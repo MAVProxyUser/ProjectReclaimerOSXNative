@@ -28,6 +28,103 @@ On the **dedicated-server exe** the loader relocates (22,919 fixups), binds
 precise, expected spot: `__p___argv` / `_get_initial_narrow_environment`
 return NULL from our stubs, so the Rust runtime dereferences a null `argv`.
 
+## MILESTONE 11: audio init survives; engine reaches the NATIVE-TRANSPORT gate (2026-10-11)
+
+With shaders compiling (M9) and the engine's self-patch landing (M10), the
+native client worker now runs all the way through graphics + audio init:
+
+```
+In-game menu renderer: Apple M4 Max
+Persistent menu created in native client PID …
+Native frame cap disabled; client frame-rate setting controls presentation.
+Native graphics quality hooks installed.
+Menu music ready: 8 of 8 songs, 0.02s
+Standalone player preferences use native defaults …
+Menu music output unavailable: No music playback device
+Initialized standalone Rust window/native graphics contract; no MCC executable launched.
+Error: Native transport instruction/import mismatch; refused   <-- current blocker
+```
+
+**Audio fix (WASAPI COM).** Reclaimer's audio crate `cpal-0.15.3` does
+`CoCreateInstance::<IMMDeviceEnumerator>(&MMDeviceEnumerator, …).unwrap()` in
+`get_enumerator()` (wasapi/device.rs:851). Our `CoCreateInstance` was a no-op
+auto-stub → cpal got an `Err` → `rust_panic`. Implemented a minimal **but real**
+WASAPI COM surface in `peload.c`: an `IMMDeviceEnumerator` vtable whose
+`EnumAudioEndpoints` returns an **empty** `IMMDeviceCollection` (count 0) and
+whose `GetDefaultAudioEndpoint` returns `E_NOTFOUND`, plus
+`CoInitializeEx`/`CoUninitialize`/`CoTaskMemAlloc`/`CoTaskMemFree`/
+`PropVariantClear`. cpal now reports "no output device" gracefully (silent
+menu) instead of panicking. COM objects are `{ void **vtbl; }` with ms_abi
+methods (`this` in rcx, 32-bit HRESULT return).
+
+**Current blocker — the `--native-udp` integrity gate.** The experimental
+native client runs a locked flag chain: `--client-window` ⇒ `--guardian-slayer`
+⇒ `--native-udp` ⇒ (`--startup --shell-callbacks --skip-render-warmup`), so the
+window path can't drop native-udp. Before wiring its loopback UDP transport the
+worker runs an **in-memory integrity check** that reads halo3.dll's code/IAT
+**directly** (no shimmed API calls between window-init and the refusal) and
+compares against the "supported build". Sibling string: `XAudio2 import slots
+differ from the supported build; refused`. Related strings cluster:
+`Cannot protect native transport worker memory` / `Cannot finalize native
+transport worker patch` / `Invalid native transport patch size` / `ws2_32.dll`
+/ `Winsock module missing` / `bind`.
+
+halo3.dll imports **WS2_32.dll** (IAT at RVA `0x6fa6b8`, ~29 funcs, mostly by
+ordinal: 1,2,3,4,7,8,9,10,11,13,14,15,16,17,18,19,20,21,22,23,52,57,111,115,
+116,151 + `WSAIoctl`,`getaddrinfo`,`freeaddrinfo`). Our loader binds those IAT
+slots to stub pointers; the check appears to validate the slots / the
+instruction bytes they point at against the real Winsock, which we fundamentally
+can't reproduce (we're not Windows). See `docs/native-transport-gate.md` for the
+disassembly and options.
+
+NOTE: even past this gate, a *visible* window still needs work — our
+`CreateWindowExW` is a stub (fake HWND) and GL renders to an **offscreen CGL
+context**, so nothing is shown on the Mac screen yet. Making a real Cocoa/NSWindow
+with the CGL context bound to it is a separate task (see docs).
+
+## MILESTONE 10: engine self-patches its own .text (VirtualProtect + FlushInstructionCache) (2026-10-11)
+
+The engine installs **inline hooks into halo3.dll's own `.text`** (the
+"private match experiment patch": 5-byte detours at `0x1802d27bc`, `0x2d2a36`,
+`0x2d2cb1`, `0x279cfe`). Two shim bugs blocked it:
+
+1. **SIGBUS on the patch write.** `i_VirtualProtect` passed the raw, *unaligned*
+   target address straight to `mprotect`, which requires a **page-aligned base**
+   → `EINVAL`, which we ignored and reported success. The page stayed `r-x`, so
+   the engine's inline `movb/movl` write to `.text` faulted (`EXC_BAD_ACCESS
+   code=2`, i.e. a write to a non-writable page). Fix: page-align base + round
+   length (RWX actually *succeeds* in this Rosetta process — `r1=0(ok)` — no
+   fallback needed; RW fallback kept for safety).
+2. **"Cannot finalize patch" after the write landed.** `FlushInstructionCache`
+   was an auto-stub (no-op). Under Rosetta the x86 code is JIT-translated to
+   arm64 and **cached**, so writing new bytes to a code page leaves a **stale
+   translation**; the engine's finalize/verify ran the old code. Fix: implement
+   `FlushInstructionCache` → `sys_icache_invalidate(base,size)`, the signal
+   Rosetta honors to drop and re-translate.
+
+After both: all four hook sites patch + finalize, and the engine proceeds to
+audio init (M11).
+
+Key Rosetta insight: self-modifying guest code needs the page **writable** for
+the store and `sys_icache_invalidate` afterward; RWX is permitted here.
+
+## MILESTONE 9: GLSL #version rewrite on the REAL call path — menu shaders compile (2026-10-11)
+
+macOS Core profile rejects `#version <150`; Reclaimer ships egui/glow shaders
+at `#version 130/140`. We already had `i_glShaderSource`/`i_glCompileShader`
+wrappers that bump the version, special-cased by **name** in every GL resolver
+— but lldb proved the engine reached the *real* `glShaderSource` with an
+un-rewritten `#version 140`. The engine requests the function under a name our
+`strcmp`s didn't catch, so it fell through to the generic `make_gl_thunk`
+(ABI-only passthrough, no rewrite).
+
+Fix: intercept by **resolved pointer** inside `make_gl_thunk` — compare the
+`dlsym` result against the real `glShaderSource`/`glShaderSourceARB`/
+`glCreateShaderProgramv` and return the version-rewriting wrapper instead of a
+raw thunk. Now every upload path is covered regardless of the alias used. Log
+shows `[glShaderSource] rewritten` ×N and the engine advances past shader
+compile to `In-game menu renderer: Apple M4 Max` and `Persistent menu created`.
+
 ## MILESTONE 8: ABI-thunk fix — crash gone; engine reaches SHADER COMPILE
 
 Root-caused and fixed the glow crash, and the engine now runs all the way to
