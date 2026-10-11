@@ -521,8 +521,9 @@ static unsigned MSABI res_GetEvict(void*s){ (void)s; return 0; }
 static void     MSABI res_GetDesc(void*s,void*pd){ D3DObj*o=s; if(!pd||!o) return; uint32_t*u=pd;
     // write ONLY the caller's desc size (overwriting more corrupts its stack/heap)
     if(o->kind==1){ memset(pd,0,24); u[0]=(uint32_t)o->size; }                 // D3D11_BUFFER_DESC (24B): ByteWidth
-    else if(o->kind==3){ memset(pd,0,28); u[0]=o->w; u[1]=1; u[2]=1; u[3]=28; } // TEXTURE1D_DESC (28B)
-    else { memset(pd,0,44); u[0]=o->w; u[1]=o->h; u[2]=1; u[3]=1; u[4]=28; u[5]=1; } } // TEXTURE2D/3D_DESC (44B)
+    else if(o->kind==3){ memset(pd,0,32); u[0]=o->w; u[1]=1; u[2]=1; u[3]=28; } // TEXTURE1D_DESC (32B): Width,Mip,Array,Format
+    else if(o->kind==4){ memset(pd,0,36); u[0]=o->w; u[1]=o->h; u[2]=1; u[3]=1; u[4]=28; } // TEXTURE3D_DESC (36B): W,H,Depth,Mip,Format
+    else { memset(pd,0,44); u[0]=o->w; u[1]=o->h; u[2]=1; u[3]=1; u[4]=28; u[5]=1; } } // TEXTURE2D_DESC (44B)
 // ---- ID3D11View (7-8). o->data holds the resource the view was created over, so
 // GetResource returns a valid (never-null) resource the engine then dereferences.
 static D3DObj* d3dobj(void** vt, uint32_t kind, uint64_t size); // fwd
@@ -1735,6 +1736,15 @@ static void* MSABI i_CreateThread(void*attr,uint64_t stack,WinThreadProc start,v
     done->owner=th; done->tid=(uint32_t)(uintptr_t)th;
     if(tid)*tid=done->tid; return done;                           // HANDLE = the SyncObj
 }
+// ucrtbase _beginthreadex: the CRT thread spawn halo3 uses. Unimplemented, it
+// stubbed to 0 (thread never created) -> halo3 waits on / uses data from a thread
+// that never ran. Route it through CreateThread so the thread actually runs and
+// is waitable. start is unsigned __stdcall(void*) == our MSABI WinThreadProc on x64.
+static uintptr_t MSABI i_beginthreadex(void*sec,unsigned stack,WinThreadProc start,void*arg,unsigned initflag,unsigned*thrdaddr){
+    uint32_t tid=0; void* h=i_CreateThread(sec,(uint64_t)stack,start,arg,initflag,&tid); if(thrdaddr)*thrdaddr=tid; return (uintptr_t)h; }
+static void MSABI i_endthreadex(unsigned code){ (void)code; pthread_exit(0); }
+static uintptr_t MSABI i_beginthread(WinThreadProc start,unsigned stack,void*arg){ uint32_t tid=0; return (uintptr_t)i_CreateThread(0,(uint64_t)stack,start,arg,0,&tid); }
+static void MSABI i_endthread(void){ pthread_exit(0); }
 static uint32_t MSABI i_GetThreadId(void*h){ if(is_sync((intptr_t)h)) return ((SyncObj*)h)->tid; return (uint32_t)(uintptr_t)h; }
 static int MSABI i_GetExitCodeThread(void*h,uint32_t*code){
     if(is_sync((intptr_t)h)){ SyncObj*s=h; if(code)*code = s->signaled? s->exitcode : 259/*STILL_ACTIVE*/; return 1; }
@@ -2456,6 +2466,10 @@ static void *resolve_impl(const char *fn){
         {"SleepEx",(void*)i_SleepEx},
         {"WaitForMultipleObjects",(void*)i_WaitForMultipleObjects},
         {"CreateThread",(void*)i_CreateThread},
+        {"_beginthreadex",(void*)i_beginthreadex},
+        {"_endthreadex",(void*)i_endthreadex},
+        {"_beginthread",(void*)i_beginthread},
+        {"_endthread",(void*)i_endthread},
         {"GetThreadId",(void*)i_GetThreadId},
         {"GetExitCodeThread",(void*)i_GetExitCodeThread},
         {"OpenProcess",(void*)i_OpenProcess},
