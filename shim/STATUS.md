@@ -28,6 +28,45 @@ On the **dedicated-server exe** the loader relocates (22,919 fixups), binds
 precise, expected spot: `__p___argv` / `_get_initial_narrow_environment`
 return NULL from our stubs, so the Rust runtime dereferences a null `argv`.
 
+## MILESTONE 4: both named frontiers fixed; engine (halo3.dll) initializing
+
+Fixed the two concrete issues from Milestone 3, then pushed into the engine:
+
+**1. Dir-enumeration loop — FIXED.** It was delete-on-close semantics: the
+client cleans the scratch by deleting entries and re-scanning. Fixes:
+refcounted last-handle-wins delete (files *and* dirs), honoring the
+delete-flag *clear* (`FileDispositionInfoEx` flag 0x1), and — the real
+trigger — mapping the Windows `NUL` device to `/dev/null` (the client opened
+`\\.\NUL` for worker stdio and aborted when it failed).
+
+**2. Worker process via `CreateProcessW` — IMPLEMENTED.** The engine runs in a
+child process: `project-reclaimer probe-engine-worker "<halo3.dll>"
+--guardian-slayer --client-window --startup --shell-callbacks --native-udp`.
+`CreateProcessW` now `posix_spawn`s the worker **under the loader** (re-exec
+`arch -x86_64 peload <exe> <args…>`), wiring child stdio from `STARTUPINFOW`,
+the working directory from `lpCurrentDirectory`, and real process handles for
+`GetExitCodeProcess`/`WaitForSingleObject`. Needed `DuplicateHandle`,
+`SetEnvironmentVariableW`, `GetCurrentDirectoryW` (real cwd), command-line
+re-quoting, and an absolute loader path (child `chdir`s).
+
+**Then — the engine itself starts.** The worker:
+- loads the genuine CRT, runs `probe-engine-worker`, and `LoadLibraryExW`s the
+  real **`halo3.dll`, mapped at its preferred base `0x180000000`** (CRT guests
+  are kept off that address so Reclaimer's hardcoded engine pokes line up);
+- resolves `halo3.dll!CreateGameEngine` and reads the engine config via
+  `ReadProcessMemory`/`WriteProcessMemory` (in-process memcpy — the
+  shell-callback patch mechanism);
+- **reserves its 64 MB "near the game"** — `VirtualQuery` (backed by
+  `mach_vm_region`) now lets the engine's free-memory scan succeed.
+
+Current engine frontier: `Error: Invalid local runtime configuration` — a
+Reclaimer handshake validating the native-startup role after memory setup
+(remaining stubs: `CreateIoCompletionPort`, `GetCurrentPackageId`). Beyond it:
+the shell-callback install, then rendering (window + GL/D3D→Metal).
+
+190 shims. Both `--version` still green. Debug env: `PELOAD_WORKER_INHERIT_STDIO`
+(worker shares terminal), `PELOAD_TRACE_FS` / `_ALL` / `_VA`, `PELOAD_NO_THREADS`.
+
 ## MILESTONE 3: client reaches engine-worker launch; FS bridge complete
 
 Built the full filesystem/handle bridge (the "it's a day, not weeks" piece —

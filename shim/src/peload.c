@@ -32,6 +32,8 @@
 #include <sys/time.h>
 #include <mach/mach_time.h>
 #include <time.h>
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
 
 // ---- raw logging (no libc TLS dependency; safe after we touch %gs) ----
 static void w(const char *s, long n){ (void)!write(2, s, n); }
@@ -68,6 +70,7 @@ static uint64_t g_pref;   // preferred image base from the header
 // loaded guest module registry (genuine MS CRT DLLs, etc.)
 typedef struct { const char *name; uint8_t *base; } Mod;
 static Mod g_mods[16]; static int g_nmods;
+static int g_prefer_base;   // map next image at its preferred base (exe, halo3.dll)
 
 // filesystem-shim foundation (declared early; used by handle-based ops)
 #include <dirent.h>
@@ -80,6 +83,7 @@ static char* win2unix(const uint16_t*, char*, int);  // fwd
 static void  unix2win(const char*, uint16_t*, int);   // fwd
 static void  fd_record(int, const char*);             // fwd
 static void  mkparents(const char*);                  // fwd
+static void  rmrf(const char*);                       // fwd
 
 // import name table, parallel arrays, indexed by stub
 static const char *imp_dll[8192];
@@ -168,6 +172,12 @@ static int    MSABI i_QueryPerformanceFrequency(uint64_t *f){ if(f) *f=100000000
 static uint32_t MSABI i_GetCurrentThreadId(void){ return 0x1000; } // single-threaded startup
 static uint32_t MSABI i_GetCurrentProcessId(void){ return (uint32_t)getpid(); }
 static void   MSABI i_InitializeSListHead(void *h){ if(h) memset(h,0,16); }
+// Interlocked SList: simple non-atomic impl (head pointer at offset 0). Enough
+// for the engine's lists at single-threaded startup.
+static void*  MSABI i_InterlockedPushEntrySList(void *head, void *entry){ void*old=*(void**)head; *(void**)entry=old; *(void**)head=entry; return old; }
+static void*  MSABI i_InterlockedPopEntrySList(void *head){ void*e=*(void**)head; if(e)*(void**)head=*(void**)e; return e; }
+static void*  MSABI i_InterlockedFlushSList(void *head){ void*e=*(void**)head; *(void**)head=0; return e; }
+static uint16_t MSABI i_QueryDepthSList(void *head){ uint16_t d=0; for(void*e=*(void**)head;e;e=*(void**)e) d++; return d; }
 #include <errno.h>
 static uint32_t g_lasterr = 0;
 static uint32_t win_err(void){ switch(errno){ case ENOENT: return 2; /*FILE_NOT_FOUND*/
@@ -221,10 +231,25 @@ static void*  MSABI i_HeapCreate(uint32_t o, uint64_t a, uint64_t b){ (void)o;(v
 // Virtual memory backed by mmap
 static void*  MSABI i_VirtualAlloc(void *addr, uint64_t sz, uint32_t type, uint32_t prot){
     (void)type;(void)prot; void *p=mmap(addr, sz?sz:4096, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANON, -1,0);
+    if(getenv("PELOAD_TRACE_VA")){ char t[128]; snprintf(t,sizeof t,"  [VirtualAlloc] want=%p size=0x%llx type=0x%x -> %p\n",addr,(unsigned long long)sz,type,p==MAP_FAILED?0:p); ws(t); }
     return p==MAP_FAILED?0:p;
 }
 static int    MSABI i_VirtualProtect(void *a, uint64_t n, uint32_t np, uint32_t *op){ if(op)*op=0x40; int pr=PROT_READ; if(np&0xf0)pr|=PROT_EXEC; if(np&0xcc)pr|=PROT_WRITE; mprotect(a,n,pr); return 1; }
 static int    MSABI i_VirtualFree(void *a, uint64_t n, uint32_t t){ (void)t; munmap(a,n?n:4096); return 1; }
+// VirtualQuery: report a region as FREE or COMMITTED via mach_vm_region, so the
+// engine's "find 64 MB free within 2 GB of the game" scan can proceed.
+static uint64_t MSABI i_VirtualQuery(void *addr, uint8_t *mbi, uint64_t len){
+    if(!mbi||len<48) return 0; memset(mbi,0,48);
+    mach_vm_address_t a=(mach_vm_address_t)addr; mach_vm_size_t sz=0;
+    vm_region_basic_info_data_64_t info; mach_msg_type_number_t cnt=VM_REGION_BASIC_INFO_COUNT_64; mach_port_t obj;
+    kern_return_t kr=mach_vm_region(mach_task_self(),&a,&sz,VM_REGION_BASIC_INFO_64,(vm_region_info_t)&info,&cnt,&obj);
+    if(kr!=KERN_SUCCESS){ *(void**)mbi=addr; *(uint64_t*)(mbi+24)=0x40000000ULL; *(uint32_t*)(mbi+32)=0x10000; return 48; } // MEM_FREE to +1GB
+    if(a > (mach_vm_address_t)addr){ *(void**)mbi=addr; *(uint64_t*)(mbi+24)=(uint64_t)(a-(mach_vm_address_t)addr); *(uint32_t*)(mbi+32)=0x10000; return 48; } // free gap
+    *(void**)mbi=(void*)a; *(void**)(mbi+8)=(void*)a; *(uint32_t*)(mbi+16)=0x40; *(uint64_t*)(mbi+24)=(uint64_t)sz; *(uint32_t*)(mbi+32)=0x1000; *(uint32_t*)(mbi+36)=0x40; *(uint32_t*)(mbi+40)=0x20000; return 48; } // MEM_COMMIT
+static void   MSABI i_GlobalMemoryStatus(uint8_t *ms){ if(!ms) return; memset(ms,0,64); *(uint32_t*)ms=64; *(uint32_t*)(ms+4)=50;
+    *(uint64_t*)(ms+8)=(uint64_t)16<<30; *(uint64_t*)(ms+16)=(uint64_t)8<<30; } // 16GB total / 8GB avail (MEMORYSTATUS)
+static int    MSABI i_GlobalMemoryStatusEx(uint8_t *ms){ if(!ms) return 0; *(uint32_t*)(ms+4)=50;
+    *(uint64_t*)(ms+8)=(uint64_t)16<<30; *(uint64_t*)(ms+16)=(uint64_t)8<<30; *(uint64_t*)(ms+24)=(uint64_t)32<<30; *(uint64_t*)(ms+32)=(uint64_t)24<<30; return 1; }
 
 static uint16_t* MSABI i_GetCommandLineW(void){ return g_cmdlineW; }
 static void*  MSABI i_GetModuleHandleW(uint16_t *n){ (void)n; return g_base; } // good enough: image base
@@ -248,6 +273,13 @@ static int    MSABI i_WriteConsoleW(void *h, const uint16_t *s, uint32_t n, uint
 static uint32_t MSABI i_GetFileType(void *h){ intptr_t hv=(intptr_t)h; return hv>=0x1000? 1 : 2; } // DISK : CHAR
 static int    MSABI i_FlushFileBuffers(void *h){ (void)h; return 1; }
 static void*  MSABI i_GetCurrentProcess(void){ return (void*)-1; }
+// Read/WriteProcessMemory: the engine probe reads/patches halo3.dll in THIS
+// process (shell-callback mechanism), so these are plain in-process memcpy.
+static int MSABI i_ReadProcessMemory(void*h,const void*addr,void*buf,uint64_t n,uint64_t*rd){ (void)h; memcpy(buf,addr,n); if(rd)*rd=n; return 1; }
+static int MSABI i_WriteProcessMemory(void*h,void*addr,const void*buf,uint64_t n,uint64_t*wr){ (void)h;
+    uintptr_t pg=(uintptr_t)addr & ~0xfffULL; size_t len=(((uintptr_t)addr+n)-pg+0xfff)&~0xfffULL;
+    if(mprotect((void*)pg,len,PROT_READ|PROT_WRITE|PROT_EXEC)!=0) mprotect((void*)pg,len,PROT_READ|PROT_WRITE);
+    memcpy(addr,buf,n); mprotect((void*)pg,len,PROT_READ|PROT_EXEC); if(wr)*wr=n; return 1; }
 static void*  MSABI i_GetCurrentThread(void){ return (void*)-2; }
 // pointer obfuscation: identity is a valid implementation
 static void*  MSABI i_EncodePointer(void *p){ return p; }
@@ -277,6 +309,68 @@ static void   MSABI i_ExitProcess(uint32_t c){ _exit((int)c); }
 static void   MSABI i_TerminateProcess(void *h,uint32_t c){ (void)h; _exit((int)c); }
 static uint32_t MSABI i_GetModuleFileNameW(void*m,uint16_t*buf,uint32_t sz){ (void)m; uint32_t i=0; for(; i<sz && g_cmdlineW[i]; i++) buf[i]=g_cmdlineW[i]; if(i<sz) buf[i]=0; return i; }
 static void   MSABI i_GetStartupInfoW(void *si){ if(si) memset(si,0,104); }
+static int    MSABI i_SetEnvironmentVariableW(const uint16_t*n,const uint16_t*v){
+    char nm[256]; int i=0; for(; n&&n[i]&&i<255;i++) nm[i]=(char)(n[i]<128?n[i]:'?'); nm[i]=0;
+    if(!v){ unsetenv(nm); return 1; }
+    char val[2048]; int j=0; for(; v[j]&&j<2047;j++) val[j]=(char)(v[j]<128?v[j]:'?'); val[j]=0;
+    setenv(nm,val,1); return 1; }
+static void*  MSABI i_SetStdHandle(uint32_t id,void*h){ (void)id; return h; } // accept redirection
+// CreateProcessW: launch the engine worker UNDER the loader. The worker is a
+// Windows exe; we re-exec peload on it (arch -x86_64) so it gets the same
+// Win64 environment. Child stdio is wired from STARTUPINFOW's std handles.
+#include <spawn.h>
+#include <sys/wait.h>
+extern char **environ;
+static const char *g_self;          // path to this peload binary (argv[0])
+static pid_t g_childpid[256]; static int g_nchild;
+static int MSABI i_CreateProcessW(const uint16_t*app,uint16_t*cmd,void*pa,void*ta,int inherit,uint32_t flags,void*env,const uint16_t*cwd,uint8_t*si,uint8_t*pi){
+    (void)pa;(void)ta;(void)inherit;(void)flags;(void)env;(void)cwd;
+    // resolve the worker exe path (prefer lpApplicationName)
+    char exe[2048]={0};
+    if(app) win2unix(app,exe,sizeof exe);
+    else if(cmd){ // first token of the command line, honoring quotes
+        char c[4096]; int n=0; for(; cmd[n]&&n<4095;n++) c[n]=(char)(cmd[n]<128?cmd[n]:'?'); c[n]=0;
+        char *p=c, *e; if(*p=='"'){ p++; e=strchr(p,'"'); } else { e=strchr(p,' '); } if(e)*e=0;
+        uint16_t w[1024]; int i=0; for(; p[i]&&i<1023;i++) w[i]=(uint8_t)p[i]; w[i]=0; win2unix(w,exe,sizeof exe);
+    }
+    // narrow command line (for logging + to append as a single arg)
+    char cl[4096]={0}; if(cmd){ int n=0; for(; cmd[n]&&n<4095;n++) cl[n]=(char)(cmd[n]<128?cmd[n]:'?'); cl[n]=0; }
+    ws("  [CreateProcessW] exe="); ws(exe[0]?exe:"(from cmdline)"); ws("\n    cmd="); ws(cl); ws("\n");
+    if(!exe[0] || access(exe,R_OK)!=0){ g_lasterr=2; return 0; }
+    // child stdio from STARTUPINFOW (x64: dwFlags@60, hStdInput@80/out@88/err@96)
+    int cfd[3]={-1,-1,-1};
+    if(si){ uint32_t dwFlags=*(uint32_t*)(si+60); if(dwFlags&0x100){ // STARTF_USESTDHANDLES
+        for(int k=0;k<3;k++){ intptr_t hv=*(intptr_t*)(si+80+8*k); if(hv>=0x1000) cfd[k]=(int)(hv-0x1000); else if(hv==1)cfd[k]=0; else if(hv==2)cfd[k]=1; else if(hv==3)cfd[k]=2; } } }
+    posix_spawn_file_actions_t fa; posix_spawn_file_actions_init(&fa);
+    if(!getenv("PELOAD_WORKER_INHERIT_STDIO")) // debug: let worker inherit our terminal
+        for(int k=0;k<3;k++){ if(cfd[k]>=0) posix_spawn_file_actions_adddup2(&fa,cfd[k],k); }
+    if(cwd){ char wd[2048]; win2unix(cwd,wd,sizeof wd); posix_spawn_file_actions_addchdir(&fa,wd);
+        ws("    cwd="); ws(wd); ws("\n"); }
+    // Tokenize the Windows command line (honoring double-quotes), DROP token0
+    // (the original exe path), keep the worker's real args. Then re-exec the
+    // loader: arch -x86_64 <peload> <unix-exe> <arg1> <arg2> ...
+    static char tokbuf[4096]; char *tok[64]; int nt=0;
+    { int bi=0; char *p=cl; while(*p){ while(*p==' ')p++; if(!*p)break;
+        char *start=&tokbuf[bi]; if(*p=='"'){ p++; while(*p&&*p!='"'&&bi<4094) tokbuf[bi++]=*p++; if(*p=='"')p++; }
+        else { while(*p&&*p!=' '&&bi<4094) tokbuf[bi++]=*p++; }
+        tokbuf[bi++]=0; if(nt<63) tok[nt++]=start; } }
+    char *av[70]; int ai=0; av[ai++]="/usr/bin/arch"; av[ai++]="-x86_64"; av[ai++]=(char*)g_self; av[ai++]=exe;
+    for(int k=1;k<nt && ai<69;k++) av[ai++]=tok[k];   // worker args (skip token0=exe)
+    av[ai]=0;
+    pid_t pid=0; int rc=posix_spawn(&pid,"/usr/bin/arch",&fa,0,av,environ);
+    posix_spawn_file_actions_destroy(&fa);
+    if(rc!=0){ g_lasterr=win_err(); return 0; }
+    if(g_nchild<256) g_childpid[g_nchild++]=pid;
+    if(pi){ *(void**)(pi+0)=(void*)(intptr_t)(0x8000+pid); *(void**)(pi+8)=(void*)(intptr_t)(0x8000+pid);
+            *(uint32_t*)(pi+16)=(uint32_t)pid; *(uint32_t*)(pi+20)=(uint32_t)pid; }
+    return 1; }
+static uint32_t MSABI i_GetExitCodeProcessReal(void*h,uint32_t*code){ intptr_t hv=(intptr_t)h; if(hv>=0x8000){ pid_t pid=(pid_t)(hv-0x8000); int st; pid_t r=waitpid(pid,&st,WNOHANG);
+    if(r==0){ if(code)*code=259; return 1; } /*STILL_ACTIVE*/ if(code)*code= WIFEXITED(st)?WEXITSTATUS(st):1; return 1; } if(code)*code=0; return 1; }
+static int    MSABI i_DuplicateHandle(void*sp,void*src,void*tp,void**tgt,uint32_t acc,int inh,uint32_t opt){
+    (void)sp;(void)tp;(void)acc;(void)inh;(void)opt; intptr_t hv=(intptr_t)src; void*res=src;
+    if(hv>=0x1000){ int sfd=(int)(hv-0x1000); int nfd=dup(sfd); if(nfd<0){ g_lasterr=win_err(); return 0; }
+        if(sfd<MAXFD && g_fdpath[sfd]) fd_record(nfd, g_fdpath[sfd]); res=(void*)(intptr_t)(0x1000+nfd); }
+    if(tgt)*tgt=res; return 1; }
 // RtlPcToFileHeader: return the base of the loaded image containing Pc.
 static void*  MSABI i_RtlPcToFileHeader(void *pc, void **base){
     uint64_t p=(uint64_t)pc;
@@ -342,7 +436,11 @@ static int   MSABI i_ReleaseSemaphore(void*h,long c,long*prev){ (void)h;(void)c;
 static void* MSABI i_CreateEventW(void*sec,int man,int sig,const uint16_t*nm){ (void)sec;(void)man;(void)sig;(void)nm; return (void*)0x5e40; }
 static int   MSABI i_SetEvent(void*h){ (void)h; return 1; }
 static int   MSABI i_ResetEvent(void*h){ (void)h; return 1; }
-static uint32_t MSABI i_WaitForSingleObject(void*h,uint32_t ms){ (void)h;(void)ms; return 0; } // WAIT_OBJECT_0
+static uint32_t MSABI i_WaitForSingleObject(void*h,uint32_t ms){ intptr_t hv=(intptr_t)h;
+    if(hv>=0x8000 && hv<0x1000000){ pid_t pid=(pid_t)(hv-0x8000); int st; // process handle: real wait
+        if(ms==0){ return waitpid(pid,&st,1/*WNOHANG*/)==0 ? 0x102 : 0; } // WAIT_TIMEOUT : signaled
+        waitpid(pid,&st,0); return 0; }
+    return 0; } // WAIT_OBJECT_0
 // ---- threads: back Win32 CreateThread with pthreads; each gets its own TEB
 // (per-thread %gs) + a fresh copy of the static TLS block. ----
 #include <pthread.h>
@@ -392,7 +490,8 @@ static int MSABI i_GetFileInformationByHandleEx(void*h,int cls,void*info,uint32_
         if(!g_fddir[fd]){ int dd=dup(fd); g_fddir[fd]= dd>=0? fdopendir(dd):0; }
         DIR *d=g_fddir[fd]; if(!d){ g_lasterr=18; return 0; }
         struct dirent *de; do{ de=readdir(d); }while(de && (!strcmp(de->d_name,".")||!strcmp(de->d_name,"..")));
-        if(!de){ g_lasterr=18; return 0; } // ERROR_NO_MORE_FILES
+        if(!de){ if(getenv("PELOAD_TRACE_FS")){ws("  [enum-end] ");ws(g_fdpath[fd]?g_fdpath[fd]:"?");ws("\n");} g_lasterr=18; return 0; } // ERROR_NO_MORE_FILES
+        if(getenv("PELOAD_TRACE_FS")){ ws("  [enum] "); ws(g_fdpath[fd]?g_fdpath[fd]:"?"); ws(" -> "); ws(de->d_name); ws("\n"); }
         char full[2300]; snprintf(full,sizeof full,"%s/%s", g_fdpath[fd]?g_fdpath[fd]:".", de->d_name);
         struct stat es; int have=stat(full,&es)==0;
         uint8_t *b=info; if(sz>700) sz=700; memset(b,0,sz);
@@ -420,8 +519,13 @@ static void rmrf(const char *p){ struct stat st; if(lstat(p,&st)) return;
 static int MSABI i_RemoveDirectoryW(const uint16_t*w){ char p[2048]; win2unix(w,p,sizeof p); if(rmdir(p)==0) return 1; rmrf(p); return 1; }
 // SetFileInformationByHandle: honor FileDispositionInfo(4)/Ex(21) = delete
 static int MSABI i_SetFileInformationByHandle(void*h,int cls,void*info,uint32_t sz){
-    (void)sz; intptr_t hv=(intptr_t)h; if(hv<0x1000) return 1; int fd=(int)(hv-0x1000);
-    if((cls==4||cls==21) && info && *(uint8_t*)info && fd<MAXFD) g_fddel[fd]=1; // DeleteFile flag set
+    (void)sz; intptr_t hv=(intptr_t)h; if(hv<0x1000) return 1; int fd=(int)(hv-0x1000); if(fd>=MAXFD) return 1;
+    // FileDispositionInfo(4): BOOLEAN DeleteFile. FileDispositionInfoEx(21):
+    // ULONG Flags, bit0 = DELETE. Honor BOTH set and clear (the client marks
+    // delete-on-close for crash safety, then clears it to keep the file).
+    if(cls==4 && info){ g_fddel[fd] = (*(uint8_t*)info)?1:0; }
+    else if(cls==21 && info){ g_fddel[fd] = (*(uint32_t*)info & 0x1)?1:0; }
+    if(getenv("PELOAD_TRACE_FS")){ char t[96]; snprintf(t,sizeof t,"  [SetFileInfo] cls=%d d0=0x%x -> del=%d ",cls, info?*(uint32_t*)info:0, (cls==4||cls==21)?g_fddel[fd]:-1); ws(t); ws(g_fdpath[fd]?g_fdpath[fd]:"?"); ws("\n"); }
     return 1;
 }
 // NtCreateFile: supports NT absolute names (\??\C:\..) and names relative to an
@@ -496,10 +600,18 @@ static uint64_t MSABI i_GetTickCount64(void){ return mach_absolute_time()/100000
 // what the engine wants. Returning a non-null handle keeps startup alive;
 // actually mapping the dependency DLLs as guests is the next phase.
 static char g_lastlib[260];
+static uint8_t *load_guest(const char *path, const char *name); // fwd (defined near main)
+static void *export_lookup(uint8_t *base, const char *want);    // fwd
 static void* MSABI i_LoadLibraryExW(const uint16_t *name, void *h, uint32_t fl){
-    (void)h;(void)fl; int i=0; for(; name && name[i] && i<259; i++) g_lastlib[i]=(char)(name[i]<128?name[i]:'?'); g_lastlib[i]=0;
-    ws("  [LoadLibraryExW] "); ws(g_lastlib); ws("\n");
-    return g_base; // placeholder handle; real guest-mapping is the next phase
+    (void)h;(void)fl; char w[2048]; int i=0; for(; name && name[i] && i<2047; i++) w[i]=(char)(name[i]<128?name[i]:'?'); w[i]=0;
+    // bare short name of the DLL (for the module registry + dedupe)
+    char *bn=w; for(char*p=w;*p;p++) if(*p=='\\'||*p=='/') bn=p+1;
+    snprintf(g_lastlib,sizeof g_lastlib,"%s",bn);
+    ws("  [LoadLibraryExW] "); ws(w); ws("\n");
+    for(int m=0;m<g_nmods;m++) if(!strcasecmp(g_mods[m].name,bn)) return g_mods[m].base; // already loaded
+    char p[2048]; win2unix(name,p,sizeof p);
+    if(access(p,R_OK)==0){ g_prefer_base=1; uint8_t *b=load_guest(p, strdup(bn)); g_prefer_base=0; if(b) return b; }
+    return g_base; // feature-probe DLLs (api-ms-*) that aren't real files: placeholder
 }
 
 // ---- filesystem shim: translate Windows paths to Unix, do real I/O ----
@@ -520,6 +632,10 @@ static char* win2unix(const uint16_t *w, char *out, int outsz){
     // strip \\?\ long-path prefix
     char *s=t; if(!strncmp(s,"\\\\?\\",4)) s+=4;
     for(char *p=s; *p; p++) if(*p=='\\') *p='/';
+    // Windows device names -> /dev equivalents (NUL always opens on Windows)
+    { const char *d=s; if(!strncmp(d,"//./",4)||!strncmp(d,"//.",3)) d+=(d[3]=='/')?4:3;
+      if(!strcasecmp(d,"nul")){ snprintf(out,outsz,"/dev/null"); return out; }
+      if(!strcasecmp(d,"con")){ snprintf(out,outsz,"/dev/tty"); return out; } }
     if(s[0] && s[1]==':'){
         char d=s[0];
         if(d=='Z'||d=='z') snprintf(out,outsz,"%s", s[2]? s+2 : "/");
@@ -570,11 +686,13 @@ static int    MSABI i_SetFilePointerEx(void*h,int64_t dist,int64_t*newp,uint32_t
 static int    MSABI i_GetFileSizeEx(void*h,int64_t*sz){ intptr_t hv=(intptr_t)h; if(hv<0x1000) return 0; struct stat st; if(fstat((int)(hv-0x1000),&st)) return 0; if(sz)*sz=st.st_size; return 1; }
 static int    MSABI i_CloseHandleReal(void*h){ intptr_t hv=(intptr_t)h; if(hv>=0x1000){ int fd=(int)(hv-0x1000);
     if(fd<MAXFD){ if(g_fddir[fd]){ closedir(g_fddir[fd]); g_fddir[fd]=0; }
-        // delete-on-close: honor for files only. Windows refcounts this across
-        // all handles; we don't, so deleting a directory here would yank it
-        // while the app still has other opens. Leaking the ephemeral scratch
-        // dir is harmless (cleaned on next launch).
-        if(g_fddel[fd]&&g_fdpath[fd]){ struct stat ds; if(stat(g_fdpath[fd],&ds)==0 && !S_ISDIR(ds.st_mode)) unlink(g_fdpath[fd]); }
+        // delete-on-close with Windows last-handle-wins semantics: only remove
+        // when no OTHER open handle still references the same path. This lets
+        // the client delete scratch sub-dirs (files & dirs) without yanking the
+        // top scratch dir out from under a still-open session handle.
+        if(g_fddel[fd]&&g_fdpath[fd]){ char *path=g_fdpath[fd]; int other=0;
+            for(int i=0;i<MAXFD;i++) if(i!=fd && g_fdpath[i] && !strcmp(g_fdpath[i],path)){ other=1; break; }
+            if(!other){ if(getenv("PELOAD_TRACE_FS")){ws("  [del-on-close] ");ws(path);ws("\n");} struct stat ds; if(stat(path,&ds)==0){ if(S_ISDIR(ds.st_mode)) rmrf(path); else unlink(path); } } }
         free(g_fdpath[fd]); g_fdpath[fd]=0; g_fddel[fd]=0; }
     close(fd); } return 1; }
 // env var lookup via the host environment (so RECLAIMER_* pass through)
@@ -595,7 +713,8 @@ static void   MSABI i_GetLocalTime(uint16_t *stm){
 }
 static void   MSABI i_GetSystemTime(uint16_t *stm){ i_GetLocalTime(stm); }
 static int    MSABI i_CreateDirectoryW(const uint16_t*w,void*sec){ (void)sec; char p[2048]; return mkdir(win2unix(w,p,sizeof p),0755)==0 || 1; }
-static uint32_t MSABI i_GetCurrentDirectoryW(uint32_t sz,uint16_t*buf){ const char*c="C:\\ReclaimerCache"; uint32_t i=0; for(; c[i]&&i<sz-1;i++) buf[i]=(uint8_t)c[i]; if(i<sz)buf[i]=0; return i; }
+static uint32_t MSABI i_GetCurrentDirectoryW(uint32_t sz,uint16_t*buf){ char cwd[2048]; if(!getcwd(cwd,sizeof cwd)) return 0; uint16_t w[2048]; unix2win(cwd,w,2048); uint32_t n=0; while(w[n])n++; if(sz<n+1) return n+1; for(uint32_t i=0;i<=n;i++) buf[i]=w[i]; return n; }
+static int MSABI i_SetCurrentDirectoryW(const uint16_t*w){ char p[2048]; return chdir(win2unix(w,p,sizeof p))==0 || (g_lasterr=win_err(),0); }
 
 // RegGetValueW: answer the Steam install-path query so MCC auto-discovery
 // works. Steam lives at C:\Program Files\Steam (maps to our prefix).
@@ -629,7 +748,7 @@ static int pat_match(const char*pat,const char*name){
     if(sl==0) return 1; if(nl<pl+sl) return 0;
     return !strcasecmp(name+nl-sl,suf);                              // suffix
 }
-static void fill_find(Find*f,struct dirent*de,void*fd){
+static void fill_find(Find*f,struct dirent*de,void*fd){ if(getenv("PELOAD_TRACE_FS")){ ws("  [find] dir="); ws(f->dir); ws(" pat="); ws(f->pat); ws(" -> "); ws(de->d_name); ws("\n"); }
     uint8_t*d=fd; memset(d,0,592); char full[1800]; struct stat st;
     snprintf(full,sizeof full,"%s/%s",f->dir,de->d_name);
     uint32_t attr=0x80; if(stat(full,&st)==0){ attr=S_ISDIR(st.st_mode)?0x10:0x80; *(uint32_t*)(d+28)=(uint32_t)(st.st_size>>32); *(uint32_t*)(d+32)=(uint32_t)st.st_size; }
@@ -656,12 +775,14 @@ static int MSABI i_GetFileInformationByHandle(void*h,void*info){ intptr_t hv=(in
 // so dynamic resolution yields a callable (not NULL) and startup continues.
 static void *resolve_impl(const char *fn); // fwd
 static void* MSABI i_GetProcAddress(void *mod, char *name){
-    (void)mod;
     if((uint64_t)name < 0x10000){ // imported by ordinal
         if(imp_count<8192){ imp_dll[imp_count]="(dynamic)"; imp_fn[imp_count]="#ordinal";
             return make_stub(imp_count++); }
         return 0;
     }
+    // real export from the requested module (e.g. halo3.dll!CreateGameEngine)
+    if((uint64_t)mod>0x10000){ void *e=export_lookup((uint8_t*)mod,name); if(e) return e; }
+    for(int m=0;m<g_nmods;m++){ void *e=export_lookup(g_mods[m].base,name); if(e) return e; }
     void *r = resolve_impl(name);
     if(r) return r;
     if(imp_count<8192){ imp_dll[imp_count]="(dynamic)"; imp_fn[imp_count]=name;
@@ -678,6 +799,10 @@ static void *resolve_impl(const char *fn){
         {"GetCurrentThreadId",(void*)i_GetCurrentThreadId},
         {"GetCurrentProcessId",(void*)i_GetCurrentProcessId},
         {"InitializeSListHead",(void*)i_InitializeSListHead},
+        {"InterlockedPushEntrySList",(void*)i_InterlockedPushEntrySList},
+        {"InterlockedPopEntrySList",(void*)i_InterlockedPopEntrySList},
+        {"InterlockedFlushSList",(void*)i_InterlockedFlushSList},
+        {"QueryDepthSList",(void*)i_QueryDepthSList},
         {"GetLastError",(void*)i_GetLastError},
         {"SetLastError",(void*)i_SetLastError},
         {"__p___argv",(void*)i_p_argv},
@@ -702,6 +827,9 @@ static void *resolve_impl(const char *fn){
         {"VirtualAlloc",(void*)i_VirtualAlloc},
         {"VirtualProtect",(void*)i_VirtualProtect},
         {"VirtualFree",(void*)i_VirtualFree},
+        {"VirtualQuery",(void*)i_VirtualQuery},
+        {"GlobalMemoryStatus",(void*)i_GlobalMemoryStatus},
+        {"GlobalMemoryStatusEx",(void*)i_GlobalMemoryStatusEx},
         {"GetCommandLineW",(void*)i_GetCommandLineW},
         {"GetModuleHandleW",(void*)i_GetModuleHandleW},
         {"GetModuleHandleA",(void*)i_GetModuleHandleA},
@@ -734,6 +862,7 @@ static void *resolve_impl(const char *fn){
         {"GetSystemTime",(void*)i_GetSystemTime},
         {"CreateDirectoryW",(void*)i_CreateDirectoryW},
         {"GetCurrentDirectoryW",(void*)i_GetCurrentDirectoryW},
+        {"SetCurrentDirectoryW",(void*)i_SetCurrentDirectoryW},
         {"CreateDirectoryW",(void*)i_CreateDirectoryW},
         {"RegGetValueW",(void*)i_RegGetValueW},
         {"RegOpenKeyExW",(void*)i_RegOpenKeyExW},
@@ -746,6 +875,8 @@ static void *resolve_impl(const char *fn){
         {"GetFileInformationByHandle",(void*)i_GetFileInformationByHandle},
         {"FlushFileBuffers",(void*)i_FlushFileBuffers},
         {"GetCurrentProcess",(void*)i_GetCurrentProcess},
+        {"ReadProcessMemory",(void*)i_ReadProcessMemory},
+        {"WriteProcessMemory",(void*)i_WriteProcessMemory},
         {"GetCurrentThread",(void*)i_GetCurrentThread},
         {"EncodePointer",(void*)i_EncodePointer},
         {"DecodePointer",(void*)i_DecodePointer},
@@ -784,6 +915,11 @@ static void *resolve_impl(const char *fn){
         {"GetModuleFileNameW",(void*)i_GetModuleFileNameW},
         {"GetEnvironmentVariableW",(void*)i_GetEnvironmentVariableW},
         {"GetStartupInfoW",(void*)i_GetStartupInfoW},
+        {"SetEnvironmentVariableW",(void*)i_SetEnvironmentVariableW},
+        {"SetStdHandle",(void*)i_SetStdHandle},
+        {"DuplicateHandle",(void*)i_DuplicateHandle},
+        {"CreateProcessW",(void*)i_CreateProcessW},
+        {"GetExitCodeProcess",(void*)i_GetExitCodeProcessReal},
         {"RtlPcToFileHeader",(void*)i_RtlPcToFileHeader},
         {"GetCommandLineA",(void*)i_GetCommandLineA},
         {"GetEnvironmentStringsW",(void*)i_GetEnvironmentStringsW},
@@ -909,7 +1045,16 @@ static uint8_t *map_image(const char *path, OPT64 **popt, COFF **pcoff){
     COFF *coff=(COFF*)(file+dos->e_lfanew); if(coff->Sig!=0x4550||coff->Machine!=0x8664) return 0;
     OPT64 *opt=(OPT64*)((uint8_t*)coff+sizeof(COFF));
     SEC *sec=(SEC*)((uint8_t*)opt+coff->OptSz);
-    uint8_t *base=mmap(0,opt->ImageSize,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANON,-1,0);
+    // Prefer the image's own base when asked (the main exe and halo3.dll:
+    // Reclaimer pokes hardcoded addresses into the engine, valid only at its
+    // preferred base). CRT guests load anywhere so they don't squat on
+    // halo3.dll's 0x180000000. Hint only — never MAP_FIXED.
+    uint8_t *base;
+    if(g_prefer_base){ uint8_t *want=(uint8_t*)opt->ImageBase;
+        base=mmap(want,opt->ImageSize,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANON,-1,0);
+        if(base!=MAP_FAILED && base==want) ws("  (at preferred base)\n");
+        else { if(base!=MAP_FAILED) munmap(base,opt->ImageSize); base=mmap(0,opt->ImageSize,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANON,-1,0); } }
+    else base=mmap(0,opt->ImageSize,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANON,-1,0);
     if(base==MAP_FAILED) return 0;
     memcpy(base,file,opt->HdrSize);
     for(int i=0;i<coff->NumSec;i++) if(sec[i].RawSize) memcpy(base+sec[i].VA,file+sec[i].RawPtr,sec[i].RawSize);
@@ -965,6 +1110,7 @@ static uint8_t *load_guest(const char *path, const char *name){
 extern char **environ;
 int main(int argc, char **argv){
     const char *path = argc>1 ? argv[1] : "halo3.dll";
+    { static char selfabs[4096]; if(realpath(argv[0],selfabs)) g_self=selfabs; else g_self=argv[0]; } // absolute (child chdir's)
     ws("peload: loading "); ws(path); ws("\n");
 
     // guest argv/argc/environ: pass the PE path + any args after it
@@ -974,15 +1120,17 @@ int main(int argc, char **argv){
       // ucrtbase parses argv from GetCommandLineW, so args must live here)
         int n=0;
         for(int a=1; a<argc; a++){
-            const char *s=argv[a];
+            const char *s=argv[a]; int q = strchr(s,' ')!=0;   // quote args with spaces
             if(a>1 && n<2046){ g_cmdlineW[n]=' '; g_cmdlineA[n]=' '; n++; }
+            if(q && n<2046){ g_cmdlineW[n]='"'; g_cmdlineA[n]='"'; n++; }
             for(int j=0; s[j] && n<2046; j++){ g_cmdlineW[n]=(uint16_t)s[j]; g_cmdlineA[n]=s[j]; n++; }
+            if(q && n<2046){ g_cmdlineW[n]='"'; g_cmdlineA[n]='"'; n++; }
         }
         g_cmdlineW[n]=0; g_cmdlineA[n]=0;
     }
 
     // ---- map + relocate the target image (exe or dll) ----
-    OPT64 *opt; COFF *coff; g_base = map_image(path,&opt,&coff);
+    g_prefer_base=1; OPT64 *opt; COFF *coff; g_base = map_image(path,&opt,&coff); g_prefer_base=0;
     if(!g_base){ ws("map_image failed\n"); return 1; }
     g_pref = opt->ImageBase;
     ws("  image base "); whexn(opt->ImageBase); ws("  size "); whex(opt->ImageSize);
@@ -1043,7 +1191,7 @@ int main(int argc, char **argv){
 
     const char *names[3] = {"ucrtbase.dll","vcruntime140.dll","msvcp140.dll"};
     ws("peload: CRT dir "); ws(crtdir[0]?crtdir:"(not found)"); ws("\n");
-    for(int i=0;i<3;i++){ char crt[1300]; snprintf(crt,sizeof crt,"%s/%s",crtdir,names[i]); load_guest(crt, names[i]); }
+    g_prefer_base=0; for(int i=0;i<3;i++){ char crt[1300]; snprintf(crt,sizeof crt,"%s/%s",crtdir,names[i]); load_guest(crt, names[i]); }
 
     // ---- bind the target's imports (CRT -> guest exports, else native/stub) ----
     bind_imports(g_base, opt);
