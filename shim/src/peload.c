@@ -175,6 +175,7 @@ static uint8_t *g_glthunk; static size_t g_glthoff; static int g_glth_exec;
 static void *g_thunk_real[8192]; static void *g_thunk_addr[8192]; static int g_nthunk;
 static void __attribute__((ms_abi)) i_glShaderSource(unsigned,int,const char*const*,const int*); // fwd
 static void __attribute__((ms_abi)) i_glCompileShader(unsigned); // fwd
+static void __attribute__((ms_abi)) i_glLinkProgram(unsigned); // fwd
 static unsigned __attribute__((ms_abi)) i_glCreateShaderProgramv(unsigned,int,const char*const*); // fwd
 static void *make_gl_thunk(void *real){
     if(!real) return real;
@@ -1421,6 +1422,7 @@ static void* gl_or_missing(const char*name){
     if(!strcmp(name,"glGetString")) return (void*)i_glGetString;
     if(!strcmp(name,"glShaderSource")||!strcmp(name,"glShaderSourceARB")) return (void*)i_glShaderSource;
     if(!strcmp(name,"glCompileShader")||!strcmp(name,"glCompileShaderARB")) return (void*)i_glCompileShader;
+    if(!strcmp(name,"glLinkProgram")) return (void*)i_glLinkProgram;
     if(!strcmp(name,"glCheckFramebufferStatus")) return (void*)i_glCheckFramebufferStatus;
     // Missing GL functions MUST resolve to NULL (not a no-op stub): glow/gl
     // loaders null-check to detect capabilities, and a stub makes them call an
@@ -1469,7 +1471,13 @@ static void MSABI i_glCompileShader(unsigned shader){
             if(dd[0]>='1'&&dd[0]<='9'&&dd[1]>='0'&&dd[1]<='9'&&dd[2]>='0'&&dd[2]<='9'){ int ver=(dd[0]-'0')*100+(dd[1]-'0')*10+(dd[2]-'0');
                 if(ver<150){ dd[0]='1';dd[1]='5';dd[2]='0'; const char*a=src; setsrc(shader,1,&a,0); if(getenv("PELOAD_TRACE_GL")){ws("  [glCompileShader] bumped #version ");char n[4]={(char)('0'+ver/100),(char)('0'+ver/10%10),(char)('0'+ver%10),0};ws(n);ws("->150\n");} } } }
         free(src); }
-    void(*real)(unsigned)=dlsym(RTLD_DEFAULT,"glCompileShader"); if(real) real(shader); }
+    void(*real)(unsigned)=dlsym(RTLD_DEFAULT,"glCompileShader"); if(real) real(shader);
+    if(getenv("PELOAD_TRACE_GLSL")){ void(*giv)(unsigned,unsigned,int*)=dlsym(RTLD_DEFAULT,"glGetShaderiv"); void(*gil)(unsigned,int,int*,char*)=dlsym(RTLD_DEFAULT,"glGetShaderInfoLog");
+        int ok=1; if(giv) giv(shader,0x8B81,&ok); if(!ok){ char log[1024]={0}; int n=0; if(gil) gil(shader,1024,&n,log); ws("  [SHADER COMPILE FAIL] "); ws(log); ws("\n"); } } }
+static void MSABI i_glLinkProgram(unsigned prog){
+    void(*real)(unsigned)=dlsym(RTLD_DEFAULT,"glLinkProgram"); if(real) real(prog);
+    if(getenv("PELOAD_TRACE_GLSL")){ void(*giv)(unsigned,unsigned,int*)=dlsym(RTLD_DEFAULT,"glGetProgramiv"); void(*gil)(unsigned,int,int*,char*)=dlsym(RTLD_DEFAULT,"glGetProgramInfoLog");
+        int ok=1; if(giv) giv(prog,0x8B82,&ok); if(!ok){ char log[1024]={0}; int n=0; if(gil) gil(prog,1024,&n,log); ws("  [PROGRAM LINK FAIL] "); ws(log); ws("\n"); } else ws("  [program linked ok]\n"); } }
 // glCreateShaderProgramv: separable-program one-call compile; rewrite #version.
 static unsigned MSABI i_glCreateShaderProgramv(unsigned type,int count,const char*const*strs){
     unsigned(*real)(unsigned,int,const char*const*)=dlsym(RTLD_DEFAULT,"glCreateShaderProgramv");
