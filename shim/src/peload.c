@@ -367,12 +367,26 @@ int main(int argc, char **argv){
     __asm__ volatile("movq %0, %%gs:0x60" :: "r"((uint64_t)peb));
     ws("  TEB @ "); whexn((uint64_t)teb); ws("  PEB @ "); whex((uint64_t)peb);
 
-    // TLS callbacks
+    // Static TLS + callbacks. MSVC/Rust read the per-thread TLS array from
+    // TEB.ThreadLocalStoragePointer (gs:[0x58]) and index it by the module's
+    // TLS index. Without this, `mov rcx, gs:[0x58]` yields NULL and the first
+    // __declspec(thread) access faults. So: build the TLS data block from the
+    // image template, assign index 0, publish the array at TEB+0x58 / gs:0x58.
     uint32_t tlsrva = opt->Dir[DIR_TLS].VA;
     if(tlsrva){
-        TLSDIR *t = (TLSDIR*)rva(tlsrva);
+        TLSDIR *t = (TLSDIR*)rva(tlsrva);          // fields are VAs (relocated)
+        uint64_t raw = t->End - t->Start, total = raw + t->Zero;
+        uint8_t *block = malloc(total ? total : 1);
+        if(raw) memcpy(block, (void*)t->Start, raw);
+        if(t->Zero) memset(block+raw, 0, t->Zero);
+        *(uint32_t*)t->Index = 0;                   // this module's TLS index
+        static void *tls_array[64];
+        tls_array[0] = block;
+        *(uint64_t*)(teb+0x58) = (uint64_t)tls_array;              // TEB field
+        __asm__ volatile("movq %0, %%gs:0x58" :: "r"((uint64_t)tls_array)); // gs overlay
+        ws("  static TLS block "); whexn((uint64_t)block); ws(" size "); whex(total);
         if(t->Callbacks){
-            uint64_t *cb = (uint64_t*)t->Callbacks; // VA already relocated
+            uint64_t *cb = (uint64_t*)t->Callbacks;
             for(int i=0; cb[i]; i++){
                 ws("  TLS callback "); whex(cb[i]);
                 void (__attribute__((ms_abi)) *fn)(void*,uint32_t,void*) = (void*)cb[i];
