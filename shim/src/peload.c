@@ -341,9 +341,13 @@ static void*  MSABI i_GetProcessHeap(void){ return (void*)0x48454150; /* 'HEAP' 
 // We tag the block so HeapFree/Size/ReAlloc recognise it. Slow + VM-heavy; diag only.
 static int g_heapguard=-1;
 static inline int heapguard(void){ if(g_heapguard<0) g_heapguard=getenv("PELOAD_HEAP_GUARD")?1:0; return g_heapguard; }
-static void* hg_alloc(uint64_t n){ uint64_t ps=4096, nb=((n+ps-1)/ps)*ps; if(nb==0) nb=ps;
+static void* hg_alloc(uint64_t n){ uint64_t ps=4096, slack=32, need=n+slack, nb=((need+ps-1)/ps)*ps; if(nb==0) nb=ps;
     uint8_t* m=mmap(0,nb+ps,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANON,-1,0); if(m==MAP_FAILED) return malloc(n?n:1);
-    mprotect(m+nb,ps,PROT_NONE); return m+(nb-n); }   // user buffer ends exactly at the guard page
+    mprotect(m+nb,ps,PROT_NONE);
+    // leave `slack` bytes between the buffer end and the guard so benign SIMD
+    // over-READS (optimized memcpy reads 16/32B chunks past the end) don't fault;
+    // a real overflow larger than the slack still hits the guard.
+    return m+(nb-n-slack); }
 static void*  MSABI i_HeapAlloc(void *h, uint32_t fl, uint64_t n){ (void)h;
     void*p = heapguard()? hg_alloc(n?n:1) : malloc(n?n:1); if(p&&(fl&8)) memset(p,0,n); return p; }
 static void*  MSABI i_HeapReAlloc(void *h, uint32_t fl, void *p, uint64_t n){ (void)h;(void)fl;
