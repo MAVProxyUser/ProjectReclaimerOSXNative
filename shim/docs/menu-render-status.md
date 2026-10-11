@@ -303,3 +303,66 @@ so lldb can attach; writes pid to /tmp/peload.pid).
 
 Key addresses (this build): halo3.dll base 0x180000000, exe base 0x140000000.
 WavesFX table RVA 0x46bb780..0x46bb7f0. Video-shader compile at halo3+0x2a0990.
+
+---
+
+## Session 4 (2026-10-11) — GL thunk ABI was THE root cause; engine reaches the present loop
+
+### Breakthrough: `make_gl_thunk` forwarded only 6 args and clobbered rdi/rsi
+The Win64->SysV GL trampoline forwarded just 6 arguments and did **not** preserve
+rdi/rsi (callee-saved in Win64, scratch in SysV). Every GL entry point with >6
+args got garbage for args 7+:
+- `glReadPixels` (7 args): the **dst pointer** (arg7) was garbage -> the driver's
+  `glgConvertTo_32<ABGR8_ARGB8>` (libGLImage) wrote the readback to a wild/undersized
+  location, corrupting adjacent heap.
+- `glTexSubImage2D`/`glTexImage2D` (9), `glBlitFramebuffer` (10): same class.
+
+That heap corruption zeroed glow's `Context` function-pointer table, producing the
+`"called glDeleteProgram but it was not loaded"` panic (gl46.rs:4515) and the whole
+family of random gl46/sig6/BTreeMap crashes. **This was the timing-dependent
+corruption hunted since session 3 — not a guest bug.**
+
+Fix (commit 3da9e9c): thunk now forwards **12 args** and saves/restores rdi/rsi
+(also corrected the rbp-relative stack-arg offsets). Added explicit MSABI wrappers
+for glReadPixels/glGetTexImage/glTexSubImage2D/glTextureSubImage2D as belt-and-braces.
+Also fixed a self-inflicted over-read in the HEAP_GUARD realloc path (copied the
+NEW size instead of min(old,new)); the guard allocator now tracks per-block sizes
+and prints `[GUARD-HIT]` with owning block + overflow distance + fault symbol.
+
+### After the fix: deterministic progress to the Win32 present loop
+The engine now reaches `MsgWaitForMultipleObjectsEx` deterministically. That loop
+only keeps rendering when the call returns `WAIT_TIMEOUT` (0x102); our stub returned
+0 -> it exited and tore down the GL context after one frame. `i_MsgWaitForMultipleObjectsEx`
+now returns 0x102 (with a ~16ms sleep). Engine then prints
+`Live rendering resolution: scene=4096x4096` and loads menu artwork
+("loading rings"; the PELOAD_WINDOW path reaches "Spartan armor 2/3",
+`engine_initialized_flag:1`).
+
+### Remaining blockers (diagnosed, not solved)
+1. **Frontend RefCell re-entrancy.** During a frame, halo3 calls back a Reclaimer
+   vtable method (halo3 global RVA 0x9fcab8, vtable+8 -> exe+0x553e0b) while the
+   frontend already holds a thread-local RefCell borrow -> panic
+   `RefCell already borrowed` (std/thread/local.rs:757). Delivered as a C++ MSVC
+   exception `RaiseException(0xE06D7363)` type `rust_panic`, which the frontend
+   wraps in catch_unwind. Likely halo3's render should run on a separate thread
+   (on our inline path the draw callback fires synchronously into the held borrow).
+2. **Guest SEH runs on the host stack.** `i_RaiseException` now rebases its context
+   onto the guest call site (commit 90f2361) so the search pass walks real guest
+   frames and finds the `__CxxFrameHandler3` catch at exe+0x553e0b. BUT that
+   personality runs on our host stack, so the context it hands `RtlUnwindEx` has a
+   host-stack RSP (0x7ff8...) that cannot unwind to the guest-stack target
+   (0x30...). The catch transfer is therefore unreliable; a "surviving" run is HUNG
+   (RefCell left borrowed), not rendering. `RtlUnwindEx` is now hardened to bound
+   RSP to a sane window (commit 00d8c68) so it no longer garbage-walks, but the
+   transfer still can't land. The guest main loop runs on a 0x30xxxxxxx stack vs
+   host 0x7ff8... — two stacks; reconciling them is the key to faithful SEH.
+3. **No visible window.** PELOAD_WINDOW makes an NSWindow but never pumps the Cocoa
+   main-thread run loop, so it shows no content. The engine renders to GL_BACK of a
+   windowless/offscreen context and never SwapBuffers; the non-intrusive
+   PELOAD_SHOT grab (in the message-pump stub) reads GL_BACK but gets black because
+   the panic skips the draw.
+
+### New diagnostics
+`PELOAD_TRACE_FAULT` (real faulting rip + guest-return scan for faults the engine
+reports as exe+0x0), `PELOAD_TRACE_SEH` (per-frame dispatch + unwind logging),
+`PELOAD_TRACE_TEX`, `PELOAD_TRACE_ALLOC=<size>`, `PELOAD_SHOT_FRONT`.
