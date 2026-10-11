@@ -313,7 +313,7 @@ static int    MSABI i_SetEnvironmentVariableW(const uint16_t*n,const uint16_t*v)
     char nm[256]; int i=0; for(; n&&n[i]&&i<255;i++) nm[i]=(char)(n[i]<128?n[i]:'?'); nm[i]=0;
     if(!v){ unsetenv(nm); return 1; }
     char val[2048]; int j=0; for(; v[j]&&j<2047;j++) val[j]=(char)(v[j]<128?v[j]:'?'); val[j]=0;
-    setenv(nm,val,1); return 1; }
+    setenv(nm,val,1); if(getenv("PELOAD_TRACE_ENV")){ws("  [SetEnv] ");ws(nm);ws("=");ws(val);ws("\n");} return 1; }
 static void*  MSABI i_SetStdHandle(uint32_t id,void*h){ (void)id; return h; } // accept redirection
 // CreateProcessW: launch the engine worker UNDER the loader. The worker is a
 // Windows exe; we re-exec peload on it (arch -x86_64) so it gets the same
@@ -324,7 +324,20 @@ extern char **environ;
 static const char *g_self;          // path to this peload binary (argv[0])
 static pid_t g_childpid[256]; static int g_nchild;
 static int MSABI i_CreateProcessW(const uint16_t*app,uint16_t*cmd,void*pa,void*ta,int inherit,uint32_t flags,void*env,const uint16_t*cwd,uint8_t*si,uint8_t*pi){
-    (void)pa;(void)ta;(void)inherit;(void)flags;(void)env;(void)cwd;
+    (void)pa;(void)ta;(void)inherit;
+    // lpEnvironment: the parent's env block for the worker carries the native
+    // handshake (RECLAIMER_LOCAL_RUNTIME, RECLAIMER_PARENT_CONTROL). Overlay it
+    // onto our environ so the posix_spawn'd worker inherits it. UTF-16 when
+    // CREATE_UNICODE_ENVIRONMENT (0x400); double-NUL terminated.
+    if(env){ int uni = (flags & 0x400)!=0;
+        if(uni){ const uint16_t *w=env; while(*w){ char nm[256],val[4096]; int i=0;
+            while(*w && *w!='=' && i<255){ nm[i++]=(char)(*w<128?*w:'?'); w++; } nm[i]=0; if(*w=='=')w++;
+            int j=0; while(*w && j<4095){ val[j++]=(char)(*w<128?*w:'?'); w++; } val[j]=0; w++;
+            if(nm[0]) setenv(nm,val,1); if(getenv("PELOAD_TRACE_ENV")){ws("  [childenv] ");ws(nm);ws("=");ws(val);ws("\n");} } }
+        else { const char *c=env; while(*c){ char nm[256],val[4096]; int i=0;
+            while(*c && *c!='=' && i<255) nm[i++]=*c++; nm[i]=0; if(*c=='=')c++;
+            int j=0; while(*c && j<4095) val[j++]=*c++; val[j]=0; c++;
+            if(nm[0]) setenv(nm,val,1); } } }
     // resolve the worker exe path (prefer lpApplicationName)
     char exe[2048]={0};
     if(app) win2unix(app,exe,sizeof exe);
@@ -410,6 +423,121 @@ static int MSABI i_SetThreadStackGuarantee(uint32_t*s){ (void)s; return 1; }
 static int MSABI i_FreeLibrary(void*h){ (void)h; return 1; }
 static uint32_t MSABI i_GetModuleFileNameA(void*m,char*buf,uint32_t sz){ (void)m; uint32_t i=0; for(; i<sz && g_cmdlineA[i]; i++) buf[i]=g_cmdlineA[i]; if(i<sz) buf[i]=0; return i; }
 static uint32_t MSABI i_GetConsoleOutputCP(void){ return 65001; }
+// Fault/exception-handler registration: return non-null so the engine's
+// "install worker fault handler" succeeds. (Actual Win64 SEH dispatch is a
+// later phase; this just lets startup proceed.)
+static void  *g_veh[16]; static int g_nveh;
+static void*  MSABI i_AddVectoredExceptionHandler(uint32_t first,void*handler){ (void)first; if(g_nveh<16)g_veh[g_nveh++]=handler; return handler?handler:(void*)1; }
+static uint32_t MSABI i_RemoveVectoredExceptionHandler(void*h){ (void)h; return 1; }
+static void*  MSABI i_SetUnhandledExceptionFilter(void*f){ static void*prev; void*o=prev; prev=f; return o; }
+static uint32_t MSABI i_SetErrorMode(uint32_t m){ static uint32_t prev; uint32_t o=prev; prev=m; return o; }
+static int    MSABI i_SetThreadErrorMode(uint32_t m,uint32_t*old){ (void)m; if(old)*old=0; return 1; }
+static uint16_t MSABI i_GetUserDefaultUILanguage(void){ return 0x409; } // en-US
+static uint16_t MSABI i_GetUserDefaultLangID(void){ return 0x409; }
+static int    MSABI i_IsValidCodePage(uint32_t cp){ (void)cp; return 1; }
+static int    MSABI i_DisableThreadLibraryCalls(void*h){ (void)h; return 1; }
+static int    MSABI i_AreFileApisANSI(void){ return 1; }
+// Minimal user32/gdi windowing: succeed so the engine can register its class
+// and create a window. (A real NSWindow + D3D11->Metal surface is the next
+// phase; these let us reach D3D11CreateDevice.)
+static uint16_t MSABI i_RegisterClassExW(const void*wc){ (void)wc; return 0xC001; } // non-zero ATOM
+static uint16_t MSABI i_RegisterClassW(const void*wc){ (void)wc; return 0xC001; }
+static int    MSABI i_UnregisterClassW(const void*a,void*b){ (void)a;(void)b; return 1; }
+static void*  MSABI i_LoadIconW(void*h,const void*n){ (void)h;(void)n; return (void*)0x1C01; }
+static void*  MSABI i_LoadCursorW(void*h,const void*n){ (void)h;(void)n; return (void*)0x1C02; }
+static void*  MSABI i_LoadImageW(void*h,const void*n,uint32_t t,int cx,int cy,uint32_t f){ (void)h;(void)n;(void)t;(void)cx;(void)cy;(void)f; return (void*)0x1C03; }
+static void*  MSABI i_GetStockObject(int i){ (void)i; return (void*)0x1C04; }
+static void*  MSABI i_CreateWindowExW(uint32_t ex,const void*cls,const void*name,uint32_t style,int x,int y,int w,int h,void*parent,void*menu,void*inst,void*param){
+    (void)ex;(void)cls;(void)name;(void)style;(void)x;(void)y;(void)w;(void)h;(void)parent;(void)menu;(void)inst;(void)param; return (void*)0x4857; } // fake HWND
+static int    MSABI i_DestroyWindow(void*h){ (void)h; return 1; }
+static int64_t MSABI i_DefWindowProcW(void*h,uint32_t m,uint64_t wp,int64_t lp){ (void)h;(void)m;(void)wp;(void)lp; return 0; }
+static int    MSABI i_ShowWindow(void*h,int c){ (void)h;(void)c; return 1; }
+static int    MSABI i_UpdateWindow(void*h){ (void)h; return 1; }
+static int    MSABI i_PeekMessageW(void*m,void*h,uint32_t f1,uint32_t f2,uint32_t r){ (void)m;(void)h;(void)f1;(void)f2;(void)r; return 0; } // no messages
+static int    MSABI i_GetMessageW(void*m,void*h,uint32_t f1,uint32_t f2){ (void)m;(void)h;(void)f1;(void)f2; return 0; } // WM_QUIT
+static int64_t MSABI i_DispatchMessageW(const void*m){ (void)m; return 0; }
+static int    MSABI i_TranslateMessage(const void*m){ (void)m; return 0; }
+static void*  MSABI i_DefRawHandle(void){ return (void*)0x4857; }
+// display/monitor: report a single 1920x1080 primary monitor
+static void*  MSABI i_MonitorFromWindow(void*h,uint32_t f){ (void)h;(void)f; return (void*)0x4D01; }
+static void*  MSABI i_MonitorFromPoint(uint64_t pt,uint32_t f){ (void)pt;(void)f; return (void*)0x4D01; }
+static void*  MSABI i_MonitorFromRect(const void*r,uint32_t f){ (void)r;(void)f; return (void*)0x4D01; }
+static int    MSABI i_GetMonitorInfoW(void*h,uint8_t*mi){ (void)h; if(!mi) return 0; uint32_t cb=*(uint32_t*)mi;
+    int32_t *r=(int32_t*)(mi+4);  r[0]=0;r[1]=0;r[2]=1920;r[3]=1080;      // rcMonitor
+    int32_t *wk=(int32_t*)(mi+20); wk[0]=0;wk[1]=0;wk[2]=1920;wk[3]=1080; // rcWork
+    *(uint32_t*)(mi+36)=1;                                               // MONITORINFOF_PRIMARY
+    if(cb>=104){ uint16_t*dev=(uint16_t*)(mi+40); const char*d="\\\\.\\DISPLAY1"; int i=0; for(;d[i];i++)dev[i]=(uint8_t)d[i]; dev[i]=0; }
+    return 1; }
+static int    MSABI i_GetSystemMetrics(int idx){ switch(idx){ case 0:return 1920; case 1:return 1080; case 4:return 0; default:return 0; } }
+static int    MSABI i_EnumDisplayMonitors(void*dc,const void*clip,void*cb,int64_t data){ (void)dc;(void)clip;(void)cb;(void)data; return 1; }
+static int    MSABI i_GetClientRect(void*h,int32_t*r){ (void)h; if(r){r[0]=0;r[1]=0;r[2]=1920;r[3]=1080;} return 1; }
+static int    MSABI i_GetWindowRect(void*h,int32_t*r){ (void)h; if(r){r[0]=0;r[1]=0;r[2]=1920;r[3]=1080;} return 1; }
+static int    MSABI i_SetWindowPos(void*h,void*after,int x,int y,int w,int ht,uint32_t f){ (void)h;(void)after;(void)x;(void)y;(void)w;(void)ht;(void)f; return 1; }
+static int64_t g_winlong[8];
+static int64_t MSABI i_GetWindowLongPtrW(void*h,int idx){ (void)h; return (idx>=-8&&idx<0)? g_winlong[-idx-1]:0; }
+static int64_t MSABI i_SetWindowLongPtrW(void*h,int idx,int64_t v){ (void)h; if(idx>=-8&&idx<0){ int64_t o=g_winlong[-idx-1]; g_winlong[-idx-1]=v; return o;} return 0; }
+static int32_t MSABI i_GetWindowLongW(void*h,int idx){ return (int32_t)i_GetWindowLongPtrW(h,idx); }
+static int32_t MSABI i_SetWindowLongW(void*h,int idx,int32_t v){ return (int32_t)i_SetWindowLongPtrW(h,idx,v); }
+static int    MSABI i_AdjustWindowRectEx(int32_t*r,uint32_t s,int m,uint32_t ex){ (void)r;(void)s;(void)m;(void)ex; return 1; }
+static int    MSABI i_MoveWindow(void*h,int x,int y,int w,int ht,int rp){ (void)h;(void)x;(void)y;(void)w;(void)ht;(void)rp; return 1; }
+static void*  MSABI i_SetFocus(void*h){ return h; }
+static void*  MSABI i_SetCapture(void*h){ return h; }
+static int    MSABI i_ReleaseCapture(void){ return 1; }
+static int    MSABI i_ClientToScreen(void*h,int32_t*p){ (void)h;(void)p; return 1; }
+static int    MSABI i_ScreenToClient(void*h,int32_t*p){ (void)h;(void)p; return 1; }
+static int    MSABI i_RegisterRawInputDevices(const void*d,uint32_t n,uint32_t cb){ (void)d;(void)n;(void)cb; return 1; }
+static uint32_t MSABI i_GetRawInputData(void*h,uint32_t cmd,void*data,uint32_t*sz,uint32_t hdr){ (void)h;(void)cmd;(void)data;(void)sz;(void)hdr; return 0; }
+static uint32_t MSABI i_GetRegisteredRawInputDevices(void*d,uint32_t*n,uint32_t cb){ (void)d;(void)cb; if(n)*n=0; return 0; }
+static void*  MSABI i_SetTimer(void*h,uintptr_t id,uint32_t el,void*fn){ (void)h;(void)el;(void)fn; return (void*)id; }
+static int    MSABI i_KillTimer(void*h,uintptr_t id){ (void)h;(void)id; return 1; }
+static int16_t MSABI i_GetAsyncKeyState(int k){ (void)k; return 0; }
+static int16_t MSABI i_GetKeyState(int k){ (void)k; return 0; }
+static int    MSABI i_ShowCursor(int s){ (void)s; return s?0:-1; }
+static int    MSABI i_ClipCursor(const void*r){ (void)r; return 1; }
+static int    MSABI i_SetCursorPos(int x,int y){ (void)x;(void)y; return 1; }
+static void*  MSABI i_SetCursor(void*c){ return c; }
+static int    MSABI i_SetLayeredWindowAttributes(void*h,uint32_t key,uint8_t a,uint32_t f){ (void)h;(void)key;(void)a;(void)f; return 1; }
+static int    MSABI i_UpdateLayeredWindow(void*h,void*dc,void*pd,void*ps,void*sd,void*sp,uint32_t key,void*bf,uint32_t f){ (void)h;(void)dc;(void)pd;(void)ps;(void)sd;(void)sp;(void)key;(void)bf;(void)f; return 1; }
+static void*  MSABI i_GetDC(void*h){ (void)h; return (void*)0xDC01; }
+static int    MSABI i_ReleaseDC(void*h,void*dc){ (void)h;(void)dc; return 1; }
+static void*  MSABI i_GetWindowDC(void*h){ (void)h; return (void*)0xDC01; }
+static int    MSABI i_InvalidateRect(void*h,const void*r,int e){ (void)h;(void)r;(void)e; return 1; }
+static int    MSABI i_SetWindowTextW(void*h,const uint16_t*t){ (void)h;(void)t; return 1; }
+static void*  MSABI i_GetForegroundWindow(void){ return (void*)0x4857; }
+static int    MSABI i_SetForegroundWindow(void*h){ (void)h; return 1; }
+static int    MSABI i_IsWindow(void*h){ return h?1:0; }
+static int    MSABI i_IsWindowVisible(void*h){ (void)h; return 1; }
+static void*  MSABI i_GetActiveWindow(void){ return (void*)0x4857; }
+// ---- OpenGL bridge: wgl -> CGL, and opengl32!gl* -> macOS OpenGL.framework.
+// The engine's menu renders via OpenGL; macOS has native GL 4.1 (CGL).
+#include <OpenGL/OpenGL.h>
+#include <dlfcn.h>
+static CGLContextObj g_cgl;
+static int    MSABI i_ChoosePixelFormat(void*hdc,const void*pfd){ (void)hdc;(void)pfd; return 1; }
+static int    MSABI i_SetPixelFormat(void*hdc,int fmt,const void*pfd){ (void)hdc;(void)fmt;(void)pfd; return 1; }
+static int    MSABI i_GetPixelFormat(void*hdc){ (void)hdc; return 1; }
+static int    MSABI i_DescribePixelFormat(void*hdc,int fmt,uint32_t bytes,uint8_t*pfd){ (void)hdc;(void)fmt;
+    if(pfd&&bytes>=40){ memset(pfd,0,bytes); *(uint16_t*)pfd=(uint16_t)(bytes<40?bytes:40); *(uint16_t*)(pfd+2)=1; *(uint32_t*)(pfd+4)=0x25; pfd[8]=32; pfd[23]=24; pfd[27]=8; } return 1; } // PFD_DRAW_TO_WINDOW|SUPPORT_OPENGL|DOUBLEBUFFER, 32bpp, 24 depth
+static void*  MSABI i_wglCreateContext(void*hdc){ (void)hdc;
+    CGLPixelFormatAttribute at[]={kCGLPFAAccelerated,kCGLPFADoubleBuffer,kCGLPFAOpenGLProfile,(CGLPixelFormatAttribute)kCGLOGLPVersion_GL4_Core,kCGLPFAColorSize,(CGLPixelFormatAttribute)24,kCGLPFAAlphaSize,(CGLPixelFormatAttribute)8,kCGLPFADepthSize,(CGLPixelFormatAttribute)24,(CGLPixelFormatAttribute)0};
+    CGLPixelFormatObj pf=0; GLint n=0; if(CGLChoosePixelFormat(at,&pf,&n)!=kCGLNoError||!pf){ CGLPixelFormatAttribute b[]={kCGLPFAColorSize,(CGLPixelFormatAttribute)24,(CGLPixelFormatAttribute)0}; CGLChoosePixelFormat(b,&pf,&n); }
+    CGLContextObj ctx=0; if(pf){ CGLCreateContext(pf,0,&ctx); CGLDestroyPixelFormat(pf); } if(ctx) g_cgl=ctx;
+    ws(ctx?"  [wgl] CGL context created\n":"  [wgl] CGL context FAILED\n"); return ctx; }
+static int    MSABI i_wglMakeCurrent(void*hdc,void*ctx){ (void)hdc; return CGLSetCurrentContext((CGLContextObj)ctx)==kCGLNoError; }
+static void*  MSABI i_wglGetProcAddress(const char*name){ void*p=dlsym(RTLD_DEFAULT,name); return p; }
+static int    MSABI i_wglDeleteContext(void*ctx){ if(ctx)CGLDestroyContext((CGLContextObj)ctx); return 1; }
+static void*  MSABI i_wglGetCurrentContext(void){ return CGLGetCurrentContext(); }
+static void*  MSABI i_wglGetCurrentDC(void){ return (void*)0xDC01; }
+static int    MSABI i_wglShareLists(void*a,void*b){ (void)a;(void)b; return 1; }
+static int    MSABI i_wglSwapIntervalEXT(int i){ (void)i; return 1; }
+static int    MSABI i_SwapBuffers(void*hdc){ (void)hdc; if(g_cgl) CGLFlushDrawable(g_cgl); return 1; }
+// RaiseException: log the code. 0x406D1388 = SetThreadName (ignore); others we
+// just return from for now (real SEH dispatch is a later phase).
+static void   MSABI i_RaiseException(uint32_t code,uint32_t flags,uint32_t n,const void*args){ (void)flags;(void)n;(void)args;
+    if(code==0x406D1388) return; char t[48]; snprintf(t,sizeof t,"  [RaiseException] 0x%08x\n",code); ws(t); }
+static void   MSABI i_RtlCaptureContext(void*ctx){ if(ctx) memset(ctx,0,1232); } // CONTEXT (x64 ~1232 bytes)
+static void*  MSABI i_RtlLookupFunctionEntry(uint64_t pc,uint64_t*base,void*hist){ (void)pc;(void)hist; if(base)*base=0; return 0; }
+static void   MSABI i_RtlRaiseException(void*rec){ (void)rec; }
 // drive/volume queries: present C: as a fixed NTFS volume with free space, so
 // the client accepts the cache/scratch as "a drive of this PC".
 static uint32_t MSABI i_GetDriveTypeW(const uint16_t*root){ (void)root; return 3; } // DRIVE_FIXED
@@ -698,7 +826,7 @@ static int    MSABI i_CloseHandleReal(void*h){ intptr_t hv=(intptr_t)h; if(hv>=0
 // env var lookup via the host environment (so RECLAIMER_* pass through)
 static uint32_t MSABI i_GetEnvironmentVariableW(const uint16_t*n,uint16_t*v,uint32_t sz){
     char nm[256]; int i=0; for(; n && n[i] && i<255; i++) nm[i]=(char)(n[i]<128?n[i]:'?'); nm[i]=0;
-    const char *val=getenv(nm); if(!val){ return 0; }
+    const char *val=getenv(nm); if(getenv("PELOAD_TRACE_ENV")){ws("  [GetEnv] ");ws(nm);ws("=");ws(val?val:"(unset)");ws("\n");} if(!val){ return 0; }
     uint32_t len=(uint32_t)strlen(val);
     if(!v||sz==0) return len+1;                 // required size incl NUL
     uint32_t j=0; for(; val[j] && j<sz-1; j++) v[j]=(uint8_t)val[j]; v[j]=0; return j;
@@ -951,6 +1079,92 @@ static void *resolve_impl(const char *fn){
         {"GetConsoleMode",(void*)i_GetConsoleMode},
         {"SetConsoleMode",(void*)i_SetConsoleMode},
         {"GetConsoleOutputCP",(void*)i_GetConsoleOutputCP},
+        {"AddVectoredExceptionHandler",(void*)i_AddVectoredExceptionHandler},
+        {"RemoveVectoredExceptionHandler",(void*)i_RemoveVectoredExceptionHandler},
+        {"SetUnhandledExceptionFilter",(void*)i_SetUnhandledExceptionFilter},
+        {"SetErrorMode",(void*)i_SetErrorMode},
+        {"SetThreadErrorMode",(void*)i_SetThreadErrorMode},
+        {"GetUserDefaultUILanguage",(void*)i_GetUserDefaultUILanguage},
+        {"GetUserDefaultLangID",(void*)i_GetUserDefaultLangID},
+        {"IsValidCodePage",(void*)i_IsValidCodePage},
+        {"DisableThreadLibraryCalls",(void*)i_DisableThreadLibraryCalls},
+        {"AreFileApisANSI",(void*)i_AreFileApisANSI},
+        {"RegisterClassExW",(void*)i_RegisterClassExW},
+        {"RegisterClassW",(void*)i_RegisterClassW},
+        {"UnregisterClassW",(void*)i_UnregisterClassW},
+        {"LoadIconW",(void*)i_LoadIconW},
+        {"LoadCursorW",(void*)i_LoadCursorW},
+        {"LoadImageW",(void*)i_LoadImageW},
+        {"GetStockObject",(void*)i_GetStockObject},
+        {"CreateWindowExW",(void*)i_CreateWindowExW},
+        {"DestroyWindow",(void*)i_DestroyWindow},
+        {"DefWindowProcW",(void*)i_DefWindowProcW},
+        {"ShowWindow",(void*)i_ShowWindow},
+        {"UpdateWindow",(void*)i_UpdateWindow},
+        {"PeekMessageW",(void*)i_PeekMessageW},
+        {"GetMessageW",(void*)i_GetMessageW},
+        {"DispatchMessageW",(void*)i_DispatchMessageW},
+        {"TranslateMessage",(void*)i_TranslateMessage},
+        {"MonitorFromWindow",(void*)i_MonitorFromWindow},
+        {"MonitorFromPoint",(void*)i_MonitorFromPoint},
+        {"MonitorFromRect",(void*)i_MonitorFromRect},
+        {"GetMonitorInfoW",(void*)i_GetMonitorInfoW},
+        {"GetSystemMetrics",(void*)i_GetSystemMetrics},
+        {"EnumDisplayMonitors",(void*)i_EnumDisplayMonitors},
+        {"GetClientRect",(void*)i_GetClientRect},
+        {"GetWindowRect",(void*)i_GetWindowRect},
+        {"SetWindowPos",(void*)i_SetWindowPos},
+        {"GetWindowLongPtrW",(void*)i_GetWindowLongPtrW},
+        {"SetWindowLongPtrW",(void*)i_SetWindowLongPtrW},
+        {"GetWindowLongW",(void*)i_GetWindowLongW},
+        {"SetWindowLongW",(void*)i_SetWindowLongW},
+        {"AdjustWindowRectEx",(void*)i_AdjustWindowRectEx},
+        {"MoveWindow",(void*)i_MoveWindow},
+        {"SetFocus",(void*)i_SetFocus},
+        {"SetCapture",(void*)i_SetCapture},
+        {"ReleaseCapture",(void*)i_ReleaseCapture},
+        {"ClientToScreen",(void*)i_ClientToScreen},
+        {"ScreenToClient",(void*)i_ScreenToClient},
+        {"RegisterRawInputDevices",(void*)i_RegisterRawInputDevices},
+        {"GetRawInputData",(void*)i_GetRawInputData},
+        {"GetRegisteredRawInputDevices",(void*)i_GetRegisteredRawInputDevices},
+        {"SetTimer",(void*)i_SetTimer},
+        {"KillTimer",(void*)i_KillTimer},
+        {"GetAsyncKeyState",(void*)i_GetAsyncKeyState},
+        {"GetKeyState",(void*)i_GetKeyState},
+        {"ShowCursor",(void*)i_ShowCursor},
+        {"ClipCursor",(void*)i_ClipCursor},
+        {"SetCursorPos",(void*)i_SetCursorPos},
+        {"SetCursor",(void*)i_SetCursor},
+        {"SetLayeredWindowAttributes",(void*)i_SetLayeredWindowAttributes},
+        {"UpdateLayeredWindow",(void*)i_UpdateLayeredWindow},
+        {"GetDC",(void*)i_GetDC},
+        {"ReleaseDC",(void*)i_ReleaseDC},
+        {"GetWindowDC",(void*)i_GetWindowDC},
+        {"InvalidateRect",(void*)i_InvalidateRect},
+        {"SetWindowTextW",(void*)i_SetWindowTextW},
+        {"GetForegroundWindow",(void*)i_GetForegroundWindow},
+        {"SetForegroundWindow",(void*)i_SetForegroundWindow},
+        {"IsWindow",(void*)i_IsWindow},
+        {"IsWindowVisible",(void*)i_IsWindowVisible},
+        {"GetActiveWindow",(void*)i_GetActiveWindow},
+        {"ChoosePixelFormat",(void*)i_ChoosePixelFormat},
+        {"SetPixelFormat",(void*)i_SetPixelFormat},
+        {"GetPixelFormat",(void*)i_GetPixelFormat},
+        {"DescribePixelFormat",(void*)i_DescribePixelFormat},
+        {"wglCreateContext",(void*)i_wglCreateContext},
+        {"wglMakeCurrent",(void*)i_wglMakeCurrent},
+        {"wglGetProcAddress",(void*)i_wglGetProcAddress},
+        {"wglDeleteContext",(void*)i_wglDeleteContext},
+        {"wglGetCurrentContext",(void*)i_wglGetCurrentContext},
+        {"wglGetCurrentDC",(void*)i_wglGetCurrentDC},
+        {"wglShareLists",(void*)i_wglShareLists},
+        {"wglSwapIntervalEXT",(void*)i_wglSwapIntervalEXT},
+        {"SwapBuffers",(void*)i_SwapBuffers},
+        {"RaiseException",(void*)i_RaiseException},
+        {"RtlCaptureContext",(void*)i_RtlCaptureContext},
+        {"RtlLookupFunctionEntry",(void*)i_RtlLookupFunctionEntry},
+        {"RtlRaiseException",(void*)i_RtlRaiseException},
         {"GetDriveTypeW",(void*)i_GetDriveTypeW},
         {"GetDriveTypeA",(void*)i_GetDriveTypeA},
         {"GetVolumeInformationW",(void*)i_GetVolumeInformationW},
@@ -1032,7 +1246,10 @@ static void *uni_resolve(const char *dll, const char *fn){
     if(is_crt_dll(dll)){
         for(int m=0;m<g_nmods;m++){ void *r=export_lookup(g_mods[m].base, fn); if(r) return r; }
     }
-    return resolve_impl(fn);
+    void *r=resolve_impl(fn); if(r) return r;
+    // opengl32!gl* -> macOS OpenGL.framework (our wgl* are handled by resolve_impl)
+    if(!strcasecmp(dll,"opengl32.dll") && (fn[0]=='g'&&fn[1]=='l')){ extern void *dlsym(void*,const char*); void *g=dlsym((void*)-2/*RTLD_DEFAULT*/,fn); if(g) return g; }
+    return 0;
 }
 
 // map + relocate a PE image (no import binding). returns base; fills opt/coff.
@@ -1172,7 +1389,8 @@ int main(int argc, char **argv){
       snprintf(pd,sizeof pd,"%s/ReclaimerCache/Temp",g_drivec); mkdir(pd,0755);
       setenv("LOCALAPPDATA","C:\\ReclaimerCache",0); setenv("APPDATA","C:\\ReclaimerCache",0);
       setenv("TEMP","C:\\ReclaimerCache\\Temp",0); setenv("TMP","C:\\ReclaimerCache\\Temp",0);
-      setenv("USERPROFILE","C:\\ReclaimerProfile",0); }
+      setenv("USERPROFILE","C:\\ReclaimerProfile",0);
+      setenv("RECLAIMER_MOUSE_SENSITIVITY","1.0",0); }  // engine input default (valid range 0.05-20)
 
     // ---- locate the genuine MS CRT dir: $RECLAIMER_CRT_DIR, then next to the
     // peload binary (<dir>/crt and <dir>/../crt), then the project tree ----

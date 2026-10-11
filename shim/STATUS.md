@@ -28,6 +28,36 @@ On the **dedicated-server exe** the loader relocates (22,919 fixups), binds
 precise, expected spot: `__p___argv` / `_get_initial_narrow_environment`
 return NULL from our stubs, so the Rust runtime dereferences a null `argv`.
 
+## MILESTONE 5: engine runs through graphics init; OpenGL context created
+
+Drove the engine worker from "loaded" all the way through its native startup
+and graphics init — it now creates a real OpenGL context and executes its
+render setup. The march (each a real shim, build with `./build.sh`):
+
+- native-startup handshake: parse `CreateProcessW`'s `lpEnvironment` block so
+  `RECLAIMER_LOCAL_RUNTIME=menu:0` / `RECLAIMER_PARENT_CONTROL` reach the
+  worker — clears "Invalid local runtime configuration";
+- `AddVectoredExceptionHandler`/`SetUnhandledExceptionFilter`/`SetErrorMode`
+  succeed — clears "Could not install worker fault handler";
+- `RECLAIMER_MOUSE_SENSITIVITY` default + locale/codepage shims;
+- windowing: `RegisterClassExW`, `CreateWindowExW`, `MonitorFromWindow` +
+  `GetMonitorInfoW` (1920×1080), `SetWindowPos`, `RegisterRawInputDevices`,
+  layered-window/DC — the engine prints **"Graphics quality: one view High…"**;
+- **OpenGL bridge: `wgl*` → CGL and `opengl32!gl*` → macOS OpenGL.framework
+  (`dlsym`). `wglCreateContext` creates a real `CGLContextObj`** — "[wgl] CGL
+  context created".
+
+Current frontier: the engine throws a **C++ exception (`RaiseException`
+0xE06D7363)**, which needs real **Win64 SEH dispatch** — walking `.pdata`/
+`.xdata` unwind info and running the MSVC `__CxxFrameHandler` personality to
+reach the `catch`. That's the substantial remaining subsystem. Beyond it:
+giving the GL context a real drawable (offscreen FBO or a hidden `NSWindow`)
+so the menu actually presents, and eventually D3D11→Metal for in-game.
+
+~250 shims. Build: `./build.sh` (links `-framework OpenGL`). Both `--version`
+green. Debug env: `PELOAD_WORKER_INHERIT_STDIO`, `PELOAD_TRACE_FS/_ALL/_VA/_ENV`,
+`PELOAD_NO_THREADS`.
+
 ## MILESTONE 4: both named frontiers fixed; engine (halo3.dll) initializing
 
 Fixed the two concrete issues from Milestone 3, then pushed into the engine:
