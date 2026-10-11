@@ -590,6 +590,17 @@ static int  MSABI ctx_Map(void*t,void*res,uint32_t sub,uint32_t type,uint32_t fl
         if(o && dp>o->size) dp=(uint32_t)o->size;
         *(void**)pM=d; *(uint32_t*)((char*)pM+8)=rp; *(uint32_t*)((char*)pM+12)=dp; } return HR_OK; }
 static void MSABI ctx_GetDevice(void*t,void**pp){ (void)t; if(pp)*pp=&g_d3ddevice; }
+// Context Get* methods (indices 72-109): if left as no-ops they leave the caller's
+// out-param array UNINITIALIZED (stack garbage), and the engine then uses/releases
+// a garbage pointer -> heap corruption (garbage varies => timing-dependent crash).
+// Zero the out-params so the engine gets NULLs it can handle. Signatures below
+// match the standard ID3D11DeviceContext vtable.
+static void MSABI ctx_get_arr(void*t,uint32_t start,uint32_t num,void**pp){ (void)t;(void)start; if(pp) for(uint32_t i=0;i<num&&i<256;i++) pp[i]=0; }        // *Get{CB,SRV,Samplers}(start,num,ppArray)
+static void MSABI ctx_get_shader(void*t,void**ppS,void**ppCI,uint32_t*pN){ (void)t; if(ppS)*ppS=0; if(pN)*pN=0; (void)ppCI; }                                 // *GetShader(ppShader,ppClassInst,pNum)
+static void MSABI ctx_get_1(void*t,void**pp){ (void)t; if(pp)*pp=0; }                                                                                          // IAGetInputLayout(ppIL)
+static void MSABI ctx_get_ib(void*t,void**ppIB,uint32_t*pFmt,uint32_t*pOff){ (void)t; if(ppIB)*ppIB=0; if(pFmt)*pFmt=0; if(pOff)*pOff=0; }                      // IAGetIndexBuffer
+static void MSABI ctx_get_vb(void*t,uint32_t start,uint32_t num,void**ppVB,uint32_t*pStr,uint32_t*pOff){ (void)t;(void)start; if(ppVB)for(uint32_t i=0;i<num&&i<256;i++)ppVB[i]=0; if(pStr)for(uint32_t i=0;i<num&&i<256;i++)pStr[i]=0; if(pOff)for(uint32_t i=0;i<num&&i<256;i++)pOff[i]=0; } // IAGetVertexBuffers
+static void MSABI ctx_om_get(void*t,uint32_t num,void**ppRTV,void**ppDSV){ (void)t; if(ppRTV)for(uint32_t i=0;i<num&&i<256;i++)ppRTV[i]=0; if(ppDSV)*ppDSV=0; } // OMGetRenderTargets
 // ---- IDXGISwapChain ----
 static int MSABI swap_Present(void*t,uint32_t sync,uint32_t fl){ (void)t;(void)sync;(void)fl; return HR_OK; }
 static int MSABI swap_GetBuffer(void*t,uint32_t buf,GUID_*r,void**pp){ (void)t;(void)buf;(void)r; if(pp)*pp=mktex(4096,4096,1,28,2); return HR_OK; } // generous backbuffer (covers any window size)
@@ -618,6 +629,36 @@ static void d3d_init(void){
     void** x=g_d3dctx_vtbl; for(int i=0;i<160;i++) x[i]=(void*)ctx_ret0;
     x[0]=(void*)d3d_QI;x[1]=(void*)d3d_AddRef;x[2]=(void*)d3d_Release;x[3]=(void*)ctx_GetDevice;x[4]=(void*)d3d_GetPD;x[5]=(void*)d3d_SetPD;x[6]=(void*)d3d_SetPDI;
     x[14]=(void*)ctx_Map;                                                                            // Map (Unmap=15 stays ret0)
+    // Get* out-param zeroing (standard ID3D11DeviceContext vtable indices)
+    x[72]=(void*)ctx_get_arr;   // VSGetConstantBuffers
+    x[73]=(void*)ctx_get_arr;   // PSGetShaderResources
+    x[74]=(void*)ctx_get_shader;// PSGetShader
+    x[75]=(void*)ctx_get_arr;   // PSGetSamplers
+    x[76]=(void*)ctx_get_shader;// VSGetShader
+    x[77]=(void*)ctx_get_arr;   // PSGetConstantBuffers
+    x[78]=(void*)ctx_get_1;     // IAGetInputLayout
+    x[79]=(void*)ctx_get_vb;    // IAGetVertexBuffers
+    x[80]=(void*)ctx_get_ib;    // IAGetIndexBuffer
+    x[81]=(void*)ctx_get_arr;   // GSGetConstantBuffers
+    x[82]=(void*)ctx_get_shader;// GSGetShader
+    // 83 IAGetPrimitiveTopology (out = UINT*) -> ret0 writes nothing; engine rarely reads. leave.
+    x[84]=(void*)ctx_get_arr;   // VSGetShaderResources
+    x[85]=(void*)ctx_get_arr;   // VSGetSamplers
+    x[87]=(void*)ctx_get_arr;   // GSGetShaderResources
+    x[88]=(void*)ctx_get_arr;   // GSGetSamplers
+    x[89]=(void*)ctx_om_get;    // OMGetRenderTargets
+    x[97]=(void*)ctx_get_arr;   // HSGetShaderResources
+    x[98]=(void*)ctx_get_shader;// HSGetShader
+    x[99]=(void*)ctx_get_arr;   // HSGetSamplers
+    x[100]=(void*)ctx_get_arr;  // HSGetConstantBuffers
+    x[101]=(void*)ctx_get_arr;  // DSGetShaderResources
+    x[102]=(void*)ctx_get_shader;// DSGetShader
+    x[103]=(void*)ctx_get_arr;  // DSGetSamplers
+    x[104]=(void*)ctx_get_arr;  // DSGetConstantBuffers
+    x[105]=(void*)ctx_get_arr;  // CSGetShaderResources
+    x[107]=(void*)ctx_get_shader;// CSGetShader
+    x[108]=(void*)ctx_get_arr;  // CSGetSamplers
+    x[109]=(void*)ctx_get_arr;  // CSGetConstantBuffers
     g_d3dcontext.vtbl=x;
     void** s=g_dxgiswap_vtbl; for(int i=0;i<40;i++) s[i]=(void*)ctx_ret0;
     s[0]=(void*)d3d_QI;s[1]=(void*)d3d_AddRef;s[2]=(void*)d3d_Release;
