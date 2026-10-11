@@ -951,6 +951,39 @@ static void MSABI i_glTexImage2D(unsigned t,int l,int ifmt,int w,int h,int b,uns
     if(getenv("PELOAD_TRACE_GL")){ char s[160]; snprintf(s,sizeof s,"  [glTexImage2D] ifmt=0x%x %dx%d fmt=0x%x type=0x%x\n",ifmt,w,h,fmt,type); ws(s);} }
 static void gl_capture(const char*tag); // fwd
 static void gl_capture_wh(const char*tag,int w,int h,int isfbo); // fwd
+// Resolve-capture: blit the current draw FBO (possibly multisample) into our own
+// single-sample FBO, then read THAT. Overwrites one BMP so the last frame drawn
+// before the crash survives. This is how we grab the menu mid-render.
+static unsigned g_capfbo, g_captex; static int g_capinit;
+static void gl_capture_resolve(void){
+    static int ncap; if(ncap>400) return;
+    void(*gi)(unsigned,int*)=dlsym(RTLD_DEFAULT,"glGetIntegerv");
+    void(*gf)(int,unsigned*)=dlsym(RTLD_DEFAULT,"glGenFramebuffers");
+    void(*gt)(int,unsigned*)=dlsym(RTLD_DEFAULT,"glGenTextures");
+    void(*bt)(unsigned,unsigned)=dlsym(RTLD_DEFAULT,"glBindTexture");
+    void(*ti)(unsigned,int,int,int,int,int,unsigned,unsigned,const void*)=dlsym(RTLD_DEFAULT,"glTexImage2D");
+    void(*bf)(unsigned,unsigned)=dlsym(RTLD_DEFAULT,"glBindFramebuffer");
+    void(*ft)(unsigned,unsigned,unsigned,unsigned,int)=dlsym(RTLD_DEFAULT,"glFramebufferTexture2D");
+    void(*bl)(int,int,int,int,int,int,int,int,unsigned,unsigned)=dlsym(RTLD_DEFAULT,"glBlitFramebuffer");
+    void(*rp)(int,int,int,int,unsigned,unsigned,void*)=dlsym(RTLD_DEFAULT,"glReadPixels");
+    void(*rb)(unsigned)=dlsym(RTLD_DEFAULT,"glReadBuffer");
+    if(!gi||!gf||!gt||!bt||!ti||!bf||!ft||!bl||!rp) return;
+    int W=1280,H=720; int vp[4]={0,0,0,0}; gi(0x0BA2,vp); if(vp[2]>0&&vp[3]>0){W=vp[2];H=vp[3];} if(W>4096)W=4096; if(H>4096)H=4096;
+    int drawfb=0,readfb=0; gi(0x8CA6,&drawfb); gi(0x8CAA,&readfb);
+    if(!g_capinit){ gf(1,&g_capfbo); gt(1,&g_captex); bt(0x0DE1,g_captex); ti(0x0DE1,0,0x8058,W,H,0,0x1908,0x1401,0); bf(0x8D40,g_capfbo); ft(0x8D40,0x8CE0,0x0DE1,g_captex,0); g_capinit=1; }
+    bf(0x8CA8/*READ_FB*/,(unsigned)drawfb); bf(0x8CA6/*DRAW_FB*/,g_capfbo); gl_err();
+    bl(0,0,W,H, 0,0,W,H, 0x4000/*COLOR*/,0x2600/*NEAREST*/);
+    bf(0x8CA8,g_capfbo); if(rb) rb(0x8CE0/*COLOR_ATTACHMENT0*/);
+    unsigned char*px=calloc(1,(size_t)W*H*4); if(px){ gl_err(); rp(0,0,W,H,0x1908,0x1401,px); unsigned e=gl_err();
+        const char*home=getenv("HOME"); char path[512]; snprintf(path,sizeof path,"%s/reclaimer_menu_latest.bmp",home?home:"/tmp");
+        FILE*f=fopen(path,"wb"); if(f){ uint32_t isz=(uint32_t)W*H*4,fsz=54+isz,off=54; uint8_t fh[14]={'B','M'}; memcpy(fh+2,&fsz,4); memcpy(fh+10,&off,4);
+            uint8_t ih[40]={0}; uint32_t v40=40; memcpy(ih,&v40,4); memcpy(ih+4,&W,4); memcpy(ih+8,&H,4); uint16_t pl=1,bpp=32; memcpy(ih+12,&pl,2); memcpy(ih+14,&bpp,2); memcpy(ih+20,&isz,4);
+            fwrite(fh,1,14,f); fwrite(ih,1,40,f);
+            for(int i=0;i<W*H;i++){ uint8_t*p=px+i*4; uint8_t b[4]={p[2],p[1],p[0],255}; fwrite(b,1,4,f);} fclose(f);
+            if(ncap==0||ncap%50==0){ char m[600]; snprintf(m,sizeof m,"  [gl_capture_resolve] #%d %dx%d err=0x%x -> %s\n",ncap,W,H,e,path); ws(m);} }
+        free(px); ncap++; }
+    bf(0x8CA8,(unsigned)readfb); bf(0x8CA6,(unsigned)drawfb); }
+static void MSABI i_glDrawElements(unsigned mode,int count,unsigned type,const void*idx){ void(*r)(unsigned,int,unsigned,const void*)=dlsym(RTLD_DEFAULT,"glDrawElements"); if(r)r(mode,count,type,idx); if(getenv("PELOAD_SHOT")) gl_capture_resolve(); }
 static void MSABI i_glBlitFramebuffer(int sx0,int sy0,int sx1,int sy1,int dx0,int dy0,int dx1,int dy1,unsigned mask,unsigned filter){
     void(*r)(int,int,int,int,int,int,int,int,unsigned,unsigned)=dlsym(RTLD_DEFAULT,"glBlitFramebuffer");
     if(r)r(sx0,sy0,sx1,sy1,dx0,dy0,dx1,dy1,mask,filter);
@@ -968,6 +1001,7 @@ static void* gl_or_missing(const char*name){
     if(!strcmp(name,"glFinish")) return (void*)i_glFinish;
     if(!strcmp(name,"glFlush")) return (void*)i_glFlush;
     if(!strcmp(name,"glBlitFramebuffer")) return (void*)i_glBlitFramebuffer;
+    if(!strcmp(name,"glDrawElements")) return (void*)i_glDrawElements;
     if(!strcmp(name,"glTexStorage2D")) return (void*)i_glTexStorage2D;
     if(!strcmp(name,"glTexStorage2DMultisample")) return (void*)i_glTexStorage2DMultisample;
     if(!strcmp(name,"glTexImage2DMultisample")) return (void*)i_glTexImage2DMultisample;
@@ -1166,8 +1200,29 @@ static int  MSABI i_SleepConditionVariableSRW(void*cv,void*l,uint32_t ms,uint32_
     pthread_rwlock_unlock(r); pthread_mutex_lock(&g_lazy); int rc;
     if(ms==0xFFFFFFFF) rc=pthread_cond_wait(c,&g_lazy); else { struct timeval tv;gettimeofday(&tv,0);struct timespec ts;uint64_t ns=(uint64_t)tv.tv_usec*1000+(uint64_t)ms*1000000ULL;ts.tv_sec=tv.tv_sec+ns/1000000000ULL;ts.tv_nsec=ns%1000000000ULL; rc=pthread_cond_timedwait(c,&g_lazy,&ts); }
     pthread_mutex_unlock(&g_lazy); if(shared) pthread_rwlock_rdlock(r); else pthread_rwlock_wrlock(r); return rc!=ETIMEDOUT; }
-static void MSABI i_WakeByAddressSingle(void*a){ (void)a; }
-static void MSABI i_WakeByAddressAll(void*a){ (void)a; }
+// WaitOnAddress / WakeByAddress*: the Windows futex. Rust's std::sync (Mutex,
+// RwLock, Condvar, Once, thread::park) uses these on Windows 8+; no-ops here
+// meant Rust locks never actually waited -> data races -> heap corruption and
+// the random BTreeMap/Option panics. Implement a real futex (bucketed condvars).
+#define WAB_N 512
+static struct { pthread_mutex_t m; pthread_cond_t c; } g_wab[WAB_N];
+static int g_wab_ready;
+static void wab_ensure(void){ static pthread_mutex_t im=PTHREAD_MUTEX_INITIALIZER; if(g_wab_ready) return;
+    pthread_mutex_lock(&im); if(!g_wab_ready){ for(int i=0;i<WAB_N;i++){ pthread_mutex_init(&g_wab[i].m,0); pthread_cond_init(&g_wab[i].c,0);} g_wab_ready=1; } pthread_mutex_unlock(&im); }
+static int wab_bucket(const volatile void*a){ return (int)(((uintptr_t)a>>3) & (WAB_N-1)); }
+static int MSABI i_WaitOnAddress(volatile void*addr, void*cmp, uint64_t size, uint32_t ms){
+    wab_ensure(); if(!addr||!cmp||size==0||size>8){ return 1; } int b=wab_bucket(addr);
+    pthread_mutex_lock(&g_wab[b].m);
+    int changed = memcmp((const void*)addr,cmp,(size_t)size)!=0;
+    if(!changed){
+        if(ms==0xFFFFFFFF) pthread_cond_wait(&g_wab[b].c,&g_wab[b].m);
+        else { struct timeval tv; gettimeofday(&tv,0); uint64_t ns=(uint64_t)tv.tv_usec*1000+(uint64_t)ms*1000000ULL; struct timespec ts; ts.tv_sec=tv.tv_sec+ns/1000000000ULL; ts.tv_nsec=ns%1000000000ULL; pthread_cond_timedwait(&g_wab[b].c,&g_wab[b].m,&ts); }
+        changed = memcmp((const void*)addr,cmp,(size_t)size)!=0;
+    }
+    pthread_mutex_unlock(&g_wab[b].m);
+    if(!changed) g_lasterr=1460/*ERROR_TIMEOUT*/; return changed?1:0; }
+static void MSABI i_WakeByAddressSingle(void*a){ wab_ensure(); int b=wab_bucket(a); pthread_mutex_lock(&g_wab[b].m); pthread_cond_broadcast(&g_wab[b].c); pthread_mutex_unlock(&g_wab[b].m); }
+static void MSABI i_WakeByAddressAll(void*a){ wab_ensure(); int b=wab_bucket(a); pthread_mutex_lock(&g_wab[b].m); pthread_cond_broadcast(&g_wab[b].c); pthread_mutex_unlock(&g_wab[b].m); }
 // ---- threads: back Win32 CreateThread with pthreads; each gets its own TEB
 // (per-thread %gs) + a fresh copy of the static TLS block. ----
 #include <pthread.h>
@@ -1713,6 +1768,7 @@ static void *resolve_impl(const char *fn){
         {"WakeAllConditionVariable",(void*)i_WakeAllConditionVariable},
         {"SleepConditionVariableCS",(void*)i_SleepConditionVariableCS},
         {"SleepConditionVariableSRW",(void*)i_SleepConditionVariableSRW},
+        {"WaitOnAddress",(void*)i_WaitOnAddress},
         {"WakeByAddressSingle",(void*)i_WakeByAddressSingle},
         {"WakeByAddressAll",(void*)i_WakeByAddressAll},
         {"InitOnceBeginInitialize",(void*)i_InitOnceBeginInitialize},
