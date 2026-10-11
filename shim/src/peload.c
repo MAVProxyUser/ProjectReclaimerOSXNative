@@ -521,10 +521,23 @@ static int    MSABI i_DescribePixelFormat(void*hdc,int fmt,uint32_t bytes,uint8_
 static void*  MSABI i_wglCreateContext(void*hdc){ (void)hdc;
     CGLPixelFormatAttribute at[]={kCGLPFAAccelerated,kCGLPFADoubleBuffer,kCGLPFAOpenGLProfile,(CGLPixelFormatAttribute)kCGLOGLPVersion_GL4_Core,kCGLPFAColorSize,(CGLPixelFormatAttribute)24,kCGLPFAAlphaSize,(CGLPixelFormatAttribute)8,kCGLPFADepthSize,(CGLPixelFormatAttribute)24,(CGLPixelFormatAttribute)0};
     CGLPixelFormatObj pf=0; GLint n=0; if(CGLChoosePixelFormat(at,&pf,&n)!=kCGLNoError||!pf){ CGLPixelFormatAttribute b[]={kCGLPFAColorSize,(CGLPixelFormatAttribute)24,(CGLPixelFormatAttribute)0}; CGLChoosePixelFormat(b,&pf,&n); }
-    CGLContextObj ctx=0; if(pf){ CGLCreateContext(pf,0,&ctx); CGLDestroyPixelFormat(pf); } if(ctx) g_cgl=ctx;
-    ws(ctx?"  [wgl] CGL context created\n":"  [wgl] CGL context FAILED\n"); return ctx; }
-static int    MSABI i_wglMakeCurrent(void*hdc,void*ctx){ (void)hdc; return CGLSetCurrentContext((CGLContextObj)ctx)==kCGLNoError; }
-static void*  MSABI i_wglGetProcAddress(const char*name){ void*p=dlsym(RTLD_DEFAULT,name); return p; }
+    CGLContextObj ctx=0; if(pf){ CGLCreateContext(pf,0,&ctx); CGLDestroyPixelFormat(pf); } if(ctx){ g_cgl=ctx; CGLSetCurrentContext(ctx); } // make current now (glow may read GL_VERSION before wglMakeCurrent)
+    ws(ctx?"  [wgl] CGL context created + current\n":"  [wgl] CGL context FAILED\n"); return ctx; }
+static int    MSABI i_wglMakeCurrent(void*hdc,void*ctx){ (void)hdc; CGLError e=CGLSetCurrentContext((CGLContextObj)ctx);
+    if(getenv("PELOAD_TRACE_GL")){ const unsigned char*(*gv)(unsigned)=dlsym(RTLD_DEFAULT,"glGetString");
+        const unsigned char*v = (gv&&ctx)? gv(0x1F02/*GL_VERSION*/):0; ws("  [wglMakeCurrent] ctx="); ws(ctx?"set":"null");
+        ws(" GL_VERSION="); ws(v?(const char*)v:"(null)"); ws("\n"); }
+    return e==kCGLNoError; }
+// glGetString wrapper: ensure OUR context is current on the calling thread
+// (CGL current-context is per-thread; glow may call GL on a thread where we
+// never ran wglMakeCurrent). Then delegate to the real framework glGetString.
+static const unsigned char* MSABI i_glGetString(unsigned name){
+    if(g_cgl && CGLGetCurrentContext()==0) CGLSetCurrentContext(g_cgl);
+    const unsigned char*(*real)(unsigned)=dlsym(RTLD_DEFAULT,"glGetString");
+    const unsigned char*r = real? real(name):0;
+    if(getenv("PELOAD_TRACE_GL")){ char t[64]; snprintf(t,sizeof t,"  [glGetString] 0x%x cur=%p -> ",name,CGLGetCurrentContext()); ws(t); ws(r?(const char*)r:"(null)"); ws("\n"); }
+    return r; }
+static void*  MSABI i_wglGetProcAddress(const char*name){ if(!strcmp(name,"glGetString")) return (void*)i_glGetString; void*p=dlsym(RTLD_DEFAULT,name); return p; }
 static int    MSABI i_wglDeleteContext(void*ctx){ if(ctx)CGLDestroyContext((CGLContextObj)ctx); return 1; }
 static void*  MSABI i_wglGetCurrentContext(void){ return CGLGetCurrentContext(); }
 static void*  MSABI i_wglGetCurrentDC(void){ return (void*)0xDC01; }
@@ -533,8 +546,25 @@ static int    MSABI i_wglSwapIntervalEXT(int i){ (void)i; return 1; }
 static int    MSABI i_SwapBuffers(void*hdc){ (void)hdc; if(g_cgl) CGLFlushDrawable(g_cgl); return 1; }
 // RaiseException: log the code. 0x406D1388 = SetThreadName (ignore); others we
 // just return from for now (real SEH dispatch is a later phase).
-static void   MSABI i_RaiseException(uint32_t code,uint32_t flags,uint32_t n,const void*args){ (void)flags;(void)n;(void)args;
-    if(code==0x406D1388) return; char t[48]; snprintf(t,sizeof t,"  [RaiseException] 0x%08x\n",code); ws(t); }
+// Decode an MSVC C++ throw (code 0xE06D7363). args = {magic, &object, ThrowInfo*,
+// imagebase}. ThrowInfo's inner fields are RVAs from imagebase; the first
+// CatchableType's TypeDescriptor.name is the mangled C++ type (".?AV<name>@@").
+static void   MSABI i_RaiseException(uint32_t code,uint32_t flags,uint32_t n,const void*args){ (void)flags;
+    if(code==0x406D1388) return; // SetThreadName
+    char t[256]; snprintf(t,sizeof t,"  [RaiseException] 0x%08x (%u args)\n",code,n); ws(t);
+    if(code==0xE06D7363 && args && n>=4){
+        const uint64_t *a=args; void *obj=(void*)a[1]; int32_t *ti=(int32_t*)a[2]; uint64_t base=a[3];
+        if(ti){ int32_t ctaRVA=ti[3]; uint8_t *cta=(uint8_t*)(base+(uint32_t)ctaRVA);
+            int nct=*(int32_t*)cta; int32_t *arr=(int32_t*)(cta+4);
+            if(nct>0){ uint8_t *ct=(uint8_t*)(base+(uint32_t)arr[0]); int32_t tdRVA=*(int32_t*)(ct+4);
+                const char *name=(const char*)(base+(uint32_t)tdRVA+16); // TypeDescriptor.name @ +16 (x64)
+                ws("    C++ type: "); ws(name); ws("\n");
+                // std::exception-derived: obj+? holds a char* message near the start
+                if(obj){ for(int off=8; off<=16; off+=8){ const char *m=*(const char**)((uint8_t*)obj+off);
+                    if(m && (uint64_t)m>0x10000){ int ok=1; for(int i=0;i<64;i++){ char c=m[i]; if(c==0)break; if(c<32||c>126){ok=0;break;} }
+                        if(ok && m[0]){ ws("    what(): "); ws(m); ws("\n"); break; } } } } } }
+    }
+}
 static void   MSABI i_RtlCaptureContext(void*ctx){ if(ctx) memset(ctx,0,1232); } // CONTEXT (x64 ~1232 bytes)
 static void*  MSABI i_RtlLookupFunctionEntry(uint64_t pc,uint64_t*base,void*hist){ (void)pc;(void)hist; if(base)*base=0; return 0; }
 static void   MSABI i_RtlRaiseException(void*rec){ (void)rec; }
@@ -902,6 +932,7 @@ static int MSABI i_GetFileInformationByHandle(void*h,void*info){ intptr_t hv=(in
 // GetProcAddress: hand back a live logging stub for whatever is requested,
 // so dynamic resolution yields a callable (not NULL) and startup continues.
 static void *resolve_impl(const char *fn); // fwd
+static const unsigned char* MSABI i_glGetString(unsigned name); // fwd (GL bridge)
 static void* MSABI i_GetProcAddress(void *mod, char *name){
     if((uint64_t)name < 0x10000){ // imported by ordinal
         if(imp_count<8192){ imp_dll[imp_count]="(dynamic)"; imp_fn[imp_count]="#ordinal";
@@ -913,6 +944,11 @@ static void* MSABI i_GetProcAddress(void *mod, char *name){
     for(int m=0;m<g_nmods;m++){ void *e=export_lookup(g_mods[m].base,name); if(e) return e; }
     void *r = resolve_impl(name);
     if(r) return r;
+    // OpenGL: route gl*/wgl* to macOS OpenGL.framework (glow/egui resolve core
+    // GL functions like glGetString via GetProcAddress, not just imports)
+    if(!strcmp(name,"glGetString")) return (void*)i_glGetString; // ensure-current wrapper
+    if(name[0]=='g'&&name[1]=='l'){ void *g=dlsym((void*)-2,name); if(g) return g; }
+    if(name[0]=='w'&&name[1]=='g'&&name[2]=='l'){ void *g=dlsym((void*)-2,name); if(g) return g; }
     if(imp_count<8192){ imp_dll[imp_count]="(dynamic)"; imp_fn[imp_count]=name;
         return make_stub(imp_count++); }
     return 0;

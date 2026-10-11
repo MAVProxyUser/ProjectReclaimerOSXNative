@@ -28,6 +28,33 @@ On the **dedicated-server exe** the loader relocates (22,919 fixups), binds
 precise, expected spot: `__p___argv` / `_get_initial_narrow_environment`
 return NULL from our stubs, so the Rust runtime dereferences a null `argv`.
 
+## MILESTONE 6: the C++ throw decoded — it was ours, now fixed; engine runs GL
+
+Answered the "error or control flow?" question by **decoding the MSVC C++
+throw** in `RaiseException` (code 0xE06D7363): read its `ThrowInfo` RTTI
+(imagebase-relative RVAs) to get the thrown type and message. Result:
+
+> C++ type: **`rust_panic`** — glow-0.16 `native.rs:59`: *"Reading GL_VERSION
+> failed. Make sure there is a valid GL context currently active."*
+
+So it was **neither an engine error nor control flow** — it was a `glow`
+(Rust OpenGL wrapper) panic because our shim wasn't resolving `glGetString`.
+`GetProcAddress`/`wglGetProcAddress` now route `gl*`/`wgl*` to macOS
+OpenGL.framework (`dlsym`), and a `glGetString` wrapper makes our CGL context
+current on the calling thread first. glow now reads real GL state:
+
+> GL_VERSION "4.1 Metal - 90.5", GL_RENDERER "Apple M4 Max", GL_VENDOR "Apple"
+
+The engine runs **past** the panic into its GL render setup. The C++-throw
+decoder stays in as a diagnostic; full Win64 SEH *dispatch* (catching a real
+throw) is still unimplemented and only needed if the engine later throws for
+control flow — this one was a bug we removed, which beats catching it.
+
+Current frontier: multi-threaded GL — the engine issues GL from more than one
+thread and CGL contexts are per-thread, so GL work needs the context current
+per GL-calling thread (and, for on-screen output, a real drawable: an
+offscreen FBO or a hidden `NSOpenGLContext`/`NSWindow`).
+
 ## MILESTONE 5: engine runs through graphics init; OpenGL context created
 
 Drove the engine worker from "loaded" all the way through its native startup
