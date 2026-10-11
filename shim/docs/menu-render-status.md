@@ -1,5 +1,31 @@
 # Where the render stands (2026-10-11, session 3 — null D3D11 + map loads)
 
+## Session-3 continued: the big race was thread-join; map load now reliable
+
+Root cause of the #1 non-determinism FOUND and FIXED: `CreateThread` returned a
+raw `pthread_t`, and `WaitForSingleObject` on it returned "signaled" instantly
+(is_sync failed), so the engine's waits on its own parallel map-load worker
+threads returned immediately and it raced the still-running workers. Thread
+handles are now waitable SyncObjects signaled on exit. Also implemented
+`_beginthreadex`/`Sleep`/`WaitForSingleObjectEx` (were no-op stubs that also
+broke waits). **Result: all runs now reliably reach the Guardian map merge and
+into post-merge shell setup**, and (under timing perturbation) the engine reaches
+actual **GL rendering** in its shell callbacks.
+
+Remaining, lower-frequency issues (still no presented frame):
+- Residual heap corruption (tiny-block `free()` abort) during post-merge shell
+  setup — reduced by exact D3D `GetDesc` sizes (buffer 24 / tex1d 32 / tex3d 36 /
+  tex2d 44) and the thread fixes, but not gone. D3D guard pages show our own D3D
+  buffers are NOT the overflow source, so it's likely a context `Get*` method
+  leaving an out-param array uninitialized (engine then uses a garbage pointer) or
+  another small caller-buffer write.
+- A GL-driver OOB read (`libGLImage` `glgConvertTo_32` / `glReadPixels`) reached in
+  Reclaimer's shell-callback GL path once past the race — a readback/upload with
+  mismatched dimensions.
+
+Still a NULL renderer: this makes the engine *run*; it does not draw halo3's game
+video. Real video needs a D3D11->Metal/GL translation layer (next phase, large).
+
 ## Session-3 breakthrough: halo3 loads the game with a null D3D11
 
 Built a minimal **null D3D11** (device/context/resources/views/swapchain, Map
