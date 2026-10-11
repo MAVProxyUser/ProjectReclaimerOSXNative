@@ -1198,6 +1198,8 @@ static void font_subst(char *p, int cap){
 }
 static void*  MSABI i_CreateFileW(const uint16_t *w,uint32_t acc,uint32_t share,void*sec,uint32_t disp,uint32_t fl,void*tmpl){
     (void)share;(void)sec;(void)fl;(void)tmpl; char p[2048]; win2unix(w,p,sizeof p);
+    if((!w||!w[0]) && getenv("PELOAD_TRACE_EMPTY")){ ws("  [CFW EMPTY-PATH caller chain]\n"); uint64_t *sp=(uint64_t*)__builtin_frame_address(0);
+        for(int i=0;i<500;i++){ uint64_t v=sp[i]; if(v>=0x140000000ULL&&v<0x14c000000ULL){ char t[48]; snprintf(t,sizeof t,"    exe+0x%llx\n",(unsigned long long)(v-0x140000000ULL)); ws(t);} } }
     if(acc&0x80000000) font_subst(p,sizeof p);    // read opens only
     int flags = (acc & 0x40000000)? O_RDWR : O_RDONLY; // GENERIC_WRITE?
     switch(disp){                                   // Win32 creation disposition
@@ -1872,7 +1874,19 @@ int main(int argc, char **argv){
       snprintf(pd,sizeof pd,"%s/ReclaimerContent",g_drivec); mkdir(pd,0755);
       { const char*cs[]={"Maps","Game Modes","Images","Mods","Mods/Downloaded",0}; for(int i=0;cs[i];i++){ char d[1400]; snprintf(d,sizeof d,"%s/ReclaimerContent/%s",g_drivec,cs[i]); mkparents(d); mkdir(d,0755);} }
       setenv("RECLAIMER_CONTENT_DIR","C:\\ReclaimerContent",0);
-      snprintf(pd,sizeof pd,"%s/ReclaimerCache/discovery",g_drivec); mkdir(pd,0755); setenv("RECLAIMER_DISCOVERY_DIR","C:\\ReclaimerCache\\discovery",0); }  // engine input default (valid range 0.05-20)
+      snprintf(pd,sizeof pd,"%s/ReclaimerCache/discovery",g_drivec); mkdir(pd,0755); setenv("RECLAIMER_DISCOVERY_DIR","C:\\ReclaimerCache\\discovery",0);
+      // Stage substitute TTFs for the Windows UI fonts the engine opens (see
+      // font_subst): copy a Mac sans into $drive_c/ReclaimerFonts/<name>.
+      { char fd[1400]; snprintf(fd,sizeof fd,"%s/ReclaimerFonts",g_drivec); mkdir(fd,0755);
+        const char *mac="/System/Library/Fonts/Supplemental/Arial.ttf";
+        const char *names[]={"bahnschrift.ttf","segoeui.ttf","Arial.ttf",0};
+        for(int i=0;names[i];i++){ char dst[1500]; snprintf(dst,sizeof dst,"%s/%s",fd,names[i]);
+          if(access(dst,R_OK)!=0){ int in=open(mac,O_RDONLY); if(in>=0){ int out=open(dst,O_WRONLY|O_CREAT|O_TRUNC,0644); if(out>=0){ char bf[65536]; long r; while((r=read(in,bf,sizeof bf))>0) (void)!write(out,bf,r); close(out);} close(in);} } } }
+      // Cache the MCC + cache folder paths the engine looks up (mcc-folder.txt /
+      // cache-folder.txt), so discovery doesn't fall back to an empty path.
+      { char fp[1400]; FILE*fh;
+        snprintf(fp,sizeof fp,"%s/ReclaimerProfile/mcc-folder.txt",g_drivec); if(access(fp,R_OK)!=0&&(fh=fopen(fp,"w"))){ fputs("C:\\Program Files\\Steam\\steamapps\\common\\Halo The Master Chief Collection",fh); fclose(fh);}
+        snprintf(fp,sizeof fp,"%s/ReclaimerCache/cache-folder.txt",g_drivec); if(access(fp,R_OK)!=0&&(fh=fopen(fp,"w"))){ fputs("C:\\ReclaimerCache",fh); fclose(fh);} } }  // engine input default (valid range 0.05-20)
 
     // The native worker enumerates its content folders (Maps / Game Modes /
     // Images / Mods / Mods/Downloaded) relative to its cwd (the mcc-startup
