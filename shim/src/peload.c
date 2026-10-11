@@ -44,6 +44,8 @@
 #include <arpa/inet.h>
 #include <poll.h>
 #include <sys/ioctl.h>
+#include <CommonCrypto/CommonDigest.h>
+#include <libkern/OSCacheControl.h>
 
 // ---- raw logging (no libc TLS dependency; safe after we touch %gs) ----
 static void w(const char *s, long n){ (void)!write(2, s, n); }
@@ -223,6 +225,9 @@ static int      g_argc;          // guest argc
 static char   **g_argv;          // guest argv (NULL-terminated)
 static char   **g_environ;       // guest environ (NULL-terminated)
 static uint16_t g_cmdlineW[2048]; // guest command line (UTF-16)
+static uint16_t g_exewin[1024];   // exe path, Windows form (GetModuleFileNameW = exe path, NOT the cmdline)
+static char     g_exewinA[1024];  // exe path, ascii
+static char     g_playlist[1400]; // staged default playlist (empty-path opens redirect here)
 
 #define MSABI __attribute__((ms_abi))
 static void   MSABI i_GetSystemTimeAsFileTime(uint64_t *ft){
@@ -363,13 +368,16 @@ static int MSABI i_ReadProcessMemory(void*h,const void*addr,void*buf,uint64_t n,
 static int MSABI i_WriteProcessMemory(void*h,void*addr,const void*buf,uint64_t n,uint64_t*wr){ (void)h;
     uintptr_t pg=(uintptr_t)addr & ~0xfffULL; size_t len=(((uintptr_t)addr+n)-pg+0xfff)&~0xfffULL;
     if(mprotect((void*)pg,len,PROT_READ|PROT_WRITE|PROT_EXEC)!=0) mprotect((void*)pg,len,PROT_READ|PROT_WRITE);
-    memcpy(addr,buf,n); mprotect((void*)pg,len,PROT_READ|PROT_EXEC); if(wr)*wr=n; return 1; }
+    // Do NOT downgrade the page to r-x afterwards: if the target is writable
+    // data/stack (or `wr` shares the page), forcing r-x faults the next write.
+    // Leave it writable+executable (RWX runs under Rosetta) and invalidate the
+    // instruction cache so a code patch re-translates.
+    memcpy(addr,buf,n); sys_icache_invalidate(addr,(size_t)n); if(wr)*wr=n; return 1; }
 static void*  MSABI i_GetCurrentThread(void){ return (void*)-2; }
 // FlushInstructionCache: the engine calls this after patching its own .text
 // (inline hooks). Under Rosetta the x86 code is translated to arm64 and cached,
 // so a write to a code page leaves a STALE translation unless we invalidate it.
 // sys_icache_invalidate is the signal Rosetta honors to drop the translation.
-extern void sys_icache_invalidate(void *start, size_t len);
 static int MSABI i_FlushInstructionCache(void *proc, void *base, uint64_t sz){ (void)proc;
     if(base&&sz) sys_icache_invalidate(base,(size_t)sz);
     if(getenv("PELOAD_TRACE_VA")){ char t[96]; snprintf(t,sizeof t,"  [FlushInstructionCache] base=%p sz=0x%llx\n",base,(unsigned long long)sz); ws(t);} return 1; }
@@ -401,6 +409,14 @@ static int MSABI mmde_RegCB(void*self,void*c){ (void)self;(void)c; return HR_OK;
 static int MSABI mmde_UnregCB(void*self,void*c){ (void)self;(void)c; return HR_OK; }
 static void* g_mmde_vtbl[] = { (void*)com_QI,(void*)com_AddRef,(void*)com_Release,(void*)mmde_EnumAudioEndpoints,(void*)mmde_GetDefaultAudioEndpoint,(void*)mmde_GetDevice,(void*)mmde_RegCB,(void*)mmde_UnregCB };
 static ComObj g_mmde = { g_mmde_vtbl };
+// DXGI: the engine probes DirectX Graphics Infrastructure even though Reclaimer
+// renders via OpenGL. Fail these cleanly (no hardware D3D) so it uses the GL
+// path instead of calling through a NULL delay-import slot.
+#define HR_DXGI_UNSUPPORTED 0x887A0004
+static int MSABI i_CreateDXGIFactory(GUID_*riid,void**pp){ (void)riid; if(pp)*pp=0; return HR_DXGI_UNSUPPORTED; }
+static int MSABI i_CreateDXGIFactory1(GUID_*riid,void**pp){ (void)riid; if(pp)*pp=0; return HR_DXGI_UNSUPPORTED; }
+static int MSABI i_CreateDXGIFactory2(uint32_t fl,GUID_*riid,void**pp){ (void)fl;(void)riid; if(pp)*pp=0; return HR_DXGI_UNSUPPORTED; }
+static int MSABI i_D3D11CreateDevice(void*a,int b,void*c,uint32_t d,void*e,uint32_t f,uint32_t g,void**dev,void*fl,void**ctx){ (void)a;(void)b;(void)c;(void)d;(void)e;(void)f;(void)g;(void)fl; if(dev)*dev=0; if(ctx)*ctx=0; return HR_DXGI_UNSUPPORTED; }
 static int   MSABI i_CoInitializeEx(void*p,uint32_t m){ (void)p;(void)m; return HR_OK; }
 static void  MSABI i_CoUninitialize(void){ }
 static void* MSABI i_CoTaskMemAlloc(uint64_t n){ return malloc(n?n:1); }
@@ -549,7 +565,7 @@ static int    MSABI i_WideCharToMultiByte(uint32_t cp,uint32_t fl,const uint16_t
 static void   MSABI i_GetSystemInfo(void *si){ if(si){ memset(si,0,48); *(uint32_t*)((char*)si+4)=4096; *(uint32_t*)((char*)si+32)=1; *(uint32_t*)((char*)si+36)=4096; } }
 static void   MSABI i_ExitProcess(uint32_t c){ _exit((int)c); }
 static void   MSABI i_TerminateProcess(void *h,uint32_t c){ (void)h; _exit((int)c); }
-static uint32_t MSABI i_GetModuleFileNameW(void*m,uint16_t*buf,uint32_t sz){ (void)m; uint32_t i=0; for(; i<sz && g_cmdlineW[i]; i++) buf[i]=g_cmdlineW[i]; if(i<sz) buf[i]=0; return i; }
+static uint32_t MSABI i_GetModuleFileNameW(void*m,uint16_t*buf,uint32_t sz){ (void)m; uint32_t i=0; for(; i<sz && g_exewin[i]; i++) buf[i]=g_exewin[i]; if(i<sz) buf[i]=0; return i; }
 static void   MSABI i_GetStartupInfoW(void *si){ if(si) memset(si,0,104); }
 static int    MSABI i_SetEnvironmentVariableW(const uint16_t*n,const uint16_t*v){
     char nm[256]; int i=0; for(; n&&n[i]&&i<255;i++) nm[i]=(char)(n[i]<128?n[i]:'?'); nm[i]=0;
@@ -678,7 +694,7 @@ static uint32_t MSABI i_GetConsoleMode(void*h,uint32_t*m){ (void)h; if(m)*m=0; r
 static uint32_t MSABI i_SetConsoleMode(void*h,uint32_t m){ (void)h;(void)m; return 1; }
 static int MSABI i_SetThreadStackGuarantee(uint32_t*s){ (void)s; return 1; }
 static int MSABI i_FreeLibrary(void*h){ (void)h; return 1; }
-static uint32_t MSABI i_GetModuleFileNameA(void*m,char*buf,uint32_t sz){ (void)m; uint32_t i=0; for(; i<sz && g_cmdlineA[i]; i++) buf[i]=g_cmdlineA[i]; if(i<sz) buf[i]=0; return i; }
+static uint32_t MSABI i_GetModuleFileNameA(void*m,char*buf,uint32_t sz){ (void)m; uint32_t i=0; for(; i<sz && g_exewinA[i]; i++) buf[i]=g_exewinA[i]; if(i<sz) buf[i]=0; return i; }
 static uint32_t MSABI i_GetConsoleOutputCP(void){ return 65001; }
 // Fault/exception-handler registration: return non-null so the engine's
 // "install worker fault handler" succeeds. (Actual Win64 SEH dispatch is a
@@ -1090,6 +1106,42 @@ static int MSABI i_CompareStringOrdinal(const uint16_t*a,int ca,const uint16_t*b
 }
 // OS randomness (Rust getrandom / community keypair): fill with arc4random
 static long MSABI i_BCryptGenRandom(void*alg,uint8_t*buf,uint32_t n,uint32_t fl){ (void)alg;(void)fl; arc4random_buf(buf,n); return 0; }
+// ---- real BCrypt hashing (anti-cheat integrity) via CommonCrypto -----------
+// Stubs returned garbage handles -> the engine's hash of its assets wrote
+// through a junk pointer and crashed. Implement SHA1/256/384/512/MD5 for real.
+enum { BALG_SHA1=1,BALG_SHA256,BALG_SHA384,BALG_SHA512,BALG_MD5 };
+typedef struct { uint32_t magic; int alg; } BAlg;
+typedef struct { uint32_t magic; int alg; union { CC_SHA1_CTX s1; CC_SHA256_CTX s256; CC_SHA512_CTX s512; CC_MD5_CTX md5; } c; } BHash;
+#define BMAGIC 0x42435254u
+static int balg_from_w(const uint16_t*w){ char a[32]; int i=0; for(; w&&w[i]&&i<31;i++) a[i]=(char)(w[i]&0xff); a[i]=0;
+    if(!strcmp(a,"SHA256"))return BALG_SHA256; if(!strcmp(a,"SHA1"))return BALG_SHA1; if(!strcmp(a,"SHA384"))return BALG_SHA384;
+    if(!strcmp(a,"SHA512"))return BALG_SHA512; if(!strcmp(a,"MD5"))return BALG_MD5; return BALG_SHA256; }
+static int balg_digestlen(int a){ switch(a){case BALG_SHA1:return 20;case BALG_SHA256:return 32;case BALG_SHA384:return 48;case BALG_SHA512:return 64;case BALG_MD5:return 16;default:return 32;} }
+static long MSABI i_BCryptOpenAlgorithmProvider(void**phAlg,const uint16_t*algid,const uint16_t*impl,uint32_t fl){ (void)impl;(void)fl;
+    BAlg*a=malloc(sizeof *a); if(!a) return 0xC0000017; a->magic=BMAGIC; a->alg=balg_from_w(algid); if(phAlg)*phAlg=a; return 0; }
+static long MSABI i_BCryptCloseAlgorithmProvider(void*hAlg,uint32_t fl){ (void)fl; if(hAlg)free(hAlg); return 0; }
+static void bhash_init(BHash*h){ switch(h->alg){case BALG_SHA1:CC_SHA1_Init(&h->c.s1);break;case BALG_SHA256:CC_SHA256_Init(&h->c.s256);break;
+    case BALG_SHA384:CC_SHA384_Init(&h->c.s512);break;case BALG_SHA512:CC_SHA512_Init(&h->c.s512);break;case BALG_MD5:CC_MD5_Init(&h->c.md5);break;} }
+static long MSABI i_BCryptCreateHash(void*hAlg,void**phHash,uint8_t*obj,uint32_t cbobj,uint8_t*sec,uint32_t cbsec,uint32_t fl){
+    (void)obj;(void)cbobj;(void)sec;(void)cbsec;(void)fl; BAlg*a=hAlg; BHash*h=malloc(sizeof *h); if(!h) return 0xC0000017;
+    h->magic=BMAGIC; h->alg=(a&&a->magic==BMAGIC)?a->alg:BALG_SHA256; bhash_init(h); if(phHash)*phHash=h; return 0; }
+static long MSABI i_BCryptHashData(void*hHash,uint8_t*in,uint32_t n,uint32_t fl){ (void)fl; BHash*h=hHash; if(!h||h->magic!=BMAGIC) return 0xC0000008;
+    switch(h->alg){case BALG_SHA1:CC_SHA1_Update(&h->c.s1,in,n);break;case BALG_SHA256:CC_SHA256_Update(&h->c.s256,in,n);break;
+    case BALG_SHA384:CC_SHA384_Update(&h->c.s512,in,n);break;case BALG_SHA512:CC_SHA512_Update(&h->c.s512,in,n);break;case BALG_MD5:CC_MD5_Update(&h->c.md5,in,n);break;} return 0; }
+static long MSABI i_BCryptFinishHash(void*hHash,uint8_t*out,uint32_t n,uint32_t fl){ (void)n;(void)fl; BHash*h=hHash; if(!h||h->magic!=BMAGIC) return 0xC0000008;
+    switch(h->alg){case BALG_SHA1:CC_SHA1_Final(out,&h->c.s1);break;case BALG_SHA256:CC_SHA256_Final(out,&h->c.s256);break;
+    case BALG_SHA384:CC_SHA384_Final(out,&h->c.s512);break;case BALG_SHA512:CC_SHA512_Final(out,&h->c.s512);break;case BALG_MD5:CC_MD5_Final(out,&h->c.md5);break;} return 0; }
+static long MSABI i_BCryptDestroyHash(void*hHash){ if(hHash)free(hHash); return 0; }
+static long MSABI i_BCryptGetProperty(void*h,const uint16_t*prop,uint8_t*out,uint32_t cb,uint32_t*cbres,uint32_t fl){ (void)fl;
+    char p[48]; int i=0; for(; prop&&prop[i]&&i<47;i++) p[i]=(char)(prop[i]&0xff); p[i]=0; int alg=BALG_SHA256;
+    if(h){ BAlg*a=h; if(a->magic==BMAGIC) alg=a->alg; }
+    uint32_t v=0; if(!strcmp(p,"HashDigestLength")) v=balg_digestlen(alg); else if(!strcmp(p,"ObjectLength")) v=(uint32_t)sizeof(BHash); else v=0;
+    if(cbres)*cbres=4; if(out&&cb>=4)*(uint32_t*)out=v; return 0; }
+// one-shot BCryptHash(hAlg, pbSecret, cbSecret, pbInput, cbInput, pbOutput, cbOutput)
+static long MSABI i_BCryptHash(void*hAlg,uint8_t*sec,uint32_t cbsec,uint8_t*in,uint32_t cbin,uint8_t*out,uint32_t cbout){
+    (void)sec;(void)cbsec;(void)cbout; BAlg*a=hAlg; int alg=(a&&a->magic==BMAGIC)?a->alg:BALG_SHA256;
+    switch(alg){case BALG_SHA1:CC_SHA1(in,cbin,out);break;case BALG_SHA256:CC_SHA256(in,cbin,out);break;
+    case BALG_SHA384:CC_SHA384(in,cbin,out);break;case BALG_SHA512:CC_SHA512(in,cbin,out);break;case BALG_MD5:CC_MD5(in,cbin,out);break;} return 0; }
 static int  MSABI i_ProcessPrng(uint8_t*buf,uint64_t n){ arc4random_buf(buf,n); return 1; }
 static int  MSABI i_RtlGenRandom(void*buf,uint32_t n){ arc4random_buf(buf,n); return 1; }
 static char* win2unix(const uint16_t *w, char *out, int outsz); // fwd (defined in FS block)
@@ -1198,8 +1250,14 @@ static void font_subst(char *p, int cap){
 }
 static void*  MSABI i_CreateFileW(const uint16_t *w,uint32_t acc,uint32_t share,void*sec,uint32_t disp,uint32_t fl,void*tmpl){
     (void)share;(void)sec;(void)fl;(void)tmpl; char p[2048]; win2unix(w,p,sizeof p);
-    if((!w||!w[0]) && getenv("PELOAD_TRACE_EMPTY")){ ws("  [CFW EMPTY-PATH caller chain]\n"); uint64_t *sp=(uint64_t*)__builtin_frame_address(0);
-        for(int i=0;i<500;i++){ uint64_t v=sp[i]; if(v>=0x140000000ULL&&v<0x14c000000ULL){ char t[48]; snprintf(t,sizeof t,"    exe+0x%llx\n",(unsigned long long)(v-0x140000000ULL)); ws(t);} } }
+    if((!w||!w[0])){
+        if(getenv("PELOAD_TRACE_EMPTY")){ ws("  [CFW EMPTY-PATH caller chain]\n"); uint64_t *sp=(uint64_t*)__builtin_frame_address(0);
+            for(int i=0;i<500;i++){ uint64_t v=sp[i]; if(v>=0x140000000ULL&&v<0x14c000000ULL){ char t[48]; snprintf(t,sizeof t,"    exe+0x%llx\n",(unsigned long long)(v-0x140000000ULL)); ws(t);} } }
+        // The engine clones an uninitialized global path -> File::open("") (the
+        // playlist path, unset for this experiment). Redirect to a staged valid
+        // playlist so the Guardian rotation parses; else an empty file.
+        if(!getenv("PELOAD_NO_EMPTY_FIX")){ if(g_playlist[0]&&access(g_playlist,R_OK)==0) snprintf(p,sizeof p,"%s",g_playlist); else snprintf(p,sizeof p,"/dev/null"); }
+    }
     if(acc&0x80000000) font_subst(p,sizeof p);    // read opens only
     int flags = (acc & 0x40000000)? O_RDWR : O_RDONLY; // GENERIC_WRITE?
     switch(disp){                                   // Win32 creation disposition
@@ -1241,7 +1299,7 @@ static int    MSABI i_CloseHandleReal(void*h){ intptr_t hv=(intptr_t)h; if(hv>=0
 // env var lookup via the host environment (so RECLAIMER_* pass through)
 static uint32_t MSABI i_GetEnvironmentVariableW(const uint16_t*n,uint16_t*v,uint32_t sz){
     char nm[256]; int i=0; for(; n && n[i] && i<255; i++) nm[i]=(char)(n[i]<128?n[i]:'?'); nm[i]=0;
-    const char *val=getenv(nm); if(getenv("PELOAD_TRACE_ENV")){ws("  [GetEnv] ");ws(nm);ws("=");ws(val?val:"(unset)");ws("\n");} if(!val){ return 0; }
+    const char *val=getenv(nm); if(getenv("PELOAD_TRACE_ENV")){ws("  [GetEnv] ");ws(nm);ws("=");ws(val?val:"(unset)");ws("\n");} if(!val){ g_lasterr=203; return 0; } g_lasterr=0; // ERROR_ENVVAR_NOT_FOUND so Rust env::var -> None, not Some("")
     uint32_t len=(uint32_t)strlen(val);
     if(!v||sz==0) return len+1;                 // required size incl NUL
     uint32_t j=0; for(; val[j] && j<sz-1; j++) v[j]=(uint8_t)val[j]; v[j]=0; return j;
@@ -1436,6 +1494,10 @@ static void *resolve_impl(const char *fn){
         {"CoInitializeEx",(void*)i_CoInitializeEx},
         {"CoUninitialize",(void*)i_CoUninitialize},
         {"CoCreateInstance",(void*)i_CoCreateInstance},
+        {"CreateDXGIFactory",(void*)i_CreateDXGIFactory},
+        {"CreateDXGIFactory1",(void*)i_CreateDXGIFactory1},
+        {"CreateDXGIFactory2",(void*)i_CreateDXGIFactory2},
+        {"D3D11CreateDevice",(void*)i_D3D11CreateDevice},
         {"CoTaskMemAlloc",(void*)i_CoTaskMemAlloc},
         {"CoTaskMemFree",(void*)i_CoTaskMemFree},
         {"PropVariantClear",(void*)i_PropVariantClear},
@@ -1500,6 +1562,14 @@ static void *resolve_impl(const char *fn){
         {"NtWriteFile",(void*)i_NtWriteFile},
         {"NtReadFile",(void*)i_NtReadFile},
         {"BCryptGenRandom",(void*)i_BCryptGenRandom},
+        {"BCryptOpenAlgorithmProvider",(void*)i_BCryptOpenAlgorithmProvider},
+        {"BCryptCloseAlgorithmProvider",(void*)i_BCryptCloseAlgorithmProvider},
+        {"BCryptCreateHash",(void*)i_BCryptCreateHash},
+        {"BCryptHashData",(void*)i_BCryptHashData},
+        {"BCryptFinishHash",(void*)i_BCryptFinishHash},
+        {"BCryptDestroyHash",(void*)i_BCryptDestroyHash},
+        {"BCryptGetProperty",(void*)i_BCryptGetProperty},
+        {"BCryptHash",(void*)i_BCryptHash},
         {"ProcessPrng",(void*)i_ProcessPrng},
         {"RtlGenRandom",(void*)i_RtlGenRandom},
         {"SystemFunction036",(void*)i_RtlGenRandom},
@@ -1752,6 +1822,28 @@ static void bind_imports(uint8_t *base, OPT64 *opt){
     }
 }
 
+// Bind DELAY imports too. We don't implement __delayLoadHelper2, so an unbound
+// delay slot stays a delay-thunk that resolves to NULL -> `call [slot]` to NULL
+// crashes (e.g. the engine's dxgi.dll!CreateDXGIFactory1 probe). Resolve each
+// delay import up front, same as normal imports.
+static void bind_delay_imports(uint8_t *base, OPT64 *opt){
+    uint32_t drva=opt->Dir[DIR_DELAY].VA; if(!drva) return;
+    DELAYDESC *dd=(DELAYDESC*)(base+drva);
+    for(; dd->Name; dd++){
+        const char *dll=(char*)(base+dd->Name);
+        uint64_t *iat=(uint64_t*)(base+dd->IAT);
+        uint64_t *intb=(uint64_t*)(base+dd->INT);
+        int is_ws2 = name_is_ws2(dll);
+        for(int i=0; intb[i]; i++){
+            const char *fn = (intb[i]>>63)? "#ordinal" : (char*)(base+(uint32_t)intb[i]+2);
+            void *r;
+            if(is_ws2) r = (intb[i]>>63)? ws2_by_ordinal((uint32_t)(intb[i]&0xffff)) : ws2_resolve_name(fn);
+            else r = uni_resolve(dll, fn);
+            if(!r && imp_count<8192){ imp_dll[imp_count]=dll; imp_fn[imp_count]=fn; r=make_stub(imp_count++); }
+            iat[i]=(uint64_t)r;
+        }
+    }
+}
 static void set_protections(uint8_t *base, COFF *coff, OPT64 *opt){
     SEC *sec=(SEC*)((uint8_t*)opt+coff->OptSz);
     for(int i=0;i<coff->NumSec;i++){ int pr=PROT_READ;
@@ -1765,6 +1857,7 @@ static uint8_t *load_guest(const char *path, const char *name){
     OPT64 *opt; COFF *coff; uint8_t *base=map_image(path,&opt,&coff);
     if(!base){ ws("  guest load FAILED: "); ws(name); ws("\n"); return 0; }
     bind_imports(base,opt);
+    bind_delay_imports(base,opt);   // halo3.dll delay-loads dxgi/d3d11/etc.
     set_protections(base,coff,opt);
     g_mods[g_nmods].name=name; g_mods[g_nmods].base=base; g_nmods++;
     ws("  guest "); ws(name); ws(" @ "); whex((uint64_t)base);
@@ -1855,6 +1948,11 @@ int main(int argc, char **argv){
     // ---- filesystem roots + env defaults for the game client ----
     { const char *h=getenv("HOME");
       if(h) snprintf(g_drivec,sizeof g_drivec,"%s/Library/Application Support/ReclaimerMac/prefix/drive_c",h);
+      // exe path (Windows form) for GetModuleFileNameW / Rust current_exe().
+      // Computed here (after g_drivec) so unix2win maps it correctly (the exe
+      // lives outside drive_c -> Z:\ , which win2unix round-trips back).
+      { char rp[2048]; const char*ep = realpath(path,rp)?rp:path; uint16_t wp[1024]; unix2win(ep,wp,1024);
+        int i=0; for(; wp[i]&&i<1023; i++){ g_exewin[i]=wp[i]; g_exewinA[i]=(char)(wp[i]&0xff); } g_exewin[i]=0; g_exewinA[i]=0; }
       // MCC lives under the prefix; expose it to the client as a C: path and via env.
       // (C:\Program Files\Steam\... maps back to the same real files.)
       setenv("RECLAIMER_MCC_FILES","C:\\Program Files\\Steam\\steamapps\\common\\Halo The Master Chief Collection",0);
@@ -1886,7 +1984,14 @@ int main(int argc, char **argv){
       // cache-folder.txt), so discovery doesn't fall back to an empty path.
       { char fp[1400]; FILE*fh;
         snprintf(fp,sizeof fp,"%s/ReclaimerProfile/mcc-folder.txt",g_drivec); if(access(fp,R_OK)!=0&&(fh=fopen(fp,"w"))){ fputs("C:\\Program Files\\Steam\\steamapps\\common\\Halo The Master Chief Collection",fh); fclose(fh);}
-        snprintf(fp,sizeof fp,"%s/ReclaimerCache/cache-folder.txt",g_drivec); if(access(fp,R_OK)!=0&&(fh=fopen(fp,"w"))){ fputs("C:\\ReclaimerCache",fh); fclose(fh);} } }  // engine input default (valid range 0.05-20)
+        snprintf(fp,sizeof fp,"%s/ReclaimerCache/cache-folder.txt",g_drivec); if(access(fp,R_OK)!=0&&(fh=fopen(fp,"w"))){ fputs("C:\\ReclaimerCache",fh); fclose(fh);} }
+      // A valid default playlist (the engine's own sample rotation). The native
+      // worker reads a playlist path that is empty when none is configured;
+      // empty-path opens are redirected here (see i_CreateFileW) so the Guardian
+      // experiment has a parseable rotation instead of failing on empty JSON.
+      { char fp[1400]; snprintf(fp,sizeof fp,"%s/ReclaimerContent/default.playlist.json",g_drivec); FILE*fh=fopen(fp,"w");
+        if(fh){ fputs("{\n  \"name\": \"Halo 3 community rotation\",\n  \"vote_seconds\": 20,\n  \"games\": []\n}\n",fh); fclose(fh); }
+        snprintf(g_playlist,sizeof g_playlist,"%s/ReclaimerContent/default.playlist.json",g_drivec); } }  // engine input default (valid range 0.05-20)
 
     // The native worker enumerates its content folders (Maps / Game Modes /
     // Images / Mods / Mods/Downloaded) relative to its cwd (the mcc-startup
@@ -1920,13 +2025,8 @@ int main(int argc, char **argv){
     bind_imports(g_base, opt);
     ws("  bound imps (exe+unresolved stubs) "); whex((uint64_t)imp_count);
 
-    // delay imports: report only (never called by a headless server)
-    uint32_t delayrva = opt->Dir[DIR_DELAY].VA;
-    if(delayrva){
-        DELAYDESC *dd = (DELAYDESC*)rva(delayrva);
-        ws("  delay-load (not bound; unused headless):\n");
-        for(; dd->Name; dd++){ ws("     "); ws((char*)rva(dd->Name)); ws("\n"); }
-    }
+    // delay imports: bind them (the graphical client DOES call them, e.g. dxgi)
+    bind_delay_imports(g_base, opt);
 
     set_protections(g_base, coff, opt);
 
