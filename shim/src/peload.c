@@ -319,8 +319,10 @@ static int    MSABI i_GlobalMemoryStatusEx(uint8_t *ms){ if(!ms) return 0; *(uin
     *(uint64_t*)(ms+8)=(uint64_t)16<<30; *(uint64_t*)(ms+16)=(uint64_t)8<<30; *(uint64_t*)(ms+24)=(uint64_t)32<<30; *(uint64_t*)(ms+32)=(uint64_t)24<<30; return 1; }
 
 static uint16_t* MSABI i_GetCommandLineW(void){ return g_cmdlineW; }
-static void*  MSABI i_GetModuleHandleW(uint16_t *n){ (void)n; return g_base; } // good enough: image base
-static void*  MSABI i_GetModuleHandleA(char *n){ (void)n; return g_base; }
+#define WS2_HANDLE ((void*)0x7732000ULL)
+static int name_is_ws2(const char*s); static int name_is_ws2_w(const uint16_t*w); // fwd
+static void*  MSABI i_GetModuleHandleW(uint16_t *n){ if(name_is_ws2_w(n)) return WS2_HANDLE; return g_base; } // ws2_32 gets a distinct handle; else image base
+static void*  MSABI i_GetModuleHandleA(char *n){ if(name_is_ws2(n)) return WS2_HANDLE; return g_base; }
 
 // TLS: a tiny fixed table (Rust/CRT use a few slots early)
 static void  *g_tls[256]; static uint32_t g_tlsnext=1;
@@ -342,7 +344,11 @@ static int    MSABI i_FlushFileBuffers(void *h){ (void)h; return 1; }
 static void*  MSABI i_GetCurrentProcess(void){ return (void*)-1; }
 // Read/WriteProcessMemory: the engine probe reads/patches halo3.dll in THIS
 // process (shell-callback mechanism), so these are plain in-process memcpy.
-static int MSABI i_ReadProcessMemory(void*h,const void*addr,void*buf,uint64_t n,uint64_t*rd){ (void)h; memcpy(buf,addr,n); if(rd)*rd=n; return 1; }
+static int MSABI i_ReadProcessMemory(void*h,const void*addr,void*buf,uint64_t n,uint64_t*rd){ (void)h;
+    if(getenv("PELOAD_TRACE_RPM")){ char t[160]; uint64_t a=(uint64_t)addr; const char*mod=(a>=0x180000000&&a<0x187000000)?"halo3":(a>=0x140000000&&a<0x14c000000)?"exe":"?";
+        uint64_t off=(a>=0x180000000&&a<0x187000000)?a-0x180000000:(a>=0x140000000&&a<0x14c000000)?a-0x140000000:a;
+        snprintf(t,sizeof t,"  [RPM] %s+0x%llx n=0x%llx\n",mod,(unsigned long long)off,(unsigned long long)n); ws(t);}
+    memcpy(buf,addr,n); if(rd)*rd=n; return 1; }
 static int MSABI i_WriteProcessMemory(void*h,void*addr,const void*buf,uint64_t n,uint64_t*wr){ (void)h;
     uintptr_t pg=(uintptr_t)addr & ~0xfffULL; size_t len=(((uintptr_t)addr+n)-pg+0xfff)&~0xfffULL;
     if(mprotect((void*)pg,len,PROT_READ|PROT_WRITE|PROT_EXEC)!=0) mprotect((void*)pg,len,PROT_READ|PROT_WRITE);
@@ -395,6 +401,37 @@ static int   MSABI i_CoCreateInstance(GUID_*clsid, void*outer, uint32_t ctx, GUI
     if(clsid && clsid->D1==0xBCDE0395u && clsid->D2==0xE52F && clsid->D3==0x467C){ if(ppv)*ppv=&g_mmde; return HR_OK; }
     if(getenv("PELOAD_TRACE_VA")&&clsid){ char t[96]; snprintf(t,sizeof t,"  [CoCreateInstance] clsid=%08x-%04x-%04x unhandled\n",clsid->D1,clsid->D2,clsid->D3); ws(t);}
     if(ppv)*ppv=0; return HR_CLASSNOTREG; }
+// ---- ws2_32 (Winsock) consistent resolution --------------------------------
+// Reclaimer's --native-udp gate reads halo3.dll's WS2_32 IAT and compares each
+// slot (esp. `bind`, ordinal 2) against the function it independently resolves
+// via GetModuleHandle("ws2_32")+GetProcAddress. If import-binding and
+// GetProcAddress return DIFFERENT stubs for the same function, the gate reports
+// "Native transport instruction/import mismatch; refused". So every ws2_32
+// function resolves through ONE ordinal/name-keyed table shared by bind_imports
+// and GetProcAddress, behind a distinct module handle (WS2_HANDLE, above).
+static void* g_ws2ord[600];
+static void* ws2_by_ordinal(uint32_t ord){
+    if(ord>=600) ord=0; if(g_ws2ord[ord]) return g_ws2ord[ord];
+    if(imp_count<8192){ imp_dll[imp_count]="ws2_32.dll"; imp_fn[imp_count]="#ws2ord"; g_ws2ord[ord]=make_stub(imp_count++); }
+    return g_ws2ord[ord]; }
+static uint32_t ws2_name2ord(const char*n){
+    struct{const char*n;uint32_t o;} m[]={{"accept",1},{"bind",2},{"closesocket",3},{"connect",4},
+     {"getpeername",5},{"getsockname",6},{"getsockopt",7},{"htonl",8},{"htons",9},{"ioctlsocket",10},
+     {"inet_addr",11},{"inet_ntoa",12},{"listen",13},{"ntohl",14},{"ntohs",15},{"recv",16},{"recvfrom",17},
+     {"select",18},{"send",19},{"sendto",20},{"setsockopt",21},{"shutdown",22},{"socket",23},
+     {"WSAGetLastError",111},{"WSAStartup",115},{"WSACleanup",116},{"__WSAFDIsSet",151},{0,0}};
+    for(int i=0;m[i].n;i++) if(!strcmp(n,m[i].n)) return m[i].o; return 0; }
+static void* ws2_resolve_name(const char*n){
+    uint32_t o=ws2_name2ord(n); if(o) return ws2_by_ordinal(o);
+    static struct{const char*n;void*p;} nc[64]; static int ncn;      // by-name only (WSAIoctl, getaddrinfo, …)
+    for(int i=0;i<ncn;i++) if(!strcmp(nc[i].n,n)) return nc[i].p;
+    void*p=0; if(imp_count<8192){ imp_dll[imp_count]="ws2_32.dll"; imp_fn[imp_count]=n; p=make_stub(imp_count++); }
+    if(ncn<64){ nc[ncn].n=n; nc[ncn].p=p; ncn++; } return p; }
+// is this (ascii) module name ws2_32 (with/without path or .dll, case-insensitive)?
+static int name_is_ws2(const char*s){ if(!s) return 0; const char*b=s; for(const char*p=s;*p;p++) if(*p=='\\'||*p=='/') b=p+1;
+    char low[32]; int i=0; for(; b[i] && i<31; i++){ char c=b[i]; if(c>='A'&&c<='Z') c+=32; low[i]=c; } low[i]=0;
+    return !strcmp(low,"ws2_32")||!strcmp(low,"ws2_32.dll"); }
+static int name_is_ws2_w(const uint16_t*w){ if(!w) return 0; char a[32]; int i=0; for(; w[i] && i<31; i++) a[i]=(char)(w[i]&0xff); a[i]=0; return name_is_ws2(a); }
 // pointer obfuscation: identity is a valid implementation
 static void*  MSABI i_EncodePointer(void *p){ return p; }
 static void*  MSABI i_DecodePointer(void *p){ return p; }
@@ -1002,6 +1039,7 @@ static void* MSABI i_LoadLibraryExW(const uint16_t *name, void *h, uint32_t fl){
     char *bn=w; for(char*p=w;*p;p++) if(*p=='\\'||*p=='/') bn=p+1;
     snprintf(g_lastlib,sizeof g_lastlib,"%s",bn);
     ws("  [LoadLibraryExW] "); ws(w); ws("\n");
+    if(name_is_ws2(bn)) return WS2_HANDLE; // Winsock: distinct handle, resolved by ordinal/name
     for(int m=0;m<g_nmods;m++) if(!strcasecmp(g_mods[m].name,bn)) return g_mods[m].base; // already loaded
     char p[2048]; win2unix(name,p,sizeof p);
     if(access(p,R_OK)==0){ g_prefer_base=1; uint8_t *b=load_guest(p, strdup(bn)); g_prefer_base=0; if(b) return b; }
@@ -1171,8 +1209,12 @@ static void *resolve_impl(const char *fn); // fwd
 static const unsigned char* MSABI i_glGetString(unsigned name); // fwd (GL bridge)
 static void MSABI i_glShaderSource(unsigned,int,const char*const*,const int*); // fwd
 static void MSABI i_glCompileShader(unsigned); // fwd
+static void* ws2_by_ordinal(uint32_t ord); static void* ws2_resolve_name(const char*n); // fwd
 static void* MSABI i_GetProcAddress(void *mod, char *name){
     if(getenv("PELOAD_GPA_ALL") && (uint64_t)name>0x10000){ char h[16]; int n=snprintf(h,sizeof h,"[GPA %d] ",getpid()); (void)!write(2,h,n); ws(name); ws("\n"); }
+    // Winsock: resolve through the shared ws2_32 table so the IAT entry and this
+    // result are the SAME pointer (the --native-udp gate compares them).
+    if(mod==WS2_HANDLE) return ((uint64_t)name<0x10000)? ws2_by_ordinal((uint32_t)(uintptr_t)name) : ws2_resolve_name(name);
     if((uint64_t)name < 0x10000){ // imported by ordinal
         if(imp_count<8192){ imp_dll[imp_count]="(dynamic)"; imp_fn[imp_count]="#ordinal";
             return make_stub(imp_count++); }
@@ -1586,8 +1628,11 @@ static void bind_imports(uint8_t *base, OPT64 *opt){
         const char *dll=(char*)(base+d->Name);
         uint64_t *oft=(uint64_t*)(base+(d->OFT?d->OFT:d->FT)), *ft=(uint64_t*)(base+d->FT);
         int trace = getenv("PELOAD_TRACE_ALL")!=0;
+        int is_ws2 = name_is_ws2(dll);
         for(int i=0; oft[i]; i++){
             const char *fn = (oft[i]>>63)? "#ordinal" : (char*)(base+(uint32_t)oft[i]+2);
+            // ws2_32: bind through the shared ordinal/name table (see WS2_HANDLE)
+            if(is_ws2){ ft[i]=(uint64_t)((oft[i]>>63)? ws2_by_ordinal((uint32_t)(oft[i]&0xffff)) : ws2_resolve_name(fn)); continue; }
             void *r = uni_resolve(dll, fn);
             if(r && trace && imp_count<8192){ imp_dll[imp_count]=dll; imp_fn[imp_count]=fn; imp_real[imp_count]=r; ft[i]=(uint64_t)make_trace_stub(imp_count,r); imp_count++; }
             else if(r){ ft[i]=(uint64_t)r; }
