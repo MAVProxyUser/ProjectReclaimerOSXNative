@@ -1276,7 +1276,8 @@ static void gl_grab_simple(void){
     void(*rb)(unsigned)=dlsym(RTLD_DEFAULT,"glReadBuffer");
     void(*ge)(void); unsigned(*gerr)(void)=dlsym(RTLD_DEFAULT,"glGetError"); (void)ge;
     if(!rp) return; int W=1280,H=720;
-    if(rb) rb(0x0404/*GL_FRONT*/);
+    // Engine never SwapBuffers, so the rendered frame lives in GL_BACK, not FRONT.
+    if(rb) rb(getenv("PELOAD_SHOT_FRONT")?0x0404/*FRONT*/:0x0405/*GL_BACK*/);
     unsigned char*px=calloc(1,(size_t)W*H*4); if(!px) return;
     if(gerr) gerr(); rp(0,0,W,H,0x1908/*RGBA*/,0x1401/*UBYTE*/,px); unsigned e=gerr?gerr():0;
     const char*home=getenv("HOME"); char path[512]; snprintf(path,sizeof path,"%s/reclaimer_menu_latest.bmp",home?home:"/tmp");
