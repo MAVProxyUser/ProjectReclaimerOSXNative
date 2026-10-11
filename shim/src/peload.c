@@ -34,6 +34,10 @@
 #include <time.h>
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
+#include <pthread.h>
+#include <signal.h>
+#include <execinfo.h>
+#include <sys/ucontext.h>
 
 // ---- raw logging (no libc TLS dependency; safe after we touch %gs) ----
 static void w(const char *s, long n){ (void)!write(2, s, n); }
@@ -287,7 +291,6 @@ static void*  MSABI i_DecodePointer(void *p){ return p; }
 // critical sections / SRW / condvar / init-once: no-ops are correct single-threaded
 static void   MSABI i_noop(void){ }
 static int    MSABI i_ret1(void){ return 1; }
-static void   MSABI i_InitializeCriticalSectionEx(void *c,uint32_t s,uint32_t f){ (void)c;(void)s;(void)f; }
 static int    MSABI i_InitOnceBeginInitialize(void *o,uint32_t f,int *pend,void**ctx){ (void)o;(void)f; if(pend)*pend=1; if(ctx)*ctx=0; return 1; }
 static int    MSABI i_InitOnceComplete(void *o,uint32_t f,void*ctx){ (void)o;(void)f;(void)ctx; return 1; }
 // FLS mirrors TLS
@@ -323,6 +326,16 @@ static void*  MSABI i_SetStdHandle(uint32_t id,void*h){ (void)id; return h; } //
 extern char **environ;
 static const char *g_self;          // path to this peload binary (argv[0])
 static pid_t g_childpid[256]; static int g_nchild;
+// cache reaped child exit statuses so WaitForSingleObject + GetExitCodeProcess
+// (two waitpid callers) don't double-reap and fabricate garbage codes.
+static struct { pid_t pid; int reaped; uint32_t code; } g_childst[256]; static int g_nchildst;
+static int child_reap(pid_t pid,uint32_t *out,int block){
+    for(int i=0;i<g_nchildst;i++) if(g_childst[i].pid==pid && g_childst[i].reaped){ if(out)*out=g_childst[i].code; return 1; }
+    int st; pid_t r=waitpid(pid,&st,block?0:WNOHANG);
+    if(r==pid){ uint32_t c = WIFEXITED(st)?WEXITSTATUS(st): WIFSIGNALED(st)?(0xC0000000u|WTERMSIG(st)):0;
+        if(g_nchildst<256){ g_childst[g_nchildst].pid=pid; g_childst[g_nchildst].reaped=1; g_childst[g_nchildst].code=c; g_nchildst++; }
+        if(out)*out=c; return 1; }
+    return 0; } // 0 = still running (or gone)
 static int MSABI i_CreateProcessW(const uint16_t*app,uint16_t*cmd,void*pa,void*ta,int inherit,uint32_t flags,void*env,const uint16_t*cwd,uint8_t*si,uint8_t*pi){
     (void)pa;(void)ta;(void)inherit;
     // lpEnvironment: the parent's env block for the worker carries the native
@@ -377,8 +390,11 @@ static int MSABI i_CreateProcessW(const uint16_t*app,uint16_t*cmd,void*pa,void*t
     if(pi){ *(void**)(pi+0)=(void*)(intptr_t)(0x8000+pid); *(void**)(pi+8)=(void*)(intptr_t)(0x8000+pid);
             *(uint32_t*)(pi+16)=(uint32_t)pid; *(uint32_t*)(pi+20)=(uint32_t)pid; }
     return 1; }
-static uint32_t MSABI i_GetExitCodeProcessReal(void*h,uint32_t*code){ intptr_t hv=(intptr_t)h; if(hv>=0x8000){ pid_t pid=(pid_t)(hv-0x8000); int st; pid_t r=waitpid(pid,&st,WNOHANG);
-    if(r==0){ if(code)*code=259; return 1; } /*STILL_ACTIVE*/ if(code)*code= WIFEXITED(st)?WEXITSTATUS(st):1; return 1; } if(code)*code=0; return 1; }
+static uint32_t MSABI i_GetExitCodeProcessReal(void*h,uint32_t*code){ intptr_t hv=(intptr_t)h;
+    if(hv>=0x8000 && hv<0x100000){ pid_t pid=(pid_t)(hv-0x8000); uint32_t c;
+        if(child_reap(pid,&c,0)){ if(code)*code=c; if(getenv("PELOAD_TRACE_GL")){char t[48];snprintf(t,sizeof t,"  [worker exit] code=0x%x\n",c);ws(t);} }
+        else if(code)*code=259; /*STILL_ACTIVE*/ return 1; }
+    if(code)*code=0; return 1; }
 static int    MSABI i_DuplicateHandle(void*sp,void*src,void*tp,void**tgt,uint32_t acc,int inh,uint32_t opt){
     (void)sp;(void)tp;(void)acc;(void)inh;(void)opt; intptr_t hv=(intptr_t)src; void*res=src;
     if(hv>=0x1000){ int sfd=(int)(hv-0x1000); int nfd=dup(sfd); if(nfd<0){ g_lasterr=win_err(); return 0; }
@@ -535,6 +551,9 @@ static const unsigned char* MSABI i_glGetString(unsigned name){
     if(g_cgl && CGLGetCurrentContext()==0) CGLSetCurrentContext(g_cgl);
     const unsigned char*(*real)(unsigned)=dlsym(RTLD_DEFAULT,"glGetString");
     const unsigned char*r = real? real(name):0;
+    // normalize macOS's non-standard strings (parsers choke on "4.1 Metal - 90.5")
+    if(name==0x1f02) r=(const unsigned char*)"4.1.0";                 // GL_VERSION
+    else if(name==0x8B8C) r=(const unsigned char*)"4.10";             // GL_SHADING_LANGUAGE_VERSION
     if(getenv("PELOAD_TRACE_GL")){ char t[64]; snprintf(t,sizeof t,"  [glGetString] 0x%x cur=%p -> ",name,CGLGetCurrentContext()); ws(t); ws(r?(const char*)r:"(null)"); ws("\n"); }
     return r; }
 static void*  MSABI i_wglGetProcAddress(const char*name){ if(!strcmp(name,"glGetString")) return (void*)i_glGetString; void*p=dlsym(RTLD_DEFAULT,name); return p; }
@@ -588,17 +607,76 @@ static uint32_t MSABI i_FormatMessageW(uint32_t fl,const void*src,uint32_t id,ui
     if(fl&0x100){ uint16_t*mb=malloc((n+1)*2); for(int i=0;i<=n;i++) mb[i]=(uint8_t)tmp[i]; *(void**)buf=mb; return n; } // ALLOCATE_BUFFER
     uint32_t i=0; for(; i<(uint32_t)n && i<sz-1; i++) buf[i]=(uint8_t)tmp[i]; buf[i]=0; return i; }
 static int   MSABI i_SetConsoleCtrlHandler(void*h,int add){ (void)h;(void)add; return 1; }
-static void* MSABI i_CreateSemaphoreA(void*sec,long init,long max,const char*nm){ (void)sec;(void)init;(void)max;(void)nm; return (void*)0x5e4a; }
-static void* MSABI i_CreateSemaphoreW(void*sec,long init,long max,const uint16_t*nm){ (void)sec;(void)init;(void)max;(void)nm; return (void*)0x5e4a; }
-static int   MSABI i_ReleaseSemaphore(void*h,long c,long*prev){ (void)h;(void)c;(void)prev; return 1; }
-static void* MSABI i_CreateEventW(void*sec,int man,int sig,const uint16_t*nm){ (void)sec;(void)man;(void)sig;(void)nm; return (void*)0x5e40; }
-static int   MSABI i_SetEvent(void*h){ (void)h; return 1; }
-static int   MSABI i_ResetEvent(void*h){ (void)h; return 1; }
+// ============ real synchronization (the engine is multi-threaded) ============
+// Sync objects are heap-allocated; the pointer IS the Win32 HANDLE. A magic
+// field lets WaitForSingleObject tell them from fd/process pseudo-handles.
+#define SYNC_MAGIC 0x53796E63u   // 'Sync'
+enum { K_EVENT, K_MUTEX, K_SEMA };
+typedef struct { uint32_t magic; int kind; pthread_mutex_t m; pthread_cond_t c; int signaled, manual; long count, maxc; pthread_t owner; } SyncObj;
+static SyncObj* sync_new(int kind){ SyncObj*s=calloc(1,sizeof *s); s->magic=SYNC_MAGIC; s->kind=kind;
+    pthread_mutex_init(&s->m,0); pthread_cond_init(&s->c,0); return s; }
+static int is_sync(intptr_t hv){ if(hv<0x100000) return 0; SyncObj*s=(SyncObj*)hv; return s && s->magic==SYNC_MAGIC; }
+static void* MSABI i_CreateEventW(void*sec,int man,int sig,const uint16_t*nm){ (void)sec;(void)nm; SyncObj*s=sync_new(K_EVENT); s->manual=man; s->signaled=sig; return s; }
+static void* MSABI i_CreateEventA(void*sec,int man,int sig,const char*nm){ return i_CreateEventW(sec,man,sig,0); }
+static void* MSABI i_CreateEventExW(void*sec,const uint16_t*nm,uint32_t fl,uint32_t acc){ (void)nm;(void)acc; return i_CreateEventW(sec,(fl&1)/*MANUAL_RESET*/,(fl&2)/*INITIAL_SET*/,0); }
+static int   MSABI i_SetEvent(void*h){ SyncObj*s=h; if(!is_sync((intptr_t)h))return 1; pthread_mutex_lock(&s->m); s->signaled=1; pthread_cond_broadcast(&s->c); pthread_mutex_unlock(&s->m); return 1; }
+static int   MSABI i_ResetEvent(void*h){ SyncObj*s=h; if(!is_sync((intptr_t)h))return 1; pthread_mutex_lock(&s->m); s->signaled=0; pthread_mutex_unlock(&s->m); return 1; }
+static void* MSABI i_CreateSemaphoreW(void*sec,long init,long max,const uint16_t*nm){ (void)sec;(void)nm; SyncObj*s=sync_new(K_SEMA); s->count=init; s->maxc=max; return s; }
+static void* MSABI i_CreateSemaphoreA(void*sec,long init,long max,const char*nm){ return i_CreateSemaphoreW(sec,init,max,0); }
+static int   MSABI i_ReleaseSemaphore(void*h,long c,long*prev){ SyncObj*s=h; if(!is_sync((intptr_t)h))return 1; pthread_mutex_lock(&s->m); if(prev)*prev=s->count; s->count+=c; pthread_cond_broadcast(&s->c); pthread_mutex_unlock(&s->m); return 1; }
+static void* MSABI i_CreateMutexW(void*sec,int owned,const uint16_t*nm){ (void)sec;(void)nm; SyncObj*s=sync_new(K_MUTEX); s->count=owned?0:1; if(owned)s->owner=pthread_self(); return s; }
+static void* MSABI i_CreateMutexA(void*sec,int owned,const char*nm){ return i_CreateMutexW(sec,owned,0); }
+static int   MSABI i_ReleaseMutex(void*h){ SyncObj*s=h; if(!is_sync((intptr_t)h))return 1; pthread_mutex_lock(&s->m); s->count=1; pthread_cond_signal(&s->c); pthread_mutex_unlock(&s->m); return 1; }
+// wait one object with a deadline; returns 0 signaled, 0x102 timeout
+static uint32_t sync_wait(SyncObj*s,uint32_t ms){
+    struct timespec ts; if(ms!=0xFFFFFFFF){ struct timeval tv; gettimeofday(&tv,0); uint64_t ns=(uint64_t)tv.tv_usec*1000+(uint64_t)ms*1000000ULL; ts.tv_sec=tv.tv_sec+ns/1000000000ULL; ts.tv_nsec=ns%1000000000ULL; }
+    pthread_mutex_lock(&s->m); uint32_t rc=0;
+    for(;;){ int avail = (s->kind==K_SEMA)? (s->count>0) : (s->kind==K_MUTEX)? (s->count>0) : s->signaled;
+        if(avail){ if(s->kind==K_SEMA) s->count--; else if(s->kind==K_MUTEX){ s->count=0; s->owner=pthread_self(); } else if(!s->manual) s->signaled=0; break; }
+        if(ms==0){ rc=0x102; break; }
+        int w = (ms==0xFFFFFFFF)? pthread_cond_wait(&s->c,&s->m) : pthread_cond_timedwait(&s->c,&s->m,&ts);
+        if(w==ETIMEDOUT){ rc=0x102; break; } }
+    pthread_mutex_unlock(&s->m); return rc; }
 static uint32_t MSABI i_WaitForSingleObject(void*h,uint32_t ms){ intptr_t hv=(intptr_t)h;
-    if(hv>=0x8000 && hv<0x1000000){ pid_t pid=(pid_t)(hv-0x8000); int st; // process handle: real wait
-        if(ms==0){ return waitpid(pid,&st,1/*WNOHANG*/)==0 ? 0x102 : 0; } // WAIT_TIMEOUT : signaled
-        waitpid(pid,&st,0); return 0; }
-    return 0; } // WAIT_OBJECT_0
+    if(is_sync(hv)) return sync_wait((SyncObj*)h,ms);
+    if(hv>=0x8000 && hv<0x100000){ pid_t pid=(pid_t)(hv-0x8000);
+        if(ms==0) return child_reap(pid,0,0)? 0 : 0x102;  // signaled : timeout
+        child_reap(pid,0,1); return 0; }
+    return 0; } // unknown handle: treat as already-signaled
+static uint32_t MSABI i_WaitForMultipleObjects(uint32_t n,void*const*h,int all,uint32_t ms){
+    if(all){ for(uint32_t i=0;i<n;i++){ intptr_t hv=(intptr_t)h[i]; if(is_sync(hv)) sync_wait((SyncObj*)h[i],0xFFFFFFFF); } return 0; }
+    for(uint32_t spin=0;;spin++){ for(uint32_t i=0;i<n;i++){ intptr_t hv=(intptr_t)h[i]; if(is_sync(hv)){ if(sync_wait((SyncObj*)h[i],0)==0) return i; } else return i; }
+        if(ms==0) return 0x102; struct timespec ts={0,2000000}; nanosleep(&ts,0); if(ms!=0xFFFFFFFF && spin*2>=ms) return 0x102; } }
+// ---- critical sections / SRW locks / condition variables (real pthreads) ----
+static pthread_mutex_t g_lazy=PTHREAD_MUTEX_INITIALIZER;
+static void MSABI i_InitializeCriticalSection(void*cs){ pthread_mutex_t*m=malloc(sizeof *m); pthread_mutexattr_t a; pthread_mutexattr_init(&a); pthread_mutexattr_settype(&a,PTHREAD_MUTEX_RECURSIVE); pthread_mutex_init(m,&a); *(void**)cs=m; }
+static int  MSABI i_InitializeCriticalSectionAndSpinCount(void*cs,uint32_t s){ (void)s; i_InitializeCriticalSection(cs); return 1; }
+static int  MSABI i_InitializeCriticalSectionEx(void*cs,uint32_t s,uint32_t f){ (void)s;(void)f; i_InitializeCriticalSection(cs); return 1; }
+static pthread_mutex_t* cs_m(void*cs){ pthread_mutex_t*m=*(void**)cs; if(!m){ pthread_mutex_lock(&g_lazy); m=*(void**)cs; if(!m){ i_InitializeCriticalSection(cs); m=*(void**)cs; } pthread_mutex_unlock(&g_lazy); } return m; }
+static void MSABI i_EnterCriticalSection(void*cs){ pthread_mutex_lock(cs_m(cs)); }
+static void MSABI i_LeaveCriticalSection(void*cs){ pthread_mutex_t*m=*(void**)cs; if(m) pthread_mutex_unlock(m); }
+static void MSABI i_DeleteCriticalSection(void*cs){ pthread_mutex_t*m=*(void**)cs; if(m){ pthread_mutex_destroy(m); free(m); *(void**)cs=0; } }
+static int  MSABI i_TryEnterCriticalSection(void*cs){ return pthread_mutex_trylock(cs_m(cs))==0; }
+static pthread_rwlock_t* srw(void*l){ pthread_rwlock_t*r=*(void**)l; if(!r){ pthread_mutex_lock(&g_lazy); r=*(void**)l; if(!r){ r=malloc(sizeof *r); pthread_rwlock_init(r,0); *(void**)l=r; } pthread_mutex_unlock(&g_lazy); } return r; }
+static void MSABI i_InitializeSRWLock(void*l){ *(void**)l=0; }
+static void MSABI i_AcquireSRWLockExclusive(void*l){ pthread_rwlock_wrlock(srw(l)); }
+static void MSABI i_ReleaseSRWLockExclusive(void*l){ pthread_rwlock_unlock(srw(l)); }
+static void MSABI i_AcquireSRWLockShared(void*l){ pthread_rwlock_rdlock(srw(l)); }
+static void MSABI i_ReleaseSRWLockShared(void*l){ pthread_rwlock_unlock(srw(l)); }
+static uint8_t MSABI i_TryAcquireSRWLockExclusive(void*l){ return pthread_rwlock_trywrlock(srw(l))==0; }
+static uint8_t MSABI i_TryAcquireSRWLockShared(void*l){ return pthread_rwlock_tryrdlock(srw(l))==0; }
+static pthread_cond_t* cvar(void*cv){ pthread_cond_t*c=*(void**)cv; if(!c){ pthread_mutex_lock(&g_lazy); c=*(void**)cv; if(!c){ c=malloc(sizeof *c); pthread_cond_init(c,0); *(void**)cv=c; } pthread_mutex_unlock(&g_lazy); } return c; }
+static void MSABI i_InitializeConditionVariable(void*cv){ *(void**)cv=0; }
+static void MSABI i_WakeConditionVariable(void*cv){ pthread_cond_signal(cvar(cv)); }
+static void MSABI i_WakeAllConditionVariable(void*cv){ pthread_cond_broadcast(cvar(cv)); }
+static int  MSABI i_SleepConditionVariableCS(void*cv,void*cs,uint32_t ms){ pthread_cond_t*c=cvar(cv); pthread_mutex_t*m=cs_m(cs);
+    if(ms==0xFFFFFFFF) return pthread_cond_wait(c,m)==0; struct timeval tv;gettimeofday(&tv,0);struct timespec ts;uint64_t ns=(uint64_t)tv.tv_usec*1000+(uint64_t)ms*1000000ULL;ts.tv_sec=tv.tv_sec+ns/1000000000ULL;ts.tv_nsec=ns%1000000000ULL; return pthread_cond_timedwait(c,m,&ts)!=ETIMEDOUT; }
+static int  MSABI i_SleepConditionVariableSRW(void*cv,void*l,uint32_t ms,uint32_t fl){ pthread_cond_t*c=cvar(cv); pthread_rwlock_t*r=srw(l); int shared=(fl&1);
+    pthread_rwlock_unlock(r); pthread_mutex_lock(&g_lazy); int rc;
+    if(ms==0xFFFFFFFF) rc=pthread_cond_wait(c,&g_lazy); else { struct timeval tv;gettimeofday(&tv,0);struct timespec ts;uint64_t ns=(uint64_t)tv.tv_usec*1000+(uint64_t)ms*1000000ULL;ts.tv_sec=tv.tv_sec+ns/1000000000ULL;ts.tv_nsec=ns%1000000000ULL; rc=pthread_cond_timedwait(c,&g_lazy,&ts); }
+    pthread_mutex_unlock(&g_lazy); if(shared) pthread_rwlock_rdlock(r); else pthread_rwlock_wrlock(r); return rc!=ETIMEDOUT; }
+static void MSABI i_WakeByAddressSingle(void*a){ (void)a; }
+static void MSABI i_WakeByAddressAll(void*a){ (void)a; }
 // ---- threads: back Win32 CreateThread with pthreads; each gets its own TEB
 // (per-thread %gs) + a fresh copy of the static TLS block. ----
 #include <pthread.h>
@@ -625,7 +703,6 @@ static void* MSABI i_CreateThread(void*attr,uint64_t stack,WinThreadProc start,v
 }
 static uint32_t MSABI i_GetThreadId(void*h){ return (uint32_t)(uintptr_t)h; }
 static int MSABI i_GetExitCodeThread(void*h,uint32_t*code){ (void)h; if(code)*code=259; return 1; } // STILL_ACTIVE
-static uint32_t MSABI i_WaitForMultipleObjects(uint32_t n,void*h,int all,uint32_t ms){ (void)n;(void)h;(void)all;(void)ms; return 0; }
 static void* MSABI i_OpenProcess(uint32_t a,int inh,uint32_t pid){ (void)a;(void)inh;(void)pid; return (void*)-1; }
 static int MSABI i_SwitchToThread(void){ sched_yield(); return 1; }
 // CompareStringOrdinal: UTF-16 ordinal compare -> 1/2/3 (LESS/EQUAL/GREATER)
@@ -947,8 +1024,8 @@ static void* MSABI i_GetProcAddress(void *mod, char *name){
     // OpenGL: route gl*/wgl* to macOS OpenGL.framework (glow/egui resolve core
     // GL functions like glGetString via GetProcAddress, not just imports)
     if(!strcmp(name,"glGetString")) return (void*)i_glGetString; // ensure-current wrapper
-    if(name[0]=='g'&&name[1]=='l'){ void *g=dlsym((void*)-2,name); if(g) return g; }
-    if(name[0]=='w'&&name[1]=='g'&&name[2]=='l'){ void *g=dlsym((void*)-2,name); if(g) return g; }
+    if((name[0]=='g'&&name[1]=='l')||(name[0]=='w'&&name[1]=='g'&&name[2]=='l')){ void *g=dlsym((void*)-2,name);
+        if(getenv("PELOAD_TRACE_GL")){ ws("  [GLproc] "); ws(name); ws(g?"\n":" MISSING\n"); } if(g) return g; }
     if(imp_count<8192){ imp_dll[imp_count]="(dynamic)"; imp_fn[imp_count]=name;
         return make_stub(imp_count++); }
     return 0;
@@ -1044,22 +1121,27 @@ static void *resolve_impl(const char *fn){
         {"GetCurrentThread",(void*)i_GetCurrentThread},
         {"EncodePointer",(void*)i_EncodePointer},
         {"DecodePointer",(void*)i_DecodePointer},
-        {"InitializeCriticalSection",(void*)i_noop},
-        {"InitializeCriticalSectionAndSpinCount",(void*)i_ret1},
+        {"InitializeCriticalSection",(void*)i_InitializeCriticalSection},
+        {"InitializeCriticalSectionAndSpinCount",(void*)i_InitializeCriticalSectionAndSpinCount},
         {"InitializeCriticalSectionEx",(void*)i_InitializeCriticalSectionEx},
-        {"EnterCriticalSection",(void*)i_noop},
-        {"LeaveCriticalSection",(void*)i_noop},
-        {"DeleteCriticalSection",(void*)i_noop},
-        {"TryEnterCriticalSection",(void*)i_ret1},
-        {"InitializeSRWLock",(void*)i_noop},
-        {"AcquireSRWLockExclusive",(void*)i_noop},
-        {"ReleaseSRWLockExclusive",(void*)i_noop},
-        {"AcquireSRWLockShared",(void*)i_noop},
-        {"ReleaseSRWLockShared",(void*)i_noop},
-        {"TryAcquireSRWLockExclusive",(void*)i_ret1},
-        {"InitializeConditionVariable",(void*)i_noop},
-        {"WakeConditionVariable",(void*)i_noop},
-        {"WakeAllConditionVariable",(void*)i_noop},
+        {"EnterCriticalSection",(void*)i_EnterCriticalSection},
+        {"LeaveCriticalSection",(void*)i_LeaveCriticalSection},
+        {"DeleteCriticalSection",(void*)i_DeleteCriticalSection},
+        {"TryEnterCriticalSection",(void*)i_TryEnterCriticalSection},
+        {"InitializeSRWLock",(void*)i_InitializeSRWLock},
+        {"AcquireSRWLockExclusive",(void*)i_AcquireSRWLockExclusive},
+        {"ReleaseSRWLockExclusive",(void*)i_ReleaseSRWLockExclusive},
+        {"AcquireSRWLockShared",(void*)i_AcquireSRWLockShared},
+        {"ReleaseSRWLockShared",(void*)i_ReleaseSRWLockShared},
+        {"TryAcquireSRWLockExclusive",(void*)i_TryAcquireSRWLockExclusive},
+        {"TryAcquireSRWLockShared",(void*)i_TryAcquireSRWLockShared},
+        {"InitializeConditionVariable",(void*)i_InitializeConditionVariable},
+        {"WakeConditionVariable",(void*)i_WakeConditionVariable},
+        {"WakeAllConditionVariable",(void*)i_WakeAllConditionVariable},
+        {"SleepConditionVariableCS",(void*)i_SleepConditionVariableCS},
+        {"SleepConditionVariableSRW",(void*)i_SleepConditionVariableSRW},
+        {"WakeByAddressSingle",(void*)i_WakeByAddressSingle},
+        {"WakeByAddressAll",(void*)i_WakeByAddressAll},
         {"InitOnceBeginInitialize",(void*)i_InitOnceBeginInitialize},
         {"InitOnceComplete",(void*)i_InitOnceComplete},
         {"FlsAlloc",(void*)i_FlsAlloc},
@@ -1213,6 +1295,11 @@ static void *resolve_impl(const char *fn){
         {"CreateSemaphoreW",(void*)i_CreateSemaphoreW},
         {"ReleaseSemaphore",(void*)i_ReleaseSemaphore},
         {"CreateEventW",(void*)i_CreateEventW},
+        {"CreateEventA",(void*)i_CreateEventA},
+        {"CreateEventExW",(void*)i_CreateEventExW},
+        {"CreateMutexW",(void*)i_CreateMutexW},
+        {"CreateMutexA",(void*)i_CreateMutexA},
+        {"ReleaseMutex",(void*)i_ReleaseMutex},
         {"SetEvent",(void*)i_SetEvent},
         {"ResetEvent",(void*)i_ResetEvent},
         {"WaitForSingleObject",(void*)i_WaitForSingleObject},
@@ -1360,8 +1447,34 @@ static uint8_t *load_guest(const char *path, const char *name){
     return base;
 }
 
+// crash handler: print faulting signal/address/RIP + which module (so a
+// null-pointer GL call or a guest-code fault is immediately identifiable).
+static void crashsig(int sig, siginfo_t *info, void *ucv){
+    ucontext_t *uc=ucv; uint64_t rip = uc? (uint64_t)uc->uc_mcontext->__ss.__rip : 0;
+    char b[192]; const char *mod="?"; uint64_t moff=0;
+    if(g_base){ DOS*d=(DOS*)g_base; OPT64*o=(OPT64*)((uint8_t*)g_base+d->e_lfanew+sizeof(COFF));
+        if(rip>=(uint64_t)g_base && rip<(uint64_t)g_base+o->ImageSize){ mod="exe"; moff=rip-(uint64_t)g_base; } }
+    for(int m=0;m<g_nmods && !moff;m++){ DOS*d=(DOS*)g_mods[m].base; OPT64*o=(OPT64*)(g_mods[m].base+d->e_lfanew+sizeof(COFF));
+        if(rip>=(uint64_t)g_mods[m].base && rip<(uint64_t)g_mods[m].base+o->ImageSize){ mod=g_mods[m].name; moff=rip-(uint64_t)g_mods[m].base; } }
+    int n=snprintf(b,sizeof b,"\n[CRASH] sig=%d faultaddr=%p RIP=0x%llx (%s+0x%llx)\n",sig,info?info->si_addr:0,(unsigned long long)rip,mod,(unsigned long long)moff);
+    (void)!write(2,b,n);
+    // manual stack scan: Win64 code defeats backtrace(); find return addresses
+    // that land inside a loaded module and print module+offset (the call chain).
+    uint64_t rsp = uc? (uint64_t)uc->uc_mcontext->__ss.__rsp : 0; int printed=0;
+    for(uint64_t p=rsp; p<rsp+0x4000 && printed<24; p+=8){
+        uint64_t v; memcpy(&v,(void*)p,8);
+        const char *mm=0; uint64_t mo=0;
+        if(g_base){ DOS*d=(DOS*)g_base; OPT64*o=(OPT64*)((uint8_t*)g_base+d->e_lfanew+sizeof(COFF));
+            if(v>=(uint64_t)g_base && v<(uint64_t)g_base+o->ImageSize){ mm="exe"; mo=v-(uint64_t)g_base; } }
+        for(int m=0;m<g_nmods && !mm;m++){ DOS*d=(DOS*)g_mods[m].base; OPT64*o=(OPT64*)(g_mods[m].base+d->e_lfanew+sizeof(COFF));
+            if(v>=(uint64_t)g_mods[m].base && v<(uint64_t)g_mods[m].base+o->ImageSize){ mm=g_mods[m].name; mo=v-(uint64_t)g_mods[m].base; } }
+        if(mm){ int k=snprintf(b,sizeof b,"    ret 0x%llx (%s+0x%llx)\n",(unsigned long long)v,mm,(unsigned long long)mo); (void)!write(2,b,k); printed++; } }
+    _exit(139);
+}
 extern char **environ;
 int main(int argc, char **argv){
+    { struct sigaction sa; memset(&sa,0,sizeof sa); sa.sa_sigaction=crashsig; sa.sa_flags=SA_SIGINFO;
+      sigaction(SIGSEGV,&sa,0); sigaction(SIGBUS,&sa,0); sigaction(SIGILL,&sa,0); sigaction(SIGABRT,&sa,0); }
     const char *path = argc>1 ? argv[1] : "halo3.dll";
     { static char selfabs[4096]; if(realpath(argv[0],selfabs)) g_self=selfabs; else g_self=argv[0]; } // absolute (child chdir's)
     ws("peload: loading "); ws(path); ws("\n");

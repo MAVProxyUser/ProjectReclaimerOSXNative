@@ -28,6 +28,39 @@ On the **dedicated-server exe** the loader relocates (22,919 fixups), binds
 precise, expected spot: `__p___argv` / `_get_initial_narrow_environment`
 return NULL from our stubs, so the Rust runtime dereferences a null `argv`.
 
+## MILESTONE 7: real threading/sync; engine reaches egui/glow menu GL setup
+
+Made the multi-threaded engine deterministic and drove it into the menu
+renderer. Did NOT yet reach a visible startup screen — crashes in glow.
+
+Fixes this pass:
+- **Real synchronization** (was no-ops): CRITICAL_SECTION→recursive
+  pthread_mutex, SRWLOCK→pthread_rwlock, CONDITION_VARIABLE→pthread_cond,
+  Events/Mutexes/Semaphores→a pthread-backed SyncObj, real WaitForSingle/
+  MultipleObjects. This removed the run-to-run nondeterminism.
+- **Process exit-code bug**: WaitForSingleObject + GetExitCodeProcess both
+  waitpid'd, double-reaping and fabricating a garbage status (0xC000002F).
+  Added a reaped-child cache; the worker's true status now shows (SIGSEGV).
+- **Crash diagnostics**: a SIGSEGV/BUS/ILL handler prints the faulting RIP as
+  module+offset and a manual Win64 stack scan (backtrace() can't unwind the
+  guest ABI).
+- GetProcAddress/wglGetProcAddress route gl*/wgl* to OpenGL.framework; a
+  glGetString wrapper normalizes macOS's "4.1 Metal - 90.5" to "4.1.0".
+
+Where it crashes (precisely isolated): the worker reaches the egui/glow menu
+GL init, reads GL_VERSION/RENDERER/VENDOR fine, then calls
+`glGetString(GL_SHADING_LANGUAGE_VERSION)` **through a glow `Context` whose
+`self` pointer is garbage** (disassembled: `mov rax,[rdx+0x9c8]; call rax`,
+rdx = Context, is a bad low/heap address that varies per run). So glow's
+Context (or the engine's reference to it) is uninitialized/corrupted by this
+point. Confirmed NOT a GL-version issue (identical at 4.1 and 4.6).
+
+Honest next steps toward the screen: (a) run the worker under lldb staged with
+the scratch cwd + RECLAIMER_LOCAL_RUNTIME=menu:0 to single-step where the glow
+Context pointer is clobbered; (b) stand up a real NSWindow + NSOpenGLContext
+drawable (needed for on-screen output regardless). ~288 shims; both --version
+green.
+
 ## MILESTONE 6: the C++ throw decoded — it was ours, now fixed; engine runs GL
 
 Answered the "error or control flow?" question by **decoding the MSVC C++
