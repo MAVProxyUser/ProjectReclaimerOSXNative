@@ -1,14 +1,37 @@
-# The `--native-udp` native-transport integrity gate
+# The `--native-udp` native-transport integrity gate — PASSED
 
-Status: **current blocker** (2026-10-11). The native client worker initializes
-graphics, the menu, and audio, then refuses with:
+Status: **PASSED** as of 2026-10-11. The gate below is defeated; the current
+blocker moved on to `Error: System error 2 (os error 2)` (see the last section).
 
-```
-Error: Native transport instruction/import mismatch; refused
-```
+## How the gate was passed (summary)
 
-and the worker exits with code 1. This document records what the check is, the
-evidence gathered, and the options.
+The gate reads halo3.dll's WS2_32 import thunks (6-byte `FF25` reads) and the
+`bind` IAT slot (RVA `0x6fa778`, ordinal 2) via `ReadProcessMemory`, then
+compares that slot to the function it independently resolves via
+`GetModuleHandle("ws2_32")`+`GetProcAddress`. Our loader was handing out a
+*different* stub for the IAT entry vs. GetProcAddress, so the slots mismatched.
+
+Fix (commit `2bfe516`): resolve every ws2_32 function through ONE ordinal/
+name-keyed table shared by `bind_imports` and `GetProcAddress`, behind a
+distinct module handle `WS2_HANDLE` returned by `GetModuleHandle`/`LoadLibrary`
+for "ws2_32". IAT.bind now equals GetProcAddress(ws2_32, 2). Gate prints
+`Selected native loopback bind; shell peer transport=true`. Later commit
+`04aabf4` made those functions real (BSD sockets) for the loopback UDP path.
+
+## Progress after the gate
+
+The worker now runs through: window/graphics contract init, **all menu shaders
+compile**, **`Persistent menu created`**, audio init (`Menu music ready: 8 of 8
+songs`, "no playback device" handled), map/variant enumeration — then fails
+with `os error 2` (next section).
+
+---
+
+## ORIGINAL ANALYSIS: the gate (kept for reference)
+
+The native client worker initialized graphics, the menu, and audio, then
+refused with `Error: Native transport instruction/import mismatch; refused`.
+This section records what the check was.
 
 ## Where it sits in the boot flow
 
@@ -134,3 +157,53 @@ To actually display: create an `NSWindow` + `NSOpenGLView` (or a CAOpenGLLayer),
 bind the existing CGL context to its drawable, and present there. The engine
 already renders egui/glow frames into the context; the bytes are being produced.
 A cheaper interim proof is to `glReadPixels` one rendered frame and write a PNG.
+
+---
+
+## CURRENT BLOCKER: `Error: System error 2 (os error 2)`
+
+The worker exits 1 with this after audio init. Findings so far:
+
+- It is a Rust `io::Error` whose code comes from **`GetLastError()` == 2**
+  (ERROR_FILE_NOT_FOUND) — read at `exe+0x18d9183`, the tail of a
+  `CreateFileW`-based `File::open` wrapper (confirmed by r2: `call CreateFileW;
+  cmp rax,-1; je <read GetLastError>`). So it is a **file** open, not a socket
+  error (socket errors would be WSA 10xxx via WSAGetLastError).
+- Per-thread `lastfail` tracking shows the failing path is **empty** —
+  `CreateFileW("")` → `File::open("")`. The empty open happens twice on the
+  worker; the first is handled (menu is still created afterwards), the second
+  propagates fatally.
+- Not caused by: missing fonts (redirected), the ws2_32 sockets (made real),
+  cross-thread `GetLastError` pollution (made `g_lasterr` `__thread`),
+  `Program Files (x86)` vs `Program Files` (symlinked), missing content/
+  discovery dirs (created + `RECLAIMER_CONTENT_DIR`/`RECLAIMER_DISCOVERY_DIR`
+  set), or `GetFinalPathNameByHandleW` format (`fl=0`, full DOS path returned
+  correctly).
+- Most likely an **unset path** the engine reads and opens directly
+  (`File::open(env::var(...).unwrap_or_default())` → `""`), or a path built
+  from a lookup that returned empty. Hard to isolate because the error thread
+  interleaves with the map-variant enumeration thread in the single combined
+  log.
+
+### Diagnostics available (env-gated)
+- `PELOAD_TRACE_FS=1` — CreateFileW/NtCreateFile/GetFileAttributes/find, with
+  `pid`/`disp`/`acc` tags and ENOENT markers.
+- `PELOAD_TRACE_LE=1` — logs when `GetLastError` returns 2, with the caller
+  module+offset and the thread's last-failed path (`CFW:`/`NT:`/`GFA:`;
+  `<empty>` for empty paths).
+- `PELOAD_TRACE_RPM=1`, `PELOAD_TRACE_VA=1`, `PELOAD_TRACE_ALL=1`.
+
+### Next ideas
+- Add **thread-id** to the FS/LE traces to isolate the error thread's ops from
+  the enumeration thread (the single biggest blocker to pinning it).
+- Or break in lldb on the `CreateFileW` wrapper (`exe+0x18d9140`) with a
+  condition that the first arg (the UTF-16 path) is empty, and walk the Rust
+  stack to the `File::open("")` call site.
+- Then supply whatever path/env the engine expected.
+
+### Separately, for a *visible* screen
+Even past this, nothing is shown yet: `CreateWindowExW` is a stub and GL renders
+to an offscreen CGL context (no `SwapBuffers`/`glClear`/`glDraw*` were ever seen
+in the trace — the engine exits before its present loop). A real Cocoa `NSWindow`
+bound to the CGL context, or a one-frame `glReadPixels` → PNG, is the remaining
+work to actually see the startup screen.
