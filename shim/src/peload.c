@@ -1784,12 +1784,27 @@ static PEXHANDLER MSABI i_RtlVirtualUnwind(uint32_t htype, uint64_t base, uint64
         if(hdata) *hdata = hrva+1; return (PEXHANDLER)(base + *hrva); }
     return 0;
 }
+// The guest runs engine/panic code on a SWITCHED stack (0x30xxxxxxx), but by the
+// time __CxxFrameHandler3 drives RtlUnwindEx the context it hands us can carry a
+// stale host-stack RSP (0x7ff8...) that cannot unwind to the guest-stack target.
+// i_RaiseException stashes the true exception-point context (on the guest stack)
+// here so RtlUnwindEx can unwind from the right stack to reach the catch frame.
+static __thread uint8_t g_exc_ctx[CTXSZ]; static __thread int g_exc_valid;
 // Unwind to TargetFrame, running termination handlers; then jump to TargetIp.
 static void MSABI i_RtlUnwindEx(uint64_t target, void* targetip, EXREC* rec, void* retval, void* ctx, void* hist){
     (void)hist; uint8_t tmp[CTXSZ]; if(!ctx){ ctx=tmp; memset(ctx,0,CTXSZ); seh_capture(ctx); }
     EXREC localrec; if(!rec){ memset(&localrec,0,sizeof localrec); localrec.ExceptionCode=0xC0000027/*STATUS_UNWIND*/; rec=&localrec; }
     rec->ExceptionFlags |= 2; // EXCEPTION_UNWINDING
     uint8_t work[CTXSZ];
+    // If the passed context's RSP is not on the same stack as the target frame
+    // (it is above target, or more than 128MB below it), but our stashed guest
+    // exception context IS a plausible starting point to reach target, unwind
+    // from the stash instead. This bridges the guest's host->switched stack gap.
+    if(g_exc_valid && target){ uint64_t prsp=CTX_RSP(ctx), gsp=CTX_RSP((void*)g_exc_ctx);
+        int passed_ok = prsp && prsp<=target && target-prsp < 0x8000000ull;
+        int stash_ok  = gsp  && gsp <=target && target-gsp  < 0x8000000ull;
+        if(!passed_ok && stash_ok){ memcpy(ctx,g_exc_ctx,CTXSZ);
+            if(getenv("PELOAD_TRACE_SEH")) ws("    [unwind] using stashed guest ctx (passed ctx on wrong stack)\n"); } }
     // Unwinding only ever moves RSP UP (toward the stack base); if a frame's unwind
     // codes are misinterpreted and RSP jumps to a bogus value, reading [RSP] faults.
     // Bound RSP to a sane window above where we started so a lost target can't walk
@@ -1840,6 +1855,10 @@ static void MSABI i_RaiseException(uint32_t code,uint32_t flags,uint32_t n,const
     uint64_t guest_rsp = (uint64_t)__builtin_frame_address(0) + 16;
     uint8_t ctxbuf[CTXSZ]; memset(ctxbuf,0,CTXSZ); void* ctx=ctxbuf; seh_capture(ctx);
     CTX_RIP(ctx)=(uint64_t)guest_rip; CTX_RSP(ctx)=guest_rsp;
+    // Stash the exception-point context (on the guest's switched stack) so a later
+    // RtlUnwindEx driven by __CxxFrameHandler3 can unwind from the correct stack.
+    // Only for C++/Rust throws (the stack-switch case); cleared after dispatch.
+    if(code==0xE06D7363){ memcpy(g_exc_ctx,ctx,CTXSZ); g_exc_valid=1; }
     if(getenv("PELOAD_TRACE_SEH")&&code==0xE06D7363){ char t[128]; int k=snprintf(t,sizeof t,
         "  [raise] thr=0x%x guest_rip=0x%llx guest_rsp=0x%llx main=%d\n",pthread_mach_thread_np(pthread_self()),
         (unsigned long long)(uint64_t)guest_rip,(unsigned long long)guest_rsp,pthread_main_np()); (void)!write(2,t,k);}
@@ -1869,6 +1888,7 @@ static void MSABI i_RaiseException(uint32_t code,uint32_t flags,uint32_t n,const
         if(!CTX_RIP(ctx)) break;
     }
     if(tr) ws("    [seh] dispatch loop ended (unhandled)\n");
+    g_exc_valid=0;   // consumed/unhandled: don't let a later normal unwind use a stale stash
     // Unhandled. For a Rust panic / C++ throw there is nothing more to do; keep
     // the legacy non-fatal return so non-exception RaiseException callers (and
     // early-startup logging) behave as before.
