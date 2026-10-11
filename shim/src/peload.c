@@ -1878,7 +1878,7 @@ static void MSABI i_RaiseException(uint32_t code,uint32_t flags,uint32_t n,const
         (unsigned long long)(uint64_t)guest_rip,(unsigned long long)guest_rsp,pthread_main_np()); (void)!write(2,t,k);}
     if(getenv("PELOAD_TRACE_STACK")&&code==0xE06D7363){ // raw scan: all exe/halo3 return addrs on the stack
         uint64_t sp=guest_rsp; int n=0;
-        for(int i=0;i<4096 && n<40;i++){ uint64_t v=*(uint64_t*)(sp+i*8);
+        for(int i=0;i<16384 && n<120;i++){ uint64_t v=*(uint64_t*)(sp+i*8);
             int e=v>=0x140000000ull&&v<0x142000000ull, h=v>=0x180000000ull&&v<0x182000000ull;
             if(e||h){ char r[64]; int k=snprintf(r,sizeof r,"    stk[%d] %s+0x%llx\n",n,e?"exe":"halo3",(unsigned long long)(v-(e?0x140000000ull:0x180000000ull))); (void)!write(2,r,k); n++; } } }
     EXREC rec; memset(&rec,0,sizeof rec); rec.ExceptionCode=code; rec.ExceptionFlags=flags;
