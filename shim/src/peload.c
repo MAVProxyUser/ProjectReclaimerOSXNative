@@ -1589,8 +1589,8 @@ static int   MSABI i_SetConsoleCtrlHandler(void*h,int add){ (void)h;(void)add; r
 // Sync objects are heap-allocated; the pointer IS the Win32 HANDLE. A magic
 // field lets WaitForSingleObject tell them from fd/process pseudo-handles.
 #define SYNC_MAGIC 0x53796E63u   // 'Sync'
-enum { K_EVENT, K_MUTEX, K_SEMA };
-typedef struct { uint32_t magic; int kind; pthread_mutex_t m; pthread_cond_t c; int signaled, manual; long count, maxc; pthread_t owner; } SyncObj;
+enum { K_EVENT, K_MUTEX, K_SEMA, K_THREAD };
+typedef struct { uint32_t magic; int kind; pthread_mutex_t m; pthread_cond_t c; int signaled, manual; long count, maxc; pthread_t owner; uint32_t tid, exitcode; } SyncObj;
 static SyncObj* sync_new(int kind){ SyncObj*s=calloc(1,sizeof *s); s->magic=SYNC_MAGIC; s->kind=kind;
     pthread_mutex_init(&s->m,0); pthread_cond_init(&s->c,0); return s; }
 static int is_sync(intptr_t hv){ if(hv<0x100000) return 0; SyncObj*s=(SyncObj*)hv; return s && s->magic==SYNC_MAGIC; }
@@ -1690,7 +1690,7 @@ static void MSABI i_WakeByAddressAll(void*a){ wab_ensure(); int b=wab_bucket(a);
 #include <malloc/malloc.h>
 static uint8_t *g_peb_ptr; static uint8_t *g_tls_src; static uint64_t g_tls_raw, g_tls_total;
 typedef uint32_t (MSABI *WinThreadProc)(void*);
-typedef struct { WinThreadProc fn; void *param; } TArg;
+typedef struct { WinThreadProc fn; void *param; SyncObj *done; } TArg;
 static void *thread_tramp(void *a){
     TArg *t=a;
     uint8_t *teb=calloc(1,0x2000);
@@ -1718,18 +1718,27 @@ static void *thread_tramp(void *a){
     // late guest thread-local destructors fault on a NULL TLS pointer. Leak the
     // teb/tarr (a few KB/thread) rather than risk a use-after-free during cleanup.
     __asm__ volatile("movq $0,%%gs:0x60":::"memory");
+    // Signal the thread handle so WaitForSingleObject(hThread) actually blocks
+    // until the thread finishes. Without this, waiting on a thread handle returned
+    // instantly and the engine raced its own worker threads (e.g. parallel map
+    // load) -> corrupted shared state. The handle stays signaled (manual-reset).
+    if(t->done){ pthread_mutex_lock(&t->done->m); t->done->exitcode=r; t->done->signaled=1; pthread_cond_broadcast(&t->done->c); pthread_mutex_unlock(&t->done->m); }
     free(t);
     return (void*)(uintptr_t)r;
 }
 static void* MSABI i_CreateThread(void*attr,uint64_t stack,WinThreadProc start,void*param,uint32_t fl,uint32_t*tid){
     (void)attr;(void)stack;(void)fl;
     if(getenv("PELOAD_NO_THREADS")){ if(tid)*tid=0x7333; return (void*)0x7333; } // diagnostic: don't spawn
-    TArg *t=malloc(sizeof *t); t->fn=start; t->param=param;
-    pthread_t th; if(pthread_create(&th,0,thread_tramp,t)){ free(t); return 0; }
-    if(tid)*tid=(uint32_t)(uintptr_t)th; return (void*)th;
+    SyncObj* done=sync_new(K_THREAD); done->manual=1;              // thread handle = waitable, manual-reset
+    TArg *t=malloc(sizeof *t); t->fn=start; t->param=param; t->done=done;
+    pthread_t th; if(pthread_create(&th,0,thread_tramp,t)){ free(t); done->exitcode=0; done->signaled=1; return 0; }
+    done->owner=th; done->tid=(uint32_t)(uintptr_t)th;
+    if(tid)*tid=done->tid; return done;                           // HANDLE = the SyncObj
 }
-static uint32_t MSABI i_GetThreadId(void*h){ return (uint32_t)(uintptr_t)h; }
-static int MSABI i_GetExitCodeThread(void*h,uint32_t*code){ (void)h; if(code)*code=259; return 1; } // STILL_ACTIVE
+static uint32_t MSABI i_GetThreadId(void*h){ if(is_sync((intptr_t)h)) return ((SyncObj*)h)->tid; return (uint32_t)(uintptr_t)h; }
+static int MSABI i_GetExitCodeThread(void*h,uint32_t*code){
+    if(is_sync((intptr_t)h)){ SyncObj*s=h; if(code)*code = s->signaled? s->exitcode : 259/*STILL_ACTIVE*/; return 1; }
+    if(code)*code=259; return 1; }
 static void* MSABI i_OpenProcess(uint32_t a,int inh,uint32_t pid){ (void)a;(void)inh;(void)pid; return (void*)-1; }
 static int MSABI i_SwitchToThread(void){ sched_yield(); return 1; }
 // CompareStringOrdinal: UTF-16 ordinal compare -> 1/2/3 (LESS/EQUAL/GREATER)
@@ -2008,8 +2017,10 @@ static int    MSABI i_SetFilePointerEx(void*h,int64_t dist,int64_t*newp,uint32_t
     intptr_t hv=(intptr_t)h; if(hv<0x1000) return 0; off_t r=lseek((int)(hv-0x1000),dist, method); if(newp)*newp=r; return r>=0;
 }
 static int    MSABI i_GetFileSizeEx(void*h,int64_t*sz){ intptr_t hv=(intptr_t)h; if(hv<0x1000) return 0; struct stat st; if(fstat((int)(hv-0x1000),&st)) return 0; if(sz)*sz=st.st_size; return 1; }
-static int    MSABI i_CloseHandleReal(void*h){ intptr_t hv=(intptr_t)h; if(hv>=0x1000){ int fd=(int)(hv-0x1000);
-    if(fd<MAXFD){ if(g_fddir[fd]){ closedir(g_fddir[fd]); g_fddir[fd]=0; }
+static int    MSABI i_CloseHandleReal(void*h){ intptr_t hv=(intptr_t)h;
+    if(is_sync(hv)) return 1;   // sync object / thread handle: no-op (leaked; a thread handle may still be live)
+    if(hv>=0x1000 && hv<0x100000){ int fd=(int)(hv-0x1000);
+    if(fd>=0 && fd<MAXFD){ if(g_fddir[fd]){ closedir(g_fddir[fd]); g_fddir[fd]=0; }
         // delete-on-close with Windows last-handle-wins semantics: only remove
         // when no OTHER open handle still references the same path. This lets
         // the client delete scratch sub-dirs (files & dirs) without yanking the
