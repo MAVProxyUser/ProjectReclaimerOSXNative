@@ -193,29 +193,48 @@ static void *make_gl_thunk(void *real){
     static pthread_mutex_t gtm=PTHREAD_MUTEX_INITIALIZER; pthread_mutex_lock(&gtm);
     for(int i=0;i<g_nthunk;i++) if(g_thunk_real[i]==real){ pthread_mutex_unlock(&gtm); return g_thunk_addr[i]; } // cache
     if(getenv("PELOAD_TRACE_GL")){ Dl_info di; if(dladdr(real,&di)&&di.dli_sname){ (void)!write(2,"  [thunk] ",10); (void)!write(2,di.dli_sname,strlen(di.dli_sname)); (void)!write(2,"\n",1); } }
-    if(g_glthoff+64 > 64*8192){ pthread_mutex_unlock(&gtm); return real; }
-    uint8_t *p=g_glthunk+g_glthoff; g_glthoff+=64; int o=0;
+    if(g_glthoff+128 > 128*8192){ pthread_mutex_unlock(&gtm); return real; }
+    uint8_t *p=g_glthunk+g_glthoff; g_glthoff+=128; int o=0;
+    // Win64 -> SysV ABI thunk forwarding up to 12 args. Win64 passes args1-4 in
+    // rcx/rdx/r8/r9 and args5+ on the stack above a 32-byte shadow area; SysV
+    // passes args1-6 in rdi/rsi/rdx/rcx/r8/r9 and args7+ on the stack. The OLD
+    // 6-arg thunk dropped args7+, so e.g. glReadPixels' 7th arg (dst pointer) and
+    // glTexSubImage2D's 9th (pixels) were garbage -> the GL driver scribbled over
+    // the heap. This forwards all 12, so any >6-arg GL entry point is safe.
+    // NB: rdi and rsi are CALLEE-saved in the Win64 ABI (caller-saved in SysV),
+    // so we must save/restore them around the SysV call or the guest's rdi/rsi
+    // get trashed. rbp is set before the saves, so the rbp-relative offsets to the
+    // caller's Win64 stack args are: ret@+8, shadow@+0x10..+0x28, arg5@+0x30, ...
     uint8_t code[]={
-        0x57,                               // push rdi
-        0x56,                               // push rsi
-        0x48,0x83,0xEC,0x08,                // sub rsp,8  (16-align)
-        0x48,0x89,0xCF,                     // mov rdi,rcx   (arg1)
-        0x48,0x89,0xD6,                     // mov rsi,rdx   (arg2)
-        0x4C,0x89,0xC2,                     // mov rdx,r8    (arg3)
-        0x4C,0x89,0xC9,                     // mov rcx,r9    (arg4)
-        0x4C,0x8B,0x44,0x24,0x40,           // mov r8,[rsp+0x40]  (arg5)
-        0x4C,0x8B,0x4C,0x24,0x48,           // mov r9,[rsp+0x48]  (arg6)
+        0x55,                               // push rbp
+        0x48,0x89,0xE5,                     // mov rbp,rsp
+        0x56,                               // push rsi   (Win64 callee-saved)
+        0x57,                               // push rdi   (Win64 callee-saved)
+        0x48,0x83,0xEC,0x40,                // sub rsp,0x40  (6 stack-arg slots; keeps 16-align)
+        0x48,0x89,0xCF,                     // mov rdi,rcx    (arg1)
+        0x48,0x89,0xD6,                     // mov rsi,rdx    (arg2)
+        0x4C,0x89,0xC2,                     // mov rdx,r8     (arg3)
+        0x4C,0x89,0xC9,                     // mov rcx,r9     (arg4)
+        0x4C,0x8B,0x45,0x30,                // mov r8,[rbp+0x30]  (arg5)
+        0x4C,0x8B,0x4D,0x38,                // mov r9,[rbp+0x38]  (arg6)
+        0x48,0x8B,0x45,0x40, 0x48,0x89,0x04,0x24,          // arg7  -> [rsp+0x00]
+        0x48,0x8B,0x45,0x48, 0x48,0x89,0x44,0x24,0x08,     // arg8  -> [rsp+0x08]
+        0x48,0x8B,0x45,0x50, 0x48,0x89,0x44,0x24,0x10,     // arg9  -> [rsp+0x10]
+        0x48,0x8B,0x45,0x58, 0x48,0x89,0x44,0x24,0x18,     // arg10 -> [rsp+0x18]
+        0x48,0x8B,0x45,0x60, 0x48,0x89,0x44,0x24,0x20,     // arg11 -> [rsp+0x20]
+        0x48,0x8B,0x45,0x68, 0x48,0x89,0x44,0x24,0x28,     // arg12 -> [rsp+0x28]
         0x48,0xB8,0,0,0,0,0,0,0,0,          // mov rax, real
         0xFF,0xD0,                          // call rax
-        0x48,0x83,0xC4,0x08,                // add rsp,8
-        0x5E,                               // pop rsi
+        0x48,0x8D,0x65,0xF0,                // lea rsp,[rbp-0x10]  (back to saved rdi)
         0x5F,                               // pop rdi
+        0x5E,                               // pop rsi
+        0x5D,                               // pop rbp
         0xC3                                // ret
     };
     for(size_t i=0;i<sizeof code;i++) p[i]=code[i];
     int immoff=0; for(int i=0;i<(int)sizeof code-1;i++) if(code[i]==0x48&&code[i+1]==0xB8){ immoff=i+2; break; }
     *(uint64_t*)(p+immoff)=(uint64_t)real; (void)o;
-    sys_icache_invalidate(p,64);  // Rosetta: translate the freshly written thunk
+    sys_icache_invalidate(p,128);  // Rosetta: translate the freshly written thunk
     if(g_nthunk<8192){ g_thunk_real[g_nthunk]=real; g_thunk_addr[g_nthunk]=p; g_nthunk++; }
     pthread_mutex_unlock(&gtm);
     return p;
@@ -341,20 +360,114 @@ static void*  MSABI i_GetProcessHeap(void){ return (void*)0x48454150; /* 'HEAP' 
 // We tag the block so HeapFree/Size/ReAlloc recognise it. Slow + VM-heavy; diag only.
 static int g_heapguard=-1;
 static inline int heapguard(void){ if(g_heapguard<0) g_heapguard=getenv("PELOAD_HEAP_GUARD")?1:0; return g_heapguard; }
-static void* hg_alloc(uint64_t n){ uint64_t ps=4096, slack=32, need=n+slack, nb=((need+ps-1)/ps)*ps; if(nb==0) nb=ps;
+#define HG_SLACK 512
+static void* hg_alloc(uint64_t n){ uint64_t ps=4096, slack=HG_SLACK, nb=((n+slack+ps-1)/ps)*ps; if(nb==0) nb=ps;
     uint8_t* m=mmap(0,nb+ps,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANON,-1,0); if(m==MAP_FAILED) return malloc(n?n:1);
-    mprotect(m+nb,ps,PROT_NONE);
-    // leave `slack` bytes between the buffer end and the guard so benign SIMD
-    // over-READS (optimized memcpy reads 16/32B chunks past the end) don't fault;
-    // a real overflow larger than the slack still hits the guard.
-    return m+(nb-n-slack); }
+    // Guard page is READ-ONLY: benign optimized memcpy/memset that over-READS (and
+    // over-WRITES by a few bytes rounding to SIMD width, or Windows heap-granularity
+    // over-use) stays within `slack` and won't fault; an over-WRITE beyond `slack`
+    // (a real heap overflow into the next allocation) faults at the store.
+    mprotect(m+nb,ps,PROT_READ);
+    return m+(nb-n-slack); }   // `slack` bytes between buffer end and guard
+// PELOAD_HEAP_DEBUG: redzone allocator for the GUEST heap (Rust + C++ both go
+// through HeapAlloc here). Each block gets a header (size+magic) + head/tail
+// redzones filled with a canary. On free (and, with PELOAD_HEAP_SCAN, on every
+// alloc for ALL live blocks) we verify the canary; a clobbered byte means an
+// out-of-bounds write, and we report the victim block's size, the overrun offset,
+// and a hexdump of what overwrote it (which usually identifies the source). This
+// finds the corruption that Guard Malloc (broken under Rosetta) and guard pages
+// (false-positive on SIMD over-reads) could not.
+#define HD_MAGIC 0x484432ULL         /* 'HD2' */
+#define HD_RZ    64                  /* redzone bytes each side */
+#define HD_CANARY 0xBE
+static int g_heapdbg=-1;
+static inline int heapdbg(void){ if(g_heapdbg<0) g_heapdbg=getenv("PELOAD_HEAP_DEBUG")?1:0; return g_heapdbg; }
+// Metadata is stored SEPARATELY from the heap buffer (so an overflow can't corrupt
+// our size/list). The user buffer is [head RZ | data | tail RZ]; the 8 bytes right
+// before the user data hold a back-pointer to the HDBlk (the rest of the head RZ is
+// canary). A block whose TAIL redzone is clobbered is the OVERFLOW SOURCE.
+typedef struct HDBlk { uint64_t magic; uint64_t size; uint8_t* buf; struct HDBlk *next,*prev; } HDBlk;
+static HDBlk* g_hdlist; static pthread_mutex_t g_hdm=PTHREAD_MUTEX_INITIALIZER; static uint64_t g_hdcount; static int g_hd_reported;
+static void hd_report(HDBlk*b,const char*when){
+    uint8_t* user=b->buf+HD_RZ; int head=-1; long tail=-1;
+    // count how many bytes of each redzone are clobbered. Benign Windows heap
+    // rounding lets guests use a few bytes past the request, so only flag a redzone
+    // that is clobbered deeply (>= 48 of 64 bytes) — that means the write ran well
+    // past the block, i.e. a real overflow into the adjacent allocation.
+    int tailbad=0; for(uint64_t i=0;i<HD_RZ;i++) if(user[b->size+i]!=HD_CANARY) tailbad++;
+    int headbad=0; for(int i=0;i<HD_RZ-8;i++) if(user[-HD_RZ+i]!=HD_CANARY) headbad++;
+    for(uint64_t i=0;i<HD_RZ;i++) if(user[b->size+i]!=HD_CANARY){ tail=(long)i; break; }
+    for(int i=0;i<HD_RZ-8;i++) if(user[-HD_RZ+i]!=HD_CANARY){ head=i; break; }
+    if(tailbad<48) tail=-1;
+    if(headbad<40) head=-1;
+    if(head<0&&tail<0) return;
+    // skip blocks whose own data is entirely zero: those are downstream VICTIMS of
+    // a big zero-run, not the source. The source has real (non-zero) data then
+    // zeros spilling past its end.
+    if(tail>=0){ int nz=0; uint64_t st=b->size>64?b->size-64:0; for(uint64_t i=st;i<b->size;i++) if(user[i]){ nz=1; break; } if(!nz) return; }
+    char m[320]; int n=snprintf(m,sizeof m,"\n[HEAP-CORRUPT @%s] user=%p size=%llu %s clobbered (+%ld); bytes: ",
+        when,(void*)user,(unsigned long long)b->size, tail>=0?"TAIL(=overflow SOURCE)":"HEAD(=victim)", tail>=0?tail:(long)(head-HD_RZ));
+    (void)!write(2,m,n);
+    uint8_t* z = tail>=0? user+b->size : user-HD_RZ+(head<0?0:head);
+    char hx[160]; int hn=0; for(int i=0;i<40;i++) hn+=snprintf(hx+hn,sizeof hx-hn,"%02x ",z[i]); hx[hn++]='\n'; (void)!write(2,hx,hn);
+    if(tail>=0){ char tb[220]; int tn=snprintf(tb,sizeof tb,"  last 32B of this block's data: ");
+        uint64_t st=b->size>32?b->size-32:0; for(uint64_t i=st;i<b->size;i++) tn+=snprintf(tb+tn,sizeof tb-tn,"%02x ",user[i]); tb[tn++]='\n'; (void)!write(2,tb,tn); }
+}
+static void hd_scan_all(const char*when){ pthread_mutex_lock(&g_hdm); for(HDBlk*b=g_hdlist;b;b=b->next) hd_report(b,when); pthread_mutex_unlock(&g_hdm); }
+static void* hd_alloc(uint64_t n){
+    uint8_t* buf=malloc(HD_RZ+n+HD_RZ); if(!buf) return 0; HDBlk* b=malloc(sizeof(HDBlk)); if(!b){ free(buf); return 0; }
+    b->magic=HD_MAGIC; b->size=n; b->buf=buf;
+    uint8_t* user=buf+HD_RZ;
+    memset(user-HD_RZ,HD_CANARY,HD_RZ-8); *(HDBlk**)(user-8)=b; memset(user+n,HD_CANARY,HD_RZ);
+    pthread_mutex_lock(&g_hdm); b->next=g_hdlist; b->prev=0; if(g_hdlist)g_hdlist->prev=b; g_hdlist=b; uint64_t c=++g_hdcount; pthread_mutex_unlock(&g_hdm);
+    if(getenv("PELOAD_HEAP_SCAN") && (c & 0xFF)==0) hd_scan_all("periodic");
+    return user; }
+static HDBlk* hd_blk(void*user){ if(!user) return 0; HDBlk* b=*(HDBlk**)((uint8_t*)user-8); return (b && b->magic==HD_MAGIC)? b : 0; }
+static void hd_free(void*user){ HDBlk* b=hd_blk(user); if(!b){ free(user); return; } hd_report(b,"free");
+    pthread_mutex_lock(&g_hdm); if(b->prev)b->prev->next=b->next; else g_hdlist=b->next; if(b->next)b->next->prev=b->prev; pthread_mutex_unlock(&g_hdm);
+    b->magic=0; free(b->buf); free(b); }
+// only guard large allocations (the observed overflow victims were >=4KB); small
+// blocks stay on malloc so the millions of tiny allocs don't exhaust VM.
+static inline int hg_want(uint64_t n){ return heapguard() && n>=2048; }
+// track guarded (mmap) pointers so HeapFree can leak them but free() the rest.
+#define HGSET (1u<<19)
+static void* g_hgset[HGSET]; static uint64_t g_hgsz[HGSET]; static pthread_mutex_t g_hgm=PTHREAD_MUTEX_INITIALIZER;
+static void hg_add(void*p,uint64_t n){ pthread_mutex_lock(&g_hgm); uint64_t i=((uintptr_t)p>>4)%HGSET; for(uint32_t k=0;k<HGSET;k++){ if(!g_hgset[i]||g_hgset[i]==(void*)1){g_hgset[i]=p;g_hgsz[i]=n;break;} i=(i+1)%HGSET; } pthread_mutex_unlock(&g_hgm); }
+// returns requested size of the guarded block (and tombstones it), or 0 if not found/not guarded.
+static uint64_t hg_del(void*p){ pthread_mutex_lock(&g_hgm); uint64_t i=((uintptr_t)p>>4)%HGSET,sz=0; for(uint32_t k=0;k<HGSET;k++){ if(g_hgset[i]==p){g_hgset[i]=(void*)1;sz=g_hgsz[i]?g_hgsz[i]:1;break;} if(!g_hgset[i])break; i=(i+1)%HGSET; } pthread_mutex_unlock(&g_hgm); return sz; }
+// If fault address `f` lands in (or just past) a guarded block's guard page,
+// return the owning block's user pointer and requested size — proves a real
+// guest overflow and says by how much. slack=48 matches hg_alloc.
+static void* hg_guardhit(void*f, void**buf, uint64_t*rsz, int64_t*over){
+    uintptr_t fa=(uintptr_t)f; pthread_mutex_lock(&g_hgm);
+    for(uint32_t i=0;i<HGSET;i++){ void*u=g_hgset[i]; if(!u||u==(void*)1) continue;
+        uintptr_t guard=(uintptr_t)u + g_hgsz[i] + HG_SLACK;   // page-aligned guard start
+        if(fa>=guard && fa<guard+4096){ if(buf)*buf=u; if(rsz)*rsz=g_hgsz[i];
+            if(over)*over=(int64_t)(fa - ((uintptr_t)u + g_hgsz[i])); pthread_mutex_unlock(&g_hgm); return u; } }
+    pthread_mutex_unlock(&g_hgm); return 0; }
 static void*  MSABI i_HeapAlloc(void *h, uint32_t fl, uint64_t n){ (void)h;
-    void*p = heapguard()? hg_alloc(n?n:1) : malloc(n?n:1); if(p&&(fl&8)) memset(p,0,n); return p; }
+    if(heapdbg()){ void*p=hd_alloc(n?n:1); if(p&&(fl&8)) memset(p,0,n); return p; }
+    void*p; if(hg_want(n)){ p=hg_alloc(n); if(p) hg_add(p,n); } else p=malloc(n?n:1);
+    if(p&&(fl&8)) memset(p,0,n);
+    { const char*ts=getenv("PELOAD_TRACE_ALLOC"); if(ts && n==(uint64_t)strtoull(ts,0,0)){
+        void*ret=__builtin_return_address(0); char t[96];
+        int k=snprintf(t,sizeof t,"  [ALLOC %llu] p=%p caller=%p\n",(unsigned long long)n,p,ret); (void)!write(2,t,k); } }
+    return p; }
 static void*  MSABI i_HeapReAlloc(void *h, uint32_t fl, void *p, uint64_t n){ (void)h;(void)fl;
-    if(heapguard()){ void*q=hg_alloc(n?n:1); if(p&&q) memcpy(q,p,n); return q; }   // leak old (diag)
+    if(heapdbg()){ HDBlk*b=hd_blk(p); void*q=hd_alloc(n?n:1); if(q&&p){ uint64_t cp = b? (b->size<n?b->size:n) : n; memcpy(q,p,cp); } if(b) hd_free(p); return q; }
+    if(heapguard()){ void*q = hg_want(n)? hg_alloc(n) : malloc(n?n:1); if(q&&hg_want(n)) hg_add(q,n);
+        if(p&&q){ uint64_t osz=hg_del(p);                 // osz>0 => old block was guarded
+            uint64_t cp = osz? (osz<n?osz:n) : (malloc_size(p)<n?malloc_size(p):n); // copy min(old,new): never over-read p
+            memcpy(q,p,cp); if(!osz) free(p); }           // guarded old -> leak; malloc'd old -> free
+        return q; }
     return realloc(p,n?n:1); }
-static int    MSABI i_HeapFree(void *h, uint32_t fl, void *p){ (void)h;(void)fl; if(heapguard()){ return 1; } free(p); return 1; } // guarded blocks: leak (diag)
-static uint64_t MSABI i_HeapSize(void *h, uint32_t fl, void *p){ (void)h;(void)fl; if(heapguard()) return 0; return p? malloc_size(p) : 0; }
+static int    MSABI i_HeapFree(void *h, uint32_t fl, void *p){ (void)h;(void)fl;
+    if(heapdbg()){ hd_free(p); return 1; }
+    if(heapguard()){ if(!hg_del(p)) free(p); return 1; }   // guarded -> leak; else free
+    free(p); return 1; }
+static uint64_t MSABI i_HeapSize(void *h, uint32_t fl, void *p){ (void)h;(void)fl;
+    if(heapdbg()){ HDBlk*b=hd_blk(p); return b? b->size : 0; }
+    if(heapguard()) return 0; return p? malloc_size(p) : 0; }
 static void*  MSABI i_HeapCreate(uint32_t o, uint64_t a, uint64_t b){ (void)o;(void)a;(void)b; return (void*)0x48454150; }
 
 // Virtual memory backed by mmap
@@ -1146,6 +1259,16 @@ static int    MSABI i_DestroyWindow(void*h){ (void)h; return 1; }
 static int64_t MSABI i_DefWindowProcW(void*h,uint32_t m,uint64_t wp,int64_t lp){ (void)h;(void)wp;(void)lp; if(m==0x0081/*WM_NCCREATE*/) return 1; return 0; }
 static int    MSABI i_ShowWindow(void*h,int c){ (void)h;(void)c; return 1; }
 static int    MSABI i_UpdateWindow(void*h){ (void)h; return 1; }
+// The engine's present loop calls MsgWaitForMultipleObjectsEx and only keeps
+// looping (rendering + presenting each frame) when it returns WAIT_TIMEOUT
+// (0x102); any other value makes it exit and tear down the GL context. Return
+// 0x102 after a short sleep (cap the engine's timeout to ~16ms = ~60fps) so the
+// menu/loading-screen keeps rendering instead of exiting after one frame.
+static uint32_t MSABI i_MsgWaitForMultipleObjectsEx(uint32_t n,const void*h,uint32_t ms,uint32_t mask,uint32_t flags){
+    (void)n;(void)h;(void)mask;(void)flags;
+    uint32_t cap=ms; if(cap==0xFFFFFFFFu||cap>16) cap=16;
+    if(cap){ struct timespec ts={0,(long)cap*1000000L}; nanosleep(&ts,0); }
+    return 0x102; /* WAIT_TIMEOUT */ }
 static int    MSABI i_PeekMessageW(void*m,void*h,uint32_t f1,uint32_t f2,uint32_t r){ (void)m;(void)h;(void)f1;(void)f2;(void)r; return 0; } // no messages
 static int    MSABI i_GetMessageW(void*m,void*h,uint32_t f1,uint32_t f2){ (void)m;(void)h;(void)f1;(void)f2; return 0; } // WM_QUIT
 static int64_t MSABI i_DispatchMessageW(const void*m){ (void)m; return 0; }
@@ -1356,8 +1479,50 @@ static void MSABI i_glRenderbufferStorage(unsigned t,unsigned ifmt,int w,int h){
     char s[140]; snprintf(s,sizeof s,"  [glRenderbufferStorage] ifmt=0x%x %dx%d err=0x%x\n",ifmt,w,h,gl_err()); ws(s); }
 static void MSABI i_glRenderbufferStorageMultisample(unsigned t,int samp,unsigned ifmt,int w,int h){ samp=gl_clamp_samples(samp); gl_err(); void(*r)(unsigned,int,unsigned,int,int)=dlsym(RTLD_DEFAULT,"glRenderbufferStorageMultisample"); if(r)r(t,samp,ifmt,w,h);
     char s[160]; snprintf(s,sizeof s,"  [glRenderbufferStorageMultisample] samples=%d ifmt=0x%x %dx%d err=0x%x\n",samp,ifmt,w,h,gl_err()); ws(s); }
-static void MSABI i_glTexImage2D(unsigned t,int l,int ifmt,int w,int h,int b,unsigned fmt,unsigned type,const void*d){ void(*r)(unsigned,int,int,int,int,int,unsigned,unsigned,const void*)=dlsym(RTLD_DEFAULT,"glTexImage2D"); if(r)r(t,l,ifmt,w,h,b,fmt,type,d);
-    if(getenv("PELOAD_TRACE_GL")){ char s[160]; snprintf(s,sizeof s,"  [glTexImage2D] ifmt=0x%x %dx%d fmt=0x%x type=0x%x\n",ifmt,w,h,fmt,type); ws(s);} }
+static void gl_check_src(const char*who,int w,int h,unsigned fmt,unsigned type,const void*d); // fwd
+static void MSABI i_glTexImage2D(unsigned t,int l,int ifmt,int w,int h,int b,unsigned fmt,unsigned type,const void*d){
+    if(d && getenv("PELOAD_TRACE_TEX")) gl_check_src("glTexImage2D",w,h,fmt,type,d);
+    void(*r)(unsigned,int,int,int,int,int,unsigned,unsigned,const void*)=dlsym(RTLD_DEFAULT,"glTexImage2D"); if(r)r(t,l,ifmt,w,h,b,fmt,type,d);
+    if(getenv("PELOAD_TRACE_GL")){ char s[160]; snprintf(s,sizeof s,"  [glTexImage2D] ifmt=0x%x %dx%d fmt=0x%x type=0x%x d=%p\n",ifmt,w,h,fmt,type,d); ws(s);} }
+// bytes-per-pixel for the common GL client format/type combos used by glow uploads
+static int gl_bpp(unsigned fmt,unsigned type){
+    int comp = (fmt==0x1903/*RED*/||fmt==0x1902/*DEPTH*/)?1 : (fmt==0x8227/*RG*/)?2 :
+               (fmt==0x1907/*RGB*/||fmt==0x80E0/*BGR*/)?3 :
+               (fmt==0x1908/*RGBA*/||fmt==0x80E1/*BGRA*/)?4 : 4;
+    int sz = (type==0x1401/*UBYTE*/||type==0x1400/*BYTE*/)?1 :
+             (type==0x1403/*USHORT*/||type==0x1402/*SHORT*/||type==0x140B/*HALF*/)?2 :
+             (type==0x1405/*UINT*/||type==0x1406/*FLOAT*/||type==0x8368/*UINT_8_8_8_8_REV*/||type==0x8367)?4 : 1;
+    // packed pixel types: one unit covers all components
+    if(type==0x8368||type==0x8367||type==0x8035||type==0x8033) return sz;
+    return comp*sz; }
+// Report whether source pointer `d` is a guarded block too small for w*h bytes.
+static void gl_check_src(const char*who,int w,int h,unsigned fmt,unsigned type,const void*d){
+    if(!d||!heapguard()) return; void*buf=0; uint64_t rsz=0; int64_t over=0;
+    // find the guarded block CONTAINING d (not just its guard page)
+    pthread_mutex_lock(&g_hgm);
+    for(uint32_t i=0;i<HGSET;i++){ void*u=g_hgset[i]; if(!u||u==(void*)1) continue;
+        if((uintptr_t)d>=(uintptr_t)u && (uintptr_t)d<(uintptr_t)u+g_hgsz[i]){ buf=u; rsz=g_hgsz[i]; break; } }
+    pthread_mutex_unlock(&g_hgm);
+    int bpp=gl_bpp(fmt,type); long long need=(long long)w*h*bpp;
+    char s[200]; int n=snprintf(s,sizeof s,"  [%s] %dx%d fmt=0x%x type=0x%x bpp=%d need=%lld src=%p%s",
+        who,w,h,fmt,type,bpp,need,d, buf?" GUARDED-BUF":"");
+    if(buf) n+=snprintf(s+n,sizeof s-n," buf=%p sz=%llu %s\n",buf,(unsigned long long)rsz, (need>(long long)rsz)?"*** TOO SMALL ***":"ok");
+    else n+=snprintf(s+n,sizeof s-n,"\n");
+    (void)over; (void)!write(2,s,n); }
+static void MSABI i_glTexSubImage2D(unsigned t,int l,int xo,int yo,int w,int h,unsigned fmt,unsigned type,const void*d){
+    if(getenv("PELOAD_TRACE_TEX")) gl_check_src("glTexSubImage2D",w,h,fmt,type,d);
+    void(*r)(unsigned,int,int,int,int,int,unsigned,unsigned,const void*)=dlsym(RTLD_DEFAULT,"glTexSubImage2D"); if(r)r(t,l,xo,yo,w,h,fmt,type,d); }
+static void MSABI i_glTextureSubImage2D(unsigned tex,int l,int xo,int yo,int w,int h,unsigned fmt,unsigned type,const void*d){
+    if(getenv("PELOAD_TRACE_TEX")) gl_check_src("glTextureSubImage2D",w,h,fmt,type,d);
+    void(*r)(unsigned,int,int,int,int,int,unsigned,unsigned,const void*)=dlsym(RTLD_DEFAULT,"glTextureSubImage2D"); if(r)r(tex,l,xo,yo,w,h,fmt,type,d); }
+static void MSABI i_glReadPixels(int x,int y,int w,int h,unsigned fmt,unsigned type,void*d){
+    if(getenv("PELOAD_TRACE_TEX")) gl_check_src("glReadPixels(DST)",w,h,fmt,type,d);
+    void(*r)(int,int,int,int,unsigned,unsigned,void*)=dlsym(RTLD_DEFAULT,"glReadPixels"); if(r)r(x,y,w,h,fmt,type,d); }
+static void MSABI i_glGetTexImage(unsigned tgt,int l,unsigned fmt,unsigned type,void*d){
+    if(getenv("PELOAD_TRACE_TEX")){ // query the bound texture's level dimensions for the size check
+        void(*gl)(unsigned,int,unsigned,int*)=dlsym(RTLD_DEFAULT,"glGetTexLevelParameteriv");
+        int w=0,h=0; if(gl){ gl(tgt,l,0x1000/*TEX_WIDTH*/,&w); gl(tgt,l,0x1001/*TEX_HEIGHT*/,&h);} gl_check_src("glGetTexImage(DST)",w,h,fmt,type,d); }
+    void(*r)(unsigned,int,unsigned,unsigned,void*)=dlsym(RTLD_DEFAULT,"glGetTexImage"); if(r)r(tgt,l,fmt,type,d); }
 static void gl_capture(const char*tag); // fwd
 static void gl_capture_wh(const char*tag,int w,int h,int isfbo); // fwd
 // Resolve-capture: blit the current draw FBO (possibly multisample) into our own
@@ -1423,6 +1588,10 @@ static void* gl_or_missing(const char*name){
     if(!strcmp(name,"glRenderbufferStorage")) return (void*)i_glRenderbufferStorage;
     if(!strcmp(name,"glRenderbufferStorageMultisample")) return (void*)i_glRenderbufferStorageMultisample;
     if(!strcmp(name,"glTexImage2D")) return (void*)i_glTexImage2D;
+    if(!strcmp(name,"glTexSubImage2D")) return (void*)i_glTexSubImage2D;
+    if(!strcmp(name,"glTextureSubImage2D")) return (void*)i_glTextureSubImage2D;
+    if(!strcmp(name,"glReadPixels")) return (void*)i_glReadPixels;
+    if(!strcmp(name,"glGetTexImage")) return (void*)i_glGetTexImage;
     if(!strcmp(name,"glGetString")) return (void*)i_glGetString;
     if(!strcmp(name,"glShaderSource")||!strcmp(name,"glShaderSourceARB")) return (void*)i_glShaderSource;
     if(!strcmp(name,"glCompileShader")||!strcmp(name,"glCompileShaderARB")) return (void*)i_glCompileShader;
@@ -2456,6 +2625,7 @@ static void *resolve_impl(const char *fn){
         {"DefWindowProcW",(void*)i_DefWindowProcW},
         {"ShowWindow",(void*)i_ShowWindow},
         {"UpdateWindow",(void*)i_UpdateWindow},
+        {"MsgWaitForMultipleObjectsEx",(void*)i_MsgWaitForMultipleObjectsEx},
         {"PeekMessageW",(void*)i_PeekMessageW},
         {"GetMessageW",(void*)i_GetMessageW},
         {"DispatchMessageW",(void*)i_DispatchMessageW},
@@ -2805,6 +2975,35 @@ static int seh_dispatch_hw(uint32_t code, EXREC* rec, void* ctx){
 // null-pointer GL call or a guest-code fault is immediately identifiable).
 static void crashsig(int sig, siginfo_t *info, void *ucv){
     ucontext_t *uc=ucv; uint64_t rip = uc? (uint64_t)uc->uc_mcontext->__ss.__rip : 0;
+    // If this fault is a write/read into a guard page, name the owning block +
+    // overflow distance BEFORE handing off to the guest VEH (which may exit).
+    if((sig==SIGSEGV||sig==SIGBUS) && info && info->si_addr && heapguard()){
+        void*buf=0; uint64_t rsz=0; int64_t over=0;
+        if(hg_guardhit(info->si_addr,&buf,&rsz,&over)){
+            char gb[160]; int n=snprintf(gb,sizeof gb,
+              "  [GUARD-HIT] faultaddr=%p in guard of buf=%p reqsize=%llu overflow=+%lld bytes rip=0x%llx\n",
+              info->si_addr,buf,(unsigned long long)rsz,(long long)over,(unsigned long long)rip);
+            (void)!write(2,gb,n);
+            { Dl_info di; if(dladdr((void*)rip,&di)){ char db[256]; int k=snprintf(db,sizeof db,
+                "      fault-rip in %s : %s +0x%llx\n", di.dli_fname?di.dli_fname:"?",
+                di.dli_sname?di.dli_sname:"?", (unsigned long long)((uint64_t)rip-(uint64_t)di.dli_saddr));
+                (void)!write(2,db,k); } }
+            // Scan the stack for the first exe-range (0x140000000..0x142000000)
+            // return address = the guest function that invoked the faulting copy.
+            if(uc){ uint64_t sp=(uint64_t)uc->uc_mcontext->__ss.__rsp;
+                uint64_t r_rcx=uc->uc_mcontext->__ss.__rcx, r_rdx=uc->uc_mcontext->__ss.__rdx,
+                         r_r8=uc->uc_mcontext->__ss.__r8, r_rdi=uc->uc_mcontext->__ss.__rdi,
+                         r_rsi=uc->uc_mcontext->__ss.__rsi;
+                char rb[200]; int k=snprintf(rb,sizeof rb,
+                    "      regs rdi=0x%llx rsi=0x%llx rdx=0x%llx rcx=0x%llx r8=0x%llx rsp=0x%llx\n",
+                    (unsigned long long)r_rdi,(unsigned long long)r_rsi,(unsigned long long)r_rdx,(unsigned long long)r_rcx,(unsigned long long)r_r8,(unsigned long long)sp); (void)!write(2,rb,k);
+                int found=0;
+                for(int i=0;i<512 && found<6;i++){ uint64_t v=*(uint64_t*)(sp+i*8);
+                    int exe = v>=0x140000000ull && v<0x142000000ull;
+                    int h3  = v>=0x180000000ull && v<0x182000000ull;
+                    if(exe||h3){ int kk=snprintf(rb,sizeof rb,"      guest-ret[%d] @sp+0x%x = %s+0x%llx\n",
+                        found,i*8, exe?"exe":"halo3", (unsigned long long)(v-(exe?0x140000000ull:0x180000000ull)));
+                        (void)!write(2,rb,kk); found++; } } } } }
     // PELOAD_SURVIVE: for a non-main thread fault, park BEFORE handing it to the
     // engine's exception handler (which would ExitProcess). This keeps halo3's
     // D3D worker-thread faults from killing the process so the OpenGL menu thread
@@ -2915,8 +3114,8 @@ int main(int argc, char **argv){
     g_pool_exec = 1;
     g_trpool = mmap(0, 96*8192, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANON, -1, 0);
     mprotect(g_trpool, 96*8192, PROT_READ|PROT_EXEC); g_trexec = 1;
-    g_glthunk = mmap(0, 64*8192, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANON, -1, 0);
-    mprotect(g_glthunk, 64*8192, PROT_READ|PROT_WRITE|PROT_EXEC); g_glth_exec = 0; // permanent RWX (thread-safe; no toggle)
+    g_glthunk = mmap(0, 128*8192, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANON, -1, 0);
+    mprotect(g_glthunk, 128*8192, PROT_READ|PROT_WRITE|PROT_EXEC); g_glth_exec = 0; // permanent RWX (thread-safe; no toggle)
 
     // ---- TEB/PEB via %gs overlay, set up BEFORE any guest code runs ----
     static uint8_t teb[0x2000] __attribute__((aligned(16)));
