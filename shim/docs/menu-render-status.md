@@ -1,4 +1,38 @@
-# Where the menu render stands (2026-10-11, session 2 — post-SEH)
+# Where the render stands (2026-10-11, session 3 — null D3D11 + map loads)
+
+## Session-3 breakthrough: halo3 loads the game with a null D3D11
+
+Built a minimal **null D3D11** (device/context/resources/views/swapchain, Map
+returns real sized buffers, D3DCompile/Reflect stubbed). With it, halo3 now:
+- creates its D3D11 device, buffers/textures/views, input layouts, shaders;
+- **loads the full Guardian map** — "Merged 130_epilogue.map with the multiplayer
+  characters from guardian ... 2052 tags" — and runs shell init.
+
+It still does not present. The remaining blocker is a **timing-dependent data
+race** in `halo3_shell_stage_5`: non-deterministic crashes (glow `glDeleteProgram
+not loaded`, BTreeMap `unwrap None`, `free()` heap-corruption abort). Proof it's a
+race not a static overflow: slowing execution (MallocCheckHeap) advances materially
+further; our D3D guard pages + Guard Malloc show no buffer overflow of our own
+allocations.
+
+Concurrency bugs fixed this session (all real, all kept):
+- **Interlocked SList** (halo3's lock-free pools) was non-atomic -> now mutex-serialized.
+- **TLS** (TlsAlloc/Get/SetValue) used a shared global array -> now per-thread in the TEB.
+- Many **D3D resource-sizing heap overflows** (format-aware texture footprint,
+  GetDesc per-type size, Map DepthPitch = one slice, backbuffer size).
+- HeapSize returned 0 -> malloc_size.
+
+At least one more concurrency issue remains (the race still reproduces). Candidates
+to investigate next: SuspendThread/ResumeThread are no-ops (if the engine uses them
+to coordinate/safepoint threads, that races); a genuine engine race exposed by
+macOS/Rosetta thread scheduling (SetThreadPriority is a no-op); or a subtle issue
+in a shared-memory structure between halo3 (C++) and Reclaimer (Rust) via the shell
+callbacks. Repro: run several times; ~1/3 hit each failure mode. Env `PELOAD_D3D_GUARD`
+guards D3D buffers; `PELOAD_SURVIVE` parks faulted non-main threads.
+
+---
+
+# Where the menu render stood (2026-10-11, session 2 — post-SEH)
 
 ## TL;DR
 
