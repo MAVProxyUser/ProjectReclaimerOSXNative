@@ -31,6 +31,7 @@
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <mach/mach_time.h>
+#include <time.h>
 
 // ---- raw logging (no libc TLS dependency; safe after we touch %gs) ----
 static void w(const char *s, long n){ (void)!write(2, s, n); }
@@ -126,8 +127,13 @@ static int    MSABI i_QueryPerformanceFrequency(uint64_t *f){ if(f) *f=100000000
 static uint32_t MSABI i_GetCurrentThreadId(void){ return 0x1000; } // single-threaded startup
 static uint32_t MSABI i_GetCurrentProcessId(void){ return (uint32_t)getpid(); }
 static void   MSABI i_InitializeSListHead(void *h){ if(h) memset(h,0,16); }
-static uint32_t MSABI i_GetLastError(void){ return 0; }
-static void   MSABI i_SetLastError(uint32_t e){ (void)e; }
+#include <errno.h>
+static uint32_t g_lasterr = 0;
+static uint32_t win_err(void){ switch(errno){ case ENOENT: return 2; /*FILE_NOT_FOUND*/
+    case EACCES: case EPERM: return 5; /*ACCESS_DENIED*/ case EEXIST: return 80; /*FILE_EXISTS*/
+    case ENOTDIR: return 3; /*PATH_NOT_FOUND*/ default: return 1; } }
+static uint32_t MSABI i_GetLastError(void){ return g_lasterr; }
+static void   MSABI i_SetLastError(uint32_t e){ g_lasterr=e; }
 
 // CRT argv/environ accessors
 static char*** MSABI i_p_argv(void){ static char **a; a=g_argv; return &a; }
@@ -194,12 +200,11 @@ static int    MSABI i_TlsFree(uint32_t i){ (void)i; return 1; }
 // console/file I/O: pseudo-handles 1/2/3 == stdin/stdout/stderr
 static void*  MSABI i_GetStdHandle(uint32_t id){ return (void*)(intptr_t)(id==(uint32_t)-10?1: id==(uint32_t)-11?2: id==(uint32_t)-12?3: 0); }
 static int    MSABI i_WriteFile(void *h, const void *buf, uint32_t n, uint32_t *wr, void *ov){
-    (void)ov; int fd = (h==(void*)2)?1 : (h==(void*)3)?2 : -1; long k = fd>=0? write(fd,buf,n) : 0; if(wr)*wr=(uint32_t)(k<0?0:k); return fd>=0; }
+    (void)ov; intptr_t hv=(intptr_t)h; int fd = (hv==2)?1 : (hv==3)?2 : (hv>=0x1000)?(int)(hv-0x1000) : -1;
+    long k = fd>=0? write(fd,buf,n) : 0; if(wr)*wr=(uint32_t)(k<0?0:k); return fd>=0; }
 static int    MSABI i_WriteConsoleW(void *h, const uint16_t *s, uint32_t n, uint32_t *wr, void *rsv){
     (void)rsv; int fd=(h==(void*)3)?2:1; for(uint32_t i=0;i<n;i++){ char c=(s[i]<128)?(char)s[i]:'?'; (void)!write(fd,&c,1);} if(wr)*wr=n; return 1; }
-static uint32_t MSABI i_GetFileType(void *h){ (void)h; return 2; } // FILE_TYPE_CHAR
-static int    MSABI i_CloseHandle(void *h){ (void)h; return 1; }
-static void*  MSABI i_CreateFileW(void *a,uint32_t b,uint32_t c,void*d,uint32_t e,uint32_t f,void*g){ (void)a;(void)b;(void)c;(void)d;(void)e;(void)f;(void)g; return (void*)-1; }
+static uint32_t MSABI i_GetFileType(void *h){ intptr_t hv=(intptr_t)h; return hv>=0x1000? 1 : 2; } // DISK : CHAR
 static int    MSABI i_FlushFileBuffers(void *h){ (void)h; return 1; }
 static void*  MSABI i_GetCurrentProcess(void){ return (void*)-1; }
 static void*  MSABI i_GetCurrentThread(void){ return (void*)-2; }
@@ -230,7 +235,6 @@ static void   MSABI i_GetSystemInfo(void *si){ if(si){ memset(si,0,48); *(uint32
 static void   MSABI i_ExitProcess(uint32_t c){ _exit((int)c); }
 static void   MSABI i_TerminateProcess(void *h,uint32_t c){ (void)h; _exit((int)c); }
 static uint32_t MSABI i_GetModuleFileNameW(void*m,uint16_t*buf,uint32_t sz){ (void)m; uint32_t i=0; for(; i<sz && g_cmdlineW[i]; i++) buf[i]=g_cmdlineW[i]; if(i<sz) buf[i]=0; return i; }
-static uint32_t MSABI i_GetEnvironmentVariableW(const uint16_t*n,uint16_t*v,uint32_t sz){ (void)n;(void)v;(void)sz; return 0; }
 static void   MSABI i_GetStartupInfoW(void *si){ if(si) memset(si,0,104); }
 // RtlPcToFileHeader: return the base of the loaded image containing Pc.
 static void*  MSABI i_RtlPcToFileHeader(void *pc, void **base){
@@ -250,11 +254,20 @@ static int    MSABI i_FreeEnvironmentStringsW(void*p){ (void)p; return 1; }
 static uint32_t MSABI i_GetTickCount(void){ return (uint32_t)(mach_absolute_time()/1000000ULL); }
 // NtWriteFile: route writes to our stdin/out/err pseudo-handles (1/2/3)
 static int MSABI i_NtWriteFile(void*h,void*ev,void*apc,void*apcctx,void*iosb,const void*buf,uint32_t len,void*off,void*key){
-    (void)ev;(void)apc;(void)apcctx;(void)off;(void)key;
-    int fd = (h==(void*)2)?1 : (h==(void*)3)?2 : (h==(void*)1)?-1 : 1;
-    long k = fd>=0? write(fd,buf,len) : len;
+    (void)ev;(void)apc;(void)apcctx;(void)key; intptr_t hv=(intptr_t)h;
+    int fd = (hv==2)?1 : (hv==3)?2 : (hv>=0x1000)?(int)(hv-0x1000) : -1;
+    int64_t o = off? *(int64_t*)off : -1; long k;
+    if(fd>=0 && hv>=0x1000 && o>=0) k=pwrite(fd,buf,len,(off_t)o);
+    else k = fd>=0? write(fd,buf,len) : len;
     if(iosb){ ((uint64_t*)iosb)[0]=0; ((uint64_t*)iosb)[1]=(uint64_t)(k<0?0:k); }
-    return 0; // STATUS_SUCCESS
+    return k<0 ? (int)0xC0000008 : 0; // STATUS_INVALID_HANDLE : SUCCESS
+}
+static int MSABI i_NtReadFile(void*h,void*ev,void*apc,void*apcctx,void*iosb,void*buf,uint32_t len,int64_t*off,void*key){
+    (void)ev;(void)apc;(void)apcctx;(void)key; intptr_t hv=(intptr_t)h;
+    long k=-1; if(hv>=0x1000){ int fd=(int)(hv-0x1000); k = (off&&*off>=0)? pread(fd,buf,len,*off) : read(fd,buf,len); }
+    if(iosb){ ((uint64_t*)iosb)[0]= (k<0)?0xC0000008ULL:0; ((uint64_t*)iosb)[1]=(uint64_t)(k<0?0:k); }
+    if(k==0) return (int)0xC0000011; // STATUS_END_OF_FILE
+    return k<0 ? (int)0xC0000008 : 0;  // STATUS_INVALID_HANDLE : SUCCESS
 }
 static uint32_t MSABI i_GetConsoleMode(void*h,uint32_t*m){ (void)h; if(m)*m=0; return 1; }
 static uint32_t MSABI i_SetConsoleMode(void*h,uint32_t m){ (void)h;(void)m; return 1; }
@@ -262,6 +275,78 @@ static int MSABI i_SetThreadStackGuarantee(uint32_t*s){ (void)s; return 1; }
 static int MSABI i_FreeLibrary(void*h){ (void)h; return 1; }
 static uint32_t MSABI i_GetModuleFileNameA(void*m,char*buf,uint32_t sz){ (void)m; uint32_t i=0; for(; i<sz && g_cmdlineA[i]; i++) buf[i]=g_cmdlineA[i]; if(i<sz) buf[i]=0; return i; }
 static uint32_t MSABI i_GetConsoleOutputCP(void){ return 65001; }
+static int   MSABI i_SetConsoleCtrlHandler(void*h,int add){ (void)h;(void)add; return 1; }
+static void* MSABI i_CreateSemaphoreA(void*sec,long init,long max,const char*nm){ (void)sec;(void)init;(void)max;(void)nm; return (void*)0x5e4a; }
+static void* MSABI i_CreateSemaphoreW(void*sec,long init,long max,const uint16_t*nm){ (void)sec;(void)init;(void)max;(void)nm; return (void*)0x5e4a; }
+static int   MSABI i_ReleaseSemaphore(void*h,long c,long*prev){ (void)h;(void)c;(void)prev; return 1; }
+static void* MSABI i_CreateEventW(void*sec,int man,int sig,const uint16_t*nm){ (void)sec;(void)man;(void)sig;(void)nm; return (void*)0x5e40; }
+static int   MSABI i_SetEvent(void*h){ (void)h; return 1; }
+static int   MSABI i_ResetEvent(void*h){ (void)h; return 1; }
+static uint32_t MSABI i_WaitForSingleObject(void*h,uint32_t ms){ (void)h;(void)ms; return 0; } // WAIT_OBJECT_0
+// ---- threads: back Win32 CreateThread with pthreads; each gets its own TEB
+// (per-thread %gs) + a fresh copy of the static TLS block. ----
+#include <pthread.h>
+static uint8_t *g_peb_ptr; static uint8_t *g_tls_src; static uint64_t g_tls_raw, g_tls_total;
+typedef uint32_t (MSABI *WinThreadProc)(void*);
+typedef struct { WinThreadProc fn; void *param; } TArg;
+static void *thread_tramp(void *a){
+    TArg *t=a;
+    uint8_t *teb=calloc(1,0x2000);
+    void **tarr=calloc(128,sizeof(void*));
+    if(g_tls_total){ uint8_t *blk=malloc(g_tls_total); if(g_tls_raw) memcpy(blk,g_tls_src,g_tls_raw); if(g_tls_total>g_tls_raw) memset(blk+g_tls_raw,0,g_tls_total-g_tls_raw); tarr[0]=blk; }
+    *(uint64_t*)(teb+0x30)=(uint64_t)teb; *(uint64_t*)(teb+0x60)=(uint64_t)g_peb_ptr; *(uint64_t*)(teb+0x58)=(uint64_t)tarr;
+    __asm__ volatile("movq %0,%%gs:0x30"::"r"((uint64_t)teb));
+    __asm__ volatile("movq %0,%%gs:0x60"::"r"((uint64_t)g_peb_ptr));
+    __asm__ volatile("movq %0,%%gs:0x58"::"r"((uint64_t)tarr));
+    uint32_t r = t->fn ? t->fn(t->param) : 0; free(t); return (void*)(uintptr_t)r;
+}
+static void* MSABI i_CreateThread(void*attr,uint64_t stack,WinThreadProc start,void*param,uint32_t fl,uint32_t*tid){
+    (void)attr;(void)stack;(void)fl; TArg *t=malloc(sizeof *t); t->fn=start; t->param=param;
+    pthread_t th; if(pthread_create(&th,0,thread_tramp,t)){ free(t); return 0; }
+    if(tid)*tid=(uint32_t)(uintptr_t)th; return (void*)th;
+}
+static uint32_t MSABI i_GetThreadId(void*h){ return (uint32_t)(uintptr_t)h; }
+static int MSABI i_GetExitCodeThread(void*h,uint32_t*code){ (void)h; if(code)*code=259; return 1; } // STILL_ACTIVE
+static uint32_t MSABI i_WaitForMultipleObjects(uint32_t n,void*h,int all,uint32_t ms){ (void)n;(void)h;(void)all;(void)ms; return 0; }
+static void* MSABI i_OpenProcess(uint32_t a,int inh,uint32_t pid){ (void)a;(void)inh;(void)pid; return (void*)-1; }
+static int MSABI i_SwitchToThread(void){ sched_yield(); return 1; }
+// CompareStringOrdinal: UTF-16 ordinal compare -> 1/2/3 (LESS/EQUAL/GREATER)
+static uint32_t MSABI i_GetTempPathW(uint32_t n,uint16_t*buf){ const char*t="C:\\ReclaimerCache\\Temp\\"; uint32_t i=0; for(; t[i]&&i<n-1;i++) buf[i]=(uint8_t)t[i]; buf[i]=0; return i; }
+static uint32_t MSABI i_GetTempPath2W(uint32_t n,uint16_t*buf){ return i_GetTempPathW(n,buf); }
+static int MSABI i_GetFileInformationByHandleEx(void*h,int cls,void*info,uint32_t sz){ (void)h;(void)cls;(void)sz; if(info) memset(info,0,sz<64?sz:64); return 1; }
+static int MSABI i_CompareStringOrdinal(const uint16_t*a,int ca,const uint16_t*b,int cb,int ic){
+    int la = ca<0? ({int n=0; while(a[n])n++; n;}) : ca;
+    int lb = cb<0? ({int n=0; while(b[n])n++; n;}) : cb;
+    for(int i=0;i<la&&i<lb;i++){ uint16_t x=a[i],y=b[i]; if(ic){ if(x>='A'&&x<='Z')x+=32; if(y>='A'&&y<='Z')y+=32; }
+        if(x<y) return 1; if(x>y) return 3; }
+    if(la<lb) return 1; if(la>lb) return 3; return 2;
+}
+// OS randomness (Rust getrandom / community keypair): fill with arc4random
+static long MSABI i_BCryptGenRandom(void*alg,uint8_t*buf,uint32_t n,uint32_t fl){ (void)alg;(void)fl; arc4random_buf(buf,n); return 0; }
+static int  MSABI i_ProcessPrng(uint8_t*buf,uint64_t n){ arc4random_buf(buf,n); return 1; }
+static int  MSABI i_RtlGenRandom(void*buf,uint32_t n){ arc4random_buf(buf,n); return 1; }
+static char* win2unix(const uint16_t *w, char *out, int outsz); // fwd (defined in FS block)
+// file locking: single process, so locks always succeed
+static int  MSABI i_LockFileEx(void*h,uint32_t fl,uint32_t r,uint32_t lo,uint32_t hi,void*ov){ (void)h;(void)fl;(void)r;(void)lo;(void)hi;(void)ov; return 1; }
+static int  MSABI i_UnlockFileEx(void*h,uint32_t r,uint32_t lo,uint32_t hi,void*ov){ (void)h;(void)r;(void)lo;(void)hi;(void)ov; return 1; }
+static int  MSABI i_LockFile(void*h,uint32_t a,uint32_t b,uint32_t c,uint32_t d){ (void)h;(void)a;(void)b;(void)c;(void)d; return 1; }
+static int  MSABI i_UnlockFile(void*h,uint32_t a,uint32_t b,uint32_t c,uint32_t d){ (void)h;(void)a;(void)b;(void)c;(void)d; return 1; }
+static int  MSABI i_FlushViewOfFile(void*a,uint64_t b){ (void)a;(void)b; return 1; }
+// SetEndOfFile / SetFileInformationByHandle: truncate to current offset
+static int  MSABI i_SetEndOfFile(void*h){ intptr_t hv=(intptr_t)h; if(hv<0x1000) return 1; int fd=(int)(hv-0x1000); off_t cur=lseek(fd,0,SEEK_CUR); if(cur>=0) (void)!ftruncate(fd,cur); return 1; }
+static int  MSABI i_MoveFileExW(const uint16_t*from,const uint16_t*to,uint32_t fl){ (void)fl; char a[2048],b[2048]; char A[2048],B[2048]; win2unix(from,A,sizeof A); if(!to) return unlink(A)==0; win2unix(to,B,sizeof B); (void)a;(void)b; return rename(A,B)==0; }
+static int  MSABI i_DeleteFileW(const uint16_t*w){ char p[2048]; return unlink(win2unix(w,p,sizeof p))==0 || 1; }
+static void* MSABI i_LocalAlloc(uint32_t fl,uint64_t n){ void*p=malloc(n?n:1); if(p&&(fl&0x40)) memset(p,0,n); return p; }
+static void* MSABI i_LocalFree(void*p){ free(p); return 0; }
+// DPAPI: no Windows user to bind to, so seal == copy (round-trips correctly,
+// which is all the local community key needs). DATA_BLOB = {u32 cb; u8* p;}.
+typedef struct { uint32_t cb; uint8_t *p; } DBLOB;
+static int MSABI i_CryptProtectData(DBLOB*in,const uint16_t*d,DBLOB*ent,void*r,void*pr,uint32_t fl,DBLOB*out){
+    (void)d;(void)ent;(void)r;(void)pr;(void)fl; if(!in||!out) return 0;
+    out->p=malloc(in->cb?in->cb:1); out->cb=in->cb; if(in->cb) memcpy(out->p,in->p,in->cb); return 1; }
+static int MSABI i_CryptUnprotectData(DBLOB*in,uint16_t**d,DBLOB*ent,void*r,void*pr,uint32_t fl,DBLOB*out){
+    (void)d;(void)ent;(void)r;(void)pr;(void)fl; if(!in||!out) return 0;
+    out->p=malloc(in->cb?in->cb:1); out->cb=in->cb; if(in->cb) memcpy(out->p,in->p,in->cb); return 1; }
 static uint64_t MSABI i_GetTickCount64(void){ return mach_absolute_time()/1000000ULL; }
 // LoadLibraryExW: log the requested module (UTF-16 -> ascii) so we can see
 // what the engine wants. Returning a non-null handle keeps startup alive;
@@ -272,6 +357,133 @@ static void* MSABI i_LoadLibraryExW(const uint16_t *name, void *h, uint32_t fl){
     ws("  [LoadLibraryExW] "); ws(g_lastlib); ws("\n");
     return g_base; // placeholder handle; real guest-mapping is the next phase
 }
+
+// ---- filesystem shim: translate Windows paths to Unix, do real I/O ----
+// drive mapping: C:\ -> $prefix/drive_c, Z:\ -> /, others -> $prefix/drive_<x>
+static char g_drivec[1024];   // absolute path of the Wine prefix's drive_c
+static char* win2unix(const uint16_t *w, char *out, int outsz){
+    char t[2048]; int n=0; for(; w && w[n] && n<2047; n++) t[n]=(char)(w[n]<128?w[n]:'?'); t[n]=0;
+    // strip \\?\ long-path prefix
+    char *s=t; if(!strncmp(s,"\\\\?\\",4)) s+=4;
+    for(char *p=s; *p; p++) if(*p=='\\') *p='/';
+    if(s[0] && s[1]==':'){
+        char d=s[0];
+        if(d=='Z'||d=='z') snprintf(out,outsz,"%s", s[2]? s+2 : "/");
+        else if((d=='C'||d=='c') && g_drivec[0]) snprintf(out,outsz,"%s%s", g_drivec, s+2);
+        else snprintf(out,outsz,"%.*s/drive_%c%s",(int)(strrchr(g_drivec,'/')-g_drivec),g_drivec,(char)(d|0x20),s+2);
+    } else snprintf(out,outsz,"%s",s);
+    return out;
+}
+// real-file handles are boxed fds offset by 0x1000 (pseudo-handles are 1/2/3)
+static uint32_t MSABI i_GetFileAttributesW(const uint16_t *w){
+    char p[2048]; struct stat st;
+    if(stat(win2unix(w,p,sizeof p),&st)!=0){ g_lasterr=win_err(); return 0xFFFFFFFF; } g_lasterr=0; // INVALID_FILE_ATTRIBUTES
+    return S_ISDIR(st.st_mode)? 0x10 : 0x80; // DIRECTORY : NORMAL
+}
+static int MSABI i_GetFileAttributesExW(const uint16_t *w,int lvl,void *info){
+    (void)lvl; char p[2048]; struct stat st; if(stat(win2unix(w,p,sizeof p),&st)!=0){ g_lasterr=win_err(); return 0; } g_lasterr=0;
+    if(info){ uint8_t*d=info; memset(d,0,36); *(uint32_t*)d = S_ISDIR(st.st_mode)?0x10:0x80;
+        *(uint32_t*)(d+28)=(uint32_t)(st.st_size>>32); *(uint32_t*)(d+32)=(uint32_t)st.st_size; }
+    return 1;
+}
+static void*  MSABI i_CreateFileW(const uint16_t *w,uint32_t acc,uint32_t share,void*sec,uint32_t disp,uint32_t fl,void*tmpl){
+    (void)share;(void)sec;(void)fl;(void)tmpl; char p[2048]; win2unix(w,p,sizeof p);
+    int flags = (acc & 0x40000000)? O_RDWR : O_RDONLY; // GENERIC_WRITE?
+    switch(disp){                                   // Win32 creation disposition
+        case 1: flags|=O_CREAT|O_EXCL;  break;      // CREATE_NEW
+        case 2: flags|=O_CREAT|O_TRUNC; flags=(flags&~O_RDONLY)|O_RDWR; break; // CREATE_ALWAYS
+        case 4: flags|=O_CREAT;         break;      // OPEN_ALWAYS
+        case 5: flags|=O_TRUNC;         break;      // TRUNCATE_EXISTING
+        default: break;                              // 3 OPEN_EXISTING
+    }
+    int fd=open(p, flags, 0644);
+    if(getenv("PELOAD_TRACE_FS")){ ws("  [CreateFileW] "); ws(p); ws(fd<0?"  FAIL\n":"  ok\n"); }
+    if(fd<0){ g_lasterr=win_err(); return (void*)-1; } g_lasterr=0; // INVALID_HANDLE_VALUE
+    return (void*)(intptr_t)(0x1000+fd);
+}
+static int    MSABI i_ReadFile(void*h,void*buf,uint32_t n,uint32_t*rd,void*ov){
+    (void)ov; intptr_t hv=(intptr_t)h; if(hv<0x1000){ if(rd)*rd=0; return 0; }
+    long k=read((int)(hv-0x1000),buf,n); if(rd)*rd=(uint32_t)(k<0?0:k); return k>=0;
+}
+static int    MSABI i_SetFilePointerEx(void*h,int64_t dist,int64_t*newp,uint32_t method){
+    intptr_t hv=(intptr_t)h; if(hv<0x1000) return 0; off_t r=lseek((int)(hv-0x1000),dist, method); if(newp)*newp=r; return r>=0;
+}
+static int    MSABI i_GetFileSizeEx(void*h,int64_t*sz){ intptr_t hv=(intptr_t)h; if(hv<0x1000) return 0; struct stat st; if(fstat((int)(hv-0x1000),&st)) return 0; if(sz)*sz=st.st_size; return 1; }
+static int    MSABI i_CloseHandleReal(void*h){ intptr_t hv=(intptr_t)h; if(hv>=0x1000) close((int)(hv-0x1000)); return 1; }
+// env var lookup via the host environment (so RECLAIMER_* pass through)
+static uint32_t MSABI i_GetEnvironmentVariableW(const uint16_t*n,uint16_t*v,uint32_t sz){
+    char nm[256]; int i=0; for(; n && n[i] && i<255; i++) nm[i]=(char)(n[i]<128?n[i]:'?'); nm[i]=0;
+    const char *val=getenv(nm); if(!val){ return 0; }
+    uint32_t len=(uint32_t)strlen(val);
+    if(!v||sz==0) return len+1;                 // required size incl NUL
+    uint32_t j=0; for(; val[j] && j<sz-1; j++) v[j]=(uint8_t)val[j]; v[j]=0; return j;
+}
+static uint32_t MSABI i_GetFullPathNameW(const uint16_t*name,uint32_t len,uint16_t*buf,uint16_t**part){
+    (void)part; uint32_t i=0; for(; name[i] && i<len-1; i++) buf[i]=name[i]; buf[i]=0; return i;
+}
+static void   MSABI i_GetLocalTime(uint16_t *stm){
+    if(!stm) return; struct timeval tv; gettimeofday(&tv,0); time_t t=tv.tv_sec; struct tm lt; localtime_r(&t,&lt);
+    stm[0]=lt.tm_year+1900; stm[1]=lt.tm_mon+1; stm[2]=lt.tm_wday; stm[3]=lt.tm_mday;
+    stm[4]=lt.tm_hour; stm[5]=lt.tm_min; stm[6]=lt.tm_sec; stm[7]=tv.tv_usec/1000;
+}
+static void   MSABI i_GetSystemTime(uint16_t *stm){ i_GetLocalTime(stm); }
+static int    MSABI i_CreateDirectoryW(const uint16_t*w,void*sec){ (void)sec; char p[2048]; return mkdir(win2unix(w,p,sizeof p),0755)==0 || 1; }
+static uint32_t MSABI i_GetCurrentDirectoryW(uint32_t sz,uint16_t*buf){ if(sz>=3&&buf){buf[0]='C';buf[1]=':';buf[2]=0;} return 2; }
+
+// RegGetValueW: answer the Steam install-path query so MCC auto-discovery
+// works. Steam lives at C:\Program Files\Steam (maps to our prefix).
+static int wput(uint16_t*d,const char*s,uint32_t cap){ uint32_t i=0; for(; s[i] && i<cap/2-1; i++) d[i]=(uint8_t)s[i]; d[i]=0; return (i+1)*2; }
+static long MSABI i_RegGetValueW(void*hk,const uint16_t*sub,const uint16_t*val,uint32_t fl,uint32_t*ty,void*data,uint32_t*cb){
+    (void)hk;(void)sub;(void)fl; char vn[128]; int i=0; for(; val&&val[i]&&i<127;i++) vn[i]=(char)val[i]; vn[i]=0;
+    const char *ans=0;
+    if(!strcasecmp(vn,"SteamPath")||!strcasecmp(vn,"InstallPath")||!strcasecmp(vn,"SteamExe"))
+        ans="C:\\Program Files\\Steam";
+    if(!ans) return 2; // ERROR_FILE_NOT_FOUND
+    if(ty)*ty=1; // REG_SZ
+    uint32_t need=((uint32_t)strlen(ans)+1)*2;
+    if(!data){ if(cb)*cb=need; return 0; }
+    if(cb && *cb<need){ *cb=need; return 234; } // ERROR_MORE_DATA
+    int n=wput((uint16_t*)data,ans, cb?*cb:need); if(cb)*cb=n; return 0; // ERROR_SUCCESS
+}
+static long MSABI i_RegOpenKeyExW(void*hk,const uint16_t*sub,uint32_t o,uint32_t sam,void**out){ (void)hk;(void)sub;(void)o;(void)sam; if(out)*out=(void*)0x4b4559; return 0; }
+static long MSABI i_RegQueryValueExW(void*hk,const uint16_t*val,void*r,uint32_t*ty,void*data,uint32_t*cb){ (void)r; return i_RegGetValueW(hk,0,val,0,ty,data,cb); }
+static long MSABI i_RegCloseKey(void*hk){ (void)hk; return 0; }
+
+// directory enumeration: FindFirstFileExW / FindNextFileW / FindClose
+#include <dirent.h>
+typedef struct { DIR*d; char dir[1536]; char pat[260]; } Find;
+static Find g_finds[64]; static int g_nfinds;
+static int pat_match(const char*pat,const char*name){
+    if(!strcmp(pat,"*")||!strcmp(pat,"*.*")) return name[0]!='.'||1;
+    const char*st=strchr(pat,'*');
+    if(!st) return !strcasecmp(pat,name);
+    size_t pl=st-pat; if(strncasecmp(pat,name,pl)) return 0;         // prefix
+    const char*suf=st+1; size_t sl=strlen(suf), nl=strlen(name);
+    if(sl==0) return 1; if(nl<pl+sl) return 0;
+    return !strcasecmp(name+nl-sl,suf);                              // suffix
+}
+static void fill_find(Find*f,struct dirent*de,void*fd){
+    uint8_t*d=fd; memset(d,0,592); char full[1800]; struct stat st;
+    snprintf(full,sizeof full,"%s/%s",f->dir,de->d_name);
+    uint32_t attr=0x80; if(stat(full,&st)==0){ attr=S_ISDIR(st.st_mode)?0x10:0x80; *(uint32_t*)(d+28)=(uint32_t)(st.st_size>>32); *(uint32_t*)(d+32)=(uint32_t)st.st_size; }
+    *(uint32_t*)d=attr; uint16_t*nm=(uint16_t*)(d+44); int i=0; for(; de->d_name[i]&&i<259;i++) nm[i]=(uint8_t)de->d_name[i]; nm[i]=0;
+}
+static void* MSABI i_FindFirstFileExW(const uint16_t*w,int lvl,void*fd,int op,void*filt,uint32_t fla){
+    (void)lvl;(void)op;(void)filt;(void)fla; if(g_nfinds>=64) return (void*)-1;
+    char p[2048]; win2unix(w,p,sizeof p);
+    char *slash=strrchr(p,'/'); char dir[1536],pat[260];
+    if(slash){ int dl=slash-p; if(dl>1535)dl=1535; memcpy(dir,p,dl); dir[dl]=0; snprintf(pat,sizeof pat,"%s",slash+1); }
+    else { snprintf(dir,sizeof dir,"."); snprintf(pat,sizeof pat,"%s",p); }
+    DIR*d=opendir(dir); if(!d){ g_lasterr=win_err(); return (void*)-1; }
+    Find*f=&g_finds[g_nfinds]; f->d=d; snprintf(f->dir,sizeof f->dir,"%s",dir); snprintf(f->pat,sizeof f->pat,"%s",pat);
+    struct dirent*de; while((de=readdir(d))){ if(!strcmp(de->d_name,".")||!strcmp(de->d_name,"..")) continue; if(pat_match(pat,de->d_name)){ fill_find(f,de,fd); return (void*)(intptr_t)(0x2000+g_nfinds++); } }
+    closedir(d); g_lasterr=2; return (void*)-1; // ERROR_FILE_NOT_FOUND
+}
+static int MSABI i_FindNextFileW(void*h,void*fd){ intptr_t hv=(intptr_t)h; int idx=(int)(hv-0x2000); if(idx<0||idx>=g_nfinds||!g_finds[idx].d) return 0;
+    Find*f=&g_finds[idx]; struct dirent*de; while((de=readdir(f->d))){ if(!strcmp(de->d_name,".")||!strcmp(de->d_name,"..")) continue; if(pat_match(f->pat,de->d_name)){ fill_find(f,de,fd); return 1; } } return 0; }
+static int MSABI i_FindClose(void*h){ intptr_t hv=(intptr_t)h; int idx=(int)(hv-0x2000); if(idx>=0&&idx<g_nfinds&&g_finds[idx].d){ closedir(g_finds[idx].d); g_finds[idx].d=0; } return 1; }
+static int MSABI i_GetFileInformationByHandle(void*h,void*info){ intptr_t hv=(intptr_t)h; if(hv<0x1000||!info) return 0; struct stat st; if(fstat((int)(hv-0x1000),&st)) return 0;
+    uint8_t*d=info; memset(d,0,52); *(uint32_t*)d=S_ISDIR(st.st_mode)?0x10:0x80; *(uint32_t*)(d+32)=(uint32_t)(st.st_size>>32); *(uint32_t*)(d+36)=(uint32_t)st.st_size; *(uint32_t*)(d+40)=1; return 1; }
 
 // GetProcAddress: hand back a live logging stub for whatever is requested,
 // so dynamic resolution yields a callable (not NULL) and startup continues.
@@ -343,8 +555,28 @@ static void *resolve_impl(const char *fn){
         {"WriteFile",(void*)i_WriteFile},
         {"WriteConsoleW",(void*)i_WriteConsoleW},
         {"GetFileType",(void*)i_GetFileType},
-        {"CloseHandle",(void*)i_CloseHandle},
+        {"CloseHandle",(void*)i_CloseHandleReal},
         {"CreateFileW",(void*)i_CreateFileW},
+        {"GetFileAttributesW",(void*)i_GetFileAttributesW},
+        {"GetFileAttributesExW",(void*)i_GetFileAttributesExW},
+        {"ReadFile",(void*)i_ReadFile},
+        {"SetFilePointerEx",(void*)i_SetFilePointerEx},
+        {"GetFileSizeEx",(void*)i_GetFileSizeEx},
+        {"GetFullPathNameW",(void*)i_GetFullPathNameW},
+        {"GetLocalTime",(void*)i_GetLocalTime},
+        {"GetSystemTime",(void*)i_GetSystemTime},
+        {"CreateDirectoryW",(void*)i_CreateDirectoryW},
+        {"GetCurrentDirectoryW",(void*)i_GetCurrentDirectoryW},
+        {"CreateDirectoryW",(void*)i_CreateDirectoryW},
+        {"RegGetValueW",(void*)i_RegGetValueW},
+        {"RegOpenKeyExW",(void*)i_RegOpenKeyExW},
+        {"RegQueryValueExW",(void*)i_RegQueryValueExW},
+        {"RegCloseKey",(void*)i_RegCloseKey},
+        {"FindFirstFileExW",(void*)i_FindFirstFileExW},
+        {"FindFirstFileW",(void*)i_FindFirstFileExW},
+        {"FindNextFileW",(void*)i_FindNextFileW},
+        {"FindClose",(void*)i_FindClose},
+        {"GetFileInformationByHandle",(void*)i_GetFileInformationByHandle},
         {"FlushFileBuffers",(void*)i_FlushFileBuffers},
         {"GetCurrentProcess",(void*)i_GetCurrentProcess},
         {"GetCurrentThread",(void*)i_GetCurrentThread},
@@ -393,9 +625,44 @@ static void *resolve_impl(const char *fn){
         {"GetTickCount64",(void*)i_GetTickCount64},
         {"LoadLibraryExW",(void*)i_LoadLibraryExW},
         {"NtWriteFile",(void*)i_NtWriteFile},
+        {"NtReadFile",(void*)i_NtReadFile},
+        {"BCryptGenRandom",(void*)i_BCryptGenRandom},
+        {"ProcessPrng",(void*)i_ProcessPrng},
+        {"RtlGenRandom",(void*)i_RtlGenRandom},
+        {"SystemFunction036",(void*)i_RtlGenRandom},
+        {"LockFileEx",(void*)i_LockFileEx},
+        {"UnlockFileEx",(void*)i_UnlockFileEx},
+        {"LockFile",(void*)i_LockFile},
+        {"UnlockFile",(void*)i_UnlockFile},
+        {"FlushViewOfFile",(void*)i_FlushViewOfFile},
+        {"SetEndOfFile",(void*)i_SetEndOfFile},
+        {"MoveFileExW",(void*)i_MoveFileExW},
+        {"DeleteFileW",(void*)i_DeleteFileW},
+        {"LocalAlloc",(void*)i_LocalAlloc},
+        {"LocalFree",(void*)i_LocalFree},
+        {"CryptProtectData",(void*)i_CryptProtectData},
+        {"CryptUnprotectData",(void*)i_CryptUnprotectData},
         {"GetConsoleMode",(void*)i_GetConsoleMode},
         {"SetConsoleMode",(void*)i_SetConsoleMode},
         {"GetConsoleOutputCP",(void*)i_GetConsoleOutputCP},
+        {"SetConsoleCtrlHandler",(void*)i_SetConsoleCtrlHandler},
+        {"CreateSemaphoreA",(void*)i_CreateSemaphoreA},
+        {"CreateSemaphoreW",(void*)i_CreateSemaphoreW},
+        {"ReleaseSemaphore",(void*)i_ReleaseSemaphore},
+        {"CreateEventW",(void*)i_CreateEventW},
+        {"SetEvent",(void*)i_SetEvent},
+        {"ResetEvent",(void*)i_ResetEvent},
+        {"WaitForSingleObject",(void*)i_WaitForSingleObject},
+        {"WaitForMultipleObjects",(void*)i_WaitForMultipleObjects},
+        {"CreateThread",(void*)i_CreateThread},
+        {"GetThreadId",(void*)i_GetThreadId},
+        {"GetExitCodeThread",(void*)i_GetExitCodeThread},
+        {"OpenProcess",(void*)i_OpenProcess},
+        {"SwitchToThread",(void*)i_SwitchToThread},
+        {"CompareStringOrdinal",(void*)i_CompareStringOrdinal},
+        {"GetTempPathW",(void*)i_GetTempPathW},
+        {"GetTempPath2W",(void*)i_GetTempPath2W},
+        {"GetFileInformationByHandleEx",(void*)i_GetFileInformationByHandleEx},
         {"SetThreadStackGuarantee",(void*)i_SetThreadStackGuarantee},
         {"FreeLibrary",(void*)i_FreeLibrary},
         {"GetModuleFileNameA",(void*)i_GetModuleFileNameA},
@@ -553,7 +820,21 @@ int main(int argc, char **argv){
     __asm__ volatile("movq %0, %%gs:0x30" :: "r"((uint64_t)teb));
     __asm__ volatile("movq %0, %%gs:0x60" :: "r"((uint64_t)peb));
     __asm__ volatile("movq %0, %%gs:0x58" :: "r"((uint64_t)tls_array));
+    g_peb_ptr=peb;
     ws("  TEB @ "); whexn((uint64_t)teb); ws("  PEB @ "); whex((uint64_t)peb);
+
+    // ---- filesystem roots + env defaults for the game client ----
+    { const char *h=getenv("HOME");
+      if(h) snprintf(g_drivec,sizeof g_drivec,"%s/Library/Application Support/ReclaimerMac/prefix/drive_c",h);
+      // MCC lives under the prefix; expose it to the client as a C: path and via env.
+      // (C:\Program Files\Steam\... maps back to the same real files.)
+      setenv("RECLAIMER_MCC_FILES","C:\\Program Files\\Steam\\steamapps\\common\\Halo The Master Chief Collection",0);
+      // profile/cache must be absolute; the client complained when unset
+      // Rust treats /unix/paths as non-absolute on Windows, so use C: paths
+      // that map (via win2unix) to real dirs we create under drive_c.
+      char pd[1200];
+      snprintf(pd,sizeof pd,"%s/ReclaimerProfile",g_drivec); mkdir(pd,0755); setenv("RECLAIMER_PROFILE_DIR","C:\\ReclaimerProfile",0);
+      snprintf(pd,sizeof pd,"%s/ReclaimerCache",g_drivec);   mkdir(pd,0755); setenv("RECLAIMER_CACHE_DIR","C:\\ReclaimerCache",0); }
 
     // ---- locate the genuine MS CRT dir: $RECLAIMER_CRT_DIR, then next to the
     // peload binary (<dir>/crt and <dir>/../crt), then the project tree ----
@@ -602,6 +883,7 @@ int main(int argc, char **argv){
         if(t->Zero) memset(block+raw, 0, t->Zero);
         *(uint32_t*)t->Index = 0;                   // this module's TLS index
         tls_array[0] = block;                        // publish into shared array
+        g_tls_src=(uint8_t*)t->Start; g_tls_raw=raw; g_tls_total=total; // template for new threads
         ws("  static TLS block "); whexn((uint64_t)block); ws(" size "); whex(total);
         if(t->Callbacks){
             uint64_t *cb = (uint64_t*)t->Callbacks;

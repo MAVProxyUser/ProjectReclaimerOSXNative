@@ -28,6 +28,44 @@ On the **dedicated-server exe** the loader relocates (22,919 fixups), binds
 precise, expected spot: `__p___argv` / `_get_initial_narrow_environment`
 return NULL from our stubs, so the Rust runtime dereferences a null `argv`.
 
+## MILESTONE 2: the graphical CLIENT runs its full userland init, Wine-free
+
+`project-reclaimer-v0.9.13.exe` (the GUI client) now boots through essentially
+all of its pre-engine initialization under the loader, no Wine:
+
+- `profile create TestPlayer` **works end-to-end** — generates a real community
+  identity (public key via OS RNG), seals the seed with a DPAPI passthrough,
+  and writes a valid 565-byte `profile.json`.
+- A normal launch runs: logging, cache setup, **MCC auto-discovery** (reads the
+  real `halo3.dll`, `campaign.map`, `guardian.map`, `shared.map` from the
+  prefix via the FS shim), profile load, Ctrl-C handler, **real threads**
+  (`CreateThread`→pthread, each with its own TEB/TLS), env handling, and into
+  native-engine startup prep (creating `mcc-startup-<uuid>` scratch dirs).
+
+This required a real support layer, all genuine-MS-CRT-backed, ~160 shims:
+- **Filesystem**: Windows→Unix path translation (C:\ → prefix/drive_c, Z:\ → /),
+  `CreateFileW` (all 5 dispositions), `ReadFile`/`NtReadFile`,
+  `WriteFile`/`NtWriteFile` (fd-routed), `GetFileAttributes[Ex]W`,
+  `FindFirstFileExW`/`FindNextFileW` (real `opendir`/`readdir` + glob),
+  `GetFileSizeEx`, `SetFilePointerEx`, file locking (no-op), `MoveFileExW`.
+- **Steam/MCC discovery**: `RegGetValueW` (SteamPath), a generated
+  `libraryfolders.vdf` + `appmanifest_976730.acf` in the prefix.
+- **Identity**: `BCryptGenRandom`/`ProcessPrng`/`RtlGenRandom`,
+  `CryptProtectData`/`CryptUnprotectData` (passthrough), `LocalAlloc/Free`.
+- **Threads/sync**: `CreateThread` (pthread + per-thread TEB), events,
+  semaphores, `WaitForSingleObject`, `SetConsoleCtrlHandler`.
+- **Misc**: real `GetLastError` (errno→Win32), `GetEnvironmentVariableW`
+  (host env), `GetLocalTime`, `CompareStringOrdinal`, temp-path, console.
+
+Current client frontier: `remove_dir_all` of the scratch dir needs real
+`GetFileInformationByHandleEx(FileIdBothDirectoryInfo)` enumeration; then the
+client spawns/loads the native MCC engine worker — which needs Win64 SEH
+(`RtlLookupFunctionEntry`/`RtlVirtualUnwind`) and, for actual rendering, a
+window + an OpenGL/D3D→Metal bridge. Those remain the big phases.
+
+Both binaries load the genuine MS CRT from `shim/crt/` (project-relative,
+`$RECLAIMER_CRT_DIR` overridable). FS trace: `PELOAD_TRACE_FS=1`.
+
 ## MILESTONE: the Rust dedicated server runs, Wine-free (2026-10-10)
 
 The genuine Microsoft CRT is now loaded as guest PEs and the dedicated
