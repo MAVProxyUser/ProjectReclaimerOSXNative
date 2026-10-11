@@ -461,10 +461,117 @@ static void* g_dxgifactory_vtbl[] = {
     (void*)com_fail,                                             // 13 IsCurrent (Factory1)
     (void*)com_fail,(void*)com_fail,(void*)com_fail,(void*)com_fail,(void*)com_fail,(void*)com_fail,(void*)com_fail,(void*)com_fail }; // 14+ Factory2 slack
 static ComObj g_dxgifactory = { g_dxgifactory_vtbl };
-static int MSABI i_CreateDXGIFactory(GUID_*riid,void**pp){ (void)riid; if(pp)*pp=&g_dxgifactory; return HR_OK; }
-static int MSABI i_CreateDXGIFactory1(GUID_*riid,void**pp){ (void)riid; if(pp)*pp=&g_dxgifactory; return HR_OK; }
-static int MSABI i_CreateDXGIFactory2(uint32_t fl,GUID_*riid,void**pp){ (void)fl;(void)riid; if(pp)*pp=&g_dxgifactory; return HR_OK; }
-static int MSABI i_D3D11CreateDevice(void*a,int b,void*c,uint32_t d,void*e,uint32_t f,uint32_t g,void**dev,void*fl,void**ctx){ (void)a;(void)b;(void)c;(void)d;(void)e;(void)f;(void)g;(void)fl; if(dev)*dev=0; if(ctx)*ctx=0; return HR_DXGI_UNSUPPORTED; }
+static void d3d_init(void); // fwd: also patches g_dxgifactory_vtbl[10]=CreateSwapChain
+static int MSABI i_CreateDXGIFactory(GUID_*riid,void**pp){ (void)riid; d3d_init(); if(pp)*pp=&g_dxgifactory; return HR_OK; }
+static int MSABI i_CreateDXGIFactory1(GUID_*riid,void**pp){ (void)riid; d3d_init(); if(pp)*pp=&g_dxgifactory; return HR_OK; }
+static int MSABI i_CreateDXGIFactory2(uint32_t fl,GUID_*riid,void**pp){ (void)fl;(void)riid; d3d_init(); if(pp)*pp=&g_dxgifactory; return HR_OK; }
+// ============================================================================
+// Minimal NULL D3D11. halo3.dll's render init needs a working D3D11 device:
+// Create* must return valid COM objects (NULLs -> the engine derefs them and
+// corrupts the shared heap), Map must return a real writable buffer (else the
+// engine writes vertex/constant data into garbage). We render nothing visible
+// (halo3 draws the game 3D; Reclaimer's OpenGL UI is what the window shows) — the
+// goal is only to satisfy the API contract so startup completes without crashing
+// or corrupting memory.  All methods are MSABI (this in rcx).
+typedef struct { void** vtbl; uint32_t kind; uint32_t pad; uint64_t size; void* data; } D3DObj;
+static ComObj g_d3ddevice, g_d3dcontext;
+static void*  g_d3dchild_vtbl[16];   // ID3D11DeviceChild (shaders, states, layouts, linkage, query...)
+static void*  g_d3dres_vtbl[16];     // ID3D11Resource (buffers, textures)
+static void*  g_d3dview_vtbl[16];    // ID3D11View (SRV/RTV/DSV/UAV)
+static void*  g_d3ddev_vtbl[48];
+static void*  g_d3dctx_vtbl[160];
+static void*  g_dxgiswap_vtbl[40];
+static uint8_t g_d3dscratch[1<<20];  // fallback Map target
+static D3DObj* d3dobj(void** vt, uint32_t kind, uint64_t size){
+    D3DObj* o=calloc(1,sizeof *o); o->vtbl=vt; o->kind=kind; o->size=size; if(size) o->data=calloc(1,size); return o; }
+// ---- ID3D11DeviceChild base (slots 0-6) ----
+static int      MSABI d3d_QI(void*s,GUID_*r,void**pp){ (void)r; if(pp)*pp=s; return HR_OK; }
+static unsigned MSABI d3d_AddRef(void*s){ (void)s; return 1; }
+static unsigned MSABI d3d_Release(void*s){ (void)s; return 0; }
+static void     MSABI d3d_GetDevice(void*s,void**pp){ (void)s; if(pp)*pp=&g_d3ddevice; }
+static int      MSABI d3d_GetPD(void*s,GUID_*g,uint32_t*ps,void*pd){ (void)s;(void)g;(void)pd; if(ps)*ps=0; return HR_NOTFOUND; }
+static int      MSABI d3d_SetPD(void*s,GUID_*g,uint32_t sz,const void*d){ (void)s;(void)g;(void)sz;(void)d; return HR_OK; }
+static int      MSABI d3d_SetPDI(void*s,GUID_*g,const void*d){ (void)s;(void)g;(void)d; return HR_OK; }
+// ---- ID3D11Resource (7-10) ----
+static void     MSABI res_GetType(void*s,uint32_t*pd){ D3DObj*o=s; if(pd)*pd=o?o->kind:1; }
+static void     MSABI res_SetEvict(void*s,uint32_t p){ (void)s;(void)p; }
+static unsigned MSABI res_GetEvict(void*s){ (void)s; return 0; }
+static void     MSABI res_GetDesc(void*s,void*pd){ D3DObj*o=s; if(pd){ memset(pd,0,64); if(o)*(uint32_t*)pd=(uint32_t)o->size; } }
+// ---- ID3D11View (7-8). o->data holds the resource the view was created over, so
+// GetResource returns a valid (never-null) resource the engine then dereferences.
+static D3DObj* d3dobj(void** vt, uint32_t kind, uint64_t size); // fwd
+static D3DObj  g_d3ddummyres_obj; static D3DObj* g_d3ddummyres;
+static void     MSABI view_GetResource(void*s,void**pp){ D3DObj*o=s; if(pp)*pp=(o&&o->data)?o->data:g_d3ddummyres; }
+static void     MSABI view_GetDesc(void*s,void*pd){ (void)s; if(pd) memset(pd,0,64); }
+// ---- create helpers by out-param position ----
+static int MSABI dev_crRes(void*t,const void*desc,const void*init,void**pp){ (void)t; // CreateBuffer/Texture*
+    uint64_t sz = desc? (uint64_t)(*(const uint32_t*)desc) : 0;          // ByteWidth / Width (offset 0)
+    if(sz<16) sz=1<<16;                                                  // textures: desc[0]=Width; give generous room
+    D3DObj* o=d3dobj(g_d3dres_vtbl,1,sz); if(init && o->data){ const void*src=*(void*const*)init; if(src) memcpy(o->data,src,sz>4096?4096:sz); }
+    if(pp)*pp=o; return HR_OK; }
+static int MSABI dev_crView3(void*t,const void*res,const void*desc,void**pp){ (void)t;(void)desc; D3DObj*o=d3dobj(g_d3dview_vtbl,0,0); o->data=(void*)res; if(pp)*pp=o; return HR_OK; }
+static int MSABI dev_cr2(void*t,const void*a,void**pp){ (void)t;(void)a; if(pp)*pp=d3dobj(g_d3dchild_vtbl,0,0); return HR_OK; }      // (desc,pp) out=r8
+static int MSABI dev_cr1(void*t,void**pp){ (void)t; if(pp)*pp=d3dobj(g_d3dchild_vtbl,0,0); return HR_OK; }                         // (pp) out=rdx
+static int MSABI dev_cr5(void*t,const void*bc,uint64_t len,void*lk,void**pp){ (void)t;(void)bc;(void)len;(void)lk; if(pp)*pp=d3dobj(g_d3dchild_vtbl,0,0); return HR_OK; } // shaders
+static int MSABI dev_crIL(void*t,const void*d,uint32_t n,const void*bc,uint64_t len,void**pp){ (void)t;(void)d;(void)n;(void)bc;(void)len; if(pp)*pp=d3dobj(g_d3dchild_vtbl,0,0); return HR_OK; } // CreateInputLayout
+static int MSABI dev_crCtx(void*t,uint32_t fl,void**pp){ (void)t;(void)fl; if(pp)*pp=&g_d3dcontext; return HR_OK; }                 // CreateDeferredContext
+static int MSABI dev_OpenShared(void*t,void*h,GUID_*r,void**pp){ (void)t;(void)h;(void)r; if(pp)*pp=d3dobj(g_d3dres_vtbl,1,1<<16); return HR_OK; }
+static int MSABI dev_CheckFormat(void*t,uint32_t fmt,uint32_t*ps){ (void)t;(void)fmt; if(ps)*ps=0x1FFFFF; return HR_OK; }           // claim broad support
+static int MSABI dev_CheckMSAA(void*t,uint32_t fmt,uint32_t cnt,uint32_t*pq){ (void)t;(void)fmt;(void)cnt; if(pq)*pq=1; return HR_OK; }
+static void MSABI dev_CheckCounterInfo(void*t,void*pi){ (void)t; if(pi) memset(pi,0,16); }
+static int MSABI dev_CheckFeature(void*t,uint32_t f,void*pd,uint32_t sz){ (void)t;(void)f; if(pd) memset(pd,0,sz); return HR_OK; }
+static uint32_t MSABI dev_GetFeatureLevel(void*t){ (void)t; return 0xb000; }   // D3D_FEATURE_LEVEL_11_0
+static uint32_t MSABI dev_GetCreationFlags(void*t){ (void)t; return 0; }
+static int MSABI dev_GetRemovedReason(void*t){ (void)t; return HR_OK; }
+static void MSABI dev_GetImmediateContext(void*t,void**pp){ (void)t; if(pp)*pp=&g_d3dcontext; }
+static int MSABI dev_SetExceptionMode(void*t,uint32_t m){ (void)t;(void)m; return HR_OK; }
+static uint32_t MSABI dev_GetExceptionMode(void*t){ (void)t; return 0; }
+// ---- ID3D11DeviceContext: Map returns a real buffer; everything else no-op/0 ----
+static int  MSABI ctx_ret0(void){ return 0; }                            // safe for void + HRESULT + UINT returns
+static int  MSABI ctx_Map(void*t,void*res,uint32_t sub,uint32_t type,uint32_t fl,void*pM){ (void)t;(void)sub;(void)type;(void)fl;
+    D3DObj*o=res; if(pM){ void* d=(o&&o->data)?o->data:g_d3dscratch; uint32_t rp=(o&&o->size)?(uint32_t)o->size:(uint32_t)sizeof g_d3dscratch;
+        *(void**)pM=d; *(uint32_t*)((char*)pM+8)=rp; *(uint32_t*)((char*)pM+12)=rp; } return HR_OK; }
+static void MSABI ctx_GetDevice(void*t,void**pp){ (void)t; if(pp)*pp=&g_d3ddevice; }
+// ---- IDXGISwapChain ----
+static int MSABI swap_Present(void*t,uint32_t sync,uint32_t fl){ (void)t;(void)sync;(void)fl; return HR_OK; }
+static int MSABI swap_GetBuffer(void*t,uint32_t buf,GUID_*r,void**pp){ (void)t;(void)buf;(void)r; if(pp)*pp=d3dobj(g_d3dres_vtbl,2,1<<20); return HR_OK; }
+static int MSABI dxgi_CreateSwapChain(void*t,void*dev,void*desc,void**pp){ (void)t;(void)dev;(void)desc; if(pp)*pp=d3dobj(g_dxgiswap_vtbl,0,0); return HR_OK; }
+static void d3d_init(void){
+    static int done; if(done) return; done=1;
+    void** c=g_d3dchild_vtbl; c[0]=(void*)d3d_QI;c[1]=(void*)d3d_AddRef;c[2]=(void*)d3d_Release;c[3]=(void*)d3d_GetDevice;c[4]=(void*)d3d_GetPD;c[5]=(void*)d3d_SetPD;c[6]=(void*)d3d_SetPDI;
+    for(int i=7;i<16;i++) c[i]=(void*)ctx_ret0;
+    void** r=g_d3dres_vtbl; for(int i=0;i<7;i++) r[i]=c[i]; r[7]=(void*)res_GetType;r[8]=(void*)res_SetEvict;r[9]=(void*)res_GetEvict;r[10]=(void*)res_GetDesc; for(int i=11;i<16;i++) r[i]=(void*)ctx_ret0;
+    void** v=g_d3dview_vtbl; for(int i=0;i<7;i++) v[i]=c[i]; v[7]=(void*)view_GetResource;v[8]=(void*)view_GetDesc; for(int i=9;i<16;i++) v[i]=(void*)ctx_ret0;
+    g_d3ddummyres_obj.vtbl=g_d3dres_vtbl; g_d3ddummyres_obj.kind=1; g_d3ddummyres_obj.size=1<<16; g_d3ddummyres_obj.data=calloc(1,1<<16); g_d3ddummyres=&g_d3ddummyres_obj;
+    void** d=g_d3ddev_vtbl;
+    d[0]=(void*)d3d_QI;d[1]=(void*)d3d_AddRef;d[2]=(void*)d3d_Release;
+    d[3]=(void*)dev_crRes;d[4]=(void*)dev_crRes;d[5]=(void*)dev_crRes;d[6]=(void*)dev_crRes;         // Create Buffer/Tex1D/2D/3D
+    d[7]=(void*)dev_crView3;d[8]=(void*)dev_crView3;d[9]=(void*)dev_crView3;d[10]=(void*)dev_crView3; // SRV/UAV/RTV/DSV
+    d[11]=(void*)dev_crIL;                                                                            // CreateInputLayout
+    d[12]=(void*)dev_cr5;d[13]=(void*)dev_cr5;d[14]=(void*)dev_cr5;d[15]=(void*)dev_cr5;d[16]=(void*)dev_cr5;d[17]=(void*)dev_cr5;d[18]=(void*)dev_cr5; // VS,GS,GSSO,PS,HS,DS,CS
+    d[19]=(void*)dev_cr1;                                                                             // CreateClassLinkage
+    d[20]=(void*)dev_cr2;d[21]=(void*)dev_cr2;d[22]=(void*)dev_cr2;d[23]=(void*)dev_cr2;d[24]=(void*)dev_cr2;d[25]=(void*)dev_cr2;d[26]=(void*)dev_cr2; // Blend,DSS,RS,Sampler,Query,Predicate,Counter
+    d[27]=(void*)dev_crCtx;                                                                           // CreateDeferredContext
+    d[28]=(void*)dev_OpenShared;d[29]=(void*)dev_CheckFormat;d[30]=(void*)dev_CheckMSAA;d[31]=(void*)dev_CheckCounterInfo;d[32]=(void*)ctx_ret0;d[33]=(void*)dev_CheckFeature;
+    d[34]=(void*)d3d_GetPD;d[35]=(void*)d3d_SetPD;d[36]=(void*)d3d_SetPDI;
+    d[37]=(void*)dev_GetFeatureLevel;d[38]=(void*)dev_GetCreationFlags;d[39]=(void*)dev_GetRemovedReason;d[40]=(void*)dev_GetImmediateContext;d[41]=(void*)dev_SetExceptionMode;d[42]=(void*)dev_GetExceptionMode;
+    for(int i=43;i<48;i++) d[i]=(void*)ctx_ret0;
+    g_d3ddevice.vtbl=d;
+    void** x=g_d3dctx_vtbl; for(int i=0;i<160;i++) x[i]=(void*)ctx_ret0;
+    x[0]=(void*)d3d_QI;x[1]=(void*)d3d_AddRef;x[2]=(void*)d3d_Release;x[3]=(void*)ctx_GetDevice;x[4]=(void*)d3d_GetPD;x[5]=(void*)d3d_SetPD;x[6]=(void*)d3d_SetPDI;
+    x[14]=(void*)ctx_Map;                                                                            // Map (Unmap=15 stays ret0)
+    g_d3dcontext.vtbl=x;
+    void** s=g_dxgiswap_vtbl; for(int i=0;i<40;i++) s[i]=(void*)ctx_ret0;
+    s[0]=(void*)d3d_QI;s[1]=(void*)d3d_AddRef;s[2]=(void*)d3d_Release;
+    s[8]=(void*)swap_Present;s[9]=(void*)swap_GetBuffer;
+    g_dxgifactory_vtbl[10]=(void*)dxgi_CreateSwapChain;   // IDXGIFactory::CreateSwapChain
+}
+static int MSABI i_D3D11CreateDevice(void*a,int b,void*c,uint32_t d,void*e,uint32_t f,uint32_t g,void**dev,void*fl,void**ctx){
+    (void)a;(void)b;(void)c;(void)d;(void)e;(void)f;(void)g;
+    d3d_init();
+    if(getenv("PELOAD_TRACE_SEH")) ws("  [d3d11] CreateDevice -> null device\n");
+    if(dev)*dev=&g_d3ddevice; if(ctx)*ctx=&g_d3dcontext; if(fl)*(uint32_t*)fl=0xb000; // FEATURE_LEVEL_11_0
+    return HR_OK; }
 // ---- D3DCompile (d3dcompiler_47): halo3.dll compiles its video-display HLSL
 // shaders (CopyToScreen / YUVToRGB) to DXBC blobs at startup, then calls
 // ID3DBlob::GetBufferPointer/Size on the result. A stub that returns S_OK but
@@ -2507,6 +2614,20 @@ static int seh_dispatch_hw(uint32_t code, EXREC* rec, void* ctx){
 // null-pointer GL call or a guest-code fault is immediately identifiable).
 static void crashsig(int sig, siginfo_t *info, void *ucv){
     ucontext_t *uc=ucv; uint64_t rip = uc? (uint64_t)uc->uc_mcontext->__ss.__rip : 0;
+    // PELOAD_SURVIVE: for a non-main thread fault, park BEFORE handing it to the
+    // engine's exception handler (which would ExitProcess). This keeps halo3's
+    // D3D worker-thread faults from killing the process so the OpenGL menu thread
+    // can keep running. (Parked thread keeps its locks — may deadlock; capture aid.)
+    if(uc && getenv("PELOAD_SURVIVE") && !pthread_main_np() &&
+       (sig==SIGILL||sig==SIGSEGV||sig==SIGBUS||sig==SIGFPE) && !g_in_crashsig){
+        static int parked; if(parked<64){ parked++;
+            char pb[80]; int n=snprintf(pb,sizeof pb,"  [survive] park faulted worker tid=0x%x rip=0x%llx\n",
+                pthread_mach_thread_np(pthread_self()),(unsigned long long)rip); (void)!write(2,pb,n); }
+        sigset_t us; sigemptyset(&us); sigaddset(&us,SIGILL); sigaddset(&us,SIGSEGV);
+        sigaddset(&us,SIGBUS); sigaddset(&us,SIGFPE); sigaddset(&us,SIGTRAP); sigaddset(&us,SIGABRT);
+        pthread_sigmask(SIG_BLOCK,&us,0);
+        for(;;) pause();
+    }
     // First try to dispatch the fault as a Windows exception (the engine faults
     // deliberately inside probes and expects a handler to recover + continue).
     if(uc && !g_in_crashsig && (sig==SIGILL||sig==SIGSEGV||sig==SIGBUS||sig==SIGFPE||sig==SIGTRAP)){
