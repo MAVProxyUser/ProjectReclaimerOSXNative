@@ -292,7 +292,16 @@ static void*  MSABI i_VirtualAlloc(void *addr, uint64_t sz, uint32_t type, uint3
     if(getenv("PELOAD_TRACE_VA")){ char t[128]; snprintf(t,sizeof t,"  [VirtualAlloc] want=%p size=0x%llx type=0x%x -> %p\n",addr,(unsigned long long)sz,type,p==MAP_FAILED?0:p); ws(t); }
     return p==MAP_FAILED?0:p;
 }
-static int    MSABI i_VirtualProtect(void *a, uint64_t n, uint32_t np, uint32_t *op){ if(op)*op=0x40; int pr=PROT_READ; if(np&0xf0)pr|=PROT_EXEC; if(np&0xcc)pr|=PROT_WRITE; mprotect(a,n,pr); return 1; }
+static int    MSABI i_VirtualProtect(void *a, uint64_t n, uint32_t np, uint32_t *op){
+    if(op)*op=0x40; int pr=PROT_READ; if(np&0xf0)pr|=PROT_EXEC; if(np&0xcc)pr|=PROT_WRITE;
+    // mprotect needs a page-aligned base + length; the engine patches its own
+    // .text at unaligned addresses (inline hooks), so align down / round up.
+    uintptr_t pg=(uintptr_t)a & ~0xfffULL; size_t len=(((uintptr_t)a+(n?n:1))-pg+0xfff)&~0xfffULL;
+    // RWX is refused under Rosetta/hardened runtime; drop EXEC (Rosetta executes
+    // via translation from readable pages, so RW still runs after restore).
+    int r1=mprotect((void*)pg,len,pr), r2=0; if(r1!=0 && (pr&PROT_WRITE)) r2=mprotect((void*)pg,len,PROT_READ|PROT_WRITE);
+    if(getenv("PELOAD_TRACE_VA")){ char t[160]; snprintf(t,sizeof t,"  [VirtualProtect] a=%p n=0x%llx np=0x%x -> pg=%p len=0x%zx pr=%d r1=%d(%s) fb=%d\n",a,(unsigned long long)n,np,(void*)pg,len,pr,r1,r1?strerror(errno):"ok",r2); ws(t);}
+    return 1; }
 static int    MSABI i_VirtualFree(void *a, uint64_t n, uint32_t t){ (void)t; munmap(a,n?n:4096); return 1; }
 // VirtualQuery: report a region as FREE or COMMITTED via mach_vm_region, so the
 // engine's "find 64 MB free within 2 GB of the game" scan can proceed.
@@ -339,6 +348,14 @@ static int MSABI i_WriteProcessMemory(void*h,void*addr,const void*buf,uint64_t n
     if(mprotect((void*)pg,len,PROT_READ|PROT_WRITE|PROT_EXEC)!=0) mprotect((void*)pg,len,PROT_READ|PROT_WRITE);
     memcpy(addr,buf,n); mprotect((void*)pg,len,PROT_READ|PROT_EXEC); if(wr)*wr=n; return 1; }
 static void*  MSABI i_GetCurrentThread(void){ return (void*)-2; }
+// FlushInstructionCache: the engine calls this after patching its own .text
+// (inline hooks). Under Rosetta the x86 code is translated to arm64 and cached,
+// so a write to a code page leaves a STALE translation unless we invalidate it.
+// sys_icache_invalidate is the signal Rosetta honors to drop the translation.
+extern void sys_icache_invalidate(void *start, size_t len);
+static int MSABI i_FlushInstructionCache(void *proc, void *base, uint64_t sz){ (void)proc;
+    if(base&&sz) sys_icache_invalidate(base,(size_t)sz);
+    if(getenv("PELOAD_TRACE_VA")){ char t[96]; snprintf(t,sizeof t,"  [FlushInstructionCache] base=%p sz=0x%llx\n",base,(unsigned long long)sz); ws(t);} return 1; }
 // pointer obfuscation: identity is a valid implementation
 static void*  MSABI i_EncodePointer(void *p){ return p; }
 static void*  MSABI i_DecodePointer(void *p){ return p; }
@@ -1223,6 +1240,7 @@ static void *resolve_impl(const char *fn){
         {"FindClose",(void*)i_FindClose},
         {"GetFileInformationByHandle",(void*)i_GetFileInformationByHandle},
         {"FlushFileBuffers",(void*)i_FlushFileBuffers},
+        {"FlushInstructionCache",(void*)i_FlushInstructionCache},
         {"GetCurrentProcess",(void*)i_GetCurrentProcess},
         {"ReadProcessMemory",(void*)i_ReadProcessMemory},
         {"WriteProcessMemory",(void*)i_WriteProcessMemory},
