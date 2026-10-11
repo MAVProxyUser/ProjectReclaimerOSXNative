@@ -1,102 +1,154 @@
-# Where the menu render stands (2026-10-11, overnight session)
+# Where the menu render stands (2026-10-11, session 2 — post-SEH)
 
 ## TL;DR
 
-Halo 3's **real MCC engine runs on Apple Silicon with no Wine**, and the native
-client worker now boots the **entire** startup path:
+Halo 3's real MCC engine runs on Apple Silicon with no Wine. Since the last
+update we implemented **Windows SEH / exception unwinding**, which was the stated
+blocker, plus hardware-fault dispatch, a thread-exit abort fix, and several
+audio/D3D effect shims. The native client worker now boots further than ever:
+`engine_initialized_flag:1`, `network_lifecycle_flag:1`, reaches
+`halo3_shell_stage_5` (menu/shell setup). It still does not draw a frame.
 
-- loads `halo3.dll`, runs its self-patches (private-match hooks), passes the
-  `--native-udp` anti-tamper gate,
-- initializes audio (XAudio2 shimmed), loads the **main-menu map** (`mainmenu`),
-  menu artwork ("loading rings"), text packages, connects controllers,
-- creates an **OpenGL 4.1 Core** context (CGL), compiles all egui/glow shaders,
-  and builds a **COMPLETE** menu framebuffer (after the MSAA sample-count fix),
-- reaches the **menu-setup stage**.
+The remaining blockers are now **in Reclaimer's own probe-worker logic and
+halo3's D3D11 renderer**, not in the loader primitives.
 
-It does **not** yet draw a frame. At menu setup the engine hits **racy Rust
-panics / C++ exceptions** (`BTreeMap` navigate, `Option::unwrap` on `None`,
-uncaught C++ throws). Because the shim has **no SEH / C++ exception unwinding**,
-these can't be caught by Reclaimer's `catch_unwind` — they `std::terminate` the
-thread (SIGILL, `0x7ff8…` trap) before any `glDrawElements` is issued. Confirmed
-by instrumentation: `glDrawElements` is **never called**.
+## What was implemented this session (all in shim/src/peload.c, committed)
 
-## The single remaining blocker: Windows SEH / C++ exception handling
+### 1. Windows x64 SEH / exception unwinding  (the requested piece)
+- `RtlLookupFunctionEntry` (.pdata binary search per module),
+  `RtlVirtualUnwind` (full UNWIND_INFO interpreter incl. CHAININFO),
+  `RtlUnwindEx`, a dispatching `RaiseException`, `RtlRestoreContext`.
+- `seh_capture`/`seh_restore` module asm (CONTEXT <-> registers).
+- **Hardware-fault dispatch**: `crashsig` converts Unix SIGSEGV/SIGILL/SIGBUS/
+  SIGFPE/SIGTRAP into a Windows EXCEPTION_RECORD+CONTEXT and runs it through the
+  guest's **vectored exception handlers** (and frame .pdata handlers);
+  EXCEPTION_CONTINUE_EXECUTION resumes via the signal ucontext.
+- Result: Rust `panic=unwind` now unwinds to `catch_unwind` (clean exit 1 instead
+  of SIGILL/terminate), and the engine's own "Experimental startup exception"
+  VEH now fires and prints real **unwound call chains**.
 
-On Windows x64, a Rust panic (panic=unwind) and a C++ `throw` both raise
-`RaiseException(0xE06D7363, …)` and unwind via the OS: `RtlDispatchException`
-walks `.pdata`/`.xdata`, calls each frame's language handler
-(`__CxxFrameHandler3`), runs cleanup, and transfers to the matching `catch`
-(`catch_unwind`). Our shim **decodes** the throw but does not **dispatch/unwind**
-it, so the C++ runtime falls through to `std::terminate`.
+### 2. Thread-exit TSD abort  (was: malloc_report -> abort at _pthread_tsd_cleanup)
+macOS x86_64 keeps the pthread TSD in `%gs`; Windows TEB/TLS/PEB map to
+`%gs:0x30/0x58/0x60`. Slot `0x60` has a pthread destructor that `free()`s the
+slot value at thread exit, and we'd stored the **static** PEB pointer there ->
+abort. Fix: zero **only** `gs:0x60` before a worker thread returns (cleanup skips
+NULL slots). We deliberately keep `gs:0x58` (TLS array) and `gs:0x30` (TEB)
+set and **leak** the per-thread TEB/tarr — zeroing 0x58 opened a window where
+late thread-local destructors faulted on NULL TLS, and freeing the TEB risked a
+use-after-free during cleanup. (Wine 10.5 instead swaps the gs base on every
+Windows<->native transition — the fully-correct fix if the leak/edge cases bite.)
 
-Implementing this is the big remaining piece and is well-defined but large:
-`RtlLookupFunctionEntry`, `RtlVirtualUnwind`, `RtlUnwindEx`, and the
-`__CxxFrameHandler3` personality (the MSVC C++ EH state machine). This is the
-part of `ntdll`/`msvcrt` that Wine implements.
+### 3. Audio / D3D effect shims (engine called NULL fn-ptrs or used NULL out-params)
+- **WavesFX**: halo3.dll builds a table of `WavesFX_*` fn-ptrs (globals at RVA
+  0x46bb780..0x46bb7f0) that it would fill by LoadLibrary+GetProcAddress of Waves'
+  DLL. That loader path never runs here, so the ptrs stay NULL and the engine
+  calls `WavesFX_Initialize`(NULL). We pre-fill the table in `load_guest` when
+  halo3 maps: Initialize returns a dummy ctx, the rest are no-ops.
+- **xaudio2_9redist** ordinals 2/3/4 = `CreateAudioReverb`/`CreateAudioVolumeMeter`/
+  `CreateFX` -> a real (silent) IXAPO COM object with a safe vtable (incl.
+  GetRegistrationProperties). (ord 1 XAudio2Create was already handled.)
+- **D3DCompile** (d3dcompiler_47): halo3 compiles its video-display HLSL
+  (CopyToScreen / YUVToRGB) to DXBC blobs and reads GetBufferPointer/Size. We
+  return a valid ID3DBlob wrapping a placeholder DXBC buffer (no device consumes
+  the bytecode on this path).
 
-Two consequences of not having it:
-1. The engine's *normal* non-fatal throws (asset-missing, control flow) abort.
-2. Reclaimer's menu-setup panics (whatever their root) can't be caught/logged
-   and continued, so the worker dies.
+## The orchestration architecture (mapped this session)
 
-Whether the menu-setup panics are *caused* by a concurrency bug in the shim or
-are genuine logic the engine recovers from via `catch_unwind` on real Windows,
-**SEH unblocks both**: with unwinding, a caught panic lets the worker continue.
+Running `peload project-reclaimer.exe` (no args) runs the **orchestrator**. It
+`CreateProcessW`-spawns ONE child: `probe-engine-worker <halo3.dll>
+--guardian-slayer --client-window --startup --skip-render-warmup --shell-callbacks
+--native-udp`. That subcommand's 6 flags are each `required(true)` (clap), so the
+probe is hardwired to this exact set — you cannot drop/alter a flag (clap exits 2).
 
-## What was fixed to get here (this session)
+The flag meanings (from the exe's own `--help` text):
+- `guardian_slayer`: try Guardian/Slayer, **suppressing the worker's menu fallback**
+- `client_window`: our own window + native rendering, **without the MCC shell**
+- `startup`: test native startup (may allocate 2 GiB), `skip_render_warmup`,
+  `shell_callbacks`, `native_udp`: as named.
+- `real_client`: "accept one launcher-provisioned real client over loopback" — the
+  actual client path, NOT launched in the standalone orchestrator flow.
 
-- GLSL `#version<150` rewrite by resolved pointer in `make_gl_thunk`.
-- `.text` self-patch: page-align `VirtualProtect`; `FlushInstructionCache` =
-  `sys_icache_invalidate`.
-- WASAPI COM (empty `IMMDeviceEnumerator`) so cpal stops panicking.
-- ws2_32 resolved through one ordinal table behind `WS2_HANDLE` → the
-  `--native-udp` import-integrity gate passes; then real BSD-socket ws2_32.
-- `GetEnvironmentVariableW` sets `ERROR_ENVVAR_NOT_FOUND` on miss (Rust
-  `env::var` was returning `Some("")` for every unset var).
-- `GetModuleFileNameW/A` return the exe path (not the command line); Rust
-  `current_exe()` works.
-- Playlist: staged a valid empty-rotation playlist; empty-path `File::open`
-  redirects to it (the empty global path *was* the playlist path).
-- BCrypt via CommonCrypto (anti-cheat hashing).
-- `WriteProcessMemory` keeps the target page RWX (was downgrading to r-x and
-  faulting the `*lpNumberOfBytesWritten` store).
-- Bind **delay imports** (dxgi/d3d11); minimal `IDXGIFactory` (EnumAdapters →
-  none) + minimal **XAudio2** (IXAudio2 + voices) so the engine's probes don't
-  deref NULL.
-- GDI DIB surface (CreateDIBSection/…); the menu's CPU bitmap allocates.
-- **MSAA sample clamp** → the menu FBO is COMPLETE (was
-  `GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT 0x8cd6`).
-- Missing GL funcs resolve to **NULL** (not a no-op stub) so glow detects
-  capabilities correctly.
-- **Thread-safe** GL thunk / stub pools: permanent RWX + mutex (the old
-  RW↔RX toggle faulted code executing on another thread — a real source of
-  random multi-thread crashes).
-- Real **WaitOnAddress / WakeByAddress*** futex (were no-ops; Rust `std::sync`
-  depends on them on Windows 8+).
-- Real **NSWindow + NSOpenGLContext** path (`PELOAD_WINDOW`), autorelease-pool
-  wrapped; frame-capture infra (`PELOAD_SHOT`, resolve-blit MSAA→single →BMP).
+So the standalone flow ONLY runs the guardian-slayer probe, which tries to load a
+Guardian map / Slayer match — needing halo3's **D3D11** renderer we don't have —
+and explicitly SKIPS the main-menu fallback ("Skipped main-menu-only fallback in
+disposable worker memory (RVA 0x12FB1C)"). The probe reaches `halo3_shell_stage_5`
+with a VISIBLE window + menu artwork loaded, then faults before presenting
+(`ready_presents:0`, no glDrawElements/SwapBuffers ever called — nothing is drawn
+to show yet).
+
+The orchestrator does NOT launch a second (real-client) process whether the probe
+succeeds or fails (verified: one CreateProcessW per run). So "the menu" in this
+flow would come only from the **menu fallback** (suppressed by guardian_slayer) or
+the **real-client** path (needs launcher provisioning we don't replicate).
+
+### Experiment hooks added (env-gated, in i_CreateProcessW / i_ExitProcess / crashsig)
+- `PELOAD_WORKER_DROP="--flag,..."` / `PELOAD_WORKER_ADD="..."`: rewrite the
+  spawned worker's args. (Dropping any required flag -> clap exit 2.)
+- `PELOAD_PROBE_EXIT0=1`: force the probe worker to report success. (The worker
+  often exits via a path we don't hook — RtlExitUserProcess/Nt* — so it doesn't
+  always fire; and the orchestrator launches no real client regardless.)
+- `PELOAD_SURVIVE=1`: park a faulted non-main thread instead of killing the proc.
+
+### Paths forward to a VISIBLE menu (all substantial)
+1. **Force the menu fallback**: patch the exe/engine branch that skips the
+   main-menu-only fallback at worker-RVA 0x12FB1C (guardian_slayer gate). The log
+   string is `project-reclaimer.exe` VA 0x141b55e54; it's referenced via a Rust
+   data table (no direct code xref), so locate the branch by its data-table entry
+   or by tracing the guardian_slayer bool. If the menu fallback renders via
+   Reclaimer's own GL (egui) it would NOT need D3D11.
+2. **Implement enough D3D11** for halo3's compositor/present (device + context +
+   the handful of shaders/draw/Present the shell uses). Large (DXVK/wined3d scope).
+3. **Drive the real-client path** (`--real-client`) with loopback provisioning the
+   launcher normally supplies. Needs RE of the provisioning handshake.
+
+## Current blockers (in priority order)
+
+### A. Reclaimer probe-worker uses a stub/headless glow context
+In `probe-engine-worker` mode the worker panics on the **main thread**:
+`glow-0.16.0/src/gl46.rs:4515: called glDeleteProgram but it was not loaded`.
+Our GL loader DOES resolve glDeleteProgram non-NULL (verified: dlsym returns it,
+make_gl_thunk wraps it; PELOAD_TRACE_GLRES shows one resolution at the real GL
+context). The panicking glow Context is a DIFFERENT one that never asked our
+loader (glDeleteProgram is resolved exactly once in the whole run) — i.e.
+Reclaimer builds a null/stub glow context in probe mode and later calls
+`delete_program` on it. This is Reclaimer probe-mode logic triggered by our
+environment, now surfaced cleanly because SEH lets the panic propagate.
+Next: understand the probe-vs-client-render architecture (does the MAIN process
+render after a successful probe? can the probe be made to "succeed"/exit 0?).
+
+### B. halo3 D3D11 native renderer + swarm of worker-thread faults
+halo3.dll is a full D3D11 engine. During shell setup it spawns many threads and
+compiles/creates D3D shaders. We have no D3D11 device (D3D11CreateDevice returns
+UNSUPPORTED), so paths that need one fault. We faked the shader *compile* (blob)
+but a real device/context/draw path is a large missing piece (DXVK/wined3d
+territory). Intermittent EXC_BAD_ACCESS on halo3 worker threads.
+`PELOAD_SURVIVE=1` parks a faulted non-main thread instead of killing the process
+(capture aid; can deadlock).
+
+### C. BTreeMap navigate `Option::unwrap() on None` (menu setup, main thread)
+A genuine Rust panic in menu setup; now cleanly caught (exit 1). May be a symptom
+of (A)/(B) or TSD corruption rather than an independent bug.
+
+## Non-determinism
+Runs end variously: glow glDeleteProgram panic (exit 1), BTreeMap panic (exit 1),
+halo3 D3D thread EXC_BAD_ACCESS (139/0xc0000005). Signature of concurrent
+thread/corruption effects. The `%gs` TEB/TSD sharing (see #2) is the prime
+suspect for residual corruption; the Wine-10.5 gs-base-swap is the robust fix.
 
 ## How to reproduce / continue
-
 ```
 cd ~/Desktop/HaloReclaimerMac
 MCC="$HOME/Library/Application Support/ReclaimerMac/prefix/drive_c/Program Files/Steam/steamapps/common/Halo The Master Chief Collection"
-( cd "$MCC" && PELOAD_WINDOW=1 RUST_BACKTRACE=full \
+( cd "$MCC" && PELOAD_WINDOW=1 PELOAD_SHOT=1 PELOAD_WORKER_INHERIT_STDIO=1 RUST_BACKTRACE=full \
   arch -x86_64 ~/Desktop/HaloReclaimerMac/shim/build/peload \
   ~/Desktop/HaloReclaimerMac/analysis/project-reclaimer-v0.9.13.exe )
 ```
+Env flags: `PELOAD_WINDOW` (real NSWindow), `PELOAD_SHOT` (capture frames to
+`~/reclaimer_shot_*.bmp`), `PELOAD_WORKER_INHERIT_STDIO` (see worker stderr — the
+crash happens in the CreateProcessW-spawned probe worker), `PELOAD_TRACE_SEH`,
+`PELOAD_TRACE_GLRES` (GL name resolution), `PELOAD_TRACE_THREAD` (thread_tramp),
+`PELOAD_SURVIVE` (park faulted non-main threads), `PELOAD_WAIT=<s>` (worker sleeps
+so lldb can attach; writes pid to /tmp/peload.pid).
 
-Useful env flags: `PELOAD_WINDOW` (real window), `PELOAD_SHOT` (frame capture to
-`~/reclaimer_menu_latest.bmp`), `PELOAD_TRACE_GL`, `PELOAD_TRACE_FS`,
-`PELOAD_TRACE_VA`, `PELOAD_WAIT=<s>` (worker sleeps so lldb can attach, writes
-pid to /tmp/peload.pid).
-
-### Next steps, in priority order
-1. **Implement SEH/C++ EH** (`RtlVirtualUnwind` + `RtlUnwindEx` +
-   `__CxxFrameHandler3`). This is the unblock: panics get caught, the engine
-   survives menu setup and reaches the draw loop. The capture infra
-   (`PELOAD_SHOT`) is already in place to grab the first frame.
-2. If SEH is too big, pin the menu-setup panic source with `RUST_BACKTRACE`
-   address mapping + r2 disassembly, and provide whatever data it wants.
-3. For a *visible* (not just captured) window, run the AppKit runloop on the
-   main thread while the engine runs elsewhere (or capture via `PELOAD_SHOT`).
+Key addresses (this build): halo3.dll base 0x180000000, exe base 0x140000000.
+WavesFX table RVA 0x46bb780..0x46bb7f0. Video-shader compile at halo3+0x2a0990.

@@ -122,6 +122,7 @@ static void  unix2win(const char*, uint16_t*, int);   // fwd
 static void  fd_record(int, const char*);             // fwd
 static void  mkparents(const char*);                  // fwd
 static void  rmrf(const char*);                       // fwd
+static char  g_cmdlineA[2048];                        // fwd (full guest cmdline)
 
 // import name table, parallel arrays, indexed by stub
 static const char *imp_dll[8192];
@@ -686,7 +687,12 @@ static int    MSABI i_MultiByteToWideChar(uint32_t cp,uint32_t fl,const char*s,i
 static int    MSABI i_WideCharToMultiByte(uint32_t cp,uint32_t fl,const uint16_t*w,int wl,char*s,int sl,const char*df,int*du){
     (void)cp;(void)fl;(void)df;(void)du; int n= wl<0? 0:wl; if(wl<0){ while(w[n]) n++; n++; } if(!s||sl==0) return n; int i=0; for(;i<n&&i<sl;i++) s[i]=(char)(w[i]<128?w[i]:'?'); return i; }
 static void   MSABI i_GetSystemInfo(void *si){ if(si){ memset(si,0,48); *(uint32_t*)((char*)si+4)=4096; *(uint32_t*)((char*)si+32)=1; *(uint32_t*)((char*)si+36)=4096; } }
-static void   MSABI i_ExitProcess(uint32_t c){ _exit((int)c); }
+static void   MSABI i_ExitProcess(uint32_t c){
+    // PELOAD_PROBE_EXIT0: force the probe-engine-worker to report success so the
+    // parent orchestrator proceeds to launch its real client (experiment).
+    if(c && getenv("PELOAD_PROBE_EXIT0") && strstr(g_cmdlineA,"probe-engine-worker")){
+        ws("  [probe-exit0] forcing worker exit 0 (was "); { char t[16]; int n=snprintf(t,sizeof t,"%u)\n",c); ws(t);} _exit(0); }
+    _exit((int)c); }
 static void   MSABI i_TerminateProcess(void *h,uint32_t c){ (void)h; _exit((int)c); }
 static uint32_t MSABI i_GetModuleFileNameW(void*m,uint16_t*buf,uint32_t sz){ (void)m; uint32_t i=0; for(; i<sz && g_exewin[i]; i++) buf[i]=g_exewin[i]; if(i<sz) buf[i]=0; return i; }
 static void   MSABI i_GetStartupInfoW(void *si){ if(si) memset(si,0,104); }
@@ -760,8 +766,20 @@ static int MSABI i_CreateProcessW(const uint16_t*app,uint16_t*cmd,void*pa,void*t
         tokbuf[bi++]=0; if(nt<63) tok[nt++]=start; } }
     // exec peload DIRECTLY (x86_64 -> Rosetta auto-engages). NOT via /usr/bin/arch,
     // which is an Apple platform binary and strips DYLD_INSERT_LIBRARIES.
-    char *av[70]; int ai=0; av[ai++]=(char*)g_self; av[ai++]=exe;
-    for(int k=1;k<nt && ai<69;k++) av[ai++]=tok[k];   // worker args (skip token0=exe)
+    char *av[80]; int ai=0; av[ai++]=(char*)g_self; av[ai++]=exe;
+    // PELOAD_WORKER_DROP: comma-separated worker args to drop (experiment with the
+    // engine-probe flags, e.g. drop --guardian-slayer so the menu fallback runs).
+    const char *dropv=getenv("PELOAD_WORKER_DROP");
+    for(int k=1;k<nt && ai<69;k++){
+        if(dropv && tok[k][0]=='-'){ int drop=0; const char*d=dropv;
+            while(*d){ const char*c=tok[k],*e=d; while(*e&&*e!=','&&*e==*c){e++;c++;} if((!*e||*e==',')&&!*c){drop=1;break;} while(*d&&*d!=',')d++; if(*d==',')d++; }
+            if(drop){ ws("    [menu-mode] dropped worker arg: "); ws(tok[k]); ws("\n"); continue; } }
+        av[ai++]=tok[k];
+    }
+    // PELOAD_WORKER_ADD: extra space-separated worker args to append.
+    static char addbuf[1024]; const char *addv=getenv("PELOAD_WORKER_ADD");
+    if(addv){ int bi=0; while(*addv&&bi<1023){ while(*addv==' ')addv++; if(!*addv)break; char*s=&addbuf[bi];
+        while(*addv&&*addv!=' '&&bi<1022) addbuf[bi++]=*addv++; addbuf[bi++]=0; if(ai<78){ av[ai++]=s; ws("    [menu-mode] added worker arg: "); ws(s); ws("\n"); } } }
     av[ai]=0;
     pid_t pid=0; int rc=posix_spawn(&pid,g_self,&fa,0,av,environ);
     posix_spawn_file_actions_destroy(&fa);
@@ -790,7 +808,6 @@ static void*  MSABI i_RtlPcToFileHeader(void *pc, void **base){
       if(p>=(uint64_t)g_mods[m].base && p<(uint64_t)g_mods[m].base+o->ImageSize){ if(base)*base=g_mods[m].base; return g_mods[m].base; } }
     if(base)*base=0; return 0;
 }
-static char   g_cmdlineA[2048];
 static char*  MSABI i_GetCommandLineA(void){ return g_cmdlineA; }
 static uint16_t g_envblock[2] = {0,0};
 static uint16_t* MSABI i_GetEnvironmentStringsW(void){ return g_envblock; }
@@ -1151,7 +1168,9 @@ static void* gl_or_missing(const char*name){
     // Missing GL functions MUST resolve to NULL (not a no-op stub): glow/gl
     // loaders null-check to detect capabilities, and a stub makes them call an
     // unavailable function and get garbage. dlsym-found funcs get an ABI thunk.
-    void*g=dlsym((void*)-2,name); return g? make_gl_thunk(g) : 0; }
+    void*g=dlsym((void*)-2,name);
+    if(getenv("PELOAD_TRACE_GLRES")){ char t[128]; int n=snprintf(t,sizeof t,"  [glres] %s -> dlsym=%p\n",name,g); (void)!write(2,t,n); }
+    return g? make_gl_thunk(g) : 0; }
 static void*  MSABI i_wglGetProcAddress(const char*name){
     if(getenv("PELOAD_TRACE_GL2")){ ws("  [wglGP] "); ws(name); ws("\n"); }
     if(!strcmp(name,"wglGetExtensionsStringARB")) return (void*)i_wglGetExtensionsStringARB;
@@ -2519,6 +2538,21 @@ static void crashsig(int sig, siginfo_t *info, void *ucv){
         for(int m=0;m<g_nmods && !mm;m++){ DOS*d=(DOS*)g_mods[m].base; OPT64*o=(OPT64*)(g_mods[m].base+d->e_lfanew+sizeof(COFF));
             if(v>=(uint64_t)g_mods[m].base && v<(uint64_t)g_mods[m].base+o->ImageSize){ mm=g_mods[m].name; mo=v-(uint64_t)g_mods[m].base; } }
         if(mm){ int k=snprintf(b,sizeof b,"    ret 0x%llx (%s+0x%llx)\n",(unsigned long long)v,mm,(unsigned long long)mo); (void)!write(2,b,k); printed++; } }
+    // PELOAD_SURVIVE: an unhandled fault on a non-main thread parks that thread
+    // instead of killing the process, so the main/render thread can continue to a
+    // draw/present (PELOAD_SHOT then captures a frame). Best-effort: a parked
+    // thread keeps any locks it held, so this can deadlock — it is a capture aid,
+    // not correctness. The main thread still terminates the process.
+    if(getenv("PELOAD_SURVIVE") && !pthread_main_np()){
+        (void)!write(2,"    [survive] parking faulted non-main thread\n",46);
+        g_in_crashsig=0;
+        sigset_t us; sigemptyset(&us); sigaddset(&us,SIGSEGV); sigaddset(&us,SIGILL);
+        sigaddset(&us,SIGBUS); sigaddset(&us,SIGFPE); sigaddset(&us,SIGTRAP); sigaddset(&us,SIGABRT);
+        pthread_sigmask(SIG_BLOCK,&us,0);
+        for(;;) pause();
+    }
+    if(getenv("PELOAD_PROBE_EXIT0") && strstr(g_cmdlineA,"probe-engine-worker")){
+        (void)!write(2,"    [probe-exit0] worker faulted; reporting success to parent\n",62); _exit(0); }
     _exit(139);
 }
 extern char **environ;
