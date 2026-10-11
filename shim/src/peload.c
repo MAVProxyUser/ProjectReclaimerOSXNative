@@ -790,7 +790,11 @@ static int MSABI i_CreateProcessW(const uint16_t*app,uint16_t*cmd,void*pa,void*t
     return 1; }
 static uint32_t MSABI i_GetExitCodeProcessReal(void*h,uint32_t*code){ intptr_t hv=(intptr_t)h;
     if(hv>=0x8000 && hv<0x100000){ pid_t pid=(pid_t)(hv-0x8000); uint32_t c;
-        if(child_reap(pid,&c,0)){ if(code)*code=c; if(getenv("PELOAD_TRACE_GL")){char t[48];snprintf(t,sizeof t,"  [worker exit] code=0x%x\n",c);ws(t);} }
+        if(child_reap(pid,&c,0)){
+            // PELOAD_PROBE_EXIT0: tell the orchestrator the probe worker succeeded
+            // (report 0) so it proceeds to whatever it does on probe success.
+            if(c && getenv("PELOAD_PROBE_EXIT0")){ ws("  [probe-exit0] reporting worker success to orchestrator\n"); c=0; }
+            if(code)*code=c; if(getenv("PELOAD_TRACE_GL")){char t[48];snprintf(t,sizeof t,"  [worker exit] code=0x%x\n",c);ws(t);} }
         else if(code)*code=259; /*STILL_ACTIVE*/ return 1; }
     if(code)*code=0; return 1; }
 static int    MSABI i_DuplicateHandle(void*sp,void*src,void*tp,void**tgt,uint32_t acc,int inh,uint32_t opt){
