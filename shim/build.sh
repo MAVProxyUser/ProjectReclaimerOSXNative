@@ -3,5 +3,5 @@
 # bridge (the engine's menu renders via OpenGL).
 set -e
 cd "$(dirname "$0")"
-clang -arch x86_64 -O1 -framework OpenGL -o build/peload src/peload.c
+clang -arch x86_64 -O1 -framework OpenGL -framework Cocoa -o build/peload src/peload.c
 echo "built: build/peload  (run under: arch -x86_64 build/peload <pe> [args])"

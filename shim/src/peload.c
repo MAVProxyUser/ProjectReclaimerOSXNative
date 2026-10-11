@@ -853,16 +853,57 @@ static void*  MSABI i_GetActiveWindow(void){ return (void*)0x4857; }
 #include <OpenGL/OpenGL.h>
 #include <dlfcn.h>
 static CGLContextObj g_cgl;
+// ---- real Cocoa window + NSOpenGLContext ------------------------------------
+// The engine's menu renders to the default framebuffer; an offscreen CGL context
+// has none (GL_FRAMEBUFFER_UNDEFINED -> 'Incomplete menu framebuffer'). Make a
+// real NSWindow with an NSOpenGLContext so FBO 0 is complete AND visible.
+#include <objc/runtime.h>
+#include <objc/message.h>
+typedef struct { double x,y,w,h; } NSRect_;
+static id g_nsapp, g_nswin, g_nsctx; extern id NSDefaultRunLoopMode;
+extern void* objc_autoreleasePoolPush(void);
+static id ocls(const char*n){ return (id)objc_getClass(n); }
+static SEL osel(const char*n){ return sel_registerName(n); }
+static id om0(id o,const char*s){ return ((id(*)(id,SEL))objc_msgSend)(o,osel(s)); }
+static id oretain(id o){ return ((id(*)(id,SEL))objc_msgSend)(o,osel("retain")); }
+static CGLContextObj cocoa_make_gl_window(int w,int h){
+    if(g_nsctx){ return (CGLContextObj)((void*(*)(id,SEL))objc_msgSend)(g_nsctx,osel("CGLContextObj")); }
+    objc_autoreleasePoolPush(); // AppKit object creation needs a pool (we never run the runloop); leak it so objects live
+    g_nsapp = om0(ocls("NSApplication"),"sharedApplication");
+    ((void(*)(id,SEL,long))objc_msgSend)(g_nsapp,osel("setActivationPolicy:"),0); // Regular
+    om0(g_nsapp,"finishLaunching");
+    uint32_t attrs[]={5/*DoubleBuffer*/,99/*Profile*/,0x4100/*4.1 Core*/,8/*ColorSize*/,24,11/*AlphaSize*/,8,12/*DepthSize*/,24,13/*Stencil*/,8,73/*Accelerated*/,72/*NoRecovery*/,0};
+    id pf = ((id(*)(id,SEL,const uint32_t*))objc_msgSend)(om0(ocls("NSOpenGLPixelFormat"),"alloc"),osel("initWithAttributes:"),attrs);
+    id ctx = ((id(*)(id,SEL,id,id))objc_msgSend)(om0(ocls("NSOpenGLContext"),"alloc"),osel("initWithFormat:shareContext:"),pf,(id)0);
+    NSRect_ rect={0,0,(double)w,(double)h};
+    id win = ((id(*)(id,SEL,NSRect_,unsigned long,unsigned long,signed char))objc_msgSend)(
+        om0(ocls("NSWindow"),"alloc"),osel("initWithContentRect:styleMask:backing:defer:"),rect,15/*Titled|Closable|Mini|Resizable*/,2/*Buffered*/,0);
+    id title = ((id(*)(id,SEL,const char*))objc_msgSend)(ocls("NSString"),osel("stringWithUTF8String:"),"Project Reclaimer (Mac, Wine-free)");
+    ((void(*)(id,SEL,id))objc_msgSend)(win,osel("setTitle:"),title);
+    id view = om0(win,"contentView");
+    ((void(*)(id,SEL,id))objc_msgSend)(g_nsctx=ctx,osel("setView:"),view); // setView wants main thread; fine on the GL thread here
+    ((void(*)(id,SEL,id))objc_msgSend)(win,osel("makeKeyAndOrderFront:"),(id)0);
+    ((void(*)(id,SEL,id))objc_msgSend)(win,osel("center"),(id)0);
+    ((void(*)(id,SEL,signed char))objc_msgSend)(g_nsapp,osel("activateIgnoringOtherApps:"),1);
+    om0(ctx,"makeCurrentContext"); om0(ctx,"update"); // bind + validate the drawable
+    oretain(ctx); oretain(win); oretain(pf); g_nswin=win;   // keep alive past any pool drain
+    ws("  [cocoa] NSWindow + NSOpenGLContext created (visible)\n");
+    return (CGLContextObj)((void*(*)(id,SEL))objc_msgSend)(ctx,osel("CGLContextObj"));
+}
+static void cocoa_pump(void){ if(!g_nsapp) return;
+    for(;;){ id ev=((id(*)(id,SEL,unsigned long,id,id,signed char))objc_msgSend)(g_nsapp,osel("nextEventMatchingMask:untilDate:inMode:dequeue:"),~0UL,(id)0,NSDefaultRunLoopMode,1);
+        if(!ev) break; ((void(*)(id,SEL,id))objc_msgSend)(g_nsapp,osel("sendEvent:"),ev); } }
 static int    MSABI i_ChoosePixelFormat(void*hdc,const void*pfd){ (void)hdc;(void)pfd; return 1; }
 static int    MSABI i_SetPixelFormat(void*hdc,int fmt,const void*pfd){ (void)hdc;(void)fmt;(void)pfd; return 1; }
 static int    MSABI i_GetPixelFormat(void*hdc){ (void)hdc; return 1; }
 static int    MSABI i_DescribePixelFormat(void*hdc,int fmt,uint32_t bytes,uint8_t*pfd){ (void)hdc;(void)fmt;
     if(pfd&&bytes>=40){ memset(pfd,0,bytes); *(uint16_t*)pfd=(uint16_t)(bytes<40?bytes:40); *(uint16_t*)(pfd+2)=1; *(uint32_t*)(pfd+4)=0x25; pfd[8]=32; pfd[23]=24; pfd[27]=8; } return 1; } // PFD_DRAW_TO_WINDOW|SUPPORT_OPENGL|DOUBLEBUFFER, 32bpp, 24 depth
 static void*  MSABI i_wglCreateContext(void*hdc){ (void)hdc;
+    if(getenv("PELOAD_WINDOW")){ CGLContextObj ctx = cocoa_make_gl_window(1280,720); if(ctx){ g_cgl=ctx; CGLSetCurrentContext(ctx); ws("  [wgl] CGL context (windowed)\n"); return ctx; } }
     CGLPixelFormatAttribute at[]={kCGLPFAAccelerated,kCGLPFADoubleBuffer,kCGLPFAOpenGLProfile,(CGLPixelFormatAttribute)kCGLOGLPVersion_GL4_Core,kCGLPFAColorSize,(CGLPixelFormatAttribute)24,kCGLPFAAlphaSize,(CGLPixelFormatAttribute)8,kCGLPFADepthSize,(CGLPixelFormatAttribute)24,(CGLPixelFormatAttribute)0};
     CGLPixelFormatObj pf=0; GLint n=0; if(CGLChoosePixelFormat(at,&pf,&n)!=kCGLNoError||!pf){ CGLPixelFormatAttribute b[]={kCGLPFAColorSize,(CGLPixelFormatAttribute)24,(CGLPixelFormatAttribute)0}; CGLChoosePixelFormat(b,&pf,&n); }
-    CGLContextObj ctx=0; if(pf){ CGLCreateContext(pf,0,&ctx); CGLDestroyPixelFormat(pf); } if(ctx){ g_cgl=ctx; CGLSetCurrentContext(ctx); } // make current now (glow may read GL_VERSION before wglMakeCurrent)
-    ws(ctx?"  [wgl] CGL context created + current\n":"  [wgl] CGL context FAILED\n"); return ctx; }
+    CGLContextObj c2=0; if(pf){ CGLCreateContext(pf,0,&c2); CGLDestroyPixelFormat(pf); } if(c2){ g_cgl=c2; CGLSetCurrentContext(c2); }
+    ws(c2?"  [wgl] CGL context (offscreen) created\n":"  [wgl] CGL context FAILED\n"); return c2; }
 static int    MSABI i_wglMakeCurrent(void*hdc,void*ctx){ (void)hdc; CGLError e=CGLSetCurrentContext((CGLContextObj)ctx);
     if(getenv("PELOAD_TRACE_GL")){ const unsigned char*(*gv)(unsigned)=dlsym(RTLD_DEFAULT,"glGetString");
         const unsigned char*v = (gv&&ctx)? gv(0x1F02/*GL_VERSION*/):0; ws("  [wglMakeCurrent] ctx="); ws(ctx?"set":"null");
@@ -881,12 +922,65 @@ static const unsigned char* MSABI i_glGetString(unsigned name){
     if(getenv("PELOAD_TRACE_GL")){ char t[64]; snprintf(t,sizeof t,"  [glGetString] 0x%x cur=%p -> ",name,CGLGetCurrentContext()); ws(t); ws(r?(const char*)r:"(null)"); ws("\n"); }
     return r; }
 static void *make_gl_thunk(void *real); // fwd
-static void*  MSABI i_wglGetProcAddress(const char*name){
-    if(getenv("PELOAD_TRACE_GL2")){ ws("  [wglGP] "); ws(name); ws("\n"); }
+static unsigned MSABI i_glCheckFramebufferStatus(unsigned target){
+    unsigned(*real)(unsigned)=dlsym(RTLD_DEFAULT,"glCheckFramebufferStatus"); unsigned s=real?real(target):0;
+    if(s!=0x8CD5/*COMPLETE*/){ char t[80]; snprintf(t,sizeof t,"  [glCheckFramebufferStatus] target=0x%x -> 0x%x (INCOMPLETE)\n",target,s); ws(t);}
+    else if(getenv("PELOAD_TRACE_GL")){ ws("  [glCheckFramebufferStatus] COMPLETE\n"); }
+    return s; }
+static unsigned gl_err(void){ unsigned(*g)(void)=dlsym(RTLD_DEFAULT,"glGetError"); return g?g():0; }
+// Clamp requested MSAA sample count to one macOS supports, consistently, so
+// color+depth multisample attachments match (else INCOMPLETE_ATTACHMENT 0x8CD6).
+static int gl_clamp_samples(int samp){ static int maxs=-1; if(maxs<0){ void(*gi)(unsigned,int*)=dlsym(RTLD_DEFAULT,"glGetIntegerv"); maxs=4; if(gi){int m=0; gi(0x8D57/*GL_MAX_SAMPLES*/,&m); if(m>0)maxs=m;} }
+    if(samp<1) samp=1; if(samp>maxs) samp=maxs; if(samp>4) samp=4; return samp; }
+static void MSABI i_glTexStorage2D(unsigned t,int lv,unsigned ifmt,int w,int h){ gl_err(); void(*r)(unsigned,int,unsigned,int,int)=dlsym(RTLD_DEFAULT,"glTexStorage2D"); if(r)r(t,lv,ifmt,w,h);
+    char s[140]; snprintf(s,sizeof s,"  [glTexStorage2D] ifmt=0x%x %dx%d lv=%d err=0x%x\n",ifmt,w,h,lv,gl_err()); ws(s); }
+static void MSABI i_glTexStorage2DMultisample(unsigned t,int samp,unsigned ifmt,int w,int h,unsigned char fx){ samp=gl_clamp_samples(samp); gl_err(); void(*r)(unsigned,int,unsigned,int,int,unsigned char)=dlsym(RTLD_DEFAULT,"glTexStorage2DMultisample"); if(r)r(t,samp,ifmt,w,h,fx);
+    char s[160]; snprintf(s,sizeof s,"  [glTexStorage2DMultisample] samples=%d ifmt=0x%x %dx%d err=0x%x\n",samp,ifmt,w,h,gl_err()); ws(s); }
+static void MSABI i_glTexImage2DMultisample(unsigned t,int samp,unsigned ifmt,int w,int h,unsigned char fx){ samp=gl_clamp_samples(samp); gl_err(); void(*r)(unsigned,int,unsigned,int,int,unsigned char)=dlsym(RTLD_DEFAULT,"glTexImage2DMultisample"); if(r)r(t,samp,ifmt,w,h,fx);
+    char s[160]; snprintf(s,sizeof s,"  [glTexImage2DMultisample] samples=%d ifmt=0x%x %dx%d err=0x%x\n",samp,ifmt,w,h,gl_err()); ws(s); }
+static void MSABI i_glRenderbufferStorage(unsigned t,unsigned ifmt,int w,int h){ gl_err(); void(*r)(unsigned,unsigned,int,int)=dlsym(RTLD_DEFAULT,"glRenderbufferStorage"); if(r)r(t,ifmt,w,h);
+    char s[140]; snprintf(s,sizeof s,"  [glRenderbufferStorage] ifmt=0x%x %dx%d err=0x%x\n",ifmt,w,h,gl_err()); ws(s); }
+static void MSABI i_glRenderbufferStorageMultisample(unsigned t,int samp,unsigned ifmt,int w,int h){ samp=gl_clamp_samples(samp); gl_err(); void(*r)(unsigned,int,unsigned,int,int)=dlsym(RTLD_DEFAULT,"glRenderbufferStorageMultisample"); if(r)r(t,samp,ifmt,w,h);
+    char s[160]; snprintf(s,sizeof s,"  [glRenderbufferStorageMultisample] samples=%d ifmt=0x%x %dx%d err=0x%x\n",samp,ifmt,w,h,gl_err()); ws(s); }
+static void MSABI i_glTexImage2D(unsigned t,int l,int ifmt,int w,int h,int b,unsigned fmt,unsigned type,const void*d){ void(*r)(unsigned,int,int,int,int,int,unsigned,unsigned,const void*)=dlsym(RTLD_DEFAULT,"glTexImage2D"); if(r)r(t,l,ifmt,w,h,b,fmt,type,d);
+    if(getenv("PELOAD_TRACE_GL")){ char s[160]; snprintf(s,sizeof s,"  [glTexImage2D] ifmt=0x%x %dx%d fmt=0x%x type=0x%x\n",ifmt,w,h,fmt,type); ws(s);} }
+static void gl_capture(const char*tag); // fwd
+static void gl_capture_wh(const char*tag,int w,int h,int isfbo); // fwd
+static void MSABI i_glBlitFramebuffer(int sx0,int sy0,int sx1,int sy1,int dx0,int dy0,int dx1,int dy1,unsigned mask,unsigned filter){
+    void(*r)(int,int,int,int,int,int,int,int,unsigned,unsigned)=dlsym(RTLD_DEFAULT,"glBlitFramebuffer");
+    if(r)r(sx0,sy0,sx1,sy1,dx0,dy0,dx1,dy1,mask,filter);
+    if(getenv("PELOAD_SHOT")){ void(*gi)(unsigned,int*)=dlsym(RTLD_DEFAULT,"glGetIntegerv"); void(*bf)(unsigned,unsigned)=dlsym(RTLD_DEFAULT,"glBindFramebuffer");
+        int draw=0,read=0; if(gi){gi(0x8CA6/*DRAW_FB_BINDING*/,&draw); gi(0x8CAA/*READ_FB_BINDING*/,&read);}
+        if(bf) bf(0x8CA8/*READ_FRAMEBUFFER*/,(unsigned)draw);          // read the blit destination
+        int w=dx1-dx0,h=dy1-dy0; if(w<0)w=-w; if(h<0)h=-h; gl_capture_wh("blit-dst",w,h,draw!=0);
+        if(bf) bf(0x8CA8,(unsigned)read); }
+}
+static void MSABI i_glFinish(void){ void(*r)(void)=dlsym(RTLD_DEFAULT,"glFinish"); if(r)r(); if(getenv("PELOAD_SHOT")) gl_capture("glFinish"); }
+static void MSABI i_glFlush(void){ void(*r)(void)=dlsym(RTLD_DEFAULT,"glFlush"); if(r)r(); if(getenv("PELOAD_SHOT")) gl_capture("glFlush"); }
+// GL resolver: real framework fn via thunk, else a NAMED logging no-op stub so
+// a CALL to an unimplemented GL function is visible (not a NULL-deref crash).
+static void* gl_or_missing(const char*name){
+    if(!strcmp(name,"glFinish")) return (void*)i_glFinish;
+    if(!strcmp(name,"glFlush")) return (void*)i_glFlush;
+    if(!strcmp(name,"glBlitFramebuffer")) return (void*)i_glBlitFramebuffer;
+    if(!strcmp(name,"glTexStorage2D")) return (void*)i_glTexStorage2D;
+    if(!strcmp(name,"glTexStorage2DMultisample")) return (void*)i_glTexStorage2DMultisample;
+    if(!strcmp(name,"glTexImage2DMultisample")) return (void*)i_glTexImage2DMultisample;
+    if(!strcmp(name,"glRenderbufferStorage")) return (void*)i_glRenderbufferStorage;
+    if(!strcmp(name,"glRenderbufferStorageMultisample")) return (void*)i_glRenderbufferStorageMultisample;
+    if(!strcmp(name,"glTexImage2D")) return (void*)i_glTexImage2D;
     if(!strcmp(name,"glGetString")) return (void*)i_glGetString;
     if(!strcmp(name,"glShaderSource")||!strcmp(name,"glShaderSourceARB")) return (void*)i_glShaderSource;
     if(!strcmp(name,"glCompileShader")||!strcmp(name,"glCompileShaderARB")) return (void*)i_glCompileShader;
-    return make_gl_thunk(dlsym(RTLD_DEFAULT,name)); }
+    if(!strcmp(name,"glCheckFramebufferStatus")) return (void*)i_glCheckFramebufferStatus;
+    void*g=dlsym((void*)-2,name); void*ret=0;
+    if(g) ret=make_gl_thunk(g);
+    else if(imp_count<8192){ imp_dll[imp_count]="GLmissing"; imp_fn[imp_count]=strdup(name); ret=make_stub(imp_count++); }
+    if(getenv("PELOAD_TRACE_GLRES")&&(strstr(name,"DeleteProgram")||strstr(name,"CreateProgram"))){ char t[96]; snprintf(t,sizeof t,"  [GLres] %s dlsym=%p ret=%p impc=%d\n",name,g,ret,imp_count); ws(t);}
+    return ret; }
+static void*  MSABI i_wglGetProcAddress(const char*name){
+    if(getenv("PELOAD_TRACE_GL2")){ ws("  [wglGP] "); ws(name); ws("\n"); }
+    return gl_or_missing(name); }
 static int    MSABI i_wglDeleteContext(void*ctx){ if(ctx)CGLDestroyContext((CGLContextObj)ctx); return 1; }
 // glShaderSource: macOS Core profile rejects #version <150. Rewrite the
 // version directive in each source string (same length: "130"->"150").
@@ -933,7 +1027,29 @@ static void*  MSABI i_wglGetCurrentContext(void){ return CGLGetCurrentContext();
 static void*  MSABI i_wglGetCurrentDC(void){ return (void*)0xDC01; }
 static int    MSABI i_wglShareLists(void*a,void*b){ (void)a;(void)b; return 1; }
 static int    MSABI i_wglSwapIntervalEXT(int i){ (void)i; return 1; }
-static int    MSABI i_SwapBuffers(void*hdc){ (void)hdc; if(g_cgl) CGLFlushDrawable(g_cgl); return 1; }
+// Capture a framebuffer region to a BMP so we can SEE the menu. Reads the
+// currently-bound GL_READ_FRAMEBUFFER (caller sets it up).
+static void gl_capture_wh(const char*tag,int w,int h,int isfbo){
+    static int nshot; if(nshot>=10) return;
+    void(*rp)(int,int,int,int,unsigned,unsigned,void*)=dlsym(RTLD_DEFAULT,"glReadPixels");
+    void(*rb)(unsigned)=dlsym(RTLD_DEFAULT,"glReadBuffer");
+    if(!rp||w<=0||h<=0||(long)w*h>40000000) return;
+    unsigned char*px=calloc(1,(size_t)w*h*4); if(!px) return;
+    gl_err(); if(rb) rb(isfbo?0x8CE0/*COLOR_ATTACHMENT0*/:0x0405/*GL_BACK*/);
+    rp(0,0,w,h,0x1908/*RGBA*/,0x1401,px);
+    unsigned e=gl_err();
+    const char*home=getenv("HOME"); char path[512]; snprintf(path,sizeof path,"%s/reclaimer_shot_%d.bmp",home?home:"/tmp",nshot++);
+    FILE*f=fopen(path,"wb"); if(f){ uint32_t isz=(uint32_t)w*h*4; uint8_t fh[14]={'B','M'}; uint32_t fsz=54+isz; memcpy(fh+2,&fsz,4); uint32_t off=54; memcpy(fh+10,&off,4);
+        uint8_t ih[40]={0}; uint32_t v40=40; memcpy(ih,&v40,4); memcpy(ih+4,&w,4); memcpy(ih+8,&h,4); uint16_t pl=1,bpp=32; memcpy(ih+12,&pl,2); memcpy(ih+14,&bpp,2); memcpy(ih+20,&isz,4);
+        fwrite(fh,1,14,f); fwrite(ih,1,40,f);
+        for(int i=0;i<w*h;i++){ uint8_t*p=px+i*4; uint8_t bgra[4]={p[2],p[1],p[0],p[3]}; fwrite(bgra,1,4,f); } fclose(f);
+        char m[600]; snprintf(m,sizeof m,"  [gl_capture] %s %dx%d err=0x%x -> %s\n",tag,w,h,e,path); ws(m); }
+    free(px); }
+static void gl_capture(const char*tag){ void(*gi)(unsigned,int*)=dlsym(RTLD_DEFAULT,"glGetIntegerv"); int vp[4]={0,0,1280,720}; if(gi)gi(0x0BA2,vp); gl_capture_wh(tag,vp[2]>0?vp[2]:1280,vp[3]>0?vp[3]:720,0); }
+static int    MSABI i_SwapBuffers(void*hdc){ (void)hdc;
+    if(getenv("PELOAD_SHOT")) gl_capture("SwapBuffers");
+    if(g_nsctx){ om0(g_nsctx,"flushBuffer"); return 1; }
+    if(g_cgl) CGLFlushDrawable(g_cgl); return 1; }
 // RaiseException: log the code. 0x406D1388 = SetThreadName (ignore); others we
 // just return from for now (real SEH dispatch is a later phase).
 // Decode an MSVC C++ throw (code 0xE06D7363). args = {magic, &object, ThrowInfo*,
@@ -1466,8 +1582,8 @@ static void* MSABI i_GetProcAddress(void *mod, char *name){
     if(!strcmp(name,"glGetString")) return (void*)i_glGetString; // ensure-current wrapper
     if(!strcmp(name,"glShaderSource")) return (void*)i_glShaderSource;
     if(!strcmp(name,"glCompileShader")) return (void*)i_glCompileShader;
-    if((name[0]=='g'&&name[1]=='l')||(name[0]=='w'&&name[1]=='g'&&name[2]=='l')){ void *g=dlsym((void*)-2,name);
-        if(getenv("PELOAD_TRACE_GL")){ ws("  [GLproc] "); ws(name); ws(g?"\n":" MISSING\n"); } if(g) return make_gl_thunk(g); }
+    if(name[0]=='g'&&name[1]=='l') return gl_or_missing(name);
+    if(name[0]=='w'&&name[1]=='g'&&name[2]=='l'){ void *g=dlsym((void*)-2,name); if(g) return make_gl_thunk(g); }
     if(imp_count<8192){ imp_dll[imp_count]="(dynamic)"; imp_fn[imp_count]=name;
         return make_stub(imp_count++); }
     return 0;
@@ -1842,7 +1958,7 @@ static void *uni_resolve(const char *dll, const char *fn){
     }
     void *r=resolve_impl(fn); if(r) return r;
     // opengl32!gl* -> macOS OpenGL.framework (our wgl* are handled by resolve_impl)
-    if(!strcasecmp(dll,"opengl32.dll") && (fn[0]=='g'&&fn[1]=='l')){ if(!strcmp(fn,"glGetString")) return (void*)i_glGetString; if(!strcmp(fn,"glShaderSource")) return (void*)i_glShaderSource; if(!strcmp(fn,"glCompileShader")) return (void*)i_glCompileShader; extern void *dlsym(void*,const char*); void *g=dlsym((void*)-2/*RTLD_DEFAULT*/,fn); if(g) return make_gl_thunk(g); }
+    if(!strcasecmp(dll,"opengl32.dll") && (fn[0]=='g'&&fn[1]=='l')) return gl_or_missing(fn);
     return 0;
 }
 
@@ -2146,6 +2262,10 @@ int main(int argc, char **argv){
         ws("  PELOAD_WAIT: pid "); whex(getpid()); sleep(atoi(getenv("PELOAD_WAIT"))); }
     ws("peload: calling entry (expect stub logs, then a fault at the first\n"
        "        unimplemented behavior — that is the signal we want)\n");
+    // Pre-create the GL window on the TRUE main thread (worker only): AppKit is
+    // main-thread-only, so making it here (not on the engine's GL thread) avoids
+    // the SIGILL, and gives FBO 0 a valid drawable. wglCreateContext reuses it.
+    if(getenv("PELOAD_WINDOW") && strstr(g_cmdlineA,"probe-engine-worker")) cocoa_make_gl_window(1280,720);
     if(opt->Subsys==2 || (coff->Chars & 0x2000)){
         // DLL: DllMain(hinst, reason, reserved)
         int (__attribute__((ms_abi)) *dllmain)(void*,uint32_t,void*) = (void*)entry;
