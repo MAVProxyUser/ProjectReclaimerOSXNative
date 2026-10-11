@@ -272,12 +272,17 @@ static int    MSABI i_QueryPerformanceFrequency(uint64_t *f){ if(f) *f=100000000
 static uint32_t MSABI i_GetCurrentThreadId(void){ return 0x1000; } // single-threaded startup
 static uint32_t MSABI i_GetCurrentProcessId(void){ return (uint32_t)getpid(); }
 static void   MSABI i_InitializeSListHead(void *h){ if(h) memset(h,0,16); }
-// Interlocked SList: simple non-atomic impl (head pointer at offset 0). Enough
-// for the engine's lists at single-threaded startup.
-static void*  MSABI i_InterlockedPushEntrySList(void *head, void *entry){ void*old=*(void**)head; *(void**)entry=old; *(void**)head=entry; return old; }
-static void*  MSABI i_InterlockedPopEntrySList(void *head){ void*e=*(void**)head; if(e)*(void**)head=*(void**)e; return e; }
-static void*  MSABI i_InterlockedFlushSList(void *head){ void*e=*(void**)head; *(void**)head=0; return e; }
-static uint16_t MSABI i_QueryDepthSList(void *head){ uint16_t d=0; for(void*e=*(void**)head;e;e=*(void**)e) d++; return d; }
+// Interlocked SList: Windows' LOCK-FREE singly-linked list, used by the engine for
+// concurrent memory pools / work queues across threads. A non-atomic version races
+// (two threads corrupt the list -> bad pointers -> non-deterministic heap crashes),
+// so serialize every op under one mutex. Our header/entry layout is just "next
+// pointer at offset 0" (consistent because the engine only touches these lists
+// through this API after InitializeSListHead zeroes the header).
+static pthread_mutex_t g_slist_m = PTHREAD_MUTEX_INITIALIZER;
+static void*  MSABI i_InterlockedPushEntrySList(void *head, void *entry){ pthread_mutex_lock(&g_slist_m); void*old=*(void**)head; *(void**)entry=old; *(void**)head=entry; pthread_mutex_unlock(&g_slist_m); return old; }
+static void*  MSABI i_InterlockedPopEntrySList(void *head){ pthread_mutex_lock(&g_slist_m); void*e=*(void**)head; if(e)*(void**)head=*(void**)e; pthread_mutex_unlock(&g_slist_m); return e; }
+static void*  MSABI i_InterlockedFlushSList(void *head){ pthread_mutex_lock(&g_slist_m); void*e=*(void**)head; *(void**)head=0; pthread_mutex_unlock(&g_slist_m); return e; }
+static uint16_t MSABI i_QueryDepthSList(void *head){ pthread_mutex_lock(&g_slist_m); uint16_t d=0; for(void*e=*(void**)head;e;e=*(void**)e) d++; pthread_mutex_unlock(&g_slist_m); return d; }
 #include <errno.h>
 // Windows GetLastError/SetLastError are PER-THREAD. A global here lets a benign
 // ENOENT probe on one thread (mod/map scans) pollute another thread's
@@ -483,7 +488,18 @@ static void*  g_d3dctx_vtbl[160];
 static void*  g_dxgiswap_vtbl[40];
 static uint8_t g_d3dscratch[1<<20];  // fallback Map target
 static D3DObj* d3dobj(void** vt, uint32_t kind, uint64_t size){
-    D3DObj* o=calloc(1,sizeof *o); o->vtbl=vt; o->kind=kind; o->size=size; if(size) o->data=calloc(1,size); return o; }
+    D3DObj* o=calloc(1,sizeof *o); o->vtbl=vt; o->kind=kind; o->size=size;
+    if(size){
+        if(getenv("PELOAD_D3D_GUARD")){
+            // place the buffer's END against a PROT_NONE guard page so any write
+            // past `size` faults immediately at the offending instruction.
+            uint64_t ps=4096, nb=((size+ps-1)/ps)*ps;
+            uint8_t* m=mmap(0,nb+ps,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANON,-1,0);
+            if(m!=MAP_FAILED){ mprotect(m+nb,ps,PROT_NONE); o->data=m+(nb-size); }
+            else o->data=calloc(1,size);
+        } else o->data=calloc(1,size);
+    }
+    return o; }
 // ---- ID3D11DeviceChild base (slots 0-6) ----
 static int      MSABI d3d_QI(void*s,GUID_*r,void**pp){ (void)r; if(pp)*pp=s; return HR_OK; }
 static unsigned MSABI d3d_AddRef(void*s){ (void)s; return 1; }
@@ -499,7 +515,8 @@ static unsigned MSABI res_GetEvict(void*s){ (void)s; return 0; }
 static void     MSABI res_GetDesc(void*s,void*pd){ D3DObj*o=s; if(!pd||!o) return; uint32_t*u=pd;
     // write ONLY the caller's desc size (overwriting more corrupts its stack/heap)
     if(o->kind==1){ memset(pd,0,24); u[0]=(uint32_t)o->size; }                 // D3D11_BUFFER_DESC (24B): ByteWidth
-    else { memset(pd,0,44); u[0]=o->w; u[1]=o->h; u[2]=1; u[3]=1; u[4]=28; u[5]=1; } } // TEXTURE2D_DESC (44B)
+    else if(o->kind==3){ memset(pd,0,28); u[0]=o->w; u[1]=1; u[2]=1; u[3]=28; } // TEXTURE1D_DESC (28B)
+    else { memset(pd,0,44); u[0]=o->w; u[1]=o->h; u[2]=1; u[3]=1; u[4]=28; u[5]=1; } } // TEXTURE2D/3D_DESC (44B)
 // ---- ID3D11View (7-8). o->data holds the resource the view was created over, so
 // GetResource returns a valid (never-null) resource the engine then dereferences.
 static D3DObj* d3dobj(void** vt, uint32_t kind, uint64_t size); // fwd
