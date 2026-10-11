@@ -69,6 +69,18 @@ static uint64_t g_pref;   // preferred image base from the header
 typedef struct { const char *name; uint8_t *base; } Mod;
 static Mod g_mods[16]; static int g_nmods;
 
+// filesystem-shim foundation (declared early; used by handle-based ops)
+#include <dirent.h>
+#define MAXFD 8192
+static char g_drivec[1024];        // abs path of the Wine prefix's drive_c
+static char *g_fdpath[MAXFD];       // boxed-fd -> real unix path
+static DIR  *g_fddir[MAXFD];        // boxed-fd -> open dir stream (lazy)
+static int   g_fddel[MAXFD];        // delete-on-close flag
+static char* win2unix(const uint16_t*, char*, int);  // fwd
+static void  unix2win(const char*, uint16_t*, int);   // fwd
+static void  fd_record(int, const char*);             // fwd
+static void  mkparents(const char*);                  // fwd
+
 // import name table, parallel arrays, indexed by stub
 static const char *imp_dll[8192];
 static const char *imp_fn [8192];
@@ -105,6 +117,35 @@ static void *make_stub(uint32_t idx){
 }
 
 static inline uint8_t* rva(uint32_t r){ return g_base + r; }
+
+// ---- full-call tracer (PELOAD_TRACE_ALL): a trampoline that logs the import
+// name, then tail-jumps to the real target with args intact. ----
+static void *imp_real[8192];
+void __attribute__((ms_abi)) on_trace(uint32_t idx){ if(idx<(uint32_t)imp_count){ ws("  >> "); ws(imp_dll[idx]); ws("!"); ws(imp_fn[idx]); ws("\n"); } }
+static uint8_t *g_trpool; static size_t g_troff; static int g_trexec;
+static void *make_trace_stub(uint32_t idx, void *real){
+    if(g_trexec) mprotect(g_trpool, 96*8192, PROT_READ|PROT_WRITE);
+    uint8_t *p=g_trpool+g_troff; g_troff+=96; int o=0;
+    // frame: sub 0x48 keeps 16-align; [rsp..+0x20) = on_trace's shadow,
+    // saves live at +0x28..+0x40 (safely below the shadow region).
+    p[o++]=0x48;p[o++]=0x83;p[o++]=0xEC;p[o++]=0x48;                       // sub rsp,0x48
+    p[o++]=0x48;p[o++]=0x89;p[o++]=0x4C;p[o++]=0x24;p[o++]=0x28;           // mov [rsp+0x28],rcx
+    p[o++]=0x48;p[o++]=0x89;p[o++]=0x54;p[o++]=0x24;p[o++]=0x30;           // mov [rsp+0x30],rdx
+    p[o++]=0x4C;p[o++]=0x89;p[o++]=0x44;p[o++]=0x24;p[o++]=0x38;           // mov [rsp+0x38],r8
+    p[o++]=0x4C;p[o++]=0x89;p[o++]=0x4C;p[o++]=0x24;p[o++]=0x40;           // mov [rsp+0x40],r9
+    p[o++]=0xB9; *(uint32_t*)(p+o)=idx; o+=4;                              // mov ecx,idx
+    p[o++]=0x48;p[o++]=0xB8; *(uint64_t*)(p+o)=(uint64_t)&on_trace; o+=8;  // mov rax,&on_trace
+    p[o++]=0xFF;p[o++]=0xD0;                                               // call rax
+    p[o++]=0x48;p[o++]=0x8B;p[o++]=0x4C;p[o++]=0x24;p[o++]=0x28;           // mov rcx,[rsp+0x28]
+    p[o++]=0x48;p[o++]=0x8B;p[o++]=0x54;p[o++]=0x24;p[o++]=0x30;           // mov rdx,[rsp+0x30]
+    p[o++]=0x4C;p[o++]=0x8B;p[o++]=0x44;p[o++]=0x24;p[o++]=0x38;           // mov r8,[rsp+0x38]
+    p[o++]=0x4C;p[o++]=0x8B;p[o++]=0x4C;p[o++]=0x24;p[o++]=0x40;           // mov r9,[rsp+0x40]
+    p[o++]=0x48;p[o++]=0x83;p[o++]=0xC4;p[o++]=0x48;                       // add rsp,0x48
+    p[o++]=0x48;p[o++]=0xB8; *(uint64_t*)(p+o)=(uint64_t)real; o+=8;       // mov rax,real
+    p[o++]=0xFF;p[o++]=0xE0;                                               // jmp rax
+    if(g_trexec) mprotect(g_trpool, 96*8192, PROT_READ|PROT_EXEC);
+    return p;
+}
 
 // ---------------------------------------------------------------------------
 // Real implementations of the Win64 bootstrap surface. Enough for the C
@@ -275,6 +316,25 @@ static int MSABI i_SetThreadStackGuarantee(uint32_t*s){ (void)s; return 1; }
 static int MSABI i_FreeLibrary(void*h){ (void)h; return 1; }
 static uint32_t MSABI i_GetModuleFileNameA(void*m,char*buf,uint32_t sz){ (void)m; uint32_t i=0; for(; i<sz && g_cmdlineA[i]; i++) buf[i]=g_cmdlineA[i]; if(i<sz) buf[i]=0; return i; }
 static uint32_t MSABI i_GetConsoleOutputCP(void){ return 65001; }
+// drive/volume queries: present C: as a fixed NTFS volume with free space, so
+// the client accepts the cache/scratch as "a drive of this PC".
+static uint32_t MSABI i_GetDriveTypeW(const uint16_t*root){ (void)root; return 3; } // DRIVE_FIXED
+static uint32_t MSABI i_GetDriveTypeA(const char*root){ (void)root; return 3; }
+static int MSABI i_GetVolumeInformationW(const uint16_t*root,uint16_t*vn,uint32_t vnsz,uint32_t*serial,uint32_t*maxcomp,uint32_t*flags,uint16_t*fsn,uint32_t fsnsz){
+    (void)root; if(vn&&vnsz){vn[0]='O';vn[1]='S';vn[2]=0;} if(serial)*serial=0x1337c0de; if(maxcomp)*maxcomp=255; if(flags)*flags=0x03;
+    if(fsn&&fsnsz){ const char*f="NTFS"; uint32_t i=0; for(; f[i]&&i<fsnsz-1;i++) fsn[i]=(uint8_t)f[i]; fsn[i]=0; } return 1; }
+static int MSABI i_GetDiskFreeSpaceExW(const uint16_t*dir,uint64_t*avail,uint64_t*total,uint64_t*tfree){
+    (void)dir; uint64_t big=(uint64_t)200*1024*1024*1024; if(avail)*avail=big; if(total)*total=big*2; if(tfree)*tfree=big; return 1; }
+static int MSABI i_GetVolumePathNameW(const uint16_t*fn,uint16_t*buf,uint32_t len){ (void)fn; if(len>=4&&buf){buf[0]='C';buf[1]=':';buf[2]='\\';buf[3]=0;} return 1; }
+static uint32_t MSABI i_RtlNtStatusToDosError(uint32_t s){ switch(s){ case 0:return 0;
+    case 0xC0000034: case 0xC000000F: return 2; case 0xC0000022: return 5;
+    case 0xC0000011: return 38; case 0x80000006: return 18; case 0xC00000BA: return 267;
+    case 0xC0000035: return 183; default: return (s&0xC0000000)? 1 : (s&0xffff); } }
+static uint32_t MSABI i_FormatMessageW(uint32_t fl,const void*src,uint32_t id,uint32_t lang,uint16_t*buf,uint32_t sz,void*args){
+    (void)src;(void)lang;(void)args; char tmp[64]; int n=0; const char*pfx="System error "; for(int i=0;pfx[i];i++) tmp[n++]=pfx[i];
+    uint32_t v=id; char d[12]; int dn=0; if(!v) d[dn++]='0'; while(v){ d[dn++]='0'+v%10; v/=10; } while(dn) tmp[n++]=d[--dn]; tmp[n]=0;
+    if(fl&0x100){ uint16_t*mb=malloc((n+1)*2); for(int i=0;i<=n;i++) mb[i]=(uint8_t)tmp[i]; *(void**)buf=mb; return n; } // ALLOCATE_BUFFER
+    uint32_t i=0; for(; i<(uint32_t)n && i<sz-1; i++) buf[i]=(uint8_t)tmp[i]; buf[i]=0; return i; }
 static int   MSABI i_SetConsoleCtrlHandler(void*h,int add){ (void)h;(void)add; return 1; }
 static void* MSABI i_CreateSemaphoreA(void*sec,long init,long max,const char*nm){ (void)sec;(void)init;(void)max;(void)nm; return (void*)0x5e4a; }
 static void* MSABI i_CreateSemaphoreW(void*sec,long init,long max,const uint16_t*nm){ (void)sec;(void)init;(void)max;(void)nm; return (void*)0x5e4a; }
@@ -301,7 +361,9 @@ static void *thread_tramp(void *a){
     uint32_t r = t->fn ? t->fn(t->param) : 0; free(t); return (void*)(uintptr_t)r;
 }
 static void* MSABI i_CreateThread(void*attr,uint64_t stack,WinThreadProc start,void*param,uint32_t fl,uint32_t*tid){
-    (void)attr;(void)stack;(void)fl; TArg *t=malloc(sizeof *t); t->fn=start; t->param=param;
+    (void)attr;(void)stack;(void)fl;
+    if(getenv("PELOAD_NO_THREADS")){ if(tid)*tid=0x7333; return (void*)0x7333; } // diagnostic: don't spawn
+    TArg *t=malloc(sizeof *t); t->fn=start; t->param=param;
     pthread_t th; if(pthread_create(&th,0,thread_tramp,t)){ free(t); return 0; }
     if(tid)*tid=(uint32_t)(uintptr_t)th; return (void*)th;
 }
@@ -313,7 +375,81 @@ static int MSABI i_SwitchToThread(void){ sched_yield(); return 1; }
 // CompareStringOrdinal: UTF-16 ordinal compare -> 1/2/3 (LESS/EQUAL/GREATER)
 static uint32_t MSABI i_GetTempPathW(uint32_t n,uint16_t*buf){ const char*t="C:\\ReclaimerCache\\Temp\\"; uint32_t i=0; for(; t[i]&&i<n-1;i++) buf[i]=(uint8_t)t[i]; buf[i]=0; return i; }
 static uint32_t MSABI i_GetTempPath2W(uint32_t n,uint16_t*buf){ return i_GetTempPathW(n,buf); }
-static int MSABI i_GetFileInformationByHandleEx(void*h,int cls,void*info,uint32_t sz){ (void)h;(void)cls;(void)sz; if(info) memset(info,0,sz<64?sz:64); return 1; }
+// GetFileInformationByHandleEx: FileBasic(0)/FileStandard(1) from fstat, and
+// directory enumeration (FileIdBothDirInfo=10/restart=11, FileFullDirInfo=14/15)
+// one entry per call (NextEntryOffset=0), real readdir.
+static int MSABI i_GetFileInformationByHandleEx(void*h,int cls,void*info,uint32_t sz){
+    intptr_t hv=(intptr_t)h; if(hv<0x1000||!info){ if(info)memset(info,0,sz); return 1; }
+    int fd=(int)(hv-0x1000); struct stat st;
+    if(getenv("PELOAD_TRACE_FS")){ char t[48]; snprintf(t,sizeof t,"  [GFIBHEx] cls=%d fd=%d\n",cls,fd); ws(t); }
+    if(cls==0){ memset(info,0,40); if(!fstat(fd,&st)) *(uint32_t*)((char*)info+32)=S_ISDIR(st.st_mode)?0x10:0x80; return 1; }
+    if(cls==1){ memset(info,0,24); if(!fstat(fd,&st)){ *(int64_t*)info=st.st_size; *(int64_t*)((char*)info+8)=st.st_size; *(uint32_t*)((char*)info+16)=1; *((char*)info+21)=S_ISDIR(st.st_mode)?1:0; } return 1; }
+    if(cls==9){ memset(info,0,8); if(!fstat(fd,&st)) *(uint32_t*)info=S_ISDIR(st.st_mode)?0x10:0x80; /*ReparseTag*/*(uint32_t*)((char*)info+4)=0; return 1; } // FileAttributeTagInfo: not a reparse point
+    if(cls==18){ memset(info,0,24); if(!fstat(fd,&st)){ *(uint64_t*)info=(uint64_t)st.st_dev; *(uint64_t*)((char*)info+8)=(uint64_t)st.st_ino; } return 1; } // FileIdInfo
+    if(cls==10||cls==11||cls==14||cls==15){
+        if(fd>=MAXFD){ g_lasterr=18; return 0; }
+        if(cls==11||cls==15){ if(g_fddir[fd]){ rewinddir(g_fddir[fd]); } }
+        if(!g_fddir[fd]){ int dd=dup(fd); g_fddir[fd]= dd>=0? fdopendir(dd):0; }
+        DIR *d=g_fddir[fd]; if(!d){ g_lasterr=18; return 0; }
+        struct dirent *de; do{ de=readdir(d); }while(de && (!strcmp(de->d_name,".")||!strcmp(de->d_name,"..")));
+        if(!de){ g_lasterr=18; return 0; } // ERROR_NO_MORE_FILES
+        char full[2300]; snprintf(full,sizeof full,"%s/%s", g_fdpath[fd]?g_fdpath[fd]:".", de->d_name);
+        struct stat es; int have=stat(full,&es)==0;
+        uint8_t *b=info; if(sz>700) sz=700; memset(b,0,sz);
+        int nameoff=(cls==10||cls==11)?104:68;
+        *(uint32_t*)(b+56) = (have&&S_ISDIR(es.st_mode))?0x10:0x80;      // FileAttributes
+        int nl=0; while(de->d_name[nl]) nl++;
+        *(uint32_t*)(b+60) = (uint32_t)(nl*2);                           // FileNameLength (bytes)
+        if(have){ *(int64_t*)(b+40)=es.st_size; *(int64_t*)(b+48)=es.st_size; if(cls==10||cls==11) *(int64_t*)(b+96)=(int64_t)es.st_ino; }
+        uint16_t *nm=(uint16_t*)(b+nameoff);
+        for(int i=0;i<nl && nameoff+2*(i+1)<=(int)sz;i++) nm[i]=(uint8_t)de->d_name[i];
+        return 1; // NextEntryOffset already 0
+    }
+    memset(info,0,sz); return 1;
+}
+static uint32_t MSABI i_GetFinalPathNameByHandleW(void*h,uint16_t*buf,uint32_t cch,uint32_t fl){
+    (void)fl; intptr_t hv=(intptr_t)h; if(hv<0x1000) return 0; int fd=(int)(hv-0x1000);
+    if(getenv("PELOAD_TRACE_FS")){ ws("  [GetFinalPathNameByHandleW] "); ws((fd<MAXFD&&g_fdpath[fd])?g_fdpath[fd]:"(none)"); ws("\n"); }
+    if(fd>=MAXFD||!g_fdpath[fd]) return 0; uint16_t tmp[2048]; unix2win(g_fdpath[fd],tmp,2048);
+    uint32_t n=0; while(tmp[n]) n++; if(cch<n+1) return n+1; for(uint32_t i=0;i<=n;i++) buf[i]=tmp[i]; return n;
+}
+// recursive directory removal (RemoveDirectoryW only needs empty, but Rust may
+// hand us a populated one; nuke it for robustness)
+static void rmrf(const char *p){ struct stat st; if(lstat(p,&st)) return;
+    if(S_ISDIR(st.st_mode)){ DIR*d=opendir(p); if(d){ struct dirent*e; while((e=readdir(d))){ if(!strcmp(e->d_name,".")||!strcmp(e->d_name,"..")) continue; char c[2300]; snprintf(c,sizeof c,"%s/%s",p,e->d_name); rmrf(c);} closedir(d);} rmdir(p);} else unlink(p); }
+static int MSABI i_RemoveDirectoryW(const uint16_t*w){ char p[2048]; win2unix(w,p,sizeof p); if(rmdir(p)==0) return 1; rmrf(p); return 1; }
+// SetFileInformationByHandle: honor FileDispositionInfo(4)/Ex(21) = delete
+static int MSABI i_SetFileInformationByHandle(void*h,int cls,void*info,uint32_t sz){
+    (void)sz; intptr_t hv=(intptr_t)h; if(hv<0x1000) return 1; int fd=(int)(hv-0x1000);
+    if((cls==4||cls==21) && info && *(uint8_t*)info && fd<MAXFD) g_fddel[fd]=1; // DeleteFile flag set
+    return 1;
+}
+// NtCreateFile: supports NT absolute names (\??\C:\..) and names relative to an
+// OBJECT_ATTRIBUTES.RootDirectory handle — the path Rust remove_dir_all uses.
+static int nt_open_common(void **ph,uint32_t acc,void *oa,void *iosb,uint32_t disp,uint32_t opts){
+    uint8_t *OA=oa; void *root = OA? *(void**)(OA+8) : 0; uint8_t *uni = OA? *(uint8_t**)(OA+16) : 0;
+    char name[1600]={0}; if(uni){ uint16_t len=*(uint16_t*)uni; uint16_t *bufw=*(uint16_t**)(uni+8); int n=len/2,j=0; for(int i=0;i<n&&j<1599;i++){ char c=(char)(bufw[i]<128?bufw[i]:'?'); name[j++]=c;} name[j]=0; }
+    for(char*q=name;*q;q++) if(*q=='\\') *q='/';
+    char path[2200];
+    if(root){ intptr_t rv=(intptr_t)root; int rfd=(int)(rv-0x1000); const char *base=(rv>=0x1000&&rfd<MAXFD&&g_fdpath[rfd])?g_fdpath[rfd]:"."; const char*nm=name; if(nm[0]=='/')nm++; snprintf(path,sizeof path,"%s/%s",base,nm); }
+    else { const char*s=name; if(!strncmp(s,"/??/",4)) s+=4; else if(!strncmp(s,"/DosDevices/",12)) s+=12;
+           uint16_t tmp[2048]; int i=0; for(; s[i]&&i<2047;i++) tmp[i]=(uint8_t)(s[i]=='/'?'\\':s[i]); tmp[i]=0; win2unix(tmp,path,sizeof path); }
+    int flags = (acc & 0x40000000)? O_RDWR : O_RDONLY;
+    switch(disp){ case 0: case 5: flags|=O_CREAT|O_TRUNC; break; case 2: flags|=O_CREAT|O_EXCL; break; case 3: flags|=O_CREAT; break; case 4: flags|=O_TRUNC; break; default: break; }
+    struct stat ds; if((opts&0x1)||(stat(path,&ds)==0&&S_ISDIR(ds.st_mode))) flags=O_RDONLY; // FILE_DIRECTORY_FILE
+    int fd=open(path,flags,0644);
+    if(fd<0 && (flags&O_CREAT) && errno==ENOENT){ mkparents(path); fd=open(path,flags,0644); }
+    if(getenv("PELOAD_TRACE_FS")){ char dd[64]; snprintf(dd,sizeof dd," disp=%u opts=0x%x fl=0x%x errno=%d",disp,opts,flags,fd<0?errno:0); ws("  [NtCreateFile] "); ws(path); ws(dd); ws(fd<0?" FAIL\n":" ok\n"); }
+    if(fd<0){ if(iosb)((uint64_t*)iosb)[0]=0xC0000034; return (int)0xC0000034; } // OBJECT_NAME_NOT_FOUND
+    fd_record(fd,path); if(opts&0x1000) g_fddel[fd<MAXFD?fd:0]=1; // FILE_DELETE_ON_CLOSE
+    if(ph)*ph=(void*)(intptr_t)(0x1000+fd); if(iosb){((uint64_t*)iosb)[0]=0; ((uint64_t*)iosb)[1]=(disp==2?2:1);} return 0;
+}
+static int MSABI i_NtCreateFile(void **ph,uint32_t acc,void *oa,void *iosb,void *alloc,uint32_t fattr,uint32_t share,uint32_t disp,uint32_t opts,void *ea,uint32_t eal){
+    (void)alloc;(void)fattr;(void)share;(void)ea;(void)eal; return nt_open_common(ph,acc,oa,iosb,disp,opts);
+}
+static int MSABI i_NtOpenFile(void **ph,uint32_t acc,void *oa,void *iosb,uint32_t share,uint32_t opts){
+    (void)share; return nt_open_common(ph,acc,oa,iosb,1 /*FILE_OPEN*/,opts);
+}
 static int MSABI i_CompareStringOrdinal(const uint16_t*a,int ca,const uint16_t*b,int cb,int ic){
     int la = ca<0? ({int n=0; while(a[n])n++; n;}) : ca;
     int lb = cb<0? ({int n=0; while(b[n])n++; n;}) : cb;
@@ -336,6 +472,14 @@ static int  MSABI i_FlushViewOfFile(void*a,uint64_t b){ (void)a;(void)b; return 
 static int  MSABI i_SetEndOfFile(void*h){ intptr_t hv=(intptr_t)h; if(hv<0x1000) return 1; int fd=(int)(hv-0x1000); off_t cur=lseek(fd,0,SEEK_CUR); if(cur>=0) (void)!ftruncate(fd,cur); return 1; }
 static int  MSABI i_MoveFileExW(const uint16_t*from,const uint16_t*to,uint32_t fl){ (void)fl; char a[2048],b[2048]; char A[2048],B[2048]; win2unix(from,A,sizeof A); if(!to) return unlink(A)==0; win2unix(to,B,sizeof B); (void)a;(void)b; return rename(A,B)==0; }
 static int  MSABI i_DeleteFileW(const uint16_t*w){ char p[2048]; return unlink(win2unix(w,p,sizeof p))==0 || 1; }
+static int  MSABI i_CopyFileExW(const uint16_t*src,const uint16_t*dst,void*prog,void*data,int*cancel,uint32_t fl){
+    (void)prog;(void)data;(void)cancel;(void)fl; char s[2048],d[2048]; win2unix(src,s,sizeof s); win2unix(dst,d,sizeof d);
+    int in=open(s,O_RDONLY); if(in<0){ g_lasterr=win_err(); return 0; }
+    mkparents(d); int out=open(d,O_WRONLY|O_CREAT|O_TRUNC,0644); if(out<0){ close(in); g_lasterr=win_err(); return 0; }
+    char buf[65536]; long n; int ok=1; while((n=read(in,buf,sizeof buf))>0){ if(write(out,buf,n)!=n){ ok=0; break; } } if(n<0) ok=0;
+    close(in); close(out); if(!ok) g_lasterr=win_err(); return ok; }
+static int  MSABI i_CopyFileW(const uint16_t*src,const uint16_t*dst,int failIfExists){ (void)failIfExists; return i_CopyFileExW(src,dst,0,0,0,0); }
+static int  MSABI i_CreateHardLinkW(const uint16_t*lnk,const uint16_t*tgt,void*sec){ (void)sec; char l[2048],t[2048]; win2unix(lnk,l,sizeof l); win2unix(tgt,t,sizeof t); mkparents(l); if(link(t,l)==0) return 1; return i_CopyFileExW(tgt,lnk,0,0,0,0); }
 static void* MSABI i_LocalAlloc(uint32_t fl,uint64_t n){ void*p=malloc(n?n:1); if(p&&(fl&0x40)) memset(p,0,n); return p; }
 static void* MSABI i_LocalFree(void*p){ free(p); return 0; }
 // DPAPI: no Windows user to bind to, so seal == copy (round-trips correctly,
@@ -360,7 +504,17 @@ static void* MSABI i_LoadLibraryExW(const uint16_t *name, void *h, uint32_t fl){
 
 // ---- filesystem shim: translate Windows paths to Unix, do real I/O ----
 // drive mapping: C:\ -> $prefix/drive_c, Z:\ -> /, others -> $prefix/drive_<x>
-static char g_drivec[1024];   // absolute path of the Wine prefix's drive_c
+static void fd_record(int fd, const char *unixpath){ if(fd>=0&&fd<MAXFD){ free(g_fdpath[fd]); g_fdpath[fd]=strdup(unixpath); if(g_fddir[fd]){closedir(g_fddir[fd]);g_fddir[fd]=0;} g_fddel[fd]=0; } }
+// mkdir -p for a file path's parent chain (scratch mirror needs this)
+static void mkparents(const char *path){ char t[2300]; snprintf(t,sizeof t,"%s",path); for(char*p=t+1;*p;p++){ if(*p=='/'){ *p=0; mkdir(t,0755); *p='/'; } } }
+// reverse of win2unix: unix path -> \\?\ Windows path (best effort)
+static void unix2win(const char *u, uint16_t *out, int cap){
+    char w[2048]; size_t dl=strlen(g_drivec);
+    if(!strncmp(u,g_drivec,dl)) snprintf(w,sizeof w,"\\\\?\\C:%s", u+dl);
+    else snprintf(w,sizeof w,"\\\\?\\Z:%s", u);
+    for(char*p=w;*p;p++) if(*p=='/') *p='\\';
+    int i=0; for(; w[i] && i<cap-1; i++) out[i]=(uint8_t)w[i]; out[i]=0;
+}
 static char* win2unix(const uint16_t *w, char *out, int outsz){
     char t[2048]; int n=0; for(; w && w[n] && n<2047; n++) t[n]=(char)(w[n]<128?w[n]:'?'); t[n]=0;
     // strip \\?\ long-path prefix
@@ -396,9 +550,14 @@ static void*  MSABI i_CreateFileW(const uint16_t *w,uint32_t acc,uint32_t share,
         case 5: flags|=O_TRUNC;         break;      // TRUNCATE_EXISTING
         default: break;                              // 3 OPEN_EXISTING
     }
+    // directories: open O_RDONLY (BACKUP_SEMANTICS 0x02000000 or trailing slash)
+    struct stat pst; if((fl&0x02000000) || (stat(p,&pst)==0 && S_ISDIR(pst.st_mode))) flags=O_RDONLY;
     int fd=open(p, flags, 0644);
+    if(fd<0 && (flags&O_CREAT) && errno==ENOENT){ mkparents(p); fd=open(p, flags, 0644); } // scratch mirror
     if(getenv("PELOAD_TRACE_FS")){ ws("  [CreateFileW] "); ws(p); ws(fd<0?"  FAIL\n":"  ok\n"); }
     if(fd<0){ g_lasterr=win_err(); return (void*)-1; } g_lasterr=0; // INVALID_HANDLE_VALUE
+    fd_record(fd,p);
+    if(fl&0x04000000) g_fddel[fd<MAXFD?fd:0]=1; // FILE_FLAG_DELETE_ON_CLOSE
     return (void*)(intptr_t)(0x1000+fd);
 }
 static int    MSABI i_ReadFile(void*h,void*buf,uint32_t n,uint32_t*rd,void*ov){
@@ -409,7 +568,15 @@ static int    MSABI i_SetFilePointerEx(void*h,int64_t dist,int64_t*newp,uint32_t
     intptr_t hv=(intptr_t)h; if(hv<0x1000) return 0; off_t r=lseek((int)(hv-0x1000),dist, method); if(newp)*newp=r; return r>=0;
 }
 static int    MSABI i_GetFileSizeEx(void*h,int64_t*sz){ intptr_t hv=(intptr_t)h; if(hv<0x1000) return 0; struct stat st; if(fstat((int)(hv-0x1000),&st)) return 0; if(sz)*sz=st.st_size; return 1; }
-static int    MSABI i_CloseHandleReal(void*h){ intptr_t hv=(intptr_t)h; if(hv>=0x1000) close((int)(hv-0x1000)); return 1; }
+static int    MSABI i_CloseHandleReal(void*h){ intptr_t hv=(intptr_t)h; if(hv>=0x1000){ int fd=(int)(hv-0x1000);
+    if(fd<MAXFD){ if(g_fddir[fd]){ closedir(g_fddir[fd]); g_fddir[fd]=0; }
+        // delete-on-close: honor for files only. Windows refcounts this across
+        // all handles; we don't, so deleting a directory here would yank it
+        // while the app still has other opens. Leaking the ephemeral scratch
+        // dir is harmless (cleaned on next launch).
+        if(g_fddel[fd]&&g_fdpath[fd]){ struct stat ds; if(stat(g_fdpath[fd],&ds)==0 && !S_ISDIR(ds.st_mode)) unlink(g_fdpath[fd]); }
+        free(g_fdpath[fd]); g_fdpath[fd]=0; g_fddel[fd]=0; }
+    close(fd); } return 1; }
 // env var lookup via the host environment (so RECLAIMER_* pass through)
 static uint32_t MSABI i_GetEnvironmentVariableW(const uint16_t*n,uint16_t*v,uint32_t sz){
     char nm[256]; int i=0; for(; n && n[i] && i<255; i++) nm[i]=(char)(n[i]<128?n[i]:'?'); nm[i]=0;
@@ -428,7 +595,7 @@ static void   MSABI i_GetLocalTime(uint16_t *stm){
 }
 static void   MSABI i_GetSystemTime(uint16_t *stm){ i_GetLocalTime(stm); }
 static int    MSABI i_CreateDirectoryW(const uint16_t*w,void*sec){ (void)sec; char p[2048]; return mkdir(win2unix(w,p,sizeof p),0755)==0 || 1; }
-static uint32_t MSABI i_GetCurrentDirectoryW(uint32_t sz,uint16_t*buf){ if(sz>=3&&buf){buf[0]='C';buf[1]=':';buf[2]=0;} return 2; }
+static uint32_t MSABI i_GetCurrentDirectoryW(uint32_t sz,uint16_t*buf){ const char*c="C:\\ReclaimerCache"; uint32_t i=0; for(; c[i]&&i<sz-1;i++) buf[i]=(uint8_t)c[i]; if(i<sz)buf[i]=0; return i; }
 
 // RegGetValueW: answer the Steam install-path query so MCC auto-discovery
 // works. Steam lives at C:\Program Files\Steam (maps to our prefix).
@@ -480,9 +647,9 @@ static void* MSABI i_FindFirstFileExW(const uint16_t*w,int lvl,void*fd,int op,vo
     closedir(d); g_lasterr=2; return (void*)-1; // ERROR_FILE_NOT_FOUND
 }
 static int MSABI i_FindNextFileW(void*h,void*fd){ intptr_t hv=(intptr_t)h; int idx=(int)(hv-0x2000); if(idx<0||idx>=g_nfinds||!g_finds[idx].d) return 0;
-    Find*f=&g_finds[idx]; struct dirent*de; while((de=readdir(f->d))){ if(!strcmp(de->d_name,".")||!strcmp(de->d_name,"..")) continue; if(pat_match(f->pat,de->d_name)){ fill_find(f,de,fd); return 1; } } return 0; }
+    Find*f=&g_finds[idx]; struct dirent*de; while((de=readdir(f->d))){ if(!strcmp(de->d_name,".")||!strcmp(de->d_name,"..")) continue; if(pat_match(f->pat,de->d_name)){ fill_find(f,de,fd); return 1; } } g_lasterr=18; return 0; } // ERROR_NO_MORE_FILES
 static int MSABI i_FindClose(void*h){ intptr_t hv=(intptr_t)h; int idx=(int)(hv-0x2000); if(idx>=0&&idx<g_nfinds&&g_finds[idx].d){ closedir(g_finds[idx].d); g_finds[idx].d=0; } return 1; }
-static int MSABI i_GetFileInformationByHandle(void*h,void*info){ intptr_t hv=(intptr_t)h; if(hv<0x1000||!info) return 0; struct stat st; if(fstat((int)(hv-0x1000),&st)) return 0;
+static int MSABI i_GetFileInformationByHandle(void*h,void*info){ intptr_t hv=(intptr_t)h; if(getenv("PELOAD_TRACE_FS")) ws("  [GetFileInformationByHandle]\n"); if(hv<0x1000||!info) return 0; struct stat st; if(fstat((int)(hv-0x1000),&st)) return 0;
     uint8_t*d=info; memset(d,0,52); *(uint32_t*)d=S_ISDIR(st.st_mode)?0x10:0x80; *(uint32_t*)(d+32)=(uint32_t)(st.st_size>>32); *(uint32_t*)(d+36)=(uint32_t)st.st_size; *(uint32_t*)(d+40)=1; return 1; }
 
 // GetProcAddress: hand back a live logging stub for whatever is requested,
@@ -638,6 +805,9 @@ static void *resolve_impl(const char *fn){
         {"SetEndOfFile",(void*)i_SetEndOfFile},
         {"MoveFileExW",(void*)i_MoveFileExW},
         {"DeleteFileW",(void*)i_DeleteFileW},
+        {"CopyFileExW",(void*)i_CopyFileExW},
+        {"CopyFileW",(void*)i_CopyFileW},
+        {"CreateHardLinkW",(void*)i_CreateHardLinkW},
         {"LocalAlloc",(void*)i_LocalAlloc},
         {"LocalFree",(void*)i_LocalFree},
         {"CryptProtectData",(void*)i_CryptProtectData},
@@ -645,6 +815,13 @@ static void *resolve_impl(const char *fn){
         {"GetConsoleMode",(void*)i_GetConsoleMode},
         {"SetConsoleMode",(void*)i_SetConsoleMode},
         {"GetConsoleOutputCP",(void*)i_GetConsoleOutputCP},
+        {"GetDriveTypeW",(void*)i_GetDriveTypeW},
+        {"GetDriveTypeA",(void*)i_GetDriveTypeA},
+        {"GetVolumeInformationW",(void*)i_GetVolumeInformationW},
+        {"GetDiskFreeSpaceExW",(void*)i_GetDiskFreeSpaceExW},
+        {"GetVolumePathNameW",(void*)i_GetVolumePathNameW},
+        {"RtlNtStatusToDosError",(void*)i_RtlNtStatusToDosError},
+        {"FormatMessageW",(void*)i_FormatMessageW},
         {"SetConsoleCtrlHandler",(void*)i_SetConsoleCtrlHandler},
         {"CreateSemaphoreA",(void*)i_CreateSemaphoreA},
         {"CreateSemaphoreW",(void*)i_CreateSemaphoreW},
@@ -663,6 +840,11 @@ static void *resolve_impl(const char *fn){
         {"GetTempPathW",(void*)i_GetTempPathW},
         {"GetTempPath2W",(void*)i_GetTempPath2W},
         {"GetFileInformationByHandleEx",(void*)i_GetFileInformationByHandleEx},
+        {"GetFinalPathNameByHandleW",(void*)i_GetFinalPathNameByHandleW},
+        {"RemoveDirectoryW",(void*)i_RemoveDirectoryW},
+        {"SetFileInformationByHandle",(void*)i_SetFileInformationByHandle},
+        {"NtCreateFile",(void*)i_NtCreateFile},
+        {"NtOpenFile",(void*)i_NtOpenFile},
         {"SetThreadStackGuarantee",(void*)i_SetThreadStackGuarantee},
         {"FreeLibrary",(void*)i_FreeLibrary},
         {"GetModuleFileNameA",(void*)i_GetModuleFileNameA},
@@ -747,10 +929,12 @@ static void bind_imports(uint8_t *base, OPT64 *opt){
     for(; d->Name; d++){
         const char *dll=(char*)(base+d->Name);
         uint64_t *oft=(uint64_t*)(base+(d->OFT?d->OFT:d->FT)), *ft=(uint64_t*)(base+d->FT);
+        int trace = getenv("PELOAD_TRACE_ALL")!=0;
         for(int i=0; oft[i]; i++){
             const char *fn = (oft[i]>>63)? "#ordinal" : (char*)(base+(uint32_t)oft[i]+2);
             void *r = uni_resolve(dll, fn);
-            if(r){ ft[i]=(uint64_t)r; }
+            if(r && trace && imp_count<8192){ imp_dll[imp_count]=dll; imp_fn[imp_count]=fn; imp_real[imp_count]=r; ft[i]=(uint64_t)make_trace_stub(imp_count,r); imp_count++; }
+            else if(r){ ft[i]=(uint64_t)r; }
             else if(imp_count<8192){ imp_dll[imp_count]=dll; imp_fn[imp_count]=fn; ft[i]=(uint64_t)make_stub(imp_count++); }
         }
     }
@@ -809,6 +993,8 @@ int main(int argc, char **argv){
     g_stubpool = mmap(0, 32*8192, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANON, -1, 0);
     mprotect(g_stubpool, 32*8192, PROT_READ|PROT_EXEC);
     g_pool_exec = 1;
+    g_trpool = mmap(0, 96*8192, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANON, -1, 0);
+    mprotect(g_trpool, 96*8192, PROT_READ|PROT_EXEC); g_trexec = 1;
 
     // ---- TEB/PEB via %gs overlay, set up BEFORE any guest code runs ----
     static uint8_t teb[0x2000] __attribute__((aligned(16)));
@@ -834,7 +1020,11 @@ int main(int argc, char **argv){
       // that map (via win2unix) to real dirs we create under drive_c.
       char pd[1200];
       snprintf(pd,sizeof pd,"%s/ReclaimerProfile",g_drivec); mkdir(pd,0755); setenv("RECLAIMER_PROFILE_DIR","C:\\ReclaimerProfile",0);
-      snprintf(pd,sizeof pd,"%s/ReclaimerCache",g_drivec);   mkdir(pd,0755); setenv("RECLAIMER_CACHE_DIR","C:\\ReclaimerCache",0); }
+      snprintf(pd,sizeof pd,"%s/ReclaimerCache",g_drivec);   mkdir(pd,0755); setenv("RECLAIMER_CACHE_DIR","C:\\ReclaimerCache",0);
+      snprintf(pd,sizeof pd,"%s/ReclaimerCache/Temp",g_drivec); mkdir(pd,0755);
+      setenv("LOCALAPPDATA","C:\\ReclaimerCache",0); setenv("APPDATA","C:\\ReclaimerCache",0);
+      setenv("TEMP","C:\\ReclaimerCache\\Temp",0); setenv("TMP","C:\\ReclaimerCache\\Temp",0);
+      setenv("USERPROFILE","C:\\ReclaimerProfile",0); }
 
     // ---- locate the genuine MS CRT dir: $RECLAIMER_CRT_DIR, then next to the
     // peload binary (<dir>/crt and <dir>/../crt), then the project tree ----

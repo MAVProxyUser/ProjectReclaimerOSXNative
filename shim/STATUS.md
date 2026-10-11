@@ -28,6 +28,41 @@ On the **dedicated-server exe** the loader relocates (22,919 fixups), binds
 precise, expected spot: `__p___argv` / `_get_initial_narrow_environment`
 return NULL from our stubs, so the Rust runtime dereferences a null `argv`.
 
+## MILESTONE 3: client reaches engine-worker launch; FS bridge complete
+
+Built the full filesystem/handle bridge (the "it's a day, not weeks" piece —
+correct). The client now runs end-to-end through userland and reaches the
+point of launching the native engine:
+
+- **MCC fully discovered & validated**: opens the real `halo3.dll` and the
+  entire Halo 3 map set (campaign + every MP map + `.mapinfo`) through the
+  path-translating FS shim.
+- **Private runtime scratch**: creates `mcc-startup-<uuid>`, builds the
+  `halo3/maps/info` mirror tree (auto-`mkdir -p`), and logs
+  *"Private runtime scratch (removed after worker exit)"* — i.e. it's ready
+  to hand the scratch to the engine worker.
+
+Added this turn (~215 shims total): `GetFileInformationByHandleEx` directory
+enumeration, `NtCreateFile`/`NtOpenFile` (incl. handle-relative opens),
+`RemoveDirectoryW` (recursive), `SetFileInformationByHandle` (delete),
+`CopyFileExW`/`CopyFileW`/`CreateHardLinkW`, a handle→path map, delete-on-close
+(file-only, Windows refcount semantics), real `GetLastError` + NT-status
+translation, `FindNextFileW` end-of-enumeration error, drive/volume queries,
+`FormatMessageW`, a full-call tracer (`PELOAD_TRACE_ALL`) and a
+`PELOAD_NO_THREADS` diagnostic.
+
+Two concrete frontiers remain for the client:
+1. **Dir-enumeration semantics loop (immediate):** the client's recursive walk
+   of the scratch loops because our enumeration omits `.`/`..` and
+   `FindFirstFileW` treats a trailing path component as a pattern. Fix:
+   Windows-accurate `FindFirstFileW`/`read_dir` semantics.
+2. **Worker process (architecture):** the engine (`halo3.dll` + D3D11 +
+   graphics) runs in a child process the client spawns via `CreateProcessW`
+   with the `--startup`/`--shell-callbacks` native-worker flags. Implementing
+   `CreateProcessW` means launching that worker *under the loader* (re-exec
+   peload on the worker exe). Then the worker needs Win64 SEH and the
+   graphics bridge — the genuinely multi-week part.
+
 ## MILESTONE 2: the graphical CLIENT runs its full userland init, Wine-free
 
 `project-reclaimer-v0.9.13.exe` (the GUI client) now boots through essentially
