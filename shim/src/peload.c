@@ -1147,11 +1147,17 @@ static void MSABI i_glBlitFramebuffer(int sx0,int sy0,int sx1,int sy1,int dx0,in
         if(bf) bf(0x8CA8,(unsigned)read); }
 }
 static void MSABI i_glFinish(void){ void(*r)(void)=dlsym(RTLD_DEFAULT,"glFinish"); if(r)r(); if(getenv("PELOAD_SHOT")) gl_capture("glFinish"); }
+// Capture on glClear too: if the engine never reaches a present/draw, at least
+// grab whatever is in the framebuffer each time it clears (self-limited to the
+// gl_capture_wh 10-shot cap). PELOAD_SHOT_CLEAR gates it (separate from SHOT).
+static void MSABI i_glClear(unsigned mask){ void(*r)(unsigned)=dlsym(RTLD_DEFAULT,"glClear"); if(r)r(mask);
+    if(getenv("PELOAD_SHOT_CLEAR")) gl_capture("glClear"); }
 static void MSABI i_glFlush(void){ void(*r)(void)=dlsym(RTLD_DEFAULT,"glFlush"); if(r)r(); if(getenv("PELOAD_SHOT")) gl_capture("glFlush"); }
 // GL resolver: real framework fn via thunk, else a NAMED logging no-op stub so
 // a CALL to an unimplemented GL function is visible (not a NULL-deref crash).
 static void* gl_or_missing(const char*name){
     if(!strcmp(name,"glFinish")) return (void*)i_glFinish;
+    if(!strcmp(name,"glClear")) return (void*)i_glClear;
     if(!strcmp(name,"glFlush")) return (void*)i_glFlush;
     if(!strcmp(name,"glBlitFramebuffer")) return (void*)i_glBlitFramebuffer;
     if(!strcmp(name,"glDrawElements")) return (void*)i_glDrawElements;
