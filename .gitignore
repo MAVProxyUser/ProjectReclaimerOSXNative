@@ -1,0 +1,6 @@
+analysis/
+*.exe
+*.dll
+prefix/
+shim/build/
+/tmp/

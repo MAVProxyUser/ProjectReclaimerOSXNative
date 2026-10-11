@@ -1,0 +1,3 @@
+#!/bin/bash
+DIR="$(cd "$(dirname "$0")/../../.." && pwd)"
+"$DIR/reclaimer-mac.sh" play >> "$HOME/Library/Logs/ReclaimerMac.log" 2>&1
