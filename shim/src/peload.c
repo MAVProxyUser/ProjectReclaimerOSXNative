@@ -1625,6 +1625,14 @@ static uint32_t MSABI i_WaitForMultipleObjects(uint32_t n,void*const*h,int all,u
     if(all){ for(uint32_t i=0;i<n;i++){ intptr_t hv=(intptr_t)h[i]; if(is_sync(hv)) sync_wait((SyncObj*)h[i],0xFFFFFFFF); } return 0; }
     for(uint32_t spin=0;;spin++){ for(uint32_t i=0;i<n;i++){ intptr_t hv=(intptr_t)h[i]; if(is_sync(hv)){ if(sync_wait((SyncObj*)h[i],0)==0) return i; } else return i; }
         if(ms==0) return 0x102; struct timespec ts={0,2000000}; nanosleep(&ts,0); if(ms!=0xFFFFFFFF && spin*2>=ms) return 0x102; } }
+// The *Ex (alertable) variants MUST actually wait — stubbing them returns
+// "signaled" instantly, so a thread waiting on an event/thread proceeds before
+// the awaited work finishes = data race. We ignore the alertable flag (no APCs).
+static uint32_t MSABI i_WaitForSingleObjectEx(void*h,uint32_t ms,int alert){ (void)alert; return i_WaitForSingleObject(h,ms); }
+static uint32_t MSABI i_WaitForMultipleObjectsEx(uint32_t n,void*const*h,int all,uint32_t ms,int alert){ (void)alert; return i_WaitForMultipleObjects(n,h,all,ms); }
+// Sleep: a no-op Sleep breaks yield/backoff-based coordination. Actually sleep.
+static void     MSABI i_Sleep(uint32_t ms){ if(ms==0){ sched_yield(); return; } struct timespec ts={ms/1000,(long)(ms%1000)*1000000L}; nanosleep(&ts,0); }
+static uint32_t MSABI i_SleepEx(uint32_t ms,int alert){ (void)alert; i_Sleep(ms); return 0; }
 // ---- critical sections / SRW locks / condition variables (real pthreads) ----
 static pthread_mutex_t g_lazy=PTHREAD_MUTEX_INITIALIZER;
 static void MSABI i_InitializeCriticalSection(void*cs){ pthread_mutex_t*m=malloc(sizeof *m); pthread_mutexattr_t a; pthread_mutexattr_init(&a); pthread_mutexattr_settype(&a,PTHREAD_MUTEX_RECURSIVE); pthread_mutex_init(m,&a); *(void**)cs=m; }
@@ -2431,6 +2439,10 @@ static void *resolve_impl(const char *fn){
         {"SetEvent",(void*)i_SetEvent},
         {"ResetEvent",(void*)i_ResetEvent},
         {"WaitForSingleObject",(void*)i_WaitForSingleObject},
+        {"WaitForSingleObjectEx",(void*)i_WaitForSingleObjectEx},
+        {"WaitForMultipleObjectsEx",(void*)i_WaitForMultipleObjectsEx},
+        {"Sleep",(void*)i_Sleep},
+        {"SleepEx",(void*)i_SleepEx},
         {"WaitForMultipleObjects",(void*)i_WaitForMultipleObjects},
         {"CreateThread",(void*)i_CreateThread},
         {"GetThreadId",(void*)i_GetThreadId},
