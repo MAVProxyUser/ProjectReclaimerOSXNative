@@ -126,6 +126,47 @@ static void *make_stub(uint32_t idx){
 
 static inline uint8_t* rva(uint32_t r){ return g_base + r; }
 
+// ---- Win64 -> System V ABI thunk for raw macOS functions (GL via dlsym) ----
+// macOS GL funcs are SysV: args in rdi,rsi,rdx,rcx,r8,r9 and rsi/rdi are
+// VOLATILE. The engine calls them Win64-style (rcx,rdx,r8,r9; rsi/rdi
+// NONVOLATILE). Direct calls pass args in the wrong registers AND let the GL
+// func trash rsi/rdi (which the engine holds live). This thunk shuffles the
+// first 6 integer args and preserves rsi/rdi (+ xmm6-15). Float-only GL funcs
+// keep their xmm0-3 args unchanged, so they work too.
+static uint8_t *g_glthunk; static size_t g_glthoff; static int g_glth_exec;
+static void *g_thunk_real[2048]; static void *g_thunk_addr[2048]; static int g_nthunk;
+static void *make_gl_thunk(void *real){
+    if(!real) return real;
+    for(int i=0;i<g_nthunk;i++) if(g_thunk_real[i]==real) return g_thunk_addr[i]; // cache
+    if(getenv("PELOAD_TRACE_GL")){ Dl_info di; if(dladdr(real,&di)&&di.dli_sname){ (void)!write(2,"  [thunk] ",10); (void)!write(2,di.dli_sname,strlen(di.dli_sname)); (void)!write(2,"\n",1); } }
+    if(g_glthoff+64 > 64*2048) return real;
+    if(g_glth_exec) mprotect(g_glthunk,64*2048,PROT_READ|PROT_WRITE);
+    uint8_t *p=g_glthunk+g_glthoff; g_glthoff+=64; int o=0;
+    uint8_t code[]={
+        0x57,                               // push rdi
+        0x56,                               // push rsi
+        0x48,0x83,0xEC,0x08,                // sub rsp,8  (16-align)
+        0x48,0x89,0xCF,                     // mov rdi,rcx   (arg1)
+        0x48,0x89,0xD6,                     // mov rsi,rdx   (arg2)
+        0x4C,0x89,0xC2,                     // mov rdx,r8    (arg3)
+        0x4C,0x89,0xC9,                     // mov rcx,r9    (arg4)
+        0x4C,0x8B,0x44,0x24,0x40,           // mov r8,[rsp+0x40]  (arg5)
+        0x4C,0x8B,0x4C,0x24,0x48,           // mov r9,[rsp+0x48]  (arg6)
+        0x48,0xB8,0,0,0,0,0,0,0,0,          // mov rax, real
+        0xFF,0xD0,                          // call rax
+        0x48,0x83,0xC4,0x08,                // add rsp,8
+        0x5E,                               // pop rsi
+        0x5F,                               // pop rdi
+        0xC3                                // ret
+    };
+    for(size_t i=0;i<sizeof code;i++) p[i]=code[i];
+    int immoff=0; for(int i=0;i<(int)sizeof code-1;i++) if(code[i]==0x48&&code[i+1]==0xB8){ immoff=i+2; break; }
+    *(uint64_t*)(p+immoff)=(uint64_t)real; (void)o;
+    if(g_glth_exec) mprotect(g_glthunk,64*2048,PROT_READ|PROT_EXEC);
+    if(g_nthunk<2048){ g_thunk_real[g_nthunk]=real; g_thunk_addr[g_nthunk]=p; g_nthunk++; }
+    return p;
+}
+
 // ---- full-call tracer (PELOAD_TRACE_ALL): a trampoline that logs the import
 // name, then tail-jumps to the real target with args intact. ----
 static void *imp_real[8192];
@@ -380,10 +421,12 @@ static int MSABI i_CreateProcessW(const uint16_t*app,uint16_t*cmd,void*pa,void*t
         char *start=&tokbuf[bi]; if(*p=='"'){ p++; while(*p&&*p!='"'&&bi<4094) tokbuf[bi++]=*p++; if(*p=='"')p++; }
         else { while(*p&&*p!=' '&&bi<4094) tokbuf[bi++]=*p++; }
         tokbuf[bi++]=0; if(nt<63) tok[nt++]=start; } }
-    char *av[70]; int ai=0; av[ai++]="/usr/bin/arch"; av[ai++]="-x86_64"; av[ai++]=(char*)g_self; av[ai++]=exe;
+    // exec peload DIRECTLY (x86_64 -> Rosetta auto-engages). NOT via /usr/bin/arch,
+    // which is an Apple platform binary and strips DYLD_INSERT_LIBRARIES.
+    char *av[70]; int ai=0; av[ai++]=(char*)g_self; av[ai++]=exe;
     for(int k=1;k<nt && ai<69;k++) av[ai++]=tok[k];   // worker args (skip token0=exe)
     av[ai]=0;
-    pid_t pid=0; int rc=posix_spawn(&pid,"/usr/bin/arch",&fa,0,av,environ);
+    pid_t pid=0; int rc=posix_spawn(&pid,g_self,&fa,0,av,environ);
     posix_spawn_file_actions_destroy(&fa);
     if(rc!=0){ g_lasterr=win_err(); return 0; }
     if(g_nchild<256) g_childpid[g_nchild++]=pid;
@@ -556,8 +599,46 @@ static const unsigned char* MSABI i_glGetString(unsigned name){
     else if(name==0x8B8C) r=(const unsigned char*)"4.10";             // GL_SHADING_LANGUAGE_VERSION
     if(getenv("PELOAD_TRACE_GL")){ char t[64]; snprintf(t,sizeof t,"  [glGetString] 0x%x cur=%p -> ",name,CGLGetCurrentContext()); ws(t); ws(r?(const char*)r:"(null)"); ws("\n"); }
     return r; }
-static void*  MSABI i_wglGetProcAddress(const char*name){ if(!strcmp(name,"glGetString")) return (void*)i_glGetString; void*p=dlsym(RTLD_DEFAULT,name); return p; }
+static void *make_gl_thunk(void *real); // fwd
+static void*  MSABI i_wglGetProcAddress(const char*name){
+    if(getenv("PELOAD_TRACE_GL2")){ ws("  [wglGP] "); ws(name); ws("\n"); }
+    if(!strcmp(name,"glGetString")) return (void*)i_glGetString;
+    if(!strcmp(name,"glShaderSource")||!strcmp(name,"glShaderSourceARB")) return (void*)i_glShaderSource;
+    if(!strcmp(name,"glCompileShader")||!strcmp(name,"glCompileShaderARB")) return (void*)i_glCompileShader;
+    return make_gl_thunk(dlsym(RTLD_DEFAULT,name)); }
 static int    MSABI i_wglDeleteContext(void*ctx){ if(ctx)CGLDestroyContext((CGLContextObj)ctx); return 1; }
+// glShaderSource: macOS Core profile rejects #version <150. Rewrite the
+// version directive in each source string (same length: "130"->"150").
+static void MSABI i_glShaderSource(unsigned shader,int count,const char*const*strs,const int*lens){
+    if(getenv("PELOAD_TRACE_GL"))(void)!write(2,"  [glShaderSource] ENTER\n",25);
+    void (*real)(unsigned,int,const char*const*,const int*)=dlsym(RTLD_DEFAULT,"glShaderSource");
+    if(!real||count<=0){ if(real) real(shader,count,strs,lens); return; }
+    static __thread char *buf; static __thread const char *nstr[64]; static __thread int nlen[64];
+    if(!buf) buf=malloc(1<<20); char *w=buf; int nc=count<64?count:64;
+    for(int i=0;i<nc;i++){ const char*s=strs[i]; int L = lens? (lens[i]>=0?lens[i]:(int)strlen(s)) : (int)strlen(s);
+        if(w+L+1 > buf+(1<<20)){ nstr[i]=s; nlen[i]=lens?lens[i]:-1; continue; }
+        memcpy(w,s,L); w[L]=0;
+        // bump "#version NNN" to 150 when NNN<150
+        char *v=strstr(w,"#version "); if(v){ char*d=v+9; while(*d==' ')d++;
+            if(d[0]>='1'&&d[0]<='9'&&d[1]>='0'&&d[1]<='9'&&d[2]>='0'&&d[2]<='9'){ int ver=(d[0]-'0')*100+(d[1]-'0')*10+(d[2]-'0'); if(ver<150){ d[0]='1';d[1]='5';d[2]='0'; } } }
+        nstr[i]=w; nlen[i]=L; w+=L+1; }
+    real(shader,nc,nstr,lens?nlen:0);
+    if(getenv("PELOAD_TRACE_GL")) ws("  [glShaderSource] rewritten\n");
+}
+// glCompileShader: fetch the shader's source, bump #version<150 to 150, re-set
+// it, then compile — catches the source regardless of how it was uploaded.
+static void MSABI i_glCompileShader(unsigned shader){
+    if(getenv("PELOAD_TRACE_GL"))(void)!write(2,"  [glCompileShader] ENTER\n",26);
+    void(*getiv)(unsigned,unsigned,int*)=dlsym(RTLD_DEFAULT,"glGetShaderiv");
+    void(*getsrc)(unsigned,int,int*,char*)=dlsym(RTLD_DEFAULT,"glGetShaderSource");
+    void(*setsrc)(unsigned,int,const char*const*,const int*)=dlsym(RTLD_DEFAULT,"glShaderSource");
+    int len=0; if(getiv) getiv(shader,0x8B88,&len); // GL_SHADER_SOURCE_LENGTH
+    if(getsrc&&setsrc&&len>0&&len<(1<<20)){ char*src=malloc(len+1); int got=0; getsrc(shader,len,&got,src); src[got>0?got:0]=0;
+        char*v=strstr(src,"#version "); if(v){ char*dd=v+9; while(*dd==' ')dd++;
+            if(dd[0]>='1'&&dd[0]<='9'&&dd[1]>='0'&&dd[1]<='9'&&dd[2]>='0'&&dd[2]<='9'){ int ver=(dd[0]-'0')*100+(dd[1]-'0')*10+(dd[2]-'0');
+                if(ver<150){ dd[0]='1';dd[1]='5';dd[2]='0'; const char*a=src; setsrc(shader,1,&a,0); if(getenv("PELOAD_TRACE_GL")){ws("  [glCompileShader] bumped #version ");char n[4]={(char)('0'+ver/100),(char)('0'+ver/10%10),(char)('0'+ver%10),0};ws(n);ws("->150\n");} } } } }
+        free(src); }
+    void(*real)(unsigned)=dlsym(RTLD_DEFAULT,"glCompileShader"); if(real) real(shader); }
 static void*  MSABI i_wglGetCurrentContext(void){ return CGLGetCurrentContext(); }
 static void*  MSABI i_wglGetCurrentDC(void){ return (void*)0xDC01; }
 static int    MSABI i_wglShareLists(void*a,void*b){ (void)a;(void)b; return 1; }
@@ -1010,7 +1091,10 @@ static int MSABI i_GetFileInformationByHandle(void*h,void*info){ intptr_t hv=(in
 // so dynamic resolution yields a callable (not NULL) and startup continues.
 static void *resolve_impl(const char *fn); // fwd
 static const unsigned char* MSABI i_glGetString(unsigned name); // fwd (GL bridge)
+static void MSABI i_glShaderSource(unsigned,int,const char*const*,const int*); // fwd
+static void MSABI i_glCompileShader(unsigned); // fwd
 static void* MSABI i_GetProcAddress(void *mod, char *name){
+    if(getenv("PELOAD_GPA_ALL") && (uint64_t)name>0x10000){ char h[16]; int n=snprintf(h,sizeof h,"[GPA %d] ",getpid()); (void)!write(2,h,n); ws(name); ws("\n"); }
     if((uint64_t)name < 0x10000){ // imported by ordinal
         if(imp_count<8192){ imp_dll[imp_count]="(dynamic)"; imp_fn[imp_count]="#ordinal";
             return make_stub(imp_count++); }
@@ -1024,8 +1108,10 @@ static void* MSABI i_GetProcAddress(void *mod, char *name){
     // OpenGL: route gl*/wgl* to macOS OpenGL.framework (glow/egui resolve core
     // GL functions like glGetString via GetProcAddress, not just imports)
     if(!strcmp(name,"glGetString")) return (void*)i_glGetString; // ensure-current wrapper
+    if(!strcmp(name,"glShaderSource")) return (void*)i_glShaderSource;
+    if(!strcmp(name,"glCompileShader")) return (void*)i_glCompileShader;
     if((name[0]=='g'&&name[1]=='l')||(name[0]=='w'&&name[1]=='g'&&name[2]=='l')){ void *g=dlsym((void*)-2,name);
-        if(getenv("PELOAD_TRACE_GL")){ ws("  [GLproc] "); ws(name); ws(g?"\n":" MISSING\n"); } if(g) return g; }
+        if(getenv("PELOAD_TRACE_GL")){ ws("  [GLproc] "); ws(name); ws(g?"\n":" MISSING\n"); } if(g) return make_gl_thunk(g); }
     if(imp_count<8192){ imp_dll[imp_count]="(dynamic)"; imp_fn[imp_count]=name;
         return make_stub(imp_count++); }
     return 0;
@@ -1371,7 +1457,7 @@ static void *uni_resolve(const char *dll, const char *fn){
     }
     void *r=resolve_impl(fn); if(r) return r;
     // opengl32!gl* -> macOS OpenGL.framework (our wgl* are handled by resolve_impl)
-    if(!strcasecmp(dll,"opengl32.dll") && (fn[0]=='g'&&fn[1]=='l')){ extern void *dlsym(void*,const char*); void *g=dlsym((void*)-2/*RTLD_DEFAULT*/,fn); if(g) return g; }
+    if(!strcasecmp(dll,"opengl32.dll") && (fn[0]=='g'&&fn[1]=='l')){ if(!strcmp(fn,"glGetString")) return (void*)i_glGetString; if(!strcmp(fn,"glShaderSource")) return (void*)i_glShaderSource; if(!strcmp(fn,"glCompileShader")) return (void*)i_glCompileShader; extern void *dlsym(void*,const char*); void *g=dlsym((void*)-2/*RTLD_DEFAULT*/,fn); if(g) return make_gl_thunk(g); }
     return 0;
 }
 
@@ -1509,6 +1595,8 @@ int main(int argc, char **argv){
     g_pool_exec = 1;
     g_trpool = mmap(0, 96*8192, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANON, -1, 0);
     mprotect(g_trpool, 96*8192, PROT_READ|PROT_EXEC); g_trexec = 1;
+    g_glthunk = mmap(0, 64*2048, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANON, -1, 0);
+    mprotect(g_glthunk, 64*2048, PROT_READ|PROT_EXEC); g_glth_exec = 1;
 
     // ---- TEB/PEB via %gs overlay, set up BEFORE any guest code runs ----
     static uint8_t teb[0x2000] __attribute__((aligned(16)));
@@ -1603,6 +1691,11 @@ int main(int argc, char **argv){
     // entry point
     uint64_t entry = (uint64_t)rva(opt->EntryRVA);
     ws("  entry @ "); whex(entry);
+    // debug: pause before entry so lldb can attach (set PELOAD_WAIT=seconds).
+    // Writes our pid to /tmp/peload.pid for the attacher.
+    if(getenv("PELOAD_WAIT") && strstr(g_cmdlineA,"probe-engine-worker")){ char pb[32]; int pn=snprintf(pb,sizeof pb,"%d\n",getpid());
+        int fd=open("/tmp/peload.pid",O_WRONLY|O_CREAT|O_TRUNC,0644); if(fd>=0){(void)!write(fd,pb,pn); close(fd);}
+        ws("  PELOAD_WAIT: pid "); whex(getpid()); sleep(atoi(getenv("PELOAD_WAIT"))); }
     ws("peload: calling entry (expect stub logs, then a fault at the first\n"
        "        unimplemented behavior — that is the signal we want)\n");
     if(opt->Subsys==2 || (coff->Chars & 0x2000)){

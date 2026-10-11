@@ -28,6 +28,42 @@ On the **dedicated-server exe** the loader relocates (22,919 fixups), binds
 precise, expected spot: `__p___argv` / `_get_initial_narrow_environment`
 return NULL from our stubs, so the Rust runtime dereferences a null `argv`.
 
+## MILESTONE 8: ABI-thunk fix — crash gone; engine reaches SHADER COMPILE
+
+Root-caused and fixed the glow crash, and the engine now runs all the way to
+real GLSL shader compilation. Only one precise blocker remains.
+
+**The crash was a Win64↔System V ABI mismatch.** macOS GL functions are SysV
+(args in rdi,rsi,rdx,rcx…; rsi/rdi are *volatile*); the engine calls them
+Win64 (rcx,rdx,r8,r9; rsi/rdi *nonvolatile*). Calling a raw dlsym'd GL function
+directly passed args in the wrong registers AND let it clobber rsi/rdi — which
+held glow's live `Context` → garbage `self` → crash. Fix: `make_gl_thunk`, a
+generated Win64→SysV thunk (shuffles the 6 integer arg registers, preserves
+rsi/rdi) wrapping every GL pointer handed to the engine. glGetString also gets
+an ms_abi wrapper that normalizes macOS's "4.1 Metal - 90.5" to "4.1.0".
+
+With that, the worker runs past glow into the renderer and the Apple GLSL
+compiler reports:
+
+> Character shader: ERROR: 0:1: version '130' is not supported
+
+**The one remaining blocker is GLSL `#version 130`.** macOS Core profile only
+accepts `#version 150+`; the engine ships 130 shaders (the exe embeds
+#version 100/120/130/140/300es variants and picks 130). Fix = rewrite the
+version directive (130→150, same length) at shader upload. I added wrappers
+(i_glShaderSource / i_glCompileShader) and a DYLD-interpose dylib (glfix.c),
+but neither fires: the shader-upload call reaches the real macOS GL without
+passing through any of our resolution paths (GetProcAddress, wglGetProcAddress,
+IAT bind, or make_gl_thunk — all instrumented, all show zero for the shader
+functions) and __interpose doesn't catch pointer-based calls. Pinning the
+actual upload site needs an lldb breakpoint on the real glShaderSource /
+glCreateShaderProgramv to see who calls it and rewrite there.
+
+Also added: a reaped-child exit-code cache (GetExitCodeProcess no longer
+fabricates garbage), and worker spawn now execs peload directly (not via
+/usr/bin/arch, which stripped DYLD_* and is why env/DYLD didn't reach the
+worker). Both --version green.
+
 ## MILESTONE 7: real threading/sync; engine reaches egui/glow menu GL setup
 
 Made the multi-threaded engine deterministic and drove it into the menu
