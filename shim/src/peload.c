@@ -1259,9 +1259,15 @@ static CGLContextObj cocoa_make_gl_window(int w,int h){
     ((void(*)(id,SEL,id))objc_msgSend)(win,osel("setTitle:"),title);
     id view = om0(win,"contentView");
     ((void(*)(id,SEL,id))objc_msgSend)(g_nsctx=ctx,osel("setView:"),view); // setView wants main thread; fine on the GL thread here
-    ((void(*)(id,SEL,id))objc_msgSend)(win,osel("makeKeyAndOrderFront:"),(id)0);
     ((void(*)(id,SEL,id))objc_msgSend)(win,osel("center"),(id)0);
-    ((void(*)(id,SEL,signed char))objc_msgSend)(g_nsapp,osel("activateIgnoringOtherApps:"),1);
+    if(getenv("PELOAD_NO_FOCUS")){
+        // show the window WITHOUT making it key or activating our app, so it never
+        // steals the user's keyboard/focus (used for background testing).
+        ((void(*)(id,SEL,id))objc_msgSend)(win,osel("orderFrontRegardless"),(id)0);
+    } else {
+        ((void(*)(id,SEL,id))objc_msgSend)(win,osel("makeKeyAndOrderFront:"),(id)0);
+        ((void(*)(id,SEL,signed char))objc_msgSend)(g_nsapp,osel("activateIgnoringOtherApps:"),1);
+    }
     om0(ctx,"makeCurrentContext"); om0(ctx,"update"); // bind + validate the drawable
     oretain(ctx); oretain(win); oretain(pf); g_nswin=win;   // keep alive past any pool drain
     ws("  [cocoa] NSWindow + NSOpenGLContext created (visible)\n");
@@ -2221,8 +2227,35 @@ static void* MSABI i_GetProcAddress(void *mod, char *name){
 }
 
 // Named dispatch: returns a real impl for a known name, else NULL.
+// File mapping: halo3 memory-maps files (and uses pagefile-backed shared memory).
+// Unimplemented, CreateFileMapping returned 0 and the engine either fell back or
+// used uninitialized memory. Back it with mmap.
+#define FMAP_MAGIC 0x464D4150u /* 'FMAP' */
+typedef struct { uint32_t magic; int fd; uint64_t size; } FMap;
+static void* MSABI i_CreateFileMappingW(void*hFile,void*attr,uint32_t protect,uint32_t maxHi,uint32_t maxLo,const uint16_t*name){
+    (void)attr;(void)protect;(void)name; FMap*m=calloc(1,sizeof*m); m->magic=FMAP_MAGIC; m->fd=-1;
+    intptr_t hv=(intptr_t)hFile;
+    if(hv>=0x1000 && hv<0x100000){ int fd=(int)(hv-0x1000); struct stat st; if(fd>=0&&fd<MAXFD&&!fstat(fd,&st)){ m->fd=fd; m->size=st.st_size; } }
+    uint64_t maxsz=((uint64_t)maxHi<<32)|maxLo; if(maxsz) m->size=maxsz; if(!m->size) m->size=4096;
+    return m; }
+static void* MSABI i_CreateFileMappingA(void*hFile,void*attr,uint32_t protect,uint32_t maxHi,uint32_t maxLo,const char*name){ (void)name; return i_CreateFileMappingW(hFile,attr,protect,maxHi,maxLo,0); }
+static void* MSABI i_OpenFileMappingW(uint32_t acc,int inh,const uint16_t*name){ (void)acc;(void)inh;(void)name; FMap*m=calloc(1,sizeof*m); m->magic=FMAP_MAGIC; m->fd=-1; m->size=1<<20; return m; }
+static void* MSABI i_MapViewOfFile(void*hMap,uint32_t acc,uint32_t offHi,uint32_t offLo,uint64_t bytes){
+    FMap*m=hMap; if(!m||m->magic!=FMAP_MAGIC) return 0; (void)acc;
+    uint64_t off=((uint64_t)offHi<<32)|offLo; uint64_t len=bytes? bytes : (m->size>off? m->size-off : 4096);
+    void*p; if(m->fd>=0) p=mmap(0,len,PROT_READ|PROT_WRITE,MAP_PRIVATE,m->fd,(off_t)off);   // COW file view
+            else        p=mmap(0,len,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANON,-1,0);        // pagefile-backed
+    return p==MAP_FAILED? 0 : p; }
+static void* MSABI i_MapViewOfFileEx(void*hMap,uint32_t acc,uint32_t offHi,uint32_t offLo,uint64_t bytes,void*base){ (void)base; return i_MapViewOfFile(hMap,acc,offHi,offLo,bytes); }
+static int   MSABI i_UnmapViewOfFile(void*p){ (void)p; return 1; }   // leak the view (size unknown); harmless
 static void *resolve_impl(const char *fn){
     struct { const char *n; void *f; } T[] = {
+        {"CreateFileMappingW",(void*)i_CreateFileMappingW},
+        {"CreateFileMappingA",(void*)i_CreateFileMappingA},
+        {"OpenFileMappingW",(void*)i_OpenFileMappingW},
+        {"MapViewOfFile",(void*)i_MapViewOfFile},
+        {"MapViewOfFileEx",(void*)i_MapViewOfFileEx},
+        {"UnmapViewOfFile",(void*)i_UnmapViewOfFile},
         {"GetSystemTimeAsFileTime",(void*)i_GetSystemTimeAsFileTime},
         {"QueryPerformanceCounter",(void*)i_QueryPerformanceCounter},
         {"QueryPerformanceFrequency",(void*)i_QueryPerformanceFrequency},
