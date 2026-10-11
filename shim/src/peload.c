@@ -378,11 +378,16 @@ static int name_is_ws2(const char*s); static int name_is_ws2_w(const uint16_t*w)
 static void*  MSABI i_GetModuleHandleW(uint16_t *n){ if(name_is_ws2_w(n)) return WS2_HANDLE; return g_base; } // ws2_32 gets a distinct handle; else image base
 static void*  MSABI i_GetModuleHandleA(char *n){ if(name_is_ws2(n)) return WS2_HANDLE; return g_base; }
 
-// TLS: a tiny fixed table (Rust/CRT use a few slots early)
-static void  *g_tls[256]; static uint32_t g_tlsnext=1;
-static uint32_t MSABI i_TlsAlloc(void){ return g_tlsnext<256? g_tlsnext++ : 0xFFFFFFFF; }
-static void*  MSABI i_TlsGetValue(uint32_t i){ return i<256? g_tls[i]:0; }
-static int    MSABI i_TlsSetValue(uint32_t i, void *v){ if(i<256){g_tls[i]=v; return 1;} return 0; }
+// TLS: Windows TLS slots are PER-THREAD. A shared global table would let threads
+// clobber each other's thread-local state -> timing-dependent corruption. Store
+// values in each thread's TEB TlsSlots (TEB+0x1480), which thread_tramp/main set
+// up per thread at %gs:0x30. (Implicit __declspec(thread) TLS uses gs:0x58 and is
+// separate.) Only the allocator index counter is global, guarded by a mutex.
+static uint32_t g_tlsnext=1; static pthread_mutex_t g_tlsm=PTHREAD_MUTEX_INITIALIZER;
+static uint32_t MSABI i_TlsAlloc(void){ pthread_mutex_lock(&g_tlsm); uint32_t i = g_tlsnext<256? g_tlsnext++ : 0xFFFFFFFFu; pthread_mutex_unlock(&g_tlsm); return i; }
+static inline void** tls_slot(uint32_t i){ uint64_t teb=0; __asm__ volatile("movq %%gs:0x30,%0":"=r"(teb)); return teb? (void**)(teb+0x1480+(uint64_t)i*8) : 0; }
+static void*  MSABI i_TlsGetValue(uint32_t i){ if(i>=256) return 0; void**s=tls_slot(i); return s? *s : 0; }
+static int    MSABI i_TlsSetValue(uint32_t i, void *v){ if(i>=256) return 0; void**s=tls_slot(i); if(!s) return 0; *s=v; return 1; }
 static int    MSABI i_TlsFree(uint32_t i){ (void)i; return 1; }
 
 // ---- expanded kernel32/core surface that genuine ucrtbase needs ----
