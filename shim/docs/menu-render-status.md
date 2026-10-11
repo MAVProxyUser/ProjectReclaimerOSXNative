@@ -101,6 +101,47 @@ the **real-client** path (needs launcher provisioning we don't replicate).
 3. **Drive the real-client path** (`--real-client`) with loopback provisioning the
    launcher normally supplies. Needs RE of the provisioning handshake.
 
+## IMPORTANT: the menu is OpenGL, not D3D11 (projectreclaimer.dev/play)
+
+The official docs state: "Graphics: A driver supporting **OpenGL 3.0 or later, which
+the menus use**. The docs don't mention DirectX requirements." Troubleshooting:
+"Menus don't appear (OpenGL) — update your graphics driver; the menus need OpenGL
+3.0 or later." So **the menu renders via OpenGL** (Reclaimer's own egui/glow),
+which we fully support (GL 4.1). halo3's D3D11 is only for in-game 3D. My earlier
+"menu needs D3D11" framing was WRONG. The probe worker IS the native OpenGL menu
+renderer ("Initialized standalone Rust window/native graphics contract; no MCC
+executable launched"). Normal usage per docs is just: run the exe (Steam/MCC
+present) → borderless-fullscreen OpenGL menu. Our no-arg run IS that path; the
+orchestrator's probe-engine-worker is how this version does native GL startup.
+
+So the real blocker is the **non-deterministic crash during GL menu setup**, not
+D3D11.
+
+## Ruled out as the corruption source (verified this session)
+- **%gs TEB/TSD collision**: DISPROVEN by a standalone Rosetta test — slots
+  0x30/0x58/0x60 read 0 in a fresh thread, macOS never touches them, and our
+  writes SURVIVE malloc/snprintf/errno-setting native calls with errno still
+  working. (The only real issue was slot 0x60's exit destructor, already fixed.)
+- **TLS block too small**: our static TLS block is 0x49b0; the observed access at
+  +0x4908 is within it. Not an overflow.
+- **No-op locks**: critical sections + SRW locks are real pthread-backed with
+  race-safe lazy init; WaitOnAddress/WakeByAddress is a correct futex (bucket
+  mutex serializes check-and-wait against wake — no lost wakeup). Rust Mutex
+  (futex-based on Windows) is therefore correctly backed.
+- The exe (Reclaimer) only creates threads via **CreateThread** (routed through
+  thread_tramp, which installs a TEB), not _beginthreadex.
+
+## The remaining blocker: non-deterministic corruption in GL menu setup
+Runs end variously (glow `glDeleteProgram not loaded`, BTreeMap `unwrap None`,
+halo3 thread EXC_BAD_ACCESS). The glow panic is a glow Context whose function
+table has `DeleteProgram == None` even though our loader resolves it non-NULL and
+only ONE GL context is ever created — i.e. the glow function table (and the
+BTreeMap) are being **corrupted in memory** at runtime. Root not yet found by code
+inspection. Next: catch it at runtime — lldb hardware watchpoint on the glow
+Context's DeleteProgram slot once populated, or a controlled single-threaded run,
+or guard-malloc (slow/large under Rosetta). This is a GL-path memory-corruption
+bug, independent of D3D11.
+
 ## Current blockers (in priority order)
 
 ### A. Reclaimer probe-worker uses a stub/headless glow context
