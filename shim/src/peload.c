@@ -35,6 +35,7 @@
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
 #include <pthread.h>
+#include <malloc/malloc.h>
 #include <signal.h>
 #include <execinfo.h>
 #include <sys/ucontext.h>
@@ -336,7 +337,7 @@ static void*  MSABI i_GetProcessHeap(void){ return (void*)0x48454150; /* 'HEAP' 
 static void*  MSABI i_HeapAlloc(void *h, uint32_t fl, uint64_t n){ (void)h; void*p=malloc(n?n:1); if(p&&(fl&8)) memset(p,0,n); return p; }
 static void*  MSABI i_HeapReAlloc(void *h, uint32_t fl, void *p, uint64_t n){ (void)h;(void)fl; return realloc(p,n?n:1); }
 static int    MSABI i_HeapFree(void *h, uint32_t fl, void *p){ (void)h;(void)fl; free(p); return 1; }
-static uint64_t MSABI i_HeapSize(void *h, uint32_t fl, void *p){ (void)h;(void)fl;(void)p; return 0; }
+static uint64_t MSABI i_HeapSize(void *h, uint32_t fl, void *p){ (void)h;(void)fl; return p? malloc_size(p) : 0; }
 static void*  MSABI i_HeapCreate(uint32_t o, uint64_t a, uint64_t b){ (void)o;(void)a;(void)b; return (void*)0x48454150; }
 
 // Virtual memory backed by mmap
@@ -1673,6 +1674,7 @@ static void MSABI i_WakeByAddressAll(void*a){ wab_ensure(); int b=wab_bucket(a);
 // ---- threads: back Win32 CreateThread with pthreads; each gets its own TEB
 // (per-thread %gs) + a fresh copy of the static TLS block. ----
 #include <pthread.h>
+#include <malloc/malloc.h>
 static uint8_t *g_peb_ptr; static uint8_t *g_tls_src; static uint64_t g_tls_raw, g_tls_total;
 typedef uint32_t (MSABI *WinThreadProc)(void*);
 typedef struct { WinThreadProc fn; void *param; } TArg;
