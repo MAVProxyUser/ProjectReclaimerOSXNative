@@ -47,6 +47,32 @@
 #include <CommonCrypto/CommonDigest.h>
 #include <libkern/OSCacheControl.h>
 
+// ---- SEH register capture/restore (CONTEXT at rcx; Win64/ms_abi) ------------
+// seh_capture fills a CONTEXT from the caller's registers (Rip = return address,
+// Rsp = rsp after return). seh_restore loads a CONTEXT and jumps to its Rip.
+__asm__(
+".text\n.p2align 4\n.globl _seh_capture\n_seh_capture:\n"
+"  movq %rax,0x78(%rcx)\n  movq %rcx,0x80(%rcx)\n  movq %rdx,0x88(%rcx)\n  movq %rbx,0x90(%rcx)\n"
+"  movq %rbp,0xa0(%rcx)\n  movq %rsi,0xa8(%rcx)\n  movq %rdi,0xb0(%rcx)\n"
+"  movq %r8,0xb8(%rcx)\n  movq %r9,0xc0(%rcx)\n  movq %r10,0xc8(%rcx)\n  movq %r11,0xd0(%rcx)\n"
+"  movq %r12,0xd8(%rcx)\n  movq %r13,0xe0(%rcx)\n  movq %r14,0xe8(%rcx)\n  movq %r15,0xf0(%rcx)\n"
+"  leaq 8(%rsp),%rax\n  movq %rax,0x98(%rcx)\n  movq (%rsp),%rax\n  movq %rax,0xf8(%rcx)\n"
+"  movdqu %xmm0,0x1a0(%rcx)\n  movdqu %xmm1,0x1b0(%rcx)\n  movdqu %xmm2,0x1c0(%rcx)\n  movdqu %xmm3,0x1d0(%rcx)\n"
+"  movdqu %xmm4,0x1e0(%rcx)\n  movdqu %xmm5,0x1f0(%rcx)\n  movdqu %xmm6,0x200(%rcx)\n  movdqu %xmm7,0x210(%rcx)\n"
+"  movdqu %xmm8,0x220(%rcx)\n  movdqu %xmm9,0x230(%rcx)\n  movdqu %xmm10,0x240(%rcx)\n  movdqu %xmm11,0x250(%rcx)\n"
+"  movdqu %xmm12,0x260(%rcx)\n  movdqu %xmm13,0x270(%rcx)\n  movdqu %xmm14,0x280(%rcx)\n  movdqu %xmm15,0x290(%rcx)\n"
+"  movq 0x78(%rcx),%rax\n  movl $0x10000f,0x30(%rcx)\n  ret\n"
+".p2align 4\n.globl _seh_restore\n_seh_restore:\n"
+"  movdqu 0x1a0(%rcx),%xmm0\n  movdqu 0x1b0(%rcx),%xmm1\n  movdqu 0x1c0(%rcx),%xmm2\n  movdqu 0x1d0(%rcx),%xmm3\n"
+"  movdqu 0x1e0(%rcx),%xmm4\n  movdqu 0x1f0(%rcx),%xmm5\n  movdqu 0x200(%rcx),%xmm6\n  movdqu 0x210(%rcx),%xmm7\n"
+"  movdqu 0x220(%rcx),%xmm8\n  movdqu 0x230(%rcx),%xmm9\n  movdqu 0x240(%rcx),%xmm10\n  movdqu 0x250(%rcx),%xmm11\n"
+"  movdqu 0x260(%rcx),%xmm12\n  movdqu 0x270(%rcx),%xmm13\n  movdqu 0x280(%rcx),%xmm14\n  movdqu 0x290(%rcx),%xmm15\n"
+"  movq 0x90(%rcx),%rbx\n  movq 0xa0(%rcx),%rbp\n  movq 0xa8(%rcx),%rsi\n  movq 0xb0(%rcx),%rdi\n"
+"  movq 0xb8(%rcx),%r8\n  movq 0xc0(%rcx),%r9\n  movq 0xc8(%rcx),%r10\n  movq 0xd0(%rcx),%r11\n"
+"  movq 0xd8(%rcx),%r12\n  movq 0xe0(%rcx),%r13\n  movq 0xe8(%rcx),%r14\n  movq 0xf0(%rcx),%r15\n"
+"  movq 0x98(%rcx),%rsp\n  pushq 0xf8(%rcx)\n  movq 0x88(%rcx),%rdx\n  movq 0x78(%rcx),%rax\n  movq 0x80(%rcx),%rcx\n  ret\n"
+);
+
 // ---- raw logging (no libc TLS dependency; safe after we touch %gs) ----
 static void w(const char *s, long n){ (void)!write(2, s, n); }
 static void ws(const char *s){ long n=0; while(s[n]) n++; w(s,n); }
@@ -438,6 +464,28 @@ static int MSABI i_CreateDXGIFactory(GUID_*riid,void**pp){ (void)riid; if(pp)*pp
 static int MSABI i_CreateDXGIFactory1(GUID_*riid,void**pp){ (void)riid; if(pp)*pp=&g_dxgifactory; return HR_OK; }
 static int MSABI i_CreateDXGIFactory2(uint32_t fl,GUID_*riid,void**pp){ (void)fl;(void)riid; if(pp)*pp=&g_dxgifactory; return HR_OK; }
 static int MSABI i_D3D11CreateDevice(void*a,int b,void*c,uint32_t d,void*e,uint32_t f,uint32_t g,void**dev,void*fl,void**ctx){ (void)a;(void)b;(void)c;(void)d;(void)e;(void)f;(void)g;(void)fl; if(dev)*dev=0; if(ctx)*ctx=0; return HR_DXGI_UNSUPPORTED; }
+// ---- D3DCompile (d3dcompiler_47): halo3.dll compiles its video-display HLSL
+// shaders (CopyToScreen / YUVToRGB) to DXBC blobs at startup, then calls
+// ID3DBlob::GetBufferPointer/Size on the result. A stub that returns S_OK but
+// leaves the out blob NULL -> the engine derefs NULL. Return a real ID3DBlob
+// wrapping a small placeholder DXBC buffer so these paths complete. ----
+typedef struct { void** vtbl; void* buf; uint64_t sz; } Blob;
+static void*    MSABI blob_GetBufferPointer(void*s){ return ((Blob*)s)->buf; }
+static uint64_t MSABI blob_GetBufferSize(void*s){ return ((Blob*)s)->sz; }
+static void* g_blob_vtbl[]={ (void*)com_QI,(void*)com_AddRef,(void*)com_Release,(void*)blob_GetBufferPointer,(void*)blob_GetBufferSize };
+static Blob* make_blob(const void*data,uint64_t n){ Blob*b=calloc(1,sizeof*b); b->vtbl=g_blob_vtbl; b->sz=n; b->buf=calloc(1,n?n:4); if(data&&n)memcpy(b->buf,data,n); return b; }
+static int MSABI i_D3DCompile(const void*src,uint64_t srcsz,const char*name,const void*defs,void*inc,
+        const char*entry,const char*target,uint32_t f1,uint32_t f2,void**ppCode,void**ppErr){
+    (void)src;(void)srcsz;(void)name;(void)defs;(void)inc;(void)entry;(void)target;(void)f1;(void)f2;
+    // placeholder DXBC container (magic + zeroed header); real bytecode isn't
+    // needed because there's no D3D device to consume it — the engine only reads
+    // the blob's pointer/size here.
+    uint8_t hdr[256]; memset(hdr,0,sizeof hdr); hdr[0]='D';hdr[1]='X';hdr[2]='B';hdr[3]='C';
+    *(uint32_t*)(hdr+24)=sizeof hdr; // total size field
+    if(ppCode)*ppCode=make_blob(hdr,sizeof hdr);
+    if(ppErr)*ppErr=0;
+    return HR_OK;
+}
 // ---- minimal XAudio2 (the engine creates IXAudio2 + voices and calls them) --
 // XAudio2Create stub didn't set the out interface -> engine called a method on
 // NULL. Provide a silent IXAudio2 + a generic voice object so audio init runs.
@@ -459,6 +507,38 @@ static ComObj g_ixaudio2 = { g_ixaudio2_vtbl };
 static int MSABI i_XAudio2Create(void**pp,uint32_t flags,uint32_t proc){ (void)flags;(void)proc;
     static int init; if(!init){ for(int i=0;i<64;i++) g_xavoice_vtbl[i]=(void*)xa_ret0; g_xavoice_vtbl[0]=(void*)xa_GetVoiceDetails; g_xavoice_vtbl[25]=(void*)xa_GetState; init=1; }
     if(pp)*pp=&g_ixaudio2; return 0; }
+// ---- XAPO audio effects: CreateAudioReverb/VolumeMeter/CreateFX (xaudio2
+// ordinals 2/3/4). The engine creates these effect objects during shell audio
+// setup and immediately calls IXAPO methods on the returned interface; a generic
+// stub returns S_OK but leaves the out-pointer NULL -> vtable deref on NULL. We
+// return a real (silent) IXAPO object. It's installed into the voice effect
+// chain (our no-op voice), so its Process() is never actually driven.
+static int MSABI apo_ret0(void){ return 0; }
+static uint8_t g_apo_regprops[2048]; // zeroed APO_REG_PROPERTIES template
+static int MSABI apo_GetRegistrationProperties(void*self, void**pp){ (void)self;
+    // after CLSID(16) + FriendlyName[256] + CopyrightInfo[256] (WCHAR): version/flags/buffer counts
+    uint32_t* u=(uint32_t*)(g_apo_regprops+16+256*2+256*2);
+    u[0]=1; u[1]=0; u[2]=0; u[3]=1; u[4]=1; u[5]=1; u[6]=1; // Major,Minor,Flags,Min/MaxIn,Min/MaxOut
+    if(pp)*pp=g_apo_regprops; return 0; }
+static void* g_apo_vtbl[32];
+static ComObj g_apo = { g_apo_vtbl };
+static int MSABI i_CreateAudioReverb(void**pp){
+    static int init; if(!init){ for(int i=0;i<32;i++) g_apo_vtbl[i]=(void*)apo_ret0;
+        g_apo_vtbl[0]=(void*)com_QI; g_apo_vtbl[1]=(void*)com_AddRef; g_apo_vtbl[2]=(void*)com_Release;
+        g_apo_vtbl[3]=(void*)apo_GetRegistrationProperties; init=1; }
+    if(pp)*pp=&g_apo; return HR_OK; }
+static int MSABI i_CreateAudioVolumeMeter(void**pp){ return i_CreateAudioReverb(pp); }
+static int MSABI i_CreateFX(GUID_*clsid,void**pp,const void*init,uint32_t sz){ (void)clsid;(void)init;(void)sz; return i_CreateAudioReverb(pp); }
+// map an xaudio2_9redist import (by ordinal or name) to our implementation.
+// ordinals: 1=XAudio2Create 2=CreateAudioReverb 3=CreateAudioVolumeMeter
+// 4=CreateFX 5=X3DAudioCalculate 6=X3DAudioInitialize.
+static void* xa_resolve(uint32_t ord, const char* fn){
+    if(ord==1 || (fn&&!strcmp(fn,"XAudio2Create"))) return (void*)i_XAudio2Create;
+    if(ord==2 || (fn&&!strcmp(fn,"CreateAudioReverb"))) return (void*)i_CreateAudioReverb;
+    if(ord==3 || (fn&&!strcmp(fn,"CreateAudioVolumeMeter"))) return (void*)i_CreateAudioVolumeMeter;
+    if(ord==4 || (fn&&!strcmp(fn,"CreateFX"))) return (void*)i_CreateFX;
+    return 0; // X3DAudio* fall through to generic stub (engine ignores results)
+}
 static int name_has(const char*s,const char*sub){ if(!s)return 0; for(;*s;s++){ const char*a=s,*b=sub; while(*b&&((*a|32)==(*b|32))){a++;b++;} if(!*b)return 1; } return 0; }
 static int   MSABI i_CoInitializeEx(void*p,uint32_t m){ (void)p;(void)m; return HR_OK; }
 static void  MSABI i_CoUninitialize(void){ }
@@ -1150,30 +1230,148 @@ static int    MSABI i_SwapBuffers(void*hdc){ (void)hdc;
     if(getenv("PELOAD_SHOT")) gl_capture("SwapBuffers");
     if(g_nsctx){ om0(g_nsctx,"flushBuffer"); return 1; }
     if(g_cgl) CGLFlushDrawable(g_cgl); return 1; }
-// RaiseException: log the code. 0x406D1388 = SetThreadName (ignore); others we
-// just return from for now (real SEH dispatch is a later phase).
-// Decode an MSVC C++ throw (code 0xE06D7363). args = {magic, &object, ThrowInfo*,
-// imagebase}. ThrowInfo's inner fields are RVAs from imagebase; the first
-// CatchableType's TypeDescriptor.name is the mangled C++ type (".?AV<name>@@").
-static void   MSABI i_RaiseException(uint32_t code,uint32_t flags,uint32_t n,const void*args){ (void)flags;
-    if(code==0x406D1388) return; // SetThreadName
-    char t[256]; snprintf(t,sizeof t,"  [RaiseException] 0x%08x (%u args)\n",code,n); ws(t);
-    if(code==0xE06D7363 && args && n>=4){
-        const uint64_t *a=args; void *obj=(void*)a[1]; int32_t *ti=(int32_t*)a[2]; uint64_t base=a[3];
-        if(ti){ int32_t ctaRVA=ti[3]; uint8_t *cta=(uint8_t*)(base+(uint32_t)ctaRVA);
-            int nct=*(int32_t*)cta; int32_t *arr=(int32_t*)(cta+4);
-            if(nct>0){ uint8_t *ct=(uint8_t*)(base+(uint32_t)arr[0]); int32_t tdRVA=*(int32_t*)(ct+4);
-                const char *name=(const char*)(base+(uint32_t)tdRVA+16); // TypeDescriptor.name @ +16 (x64)
-                ws("    C++ type: "); ws(name); ws("\n");
-                // std::exception-derived: obj+? holds a char* message near the start
-                if(obj){ for(int off=8; off<=16; off+=8){ const char *m=*(const char**)((uint8_t*)obj+off);
-                    if(m && (uint64_t)m>0x10000){ int ok=1; for(int i=0;i<64;i++){ char c=m[i]; if(c==0)break; if(c<32||c>126){ok=0;break;} }
-                        if(ok && m[0]){ ws("    what(): "); ws(m); ws("\n"); break; } } } } } }
+// ============================================================================
+// Windows x64 SEH / C++ exception unwinding. The genuine vcruntime140 we load
+// provides __CxxFrameHandler3 (the C++/Rust catch personality) and
+// _CxxThrowException; it stands on these NTDLL primitives, which we implement so
+// a Rust panic / C++ throw actually UNWINDS to its catch_unwind/catch instead of
+// terminating. CONTEXT integer regs live at 0x78 + reg*8 (reg = the DWARF/UNWIND
+// register number: 0=Rax,1=Rcx,2=Rdx,3=Rbx,4=Rsp,5=Rbp,6=Rsi,7=Rdi,8..15=R8..R15),
+// Rip at 0xf8, Xmm0 at 0x1a0 (16 bytes each).
+#define CTXSZ 1256
+#define CTX_REG(c,r) (*(uint64_t*)((uint8_t*)(c)+0x78+(r)*8))
+#define CTX_RSP(c)   (*(uint64_t*)((uint8_t*)(c)+0x98))
+#define CTX_RIP(c)   (*(uint64_t*)((uint8_t*)(c)+0xf8))
+typedef struct { uint32_t Begin, End, Unwind; } RUNFN;     // RUNTIME_FUNCTION (RVAs)
+typedef struct { uint32_t ExceptionCode, ExceptionFlags; void* ExceptionRecord; void* ExceptionAddress;
+    uint32_t NumberParameters, u; uint64_t ExceptionInformation[15]; } EXREC;
+typedef struct { EXREC* ExceptionRecord; void* ContextRecord; } EXCEPTION_POINTERS;
+typedef int (MSABI *PEXHANDLER)(EXREC*, uint64_t frame, void* ctx, void* disp);
+typedef long (MSABI *PVEH)(EXCEPTION_POINTERS*);
+typedef struct { uint64_t ControlPc, ImageBase; RUNFN* FunctionEntry; uint64_t EstablisherFrame, TargetIp;
+    void* ContextRecord; PEXHANDLER LanguageHandler; void* HandlerData; void* HistoryTable; uint32_t ScopeIndex, Fill0; } DISPCTX;
+// register capture / restore (defined in module asm below)
+extern void MSABI seh_capture(void* ctx);
+extern void MSABI seh_restore(void* ctx);   // restore CONTEXT and jump to its Rip (no return)
+static void MSABI i_RtlCaptureContext(void*ctx){ if(ctx){ memset(ctx,0,CTXSZ); seh_capture(ctx); } }
+
+// find the module (exe + guest DLLs) containing pc; return base+ImageSize
+static uint8_t* seh_module(uint64_t pc, uint64_t* obase, uint32_t* osize){
+    uint8_t* mods[17]; int nm=0; if(g_base) mods[nm++]=g_base; for(int i=0;i<g_nmods&&nm<17;i++) mods[nm++]=g_mods[i].base;
+    for(int i=0;i<nm;i++){ uint8_t*b=mods[i]; DOS*d=(DOS*)b; OPT64*o=(OPT64*)(b+d->e_lfanew+sizeof(COFF));
+        if(pc>=(uint64_t)b && pc<(uint64_t)b+o->ImageSize){ if(obase)*obase=(uint64_t)b; if(osize)*osize=o->ImageSize; return b; } }
+    return 0; }
+static RUNFN* MSABI i_RtlLookupFunctionEntry(uint64_t pc,uint64_t*base,void*hist){ (void)hist;
+    uint64_t b=0; uint8_t* mod=seh_module(pc,&b,0); if(base)*base=b; if(!mod) return 0;
+    DOS*d=(DOS*)mod; OPT64*o=(OPT64*)(mod+d->e_lfanew+sizeof(COFF));
+    uint32_t prva=o->Dir[3].VA, psz=o->Dir[3].Size; if(!prva||!psz) return 0;  // IMAGE_DIRECTORY_ENTRY_EXCEPTION
+    RUNFN* fns=(RUNFN*)(mod+prva); int n=psz/sizeof(RUNFN); uint32_t rva=(uint32_t)(pc-b);
+    int lo=0,hi=n-1; while(lo<=hi){ int m=(lo+hi)/2; if(rva<fns[m].Begin) hi=m-1; else if(rva>=fns[m].End) lo=m+1; else return &fns[m]; }
+    return 0; }
+// Interpret UNWIND_INFO: roll CONTEXT back one frame; return the language handler
+// (if EHANDLER/UHANDLER requested), set *hdata to the handler-specific data.
+static PEXHANDLER MSABI i_RtlVirtualUnwind(uint32_t htype, uint64_t base, uint64_t pc, RUNFN* fn,
+        void* ctx, void** hdata, uint64_t* establisher, void* ctxptrs){ (void)ctxptrs;
+    uint8_t* info=(uint8_t*)base + fn->Unwind;
+    uint8_t ver=info[0]&7, flags=info[0]>>3, prolog=info[1], ncodes=info[2], fr=info[3]&0xf, fro=info[3]>>4;
+    (void)ver; uint16_t* codes=(uint16_t*)(info+4);
+    uint64_t prolog_off = pc - (base + fn->Begin);
+    uint64_t frame_base = fr? (CTX_REG(ctx,fr) - (uint64_t)fro*16) : CTX_RSP(ctx);
+    if(establisher) *establisher = frame_base;
+    int i=0;
+    while(i<ncodes){ uint8_t coff=codes[i]&0xff, op=(codes[i]>>8)&0xf, oi=(codes[i]>>12)&0xf; int slots=1;
+        int active = (coff<=prolog_off);   // this prolog op has already executed
+        switch(op){
+            case 0: /*PUSH_NONVOL*/ if(active){ CTX_REG(ctx,oi)=*(uint64_t*)CTX_RSP(ctx); CTX_RSP(ctx)+=8; } slots=1; break;
+            case 1: /*ALLOC_LARGE*/ if(oi==0){ if(active) CTX_RSP(ctx)+=(uint64_t)codes[i+1]*8; slots=2; }
+                     else { if(active) CTX_RSP(ctx)+=*(uint32_t*)&codes[i+1]; slots=3; } break;
+            case 2: /*ALLOC_SMALL*/ if(active) CTX_RSP(ctx)+=(uint64_t)oi*8+8; slots=1; break;
+            case 3: /*SET_FPREG*/   if(active) CTX_RSP(ctx)=CTX_REG(ctx,fr)-(uint64_t)fro*16; slots=1; break;
+            case 4: /*SAVE_NONVOL*/ if(active) CTX_REG(ctx,oi)=*(uint64_t*)(frame_base+(uint64_t)codes[i+1]*8); slots=2; break;
+            case 5: /*SAVE_NONVOL_FAR*/ if(active) CTX_REG(ctx,oi)=*(uint64_t*)(frame_base+*(uint32_t*)&codes[i+1]); slots=3; break;
+            case 8: /*SAVE_XMM128*/ if(active) memcpy((uint8_t*)ctx+0x1a0+oi*16,(void*)(frame_base+(uint64_t)codes[i+1]*16),16); slots=2; break;
+            case 9: /*SAVE_XMM128_FAR*/ if(active) memcpy((uint8_t*)ctx+0x1a0+oi*16,(void*)(frame_base+*(uint32_t*)&codes[i+1]),16); slots=3; break;
+            case 10:/*PUSH_MACHFRAME*/ if(active){ uint64_t sp=CTX_RSP(ctx)+(oi?8:0); CTX_RIP(ctx)=*(uint64_t*)sp; CTX_RSP(ctx)=*(uint64_t*)(sp+24); } slots=1; break;
+            case 6: case 7: default: slots=1; break; // EPILOG/SPARE: ignore
+        }
+        i+=slots;
     }
+    if(flags&4){ /*CHAININFO*/ RUNFN* chain=(RUNFN*)(codes + ((ncodes+1)&~1)); return i_RtlVirtualUnwind(htype,base,base+chain->Begin,chain,ctx,hdata,establisher,0); }
+    if(prolog_off >= prolog){ /* in body: pop return address */ CTX_RIP(ctx)=*(uint64_t*)CTX_RSP(ctx); CTX_RSP(ctx)+=8; }
+    else { CTX_RIP(ctx)=*(uint64_t*)CTX_RSP(ctx); CTX_RSP(ctx)+=8; } // simplified: treat prolog like body
+    if((flags&3) && (htype&3)){ uint32_t* hrva=(uint32_t*)(codes + ((ncodes+1)&~1));
+        if(hdata) *hdata = hrva+1; return (PEXHANDLER)(base + *hrva); }
+    return 0;
 }
-static void   MSABI i_RtlCaptureContext(void*ctx){ if(ctx) memset(ctx,0,1232); } // CONTEXT (x64 ~1232 bytes)
-static void*  MSABI i_RtlLookupFunctionEntry(uint64_t pc,uint64_t*base,void*hist){ (void)pc;(void)hist; if(base)*base=0; return 0; }
+// Unwind to TargetFrame, running termination handlers; then jump to TargetIp.
+static void MSABI i_RtlUnwindEx(uint64_t target, void* targetip, EXREC* rec, void* retval, void* ctx, void* hist){
+    (void)hist; uint8_t tmp[CTXSZ]; if(!ctx){ ctx=tmp; memset(ctx,0,CTXSZ); seh_capture(ctx); }
+    EXREC localrec; if(!rec){ memset(&localrec,0,sizeof localrec); localrec.ExceptionCode=0xC0000027/*STATUS_UNWIND*/; rec=&localrec; }
+    rec->ExceptionFlags |= 2; // EXCEPTION_UNWINDING
+    uint8_t work[CTXSZ];
+    for(int guard=0; guard<512; guard++){
+        uint64_t base=0; RUNFN* fn=i_RtlLookupFunctionEntry(CTX_RIP(ctx),&base,0);
+        if(!fn){ uint64_t sp=CTX_RSP(ctx); if(!sp) break; CTX_RIP(ctx)=*(uint64_t*)sp; CTX_RSP(ctx)=sp+8; if((uint64_t)CTX_RIP(ctx)==0) break; continue; }
+        memcpy(work,ctx,CTXSZ); void* hdata=0; uint64_t estab=0;
+        PEXHANDLER h=i_RtlVirtualUnwind(2/*UHANDLER*/,base,CTX_RIP(ctx),fn,work,&hdata,&estab,0);
+        if(estab==target){ break; }                 // reached the destination frame
+        if(h && (estab>CTX_RSP(ctx))){               // run this frame's termination handler
+            DISPCTX dc; memset(&dc,0,sizeof dc); dc.ControlPc=CTX_RIP(ctx); dc.ImageBase=base; dc.FunctionEntry=fn;
+            dc.EstablisherFrame=estab; dc.ContextRecord=ctx; dc.LanguageHandler=h; dc.HandlerData=hdata; dc.TargetIp=(uint64_t)targetip;
+            h(rec, estab, ctx, &dc);
+        }
+        memcpy(ctx,work,CTXSZ);
+        if(estab==target) break;
+    }
+    CTX_RIP(ctx)=(uint64_t)targetip; CTX_REG(ctx,0)=(uint64_t)retval; // Rax = return value
+    seh_restore(ctx); // transfer control to the catch (does not return)
+}
 static void   MSABI i_RtlRaiseException(void*rec){ (void)rec; }
+static void   MSABI i_RtlRestoreContext(void* ctx, void* rec){ (void)rec; seh_restore(ctx); }
+static void seh_decode_cpp(uint32_t code,uint32_t n,const void*args); // fwd (logging)
+// Dispatch an exception: walk frames, call each EH handler; a C++ catch unwinds
+// itself (via RtlUnwindEx) and never returns. If none handles it, we return
+// (legacy behavior) so startup logging still works.
+static void MSABI i_RaiseException(uint32_t code,uint32_t flags,uint32_t n,const void*args){
+    if(code==0x406D1388) return;                 // SetThreadName: ignore
+    if(getenv("PELOAD_TRACE_SEH")){ char t[64]; snprintf(t,sizeof t,"  [RaiseException] 0x%08x\n",code); ws(t); }
+    seh_decode_cpp(code,n,args);
+    uint8_t ctxbuf[CTXSZ]; memset(ctxbuf,0,CTXSZ); void* ctx=ctxbuf; seh_capture(ctx);
+    EXREC rec; memset(&rec,0,sizeof rec); rec.ExceptionCode=code; rec.ExceptionFlags=flags;
+    rec.ExceptionAddress=(void*)CTX_RIP(ctx); rec.NumberParameters=(n>15?15:n);
+    if(args) for(uint32_t i=0;i<rec.NumberParameters;i++) rec.ExceptionInformation[i]=((const uint64_t*)args)[i];
+    uint8_t work[CTXSZ];
+    for(int guard=0; guard<512; guard++){
+        uint64_t base=0; RUNFN* fn=i_RtlLookupFunctionEntry(CTX_RIP(ctx),&base,0);
+        if(!fn){ uint64_t sp=CTX_RSP(ctx); if(!sp) break; uint64_t rip=*(uint64_t*)sp; CTX_RSP(ctx)=sp+8; CTX_RIP(ctx)=rip; if(!rip) break; continue; }
+        memcpy(work,ctx,CTXSZ); void* hdata=0; uint64_t estab=0;
+        PEXHANDLER h=i_RtlVirtualUnwind(1/*EHANDLER*/,base,CTX_RIP(ctx),fn,work,&hdata,&estab,0);
+        if(h){
+            DISPCTX dc; memset(&dc,0,sizeof dc); dc.ControlPc=CTX_RIP(ctx); dc.ImageBase=base; dc.FunctionEntry=fn;
+            dc.EstablisherFrame=estab; dc.ContextRecord=ctx; dc.LanguageHandler=h; dc.HandlerData=hdata;
+            int disp=h(&rec, estab, ctx, &dc);     // __CxxFrameHandler3 et al.
+            // 0=ContinueExecution, 1=ContinueSearch. A C++ catch does its own
+            // RtlUnwindEx+transfer and never returns here.
+            if(disp==0){ seh_restore(ctx); }       // resume at (possibly modified) ctx
+            // else ContinueSearch: fall through to next frame
+        }
+        memcpy(ctx,work,CTXSZ);                     // move to the caller frame
+        if(!CTX_RIP(ctx)) break;
+    }
+    // Unhandled. For a Rust panic / C++ throw there is nothing more to do; keep
+    // the legacy non-fatal return so non-exception RaiseException callers (and
+    // early-startup logging) behave as before.
+}
+static void seh_decode_cpp(uint32_t code,uint32_t n,const void*args){
+    if(!(getenv("PELOAD_TRACE_SEH")) || code!=0xE06D7363 || !args || n<4) return;
+    const uint64_t *a=args; void *obj=(void*)a[1]; int32_t *ti=(int32_t*)a[2]; uint64_t base=a[3];
+    if(!ti) return; int32_t ctaRVA=ti[3]; uint8_t *cta=(uint8_t*)(base+(uint32_t)ctaRVA);
+    int nct=*(int32_t*)cta; int32_t *arr=(int32_t*)(cta+4);
+    if(nct>0){ uint8_t *ct=(uint8_t*)(base+(uint32_t)arr[0]); int32_t tdRVA=*(int32_t*)(ct+4);
+        const char *name=(const char*)(base+(uint32_t)tdRVA+16); ws("    C++ type: "); ws(name); ws("\n");
+        if(obj) for(int off=8; off<=16; off+=8){ const char *m=*(const char**)((uint8_t*)obj+off);
+            if(m&&(uint64_t)m>0x10000){ int ok=1; for(int i=0;i<64;i++){char c=m[i]; if(!c)break; if(c<32||c>126){ok=0;break;}} if(ok&&m[0]){ws("    what(): ");ws(m);ws("\n");break;} } } }
+}
 // drive/volume queries: present C: as a fixed NTFS volume with free space, so
 // the client accepts the cache/scratch as "a drive of this PC".
 static uint32_t MSABI i_GetDriveTypeW(const uint16_t*root){ (void)root; return 3; } // DRIVE_FIXED
@@ -1297,10 +1495,29 @@ static void *thread_tramp(void *a){
     void **tarr=calloc(128,sizeof(void*));
     if(g_tls_total){ uint8_t *blk=malloc(g_tls_total); if(g_tls_raw) memcpy(blk,g_tls_src,g_tls_raw); if(g_tls_total>g_tls_raw) memset(blk+g_tls_raw,0,g_tls_total-g_tls_raw); tarr[0]=blk; }
     *(uint64_t*)(teb+0x30)=(uint64_t)teb; *(uint64_t*)(teb+0x60)=(uint64_t)g_peb_ptr; *(uint64_t*)(teb+0x58)=(uint64_t)tarr;
+    // macOS x86_64 uses %gs as the live pthread TSD base: key K lives at %gs:[K*8].
+    // Windows wants TEB at gs:0x30, TLS-array at gs:0x58, PEB at gs:0x60 — which
+    // collide with macOS TSD keys 6/11/12. Overwriting them is fine while the
+    // thread runs (not on the malloc hot path), but at thread exit
+    // _pthread_tsd_cleanup walks every slot and runs its destructor; freeing our
+    // non-heap PEB/TEB pointers aborts in malloc_report. Save the originals and
+    // restore them before returning so cleanup sees valid macOS TSD values.
     __asm__ volatile("movq %0,%%gs:0x30"::"r"((uint64_t)teb));
     __asm__ volatile("movq %0,%%gs:0x60"::"r"((uint64_t)g_peb_ptr));
     __asm__ volatile("movq %0,%%gs:0x58"::"r"((uint64_t)tarr));
-    uint32_t r = t->fn ? t->fn(t->param) : 0; free(t); return (void*)(uintptr_t)r;
+    if(getenv("PELOAD_TRACE_THREAD")){ char tb[96]; int nn=snprintf(tb,sizeof tb,"  [TT] enter tid=0x%x gs58=0x%llx fn=%p\n",pthread_mach_thread_np(pthread_self()),(unsigned long long)(uint64_t)tarr,(void*)t->fn); (void)!write(2,tb,nn); }
+    uint32_t r = t->fn ? t->fn(t->param) : 0;
+    // The Windows TEB fields live in macOS TSD slots 0x30/0x58/0x60. On this
+    // macOS, slot 12 (gs:0x60) has a pthread destructor that FREES the slot value
+    // at thread exit (_pthread_tsd_cleanup). We put the *static* PEB pointer there
+    // -> free(static) -> malloc abort. So zero ONLY gs:0x60 before returning so
+    // cleanup skips it. We deliberately leave gs:0x58 (TLS array) and gs:0x30
+    // (TEB self, both heap-backed) intact: zeroing 0x58 would open a window where
+    // late guest thread-local destructors fault on a NULL TLS pointer. Leak the
+    // teb/tarr (a few KB/thread) rather than risk a use-after-free during cleanup.
+    __asm__ volatile("movq $0,%%gs:0x60":::"memory");
+    free(t);
+    return (void*)(uintptr_t)r;
 }
 static void* MSABI i_CreateThread(void*attr,uint64_t stack,WinThreadProc start,void*param,uint32_t fl,uint32_t*tid){
     (void)attr;(void)stack;(void)fl;
@@ -1802,6 +2019,8 @@ static void *resolve_impl(const char *fn){
         {"CreateDXGIFactory1",(void*)i_CreateDXGIFactory1},
         {"CreateDXGIFactory2",(void*)i_CreateDXGIFactory2},
         {"D3D11CreateDevice",(void*)i_D3D11CreateDevice},
+        {"D3DCompile",(void*)i_D3DCompile},
+        {"D3DCompile2",(void*)i_D3DCompile},
         {"CoTaskMemAlloc",(void*)i_CoTaskMemAlloc},
         {"CoTaskMemFree",(void*)i_CoTaskMemFree},
         {"PropVariantClear",(void*)i_PropVariantClear},
@@ -1994,6 +2213,10 @@ static void *resolve_impl(const char *fn){
         {"RtlCaptureContext",(void*)i_RtlCaptureContext},
         {"RtlLookupFunctionEntry",(void*)i_RtlLookupFunctionEntry},
         {"RtlRaiseException",(void*)i_RtlRaiseException},
+        {"RtlVirtualUnwind",(void*)i_RtlVirtualUnwind},
+        {"RtlUnwindEx",(void*)i_RtlUnwindEx},
+        {"RtlUnwind",(void*)i_RtlUnwindEx},
+        {"RtlRestoreContext",(void*)i_RtlRestoreContext},
         {"GetDriveTypeW",(void*)i_GetDriveTypeW},
         {"GetDriveTypeA",(void*)i_GetDriveTypeA},
         {"GetVolumeInformationW",(void*)i_GetVolumeInformationW},
@@ -2131,8 +2354,7 @@ static void bind_imports(uint8_t *base, OPT64 *opt){
             const char *fn = (oft[i]>>63)? "#ordinal" : (char*)(base+(uint32_t)oft[i]+2);
             // ws2_32: bind through the shared ordinal/name table (see WS2_HANDLE)
             if(is_ws2){ ft[i]=(uint64_t)((oft[i]>>63)? ws2_by_ordinal((uint32_t)(oft[i]&0xffff)) : ws2_resolve_name(fn)); continue; }
-            if(is_xa && (oft[i]>>63) && (oft[i]&0xffff)==1){ ft[i]=(uint64_t)i_XAudio2Create; continue; } // XAudio2Create = ordinal 1
-            if(is_xa && !(oft[i]>>63) && !strcmp(fn,"XAudio2Create")){ ft[i]=(uint64_t)i_XAudio2Create; continue; }
+            if(is_xa){ void* xr=xa_resolve((oft[i]>>63)?(uint32_t)(oft[i]&0xffff):0, (oft[i]>>63)?0:fn); if(xr){ ft[i]=(uint64_t)xr; continue; } }
             void *r = uni_resolve(dll, fn);
             if(r && trace && imp_count<8192){ imp_dll[imp_count]=dll; imp_fn[imp_count]=fn; imp_real[imp_count]=r; ft[i]=(uint64_t)make_trace_stub(imp_count,r); imp_count++; }
             else if(r){ ft[i]=(uint64_t)r; }
@@ -2157,7 +2379,7 @@ static void bind_delay_imports(uint8_t *base, OPT64 *opt){
             const char *fn = (intb[i]>>63)? "#ordinal" : (char*)(base+(uint32_t)intb[i]+2);
             void *r;
             if(is_ws2) r = (intb[i]>>63)? ws2_by_ordinal((uint32_t)(intb[i]&0xffff)) : ws2_resolve_name(fn);
-            else if(is_xa && (((intb[i]>>63)&&(intb[i]&0xffff)==1)||(!(intb[i]>>63)&&!strcmp(fn,"XAudio2Create")))) r=(void*)i_XAudio2Create;
+            else if(is_xa && (r=xa_resolve((intb[i]>>63)?(uint32_t)(intb[i]&0xffff):0,(intb[i]>>63)?0:fn))) ;
             else r = uni_resolve(dll, fn);
             if(!r && imp_count<8192){ imp_dll[imp_count]=dll; imp_fn[imp_count]=fn; r=make_stub(imp_count++); }
             iat[i]=(uint64_t)r;
@@ -2172,6 +2394,24 @@ static void set_protections(uint8_t *base, COFF *coff, OPT64 *opt){
         mprotect(base+sec[i].VA,len,pr); }
 }
 
+// WavesFX audio-DSP shim. halo3.dll builds a table of WavesFX_* function
+// pointers (globals at RVA 0x46bb780..0x46bb7f0) that it would populate by
+// LoadLibrary'ing Waves' DLL + GetProcAddress. That loader path never runs in
+// our environment, so the pointers stay NULL and the engine later calls
+// WavesFX_Initialize (NULL) -> jmp 0 -> AV. Pre-fill them: Initialize returns a
+// non-NULL dummy context (the engine stores it at obj+0x388 and asserts it is
+// non-NULL), every other entry is a harmless no-op (audio effects just become
+// a pass-through / silence, which is fine for reaching the menu).
+static uint8_t g_waves_ctx[8192]; // dummy WavesFX context handle (zeroed)
+static void*   MSABI waves_init(void*a,uint32_t b,void*c){ (void)a;(void)b;(void)c; return g_waves_ctx; }
+static uint64_t MSABI waves_noop(void*a,void*b,void*c,void*d,void*e,void*f){ (void)a;(void)b;(void)c;(void)d;(void)e;(void)f; return 0; }
+static void waves_prefill(uint8_t* halo3_base){
+    // contiguous block of 15 function-pointer globals
+    for(uint32_t rva=0x46bb780; rva<=0x46bb7f0; rva+=8)
+        *(void**)(halo3_base+rva) = (void*)waves_noop;
+    *(void**)(halo3_base+0x46bb7c8) = (void*)waves_init; // WavesFX_Initialize
+    if(getenv("PELOAD_TRACE_SEH")) ws("  [waves] prefilled WavesFX_* function table\n");
+}
 // load a guest DLL end-to-end: map, bind, protect, register exports, DllMain
 static uint8_t *load_guest(const char *path, const char *name){
     OPT64 *opt; COFF *coff; uint8_t *base=map_image(path,&opt,&coff);
@@ -2180,6 +2420,7 @@ static uint8_t *load_guest(const char *path, const char *name){
     bind_delay_imports(base,opt);   // halo3.dll delay-loads dxgi/d3d11/etc.
     set_protections(base,coff,opt);
     g_mods[g_nmods].name=name; g_mods[g_nmods].base=base; g_nmods++;
+    if(strcasestr(name,"halo3")) waves_prefill(base);
     ws("  guest "); ws(name); ws(" @ "); whex((uint64_t)base);
     uint64_t ep=opt->EntryRVA;
     if(ep){ int (MSABI *dm)(void*,uint32_t,void*)=(void*)(base+ep); int r=dm(base,1,0);
@@ -2187,10 +2428,74 @@ static uint8_t *load_guest(const char *path, const char *name){
     return base;
 }
 
+// Bridge the Darwin x86_64 signal mcontext <-> a Windows x64 CONTEXT so a Unix
+// hardware fault can be dispatched through the guest's SEH chain.
+static void uc2ctx(void* ctx, ucontext_t* uc){
+    x86_thread_state64_t* s=&uc->uc_mcontext->__ss;
+    CTX_REG(ctx,0)=s->__rax; CTX_REG(ctx,1)=s->__rcx; CTX_REG(ctx,2)=s->__rdx; CTX_REG(ctx,3)=s->__rbx;
+    CTX_REG(ctx,4)=s->__rsp; CTX_REG(ctx,5)=s->__rbp; CTX_REG(ctx,6)=s->__rsi; CTX_REG(ctx,7)=s->__rdi;
+    CTX_REG(ctx,8)=s->__r8; CTX_REG(ctx,9)=s->__r9; CTX_REG(ctx,10)=s->__r10; CTX_REG(ctx,11)=s->__r11;
+    CTX_REG(ctx,12)=s->__r12; CTX_REG(ctx,13)=s->__r13; CTX_REG(ctx,14)=s->__r14; CTX_REG(ctx,15)=s->__r15;
+    CTX_RIP(ctx)=s->__rip; *(uint32_t*)((uint8_t*)ctx+0x44)=(uint32_t)s->__rflags;
+    *(uint32_t*)((uint8_t*)ctx+0x30)=0x10000f; // CONTEXT_FULL|SEGMENTS
+    memcpy((uint8_t*)ctx+0x1a0,&uc->uc_mcontext->__fs.__fpu_xmm0,256);
+}
+static void ctx2uc(ucontext_t* uc, void* ctx){
+    x86_thread_state64_t* s=&uc->uc_mcontext->__ss;
+    s->__rax=CTX_REG(ctx,0); s->__rcx=CTX_REG(ctx,1); s->__rdx=CTX_REG(ctx,2); s->__rbx=CTX_REG(ctx,3);
+    s->__rsp=CTX_REG(ctx,4); s->__rbp=CTX_REG(ctx,5); s->__rsi=CTX_REG(ctx,6); s->__rdi=CTX_REG(ctx,7);
+    s->__r8=CTX_REG(ctx,8); s->__r9=CTX_REG(ctx,9); s->__r10=CTX_REG(ctx,10); s->__r11=CTX_REG(ctx,11);
+    s->__r12=CTX_REG(ctx,12); s->__r13=CTX_REG(ctx,13); s->__r14=CTX_REG(ctx,14); s->__r15=CTX_REG(ctx,15);
+    s->__rip=CTX_RIP(ctx); s->__rflags=*(uint32_t*)((uint8_t*)ctx+0x44);
+    memcpy(&uc->uc_mcontext->__fs.__fpu_xmm0,(uint8_t*)ctx+0x1a0,256);
+}
+// Run a hardware fault through the guest's Win64 SEH dispatch. Returns 1 if a
+// handler asked to CONTINUE execution (ctx updated in place), 0 if unhandled.
+static __thread int g_in_crashsig;
+static int seh_dispatch_hw(uint32_t code, EXREC* rec, void* ctx){
+    EXCEPTION_POINTERS ep; ep.ExceptionRecord=rec; ep.ContextRecord=ctx;
+    // (1) first-chance vectored exception handlers (anti-cheat / probe recovery)
+    for(int i=0;i<g_nveh;i++){ if(!g_veh[i]) continue; PVEH vh=(PVEH)g_veh[i];
+        long r=vh(&ep);
+        if(r==-1L){ if(getenv("PELOAD_TRACE_SEH")) ws("  [VEH -> CONTINUE_EXECUTION]\n"); return 1; } }
+    // (2) frame-based (.pdata) handlers. A __try/__except that handles the fault
+    // transfers via RtlUnwindEx and never returns; one that resumes returns 0.
+    uint8_t work[CTXSZ];
+    for(int guard=0; guard<512; guard++){
+        uint64_t base=0; RUNFN* fn=i_RtlLookupFunctionEntry(CTX_RIP(ctx),&base,0);
+        if(!fn){ uint64_t sp=CTX_RSP(ctx); if(!sp) break; uint64_t rip=*(uint64_t*)sp; CTX_RSP(ctx)=sp+8; CTX_RIP(ctx)=rip; if(!rip) break; continue; }
+        memcpy(work,ctx,CTXSZ); void* hdata=0; uint64_t estab=0;
+        PEXHANDLER h=i_RtlVirtualUnwind(1,base,CTX_RIP(ctx),fn,work,&hdata,&estab,0);
+        if(h){ DISPCTX dc; memset(&dc,0,sizeof dc); dc.ControlPc=CTX_RIP(ctx); dc.ImageBase=base; dc.FunctionEntry=fn;
+            dc.EstablisherFrame=estab; dc.ContextRecord=ctx; dc.LanguageHandler=h; dc.HandlerData=hdata;
+            int disp=h(rec, estab, ctx, &dc);
+            if(disp==0){ if(getenv("PELOAD_TRACE_SEH")) ws("  [__except -> CONTINUE_EXECUTION]\n"); return 1; } }
+        memcpy(ctx,work,CTXSZ); if(!CTX_RIP(ctx)) break;
+    }
+    (void)code; return 0;
+}
 // crash handler: print faulting signal/address/RIP + which module (so a
 // null-pointer GL call or a guest-code fault is immediately identifiable).
 static void crashsig(int sig, siginfo_t *info, void *ucv){
     ucontext_t *uc=ucv; uint64_t rip = uc? (uint64_t)uc->uc_mcontext->__ss.__rip : 0;
+    // First try to dispatch the fault as a Windows exception (the engine faults
+    // deliberately inside probes and expects a handler to recover + continue).
+    if(uc && !g_in_crashsig && (sig==SIGILL||sig==SIGSEGV||sig==SIGBUS||sig==SIGFPE||sig==SIGTRAP)){
+        g_in_crashsig=1;
+        // unblock these so a nested fault during dispatch isn't silently fatal
+        sigset_t us; sigemptyset(&us); sigaddset(&us,SIGILL); sigaddset(&us,SIGSEGV);
+        sigaddset(&us,SIGBUS); sigaddset(&us,SIGFPE); sigaddset(&us,SIGTRAP);
+        sigprocmask(SIG_UNBLOCK,&us,0);
+        uint8_t ctxbuf[CTXSZ]; memset(ctxbuf,0,CTXSZ); void*ctx=ctxbuf; uc2ctx(ctx,uc);
+        uint32_t code = sig==SIGILL?0xC000001D : (sig==SIGSEGV||sig==SIGBUS)?0xC0000005 :
+                        sig==SIGFPE?0xC0000090 : 0x80000003;
+        EXREC rec; memset(&rec,0,sizeof rec); rec.ExceptionCode=code; rec.ExceptionAddress=(void*)CTX_RIP(ctx);
+        if(code==0xC0000005){ rec.NumberParameters=2;
+            rec.ExceptionInformation[0]=(uc->uc_mcontext->__es.__err & 2)?1:0;
+            rec.ExceptionInformation[1]=(uint64_t)(info?info->si_addr:0); }
+        if(seh_dispatch_hw(code,&rec,ctx)){ ctx2uc(uc,ctx); g_in_crashsig=0; return; }
+        g_in_crashsig=0;
+    }
     char b[192]; const char *mod="?"; uint64_t moff=0;
     if(g_base){ DOS*d=(DOS*)g_base; OPT64*o=(OPT64*)((uint8_t*)g_base+d->e_lfanew+sizeof(COFF));
         if(rip>=(uint64_t)g_base && rip<(uint64_t)g_base+o->ImageSize){ mod="exe"; moff=rip-(uint64_t)g_base; } }
@@ -2198,6 +2503,11 @@ static void crashsig(int sig, siginfo_t *info, void *ucv){
         if(rip>=(uint64_t)g_mods[m].base && rip<(uint64_t)g_mods[m].base+o->ImageSize){ mod=g_mods[m].name; moff=rip-(uint64_t)g_mods[m].base; } }
     int n=snprintf(b,sizeof b,"\n[CRASH] sig=%d faultaddr=%p RIP=0x%llx (%s+0x%llx)\n",sig,info?info->si_addr:0,(unsigned long long)rip,mod,(unsigned long long)moff);
     (void)!write(2,b,n);
+    { uint64_t gs58=0; __asm__ volatile("movq %%gs:0x58,%0":"=r"(gs58));
+      uint64_t t0=(gs58>0x10000)?*(uint64_t*)gs58:0;
+      int nn=snprintf(b,sizeof b,"    gs:0x58(tls_array)=0x%llx  tls[0]=0x%llx  mach_tid=0x%x  mainthr=%d\n",
+        (unsigned long long)gs58,(unsigned long long)t0,pthread_mach_thread_np(pthread_self()),pthread_main_np());
+      (void)!write(2,b,nn); }
     // manual stack scan: Win64 code defeats backtrace(); find return addresses
     // that land inside a loaded module and print module+offset (the call chain).
     uint64_t rsp = uc? (uint64_t)uc->uc_mcontext->__ss.__rsp : 0; int printed=0;
