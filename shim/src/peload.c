@@ -1789,19 +1789,33 @@ static void MSABI i_RtlUnwindEx(uint64_t target, void* targetip, EXREC* rec, voi
     EXREC localrec; if(!rec){ memset(&localrec,0,sizeof localrec); localrec.ExceptionCode=0xC0000027/*STATUS_UNWIND*/; rec=&localrec; }
     rec->ExceptionFlags |= 2; // EXCEPTION_UNWINDING
     uint8_t work[CTXSZ];
+    // Unwinding only ever moves RSP UP (toward the stack base); if a frame's unwind
+    // codes are misinterpreted and RSP jumps to a bogus value, reading [RSP] faults.
+    // Bound RSP to a sane window above where we started so a lost target can't walk
+    // us into garbage — stop and transfer to the catch with the best context so far.
+    uint64_t sp_start=CTX_RSP(ctx);
+    if(getenv("PELOAD_TRACE_SEH")){ char t[96]; int k=snprintf(t,sizeof t,"    [unwind] target=0x%llx targetip=0x%llx sp_start=0x%llx\n",(unsigned long long)target,(unsigned long long)(uint64_t)targetip,(unsigned long long)sp_start); (void)!write(2,t,k);}
     for(int guard=0; guard<512; guard++){
+        // Stack grows down, so each unwound frame's EstablisherFrame is a strictly
+        // HIGHER address; once we reach OR pass `target` we must stop. Requiring
+        // exact equality let a one-off estab miss walk the loop past the target
+        // into garbage (CTX_RSP -> a bogus low address, faulting in i_RtlUnwindEx).
+        uint64_t sp0=CTX_RSP(ctx);
+        if(sp0 && target && sp0 > target) break;     // already at/above the target frame's stack
+        if(sp_start && (sp0 < sp_start || sp0 > sp_start + 0x8000000ull)) break; // RSP left the sane window
         uint64_t base=0; RUNFN* fn=i_RtlLookupFunctionEntry(CTX_RIP(ctx),&base,0);
-        if(!fn){ uint64_t sp=CTX_RSP(ctx); if(!sp) break; CTX_RIP(ctx)=*(uint64_t*)sp; CTX_RSP(ctx)=sp+8; if((uint64_t)CTX_RIP(ctx)==0) break; continue; }
+        if(!fn){ uint64_t sp=CTX_RSP(ctx); if(sp<sp_start||sp>sp_start+0x8000000ull) break; CTX_RIP(ctx)=*(uint64_t*)sp; CTX_RSP(ctx)=sp+8; if((uint64_t)CTX_RIP(ctx)==0) break; continue; }
         memcpy(work,ctx,CTXSZ); void* hdata=0; uint64_t estab=0;
         PEXHANDLER h=i_RtlVirtualUnwind(2/*UHANDLER*/,base,CTX_RIP(ctx),fn,work,&hdata,&estab,0);
-        if(estab==target){ break; }                 // reached the destination frame
+        if(getenv("PELOAD_TRACE_SEH")){ char t[112]; int k=snprintf(t,sizeof t,"    [unwind] rip=exe+0x%llx estab=0x%llx h=%p\n",(unsigned long long)(CTX_RIP(ctx)-0x140000000ull),(unsigned long long)estab,(void*)h); (void)!write(2,t,k);}
+        if(target && estab>=target){ break; }        // reached (or passed) the destination frame
         if(h && (estab>CTX_RSP(ctx))){               // run this frame's termination handler
             DISPCTX dc; memset(&dc,0,sizeof dc); dc.ControlPc=CTX_RIP(ctx); dc.ImageBase=base; dc.FunctionEntry=fn;
             dc.EstablisherFrame=estab; dc.ContextRecord=ctx; dc.LanguageHandler=h; dc.HandlerData=hdata; dc.TargetIp=(uint64_t)targetip;
             h(rec, estab, ctx, &dc);
         }
         memcpy(ctx,work,CTXSZ);
-        if(estab==target) break;
+        if(!CTX_RIP(ctx)) break;
     }
     CTX_RIP(ctx)=(uint64_t)targetip; CTX_REG(ctx,0)=(uint64_t)retval; // Rax = return value
     seh_restore(ctx); // transfer control to the catch (does not return)
@@ -3040,6 +3054,22 @@ static void crashsig(int sig, siginfo_t *info, void *ucv){
                     if(exe||h3){ int kk=snprintf(rb,sizeof rb,"      guest-ret[%d] @sp+0x%x = %s+0x%llx\n",
                         found,i*8, exe?"exe":"halo3", (unsigned long long)(v-(exe?0x140000000ull:0x180000000ull)));
                         (void)!write(2,rb,kk); found++; } } } } }
+    // PELOAD_TRACE_FAULT: log the REAL faulting rip (the engine's own report
+    // prints exe+0x0 whenever rip isn't inside the exe image) + a guest-return
+    // scan, so hardware faults in halo3/system/shim code are identifiable.
+    if(getenv("PELOAD_TRACE_FAULT") && (sig==SIGSEGV||sig==SIGBUS||sig==SIGILL||sig==SIGFPE) && uc && !g_in_crashsig){
+        Dl_info di; const char*fn="?",*mod="?"; uint64_t fo=0;
+        if(dladdr((void*)rip,&di)){ if(di.dli_sname)fn=di.dli_sname; if(di.dli_fname)mod=di.dli_fname; if(di.dli_saddr)fo=rip-(uint64_t)di.dli_saddr; }
+        const char*reg = rip>=0x140000000ull&&rip<0x142000000ull?"exe":(rip>=0x180000000ull&&rip<0x182000000ull?"halo3":"other");
+        char b[320]; int k=snprintf(b,sizeof b,"\n[FAULT] sig=%d thr=0x%x faultaddr=%p rip=0x%llx (%s%s+0x%llx | %s:%s+0x%llx)\n",
+            sig,pthread_mach_thread_np(pthread_self()),info?info->si_addr:0,(unsigned long long)rip,reg,
+            reg[0]=='e'?" exe+0x":(reg[0]=='h'?" halo3+0x":" "),
+            (unsigned long long)(reg[0]=='e'?rip-0x140000000ull:(reg[0]=='h'?rip-0x180000000ull:rip)),mod,fn,(unsigned long long)fo);
+        (void)!write(2,b,k);
+        uint64_t sp=(uint64_t)uc->uc_mcontext->__ss.__rsp; int found=0;
+        for(int i=0;i<256 && found<8;i++){ uint64_t v=*(uint64_t*)(sp+i*8);
+            int e=v>=0x140000000ull&&v<0x142000000ull, h=v>=0x180000000ull&&v<0x182000000ull;
+            if(e||h){ char r[80]; int kk=snprintf(r,sizeof r,"    ret[%d] %s+0x%llx\n",found,e?"exe":"halo3",(unsigned long long)(v-(e?0x140000000ull:0x180000000ull))); (void)!write(2,r,kk); found++; } } }
     // PELOAD_SURVIVE: for a non-main thread fault, park BEFORE handing it to the
     // engine's exception handler (which would ExitProcess). This keeps halo3's
     // D3D worker-thread faults from killing the process so the OpenGL menu thread
