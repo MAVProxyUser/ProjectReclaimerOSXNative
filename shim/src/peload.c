@@ -1810,7 +1810,10 @@ static void MSABI i_RtlUnwindEx(uint64_t target, void* targetip, EXREC* rec, voi
     // Bound RSP to a sane window above where we started so a lost target can't walk
     // us into garbage — stop and transfer to the catch with the best context so far.
     uint64_t sp_start=CTX_RSP(ctx);
-    if(getenv("PELOAD_TRACE_SEH")){ char t[96]; int k=snprintf(t,sizeof t,"    [unwind] target=0x%llx targetip=0x%llx sp_start=0x%llx\n",(unsigned long long)target,(unsigned long long)(uint64_t)targetip,(unsigned long long)sp_start); (void)!write(2,t,k);}
+    if(getenv("PELOAD_TRACE_SEH")){ void*caller=__builtin_return_address(0);
+        uint64_t cb=0; uint8_t*cm=seh_module((uint64_t)caller,&cb,0); const char*cn="?";
+        if(cm){ if(cm==g_base)cn="exe"; else for(int i=0;i<g_nmods;i++) if(g_mods[i].base==cm){cn=g_mods[i].name;break;} }
+        char t[200]; int k=snprintf(t,sizeof t,"    [unwind] target=0x%llx targetip=0x%llx(exe+0x%llx) sp_start=0x%llx caller=%s+0x%llx\n",(unsigned long long)target,(unsigned long long)(uint64_t)targetip,(unsigned long long)((uint64_t)targetip-0x140000000ull),(unsigned long long)sp_start,cn,(unsigned long long)((uint64_t)caller-cb)); (void)!write(2,t,k);}
     for(int guard=0; guard<512; guard++){
         // Stack grows down, so each unwound frame's EstablisherFrame is a strictly
         // HIGHER address; once we reach OR pass `target` we must stop. Requiring
@@ -1824,7 +1827,18 @@ static void MSABI i_RtlUnwindEx(uint64_t target, void* targetip, EXREC* rec, voi
         memcpy(work,ctx,CTXSZ); void* hdata=0; uint64_t estab=0;
         PEXHANDLER h=i_RtlVirtualUnwind(2/*UHANDLER*/,base,CTX_RIP(ctx),fn,work,&hdata,&estab,0);
         if(getenv("PELOAD_TRACE_SEH")){ char t[112]; int k=snprintf(t,sizeof t,"    [unwind] rip=exe+0x%llx estab=0x%llx h=%p\n",(unsigned long long)(CTX_RIP(ctx)-0x140000000ull),(unsigned long long)estab,(void*)h); (void)!write(2,t,k);}
-        if(target && estab>=target){ break; }        // reached (or passed) the destination frame
+        if(target && estab>=target){               // reached the destination frame
+            // Call its handler one last time with EXCEPTION_TARGET_UNWIND set: this
+            // is what makes __CxxFrameHandler3 run the C++ CATCH FUNCLET (the catch
+            // body). Without it we'd jump to the continuation with nothing caught.
+            if(h){ rec->ExceptionFlags |= 0x20; /*EXCEPTION_TARGET_UNWIND*/
+                DISPCTX dc; memset(&dc,0,sizeof dc); dc.ControlPc=CTX_RIP(ctx); dc.ImageBase=base; dc.FunctionEntry=fn;
+                dc.EstablisherFrame=estab; dc.ContextRecord=ctx; dc.LanguageHandler=h; dc.HandlerData=hdata; dc.TargetIp=(uint64_t)targetip;
+                if(getenv("PELOAD_TRACE_SEH")) ws("    [unwind] TARGET_UNWIND -> running catch funclet\n");
+                h(rec, estab, ctx, &dc);
+            }
+            break;
+        }
         if(h && (estab>CTX_RSP(ctx))){               // run this frame's termination handler
             DISPCTX dc; memset(&dc,0,sizeof dc); dc.ControlPc=CTX_RIP(ctx); dc.ImageBase=base; dc.FunctionEntry=fn;
             dc.EstablisherFrame=estab; dc.ContextRecord=ctx; dc.LanguageHandler=h; dc.HandlerData=hdata; dc.TargetIp=(uint64_t)targetip;
@@ -2264,6 +2278,7 @@ static uint64_t MSABI i_GetTickCount64(void){ return mach_absolute_time()/100000
 // actually mapping the dependency DLLs as guests is the next phase.
 static char g_lastlib[260];
 static uint8_t *load_guest(const char *path, const char *name); // fwd (defined near main)
+static void patch_install(void); // fwd (PELOAD_PATCH guest-code overwrites)
 static void *export_lookup(uint8_t *base, const char *want);    // fwd
 static void* MSABI i_LoadLibraryExW(const uint16_t *name, void *h, uint32_t fl){
     (void)h;(void)fl; char w[2048]; int i=0; for(; name && name[i] && i<2047; i++) w[i]=(char)(name[i]<128?name[i]:'?'); w[i]=0;
@@ -2455,6 +2470,25 @@ static void* MSABI i_FindFirstFileExW(const uint16_t*w,int lvl,void*fd,int op,vo
 static int MSABI i_FindNextFileW(void*h,void*fd){ intptr_t hv=(intptr_t)h; int idx=(int)(hv-0x2000); if(idx<0||idx>=g_nfinds||!g_finds[idx].d) return 0;
     Find*f=&g_finds[idx]; struct dirent*de; while((de=readdir(f->d))){ if(!strcmp(de->d_name,".")||!strcmp(de->d_name,"..")) continue; if(pat_match(f->pat,de->d_name)){ fill_find(f,de,fd); return 1; } } g_lasterr=18; return 0; } // ERROR_NO_MORE_FILES
 static int MSABI i_FindClose(void*h){ intptr_t hv=(intptr_t)h; int idx=(int)(hv-0x2000); if(idx>=0&&idx<g_nfinds&&g_finds[idx].d){ closedir(g_finds[idx].d); g_finds[idx].d=0; } return 1; }
+// ANSI variants: halo3 enumerates its maps/ with FindFirstFileA, so a stub here
+// leaves the map catalog EMPTY ("guardian" never resolves). WIN32_FIND_DATAA has
+// cFileName (CHAR[260]) at +44 instead of the wide WCHAR.
+static void fill_find_a(Find*f,struct dirent*de,void*fd){ if(getenv("PELOAD_TRACE_FS")){ ws("  [findA] dir="); ws(f->dir); ws(" pat="); ws(f->pat); ws(" -> "); ws(de->d_name); ws("\n"); }
+    uint8_t*d=fd; memset(d,0,320); char full[1800]; struct stat st;
+    snprintf(full,sizeof full,"%s/%s",f->dir,de->d_name);
+    uint32_t attr=0x80; if(stat(full,&st)==0){ attr=S_ISDIR(st.st_mode)?0x10:0x80; *(uint32_t*)(d+28)=(uint32_t)(st.st_size>>32); *(uint32_t*)(d+32)=(uint32_t)st.st_size; }
+    *(uint32_t*)d=attr; char*nm=(char*)(d+44); int i=0; for(; de->d_name[i]&&i<259;i++) nm[i]=de->d_name[i]; nm[i]=0; }
+static void* MSABI i_FindFirstFileA(const char*p0,void*fd){ if(g_nfinds>=64) return (void*)-1;
+    char p[2048]; { int i=0; for(; p0&&p0[i]&&i<2047;i++) p[i]=(p0[i]=='\\')?'/':p0[i]; p[i]=0; }
+    char *slash=strrchr(p,'/'); char dir[1536],pat[260];
+    if(slash){ int dl=slash-p; if(dl>1535)dl=1535; memcpy(dir,p,dl); dir[dl]=0; snprintf(pat,sizeof pat,"%s",slash+1); }
+    else { snprintf(dir,sizeof dir,"."); snprintf(pat,sizeof pat,"%s",p); }
+    DIR*d=opendir(dir); if(!d){ g_lasterr=win_err(); return (void*)-1; }
+    Find*f=&g_finds[g_nfinds]; f->d=d; snprintf(f->dir,sizeof f->dir,"%s",dir); snprintf(f->pat,sizeof f->pat,"%s",pat);
+    struct dirent*de; while((de=readdir(d))){ if(!strcmp(de->d_name,".")||!strcmp(de->d_name,"..")) continue; if(pat_match(pat,de->d_name)){ fill_find_a(f,de,fd); return (void*)(intptr_t)(0x2000+g_nfinds++); } }
+    closedir(d); g_lasterr=2; return (void*)-1; }
+static int MSABI i_FindNextFileA(void*h,void*fd){ intptr_t hv=(intptr_t)h; int idx=(int)(hv-0x2000); if(idx<0||idx>=g_nfinds||!g_finds[idx].d) return 0;
+    Find*f=&g_finds[idx]; struct dirent*de; while((de=readdir(f->d))){ if(!strcmp(de->d_name,".")||!strcmp(de->d_name,"..")) continue; if(pat_match(f->pat,de->d_name)){ fill_find_a(f,de,fd); return 1; } } g_lasterr=18; return 0; }
 static int MSABI i_GetFileInformationByHandle(void*h,void*info){ intptr_t hv=(intptr_t)h; if(getenv("PELOAD_TRACE_FS")) ws("  [GetFileInformationByHandle]\n"); if(hv<0x1000||!info) return 0; struct stat st; if(fstat((int)(hv-0x1000),&st)) return 0;
     uint8_t*d=info; memset(d,0,52); *(uint32_t*)d=S_ISDIR(st.st_mode)?0x10:0x80; *(uint32_t*)(d+32)=(uint32_t)(st.st_size>>32); *(uint32_t*)(d+36)=(uint32_t)st.st_size; *(uint32_t*)(d+40)=1; return 1; }
 
@@ -2573,6 +2607,8 @@ static void *resolve_impl(const char *fn){
         {"FindFirstFileExW",(void*)i_FindFirstFileExW},
         {"FindFirstFileW",(void*)i_FindFirstFileExW},
         {"FindNextFileW",(void*)i_FindNextFileW},
+        {"FindFirstFileA",(void*)i_FindFirstFileA},
+        {"FindNextFileA",(void*)i_FindNextFileA},
         {"FindClose",(void*)i_FindClose},
         {"GetFileInformationByHandle",(void*)i_GetFileInformationByHandle},
         {"FlushFileBuffers",(void*)i_FlushFileBuffers},
@@ -2996,7 +3032,7 @@ static uint8_t *load_guest(const char *path, const char *name){
     bind_delay_imports(base,opt);   // halo3.dll delay-loads dxgi/d3d11/etc.
     set_protections(base,coff,opt);
     g_mods[g_nmods].name=name; g_mods[g_nmods].base=base; g_nmods++;
-    if(strcasestr(name,"halo3")) waves_prefill(base);
+    if(strcasestr(name,"halo3")){ waves_prefill(base); patch_install(); } // patches can target halo3 now it's mapped
     ws("  guest "); ws(name); ws(" @ "); whex((uint64_t)base);
     uint64_t ep=opt->EntryRVA;
     if(ep){ int (MSABI *dm)(void*,uint32_t,void*)=(void*)(base+ep); int r=dm(base,1,0);
@@ -3052,8 +3088,34 @@ static int seh_dispatch_hw(uint32_t code, EXREC* rec, void* ctx){
 }
 // crash handler: print faulting signal/address/RIP + which module (so a
 // null-pointer GL call or a guest-code fault is immediately identifiable).
+// PELOAD_BP=<exe-rva-hex>: one-shot software breakpoints. Each hit logs "[bp]"
+// then restores the original byte and resumes (so the probed code runs normally).
+static uint64_t g_bp_addr[8]; static uint8_t g_bp_orig[8]; static int g_bp_n;
+// Resolve a loaded guest module base by (case-insensitive) name substring.
+static uint8_t* mod_base(const char*want){ for(int i=0;i<g_nmods;i++){ const char*n=g_mods[i].name; for(const char*p=n;*p;p++){ if(!strncasecmp(p,want,strlen(want))) return g_mods[i].base; } } return 0; }
+// PELOAD_PATCH=<mod>+<rva>:<hexbytes>[,...]  — overwrite guest code (e.g. NOP out
+// a re-entrant callback). mod is "exe" or a module-name substring ("halo3").
+static void patch_install(void){ const char*s=getenv("PELOAD_PATCH"); if(!s) return;
+    char buf[256]; strncpy(buf,s,sizeof buf-1); buf[sizeof buf-1]=0;
+    for(char*tok=strtok(buf,",");tok;tok=strtok(0,",")){
+        char*plus=strchr(tok,'+'),*colon=strchr(tok,':'); if(!plus||!colon) continue; *plus=0;*colon=0;
+        uint8_t*base = !strcasecmp(tok,"exe")? g_base : mod_base(tok); if(!base) continue;
+        uint64_t rva=strtoull(plus+1,0,16); uint8_t*p=base+rva;
+        uintptr_t pg=(uintptr_t)p & ~0xFFFull; mprotect((void*)pg,0x2000,PROT_READ|PROT_WRITE|PROT_EXEC);
+        const char*h=colon+1; int n=0; while(h[0]&&h[1]){ char hh[3]={h[0],h[1],0}; p[n++]=(uint8_t)strtoul(hh,0,16); h+=2; }
+        sys_icache_invalidate(p,n);
+        char m[96]; int k=snprintf(m,sizeof m,"  [patch] %s+0x%llx <- %d bytes\n",tok,(unsigned long long)rva,n); (void)!write(2,m,k); } }
+static void bp_install(void){ const char*s=getenv("PELOAD_BP"); if(!s||!g_base) return;
+    while(*s && g_bp_n<8){ uint64_t rva=strtoull(s,0,16); if(rva){ uint8_t*p=g_base+rva;
+            uintptr_t pg=(uintptr_t)p & ~0xFFFull; mprotect((void*)pg,0x2000,PROT_READ|PROT_WRITE|PROT_EXEC);
+            g_bp_orig[g_bp_n]=*p; g_bp_addr[g_bp_n]=(uint64_t)p; *p=0xCC; sys_icache_invalidate(p,1); g_bp_n++; }
+        const char*c=strchr(s,','); if(!c) break; s=c+1; } }
 static void crashsig(int sig, siginfo_t *info, void *ucv){
     ucontext_t *uc=ucv; uint64_t rip = uc? (uint64_t)uc->uc_mcontext->__ss.__rip : 0;
+    if(sig==SIGTRAP && uc){ uint64_t hit=rip-1;   // int3 already advanced rip
+        for(int i=0;i<g_bp_n;i++) if(g_bp_addr[i]==hit){ uint8_t*p=(uint8_t*)hit; *p=g_bp_orig[i]; sys_icache_invalidate(p,1);
+            uc->uc_mcontext->__ss.__rip=hit;      // rewind to re-execute original insn
+            char b[80]; int k=snprintf(b,sizeof b,"\n[bp] HIT exe+0x%llx (funclet/target executed)\n",(unsigned long long)(hit-(uint64_t)g_base)); (void)!write(2,b,k); return; } }
     // If this fault is a write/read into a guard page, name the owning block +
     // overflow distance BEFORE handing off to the guest VEH (which may exit).
     if((sig==SIGSEGV||sig==SIGBUS) && info && info->si_addr && heapguard()){
@@ -3344,6 +3406,8 @@ int main(int argc, char **argv){
     if(getenv("PELOAD_WAIT") && strstr(g_cmdlineA,"probe-engine-worker")){ char pb[32]; int pn=snprintf(pb,sizeof pb,"%d\n",getpid());
         int fd=open("/tmp/peload.pid",O_WRONLY|O_CREAT|O_TRUNC,0644); if(fd>=0){(void)!write(fd,pb,pn); close(fd);}
         ws("  PELOAD_WAIT: pid "); whex(getpid()); sleep(atoi(getenv("PELOAD_WAIT"))); }
+    bp_install();   // PELOAD_BP software breakpoints (diagnostic)
+    patch_install(); // PELOAD_PATCH guest-code overwrites (diagnostic)
     ws("peload: calling entry (expect stub logs, then a fault at the first\n"
        "        unimplemented behavior — that is the signal we want)\n");
     // (window is created lazily in wglCreateContext on the engine's GL thread)
