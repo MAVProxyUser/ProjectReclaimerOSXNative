@@ -1840,6 +1840,9 @@ static void MSABI i_RaiseException(uint32_t code,uint32_t flags,uint32_t n,const
     uint64_t guest_rsp = (uint64_t)__builtin_frame_address(0) + 16;
     uint8_t ctxbuf[CTXSZ]; memset(ctxbuf,0,CTXSZ); void* ctx=ctxbuf; seh_capture(ctx);
     CTX_RIP(ctx)=(uint64_t)guest_rip; CTX_RSP(ctx)=guest_rsp;
+    if(getenv("PELOAD_TRACE_SEH")&&code==0xE06D7363){ char t[128]; int k=snprintf(t,sizeof t,
+        "  [raise] thr=0x%x guest_rip=0x%llx guest_rsp=0x%llx main=%d\n",pthread_mach_thread_np(pthread_self()),
+        (unsigned long long)(uint64_t)guest_rip,(unsigned long long)guest_rsp,pthread_main_np()); (void)!write(2,t,k);}
     EXREC rec; memset(&rec,0,sizeof rec); rec.ExceptionCode=code; rec.ExceptionFlags=flags;
     rec.ExceptionAddress=(void*)CTX_RIP(ctx); rec.NumberParameters=(n>15?15:n);
     if(args) for(uint32_t i=0;i<rec.NumberParameters;i++) rec.ExceptionInformation[i]=((const uint64_t*)args)[i];
