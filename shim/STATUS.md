@@ -28,18 +28,41 @@ On the **dedicated-server exe** the loader relocates (22,919 fixups), binds
 precise, expected spot: `__p___argv` / `_get_initial_narrow_environment`
 return NULL from our stubs, so the Rust runtime dereferences a null `argv`.
 
+## Boot march (dedicated exe, with real bootstrap impls)
+
+`peload.c` now implements ~45 bootstrap functions (argv/argc/environ, a real
+`_initterm` that calls the init table, time, a malloc-backed Win32 heap,
+mmap-backed VirtualAlloc/Protect, TLS, the `__p__*` stdio/locale accessors,
+and `GetProcAddress` that hands back live stubs). Each function added walks
+the Rust server's startup a few calls further — an empirical, repeatable
+march:
+
+| after implementing            | boot reaches                               |
+|-------------------------------|--------------------------------------------|
+| (NULL stubs)                  | `__p___argv` → null argv deref             |
+| argv/environ/`_initterm`      | `__p__commode` (stdio globals)             |
+| `__p__*` stdio/locale         | `SetUnhandledExceptionFilter`, `_set_new_mode` |
+| …                             | marches on, one function at a time         |
+
+This confirms the surface is finite and mechanical, but hand-implementing it
+one accessor at a time has diminishing per-step value.
+
 ## Next step (bounded, clear)
 
-The wall is the C-runtime bootstrap, ~20 functions. Two options:
+The boot march above proves option 1 works but is tedious. **Decision: do
+option 2 next** — load the real Microsoft ucrt as a guest PE:
 
-1. **Implement them** — `__p___argv`/`__p___argc`/`_get_initial_narrow_environment`
-   return real argv/argc/environ; `_initterm[_e]` actually walk and call the
-   init table; real `GetSystemTimeAsFileTime`/`QueryPerformanceCounter`.
-2. **Load the real Microsoft ucrt as a guest PE** (preferred) — recursively
-   map `ucrtbase.dll` + `vcruntime140.dll` + `msvcp140.dll` (all present in
-   the MCC folder / depot 228987). They import essentially only kernel32, so
-   this collapses ~100 CRT functions into real code and leaves us owning just
-   kernel32/ntdll/ws2_32/winmm/bcrypt + a handful of user32 stubs.
+- recursively map `ucrtbase.dll` + `vcruntime140.dll` + `msvcp140.dll` (all
+  present in the MCC folder / VC redist depot 228987) with the same loader
+- they import essentially only kernel32, so this turns ~100 CRT functions
+  (every `__p__*`, stdio, heap, locale accessor) into *real* code at once
+- we then own only kernel32 / ntdll / ws2_32 / winmm / bcrypt + a few user32
+  stubs — a far smaller, non-accessor surface
+
+This requires the loader to (a) load a dependency DLL by name, (b) run its
+DllMain, (c) resolve the main exe's CRT imports against the loaded DLL's
+export table instead of our stubs. That export-table resolver is the one
+new piece of loader machinery; everything else is already here.
 
 After CRT: kernel32 heap+sync+TLS, ntdll, then ws2_32→BSD sockets and the
 tokio AFD/IOCP poll → kqueue bridge. Then `halo3.dll`'s exported engine

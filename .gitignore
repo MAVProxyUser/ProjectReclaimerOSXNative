@@ -4,3 +4,4 @@ analysis/
 prefix/
 shim/build/
 /tmp/
+.DS_Store

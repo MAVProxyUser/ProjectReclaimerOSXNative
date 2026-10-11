@@ -23,10 +23,13 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
+#include <stdlib.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/time.h>
+#include <mach/mach_time.h>
 
 // ---- raw logging (no libc TLS dependency; safe after we touch %gs) ----
 static void w(const char *s, long n){ (void)!write(2, s, n); }
@@ -77,9 +80,12 @@ uint64_t __attribute__((ms_abi)) on_stub(uint32_t idx){
     return 0;
 }
 
-// build a Win64 stub that calls on_stub(idx) and returns its result
-static uint8_t *g_stubpool; static size_t g_stuboff;
+// build a Win64 stub that calls on_stub(idx) and returns its result.
+// runtime-safe: pool is RX, so flip RW around the write then back to RX
+// (the RW<->RX cycle is proven to work under Rosetta).
+static uint8_t *g_stubpool; static size_t g_stuboff; static int g_pool_exec;
 static void *make_stub(uint32_t idx){
+    if(g_pool_exec) mprotect(g_stubpool, 32*8192, PROT_READ|PROT_WRITE);
     uint8_t *p = g_stubpool + g_stuboff; g_stuboff += 32;
     int o=0;
     p[o++]=0x48; p[o++]=0x83; p[o++]=0xEC; p[o++]=0x28;            // sub rsp,0x28
@@ -88,14 +94,179 @@ static void *make_stub(uint32_t idx){
     p[o++]=0xFF; p[o++]=0xD0;                                       // call rax
     p[o++]=0x48; p[o++]=0x83; p[o++]=0xC4; p[o++]=0x28;            // add rsp,0x28
     p[o++]=0xC3;                                                    // ret
+    if(g_pool_exec) mprotect(g_stubpool, 32*8192, PROT_READ|PROT_EXEC);
     return p;
 }
 
 static inline uint8_t* rva(uint32_t r){ return g_base + r; }
 
+// ---------------------------------------------------------------------------
+// Real implementations of the Win64 bootstrap surface. Enough for the C
+// runtime + Rust std startup to get past argv/environ/_initterm. Everything
+// is ms_abi. Unimplemented names still fall back to logging stubs.
+// ---------------------------------------------------------------------------
+static int      g_argc;          // guest argc
+static char   **g_argv;          // guest argv (NULL-terminated)
+static char   **g_environ;       // guest environ (NULL-terminated)
+static uint16_t g_cmdlineW[2048]; // guest command line (UTF-16)
+
+#define MSABI __attribute__((ms_abi))
+static void   MSABI i_GetSystemTimeAsFileTime(uint64_t *ft){
+    struct timeval tv; gettimeofday(&tv,0);
+    // 100ns ticks since 1601-01-01; 11644473600s between 1601 and 1970
+    if(ft) *ft = ((uint64_t)tv.tv_sec + 11644473600ULL)*10000000ULL + (uint64_t)tv.tv_usec*10;
+}
+static int    MSABI i_QueryPerformanceCounter(uint64_t *c){ if(c) *c=mach_absolute_time(); return 1; }
+static int    MSABI i_QueryPerformanceFrequency(uint64_t *f){ if(f) *f=1000000000ULL; return 1; }
+static uint32_t MSABI i_GetCurrentThreadId(void){ return 0x1000; } // single-threaded startup
+static uint32_t MSABI i_GetCurrentProcessId(void){ return (uint32_t)getpid(); }
+static void   MSABI i_InitializeSListHead(void *h){ if(h) memset(h,0,16); }
+static uint32_t MSABI i_GetLastError(void){ return 0; }
+static void   MSABI i_SetLastError(uint32_t e){ (void)e; }
+
+// CRT argv/environ accessors
+static char*** MSABI i_p_argv(void){ static char **a; a=g_argv; return &a; }
+static int*    MSABI i_p_argc(void){ static int c; c=g_argc; return &c; }
+static char**  MSABI i_get_initial_narrow_environment(void){ return g_environ; }
+static char*** MSABI i_p_environ(void){ static char **e; e=g_environ; return &e; }
+static int     MSABI i_configure_narrow_argv(int m){ (void)m; return 0; }
+static int     MSABI i_initialize_narrow_environment(void){ return 0; }
+static int     MSABI i_initialize_onexit_table(void *t){ (void)t; return 0; }
+static int     MSABI i_register_onexit_function(void *t, void *f){ (void)t;(void)f; return 0; }
+static int     MSABI i_crt_atexit(void *f){ (void)f; return 0; }
+static void    MSABI i_set_app_type(int t){ (void)t; }
+static int     MSABI i_seh_filter_exe(uint32_t c, void *p){ (void)c;(void)p; return 0; } // EXCEPTION_CONTINUE_SEARCH
+
+// stdio/locale globals: these __p__* accessors MUST return real pointers
+// (the CRT writes through them). NULL stubs segfault here.
+static int g_commode, g_fmode, g_dowildcard;
+static int*  MSABI i_p_commode(void){ return &g_commode; }
+static int*  MSABI i_p_fmode(void){ return &g_fmode; }
+static int   MSABI i_set_fmode(int m){ g_fmode=m; return 0; }
+static int   MSABI i_get_fmode(int *p){ if(p)*p=g_fmode; return 0; }
+static int*  MSABI i_p_dowildcard(void){ return &g_dowildcard; }
+static int   MSABI i_configthreadlocale(int m){ (void)m; return 0; }
+static void  MSABI i_cexit(void){ }
+
+// _initterm: call each non-null fn ptr in [start,end). This is what actually
+// runs C++/Rust global constructors — the reason a NULL stub was not enough.
+static void MSABI i_initterm(void (MSABI **start)(void), void (MSABI **end)(void)){
+    for(; start<end; start++) if(*start) (*start)();
+}
+static int MSABI i_initterm_e(int (MSABI **start)(void), int (MSABI **end)(void)){
+    for(; start<end; start++) if(*start){ int r=(*start)(); if(r) return r; }
+    return 0;
+}
+
+// Win32 heap backed by malloc (handle value is arbitrary but non-null)
+static void*  MSABI i_GetProcessHeap(void){ return (void*)0x48454150; /* 'HEAP' */ }
+static void*  MSABI i_HeapAlloc(void *h, uint32_t fl, uint64_t n){ (void)h; void*p=malloc(n?n:1); if(p&&(fl&8)) memset(p,0,n); return p; }
+static void*  MSABI i_HeapReAlloc(void *h, uint32_t fl, void *p, uint64_t n){ (void)h;(void)fl; return realloc(p,n?n:1); }
+static int    MSABI i_HeapFree(void *h, uint32_t fl, void *p){ (void)h;(void)fl; free(p); return 1; }
+static uint64_t MSABI i_HeapSize(void *h, uint32_t fl, void *p){ (void)h;(void)fl;(void)p; return 0; }
+static void*  MSABI i_HeapCreate(uint32_t o, uint64_t a, uint64_t b){ (void)o;(void)a;(void)b; return (void*)0x48454150; }
+
+// Virtual memory backed by mmap
+static void*  MSABI i_VirtualAlloc(void *addr, uint64_t sz, uint32_t type, uint32_t prot){
+    (void)type;(void)prot; void *p=mmap(addr, sz?sz:4096, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANON, -1,0);
+    return p==MAP_FAILED?0:p;
+}
+static int    MSABI i_VirtualProtect(void *a, uint64_t n, uint32_t np, uint32_t *op){ if(op)*op=0x40; int pr=PROT_READ; if(np&0xf0)pr|=PROT_EXEC; if(np&0xcc)pr|=PROT_WRITE; mprotect(a,n,pr); return 1; }
+static int    MSABI i_VirtualFree(void *a, uint64_t n, uint32_t t){ (void)t; munmap(a,n?n:4096); return 1; }
+
+static uint16_t* MSABI i_GetCommandLineW(void){ return g_cmdlineW; }
+static void*  MSABI i_GetModuleHandleW(uint16_t *n){ (void)n; return g_base; } // good enough: image base
+static void*  MSABI i_GetModuleHandleA(char *n){ (void)n; return g_base; }
+
+// TLS: a tiny fixed table (Rust/CRT use a few slots early)
+static void  *g_tls[256]; static uint32_t g_tlsnext=1;
+static uint32_t MSABI i_TlsAlloc(void){ return g_tlsnext<256? g_tlsnext++ : 0xFFFFFFFF; }
+static void*  MSABI i_TlsGetValue(uint32_t i){ return i<256? g_tls[i]:0; }
+static int    MSABI i_TlsSetValue(uint32_t i, void *v){ if(i<256){g_tls[i]=v; return 1;} return 0; }
+static int    MSABI i_TlsFree(uint32_t i){ (void)i; return 1; }
+
+// GetProcAddress: hand back a live logging stub for whatever is requested,
+// so dynamic resolution yields a callable (not NULL) and startup continues.
+static void *resolve_impl(const char *fn); // fwd
+static void* MSABI i_GetProcAddress(void *mod, char *name){
+    (void)mod;
+    if((uint64_t)name < 0x10000){ // imported by ordinal
+        if(imp_count<8192){ imp_dll[imp_count]="(dynamic)"; imp_fn[imp_count]="#ordinal";
+            return make_stub(imp_count++); }
+        return 0;
+    }
+    void *r = resolve_impl(name);
+    if(r) return r;
+    if(imp_count<8192){ imp_dll[imp_count]="(dynamic)"; imp_fn[imp_count]=name;
+        return make_stub(imp_count++); }
+    return 0;
+}
+
+// Named dispatch: returns a real impl for a known name, else NULL.
+static void *resolve_impl(const char *fn){
+    struct { const char *n; void *f; } T[] = {
+        {"GetSystemTimeAsFileTime",(void*)i_GetSystemTimeAsFileTime},
+        {"QueryPerformanceCounter",(void*)i_QueryPerformanceCounter},
+        {"QueryPerformanceFrequency",(void*)i_QueryPerformanceFrequency},
+        {"GetCurrentThreadId",(void*)i_GetCurrentThreadId},
+        {"GetCurrentProcessId",(void*)i_GetCurrentProcessId},
+        {"InitializeSListHead",(void*)i_InitializeSListHead},
+        {"GetLastError",(void*)i_GetLastError},
+        {"SetLastError",(void*)i_SetLastError},
+        {"__p___argv",(void*)i_p_argv},
+        {"__p___argc",(void*)i_p_argc},
+        {"__p__environ",(void*)i_p_environ},
+        {"_get_initial_narrow_environment",(void*)i_get_initial_narrow_environment},
+        {"_configure_narrow_argv",(void*)i_configure_narrow_argv},
+        {"_initialize_narrow_environment",(void*)i_initialize_narrow_environment},
+        {"_initialize_onexit_table",(void*)i_initialize_onexit_table},
+        {"_register_onexit_function",(void*)i_register_onexit_function},
+        {"_crt_atexit",(void*)i_crt_atexit},
+        {"_set_app_type",(void*)i_set_app_type},
+        {"_seh_filter_exe",(void*)i_seh_filter_exe},
+        {"_initterm",(void*)i_initterm},
+        {"_initterm_e",(void*)i_initterm_e},
+        {"GetProcessHeap",(void*)i_GetProcessHeap},
+        {"HeapAlloc",(void*)i_HeapAlloc},
+        {"HeapReAlloc",(void*)i_HeapReAlloc},
+        {"HeapFree",(void*)i_HeapFree},
+        {"HeapSize",(void*)i_HeapSize},
+        {"HeapCreate",(void*)i_HeapCreate},
+        {"VirtualAlloc",(void*)i_VirtualAlloc},
+        {"VirtualProtect",(void*)i_VirtualProtect},
+        {"VirtualFree",(void*)i_VirtualFree},
+        {"GetCommandLineW",(void*)i_GetCommandLineW},
+        {"GetModuleHandleW",(void*)i_GetModuleHandleW},
+        {"GetModuleHandleA",(void*)i_GetModuleHandleA},
+        {"TlsAlloc",(void*)i_TlsAlloc},
+        {"TlsGetValue",(void*)i_TlsGetValue},
+        {"TlsSetValue",(void*)i_TlsSetValue},
+        {"TlsFree",(void*)i_TlsFree},
+        {"GetProcAddress",(void*)i_GetProcAddress},
+        {"__p__commode",(void*)i_p_commode},
+        {"__p__fmode",(void*)i_p_fmode},
+        {"_set_fmode",(void*)i_set_fmode},
+        {"_get_fmode",(void*)i_get_fmode},
+        {"__p__dowildcard",(void*)i_p_dowildcard},
+        {"_configthreadlocale",(void*)i_configthreadlocale},
+        {"_cexit",(void*)i_cexit},
+        {0,0}
+    };
+    for(int i=0; T[i].n; i++) if(!strcmp(T[i].n, fn)) return T[i].f;
+    return 0;
+}
+
+extern char **environ;
 int main(int argc, char **argv){
     const char *path = argc>1 ? argv[1] : "halo3.dll";
     ws("peload: loading "); ws(path); ws("\n");
+
+    // guest argv/argc/environ: pass the PE path + any args after it
+    g_argv = argv+1; g_argc = argc-1; if(g_argc<1){ g_argc=1; }
+    g_environ = environ;
+    { // build a minimal UTF-16 command line = the PE path
+        int i=0; for(; path[i] && i<2047; i++) g_cmdlineW[i]=(uint16_t)path[i]; g_cmdlineW[i]=0;
+    }
 
     int fd = open(path, O_RDONLY);
     if(fd<0){ ws("open failed\n"); return 1; }
@@ -157,7 +328,9 @@ int main(int argc, char **argv){
             for(int i=0; oft[i]; i++){
                 const char *fn = "#ordinal";
                 if(!(oft[i]>>63)) fn = (char*)rva((uint32_t)oft[i]+2);
-                if(imp_count<8192){ imp_dll[imp_count]=dll; imp_fn[imp_count]=fn;
+                void *impl = resolve_impl(fn);          // real impl if we have one
+                if(impl){ ft[i] = (uint64_t)impl; }
+                else if(imp_count<8192){ imp_dll[imp_count]=dll; imp_fn[imp_count]=fn;
                     ft[i] = (uint64_t)make_stub(imp_count); imp_count++; }
             }
         }
@@ -182,6 +355,7 @@ int main(int argc, char **argv){
         mprotect(g_base+sec[i].VA, len, prot);
     }
     mprotect(g_stubpool, 32*8192, PROT_READ|PROT_EXEC);
+    g_pool_exec = 1;   // runtime make_stub (via GetProcAddress) now toggles prot
 
     // minimal TEB via %gs overlay (proven writable under Rosetta).
     // Windows x64 reads TEB at gs:[0x30]=self, PEB at gs:[0x60].
