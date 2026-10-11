@@ -1102,7 +1102,7 @@ static void*  MSABI i_CreateFileW(const uint16_t *w,uint32_t acc,uint32_t share,
     struct stat pst; if((fl&0x02000000) || (stat(p,&pst)==0 && S_ISDIR(pst.st_mode))) flags=O_RDONLY;
     int fd=open(p, flags, 0644);
     if(fd<0 && (flags&O_CREAT) && errno==ENOENT){ mkparents(p); fd=open(p, flags, 0644); } // scratch mirror
-    if(getenv("PELOAD_TRACE_FS")){ ws("  [CreateFileW] "); ws(p); ws(fd<0?"  FAIL\n":"  ok\n"); }
+    if(getenv("PELOAD_TRACE_FS")){ char hd[48]; snprintf(hd,sizeof hd,"  [CFW pid=%d disp=%u acc=0x%x] ",getpid(),disp,acc); ws(hd); ws(p); ws(fd<0?"  FAIL\n":"  ok\n"); }
     if(fd<0){ g_lasterr=win_err(); return (void*)-1; } g_lasterr=0; // INVALID_HANDLE_VALUE
     fd_record(fd,p);
     if(fl&0x04000000) g_fddel[fd<MAXFD?fd:0]=1; // FILE_FLAG_DELETE_ON_CLOSE
@@ -1758,6 +1758,15 @@ int main(int argc, char **argv){
       setenv("TEMP","C:\\ReclaimerCache\\Temp",0); setenv("TMP","C:\\ReclaimerCache\\Temp",0);
       setenv("USERPROFILE","C:\\ReclaimerProfile",0);
       setenv("RECLAIMER_MOUSE_SENSITIVITY","1.0",0); }  // engine input default (valid range 0.05-20)
+
+    // The native worker enumerates its content folders (Maps / Game Modes /
+    // Images / Mods / Mods/Downloaded) relative to its cwd (the mcc-startup
+    // temp dir). On a real install these exist (empty); here they don't, so the
+    // enumeration hits a fatal ENOENT ("os error 2"). Pre-create them empty so
+    // enumeration yields zero entries and startup proceeds.
+    { char cwd[1200]; if(getcwd(cwd,sizeof cwd) && strstr(cwd,"mcc-startup")){
+        const char *subs[]={"Maps","Game Modes","Images","Mods","Mods/Downloaded","Mods/Local",0};
+        for(int i=0;subs[i];i++){ char d[1500]; snprintf(d,sizeof d,"%s/%s",cwd,subs[i]); mkparents(d); mkdir(d,0755); } } }
 
     // ---- locate the genuine MS CRT dir: $RECLAIMER_CRT_DIR, then next to the
     // peload binary (<dir>/crt and <dir>/../crt), then the project tree ----
