@@ -28,6 +28,38 @@ On the **dedicated-server exe** the loader relocates (22,919 fixups), binds
 precise, expected spot: `__p___argv` / `_get_initial_narrow_environment`
 return NULL from our stubs, so the Rust runtime dereferences a null `argv`.
 
+## MILESTONE: the Rust dedicated server runs, Wine-free (2026-10-10)
+
+The genuine Microsoft CRT is now loaded as guest PEs and the dedicated
+server's CLI executes:
+
+```
+$ arch -x86_64 build/peload project-reclaimer-dedicated-v0.9.13.exe --version
+project-reclaimer 0.9.13
+```
+
+`--help` and subcommand parsing (`discovery-bootstrap --help`) all work. The
+Rust binary reaches `main`, runs its clap parser, and writes correct output —
+on an M4 Max under Rosetta, no Wine, no wineserver, no prefix.
+
+How it fits together now:
+- `peload` maps the exe, sets up TEB/PEB/TLS via the `%gs` overlay.
+- It loads genuine `ucrtbase.dll` + `vcruntime140.dll` + `msvcp140.dll`
+  (extracted from the MS VC redist, zero Wine markers) as guest PEs, binds
+  their imports, runs their DllMains.
+- The exe's CRT imports resolve by name against those guests' real export
+  tables (forwarders followed); `kernel32`/`ntdll`/core calls resolve to ~90
+  native ms_abi shims (heap→malloc, file/console I/O→fd, `NtWriteFile`→write,
+  locks→no-op single-thread, FLS/TLS, `RtlPcToFileHeader`, time, argv via
+  `GetCommandLineW`).
+- Loading genuine ucrtbase collapsed the entire hand-stub march: the
+  unresolved surface dropped to a handful of real OS calls.
+
+Next frontier: the `local-server` hosting path, which will `LoadLibraryExW`
+the real `halo3.dll` + MCC engine (our loader already maps that DLL's DllMain
+successfully). That pulls in full Win64 SEH/stack-unwinding
+(`RtlLookupFunctionEntry`/`RtlVirtualUnwind`/`.pdata`) — the known hard part.
+
 ## Boot march (dedicated exe, with real bootstrap impls)
 
 `peload.c` now implements ~45 bootstrap functions (argv/argc/environ, a real
