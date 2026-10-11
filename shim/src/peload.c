@@ -119,7 +119,9 @@ uint64_t __attribute__((ms_abi)) on_stub(uint32_t idx){
 // (the RW<->RX cycle is proven to work under Rosetta).
 static uint8_t *g_stubpool; static size_t g_stuboff; static int g_pool_exec;
 static void *make_stub(uint32_t idx){
-    if(g_pool_exec) mprotect(g_stubpool, 32*8192, PROT_READ|PROT_WRITE);
+    // thread-safe: permanent RWX pool (no RW<->RX toggle that would fault a stub
+    // executing on another thread), serialized.
+    static pthread_mutex_t sm=PTHREAD_MUTEX_INITIALIZER; pthread_mutex_lock(&sm);
     uint8_t *p = g_stubpool + g_stuboff; g_stuboff += 32;
     int o=0;
     p[o++]=0x48; p[o++]=0x83; p[o++]=0xEC; p[o++]=0x28;            // sub rsp,0x28
@@ -128,7 +130,7 @@ static void *make_stub(uint32_t idx){
     p[o++]=0xFF; p[o++]=0xD0;                                       // call rax
     p[o++]=0x48; p[o++]=0x83; p[o++]=0xC4; p[o++]=0x28;            // add rsp,0x28
     p[o++]=0xC3;                                                    // ret
-    if(g_pool_exec) mprotect(g_stubpool, 32*8192, PROT_READ|PROT_EXEC);
+    sys_icache_invalidate(p,32); pthread_mutex_unlock(&sm);
     return p;
 }
 
@@ -142,7 +144,7 @@ static inline uint8_t* rva(uint32_t r){ return g_base + r; }
 // first 6 integer args and preserves rsi/rdi (+ xmm6-15). Float-only GL funcs
 // keep their xmm0-3 args unchanged, so they work too.
 static uint8_t *g_glthunk; static size_t g_glthoff; static int g_glth_exec;
-static void *g_thunk_real[2048]; static void *g_thunk_addr[2048]; static int g_nthunk;
+static void *g_thunk_real[8192]; static void *g_thunk_addr[8192]; static int g_nthunk;
 static void __attribute__((ms_abi)) i_glShaderSource(unsigned,int,const char*const*,const int*); // fwd
 static void __attribute__((ms_abi)) i_glCompileShader(unsigned); // fwd
 static unsigned __attribute__((ms_abi)) i_glCreateShaderProgramv(unsigned,int,const char*const*); // fwd
@@ -157,10 +159,12 @@ static void *make_gl_thunk(void *real){
       if(!res){ r_ss=dlsym((void*)-2,"glShaderSource"); r_ssarb=dlsym((void*)-2,"glShaderSourceARB"); r_csp=dlsym((void*)-2,"glCreateShaderProgramv"); res=1; }
       if(real==r_ss||real==r_ssarb) return (void*)i_glShaderSource;
       if(real==r_csp) return (void*)i_glCreateShaderProgramv; }
-    for(int i=0;i<g_nthunk;i++) if(g_thunk_real[i]==real) return g_thunk_addr[i]; // cache
+    // Thread-safe: the pool is permanently RWX (no RW<->RX toggle, which would
+    // fault a thunk being executed on another thread), and creation is serialized.
+    static pthread_mutex_t gtm=PTHREAD_MUTEX_INITIALIZER; pthread_mutex_lock(&gtm);
+    for(int i=0;i<g_nthunk;i++) if(g_thunk_real[i]==real){ pthread_mutex_unlock(&gtm); return g_thunk_addr[i]; } // cache
     if(getenv("PELOAD_TRACE_GL")){ Dl_info di; if(dladdr(real,&di)&&di.dli_sname){ (void)!write(2,"  [thunk] ",10); (void)!write(2,di.dli_sname,strlen(di.dli_sname)); (void)!write(2,"\n",1); } }
-    if(g_glthoff+64 > 64*2048) return real;
-    if(g_glth_exec) mprotect(g_glthunk,64*2048,PROT_READ|PROT_WRITE);
+    if(g_glthoff+64 > 64*8192){ pthread_mutex_unlock(&gtm); return real; }
     uint8_t *p=g_glthunk+g_glthoff; g_glthoff+=64; int o=0;
     uint8_t code[]={
         0x57,                               // push rdi
@@ -182,8 +186,9 @@ static void *make_gl_thunk(void *real){
     for(size_t i=0;i<sizeof code;i++) p[i]=code[i];
     int immoff=0; for(int i=0;i<(int)sizeof code-1;i++) if(code[i]==0x48&&code[i+1]==0xB8){ immoff=i+2; break; }
     *(uint64_t*)(p+immoff)=(uint64_t)real; (void)o;
-    if(g_glth_exec) mprotect(g_glthunk,64*2048,PROT_READ|PROT_EXEC);
-    if(g_nthunk<2048){ g_thunk_real[g_nthunk]=real; g_thunk_addr[g_nthunk]=p; g_nthunk++; }
+    sys_icache_invalidate(p,64);  // Rosetta: translate the freshly written thunk
+    if(g_nthunk<8192){ g_thunk_real[g_nthunk]=real; g_thunk_addr[g_nthunk]=p; g_nthunk++; }
+    pthread_mutex_unlock(&gtm);
     return p;
 }
 
@@ -973,11 +978,10 @@ static void* gl_or_missing(const char*name){
     if(!strcmp(name,"glShaderSource")||!strcmp(name,"glShaderSourceARB")) return (void*)i_glShaderSource;
     if(!strcmp(name,"glCompileShader")||!strcmp(name,"glCompileShaderARB")) return (void*)i_glCompileShader;
     if(!strcmp(name,"glCheckFramebufferStatus")) return (void*)i_glCheckFramebufferStatus;
-    void*g=dlsym((void*)-2,name); void*ret=0;
-    if(g) ret=make_gl_thunk(g);
-    else if(imp_count<8192){ imp_dll[imp_count]="GLmissing"; imp_fn[imp_count]=strdup(name); ret=make_stub(imp_count++); }
-    if(getenv("PELOAD_TRACE_GLRES")&&(strstr(name,"DeleteProgram")||strstr(name,"CreateProgram"))){ char t[96]; snprintf(t,sizeof t,"  [GLres] %s dlsym=%p ret=%p impc=%d\n",name,g,ret,imp_count); ws(t);}
-    return ret; }
+    // Missing GL functions MUST resolve to NULL (not a no-op stub): glow/gl
+    // loaders null-check to detect capabilities, and a stub makes them call an
+    // unavailable function and get garbage. dlsym-found funcs get an ABI thunk.
+    void*g=dlsym((void*)-2,name); return g? make_gl_thunk(g) : 0; }
 static void*  MSABI i_wglGetProcAddress(const char*name){
     if(getenv("PELOAD_TRACE_GL2")){ ws("  [wglGP] "); ws(name); ws("\n"); }
     return gl_or_missing(name); }
@@ -2121,12 +2125,12 @@ int main(int argc, char **argv){
 
     // ---- stub pool (RX; make_stub toggles RW/RX at runtime) ----
     g_stubpool = mmap(0, 32*8192, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANON, -1, 0);
-    mprotect(g_stubpool, 32*8192, PROT_READ|PROT_EXEC);
+    mprotect(g_stubpool, 32*8192, PROT_READ|PROT_WRITE|PROT_EXEC); g_pool_exec=0; // permanent RWX (thread-safe)
     g_pool_exec = 1;
     g_trpool = mmap(0, 96*8192, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANON, -1, 0);
     mprotect(g_trpool, 96*8192, PROT_READ|PROT_EXEC); g_trexec = 1;
-    g_glthunk = mmap(0, 64*2048, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANON, -1, 0);
-    mprotect(g_glthunk, 64*2048, PROT_READ|PROT_EXEC); g_glth_exec = 1;
+    g_glthunk = mmap(0, 64*8192, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANON, -1, 0);
+    mprotect(g_glthunk, 64*8192, PROT_READ|PROT_WRITE|PROT_EXEC); g_glth_exec = 0; // permanent RWX (thread-safe; no toggle)
 
     // ---- TEB/PEB via %gs overlay, set up BEFORE any guest code runs ----
     static uint8_t teb[0x2000] __attribute__((aligned(16)));
@@ -2262,10 +2266,7 @@ int main(int argc, char **argv){
         ws("  PELOAD_WAIT: pid "); whex(getpid()); sleep(atoi(getenv("PELOAD_WAIT"))); }
     ws("peload: calling entry (expect stub logs, then a fault at the first\n"
        "        unimplemented behavior — that is the signal we want)\n");
-    // Pre-create the GL window on the TRUE main thread (worker only): AppKit is
-    // main-thread-only, so making it here (not on the engine's GL thread) avoids
-    // the SIGILL, and gives FBO 0 a valid drawable. wglCreateContext reuses it.
-    if(getenv("PELOAD_WINDOW") && strstr(g_cmdlineA,"probe-engine-worker")) cocoa_make_gl_window(1280,720);
+    // (window is created lazily in wglCreateContext on the engine's GL thread)
     if(opt->Subsys==2 || (coff->Chars & 0x2000)){
         // DLL: DllMain(hinst, reason, reserved)
         int (__attribute__((ms_abi)) *dllmain)(void*,uint32_t,void*) = (void*)entry;
