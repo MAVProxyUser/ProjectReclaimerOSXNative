@@ -1,5 +1,31 @@
 # Where the render stands (2026-10-11, session 3 — null D3D11 + map loads)
 
+## Session-3 part 3: GL window-size fix; failure modes consolidating
+
+More fixes landed:
+- **Window size consistency**: GetClientRect/GetWindowRect/GetSystemMetrics reported
+  1920x1080 while the real GL drawable is 1280x720, so the engine sized its
+  framebuffer/readback to 1920x1080 and glReadPixels read past the drawable ->
+  GL-driver OOB (libGLImage). Fixed -> that OOB is GONE (0/12).
+- **D3DReflect/D3DGetInputSignatureBlob** implemented (were unimplemented; the
+  engine used a garbage reflection pointer) -> heap-corruption aborts down to ~2/12.
+- D3D11 context Get* out-params now zeroed; exact per-kind GetDesc sizes.
+- PELOAD_NO_FOCUS so background test runs don't steal the keyboard.
+- Confirmed Guard Malloc does NOT work under Rosetta (can't use it to find overflows).
+- Tried file mapping over mmap -> REVERTED (broke .map COW / named shared-mem IPC,
+  raised corruption; halo3's ReadFile fallback is fine).
+
+Current failure distribution (12 runs): glow `glDeleteProgram` panic ~7, heap
+`free()` abort ~2, BTreeMap ~2, other ~1. **Still no presented frame.**
+
+Decisive finding on the dominant glow panic: at the panic, the glow context pointer
+is NULL (not just one fn-ptr field) — i.e. Reclaimer's egui_glow painter is in a
+None/failed state when something calls delete_program on it. So this is a
+GL-painter-setup correctness problem (likely a GL error, e.g. the observed
+GL_INVALID_OPERATION 0x502, makes painter creation bail), NOT simple heap
+corruption. Next: trace the egui_glow painter setup's GL calls and fix whatever
+errors on our GL 4.1 Core context.
+
 ## Session-3 continued: the big race was thread-join; map load now reliable
 
 Root cause of the #1 non-determinism FOUND and FIXED: `CreateThread` returned a
