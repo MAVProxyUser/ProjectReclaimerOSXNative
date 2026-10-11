@@ -756,17 +756,53 @@ static int    MSABI i_AreFileApisANSI(void){ return 1; }
 // Minimal user32/gdi windowing: succeed so the engine can register its class
 // and create a window. (A real NSWindow + D3D11->Metal surface is the next
 // phase; these let us reach D3D11CreateDevice.)
-static uint16_t MSABI i_RegisterClassExW(const void*wc){ (void)wc; return 0xC001; } // non-zero ATOM
-static uint16_t MSABI i_RegisterClassW(const void*wc){ (void)wc; return 0xC001; }
+// ---- minimal Win32 window-creation protocol (so winit/eframe work) ----------
+// winit's CreateWindowEx relies on the WndProc being called synchronously with
+// WM_NCCREATE/WM_CREATE (carrying the CREATESTRUCT) to record the HWND; without
+// it winit panics 'initdata.window.unwrap() on None'. Register the class WndProc
+// and dispatch those messages. WNDCLASS(EX)W both have lpfnWndProc at +8 and
+// lpszClassName at +64.
+typedef int64_t (MSABI *WNDPROC_t)(void*,uint32_t,uint64_t,int64_t);
+static struct { int used; uint16_t atom; char name[64]; WNDPROC_t wndproc; } g_wcls[64]; static int g_nwcls; static uint16_t g_atomseq=0xC000;
+typedef struct { uint32_t magic; WNDPROC_t wndproc; int64_t userdata; int64_t extra[16]; int x,y,w,h; } WWin;
+#define WWIN_MAGIC 0x57494E44u
+static WNDPROC_t wcls_find(const void*cls){ uintptr_t v=(uintptr_t)cls;
+    if(v>0xffff){ char nm[64]; const uint16_t*w=cls; int i=0; for(; w[i]&&i<63;i++) nm[i]=(char)(w[i]&0xff); nm[i]=0;
+        for(int k=0;k<g_nwcls;k++) if(g_wcls[k].used&&!strcmp(g_wcls[k].name,nm)) return g_wcls[k].wndproc; }
+    else for(int k=0;k<g_nwcls;k++) if(g_wcls[k].used&&g_wcls[k].atom==(uint16_t)v) return g_wcls[k].wndproc;
+    return 0; }
+static uint16_t wcls_register(const void*wc){ if(!wc||g_nwcls>=64) return 0xC001;
+    const uint8_t*p=wc; WNDPROC_t wp=*(WNDPROC_t*)(p+8); const uint16_t*cn=*(const uint16_t**)(p+64);
+    int k=g_nwcls++; g_wcls[k].used=1; g_wcls[k].atom=g_atomseq++; g_wcls[k].wndproc=wp;
+    int i=0; if(cn) for(; cn[i]&&i<63;i++) g_wcls[k].name[i]=(char)(cn[i]&0xff); g_wcls[k].name[i]=0;
+    return g_wcls[k].atom; }
+static uint16_t MSABI i_RegisterClassExW(const void*wc){ return wcls_register(wc); }
+static uint16_t MSABI i_RegisterClassW(const void*wc){ return wcls_register(wc); }
+// RegisterWindowMessage*: unique non-zero message id per string (winit uses it)
+static struct { char n[96]; uint32_t id; } g_winmsg[128]; static int g_nwinmsg; static uint32_t g_winmsgseq=0xC000;
+static uint32_t winmsg_reg(const char*s){ if(!s) return 0; for(int i=0;i<g_nwinmsg;i++) if(!strcmp(g_winmsg[i].n,s)) return g_winmsg[i].id;
+    if(g_nwinmsg<128){ int k=g_nwinmsg++; snprintf(g_winmsg[k].n,sizeof g_winmsg[k].n,"%s",s); g_winmsg[k].id=g_winmsgseq++; return g_winmsg[k].id; } return 0xC000; }
+static uint32_t MSABI i_RegisterWindowMessageA(const char*s){ return winmsg_reg(s); }
+static uint32_t MSABI i_RegisterWindowMessageW(const uint16_t*s){ char a[96]; int i=0; for(; s&&s[i]&&i<95;i++)a[i]=(char)(s[i]&0xff); a[i]=0; return winmsg_reg(a); }
 static int    MSABI i_UnregisterClassW(const void*a,void*b){ (void)a;(void)b; return 1; }
 static void*  MSABI i_LoadIconW(void*h,const void*n){ (void)h;(void)n; return (void*)0x1C01; }
 static void*  MSABI i_LoadCursorW(void*h,const void*n){ (void)h;(void)n; return (void*)0x1C02; }
 static void*  MSABI i_LoadImageW(void*h,const void*n,uint32_t t,int cx,int cy,uint32_t f){ (void)h;(void)n;(void)t;(void)cx;(void)cy;(void)f; return (void*)0x1C03; }
 static void*  MSABI i_GetStockObject(int i){ (void)i; return (void*)0x1C04; }
 static void*  MSABI i_CreateWindowExW(uint32_t ex,const void*cls,const void*name,uint32_t style,int x,int y,int w,int h,void*parent,void*menu,void*inst,void*param){
-    (void)ex;(void)cls;(void)name;(void)style;(void)x;(void)y;(void)w;(void)h;(void)parent;(void)menu;(void)inst;(void)param; return (void*)0x4857; } // fake HWND
+    WWin* win=calloc(1,sizeof *win); if(!win) return (void*)0x4857;
+    win->magic=WWIN_MAGIC; win->wndproc=wcls_find(cls); win->x=x; win->y=y; win->w=w>0?w:1280; win->h=h>0?h:720;
+    if(win->wndproc){
+        uint8_t cs[80]; memset(cs,0,sizeof cs);  // CREATESTRUCTW
+        *(const void**)(cs+0)=param; *(void**)(cs+8)=inst; *(void**)(cs+16)=menu; *(void**)(cs+24)=parent;
+        *(int*)(cs+32)=h; *(int*)(cs+36)=w; *(int*)(cs+40)=y; *(int*)(cs+44)=x; *(uint32_t*)(cs+48)=style;
+        *(const void**)(cs+56)=name; *(const void**)(cs+64)=cls; *(uint32_t*)(cs+72)=ex;
+        win->wndproc(win, 0x0081/*WM_NCCREATE*/, 0, (int64_t)(intptr_t)cs);
+        win->wndproc(win, 0x0001/*WM_CREATE*/,  0, (int64_t)(intptr_t)cs);
+    }
+    ws("  [CreateWindowExW] real HWND\n"); return win; }
 static int    MSABI i_DestroyWindow(void*h){ (void)h; return 1; }
-static int64_t MSABI i_DefWindowProcW(void*h,uint32_t m,uint64_t wp,int64_t lp){ (void)h;(void)m;(void)wp;(void)lp; return 0; }
+static int64_t MSABI i_DefWindowProcW(void*h,uint32_t m,uint64_t wp,int64_t lp){ (void)h;(void)wp;(void)lp; if(m==0x0081/*WM_NCCREATE*/) return 1; return 0; }
 static int    MSABI i_ShowWindow(void*h,int c){ (void)h;(void)c; return 1; }
 static int    MSABI i_UpdateWindow(void*h){ (void)h; return 1; }
 static int    MSABI i_PeekMessageW(void*m,void*h,uint32_t f1,uint32_t f2,uint32_t r){ (void)m;(void)h;(void)f1;(void)f2;(void)r; return 0; } // no messages
@@ -790,8 +826,8 @@ static int    MSABI i_GetClientRect(void*h,int32_t*r){ (void)h; if(r){r[0]=0;r[1
 static int    MSABI i_GetWindowRect(void*h,int32_t*r){ (void)h; if(r){r[0]=0;r[1]=0;r[2]=1920;r[3]=1080;} return 1; }
 static int    MSABI i_SetWindowPos(void*h,void*after,int x,int y,int w,int ht,uint32_t f){ (void)h;(void)after;(void)x;(void)y;(void)w;(void)ht;(void)f; return 1; }
 static int64_t g_winlong[8];
-static int64_t MSABI i_GetWindowLongPtrW(void*h,int idx){ (void)h; return (idx>=-8&&idx<0)? g_winlong[-idx-1]:0; }
-static int64_t MSABI i_SetWindowLongPtrW(void*h,int idx,int64_t v){ (void)h; if(idx>=-8&&idx<0){ int64_t o=g_winlong[-idx-1]; g_winlong[-idx-1]=v; return o;} return 0; }
+static int64_t MSABI i_GetWindowLongPtrW(void*h,int idx){ WWin*w=h; if(w&&w->magic==WWIN_MAGIC){ if(idx==-21)return w->userdata; if(idx==-4)return (int64_t)(intptr_t)w->wndproc; if(idx>=0&&idx<128)return w->extra[idx/8]; return 0; } return (idx>=-8&&idx<0)? g_winlong[-idx-1]:0; }
+static int64_t MSABI i_SetWindowLongPtrW(void*h,int idx,int64_t v){ WWin*w=h; if(w&&w->magic==WWIN_MAGIC){ int64_t o=0; if(idx==-21){o=w->userdata;w->userdata=v;} else if(idx==-4){o=(int64_t)(intptr_t)w->wndproc;w->wndproc=(WNDPROC_t)(intptr_t)v;} else if(idx>=0&&idx<128){o=w->extra[idx/8];w->extra[idx/8]=v;} return o; } if(idx>=-8&&idx<0){ int64_t o=g_winlong[-idx-1]; g_winlong[-idx-1]=v; return o;} return 0; }
 static int32_t MSABI i_GetWindowLongW(void*h,int idx){ return (int32_t)i_GetWindowLongPtrW(h,idx); }
 static int32_t MSABI i_SetWindowLongW(void*h,int idx,int32_t v){ return (int32_t)i_SetWindowLongPtrW(h,idx,v); }
 static int    MSABI i_AdjustWindowRectEx(int32_t*r,uint32_t s,int m,uint32_t ex){ (void)r;(void)s;(void)m;(void)ex; return 1; }
@@ -909,6 +945,26 @@ static void*  MSABI i_wglCreateContext(void*hdc){ (void)hdc;
     CGLPixelFormatObj pf=0; GLint n=0; if(CGLChoosePixelFormat(at,&pf,&n)!=kCGLNoError||!pf){ CGLPixelFormatAttribute b[]={kCGLPFAColorSize,(CGLPixelFormatAttribute)24,(CGLPixelFormatAttribute)0}; CGLChoosePixelFormat(b,&pf,&n); }
     CGLContextObj c2=0; if(pf){ CGLCreateContext(pf,0,&c2); CGLDestroyPixelFormat(pf); } if(c2){ g_cgl=c2; CGLSetCurrentContext(c2); }
     ws(c2?"  [wgl] CGL context (offscreen) created\n":"  [wgl] CGL context FAILED\n"); return c2; }
+// ---- WGL ARB extensions (glutin/eframe enumerate pixel formats via these) ----
+static const char* MSABI i_wglGetExtensionsStringARB(void*hdc){ (void)hdc; return "WGL_ARB_pixel_format WGL_ARB_create_context WGL_ARB_create_context_profile WGL_ARB_extensions_string WGL_EXT_extensions_string WGL_ARB_multisample WGL_EXT_swap_control WGL_ARB_framebuffer_sRGB"; }
+static const char* MSABI i_wglGetExtensionsStringEXT(void){ return i_wglGetExtensionsStringARB(0); }
+static int MSABI i_wglChoosePixelFormatARB(void*hdc,const int*ia,const float*fa,uint32_t maxf,int*formats,uint32_t*nfmt){ (void)hdc;(void)ia;(void)fa; if(maxf>=1&&formats)formats[0]=1; if(nfmt)*nfmt=1; return 1; }
+static int MSABI i_wglGetPixelFormatAttribivARB(void*hdc,int fmt,int layer,uint32_t n,const int*attribs,int*values){ (void)hdc;(void)fmt;(void)layer;
+    for(uint32_t i=0;i<n;i++){ int a=attribs[i],v=0; switch(a){
+        case 0x2001/*DRAW_TO_WINDOW*/: case 0x2010/*SUPPORT_OPENGL*/: case 0x2011/*DOUBLE_BUFFER*/: v=1; break;
+        case 0x2003/*ACCELERATION*/: v=0x2027/*FULL_ACCELERATION*/; break;
+        case 0x2013/*PIXEL_TYPE*/: v=0x202B/*TYPE_RGBA*/; break;
+        case 0x2014/*COLOR_BITS*/: v=32; break;
+        case 0x2015/*RED_BITS*/: case 0x2017/*GREEN*/: case 0x2019/*BLUE*/: case 0x201B/*ALPHA*/: v=8; break;
+        case 0x2016/*RED_SHIFT*/: v=0; break; case 0x2018: v=8; break; case 0x201A: v=16; break; case 0x201C: v=24; break;
+        case 0x2022/*DEPTH_BITS*/: v=24; break; case 0x2023/*STENCIL_BITS*/: v=8; break;
+        case 0x2041/*SAMPLE_BUFFERS*/: case 0x2042/*SAMPLES*/: case 0x200A/*AUX_BUFFERS*/: case 0x2012/*STEREO*/: case 0x2006/*TRANSPARENT*/: v=0; break;
+        case 0x2000/*NUMBER_PIXEL_FORMATS*/: v=1; break;
+        case 0x20A9/*FRAMEBUFFER_SRGB_CAPABLE*/: v=1; break;
+        default: v=0; } if(values)values[i]=v; }
+    return 1; }
+static void* MSABI i_wglCreateContextAttribsARB(void*hdc,void*share,const int*attribs){ (void)share;(void)attribs; return i_wglCreateContext(hdc); }
+static int MSABI i_wglSwapIntervalEXT_(int i){ (void)i; return 1; }
 static int    MSABI i_wglMakeCurrent(void*hdc,void*ctx){ (void)hdc; CGLError e=CGLSetCurrentContext((CGLContextObj)ctx);
     if(getenv("PELOAD_TRACE_GL")){ const unsigned char*(*gv)(unsigned)=dlsym(RTLD_DEFAULT,"glGetString");
         const unsigned char*v = (gv&&ctx)? gv(0x1F02/*GL_VERSION*/):0; ws("  [wglMakeCurrent] ctx="); ws(ctx?"set":"null");
@@ -1018,6 +1074,12 @@ static void* gl_or_missing(const char*name){
     void*g=dlsym((void*)-2,name); return g? make_gl_thunk(g) : 0; }
 static void*  MSABI i_wglGetProcAddress(const char*name){
     if(getenv("PELOAD_TRACE_GL2")){ ws("  [wglGP] "); ws(name); ws("\n"); }
+    if(!strcmp(name,"wglGetExtensionsStringARB")) return (void*)i_wglGetExtensionsStringARB;
+    if(!strcmp(name,"wglGetExtensionsStringEXT")) return (void*)i_wglGetExtensionsStringEXT;
+    if(!strcmp(name,"wglChoosePixelFormatARB")||!strcmp(name,"wglChoosePixelFormatEXT")) return (void*)i_wglChoosePixelFormatARB;
+    if(!strcmp(name,"wglGetPixelFormatAttribivARB")||!strcmp(name,"wglGetPixelFormatAttribivEXT")) return (void*)i_wglGetPixelFormatAttribivARB;
+    if(!strcmp(name,"wglCreateContextAttribsARB")) return (void*)i_wglCreateContextAttribsARB;
+    if(!strcmp(name,"wglSwapIntervalEXT")) return (void*)i_wglSwapIntervalEXT_;
     return gl_or_missing(name); }
 static int    MSABI i_wglDeleteContext(void*ctx){ if(ctx)CGLDestroyContext((CGLContextObj)ctx); return 1; }
 // glShaderSource: macOS Core profile rejects #version <150. Rewrite the
@@ -1867,6 +1929,8 @@ static void *resolve_impl(const char *fn){
         {"GetSystemMetrics",(void*)i_GetSystemMetrics},
         {"EnumDisplayMonitors",(void*)i_EnumDisplayMonitors},
         {"GetClientRect",(void*)i_GetClientRect},
+        {"RegisterWindowMessageA",(void*)i_RegisterWindowMessageA},
+        {"RegisterWindowMessageW",(void*)i_RegisterWindowMessageW},
         {"GetWindowRect",(void*)i_GetWindowRect},
         {"SetWindowPos",(void*)i_SetWindowPos},
         {"GetWindowLongPtrW",(void*)i_GetWindowLongPtrW},
