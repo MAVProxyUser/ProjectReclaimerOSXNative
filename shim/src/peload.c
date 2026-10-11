@@ -356,6 +356,45 @@ extern void sys_icache_invalidate(void *start, size_t len);
 static int MSABI i_FlushInstructionCache(void *proc, void *base, uint64_t sz){ (void)proc;
     if(base&&sz) sys_icache_invalidate(base,(size_t)sz);
     if(getenv("PELOAD_TRACE_VA")){ char t[96]; snprintf(t,sizeof t,"  [FlushInstructionCache] base=%p sz=0x%llx\n",base,(unsigned long long)sz); ws(t);} return 1; }
+// ---- minimal WASAPI COM ----------------------------------------------------
+// cpal (Reclaimer's audio crate) does CoCreateInstance(MMDeviceEnumerator) and
+// .unwrap()s it. We hand back a real IMMDeviceEnumerator COM object that reports
+// NO endpoints and no default device, so cpal yields "no output device" instead
+// of panicking; the menu then runs silently. COM methods are Win64 ABI (this in
+// rcx), return HRESULT (32-bit). S_OK=0.
+typedef struct { uint32_t D1; uint16_t D2,D3; uint8_t D4[8]; } GUID_;
+typedef struct { void **vtbl; } ComObj;
+#define HR_OK 0
+#define HR_NOTFOUND 0x80070490
+#define HR_INVALIDARG 0x80070057
+#define HR_CLASSNOTREG 0x80040154
+static int MSABI com_QI(void*self, GUID_*riid, void**ppv){ (void)riid; if(ppv)*ppv=self; return HR_OK; }
+static unsigned MSABI com_AddRef(void*self){ (void)self; return 1; }
+static unsigned MSABI com_Release(void*self){ (void)self; return 1; }
+// IMMDeviceCollection — always empty
+static int MSABI mmdc_GetCount(void*self, unsigned*pc){ (void)self; if(pc)*pc=0; return HR_OK; }
+static int MSABI mmdc_Item(void*self, unsigned i, void**pp){ (void)self;(void)i; if(pp)*pp=0; return HR_INVALIDARG; }
+static void* g_mmdc_vtbl[] = { (void*)com_QI,(void*)com_AddRef,(void*)com_Release,(void*)mmdc_GetCount,(void*)mmdc_Item };
+static ComObj g_mmdc = { g_mmdc_vtbl };
+// IMMDeviceEnumerator — empty collection, no default endpoint
+static int MSABI mmde_EnumAudioEndpoints(void*self,int df,unsigned sm,void**pp){ (void)self;(void)df;(void)sm; if(pp)*pp=&g_mmdc; return HR_OK; }
+static int MSABI mmde_GetDefaultAudioEndpoint(void*self,int df,int role,void**pp){ (void)self;(void)df;(void)role; if(pp)*pp=0; return HR_NOTFOUND; }
+static int MSABI mmde_GetDevice(void*self,const unsigned short*id,void**pp){ (void)self;(void)id; if(pp)*pp=0; return HR_NOTFOUND; }
+static int MSABI mmde_RegCB(void*self,void*c){ (void)self;(void)c; return HR_OK; }
+static int MSABI mmde_UnregCB(void*self,void*c){ (void)self;(void)c; return HR_OK; }
+static void* g_mmde_vtbl[] = { (void*)com_QI,(void*)com_AddRef,(void*)com_Release,(void*)mmde_EnumAudioEndpoints,(void*)mmde_GetDefaultAudioEndpoint,(void*)mmde_GetDevice,(void*)mmde_RegCB,(void*)mmde_UnregCB };
+static ComObj g_mmde = { g_mmde_vtbl };
+static int   MSABI i_CoInitializeEx(void*p,uint32_t m){ (void)p;(void)m; return HR_OK; }
+static void  MSABI i_CoUninitialize(void){ }
+static void* MSABI i_CoTaskMemAlloc(uint64_t n){ return malloc(n?n:1); }
+static void  MSABI i_CoTaskMemFree(void*p){ free(p); }
+static int   MSABI i_PropVariantClear(void*p){ (void)p; return HR_OK; }
+static int   MSABI i_CoCreateInstance(GUID_*clsid, void*outer, uint32_t ctx, GUID_*iid, void**ppv){
+    (void)outer;(void)ctx;(void)iid;
+    // CLSID_MMDeviceEnumerator = BCDE0395-E52F-467C-8E3D-C4579291692E
+    if(clsid && clsid->D1==0xBCDE0395u && clsid->D2==0xE52F && clsid->D3==0x467C){ if(ppv)*ppv=&g_mmde; return HR_OK; }
+    if(getenv("PELOAD_TRACE_VA")&&clsid){ char t[96]; snprintf(t,sizeof t,"  [CoCreateInstance] clsid=%08x-%04x-%04x unhandled\n",clsid->D1,clsid->D2,clsid->D3); ws(t);}
+    if(ppv)*ppv=0; return HR_CLASSNOTREG; }
 // pointer obfuscation: identity is a valid implementation
 static void*  MSABI i_EncodePointer(void *p){ return p; }
 static void*  MSABI i_DecodePointer(void *p){ return p; }
@@ -1241,6 +1280,12 @@ static void *resolve_impl(const char *fn){
         {"GetFileInformationByHandle",(void*)i_GetFileInformationByHandle},
         {"FlushFileBuffers",(void*)i_FlushFileBuffers},
         {"FlushInstructionCache",(void*)i_FlushInstructionCache},
+        {"CoInitializeEx",(void*)i_CoInitializeEx},
+        {"CoUninitialize",(void*)i_CoUninitialize},
+        {"CoCreateInstance",(void*)i_CoCreateInstance},
+        {"CoTaskMemAlloc",(void*)i_CoTaskMemAlloc},
+        {"CoTaskMemFree",(void*)i_CoTaskMemFree},
+        {"PropVariantClear",(void*)i_PropVariantClear},
         {"GetCurrentProcess",(void*)i_GetCurrentProcess},
         {"ReadProcessMemory",(void*)i_ReadProcessMemory},
         {"WriteProcessMemory",(void*)i_WriteProcessMemory},
