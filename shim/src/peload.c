@@ -681,6 +681,23 @@ static void*    MSABI blob_GetBufferPointer(void*s){ return ((Blob*)s)->buf; }
 static uint64_t MSABI blob_GetBufferSize(void*s){ return ((Blob*)s)->sz; }
 static void* g_blob_vtbl[]={ (void*)com_QI,(void*)com_AddRef,(void*)com_Release,(void*)blob_GetBufferPointer,(void*)blob_GetBufferSize };
 static Blob* make_blob(const void*data,uint64_t n){ Blob*b=calloc(1,sizeof*b); b->vtbl=g_blob_vtbl; b->sz=n; b->buf=calloc(1,n?n:4); if(data&&n)memcpy(b->buf,data,n); return b; }
+// D3DReflect: halo3 reflects its compiled shaders to discover constant buffers /
+// resource bindings / input params. Unimplemented, it left **ppReflector
+// uninitialized -> the engine deref'd a garbage pointer. Return a fake reflection
+// whose GetDesc reports ZERO of everything, so the engine's enumeration loops run
+// zero times and it binds nothing (fine for a null renderer).
+static int      MSABI refl_ret0(void){ return 0; }
+static int      MSABI refl_GetDesc(void*s,void*pd){ (void)s; if(pd) memset(pd,0,128); return HR_OK; } // D3D11_SHADER_DESC: all counts 0 (>=128B, no overflow)
+static void*    g_refl_vtbl[40];
+static ComObj   g_refl = { g_refl_vtbl };
+static int MSABI i_D3DReflect(const void*src,uint64_t sz,GUID_*iid,void**pp){ (void)src;(void)sz;(void)iid;
+    static int init; if(!init){ for(int i=0;i<40;i++) g_refl_vtbl[i]=(void*)refl_ret0;
+        g_refl_vtbl[0]=(void*)com_QI; g_refl_vtbl[1]=(void*)com_AddRef; g_refl_vtbl[2]=(void*)com_Release;
+        g_refl_vtbl[3]=(void*)refl_GetDesc; init=1; }
+    if(pp)*pp=&g_refl; return HR_OK; }
+static Blob* make_blob(const void*data,uint64_t n); // fwd
+static int MSABI i_D3DGetInputSignatureBlob(const void*src,uint64_t sz,void**pp){ (void)src;(void)sz;
+    uint8_t hdr[64]; memset(hdr,0,sizeof hdr); hdr[0]='D';hdr[1]='X';hdr[2]='B';hdr[3]='C'; if(pp)*pp=make_blob(hdr,sizeof hdr); return HR_OK; }
 static int MSABI i_D3DCompile(const void*src,uint64_t srcsz,const char*name,const void*defs,void*inc,
         const char*entry,const char*target,uint32_t f1,uint32_t f2,void**ppCode,void**ppErr){
     (void)src;(void)srcsz;(void)name;(void)defs;(void)inc;(void)entry;(void)target;(void)f1;(void)f2;
@@ -2285,6 +2302,8 @@ static void *resolve_impl(const char *fn){
         {"D3D11CreateDevice",(void*)i_D3D11CreateDevice},
         {"D3DCompile",(void*)i_D3DCompile},
         {"D3DCompile2",(void*)i_D3DCompile},
+        {"D3DReflect",(void*)i_D3DReflect},
+        {"D3DGetInputSignatureBlob",(void*)i_D3DGetInputSignatureBlob},
         {"CoTaskMemAlloc",(void*)i_CoTaskMemAlloc},
         {"CoTaskMemFree",(void*)i_CoTaskMemFree},
         {"PropVariantClear",(void*)i_PropVariantClear},
