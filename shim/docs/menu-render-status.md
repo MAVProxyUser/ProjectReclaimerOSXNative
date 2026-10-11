@@ -131,6 +131,30 @@ D3D11.
 - The exe (Reclaimer) only creates threads via **CreateThread** (routed through
   thread_tramp, which installs a TEB), not _beginthreadex.
 
+## The decisive constraint: native GL window is coupled to a game load
+
+The exe's own experiment-validation rules (strings in .rdata):
+```
+Empty-match experiment requires --guardian-slayer
+Guardian experiment requires --native-udp and its startup prerequisites
+Native experiments require --startup
+Real-client experiment requires empty match and excludes synthetic admission
+Standalone client window requires Guardian and excludes headless experiments
+```
+So in THIS build, `--client-window` (native OpenGL window, no MCC shell)
+**requires `--guardian-slayer`** — the native-GL path is inseparable from loading
+a Guardian/Slayer match, which drives halo3's **D3D11** renderer. There is no
+experimental "native GL window that only shows the menu" combination here.
+
+Consequence for the corruption below: halo3's D3D11 game-load paths run, fed our
+FAKE device/APO/D3DCompile data, and corrupt the shared heap (glow fn-table +
+BTreeMap). Faking D3D success → halo3 proceeds with garbage → corruption; faking
+D3D failure → halo3 null-derefs (engine doesn't check). Neither is clean because
+halo3 genuinely needs a working D3D11. So in this build, a visible native-GL menu
+is effectively gated on **implementing D3D11** for the coupled game load — or on a
+future Reclaimer build that decouples native GL rendering from the game load, or
+the launcher-provisioned `--real-client` path.
+
 ## The remaining blocker: non-deterministic corruption in GL menu setup
 Runs end variously (glow `glDeleteProgram not loaded`, BTreeMap `unwrap None`,
 halo3 thread EXC_BAD_ACCESS). The glow panic is a glow Context whose function
