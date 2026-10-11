@@ -410,13 +410,51 @@ static int MSABI mmde_UnregCB(void*self,void*c){ (void)self;(void)c; return HR_O
 static void* g_mmde_vtbl[] = { (void*)com_QI,(void*)com_AddRef,(void*)com_Release,(void*)mmde_EnumAudioEndpoints,(void*)mmde_GetDefaultAudioEndpoint,(void*)mmde_GetDevice,(void*)mmde_RegCB,(void*)mmde_UnregCB };
 static ComObj g_mmde = { g_mmde_vtbl };
 // DXGI: the engine probes DirectX Graphics Infrastructure even though Reclaimer
-// renders via OpenGL. Fail these cleanly (no hardware D3D) so it uses the GL
-// path instead of calling through a NULL delay-import slot.
+// renders via OpenGL. It ignores the HRESULT and calls factory->EnumAdapters on
+// the returned interface, so we must hand back a REAL (minimal) IDXGIFactory
+// COM object whose EnumAdapters reports "no adapters" (the engine then uses the
+// GL/menu path instead of D3D hardware).
 #define HR_DXGI_UNSUPPORTED 0x887A0004
-static int MSABI i_CreateDXGIFactory(GUID_*riid,void**pp){ (void)riid; if(pp)*pp=0; return HR_DXGI_UNSUPPORTED; }
-static int MSABI i_CreateDXGIFactory1(GUID_*riid,void**pp){ (void)riid; if(pp)*pp=0; return HR_DXGI_UNSUPPORTED; }
-static int MSABI i_CreateDXGIFactory2(uint32_t fl,GUID_*riid,void**pp){ (void)fl;(void)riid; if(pp)*pp=0; return HR_DXGI_UNSUPPORTED; }
+#define HR_DXGI_NOT_FOUND   0x887A0002
+#define HR_E_NOTIMPL        0x80004001
+static int MSABI com_fail(void){ return HR_E_NOTIMPL; }
+static int MSABI dxgi_EnumAdapters(void*self,unsigned i,void**pp){ (void)self;(void)i; if(pp)*pp=0; return HR_DXGI_NOT_FOUND; }
+// IDXGIFactory(1/2) vtable: IUnknown(0-2) + IDXGIObject(3-6) + IDXGIFactory(7+)
+static void* g_dxgifactory_vtbl[] = {
+    (void*)com_QI,(void*)com_AddRef,(void*)com_Release,          // 0-2 IUnknown
+    (void*)com_fail,(void*)com_fail,(void*)com_fail,(void*)com_fail, // 3-6 SetPrivateData.. GetParent
+    (void*)dxgi_EnumAdapters,                                    // 7 EnumAdapters
+    (void*)com_fail,(void*)com_fail,(void*)com_fail,(void*)com_fail, // 8-11 MakeWindowAssoc..CreateSoftwareAdapter
+    (void*)dxgi_EnumAdapters,                                    // 12 EnumAdapters1 (Factory1)
+    (void*)com_fail,                                             // 13 IsCurrent (Factory1)
+    (void*)com_fail,(void*)com_fail,(void*)com_fail,(void*)com_fail,(void*)com_fail,(void*)com_fail,(void*)com_fail,(void*)com_fail }; // 14+ Factory2 slack
+static ComObj g_dxgifactory = { g_dxgifactory_vtbl };
+static int MSABI i_CreateDXGIFactory(GUID_*riid,void**pp){ (void)riid; if(pp)*pp=&g_dxgifactory; return HR_OK; }
+static int MSABI i_CreateDXGIFactory1(GUID_*riid,void**pp){ (void)riid; if(pp)*pp=&g_dxgifactory; return HR_OK; }
+static int MSABI i_CreateDXGIFactory2(uint32_t fl,GUID_*riid,void**pp){ (void)fl;(void)riid; if(pp)*pp=&g_dxgifactory; return HR_OK; }
 static int MSABI i_D3D11CreateDevice(void*a,int b,void*c,uint32_t d,void*e,uint32_t f,uint32_t g,void**dev,void*fl,void**ctx){ (void)a;(void)b;(void)c;(void)d;(void)e;(void)f;(void)g;(void)fl; if(dev)*dev=0; if(ctx)*ctx=0; return HR_DXGI_UNSUPPORTED; }
+// ---- minimal XAudio2 (the engine creates IXAudio2 + voices and calls them) --
+// XAudio2Create stub didn't set the out interface -> engine called a method on
+// NULL. Provide a silent IXAudio2 + a generic voice object so audio init runs.
+static int MSABI xa_ret0(void){ return 0; }                    // S_OK / void methods
+static void MSABI xa_GetVoiceDetails(void*self,void*pd){ (void)self; if(pd){ uint32_t*d=pd; d[0]=0; d[1]=0; d[2]=2; d[3]=48000; } } // {flags,active,channels,rate}
+static void MSABI xa_GetState(void*self,void*ps,uint32_t fl){ (void)self;(void)fl; if(ps) memset(ps,0,24); } // {ctx*,BuffersQueued,SamplesPlayed}
+// IXAudio2Voice/SourceVoice vtable: slot0 GetVoiceDetails; most return 0/void.
+static void* g_xavoice_vtbl[64];
+static ComObj g_xavoice = { g_xavoice_vtbl };
+static void* MSABI xa_CreateVoice(void*self,void**ppv,const void*a,uint32_t b,float c,void*d,const void*e,const void*f){
+    (void)self;(void)a;(void)b;(void)c;(void)d;(void)e;(void)f; if(ppv)*ppv=&g_xavoice; return 0; }
+// IXAudio2 vtable (IUnknown + XAudio2 methods)
+static void* g_ixaudio2_vtbl[] = {
+    (void*)com_QI,(void*)com_AddRef,(void*)com_Release,          // 0-2
+    (void*)xa_ret0,(void*)xa_ret0,                              // 3 RegisterForCallbacks, 4 Unregister
+    (void*)xa_CreateVoice,(void*)xa_CreateVoice,(void*)xa_CreateVoice, // 5 CreateSourceVoice,6 Submix,7 Mastering
+    (void*)xa_ret0,(void*)xa_ret0,(void*)xa_ret0,(void*)xa_ret0,(void*)xa_ret0 }; // 8 StartEngine..12 SetDebugConfiguration
+static ComObj g_ixaudio2 = { g_ixaudio2_vtbl };
+static int MSABI i_XAudio2Create(void**pp,uint32_t flags,uint32_t proc){ (void)flags;(void)proc;
+    static int init; if(!init){ for(int i=0;i<64;i++) g_xavoice_vtbl[i]=(void*)xa_ret0; g_xavoice_vtbl[0]=(void*)xa_GetVoiceDetails; g_xavoice_vtbl[25]=(void*)xa_GetState; init=1; }
+    if(pp)*pp=&g_ixaudio2; return 0; }
+static int name_has(const char*s,const char*sub){ if(!s)return 0; for(;*s;s++){ const char*a=s,*b=sub; while(*b&&((*a|32)==(*b|32))){a++;b++;} if(!*b)return 1; } return 0; }
 static int   MSABI i_CoInitializeEx(void*p,uint32_t m){ (void)p;(void)m; return HR_OK; }
 static void  MSABI i_CoUninitialize(void){ }
 static void* MSABI i_CoTaskMemAlloc(uint64_t n){ return malloc(n?n:1); }
@@ -771,6 +809,35 @@ static int    MSABI i_SetCursorPos(int x,int y){ (void)x;(void)y; return 1; }
 static void*  MSABI i_SetCursor(void*c){ return c; }
 static int    MSABI i_SetLayeredWindowAttributes(void*h,uint32_t key,uint8_t a,uint32_t f){ (void)h;(void)key;(void)a;(void)f; return 1; }
 static int    MSABI i_UpdateLayeredWindow(void*h,void*dc,void*pd,void*ps,void*sd,void*sp,uint32_t key,void*bf,uint32_t f){ (void)h;(void)dc;(void)pd;(void)ps;(void)sd;(void)sp;(void)key;(void)bf;(void)f; return 1; }
+// ---- GDI DIB surface (the menu renders into a CPU bitmap, then presents) ----
+// The engine builds its menu surface with CreateCompatibleDC + CreateDIBSection
+// and draws into the DIB bits. Stubs returned NULL -> 'Cannot allocate menu
+// surface' + NULL deref. Provide real memory-backed DIB surfaces.
+typedef struct { uint32_t magic; int w,h,bpp; void*bits; int owns; } GdiObj;
+#define GDI_MAGIC 0x47444942u
+static GdiObj* gdi_new(int w,int h,int bpp,void*bits,int owns){ GdiObj*g=calloc(1,sizeof*g); if(!g)return 0; g->magic=GDI_MAGIC; g->w=w; g->h=h; g->bpp=bpp; g->bits=bits; g->owns=owns; return g; }
+typedef struct { uint32_t magic; GdiObj*bmp; } GdiDC;
+#define GDIDC_MAGIC 0x47444344u
+static void*  MSABI i_CreateCompatibleDC(void*hdc){ (void)hdc; GdiDC*d=calloc(1,sizeof*d); if(d)d->magic=GDIDC_MAGIC; return d?d:(void*)0xDC02; }
+static void*  MSABI i_CreateDIBSection(void*hdc,const uint8_t*bmi,uint32_t usage,void**ppvBits,void*hSection,uint32_t off){
+    (void)hdc;(void)usage;(void)hSection;(void)off;
+    int w=bmi?*(const int32_t*)(bmi+4):0; int h=bmi?*(const int32_t*)(bmi+8):0; int bpp=bmi?*(const uint16_t*)(bmi+14):32;
+    if(bpp<=0)bpp=32; int ah=h<0?-h:h; if(w<=0)w=1; if(ah<=0)ah=1; size_t sz=(size_t)w*ah*((bpp+7)/8); if(sz<4)sz=4;
+    void*bits=calloc(1,sz); GdiObj*g=gdi_new(w,ah,bpp,bits,1);
+    if(ppvBits)*ppvBits=bits;
+    if(getenv("PELOAD_TRACE_GDI")){ char t[96]; snprintf(t,sizeof t,"  [CreateDIBSection] %dx%d %dbpp bits=%p\n",w,ah,bpp,bits); ws(t);}
+    return g; }
+static void*  MSABI i_CreateCompatibleBitmap(void*hdc,int w,int h){ (void)hdc; if(w<=0)w=1; if(h<=0)h=1; void*b=calloc(1,(size_t)w*h*4); return gdi_new(w,h,32,b,1); }
+static void*  MSABI i_SelectObject(void*hdc,void*obj){ GdiDC*d=hdc; GdiObj*g=obj; void*prev=0;
+    if(d&&d->magic==GDIDC_MAGIC){ prev=d->bmp; if(g&&g->magic==GDI_MAGIC) d->bmp=g; } return prev?prev:(void*)0x1; }
+static int    MSABI i_DeleteObject(void*obj){ GdiObj*g=obj; if(g&&g->magic==GDI_MAGIC){ if(g->owns)free(g->bits); g->magic=0; free(g); } return 1; }
+static int    MSABI i_DeleteDC(void*hdc){ GdiDC*d=hdc; if(d&&d->magic==GDIDC_MAGIC){ d->magic=0; free(d); } return 1; }
+static int    MSABI i_GetObjectW(void*obj,int cb,void*out){ GdiObj*g=obj; if(!g||g->magic!=GDI_MAGIC||!out) return 0;
+    // BITMAP { LONG type; LONG w; LONG h; LONG widthBytes; WORD planes; WORD bpp; void* bits; }
+    if(cb>=32){ int32_t*p=out; p[0]=0; p[1]=g->w; p[2]=g->h; p[3]=g->w*((g->bpp+7)/8); *(uint16_t*)(p+4)=1; *((uint16_t*)(p+4)+1)=(uint16_t)g->bpp; *(void**)((uint8_t*)out+24)=g->bits; return 32; } return 0; }
+static int    MSABI i_BitBlt(void*dst,int x,int y,int w,int h,void*src,int sx,int sy,uint32_t rop){ (void)dst;(void)x;(void)y;(void)w;(void)h;(void)src;(void)sx;(void)sy;(void)rop; return 1; }
+static int    MSABI i_StretchBlt(void*dst,int x,int y,int w,int h,void*src,int sx,int sy,int sw,int sh,uint32_t rop){ (void)dst;(void)x;(void)y;(void)w;(void)h;(void)src;(void)sx;(void)sy;(void)sw;(void)sh;(void)rop; return 1; }
+static int    MSABI i_SetDIBitsToDevice(void*dc,int x,int y,uint32_t w,uint32_t h,int sx,int sy,uint32_t sl,uint32_t nl,const void*bits,const void*bmi,uint32_t u){ (void)dc;(void)x;(void)y;(void)w;(void)h;(void)sx;(void)sy;(void)sl;(void)nl;(void)bits;(void)bmi;(void)u; return (int)h; }
 static void*  MSABI i_GetDC(void*h){ (void)h; return (void*)0xDC01; }
 static int    MSABI i_ReleaseDC(void*h,void*dc){ (void)h;(void)dc; return 1; }
 static void*  MSABI i_GetWindowDC(void*h){ (void)h; return (void*)0xDC01; }
@@ -1651,6 +1718,16 @@ static void *resolve_impl(const char *fn){
         {"SetLayeredWindowAttributes",(void*)i_SetLayeredWindowAttributes},
         {"UpdateLayeredWindow",(void*)i_UpdateLayeredWindow},
         {"GetDC",(void*)i_GetDC},
+        {"CreateCompatibleDC",(void*)i_CreateCompatibleDC},
+        {"CreateDIBSection",(void*)i_CreateDIBSection},
+        {"CreateCompatibleBitmap",(void*)i_CreateCompatibleBitmap},
+        {"SelectObject",(void*)i_SelectObject},
+        {"DeleteObject",(void*)i_DeleteObject},
+        {"DeleteDC",(void*)i_DeleteDC},
+        {"GetObjectW",(void*)i_GetObjectW},
+        {"BitBlt",(void*)i_BitBlt},
+        {"StretchBlt",(void*)i_StretchBlt},
+        {"SetDIBitsToDevice",(void*)i_SetDIBitsToDevice},
         {"ReleaseDC",(void*)i_ReleaseDC},
         {"GetWindowDC",(void*)i_GetWindowDC},
         {"InvalidateRect",(void*)i_InvalidateRect},
@@ -1809,11 +1886,13 @@ static void bind_imports(uint8_t *base, OPT64 *opt){
         const char *dll=(char*)(base+d->Name);
         uint64_t *oft=(uint64_t*)(base+(d->OFT?d->OFT:d->FT)), *ft=(uint64_t*)(base+d->FT);
         int trace = getenv("PELOAD_TRACE_ALL")!=0;
-        int is_ws2 = name_is_ws2(dll);
+        int is_ws2 = name_is_ws2(dll); int is_xa = name_has(dll,"xaudio");
         for(int i=0; oft[i]; i++){
             const char *fn = (oft[i]>>63)? "#ordinal" : (char*)(base+(uint32_t)oft[i]+2);
             // ws2_32: bind through the shared ordinal/name table (see WS2_HANDLE)
             if(is_ws2){ ft[i]=(uint64_t)((oft[i]>>63)? ws2_by_ordinal((uint32_t)(oft[i]&0xffff)) : ws2_resolve_name(fn)); continue; }
+            if(is_xa && (oft[i]>>63) && (oft[i]&0xffff)==1){ ft[i]=(uint64_t)i_XAudio2Create; continue; } // XAudio2Create = ordinal 1
+            if(is_xa && !(oft[i]>>63) && !strcmp(fn,"XAudio2Create")){ ft[i]=(uint64_t)i_XAudio2Create; continue; }
             void *r = uni_resolve(dll, fn);
             if(r && trace && imp_count<8192){ imp_dll[imp_count]=dll; imp_fn[imp_count]=fn; imp_real[imp_count]=r; ft[i]=(uint64_t)make_trace_stub(imp_count,r); imp_count++; }
             else if(r){ ft[i]=(uint64_t)r; }
@@ -1833,11 +1912,12 @@ static void bind_delay_imports(uint8_t *base, OPT64 *opt){
         const char *dll=(char*)(base+dd->Name);
         uint64_t *iat=(uint64_t*)(base+dd->IAT);
         uint64_t *intb=(uint64_t*)(base+dd->INT);
-        int is_ws2 = name_is_ws2(dll);
+        int is_ws2 = name_is_ws2(dll); int is_xa = name_has(dll,"xaudio");
         for(int i=0; intb[i]; i++){
             const char *fn = (intb[i]>>63)? "#ordinal" : (char*)(base+(uint32_t)intb[i]+2);
             void *r;
             if(is_ws2) r = (intb[i]>>63)? ws2_by_ordinal((uint32_t)(intb[i]&0xffff)) : ws2_resolve_name(fn);
+            else if(is_xa && (((intb[i]>>63)&&(intb[i]&0xffff)==1)||(!(intb[i]>>63)&&!strcmp(fn,"XAudio2Create")))) r=(void*)i_XAudio2Create;
             else r = uni_resolve(dll, fn);
             if(!r && imp_count<8192){ imp_dll[imp_count]=dll; imp_fn[imp_count]=fn; r=make_stub(imp_count++); }
             iat[i]=(uint64_t)r;
