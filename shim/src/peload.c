@@ -38,6 +38,7 @@
 #include <signal.h>
 #include <execinfo.h>
 #include <sys/ucontext.h>
+#include <dlfcn.h>
 
 // ---- raw logging (no libc TLS dependency; safe after we touch %gs) ----
 static void w(const char *s, long n){ (void)!write(2, s, n); }
@@ -135,8 +136,20 @@ static inline uint8_t* rva(uint32_t r){ return g_base + r; }
 // keep their xmm0-3 args unchanged, so they work too.
 static uint8_t *g_glthunk; static size_t g_glthoff; static int g_glth_exec;
 static void *g_thunk_real[2048]; static void *g_thunk_addr[2048]; static int g_nthunk;
+static void __attribute__((ms_abi)) i_glShaderSource(unsigned,int,const char*const*,const int*); // fwd
+static void __attribute__((ms_abi)) i_glCompileShader(unsigned); // fwd
+static unsigned __attribute__((ms_abi)) i_glCreateShaderProgramv(unsigned,int,const char*const*); // fwd
 static void *make_gl_thunk(void *real){
     if(!real) return real;
+    // Shader-upload interception by POINTER: the engine may request
+    // glShaderSource under an alias (e.g. *ARB) that skips the name-based
+    // special-cases, so it reaches here as a raw thunk and its #version is
+    // never rewritten. Compare the resolved pointer and substitute our
+    // version-rewriting wrapper so macOS Core profile (needs >=150) accepts it.
+    { static void *r_ss,*r_ssarb,*r_csp; static int res;
+      if(!res){ r_ss=dlsym((void*)-2,"glShaderSource"); r_ssarb=dlsym((void*)-2,"glShaderSourceARB"); r_csp=dlsym((void*)-2,"glCreateShaderProgramv"); res=1; }
+      if(real==r_ss||real==r_ssarb) return (void*)i_glShaderSource;
+      if(real==r_csp) return (void*)i_glCreateShaderProgramv; }
     for(int i=0;i<g_nthunk;i++) if(g_thunk_real[i]==real) return g_thunk_addr[i]; // cache
     if(getenv("PELOAD_TRACE_GL")){ Dl_info di; if(dladdr(real,&di)&&di.dli_sname){ (void)!write(2,"  [thunk] ",10); (void)!write(2,di.dli_sname,strlen(di.dli_sname)); (void)!write(2,"\n",1); } }
     if(g_glthoff+64 > 64*2048) return real;
@@ -636,9 +649,18 @@ static void MSABI i_glCompileShader(unsigned shader){
     if(getsrc&&setsrc&&len>0&&len<(1<<20)){ char*src=malloc(len+1); int got=0; getsrc(shader,len,&got,src); src[got>0?got:0]=0;
         char*v=strstr(src,"#version "); if(v){ char*dd=v+9; while(*dd==' ')dd++;
             if(dd[0]>='1'&&dd[0]<='9'&&dd[1]>='0'&&dd[1]<='9'&&dd[2]>='0'&&dd[2]<='9'){ int ver=(dd[0]-'0')*100+(dd[1]-'0')*10+(dd[2]-'0');
-                if(ver<150){ dd[0]='1';dd[1]='5';dd[2]='0'; const char*a=src; setsrc(shader,1,&a,0); if(getenv("PELOAD_TRACE_GL")){ws("  [glCompileShader] bumped #version ");char n[4]={(char)('0'+ver/100),(char)('0'+ver/10%10),(char)('0'+ver%10),0};ws(n);ws("->150\n");} } } } }
+                if(ver<150){ dd[0]='1';dd[1]='5';dd[2]='0'; const char*a=src; setsrc(shader,1,&a,0); if(getenv("PELOAD_TRACE_GL")){ws("  [glCompileShader] bumped #version ");char n[4]={(char)('0'+ver/100),(char)('0'+ver/10%10),(char)('0'+ver%10),0};ws(n);ws("->150\n");} } } }
         free(src); }
     void(*real)(unsigned)=dlsym(RTLD_DEFAULT,"glCompileShader"); if(real) real(shader); }
+// glCreateShaderProgramv: separable-program one-call compile; rewrite #version.
+static unsigned MSABI i_glCreateShaderProgramv(unsigned type,int count,const char*const*strs){
+    unsigned(*real)(unsigned,int,const char*const*)=dlsym(RTLD_DEFAULT,"glCreateShaderProgramv");
+    if(!real) return 0; if(count<=0) return real(type,count,strs);
+    static __thread char *buf; static __thread const char *ns[32]; if(!buf) buf=malloc(1<<20); char *w=buf; int nc=count<32?count:32;
+    for(int i=0;i<nc;i++){ const char*s=strs[i]; int L=(int)strlen(s); if(w+L+1>buf+(1<<20)){ns[i]=s;continue;} memcpy(w,s,L); w[L]=0;
+        char*v=strstr(w,"#version "); if(v){char*d=v+9;while(*d==' ')d++; if(d[0]>='1'&&d[0]<='9'&&d[1]>='0'&&d[1]<='9'&&d[2]>='0'&&d[2]<='9'){int ver=(d[0]-'0')*100+(d[1]-'0')*10+(d[2]-'0'); if(ver<150){d[0]='1';d[1]='5';d[2]='0';}}}
+        ns[i]=w; w+=L+1; }
+    return real(type,nc,ns); }
 static void*  MSABI i_wglGetCurrentContext(void){ return CGLGetCurrentContext(); }
 static void*  MSABI i_wglGetCurrentDC(void){ return (void*)0xDC01; }
 static int    MSABI i_wglShareLists(void*a,void*b){ (void)a;(void)b; return 1; }
