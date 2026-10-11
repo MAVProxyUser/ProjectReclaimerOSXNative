@@ -334,10 +334,22 @@ static int MSABI i_initterm_e(int (MSABI **start)(void), int (MSABI **end)(void)
 
 // Win32 heap backed by malloc (handle value is arbitrary but non-null)
 static void*  MSABI i_GetProcessHeap(void){ return (void*)0x48454150; /* 'HEAP' */ }
-static void*  MSABI i_HeapAlloc(void *h, uint32_t fl, uint64_t n){ (void)h; void*p=malloc(n?n:1); if(p&&(fl&8)) memset(p,0,n); return p; }
-static void*  MSABI i_HeapReAlloc(void *h, uint32_t fl, void *p, uint64_t n){ (void)h;(void)fl; return realloc(p,n?n:1); }
-static int    MSABI i_HeapFree(void *h, uint32_t fl, void *p){ (void)h;(void)fl; free(p); return 1; }
-static uint64_t MSABI i_HeapSize(void *h, uint32_t fl, void *p){ (void)h;(void)fl; return p? malloc_size(p) : 0; }
+// PELOAD_HEAP_GUARD: diagnostic guarded allocator — each HeapAlloc goes on its own
+// page(s) with a trailing PROT_NONE guard, so ANY overflow of a guest heap buffer
+// faults exactly at the offending write (Guard Malloc doesn't work under Rosetta).
+// We tag the block so HeapFree/Size/ReAlloc recognise it. Slow + VM-heavy; diag only.
+static int g_heapguard=-1;
+static inline int heapguard(void){ if(g_heapguard<0) g_heapguard=getenv("PELOAD_HEAP_GUARD")?1:0; return g_heapguard; }
+static void* hg_alloc(uint64_t n){ uint64_t ps=4096, nb=((n+ps-1)/ps)*ps; if(nb==0) nb=ps;
+    uint8_t* m=mmap(0,nb+ps,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANON,-1,0); if(m==MAP_FAILED) return malloc(n?n:1);
+    mprotect(m+nb,ps,PROT_NONE); return m+(nb-n); }   // user buffer ends exactly at the guard page
+static void*  MSABI i_HeapAlloc(void *h, uint32_t fl, uint64_t n){ (void)h;
+    void*p = heapguard()? hg_alloc(n?n:1) : malloc(n?n:1); if(p&&(fl&8)) memset(p,0,n); return p; }
+static void*  MSABI i_HeapReAlloc(void *h, uint32_t fl, void *p, uint64_t n){ (void)h;(void)fl;
+    if(heapguard()){ void*q=hg_alloc(n?n:1); if(p&&q) memcpy(q,p,n); return q; }   // leak old (diag)
+    return realloc(p,n?n:1); }
+static int    MSABI i_HeapFree(void *h, uint32_t fl, void *p){ (void)h;(void)fl; if(heapguard()){ return 1; } free(p); return 1; } // guarded blocks: leak (diag)
+static uint64_t MSABI i_HeapSize(void *h, uint32_t fl, void *p){ (void)h;(void)fl; if(heapguard()) return 0; return p? malloc_size(p) : 0; }
 static void*  MSABI i_HeapCreate(uint32_t o, uint64_t a, uint64_t b){ (void)o;(void)a;(void)b; return (void*)0x48454150; }
 
 // Virtual memory backed by mmap
