@@ -5,3 +5,4 @@ prefix/
 shim/build/
 /tmp/
 .DS_Store
+shim/crt/

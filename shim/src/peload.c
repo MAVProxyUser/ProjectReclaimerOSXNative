@@ -555,14 +555,24 @@ int main(int argc, char **argv){
     __asm__ volatile("movq %0, %%gs:0x58" :: "r"((uint64_t)tls_array));
     ws("  TEB @ "); whexn((uint64_t)teb); ws("  PEB @ "); whex((uint64_t)peb);
 
-    // ---- load genuine Microsoft CRT as guest PEs (ucrtbase first) ----
-    const char *home = getenv("HOME"); char crt[1024];
+    // ---- locate the genuine MS CRT dir: $RECLAIMER_CRT_DIR, then next to the
+    // peload binary (<dir>/crt and <dir>/../crt), then the project tree ----
+    const char *home = getenv("HOME");
+    char crtdir[1024]={0}; char bindir[1024]={0};
+    { const char *b=argv[0]; int s=-1; for(int i=0; b[i]; i++) if(b[i]=='/') s=i;
+      if(s>=0){ int n=s<1023?s:1023; memcpy(bindir,b,n); bindir[n]=0; } else snprintf(bindir,sizeof bindir,"."); }
+    char cand[5][1024]; int nc=0;
+    if(getenv("RECLAIMER_CRT_DIR")) snprintf(cand[nc++],1024,"%s",getenv("RECLAIMER_CRT_DIR"));
+    snprintf(cand[nc++],1024,"%s/crt",bindir);
+    snprintf(cand[nc++],1024,"%s/../crt",bindir);
+    if(home){ snprintf(cand[nc++],1024,"%s/Desktop/HaloReclaimerMac/shim/crt",home);
+              snprintf(cand[nc++],1024,"%s/Library/Application Support/ReclaimerMac/ms-crt",home); }
+    for(int i=0;i<nc;i++){ char p[1200]; snprintf(p,sizeof p,"%s/ucrtbase.dll",cand[i]);
+        if(access(p,R_OK)==0){ snprintf(crtdir,sizeof crtdir,"%s",cand[i]); break; } }
+
     const char *names[3] = {"ucrtbase.dll","vcruntime140.dll","msvcp140.dll"};
-    ws("peload: loading genuine MS CRT guests:\n");
-    for(int i=0;i<3;i++){
-        snprintf(crt,sizeof crt,"%s/Library/Application Support/ReclaimerMac/ms-crt/%s",home?home:"",names[i]);
-        load_guest(crt, names[i]);
-    }
+    ws("peload: CRT dir "); ws(crtdir[0]?crtdir:"(not found)"); ws("\n");
+    for(int i=0;i<3;i++){ char crt[1300]; snprintf(crt,sizeof crt,"%s/%s",crtdir,names[i]); load_guest(crt, names[i]); }
 
     // ---- bind the target's imports (CRT -> guest exports, else native/stub) ----
     bind_imports(g_base, opt);
