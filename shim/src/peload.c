@@ -1264,8 +1264,31 @@ static int    MSABI i_UpdateWindow(void*h){ (void)h; return 1; }
 // (0x102); any other value makes it exit and tear down the GL context. Return
 // 0x102 after a short sleep (cap the engine's timeout to ~16ms = ~60fps) so the
 // menu/loading-screen keeps rendering instead of exiting after one frame.
+// Lightweight, NON-intrusive frame grab: called from the message-pump stub
+// (between frames, no engine borrow / no mid-draw GL state to corrupt). Plain
+// glReadPixels of the current drawable into a BMP; no FBO/blit juggling (that
+// re-enters and breaks the frontend). PELOAD_SHOT gates it.
+static void gl_grab_simple(void){
+    if(!getenv("PELOAD_SHOT")) return;
+    static int every; if((every++ % 15)!=0) return;   // ~every 15th frame
+    void*(*cur)(void)=dlsym(RTLD_DEFAULT,"CGLGetCurrentContext"); if(cur&&!cur()) return;
+    void(*rp)(int,int,int,int,unsigned,unsigned,void*)=dlsym(RTLD_DEFAULT,"glReadPixels");
+    void(*rb)(unsigned)=dlsym(RTLD_DEFAULT,"glReadBuffer");
+    void(*ge)(void); unsigned(*gerr)(void)=dlsym(RTLD_DEFAULT,"glGetError"); (void)ge;
+    if(!rp) return; int W=1280,H=720;
+    if(rb) rb(0x0404/*GL_FRONT*/);
+    unsigned char*px=calloc(1,(size_t)W*H*4); if(!px) return;
+    if(gerr) gerr(); rp(0,0,W,H,0x1908/*RGBA*/,0x1401/*UBYTE*/,px); unsigned e=gerr?gerr():0;
+    const char*home=getenv("HOME"); char path[512]; snprintf(path,sizeof path,"%s/reclaimer_menu_latest.bmp",home?home:"/tmp");
+    FILE*f=fopen(path,"wb"); if(f){ uint32_t isz=(uint32_t)W*H*4,fsz=54+isz,o=54; uint8_t fh[14]={'B','M'}; memcpy(fh+2,&fsz,4); memcpy(fh+10,&o,4);
+        uint8_t ih[40]={0}; uint32_t v40=40; memcpy(ih,&v40,4); memcpy(ih+4,&W,4); memcpy(ih+8,&H,4); uint16_t pl=1,bpp=32; memcpy(ih+12,&pl,2); memcpy(ih+14,&bpp,2); memcpy(ih+20,&isz,4);
+        fwrite(fh,1,14,f); fwrite(ih,1,40,f);
+        for(int i=0;i<W*H;i++){ uint8_t*p=px+i*4; uint8_t b[4]={p[2],p[1],p[0],255}; fwrite(b,1,4,f);} fclose(f);
+        static int once; if(!once){ once=1; char m[160]; int k=snprintf(m,sizeof m,"  [gl_grab_simple] %dx%d readpixels err=0x%x -> %s\n",W,H,e,path); (void)!write(2,m,k);} }
+    free(px); }
 static uint32_t MSABI i_MsgWaitForMultipleObjectsEx(uint32_t n,const void*h,uint32_t ms,uint32_t mask,uint32_t flags){
     (void)n;(void)h;(void)mask;(void)flags;
+    gl_grab_simple();
     uint32_t cap=ms; if(cap==0xFFFFFFFFu||cap>16) cap=16;
     if(cap){ struct timespec ts={0,(long)cap*1000000L}; nanosleep(&ts,0); }
     return 0x102; /* WAIT_TIMEOUT */ }
@@ -1793,20 +1816,32 @@ static void MSABI i_RaiseException(uint32_t code,uint32_t flags,uint32_t n,const
     if(code==0x406D1388) return;                 // SetThreadName: ignore
     if(getenv("PELOAD_TRACE_SEH")){ char t[64]; snprintf(t,sizeof t,"  [RaiseException] 0x%08x\n",code); ws(t); }
     seh_decode_cpp(code,n,args);
+    // Capture, then rebase the context onto the GUEST call site: seh_capture
+    // records a RIP/RSP inside THIS shim, which has no guest .pdata, so the
+    // unwinder would find no frames and no catch_unwind handler. Our return
+    // address is the guest instruction after its `call RaiseException`, and the
+    // guest's RSP there is just above our return-address slot ([rbp+8]).
+    void* guest_rip = __builtin_return_address(0);
+    uint64_t guest_rsp = (uint64_t)__builtin_frame_address(0) + 16;
     uint8_t ctxbuf[CTXSZ]; memset(ctxbuf,0,CTXSZ); void* ctx=ctxbuf; seh_capture(ctx);
+    CTX_RIP(ctx)=(uint64_t)guest_rip; CTX_RSP(ctx)=guest_rsp;
     EXREC rec; memset(&rec,0,sizeof rec); rec.ExceptionCode=code; rec.ExceptionFlags=flags;
     rec.ExceptionAddress=(void*)CTX_RIP(ctx); rec.NumberParameters=(n>15?15:n);
     if(args) for(uint32_t i=0;i<rec.NumberParameters;i++) rec.ExceptionInformation[i]=((const uint64_t*)args)[i];
-    uint8_t work[CTXSZ];
+    uint8_t work[CTXSZ]; int tr=getenv("PELOAD_TRACE_SEH")!=0;
     for(int guard=0; guard<512; guard++){
         uint64_t base=0; RUNFN* fn=i_RtlLookupFunctionEntry(CTX_RIP(ctx),&base,0);
-        if(!fn){ uint64_t sp=CTX_RSP(ctx); if(!sp) break; uint64_t rip=*(uint64_t*)sp; CTX_RSP(ctx)=sp+8; CTX_RIP(ctx)=rip; if(!rip) break; continue; }
+        if(!fn){ uint64_t sp=CTX_RSP(ctx); if(!sp) break; uint64_t rip=*(uint64_t*)sp; CTX_RSP(ctx)=sp+8; CTX_RIP(ctx)=rip; if(!rip) break;
+            if(tr){ char t[80]; int k=snprintf(t,sizeof t,"    [seh] leaf rip=0x%llx (no .pdata), ret->0x%llx\n",(unsigned long long)(sp?*(uint64_t*)(sp-8):0),(unsigned long long)rip); (void)!write(2,t,k);} continue; }
         memcpy(work,ctx,CTXSZ); void* hdata=0; uint64_t estab=0;
         PEXHANDLER h=i_RtlVirtualUnwind(1/*EHANDLER*/,base,CTX_RIP(ctx),fn,work,&hdata,&estab,0);
+        if(tr){ char t[128]; int k=snprintf(t,sizeof t,"    [seh] frame rip=0x%llx (exe+0x%llx) handler=%p estab=0x%llx hdata=%p\n",
+            (unsigned long long)CTX_RIP(ctx),(unsigned long long)(CTX_RIP(ctx)-0x140000000ull),(void*)h,(unsigned long long)estab,hdata); (void)!write(2,t,k); }
         if(h){
             DISPCTX dc; memset(&dc,0,sizeof dc); dc.ControlPc=CTX_RIP(ctx); dc.ImageBase=base; dc.FunctionEntry=fn;
             dc.EstablisherFrame=estab; dc.ContextRecord=ctx; dc.LanguageHandler=h; dc.HandlerData=hdata;
             int disp=h(&rec, estab, ctx, &dc);     // __CxxFrameHandler3 et al.
+            if(tr){ char t[64]; int k=snprintf(t,sizeof t,"    [seh] handler disp=%d\n",disp); (void)!write(2,t,k); }
             // 0=ContinueExecution, 1=ContinueSearch. A C++ catch does its own
             // RtlUnwindEx+transfer and never returns here.
             if(disp==0){ seh_restore(ctx); }       // resume at (possibly modified) ctx
@@ -1815,6 +1850,7 @@ static void MSABI i_RaiseException(uint32_t code,uint32_t flags,uint32_t n,const
         memcpy(ctx,work,CTXSZ);                     // move to the caller frame
         if(!CTX_RIP(ctx)) break;
     }
+    if(tr) ws("    [seh] dispatch loop ended (unhandled)\n");
     // Unhandled. For a Rust panic / C++ throw there is nothing more to do; keep
     // the legacy non-fatal return so non-exception RaiseException callers (and
     // early-startup logging) behave as before.
