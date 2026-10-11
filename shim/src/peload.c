@@ -39,6 +39,11 @@
 #include <execinfo.h>
 #include <sys/ucontext.h>
 #include <dlfcn.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <poll.h>
+#include <sys/ioctl.h>
 
 // ---- raw logging (no libc TLS dependency; safe after we touch %gs) ----
 static void w(const char *s, long n){ (void)!write(2, s, n); }
@@ -237,11 +242,17 @@ static void*  MSABI i_InterlockedPopEntrySList(void *head){ void*e=*(void**)head
 static void*  MSABI i_InterlockedFlushSList(void *head){ void*e=*(void**)head; *(void**)head=0; return e; }
 static uint16_t MSABI i_QueryDepthSList(void *head){ uint16_t d=0; for(void*e=*(void**)head;e;e=*(void**)e) d++; return d; }
 #include <errno.h>
-static uint32_t g_lasterr = 0;
+// Windows GetLastError/SetLastError are PER-THREAD. A global here lets a benign
+// ENOENT probe on one thread (mod/map scans) pollute another thread's
+// GetLastError, which Rust reads as a spurious "os error 2". Make it __thread.
+static __thread uint32_t g_lasterr = 0;
 static uint32_t win_err(void){ switch(errno){ case ENOENT: return 2; /*FILE_NOT_FOUND*/
     case EACCES: case EPERM: return 5; /*ACCESS_DENIED*/ case EEXIST: return 80; /*FILE_EXISTS*/
     case ENOTDIR: return 3; /*PATH_NOT_FOUND*/ default: return 1; } }
-static uint32_t MSABI i_GetLastError(void){ return g_lasterr; }
+static __thread char t_lastfail[512];           // last path that failed to open on this thread
+static uint32_t MSABI i_GetLastError(void){
+    if(g_lasterr==2 && getenv("PELOAD_TRACE_LE")){ void*ra=__builtin_return_address(0); char t[640]; uint64_t r=(uint64_t)ra; snprintf(t,sizeof t,"  [GLE=2] caller=%s+0x%llx lastfail='%s'\n",(r>=0x140000000&&r<0x14c000000)?"exe":(r>=0x180000000&&r<0x187000000)?"halo3":"?",(unsigned long long)((r>=0x140000000&&r<0x14c000000)?r-0x140000000:(r>=0x180000000&&r<0x187000000)?r-0x180000000:r),t_lastfail); ws(t); }
+    return g_lasterr; }
 static void   MSABI i_SetLastError(uint32_t e){ g_lasterr=e; }
 
 // CRT argv/environ accessors
@@ -409,11 +420,92 @@ static int   MSABI i_CoCreateInstance(GUID_*clsid, void*outer, uint32_t ctx, GUI
 // "Native transport instruction/import mismatch; refused". So every ws2_32
 // function resolves through ONE ordinal/name-keyed table shared by bind_imports
 // and GetProcAddress, behind a distinct module handle (WS2_HANDLE, above).
+// ---- real Winsock (BSD sockets) for the loopback UDP transport -------------
+// The native transport is loopback-only, which BSD sockets service directly.
+// SOCKET values are the BSD fd; INVALID_SOCKET = ~0. sockaddr differs between
+// Win (family is LE16 at offset 0) and BSD (sin_len, sin_family bytes) and the
+// AF_INET6 constant differs (Win 23 vs macOS 30), so convert both ways.
+#define WSASOCK uint64_t
+#define WSA_INVALID (~0ULL)
+static __thread int t_wsa_err;
+static uint32_t errno2wsa(int e){ switch(e){ case EWOULDBLOCK:return 10035; case EINPROGRESS:return 10036;
+    case EALREADY:return 10037; case ENOTSOCK:return 10038; case EMSGSIZE:return 10040; case EADDRINUSE:return 10048;
+    case EADDRNOTAVAIL:return 10049; case ENETUNREACH:return 10051; case ECONNRESET:return 10054; case ENOBUFS:return 10055;
+    case EISCONN:return 10056; case ENOTCONN:return 10057; case ECONNREFUSED:return 10061; case EAFNOSUPPORT:return 10047;
+    case EINVAL:return 10022; default:return 10022; } }
+static void ws2_err(int e){ t_wsa_err = e? (int)errno2wsa(e):0; }
+// Windows sockaddr_in -> BSD sockaddr_storage; returns BSD length or 0
+static int sa_w2b(const void*win,int wl,struct sockaddr_storage*bsd){ if(!win||wl<2) return 0; const uint8_t*w=win;
+    uint16_t fam=(uint16_t)(w[0]|(w[1]<<8)); memset(bsd,0,sizeof *bsd);
+    if(fam==2){ struct sockaddr_in*b=(void*)bsd; b->sin_len=sizeof *b; b->sin_family=AF_INET; memcpy(&b->sin_port,w+2,2); memcpy(&b->sin_addr,w+4,4); return sizeof *b; }
+    if(fam==23){ struct sockaddr_in6*b=(void*)bsd; b->sin6_len=sizeof *b; b->sin6_family=AF_INET6; memcpy(&b->sin6_port,w+2,2); memcpy(&b->sin6_flowinfo,w+4,4); memcpy(&b->sin6_addr,w+8,16); memcpy(&b->sin6_scope_id,w+24,4); return sizeof *b; }
+    return 0; }
+// BSD sockaddr -> Windows sockaddr; writes up to *wl bytes, sets *wl to size used
+static void sa_b2w(const struct sockaddr*bsd,void*win,int*wl){ if(!bsd||!win) return; uint8_t*w=win;
+    if(bsd->sa_family==AF_INET){ const struct sockaddr_in*b=(void*)bsd; if(!wl||*wl>=16){ w[0]=2;w[1]=0; memcpy(w+2,&b->sin_port,2); memcpy(w+4,&b->sin_addr,4); memset(w+8,0,8);} if(wl)*wl=16; }
+    else if(bsd->sa_family==AF_INET6){ const struct sockaddr_in6*b=(void*)bsd; if(!wl||*wl>=28){ w[0]=23;w[1]=0; memcpy(w+2,&b->sin6_port,2); memcpy(w+4,&b->sin6_flowinfo,4); memcpy(w+8,&b->sin6_addr,16); memcpy(w+24,&b->sin6_scope_id,4);} if(wl)*wl=28; } }
+static int MSABI i_ws2_WSAStartup(uint16_t ver,void*data){ if(data){ uint8_t*d=data; *(uint16_t*)d=ver; *(uint16_t*)(d+2)=ver; memset(d+4,0,398);} t_wsa_err=0; return 0; }
+static int MSABI i_ws2_WSACleanup(void){ return 0; }
+static int MSABI i_ws2_WSAGetLastError(void){ return t_wsa_err; }
+static void MSABI i_ws2_WSASetLastError(int e){ t_wsa_err=e; }
+static WSASOCK MSABI i_ws2_socket(int af,int type,int proto){ int fd=socket(af==23?AF_INET6:af,type,proto); if(fd<0){ws2_err(errno);return WSA_INVALID;} return (WSASOCK)(unsigned)fd; }
+static WSASOCK MSABI i_ws2_WSASocketW(int af,int type,int proto,void*pi,unsigned g,uint32_t fl){ (void)pi;(void)g;(void)fl; return i_ws2_socket(af,type,proto); }
+static int MSABI i_ws2_closesocket(WSASOCK s){ return close((int)s)==0?0:(ws2_err(errno),-1); }
+static int MSABI i_ws2_bind(WSASOCK s,const void*name,int nl){ struct sockaddr_storage ss; int bl=sa_w2b(name,nl,&ss); if(!bl){ws2_err(EINVAL);return -1;} if(bind((int)s,(struct sockaddr*)&ss,bl)<0){ws2_err(errno);return -1;} return 0; }
+static int MSABI i_ws2_connect(WSASOCK s,const void*name,int nl){ struct sockaddr_storage ss; int bl=sa_w2b(name,nl,&ss); if(!bl){ws2_err(EINVAL);return -1;} if(connect((int)s,(struct sockaddr*)&ss,bl)<0){ws2_err(errno);return -1;} return 0; }
+static int MSABI i_ws2_sendto(WSASOCK s,const char*buf,int len,int fl,const void*to,int tl){ struct sockaddr_storage ss; int bl=to?sa_w2b(to,tl,&ss):0; ssize_t r=sendto((int)s,buf,len,fl,bl?(struct sockaddr*)&ss:0,bl); if(r<0){ws2_err(errno);return -1;} return (int)r; }
+static int MSABI i_ws2_recvfrom(WSASOCK s,char*buf,int len,int fl,void*from,int*fl2){ struct sockaddr_storage ss; socklen_t sl=sizeof ss; ssize_t r=recvfrom((int)s,buf,len,fl,(struct sockaddr*)&ss,&sl); if(r<0){ws2_err(errno);return -1;} if(from&&fl2) sa_b2w((struct sockaddr*)&ss,from,fl2); return (int)r; }
+static int MSABI i_ws2_send(WSASOCK s,const char*buf,int len,int fl){ ssize_t r=send((int)s,buf,len,fl); if(r<0){ws2_err(errno);return -1;} return (int)r; }
+static int MSABI i_ws2_recv(WSASOCK s,char*buf,int len,int fl){ ssize_t r=recv((int)s,buf,len,fl); if(r<0){ws2_err(errno);return -1;} return (int)r; }
+static int MSABI i_ws2_shutdown(WSASOCK s,int how){ return shutdown((int)s,how)==0?0:(ws2_err(errno),-1); }
+static int MSABI i_ws2_getsockname(WSASOCK s,void*name,int*nl){ struct sockaddr_storage ss; socklen_t sl=sizeof ss; if(getsockname((int)s,(struct sockaddr*)&ss,&sl)<0){ws2_err(errno);return -1;} sa_b2w((struct sockaddr*)&ss,name,nl); return 0; }
+static int MSABI i_ws2_getpeername(WSASOCK s,void*name,int*nl){ struct sockaddr_storage ss; socklen_t sl=sizeof ss; if(getpeername((int)s,(struct sockaddr*)&ss,&sl)<0){ws2_err(errno);return -1;} sa_b2w((struct sockaddr*)&ss,name,nl); return 0; }
+static int MSABI i_ws2_setsockopt(WSASOCK s,int lvl,int opt,const char*val,int len){ if(setsockopt((int)s,lvl,opt,val,len)==0) return 0; if(errno==ENOPROTOOPT) return 0; /*lenient: ignore unknown opts*/ ws2_err(errno); return -1; }
+static int MSABI i_ws2_getsockopt(WSASOCK s,int lvl,int opt,char*val,int*len){ socklen_t sl=len?*len:0; if(getsockopt((int)s,lvl,opt,val,&sl)==0){ if(len)*len=sl; return 0;} if(errno==ENOPROTOOPT){ if(val&&len&&*len>=4)*(int*)val=0; return 0;} ws2_err(errno); return -1; }
+static int MSABI i_ws2_ioctlsocket(WSASOCK s,long cmd,uint32_t*argp){ if(ioctl((int)s,(unsigned long)cmd,argp)==0) return 0; ws2_err(errno); return -1; }
+// select: Windows fd_set = { u_int count; SOCKET array[64] }. Bridge via poll().
+typedef struct { uint32_t cnt; WSASOCK arr[64]; } WSAFDSET;
+static int MSABI i_ws2_select(int nfds,WSAFDSET*rd,WSAFDSET*wr,WSAFDSET*ex,const void*tv){ (void)nfds;
+    struct pollfd pfd[192]; int np=0; WSAFDSET*sets[3]={rd,wr,ex}; short ev[3]={POLLIN,POLLOUT,POLLPRI};
+    for(int si=0;si<3;si++){ WSAFDSET*S=sets[si]; if(!S)continue; for(uint32_t i=0;i<S->cnt&&np<192;i++){ int fd=(int)S->arr[i]; int f=-1; for(int k=0;k<np;k++) if(pfd[k].fd==fd){f=k;break;} if(f<0){ pfd[np].fd=fd; pfd[np].events=0; pfd[np].revents=0; f=np++; } pfd[f].events|=ev[si]; } }
+    int to=-1; if(tv){ const int32_t*t=tv; to=t[0]*1000 + t[1]/1000; }
+    int r=poll(pfd,np,to); if(r<0){ws2_err(errno);return -1;}
+    for(int si=0;si<3;si++){ WSAFDSET*S=sets[si]; if(!S)continue; WSASOCK keep[64]; uint32_t kc=0; for(uint32_t i=0;i<S->cnt;i++){ int fd=(int)S->arr[i]; for(int k=0;k<np;k++) if(pfd[k].fd==fd && (pfd[k].revents&(ev[si]|POLLHUP|POLLERR))){ if(kc<64)keep[kc++]=S->arr[i]; break; } } S->cnt=kc; for(uint32_t i=0;i<kc;i++)S->arr[i]=keep[i]; }
+    return r; }
+static int MSABI i_ws2___WSAFDIsSet(WSASOCK s,WSAFDSET*set){ if(!set)return 0; for(uint32_t i=0;i<set->cnt;i++) if(set->arr[i]==s) return 1; return 0; }
+static uint32_t MSABI i_ws2_htonl(uint32_t x){ return htonl(x); }
+static uint32_t MSABI i_ws2_ntohl(uint32_t x){ return ntohl(x); }
+static uint16_t MSABI i_ws2_htons(uint16_t x){ return htons(x); }
+static uint16_t MSABI i_ws2_ntohs(uint16_t x){ return ntohs(x); }
+static uint32_t MSABI i_ws2_inet_addr(const char*c){ return inet_addr(c); }
+static int MSABI i_ws2_WSAIoctl(WSASOCK s,uint32_t code,void*ib,uint32_t ibl,void*ob,uint32_t obl,uint32_t*ret,void*ov,void*cb){
+    (void)s;(void)ib;(void)ibl;(void)ob;(void)obl;(void)ov;(void)cb;
+    // SIO_GET_EXTENSION_FUNCTION_POINTER (0xC8000006): refuse so quinn falls back
+    // to plain recvfrom/sendto instead of WSARecvMsg/WSASendMsg.
+    if(ret)*ret=0; t_wsa_err=10022 /*WSAEINVAL*/; return -1; }
+// map a ws2_32 ordinal to a real impl (0 = none, fall back to stub)
+static void* ws2_real_ord(uint32_t o){ switch(o){
+    case 1: return 0; /*accept: TCP, not needed for UDP*/
+    case 2: return (void*)i_ws2_bind; case 3: return (void*)i_ws2_closesocket; case 4: return (void*)i_ws2_connect;
+    case 5: return (void*)i_ws2_getpeername; case 6: return (void*)i_ws2_getsockname; case 7: return (void*)i_ws2_getsockopt;
+    case 8: return (void*)i_ws2_htonl; case 9: return (void*)i_ws2_htons; case 10: return (void*)i_ws2_ioctlsocket;
+    case 11: return (void*)i_ws2_inet_addr; case 14: return (void*)i_ws2_ntohl; case 15: return (void*)i_ws2_ntohs;
+    case 16: return (void*)i_ws2_recv; case 17: return (void*)i_ws2_recvfrom; case 18: return (void*)i_ws2_select;
+    case 19: return (void*)i_ws2_send; case 20: return (void*)i_ws2_sendto; case 21: return (void*)i_ws2_setsockopt;
+    case 22: return (void*)i_ws2_shutdown; case 23: return (void*)i_ws2_socket;
+    case 111: return (void*)i_ws2_WSAGetLastError; case 115: return (void*)i_ws2_WSAStartup; case 116: return (void*)i_ws2_WSACleanup;
+    case 151: return (void*)i_ws2___WSAFDIsSet; default: return 0; } }
+static void* ws2_real_name(const char*n){
+    if(!strcmp(n,"WSASocketW")||!strcmp(n,"WSASocketA")) return (void*)i_ws2_WSASocketW;
+    if(!strcmp(n,"WSAIoctl")) return (void*)i_ws2_WSAIoctl;
+    if(!strcmp(n,"WSASetLastError")) return (void*)i_ws2_WSASetLastError;
+    if(!strcmp(n,"WSARecvFrom")) return (void*)i_ws2_recvfrom; // close-enough arg prefix for fallback probing
+    return 0; }
 static void* g_ws2ord[600];
 static void* ws2_by_ordinal(uint32_t ord){
     if(ord>=600) ord=0; if(g_ws2ord[ord]) return g_ws2ord[ord];
-    if(imp_count<8192){ imp_dll[imp_count]="ws2_32.dll"; imp_fn[imp_count]="#ws2ord"; g_ws2ord[ord]=make_stub(imp_count++); }
-    return g_ws2ord[ord]; }
+    void*r=ws2_real_ord(ord); if(!r && imp_count<8192){ imp_dll[imp_count]="ws2_32.dll"; imp_fn[imp_count]="#ws2ord"; r=make_stub(imp_count++); }
+    g_ws2ord[ord]=r; return r; }
 static uint32_t ws2_name2ord(const char*n){
     struct{const char*n;uint32_t o;} m[]={{"accept",1},{"bind",2},{"closesocket",3},{"connect",4},
      {"getpeername",5},{"getsockname",6},{"getsockopt",7},{"htonl",8},{"htons",9},{"ioctlsocket",10},
@@ -423,9 +515,9 @@ static uint32_t ws2_name2ord(const char*n){
     for(int i=0;m[i].n;i++) if(!strcmp(n,m[i].n)) return m[i].o; return 0; }
 static void* ws2_resolve_name(const char*n){
     uint32_t o=ws2_name2ord(n); if(o) return ws2_by_ordinal(o);
-    static struct{const char*n;void*p;} nc[64]; static int ncn;      // by-name only (WSAIoctl, getaddrinfo, …)
+    static struct{const char*n;void*p;} nc[64]; static int ncn;      // by-name only (WSASocketW, WSAIoctl, …)
     for(int i=0;i<ncn;i++) if(!strcmp(nc[i].n,n)) return nc[i].p;
-    void*p=0; if(imp_count<8192){ imp_dll[imp_count]="ws2_32.dll"; imp_fn[imp_count]=n; p=make_stub(imp_count++); }
+    void*p=ws2_real_name(n); if(!p && imp_count<8192){ imp_dll[imp_count]="ws2_32.dll"; imp_fn[imp_count]=n; p=make_stub(imp_count++); }
     if(ncn<64){ nc[ncn].n=n; nc[ncn].p=p; ncn++; } return p; }
 // is this (ascii) module name ws2_32 (with/without path or .dll, case-insensitive)?
 static int name_is_ws2(const char*s){ if(!s) return 0; const char*b=s; for(const char*p=s;*p;p++) if(*p=='\\'||*p=='/') b=p+1;
@@ -938,10 +1030,14 @@ static int MSABI i_GetFileInformationByHandleEx(void*h,int cls,void*info,uint32_
     memset(info,0,sz); return 1;
 }
 static uint32_t MSABI i_GetFinalPathNameByHandleW(void*h,uint16_t*buf,uint32_t cch,uint32_t fl){
-    (void)fl; intptr_t hv=(intptr_t)h; if(hv<0x1000) return 0; int fd=(int)(hv-0x1000);
-    if(getenv("PELOAD_TRACE_FS")){ ws("  [GetFinalPathNameByHandleW] "); ws((fd<MAXFD&&g_fdpath[fd])?g_fdpath[fd]:"(none)"); ws("\n"); }
+    intptr_t hv=(intptr_t)h; if(hv<0x1000) return 0; int fd=(int)(hv-0x1000);
     if(fd>=MAXFD||!g_fdpath[fd]) return 0; uint16_t tmp[2048]; unix2win(g_fdpath[fd],tmp,2048);
-    uint32_t n=0; while(tmp[n]) n++; if(cch<n+1) return n+1; for(uint32_t i=0;i<=n;i++) buf[i]=tmp[i]; return n;
+    // fl low bits = VOLUME_NAME_*: DOS(0) -> \\?\C:\path, NONE(4) -> \path (no
+    // volume). Honor NONE so the engine's relative-path math doesn't break.
+    uint16_t *src=tmp; if((fl&0x4)){ uint16_t*c=tmp; /* skip \\?\C: -> leave leading backslash of path */ int k=0; while(c[k]) k++; /* find the ':' and take from next char */ for(int i=0;i<k;i++) if(tmp[i]==':'){ src=&tmp[i+1]; break; } }
+    uint32_t n=0; while(src[n]) n++; if(cch<n+1) return n+1; for(uint32_t i=0;i<=n;i++) buf[i]=src[i];
+    if(getenv("PELOAD_TRACE_FS")){ char o[1100]; int j=0; for(uint32_t i=0;i<n&&j<1098;i++)o[j++]=(char)(src[i]&0xff); o[j]=0; char hh[64]; snprintf(hh,sizeof hh,"  [GFPNBH fl=0x%x] ",fl); ws(hh); ws(o); ws("\n"); }
+    return n;
 }
 // recursive directory removal (RemoveDirectoryW only needs empty, but Rust may
 // hand us a populated one; nuke it for robustness)
@@ -975,7 +1071,7 @@ static int nt_open_common(void **ph,uint32_t acc,void *oa,void *iosb,uint32_t di
     int fd=open(path,flags,0644);
     if(fd<0 && (flags&O_CREAT) && errno==ENOENT){ mkparents(path); fd=open(path,flags,0644); }
     if(getenv("PELOAD_TRACE_FS")){ char dd[64]; snprintf(dd,sizeof dd," disp=%u opts=0x%x fl=0x%x errno=%d",disp,opts,flags,fd<0?errno:0); ws("  [NtCreateFile] "); ws(path); ws(dd); ws(fd<0?" FAIL\n":" ok\n"); }
-    if(fd<0){ if(iosb)((uint64_t*)iosb)[0]=0xC0000034; return (int)0xC0000034; } // OBJECT_NAME_NOT_FOUND
+    if(fd<0){ if(errno==ENOENT) snprintf(t_lastfail,sizeof t_lastfail,"NT:%s",path[0]?path:"<empty>"); if(iosb)((uint64_t*)iosb)[0]=0xC0000034; return (int)0xC0000034; } // OBJECT_NAME_NOT_FOUND
     fd_record(fd,path); if(opts&0x1000) g_fddel[fd<MAXFD?fd:0]=1; // FILE_DELETE_ON_CLOSE
     if(ph)*ph=(void*)(intptr_t)(0x1000+fd); if(iosb){((uint64_t*)iosb)[0]=0; ((uint64_t*)iosb)[1]=(disp==2?2:1);} return 0;
 }
@@ -1079,17 +1175,30 @@ static char* win2unix(const uint16_t *w, char *out, int outsz){
 // real-file handles are boxed fds offset by 0x1000 (pseudo-handles are 1/2/3)
 static uint32_t MSABI i_GetFileAttributesW(const uint16_t *w){
     char p[2048]; struct stat st;
-    if(stat(win2unix(w,p,sizeof p),&st)!=0){ g_lasterr=win_err(); return 0xFFFFFFFF; } g_lasterr=0; // INVALID_FILE_ATTRIBUTES
+    if(stat(win2unix(w,p,sizeof p),&st)!=0){ if(getenv("PELOAD_TRACE_FS")){ws("  [GetFileAttributesW] ");ws(p);ws(errno==ENOENT?" ENOENT\n":" FAIL\n");} g_lasterr=win_err(); if(g_lasterr==2)snprintf(t_lastfail,sizeof t_lastfail,"GFA:%s",p[0]?p:"<empty>"); return 0xFFFFFFFF; } g_lasterr=0; // INVALID_FILE_ATTRIBUTES
     return S_ISDIR(st.st_mode)? 0x10 : 0x80; // DIRECTORY : NORMAL
 }
 static int MSABI i_GetFileAttributesExW(const uint16_t *w,int lvl,void *info){
-    (void)lvl; char p[2048]; struct stat st; if(stat(win2unix(w,p,sizeof p),&st)!=0){ g_lasterr=win_err(); return 0; } g_lasterr=0;
+    (void)lvl; char p[2048]; struct stat st; if(stat(win2unix(w,p,sizeof p),&st)!=0){ if(getenv("PELOAD_TRACE_FS")){ws("  [GetFileAttributesExW] ");ws(p);ws(errno==ENOENT?" ENOENT\n":" FAIL\n");} g_lasterr=win_err(); if(g_lasterr==2)snprintf(t_lastfail,sizeof t_lastfail,"GFAx:%s",p[0]?p:"<empty>"); return 0; } g_lasterr=0;
     if(info){ uint8_t*d=info; memset(d,0,36); *(uint32_t*)d = S_ISDIR(st.st_mode)?0x10:0x80;
         *(uint32_t*)(d+28)=(uint32_t)(st.st_size>>32); *(uint32_t*)(d+32)=(uint32_t)st.st_size; }
     return 1;
 }
+// Font substitution: the engine opens Windows UI fonts (e.g. Fonts/bahnschrift.ttf)
+// that don't exist on macOS. If a font path doesn't resolve, redirect it to a
+// staged substitute in $drive_c/ReclaimerFonts so text rendering has a real TTF.
+static void font_subst(char *p, int cap){
+    const char *b=p; for(char*q=p;*q;q++) if(*q=='/') b=q+1;
+    int L=(int)strlen(b); if(L<5) return;
+    const char *ext=b+L-4; if(strcasecmp(ext,".ttf")&&strcasecmp(ext,".otf")&&strcasecmp(ext,".ttc")) return;
+    if(access(p,R_OK)==0) return;                 // real file present -> keep
+    char cand[2048]; snprintf(cand,sizeof cand,"%s/ReclaimerFonts/%s",g_drivec,b);
+    if(access(cand,R_OK)!=0) snprintf(cand,sizeof cand,"%s/ReclaimerFonts/bahnschrift.ttf",g_drivec); // generic fallback
+    if(access(cand,R_OK)==0) snprintf(p,cap,"%s",cand);
+}
 static void*  MSABI i_CreateFileW(const uint16_t *w,uint32_t acc,uint32_t share,void*sec,uint32_t disp,uint32_t fl,void*tmpl){
     (void)share;(void)sec;(void)fl;(void)tmpl; char p[2048]; win2unix(w,p,sizeof p);
+    if(acc&0x80000000) font_subst(p,sizeof p);    // read opens only
     int flags = (acc & 0x40000000)? O_RDWR : O_RDONLY; // GENERIC_WRITE?
     switch(disp){                                   // Win32 creation disposition
         case 1: flags|=O_CREAT|O_EXCL;  break;      // CREATE_NEW
@@ -1103,7 +1212,7 @@ static void*  MSABI i_CreateFileW(const uint16_t *w,uint32_t acc,uint32_t share,
     int fd=open(p, flags, 0644);
     if(fd<0 && (flags&O_CREAT) && errno==ENOENT){ mkparents(p); fd=open(p, flags, 0644); } // scratch mirror
     if(getenv("PELOAD_TRACE_FS")){ char hd[48]; snprintf(hd,sizeof hd,"  [CFW pid=%d disp=%u acc=0x%x] ",getpid(),disp,acc); ws(hd); ws(p); ws(fd<0?"  FAIL\n":"  ok\n"); }
-    if(fd<0){ g_lasterr=win_err(); return (void*)-1; } g_lasterr=0; // INVALID_HANDLE_VALUE
+    if(fd<0){ g_lasterr=win_err(); if(g_lasterr==2) snprintf(t_lastfail,sizeof t_lastfail,"CFW:%s",p[0]?p:"<empty>"); return (void*)-1; } g_lasterr=0; // INVALID_HANDLE_VALUE
     fd_record(fd,p);
     if(fl&0x04000000) g_fddel[fd<MAXFD?fd:0]=1; // FILE_FLAG_DELETE_ON_CLOSE
     return (void*)(intptr_t)(0x1000+fd);
@@ -1757,7 +1866,13 @@ int main(int argc, char **argv){
       setenv("LOCALAPPDATA","C:\\ReclaimerCache",0); setenv("APPDATA","C:\\ReclaimerCache",0);
       setenv("TEMP","C:\\ReclaimerCache\\Temp",0); setenv("TMP","C:\\ReclaimerCache\\Temp",0);
       setenv("USERPROFILE","C:\\ReclaimerProfile",0);
-      setenv("RECLAIMER_MOUSE_SENSITIVITY","1.0",0); }  // engine input default (valid range 0.05-20)
+      setenv("RECLAIMER_MOUSE_SENSITIVITY","1.0",0);
+      // Content/discovery dirs: if unset the engine may read an empty path and
+      // File::open("") -> ENOENT ("os error 2"). Point them at real dirs.
+      snprintf(pd,sizeof pd,"%s/ReclaimerContent",g_drivec); mkdir(pd,0755);
+      { const char*cs[]={"Maps","Game Modes","Images","Mods","Mods/Downloaded",0}; for(int i=0;cs[i];i++){ char d[1400]; snprintf(d,sizeof d,"%s/ReclaimerContent/%s",g_drivec,cs[i]); mkparents(d); mkdir(d,0755);} }
+      setenv("RECLAIMER_CONTENT_DIR","C:\\ReclaimerContent",0);
+      snprintf(pd,sizeof pd,"%s/ReclaimerCache/discovery",g_drivec); mkdir(pd,0755); setenv("RECLAIMER_DISCOVERY_DIR","C:\\ReclaimerCache\\discovery",0); }  // engine input default (valid range 0.05-20)
 
     // The native worker enumerates its content folders (Maps / Game Modes /
     // Images / Mods / Mods/Downloaded) relative to its cwd (the mcc-startup
