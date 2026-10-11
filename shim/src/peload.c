@@ -473,7 +473,7 @@ static int MSABI i_CreateDXGIFactory2(uint32_t fl,GUID_*riid,void**pp){ (void)fl
 // (halo3 draws the game 3D; Reclaimer's OpenGL UI is what the window shows) — the
 // goal is only to satisfy the API contract so startup completes without crashing
 // or corrupting memory.  All methods are MSABI (this in rcx).
-typedef struct { void** vtbl; uint32_t kind; uint32_t pad; uint64_t size; void* data; } D3DObj;
+typedef struct { void** vtbl; uint32_t kind; uint32_t rowpitch; uint64_t size; void* data; uint32_t w,h; } D3DObj;
 static ComObj g_d3ddevice, g_d3dcontext;
 static void*  g_d3dchild_vtbl[16];   // ID3D11DeviceChild (shaders, states, layouts, linkage, query...)
 static void*  g_d3dres_vtbl[16];     // ID3D11Resource (buffers, textures)
@@ -496,29 +496,57 @@ static int      MSABI d3d_SetPDI(void*s,GUID_*g,const void*d){ (void)s;(void)g;(
 static void     MSABI res_GetType(void*s,uint32_t*pd){ D3DObj*o=s; if(pd)*pd=o?o->kind:1; }
 static void     MSABI res_SetEvict(void*s,uint32_t p){ (void)s;(void)p; }
 static unsigned MSABI res_GetEvict(void*s){ (void)s; return 0; }
-static void     MSABI res_GetDesc(void*s,void*pd){ D3DObj*o=s; if(pd){ memset(pd,0,64); if(o)*(uint32_t*)pd=(uint32_t)o->size; } }
+static void     MSABI res_GetDesc(void*s,void*pd){ D3DObj*o=s; if(!pd||!o) return; uint32_t*u=pd;
+    // write ONLY the caller's desc size (overwriting more corrupts its stack/heap)
+    if(o->kind==1){ memset(pd,0,24); u[0]=(uint32_t)o->size; }                 // D3D11_BUFFER_DESC (24B): ByteWidth
+    else { memset(pd,0,44); u[0]=o->w; u[1]=o->h; u[2]=1; u[3]=1; u[4]=28; u[5]=1; } } // TEXTURE2D_DESC (44B)
 // ---- ID3D11View (7-8). o->data holds the resource the view was created over, so
 // GetResource returns a valid (never-null) resource the engine then dereferences.
 static D3DObj* d3dobj(void** vt, uint32_t kind, uint64_t size); // fwd
 static D3DObj  g_d3ddummyres_obj; static D3DObj* g_d3ddummyres;
 static void     MSABI view_GetResource(void*s,void**pp){ D3DObj*o=s; if(pp)*pp=(o&&o->data)?o->data:g_d3ddummyres; }
-static void     MSABI view_GetDesc(void*s,void*pd){ (void)s; if(pd) memset(pd,0,64); }
+static void     MSABI view_GetDesc(void*s,void*pd){ (void)s; if(pd) memset(pd,0,16); } // RTV/DSV descs are ~16B; keep small to avoid overflow
 // ---- create helpers by out-param position ----
-static int MSABI dev_crRes(void*t,const void*desc,const void*init,void**pp){ (void)t; // CreateBuffer/Texture*
-    uint64_t sz = desc? (uint64_t)(*(const uint32_t*)desc) : 0;          // ByteWidth / Width (offset 0)
-    if(sz<16) sz=1<<16;                                                  // textures: desc[0]=Width; give generous room
-    D3DObj* o=d3dobj(g_d3dres_vtbl,1,sz); if(init && o->data){ const void*src=*(void*const*)init; if(src) memcpy(o->data,src,sz>4096?4096:sz); }
+// CreateBuffer(desc,init,pp): D3D11_BUFFER_DESC.ByteWidth @ offset 0.
+static int MSABI dev_CreateBuffer(void*t,const void*desc,const void*init,void**pp){ (void)t;
+    uint64_t sz = desc? (uint64_t)(*(const uint32_t*)desc) : 16; if(sz<16) sz=16;
+    D3DObj* o=d3dobj(g_d3dres_vtbl,1/*BUFFER*/,sz); o->rowpitch=(uint32_t)sz; o->w=(uint32_t)sz; o->h=1;
+    if(init && o->data){ const void*src=*(void*const*)init; if(src) memcpy(o->data,src,sz); }
     if(pp)*pp=o; return HR_OK; }
+// textures: compute the REAL footprint from the DXGI format so our buffer matches
+// exactly what the engine writes via Map (no over/under-allocation -> no overflow).
+static int is_bc(uint32_t f){ return (f>=70&&f<=84)||(f>=94&&f<=99); }      // BC1..BC7
+static uint32_t bc_block(uint32_t f){ return ((f>=70&&f<=72)||(f>=79&&f<=81))?8:16; } // BC1,BC4=8B blocks
+static uint32_t dxgi_bpp(uint32_t f){
+    if(f>=1&&f<=4) return 16; if(f>=5&&f<=8) return 12; if(f>=9&&f<=14) return 8;
+    if(f>=15&&f<=22) return 8; if(f==0) return 4; return 4; }                 // default RGBA8-class
+static D3DObj* mktex(uint32_t w,uint32_t h,uint32_t arr,uint32_t fmt,uint32_t kind){
+    if(w<1)w=1; if(h<1)h=1; if(arr<1)arr=1;
+    uint64_t rp,sz;
+    if(is_bc(fmt)){ uint32_t bb=bc_block(fmt); rp=(uint64_t)((w+3)/4)*bb; sz=rp*((h+3)/4); }
+    else { rp=(uint64_t)w*dxgi_bpp(fmt); sz=rp*h; }
+    sz = sz*arr*2 + 65536;                                                    // array + mip-chain + guard
+    D3DObj* o=d3dobj(g_d3dres_vtbl,kind,sz); o->rowpitch=(uint32_t)rp; o->w=w; o->h=h; return o; }
+static int MSABI dev_CreateTexture1D(void*t,const void*d,const void*init,void**pp){ (void)t;(void)init;
+    uint32_t w=d?*(const uint32_t*)d:1, arr=d?*(const uint32_t*)((const char*)d+8):1, f=d?*(const uint32_t*)((const char*)d+12):0;
+    if(pp)*pp=mktex(w,1,arr,f,3); return HR_OK; }
+static int MSABI dev_CreateTexture2D(void*t,const void*d,const void*init,void**pp){ (void)t;(void)init;
+    uint32_t w=d?*(const uint32_t*)d:1, h=d?*(const uint32_t*)((const char*)d+4):1, arr=d?*(const uint32_t*)((const char*)d+12):1, f=d?*(const uint32_t*)((const char*)d+16):0;
+    if(pp)*pp=mktex(w,h,arr,f,2); return HR_OK; }
+static int MSABI dev_CreateTexture3D(void*t,const void*d,const void*init,void**pp){ (void)t;(void)init;
+    uint32_t w=d?*(const uint32_t*)d:1, h=d?*(const uint32_t*)((const char*)d+4):1, dp=d?*(const uint32_t*)((const char*)d+8):1, f=d?*(const uint32_t*)((const char*)d+16):0;
+    if(pp)*pp=mktex(w,h,dp,f,4); return HR_OK; }
 static int MSABI dev_crView3(void*t,const void*res,const void*desc,void**pp){ (void)t;(void)desc; D3DObj*o=d3dobj(g_d3dview_vtbl,0,0); o->data=(void*)res; if(pp)*pp=o; return HR_OK; }
 static int MSABI dev_cr2(void*t,const void*a,void**pp){ (void)t;(void)a; if(pp)*pp=d3dobj(g_d3dchild_vtbl,0,0); return HR_OK; }      // (desc,pp) out=r8
 static int MSABI dev_cr1(void*t,void**pp){ (void)t; if(pp)*pp=d3dobj(g_d3dchild_vtbl,0,0); return HR_OK; }                         // (pp) out=rdx
 static int MSABI dev_cr5(void*t,const void*bc,uint64_t len,void*lk,void**pp){ (void)t;(void)bc;(void)len;(void)lk; if(pp)*pp=d3dobj(g_d3dchild_vtbl,0,0); return HR_OK; } // shaders
 static int MSABI dev_crIL(void*t,const void*d,uint32_t n,const void*bc,uint64_t len,void**pp){ (void)t;(void)d;(void)n;(void)bc;(void)len; if(pp)*pp=d3dobj(g_d3dchild_vtbl,0,0); return HR_OK; } // CreateInputLayout
 static int MSABI dev_crCtx(void*t,uint32_t fl,void**pp){ (void)t;(void)fl; if(pp)*pp=&g_d3dcontext; return HR_OK; }                 // CreateDeferredContext
-static int MSABI dev_OpenShared(void*t,void*h,GUID_*r,void**pp){ (void)t;(void)h;(void)r; if(pp)*pp=d3dobj(g_d3dres_vtbl,1,1<<16); return HR_OK; }
+static D3DObj* mktex(uint32_t w,uint32_t h,uint32_t arr,uint32_t fmt,uint32_t kind); // fwd
+static int MSABI dev_OpenShared(void*t,void*h,GUID_*r,void**pp){ (void)t;(void)h;(void)r; if(pp)*pp=mktex(4096,4096,1,28,2); return HR_OK; }
 static int MSABI dev_CheckFormat(void*t,uint32_t fmt,uint32_t*ps){ (void)t;(void)fmt; if(ps)*ps=0x1FFFFF; return HR_OK; }           // claim broad support
 static int MSABI dev_CheckMSAA(void*t,uint32_t fmt,uint32_t cnt,uint32_t*pq){ (void)t;(void)fmt;(void)cnt; if(pq)*pq=1; return HR_OK; }
-static void MSABI dev_CheckCounterInfo(void*t,void*pi){ (void)t; if(pi) memset(pi,0,16); }
+static void MSABI dev_CheckCounterInfo(void*t,void*pi){ (void)t; if(pi) memset(pi,0,12); }
 static int MSABI dev_CheckFeature(void*t,uint32_t f,void*pd,uint32_t sz){ (void)t;(void)f; if(pd) memset(pd,0,sz); return HR_OK; }
 static uint32_t MSABI dev_GetFeatureLevel(void*t){ (void)t; return 0xb000; }   // D3D_FEATURE_LEVEL_11_0
 static uint32_t MSABI dev_GetCreationFlags(void*t){ (void)t; return 0; }
@@ -529,12 +557,18 @@ static uint32_t MSABI dev_GetExceptionMode(void*t){ (void)t; return 0; }
 // ---- ID3D11DeviceContext: Map returns a real buffer; everything else no-op/0 ----
 static int  MSABI ctx_ret0(void){ return 0; }                            // safe for void + HRESULT + UINT returns
 static int  MSABI ctx_Map(void*t,void*res,uint32_t sub,uint32_t type,uint32_t fl,void*pM){ (void)t;(void)sub;(void)type;(void)fl;
-    D3DObj*o=res; if(pM){ void* d=(o&&o->data)?o->data:g_d3dscratch; uint32_t rp=(o&&o->size)?(uint32_t)o->size:(uint32_t)sizeof g_d3dscratch;
-        *(void**)pM=d; *(uint32_t*)((char*)pM+8)=rp; *(uint32_t*)((char*)pM+12)=rp; } return HR_OK; }
+    D3DObj*o=res; if(pM){ void* d=(o&&o->data)?o->data:g_d3dscratch;
+        uint32_t rp = o? (o->rowpitch?o->rowpitch:(uint32_t)o->size) : (uint32_t)sizeof g_d3dscratch;   // bytes per row
+        // DepthPitch = one 2D slice. Must NOT be the whole buffer: for 3D/array
+        // textures the engine strides depth slices by DepthPitch (slice N at N*dp),
+        // so an oversized dp writes far past our buffer and corrupts the heap.
+        uint32_t dp = o? (uint32_t)(o->rowpitch? (uint64_t)o->rowpitch*(o->h?o->h:1) : o->size) : (uint32_t)sizeof g_d3dscratch;
+        if(o && dp>o->size) dp=(uint32_t)o->size;
+        *(void**)pM=d; *(uint32_t*)((char*)pM+8)=rp; *(uint32_t*)((char*)pM+12)=dp; } return HR_OK; }
 static void MSABI ctx_GetDevice(void*t,void**pp){ (void)t; if(pp)*pp=&g_d3ddevice; }
 // ---- IDXGISwapChain ----
 static int MSABI swap_Present(void*t,uint32_t sync,uint32_t fl){ (void)t;(void)sync;(void)fl; return HR_OK; }
-static int MSABI swap_GetBuffer(void*t,uint32_t buf,GUID_*r,void**pp){ (void)t;(void)buf;(void)r; if(pp)*pp=d3dobj(g_d3dres_vtbl,2,1<<20); return HR_OK; }
+static int MSABI swap_GetBuffer(void*t,uint32_t buf,GUID_*r,void**pp){ (void)t;(void)buf;(void)r; if(pp)*pp=mktex(4096,4096,1,28,2); return HR_OK; } // generous backbuffer (covers any window size)
 static int MSABI dxgi_CreateSwapChain(void*t,void*dev,void*desc,void**pp){ (void)t;(void)dev;(void)desc; if(pp)*pp=d3dobj(g_dxgiswap_vtbl,0,0); return HR_OK; }
 static void d3d_init(void){
     static int done; if(done) return; done=1;
@@ -545,7 +579,7 @@ static void d3d_init(void){
     g_d3ddummyres_obj.vtbl=g_d3dres_vtbl; g_d3ddummyres_obj.kind=1; g_d3ddummyres_obj.size=1<<16; g_d3ddummyres_obj.data=calloc(1,1<<16); g_d3ddummyres=&g_d3ddummyres_obj;
     void** d=g_d3ddev_vtbl;
     d[0]=(void*)d3d_QI;d[1]=(void*)d3d_AddRef;d[2]=(void*)d3d_Release;
-    d[3]=(void*)dev_crRes;d[4]=(void*)dev_crRes;d[5]=(void*)dev_crRes;d[6]=(void*)dev_crRes;         // Create Buffer/Tex1D/2D/3D
+    d[3]=(void*)dev_CreateBuffer;d[4]=(void*)dev_CreateTexture1D;d[5]=(void*)dev_CreateTexture2D;d[6]=(void*)dev_CreateTexture3D;
     d[7]=(void*)dev_crView3;d[8]=(void*)dev_crView3;d[9]=(void*)dev_crView3;d[10]=(void*)dev_crView3; // SRV/UAV/RTV/DSV
     d[11]=(void*)dev_crIL;                                                                            // CreateInputLayout
     d[12]=(void*)dev_cr5;d[13]=(void*)dev_cr5;d[14]=(void*)dev_cr5;d[15]=(void*)dev_cr5;d[16]=(void*)dev_cr5;d[17]=(void*)dev_cr5;d[18]=(void*)dev_cr5; // VS,GS,GSSO,PS,HS,DS,CS
