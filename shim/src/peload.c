@@ -3137,11 +3137,11 @@ static uint64_t g_hookseq;
 // [5]=r10 [6]=r9 [7]=r8 [8]=rdi [9]=rsi [10]=rbp [11]=rbx [12]=rdx [13]=rcx [14]=rax
 static void hook_log(uint64_t id,uint64_t* r){
     uint64_t seq=__sync_fetch_and_add(&g_hookseq,1);
-    uint64_t r13=r[2],r12=r[3],rdi=r[8],rsi=r[9],rbp=r[10],rbx=r[11];
-    // the field pointer for a borrow site is whichever reg holds it; print the ones used
-    char b[256]; int k=snprintf(b,sizeof b,"[hk#%llu id=%llu] thr=0x%x rbx=0x%llx r12=0x%llx r13=0x%llx rsi=0x%llx rdi=0x%llx rbp=0x%llx\n",
+    uint64_t r12=r[3],rbx=r[11]; uint64_t gsp=(uint64_t)(r+15); uint64_t ret=*(uint64_t*)gsp; // guest rsp & [rsp]
+    char b[256]; int k=snprintf(b,sizeof b,"[hk#%llu id=%llu] thr=0x%x rbx=0x%llx r12=0x%llx [r12]=0x%llx gsp=0x%llx [gsp]=exe+0x%llx\n",
         (unsigned long long)seq,(unsigned long long)id,pthread_mach_thread_np(pthread_self()),
-        (unsigned long long)rbx,(unsigned long long)r12,(unsigned long long)r13,(unsigned long long)rsi,(unsigned long long)rdi,(unsigned long long)rbp); (void)!write(2,b,k); }
+        (unsigned long long)rbx,(unsigned long long)r12,(unsigned long long)(r12>0x10000?*(uint64_t*)r12:0),
+        (unsigned long long)gsp,(unsigned long long)(ret>=0x140000000&&ret<0x142000000?ret-0x140000000:ret)); (void)!write(2,b,k); }
 static uint8_t* g_hookpool; static size_t g_hookoff;
 static void hook_one(uint8_t*base,uint64_t rva,int origlen,uint64_t id){
     if(!g_hookpool){ g_hookpool=mmap(0,1<<20,PROT_READ|PROT_WRITE|PROT_EXEC,MAP_PRIVATE|MAP_ANON,-1,0); if(g_hookpool==MAP_FAILED){g_hookpool=0;return;} }
