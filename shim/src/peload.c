@@ -649,19 +649,38 @@ static const GUID_ IID_ID3D11DeviceContext={0xc0bfa96c,0xe089,0x44fb,{0x8e,0xaf,
 static int guid_eq(const GUID_*a,const GUID_*b){ return a&&b&&a->D1==b->D1&&a->D2==b->D2&&a->D3==b->D3&&!memcmp(a->D4,b->D4,8); }
 static ComObj g_dxgidevice, g_dxgiadapter; static void* g_dxgidev_vtbl[16]; static void* g_dxgiadapter_vtbl[16];
 // ---- ID3D11DeviceChild base (slots 0-6) ----
-static int      MSABI d3d_QI(void*s,GUID_*r,void**pp){ (void)r; if(pp)*pp=s; return HR_OK; }
+static void qi_trace(const char*who,GUID_*r);
+static int      MSABI d3d_QI(void*s,GUID_*r,void**pp){ qi_trace("obj",r); if(pp)*pp=s; return HR_OK; }
 // device-level QI: route ID3D11Device*/IDXGIDevice*/context to the right object.
-static int      MSABI dev_QI(void*s,GUID_*r,void**pp){ (void)s; if(!pp) return HR_OK;
+static void qi_trace(const char*who,GUID_*r); // fwd
+static int      MSABI dev_QI(void*s,GUID_*r,void**pp){ (void)s; qi_trace("device",r); if(!pp) return HR_OK;
     if(guid_eq(r,&IID_IDXGIDevice)||guid_eq(r,&IID_IDXGIDevice1)) *pp=&g_dxgidevice;
     else if(guid_eq(r,&IID_ID3D11DeviceContext)) *pp=&g_d3dcontext;
     else *pp=&g_d3ddevice;   // ID3D11Device/Device1/unknown -> the device
     return HR_OK; }
-static int  MSABI dxgidev_GetAdapter(void*s,void**pp){ (void)s; if(pp)*pp=&g_dxgiadapter; return HR_OK; } // IDXGIDevice::GetAdapter -> HRESULT
+static int  MSABI dxgidev_GetAdapter(void*s,void**pp){ (void)s; if(getenv("PELOAD_TRACE_QI"))(void)!write(2,"  [GetAdapter]\n",15); if(pp)*pp=&g_dxgiadapter; return HR_OK; } // IDXGIDevice::GetAdapter -> HRESULT
 static int  MSABI dxgidev_GetParent(void*s,GUID_*r,void**pp){ (void)s;(void)r; if(pp)*pp=&g_dxgifactory; return HR_OK; }
+// Adapter QI: the frontend probes IDXGIAdapter3 (QueryVideoMemoryInfo for GPU mem
+// usage/budget). Returning self for that IID makes it think Adapter3 EXISTS, then
+// QueryVideoMemoryInfo returns garbage and it builds a null string -> fault. Report
+// only IUnknown/IDXGIObject/IDXGIAdapter; E_NOINTERFACE for Adapter1/2/3/4 so the
+// engine takes its valid "IDXGIAdapter3 unavailable" fallback.
+static const GUID_ IID_IUnknown     ={0x00000000,0x0000,0x0000,{0xc0,0x00,0x00,0x00,0x00,0x00,0x00,0x46}};
+static const GUID_ IID_IDXGIObject  ={0xaec22fb8,0x76f3,0x4639,{0x9b,0xe0,0x28,0xeb,0x43,0xa6,0x7a,0x2e}};
+static void qi_trace(const char*who,GUID_*r){ if(!getenv("PELOAD_TRACE_QI")||!r) return;
+    char b[120]; int k=snprintf(b,sizeof b,"  [QI %s] {%08X-%04X-%04X-...}\n",who,r->D1,r->D2,r->D3); (void)!write(2,b,k); }
+static int  MSABI adapter_QI(void*s,GUID_*r,void**pp){ qi_trace("adapter",r); if(!pp) return HR_OK;
+    if(guid_eq(r,&IID_IUnknown)||guid_eq(r,&IID_IDXGIObject)||guid_eq(r,&IID_IDXGIAdapter)){ *pp=s; return HR_OK; }
+    *pp=0; return (int)0x80004002; /*E_NOINTERFACE*/ }
 // DXGI_ADAPTER_DESC: Description WCHAR[128]@0, VendorId@256, DeviceId@260, ...,
 // DedicatedVideoMemory(SIZE_T)@272. Give a real name + nonzero VRAM so the
 // frontend's "Graphics card: <name>" path has valid data.
-static int  MSABI adapter_GetDesc(void*s,void*pd){ (void)s; if(!pd) return HR_OK; uint8_t*d=pd; memset(d,0,320);
+// DXGI_ADAPTER_DESC is EXACTLY 0x130 (304) bytes: Description WCHAR[128]@0,
+// VendorId@256, DeviceId@260, SubSysId@264, Revision@268, DedicatedVideoMemory@272,
+// DedicatedSystemMemory@280, SharedSystemMemory@288, AdapterLuid@296. Writing more
+// (we used 320) overflows the caller's 304-byte buffer and smashes its saved
+// registers (rbx) -> a null string arg -> 0xC0000005 in the GPU-info log formatter.
+static int  MSABI adapter_GetDesc(void*s,void*pd){ (void)s; if(getenv("PELOAD_TRACE_QI"))(void)!write(2,"  [adapter.GetDesc]\n",20); if(!pd) return HR_OK; uint8_t*d=pd; memset(d,0,304);
     const char*nm="Reclaimer GL (OpenGL on Metal)"; uint16_t*w=(uint16_t*)d; int i=0; for(; nm[i]&&i<127;i++) w[i]=(uint8_t)nm[i]; w[i]=0;
     *(uint32_t*)(d+256)=0x10de; *(uint32_t*)(d+260)=0x1; *(uint64_t*)(d+272)=(uint64_t)4096*1024*1024; *(uint64_t*)(d+280)=(uint64_t)2048*1024*1024; *(uint64_t*)(d+288)=(uint64_t)2048*1024*1024;
     return HR_OK; }
@@ -807,7 +826,7 @@ static void d3d_init(void){
     gd[6]=(void*)dxgidev_GetParent;gd[7]=(void*)dxgidev_GetAdapter;
     g_dxgidevice.vtbl=gd;
     void** ga=g_dxgiadapter_vtbl; for(int i=0;i<16;i++) ga[i]=(void*)ctx_ret0;
-    ga[0]=(void*)d3d_QI;ga[1]=(void*)d3d_AddRef;ga[2]=(void*)d3d_Release;ga[6]=(void*)dxgidev_GetParent;ga[8]=(void*)adapter_GetDesc;
+    ga[0]=(void*)adapter_QI;ga[1]=(void*)d3d_AddRef;ga[2]=(void*)d3d_Release;ga[6]=(void*)dxgidev_GetParent;ga[8]=(void*)adapter_GetDesc;
     g_dxgiadapter.vtbl=ga;
     void** x=g_d3dctx_vtbl; for(int i=0;i<160;i++) x[i]=(void*)ctx_ret0;
     x[0]=(void*)d3d_QI;x[1]=(void*)d3d_AddRef;x[2]=(void*)d3d_Release;x[3]=(void*)ctx_GetDevice;x[4]=(void*)d3d_GetPD;x[5]=(void*)d3d_SetPD;x[6]=(void*)d3d_SetPDI;
