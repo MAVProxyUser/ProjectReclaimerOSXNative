@@ -668,7 +668,8 @@ static int  MSABI dxgidev_GetParent(void*s,GUID_*r,void**pp){ (void)s;(void)r; i
 static const GUID_ IID_IUnknown     ={0x00000000,0x0000,0x0000,{0xc0,0x00,0x00,0x00,0x00,0x00,0x00,0x46}};
 static const GUID_ IID_IDXGIObject  ={0xaec22fb8,0x76f3,0x4639,{0x9b,0xe0,0x28,0xeb,0x43,0xa6,0x7a,0x2e}};
 static void qi_trace(const char*who,GUID_*r){ if(!getenv("PELOAD_TRACE_QI")||!r) return;
-    char b[120]; int k=snprintf(b,sizeof b,"  [QI %s] {%08X-%04X-%04X-...}\n",who,r->D1,r->D2,r->D3); (void)!write(2,b,k); }
+    char b[120]; int k=snprintf(b,sizeof b,"  [QI %s] {%08X-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X}\n",who,r->D1,r->D2,r->D3,
+        r->D4[0],r->D4[1],r->D4[2],r->D4[3],r->D4[4],r->D4[5],r->D4[6],r->D4[7]); (void)!write(2,b,k); }
 static int  MSABI adapter_QI(void*s,GUID_*r,void**pp){ qi_trace("adapter",r); if(!pp) return HR_OK;
     if(guid_eq(r,&IID_IUnknown)||guid_eq(r,&IID_IDXGIObject)||guid_eq(r,&IID_IDXGIAdapter)){ *pp=s; return HR_OK; }
     *pp=0; return (int)0x80004002; /*E_NOINTERFACE*/ }
