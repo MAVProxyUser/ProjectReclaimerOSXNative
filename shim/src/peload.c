@@ -536,7 +536,8 @@ static void*  MSABI i_GetCurrentProcess(void){ return (void*)-1; }
 static int MSABI i_ReadProcessMemory(void*h,const void*addr,void*buf,uint64_t n,uint64_t*rd){ (void)h;
     if(getenv("PELOAD_TRACE_RPM")){ char t[160]; uint64_t a=(uint64_t)addr; const char*mod=(a>=0x180000000&&a<0x187000000)?"halo3":(a>=0x140000000&&a<0x14c000000)?"exe":"?";
         uint64_t off=(a>=0x180000000&&a<0x187000000)?a-0x180000000:(a>=0x140000000&&a<0x14c000000)?a-0x140000000:a;
-        snprintf(t,sizeof t,"  [RPM] %s+0x%llx n=0x%llx\n",mod,(unsigned long long)off,(unsigned long long)n); ws(t);}
+        uint64_t v=0; if(n>=1&&n<=8) memcpy(&v,addr,n);
+        snprintf(t,sizeof t,"  [RPM] %s+0x%llx n=0x%llx val=0x%llx\n",mod,(unsigned long long)off,(unsigned long long)n,(unsigned long long)v); ws(t);}
     memcpy(buf,addr,n); if(rd)*rd=n; return 1; }
 static int MSABI i_WriteProcessMemory(void*h,void*addr,const void*buf,uint64_t n,uint64_t*wr){ (void)h;
     uintptr_t pg=(uintptr_t)addr & ~0xfffULL; size_t len=(((uintptr_t)addr+n)-pg+0xfff)&~0xfffULL;
@@ -1006,7 +1007,15 @@ static void ws2_err(int e){ t_wsa_err = e? (int)errno2wsa(e):0; }
 // Windows sockaddr_in -> BSD sockaddr_storage; returns BSD length or 0
 static int sa_w2b(const void*win,int wl,struct sockaddr_storage*bsd){ if(!win||wl<2) return 0; const uint8_t*w=win;
     uint16_t fam=(uint16_t)(w[0]|(w[1]<<8)); memset(bsd,0,sizeof *bsd);
-    if(fam==2){ struct sockaddr_in*b=(void*)bsd; b->sin_len=sizeof *b; b->sin_family=AF_INET; memcpy(&b->sin_port,w+2,2); memcpy(&b->sin_addr,w+4,4); return sizeof *b; }
+    if(fam==2){ struct sockaddr_in*b=(void*)bsd; b->sin_len=sizeof *b; b->sin_family=AF_INET; memcpy(&b->sin_port,w+2,2); memcpy(&b->sin_addr,w+4,4);
+        // macOS routes ONLY 127.0.0.1 to loopback, not all of 127/8 like Linux/Windows.
+        // Reclaimer's native-UDP transport assigns unique 127.x.x.x peer IPs, so bind/
+        // connect/sendto to e.g. 127.3.164.238 fail with EADDRNOTAVAIL -> the guardian
+        // match can't host -> halo3 never selects the map -> "map catalog ... got ''".
+        // Collapse 127/8 -> 127.0.0.1 consistently (peers stay distinct by port). Disable
+        // with PELOAD_NO_LOOPBACK_FIX.
+        { uint8_t*ip=(uint8_t*)&b->sin_addr; if(ip[0]==127 && !(ip[1]==0&&ip[2]==0&&ip[3]==1) && !getenv("PELOAD_NO_LOOPBACK_FIX")){ ip[1]=0;ip[2]=0;ip[3]=1; } }
+        return sizeof *b; }
     if(fam==23){ struct sockaddr_in6*b=(void*)bsd; b->sin6_len=sizeof *b; b->sin6_family=AF_INET6; memcpy(&b->sin6_port,w+2,2); memcpy(&b->sin6_flowinfo,w+4,4); memcpy(&b->sin6_addr,w+8,16); memcpy(&b->sin6_scope_id,w+24,4); return sizeof *b; }
     return 0; }
 // BSD sockaddr -> Windows sockaddr; writes up to *wl bytes, sets *wl to size used
@@ -3411,6 +3420,18 @@ static void hook_log(uint64_t id,uint64_t* r){
             char nm[48]; nm[0]=0; if(hook_safe(dptr)) hook_str(nm,sizeof nm,dptr, d8<64?d8:32);
             char b[160]; int m=snprintf(b,sizeof b,"  [cat#%llu] e=0x%llx id=0x%x [+8]=0x%llx [+0x10]=0x%llx \"%s\"\n",
                 (unsigned long long)i,(unsigned long long)e,eid,(unsigned long long)d8,(unsigned long long)dptr,nm); (void)!write(2,b,m); }
+        return; }
+    // Stack-walk mode (id==0x57acc): scan the guest stack for exe/halo3 return addrs,
+    // printing module+offset. Gives the REAL call chain regardless of the (unreliable)
+    // symbol map — use at a confirmed point to find callers/callees dynamically.
+    if(id==0x57acc){
+        char hd[96]; int k=snprintf(hd,sizeof hd,"[STACK seq=%llu] thr=0x%x gsp=0x%llx rcx=0x%llx rdx=0x%llx rbx=0x%llx r12=0x%llx\n",
+            (unsigned long long)seq,pthread_mach_thread_np(pthread_self()),(unsigned long long)gsp,
+            (unsigned long long)rcx,(unsigned long long)rdx,(unsigned long long)rbx,(unsigned long long)r12); (void)!write(2,hd,k);
+        uint64_t*sp=(uint64_t*)gsp; int printed=0;
+        for(int i=0;i<700 && printed<40;i++){ uint64_t v=sp[i];
+            if(v>=0x140000000ULL&&v<0x142000000ULL){ char b[64]; int m=snprintf(b,sizeof b,"   exe+0x%llx\n",(unsigned long long)(v-0x140000000ULL)); (void)!write(2,b,m); printed++; }
+            else if(v>=0x180000000ULL&&v<0x187000000ULL){ char b[64]; int m=snprintf(b,sizeof b,"   halo3+0x%llx\n",(unsigned long long)(v-0x180000000ULL)); (void)!write(2,b,m); printed++; } }
         return; }
     char s1[80]; hook_str(s1,sizeof s1,rcx,rdx); // rcx=ptr,rdx=len (common Rust &str arg)
     char b[420]; int k=snprintf(b,sizeof b,"[hk#%llu id=%llu] thr=0x%x rax=0x%llx rcx=0x%llx rdx=0x%llx r8=0x%llx rbx=0x%llx rsi=0x%llx rdi=0x%llx r12=0x%llx r13=0x%llx r14=0x%llx r15=0x%llx [gsp]=exe+0x%llx str(rcx,rdx)=\"%s\"\n",
