@@ -1887,13 +1887,15 @@ static void MSABI i_RaiseException(uint32_t code,uint32_t flags,uint32_t n,const
     // Only for C++/Rust throws (the stack-switch case); cleared after dispatch.
     if(code==0xE06D7363){ memcpy(g_exc_ctx,ctx,CTXSZ); g_exc_valid=1; }
     if(getenv("PELOAD_TRACE_SEH")&&code==0xE06D7363){ char t[128]; int k=snprintf(t,sizeof t,
-        "  [raise] thr=0x%x guest_rip=0x%llx guest_rsp=0x%llx main=%d\n",pthread_mach_thread_np(pthread_self()),
-        (unsigned long long)(uint64_t)guest_rip,(unsigned long long)guest_rsp,pthread_main_np()); (void)!write(2,t,k);}
+        "  [raise] thr=0x%x main=%d guest_rip=0x%llx guest_rsp=0x%llx\n",pthread_mach_thread_np(pthread_self()),
+        pthread_main_np(),(unsigned long long)(uint64_t)guest_rip,(unsigned long long)guest_rsp); (void)!write(2,t,k);}
     if(getenv("PELOAD_TRACE_STACK")&&code==0xE06D7363){ // raw scan: all exe/halo3 return addrs on the stack
-        uint64_t sp=guest_rsp; int n=0;
-        for(int i=0;i<16384 && n<120;i++){ uint64_t v=*(uint64_t*)(sp+i*8);
+        uint64_t sp=guest_rsp; int n=0, uic=0;
+        for(int i=0;i<65536 && n<400;i++){ uint64_t v=*(uint64_t*)(sp+i*8);
             int e=v>=0x140000000ull&&v<0x142000000ull, h=v>=0x180000000ull&&v<0x182000000ull;
-            if(e||h){ char r[64]; int k=snprintf(r,sizeof r,"    stk[%d] %s+0x%llx\n",n,e?"exe":"halo3",(unsigned long long)(v-(e?0x140000000ull:0x180000000ull))); (void)!write(2,r,k); n++; } } }
+            uint64_t rv=v-0x140000000ull;
+            if(e && rv>=0x550e00 && rv<0x557d3c){ char r[80]; int k=snprintf(r,sizeof r,"    *** UI_COMPOSITION frame #%d stk[%d] exe+0x%llx\n",uic++,n,(unsigned long long)rv); (void)!write(2,r,k); }
+            if(e||h){ if(n<160){ char r[64]; int k=snprintf(r,sizeof r,"    stk[%d] %s+0x%llx\n",n,e?"exe":"halo3",(unsigned long long)(v-(e?0x140000000ull:0x180000000ull))); (void)!write(2,r,k);} n++; } } }
     EXREC rec; memset(&rec,0,sizeof rec); rec.ExceptionCode=code; rec.ExceptionFlags=flags;
     rec.ExceptionAddress=(void*)CTX_RIP(ctx); rec.NumberParameters=(n>15?15:n);
     if(args) for(uint32_t i=0;i<rec.NumberParameters;i++) rec.ExceptionInformation[i]=((const uint64_t*)args)[i];
@@ -3134,7 +3136,11 @@ static void crashsig(int sig, siginfo_t *info, void *ucv){
         for(int i=0;i<g_bp_n;i++) if(g_bp_addr[i]==hit){ uint8_t*p=(uint8_t*)hit; *p=g_bp_orig[i]; sys_icache_invalidate(p,1);
             g_bp_cnt[i]++; uc->uc_mcontext->__ss.__rip=hit;   // rewind to re-execute original insn
             uc->uc_mcontext->__ss.__rflags |= 0x100ull; g_bp_rearm=i;   // single-step, then re-arm
-            if(g_bp_cnt[i]<=20){ char b[96]; int k=snprintf(b,sizeof b,"[bp] HIT exe+0x%llx #%llu\n",(unsigned long long)(hit-(uint64_t)g_base),(unsigned long long)g_bp_cnt[i]); (void)!write(2,b,k);} return; } }
+            if(g_bp_cnt[i]<=40){ uint64_t rbx=uc->uc_mcontext->__ss.__rbx, rsi=uc->uc_mcontext->__ss.__rsi, rdi=uc->uc_mcontext->__ss.__rdi, r15=uc->uc_mcontext->__ss.__r15;
+                uint64_t vbx = (rbx>0x1000)? *(uint64_t*)rbx : 0;
+                char b[200]; int k=snprintf(b,sizeof b,"[bp] HIT exe+0x%llx #%llu thr=0x%x rbx=0x%llx [rbx]=0x%llx rsi=0x%llx rdi=0x%llx r15=0x%llx\n",
+                    (unsigned long long)(hit-(uint64_t)g_base),(unsigned long long)g_bp_cnt[i],pthread_mach_thread_np(pthread_self()),
+                    (unsigned long long)rbx,(unsigned long long)vbx,(unsigned long long)rsi,(unsigned long long)rdi,(unsigned long long)r15); (void)!write(2,b,k);} return; } }
     // If this fault is a write/read into a guard page, name the owning block +
     // overflow distance BEFORE handing off to the guest VEH (which may exit).
     if((sig==SIGSEGV||sig==SIGBUS) && info && info->si_addr && heapguard()){
