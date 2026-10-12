@@ -252,3 +252,36 @@ patching 0x76d2d0->ret0 alone didn't un-skip it.
 2. Find where catalog entry+0x10 is WRITTEN (the populate step) and why it's skipped for guardian.
 3. If the map genuinely can't be hosted without halo3 D3D game rendering, pivot to the menu
    fallback (un-skip all gates) since the menu is pure GL and needs no halo3 D3D.
+
+---
+
+## SESSION 6 (cont.) — ROOT CAUSE of the empty map catalog: the Forge asset library never builds
+
+The guardian map-catalog resolve ("got ''") traces to the **Forge asset library**
+(ReclaimerCache/forge-maps/forgelib, ~340 MB of every map's Forge objects; also the
+source of the main-menu scenery) never being built — only a stale 0-byte
+`forgelib.lock` from a crashed first-build. Every run saw the lock ("asset library
+already being prepared") and skipped. Clearing the lock triggers the build, which
+exposed missing kernel32 surface the builder needs (all now implemented, commit e6e2b02):
+- Import integrity check (exe+0x4b9480): halo3's imports {CreateFileW, CreateFileA,
+  CloseHandle, GetFileSizeEx, CreateIoCompletionPort, ReadFileEx, ReadFile} must each
+  == GetProcAddress(kernel32,name). Missing names (CreateFileA, CreateIoCompletionPort,
+  ReadFileEx) got a fresh make_stub per call -> mismatch -> "halo3.dll's CreateFileA
+  import is not kernel32's". Added to resolve_impl (one stable ptr for both paths).
+- Async tokio/mio I/O driver: needs a real IOCP. Added CreateIoCompletionPort (real
+  completion-queue obj), PostQueuedCompletionStatus, GetQueuedCompletionStatus(Ex),
+  GetOverlappedResult; overlapped ReadFile posts a packet. Fixed "failed to wake I/O
+  driver" + tokio err-203 panic.
+- Memory-mapping: builder maps each map (CreateFileMappingW/A + MapViewOfFile). Added
+  over mmap() (FILE_MAP_READ -> PROT_READ; requesting PROT_WRITE on O_RDONLY = EACCES=5).
+
+With these the per-map "Forge objects unavailable" errors are GONE; the build now runs
+and processes ~40 maps. REMAINING: the build is async ("building it while the game
+starts") and the short-lived probe worker exits at the guardian resolve before it
+finishes, so forgelib is never written -> next run still skips. Forcing past the
+guardian assertion keeps the worker alive but the forced bogus map eventually faults
+the main thread (0xC0000005 at exe+0x18D46B4), killing the bg build. mainmenu.map does
+NOT exist (menu scenery is synthetic from campaign maps; its "error 2" is expected);
+040_voi.map (477MB campaign map) is "left out" with os-error-1 (likely no forge data,
+non-fatal). NEXT: get one complete forgelib build cached (without the main-thread
+crash), then confirm a normal run resolves guardian / renders.
