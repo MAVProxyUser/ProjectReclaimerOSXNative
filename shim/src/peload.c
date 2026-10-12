@@ -525,6 +525,14 @@ static int    MSABI i_TlsFree(uint32_t i){ (void)i; return 1; }
 static void*  MSABI i_GetStdHandle(uint32_t id){ return (void*)(intptr_t)(id==(uint32_t)-10?1: id==(uint32_t)-11?2: id==(uint32_t)-12?3: 0); }
 static int    MSABI i_WriteFile(void *h, const void *buf, uint32_t n, uint32_t *wr, void *ov){
     (void)ov; intptr_t hv=(intptr_t)h; int fd = (hv==2)?1 : (hv==3)?2 : (hv>=0x1000)?(int)(hv-0x1000) : -1;
+    // PELOAD_TRACE_BT: when a watched log line is written, scan the stack for exe/halo3
+    // return addresses to find the REAL emitter + callers (bypasses unreliable symmap).
+    if(fd>=0 && n>8 && n<4096 && getenv("PELOAD_TRACE_BT")){ const char*w=getenv("PELOAD_TRACE_BT");
+        if(memmem(buf,n,w,strlen(w))){ (void)!write(2,"  [BT] matched; stack exe/halo3 returns:\n",41);
+            uint64_t*sp=(uint64_t*)__builtin_frame_address(0); int pr=0;
+            for(int i=0;i<4000 && pr<60;i++){ uint64_t v=sp[i];
+                if(v>=0x140000000ULL&&v<0x142000000ULL){ char b[48]; int m=snprintf(b,sizeof b,"     exe+0x%llx\n",(unsigned long long)(v-0x140000000ULL)); (void)!write(2,b,m); pr++; }
+                else if(v>=0x180000000ULL&&v<0x187000000ULL){ char b[48]; int m=snprintf(b,sizeof b,"     halo3+0x%llx\n",(unsigned long long)(v-0x180000000ULL)); (void)!write(2,b,m); pr++; } } } }
     long k = fd>=0? write(fd,buf,n) : 0; if(wr)*wr=(uint32_t)(k<0?0:k); return fd>=0; }
 static int    MSABI i_WriteConsoleW(void *h, const uint16_t *s, uint32_t n, uint32_t *wr, void *rsv){
     (void)rsv; int fd=(h==(void*)3)?2:1; for(uint32_t i=0;i<n;i++){ char c=(s[i]<128)?(char)s[i]:'?'; (void)!write(fd,&c,1);} if(wr)*wr=n; return 1; }
@@ -546,6 +554,8 @@ static int MSABI i_WriteProcessMemory(void*h,void*addr,const void*buf,uint64_t n
     // data/stack (or `wr` shares the page), forcing r-x faults the next write.
     // Leave it writable+executable (RWX runs under Rosetta) and invalidate the
     // instruction cache so a code patch re-translates.
+    if(getenv("PELOAD_TRACE_RPM")){ uint64_t a=(uint64_t)addr; if(a>=0x180000000&&a<0x187000000){ uint64_t v=0; if(n>=1&&n<=8) memcpy(&v,buf,n);
+        char t[128]; snprintf(t,sizeof t,"  [WPM] halo3+0x%llx n=0x%llx val=0x%llx\n",(unsigned long long)(a-0x180000000),(unsigned long long)n,(unsigned long long)v); ws(t);} }
     memcpy(addr,buf,n); sys_icache_invalidate(addr,(size_t)n); if(wr)*wr=n; return 1; }
 static void*  MSABI i_GetCurrentThread(void){ return (void*)-2; }
 // FlushInstructionCache: the engine calls this after patching its own .text
@@ -1259,6 +1269,12 @@ static uint32_t MSABI i_GetTickCount(void){ return (uint32_t)(mach_absolute_time
 static int MSABI i_NtWriteFile(void*h,void*ev,void*apc,void*apcctx,void*iosb,const void*buf,uint32_t len,void*off,void*key){
     (void)ev;(void)apc;(void)apcctx;(void)key; intptr_t hv=(intptr_t)h;
     int fd = (hv==2)?1 : (hv==3)?2 : (hv>=0x1000)?(int)(hv-0x1000) : -1;
+    if(fd>=0 && len>8 && len<4096 && getenv("PELOAD_TRACE_BT")){ const char*w=getenv("PELOAD_TRACE_BT");
+        if(memmem(buf,len,w,strlen(w))){ (void)!write(2,"  [BT-Nt] matched; stack exe/halo3 returns:\n",44);
+            uint64_t*sp=(uint64_t*)__builtin_frame_address(0); int pr=0;
+            for(int i=0;i<4000 && pr<60;i++){ uint64_t v=sp[i];
+                if(v>=0x140000000ULL&&v<0x142000000ULL){ char b[48]; int m=snprintf(b,sizeof b,"     exe+0x%llx\n",(unsigned long long)(v-0x140000000ULL)); (void)!write(2,b,m); pr++; }
+                else if(v>=0x180000000ULL&&v<0x187000000ULL){ char b[48]; int m=snprintf(b,sizeof b,"     halo3+0x%llx\n",(unsigned long long)(v-0x180000000ULL)); (void)!write(2,b,m); pr++; } } } }
     int64_t o = off? *(int64_t*)off : -1; long k;
     if(fd>=0 && hv>=0x1000 && o>=0) k=pwrite(fd,buf,len,(off_t)o);
     else k = fd>=0? write(fd,buf,len) : len;
@@ -3420,6 +3436,14 @@ static void hook_log(uint64_t id,uint64_t* r){
             char nm[48]; nm[0]=0; if(hook_safe(dptr)) hook_str(nm,sizeof nm,dptr, d8<64?d8:32);
             char b[160]; int m=snprintf(b,sizeof b,"  [cat#%llu] e=0x%llx id=0x%x [+8]=0x%llx [+0x10]=0x%llx \"%s\"\n",
                 (unsigned long long)i,(unsigned long long)e,eid,(unsigned long long)d8,(unsigned long long)dptr,nm); (void)!write(2,b,m); }
+        return; }
+    // rbp-args mode (id==0x90b0): dump the fmt arg slots the refusal builder fills
+    // ([rbp+0x160/0x168] and [rbp+0x170/0x178] = (ptr,len) pairs) + their strings.
+    if(id==0x90b0){ uint64_t rbp=r[10];
+        char b[400]; int k=snprintf(b,sizeof b,"[ARGS seq=%llu] rbp=0x%llx\n",(unsigned long long)seq,(unsigned long long)rbp); (void)!write(2,b,k);
+        for(int o=0x150;o<=0x1a0;o+=0x10){ if(!hook_safe(rbp)) break; uint64_t pp=*(uint64_t*)(rbp+o), ln=*(uint64_t*)(rbp+o+8);
+            char s[80]; hook_str(s,sizeof s,pp, ln<80?ln:79);
+            char m[160]; int j=snprintf(m,sizeof m,"   [rbp+0x%x]=0x%llx len=0x%llx \"%s\"\n",o,(unsigned long long)pp,(unsigned long long)ln,s); (void)!write(2,m,j); }
         return; }
     // Stack-walk mode (id==0x57acc): scan the guest stack for exe/halo3 return addrs,
     // printing module+offset. Gives the REAL call chain regardless of the (unreliable)
