@@ -2123,14 +2123,48 @@ static void MSABI i_WakeByAddressAll(void*a){ wab_ensure(); int b=wab_bucket(a);
 // (per-thread %gs) + a fresh copy of the static TLS block. ----
 #include <pthread.h>
 #include <malloc/malloc.h>
-static uint8_t *g_peb_ptr; static uint8_t *g_tls_src; static uint64_t g_tls_raw, g_tls_total;
+static uint8_t *g_peb_ptr;
+// Multi-module static TLS. Each PE with a TLS directory (exe, halo3.dll, CRT DLLs)
+// has its OWN __declspec(thread) index + its own per-thread data block. If only the
+// exe's TLS is set up (index 0), halo3's _tls_index global stays 0 and halo3 reads
+// the EXE's block at gs:[0x58][0] -> wrong data -> e.g. a thread-local singleton
+// slot reads a bogus pointer and faults. register_tls() assigns each module a
+// distinct index (sharing g_tlsnext with TlsAlloc so dynamic+static never collide),
+// publishes the main-thread block, and records the template so thread_tramp can
+// build a fresh block per index on every new thread.
+#define MAX_TLSMODS 16
+static struct { uint8_t* src; uint64_t raw, total; uint32_t index; } g_tlsmods[MAX_TLSMODS];
+static int g_ntlsmods;
+static void* g_tls_array[128];   // the MAIN thread's TLS pointer array (published at gs:0x58)
+typedef struct { uint64_t Start, End, Index, Callbacks; uint32_t Zero, Flags; } TLSDIR_;
+static void register_tls(void* tlsdir, uint8_t* modbase, int fixed_index){
+    TLSDIR_* t=(TLSDIR_*)tlsdir; if(!t) return;
+    uint32_t idx;
+    if(fixed_index>=0) idx=(uint32_t)fixed_index;
+    else { pthread_mutex_lock(&g_tlsm); idx = g_tlsnext<128? g_tlsnext++ : 0; pthread_mutex_unlock(&g_tlsm); }
+    uint64_t raw = t->End - t->Start, total = raw + t->Zero;
+    uint8_t* block = malloc(total?total:1);
+    if(raw) memcpy(block,(void*)t->Start,raw);
+    if(total>raw) memset(block+raw,0,total-raw);
+    *(uint32_t*)t->Index = idx;          // write the module's TLS index global
+    g_tls_array[idx]=block;              // main thread's block for this index
+    if(g_ntlsmods<MAX_TLSMODS){ g_tlsmods[g_ntlsmods].src=(uint8_t*)t->Start; g_tlsmods[g_ntlsmods].raw=raw; g_tlsmods[g_ntlsmods].total=total; g_tlsmods[g_ntlsmods].index=idx; g_ntlsmods++; }
+    ws("  static TLS idx "); whex(idx); ws("  block "); whexn((uint64_t)block); ws(" size "); whex(total);
+    if(t->Callbacks){ uint64_t* cb=(uint64_t*)t->Callbacks;
+        for(int i=0; cb[i]; i++){ ws("  TLS callback "); whex(cb[i]);
+            void (__attribute__((ms_abi)) *fn)(void*,uint32_t,void*) = (void*)cb[i]; fn(modbase,1/*PROCESS_ATTACH*/,0); } }
+}
 typedef uint32_t (MSABI *WinThreadProc)(void*);
 typedef struct { WinThreadProc fn; void *param; SyncObj *done; } TArg;
 static void *thread_tramp(void *a){
     TArg *t=a;
     uint8_t *teb=calloc(1,0x2000);
     void **tarr=calloc(128,sizeof(void*));
-    if(g_tls_total){ uint8_t *blk=malloc(g_tls_total); if(g_tls_raw) memcpy(blk,g_tls_src,g_tls_raw); if(g_tls_total>g_tls_raw) memset(blk+g_tls_raw,0,g_tls_total-g_tls_raw); tarr[0]=blk; }
+    // Fresh per-thread block for EVERY module's TLS index (exe, halo3, CRT), not
+    // just index 0 — otherwise halo3's thread-locals alias the exe's on new threads.
+    for(int i=0;i<g_ntlsmods;i++){ uint64_t tot=g_tlsmods[i].total, raw=g_tlsmods[i].raw;
+        uint8_t *blk=malloc(tot?tot:1); if(raw) memcpy(blk,g_tlsmods[i].src,raw); if(tot>raw) memset(blk+raw,0,tot-raw);
+        tarr[g_tlsmods[i].index]=blk; }
     *(uint64_t*)(teb+0x30)=(uint64_t)teb; *(uint64_t*)(teb+0x60)=(uint64_t)g_peb_ptr; *(uint64_t*)(teb+0x58)=(uint64_t)tarr;
     // macOS x86_64 uses %gs as the live pthread TSD base: key K lives at %gs:[K*8].
     // Windows wants TEB at gs:0x30, TLS-array at gs:0x58, PEB at gs:0x60 — which
@@ -3111,6 +3145,10 @@ static uint8_t *load_guest(const char *path, const char *name){
     bind_delay_imports(base,opt);   // halo3.dll delay-loads dxgi/d3d11/etc.
     set_protections(base,coff,opt);
     g_mods[g_nmods].name=name; g_mods[g_nmods].base=base; g_nmods++;
+    // Static TLS for this DLL (halo3, CRT): give it its own index + per-thread block
+    // BEFORE its DllMain/TLS callbacks run, so its __declspec(thread) globals resolve
+    // to its own data instead of aliasing the exe's TLS block (index 0).
+    if(opt->Dir[DIR_TLS].VA) register_tls((void*)(base+opt->Dir[DIR_TLS].VA), base, -1);
     if(strcasestr(name,"halo3")){ waves_prefill(base); patch_install(); hook_install(); } // patches can target halo3 now it's mapped
     ws("  guest "); ws(name); ws(" @ "); whex((uint64_t)base);
     uint64_t ep=opt->EntryRVA;
@@ -3423,7 +3461,7 @@ int main(int argc, char **argv){
     static uint8_t peb[0x1000] __attribute__((aligned(16)));
     *(uint64_t*)(teb+0x30) = (uint64_t)teb;   // NtTib.Self
     *(uint64_t*)(teb+0x60) = (uint64_t)peb;   // PEB
-    static void *tls_array[128];              // shared TLS pointer array
+    void **tls_array = g_tls_array;           // the global main-thread TLS array (register_tls fills it)
     *(uint64_t*)(teb+0x58) = (uint64_t)tls_array;
     __asm__ volatile("movq %0, %%gs:0x30" :: "r"((uint64_t)teb));
     __asm__ volatile("movq %0, %%gs:0x60" :: "r"((uint64_t)peb));
@@ -3521,26 +3559,10 @@ int main(int argc, char **argv){
     // TLS index. Without this, `mov rcx, gs:[0x58]` yields NULL and the first
     // __declspec(thread) access faults. So: build the TLS data block from the
     // image template, assign index 0, publish the array at TEB+0x58 / gs:0x58.
+    // The exe takes TLS index 0; DLLs (CRT, halo3) were/are registered via
+    // register_tls() in load_guest and get their own indices. All share g_tls_array.
     uint32_t tlsrva = opt->Dir[DIR_TLS].VA;
-    if(tlsrva){
-        TLSDIR *t = (TLSDIR*)rva(tlsrva);          // fields are VAs (relocated)
-        uint64_t raw = t->End - t->Start, total = raw + t->Zero;
-        uint8_t *block = malloc(total ? total : 1);
-        if(raw) memcpy(block, (void*)t->Start, raw);
-        if(t->Zero) memset(block+raw, 0, t->Zero);
-        *(uint32_t*)t->Index = 0;                   // this module's TLS index
-        tls_array[0] = block;                        // publish into shared array
-        g_tls_src=(uint8_t*)t->Start; g_tls_raw=raw; g_tls_total=total; // template for new threads
-        ws("  static TLS block "); whexn((uint64_t)block); ws(" size "); whex(total);
-        if(t->Callbacks){
-            uint64_t *cb = (uint64_t*)t->Callbacks;
-            for(int i=0; cb[i]; i++){
-                ws("  TLS callback "); whex(cb[i]);
-                void (__attribute__((ms_abi)) *fn)(void*,uint32_t,void*) = (void*)cb[i];
-                fn(g_base, 1 /*DLL_PROCESS_ATTACH*/, 0);
-            }
-        }
-    }
+    if(tlsrva) register_tls((void*)rva(tlsrva), g_base, 0);
 
     // entry point
     uint64_t entry = (uint64_t)rva(opt->EntryRVA);
