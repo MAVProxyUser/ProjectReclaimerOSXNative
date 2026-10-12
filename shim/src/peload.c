@@ -3248,13 +3248,19 @@ static void reentrancy_fix(void){ if(getenv("PELOAD_NO_REENTRANCY_FIX")||!g_base
 static uint64_t g_hookseq;
 // base points at the saved-regs block: [0]=r15 [1]=r14 [2]=r13 [3]=r12 [4]=r11
 // [5]=r10 [6]=r9 [7]=r8 [8]=rdi [9]=rsi [10]=rbp [11]=rbx [12]=rdx [13]=rcx [14]=rax
+// Try to render up to n bytes at p as ASCII (for Rust &str args: ptr=rcx,len=rdx).
+static void hook_str(char*out,int outsz,uint64_t p,uint64_t len){ int o=0;
+    if(p<0x10000||len==0||len>512){ out[0]=0; return; }
+    for(uint64_t i=0;i<len&&o<outsz-1;i++){ unsigned char c=((unsigned char*)p)[i]; out[o++]=(c>=0x20&&c<0x7f)?c:'.'; } out[o]=0; }
 static void hook_log(uint64_t id,uint64_t* r){
     uint64_t seq=__sync_fetch_and_add(&g_hookseq,1);
-    uint64_t r12=r[3],rbx=r[11]; uint64_t gsp=(uint64_t)(r+15); uint64_t ret=*(uint64_t*)gsp; // guest rsp & [rsp]
-    char b[256]; int k=snprintf(b,sizeof b,"[hk#%llu id=%llu] thr=0x%x rbx=0x%llx r12=0x%llx [r12]=0x%llx gsp=0x%llx [gsp]=exe+0x%llx\n",
+    uint64_t rbx=r[11],rcx=r[13],rdx=r[12],r8=r[7],r12=r[3]; uint64_t gsp=(uint64_t)(r+15); uint64_t ret=*(uint64_t*)gsp;
+    // General: dump rcx/rdx/r8/rbx/r12 + render rcx as a Rust &str (ptr=rcx,len=rdx).
+    char s1[96]; hook_str(s1,sizeof s1,rcx,rdx);
+    char b[416]; int k=snprintf(b,sizeof b,"[hk#%llu id=%llu] thr=0x%x rcx=0x%llx rdx=0x%llx r8=0x%llx rbx=0x%llx r12=0x%llx [gsp]=exe+0x%llx str(rcx,rdx)=\"%s\"\n",
         (unsigned long long)seq,(unsigned long long)id,pthread_mach_thread_np(pthread_self()),
-        (unsigned long long)rbx,(unsigned long long)r12,(unsigned long long)(r12>0x10000?*(uint64_t*)r12:0),
-        (unsigned long long)gsp,(unsigned long long)(ret>=0x140000000&&ret<0x142000000?ret-0x140000000:ret)); (void)!write(2,b,k); }
+        (unsigned long long)rcx,(unsigned long long)rdx,(unsigned long long)r8,(unsigned long long)rbx,(unsigned long long)r12,
+        (unsigned long long)(ret>=0x140000000&&ret<0x142000000?ret-0x140000000:ret),s1); (void)!write(2,b,k); }
 static uint8_t* g_hookpool; static size_t g_hookoff;
 static void hook_one(uint8_t*base,uint64_t rva,int origlen,uint64_t id){
     if(!g_hookpool){ g_hookpool=mmap(0,1<<20,PROT_READ|PROT_WRITE|PROT_EXEC,MAP_PRIVATE|MAP_ANON,-1,0); if(g_hookpool==MAP_FAILED){g_hookpool=0;return;} }
