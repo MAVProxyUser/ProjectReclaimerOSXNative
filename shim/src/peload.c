@@ -636,8 +636,29 @@ static D3DObj* d3dobj(void** vt, uint32_t kind, uint64_t size){
         } else o->data=calloc(1,size);
     }
     return o; }
+// ---- known interface IIDs + per-IID QueryInterface ----
+// The frontend (ui_composition) does IDXGISwapChain::GetDevice(ID3D11Device) and
+// device.QueryInterface(IDXGIDevice); returning the WRONG vtable makes later method
+// calls misbehave. Hand back the right object per IID.
+static const GUID_ IID_ID3D11Device   ={0xdb6f6ddb,0xac77,0x4e88,{0x82,0x53,0x81,0x9d,0xf9,0xbb,0xf1,0x40}};
+static const GUID_ IID_ID3D11Device1  ={0xa04bfb29,0x08ef,0x43d6,{0xa4,0x9c,0xa9,0xbd,0xbd,0xcb,0xe6,0x86}};
+static const GUID_ IID_IDXGIDevice    ={0x54ec77fa,0x1377,0x44e6,{0x8c,0x32,0x88,0xfd,0x5f,0x44,0xc8,0x4c}};
+static const GUID_ IID_IDXGIDevice1   ={0x77db970f,0x6276,0x48ba,{0xba,0x28,0x07,0x01,0x43,0xb4,0x39,0x2c}};
+static const GUID_ IID_IDXGIAdapter   ={0x2411e7e1,0x12ac,0x4ccf,{0xbd,0x14,0x97,0x98,0xe8,0x53,0x4d,0xc0}};
+static const GUID_ IID_ID3D11DeviceContext={0xc0bfa96c,0xe089,0x44fb,{0x8e,0xaf,0x26,0xf8,0x79,0x61,0x90,0xda}};
+static int guid_eq(const GUID_*a,const GUID_*b){ return a&&b&&a->D1==b->D1&&a->D2==b->D2&&a->D3==b->D3&&!memcmp(a->D4,b->D4,8); }
+static ComObj g_dxgidevice, g_dxgiadapter; static void* g_dxgidev_vtbl[16]; static void* g_dxgiadapter_vtbl[16];
 // ---- ID3D11DeviceChild base (slots 0-6) ----
 static int      MSABI d3d_QI(void*s,GUID_*r,void**pp){ (void)r; if(pp)*pp=s; return HR_OK; }
+// device-level QI: route ID3D11Device*/IDXGIDevice*/context to the right object.
+static int      MSABI dev_QI(void*s,GUID_*r,void**pp){ (void)s; if(!pp) return HR_OK;
+    if(guid_eq(r,&IID_IDXGIDevice)||guid_eq(r,&IID_IDXGIDevice1)) *pp=&g_dxgidevice;
+    else if(guid_eq(r,&IID_ID3D11DeviceContext)) *pp=&g_d3dcontext;
+    else *pp=&g_d3ddevice;   // ID3D11Device/Device1/unknown -> the device
+    return HR_OK; }
+static void MSABI dxgidev_GetAdapter(void*s,void**pp){ (void)s; if(pp)*pp=&g_dxgiadapter; }  // returns HRESULT in real DXGI; most callers just read *pp
+static int  MSABI dxgidev_GetParent(void*s,GUID_*r,void**pp){ (void)s;(void)r; if(pp)*pp=&g_dxgifactory; return HR_OK; }
+static int  MSABI adapter_GetDesc(void*s,void*pd){ (void)s; if(pd) memset(pd,0,8+128*2+16+8+8+8+8); return HR_OK; } // DXGI_ADAPTER_DESC ~0x148B; zero it
 static unsigned MSABI d3d_AddRef(void*s){ (void)s; return 1; }
 static unsigned MSABI d3d_Release(void*s){ (void)s; return 0; }
 static void     MSABI d3d_GetDevice(void*s,void**pp){ (void)s; if(pp)*pp=&g_d3ddevice; }
@@ -759,7 +780,7 @@ static void d3d_init(void){
     void** v=g_d3dview_vtbl; for(int i=0;i<7;i++) v[i]=c[i]; v[7]=(void*)view_GetResource;v[8]=(void*)view_GetDesc; for(int i=9;i<16;i++) v[i]=(void*)ctx_ret0;
     g_d3ddummyres_obj.vtbl=g_d3dres_vtbl; g_d3ddummyres_obj.kind=1; g_d3ddummyres_obj.size=1<<16; g_d3ddummyres_obj.data=calloc(1,1<<16); g_d3ddummyres=&g_d3ddummyres_obj;
     void** d=g_d3ddev_vtbl;
-    d[0]=(void*)d3d_QI;d[1]=(void*)d3d_AddRef;d[2]=(void*)d3d_Release;
+    d[0]=(void*)dev_QI;d[1]=(void*)d3d_AddRef;d[2]=(void*)d3d_Release;   // per-IID QI (device/dxgi device/context)
     d[3]=(void*)dev_CreateBuffer;d[4]=(void*)dev_CreateTexture1D;d[5]=(void*)dev_CreateTexture2D;d[6]=(void*)dev_CreateTexture3D;
     d[7]=(void*)dev_crView3;d[8]=(void*)dev_crView3;d[9]=(void*)dev_crView3;d[10]=(void*)dev_crView3; // SRV/UAV/RTV/DSV
     d[11]=(void*)dev_crIL;                                                                            // CreateInputLayout
@@ -772,6 +793,16 @@ static void d3d_init(void){
     d[37]=(void*)dev_GetFeatureLevel;d[38]=(void*)dev_GetCreationFlags;d[39]=(void*)dev_GetRemovedReason;d[40]=(void*)dev_GetImmediateContext;d[41]=(void*)dev_SetExceptionMode;d[42]=(void*)dev_GetExceptionMode;
     for(int i=43;i<48;i++) d[i]=(void*)ctx_ret0;
     g_d3ddevice.vtbl=d;
+    // IDXGIDevice (returned by device.QI(IDXGIDevice)): IUnknown + IDXGIObject +
+    // GetAdapter(7). A valid object here keeps ui_composition on its success path
+    // instead of the error path that leaks the app-state RefCell borrow.
+    void** gd=g_dxgidev_vtbl; for(int i=0;i<16;i++) gd[i]=(void*)ctx_ret0;
+    gd[0]=(void*)dev_QI;gd[1]=(void*)d3d_AddRef;gd[2]=(void*)d3d_Release;
+    gd[6]=(void*)dxgidev_GetParent;gd[7]=(void*)dxgidev_GetAdapter;
+    g_dxgidevice.vtbl=gd;
+    void** ga=g_dxgiadapter_vtbl; for(int i=0;i<16;i++) ga[i]=(void*)ctx_ret0;
+    ga[0]=(void*)d3d_QI;ga[1]=(void*)d3d_AddRef;ga[2]=(void*)d3d_Release;ga[6]=(void*)dxgidev_GetParent;ga[8]=(void*)adapter_GetDesc;
+    g_dxgiadapter.vtbl=ga;
     void** x=g_d3dctx_vtbl; for(int i=0;i<160;i++) x[i]=(void*)ctx_ret0;
     x[0]=(void*)d3d_QI;x[1]=(void*)d3d_AddRef;x[2]=(void*)d3d_Release;x[3]=(void*)ctx_GetDevice;x[4]=(void*)d3d_GetPD;x[5]=(void*)d3d_SetPD;x[6]=(void*)d3d_SetPDI;
     x[12]=(void*)ctx_DrawIndexed; x[13]=(void*)ctx_Draw;                                             // DrawIndexed, Draw
