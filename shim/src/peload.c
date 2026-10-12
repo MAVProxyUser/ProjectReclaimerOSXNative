@@ -1649,7 +1649,7 @@ static void gl_capture_resolve(void){
     bl(0,0,W,H, 0,0,W,H, 0x4000/*COLOR*/,0x2600/*NEAREST*/);
     bf(0x8CA8,g_capfbo); if(rb) rb(0x8CE0/*COLOR_ATTACHMENT0*/);
     unsigned char*px=calloc(1,(size_t)W*H*4); if(px){ gl_err(); rp(0,0,W,H,0x1908,0x1401,px); unsigned e=gl_err();
-        const char*home=getenv("HOME"); char path[512]; snprintf(path,sizeof path,"%s/reclaimer_fbo_latest.bmp",home?home:"/tmp"); // FBO the engine draws to (separate from GL_BACK)
+        const char*home=getenv("HOME"); char path[512]; snprintf(path,sizeof path,"%s/reclaimer_fbo_%dx%d.bmp",home?home:"/tmp",W,H); // FBO the engine draws to, size-stamped (keep distinct passes)
         FILE*f=fopen(path,"wb"); if(f){ uint32_t isz=(uint32_t)W*H*4,fsz=54+isz,off=54; uint8_t fh[14]={'B','M'}; memcpy(fh+2,&fsz,4); memcpy(fh+10,&off,4);
             uint8_t ih[40]={0}; uint32_t v40=40; memcpy(ih,&v40,4); memcpy(ih+4,&W,4); memcpy(ih+8,&H,4); uint16_t pl=1,bpp=32; memcpy(ih+12,&pl,2); memcpy(ih+14,&bpp,2); memcpy(ih+20,&isz,4);
             fwrite(fh,1,14,f); fwrite(ih,1,40,f);
