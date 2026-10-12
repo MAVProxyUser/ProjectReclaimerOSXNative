@@ -285,3 +285,30 @@ NOT exist (menu scenery is synthetic from campaign maps; its "error 2" is expect
 040_voi.map (477MB campaign map) is "left out" with os-error-1 (likely no forge data,
 non-fatal). NEXT: get one complete forgelib build cached (without the main-thread
 crash), then confirm a normal run resolves guardian / renders.
+
+---
+
+## SESSION 6 (cont.) — Forge library BUILT (cached); guardian resolve is a SEPARATE issue
+
+The Forge asset library now builds to completion and is cached on disk:
+  ReclaimerCache/forge-maps/forgelib-a067bf91a421.json (1.2MB) + .map (392MB).
+How: the build is async ("while the game starts") and the probe worker exits at the
+guardian resolve before it finishes. Trick to force completion once: patch the
+post-refusal call `exe+0x4e1226` (call engine_shell "stopping") to an infinite loop
+(ebfe909090) so the worker's main thread hangs ALIVE while the background build
+finalizes (partial grew 16K -> 121MB -> 392MB -> renamed to .json). The cache
+persists, so normal runs now use it (no rebuild unless the forgelib hash changes or
+the lock/json is deleted). NOTE: this is a manual one-time step; a clean solution
+would make the loader run the build to completion itself.
+
+IMPORTANT: building the forgelib did NOT fix the guardian map resolve — a normal run
+still fails "did not resolve the selected map: expected halo3\maps\guardian, got ''"
+with the Guardian/Slayer variant 'Custom Slayer' at custom_map:false and
+launch_inputs map_available:false / map_variant_available:false / game_variant_available:false.
+So the forge library (menu scenery/objects) and the available-maps catalog are
+DIFFERENT subsystems. The guardian resolve blocker is the available-maps catalog not
+containing a usable guardian entry (all match inputs are unset). The error-build at
+exe+0x4e0c93 (fn 0x4e0120) is NOT reached via the loop at 0x4e0abf (hooks there never
+fire), so that block-mapping was wrong; the real resolve path is still unlocated.
+NEXT: find where the available-maps catalog is populated and why guardian (whose
+guardian.map + guardian.mapinfo read fine, tags merge) isn't a usable entry.
