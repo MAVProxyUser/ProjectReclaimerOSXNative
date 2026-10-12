@@ -656,9 +656,15 @@ static int      MSABI dev_QI(void*s,GUID_*r,void**pp){ (void)s; if(!pp) return H
     else if(guid_eq(r,&IID_ID3D11DeviceContext)) *pp=&g_d3dcontext;
     else *pp=&g_d3ddevice;   // ID3D11Device/Device1/unknown -> the device
     return HR_OK; }
-static void MSABI dxgidev_GetAdapter(void*s,void**pp){ (void)s; if(pp)*pp=&g_dxgiadapter; }  // returns HRESULT in real DXGI; most callers just read *pp
+static int  MSABI dxgidev_GetAdapter(void*s,void**pp){ (void)s; if(pp)*pp=&g_dxgiadapter; return HR_OK; } // IDXGIDevice::GetAdapter -> HRESULT
 static int  MSABI dxgidev_GetParent(void*s,GUID_*r,void**pp){ (void)s;(void)r; if(pp)*pp=&g_dxgifactory; return HR_OK; }
-static int  MSABI adapter_GetDesc(void*s,void*pd){ (void)s; if(pd) memset(pd,0,8+128*2+16+8+8+8+8); return HR_OK; } // DXGI_ADAPTER_DESC ~0x148B; zero it
+// DXGI_ADAPTER_DESC: Description WCHAR[128]@0, VendorId@256, DeviceId@260, ...,
+// DedicatedVideoMemory(SIZE_T)@272. Give a real name + nonzero VRAM so the
+// frontend's "Graphics card: <name>" path has valid data.
+static int  MSABI adapter_GetDesc(void*s,void*pd){ (void)s; if(!pd) return HR_OK; uint8_t*d=pd; memset(d,0,320);
+    const char*nm="Reclaimer GL (OpenGL on Metal)"; uint16_t*w=(uint16_t*)d; int i=0; for(; nm[i]&&i<127;i++) w[i]=(uint8_t)nm[i]; w[i]=0;
+    *(uint32_t*)(d+256)=0x10de; *(uint32_t*)(d+260)=0x1; *(uint64_t*)(d+272)=(uint64_t)4096*1024*1024; *(uint64_t*)(d+280)=(uint64_t)2048*1024*1024; *(uint64_t*)(d+288)=(uint64_t)2048*1024*1024;
+    return HR_OK; }
 static unsigned MSABI d3d_AddRef(void*s){ (void)s; return 1; }
 static unsigned MSABI d3d_Release(void*s){ (void)s; return 0; }
 static void     MSABI d3d_GetDevice(void*s,void**pp){ (void)s; if(pp)*pp=&g_d3ddevice; }
