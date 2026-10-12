@@ -684,7 +684,8 @@ static D3DObj* mktex(uint32_t w,uint32_t h,uint32_t arr,uint32_t fmt,uint32_t ki
 static int MSABI dev_CreateTexture1D(void*t,const void*d,const void*init,void**pp){ (void)t;(void)init;
     uint32_t w=d?*(const uint32_t*)d:1, arr=d?*(const uint32_t*)((const char*)d+8):1, f=d?*(const uint32_t*)((const char*)d+12):0;
     if(pp)*pp=mktex(w,1,arr,f,3); return HR_OK; }
-static int MSABI dev_CreateTexture2D(void*t,const void*d,const void*init,void**pp){ (void)t;(void)init;
+static void d3dtrace(int i,const char*nm); // fwd
+static int MSABI dev_CreateTexture2D(void*t,const void*d,const void*init,void**pp){ (void)t;(void)init; d3dtrace(5,"CreateTexture2D");
     uint32_t w=d?*(const uint32_t*)d:1, h=d?*(const uint32_t*)((const char*)d+4):1, arr=d?*(const uint32_t*)((const char*)d+12):1, f=d?*(const uint32_t*)((const char*)d+16):0;
     if(pp)*pp=mktex(w,h,arr,f,2); return HR_OK; }
 static int MSABI dev_CreateTexture3D(void*t,const void*d,const void*init,void**pp){ (void)t;(void)init;
@@ -732,7 +733,17 @@ static void MSABI ctx_get_ib(void*t,void**ppIB,uint32_t*pFmt,uint32_t*pOff){ (vo
 static void MSABI ctx_get_vb(void*t,uint32_t start,uint32_t num,void**ppVB,uint32_t*pStr,uint32_t*pOff){ (void)t;(void)start; if(ppVB)for(uint32_t i=0;i<num&&i<256;i++)ppVB[i]=0; if(pStr)for(uint32_t i=0;i<num&&i<256;i++)pStr[i]=0; if(pOff)for(uint32_t i=0;i<num&&i<256;i++)pOff[i]=0; } // IAGetVertexBuffers
 static void MSABI ctx_om_get(void*t,uint32_t num,void**ppRTV,void**ppDSV){ (void)t; if(ppRTV)for(uint32_t i=0;i<num&&i<256;i++)ppRTV[i]=0; if(ppDSV)*ppDSV=0; } // OMGetRenderTargets
 // ---- IDXGISwapChain ----
-static int MSABI swap_Present(void*t,uint32_t sync,uint32_t fl){ (void)t;(void)sync;(void)fl; return HR_OK; }
+// --- D3D11 call tracing (PELOAD_TRACE_D3D): counts the hot render methods so we
+// can tell whether halo3 actually DRAWS via D3D11 (=> needs real D3D11->GL) or
+// only creates resources while the GL frontend does the drawing. ---
+static uint64_t g_d3dcnt[8]; // 0 Draw,1 DrawIndexed,2 DrawInstanced,3 DrawIdxInst,4 Present,5 CreateTex2D,6 CreateBuffer,7 Dispatch
+static void d3dtrace(int i,const char*nm){ if(!getenv("PELOAD_TRACE_D3D")) return; if((g_d3dcnt[i]++ %200)==0){ char b[80]; int k=snprintf(b,sizeof b,"  [d3d] %s #%llu\n",nm,(unsigned long long)g_d3dcnt[i]); (void)!write(2,b,k);} }
+static void MSABI ctx_DrawIndexed(void*t,uint32_t n,uint32_t s,int b){ (void)t;(void)n;(void)s;(void)b; d3dtrace(1,"DrawIndexed"); }
+static void MSABI ctx_Draw(void*t,uint32_t n,uint32_t s){ (void)t;(void)n;(void)s; d3dtrace(0,"Draw"); }
+static void MSABI ctx_DrawIndexedInstanced(void*t,uint32_t a,uint32_t b,uint32_t c,int d,uint32_t e){ (void)t;(void)a;(void)b;(void)c;(void)d;(void)e; d3dtrace(3,"DrawIndexedInstanced"); }
+static void MSABI ctx_DrawInstanced(void*t,uint32_t a,uint32_t b,uint32_t c,uint32_t d){ (void)t;(void)a;(void)b;(void)c;(void)d; d3dtrace(2,"DrawInstanced"); }
+static void MSABI ctx_Dispatch(void*t,uint32_t a,uint32_t b,uint32_t c){ (void)t;(void)a;(void)b;(void)c; d3dtrace(7,"Dispatch"); }
+static int MSABI swap_Present(void*t,uint32_t sync,uint32_t fl){ (void)t;(void)sync;(void)fl; d3dtrace(4,"Present"); return HR_OK; }
 static int MSABI swap_GetBuffer(void*t,uint32_t buf,GUID_*r,void**pp){ (void)t;(void)buf;(void)r; if(pp)*pp=mktex(4096,4096,1,28,2); return HR_OK; } // generous backbuffer (covers any window size)
 static int MSABI dxgi_CreateSwapChain(void*t,void*dev,void*desc,void**pp){ (void)t;(void)dev;(void)desc; if(pp)*pp=d3dobj(g_dxgiswap_vtbl,0,0); return HR_OK; }
 static void d3d_init(void){
@@ -758,7 +769,9 @@ static void d3d_init(void){
     g_d3ddevice.vtbl=d;
     void** x=g_d3dctx_vtbl; for(int i=0;i<160;i++) x[i]=(void*)ctx_ret0;
     x[0]=(void*)d3d_QI;x[1]=(void*)d3d_AddRef;x[2]=(void*)d3d_Release;x[3]=(void*)ctx_GetDevice;x[4]=(void*)d3d_GetPD;x[5]=(void*)d3d_SetPD;x[6]=(void*)d3d_SetPDI;
+    x[12]=(void*)ctx_DrawIndexed; x[13]=(void*)ctx_Draw;                                             // DrawIndexed, Draw
     x[14]=(void*)ctx_Map;                                                                            // Map (Unmap=15 stays ret0)
+    x[20]=(void*)ctx_DrawIndexedInstanced; x[21]=(void*)ctx_DrawInstanced; x[41]=(void*)ctx_Dispatch;
     // Get* out-param zeroing (standard ID3D11DeviceContext vtable indices)
     x[72]=(void*)ctx_get_arr;   // VSGetConstantBuffers
     x[73]=(void*)ctx_get_arr;   // PSGetShaderResources
@@ -3090,7 +3103,7 @@ static int seh_dispatch_hw(uint32_t code, EXREC* rec, void* ctx){
 // null-pointer GL call or a guest-code fault is immediately identifiable).
 // PELOAD_BP=<exe-rva-hex>: one-shot software breakpoints. Each hit logs "[bp]"
 // then restores the original byte and resumes (so the probed code runs normally).
-static uint64_t g_bp_addr[8]; static uint8_t g_bp_orig[8]; static int g_bp_n;
+static uint64_t g_bp_addr[8]; static uint8_t g_bp_orig[8]; static int g_bp_n; static uint64_t g_bp_cnt[8]; static int g_bp_rearm=-1;
 // Resolve a loaded guest module base by (case-insensitive) name substring.
 static uint8_t* mod_base(const char*want){ for(int i=0;i<g_nmods;i++){ const char*n=g_mods[i].name; for(const char*p=n;*p;p++){ if(!strncasecmp(p,want,strlen(want))) return g_mods[i].base; } } return 0; }
 // PELOAD_PATCH=<mod>+<rva>:<hexbytes>[,...]  — overwrite guest code (e.g. NOP out
@@ -3112,10 +3125,16 @@ static void bp_install(void){ const char*s=getenv("PELOAD_BP"); if(!s||!g_base) 
         const char*c=strchr(s,','); if(!c) break; s=c+1; } }
 static void crashsig(int sig, siginfo_t *info, void *ucv){
     ucontext_t *uc=ucv; uint64_t rip = uc? (uint64_t)uc->uc_mcontext->__ss.__rip : 0;
-    if(sig==SIGTRAP && uc){ uint64_t hit=rip-1;   // int3 already advanced rip
+    if(sig==SIGTRAP && uc){
+        // Re-arm phase: a prior hit set TF to single-step over the original insn;
+        // this trap re-plants the int3 so the breakpoint counts EVERY hit.
+        if(g_bp_rearm>=0){ int i=g_bp_rearm; g_bp_rearm=-1; uint8_t*p=(uint8_t*)g_bp_addr[i]; *p=0xCC; sys_icache_invalidate(p,1);
+            uc->uc_mcontext->__ss.__rflags &= ~0x100ull; return; }
+        uint64_t hit=rip-1;   // int3 already advanced rip
         for(int i=0;i<g_bp_n;i++) if(g_bp_addr[i]==hit){ uint8_t*p=(uint8_t*)hit; *p=g_bp_orig[i]; sys_icache_invalidate(p,1);
-            uc->uc_mcontext->__ss.__rip=hit;      // rewind to re-execute original insn
-            char b[80]; int k=snprintf(b,sizeof b,"\n[bp] HIT exe+0x%llx (funclet/target executed)\n",(unsigned long long)(hit-(uint64_t)g_base)); (void)!write(2,b,k); return; } }
+            g_bp_cnt[i]++; uc->uc_mcontext->__ss.__rip=hit;   // rewind to re-execute original insn
+            uc->uc_mcontext->__ss.__rflags |= 0x100ull; g_bp_rearm=i;   // single-step, then re-arm
+            if(g_bp_cnt[i]<=20){ char b[96]; int k=snprintf(b,sizeof b,"[bp] HIT exe+0x%llx #%llu\n",(unsigned long long)(hit-(uint64_t)g_base),(unsigned long long)g_bp_cnt[i]); (void)!write(2,b,k);} return; } }
     // If this fault is a write/read into a guard page, name the owning block +
     // overflow distance BEFORE handing off to the guest VEH (which may exit).
     if((sig==SIGSEGV||sig==SIGBUS) && info && info->si_addr && heapguard()){
