@@ -2460,6 +2460,73 @@ static void font_subst(char *p, int cap){
     if(access(cand,R_OK)!=0) snprintf(cand,sizeof cand,"%s/ReclaimerFonts/bahnschrift.ttf",g_drivec); // generic fallback
     if(access(cand,R_OK)==0) snprintf(p,cap,"%s",cand);
 }
+// ---- Minimal IOCP, for the async (mio) I/O driver the Forge-library builder uses
+// to read OTHER maps. Without it the builder's "wake I/O driver"
+// (PostQueuedCompletionStatus) fails -> "Other maps' Forge objects unavailable" ->
+// forge library not built -> empty map catalog. We implement a real completion
+// queue: overlapped ReadFile on an IOCP-associated handle does the read and posts
+// a packet; GetQueuedCompletionStatus dequeues it; PostQueuedCompletionStatus wakes.
+typedef struct { uint64_t bytes; uint64_t key; void* ov; } IocpPkt;
+typedef struct { uint32_t magic; pthread_mutex_t m; pthread_cond_t c; IocpPkt q[2048]; int head,tail,count; } Iocp;
+#define IOCP_MAGIC 0x50434f49u   // 'IOCP'
+static int is_iocp(intptr_t h){ if(h<0x100000) return 0; Iocp*p=(Iocp*)h; return p && p->magic==IOCP_MAGIC; }
+static Iocp*    g_fdiocp[MAXFD]; static uint64_t g_fdiocpkey[MAXFD];
+static void iocp_post(Iocp*p,uint64_t bytes,uint64_t key,void*ov){ pthread_mutex_lock(&p->m);
+    if(p->count<2048){ p->q[p->tail].bytes=bytes; p->q[p->tail].key=key; p->q[p->tail].ov=ov; p->tail=(p->tail+1)&2047; p->count++; }
+    pthread_cond_signal(&p->c); pthread_mutex_unlock(&p->m); }
+static void*  MSABI i_CreateIoCompletionPort(void*fh,void*existing,uint64_t key,uint32_t nthreads){ (void)nthreads;
+    Iocp*p; if(is_iocp((intptr_t)existing)) p=(Iocp*)existing;
+    else { p=calloc(1,sizeof *p); if(!p) return 0; p->magic=IOCP_MAGIC; pthread_mutex_init(&p->m,0); pthread_cond_init(&p->c,0); }
+    intptr_t hv=(intptr_t)fh; if(hv>=0x1000&&hv<0x100000){ int fd=(int)(hv-0x1000); if(fd>=0&&fd<MAXFD){ g_fdiocp[fd]=p; g_fdiocpkey[fd]=key; } }
+    return p; }
+static int    MSABI i_PostQueuedCompletionStatus(void*port,uint32_t bytes,uint64_t key,void*ov){
+    if(!is_iocp((intptr_t)port)){ g_lasterr=6; return 0; } iocp_post((Iocp*)port,bytes,key,ov); return 1; }
+static int    MSABI i_GetQueuedCompletionStatus(void*port,uint32_t*pbytes,uint64_t*pkey,void**pov,uint32_t ms){
+    if(!is_iocp((intptr_t)port)){ g_lasterr=6; if(pov)*pov=0; return 0; } Iocp*p=(Iocp*)port;
+    pthread_mutex_lock(&p->m); struct timespec ts;
+    if(ms!=0xFFFFFFFFu){ clock_gettime(CLOCK_REALTIME,&ts); ts.tv_sec+=ms/1000; ts.tv_nsec+=(long)(ms%1000)*1000000L; if(ts.tv_nsec>=1000000000L){ts.tv_sec++;ts.tv_nsec-=1000000000L;} }
+    while(p->count==0){ int r=(ms==0xFFFFFFFFu)?pthread_cond_wait(&p->c,&p->m):pthread_cond_timedwait(&p->c,&p->m,&ts);
+        if(r!=0){ pthread_mutex_unlock(&p->m); g_lasterr=258; if(pov)*pov=0; if(pbytes)*pbytes=0; return 0; } }
+    IocpPkt pk=p->q[p->head]; p->head=(p->head+1)&2047; p->count--; pthread_mutex_unlock(&p->m);
+    if(pbytes)*pbytes=(uint32_t)pk.bytes; if(pkey)*pkey=pk.key; if(pov)*pov=pk.ov; g_lasterr=0; return 1; }
+static int    MSABI i_GetOverlappedResult(void*h,uint8_t*ov,uint32_t*pbytes,int wait){ (void)h;(void)wait;
+    if(pbytes)*pbytes= ov? (uint32_t)*(uint64_t*)(ov+8) : 0; return 1; }
+// GetQueuedCompletionStatusEx: batch dequeue (tokio/mio's Windows poller uses this).
+// OVERLAPPED_ENTRY = {ULONG_PTR key; LPOVERLAPPED ov; ULONG_PTR Internal; DWORD bytes;} (32 bytes).
+static int    MSABI i_GetQueuedCompletionStatusEx(void*port,uint8_t*entries,uint32_t count,uint32_t*removed,uint32_t ms,int alertable){
+    (void)alertable; if(!is_iocp((intptr_t)port)){ g_lasterr=6; if(removed)*removed=0; return 0; } Iocp*p=(Iocp*)port;
+    pthread_mutex_lock(&p->m); struct timespec ts;
+    if(ms!=0xFFFFFFFFu){ clock_gettime(CLOCK_REALTIME,&ts); ts.tv_sec+=ms/1000; ts.tv_nsec+=(long)(ms%1000)*1000000L; if(ts.tv_nsec>=1000000000L){ts.tv_sec++;ts.tv_nsec-=1000000000L;} }
+    while(p->count==0){ int r=(ms==0xFFFFFFFFu)?pthread_cond_wait(&p->c,&p->m):pthread_cond_timedwait(&p->c,&p->m,&ts);
+        if(r!=0){ pthread_mutex_unlock(&p->m); g_lasterr=258; if(removed)*removed=0; return 0; } }
+    uint32_t got=0; while(got<count && p->count>0){ IocpPkt pk=p->q[p->head]; p->head=(p->head+1)&2047; p->count--;
+        uint8_t*e=entries+(size_t)got*32; *(uint64_t*)(e+0)=pk.key; *(uint64_t*)(e+8)=(uint64_t)pk.ov; *(uint64_t*)(e+16)=0; *(uint32_t*)(e+24)=(uint32_t)pk.bytes; got++; }
+    pthread_mutex_unlock(&p->m); if(removed)*removed=got; g_lasterr=0; return 1; }
+// ---- File mapping: the Forge-library builder memory-maps each map (CreateFileMappingW
+// + MapViewOfFile) to read its Forge objects. Without these the mapping fails ->
+// "Other maps' Forge objects unavailable" -> empty catalog. Back it with mmap().
+typedef struct { uint32_t magic; int fd; uint64_t size; int prot; } FileMap;
+#define FMAP_MAGIC 0x50414d46u   // 'FMAP'
+static void*  MSABI i_CreateFileMappingW(void*hFile,void*sec,uint32_t protect,uint32_t maxHigh,uint32_t maxLow,const uint16_t*name){
+    (void)sec;(void)name; intptr_t hv=(intptr_t)hFile; FileMap*fm=calloc(1,sizeof *fm); if(!fm) return 0; fm->magic=FMAP_MAGIC;
+    fm->fd=(hv>=0x1000&&hv<0x100000)?(int)(hv-0x1000):-1;
+    uint64_t sz=((uint64_t)maxHigh<<32)|maxLow; if(sz==0&&fm->fd>=0){ struct stat st; if(fstat(fm->fd,&st)==0) sz=st.st_size; }
+    fm->size=sz; fm->prot=(protect==0x02)?PROT_READ:PROT_READ|PROT_WRITE;
+    if(getenv("PELOAD_TRACE_FS")){ char b[64]; int k=snprintf(b,sizeof b,"  [CreateFileMapping fd=%d size=0x%llx]\n",fm->fd,(unsigned long long)sz); (void)!write(2,b,k);} return fm; }
+static void*  MSABI i_MapViewOfFile(void*hMap,uint32_t access,uint32_t offHigh,uint32_t offLow,uint64_t bytes){
+    FileMap*fm=hMap; if(!fm||fm->magic!=FMAP_MAGIC||fm->fd<0){ g_lasterr=6; return 0; }
+    uint64_t off=((uint64_t)offHigh<<32)|offLow; size_t len=bytes?bytes:(size_t)(fm->size>off?fm->size-off:0); if(len==0){ g_lasterr=8; return 0; }
+    // FILE_MAP_COPY=0x01, FILE_MAP_WRITE=0x02, FILE_MAP_READ=0x04. READ alone must map
+    // PROT_READ (requesting PROT_WRITE on an O_RDONLY fd gives EACCES=err 5).
+    int cow=(access&0x01)!=0, wr=(access&0x02)!=0;
+    int prot=(wr||cow)?(PROT_READ|PROT_WRITE):PROT_READ;
+    int mflags=(wr&&!cow)?MAP_SHARED:MAP_PRIVATE;
+    size_t pg=getpagesize(); uint64_t aoff=off&~(uint64_t)(pg-1); uint64_t delta=off-aoff;
+    void*base=mmap(0,len+delta,prot,mflags,fm->fd,(off_t)aoff);
+    if(base==MAP_FAILED){ g_lasterr=win_err(); return 0; } g_lasterr=0; return (uint8_t*)base+delta; }
+static void*  MSABI i_MapViewOfFileEx(void*hMap,uint32_t access,uint32_t offHigh,uint32_t offLow,uint64_t bytes,void*baseHint){
+    (void)baseHint; return i_MapViewOfFile(hMap,access,offHigh,offLow,bytes); }
+static int    MSABI i_UnmapViewOfFile(void*p){ (void)p; return 1; } // size unknown here; leak the view (harmless)
 static void*  MSABI i_CreateFileW(const uint16_t *w,uint32_t acc,uint32_t share,void*sec,uint32_t disp,uint32_t fl,void*tmpl){
     (void)share;(void)sec;(void)fl;(void)tmpl; char p[2048]; win2unix(w,p,sizeof p);
     if((!w||!w[0])){
@@ -2489,14 +2556,39 @@ static void*  MSABI i_CreateFileW(const uint16_t *w,uint32_t acc,uint32_t share,
     if(fl&0x04000000) g_fddel[fd<MAXFD?fd:0]=1; // FILE_FLAG_DELETE_ON_CLOSE
     return (void*)(intptr_t)(0x1000+fd);
 }
-static int    MSABI i_ReadFile(void*h,void*buf,uint32_t n,uint32_t*rd,void*ov){
-    (void)ov; intptr_t hv=(intptr_t)h; if(hv<0x1000){ if(rd)*rd=0; return 0; }
-    long k=read((int)(hv-0x1000),buf,n); if(rd)*rd=(uint32_t)(k<0?0:k); return k>=0;
+static int    MSABI i_ReadFile(void*h,void*buf,uint32_t n,uint32_t*rd,uint8_t*ov){
+    intptr_t hv=(intptr_t)h; if(hv<0x1000){ if(rd)*rd=0; return 0; } int fd=(int)(hv-0x1000);
+    long k; if(ov){ uint64_t off=*(uint64_t*)(ov+16); k=pread(fd,buf,n,(off_t)off); } else k=read(fd,buf,n);
+    if(rd)*rd=(uint32_t)(k<0?0:k);
+    if(ov){ *(uint64_t*)(ov+0)=0; *(uint64_t*)(ov+8)=(uint64_t)(k<0?0:k);  // Internal, InternalHigh
+        if(fd>=0&&fd<MAXFD&&g_fdiocp[fd]){ iocp_post(g_fdiocp[fd],(uint64_t)(k<0?0:k),g_fdiocpkey[fd],ov);
+            g_lasterr=997/*ERROR_IO_PENDING*/; return 0; } }        // async: completion delivered via IOCP
+    return k>=0;
 }
 static int    MSABI i_SetFilePointerEx(void*h,int64_t dist,int64_t*newp,uint32_t method){
     intptr_t hv=(intptr_t)h; if(hv<0x1000) return 0; off_t r=lseek((int)(hv-0x1000),dist, method); if(newp)*newp=r; return r>=0;
 }
 static int    MSABI i_GetFileSizeEx(void*h,int64_t*sz){ intptr_t hv=(intptr_t)h; if(hv<0x1000) return 0; struct stat st; if(fstat((int)(hv-0x1000),&st)) return 0; if(sz)*sz=st.st_size; return 1; }
+// CreateFileA: ANSI CreateFile. The Reclaimer forge-library builder reads OTHER
+// maps' Forge objects via halo3.dll's kernel32 imports, and first verifies each
+// of {CreateFileW,CreateFileA,CloseHandle,GetFileSizeEx,CreateIoCompletionPort,
+// ReadFileEx,ReadFile} resolves to the SAME pointer as GetProcAddress(kernel32,name)
+// (engine_player_slots_bounds check at exe+0x4b9480). Any missing name got a fresh
+// make_stub per call -> mismatch -> "halo3.dll's CreateFileA import is not kernel32's"
+// -> forge library not built -> empty map catalog -> guardian/map resolve fails.
+// So these must live in resolve_impl's table (stable ptr) AND actually work.
+static void*  MSABI i_CreateFileA(const char*a,uint32_t acc,uint32_t share,void*sec,uint32_t disp,uint32_t fl,void*tmpl){
+    uint16_t w[2048]; int i=0; for(; a&&a[i]&&i<2047;i++) w[i]=(uint8_t)a[i]; w[i]=0;
+    return i_CreateFileW(w,acc,share,sec,disp,fl,tmpl); }
+// ReadFileEx: overlapped read + APC completion routine. Read synchronously at the
+// OVERLAPPED.Offset and invoke the completion so the engine's async wait resolves.
+static int    MSABI i_ReadFileEx(void*h,void*buf,uint32_t n,uint8_t*ov,void*completion){
+    intptr_t hv=(intptr_t)h; if(hv<0x1000) return 0; int fd=(int)(hv-0x1000);
+    uint64_t off = ov? *(uint64_t*)(ov+16) : 0;                 // OVERLAPPED.Offset (Offset/OffsetHigh union)
+    long k = ov? pread(fd,buf,n,(off_t)off) : read(fd,buf,n);
+    if(ov){ *(uint64_t*)(ov+0)=0; *(uint64_t*)(ov+8)=(uint64_t)(k<0?0:k); } // Internal=0, InternalHigh=bytes
+    if(completion){ void(__attribute__((ms_abi))*cr)(uint32_t,uint32_t,void*)=completion; cr(k<0?5u:0u,(uint32_t)(k<0?0:k),ov); }
+    return k>=0; }
 static int    MSABI i_CloseHandleReal(void*h){ intptr_t hv=(intptr_t)h;
     if(is_sync(hv)) return 1;   // sync object / thread handle: no-op (leaked; a thread handle may still be live)
     if(hv>=0x1000 && hv<0x100000){ int fd=(int)(hv-0x1000);
@@ -2701,6 +2793,18 @@ static void *resolve_impl(const char *fn){
         {"GetFileType",(void*)i_GetFileType},
         {"CloseHandle",(void*)i_CloseHandleReal},
         {"CreateFileW",(void*)i_CreateFileW},
+        {"CreateFileA",(void*)i_CreateFileA},
+        {"ReadFileEx",(void*)i_ReadFileEx},
+        {"CreateIoCompletionPort",(void*)i_CreateIoCompletionPort},
+        {"PostQueuedCompletionStatus",(void*)i_PostQueuedCompletionStatus},
+        {"GetQueuedCompletionStatus",(void*)i_GetQueuedCompletionStatus},
+        {"GetQueuedCompletionStatusEx",(void*)i_GetQueuedCompletionStatusEx},
+        {"GetOverlappedResult",(void*)i_GetOverlappedResult},
+        {"CreateFileMappingW",(void*)i_CreateFileMappingW},
+        {"CreateFileMappingA",(void*)i_CreateFileMappingW},
+        {"MapViewOfFile",(void*)i_MapViewOfFile},
+        {"MapViewOfFileEx",(void*)i_MapViewOfFileEx},
+        {"UnmapViewOfFile",(void*)i_UnmapViewOfFile},
         {"GetFileAttributesW",(void*)i_GetFileAttributesW},
         {"GetFileAttributesExW",(void*)i_GetFileAttributesExW},
         {"ReadFile",(void*)i_ReadFile},
@@ -3252,13 +3356,30 @@ static uint64_t g_hookseq;
 static void hook_str(char*out,int outsz,uint64_t p,uint64_t len){ int o=0;
     if(p<0x10000||len==0||len>512){ out[0]=0; return; }
     for(uint64_t i=0;i<len&&o<outsz-1;i++){ unsigned char c=((unsigned char*)p)[i]; out[o++]=(c>=0x20&&c<0x7f)?c:'.'; } out[o]=0; }
+static int hook_safe(uint64_t p){ return p>=0x10000 && p<0x800000000000ULL; }
 static void hook_log(uint64_t id,uint64_t* r){
     uint64_t seq=__sync_fetch_and_add(&g_hookseq,1);
-    uint64_t r12=r[3],rbx=r[11],rcx=r[13],rdx=r[12],r8=r[7]; uint64_t gsp=(uint64_t)(r+15); uint64_t ret=*(uint64_t*)gsp;
+    uint64_t rax=r[14],r15=r[0],r14=r[1],r13=r[2],r12=r[3],rbx=r[11],rcx=r[13],rdx=r[12],r8=r[7],rsi=r[9],rdi=r[8];
+    uint64_t gsp=(uint64_t)(r+15); uint64_t ret=*(uint64_t*)gsp;
+    // Catalog-dump mode (id==0xca7a): interpret rax/rdx/r15 as the map-catalog resolve loop
+    // state and print each entry's id (+0x1b8) and data ptr (+0x10) so we can see why a
+    // map's entry+0x10 is null. Guesses base from rax/rdx; dumps up to 64 entries.
+    if(id==0xca7a){
+        char h[256]; int k=snprintf(h,sizeof h,"[CAT seq=%llu] thr=0x%x rax=0x%llx rdx(count?)=0x%llx r15(query)=0x%llx query_id=0x%x\n",
+            (unsigned long long)seq,pthread_mach_thread_np(pthread_self()),(unsigned long long)rax,(unsigned long long)rdx,
+            (unsigned long long)r15,hook_safe(r15)?*(uint32_t*)(r15+0xd8):0xffffffff); (void)!write(2,h,k);
+        uint64_t cnt=rdx; if(cnt>64)cnt=64;
+        for(uint64_t i=0;i<cnt;i++){ uint64_t e=rax-0xe0*(i+1); if(!hook_safe(e))break;
+            uint32_t eid=hook_safe(e+0x1b8)?*(uint32_t*)(e+0x1b8):0; uint64_t dptr=*(uint64_t*)(e+0x10); uint64_t d8=*(uint64_t*)(e+8);
+            char nm[48]; nm[0]=0; if(hook_safe(dptr)) hook_str(nm,sizeof nm,dptr, d8<64?d8:32);
+            char b[160]; int m=snprintf(b,sizeof b,"  [cat#%llu] e=0x%llx id=0x%x [+8]=0x%llx [+0x10]=0x%llx \"%s\"\n",
+                (unsigned long long)i,(unsigned long long)e,eid,(unsigned long long)d8,(unsigned long long)dptr,nm); (void)!write(2,b,m); }
+        return; }
     char s1[80]; hook_str(s1,sizeof s1,rcx,rdx); // rcx=ptr,rdx=len (common Rust &str arg)
-    char b[384]; int k=snprintf(b,sizeof b,"[hk#%llu id=%llu] thr=0x%x rcx=0x%llx rdx=0x%llx r8=0x%llx rbx=0x%llx [gsp]=exe+0x%llx str(rcx,rdx)=\"%s\"\n",
+    char b[420]; int k=snprintf(b,sizeof b,"[hk#%llu id=%llu] thr=0x%x rax=0x%llx rcx=0x%llx rdx=0x%llx r8=0x%llx rbx=0x%llx rsi=0x%llx rdi=0x%llx r12=0x%llx r13=0x%llx r14=0x%llx r15=0x%llx [gsp]=exe+0x%llx str(rcx,rdx)=\"%s\"\n",
         (unsigned long long)seq,(unsigned long long)id,pthread_mach_thread_np(pthread_self()),
-        (unsigned long long)rcx,(unsigned long long)rdx,(unsigned long long)r8,(unsigned long long)rbx,
+        (unsigned long long)rax,(unsigned long long)rcx,(unsigned long long)rdx,(unsigned long long)r8,(unsigned long long)rbx,
+        (unsigned long long)rsi,(unsigned long long)rdi,(unsigned long long)r12,(unsigned long long)r13,(unsigned long long)r14,(unsigned long long)r15,
         (unsigned long long)(ret>=0x140000000&&ret<0x142000000?ret-0x140000000:ret),s1); (void)!write(2,b,k); }
 static uint8_t* g_hookpool; static size_t g_hookoff;
 static void hook_one(uint8_t*base,uint64_t rva,int origlen,uint64_t id){
