@@ -1363,8 +1363,45 @@ static void gl_grab_simple(void){
         for(int i=0;i<W*H;i++){ uint8_t*p=px+i*4; uint8_t b[4]={p[2],p[1],p[0],255}; fwrite(b,1,4,f);} fclose(f);
         static int once; if(!once){ once=1; char m[160]; int k=snprintf(m,sizeof m,"  [gl_grab_simple] %dx%d readpixels err=0x%x -> %s\n",W,H,e,path); (void)!write(2,m,k);} }
     free(px); }
+// Present the frontend's offscreen render target to the visible window. Reclaimer
+// draws its menu/client-screens to an OFFSCREEN FBO (observed: FBO 2) and hands it
+// to halo3's D3D swap-chain Present (our no-op) — so nothing ever reaches the GL
+// window (fb 0 stays black). This bridges that: blit the frontend FBO -> fb 0 and
+// CGLFlushDrawable. FBO id defaults to 2, override with PELOAD_PRESENT_FBO. Gated by
+// PELOAD_PRESENT so it's opt-in.
+static void present_frontend(void){
+    if(!getenv("PELOAD_PRESENT")) return;
+    int fbo = getenv("PELOAD_PRESENT_FBO")? atoi(getenv("PELOAD_PRESENT_FBO")) : 2;
+    void*(*cur)(void)=dlsym(RTLD_DEFAULT,"CGLGetCurrentContext"); void*ctx=cur?cur():0; if(!ctx) return;
+    void*(*flush)(void*)=dlsym(RTLD_DEFAULT,"CGLFlushDrawable");
+    void(*bf)(unsigned,unsigned)=dlsym(RTLD_DEFAULT,"glBindFramebuffer");
+    void(*bl)(int,int,int,int,int,int,int,int,unsigned,unsigned)=dlsym(RTLD_DEFAULT,"glBlitFramebuffer");
+    void(*gi)(unsigned,int*)=dlsym(RTLD_DEFAULT,"glGetIntegerv");
+    if(!bf||!bl||!gi||!flush) return;
+    int W=1280,H=720; int vp[4]={0,0,0,0}; gi(0x0BA2,vp); if(vp[2]>0)W=vp[2]; if(vp[3]>0)H=vp[3]; if(W>4096)W=4096; if(H>4096)H=4096;
+    int sdraw=0,sread=0; gi(0x8CA6,&sdraw); gi(0x8CAA,&sread);
+    bf(0x8CA8/*READ_FRAMEBUFFER*/,(unsigned)fbo); bf(0x8CA6/*DRAW_FRAMEBUFFER*/,0);
+    bl(0,0,W,H, 0,0,W,H, 0x4000/*COLOR*/,0x2600/*NEAREST*/);
+    // verify: read EACH candidate FBO's color attachment 0 directly (no blit),
+    // writing a per-FBO BMP, + the window back buffer, so we can find any FBO with content.
+    static int vevery; if(getenv("PELOAD_SHOT") && (vevery++ % 15)==0){
+        void(*rp)(int,int,int,int,unsigned,unsigned,void*)=dlsym(RTLD_DEFAULT,"glReadPixels");
+        void(*rb)(unsigned)=dlsym(RTLD_DEFAULT,"glReadBuffer");
+        void(*ge)(void)=dlsym(RTLD_DEFAULT,"glGetError");
+        if(rp){ const char*home=getenv("HOME");
+          for(int cand=0;cand<=6;cand++){ bf(0x8CA8,(unsigned)cand); if(rb) rb(cand?0x8CE0/*COLOR_ATTACHMENT0*/:0x0405/*GL_BACK*/); if(ge)ge();
+            unsigned char*px=calloc(1,(size_t)W*H*4); if(!px) break; rp(0,0,W,H,0x1908,0x1401,px);
+            long sum=0; for(int i=0;i<W*H;i+=97){ unsigned char*p=px+(size_t)i*4; sum+=p[0]+p[1]+p[2]; }
+            char path[512]; snprintf(path,sizeof path,"%s/reclaimer_fb%d_%dx%d.bmp",home?home:"/tmp",cand,W,H);
+            FILE*f=fopen(path,"wb"); if(f){ uint32_t isz=(uint32_t)W*H*4,fsz=54+isz,o=54; uint8_t fh[14]={'B','M'}; memcpy(fh+2,&fsz,4); memcpy(fh+10,&o,4);
+                uint8_t ih[40]={0}; uint32_t v=40; memcpy(ih,&v,4); memcpy(ih+4,&W,4); memcpy(ih+8,&H,4); uint16_t pl=1,bpp=32; memcpy(ih+12,&pl,2); memcpy(ih+14,&bpp,2); memcpy(ih+20,&isz,4);
+                fwrite(fh,1,14,f); fwrite(ih,1,40,f); for(int i=0;i<W*H;i++){ unsigned char*p=px+(size_t)i*4; uint8_t bb[4]={p[2],p[1],p[0],255}; fwrite(bb,1,4,f);} fclose(f);}
+            if(sum>0){ char m[128]; int k=snprintf(m,sizeof m,"  [present] FBO %d has CONTENT (sum=%ld) %dx%d\n",cand,sum,W,H); (void)!write(2,m,k);} free(px);} } }
+    bf(0x8CA8,(unsigned)sread); bf(0x8CA6,(unsigned)sdraw);
+    flush(ctx); }
 static uint32_t MSABI i_MsgWaitForMultipleObjectsEx(uint32_t n,const void*h,uint32_t ms,uint32_t mask,uint32_t flags){
     (void)n;(void)h;(void)mask;(void)flags;
+    present_frontend();   // blit frontend FBO -> window (before capture, so gl_grab_simple verifies what we presented)
     gl_grab_simple();
     uint32_t cap=ms; if(cap==0xFFFFFFFFu||cap>16) cap=16;
     if(cap){ struct timespec ts={0,(long)cap*1000000L}; nanosleep(&ts,0); }
@@ -1654,7 +1691,7 @@ static void gl_capture_resolve(void){
             uint8_t ih[40]={0}; uint32_t v40=40; memcpy(ih,&v40,4); memcpy(ih+4,&W,4); memcpy(ih+8,&H,4); uint16_t pl=1,bpp=32; memcpy(ih+12,&pl,2); memcpy(ih+14,&bpp,2); memcpy(ih+20,&isz,4);
             fwrite(fh,1,14,f); fwrite(ih,1,40,f);
             for(int i=0;i<W*H;i++){ uint8_t*p=px+i*4; uint8_t b[4]={p[2],p[1],p[0],255}; fwrite(b,1,4,f);} fclose(f);
-            if(ncap==0||ncap%50==0){ char m[600]; snprintf(m,sizeof m,"  [gl_capture_resolve] #%d %dx%d err=0x%x -> %s\n",ncap,W,H,e,path); ws(m);} }
+            if(ncap==0||ncap%50==0){ char m[600]; snprintf(m,sizeof m,"  [gl_capture_resolve] #%d %dx%d drawfb=%d readfb=%d err=0x%x -> %s\n",ncap,W,H,drawfb,readfb,e,path); ws(m);} }
         free(px); ncap++; }
     bf(0x8CA8,(unsigned)readfb); bf(0x8CA6,(unsigned)drawfb); }
 static void MSABI i_glDrawElements(unsigned mode,int count,unsigned type,const void*idx){ void(*r)(unsigned,int,unsigned,const void*)=dlsym(RTLD_DEFAULT,"glDrawElements"); if(r)r(mode,count,type,idx); if(getenv("PELOAD_SHOT")) gl_capture_resolve(); }
