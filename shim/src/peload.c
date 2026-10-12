@@ -745,6 +745,11 @@ static void MSABI ctx_DrawInstanced(void*t,uint32_t a,uint32_t b,uint32_t c,uint
 static void MSABI ctx_Dispatch(void*t,uint32_t a,uint32_t b,uint32_t c){ (void)t;(void)a;(void)b;(void)c; d3dtrace(7,"Dispatch"); }
 static int MSABI swap_Present(void*t,uint32_t sync,uint32_t fl){ (void)t;(void)sync;(void)fl; d3dtrace(4,"Present"); return HR_OK; }
 static int MSABI swap_GetBuffer(void*t,uint32_t buf,GUID_*r,void**pp){ (void)t;(void)buf;(void)r; if(pp)*pp=mktex(4096,4096,1,28,2); return HR_OK; } // generous backbuffer (covers any window size)
+// IDXGIDeviceSubObject::GetDevice (vtable slot 7): MUST populate *pp with the
+// device, else callers (e.g. ui_composition's IDXGISwapChain::GetDevice(ID3D11Device))
+// get a null device, take their error path, and LEAK a RefCell borrow -> the
+// frontend's "RefCell already borrowed" re-entrancy panic on the next UI draw.
+static int MSABI swap_GetDevice(void*t,GUID_*riid,void**pp){ (void)t;(void)riid; if(pp)*pp=&g_d3ddevice; return HR_OK; }
 static int MSABI dxgi_CreateSwapChain(void*t,void*dev,void*desc,void**pp){ (void)t;(void)dev;(void)desc; if(pp)*pp=d3dobj(g_dxgiswap_vtbl,0,0); return HR_OK; }
 static void d3d_init(void){
     static int done; if(done) return; done=1;
@@ -805,6 +810,7 @@ static void d3d_init(void){
     g_d3dcontext.vtbl=x;
     void** s=g_dxgiswap_vtbl; for(int i=0;i<40;i++) s[i]=(void*)ctx_ret0;
     s[0]=(void*)d3d_QI;s[1]=(void*)d3d_AddRef;s[2]=(void*)d3d_Release;
+    s[7]=(void*)swap_GetDevice;                           // IDXGIDeviceSubObject::GetDevice
     s[8]=(void*)swap_Present;s[9]=(void*)swap_GetBuffer;
     g_dxgifactory_vtbl[10]=(void*)dxgi_CreateSwapChain;   // IDXGIFactory::CreateSwapChain
 }
@@ -2294,6 +2300,7 @@ static uint64_t MSABI i_GetTickCount64(void){ return mach_absolute_time()/100000
 static char g_lastlib[260];
 static uint8_t *load_guest(const char *path, const char *name); // fwd (defined near main)
 static void patch_install(void); // fwd (PELOAD_PATCH guest-code overwrites)
+static void hook_install(void); // fwd (PELOAD_HOOK trace detours)
 static void *export_lookup(uint8_t *base, const char *want);    // fwd
 static void* MSABI i_LoadLibraryExW(const uint16_t *name, void *h, uint32_t fl){
     (void)h;(void)fl; char w[2048]; int i=0; for(; name && name[i] && i<2047; i++) w[i]=(char)(name[i]<128?name[i]:'?'); w[i]=0;
@@ -3047,7 +3054,7 @@ static uint8_t *load_guest(const char *path, const char *name){
     bind_delay_imports(base,opt);   // halo3.dll delay-loads dxgi/d3d11/etc.
     set_protections(base,coff,opt);
     g_mods[g_nmods].name=name; g_mods[g_nmods].base=base; g_nmods++;
-    if(strcasestr(name,"halo3")){ waves_prefill(base); patch_install(); } // patches can target halo3 now it's mapped
+    if(strcasestr(name,"halo3")){ waves_prefill(base); patch_install(); hook_install(); } // patches can target halo3 now it's mapped
     ws("  guest "); ws(name); ws(" @ "); whex((uint64_t)base);
     uint64_t ep=opt->EntryRVA;
     if(ep){ int (MSABI *dm)(void*,uint32_t,void*)=(void*)(base+ep); int r=dm(base,1,0);
@@ -3120,6 +3127,61 @@ static void patch_install(void){ const char*s=getenv("PELOAD_PATCH"); if(!s) ret
         const char*h=colon+1; int n=0; while(h[0]&&h[1]){ char hh[3]={h[0],h[1],0}; p[n++]=(uint8_t)strtoul(hh,0,16); h+=2; }
         sys_icache_invalidate(p,n);
         char m[96]; int k=snprintf(m,sizeof m,"  [patch] %s+0x%llx <- %d bytes\n",tok,(unsigned long long)rva,n); (void)!write(2,m,k); } }
+// ---- JMP-trampoline trace hooks (int3 doesn't work under Rosetta; code detours do) ----
+// PELOAD_HOOK=<mod>+<rva>:<origlen>:<id>[,...]  installs a detour at rva that logs
+// id + the guest rbx/rsi/rdi/rbp (so we can watch RefCell borrow sites etc.), runs
+// the <origlen> relocated original bytes, and jumps back. origlen must be >=13 and
+// cover whole, non-rip-relative instructions.
+static uint64_t g_hookseq;
+// base points at the saved-regs block: [0]=r15 [1]=r14 [2]=r13 [3]=r12 [4]=r11
+// [5]=r10 [6]=r9 [7]=r8 [8]=rdi [9]=rsi [10]=rbp [11]=rbx [12]=rdx [13]=rcx [14]=rax
+static void hook_log(uint64_t id,uint64_t* r){
+    uint64_t seq=__sync_fetch_and_add(&g_hookseq,1);
+    uint64_t r13=r[2],r12=r[3],rdi=r[8],rsi=r[9],rbp=r[10],rbx=r[11];
+    // the field pointer for a borrow site is whichever reg holds it; print the ones used
+    char b[256]; int k=snprintf(b,sizeof b,"[hk#%llu id=%llu] thr=0x%x rbx=0x%llx r12=0x%llx r13=0x%llx rsi=0x%llx rdi=0x%llx rbp=0x%llx\n",
+        (unsigned long long)seq,(unsigned long long)id,pthread_mach_thread_np(pthread_self()),
+        (unsigned long long)rbx,(unsigned long long)r12,(unsigned long long)r13,(unsigned long long)rsi,(unsigned long long)rdi,(unsigned long long)rbp); (void)!write(2,b,k); }
+static uint8_t* g_hookpool; static size_t g_hookoff;
+static void hook_one(uint8_t*base,uint64_t rva,int origlen,uint64_t id){
+    if(!g_hookpool){ g_hookpool=mmap(0,1<<20,PROT_READ|PROT_WRITE|PROT_EXEC,MAP_PRIVATE|MAP_ANON,-1,0); if(g_hookpool==MAP_FAILED){g_hookpool=0;return;} }
+    uint8_t*site=base+rva; uint8_t*t=g_hookpool+g_hookoff;
+    uint8_t*w=t;
+    // save 15 GPRs (not rsp): rax rcx rdx rbx rbp rsi rdi r8..r15
+    static const uint8_t pushes[]={0x50,0x51,0x52,0x53,0x55,0x56,0x57,0x41,0x50,0x41,0x51,0x41,0x52,0x41,0x53,0x41,0x54,0x41,0x55,0x41,0x56,0x41,0x57};
+    for(unsigned i=0;i<sizeof pushes;i++) *w++=pushes[i];
+    // after pushes, from rsp: r15@0 r14@8 r13@10 r12@18 r11@20 r10@28 r9@30 r8@38 rdi@40 rsi@48 rbp@50 rbx@58 rdx@60 rcx@68 rax@70
+    // mov rbp,rsp ; and rsp,-16
+    *w++=0x48;*w++=0x89;*w++=0xE5;                      // mov rbp,rsp
+    *w++=0x48;*w++=0x83;*w++=0xE4;*w++=0xF0;            // and rsp,-16
+    // args (SysV): rdi=id, rsi=rbp (saved-regs base)
+    *w++=0x48;*w++=0xBF; *(uint64_t*)w=id; w+=8;        // mov rdi,id
+    *w++=0x48;*w++=0x89;*w++=0xEE;                      // mov rsi,rbp
+    *w++=0x4C;*w++=0x8B;*w++=0x45;*w++=0x50;            // mov r8,[rbp+0x50]
+    *w++=0x48;*w++=0xB8; *(uint64_t*)w=(uint64_t)hook_log; w+=8; // mov rax,&hook_log
+    *w++=0xFF;*w++=0xD0;                                 // call rax
+    *w++=0x48;*w++=0x89;*w++=0xEC;                      // mov rsp,rbp
+    static const uint8_t pops[]={0x41,0x5F,0x41,0x5E,0x41,0x5D,0x41,0x5C,0x41,0x5B,0x41,0x5A,0x41,0x59,0x41,0x58,0x5F,0x5E,0x5D,0x5B,0x5A,0x59,0x58};
+    for(unsigned i=0;i<sizeof pops;i++) *w++=pops[i];
+    // relocated original bytes
+    for(int i=0;i<origlen;i++) *w++=site[i];
+    // jmp back to site+origlen (abs)
+    *w++=0x49;*w++=0xBB; *(uint64_t*)w=(uint64_t)(site+origlen); w+=8; // mov r11,ret
+    *w++=0x41;*w++=0xFF;*w++=0xE3;                       // jmp r11
+    sys_icache_invalidate(t,w-t); g_hookoff+=(w-t+15)&~15ull;
+    // patch the site: mov r11,trampoline ; jmp r11 (13 bytes) + nop pad
+    uintptr_t pg=(uintptr_t)site & ~0xFFFull; mprotect((void*)pg,0x3000,PROT_READ|PROT_WRITE|PROT_EXEC);
+    uint8_t*p=site; *p++=0x49;*p++=0xBB; *(uint64_t*)p=(uint64_t)t; p+=8; *p++=0x41;*p++=0xFF;*p++=0xE3;
+    for(int i=13;i<origlen;i++) site[i]=0x90;
+    sys_icache_invalidate(site,origlen);
+    char m[96]; int k=snprintf(m,sizeof m,"  [hook %llu] @%p origlen=%d tramp=%p\n",(unsigned long long)id,(void*)site,origlen,(void*)t); (void)!write(2,m,k);
+}
+static void hook_install(void){ const char*s=getenv("PELOAD_HOOK"); if(!s) return;
+    char buf[512]; strncpy(buf,s,sizeof buf-1); buf[sizeof buf-1]=0;
+    for(char*tok=strtok(buf,",");tok;tok=strtok(0,",")){
+        char*plus=strchr(tok,'+'),*c1=strchr(tok,':'); if(!plus||!c1) continue; char*c2=strchr(c1+1,':'); if(!c2) continue;
+        *plus=0;*c1=0;*c2=0; uint8_t*base = !strcasecmp(tok,"exe")? g_base : mod_base(tok); if(!base) continue;
+        hook_one(base,strtoull(plus+1,0,16),(int)strtoull(c1+1,0,10),strtoull(c2+1,0,10)); } }
 static void bp_install(void){ const char*s=getenv("PELOAD_BP"); if(!s||!g_base) return;
     while(*s && g_bp_n<8){ uint64_t rva=strtoull(s,0,16); if(rva){ uint8_t*p=g_base+rva;
             uintptr_t pg=(uintptr_t)p & ~0xFFFull; mprotect((void*)pg,0x2000,PROT_READ|PROT_WRITE|PROT_EXEC);
@@ -3432,7 +3494,7 @@ int main(int argc, char **argv){
         int fd=open("/tmp/peload.pid",O_WRONLY|O_CREAT|O_TRUNC,0644); if(fd>=0){(void)!write(fd,pb,pn); close(fd);}
         ws("  PELOAD_WAIT: pid "); whex(getpid()); sleep(atoi(getenv("PELOAD_WAIT"))); }
     bp_install();   // PELOAD_BP software breakpoints (diagnostic)
-    patch_install(); // PELOAD_PATCH guest-code overwrites (diagnostic)
+    patch_install(); hook_install(); // PELOAD_PATCH overwrites + PELOAD_HOOK trace detours
     ws("peload: calling entry (expect stub logs, then a fault at the first\n"
        "        unimplemented behavior — that is the signal we want)\n");
     // (window is created lazily in wglCreateContext on the engine's GL thread)

@@ -81,3 +81,42 @@ deferred rather than synchronous. Concrete next levers:
 ## Session-5 commits of record
 GL-thunk ABI root-cause fix (3da9e9c) through this doc; symbol map + tools
 (dff054c, f572e31); D3D11 tracing + FindFirstFileA (fabd4b7).
+
+---
+
+## UPDATE (session 5 cont.) — ROOT CAUSE FOUND: D3D11/DXGI query failure leaks the borrow
+
+Built a working **JMP-trampoline detour tracer** (PELOAD_HOOK, works under Rosetta
+unlike int3): `PELOAD_HOOK=<mod>+<rva>:<origlen>:<id>` logs id + guest regs, runs
+the relocated bytes, jumps back. origlen must cover whole non-rip/non-rel insns.
+
+Using it, the re-entrancy is now understood:
+- `ui_composition` (exe+0x550e00) is called TWICE from the same caller frame (same
+  entry rbp). The FIRST call borrows the app-state RefCell at `exe+0x551038/0x551043`
+  (field = TLS_block+8), does work, and LEAKS the borrow (never releases [r12]->0).
+  The SECOND call then hits `0x553ad9 cmp[rbx],0` with the field still -1 -> panic.
+- WHY it leaks: inside that borrow scope `ui_composition` makes D3D11/DXGI interface
+  calls and on failure takes a path that skips the release:
+  - `0x551071 call [rax+0x38]` = `IDXGISwapChain::GetDevice(riid, **)` with
+    riid = **ID3D11Device** `{DB6F6DDB-AC77-4E88-8253-819DF9BBF140}`.
+  - `0x5510a2 call [rax]` = device `QueryInterface(riid, **)` with
+    riid = **IDXGIDevice** `{54EC77FA-1377-44E6-8C32-88FD5F44C84C}`.
+  - `0x5520aa call [rax+0x138]` on `[r12+0x20]` (normal loop path).
+  Our swapchain vtable slot 7 (GetDevice) was `ctx_ret0` -> returned S_OK but left
+  the out pointer NULL -> caller's error path -> leaked borrow.
+
+**So D3D11 DOES matter for the menu** — not for drawing, but because the frontend
+queries the D3D11 device/DXGI device during UI setup; a failed query leaks a
+RefCell borrow and surfaces as the "already borrowed" re-entrancy panic.
+
+### Fix in progress
+- Implemented `IDXGISwapChain::GetDevice` (swapchain vtable slot 7 -> `swap_GetDevice`
+  returns `&g_d3ddevice`). Necessary but NOT sufficient alone — the panic persists,
+  so at least one more call in that scope still fails. Next: use PELOAD_HOOK to log
+  the RETURN VALUE (eax) of each interface call in the 0x551043 scope (hook a safe
+  point after each call) and make each one return success with a valid out pointer.
+  Candidate methods to complete: the DXGI device QI (IDXGIDevice), and the method at
+  `[r12+0x20] vtable +0x138`. Also verify `[r12+0x20]`'s object type.
+- Tracer caveat: single-step re-arm / int3 DON'T work under Rosetta; the detour
+  (PELOAD_HOOK) is the working mechanism. Hook only sites whose first >=13 bytes are
+  whole, non-rip-relative, non-rel-branch instructions.
