@@ -3439,8 +3439,8 @@ static void hook_log(uint64_t id,uint64_t* r){
         return; }
     // global-dump mode (id==0x2263c): print the resolve/menu-skip mode flags.
     if(id==0x2263c){ uint64_t b=0x140000000ULL;
-        char m[160]; int k=snprintf(m,sizeof m,"[GLOB seq=%llu] [0x2263c60]=0x%x [0x2263c64]=0x%x [0x228bbe9]=0x%x [0x228af60]=0x%x\n",
-            (unsigned long long)seq,*(uint32_t*)(b+0x2263c60),*(uint8_t*)(b+0x2263c64),*(uint8_t*)(b+0x228bbe9),*(uint8_t*)(b+0x228af60)); (void)!write(2,m,k); return; }
+        char m[128]; int k=snprintf(m,sizeof m,"[GLOB seq=%llu] [0x2263c60]=0x%x [0x2263c64]=0x%x\n",
+            (unsigned long long)seq,*(uint32_t*)(b+0x2263c60),*(uint8_t*)(b+0x2263c64)); (void)!write(2,m,k); return; }
     // rbp-args mode (id==0x90b0): dump the fmt arg slots the refusal builder fills
     // ([rbp+0x160/0x168] and [rbp+0x170/0x178] = (ptr,len) pairs) + their strings.
     if(id==0x90b0){ uint64_t rbp=r[10];
