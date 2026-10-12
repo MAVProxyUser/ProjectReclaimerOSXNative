@@ -3254,12 +3254,11 @@ static void hook_str(char*out,int outsz,uint64_t p,uint64_t len){ int o=0;
     for(uint64_t i=0;i<len&&o<outsz-1;i++){ unsigned char c=((unsigned char*)p)[i]; out[o++]=(c>=0x20&&c<0x7f)?c:'.'; } out[o]=0; }
 static void hook_log(uint64_t id,uint64_t* r){
     uint64_t seq=__sync_fetch_and_add(&g_hookseq,1);
-    uint64_t rbx=r[11],rcx=r[13],rdx=r[12],r8=r[7],r12=r[3]; uint64_t gsp=(uint64_t)(r+15); uint64_t ret=*(uint64_t*)gsp;
-    // General: dump rcx/rdx/r8/rbx/r12 + render rcx as a Rust &str (ptr=rcx,len=rdx).
-    char s1[96]; hook_str(s1,sizeof s1,rcx,rdx);
-    char b[416]; int k=snprintf(b,sizeof b,"[hk#%llu id=%llu] thr=0x%x rcx=0x%llx rdx=0x%llx r8=0x%llx rbx=0x%llx r12=0x%llx [gsp]=exe+0x%llx str(rcx,rdx)=\"%s\"\n",
+    uint64_t r12=r[3],rbx=r[11],rcx=r[13],rdx=r[12],r8=r[7]; uint64_t gsp=(uint64_t)(r+15); uint64_t ret=*(uint64_t*)gsp;
+    char s1[80]; hook_str(s1,sizeof s1,rcx,rdx); // rcx=ptr,rdx=len (common Rust &str arg)
+    char b[384]; int k=snprintf(b,sizeof b,"[hk#%llu id=%llu] thr=0x%x rcx=0x%llx rdx=0x%llx r8=0x%llx rbx=0x%llx [gsp]=exe+0x%llx str(rcx,rdx)=\"%s\"\n",
         (unsigned long long)seq,(unsigned long long)id,pthread_mach_thread_np(pthread_self()),
-        (unsigned long long)rcx,(unsigned long long)rdx,(unsigned long long)r8,(unsigned long long)rbx,(unsigned long long)r12,
+        (unsigned long long)rcx,(unsigned long long)rdx,(unsigned long long)r8,(unsigned long long)rbx,
         (unsigned long long)(ret>=0x140000000&&ret<0x142000000?ret-0x140000000:ret),s1); (void)!write(2,b,k); }
 static uint8_t* g_hookpool; static size_t g_hookoff;
 static void hook_one(uint8_t*base,uint64_t rva,int origlen,uint64_t id){
