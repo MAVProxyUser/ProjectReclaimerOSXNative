@@ -193,3 +193,62 @@ Engine now reaches: native swap-chain present path, real window + GL menu render
 "Client screens now drawn into the game's frame". Remaining: the `--guardian-slayer`
 probe worker's map-catalog name resolve returns '' for guardian (files read fine) ->
 exit 3. engine_catalog.rs = exe+0x1a1ce10.
+
+---
+
+## SESSION 6 (cont.) — ARCHITECTURE MAP + the map-load gate
+
+Confirmed from projectreclaimer.dev/play + behavior:
+- The menu renders via **OpenGL** (Reclaimer's own glutin/winit/egui frontend). halo3's
+  D3D is only for actual in-GAME rendering, not the menu. So our GL bridge is the right path.
+- A normal launch opens the menu directly (borderless fullscreen; Windowed via Settings).
+- The single exe ALWAYS spawns a `probe-engine-worker --guardian-slayer --client-window
+  --startup --skip-render-warmup --shell-callbacks --native-udp` child as an unconditional
+  startup self-test (NOT recovery-only; clearing the `ReclaimerProfile/starting` marker
+  doesn't change it). `--guardian-slayer` is clap-REQUIRED for that subcommand and it
+  "suppresses the worker's menu fallback"; `--client-window` "requires Guardian". Dropping
+  either fails ("Local runtime role does not match native startup mode" / clap error).
+
+Flow in our runs: parent launches -> spawns probe worker -> waits. The worker (what we see
+via PELOAD_WORKER_INHERIT_STDIO, logging to STDERR) runs the guardian probe and FAILS at the
+map-catalog resolve -> parent prints "probe worker failed: exit code 3" and exits. PROBE_EXIT0
+(fake worker success) makes the parent exit cleanly WITHOUT rendering — so the parent needs the
+worker's genuine capability result, not just exit code. The worker is the only thing with a
+window (--client-window); the full menu client only runs after the probe genuinely passes.
+
+client.log is empty because the probe worker logs to stderr (which we capture); the file sink
+belongs to the full client we don't reach. Our i_WriteFile writes real files fine.
+
+### The map-load gate (the real blocker to any rendered frame)
+The guardian setup (exe+0x4e0120) resolves the selected map via a linear search over catalog
+entries (match a dword id at entry+0x1b8 vs the query's [r15+0xd8]); the matched entry's
+pointer at entry+0x10 is **NULL** -> `0x4e0af5 mov r15,[rdx+0x10]; test r15; je 0x4e0b66`
+failure -> logs "Native map catalog lookup did not resolve the selected map: expected
+halo3\maps\guardian, got ''". So the catalog HAS a guardian entry but its map/scenario/path
+pointer was never populated. guardian.map + guardian.mapinfo read fine and guardian's tags even
+merge ("Merged ...guardian ... 2052 tags"), so it's not a file problem — the catalog entry's
+data slot is null.
+
+### KEY EXPERIMENT — forcing past the assertion makes the engine RUN STABLY
+PELOAD_PATCH="exe+4e0bde:9090,exe+4e0bf2:31c0,exe+4e0c38:9090,exe+4e0c48:31c0" NOPs the
+resolve-failure branches so the guardian setup proceeds. Result: NO crash, rc=124 (ran the full
+90s in its main loop, ~105k log lines, 0 panics/faults). engine_initialized_flag:1,
+standalone_present_path_observed:true, ui_mode_available:true, queued_game_mode_raw:3, processes
+"Shell lifecycle event 0/7". BUT engine_error_message:"main_game_change_immediate() failed"
+(start_error_raw:11) because the forced map is bogus/empty, so no map loads (map_loaded:false,
+ready_presents:0, visible:false) -> nothing presents. This is the closest to a running game yet:
+the engine loop is alive; it just has no valid map/scenario to present.
+
+`main_game_change_immediate` is a halo3 engine call (Reclaimer logs its failure). The real fix
+is making guardian's catalog entry resolve to a valid map so the game-change succeeds. The
+"Skipped main-menu-only fallback" path (exe+0x4c2310 logs it; decision in exe+0x4b9480 around
+0x4c24d5 gated by exe+0x76d2d0 AND a cl&1 flag) is the menu alternative but has multiple gates;
+patching 0x76d2d0->ret0 alone didn't un-skip it.
+
+### Next levers (priority)
+1. Empirically dump the catalog during resolve (detour tracer on the loop at exe+0x4e0abf..0af5)
+   to see entry count, the query id, and why guardian's entry+0x10 is null — is the catalog
+   built but unpopulated, or is +0x10 lazily loaded by a step that fails here?
+2. Find where catalog entry+0x10 is WRITTEN (the populate step) and why it's skipped for guardian.
+3. If the map genuinely can't be hosted without halo3 D3D game rendering, pivot to the menu
+   fallback (un-skip all gates) since the menu is pure GL and needs no halo3 D3D.
