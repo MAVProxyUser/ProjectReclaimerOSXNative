@@ -164,3 +164,32 @@ the EXACT routing condition is not yet pinned.
 analysis/reclaimer-exe-symmap.tsv (70k funcs), tools/build_symmap.py, tools/sym.py,
 tools/pe.py (disassembler), PELOAD_HOOK detour tracer, PELOAD_TRACE_D3D, PELOAD_PATCH,
 PELOAD_TRACE_STACK, PELOAD_TRACE_SEH; plus the swap_GetDevice D3D11 fix.
+
+---
+
+## SESSION 6 — RE-ENTRANCY SOLVED (auto-patched) + halo3 TLS fixed
+
+The re-entrancy is fixed without Reclaimer source. Mechanism pinned via static RE:
+- `ui_composition` (exe+0x550e00) write-borrows the app-state thread_local RefCell
+  at `0x551043` (field = TLS_block+8). On the FIRST call, the timer check
+  (`0x55212a cmp [r12+0x30],0`) forces the heavy init path (`0x55213b`), which
+  reaches a once-per-second **cache cleanup** at `0x553ad9` that write-borrows the
+  SAME cell again — WITHOUT the outer release (`0x5524b6 inc [r12]`) having run.
+  => "RefCell already borrowed" (thread/local.rs:757) -> rust_panic -> ud2 `0x557d3a`.
+- The cleanup body (`0x553ad9`): `cmp[rbx],0; jne 0x553dff(panic)`; borrow;
+  `cmp dword[rbx+0x10],1e9; jne` -> drop 8 cached sub-objects `[rbx+0x18..0x50]`
+  (ALL NULL this early) then `inc[rbx]` (release). The `je` no-drop path
+  (`0x553af3 xor eax,eax; jmp 0x553b4d`) sets `[rbx]=0` (free) and skips the drops.
+- FIX (`reentrancy_fix()` in peload.c, auto at exe entry; `PELOAD_NO_REENTRANCY_FIX`
+  to disable): NOP the panic branch `0x553add` (6 bytes) and the drop-dispatch
+  branch `0x553af1` (2 bytes). The cleanup becomes a safe no-op that leaves the
+  RefCell free. No panic; outer scope's logical borrow is already done by here.
+
+After this, the next crash was a halo3 thread-local aliasing fault (halo3+0xa50ae),
+fixed by multi-module static TLS (register_tls / per-index thread_tramp blocks;
+halo3 gets its own TLS index). See memory `reclaimer-mac-goal` session-6 block.
+
+Engine now reaches: native swap-chain present path, real window + GL menu renderer,
+"Client screens now drawn into the game's frame". Remaining: the `--guardian-slayer`
+probe worker's map-catalog name resolve returns '' for guardian (files read fine) ->
+exit 3. engine_catalog.rs = exe+0x1a1ce10.
