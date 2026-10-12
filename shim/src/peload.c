@@ -3222,6 +3222,24 @@ static void patch_install(void){ const char*s=getenv("PELOAD_PATCH"); if(!s) ret
         const char*h=colon+1; int n=0; while(h[0]&&h[1]){ char hh[3]={h[0],h[1],0}; p[n++]=(uint8_t)strtoul(hh,0,16); h+=2; }
         sys_icache_invalidate(p,n);
         char m[96]; int k=snprintf(m,sizeof m,"  [patch] %s+0x%llx <- %d bytes\n",tok,(unsigned long long)rva,n); (void)!write(2,m,k); } }
+// Built-in workaround for the Reclaimer frontend's UI-composition re-entrancy in
+// this environment. ui_composition (exe+0x550e00) runs a once-per-second cache
+// cleanup at exe+0x553ad9 that borrows the app-state RefCell; on our first-call
+// path the outer borrow (exe+0x551043) isn't released first, so the cleanup's
+// borrow panics ("RefCell already borrowed", std thread/local.rs:757). The cleanup
+// only drops 8 cached sub-objects (null this early) and then releases the borrow,
+// so we neutralise it: NOP the borrow-conflict panic branch (0x553add) and the
+// drop-dispatch branch (0x553af1) so it takes the no-drop path that just sets the
+// RefCell flag back to free. This lets the engine reach its native swap-chain
+// present path and the client-screen draw. Disable with PELOAD_NO_REENTRANCY_FIX.
+static void apply_patch(uint8_t*base,uint64_t rva,const uint8_t*bytes,int n){
+    uint8_t*p=base+rva; uintptr_t pg=(uintptr_t)p & ~0xFFFull; mprotect((void*)pg,0x2000,PROT_READ|PROT_WRITE|PROT_EXEC);
+    memcpy(p,bytes,n); sys_icache_invalidate(p,n); }
+static void reentrancy_fix(void){ if(getenv("PELOAD_NO_REENTRANCY_FIX")||!g_base) return;
+    static const uint8_t nop6[6]={0x90,0x90,0x90,0x90,0x90,0x90}, nop2[2]={0x90,0x90};
+    apply_patch(g_base,0x553add,nop6,6);   // jne 0x553dff (borrow-conflict panic) -> nops
+    apply_patch(g_base,0x553af1,nop2,2);   // jne 0x553af7 (drop dispatch) -> nops (take no-drop/release path)
+    ws("  [reentrancy-fix] ui_composition cache-cleanup borrow neutralised (exe+0x553add,0x553af1)\n"); }
 // ---- JMP-trampoline trace hooks (int3 doesn't work under Rosetta; code detours do) ----
 // PELOAD_HOOK=<mod>+<rva>:<origlen>:<id>[,...]  installs a detour at rva that logs
 // id + the guest rbx/rsi/rdi/rbp (so we can watch RefCell borrow sites etc.), runs
@@ -3573,6 +3591,7 @@ int main(int argc, char **argv){
         int fd=open("/tmp/peload.pid",O_WRONLY|O_CREAT|O_TRUNC,0644); if(fd>=0){(void)!write(fd,pb,pn); close(fd);}
         ws("  PELOAD_WAIT: pid "); whex(getpid()); sleep(atoi(getenv("PELOAD_WAIT"))); }
     bp_install();   // PELOAD_BP software breakpoints (diagnostic)
+    reentrancy_fix(); // built-in: neutralise the ui_composition RefCell re-entrancy
     patch_install(); hook_install(); // PELOAD_PATCH overwrites + PELOAD_HOOK trace detours
     ws("peload: calling entry (expect stub logs, then a fault at the first\n"
        "        unimplemented behavior — that is the signal we want)\n");
