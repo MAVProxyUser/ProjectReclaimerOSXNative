@@ -120,3 +120,47 @@ RefCell borrow and surfaces as the "already borrowed" re-entrancy panic.
 - Tracer caveat: single-step re-arm / int3 DON'T work under Rosetta; the detour
   (PELOAD_HOOK) is the working mechanism. Hook only sites whose first >=13 bytes are
   whole, non-rip-relative, non-rel-branch instructions.
+
+---
+
+## UPDATE 2 — refined model + where it stands
+
+Using the detour tracer (PELOAD_HOOK), the precise model is now:
+- halo3 calls `ui_composition` (vtable+8) TWICE from the SAME site `halo3+0x2741fb`
+  at the SAME stack slot (sequential calls, NOT nested).
+- The app-state RefCell field is `TLS_block+8`. It is borrowed at `exe+0x551043`
+  (check `0x551038 cmp[r12],0; jne 0x551355`) and released ONLY at `exe+0x5524b6`
+  (`inc qword[r12]`). It is also borrowed again later at `exe+0x553ad9` (reached via
+  the region at `0x553757`).
+- The panic: on a path, execution goes from the `0x551043` borrow to the `0x553ad9`
+  borrow of the SAME field WITHOUT passing the `0x5524b6` release -> nested borrow
+  -> "RefCell already borrowed". The normal loop path (`0x5520aa call [rax+0x138]`)
+  is the one taken and it SUCCEEDS; the D3D11 `GetDevice`/`IDXGIDevice` queries are
+  in the NOT-taken edge path (`0x551058+`).
+- The region `0x553757` (2nd borrow) is gated by a global flag `0x228bbe9` and a
+  `Once`-style guard `exe+0x617900` (lazy init), not a direct D3D query.
+
+So the trigger is a branch in `ui_composition`'s normal path that, in our
+environment's state, routes to the `0x553757`/`0x553ad9` nested borrow instead of
+the release. D3D11/DXGI state still plausibly influences it (the queried interfaces
+appear in the same function, and `swap_GetDevice` was a genuine missing piece), but
+the EXACT routing condition is not yet pinned.
+
+### Concrete next steps (in priority order)
+1. **Reclaimer source** — `ui_composition.rs` + the vtable+8 shell-callback
+   registration makes this a one-line borrow-scope fix. By far the fastest.
+2. **Tracer rip/rel-relative relocation** — enhance `hook_one` to fix up
+   rip-relative mem operands and rel8/rel32 branches when relocating, and allocate
+   `g_hookpool` near the exe (hint ~0x142000000) so fixup disps fit in int32. Then
+   hook the rip-dense release (`0x5524b6`) and 2nd-borrow (`0x553ad9`) sites to see,
+   per call, whether the release fires before the nested borrow, and which branch
+   routes to `0x553757`.
+3. **Finish D3D11/DXGI** — proper per-IID `QueryInterface` (distinct objects for
+   ID3D11Device / ID3D11DeviceContext / IDXGIDevice / IDXGISwapChain) + a real
+   IDXGIDevice vtable (GetAdapter, etc.). Needed regardless for in-game rendering;
+   may also fix the routing if it's a device-capability query.
+
+### Tools delivered this session (all committed)
+analysis/reclaimer-exe-symmap.tsv (70k funcs), tools/build_symmap.py, tools/sym.py,
+tools/pe.py (disassembler), PELOAD_HOOK detour tracer, PELOAD_TRACE_D3D, PELOAD_PATCH,
+PELOAD_TRACE_STACK, PELOAD_TRACE_SEH; plus the swap_GetDevice D3D11 fix.
