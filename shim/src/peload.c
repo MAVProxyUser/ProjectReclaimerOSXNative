@@ -1522,6 +1522,34 @@ static void udp_bases(int*bindbase,int*sendbase){ const char*r=getenv("PELOAD_UD
     if(r&&!strcmp(r,"host")){ *bindbase=40000; *sendbase=50000; }
     else if(r&&!strcmp(r,"client")){ *bindbase=50000; *sendbase=40000; }
     else { *bindbase=40000; *sendbase=40000; } }
+// ---- per-peer loopback-IP identity preservation ---------------------------
+// The engine assigns DISTINCT loopback IPs per peer/role: host transport 127.0.0.3,
+// client transport 127.0.1.1, client native bind 127.0.2.1, etc. (deterministic from the
+// join slot). On Windows all of 127.0.0.0/8 is loopback so each process binds its own IP and
+// the peers address + recognize each other by IP. macOS routes only 127.0.0.1, so sa_w2b
+// collapses 127.x.x.x -> 127.0.0.1 to make bind/sendto work (the port alone still uniquely
+// identifies each UDP socket across both processes). But the collapse ALSO erases the source
+// IP: the host's private-bridge sends its MCV1 verify datagrams to 127.0.1.1:0 (it knows the
+// peer IP from the slot assignment but must learn the PORT from the client's incoming MCH1),
+// and it only adopts that port from a packet whose source IP matches the expected peer
+// (127.0.1.1). With the collapse the client's packets arrive from 127.0.0.1, the match never
+// succeeds, the host keeps replying to port 0, and gameplay_join_verified stays false.
+// Fix: record per-fd the guest destination IP the engine last sent to (before the collapse),
+// and when a UDP recv hands back a 127.0.0.1 source, present it as that recorded guest IP so
+// the engine's peer-identity check passes. Disable with PELOAD_NO_PEERIP.
+static uint32_t g_peer_gip[MAXFD];   // fd -> guest dest IPv4 (network order) last sent on it
+static int g_peerip_off=-1;
+static void peer_gip_rec(int fd,const void*win,int wl){
+    if(g_peerip_off<0) g_peerip_off=getenv("PELOAD_NO_PEERIP")?1:0;
+    if(g_peerip_off||fd<0||fd>=MAXFD||!win||wl<8) return; const uint8_t*w=win;
+    if(((w[0]|(w[1]<<8)))!=2) return; uint32_t ip; memcpy(&ip,w+4,4);
+    if((ntohl(ip)>>24)==127){ if(g_peer_gip[fd]!=ip && getenv("PELOAD_TRACE_UDP")){ char ips[32]; inet_ntop(AF_INET,&ip,ips,sizeof ips); char b[96]; int k=snprintf(b,sizeof b,"  [udp] rec fd=%d dest-guest-ip=%s\n",fd,ips); (void)!write(2,b,k);} g_peer_gip[fd]=ip; } }
+static int peer_gip_restore(int fd,void*win){
+    if(g_peerip_off<0) g_peerip_off=getenv("PELOAD_NO_PEERIP")?1:0;
+    if(g_peerip_off||fd<0||fd>=MAXFD||!win||!g_peer_gip[fd]) return 0; uint8_t*w=win;
+    if(((w[0]|(w[1]<<8)))!=2) return 0; uint32_t ip; memcpy(&ip,w+4,4);
+    if(ip==htonl(0x7f000001) && g_peer_gip[fd]!=htonl(0x7f000001)){ memcpy(w+4,&g_peer_gip[fd],4);
+        if(getenv("PELOAD_TRACE_UDP")){ char ips[32]; inet_ntop(AF_INET,&g_peer_gip[fd],ips,sizeof ips); char b[96]; int k=snprintf(b,sizeof b,"  [udp] restore fd=%d src 127.0.0.1 -> %s\n",fd,ips); (void)!write(2,b,k);} return 1; } return 0; }
 static uint32_t errno2wsa(int e){ switch(e){ case EWOULDBLOCK:return 10035; case EINPROGRESS:return 10036;
     case EALREADY:return 10037; case ENOTSOCK:return 10038; case EMSGSIZE:return 10040; case EADDRINUSE:return 10048;
     case EADDRNOTAVAIL:return 10049; case ENETUNREACH:return 10051; case ECONNRESET:return 10054; case ENOBUFS:return 10055;
@@ -1568,7 +1596,13 @@ static int MSABI i_ws2_bind(WSASOCK s,const void*name,int nl){ struct sockaddr_s
     // SO_REUSEADDR a quick worker restart hits EADDRINUSE on the TIME_WAIT'd port and the local
     // server never comes up. Set it to match Windows' effective reuse behaviour on relaunch.
     { int one=1; setsockopt((int)s,SOL_SOCKET,SO_REUSEADDR,&one,sizeof one); }
-    if(bind((int)s,(struct sockaddr*)&ss,bl)<0){ws2_err(errno);return -1;} return 0; }
+    if(bind((int)s,(struct sockaddr*)&ss,bl)<0){ws2_err(errno);
+        if(getenv("PELOAD_TRACE_NET")){ char b[96]; int k=snprintf(b,sizeof b,"[net] bind(fd=%d) FAIL errno=%d\n",(int)s,errno); (void)!write(2,b,k);} return -1; }
+    if(getenv("PELOAD_TRACE_NET")){ struct sockaddr_in me; socklen_t ml=sizeof me; int rp=0,reqp=0;
+        if(ss.ss_family==AF_INET) reqp=ntohs(((struct sockaddr_in*)&ss)->sin_port);
+        if(getsockname((int)s,(struct sockaddr*)&me,&ml)==0&&me.sin_family==AF_INET) rp=ntohs(me.sin_port);
+        char b[128]; int k=snprintf(b,sizeof b,"[net] bind(fd=%d) req=%d -> actual=%d\n",(int)s,reqp,rp); (void)!write(2,b,k); }
+    return 0; }
 // listen/accept: the local-server "browser" opens a TCP listener on 127.0.0.1 and the client
 // (local-browse / local-join) connects to the advertised port. These were previously
 // unimplemented ("TCP, not needed for UDP"), so the listener socket was torn down and every
@@ -1620,7 +1654,7 @@ static WSASOCK MSABI i_ws2_accept(WSASOCK s,void*name,int*nl){ struct sockaddr_s
     net_tracef("[net] accept(fd=%d) -> fd=%d\n",(int)s,fd); return (WSASOCK)(unsigned)fd; }
 static int g_net_trace=-1;
 static void net_tracef(const char*fmt,...){ if(g_net_trace<0) g_net_trace=getenv("PELOAD_TRACE_NET")?1:0; if(!g_net_trace) return; char b[256]; int p=snprintf(b,sizeof b,"[pid %d]",getpid()); va_list ap; va_start(ap,fmt); vsnprintf(b+p,sizeof b-p,fmt,ap); va_end(ap); ws(b); }
-static int MSABI i_ws2_connect(WSASOCK s,const void*name,int nl){ struct sockaddr_storage ss; t_sa_send=1; int bl=sa_w2b(name,nl,&ss); t_sa_send=0; if(!bl){ws2_err(EINVAL);return -1;}
+static int MSABI i_ws2_connect(WSASOCK s,const void*name,int nl){ struct sockaddr_storage ss; if(name)peer_gip_rec((int)s,name,nl); t_sa_send=1; int bl=sa_w2b(name,nl,&ss); t_sa_send=0; if(!bl){ws2_err(EINVAL);return -1;}
     char ips[64]="?"; int port=0; if(ss.ss_family==AF_INET){ struct sockaddr_in*si=(void*)&ss; inet_ntop(AF_INET,&si->sin_addr,ips,sizeof ips); port=ntohs(si->sin_port); }
     // PELOAD_LOOPBACK_ONLY: refuse any non-127.x connect so a forced browser host can be tested purely
     // locally (no internet master registration). Keeps all traffic on loopback.
@@ -1650,13 +1684,13 @@ static void udp_tracef(const char*dir,WSASOCK s,const struct sockaddr_storage*ss
     char ip[64]="?"; int port=0; if(ss->ss_family==AF_INET){ const struct sockaddr_in*si=(const void*)ss; inet_ntop(AF_INET,&si->sin_addr,ip,sizeof ip); port=ntohs(si->sin_port);}
     int lp=0; { struct sockaddr_in me; socklen_t ml=sizeof me; if(getsockname((int)s,(struct sockaddr*)&me,&ml)==0) lp=ntohs(me.sin_port);}
     char b[160]; int k=snprintf(b,sizeof b,"  [udp] %s fd=%d local:%d %s %s:%d len=%d\n",dir,(int)s,lp,strcmp(dir,"TX")?"<-":"->",ip,port,len); (void)!write(2,b,k); }
-static int MSABI i_ws2_sendto(WSASOCK s,const char*buf,int len,int fl,const void*to,int tl){ struct sockaddr_storage ss; t_sa_send=1; int bl=to?sa_w2b(to,tl,&ss):0; t_sa_send=0; ssize_t r=sendto((int)s,buf,len,fl,bl?(struct sockaddr*)&ss:0,bl); if(r<0){ws2_err(errno);if(getenv("PELOAD_TRACE_UDP")){char b[96];int k=snprintf(b,sizeof b,"  [udp] TX fd=%d FAIL errno=%d\n",(int)s,errno);(void)!write(2,b,k);}return -1;} if(bl)udp_tracef("TX",s,&ss,(int)r); return (int)r; }
-static int MSABI i_ws2_recvfrom(WSASOCK s,char*buf,int len,int fl,void*from,int*fl2){ struct sockaddr_storage ss; socklen_t sl=sizeof ss; ssize_t r=recvfrom((int)s,buf,len,fl,(struct sockaddr*)&ss,&sl); if(r<0){ws2_err(errno);return -1;} if(r>=0)udp_tracef("RX",s,&ss,(int)r); if(from&&fl2) sa_b2w((struct sockaddr*)&ss,from,fl2); return (int)r; }
+static int MSABI i_ws2_sendto(WSASOCK s,const char*buf,int len,int fl,const void*to,int tl){ struct sockaddr_storage ss; if(to)peer_gip_rec((int)s,to,tl); t_sa_send=1; int bl=to?sa_w2b(to,tl,&ss):0; t_sa_send=0; ssize_t r=sendto((int)s,buf,len,fl,bl?(struct sockaddr*)&ss:0,bl); if(r<0){ws2_err(errno);if(getenv("PELOAD_TRACE_UDP")){char b[96];int k=snprintf(b,sizeof b,"  [udp] TX fd=%d FAIL errno=%d\n",(int)s,errno);(void)!write(2,b,k);}return -1;} if(bl)udp_tracef("TX",s,&ss,(int)r); return (int)r; }
+static int MSABI i_ws2_recvfrom(WSASOCK s,char*buf,int len,int fl,void*from,int*fl2){ struct sockaddr_storage ss; socklen_t sl=sizeof ss; ssize_t r=recvfrom((int)s,buf,len,fl,(struct sockaddr*)&ss,&sl); if(r<0){ws2_err(errno);return -1;} if(r>=0)udp_tracef("RX",s,&ss,(int)r); if(from&&fl2){ sa_b2w((struct sockaddr*)&ss,from,fl2); peer_gip_restore((int)s,from); } return (int)r; }
 // PELOAD_TRACE_WIRE: hex+ascii dump of TCP payloads (to RE the local-server query/join protocol).
 static void wire_dump(const char*dir,int fd,const char*buf,int n){ if(!getenv("PELOAD_TRACE_WIRE")||n<=0) return;
-    int m=n>128?128:n; char o[700]; int k=snprintf(o,sizeof o,"  [wire] %s fd=%d n=%d: ",dir,fd,n);
-    for(int i=0;i<m&&k<620;i++) k+=snprintf(o+k,sizeof o-k,"%02x",(unsigned char)buf[i]);
-    k+=snprintf(o+k,sizeof o-k," | "); for(int i=0;i<m&&k<690;i++){ unsigned char c=buf[i]; o[k++]=(c>=32&&c<127)?c:'.'; }
+    int cap=getenv("PELOAD_TRACE_WIRE_FULL")?560:128; int m=n>cap?cap:n; char o[2400]; int k=snprintf(o,sizeof o,"  [wire] %s fd=%d n=%d: ",dir,fd,n);
+    for(int i=0;i<m&&k<1200;i++) k+=snprintf(o+k,sizeof o-k,"%02x",(unsigned char)buf[i]);
+    k+=snprintf(o+k,sizeof o-k," | "); for(int i=0;i<m&&k<2300;i++){ unsigned char c=buf[i]; o[k++]=(c>=32&&c<127)?c:'.'; }
     o[k++]='\n'; (void)!write(2,o,k); }
 static int MSABI i_ws2_send(WSASOCK s,const char*buf,int len,int fl){ ssize_t r=send((int)s,buf,len,fl); if(r<0){ws2_err(errno);net_tracef("[net] send(fd=%d,len=%d) -> errno=%d wsa=%d\n",(int)s,len,errno,t_wsa_err);return -1;} net_tracef("[net] send(fd=%d,len=%d) -> %d\n",(int)s,len,(int)r); wire_dump("TX",(int)s,buf,(int)r); return (int)r; }
 static int MSABI i_ws2_recv(WSASOCK s,char*buf,int len,int fl){ ssize_t r=recv((int)s,buf,len,fl); if(r<0){ws2_err(errno);net_tracef("[net] recv(fd=%d,len=%d) -> errno=%d wsa=%d\n",(int)s,len,errno,t_wsa_err);return -1;} net_tracef("[net] recv(fd=%d,len=%d) -> %d\n",(int)s,len,(int)r); wire_dump("RX",(int)s,buf,(int)r); return (int)r; }
@@ -1814,6 +1848,7 @@ static int MSABI i_ws2_WSASendMsg(WSASOCK s,uint8_t*msg,uint32_t flags,uint32_t*
     static __thread char gbuf[65536]; uint32_t tot=0;
     for(uint32_t i=0;i<cnt;i++){ uint32_t blen=*(uint32_t*)(bufs+(size_t)i*16); char*bp=*(char**)(bufs+(size_t)i*16+8);
         if(blen>sizeof gbuf-tot) blen=(uint32_t)(sizeof gbuf-tot); if(bp&&blen) memcpy(gbuf+tot,bp,blen); tot+=blen; if(tot>=sizeof gbuf) break; }
+    if(name)peer_gip_rec((int)s,name,namelen);
     struct sockaddr_storage ss; t_sa_send=1; int bl=name?sa_w2b(name,namelen,&ss):0; t_sa_send=0;
     ssize_t r=sendto((int)s,gbuf,tot,0,bl?(struct sockaddr*)&ss:0,bl);
     if(r<0){ ws2_err(errno); if(ov){*(uint64_t*)(ov+0)=0;*(uint64_t*)(ov+8)=0;} return -1; }
@@ -1831,7 +1866,7 @@ static int MSABI i_ws2_WSARecvMsg(WSASOCK s,uint8_t*msg,uint32_t*recvd,uint8_t*o
     uint32_t off=0; for(uint32_t i=0;i<cnt && off<(uint32_t)r;i++){ uint32_t blen=*(uint32_t*)(bufs+(size_t)i*16); char*bp=*(char**)(bufs+(size_t)i*16+8);
         uint32_t n=(uint32_t)r-off; if(n>blen)n=blen; if(bp&&n) memcpy(bp,rbuf+off,n); off+=n; }
     if(recvd)*recvd=(uint32_t)r;
-    if(name&&namelenp){ int wl=*namelenp; sa_b2w((struct sockaddr*)&ss,name,&wl); *namelenp=wl; }
+    if(name&&namelenp){ int wl=*namelenp; sa_b2w((struct sockaddr*)&ss,name,&wl); *namelenp=wl; peer_gip_restore((int)s,name); }
     *(uint32_t*)(msg+48)=0; /* dwFlags out */ *(uint32_t*)(msg+32)=0; /* Control.len out (no cmsg) */
     udp_tracef("RX",s,&ss,(int)r);
     if(ov){ *(uint64_t*)(ov+0)=0; *(uint64_t*)(ov+8)=(uint64_t)r; iocp_post_fd((int)s,(uint64_t)r,ov); }
