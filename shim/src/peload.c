@@ -50,6 +50,7 @@
 #include <sys/un.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <ifaddrs.h>
 #include <netdb.h>
 #include <netinet/tcp.h>
 #include <poll.h>
@@ -1567,6 +1568,19 @@ static uint32_t errno2wsa(int e){ switch(e){ case EWOULDBLOCK:return 10035; case
 // socket errors through GetLastError (io::Error::last_os_error), so both slots must match
 // or a non-blocking connect's WSAEWOULDBLOCK is misread and the connection is abandoned.
 static void ws2_err(int e){ t_wsa_err = e? (int)errno2wsa(e):0; g_lasterr=(uint32_t)t_wsa_err; }
+// Is this IPv4 (network order) a locally-assigned address? Used so the 127/8 collapse only
+// applies to loopback IPs that are NOT actually bindable here. If the user adds lo0 aliases for
+// the engine's distinct per-peer loopback IPs (127.0.0.3 / 127.0.1.1 / 127.0.2.1 ...), those
+// become real and we DON'T collapse them -> the native bridge addresses peers exactly like
+// Windows (correct source IPs, no hole-punch needed). Un-aliased 127.x still collapses as before.
+// Cached once via getifaddrs (refreshed if PELOAD_NO_IFCACHE set, for tests that add aliases live).
+static int ip_is_local(uint32_t ipn){
+    static uint32_t locals[128]; static int nloc=-1;
+    if(nloc<0 || getenv("PELOAD_NO_IFCACHE")){ nloc=0; struct ifaddrs*ia=0;
+        if(getifaddrs(&ia)==0){ for(struct ifaddrs*p=ia;p&&nloc<128;p=p->ifa_next){
+            if(p->ifa_addr && p->ifa_addr->sa_family==AF_INET) locals[nloc++]=((struct sockaddr_in*)p->ifa_addr)->sin_addr.s_addr; }
+            freeifaddrs(ia); } }
+    for(int i=0;i<nloc;i++) if(locals[i]==ipn) return 1; return 0; }
 // Windows sockaddr_in -> BSD sockaddr_storage; returns BSD length or 0
 static int sa_w2b(const void*win,int wl,struct sockaddr_storage*bsd){ if(!win||wl<2) return 0; const uint8_t*w=win;
     uint16_t fam=(uint16_t)(w[0]|(w[1]<<8)); memset(bsd,0,sizeof *bsd);
@@ -1577,7 +1591,7 @@ static int sa_w2b(const void*win,int wl,struct sockaddr_storage*bsd){ if(!win||w
         // match can't host -> halo3 never selects the map -> "map catalog ... got ''".
         // Collapse 127/8 -> 127.0.0.1 consistently (peers stay distinct by port). Disable
         // with PELOAD_NO_LOOPBACK_FIX.
-        { uint8_t*ip=(uint8_t*)&b->sin_addr; if(ip[0]==127 && !(ip[1]==0&&ip[2]==0&&ip[3]==1) && !getenv("PELOAD_NO_LOOPBACK_FIX")){ ip[1]=0;ip[2]=0;ip[3]=1; } }
+        { uint8_t*ip=(uint8_t*)&b->sin_addr; if(ip[0]==127 && !(ip[1]==0&&ip[2]==0&&ip[3]==1) && !getenv("PELOAD_NO_LOOPBACK_FIX") && !ip_is_local(b->sin_addr.s_addr)){ ip[1]=0;ip[2]=0;ip[3]=1; } }
         // macOS can't bind privileged ports (<1024) without root. Reclaimer's native-UDP
         // transport uses low loopback ports (e.g. 127.0.0.1:1000), so bind fails -> the
         // session never establishes -> loading stalls. Remap loopback ports <1024 to a high
