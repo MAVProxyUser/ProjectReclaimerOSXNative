@@ -2930,8 +2930,11 @@ static int d3dgl_make_offscreen(void){
     // pixel format is incompatible with the new context's -- which was dropping us to an UNSHARED
     // context, so the present thread could never see our rendered backbuffer texture => black screen
     // (and the loading-screen artwork never appeared). Reusing the present's NSOpenGLPixelFormat's
-    // CGLPixelFormatObj makes the match exact. Disable with PELOAD_D3DGL_NOSHAREPF.
-    if(share && g_nspf && !getenv("PELOAD_D3DGL_NOSHAREPF")){
+    // CGLPixelFormatObj makes the match exact. HOWEVER: with sharing ON, the present thread displays
+    // the render thread's (currently BLACK) backbuffer texture INSTEAD of the GDI text overlay it
+    // otherwise shows, so until the render thread actually produces content this makes the window
+    // WORSE (black vs text). Default OFF; enable with PELOAD_D3DGL_SHAREPF once the render output is real.
+    if(share && g_nspf && getenv("PELOAD_D3DGL_SHAREPF")){
         CGLPixelFormatObj ppf=(CGLPixelFormatObj)((void*(*)(id,SEL))objc_msgSend)(g_nspf,osel("CGLPixelFormatObj"));
         if(ppf){ e=CGLCreateContext(ppf,share,&ctx);
             if(e==kCGLNoError&&ctx){ pf=ppf; pf_borrowed=1; }
