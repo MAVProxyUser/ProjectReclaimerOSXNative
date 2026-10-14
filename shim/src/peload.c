@@ -2995,9 +2995,18 @@ static int d3dgl_synth_cb0(void){
     extern float g_b12_org[32][3]; extern int g_nb12_org;
     // camera VIEW = the fresh small CB whose P*V projects the MOST per-object origins on-screen (LH, V
     // as-is -- determined empirically, 30/32). Re-detect every frame; cheap (a few small CBs).
+    // PELOAD_SYNVP_CB=<i> forces g_cbreg[i] as V (debug: confirm the cb0find winner renders).
     D3DObj* V=0; int bestN=1;
+    const char*force=getenv("PELOAD_SYNVP_CB");
+    if(force){ int fi=atoi(force); if(fi>=0&&fi<g_ncbreg&&g_cbreg[fi]&&g_cbreg[fi]->data) V=g_cbreg[fi]; }
+    else
     for(int i=0;i<g_ncbreg;i++){ D3DObj*c=g_cbreg[i]; if(!c||!c->data||c->size<64||c->size>512) continue; if((g_cb_tick-c->cb_upd)>2) continue;
         const float*vm=(const float*)c->data; int bad=0; for(int j=0;j<16;j++){ float v=vm[j]; if(v!=v||v<-1e9f||v>1e9f){bad=1;break;} } if(bad)continue;
+        // Reject a near-identity rotation (the real camera view has a non-trivial basis): require the
+        // upper-left 3x3 to differ meaningfully from I, else a trivial "looking down +z from origin"
+        // matrix wins the on-screen count without being the actual camera.
+        float idd=fabsf(vm[0]-1)+fabsf(vm[5]-1)+fabsf(vm[10]-1)+fabsf(vm[1])+fabsf(vm[2])+fabsf(vm[4])+fabsf(vm[6])+fabsf(vm[8])+fabsf(vm[9]);
+        if(idd<0.25f) continue;
         float VP[16]; d3dgl_mul44(P,vm,VP); int on=0;
         for(int o=0;o<g_nb12_org;o++){ float cl[4]; for(int r=0;r<4;r++) cl[r]=VP[r*4]*g_b12_org[o][0]+VP[r*4+1]*g_b12_org[o][1]+VP[r*4+2]*g_b12_org[o][2]+VP[r*4+3];
             if(cl[3]>0.05f){ float nx=cl[0]/cl[3],ny=cl[1]/cl[3],nz=cl[2]/cl[3]; if(nx>-1.1f&&nx<1.1f&&ny>-1.1f&&ny<1.1f&&nz>-0.05f&&nz<1.05f) on++; } }
