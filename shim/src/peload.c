@@ -587,6 +587,18 @@ static int    MSABI i_WriteFile(void *h, const void *buf, uint32_t n, uint32_t *
     return (fd>=0 || hv==1||hv==2||hv==3) ? 1 : 0; }
 static int    MSABI i_WriteConsoleW(void *h, const uint16_t *s, uint32_t n, uint32_t *wr, void *rsv){
     (void)rsv; int fd=(h==(void*)3)?2:1; for(uint32_t i=0;i<n;i++){ char c=(s[i]<128)?(char)s[i]:'?'; (void)!write(fd,&c,1);} if(wr)*wr=n; return 1; }
+// ReadConsoleW/A: the dedicated server's game-server host reads its console (stdin) to wait for a
+// shutdown command / EOF while its server threads run. The old generic stub returned 0 (FALSE) ->
+// Rust saw a read error -> the host shut down immediately (exit code 1). Read from the real stdin fd,
+// BLOCKING like a true console, so the host parks instead of exiting. One byte -> one UTF-16 char.
+static int    MSABI i_ReadConsoleW(void *h, uint16_t *buf, uint32_t nchars, uint32_t *nread, void *rsv){
+    (void)rsv; intptr_t hv=(intptr_t)h; int fd=(hv==1)?0 : (hv>=0x1000)?(int)(hv-0x1000):0;
+    uint32_t got=0; while(got<nchars){ unsigned char c; ssize_t r=read(fd,&c,1); if(r<=0) break; buf[got++]=c; if(c=='\n') break; }
+    if(nread)*nread=got; return 1; }
+static int    MSABI i_ReadConsoleA(void *h, char *buf, uint32_t nb, uint32_t *nread, void *rsv){
+    (void)rsv; intptr_t hv=(intptr_t)h; int fd=(hv==1)?0 : (hv>=0x1000)?(int)(hv-0x1000):0;
+    uint32_t got=0; while(got<nb){ char c; ssize_t r=read(fd,&c,1); if(r<=0) break; buf[got++]=c; if(c=='\n') break; }
+    if(nread)*nread=got; return 1; }
 static uint32_t MSABI i_GetFileType(void *h){ intptr_t hv=(intptr_t)h; return hv>=0x1000? 1 : 2; } // DISK : CHAR
 static int    MSABI i_FlushFileBuffers(void *h){ (void)h; return 1; }
 static void*  MSABI i_GetCurrentProcess(void){ return (void*)-1; }
@@ -5566,6 +5578,8 @@ static void *resolve_impl(const char *fn){
         {"GetStdHandle",(void*)i_GetStdHandle},
         {"WriteFile",(void*)i_WriteFile},
         {"WriteConsoleW",(void*)i_WriteConsoleW},
+        {"ReadConsoleW",(void*)i_ReadConsoleW},
+        {"ReadConsoleA",(void*)i_ReadConsoleA},
         {"GetFileType",(void*)i_GetFileType},
         {"CloseHandle",(void*)i_CloseHandleReal},
         {"CreateFileW",(void*)i_CreateFileW},
