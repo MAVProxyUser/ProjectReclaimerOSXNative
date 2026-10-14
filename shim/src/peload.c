@@ -1587,6 +1587,10 @@ static int g_net_trace=-1;
 static void net_tracef(const char*fmt,...){ if(g_net_trace<0) g_net_trace=getenv("PELOAD_TRACE_NET")?1:0; if(!g_net_trace) return; char b[256]; int p=snprintf(b,sizeof b,"[pid %d]",getpid()); va_list ap; va_start(ap,fmt); vsnprintf(b+p,sizeof b-p,fmt,ap); va_end(ap); ws(b); }
 static int MSABI i_ws2_connect(WSASOCK s,const void*name,int nl){ struct sockaddr_storage ss; int bl=sa_w2b(name,nl,&ss); if(!bl){ws2_err(EINVAL);return -1;}
     char ips[64]="?"; int port=0; if(ss.ss_family==AF_INET){ struct sockaddr_in*si=(void*)&ss; inet_ntop(AF_INET,&si->sin_addr,ips,sizeof ips); port=ntohs(si->sin_port); }
+    // PELOAD_LOOPBACK_ONLY: refuse any non-127.x connect so a forced browser host can be tested purely
+    // locally (no internet master registration). Keeps all traffic on loopback.
+    if(getenv("PELOAD_LOOPBACK_ONLY") && ss.ss_family==AF_INET){ struct sockaddr_in*si=(void*)&ss;
+        if((ntohl(si->sin_addr.s_addr)>>24)!=127){ net_tracef("[net] connect(fd=%d,%s:%d) -> BLOCKED(loopback-only)\n",(int)s,ips,port); ws2_err(ECONNREFUSED); return -1; } }
     if(connect((int)s,(struct sockaddr*)&ss,bl)<0){ int e=errno;
         // On a non-blocking socket connect() returns EINPROGRESS (first call) or
         // EALREADY (subsequent). Windows reports BOTH as WSAEWOULDBLOCK (10035);
