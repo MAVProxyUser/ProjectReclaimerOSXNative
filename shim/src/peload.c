@@ -3079,8 +3079,8 @@ static unsigned d3dgl_prog(D3DObj*o,unsigned glstage){
 // (format,type) for 32bpp classes; 0 for formats we can't upload yet (BC* etc).
 static int d3dgl_tex_upload_fmt(uint32_t f,unsigned*gfmt,unsigned*gtype){
     switch(f){
-        case 28: case 29: *gfmt=GLE_RGBA; *gtype=GLE_UBYTE; return 1;       // R8G8B8A8_UNORM(_SRGB)
-        case 87: case 91: case 88: *gfmt=GLE_BGRA; *gtype=GLE_UI8REV; return 1; // B8G8R8A8
+        case 27: case 28: case 29: *gfmt=GLE_RGBA; *gtype=GLE_UBYTE; return 1;   // R8G8B8A8_TYPELESS/UNORM(_SRGB)
+        case 87: case 88: case 90: case 91: case 92: case 93: *gfmt=GLE_BGRA; *gtype=GLE_UI8REV; return 1; // B8G8R8A8/X8 UNORM/TYPELESS/SRGB (90 = the loading-screen artwork texture)
         default: return 0;
     }
 }
@@ -3096,6 +3096,14 @@ static void d3dgl_ensure_tex(D3DObj*o){
     // Only upload real pixels when the backing buffer actually holds >= w*h*4 bytes; otherwise
     // glTexImage2D would read past o->data (heap OOB -> crash). Fall back to a 1x1 placeholder.
     int can = o->data && d3dgl_tex_upload_fmt(o->fmt,&gf,&gt) && o->size>=(uint64_t)w*h*4;
+    // PELOAD_TRACE_TEXUP: for sizeable textures, report w/h/fmt/can + whether the backing data is all
+    // black (so we can tell if the loading-screen 1280x720 texture is uploaded empty vs the engine
+    // actually rendered content into it).
+    if(getenv("PELOAD_TRACE_TEXUP") && w>=256 && h>=256){ uint64_t sum=0; int nz=0;
+        if(o->data && o->size>=1024){ const uint8_t*d=o->data; uint64_t step=o->size/4096; if(step<1)step=1;
+            for(uint64_t i=0;i<o->size && nz<32; i+=step){ if(d[i]){ sum+=d[i]; nz++; } } }
+        static int tc; if(tc++<60){ char b[160]; int k=snprintf(b,sizeof b,"  [texup] %dx%d fmt=%u size=%lluB can=%d data=%p nonzero-samples=%d sum=%llu%s\n",
+            w,h,o->fmt,(unsigned long long)o->size,can,o->data,nz,(unsigned long long)sum,nz?"":" (ALL BLACK)"); (void)!write(2,b,k);} }
     if(can) G.TexImage2D(GLE_TEX2D,0,GLE_RGBA8,w,h,0,gf,gt,o->data);
     else { static const unsigned char mag[4]={255,0,255,255}; G.TexImage2D(GLE_TEX2D,0,GLE_RGBA8,1,1,0,GLE_RGBA,GLE_UBYTE,mag); }
     o->gl_uploaded=1; o->gl_dirty=0;
