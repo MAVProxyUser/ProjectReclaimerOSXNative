@@ -1555,10 +1555,19 @@ static int MSABI i_ws2_listen(WSASOCK s,int backlog){
               snprintf(p1,sizeof p1,"%s/ReclaimerCache/Temp",g_drivec); mkdir(p1,0755);
               snprintf(p1,sizeof p1,"%s/ReclaimerCache/Temp/Project Reclaimer",g_drivec); mkdir(p1,0755); }
             mkdir(dir,0755);
-            // 32-hex uuid (local-join validates the filename as a 32/36-char hex instance id).
-            unsigned t=(unsigned)time(0); char uuid[40];
-            snprintf(uuid,sizeof uuid,"%08x%08x%08x%08x",(unsigned)getpid(),(unsigned)port,t,(unsigned)(t^0x5eed1234u));
-            uuid[32]=0;
+            // local-join parses the filename as a UUID and validates version/variant. A real browser
+            // host writes a proper RFC-4122 v4 UUID (e.g. 7a64fbc5-7070-4676-a317-766a867eb1b3); the old
+            // "%08x%08x%08x%08x" of pid|port|time had version nibble 'c' (not 4) + wrong variant, so the
+            // host was found+probed but then REJECTED ("No local server found"). Emit a valid v4 UUID.
+            unsigned char uu[16];
+            { uint64_t s=((uint64_t)getpid()<<32) ^ ((uint64_t)port<<16) ^ (uint64_t)time(0);
+              struct timeval tvv; gettimeofday(&tvv,0); s ^= ((uint64_t)tvv.tv_usec<<13) ^ (uint64_t)(uintptr_t)&s;
+              for(int i=0;i<16;i++){ s=s*6364136223846793005ULL+1442695040888963407ULL; uu[i]=(unsigned char)(s>>33); }
+              uu[6]=(uu[6]&0x0f)|0x40;   // version 4
+              uu[8]=(uu[8]&0x3f)|0x80; } // variant RFC 4122 (10xx)
+            char uuid[40];
+            snprintf(uuid,sizeof uuid,"%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+                uu[0],uu[1],uu[2],uu[3],uu[4],uu[5],uu[6],uu[7],uu[8],uu[9],uu[10],uu[11],uu[12],uu[13],uu[14],uu[15]);
             char path[1200]; snprintf(path,sizeof path,"%s/%s.json",dir,uuid);
             char js[64]; int n=snprintf(js,sizeof js,"{\"port\":%d,\"pid\":%d}",port,(int)getpid());
             FILE*f=fopen(path,"wb"); if(f){ (void)!fwrite(js,1,n,f); fclose(f);
