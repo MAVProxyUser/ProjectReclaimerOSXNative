@@ -1694,6 +1694,8 @@ static uint32_t MSABI i_ws2_ntohl(uint32_t x){ return ntohl(x); }
 static uint16_t MSABI i_ws2_htons(uint16_t x){ return htons(x); }
 static uint16_t MSABI i_ws2_ntohs(uint16_t x){ return ntohs(x); }
 static uint32_t MSABI i_ws2_inet_addr(const char*c){ return inet_addr(c); }
+static int MSABI i_ws2_WSASendMsg(WSASOCK s,uint8_t*msg,uint32_t flags,uint32_t*sent,uint8_t*ov,void*cr); // fwd
+static int MSABI i_ws2_WSARecvMsg(WSASOCK s,uint8_t*msg,uint32_t*recvd,uint8_t*ov,void*cr);             // fwd
 static int MSABI i_ws2_WSAIoctl(WSASOCK s,uint32_t code,void*ib,uint32_t ibl,void*ob,uint32_t obl,uint32_t*ret,void*ov,void*cb){
     (void)ib;(void)ibl;(void)ov;(void)cb;
     // SIO_BASE_HANDLE (0x48000022) and the BSP_HANDLE variants: mio needs the underlying
@@ -1709,8 +1711,16 @@ static int MSABI i_ws2_WSAIoctl(WSASOCK s,uint32_t code,void*ib,uint32_t ibl,voi
             if(on&&ibl>=8){ int sec=(int)(kv[1]/1000); if(sec<1)sec=1; setsockopt((int)s,IPPROTO_TCP,TCP_KEEPALIVE,&sec,sizeof sec); }
 #endif
         } if(ret)*ret=0; t_wsa_err=0; return 0; }
-    // SIO_GET_EXTENSION_FUNCTION_POINTER (0xC8000006): refuse so quinn falls back
-    // to plain recvfrom/sendto instead of WSARecvMsg/WSASendMsg.
+    // SIO_GET_EXTENSION_FUNCTION_POINTER (0xC8000006): now that WSASendMsg/WSARecvMsg are implemented,
+    // hand back their real pointers (the native-UDP private bridge resolves them this way too). Match
+    // the GUID in ib; refuse anything else so callers that can fall back still do.
+    if(code==0xC8000006 && ib && ibl>=16 && ob && obl>=8){
+        static const uint8_t G_RECVMSG[16]={0xc8,0xd7,0x89,0xf6,0x1f,0x6f,0x6b,0x43,0x8a,0x59,0xfd,0xc5,0x2e,0xde,0xf8,0xd8};
+        static const uint8_t G_SENDMSG[16]={0x12,0xe7,0x41,0xa4,0x4f,0x75,0xca,0x43,0x84,0xa7,0x0d,0xee,0x44,0xcf,0x60,0x6d};
+        if(!memcmp(ib,G_RECVMSG,16)){ *(void**)ob=(void*)i_ws2_WSARecvMsg; if(ret)*ret=8; t_wsa_err=0;
+            if(getenv("PELOAD_TRACE_NET"))ws("[net] WSAIoctl -> WSARecvMsg ptr\n"); return 0; }
+        if(!memcmp(ib,G_SENDMSG,16)){ *(void**)ob=(void*)i_ws2_WSASendMsg; if(ret)*ret=8; t_wsa_err=0;
+            if(getenv("PELOAD_TRACE_NET"))ws("[net] WSAIoctl -> WSASendMsg ptr\n"); return 0; } }
     if(ret)*ret=0; t_wsa_err=10022 /*WSAEINVAL*/; return -1; }
 // map a ws2_32 ordinal to a real impl (0 = none, fall back to stub)
 static void* ws2_real_ord(uint32_t o){ switch(o){
@@ -1790,8 +1800,46 @@ static int MSABI i_ws2_WSASend(WSASOCK s,uint8_t*bufs,uint32_t cnt,uint32_t*sent
     if(sent)*sent=total;
     if(ov){ *(uint64_t*)(ov+0)=0; *(uint64_t*)(ov+8)=total; iocp_post_fd((int)s,total,ov); return err&&total==0?-1:0; }
     if(err&&total==0) return -1; return 0; }
+// WSASendMsg / WSARecvMsg: the native-UDP private-bridge transport uses these (both IMPORTED), NOT
+// sendto/recvfrom. They were unimplemented (generic stub -> return 0 = fake success, zero bytes on the
+// wire), so the client created its 3 UDP sockets but no datagram ever crossed to the host -> the
+// private bridge never formed -> gameplay_join_verified stayed false. Implement them over sendto/
+// recvfrom with gather/scatter. WSAMSG (x64): name@0, namelen@8, lpBuffers@16, dwBufferCount@24,
+// Control{len@32,buf@40}, dwFlags@48. WSABUF{len@0,buf@8}=16B. The dest/src address goes through the
+// same sa_w2b/sa_b2w private-port remap (t_sa_send marks the send direction for PELOAD_UDP_ROLE).
+static int MSABI i_ws2_WSASendMsg(WSASOCK s,uint8_t*msg,uint32_t flags,uint32_t*sent,uint8_t*ov,void*cr){
+    (void)flags;(void)cr; if(!msg){ws2_err(EFAULT);return -1;}
+    void*name=*(void**)(msg+0); int namelen=*(int*)(msg+8);
+    uint8_t*bufs=*(uint8_t**)(msg+16); uint32_t cnt=*(uint32_t*)(msg+24);
+    static __thread char gbuf[65536]; uint32_t tot=0;
+    for(uint32_t i=0;i<cnt;i++){ uint32_t blen=*(uint32_t*)(bufs+(size_t)i*16); char*bp=*(char**)(bufs+(size_t)i*16+8);
+        if(blen>sizeof gbuf-tot) blen=(uint32_t)(sizeof gbuf-tot); if(bp&&blen) memcpy(gbuf+tot,bp,blen); tot+=blen; if(tot>=sizeof gbuf) break; }
+    struct sockaddr_storage ss; t_sa_send=1; int bl=name?sa_w2b(name,namelen,&ss):0; t_sa_send=0;
+    ssize_t r=sendto((int)s,gbuf,tot,0,bl?(struct sockaddr*)&ss:0,bl);
+    if(r<0){ ws2_err(errno); if(ov){*(uint64_t*)(ov+0)=0;*(uint64_t*)(ov+8)=0;} return -1; }
+    if(sent)*sent=(uint32_t)r; if(bl)udp_tracef("TX",s,&ss,(int)r);
+    if(ov){ *(uint64_t*)(ov+0)=0; *(uint64_t*)(ov+8)=(uint64_t)r; iocp_post_fd((int)s,(uint64_t)r,ov); }
+    return 0; }
+static int MSABI i_ws2_WSARecvMsg(WSASOCK s,uint8_t*msg,uint32_t*recvd,uint8_t*ov,void*cr){
+    (void)cr; if(!msg){ws2_err(EFAULT);return -1;}
+    void*name=*(void**)(msg+0); int*namelenp=(int*)(msg+8);
+    uint8_t*bufs=*(uint8_t**)(msg+16); uint32_t cnt=*(uint32_t*)(msg+24);
+    static __thread char rbuf[65536];
+    struct sockaddr_storage ss; socklen_t sl=sizeof ss;
+    ssize_t r=recvfrom((int)s,rbuf,sizeof rbuf,0,(struct sockaddr*)&ss,&sl);
+    if(r<0){ ws2_err(errno); return -1; }
+    uint32_t off=0; for(uint32_t i=0;i<cnt && off<(uint32_t)r;i++){ uint32_t blen=*(uint32_t*)(bufs+(size_t)i*16); char*bp=*(char**)(bufs+(size_t)i*16+8);
+        uint32_t n=(uint32_t)r-off; if(n>blen)n=blen; if(bp&&n) memcpy(bp,rbuf+off,n); off+=n; }
+    if(recvd)*recvd=(uint32_t)r;
+    if(name&&namelenp){ int wl=*namelenp; sa_b2w((struct sockaddr*)&ss,name,&wl); *namelenp=wl; }
+    *(uint32_t*)(msg+48)=0; /* dwFlags out */ *(uint32_t*)(msg+32)=0; /* Control.len out (no cmsg) */
+    udp_tracef("RX",s,&ss,(int)r);
+    if(ov){ *(uint64_t*)(ov+0)=0; *(uint64_t*)(ov+8)=(uint64_t)r; iocp_post_fd((int)s,(uint64_t)r,ov); }
+    return 0; }
 static void* ws2_real_name(const char*n){
     if(!strcmp(n,"WSASend")) return (void*)i_ws2_WSASend;
+    if(!strcmp(n,"WSASendMsg")) return (void*)i_ws2_WSASendMsg;
+    if(!strcmp(n,"WSARecvMsg")) return (void*)i_ws2_WSARecvMsg;
     if(!strcmp(n,"WSASocketW")||!strcmp(n,"WSASocketA")) return (void*)i_ws2_WSASocketW;
     if(!strcmp(n,"WSAIoctl")) return (void*)i_ws2_WSAIoctl;
     if(!strcmp(n,"WSASetLastError")) return (void*)i_ws2_WSASetLastError;
