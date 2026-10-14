@@ -6591,8 +6591,15 @@ static void crashsig(int sig, siginfo_t *info, void *ucv){
             g_bp_cnt[i]++; uc->uc_mcontext->__ss.__rip=hit;   // rewind to re-execute original insn
             uc->uc_mcontext->__ss.__rflags |= 0x100ull; g_bp_rearm=i;   // single-step, then re-arm
             if(g_bp_cnt[i]<=40){ uint64_t rbx=uc->uc_mcontext->__ss.__rbx, rsi=uc->uc_mcontext->__ss.__rsi, rdi=uc->uc_mcontext->__ss.__rdi, r15=uc->uc_mcontext->__ss.__r15;
+                uint64_t rax=uc->uc_mcontext->__ss.__rax, r10=uc->uc_mcontext->__ss.__r10, r9=uc->uc_mcontext->__ss.__r9, r14=uc->uc_mcontext->__ss.__r14;
                 uint64_t vbx = (rbx>0x1000)? *(uint64_t*)rbx : 0;
-                char b[200]; int k=snprintf(b,sizeof b,"[bp] HIT exe+0x%llx #%llu thr=0x%x rbx=0x%llx [rbx]=0x%llx rsi=0x%llx rdi=0x%llx r15=0x%llx\n",
+                // PELOAD_BP_CORR: also dump the connection-correlation operands (cmp r10,[rax+0x200])
+                uint64_t exp200=0; if(getenv("PELOAD_BP_CORR") && (hit-(uint64_t)g_base)==0x5880a5 && rax>0x100000000ull && rax<0x800000000000ull) exp200=*(uint64_t*)(rax+0x200);
+                char b[280]; int k;
+                if(getenv("PELOAD_BP_CORR")) k=snprintf(b,sizeof b,"[bp] HIT exe+0x%llx #%llu thr=0x%x rax=0x%llx r10(pktID)=0x%llx [rax+0x200](expID)=0x%llx r9=0x%llx r14=0x%llx\n",
+                    (unsigned long long)(hit-(uint64_t)g_base),(unsigned long long)g_bp_cnt[i],pthread_mach_thread_np(pthread_self()),
+                    (unsigned long long)rax,(unsigned long long)r10,(unsigned long long)exp200,(unsigned long long)r9,(unsigned long long)r14);
+                else k=snprintf(b,sizeof b,"[bp] HIT exe+0x%llx #%llu thr=0x%x rbx=0x%llx [rbx]=0x%llx rsi=0x%llx rdi=0x%llx r15=0x%llx\n",
                     (unsigned long long)(hit-(uint64_t)g_base),(unsigned long long)g_bp_cnt[i],pthread_mach_thread_np(pthread_self()),
                     (unsigned long long)rbx,(unsigned long long)vbx,(unsigned long long)rsi,(unsigned long long)rdi,(unsigned long long)r15); (void)!write(2,b,k);} return; } }
     // Decompressor fault dump: on a fault in halo3's bitstream reader, print the fiber ctx
