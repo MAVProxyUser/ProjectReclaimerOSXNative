@@ -1622,7 +1622,16 @@ static int MSABI i_ws2_recv(WSASOCK s,char*buf,int len,int fl){ ssize_t r=recv((
 static int MSABI i_ws2_shutdown(WSASOCK s,int how){ return shutdown((int)s,how)==0?0:(ws2_err(errno),-1); }
 static int MSABI i_ws2_getsockname(WSASOCK s,void*name,int*nl){ struct sockaddr_storage ss; socklen_t sl=sizeof ss; if(getsockname((int)s,(struct sockaddr*)&ss,&sl)<0){ws2_err(errno);return -1;} sa_b2w((struct sockaddr*)&ss,name,nl); return 0; }
 static int MSABI i_ws2_getpeername(WSASOCK s,void*name,int*nl){ struct sockaddr_storage ss; socklen_t sl=sizeof ss; if(getpeername((int)s,(struct sockaddr*)&ss,&sl)<0){ws2_err(errno);return -1;} sa_b2w((struct sockaddr*)&ss,name,nl); return 0; }
-static int MSABI i_ws2_setsockopt(WSASOCK s,int lvl,int opt,const char*val,int len){ if(setsockopt((int)s,lvl,opt,val,len)==0) return 0; if(errno==ENOPROTOOPT) return 0; /*lenient: ignore unknown opts*/ ws2_err(errno); return -1; }
+static int MSABI i_ws2_setsockopt(WSASOCK s,int lvl,int opt,const char*val,int len){
+    // Winsock SO_RCVTIMEO(0x1006)/SO_SNDTIMEO(0x1005) at SOL_SOCKET(0xffff) pass a 4-byte DWORD of
+    // MILLISECONDS; BSD/macOS expect a 16-byte struct timeval. Passing the raw 4 bytes gives EINVAL(-1),
+    // which made local-join's probe caller (sub_14058cfe0) take its failure path and NEVER send its query
+    // -> "No local server found" even though connect succeeded. Convert ms -> timeval.
+    if(lvl==0xffff && (opt==0x1005||opt==0x1006) && val && len>=4){
+        uint32_t ms=*(const uint32_t*)val; struct timeval tv; tv.tv_sec=(time_t)(ms/1000); tv.tv_usec=(suseconds_t)((ms%1000)*1000);
+        if(setsockopt((int)s,SOL_SOCKET,opt==0x1006?SO_RCVTIMEO:SO_SNDTIMEO,&tv,sizeof tv)==0) return 0;
+        ws2_err(errno); return -1; }
+    if(setsockopt((int)s,lvl,opt,val,len)==0) return 0; if(errno==ENOPROTOOPT) return 0; /*lenient: ignore unknown opts*/ ws2_err(errno); return -1; }
 static int MSABI i_ws2_getsockopt(WSASOCK s,int lvl,int opt,char*val,int*len){ socklen_t sl=len?*len:0; int rc=getsockopt((int)s,lvl,opt,val,&sl);
     if(g_net_trace>0 && opt==0x1007/*SO_ERROR*/){ char b[96]; int k=snprintf(b,sizeof b,"[net] getsockopt(fd=%d,SO_ERROR) rc=%d val=%d\n",(int)s,rc,(rc==0&&val)?*(int*)val:-1); (void)!write(2,b,k); }
     if(rc==0){ if(len)*len=sl; return 0;} if(errno==ENOPROTOOPT){ if(val&&len&&*len>=4)*(int*)val=0; return 0;} ws2_err(errno); return -1; }
