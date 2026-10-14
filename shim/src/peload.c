@@ -325,7 +325,8 @@ static uint32_t win_err(void){ switch(errno){ case ENOENT: return 2; /*FILE_NOT_
     case ENOTDIR: return 3; /*PATH_NOT_FOUND*/ default: return 1; } }
 static __thread char t_lastfail[512];           // last path that failed to open on this thread
 static uint32_t MSABI i_GetLastError(void){
-    if(g_lasterr==2 && getenv("PELOAD_TRACE_LE")){ void*ra=__builtin_return_address(0); char t[640]; uint64_t r=(uint64_t)ra; snprintf(t,sizeof t,"  [GLE=2] caller=%s+0x%llx lastfail='%s'\n",(r>=0x140000000&&r<0x14c000000)?"exe":(r>=0x180000000&&r<0x187000000)?"halo3":"?",(unsigned long long)((r>=0x140000000&&r<0x14c000000)?r-0x140000000:(r>=0x180000000&&r<0x187000000)?r-0x180000000:r),t_lastfail); ws(t); }
+    const char*le=getenv("PELOAD_TRACE_LE");
+    if(le && (g_lasterr==2 || !strcmp(le,"all"))){ void*ra=__builtin_return_address(0); char t[640]; uint64_t r=(uint64_t)ra; snprintf(t,sizeof t,"  [GLE=%u] caller=%s+0x%llx lastfail='%s'\n",g_lasterr,(r>=0x140000000&&r<0x14c000000)?"exe":(r>=0x180000000&&r<0x187000000)?"halo3":"?",(unsigned long long)((r>=0x140000000&&r<0x14c000000)?r-0x140000000:(r>=0x180000000&&r<0x187000000)?r-0x180000000:r),t_lastfail); ws(t); }
     return g_lasterr; }
 static void   MSABI i_SetLastError(uint32_t e){ g_lasterr=e; }
 
@@ -1832,7 +1833,7 @@ static void   MSABI i_ExitProcess(uint32_t c){
     if(getenv("PELOAD_HOLD_WINDOW") && g_present_started){ ws("  [hold-window] worker exit suppressed; keeping window up\n"); for(;;){ struct timespec ts={1,0}; nanosleep(&ts,0); } }
     _exit((int)c); }
 static void   MSABI i_TerminateProcess(void *h,uint32_t c){ (void)h; _exit((int)c); }
-static uint32_t MSABI i_GetModuleFileNameW(void*m,uint16_t*buf,uint32_t sz){ (void)m; uint32_t i=0; for(; i<sz && g_exewin[i]; i++) buf[i]=g_exewin[i]; if(i<sz) buf[i]=0; return i; }
+static uint32_t MSABI i_GetModuleFileNameW(void*m,uint16_t*buf,uint32_t sz){ (void)m; uint32_t i=0; for(; i<sz && g_exewin[i]; i++) buf[i]=g_exewin[i]; if(i<sz) buf[i]=0; if(getenv("PELOAD_TRACE_SPAWN")){ char n[1100]; uint32_t k=0; for(;k<i&&k<1099;k++)n[k]=(char)(buf[k]&0xff); n[k]=0; char t[1200]; snprintf(t,sizeof t,"  [GetModuleFileNameW] mod=%p -> %s\n",m,n); ws(t);} return i; }
 static void   MSABI i_GetStartupInfoW(void *si){ if(si) memset(si,0,104); }
 static int    MSABI i_SetEnvironmentVariableW(const uint16_t*n,const uint16_t*v){
     char nm[256]; int i=0; for(; n&&n[i]&&i<255;i++) nm[i]=(char)(n[i]<128?n[i]:'?'); nm[i]=0;
@@ -1860,6 +1861,7 @@ static int child_reap(pid_t pid,uint32_t *out,int block){
     return 0; } // 0 = still running (or gone)
 static int MSABI i_CreateProcessW(const uint16_t*app,uint16_t*cmd,void*pa,void*ta,int inherit,uint32_t flags,void*env,const uint16_t*cwd,uint8_t*si,uint8_t*pi){
     (void)pa;(void)ta;(void)inherit;
+    if(getenv("PELOAD_TRACE_SPAWN")) ws("  [CreateProcessW ENTRY]\n");
     // lpEnvironment: the parent's env block for the worker carries the native
     // handshake (RECLAIMER_LOCAL_RUNTIME, RECLAIMER_PARENT_CONTROL). Overlay it
     // onto our environ so the posix_spawn'd worker inherits it. UTF-16 when
@@ -1961,9 +1963,33 @@ static void*  MSABI i_RtlPcToFileHeader(void *pc, void **base){
     if(base)*base=0; return 0;
 }
 static char*  MSABI i_GetCommandLineA(void){ return g_cmdlineA; }
-static uint16_t g_envblock[2] = {0,0};
-static uint16_t* MSABI i_GetEnvironmentStringsW(void){ return g_envblock; }
-static int    MSABI i_FreeEnvironmentStringsW(void*p){ (void)p; return 1; }
+// A Windows environment block: a run of UTF-16 "NAME=VALUE\0" strings terminated
+// by one extra NUL. The old stub returned an EMPTY block ({0,0}); Rust's
+// std::sys::windows::os::env()/Command path then read a varless environment and,
+// finding no PATH/var, returned ErrorKind::NotFound -> the caller surfaced the
+// stale GetLastError (2, from an earlier benign ModInfo.json probe) as a fatal
+// "os error 2" (e.g. the dedicated server's "Cannot start '<game>'"). Build a real
+// block from `environ` so env reads (and %PATH% program resolution) succeed.
+// (environ is declared extern above, near CreateProcessW.)
+static uint16_t* build_env_block_w(void){
+    size_t need=1; // trailing extra NUL
+    for(char**e=environ; e&&*e; e++) need += strlen(*e)+1; // each entry + its NUL (1 u16 each, ASCII)
+    uint16_t *blk=(uint16_t*)malloc((need+1)*sizeof(uint16_t)); if(!blk) return 0;
+    size_t o=0;
+    for(char**e=environ; e&&*e; e++){ const char*s=*e; if(s[0]=='=') continue; // skip drive-cwd pseudo-vars
+        for(const char*p=s; *p; p++) blk[o++]=(uint8_t)*p; blk[o++]=0; }
+    blk[o++]=0; // extra terminating NUL
+    return blk;
+}
+static uint16_t* MSABI i_GetEnvironmentStringsW(void){ uint16_t*b=build_env_block_w();
+    if(getenv("PELOAD_TRACE_ENV")){ int nv=0; for(char**e=environ;e&&*e;e++)nv++; char t[64]; snprintf(t,sizeof t,"  [GetEnvStringsW] %d vars\n",nv); ws(t); }
+    if(!b){ static uint16_t empty[2]={0,0}; return empty; } return b; }
+static int    MSABI i_FreeEnvironmentStringsW(void*p){ if(p) free(p); return 1; }
+// ANSI variant: same block, one byte per char.
+static char* MSABI i_GetEnvironmentStrings(void){ size_t need=1; for(char**e=environ;e&&*e;e++) need+=strlen(*e)+1;
+    char*blk=(char*)malloc(need+1); if(!blk){ static char empty[2]={0,0}; return empty; } size_t o=0;
+    for(char**e=environ;e&&*e;e++){ const char*s=*e; if(s[0]=='=') continue; size_t l=strlen(s); memcpy(blk+o,s,l); o+=l; blk[o++]=0; } blk[o++]=0; return blk; }
+static int MSABI i_FreeEnvironmentStringsA(void*p){ if(p) free(p); return 1; }
 static uint32_t MSABI i_GetTickCount(void){ return (uint32_t)(mach_absolute_time()/1000000ULL); }
 // NtWriteFile: route writes to our stdin/out/err pseudo-handles (1/2/3)
 static int MSABI i_NtWriteFile(void*h,void*ev,void*apc,void*apcctx,void*iosb,const void*buf,uint32_t len,void*off,void*key){
@@ -5111,8 +5137,20 @@ static uint32_t MSABI i_GetEnvironmentVariableW(const uint16_t*n,uint16_t*v,uint
     uint32_t j=0; for(; val[j] && j<sz-1; j++) v[j]=(uint8_t)val[j]; v[j]=0; return j;
 }
 static uint32_t MSABI i_GetFullPathNameW(const uint16_t*name,uint32_t len,uint16_t*buf,uint16_t**part){
-    (void)part; uint32_t i=0; for(; name[i] && i<len-1; i++) buf[i]=name[i]; buf[i]=0; return i;
+    // Full length of the (already-absolute) input. Windows semantics: return the
+    // number of chars written (excl. NUL) when it fits, or the required size
+    // (incl. NUL) when buf is too small so the caller can retry with a bigger buf.
+    uint32_t nlen=0; while(name[nlen]) nlen++;
+    if(getenv("PELOAD_TRACE_SPAWN")){ char n[512]; int k=0; for(;name[k]&&k<511;k++)n[k]=(char)(name[k]&0xff); n[k]=0; char t[600]; snprintf(t,sizeof t,"  [GetFullPathNameW] %s\n",n); ws(t);}
+    if(!buf || len < nlen+1){ g_lasterr=0; return nlen+1; }           // caller must grow buffer
+    uint32_t i=0; for(; i<nlen; i++) buf[i]=name[i]; buf[i]=0;
+    if(part){ *part=0; for(uint32_t j=0;j<nlen;j++) if(buf[j]=='\\'||buf[j]=='/') *part=&buf[j+1]; } // last component
+    g_lasterr=0; return nlen;                                          // chars written (excl NUL)
 }
+// System/Windows directory queries: resolve_exe (Command::spawn) searches these.
+// Return the prefix's Windows dirs so the search is well-formed. C:\Windows[\System32].
+static uint32_t MSABI i_GetSystemDirectoryW(uint16_t*buf,uint32_t sz){ const char*s="C:\\Windows\\System32"; uint32_t i=0; for(; s[i]&&i<sz-1;i++) buf[i]=(uint8_t)s[i]; if(i<sz)buf[i]=0; if(getenv("PELOAD_TRACE_SPAWN"))ws("  [GetSystemDirectoryW]\n"); return i; }
+static uint32_t MSABI i_GetWindowsDirectoryW(uint16_t*buf,uint32_t sz){ const char*s="C:\\Windows"; uint32_t i=0; for(; s[i]&&i<sz-1;i++) buf[i]=(uint8_t)s[i]; if(i<sz)buf[i]=0; if(getenv("PELOAD_TRACE_SPAWN"))ws("  [GetWindowsDirectoryW]\n"); return i; }
 static void   MSABI i_GetLocalTime(uint16_t *stm){
     if(!stm) return; struct timeval tv; gettimeofday(&tv,0); time_t t=tv.tv_sec; struct tm lt; localtime_r(&t,&lt);
     stm[0]=lt.tm_year+1900; stm[1]=lt.tm_mon+1; stm[2]=lt.tm_wday; stm[3]=lt.tm_mday;
@@ -5128,9 +5166,11 @@ static int MSABI i_SetCurrentDirectoryW(const uint16_t*w){ char p[2048]; return 
 static int wput(uint16_t*d,const char*s,uint32_t cap){ uint32_t i=0; for(; s[i] && i<cap/2-1; i++) d[i]=(uint8_t)s[i]; d[i]=0; return (i+1)*2; }
 static long MSABI i_RegGetValueW(void*hk,const uint16_t*sub,const uint16_t*val,uint32_t fl,uint32_t*ty,void*data,uint32_t*cb){
     (void)hk;(void)sub;(void)fl; char vn[128]; int i=0; for(; val&&val[i]&&i<127;i++) vn[i]=(char)val[i]; vn[i]=0;
+    char sn[256]; int j=0; for(; sub&&sub[j]&&j<255;j++) sn[j]=(char)sub[j]; sn[j]=0;
     const char *ans=0;
     if(!strcasecmp(vn,"SteamPath")||!strcasecmp(vn,"InstallPath")||!strcasecmp(vn,"SteamExe"))
         ans="C:\\Program Files\\Steam";
+    if(getenv("PELOAD_TRACE_REG")){ char t[420]; snprintf(t,sizeof t,"  [RegGetValue] sub='%s' val='%s' -> %s\n",sn,vn,ans?ans:"ERROR_FILE_NOT_FOUND(2)"); ws(t); }
     if(!ans) return 2; // ERROR_FILE_NOT_FOUND
     if(ty)*ty=1; // REG_SZ
     uint32_t need=((uint32_t)strlen(ans)+1)*2;
@@ -5138,7 +5178,7 @@ static long MSABI i_RegGetValueW(void*hk,const uint16_t*sub,const uint16_t*val,u
     if(cb && *cb<need){ *cb=need; return 234; } // ERROR_MORE_DATA
     int n=wput((uint16_t*)data,ans, cb?*cb:need); if(cb)*cb=n; return 0; // ERROR_SUCCESS
 }
-static long MSABI i_RegOpenKeyExW(void*hk,const uint16_t*sub,uint32_t o,uint32_t sam,void**out){ (void)hk;(void)sub;(void)o;(void)sam; if(out)*out=(void*)0x4b4559; return 0; }
+static long MSABI i_RegOpenKeyExW(void*hk,const uint16_t*sub,uint32_t o,uint32_t sam,void**out){ (void)hk;(void)o;(void)sam; if(getenv("PELOAD_TRACE_REG")){ char sn[256]; int j=0; for(; sub&&sub[j]&&j<255;j++) sn[j]=(char)sub[j]; sn[j]=0; char t[320]; snprintf(t,sizeof t,"  [RegOpenKeyEx] sub='%s'\n",sn); ws(t); } if(out)*out=(void*)0x4b4559; return 0; }
 static long MSABI i_RegQueryValueExW(void*hk,const uint16_t*val,void*r,uint32_t*ty,void*data,uint32_t*cb){ (void)r; return i_RegGetValueW(hk,0,val,0,ty,data,cb); }
 static long MSABI i_RegCloseKey(void*hk){ (void)hk; return 0; }
 
@@ -5503,6 +5543,8 @@ static void *resolve_impl(const char *fn){
         {"SetFilePointerEx",(void*)i_SetFilePointerEx},
         {"GetFileSizeEx",(void*)i_GetFileSizeEx},
         {"GetFullPathNameW",(void*)i_GetFullPathNameW},
+        {"GetSystemDirectoryW",(void*)i_GetSystemDirectoryW},
+        {"GetWindowsDirectoryW",(void*)i_GetWindowsDirectoryW},
         {"GetLocalTime",(void*)i_GetLocalTime},
         {"GetSystemTime",(void*)i_GetSystemTime},
         {"CreateDirectoryW",(void*)i_CreateDirectoryW},
@@ -5593,6 +5635,9 @@ static void *resolve_impl(const char *fn){
         {"GetCommandLineA",(void*)i_GetCommandLineA},
         {"GetEnvironmentStringsW",(void*)i_GetEnvironmentStringsW},
         {"FreeEnvironmentStringsW",(void*)i_FreeEnvironmentStringsW},
+        {"GetEnvironmentStrings",(void*)i_GetEnvironmentStrings},
+        {"GetEnvironmentStringsA",(void*)i_GetEnvironmentStrings},
+        {"FreeEnvironmentStringsA",(void*)i_FreeEnvironmentStringsA},
         {"GetTickCount",(void*)i_GetTickCount},
         {"GetTickCount64",(void*)i_GetTickCount64},
         {"LoadLibraryExW",(void*)i_LoadLibraryExW},
