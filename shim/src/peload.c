@@ -5082,7 +5082,12 @@ static void*  MSABI i_CreateFileW(const uint16_t *w,uint32_t acc,uint32_t share,
     int fd=open(p, flags, 0644);
     if(fd<0 && (flags&O_CREAT) && errno==ENOENT){ mkparents(p); fd=open(p, flags, 0644); } // scratch mirror
     if(getenv("PELOAD_TRACE_FS")){ char hd[48]; snprintf(hd,sizeof hd,"  [CFW pid=%d disp=%u acc=0x%x] ",getpid(),disp,acc); ws(hd); ws(p); ws(fd<0?"  FAIL\n":"  ok\n"); }
-    if(fd<0){ g_lasterr=win_err(); if(g_lasterr==2) snprintf(t_lastfail,sizeof t_lastfail,"CFW:%s",p[0]?p:"<empty>"); return (void*)-1; } g_lasterr=0; // INVALID_HANDLE_VALUE
+    if(fd<0){ g_lasterr=win_err(); if(g_lasterr==2) snprintf(t_lastfail,sizeof t_lastfail,"CFW:%s",p[0]?p:"<empty>");
+        if(getenv("PELOAD_TRACE_CFWBT") && errno==ENOENT){ ws("  [CFW-ENOENT] "); ws(p); ws("\n    chain:");
+            uint64_t *sp=(uint64_t*)__builtin_frame_address(0); int shown=0;
+            for(int i=0;i<800 && shown<8;i++){ uint64_t v=sp[i]; if(v>=0x140001000ULL&&v<0x141aae000ULL){ char t[32]; snprintf(t,sizeof t," +0x%llx",(unsigned long long)(v-0x140000000ULL)); ws(t); shown++; } }
+            ws("\n"); }
+        return (void*)-1; } g_lasterr=0; // INVALID_HANDLE_VALUE
     fd_record(fd,p);
     if(fl&0x04000000) g_fddel[fd<MAXFD?fd:0]=1; // FILE_FLAG_DELETE_ON_CLOSE
     return (void*)(intptr_t)(0x1000+fd);
