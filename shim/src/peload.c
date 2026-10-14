@@ -47,6 +47,7 @@
 #include <sys/ucontext.h>
 #include <dlfcn.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netdb.h>
@@ -542,8 +543,16 @@ static int    MSABI i_TlsFree(uint32_t i){ (void)i; return 1; }
 // ---- expanded kernel32/core surface that genuine ucrtbase needs ----
 // console/file I/O: pseudo-handles 1/2/3 == stdin/stdout/stderr
 static void*  MSABI i_GetStdHandle(uint32_t id){ return (void*)(intptr_t)(id==(uint32_t)-10?1: id==(uint32_t)-11?2: id==(uint32_t)-12?3: 0); }
+static int pipe_is(intptr_t hv);          // fwd (named-pipe handle predicate)
+static int pipe_write(void*h,const void*buf,uint32_t n,uint32_t*wr); // fwd (defined with the pipe subsystem)
+static int pipe_read(void*h,void*buf,uint32_t n,uint32_t*rd);        // fwd
+static int pipe_close(void*h);                                       // fwd
+static int pipe_name_is(const char*s);                               // fwd
+static void* pipe_client_open(const char*narrow);                    // fwd
 static int    MSABI i_WriteFile(void *h, const void *buf, uint32_t n, uint32_t *wr, void *ov){
-    (void)ov; intptr_t hv=(intptr_t)h; int fd = (hv==2)?1 : (hv==3)?2 : (hv>=0x1000)?(int)(hv-0x1000) : -1;
+    (void)ov; intptr_t hv=(intptr_t)h;
+    if(pipe_is(hv)) return pipe_write(h,buf,n,wr);
+    int fd = (hv==2)?1 : (hv==3)?2 : (hv>=0x1000)?(int)(hv-0x1000) : -1;
     // PELOAD_CAP_ADV: dump the exact bytes written to a local-server advertisement file
     // (the <uuid>.partial / .json), so we learn the real schema the discovery validator wants.
     if(fd>=0 && fd<MAXFD && g_fdpath[fd] && buf && n>0 && n<8192 && getenv("PELOAD_CAP_ADV")
@@ -1617,8 +1626,14 @@ static void udp_tracef(const char*dir,WSASOCK s,const struct sockaddr_storage*ss
     char b[160]; int k=snprintf(b,sizeof b,"  [udp] %s fd=%d local:%d %s %s:%d len=%d\n",dir,(int)s,lp,strcmp(dir,"TX")?"<-":"->",ip,port,len); (void)!write(2,b,k); }
 static int MSABI i_ws2_sendto(WSASOCK s,const char*buf,int len,int fl,const void*to,int tl){ struct sockaddr_storage ss; int bl=to?sa_w2b(to,tl,&ss):0; ssize_t r=sendto((int)s,buf,len,fl,bl?(struct sockaddr*)&ss:0,bl); if(r<0){ws2_err(errno);if(getenv("PELOAD_TRACE_UDP")){char b[96];int k=snprintf(b,sizeof b,"  [udp] TX fd=%d FAIL errno=%d\n",(int)s,errno);(void)!write(2,b,k);}return -1;} if(bl)udp_tracef("TX",s,&ss,(int)r); return (int)r; }
 static int MSABI i_ws2_recvfrom(WSASOCK s,char*buf,int len,int fl,void*from,int*fl2){ struct sockaddr_storage ss; socklen_t sl=sizeof ss; ssize_t r=recvfrom((int)s,buf,len,fl,(struct sockaddr*)&ss,&sl); if(r<0){ws2_err(errno);return -1;} if(r>=0)udp_tracef("RX",s,&ss,(int)r); if(from&&fl2) sa_b2w((struct sockaddr*)&ss,from,fl2); return (int)r; }
-static int MSABI i_ws2_send(WSASOCK s,const char*buf,int len,int fl){ ssize_t r=send((int)s,buf,len,fl); if(r<0){ws2_err(errno);net_tracef("[net] send(fd=%d,len=%d) -> errno=%d wsa=%d\n",(int)s,len,errno,t_wsa_err);return -1;} net_tracef("[net] send(fd=%d,len=%d) -> %d\n",(int)s,len,(int)r); return (int)r; }
-static int MSABI i_ws2_recv(WSASOCK s,char*buf,int len,int fl){ ssize_t r=recv((int)s,buf,len,fl); if(r<0){ws2_err(errno);net_tracef("[net] recv(fd=%d,len=%d) -> errno=%d wsa=%d\n",(int)s,len,errno,t_wsa_err);return -1;} net_tracef("[net] recv(fd=%d,len=%d) -> %d\n",(int)s,len,(int)r); return (int)r; }
+// PELOAD_TRACE_WIRE: hex+ascii dump of TCP payloads (to RE the local-server query/join protocol).
+static void wire_dump(const char*dir,int fd,const char*buf,int n){ if(!getenv("PELOAD_TRACE_WIRE")||n<=0) return;
+    int m=n>128?128:n; char o[700]; int k=snprintf(o,sizeof o,"  [wire] %s fd=%d n=%d: ",dir,fd,n);
+    for(int i=0;i<m&&k<620;i++) k+=snprintf(o+k,sizeof o-k,"%02x",(unsigned char)buf[i]);
+    k+=snprintf(o+k,sizeof o-k," | "); for(int i=0;i<m&&k<690;i++){ unsigned char c=buf[i]; o[k++]=(c>=32&&c<127)?c:'.'; }
+    o[k++]='\n'; (void)!write(2,o,k); }
+static int MSABI i_ws2_send(WSASOCK s,const char*buf,int len,int fl){ ssize_t r=send((int)s,buf,len,fl); if(r<0){ws2_err(errno);net_tracef("[net] send(fd=%d,len=%d) -> errno=%d wsa=%d\n",(int)s,len,errno,t_wsa_err);return -1;} net_tracef("[net] send(fd=%d,len=%d) -> %d\n",(int)s,len,(int)r); wire_dump("TX",(int)s,buf,(int)r); return (int)r; }
+static int MSABI i_ws2_recv(WSASOCK s,char*buf,int len,int fl){ ssize_t r=recv((int)s,buf,len,fl); if(r<0){ws2_err(errno);net_tracef("[net] recv(fd=%d,len=%d) -> errno=%d wsa=%d\n",(int)s,len,errno,t_wsa_err);return -1;} net_tracef("[net] recv(fd=%d,len=%d) -> %d\n",(int)s,len,(int)r); wire_dump("RX",(int)s,buf,(int)r); return (int)r; }
 static int MSABI i_ws2_shutdown(WSASOCK s,int how){ return shutdown((int)s,how)==0?0:(ws2_err(errno),-1); }
 static int MSABI i_ws2_getsockname(WSASOCK s,void*name,int*nl){ struct sockaddr_storage ss; socklen_t sl=sizeof ss; if(getsockname((int)s,(struct sockaddr*)&ss,&sl)<0){ws2_err(errno);return -1;} sa_b2w((struct sockaddr*)&ss,name,nl); return 0; }
 static int MSABI i_ws2_getpeername(WSASOCK s,void*name,int*nl){ struct sockaddr_storage ss; socklen_t sl=sizeof ss; if(getpeername((int)s,(struct sockaddr*)&ss,&sl)<0){ws2_err(errno);return -1;} sa_b2w((struct sockaddr*)&ss,name,nl); return 0; }
@@ -4580,6 +4595,9 @@ static int nt_open_common(void **ph,uint32_t acc,void *oa,void *iosb,uint32_t di
     uint8_t *OA=oa; void *root = OA? *(void**)(OA+8) : 0; uint8_t *uni = OA? *(uint8_t**)(OA+16) : 0;
     char name[1600]={0}; if(uni){ uint16_t len=*(uint16_t*)uni; uint16_t *bufw=*(uint16_t**)(uni+8); int n=len/2,j=0; for(int i=0;i<n&&j<1599;i++){ char c=(char)(bufw[i]<128?bufw[i]:'?'); name[j++]=c;} name[j]=0; }
     for(char*q=name;*q;q++) if(*q=='\\') *q='/';
+    if(pipe_name_is(name)){ void*ph2=pipe_client_open(name);
+        if(ph2==(void*)-1){ if(iosb)((uint64_t*)iosb)[0]=0xC0000034; return (int)0xC0000034; }
+        if(ph)*ph=ph2; if(iosb){((uint64_t*)iosb)[0]=0;((uint64_t*)iosb)[1]=1;} return 0; }
     if(getenv("PELOAD_TRACE_NET") && (strstr(name,"Device")||strstr(name,"Afd")||strstr(name,"afd"))){ ws("  [NtCreate-dev] "); ws(name); ws("\n"); }
     if(afd_is_device_name(name)){ void*d=afd_make_device(); if(!d){ if(iosb)((uint64_t*)iosb)[0]=0xC0000017; return (int)0xC0000017; }
         if(ph)*ph=d; if(iosb){((uint64_t*)iosb)[0]=0;((uint64_t*)iosb)[1]=1;}
@@ -4956,8 +4974,57 @@ static void*  MSABI i_MapViewOfFile(void*hMap,uint32_t access,uint32_t offHigh,u
 static void*  MSABI i_MapViewOfFileEx(void*hMap,uint32_t access,uint32_t offHigh,uint32_t offLow,uint64_t bytes,void*baseHint){
     (void)baseHint; return i_MapViewOfFile(hMap,access,offHigh,offLow,bytes); }
 static int    MSABI i_UnmapViewOfFile(void*p){ (void)p; return 1; } // size unknown here; leak the view (harmless)
+// ---- Named pipes (dedicated-server <-> game-worker IPC) bridged to UNIX domain sockets ----
+// Windows named pipes (\\.\pipe\NAME) cross arbitrary processes by name. Back each with a UNIX socket at
+// /tmp/rnp_<fnv(tail)> where tail is the part after "pipe\\"/"pipe/" (so \\.\pipe\NAME and
+// \Device\NamedPipe\NAME map to the SAME socket). The server (CreateNamedPipeW) binds+listens; a client
+// (CreateFileW/NtCreateFile on a pipe path) connects; ConnectNamedPipe accepts. Synchronous only.
+#define PIPE_MAGIC 0x45504950u  // 'PIPE'
+typedef struct { uint32_t magic; int listenfd; int connfd; int is_server; char sp[108]; } PipeObj;
+static int pipe_name_is(const char*s){ if(!s) return 0;
+    for(const char*p=s;p[0]&&p[1]&&p[2]&&p[3]&&p[4];p++)
+        if((p[0]|32)=='p'&&(p[1]|32)=='i'&&(p[2]|32)=='p'&&(p[3]|32)=='e'&&(p[4]=='\\'||p[4]=='/')) return 1;
+    return 0; }
+static const char* pipe_tail(const char*s){ const char*best=s;
+    for(const char*p=s;p[0]&&p[1]&&p[2]&&p[3]&&p[4];p++)
+        if((p[0]|32)=='p'&&(p[1]|32)=='i'&&(p[2]|32)=='p'&&(p[3]|32)=='e'&&(p[4]=='\\'||p[4]=='/')) best=p+5;
+    return best; }
+static void pipe_sockpath(const char*name,char*out,size_t osz){ const char*t=pipe_tail(name);
+    uint64_t h=1469598103934665603ULL; for(const char*p=t;*p;p++){ h^=(unsigned char)*p; h*=1099511628211ULL; }
+    snprintf(out,osz,"/tmp/rnp_%016llx",(unsigned long long)h); }
+static int pipe_is(intptr_t hv){ return hv>0x100000 && !((hv)&3) && ((PipeObj*)hv)->magic==PIPE_MAGIC; }
+static void* MSABI i_CreateNamedPipeW(const uint16_t*w,uint32_t openMode,uint32_t pipeMode,uint32_t maxInst,uint32_t outBuf,uint32_t inBuf,uint32_t timeout,void*sec){
+    (void)openMode;(void)pipeMode;(void)maxInst;(void)outBuf;(void)inBuf;(void)timeout;(void)sec;
+    char nm[1024]; int i=0; for(; w&&w[i]&&i<1023;i++) nm[i]=(char)(w[i]<128?w[i]:'?'); nm[i]=0;
+    PipeObj*o=calloc(1,sizeof *o); if(!o) return (void*)-1; o->magic=PIPE_MAGIC; o->listenfd=-1; o->connfd=-1; o->is_server=1;
+    pipe_sockpath(nm,o->sp,sizeof o->sp);
+    int fd=socket(AF_UNIX,SOCK_STREAM,0); if(fd<0){ free(o); g_lasterr=win_err(); return (void*)-1; }
+    struct sockaddr_un un; memset(&un,0,sizeof un); un.sun_family=AF_UNIX; snprintf(un.sun_path,sizeof un.sun_path,"%s",o->sp);
+    unlink(o->sp); if(bind(fd,(struct sockaddr*)&un,sizeof un)<0 || listen(fd,8)<0){ close(fd); free(o); g_lasterr=win_err(); return (void*)-1; }
+    o->listenfd=fd; if(getenv("PELOAD_TRACE_FS")){ char b[200]; int k=snprintf(b,sizeof b,"  [CreateNamedPipe] %s -> %s\n",nm,o->sp); (void)!write(2,b,k);} g_lasterr=0; return o; }
+static void* MSABI i_CreateNamedPipeA(const char*a,uint32_t om,uint32_t pm,uint32_t mi,uint32_t ob,uint32_t ib,uint32_t to,void*sec){
+    uint16_t w[1024]; int i=0; for(; a&&a[i]&&i<1023;i++) w[i]=(uint8_t)a[i]; w[i]=0; return i_CreateNamedPipeW(w,om,pm,mi,ob,ib,to,sec); }
+static void* pipe_client_open(const char*narrow){
+    PipeObj*o=calloc(1,sizeof *o); if(!o) return (void*)-1; o->magic=PIPE_MAGIC; o->listenfd=-1; o->connfd=-1; o->is_server=0;
+    pipe_sockpath(narrow,o->sp,sizeof o->sp);
+    int fd=socket(AF_UNIX,SOCK_STREAM,0); if(fd<0){ free(o); g_lasterr=win_err(); return (void*)-1; }
+    struct sockaddr_un un; memset(&un,0,sizeof un); un.sun_family=AF_UNIX; snprintf(un.sun_path,sizeof un.sun_path,"%s",o->sp);
+    int ok=0; for(int t=0;t<100;t++){ if(connect(fd,(struct sockaddr*)&un,sizeof un)==0){ ok=1; break; } struct timespec ts={0,2*1000000L}; nanosleep(&ts,0); }
+    if(!ok){ close(fd); free(o); g_lasterr=2 /*ERROR_FILE_NOT_FOUND*/; return (void*)-1; }
+    o->connfd=fd; if(getenv("PELOAD_TRACE_FS")){ char b[200]; int k=snprintf(b,sizeof b,"  [pipe-open] %s -> %s\n",narrow,o->sp); (void)!write(2,b,k);} g_lasterr=0; return o; }
+static int MSABI i_ConnectNamedPipe(void*h,void*ov){ (void)ov; intptr_t hv=(intptr_t)h; if(!pipe_is(hv)){ g_lasterr=6; return 0; }
+    PipeObj*o=(PipeObj*)hv; if(o->connfd>=0) return 1; int c=accept(o->listenfd,0,0); if(c<0){ g_lasterr=win_err(); return 0; } o->connfd=c; return 1; }
+static int MSABI i_DisconnectNamedPipe(void*h){ intptr_t hv=(intptr_t)h; if(!pipe_is(hv)) return 0; PipeObj*o=(PipeObj*)hv; if(o->connfd>=0){ close(o->connfd); o->connfd=-1; } return 1; }
+static int pipe_rw_fd(PipeObj*o){ if(o->connfd<0 && o->is_server){ int c=accept(o->listenfd,0,0); if(c>=0) o->connfd=c; } return o->connfd; }
+static int pipe_write(void*h,const void*buf,uint32_t n,uint32_t*wr){ PipeObj*o=h; int f=pipe_rw_fd(o);
+    ssize_t k=(f>=0&&buf)?send(f,buf,n,0):-1; if(wr)*wr=(uint32_t)(k<0?0:k); if(k<0)g_lasterr=win_err(); return k>=0; }
+static int pipe_read(void*h,void*buf,uint32_t n,uint32_t*rd){ PipeObj*o=h; int f=pipe_rw_fd(o);
+    ssize_t k=(f>=0&&buf)?recv(f,buf,n,0):-1; if(rd)*rd=(uint32_t)(k<0?0:k); if(k<0)g_lasterr=win_err(); return k>0 || (k==0); }
+static int pipe_close(void*h){ PipeObj*o=h; if(o->connfd>=0)close(o->connfd); if(o->listenfd>=0){ close(o->listenfd); if(o->is_server)unlink(o->sp);} o->magic=0; free(o); return 1; }
 static void*  MSABI i_CreateFileW(const uint16_t *w,uint32_t acc,uint32_t share,void*sec,uint32_t disp,uint32_t fl,void*tmpl){
     (void)share;(void)sec;(void)fl;(void)tmpl; char p[2048]; win2unix(w,p,sizeof p);
+    { char nn[1024]; int i=0; for(; w&&w[i]&&i<1023;i++) nn[i]=(char)(w[i]<128?w[i]:'?'); nn[i]=0;
+      if(pipe_name_is(nn)) return pipe_client_open(nn); }
     if((!w||!w[0])){
         if(getenv("PELOAD_TRACE_EMPTY")){ ws("  [CFW EMPTY-PATH caller chain]\n"); uint64_t *sp=(uint64_t*)__builtin_frame_address(0);
             for(int i=0;i<500;i++){ uint64_t v=sp[i]; if(v>=0x140000000ULL&&v<0x14c000000ULL){ char t[48]; snprintf(t,sizeof t,"    exe+0x%llx\n",(unsigned long long)(v-0x140000000ULL)); ws(t);} } }
@@ -4986,7 +5053,9 @@ static void*  MSABI i_CreateFileW(const uint16_t *w,uint32_t acc,uint32_t share,
     return (void*)(intptr_t)(0x1000+fd);
 }
 static int    MSABI i_ReadFile(void*h,void*buf,uint32_t n,uint32_t*rd,uint8_t*ov){
-    intptr_t hv=(intptr_t)h; if(hv<0x1000){ if(rd)*rd=0; return 0; } int fd=(int)(hv-0x1000);
+    intptr_t hv=(intptr_t)h;
+    if(pipe_is(hv)) return pipe_read(h,buf,n,rd);
+    if(hv<0x1000){ if(rd)*rd=0; return 0; } int fd=(int)(hv-0x1000);
     long k; if(ov){ uint64_t off=*(uint64_t*)(ov+16); k=pread(fd,buf,n,(off_t)off); } else k=read(fd,buf,n);
     if(rd)*rd=(uint32_t)(k<0?0:k);
     if(ov){ *(uint64_t*)(ov+0)=0; *(uint64_t*)(ov+8)=(uint64_t)(k<0?0:k);  // Internal, InternalHigh
@@ -5019,6 +5088,7 @@ static int    MSABI i_ReadFileEx(void*h,void*buf,uint32_t n,uint8_t*ov,void*comp
     if(completion){ void(__attribute__((ms_abi))*cr)(uint32_t,uint32_t,void*)=completion; cr(k<0?5u:0u,(uint32_t)(k<0?0:k),ov); }
     return k>=0; }
 static int    MSABI i_CloseHandleReal(void*h){ intptr_t hv=(intptr_t)h;
+    if(pipe_is(hv)) return pipe_close(h);
     if(is_sync(hv)) return 1;   // sync object / thread handle: no-op (leaked; a thread handle may still be live)
     if(hv>=0x1000 && hv<0x100000){ int fd=(int)(hv-0x1000);
     if(fd>=0 && fd<MAXFD){ if(g_fddir[fd]){ closedir(g_fddir[fd]); g_fddir[fd]=0; }
@@ -5411,6 +5481,10 @@ static void *resolve_impl(const char *fn){
         {"CloseHandle",(void*)i_CloseHandleReal},
         {"CreateFileW",(void*)i_CreateFileW},
         {"CreateFileA",(void*)i_CreateFileA},
+        {"CreateNamedPipeW",(void*)i_CreateNamedPipeW},
+        {"CreateNamedPipeA",(void*)i_CreateNamedPipeA},
+        {"ConnectNamedPipe",(void*)i_ConnectNamedPipe},
+        {"DisconnectNamedPipe",(void*)i_DisconnectNamedPipe},
         {"ReadFileEx",(void*)i_ReadFileEx},
         {"CreateIoCompletionPort",(void*)i_CreateIoCompletionPort},
         {"PostQueuedCompletionStatus",(void*)i_PostQueuedCompletionStatus},
