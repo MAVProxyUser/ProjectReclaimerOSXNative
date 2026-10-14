@@ -4621,6 +4621,30 @@ static int MSABI i_SetFileInformationByHandle(void*h,int cls,void*info,uint32_t 
     if(getenv("PELOAD_TRACE_FS")){ char t[96]; snprintf(t,sizeof t,"  [SetFileInfo] cls=%d d0=0x%x -> del=%d ",cls, info?*(uint32_t*)info:0, (cls==4||cls==21)?g_fddel[fd]:-1); ws(t); ws(g_fdpath[fd]?g_fdpath[fd]:"?"); ws("\n"); }
     return 1;
 }
+// Rust anon_pipe (Stdio::piped) builds a pipe via the NT API, not CreateNamedPipeW:
+//   NtOpenFile("\Device\NamedPipe\")          -> a root handle to the pipe FS
+//   NtCreateNamedPipeFile(root, <random name>) -> the server end (ours)
+//   NtOpenFile(root=server, "")                -> the client end (theirs, opposite direction)
+// We back it with a bidirectional socketpair (so read/write direction is a non-issue) and pair the
+// two fds, so the client reopen (root == a pipe-server fd) returns the mate. This is what the
+// dedicated server needs: it captures each game-server worker's stdout/stderr over piped stdio, so
+// Command::spawn fails at the first anon_pipe (os error 2) without this.
+#define PIPE_DEV_HANDLE ((void*)0x5500)
+static int g_pipe_other[MAXFD];   // pipe fd -> (mate fd + 1); 0 = not an anon-pipe end
+static int nt_name_is_pipedev(const char*n){ // n is already in slash form; Rust uses the \??\PIPE\ alias
+    return n && (!strcasecmp(n,"/Device/NamedPipe") || !strncasecmp(n,"/Device/NamedPipe/",18)
+                 || !strcasecmp(n,"/??/PIPE") || !strncasecmp(n,"/??/PIPE/",9)); }
+static int MSABI i_NtCreateNamedPipeFile(void**ph,uint32_t acc,void*oa,void*iosb,uint32_t share,
+        uint32_t disp,uint32_t opts,uint32_t ptype,uint32_t rmode,uint32_t cmode,uint32_t maxinst,
+        uint32_t inq,uint32_t outq,void*timeout){
+    (void)acc;(void)oa;(void)share;(void)disp;(void)opts;(void)ptype;(void)rmode;(void)cmode;
+    (void)maxinst;(void)inq;(void)outq;(void)timeout;
+    int sv[2]; if(socketpair(AF_UNIX,SOCK_STREAM,0,sv)!=0){ if(iosb)((uint64_t*)iosb)[0]=0xC0000001; return (int)0xC0000001; }
+    if(sv[0]<MAXFD) g_pipe_other[sv[0]]=sv[1]+1;
+    if(sv[1]<MAXFD) g_pipe_other[sv[1]]=sv[0]+1;
+    if(ph)*ph=(void*)(intptr_t)(0x1000+sv[0]); if(iosb){((uint64_t*)iosb)[0]=0;((uint64_t*)iosb)[1]=1;}
+    if(getenv("PELOAD_TRACE_FS")){ char b[64]; int k=snprintf(b,sizeof b,"  [NtCreateNamedPipe] sv=%d/%d\n",sv[0],sv[1]); (void)!write(2,b,k);} return 0;
+}
 // NtCreateFile: supports NT absolute names (\??\C:\..) and names relative to an
 // OBJECT_ATTRIBUTES.RootDirectory handle — the path Rust remove_dir_all uses.
 // mio opens "\Device\Afd\Mio" as its socket-readiness poller; forward to our AFD bridge.
@@ -4630,6 +4654,13 @@ static int nt_open_common(void **ph,uint32_t acc,void *oa,void *iosb,uint32_t di
     uint8_t *OA=oa; void *root = OA? *(void**)(OA+8) : 0; uint8_t *uni = OA? *(uint8_t**)(OA+16) : 0;
     char name[1600]={0}; if(uni){ uint16_t len=*(uint16_t*)uni; uint16_t *bufw=*(uint16_t**)(uni+8); int n=len/2,j=0; for(int i=0;i<n&&j<1599;i++){ char c=(char)(bufw[i]<128?bufw[i]:'?'); name[j++]=c;} name[j]=0; }
     for(char*q=name;*q;q++) if(*q=='\\') *q='/';
+    // anon_pipe: client reopen (RootDirectory is a pipe-server fd) -> return the socketpair mate.
+    { intptr_t rv=(intptr_t)root; if(rv>=0x1000){ int rfd=(int)(rv-0x1000); if(rfd>=0&&rfd<MAXFD&&g_pipe_other[rfd]){
+        int mate=g_pipe_other[rfd]-1; if(ph)*ph=(void*)(intptr_t)(0x1000+mate); if(iosb){((uint64_t*)iosb)[0]=0;((uint64_t*)iosb)[1]=1;}
+        if(getenv("PELOAD_TRACE_FS")){ char b[64]; int k=snprintf(b,sizeof b,"  [NtOpen pipe-mate] srv=%d -> %d\n",rfd,mate); (void)!write(2,b,k);} return 0; } } }
+    // anon_pipe: device-root open ("\Device\NamedPipe\") -> a sentinel used only as RootDirectory.
+    if(!root && nt_name_is_pipedev(name)){ if(ph)*ph=PIPE_DEV_HANDLE; if(iosb){((uint64_t*)iosb)[0]=0;((uint64_t*)iosb)[1]=1;}
+        if(getenv("PELOAD_TRACE_FS")) ws("  [NtOpen NamedPipe device]\n"); return 0; }
     if(pipe_name_is(name)){ void*ph2=pipe_client_open(name);
         if(ph2==(void*)-1){ if(iosb)((uint64_t*)iosb)[0]=0xC0000034; return (int)0xC0000034; }
         if(ph)*ph=ph2; if(iosb){((uint64_t*)iosb)[0]=0;((uint64_t*)iosb)[1]=1;} return 0; }
@@ -4655,7 +4686,11 @@ static int MSABI i_NtCreateFile(void **ph,uint32_t acc,void *oa,void *iosb,void 
     (void)alloc;(void)fattr;(void)share;(void)ea;(void)eal; return nt_open_common(ph,acc,oa,iosb,disp,opts);
 }
 static int MSABI i_NtOpenFile(void **ph,uint32_t acc,void *oa,void *iosb,uint32_t share,uint32_t opts){
-    (void)share; return nt_open_common(ph,acc,oa,iosb,1 /*FILE_OPEN*/,opts);
+    (void)share;
+    if(getenv("PELOAD_TRACE_FS")){ uint8_t*OA=oa; uint8_t*uni=OA?*(uint8_t**)(OA+16):0; char nm[256]={0};
+        if(uni){ uint16_t ln=*(uint16_t*)uni; uint16_t*bw=*(uint16_t**)(uni+8); int n=ln/2,j=0; for(int i=0;i<n&&j<255;i++){char c=(char)(bw[i]<128?bw[i]:'?'); nm[j++]=c;} nm[j]=0; }
+        char b[320]; int k=snprintf(b,sizeof b,"  [NtOpenFile entry] root=%p name='%s'\n",OA?*(void**)(OA+8):0,nm); (void)!write(2,b,k); }
+    return nt_open_common(ph,acc,oa,iosb,1 /*FILE_OPEN*/,opts);
 }
 static int MSABI i_CompareStringOrdinal(const uint16_t*a,int ca,const uint16_t*b,int cb,int ic){
     int la = ca<0? ({int n=0; while(a[n])n++; n;}) : ca;
@@ -5861,6 +5896,7 @@ static void *resolve_impl(const char *fn){
         {"NtDeviceIoControlFile",(void*)i_NtDeviceIoControlFile},
         {"NtCancelIoFileEx",(void*)i_NtCancelIoFileEx},
         {"NtOpenFile",(void*)i_NtOpenFile},
+        {"NtCreateNamedPipeFile",(void*)i_NtCreateNamedPipeFile},
         {"SetThreadStackGuarantee",(void*)i_SetThreadStackGuarantee},
         {"FreeLibrary",(void*)i_FreeLibrary},
         {"GetModuleFileNameA",(void*)i_GetModuleFileNameA},
