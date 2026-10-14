@@ -1538,18 +1538,26 @@ static void udp_bases(int*bindbase,int*sendbase){ const char*r=getenv("PELOAD_UD
 // and when a UDP recv hands back a 127.0.0.1 source, present it as that recorded guest IP so
 // the engine's peer-identity check passes. Disable with PELOAD_NO_PEERIP.
 static uint32_t g_peer_gip[MAXFD];   // fd -> guest dest IPv4 (network order) last sent on it
+static uint32_t g_last_peer_gip;     // most recent distinct (non-127.0.0.1) guest peer IP, any fd
 static int g_peerip_off=-1;
 static void peer_gip_rec(int fd,const void*win,int wl){
     if(g_peerip_off<0) g_peerip_off=getenv("PELOAD_NO_PEERIP")?1:0;
     if(g_peerip_off||fd<0||fd>=MAXFD||!win||wl<8) return; const uint8_t*w=win;
     if(((w[0]|(w[1]<<8)))!=2) return; uint32_t ip; memcpy(&ip,w+4,4);
-    if((ntohl(ip)>>24)==127){ if(g_peer_gip[fd]!=ip && getenv("PELOAD_TRACE_UDP")){ char ips[32]; inet_ntop(AF_INET,&ip,ips,sizeof ips); char b[96]; int k=snprintf(b,sizeof b,"  [udp] rec fd=%d dest-guest-ip=%s\n",fd,ips); (void)!write(2,b,k);} g_peer_gip[fd]=ip; } }
+    if((ntohl(ip)>>24)==127){ if(g_peer_gip[fd]!=ip && getenv("PELOAD_TRACE_UDP")){ char ips[32]; inet_ntop(AF_INET,&ip,ips,sizeof ips); char b[96]; int k=snprintf(b,sizeof b,"  [udp] rec fd=%d dest-guest-ip=%s\n",fd,ips); (void)!write(2,b,k);} g_peer_gip[fd]=ip;
+        if(ip!=htonl(0x7f000001)) g_last_peer_gip=ip; } }
 static int peer_gip_restore(int fd,void*win){
     if(g_peerip_off<0) g_peerip_off=getenv("PELOAD_NO_PEERIP")?1:0;
-    if(g_peerip_off||fd<0||fd>=MAXFD||!win||!g_peer_gip[fd]) return 0; uint8_t*w=win;
+    if(g_peerip_off||fd<0||fd>=MAXFD||!win) return 0; uint8_t*w=win;
     if(((w[0]|(w[1]<<8)))!=2) return 0; uint32_t ip; memcpy(&ip,w+4,4);
-    if(ip==htonl(0x7f000001) && g_peer_gip[fd]!=htonl(0x7f000001)){ memcpy(w+4,&g_peer_gip[fd],4);
-        if(getenv("PELOAD_TRACE_UDP")){ char ips[32]; inet_ntop(AF_INET,&g_peer_gip[fd],ips,sizeof ips); char b[96]; int k=snprintf(b,sizeof b,"  [udp] restore fd=%d src 127.0.0.1 -> %s\n",fd,ips); (void)!write(2,b,k);} return 1; } return 0; }
+    // Pick the guest IP this socket last addressed; if this fd never sent (a bridge channel the
+    // engine only RECEIVES on until it learns the peer port), fall back to the most recent distinct
+    // peer IP seen on any fd (single-peer loopback bridge). Opt out of the fallback with
+    // PELOAD_NO_PEERIP_GLOBAL; the whole mechanism with PELOAD_NO_PEERIP.
+    uint32_t gip=g_peer_gip[fd]; if(!gip && !getenv("PELOAD_NO_PEERIP_GLOBAL")) gip=g_last_peer_gip;
+    if(!gip) return 0;
+    if(ip==htonl(0x7f000001) && gip!=htonl(0x7f000001)){ memcpy(w+4,&gip,4);
+        if(getenv("PELOAD_TRACE_UDP")){ char ips[32]; inet_ntop(AF_INET,&gip,ips,sizeof ips); char b[96]; int k=snprintf(b,sizeof b,"  [udp] restore fd=%d src 127.0.0.1 -> %s%s\n",fd,ips,g_peer_gip[fd]?"":" (global)"); (void)!write(2,b,k);} return 1; } return 0; }
 static uint32_t errno2wsa(int e){ switch(e){ case EWOULDBLOCK:return 10035; case EINPROGRESS:return 10036;
     case EALREADY:return 10037; case ENOTSOCK:return 10038; case EMSGSIZE:return 10040; case EADDRINUSE:return 10048;
     case EADDRNOTAVAIL:return 10049; case ENETUNREACH:return 10051; case ECONNRESET:return 10054; case ENOBUFS:return 10055;
