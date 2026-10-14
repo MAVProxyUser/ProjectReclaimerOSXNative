@@ -1707,7 +1707,9 @@ static void udp_tracef(const char*dir,WSASOCK s,const struct sockaddr_storage*ss
     int lp=0; { struct sockaddr_in me; socklen_t ml=sizeof me; if(getsockname((int)s,(struct sockaddr*)&me,&ml)==0) lp=ntohs(me.sin_port);}
     char b[160]; int k=snprintf(b,sizeof b,"  [udp] %s fd=%d local:%d %s %s:%d len=%d\n",dir,(int)s,lp,strcmp(dir,"TX")?"<-":"->",ip,port,len); (void)!write(2,b,k); }
 static int MSABI i_ws2_sendto(WSASOCK s,const char*buf,int len,int fl,const void*to,int tl){ struct sockaddr_storage ss; if(to)peer_gip_rec((int)s,to,tl); t_sa_send=1; int bl=to?sa_w2b(to,tl,&ss):0; t_sa_send=0; ssize_t r=sendto((int)s,buf,len,fl,bl?(struct sockaddr*)&ss:0,bl); if(r<0){ws2_err(errno);if(getenv("PELOAD_TRACE_UDP")){char b[96];int k=snprintf(b,sizeof b,"  [udp] TX fd=%d FAIL errno=%d\n",(int)s,errno);(void)!write(2,b,k);}return -1;} if(bl)udp_tracef("TX",s,&ss,(int)r); return (int)r; }
-static int MSABI i_ws2_recvfrom(WSASOCK s,char*buf,int len,int fl,void*from,int*fl2){ struct sockaddr_storage ss; socklen_t sl=sizeof ss; ssize_t r=recvfrom((int)s,buf,len,fl,(struct sockaddr*)&ss,&sl); if(r<0){ws2_err(errno);return -1;} if(r>=0)udp_tracef("RX",s,&ss,(int)r); if(from&&fl2){ sa_b2w((struct sockaddr*)&ss,from,fl2); peer_gip_restore((int)s,from); } return (int)r; }
+static int MSABI i_ws2_recvfrom(WSASOCK s,char*buf,int len,int fl,void*from,int*fl2){ struct sockaddr_storage ss; socklen_t sl=sizeof ss; ssize_t r=recvfrom((int)s,buf,len,fl,(struct sockaddr*)&ss,&sl); if(r<0){ws2_err(errno);return -1;} if(r>=0)udp_tracef("RX",s,&ss,(int)r);
+    if(getenv("PELOAD_TRACE_SCATTER") && r>200){ void*ra=__builtin_return_address(0); char b[180]; int k=snprintf(b,sizeof b,"  [scatter] recvfrom fd=%d wire=%d bufcap=%d caller=%p%s\n",(int)s,(int)r,len,ra,(r==len)?" (==cap)":""); (void)!write(2,b,k); }
+    if(from&&fl2){ sa_b2w((struct sockaddr*)&ss,from,fl2); peer_gip_restore((int)s,from); } return (int)r; }
 // PELOAD_TRACE_WIRE: hex+ascii dump of TCP payloads (to RE the local-server query/join protocol).
 static void wire_dump(const char*dir,int fd,const char*buf,int n){ if(!getenv("PELOAD_TRACE_WIRE")||n<=0) return;
     int cap=getenv("PELOAD_TRACE_WIRE_FULL")?560:128; int m=n>cap?cap:n; char o[2400]; int k=snprintf(o,sizeof o,"  [wire] %s fd=%d n=%d: ",dir,fd,n);
@@ -1885,8 +1887,10 @@ static int MSABI i_ws2_WSARecvMsg(WSASOCK s,uint8_t*msg,uint32_t*recvd,uint8_t*o
     struct sockaddr_storage ss; socklen_t sl=sizeof ss;
     ssize_t r=recvfrom((int)s,rbuf,sizeof rbuf,0,(struct sockaddr*)&ss,&sl);
     if(r<0){ ws2_err(errno); return -1; }
+    uint32_t cap=0; for(uint32_t i=0;i<cnt;i++) cap+=*(uint32_t*)(bufs+(size_t)i*16);
     uint32_t off=0; for(uint32_t i=0;i<cnt && off<(uint32_t)r;i++){ uint32_t blen=*(uint32_t*)(bufs+(size_t)i*16); char*bp=*(char**)(bufs+(size_t)i*16+8);
         uint32_t n=(uint32_t)r-off; if(n>blen)n=blen; if(bp&&n) memcpy(bp,rbuf+off,n); off+=n; }
+    if((getenv("PELOAD_TRACE_SCATTER") && r>200) || (uint32_t)r>cap){ char b[160]; int k=snprintf(b,sizeof b,"  [scatter] WSARecvMsg fd=%d wire=%d bufs=%u cap=%u delivered=%u%s\n",(int)s,(int)r,cnt,cap,off,((uint32_t)r>cap)?" TRUNCATED!":""); (void)!write(2,b,k); }
     if(recvd)*recvd=(uint32_t)r;
     if(name&&namelenp){ int wl=*namelenp; sa_b2w((struct sockaddr*)&ss,name,&wl); *namelenp=wl; peer_gip_restore((int)s,name); }
     *(uint32_t*)(msg+48)=0; /* dwFlags out */ *(uint32_t*)(msg+32)=0; /* Control.len out (no cmsg) */
@@ -2919,21 +2923,33 @@ static int d3dgl_make_offscreen(void){
     CGLPixelFormatAttribute at[]={kCGLPFAAccelerated,kCGLPFADoubleBuffer,kCGLPFAOpenGLProfile,
         (CGLPixelFormatAttribute)kCGLOGLPVersion_GL4_Core,kCGLPFAColorSize,(CGLPixelFormatAttribute)24,
         kCGLPFAAlphaSize,(CGLPixelFormatAttribute)8,kCGLPFADepthSize,(CGLPixelFormatAttribute)24,(CGLPixelFormatAttribute)0};
-    CGLPixelFormatObj pf=0; GLint n=0; CGLError e;
-    e=CGLChoosePixelFormat(at,&pf,&n);
-    if(e!=kCGLNoError||!pf){
-        char m[96]; int k=snprintf(m,sizeof m,"  [d3dgl] CGLChoosePixelFormat(full) err=%d; retrying minimal\n",e); (void)!write(2,m,k);
-        CGLPixelFormatAttribute b[]={kCGLPFAOpenGLProfile,(CGLPixelFormatAttribute)kCGLOGLPVersion_GL4_Core,kCGLPFAColorSize,(CGLPixelFormatAttribute)24,(CGLPixelFormatAttribute)0};
-        e=CGLChoosePixelFormat(b,&pf,&n);
-        if(e!=kCGLNoError||!pf){ char m2[80]; int k2=snprintf(m2,sizeof m2,"  [d3dgl] CGLChoosePixelFormat(min) err=%d\n",e); (void)!write(2,m2,k2); return 0; } }
-    // Try sharing with the present/window context first (so the present thread can display our
-    // backbuffer); if that fails (pixel-format incompatibility), fall back to an unshared context
-    // (capture via PELOAD_D3DGL_SHOT still works; live display may not).
+    CGLPixelFormatObj pf=0; GLint n=0; CGLError e; int pf_borrowed=0;
     CGLContextObj share=(CGLContextObj)g_present_glctx; CGLContextObj ctx=0;
-    e=CGLCreateContext(pf,share,&ctx);
-    if((e!=kCGLNoError||!ctx) && share){ char m[96]; int k=snprintf(m,sizeof m,"  [d3dgl] CGLCreateContext(shared) err=%d; retrying unshared\n",e); (void)!write(2,m,k);
-        e=CGLCreateContext(pf,0,&ctx); if(e==kCGLNoError&&ctx) share=0; }
-    CGLDestroyPixelFormat(pf);
+    // FIRST choice: build this (render) context from the PRESENT context's OWN pixel format, so the
+    // two share compatibly. CGLCreateContext returns kCGLBadMatch (10009) when the share context's
+    // pixel format is incompatible with the new context's -- which was dropping us to an UNSHARED
+    // context, so the present thread could never see our rendered backbuffer texture => black screen
+    // (and the loading-screen artwork never appeared). Reusing the present's NSOpenGLPixelFormat's
+    // CGLPixelFormatObj makes the match exact. Disable with PELOAD_D3DGL_NOSHAREPF.
+    if(share && g_nspf && !getenv("PELOAD_D3DGL_NOSHAREPF")){
+        CGLPixelFormatObj ppf=(CGLPixelFormatObj)((void*(*)(id,SEL))objc_msgSend)(g_nspf,osel("CGLPixelFormatObj"));
+        if(ppf){ e=CGLCreateContext(ppf,share,&ctx);
+            if(e==kCGLNoError&&ctx){ pf=ppf; pf_borrowed=1; }
+            else { char m[112]; int k=snprintf(m,sizeof m,"  [d3dgl] shared via present PF err=%d; trying own PF\n",e); (void)!write(2,m,k); ctx=0; } } }
+    if(!ctx){
+        e=CGLChoosePixelFormat(at,&pf,&n);
+        if(e!=kCGLNoError||!pf){
+            char m[96]; int k=snprintf(m,sizeof m,"  [d3dgl] CGLChoosePixelFormat(full) err=%d; retrying minimal\n",e); (void)!write(2,m,k);
+            CGLPixelFormatAttribute b[]={kCGLPFAOpenGLProfile,(CGLPixelFormatAttribute)kCGLOGLPVersion_GL4_Core,kCGLPFAColorSize,(CGLPixelFormatAttribute)24,(CGLPixelFormatAttribute)0};
+            e=CGLChoosePixelFormat(b,&pf,&n);
+            if(e!=kCGLNoError||!pf){ char m2[80]; int k2=snprintf(m2,sizeof m2,"  [d3dgl] CGLChoosePixelFormat(min) err=%d\n",e); (void)!write(2,m2,k2); return 0; } }
+        // share with the present/window context if possible; else fall back to an unshared context
+        // (capture via PELOAD_D3DGL_SHOT still works; live display may not).
+        e=CGLCreateContext(pf,share,&ctx);
+        if((e!=kCGLNoError||!ctx) && share){ char m[96]; int k=snprintf(m,sizeof m,"  [d3dgl] CGLCreateContext(shared) err=%d; retrying unshared\n",e); (void)!write(2,m,k);
+            e=CGLCreateContext(pf,0,&ctx); if(e==kCGLNoError&&ctx) share=0; }
+    }
+    if(pf && !pf_borrowed) CGLDestroyPixelFormat(pf);
     if(e!=kCGLNoError||!ctx){ char m[80]; int k=snprintf(m,sizeof m,"  [d3dgl] CGLCreateContext err=%d\n",e); (void)!write(2,m,k); return 0; }
     CGLError se=CGLSetCurrentContext(ctx);
     if(se!=kCGLNoError){ char m[80]; int k=snprintf(m,sizeof m,"  [d3dgl] CGLSetCurrentContext err=%d\n",se); (void)!write(2,m,k); return 0; }
