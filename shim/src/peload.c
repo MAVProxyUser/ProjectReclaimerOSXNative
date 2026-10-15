@@ -732,7 +732,7 @@ typedef struct { void** vtbl; uint32_t kind; uint32_t rowpitch; uint64_t size; v
     unsigned glsh;                // compiled GL shader object (0 until first compile)
     int gl_locinit;               // shader: uniform-location cache populated (0=no)
     int gl_cbloc[16];             // shader: glGetUniformLocation("cb<b>")  (-1 absent)
-    int gl_tloc[16];              // shader: glGetUniformLocation("t<r>")   (-1 absent)
+    int gl_tloc[32];              // shader: glGetUniformLocation("t<r>")   (-1 absent)
     int vs_vtxin;                 // VS: has classic vertex inputs (POSITION/NORMAL/..) not just SV_*
     void* pdata;                  // lazily-allocated private-data store (SetPrivateData/GetPrivateData)
     int is_cb;                    // buffer created with D3D11_BIND_CONSTANT_BUFFER
@@ -747,7 +747,7 @@ typedef struct { GUID_ g; uint32_t sz; uint8_t buf[64]; } PDEnt;
 typedef struct { int n; PDEnt e[12]; } PDStore;
 // Bound pipeline state we track to interpret/translate draws.
 static struct {
-    D3DObj *il, *vb[8], *ib, *psrv[8], *rtv;
+    D3DObj *il, *vb[8], *ib, *psrv[32], *rtv;
     D3DObj *rtvs[8]; int num_rt; D3DObj *dsv;  // multiple render targets (deferred G-buffer) + depth
     D3DObj *vs, *ps, *vscb[16], *pscb[16];   // bound shaders + constant buffers (for D3DGL)
     uint32_t vscb_1st[16], vscb_cnt[16], pscb_1st[16], pscb_cnt[16]; // *SetConstantBuffers1 ranges (16B units)
@@ -1199,7 +1199,7 @@ static void MSABI ctx_PSSetConstantBuffers1(void*t,uint32_t start,uint32_t num,v
     for(uint32_t i=0;i<num&&start+i<16;i++){ g_d3dst.pscb[start+i]=cbs?(D3DObj*)cbs[i]:0;
         g_d3dst.pscb_1st[start+i]=first?first[i]:0; g_d3dst.pscb_cnt[start+i]=cnt?cnt[i]:0; } }
 static void MSABI ctx_PSSetShaderResources(void*t,uint32_t start,uint32_t num,void*const*srvs){ (void)t;
-    for(uint32_t i=0;i<num&&start+i<8;i++){ D3DObj*v=srvs?(D3DObj*)srvs[i]:0; g_d3dst.psrv[start+i]=(v&&v->data)?(D3DObj*)v->data:v; } }
+    for(uint32_t i=0;i<num&&start+i<32;i++){ D3DObj*v=srvs?(D3DObj*)srvs[i]:0; g_d3dst.psrv[start+i]=(v&&v->data)?(D3DObj*)v->data:v; } }
 static void MSABI ctx_OMSetRenderTargets(void*t,uint32_t num,void*const*rtvs,void*dsv){ (void)t;
     g_d3dst.num_rt=0;
     for(uint32_t i=0;i<num&&i<8;i++){ D3DObj*v=rtvs?(D3DObj*)rtvs[i]:0; D3DObj*res=(v&&v->data)?(D3DObj*)v->data:v; g_d3dst.rtvs[i]=res; if(res)g_d3dst.num_rt=i+1; }
@@ -3086,7 +3086,7 @@ static unsigned d3dgl_prog(D3DObj*o,unsigned glstage){
     // populate the uniform-location cache for this program's shader
     o->gl_locinit=1; char nm[16];
     for(int b=0;b<16;b++){ snprintf(nm,sizeof nm,"cb%d",b); o->gl_cbloc[b]=G.GetUniformLocation(prog,nm); }
-    for(int r=0;r<16;r++){ snprintf(nm,sizeof nm,"t%d",r);  o->gl_tloc[r] =G.GetUniformLocation(prog,nm); }
+    for(int r=0;r<32;r++){ snprintf(nm,sizeof nm,"t%d",r);  o->gl_tloc[r] =G.GetUniformLocation(prog,nm); }
     if(g_d3dgl_trace){ static int n; if(++n<=40){ char m[64]; int k=snprintf(m,sizeof m,"  [d3dgl] linked program #%d (%s)\n",n,glstage==GLE_VS?"vs":"ps"); (void)!write(2,m,k);} }
     return prog;
 }
@@ -3257,11 +3257,15 @@ static int d3dgl_synth_cb0(void){
     if(getenv("PELOAD_TRACE_D3DGL")){ static int c; if(c++<3){ char m[200]; int k=snprintf(m,sizeof m,"  [synvp] cb0 from V=%p: row0=[%.3f %.3f %.3f %.3f] row3=[%.3f %.3f %.3f %.3f]\n",(void*)V,out[0],out[1],out[2],out[3],out[12],out[13],out[14],out[15]); (void)!write(2,m,k);} }
     return 1; }
 static void d3dgl_bind_texs_p(unsigned prog,const int*tloc){
-    if(!prog) return;
-    for(int r=0;r<16;r++){ int loc=tloc[r]; if(loc<0) continue; D3DObj*tx=(r<8)?g_d3dst.psrv[r]:0;
-        G.ActiveTexture(GLE_TEX0+r);
+    if(!prog) return; int unit=0;
+    // halo3 binds the map/material textures to high, SPARSE SRV slots (seen: t13,t14,t16,t17), not just
+    // t0-t7. Cover slots 0..31, and PACK each declared sampler into the next contiguous GL texture unit
+    // (Apple GL-on-Metal has ~16 fragment units, so binding to unit 17 would fail) -- the sampler uniform
+    // is set to the packed unit, so the shader samples the right texture.
+    for(int r=0;r<32 && unit<16;r++){ int loc=tloc[r]; if(loc<0) continue; D3DObj*tx=g_d3dst.psrv[r];
+        G.ActiveTexture(GLE_TEX0+unit);
         if(tx){ d3dgl_ensure_tex(tx); G.BindTexture(GLE_TEX2D,tx->gltex); } else G.BindTexture(GLE_TEX2D,0);
-        G.ProgramUniform1i(prog,loc,r); }
+        G.ProgramUniform1i(prog,loc,unit); unit++; }
 }
 static void d3dgl_bind_texs(D3DObj*sh){
     if(!sh) return; d3dgl_bind_texs_p(sh->glprog,sh->gl_tloc);
@@ -3393,7 +3397,7 @@ static unsigned d3dgl_compile(const char*src,unsigned glstage){
         G.DeleteShader(sh); return 0; }
     return sh;
 }
-typedef struct { void*vs; void*ps; unsigned prog; int tried; int vcb[16],pcb[16],tloc[16]; } MonoProg;
+typedef struct { void*vs; void*ps; unsigned prog; int tried; int vcb[16],pcb[16],tloc[32]; } MonoProg;
 static MonoProg g_mono[1024];
 static MonoProg* d3dgl_monoprog(D3DObj*vs,D3DObj*ps){
     uintptr_t h=(((uintptr_t)vs>>4)*2654435761u) ^ (((uintptr_t)ps>>4)*40503u);
@@ -3417,8 +3421,8 @@ static MonoProg* d3dgl_monoprog(D3DObj*vs,D3DObj*ps){
                 ws("  [d3dgl] mono link FAIL: "); ws(log); ws("\n"); } return m; }
         m->prog=prog; char nm[24];
         for(int b=0;b<16;b++){ snprintf(nm,sizeof nm,"vXcb%d",b); m->vcb[b]=G.GetUniformLocation(prog,nm);
-                               snprintf(nm,sizeof nm,"pXcb%d",b); m->pcb[b]=G.GetUniformLocation(prog,nm);
-                               snprintf(nm,sizeof nm,"t%d",b);    m->tloc[b]=G.GetUniformLocation(prog,nm); }
+                               snprintf(nm,sizeof nm,"pXcb%d",b); m->pcb[b]=G.GetUniformLocation(prog,nm); }
+        for(int b=0;b<32;b++){ snprintf(nm,sizeof nm,"t%d",b);    m->tloc[b]=G.GetUniformLocation(prog,nm); }
         if(g_d3dgl_trace){ static int n; if(++n<=40){ char mm[64]; int k=snprintf(mm,sizeof mm,"  [d3dgl] mono-linked program #%d\n",n); (void)!write(2,mm,k);} }
         return m;
     }
