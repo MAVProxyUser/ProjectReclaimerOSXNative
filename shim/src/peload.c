@@ -3300,13 +3300,34 @@ static char* d3dgl_rename_varyings(const char*src,int isvs){
     #undef PUT1
     return out;
 }
+// Remove DUPLICATE inter-stage varying decls (same direction+location). Two different shader inputs
+// can map to the same location -- e.g. a body-referenced input register not in the signature gets
+// loc=register in d3dgl_inject and collides with another input whose D3D semantic maps to the same
+// location -- yielding two "layout(location=L) in vec4 xferL;" -> GLSL "xferL may not be redeclared"
+// (the dominant mono-compile failure, ~20% of draws skipped). Keep the first; the body var is shared.
+static char* d3dgl_dedup_varyings(char*src){
+    if(!src) return src; size_t n=strlen(src); char*out=malloc(n+1); if(!out) return src;
+    uint64_t seen_in=0,seen_out=0; size_t ol=0; const char*p=src;
+    while(*p){ const char*nl=strchr(p,'\n'); size_t ln=nl?(size_t)(nl-p+1):strlen(p);
+        const char*q=p; while(*q==' '||*q=='\t')q++; int skip=0;
+        if(!strncmp(q,"layout(location=",16)){
+            const char*in_x=strstr(q," in vec4 xfer"), *out_x=strstr(q," out vec4 xfer");
+            int isin=(in_x&&in_x<p+ln), isout=(out_x&&out_x<p+ln);
+            if(isin||isout){ int L=atoi(q+16); if(L>=0&&L<64){ uint64_t bit=1ULL<<L;
+                if(isout){ if(seen_out&bit)skip=1; else seen_out|=bit; } else { if(seen_in&bit)skip=1; else seen_in|=bit; } } }
+        }
+        if(!skip){ memcpy(out+ol,p,ln); ol+=ln; }
+        p+=ln; if(!nl)break; }
+    out[ol]=0; free(src); return out;
+}
 // Build the injected + cb-renamed + varying-renamed GLSL for one stage of the mono path. Caller frees.
 // Does NOT touch o->glsl (other pairs reuse it; augmentation is per-pair so nothing is cached here).
 static char* d3dgl_mono_src(D3DObj*o,int isvs){
     if(!o||!o->glsl) return 0;
     char*inj=d3dgl_inject(o->glsl,isvs,1); if(!inj) return 0;
     char*ren=d3dgl_rename_cb(inj,isvs); free(inj); if(!ren) return 0;
-    char*var=d3dgl_rename_varyings(ren,isvs); free(ren); return var;
+    char*var=d3dgl_rename_varyings(ren,isvs); free(ren); if(!var) return 0;
+    return d3dgl_dedup_varyings(var);
 }
 // Bitmask of the inter-stage interface locations a stage declares: want_out=1 -> VS outputs
 // ("out vec4 o"), want_out=0 -> FS inputs ("in vec4 v"), read from each line's layout(location=L).
@@ -3345,7 +3366,9 @@ static char* d3dgl_augment(const char*src,uint64_t add,int as_out){
 static unsigned d3dgl_compile(const char*src,unsigned glstage){
     unsigned sh=G.CreateShader(glstage); G.ShaderSource(sh,1,&src,0); G.CompileShader(sh);
     int ok=0; G.GetShaderiv(sh,GLE_CSTAT,&ok);
-    if(!ok){ if(g_d3dgl_trace){ char log[1024]={0}; if(G.GetShaderInfoLog)G.GetShaderInfoLog(sh,1024,0,log); ws("  [d3dgl] mono compile FAIL: "); ws(log); ws("\n"); } G.DeleteShader(sh); return 0; }
+    if(!ok){ if(g_d3dgl_trace){ char log[1024]={0}; if(G.GetShaderInfoLog)G.GetShaderInfoLog(sh,1024,0,log); ws("  [d3dgl] mono compile FAIL: "); ws(log); ws("\n");
+            if(getenv("PELOAD_D3DGL_DUMPFAIL")){ static int fn; if(fn<6){ char pth[64]; int k=snprintf(pth,sizeof pth,"/tmp/monofail_%d.glsl",fn++); FILE*f=fopen(pth,"wb"); if(f){ fwrite(src,1,strlen(src),f); fclose(f); char mm[80]; int j=snprintf(mm,sizeof mm,"  [d3dgl] dumped failing src -> %s\n",pth); (void)!write(2,mm,j);} } } }
+        G.DeleteShader(sh); return 0; }
     return sh;
 }
 typedef struct { void*vs; void*ps; unsigned prog; int tried; int vcb[16],pcb[16],tloc[16]; } MonoProg;
@@ -4718,7 +4741,8 @@ static void* MSABI i_CreateThread(void*attr,uint64_t stack,WinThreadProc start,v
     if(getenv("PELOAD_NO_THREADS")){ if(tid)*tid=0x7333; return (void*)0x7333; } // diagnostic: don't spawn
     SyncObj* done=sync_new(K_THREAD); done->manual=1;              // thread handle = waitable, manual-reset
     TArg *t=malloc(sizeof *t); t->fn=start; t->param=param; t->done=done;
-    pthread_t th; if(pthread_create(&th,0,thread_tramp,t)){ free(t); done->exitcode=0; done->signaled=1; return 0; }
+    pthread_t th; int pcrc=pthread_create(&th,0,thread_tramp,t);
+    if(pcrc){ if(getenv("PELOAD_TRACE_THREAD")){ char eb[96]; int k=snprintf(eb,sizeof eb,"  [CreateThread] pthread_create FAILED rc=%d (start=%p param=%p)\n",pcrc,(void*)start,param); (void)!write(2,eb,k); } free(t); done->exitcode=0; done->signaled=1; return 0; }
     done->owner=th; done->tid=(uint32_t)(uintptr_t)th;
     if(tid)*tid=done->tid; return done;                           // HANDLE = the SyncObj
 }
@@ -6426,6 +6450,14 @@ static void hook_log(uint64_t id,uint64_t* r){
         char m[220]; int k=snprintf(m,sizeof m,"[fd838 #%llu t%x] idx=%llx f1800=%llx f1810=%llx f1818=%d f985c=%x%s\n",(unsigned long long)seq,
         pthread_mach_thread_np(pthread_self()),(unsigned long long)ix,(unsigned long long)f1800,(unsigned long long)f1810,f1818,f985c,
         f1800==0?"  <== f1800 NULL!":""); (void)!write(2,m,k);} return; }
+    // host-setup arg dump (id==0x6c): sub_14058da30(idx=rcx, idx1=rdx, a2=R8). Gate 1 proceeds iff
+    // a2->field_6c==1. Dump field_6c (+0x6c) + nearby bytes to see which early gate bails on a real join.
+    if(id==0x6c){ uint64_t a2=r8;
+        char m[200]; int k=snprintf(m,sizeof m,"[HS seq=%llu a2=0x%llx] field_6c=0x%x  [+0x60..0x74]=",
+            (unsigned long long)seq,(unsigned long long)a2, hook_safe(a2+0x6c)?*(uint8_t*)(a2+0x6c):0xee);
+        (void)!write(2,m,k);
+        for(int o=0x60;o<=0x74 && hook_safe(a2+o);o++){ char b2[8]; int j=snprintf(b2,sizeof b2,"%02x ",*(uint8_t*)(a2+o)); (void)!write(2,b2,j); }
+        (void)!write(2,"\n",1); return; }
     // global-dump mode (id==0x2263c): print the resolve/menu-skip mode flags.
     if(id==0x2263c){ uint64_t b=0x140000000ULL;
         char m[128]; int k=snprintf(m,sizeof m,"[GLOB seq=%llu] [0x2263c60]=0x%x [0x2263c64]=0x%x\n",
