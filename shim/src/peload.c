@@ -3221,6 +3221,53 @@ static int d3dgl_bc_glfmt(uint32_t f,unsigned*ifmt,int*blkbytes){
         default: return 0;
     }
 }
+// Decode one BC1 color block (8B) into 16 RGBA8 texels (row-major 4x4). c1mode: 1 => DXT1 (3-color +
+// 1-bit alpha when c0<=c1); 0 => always 4-color (as used inside BC2/BC3).
+static void dg_bc1_block(const uint8_t*s,uint8_t out[16][4],int c1mode){
+    unsigned c0=s[0]|(s[1]<<8), c1=s[2]|(s[3]<<8); unsigned idx=s[4]|(s[5]<<8)|(s[6]<<16)|((unsigned)s[7]<<24);
+    int r0=(c0>>11)&31,g0=(c0>>5)&63,b0=c0&31, r1=(c1>>11)&31,g1=(c1>>5)&63,b1=c1&31;
+    int R[4],G[4],B[4],A[4];
+    R[0]=(r0<<3)|(r0>>2);G[0]=(g0<<2)|(g0>>4);B[0]=(b0<<3)|(b0>>2);A[0]=255;
+    R[1]=(r1<<3)|(r1>>2);G[1]=(g1<<2)|(g1>>4);B[1]=(b1<<3)|(b1>>2);A[1]=255;
+    if(!c1mode || c0>c1){ R[2]=(2*R[0]+R[1])/3;G[2]=(2*G[0]+G[1])/3;B[2]=(2*B[0]+B[1])/3;A[2]=255;
+                          R[3]=(R[0]+2*R[1])/3;G[3]=(G[0]+2*G[1])/3;B[3]=(B[0]+2*B[1])/3;A[3]=255; }
+    else { R[2]=(R[0]+R[1])/2;G[2]=(G[0]+G[1])/2;B[2]=(B[0]+B[1])/2;A[2]=255;
+           R[3]=0;G[3]=0;B[3]=0;A[3]=0; }
+    for(int i=0;i<16;i++){ int c=(idx>>(2*i))&3; out[i][0]=(uint8_t)R[c];out[i][1]=(uint8_t)G[c];out[i][2]=(uint8_t)B[c];out[i][3]=(uint8_t)A[c]; }
+}
+// Decode one BC4/alpha block (8B) into 16 single-channel values (used for DXT5 alpha + BC5 R/G).
+static void dg_bc4_block(const uint8_t*s,uint8_t out[16],int sgn){
+    int a0=s[0],a1=s[1]; int v[8];
+    if(sgn){ int sa0=(int8_t)s[0],sa1=(int8_t)s[1]; a0=sa0+128;a1=sa1+128; } // SNORM -> map to 0..255 domain
+    v[0]=a0;v[1]=a1;
+    if(a0>a1){ for(int i=1;i<=6;i++) v[i+1]=((7-i)*a0+i*a1)/7; }
+    else { for(int i=1;i<=4;i++) v[i+1]=((5-i)*a0+i*a1)/5; v[6]=0; v[7]=255; }
+    uint64_t bits=0; for(int i=0;i<6;i++) bits|=((uint64_t)s[2+i])<<(8*i);
+    for(int i=0;i<16;i++){ int c=(int)((bits>>(3*i))&7); int val=v[c]; if(val<0)val=0; if(val>255)val=255; out[i]=(uint8_t)val; }
+}
+// Decode a BC1/BC2/BC3/BC4/BC5 image to a freshly-malloc'd RGBA8 buffer (w*h*4), or NULL if unsupported
+// or the source is too small. BC5 is treated as a normal map: RG = decoded X,Y; B = reconstructed Z.
+static uint8_t* dg_bc_decode(uint32_t fmt,const uint8_t*src,size_t srclen,int w,int h){
+    int bc1=(fmt>=70&&fmt<=72), bc2=(fmt>=73&&fmt<=75), bc3=(fmt>=76&&fmt<=78),
+        bc4=(fmt>=79&&fmt<=81), bc5=(fmt>=82&&fmt<=84);
+    if(!(bc1||bc2||bc3||bc4||bc5)) return 0;              // BC6/7 not decoded here
+    int blkb=(bc1||bc4)?8:16; int bw=(w+3)/4, bh=(h+3)/4;
+    if((size_t)bw*bh*blkb>srclen) return 0;
+    uint8_t*out=calloc(1,(size_t)w*h*4); if(!out) return 0;
+    for(int by=0;by<bh;by++) for(int bx=0;bx<bw;bx++){
+        const uint8_t*blk=src+((size_t)by*bw+bx)*blkb; uint8_t texel[16][4];
+        if(bc1){ dg_bc1_block(blk,texel,1); }
+        else if(bc2){ dg_bc1_block(blk+8,texel,0); for(int i=0;i<16;i++){ int a=(blk[i/2]>>((i&1)*4))&0xf; texel[i][3]=(uint8_t)((a<<4)|a);} }
+        else if(bc3){ uint8_t al[16]; dg_bc4_block(blk,al,0); dg_bc1_block(blk+8,texel,0); for(int i=0;i<16;i++) texel[i][3]=al[i]; }
+        else if(bc4){ uint8_t rr[16]; dg_bc4_block(blk,rr,fmt==81); for(int i=0;i<16;i++){ texel[i][0]=texel[i][1]=texel[i][2]=rr[i]; texel[i][3]=255; } }
+        else { uint8_t rr[16],gg[16]; dg_bc4_block(blk,rr,fmt==84); dg_bc4_block(blk+8,gg,fmt==84);   // BC5 normal
+               for(int i=0;i<16;i++){ float nx=rr[i]/127.5f-1.f, ny=gg[i]/127.5f-1.f; float nz2=1.f-nx*nx-ny*ny; float nz=nz2>0?sqrtf(nz2):0.f;
+                   texel[i][0]=rr[i]; texel[i][1]=gg[i]; texel[i][2]=(uint8_t)((nz*0.5f+0.5f)*255.f); texel[i][3]=255; } }
+        for(int py=0;py<4;py++) for(int px=0;px<4;px++){ int x=bx*4+px,y=by*4+py; if(x>=w||y>=h)continue;
+            uint8_t*d=out+((size_t)y*w+x)*4; const uint8_t*t=texel[py*4+px]; d[0]=t[0];d[1]=t[1];d[2]=t[2];d[3]=t[3]; }
+    }
+    return out;
+}
 // PELOAD_D3DGL_DUMPGLTEX: read the currently-bound GL texture back (glGetTexImage) + save a BMP, so we
 // can see whether the (BC) decode produced a real map texture vs dark/garbage. Caller gates the env.
 static void dg_gltex_dump(int w,int h,unsigned fmt){
@@ -3261,19 +3308,75 @@ static void d3dgl_ensure_tex(D3DObj*o){
         unsigned(*gerr)(void)=dlsym(RTLD_DEFAULT,"glGetError");
         if(cti && o->size>=csz){
             if(gerr) gerr(); // clear
-            // halo3 streams map textures mip-by-mip and often does NOT provide the full-res mip 0 (it
-            // copies a 512 staging texture's mip0 into this texture's MIP 1, etc.). So upload the
-            // HIGHEST-RESOLUTION POPULATED mip as the base texture (level 0 at that mip's size), LINEAR.
-            // That samples the best real data available instead of the black/absent mip 0.
-            uint32_t uw=w,uh=h; uint64_t uoff=0,usz=csz;
+            // halo3 streams map textures mip-by-mip (low-res mips complete FIRST; the full-res mip 0 is
+            // often only PARTIALLY streamed -> uploading it gives black BLOCKS that, with the tiled
+            // terrain sampling, show as a regular grid of gaps). So upload the HIGHEST-RESOLUTION mip that
+            // is SUBSTANTIALLY complete (>= thresh of sampled bytes nonzero); fall back to the most-
+            // complete mip available (the smallest mip is always complete). PELOAD_D3DGL_MIPTHRESH tunes it.
+            double thresh=getenv("PELOAD_D3DGL_MIPTHRESH")?atof(getenv("PELOAD_D3DGL_MIPTHRESH")):0.55; if(thresh<=0||thresh>1)thresh=0.55;
+            uint32_t uw=w,uh=h; uint64_t uoff=0,usz=csz; int picked=0,baselvl=0; double bestfrac=-1; uint32_t bw=w,bh=h; uint64_t boff=0,bsz=csz; int bbl=0;
             for(uint32_t lvl=0;lvl<15;lvl++){ uint32_t mw=w>>lvl; if(!mw)mw=1; uint32_t mh=h>>lvl; if(!mh)mh=1;
                 uint64_t msz=0,moff=tex_sub_off(o->w,o->h,o->fmt,lvl,&msz); if(!msz||moff+msz>o->size) break;
-                int nz=0; const uint8_t*dd=(const uint8_t*)o->data+moff; for(uint64_t i=0;i<msz&&nz<4;i+=(msz/64?msz/64:1)) if(dd[i])nz++;
-                if(nz){ uw=mw; uh=mh; uoff=moff; usz=msz; break; }
+                int nz=0,ns=0; const uint8_t*dd=(const uint8_t*)o->data+moff; uint64_t step=msz/128?msz/128:1;
+                for(uint64_t i=0;i<msz;i+=step){ ns++; if(dd[i])nz++; }
+                double frac=ns?(double)nz/ns:0;
+                if(frac>bestfrac){ bestfrac=frac; bw=mw; bh=mh; boff=moff; bsz=msz; bbl=(int)lvl; }   // track most-complete
+                if(frac>=thresh){ uw=mw; uh=mh; uoff=moff; usz=msz; picked=1; baselvl=(int)lvl; break; }   // highest-res complete-enough
                 if(mw==1&&mh==1) break; }
-            cti(GLE_TEX2D,0,bcif,(int)uw,(int)uh,0,(int)usz,(uint8_t*)o->data+uoff);
-            unsigned e=gerr?gerr():0;
-            if(getenv("PELOAD_TRACE_TEXUP")){ static int bc; if(bc++<40){ char b[160]; int k=snprintf(b,sizeof b,"  [texup-bc] %dx%d fmt=%u ifmt=0x%x used=%ux%u@%llu err=0x%x%s\n",w,h,o->fmt,bcif,uw,uh,(unsigned long long)uoff,e,e?" (FALLBACK)":""); (void)!write(2,b,k);} }
+            if(!picked){ uw=bw; uh=bh; uoff=boff; usz=bsz; baselvl=bbl; }   // nothing met thresh -> use the most-complete mip
+            // PELOAD_D3DGL_BCDECODE (default ON): Apple GL-on-Metal CANNOT sample a COMPRESSED texture with
+            // any mipmap min-filter (returns BLACK), so heavily-tiled terrain textures alias badly (blue
+            // moiré) with no way to mip them while compressed. Fix: DECODE the BC block to RGBA8 in the shim,
+            // upload uncompressed, glGenerateMipmap, trilinear -> proper anti-aliasing. PELOAD_D3DGL_NOBCDECODE
+            // keeps the raw compressed upload (single level, no mips).
+            if(!getenv("PELOAD_D3DGL_NOBCDECODE")){
+                uint8_t*rgba=dg_bc_decode(o->fmt,(const uint8_t*)o->data+uoff,(size_t)(o->size-uoff),(int)uw,(int)uh);
+                if(rgba){ static void(*genmip)(unsigned); static int gmi; if(!gmi){ genmip=dlsym(RTLD_DEFAULT,"glGenerateMipmap"); gmi=1; }
+                    if(gerr) gerr();
+                    // SRGB BC formats (BC1/BC2/BC3 _SRGB) store gamma-encoded color -> upload as SRGB8_ALPHA8
+                    // so GL de-gammas to linear on sample (matches the compressed-SRGB path we replaced).
+                    int issrgb=(o->fmt==72||o->fmt==75||o->fmt==78); unsigned iform=issrgb?0x8C43/*SRGB8_ALPHA8*/:GLE_RGBA8;
+                    G.TexImage2D(GLE_TEX2D,0,iform,(int)uw,(int)uh,0,GLE_RGBA,GLE_UBYTE,rgba);
+                    unsigned de=gerr?gerr():0; free(rgba);
+                    if(!de){ int mip=!getenv("PELOAD_D3DGL_NOMIP");
+                        if(mip&&genmip){ genmip(GLE_TEX2D); G.TexParameteri(GLE_TEX2D,0x2801,0x2703/*LINEAR_MIPMAP_LINEAR*/); G.TexParameteri(GLE_TEX2D,0x813D/*MAX_LEVEL*/,1000);
+                            // anisotropic filtering: the terrain is viewed at grazing angles (one UV axis
+                            // hugely minified) -> isotropic trilinear still aliases into vertical scanline
+                            // moiré. GL_TEXTURE_MAX_ANISOTROPY (0x84FE) fixes grazing-angle sampling.
+                            if(!getenv("PELOAD_D3DGL_NOANISO")){ static void(*tpf)(unsigned,unsigned,float); static void(*gfv)(unsigned,float*); static int qa; static float qmax;
+                                if(!qa){ qa=1; tpf=dlsym(RTLD_DEFAULT,"glTexParameterf"); gfv=dlsym(RTLD_DEFAULT,"glGetFloatv"); qmax=1; if(gfv) gfv(0x84FF/*MAX_TEXTURE_MAX_ANISOTROPY*/,&qmax); if(qmax<1)qmax=1; }
+                                float ma=8.0f; if(ma>qmax)ma=qmax; if(tpf) tpf(GLE_TEX2D,0x84FE/*TEXTURE_MAX_ANISOTROPY*/,ma); } }
+                        else G.TexParameteri(GLE_TEX2D,0x2801,GLE_LINEAR);
+                        if(getenv("PELOAD_TRACE_TEXUP")){ static int dc; if(dc++<40){ char b[160]; int k=snprintf(b,sizeof b,"  [texup-bcdec] %dx%d fmt=%u -> RGBA8 base=%ux%u(dl%d) mips=%d\n",w,h,o->fmt,uw,uh,baselvl,mip&&genmip?1:0); (void)!write(2,b,k);} }
+                        o->gl_uploaded=1; o->gl_dirty=0; dg_gltex_dump((int)uw,(int)uh,o->fmt); return; }
+                    // decode-upload failed -> fall through to the compressed path
+                }
+            }
+            // Upload a MIP CHAIN from the base (GL level 0) down to 1x1 (DXGI levels baselvl, baselvl+1, ...
+            // — the smaller mips stream first so they're complete). A real chain + trilinear filtering kills
+            // the aliasing MOIRÉ on the heavily-tiled (8-48x) terrain/normal textures. PELOAD_D3DGL_NOMIPCHAIN
+            // uploads only the base level. (BC can't glGenerateMipmap, so upload the asset's own mips.)
+            unsigned e=0; int gl_lvl=0; int domip=getenv("PELOAD_D3DGL_MIPCHAIN")?1:0;
+            for(int dl=baselvl; dl<15; dl++){ uint32_t mw=w>>dl; if(!mw)mw=1; uint32_t mh=h>>dl; if(!mh)mh=1;
+                uint64_t msz=0,moff=tex_sub_off(o->w,o->h,o->fmt,dl,&msz); if(!msz||moff+msz>o->size) break;
+                if(gerr) gerr();   // clear before each level
+                cti(GLE_TEX2D,gl_lvl,bcif,(int)mw,(int)mh,0,(int)msz,(uint8_t*)o->data+moff);
+                unsigned ee=gerr?gerr():0;
+                // The BASE level (gl_lvl 0) failing is fatal (fall back); a smaller mip failing (some
+                // drivers reject BC mips < 4x4) just TRUNCATES the chain -- keep the good levels.
+                if(ee){ if(gl_lvl==0){ e=ee; } break; }
+                gl_lvl++;
+                if(!domip || (mw<=4&&mh<=4)) break;   // single level, or stop at 4x4 (smaller BC mips are flaky)
+            }
+            if(!e){ // base ok (chain may be truncated): trilinear only if >1 level, cap max level
+                unsigned minf=GLE_LINEAR;
+                if(domip&&gl_lvl>1) minf=getenv("PELOAD_D3DGL_MIPNEAREST")?0x2701/*LINEAR_MIPMAP_NEAREST*/
+                                        :getenv("PELOAD_D3DGL_MIPLINEAR")?GLE_LINEAR/*bilinear base, chain present*/
+                                        :0x2703/*LINEAR_MIPMAP_LINEAR*/;
+                G.TexParameteri(GLE_TEX2D,0x2801/*MIN*/, minf);
+                G.TexParameteri(GLE_TEX2D,0x813D/*MAX_LEVEL*/, gl_lvl>0?gl_lvl-1:0);
+            }
+            if(getenv("PELOAD_TRACE_TEXUP")){ static int bc; if(bc++<40){ char b[180]; int k=snprintf(b,sizeof b,"  [texup-bc] %dx%d fmt=%u ifmt=0x%x base=%ux%u@%llu(dl%d) levels=%d err=0x%x%s\n",w,h,o->fmt,bcif,uw,uh,(unsigned long long)uoff,baselvl,gl_lvl,e,e?" (FALLBACK)":""); (void)!write(2,b,k);} }
             if(!e){ o->gl_uploaded=1; o->gl_dirty=0; dg_gltex_dump((int)uw,(int)uh,o->fmt); return; } // success: BPTC may fail on GL4.1 -> fall through
         }
     }
@@ -3812,9 +3915,17 @@ static void d3dgl_build_blit(unsigned*vao){
         // The d3dgl pipeline renders both the engine UI and 3D into the FBO right-side up already;
         // flipping v here inverts correctly-oriented content (confirmed: loading screen was upside
         // down). Default = no flip. PELOAD_BLIT_FLIP restores the old vertical flip if ever needed.
-        const char*bfs = getenv("PELOAD_BLIT_FLIP")
-            ? "#version 410 core\nin vec2 uv;out vec4 c;uniform sampler2D s;uniform vec4 sc;void main(){vec2 t=vec2(uv.x*sc.x,(1.0-uv.y)*sc.y);c=texture(s,t);}\n"
-            : "#version 410 core\nin vec2 uv;out vec4 c;uniform sampler2D s;uniform vec4 sc;void main(){vec2 t=vec2(uv.x*sc.x,uv.y*sc.y);c=texture(s,t);}\n";
+        const char*flipy = getenv("PELOAD_BLIT_FLIP") ? "(1.0-uv.y)" : "uv.y";
+        // PELOAD_D3DGL_EXPOSE=<f>: present-time tonemap for the dark linear-HDR scene RT. Scale by f,
+        // Reinhard-compress, gamma 2.2. Default (unset) = passthrough (unchanged present for UI/loading).
+        static char bfsbuf[512]; const char*bfs;
+        if(getenv("PELOAD_D3DGL_EXPOSE")){ double E=atof(getenv("PELOAD_D3DGL_EXPOSE")); if(E<=0)E=8.0;
+            snprintf(bfsbuf,sizeof bfsbuf,
+              "#version 410 core\nin vec2 uv;out vec4 c;uniform sampler2D s;uniform vec4 sc;\n"
+              "void main(){vec2 t=vec2(uv.x*sc.x,%s*sc.y);vec3 x=texture(s,t).rgb*%f;x=x/(x+vec3(1.0));c=vec4(pow(x,vec3(1.0/2.2)),1.0);}\n",
+              flipy,E); bfs=bfsbuf; }
+        else { static char pbuf[320]; snprintf(pbuf,sizeof pbuf,
+              "#version 410 core\nin vec2 uv;out vec4 c;uniform sampler2D s;uniform vec4 sc;void main(){vec2 t=vec2(uv.x*sc.x,%s*sc.y);c=texture(s,t);}\n",flipy); bfs=pbuf; }
         unsigned v=G.CreateShader(GLE_VS),f=G.CreateShader(GLE_FS);
         G.ShaderSource(v,1,&bvs,0); G.CompileShader(v); G.ShaderSource(f,1,&bfs,0); G.CompileShader(f);
         g_d3dgl_blit_prog=G.CreateProgram(); G.AttachShader(g_d3dgl_blit_prog,v); G.AttachShader(g_d3dgl_blit_prog,f); G.LinkProgram(g_d3dgl_blit_prog);
