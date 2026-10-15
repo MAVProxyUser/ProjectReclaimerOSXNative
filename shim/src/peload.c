@@ -3343,11 +3343,14 @@ static void d3dgl_ensure_tex(D3DObj*o){
                             // anisotropic filtering: the terrain is viewed at grazing angles (one UV axis
                             // hugely minified) -> isotropic trilinear still aliases into vertical scanline
                             // moiré. GL_TEXTURE_MAX_ANISOTROPY (0x84FE) fixes grazing-angle sampling.
-                            if(!getenv("PELOAD_D3DGL_NOANISO")){ static void(*tpf)(unsigned,unsigned,float); static void(*gfv)(unsigned,float*); static int qa; static float qmax;
-                                if(!qa){ qa=1; tpf=dlsym(RTLD_DEFAULT,"glTexParameterf"); gfv=dlsym(RTLD_DEFAULT,"glGetFloatv"); qmax=1; if(gfv) gfv(0x84FF/*MAX_TEXTURE_MAX_ANISOTROPY*/,&qmax); if(qmax<1)qmax=1; }
-                                float ma=8.0f; if(ma>qmax)ma=qmax; if(tpf) tpf(GLE_TEX2D,0x84FE/*TEXTURE_MAX_ANISOTROPY*/,ma); } }
+                            static void(*tpf)(unsigned,unsigned,float); static void(*gfv)(unsigned,float*); static int qa; static float qmax;
+                            if(!qa){ qa=1; tpf=dlsym(RTLD_DEFAULT,"glTexParameterf"); gfv=dlsym(RTLD_DEFAULT,"glGetFloatv"); qmax=1; if(gfv) gfv(0x84FF/*MAX_TEXTURE_MAX_ANISOTROPY*/,&qmax); if(qmax<1)qmax=1; }
+                            if(!getenv("PELOAD_D3DGL_NOANISO")){ float ma=16.0f; if(ma>qmax)ma=qmax; if(tpf) tpf(GLE_TEX2D,0x84FE/*TEXTURE_MAX_ANISOTROPY*/,ma); }
+                            // PELOAD_D3DGL_LODBIAS=<f>: positive bias blurs (lower-res mip) -> softens the
+                            // grazing-angle silhouette streaks that extreme tiling (48x) + aniso can't resolve.
+                            if(getenv("PELOAD_D3DGL_LODBIAS")&&tpf){ float lb=atof(getenv("PELOAD_D3DGL_LODBIAS")); tpf(GLE_TEX2D,0x8501/*TEXTURE_LOD_BIAS*/,lb); } }
                         else G.TexParameteri(GLE_TEX2D,0x2801,GLE_LINEAR);
-                        if(getenv("PELOAD_TRACE_TEXUP")){ static int dc; if(dc++<40){ char b[160]; int k=snprintf(b,sizeof b,"  [texup-bcdec] %dx%d fmt=%u -> RGBA8 base=%ux%u(dl%d) mips=%d\n",w,h,o->fmt,uw,uh,baselvl,mip&&genmip?1:0); (void)!write(2,b,k);} }
+                        if(getenv("PELOAD_TRACE_TEXUP")){ static int dc; if(dc++<3){ static float qmx; static int qd; if(!qd){ qd=1; void(*gf)(unsigned,float*)=dlsym(RTLD_DEFAULT,"glGetFloatv"); qmx=0; if(gf)gf(0x84FF,&qmx); } char b[180]; int k=snprintf(b,sizeof b,"  [texup-bcdec] %dx%d fmt=%u -> RGBA8 base=%ux%u(dl%d) mips=%d maxaniso=%.1f\n",w,h,o->fmt,uw,uh,baselvl,mip&&genmip?1:0,qmx); (void)!write(2,b,k);} }
                         o->gl_uploaded=1; o->gl_dirty=0; dg_gltex_dump((int)uw,(int)uh,o->fmt); return; }
                     // decode-upload failed -> fall through to the compressed path
                 }
