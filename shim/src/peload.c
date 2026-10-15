@@ -933,7 +933,17 @@ static int MSABI dev_CreateTexture2D(void*t,const void*d,const void*init,void**p
                         if(bgra){ b[0]=px[0];b[1]=px[1];b[2]=px[2]; } else { b[0]=px[2];b[1]=px[1];b[2]=px[0]; } b[3]=255; fwrite(b,1,4,fp);} }
                 fclose(fp); char mm[200]; int kk=snprintf(mm,sizeof mm,"  [tex] dumped -> %s\n",p); (void)!write(2,mm,kk); } }
     }
-    if(pp)*pp=mktex(w,h,arr,f,2); return HR_OK; }
+    D3DObj* tx=mktex(w,h,arr,f,2);
+    // COPY pInitialData into the texture. halo3 creates map textures (diffuse/control/detail/normal)
+    // WITH their pixel data in pInitialData -- without this they stay the zeroed mktex buffer (all
+    // black), so every sampled texture returns 0 and gameplay renders black. init = D3D11_SUBRESOURCE_DATA*
+    // {pSysMem, SysMemPitch, SysMemSlicePitch}; copy mip 0 (what d3dgl uploads). For BC/DXT the row count
+    // is ceil(h/4) (4-row blocks); otherwise h. Disable with PELOAD_NO_TEXINIT.
+    if(init && tx && tx->data && tx->size && !getenv("PELOAD_NO_TEXINIT")){
+        const void* sys=*(const void* const*)init; uint32_t pitch=*(const uint32_t*)((const char*)init+8);
+        if(sys && pitch){ int bc=(f>=70&&f<=84)||(f>=94&&f<=99); uint64_t rows=bc?(((uint64_t)h+3)/4):(uint64_t)h;
+            uint64_t sz=(uint64_t)pitch*rows; if(sz>tx->size)sz=tx->size; memcpy(tx->data,sys,(size_t)sz); tx->gl_dirty=1; } }
+    if(pp)*pp=tx; return HR_OK; }
 static int MSABI dev_CreateTexture3D(void*t,const void*d,const void*init,void**pp){ (void)t;(void)init;
     uint32_t w=d?*(const uint32_t*)d:1, h=d?*(const uint32_t*)((const char*)d+4):1, dp=d?*(const uint32_t*)((const char*)d+8):1, f=d?*(const uint32_t*)((const char*)d+16):0;
     if(pp)*pp=mktex(w,h,dp,f,4); return HR_OK; }
@@ -1218,7 +1228,34 @@ static void draw_census(void){ slotcen_dump(); if(!getenv("PELOAD_DRAW_CENSUS"))
     if(((fs+geo)%500)==0 && reported!=(int)(fs+geo)){ reported=(int)(fs+geo);
         char m[128]; int k=snprintf(m,sizeof m,"  [census] fullscreen=%llu geometry=%llu (with-vdata=%llu)\n",
             (unsigned long long)fs,(unsigned long long)geo,(unsigned long long)geo_vcapture); (void)!write(2,m,k); } }
-static void draw_log(const char*tag,uint32_t count){ draw_census(); if(!getenv("PELOAD_TRACE_DRAW")) return; static int c; if(c++>=200) return;
+static void draw_log(const char*tag,uint32_t count){ draw_census(); if(!getenv("PELOAD_TRACE_DRAW")) return;
+    D3DObj*il0=g_d3dst.il,*rt0=g_d3dst.rtv;
+    // PELOAD_TRACE_DRAW_RTW=<w>: only log draws whose render target has this width (e.g. 1920 = the
+    // scene G-buffer, skipping the thousands of 4096 backbuffer/UI draws). Also dump psrv slots 0..31.
+    const char*rtw=getenv("PELOAD_TRACE_DRAW_RTW");
+    if(rtw && (!rt0 || rt0->w!=(uint32_t)atoi(rtw))) return;
+    // PELOAD_D3DGL_DUMPSHADER: dump the bound VS/PS GLSL for scene draws that bind >=6 textures (the
+    // map MATERIAL shaders, not the texture-less dither/discard passes) so we can read the material math.
+    if(rtw && getenv("PELOAD_D3DGL_DUMPSHADER")){ static int ds; if(ds<4){ int nt=0; for(int r=0;r<32;r++) if(g_d3dst.psrv[r]) nt++;
+        D3DObj*vs=g_d3dst.vs,*ps=g_d3dst.ps;
+        if(nt>=6 && vs&&vs->glsl&&ps&&ps->glsl){ char p[64]; int k=snprintf(p,sizeof p,"/tmp/scene_ps_%d.glsl",ds); FILE*f=fopen(p,"wb"); if(f){fwrite(ps->glsl,1,strlen(ps->glsl),f);fclose(f);}
+            k=snprintf(p,sizeof p,"/tmp/scene_vs_%d.glsl",ds); f=fopen(p,"wb"); if(f){fwrite(vs->glsl,1,strlen(vs->glsl),f);fclose(f);} ds++;
+            D3DObj*c13p=g_d3dst.pscb[13],*c13v=g_d3dst.vscb[13],*c12=g_d3dst.vscb[12]; char cm[300]; int ck=snprintf(cm,sizeof cm,"  [cbdata] pscb13=%p(%lluB) vscb13=%p(%lluB) vscb12=%p(%lluB)",(void*)c13p,c13p?(unsigned long long)c13p->size:0,(void*)c13v,c13v?(unsigned long long)c13v->size:0,(void*)c12,c12?(unsigned long long)c12->size:0);
+            if(c13p&&c13p->data&&c13p->size>=16){ const float*fp=(const float*)c13p->data; ck+=snprintf(cm+ck,sizeof cm-ck," pscb13[0..7]=[%.3f %.3f %.3f %.3f | %.3f %.3f %.3f %.3f]",fp[0],fp[1],fp[2],fp[3],fp[4],fp[5],fp[6],fp[7]); }
+            ck+=snprintf(cm+ck,sizeof cm-ck,"\n"); (void)!write(2,cm,ck);
+            // sample the bound textures' raw data: how many nonzero bytes (black vs has-content) + the
+            // GL-uploaded flag + format, for slots 0..8 (the terrain blend/detail textures)
+            char tm[400]; int tk2=snprintf(tm,sizeof tm,"  [texdata]"); for(int r=0;r<9;r++){ D3DObj*t=g_d3dst.psrv[r];
+                if(!t){ tk2+=snprintf(tm+tk2,sizeof tm-tk2," t%d=-",r); continue; }
+                int nz=0; if(t->data&&t->size>=1024){ const uint8_t*d=t->data; uint64_t step=t->size/2048; if(step<1)step=1; for(uint64_t i=0;i<t->size&&nz<40;i+=step) if(d[i])nz++; }
+                tk2+=snprintf(tm+tk2,sizeof tm-tk2," t%d=%ux%u(f%u,%lluB,nz%d,gl%u)",r,t->w,t->h,t->fmt,(unsigned long long)t->size,nz,t->gltex); }
+            tk2+=snprintf(tm+tk2,sizeof tm-tk2,"\n"); (void)!write(2,tm,tk2); } } }
+    static int c; if(c++>=(rtw?400:200)) return;
+    if(rtw){ int ntex=0; char tb[160]; int tk=0; for(int r=0;r<32;r++){ D3DObj*t=g_d3dst.psrv[r]; if(t){ntex++; if(tk<140)tk+=snprintf(tb+tk,sizeof tb-tk," t%d=%ux%u(f%u)",r,t->w,t->h,t->fmt);} } if(!ntex){tb[0]=' ';tb[1]='n';tb[2]='o';tb[3]='n';tb[4]='e';tb[5]=0;}
+        char cbb[96]; int ck=snprintf(cbb,sizeof cbb," VScb:"); for(int b=0;b<16;b++) if(g_d3dst.vscb[b]) ck+=snprintf(cbb+ck,sizeof cbb-ck,"%d ",b); ck+=snprintf(cbb+ck,sizeof cbb-ck,"PScb:"); for(int b=0;b<16;b++) if(g_d3dst.pscb[b]) ck+=snprintf(cbb+ck,sizeof cbb-ck,"%d ",b);
+        char m2[500]; int k2=snprintf(m2,sizeof m2,"  [%s] rt=%ux%u stride=%u elems=%d ntex=%d%s:%s |",tag,rt0->w,rt0->h,g_d3dst.vstride[0],il0?il0->nelem:0,ntex,cbb,tb);
+        if(il0) for(int i=0;i<il0->nelem&&k2<380;i++) k2+=snprintf(m2+k2,sizeof m2-k2," %s",il0->elem[i].sem);
+        if(k2<398){m2[k2++]='\n';m2[k2]=0;} (void)!write(2,m2,k2); return; }
     D3DObj*il=g_d3dst.il,*vb=g_d3dst.vb[0],*tex=g_d3dst.psrv[0],*rt=g_d3dst.rtv;
     char m[640]; int k=snprintf(m,sizeof m,"  [%s] n=%u topo=%u stride=%u vb=%lluB ibfmt=%u tex=%ux%u(f%u) rt=%ux%u vp=%dx%d elems=%d:",tag,count,g_d3dst.topo,g_d3dst.vstride[0],vb?(unsigned long long)vb->size:0,g_d3dst.ibfmt,tex?tex->w:0,tex?tex->h:0,tex?tex->fmt:0,rt?rt->w:0,rt?rt->h:0,g_d3dst.vp_w,g_d3dst.vp_h,il?il->nelem:0);
     if(il) for(int i=0;i<il->nelem&&k<600;i++) k+=snprintf(m+k,sizeof m-k," %s@%u/%s",il->elem[i].sem,il->elem[i].off,dxgi_fmt_name(il->elem[i].fmt));
