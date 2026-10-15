@@ -899,6 +899,16 @@ static uint32_t bc_block(uint32_t f){ return ((f>=70&&f<=72)||(f>=79&&f<=81))?8:
 static uint32_t dxgi_bpp(uint32_t f){
     if(f>=1&&f<=4) return 16; if(f>=5&&f<=8) return 12; if(f>=9&&f<=14) return 8;
     if(f>=15&&f<=22) return 8; if(f==0) return 4; return 4; }                 // default RGBA8-class
+// Byte offset + size of subresource `sub` (mip level; array=1 common case) inside a texture's data
+// buffer, walking the mip chain (BC counts 4x4 blocks). halo3 streams each mip separately via
+// CopySubresourceRegion(dstSub,srcSub); honoring these offsets is what puts each mip in the right place.
+static uint64_t tex_sub_off(uint32_t w,uint32_t h,uint32_t fmt,uint32_t sub,uint64_t*psz){
+    int bc=is_bc(fmt); uint32_t bb=bc?bc_block(fmt):dxgi_bpp(fmt); uint64_t off=0,ms=0;
+    for(uint32_t m=0;;m++){ uint32_t mw=w>>m; if(!mw)mw=1; uint32_t mh=h>>m; if(!mh)mh=1;
+        ms = bc ? ((uint64_t)((mw+3)/4)*bb)*((mh+3)/4) : (uint64_t)mw*bb*mh;
+        if(m==sub){ if(psz)*psz=ms; return off; }
+        off+=ms; if(mw==1&&mh==1){ if(psz)*psz=ms; return off; } }
+}
 static D3DObj* mktex(uint32_t w,uint32_t h,uint32_t arr,uint32_t fmt,uint32_t kind){
     if(w<1)w=1; if(h<1)h=1; if(arr<1)arr=1;
     uint64_t rp,sz;
@@ -934,6 +944,7 @@ static int MSABI dev_CreateTexture2D(void*t,const void*d,const void*init,void**p
                 fclose(fp); char mm[200]; int kk=snprintf(mm,sizeof mm,"  [tex] dumped -> %s\n",p); (void)!write(2,mm,kk); } }
     }
     D3DObj* tx=mktex(w,h,arr,f,2);
+    if(getenv("PELOAD_TRACE_TEXPATH") && w>=512 && h>=512 && ((f>=70&&f<=84)||(f>=94&&f<=99))){ char m[128]; int k=snprintf(m,sizeof m,"  [texpath] CREATE %ux%u f%u init=%s obj=%p\n",w,h,f,init?"DATA":"NULL",(void*)tx); (void)!write(2,m,k); }
     // COPY pInitialData into the texture. halo3 creates map textures (diffuse/control/detail/normal)
     // WITH their pixel data in pInitialData -- without this they stay the zeroed mktex buffer (all
     // black), so every sampled texture returns 0 and gameplay renders black. init = D3D11_SUBRESOURCE_DATA*
@@ -947,7 +958,9 @@ static int MSABI dev_CreateTexture2D(void*t,const void*d,const void*init,void**p
             uint64_t sz; if(bc){ int blk=((f>=70&&f<=72)||(f>=79&&f<=81))?8:16; sz=(uint64_t)((w+3)/4)*((h+3)/4)*blk; }
             else sz=(uint64_t)pitch*h;
             if(sz>tx->size)sz=tx->size; memcpy(tx->data,sys,(size_t)sz); tx->gl_dirty=1;
-            if(getenv("PELOAD_TRACE_TEXINIT")){ static int ti; if(ti++<20){ char m[160]; int k=snprintf(m,sizeof m,"  [texinit] %ux%u f%u pitch=%u copy=%lluB tsize=%lluB\n",w,h,f,pitch,(unsigned long long)sz,(unsigned long long)tx->size); (void)!write(2,m,k);} } } }
+            if(getenv("PELOAD_TRACE_TEXINIT")){ static int ti; if(ti++<24){ uint32_t mips=d?*(const uint32_t*)((const char*)d+8):0;
+                int q[4]={0,0,0,0}; const uint8_t*sp=sys; uint64_t qb=sz/4; if(qb>0) for(int Q=0;Q<4;Q++){ for(uint64_t i=0;i<qb;i+=((qb/64)?(qb/64):1)) if(sp[Q*qb+i]) q[Q]++; }
+                char m[220]; int k=snprintf(m,sizeof m,"  [texinit] %ux%u f%u mips=%u arr=%u pitch=%u copy=%lluB tsize=%lluB src-nz-quarters=[%d %d %d %d]/~64\n",w,h,f,mips,arr,pitch,(unsigned long long)sz,(unsigned long long)tx->size,q[0],q[1],q[2],q[3]); (void)!write(2,m,k);} } } }
     if(pp)*pp=tx; return HR_OK; }
 static int MSABI dev_CreateTexture3D(void*t,const void*d,const void*init,void**pp){ (void)t;(void)init;
     uint32_t w=d?*(const uint32_t*)d:1, h=d?*(const uint32_t*)((const char*)d+4):1, dp=d?*(const uint32_t*)((const char*)d+8):1, f=d?*(const uint32_t*)((const char*)d+16):0;
@@ -1071,6 +1084,7 @@ static int  MSABI ctx_ret0(void){ return 0; }                            // safe
 static uint64_t g_cb_tick;           // advances each present; marks CB freshness for view-proj auto-detect
 static int  MSABI ctx_Map(void*t,void*res,uint32_t sub,uint32_t type,uint32_t fl,void*pM){ (void)t;(void)sub;(void)type;(void)fl;
     D3DObj*o=res; if(o){ o->gl_dirty=1; if(o->is_cb) o->cb_upd=g_cb_tick; }   // mapped for write -> re-upload + mark CB fresh
+    if(o && getenv("PELOAD_TRACE_TEXPATH") && o->w>=512 && o->h>=512 && ((o->fmt>=70&&o->fmt<=84)||(o->fmt>=94&&o->fmt<=99))){ char m[128]; int k=snprintf(m,sizeof m,"  [texpath] MAP sub=%u type=%u %ux%u f%u obj=%p\n",sub,type,o->w,o->h,o->fmt,(void*)o); (void)!write(2,m,k); }
     if(pM){ void* d=(o&&o->data)?o->data:g_d3dscratch;
         uint32_t rp = o? (o->rowpitch?o->rowpitch:(uint32_t)o->size) : (uint32_t)sizeof g_d3dscratch;   // bytes per row
         // DepthPitch = one 2D slice. Must NOT be the whole buffer: for 3D/array
@@ -1154,13 +1168,30 @@ static void MSABI ctx_UpdateSubresource(void*t,void*res,uint32_t sub,const void*
     uint32_t rowbytes=(right-left)*bpp; uint32_t sr=srp?srp:rowbytes;
     for(uint32_t y=top;y<bottom;y++){ uint64_t doff=(uint64_t)y*drp+(uint64_t)left*bpp, soff=(uint64_t)(y-top)*sr;
         if(doff+rowbytes>cap) break; memcpy(d+doff,s+soff,rowbytes); } }
-static void MSABI ctx_CopyResource(void*t,void*dst,void*src){ (void)t; D3DObj*a=dst,*b=src; if(a&&b&&a->data&&b->data){ uint64_t n=a->size<b->size?a->size:b->size; memcpy(a->data,b->data,n); if(a)a->gl_dirty=1; } }
+static void MSABI ctx_CopyResource(void*t,void*dst,void*src){ (void)t; D3DObj*a=dst,*b=src; if(a&&b&&a->data&&b->data){ uint64_t n=a->size<b->size?a->size:b->size; memcpy(a->data,b->data,n); if(a)a->gl_dirty=1;
+    if(getenv("PELOAD_TRACE_TEXPATH") && a->w>=512 && ((a->fmt>=70&&a->fmt<=84)||(a->fmt>=94&&a->fmt<=99))){ char m[128]; int k=snprintf(m,sizeof m,"  [texpath] COPYRES dst%ux%u f%u <- src%ux%u (%lluB)\n",a->w,a->h,a->fmt,b->w,b->h,(unsigned long long)n); (void)!write(2,m,k);} } }
 // CopySubresourceRegion(dst,dstSub,dstX,dstY,dstZ,src,srcSub,pSrcBox). Was a no-op -> 12k/frame copies
 // (texture staging / composite steps) were dropped. Implement the CPU copy (full or box region).
 static void MSABI ctx_CopySubresourceRegion(void*t,void*dstR,uint32_t dstSub,uint32_t dstX,uint32_t dstY,uint32_t dstZ,void*srcR,uint32_t srcSub,const void*srcBox){
     (void)t;(void)dstSub;(void)srcSub;(void)dstZ; D3DObj*dst=dstR,*src=srcR; if(!dst||!src||!dst->data||!src->data) return;
     dst->gl_dirty=1;
-    if(!srcBox && dstX==0 && dstY==0){ uint64_t n=dst->size<src->size?dst->size:src->size; memcpy(dst->data,src->data,n); return; }
+    if(getenv("PELOAD_TRACE_TEXPATH") && dst->w>=512 && ((dst->fmt>=70&&dst->fmt<=84)||(dst->fmt>=94&&dst->fmt<=99))){ const uint32_t*bx=srcBox; char m[160]; int k=snprintf(m,sizeof m,"  [texpath] COPYSUB dst%ux%u f%u dstSub=%u srcSub=%u at(%u,%u) box=%s[%u %u %u %u]\n",dst->w,dst->h,dst->fmt,dstSub,srcSub,dstX,dstY,srcBox?"":"null",bx?bx[0]:0,bx?bx[1]:0,bx?bx[3]:0,bx?bx[4]:0); (void)!write(2,m,k); }
+    // BC/DXT: a box region is in PIXELS but the copy must be in 4x4 BLOCKS. The old per-pixel bpp path
+    // scrambled compressed data; honor blocks so streamed map textures fill fully.
+    { int bc=(dst->fmt>=70&&dst->fmt<=84)||(dst->fmt>=94&&dst->fmt<=99);
+      if(bc){ int blk=((dst->fmt>=70&&dst->fmt<=72)||(dst->fmt>=79&&dst->fmt<=81))?8:16;
+        const uint32_t*bx=srcBox; uint32_t left=bx?bx[0]:0, top=bx?bx[1]:0, right=bx?bx[3]:src->w, bottom=bx?bx[4]:src->h;
+        if(right<=left||bottom<=top) return;
+        uint32_t sbw=((src->w?src->w:1)+3)/4, dbw=((dst->w?dst->w:1)+3)/4; uint32_t srp=sbw*blk, drp=dbw*blk;
+        uint32_t bl=left/4, br=(right+3)/4, bt=top/4, bb=(bottom+3)/4, dbx=dstX/4, dby=dstY/4;
+        uint32_t rb=(br-bl)*(uint32_t)blk;
+        for(uint32_t by=bt;by<bb;by++){ uint64_t doff=(uint64_t)(dby+(by-bt))*drp+(uint64_t)dbx*blk, soff=(uint64_t)by*srp+(uint64_t)bl*blk;
+            if(doff+rb>dst->size || soff+rb>src->size) break; memcpy((uint8_t*)dst->data+doff,(uint8_t*)src->data+soff,rb); }
+        return; } }
+    if(!srcBox && dstX==0 && dstY==0){                          // full-subresource copy: honor dstSub/srcSub (mip levels)
+        uint64_t ss=0,ds=0; uint64_t soff=tex_sub_off(src->w,src->h,src->fmt,srcSub,&ss);
+        uint64_t doff=tex_sub_off(dst->w,dst->h,dst->fmt,dstSub,&ds); uint64_t n=ss<ds?ss:ds;
+        if(soff+n<=src->size && doff+n<=dst->size) memcpy((uint8_t*)dst->data+doff,(uint8_t*)src->data+soff,(size_t)n); return; }
     const uint32_t*bx=srcBox;                                  // D3D11_BOX = {left,top,front,right,bottom,back}
     uint32_t left=bx?bx[0]:0, top=bx?bx[1]:0, right=bx?bx[3]:src->w, bottom=bx?bx[4]:src->h;
     if(right<=left||bottom<=top) return;
@@ -3210,10 +3241,17 @@ static void d3dgl_ensure_tex(D3DObj*o){
         unsigned(*gerr)(void)=dlsym(RTLD_DEFAULT,"glGetError");
         if(cti && o->size>=csz){
             if(gerr) gerr(); // clear
-            cti(GLE_TEX2D,0,bcif,w,h,0,(int)csz,o->data);
+            // Upload mip 0 (LINEAR). PELOAD_D3DGL_MIPS uploads the full chain + mipmap filtering, but the
+            // not-yet-streamed small mips sample black, so it's opt-in. Mip-0 + the subresource-offset
+            // copy fix is the default (mip 0 lands at offset 0 correctly).
+            int nmip=1; cti(GLE_TEX2D,0,bcif,w,h,0,(int)csz,o->data);
+            if(getenv("PELOAD_D3DGL_MIPS")){ for(uint32_t lvl=1;lvl<15;lvl++){ uint32_t mw=w>>lvl; if(!mw)mw=1; uint32_t mh=h>>lvl; if(!mh)mh=1;
+                uint64_t msz=0,moff=tex_sub_off(o->w,o->h,o->fmt,lvl,&msz); if(!msz||moff+msz>o->size) break;
+                cti(GLE_TEX2D,(int)lvl,bcif,(int)mw,(int)mh,0,(int)msz,(uint8_t*)o->data+moff); nmip++; if(mw==1&&mh==1) break; } }
             unsigned e=gerr?gerr():0;
-            if(getenv("PELOAD_TRACE_TEXUP")){ static int bc; if(bc++<40){ char b[160]; int k=snprintf(b,sizeof b,"  [texup-bc] %dx%d fmt=%u ifmt=0x%x csz=%lluB err=0x%x%s\n",w,h,o->fmt,bcif,(unsigned long long)csz,e,e?" (FALLBACK)":""); (void)!write(2,b,k);} }
-            if(!e){ o->gl_uploaded=1; o->gl_dirty=0; dg_gltex_dump(w,h,o->fmt); return; } // success: BPTC may fail on GL4.1 -> fall through
+            if(getenv("PELOAD_TRACE_TEXUP")){ static int bc; if(bc++<40){ char b[160]; int k=snprintf(b,sizeof b,"  [texup-bc] %dx%d fmt=%u ifmt=0x%x mips=%d err=0x%x%s\n",w,h,o->fmt,bcif,nmip,e,e?" (FALLBACK)":""); (void)!write(2,b,k);} }
+            if(!e){ if(nmip>1){ G.TexParameteri(GLE_TEX2D,0x2801,0x2703/*LINEAR_MIPMAP_LINEAR*/); G.TexParameteri(GLE_TEX2D,0x813D,nmip-1); }
+                o->gl_uploaded=1; o->gl_dirty=0; dg_gltex_dump(w,h,o->fmt); return; } // success: BPTC may fail on GL4.1 -> fall through
         }
     }
     // Only upload real pixels when the backing buffer actually holds >= w*h*4 bytes; otherwise
