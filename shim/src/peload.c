@@ -951,8 +951,33 @@ static uint64_t d3dgl_fnv(const void*b,uint64_t n){ const uint8_t*p=b; uint64_t 
     for(uint64_t i=0;i<n;i++){ h^=p[i]; h*=0x100000001b3ULL; } return h; }
 static char* d3dgl_load_glsl(const void*bc,uint64_t len){
     const char*home=getenv("HOME"); char path[512];
-    snprintf(path,sizeof path,"%s/reclaimer_glsl/%016llx.glsl",home?home:"/tmp",(unsigned long long)d3dgl_fnv(bc,len));
-    FILE*f=fopen(path,"rb"); if(!f) return 0; fseek(f,0,SEEK_END); long sz=ftell(f); fseek(f,0,SEEK_SET);
+    uint64_t hash=d3dgl_fnv(bc,len);
+    snprintf(path,sizeof path,"%s/reclaimer_glsl/%016llx.glsl",home?home:"/tmp",(unsigned long long)hash);
+    FILE*f=fopen(path,"rb");
+    // ON-DEMAND translation: if this DXBC isn't cached yet, run the DXBC->GLSL translator NOW and
+    // cache the result, so ANY shader the game uses gets GLSL at runtime -- no offline pre-pass, no
+    // "cache miss -> skipped draw -> black" gaps (this is what was blacking out the menu: its shaders
+    // were never pre-translated). The translator is still the Python tool (re-tools/dxbc2glsl.py) --
+    // the shim just invokes it and caches. Path via PELOAD_DXBC2GLSL (absolute recommended, since
+    // spawned workers have a different cwd); disable the whole mechanism with PELOAD_D3DGL_NOXLAT.
+    if(!f && bc && len>=4 && !memcmp(bc,"DXBC",4) && !getenv("PELOAD_D3DGL_NOXLAT")){
+        const char*xlat=getenv("PELOAD_DXBC2GLSL"); if(!xlat) xlat="re-tools/dxbc2glsl.py";
+        char gdir[400]; snprintf(gdir,sizeof gdir,"%s/reclaimer_glsl",home?home:"/tmp"); mkdir(gdir,0755);
+        char tmp[256]; snprintf(tmp,sizeof tmp,"/tmp/reclaimer_xlat_%d_%016llx.dxbc",getpid(),(unsigned long long)hash);
+        FILE*t=fopen(tmp,"wb"); if(t){ fwrite(bc,1,(size_t)len,t); fclose(t);
+            char cmd[1200]; snprintf(cmd,sizeof cmd,"python3 '%s' '%s' 2>/dev/null",xlat,tmp);
+            FILE*p=popen(cmd,"r");
+            if(p){ size_t cap=1<<18,got=0; char*buf=malloc(cap);
+                if(buf){ size_t r; while((r=fread(buf+got,1,cap-got-1,p))>0){ got+=r; if(got>=cap-1){ cap*=2; char*nb=realloc(buf,cap); if(!nb)break; buf=nb; } }
+                    buf[got]=0; }
+                pclose(p);
+                if(buf && strstr(buf,"#version")){ FILE*o=fopen(path,"wb"); if(o){ fwrite(buf,1,got,o); fclose(o); }
+                    if(getenv("PELOAD_TRACE_D3DGL")){ char m[80]; int k=snprintf(m,sizeof m,"  [d3dgl] on-demand translated %016llx (%zuB)\n",(unsigned long long)hash,got); (void)!write(2,m,k);} }
+                free(buf); }
+            unlink(tmp); }
+        f=fopen(path,"rb");
+    }
+    if(!f) return 0; fseek(f,0,SEEK_END); long sz=ftell(f); fseek(f,0,SEEK_SET);
     if(sz<=0||sz>(4<<20)){ fclose(f); return 0; } char*s=malloc(sz+1); if(!s){ fclose(f); return 0; }
     if(fread(s,1,sz,f)!=(size_t)sz){ free(s); fclose(f); return 0; } s[sz]=0; fclose(f); return s; }
 // Does a VS DXBC declare a classic vertex input (a non-system semantic in ISGN)? If so it needs a
@@ -3084,6 +3109,31 @@ static int d3dgl_tex_upload_fmt(uint32_t f,unsigned*gfmt,unsigned*gtype){
         default: return 0;
     }
 }
+// BC/DXT block-compressed DXGI formats -> GL internal format + block byte size. These are the real
+// artwork/texture assets (map hero photo, decals, UI art): D3D ships them compressed, and without
+// this path d3dgl_tex_upload_fmt rejected them -> magenta/black (the "missing hero artwork"). GL
+// uploads them untouched via glCompressedTexImage2D. S3TC(BC1-3) + RGTC(BC4-5) are available on
+// Apple's GL; BPTC(BC6-7) is GL 4.2 core and may be unsupported on the 4.1 GL-on-Metal context, so
+// those fall through to the placeholder if the driver rejects the enum (checked via glGetError).
+static int d3dgl_bc_glfmt(uint32_t f,unsigned*ifmt,int*blkbytes){
+    switch(f){
+        case 70: case 71: *ifmt=0x83F1; *blkbytes=8;  return 1; // BC1_UNORM        RGBA_S3TC_DXT1
+        case 72:          *ifmt=0x8C4D; *blkbytes=8;  return 1; // BC1_UNORM_SRGB    SRGB_ALPHA_S3TC_DXT1
+        case 73: case 74: *ifmt=0x83F2; *blkbytes=16; return 1; // BC2_UNORM        RGBA_S3TC_DXT3
+        case 75:          *ifmt=0x8C4E; *blkbytes=16; return 1; // BC2_UNORM_SRGB
+        case 76: case 77: *ifmt=0x83F3; *blkbytes=16; return 1; // BC3_UNORM        RGBA_S3TC_DXT5
+        case 78:          *ifmt=0x8C4F; *blkbytes=16; return 1; // BC3_UNORM_SRGB
+        case 79: case 80: *ifmt=0x8DBB; *blkbytes=8;  return 1; // BC4_UNORM        RED_RGTC1
+        case 81:          *ifmt=0x8DBC; *blkbytes=8;  return 1; // BC4_SNORM
+        case 82: case 83: *ifmt=0x8DBD; *blkbytes=16; return 1; // BC5_UNORM        RG_RGTC2
+        case 84:          *ifmt=0x8DBE; *blkbytes=16; return 1; // BC5_SNORM
+        case 94: case 95: *ifmt=0x8E8F; *blkbytes=16; return 1; // BC6H_UF16        RGB_BPTC_UF
+        case 96:          *ifmt=0x8E8E; *blkbytes=16; return 1; // BC6H_SF16
+        case 97: case 98: *ifmt=0x8E8C; *blkbytes=16; return 1; // BC7_UNORM        RGBA_BPTC_UNORM
+        case 99:          *ifmt=0x8E8D; *blkbytes=16; return 1; // BC7_UNORM_SRGB
+        default: return 0;
+    }
+}
 static void d3dgl_ensure_tex(D3DObj*o){
     if(!o) return;
     if(!o->gltex){ G.GenTextures(1,&o->gltex); G.BindTexture(GLE_TEX2D,o->gltex);
@@ -3093,6 +3143,22 @@ static void d3dgl_ensure_tex(D3DObj*o){
     if(o->gl_uploaded && !o->gl_dirty) return;
     G.BindTexture(GLE_TEX2D,o->gltex);
     unsigned gf,gt; int w=o->w?(int)o->w:1, h=o->h?(int)o->h:1; if(w>4096)w=4096; if(h>4096)h=4096;
+    // Block-compressed (BC/DXT) upload: the real artwork assets ship compressed. Upload level 0
+    // untouched; GL decodes it. Only when the backing buffer holds the level-0 block bytes.
+    unsigned bcif; int bcbb;
+    if(!getenv("PELOAD_NO_BC") && o->data && d3dgl_bc_glfmt(o->fmt,&bcif,&bcbb)){
+        uint64_t csz=(uint64_t)((w+3)/4)*((h+3)/4)*bcbb;
+        static void(*cti)(unsigned,int,unsigned,int,int,int,int,const void*);
+        static int cti_init; if(!cti_init){ cti=dlsym(RTLD_DEFAULT,"glCompressedTexImage2D"); cti_init=1; }
+        unsigned(*gerr)(void)=dlsym(RTLD_DEFAULT,"glGetError");
+        if(cti && o->size>=csz){
+            if(gerr) gerr(); // clear
+            cti(GLE_TEX2D,0,bcif,w,h,0,(int)csz,o->data);
+            unsigned e=gerr?gerr():0;
+            if(getenv("PELOAD_TRACE_TEXUP")){ static int bc; if(bc++<40){ char b[160]; int k=snprintf(b,sizeof b,"  [texup-bc] %dx%d fmt=%u ifmt=0x%x csz=%lluB err=0x%x%s\n",w,h,o->fmt,bcif,(unsigned long long)csz,e,e?" (FALLBACK)":""); (void)!write(2,b,k);} }
+            if(!e){ o->gl_uploaded=1; o->gl_dirty=0; return; } // success: BPTC may fail on GL4.1 -> fall through
+        }
+    }
     // Only upload real pixels when the backing buffer actually holds >= w*h*4 bytes; otherwise
     // glTexImage2D would read past o->data (heap OOB -> crash). Fall back to a 1x1 placeholder.
     int can = o->data && d3dgl_tex_upload_fmt(o->fmt,&gf,&gt) && o->size>=(uint64_t)w*h*4;
@@ -3931,7 +3997,7 @@ static void* present_thread_fn(void*a){ (void)a; void(*set)(void*)=dlsym(RTLD_DE
             void(*rb)(unsigned)=dlsym(RTLD_DEFAULT,"glReadBuffer");
             if(rp){ int W=WIN_W,H=WIN_H; unsigned char*px=calloc(1,(size_t)W*H*4);
                 if(px){ if(rb)rb(0x0405/*BACK*/); rp(0,0,W,H,0x1908/*RGBA*/,0x1401,px);
-                    const char*home=getenv("HOME"); char p[256]; snprintf(p,sizeof p,"%s/reclaimer_win_%d.bmp",home?home:"/tmp",wc);
+                    const char*home=getenv("HOME"); char p[256]; snprintf(p,sizeof p,"%s/reclaimer_win_%d_%d.bmp",home?home:"/tmp",getpid(),wc);
                     FILE*f=fopen(p,"wb"); if(f){ uint32_t isz=(uint32_t)W*H*4,fsz=54+isz,o=54; uint8_t fh[14]={'B','M'}; memcpy(fh+2,&fsz,4); memcpy(fh+10,&o,4);
                         uint8_t ih[40]={0}; uint32_t v=40; memcpy(ih,&v,4); memcpy(ih+4,&W,4); memcpy(ih+8,&H,4); uint16_t pl=1,bpp=32; memcpy(ih+12,&pl,2); memcpy(ih+14,&bpp,2); memcpy(ih+20,&isz,4);
                         fwrite(fh,1,14,f); fwrite(ih,1,40,f);
