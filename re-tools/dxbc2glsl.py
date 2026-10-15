@@ -270,6 +270,7 @@ def emit(stage,isgn,osgn,ins):
             if inner=='loop': L.append('  break;')
             else: L.append('  // break (switch) -> if-chain')
             continue
+        if n=='discard': L.append('  if((%s).x %s 0.0) discard;'%(S(0),cmp)); continue  # discard_z/_nz (alpha test)
         if n=='switch':
             sv='_sw%d'%len(cf_stack); L.append('  { int %s=floatBitsToInt((%s).x);'%(sv,S(0))); cf_stack.append(['switch',sv,False]); continue
         if n=='case':
@@ -326,6 +327,12 @@ def emit(stage,isgn,osgn,ins):
             elif n=='sqrt': L.append(asg(o[0],'sqrt(%s)'%S(1),0))
             elif n=='rsq': L.append(asg(o[0],'inversesqrt(%s)'%S(1),0))
             elif n=='round_z': L.append(asg(o[0],'trunc(%s)'%S(1),0))
+            elif n=='round_ni': L.append(asg(o[0],'floor(%s)'%S(1),0))
+            elif n=='round_pi': L.append(asg(o[0],'ceil(%s)'%S(1),0))
+            elif n=='round_ne': L.append(asg(o[0],'roundEven(%s)'%S(1),0))
+            elif n=='ineg': L.append(asg_i(o[0],'-%s'%si(1)))
+            elif n=='ult': L.append(asg(o[0],'vec4(lessThan(uvec4(floatBitsToUint(%s)),uvec4(floatBitsToUint(%s))))'%(S(1),S(2)),0))
+            elif n=='sample_b': L.append(asg(o[0],'texture(t%d,(%s).xy,(%s).x)'%(TX(2),S(1),S(4)),0))
             elif n=='sincos': L.append('  // sincos (approx)'); L.append(asg(o[0] if o[0]['type']!=T_NULL else o[1],'sin(%s)'%S(2),0))
             elif n=='dp2': L.append(asg(o[0],'vec4(dot((%s).xy,(%s).xy))'%(S(1),S(2)),0))
             elif n=='dp3': L.append(asg(o[0],'vec4(dot((%s).xyz,(%s).xyz))'%(S(1),S(2)),0))

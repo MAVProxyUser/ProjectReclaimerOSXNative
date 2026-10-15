@@ -276,6 +276,7 @@ char* dg_emit(const char*stage,const DgSig*isgn,int ni,const DgSig*osgn,int no,D
             if(inl) dg_lprintf(&L,"  if((%s).x %s 0.0) break;",S(0),cmp); else dg_lprintf(&L,"  // breakc (switch) omitted"); continue; }
         if(!strcmp(n,"break")){ int innerloop=-1; for(int e=cfn-1;e>=0;e--){ if(cf[e].kind==2){ innerloop=1; break; } if(cf[e].kind==3){ innerloop=0; break; } }
             if(innerloop==1) dg_lprintf(&L,"  break;"); else dg_lprintf(&L,"  // break (switch) -> if-chain"); continue; }
+        if(!strcmp(n,"discard")){ dg_lprintf(&L,"  if((%s).x %s 0.0) discard;",S(0),cmp); continue; } // discard_z/_nz (alpha test)
         if(!strcmp(n,"switch")){ snprintf(cf[cfn].sv,sizeof cf[cfn].sv,"_sw%d",cfn); dg_lprintf(&L,"  { int %s=floatBitsToInt((%s).x);",cf[cfn].sv,S(0)); cf[cfn].kind=3; cf[cfn].first=0; cfn++; continue; }
         if(!strcmp(n,"case")){ int cv=(nopn && o[0].has_imm)?(int)o[0].imm[0]:0; if(cfn && cf[cfn-1].kind==3){ CF*st=&cf[cfn-1];
             dg_lprintf(&L,"  %sif(%s==%d){", st->first?"}else ":"", st->sv, cv); st->first=1; } continue; }
@@ -318,6 +319,12 @@ char* dg_emit(const char*stage,const DgSig*isgn,int ni,const DgSig*osgn,int no,D
         else if(!strcmp(n,"sqrt")) line=dg_asg(&ctx,&o[0],({char*t=dg_pool();snprintf(t,256,"sqrt(%s)",S(1));t;}));
         else if(!strcmp(n,"rsq")) line=dg_asg(&ctx,&o[0],({char*t=dg_pool();snprintf(t,256,"inversesqrt(%s)",S(1));t;}));
         else if(!strcmp(n,"round_z")) line=dg_asg(&ctx,&o[0],({char*t=dg_pool();snprintf(t,256,"trunc(%s)",S(1));t;}));
+        else if(!strcmp(n,"round_ni")) line=dg_asg(&ctx,&o[0],({char*t=dg_pool();snprintf(t,256,"floor(%s)",S(1));t;}));
+        else if(!strcmp(n,"round_pi")) line=dg_asg(&ctx,&o[0],({char*t=dg_pool();snprintf(t,256,"ceil(%s)",S(1));t;}));
+        else if(!strcmp(n,"round_ne")) line=dg_asg(&ctx,&o[0],({char*t=dg_pool();snprintf(t,256,"roundEven(%s)",S(1));t;}));
+        else if(!strcmp(n,"ineg")) line=dg_asg_i(&ctx,&o[0],({char*t=dg_pool();snprintf(t,256,"-%s",SI(1));t;}));
+        else if(!strcmp(n,"ult")) line=dg_asg(&ctx,&o[0],({char*t=dg_pool();snprintf(t,256,"vec4(lessThan(uvec4(floatBitsToUint(%s)),uvec4(floatBitsToUint(%s))))",S(1),S(2));t;}));
+        else if(!strcmp(n,"sample_b")) line=dg_asg(&ctx,&o[0],({char*t=dg_pool();snprintf(t,256,"texture(t%u,(%s).xy,(%s).x)",(unsigned)TX(2),S(1),S(4));t;}));
         else if(!strcmp(n,"sincos")){ dg_lprintf(&L,"  // sincos (approx)"); const DgOp*dstop=(o[0].type!=T_NULL)?&o[0]:&o[1]; line=dg_asg(&ctx,dstop,({char*t=dg_pool();snprintf(t,256,"sin(%s)",S(2));t;})); }
         else if(!strcmp(n,"dp2")) line=dg_asg(&ctx,&o[0],({char*t=dg_pool();snprintf(t,256,"vec4(dot((%s).xy,(%s).xy))",S(1),S(2));t;}));
         else if(!strcmp(n,"dp3")) line=dg_asg(&ctx,&o[0],({char*t=dg_pool();snprintf(t,256,"vec4(dot((%s).xyz,(%s).xyz))",S(1),S(2));t;}));
