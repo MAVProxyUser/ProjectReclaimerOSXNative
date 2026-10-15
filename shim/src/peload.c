@@ -945,8 +945,11 @@ static int MSABI dev_cr1(void*t,void**pp){ (void)t; if(pp)*pp=d3dobj(g_d3dchild_
 // $HOME/reclaimer_shaders/<stage><idx>.dxbc for offline workload analysis.
 static const char* const g_stage_name[6]={"vs","ps","gs","hs","ds","cs"};
 static int g_shcount[6];
-// FNV-1a 64 over the DXBC bytes (matches the offline pre-translator) -> load the pre-translated
-// GLSL from ~/reclaimer_glsl/<hash>.glsl. PELOAD_D3DGL wires the translator into the live path.
+// In-process DXBC->GLSL translator (dg_translate). A byte-for-byte C port of re-tools/dxbc2glsl.py
+// (verified identical over the 2833-shader corpus) so the shim does its OWN shader translation at
+// runtime -- no Python subprocess, no offline pre-pass. Python stays strictly a test oracle.
+#include "dxbc2glsl.c"
+// FNV-1a 64 over the DXBC bytes (matches the cache key) -> ~/reclaimer_glsl/<hash>.glsl.
 static uint64_t d3dgl_fnv(const void*b,uint64_t n){ const uint8_t*p=b; uint64_t h=0xcbf29ce484222325ULL;
     for(uint64_t i=0;i<n;i++){ h^=p[i]; h*=0x100000001b3ULL; } return h; }
 static char* d3dgl_load_glsl(const void*bc,uint64_t len){
@@ -954,32 +957,19 @@ static char* d3dgl_load_glsl(const void*bc,uint64_t len){
     uint64_t hash=d3dgl_fnv(bc,len);
     snprintf(path,sizeof path,"%s/reclaimer_glsl/%016llx.glsl",home?home:"/tmp",(unsigned long long)hash);
     FILE*f=fopen(path,"rb");
-    // ON-DEMAND translation: if this DXBC isn't cached yet, run the DXBC->GLSL translator NOW and
-    // cache the result, so ANY shader the game uses gets GLSL at runtime -- no offline pre-pass, no
-    // "cache miss -> skipped draw -> black" gaps (this is what was blacking out the menu: its shaders
-    // were never pre-translated). The translator is still the Python tool (re-tools/dxbc2glsl.py) --
-    // the shim just invokes it and caches. Path via PELOAD_DXBC2GLSL (absolute recommended, since
-    // spawned workers have a different cwd); disable the whole mechanism with PELOAD_D3DGL_NOXLAT.
-    if(!f && bc && len>=4 && !memcmp(bc,"DXBC",4) && !getenv("PELOAD_D3DGL_NOXLAT")){
-        const char*xlat=getenv("PELOAD_DXBC2GLSL"); if(!xlat) xlat="re-tools/dxbc2glsl.py";
-        char gdir[400]; snprintf(gdir,sizeof gdir,"%s/reclaimer_glsl",home?home:"/tmp"); mkdir(gdir,0755);
-        char tmp[256]; snprintf(tmp,sizeof tmp,"/tmp/reclaimer_xlat_%d_%016llx.dxbc",getpid(),(unsigned long long)hash);
-        FILE*t=fopen(tmp,"wb"); if(t){ fwrite(bc,1,(size_t)len,t); fclose(t);
-            char cmd[1200]; snprintf(cmd,sizeof cmd,"python3 '%s' '%s' 2>/dev/null",xlat,tmp);
-            FILE*p=popen(cmd,"r");
-            if(p){ size_t cap=1<<18,got=0; char*buf=malloc(cap);
-                if(buf){ size_t r; while((r=fread(buf+got,1,cap-got-1,p))>0){ got+=r; if(got>=cap-1){ cap*=2; char*nb=realloc(buf,cap); if(!nb)break; buf=nb; } }
-                    buf[got]=0; }
-                pclose(p);
-                if(buf && strstr(buf,"#version")){ FILE*o=fopen(path,"wb"); if(o){ fwrite(buf,1,got,o); fclose(o); }
-                    if(getenv("PELOAD_TRACE_D3DGL")){ char m[80]; int k=snprintf(m,sizeof m,"  [d3dgl] on-demand translated %016llx (%zuB)\n",(unsigned long long)hash,got); (void)!write(2,m,k);} }
-                free(buf); }
-            unlink(tmp); }
-        f=fopen(path,"rb");
-    }
-    if(!f) return 0; fseek(f,0,SEEK_END); long sz=ftell(f); fseek(f,0,SEEK_SET);
-    if(sz<=0||sz>(4<<20)){ fclose(f); return 0; } char*s=malloc(sz+1); if(!s){ fclose(f); return 0; }
-    if(fread(s,1,sz,f)!=(size_t)sz){ free(s); fclose(f); return 0; } s[sz]=0; fclose(f); return s; }
+    if(f){ fseek(f,0,SEEK_END); long sz=ftell(f); fseek(f,0,SEEK_SET);
+        if(sz<=0||sz>(4<<20)){ fclose(f); return 0; } char*s=malloc(sz+1); if(!s){ fclose(f); return 0; }
+        if(fread(s,1,sz,f)!=(size_t)sz){ free(s); fclose(f); return 0; } s[sz]=0; fclose(f); return s; }
+    // Cache miss: translate IN-PROCESS now (the program's own routine) and cache it, so ANY shader the
+    // game uses gets GLSL at first use with no Python and no "miss -> skipped draw -> black" gap.
+    if(!(bc && len>=4 && !memcmp(bc,"DXBC",4)) || getenv("PELOAD_D3DGL_NOXLAT")) return 0;
+    char*g=dg_translate((const uint8_t*)bc,(size_t)len);
+    if(!g) return 0;
+    char gdir[400]; snprintf(gdir,sizeof gdir,"%s/reclaimer_glsl",home?home:"/tmp"); mkdir(gdir,0755);
+    FILE*o=fopen(path,"wb"); if(o){ fwrite(g,1,strlen(g),o); fclose(o); }
+    if(getenv("PELOAD_TRACE_D3DGL")){ char m[96]; int k=snprintf(m,sizeof m,"  [d3dgl] translated %016llx in-process (%zuB)\n",(unsigned long long)hash,strlen(g)); (void)!write(2,m,k); }
+    return g;
+}
 // Does a VS DXBC declare a classic vertex input (a non-system semantic in ISGN)? If so it needs a
 // bound vertex buffer; if ISGN is empty / all SV_* it is a vertex-pulling / fullscreen shader.
 static int dxbc_has_vtxinput(const uint8_t*d,uint64_t n){
