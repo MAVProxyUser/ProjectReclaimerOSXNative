@@ -3206,6 +3206,28 @@ static int d3dgl_synth_cb0(void){
     float fovy=70.0f*3.14159265f/180.0f, sy=1.0f/tanf(fovy*0.5f), sx=sy/aspect, n=0.0625f, fr=1000.0f;
     float P[16]={ sx,0,0,0, 0,sy,0,0, 0,0,fr/(fr-n),-n*fr/(fr-n), 0,0,1,0 };
     extern float g_b12_org[32][3]; extern int g_nb12_org;
+    // PELOAD_D3DGL_CAM="ex,ey,ez[,tx,ty,tz[,ux,uy,uz]]": build a look-at VIEW matrix (column-vector
+    // convention: V*[world,1]=view) and use P*V as cb0, bypassing the pool-CB search (the real
+    // view-proj is in NO cbuffer -- cb0find only ever finds per-object matrices). Target defaults to
+    // the scene center (avg of the known object origins); up defaults to +Z (Halo is Z-up).
+    const char*camenv=getenv("PELOAD_D3DGL_CAM");
+    if(camenv){
+        float e[3]={0,0,0},t[3]={0,0,0},up[3]={0,0,1}; int ne=sscanf(camenv,"%f,%f,%f,%f,%f,%f,%f,%f,%f",
+            &e[0],&e[1],&e[2],&t[0],&t[1],&t[2],&up[0],&up[1],&up[2]);
+        if(ne<6){ float c[3]={0,0,0}; int nn=g_nb12_org>0?g_nb12_org:1; for(int o=0;o<g_nb12_org;o++){ c[0]+=g_b12_org[o][0]; c[1]+=g_b12_org[o][1]; c[2]+=g_b12_org[o][2]; } t[0]=c[0]/nn; t[1]=c[1]/nn; t[2]=c[2]/nn; }
+        float z[3]={t[0]-e[0],t[1]-e[1],t[2]-e[2]}; float zl=sqrtf(z[0]*z[0]+z[1]*z[1]+z[2]*z[2]); if(zl<1e-6f)zl=1; z[0]/=zl;z[1]/=zl;z[2]/=zl;
+        float x[3]={up[1]*z[2]-up[2]*z[1], up[2]*z[0]-up[0]*z[2], up[0]*z[1]-up[1]*z[0]}; float xl=sqrtf(x[0]*x[0]+x[1]*x[1]+x[2]*x[2]); if(xl<1e-6f)xl=1; x[0]/=xl;x[1]/=xl;x[2]/=xl;
+        float y[3]={z[1]*x[2]-z[2]*x[1], z[2]*x[0]-z[0]*x[2], z[0]*x[1]-z[1]*x[0]};
+        float Vm[16]={ x[0],x[1],x[2], -(x[0]*e[0]+x[1]*e[1]+x[2]*e[2]),
+                       y[0],y[1],y[2], -(y[0]*e[0]+y[1]*e[1]+y[2]*e[2]),
+                       z[0],z[1],z[2], -(z[0]*e[0]+z[1]*e[1]+z[2]*e[2]),
+                       0,0,0,1 };
+        float*out=(float*)g_syn_cb0_buf; memset(out,0,256); d3dgl_mul44(P,Vm,out);
+        if(getenv("PELOAD_SYNVP_OBJ")) out[48]=out[49]=out[50]=out[51]=1.0f;
+        g_syn_cb0.data=g_syn_cb0_buf; g_syn_cb0.size=256; g_syn_cb0.is_cb=1;
+        if(getenv("PELOAD_TRACE_D3DGL")){ static int cc; if(cc++<2){ char m[200]; int k=snprintf(m,sizeof m,"  [cam] eye=[%.1f %.1f %.1f] tgt=[%.1f %.1f %.1f] cb0row0=[%.3f %.3f %.3f %.3f]\n",e[0],e[1],e[2],t[0],t[1],t[2],out[0],out[1],out[2],out[3]); (void)!write(2,m,k);} }
+        return 1;
+    }
     // camera VIEW = the fresh small CB whose P*V projects the MOST per-object origins on-screen (LH, V
     // as-is -- determined empirically, 30/32). Re-detect every frame; cheap (a few small CBs).
     // PELOAD_SYNVP_CB=<i> forces g_cbreg[i] as V (debug: confirm the cb0find winner renders).
@@ -3535,6 +3557,15 @@ static void d3dgl_draw(uint32_t vcount,int indexed,uint32_t instcount){
             G.EnableVertexAttribArray((unsigned)i); nattr++;
         }
         if(g_d3dgl_depth) G.Enable(0x0B71/*DEPTH_TEST*/);   // opt-in depth (needs PELOAD_D3DGL_DEPTH + depth RB)
+        // PELOAD_D3DGL_VTXDUMP: ground-truth the world-space vertex range of element 0 (POSITION) so we
+        // can size/aim the camera. Only meaningful for an uncompressed float position (DXGI 2/6).
+        if(getenv("PELOAD_D3DGL_VTXDUMP")){ static int vd; if(vd<5){ D3DObj*sb=g_d3dst.vb[il->elem[0].slot<8?il->elem[0].slot:0];
+            uint32_t stride=g_d3dst.vstride[il->elem[0].slot<8?il->elem[0].slot:0]; uint32_t off=g_d3dst.voff[0]+il->elem[0].off; uint32_t fmt=il->elem[0].fmt;
+            if(sb&&sb->data&&stride>=12&&(fmt==2||fmt==6)){ vd++; const uint8_t*d=(const uint8_t*)sb->data; uint64_t nv=sb->size/stride; if(nv>400)nv=400;
+                float mn[3]={1e30f,1e30f,1e30f},mx[3]={-1e30f,-1e30f,-1e30f}; for(uint64_t v=0;v<nv;v++){ const float*p=(const float*)(d+off+v*stride);
+                    for(int c=0;c<3;c++){ float val=p[c]; if(val==val){ if(val<mn[c])mn[c]=val; if(val>mx[c])mx[c]=val; } } }
+                char m[220]; int k=snprintf(m,sizeof m,"  [vtxdump] fmt=%u stride=%u nvsamp=%llu posX[%.2f..%.2f] Y[%.2f..%.2f] Z[%.2f..%.2f] v0=[%.2f %.2f %.2f]\n",
+                    fmt,stride,(unsigned long long)nv,mn[0],mx[0],mn[1],mx[1],mn[2],mx[2],((const float*)(d+off))[0],((const float*)(d+off))[1],((const float*)(d+off))[2]); (void)!write(2,m,k); } } }
     }
     g_d3dgl_phase="draw";
     unsigned mode=d3dgl_topo(g_d3dst.topo);
