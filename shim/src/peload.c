@@ -909,6 +909,7 @@ static uint64_t tex_sub_off(uint32_t w,uint32_t h,uint32_t fmt,uint32_t sub,uint
         if(m==sub){ if(psz)*psz=ms; return off; }
         off+=ms; if(mw==1&&mh==1){ if(psz)*psz=ms; return off; } }
 }
+static void* g_watch_tex;   // PELOAD_WATCH_TEX: the one texture whose data history we log
 static D3DObj* mktex(uint32_t w,uint32_t h,uint32_t arr,uint32_t fmt,uint32_t kind){
     if(w<1)w=1; if(h<1)h=1; if(arr<1)arr=1;
     uint64_t rp,sz;
@@ -945,6 +946,10 @@ static int MSABI dev_CreateTexture2D(void*t,const void*d,const void*init,void**p
     }
     D3DObj* tx=mktex(w,h,arr,f,2);
     if(getenv("PELOAD_TRACE_TEXPATH") && w>=512 && h>=512 && ((f>=70&&f<=84)||(f>=94&&f<=99))){ char m[128]; int k=snprintf(m,sizeof m,"  [texpath] CREATE %ux%u f%u init=%s obj=%p\n",w,h,f,init?"DATA":"NULL",(void*)tx); (void)!write(2,m,k); }
+    // PELOAD_WATCH_TEX: pick the first 1024x1024 BC texture and log its ENTIRE data history
+    // (create/init/copy/update/upload) so we can see exactly how/if it gets its pixels.
+    if(getenv("PELOAD_WATCH_TEX") && !g_watch_tex && w==1024 && h==1024 && ((f>=70&&f<=84)||(f>=94&&f<=99))){
+        g_watch_tex=tx; char m[128]; int k=snprintf(m,sizeof m,"  [WATCH] created 1024x1024 f%u init=%s obj=%p size=%lluB\n",f,init?"DATA":"NULL",(void*)tx,(unsigned long long)tx->size); (void)!write(2,m,k); }
     // COPY pInitialData into the texture. halo3 creates map textures (diffuse/control/detail/normal)
     // WITH their pixel data in pInitialData -- without this they stay the zeroed mktex buffer (all
     // black), so every sampled texture returns 0 and gameplay renders black. init = D3D11_SUBRESOURCE_DATA*
@@ -958,6 +963,7 @@ static int MSABI dev_CreateTexture2D(void*t,const void*d,const void*init,void**p
             uint64_t sz; if(bc){ int blk=((f>=70&&f<=72)||(f>=79&&f<=81))?8:16; sz=(uint64_t)((w+3)/4)*((h+3)/4)*blk; }
             else sz=(uint64_t)pitch*h;
             if(sz>tx->size)sz=tx->size; memcpy(tx->data,sys,(size_t)sz); tx->gl_dirty=1;
+            if(tx==g_watch_tex){ int nz=0; const uint8_t*dp=tx->data; for(uint64_t i=0;i<sz&&nz<99;i+=(sz/100?sz/100:1)) if(dp[i])nz++; char m[128]; int k=snprintf(m,sizeof m,"  [WATCH] INIT copy %lluB pitch=%u -> nz=%d/100\n",(unsigned long long)sz,pitch,nz); (void)!write(2,m,k); }
             if(getenv("PELOAD_TRACE_TEXINIT")){ static int ti; if(ti++<24){ uint32_t mips=d?*(const uint32_t*)((const char*)d+8):0;
                 int q[4]={0,0,0,0}; const uint8_t*sp=sys; uint64_t qb=sz/4; if(qb>0) for(int Q=0;Q<4;Q++){ for(uint64_t i=0;i<qb;i+=((qb/64)?(qb/64):1)) if(sp[Q*qb+i]) q[Q]++; }
                 char m[220]; int k=snprintf(m,sizeof m,"  [texinit] %ux%u f%u mips=%u arr=%u pitch=%u copy=%lluB tsize=%lluB src-nz-quarters=[%d %d %d %d]/~64\n",w,h,f,mips,arr,pitch,(unsigned long long)sz,(unsigned long long)tx->size,q[0],q[1],q[2],q[3]); (void)!write(2,m,k);} } } }
@@ -1175,6 +1181,9 @@ static void MSABI ctx_CopyResource(void*t,void*dst,void*src){ (void)t; D3DObj*a=
 static void MSABI ctx_CopySubresourceRegion(void*t,void*dstR,uint32_t dstSub,uint32_t dstX,uint32_t dstY,uint32_t dstZ,void*srcR,uint32_t srcSub,const void*srcBox){
     (void)t;(void)dstSub;(void)srcSub;(void)dstZ; D3DObj*dst=dstR,*src=srcR; if(!dst||!src||!dst->data||!src->data) return;
     dst->gl_dirty=1;
+    if(dst==g_watch_tex || src==g_watch_tex){ uint64_t ss=0,ds=0; uint64_t soff=tex_sub_off(src->w,src->h,src->fmt,srcSub,&ss); uint64_t doff=tex_sub_off(dst->w,dst->h,dst->fmt,dstSub,&ds);
+        int snz=0; const uint8_t*sp=src->data; for(uint64_t i=0;i<ss&&soff+i<src->size&&snz<49;i+=(ss/50?ss/50:1)) if(sp[soff+i])snz++;
+        char m[200]; int k=snprintf(m,sizeof m,"  [WATCH] COPYSUB %s dst=%p(sub%u@%llu) <- src=%p %ux%u(sub%u@%llu sz%llu snz=%d/50) box=%s\n",dst==g_watch_tex?"IN":"OUT",(void*)dst,dstSub,(unsigned long long)doff,(void*)src,src->w,src->h,srcSub,(unsigned long long)soff,(unsigned long long)ss,snz,srcBox?"yes":"null"); (void)!write(2,m,k); }
     if(getenv("PELOAD_TRACE_TEXPATH") && dst->w>=512 && ((dst->fmt>=70&&dst->fmt<=84)||(dst->fmt>=94&&dst->fmt<=99))){ const uint32_t*bx=srcBox; char m[160]; int k=snprintf(m,sizeof m,"  [texpath] COPYSUB dst%ux%u f%u dstSub=%u srcSub=%u at(%u,%u) box=%s[%u %u %u %u]\n",dst->w,dst->h,dst->fmt,dstSub,srcSub,dstX,dstY,srcBox?"":"null",bx?bx[0]:0,bx?bx[1]:0,bx?bx[3]:0,bx?bx[4]:0); (void)!write(2,m,k); }
     // BC/DXT: a box region is in PIXELS but the copy must be in 4x4 BLOCKS. The old per-pixel bpp path
     // scrambled compressed data; honor blocks so streamed map textures fill fully.
@@ -1288,14 +1297,17 @@ static void draw_log(const char*tag,uint32_t count){ draw_census(); if(!getenv("
         if(nt>=6 && vs&&vs->glsl&&ps&&ps->glsl){ char p[64]; int k=snprintf(p,sizeof p,"/tmp/scene_ps_%d.glsl",ds); FILE*f=fopen(p,"wb"); if(f){fwrite(ps->glsl,1,strlen(ps->glsl),f);fclose(f);}
             k=snprintf(p,sizeof p,"/tmp/scene_vs_%d.glsl",ds); f=fopen(p,"wb"); if(f){fwrite(vs->glsl,1,strlen(vs->glsl),f);fclose(f);} ds++;
             D3DObj*c13p=g_d3dst.pscb[13],*c13v=g_d3dst.vscb[13],*c12=g_d3dst.vscb[12]; char cm[300]; int ck=snprintf(cm,sizeof cm,"  [cbdata] pscb13=%p(%lluB) vscb13=%p(%lluB) vscb12=%p(%lluB)",(void*)c13p,c13p?(unsigned long long)c13p->size:0,(void*)c13v,c13v?(unsigned long long)c13v->size:0,(void*)c12,c12?(unsigned long long)c12->size:0);
-            if(c13p&&c13p->data&&c13p->size>=16){ const float*fp=(const float*)c13p->data; ck+=snprintf(cm+ck,sizeof cm-ck," pscb13[0..7]=[%.3f %.3f %.3f %.3f | %.3f %.3f %.3f %.3f]",fp[0],fp[1],fp[2],fp[3],fp[4],fp[5],fp[6],fp[7]); }
+            if(c13p&&c13p->data&&c13p->size>=16){ const float*fp=(const float*)c13p->data; int nv=(int)(c13p->size/16); if(nv>10)nv=10;
+                ck+=snprintf(cm+ck,sizeof cm-ck," pscb13[0..%d]=",nv-1); for(int v=0;v<nv&&ck<(int)sizeof cm-40;v++) ck+=snprintf(cm+ck,sizeof cm-ck,"[%.2f %.2f %.2f %.2f]",fp[v*4],fp[v*4+1],fp[v*4+2],fp[v*4+3]); }
             ck+=snprintf(cm+ck,sizeof cm-ck,"\n"); (void)!write(2,cm,ck);
             // sample the bound textures' raw data: how many nonzero bytes (black vs has-content) + the
             // GL-uploaded flag + format, for slots 0..8 (the terrain blend/detail textures)
             char tm[400]; int tk2=snprintf(tm,sizeof tm,"  [texdata]"); for(int r=0;r<9;r++){ D3DObj*t=g_d3dst.psrv[r];
                 if(!t){ tk2+=snprintf(tm+tk2,sizeof tm-tk2," t%d=-",r); continue; }
                 int nz=0; if(t->data&&t->size>=1024){ const uint8_t*d=t->data; uint64_t step=t->size/2048; if(step<1)step=1; for(uint64_t i=0;i<t->size&&nz<40;i+=step) if(d[i])nz++; }
-                tk2+=snprintf(tm+tk2,sizeof tm-tk2," t%d=%ux%u(f%u,%lluB,nz%d,gl%u)",r,t->w,t->h,t->fmt,(unsigned long long)t->size,nz,t->gltex); }
+                // for small (1x1/4x4) multiplier textures, show the first texel bytes (the value actually sampled)
+                char px[24]=""; if(t->data&&t->w<=4&&t->size>=4){ const uint8_t*d=t->data; snprintf(px,sizeof px,"=%02x%02x%02x%02x",d[0],d[1],d[2],d[3]); }
+                tk2+=snprintf(tm+tk2,sizeof tm-tk2," t%d=%ux%u(f%u,%lluB,nz%d,gl%u%s)",r,t->w,t->h,t->fmt,(unsigned long long)t->size,nz,t->gltex,px); }
             tk2+=snprintf(tm+tk2,sizeof tm-tk2,"\n"); (void)!write(2,tm,tk2); } } }
     static int c; if(c++>=(rtw?400:200)) return;
     if(rtw){ int ntex=0; char tb[160]; int tk=0; for(int r=0;r<32;r++){ D3DObj*t=g_d3dst.psrv[r]; if(t){ntex++; if(tk<140)tk+=snprintf(tb+tk,sizeof tb-tk," t%d=%ux%u(f%u)",r,t->w,t->h,t->fmt);} } if(!ntex){tb[0]=' ';tb[1]='n';tb[2]='o';tb[3]='n';tb[4]='e';tb[5]=0;}
@@ -2954,6 +2966,7 @@ static void d3dgl_note_rt(D3DObj* rt){ if(!rt||!getenv("PELOAD_D3DGL_DUMP_RT")) 
 #define GLE_UI8REV 0x8367
 #define GLE_LINEAR 0x2601
 #define GLE_CLAMP 0x812F
+#define GLE_REPEAT 0x2901
 #define GLE_VS    0x8B31
 #define GLE_FS    0x8B30
 #define GLE_VSBIT 0x1
@@ -3224,9 +3237,16 @@ static void dg_gltex_dump(int w,int h,unsigned fmt){
 }
 static void d3dgl_ensure_tex(D3DObj*o){
     if(!o) return;
+    if(o==g_watch_tex && o->data){ static int wc; if(wc++<30){ int q[4]={0,0,0,0}; uint64_t mip0=(uint64_t)((o->w+3)/4)*((o->h+3)/4)*(is_bc(o->fmt)?bc_block(o->fmt):4); uint64_t qb=mip0/4; const uint8_t*d=o->data;
+        if(qb) for(int Q=0;Q<4;Q++) for(uint64_t i=0;i<qb;i+=(qb/32?qb/32:1)) if(d[Q*qb+i])q[Q]++;
+        char m[160]; int k=snprintf(m,sizeof m,"  [WATCH] UPLOAD mip0=%lluB data-quarters(nz)=[%d %d %d %d]/~32 dirty=%d\n",(unsigned long long)mip0,q[0],q[1],q[2],q[3],o->gl_dirty); (void)!write(2,m,k);} }
     if(!o->gltex){ G.GenTextures(1,&o->gltex); G.BindTexture(GLE_TEX2D,o->gltex);
         G.TexParameteri(GLE_TEX2D,0x2801,GLE_LINEAR); G.TexParameteri(GLE_TEX2D,0x2800,GLE_LINEAR);
-        G.TexParameteri(GLE_TEX2D,0x2802,GLE_CLAMP); G.TexParameteri(GLE_TEX2D,0x2803,GLE_CLAMP);
+        // Terrain/detail textures TILE (halo3's cb13 UV scales reach 8-48x); D3D11's default sampler is
+        // WRAP, so REPEAT is the correct default. CLAMP_TO_EDGE made tiled UVs sample only the edge texel
+        // -> dark/black terrain. PELOAD_D3DGL_CLAMP forces the old clamp.
+        unsigned wrap = getenv("PELOAD_D3DGL_CLAMP")?GLE_CLAMP:GLE_REPEAT;
+        G.TexParameteri(GLE_TEX2D,0x2802,wrap); G.TexParameteri(GLE_TEX2D,0x2803,wrap);
         o->gl_uploaded=0; }
     if(o->gl_uploaded && !o->gl_dirty) return;
     G.BindTexture(GLE_TEX2D,o->gltex);
@@ -3241,17 +3261,20 @@ static void d3dgl_ensure_tex(D3DObj*o){
         unsigned(*gerr)(void)=dlsym(RTLD_DEFAULT,"glGetError");
         if(cti && o->size>=csz){
             if(gerr) gerr(); // clear
-            // Upload mip 0 (LINEAR). PELOAD_D3DGL_MIPS uploads the full chain + mipmap filtering, but the
-            // not-yet-streamed small mips sample black, so it's opt-in. Mip-0 + the subresource-offset
-            // copy fix is the default (mip 0 lands at offset 0 correctly).
-            int nmip=1; cti(GLE_TEX2D,0,bcif,w,h,0,(int)csz,o->data);
-            if(getenv("PELOAD_D3DGL_MIPS")){ for(uint32_t lvl=1;lvl<15;lvl++){ uint32_t mw=w>>lvl; if(!mw)mw=1; uint32_t mh=h>>lvl; if(!mh)mh=1;
+            // halo3 streams map textures mip-by-mip and often does NOT provide the full-res mip 0 (it
+            // copies a 512 staging texture's mip0 into this texture's MIP 1, etc.). So upload the
+            // HIGHEST-RESOLUTION POPULATED mip as the base texture (level 0 at that mip's size), LINEAR.
+            // That samples the best real data available instead of the black/absent mip 0.
+            uint32_t uw=w,uh=h; uint64_t uoff=0,usz=csz;
+            for(uint32_t lvl=0;lvl<15;lvl++){ uint32_t mw=w>>lvl; if(!mw)mw=1; uint32_t mh=h>>lvl; if(!mh)mh=1;
                 uint64_t msz=0,moff=tex_sub_off(o->w,o->h,o->fmt,lvl,&msz); if(!msz||moff+msz>o->size) break;
-                cti(GLE_TEX2D,(int)lvl,bcif,(int)mw,(int)mh,0,(int)msz,(uint8_t*)o->data+moff); nmip++; if(mw==1&&mh==1) break; } }
+                int nz=0; const uint8_t*dd=(const uint8_t*)o->data+moff; for(uint64_t i=0;i<msz&&nz<4;i+=(msz/64?msz/64:1)) if(dd[i])nz++;
+                if(nz){ uw=mw; uh=mh; uoff=moff; usz=msz; break; }
+                if(mw==1&&mh==1) break; }
+            cti(GLE_TEX2D,0,bcif,(int)uw,(int)uh,0,(int)usz,(uint8_t*)o->data+uoff);
             unsigned e=gerr?gerr():0;
-            if(getenv("PELOAD_TRACE_TEXUP")){ static int bc; if(bc++<40){ char b[160]; int k=snprintf(b,sizeof b,"  [texup-bc] %dx%d fmt=%u ifmt=0x%x mips=%d err=0x%x%s\n",w,h,o->fmt,bcif,nmip,e,e?" (FALLBACK)":""); (void)!write(2,b,k);} }
-            if(!e){ if(nmip>1){ G.TexParameteri(GLE_TEX2D,0x2801,0x2703/*LINEAR_MIPMAP_LINEAR*/); G.TexParameteri(GLE_TEX2D,0x813D,nmip-1); }
-                o->gl_uploaded=1; o->gl_dirty=0; dg_gltex_dump(w,h,o->fmt); return; } // success: BPTC may fail on GL4.1 -> fall through
+            if(getenv("PELOAD_TRACE_TEXUP")){ static int bc; if(bc++<40){ char b[160]; int k=snprintf(b,sizeof b,"  [texup-bc] %dx%d fmt=%u ifmt=0x%x used=%ux%u@%llu err=0x%x%s\n",w,h,o->fmt,bcif,uw,uh,(unsigned long long)uoff,e,e?" (FALLBACK)":""); (void)!write(2,b,k);} }
+            if(!e){ o->gl_uploaded=1; o->gl_dirty=0; dg_gltex_dump((int)uw,(int)uh,o->fmt); return; } // success: BPTC may fail on GL4.1 -> fall through
         }
     }
     // Only upload real pixels when the backing buffer actually holds >= w*h*4 bytes; otherwise
@@ -3459,7 +3482,65 @@ static char* d3dgl_mono_src(D3DObj*o,int isvs){
     char*inj=d3dgl_inject(o->glsl,isvs,1); if(!inj) return 0;
     char*ren=d3dgl_rename_cb(inj,isvs); free(inj); if(!ren) return 0;
     char*var=d3dgl_rename_varyings(ren,isvs); free(ren); if(!var) return 0;
-    return d3dgl_dedup_varyings(var);
+    var=d3dgl_dedup_varyings(var);
+    // PELOAD_D3DGL_SOLIDPS: geometry-coverage diagnostic -- make every PS output solid red and drop
+    // discards, so we see exactly what geometry/camera covers the frame independent of shading.
+    if(var && !isvs && getenv("PELOAD_D3DGL_SOLIDPS")){
+        for(char*p=strstr(var,"discard;"); p; p=strstr(p+1,"discard;")) memcpy(p,"/*skip*/",8);
+        for(char*p=strstr(var,"return;"); p; p=strstr(p+1,"return;")) memcpy(p,"/*rtn*/",7);  // strip returns so the override runs
+        static char insbuf[128]; const char*ins="  o0=vec4(1.0,0.25,0.25,1.0);\n";
+        // PELOAD_D3DGL_TEXVIZ: sample t0 at the real TEXCOORD0 varying (first inter-stage xfer) so we
+        // see if the diffuse/control texture has data. PELOAD_D3DGL_UVVIZ: output that texcoord as color
+        // (gradient = UVs vary correctly; flat = UVs broken -> everything samples one texel -> black).
+        // Locate the varying tagged TEXCOORD0 (the terrain diffuse/control UV). The register that carries
+        // TEXCOORD0 is NOT the first inter-stage varying (v1 is often SV_ClipDistance0); find it by comment.
+        char xf[16]="xfer0"; const char*tc=strstr(var,"// TEXCOORD0"); const char*xp=0;
+        if(tc){ const char*ls=tc; while(ls>var && ls[-1]!='\n') ls--; xp=strstr(ls,"xfer"); if(xp>tc) xp=0; }
+        if(!xp) xp=strstr(var,"in vec4 xfer"), xp=xp?xp+8:0;   // fallback: first xfer
+        if(xp){ int i=0; while(xp[i]&&xp[i]!=';'&&xp[i]!=' '&&i<15){ xf[i]=xp[i]; i++; } xf[i]=0; }
+        if(getenv("PELOAD_D3DGL_UVVIZ")){ snprintf(insbuf,sizeof insbuf,"  o0=vec4(fract(%s.xy),0.0,1.0);\n",xf); ins=insbuf; }
+        else if(getenv("PELOAD_D3DGL_TEXVIZ")){ // sample texture unit N at TEXCOORD0. PELOAD_D3DGL_TEXVIZ=<n> picks t<n> (default 1).
+            int u=atoi(getenv("PELOAD_D3DGL_TEXVIZ")); if(u<0||u>31)u=1; char tn[8]; snprintf(tn,sizeof tn,"t%d",u);
+            char sd[20]; snprintf(sd,sizeof sd,"sampler2D %s",tn);
+            const char*use = strstr(var,sd)?tn:(strstr(var,"sampler2D t1")?"t1":(strstr(var,"sampler2D t0")?"t0":0));
+            // scale*4 so a dark control/detail map is still visible; show .x in R, .y in G (control maps use xy).
+            if(use){ snprintf(insbuf,sizeof insbuf,"  o0=vec4(texture(%s,%s.xy).xyz*4.0,1.0);\n",use,xf); ins=insbuf; } }
+        char*lb=strrchr(var,'}'); if(lb){ size_t il=strlen(ins),vl=strlen(var),pre=(size_t)(lb-var);
+            char*nv=malloc(vl+il+1); if(nv){ memcpy(nv,var,pre); memcpy(nv+pre,ins,il); memcpy(nv+pre+il,lb,vl-pre+1); free(var); var=nv; } } }
+    // PELOAD_D3DGL_ALBVIZ: in the terrain PS, output the raw blended ALBEDO (register r1) brightened,
+    // short-circuiting all lighting. The albedo accumulation ends right before the exposure constant
+    // 4.59478998; inject an o0 write + return there. Reveals whether the albedo itself is 0 (texture/
+    // blend problem) or nonzero (so the darkness is in the downstream lighting/mix math).
+    if(var && !isvs && getenv("PELOAD_D3DGL_ALBVIZ")){
+        char*m=strstr(var,"4.59478998");
+        if(m){ char*ls=m; while(ls>var && ls[-1]!='\n') ls--;   // start of that line
+            // find the TEXCOORD0 varying so ALBVIZ=2 samples t1 at the shader's REAL UV
+            // (v2*cb13[2]+cb13[2].zw; cb13 is renamed pXcb13 in the PS).
+            char xf[16]="xfer0"; const char*tc=strstr(var,"// TEXCOORD0"); const char*xp=0;
+            if(tc){ const char*l2=tc; while(l2>var&&l2[-1]!='\n')l2--; xp=strstr(l2,"xfer"); if(xp>tc)xp=0; }
+            if(xp){ int i=0; while(xp[i]&&xp[i]!=';'&&xp[i]!=' '&&i<15){xf[i]=xp[i];i++;} xf[i]=0; }
+            char inj[224];
+            if(atoi(getenv("PELOAD_D3DGL_ALBVIZ"))>=2)
+                snprintf(inj,sizeof inj,"  o0=vec4(clamp((texture(t1,%s.xy*pXcb13[2].xy+pXcb13[2].zw)).xyz*4.0,0.0,1.0),1.0);return;\n",xf);
+            else snprintf(inj,sizeof inj,"  o0=vec4(clamp(r1.xyz*8.0,0.0,1.0),1.0);return;\n");
+            size_t il=strlen(inj),vl=strlen(var),pre=(size_t)(ls-var);
+            char*nv=malloc(vl+il+1); if(nv){ memcpy(nv,var,pre); memcpy(nv+pre,inj,il); memcpy(nv+pre+il,ls,vl-pre+1); free(var); var=nv; }
+            if(getenv("PELOAD_D3DGL_DUMPINJ")){ static int di; if(di++<2){ char pp[64]; snprintf(pp,sizeof pp,"/tmp/albviz_ps_%d.glsl",di); FILE*f=fopen(pp,"wb"); if(f){ fwrite(var,1,strlen(var),f); fclose(f);} di++; } } } }
+    // PELOAD_D3DGL_BRIGHT=<f>: multiply the REAL PS output o0.xyz by f before writeout (tonemap stand-in).
+    // Works on the unmodified shader (not SOLIDPS): if the scene is merely dark (linear HDR pre-tonemap),
+    // this reveals the textured/lit geometry; if the control-map gate zeroed everything, it stays black.
+    // PELOAD_D3DGL_NANVIZ: paint any pixel whose o0 is NaN/Inf GREEN (the lighting math divides by the
+    // length of VS-output tangent varyings; if those are 0 -> inversesqrt(0)=Inf -> NaN -> black).
+    if(var && !isvs && !getenv("PELOAD_D3DGL_SOLIDPS") && (getenv("PELOAD_D3DGL_BRIGHT")||getenv("PELOAD_D3DGL_NANVIZ"))){
+        double f=getenv("PELOAD_D3DGL_BRIGHT")?atof(getenv("PELOAD_D3DGL_BRIGHT")):8.0; if(f<=0)f=8.0;
+        for(char*p=strstr(var,"return;"); p; p=strstr(p+1,"return;")) memcpy(p,"/*rtn*/",7);
+        static char bb[192];
+        if(getenv("PELOAD_D3DGL_NANVIZ"))
+            snprintf(bb,sizeof bb,"  if(any(isnan(o0.xyz))||any(isinf(o0.xyz)))o0=vec4(0.0,1.0,0.0,1.0);else o0=vec4(clamp(o0.xyz*%.4f,0.0,1.0),1.0);\n",f);
+        else snprintf(bb,sizeof bb,"  o0.xyz*=%.4f;\n",f);
+        char*lb=strrchr(var,'}'); if(lb){ size_t il=strlen(bb),vl=strlen(var),pre=(size_t)(lb-var);
+            char*nv=malloc(vl+il+1); if(nv){ memcpy(nv,var,pre); memcpy(nv+pre,bb,il); memcpy(nv+pre+il,lb,vl-pre+1); free(var); var=nv; } } }
+    return var;
 }
 // Bitmask of the inter-stage interface locations a stage declares: want_out=1 -> VS outputs
 // ("out vec4 o"), want_out=0 -> FS inputs ("in vec4 v"), read from each line's layout(location=L).
