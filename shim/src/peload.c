@@ -941,8 +941,13 @@ static int MSABI dev_CreateTexture2D(void*t,const void*d,const void*init,void**p
     // is ceil(h/4) (4-row blocks); otherwise h. Disable with PELOAD_NO_TEXINIT.
     if(init && tx && tx->data && tx->size && !getenv("PELOAD_NO_TEXINIT")){
         const void* sys=*(const void* const*)init; uint32_t pitch=*(const uint32_t*)((const char*)init+8);
-        if(sys && pitch){ int bc=(f>=70&&f<=84)||(f>=94&&f<=99); uint64_t rows=bc?(((uint64_t)h+3)/4):(uint64_t)h;
-            uint64_t sz=(uint64_t)pitch*rows; if(sz>tx->size)sz=tx->size; memcpy(tx->data,sys,(size_t)sz); tx->gl_dirty=1; } }
+        if(sys){ int bc=(f>=70&&f<=84)||(f>=94&&f<=99);
+            // For BC use the TIGHT compressed mip-0 size (ceil(w/4)*ceil(h/4)*blockbytes) -- the source is
+            // tightly packed and SysMemPitch has been seen 4x short, truncating the copy. Uncompressed uses pitch*h.
+            uint64_t sz; if(bc){ int blk=((f>=70&&f<=72)||(f>=79&&f<=81))?8:16; sz=(uint64_t)((w+3)/4)*((h+3)/4)*blk; }
+            else sz=(uint64_t)pitch*h;
+            if(sz>tx->size)sz=tx->size; memcpy(tx->data,sys,(size_t)sz); tx->gl_dirty=1;
+            if(getenv("PELOAD_TRACE_TEXINIT")){ static int ti; if(ti++<20){ char m[160]; int k=snprintf(m,sizeof m,"  [texinit] %ux%u f%u pitch=%u copy=%lluB tsize=%lluB\n",w,h,f,pitch,(unsigned long long)sz,(unsigned long long)tx->size); (void)!write(2,m,k);} } } }
     if(pp)*pp=tx; return HR_OK; }
 static int MSABI dev_CreateTexture3D(void*t,const void*d,const void*init,void**pp){ (void)t;(void)init;
     uint32_t w=d?*(const uint32_t*)d:1, h=d?*(const uint32_t*)((const char*)d+4):1, dp=d?*(const uint32_t*)((const char*)d+8):1, f=d?*(const uint32_t*)((const char*)d+16):0;
@@ -1131,6 +1136,17 @@ static void MSABI ctx_UpdateSubresource(void*t,void*res,uint32_t sub,const void*
     if(o->kind==1){                                   // BUFFER
         uint64_t off=b?b[0]:0, n=b?(uint64_t)(b[3]-b[0]):cap;
         if(off<cap){ if(off+n>cap)n=cap-off; memcpy(d+off,s,(size_t)n); } return; }
+    // Block-compressed (BC/DXT) textures stream in via UpdateSubresource too, but they have NO per-pixel
+    // bpp -- rows are 4-high blocks and the pitch is (blocks_per_row * blockbytes). Treating them like
+    // uncompressed (bpp=rowpitch/w) scrambled/truncated the copy, so map textures only partly filled.
+    { int bc=(o->fmt>=70&&o->fmt<=84)||(o->fmt>=94&&o->fmt<=99);
+      if(bc){ int blk=((o->fmt>=70&&o->fmt<=72)||(o->fmt>=79&&o->fmt<=81))?8:16;
+        uint32_t bw=(((o->w?o->w:1)+3)/4), drp2=bw*blk, sr=srp?srp:drp2;
+        uint32_t ltop=b?b[1]:0, lbot=b?b[4]:(o->h?o->h:1), lleft=b?b[0]:0, lright=b?b[3]:(o->w?o->w:1);
+        uint32_t btop=ltop/4, bbot=(lbot+3)/4, bleft=lleft/4, brbytes=((((lright+3)/4)-bleft)*(uint32_t)blk);
+        for(uint32_t by=btop;by<bbot;by++){ uint64_t doff=(uint64_t)by*drp2+(uint64_t)bleft*blk, soff=(uint64_t)(by-btop)*sr;
+            if(doff+brbytes>cap) break; memcpy(d+doff,s+soff,brbytes); }
+        return; } }
     uint32_t bpp=(o->rowpitch&&o->w)?(uint32_t)(o->rowpitch/o->w):4; if(!bpp)bpp=4;
     uint32_t drp=o->rowpitch?o->rowpitch:(o->w?o->w*bpp:0); if(!drp) return;
     uint32_t left=b?b[0]:0, top=b?b[1]:0, right=b?b[3]:o->w, bottom=b?b[4]:(o->h?o->h:1);
@@ -3161,6 +3177,20 @@ static int d3dgl_bc_glfmt(uint32_t f,unsigned*ifmt,int*blkbytes){
         default: return 0;
     }
 }
+// PELOAD_D3DGL_DUMPGLTEX: read the currently-bound GL texture back (glGetTexImage) + save a BMP, so we
+// can see whether the (BC) decode produced a real map texture vs dark/garbage. Caller gates the env.
+static void dg_gltex_dump(int w,int h,unsigned fmt){
+    if(!getenv("PELOAD_D3DGL_DUMPGLTEX") || w<256 || h<256) return;
+    if(!(((fmt>=70&&fmt<=84)||(fmt>=94&&fmt<=99)))) return;   // BC/DXT only (the map textures)
+    static int gt2; if(gt2>=8) return;
+    void(*gti)(unsigned,int,unsigned,unsigned,void*)=dlsym(RTLD_DEFAULT,"glGetTexImage"); if(!gti) return;
+    unsigned char*buf=calloc(1,(size_t)w*h*4); if(!buf) return; gti(GLE_TEX2D,0,GLE_RGBA,GLE_UBYTE,buf);
+    const char*home=getenv("HOME"); char p[160]; snprintf(p,sizeof p,"%s/reclaimer_gltex_%d_%dx%d_f%u.bmp",home?home:"/tmp",gt2,w,h,fmt);
+    FILE*f=fopen(p,"wb"); if(f){ uint32_t isz=(uint32_t)w*h*4,fsz=54+isz,oo=54; uint8_t fh[14]={'B','M'}; memcpy(fh+2,&fsz,4); memcpy(fh+10,&oo,4);
+        uint8_t ih[40]={0}; uint32_t v=40; memcpy(ih,&v,4); memcpy(ih+4,&w,4); memcpy(ih+8,&h,4); uint16_t pl=1,bpp=32; memcpy(ih+12,&pl,2); memcpy(ih+14,&bpp,2); memcpy(ih+20,&isz,4);
+        fwrite(fh,1,14,f); fwrite(ih,1,40,f); for(int y=h-1;y>=0;y--){ unsigned char*row=buf+(size_t)y*w*4; for(int x=0;x<w;x++){ unsigned char*px=row+x*4; unsigned char b[4]={px[2],px[1],px[0],255}; fwrite(b,1,4,f);} } fclose(f);
+        char m[200]; int k=snprintf(m,sizeof m,"  [gltex] dumped %dx%d f%u -> %s\n",w,h,fmt,p); (void)!write(2,m,k); } free(buf); gt2++;
+}
 static void d3dgl_ensure_tex(D3DObj*o){
     if(!o) return;
     if(!o->gltex){ G.GenTextures(1,&o->gltex); G.BindTexture(GLE_TEX2D,o->gltex);
@@ -3183,7 +3213,7 @@ static void d3dgl_ensure_tex(D3DObj*o){
             cti(GLE_TEX2D,0,bcif,w,h,0,(int)csz,o->data);
             unsigned e=gerr?gerr():0;
             if(getenv("PELOAD_TRACE_TEXUP")){ static int bc; if(bc++<40){ char b[160]; int k=snprintf(b,sizeof b,"  [texup-bc] %dx%d fmt=%u ifmt=0x%x csz=%lluB err=0x%x%s\n",w,h,o->fmt,bcif,(unsigned long long)csz,e,e?" (FALLBACK)":""); (void)!write(2,b,k);} }
-            if(!e){ o->gl_uploaded=1; o->gl_dirty=0; return; } // success: BPTC may fail on GL4.1 -> fall through
+            if(!e){ o->gl_uploaded=1; o->gl_dirty=0; dg_gltex_dump(w,h,o->fmt); return; } // success: BPTC may fail on GL4.1 -> fall through
         }
     }
     // Only upload real pixels when the backing buffer actually holds >= w*h*4 bytes; otherwise
@@ -3200,6 +3230,7 @@ static void d3dgl_ensure_tex(D3DObj*o){
     if(can) G.TexImage2D(GLE_TEX2D,0,GLE_RGBA8,w,h,0,gf,gt,o->data);
     else { static const unsigned char mag[4]={255,0,255,255}; G.TexImage2D(GLE_TEX2D,0,GLE_RGBA8,1,1,0,GLE_RGBA,GLE_UBYTE,mag); }
     o->gl_uploaded=1; o->gl_dirty=0;
+    dg_gltex_dump(w,h,o->fmt);
 }
 static void d3dgl_ensure_rt(D3DObj*o){
     if(!o) return;
