@@ -780,6 +780,10 @@ typedef struct { void** vtbl; uint32_t kind; uint32_t rowpitch; uint64_t size; v
     unsigned glubo; uint32_t uboglver, ubosz; // constant buffer: GL uniform-buffer copy, the ver it holds, its byte size
     unsigned gltbo, gltbobuf; uint32_t tbover; int tbook; // buffer SRV: GL texture buffer (R32UI) + its storage, uploaded ver
     void* csprog;                 // compute shader: CPU-interpreter program (dxbc_cpu.c), compiled on first Dispatch
+    char* monosrc;                // shader: mono-path GLSL (injected + renamed), built once and shared by every pair
+    uint64_t bchash;              // shader: FNV-1a of the bytecode (identifies it across runs for the pair pre-link list)
+    unsigned shc_id[4]; uint64_t shc_mask[4]; int shc_n; // shader: compiled GL shaders per interface-padding mask
+    void* canon;                  // shader: first-created object with identical bytecode (programs are keyed by it)
 } D3DObj;
 // ID3D11DeviceChild private data: halo3 stashes the VS bytecode-blob pointer on the shader object
 // (SetPrivateData with GUID g_180801e00) and reads it back for CreateInputLayout. Our old no-op
@@ -1159,12 +1163,15 @@ static int dxbc_has_vtxinput(const uint8_t*d,uint64_t n){
     return 0;
 }
 static void shader_rname(D3DObj*o); // fwd
+static void d3dgl_prelink_register(D3DObj*o); // fwd
 static int MSABI dev_crShader(int stage,const void*bc,uint64_t len,void**pp){
     D3DObj*o=d3dobj(g_d3dchild_vtbl,0,0); o->stype=stage;
     if(bc&&len&&len<(16<<20)){ o->bc=malloc(len); if(o->bc){ memcpy(o->bc,bc,len); o->bclen=(uint32_t)len; } }
     if(getenv("PELOAD_FRAMELOG")) shader_rname(o);
     if(stage==0 && o->bc) o->vs_vtxin=dxbc_has_vtxinput(o->bc,o->bclen);
     if(getenv("PELOAD_D3DGL") && o->bc){ o->glsl=d3dgl_load_glsl(o->bc,o->bclen);
+        { uint64_t h=1469598103934665603ull; for(uint32_t i=0;i<o->bclen;i++){ h^=((const uint8_t*)o->bc)[i]; h*=1099511628211ull; }
+          o->bchash=h|1; d3dgl_prelink_register(o); }
         if(getenv("PELOAD_TRACE_D3DGL")){ static int lo,hi; if(o->glsl)hi++; else lo++; if(((lo+hi)%200)==0){ char m[64]; int k=snprintf(m,sizeof m,"  [d3dgl] shaders translated=%d miss=%d\n",hi,lo); (void)!write(2,m,k);} } }
     int idx=g_shcount[stage]++;
     if(getenv("PELOAD_DUMP_SHADERS") && o->bc){ char d[512]; const char*h=getenv("HOME");
@@ -4696,31 +4703,85 @@ static unsigned d3dgl_compile(const char*src,unsigned glstage){
         G.DeleteShader(sh); return 0; }
     return sh;
 }
+// Compiled GL shader for (D3D shader, interface-padding mask): most pairs need no or the same padding, so
+// a VS/PS compiles once and is attached to every program that uses it (compile was ~2/3 of a first-use link).
+static unsigned d3dgl_shcache(D3DObj*o,uint64_t mask,const char*src,unsigned stage){
+    for(int i=0;i<o->shc_n;i++) if(o->shc_mask[i]==mask && o->shc_id[i]) return o->shc_id[i];
+    unsigned sh=d3dgl_compile(src,stage); if(!sh) return 0;
+    int slot=o->shc_n<4?o->shc_n++:3;
+    if(o->shc_n>=4 && o->shc_id[slot] && G.DeleteShader) G.DeleteShader(o->shc_id[slot]);   // evict (programs keep their copy)
+    o->shc_id[slot]=sh; o->shc_mask[slot]=mask; return sh; }
+// ---- persistent first-use pair list -----------------------------------------------------------------
+// A new VS/PS pair costs ~10-40 ms to build (GLSL compile + link on GL-on-Metal); effects introduce a dozen
+// at once (a grenade explosion froze the game ~0.4 s). Every linked pair is recorded by bytecode hash in
+// ~/Library/Application Support/ReclaimerMac/glpairs_v1.txt; on later runs those pairs are built while the
+// loading screen is up (d3dgl_prelink_tick at Present) so gameplay rarely meets an unbuilt one.
+// PELOAD_D3DGL_NOPRELINK disables both the recording and the pre-build.
+#define PL_MAXSH 16384
+#define PL_MAXPAIR 8192
+static struct { uint64_t h; D3DObj*o; } g_pl_sh[PL_MAXSH];            // bytecode hash -> shader object
+static struct { uint64_t vh, ph; int done; } g_pl_pair[PL_MAXPAIR]; static int g_pl_npair, g_pl_loaded, g_pl_next;
+static pthread_mutex_t g_pl_mx=PTHREAD_MUTEX_INITIALIZER;
+static int pl_on(void){ static int on=-1; if(on<0) on=!getenv("PELOAD_D3DGL_NOPRELINK"); return on; }
+static void pl_path(char*p,size_t n){ const char*h=getenv("HOME"); snprintf(p,n,"%s/Library/Application Support/ReclaimerMac/glpairs_v1.txt",h?h:"/tmp"); }
+static D3DObj* pl_find(uint64_t h){ for(unsigned i=0;i<PL_MAXSH;i++){ unsigned k=(unsigned)((h+i)&(PL_MAXSH-1)); if(!g_pl_sh[k].h) return 0; if(g_pl_sh[k].h==h) return g_pl_sh[k].o; } return 0; }
+static int pl_havepair(uint64_t vh,uint64_t ph){ for(int i=0;i<g_pl_npair;i++) if(g_pl_pair[i].vh==vh&&g_pl_pair[i].ph==ph) return i; return -1; }
+static void pl_load(void){ if(g_pl_loaded) return; g_pl_loaded=1;
+    char p[512]; pl_path(p,sizeof p); FILE*f=fopen(p,"r"); if(!f) return;
+    unsigned long long a,b; while(g_pl_npair<PL_MAXPAIR && fscanf(f,"%llx %llx",&a,&b)==2){ g_pl_pair[g_pl_npair].vh=a; g_pl_pair[g_pl_npair].ph=b; g_pl_pair[g_pl_npair].done=0; g_pl_npair++; }
+    fclose(f);
+    char m[160]; int k=snprintf(m,sizeof m,"  [prelink] %d known shader pairs from %s\n",g_pl_npair,p); (void)!write(2,m,k); }
+// Register a new shader by bytecode hash. halo3 creates many shaders with byte-identical bytecode (~1/4 of
+// pairs); those share the first object's programs (o->canon) instead of building duplicates.
+static void d3dgl_prelink_register(D3DObj*o){ if(!o->bchash) return;
+    pthread_mutex_lock(&g_pl_mx); if(pl_on()) pl_load();
+    for(unsigned i=0;i<PL_MAXSH;i++){ unsigned k=(unsigned)((o->bchash+i)&(PL_MAXSH-1)); if(!g_pl_sh[k].h){ g_pl_sh[k].h=o->bchash; g_pl_sh[k].o=o; break; }
+        if(g_pl_sh[k].h==o->bchash){ D3DObj*c=g_pl_sh[k].o;
+            if(c&&c!=o&&c->stype==o->stype&&c->bclen==o->bclen&&c->bc&&o->bc&&!memcmp(c->bc,o->bc,o->bclen)&&!getenv("PELOAD_D3DGL_NOCANON")) o->canon=c;
+            break; } }
+    pthread_mutex_unlock(&g_pl_mx); }
+static void d3dgl_prelink_record(D3DObj*vs,D3DObj*ps){ if(!pl_on()||!vs->bchash||!ps->bchash) return;
+    pthread_mutex_lock(&g_pl_mx); pl_load();
+    int i=pl_havepair(vs->bchash,ps->bchash);
+    if(i>=0) g_pl_pair[i].done=1;
+    else if(g_pl_npair<PL_MAXPAIR){ g_pl_pair[g_pl_npair].vh=vs->bchash; g_pl_pair[g_pl_npair].ph=ps->bchash; g_pl_pair[g_pl_npair].done=1; g_pl_npair++;
+        char p[512]; pl_path(p,sizeof p); FILE*f=fopen(p,"a"); if(f){ fprintf(f,"%016llx %016llx\n",(unsigned long long)vs->bchash,(unsigned long long)ps->bchash); fclose(f); } }
+    pthread_mutex_unlock(&g_pl_mx); }
 static char *m_vsrc_keep, *m_psrc_keep;   // last mono sources (block-size parsing at link)
 typedef struct { void*vs; void*ps; unsigned prog; int tried; int vcb[16],pcb[16],tloc[32]; signed char tt[32];
     int vblk[16], pblk[16];        // UBO path: declared block size in vec4s per D3D slot (0 = slot unused)
-    int units_set; int relcb; int vtloc[32]; signed char vtt[32]; int vunits_set; } MonoProg;   // relcb: 1 = VS / 2 = PS indexes a constant buffer by register
-static MonoProg g_mono[1024];
+    int units_set; int relcb; int vtloc[32]; signed char vtt[32]; int vunits_set; int drawn; } MonoProg;   // relcb: 1 = VS / 2 = PS indexes a constant buffer by register
+#define MONO_N 4096
+static MonoProg g_mono[MONO_N]; static int g_mono_used;
 static MonoProg* d3dgl_monoprog(D3DObj*vs,D3DObj*ps){
     uintptr_t h=(((uintptr_t)vs>>4)*2654435761u) ^ (((uintptr_t)ps>>4)*40503u);
-    for(int probe=0;probe<1024;probe++){ MonoProg*m=&g_mono[(int)((h+probe)&1023)];
+    for(int probe=0;probe<MONO_N;probe++){ MonoProg*m=&g_mono[(int)((h+probe)&(MONO_N-1))];
         if(m->tried){ if(m->vs==vs&&m->ps==ps) return m; continue; }   // occupied by another pair -> probe on
-        m->vs=vs; m->ps=ps; m->tried=1; m->prog=0;                     // claim slot; prog stays 0 on any failure
-        char*vsrc=d3dgl_mono_src(vs,1), *psrc=d3dgl_mono_src(ps,0);
-        if(!vsrc||!psrc){ free(vsrc); free(psrc); return m; }
+        m->vs=vs; m->ps=ps; m->tried=1; m->prog=0; g_mono_used++;      // claim slot; prog stays 0 on any failure
+        double pt0=mono_s();
+        // per-shader GLSL is built once (it doesn't depend on the partner); only the padding is per pair
+        if(!vs->monosrc) vs->monosrc=d3dgl_mono_src(vs,1);
+        if(!ps->monosrc) ps->monosrc=d3dgl_mono_src(ps,0);
+        const char*vsrc=vs->monosrc, *psrc=ps->monosrc;
+        double pt1=mono_s();
+        if(!vsrc||!psrc) return m;
         memset(m->tt,0,sizeof m->tt); d3dgl_scan_tt(psrc,m->tt);   // PS sampler dimension per t#
         memset(m->vtt,0,sizeof m->vtt); d3dgl_scan_tt_p(vsrc,m->vtt,"vt");   // VS resources (renamed vt#)
         uint64_t vo=d3dgl_iface_mask(vsrc,1), fi=d3dgl_iface_mask(psrc,0);
-        char*vfull=d3dgl_augment(vsrc, fi & ~vo, 1);   // VS gets the outputs the PS reads but the VS lacked
-        char*pfull=d3dgl_augment(psrc, vo & ~fi, 0);   // PS gets inputs for the VS outputs it didn't read
-        free(vsrc); free(psrc);
+        uint64_t vadd=fi & ~vo, padd=vo & ~fi;
+        char*vfull=d3dgl_augment(vsrc, vadd, 1);   // VS gets the outputs the PS reads but the VS lacked
+        char*pfull=d3dgl_augment(psrc, padd, 0);   // PS gets inputs for the VS outputs it didn't read
         if(!vfull||!pfull){ free(vfull); free(pfull); return m; }
-        unsigned vsh=d3dgl_compile(vfull,GLE_VS), psh=d3dgl_compile(pfull,GLE_FS);
+        unsigned vsh=d3dgl_shcache(vs,vadd,vfull,GLE_VS), psh=d3dgl_shcache(ps,padd,pfull,GLE_FS);
         free(m_vsrc_keep); free(m_psrc_keep); m_vsrc_keep=vfull; m_psrc_keep=pfull;   // block sizes parsed after link
-        if(!vsh||!psh){ if(vsh)G.DeleteShader(vsh); if(psh)G.DeleteShader(psh); return m; }
+        if(!vsh||!psh) return m;
+        double pt2=mono_s();
         unsigned prog=G.CreateProgram(); G.AttachShader(prog,vsh); G.AttachShader(prog,psh); G.LinkProgram(prog);
-        G.DeleteShader(vsh); G.DeleteShader(psh);                      // flagged; freed with the program
+        if(G.DetachShader){ G.DetachShader(prog,vsh); G.DetachShader(prog,psh); }   // shader objects stay cached for other pairs
         int lok=0; G.GetProgramiv(prog,GLE_LSTAT,&lok);
+        if(lok) d3dgl_prelink_record(vs,ps);
+        if(getenv("PELOAD_D3DGL_PROGTIME")){ double pt3=mono_s(); extern double g_gameplay_t0; static int np; np++;
+            char mm[200]; int k=snprintf(mm,sizeof mm,"  [progtime] #%d t=%.2f translate %.1f ms compile %.1f ms link %.1f ms\n",np,g_gameplay_t0?pt3-g_gameplay_t0:-1.0,(pt1-pt0)*1e3,(pt2-pt1)*1e3,(pt3-pt2)*1e3); (void)!write(2,mm,k); }
         if(!lok){ if(g_d3dgl_trace){ static char log[16384]; log[0]=0; if(G.GetProgramInfoLog)G.GetProgramInfoLog(prog,sizeof log,0,log);
                 // print the ERROR lines (unread-varying WARNINGs precede them and used to fill the old 1 KB buffer)
                 int any=0; for(char*l=log;l&&*l;){ char*nl=strchr(l,'\n'); if(nl)*nl=0; if(strstr(l,"ERROR")){ ws("  [d3dgl] mono link FAIL: "); ws(l); ws("\n"); any=1; } l=nl?nl+1:0; }
@@ -4749,6 +4810,20 @@ static MonoProg* d3dgl_monoprog(D3DObj*vs,D3DObj*ps){
     }
     return 0;   // table full
 }
+// Build known pairs whose shaders exist, within budget_ms (render thread, GL lock held). Returns pairs built.
+static int d3dgl_prelink_tick(double budget_ms){
+    if(!pl_on()||!g_pl_npair||g_pl_next>=g_pl_npair||g_mono_used>MONO_N*3/4) return 0;   // keep room for new pairs
+    double t0=mono_s(); int built=0, i;
+    for(i=g_pl_next;i<g_pl_npair;i++){
+        if(g_pl_pair[i].done) continue;
+        pthread_mutex_lock(&g_pl_mx); D3DObj*vs=pl_find(g_pl_pair[i].vh), *ps=pl_find(g_pl_pair[i].ph); pthread_mutex_unlock(&g_pl_mx);
+        if(!vs||!ps||!vs->glsl||!ps->glsl) continue;          // not created yet (this map/load) -- retried next tick
+        d3dgl_monoprog(vs,ps); g_pl_pair[i].done=1; built++;
+        if((mono_s()-t0)*1e3>=budget_ms){ i++; break; } }
+    // advance the cursor past the leading run of finished entries
+    while(g_pl_next<g_pl_npair && g_pl_pair[g_pl_next].done) g_pl_next++;
+    if(built && getenv("PELOAD_D3DGL_PROGTIME")){ static int tot; tot+=built; char m[120]; int k=snprintf(m,sizeof m,"  [prelink] built %d (total %d) in %.1f ms\n",built,tot,(mono_s()-t0)*1e3); (void)!write(2,m,k); }
+    return built; }
 // ClearRenderTargetView -> clear that RT's GL FBO color (engine's clears are no-ops in our stub, so
 // without this the GL render targets accumulate across frames). Runs only on our render thread/context.
 static void d3dgl_clear_rtv(void* rtvview,const float* col){
@@ -4923,7 +4998,7 @@ static void d3dgl_draw_impl(uint32_t vcount,int indexed,uint32_t instcount,uint3
     // program-pipeline path (which Apple GL-on-Metal fails to build -> all-SW fallback). See d3dgl_monoprog.
     int mono=!getenv("PELOAD_D3DGL_SEP");
     unsigned vsp=0,psp=0; MonoProg*mp=0;
-    if(mono){ mp=d3dgl_monoprog(vs,ps); if(!mp||!mp->prog){ c_noprog++; return; } }
+    if(mono){ mp=d3dgl_monoprog(vs->canon?vs->canon:vs,ps->canon?ps->canon:ps); if(!mp||!mp->prog){ c_noprog++; return; } }
     else { vsp=d3dgl_prog(vs,GLE_VS); psp=d3dgl_prog(ps,GLE_FS); if(!vsp||!psp){ c_noprog++; return; } }
     c_exec++;
     // render target (default to the swapchain backbuffer)
@@ -5205,6 +5280,7 @@ static void d3dgl_draw_impl(uint32_t vcount,int indexed,uint32_t instcount,uint3
     if(getenv("PELOAD_D3DGL_SKIPDEGEN") && getenv("PELOAD_D3DGL_DECOMP")){
         const float*c1=(const float*)g_syn_cb1_buf; float t=atof(getenv("PELOAD_D3DGL_SKIPDEGEN")); if(t<=0)t=2.0f;
         if(c1[0]<t||c1[1]<t||c1[2]<t) n=0; }
+    double fd0=(mp && !mp->drawn && getenv("PELOAD_D3DGL_PROGTIME"))?mono_s():0;
     if(indexed && g_d3dst.ib && g_d3dst.ib->data && g_d3dst.ib->size){
         D3DObj*ib=g_d3dst.ib;
         unsigned itype=(g_d3dst.ibfmt==42)?GLE_UI:GLE_US; size_t isz=(itype==GLE_UI)?4:2;
@@ -5232,6 +5308,7 @@ static void d3dgl_draw_impl(uint32_t vcount,int indexed,uint32_t instcount,uint3
         if(instcount>1) G.DrawArraysInstanced(mode,first,(int)n,(int)instcount);
         else G.DrawArrays(mode,first,(int)n);
     }
+    if(fd0){ mp->drawn=1; double d=(mono_s()-fd0)*1e3; if(d>2.0){ char mm[120]; int k=snprintf(mm,sizeof mm,"  [progtime] first draw %.1f ms t=%.2f\n",d,g_gameplay_t0?mono_s()-g_gameplay_t0:-1.0); (void)!write(2,mm,k); } }
     // PELOAD_D3DGL_COVPROBE (use with SOLIDPS): read back the CURRENTLY-BOUND FBO right after each of the
     // first geometry draws and count red/nonblack pixels. This measures "did THIS draw rasterize into ITS
     // OWN render target" with zero present/latch/capture confusion -- the ground truth for on-screen coverage.
@@ -5474,7 +5551,10 @@ static int pq_present_wait(unsigned long*seen,int ms){
     G.BindVertexArray(g_pq_vao); G.DrawArrays(4,0,3); G.Flush(); if(pc) CGLUnlockContext(pc);
     pthread_mutex_lock(&g_pq_mx); g_pq_reading=-1; pthread_mutex_unlock(&g_pq_mx);
     if(getenv("PELOAD_D3DGL_SHOTWIN")){ static unsigned long bc; int every=atoi(getenv("PELOAD_D3DGL_SHOTWIN")); if(every<1)every=20;
-        if((bc++ % every)==0 && G.ReadPixels){ int w=g_win_pw>0?g_win_pw:g_d3dgl_W,h=g_win_ph>0?g_win_ph:g_d3dgl_H; unsigned char*cap=calloc(1,(size_t)w*h*4);
+        // optional window (seconds after "gameplay presentation ready"): PELOAD_D3DGL_SHOTWIN_FROM / _TO
+        double gt=g_gameplay_t0?mono_s()-g_gameplay_t0:-1; const char*fr=getenv("PELOAD_D3DGL_SHOTWIN_FROM"),*to=getenv("PELOAD_D3DGL_SHOTWIN_TO");
+        int inwin=(!fr||(gt>=0&&gt>=atof(fr))) && (!to||(gt>=0&&gt<atof(to)));
+        if(inwin && (bc++ % every)==0 && G.ReadPixels){ int w=g_win_pw>0?g_win_pw:g_d3dgl_W,h=g_win_ph>0?g_win_ph:g_d3dgl_H; unsigned char*cap=calloc(1,(size_t)w*h*4);
             if(cap){ if(G.ReadBuffer)G.ReadBuffer(0x0405/*BACK*/); G.ReadPixels(0,0,w,h,GLE_RGBA,GLE_UBYTE,cap);
                 static int wn; const char*home=getenv("HOME"); char p[512]; snprintf(p,sizeof p,"%s/reclaimer_win_%d_%03d%s.bmp",home?home:"/tmp",(int)getpid(),wn++, getenv("PELOAD_D3DGL_ALT5")?((((long)(mono_s()/5.0))&1)?"_B":"_A"):"");
                 bmp_write_rgba(p,w,h,cap); free(cap); } } }
@@ -5601,6 +5681,10 @@ static void d3dgl_present_impl(void){
         cocoa_pump();
     }
     if(g_d3dgl_offscreen) pq_publish(); else if(G.Flush) G.Flush();
+    // build previously-seen shader pairs while the loading screen is up (see d3dgl_prelink_tick);
+    // during gameplay only with PELOAD_D3DGL_PRELINK_MS=<per-frame budget>
+    { static double gb=-1; if(gb<0){ const char*e=getenv("PELOAD_D3DGL_PRELINK_MS"); gb=e?atof(e):0; }
+      if(!g_gameplay_t0) d3dgl_prelink_tick(40.0); else if(gb>0) d3dgl_prelink_tick(gb); }
     // PELOAD_D3DGL_SHOTPRESENT: dump the ACTUAL PRESENTED texture (what the window shows) via glGetTexImage,
     // every N presents (default 30). My RT dumps grabbed the wrong G-buffer; this is the real on-screen frame.
     if(getenv("PELOAD_D3DGL_SHOTPRESENT") && g_d3dgl_present_tex){
