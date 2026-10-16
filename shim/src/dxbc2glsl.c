@@ -188,14 +188,18 @@ static const char* dg_dst(DgCtx*c,const DgOp*op){ char*o=dg_pool(); uint32_t ix=
     if(op->type==T_OUTPUT){ if(ix>=0xffffffffu){ snprintf(o,256,"gl_FragDepth"); return o; } if(dg_out_is_pos(c,ix)){ snprintf(o,256,"gl_Position"); return o; } snprintf(o,256,"o%u",ix); return o; }
     if(op->type==T_OUTPUT_DEPTH){ snprintf(o,256,"gl_FragDepth"); return o; }
     snprintf(o,256,"r%u",ix); return o; }
+// DXBC is lane-wise: destination lane i reads lane i of the (already per-lane swizzled) 4-wide source, so
+// "mov o0.zw, l(0,0,0.5,0.5)" sets z=0.5,w=0.5. Select the MASK lanes, not the first N lanes -- the old
+// "(expr).xy" for a .zw mask wrote w=0 into gl_Position (geometry vanished) and scrambled every non-prefix
+// write mask (.y .z .w .xz .yw .zw ...) across all shaders.
 static char* dg_asg(DgCtx*c,const DgOp*op,const char*expr){ const char*d=dg_dst(c,op);
     if(!strcmp(d,"gl_FragDepth")){ char*s; asprintf(&s,"  gl_FragDepth = (%s).x;",expr); return s; }
-    char m[5]; dg_destmask(op,m); char sw[5]; int l=(int)strlen(m); memcpy(sw,"xyzw",l); sw[l]=0;
-    char*s; asprintf(&s,"  %s.%s = (%s).%s;",d,m,expr,sw); return s; }
+    char m[5]; dg_destmask(op,m);
+    char*s; asprintf(&s,"  %s.%s = (%s).%s;",d,m,expr,m); return s; }
 static char* dg_asg_i(DgCtx*c,const DgOp*op,const char*expr){ const char*d=dg_dst(c,op);
     if(!strcmp(d,"gl_FragDepth")){ char*s; asprintf(&s,"  gl_FragDepth = intBitsToFloat((%s)).x;",expr); return s; }
-    char m[5]; dg_destmask(op,m); char sw[5]; int l=(int)strlen(m); memcpy(sw,"xyzw",l); sw[l]=0;
-    char*s; asprintf(&s,"  %s.%s = intBitsToFloat((%s)).%s;",d,m,expr,sw); return s; }
+    char m[5]; dg_destmask(op,m);
+    char*s; asprintf(&s,"  %s.%s = intBitsToFloat((%s)).%s;",d,m,expr,m); return s; }
 
 static int dg_is_word(int c){ return isalnum(c)||c=='_'; }
 // collect ids matching prefix (e.g. "r","cb") followed by digits, with word boundaries, into seen[].
@@ -286,6 +290,7 @@ char* dg_emit(const char*stage,const DgSig*isgn,int ni,const DgSig*osgn,int no,D
         // integer helpers
         #define SI(k) ({ char*_t=dg_pool(); snprintf(_t,256,"floatBitsToInt(%s)",S(k)); _t; })
         #define TX(k) ( (k)<nopn && o[k].nidx ? o[k].idx[0].val : 0 )
+        #define RSW(k) ({ char*_r=dg_pool(); if((k)<nopn) dg_swz(&o[k],_r); else strcpy(_r,"xyzw"); _r; })
         char*line=NULL;
         if(!strcmp(n,"iadd")) line=dg_asg_i(&ctx,&o[0],({char*t=dg_pool();snprintf(t,256,"%s + %s",SI(1),SI(2));t;}));
         else if(!strcmp(n,"imul")) line=dg_asg_i(&ctx,&o[0], nopn>3?({char*t=dg_pool();snprintf(t,256,"%s * %s",SI(2),SI(3));t;}):({char*t=dg_pool();snprintf(t,256,"%s*%s",SI(1),SI(2));t;}));
@@ -303,8 +308,8 @@ char* dg_emit(const char*stage,const DgSig*isgn,int ni,const DgSig*osgn,int no,D
         else if(!strcmp(n,"ftou")) line=dg_asg_i(&ctx,&o[0],({char*t=dg_pool();snprintf(t,256,"ivec4(uvec4(%s))",S(1));t;}));
         else if(!strcmp(n,"itof")) line=dg_asg(&ctx,&o[0],({char*t=dg_pool();snprintf(t,256,"vec4(%s)",SI(1));t;}));
         else if(!strcmp(n,"utof")) line=dg_asg(&ctx,&o[0],({char*t=dg_pool();snprintf(t,256,"vec4(uvec4(%s))",SI(1));t;}));
-        else if(!strcmp(n,"ld_ms")||!strcmp(n,"ld")) line=dg_asg(&ctx,&o[0],({char*t=dg_pool();snprintf(t,256,"texelFetch(t%u,ivec2((%s).xy),0)",(unsigned)TX(2),S(1));t;}));
-        else if(!strcmp(n,"sample_d")) line=dg_asg(&ctx,&o[0],({char*t=dg_pool();snprintf(t,256,"textureGrad(t%u,(%s).xy,(%s).xy,(%s).xy)",(unsigned)TX(2),S(1),S(3),S(4));t;}));
+        else if(!strcmp(n,"ld_ms")||!strcmp(n,"ld")) line=dg_asg(&ctx,&o[0],({char*t=dg_pool();snprintf(t,256,"texelFetch(t%u,ivec2((%s).xy),0).%s",(unsigned)TX(2),S(1),RSW(2));t;}));
+        else if(!strcmp(n,"sample_d")) line=dg_asg(&ctx,&o[0],({char*t=dg_pool();snprintf(t,256,"textureGrad(t%u,(%s).xy,(%s).xy,(%s).xy).%s",(unsigned)TX(2),S(1),S(3),S(4),RSW(2));t;}));
         else if(!strcmp(n,"resinfo")) line=dg_asg(&ctx,&o[0],({char*t=dg_pool();snprintf(t,256,"vec4(textureSize(t%u,0),0,0)",(unsigned)TX(2));t;}));
         else if(!strcmp(n,"mov")) line=dg_asg(&ctx,&o[0],S(1));
         else if(!strcmp(n,"add")) line=dg_asg(&ctx,&o[0],({char*t=dg_pool();snprintf(t,256,"%s + %s",S(1),S(2));t;}));
@@ -324,8 +329,10 @@ char* dg_emit(const char*stage,const DgSig*isgn,int ni,const DgSig*osgn,int no,D
         else if(!strcmp(n,"round_ne")) line=dg_asg(&ctx,&o[0],({char*t=dg_pool();snprintf(t,256,"roundEven(%s)",S(1));t;}));
         else if(!strcmp(n,"ineg")) line=dg_asg_i(&ctx,&o[0],({char*t=dg_pool();snprintf(t,256,"-%s",SI(1));t;}));
         else if(!strcmp(n,"ult")) line=dg_asg(&ctx,&o[0],({char*t=dg_pool();snprintf(t,256,"vec4(lessThan(uvec4(floatBitsToUint(%s)),uvec4(floatBitsToUint(%s))))",S(1),S(2));t;}));
-        else if(!strcmp(n,"sample_b")) line=dg_asg(&ctx,&o[0],({char*t=dg_pool();snprintf(t,256,"texture(t%u,(%s).xy,(%s).x)",(unsigned)TX(2),S(1),S(4));t;}));
-        else if(!strcmp(n,"sincos")){ dg_lprintf(&L,"  // sincos (approx)"); const DgOp*dstop=(o[0].type!=T_NULL)?&o[0]:&o[1]; line=dg_asg(&ctx,dstop,({char*t=dg_pool();snprintf(t,256,"sin(%s)",S(2));t;})); }
+        else if(!strcmp(n,"sample_b")) line=dg_asg(&ctx,&o[0],({char*t=dg_pool();snprintf(t,256,"texture(t%u,(%s).xy,(%s).x).%s",(unsigned)TX(2),S(1),S(4),RSW(2));t;}));
+        else if(!strcmp(n,"sincos")){   // sincos dst_sin, dst_cos, src  (either destination may be null)
+            if(o[0].type!=T_NULL) dg_lpush(&L,dg_asg(&ctx,&o[0],({char*t=dg_pool();snprintf(t,256,"sin(%s)",S(2));t;})));
+            if(nopn>1 && o[1].type!=T_NULL) line=dg_asg(&ctx,&o[1],({char*t=dg_pool();snprintf(t,256,"cos(%s)",S(2));t;})); }
         else if(!strcmp(n,"dp2")) line=dg_asg(&ctx,&o[0],({char*t=dg_pool();snprintf(t,256,"vec4(dot((%s).xy,(%s).xy))",S(1),S(2));t;}));
         else if(!strcmp(n,"dp3")) line=dg_asg(&ctx,&o[0],({char*t=dg_pool();snprintf(t,256,"vec4(dot((%s).xyz,(%s).xyz))",S(1),S(2));t;}));
         else if(!strcmp(n,"dp4")) line=dg_asg(&ctx,&o[0],({char*t=dg_pool();snprintf(t,256,"vec4(dot(%s,%s))",S(1),S(2));t;}));
@@ -334,8 +341,8 @@ char* dg_emit(const char*stage,const DgSig*isgn,int ni,const DgSig*osgn,int no,D
         else if(!strcmp(n,"eq")||!strcmp(n,"ieq")) line=dg_asg(&ctx,&o[0],({char*t=dg_pool();snprintf(t,256,"vec4(equal(vec4(%s),vec4(%s)))",S(1),S(2));t;}));
         else if(!strcmp(n,"lt")||!strcmp(n,"ilt")) line=dg_asg(&ctx,&o[0],({char*t=dg_pool();snprintf(t,256,"vec4(lessThan(vec4(%s),vec4(%s)))",S(1),S(2));t;}));
         else if(!strcmp(n,"ge")||!strcmp(n,"ige")) line=dg_asg(&ctx,&o[0],({char*t=dg_pool();snprintf(t,256,"vec4(greaterThanEqual(vec4(%s),vec4(%s)))",S(1),S(2));t;}));
-        else if(!strcmp(n,"sample")) line=dg_asg(&ctx,&o[0],({char*t=dg_pool();snprintf(t,256,"texture(t%u,(%s).xy)",(unsigned)TX(2),S(1));t;}));
-        else if(!strcmp(n,"sample_l")) line=dg_asg(&ctx,&o[0],({char*t=dg_pool();snprintf(t,256,"textureLod(t%u,(%s).xy,(%s).x)",(unsigned)TX(2),S(1),S(4));t;}));
+        else if(!strcmp(n,"sample")) line=dg_asg(&ctx,&o[0],({char*t=dg_pool();snprintf(t,256,"texture(t%u,(%s).xy).%s",(unsigned)TX(2),S(1),RSW(2));t;}));
+        else if(!strcmp(n,"sample_l")) line=dg_asg(&ctx,&o[0],({char*t=dg_pool();snprintf(t,256,"textureLod(t%u,(%s).xy,(%s).x).%s",(unsigned)TX(2),S(1),S(4),RSW(2));t;}));
         else if(!strcmp(n,"sample_c")||!strcmp(n,"sample_c_lz")) line=dg_asg(&ctx,&o[0],({char*t=dg_pool();snprintf(t,256,"vec4(texture(t%u,(%s).xy).r >= (%s).x ?1.0:0.0)",(unsigned)TX(2),S(1), nopn>4?S(4):"vec4(0.5)");t;}));
         else dg_lprintf(&L,"  // UNTRANSLATED: %s",n);
         if(line) dg_lpush(&L,line);
@@ -343,6 +350,7 @@ char* dg_emit(const char*stage,const DgSig*isgn,int ni,const DgSig*osgn,int no,D
     #undef S
     #undef SI
     #undef TX
+    #undef RSW
     // --- safety passes: declare any referenced-but-undeclared identifier, then balance braces ---
     char*body=dg_join(&L);
     int has_t[256]={0},has_cb[256]={0},has_v[256]={0},has_o[256]={0},has_r[256]={0};
