@@ -15,17 +15,20 @@ typedef struct {
     uint32_t tg[3];   // numthreads
     uint32_t uavstride[8], srvstride[32];
     int ok; const char* why;
+    int usestex;      // has sample*/ld instructions (textures are decoded per dispatch only then)
+    uint32_t* icb; int icbn;   // this program's immediate constant buffer (g_icb is shared with the GLSL translator)
 } CsProg;
 
 typedef struct {
     const uint8_t* cb[16]; uint32_t cbsz[16];   // constant buffer bytes
     D3DObj* srv[32]; D3DObj* uav[8]; D3DObj* samp[16];
+    const float* tpx[32]; int tw[32], th[32];   // SRV textures decoded to RGBA32F once per dispatch (lock-free in threads)
 } CsCtx;
 
 static uint32_t cs_rd_u32(const uint8_t* p, uint64_t size, uint64_t off){ uint32_t v=0; if(off+4<=size) memcpy(&v,p+off,4); return v; }
 
 // ---- program preparation ----
-static void cs_free(CsProg* p){ if(!p) return; free(p->ins); free(p->jump); free(p); }
+static void cs_free(CsProg* p){ if(!p) return; free(p->ins); free(p->jump); free(p->icb); free(p); }
 static CsProg* cs_compile(const uint8_t* d, size_t len){
     CsProg* p=calloc(1,sizeof *p); if(!p) return 0;
     if(len<32||memcmp(d,"DXBC",4)){ p->why="not DXBC"; return p; }
@@ -34,6 +37,7 @@ static CsProg* cs_compile(const uint8_t* d, size_t len){
     if(!shex){ p->why="no SHEX"; return p; }
     p->ins=calloc(8192,sizeof(DgIns)); if(!p->ins){ p->why="oom"; return p; }
     g_icbn=0; dg_decode_program(d,len,shex,sz,p->ins,&p->nins,8192);
+    if(g_icbn>0){ p->icb=malloc((size_t)g_icbn*4); if(p->icb){ memcpy(p->icb,g_icb,(size_t)g_icbn*4); p->icbn=g_icbn; } }
     p->jump=calloc(p->nins+1,sizeof(int));
     int st[256], sp=0;           // control-flow stack of instruction indices
     int lst[64], lsp=0;          // loop stack
@@ -51,8 +55,11 @@ static CsProg* cs_compile(const uint8_t* d, size_t len){
         else if(op==22/*endloop*/){ if(sp){ int L=st[--sp]; p->jump[L]=i; p->jump[i]=L; } if(lsp) lsp--; }
         else if(op==2||op==3||op==7||op==8){ p->jump[i]=lsp?lst[lsp-1]:-1; }   // break/breakc/continue/continuec -> loop
         else if(op==76/*switch*/||op==6||op==10||op==23){ p->why="switch unsupported"; return p; }
+        if(op==72||op==69||op==74||op==45) p->usestex=1;
     }
     if(p->ntemps>4096||p->xtotal>65536){ p->why="too many registers"; return p; }
+    for(int i=0;i<p->nins;i++) for(int k=0;k<8;k++){ DgOp* o=&p->ins[i].ops[k]; char sw[5]; dg_swz(o,sw);
+        for(int c=0;c<4;c++) o->csw[c]=(uint8_t)(sw[c]=='x'?0:sw[c]=='y'?1:sw[c]=='z'?2:3); }
     p->ok=1; return p;
 }
 
@@ -94,8 +101,8 @@ static int cs_addr(int i,int n,uint32_t mode){ if(n<=0) return 0;
     if(mode==1){ i%=n; if(i<0) i+=n; return i; }                       // WRAP
     if(mode==2){ int p=2*n; i%=p; if(i<0) i+=p; return i<n?i:p-1-i; }  // MIRROR
     return i<0?0:(i>=n?n-1:i); }                                       // CLAMP/BORDER/MIRROR_ONCE
-static void cs_sample(D3DObj* t,D3DObj* s,float u,float v,float* out){
-    int W,H; const float* px=cs_tex_rgba(t,&W,&H); out[0]=out[1]=out[2]=0; out[3]=0; if(!px) return;
+static void cs_sample(const float* px,int W,int H,D3DObj* s,float u,float v,float* out){
+    out[0]=out[1]=out[2]=0; out[3]=0; if(!px) return;
     uint32_t au=1,av=1, filt=0x15; if(s&&s->stkind==4){ filt=s->sd[0]; au=s->sd[1]; av=s->sd[2]; }
     if(!(filt&0x14)){ int x=cs_addr((int)floorf(u*W),W,au), y=cs_addr((int)floorf(v*H),H,av); memcpy(out,px+((size_t)y*W+x)*4,16); return; }
     float fx=u*W-0.5f, fy=v*H-0.5f; int x0=(int)floorf(fx), y0=(int)floorf(fy); float ax=fx-x0, ay=fy-y0;
@@ -126,7 +133,7 @@ static CsV4 cs_src(CsThread* T,const DgOp* o,int isint){
         case T_IMM32: if(o->immn==1) v.u[0]=v.u[1]=v.u[2]=v.u[3]=o->imm[0]; else for(int k=0;k<4;k++) v.u[k]=o->imm[k]; break;
         case T_CB: { uint32_t b=o->nidx?o->idx[0].val:0; int32_t i=o->nidx>1?cs_relidx(T,&o->idx[1]):0;
             if(b<16 && T->c->cb[b] && i>=0 && (uint64_t)(i+1)*16<=T->c->cbsz[b]) memcpy(&v,T->c->cb[b]+(size_t)i*16,16); } break;
-        case T_ICB: { int32_t i=o->nidx?cs_relidx(T,&o->idx[0]):0; if(i>=0 && i*4+4<=g_icbn) memcpy(&v,&g_icb[i*4],16); } break;
+        case T_ICB: { int32_t i=o->nidx?cs_relidx(T,&o->idx[0]):0; if(i>=0 && i*4+4<=T->p->icbn) memcpy(&v,&T->p->icb[i*4],16); } break;
         case T_INDEXABLE_TEMP: { CsV4* p=cs_xref(T,o); if(p) v=*p; } break;
         case 32: v.u[0]=T->tid[0]; v.u[1]=T->tid[1]; v.u[2]=T->tid[2]; break;     // vThreadID
         case 33: v.u[0]=T->gid[0]; v.u[1]=T->gid[1]; v.u[2]=T->gid[2]; break;     // vThreadGroupID
@@ -134,7 +141,7 @@ static CsV4 cs_src(CsThread* T,const DgOp* o,int isint){
         case 35: v.u[0]=T->ltid[0]+T->ltid[1]*T->p->tg[0]+T->ltid[2]*T->p->tg[0]*T->p->tg[1]; v.u[1]=v.u[2]=v.u[3]=v.u[0]; break;
         default: break; }
     CsV4 s=v;
-    if(o->numc==2){ char sw[5]; dg_swz(o,sw); for(int k=0;k<4;k++) s.u[k]=v.u[sw[k]=='x'?0:sw[k]=='y'?1:sw[k]=='z'?2:3]; }
+    if(o->numc==2){ const uint8_t* sw=o->csw; s.u[0]=v.u[sw[0]]; s.u[1]=v.u[sw[1]]; s.u[2]=v.u[sw[2]]; s.u[3]=v.u[sw[3]]; }
     else if(o->numc==1){ s.u[1]=s.u[2]=s.u[3]=s.u[0]; }
     if(o->emod&2){ for(int k=0;k<4;k++){ if(isint) s.i[k]=s.i[k]<0?-s.i[k]:s.i[k]; else s.u[k]&=0x7fffffffu; } }
     if(o->emod&1){ for(int k=0;k<4;k++){ if(isint) s.i[k]=-s.i[k]; else s.u[k]^=0x80000000u; } }
@@ -156,11 +163,14 @@ static uint32_t cs_f2h(float f){ uint32_t b; memcpy(&b,&f,4); uint32_t s=(b>>16)
 // a structured/raw buffer view: resource + its byte stride
 static D3DObj* cs_res(D3DObj* view){ return (view&&view->data&&view->vkind)?(D3DObj*)view->data:view; }
 
-static int cs_exec_thread(CsThread* T){
+static long g_cs_instrs;   // executed-instruction counter (PELOAD_D3DGL_PROF; approximate when parallel)
+static int cs_exec_thread_i(CsThread* T,long*budget);
+static int cs_exec_thread(CsThread* T){ long budget=4000000; int rc=cs_exec_thread_i(T,&budget); g_cs_instrs+=4000000-budget; return rc; }
+static int cs_exec_thread_i(CsThread* T,long*budgetp){
     const CsProg* p=T->p; const DgIns* in=p->ins; int n=p->nins;
-    long budget=4000000;   // runaway guard
+    long budget=*budgetp;   // runaway guard
     for(int pc=0; pc<n; pc++){
-        if(--budget<0) return 0;
+        if(--budget<0){ *budgetp=budget; return 0; }
         const DgIns* I=&in[pc]; int op=I->op; const DgOp* o=I->ops; int sat=(op<88)&&((I->tok>>13)&1);
         #define F(k) cs_src(T,&o[k],0)
         #define U(k) cs_src(T,&o[k],1)
@@ -176,8 +186,8 @@ static int cs_exec_thread(CsThread* T){
         case 3: a=U(0); if((a.u[0]!=0)==(I->test!=0)){ int L=p->jump[pc]; if(L>=0) pc=p->jump[L]; } break;
         case 7: { int L=p->jump[pc]; if(L>=0) pc=L; } break;                                 // continue -> loop
         case 8: a=U(0); if((a.u[0]!=0)==(I->test!=0)){ int L=p->jump[pc]; if(L>=0) pc=L; } break;
-        case 62: return 1;
-        case 63: a=U(0); if((a.u[0]!=0)==(I->test!=0)) return 1; break;
+        case 62: *budgetp=budget; return 1;
+        case 63: a=U(0); if((a.u[0]!=0)==(I->test!=0)){ *budgetp=budget; return 1; } break;
         case 13: break;   // discard (n/a)
         // ---- float ALU ----
         case 0: a=F(1); b=F(2); for(int k=0;k<4;k++) r.f[k]=a.f[k]+b.f[k]; cs_dst(T,&o[0],r,sat); break;
@@ -250,7 +260,7 @@ static int cs_exec_thread(CsThread* T){
             else if(ro->type==T_RESOURCE){ if(reg<32){ res=cs_res(T->c->srv[reg]); stride=p->srvstride[reg]; } }
             a=U(1); uint64_t addr = op==167 ? (uint64_t)a.u[0]*stride + (b=U(2)).u[0] : a.u[0];
             CsV4 raw4; for(int k=0;k<4;k++) raw4.u[k]= res? cs_rd_u32(res->data,res->size,addr+4u*k) : 0;
-            char sw[5]; dg_swz(ro,sw); for(int k=0;k<4;k++) r.u[k]=raw4.u[sw[k]=='x'?0:sw[k]=='y'?1:sw[k]=='z'?2:3];
+            for(int k=0;k<4;k++) r.u[k]=raw4.u[ro->csw[k]];
             cs_dst(T,&o[0],r,0); } break;
         case 168: case 166: {   // store_structured u#.mask, idx, byteoff, src  |  store_raw u#.mask, byteaddr, src
             uint32_t reg=o[0].nidx?o[0].idx[0].val:0; if(reg>=8) break; D3DObj* res=cs_res(T->c->uav[reg]); if(!res||!res->data) break;
@@ -261,31 +271,31 @@ static int cs_exec_thread(CsThread* T){
             } break;
         case 72: case 69: case 74: {   // sample_l / sample / sample_b dst, uv, t#, s#, lod  (mip 0, bilinear)
             a=F(1); uint32_t tr=o[2].nidx?o[2].idx[0].val:0, sr=o[3].nidx?o[3].idx[0].val:0;
-            D3DObj* t=tr<32?cs_res(T->c->srv[tr]):0; D3DObj* s=sr<16?T->c->samp[sr]:0;
-            float px[4]; cs_sample(t,s,a.f[0],a.f[1],px); CsV4 v; memcpy(&v,px,16);
-            char sw[5]; dg_swz(&o[2],sw); for(int k=0;k<4;k++) r.u[k]=v.u[sw[k]=='x'?0:sw[k]=='y'?1:sw[k]=='z'?2:3];
+            D3DObj* s=sr<16?T->c->samp[sr]:0;
+            float px[4]; if(tr<32) cs_sample(T->c->tpx[tr],T->c->tw[tr],T->c->th[tr],s,a.f[0],a.f[1],px); else memset(px,0,sizeof px); CsV4 v; memcpy(&v,px,16);
+            for(int k=0;k<4;k++) r.u[k]=v.u[o[2].csw[k]];
             cs_dst(T,&o[0],r,sat); } break;
         case 45: {   // ld dst, int addr, t#
-            a=U(1); uint32_t tr=o[2].nidx?o[2].idx[0].val:0; D3DObj* t=tr<32?cs_res(T->c->srv[tr]):0; int W,H; const float* px=t?cs_tex_rgba(t,&W,&H):0;
+            a=U(1); uint32_t tr=o[2].nidx?o[2].idx[0].val:0; int W=tr<32?T->c->tw[tr]:0,H=tr<32?T->c->th[tr]:0; const float* px=tr<32?T->c->tpx[tr]:0;
             CsV4 v; memset(&v,0,sizeof v); if(px && a.i[0]>=0 && a.i[1]>=0 && a.i[0]<W && a.i[1]<H) memcpy(&v,px+((size_t)a.i[1]*W+a.i[0])*4,16);
-            char sw[5]; dg_swz(&o[2],sw); for(int k=0;k<4;k++) r.u[k]=v.u[sw[k]=='x'?0:sw[k]=='y'?1:sw[k]=='z'?2:3];
+            for(int k=0;k<4;k++) r.u[k]=v.u[o[2].csw[k]];
             cs_dst(T,&o[0],r,sat); } break;
         default:
             if(op>=88 && op<=106) break;       // declarations
             if(op==53||op==58||op>=143) break; // customdata, nop, SM5 dcls
-            return -op;                        // unsupported instruction
+            *budgetp=budget; return -op;       // unsupported instruction
         }
         #undef F
         #undef U
     }
-    return 1; }
+    *budgetp=budget; return 1; }
 
 // Run Dispatch(gx,gy,gz). Returns threads run, or <0 = -opcode of an unsupported instruction.
 // Threads are independent (no group-shared memory in these kernels), so the thread range is split into
 // chunks that can run in parallel with GCD (PELOAD_CS_PARALLEL; measured no gain for 64-thread dispatches,
 // so serial is the default). Each chunk has its own registers.
 #include <dispatch/dispatch.h>
-typedef struct { CsProg* p; CsCtx* c; uint32_t gx,gy,gz; uint64_t total; uint32_t chunks; volatile long ran; volatile long bad; } CsJob;
+typedef struct { CsProg* p; CsCtx* c; uint32_t gx,gy,gz; uint64_t total; uint32_t chunks; volatile long ran; volatile long bad; long tmax,tsum,tbusy; } CsJob;
 static void cs_chunk(void* ctx,size_t ci){
     CsJob* J=ctx; CsProg* p=J->p; uint64_t per=(J->total+J->chunks-1)/J->chunks, lo=ci*per, hi=lo+per; if(hi>J->total) hi=J->total; if(lo>=hi) return;
     int nr=p->ntemps>0?p->ntemps:1; CsV4* r=calloc((size_t)nr,sizeof(CsV4)); CsV4* x=calloc((size_t)(p->xtotal>0?p->xtotal:1),sizeof(CsV4)); if(!r||!x){ free(r); free(x); return; }
@@ -298,15 +308,20 @@ static void cs_chunk(void* ctx,size_t ci){
         T.gid[0]=gi; T.gid[1]=gj; T.gid[2]=gk; T.ltid[0]=li; T.ltid[1]=lj; T.ltid[2]=lk;
         T.tid[0]=gi*p->tg[0]+li; T.tid[1]=gj*p->tg[1]+lj; T.tid[2]=gk*p->tg[2]+lk;
         memset(r,0,(size_t)nr*sizeof(CsV4));
-        int rc=cs_exec_thread(&T); if(rc<0){ J->bad=rc; break; } __sync_fetch_and_add(&J->ran,1); }
+        long before=g_cs_instrs;
+        int rc=cs_exec_thread(&T); if(rc<0){ J->bad=rc; break; } __sync_fetch_and_add(&J->ran,1);
+        { static int ts=-1; if(ts<0) ts=getenv("PELOAD_CS_THRSTAT")?1:0; if(ts){ long d=g_cs_instrs-before; if(d>J->tmax) J->tmax=d; J->tsum+=d; if(d>8) J->tbusy++; } } }
     free(r); free(x); }
 static long cs_dispatch(CsProg*p,CsCtx*c,uint32_t gx,uint32_t gy,uint32_t gz){
     if(!p||!p->ok) return 0;
     CsJob J; memset(&J,0,sizeof J); J.p=p; J.c=c; J.gx=gx?gx:1; J.gy=gy?gy:1; J.gz=gz?gz:1;
     J.total=(uint64_t)J.gx*J.gy*J.gz*p->tg[0]*p->tg[1]*p->tg[2];
+    for(int i=0;i<32;i++){ c->tpx[i]=0; c->tw[i]=c->th[i]=0; D3DObj* t=cs_res(c->srv[i]);
+        if(t && t->kind>=2 && t->kind<=4 && t->w && p->usestex) c->tpx[i]=cs_tex_rgba(t,&c->tw[i],&c->th[i]); }
     static int serial=-1; if(serial<0) serial=getenv("PELOAD_CS_PARALLEL")?0:1;   // 64-thread dispatches: GCD fan-out costs more than it saves
     J.chunks = serial||J.total<32 ? 1 : (uint32_t)(J.total/16 < 8 ? J.total/16 : 8);
     if(J.chunks<=1){ J.chunks=1; cs_chunk(&J,0); }
     else dispatch_apply_f(J.chunks,dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE,0),&J,cs_chunk);
+    { static int n; if(getenv("PELOAD_CS_THRSTAT") && n++<40){ char m[200]; int k=snprintf(m,sizeof m,"  [cs-thr] prog %p nins %d threads %llu: instrs sum %ld max/thread %ld busy threads %ld\n",(void*)p,p->nins,(unsigned long long)J.total,J.tsum,J.tmax,J.tbusy); (void)!write(2,m,k); } }
     if(J.bad) return J.bad;
     return J.ran; }

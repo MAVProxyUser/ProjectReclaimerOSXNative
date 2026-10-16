@@ -785,6 +785,7 @@ typedef struct { void** vtbl; uint32_t kind; uint32_t rowpitch; uint64_t size; v
     unsigned shc_id[4]; uint64_t shc_mask[4]; int shc_n; // shader: compiled GL shaders per interface-padding mask
     void* canon;                  // shader: first-created object with identical bytecode (programs are keyed by it)
     uint32_t intin; int intin_ok; // VS: input registers declared uvec4/ivec4 (integer vertex attributes)
+    volatile int cs_pending;      // buffer: queued async compute jobs that write it (wait before reading its CPU copy)
     unsigned glq; int qstate; uint64_t qval; // query: GL query object, 0 idle / 1 begun / 2 ended, cached result (timestamps)
 } D3DObj;
 // ID3D11DeviceChild private data: halo3 stashes the VS bytecode-blob pointer on the shader object
@@ -1248,10 +1249,12 @@ static uint32_t MSABI dev_GetExceptionMode(void*t){ (void)t; return 0; }
 // ---- ID3D11DeviceContext: Map returns a real buffer; everything else no-op/0 ----
 static int  MSABI ctx_ret0(void){ return 0; }                            // safe for void + HRESULT + UINT returns
 static uint64_t g_cb_tick;           // advances each present; marks CB freshness for view-proj auto-detect
+static void cs_wait_res(D3DObj*r); static void cs_wait_view(void*v); // fwd (async compute)
 // PELOAD_D3DGL_FRAMESTAT: per-frame counters, one log line per engine Present (diagnosing one-frame glitches)
 static struct { unsigned exec, novsps, noglsl, noprog, ringfail, wraps, disp, copies, maps, mapread, upd, clears; } g_fs;
 static int  MSABI ctx_Map(void*t,void*res,uint32_t sub,uint32_t type,uint32_t fl,void*pM){ (void)t;(void)sub;(void)type;(void)fl;
     g_fs.maps++; if(type==1||type==3) g_fs.mapread++;
+    cs_wait_res((D3DObj*)res);
     D3DObj*o=res; if(o){ o->gl_dirty=1; o->rvalid=0; o->ver++; if(o->is_cb) o->cb_upd=g_cb_tick; }   // mapped for write -> re-upload + mark CB fresh
     extern D3DObj* g_last_smallcb; if(o && o->is_cb && o->size>=32 && o->size<=96) g_last_smallcb=o;  // candidate decompress cb1
     if(o && getenv("PELOAD_TRACE_TEXPATH") && o->w>=512 && o->h>=512 && ((o->fmt>=70&&o->fmt<=84)||(o->fmt>=94&&o->fmt<=99))){ char m[128]; int k=snprintf(m,sizeof m,"  [texpath] MAP sub=%u type=%u %ux%u f%u obj=%p\n",sub,type,o->w,o->h,o->fmt,(void*)o); (void)!write(2,m,k); }
@@ -1315,6 +1318,7 @@ static void MSABI ctx_DrawIndexed(void*t,uint32_t n,uint32_t s,int b){ (void)t;(
 static void MSABI ctx_Draw(void*t,uint32_t n,uint32_t s){ (void)t;(void)s; d3dtrace(0,"Draw"); draw_caller("Draw",__builtin_return_address(0),n); draw_log("draw",n); d3d_capture_frame(n); if(d3dgl_enabled()) d3dgl_draw(n,0,1,s,0,0); }
 static void MSABI ctx_UpdateSubresource(void*t,void*res,uint32_t sub,const void*box,const void*src,uint32_t srp,uint32_t sdp){
     (void)t; D3DObj*o=res; if(!o||!o->data||!src) return;
+    cs_wait_res(o);
     o->gl_dirty=1; o->rvalid=0; o->ver++; if(o->is_cb) o->cb_upd=g_cb_tick;
     { extern D3DObj* g_last_smallcb; if(o->is_cb && o->size>=32 && o->size<=96) g_last_smallcb=o; }
     // MUST honor pDstBox: a partial (box) update supplies a source sized only for the box. Reading the
@@ -1348,13 +1352,13 @@ static void copy_trace(const char*what,D3DObj*dst,D3DObj*src){ if(dst&&src) flog
     (void)!write(2,m,k); }
 static void d3dgl_ensure_rt(D3DObj*o); static int d3dgl_ensure(void); // fwd
 static int d3dgl_gpu_copy(D3DObj*dst,D3DObj*src,uint32_t sx,uint32_t sy,uint32_t sw,uint32_t sh,uint32_t dx,uint32_t dy); // fwd (impl after the GL table)
-static void MSABI ctx_CopyResource(void*t,void*dst,void*src){ (void)t; D3DObj*a=dst,*b=src; g_fs.copies++; copy_trace("CopyResource",a,b); if(a) a->ver++;
+static void MSABI ctx_CopyResource(void*t,void*dst,void*src){ (void)t; D3DObj*a=dst,*b=src; g_fs.copies++; cs_wait_res(a); cs_wait_res(b); copy_trace("CopyResource",a,b); if(a) a->ver++;
     if(a&&b&&d3dgl_gpu_copy(a,b,0,0,b->w>4096?4096:b->w,b->h>4096?4096:b->h,0,0)) return; if(a&&b&&a->data&&b->data){ uint64_t n=a->size<b->size?a->size:b->size; memcpy(a->data,b->data,n); if(a)a->gl_dirty=1;
     if(getenv("PELOAD_TRACE_TEXPATH") && a->w>=512 && ((a->fmt>=70&&a->fmt<=84)||(a->fmt>=94&&a->fmt<=99))){ char m[128]; int k=snprintf(m,sizeof m,"  [texpath] COPYRES dst%ux%u f%u <- src%ux%u (%lluB)\n",a->w,a->h,a->fmt,b->w,b->h,(unsigned long long)n); (void)!write(2,m,k);} } }
 // CopySubresourceRegion(dst,dstSub,dstX,dstY,dstZ,src,srcSub,pSrcBox). Was a no-op -> 12k/frame copies
 // (texture staging / composite steps) were dropped. Implement the CPU copy (full or box region).
 static void MSABI ctx_CopySubresourceRegion(void*t,void*dstR,uint32_t dstSub,uint32_t dstX,uint32_t dstY,uint32_t dstZ,void*srcR,uint32_t srcSub,const void*srcBox){
-    (void)t; D3DObj*dst=dstR,*src=srcR; copy_trace("CopySubresourceRegion",dst,src); if(dst) dst->ver++;
+    (void)t; D3DObj*dst=dstR,*src=srcR; cs_wait_res(dst); cs_wait_res(src); copy_trace("CopySubresourceRegion",dst,src); if(dst) dst->ver++;
     if(dst&&src&&srcSub==0&&dstSub==0&&src->glfbo){ const uint32_t*bx=srcBox; uint32_t l=bx?bx[0]:0,tp=bx?bx[1]:0,r=bx?bx[3]:src->w,bt=bx?bx[4]:src->h;
         if(r>l&&bt>tp&&d3dgl_gpu_copy(dst,src,l,tp,r-l,bt-tp,dstX,dstY)) return; }
     if(!dst||!src||!dst->data||!src->data) return;
@@ -1403,12 +1407,52 @@ static void cscensus(const char*what,uint32_t a,uint32_t b,uint32_t c){ if(!gete
 // Dispatch -> run the compute shader on the CPU (dxbc_cpu.c) over the CPU copies of its buffers; written UAV
 // buffers get a new version so their GL texture-buffer copies refresh before the particle draws read them.
 static void MSABI ctx_Begin(void*t,void*a); static void MSABI ctx_End(void*t,void*a); static int MSABI ctx_GetData(void*t,void*a,void*data,uint32_t size,uint32_t flags); // fwd (queries)
+// ---- asynchronous compute: Dispatch queues the CPU kernel on a worker thread so the particle simulation
+// overlaps the opaque draws; the render thread waits only where it touches a buffer a queued job writes
+// (texture-buffer upload for the particle draws, Map/Update/Copy/Clear). Constant buffers and read-only
+// structured buffers are snapshotted at Dispatch time (the game rewrites them for the next dispatch).
+// PELOAD_CS_SYNC runs every dispatch inline (old behaviour).
+typedef struct CsQJob { CsProg*p; CsCtx cx; uint32_t a,b,c; void*own[64]; int nown; D3DObj* uavres[8]; struct CsQJob*next; } CsQJob;
+static pthread_mutex_t g_csq_mx=PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_csq_cv=PTHREAD_COND_INITIALIZER, g_csq_done=PTHREAD_COND_INITIALIZER;
+static CsQJob *g_csq_head,*g_csq_tail; static volatile int g_csq_n; static int g_csq_started;
+static void* csq_worker(void*arg){ (void)arg;
+    for(;;){ pthread_mutex_lock(&g_csq_mx); while(!g_csq_head) pthread_cond_wait(&g_csq_cv,&g_csq_mx); CsQJob*j=g_csq_head; pthread_mutex_unlock(&g_csq_mx);
+        uint64_t t0=prof_on()?prof_now():0;
+        long rc=cs_dispatch(j->p,&j->cx,j->a,j->b,j->c);
+        if(t0){ static uint64_t acc,nn,lacc,lins; acc+=prof_now()-t0; if((++nn%200)==0){ char m[160]; long ins=g_cs_instrs; int k=snprintf(m,sizeof m,"  [cs-cpu] %llu dispatches (async), last 200: %.1f us/dispatch, %.0f instrs/dispatch\n",(unsigned long long)nn,(acc-lacc)/1e3/200,(ins-lins)/200.0); (void)!write(2,m,k); lacc=acc; lins=ins; } }
+        if(rc<0){ static int warned; if(warned++<8){ char m[120]; int k=snprintf(m,sizeof m,"  [cs-cpu] unsupported opcode %ld\n",-rc); (void)!write(2,m,k); } }
+        pthread_mutex_lock(&g_csq_mx); g_csq_head=j->next; if(!g_csq_head) g_csq_tail=0; g_csq_n--;
+        for(int i=0;i<8;i++) if(j->uavres[i]) j->uavres[i]->cs_pending--;
+        pthread_cond_broadcast(&g_csq_done); pthread_mutex_unlock(&g_csq_mx);
+        for(int i=0;i<j->nown;i++) free(j->own[i]); free(j); }
+    return 0; }
+static void cs_wait_res(D3DObj*r){ if(!r||!r->cs_pending) return; uint64_t t0=prof_on()?prof_now():0;
+    pthread_mutex_lock(&g_csq_mx); while(r->cs_pending) pthread_cond_wait(&g_csq_done,&g_csq_mx); pthread_mutex_unlock(&g_csq_mx);
+    if(t0){ static uint64_t acc,nn; acc+=prof_now()-t0; if((++nn%500)==0){ char m[100]; int k=snprintf(m,sizeof m,"  [cs-cpu] render thread waited %.0f us avg (%llu waits)\n",acc/1e3/nn,(unsigned long long)nn); (void)!write(2,m,k); } } }
+static void cs_wait_view(void*v){ D3DObj*o=v; if(!o) return; cs_wait_res(o); if(o->vkind&&o->data) cs_wait_res((D3DObj*)o->data); }
+static int cs_async(void){ static int a=-1; if(a<0) a=getenv("PELOAD_CS_SYNC")?0:1; return a; }
 static void MSABI ctx_Dispatch(void*t,uint32_t a,uint32_t b,uint32_t c){ (void)t; d3dtrace(7,"Dispatch"); g_fs.disp++; cscensus("Dispatch",a,b,c);
     D3DObj*cs=g_cs.cs; if(!cs||!cs->bc||getenv("PELOAD_NOCSCPU")) return;
     if(!cs->csprog){ CsProg*p=cs_compile(cs->bc,cs->bclen); cs->csprog=p;
         char m[200]; int k=snprintf(m,sizeof m,"  [cs-cpu] compiled cs %p (%u B): %s, %d instrs, temps %d, numthreads(%u,%u,%u)\n",(void*)cs,cs->bclen,p&&p->ok?"ok":(p?p->why:"oom"),p?p->nins:0,p?p->ntemps:0,p?p->tg[0]:0,p?p->tg[1]:0,p?p->tg[2]:0); (void)!write(2,m,k); }
     CsProg*p=cs->csprog; if(!p||!p->ok) return;
     if((uint64_t)a*b*c*p->tg[0]*p->tg[1]*p->tg[2] > (1u<<20)) return;   // runaway guard
+    if(cs_async()){
+        CsQJob*j=calloc(1,sizeof *j); if(!j) return; j->p=p; j->a=a; j->b=b; j->c=c;
+        for(int i=0;i<16;i++){ D3DObj*cb=g_cs.cb[i]; if(cb&&cb->data&&cb->size){ uint64_t off=(uint64_t)g_cs.cbfirst[i]*16; if(off>=cb->size) off=0;
+                uint64_t n=cb->size-off; if(n>65536) n=65536; uint8_t*cp=malloc(n); if(!cp||j->nown>=64){ free(cp); continue; } memcpy(cp,(const uint8_t*)cb->data+off,n); j->own[j->nown++]=cp; j->cx.cb[i]=cp; j->cx.cbsz[i]=(uint32_t)n; } }
+        for(int i=0;i<32;i++){ D3DObj*v=g_cs.srv[i]; if(!v) continue; D3DObj*r=(v->data&&v->vkind)?(D3DObj*)v->data:v; j->cx.srv[i]=v;
+            if(r && r->kind==1 && r->data && r->size && r->size<=(8u<<20) && !r->cs_pending && j->nown<62){   // read-only buffer: snapshot
+                D3DObj*sh=malloc(sizeof(D3DObj)); uint8_t*d=malloc(r->size); if(!sh||!d){ free(sh); free(d); continue; }
+                *sh=*r; sh->vkind=0; sh->data=d; memcpy(d,r->data,r->size); j->own[j->nown++]=sh; j->own[j->nown++]=d; j->cx.srv[i]=sh; } }
+        for(int i=0;i<16;i++) j->cx.samp[i]=g_cs.samp[i];
+        pthread_mutex_lock(&g_csq_mx);
+        for(int i=0;i<8;i++){ D3DObj*v=g_cs.uav[i]; j->cx.uav[i]=v; D3DObj*r=(v&&v->data&&v->vkind)?(D3DObj*)v->data:v;
+            if(r){ r->cs_pending++; j->uavres[i]=r; r->ver++; r->gl_dirty=1; r->rvalid=0; } }
+        if(g_csq_tail) g_csq_tail->next=j; else g_csq_head=j; g_csq_tail=j; g_csq_n++;
+        if(!g_csq_started){ g_csq_started=1; pthread_t th; pthread_attr_t at; pthread_attr_init(&at); pthread_attr_set_qos_class_np(&at,QOS_CLASS_USER_INTERACTIVE,0); pthread_create(&th,&at,csq_worker,0); }
+        pthread_cond_signal(&g_csq_cv); pthread_mutex_unlock(&g_csq_mx);
+        return; }
     CsCtx cx; memset(&cx,0,sizeof cx);
     for(int i=0;i<16;i++){ D3DObj*cb=g_cs.cb[i]; if(cb&&cb->data&&cb->size){ uint64_t off=(uint64_t)g_cs.cbfirst[i]*16; if(off>=cb->size) off=0; cx.cb[i]=(const uint8_t*)cb->data+off; cx.cbsz[i]=(uint32_t)(cb->size-off); } }
     for(int i=0;i<32;i++) cx.srv[i]=g_cs.srv[i];
@@ -1416,7 +1460,7 @@ static void MSABI ctx_Dispatch(void*t,uint32_t a,uint32_t b,uint32_t c){ (void)t
     for(int i=0;i<16;i++) cx.samp[i]=g_cs.samp[i];
     uint64_t t0=prof_on()?prof_now():0;
     long rc=cs_dispatch(p,&cx,a,b,c);
-    if(t0){ static uint64_t acc,nn; acc+=prof_now()-t0; if((++nn%200)==0){ char m[120]; int k=snprintf(m,sizeof m,"  [cs-cpu] %llu dispatches, avg %.1f us\n",(unsigned long long)nn,acc/1e3/nn); (void)!write(2,m,k); } }
+    if(t0){ static uint64_t acc,nn,lacc,lins; acc+=prof_now()-t0; if((++nn%200)==0){ char m[160]; long ins=g_cs_instrs; int k=snprintf(m,sizeof m,"  [cs-cpu] %llu dispatches, avg %.1f us | last 200: %.1f us/dispatch, %.0f instrs/dispatch, %.1f ns/instr\n",(unsigned long long)nn,acc/1e3/nn,(acc-lacc)/1e3/200,(ins-lins)/200.0,(ins-lins)?(double)(acc-lacc)/(double)(ins-lins):0.0); (void)!write(2,m,k); lacc=acc; lins=ins; } }
     if(rc<0){ static int warned; if(warned++<8){ char m[120]; int k=snprintf(m,sizeof m,"  [cs-cpu] unsupported opcode %ld in cs %p\n",-rc,(void*)cs); (void)!write(2,m,k); } return; }
     for(int i=0;i<8;i++){ D3DObj*v=g_cs.uav[i]; D3DObj*r=(v&&v->data&&v->vkind)?(D3DObj*)v->data:v; if(r){ r->ver++; r->gl_dirty=1; r->rvalid=0; } } }
 static void MSABI ctx_DispatchIndirect(void*t,void*args,uint32_t off){ (void)t;(void)args; cscensus("DispatchIndirect",off,0,0); }
@@ -1430,6 +1474,7 @@ static void MSABI ctx_CSSetConstantBuffers1(void*t,uint32_t st,uint32_t n,void*c
     for(uint32_t i=0;i<n&&st+i<16;i++){ g_cs.cb[st+i]=v?(D3DObj*)v[i]:0; g_cs.cbfirst[st+i]=first?first[i]:0; } }
 // ClearUnorderedAccessView{Uint,Float} on buffers (particle pools are reset this way)
 static void cs_clear_uav(void*view,uint32_t v0){ D3DObj*v=view; D3DObj*r=(v&&v->data&&v->vkind)?(D3DObj*)v->data:v; if(!r||!r->data||r->kind!=1) return;
+    cs_wait_res(r);
     uint32_t*d=(uint32_t*)r->data; for(uint64_t i=0;i<r->size/4;i++) d[i]=v0; r->ver++; r->gl_dirty=1; r->rvalid=0; }
 static void MSABI ctx_ClearUAVUint(void*t,void*uav,const uint32_t*vals){ (void)t; cs_clear_uav(uav,vals?vals[0]:0); }
 static void MSABI ctx_ClearUAVFloat(void*t,void*uav,const float*vals){ (void)t; uint32_t b=0; if(vals) memcpy(&b,vals,4); cs_clear_uav(uav,b); }
@@ -4477,6 +4522,7 @@ static void d3dgl_scan_tt(const char*src,signed char*tt){ d3dgl_scan_tt_p(src,tt
 // re-uploaded whenever the D3D buffer's version changed (CPU compute / Map / Update)
 static void d3dgl_ensure_tbo(D3DObj*o){
     if(!G.TexBuffer||!o->data||!o->size) return;
+    cs_wait_res(o);
     if(!o->gltbobuf) G.GenBuffers(1,&o->gltbobuf);
     if(!o->tbook || o->tbover!=o->ver){ G.BindBuffer(0x8C2A,o->gltbobuf); G.BufferData(0x8C2A,(long)((o->size+15)&~15ull),0,0x88E8); G.BufferSubData(0x8C2A,0,(long)o->size,o->data); o->tbover=o->ver; o->tbook=1; }
     if(!o->gltbo){ TEXCACHE_INVALIDATE(); G.GenTextures(1,&o->gltbo); G.BindTexture(0x8C2A,o->gltbo); G.TexBuffer(0x8C2A,0x8236/*R32UI*/,o->gltbobuf); } }
@@ -5034,6 +5080,7 @@ static void d3dgl_buf_need(D3DObj*b,unsigned target,uint64_t lo,uint64_t hi){
     uint64_t t=prof_now(); int was=b->gl_dirty||!b->glbuf; d3dgl_buf_need_i(b,target,lo,hi); g_vx_ns[target==GLE_ELEM?1:0]+=prof_now()-t;
     if(was){ g_vx_bytes+=hi>lo?hi-lo:0; g_vx_calls++; } }
 static void d3dgl_buf_need_i(D3DObj*b,unsigned target,uint64_t lo,uint64_t hi){
+    cs_wait_res(b);
     uint64_t cap=b->size; if(cap>(96ull<<20)) cap=96ull<<20;
     if(!b->glbuf){ G.GenBuffers(1,&b->glbuf); G.BindBuffer(target,b->glbuf); G.BufferData(target,(long)cap,b->data,GLE_STREAM); b->gl_dirty=0; b->rvalid=0; return; }
     G.BindBuffer(target,b->glbuf);
@@ -5369,7 +5416,7 @@ static void d3dgl_draw_impl(uint32_t vcount,int indexed,uint32_t instcount,uint3
             if(use_ring && !inst && stride){
                 int covered = sb->glbuf && (!sb->gl_dirty || (sb->rvalid && lo>=sb->rlo && hi<=sb->rhi));
                 if(!covered && sb->gl_dirty && hi<=sb->size && hi>lo && hi-lo<=(8u<<20)){
-                    if(ringoff[slot]==-2){ uint64_t _t=prof_on()?prof_now():0; ringoff[slot]=d3dgl_ring_put((const uint8_t*)sb->data+lo,hi-lo);
+                    if(ringoff[slot]==-2){ uint64_t _t=prof_on()?prof_now():0; cs_wait_res(sb); ringoff[slot]=d3dgl_ring_put((const uint8_t*)sb->data+lo,hi-lo);
                         if(_t){ g_vx_ns[3]+=prof_now()-_t; g_vx_calls++; g_vx_bytes+=hi-lo; } }
                     if(ringoff[slot]>=0){ G.BindBuffer(GLE_ARRAY,g_ring); aoff=(uint64_t)ringoff[slot]+il->elem[i].off; ringed=1; } } }
             if(!ringed){ d3dgl_buf_need(sb,GLE_ARRAY,lo,hi);   // also binds GL_ARRAY_BUFFER for the pointer below
@@ -5493,7 +5540,7 @@ static void d3dgl_draw_impl(uint32_t vcount,int indexed,uint32_t instcount,uint3
         uint64_t maxn=(boff<ib->size)?(ib->size-boff)/isz:0; if(n>maxn) n=(unsigned)maxn;
         // dynamic index data streams through the ring too (same NO_OVERWRITE upload stall as vertices)
         { uint64_t lo=boff, hi=boff+(uint64_t)n*isz; int covered = ib->glbuf && (!ib->gl_dirty || (ib->rvalid && lo>=ib->rlo && hi<=ib->rhi)); long ro=-1;
-          if(!covered && ib->gl_dirty && n && hi<=ib->size && !getenv("PELOAD_D3DGL_NORING") && !getenv("PELOAD_D3DGL_NORING_IB")){ uint64_t _t=prof_on()?prof_now():0; ro=d3dgl_ring_put((const uint8_t*)ib->data+lo,hi-lo); if(_t) g_vx_ns[1]+=prof_now()-_t; }
+          if(!covered && ib->gl_dirty && n && hi<=ib->size && !getenv("PELOAD_D3DGL_NORING") && !getenv("PELOAD_D3DGL_NORING_IB")){ uint64_t _t=prof_on()?prof_now():0; cs_wait_res(ib); ro=d3dgl_ring_put((const uint8_t*)ib->data+lo,hi-lo); if(_t) g_vx_ns[1]+=prof_now()-_t; }
           if(ro>=0){ G.BindBuffer(GLE_ELEM,g_ring); boff=(uint64_t)ro; }
           else d3dgl_buf_need(ib,GLE_ELEM,boff,boff+(uint64_t)n*isz); }
         // D3D11 strip topologies ALWAYS cut at the all-ones index; GL 4.1 needs PRIMITIVE_RESTART + the index,

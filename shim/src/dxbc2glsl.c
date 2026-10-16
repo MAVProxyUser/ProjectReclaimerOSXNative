@@ -38,6 +38,7 @@ typedef struct {
     int has_swz; int swz[4];
     int nidx; DgIdx idx[3];
     int has_imm; int immn; uint32_t imm[4];
+    uint8_t csw[4];   // dxbc_cpu: precomputed swizzle (component index per output lane), filled by cs_compile
 } DgOp;
 
 typedef struct { int op; const char*name; int test; int nop; DgOp ops[8]; uint32_t tok; int has_aoff; int aoff[3]; uint32_t raw[4]; } DgIns;
