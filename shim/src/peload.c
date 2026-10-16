@@ -3288,6 +3288,7 @@ static CGLContextObj g_cgl;
 #include <objc/message.h>
 typedef struct { double x,y,w,h; } NSRect_;
 static id g_nsapp, g_nswin, g_nsctx, g_nspf; extern id NSDefaultRunLoopMode;
+static volatile int g_win_pw, g_win_ph;   // current window drawable size (0 = not yet known)
 id g_nswin_ext(void){ return g_nswin; }
 extern void* objc_autoreleasePoolPush(void);
 static id ocls(const char*n){ return (id)objc_getClass(n); }
@@ -3313,6 +3314,7 @@ static CGLContextObj cocoa_make_gl_window(int w,int h){
     ((void(*)(id,SEL,id))objc_msgSend)(win,osel("center"),(id)0);
     // mouse-moved events (with deltas) are only delivered to windows that ask for them (keyboard/mouse input)
     ((void(*)(id,SEL,signed char))objc_msgSend)(win,osel("setAcceptsMouseMovedEvents:"),1);
+    ((void(*)(id,SEL,unsigned long))objc_msgSend)(win,osel("setCollectionBehavior:"),1ul<<7/*FullScreenPrimary: green button = full screen*/);
     if(getenv("PELOAD_NO_FOCUS")){
         // show the window WITHOUT making it key or activating our app, so it never
         // steals the user's keyboard/focus (used for background testing).
@@ -5460,14 +5462,19 @@ static int pq_present_wait(unsigned long*seen,int ms){
         unsigned v=G.CreateShader(GLE_VS),fr=G.CreateShader(GLE_FS); G.ShaderSource(v,1,&vs,0); G.CompileShader(v); G.ShaderSource(fr,1,&fs,0); G.CompileShader(fr);
         g_pq_prog=G.CreateProgram(); G.AttachShader(g_pq_prog,v); G.AttachShader(g_pq_prog,fr); G.LinkProgram(g_pq_prog); G.DeleteShader(v); G.DeleteShader(fr);
         g_pq_sloc=G.GetUniformLocation(g_pq_prog,"s"); G.GenVertexArrays(1,&g_pq_vao); }
-    G.BindFramebuffer(GLE_FBO,0); G.Viewport(0,0,g_d3dgl_W,g_d3dgl_H); G.Disable(0x0B71); G.Disable(0x0BE2); G.Disable(0x0C11); G.Disable(0x8DB9);
+    CGLContextObj pc=CGLGetCurrentContext(); if(pc) CGLLockContext(pc);
+    G.BindFramebuffer(GLE_FBO,0); G.Disable(0x0B71); G.Disable(0x0BE2); G.Disable(0x0C11); G.Disable(0x8DB9);
+    { int dw=g_win_pw>0?g_win_pw:g_d3dgl_W, dh=g_win_ph>0?g_win_ph:g_d3dgl_H;   // letterbox the frame's aspect into the window
+      double ar=(double)g_d3dgl_W/g_d3dgl_H; int vw=dw, vh=(int)(dw/ar+0.5); if(vh>dh){ vh=dh; vw=(int)(dh*ar+0.5); }
+      if(vw!=dw||vh!=dh){ G.Viewport(0,0,dw,dh); G.ClearColor(0,0,0,1); G.Clear(GLE_COLORBIT); }
+      G.Viewport((dw-vw)/2,(dh-vh)/2,vw,vh); }
     G.UseProgram(0); G.BindProgramPipeline(0); G.UseProgram(g_pq_prog);
     G.ActiveTexture(GLE_TEX0); G.BindTexture(GLE_TEX2D,g_pq_tex[slot]); if(G.BindSampler) G.BindSampler(0,0);
     if(g_pq_sloc>=0) G.ProgramUniform1i(g_pq_prog,g_pq_sloc,0);
-    G.BindVertexArray(g_pq_vao); G.DrawArrays(4,0,3); G.Flush();
+    G.BindVertexArray(g_pq_vao); G.DrawArrays(4,0,3); G.Flush(); if(pc) CGLUnlockContext(pc);
     pthread_mutex_lock(&g_pq_mx); g_pq_reading=-1; pthread_mutex_unlock(&g_pq_mx);
     if(getenv("PELOAD_D3DGL_SHOTWIN")){ static unsigned long bc; int every=atoi(getenv("PELOAD_D3DGL_SHOTWIN")); if(every<1)every=20;
-        if((bc++ % every)==0 && G.ReadPixels){ int w=g_d3dgl_W,h=g_d3dgl_H; unsigned char*cap=calloc(1,(size_t)w*h*4);
+        if((bc++ % every)==0 && G.ReadPixels){ int w=g_win_pw>0?g_win_pw:g_d3dgl_W,h=g_win_ph>0?g_win_ph:g_d3dgl_H; unsigned char*cap=calloc(1,(size_t)w*h*4);
             if(cap){ if(G.ReadBuffer)G.ReadBuffer(0x0405/*BACK*/); G.ReadPixels(0,0,w,h,GLE_RGBA,GLE_UBYTE,cap);
                 static int wn; const char*home=getenv("HOME"); char p[512]; snprintf(p,sizeof p,"%s/reclaimer_win_%d_%03d%s.bmp",home?home:"/tmp",(int)getpid(),wn++, getenv("PELOAD_D3DGL_ALT5")?((((long)(mono_s()/5.0))&1)?"_B":"_A"):"");
                 bmp_write_rgba(p,w,h,cap); free(cap); } } }
@@ -5873,7 +5880,7 @@ static void* present_thread_fn(void*a){ (void)a; void(*set)(void*)=dlsym(RTLD_DE
         if(getenv("PELOAD_TRACE_PRESENT")){ static int lp; if((lp++ %60)==0){ char m[96]; int k=snprintf(m,sizeof m,"  [present] branch=%s d3dgl(en=%d ready=%d off=%d tex=%u)\n",use_d3dgl?"d3dgl_blit":"gdi_main",d3dgl_enabled(),g_d3dgl_ready,g_d3dgl_offscreen,g_d3dgl_present_tex); (void)!write(2,m,k);} }
         static unsigned long pq_seen; int pq_shown=0;
         if(use_d3dgl && pq_on()){
-            if(pq_present_wait(&pq_seen,50)){ pq_shown=1; if(cglflush&&g_present_glctx) cglflush(g_present_glctx); }
+            if(pq_present_wait(&pq_seen,50)){ pq_shown=1; if(cglflush&&g_present_glctx){ CGLLockContext((CGLContextObj)g_present_glctx); cglflush(g_present_glctx); CGLUnlockContext((CGLContextObj)g_present_glctx); } }
             else if(!g_pq_seq){ d3dgl_blit_present(); if(cglflush&&g_present_glctx) cglflush(g_present_glctx); }   // nothing queued yet
         } else if(use_d3dgl){
             d3dgl_blit_present(); if(cglflush&&g_present_glctx) cglflush(g_present_glctx);
@@ -5906,7 +5913,15 @@ static void* cocoa_make_gl_window_i(int w,int h){ CGLContextObj c=cocoa_make_gl_
     return (void*)c; }
 static void cocoa_pump(void){ if(!g_nsapp) return;
     for(;;){ id ev=((id(*)(id,SEL,unsigned long,id,id,signed char))objc_msgSend)(g_nsapp,osel("nextEventMatchingMask:untilDate:inMode:dequeue:"),~0UL,(id)0,NSDefaultRunLoopMode,1);
-        if(!ev) break; if(wi_translate(ev)) continue; ((void(*)(id,SEL,id))objc_msgSend)(g_nsapp,osel("sendEvent:"),ev); } }
+        if(!ev) break; if(wi_translate(ev)) continue; ((void(*)(id,SEL,id))objc_msgSend)(g_nsapp,osel("sendEvent:"),ev); }
+    { const char*tr=getenv("PELOAD_TEST_RESIZE"); static int done; extern double g_gameplay_t0; if(tr && !done && g_gameplay_t0 && mono_s()-g_gameplay_t0>5 && g_nswin){ done=1; int tw=0,th=0; sscanf(tr,"%dx%d",&tw,&th);
+        if(tw>0&&th>0){ typedef struct { double w,h; } NSSize_; NSSize_ sz={(double)tw,(double)th}; ((void(*)(id,SEL,NSSize_))objc_msgSend)(g_nswin,osel("setContentSize:"),sz); } } }
+    // window resized / full screen: resize the GL drawable (main thread) and record the new size for present
+    if(g_nswin && g_nsctx){ id view=om0(g_nswin,"contentView"); NSRect_ b={0,0,0,0}; if(view) ((void(*)(NSRect_*,id,SEL))objc_msgSend_stret)(&b,view,osel("bounds"));   // x86_64: >16-byte struct returns need _stret
+        int pw=(int)b.w, ph=(int)b.h; if(pw>0 && ph>0 && (pw!=g_win_pw || ph!=g_win_ph)){
+            CGLContextObj c=(CGLContextObj)((void*(*)(id,SEL))objc_msgSend)(g_nsctx,osel("CGLContextObj"));
+            if(c) CGLLockContext(c); om0(g_nsctx,"update"); if(c) CGLUnlockContext(c);
+            g_win_pw=pw; g_win_ph=ph; } } }
 static int    MSABI i_ChoosePixelFormat(void*hdc,const void*pfd){ (void)hdc;(void)pfd; return 1; }
 static int    MSABI i_SetPixelFormat(void*hdc,int fmt,const void*pfd){ (void)hdc;(void)fmt;(void)pfd; return 1; }
 static int    MSABI i_GetPixelFormat(void*hdc){ (void)hdc; return 1; }

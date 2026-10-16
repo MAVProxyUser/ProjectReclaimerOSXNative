@@ -149,7 +149,7 @@ static int wi_translate(id ev){
         id win=((id(*)(id,SEL))objc_msgSend)(ev,sel_registerName("window"));
         if(win && !g_wi_captured){ typedef struct { double x,y; } P; P p=((P(*)(id,SEL))objc_msgSend)(ev,sel_registerName("locationInWindow"));
             id view=((id(*)(id,SEL))objc_msgSend)(win,sel_registerName("contentView")); typedef struct { double x,y,w,h; } R;
-            R b=view?((R(*)(id,SEL))objc_msgSend)(view,sel_registerName("bounds")):(R){0,0,WIN_W,WIN_H};
+            R b={0,0,WIN_W,WIN_H}; if(view) ((void(*)(R*,id,SEL))objc_msgSend_stret)(&b,view,sel_registerName("bounds"));   // x86_64: NSRect via _stret
             if(b.w>0&&b.h>0){ g_wi_cx=(int32_t)(p.x/b.w*WIN_W); g_wi_cy=(int32_t)((b.h-p.y)/b.h*WIN_H); } }
         uint64_t mk=(g_keydown[1]?1:0)|(g_keydown[2]?2:0)|(g_keydown[4]?0x10:0);
         wi_post(h,0x0200,mk,(int64_t)((uint32_t)(g_wi_cx&0xffff)|((uint32_t)(g_wi_cy&0xffff)<<16)));
