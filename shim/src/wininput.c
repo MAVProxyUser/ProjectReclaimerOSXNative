@@ -181,7 +181,9 @@ static int wi_translate(id ev){
 // mouse sweeps right, then release. Uses the same queue/raw-input path real NSEvents feed.
 extern double g_gameplay_t0, g_menu_ready_t0;
 static void* wi_test_thread(void*a){ (void)a;
-    while(!g_gameplay_t0 && !g_menu_ready_t0) usleep(100000);   // a match, or Reclaimer's frontend menu
+    // a match, or Reclaimer's frontend menu (PELOAD_KBM_TEST_GAMEPLAY=1: only a match, e.g. one joined from the menu)
+    int wait_match=getenv("PELOAD_KBM_TEST_GAMEPLAY")!=0;
+    while(!g_gameplay_t0 && (wait_match || !g_menu_ready_t0)) usleep(100000);
     usleep(3000000);
     void*h=fg_hwnd_ext(); char m[64]; int k;
     g_keydown[1]=1; wi_raw_mouse(0,0,0x1,0); wi_post(h,0x0201,1,(int64_t)((WIN_H/2)<<16|(WIN_W/2)));

@@ -221,14 +221,6 @@ static void (*p_glUniform2f)(int,float,float);
 static void __attribute__((ms_abi)) w_glUniform2f(int l,float a,float b){
     if(getenv("PELOAD_TRACE_UNIFORM")){ static int n; if(n++<6){ char m[96]; int k=snprintf(m,sizeof m,"  [glUniform2f] loc=%d (%g, %g)\n",l,a,b); (void)!write(2,m,k);
             if(n==1){ uint64_t*sp=(uint64_t*)__builtin_frame_address(0); int f=0; for(int i=0;i<3000&&f<16;i++){ uint64_t v=sp[i]; if(v>=0x140001000ULL&&v<0x141aae000ULL){ char b[48]; int q=snprintf(b,sizeof b,"     exe+0x%llx\n",(unsigned long long)(v-0x140000000ULL)); (void)!write(2,b,q); f++; } } } } }
-    // Reclaimer's egui painter receives pixels_per_point = <window width> (cause not found yet), so its
-    // u_screen_size arrives as (1, 0.5625) points while the tessellated vertices are laid out for 1280x720
-    // points: every widget lands off-screen and the frontend menu showed only its background. When the
-    // uniform being set is egui's u_screen_size and the value is implausibly small, use the viewport size
-    // (egui's own layout runs at 1 pixel per point). PELOAD_GL_NOFIXSCREEN disables.
-    { static int off=-1; if(off<0) off=getenv("PELOAD_GL_NOFIXSCREEN")?1:0;
-      if(!off && a>0 && a<16.0f && b>0 && b<16.0f){ int prog=0,vp[4]={0}; void(*gi)(unsigned,int*)=dlsym(RTLD_DEFAULT,"glGetIntegerv"); int(*gul)(unsigned,const char*)=dlsym(RTLD_DEFAULT,"glGetUniformLocation");
-        if(gi&&gul){ gi(0x8B8D,&prog); if(prog && gul((unsigned)prog,"u_screen_size")==l){ gi(0x0BA2,vp); if(vp[2]>=64 && vp[3]>=64){ a=(float)vp[2]; b=(float)vp[3]; } } } } }
     p_glUniform2f(l,a,b); }
 GLMIX(void,glUniform3f,(int l,float a,float b,float c),(l,a,b,c))
 GLMIX(void,glUniform4f,(int l,float a,float b,float c,float d),(l,a,b,c,d))
@@ -284,48 +276,45 @@ static void *make_gl_thunk(void *real){
     static pthread_mutex_t gtm=PTHREAD_MUTEX_INITIALIZER; pthread_mutex_lock(&gtm);
     for(int i=0;i<g_nthunk;i++) if(g_thunk_real[i]==real){ pthread_mutex_unlock(&gtm); return g_thunk_addr[i]; } // cache
     if(getenv("PELOAD_TRACE_GL")){ Dl_info di; if(dladdr(real,&di)&&di.dli_sname){ (void)!write(2,"  [thunk] ",10); (void)!write(2,di.dli_sname,strlen(di.dli_sname)); (void)!write(2,"\n",1); } }
+    // Win64 -> SysV ABI call stub, shared by every GL thunk (each thunk is `mov r11,real; jmp stub`).
+    // Win64 passes args1-4 in rcx/rdx/r8/r9 and args5+ on the stack above a 32-byte shadow area; SysV
+    // passes args1-6 in rdi/rsi/rdx/rcx/r8/r9 and args7+ on the stack. All 12 args are forwarded (an old
+    // 6-arg thunk dropped glReadPixels' 7th / glTexSubImage2D's 9th arg and the driver scribbled the heap).
+    // Registers that are callee-saved in Win64 but scratch in SysV must survive the call: rdi, rsi and
+    // xmm6-xmm15. Without the xmm saves, egui's painter (which keeps pixels_per_point in xmm6 across its
+    // GL calls) got 1280.0 back from a texture upload, so every clip rect collapsed and Reclaimer's server
+    // list and other scroll areas drew nothing. PELOAD_GL_NOXMMSAVE drops the xmm saves (A/B).
+    // Frame: rbp set before the pushes, so the caller's stack args are at ret@+8, shadow@+0x10..+0x28,
+    // arg5@+0x30, ...; [rsp+0x00..0x30) holds SysV args 7-12, [rsp+0x40..0xe0) the saved xmm6-15.
+    static uint8_t *stub;
+    if(!stub){
+        if(g_glthoff+512 > 128*8192){ pthread_mutex_unlock(&gtm); return real; }
+        uint8_t *q=g_glthunk+g_glthoff; g_glthoff+=512; int n=0; int savex=!getenv("PELOAD_GL_NOXMMSAVE");
+        #define EMIT(...) do{ const uint8_t b_[]={__VA_ARGS__}; memcpy(q+n,b_,sizeof b_); n+=(int)sizeof b_; }while(0)
+        #define XMM_RSP(op,r,disp) do{ q[n++]=0xF3; if((r)>=8) q[n++]=0x44; q[n++]=0x0F; q[n++]=(op); q[n++]=(uint8_t)(0x84|(((r)&7)<<3)); q[n++]=0x24; uint32_t d_=(disp); memcpy(q+n,&d_,4); n+=4; }while(0)
+        EMIT(0x55, 0x48,0x89,0xE5, 0x56, 0x57);                   // push rbp; mov rbp,rsp; push rsi; push rdi
+        EMIT(0x48,0x81,0xEC,0xE0,0x00,0x00,0x00);                 // sub rsp,0xe0 (keeps 16-byte alignment)
+        if(savex) for(int r=6;r<16;r++) XMM_RSP(0x7F,r,0x40+16*(r-6));   // movdqu [rsp+..],xmmN
+        EMIT(0x48,0x89,0xCF, 0x48,0x89,0xD6, 0x4C,0x89,0xC2, 0x4C,0x89,0xC9);   // rdi,rsi,rdx,rcx <- rcx,rdx,r8,r9
+        EMIT(0x4C,0x8B,0x45,0x30, 0x4C,0x8B,0x4D,0x38);           // r8,r9 <- arg5,arg6
+        EMIT(0x48,0x8B,0x45,0x40, 0x48,0x89,0x04,0x24);           // arg7  -> [rsp+0x00]
+        EMIT(0x48,0x8B,0x45,0x48, 0x48,0x89,0x44,0x24,0x08);      // arg8  -> [rsp+0x08]
+        EMIT(0x48,0x8B,0x45,0x50, 0x48,0x89,0x44,0x24,0x10);      // arg9  -> [rsp+0x10]
+        EMIT(0x48,0x8B,0x45,0x58, 0x48,0x89,0x44,0x24,0x18);      // arg10 -> [rsp+0x18]
+        EMIT(0x48,0x8B,0x45,0x60, 0x48,0x89,0x44,0x24,0x20);      // arg11 -> [rsp+0x20]
+        EMIT(0x48,0x8B,0x45,0x68, 0x48,0x89,0x44,0x24,0x28);      // arg12 -> [rsp+0x28]
+        EMIT(0x41,0xFF,0xD3);                                      // call r11
+        if(savex) for(int r=6;r<16;r++) XMM_RSP(0x6F,r,0x40+16*(r-6));   // movdqu xmmN,[rsp+..]
+        EMIT(0x48,0x8D,0x65,0xF0, 0x5F, 0x5E, 0x5D, 0xC3);        // lea rsp,[rbp-0x10]; pop rdi; pop rsi; pop rbp; ret
+        #undef EMIT
+        #undef XMM_RSP
+        sys_icache_invalidate(q,512); stub=q;
+    }
     if(g_glthoff+128 > 128*8192){ pthread_mutex_unlock(&gtm); return real; }
-    uint8_t *p=g_glthunk+g_glthoff; g_glthoff+=128; int o=0;
-    // Win64 -> SysV ABI thunk forwarding up to 12 args. Win64 passes args1-4 in
-    // rcx/rdx/r8/r9 and args5+ on the stack above a 32-byte shadow area; SysV
-    // passes args1-6 in rdi/rsi/rdx/rcx/r8/r9 and args7+ on the stack. The OLD
-    // 6-arg thunk dropped args7+, so e.g. glReadPixels' 7th arg (dst pointer) and
-    // glTexSubImage2D's 9th (pixels) were garbage -> the GL driver scribbled over
-    // the heap. This forwards all 12, so any >6-arg GL entry point is safe.
-    // NB: rdi and rsi are CALLEE-saved in the Win64 ABI (caller-saved in SysV),
-    // so we must save/restore them around the SysV call or the guest's rdi/rsi
-    // get trashed. rbp is set before the saves, so the rbp-relative offsets to the
-    // caller's Win64 stack args are: ret@+8, shadow@+0x10..+0x28, arg5@+0x30, ...
-    uint8_t code[]={
-        0x55,                               // push rbp
-        0x48,0x89,0xE5,                     // mov rbp,rsp
-        0x56,                               // push rsi   (Win64 callee-saved)
-        0x57,                               // push rdi   (Win64 callee-saved)
-        0x48,0x83,0xEC,0x40,                // sub rsp,0x40  (6 stack-arg slots; keeps 16-align)
-        0x48,0x89,0xCF,                     // mov rdi,rcx    (arg1)
-        0x48,0x89,0xD6,                     // mov rsi,rdx    (arg2)
-        0x4C,0x89,0xC2,                     // mov rdx,r8     (arg3)
-        0x4C,0x89,0xC9,                     // mov rcx,r9     (arg4)
-        0x4C,0x8B,0x45,0x30,                // mov r8,[rbp+0x30]  (arg5)
-        0x4C,0x8B,0x4D,0x38,                // mov r9,[rbp+0x38]  (arg6)
-        0x48,0x8B,0x45,0x40, 0x48,0x89,0x04,0x24,          // arg7  -> [rsp+0x00]
-        0x48,0x8B,0x45,0x48, 0x48,0x89,0x44,0x24,0x08,     // arg8  -> [rsp+0x08]
-        0x48,0x8B,0x45,0x50, 0x48,0x89,0x44,0x24,0x10,     // arg9  -> [rsp+0x10]
-        0x48,0x8B,0x45,0x58, 0x48,0x89,0x44,0x24,0x18,     // arg10 -> [rsp+0x18]
-        0x48,0x8B,0x45,0x60, 0x48,0x89,0x44,0x24,0x20,     // arg11 -> [rsp+0x20]
-        0x48,0x8B,0x45,0x68, 0x48,0x89,0x44,0x24,0x28,     // arg12 -> [rsp+0x28]
-        0x48,0xB8,0,0,0,0,0,0,0,0,          // mov rax, real
-        0xFF,0xD0,                          // call rax
-        0x48,0x8D,0x65,0xF0,                // lea rsp,[rbp-0x10]  (back to saved rdi)
-        0x5F,                               // pop rdi
-        0x5E,                               // pop rsi
-        0x5D,                               // pop rbp
-        0xC3                                // ret
-    };
-    for(size_t i=0;i<sizeof code;i++) p[i]=code[i];
-    int immoff=0; for(int i=0;i<(int)sizeof code-1;i++) if(code[i]==0x48&&code[i+1]==0xB8){ immoff=i+2; break; }
-    *(uint64_t*)(p+immoff)=(uint64_t)real; (void)o;
-    sys_icache_invalidate(p,128);  // Rosetta: translate the freshly written thunk
+    uint8_t *p=g_glthunk+g_glthoff; g_glthoff+=128;
+    p[0]=0x49; p[1]=0xBB; *(uint64_t*)(p+2)=(uint64_t)real;                 // mov r11, real
+    p[10]=0xE9; int32_t rel=(int32_t)(stub-(p+15)); memcpy(p+11,&rel,4);    // jmp stub
+    sys_icache_invalidate(p,16);  // Rosetta: translate the freshly written thunk
     if(g_nthunk<8192){ g_thunk_real[g_nthunk]=real; g_thunk_addr[g_nthunk]=p; g_nthunk++; }
     pthread_mutex_unlock(&gtm);
     return p;

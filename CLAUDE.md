@@ -54,6 +54,12 @@ with a stale error -> "Cannot prepare playlist map: os error 80"), and XAudio2 F
 head buffer of a STOPPED voice, so its OnBufferEnd never came and the engine's pre-load "drain every voice"
 wait (halo3+0x1d17be, busy byte at voice+0x38) spun forever.
 
+GL call ABI: guest code (Reclaimer's egui/WGL UI) calls GL through make_gl_thunk's Win64->SysV stub, which
+must preserve xmm6-xmm15 (Win64 callee-saved, SysV scratch) as well as rdi/rsi. It didn't until 2026-10-16:
+egui's painter keeps pixels_per_point in xmm6 across GL calls and got 1280.0 back, so all its clip rects
+collapsed (empty Server Browser list, missing lobby names/vote list). `PELOAD_GL_NOXMMSAVE` = old behavior.
+Float-arg GL calls go through typed ms_abi wrappers (GLMIX) because Win64 passes floats positionally.
+
 Perf (2026-10-16, M4, 1280x720 window, 1920x1080 internal): gameplay median ~116 fps, p10 ~80,
 min ~50 (3-min soak). Draw-call bound: ~3.6 us per glDraw* in GL-on-Metal x ~1200-2300 draws/frame;
 the next big step would be a GL submission thread. CPU particle compute runs on a worker thread

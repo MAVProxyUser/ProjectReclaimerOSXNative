@@ -25,18 +25,17 @@ depending on the scene). The window title shows the elapsed time, the load time 
 Reclaimer's own frontend menu (Halo 3 menu scene with Server Browser, Campaign, Host Game, Customize,
 Settings, Credits) also renders and responds to the mouse: `RECLAIMER_MENU=1 bash shim/play.sh`.
 
-**Online play:** joining a public internet server works. The client joins the lobby, prepares the next
-map when the server rotates, and loads into the match: `RECLAIMER_JOIN=host:port bash shim/play.sh`.
-Only servers running the same client version (0.9.13) can be joined.
+**Online play:** joining a public internet server works, from the menu's Server Browser or directly with
+`RECLAIMER_JOIN=host:port bash shim/play.sh`. The client joins the lobby (players, map vote), prepares
+the next map when the server rotates, and loads into the match. Only servers running the same client
+version (0.9.13) can be joined; the browser shows other versions in red.
 
 Known gaps:
-- **Server Browser list.** The browser finds the servers (its header shows the count), but the list rows
-  aren't drawn yet. Use `RECLAIMER_JOIN=host:port` to join a server in the meantime.
 - **Starting a match from the menu** (Host Game → Start Game) hangs on the loading screen. Use the
   default `bash shim/play.sh`, which goes straight into a Guardian match.
-- **Scoreboard names.** Holding Back/Tab in a match shows the scoreboard bars without names or scores.
-  Reclaimer draws those with its menu UI, which only runs when the match was started from the menu
-  (see above).
+- **Scoreboard text.** Holding Back/Tab in a match shows the scoreboard bars without names, service
+  tags or scores. In the default direct match the player has no name at all; Reclaimer draws the
+  scoreboard text with its own UI, which only runs under its menu (being worked on).
 - **No MCC pause menu** (by design in standalone mode); F1 releases the mouse.
 - **Frame-rate ceiling.** Performance is bound by OpenGL-on-Metal's per-draw-call cost.
 
