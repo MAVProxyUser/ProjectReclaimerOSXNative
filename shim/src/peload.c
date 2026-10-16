@@ -3456,7 +3456,12 @@ static int d3dgl_synth_cb0(void){
     D3DObj*b=g_last_b12; if(!b||!b->data) return 0;
     const float*wf=(const float*)b->data; float wp[4]={wf[3],wf[7],wf[11],1.0f};   // object world origin
     float aspect=(g_d3dst.vp_h>0)?(float)g_d3dst.vp_w/(float)g_d3dst.vp_h:1.0f; if(aspect<0.2f||aspect>5.0f)aspect=1.0f;
-    float fovy=70.0f*3.14159265f/180.0f, sy=1.0f/tanf(fovy*0.5f), sx=sy/aspect, n=0.0625f, fr=1000.0f;
+    // PELOAD_D3DGL_FOV (vertical degrees, default 70 = the known-good view) / PELOAD_D3DGL_NEAR
+    // (default 0.0625). A LARGER near plane clips geometry the uniform-scale decompression lands near/
+    // behind the camera (w->0) -> cuts the radiating "spike" streaks.
+    float fovy=(getenv("PELOAD_D3DGL_FOV")?atof(getenv("PELOAD_D3DGL_FOV")):70.0f)*3.14159265f/180.0f;
+    float sy=1.0f/tanf(fovy*0.5f), sx=sy/aspect;
+    float n=getenv("PELOAD_D3DGL_NEAR")?atof(getenv("PELOAD_D3DGL_NEAR")):0.0625f, fr=1000.0f;
     float P[16]={ sx,0,0,0, 0,sy,0,0, 0,0,fr/(fr-n),-n*fr/(fr-n), 0,0,1,0 };
     extern float g_b12_org[32][3]; extern int g_nb12_org;
     // PELOAD_D3DGL_CAM="ex,ey,ez[,tx,ty,tz[,ux,uy,uz]]": build a look-at VIEW matrix (column-vector
@@ -3488,7 +3493,7 @@ static int d3dgl_synth_cb0(void){
     // require an ORTHONORMAL rotation (unit, orthogonal rows = a true view) and PREFER the smallest such
     // buffer (the standalone camera), breaking ties by most origins on-screen.
     // PELOAD_SYNVP_CB=<i> forces g_cbreg[i] as V (debug).
-    D3DObj* V=0; int bestN=0; uint64_t bestSz=~0ull;
+    D3DObj* V=0; int bestN=0; uint64_t bestSz=~0ull; int g_cam_is4x3=0;
     const char*force=getenv("PELOAD_SYNVP_CB");
     if(force){ int fi=atoi(force); if(fi>=0&&fi<g_ncbreg&&g_cbreg[fi]&&g_cbreg[fi]->data) V=g_cbreg[fi]; }
     else
@@ -3510,19 +3515,17 @@ static int d3dgl_synth_cb0(void){
         float VP[16]; d3dgl_mul44(P,vm,VP); int on=0;
         for(int o=0;o<g_nb12_org;o++){ float cl[4]; for(int r=0;r<4;r++) cl[r]=VP[r*4]*g_b12_org[o][0]+VP[r*4+1]*g_b12_org[o][1]+VP[r*4+2]*g_b12_org[o][2]+VP[r*4+3];
             if(cl[3]>0.05f){ float nx=cl[0]/cl[3],ny=cl[1]/cl[3],nz=cl[2]/cl[3]; if(nx>-1.1f&&nx<1.1f&&ny>-1.1f&&ny<1.1f&&nz>-0.05f&&nz<1.05f) on++; } }
-        // Pick purely by MOST origins on-screen (matches the cb0find diagnostic that identified cb[10] as
-        // the real camera at 30/32). The orthonormal+translation gates already exclude per-object/rotation-
-        // only matrices; among true views, the player camera frames the most of the world.
+        // Pick purely by MOST origins on-screen (the orthonormal+translation+non-identity gates already
+        // exclude per-object/rotation-only matrices; among true views the player camera frames the most).
         if(on < (g_nb12_org/4)) continue;
-        if(getenv("PELOAD_D3DGL_CAMDBG")){ static int cd; if(cd++<40){ char mm[220]; int kk=snprintf(mm,sizeof mm,"  [camdbg] cb[%d] %lluB tr=%.1f on=%d/%d eye=[%.1f %.1f %.1f] fwd=[%.2f %.2f %.2f]\n",i,(unsigned long long)c->size,tr,on,g_nb12_org,vm[3],vm[7],vm[11],vm[8],vm[9],vm[10]); (void)!write(2,mm,kk);} }
+        if(getenv("PELOAD_D3DGL_CAMDBG")){ static int cd; if(cd++<40){ char mm[240]; int kk=snprintf(mm,sizeof mm,"  [camdbg] cb[%d] %lluB tr=%.1f on=%d/%d eye=[%.1f %.1f %.1f] fwd=[%.2f %.2f %.2f]\n",i,(unsigned long long)c->size,tr,on,g_nb12_org,vm[3],vm[7],vm[11],vm[8],vm[9],vm[10]); (void)!write(2,mm,kk);} }
         if(on>bestN || (on==bestN && c->size<bestSz)){ bestN=on; bestSz=c->size; V=c; } }
-    // LATCHING: early frames have few object origins (g_nb12_org small) so the score is unreliable and a
-    // ground-plane (z~0) view can win by default -> flip-flop (good frame / black frame). Once enough
-    // origins accumulate AND the winner frames a strong majority, LATCH that CB. A camera-view CB is
-    // re-written each frame with the live view, so reusing the latched one FOLLOWS the camera and stays
-    // stable. Re-detect only if the latch goes stale or stops being a valid orthonormal view.
+    (void)g_cam_is4x3;
+    // LATCHING: early frames have few object origins so the score is unreliable and a ground-plane view can
+    // win by default -> flip-flop. Once enough origins accumulate AND the winner frames a strong majority,
+    // LATCH that CB (re-written each frame with the live view, so reusing it FOLLOWS the camera, stays stable).
     static D3DObj* g_cam_latch;
-    if(V && V->data && g_nb12_org>=6 && bestN*5 >= g_nb12_org*3) g_cam_latch=V;   // confident -> latch
+    if(V && V->data && g_nb12_org>=8 && bestN*3 >= g_nb12_org*2) g_cam_latch=V;   // >=66% on-screen -> latch
     if(!force && g_cam_latch && g_cam_latch->data && (g_cb_tick-g_cam_latch->cb_upd)<=4){
         const float*vm=(const float*)g_cam_latch->data; int ok=1;
         for(int j=0;j<16;j++){ float v=vm[j]; if(v!=v||v<-1e9f||v>1e9f){ok=0;break;} }
