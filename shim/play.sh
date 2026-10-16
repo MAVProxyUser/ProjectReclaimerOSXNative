@@ -1,6 +1,8 @@
 #!/bin/bash
 # Play Guardian through the game client on the D3D11->GL renderer (no Wine).
 # Controller: any GameController-supported pad (Xbox, DualSense, ...) via the shim's XInput.
+# Keyboard + mouse: click the game window to capture them (the client's own behavior); F1 or switching
+#   windows releases. Cmd-key shortcuts (Cmd+Tab, Cmd+Q) still go to macOS.
 #   PELOAD_INVERT_PITCH=0      normal (non-inverted) look; inverted is the default
 #   PELOAD_INPUT_SCRIPT=walk   scripted turn/walk test (PELOAD_INPUT_LOOP=1 repeats it)
 #   PELOAD_AUDIO=0             silence (game audio plays through CoreAudio by default)

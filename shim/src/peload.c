@@ -571,7 +571,7 @@ static int pipe_read(void*h,void*buf,uint32_t n,uint32_t*rd);        // fwd
 static int pipe_close(void*h);                                       // fwd
 static int pipe_name_is(const char*s);                               // fwd
 static void* pipe_client_open(const char*narrow);                    // fwd
-static double g_gameplay_t0;   // monotonic seconds when the client logged "gameplay presentation ready" (0 = not yet)
+double g_gameplay_t0;   // monotonic seconds when the client logged "gameplay presentation ready" (0 = not yet)
 static double mono_s(void){ struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t); return t.tv_sec+t.tv_nsec*1e-9; }
 static int    MSABI i_WriteFile(void *h, const void *buf, uint32_t n, uint32_t *wr, void *ov){
     (void)ov; intptr_t hv=(intptr_t)h;
@@ -2654,6 +2654,7 @@ static void* g_last_hwnd;   // most-recently created real window (reported as fo
 static void* g_shown_hwnd;  // most-recently SHOWN top-level window = the game window the client compares
                             // GetForegroundWindow() against before polling XInput / reading input
 static void* fg_hwnd(void){ return g_shown_hwnd?g_shown_hwnd:(g_last_hwnd?g_last_hwnd:(void*)0x4857); }
+void* fg_hwnd_ext(void){ return fg_hwnd(); }
 static void*  MSABI i_CreateWindowExW(uint32_t ex,const void*cls,const void*name,uint32_t style,int x,int y,int w,int h,void*parent,void*menu,void*inst,void*param){
     WWin* win=calloc(1,sizeof *win); if(!win) return (void*)0x4857;
     win->magic=WWIN_MAGIC; win->wndproc=wcls_find(cls); win->x=x; win->y=y; win->w=w>0?w:1280; win->h=h>0?h:720;
@@ -2771,10 +2772,18 @@ static void inject_activation_once(void){ if(g_act_done||!g_last_hwnd||getenv("P
     inject_msg(g_last_hwnd,0x0007,0,0);  // WM_SETFOCUS
     if(getenv("PELOAD_TRACE_MSG")) ws("  [msg] injected window activation\n"); }
 static void msg_fill(void*m,void*h,uint32_t msg,uint64_t wp,int64_t lp){ if(!m)return; uint8_t*p=m; *(void**)(p+0)=h; *(uint32_t*)(p+8)=msg; *(uint64_t*)(p+16)=wp; *(int64_t*)(p+24)=lp; *(uint32_t*)(p+32)=(uint32_t)i_GetTickCount(); *(int32_t*)(p+36)=0; *(int32_t*)(p+40)=0; }
+typedef struct { void* hwnd; uint32_t msg; uint64_t wp; int64_t lp; } WiMsgFwd;
+static int wi_peek_fwd(WiMsgFwd*out,int remove);   // wininput.c (keyboard/mouse queue)
+static void cocoa_pump(void);
 static int    MSABI i_PeekMessageW(void*m,void*h,uint32_t f1,uint32_t f2,uint32_t r){ (void)h;(void)f1;(void)f2; inject_activation_once();
-    if(g_inji<g_injn){ msg_fill(m,g_injmsg[g_inji].hwnd,g_injmsg[g_inji].msg,g_injmsg[g_inji].wp,g_injmsg[g_inji].lp); if(r&1/*PM_REMOVE*/) g_inji++; return 1; } return 0; }
+    if(g_inji<g_injn){ msg_fill(m,g_injmsg[g_inji].hwnd,g_injmsg[g_inji].msg,g_injmsg[g_inji].wp,g_injmsg[g_inji].lp); if(r&1/*PM_REMOVE*/) g_inji++; return 1; }
+    WiMsgFwd e; if(wi_peek_fwd(&e,r&1)){ msg_fill(m,e.hwnd,e.msg,e.wp,e.lp); return 1; }
+    if(pthread_main_np()){ static double last; double now=mono_s(); if(now-last>0.002){ last=now; cocoa_pump(); if(wi_peek_fwd(&e,r&1)){ msg_fill(m,e.hwnd,e.msg,e.wp,e.lp); return 1; } } }
+    return 0; }
 static int    MSABI i_GetMessageW(void*m,void*h,uint32_t f1,uint32_t f2){ (void)h;(void)f1;(void)f2; inject_activation_once();
-    if(g_inji<g_injn){ msg_fill(m,g_injmsg[g_inji].hwnd,g_injmsg[g_inji].msg,g_injmsg[g_inji].wp,g_injmsg[g_inji].lp); g_inji++; return 1; } return 0; }
+    if(g_inji<g_injn){ msg_fill(m,g_injmsg[g_inji].hwnd,g_injmsg[g_inji].msg,g_injmsg[g_inji].wp,g_injmsg[g_inji].lp); g_inji++; return 1; }
+    WiMsgFwd e; if(wi_peek_fwd(&e,1)){ msg_fill(m,e.hwnd,e.msg,e.wp,e.lp); return 1; }
+    return 0; }
 static int64_t MSABI i_DispatchMessageW(const void*m){ if(!m) return 0; const uint8_t*p=m; WWin* w=*(WWin**)(p+0); uint32_t msg=*(uint32_t*)(p+8); uint64_t wp=*(uint64_t*)(p+16); int64_t lp=*(int64_t*)(p+24);
     if(w&&w->magic==WWIN_MAGIC&&w->wndproc){ if(getenv("PELOAD_TRACE_MSG")){ char b[64]; int k=snprintf(b,sizeof b,"  [msg] dispatch 0x%x -> wndproc\n",msg); ws(b);} return w->wndproc(w,msg,wp,lp); } return 0; }
 static int    MSABI i_TranslateMessage(const void*m){ (void)m; return 0; }
@@ -2823,6 +2832,9 @@ static int    MSABI i_ShowCursor(int s){ (void)s; return s?0:-1; }
 static int    MSABI i_ClipCursor(const void*r){ (void)r; return 1; }
 static int    MSABI i_SetCursorPos(int x,int y){ (void)x;(void)y; return 1; }
 static void*  MSABI i_SetCursor(void*c){ return c; }
+void* fg_hwnd_ext(void);
+#include <CoreGraphics/CoreGraphics.h>
+#include "wininput.c"
 static int    MSABI i_SetLayeredWindowAttributes(void*h,uint32_t key,uint8_t a,uint32_t f){ (void)h;(void)key;(void)a;(void)f; return 1; }
 static int    MSABI i_UpdateLayeredWindow(void*h,void*dc,void*pd,void*ps,void*sd,void*sp,uint32_t key,void*bf,uint32_t f){ (void)h;(void)dc;(void)pd;(void)ps;(void)sd;(void)sp;(void)key;(void)bf;(void)f; return 1; }
 #include <CoreGraphics/CoreGraphics.h>
@@ -5891,7 +5903,7 @@ static void* cocoa_make_gl_window_i(int w,int h){ CGLContextObj c=cocoa_make_gl_
     return (void*)c; }
 static void cocoa_pump(void){ if(!g_nsapp) return;
     for(;;){ id ev=((id(*)(id,SEL,unsigned long,id,id,signed char))objc_msgSend)(g_nsapp,osel("nextEventMatchingMask:untilDate:inMode:dequeue:"),~0UL,(id)0,NSDefaultRunLoopMode,1);
-        if(!ev) break; ((void(*)(id,SEL,id))objc_msgSend)(g_nsapp,osel("sendEvent:"),ev); } }
+        if(!ev) break; if(wi_translate(ev)) continue; ((void(*)(id,SEL,id))objc_msgSend)(g_nsapp,osel("sendEvent:"),ev); } }
 static int    MSABI i_ChoosePixelFormat(void*hdc,const void*pfd){ (void)hdc;(void)pfd; return 1; }
 static int    MSABI i_SetPixelFormat(void*hdc,int fmt,const void*pfd){ (void)hdc;(void)fmt;(void)pfd; return 1; }
 static int    MSABI i_GetPixelFormat(void*hdc){ (void)hdc; return 1; }
@@ -7877,16 +7889,16 @@ static void *resolve_impl(const char *fn){
         {"ReleaseCapture",(void*)i_ReleaseCapture},
         {"ClientToScreen",(void*)i_ClientToScreen},
         {"ScreenToClient",(void*)i_ScreenToClient},
-        {"RegisterRawInputDevices",(void*)i_RegisterRawInputDevices},
-        {"GetRawInputData",(void*)i_GetRawInputData},
+        {"RegisterRawInputDevices",(void*)wi_RegisterRawInputDevices},
+        {"GetRawInputData",(void*)wi_GetRawInputData},{"GetRawInputDeviceInfoW",(void*)wi_GetRawInputDeviceInfoW},{"GetKeyboardState",(void*)wi_GetKeyboardState},{"GetCursorPos",(void*)wi_GetCursorPos},
         {"GetRegisteredRawInputDevices",(void*)i_GetRegisteredRawInputDevices},
         {"SetTimer",(void*)i_SetTimer},
         {"KillTimer",(void*)i_KillTimer},
-        {"GetAsyncKeyState",(void*)i_GetAsyncKeyState},
-        {"GetKeyState",(void*)i_GetKeyState},
-        {"ShowCursor",(void*)i_ShowCursor},
-        {"ClipCursor",(void*)i_ClipCursor},
-        {"SetCursorPos",(void*)i_SetCursorPos},
+        {"GetAsyncKeyState",(void*)wi_GetAsyncKeyState},
+        {"GetKeyState",(void*)wi_GetKeyState},
+        {"ShowCursor",(void*)wi_ShowCursor},
+        {"ClipCursor",(void*)wi_ClipCursor},
+        {"SetCursorPos",(void*)wi_SetCursorPos},
         {"SetCursor",(void*)i_SetCursor},
         {"SetLayeredWindowAttributes",(void*)i_SetLayeredWindowAttributes},
         {"UpdateLayeredWindow",(void*)i_UpdateLayeredWindow},
@@ -8801,6 +8813,7 @@ static void* sampler_thread(void*a){ (void)a;
     return 0; }
 int main(int argc, char **argv){
     if(getenv("PELOAD_SAMPLE")){ pthread_t st; pthread_create(&st,0,sampler_thread,0); }
+    wi_test_start();
     { struct sigaction sa; memset(&sa,0,sizeof sa); sa.sa_sigaction=crashsig; sa.sa_flags=SA_SIGINFO;
       sigaction(SIGSEGV,&sa,0); sigaction(SIGBUS,&sa,0); sigaction(SIGILL,&sa,0); sigaction(SIGABRT,&sa,0);
       if(getenv("PELOAD_BP")) sigaction(SIGTRAP,&sa,0); }  // PELOAD_BP software breakpoints need SIGTRAP caught (else "Trace/BPT trap")
