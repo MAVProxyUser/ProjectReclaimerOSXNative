@@ -3476,10 +3476,29 @@ static int d3dgl_synth_cb0(void){
     // convention: V*[world,1]=view) and use P*V as cb0, bypassing the pool-CB search (the real
     // view-proj is in NO cbuffer -- cb0find only ever finds per-object matrices). Target defaults to
     // the scene center (avg of the known object origins); up defaults to +Z (Halo is Z-up).
+    // PELOAD_D3DGL_AUTOFRAME: robust auto-camera -- frame the object-origin cloud (the live geometry) from
+    // outside, looking at its centroid. The pool-CB auto-detect below keeps latching near-vertical "looking
+    // up" shadow/env views (fwd=+Z) that throw the ground off the bottom of the screen; this instead always
+    // aims AT the geometry so it lands on-screen. PELOAD_D3DGL_AF_DIST scales the pull-back distance,
+    // PELOAD_D3DGL_AF_YAW/_PITCH (degrees) orbit the eye around the centroid (default behind -Y, slightly up).
     const char*camenv=getenv("PELOAD_D3DGL_CAM");
-    if(camenv){
-        float e[3]={0,0,0},t[3]={0,0,0},up[3]={0,0,1}; int ne=sscanf(camenv,"%f,%f,%f,%f,%f,%f,%f,%f,%f",
-            &e[0],&e[1],&e[2],&t[0],&t[1],&t[2],&up[0],&up[1],&up[2]);
+    int autoframe = !camenv && getenv("PELOAD_D3DGL_AUTOFRAME") && g_nb12_org>=2;
+    if(camenv || autoframe){
+        float e[3]={0,0,0},t[3]={0,0,0},up[3]={0,0,1}; int ne = camenv?sscanf(camenv,"%f,%f,%f,%f,%f,%f,%f,%f,%f",
+            &e[0],&e[1],&e[2],&t[0],&t[1],&t[2],&up[0],&up[1],&up[2]):0;
+        if(autoframe){
+            float c[3]={0,0,0}; for(int o=0;o<g_nb12_org;o++){ c[0]+=g_b12_org[o][0]; c[1]+=g_b12_org[o][1]; c[2]+=g_b12_org[o][2]; }
+            c[0]/=g_nb12_org; c[1]/=g_nb12_org; c[2]/=g_nb12_org;
+            float rad=1.0f; for(int o=0;o<g_nb12_org;o++){ float dx=g_b12_org[o][0]-c[0],dy=g_b12_org[o][1]-c[1],dz=g_b12_org[o][2]-c[2]; float d=sqrtf(dx*dx+dy*dy+dz*dz); if(d>rad)rad=d; }
+            float distk=getenv("PELOAD_D3DGL_AF_DIST")?atof(getenv("PELOAD_D3DGL_AF_DIST")):2.2f;
+            float dist=rad*distk+8.0f;
+            float yaw=(getenv("PELOAD_D3DGL_AF_YAW")?atof(getenv("PELOAD_D3DGL_AF_YAW")):0.0f)*3.14159265f/180.0f;
+            float pitch=(getenv("PELOAD_D3DGL_AF_PITCH")?atof(getenv("PELOAD_D3DGL_AF_PITCH")):22.0f)*3.14159265f/180.0f;
+            float ch=cosf(pitch); // horizontal component
+            t[0]=c[0]; t[1]=c[1]; t[2]=c[2];
+            e[0]=c[0]+dist*ch*sinf(yaw); e[1]=c[1]-dist*ch*cosf(yaw); e[2]=c[2]+dist*sinf(pitch);
+            up[0]=0; up[1]=0; up[2]=1; ne=6;
+        }
         if(ne<6){ float c[3]={0,0,0}; int nn=g_nb12_org>0?g_nb12_org:1; for(int o=0;o<g_nb12_org;o++){ c[0]+=g_b12_org[o][0]; c[1]+=g_b12_org[o][1]; c[2]+=g_b12_org[o][2]; } t[0]=c[0]/nn; t[1]=c[1]/nn; t[2]=c[2]/nn; }
         float z[3]={t[0]-e[0],t[1]-e[1],t[2]-e[2]}; float zl=sqrtf(z[0]*z[0]+z[1]*z[1]+z[2]*z[2]); if(zl<1e-6f)zl=1; z[0]/=zl;z[1]/=zl;z[2]/=zl;
         float x[3]={up[1]*z[2]-up[2]*z[1], up[2]*z[0]-up[0]*z[2], up[0]*z[1]-up[1]*z[0]}; float xl=sqrtf(x[0]*x[0]+x[1]*x[1]+x[2]*x[2]); if(xl<1e-6f)xl=1; x[0]/=xl;x[1]/=xl;x[2]/=xl;
@@ -3872,6 +3891,14 @@ static void d3dgl_draw(uint32_t vcount,int indexed,uint32_t instcount){
     int vs_has_cb0 = mono ? (mp->vcb[0]>=0) : (vs->gl_cbloc[0]>=0);
     if(getenv("PELOAD_D3DGL_SYNVP") && vs && (!vscb_eff[0]||!vscb_eff[0]->data) && vs_has_cb0 && g_last_b12 && g_last_b12->data){
         if(d3dgl_synth_cb0()) vscb_eff[0]=&g_syn_cb0; }
+    // PER-DRAW decompress gate: the VS runs its vertex-decompress branch when cb0[12]!=0. synth_cb0 sets it
+    // =1 globally for DECOMP, but only COMPRESSED-position draws (R16 UNORM/SNORM, fmt 11/13) are actually
+    // packed; forcing it on UNCOMPRESSED (float32, fmt 2/6) object draws re-scales already-world verts into
+    // the radiating "streaks". Gate it by THIS draw's position format. (Default on with DECOMP; PELOAD_D3DGL_
+    // DECOMP_ALL keeps the old force-everything behavior.)
+    if(getenv("PELOAD_D3DGL_DECOMP") && vscb_eff[0]==&g_syn_cb0 && g_d3dst.il && g_d3dst.il->nelem && !getenv("PELOAD_D3DGL_DECOMP_ALL")){
+        uint32_t pfmt=g_d3dst.il->elem[0].fmt; int compressed=(pfmt==11||pfmt==13||pfmt==35);
+        float*c0=(float*)g_syn_cb0_buf; float g=compressed?1.0f:0.0f; c0[48]=c0[49]=c0[50]=c0[51]=g; }
     // PELOAD_D3DGL_DECOMP: the terrain BSP vertices are 16-bit COMPRESSED to [-1,1]; the VS if-branch
     // (cb0[12]!=0) decompresses them: r0 = v0*cb1[0]+cb1[1], then *cb12 (world). cb1 (per-mesh bounds) is
     // NEVER bound (dead material path) -> without it the raw [-1,1] verts collapse the map into a cube.
