@@ -8,7 +8,7 @@
 cd "$(dirname "$0")/.."
 PFX="$HOME/Library/Application Support/ReclaimerMac/prefix/drive_c"
 MCC="C:\\Program Files\\Steam\\steamapps\\common\\Halo The Master Chief Collection"
-XA="exe+460294:909090909090,exe+4602cb:909090909090,exe+460302:909090909090,exe+460335:9090"
+XA="exe+460294:909090909090,exe+4602cb:909090909090,exe+460302:909090909090,exe+460335:9090,exe+65ddf9:eb"
 pkill -9 -f 'build/peload' 2>/dev/null; sleep 1
 rm -f "$PFX/ReclaimerProfile/starting" 2>/dev/null
 echo "starting (the window stays black ~15-20 s while the map loads); log: /tmp/reclaimer_play.log"

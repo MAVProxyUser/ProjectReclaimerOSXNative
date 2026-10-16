@@ -41,6 +41,11 @@ typedef struct {
 } DgOp;
 
 typedef struct { int op; const char*name; int test; int nop; DgOp ops[8]; uint32_t tok; int has_aoff; int aoff[3]; uint32_t raw[4]; } DgIns;
+// Constant buffers as std140 uniform BLOCKS ("layout(std140) uniform cbN_blk { vec4 cbN[size]; }", size from
+// dcl_constantbuffer) instead of plain uniform arrays: plain arrays hit GL's 4096-component limit for
+// dynamically indexed palettes (skinned meshes failed to link) and cost a full copy per draw. 0 = old arrays.
+static int g_dg_ubo = 1;
+static int g_dg_nodclsz = 0;   // A/B: ignore dcl_constantbuffer sizes (old max-index heuristic)
 // immediate constant buffer (dcl_immediateConstantBuffer customdata), per translated shader
 static uint32_t g_icb[4096*4]; static int g_icbn;
 
@@ -294,7 +299,8 @@ char* dg_emit(const char*stage,const DgSig*isgn,int ni,const DgSig*osgn,int no,D
     // dcl_resource dimension per t# (D3D10_SB_RESOURCE_DIMENSION at opcode bits 11..15): 3=2D 5=3D 6=CUBE
     // 7=1DARRAY 8=2DARRAY 9=2DMSARRAY 10=CUBEARRAY. Declaring everything sampler2D and sampling .xy made cube
     // maps / texture arrays (env maps, lightmap pages) read the wrong texels entirely.
-    int rdim[256]={0};
+    int rdim[256]={0}; int dclsz[64]={0};
+    for(int x=0;x<nins;x++) if(ins[x].op==89 && ins[x].nop && ins[x].ops[0].nidx>1){ uint32_t b=ins[x].ops[0].idx[0].val, n=ins[x].ops[0].idx[1].val; if(b<64 && n>0 && n<=4096) dclsz[b]=(int)n; }
     for(int x=0;x<nins;x++) if(ins[x].op==88 && ins[x].nop && ins[x].ops[0].nidx){ uint32_t r=ins[x].ops[0].idx[0].val; if(r<256) rdim[r]=(int)((ins[x].tok>>11)&0x1f); }
     for(int x=0;x<nins;x++){ for(int k=0;k<ins[x].nop;k++){ DgOp*op=&ins[x].ops[k];
         if(op->type==T_TEMP && op->nidx){ if((int)op->idx[0].val>maxt) maxt=(int)op->idx[0].val; }
@@ -324,7 +330,8 @@ char* dg_emit(const char*stage,const DgSig*isgn,int ni,const DgSig*osgn,int no,D
         if(s->reg<256){ if(seen_out[s->reg]) continue; seen_out[s->reg]=1; }
         dg_lprintf(&L,"out vec4 o%u; // %s%u",s->reg,s->name,s->idx);
     }
-    for(int b=0;b<64;b++) if(cbused[b]) dg_lprintf(&L,"uniform vec4 cb%d[%d];",b,cbs[b]);
+    for(int b=0;b<64;b++) if(cbused[b]){ int n = (dclsz[b] && !g_dg_nodclsz) ? dclsz[b] : cbs[b];
+        if(g_dg_ubo) dg_lprintf(&L,"layout(std140) uniform cb%d_blk { vec4 cb%d[%d]; };",b,b,n); else dg_lprintf(&L,"uniform vec4 cb%d[%d];",b,n); }
     for(int r=0;r<256;r++) if(res_[r]) dg_lprintf(&L,"uniform %s t%d;",dg_samptype(rdim[r]),r);
     int isvs=!strcmp(stage,"vs");
     // D3D -> GL clip space at every VS exit: y is flipped so GL row y holds D3D row y (render targets match
@@ -489,6 +496,7 @@ char* dg_emit(const char*stage,const DgSig*isgn,int ni,const DgSig*osgn,int no,D
       for(int i=0;i<L.n;i++){ int d; const char*s=L.v[i];
         if(!strncmp(s,"uniform sampler",15)){ const char*q=strrchr(s,' '); if(q && sscanf(q," t%d;",&d)==1 && d>=0 && d<256) has_t[d]=1; }
         if(sscanf(s,"uniform vec4 cb%d[",&d)==1 && d<256) has_cb[d]=1;
+        if(sscanf(s,"layout(std140) uniform cb%d_blk",&d)==1 && d<256) has_cb[d]=1;
         if(sscanf(s,"in vec4 v%d;",&d)==1 && d<256) has_v[d]=1;
         if(sscanf(s,"out vec4 o%d;",&d)==1 && d<256) has_o[d]=1;
         if(sscanf(s,"  vec4 r%d=vec4",&d)==1 && d<256) has_r[d]=1;
@@ -504,7 +512,7 @@ char* dg_emit(const char*stage,const DgSig*isgn,int ni,const DgSig*osgn,int no,D
     // header decls (t, cb, v, o) inserted before main, in that order, ascending — matches Python
     int ins_at=mi;
     for(int m=0;m<256;m++) if(ref_t[m]&&!has_t[m]){ char*s; asprintf(&s,"uniform sampler2D t%d;",m); dg_linsert(&L,ins_at++,s); mi++; }
-    for(int m=0;m<256;m++) if(ref_cb[m]&&!has_cb[m]){ char*s; asprintf(&s,"uniform vec4 cb%d[4096];",m); dg_linsert(&L,ins_at++,s); mi++; }
+    for(int m=0;m<256;m++) if(ref_cb[m]&&!has_cb[m]){ char*s; if(g_dg_ubo) asprintf(&s,"layout(std140) uniform cb%d_blk { vec4 cb%d[4096]; };",m,m); else asprintf(&s,"uniform vec4 cb%d[4096];",m); dg_linsert(&L,ins_at++,s); mi++; }
     for(int m=0;m<256;m++) if(ref_v[m]&&!has_v[m]){ char*s; asprintf(&s,"in vec4 v%d;",m); dg_linsert(&L,ins_at++,s); mi++; }
     for(int m=0;m<256;m++) if(ref_o[m]&&!has_o[m]){ if(m!=0||!has_glpos){ char*s; asprintf(&s,"out vec4 o%d;",m); dg_linsert(&L,ins_at++,s); mi++; } }
     // half-float helpers (packHalf2x16/unpackHalf2x16 are GLSL 4.20; we target 4.10)
