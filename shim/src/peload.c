@@ -3311,6 +3311,8 @@ static CGLContextObj cocoa_make_gl_window(int w,int h){
     id view = om0(win,"contentView");
     ((void(*)(id,SEL,id))objc_msgSend)(g_nsctx=ctx,osel("setView:"),view); // setView wants main thread; fine on the GL thread here
     ((void(*)(id,SEL,id))objc_msgSend)(win,osel("center"),(id)0);
+    // mouse-moved events (with deltas) are only delivered to windows that ask for them (keyboard/mouse input)
+    ((void(*)(id,SEL,signed char))objc_msgSend)(win,osel("setAcceptsMouseMovedEvents:"),1);
     if(getenv("PELOAD_NO_FOCUS")){
         // show the window WITHOUT making it key or activating our app, so it never
         // steals the user's keyboard/focus (used for background testing).
@@ -3505,6 +3507,7 @@ static int d3dgl_make_window(void){
     id view = om0(win,"contentView");
     ((void(*)(id,SEL,id))objc_msgSend)(ctx,osel("setView:"),view);
     ((void(*)(id,SEL,id))objc_msgSend)(win,osel("center"),(id)0);
+    ((void(*)(id,SEL,signed char))objc_msgSend)(win,osel("setAcceptsMouseMovedEvents:"),1);
     if(getenv("PELOAD_NO_FOCUS")) ((void(*)(id,SEL,id))objc_msgSend)(win,osel("orderFrontRegardless"),(id)0);
     else { ((void(*)(id,SEL,id))objc_msgSend)(win,osel("makeKeyAndOrderFront:"),(id)0);
            ((void(*)(id,SEL,signed char))objc_msgSend)(app,osel("activateIgnoringOtherApps:"),1); }
