@@ -41,7 +41,12 @@ fi
 [ -x shim/build/peload ] || { echo "shim/build/peload missing: run 'bash shim/build.sh' (or use a release bundle)"; exit 1; }
 [ -d "$MCC_DIR/halo3" ] || { echo "MCC files not found in: $MCC_DIR"; echo "run: ./reclaimer-mac.sh download"; exit 1; }
 
-pkill -9 -f 'build/peload' 2>/dev/null; sleep 1
+# Clear leftovers from an earlier launch, but leave a running test target (shim/target.sh) alone.
+TPG="$(cat "$HOME/Library/Application Support/ReclaimerMac/target.pgid" 2>/dev/null)"
+for p in $(pgrep -f 'build/peload'); do
+  [ -n "$TPG" ] && [ "$(ps -o pgid= -p "$p" | tr -d ' ')" = "$TPG" ] && continue
+  kill -9 "$p" 2>/dev/null
+done; sleep 1
 rm -f "$PFX/ReclaimerProfile/starting" 2>/dev/null
 RUNTIME=()
 ARGS=(game-client --mcc-path "$MCC")

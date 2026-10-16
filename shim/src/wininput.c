@@ -213,4 +213,34 @@ static void* wi_test_thread(void*a){ (void)a;
         const char*dl=getenv("PELOAD_KBM_TEST_HOLD_DELAY"); usleep(dl?(useconds_t)(atof(dl)*1e6):500000); wi_key((uint16_t)kc,1,0); k=snprintf(m,sizeof m,"  [kbm-test] key 0x%x down\n",kc); (void)!write(2,m,k);
         usleep((useconds_t)(secs*1e6)); wi_key((uint16_t)kc,0,0); k=snprintf(m,sizeof m,"  [kbm-test] key 0x%x up\n",kc); (void)!write(2,m,k); } }
     return 0; }
-static void wi_test_start(void){ if(getenv("PELOAD_KBM_TEST")){ pthread_t t; pthread_create(&t,0,wi_test_thread,0); } }
+// PELOAD_AUTOCLICK="<step>;<step>;...": drive the client's own UI once its menu is up, e.g. so an instance with
+// no real input (a test target) can host a game by itself. Steps, in 1280x720 client coordinates:
+//   x,y            left-click there            w:x,y,n   mouse wheel n notches there (+ up, - down)
+//   s:secs         wait                        k:hex     press + release a key (macOS keycode)
+//   t:text         type text (WM_CHAR)
+// Each click/wheel/key is followed by PELOAD_AUTOCLICK_GAP s (default 1.5). Starts PELOAD_AUTOCLICK_DELAY s
+// (default 3) after "Menu loading screen finished". Never touches the real cursor.
+static void wi_click_at(void*h,int x,int y){ int64_t lp=(int64_t)((y<<16)|(x&0xffff)); g_wi_cx=x; g_wi_cy=y;
+    wi_post(h,0x0200,0,lp); usleep(100000);
+    g_keydown[1]=1; wi_raw_mouse(0,0,0x1,0); wi_post(h,0x0201,1,lp); usleep(80000);
+    g_keydown[1]=0; wi_raw_mouse(0,0,0x2,0); wi_post(h,0x0202,0,lp); }
+static void* wi_auto_thread(void*a){ (void)a;
+    while(!g_menu_ready_t0) usleep(100000);
+    const char*dl=getenv("PELOAD_AUTOCLICK_DELAY"); usleep((useconds_t)((dl?atof(dl):3.0)*1e6));
+    const char*gp=getenv("PELOAD_AUTOCLICK_GAP"); useconds_t gap=(useconds_t)((gp?atof(gp):1.5)*1e6);
+    void*h=fg_hwnd_ext(); char m[96]; int k;
+    for(const char*e=getenv("PELOAD_AUTOCLICK"); e && *e; e=strchr(e,';')?strchr(e,';')+1:0){
+        int x=0,y=0,n=0; double secs=0; unsigned kc=0;
+        if(sscanf(e,"s:%lf",&secs)==1){ usleep((useconds_t)(secs*1e6)); continue; }
+        if(sscanf(e,"w:%d,%d,%d",&x,&y,&n)==3){ int64_t lp=(int64_t)((y<<16)|(x&0xffff)); g_wi_cx=x; g_wi_cy=y; wi_post(h,0x0200,0,lp);
+            for(int i=0;i<(n<0?-n:n);i++){ int16_t d=(int16_t)(n<0?-120:120); wi_raw_mouse(0,0,0x400,d); wi_post(h,0x020A,(uint64_t)((uint32_t)(uint16_t)d<<16),lp); usleep(60000); }
+            k=snprintf(m,sizeof m,"  [autoclick] wheel %d at %d,%d\n",n,x,y); }
+        else if(!strncmp(e,"t:",2)){ const char*t=e+2; int c=0; for(; t[c] && t[c]!=';'; c++){ wi_post(h,0x0102/*WM_CHAR*/,(uint64_t)(uint8_t)t[c],1); usleep(40000); }
+            k=snprintf(m,sizeof m,"  [autoclick] typed %d chars\n",c); }
+        else if(sscanf(e,"k:%x",&kc)==1){ wi_key((unsigned short)kc,1,0); usleep(80000); wi_key((unsigned short)kc,0,0); k=snprintf(m,sizeof m,"  [autoclick] key 0x%x\n",kc); }
+        else if(sscanf(e,"%d,%d",&x,&y)==2){ wi_click_at(h,x,y); k=snprintf(m,sizeof m,"  [autoclick] click %d,%d\n",x,y); }
+        else break;
+        (void)!write(2,m,k); usleep(gap); }
+    k=snprintf(m,sizeof m,"  [autoclick] done\n"); (void)!write(2,m,k); return 0; }
+static void wi_test_start(void){ if(getenv("PELOAD_KBM_TEST")){ pthread_t t; pthread_create(&t,0,wi_test_thread,0); }
+    if(getenv("PELOAD_AUTOCLICK")){ pthread_t t; pthread_create(&t,0,wi_auto_thread,0); } }

@@ -2197,7 +2197,28 @@ static int MSABI i_ws2_WSAGetLastError(void){ return t_wsa_err; }
 static void MSABI i_ws2_WSASetLastError(int e){ t_wsa_err=e; }
 static void net_tracef(const char*fmt,...);
 static WSASOCK MSABI i_ws2_socket(int af,int type,int proto){ int fd=socket(af==23?AF_INET6:af,type,proto); if(fd<0){ws2_err(errno);return WSA_INVALID;} net_tracef("[net] socket(af=%d,type=%d,proto=%d) -> fd=%d\n",af,type,proto,fd); return (WSASOCK)(unsigned)fd; }
-static WSASOCK MSABI i_ws2_WSASocketW(int af,int type,int proto,void*pi,unsigned g,uint32_t fl){ (void)pi;(void)g;(void)fl; return i_ws2_socket(af,type,proto); }
+// WSADuplicateSocketW + WSASocketW(FROM_PROTOCOL_INFO): Rust's socket try_clone() duplicates a socket
+// this way (the dedicated server clones its sockets). WSAPROTOCOL_INFOW (628 B): iAddressFamily @76,
+// iSocketType @88, iProtocol @92; we mark dwCatalogEntryId @36 and keep the source fd in
+// dwProviderReserved @112, and WSASocketW dup()s it. Same-process only, which is all try_clone needs.
+// (It was a stub: WSASocketW then got a garbage family and failed with WSAEAFNOSUPPORT, os error 10047.)
+#define WSADUP_MAGIC 0x5EED0D0Fu
+static int MSABI i_ws2_WSADuplicateSocketW(WSASOCK s,uint32_t pid,uint8_t*pi){ (void)pid; int fd=(int)(intptr_t)s;
+    if(!pi){ t_wsa_err=10014; g_lasterr=10014; return -1; }   // WSAEFAULT
+    struct sockaddr_storage ss; socklen_t sl=sizeof ss; int type=0; socklen_t tl=sizeof type;
+    if(getsockname(fd,(struct sockaddr*)&ss,&sl)!=0 || getsockopt(fd,SOL_SOCKET,SO_TYPE,&type,&tl)!=0){ ws2_err(errno); return -1; }
+    memset(pi,0,628); uint32_t magic=WSADUP_MAGIC; memcpy(pi+36,&magic,4);
+    int af=ss.ss_family==AF_INET6?23:ss.ss_family; int proto=type==SOCK_STREAM?6:type==SOCK_DGRAM?17:0;
+    memcpy(pi+72,&(int){2},4); memcpy(pi+76,&af,4); memcpy(pi+80,&(int){af==23?28:16},4); memcpy(pi+84,&(int){af==23?28:16},4);
+    memcpy(pi+88,&type,4); memcpy(pi+92,&proto,4); uint32_t f=(uint32_t)fd; memcpy(pi+112,&f,4);
+    net_tracef("[net] WSADuplicateSocketW(fd=%d) af=%d type=%d\n",fd,af,type); return 0; }
+static WSASOCK MSABI i_ws2_WSASocketW(int af,int type,int proto,void*pi,unsigned g,uint32_t fl){ (void)g;(void)fl;
+    if(pi){ uint32_t magic,src; memcpy(&magic,(uint8_t*)pi+36,4); memcpy(&src,(uint8_t*)pi+112,4);
+        if(magic==WSADUP_MAGIC && src<MAXFD){ int nfd=dup((int)src); if(nfd<0){ ws2_err(errno); return WSA_INVALID; }
+            if(nfd<MAXFD) g_peer_gip[nfd]=g_peer_gip[src];
+            net_tracef("[net] WSASocketW(dup of fd=%d) -> fd=%d\n",(int)src,nfd); return (WSASOCK)(unsigned)nfd; }
+        memcpy(&af,(uint8_t*)pi+76,4); memcpy(&type,(uint8_t*)pi+88,4); memcpy(&proto,(uint8_t*)pi+92,4); }
+    return i_ws2_socket(af,type,proto); }
 static int MSABI i_ws2_closesocket(WSASOCK s){ net_tracef("[net] closesocket(fd=%d)\n",(int)s); return close((int)s)==0?0:(ws2_err(errno),-1); }
 static int MSABI i_ws2_bind(WSASOCK s,const void*name,int nl){ struct sockaddr_storage ss; int bl=sa_w2b(name,nl,&ss); if(!bl){ws2_err(EINVAL);return -1;}
     // Windows bind defaults to exclusive-but-reusable for the loopback browser port; without
@@ -2488,6 +2509,7 @@ static void* ws2_real_name(const char*n){
     if(!strcmp(n,"WSASendMsg")) return (void*)i_ws2_WSASendMsg;
     if(!strcmp(n,"WSARecvMsg")) return (void*)i_ws2_WSARecvMsg;
     if(!strcmp(n,"WSASocketW")||!strcmp(n,"WSASocketA")) return (void*)i_ws2_WSASocketW;
+    if(!strcmp(n,"WSADuplicateSocketW")) return (void*)i_ws2_WSADuplicateSocketW;
     if(!strcmp(n,"WSAIoctl")) return (void*)i_ws2_WSAIoctl;
     if(!strcmp(n,"WSASetLastError")) return (void*)i_ws2_WSASetLastError;
     if(!strcmp(n,"WSARecvFrom")) return (void*)i_ws2_recvfrom; // close-enough arg prefix for fallback probing
@@ -3436,6 +3458,9 @@ static int input_script(XPad*p){
     return 0; }
 static uint32_t MSABI i_XInputGetState(uint32_t idx,void*st){
     if(idx>3||!st) return 160; /*ERROR_BAD_ARGUMENTS*/
+    // PELOAD_NO_PAD: this instance sees no controllers (e.g. a second client used as a test target, so it
+    // doesn't share the player's pad: GameController delivers pad input to every process, focused or not)
+    { static int nopad=-1; if(nopad<0) nopad=getenv("PELOAD_NO_PAD")?1:0; if(nopad) return 1167; /*ERROR_DEVICE_NOT_CONNECTED*/ }
     static uint32_t pkt[4]; static XPad last[4]; static int logged;
     XPad p; memset(&p,0,sizeof p); int con=gc_read(idx,&p);
     if(idx==0 && input_script(&p)) con=1;
@@ -3447,7 +3472,7 @@ static uint32_t MSABI i_XInputGetState(uint32_t idx,void*st){
     memcpy(o+8,&p.lx,2); memcpy(o+10,&p.ly,2); memcpy(o+12,&p.rx,2); memcpy(o+14,&p.ry,2);
     return 0; }
 static uint32_t MSABI i_XInputSetState(uint32_t idx,void*vib){ (void)vib; XPad p; return (idx<4 && (gc_read(idx,&p)||idx==0))?0:1167; }
-static uint32_t MSABI i_XInputGetCapabilities(uint32_t idx,uint32_t fl,void*cap){ (void)fl; XPad p; if(idx>3) return 160;
+static uint32_t MSABI i_XInputGetCapabilities(uint32_t idx,uint32_t fl,void*cap){ (void)fl; XPad p; if(idx>3) return 160; if(getenv("PELOAD_NO_PAD")) return 1167;
     if(!gc_read(idx,&p) && !(idx==0&&getenv("PELOAD_INPUT_SCRIPT"))) return 1167;
     if(cap){ memset(cap,0,20); uint8_t*c=cap; c[0]=1/*GAMEPAD*/; c[1]=1/*SUBTYPE_GAMEPAD*/; *(uint16_t*)(c+4)=0xF3FF; c[6]=c[7]=255; *(int16_t*)(c+8)=*(int16_t*)(c+10)=*(int16_t*)(c+12)=*(int16_t*)(c+14)=(int16_t)0xFFC0; } return 0; }
 static void MSABI i_XInputEnable(int en){ (void)en; }
@@ -7605,8 +7630,14 @@ static int    MSABI i_GetQueuedCompletionStatus(void*port,uint32_t*pbytes,uint64
         if(r!=0){ pthread_mutex_unlock(&p->m); g_lasterr=258; if(pov)*pov=0; if(pbytes)*pbytes=0; return 0; } }
     IocpPkt pk=p->q[p->head]; p->head=(p->head+1)&2047; p->count--; pthread_mutex_unlock(&p->m);
     if(pbytes)*pbytes=(uint32_t)pk.bytes; if(pkey)*pkey=pk.key; if(pov)*pov=pk.ov; g_lasterr=0; return 1; }
-static int    MSABI i_GetOverlappedResult(void*h,uint8_t*ov,uint32_t*pbytes,int wait){ (void)h;(void)wait;
-    if(pbytes)*pbytes= ov? (uint32_t)*(uint64_t*)(ov+8) : 0; return 1; }
+static int    MSABI i_GetOverlappedResult(void*h,uint8_t*ov,uint32_t*pbytes,int wait){ (void)h;
+    if(!ov){ if(pbytes)*pbytes=0; return 1; }
+    uint64_t st=__atomic_load_n((uint64_t*)(ov+0),__ATOMIC_ACQUIRE);
+    while(st==0x103){ if(!wait){ g_lasterr=996/*ERROR_IO_INCOMPLETE*/; return 0; } usleep(200); st=__atomic_load_n((uint64_t*)(ov+0),__ATOMIC_ACQUIRE); }
+    if(pbytes)*pbytes=(uint32_t)*(uint64_t*)(ov+8);
+    if(st==0xC000014BULL){ g_lasterr=109/*ERROR_BROKEN_PIPE*/; return 0; }
+    if(st>=0xC0000000ULL){ g_lasterr=31; return 0; }
+    return 1; }
 // GetQueuedCompletionStatusEx: batch dequeue (tokio/mio's Windows poller uses this).
 // OVERLAPPED_ENTRY = {ULONG_PTR key; LPOVERLAPPED ov; ULONG_PTR Internal; DWORD bytes;} (32 bytes).
 static int    MSABI i_GetQueuedCompletionStatusEx(void*port,uint8_t*entries,uint32_t count,uint32_t*removed,uint32_t ms,int alertable){
@@ -7819,10 +7850,36 @@ static void*  MSABI i_CreateFileW(const uint16_t *w,uint32_t acc,uint32_t share,
     if(fl&0x04000000) g_fddel[fd<MAXFD?fd:0]=1; // FILE_FLAG_DELETE_ON_CLOSE
     return (void*)(intptr_t)(0x1000+fd);
 }
+// Overlapped reads on PIPES/SOCKETS (anon pipes are socketpairs): they have no file offset, so pread()
+// fails (ESPIPE) and the reader saw an error/EOF at once. Rust's async process I/O (the dedicated server
+// supervising its game servers) reads children's stdout that way; it stopped reading, the child blocked on
+// a full pipe, and the server never got past "preparing its map". Now: read() when data is waiting, else
+// a helper thread completes the read when data arrives (poll). Completion: OVERLAPPED.Internal
+// (STATUS_PENDING -> 0 / STATUS_PIPE_BROKEN at EOF), InternalHigh = bytes, then the hEvent and/or the
+// handle's IOCP (hEvent low bit set = no IOCP packet, as on Windows).
+static int fd_is_stream(int fd){ if(fd<0) return 0; if(fd<MAXFD && g_pipe_other[fd]) return 1; struct stat st;
+    return fstat(fd,&st)==0 && (S_ISSOCK(st.st_mode)||S_ISFIFO(st.st_mode)||S_ISCHR(st.st_mode)); }
+static void ovread_complete(int fd,uint8_t*ov,long k){
+    void*ev=*(void**)(ov+24); int noport=((uintptr_t)ev)&1;
+    *(uint64_t*)(ov+8)=(uint64_t)(k>0?k:0);
+    __atomic_store_n((uint64_t*)(ov+0), k>0? 0ULL : k==0? 0xC000014BULL /*STATUS_PIPE_BROKEN*/ : 0xC0000001ULL, __ATOMIC_RELEASE);
+    if(ev) i_SetEvent((void*)((uintptr_t)ev&~(uintptr_t)1));
+    if(!noport) iocp_post_fd(fd,(uint64_t)(k>0?k:0),ov); }
+typedef struct { int fd; void*buf; uint32_t n; uint8_t*ov; } OvRead;
+static void* ovread_thread(void*a){ OvRead r=*(OvRead*)a; free(a);
+    struct pollfd p={r.fd,POLLIN,0}; while(poll(&p,1,-1)<0 && errno==EINTR){}
+    long k=read(r.fd,r.buf,r.n); ovread_complete(r.fd,r.ov,k); return 0; }
 static int    MSABI i_ReadFile(void*h,void*buf,uint32_t n,uint32_t*rd,uint8_t*ov){
     intptr_t hv=(intptr_t)h;
     if(pipe_is(hv)) return pipe_read(h,buf,n,rd);
     if(hv<0x1000){ if(rd)*rd=0; return 0; } int fd=(int)(hv-0x1000);
+    if(ov && fd_is_stream(fd)){
+        *(uint64_t*)(ov+8)=0; __atomic_store_n((uint64_t*)(ov+0),0x103ULL,__ATOMIC_RELEASE);   // STATUS_PENDING
+        struct pollfd p={fd,POLLIN,0};
+        if(poll(&p,1,0)>0){ long k=read(fd,buf,n); ovread_complete(fd,ov,k); }
+        else { OvRead*r=malloc(sizeof *r); pthread_t t; if(!r){ g_lasterr=8; return 0; } r->fd=fd; r->buf=buf; r->n=n; r->ov=ov;
+               if(pthread_create(&t,0,ovread_thread,r)!=0){ free(r); g_lasterr=8; return 0; } pthread_detach(t); }
+        if(rd)*rd=0; g_lasterr=997/*ERROR_IO_PENDING*/; return 0; }
     long k; if(ov){ uint64_t off=*(uint64_t*)(ov+16); k=pread(fd,buf,n,(off_t)off); } else k=read(fd,buf,n);
     if(rd)*rd=(uint32_t)(k<0?0:k);
     if(ov){ *(uint64_t*)(ov+0)=0; *(uint64_t*)(ov+8)=(uint64_t)(k<0?0:k);  // Internal, InternalHigh
@@ -7898,7 +7955,12 @@ static void   MSABI i_GetLocalTime(uint16_t *stm){
     stm[4]=lt.tm_hour; stm[5]=lt.tm_min; stm[6]=lt.tm_sec; stm[7]=tv.tv_usec/1000;
 }
 static void   MSABI i_GetSystemTime(uint16_t *stm){ i_GetLocalTime(stm); }
-static int    MSABI i_CreateDirectoryW(const uint16_t*w,void*sec){ (void)sec; char p[2048]; return mkdir(win2unix(w,p,sizeof p),0755)==0 || 1; }
+// CreateDirectoryW reports failures the Windows way: ERROR_ALREADY_EXISTS (183) or ERROR_PATH_NOT_FOUND (3)
+// for a missing parent. It used to claim success always, so Rust's create_dir_all never created the
+// parents ("Created content/Maps" with no folder on disk). PELOAD_MKDIR_LAX = the old always-TRUE behavior.
+static int    MSABI i_CreateDirectoryW(const uint16_t*w,void*sec){ (void)sec; char p[2048]; if(mkdir(win2unix(w,p,sizeof p),0755)==0) return 1;
+    static int lax=-1; if(lax<0) lax=getenv("PELOAD_MKDIR_LAX")?1:0; if(lax) return 1;
+    g_lasterr = errno==EEXIST? 183 : errno==ENOENT? 3 : win_err(); return 0; }
 static uint32_t MSABI i_GetCurrentDirectoryW(uint32_t sz,uint16_t*buf){ char cwd[2048]; if(!getcwd(cwd,sizeof cwd)) return 0; uint16_t w[2048]; unix2win(cwd,w,2048); uint32_t n=0; while(w[n])n++; if(sz<n+1) return n+1; for(uint32_t i=0;i<=n;i++) buf[i]=w[i]; return n; }
 static int MSABI i_SetCurrentDirectoryW(const uint16_t*w){ char p[2048]; return chdir(win2unix(w,p,sizeof p))==0 || (g_lasterr=win_err(),0); }
 

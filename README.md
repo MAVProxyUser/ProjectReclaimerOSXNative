@@ -99,6 +99,21 @@ pkill -9 -f build/peload
 The first launch builds and caches the game's shaders as effects first appear (brief hitches). Later
 launches pre-build them during the loading screen.
 
+### A second player to shoot at (testing)
+
+`shim/target.sh` starts a second copy of the client as a stationary target: it hosts a hidden Online game
+on Valhalla by itself (scripted clicks in its own window) and stands in the match. It has its own profile
+("Target"), no controller, keyboard, mouse or audio, and never takes focus, so it doesn't touch your
+input. Then join it:
+
+```bash
+bash shim/target.sh
+RECLAIMER_JOIN=127.0.0.1:11774 bash shim/play.sh
+```
+
+The target is in its match about 50 s after starting; `TARGET_MAP=<name>` picks another map, and
+`bash shim/target.sh stop` stops it (`play.sh` leaves a running target alone).
+
 ## Controls and options
 
 - **Controller:** any controller macOS supports. Look pitch is inverted by default.

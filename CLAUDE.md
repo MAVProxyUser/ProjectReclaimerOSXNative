@@ -71,6 +71,23 @@ never fired). `PELOAD_FG_LASTSHOWN` = old behavior. Self-test: `PELOAD_KBM_TEST_
 `PELOAD_KBM_TEST_HOLD_GAMEPLAY=1`/`PELOAD_KBM_TEST_GAMEPLAY=1`; KBM tests never capture the real cursor
 (`PELOAD_NO_SYS_CURSOR` does the same for any run).
 
+Second player for testing (2026-10-16): `shim/target.sh` = an input-less client (PELOAD_NO_PAD, NO_KBM,
+NO_SYS_CURSOR, NO_FOCUS, AUDIO=0, own RECLAIMER_PROFILE_DIR=C:\ReclaimerProfileTarget, nickname "Target")
+that hosts a hidden Online game via `PELOAD_AUTOCLICK` ("x,y;w:x,y,n;t:text;k:hex;s:secs" scripted UI steps
+after the menu is up). Game port 11774; join with RECLAIMER_JOIN=127.0.0.1:11774. A LOCAL-mode host is NOT
+joinable by address (only its 127.0.0.3 transport; "Public join timed out"), and `local-join` needs a
+local-server ticket ("Invalid client ticket"). Its pgid lives in ~/Library/Application Support/ReclaimerMac/
+target.pgid and play.sh's leftover-kill skips it.
+Headless `dedicated` server (dedicated init/check/run, C:\ReclaimerTestServer test folder with game/halo3 ->
+MCC symlink): config/check/online setup work, but its local-server worker idles at "Private native host
+descriptor verified; waiting for the native game client" (halo3 main loop never runs) -> server stays
+ready:false. Not solved. Shim fixes found on the way: CreateDirectoryW now returns real errors (183/3; it
+always claimed success, so create_dir_all never made parents; PELOAD_MKDIR_LAX = old), WSADuplicateSocketW +
+WSASocketW(FROM_PROTOCOL_INFO) for Rust try_clone (was a stub -> WSAEAFNOSUPPORT 10047), overlapped ReadFile
+on pipes/sockets uses read() + async completion (pread -> ESPIPE made parents stop reading children's
+stdout), GetOverlappedResult(wait) waits. PELOAD_WORKER_INHERIT_STDIO breaks parents that pipe child stdio
+(the dedicated supervisor saw EOF and restarted servers in a loop).
+
 Perf (2026-10-16, M4, 1280x720 window, 1920x1080 internal): gameplay median ~116 fps, p10 ~80,
 min ~50 (3-min soak). Draw-call bound: ~3.6 us per glDraw* in GL-on-Metal x ~1200-2300 draws/frame;
 the next big step would be a GL submission thread. CPU particle compute runs on a worker thread
