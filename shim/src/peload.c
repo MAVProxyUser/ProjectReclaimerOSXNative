@@ -4048,7 +4048,7 @@ static int d3dgl_gpu_copy_impl(D3DObj*dst,D3DObj*src,uint32_t sx,uint32_t sy,uin
         // the engine composited its frame into (0,0,last_vp) of the source: present exactly that region
         g_d3dgl_present_tex=dst->gltex; g_d3dgl_present_tw=(int)(dst->w>4096?4096:dst->w); g_d3dgl_present_th=(int)(dst->h>4096?4096:dst->h);
         g_d3dgl_present_vw=src->last_vpw; g_d3dgl_present_vh=src->last_vph; }
-    if(dst==g_d3d_backbuf && !getenv("PELOAD_D3DGL_NOFINISH")){ G.BindFramebuffer(GLE_FBO,0); if(G.Finish) G.Finish(); else if(G.Flush) G.Flush(); }
+    if(dst==g_d3d_backbuf && !getenv("PELOAD_D3DGL_NOFINISH") && getenv("PELOAD_D3DGL_NOPQ")){ G.BindFramebuffer(GLE_FBO,0); if(G.Finish) G.Finish(); else if(G.Flush) G.Flush(); }
     if(getenv("PELOAD_D3DGL_COPYDUMP") && dst==g_d3d_backbuf && G.ReadPixels){ static unsigned long cn; static int nd2; unsigned long skip=strtoul(getenv("PELOAD_D3DGL_COPYDUMP"),0,10); cn++; if(cn>skip && (cn%60)==0 && nd2<4){
         static uint8_t*cb3; if(!cb3) cb3=malloc(1920u*1080u*4u); G.BindFramebuffer(0x8CA8,dst->glfbo);
         int y0=d3dgl_fbo_y(DH,0,1080); if(cb3){ G.ReadPixels(0,y0,1920,1080,GLE_RGBA,GLE_UBYTE,cb3); const char*home=getenv("HOME"); char pth[256];
@@ -4273,17 +4273,40 @@ static unsigned d3d_cmp_gl(uint32_t f){ return (f>=1&&f<=8)?0x0200+(f-1):0x0207;
 static unsigned d3d_stencilop_gl(uint32_t o){ switch(o){ case 2: return 0; case 3: return 0x1E01; case 4: return 0x1E02; case 5: return 0x1E03;
     case 6: return 0x150A; case 7: return 0x8507; case 8: return 0x8508; default: return 0x1E00; } }
 // D3D11 depth-stencil state (only meaningful with a DSV bound; no DSV = depth/stencil tests pass, no writes)
+// ---- GL state shadow for the per-draw state (render context) ------------------------------------------
+// apply_state used to re-issue every blend/raster/depth/viewport call on every draw; on GL-on-Metal redundant
+// state changes cost CPU and pipeline re-validation. Only changes are sent now. Paths that touch this state
+// directly (window blit) call gs_invalidate(). PELOAD_D3DGL_NOSTATECACHE disables the cache.
+static struct { int valid; uint8_t cap[10]; unsigned bf[4], be[2]; float bc[4]; uint8_t cm[4]; unsigned cull, ff; int sc[4], vp[4]; double dr[2]; float po[2]; unsigned dfunc; int dmask; } g_gs;
+static int g_gs_off=-1;
+static void gs_invalidate(void){ g_gs.valid=0; }
+static void gs_ok(void){ if(g_gs_off<0) g_gs_off=getenv("PELOAD_D3DGL_NOSTATECACHE")?1:0; if(!g_gs.valid||g_gs_off){ memset(&g_gs,0xff,sizeof g_gs); g_gs.valid=1; } }
+static int gs_capi(unsigned c){ switch(c){ case 0x0BE2: return 0; case 0x0B44: return 1; case 0x0C11: return 2; case 0x0B71: return 3; case 0x0B90: return 4;
+    case 0x8DB9: return 5; case 0x8037: return 6; case 0x864F: return 7; case 0x8F9D: return 8; default: return -1; } }
+static void gs_cap(unsigned c,int on){ gs_ok(); int i=gs_capi(c); if(i>=0){ uint8_t v=on?1:0; if(g_gs.cap[i]==v) return; g_gs.cap[i]=v; } if(on) G.Enable(c); else G.Disable(c); }
+static void gs_blendfunc(unsigned a,unsigned b,unsigned c,unsigned d){ gs_ok(); if(g_gs.bf[0]==a&&g_gs.bf[1]==b&&g_gs.bf[2]==c&&g_gs.bf[3]==d) return; g_gs.bf[0]=a;g_gs.bf[1]=b;g_gs.bf[2]=c;g_gs.bf[3]=d; G.BlendFuncSeparate(a,b,c,d); }
+static void gs_blendeq(unsigned a,unsigned b){ gs_ok(); if(g_gs.be[0]==a&&g_gs.be[1]==b) return; g_gs.be[0]=a; g_gs.be[1]=b; G.BlendEquationSeparate(a,b); }
+static void gs_blendcolor(float r,float g,float b,float a){ gs_ok(); if(g_gs.bc[0]==r&&g_gs.bc[1]==g&&g_gs.bc[2]==b&&g_gs.bc[3]==a) return; g_gs.bc[0]=r;g_gs.bc[1]=g;g_gs.bc[2]=b;g_gs.bc[3]=a; G.BlendColor(r,g,b,a); }
+static void gs_colormask(unsigned char r,unsigned char g,unsigned char b,unsigned char a){ gs_ok(); if(g_gs.cm[0]==r&&g_gs.cm[1]==g&&g_gs.cm[2]==b&&g_gs.cm[3]==a) return; g_gs.cm[0]=r;g_gs.cm[1]=g;g_gs.cm[2]=b;g_gs.cm[3]=a; G.ColorMask(r,g,b,a); }
+static void gs_cullface(unsigned m){ gs_ok(); if(g_gs.cull==m) return; g_gs.cull=m; G.CullFace(m); }
+static void gs_frontface(unsigned m){ gs_ok(); if(g_gs.ff==m) return; g_gs.ff=m; G.FrontFace(m); }
+static void gs_scissor(int x,int y,int w,int h){ gs_ok(); if(g_gs.sc[0]==x&&g_gs.sc[1]==y&&g_gs.sc[2]==w&&g_gs.sc[3]==h) return; g_gs.sc[0]=x;g_gs.sc[1]=y;g_gs.sc[2]=w;g_gs.sc[3]=h; G.Scissor(x,y,w,h); }
+static void gs_viewport(int x,int y,int w,int h){ gs_ok(); if(g_gs.vp[0]==x&&g_gs.vp[1]==y&&g_gs.vp[2]==w&&g_gs.vp[3]==h) return; g_gs.vp[0]=x;g_gs.vp[1]=y;g_gs.vp[2]=w;g_gs.vp[3]=h; G.Viewport(x,y,w,h); }
+static void gs_depthrange(void(*dr)(double,double),double n,double f){ gs_ok(); if(g_gs.dr[0]==n&&g_gs.dr[1]==f) return; g_gs.dr[0]=n; g_gs.dr[1]=f; dr(n,f); }
+static void gs_polyofs(void(*po)(float,float),float s,float b){ gs_ok(); if(g_gs.po[0]==s&&g_gs.po[1]==b) return; g_gs.po[0]=s; g_gs.po[1]=b; po(s,b); }
+static void gs_depthfunc(unsigned f){ gs_ok(); if(g_gs.dfunc==f) return; g_gs.dfunc=f; G.DepthFunc(f); }
+static void gs_depthmask(unsigned char m){ gs_ok(); if(g_gs.dmask==(int)m) return; g_gs.dmask=m; G.DepthMask(m); }
 static void d3dgl_apply_depth(void){
     D3DObj*d=g_d3dst.depth; int hasds=g_d3dst.dsv!=0 && !getenv("PELOAD_D3DGL_NODEPTH");
     uint32_t de=1,dw=1,df=2,se=0,rm=0xff,wm=0xff; const uint32_t*fr=0,*bk=0;
     if(d && d->stkind==2){ de=d->sd[0]; dw=d->sd[1]; df=d->sd[2]; se=d->sd[3]; rm=d->sd[4]&0xff; wm=(d->sd[4]>>8)&0xff; fr=&d->sd[5]; bk=&d->sd[9]; }
-    if(hasds && de){ G.Enable(0x0B71); if(G.DepthFunc) G.DepthFunc(d3d_cmp_gl(df)); if(G.DepthMask) G.DepthMask(dw?1:0); }
-    else { G.Disable(0x0B71); if(G.DepthMask) G.DepthMask(0); }
-    if(hasds && se && fr && G.StencilFuncSeparate && G.StencilOpSeparate){ G.Enable(0x0B90);
+    if(hasds && de){ gs_cap(0x0B71,1); if(G.DepthFunc) gs_depthfunc(d3d_cmp_gl(df)); if(G.DepthMask) gs_depthmask(dw?1:0); }
+    else { gs_cap(0x0B71,0); if(G.DepthMask) gs_depthmask(0); }
+    if(hasds && se && fr && G.StencilFuncSeparate && G.StencilOpSeparate){ gs_cap(0x0B90,1);
         G.StencilFuncSeparate(0x0404,d3d_cmp_gl(fr[3]),(int)g_d3dst.sref,rm); G.StencilOpSeparate(0x0404,d3d_stencilop_gl(fr[0]),d3d_stencilop_gl(fr[1]),d3d_stencilop_gl(fr[2]));
         G.StencilFuncSeparate(0x0405,d3d_cmp_gl(bk[3]),(int)g_d3dst.sref,rm); G.StencilOpSeparate(0x0405,d3d_stencilop_gl(bk[0]),d3d_stencilop_gl(bk[1]),d3d_stencilop_gl(bk[2]));
         if(G.StencilMask) G.StencilMask(wm); }
-    else G.Disable(0x0B90); }
+    else gs_cap(0x0B90,0); }
 // Blend (RT0), rasterizer (cull/front face/scissor), viewport origin. Depth stays off until depth
 // buffers exist. Viewport/scissor y: GL row y == D3D row y (see d3dgl_flipy); under NOYFLIP a D3D rect
 // starting at y spans GL rows [H-(y+h), H-y).
@@ -4298,33 +4321,34 @@ static void d3dgl_apply_state(D3DObj*rt,int vw,int vh){
                 if(G.BlendEquationSeparatei) G.BlendEquationSeparatei(i,d3d_blendop_gl(ri[3]),d3d_blendop_gl(ri[6])); }
             else G.Disablei(0x0BE2,i);
             G.ColorMaski(i,m&1,(m>>1)&1,(m>>2)&1,(m>>3)&1); }
-        if(G.BlendColor) G.BlendColor(g_d3dst.blendf[0],g_d3dst.blendf[1],g_d3dst.blendf[2],g_d3dst.blendf[3]);
+        if(G.BlendColor) gs_blendcolor(g_d3dst.blendf[0],g_d3dst.blendf[1],g_d3dst.blendf[2],g_d3dst.blendf[3]);
+        g_gs.cap[0]=0xff; memset(g_gs.cm,0xff,4); memset(g_gs.bf,0xff,sizeof g_gs.bf); memset(g_gs.be,0xff,sizeof g_gs.be);   // indexed blend touched global state
         b=0; be=-1; }
     if(b && b->stkind==1 && !getenv("PELOAD_D3DGL_NOBLEND")){ const uint32_t*r0=b->sd+2; be=(int)r0[0]; wm=r0[7]&0xF;
-        if(be){ G.Enable(0x0BE2);
-            if(G.BlendFuncSeparate) G.BlendFuncSeparate(d3d_blend_gl(r0[1]),d3d_blend_gl(r0[2]),d3d_blend_gl(r0[4]),d3d_blend_gl(r0[5]));
-            if(G.BlendEquationSeparate) G.BlendEquationSeparate(d3d_blendop_gl(r0[3]),d3d_blendop_gl(r0[6]));
-            if(G.BlendColor) G.BlendColor(g_d3dst.blendf[0],g_d3dst.blendf[1],g_d3dst.blendf[2],g_d3dst.blendf[3]); } }
-    if(be>=0){ if(!be) G.Disable(0x0BE2);
-        if(G.ColorMask) G.ColorMask(wm&1,(wm>>1)&1,(wm>>2)&1,(wm>>3)&1); }
+        if(be){ gs_cap(0x0BE2,1);
+            if(G.BlendFuncSeparate) gs_blendfunc(d3d_blend_gl(r0[1]),d3d_blend_gl(r0[2]),d3d_blend_gl(r0[4]),d3d_blend_gl(r0[5]));
+            if(G.BlendEquationSeparate) gs_blendeq(d3d_blendop_gl(r0[3]),d3d_blendop_gl(r0[6]));
+            if(G.BlendColor) gs_blendcolor(g_d3dst.blendf[0],g_d3dst.blendf[1],g_d3dst.blendf[2],g_d3dst.blendf[3]); } }
+    if(be>=0){ if(!be) gs_cap(0x0BE2,0);
+        if(G.ColorMask) gs_colormask(wm&1,(wm>>1)&1,(wm>>2)&1,(wm>>3)&1); }
     D3DObj*r=g_d3dst.raster; uint32_t cull=3, fccw=0, scis=0;   // D3D default: cull back, front = CW, no scissor
     if(r && r->stkind==3){ cull=r->sd[1]; fccw=r->sd[2]; scis=r->sd[7]; }
-    if(cull==1 || getenv("PELOAD_D3DGL_NOCULL") || !G.CullFace) G.Disable(0x0B44);
-    else { G.Enable(0x0B44); G.CullFace(cull==2?0x0404:0x0405);
+    if(cull==1 || getenv("PELOAD_D3DGL_NOCULL") || !G.CullFace) gs_cap(0x0B44,0);
+    else { gs_cap(0x0B44,1); gs_cullface(cull==2?0x0404:0x0405);
         // D3D judges winding in y-DOWN pixel space, GL in y-UP window space: the same triangle flips, so
         // D3D front=CW maps to GL front=CCW (and vice versa).
         // (Exact with the y-flipped VS: GL's image is D3D's mirrored vertically. Under PELOAD_D3DGL_NOYFLIP
         //  the image is NOT mirrored and this mapping is inverted -- kept only to reproduce the old layout.)
-        if(G.FrontFace) G.FrontFace(fccw?0x0900/*CW*/:0x0901/*CCW*/); }
+        if(G.FrontFace) gs_frontface(fccw?0x0900/*CW*/:0x0901/*CCW*/); }
     if(scis && G.Scissor && !getenv("PELOAD_D3DGL_NOSCISSOR")){ int sw=g_d3dst.sc_r-g_d3dst.sc_l, sh=g_d3dst.sc_b-g_d3dst.sc_t; if(sw<0)sw=0; if(sh<0)sh=0;
-        G.Enable(0x0C11); G.Scissor(g_d3dst.sc_l, d3dgl_flipy()?g_d3dst.sc_t:H-g_d3dst.sc_b, sw, sh); }
-    else G.Disable(0x0C11);
-    G.Viewport(g_d3dst.vp_x, d3dgl_flipy()?g_d3dst.vp_y:H-(g_d3dst.vp_y+vh), vw, vh);
+        gs_cap(0x0C11,1); gs_scissor(g_d3dst.sc_l, d3dgl_flipy()?g_d3dst.sc_t:H-g_d3dst.sc_b, sw, sh); }
+    else gs_cap(0x0C11,0);
+    gs_viewport(g_d3dst.vp_x, d3dgl_flipy()?g_d3dst.vp_y:H-(g_d3dst.vp_y+vh), vw, vh);
     // viewport depth range (D3D MinDepth/MaxDepth; the VS z remap makes GL's [-1,1] land on [n,f] like D3D's
     // [0,1]), depth clip, depth bias. Without the range the first-person weapon (own depth slice) is buried.
     { static void(*dr)(double,double); static void(*po)(float,float); static int ini; if(!ini){ ini=1; dr=dlsym(RTLD_DEFAULT,"glDepthRange"); po=dlsym(RTLD_DEFAULT,"glPolygonOffset"); }
       float zn=g_d3dst.vp_set?g_d3dst.vp_zn:0.0f, zf=g_d3dst.vp_set?g_d3dst.vp_zf:1.0f;
-      if(dr && !getenv("PELOAD_D3DGL_NODEPTHRANGE")) dr(zn,zf);
+      if(dr && !getenv("PELOAD_D3DGL_NODEPTHRANGE")) gs_depthrange(dr,zn,zf);
       D3DObj*rs=g_d3dst.raster; int dclip=1; float bias=0,slope=0;
       if(rs && rs->stkind==3){ int32_t db=(int32_t)rs->sd[3]; memcpy(&slope,&rs->sd[5],4); bias=(float)db; dclip=rs->sd[6]?1:0; }
       int alton = !getenv("PELOAD_D3DGL_ALT5") || (((long)(mono_s()/5.0))&1);
@@ -4333,10 +4357,10 @@ static void d3dgl_apply_state(D3DObj*rt,int vw,int vh){
       if(!getenv("PELOAD_D3DGL_DEPTHCLAMP")) dclip=1;
       if(getenv("PELOAD_D3DGL_NODEPTHCLAMP") && alton) dclip=1;
       if(getenv("PELOAD_D3DGL_NOPOLYOFS") && alton){ bias=0; slope=0; }
-      if(dclip) G.Disable(0x864F/*DEPTH_CLAMP*/); else G.Enable(0x864F);
-      if((bias!=0||slope!=0) && po){ G.Enable(0x8037/*POLYGON_OFFSET_FILL*/); po(slope,bias); } else G.Disable(0x8037); } }
+      if(dclip) gs_cap(0x864F,0); else gs_cap(0x864F,1);
+      if((bias!=0||slope!=0) && po){ gs_cap(0x8037,1); gs_polyofs(po,slope,bias); } else gs_cap(0x8037,0); } }
 // state that must NOT leak into clears / copies (D3D clears & copies ignore blend, write mask and scissor)
-static void d3dgl_reset_raster_ops(void){ G.Disable(0x0BE2); G.Disable(0x0C11); if(G.ColorMask) G.ColorMask(1,1,1,1); G.Disable(0x0B71); G.Disable(0x0B90); G.Disable(0x8DB9/*FRAMEBUFFER_SRGB*/); }
+static void d3dgl_reset_raster_ops(void){ gs_cap(0x0BE2,0); gs_cap(0x0C11,0); if(G.ColorMask) gs_colormask(1,1,1,1); gs_cap(0x0B71,0); gs_cap(0x0B90,0); gs_cap(0x8DB9,0); }
 // sampler-type code (dxbc2glsl: 0 sampler2D, 1 sampler3D, 2 samplerCube, 3 sampler2DArray, 4 samplerCubeArray) -> GL target
 static const unsigned g_tt_target[6]={GLE_TEX2D,0x806F,0x8513,0x8C1A,0x9009,0x8C2A/*TEXTURE_BUFFER*/};
 static void d3dgl_scan_tt_p(const char*src,signed char*tt,const char*pfx){
@@ -4699,16 +4723,16 @@ static void d3dgl_clear_rtv(void* rtvview,const float* col){
     D3DObj* v=rtvview; D3DObj* rt=(v&&v->data)?(D3DObj*)v->data:v; if(!rt) return;
     GLLOCK(); if(CGLGetCurrentContext()!=g_d3dgl_cgl) CGLSetCurrentContext(g_d3dgl_cgl);
     d3dgl_ensure_rt(rt); G.BindFramebuffer(GLE_FBO,rt->glfbo); d3dgl_reset_raster_ops();
-    if(rt->glsrgb && dxgi_is_srgb((v&&v->vkind)?v->vfmt:rt->fmt)) G.Enable(0x8DB9);   // D3D encodes the clear colour for _SRGB RTVs
+    if(rt->glsrgb && dxgi_is_srgb((v&&v->vkind)?v->vfmt:rt->fmt)) gs_cap(0x8DB9,1);   // D3D encodes the clear colour for _SRGB RTVs
     if(col) G.ClearColor(col[0],col[1],col[2],col[3]); else G.ClearColor(0,0,0,0);
-    if(G.DepthMask)G.DepthMask(1); G.Clear(GLE_COLORBIT); G.Disable(0x8DB9); GLUNLOCK(); }
+    G.Clear(GLE_COLORBIT); gs_cap(0x8DB9,0); GLUNLOCK(); }
 static void d3dgl_clear_dsv(void*dsvview,uint32_t flags,float depth,uint8_t stencil){
     if(!g_d3dgl_ready || getenv("PELOAD_D3DGL_NODEPTH")) return;
     D3DObj* v=dsvview; D3DObj* ds=(v&&v->data)?(D3DObj*)v->data:v; if(!ds) return;
     GLLOCK(); if(CGLGetCurrentContext()!=g_d3dgl_cgl) CGLSetCurrentContext(g_d3dgl_cgl);
     unsigned fbo=d3dgl_fbo_for(0,0,ds); G.BindFramebuffer(GLE_FBO,fbo); d3dgl_reset_raster_ops();
     unsigned bits=0;
-    if(flags&1){ if(G.DepthMask) G.DepthMask(1); if(G.ClearDepth) G.ClearDepth((double)depth); bits|=0x100; }      // D3D11_CLEAR_DEPTH
+    if(flags&1){ gs_depthmask(1); if(G.ClearDepth) G.ClearDepth((double)depth); bits|=0x100; }      // D3D11_CLEAR_DEPTH
     if((flags&2) && ds->gldsatt==0x821A){ if(G.StencilMask) G.StencilMask(0xff); if(G.ClearStencil) G.ClearStencil(stencil); bits|=0x400; } // _STENCIL
     if(bits) G.Clear(bits);
     G.BindFramebuffer(GLE_FBO,0); GLUNLOCK(); }
@@ -4841,6 +4865,8 @@ static void prof_report(void){ if(!prof_on()) return; uint64_t now=prof_now(); i
     g_prof_ns=g_prof_n=g_prof_pres_ns=g_prof_pres_n=0; g_prof_wall0=now; }
 // empty pixel shader for depth-only passes (D3D allows PS=NULL; GL needs a fragment stage in a mono program)
 static D3DObj* d3dgl_null_ps(void){ static D3DObj o; if(!o.glsl){ o.stype=1; o.glsl=strdup("#version 410 core\n// stage=ps\nvoid main(){}\n"); } return &o; }
+static struct { unsigned buf; unsigned comps, type; unsigned char norm; uint32_t stride; uint64_t off; unsigned div; } g_va[16];
+static uint32_t g_va_en; static int g_va_nocache=-1;
 static void d3dgl_draw_impl(uint32_t vcount,int indexed,uint32_t instcount,uint32_t start,int32_t base,uint32_t sinst){
     if(prof_on()) g_ph_t=prof_now();
     if(!d3dgl_ensure()) return;
@@ -4877,7 +4903,7 @@ static void d3dgl_draw_impl(uint32_t vcount,int indexed,uint32_t instcount,uint3
     { D3DObj*one[1]={rt}; unsigned fbo = (g_d3dst.num_rt>1&&rt) ? d3dgl_fbo_for(g_d3dst.rtvs,g_d3dst.num_rt,dsv) : d3dgl_fbo_for(rt?one:0,rt?1:0,dsv);
       G.BindFramebuffer(GLE_FBO,fbo); }
     { D3DObj*v0=g_d3dst.rtvv[0]; int enc = rt && rt->glsrgb && dxgi_is_srgb(v0?v0->vfmt:rt->fmt);   // _SRGB RTV: encode on write
-      if(enc) G.Enable(0x8DB9/*FRAMEBUFFER_SRGB*/); else G.Disable(0x8DB9); }
+      gs_cap(0x8DB9,enc); }
     if(!rt) rt=dsv;                                            // depth-only: size/viewport from the depth target
     int vw=g_d3dst.vp_w>0?g_d3dst.vp_w:(rt->w?(int)rt->w:g_d3dgl_W); if(vw>4096)vw=4096;
     int vh=g_d3dst.vp_h>0?g_d3dst.vp_h:(rt->h?(int)rt->h:g_d3dgl_H); if(vh>4096)vh=4096;
@@ -5050,9 +5076,14 @@ static void d3dgl_draw_impl(uint32_t vcount,int indexed,uint32_t instcount,uint3
                     if(ringoff[slot]>=0){ G.BindBuffer(GLE_ARRAY,g_ring); aoff=(uint64_t)ringoff[slot]+il->elem[i].off; ringed=1; } } }
             if(!ringed){ d3dgl_buf_need(sb,GLE_ARRAY,lo,hi);   // also binds GL_ARRAY_BUFFER for the pointer below
                 if(use_ring && !inst) aoff+=(uint64_t)vshift*stride; }
-            G.VertexAttribPointer((unsigned)loc,(int)comps,gt,norm,(int)stride,(const void*)(size_t)aoff);
-            if(G.VertexAttribDivisor) G.VertexAttribDivisor((unsigned)loc,inst?step:0);
-            G.EnableVertexAttribArray((unsigned)loc); amask|=1u<<loc; nattr++;
+            // attribute state of the shared VAO is cached: only changed pointers/divisors/enables are sent
+            { unsigned cb=ringed?g_ring:sb->glbuf; unsigned dv=inst?step:0; int nc=g_va_nocache<0?(g_va_nocache=getenv("PELOAD_D3DGL_NOSTATECACHE")?1:0):g_va_nocache;
+              if(nc || g_va[loc].buf!=cb||g_va[loc].comps!=comps||g_va[loc].type!=gt||g_va[loc].norm!=norm||g_va[loc].stride!=(uint32_t)stride||g_va[loc].off!=aoff){
+                  G.VertexAttribPointer((unsigned)loc,(int)comps,gt,norm,(int)stride,(const void*)(size_t)aoff);
+                  g_va[loc].buf=cb; g_va[loc].comps=comps; g_va[loc].type=gt; g_va[loc].norm=norm; g_va[loc].stride=(uint32_t)stride; g_va[loc].off=aoff; }
+              if((nc || g_va[loc].div!=dv) && G.VertexAttribDivisor){ G.VertexAttribDivisor((unsigned)loc,dv); g_va[loc].div=dv; }
+              if(nc || !(g_va_en&(1u<<loc))){ G.EnableVertexAttribArray((unsigned)loc); g_va_en|=1u<<loc; } }
+            amask|=1u<<loc; nattr++;
         }
         // PELOAD_D3DGL_VTXDUMP: ground-truth the world-space vertex range of element 0 (POSITION) so we
         // can size/aim the camera. Only meaningful for an uncompressed float position (DXGI 2/6).
@@ -5114,6 +5145,7 @@ static void d3dgl_draw_impl(uint32_t vcount,int indexed,uint32_t instcount,uint3
                 char m2[280]; int k2=snprintf(m2,sizeof m2,"  [rangedump] fmt=%u nv=%llu stride=%u span=[%.0f %.0f %.0f] mean=[%.0f %.0f %.0f] cb1scale=[%.0f %.0f %.0f] outliers=%d/%llu\n",
                     fmt,(unsigned long long)nv,stride,span[0],span[1],span[2],med[0],med[1],med[2],c1[0],c1[1],c1[2],outl,(unsigned long long)nv); (void)!write(2,m2,k2); } } }
     }
+    { uint32_t stale=g_va_en&~amask; for(int l=0;stale && l<16;l++) if(stale&(1u<<l)){ G.DisableVertexAttribArray((unsigned)l); g_va_en&=~(1u<<l); stale&=~(1u<<l); } }
     PH(5); g_d3dgl_phase="draw";
     unsigned mode=d3dgl_topo(g_d3dst.topo);
     unsigned n=vcount;               // D3D: a zero count draws nothing
@@ -5153,7 +5185,7 @@ static void d3dgl_draw_impl(uint32_t vcount,int indexed,uint32_t instcount,uint3
         // D3D11 strip topologies ALWAYS cut at the all-ones index; GL 4.1 needs PRIMITIVE_RESTART + the index,
         // otherwise the cut index is fetched as vertex 0xFFFF and the strip fans out to a garbage vertex.
         int strip=(g_d3dst.topo==5||g_d3dst.topo==3), pr=strip&&G.PrimitiveRestartIndex;
-        if(pr){ G.Enable(0x8F9D/*PRIMITIVE_RESTART*/); G.PrimitiveRestartIndex(itype==GLE_UI?0xFFFFFFFFu:0xFFFFu); }
+        if(pr){ gs_cap(0x8F9D,1); G.PrimitiveRestartIndex(itype==GLE_UI?0xFFFFFFFFu:0xFFFFu); }
         const void*off=(const void*)(size_t)boff;
         base = (int32_t)((int64_t)base - vshift);                          // ring-rebased vertices
         if(n){ if(base && G.DrawElementsBaseVertex){                         // + BaseVertexLocation
@@ -5161,7 +5193,7 @@ static void d3dgl_draw_impl(uint32_t vcount,int indexed,uint32_t instcount,uint3
                    else G.DrawElementsBaseVertex(mode,(int)n,itype,off,base); }
                else { if(instcount>1) G.DrawElementsInstanced(mode,(int)n,itype,off,(int)instcount);
                       else G.DrawElements(mode,(int)n,itype,off); } }
-        if(pr) G.Disable(0x8F9D);
+        if(pr) gs_cap(0x8F9D,0);
     } else if(!indexed){                                                     // + StartVertexLocation
         int first=(int)((int64_t)start - vshift);
         if(instcount>1) G.DrawArraysInstanced(mode,first,(int)n,(int)instcount);
@@ -5218,7 +5250,7 @@ static void d3dgl_draw_impl(uint32_t vcount,int indexed,uint32_t instcount,uint3
                     char p[256]; snprintf(p,sizeof p,"%s/reclaimer_cov_%d_%02d.bmp",home?home:"/tmp",(int)getpid(),ndump);
                     bmp_write_rgba(p,W,H,cbuf);
                     char m[220]; int k=snprintf(m,sizeof m,"  [covprobe] NEWHIGH DUMP -> %s (vp=%dx%d fbo=%u red=%d nonblack=%d glerr=%u)\n",p,W,H,crt?crt->glfbo:0,red,nb,ge); (void)!write(2,m,k); } } } }
-    PH(6); for(int l=0;l<16;l++) if(amask&(1u<<l)){ G.DisableVertexAttribArray((unsigned)l); if(G.VertexAttribDivisor) G.VertexAttribDivisor((unsigned)l,0); }
+    PH(6);   // (attribute arrays stay enabled for the next draw; stale ones are disabled before each draw)
     g_d3dgl_phase="done"; g_d3dgl_frame_draws++; g_draws_total++; d3dgl_note_rt(rt); rtc_note(rt,rt->w,rt->h,rt->fmt,nattr>0,g_d3dst.psrv[0]);
     { D3DObj*t0=g_d3dst.psrv[0]; { D3DObj*b=g_d3dst.blend; const uint32_t*r0=(b&&b->stkind==1)?b->sd+2:0;
       flog("draw rt=%06lx %ux%u f%u vp=%dx%d ps=[%.40s] t0=%06lx %ux%u f%u t1=%06lx blend=%u:%u/%u wm=%x",((unsigned long)rt>>4)&0xffffff,rt->w,rt->h,rt->fmt,vw,vh,ps?ps->rname:"-",
@@ -5323,7 +5355,9 @@ static void d3dgl_build_blit(unsigned*vao){
 }
 // Draw the latched backbuffer texture across the current default framebuffer. Caller has made the
 // presenting context current and passes its own VAO. Safe to call from render or present thread.
-static void d3dgl_blit_fullscreen(unsigned vao){
+static void d3dgl_blit_fullscreen_i(unsigned vao);
+static void d3dgl_blit_fullscreen(unsigned vao){ d3dgl_blit_fullscreen_i(vao); gs_invalidate(); }
+static void d3dgl_blit_fullscreen_i(unsigned vao){
     if(!g_d3dgl_present_tex) return;
     G.BindFramebuffer(GLE_FBO,0); G.Viewport(0,0,g_d3dgl_W,g_d3dgl_H);
     G.Disable(0x0B71); G.Disable(0x0BE2);
@@ -5346,6 +5380,67 @@ static void d3dgl_blit_fullscreen(unsigned vao){
                 static int wn; const char*home=getenv("HOME"); char p[512]; snprintf(p,sizeof p,"%s/reclaimer_win_%d_%03d%s.bmp",home?home:"/tmp",(int)getpid(),wn++, getenv("PELOAD_D3DGL_ALT5")?((((long)(mono_s()/5.0))&1)?"_B":"_A"):"");
                 bmp_write_rgba(p,w,h,cap); char m[160]; int k=snprintf(m,sizeof m,"  [d3dgl] win-shot -> %s (%dx%d)\n",p,w,h); (void)!write(2,m,k); free(cap); } } } }
 }
+// ---- fenced present queue (render thread -> present thread) -------------------------------------------
+// The present thread used to re-blit whatever the backbuffer held every 33 ms (window capped at ~30 fps,
+// and the render thread glFinish()ed every frame so the other context saw finished pixels). Now each engine
+// Present copies the frame region into one of 3 window-sized textures, drops a GL fence and signals; the
+// present thread wakes, waits on the fence on the GPU (glWaitSync, no CPU stall) and shows that frame.
+// PELOAD_D3DGL_NOPQ restores the old timer + glFinish path.
+static unsigned g_pq_tex[3], g_pq_fbo[3]; static void* g_pq_fence[3]; static int g_pq_latest=-1, g_pq_reading=-1, g_pq_w, g_pq_h;
+static unsigned long g_pq_seq; static pthread_mutex_t g_pq_mx=PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_pq_cv=PTHREAD_COND_INITIALIZER;
+static void*(*pq_fencesync)(unsigned,unsigned); static void(*pq_waitsync)(void*,unsigned,uint64_t); static void(*pq_delsync)(void*);
+static int pq_on(void){ static int on=-1; if(on<0){ on=getenv("PELOAD_D3DGL_NOPQ")?0:1; if(on){ pq_fencesync=dlsym(RTLD_DEFAULT,"glFenceSync"); pq_waitsync=dlsym(RTLD_DEFAULT,"glWaitSync"); pq_delsync=dlsym(RTLD_DEFAULT,"glDeleteSync"); if(!pq_fencesync||!pq_waitsync||!pq_delsync) on=0; } } return on; }
+// render thread (g_glmx held, render context current)
+static void pq_publish(void){
+    if(!pq_on() || !g_d3dgl_present_tex || !G.BlitFramebuffer) return;
+    D3DObj*bb=g_d3d_backbuf; if(!bb||!bb->glfbo||bb->gltex!=g_d3dgl_present_tex) return;   // only the swap-chain backbuffer path
+    int W=g_d3dgl_W, H=g_d3dgl_H; if(W<1||H<1) return;
+    int slot; pthread_mutex_lock(&g_pq_mx);
+    for(slot=0;slot<3;slot++) if(slot!=g_pq_reading && slot!=g_pq_latest) break;
+    void*old=(slot<3)?g_pq_fence[slot]:0; if(slot<3) g_pq_fence[slot]=0;
+    pthread_mutex_unlock(&g_pq_mx); if(slot>=3) return;
+    if(old) pq_delsync(old);
+    if(g_pq_w!=W||g_pq_h!=H||!g_pq_tex[0]){ for(int i=0;i<3;i++){ if(!g_pq_tex[i]){ G.GenTextures(1,&g_pq_tex[i]); G.GenFramebuffers(1,&g_pq_fbo[i]); }
+            TEXCACHE_INVALIDATE(); G.BindTexture(GLE_TEX2D,g_pq_tex[i]); G.TexImage2D(GLE_TEX2D,0,GLE_RGBA8,W,H,0,GLE_RGBA,GLE_UBYTE,0);
+            G.TexParameteri(GLE_TEX2D,0x2801,GLE_LINEAR); G.TexParameteri(GLE_TEX2D,0x2800,GLE_LINEAR); G.TexParameteri(GLE_TEX2D,0x2802,GLE_CLAMP); G.TexParameteri(GLE_TEX2D,0x2803,GLE_CLAMP); G.TexParameteri(GLE_TEX2D,0x813D,0);
+            G.BindFramebuffer(GLE_FBO,g_pq_fbo[i]); G.FramebufferTexture2D(GLE_FBO,GLE_CA0,GLE_TEX2D,g_pq_tex[i],0); }
+        g_pq_w=W; g_pq_h=H; }
+    int vw=g_d3dgl_present_vw>0?g_d3dgl_present_vw:g_d3dgl_present_tw, vh=g_d3dgl_present_vh>0?g_d3dgl_present_vh:g_d3dgl_present_th;
+    d3dgl_reset_raster_ops();
+    G.BindFramebuffer(0x8CA8,bb->glfbo); G.BindFramebuffer(0x8CA9,g_pq_fbo[slot]);
+    // raw bytes (FRAMEBUFFER_SRGB off), scaled to the window; D3D row 0 (GL row 0) lands at the window TOP
+    G.BlitFramebuffer(0,0,vw,vh, 0,H,W,0, 0x4000,0x2601/*LINEAR*/);
+    G.BindFramebuffer(GLE_FBO,0);
+    void*f=pq_fencesync(0x9117/*SYNC_GPU_COMMANDS_COMPLETE*/,0); G.Flush();
+    pthread_mutex_lock(&g_pq_mx); g_pq_fence[slot]=f; g_pq_latest=slot; g_pq_seq++; pthread_cond_signal(&g_pq_cv); pthread_mutex_unlock(&g_pq_mx); }
+// present thread: wait (up to ms) for a frame newer than *seen; draw it. Returns 1 if a frame was shown.
+static unsigned g_pq_prog, g_pq_vao; static int g_pq_sloc=-1;
+static int pq_present_wait(unsigned long*seen,int ms){
+    if(!pq_on()) return 0;
+    pthread_mutex_lock(&g_pq_mx);
+    if(g_pq_seq==*seen){ struct timespec ts; clock_gettime(CLOCK_REALTIME,&ts); ts.tv_nsec+=(long)ms*1000000L; ts.tv_sec+=ts.tv_nsec/1000000000L; ts.tv_nsec%=1000000000L;
+        pthread_cond_timedwait(&g_pq_cv,&g_pq_mx,&ts); }
+    if(g_pq_seq==*seen || g_pq_latest<0){ pthread_mutex_unlock(&g_pq_mx); return 0; }
+    int slot=g_pq_latest; g_pq_reading=slot; *seen=g_pq_seq; void*f=g_pq_fence[slot];
+    pthread_mutex_unlock(&g_pq_mx);
+    if(f) pq_waitsync(f,0,0xFFFFFFFFFFFFFFFFull/*TIMEOUT_IGNORED*/);
+    if(!g_pq_prog){ const char*vs="#version 410 core\nout vec2 uv;void main(){vec2 p=vec2((gl_VertexID==1)?3.0:-1.0,(gl_VertexID==2)?3.0:-1.0);uv=p*0.5+0.5;gl_Position=vec4(p,0.0,1.0);}\n";
+        const char*fs="#version 410 core\nin vec2 uv;out vec4 c;uniform sampler2D s;void main(){c=vec4(texture(s,uv).rgb,1.0);}\n";
+        unsigned v=G.CreateShader(GLE_VS),fr=G.CreateShader(GLE_FS); G.ShaderSource(v,1,&vs,0); G.CompileShader(v); G.ShaderSource(fr,1,&fs,0); G.CompileShader(fr);
+        g_pq_prog=G.CreateProgram(); G.AttachShader(g_pq_prog,v); G.AttachShader(g_pq_prog,fr); G.LinkProgram(g_pq_prog); G.DeleteShader(v); G.DeleteShader(fr);
+        g_pq_sloc=G.GetUniformLocation(g_pq_prog,"s"); G.GenVertexArrays(1,&g_pq_vao); }
+    G.BindFramebuffer(GLE_FBO,0); G.Viewport(0,0,g_d3dgl_W,g_d3dgl_H); G.Disable(0x0B71); G.Disable(0x0BE2); G.Disable(0x0C11); G.Disable(0x8DB9);
+    G.UseProgram(0); G.BindProgramPipeline(0); G.UseProgram(g_pq_prog);
+    G.ActiveTexture(GLE_TEX0); G.BindTexture(GLE_TEX2D,g_pq_tex[slot]); if(G.BindSampler) G.BindSampler(0,0);
+    if(g_pq_sloc>=0) G.ProgramUniform1i(g_pq_prog,g_pq_sloc,0);
+    G.BindVertexArray(g_pq_vao); G.DrawArrays(4,0,3); G.Flush();
+    pthread_mutex_lock(&g_pq_mx); g_pq_reading=-1; pthread_mutex_unlock(&g_pq_mx);
+    if(getenv("PELOAD_D3DGL_SHOTWIN")){ static unsigned long bc; int every=atoi(getenv("PELOAD_D3DGL_SHOTWIN")); if(every<1)every=20;
+        if((bc++ % every)==0 && G.ReadPixels){ int w=g_d3dgl_W,h=g_d3dgl_H; unsigned char*cap=calloc(1,(size_t)w*h*4);
+            if(cap){ if(G.ReadBuffer)G.ReadBuffer(0x0405/*BACK*/); G.ReadPixels(0,0,w,h,GLE_RGBA,GLE_UBYTE,cap);
+                static int wn; const char*home=getenv("HOME"); char p[512]; snprintf(p,sizeof p,"%s/reclaimer_win_%d_%03d%s.bmp",home?home:"/tmp",(int)getpid(),wn++, getenv("PELOAD_D3DGL_ALT5")?((((long)(mono_s()/5.0))&1)?"_B":"_A"):"");
+                bmp_write_rgba(p,w,h,cap); free(cap); } } }
+    return 1; }
 // Called on the PRESENT thread (owns the window context g_present_glctx, which shares objects with
 // our offscreen render context). Displays the backbuffer the render thread produced.
 static unsigned g_d3dgl_pt_vao;   // present-thread-local VAO (VAOs are not shared across contexts)
@@ -5467,7 +5562,7 @@ static void d3dgl_present_impl(void){
         if(g_d3dgl_nsctx) om0(g_d3dgl_nsctx,"flushBuffer");
         cocoa_pump();
     }
-    if(G.Flush) G.Flush();
+    if(g_d3dgl_offscreen) pq_publish(); else if(G.Flush) G.Flush();
     // PELOAD_D3DGL_SHOTPRESENT: dump the ACTUAL PRESENTED texture (what the window shows) via glGetTexImage,
     // every N presents (default 30). My RT dumps grabbed the wrong G-buffer; this is the real on-screen frame.
     if(getenv("PELOAD_D3DGL_SHOTPRESENT") && g_d3dgl_present_tex){
@@ -5745,7 +5840,11 @@ static void* present_thread_fn(void*a){ (void)a; void(*set)(void*)=dlsym(RTLD_DE
         // (the real translated-shader output) on this thread's window instead of the GDI composite.
         int use_d3dgl = d3dgl_enabled() && g_d3dgl_ready && g_d3dgl_offscreen && g_d3dgl_present_tex;
         if(getenv("PELOAD_TRACE_PRESENT")){ static int lp; if((lp++ %60)==0){ char m[96]; int k=snprintf(m,sizeof m,"  [present] branch=%s d3dgl(en=%d ready=%d off=%d tex=%u)\n",use_d3dgl?"d3dgl_blit":"gdi_main",d3dgl_enabled(),g_d3dgl_ready,g_d3dgl_offscreen,g_d3dgl_present_tex); (void)!write(2,m,k);} }
-        if(use_d3dgl){
+        static unsigned long pq_seen; int pq_shown=0;
+        if(use_d3dgl && pq_on()){
+            if(pq_present_wait(&pq_seen,50)){ pq_shown=1; if(cglflush&&g_present_glctx) cglflush(g_present_glctx); }
+            else if(!g_pq_seq){ d3dgl_blit_present(); if(cglflush&&g_present_glctx) cglflush(g_present_glctx); }   // nothing queued yet
+        } else if(use_d3dgl){
             d3dgl_blit_present(); if(cglflush&&g_present_glctx) cglflush(g_present_glctx);
         } else gdi_present_main();
         // PELOAD_WIN_SHOT: capture the ACTUAL window framebuffer (post-blit) so we see exactly what the
@@ -5767,7 +5866,8 @@ static void* present_thread_fn(void*a){ (void)a; void(*set)(void*)=dlsym(RTLD_DE
         // (e.g. a halo3 GPU-frame-ready flag at 0x1821b0a74 + 24*i) each present cycle.
         const char* pk32=getenv("PELOAD_POKE32");
         if(pk32){ char buf[256]; snprintf(buf,sizeof buf,"%s",pk32); for(char*tok=strtok(buf,",");tok;tok=strtok(0,",")){ char*c=strchr(tok,':'); if(!c)continue; *c=0; uint64_t a=strtoull(tok,0,16); uint32_t v=(uint32_t)strtoull(c+1,0,16); if(a>0x100000000ULL) *(volatile uint32_t*)a=v; } }
-        struct timespec ts={0,33*1000000L}; nanosleep(&ts,0); } return 0; }
+        if(!(use_d3dgl && pq_on() && g_pq_seq)){ struct timespec ts={0,33*1000000L}; nanosleep(&ts,0); }   // frame-driven once the queue runs
+        (void)pq_shown; } return 0; }
 static void* cocoa_make_gl_window_i(int w,int h){ CGLContextObj c=cocoa_make_gl_window(w,h);
     if(c){ g_present_glctx=(void*)c; void(*set)(void*)=dlsym(RTLD_DEFAULT,"CGLSetCurrentContext");
         if(getenv("PELOAD_HOLD_WINDOW")){ if(!g_present_started){ g_present_started=1; if(set)set(0); /*release from this thread*/ pthread_t th; pthread_create(&th,0,present_thread_fn,0); ws("  [hold-window] present thread started\n"); } }
