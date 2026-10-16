@@ -1300,6 +1300,20 @@ static void draw_log(const char*tag,uint32_t count){ draw_census(); if(!getenv("
             if(c13p&&c13p->data&&c13p->size>=16){ const float*fp=(const float*)c13p->data; int nv=(int)(c13p->size/16); if(nv>10)nv=10;
                 ck+=snprintf(cm+ck,sizeof cm-ck," pscb13[0..%d]=",nv-1); for(int v=0;v<nv&&ck<(int)sizeof cm-40;v++) ck+=snprintf(cm+ck,sizeof cm-ck,"[%.2f %.2f %.2f %.2f]",fp[v*4],fp[v*4+1],fp[v*4+2],fp[v*4+3]); }
             ck+=snprintf(cm+ck,sizeof cm-ck,"\n"); (void)!write(2,cm,ck);
+            // VERTEX FORMAT + sample: is POSITION compressed (16-bit, needs cb3 decompress) or float3?
+            // Interpret vertex 0's first bytes both ways so we can tell which path the geometry needs.
+            D3DObj*il=g_d3dst.il, *vb=g_d3dst.vb[0]; uint32_t vstr=g_d3dst.vstride[0];
+            char vm2[380]; int vk=snprintf(vm2,sizeof vm2,"  [vtxfmt] stride=%u elems=%d:",vstr,il?il->nelem:0);
+            if(il) for(int e=0;e<il->nelem&&vk<260;e++) vk+=snprintf(vm2+vk,sizeof vm2-vk," %s@%u/%s",il->elem[e].sem,il->elem[e].off,dxgi_fmt_name(il->elem[e].fmt));
+            if(vb&&vb->data&&vstr>=6){ const uint8_t*v0=(const uint8_t*)vb->data; const float*ff=(const float*)v0; const int16_t*ss=(const int16_t*)v0;
+                vk+=snprintf(vm2+vk,sizeof vm2-vk," | v0 asF32=[%.2f %.2f %.2f] asI16n=[%.3f %.3f %.3f]",ff[0],ff[1],ff[2],ss[0]/32767.0f,ss[1]/32767.0f,ss[2]/32767.0f); }
+            vk+=snprintf(vm2+vk,sizeof vm2-vk,"\n"); (void)!write(2,vm2,vk);
+            // ALL VS cbuffer slots for this compressed draw: which are bound + first 2 vec4 (find cb1 =
+            // the vertex-decompression scale/offset, needed to un-collapse the [-1,1] compressed positions).
+            char vb2[420]; int vk2=snprintf(vb2,sizeof vb2,"  [vscbs]"); for(int b=0;b<16;b++){ D3DObj*cc=g_d3dst.vscb[b]; if(!cc)continue;
+                vk2+=snprintf(vb2+vk2,sizeof vb2-vk2," b%d=%lluB",b,(unsigned long long)cc->size);
+                if(cc->data&&cc->size>=32&&vk2<340){ const float*ff=(const float*)cc->data; vk2+=snprintf(vb2+vk2,sizeof vb2-vk2,"[%.2f %.2f %.2f %.2f|%.2f %.2f %.2f %.2f]",ff[0],ff[1],ff[2],ff[3],ff[4],ff[5],ff[6],ff[7]); } }
+            vk2+=snprintf(vb2+vk2,sizeof vb2-vk2,"\n"); (void)!write(2,vb2,vk2);
             // sample the bound textures' raw data: how many nonzero bytes (black vs has-content) + the
             // GL-uploaded flag + format, for slots 0..8 (the terrain blend/detail textures)
             char tm[400]; int tk2=snprintf(tm,sizeof tm,"  [texdata]"); for(int r=0;r<9;r++){ D3DObj*t=g_d3dst.psrv[r];
@@ -3433,6 +3447,7 @@ static void d3dgl_bind_cbs(D3DObj*sh,D3DObj**cbarr,const uint32_t*first,const ui
 // Synthesized view-projection (PELOAD_D3DGL_SYNVP). cb0 = P(FOV 70) * V, V = the camera view matrix
 // found at runtime (fresh pool CB whose P*V projects the current object on-screen). See cb0find.
 static D3DObj g_syn_cb0; static uint8_t g_syn_cb0_buf[256];
+static D3DObj g_syn_cb1; static uint8_t g_syn_cb1_buf[256];   // synthesized vertex-decompression cb1
 static void d3dgl_mul44(const float*A,const float*B,float*O){ for(int r=0;r<4;r++)for(int c=0;c<4;c++){ float a=0; for(int k=0;k<4;k++)a+=A[r*4+k]*B[k*4+c]; O[r*4+c]=a; } }
 static int d3dgl_synth_cb0(void){
     D3DObj*b=g_last_b12; if(!b||!b->data) return 0;
@@ -3458,36 +3473,68 @@ static int d3dgl_synth_cb0(void){
                        z[0],z[1],z[2], -(z[0]*e[0]+z[1]*e[1]+z[2]*e[2]),
                        0,0,0,1 };
         float*out=(float*)g_syn_cb0_buf; memset(out,0,256); d3dgl_mul44(P,Vm,out);
-        if(getenv("PELOAD_SYNVP_OBJ")) out[48]=out[49]=out[50]=out[51]=1.0f;
+        if(getenv("PELOAD_SYNVP_OBJ")||getenv("PELOAD_D3DGL_DECOMP")) out[48]=out[49]=out[50]=out[51]=1.0f;
         g_syn_cb0.data=g_syn_cb0_buf; g_syn_cb0.size=256; g_syn_cb0.is_cb=1;
         if(getenv("PELOAD_TRACE_D3DGL")){ static int cc; if(cc++<2){ char m[200]; int k=snprintf(m,sizeof m,"  [cam] eye=[%.1f %.1f %.1f] tgt=[%.1f %.1f %.1f] cb0row0=[%.3f %.3f %.3f %.3f]\n",e[0],e[1],e[2],t[0],t[1],t[2],out[0],out[1],out[2],out[3]); (void)!write(2,m,k);} }
         return 1;
     }
-    // camera VIEW = the fresh small CB whose P*V projects the MOST per-object origins on-screen (LH, V
-    // as-is -- determined empirically, 30/32). Re-detect every frame; cheap (a few small CBs).
-    // PELOAD_SYNVP_CB=<i> forces g_cbreg[i] as V (debug: confirm the cb0find winner renders).
-    D3DObj* V=0; int bestN=1;
+    // camera VIEW = the CB holding the player camera's view matrix. The engine stores it as a STANDALONE
+    // 4x4 (64B) ORTHONORMAL matrix (cb0find: [-1 0 0 8.3][0 -1 0 -10][0 0 1 17.1] projects 30/32 object
+    // origins). Per-object world matrices live in LARGER buffers (256B+ bone/scale ARRAYS) whose first
+    // entry can look view-like but score high only for their own object -> they warped the frame. So:
+    // require an ORTHONORMAL rotation (unit, orthogonal rows = a true view) and PREFER the smallest such
+    // buffer (the standalone camera), breaking ties by most origins on-screen.
+    // PELOAD_SYNVP_CB=<i> forces g_cbreg[i] as V (debug).
+    D3DObj* V=0; int bestN=0; uint64_t bestSz=~0ull;
     const char*force=getenv("PELOAD_SYNVP_CB");
     if(force){ int fi=atoi(force); if(fi>=0&&fi<g_ncbreg&&g_cbreg[fi]&&g_cbreg[fi]->data) V=g_cbreg[fi]; }
     else
     for(int i=0;i<g_ncbreg;i++){ D3DObj*c=g_cbreg[i]; if(!c||!c->data||c->size<64||c->size>512) continue; if((g_cb_tick-c->cb_upd)>2) continue;
         const float*vm=(const float*)c->data; int bad=0; for(int j=0;j<16;j++){ float v=vm[j]; if(v!=v||v<-1e9f||v>1e9f){bad=1;break;} } if(bad)continue;
-        // Reject a near-identity rotation (the real camera view has a non-trivial basis): require the
-        // upper-left 3x3 to differ meaningfully from I, else a trivial "looking down +z from origin"
-        // matrix wins the on-screen count without being the actual camera.
+        // ORTHONORMALITY: the 3x3 upper-left must be unit-length rows that are mutually orthogonal (a pure
+        // rotation = a real camera view). This rejects per-object matrices that carry scale/skew.
+        float l0=vm[0]*vm[0]+vm[1]*vm[1]+vm[2]*vm[2], l1=vm[4]*vm[4]+vm[5]*vm[5]+vm[6]*vm[6], l2=vm[8]*vm[8]+vm[9]*vm[9]+vm[10]*vm[10];
+        if(fabsf(l0-1)>0.06f||fabsf(l1-1)>0.06f||fabsf(l2-1)>0.06f) continue;
+        float d01=vm[0]*vm[4]+vm[1]*vm[5]+vm[2]*vm[6], d02=vm[0]*vm[8]+vm[1]*vm[9]+vm[2]*vm[10], d12=vm[4]*vm[8]+vm[5]*vm[9]+vm[6]*vm[10];
+        if(fabsf(d01)>0.06f||fabsf(d02)>0.06f||fabsf(d12)>0.06f) continue;
+        // Require NON-TRIVIAL TRANSLATION (view translation = -R*eye, magnitude = |eye|). The camera sits
+        // outside the scene (|eye|>~2); rotation-only orthonormal matrices (normal/tangent frames, camera
+        // at origin) have ~0 translation and must be rejected (they project the scene from the origin -> black).
+        float tr=vm[3]*vm[3]+vm[7]*vm[7]+vm[11]*vm[11]; if(tr<4.0f) continue;
+        // Reject identity (a trivial "look down +z from origin" view that over-counts without being real).
         float idd=fabsf(vm[0]-1)+fabsf(vm[5]-1)+fabsf(vm[10]-1)+fabsf(vm[1])+fabsf(vm[2])+fabsf(vm[4])+fabsf(vm[6])+fabsf(vm[8])+fabsf(vm[9]);
         if(idd<0.25f) continue;
         float VP[16]; d3dgl_mul44(P,vm,VP); int on=0;
         for(int o=0;o<g_nb12_org;o++){ float cl[4]; for(int r=0;r<4;r++) cl[r]=VP[r*4]*g_b12_org[o][0]+VP[r*4+1]*g_b12_org[o][1]+VP[r*4+2]*g_b12_org[o][2]+VP[r*4+3];
             if(cl[3]>0.05f){ float nx=cl[0]/cl[3],ny=cl[1]/cl[3],nz=cl[2]/cl[3]; if(nx>-1.1f&&nx<1.1f&&ny>-1.1f&&ny<1.1f&&nz>-0.05f&&nz<1.05f) on++; } }
-        if(on>bestN){ bestN=on; V=c; } }
+        // Pick purely by MOST origins on-screen (matches the cb0find diagnostic that identified cb[10] as
+        // the real camera at 30/32). The orthonormal+translation gates already exclude per-object/rotation-
+        // only matrices; among true views, the player camera frames the most of the world.
+        if(on < (g_nb12_org/4)) continue;
+        if(getenv("PELOAD_D3DGL_CAMDBG")){ static int cd; if(cd++<40){ char mm[220]; int kk=snprintf(mm,sizeof mm,"  [camdbg] cb[%d] %lluB tr=%.1f on=%d/%d eye=[%.1f %.1f %.1f] fwd=[%.2f %.2f %.2f]\n",i,(unsigned long long)c->size,tr,on,g_nb12_org,vm[3],vm[7],vm[11],vm[8],vm[9],vm[10]); (void)!write(2,mm,kk);} }
+        if(on>bestN || (on==bestN && c->size<bestSz)){ bestN=on; bestSz=c->size; V=c; } }
+    // LATCHING: early frames have few object origins (g_nb12_org small) so the score is unreliable and a
+    // ground-plane (z~0) view can win by default -> flip-flop (good frame / black frame). Once enough
+    // origins accumulate AND the winner frames a strong majority, LATCH that CB. A camera-view CB is
+    // re-written each frame with the live view, so reusing the latched one FOLLOWS the camera and stays
+    // stable. Re-detect only if the latch goes stale or stops being a valid orthonormal view.
+    static D3DObj* g_cam_latch;
+    if(V && V->data && g_nb12_org>=6 && bestN*5 >= g_nb12_org*3) g_cam_latch=V;   // confident -> latch
+    if(!force && g_cam_latch && g_cam_latch->data && (g_cb_tick-g_cam_latch->cb_upd)<=4){
+        const float*vm=(const float*)g_cam_latch->data; int ok=1;
+        for(int j=0;j<16;j++){ float v=vm[j]; if(v!=v||v<-1e9f||v>1e9f){ok=0;break;} }
+        if(ok){ float l0=vm[0]*vm[0]+vm[1]*vm[1]+vm[2]*vm[2],l1=vm[4]*vm[4]+vm[5]*vm[5]+vm[6]*vm[6],l2=vm[8]*vm[8]+vm[9]*vm[9]+vm[10]*vm[10];
+            float tr=vm[3]*vm[3]+vm[7]*vm[7]+vm[11]*vm[11];
+            if(fabsf(l0-1)>0.08f||fabsf(l1-1)>0.08f||fabsf(l2-1)>0.08f||tr<4.0f) ok=0; }
+        if(ok) V=g_cam_latch; else g_cam_latch=0; }
     if(!V||!V->data) return 0;
+    if(getenv("PELOAD_D3DGL_CAMDBG")){ static int cw; if(cw++<4){ const float*vm=(const float*)V->data; char mm[220]; int kk=snprintf(mm,sizeof mm,"  [camdbg] WINNER %lluB eye=[%.1f %.1f %.1f] fwd=[%.2f %.2f %.2f] rows0=[%.2f %.2f %.2f %.2f]\n",(unsigned long long)V->size,vm[3],vm[7],vm[11],vm[8],vm[9],vm[10],vm[0],vm[1],vm[2],vm[3]); (void)!write(2,mm,kk);} }
     float*out=(float*)g_syn_cb0_buf; memset(out,0,256);
     d3dgl_mul44(P,(const float*)V->data,out);           // cb0[0..3] = P*V (view-projection)
     // cb0[12] gates the vertex path: !=0 => decompress+world (needs cb3+cb12, both unbound here);
     // ==0 => r1=v0 directly (pre-transformed world/BSP geometry) -> only cb0 needed. Use the world path
     // unless PELOAD_SYNVP_OBJ asks for the object path. Default 0 renders the static map geometry.
-    if(getenv("PELOAD_SYNVP_OBJ")) out[48]=out[49]=out[50]=out[51]=1.0f;
+    if(getenv("PELOAD_SYNVP_OBJ")||getenv("PELOAD_D3DGL_DECOMP")) out[48]=out[49]=out[50]=out[51]=1.0f;
     g_syn_cb0.data=g_syn_cb0_buf; g_syn_cb0.size=256; g_syn_cb0.is_cb=1;
     if(getenv("PELOAD_TRACE_D3DGL")){ static int c; if(c++<3){ char m[200]; int k=snprintf(m,sizeof m,"  [synvp] cb0 from V=%p: row0=[%.3f %.3f %.3f %.3f] row3=[%.3f %.3f %.3f %.3f]\n",(void*)V,out[0],out[1],out[2],out[3],out[12],out[13],out[14],out[15]); (void)!write(2,m,k);} }
     return 1; }
@@ -3811,6 +3858,21 @@ static void d3dgl_draw(uint32_t vcount,int indexed,uint32_t instcount){
     int vs_has_cb0 = mono ? (mp->vcb[0]>=0) : (vs->gl_cbloc[0]>=0);
     if(getenv("PELOAD_D3DGL_SYNVP") && vs && (!vscb_eff[0]||!vscb_eff[0]->data) && vs_has_cb0 && g_last_b12 && g_last_b12->data){
         if(d3dgl_synth_cb0()) vscb_eff[0]=&g_syn_cb0; }
+    // PELOAD_D3DGL_DECOMP: the terrain BSP vertices are 16-bit COMPRESSED to [-1,1]; the VS if-branch
+    // (cb0[12]!=0) decompresses them: r0 = v0*cb1[0]+cb1[1], then *cb12 (world). cb1 (per-mesh bounds) is
+    // NEVER bound (dead material path) -> without it the raw [-1,1] verts collapse the map into a cube.
+    // Synthesize cb1 with a uniform scale (PELOAD_D3DGL_DSCALE, offset via _DOFF) so the sections spread
+    // out via their bound cb12 placement -> the map LAYOUT emerges even without exact per-mesh bounds.
+    // (synth_cb0 sets cb0[12]=1 when DECOMP so the if-branch runs.)
+    if(getenv("PELOAD_D3DGL_DECOMP") && vs){
+        float*c1=(float*)g_syn_cb1_buf; memset(c1,0,256);
+        float S=getenv("PELOAD_D3DGL_DSCALE")?atof(getenv("PELOAD_D3DGL_DSCALE")):10.0f;
+        float O=getenv("PELOAD_D3DGL_DOFF")?atof(getenv("PELOAD_D3DGL_DOFF")):0.0f;
+        c1[0]=c1[1]=c1[2]=S;             // cb1[0] = position scale
+        c1[4]=c1[5]=c1[6]=O;             // cb1[1] = position offset
+        c1[8]=c1[9]=1.0f;                // cb1[2].xy = texcoord scale (passthrough); .zw offset = 0
+        g_syn_cb1.data=g_syn_cb1_buf; g_syn_cb1.size=256; g_syn_cb1.is_cb=1;
+        if(!vscb_eff[1]||!vscb_eff[1]->data) vscb_eff[1]=&g_syn_cb1; }
     if(mono){
         d3dgl_bind_cbs_p(mp->prog,mp->vcb,vscb_eff,g_d3dst.vscb_1st,g_d3dst.vscb_cnt);
         d3dgl_bind_cbs_p(mp->prog,mp->pcb,g_d3dst.pscb,g_d3dst.pscb_1st,g_d3dst.pscb_cnt);
@@ -4071,6 +4133,18 @@ static void d3dgl_present(void){
         cocoa_pump();
     }
     if(G.Flush) G.Flush();
+    // PELOAD_D3DGL_SHOTPRESENT: dump the ACTUAL PRESENTED texture (what the window shows) via glGetTexImage,
+    // every N presents (default 30). My RT dumps grabbed the wrong G-buffer; this is the real on-screen frame.
+    if(getenv("PELOAD_D3DGL_SHOTPRESENT") && g_d3dgl_present_tex){
+        static unsigned long pc; int every=atoi(getenv("PELOAD_D3DGL_SHOTPRESENT")); if(every<1)every=30;
+        if((pc++ % every)==0){ int w=g_d3dgl_present_tw,h=g_d3dgl_present_th; if(w>0&&h>0&&(long)w*h<=(64<<20)){
+            static void(*gti)(unsigned,int,unsigned,unsigned,void*); static int gi; if(!gi){ gti=dlsym(RTLD_DEFAULT,"glGetTexImage"); gi=1; }
+            unsigned char*cap=calloc(1,(size_t)w*h*4);
+            if(cap&&gti){ G.BindTexture(GLE_TEX2D,g_d3dgl_present_tex); if(G.GetError)G.GetError(); gti(GLE_TEX2D,0,GLE_RGBA,GLE_UBYTE,cap);
+                static int sn; const char*home=getenv("HOME"); char p[512]; snprintf(p,sizeof p,"%s/reclaimer_present_%03d.bmp",home?home:"/tmp",sn++);
+                bmp_write_rgba(p,w,h,cap); char m[200]; int k=snprintf(m,sizeof m,"  [d3dgl] present-shot -> %s (%dx%d tex=%u)\n",p,w,h,g_d3dgl_present_tex); (void)!write(2,m,k); }
+            free(cap); } }
+    }
     // PELOAD_D3DGL_SHOT: dump the composited backbuffer FBO (the real game frame produced by the
     // translated shaders) to ~/reclaimer_d3dgl_<n>.bmp every PELOAD_D3DGL_SHOT presents (default 60).
     if(getenv("PELOAD_D3DGL_SHOT") && g_d3dgl_present_tex && g_d3d_backbuf && g_d3d_backbuf->glfbo && G.ReadPixels){
