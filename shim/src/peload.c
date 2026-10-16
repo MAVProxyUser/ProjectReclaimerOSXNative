@@ -6244,8 +6244,9 @@ static void gl_selftest(void){
 // shows the engine's GDI composite continuously (so it survives the worker's abort).
 static void* present_thread_fn(void*a){ (void)a; void(*set)(void*)=dlsym(RTLD_DEFAULT,"CGLSetCurrentContext");
     if(set&&g_present_glctx) set(g_present_glctx);
-    // vsync the window flips (no tearing); only this present thread waits on it, never the engine
-    if(g_present_glctx && !getenv("PELOAD_NOVSYNC")){ GLint one=1; CGLSetParameter((CGLContextObj)g_present_glctx,kCGLCPSwapInterval,&one); }
+    // PELOAD_VSYNC=1: vsync the window flips (no tearing). Opt-in: a vsynced flush can block for as long as
+    // the display sleeps / the window is occluded, and one soak froze ~105 s in with it enabled.
+    if(g_present_glctx && getenv("PELOAD_VSYNC")){ GLint one=1; CGLSetParameter((CGLContextObj)g_present_glctx,kCGLCPSwapInterval,&one); }
     void(*cglflush)(void*)=dlsym(RTLD_DEFAULT,"CGLFlushDrawable");
     // PELOAD_POKE=<rva>:<u8>[,...] continuously writes a byte into guest memory each frame
     // (e.g. force the worker's "window foreground" flag so presents count as ready).
@@ -6256,6 +6257,7 @@ static void* present_thread_fn(void*a){ (void)a; void(*set)(void*)=dlsym(RTLD_DE
         int use_d3dgl = d3dgl_enabled() && g_d3dgl_ready && g_d3dgl_offscreen && g_d3dgl_present_tex;
         if(getenv("PELOAD_TRACE_PRESENT")){ static int lp; if((lp++ %60)==0){ char m[96]; int k=snprintf(m,sizeof m,"  [present] branch=%s d3dgl(en=%d ready=%d off=%d tex=%u)\n",use_d3dgl?"d3dgl_blit":"gdi_main",d3dgl_enabled(),g_d3dgl_ready,g_d3dgl_offscreen,g_d3dgl_present_tex); (void)!write(2,m,k);} }
         static unsigned long pq_seen; int pq_shown=0;
+        { extern volatile int g_win_visible_x; if(use_d3dgl && !g_win_visible_x && !getenv("PELOAD_PRESENT_HIDDEN")){ usleep(20000); continue; } }
         if(use_d3dgl && pq_on()){
             if(pq_present_wait(&pq_seen,50)){ pq_shown=1; if(cglflush&&g_present_glctx){ CGLLockContext((CGLContextObj)g_present_glctx); cglflush(g_present_glctx); CGLUnlockContext((CGLContextObj)g_present_glctx); } }
             else if(!g_pq_seq){ d3dgl_blit_present(); if(cglflush&&g_present_glctx) cglflush(g_present_glctx); }   // nothing queued yet
@@ -6288,11 +6290,16 @@ static void* cocoa_make_gl_window_i(int w,int h){ CGLContextObj c=cocoa_make_gl_
         if(getenv("PELOAD_HOLD_WINDOW")){ if(!g_present_started){ g_present_started=1; if(set)set(0); /*release from this thread*/ pthread_t th; pthread_create(&th,0,present_thread_fn,0); ws("  [hold-window] present thread started\n"); } }
         else if(set) set(c); }
     return (void*)c; }
+volatile int g_win_visible_x=1;
+#define g_win_visible g_win_visible_x   // NSWindow occlusionState & Visible, sampled in cocoa_pump
 static void cocoa_pump(void){ if(!g_nsapp) return;
     for(;;){ id ev=((id(*)(id,SEL,unsigned long,id,id,signed char))objc_msgSend)(g_nsapp,osel("nextEventMatchingMask:untilDate:inMode:dequeue:"),~0UL,(id)0,NSDefaultRunLoopMode,1);
         if(!ev) break; if(wi_translate(ev)) continue; ((void(*)(id,SEL,id))objc_msgSend)(g_nsapp,osel("sendEvent:"),ev); }
     { const char*tr=getenv("PELOAD_TEST_RESIZE"); static int done; extern double g_gameplay_t0; if(tr && !done && g_gameplay_t0 && mono_s()-g_gameplay_t0>5 && g_nswin){ done=1; int tw=0,th=0; sscanf(tr,"%dx%d",&tw,&th);
         if(tw>0&&th>0){ typedef struct { double w,h; } NSSize_; NSSize_ sz={(double)tw,(double)th}; ((void(*)(id,SEL,NSSize_))objc_msgSend)(g_nswin,osel("setContentSize:"),sz); } } }
+    // window visibility (main thread): occluded windows / a sleeping display get no vblank, so a vsynced
+    // flush could block the present thread indefinitely -- it skips presenting while not visible.
+    if(g_nswin){ unsigned long os=((unsigned long(*)(id,SEL))objc_msgSend)(g_nswin,osel("occlusionState")); g_win_visible=(os&2UL)?1:0; }
     // window resized / full screen: resize the GL drawable (main thread) and record the new size for present
     if(g_nswin && g_nsctx){ id view=om0(g_nswin,"contentView"); NSRect_ b={0,0,0,0}; if(view) ((void(*)(NSRect_*,id,SEL))objc_msgSend_stret)(&b,view,osel("bounds"));   // x86_64: >16-byte struct returns need _stret
         int pw=(int)b.w, ph=(int)b.h; if(pw>0 && ph>0 && (pw!=g_win_pw || ph!=g_win_ph)){
