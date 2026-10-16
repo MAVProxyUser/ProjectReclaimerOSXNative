@@ -1024,6 +1024,9 @@ static void d3dtrace(int i,const char*nm); // fwd
 static void draw_log(const char*tag,uint32_t count); // fwd
 static int MSABI dev_CreateTexture2D(void*t,const void*d,const void*init,void**pp){ (void)t; d3dtrace(5,"CreateTexture2D");
     uint32_t w=d?*(const uint32_t*)d:1, h=d?*(const uint32_t*)((const char*)d+4):1, arr=d?*(const uint32_t*)((const char*)d+12):1, f=d?*(const uint32_t*)((const char*)d+16):0;
+    { const char*tf=getenv("PELOAD_TRACE_TEXFMT"); if(tf && d && (uint32_t)atoi(tf)==f){ uint64_t v=(uint64_t)__builtin_return_address(0); const char*mod="?"; uint64_t off=v;
+        if(v>=0x180000000ULL&&v<0x187000000ULL){mod="halo3";off=v-0x180000000ULL;} else if(v>=0x140000000ULL&&v<0x14c000000ULL){mod="exe";off=v-0x140000000ULL;}
+        const uint32_t*D=d; char m[220]; int k=snprintf(m,sizeof m,"  [texfmt] %ux%u mips=%u arr=%u fmt=%u usage=%u bind=0x%x cpu=0x%x misc=0x%x init=%p ra=%s+0x%llx\n",w,h,D[2],arr,f,D[7],D[8],D[9],D[10],init,mod,(unsigned long long)off); (void)!write(2,m,k); } }
     // PELOAD_DUMP_TEX: capture textures created WITH pixel data (loaded game assets: loading art,
     // UI, fonts, map textures). Logs all >=128px textures; dumps 32bpp (RGBA8=28/29, BGRA8=87/91)
     // ones to BMP so we can display real Guardian imagery through the GL path (compressed BC* skipped).
@@ -5154,11 +5157,11 @@ static uint32_t g_va_en; static int g_va_nocache=-1;
 // previous frame is kept in memory; when a 1x1 luminance target (auto exposure) receives a value > 0 while
 // the previous one was < -1 (normal log-luminance is about -8..-3), both frames' draw lists are written to
 // ~/reclaimer_whitedump_<frame>.txt for diffing.
-typedef struct { uint64_t vsh,psh; void*rt; uint32_t n,inst,w,h,fmt; void*blend; float psmax,vsmax; uint32_t pscs; uint32_t pss[4],vss[4]; } FRec;
+typedef struct { uint64_t vsh,psh; void*rt; uint32_t n,inst,w,h,fmt; void*blend; float psmax,vsmax; uint32_t pscs; uint32_t pss[4],vss[4]; uint32_t tw[3],th[3],tf[3]; void*tp[3]; } FRec;
 #define FREC_N 8192
 static FRec g_fr[2][FREC_N]; static int g_frn[2], g_frc; static unsigned long g_fr_frame[2];
 static int g_wd_dump; static float g_wd_last=-10;
-static int wd_on(void){ static int on=-1; if(on<0) on=getenv("PELOAD_D3DGL_WHITEDUMP")?1:0; return on; }
+static int wd_on(void){ static int on=-1; if(on<0) on=(getenv("PELOAD_D3DGL_WHITEDUMP")||getenv("PELOAD_D3DGL_DUMPFRAME_AT"))?1:0; return on; }
 static float cb_maxabs(D3DObj*c,uint32_t first,int nvec,uint32_t*cs){ if(!c||!c->data||nvec<=0) return 0; uint64_t o0=(uint64_t)first*16,o1=o0+(uint64_t)nvec*16; if(o1>c->size)o1=c->size; float m=0;
     for(uint64_t q=o0;q+4<=o1;q+=4){ float f; uint32_t u; memcpy(&f,(const uint8_t*)c->data+q,4); memcpy(&u,&f,4); if(cs)*cs=*cs*31+u; if(((u>>23)&0xff)==0xff){ m=1e30f; continue; } if(fabsf(f)>m)m=fabsf(f); } return m; }
 static void wd_rec(D3DObj*vs,D3DObj*ps,uint32_t n,uint32_t inst,void*mpv){ if(!wd_on()) return;
@@ -5166,12 +5169,16 @@ static void wd_rec(D3DObj*vs,D3DObj*ps,uint32_t n,uint32_t inst,void*mpv){ if(!w
     if(g_frn[b]>=FREC_N) return; FRec*r=&g_fr[b][g_frn[b]++]; memset(r,0,sizeof *r);
     D3DObj*rt=g_d3dst.rtv; D3DObj*rr=(rt&&rt->data&&rt->vkind)?(D3DObj*)rt->data:rt;
     r->vsh=vs->bchash; r->psh=ps->bchash; r->rt=rr; r->n=n; r->inst=inst; r->w=rr?rr->w:0; r->h=rr?rr->h:0; r->fmt=rr?rr->fmt:0; r->blend=g_d3dst.blend;
+    for(int t=0;t<3;t++){ D3DObj*x=g_d3dst.psrv[t]; D3DObj*xr=(x&&x->data&&x->vkind)?(D3DObj*)x->data:x; r->tp[t]=xr; r->tw[t]=xr?xr->w:0; r->th[t]=xr?xr->h:0; r->tf[t]=xr?xr->fmt:0; }
     const int*pb=(const int*)mpv; (void)pb;
     for(int k=0;k<4;k++){ float a=cb_maxabs(g_d3dst.pscb[k],g_d3dst.pscb_1st[k],64,&r->pscs); if(a>r->psmax) r->psmax=a; float v=cb_maxabs(g_d3dst.vscb[k],g_d3dst.vscb_1st[k],64,0); if(v>r->vsmax) r->vsmax=v; } }
 static void wd_present(void){ if(!wd_on()) return;
+    { static int done; const char*at=getenv("PELOAD_D3DGL_DUMPFRAME_AT"); extern double g_gameplay_t0;
+      if(at && !done && g_gameplay_t0 && mono_s()-g_gameplay_t0>=atof(at)){ done=1; g_wd_dump=1; } }
     if(g_wd_dump){ g_wd_dump=0; extern unsigned long g_eng_present_no_x; const char*h=getenv("HOME"); char p[300]; snprintf(p,sizeof p,"%s/reclaimer_whitedump_%lu.txt",h?h:"/tmp",g_eng_present_no_x);
         FILE*f=fopen(p,"w"); if(f){ for(int pass=0;pass<2;pass++){ int b=pass==0?(g_frc^1):g_frc; fprintf(f,"== frame %lu (%s) %d draws\n",g_fr_frame[b],pass==0?"prev":"WHITE",g_frn[b]);
-                for(int i=0;i<g_frn[b];i++){ FRec*r=&g_fr[b][i]; fprintf(f,"%d vsh=%016llx psh=%016llx rt=%p %ux%u f%u n=%u inst=%u blend=%p psmax=%g vsmax=%g pscs=%08x\n",i,(unsigned long long)r->vsh,(unsigned long long)r->psh,r->rt,r->w,r->h,r->fmt,r->n,r->inst,r->blend,r->psmax,r->vsmax,r->pscs); } }
+                for(int i=0;i<g_frn[b];i++){ FRec*r=&g_fr[b][i]; fprintf(f,"%d vsh=%016llx psh=%016llx rt=%p %ux%u f%u n=%u inst=%u blend=%p psmax=%g vsmax=%g pscs=%08x t0=%p %ux%u f%u t1=%p %ux%u f%u t2=%p %ux%u f%u\n",i,(unsigned long long)r->vsh,(unsigned long long)r->psh,r->rt,r->w,r->h,r->fmt,r->n,r->inst,r->blend,r->psmax,r->vsmax,r->pscs,
+                    r->tp[0],r->tw[0],r->th[0],r->tf[0],r->tp[1],r->tw[1],r->th[1],r->tf[1],r->tp[2],r->tw[2],r->th[2],r->tf[2]); } }
             fclose(f); char m[340]; int k=snprintf(m,sizeof m,"  [whitedump] wrote %s\n",p); (void)!write(2,m,k); } }
     g_frc^=1; g_frn[g_frc]=0; }
 static void wd_lum(float v){ if(!wd_on()) return; if(v>0 && g_wd_last<-1) g_wd_dump=1; g_wd_last=v; }
