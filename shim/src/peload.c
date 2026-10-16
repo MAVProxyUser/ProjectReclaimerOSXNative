@@ -778,6 +778,8 @@ typedef struct { void** vtbl; uint32_t kind; uint32_t rowpitch; uint64_t size; v
     uint32_t vkind, vfmt, vdim, vmip, vfirst, vcount; // view: 1=SRV 2=UAV 3=RTV 4=DSV, desc Format, ViewDimension, mip, first slice, slices
     uint32_t ver;                 // bumped on every CPU write (Map/UpdateSubresource/copy) -> GL re-upload of the UBO copy
     unsigned glubo; uint32_t uboglver, ubosz; // constant buffer: GL uniform-buffer copy, the ver it holds, its byte size
+    unsigned gltbo, gltbobuf; uint32_t tbover; int tbook; // buffer SRV: GL texture buffer (R32UI) + its storage, uploaded ver
+    void* csprog;                 // compute shader: CPU-interpreter program (dxbc_cpu.c), compiled on first Dispatch
 } D3DObj;
 // ID3D11DeviceChild private data: halo3 stashes the VS bytecode-blob pointer on the shader object
 // (SetPrivateData with GUID g_180801e00) and reads it back for CreateInputLayout. Our old no-op
@@ -793,7 +795,7 @@ static struct {
     D3DObj *rtvs[8]; int num_rt; D3DObj *dsv;  // multiple render targets (deferred G-buffer) + depth
     D3DObj *vs, *ps, *vscb[16], *pscb[16];   // bound shaders + constant buffers (for D3DGL)
     uint32_t vscb_1st[16], vscb_cnt[16], pscb_1st[16], pscb_cnt[16]; // *SetConstantBuffers1 ranges (16B units)
-    D3DObj *vssrv[16];                        // VS-stage shader resources (vertex-pulling geometry!)
+    D3DObj *vssrv[32], *vssrvv[32];           // VS-stage shader resources (+views): particle state buffers (t16/t17), VTF
     D3DObj *blend, *depth, *raster;           // bound state objects (descs captured at create time)
     float blendf[4]; uint32_t sref; int sc_l,sc_t,sc_r,sc_b; int vp_x, vp_y; D3DObj *pssamp[16], *vssamp[16];
     float vp_zn, vp_zf; int vp_set;           // viewport MinDepth/MaxDepth (first-person view models use their own slice)
@@ -1104,6 +1106,9 @@ static int g_shcount[6];
 // (verified identical over the 2833-shader corpus) so the shim does its OWN shader translation at
 // runtime -- no Python subprocess, no offline pre-pass. Python stays strictly a test oracle.
 #include "dxbc2glsl.c"
+static uint8_t* dg_bc_decode(uint32_t fmt,const uint8_t*src,size_t srclen,int w,int h); // fwd (BC decoder, defined with the GL uploads)
+static uint64_t prof_now(void); static int prof_on(void);                                 // fwd (profiling)
+#include "dxbc_cpu.c"
 // FNV-1a 64 over the DXBC bytes (matches the cache key) -> ~/reclaimer_glsl/<hash>.glsl.
 static uint64_t d3dgl_fnv(const void*b,uint64_t n){ const uint8_t*p=b; uint64_t h=0xcbf29ce484222325ULL;
     for(uint64_t i=0;i<n;i++){ h^=p[i]; h*=0x100000001b3ULL; } return h; }
@@ -1365,21 +1370,46 @@ static void draw_census(void); // fwd
 static void MSABI ctx_DrawIndexedInstanced(void*t,uint32_t a,uint32_t b,uint32_t c,int d,uint32_t e){ (void)t; d3dtrace(3,"DrawIndexedInstanced"); draw_caller("DrawIdxInst",__builtin_return_address(0),a); draw_census(); if(d3dgl_enabled() && b) d3dgl_draw(a,1,b,c,d,e); }
 static void MSABI ctx_DrawInstanced(void*t,uint32_t a,uint32_t b,uint32_t c,uint32_t d){ (void)t; d3dtrace(2,"DrawInstanced"); draw_caller("DrawInst",__builtin_return_address(0),a); draw_census(); if(d3dgl_enabled() && b) d3dgl_draw(a,0,b,c,0,d); }
 // ---- compute stage state (particles) ----
-static struct { D3DObj*cs; D3DObj*srv[16]; D3DObj*uav[8]; D3DObj*cb[16]; } g_cs;
+static struct { D3DObj*cs; D3DObj*srv[32]; D3DObj*uav[8]; D3DObj*cb[16]; uint32_t cbfirst[16]; D3DObj*samp[16]; } g_cs;
 static void cscensus(const char*what,uint32_t a,uint32_t b,uint32_t c){ if(!getenv("PELOAD_CSCENSUS")) return;
     static unsigned long n; n++; if(n>400 && (n%500)) return;
     char m[300]; int k=snprintf(m,sizeof m,"  [cscensus] %s(%u,%u,%u) cs=%p bc=%u uav0=%p(%lluB stride %u) srv4=%p srv5=%p cb0=%p\n",what,a,b,c,(void*)g_cs.cs,g_cs.cs?g_cs.cs->bclen:0,
         g_cs.uav[0]?g_cs.uav[0]->data:0,g_cs.uav[0]&&g_cs.uav[0]->data?(unsigned long long)((D3DObj*)g_cs.uav[0]->data)->size:0ull,g_cs.uav[0]&&g_cs.uav[0]->data?((D3DObj*)g_cs.uav[0]->data)->depth:0,
         g_cs.srv[4]?g_cs.srv[4]->data:0,g_cs.srv[5]?g_cs.srv[5]->data:0,(void*)g_cs.cb[0]); (void)!write(2,m,k); }
-static void MSABI ctx_Dispatch(void*t,uint32_t a,uint32_t b,uint32_t c){ (void)t; d3dtrace(7,"Dispatch"); cscensus("Dispatch",a,b,c); }
+// Dispatch -> run the compute shader on the CPU (dxbc_cpu.c) over the CPU copies of its buffers; written UAV
+// buffers get a new version so their GL texture-buffer copies refresh before the particle draws read them.
+static void MSABI ctx_Dispatch(void*t,uint32_t a,uint32_t b,uint32_t c){ (void)t; d3dtrace(7,"Dispatch"); cscensus("Dispatch",a,b,c);
+    D3DObj*cs=g_cs.cs; if(!cs||!cs->bc||getenv("PELOAD_NOCSCPU")) return;
+    if(!cs->csprog){ CsProg*p=cs_compile(cs->bc,cs->bclen); cs->csprog=p;
+        char m[200]; int k=snprintf(m,sizeof m,"  [cs-cpu] compiled cs %p (%u B): %s, %d instrs, temps %d, numthreads(%u,%u,%u)\n",(void*)cs,cs->bclen,p&&p->ok?"ok":(p?p->why:"oom"),p?p->nins:0,p?p->ntemps:0,p?p->tg[0]:0,p?p->tg[1]:0,p?p->tg[2]:0); (void)!write(2,m,k); }
+    CsProg*p=cs->csprog; if(!p||!p->ok) return;
+    if((uint64_t)a*b*c*p->tg[0]*p->tg[1]*p->tg[2] > (1u<<20)) return;   // runaway guard
+    CsCtx cx; memset(&cx,0,sizeof cx);
+    for(int i=0;i<16;i++){ D3DObj*cb=g_cs.cb[i]; if(cb&&cb->data&&cb->size){ uint64_t off=(uint64_t)g_cs.cbfirst[i]*16; if(off>=cb->size) off=0; cx.cb[i]=(const uint8_t*)cb->data+off; cx.cbsz[i]=(uint32_t)(cb->size-off); } }
+    for(int i=0;i<32;i++) cx.srv[i]=g_cs.srv[i];
+    for(int i=0;i<8;i++) cx.uav[i]=g_cs.uav[i];
+    for(int i=0;i<16;i++) cx.samp[i]=g_cs.samp[i];
+    uint64_t t0=prof_on()?prof_now():0;
+    long rc=cs_dispatch(p,&cx,a,b,c);
+    if(t0){ static uint64_t acc,nn; acc+=prof_now()-t0; if((++nn%200)==0){ char m[120]; int k=snprintf(m,sizeof m,"  [cs-cpu] %llu dispatches, avg %.1f us\n",(unsigned long long)nn,acc/1e3/nn); (void)!write(2,m,k); } }
+    if(rc<0){ static int warned; if(warned++<8){ char m[120]; int k=snprintf(m,sizeof m,"  [cs-cpu] unsupported opcode %ld in cs %p\n",-rc,(void*)cs); (void)!write(2,m,k); } return; }
+    for(int i=0;i<8;i++){ D3DObj*v=g_cs.uav[i]; D3DObj*r=(v&&v->data&&v->vkind)?(D3DObj*)v->data:v; if(r){ r->ver++; r->gl_dirty=1; r->rvalid=0; } } }
 static void MSABI ctx_DispatchIndirect(void*t,void*args,uint32_t off){ (void)t;(void)args; cscensus("DispatchIndirect",off,0,0); }
 static void MSABI ctx_DrawInstancedIndirect(void*t,void*args,uint32_t off){ (void)t;(void)args; cscensus("DrawInstancedIndirect",off,0,0); }
 static void MSABI ctx_DrawIndexedInstancedIndirect(void*t,void*args,uint32_t off){ (void)t;(void)args; cscensus("DrawIndexedInstancedIndirect",off,0,0); }
 static void MSABI ctx_CopyStructureCount(void*t,void*dst,uint32_t off,void*uav){ (void)t;(void)dst;(void)uav; cscensus("CopyStructureCount",off,0,0); }
 static void MSABI ctx_CSSetShader(void*t,void*cs,void*ci,uint32_t n){ (void)t;(void)ci;(void)n; g_cs.cs=cs; }
-static void MSABI ctx_CSSetShaderResources(void*t,uint32_t st,uint32_t n,void*const*v){ (void)t; for(uint32_t i=0;i<n&&st+i<16;i++) g_cs.srv[st+i]=v?(D3DObj*)v[i]:0; }
+static void MSABI ctx_CSSetShaderResources(void*t,uint32_t st,uint32_t n,void*const*v){ (void)t; for(uint32_t i=0;i<n&&st+i<32;i++) g_cs.srv[st+i]=v?(D3DObj*)v[i]:0; }
+static void MSABI ctx_CSSetSamplers(void*t,uint32_t st,uint32_t n,void*const*v){ (void)t; for(uint32_t i=0;i<n&&st+i<16;i++) g_cs.samp[st+i]=v?(D3DObj*)v[i]:0; }
+static void MSABI ctx_CSSetConstantBuffers1(void*t,uint32_t st,uint32_t n,void*const*v,const uint32_t*first,const uint32_t*cnt){ (void)t;(void)cnt;
+    for(uint32_t i=0;i<n&&st+i<16;i++){ g_cs.cb[st+i]=v?(D3DObj*)v[i]:0; g_cs.cbfirst[st+i]=first?first[i]:0; } }
+// ClearUnorderedAccessView{Uint,Float} on buffers (particle pools are reset this way)
+static void cs_clear_uav(void*view,uint32_t v0){ D3DObj*v=view; D3DObj*r=(v&&v->data&&v->vkind)?(D3DObj*)v->data:v; if(!r||!r->data||r->kind!=1) return;
+    uint32_t*d=(uint32_t*)r->data; for(uint64_t i=0;i<r->size/4;i++) d[i]=v0; r->ver++; r->gl_dirty=1; r->rvalid=0; }
+static void MSABI ctx_ClearUAVUint(void*t,void*uav,const uint32_t*vals){ (void)t; cs_clear_uav(uav,vals?vals[0]:0); }
+static void MSABI ctx_ClearUAVFloat(void*t,void*uav,const float*vals){ (void)t; uint32_t b=0; if(vals) memcpy(&b,vals,4); cs_clear_uav(uav,b); }
 static void MSABI ctx_CSSetUAVs(void*t,uint32_t st,uint32_t n,void*const*v,const uint32_t*cnt){ (void)t;(void)cnt; for(uint32_t i=0;i<n&&st+i<8;i++) g_cs.uav[st+i]=v?(D3DObj*)v[i]:0; }
-static void MSABI ctx_CSSetConstantBuffers(void*t,uint32_t st,uint32_t n,void*const*v){ (void)t; for(uint32_t i=0;i<n&&st+i<16;i++) g_cs.cb[st+i]=v?(D3DObj*)v[i]:0; }
+static void MSABI ctx_CSSetConstantBuffers(void*t,uint32_t st,uint32_t n,void*const*v){ (void)t; for(uint32_t i=0;i<n&&st+i<16;i++){ g_cs.cb[st+i]=v?(D3DObj*)v[i]:0; g_cs.cbfirst[st+i]=0; } }
 // ---- pipeline-state recorders (hooked into the context vtable) ----
 static void iacen_log(void){ if(!getenv("PELOAD_IA_CENSUS")) return; static uint64_t last;
     uint64_t tot=g_iacen.vs_set; if(tot<last+20000) return; last=tot;
@@ -1390,7 +1420,7 @@ static void MSABI ctx_IASetInputLayout(void*t,void*il){ (void)t; g_d3dst.il=il; 
 static void MSABI ctx_IASetVertexBuffers(void*t,uint32_t start,uint32_t num,void*const*vbs,const uint32_t*str,const uint32_t*off){ (void)t;
     for(uint32_t i=0;i<num&&start+i<8;i++){ g_d3dst.vb[start+i]=vbs?(D3DObj*)vbs[i]:0; g_d3dst.vstride[start+i]=str?str[i]:0; g_d3dst.voff[start+i]=off?off[i]:0; if(vbs&&vbs[i])g_iacen.ia_vb++; } }
 static void MSABI ctx_VSSetShaderResources(void*t,uint32_t start,uint32_t num,void*const*srvs){ (void)t;
-    for(uint32_t i=0;i<num&&start+i<16;i++){ D3DObj*v=srvs?(D3DObj*)srvs[i]:0; g_d3dst.vssrv[start+i]=(v&&v->data)?(D3DObj*)v->data:v; if(srvs&&srvs[i])g_iacen.vs_srv++; } }
+    for(uint32_t i=0;i<num&&start+i<32;i++){ D3DObj*v=srvs?(D3DObj*)srvs[i]:0; g_d3dst.vssrv[start+i]=(v&&v->data)?(D3DObj*)v->data:v; g_d3dst.vssrvv[start+i]=(v&&v->vkind)?v:0; if(srvs&&srvs[i])g_iacen.vs_srv++; } }
 static void MSABI ctx_IASetIndexBuffer(void*t,void*ib,uint32_t fmt,uint32_t off){ (void)t; g_d3dst.ib=(D3DObj*)ib; g_d3dst.ibfmt=fmt; g_d3dst.iboff=off; }
 static void MSABI ctx_IASetPrimitiveTopology(void*t,uint32_t topo){ (void)t; g_d3dst.topo=topo; }
 static void MSABI ctx_VSSetShader(void*t,void*sh,void*ci,uint32_t nci){ (void)t;(void)ci;(void)nci; g_d3dst.vs=(D3DObj*)sh;
@@ -1621,6 +1651,7 @@ static void d3d_init(void){
     x[20]=(void*)ctx_DrawIndexedInstanced; x[21]=(void*)ctx_DrawInstanced; x[41]=(void*)ctx_Dispatch;
     x[39]=(void*)ctx_DrawIndexedInstancedIndirect; x[40]=(void*)ctx_DrawInstancedIndirect; x[42]=(void*)ctx_DispatchIndirect; x[49]=(void*)ctx_CopyStructureCount;
     x[67]=(void*)ctx_CSSetShaderResources; x[68]=(void*)ctx_CSSetUAVs; x[69]=(void*)ctx_CSSetShader; x[71]=(void*)ctx_CSSetConstantBuffers;
+    x[70]=(void*)ctx_CSSetSamplers; x[124]=(void*)ctx_CSSetConstantBuffers1; x[51]=(void*)ctx_ClearUAVUint; x[52]=(void*)ctx_ClearUAVFloat;
     x[7]=(void*)ctx_VSSetConstantBuffers; x[9]=(void*)ctx_PSSetShader; x[11]=(void*)ctx_VSSetShader; x[16]=(void*)ctx_PSSetConstantBuffers;
     x[8]=(void*)ctx_PSSetShaderResources; x[17]=(void*)ctx_IASetInputLayout; x[18]=(void*)ctx_IASetVertexBuffers;
     x[25]=(void*)ctx_VSSetShaderResources;   // VS-stage SRVs (vertex-pulling geometry source)
@@ -3307,7 +3338,7 @@ typedef struct {
     void(*BlendFuncSeparate)(unsigned,unsigned,unsigned,unsigned); void(*BlendEquationSeparate)(unsigned,unsigned); void(*BlendColor)(float,float,float,float);
     void(*ColorMask)(unsigned char,unsigned char,unsigned char,unsigned char); void(*CullFace)(unsigned); void(*FrontFace)(unsigned); void(*Scissor)(int,int,int,int);
     void(*GenSamplers)(int,unsigned*); void(*BindSampler)(unsigned,unsigned); void(*SamplerParameteri)(unsigned,unsigned,int); void(*SamplerParameterf)(unsigned,unsigned,float); void(*SamplerParameterfv)(unsigned,unsigned,const float*);
-    void*(*MapBufferRange)(unsigned,long,long,unsigned); unsigned char(*UnmapBuffer)(unsigned);
+    void*(*MapBufferRange)(unsigned,long,long,unsigned); unsigned char(*UnmapBuffer)(unsigned); void(*TexBuffer)(unsigned,unsigned,unsigned);
     unsigned(*GetUniformBlockIndex)(unsigned,const char*); void(*UniformBlockBinding)(unsigned,unsigned,unsigned); void(*BindBufferRange)(unsigned,unsigned,unsigned,long,long);
     void(*DrawBuffers)(int,const unsigned*); void(*DrawBuffer)(unsigned); void(*DepthFunc)(unsigned); void(*ClearDepth)(double); void(*ClearStencil)(int);
     void(*StencilFuncSeparate)(unsigned,unsigned,int,unsigned); void(*StencilOpSeparate)(unsigned,unsigned,unsigned,unsigned); void(*StencilMask)(unsigned);
@@ -3417,7 +3448,7 @@ static int d3dgl_loadgl(void){
     L(DrawElementsBaseVertex);L(DrawElementsInstancedBaseVertex);L(VertexAttribDivisor);L(BufferSubData);L(PrimitiveRestartIndex);L(BlitFramebuffer);L(Finish);
     L(BlendFuncSeparate);L(BlendEquationSeparate);L(BlendColor);L(ColorMask);L(CullFace);L(FrontFace);L(Scissor);
     L(GenSamplers);L(BindSampler);L(SamplerParameteri);L(SamplerParameterf);L(SamplerParameterfv);
-    L(GetUniformBlockIndex);L(UniformBlockBinding);L(BindBufferRange);L(MapBufferRange);L(UnmapBuffer);
+    L(GetUniformBlockIndex);L(UniformBlockBinding);L(BindBufferRange);L(MapBufferRange);L(UnmapBuffer);L(TexBuffer);
     L(DrawBuffers);L(DrawBuffer);L(DepthFunc);L(ClearDepth);L(ClearStencil);L(StencilFuncSeparate);L(StencilOpSeparate);L(StencilMask);
     L(Enablei);L(Disablei);L(BlendFuncSeparatei);L(BlendEquationSeparatei);L(ColorMaski);
     #undef L
@@ -3715,7 +3746,7 @@ static void dg_gltex_dump(int w,int h,unsigned fmt){
 static void d3dgl_ensure_depth(D3DObj*o); // fwd (depth-stencil resources)
 // per-unit binding cache of the draw path (texture+target, sampler); any other BindTexture on the render
 // context (uploads, RT/depth creation, blits) invalidates it
-static unsigned g_unit_tex[16], g_unit_tgt[16], g_unit_samp[16]; static int g_unitcache_ok;
+static unsigned g_unit_tex[32], g_unit_tgt[32], g_unit_samp[32]; static int g_unitcache_ok;
 #define TEXCACHE_INVALIDATE() (g_unitcache_ok=0)
 // DXGI -> GL upload format for uncompressed textures. swz: 1 = A8 (0,0,0,R), 2 = X8 formats (alpha = 1).
 // Anything not listed (integer/depth formats) falls back to the 1x1 magenta placeholder.
@@ -4292,26 +4323,46 @@ static void d3dgl_apply_state(D3DObj*rt,int vw,int vh){
       if(dr && !getenv("PELOAD_D3DGL_NODEPTHRANGE")) dr(zn,zf);
       D3DObj*rs=g_d3dst.raster; int dclip=1; float bias=0,slope=0;
       if(rs && rs->stkind==3){ int32_t db=(int32_t)rs->sd[3]; memcpy(&slope,&rs->sd[5],4); bias=(float)db; dclip=rs->sd[6]?1:0; }
+      int alton = !getenv("PELOAD_D3DGL_ALT5") || (((long)(mono_s()/5.0))&1);
+      // D3D DepthClipEnable=FALSE -> GL_DEPTH_CLAMP made primitives crossing behind the eye rasterize as huge
+      // screen-covering polygons on GL-on-Metal (A/B: 4/86 frames vs 0/86). Keep clipping unless opted in.
+      if(!getenv("PELOAD_D3DGL_DEPTHCLAMP")) dclip=1;
+      if(getenv("PELOAD_D3DGL_NODEPTHCLAMP") && alton) dclip=1;
+      if(getenv("PELOAD_D3DGL_NOPOLYOFS") && alton){ bias=0; slope=0; }
       if(dclip) G.Disable(0x864F/*DEPTH_CLAMP*/); else G.Enable(0x864F);
       if((bias!=0||slope!=0) && po){ G.Enable(0x8037/*POLYGON_OFFSET_FILL*/); po(slope,bias); } else G.Disable(0x8037); } }
 // state that must NOT leak into clears / copies (D3D clears & copies ignore blend, write mask and scissor)
 static void d3dgl_reset_raster_ops(void){ G.Disable(0x0BE2); G.Disable(0x0C11); if(G.ColorMask) G.ColorMask(1,1,1,1); G.Disable(0x0B71); G.Disable(0x0B90); G.Disable(0x8DB9/*FRAMEBUFFER_SRGB*/); }
 // sampler-type code (dxbc2glsl: 0 sampler2D, 1 sampler3D, 2 samplerCube, 3 sampler2DArray, 4 samplerCubeArray) -> GL target
-static const unsigned g_tt_target[5]={GLE_TEX2D,0x806F,0x8513,0x8C1A,0x9009};
-static void d3dgl_scan_tt(const char*src,signed char*tt){
-    for(const char*p=src; p && (p=strstr(p,"uniform sampler")); ){ p+=15; int k=-1;
-        if(!strncmp(p,"2DArray ",8)) k=3; else if(!strncmp(p,"2D ",3)) k=0; else if(!strncmp(p,"3D ",3)) k=1;
-        else if(!strncmp(p,"CubeArray ",10)) k=4; else if(!strncmp(p,"Cube ",5)) k=2;
-        const char*q=strchr(p,' '); int r; if(k>=0 && q && sscanf(q," t%d;",&r)==1 && r>=0 && r<32) tt[r]=(signed char)k; } }
+static const unsigned g_tt_target[6]={GLE_TEX2D,0x806F,0x8513,0x8C1A,0x9009,0x8C2A/*TEXTURE_BUFFER*/};
+static void d3dgl_scan_tt_p(const char*src,signed char*tt,const char*pfx){
+    char pat[16]; snprintf(pat,sizeof pat," %s%%d;",pfx);
+    for(const char*p=src; p && (p=strstr(p,"uniform ")); ){ p+=8; int k=-1;
+        if(!strncmp(p,"usamplerBuffer ",15)) k=5;
+        else if(!strncmp(p,"sampler",7)){ const char*t=p+7;
+            if(!strncmp(t,"2DArray ",8)) k=3; else if(!strncmp(t,"2D ",3)) k=0; else if(!strncmp(t,"3D ",3)) k=1;
+            else if(!strncmp(t,"CubeArray ",10)) k=4; else if(!strncmp(t,"Cube ",5)) k=2; }
+        const char*q=strchr(p,' '); int r; if(k>=0 && q && sscanf(q,pat,&r)==1 && r>=0 && r<32) tt[r]=(signed char)k; } }
+static void d3dgl_scan_tt(const char*src,signed char*tt){ d3dgl_scan_tt_p(src,tt,"t"); }
+// buffer SRV (StructuredBuffer / ByteAddressBuffer) -> GL texture buffer over an R32UI copy of its bytes,
+// re-uploaded whenever the D3D buffer's version changed (CPU compute / Map / Update)
+static void d3dgl_ensure_tbo(D3DObj*o){
+    if(!G.TexBuffer||!o->data||!o->size) return;
+    if(!o->gltbobuf) G.GenBuffers(1,&o->gltbobuf);
+    if(!o->tbook || o->tbover!=o->ver){ G.BindBuffer(0x8C2A,o->gltbobuf); G.BufferData(0x8C2A,(long)((o->size+15)&~15ull),0,0x88E8); G.BufferSubData(0x8C2A,0,(long)o->size,o->data); o->tbover=o->ver; o->tbook=1; }
+    if(!o->gltbo){ TEXCACHE_INVALIDATE(); G.GenTextures(1,&o->gltbo); G.BindTexture(0x8C2A,o->gltbo); G.TexBuffer(0x8C2A,0x8236/*R32UI*/,o->gltbobuf); } }
+static void d3dgl_bind_res(unsigned prog,const int*tloc,const signed char*tt,int*units_set,D3DObj**srvs,D3DObj**views,D3DObj**samps,int ubase,int umax);
 static void d3dgl_bind_texs_p(unsigned prog,const int*tloc,const signed char*tt,int*units_set){
-    if(!prog) return; int unit=0;
+    d3dgl_bind_res(prog,tloc,tt,units_set,g_d3dst.psrv,g_d3dst.psrvv,g_d3dst.pssamp,0,16); }
+static void d3dgl_bind_res(unsigned prog,const int*tloc,const signed char*tt,int*units_set,D3DObj**srvs,D3DObj**views,D3DObj**samps,int ubase,int umax){
+    if(!prog) return; int unit=ubase;
     if(!g_unitcache_ok){ memset(g_unit_tex,0xff,sizeof g_unit_tex); memset(g_unit_tgt,0,sizeof g_unit_tgt); memset(g_unit_samp,0xff,sizeof g_unit_samp); g_unitcache_ok=1; }
     int nocache=getenv("PELOAD_D3DGL_NOBINDCACHE")!=0;
     // halo3 binds the map/material textures to high, SPARSE SRV slots (seen: t13,t14,t16,t17), not just
     // t0-t7. Cover slots 0..31, and PACK each declared sampler into the next contiguous GL texture unit
     // (Apple GL-on-Metal has ~16 fragment units, so binding to unit 17 would fail) -- the sampler uniform
     // is set to the packed unit, so the shader samples the right texture.
-    for(int r=0;r<32 && unit<16;r++){ int loc=tloc[r]; if(loc<0) continue; D3DObj*tx=g_d3dst.psrv[r];
+    for(int r=0;r<32 && unit<umax;r++){ int loc=tloc[r]; if(loc<0) continue; D3DObj*tx=srvs[r];
         // PELOAD_TEXCENSUS: log each distinct (format, dimension, RT-ness) texture class the frame SAMPLES,
         // with whether the uploader can represent it (anything else is a 1x1 magenta placeholder).
         if(tx && getenv("PELOAD_TEXCENSUS")){ static uint64_t seen[512]; static int ns;
@@ -4319,18 +4370,22 @@ static void d3dgl_bind_texs_p(unsigned prog,const int*tloc,const signed char*tt,
             int f=0; for(int i=0;i<ns;i++) if(seen[i]==key){ f=1; break; }
             if(!f && ns<512){ seen[ns++]=key; unsigned gf,gt,bi; int bb; int up=d3dgl_tex_upload_fmt(tx->fmt,&gf,&gt)||d3dgl_bc_glfmt(tx->fmt,&bi,&bb);
                 char m[240]; int k=snprintf(m,sizeof m,"  [texcensus] t%d f%u kind%u %ux%u arr=%u depth=%u mips=%u misc=0x%x bind=0x%x %s uploadable=%d\n",r,tx->fmt,tx->kind,tx->w,tx->h,tx->arr,tx->depth,tx->mips,tx->misc,tx->bindf,tx->glfbo?"RT":"asset",up||tx->glfbo); (void)!write(2,m,k); } }
-        unsigned want = tt ? g_tt_target[(tt[r]>=0&&tt[r]<5)?tt[r]:0] : GLE_TEX2D;
-        if(tx && (!tx->gltex || tx->gl_dirty || !tx->gl_uploaded)){ G.ActiveTexture(GLE_TEX0+unit); d3dgl_ensure_tex(tx); }   // upload (binds on this unit) first
-        unsigned wtex = 0; if(tx){ unsigned have=tx->gltarget?tx->gltarget:GLE_TEX2D; if(!tt) want=have; if(have==want) wtex=tx->gltex; }
-        D3DObj*sv=g_d3dst.psrvv[r]; int skip = tx && tx->glsrgb && !dxgi_is_srgb(sv?sv->vfmt:tx->fmt);   // UNORM view of sRGB storage: raw read
-        unsigned wsamp = (G.BindSampler && r<16 && !getenv("PELOAD_D3DGL_NOSAMPLER")) ? d3dgl_glsampler_x(g_d3dst.pssamp[r],tx?tx->glhasmips:0,skip) : 0;
+        unsigned want = tt ? g_tt_target[(tt[r]>=0&&tt[r]<6)?tt[r]:0] : GLE_TEX2D;
+        int isbuf = tx && tx->kind==1;
+        if(isbuf){ if(want==0x8C2A){ G.ActiveTexture(GLE_TEX0+unit); d3dgl_ensure_tbo(tx); } }
+        else if(tx && (!tx->gltex || tx->gl_dirty || !tx->gl_uploaded)){ G.ActiveTexture(GLE_TEX0+unit); d3dgl_ensure_tex(tx); }   // upload (binds on this unit) first
+        unsigned wtex = 0; if(isbuf){ if(want==0x8C2A) wtex=tx->gltbo; }
+        else if(tx){ unsigned have=tx->gltarget?tx->gltarget:GLE_TEX2D; if(!tt) want=have; if(have==want) wtex=tx->gltex; }
+        D3DObj*sv=views?views[r]:0; int skip = !isbuf && tx && tx->glsrgb && !dxgi_is_srgb(sv?sv->vfmt:tx->fmt);   // UNORM view of sRGB storage: raw read
+        unsigned wsamp = (!isbuf && G.BindSampler && r<16 && samps && !getenv("PELOAD_D3DGL_NOSAMPLER")) ? d3dgl_glsampler_x(samps[r],tx?tx->glhasmips:0,skip) : 0;
         if(!wsamp && tx && tx->glsrgb && wtex){ G.ActiveTexture(GLE_TEX0+unit); G.BindTexture(want,wtex); G.TexParameteri(want,0x8A48,skip?0x8A4A:0x8A49); g_unit_tex[unit]=~0u; }   // no sampler object: texture's own decode state
         if(!nocache && g_unitcache_ok && g_unit_tex[unit]==wtex && g_unit_tgt[unit]==want && g_unit_samp[unit]==wsamp){
             if(!(units_set&&*units_set)) G.ProgramUniform1i(prog,loc,unit);
             unit++; continue; }
         G.ActiveTexture(GLE_TEX0+unit);
         g_unit_tex[unit]=wtex; g_unit_tgt[unit]=want; g_unit_samp[unit]=wsamp;
-        if(tx){ unsigned have=tx->gltarget?tx->gltarget:GLE_TEX2D;
+        if(isbuf) G.BindTexture(want,wtex);
+        else if(tx){ unsigned have=tx->gltarget?tx->gltarget:GLE_TEX2D;
             if(have==want) G.BindTexture(want,tx->gltex);
             else { G.BindTexture(want,0);   // shader's resource dimension != the resource's (view mismatch): sample black
                 if(getenv("PELOAD_TEXCENSUS")){ static uint64_t ms[64]; static int nms; uint64_t key=((uint64_t)have<<32)|((uint64_t)want<<8)|tx->fmt; int f=0;
@@ -4390,6 +4445,18 @@ bind:
 // VS and PS each name their constant buffers "cb<N>"; linked together they'd merge (or conflict on
 // array size). d3dgl_rename_cb prefixes them per stage: VS "cb<N>"->"vXcb<N>", PS -> "pXcb<N>".
 static int d3dgl_idchar(char c){ return (c>='a'&&c<='z')||(c>='A'&&c<='Z')||(c>='0'&&c<='9')||c=='_'; }
+// VS resource names t<N> -> vt<N> so a monolithic program's VS and PS resources never alias (different D3D
+// slots/types: the particle VS reads StructuredBuffers at t16/t17 while the PS samples t0..)
+static int d3dgl_idchar(char c);
+static char* d3dgl_rename_vt(const char*src){
+    size_t n=strlen(src), cap=n+n/8+64, len=0; char*out=malloc(cap); if(!out) return 0;
+    for(size_t i=0;i<n;){
+        if(len+4>cap){ cap*=2; char*nn=realloc(out,cap); if(!nn){ free(out); return 0; } out=nn; }
+        int previd=(i>0)&&d3dgl_idchar(src[i-1]);
+        if(!previd && src[i]=='t' && src[i+1]>='0' && src[i+1]<='9'){ size_t j=i+1; while(src[j]>='0'&&src[j]<='9') j++;
+            if(!d3dgl_idchar(src[j])){ out[len++]='v'; } }
+        out[len++]=src[i++]; }
+    out[len]=0; return out; }
 static char* d3dgl_rename_cb(const char*src,int isvs){
     size_t cap=strlen(src)+1024,len=0; char*out=malloc(cap); if(!out) return 0;
     char p0=isvs?'v':'p';
@@ -4463,6 +4530,7 @@ static char* d3dgl_mono_src(D3DObj*o,int isvs){
     if(!o||!o->glsl) return 0;
     char*inj=d3dgl_inject(o->glsl,isvs,1); if(!inj) return 0;
     char*ren=d3dgl_rename_cb(inj,isvs); free(inj); if(!ren) return 0;
+    if(isvs){ char*r2=d3dgl_rename_vt(ren); free(ren); ren=r2; if(!ren) return 0; }   // VS resources -> vt# (own units 16..31)
     char*var=d3dgl_rename_varyings(ren,isvs); free(ren); if(!var) return 0;
     var=d3dgl_dedup_varyings(var);
     // PELOAD_D3DGL_SOLIDPS: geometry-coverage diagnostic -- make every PS output solid red and drop
@@ -4569,7 +4637,7 @@ static unsigned d3dgl_compile(const char*src,unsigned glstage){
 static char *m_vsrc_keep, *m_psrc_keep;   // last mono sources (block-size parsing at link)
 typedef struct { void*vs; void*ps; unsigned prog; int tried; int vcb[16],pcb[16],tloc[32]; signed char tt[32];
     int vblk[16], pblk[16];        // UBO path: declared block size in vec4s per D3D slot (0 = slot unused)
-    int units_set; int relcb; } MonoProg;   // relcb: 1 = VS / 2 = PS indexes a constant buffer by register
+    int units_set; int relcb; int vtloc[32]; signed char vtt[32]; int vunits_set; } MonoProg;   // relcb: 1 = VS / 2 = PS indexes a constant buffer by register
 static MonoProg g_mono[1024];
 static MonoProg* d3dgl_monoprog(D3DObj*vs,D3DObj*ps){
     uintptr_t h=(((uintptr_t)vs>>4)*2654435761u) ^ (((uintptr_t)ps>>4)*40503u);
@@ -4578,7 +4646,8 @@ static MonoProg* d3dgl_monoprog(D3DObj*vs,D3DObj*ps){
         m->vs=vs; m->ps=ps; m->tried=1; m->prog=0;                     // claim slot; prog stays 0 on any failure
         char*vsrc=d3dgl_mono_src(vs,1), *psrc=d3dgl_mono_src(ps,0);
         if(!vsrc||!psrc){ free(vsrc); free(psrc); return m; }
-        memset(m->tt,0,sizeof m->tt); d3dgl_scan_tt(vsrc,m->tt); d3dgl_scan_tt(psrc,m->tt);   // sampler dimension per t#
+        memset(m->tt,0,sizeof m->tt); d3dgl_scan_tt(psrc,m->tt);   // PS sampler dimension per t#
+        memset(m->vtt,0,sizeof m->vtt); d3dgl_scan_tt_p(vsrc,m->vtt,"vt");   // VS resources (renamed vt#)
         uint64_t vo=d3dgl_iface_mask(vsrc,1), fi=d3dgl_iface_mask(psrc,0);
         char*vfull=d3dgl_augment(vsrc, fi & ~vo, 1);   // VS gets the outputs the PS reads but the VS lacked
         char*pfull=d3dgl_augment(psrc, vo & ~fi, 0);   // PS gets inputs for the VS outputs it didn't read
@@ -4599,6 +4668,8 @@ static MonoProg* d3dgl_monoprog(D3DObj*vs,D3DObj*ps){
         for(int b=0;b<16;b++){ snprintf(nm,sizeof nm,"vXcb%d",b); m->vcb[b]=G.GetUniformLocation(prog,nm);
                                snprintf(nm,sizeof nm,"pXcb%d",b); m->pcb[b]=G.GetUniformLocation(prog,nm); }
         for(int b=0;b<32;b++){ snprintf(nm,sizeof nm,"t%d",b);    m->tloc[b]=G.GetUniformLocation(prog,nm); }
+        for(int b=0;b<32;b++){ snprintf(nm,sizeof nm,"vt%d",b);   m->vtloc[b]=G.GetUniformLocation(prog,nm); }
+        m->vunits_set=0;
         // constant-buffer blocks: VS slot b -> binding b, PS slot b -> binding 16+b
         memset(m->vblk,0,sizeof m->vblk); memset(m->pblk,0,sizeof m->pblk);
         if(G.GetUniformBlockIndex && G.UniformBlockBinding) for(int b=0;b<16;b++){
@@ -4882,6 +4953,7 @@ static void d3dgl_draw_impl(uint32_t vcount,int indexed,uint32_t instcount,uint3
             g_syn_cb1.data=g_syn_cb1_buf; g_syn_cb1.size=256; g_syn_cb1.is_cb=1; g_syn_cb1.ver++;
             if(!vscb_eff[1]||!vscb_eff[1]->data) vscb_eff[1]=&g_syn_cb1; } }
     if(mono && g_dg_ubo && G.BindBufferRange){
+        if(getenv("PELOAD_D3DGL_SKIPVSBUF") && (!getenv("PELOAD_D3DGL_ALT5") || (((long)(mono_s()/5.0))&1))){ int hb=0; for(int q=0;q<32;q++) if(mp->vtloc[q]>=0 && mp->vtt[q]==5) hb=1; if(hb) return; }
         { const char*e=getenv("PELOAD_D3DGL_SKIPRELCB"); if(e && (mp->relcb&atoi(e)) && (!getenv("PELOAD_D3DGL_ALT5") || (((long)(mono_s()/5.0))&1))) return; }
         { const char*e=getenv("PELOAD_D3DGL_SKIPVSBLK"); if(e){ int sb=atoi(e), mv=strchr(e,':')?atoi(strchr(e,':')+1):1; if(sb>=0&&sb<16&&mp->vblk[sb]>=mv && (!getenv("PELOAD_D3DGL_ALT5") || (((long)(mono_s()/5.0))&1))){ return; } } }
         // PELOAD_D3DGL_SKIPPSBLK=<slot>:<minvec>: skip draws whose PS declares cb<slot> with >= minvec vec4s (A/B a shader family)
@@ -4893,6 +4965,7 @@ static void d3dgl_draw_impl(uint32_t vcount,int indexed,uint32_t instcount,uint3
         for(int b=0;b<16;b++){ if(mp->vblk[b]) d3dgl_bind_ubo((unsigned)b,vscb_eff[b],g_d3dst.vscb_1st[b],mp->vblk[b]);
                                if(mp->pblk[b]) d3dgl_bind_ubo((unsigned)(16+b),g_d3dst.pscb[b],g_d3dst.pscb_1st[b],mp->pblk[b]); }
         PH(3); g_d3dgl_phase="texs"; d3dgl_bind_texs_p(mp->prog,mp->tloc,mp->tt,&mp->units_set);
+        d3dgl_bind_res(mp->prog,mp->vtloc,mp->vtt,&mp->vunits_set,g_d3dst.vssrv,g_d3dst.vssrvv,g_d3dst.vssamp,16,32);   // VS resources: units 16..31
     } else if(mono){
         d3dgl_bind_cbs_p(mp->prog,mp->vcb,vscb_eff,g_d3dst.vscb_1st,g_d3dst.vscb_cnt);
         d3dgl_bind_cbs_p(mp->prog,mp->pcb,g_d3dst.pscb,g_d3dst.pscb_1st,g_d3dst.pscb_cnt);
@@ -5265,7 +5338,7 @@ static void d3dgl_blit_fullscreen(unsigned vao){
             unsigned char*cap=calloc(1,(size_t)w*h*4);
             if(cap){ G.BindFramebuffer(GLE_FBO,0); if(G.ReadBuffer)G.ReadBuffer(0x0405/*BACK*/); if(G.GetError)G.GetError();
                 G.ReadPixels(0,0,w,h,GLE_RGBA,GLE_UBYTE,cap);
-                static int wn; const char*home=getenv("HOME"); char p[512]; snprintf(p,sizeof p,"%s/reclaimer_win_%d_%03d.bmp",home?home:"/tmp",(int)getpid(),wn++);
+                static int wn; const char*home=getenv("HOME"); char p[512]; snprintf(p,sizeof p,"%s/reclaimer_win_%d_%03d%s.bmp",home?home:"/tmp",(int)getpid(),wn++, getenv("PELOAD_D3DGL_ALT5")?((((long)(mono_s()/5.0))&1)?"_B":"_A"):"");
                 bmp_write_rgba(p,w,h,cap); char m[160]; int k=snprintf(m,sizeof m,"  [d3dgl] win-shot -> %s (%dx%d)\n",p,w,h); (void)!write(2,m,k); free(cap); } } } }
 }
 // Called on the PRESENT thread (owns the window context g_present_glctx, which shares objects with

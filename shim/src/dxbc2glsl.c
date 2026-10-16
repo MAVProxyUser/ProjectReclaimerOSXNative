@@ -102,7 +102,9 @@ static const char* dg_ops(int op){
         case 109: return "gather4"; case 122: return "deriv_rtx_coarse"; case 123: return "deriv_rtx_fine";
         case 124: return "deriv_rty_coarse"; case 125: return "deriv_rty_fine"; case 129: return "rcp";
         case 130: return "f32tof16"; case 131: return "f16tof32"; case 138: return "ubfe"; case 139: return "ibfe";
-        case 140: return "bfi"; case 141: return "bfrev"; case 134: return "countbits"; }
+        case 140: return "bfi"; case 141: return "bfrev"; case 134: return "countbits";
+        case 165: return "ld_raw"; case 167: return "ld_structured"; case 166: return "store_raw"; case 168: return "store_structured";
+        case 161: return "dcl_resource_raw"; case 162: return "dcl_resource_structured"; }
     return NULL;
 }
 static int dg_noperand_op(int op){ // ret,nop,else,endif,endloop,loop,break,continue,cut,default,endswitch,emit
@@ -245,7 +247,7 @@ static char* dg_asg_i(DgCtx*c,const DgOp*op,const char*expr){ if(op->type==T_NUL
 
 // ---- texture resource dimensions (dcl_resource) -> GLSL sampler type + coordinate shapes ----
 static const char* dg_samptype(int dim){
-    switch(dim){ case 5: return "sampler3D"; case 6: return "samplerCube"; case 7: case 8: case 9: return "sampler2DArray";
+    switch(dim){ case 100: case 101: return "usamplerBuffer"; case 5: return "sampler3D"; case 6: return "samplerCube"; case 7: case 8: case 9: return "sampler2DArray";
         case 10: return "samplerCubeArray"; default: return "sampler2D"; } }
 static const char* dg_crd(int dim,const char*a){ char*o=dg_pool();      // float sample coordinate
     switch(dim){ case 5: case 6: case 8: case 9: snprintf(o,256,"(%s).xyz",a); break;
@@ -305,6 +307,11 @@ char* dg_emit(const char*stage,const DgSig*isgn,int ni,const DgSig*osgn,int no,D
     int rdim[256]={0}; int dclsz[64]={0};
     for(int x=0;x<nins;x++) if(ins[x].op==89 && ins[x].nop && ins[x].ops[0].nidx>1){ uint32_t b=ins[x].ops[0].idx[0].val, n=ins[x].ops[0].idx[1].val; if(b<64 && n>0 && n<=4096) dclsz[b]=(int)n; }
     for(int x=0;x<nins;x++) if(ins[x].op==88 && ins[x].nop && ins[x].ops[0].nidx){ uint32_t r=ins[x].ops[0].idx[0].val; if(r<256) rdim[r]=(int)((ins[x].tok>>11)&0x1f); }
+    // StructuredBuffer / ByteAddressBuffer SRVs (dcl_resource_structured 162 / _raw 161): GL texture buffer of R32UI
+    // dwords (particle state read by the particle vertex shaders). rdim 100 = structured, 101 = raw; stride kept.
+    int rstride[256]={0};
+    for(int x=0;x<nins;x++) if((ins[x].op==162||ins[x].op==161) && ins[x].nop && ins[x].ops[0].type==T_RESOURCE && ins[x].ops[0].nidx){ uint32_t r=ins[x].ops[0].idx[0].val;
+        if(r<256){ rdim[r]=ins[x].op==162?100:101; rstride[r]=ins[x].op==162?(int)ins[x].raw[2]:4; res_[r]=1; } }
     for(int x=0;x<nins;x++){ for(int k=0;k<ins[x].nop;k++){ DgOp*op=&ins[x].ops[k];
         if(op->type==T_TEMP && op->nidx){ if((int)op->idx[0].val>maxt) maxt=(int)op->idx[0].val; }
         if(op->type==T_CB && op->nidx){ int b=op->idx[0].val; if(b>=0&&b<64){ int need=64;
@@ -363,7 +370,8 @@ char* dg_emit(const char*stage,const DgSig*isgn,int ni,const DgSig*osgn,int no,D
            !strcmp(n,"dcl_input_ps")||!strcmp(n,"dcl_input_sgv")||!strcmp(n,"dcl_input_ps_sgv")||
            !strcmp(n,"dcl_input_ps_siv")||!strcmp(n,"dcl_input_siv")||!strcmp(n,"dcl_output")||
            !strcmp(n,"dcl_output_sgv")||!strcmp(n,"dcl_output_siv")||!strcmp(n,"dcl_temps")||
-           !strcmp(n,"dcl_globalflags")||!strcmp(n,"dcl_indexable_temp")||!strcmp(n,"customdata")||!strcmp(n,"nop")) continue;
+           !strcmp(n,"dcl_globalflags")||!strcmp(n,"dcl_indexable_temp")||!strcmp(n,"customdata")||!strcmp(n,"nop")||
+           !strcmp(n,"dcl_resource_raw")||!strcmp(n,"dcl_resource_structured")) continue;
         const char*cmp = ins[x].test ? "!=" : "==";
         // conditions test the register's BITS (D3D: any nonzero 32-bit value is true; masks are 0xFFFFFFFF)
         if(!strcmp(n,"ret")){ dg_lprintf(&L,isvs?"  { dx_posfix(); return; }":"  return;"); continue; }
@@ -386,7 +394,8 @@ char* dg_emit(const char*stage,const DgSig*isgn,int ni,const DgSig*osgn,int no,D
         if(!strcmp(n,"endswitch")){ if(cfn && cf[cfn-1].kind==3){ cfn--; dg_lprintf(&L,"  } }"); } continue; }
         if(nopn==0){ dg_lprintf(&L,"  // %s (no operands)",n); continue; }
         // integer helpers
-        #define SI(k) ({ char*_t=dg_pool(); snprintf(_t,256,"floatBitsToInt(%s)",S(k)); _t; })
+        // integer operand: the NEG modifier is two's-complement negation of the int (not a float sign flip)
+        #define SI(k) ({ char*_t=dg_pool(); if((k)<nopn && (o[k].emod&1)){ DgOp _c=o[k]; _c.emod&=~1; snprintf(_t,256,"(-floatBitsToInt(%s))",dg_src(&_c)); } else snprintf(_t,256,"floatBitsToInt(%s)",S(k)); _t; })
         #define TX(k) ( (k)<nopn && o[k].nidx ? o[k].idx[0].val : 0 )
         #define RSW(k) ({ char*_r=dg_pool(); if((k)<nopn) dg_swz(&o[k],_r); else strcpy(_r,"xyzw"); _r; })
         #define DIM2 ( TX(2)<256 ? rdim[TX(2)] : 0 )
@@ -424,6 +433,12 @@ char* dg_emit(const char*stage,const DgSig*isgn,int ni,const DgSig*osgn,int no,D
             else snprintf(t,256,"(%s).%s",sz,RSW(2));
             line=dg_asg(&ctx,&o[0],t); }
         else if(!strcmp(n,"mov")) line=dg_asg(&ctx,&o[0],S(1));
+        else if((ins[x].op==167||ins[x].op==165) && nopn>=3){   // ld_structured dst, idx, byteoff, t# | ld_raw dst, byteaddr, t#
+            int ri=ins[x].op==167?3:2; unsigned tr=(ri<nopn&&o[ri].nidx)?o[ri].idx[0].val:0; char sw[5]; if(ri<nopn) dg_swz(&o[ri],sw); else strcpy(sw,"xyzw");
+            char a1[256]; snprintf(a1,256,"%s",SI(1)); char e[512];
+            if(ins[x].op==167){ char a2[256]; snprintf(a2,256,"%s",SI(2)); snprintf(e,512,"uintBitsToFloat(dx_ldb(t%u,((%s).x*%d+(%s).x)>>2)).%s",tr,a1,tr<256?rstride[tr]:4,a2,sw); }
+            else snprintf(e,512,"uintBitsToFloat(dx_ldb(t%u,(%s).x>>2)).%s",tr,a1,sw);
+            line=dg_asg(&ctx,&o[0],e); }
         // screen-space derivatives: GL row y == D3D row y (VS y-flip), so dFdy has D3D's sign
         else if(!strncmp(n,"deriv_rtx",9)) line=dg_asg(&ctx,&o[0],({char*t=dg_pool();snprintf(t,256,"dFdx(%s)",S(1));t;}));
         else if(!strncmp(n,"deriv_rty",9)) line=dg_asg(&ctx,&o[0],({char*t=dg_pool();snprintf(t,256,"dFdy(%s)",S(1));t;}));
@@ -498,7 +513,7 @@ char* dg_emit(const char*stage,const DgSig*isgn,int ni,const DgSig*osgn,int no,D
     // what's already declared
     { // declared samplers "uniform sampler2D t%d", cbs "uniform vec4 cb%d", in v%d, out o%d, temps "vec4 r%d=vec4"
       for(int i=0;i<L.n;i++){ int d; const char*s=L.v[i];
-        if(!strncmp(s,"uniform sampler",15)){ const char*q=strrchr(s,' '); if(q && sscanf(q," t%d;",&d)==1 && d>=0 && d<256) has_t[d]=1; }
+        if(!strncmp(s,"uniform sampler",15)||!strncmp(s,"uniform usampler",16)){ const char*q=strrchr(s,' '); if(q && sscanf(q," t%d;",&d)==1 && d>=0 && d<256) has_t[d]=1; }
         if(sscanf(s,"uniform vec4 cb%d[",&d)==1 && d<256) has_cb[d]=1;
         if(sscanf(s,"layout(std140) uniform cb%d_blk",&d)==1 && d<256) has_cb[d]=1;
         if(sscanf(s,"in vec4 v%d;",&d)==1 && d<256) has_v[d]=1;
@@ -510,7 +525,7 @@ char* dg_emit(const char*stage,const DgSig*isgn,int ni,const DgSig*osgn,int no,D
     dg_scan_ids(body,"t",ref_t,256); dg_scan_ids(body,"cb",ref_cb,256);
     dg_scan_ids(body,"v",ref_v,256); dg_scan_ids(body,"o",ref_o,256); dg_scan_ids(body,"r",ref_r,256);
     int has_glpos = strstr(body,"gl_Position")!=NULL;
-    int need_h2f = strstr(body,"dx_h2f(")!=NULL, need_f2h = strstr(body,"dx_f2h(")!=NULL;
+    int need_h2f = strstr(body,"dx_h2f(")!=NULL, need_f2h = strstr(body,"dx_f2h(")!=NULL, need_ldb = strstr(body,"dx_ldb(")!=NULL;
     // find insertion index (the 'void main(){' line)
     int mi=0; for(int i=0;i<L.n;i++) if(!strncmp(L.v[i],"void main",9)){ mi=i; break; }
     // header decls (t, cb, v, o) inserted before main, in that order, ascending — matches Python
@@ -519,6 +534,7 @@ char* dg_emit(const char*stage,const DgSig*isgn,int ni,const DgSig*osgn,int no,D
     for(int m=0;m<256;m++) if(ref_cb[m]&&!has_cb[m]){ char*s; if(g_dg_ubo) asprintf(&s,"layout(std140) uniform cb%d_blk { vec4 cb%d[4096]; };",m,m); else asprintf(&s,"uniform vec4 cb%d[4096];",m); dg_linsert(&L,ins_at++,s); mi++; }
     for(int m=0;m<256;m++) if(ref_v[m]&&!has_v[m]){ char*s; asprintf(&s,"in vec4 v%d;",m); dg_linsert(&L,ins_at++,s); mi++; }
     for(int m=0;m<256;m++) if(ref_o[m]&&!has_o[m]){ if(m!=0||!has_glpos){ char*s; asprintf(&s,"out vec4 o%d;",m); dg_linsert(&L,ins_at++,s); mi++; } }
+    if(need_ldb){ dg_linsert(&L,ins_at++,strdup("uvec4 dx_ldb(usamplerBuffer b,int dw){ return uvec4(texelFetch(b,dw).x,texelFetch(b,dw+1).x,texelFetch(b,dw+2).x,texelFetch(b,dw+3).x); }")); mi++; }
     // half-float helpers (packHalf2x16/unpackHalf2x16 are GLSL 4.20; we target 4.10)
     if(need_h2f){ dg_linsert(&L,ins_at++,strdup("float dx_h2f1(uint h){ uint e=(h>>10)&31u, m=h&1023u; float v = e==0u ? float(m)*exp2(-24.0) : (e==31u ? (m==0u?uintBitsToFloat(0x7f800000u):uintBitsToFloat(0x7fc00000u)) : (1.0+float(m)/1024.0)*exp2(float(e)-15.0)); return ((h>>15)&1u)!=0u ? -v : v; }\nvec4 dx_h2f(uvec4 h){ return vec4(dx_h2f1(h.x),dx_h2f1(h.y),dx_h2f1(h.z),dx_h2f1(h.w)); }")); mi++; }
     if(need_f2h){ dg_linsert(&L,ins_at++,strdup("uint dx_f2h1(float f){ uint b=floatBitsToUint(f), s=(b>>16)&0x8000u; int e=int((b>>23)&255u)-112; uint m=b&0x7fffffu; if(e<=0) return s; if(e>=31) return s|0x7c00u; return s|(uint(e)<<10)|(m>>13); }\nuvec4 dx_f2h(vec4 f){ return uvec4(dx_f2h1(f.x),dx_f2h1(f.y),dx_f2h1(f.z),dx_f2h1(f.w)); }")); mi++; }
