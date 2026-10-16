@@ -2665,7 +2665,8 @@ static void*  MSABI i_CreateWindowExW(uint32_t ex,const void*cls,const void*name
     ws("  [CreateWindowExW] real HWND\n"); return win; }
 static int    MSABI i_DestroyWindow(void*h){ (void)h; return 1; }
 static int64_t MSABI i_DefWindowProcW(void*h,uint32_t m,uint64_t wp,int64_t lp){ (void)h;(void)wp;(void)lp; if(m==0x0081/*WM_NCCREATE*/) return 1; return 0; }
-static int    MSABI i_ShowWindow(void*h,int c){ if(h && c && ((WWin*)h)->magic==WWIN_MAGIC){ g_shown_hwnd=h; } { char m[80]; int k=snprintf(m,sizeof m,"  [ShowWindow] hwnd=%p cmd=%d\n",h,c); (void)!write(2,m,k); } return 1; }
+static int    MSABI i_ShowWindow(void*h,int c){ if(h && c && ((WWin*)h)->magic==WWIN_MAGIC){ g_shown_hwnd=h; }
+    { static void*lh; static int lc=-1; if(h!=lh||c!=lc){ lh=h; lc=c; char m[80]; int k=snprintf(m,sizeof m,"  [ShowWindow] hwnd=%p cmd=%d\n",h,c); (void)!write(2,m,k); } } return 1; }
 static int    MSABI i_UpdateWindow(void*h){ (void)h; return 1; }
 // The engine's present loop calls MsgWaitForMultipleObjectsEx and only keeps
 // looping (rendering + presenting each frame) when it returns WAIT_TIMEOUT
@@ -8731,7 +8732,48 @@ static void net_selftest(const char* spec){
     i_ws2_closesocket(s);
     char m[256]; snprintf(m,sizeof m,"[nettest] http://%s:%d%s -> %d bytes total (headers+body); body starts at %d\n",host,port,pq,total,body); ws(m);
 }
+// ---- PELOAD_SAMPLE=<us>: in-process sampling profiler (macOS `sample` can't symbolize Rosetta code) ----
+// Every <us> microseconds each other thread is suspended and its x86 RIP read (thread_get_state works for
+// translated processes); every 10 s the top hotspots are printed: guest code as exe+RVA / halo3+RVA,
+// shim and system code via dladdr (shim statics: resolve offline with atos -o shim/build/peload).
+typedef struct { uint64_t rip; uint32_t cnt; uint32_t th; } SmpEnt;
+static void* sampler_thread(void*a){ (void)a;
+    int us=atoi(getenv("PELOAD_SAMPLE")); if(us<200) us=1000;
+    static SmpEnt tab[65536]; uint64_t total=0; double tlast=mono_s();
+    static struct { thread_t t; uint64_t n, busy; } thr[64]; int nthr=0;
+    mach_port_t self=mach_thread_self();
+    for(;;){
+        thread_act_array_t th; mach_msg_type_number_t n=0;
+        if(task_threads(mach_task_self(),&th,&n)==KERN_SUCCESS){
+            for(mach_msg_type_number_t i=0;i<n;i++){ thread_t t=th[i];
+                if(t!=self && thread_suspend(t)==KERN_SUCCESS){
+                    x86_thread_state64_t st; mach_msg_type_number_t c=x86_THREAD_STATE64_COUNT;
+                    int ok=thread_get_state(t,x86_THREAD_STATE64,(thread_state_t)&st,&c)==KERN_SUCCESS;
+                    thread_resume(t);
+                    if(ok){ uint64_t rip=st.__rip; int ti=-1; for(int k=0;k<nthr;k++) if(thr[k].t==t){ ti=k; break; } if(ti<0 && nthr<64){ ti=nthr++; thr[ti].t=t; thr[ti].n=thr[ti].busy=0; }
+                        Dl_info di; int idle=0; if(dladdr((void*)rip,&di) && di.dli_sname && (strstr(di.dli_sname,"mach_msg")||strstr(di.dli_sname,"__psynch")||strstr(di.dli_sname,"__semwait")||strstr(di.dli_sname,"nanosleep")||strstr(di.dli_sname,"__select")||strstr(di.dli_sname,"kevent")||strstr(di.dli_sname,"__wait4")||strstr(di.dli_sname,"__workq")||strstr(di.dli_sname,"pid_for_task")||!strcmp(di.dli_sname,"poll")||strstr(di.dli_sname,"__sigsuspend"))) idle=1;
+                        if(ti>=0){ thr[ti].n++; if(!idle) thr[ti].busy++; }
+                        if(!idle){ uint64_t key=rip>>4; uint32_t h=(uint32_t)(key*2654435761u)&65535;
+                            for(int pr=0;pr<64;pr++){ SmpEnt*e=&tab[(h+pr)&65535]; if(e->rip==0){ e->rip=rip&~15ULL; e->cnt=1; e->th=ti; break; } if(e->rip==(rip&~15ULL)){ e->cnt++; break; } }
+                            total++; } } }
+                mach_port_deallocate(mach_task_self(),t); }
+            vm_deallocate(mach_task_self(),(vm_address_t)th,n*sizeof(thread_t)); }
+        usleep(us);
+        if(mono_s()-tlast>=10.0){ tlast=mono_s();
+            char m[256]; int k=snprintf(m,sizeof m,"  [sample] ---- %llu busy samples; threads (busy/total):",(unsigned long long)total); (void)!write(2,m,k);
+            for(int i=0;i<nthr;i++) if(thr[i].busy>20){ k=snprintf(m,sizeof m," t%d=%llu/%llu",i,(unsigned long long)thr[i].busy,(unsigned long long)thr[i].n); (void)!write(2,m,k); } (void)!write(2,"\n",1);
+            for(int top=0;top<40;top++){ int bi=-1; uint32_t bc=0; for(int i=0;i<65536;i++) if(tab[i].cnt>bc){ bc=tab[i].cnt; bi=i; }
+                if(bi<0||bc<5) break; uint64_t rip=tab[bi].rip; Dl_info di; char where[160];
+                if(rip>=0x140000000ULL&&rip<0x150000000ULL) snprintf(where,sizeof where,"exe+0x%llx",(unsigned long long)(rip-0x140000000ULL));
+                else if(rip>=0x180000000ULL&&rip<0x190000000ULL) snprintf(where,sizeof where,"halo3+0x%llx",(unsigned long long)(rip-0x180000000ULL));
+                else if(dladdr((void*)rip,&di)) snprintf(where,sizeof where,"%s:%s+0x%llx",di.dli_fname?strrchr(di.dli_fname,'/')?strrchr(di.dli_fname,'/')+1:di.dli_fname:"?",di.dli_sname?di.dli_sname:"?",(unsigned long long)(di.dli_saddr?rip-(uint64_t)di.dli_saddr:0));
+                else snprintf(where,sizeof where,"0x%llx",(unsigned long long)rip);
+                k=snprintf(m,sizeof m,"  [sample] %5.1f%% t%u %s\n",100.0*bc/(total?total:1),tab[bi].th,where); (void)!write(2,m,k);
+                tab[bi].cnt=0; }   // (printed entries reset; counts restart for the next window)
+            memset(tab,0,sizeof tab); total=0; for(int i=0;i<nthr;i++){ thr[i].n=thr[i].busy=0; } } }
+    return 0; }
 int main(int argc, char **argv){
+    if(getenv("PELOAD_SAMPLE")){ pthread_t st; pthread_create(&st,0,sampler_thread,0); }
     { struct sigaction sa; memset(&sa,0,sizeof sa); sa.sa_sigaction=crashsig; sa.sa_flags=SA_SIGINFO;
       sigaction(SIGSEGV,&sa,0); sigaction(SIGBUS,&sa,0); sigaction(SIGILL,&sa,0); sigaction(SIGABRT,&sa,0);
       if(getenv("PELOAD_BP")) sigaction(SIGTRAP,&sa,0); }  // PELOAD_BP software breakpoints need SIGTRAP caught (else "Trace/BPT trap")
