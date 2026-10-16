@@ -18,7 +18,7 @@ Game, Customize, Settings, Credits):
 - **Host Game → Start Game** hosts a local Guardian Slayer match.
 - **Server Browser** lists the public servers; double-click one (or select it and JOIN GAME) to join.
   The client joins the lobby (players, map vote), prepares the next map when the server rotates, and
-  loads into the match. Only servers running the same client version (0.9.13) can be joined; the
+  loads into the match. Only servers running the same client version can be joined; the
   browser shows other versions in red.
 - In a match: correct rendering, lighting and shadows; the first-person weapon, particles, muzzle flash
   and explosions; the HUD and scoreboard (hold Tab or Back); the loading screen and game audio;
@@ -37,9 +37,11 @@ Known gaps:
 - An Apple Silicon Mac with **Rosetta 2** (`softwareupdate --install-rosetta --agree-to-license`).
   Developed and tested on an M4 running macOS 26.
 - Your own copy of **Halo: The Master Chief Collection** on Steam, with the Halo 3 Multiplayer files.
-- **Project Reclaimer v0.9.13** — `project-reclaimer-v0.9.13.exe` from https://projectreclaimer.dev.
-  It must be this exact build; the loader patches it at fixed offsets. SHA-256:
-  `a393504dc32a8fd35dabb5b26ea1427fbaedabdac76b00133d49ebc44fb8efd1`
+- **Project Reclaimer client v0.9.18** — `project-reclaimer-client-v0.9.18.exe` from
+  https://github.com/ProjectReclaimer/project-reclaimer-releases/releases (SHA-256
+  `a8d3a37ad27e31abc09d009a94210470976ecefb34908a9fb8e1a245f4924910`). The loader finds the few client
+  code paths it patches by byte signature, so other builds usually work too; v0.9.13 is also tested.
+  Servers and players are almost all on the newest release.
 - About 25 GB of disk space for the MCC files.
 
 No game files are included in this repository or its releases.
@@ -65,8 +67,9 @@ No game files are included in this repository or its releases.
    ./reclaimer-mac.sh download
    ```
    (Only `download` is needed; that script's other commands are for an older Wine-based setup.)
-3. **Add the client exe.** Put `project-reclaimer-v0.9.13.exe` in `client/`, or point
-   `RECLAIMER_EXE=/path/to/exe` at it.
+3. **Add the client exe.** Put `project-reclaimer-client-v0.9.18.exe` in `client/`, or point
+   `RECLAIMER_EXE=/path/to/exe` at it. The first launch of a new client version builds its Forge asset
+   library (about 2.5 minutes, "BUILDING ASSET LIBRARY"); later launches reach the menu in ~20 s.
 
 ## Launch
 

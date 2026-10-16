@@ -138,8 +138,8 @@ static uint8_t *g_base;   // where we mapped the image
 static uint64_t g_pref;   // preferred image base from the header
 
 // loaded guest module registry (genuine MS CRT DLLs, etc.)
-typedef struct { const char *name; uint8_t *base; } Mod;
-static Mod g_mods[16]; static int g_nmods;
+typedef struct { const char *name; uint8_t *base; const char *path; } Mod;   // path: host path of a guest DLL
+static Mod g_mods[64]; static int g_nmods;
 static int g_prefer_base;   // map next image at its preferred base (exe, halo3.dll)
 
 // filesystem-shim foundation (declared early; used by handle-based ops)
@@ -151,6 +151,7 @@ static DIR  *g_fddir[MAXFD];        // boxed-fd -> open dir stream (lazy)
 static int   g_fddel[MAXFD];        // delete-on-close flag
 static char* win2unix(const uint16_t*, char*, int);  // fwd
 static void  unix2win(const char*, uint16_t*, int);   // fwd
+static void  unix2win_ex(const char*, uint16_t*, int, int);   // fwd
 static void  fd_record(int, const char*);             // fwd
 static void  mkparents(const char*);                  // fwd
 static void  rmrf(const char*);                       // fwd
@@ -597,7 +598,18 @@ static int    MSABI i_GlobalMemoryStatusEx(uint8_t *ms){ if(!ms) return 0; *(uin
 static uint16_t* MSABI i_GetCommandLineW(void){ return g_cmdlineW; }
 #define WS2_HANDLE ((void*)0x7732000ULL)
 static int name_is_ws2(const char*s); static int name_is_ws2_w(const uint16_t*w); // fwd
-static void*  MSABI i_GetModuleHandleW(uint16_t *n){ if(name_is_ws2_w(n)) return WS2_HANDLE; return g_base; } // ws2_32 gets a distinct handle; else image base
+// Loaded guest DLL by file name (case-insensitive, with or without a directory / ".dll").
+static uint8_t* guest_mod_by_name_w(const uint16_t*n){ if(!n) return 0; char a[512]; int i=0; for(; n[i]&&i<511;i++) a[i]=(char)(n[i]<128?n[i]:'?'); a[i]=0;
+    const char*b=a; for(const char*q=a;*q;q++) if(*q=='\\'||*q=='/') b=q+1;
+    for(int k=0;k<g_nmods;k++){ const char*mn=g_mods[k].name; if(!mn) continue; const char*mb=mn; for(const char*q=mn;*q;q++) if(*q=='\\'||*q=='/') mb=q+1;
+        size_t lb=strlen(b), lm=strlen(mb); if(!strcasecmp(mb,b) || (lm==lb+4 && !strncasecmp(mb,b,lb) && !strcasecmp(mb+lb,".dll"))) return g_mods[k].base; }
+    return 0; }
+// The loaded image (exe or guest DLL) containing an address.
+static uint8_t* guest_mod_by_addr(uint64_t p){
+    if(g_base){ OPT64*o=(OPT64*)((uint8_t*)g_base+((DOS*)g_base)->e_lfanew+sizeof(COFF)); if(p>=(uint64_t)g_base && p<(uint64_t)g_base+o->ImageSize) return g_base; }
+    for(int k=0;k<g_nmods;k++){ uint8_t*bs=g_mods[k].base; OPT64*o=(OPT64*)(bs+((DOS*)bs)->e_lfanew+sizeof(COFF)); if(p>=(uint64_t)bs && p<(uint64_t)bs+o->ImageSize) return bs; }
+    return 0; }
+static void*  MSABI i_GetModuleHandleW(uint16_t *n){ if(name_is_ws2_w(n)) return WS2_HANDLE; { uint8_t*m=guest_mod_by_name_w(n); if(m) return m; } return g_base; } // ws2_32 / guest DLLs by name; else image base
 static void*  MSABI i_GetModuleHandleA(char *n){ if(name_is_ws2(n)) return WS2_HANDLE; return g_base; }
 
 // TLS: Windows TLS slots are PER-THREAD. A shared global table would let threads
@@ -2560,7 +2572,12 @@ static int    MSABI i_FlsFree(uint32_t i){ return i_TlsFree(i); }
 static int    MSABI i_IsProcessorFeaturePresent(uint32_t f){ (void)f; return 1; }
 static int    MSABI i_IsDebuggerPresent(void){ return 0; }
 static uint32_t MSABI i_GetACP(void){ return 65001; }
-static int    MSABI i_GetModuleHandleExW(uint32_t fl, void *name, void **out){ (void)fl;(void)name; if(out)*out=g_base; return 1; }
+// GetModuleHandleExW: FROM_ADDRESS (0x4) -> the image containing the address (Waves' WaveShell-Xbox.dll finds its own
+// folder this way to load L360.dll/q10.dll next to it; always answering "the exe" sent it to client\waves\);
+// a name -> GetModuleHandleW; NULL -> the exe.
+static int    MSABI i_GetModuleHandleExW(uint32_t fl, void *name, void **out){
+    if(fl&0x4){ uint8_t*m=guest_mod_by_addr((uint64_t)name); if(out)*out=m; if(!m){ g_lasterr=126; return 0; } return 1; }
+    void*m= name? i_GetModuleHandleW((uint16_t*)name) : g_base; if(out)*out=m; return m!=0; }
 static int    MSABI i_MultiByteToWideChar(uint32_t cp,uint32_t fl,const char*s,int sl,uint16_t*w,int wl){
     (void)cp;(void)fl; int n= sl<0? (int)strlen(s)+1 : sl; if(!w||wl==0) return n; int i=0; for(;i<n&&i<wl;i++) w[i]=(uint8_t)s[i]; return i; }
 static int    MSABI i_WideCharToMultiByte(uint32_t cp,uint32_t fl,const uint16_t*w,int wl,char*s,int sl,const char*df,int*du){
@@ -2576,9 +2593,26 @@ static void   MSABI i_ExitProcess(uint32_t c){
     // rendered window on screen (instead of exiting on the "no map selected" abort).
     if(getenv("PELOAD_HOLD_WINDOW") && g_present_started){ ws("  [hold-window] worker exit suppressed; keeping window up\n"); for(;;){ struct timespec ts={1,0}; nanosleep(&ts,0); } }
     _exit((int)c); }
-static void   MSABI i_TerminateProcess(void *h,uint32_t c){ (void)h; _exit((int)c); }
-static uint32_t MSABI i_GetModuleFileNameW(void*m,uint16_t*buf,uint32_t sz){ (void)m; uint32_t i=0; for(; i<sz && g_exewin[i]; i++) buf[i]=g_exewin[i]; if(i<sz) buf[i]=0; if(getenv("PELOAD_TRACE_SPAWN")){ char n[1100]; uint32_t k=0; for(;k<i&&k<1099;k++)n[k]=(char)(buf[k]&0xff); n[k]=0; char t[1200]; snprintf(t,sizeof t,"  [GetModuleFileNameW] mod=%p -> %s\n",m,n); ws(t);} return i; }
-static void   MSABI i_GetStartupInfoW(void *si){ if(si) memset(si,0,104); }
+static void   MSABI i_TerminateProcess(void *h,uint32_t c){ (void)h;
+    { uint64_t r=(uint64_t)__builtin_return_address(0); char m[160]; int k=snprintf(m,sizeof m,"  [TerminateProcess] code=0x%x caller=%s+0x%llx\n",c,
+        (r>=0x140000000ULL&&r<0x150000000ULL)?"exe":(r>=0x180000000ULL&&r<0x190000000ULL)?"halo3":"?",(unsigned long long)((r>=0x140000000ULL&&r<0x150000000ULL)?r-0x140000000ULL:(r>=0x180000000ULL&&r<0x190000000ULL)?r-0x180000000ULL:r)); (void)!write(2,m,k);
+      // guest return addresses on the stack (who decided to terminate)
+      uint64_t*sp=(uint64_t*)__builtin_frame_address(0); int f=0; for(int i=0;i<600&&f<14;i++){ uint64_t v=sp[i];
+        if(v>=0x140001000ULL&&v<0x150000000ULL){ k=snprintf(m,sizeof m,"     exe+0x%llx\n",(unsigned long long)(v-0x140000000ULL)); (void)!write(2,m,k); f++; }
+        else if(v>=0x180001000ULL&&v<0x187000000ULL){ k=snprintf(m,sizeof m,"     halo3+0x%llx\n",(unsigned long long)(v-0x180000000ULL)); (void)!write(2,m,k); f++; } } }
+    _exit((int)c); }
+// GetModuleFileName(hModule): a guest DLL's own path (Waves' WaveShell-Xbox.dll, loaded by client v0.9.18,
+// builds boost::filesystem paths from it; returning the exe's "\\?\Z:\..." path made boost throw
+// "invalid name"). NULL / the exe's base -> the exe path, as before.
+static const char* guest_mod_path(void*m){ for(int k=0;k<g_nmods;k++) if(m && g_mods[k].base==(uint8_t*)m) return g_mods[k].path; return 0; }
+static uint32_t MSABI i_GetModuleFileNameW(void*m,uint16_t*buf,uint32_t sz){ uint32_t i=0;
+    { const char*mp=guest_mod_path(m); if(mp && sz){ uint16_t w[1024]; unix2win_ex(mp,w,1024,1); for(; i<sz && w[i]; i++) buf[i]=w[i]; if(i<sz) buf[i]=0; else { buf[sz-1]=0; g_lasterr=122; } return i; } }
+    for(; i<sz && g_exewin[i]; i++) buf[i]=g_exewin[i]; if(i<sz) buf[i]=0; if(getenv("PELOAD_TRACE_SPAWN")){ char n[1100]; uint32_t k=0; for(;k<i&&k<1099;k++)n[k]=(char)(buf[k]&0xff); n[k]=0; char t[1200]; snprintf(t,sizeof t,"  [GetModuleFileNameW] mod=%p -> %s\n",m,n); ws(t);} return i; }
+static void   MSABI i_GetStartupInfoW(void *si){ if(si){ memset(si,0,104); *(uint32_t*)si=104; } }
+// GetStartupInfoA: the MSVC CRT startup of guest DLLs (bink2w64.dll, loaded by client v0.9.18) reads
+// lpReserved2/cbReserved2 for inherited handles; an unfilled stub made it parse garbage and crash.
+static void   MSABI i_GetStartupInfoA(void *si){ if(si){ memset(si,0,104); *(uint32_t*)si=104; } }
+static int    MSABI i_HeapSetInformation(void*h,int cls,void*info,uint64_t len){ (void)h;(void)cls;(void)info;(void)len; return 1; }
 static int    MSABI i_SetEnvironmentVariableW(const uint16_t*n,const uint16_t*v){
     char nm[256]; int i=0; for(; n&&n[i]&&i<255;i++) nm[i]=(char)(n[i]<128?n[i]:'?'); nm[i]=0;
     if(!v){ unsetenv(nm); return 1; }
@@ -2765,7 +2799,8 @@ static uint32_t MSABI i_GetConsoleMode(void*h,uint32_t*m){ (void)h; if(m)*m=0; r
 static uint32_t MSABI i_SetConsoleMode(void*h,uint32_t m){ (void)h;(void)m; return 1; }
 static int MSABI i_SetThreadStackGuarantee(uint32_t*s){ (void)s; return 1; }
 static int MSABI i_FreeLibrary(void*h){ (void)h; return 1; }
-static uint32_t MSABI i_GetModuleFileNameA(void*m,char*buf,uint32_t sz){ (void)m; uint32_t i=0; for(; i<sz && g_exewinA[i]; i++) buf[i]=g_exewinA[i]; if(i<sz) buf[i]=0; return i; }
+static uint32_t MSABI i_GetModuleFileNameA(void*m,char*buf,uint32_t sz){ uint32_t i=0;
+    { const char*mp=guest_mod_path(m); if(mp && sz){ uint16_t w[1024]; unix2win_ex(mp,w,1024,1); for(; i<sz && w[i]; i++) buf[i]=(char)(w[i]<128?w[i]:'?'); if(i<sz) buf[i]=0; else buf[sz-1]=0; return i; } } for(; i<sz && g_exewinA[i]; i++) buf[i]=g_exewinA[i]; if(i<sz) buf[i]=0; return i; }
 static uint32_t MSABI i_GetConsoleOutputCP(void){ return 65001; }
 // Fault/exception-handler registration: return non-null so the engine's
 // "install worker fault handler" succeeds. (Actual Win64 SEH dispatch is a
@@ -7018,7 +7053,17 @@ static void seh_decode_cpp(uint32_t code,uint32_t n,const void*args){
     if(nct>0){ uint8_t *ct=(uint8_t*)(base+(uint32_t)arr[0]); int32_t tdRVA=*(int32_t*)(ct+4);
         const char *name=(const char*)(base+(uint32_t)tdRVA+16); ws("    C++ type: "); ws(name); ws("\n");
         if(obj) for(int off=8; off<=16; off+=8){ const char *m=*(const char**)((uint8_t*)obj+off);
-            if(m&&(uint64_t)m>0x10000){ int ok=1; for(int i=0;i<64;i++){char c=m[i]; if(!c)break; if(c<32||c>126){ok=0;break;}} if(ok&&m[0]){ws("    what(): ");ws(m);ws("\n");break;} } } }
+            if(m&&(uint64_t)m>0x10000){ int ok=1; for(int i=0;i<64;i++){char c=m[i]; if(!c)break; if(c<32||c>126){ok=0;break;}} if(ok&&m[0]){ws("    what(): ");ws(m);ws("\n");break;} } }
+        // every printable string the object holds (inline or pointed to, narrow or UTF-16): e.g. the paths
+        // in a boost::filesystem error
+        if(obj) for(int off=0; off<0x100; off+=8){ const uint8_t*q=(const uint8_t*)obj+off; uint8_t sb[2][400]; mach_vm_size_t got=0;
+            uint64_t pv=0; if(mach_vm_read_overwrite(mach_task_self(),(mach_vm_address_t)(uintptr_t)q,8,(mach_vm_address_t)(uintptr_t)&pv,&got)!=KERN_SUCCESS) continue;
+            const uint8_t*src[2]={q,(const uint8_t*)(uintptr_t)pv}; const uint8_t*cand[2]={0,0};
+            for(int c=0;c<2;c++){ got=0; memset(sb[c],0,sizeof sb[c]); if((uint64_t)src[c]>=0x10000 && mach_vm_read_overwrite(mach_task_self(),(mach_vm_address_t)(uintptr_t)src[c],sizeof sb[c]-2,(mach_vm_address_t)(uintptr_t)sb[c],&got)==KERN_SUCCESS) cand[c]=sb[c]; }
+            for(int c=0;c<2;c++){ const uint8_t*m=cand[c]; if(!m) continue;
+                char out[200]; int k=0; if(m[1]==0 && m[0]>=32 && m[0]<127){ for(int i=0;i<180 && m[2*i] && !m[2*i+1];i++){ uint8_t ch=m[2*i]; if(ch<32||ch>126){k=0;break;} out[k++]=(char)ch; } }
+                else { for(int i=0;i<180 && m[i];i++){ if(m[i]<32||m[i]>126){k=0;break;} out[k++]=(char)m[i]; } }
+                if(k>=4){ out[k]=0; char t[260]; snprintf(t,sizeof t,"    obj+0x%x%s: \"%s\"\n",off,c?" ->":"",out); ws(t); } } } }
 }
 // drive/volume queries: present C: as a fixed NTFS volume with free space, so
 // the client accepts the cache/scratch as "a drive of this PC".
@@ -7165,6 +7210,10 @@ static uint8_t *g_peb_ptr;
 static struct { uint8_t* src; uint64_t raw, total; uint32_t index; } g_tlsmods[MAX_TLSMODS];
 static int g_ntlsmods;
 static void* g_tls_array[128];   // the MAIN thread's TLS pointer array (published at gs:0x58)
+// Every guest thread's TLS pointer array (thread_tramp's; never freed), so a DLL loaded later can give each
+// EXISTING thread a block for its static-TLS index, as Windows does. Without it a thread that predates the
+// DLL read NULL from ThreadLocalStoragePointer[idx] (WavesLibDLL.dll+0xC732, loaded by client v0.9.18).
+static void** g_tarrs[1024]; static int g_ntarrs;
 typedef struct { uint64_t Start, End, Index, Callbacks; uint32_t Zero, Flags; } TLSDIR_;
 static void register_tls(void* tlsdir, uint8_t* modbase, int fixed_index){
     TLSDIR_* t=(TLSDIR_*)tlsdir; if(!t) return;
@@ -7176,8 +7225,12 @@ static void register_tls(void* tlsdir, uint8_t* modbase, int fixed_index){
     if(raw) memcpy(block,(void*)t->Start,raw);
     if(total>raw) memset(block+raw,0,total-raw);
     *(uint32_t*)t->Index = idx;          // write the module's TLS index global
+    pthread_mutex_lock(&g_tlsm);
     g_tls_array[idx]=block;              // main thread's block for this index
     if(g_ntlsmods<MAX_TLSMODS){ g_tlsmods[g_ntlsmods].src=(uint8_t*)t->Start; g_tlsmods[g_ntlsmods].raw=raw; g_tlsmods[g_ntlsmods].total=total; g_tlsmods[g_ntlsmods].index=idx; g_ntlsmods++; }
+    for(int k=0;k<g_ntarrs;k++){ void**ta=g_tarrs[k]; if(!ta || ta==g_tls_array || ta[idx]) continue;   // existing threads
+        uint8_t*b=malloc(total?total:1); if(raw) memcpy(b,(void*)t->Start,raw); if(total>raw) memset(b+raw,0,total-raw); ta[idx]=b; }
+    pthread_mutex_unlock(&g_tlsm);
     ws("  static TLS idx "); whex(idx); ws("  block "); whexn((uint64_t)block); ws(" size "); whex(total);
     if(t->Callbacks){ uint64_t* cb=(uint64_t*)t->Callbacks;
         for(int i=0; cb[i]; i++){ ws("  TLS callback "); whex(cb[i]);
@@ -7191,9 +7244,12 @@ static void *thread_tramp(void *a){
     void **tarr=calloc(128,sizeof(void*));
     // Fresh per-thread block for EVERY module's TLS index (exe, halo3, CRT), not
     // just index 0 — otherwise halo3's thread-locals alias the exe's on new threads.
+    pthread_mutex_lock(&g_tlsm);   // (same lock as register_tls: no module can slip in between)
     for(int i=0;i<g_ntlsmods;i++){ uint64_t tot=g_tlsmods[i].total, raw=g_tlsmods[i].raw;
         uint8_t *blk=malloc(tot?tot:1); if(raw) memcpy(blk,g_tlsmods[i].src,raw); if(tot>raw) memset(blk+raw,0,tot-raw);
         tarr[g_tlsmods[i].index]=blk; }
+    if(g_ntarrs<(int)(sizeof g_tarrs/sizeof g_tarrs[0])) g_tarrs[g_ntarrs++]=tarr;
+    pthread_mutex_unlock(&g_tlsm);
     *(uint64_t*)(teb+0x30)=(uint64_t)teb; *(uint64_t*)(teb+0x60)=(uint64_t)g_peb_ptr; *(uint64_t*)(teb+0x58)=(uint64_t)tarr;
     // macOS x86_64 uses %gs as the live pthread TSD base: key K lives at %gs:[K*8].
     // Windows wants TEB at gs:0x30, TLS-array at gs:0x58, PEB at gs:0x60 — which
@@ -7317,6 +7373,8 @@ static uint32_t MSABI i_GetFinalPathNameByHandleW(void*h,uint16_t*buf,uint32_t c
 // hand us a populated one; nuke it for robustness)
 static void rmrf(const char *p){ struct stat st; if(lstat(p,&st)) return;
     if(S_ISDIR(st.st_mode)){ DIR*d=opendir(p); if(d){ struct dirent*e; while((e=readdir(d))){ if(!strcmp(e->d_name,".")||!strcmp(e->d_name,"..")) continue; char c[2300]; snprintf(c,sizeof c,"%s/%s",p,e->d_name); rmrf(c);} closedir(d);} rmdir(p);} else unlink(p); }
+static int MSABI i_RemoveDirectoryW(const uint16_t*w); // fwd
+static int MSABI i_RemoveDirectoryA(const char*a){ uint16_t w[2048]; int i=0; for(; a&&a[i]&&i<2047;i++) w[i]=(uint8_t)a[i]; w[i]=0; return i_RemoveDirectoryW(w); }
 static int MSABI i_RemoveDirectoryW(const uint16_t*w){ char p[2048]; win2unix(w,p,sizeof p);
     if(getenv("PELOAD_TRACE_DEL")){ static int n; if(n++<40){ char m[2200]; int k=snprintf(m,sizeof m,"  [RemoveDirectoryW] %s\n",p); (void)!write(2,m,k); } }
     if(rmdir(p)==0) return 1; rmrf(p); return 1; }
@@ -7558,13 +7616,15 @@ static void fd_record(int fd, const char *unixpath){ if(fd>=0&&fd<MAXFD){ free(g
 // mkdir -p for a file path's parent chain (scratch mirror needs this)
 static void mkparents(const char *path){ char t[2300]; snprintf(t,sizeof t,"%s",path); for(char*p=t+1;*p;p++){ if(*p=='/'){ *p=0; mkdir(t,0755); *p='/'; } } }
 // reverse of win2unix: unix path -> \\?\ Windows path (best effort)
-static void unix2win(const char *u, uint16_t *out, int cap){
-    char w[2048]; size_t dl=strlen(g_drivec);
-    if(!strncmp(u,g_drivec,dl)) snprintf(w,sizeof w,"\\\\?\\C:%s", u+dl);
-    else snprintf(w,sizeof w,"\\\\?\\Z:%s", u);
+// plain=1: "C:\dir\file" as Windows reports module paths (GetModuleFileName); plain=0: "\\?\C:\..." long-path form.
+static void unix2win_ex(const char *u, uint16_t *out, int cap, int plain){
+    char w[2048]; size_t dl=strlen(g_drivec); const char*pre=plain?"":"\\\\?\\";
+    if(!strncmp(u,g_drivec,dl)) snprintf(w,sizeof w,"%sC:%s", pre, u+dl);
+    else snprintf(w,sizeof w,"%sZ:%s", pre, u);
     for(char*p=w;*p;p++) if(*p=='/') *p='\\';
     int i=0; for(; w[i] && i<cap-1; i++) out[i]=(uint8_t)w[i]; out[i]=0;
 }
+static void unix2win(const char *u, uint16_t *out, int cap){ unix2win_ex(u,out,cap,0); }
 static char* win2unix(const uint16_t *w, char *out, int outsz){
     char t[2048]; int n=0; for(; w && w[n] && n<2047; n++) t[n]=(char)(w[n]<128?w[n]:'?'); t[n]=0;
     // strip \\?\ long-path prefix
@@ -7966,6 +8026,15 @@ static uint32_t MSABI i_GetFullPathNameW(const uint16_t*name,uint32_t len,uint16
 // System/Windows directory queries: resolve_exe (Command::spawn) searches these.
 // Return the prefix's Windows dirs so the search is well-formed. C:\Windows[\System32].
 static uint32_t MSABI i_GetSystemDirectoryW(uint16_t*buf,uint32_t sz){ const char*s="C:\\Windows\\System32"; uint32_t i=0; for(; s[i]&&i<sz-1;i++) buf[i]=(uint8_t)s[i]; if(i<sz)buf[i]=0; if(getenv("PELOAD_TRACE_SPAWN"))ws("  [GetSystemDirectoryW]\n"); return i; }
+static uint32_t MSABI i_GetSystemDirectoryA(char*buf,uint32_t sz){ const char*s="C:\\Windows\\System32"; uint32_t n=(uint32_t)strlen(s); if(!buf||sz<=n) return n+1; memcpy(buf,s,n+1); return n; }
+static uint32_t MSABI i_GetWindowsDirectoryA(char*buf,uint32_t sz){ const char*s="C:\\Windows"; uint32_t n=(uint32_t)strlen(s); if(!buf||sz<=n) return n+1; memcpy(buf,s,n+1); return n; }
+// GetCurrentThreadStackLimits: this thread's real stack [low, high) (the guest runs on the pthread stack).
+static void MSABI i_GetCurrentThreadStackLimits(uint64_t*lo,uint64_t*hi){ pthread_t t=pthread_self(); uint64_t top=(uint64_t)pthread_get_stackaddr_np(t); uint64_t sz=(uint64_t)pthread_get_stacksize_np(t);
+    if(lo)*lo=top-sz; if(hi)*hi=top; }
+static uint32_t MSABI i_SetHandleCount(uint32_t n){ return n; }
+static void*    MSABI i_GetKeyboardLayout(uint32_t tid){ (void)tid; return (void*)(uintptr_t)0x04090409; }   // en-US
+static int      MSABI i_MulDiv(int a,int b,int c){ if(!c) return -1; int64_t r=(int64_t)a*b; r = (r>=0)? (r+c/2)/c : (r-c/2)/c; return (int)r; }
+static uint16_t MSABI i_GetThreadUILanguage(void){ return 0x409; }
 static uint32_t MSABI i_GetWindowsDirectoryW(uint16_t*buf,uint32_t sz){ const char*s="C:\\Windows"; uint32_t i=0; for(; s[i]&&i<sz-1;i++) buf[i]=(uint8_t)s[i]; if(i<sz)buf[i]=0; if(getenv("PELOAD_TRACE_SPAWN"))ws("  [GetWindowsDirectoryW]\n"); return i; }
 static void   MSABI i_GetLocalTime(uint16_t *stm){
     if(!stm) return; struct timeval tv; gettimeofday(&tv,0); time_t t=tv.tv_sec; struct tm lt; localtime_r(&t,&lt);
@@ -8137,6 +8206,7 @@ static int MSABI i_DeleteFileA(const char*a){ uint16_t w[2048]; int i=0; for(; a
 static uint32_t MSABI i_GetFileAttributesA(const char*a){ uint16_t w[2048]; int i=0; for(; a&&a[i]&&i<2047;i++) w[i]=(uint8_t)a[i]; w[i]=0; return i_GetFileAttributesW(w); }
 static int MSABI i_GetFileAttributesExA(const char*a,int lvl,void*info){ uint16_t w[2048]; int i=0; for(; a&&a[i]&&i<2047;i++) w[i]=(uint8_t)a[i]; w[i]=0; return i_GetFileAttributesExW(w,lvl,info); }
 static void* MSABI i_LoadLibraryExA(const char*a,void*h,uint32_t fl){ uint16_t w[2048]; int i=0; for(; a&&a[i]&&i<2047;i++) w[i]=(uint8_t)a[i]; w[i]=0; return i_LoadLibraryExW(w,h,fl); }
+static void* MSABI i_LoadLibraryA(const char*a){ return i_LoadLibraryExA(a,0,0); }
 static uint32_t MSABI i_SetFilePointer(void*h,int32_t dist,int32_t*high,uint32_t method){
     int64_t d = high? (((int64_t)(*high)<<32)|(uint32_t)dist) : (int64_t)dist; int64_t np=0;
     if(!i_SetFilePointerEx(h,d,&np,method)){ g_lasterr=win_err(); return 0xFFFFFFFFu; }
@@ -8269,7 +8339,7 @@ static void *resolve_impl(const char *fn){
         {"DeleteFileA",(void*)i_DeleteFileA},
         {"GetFileAttributesA",(void*)i_GetFileAttributesA},
         {"GetFileAttributesExA",(void*)i_GetFileAttributesExA},
-        {"LoadLibraryExA",(void*)i_LoadLibraryExA},
+        {"LoadLibraryExA",(void*)i_LoadLibraryExA},{"LoadLibraryA",(void*)i_LoadLibraryA},
         {"SetFilePointer",(void*)i_SetFilePointer},
         {"SetFileTime",(void*)i_SetFileTime},
         {"GetParent",(void*)i_GetParent},
@@ -8376,7 +8446,9 @@ static void *resolve_impl(const char *fn){
         {"GetFileSizeEx",(void*)i_GetFileSizeEx},
         {"GetFullPathNameW",(void*)i_GetFullPathNameW},
         {"GetSystemDirectoryW",(void*)i_GetSystemDirectoryW},
-        {"GetWindowsDirectoryW",(void*)i_GetWindowsDirectoryW},
+        {"GetWindowsDirectoryW",(void*)i_GetWindowsDirectoryW},{"GetWindowsDirectoryA",(void*)i_GetWindowsDirectoryA},{"GetSystemDirectoryA",(void*)i_GetSystemDirectoryA},
+        {"GetCurrentThreadStackLimits",(void*)i_GetCurrentThreadStackLimits},{"SetHandleCount",(void*)i_SetHandleCount},{"GetKeyboardLayout",(void*)i_GetKeyboardLayout},
+        {"MulDiv",(void*)i_MulDiv},{"GetThreadUILanguage",(void*)i_GetThreadUILanguage},{"RemoveDirectoryA",(void*)i_RemoveDirectoryA},
         {"GetLocalTime",(void*)i_GetLocalTime},
         {"GetSystemTime",(void*)i_GetSystemTime},
         {"CreateDirectoryW",(void*)i_CreateDirectoryW},
@@ -8457,7 +8529,7 @@ static void *resolve_impl(const char *fn){
         {"TerminateProcess",(void*)i_TerminateProcess},
         {"GetModuleFileNameW",(void*)i_GetModuleFileNameW},
         {"GetEnvironmentVariableW",(void*)i_GetEnvironmentVariableW},
-        {"GetStartupInfoW",(void*)i_GetStartupInfoW},
+        {"GetStartupInfoW",(void*)i_GetStartupInfoW},{"GetStartupInfoA",(void*)i_GetStartupInfoA},{"HeapSetInformation",(void*)i_HeapSetInformation},
         {"SetEnvironmentVariableW",(void*)i_SetEnvironmentVariableW},
         {"SetStdHandle",(void*)i_SetStdHandle},
         {"DuplicateHandle",(void*)i_DuplicateHandle},
@@ -8742,6 +8814,10 @@ static void *uni_resolve(const char *dll, const char *fn){
     if(is_crt_dll(dll)){
         for(int m=0;m<g_nmods;m++){ void *r=export_lookup(g_mods[m].base, fn); if(r) return r; }
     }
+    // An import from another GUEST DLL that is already loaded (Waves' l360.dll/q10.dll import C++ classes from
+    // WavesLibDLL.dll, loaded just before them) binds to that DLL's real export.
+    for(int m=0;m<g_nmods;m++){ const char*mn=g_mods[m].name; if(!mn) continue; const char*mb=mn; for(const char*q=mn;*q;q++) if(*q=='\\'||*q=='/') mb=q+1;
+        if(!strcasecmp(mb,dll)){ void *g=export_lookup(g_mods[m].base, fn); if(g) return g; break; } }
     void *r=resolve_impl(fn); if(r) return r;
     // opengl32!gl* -> macOS OpenGL.framework (our wgl* are handled by resolve_impl)
     if(!strcasecmp(dll,"opengl32.dll") && (fn[0]=='g'&&fn[1]=='l')) return gl_or_missing(fn);
@@ -8790,7 +8866,8 @@ static void bind_imports(uint8_t *base, OPT64 *opt){
         int trace = getenv("PELOAD_TRACE_ALL")!=0;
         int is_ws2 = name_is_ws2(dll); int is_xa = name_has(dll,"xaudio");
         for(int i=0; oft[i]; i++){
-            const char *fn = (oft[i]>>63)? "#ordinal" : (char*)(base+(uint32_t)oft[i]+2);
+            const char *fn = (oft[i]>>63)? 0 : (char*)(base+(uint32_t)oft[i]+2);
+            if(!fn){ char ob[24]; snprintf(ob,sizeof ob,"#%u",(unsigned)(oft[i]&0xffff)); fn=strdup(ob); }   // ordinal (named in stub logs)
             // ws2_32: bind through the shared ordinal/name table (see WS2_HANDLE)
             if(is_ws2){ ft[i]=(uint64_t)((oft[i]>>63)? ws2_by_ordinal((uint32_t)(oft[i]&0xffff)) : ws2_resolve_name(fn)); continue; }
             if(is_xa){ void* xr=xa_resolve((oft[i]>>63)?(uint32_t)(oft[i]&0xffff):0, (oft[i]>>63)?0:fn); if(xr){ ft[i]=(uint64_t)xr; continue; } }
@@ -8815,7 +8892,8 @@ static void bind_delay_imports(uint8_t *base, OPT64 *opt){
         uint64_t *intb=(uint64_t*)(base+dd->INT);
         int is_ws2 = name_is_ws2(dll); int is_xa = name_has(dll,"xaudio");
         for(int i=0; intb[i]; i++){
-            const char *fn = (intb[i]>>63)? "#ordinal" : (char*)(base+(uint32_t)intb[i]+2);
+            const char *fn = (intb[i]>>63)? 0 : (char*)(base+(uint32_t)intb[i]+2);
+            if(!fn){ char ob[24]; snprintf(ob,sizeof ob,"#%u",(unsigned)(intb[i]&0xffff)); fn=strdup(ob); }
             void *r;
             if(is_ws2) r = (intb[i]>>63)? ws2_by_ordinal((uint32_t)(intb[i]&0xffff)) : ws2_resolve_name(fn);
             else if(is_xa && (r=xa_resolve((intb[i]>>63)?(uint32_t)(intb[i]&0xffff):0,(intb[i]>>63)?0:fn))) ;
@@ -8858,7 +8936,7 @@ static uint8_t *load_guest(const char *path, const char *name){
     bind_imports(base,opt);
     bind_delay_imports(base,opt);   // halo3.dll delay-loads dxgi/d3d11/etc.
     set_protections(base,coff,opt);
-    g_mods[g_nmods].name=name; g_mods[g_nmods].base=base; g_nmods++;
+    if(g_nmods<(int)(sizeof g_mods/sizeof g_mods[0])){ g_mods[g_nmods].name=name; g_mods[g_nmods].base=base; g_mods[g_nmods].path=strdup(path); g_nmods++; }
     // Static TLS for this DLL (halo3, CRT): give it its own index + per-thread block
     // BEFORE its DllMain/TLS callbacks run, so its __declspec(thread) globals resolve
     // to its own data instead of aliasing the exe's TLS block (index 0).
@@ -8960,11 +9038,55 @@ static void patch_install(void){ const char*s=getenv("PELOAD_PATCH"); if(!s) ret
 static void apply_patch(uint8_t*base,uint64_t rva,const uint8_t*bytes,int n){
     uint8_t*p=base+rva; uintptr_t pg=(uintptr_t)p & ~0xFFFull; mprotect((void*)pg,0x2000,PROT_READ|PROT_WRITE|PROT_EXEC);
     memcpy(p,bytes,n); sys_icache_invalidate(p,n); }
-static void reentrancy_fix(void){ if(getenv("PELOAD_NO_REENTRANCY_FIX")||!g_base) return;
-    static const uint8_t nop6[6]={0x90,0x90,0x90,0x90,0x90,0x90}, nop2[2]={0x90,0x90};
-    apply_patch(g_base,0x553add,nop6,6);   // jne 0x553dff (borrow-conflict panic) -> nops
-    apply_patch(g_base,0x553af1,nop2,2);   // jne 0x553af7 (drop dispatch) -> nops (take no-drop/release path)
-    ws("  [reentrancy-fix] ui_composition cache-cleanup borrow neutralised (exe+0x553add,0x553af1)\n"); }
+// ---- Reclaimer client patches located by BYTE SIGNATURE (works across client builds) ----
+// Each patch is a masked byte pattern ("??" = any byte: relative branch/call targets, RIP-relative and
+// stack displacements) that must match exactly once in the exe's executable sections, plus the edits
+// at offsets inside the match (the original bytes are checked first). Found in v0.9.13 and v0.9.18.
+//   ui-reentrancy  (on by default; PELOAD_NO_REENTRANCY_FIX disables) ui_composition's once-per-second
+//                  cache cleanup borrows the app-state RefCell while the outer borrow is still held on our
+//                  first-call path and panics ("RefCell already borrowed"); NOP the borrow-conflict branch
+//                  and the drop dispatch so it takes the no-drop path that just releases the borrow.
+//   xaudio         the client's XAudio2 integrity check (4 halo3 callback slots must point into the retail
+//                  XAudio2) fails against our XAudio2 shim; NOP its 4 mismatch branches.
+//   watchdog       the worker's 45 s startup deadline parks the input thread ("lost control"); never take it.
+// PELOAD_RECLAIMER_PATCHES=all | comma list of names enables the optional ones (play.sh: all).
+typedef struct { const char*name; int dflt; const char*sig; int n; int off[2]; const char*orig[2]; const char*repl[2]; } SigPatch;
+static const SigPatch g_sigpatches[]={
+  {"ui-reentrancy",1,"C6 43 68 01 48 83 3B 00 0F 85 ?? ?? ?? ?? 48 C7 03 FF FF FF FF 81 7B 10 00 CA 9A 3B 75 ?? 31 C0 EB ??",
+     2,{8,0x1c},{"0F 85","75"},{"90 90 90 90 90 90","90 90"}},
+  {"xaudio",0,"48 8B 44 24 20 48 89 C1 48 F7 D9 0F 81 ?? ?? ?? ?? 48 8D 83 16 C4 60 00 48 39 44 24 28 0F 85 ?? ?? ?? ?? 4C 8D B3 18 9E A3 00",
+     1,{0x1d},{"0F 85"},{"90 90 90 90 90 90"}},
+  {"xaudio",0,"48 8B 44 24 20 48 89 C1 48 F7 D9 0F 81 ?? ?? ?? ?? 48 8D 83 22 C4 60 00 48 39 44 24 28 0F 85 ?? ?? ?? ?? 4C 8D BB 20 9E A3 00",
+     1,{0x1d},{"0F 85"},{"90 90 90 90 90 90"}},
+  {"xaudio",0,"48 8B 44 24 20 48 89 C1 48 F7 D9 0F 81 ?? ?? ?? ?? 48 8D 83 0A C4 60 00 48 39 44 24 28 0F 85 ?? ?? ?? ?? 4C 8D A3 28 9E A3 00",
+     1,{0x1d},{"0F 85"},{"90 90 90 90 90 90"}},
+  {"xaudio",0,"48 8B 44 24 20 48 89 C1 48 F7 D9 71 ?? 48 81 C3 85 C3 60 00 48 39 5C 24 28 75 ?? 48 8D 05",
+     1,{0x19},{"75"},{"90 90"}},
+  {"watchdog",0,"81 BD ?? ?? ?? ?? 00 CA 9A 3B 74 ?? E8 ?? ?? ?? ?? 90 48 8B 8D ?? ?? ?? ?? 48 39 C8 75 ?? 3B 95 ?? ?? ?? ?? 72 ??",
+     1,{0x0a},{"74"},{"EB"}},
+};
+static int sig_parse(const char*s,uint8_t*b,uint8_t*m,int cap){ int n=0; while(*s && n<cap){ while(*s==' ')s++; if(!*s)break;
+    if(s[0]=='?'){ b[n]=0; m[n]=0; } else { char h[3]={s[0],s[1],0}; b[n]=(uint8_t)strtoul(h,0,16); m[n]=1; } n++; s+=2; } return n; }
+// unique match of the pattern in the image's executable sections: rva, -1 none, -2 ambiguous
+static int64_t sig_find(uint8_t*base,const uint8_t*b,const uint8_t*m,int n){
+    uint32_t pe=*(uint32_t*)(base+0x3c); uint16_t ns=*(uint16_t*)(base+pe+6), so=*(uint16_t*)(base+pe+20); uint8_t*st=base+pe+24+so; int64_t hit=-1;
+    for(int i=0;i<ns;i++){ uint8_t*sh=st+i*40; uint32_t vs=*(uint32_t*)(sh+8), va=*(uint32_t*)(sh+12), ch=*(uint32_t*)(sh+36);
+        if(!(ch&0x20000000)) continue;   // IMAGE_SCN_MEM_EXECUTE
+        uint8_t*p=base+va; for(uint32_t k=0;k+(uint32_t)n<=vs;k++){ if(p[k]!=b[0]) continue; int j=1; for(;j<n;j++) if(m[j] && p[k+j]!=b[j]) break;
+            if(j==n){ if(hit>=0) return -2; hit=(int64_t)va+k; } } }
+    return hit; }
+static int sig_enabled(const SigPatch*sp){ const char*e=getenv("PELOAD_RECLAIMER_PATCHES");
+    if(!strcmp(sp->name,"ui-reentrancy") && getenv("PELOAD_NO_REENTRANCY_FIX")) return 0;
+    if(e && (!strcmp(e,"all") || strstr(e,sp->name))) return 1; return sp->dflt; }
+static void reentrancy_fix(void){ if(!g_base) return;   // (name kept: applies every enabled signature patch)
+    for(size_t i=0;i<sizeof g_sigpatches/sizeof g_sigpatches[0];i++){ const SigPatch*sp=&g_sigpatches[i]; if(!sig_enabled(sp)) continue;
+        uint8_t b[128],m[128]; int n=sig_parse(sp->sig,b,m,128); int64_t rva=sig_find(g_base,b,m,n); char msg[200]; int k;
+        if(rva<0){ k=snprintf(msg,sizeof msg,"  [sigpatch] %s: signature %s -- NOT applied (unsupported client build?)\n",sp->name,rva==-1?"not found":"ambiguous"); (void)!write(2,msg,k); continue; }
+        int ok=1; for(int e=0;e<sp->n;e++){ uint8_t ob[16],om[16],rb[16],rm[16]; int on=sig_parse(sp->orig[e],ob,om,16); (void)rm;
+            if(memcmp(g_base+rva+sp->off[e],ob,on)) ok=0; (void)sig_parse(sp->repl[e],rb,rm,16); }
+        if(!ok){ k=snprintf(msg,sizeof msg,"  [sigpatch] %s: unexpected bytes at exe+0x%llx -- NOT applied\n",sp->name,(unsigned long long)rva); (void)!write(2,msg,k); continue; }
+        for(int e=0;e<sp->n;e++){ uint8_t rb[16],rm[16]; int rn=sig_parse(sp->repl[e],rb,rm,16); apply_patch(g_base,(uint64_t)rva+sp->off[e],rb,rn); }
+        k=snprintf(msg,sizeof msg,"  [sigpatch] %s @ exe+0x%llx\n",sp->name,(unsigned long long)(rva+sp->off[0])); (void)!write(2,msg,k); } }
 // ---- JMP-trampoline trace hooks (int3 doesn't work under Rosetta; code detours do) ----
 // PELOAD_HOOK=<mod>+<rva>:<origlen>:<id>[,...]  installs a detour at rva that logs
 // id + the guest rbx/rsi/rdi/rbp (so we can watch RefCell borrow sites etc.), runs
