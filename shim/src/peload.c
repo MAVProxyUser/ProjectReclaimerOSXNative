@@ -7595,6 +7595,7 @@ static void patch_install(void); // fwd (PELOAD_PATCH guest-code overwrites)
 static void hook_install(void); // fwd (PELOAD_HOOK trace detours)
 static void skinguard_install(uint8_t*halo3base); // fwd (PELOAD_SKINGUARD null-key guard)
 static void vtguard_install(uint8_t*halo3base); // fwd (PELOAD_VTGUARD null-vtable release guard)
+static void h3set_install(uint8_t*halo3base);   // fwd (PELOAD_H3 engine globals)
 static void capcb1_install(uint8_t*halo3base); // fwd (PELOAD_D3DGL_CAPCB1 per-section decompression capture)
 static void *export_lookup(uint8_t *base, const char *want);    // fwd
 static void* MSABI i_LoadLibraryExW(const uint16_t *name, void *h, uint32_t fl);
@@ -8948,7 +8949,7 @@ static uint8_t *load_guest(const char *path, const char *name){
     // BEFORE its DllMain/TLS callbacks run, so its __declspec(thread) globals resolve
     // to its own data instead of aliasing the exe's TLS block (index 0).
     if(opt->Dir[DIR_TLS].VA) register_tls((void*)(base+opt->Dir[DIR_TLS].VA), base, -1);
-    if(strcasestr(name,"halo3")){ waves_prefill(base); patch_install(); hook_install(); skinguard_install(base); vtguard_install(base); capcb1_install(base); } // patches can target halo3 now it's mapped
+    if(strcasestr(name,"halo3")){ waves_prefill(base); patch_install(); hook_install(); skinguard_install(base); vtguard_install(base); capcb1_install(base); h3set_install(base); } // patches can target halo3 now it's mapped
     ws("  guest "); ws(name); ws(" @ "); whex((uint64_t)base);
     uint64_t ep=opt->EntryRVA;
     if(ep){ int (MSABI *dm)(void*,uint32_t,void*)=(void*)(base+ep); int r=dm(base,1,0);
@@ -9373,6 +9374,35 @@ static void vtguard_one(uint8_t*base,uint64_t rva,int origlen,uint64_t skiprva){
 // player joining a match in progress faulted at RVA 0x172FA0 (`call [rax]` with a NULL vtable) a few
 // seconds after the map was ready. mov rax,[rbx] / mov rcx,rbx / call [rax] / mov eax,edi / lock xadd
 // [rbx+0xc],eax = 15 bytes to the boundary at 0x172fa9; skip to the epilogue at 0x172fb7.
+// ---- PELOAD_H3="name=value[,name=value...]": set halo3 engine (HaloScript) globals at launch ----
+// halo3.dll keeps a table of its HaloScript globals: 24-byte entries {const char* name; u64 type; void* storage}.
+// In the retail MCC build only ~220 of ~1250 still have storage (the debug_objects_* overlays, among many others,
+// are compiled out: storage 0). Types: 5 bool, 6 real, 7 short, 8 long. The value is written at halo3 load and
+// re-written every 0.5 s (the engine may reset some during init). List: shim/docs/halo3-engine-globals.md.
+typedef struct { volatile uint8_t*addr; int type; double v; char name[96]; } H3Set;
+static H3Set g_h3set[32]; static int g_nh3set;
+static void h3set_write(const H3Set*e){
+    switch(e->type){ case 5: *(volatile uint8_t*)e->addr=(uint8_t)(e->v!=0); break; case 6: *(volatile float*)e->addr=(float)e->v; break;
+        case 7: *(volatile int16_t*)e->addr=(int16_t)e->v; break; case 8: *(volatile int32_t*)e->addr=(int32_t)e->v; break; } }
+static void* h3set_thread(void*a){ (void)a; for(;;){ for(int i=0;i<g_nh3set;i++) h3set_write(&g_h3set[i]); usleep(500000); } return 0; }
+static void h3set_install(uint8_t*base){ const char*e=getenv("PELOAD_H3"); if(!e||!*e) return;
+    OPT64*o=(OPT64*)(base+((DOS*)base)->e_lfanew+sizeof(COFF)); uint64_t isz=o->ImageSize;
+    char buf[2048]; snprintf(buf,sizeof buf,"%s",e);
+    for(char*tok=strtok(buf,",; "); tok && g_nh3set<32; tok=strtok(0,",; ")){
+        char*eq=strchr(tok,'='); if(!eq) continue; *eq=0; const char*nm=tok; double v=atof(eq+1);
+        if(!strcasecmp(eq+1,"true")||!strcasecmp(eq+1,"on")) v=1;
+        // the name string ("\0name\0"), then the table entry pointing at it
+        char pat[128]; int pl=snprintf(pat,sizeof pat,"%c%s",0,nm)+1;   // includes the terminating NUL
+        uint8_t*str=memmem(base,isz,pat,pl); char m[200]; int k;
+        if(!str){ k=snprintf(m,sizeof m,"  [h3] %s: no such engine global\n",nm); (void)!write(2,m,k); continue; }
+        uint64_t sva=(uint64_t)(str+1); uint8_t*ent=memmem(base,isz,&sva,8);
+        if(!ent){ k=snprintf(m,sizeof m,"  [h3] %s: not in the globals table\n",nm); (void)!write(2,m,k); continue; }
+        uint64_t ty=*(uint64_t*)(ent+8), ad=*(uint64_t*)(ent+16);
+        if(!ad){ k=snprintf(m,sizeof m,"  [h3] %s: compiled out of this halo3.dll (no storage)\n",nm); (void)!write(2,m,k); continue; }
+        if(ty<5||ty>8){ k=snprintf(m,sizeof m,"  [h3] %s: unsupported type %llu\n",nm,(unsigned long long)ty); (void)!write(2,m,k); continue; }
+        H3Set*h=&g_h3set[g_nh3set++]; h->addr=(volatile uint8_t*)ad; h->type=(int)ty; h->v=v; snprintf(h->name,sizeof h->name,"%s",nm); h3set_write(h);
+        k=snprintf(m,sizeof m,"  [h3] %s = %g (%s @ halo3+0x%llx)\n",nm,v,ty==5?"bool":ty==6?"real":ty==7?"short":"long",(unsigned long long)(ad-(uint64_t)base)); (void)!write(2,m,k); }
+    if(g_nh3set){ pthread_t t; pthread_create(&t,0,h3set_thread,0); } }
 static void vtguard_install(uint8_t*halo3base){ if(!getenv("PELOAD_VTGUARD")) return; vtguard_one(halo3base,0x172bce,17,0x172bee);
     vtguard_one(halo3base,0x172f9a,15,0x172fb7); }
 static void bp_install(void){ const char*s=getenv("PELOAD_BP"); if(!s||!g_base) return;

@@ -10,6 +10,7 @@
 #   PELOAD_VSYNC=1             vsync the window (off by default: frames are never held back)
 #   RECLAIMER_EXE=<path>       the Project Reclaimer client exe (default: the newest supported one in client/)
 #   RECLAIMER_JOIN=host:port   start in the menu and join that server (the client's reclaimer://join link)
+#   PELOAD_H3="name=value,..." set Halo 3 engine settings (shim/docs/halo3-engine-globals.md)
 #   RECLAIMER_DIRECT=1         skip the menu and go straight into a local Guardian match (~12 s). Reclaimer's
 #                              in-game UI (scoreboard names/scores, chat, game menu) only runs under its menu,
 #                              so in this mode the scoreboard shows bars without text.
