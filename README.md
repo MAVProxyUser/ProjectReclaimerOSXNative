@@ -13,29 +13,22 @@ client and MCC's `halo3.dll` directly and implements the Windows APIs they use, 
 
 ## Status
 
-**Playable:** a Guardian Slayer match runs with:
-- correct rendering, lighting and shadows
-- the first-person weapon, particles, muzzle flash and explosions
-- the HUD, the loading screen and game audio
-- controller input (Xbox, DualSense, …) and keyboard/mouse
+**Playable**, starting from Reclaimer's own menu (Halo 3 menu scene with Server Browser, Campaign, Host
+Game, Customize, Settings, Credits):
+- **Host Game → Start Game** hosts a local Guardian Slayer match.
+- **Server Browser** lists the public servers; double-click one (or select it and JOIN GAME) to join.
+  The client joins the lobby (players, map vote), prepares the next map when the server rotates, and
+  loads into the match. Only servers running the same client version (0.9.13) can be joined; the
+  browser shows other versions in red.
+- In a match: correct rendering, lighting and shadows; the first-person weapon, particles, muzzle flash
+  and explosions; the HUD and scoreboard (hold Tab or Back); the loading screen and game audio;
+  controller (Xbox, DualSense, …) and keyboard/mouse.
 
-On an M4, it reaches the match about 12 s after launch and averages ~116 fps (roughly 50–200 fps
-depending on the scene). The window title shows the elapsed time, the load time and the live frame rate.
-
-Reclaimer's own frontend menu (Halo 3 menu scene with Server Browser, Campaign, Host Game, Customize,
-Settings, Credits) also renders and responds to the mouse: `RECLAIMER_MENU=1 bash shim/play.sh`.
-
-**Online play:** joining a public internet server works, from the menu's Server Browser or directly with
-`RECLAIMER_JOIN=host:port bash shim/play.sh`. The client joins the lobby (players, map vote), prepares
-the next map when the server rotates, and loads into the match. Only servers running the same client
-version (0.9.13) can be joined; the browser shows other versions in red.
+On an M4 the menu is up about 17 s after launch, a hosted match loads in ~6 s, and gameplay averages
+~85–120 fps depending on the map and scene. The window title shows the elapsed time, the load time and
+the live frame rate.
 
 Known gaps:
-- **Starting a match from the menu** (Host Game → Start Game) hangs on the loading screen. Use the
-  default `bash shim/play.sh`, which goes straight into a Guardian match.
-- **Scoreboard text.** Holding Back/Tab in a match shows the scoreboard bars without names, service
-  tags or scores. In the default direct match the player has no name at all; Reclaimer draws the
-  scoreboard text with its own UI, which only runs under its menu (being worked on).
 - **No MCC pause menu** (by design in standalone mode); F1 releases the mouse.
 - **Frame-rate ceiling.** Performance is bound by OpenGL-on-Metal's per-draw-call cost.
 
@@ -89,9 +82,13 @@ bash shim/build.sh && bash shim/play.sh
 
 Startup sequence:
 - The window title counts up from launch (`starting... 0:07`).
-- The Guardian loading screen appears.
-- The match starts about 12 s in, and the title then shows `match loaded in N s` and the frame rate.
+- After a black screen, the Halo 3 menu scene fades in; the menu is ready about 17 s in (`menu loaded
+  in N s` in the title).
+- Host Game → Start Game for a local match, or Server Browser to join a server.
 - The engine log goes to `/tmp/reclaimer_play.log`.
+
+`RECLAIMER_DIRECT=1 bash shim/play.sh` skips the menu and goes straight into a local Guardian match
+(about 12 s). In that mode Reclaimer's in-game UI doesn't run, so the scoreboard has no names or scores.
 
 Quit by closing the window, or Ctrl-C in the terminal. If a launch is interrupted, clear leftovers:
 
@@ -115,8 +112,8 @@ Options go in front of the command, e.g. `PELOAD_INVERT_PITCH=0 bash shim/play.s
 | `PELOAD_AUDIO=0` | no sound |
 | `PELOAD_VSYNC=1` | vsync the window (off by default) |
 | `RECLAIMER_EXE=<path>` | use the client exe at this path |
-| `RECLAIMER_MENU=1` | start in Reclaimer's frontend menu instead of a match |
-| `RECLAIMER_JOIN=host:port` | start in the menu and join that server, e.g. `RECLAIMER_JOIN=203.0.113.7:11774` |
+| `RECLAIMER_JOIN=host:port` | join that server as soon as the menu is up, e.g. `RECLAIMER_JOIN=203.0.113.7:11774` |
+| `RECLAIMER_DIRECT=1` | skip the menu: straight into a local Guardian match (no scoreboard text) |
 
 The window can be resized and made full screen. Developer and diagnostic switches are documented in
 `CLAUDE.md` and in the source.

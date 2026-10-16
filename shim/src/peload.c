@@ -2767,7 +2767,7 @@ static int    MSABI i_AreFileApisANSI(void){ return 1; }
 // lpszClassName at +64.
 typedef int64_t (MSABI *WNDPROC_t)(void*,uint32_t,uint64_t,int64_t);
 static struct { int used; uint16_t atom; char name[64]; WNDPROC_t wndproc; } g_wcls[64]; static int g_nwcls; static uint16_t g_atomseq=0xC000;
-typedef struct { uint32_t magic; WNDPROC_t wndproc; int64_t userdata; int64_t extra[16]; int x,y,w,h; } WWin;
+typedef struct { uint32_t magic; WNDPROC_t wndproc; int64_t userdata; int64_t extra[16]; int x,y,w,h; uint32_t style, exstyle; } WWin;
 #define WWIN_MAGIC 0x57494E44u
 static WNDPROC_t wcls_find(const void*cls){ uintptr_t v=(uintptr_t)cls;
     if(v>0xffff){ char nm[64]; const uint16_t*w=cls; int i=0; for(; w[i]&&i<63;i++) nm[i]=(char)(w[i]&0xff); nm[i]=0;
@@ -2793,15 +2793,23 @@ static void*  MSABI i_LoadCursorW(void*h,const void*n){ (void)h;(void)n; return 
 static void*  MSABI i_LoadImageW(void*h,const void*n,uint32_t t,int cx,int cy,uint32_t f){ (void)h;(void)n;(void)t;(void)cx;(void)cy;(void)f; return (void*)0x1C03; }
 static void*  MSABI i_GetStockObject(int i){ (void)i; return (void*)0x1C04; }
 static void* g_last_hwnd;   // most-recently created real window (reported as foreground/active)
-static void* g_shown_hwnd;  // most-recently SHOWN top-level window = the game window the client compares
-                            // GetForegroundWindow() against before polling XInput / reading input
+static void* g_shown_hwnd;  // the foreground window: the last top-level window shown or set with ACTIVATION
+                            // (the client compares GetForegroundWindow() with its game window before polling
+                            // XInput / reading input, and input with no target window goes here)
+// Windows activation rules: child windows and WS_EX_NOACTIVATE windows never become the foreground window,
+// and SW_SHOWNOACTIVATE / SW_SHOWNA / SW_SHOWMINNOACTIVE / SW_MINIMIZE / SW_HIDE don't activate. Reclaimer's
+// menu runtime shows its in-game overlay (a WS_CHILD | WS_EX_NOACTIVATE layered window) with SW_SHOWNOACTIVATE
+// many times per match; treating that as activation sent keyboard input to the overlay and made the client
+// think its window had lost focus, so its scoreboard/chat never saw a key. PELOAD_FG_LASTSHOWN = old behavior.
+static int fg_can_activate(void*h){ if(!h || ((WWin*)h)->magic!=WWIN_MAGIC) return 0; static int old=-1; if(old<0) old=getenv("PELOAD_FG_LASTSHOWN")?1:0;
+    if(old) return 1; const WWin*w=h; return !(w->style&0x40000000/*WS_CHILD*/) && !(w->exstyle&0x08000000/*WS_EX_NOACTIVATE*/); }
 static void* fg_hwnd(void){ return g_shown_hwnd?g_shown_hwnd:(g_last_hwnd?g_last_hwnd:(void*)0x4857); }
 void* fg_hwnd_ext(void){ return fg_hwnd(); }
 static void*  MSABI i_CreateWindowExW(uint32_t ex,const void*cls,const void*name,uint32_t style,int x,int y,int w,int h,void*parent,void*menu,void*inst,void*param){
     WWin* win=calloc(1,sizeof *win); if(!win) return (void*)0x4857;
     win->magic=WWIN_MAGIC; win->wndproc=wcls_find(cls); win->x=x; win->y=y; win->w=w>0?w:1280; win->h=h>0?h:720;
-    g_last_hwnd=win;
-    if((style&0x10000000/*WS_VISIBLE*/) && !(style&0x40000000/*WS_CHILD*/)) g_shown_hwnd=win;
+    win->style=style; win->exstyle=ex; g_last_hwnd=win;
+    if((style&0x10000000/*WS_VISIBLE*/) && fg_can_activate(win)) g_shown_hwnd=win;
     { char t[96]={0}; const uint16_t*wn=name; for(int i=0;wn&&wn[i]&&i<95;i++) t[i]=(char)(wn[i]&0x7f);
       char c[96]={0}; if((uintptr_t)cls>0x10000){ const uint16_t*wc=cls; for(int i=0;wc[i]&&i<95;i++) c[i]=(char)(wc[i]&0x7f); } else snprintf(c,sizeof c,"#atom%u",(unsigned)(uintptr_t)cls);
       char m[300]; int k=snprintf(m,sizeof m,"  [CreateWindowExW] hwnd=%p class=%s title=\"%s\" style=0x%x ex=0x%x parent=%p %dx%d\n",(void*)win,c,t,style,ex,parent,w,h); (void)!write(2,m,k); }
@@ -2816,7 +2824,8 @@ static void*  MSABI i_CreateWindowExW(uint32_t ex,const void*cls,const void*name
     ws("  [CreateWindowExW] real HWND\n"); return win; }
 static int    MSABI i_DestroyWindow(void*h){ (void)h; return 1; }
 static int64_t MSABI i_DefWindowProcW(void*h,uint32_t m,uint64_t wp,int64_t lp){ (void)h;(void)wp;(void)lp; if(m==0x0081/*WM_NCCREATE*/) return 1; return 0; }
-static int    MSABI i_ShowWindow(void*h,int c){ if(h && c && ((WWin*)h)->magic==WWIN_MAGIC){ g_shown_hwnd=h; }
+static int    MSABI i_ShowWindow(void*h,int c){ int act=(c==1||c==2||c==3||c==5||c==9||c==10)||(getenv("PELOAD_FG_LASTSHOWN")&&c);
+    if(act && fg_can_activate(h)) g_shown_hwnd=h;
     { static void*lh; static int lc=-1; if(h!=lh||c!=lc){ lh=h; lc=c; char m[80]; int k=snprintf(m,sizeof m,"  [ShowWindow] hwnd=%p cmd=%d\n",h,c); (void)!write(2,m,k); } } return 1; }
 static int    MSABI i_UpdateWindow(void*h){ (void)h; return 1; }
 // The engine's present loop calls MsgWaitForMultipleObjectsEx and only keeps
@@ -3443,7 +3452,7 @@ static uint32_t MSABI i_XInputGetCapabilities(uint32_t idx,uint32_t fl,void*cap)
     if(cap){ memset(cap,0,20); uint8_t*c=cap; c[0]=1/*GAMEPAD*/; c[1]=1/*SUBTYPE_GAMEPAD*/; *(uint16_t*)(c+4)=0xF3FF; c[6]=c[7]=255; *(int16_t*)(c+8)=*(int16_t*)(c+10)=*(int16_t*)(c+12)=*(int16_t*)(c+14)=(int16_t)0xFFC0; } return 0; }
 static void MSABI i_XInputEnable(int en){ (void)en; }
 static void*  MSABI i_GetForegroundWindow(void){ return fg_hwnd(); }
-static int    MSABI i_SetForegroundWindow(void*h){ (void)h; return 1; }
+static int    MSABI i_SetForegroundWindow(void*h){ if(fg_can_activate(h)) g_shown_hwnd=h; return 1; }
 static int    MSABI i_IsWindow(void*h){ return h?1:0; }
 static int    MSABI i_IsWindowVisible(void*h){ (void)h; return 1; }
 static void*  MSABI i_GetActiveWindow(void){ return fg_hwnd(); }

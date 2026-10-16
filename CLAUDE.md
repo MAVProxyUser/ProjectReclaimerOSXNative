@@ -60,6 +60,17 @@ egui's painter keeps pixels_per_point in xmm6 across GL calls and got 1280.0 bac
 collapsed (empty Server Browser list, missing lobby names/vote list). `PELOAD_GL_NOXMMSAVE` = old behavior.
 Float-arg GL calls go through typed ms_abi wrappers (GLMIX) because Win64 passes floats positionally.
 
+play.sh starts in Reclaimer's MENU runtime by default (2026-10-16); `RECLAIMER_DIRECT=1` = the old direct
+Guardian match (PELOAD_LOCAL_RUNTIME=__unset__), which never creates Reclaimer's in-game UI windows, so
+its scoreboard has bars but no names/scores. Menu Host Game -> Start Game works (its old "hang" was the
+XAudio2 voice-drain bug). Scoreboard text needed a foreground fix: ShowWindow/CreateWindow only make a
+window foreground under Windows' activation rules (not WS_CHILD / WS_EX_NOACTIVATE, not SW_SHOWNOACTIVATE
+/ SW_SHOWNA ...); the menu runtime's ReclaimerIngameMenu overlay (child, NOACTIVATE) used to become
+"foreground", so GetForegroundWindow != game window and keys went to the overlay ("Scoreboard shown"
+never fired). `PELOAD_FG_LASTSHOWN` = old behavior. Self-test: `PELOAD_KBM_TEST_HOLD=30:6` (Tab) +
+`PELOAD_KBM_TEST_HOLD_GAMEPLAY=1`/`PELOAD_KBM_TEST_GAMEPLAY=1`; KBM tests never capture the real cursor
+(`PELOAD_NO_SYS_CURSOR` does the same for any run).
+
 Perf (2026-10-16, M4, 1280x720 window, 1920x1080 internal): gameplay median ~116 fps, p10 ~80,
 min ~50 (3-min soak). Draw-call bound: ~3.6 us per glDraw* in GL-on-Metal x ~1200-2300 draws/frame;
 the next big step would be a GL submission thread. CPU particle compute runs on a worker thread

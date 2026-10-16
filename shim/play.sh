@@ -1,5 +1,6 @@
 #!/bin/bash
-# Play Guardian through the game client on the D3D11->GL renderer (no Wine).
+# Play Project Reclaimer on the D3D11->GL renderer (no Wine). Starts in Reclaimer's own menu: Server Browser,
+# Host Game (Start Game hosts a local match), Customize, Settings.
 # Controller: any GameController-supported pad (Xbox, DualSense, ...) via the shim's XInput.
 # Keyboard + mouse: click the game window to capture them (the client's own behavior); F1 or switching
 #   windows releases. Cmd-key shortcuts (Cmd+Tab, Cmd+Q) still go to macOS.
@@ -8,9 +9,10 @@
 #   PELOAD_AUDIO=0             silence (game audio plays through CoreAudio by default)
 #   PELOAD_VSYNC=1             vsync the window (off by default: frames are never held back)
 #   RECLAIMER_EXE=<path>       the Project Reclaimer v0.9.13 client exe (default: client/ or analysis/)
-#   RECLAIMER_MENU=1           start in Reclaimer's own frontend menu (server browser, host game, settings)
-#                              instead of jumping straight into a Guardian match
 #   RECLAIMER_JOIN=host:port   start in the menu and join that server (the client's reclaimer://join link)
+#   RECLAIMER_DIRECT=1         skip the menu and go straight into a local Guardian match (~12 s). Reclaimer's
+#                              in-game UI (scoreboard names/scores, chat, game menu) only runs under its menu,
+#                              so in this mode the scoreboard shows bars without text.
 # The window title shows elapsed time, the load time, the engine frame rate, draw calls and frame time.
 # Extra env can be passed in front:  PELOAD_INVERT_PITCH=0 bash shim/play.sh
 # Engine/worker output goes to /tmp/reclaimer_play.log. Quit by closing the window or Ctrl-C.
@@ -41,18 +43,18 @@ fi
 
 pkill -9 -f 'build/peload' 2>/dev/null; sleep 1
 rm -f "$PFX/ReclaimerProfile/starting" 2>/dev/null
-# Direct match: unset RECLAIMER_LOCAL_RUNTIME (the client's default "menu:0" boots its frontend menu).
-RUNTIME=(PELOAD_LOCAL_RUNTIME="__unset__")
+RUNTIME=()
 ARGS=(game-client --mcc-path "$MCC")
 if [ -n "${RECLAIMER_JOIN:-}" ]; then
   # The same link a browser or Discord hands the client; it finds MCC itself and joins once its menu is up.
-  RUNTIME=(); ARGS=("reclaimer://join?server=$RECLAIMER_JOIN")
+  ARGS=("reclaimer://join?server=$RECLAIMER_JOIN")
   echo "starting Reclaimer's menu, then joining $RECLAIMER_JOIN; log: /tmp/reclaimer_play.log"
-elif [ -n "${RECLAIMER_MENU:-}" ]; then
-  RUNTIME=()
-  echo "starting Reclaimer's menu (~17 s); log: /tmp/reclaimer_play.log"
-else
+elif [ -n "${RECLAIMER_DIRECT:-}" ]; then
+  # Direct match: unset RECLAIMER_LOCAL_RUNTIME (the client's default "menu:0" boots its frontend menu).
+  RUNTIME=(PELOAD_LOCAL_RUNTIME="__unset__")
   echo "starting (~12 s to gameplay: loading screen, then the match); log: /tmp/reclaimer_play.log"
+else
+  echo "starting Reclaimer's menu (~17 s); log: /tmp/reclaimer_play.log"
 fi
 env PELOAD_SKINGUARD=1 PELOAD_VTGUARD=1 PELOAD_ALLOC_GUARD=1 "${RUNTIME[@]}" \
     PELOAD_PATCH="$XA" PELOAD_WORKER_INHERIT_STDIO=1 PELOAD_PRESENT=1 PELOAD_HOLD_WINDOW=1 PELOAD_D3DGL=1 \

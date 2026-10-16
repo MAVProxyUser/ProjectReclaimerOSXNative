@@ -72,13 +72,17 @@ static int MSABI wi_GetKeyboardState(uint8_t*s){ if(!s) return 0; for(int i=0;i<
 // ---- cursor ----
 static int g_wi_captured, g_wi_cursor_count;   // ShowCursor counter (>=0 visible)
 static int32_t g_wi_cx=WIN_W/2, g_wi_cy=WIN_H/2;   // last client-space pointer position
+// Unattended input self-tests (PELOAD_KBM_TEST) and PELOAD_NO_SYS_CURSOR never capture or hide the real
+// macOS cursor: the guest still sees its pointer captured, but whoever is using the Mac keeps their mouse.
+static int wi_syscursor(void){ static int ok=-1; if(ok<0) ok=!(getenv("PELOAD_KBM_TEST")||getenv("PELOAD_NO_SYS_CURSOR")); return ok; }
 static int MSABI wi_ClipCursor(const int32_t*r){
     int want = r!=0;
-    if(want!=g_wi_captured){ g_wi_captured=want; CGAssociateMouseAndMouseCursorPosition(want?0:1);
+    if(want!=g_wi_captured){ g_wi_captured=want; if(wi_syscursor()) CGAssociateMouseAndMouseCursorPosition(want?0:1);
         if(getenv("PELOAD_TRACE_INPUT")){ char m[64]; int k=snprintf(m,sizeof m,"  [kbm] pointer %s\n",want?"captured":"released"); (void)!write(2,m,k); } }
     return 1; }
 static int MSABI wi_ShowCursor(int show){
     int before=g_wi_cursor_count; g_wi_cursor_count += show?1:-1;
+    if(!wi_syscursor()) return g_wi_cursor_count;
     if(before>=0 && g_wi_cursor_count<0) CGDisplayHideCursor(kCGDirectMainDisplay);
     else if(before<0 && g_wi_cursor_count>=0) CGDisplayShowCursor(kCGDirectMainDisplay);
     return g_wi_cursor_count; }
@@ -205,6 +209,7 @@ static void* wi_test_thread(void*a){ (void)a;
         e=strchr(e,';'); if(e) e++; } }
     // PELOAD_KBM_TEST_HOLD=<mac keycode hex>:<seconds> -- then hold that key (e.g. 30:3 = Tab for 3 s)
     { const char*e=getenv("PELOAD_KBM_TEST_HOLD"); if(e){ unsigned kc=(unsigned)strtoul(e,0,16); double secs=strchr(e,':')?atof(strchr(e,':')+1):2.0;
+        if(getenv("PELOAD_KBM_TEST_HOLD_GAMEPLAY")) while(!g_gameplay_t0) usleep(100000);   // e.g. after clicks that start a match
         const char*dl=getenv("PELOAD_KBM_TEST_HOLD_DELAY"); usleep(dl?(useconds_t)(atof(dl)*1e6):500000); wi_key((uint16_t)kc,1,0); k=snprintf(m,sizeof m,"  [kbm-test] key 0x%x down\n",kc); (void)!write(2,m,k);
         usleep((useconds_t)(secs*1e6)); wi_key((uint16_t)kc,0,0); k=snprintf(m,sizeof m,"  [kbm-test] key 0x%x up\n",kc); (void)!write(2,m,k); } }
     return 0; }
