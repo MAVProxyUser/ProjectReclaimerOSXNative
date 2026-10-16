@@ -231,10 +231,13 @@ static const char* dg_dst(DgCtx*c,const DgOp*op){ char*o=dg_pool(); uint32_t ix=
 // write mask (.y .z .w .xz .yw .zw ...) across all shaders.
 // A NULL destination (operand type 13, e.g. imul's unused hi half) has no register: it used to fall
 // through to "r0.xyzw" and silently clobber r0 (seen: a light loop's counter in r0.w).
+// _sat instruction modifier (opcode token bit 13): clamp the float result to [0,1]. It was ignored -> 7210
+// instructions in 1852 shaders (lighting/fog/blend weights) produced out-of-range values.
+static int g_dg_sat;
 static char* dg_asg(DgCtx*c,const DgOp*op,const char*expr){ if(op->type==T_NULL) return strdup("  // (null dst)"); const char*d=dg_dst(c,op);
-    if(!strcmp(d,"gl_FragDepth")){ char*s; asprintf(&s,"  gl_FragDepth = (%s).x;",expr); return s; }
+    if(!strcmp(d,"gl_FragDepth")){ char*s; asprintf(&s,g_dg_sat?"  gl_FragDepth = clamp((%s).x,0.0,1.0);":"  gl_FragDepth = (%s).x;",expr); return s; }
     char m[5]; dg_destmask(op,m);
-    char*s; asprintf(&s,"  %s.%s = (%s).%s;",d,m,expr,m); return s; }
+    char*s; if(g_dg_sat) asprintf(&s,"  %s.%s = clamp(vec4(%s),0.0,1.0).%s;",d,m,expr,m); else asprintf(&s,"  %s.%s = (%s).%s;",d,m,expr,m); return s; }
 static char* dg_asg_i(DgCtx*c,const DgOp*op,const char*expr){ if(op->type==T_NULL) return strdup("  // (null dst)"); const char*d=dg_dst(c,op);
     if(!strcmp(d,"gl_FragDepth")){ char*s; asprintf(&s,"  gl_FragDepth = intBitsToFloat((%s)).x;",expr); return s; }
     char m[5]; dg_destmask(op,m);
@@ -354,6 +357,7 @@ char* dg_emit(const char*stage,const DgSig*isgn,int ni,const DgSig*osgn,int no,D
     #define S(k) ( (k)<ins[x].nop ? dg_src(&ins[x].ops[k]) : "vec4(0.0)" )
     for(int x=0;x<nins;x++){
         const char*n=ins[x].name; int nopn=ins[x].nop; DgOp*o=ins[x].ops;
+        g_dg_sat = (ins[x].op<88) && ((ins[x].tok>>13)&1);
         if(!n){ continue; } // op%d unknown -> skipped like startswith('op')
         if(!strcmp(n,"dcl_cb")||!strcmp(n,"dcl_sampler")||!strcmp(n,"dcl_resource")||!strcmp(n,"dcl_input")||
            !strcmp(n,"dcl_input_ps")||!strcmp(n,"dcl_input_sgv")||!strcmp(n,"dcl_input_ps_sgv")||

@@ -933,6 +933,8 @@ static int MSABI dev_CreateBuffer(void*t,const void*desc,const void*init,void**p
     uint64_t sz = desc? (uint64_t)(*(const uint32_t*)desc) : 16; if(sz<16) sz=16;
     uint32_t bind = desc? *(const uint32_t*)((const char*)desc+8) : 0;
     D3DObj* o=d3dobj(g_d3dres_vtbl,1/*BUFFER*/,sz); o->rowpitch=(uint32_t)sz; o->w=(uint32_t)sz; o->h=1;
+    if(desc){ o->bindf=bind; o->misc=*(const uint32_t*)((const char*)desc+16); o->depth=*(const uint32_t*)((const char*)desc+20); }  // depth = StructureByteStride for buffers
+    if(desc && getenv("PELOAD_CSCENSUS") && ((o->misc&0x60)||(bind&0x80))){ char m[160]; int k=snprintf(m,sizeof m,"  [cscensus] CreateBuffer %lluB bind=0x%x misc=0x%x stride=%u init=%p\n",(unsigned long long)sz,bind,o->misc,o->depth,init); (void)!write(2,m,k); }
     if(init && o->data){ const void*src=*(void*const*)init; if(src) memcpy(o->data,src,sz); }
     if((bind&0x4) && o){ o->is_cb=1; if(g_ncbreg<(int)(sizeof g_cbreg/sizeof*g_cbreg)) g_cbreg[g_ncbreg++]=o; }
     if(pp)*pp=o; return HR_OK; }
@@ -1362,7 +1364,22 @@ static void MSABI ctx_CopySubresourceRegion(void*t,void*dstR,uint32_t dstSub,uin
 static void draw_census(void); // fwd
 static void MSABI ctx_DrawIndexedInstanced(void*t,uint32_t a,uint32_t b,uint32_t c,int d,uint32_t e){ (void)t; d3dtrace(3,"DrawIndexedInstanced"); draw_caller("DrawIdxInst",__builtin_return_address(0),a); draw_census(); if(d3dgl_enabled() && b) d3dgl_draw(a,1,b,c,d,e); }
 static void MSABI ctx_DrawInstanced(void*t,uint32_t a,uint32_t b,uint32_t c,uint32_t d){ (void)t; d3dtrace(2,"DrawInstanced"); draw_caller("DrawInst",__builtin_return_address(0),a); draw_census(); if(d3dgl_enabled() && b) d3dgl_draw(a,0,b,c,0,d); }
-static void MSABI ctx_Dispatch(void*t,uint32_t a,uint32_t b,uint32_t c){ (void)t;(void)a;(void)b;(void)c; d3dtrace(7,"Dispatch"); }
+// ---- compute stage state (particles) ----
+static struct { D3DObj*cs; D3DObj*srv[16]; D3DObj*uav[8]; D3DObj*cb[16]; } g_cs;
+static void cscensus(const char*what,uint32_t a,uint32_t b,uint32_t c){ if(!getenv("PELOAD_CSCENSUS")) return;
+    static unsigned long n; n++; if(n>400 && (n%500)) return;
+    char m[300]; int k=snprintf(m,sizeof m,"  [cscensus] %s(%u,%u,%u) cs=%p bc=%u uav0=%p(%lluB stride %u) srv4=%p srv5=%p cb0=%p\n",what,a,b,c,(void*)g_cs.cs,g_cs.cs?g_cs.cs->bclen:0,
+        g_cs.uav[0]?g_cs.uav[0]->data:0,g_cs.uav[0]&&g_cs.uav[0]->data?(unsigned long long)((D3DObj*)g_cs.uav[0]->data)->size:0ull,g_cs.uav[0]&&g_cs.uav[0]->data?((D3DObj*)g_cs.uav[0]->data)->depth:0,
+        g_cs.srv[4]?g_cs.srv[4]->data:0,g_cs.srv[5]?g_cs.srv[5]->data:0,(void*)g_cs.cb[0]); (void)!write(2,m,k); }
+static void MSABI ctx_Dispatch(void*t,uint32_t a,uint32_t b,uint32_t c){ (void)t; d3dtrace(7,"Dispatch"); cscensus("Dispatch",a,b,c); }
+static void MSABI ctx_DispatchIndirect(void*t,void*args,uint32_t off){ (void)t;(void)args; cscensus("DispatchIndirect",off,0,0); }
+static void MSABI ctx_DrawInstancedIndirect(void*t,void*args,uint32_t off){ (void)t;(void)args; cscensus("DrawInstancedIndirect",off,0,0); }
+static void MSABI ctx_DrawIndexedInstancedIndirect(void*t,void*args,uint32_t off){ (void)t;(void)args; cscensus("DrawIndexedInstancedIndirect",off,0,0); }
+static void MSABI ctx_CopyStructureCount(void*t,void*dst,uint32_t off,void*uav){ (void)t;(void)dst;(void)uav; cscensus("CopyStructureCount",off,0,0); }
+static void MSABI ctx_CSSetShader(void*t,void*cs,void*ci,uint32_t n){ (void)t;(void)ci;(void)n; g_cs.cs=cs; }
+static void MSABI ctx_CSSetShaderResources(void*t,uint32_t st,uint32_t n,void*const*v){ (void)t; for(uint32_t i=0;i<n&&st+i<16;i++) g_cs.srv[st+i]=v?(D3DObj*)v[i]:0; }
+static void MSABI ctx_CSSetUAVs(void*t,uint32_t st,uint32_t n,void*const*v,const uint32_t*cnt){ (void)t;(void)cnt; for(uint32_t i=0;i<n&&st+i<8;i++) g_cs.uav[st+i]=v?(D3DObj*)v[i]:0; }
+static void MSABI ctx_CSSetConstantBuffers(void*t,uint32_t st,uint32_t n,void*const*v){ (void)t; for(uint32_t i=0;i<n&&st+i<16;i++) g_cs.cb[st+i]=v?(D3DObj*)v[i]:0; }
 // ---- pipeline-state recorders (hooked into the context vtable) ----
 static void iacen_log(void){ if(!getenv("PELOAD_IA_CENSUS")) return; static uint64_t last;
     uint64_t tot=g_iacen.vs_set; if(tot<last+20000) return; last=tot;
@@ -1602,6 +1619,8 @@ static void d3d_init(void){
     x[12]=(void*)ctx_DrawIndexed; x[13]=(void*)ctx_Draw;                                             // DrawIndexed, Draw
     x[14]=(void*)ctx_Map;                                                                            // Map (Unmap=15 stays ret0)
     x[20]=(void*)ctx_DrawIndexedInstanced; x[21]=(void*)ctx_DrawInstanced; x[41]=(void*)ctx_Dispatch;
+    x[39]=(void*)ctx_DrawIndexedInstancedIndirect; x[40]=(void*)ctx_DrawInstancedIndirect; x[42]=(void*)ctx_DispatchIndirect; x[49]=(void*)ctx_CopyStructureCount;
+    x[67]=(void*)ctx_CSSetShaderResources; x[68]=(void*)ctx_CSSetUAVs; x[69]=(void*)ctx_CSSetShader; x[71]=(void*)ctx_CSSetConstantBuffers;
     x[7]=(void*)ctx_VSSetConstantBuffers; x[9]=(void*)ctx_PSSetShader; x[11]=(void*)ctx_VSSetShader; x[16]=(void*)ctx_PSSetConstantBuffers;
     x[8]=(void*)ctx_PSSetShaderResources; x[17]=(void*)ctx_IASetInputLayout; x[18]=(void*)ctx_IASetVertexBuffers;
     x[25]=(void*)ctx_VSSetShaderResources;   // VS-stage SRVs (vertex-pulling geometry source)
@@ -3154,19 +3173,23 @@ static int gc_read(uint32_t idx,XPad*p){
     p->buttons=b; return 1; }
 // scripted override for pad 0: returns 1 and fills *p while a segment is active
 static int input_script(XPad*p){
-    static int parsed; static int nseg; static struct { double dur; float lx,ly,rx,ry; uint16_t b; } seg[64]; static double total;
+    static int parsed; static int nseg; static struct { double dur; float lx,ly,rx,ry; uint16_t b; float rt,lt; } seg[64]; static double total;
     if(!parsed){ parsed=1; const char*e=getenv("PELOAD_INPUT_SCRIPT"); if(!e) return 0;
         // built-in: settle, turn right, walk, turn left, walk
         if(!strcmp(e,"walk")) e="1:0,0,0,0;1.2:0,0,0.8,0;2.5:0,1,0,0;1.2:0,0,-0.8,0;2.5:0,1,0,0;1:0,0,0,0";
+        // built-in: fire bursts + a grenade (effects / particles test)
+        if(!strcmp(e,"fire")) e="1:0,0,0,0;2:0,0,0,0,0,1;1:0,0,0,0;0.4:0,0,0,0,0,0,1;3:0,0,0,0;2:0,0,0.3,0,0,1";
         char buf[2048]; snprintf(buf,sizeof buf,"%s",e);
         for(char*sv=0,*t=strtok_r(buf,";",&sv); t && nseg<64; t=strtok_r(0,";",&sv)){ unsigned bb=0;
-            if(sscanf(t,"%lf:%f,%f,%f,%f,%x",&seg[nseg].dur,&seg[nseg].lx,&seg[nseg].ly,&seg[nseg].rx,&seg[nseg].ry,&bb)>=5){ seg[nseg].b=(uint16_t)bb; total+=seg[nseg].dur; nseg++; } }
+            seg[nseg].rt=seg[nseg].lt=0;
+            if(sscanf(t,"%lf:%f,%f,%f,%f,%x,%f,%f",&seg[nseg].dur,&seg[nseg].lx,&seg[nseg].ly,&seg[nseg].rx,&seg[nseg].ry,&bb,&seg[nseg].rt,&seg[nseg].lt)>=5){ seg[nseg].b=(uint16_t)bb; total+=seg[nseg].dur; nseg++; } }
         char m[120]; int k=snprintf(m,sizeof m,"  [input] script: %d segments, %.1fs%s\n",nseg,total,getenv("PELOAD_INPUT_LOOP")?" (loop)":""); (void)!write(2,m,k); }
     if(!nseg || !g_gameplay_t0) return 0;
     double delay=getenv("PELOAD_INPUT_DELAY")?atof(getenv("PELOAD_INPUT_DELAY")):3.0;
     double t=mono_s()-g_gameplay_t0-delay; if(t<0) return 0;
     if(getenv("PELOAD_INPUT_LOOP") && total>0) t=fmod(t,total); else if(t>=total) return 0;
-    for(int i=0;i<nseg;i++){ if(t<seg[i].dur){ p->lx=ax16(seg[i].lx); p->ly=ax16(seg[i].ly); p->rx=ax16(seg[i].rx); p->ry=ax16(seg[i].ry); p->buttons=seg[i].b; p->lt=p->rt=0;
+    for(int i=0;i<nseg;i++){ if(t<seg[i].dur){ p->lx=ax16(seg[i].lx); p->ly=ax16(seg[i].ly); p->rx=ax16(seg[i].rx); p->ry=ax16(seg[i].ry); p->buttons=seg[i].b;
+            p->rt=(uint8_t)(seg[i].rt*255.0f); p->lt=(uint8_t)(seg[i].lt*255.0f);
             static int last=-1; if(i!=last){ last=i; char m[120]; int k=snprintf(m,sizeof m,"  [input] script segment %d: L=(%.2f,%.2f) R=(%.2f,%.2f) b=%x\n",i,seg[i].lx,seg[i].ly,seg[i].rx,seg[i].ry,seg[i].b); (void)!write(2,m,k); }
             return 1; } t-=seg[i].dur; }
     return 0; }
