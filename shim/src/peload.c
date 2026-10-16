@@ -3451,6 +3451,14 @@ static void d3dgl_bind_cbs(D3DObj*sh,D3DObj**cbarr,const uint32_t*first,const ui
 // found at runtime (fresh pool CB whose P*V projects the current object on-screen). See cb0find.
 static D3DObj g_syn_cb0; static uint8_t g_syn_cb0_buf[256];
 static D3DObj g_syn_cb1; static uint8_t g_syn_cb1_buf[256];   // synthesized vertex-decompression cb1
+// PELOAD_D3DGL_CAPCB1: the REAL per-section decompression constants, captured by an entry detour on
+// halo3+0x28e8e0 (sub_18028e8e0) which the engine calls right before each section's draws to build the
+// 48-byte decompression buffer from the mesh's compression_info bounding box:
+//   [0..2]=X/Y/Z extent (scale) [3]=1 ; [4..6]=X/Y/Z min (offset) [7]=0 ; [8..11]=u_ext,v_ext,u_min,v_min
+// The engine then binds it via sub_1802af478 into material-param slot 0x22 -- a path dead under the
+// loader -- so without this capture cb1 is never bound and each section's compressed verts collapse.
+// Layout matches cb1 exactly (what the VS reads: r0 = v0*cb1[0]+cb1[1]), so we feed it straight through.
+static float g_decomp_cap[12]; static volatile int g_decomp_cap_valid; static volatile unsigned long g_decomp_cap_seq;
 static void d3dgl_mul44(const float*A,const float*B,float*O){ for(int r=0;r<4;r++)for(int c=0;c<4;c++){ float a=0; for(int k=0;k<4;k++)a+=A[r*4+k]*B[k*4+c]; O[r*4+c]=a; } }
 static int d3dgl_synth_cb0(void){
     D3DObj*b=g_last_b12; if(!b||!b->data) return 0;
@@ -3875,7 +3883,25 @@ static void d3dgl_draw(uint32_t vcount,int indexed,uint32_t instcount){
         // decompression cb1 (the engine maps it right before each draw, even though the BIND is on the dead
         // material path) -> correct per-section scale/offset = no stretched-spike sections. Falls back to
         // the synthetic uniform scale (PELOAD_D3DGL_DSCALE) when no candidate exists.
-        if(getenv("PELOAD_D3DGL_REALCB1") && g_last_smallcb && g_last_smallcb->data && g_last_smallcb->size>=48){
+        // PELOAD_D3DGL_CAPCB1: bind the REAL per-section decompression captured at halo3+0x28e8e0 (the
+        // engine's own scale/offset/uv) instead of the uniform DSCALE guess -> correct per-section bounds,
+        // no stretched "spike" sections. PELOAD_D3DGL_CAPSNORM halves the extent + centers the offset for
+        // SNORM-packed positions ([-1,1]); PELOAD_D3DGL_CAPSCALE multiplies the position scale (debug).
+        if(getenv("PELOAD_D3DGL_CAPCB1") && g_decomp_cap_valid){
+            float lc[12]; for(int i=0;i<12;i++) lc[i]=g_decomp_cap[i];   // snapshot (avoid torn read)
+            float*c1=(float*)g_syn_cb1_buf; memset(c1,0,256);
+            float sm=getenv("PELOAD_D3DGL_CAPSCALE")?atof(getenv("PELOAD_D3DGL_CAPSCALE")):1.0f;
+            if(getenv("PELOAD_D3DGL_CAPSNORM")){ // v0 in [-1,1]: decompressed = (v0*0.5+0.5)*ext+min
+                c1[0]=lc[0]*0.5f*sm; c1[1]=lc[1]*0.5f*sm; c1[2]=lc[2]*0.5f*sm; c1[3]=1.0f;
+                c1[4]=lc[4]+lc[0]*0.5f; c1[5]=lc[5]+lc[1]*0.5f; c1[6]=lc[6]+lc[2]*0.5f;
+            } else {                               // v0 in [0,1]: decompressed = v0*ext+min
+                c1[0]=lc[0]*sm; c1[1]=lc[1]*sm; c1[2]=lc[2]*sm; c1[3]=1.0f;
+                c1[4]=lc[4]; c1[5]=lc[5]; c1[6]=lc[6];
+            }
+            c1[8]=lc[8]; c1[9]=lc[9]; c1[10]=lc[10]; c1[11]=lc[11];     // texcoord scale+offset
+            g_syn_cb1.data=g_syn_cb1_buf; g_syn_cb1.size=256; g_syn_cb1.is_cb=1;
+            if(!vscb_eff[1]||!vscb_eff[1]->data) vscb_eff[1]=&g_syn_cb1;
+        } else if(getenv("PELOAD_D3DGL_REALCB1") && g_last_smallcb && g_last_smallcb->data && g_last_smallcb->size>=48){
             if(!vscb_eff[1]||!vscb_eff[1]->data) vscb_eff[1]=g_last_smallcb;
             if(getenv("PELOAD_D3DGL_CAMDBG")){ static int rc; if(rc++<6){ const float*f=(const float*)g_last_smallcb->data; char mm[200]; int k=snprintf(mm,sizeof mm,"  [realcb1] %lluB scale=[%.2f %.2f %.2f] off=[%.2f %.2f %.2f] tc=[%.2f %.2f %.2f %.2f]\n",(unsigned long long)g_last_smallcb->size,f[0],f[1],f[2],f[4],f[5],f[6],f[8],f[9],f[10],f[11]); (void)!write(2,mm,k);} }
         } else {
@@ -3973,8 +3999,13 @@ static void d3dgl_draw(uint32_t vcount,int indexed,uint32_t instcount){
     int scene_mode = getenv("PELOAD_D3DGL_PRESENT_SCENE")!=0;
     if(vw>=512 && vh>=288){ long a=(long)vw*vh; static long best;
         int isbb=(rt==g_d3d_backbuf);
-        int take = scene_mode ? (!isbb && nattr>0 && a>=best) : (isbb || a>=best);
-        if(take){ best = (!scene_mode && isbb)?(1L<<60):a;
+        // In scene mode prefer a 16:9 RT (the scene COLOR buffer, 1920x1080 / 1280x720) over square
+        // shadow/atlas RTs (4096^2) that also take geometry draws -- a huge bias puts any 16:9 RT above
+        // any square one, and within a tier the largest wins (so scene color beats the bloom downsample).
+        long score_a = a;
+        if(scene_mode){ float ar=(rt->h>0)?(float)rt->w/(float)rt->h:0.0f; if(ar>1.6f && ar<1.95f) score_a = a | (1L<<50); }
+        int take = scene_mode ? (!isbb && nattr>0 && score_a>=best) : (isbb || a>=best);
+        if(take){ best = (!scene_mode && isbb)?(1L<<60):score_a;
             unsigned newtex=rt->gltex; int reset=(newtex!=g_d3dgl_present_tex);
             g_d3dgl_present_tex=newtex;
             g_d3dgl_present_tw=(rt->w>4096?4096:(int)rt->w); g_d3dgl_present_th=(rt->h>4096?4096:(int)rt->h);
@@ -5473,6 +5504,7 @@ static void patch_install(void); // fwd (PELOAD_PATCH guest-code overwrites)
 static void hook_install(void); // fwd (PELOAD_HOOK trace detours)
 static void skinguard_install(uint8_t*halo3base); // fwd (PELOAD_SKINGUARD null-key guard)
 static void vtguard_install(uint8_t*halo3base); // fwd (PELOAD_VTGUARD null-vtable release guard)
+static void capcb1_install(uint8_t*halo3base); // fwd (PELOAD_D3DGL_CAPCB1 per-section decompression capture)
 static void *export_lookup(uint8_t *base, const char *want);    // fwd
 static void* MSABI i_LoadLibraryExW(const uint16_t *name, void *h, uint32_t fl){
     (void)h;(void)fl; char w[2048]; int i=0; for(; name && name[i] && i<2047; i++) w[i]=(char)(name[i]<128?name[i]:'?'); w[i]=0;
@@ -6741,7 +6773,7 @@ static uint8_t *load_guest(const char *path, const char *name){
     // BEFORE its DllMain/TLS callbacks run, so its __declspec(thread) globals resolve
     // to its own data instead of aliasing the exe's TLS block (index 0).
     if(opt->Dir[DIR_TLS].VA) register_tls((void*)(base+opt->Dir[DIR_TLS].VA), base, -1);
-    if(strcasestr(name,"halo3")){ waves_prefill(base); patch_install(); hook_install(); skinguard_install(base); vtguard_install(base); } // patches can target halo3 now it's mapped
+    if(strcasestr(name,"halo3")){ waves_prefill(base); patch_install(); hook_install(); skinguard_install(base); vtguard_install(base); capcb1_install(base); } // patches can target halo3 now it's mapped
     ws("  guest "); ws(name); ws(" @ "); whex((uint64_t)base);
     uint64_t ep=opt->EntryRVA;
     if(ep){ int (MSABI *dm)(void*,uint32_t,void*)=(void*)(base+ep); int r=dm(base,1,0);
@@ -6849,6 +6881,30 @@ static void hook_log(uint64_t id,uint64_t* r){
     uint64_t seq=__sync_fetch_and_add(&g_hookseq,1);
     uint64_t rax=r[14],r15=r[0],r14=r[1],r13=r[2],r12=r[3],rbx=r[11],rcx=r[13],rdx=r[12],r8=r[7],rsi=r[9],rdi=r[8];
     uint64_t gsp=(uint64_t)(r+15); uint64_t ret=*(uint64_t*)gsp;
+    // decompression-capture mode (id==0xdec0): at sub_18028e8e0 entry rcx=idx (float* compression_info).
+    // Build the 48-byte decompression buffer the engine would (extent=max-min, min as offset, uv bounds)
+    // and stash it so the D3DGL DECOMP path can bind it as the real per-section cb1 (PELOAD_D3DGL_CAPCB1).
+    if(id==0xdec0){
+        uint64_t ix=rcx;
+        if(hook_safe(ix) && hook_safe(ix+44)){
+            const float*f=(const float*)ix;
+            float b[12];
+            b[0]=f[2]-f[1]; b[1]=f[4]-f[3]; b[2]=f[6]-f[5]; b[3]=1.0f;
+            b[4]=f[1];      b[5]=f[3];      b[6]=f[5];      b[7]=0.0f;
+            b[8]=f[8]-f[7]; b[9]=f[10]-f[9]; b[10]=f[7];    b[11]=f[9];
+            int ok=1; for(int i=0;i<12;i++){ float v=b[i]; if(v!=v||v<-1e9f||v>1e9f){ok=0;break;} }
+            if(ok && (b[0]>1e-4f||b[1]>1e-4f||b[2]>1e-4f)){   // non-degenerate position extent
+                for(int i=0;i<12;i++) g_decomp_cap[i]=b[i];
+                g_decomp_cap_seq++; g_decomp_cap_valid=1;
+                static int capdbg=-1; if(capdbg<0) capdbg=getenv("PELOAD_D3DGL_CAPDBG")?1:0;
+                if(capdbg){ static int c; if(c++<12){ char m[220]; int k=snprintf(m,sizeof m,
+                    "  [capcb1] scale=[%.2f %.2f %.2f] off=[%.2f %.2f %.2f] tc=[%.3f %.3f %.3f %.3f] ret=halo3+0x%llx\n",
+                    b[0],b[1],b[2],b[4],b[5],b[6],b[8],b[9],b[10],b[11],
+                    (unsigned long long)(ret>=0x180000000ULL&&ret<0x187000000ULL?ret-0x180000000ULL:ret)); (void)!write(2,m,k);} }
+            }
+        }
+        return;
+    }
     // Catalog-dump mode (id==0xca7a): interpret rax/rdx/r15 as the map-catalog resolve loop
     // state and print each entry's id (+0x1b8) and data ptr (+0x10) so we can see why a
     // map's entry+0x10 is null. Guesses base from rax/rdx; dumps up to 64 entries.
@@ -7046,6 +7102,16 @@ static void skinguard_one(uint8_t*base,uint64_t rva,int origlen){
     char m[96]; int k=snprintf(m,sizeof m,"  [skinguard] @%p tramp=%p (null-key -> return 0)\n",(void*)site,(void*)t); (void)!write(2,m,k);
 }
 static void skinguard_install(uint8_t*halo3base){ if(!getenv("PELOAD_SKINGUARD")) return; skinguard_one(halo3base,0x2ac24c,14); }
+// ---- Per-section vertex-decompression capture (PELOAD_D3DGL_CAPCB1) ----------
+// Entry detour (via the generic trace-hook trampoline, id 0xdec0) on sub_18028e8e0, the function the
+// engine calls per BSP section to build the decompression constant buffer from the mesh bounding box.
+// The handler (hook_log id==0xdec0) reads rcx=compression_info and stashes the real scale/offset/uv so
+// the D3DGL path binds exact per-section cb1 instead of a uniform guess -> kills the stretched spikes.
+// First 14 bytes of the prologue (push rbp;mov rbp,rsp;sub rsp,0x50;movss xmm2,[rcx+4]) are whole,
+// non-rip-relative instructions -> safely relocatable.
+static void capcb1_install(uint8_t*halo3base){ if(!getenv("PELOAD_D3DGL_CAPCB1")) return;
+    hook_one(halo3base,0x28e8e0,14,0xdec0);
+    char m[80]; int k=snprintf(m,sizeof m,"  [capcb1] per-section decomp capture installed @halo3+0x28e8e0\n"); (void)!write(2,m,k); }
 // ---- NULL-vtable release guard (PELOAD_VTGUARD) ------------------------------
 // A refcounted-resource sweep (halo3+0x172ad0) releases each live object in a hash table:
 // after the strong-refcount hits 1 it loads the object's vtable (`mov rax,[r14]` @0x172bce)
