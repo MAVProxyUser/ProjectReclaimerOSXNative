@@ -769,6 +769,8 @@ typedef struct { void** vtbl; uint32_t kind; uint32_t rowpitch; uint64_t size; v
     char rname[48];               // shader: reflected cbuffer/resource names (diagnostics)
     int stkind; uint32_t sd[72];  // state object: 1=blend 2=depth-stencil 3=rasterizer 4=sampler + raw D3D11 desc
     unsigned glsamp, glsamp_nomip; // sampler state: GL sampler objects (full / no-mip variant)
+    unsigned glsamp_skip, glsamp_nomip_skip; // ... with sRGB decode SKIPPED (UNORM view of sRGB-stored texture)
+    int glsrgb;                   // texture: GL storage is SRGB8_ALPHA8 (decode per view; write-encode per RTV)
     int glhasmips;                // texture: a real GL mip chain was uploaded/generated
     uint32_t mips, arr, depth, misc, bindf; // texture desc: MipLevels (resolved), ArraySize, Depth (3D), MiscFlags, BindFlags
     unsigned gltarget;            // texture: GL target of gltex (2D / 2D_ARRAY / CUBE_MAP / CUBE_MAP_ARRAY / 3D)
@@ -787,6 +789,7 @@ typedef struct { int n; PDEnt e[12]; } PDStore;
 // Bound pipeline state we track to interpret/translate draws.
 static struct {
     D3DObj *il, *vb[8], *ib, *psrv[32], *rtv;
+    D3DObj *psrvv[32], *rtvv[8];               // the bound VIEW objects (format: sRGB vs UNORM view of a TYPELESS resource)
     D3DObj *rtvs[8]; int num_rt; D3DObj *dsv;  // multiple render targets (deferred G-buffer) + depth
     D3DObj *vs, *ps, *vscb[16], *pscb[16];   // bound shaders + constant buffers (for D3DGL)
     uint32_t vscb_1st[16], vscb_cnt[16], pscb_1st[16], pscb_cnt[16]; // *SetConstantBuffers1 ranges (16B units)
@@ -936,6 +939,12 @@ static int MSABI dev_CreateBuffer(void*t,const void*desc,const void*init,void**p
 // textures: compute the REAL footprint from the DXGI format so our buffer matches
 // exactly what the engine writes via Map (no over/under-allocation -> no overflow).
 static int is_bc(uint32_t f){ return (f>=70&&f<=84)||(f>=94&&f<=99); }      // BC1..BC7
+// sRGB handling: 8-bit RGBA/BGRA (and decoded BC1-3) textures are STORED as SRGB8_ALPHA8; whether a read
+// decodes and a write encodes is decided per D3D VIEW format (EXT_texture_sRGB_decode + GL_FRAMEBUFFER_SRGB),
+// because halo3 renders into a TYPELESS target through an _SRGB RTV and copies it through a UNORM view.
+static int dxgi_is_srgb(uint32_t f){ return f==29||f==72||f==75||f==78||f==91||f==93||f==99; }
+static int dxgi_srgb_storable(uint32_t f){ return (f>=27&&f<=29)||f==87||f==88||(f>=90&&f<=93)||(f>=70&&f<=78); }
+static int g_nosrgb=-1; static int nosrgb(void){ if(g_nosrgb<0) g_nosrgb=getenv("PELOAD_D3DGL_NOSRGB")?1:0; return g_nosrgb; }
 static uint32_t bc_block(uint32_t f){ return ((f>=70&&f<=72)||(f>=79&&f<=81))?8:16; } // BC1,BC4=8B blocks
 static uint32_t dxgi_bpp(uint32_t f){                                         // bytes per texel (non-BC)
     if(f>=1&&f<=4) return 16; if(f>=5&&f<=8) return 12; if(f>=9&&f<=22) return 8;
@@ -1062,7 +1071,7 @@ static int MSABI dev_CreateTexture3D(void*t,const void*d,const void*init,void**p
 static int dev_crViewK(int kind,const void*res,const void*desc,void**pp){ D3DObj*o=d3dobj(g_d3dview_vtbl,0,0); o->data=(void*)res; o->vkind=kind;
     const D3DObj*r=res; o->vfmt=r?r->fmt:0; o->vdim=0; o->vmip=0; o->vfirst=0; o->vcount=r?(r->kind==4?1:(r->arr?r->arr:1)):1;
     if(desc){ const uint32_t*d=desc; o->vfmt=d[0]?d[0]:o->vfmt; o->vdim=d[1];
-        int arrdim = (kind==1)? (d[1]==5||d[1]==10||d[1]==3) : (kind==4)? (d[1]==4||d[1]==6||d[1]==2) : (d[1]==4||d[1]==6||d[1]==2);  // *_ARRAY dims
+        int arrdim = (kind==1)? (d[1]==5||d[1]==10||d[1]==3) : (kind==4)? (d[1]==2||d[1]==4||d[1]==6) : (d[1]==3||d[1]==5||d[1]==7);  // *_ARRAY dims (SRV / DSV / RTV enums differ)
         if(kind==1){ o->vmip=d[2]; if(arrdim){ o->vfirst=(d[1]==10)?d[4]*6:d[4]; o->vcount=(d[1]==10)?d[5]*6:d[5]; } else if(d[1]==9){ o->vfirst=0; o->vcount=6; } else o->vcount=1; }
         else if(kind==3){ o->vmip=d[2]; if(arrdim){ o->vfirst=d[3]; o->vcount=d[4]; } else if(d[1]==8){ o->vfirst=d[3]; o->vcount=d[4]; } else o->vcount=1; }  // 3D: FirstWSlice
         else if(kind==4){ o->vmip=d[3]; if(arrdim){ o->vfirst=d[4]; o->vcount=d[5]; } else o->vcount=1; } }
@@ -1405,11 +1414,11 @@ static void MSABI ctx_PSSetConstantBuffers1(void*t,uint32_t start,uint32_t num,v
     for(uint32_t i=0;i<num&&start+i<16;i++){ g_d3dst.pscb[start+i]=cbs?(D3DObj*)cbs[i]:0;
         g_d3dst.pscb_1st[start+i]=first?first[i]:0; g_d3dst.pscb_cnt[start+i]=cnt?cnt[i]:0; } }
 static void MSABI ctx_PSSetShaderResources(void*t,uint32_t start,uint32_t num,void*const*srvs){ (void)t;
-    for(uint32_t i=0;i<num&&start+i<32;i++){ D3DObj*v=srvs?(D3DObj*)srvs[i]:0; g_d3dst.psrv[start+i]=(v&&v->data)?(D3DObj*)v->data:v; } }
+    for(uint32_t i=0;i<num&&start+i<32;i++){ D3DObj*v=srvs?(D3DObj*)srvs[i]:0; g_d3dst.psrv[start+i]=(v&&v->data)?(D3DObj*)v->data:v; g_d3dst.psrvv[start+i]=(v&&v->vkind)?v:0; } }
 static void MSABI ctx_OMSetRenderTargets(void*t,uint32_t num,void*const*rtvs,void*dsv){ (void)t;
     g_d3dst.num_rt=0;
-    for(uint32_t i=0;i<num&&i<8;i++){ D3DObj*v=rtvs?(D3DObj*)rtvs[i]:0; D3DObj*res=(v&&v->data)?(D3DObj*)v->data:v; g_d3dst.rtvs[i]=res; if(res)g_d3dst.num_rt=i+1; }
-    for(uint32_t i=num;i<8;i++) g_d3dst.rtvs[i]=0;
+    for(uint32_t i=0;i<num&&i<8;i++){ D3DObj*v=rtvs?(D3DObj*)rtvs[i]:0; D3DObj*res=(v&&v->data)?(D3DObj*)v->data:v; g_d3dst.rtvs[i]=res; g_d3dst.rtvv[i]=(v&&v->vkind)?v:0; if(res)g_d3dst.num_rt=i+1; }
+    for(uint32_t i=num;i<8;i++){ g_d3dst.rtvs[i]=0; g_d3dst.rtvv[i]=0; }
     g_d3dst.rtv=g_d3dst.rtvs[0];
     { D3DObj*d=(D3DObj*)dsv; g_d3dst.dsv=(d&&d->data)?(D3DObj*)d->data:d; } }
 static void MSABI ctx_RSSetViewports(void*t,uint32_t num,const void*vps){ (void)t; if(num&&vps){ const float*f=vps; g_d3dst.vp_x=(int)f[0]; g_d3dst.vp_y=(int)f[1]; g_d3dst.vp_w=(int)f[2]; g_d3dst.vp_h=(int)f[3];
@@ -3699,7 +3708,7 @@ static int d3dgl_fmt(uint32_t f,GLFmt*g){
         case 15: case 16: GF(0x8230,0x8227,0x1406,0);   // R32G32_FLOAT        RG32F
         case 23: case 24: GF(0x8059,0x1908,0x8368,0);   // R10G10B10A2_UNORM   RGB10_A2 / 2_10_10_10_REV
         case 26:          GF(0x8C3A,0x1907,0x8C3B,0);   // R11G11B10_FLOAT
-        case 27: case 28: case 29: GF(GLE_RGBA8,GLE_RGBA,GLE_UBYTE,0); // R8G8B8A8 (sRGB kept linear: RTs aren't sRGB-encoded yet)
+        case 27: case 28: case 29: GF(nosrgb()?GLE_RGBA8:0x8C43,GLE_RGBA,GLE_UBYTE,0); // R8G8B8A8: sRGB storage, decode per view
         case 31:          GF(0x8F97,0x1908,0x1400,0);   // R8G8B8A8_SNORM
         case 33: case 34: GF(0x822F,0x8227,0x140B,0);   // R16G16_FLOAT        RG16F
         case 35:          GF(0x822C,0x8227,0x1403,0);   // R16G16_UNORM
@@ -3716,8 +3725,8 @@ static int d3dgl_fmt(uint32_t f,GLFmt*g){
         case 67:          GF(0x8C3D,0x1907,0x8C3E,0);   // R9G9B9E5_SHAREDEXP
         case 85:          GF(0x8D62,0x1907,0x8363,0);   // B5G6R5_UNORM        RGB565
         case 86:          GF(0x8057,0x80E1,0x8366,0);   // B5G5R5A1_UNORM
-        case 87: case 90: case 91: GF(GLE_RGBA8,GLE_BGRA,GLE_UI8REV,0); // B8G8R8A8
-        case 88: case 92: case 93: GF(GLE_RGBA8,GLE_BGRA,GLE_UI8REV,2); // B8G8R8X8 (alpha reads 1)
+        case 87: case 90: case 91: GF(nosrgb()?GLE_RGBA8:0x8C43,GLE_BGRA,GLE_UI8REV,0); // B8G8R8A8
+        case 88: case 92: case 93: GF(nosrgb()?GLE_RGBA8:0x8C43,GLE_BGRA,GLE_UI8REV,2); // B8G8R8X8 (alpha reads 1)
         case 115:         GF(0x8056,0x80E1,0x8365,0);   // B4G4R4A4_UNORM
     }
     #undef GF
@@ -3740,6 +3749,7 @@ static const uint8_t* d3dgl_sub_pixels(D3DObj*o,uint32_t sl,uint32_t m,GLFmt*g,i
         uint64_t lsz=(uint64_t)rp*rows; size_t pl=(size_t)(*mw)*(*mh)*4; uint8_t*out=malloc(pl*(*md)); if(!out) return 0;
         for(uint32_t z=0;z<*md;z++){ uint8_t*dz=dg_bc_decode(o->fmt,(const uint8_t*)o->data+off+z*lsz,(size_t)lsz,(int)*mw,(int)*mh);
             if(!dz){ free(out); return 0; } memcpy(out+z*pl,dz,pl); free(dz); }
+        if(!nosrgb() && o->fmt>=70 && o->fmt<=78) srgb=1;
         g->ifmt=sn?0x8F97:(srgb?0x8C43:GLE_RGBA8); g->fmt=GLE_RGBA; g->type=sn?0x1400:GLE_UBYTE; g->swz=0; *own=1; *bpp=4; return out; }
     if(!d3dgl_fmt(o->fmt,g)) return 0;
     *bpp=dxgi_bpp(o->fmt); return (const uint8_t*)o->data+off; }
@@ -3776,7 +3786,7 @@ static void d3dgl_upload_layered(D3DObj*o,unsigned tgt){
             ti3(tgt,0,g.ifmt,(int)mw,(int)mh,(int)ns,0,g.fmt,g.type,all); free(all); } }
     if(psi) psi(0x0CF5,4);
     unsigned e=ge?ge():0;
-    d3dgl_apply_swz(tgt,g.swz);
+    d3dgl_apply_swz(tgt,g.swz); o->glsrgb=(g.ifmt==0x8C43);
     o->glhasmips=0;
     if(!e && nm-L>1 && gm && !getenv("PELOAD_D3DGL_NOMIP")){ gm(tgt); if(!(ge&&ge())){ o->glhasmips=1; G.TexParameteri(tgt,0x2801,0x2703); G.TexParameteri(tgt,0x813D,1000); } }
     if(!o->glhasmips){ G.TexParameteri(tgt,0x2801,GLE_LINEAR); G.TexParameteri(tgt,0x813D,0); }
@@ -3845,8 +3855,8 @@ static void d3dgl_ensure_tex(D3DObj*o){
                     if(gerr) gerr();
                     // SRGB BC formats (BC1/BC2/BC3 _SRGB) store gamma-encoded color -> upload as SRGB8_ALPHA8
                     // so GL de-gammas to linear on sample (matches the compressed-SRGB path we replaced).
-                    int issrgb=(o->fmt==72||o->fmt==75||o->fmt==78), issn=(o->fmt==81||o->fmt==84);
-                    unsigned iform=issn?0x8F97/*RGBA8_SNORM*/:issrgb?0x8C43/*SRGB8_ALPHA8*/:GLE_RGBA8;
+                    int issrgb=nosrgb()?(o->fmt==72||o->fmt==75||o->fmt==78):(o->fmt>=70&&o->fmt<=78), issn=(o->fmt==81||o->fmt==84);
+                    unsigned iform=issn?0x8F97/*RGBA8_SNORM*/:issrgb?0x8C43/*SRGB8_ALPHA8*/:GLE_RGBA8; o->glsrgb=(iform==0x8C43);
                     G.TexImage2D(GLE_TEX2D,0,iform,(int)uw,(int)uh,0,GLE_RGBA,issn?0x1400/*BYTE*/:GLE_UBYTE,rgba);
                     unsigned de=gerr?gerr():0; free(rgba);
                     if(!de){ int mip=!getenv("PELOAD_D3DGL_NOMIP");
@@ -3891,7 +3901,7 @@ static void d3dgl_ensure_tex(D3DObj*o){
                 G.TexParameteri(GLE_TEX2D,0x813D/*MAX_LEVEL*/, gl_lvl>0?gl_lvl-1:0); o->glhasmips=(gl_lvl>1);
             }
             if(getenv("PELOAD_TRACE_TEXUP")){ static int bc; if(bc++<40){ char b[180]; int k=snprintf(b,sizeof b,"  [texup-bc] %dx%d fmt=%u ifmt=0x%x base=%ux%u@%llu(dl%d) levels=%d err=0x%x%s\n",w,h,o->fmt,bcif,uw,uh,(unsigned long long)uoff,baselvl,gl_lvl,e,e?" (FALLBACK)":""); (void)!write(2,b,k);} }
-            if(!e){ o->gl_uploaded=1; o->gl_dirty=0; dg_gltex_dump((int)uw,(int)uh,o->fmt); return; } // success: BPTC may fail on GL4.1 -> fall through
+            if(!e){ o->glsrgb=(o->fmt==72||o->fmt==75||o->fmt==78); o->gl_uploaded=1; o->gl_dirty=0; dg_gltex_dump((int)uw,(int)uh,o->fmt); return; } // success: BPTC may fail on GL4.1 -> fall through
         }
     }
     // Only upload real pixels when the backing buffer actually holds >= w*h*4 bytes; otherwise
@@ -3906,7 +3916,8 @@ static void d3dgl_ensure_tex(D3DObj*o){
         static int tc; if(tc++<60){ char b[160]; int k=snprintf(b,sizeof b,"  [texup] %dx%d fmt=%u size=%lluB can=%d data=%p nonzero-samples=%d sum=%llu%s\n",
             w,h,o->fmt,(unsigned long long)o->size,can,o->data,nz,(unsigned long long)sum,nz?"":" (ALL BLACK)"); (void)!write(2,b,k);} }
     if(can){ static void(*psi)(unsigned,int); static int pi; if(!pi){ pi=1; psi=dlsym(RTLD_DEFAULT,"glPixelStorei"); }
-        if(psi) psi(0x0CF5,1); G.TexImage2D(GLE_TEX2D,0,(int)gfm.ifmt,w,h,0,gfm.fmt,gfm.type,o->data); if(psi) psi(0x0CF5,4); d3dgl_apply_swz(GLE_TEX2D,gfm.swz); }
+        if(psi) psi(0x0CF5,1); G.TexImage2D(GLE_TEX2D,0,(int)gfm.ifmt,w,h,0,gfm.fmt,gfm.type,o->data); if(psi) psi(0x0CF5,4); d3dgl_apply_swz(GLE_TEX2D,gfm.swz);
+        o->glsrgb=(gfm.ifmt==0x8C43); }
     else { static const unsigned char mag[4]={255,0,255,255}; G.TexImage2D(GLE_TEX2D,0,GLE_RGBA8,1,1,0,GLE_RGBA,GLE_UBYTE,mag); }
     o->gl_uploaded=1; o->gl_dirty=0;
     dg_gltex_dump(w,h,o->fmt);
@@ -3917,7 +3928,7 @@ static unsigned d3dgl_rt_ifmt(uint32_t f){
     switch(f){ case 1: case 2: return 0x8814; case 9: case 10: return 0x881A; case 11: return 0x805B; case 15: case 16: return 0x8230;
         case 23: case 24: return 0x8059; case 26: return 0x8C3A; case 33: case 34: return 0x822F; case 35: return 0x822C;
         case 39: case 41: return 0x822E; case 48: case 49: return 0x822B; case 53: case 54: return 0x822D; case 56: return 0x822A;
-        case 60: case 61: return 0x8229; default: return GLE_RGBA8; } }
+        case 60: case 61: return 0x8229; default: return (dxgi_srgb_storable(f)&&!nosrgb())?0x8C43:GLE_RGBA8; } }
 static void d3dgl_ensure_rt(D3DObj*o){
     if(!o) return;
     int w=o->w?(int)o->w:g_d3dgl_W, h=o->h?(int)o->h:g_d3dgl_H; if(w>4096)w=4096; if(h>4096)h=4096;
@@ -3928,7 +3939,8 @@ static void d3dgl_ensure_rt(D3DObj*o){
         G.TexParameteri(GLE_TEX2D,0x2802,GLE_CLAMP); G.TexParameteri(GLE_TEX2D,0x2803,GLE_CLAMP);
         // the RT's real precision: HDR targets (lighting, bloom chain, the 1x1 average-luminance target that
         // drives auto-exposure) clamped at 1.0 in RGBA8 -> blown-out white frame
-        G.TexImage2D(GLE_TEX2D,0,(int)d3dgl_rt_ifmt(o->fmt),w,h,0,GLE_RGBA,GLE_UBYTE,0); G.TexParameteri(GLE_TEX2D,0x813D/*MAX_LEVEL*/,0); o->gl_uploaded=1; }
+        G.TexImage2D(GLE_TEX2D,0,(int)d3dgl_rt_ifmt(o->fmt),w,h,0,GLE_RGBA,GLE_UBYTE,0); G.TexParameteri(GLE_TEX2D,0x813D/*MAX_LEVEL*/,0); o->gl_uploaded=1;
+        o->glsrgb=(d3dgl_rt_ifmt(o->fmt)==0x8C43); }
     if(!o->glfbo){ G.GenFramebuffers(1,&o->glfbo); G.BindFramebuffer(GLE_FBO,o->glfbo);
         G.FramebufferTexture2D(GLE_FBO,GLE_CA0,GLE_TEX2D,o->gltex,0);
         if(G.CheckFramebufferStatus){ unsigned st=G.CheckFramebufferStatus(GLE_FBO); if(st!=0x8CD5){ static int nb; if(nb++<20){ char m[200];
@@ -4145,9 +4157,11 @@ static unsigned d3d_blend_gl(uint32_t b){ switch(b){ case 1:return 0; case 2:ret
 static unsigned d3d_blendop_gl(uint32_t o){ switch(o){ case 2:return 0x800A; case 3:return 0x800B; case 4:return 0x8007; case 5:return 0x8008; default:return 0x8006; } }
 static unsigned d3d_addr_gl(uint32_t a){ switch(a){ case 1:return 0x2901; case 2:return 0x8370; case 3:return 0x812F; case 4:return 0x812D; case 5:return 0x8743; default:return 0x2901; } }
 // D3D11_SAMPLER_DESC {Filter, AddressU,V,W, MipLODBias, MaxAnisotropy, ComparisonFunc, BorderColor[4], MinLOD, MaxLOD}
-static unsigned d3dgl_glsampler(D3DObj*s,int hasmips){
+static unsigned d3dgl_glsampler_x(D3DObj*s,int hasmips,int skip);
+static unsigned d3dgl_glsampler(D3DObj*s,int hasmips){ return d3dgl_glsampler_x(s,hasmips,0); }
+static unsigned d3dgl_glsampler_x(D3DObj*s,int hasmips,int skip){
     if(!s||s->stkind!=4||!G.GenSamplers||!G.SamplerParameteri) return 0;
-    unsigned*slot=hasmips?&s->glsamp:&s->glsamp_nomip; if(*slot) return *slot;
+    unsigned*slot=skip?(hasmips?&s->glsamp_skip:&s->glsamp_nomip_skip):(hasmips?&s->glsamp:&s->glsamp_nomip); if(*slot) return *slot;
     G.GenSamplers(1,slot); unsigned g=*slot; const uint32_t*d=s->sd; uint32_t f=d[0]&0x7F;
     int aniso=(f&0x40)!=0, minl=(f&0x10)!=0||aniso, magl=(f&0x04)!=0||aniso, mipl=(f&0x01)!=0||aniso;
     unsigned minf = hasmips ? (minl?(mipl?0x2703:0x2701):(mipl?0x2702:0x2700)) : (minl?0x2601:0x2600);
@@ -4157,6 +4171,7 @@ static unsigned d3dgl_glsampler(D3DObj*s,int hasmips){
     if(G.SamplerParameterf){ G.SamplerParameterf(g,0x8501,bias); G.SamplerParameterf(g,0x813A,mnl); G.SamplerParameterf(g,0x813B,mxl>1000.0f?1000.0f:mxl);
         if(aniso) G.SamplerParameterf(g,0x84FE,(float)(d[5]<1?1:(d[5]>16?16:d[5]))); }
     if(G.SamplerParameterfv) G.SamplerParameterfv(g,0x1004,(const float*)&d[7]);
+    G.SamplerParameteri(g,0x8A48/*TEXTURE_SRGB_DECODE_EXT*/,skip?0x8A4A/*SKIP_DECODE*/:0x8A49/*DECODE*/);
     return g; }
 // ---- depth-stencil textures + per-(RTVs,DSV) framebuffers ---------------------------------------
 // A DSV resource becomes a real GL depth(-stencil) texture (also sampleable through its SRV: GL returns
@@ -4257,7 +4272,7 @@ static void d3dgl_apply_state(D3DObj*rt,int vw,int vh){
       if(dclip) G.Disable(0x864F/*DEPTH_CLAMP*/); else G.Enable(0x864F);
       if((bias!=0||slope!=0) && po){ G.Enable(0x8037/*POLYGON_OFFSET_FILL*/); po(slope,bias); } else G.Disable(0x8037); } }
 // state that must NOT leak into clears / copies (D3D clears & copies ignore blend, write mask and scissor)
-static void d3dgl_reset_raster_ops(void){ G.Disable(0x0BE2); G.Disable(0x0C11); if(G.ColorMask) G.ColorMask(1,1,1,1); G.Disable(0x0B71); G.Disable(0x0B90); }
+static void d3dgl_reset_raster_ops(void){ G.Disable(0x0BE2); G.Disable(0x0C11); if(G.ColorMask) G.ColorMask(1,1,1,1); G.Disable(0x0B71); G.Disable(0x0B90); G.Disable(0x8DB9/*FRAMEBUFFER_SRGB*/); }
 // sampler-type code (dxbc2glsl: 0 sampler2D, 1 sampler3D, 2 samplerCube, 3 sampler2DArray, 4 samplerCubeArray) -> GL target
 static const unsigned g_tt_target[5]={GLE_TEX2D,0x806F,0x8513,0x8C1A,0x9009};
 static void d3dgl_scan_tt(const char*src,signed char*tt){
@@ -4284,7 +4299,9 @@ static void d3dgl_bind_texs_p(unsigned prog,const int*tloc,const signed char*tt,
         unsigned want = tt ? g_tt_target[(tt[r]>=0&&tt[r]<5)?tt[r]:0] : GLE_TEX2D;
         if(tx && (!tx->gltex || tx->gl_dirty || !tx->gl_uploaded)){ G.ActiveTexture(GLE_TEX0+unit); d3dgl_ensure_tex(tx); }   // upload (binds on this unit) first
         unsigned wtex = 0; if(tx){ unsigned have=tx->gltarget?tx->gltarget:GLE_TEX2D; if(!tt) want=have; if(have==want) wtex=tx->gltex; }
-        unsigned wsamp = (G.BindSampler && r<16 && !getenv("PELOAD_D3DGL_NOSAMPLER")) ? d3dgl_glsampler(g_d3dst.pssamp[r],tx?tx->glhasmips:0) : 0;
+        D3DObj*sv=g_d3dst.psrvv[r]; int skip = tx && tx->glsrgb && !dxgi_is_srgb(sv?sv->vfmt:tx->fmt);   // UNORM view of sRGB storage: raw read
+        unsigned wsamp = (G.BindSampler && r<16 && !getenv("PELOAD_D3DGL_NOSAMPLER")) ? d3dgl_glsampler_x(g_d3dst.pssamp[r],tx?tx->glhasmips:0,skip) : 0;
+        if(!wsamp && tx && tx->glsrgb && wtex){ G.ActiveTexture(GLE_TEX0+unit); G.BindTexture(want,wtex); G.TexParameteri(want,0x8A48,skip?0x8A4A:0x8A49); g_unit_tex[unit]=~0u; }   // no sampler object: texture's own decode state
         if(!nocache && g_unitcache_ok && g_unit_tex[unit]==wtex && g_unit_tgt[unit]==want && g_unit_samp[unit]==wsamp){
             if(!(units_set&&*units_set)) G.ProgramUniform1i(prog,loc,unit);
             unit++; continue; }
@@ -4529,7 +4546,7 @@ static unsigned d3dgl_compile(const char*src,unsigned glstage){
 static char *m_vsrc_keep, *m_psrc_keep;   // last mono sources (block-size parsing at link)
 typedef struct { void*vs; void*ps; unsigned prog; int tried; int vcb[16],pcb[16],tloc[32]; signed char tt[32];
     int vblk[16], pblk[16];        // UBO path: declared block size in vec4s per D3D slot (0 = slot unused)
-    int units_set; } MonoProg;
+    int units_set; int relcb; } MonoProg;   // relcb: 1 = VS / 2 = PS indexes a constant buffer by register
 static MonoProg g_mono[1024];
 static MonoProg* d3dgl_monoprog(D3DObj*vs,D3DObj*ps){
     uintptr_t h=(((uintptr_t)vs>>4)*2654435761u) ^ (((uintptr_t)ps>>4)*40503u);
@@ -4567,6 +4584,8 @@ static MonoProg* d3dgl_monoprog(D3DObj*vs,D3DObj*ps){
                 const char*src=st?m_psrc_keep:m_vsrc_keep; int n=0; char pat[40]; snprintf(pat,sizeof pat,"uniform %cXcb%d_blk { vec4 %cXcb%d[",st?'p':'v',b,st?'p':'v',b);
                 const char*q=src?strstr(src,pat):0; if(q) n=atoi(q+strlen(pat)); if(n<=0) n=4096;
                 if(st) m->pblk[b]=n; else m->vblk[b]=n; } }
+        m->relcb = ((m_vsrc_keep&&strstr(m_vsrc_keep,"[floatBitsToInt(")) || (m_vsrc_keep&&strstr(m_vsrc_keep," + floatBitsToInt(r")&&strstr(m_vsrc_keep,"Xcb")))?1:0;
+        if(m_psrc_keep && (strstr(m_psrc_keep,"Xcb3[1 + floatBitsToInt") || strstr(m_psrc_keep,"Xcb3[floatBitsToInt"))) m->relcb|=2;
         free(m_vsrc_keep); free(m_psrc_keep); m_vsrc_keep=m_psrc_keep=0;
         m->units_set=0;
         if(g_d3dgl_trace){ static int n; if(++n<=40){ char mm[64]; int k=snprintf(mm,sizeof mm,"  [d3dgl] mono-linked program #%d\n",n); (void)!write(2,mm,k);} }
@@ -4581,8 +4600,9 @@ static void d3dgl_clear_rtv(void* rtvview,const float* col){
     D3DObj* v=rtvview; D3DObj* rt=(v&&v->data)?(D3DObj*)v->data:v; if(!rt) return;
     GLLOCK(); if(CGLGetCurrentContext()!=g_d3dgl_cgl) CGLSetCurrentContext(g_d3dgl_cgl);
     d3dgl_ensure_rt(rt); G.BindFramebuffer(GLE_FBO,rt->glfbo); d3dgl_reset_raster_ops();
+    if(rt->glsrgb && dxgi_is_srgb((v&&v->vkind)?v->vfmt:rt->fmt)) G.Enable(0x8DB9);   // D3D encodes the clear colour for _SRGB RTVs
     if(col) G.ClearColor(col[0],col[1],col[2],col[3]); else G.ClearColor(0,0,0,0);
-    if(G.DepthMask)G.DepthMask(1); G.Clear(GLE_COLORBIT); GLUNLOCK(); }
+    if(G.DepthMask)G.DepthMask(1); G.Clear(GLE_COLORBIT); G.Disable(0x8DB9); GLUNLOCK(); }
 static void d3dgl_clear_dsv(void*dsvview,uint32_t flags,float depth,uint8_t stencil){
     if(!g_d3dgl_ready || getenv("PELOAD_D3DGL_NODEPTH")) return;
     D3DObj* v=dsvview; D3DObj* ds=(v&&v->data)?(D3DObj*)v->data:v; if(!ds) return;
@@ -4757,6 +4777,8 @@ static void d3dgl_draw_impl(uint32_t vcount,int indexed,uint32_t instcount,uint3
     if(!rt && getenv("PELOAD_D3DGL_NODEPTHONLY")) return;      // A/B: skip depth-only (shadow/occlusion) passes
     { D3DObj*one[1]={rt}; unsigned fbo = (g_d3dst.num_rt>1&&rt) ? d3dgl_fbo_for(g_d3dst.rtvs,g_d3dst.num_rt,dsv) : d3dgl_fbo_for(rt?one:0,rt?1:0,dsv);
       G.BindFramebuffer(GLE_FBO,fbo); }
+    { D3DObj*v0=g_d3dst.rtvv[0]; int enc = rt && rt->glsrgb && dxgi_is_srgb(v0?v0->vfmt:rt->fmt);   // _SRGB RTV: encode on write
+      if(enc) G.Enable(0x8DB9/*FRAMEBUFFER_SRGB*/); else G.Disable(0x8DB9); }
     if(!rt) rt=dsv;                                            // depth-only: size/viewport from the depth target
     int vw=g_d3dst.vp_w>0?g_d3dst.vp_w:(rt->w?(int)rt->w:g_d3dgl_W); if(vw>4096)vw=4096;
     int vh=g_d3dst.vp_h>0?g_d3dst.vp_h:(rt->h?(int)rt->h:g_d3dgl_H); if(vh>4096)vh=4096;
@@ -4837,6 +4859,7 @@ static void d3dgl_draw_impl(uint32_t vcount,int indexed,uint32_t instcount,uint3
             g_syn_cb1.data=g_syn_cb1_buf; g_syn_cb1.size=256; g_syn_cb1.is_cb=1; g_syn_cb1.ver++;
             if(!vscb_eff[1]||!vscb_eff[1]->data) vscb_eff[1]=&g_syn_cb1; } }
     if(mono && g_dg_ubo && G.BindBufferRange){
+        { const char*e=getenv("PELOAD_D3DGL_SKIPRELCB"); if(e && (mp->relcb&atoi(e)) && (!getenv("PELOAD_D3DGL_ALT5") || (((long)(mono_s()/5.0))&1))) return; }
         { const char*e=getenv("PELOAD_D3DGL_SKIPVSBLK"); if(e){ int sb=atoi(e), mv=strchr(e,':')?atoi(strchr(e,':')+1):1; if(sb>=0&&sb<16&&mp->vblk[sb]>=mv && (!getenv("PELOAD_D3DGL_ALT5") || (((long)(mono_s()/5.0))&1))){ return; } } }
         // PELOAD_D3DGL_SKIPPSBLK=<slot>:<minvec>: skip draws whose PS declares cb<slot> with >= minvec vec4s (A/B a shader family)
         { const char*e=getenv("PELOAD_D3DGL_SKIPPSBLK"); if(e){ int sb=atoi(e), mv=strchr(e,':')?atoi(strchr(e,':')+1):1; if(sb>=0&&sb<16&&mp->pblk[sb]>=mv && (!getenv("PELOAD_D3DGL_ALT5") || (((long)(mono_s()/5.0))&1))){ return; } } }
@@ -5206,6 +5229,8 @@ static void d3dgl_blit_fullscreen(unsigned vao){
     G.ClearColor(0.02f,0.02f,0.05f,1.0f); G.Clear(GLE_COLORBIT);
     G.UseProgram(0); G.BindProgramPipeline(0); G.UseProgram(g_d3dgl_blit_prog);
     TEXCACHE_INVALIDATE(); G.ActiveTexture(GLE_TEX0); G.BindTexture(GLE_TEX2D,g_d3dgl_present_tex);
+    // present shows the raw stored bytes (the swap chain is UNORM; the game already sRGB-encoded via its RTV)
+    if(G.BindSampler) G.BindSampler(0,0); G.TexParameteri(GLE_TEX2D,0x8A48,0x8A4A/*SKIP_DECODE*/); G.Disable(0x8DB9);
     if(g_d3dgl_blit_sloc>=0) G.ProgramUniform1i(g_d3dgl_blit_prog,g_d3dgl_blit_sloc,0);
     if(g_d3dgl_blit_uloc>=0){ float tw=g_d3dgl_present_tw?g_d3dgl_present_tw:1, th=g_d3dgl_present_th?g_d3dgl_present_th:1;
         float sc[4]={ g_d3dgl_present_vw/tw, g_d3dgl_present_vh/th, 0,0 }; G.ProgramUniform4fv(g_d3dgl_blit_prog,g_d3dgl_blit_uloc,1,sc); }
