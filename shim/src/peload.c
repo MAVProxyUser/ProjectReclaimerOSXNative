@@ -4017,6 +4017,31 @@ static void d3dgl_draw(uint32_t vcount,int indexed,uint32_t instcount){
                     fmt,v0[0],v0[1],v0[2],world[0],world[1],world[2],clip[3],nx,ny,nz,on?"ONSCREEN":"off",
                     cb0loc, synthcb0?"SYNTH":(vscb_eff[0]&&vscb_eff[0]->data?"other":"NONE"),
                     crt?(int)crt->w:0,crt?(int)crt->h:0,crt==g_d3d_backbuf); (void)!write(2,m,k); } } }
+        // PELOAD_D3DGL_RANGEDUMP: sample up to 300 verts of a fmt-11/13 draw, decompress each via the bound
+        // cb1, and report the world-position RANGE + how many verts land FAR from the median (streak verts).
+        // A big intra-draw range / many outliers => the draw mixes sections (one cb1 can't fit) or the
+        // compression bounds are wrong for part of it = the radiating streaks.
+        if(getenv("PELOAD_D3DGL_RANGEDUMP")){ static int rd; if(rd<400 && il->nelem>0){
+            int slot0=il->elem[0].slot<8?il->elem[0].slot:0; D3DObj*sb=g_d3dst.vb[slot0];
+            uint32_t stride=g_d3dst.vstride[slot0]; uint32_t off=g_d3dst.voff[slot0]+il->elem[0].off; uint32_t fmt=il->elem[0].fmt;
+            if(sb&&sb->data&&stride>=8&&(fmt==11||fmt==13)){ rd++;
+                const float*c1=(const float*)g_syn_cb1_buf;
+                uint64_t nv=sb->size/stride; if(nv>300)nv=300;
+                float mn[3]={1e30f,1e30f,1e30f},mx[3]={-1e30f,-1e30f,-1e30f}; double sum[3]={0,0,0}; int cnt=0;
+                for(uint64_t vi=0;vi<nv;vi++){ const uint8_t*d=(const uint8_t*)sb->data+off+vi*stride; float raw[3];
+                    if(fmt==11){ const uint16_t*u=(const uint16_t*)d; raw[0]=u[0]/65535.0f;raw[1]=u[1]/65535.0f;raw[2]=u[2]/65535.0f; }
+                    else { const int16_t*s=(const int16_t*)d; raw[0]=s[0]/32767.0f;raw[1]=s[1]/32767.0f;raw[2]=s[2]/32767.0f; }
+                    float dz[3]; for(int c=0;c<3;c++){ dz[c]=raw[c]*c1[c]+c1[4+c]; if(dz[c]!=dz[c])continue; if(dz[c]<mn[c])mn[c]=dz[c]; if(dz[c]>mx[c])mx[c]=dz[c]; sum[c]+=dz[c]; } cnt++; }
+                float med[3]={cnt?(float)(sum[0]/cnt):0,cnt?(float)(sum[1]/cnt):0,cnt?(float)(sum[2]/cnt):0};
+                float span[3]={mx[0]-mn[0],mx[1]-mn[1],mx[2]-mn[2]};
+                // second pass: count verts FAR from the mean (>150u) = outliers that would streak
+                int outl=0; for(uint64_t vi=0;vi<nv;vi++){ const uint8_t*d=(const uint8_t*)sb->data+off+vi*stride; float raw[3];
+                    if(fmt==11){ const uint16_t*u=(const uint16_t*)d; raw[0]=u[0]/65535.0f;raw[1]=u[1]/65535.0f;raw[2]=u[2]/65535.0f; }
+                    else { const int16_t*s=(const int16_t*)d; raw[0]=s[0]/32767.0f;raw[1]=s[1]/32767.0f;raw[2]=s[2]/32767.0f; }
+                    float dx=raw[0]*c1[0]+c1[4]-med[0], dy=raw[1]*c1[1]+c1[5]-med[1], dz=raw[2]*c1[2]+c1[6]-med[2];
+                    if(dx*dx+dy*dy+dz*dz > 150.0f*150.0f) outl++; }
+                char m2[280]; int k2=snprintf(m2,sizeof m2,"  [rangedump] fmt=%u nv=%llu stride=%u span=[%.0f %.0f %.0f] mean=[%.0f %.0f %.0f] cb1scale=[%.0f %.0f %.0f] outliers=%d/%llu\n",
+                    fmt,(unsigned long long)nv,stride,span[0],span[1],span[2],med[0],med[1],med[2],c1[0],c1[1],c1[2],outl,(unsigned long long)nv); (void)!write(2,m2,k2); } } }
     }
     g_d3dgl_phase="draw";
     unsigned mode=d3dgl_topo(g_d3dst.topo);
