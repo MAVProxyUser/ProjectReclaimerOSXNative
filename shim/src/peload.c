@@ -4048,6 +4048,21 @@ static void d3dgl_draw(uint32_t vcount,int indexed,uint32_t instcount){
     unsigned n=vcount? vcount : 3;   // SV_VertexID fullscreen passes often issue 3/4 verts
     if(n>8000000) n=8000000;         // guard against a garbage count driving a wild GL read
     if(instcount>65536) instcount=65536;
+    // PELOAD_D3DGL_SKIPWIDE=<u>: skip draws whose DECOMPRESSED vertex span exceeds <u> units (default 400).
+    // Diagnostic for the streaks: the whole-map terrain meshes (verts spread across the full [-500,500] box)
+    // are the streak source; the clean local sections (span ~100) are the ground. Skipping the wide meshes
+    // isolates whether they are what streaks (and whether the ground alone renders cleanly).
+    if(getenv("PELOAD_D3DGL_SKIPWIDE") && getenv("PELOAD_D3DGL_DECOMP") && g_d3dst.il && g_d3dst.il->nelem){
+        float thr=atof(getenv("PELOAD_D3DGL_SKIPWIDE")); if(thr<1)thr=400.0f;
+        int slot0=g_d3dst.il->elem[0].slot<8?g_d3dst.il->elem[0].slot:0; D3DObj*sb=g_d3dst.vb[slot0];
+        uint32_t st2=g_d3dst.vstride[slot0]; uint32_t vo2=g_d3dst.voff[slot0]+g_d3dst.il->elem[0].off; uint32_t f2=g_d3dst.il->elem[0].fmt;
+        if(sb&&sb->data&&st2>=8&&(f2==11||f2==13)){ const float*c1=(const float*)g_syn_cb1_buf;
+            float mn[3]={1e30f,1e30f,1e30f},mx[3]={-1e30f,-1e30f,-1e30f}; uint64_t nv=sb->size/st2; if(nv>128)nv=128;
+            for(uint64_t vi=0;vi<nv;vi++){ const uint8_t*d=(const uint8_t*)sb->data+vo2+vi*st2; float raw[3];
+                if(f2==11){ const uint16_t*u=(const uint16_t*)d; raw[0]=u[0]/65535.0f;raw[1]=u[1]/65535.0f;raw[2]=u[2]/65535.0f; }
+                else { const int16_t*s=(const int16_t*)d; raw[0]=s[0]/32767.0f;raw[1]=s[1]/32767.0f;raw[2]=s[2]/32767.0f; }
+                for(int c=0;c<3;c++){ float dz=raw[c]*c1[c]+c1[4+c]; if(dz<mn[c])mn[c]=dz; if(dz>mx[c])mx[c]=dz; } }
+            if((mx[0]-mn[0])>thr||(mx[1]-mn[1])>thr||(mx[2]-mn[2])>thr) n=0; } }
     if(indexed && g_d3dst.ib && g_d3dst.ib->data && g_d3dst.ib->size){
         D3DObj*ib=g_d3dst.ib; if(!ib->glbuf){ G.GenBuffers(1,&ib->glbuf); ib->gl_dirty=1; }
         if(ib->gl_dirty){ long cap=(long)ib->size; if(cap>(96<<20))cap=(96<<20); G.BindBuffer(GLE_ELEM,ib->glbuf); G.BufferData(GLE_ELEM,cap,ib->data,GLE_STREAM); ib->gl_dirty=0; }
