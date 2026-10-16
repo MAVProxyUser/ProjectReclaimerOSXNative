@@ -22,12 +22,15 @@ client and MCC's `halo3.dll` directly and implements the Windows APIs they use, 
 On an M4, it reaches the match about 12 s after launch and averages ~116 fps (roughly 50–200 fps
 depending on the scene). The window title shows the elapsed time, the load time and the live frame rate.
 
+Reclaimer's own frontend menu (Halo 3 menu scene with Server Browser, Campaign, Host Game, Customize,
+Settings, Credits) also renders and responds to the mouse: `RECLAIMER_MENU=1 bash shim/play.sh`.
+
 Known gaps:
-- **Scoreboard names.** Holding Back/Tab shows the scoreboard bars without names or scores. Reclaimer
-  draws those itself, and only when the game runs under its own menu ("menu runtime"). The play
-  script skips the menu, so that drawing never happens.
-- **Reclaimer's frontend menu.** Launching without the skip boots Reclaimer's menu: the Halo 3 menu
-  scene renders, but its UI layer (egui) is still blank, so the menu can't be used yet.
+- **Starting a match from the menu** (Host Game → Start Game) hangs on the loading screen. Use the
+  default `bash shim/play.sh`, which goes straight into a Guardian match.
+- **Scoreboard names.** Holding Back/Tab in a match shows the scoreboard bars without names or scores.
+  Reclaimer draws those with its menu UI, which only runs when the match was started from the menu
+  (see above).
 - **No MCC pause menu** (by design in standalone mode); F1 releases the mouse.
 - **Frame-rate ceiling.** Performance is bound by OpenGL-on-Metal's per-draw-call cost.
 
@@ -107,6 +110,7 @@ Options go in front of the command, e.g. `PELOAD_INVERT_PITCH=0 bash shim/play.s
 | `PELOAD_AUDIO=0` | no sound |
 | `PELOAD_VSYNC=1` | vsync the window (off by default) |
 | `RECLAIMER_EXE=<path>` | use the client exe at this path |
+| `RECLAIMER_MENU=1` | start in Reclaimer's frontend menu instead of a match |
 
 The window can be resized and made full screen. Developer and diagnostic switches are documented in
 `CLAUDE.md` and in the source.

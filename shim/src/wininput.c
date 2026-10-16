@@ -203,7 +203,7 @@ static void* wi_test_thread(void*a){ (void)a;
         e=strchr(e,';'); if(e) e++; } }
     // PELOAD_KBM_TEST_HOLD=<mac keycode hex>:<seconds> -- then hold that key (e.g. 30:3 = Tab for 3 s)
     { const char*e=getenv("PELOAD_KBM_TEST_HOLD"); if(e){ unsigned kc=(unsigned)strtoul(e,0,16); double secs=strchr(e,':')?atof(strchr(e,':')+1):2.0;
-        usleep(500000); wi_key((uint16_t)kc,1,0); k=snprintf(m,sizeof m,"  [kbm-test] key 0x%x down\n",kc); (void)!write(2,m,k);
+        const char*dl=getenv("PELOAD_KBM_TEST_HOLD_DELAY"); usleep(dl?(useconds_t)(atof(dl)*1e6):500000); wi_key((uint16_t)kc,1,0); k=snprintf(m,sizeof m,"  [kbm-test] key 0x%x down\n",kc); (void)!write(2,m,k);
         usleep((useconds_t)(secs*1e6)); wi_key((uint16_t)kc,0,0); k=snprintf(m,sizeof m,"  [kbm-test] key 0x%x up\n",kc); (void)!write(2,m,k); } }
     return 0; }
 static void wi_test_start(void){ if(getenv("PELOAD_KBM_TEST")){ pthread_t t; pthread_create(&t,0,wi_test_thread,0); } }
