@@ -571,8 +571,11 @@ static int pipe_read(void*h,void*buf,uint32_t n,uint32_t*rd);        // fwd
 static int pipe_close(void*h);                                       // fwd
 static int pipe_name_is(const char*s);                               // fwd
 static void* pipe_client_open(const char*narrow);                    // fwd
+static double g_gameplay_t0;   // monotonic seconds when the client logged "gameplay presentation ready" (0 = not yet)
+static double mono_s(void){ struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t); return t.tv_sec+t.tv_nsec*1e-9; }
 static int    MSABI i_WriteFile(void *h, const void *buf, uint32_t n, uint32_t *wr, void *ov){
     (void)ov; intptr_t hv=(intptr_t)h;
+    if(!g_gameplay_t0 && buf && n>20 && memmem(buf,n,"gameplay presentation ready",27)) g_gameplay_t0=mono_s();
     if(pipe_is(hv)) return pipe_write(h,buf,n,wr);
     int fd = (hv==2)?1 : (hv==3)?2 : (hv>=0x1000)?(int)(hv-0x1000) : -1;
     // PELOAD_CAP_ADV: dump the exact bytes written to a local-server advertisement file
@@ -2551,10 +2554,17 @@ static void*  MSABI i_LoadCursorW(void*h,const void*n){ (void)h;(void)n; return 
 static void*  MSABI i_LoadImageW(void*h,const void*n,uint32_t t,int cx,int cy,uint32_t f){ (void)h;(void)n;(void)t;(void)cx;(void)cy;(void)f; return (void*)0x1C03; }
 static void*  MSABI i_GetStockObject(int i){ (void)i; return (void*)0x1C04; }
 static void* g_last_hwnd;   // most-recently created real window (reported as foreground/active)
+static void* g_shown_hwnd;  // most-recently SHOWN top-level window = the game window the client compares
+                            // GetForegroundWindow() against before polling XInput / reading input
+static void* fg_hwnd(void){ return g_shown_hwnd?g_shown_hwnd:(g_last_hwnd?g_last_hwnd:(void*)0x4857); }
 static void*  MSABI i_CreateWindowExW(uint32_t ex,const void*cls,const void*name,uint32_t style,int x,int y,int w,int h,void*parent,void*menu,void*inst,void*param){
     WWin* win=calloc(1,sizeof *win); if(!win) return (void*)0x4857;
     win->magic=WWIN_MAGIC; win->wndproc=wcls_find(cls); win->x=x; win->y=y; win->w=w>0?w:1280; win->h=h>0?h:720;
     g_last_hwnd=win;
+    if((style&0x10000000/*WS_VISIBLE*/) && !(style&0x40000000/*WS_CHILD*/)) g_shown_hwnd=win;
+    { char t[96]={0}; const uint16_t*wn=name; for(int i=0;wn&&wn[i]&&i<95;i++) t[i]=(char)(wn[i]&0x7f);
+      char c[96]={0}; if((uintptr_t)cls>0x10000){ const uint16_t*wc=cls; for(int i=0;wc[i]&&i<95;i++) c[i]=(char)(wc[i]&0x7f); } else snprintf(c,sizeof c,"#atom%u",(unsigned)(uintptr_t)cls);
+      char m[300]; int k=snprintf(m,sizeof m,"  [CreateWindowExW] hwnd=%p class=%s title=\"%s\" style=0x%x ex=0x%x parent=%p %dx%d\n",(void*)win,c,t,style,ex,parent,w,h); (void)!write(2,m,k); }
     if(win->wndproc){
         uint8_t cs[80]; memset(cs,0,sizeof cs);  // CREATESTRUCTW
         *(const void**)(cs+0)=param; *(void**)(cs+8)=inst; *(void**)(cs+16)=menu; *(void**)(cs+24)=parent;
@@ -2566,7 +2576,7 @@ static void*  MSABI i_CreateWindowExW(uint32_t ex,const void*cls,const void*name
     ws("  [CreateWindowExW] real HWND\n"); return win; }
 static int    MSABI i_DestroyWindow(void*h){ (void)h; return 1; }
 static int64_t MSABI i_DefWindowProcW(void*h,uint32_t m,uint64_t wp,int64_t lp){ (void)h;(void)wp;(void)lp; if(m==0x0081/*WM_NCCREATE*/) return 1; return 0; }
-static int    MSABI i_ShowWindow(void*h,int c){ (void)h;(void)c; return 1; }
+static int    MSABI i_ShowWindow(void*h,int c){ if(h && c && ((WWin*)h)->magic==WWIN_MAGIC){ g_shown_hwnd=h; } { char m[80]; int k=snprintf(m,sizeof m,"  [ShowWindow] hwnd=%p cmd=%d\n",h,c); (void)!write(2,m,k); } return 1; }
 static int    MSABI i_UpdateWindow(void*h){ (void)h; return 1; }
 // The engine's present loop calls MsgWaitForMultipleObjectsEx and only keeps
 // looping (rendering + presenting each frame) when it returns WAIT_TIMEOUT
@@ -3067,11 +3077,83 @@ static void gdi_present_main(void){
 static int gdi_has_main(void){ return g_gdi_mainsurf && g_gdi_mainsurf->magic==GDI_MAGIC && g_gdi_mainsurf->bits ? 1:0; }
 static int    MSABI i_InvalidateRect(void*h,const void*r,int e){ (void)h;(void)r;(void)e; return 1; }
 static int    MSABI i_SetWindowTextW(void*h,const uint16_t*t){ (void)h;(void)t; return 1; }
-static void*  MSABI i_GetForegroundWindow(void){ extern void* g_last_hwnd; return g_last_hwnd?g_last_hwnd:(void*)0x4857; }
+// ---- XInput (xinput1_4.dll) -> macOS GameController.framework + scripted sticks -----------------
+// The client polls XInputGetState (exe sub_1406108a0) only while GetForegroundWindow()==its game window.
+// Pad state comes from the real controller (GCController.extendedGamepad; needs the main run loop, which
+// cocoa_pump services), optionally overridden by PELOAD_INPUT_SCRIPT for automated walking tests:
+//   PELOAD_INPUT_SCRIPT="secs:lx,ly,rx,ry[,buttonsHex][;...]"  (axes -1..1; "walk" = built-in turn/walk loop)
+//   starts PELOAD_INPUT_DELAY s (default 3) after "gameplay presentation ready"; PELOAD_INPUT_LOOP repeats it.
+//   PELOAD_TRACE_INPUT logs pad state changes.
+#include <objc/runtime.h>
+#include <objc/message.h>
+typedef struct { uint16_t buttons; uint8_t lt, rt; int16_t lx, ly, rx, ry; } XPad;
+static int g_gc_init; static Class g_gccls;
+static void gc_init(void){ if(g_gc_init) return; g_gc_init=1;
+    dlopen("/System/Library/Frameworks/GameController.framework/GameController",RTLD_LAZY);
+    g_gccls=objc_getClass("GCController"); if(!g_gccls) return;
+    SEL sb=sel_registerName("setShouldMonitorBackgroundEvents:");
+    if(class_getClassMethod(g_gccls,sb)) ((void(*)(id,SEL,signed char))objc_msgSend)((id)g_gccls,sb,1); }   // input even when not key window
+static id gcm(id o,const char*sel){ return o?((id(*)(id,SEL))objc_msgSend)(o,sel_registerName(sel)):(id)0; }
+static float gcv(id o){ return o?((float(*)(id,SEL))objc_msgSend)(o,sel_registerName("value")):0.0f; }
+static int gcp(id o){ return o?(int)((signed char(*)(id,SEL))objc_msgSend)(o,sel_registerName("isPressed")):0; }
+static int16_t ax16(float v){ if(v>1)v=1; if(v<-1)v=-1; return (int16_t)(v*32767.0f); }
+static int gc_read(uint32_t idx,XPad*p){
+    gc_init(); if(!g_gccls) return 0;
+    id arr=gcm((id)g_gccls,"controllers"); long n=arr?((long(*)(id,SEL))objc_msgSend)(arr,sel_registerName("count")):0;
+    if((long)idx>=n) return 0;
+    id c=((id(*)(id,SEL,unsigned long))objc_msgSend)(arr,sel_registerName("objectAtIndex:"),idx); id g=gcm(c,"extendedGamepad"); if(!g) return 0;
+    id ls=gcm(g,"leftThumbstick"), rs=gcm(g,"rightThumbstick"), dp=gcm(g,"dpad");
+    p->lx=ax16(gcv(gcm(ls,"xAxis"))); p->ly=ax16(gcv(gcm(ls,"yAxis"))); p->rx=ax16(gcv(gcm(rs,"xAxis"))); p->ry=ax16(gcv(gcm(rs,"yAxis")));
+    // inverted look (pitch) by default -- the player's preference; PELOAD_INVERT_PITCH=0 restores normal
+    { static int inv=-1; if(inv<0){ const char*e=getenv("PELOAD_INVERT_PITCH"); inv=!(e&&e[0]=='0'); } if(inv) p->ry=(int16_t)(p->ry==-32768?32767:-p->ry); }
+    p->lt=(uint8_t)(gcv(gcm(g,"leftTrigger"))*255.0f); p->rt=(uint8_t)(gcv(gcm(g,"rightTrigger"))*255.0f);
+    uint16_t b=0;
+    if(gcp(gcm(dp,"up")))b|=0x0001; if(gcp(gcm(dp,"down")))b|=0x0002; if(gcp(gcm(dp,"left")))b|=0x0004; if(gcp(gcm(dp,"right")))b|=0x0008;
+    if(gcp(gcm(g,"buttonMenu")))b|=0x0010; if(gcp(gcm(g,"buttonOptions")))b|=0x0020;
+    if(gcp(gcm(g,"leftThumbstickButton")))b|=0x0040; if(gcp(gcm(g,"rightThumbstickButton")))b|=0x0080;
+    if(gcp(gcm(g,"leftShoulder")))b|=0x0100; if(gcp(gcm(g,"rightShoulder")))b|=0x0200;
+    if(gcp(gcm(g,"buttonA")))b|=0x1000; if(gcp(gcm(g,"buttonB")))b|=0x2000; if(gcp(gcm(g,"buttonX")))b|=0x4000; if(gcp(gcm(g,"buttonY")))b|=0x8000;
+    p->buttons=b; return 1; }
+// scripted override for pad 0: returns 1 and fills *p while a segment is active
+static int input_script(XPad*p){
+    static int parsed; static int nseg; static struct { double dur; float lx,ly,rx,ry; uint16_t b; } seg[64]; static double total;
+    if(!parsed){ parsed=1; const char*e=getenv("PELOAD_INPUT_SCRIPT"); if(!e) return 0;
+        // built-in: settle, turn right, walk, turn left, walk
+        if(!strcmp(e,"walk")) e="1:0,0,0,0;1.2:0,0,0.8,0;2.5:0,1,0,0;1.2:0,0,-0.8,0;2.5:0,1,0,0;1:0,0,0,0";
+        char buf[2048]; snprintf(buf,sizeof buf,"%s",e);
+        for(char*sv=0,*t=strtok_r(buf,";",&sv); t && nseg<64; t=strtok_r(0,";",&sv)){ unsigned bb=0;
+            if(sscanf(t,"%lf:%f,%f,%f,%f,%x",&seg[nseg].dur,&seg[nseg].lx,&seg[nseg].ly,&seg[nseg].rx,&seg[nseg].ry,&bb)>=5){ seg[nseg].b=(uint16_t)bb; total+=seg[nseg].dur; nseg++; } }
+        char m[120]; int k=snprintf(m,sizeof m,"  [input] script: %d segments, %.1fs%s\n",nseg,total,getenv("PELOAD_INPUT_LOOP")?" (loop)":""); (void)!write(2,m,k); }
+    if(!nseg || !g_gameplay_t0) return 0;
+    double delay=getenv("PELOAD_INPUT_DELAY")?atof(getenv("PELOAD_INPUT_DELAY")):3.0;
+    double t=mono_s()-g_gameplay_t0-delay; if(t<0) return 0;
+    if(getenv("PELOAD_INPUT_LOOP") && total>0) t=fmod(t,total); else if(t>=total) return 0;
+    for(int i=0;i<nseg;i++){ if(t<seg[i].dur){ p->lx=ax16(seg[i].lx); p->ly=ax16(seg[i].ly); p->rx=ax16(seg[i].rx); p->ry=ax16(seg[i].ry); p->buttons=seg[i].b; p->lt=p->rt=0;
+            static int last=-1; if(i!=last){ last=i; char m[120]; int k=snprintf(m,sizeof m,"  [input] script segment %d: L=(%.2f,%.2f) R=(%.2f,%.2f) b=%x\n",i,seg[i].lx,seg[i].ly,seg[i].rx,seg[i].ry,seg[i].b); (void)!write(2,m,k); }
+            return 1; } t-=seg[i].dur; }
+    return 0; }
+static uint32_t MSABI i_XInputGetState(uint32_t idx,void*st){
+    if(idx>3||!st) return 160; /*ERROR_BAD_ARGUMENTS*/
+    static uint32_t pkt[4]; static XPad last[4]; static int logged;
+    XPad p; memset(&p,0,sizeof p); int con=gc_read(idx,&p);
+    if(idx==0 && input_script(&p)) con=1;
+    if(!logged){ logged=1; char m[96]; int k=snprintf(m,sizeof m,"  [input] XInputGetState first call (pad0 %s)\n",con?"connected":"absent"); (void)!write(2,m,k); }
+    if(!con) return 1167; /*ERROR_DEVICE_NOT_CONNECTED*/
+    if(memcmp(&p,&last[idx],sizeof p)){ last[idx]=p; pkt[idx]++;
+        if(getenv("PELOAD_TRACE_INPUT")){ char m[160]; int k=snprintf(m,sizeof m,"  [input] pad%u pkt=%u b=%04x lt=%u rt=%u L=(%d,%d) R=(%d,%d)\n",idx,pkt[idx],p.buttons,p.lt,p.rt,p.lx,p.ly,p.rx,p.ry); (void)!write(2,m,k); } }
+    uint8_t*o=st; *(uint32_t*)o=pkt[idx]; memcpy(o+4,&p.buttons,2); o[6]=p.lt; o[7]=p.rt;
+    memcpy(o+8,&p.lx,2); memcpy(o+10,&p.ly,2); memcpy(o+12,&p.rx,2); memcpy(o+14,&p.ry,2);
+    return 0; }
+static uint32_t MSABI i_XInputSetState(uint32_t idx,void*vib){ (void)vib; XPad p; return (idx<4 && (gc_read(idx,&p)||idx==0))?0:1167; }
+static uint32_t MSABI i_XInputGetCapabilities(uint32_t idx,uint32_t fl,void*cap){ (void)fl; XPad p; if(idx>3) return 160;
+    if(!gc_read(idx,&p) && !(idx==0&&getenv("PELOAD_INPUT_SCRIPT"))) return 1167;
+    if(cap){ memset(cap,0,20); uint8_t*c=cap; c[0]=1/*GAMEPAD*/; c[1]=1/*SUBTYPE_GAMEPAD*/; *(uint16_t*)(c+4)=0xF3FF; c[6]=c[7]=255; *(int16_t*)(c+8)=*(int16_t*)(c+10)=*(int16_t*)(c+12)=*(int16_t*)(c+14)=(int16_t)0xFFC0; } return 0; }
+static void MSABI i_XInputEnable(int en){ (void)en; }
+static void*  MSABI i_GetForegroundWindow(void){ return fg_hwnd(); }
 static int    MSABI i_SetForegroundWindow(void*h){ (void)h; return 1; }
 static int    MSABI i_IsWindow(void*h){ return h?1:0; }
 static int    MSABI i_IsWindowVisible(void*h){ (void)h; return 1; }
-static void*  MSABI i_GetActiveWindow(void){ extern void* g_last_hwnd; return g_last_hwnd?g_last_hwnd:(void*)0x4857; }
+static void*  MSABI i_GetActiveWindow(void){ return fg_hwnd(); }
 // ---- OpenGL bridge: wgl -> CGL, and opengl32!gl* -> macOS OpenGL.framework.
 // The engine's menu renders via OpenGL; macOS has native GL 4.1 (CGL).
 #include <OpenGL/OpenGL.h>
@@ -6959,7 +7041,7 @@ static int MSABI i_SetFileTime(void*h,const uint64_t*cre,const uint64_t*acc,cons
     futimes(fd,tv); return 1; }
 // WINDOW / DISPLAY
 static void* MSABI i_GetParent(void*h){ (void)h; return 0; }           // our windows are top-level
-static void* MSABI i_GetFocus(void){ extern void* g_last_hwnd; return g_last_hwnd?g_last_hwnd:(void*)0x4857; }   // the one logical window
+static void* MSABI i_GetFocus(void){ return fg_hwnd(); }   // the one logical window
 static int MSABI i_RedrawWindow(void*h,const void*rc,void*rgn,uint32_t fl){ (void)h;(void)rc;(void)rgn;(void)fl; return 1; } // we present on our own thread
 static int MSABI i_EnumWindows(void*proc,int64_t lparam){ extern void* g_last_hwnd; if(!proc) return 0; int(__attribute__((ms_abi))*cb)(void*,int64_t)=proc; cb(g_last_hwnd?g_last_hwnd:(void*)0x4857,lparam); return 1; }
 static int MSABI i_EnumDisplaySettingsW(const uint16_t*dev,uint32_t mode,uint8_t*dm){ (void)dev;(void)mode; if(!dm) return 0;
@@ -7417,6 +7499,8 @@ static void *resolve_impl(const char *fn){
         {"InvalidateRect",(void*)i_InvalidateRect},
         {"SetWindowTextW",(void*)i_SetWindowTextW},
         {"GetForegroundWindow",(void*)i_GetForegroundWindow},
+        {"XInputGetState",(void*)i_XInputGetState},{"XInputSetState",(void*)i_XInputSetState},
+        {"XInputGetCapabilities",(void*)i_XInputGetCapabilities},{"XInputEnable",(void*)i_XInputEnable},
         {"SetForegroundWindow",(void*)i_SetForegroundWindow},
         {"IsWindow",(void*)i_IsWindow},
         {"IsWindowVisible",(void*)i_IsWindowVisible},
