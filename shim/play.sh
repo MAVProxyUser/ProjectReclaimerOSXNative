@@ -3,6 +3,8 @@
 # Controller: any GameController-supported pad (Xbox, DualSense, ...) via the shim's XInput.
 #   PELOAD_INVERT_PITCH=0      normal (non-inverted) look; inverted is the default
 #   PELOAD_INPUT_SCRIPT=walk   scripted turn/walk test (PELOAD_INPUT_LOOP=1 repeats it)
+#   PELOAD_AUDIO=0             silence (game audio plays through CoreAudio by default)
+# The window title shows the engine frame rate, draw calls per frame and frame time.
 # Extra env can be passed in front:  PELOAD_INVERT_PITCH=0 bash shim/play.sh
 # Engine/worker output goes to /tmp/reclaimer_play.log. Quit by closing the window or Ctrl-C.
 cd "$(dirname "$0")/.."

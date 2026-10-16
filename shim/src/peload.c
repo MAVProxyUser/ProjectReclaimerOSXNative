@@ -1915,7 +1915,7 @@ static int MSABI i_CreateFX(GUID_*clsid,void**pp,const void*init,uint32_t sz){ (
 static int MSABI i_XAudio2Create_real(void**pp,uint32_t flags,uint32_t proc);                 // xaudio.c (CoreAudio)
 static int MSABI i_X3DAudioInitialize(uint32_t mask,float sos,uint8_t*h);
 static void MSABI i_X3DAudioCalculate(const uint8_t*h,const float*L,const uint8_t*E,uint32_t fl,uint8_t*dsp);
-static int xa_real(void){ static int r=-1; if(r<0){ const char*e=getenv("PELOAD_AUDIO"); r = e ? (e[0]!='0') : 0; } return r; }
+static int xa_real(void){ static int r=-1; if(r<0){ const char*e=getenv("PELOAD_AUDIO"); r = e ? (e[0]!='0') : 1; } return r; }   // default ON; PELOAD_AUDIO=0 = silent stub
 static void* xa_resolve(uint32_t ord, const char* fn){
     if(xa_real()){   // PELOAD_AUDIO: real XAudio2 on CoreAudio (xaudio.c)
         if(ord==1 || (fn&&!strcmp(fn,"XAudio2Create"))) return (void*)i_XAudio2Create_real;
