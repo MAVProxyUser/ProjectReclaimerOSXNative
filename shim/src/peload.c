@@ -1258,6 +1258,8 @@ static struct { unsigned exec, novsps, noglsl, noprog, ringfail, wraps, disp, co
 static int  MSABI ctx_Map(void*t,void*res,uint32_t sub,uint32_t type,uint32_t fl,void*pM){ (void)t;(void)sub;(void)type;(void)fl;
     g_fs.maps++; if(type==1||type==3) g_fs.mapread++;
     cs_wait_res((D3DObj*)res);
+    if(getenv("PELOAD_TRACE_TEXUPD") && res && ((D3DObj*)res)->kind>=2 && ((D3DObj*)res)->w){ D3DObj*q=res; extern double g_gameplay_t0; uint64_t ra=(uint64_t)__builtin_return_address(0);
+        char m[200]; int k=snprintf(m,sizeof m,"  [texupd] t=%.2f Map %p %ux%u f%u sub=%u type=%u ra=0x%llx\n",g_gameplay_t0?mono_s()-g_gameplay_t0:-1.0,(void*)q,q->w,q->h,q->fmt,sub,type,(unsigned long long)(ra>=0x180000000ULL&&ra<0x187000000ULL?ra-0x180000000ULL:ra)); (void)!write(2,m,k); }
     D3DObj*o=res; if(o){ o->gl_dirty=1; o->rvalid=0; o->ver++; if(o->is_cb) o->cb_upd=g_cb_tick; }   // mapped for write -> re-upload + mark CB fresh
     extern D3DObj* g_last_smallcb; if(o && o->is_cb && o->size>=32 && o->size<=96) g_last_smallcb=o;  // candidate decompress cb1
     if(o && getenv("PELOAD_TRACE_TEXPATH") && o->w>=512 && o->h>=512 && ((o->fmt>=70&&o->fmt<=84)||(o->fmt>=94&&o->fmt<=99))){ char m[128]; int k=snprintf(m,sizeof m,"  [texpath] MAP sub=%u type=%u %ux%u f%u obj=%p\n",sub,type,o->w,o->h,o->fmt,(void*)o); (void)!write(2,m,k); }
@@ -1322,6 +1324,8 @@ static void MSABI ctx_Draw(void*t,uint32_t n,uint32_t s){ (void)t;(void)s; d3dtr
 static void MSABI ctx_UpdateSubresource(void*t,void*res,uint32_t sub,const void*box,const void*src,uint32_t srp,uint32_t sdp){
     (void)t; D3DObj*o=res; if(!o||!o->data||!src) return;
     cs_wait_res(o);
+    if(getenv("PELOAD_TRACE_TEXUPD") && o->kind>=2 && o->w){ extern double g_gameplay_t0; const uint32_t*bx=box; uint64_t ra=(uint64_t)__builtin_return_address(0);
+        char m[220]; int k=snprintf(m,sizeof m,"  [texupd] t=%.2f UpdateSubresource %p %ux%u f%u sub=%u box=%d,%d-%d,%d ra=0x%llx\n",g_gameplay_t0?mono_s()-g_gameplay_t0:-1.0,(void*)o,o->w,o->h,o->fmt,sub,bx?(int)bx[0]:-1,bx?(int)bx[1]:-1,bx?(int)bx[3]:-1,bx?(int)bx[4]:-1,(unsigned long long)(ra>=0x180000000ULL&&ra<0x187000000ULL?ra-0x180000000ULL:ra)); (void)!write(2,m,k); }
     o->gl_dirty=1; o->rvalid=0; o->ver++; if(o->is_cb) o->cb_upd=g_cb_tick;
     { extern D3DObj* g_last_smallcb; if(o->is_cb && o->size>=32 && o->size<=96) g_last_smallcb=o; }
     // MUST honor pDstBox: a partial (box) update supplies a source sized only for the box. Reading the
@@ -5540,6 +5544,20 @@ static void d3dgl_draw_impl(uint32_t vcount,int indexed,uint32_t instcount,uint3
     double fd0=(mp && !mp->drawn && getenv("PELOAD_D3DGL_PROGTIME"))?mono_s():0;
     int covq=covq_begin(vs,ps,vcount,instcount);
     wd_rec(vs,ps,vcount,instcount,mp);
+    { const char*tp=getenv("PELOAD_TRACE_PSH"); if(tp && strstr(tp,"x")==0){ char hx[20]; snprintf(hx,sizeof hx,"%016llx",(unsigned long long)ps->bchash);
+        if(strstr(tp,hx)){ extern double g_gameplay_t0; static unsigned long lastf; static int cnt; extern unsigned long g_eng_present_no_x;
+          if(g_eng_present_no_x!=lastf){ if(cnt){ char m[120]; int k=snprintf(m,sizeof m,"  [psh] f%lu t=%.2f %d draws\n",lastf,g_gameplay_t0?mono_s()-g_gameplay_t0:-1.0,cnt); (void)!write(2,m,k); } cnt=0; lastf=g_eng_present_no_x; }
+          cnt++; } } }
+    // PELOAD_D3DGL_DUMPTEX_PS=<pshash>: once, read back the PS's t0 (mip 0, RGBA8) to ~/reclaimer_pstex_<hash>.bmp
+    { const char*dp=getenv("PELOAD_D3DGL_DUMPTEX_PS"); static int dumped;
+      if(dp && !dumped && ps->bchash==strtoull(dp,0,16)){ D3DObj*x=g_d3dst.psrv[0]; D3DObj*xr=(x&&x->data&&x->vkind)?(D3DObj*)x->data:x;
+        static void(*gti)(unsigned,int,unsigned,unsigned,void*); if(!gti) gti=dlsym(RTLD_DEFAULT,"glGetTexImage");
+        if(xr && xr->gltex && xr->w && xr->h && xr->w<=4096 && xr->h<=4096 && gti){ dumped=1; unsigned char*px=calloc(1,(size_t)xr->w*xr->h*4);
+            if(px){ G.BindTexture(xr->gltarget?xr->gltarget:GLE_TEX2D,xr->gltex); TEXCACHE_INVALIDATE(); gti(xr->gltarget?xr->gltarget:GLE_TEX2D,0,GLE_RGBA,GLE_UBYTE,px);
+                const char*h=getenv("HOME"); char pth[300]; snprintf(pth,sizeof pth,"%s/reclaimer_pstex_%s.bmp",h?h:"/tmp",dp); bmp_write_rgba(pth,(int)xr->w,(int)xr->h,px);
+                for(size_t q=0;q<(size_t)xr->w*xr->h;q++){ unsigned char a=px[q*4+3]; px[q*4]=px[q*4+1]=px[q*4+2]=a; }
+                snprintf(pth,sizeof pth,"%s/reclaimer_pstex_%s_alpha.bmp",h?h:"/tmp",dp); bmp_write_rgba(pth,(int)xr->w,(int)xr->h,px); free(px);
+                char m[340]; int k=snprintf(m,sizeof m,"  [dumptex] %s t0 %ux%u f%u -> %s\n",dp,xr->w,xr->h,xr->fmt,pth); (void)!write(2,m,k); } } } }
     // PELOAD_D3DGL_FSLOG: log every full-screen-ish pass (<=6 verts, 1 instance) with its PS hash, target,
     // blend state and a checksum of the PS constants it reads (finds a stray one-frame overlay).
     { static int fl=-1; if(fl<0) fl=getenv("PELOAD_D3DGL_FSLOG")?1:0;
