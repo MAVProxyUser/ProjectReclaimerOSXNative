@@ -4691,8 +4691,9 @@ static void gs_depthrange(void(*dr)(double,double),double n,double f){ gs_ok(); 
 static void gs_polyofs(void(*po)(float,float),float s,float b){ gs_ok(); if(g_gs.po[0]==s&&g_gs.po[1]==b) return; g_gs.po[0]=s; g_gs.po[1]=b; po(s,b); }
 static void gs_depthfunc(unsigned f){ gs_ok(); if(g_gs.dfunc==f) return; g_gs.dfunc=f; G.DepthFunc(f); }
 static void gs_depthmask(unsigned char m){ gs_ok(); if(g_gs.dmask==(int)m) return; g_gs.dmask=m; G.DepthMask(m); }
+static int g_dbg_nodepth;   // PELOAD_TRACE_HASH_NODEPTH: draws of the traced shader hashes ignore depth
 static void d3dgl_apply_depth(void){
-    D3DObj*d=g_d3dst.depth; int hasds=g_d3dst.dsv!=0 && !getenv("PELOAD_D3DGL_NODEPTH");
+    D3DObj*d=g_d3dst.depth; int hasds=g_d3dst.dsv!=0 && !getenv("PELOAD_D3DGL_NODEPTH") && !g_dbg_nodepth;
     uint32_t de=1,dw=1,df=2,se=0,rm=0xff,wm=0xff; const uint32_t*fr=0,*bk=0;
     if(d && d->stkind==2){ de=d->sd[0]; dw=d->sd[1]; df=d->sd[2]; se=d->sd[3]; rm=d->sd[4]&0xff; wm=(d->sd[4]>>8)&0xff; fr=&d->sd[5]; bk=&d->sd[9]; }
     if(hasds && de){ gs_cap(0x0B71,1); if(G.DepthFunc) gs_depthfunc(d3d_cmp_gl(df)); if(G.DepthMask) gs_depthmask(dw?1:0); }
@@ -5074,6 +5075,22 @@ static char* d3dgl_augment(const char*src,uint64_t add,int as_out){
     else { memcpy(out+len,rest,restlen); len+=restlen; }
     out[len]=0; return out;
 }
+// Apple's GL-on-Metal gives a vertex shader 64 output components (16 vec4) and gl_Position etc. take the top
+// slots: an explicit varying location >= 14 fails to link ("slots starting at 14 unavailable" / "limit of 128
+// varying components exceeded"). Varying locations come from D3D semantics (d3dgl_sem_loc), so a pair can use
+// few varyings yet high locations -- Halo 3's water (TEXCOORD10/11 -> 14/15) never linked and drew nothing.
+// Such a pair gets its varyings renumbered 0..n-1 (same order on both sides; locations are what GL matches).
+static int d3dgl_varying_slots(void){ static int n=-1; if(n<0){ const char*e=getenv("PELOAD_D3DGL_VARYING_SLOTS"); n=e?atoi(e):14; if(n<1||n>64) n=64; } return n; }
+static char* d3dgl_relocate(const char*src,uint64_t U){
+    size_t n=strlen(src); char*out=malloc(n+64*4+1); if(!out) return 0; size_t o=0; const char*p=src;
+    while(*p){ const char*nl=strchr(p,'\n'); size_t ln=nl?(size_t)(nl-p+1):strlen(p);
+        const char*lo=strstr(p,"layout(location="); const char*kk=strstr(p," vec4 xfer");
+        if(lo&&kk&&lo<p+ln&&kk<p+ln&&(strstr(p,"out vec4 xfer")==kk-3||strstr(p,"in vec4 xfer")==kk-2)){
+            char*end; long L=strtol(lo+16,&end,10);
+            if(L>=0&&L<64){ int nl2=__builtin_popcountll(U&((1ULL<<L)-1)); size_t pre=(size_t)(lo+16-p); memcpy(out+o,p,pre); o+=pre;
+                o+=(size_t)sprintf(out+o,"%d",nl2); size_t rest=ln-(size_t)(end-p); memcpy(out+o,end,rest); o+=rest; p+=ln; if(!nl) break; continue; } }
+        memcpy(out+o,p,ln); o+=ln; p+=ln; if(!nl) break; }
+    out[o]=0; return out; }
 static unsigned d3dgl_compile(const char*src,unsigned glstage){
     unsigned sh=G.CreateShader(glstage); G.ShaderSource(sh,1,&src,0); G.CompileShader(sh);
     int ok=0; G.GetShaderiv(sh,GLE_CSTAT,&ok);
@@ -5156,7 +5173,12 @@ static MonoProg* d3dgl_monoprog(D3DObj*vs,D3DObj*ps){
         char*vfull=d3dgl_augment(vsrc, vadd, 1);   // VS gets the outputs the PS reads but the VS lacked
         char*pfull=d3dgl_augment(psrc, padd, 0);   // PS gets inputs for the VS outputs it didn't read
         if(!vfull||!pfull){ free(vfull); free(pfull); return m; }
-        unsigned vsh=d3dgl_shcache(vs,vadd,vfull,GLE_VS), psh=d3dgl_shcache(ps,padd,pfull,GLE_FS);
+        uint64_t U=vo|fi, vkey=vadd, pkey=padd;
+        if(U>>d3dgl_varying_slots()){ char*vr=d3dgl_relocate(vfull,U), *pr=d3dgl_relocate(pfull,U);   // compact this pair's varyings
+            if(vr&&pr){ free(vfull); free(pfull); vfull=vr; pfull=pr; vkey=vadd^(U*0x9E3779B97F4A7C15ull)^1; pkey=padd^(U*0x9E3779B97F4A7C15ull)^1;
+                static int nrel; if(nrel++<8 && g_d3dgl_trace){ char mm[120]; int k=snprintf(mm,sizeof mm,"  [d3dgl] varyings compacted for vs %016llx / ps %016llx (mask %llx)\n",(unsigned long long)vs->bchash,(unsigned long long)ps->bchash,(unsigned long long)U); (void)!write(2,mm,k); } }
+            else { free(vr); free(pr); } }
+        unsigned vsh=d3dgl_shcache(vs,vkey,vfull,GLE_VS), psh=d3dgl_shcache(ps,pkey,pfull,GLE_FS);
         free(m_vsrc_keep); free(m_psrc_keep); m_vsrc_keep=vfull; m_psrc_keep=pfull;   // block sizes parsed after link
         if(!vsh||!psh) return m;
         double pt2=mono_s();
@@ -5370,8 +5392,43 @@ static void d3dgl_draw(uint32_t vcount,int indexed,uint32_t instcount,uint32_t s
     // shader behind a "Caused GPU Hang" error) is logged with its VS/PS and both GLSL sources are dumped.
     static int sd=-1; if(sd<0) sd=getenv("PELOAD_D3DGL_SLOWDRAW")?atoi(getenv("PELOAD_D3DGL_SLOWDRAW")):0;
     uint64_t t0=sd?prof_now():0;
+    // PELOAD_TRACE_HASH=<hash,...>: log draws whose VS or PS bytecode hash is listed (state, targets, resources)
+    // and how many samples they actually wrote (own SAMPLES_PASSED query, read back synchronously).
+    static int nth=-1; static uint64_t th[16]; if(nth<0){ nth=0; const char*e=getenv("PELOAD_TRACE_HASH"); while(e&&*e&&nth<16){ th[nth++]=strtoull(e,(char**)&e,16); if(*e==',') e++; else break; } }
+    int traced=0; unsigned tq=0;
+    if(nth){ D3DObj*vs=g_d3dst.vs,*ps=g_d3dst.ps; for(int i=0;i<nth;i++) if((vs&&vs->bchash==th[i])||(ps&&ps->bchash==th[i])) traced=1;
+        static unsigned long tn; static double tsec; static int tcount; double now=mono_s(); if(now-tsec>3.0){ tsec=now; tcount=0; }
+        int match=traced; static int nd=-1; if(nd<0) nd=getenv("PELOAD_TRACE_HASH_NODEPTH")?1:0; g_dbg_nodepth=match&&nd;
+        if(traced && tcount++<6){ D3DObj*rt=g_d3dst.rtv, *rr=rt&&rt->data&&rt->vkind?(D3DObj*)rt->data:rt; D3DObj*dv=g_d3dst.dsv; D3DObj*b=g_d3dst.blend,*d=g_d3dst.depth,*r=g_d3dst.raster;
+            char m[700]; int k=snprintf(m,sizeof m,"  [hashdraw #%lu f%lu] vs=%016llx ps=%016llx n=%u idx=%d inst=%u topo=%u rt=%ux%u f%u nrt=%d dsv=%s vp=%dx%d+%d+%d z%.2f-%.2f"
+                " blend=%s(%u:%u,%u,%u wm%x) depth=%s(en%u w%u f%u st%u) rast=%s(fill%u cull%u ccw%u) il=%d vb0=%u/%u\n",
+                tn++,(unsigned long)g_ct_frame,(unsigned long long)(vs?vs->bchash:0),(unsigned long long)(ps?ps->bchash:0),vcount,indexed,instcount,g_d3dst.topo,
+                rr?rr->w:0,rr?rr->h:0,rt?(rt->vfmt?rt->vfmt:rr->fmt):0,g_d3dst.num_rt,dv?"yes":"no",g_d3dst.vp_w,g_d3dst.vp_h,g_d3dst.vp_x,g_d3dst.vp_y,g_d3dst.vp_zn,g_d3dst.vp_zf,
+                b?"set":"default",b?b->sd[2]:0,b?b->sd[3]:0,b?b->sd[4]:0,b?b->sd[5]:0,b?b->sd[9]:0xf, d?"set":"default",d?d->sd[0]:1,d?d->sd[1]:1,d?d->sd[2]:2,d?d->sd[3]:0,
+                r?"set":"default",r?r->sd[0]:3,r?r->sd[1]:3,r?r->sd[2]:0,g_d3dst.il?g_d3dst.il->nelem:-1,g_d3dst.vstride[0],g_d3dst.voff[0]); (void)!write(2,m,k);
+            k=snprintf(m,sizeof m,"     vs-srv:"); for(int i=0;i<20;i++){ D3DObj*v=g_d3dst.vssrv[i]; if(!v) continue; D3DObj*x=v->data&&v->vkind?(D3DObj*)v->data:v; k+=snprintf(m+k,sizeof m-k," t%d=%ux%u f%u%s",i,x->w,x->h,v->vfmt?v->vfmt:x->fmt,x->glfbo?"(RT)":""); }
+            k+=snprintf(m+k,sizeof m-k," | ps-srv:"); for(int i=0;i<20;i++){ D3DObj*v=g_d3dst.psrv[i]; if(!v) continue; D3DObj*x=v->data&&v->vkind?(D3DObj*)v->data:v; k+=snprintf(m+k,sizeof m-k," t%d=%ux%u f%u%s",i,x->w,x->h,v->vfmt?v->vfmt:x->fmt,x->glfbo?"(RT)":""); }
+            m[k++]='\n'; (void)!write(2,m,k);
+            if(g_d3dst.il){ D3DObj*il=g_d3dst.il; k=snprintf(m,sizeof m,"     il:"); for(int i=0;i<il->nelem;i++) k+=snprintf(m+k,sizeof m-k," %s%u@s%u+%u f%u%s",il->elem[i].sem,il->elem[i].semidx,il->elem[i].slot,il->elem[i].off,il->elem[i].fmt,il->elem[i].cls?"(inst)":"");
+                k+=snprintf(m+k,sizeof m-k," | vb:"); for(int i=0;i<3;i++) k+=snprintf(m+k,sizeof m-k," s%d=%p/%u+%u(%lluB)",i,(void*)g_d3dst.vb[i],g_d3dst.vstride[i],g_d3dst.voff[i],g_d3dst.vb[i]?(unsigned long long)g_d3dst.vb[i]->size:0ull);
+                k+=snprintf(m+k,sizeof m-k," ib=%p f%u+%u sinst=%u base=%d start=%u",(void*)g_d3dst.ib,g_d3dst.ibfmt,g_d3dst.iboff,sinst,base,start); m[k++]='\n'; (void)!write(2,m,k);
+                { D3DObj*vsx=g_d3dst.vs; k=snprintf(m,sizeof m,"     locs:"); for(int i=0;i<il->nelem;i++) k+=snprintf(m+k,sizeof m-k," %s%u->%d",il->elem[i].sem,il->elem[i].semidx,d3dgl_vs_inreg(vsx,il->elem[i].sem,il->elem[i].semidx));
+                  D3DObj*s2=g_d3dst.vb[2]; if(s2&&s2->data){ k+=snprintf(m+k,sizeof m-k," | s2:"); for(int v=0;v<4;v++){ const float*f=(const float*)((uint8_t*)s2->data+g_d3dst.voff[2]+v*g_d3dst.vstride[2]); k+=snprintf(m+k,sizeof m-k," (%.2f %.2f %.2f)",f[0],f[1],f[2]); } }
+                  D3DObj*ibx=g_d3dst.ib; if(ibx&&ibx->data){ k+=snprintf(m+k,sizeof m-k," | idx:"); const uint16_t*ix=(const uint16_t*)((uint8_t*)ibx->data+g_d3dst.iboff+start*2); for(int v=0;v<9;v++) k+=snprintf(m+k,sizeof m-k," %u",ix[v]); }
+                  m[k++]='\n'; (void)!write(2,m,k); }
+                // water-style instanced patches: corner A = POSITION0.xyz of the slot-1 instance record, projected with VS cb0 rows 0-3
+                D3DObj*s1=g_d3dst.vb[1], *c0=g_d3dst.vscb[0]; if(s1&&s1->data&&c0&&c0->data){ const float*cb=(const float*)((uint8_t*)c0->data+(uint64_t)g_d3dst.vscb_1st[0]*16);
+                    k=snprintf(m,sizeof m,"     cb0 r0(%.3f %.3f %.3f %.3f) r3(%.3f %.3f %.3f %.3f) r7(%.2f %.2f %.2f) | corners:",cb[0],cb[1],cb[2],cb[3],cb[12],cb[13],cb[14],cb[15],cb[28],cb[29],cb[30]);
+                    for(uint32_t q=0;q<instcount && q<instcount;q+= (instcount/5?instcount/5:1)){ uint64_t o=g_d3dst.voff[1]+(uint64_t)(sinst+q)*g_d3dst.vstride[1]; if(o+16>s1->size) break; const float*f=(const float*)((uint8_t*)s1->data+o);
+                        float x=f[0]*cb[0]+f[1]*cb[1]+f[2]*cb[2]+cb[3], y=f[0]*cb[4]+f[1]*cb[5]+f[2]*cb[6]+cb[7], w=f[0]*cb[12]+f[1]*cb[13]+f[2]*cb[14]+cb[15];
+                        k+=snprintf(m+k,sizeof m-k," #%u(%.1f %.1f %.1f)->ndc(%.2f %.2f) w%.1f",q,f[0],f[1],f[2],w?x/w:0,w?y/w:0,w); if(k>600) break; }
+                    m[k++]='\n'; (void)!write(2,m,k); } }
+            if(G.GenQueries && G.BeginQuery && !g_q_active){ static unsigned q; if(!q) G.GenQueries(1,&q); tq=q; G.BeginQuery(0x8914,q); } else traced=2; }
+        else traced=0; }
     if(!prof_on()) d3dgl_draw_impl(vcount,indexed,instcount,start,base,sinst);
     else { uint64_t t=prof_now(); d3dgl_draw_impl(vcount,indexed,instcount,start,base,sinst); g_prof_ns+=prof_now()-t; g_prof_n++; }
+    g_dbg_nodepth=0;
+    if(traced==1 && tq){ G.EndQuery(0x8914); int sp=-1; if(G.GetQueryObjectiv) G.GetQueryObjectiv(tq,0x8866/*QUERY_RESULT*/,&sp); char m[80]; int k=snprintf(m,sizeof m,"     -> samples passed %d\n",sp); (void)!write(2,m,k); }
     if(sd && G.Finish){ G.Finish(); uint64_t dt=(prof_now()-t0)/1000000; if(dt>=(uint64_t)sd){ static int ns; D3DObj*vs=g_d3dst.vs,*ps=g_d3dst.ps; D3DObj*rt=g_d3dst.rtv;
         char m[300]; int k=snprintf(m,sizeof m,"  [slowdraw #%d] %llums n=%u inst=%u idx=%d vs=%p ps=%p rt=%ux%u f%u t0=%ux%u f%u\n",ns,(unsigned long long)dt,vcount,instcount,indexed,(void*)vs,(void*)ps,
             rt?rt->w:0,rt?rt->h:0,rt?rt->fmt:0,g_d3dst.psrv[0]?g_d3dst.psrv[0]->w:0,g_d3dst.psrv[0]?g_d3dst.psrv[0]->h:0,g_d3dst.psrv[0]?g_d3dst.psrv[0]->fmt:0); (void)!write(2,m,k);

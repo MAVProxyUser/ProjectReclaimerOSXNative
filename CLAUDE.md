@@ -127,6 +127,15 @@ check skips the lock when the ids match) -> data races + a lock left held -> int
 SIGUSR1 dumps identify them. `PELOAD_TRACE_STAGES` counts draws with GS/HS/DS/stream-out bound (Halo 3 uses none)
 and indirect draws (none either).
 
+Water (2026-10-16): Halo 3 water = instanced patches (VS 95d9d62eca234cc3 "water_tessellated", per-instance corner
+data in VB slots 1/3, barycentrics in slot 2) + PS 7ed7117500fe75b1/23caa222baa5cb9f. It never drew because the pair
+failed to LINK: varying locations come from semantics (TEXCOORD10/11 -> 14/15) and Apple's GL refuses user varying
+locations >= 14 (MAX_VERTEX_OUTPUT_COMPONENTS 64). d3dgl_relocate compacts a pair's varyings when any location
+>= PELOAD_D3DGL_VARYING_SLOTS (14). Link failures are only printed with PELOAD_TRACE_D3DGL -- check that first when
+something "doesn't render". `PELOAD_TRACE_HASH=<vs/ps hash,..>` logs those draws' state, input layout, buffers,
+CPU-projected instance corners and samples passed (`PELOAD_TRACE_HASH_NODEPTH=1` draws them without depth test).
+Shader hashes by name: dump with PELOAD_DUMP_SHADERS and grep the DXBC RDEF strings (e.g. "WaterPS").
+
 ## Render Guardian via the game client (GL-on-Metal, no MCC/Steam)
 `game-client` runs the engine in a standalone native window ("Reclaimer GL (OpenGL on Metal)") and
 actually renders Guardian gameplay. Needs the XAudio2 bypass + skinguard + two crash guards:

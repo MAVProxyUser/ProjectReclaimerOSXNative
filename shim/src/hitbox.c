@@ -225,7 +225,9 @@ static void hb_draw_overlay(void){
         m[k++]='\n'; (void)!write(2,m,k); } }
     { float bd=1e30f; int bi=-1; for(int i=0;i<n;i++){ if(objs[i].type) continue; float dx=objs[i].c[0]-vp[28],dy=objs[i].c[1]-vp[29],dz=objs[i].c[2]-vp[30],d=dx*dx+dy*dy+dz*dz;
           if(d>(objs[i].r+0.3f)*(objs[i].r+0.3f) && d<bd){ bd=d; bi=i; } }
-      if(bi>=0){ memcpy(g_hb_tgt,objs[bi].c,12); memcpy(g_hb_cam,vp+28,12); memcpy(g_hb_fwd,vp+12,12); g_hb_tgt_ok=1; } else g_hb_tgt_ok=0; }
+      if(bi>=0){ memcpy(g_hb_tgt,objs[bi].c,12); memcpy(g_hb_cam,vp+28,12); memcpy(g_hb_fwd,vp+12,12); g_hb_tgt_ok=1; } else g_hb_tgt_ok=0;
+      const char*fp=getenv("PELOAD_INPUT_FACE_POINT"); float pt[3];   // "x,y,z": aim at a fixed world point instead
+      if(fp && sscanf(fp,"%f,%f,%f",&pt[0],&pt[1],&pt[2])==3){ memcpy(g_hb_tgt,pt,12); memcpy(g_hb_cam,vp+28,12); memcpy(g_hb_fwd,vp+12,12); g_hb_tgt_ok=1; } }
     if(!n) return;
     enum { HB_CAP=400000 }; static float verts[HB_CAP*5]; int nv=0; const float*cam=vp+28;   // cb0[7] = camera position
     for(int i=0;i<n;i++){ const HbObj*o=&objs[i];
