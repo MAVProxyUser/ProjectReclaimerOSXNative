@@ -2828,7 +2828,7 @@ typedef struct { uint32_t magic; int w,h,bpp; void*bits; int owns; uint32_t colo
 #define GDI_MAGIC 0x47444942u
 static GdiObj* gdi_new(int w,int h,int bpp,void*bits,int owns){ GdiObj*g=calloc(1,sizeof*g); if(!g)return 0; g->magic=GDI_MAGIC; g->w=w; g->h=h; g->bpp=bpp; g->bits=bits; g->owns=owns; return g; }
 // iswin: this DC targets the on-screen window (GetDC/GetWindowDC) -> blits present.
-typedef struct { uint32_t magic; GdiObj*bmp; int iswin; uint32_t textcolor; int bkmode; int font_h; } GdiDC;
+typedef struct { uint32_t magic; GdiObj*bmp; int iswin; uint32_t textcolor; int bkmode; int font_h; uint32_t bkcolor; } GdiDC;
 char g_cur_face[32];   // face of the DC's currently selected font (engine asks for Bahnschrift/Segoe UI)
 #define GDIDC_MAGIC 0x47444344u
 // ---- software rasteriser (all surfaces treated as 32bpp BGRA) ----------------
@@ -2852,7 +2852,7 @@ static void gdi_blit(GdiObj*d,int dx,int dy,int dw,int dh, GdiObj*s,int sx,int s
                 unsigned ob=((sp&0xff)*a+(dp&0xff)*na)/255, og=(((sp>>8)&0xff)*a+((dp>>8)&0xff)*na)/255, orr=(((sp>>16)&0xff)*a+((dp>>16)&0xff)*na)/255;
                 drow[tx]=ob|(og<<8)|(orr<<16)|0xFF000000u; }
             else drow[tx]=sp; } } }
-static void*  MSABI i_CreateCompatibleDC(void*hdc){ (void)hdc; GdiDC*d=calloc(1,sizeof*d); if(d){d->magic=GDIDC_MAGIC;d->bkmode=2;} return d?d:(void*)0xDC02; }
+static void*  MSABI i_CreateCompatibleDC(void*hdc){ (void)hdc; GdiDC*d=calloc(1,sizeof*d); if(d){d->magic=GDIDC_MAGIC;d->bkmode=2;d->bkcolor=0xFFFFFF;} return d?d:(void*)0xDC02; }
 static void*  MSABI i_CreateDIBSection(void*hdc,const uint8_t*bmi,uint32_t usage,void**ppvBits,void*hSection,uint32_t off){
     (void)hdc;(void)usage;(void)hSection;(void)off;
     int w=bmi?*(const int32_t*)(bmi+4):0; int h=bmi?*(const int32_t*)(bmi+8):0; int bpp=bmi?*(const uint16_t*)(bmi+14):32;
@@ -2900,9 +2900,13 @@ static int    MSABI i_SetDIBitsToDevice(void*dc,int x,int y,uint32_t w,uint32_t 
     (void)sl;(void)nl;(void)u; GdiDC*dd=dc; if(dd&&dd->magic==GDIDC_MAGIC&&dd->bmp&&bits&&bmi){ int bw=*(const int32_t*)(bmi+4),bh=*(const int32_t*)(bmi+8);
         GdiObj s={GDI_MAGIC,bw,bh<0?-bh:bh,32,(void*)bits,0,0,0,bh<0}; gdi_blit(dd->bmp,x,y,(int)w,(int)h,&s,sx,sy,(int)w,(int)h,0); if(dd->iswin) gdi_present_window(); }
     return (int)h; }
+static GdiObj* gdi_text_target(GdiDC*d); // fwd
 static int    MSABI i_StretchDIBits(void*dc,int xd,int yd,int wd,int hd,int xs,int ys,int ws,int hs,const void*bits,const uint8_t*bmi,uint32_t usage,uint32_t rop){
     (void)usage;(void)rop; GdiDC*dd=dc; if(dd&&dd->magic==GDIDC_MAGIC&&dd->bmp&&bits&&bmi){ int bw=*(const int32_t*)(bmi+4),bh=*(const int32_t*)(bmi+8);
-        GdiObj s={GDI_MAGIC,bw,bh<0?-bh:bh,32,(void*)bits,0,0,0,bh<0}; gdi_blit(dd->bmp,xd,yd,wd,hd,&s,xs,ys,ws,hs,0);
+        // same destination as the DC's text (gdi_text_target): the client repaints its background with
+        // StretchDIBits before redrawing the status text; blitting into the pixel-less DC bitmap left the old
+        // text on the surface ("LOADING MAP" over "LOADING ENGINE")
+        GdiObj s={GDI_MAGIC,bw,bh<0?-bh:bh,32,(void*)bits,0,0,0,bh<0}; GdiObj*dst=gdi_text_target(dd); gdi_blit(dst?dst:dd->bmp,xd,yd,wd,hd,&s,xs,ys,ws,hs,0);
         if(getenv("PELOAD_TRACE_GDI")){ char t[128]; int k=snprintf(t,sizeof t,"  [StretchDIBits] dst(win=%d) %d,%d %dx%d <- DIB %dx%d\n",dd->iswin,xd,yd,wd,hd,bw,bh); (void)!write(2,t,k);}
         if(dd->iswin) gdi_present_window(); }
     return hs>0?hs:1; }
@@ -2910,7 +2914,7 @@ static int    MSABI i_SetStretchBltMode(void*dc,int mode){ (void)dc;(void)mode; 
 static int    MSABI i_SetBrushOrgEx(void*dc,int x,int y,void*pt){ (void)dc;(void)x;(void)y; if(pt){((int32_t*)pt)[0]=0;((int32_t*)pt)[1]=0;} return 1; }
 static uint32_t MSABI i_SetTextColor(void*dc,uint32_t c){ GdiDC*d=dc; uint32_t o=0; if(d&&d->magic==GDIDC_MAGIC){o=d->textcolor;d->textcolor=c;} return o; }
 static int    MSABI i_SetBkMode(void*dc,int m){ GdiDC*d=dc; int o=2; if(d&&d->magic==GDIDC_MAGIC){o=d->bkmode;d->bkmode=m;} return o; }
-static uint32_t MSABI i_SetBkColor(void*dc,uint32_t c){ (void)dc;(void)c; return 0; }
+static uint32_t MSABI i_SetBkColor(void*dc,uint32_t c){ GdiDC*d=dc; uint32_t o=0xFFFFFF; if(d&&d->magic==GDIDC_MAGIC){ o=d->bkcolor; d->bkcolor=c; } return o; }
 // ---- CoreText glyph rasterization into the GDI BGRA DIB ----
 // The Reclaimer frontend composites its menu into a CPU DIB (which we present) and
 // draws every label via GDI DrawTextW/TextOutW. Those were no-ops, so the UI showed a
@@ -3089,7 +3093,10 @@ static int    MSABI i_GetTextExtentPoint32W(void*dc,const uint16_t*s,int c,void*
 static int    MSABI i_TextOutW(void*dc,int x,int y,const uint16_t*s,int c){ GdiDC*d=dc;
     if(getenv("PELOAD_TRACE_TEXT")){ char m[96]; snprintf(m,sizeof m,"  [TextOutW] dc=%p dcok=%d bmp=%p c=%d\n",dc,d&&d->magic==GDIDC_MAGIC,(d&&d->magic==GDIDC_MAGIC)?(void*)d->bmp:0,c); ws(m); }
     if(d&&d->magic==GDIDC_MAGIC){ gdi_text_render(gdi_text_target(d),x,y,s,c,d->textcolor,d->font_h?d->font_h:16); if(d->iswin) gdi_present_window(); } return 1; }
-static int    MSABI i_ExtTextOutW(void*dc,int x,int y,uint32_t f,const void*rc,const uint16_t*s,uint32_t c,const int*dx){ (void)f;(void)rc;(void)dx; GdiDC*d=dc;
+static int    MSABI i_ExtTextOutW(void*dc,int x,int y,uint32_t f,const void*rc,const uint16_t*s,uint32_t c,const int*dx){ (void)dx; GdiDC*d=dc;
+    // ETO_OPAQUE: fill the rectangle with the DC background colour first -- the client erases its previous
+    // status line this way ("LOADING MAP" was drawn over the stale "LOADING ENGINE")
+    if((f&2) && rc && d && d->magic==GDIDC_MAGIC){ const int32_t*r=rc; GdiObj*t=gdi_text_target(d); if(t) gdi_fill(t,r[0],r[1],r[2]-r[0],r[3]-r[1],gdi_colorref_to_px(d->bkcolor)); }
     if(getenv("PELOAD_TRACE_TEXT")){ char m[96]; snprintf(m,sizeof m,"  [ExtTextOutW] dc=%p dcok=%d bmp=%p c=%u\n",dc,d&&d->magic==GDIDC_MAGIC,(d&&d->magic==GDIDC_MAGIC)?(void*)d->bmp:0,c); ws(m); }
     if(d&&d->magic==GDIDC_MAGIC){ gdi_text_render(gdi_text_target(d),x,y,s,(int)c,d->textcolor,d->font_h?d->font_h:16); if(d->iswin) gdi_present_window(); } return 1; }
 static int    MSABI i_DrawTextW(void*dc,const uint16_t*s,int count,int32_t*rc,uint32_t fmt){ GdiDC*d=dc;
@@ -3118,7 +3125,7 @@ static uint32_t* g_gdi_winbuf;                 // WIN_WxWIN_H BGRA, top-down
 static GdiObj     g_gdi_winobj;
 static void gdi_win_init(void){ if(g_gdi_winbuf) return; g_gdi_winbuf=calloc(1,(size_t)WIN_W*WIN_H*4);
     g_gdi_winobj.magic=GDI_MAGIC; g_gdi_winobj.w=WIN_W; g_gdi_winobj.h=WIN_H; g_gdi_winobj.bpp=32; g_gdi_winobj.bits=g_gdi_winbuf; g_gdi_winobj.topdown=1; }
-static void*  MSABI i_GetDC(void*h){ (void)h; gdi_win_init(); GdiDC*d=calloc(1,sizeof*d); if(d){ d->magic=GDIDC_MAGIC; d->bmp=&g_gdi_winobj; d->iswin=1; d->bkmode=2; } return d?d:(void*)0xDC01; }
+static void*  MSABI i_GetDC(void*h){ (void)h; gdi_win_init(); GdiDC*d=calloc(1,sizeof*d); if(d){ d->magic=GDIDC_MAGIC; d->bmp=&g_gdi_winobj; d->iswin=1; d->bkmode=2; d->bkcolor=0xFFFFFF; } return d?d:(void*)0xDC01; }
 static int    MSABI i_ReleaseDC(void*h,void*dc){ (void)h; GdiDC*d=dc; if(d&&d->magic==GDIDC_MAGIC){ d->magic=0; free(d); } return 1; }
 static void*  MSABI i_GetWindowDC(void*h){ return i_GetDC(h); }
 // Present the window BGRA buffer to the GL window: upload to a texture-backed FBO
