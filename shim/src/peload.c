@@ -4672,7 +4672,7 @@ static unsigned d3d_stencilop_gl(uint32_t o){ switch(o){ case 2: return 0; case 
 // apply_state used to re-issue every blend/raster/depth/viewport call on every draw; on GL-on-Metal redundant
 // state changes cost CPU and pipeline re-validation. Only changes are sent now. Paths that touch this state
 // directly (window blit) call gs_invalidate(). PELOAD_D3DGL_NOSTATECACHE disables the cache.
-static struct { int valid; uint8_t cap[10]; unsigned bf[4], be[2]; float bc[4]; uint8_t cm[4]; unsigned cull, ff; int sc[4], vp[4]; double dr[2]; float po[2]; unsigned dfunc; int dmask; } g_gs;
+static struct { int valid; uint8_t cap[10]; unsigned bf[4], be[2]; float bc[4]; uint8_t cm[4]; unsigned cull, ff; int sc[4], vp[4]; double dr[2]; float po[2]; unsigned dfunc; int dmask; unsigned prog, pipe; } g_gs;
 static int g_gs_off=-1;
 static void gs_invalidate(void){ g_gs.valid=0; }
 static void gs_ok(void){ if(g_gs_off<0) g_gs_off=getenv("PELOAD_D3DGL_NOSTATECACHE")?1:0; if(!g_gs.valid||g_gs_off){ memset(&g_gs,0xff,sizeof g_gs); g_gs.valid=1; } }
@@ -4690,6 +4690,10 @@ static void gs_viewport(int x,int y,int w,int h){ gs_ok(); if(g_gs.vp[0]==x&&g_g
 static void gs_depthrange(void(*dr)(double,double),double n,double f){ gs_ok(); if(g_gs.dr[0]==n&&g_gs.dr[1]==f) return; g_gs.dr[0]=n; g_gs.dr[1]=f; dr(n,f); }
 static void gs_polyofs(void(*po)(float,float),float s,float b){ gs_ok(); if(g_gs.po[0]==s&&g_gs.po[1]==b) return; g_gs.po[0]=s; g_gs.po[1]=b; po(s,b); }
 static void gs_depthfunc(unsigned f){ gs_ok(); if(g_gs.dfunc==f) return; g_gs.dfunc=f; G.DepthFunc(f); }
+// Apple's GL does NOT early-out on a redundant glUseProgram: UseProgram(current) per draw cost +1.5 us of
+// revalidation per draw under Rosetta (benchmark: 0.60 -> 2.09 us/draw), about as much as a real switch.
+static void gs_useprog(unsigned p){ gs_ok(); if(g_gs.prog==p) return; g_gs.prog=p; G.UseProgram(p); }
+static void gs_pipeline(unsigned p){ gs_ok(); if(g_gs.pipe==p) return; g_gs.pipe=p; G.BindProgramPipeline(p); }
 static void gs_depthmask(unsigned char m){ gs_ok(); if(g_gs.dmask==(int)m) return; g_gs.dmask=m; G.DepthMask(m); }
 static int g_dbg_nodepth;   // PELOAD_TRACE_HASH_NODEPTH: draws of the traced shader hashes ignore depth
 static void d3dgl_apply_depth(void){
@@ -5577,8 +5581,8 @@ static void d3dgl_draw_impl(uint32_t vcount,int indexed,uint32_t instcount,uint3
     if(g_nullps_color){ g_nullps_color=0; if(G.ColorMask) gs_colormask(0,0,0,0); }   // NULL PS: no colour writes
     // pipeline
     PH(1); g_d3dgl_phase="pipeline";
-    if(mono){ G.BindProgramPipeline(0); G.UseProgram(mp->prog); }
-    else { G.UseProgram(0); G.BindProgramPipeline(g_d3dgl_pipe);
+    if(mono){ gs_pipeline(0); gs_useprog(mp->prog); }
+    else { gs_useprog(0); gs_pipeline(g_d3dgl_pipe);
         G.UseProgramStages(g_d3dgl_pipe,GLE_VSBIT,vsp); G.UseProgramStages(g_d3dgl_pipe,GLE_FSBIT,psp); }
     PH(2); g_d3dgl_phase="cbs";
     // EXPERIMENT (PELOAD_VP0..VP3=<cbreg index>): halo3 binds the per-frame global constant buffers
