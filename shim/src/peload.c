@@ -4063,6 +4063,12 @@ static void d3dgl_draw(uint32_t vcount,int indexed,uint32_t instcount){
                 else { const int16_t*s=(const int16_t*)d; raw[0]=s[0]/32767.0f;raw[1]=s[1]/32767.0f;raw[2]=s[2]/32767.0f; }
                 for(int c=0;c<3;c++){ float dz=raw[c]*c1[c]+c1[4+c]; if(dz<mn[c])mn[c]=dz; if(dz>mx[c])mx[c]=dz; } }
             if((mx[0]-mn[0])>thr||(mx[1]-mn[1])>thr||(mx[2]-mn[2])>thr) n=0; } }
+    // PELOAD_D3DGL_SKIPDEGEN=<t>: skip draws whose bound cb1 position scale has any component < t
+    // (default 2.0) -- these are DEGENERATE/mis-correlated captures (cb1scale ~[0,0,0]/[1,1,0]) that
+    // collapse or stretch the draw. Diagnostic for whether those are the streak source.
+    if(getenv("PELOAD_D3DGL_SKIPDEGEN") && getenv("PELOAD_D3DGL_DECOMP")){
+        const float*c1=(const float*)g_syn_cb1_buf; float t=atof(getenv("PELOAD_D3DGL_SKIPDEGEN")); if(t<=0)t=2.0f;
+        if(c1[0]<t||c1[1]<t||c1[2]<t) n=0; }
     if(indexed && g_d3dst.ib && g_d3dst.ib->data && g_d3dst.ib->size){
         D3DObj*ib=g_d3dst.ib; if(!ib->glbuf){ G.GenBuffers(1,&ib->glbuf); ib->gl_dirty=1; }
         if(ib->gl_dirty){ long cap=(long)ib->size; if(cap>(96<<20))cap=(96<<20); G.BindBuffer(GLE_ELEM,ib->glbuf); G.BufferData(GLE_ELEM,cap,ib->data,GLE_STREAM); ib->gl_dirty=0; }
