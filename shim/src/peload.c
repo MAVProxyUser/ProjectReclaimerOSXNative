@@ -5869,6 +5869,8 @@ static void gl_selftest(void){
 // shows the engine's GDI composite continuously (so it survives the worker's abort).
 static void* present_thread_fn(void*a){ (void)a; void(*set)(void*)=dlsym(RTLD_DEFAULT,"CGLSetCurrentContext");
     if(set&&g_present_glctx) set(g_present_glctx);
+    // vsync the window flips (no tearing); only this present thread waits on it, never the engine
+    if(g_present_glctx && !getenv("PELOAD_NOVSYNC")){ GLint one=1; CGLSetParameter((CGLContextObj)g_present_glctx,kCGLCPSwapInterval,&one); }
     void(*cglflush)(void*)=dlsym(RTLD_DEFAULT,"CGLFlushDrawable");
     // PELOAD_POKE=<rva>:<u8>[,...] continuously writes a byte into guest memory each frame
     // (e.g. force the worker's "window foreground" flag so presents count as ready).
