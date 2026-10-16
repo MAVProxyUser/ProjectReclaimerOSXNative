@@ -1912,7 +1912,15 @@ static int MSABI i_CreateFX(GUID_*clsid,void**pp,const void*init,uint32_t sz){ (
 // map an xaudio2_9redist import (by ordinal or name) to our implementation.
 // ordinals: 1=XAudio2Create 2=CreateAudioReverb 3=CreateAudioVolumeMeter
 // 4=CreateFX 5=X3DAudioCalculate 6=X3DAudioInitialize.
+static int MSABI i_XAudio2Create_real(void**pp,uint32_t flags,uint32_t proc);                 // xaudio.c (CoreAudio)
+static int MSABI i_X3DAudioInitialize(uint32_t mask,float sos,uint8_t*h);
+static void MSABI i_X3DAudioCalculate(const uint8_t*h,const float*L,const uint8_t*E,uint32_t fl,uint8_t*dsp);
+static int xa_real(void){ static int r=-1; if(r<0){ const char*e=getenv("PELOAD_AUDIO"); r = e ? (e[0]!='0') : 0; } return r; }
 static void* xa_resolve(uint32_t ord, const char* fn){
+    if(xa_real()){   // PELOAD_AUDIO: real XAudio2 on CoreAudio (xaudio.c)
+        if(ord==1 || (fn&&!strcmp(fn,"XAudio2Create"))) return (void*)i_XAudio2Create_real;
+        if(ord==5 || (fn&&!strcmp(fn,"X3DAudioCalculate"))) return (void*)i_X3DAudioCalculate;
+        if(ord==6 || (fn&&!strcmp(fn,"X3DAudioInitialize"))) return (void*)i_X3DAudioInitialize; }
     if(ord==1 || (fn&&!strcmp(fn,"XAudio2Create"))) return (void*)i_XAudio2Create;
     if(ord==2 || (fn&&!strcmp(fn,"CreateAudioReverb"))) return (void*)i_CreateAudioReverb;
     if(ord==3 || (fn&&!strcmp(fn,"CreateAudioVolumeMeter"))) return (void*)i_CreateAudioVolumeMeter;
@@ -6607,6 +6615,7 @@ static uintptr_t MSABI i_beginthreadex(void*sec,unsigned stack,WinThreadProc sta
     uint32_t tid=0; void* h=i_CreateThread(sec,(uint64_t)stack,start,arg,initflag,&tid); if(thrdaddr)*thrdaddr=tid; return (uintptr_t)h; }
 static void MSABI i_endthreadex(unsigned code){ (void)code; pthread_exit(0); }
 static uintptr_t MSABI i_beginthread(WinThreadProc start,unsigned stack,void*arg){ uint32_t tid=0; return (uintptr_t)i_CreateThread(0,(uint64_t)stack,start,arg,0,&tid); }
+#include "xaudio.c"
 static void MSABI i_endthread(void){ pthread_exit(0); }
 static uint32_t MSABI i_GetThreadId(void*h){ if(is_sync((intptr_t)h)) return ((SyncObj*)h)->tid; return (uint32_t)(uintptr_t)h; }
 static int MSABI i_GetExitCodeThread(void*h,uint32_t*code){
@@ -8198,6 +8207,17 @@ static void ctx2uc(ucontext_t* uc, void* ctx){
 static __thread int g_in_crashsig;
 static int seh_dispatch_hw(uint32_t code, EXREC* rec, void* ctx){
     EXCEPTION_POINTERS ep; ep.ExceptionRecord=rec; ep.ContextRecord=ctx;
+    // PELOAD_TRACE_FAULT: log every hardware fault BEFORE the guest's handlers see it (RIP attributed to
+    // exe/halo3/shim + a scan of the stack for return addresses), even when a guest handler swallows it.
+    if(getenv("PELOAD_TRACE_FAULT")){ static int nf; if(nf++<6){ uint64_t rip=CTX_RIP(ctx), rsp=CTX_REG(ctx,4); char m[300]; Dl_info di;
+        const char*mod="?"; uint64_t off=rip; if(rip>=0x140000000ULL&&rip<0x150000000ULL){mod="exe";off=rip-0x140000000ULL;} else if(rip>=0x180000000ULL&&rip<0x190000000ULL){mod="halo3";off=rip-0x180000000ULL;}
+        else if(dladdr((void*)rip,&di)&&di.dli_sname){ mod=di.dli_sname; off=rip-(uint64_t)di.dli_saddr; }
+        int k=snprintf(m,sizeof m,"  [fault] code=0x%x rip=%s+0x%llx addr=0x%llx rax=%llx rcx=%llx rdx=%llx r8=%llx r14=%llx\n",code,mod,(unsigned long long)off,(unsigned long long)rec->ExceptionInformation[1],
+            (unsigned long long)CTX_REG(ctx,0),(unsigned long long)CTX_REG(ctx,1),(unsigned long long)CTX_REG(ctx,2),(unsigned long long)CTX_REG(ctx,8),(unsigned long long)CTX_REG(ctx,14)); (void)!write(2,m,k);
+        for(int i=0;i<48;i++){ uint64_t v=*(uint64_t*)(rsp+8*i); const char*mm=0; uint64_t o=0;
+            if(v>=0x140000000ULL&&v<0x150000000ULL){mm="exe";o=v-0x140000000ULL;} else if(v>=0x180000000ULL&&v<0x190000000ULL){mm="halo3";o=v-0x180000000ULL;}
+            else if(v>0x100000000ULL && v<0x200000000ULL && dladdr((void*)v,&di)&&di.dli_sname&&strstr(di.dli_fname?di.dli_fname:"","peload")){ mm=di.dli_sname; o=v-(uint64_t)di.dli_saddr; }
+            if(mm){ k=snprintf(m,sizeof m,"     [rsp+0x%x] %s+0x%llx\n",i*8,mm,(unsigned long long)o); (void)!write(2,m,k); } } } }
     // (1) first-chance vectored exception handlers (anti-cheat / probe recovery)
     for(int i=0;i<g_nveh;i++){ if(!g_veh[i]) continue; PVEH vh=(PVEH)g_veh[i];
         long r=vh(&ep);
