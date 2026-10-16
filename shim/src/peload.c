@@ -1090,6 +1090,7 @@ static int  MSABI ctx_ret0(void){ return 0; }                            // safe
 static uint64_t g_cb_tick;           // advances each present; marks CB freshness for view-proj auto-detect
 static int  MSABI ctx_Map(void*t,void*res,uint32_t sub,uint32_t type,uint32_t fl,void*pM){ (void)t;(void)sub;(void)type;(void)fl;
     D3DObj*o=res; if(o){ o->gl_dirty=1; if(o->is_cb) o->cb_upd=g_cb_tick; }   // mapped for write -> re-upload + mark CB fresh
+    extern D3DObj* g_last_smallcb; if(o && o->is_cb && o->size>=32 && o->size<=96) g_last_smallcb=o;  // candidate decompress cb1
     if(o && getenv("PELOAD_TRACE_TEXPATH") && o->w>=512 && o->h>=512 && ((o->fmt>=70&&o->fmt<=84)||(o->fmt>=94&&o->fmt<=99))){ char m[128]; int k=snprintf(m,sizeof m,"  [texpath] MAP sub=%u type=%u %ux%u f%u obj=%p\n",sub,type,o->w,o->h,o->fmt,(void*)o); (void)!write(2,m,k); }
     if(pM){ void* d=(o&&o->data)?o->data:g_d3dscratch;
         uint32_t rp = o? (o->rowpitch?o->rowpitch:(uint32_t)o->size) : (uint32_t)sizeof g_d3dscratch;   // bytes per row
@@ -1149,6 +1150,7 @@ static void MSABI ctx_Draw(void*t,uint32_t n,uint32_t s){ (void)t;(void)s; d3dtr
 static void MSABI ctx_UpdateSubresource(void*t,void*res,uint32_t sub,const void*box,const void*src,uint32_t srp,uint32_t sdp){
     (void)t;(void)sub;(void)sdp; D3DObj*o=res; if(!o||!o->data||!src) return;
     o->gl_dirty=1; if(o->is_cb) o->cb_upd=g_cb_tick;
+    { extern D3DObj* g_last_smallcb; if(o->is_cb && o->size>=32 && o->size<=96) g_last_smallcb=o; }
     // MUST honor pDstBox: a partial (box) update supplies a source sized only for the box. Reading the
     // full-resource height instead overreads past the source end -> SIGSEGV in memmove. D3D11_BOX =
     // {Left,Top,Front,Right,Bottom,Back}; for a BUFFER Left/Right are byte offsets, rows=1.
@@ -1246,6 +1248,7 @@ static void cb_trace2(int w,uint32_t start,uint32_t num,void*const*cbs,void*ra){
         char m[200]; int k=snprintf(m,sizeof m,"  [cb] %s start=%u num=%u cb0sz=%lluB cb1sz=%lluB  <- %s\n",nm[w],start,num,
             (unsigned long long)(c0?c0->size:0),(unsigned long long)((num>1&&cbs&&cbs[1])?((D3DObj*)cbs[1])->size:0),sym); (void)!write(2,m,k); } }
 D3DObj* g_last_b12;  // most recent buffer bound to VS slot 12 (per-object world) — for cb-source diagnosis
+D3DObj* g_last_smallcb;  // most recent small (32-96B) CB mapped/updated — candidate vertex-decompress cb1
 float g_b12_org[32][3]; int g_nb12_org;   // recent distinct per-object world origins (for view-proj convention search)
 static void MSABI ctx_VSSetConstantBuffers(void*t,uint32_t start,uint32_t num,void*const*cbs){ (void)t; cb_trace2(0,start,num,cbs,__builtin_return_address(0));
     for(uint32_t i=0;i<num&&start+i<16;i++){ g_d3dst.vscb[start+i]=cbs?(D3DObj*)cbs[i]:0; g_d3dst.vscb_1st[start+i]=0; g_d3dst.vscb_cnt[start+i]=0;
@@ -3865,14 +3868,22 @@ static void d3dgl_draw(uint32_t vcount,int indexed,uint32_t instcount){
     // out via their bound cb12 placement -> the map LAYOUT emerges even without exact per-mesh bounds.
     // (synth_cb0 sets cb0[12]=1 when DECOMP so the if-branch runs.)
     if(getenv("PELOAD_D3DGL_DECOMP") && vs){
-        float*c1=(float*)g_syn_cb1_buf; memset(c1,0,256);
-        float S=getenv("PELOAD_D3DGL_DSCALE")?atof(getenv("PELOAD_D3DGL_DSCALE")):10.0f;
-        float O=getenv("PELOAD_D3DGL_DOFF")?atof(getenv("PELOAD_D3DGL_DOFF")):0.0f;
-        c1[0]=c1[1]=c1[2]=S;             // cb1[0] = position scale
-        c1[4]=c1[5]=c1[6]=O;             // cb1[1] = position offset
-        c1[8]=c1[9]=1.0f;                // cb1[2].xy = texcoord scale (passthrough); .zw offset = 0
-        g_syn_cb1.data=g_syn_cb1_buf; g_syn_cb1.size=256; g_syn_cb1.is_cb=1;
-        if(!vscb_eff[1]||!vscb_eff[1]->data) vscb_eff[1]=&g_syn_cb1; }
+        // PELOAD_D3DGL_REALCB1: use the most-recently-mapped small CB (g_last_smallcb) as the real per-mesh
+        // decompression cb1 (the engine maps it right before each draw, even though the BIND is on the dead
+        // material path) -> correct per-section scale/offset = no stretched-spike sections. Falls back to
+        // the synthetic uniform scale (PELOAD_D3DGL_DSCALE) when no candidate exists.
+        if(getenv("PELOAD_D3DGL_REALCB1") && g_last_smallcb && g_last_smallcb->data && g_last_smallcb->size>=48){
+            if(!vscb_eff[1]||!vscb_eff[1]->data) vscb_eff[1]=g_last_smallcb;
+            if(getenv("PELOAD_D3DGL_CAMDBG")){ static int rc; if(rc++<6){ const float*f=(const float*)g_last_smallcb->data; char mm[200]; int k=snprintf(mm,sizeof mm,"  [realcb1] %lluB scale=[%.2f %.2f %.2f] off=[%.2f %.2f %.2f] tc=[%.2f %.2f %.2f %.2f]\n",(unsigned long long)g_last_smallcb->size,f[0],f[1],f[2],f[4],f[5],f[6],f[8],f[9],f[10],f[11]); (void)!write(2,mm,k);} }
+        } else {
+            float*c1=(float*)g_syn_cb1_buf; memset(c1,0,256);
+            float S=getenv("PELOAD_D3DGL_DSCALE")?atof(getenv("PELOAD_D3DGL_DSCALE")):10.0f;
+            float O=getenv("PELOAD_D3DGL_DOFF")?atof(getenv("PELOAD_D3DGL_DOFF")):0.0f;
+            c1[0]=c1[1]=c1[2]=S;             // cb1[0] = position scale
+            c1[4]=c1[5]=c1[6]=O;             // cb1[1] = position offset
+            c1[8]=c1[9]=1.0f;                // cb1[2].xy = texcoord scale (passthrough); .zw offset = 0
+            g_syn_cb1.data=g_syn_cb1_buf; g_syn_cb1.size=256; g_syn_cb1.is_cb=1;
+            if(!vscb_eff[1]||!vscb_eff[1]->data) vscb_eff[1]=&g_syn_cb1; } }
     if(mono){
         d3dgl_bind_cbs_p(mp->prog,mp->vcb,vscb_eff,g_d3dst.vscb_1st,g_d3dst.vscb_cnt);
         d3dgl_bind_cbs_p(mp->prog,mp->pcb,g_d3dst.pscb,g_d3dst.pscb_1st,g_d3dst.pscb_cnt);
@@ -4013,6 +4024,15 @@ static void d3dgl_blit_fullscreen(unsigned vao){
     if(g_d3dgl_blit_uloc>=0){ float tw=g_d3dgl_present_tw?g_d3dgl_present_tw:1, th=g_d3dgl_present_th?g_d3dgl_present_th:1;
         float sc[4]={ g_d3dgl_present_vw/tw, g_d3dgl_present_vh/th, 0,0 }; G.ProgramUniform4fv(g_d3dgl_blit_prog,g_d3dgl_blit_uloc,1,sc); }
     G.BindVertexArray(vao); G.DrawArrays(4,0,3);
+    // PELOAD_D3DGL_SHOTWIN=<n>: capture the WINDOW framebuffer (FB 0) right after the blit = EXACTLY what the
+    // user sees (not the G-buffer RT dumps, which are a different, often-black buffer). Every n blits.
+    if(getenv("PELOAD_D3DGL_SHOTWIN")){ static unsigned long bc; int every=atoi(getenv("PELOAD_D3DGL_SHOTWIN")); if(every<1)every=20;
+        if((bc++ % every)==0 && G.ReadPixels){ int w=g_d3dgl_W,h=g_d3dgl_H; if(w>0&&h>0&&(long)w*h<=(32<<20)){
+            unsigned char*cap=calloc(1,(size_t)w*h*4);
+            if(cap){ G.BindFramebuffer(GLE_FBO,0); if(G.ReadBuffer)G.ReadBuffer(0x0405/*BACK*/); if(G.GetError)G.GetError();
+                G.ReadPixels(0,0,w,h,GLE_RGBA,GLE_UBYTE,cap);
+                static int wn; const char*home=getenv("HOME"); char p[512]; snprintf(p,sizeof p,"%s/reclaimer_win_%d_%03d.bmp",home?home:"/tmp",(int)getpid(),wn++);
+                bmp_write_rgba(p,w,h,cap); char m[160]; int k=snprintf(m,sizeof m,"  [d3dgl] win-shot -> %s (%dx%d)\n",p,w,h); (void)!write(2,m,k); free(cap); } } } }
 }
 // Called on the PRESENT thread (owns the window context g_present_glctx, which shares objects with
 // our offscreen render context). Displays the backbuffer the render thread produced.
