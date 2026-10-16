@@ -45,7 +45,9 @@ frame `_f<N>`; `PELOAD_D3DGL_ALT5` phase-tagged A/B), `PELOAD_INPUT_SCRIPT=walk|
 Perf (2026-10-16, M4, 1280x720 window, 1920x1080 internal): gameplay median ~116 fps, p10 ~80,
 min ~50 (3-min soak). Draw-call bound: ~3.6 us per glDraw* in GL-on-Metal x ~1200-2300 draws/frame;
 the next big step would be a GL submission thread. CPU particle compute runs on a worker thread
-(`PELOAD_CS_SYNC` = inline). Window flips are vsynced (`PELOAD_NOVSYNC`); the engine never waits on them.
+(`PELOAD_CS_SYNC` = inline). Window flips are NOT vsynced by default (`PELOAD_VSYNC=1` opts in; one soak
+froze with it while the display slept); the present thread idles while the window is occluded or the display
+sleeps (`PELOAD_PRESENT_HIDDEN=1` keeps presenting -- needed for SHOTWIN captures in unattended test runs).
 First-use shader stalls: every linked VS/PS pair is recorded (by bytecode hash) in
 `~/Library/Application Support/ReclaimerMac/glpairs_v1.txt` and pre-built during the next loading
 screen (`PELOAD_D3DGL_NOPRELINK`; `PELOAD_D3DGL_PROGTIME` logs build costs).
