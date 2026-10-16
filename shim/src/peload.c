@@ -7597,7 +7597,14 @@ static void skinguard_install(uint8_t*halo3base); // fwd (PELOAD_SKINGUARD null-
 static void vtguard_install(uint8_t*halo3base); // fwd (PELOAD_VTGUARD null-vtable release guard)
 static void capcb1_install(uint8_t*halo3base); // fwd (PELOAD_D3DGL_CAPCB1 per-section decompression capture)
 static void *export_lookup(uint8_t *base, const char *want);    // fwd
+static void* MSABI i_LoadLibraryExW(const uint16_t *name, void *h, uint32_t fl);
+// PELOAD_NO_WAVES: refuse MCC's Waves audio DLLs (halo3\waves\*.dll), so halo3 keeps the pass-through WavesFX
+// table waves_prefill() installs (what client v0.9.13 effectively ran with).
+static int no_waves_dll(const uint16_t*n){ static int on=-1; if(on<0) on=getenv("PELOAD_NO_WAVES")?1:0; if(!on||!n) return 0;
+    char a[1024]; int i=0; for(; n[i]&&i<1023;i++) a[i]=(char)(n[i]<128?n[i]:'?'); a[i]=0; for(char*q=a;*q;q++) if(*q=='/') *q='\\';
+    return strcasestr(a,"\\waves\\")!=0; }
 static void* MSABI i_LoadLibraryExW(const uint16_t *name, void *h, uint32_t fl){
+    if(no_waves_dll(name)){ g_lasterr=126; ws("  [no-waves] refused a Waves DLL\n"); return 0; }
     (void)h;(void)fl; char w[2048]; int i=0; for(; name && name[i] && i<2047; i++) w[i]=(char)(name[i]<128?name[i]:'?'); w[i]=0;
     // bare short name of the DLL (for the module registry + dedupe)
     char *bn=w; for(char*p=w;*p;p++) if(*p=='\\'||*p=='/') bn=p+1;

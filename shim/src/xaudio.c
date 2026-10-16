@@ -254,7 +254,8 @@ static void xa_render_submix(XAVoice*v){
 static float g_xaring[XA_RING*2]; static volatile uint64_t g_xaw, g_xar;
 static void xa_aq_cb(void*ud,AudioQueueRef q,AudioQueueBufferRef buf){ (void)ud;
     float*o=buf->mAudioData; uint32_t frames=buf->mAudioDataBytesCapacity/8;
-    for(uint32_t i=0;i<frames;i++){ if(g_xar<g_xaw){ uint64_t r=g_xar%XA_RING; o[2*i]=g_xaring[2*r]; o[2*i+1]=g_xaring[2*r+1]; g_xar++; } else { o[2*i]=o[2*i+1]=0; } }
+    static int mute=-1; if(mute<0) mute=getenv("PELOAD_AUDIO_MUTE")?1:0;   // test runs: mix (and PELOAD_AUDIO_DUMP) but play silence
+    for(uint32_t i=0;i<frames;i++){ if(g_xar<g_xaw){ uint64_t r=g_xar%XA_RING; o[2*i]=mute?0:g_xaring[2*r]; o[2*i+1]=mute?0:g_xaring[2*r+1]; g_xar++; } else { o[2*i]=o[2*i+1]=0; } }
     buf->mAudioDataByteSize=frames*8; AudioQueueEnqueueBuffer(q,buf,0,0); }
 static uint32_t MSABI xa_mixer_thread(void*arg){ (void)arg;
     double next=mono_s();
@@ -282,7 +283,8 @@ static uint32_t MSABI xa_mixer_thread(void*arg){ (void)arg;
         pthread_mutex_unlock(&g_xamx);
         // PELOAD_AUDIO_DUMP=<file.raw>: append the mixed stereo float32 48 kHz output (first 60 s) for offline checks
         { static FILE*df; static int dfi; static uint64_t dn; if(!dfi){ dfi=1; const char*p=getenv("PELOAD_AUDIO_DUMP"); if(p) df=fopen(p,"wb"); }
-          if(df && dn<(uint64_t)XA_RATE*60){ for(int i=0;i<XA_BLOCK;i++){ uint64_t k=(w+i)%XA_RING; fwrite(&g_xaring[2*k],4,2,df); } dn+=XA_BLOCK; fflush(df); } }
+          static double dsecs=-1; if(dsecs<0){ const char*e=getenv("PELOAD_AUDIO_DUMP_SECS"); dsecs=e?atof(e):60; }
+          if(df && dn<(uint64_t)(XA_RATE*dsecs)){ for(int i=0;i<XA_BLOCK;i++){ uint64_t k=(w+i)%XA_RING; fwrite(&g_xaring[2*k],4,2,df); } dn+=XA_BLOCK; fflush(df); } }
         for(int e=0;e<ne;e++) ((XACb0)((void**)eng[e][0])[0])(eng[e]);   // engine OnProcessingPassStart
         xa_flush_callbacks(local,nl);                                    // voice callbacks (outside the lock)
         for(int e=0;e<ne;e++) ((XACb0)((void**)eng[e][0])[1])(eng[e]);   // engine OnProcessingPassEnd
