@@ -3965,6 +3965,31 @@ static void d3dgl_draw(uint32_t vcount,int indexed,uint32_t instcount){
                     for(int c=0;c<3;c++){ float val=p[c]; if(val==val){ if(val<mn[c])mn[c]=val; if(val>mx[c])mx[c]=val; } } }
                 char m[220]; int k=snprintf(m,sizeof m,"  [vtxdump] fmt=%u stride=%u nvsamp=%llu posX[%.2f..%.2f] Y[%.2f..%.2f] Z[%.2f..%.2f] v0=[%.2f %.2f %.2f]\n",
                     fmt,stride,(unsigned long long)nv,mn[0],mx[0],mn[1],mx[1],mn[2],mx[2],((const float*)(d+off))[0],((const float*)(d+off))[1],((const float*)(d+off))[2]); (void)!write(2,m,k); } } }
+        // PELOAD_D3DGL_CLIPDUMP: decode v0's POSITION (any fmt), run it through the SAME transform the VS
+        // would (decompress via cb1=g_syn_cb1_buf -> world via cb12=g_last_b12 -> clip via cb0=g_syn_cb0_buf),
+        // and log the resulting clip/NDC. ONSCREEN iff NDC in [-1,1] & w>0. Grounds the "geometry off-screen"
+        // diagnosis in real numbers instead of guessing the camera. Samples a vertex min/max across the draw.
+        if(getenv("PELOAD_D3DGL_CLIPDUMP")){ static int cd2; if(cd2<10 && il->nelem>0){
+            int slot0=il->elem[0].slot<8?il->elem[0].slot:0; D3DObj*sb=g_d3dst.vb[slot0];
+            uint32_t stride=g_d3dst.vstride[slot0]; uint32_t off=g_d3dst.voff[slot0]+il->elem[0].off; uint32_t fmt=il->elem[0].fmt;
+            if(sb&&sb->data&&stride>=4&&(uint64_t)off+16<=sb->size){ cd2++;
+                const uint8_t*d=(const uint8_t*)sb->data+off; float v0[3]={0,0,0};
+                if(fmt==2||fmt==6||fmt==16||fmt==41){ const float*f=(const float*)d; v0[0]=f[0]; v0[1]=(fmt==41)?0:f[1]; v0[2]=(fmt==2||fmt==6)?f[2]:0; }
+                else if(fmt==11){ const uint16_t*u=(const uint16_t*)d; v0[0]=u[0]/65535.0f; v0[1]=u[1]/65535.0f; v0[2]=u[2]/65535.0f; }
+                else if(fmt==13){ const int16_t*s=(const int16_t*)d; v0[0]=s[0]/32767.0f; v0[1]=s[1]/32767.0f; v0[2]=s[2]/32767.0f; }
+                float dec[3]={v0[0],v0[1],v0[2]};
+                if(getenv("PELOAD_D3DGL_DECOMP")){ const float*c1=(const float*)g_syn_cb1_buf; dec[0]=v0[0]*c1[0]+c1[4]; dec[1]=v0[1]*c1[1]+c1[5]; dec[2]=v0[2]*c1[2]+c1[6]; }
+                float world[3]={dec[0],dec[1],dec[2]};
+                if(g_last_b12&&g_last_b12->data){ const float*w=(const float*)g_last_b12->data; for(int r=0;r<3;r++) world[r]=w[r*4]*dec[0]+w[r*4+1]*dec[1]+w[r*4+2]*dec[2]+w[r*4+3]; }
+                const float*c0=(const float*)g_syn_cb0_buf; float clip[4]; for(int r=0;r<4;r++) clip[r]=c0[r*4]*world[0]+c0[r*4+1]*world[1]+c0[r*4+2]*world[2]+c0[r*4+3];
+                float iw=clip[3]!=0?1.0f/clip[3]:0; float nx=clip[0]*iw,ny=clip[1]*iw,nz=clip[2]*iw;
+                int on=clip[3]>0&&nx>-1&&nx<1&&ny>-1&&ny<1&&nz>-0.1f&&nz<1.1f;
+                D3DObj*crt=g_d3dst.rtv; int cb0loc = mono ? (mp?mp->vcb[0]:-1) : (vs?vs->gl_cbloc[0]:-1);
+                int synthcb0 = (vscb_eff[0]==&g_syn_cb0);
+                char m[420]; int k=snprintf(m,sizeof m,"  [clipdump] fmt=%u v0=[%.3f %.3f %.3f] world=[%.1f %.1f %.1f] clipw=%.1f ndc=[%.2f %.2f %.2f] %s | cb0loc=%d cb0=%s rt=%dx%d(bb=%d)\n",
+                    fmt,v0[0],v0[1],v0[2],world[0],world[1],world[2],clip[3],nx,ny,nz,on?"ONSCREEN":"off",
+                    cb0loc, synthcb0?"SYNTH":(vscb_eff[0]&&vscb_eff[0]->data?"other":"NONE"),
+                    crt?(int)crt->w:0,crt?(int)crt->h:0,crt==g_d3d_backbuf); (void)!write(2,m,k); } } }
     }
     g_d3dgl_phase="draw";
     unsigned mode=d3dgl_topo(g_d3dst.topo);
@@ -3985,6 +4010,25 @@ static void d3dgl_draw(uint32_t vcount,int indexed,uint32_t instcount){
         if(instcount>1) G.DrawArraysInstanced(mode,0,(int)n,(int)instcount);
         else G.DrawArrays(mode,0,(int)n);
     }
+    // PELOAD_D3DGL_COVPROBE (use with SOLIDPS): read back the CURRENTLY-BOUND FBO right after each of the
+    // first geometry draws and count red/nonblack pixels. This measures "did THIS draw rasterize into ITS
+    // OWN render target" with zero present/latch/capture confusion -- the ground truth for on-screen coverage.
+    // PELOAD_D3DGL_COVPROBE: probe every COVINT'th geometry draw (default 40) that renders into a big
+    // (>=512x512) RT; read the FULL viewport (geometry projects to CENTER, not the corner) and dump the
+    // frame to a BMP whenever coverage hits a NEW HIGH -> captures the FULLEST scene across the run, directly
+    // from the geometry's own FBO (bypasses the present/latch). COVINT keeps the 8MB readbacks sparse.
+    if(getenv("PELOAD_D3DGL_COVPROBE") && nattr>0 && n>0 && G.ReadPixels && g_d3dst.rtv && g_d3dst.rtv->w>=512){
+        static long gdraw; gdraw++; int interval=getenv("PELOAD_D3DGL_COVINT")?atoi(getenv("PELOAD_D3DGL_COVINT")):40; if(interval<1)interval=40;
+        if((gdraw%interval)==0){
+            int W=g_d3dst.vp_w>0?g_d3dst.vp_w:1280, H=g_d3dst.vp_h>0?g_d3dst.vp_h:720; if(W>1920)W=1920; if(H>1080)H=1080;
+            static uint8_t*cbuf; if(!cbuf) cbuf=malloc(1920*1080*4);
+            if(cbuf){ if(G.GetError)G.GetError(); G.ReadPixels(0,0,W,H,GLE_RGBA,GLE_UBYTE,cbuf); unsigned ge=G.GetError?G.GetError():0;
+                int red=0,nb=0; for(int i=0;i<W*H;i++){ uint8_t r=cbuf[i*4],g=cbuf[i*4+1],b=cbuf[i*4+2]; if(r>80&&r>g+30&&r>b+30)red++; if((int)r+g+b>24)nb++; }
+                static int best_nb, ndump; D3DObj*crt=g_d3dst.rtv;
+                if(nb > best_nb+2000 && ndump<8){ best_nb=nb; ndump++; const char*home=getenv("HOME");
+                    char p[256]; snprintf(p,sizeof p,"%s/reclaimer_cov_%d_%02d.bmp",home?home:"/tmp",(int)getpid(),ndump);
+                    bmp_write_rgba(p,W,H,cbuf);
+                    char m[220]; int k=snprintf(m,sizeof m,"  [covprobe] NEWHIGH DUMP -> %s (vp=%dx%d fbo=%u red=%d nonblack=%d glerr=%u)\n",p,W,H,crt?crt->glfbo:0,red,nb,ge); (void)!write(2,m,k); } } } }
     for(int i=0;i<nattr;i++) G.DisableVertexAttribArray((unsigned)i);
     g_d3dgl_phase="done"; g_d3dgl_frame_draws++; d3dgl_note_rt(rt);
     // Latch the present source. The backbuffer (final composite) is preferred; if the engine never
@@ -3996,6 +4040,24 @@ static void d3dgl_draw(uint32_t vcount,int indexed,uint32_t instcount){
     // renders the 3D world into separate scene RTs; by default we present the backbuffer (so we show the
     // loading screen). In scene mode, ignore the backbuffer and latch the largest non-backbuffer RT that
     // received a real geometry draw this call -> show the rendered map instead of the loading overlay.
+    // PELOAD_D3DGL_PRESENT_GEOM: latch the RT that accumulates the MOST geometry vertices over the run
+    // (= the 3D scene color buffer -- the terrain/object draws submit millions of verts, while UI text
+    // quads and the loading-screen composite blit submit a handful). This reliably picks the scene RT
+    // regardless of its size/aspect, where the loading-screen overlay and square shadow RTs do not.
+    if(getenv("PELOAD_D3DGL_PRESENT_GEOM") && !(rt==g_d3d_backbuf) && nattr>0 && n>0 && rt->w>=256 && rt->h>=256){
+        static struct { unsigned tex; double verts; int w,h,vw,vh; } gtbl[64]; static int ngtbl; static unsigned gbesttex;
+        int fi=-1; for(int i=0;i<ngtbl;i++) if(gtbl[i].tex==rt->gltex){ fi=i; break; }
+        if(fi<0 && ngtbl<64){ fi=ngtbl++; gtbl[fi].tex=rt->gltex; gtbl[fi].verts=0; }
+        if(fi>=0){ gtbl[fi].verts += (double)n; gtbl[fi].w=(int)rt->w; gtbl[fi].h=(int)rt->h; gtbl[fi].vw=vw; gtbl[fi].vh=vh;
+            double mx=-1; int mi=-1; for(int i=0;i<ngtbl;i++) if(gtbl[i].verts>mx){ mx=gtbl[i].verts; mi=i; }
+            if(mi>=0 && gtbl[mi].tex!=gbesttex){ gbesttex=gtbl[mi].tex;
+                g_d3dgl_present_tex=gtbl[mi].tex;
+                g_d3dgl_present_tw=(gtbl[mi].w>4096?4096:gtbl[mi].w); g_d3dgl_present_th=(gtbl[mi].h>4096?4096:gtbl[mi].h);
+                if(g_d3dgl_present_tw<1)g_d3dgl_present_tw=gtbl[mi].vw; if(g_d3dgl_present_th<1)g_d3dgl_present_th=gtbl[mi].vh;
+                g_d3dgl_present_vw=g_d3dgl_present_tw; g_d3dgl_present_vh=g_d3dgl_present_th;
+                if(getenv("PELOAD_TRACE_D3DGL")){ char m[160]; int k=snprintf(m,sizeof m,"  [present-geom] latch tex=%u %dx%d verts=%.0f\n",gtbl[mi].tex,gtbl[mi].w,gtbl[mi].h,mx); (void)!write(2,m,k);} } }
+        return;
+    }
     int scene_mode = getenv("PELOAD_D3DGL_PRESENT_SCENE")!=0;
     if(vw>=512 && vh>=288){ long a=(long)vw*vh; static long best;
         int isbb=(rt==g_d3d_backbuf);
