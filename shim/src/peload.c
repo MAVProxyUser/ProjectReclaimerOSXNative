@@ -1374,7 +1374,7 @@ static volatile unsigned long g_d3dgl_phase_draw;    // which draw # we were on
 static int d3dgl_enabled(void){ if(g_d3dgl_en<0) g_d3dgl_en=getenv("PELOAD_D3DGL")?1:0; return g_d3dgl_en; }
 static void d3dgl_draw(uint32_t vcount,int indexed,uint32_t instcount,uint32_t start,int32_t base,uint32_t sinst); // fwd
 static void d3dgl_present(void); // fwd (blit the D3DGL backbuffer to the window at Present)
-static int cb_looks_viewproj(const float*m,uint64_t bytes); static int hb_enabled(void); static int hb_is_world_camera(const float*rows); static void hb_capture_view(const float*rows); static void hb_draw_overlay(void); extern volatile int g_hb_taken; // hitbox.c
+static int cb_looks_viewproj(const float*m,uint64_t bytes); static int hb_enabled(void); static int hb_is_world_camera(const float*rows); static void hb_capture_view(const float*rows); static void hb_draw_overlay(void); static void hb_note_map(const char*p); extern volatile int g_hb_taken; // hitbox.c
 static void d3dgl_clear_rtv(void* rtvview,const float* col); // fwd (ClearRenderTargetView -> GL clear)
 static void d3dgl_clear_dsv(void*dsvview,uint32_t flags,float depth,uint8_t stencil); // fwd (ClearDepthStencilView -> GL depth/stencil clear)
 static void MSABI ctx_ClearRTV(void*t,void*rtv,const float*col){ (void)t; if(d3dgl_enabled()) d3dgl_clear_rtv(rtv,col); }
@@ -3491,6 +3491,7 @@ static int input_script(XPad*p){
     double t=mono_s()-g_gameplay_t0-delay; if(t<0) return 0;
     if(getenv("PELOAD_INPUT_LOOP") && total>0) t=fmod(t,total); else if(t>=total) return 0;
     for(int i=0;i<nseg;i++){ if(t<seg[i].dur){ p->lx=ax16(seg[i].lx); p->ly=ax16(seg[i].ly); p->rx=ax16(seg[i].rx); p->ry=ax16(seg[i].ry); p->buttons=seg[i].b;
+            { extern int hb_face_target(float*,float*); float fx,fy; if(i>0 && getenv("PELOAD_INPUT_FACE") && hb_face_target(&fx,&fy)){ p->rx=ax16(fx); p->ry=ax16(fy); } }
             p->rt=(uint8_t)(seg[i].rt*255.0f); p->lt=(uint8_t)(seg[i].lt*255.0f);
             static int last=-1; if(i!=last){ last=i; char m[120]; int k=snprintf(m,sizeof m,"  [input] script segment %d: L=(%.2f,%.2f) R=(%.2f,%.2f) b=%x\n",i,seg[i].lx,seg[i].ly,seg[i].rx,seg[i].ry,seg[i].b); (void)!write(2,m,k); }
             return 1; } t-=seg[i].dur; }
@@ -7970,7 +7971,7 @@ static void*  MSABI i_CreateFileW(const uint16_t *w,uint32_t acc,uint32_t share,
             for(int i=0;i<800 && shown<8;i++){ uint64_t v=sp[i]; if(v>=0x140001000ULL&&v<0x141aae000ULL){ char t[32]; snprintf(t,sizeof t," +0x%llx",(unsigned long long)(v-0x140000000ULL)); ws(t); shown++; } }
             ws("\n"); }
         return (void*)-1; } g_lasterr=0; // INVALID_HANDLE_VALUE
-    fd_record(fd,p);
+    fd_record(fd,p); hb_note_map(p);   // hitbox.c: remembers opened .map files (collision models for PELOAD_HITBOXES)
     if(fl&0x04000000) g_fddel[fd<MAXFD?fd:0]=1; // FILE_FLAG_DELETE_ON_CLOSE
     return (void*)(intptr_t)(0x1000+fd);
 }

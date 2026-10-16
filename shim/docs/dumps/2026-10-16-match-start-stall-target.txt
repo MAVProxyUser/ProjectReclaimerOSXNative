@@ -1,0 +1,200 @@
+==== GUEST THREAD DUMP (31 threads) ====
+-- thr2 rip=jit:0x7ff80dc9e5e2 rsp=0x30f2e7f18
+-- thr3 rip=jit:0x7ff80dc9d2a6 rsp=0x30f47bb28
+-- thr4 rip=jit:0x7ff80dc9e712 rsp=0x30f6048f8
+      exe+0x1d6702a
+      exe+0xc1179f
+      exe+0x2062850
+      exe+0x2062850
+      exe+0xcdc037
+      exe+0x1d4d079
+      exe+0x2062850
+-- thr5 rip=jit:0x7ff80dc9e712 rsp=0x30f6877d8
+      exe+0x1d6702a
+      exe+0x1d4c0f6
+      exe+0xc2ed0a
+      exe+0x11a1220
+      exe+0x1f33da0
+      exe+0x1f33d42
+      exe+0x2061db0
+      exe+0x1d4a1ac
+      exe+0x2061db0
+      exe+0xd19d3c
+      exe+0x1d4d079
+      exe+0x2061db0
+-- thr6 rip=jit:0x7ff80dc9e712 rsp=0x30f709fd8
+      exe+0x27daaa0
+      exe+0x27daaa0
+      exe+0x1d6702a
+      exe+0x1d4c0f6
+      exe+0x101503
+      exe+0x27daa9c
+      exe+0x27daaa4
+      exe+0x27daadc
+      exe+0x27daaa0
+      exe+0x27daaa0
+      exe+0x27daaa4
+      exe+0x27daadc
+      exe+0x27daad8
+      exe+0x27daa9c
+      exe+0x15c86f0
+      exe+0x4430
+-- thr7 rip=jit:0x7ff80dca288a rsp=0x30f915628
+-- thr8 rip=jit:0x7ff80dc9fe36 rsp=0x30fa16698
+      halo3+0x21c2398
+      halo3+0x21c2398
+      halo3+0x212f8
+      halo3+0x177bdd
+      halo3+0x173bdd
+      halo3+0x171f86
+      halo3+0x17af54
+      halo3+0x2d6731c
+      halo3+0xad8e8
+      halo3+0xa97dd
+-- thr9 rip=jit:0x7ff80dc9e712 rsp=0x30fa9fc38
+      halo3+0x0
+      halo3+0x1221a2
+      halo3+0x9f52d
+      halo3+0xd1ee3
+-- thr10 rip=jit:0x7ff80dc9e712 rsp=0x30fb22c38
+      halo3+0x0
+      halo3+0x1221a2
+      halo3+0x9f52d
+      halo3+0xd1ee3
+-- thr11 rip=jit:0x7ff80dc9e712 rsp=0x30fba5c38
+      halo3+0x0
+      halo3+0x1221a2
+      halo3+0x9f52d
+      halo3+0xd1ee3
+-- thr12 rip=jit:0x7ff80dc9e712 rsp=0x30fc28c38
+      halo3+0x0
+      halo3+0x1221a2
+      halo3+0x9f52d
+      halo3+0xd1ee3
+-- thr13 rip=jit:0x7ff80dc9e712 rsp=0x30fcabc38
+      halo3+0x1e439fc
+      halo3+0x0
+      halo3+0x1221e5
+      halo3+0x2d74668
+      halo3+0x1e439fc
+      halo3+0xa4724
+      halo3+0x2d74668
+      halo3+0xd1ee3
+-- thr14 rip=jit:0x7ff80dc9e5e2 rsp=0x30fd2ed58
+      halo3+0x1e439fc
+      halo3+0x217fb
+      halo3+0xd1ee3
+-- thr15 rip=jit:0x7ff80dc9bb4e rsp=0x30fe33f78
+-- thr16 rip=jit:0x7ff80dc9d2a6 rsp=0x30febbb28
+      exe+0x713aed0
+-- thr17 rip=jit:0x7ff80dc9e712 rsp=0x30ffc6bf8
+      halo3+0x21c2390
+      halo3+0x172b08
+      halo3+0x21c2398
+      halo3+0x21c2398
+      halo3+0x172975
+      halo3+0x21c2390
+-- thr18 rip=jit:0x7ff80dc9e712 rsp=0x310049c78
+-- thr19 rip=jit:0x7ff80dc9d2a6 rsp=0x3100cfb18
+-- thr20 rip=jit:0x7ff80dc9d2a6 rsp=0x310157b18
+-- thr21 rip=jit:0x7ff80dc9e712 rsp=0x3101dac58
+      halo3+0x0
+      halo3+0xb1a93
+      halo3+0xd1ee3
+-- thr22 rip=jit:0x7ff80dc9e712 rsp=0x31025dc68
+      halo3+0x1e439fc
+      halo3+0xb1ce3
+      halo3+0xd1ee3
+-- thr24 rip=exe+0x82d33e rsp=0x31057a360
+      exe+0x82bf7e
+      exe+0x65c0bf
+      exe+0x6739c1
+      exe+0x4430
+      exe+0x1f33da0
+      exe+0x1f33d42
+      exe+0x1f33fdb
+      exe+0x2062590
+      exe+0x1d4a1ac
+      exe+0x2062590
+      exe+0xc3e5e9
+      exe+0xd59694
+      exe+0x1d4d079
+      exe+0x2062590
+-- thr25 rip=jit:0x7ff80dc9e712 rsp=0x31088c788
+      exe+0x1d6702a
+      exe+0xc27fa0
+      exe+0x1f33e4f
+      exe+0x1f33d42
+      exe+0x1f33fdb
+      exe+0x1d4a1ac
+      exe+0x2061c90
+      exe+0xd19f9a
+      exe+0x1d4d079
+      exe+0x2061c90
+-- thr26 rip=jit:0x7ff80dc9e712 rsp=0x310991e98
+      exe+0x1d6702a
+      exe+0x6a4b10
+      exe+0x1f33e4f
+      exe+0x2062330
+      exe+0x1f33da0
+      exe+0x1f33d42
+      exe+0x1f33fdb
+      exe+0x2062330
+      exe+0x1d4a1ac
+      exe+0x2062330
+      exe+0xc44469
+      exe+0xd16561
+      exe+0x1d4d079
+      exe+0x2062330
+-- thr27 rip=jit:0x7ff80dc9e712 rsp=0x311e8d5e8
+      exe+0x1db24b7
+      exe+0x1db2d97
+      exe+0x1db0a3f
+      exe+0x1d4c0f6
+      exe+0x1dae4d1
+      exe+0x1dac4c4
+      exe+0x1d98837
+      exe+0x2327980
+      exe+0x2327980
+      exe+0x1d9bf84
+      exe+0x2327980
+      exe+0x1d4d079
+      exe+0x2327980
+-- thr28 rip=jit:0x7ff80dc9e712 rsp=0x311f10448
+      exe+0x1438887
+      exe+0x1db313b
+      exe+0x1db2ceb
+      exe+0x1db0925
+      exe+0x1d4c0f6
+      exe+0x1dae4d1
+      exe+0x1dac4c4
+      exe+0x2327980
+      exe+0x1f33da0
+      exe+0x1d99399
+      exe+0x1f33d42
+      exe+0x1d98837
+      exe+0x2327980
+      exe+0x2327980
+      exe+0x1d9bf84
+      exe+0x2327980
+-- thr29 rip=jit:0x7ff80dc9e712 rsp=0x31219ba38
+      exe+0x1438887
+      exe+0x1db315a
+      exe+0x1db2bda
+      exe+0x1db55c2
+      exe+0x1db5a81
+      exe+0x1db3567
+      exe+0xbd8380
+      exe+0xc432a4
+-- thr30 rip=jit:0x7ff80dc9e712 rsp=0x30f3ede38
+==== END DUMP ====
+16:58:21.662 Menu music output unavailable: No music playback device
+16:58:23.673 Menu music output unavailable: No music playback device
+16:58:25.702 Menu music output unavailable: No music playback device
+16:58:27.705 Menu music output unavailable: No music playback device
+16:58:29.719 Menu music output unavailable: No music playback device
+16:58:31.739 Menu music output unavailable: No music playback device
+16:58:33.742 Menu music output unavailable: No music playback device
+16:58:35.755 Menu music output unavailable: No music playback device
+16:58:37.765 Menu music output unavailable: No music playback device
+16:58:39.773 Menu music output unavailable: No music playback device

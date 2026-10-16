@@ -7,7 +7,10 @@
 # Refuses to start while any other game process is running (never runs beside the user's game).
 cd "$(dirname "$0")/../.."
 EXTRA="$1"; SECS="${2:-60}"; shift 2
-if pgrep -f '^[^ ]*build/peload' >/dev/null; then echo "a game is already running - not starting"; ps -axo pid,pgid,etime,command | grep -E '[0-9] [^ ]*build/peload' | cut -c1-120; exit 3; fi
+# (a running shim/target.sh target is allowed: it is input-less and has its own process group)
+TPG="$(cat "$HOME/Library/Application Support/ReclaimerMac/target.pgid" 2>/dev/null)"
+others(){ for p in $(pgrep -f '^[^ ]*build/peload'); do [ -n "$TPG" ] && [ "$(ps -o pgid= -p "$p" | tr -d ' ')" = "$TPG" ] && continue; echo "$p"; done; }
+if [ -n "$(others)" ]; then echo "a game is already running - not starting"; ps -axo pid,pgid,etime,command | grep -E '[0-9] [^ ]*build/peload' | cut -c1-120; exit 3; fi
 EXE="${QR_EXE:-client/project-reclaimer-client-v0.9.18.exe}"
 ARGS=("$@"); [ ${#ARGS[@]} -eq 0 ] && ARGS=(game-client --mcc-path "C:\\Program Files\\Steam\\steamapps\\common\\Halo The Master Chief Collection")
 mkdir -p "$HOME/Library/Application Support/ReclaimerMac/prefix/drive_c/ReclaimerProfileTest"
@@ -21,5 +24,5 @@ env PELOAD_SKINGUARD=1 PELOAD_VTGUARD=1 PELOAD_ALLOC_GUARD=1 PELOAD_RECLAIMER_PA
   PELOAD_TITLE_PREFIX="TEST (no input)" RECLAIMER_PROFILE_DIR='C:\ReclaimerProfileTest' $EXTRA \
   arch -x86_64 shim/build/peload "$EXE" "${ARGS[@]}" < /dev/null > /tmp/quiet-run.log 2>&1 &
 PG=$!; sleep "$SECS"; kill -9 -- -$PG 2>/dev/null; sleep 1
-if pgrep -f '^[^ ]*build/peload' >/dev/null; then echo "WARNING: a game process is still running after cleanup"; ps -axo pid,pgid,command | grep -E '[0-9] [^ ]*build/peload' | cut -c1-120; fi
+if [ -n "$(others)" ]; then echo "WARNING: a game process is still running after cleanup"; ps -axo pid,pgid,command | grep -E '[0-9] [^ ]*build/peload' | cut -c1-120; fi
 echo DONE

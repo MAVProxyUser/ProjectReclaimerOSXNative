@@ -6,7 +6,7 @@ Kept current as work lands (newest status first). "Done" items name the commit t
 
 | # | Request | Status / notes |
 |---|---|---|
-| 1 | **Game audio silent after joining a match from the menu (v0.9.18)** | Direct mode (`RECLAIMER_DIRECT=1`) has audio on v0.9.18 (user heard the "Slayer" announcer). A muted dump of a menu-*hosted* Valhalla match also had audio. The silent case was a menu-runtime **join of a match in progress** (FKK BTB). To reproduce: target.sh host + a muted joiner with `PELOAD_AUDIO_DUMP`. |
+| 1 | ~~Game audio silent after joining a match from the menu (v0.9.18)~~ **resolved**: user heard full game audio after joining FKK BTB in progress (2026-10-16) | Direct mode (`RECLAIMER_DIRECT=1`) has audio on v0.9.18 (user heard the "Slayer" announcer). A muted dump of a menu-*hosted* Valhalla match also had audio. The silent case was a menu-runtime **join of a match in progress** (FKK BTB). To reproduce: target.sh host + a muted joiner with `PELOAD_AUDIO_DUMP`. |
 | 2 | **Water doesn't render** | Seen on Valhalla. Not investigated yet. |
 | 3 | **Frame rate** — "any way to increase fps?" | Draw-call bound in GL-on-Metal (~3.6 µs per draw, 1200–2300 draws/frame). Ideas: GL submission thread, draw batching/instancing, fewer state changes. Not started. |
 | 5 | **45 s startup watchdog — root cause** | We skip the deadline check (signature patch `watchdog`). On Windows something clears that deadline in time; find what, so the patch can go. |
@@ -18,6 +18,8 @@ Kept current as work lands (newest status first). "Done" items name the commit t
 | 11 | v0.9.13 regression check | Loader changes for v0.9.18 (module handles, TLS, CreateDirectoryW, pipes) not re-verified on v0.9.13; it is only a fallback now. |
 | 12 | Release bundle | GitHub release v0.1.0 predates everything below; a new bundle (loader + scripts) would need the user's go-ahead. |
 
+| 13 | **Intermittent hang at match start** ("presentation callback stalled" right after the loading screen, engine never presents again; seen on target.sh and quiet runs) | Thread dump: shim/docs/dumps/2026-10-16-match-start-stall-target.txt — two engine threads in halo3 render-resource code (halo3+0x171f86..0x172b08, next to the VTGUARD site 0x172bce). Not investigated. |
+
 ## Done (2026-10-16)
 
 - Join public servers (remote join proven, then real BTB on v0.9.18) — 36c3c98, a574219
@@ -27,4 +29,5 @@ Kept current as work lands (newest status first). "Done" items name the commit t
 - Bigger window (largest 16:9 that fits the screen) — 1367a68
 - Reclaimer client v0.9.18 support (signature patches, Bink/Waves DLL support) — a574219
 - Hitbox overlay `PELOAD_HITBOXES=1|all` (halo3's own debug_objects overlays are compiled out; reads the object table, draws bounding spheres with the world camera); verified in a 60-player BTB (FKK, High Ground) — f73252e
+- Real hitboxes: `PELOAD_HITBOXES=1` now draws each object's collision model (what damage tests) posed on its live node matrices — HEAD
 - Title fps no longer claims more than the screen can show (loading screens spin at ~1000 presents/s) — f73252e
