@@ -572,10 +572,12 @@ static int pipe_close(void*h);                                       // fwd
 static int pipe_name_is(const char*s);                               // fwd
 static void* pipe_client_open(const char*narrow);                    // fwd
 double g_gameplay_t0;   // monotonic seconds when the client logged "gameplay presentation ready" (0 = not yet)
+double g_menu_ready_t0; // ... "Menu loading screen finished" (frontend menu mode)
 static double mono_s(void){ struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t); return t.tv_sec+t.tv_nsec*1e-9; }
 static int    MSABI i_WriteFile(void *h, const void *buf, uint32_t n, uint32_t *wr, void *ov){
     (void)ov; intptr_t hv=(intptr_t)h;
     if(!g_gameplay_t0 && buf && n>20 && memmem(buf,n,"gameplay presentation ready",27)) g_gameplay_t0=mono_s();
+    if(!g_menu_ready_t0 && buf && n>20 && memmem(buf,n,"Menu loading screen finished",28)) g_menu_ready_t0=mono_s();
     if(pipe_is(hv)) return pipe_write(h,buf,n,wr);
     int fd = (hv==2)?1 : (hv==3)?2 : (hv>=0x1000)?(int)(hv-0x1000) : -1;
     // PELOAD_CAP_ADV: dump the exact bytes written to a local-server advertisement file
@@ -612,6 +614,7 @@ static int    MSABI i_WriteFile(void *h, const void *buf, uint32_t n, uint32_t *
 static int    MSABI i_WriteConsoleW(void *h, const uint16_t *s, uint32_t n, uint32_t *wr, void *rsv){
     (void)rsv; int fd=(h==(void*)3)?2:1;
     if(!g_gameplay_t0 && s && n>20){ char a[512]; uint32_t m=n<511?n:511; for(uint32_t i=0;i<m;i++) a[i]=(s[i]<128)?(char)s[i]:'?'; if(memmem(a,m,"gameplay presentation ready",27)) g_gameplay_t0=mono_s(); }
+    if(!g_menu_ready_t0 && s && n>20){ char a[512]; uint32_t m=n<511?n:511; for(uint32_t i=0;i<m;i++) a[i]=(s[i]<128)?(char)s[i]:'?'; if(memmem(a,m,"Menu loading screen finished",28)) g_menu_ready_t0=mono_s(); }
     for(uint32_t i=0;i<n;i++){ char c=(s[i]<128)?(char)s[i]:'?'; (void)!write(fd,&c,1);} if(wr)*wr=n; return 1; }
 // ReadConsoleW/A: the dedicated server's game-server host reads its console (stdin) to wait for a
 // shutdown command / EOF while its server threads run. The old generic stub returned 0 (FALSE) ->
@@ -1324,6 +1327,8 @@ static void MSABI ctx_Draw(void*t,uint32_t n,uint32_t s){ (void)t;(void)s; d3dtr
 static void MSABI ctx_UpdateSubresource(void*t,void*res,uint32_t sub,const void*box,const void*src,uint32_t srp,uint32_t sdp){
     (void)t; D3DObj*o=res; if(!o||!o->data||!src) return;
     cs_wait_res(o);
+    if(getenv("PELOAD_TRACE_TEXUPD") && o->kind>=2 && o->w==1280 && o->h==720 && !box){ static int n; if((n++%300)==0){ uint64_t nz=0; const uint8_t*sp=src; for(uint32_t y=0;y<720;y+=4) for(uint32_t x=0;x<1280*4;x+=4) if(sp[(size_t)y*srp+x+3]) nz++;
+        char m[160]; int k=snprintf(m,sizeof m,"  [texupd-px] #%d %p pitch=%u nonzero-alpha samples=%llu/230400\n",n,(void*)o,srp,(unsigned long long)nz); (void)!write(2,m,k); } }
     if(getenv("PELOAD_TRACE_TEXUPD") && o->kind>=2 && o->w){ extern double g_gameplay_t0; const uint32_t*bx=box; uint64_t ra=(uint64_t)__builtin_return_address(0);
         char m[220]; int k=snprintf(m,sizeof m,"  [texupd] t=%.2f UpdateSubresource %p %ux%u f%u sub=%u box=%d,%d-%d,%d ra=0x%llx\n",g_gameplay_t0?mono_s()-g_gameplay_t0:-1.0,(void*)o,o->w,o->h,o->fmt,sub,bx?(int)bx[0]:-1,bx?(int)bx[1]:-1,bx?(int)bx[3]:-1,bx?(int)bx[4]:-1,(unsigned long long)(ra>=0x180000000ULL&&ra<0x187000000ULL?ra-0x180000000ULL:ra)); (void)!write(2,m,k); }
     o->gl_dirty=1; o->rvalid=0; o->ver++; if(o->is_cb) o->cb_upd=g_cb_tick;
@@ -2659,6 +2664,7 @@ static uint32_t MSABI i_GetTickCount(void){ return (uint32_t)(mach_absolute_time
 static int MSABI i_NtWriteFile(void*h,void*ev,void*apc,void*apcctx,void*iosb,const void*buf,uint32_t len,void*off,void*key){
     (void)ev;(void)apc;(void)apcctx;(void)key; intptr_t hv=(intptr_t)h;
     if(!g_gameplay_t0 && buf && len>20 && memmem(buf,len,"gameplay presentation ready",27)) g_gameplay_t0=mono_s();
+    { extern double g_menu_ready_t0; if(!g_menu_ready_t0 && buf && len>20 && memmem(buf,len,"Menu loading screen finished",28)) g_menu_ready_t0=mono_s(); }
     int fd = (hv==2)?1 : (hv==3)?2 : (hv>=0x1000)?(int)(hv-0x1000) : -1;
     if(fd>=0 && len>8 && len<4096 && getenv("PELOAD_TRACE_BT")){ const char*w=getenv("PELOAD_TRACE_BT");
         if(memmem(buf,len,w,strlen(w))){ (void)!write(2,"  [BT-Nt] matched; stack exe/halo3 returns:\n",44);
@@ -3410,6 +3416,7 @@ static CGLContextObj cocoa_make_gl_window(int w,int h){
     }
     om0(ctx,"makeCurrentContext"); om0(ctx,"update"); // bind + validate the drawable
     oretain(ctx); oretain(win); oretain(pf); g_nswin=win;   // keep alive past any pool drain
+    { extern void title_timer_start_ext(void); title_timer_start_ext(); }
     ws("  [cocoa] NSWindow + NSOpenGLContext created (visible)\n");
     return (CGLContextObj)((void*(*)(id,SEL))objc_msgSend)(ctx,osel("CGLContextObj"));
 }
@@ -3500,9 +3507,34 @@ static long     g_d3dgl_frame_draws, g_d3dgl_max_draws;
 #include <dispatch/dispatch.h>
 static unsigned long g_draws_total;
 static char g_fps_title[160];
+// Launch time = start of the process that launched this one when that was a peload process started within
+// the last 2 minutes (the window lives in the spawned worker), else this process.
+#include <sys/sysctl.h>
+static double proc_start_wall(pid_t pid){ struct kinfo_proc kp; size_t len=sizeof kp; int mib[4]={CTL_KERN,KERN_PROC,KERN_PROC_PID,(int)pid};
+    if(sysctl(mib,4,&kp,&len,0,0)!=0||len==0) return 0; return kp.kp_proc.p_starttime.tv_sec+kp.kp_proc.p_starttime.tv_usec*1e-6; }
+static double g_launch_mono;   // launch time on the CLOCK_MONOTONIC scale of mono_s()
+static void launch_time_init(void){ if(g_launch_mono) return; struct timeval tv; gettimeofday(&tv,0); double wall=tv.tv_sec+tv.tv_usec*1e-6;
+    double me=proc_start_wall(getpid()), par=proc_start_wall(getppid()); double st=me?me:wall;
+    if(par && me && par<me && me-par<120.0){ struct kinfo_proc kp; size_t len=sizeof kp; int mib[4]={CTL_KERN,KERN_PROC,KERN_PROC_PID,(int)getppid()};
+        if(sysctl(mib,4,&kp,&len,0,0)==0 && strstr(kp.kp_proc.p_comm,"peload")) st=par; }
+    g_launch_mono=mono_s()-(wall-st); }
+// Window title, refreshed every second on the main queue (also while the window is still black during
+// startup): "starting... m:ss" until the first engine frame, then fps / draws / frame time, the load time
+// once the match or the frontend menu is ready, and the elapsed time since launch.
 static void fps_title_main(void*ctx){ (void)ctx; extern id g_nswin_ext(void); id w=g_nswin_ext(); if(!w) return;
-    id str=((id(*)(id,SEL,const char*))objc_msgSend)((id)objc_getClass("NSString"),sel_registerName("stringWithUTF8String:"),g_fps_title);
+    extern double g_gameplay_t0, g_menu_ready_t0; launch_time_init(); double up=mono_s()-g_launch_mono; int um=(int)(up/60), us=(int)up%60;
+    char t[260]; double ready=g_gameplay_t0?g_gameplay_t0:g_menu_ready_t0;
+    if(!g_fps_title[0]) snprintf(t,sizeof t,"Project Reclaimer (Mac, Wine-free)  |  starting...  %d:%02d",um,us);
+    else if(ready) snprintf(t,sizeof t,"%s  |  %s in %.1f s  |  up %d:%02d",g_fps_title,g_gameplay_t0?"match loaded":"menu loaded",ready-g_launch_mono,um,us);
+    else snprintf(t,sizeof t,"%s  |  loading...  %d:%02d",g_fps_title,um,us);
+    { static int n; if(getenv("PELOAD_FPS_LOG") && (n++%5)==0){ char m[300]; int k=snprintf(m,sizeof m,"  [title] %s\n",t); (void)!write(2,m,k); } }
+    id str=((id(*)(id,SEL,const char*))objc_msgSend)((id)objc_getClass("NSString"),sel_registerName("stringWithUTF8String:"),t);
     ((void(*)(id,SEL,id))objc_msgSend)(w,sel_registerName("setTitle:"),str); }
+static void title_timer_start(void){ static int started; if(started||getenv("PELOAD_NO_FPS_TITLE")) return; started=1; launch_time_init();
+    dispatch_source_t ds=dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER,0,0,dispatch_get_main_queue());
+    dispatch_source_set_timer(ds,dispatch_time(DISPATCH_TIME_NOW,0),NSEC_PER_SEC,NSEC_PER_SEC/10);
+    dispatch_set_context(ds,0); dispatch_source_set_event_handler_f(ds,fps_title_main); dispatch_resume(ds); }
+void title_timer_start_ext(void){ title_timer_start(); }
 static void fps_title_tick(void){
     static double t0; static unsigned long n0, d0; static int off=-1; if(off<0) off=getenv("PELOAD_NO_FPS_TITLE")?1:0; if(off) return;
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC,&ts); double now=ts.tv_sec+ts.tv_nsec*1e-9;
@@ -3512,7 +3544,6 @@ static void fps_title_tick(void){
     double fps=(frames-n0)/dt; double dpf=(frames>n0)?(double)(g_draws_total-d0)/(frames-n0):0;
     snprintf(g_fps_title,sizeof g_fps_title,"Project Reclaimer (Mac, Wine-free)  |  %.1f fps  |  %.0f draws/frame  |  %.1f ms",fps,dpf,fps>0?1000.0/fps:0);
     if(getenv("PELOAD_FPS_LOG")){ char m[200]; int k=snprintf(m,sizeof m,"  [fps] %s\n",g_fps_title+35); (void)!write(2,m,k); }
-    dispatch_async_f(dispatch_get_main_queue(),0,fps_title_main);
     t0=now; n0=frames; d0=g_draws_total; }
 static int      g_d3dgl_trace, g_d3dgl_depth;
 // PELOAD_D3DGL_DUMP_RT: record every distinct render target drawn into, then dump each one's GL
@@ -5559,7 +5590,8 @@ static void d3dgl_draw_impl(uint32_t vcount,int indexed,uint32_t instcount,uint3
           cnt++; } } }
     // PELOAD_D3DGL_DUMPTEX_PS=<pshash>: once, read back the PS's t0 (mip 0, RGBA8) to ~/reclaimer_pstex_<hash>.bmp
     { const char*dp=getenv("PELOAD_D3DGL_DUMPTEX_PS"); static int dumped;
-      if(dp && !dumped && ps->bchash==strtoull(dp,0,16)){ D3DObj*x=g_d3dst.psrv[0]; D3DObj*xr=(x&&x->data&&x->vkind)?(D3DObj*)x->data:x;
+      static long seen_n; long skipn=getenv("PELOAD_D3DGL_DUMPTEX_SKIP")?atol(getenv("PELOAD_D3DGL_DUMPTEX_SKIP")):0;
+      if(dp && !dumped && ps->bchash==strtoull(dp,0,16) && seen_n++>=skipn){ D3DObj*x=g_d3dst.psrv[0]; D3DObj*xr=(x&&x->data&&x->vkind)?(D3DObj*)x->data:x;
         static void(*gti)(unsigned,int,unsigned,unsigned,void*); if(!gti) gti=dlsym(RTLD_DEFAULT,"glGetTexImage");
         if(xr && xr->gltex && xr->w && xr->h && xr->w<=4096 && xr->h<=4096 && gti){ dumped=1; unsigned char*px=calloc(1,(size_t)xr->w*xr->h*4);
             if(px){ G.BindTexture(xr->gltarget?xr->gltarget:GLE_TEX2D,xr->gltex); TEXCACHE_INVALIDATE(); gti(xr->gltarget?xr->gltarget:GLE_TEX2D,0,GLE_RGBA,GLE_UBYTE,px);
