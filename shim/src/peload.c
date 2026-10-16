@@ -760,6 +760,7 @@ typedef struct { void** vtbl; uint32_t kind; uint32_t rowpitch; uint64_t size; v
     int rvalid; uint64_t rlo, rhi; // buffer: byte range uploaded to GL since the last Map/Update (partial uploads)
     void* isg; int nisg;          // VS: parsed input signature (semantic -> register), lazily from bc
     int copydst;                  // texture: destination of a GPU copy from a rendered target (diagnostics)
+    int last_vpw, last_vph;       // render target: viewport of the most recent draw into it
     char rname[48];               // shader: reflected cbuffer/resource names (diagnostics)
     int stkind; uint32_t sd[72];  // state object: 1=blend 2=depth-stencil 3=rasterizer 4=sampler + raw D3D11 desc
     unsigned glsamp, glsamp_nomip; // sampler state: GL sampler objects (full / no-mip variant)
@@ -3107,7 +3108,7 @@ typedef struct {
     void(*DepthMask)(unsigned char);
     void(*DrawElementsBaseVertex)(unsigned,int,unsigned,const void*,int); void(*DrawElementsInstancedBaseVertex)(unsigned,int,unsigned,const void*,int,int);
     void(*VertexAttribDivisor)(unsigned,unsigned); void(*BufferSubData)(unsigned,long,long,const void*); void(*PrimitiveRestartIndex)(unsigned);
-    void(*BlitFramebuffer)(int,int,int,int,int,int,int,int,unsigned,unsigned);
+    void(*BlitFramebuffer)(int,int,int,int,int,int,int,int,unsigned,unsigned); void(*Finish)(void);
     void(*BlendFuncSeparate)(unsigned,unsigned,unsigned,unsigned); void(*BlendEquationSeparate)(unsigned,unsigned); void(*BlendColor)(float,float,float,float);
     void(*ColorMask)(unsigned char,unsigned char,unsigned char,unsigned char); void(*CullFace)(unsigned); void(*FrontFace)(unsigned); void(*Scissor)(int,int,int,int);
     void(*GenSamplers)(int,unsigned*); void(*BindSampler)(unsigned,unsigned); void(*SamplerParameteri)(unsigned,unsigned,int); void(*SamplerParameterf)(unsigned,unsigned,float); void(*SamplerParameterfv)(unsigned,unsigned,const float*);
@@ -3191,7 +3192,7 @@ static int d3dgl_loadgl(void){
     L(Viewport);L(ClearColor);L(Clear);L(Enable);L(Disable);L(BlendFunc);L(GetError);L(Flush);
     L(ReadBuffer);L(ReadPixels);
     L(GenRenderbuffers);L(BindRenderbuffer);L(RenderbufferStorage);L(FramebufferRenderbuffer);L(DepthMask);
-    L(DrawElementsBaseVertex);L(DrawElementsInstancedBaseVertex);L(VertexAttribDivisor);L(BufferSubData);L(PrimitiveRestartIndex);L(BlitFramebuffer);
+    L(DrawElementsBaseVertex);L(DrawElementsInstancedBaseVertex);L(VertexAttribDivisor);L(BufferSubData);L(PrimitiveRestartIndex);L(BlitFramebuffer);L(Finish);
     L(BlendFuncSeparate);L(BlendEquationSeparate);L(BlendColor);L(ColorMask);L(CullFace);L(FrontFace);L(Scissor);
     L(GenSamplers);L(BindSampler);L(SamplerParameteri);L(SamplerParameterf);L(SamplerParameterfv);
     #undef L
@@ -3247,7 +3248,7 @@ static int d3dgl_make_offscreen(void){
     // the render thread's (currently BLACK) backbuffer texture INSTEAD of the GDI text overlay it
     // otherwise shows, so until the render thread actually produces content this makes the window
     // WORSE (black vs text). Default OFF; enable with PELOAD_D3DGL_SHAREPF once the render output is real.
-    if(share && g_nspf && getenv("PELOAD_D3DGL_SHAREPF")){
+    if(share && g_nspf && !getenv("PELOAD_D3DGL_NOSHAREPF")){
         CGLPixelFormatObj ppf=(CGLPixelFormatObj)((void*(*)(id,SEL))objc_msgSend)(g_nspf,osel("CGLPixelFormatObj"));
         if(ppf){ e=CGLCreateContext(ppf,share,&ctx);
             if(e==kCGLNoError&&ctx){ pf=ppf; pf_borrowed=1; }
@@ -3647,6 +3648,16 @@ static int d3dgl_gpu_copy_impl(D3DObj*dst,D3DObj*src,uint32_t sx,uint32_t sy,uin
     G.BindFramebuffer(0x8CA8/*READ*/,src->glfbo); G.BindFramebuffer(0x8CA9/*DRAW*/,dst->glfbo); d3dgl_reset_raster_ops();
     G.BlitFramebuffer((int)sx,sy0,(int)(sx+sw),sy0+(int)sh,(int)dx,dy0,(int)(dx+sw),dy0+(int)sh,0x4000/*COLOR*/,0x2600/*NEAREST*/);
     dst->gl_dirty=0; dst->gl_uploaded=1; dst->copydst=1;
+    if(dst==g_d3d_backbuf && src->last_vpw>0 && src->last_vph>0 && sw>=(uint32_t)src->last_vpw){
+        // the engine composited its frame into (0,0,last_vp) of the source: present exactly that region
+        g_d3dgl_present_tex=dst->gltex; g_d3dgl_present_tw=(int)(dst->w>4096?4096:dst->w); g_d3dgl_present_th=(int)(dst->h>4096?4096:dst->h);
+        g_d3dgl_present_vw=src->last_vpw; g_d3dgl_present_vh=src->last_vph; }
+    if(dst==g_d3d_backbuf && !getenv("PELOAD_D3DGL_NOFINISH")){ G.BindFramebuffer(GLE_FBO,0); if(G.Finish) G.Finish(); else if(G.Flush) G.Flush(); }
+    if(getenv("PELOAD_D3DGL_COPYDUMP") && dst==g_d3d_backbuf && G.ReadPixels){ static unsigned long cn; static int nd2; unsigned long skip=strtoul(getenv("PELOAD_D3DGL_COPYDUMP"),0,10); cn++; if(cn>skip && (cn%60)==0 && nd2<4){
+        static uint8_t*cb3; if(!cb3) cb3=malloc(1920u*1080u*4u); G.BindFramebuffer(0x8CA8,dst->glfbo);
+        int y0=d3dgl_fbo_y(DH,0,1080); if(cb3){ G.ReadPixels(0,y0,1920,1080,GLE_RGBA,GLE_UBYTE,cb3); const char*home=getenv("HOME"); char pth[256];
+            snprintf(pth,sizeof pth,"%s/reclaimer_bbcopy_%d.bmp",home?home:"/tmp",nd2++); bmp_write_rgba(pth,1920,1080,cb3);
+            char m[200]; int k=snprintf(m,sizeof m,"  [copydump] backbuffer after GPU copy -> %s\n",pth); (void)!write(2,m,k); } } }
     unsigned rf,rt,bpp;
     if((uint64_t)sw*sh<=65536 && dst->data && d3dgl_rt_readfmt(dst->fmt,&rf,&rt,&bpp)){
         static uint8_t tmp[65536*16]; G.ReadPixels((int)sx,sy0,(int)sw,(int)sh,rf,rt,tmp);
@@ -4211,7 +4222,9 @@ static void d3dgl_draw_impl(uint32_t vcount,int indexed,uint32_t instcount,uint3
     c_exec++;
     // render target (default to the swapchain backbuffer)
     PH(0); g_d3dgl_phase="rt";
-    D3DObj*rt=g_d3dst.rtv; if(!rt){ if(!g_d3d_backbuf) g_d3d_backbuf=mktex(4096,4096,1,28,2); rt=g_d3d_backbuf; }
+    // No render target bound = a depth-only pass (shadow maps, occlusion): D3D discards colour. The old
+    // "fall back to the backbuffer" scribbled every shadow-caster draw over the swap-chain image.
+    D3DObj*rt=g_d3dst.rtv; if(!rt){ if(!getenv("PELOAD_D3DGL_NULLRT_BB")) return; if(!g_d3d_backbuf) g_d3d_backbuf=mktex(4096,4096,1,28,2); rt=g_d3d_backbuf; }
     d3dgl_ensure_rt(rt); G.BindFramebuffer(GLE_FBO,rt->glfbo);
     int vw=g_d3dst.vp_w>0?g_d3dst.vp_w:(rt->w?(int)rt->w:g_d3dgl_W); if(vw>4096)vw=4096;
     int vh=g_d3dst.vp_h>0?g_d3dst.vp_h:(rt->h?(int)rt->h:g_d3dgl_H); if(vh>4096)vh=4096;
@@ -4220,7 +4233,7 @@ static void d3dgl_draw_impl(uint32_t vcount,int indexed,uint32_t instcount,uint3
     // projection (bad cb0); if it stays black, the FBO/capture path itself is broken.
     if(getenv("PELOAD_D3DGL_RTTEST") && G.ClearColor){ G.ClearColor(1.0f,0.0f,1.0f,1.0f); G.Clear(0x4000/*COLOR_BUFFER_BIT*/); }
     // D3D11 blend / rasterizer / viewport state (was: everything forced off + viewport origin ignored)
-    d3dgl_apply_state(rt,vw,vh);
+    d3dgl_apply_state(rt,vw,vh); rt->last_vpw=vw; rt->last_vph=vh;
     // pipeline
     PH(1); g_d3dgl_phase="pipeline";
     if(mono){ G.BindProgramPipeline(0); G.UseProgram(mp->prog); }
@@ -4577,6 +4590,8 @@ static void d3dgl_build_blit(unsigned*vao){
         // The d3dgl pipeline renders both the engine UI and 3D into the FBO right-side up already;
         // flipping v here inverts correctly-oriented content (confirmed: loading screen was upside
         // down). Default = no flip. PELOAD_BLIT_FLIP restores the old vertical flip if ever needed.
+        // sub-rect [0,sc.x] x [top sc.y] of the texture: rendered targets hold D3D row 0 at the TOP GL row,
+        // so the engine's (0,0,vw,vh) region is t.y in [1-sc.y, 1].
         const char*flipy = getenv("PELOAD_BLIT_FLIP") ? "(1.0-uv.y)" : "uv.y";
         // PELOAD_D3DGL_EXPOSE=<f>: present-time tonemap for the dark linear-HDR scene RT. Scale by f,
         // Reinhard-compress, gamma 2.2. Default (unset) = passthrough (unchanged present for UI/loading).
@@ -4584,10 +4599,10 @@ static void d3dgl_build_blit(unsigned*vao){
         if(getenv("PELOAD_D3DGL_EXPOSE")){ double E=atof(getenv("PELOAD_D3DGL_EXPOSE")); if(E<=0)E=8.0;
             snprintf(bfsbuf,sizeof bfsbuf,
               "#version 410 core\nin vec2 uv;out vec4 c;uniform sampler2D s;uniform vec4 sc;\n"
-              "void main(){vec2 t=vec2(uv.x*sc.x,%s*sc.y);vec3 x=texture(s,t).rgb*%f;x=x/(x+vec3(1.0));c=vec4(pow(x,vec3(1.0/2.2)),1.0);}\n",
+              "void main(){vec2 t=vec2(uv.x*sc.x,1.0-sc.y+%s*sc.y);vec3 x=texture(s,t).rgb*%f;x=x/(x+vec3(1.0));c=vec4(pow(x,vec3(1.0/2.2)),1.0);}\n",
               flipy,E); bfs=bfsbuf; }
         else { static char pbuf[320]; snprintf(pbuf,sizeof pbuf,
-              "#version 410 core\nin vec2 uv;out vec4 c;uniform sampler2D s;uniform vec4 sc;void main(){vec2 t=vec2(uv.x*sc.x,%s*sc.y);c=texture(s,t);}\n",flipy); bfs=pbuf; }
+              "#version 410 core\nin vec2 uv;out vec4 c;uniform sampler2D s;uniform vec4 sc;void main(){vec2 t=vec2(uv.x*sc.x,1.0-sc.y+%s*sc.y);c=texture(s,t);}\n",flipy); bfs=pbuf; }
         unsigned v=G.CreateShader(GLE_VS),f=G.CreateShader(GLE_FS);
         G.ShaderSource(v,1,&bvs,0); G.CompileShader(v); G.ShaderSource(f,1,&bfs,0); G.CompileShader(f);
         g_d3dgl_blit_prog=G.CreateProgram(); G.AttachShader(g_d3dgl_blit_prog,v); G.AttachShader(g_d3dgl_blit_prog,f); G.LinkProgram(g_d3dgl_blit_prog);
