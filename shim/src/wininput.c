@@ -184,7 +184,7 @@ static int wi_translate(id ev){
 // 3 s after gameplay starts: left click (the client captures input on click), hold W for 2 s while the
 // mouse sweeps right, then release. Uses the same queue/raw-input path real NSEvents feed.
 extern double g_gameplay_t0, g_menu_ready_t0;
-static void* wi_test_thread(void*a){ (void)a;
+static void* wi_test_thread(void*a){ (void)a; pthread_setname_np("shim-kbmtest");
     // a match, or Reclaimer's frontend menu (PELOAD_KBM_TEST_GAMEPLAY=1: only a match, e.g. one joined from the menu)
     int wait_match=getenv("PELOAD_KBM_TEST_GAMEPLAY")!=0;
     while(!g_gameplay_t0 && (wait_match || !g_menu_ready_t0)) usleep(100000);
@@ -241,7 +241,7 @@ static void wi_run_steps(void*h,const char*e,useconds_t gap){ char m[96]; int k;
 // PELOAD_AUTOCLICK_AFTER_GAME="<steps>": run these steps again PELOAD_AUTOCLICK_AFTER_DELAY s (default 8)
 // after every finished match ("Carnage report opened"), e.g. Continue + Start Game so a hosting test
 // target always has a match running.
-static void* wi_auto_thread(void*a){ (void)a;
+static void* wi_auto_thread(void*a){ (void)a; pthread_setname_np("shim-autoclick");
     while(!g_menu_ready_t0) usleep(100000);
     const char*dl=getenv("PELOAD_AUTOCLICK_DELAY"); usleep((useconds_t)((dl?atof(dl):3.0)*1e6));
     const char*gp=getenv("PELOAD_AUTOCLICK_GAP"); useconds_t gap=(useconds_t)((gp?atof(gp):1.5)*1e6);

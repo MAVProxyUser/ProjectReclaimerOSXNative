@@ -120,6 +120,13 @@ Test runs: `bash shim/tools/quiet-run.sh "<env>" <secs>` (one instance, visible 
 minimizes, which can stall the loading screen). Process matches must be anchored (`pgrep -f '^[^ ]*build/peload'`):
 an unanchored pattern also matches shells whose command text mentions build/peload.
 
+Thread ids (2026-10-16): GetCurrentThreadId MUST be unique per thread (mach thread port; CreateThread's id and
+GetThreadId match it). It returned 0x1000 everywhere, which silently disabled every msvcp140 std::mutex (its owner
+check skips the lock when the ids match) -> data races + a lock left held -> intermittent hang at match start.
+`PELOAD_TID_CONST=1` = old behavior. Loader-created threads are named (shim-*, guest-<start fn>) so [CRASH] and
+SIGUSR1 dumps identify them. `PELOAD_TRACE_STAGES` counts draws with GS/HS/DS/stream-out bound (Halo 3 uses none)
+and indirect draws (none either).
+
 ## Render Guardian via the game client (GL-on-Metal, no MCC/Steam)
 `game-client` runs the engine in a standalone native window ("Reclaimer GL (OpenGL on Metal)") and
 actually renders Guardian gameplay. Needs the XAudio2 bypass + skinguard + two crash guards:

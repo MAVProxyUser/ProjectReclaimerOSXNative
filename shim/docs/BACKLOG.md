@@ -18,7 +18,9 @@ Kept current as work lands (newest status first). "Done" items name the commit t
 | 11 | v0.9.13 regression check | Loader changes for v0.9.18 (module handles, TLS, CreateDirectoryW, pipes) not re-verified on v0.9.13; it is only a fallback now. |
 | 12 | Release bundle | GitHub release v0.1.0 predates everything below; a new bundle (loader + scripts) would need the user's go-ahead. |
 
-| 13 | **Intermittent hang at match start** ("presentation callback stalled" right after the loading screen, engine never presents again; seen on target.sh and quiet runs) | Thread dump: shim/docs/dumps/2026-10-16-match-start-stall-target.txt — two engine threads in halo3 render-resource code (halo3+0x171f86..0x172b08, next to the VTGUARD site 0x172bce). Not investigated. |
+| 13 | ~~Intermittent hang at match start~~ **fixed (root cause)**: GetCurrentThreadId returned 0x1000 on every thread, so msvcp140 std::mutex had no mutual exclusion (owner check) and macOS refused cross-thread rwlock unlocks -> a lock left held -> game thread stuck in _Mtx_lock(halo3+0x21c2398). Dumps in shim/docs/dumps/. 3/3 menu-hosted starts + a join clean after the fix (was ~1 in 3 hung). |
+
+| 14 | **Startup crash: guest code on a thread without TLS** (`gs:[0x58]`=0, exe+0x1d6455d Rust thread-local, once) | Loader threads are now named (shim-present, shim-ovread, guest-<fn>, ...), so the next [CRASH] line says which thread ran guest code. |
 
 ## Done (2026-10-16)
 

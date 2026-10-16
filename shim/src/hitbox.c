@@ -33,7 +33,7 @@ static uint64_t hb_object_array(void){
 // entries (raw 0x18-byte headers and the first 0x100 bytes their pointers lead to), to learn the layouts.
 static void hb_hex(const char*tag,const uint8_t*p,int n){ char m[512]; int k=snprintf(m,sizeof m,"  [objdump] %s",tag);
     for(int i=0;i<n;i+=4) k+=snprintf(m+k,sizeof m-k," %08x",*(const uint32_t*)(p+i)); m[k++]='\n'; (void)!write(2,m,k); }
-static void* objdump_thread(void*a){ (void)a; extern double g_gameplay_t0; while(!g_gameplay_t0) usleep(200000);
+static void* objdump_thread(void*a){ (void)a; pthread_setname_np("shim-objdump"); extern double g_gameplay_t0; while(!g_gameplay_t0) usleep(200000);
     for(int round=0; round<8; round++){ sleep(2); char m[600]; int k;
         uint64_t arr=hb_object_array(); if(!arr){ k=snprintf(m,sizeof m,"  [objdump] object array not found\n"); (void)!write(2,m,k); continue; }
         uint8_t hdr[0x60]; hb_read(arr,hdr,sizeof hdr); int32_t maxc=*(int32_t*)(hdr+0x20), esz=*(int32_t*)(hdr+0x24); uint64_t data=*(uint64_t*)(hdr+0x48);

@@ -371,7 +371,14 @@ static void   MSABI i_GetSystemTimeAsFileTime(uint64_t *ft){
 }
 static int    MSABI i_QueryPerformanceCounter(uint64_t *c){ if(c) *c=mach_absolute_time(); return 1; }
 static int    MSABI i_QueryPerformanceFrequency(uint64_t *f){ if(f) *f=1000000000ULL; return 1; }
-static uint32_t MSABI i_GetCurrentThreadId(void){ return 0x1000; } // single-threaded startup
+// Must be unique per thread: msvcp140's std::mutex (_Mtx_lock) records the owner's GetCurrentThreadId() and SKIPS
+// the real lock when the caller's id equals it ("recursive" re-entry). The old constant 0x1000 made every thread
+// look like the owner of any held std::mutex -> no mutual exclusion, cross-thread unlocks of the underlying SRW
+// rwlock (refused by macOS) -> locks left held -> halo3 hung at match start in _Mtx_lock(halo3+0x21c2398) from
+// 0x173bb0. The mach thread port name is unique per live thread (and is what the thread dumps print as mach_tid).
+// PELOAD_TID_CONST = old behavior.
+static uint32_t MSABI i_GetCurrentThreadId(void){ static int k=-1; if(k<0) k=getenv("PELOAD_TID_CONST")?1:0; if(k) return 0x1000;
+    return (uint32_t)pthread_mach_thread_np(pthread_self()); }
 static uint32_t MSABI i_GetCurrentProcessId(void){ return (uint32_t)getpid(); }
 static void   MSABI i_InitializeSListHead(void *h){ if(h) memset(h,0,16); }
 // Interlocked SList: Windows' LOCK-FREE singly-linked list, used by the engine for
@@ -1387,8 +1394,9 @@ static void draw_caller(const char*tag,void*ra,uint32_t vcount){ if(!getenv("PEL
     const char*mod="?"; uint64_t off=v; if(v>=0x180000000ULL&&v<0x187000000ULL){mod="halo3";off=v-0x180000000ULL;} else if(v>=0x140000000ULL&&v<0x14c000000ULL){mod="exe";off=v-0x140000000ULL;}
     char m[128]; int k=snprintf(m,sizeof m,"  [draw-caller] %s ra=%s+0x%llx n=%u vb0=%lluB stride=%u classicVS=%d il=%p\n",tag,mod,(unsigned long long)off,vcount,
         g_d3dst.vb[0]?(unsigned long long)g_d3dst.vb[0]->size:0,g_d3dst.vstride[0], (g_d3dst.vs?g_d3dst.vs->vs_vtxin:-1), (void*)g_d3dst.il); (void)!write(2,m,k); }
-static void MSABI ctx_DrawIndexed(void*t,uint32_t n,uint32_t s,int b){ (void)t;(void)s;(void)b; d3dtrace(1,"DrawIndexed"); draw_caller("DrawIndexed",__builtin_return_address(0),n); draw_log("drawI",n); d3d_capture_frame(n); if(d3dgl_enabled()) d3dgl_draw(n,1,1,s,b,0); }
-static void MSABI ctx_Draw(void*t,uint32_t n,uint32_t s){ (void)t;(void)s; d3dtrace(0,"Draw"); draw_caller("Draw",__builtin_return_address(0),n); draw_log("draw",n); d3d_capture_frame(n); if(d3dgl_enabled()) d3dgl_draw(n,0,1,s,0,0); }
+static void stg_note_draw(uint32_t n);
+static void MSABI ctx_DrawIndexed(void*t,uint32_t n,uint32_t s,int b){ (void)t;(void)s;(void)b; d3dtrace(1,"DrawIndexed"); stg_note_draw(n); draw_caller("DrawIndexed",__builtin_return_address(0),n); draw_log("drawI",n); d3d_capture_frame(n); if(d3dgl_enabled()) d3dgl_draw(n,1,1,s,b,0); }
+static void MSABI ctx_Draw(void*t,uint32_t n,uint32_t s){ (void)t;(void)s; d3dtrace(0,"Draw"); stg_note_draw(n); draw_caller("Draw",__builtin_return_address(0),n); draw_log("draw",n); d3d_capture_frame(n); if(d3dgl_enabled()) d3dgl_draw(n,0,1,s,0,0); }
 static void MSABI ctx_UpdateSubresource(void*t,void*res,uint32_t sub,const void*box,const void*src,uint32_t srp,uint32_t sdp){
     (void)t; D3DObj*o=res; if(!o||!o->data||!src) return;
     cs_wait_res(o);
@@ -1473,8 +1481,8 @@ static void MSABI ctx_CopySubresourceRegion(void*t,void*dstR,uint32_t dstSub,uin
         uint64_t soff=(uint64_t)y*srp+(uint64_t)left*sbpp, doff=(uint64_t)dy*drp+(uint64_t)dstX*sbpp;
         if(soff+rw<=src->size && doff+rw<=dst->size) memcpy((char*)dst->data+doff,(char*)src->data+soff,rw); } }
 static void draw_census(void); // fwd
-static void MSABI ctx_DrawIndexedInstanced(void*t,uint32_t a,uint32_t b,uint32_t c,int d,uint32_t e){ (void)t; d3dtrace(3,"DrawIndexedInstanced"); draw_caller("DrawIdxInst",__builtin_return_address(0),a); draw_census(); if(d3dgl_enabled() && b) d3dgl_draw(a,1,b,c,d,e); }
-static void MSABI ctx_DrawInstanced(void*t,uint32_t a,uint32_t b,uint32_t c,uint32_t d){ (void)t; d3dtrace(2,"DrawInstanced"); draw_caller("DrawInst",__builtin_return_address(0),a); draw_census(); if(d3dgl_enabled() && b) d3dgl_draw(a,0,b,c,0,d); }
+static void MSABI ctx_DrawIndexedInstanced(void*t,uint32_t a,uint32_t b,uint32_t c,int d,uint32_t e){ (void)t; d3dtrace(3,"DrawIndexedInstanced"); stg_note_draw(a); draw_caller("DrawIdxInst",__builtin_return_address(0),a); draw_census(); if(d3dgl_enabled() && b) d3dgl_draw(a,1,b,c,d,e); }
+static void MSABI ctx_DrawInstanced(void*t,uint32_t a,uint32_t b,uint32_t c,uint32_t d){ (void)t; d3dtrace(2,"DrawInstanced"); stg_note_draw(a); draw_caller("DrawInst",__builtin_return_address(0),a); draw_census(); if(d3dgl_enabled() && b) d3dgl_draw(a,0,b,c,0,d); }
 // ---- compute stage state (particles) ----
 static struct { D3DObj*cs; D3DObj*srv[32]; D3DObj*uav[8]; D3DObj*cb[16]; uint32_t cbfirst[16]; D3DObj*samp[16]; } g_cs;
 static void cscensus(const char*what,uint32_t a,uint32_t b,uint32_t c){ if(!getenv("PELOAD_CSCENSUS")) return;
@@ -1493,7 +1501,7 @@ static void MSABI ctx_Begin(void*t,void*a); static void MSABI ctx_End(void*t,voi
 typedef struct CsQJob { CsProg*p; CsCtx cx; uint32_t a,b,c; void*own[64]; int nown; D3DObj* uavres[8]; struct CsQJob*next; } CsQJob;
 static pthread_mutex_t g_csq_mx=PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_csq_cv=PTHREAD_COND_INITIALIZER, g_csq_done=PTHREAD_COND_INITIALIZER;
 static CsQJob *g_csq_head,*g_csq_tail; static volatile int g_csq_n; static int g_csq_started;
-static void* csq_worker(void*arg){ (void)arg;
+static void* csq_worker(void*arg){ (void)arg; pthread_setname_np("shim-compute");
     for(;;){ pthread_mutex_lock(&g_csq_mx); while(!g_csq_head) pthread_cond_wait(&g_csq_cv,&g_csq_mx); CsQJob*j=g_csq_head; pthread_mutex_unlock(&g_csq_mx);
         uint64_t t0=prof_on()?prof_now():0;
         long rc=cs_dispatch(j->p,&j->cx,j->a,j->b,j->c);
@@ -1542,10 +1550,27 @@ static void MSABI ctx_Dispatch(void*t,uint32_t a,uint32_t b,uint32_t c){ (void)t
     if(rc<0){ static int warned; if(warned++<8){ char m[120]; int k=snprintf(m,sizeof m,"  [cs-cpu] unsupported opcode %ld in cs %p\n",-rc,(void*)cs); (void)!write(2,m,k); } return; }
     for(int i=0;i<8;i++){ D3DObj*v=g_cs.uav[i]; D3DObj*r=(v&&v->data&&v->vkind)?(D3DObj*)v->data:v; if(r){ r->ver++; r->gl_dirty=1; r->rvalid=0; } } }
 static void MSABI ctx_DispatchIndirect(void*t,void*args,uint32_t off){ (void)t;(void)args; cscensus("DispatchIndirect",off,0,0); }
-static void MSABI ctx_DrawInstancedIndirect(void*t,void*args,uint32_t off){ (void)t;(void)args; cscensus("DrawInstancedIndirect",off,0,0); }
-static void MSABI ctx_DrawIndexedInstancedIndirect(void*t,void*args,uint32_t off){ (void)t;(void)args; cscensus("DrawIndexedInstancedIndirect",off,0,0); }
+static void stg_note_indirect(const char*what,uint32_t off){ if(!getenv("PELOAD_TRACE_STAGES")) return; static unsigned long n; n++;
+    if(n<=20 || !(n%2000)){ char m[220]; int k=snprintf(m,sizeof m,"  [stages] %s #%lu off=%u vs=%016llx ps=%016llx\n",what,n,off,
+        (unsigned long long)(g_d3dst.vs?g_d3dst.vs->bchash:0),(unsigned long long)(g_d3dst.ps?g_d3dst.ps->bchash:0)); (void)!write(2,m,k); } }
+static void MSABI ctx_DrawInstancedIndirect(void*t,void*args,uint32_t off){ (void)t;(void)args; cscensus("DrawInstancedIndirect",off,0,0); stg_note_indirect("DrawInstancedIndirect",off); }
+static void MSABI ctx_DrawIndexedInstancedIndirect(void*t,void*args,uint32_t off){ (void)t;(void)args; cscensus("DrawIndexedInstancedIndirect",off,0,0); stg_note_indirect("DrawIndexedInstancedIndirect",off); }
 static void MSABI ctx_CopyStructureCount(void*t,void*dst,uint32_t off,void*uav){ (void)t;(void)dst;(void)uav; cscensus("CopyStructureCount",off,0,0); }
 static void MSABI ctx_CSSetShader(void*t,void*cs,void*ci,uint32_t n){ (void)t;(void)ci;(void)n; g_cs.cs=cs; }
+// Geometry / hull / domain shader stages: tracked so draws that use them can be found (PELOAD_TRACE_STAGES); the GL
+// translation only runs VS+PS.
+static struct { D3DObj *gs,*hs,*ds; void* so; unsigned long ngs,nhs,nso,nall; } g_stg;
+static void MSABI ctx_GSSetShader(void*t,void*sh,void*ci,uint32_t n){ (void)t;(void)ci;(void)n; g_stg.gs=(D3DObj*)sh; }
+static void MSABI ctx_HSSetShader(void*t,void*sh,void*ci,uint32_t n){ (void)t;(void)ci;(void)n; g_stg.hs=(D3DObj*)sh; }
+static void MSABI ctx_DSSetShader(void*t,void*sh,void*ci,uint32_t n){ (void)t;(void)ci;(void)n; g_stg.ds=(D3DObj*)sh; }
+static void MSABI ctx_SOSetTargets(void*t,uint32_t n,void*const*b,const uint32_t*o){ (void)t;(void)o; g_stg.so=(n&&b)?b[0]:0; }
+static void stg_note_draw(uint32_t n){ static int on=-1; if(on<0) on=getenv("PELOAD_TRACE_STAGES")?1:0; if(!on) return;
+    g_stg.nall++; if(g_stg.gs) g_stg.ngs++; if(g_stg.hs||g_stg.ds) g_stg.nhs++; if(g_stg.so) g_stg.nso++;
+    if((g_stg.gs||g_stg.hs||g_stg.ds||g_stg.so)){ static int shown; if(shown<40){ shown++; char m[256];
+        int k=snprintf(m,sizeof m,"  [stages] draw n=%u topo=%u vs=%016llx ps=%016llx gs=%016llx hs=%016llx ds=%016llx so=%p\n",n,g_d3dst.topo,
+            (unsigned long long)(g_d3dst.vs?g_d3dst.vs->bchash:0),(unsigned long long)(g_d3dst.ps?g_d3dst.ps->bchash:0),(unsigned long long)(g_stg.gs?g_stg.gs->bchash:0),
+            (unsigned long long)(g_stg.hs?g_stg.hs->bchash:0),(unsigned long long)(g_stg.ds?g_stg.ds->bchash:0),g_stg.so); (void)!write(2,m,k); } }
+    static double t0; double now=mono_s(); if(now-t0>5){ t0=now; char m[160]; int k=snprintf(m,sizeof m,"  [stages] draws %lu: with GS %lu, HS/DS %lu, stream-out %lu\n",g_stg.nall,g_stg.ngs,g_stg.nhs,g_stg.nso); (void)!write(2,m,k); } }
 static void MSABI ctx_CSSetShaderResources(void*t,uint32_t st,uint32_t n,void*const*v){ (void)t; for(uint32_t i=0;i<n&&st+i<32;i++) g_cs.srv[st+i]=v?(D3DObj*)v[i]:0; }
 static void MSABI ctx_CSSetSamplers(void*t,uint32_t st,uint32_t n,void*const*v){ (void)t; for(uint32_t i=0;i<n&&st+i<16;i++) g_cs.samp[st+i]=v?(D3DObj*)v[i]:0; }
 static void MSABI ctx_CSSetConstantBuffers1(void*t,uint32_t st,uint32_t n,void*const*v,const uint32_t*first,const uint32_t*cnt){ (void)t;(void)cnt;
@@ -1806,6 +1831,7 @@ static void d3d_init(void){
     x[14]=(void*)ctx_Map;                                                                            // Map (Unmap=15 stays ret0)
     x[20]=(void*)ctx_DrawIndexedInstanced; x[21]=(void*)ctx_DrawInstanced; x[41]=(void*)ctx_Dispatch;
     x[39]=(void*)ctx_DrawIndexedInstancedIndirect; x[40]=(void*)ctx_DrawInstancedIndirect; x[42]=(void*)ctx_DispatchIndirect; x[49]=(void*)ctx_CopyStructureCount;
+    x[23]=(void*)ctx_GSSetShader; x[60]=(void*)ctx_HSSetShader; x[64]=(void*)ctx_DSSetShader; x[37]=(void*)ctx_SOSetTargets;
     x[67]=(void*)ctx_CSSetShaderResources; x[68]=(void*)ctx_CSSetUAVs; x[69]=(void*)ctx_CSSetShader; x[71]=(void*)ctx_CSSetConstantBuffers;
     x[70]=(void*)ctx_CSSetSamplers; x[124]=(void*)ctx_CSSetConstantBuffers1; x[51]=(void*)ctx_ClearUAVUint; x[52]=(void*)ctx_ClearUAVFloat;
     x[7]=(void*)ctx_VSSetConstantBuffers; x[9]=(void*)ctx_PSSetShader; x[11]=(void*)ctx_VSSetShader; x[16]=(void*)ctx_PSSetConstantBuffers;
@@ -6487,7 +6513,7 @@ static void gl_selftest(void){
 // CGLContextObj in scope. The NSWindow is created on the (main) calling thread.
 // Under PELOAD_HOLD_WINDOW we hand the GL context to a dedicated present thread that
 // shows the engine's GDI composite continuously (so it survives the worker's abort).
-static void* present_thread_fn(void*a){ (void)a; void(*set)(void*)=dlsym(RTLD_DEFAULT,"CGLSetCurrentContext");
+static void* present_thread_fn(void*a){ (void)a; pthread_setname_np("shim-present"); void(*set)(void*)=dlsym(RTLD_DEFAULT,"CGLSetCurrentContext");
     if(set&&g_present_glctx) set(g_present_glctx);
     // PELOAD_VSYNC=1: vsync the window flips (no tearing). Opt-in: a vsynced flush can block for as long as
     // the display sleeps / the window is occluded, and one soak froze ~105 s in with it enabled.
@@ -7280,6 +7306,7 @@ static void *thread_tramp(void *a){
     TArg *t=a;
     uint8_t *teb=calloc(1,0x2000);
     void **tarr=calloc(128,sizeof(void*));
+    { char nm[32]; snprintf(nm,sizeof nm,"guest-%p",(void*)t->fn); pthread_setname_np(nm); }   // SetThreadDescription renames it
     // Fresh per-thread block for EVERY module's TLS index (exe, halo3, CRT), not
     // just index 0 — otherwise halo3's thread-locals alias the exe's on new threads.
     pthread_mutex_lock(&g_tlsm);   // (same lock as register_tls: no module can slip in between)
@@ -7330,7 +7357,7 @@ static void* MSABI i_CreateThread(void*attr,uint64_t stack,WinThreadProc start,v
     TArg *t=malloc(sizeof *t); t->fn=start; t->param=param; t->done=done;
     pthread_t th; int pcrc=pthread_create(&th,0,thread_tramp,t);
     if(pcrc){ if(getenv("PELOAD_TRACE_THREAD")){ char eb[96]; int k=snprintf(eb,sizeof eb,"  [CreateThread] pthread_create FAILED rc=%d (start=%p param=%p)\n",pcrc,(void*)start,param); (void)!write(2,eb,k); } free(t); done->exitcode=0; done->signaled=1; return 0; }
-    done->owner=th; done->tid=(uint32_t)(uintptr_t)th;
+    done->owner=th; done->tid=getenv("PELOAD_TID_CONST")?(uint32_t)(uintptr_t)th:(uint32_t)pthread_mach_thread_np(th);   // = its GetCurrentThreadId()
     if(tid)*tid=done->tid; return done;                           // HANDLE = the SyncObj
 }
 // ucrtbase _beginthreadex: the CRT thread spawn halo3 uses. Unimplemented, it
@@ -7344,7 +7371,7 @@ static uintptr_t MSABI i_beginthread(WinThreadProc start,unsigned stack,void*arg
 #include "xaudio.c"
 #include "hitbox.c"
 static void MSABI i_endthread(void){ pthread_exit(0); }
-static uint32_t MSABI i_GetThreadId(void*h){ if(is_sync((intptr_t)h)) return ((SyncObj*)h)->tid; return (uint32_t)(uintptr_t)h; }
+static uint32_t MSABI i_GetThreadId(void*h){ if(is_sync((intptr_t)h)) return ((SyncObj*)h)->tid; if(h==(void*)-2) return i_GetCurrentThreadId(); return (uint32_t)(uintptr_t)h; }
 static int MSABI i_GetExitCodeThread(void*h,uint32_t*code){
     if(is_sync((intptr_t)h)){ SyncObj*s=h; if(code)*code = s->signaled? s->exitcode : 259/*STILL_ACTIVE*/; return 1; }
     if(code)*code=259; return 1; }
@@ -7807,7 +7834,7 @@ static void afd_complete(AfdReq*r,uint32_t evts,int32_t ntstatus){
     if(r->iocp) iocp_post(r->iocp,32,r->key,r->ov);
     r->active=0;
 }
-static void* afd_thread_fn(void* a){ (void)a;
+static void* afd_thread_fn(void* a){ (void)a; pthread_setname_np("shim-afd");
     struct pollfd pfd[AFD_MAXREQ+1]; int map[AFD_MAXREQ+1];
     for(;;){ pthread_mutex_lock(&g_afdm);
         int np=0; pfd[np].fd=g_afdwake[0]; pfd[np].events=POLLIN; pfd[np].revents=0; map[np]=-1; np++;
@@ -7991,7 +8018,7 @@ static void ovread_complete(int fd,uint8_t*ov,long k){
     if(ev) i_SetEvent((void*)((uintptr_t)ev&~(uintptr_t)1));
     if(!noport) iocp_post_fd(fd,(uint64_t)(k>0?k:0),ov); }
 typedef struct { int fd; void*buf; uint32_t n; uint8_t*ov; } OvRead;
-static void* ovread_thread(void*a){ OvRead r=*(OvRead*)a; free(a);
+static void* ovread_thread(void*a){ OvRead r=*(OvRead*)a; free(a); pthread_setname_np("shim-ovread");
     struct pollfd p={r.fd,POLLIN,0}; while(poll(&p,1,-1)<0 && errno==EINTR){}
     long k=read(r.fd,r.buf,r.n); ovread_complete(r.fd,r.ov,k); return 0; }
 static int    MSABI i_ReadFile(void*h,void*buf,uint32_t n,uint32_t*rd,uint8_t*ov){
@@ -9423,7 +9450,7 @@ static H3Set g_h3set[32]; static int g_nh3set;
 static void h3set_write(const H3Set*e){
     switch(e->type){ case 5: *(volatile uint8_t*)e->addr=(uint8_t)(e->v!=0); break; case 6: *(volatile float*)e->addr=(float)e->v; break;
         case 7: *(volatile int16_t*)e->addr=(int16_t)e->v; break; case 8: *(volatile int32_t*)e->addr=(int32_t)e->v; break; } }
-static void* h3set_thread(void*a){ (void)a; for(;;){ for(int i=0;i<g_nh3set;i++) h3set_write(&g_h3set[i]); usleep(500000); } return 0; }
+static void* h3set_thread(void*a){ (void)a; pthread_setname_np("shim-h3set"); for(;;){ for(int i=0;i<g_nh3set;i++) h3set_write(&g_h3set[i]); usleep(500000); } return 0; }
 static void h3set_install(uint8_t*base){ const char*e=getenv("PELOAD_H3"); if(!e||!*e) return;
     OPT64*o=(OPT64*)(base+((DOS*)base)->e_lfanew+sizeof(COFF)); uint64_t isz=o->ImageSize;
     char buf[2048]; snprintf(buf,sizeof buf,"%s",e);
@@ -9675,7 +9702,7 @@ static void net_selftest(const char* spec){
 // translated processes); every 10 s the top hotspots are printed: guest code as exe+RVA / halo3+RVA,
 // shim and system code via dladdr (shim statics: resolve offline with atos -o shim/build/peload).
 typedef struct { uint64_t rip; uint32_t cnt; uint32_t th; } SmpEnt;
-static void* sampler_thread(void*a){ (void)a;
+static void* sampler_thread(void*a){ (void)a; pthread_setname_np("shim-sampler");
     int us=atoi(getenv("PELOAD_SAMPLE")); if(us<200) us=1000;
     static SmpEnt tab[65536]; uint64_t total=0; double tlast=mono_s();
     static struct { thread_t t; uint64_t n, busy; } thr[64]; int nthr=0;
