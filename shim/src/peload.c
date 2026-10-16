@@ -3504,6 +3504,17 @@ static id ocls(const char*n){ return (id)objc_getClass(n); }
 static SEL osel(const char*n){ return sel_registerName(n); }
 static id om0(id o,const char*s){ return ((id(*)(id,SEL))objc_msgSend)(o,osel(s)); }
 static id oretain(id o){ return ((id(*)(id,SEL))objc_msgSend)(o,osel("retain")); }
+// Initial window content size (points): PELOAD_WIN_SIZE=WxH, else the largest 16:9 size that fits 90% of the
+// main screen's usable area (menu bar and Dock excluded), never smaller than the requested w x h. The game
+// renders at its own resolution (swap chain 1920x1080) and the window scales it; input maps by view size.
+static void win_initial_size(double*w,double*h){
+    const char*e=getenv("PELOAD_WIN_SIZE"); int ew=0,eh=0;
+    if(e && sscanf(e,"%dx%d",&ew,&eh)==2 && ew>=320 && eh>=180){ *w=ew; *h=eh; return; }
+    id scr=om0(ocls("NSScreen"),"mainScreen"); if(!scr) return;
+    NSRect_ vf={0,0,0,0}; ((void(*)(NSRect_*,id,SEL))objc_msgSend_stret)(&vf,scr,osel("visibleFrame"));
+    double mw=vf.w*0.9, mh=vf.h*0.9; if(mw<=0||mh<=0) return;
+    double fw=mw, fh=mw*9.0/16.0; if(fh>mh){ fh=mh; fw=mh*16.0/9.0; }
+    if(fw>*w){ *w=(double)(int)fw; *h=(double)(int)fh; } }
 static CGLContextObj cocoa_make_gl_window(int w,int h){
     if(g_nsctx){ return (CGLContextObj)((void*(*)(id,SEL))objc_msgSend)(g_nsctx,osel("CGLContextObj")); }
     objc_autoreleasePoolPush(); // AppKit object creation needs a pool (we never run the runloop); leak it so objects live
@@ -3513,7 +3524,7 @@ static CGLContextObj cocoa_make_gl_window(int w,int h){
     uint32_t attrs[]={5/*DoubleBuffer*/,99/*Profile*/,0x4100/*4.1 Core*/,8/*ColorSize*/,24,11/*AlphaSize*/,8,12/*DepthSize*/,24,13/*Stencil*/,8,73/*Accelerated*/,72/*NoRecovery*/,0};
     id pf = ((id(*)(id,SEL,const uint32_t*))objc_msgSend)(om0(ocls("NSOpenGLPixelFormat"),"alloc"),osel("initWithAttributes:"),attrs); g_nspf=pf;
     id ctx = ((id(*)(id,SEL,id,id))objc_msgSend)(om0(ocls("NSOpenGLContext"),"alloc"),osel("initWithFormat:shareContext:"),pf,(id)0);
-    NSRect_ rect={0,0,(double)w,(double)h};
+    NSRect_ rect={0,0,(double)w,(double)h}; win_initial_size(&rect.w,&rect.h);
     id win = ((id(*)(id,SEL,NSRect_,unsigned long,unsigned long,signed char))objc_msgSend)(
         om0(ocls("NSWindow"),"alloc"),osel("initWithContentRect:styleMask:backing:defer:"),rect,15/*Titled|Closable|Mini|Resizable*/,2/*Buffered*/,0);
     id title = ((id(*)(id,SEL,const char*))objc_msgSend)(ocls("NSString"),osel("stringWithUTF8String:"),"Project Reclaimer (Mac, Wine-free)");
@@ -3742,7 +3753,7 @@ static int d3dgl_make_window(void){
     if(!pf){ ws("  [d3dgl] pixel format failed\n"); return 0; }
     id ctx = ((id(*)(id,SEL,id,id))objc_msgSend)(om0(ocls("NSOpenGLContext"),"alloc"),osel("initWithFormat:shareContext:"),pf,(id)0);
     if(!ctx){ ws("  [d3dgl] NSOpenGLContext failed\n"); return 0; }
-    NSRect_ rect={0,0,(double)g_d3dgl_W,(double)g_d3dgl_H};
+    NSRect_ rect={0,0,(double)g_d3dgl_W,(double)g_d3dgl_H}; win_initial_size(&rect.w,&rect.h);
     id win = ((id(*)(id,SEL,NSRect_,unsigned long,unsigned long,signed char))objc_msgSend)(
         om0(ocls("NSWindow"),"alloc"),osel("initWithContentRect:styleMask:backing:defer:"),rect,15,2,0);
     id title = ((id(*)(id,SEL,const char*))objc_msgSend)(ocls("NSString"),osel("stringWithUTF8String:"),"Project Reclaimer — halo3 D3D11->GL");

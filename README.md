@@ -130,7 +130,8 @@ Options go in front of the command, e.g. `PELOAD_INVERT_PITCH=0 bash shim/play.s
 | `RECLAIMER_JOIN=host:port` | join that server as soon as the menu is up, e.g. `RECLAIMER_JOIN=203.0.113.7:11774` |
 | `RECLAIMER_DIRECT=1` | skip the menu: straight into a local Guardian match (no scoreboard text) |
 
-The window can be resized and made full screen. Developer and diagnostic switches are documented in
+The window opens at the largest 16:9 size that fits your screen (`PELOAD_WIN_SIZE=1280x720` picks a size), can be
+resized, and can go full screen (green button or Ctrl-Cmd-F). Developer and diagnostic switches are documented in
 `CLAUDE.md` and in the source.
 
 ## Layout
