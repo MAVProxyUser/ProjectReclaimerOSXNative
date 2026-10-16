@@ -1632,8 +1632,15 @@ static int MSABI swap_Present(void*t,uint32_t sync,uint32_t fl){ (void)sync;(voi
 // The back buffer must be STABLE across GetBuffer calls (the engine caches/compares it and
 // renders into it each frame); a fresh texture per call breaks present bookkeeping.
 static D3DObj* g_d3d_backbuf;
+// Swap-chain size: 1920x1080 (the engine's render size). It used to be a 4096x4096 placeholder, which
+// Reclaimer's own UI (the frontend menu and in-game overlays, composited into the back buffer with a
+// viewport of the back buffer's size) laid out for a 4096^2 screen. PELOAD_SWAP_SIZE=<w>x<h> overrides;
+// PELOAD_SWAP_SIZE=4096x4096 restores the old placeholder.
+static void swap_size(uint32_t*w,uint32_t*h){ static uint32_t W,H; if(!W){ W=1920; H=1080; const char*e=getenv("PELOAD_SWAP_SIZE");
+        if(e){ unsigned a=0,b=0; if(sscanf(e,"%ux%u",&a,&b)==2 && a>=320 && b>=200 && a<=4096 && b<=4096){ W=a; H=b; } } } *w=W; *h=H; }
+static D3DObj* swap_backbuf(void){ if(!g_d3d_backbuf){ uint32_t w,h; swap_size(&w,&h); g_d3d_backbuf=mktex(w,h,1,28,2); } return g_d3d_backbuf; }
 static int MSABI swap_GetBuffer(void*t,uint32_t buf,GUID_*r,void**pp){ (void)t;(void)buf;(void)r;
-    if(!g_d3d_backbuf) g_d3d_backbuf=mktex(4096,4096,1,28,2);
+    swap_backbuf();
     if(pp)*pp=g_d3d_backbuf; return HR_OK; }
 // IDXGIDeviceSubObject::GetDevice (vtable slot 7): MUST populate *pp with the
 // device, else callers (e.g. ui_composition's IDXGISwapChain::GetDevice(ID3D11Device))
@@ -1645,7 +1652,7 @@ static int MSABI dxgi_CreateSwapChain(void*t,void*dev,void*desc,void**pp){ (void
 // BufferUsage@36 BufferCount@40 OutputWindow@48 Windowed@56 SwapEffect@60 Flags@64. A zeroed
 // desc (our old no-op) made the engine see buffers=0/format=0 and never count a "ready present".
 static int MSABI swap_GetDesc(void*t,void*pd){ (void)t; if(!pd) return HR_OK; uint8_t*d=pd; memset(d,0,80);
-    *(uint32_t*)(d+0)=4096; *(uint32_t*)(d+4)=4096; *(uint32_t*)(d+8)=60; *(uint32_t*)(d+12)=1;
+    { uint32_t w,h; swap_size(&w,&h); *(uint32_t*)(d+0)=w; *(uint32_t*)(d+4)=h; } *(uint32_t*)(d+8)=60; *(uint32_t*)(d+12)=1;
     *(uint32_t*)(d+16)=87; *(uint32_t*)(d+28)=1; *(uint32_t*)(d+36)=0x20; *(uint32_t*)(d+40)=2;
     *(int32_t*)(d+56)=0; *(uint32_t*)(d+60)=0; *(uint32_t*)(d+64)=0; return HR_OK; }
 static int MSABI swap_GetFullscreenState(void*t,int32_t*pfs,void**pp){ (void)t; if(pfs)*pfs=0; if(pp)*pp=0; return HR_OK; }
@@ -4196,6 +4203,7 @@ static int d3dgl_gpu_copy_impl(D3DObj*dst,D3DObj*src,uint32_t sx,uint32_t sy,uin
     G.BindFramebuffer(0x8CA8/*READ*/,src->glfbo); G.BindFramebuffer(0x8CA9/*DRAW*/,dst->glfbo); d3dgl_reset_raster_ops();
     G.BlitFramebuffer((int)sx,sy0,(int)(sx+sw),sy0+(int)sh,(int)dx,dy0,(int)(dx+sw),dy0+(int)sh,0x4000/*COLOR*/,0x2600/*NEAREST*/);
     dst->gl_dirty=0; dst->gl_uploaded=1; dst->copydst=1;
+    if(dst==g_d3d_backbuf && getenv("PELOAD_TRACE_VP")){ static int n; if((n++%300)==0){ char m[200]; int k=snprintf(m,sizeof m,"  [bbcopy] src=%p %ux%u f%u last_vp=%dx%d copy %ux%u at %u,%u\n",(void*)src,src->w,src->h,src->fmt,src->last_vpw,src->last_vph,sw,sh,sx,sy); (void)!write(2,m,k); } }
     if(dst==g_d3d_backbuf && src->last_vpw>0 && src->last_vph>0 && sw>=(uint32_t)src->last_vpw){
         // the engine composited its frame into (0,0,last_vp) of the source: present exactly that region
         g_d3dgl_present_tex=dst->gltex; g_d3dgl_present_tw=(int)(dst->w>4096?4096:dst->w); g_d3dgl_present_th=(int)(dst->h>4096?4096:dst->h);
@@ -5252,7 +5260,7 @@ static void d3dgl_draw_impl(uint32_t vcount,int indexed,uint32_t instcount,uint3
     // No render target bound = a depth-only pass (shadow maps, occlusion): D3D discards colour. The old
     // "fall back to the backbuffer" scribbled every shadow-caster draw over the swap-chain image.
     D3DObj*rt=g_d3dst.rtv; D3DObj*dsv=getenv("PELOAD_D3DGL_NODEPTH")?0:g_d3dst.dsv;
-    if(!rt && !dsv){ if(!getenv("PELOAD_D3DGL_NULLRT_BB")) return; if(!g_d3d_backbuf) g_d3d_backbuf=mktex(4096,4096,1,28,2); rt=g_d3d_backbuf; }
+    if(!rt && !dsv){ if(!getenv("PELOAD_D3DGL_NULLRT_BB")) return; rt=swap_backbuf(); }
     if(!rt && getenv("PELOAD_D3DGL_NODEPTHONLY")) return;      // A/B: skip depth-only (shadow/occlusion) passes
     { D3DObj*one[1]={rt}; unsigned fbo = (g_d3dst.num_rt>1&&rt) ? d3dgl_fbo_for(g_d3dst.rtvs,g_d3dst.num_rt,dsv) : d3dgl_fbo_for(rt?one:0,rt?1:0,dsv);
       { static unsigned lastfbo; if(fbo!=lastfbo){ g_fs.fbochg++; lastfbo=fbo; } }
@@ -5268,6 +5276,7 @@ static void d3dgl_draw_impl(uint32_t vcount,int indexed,uint32_t instcount,uint3
     if(getenv("PELOAD_D3DGL_RTTEST") && G.ClearColor){ G.ClearColor(1.0f,0.0f,1.0f,1.0f); G.Clear(0x4000/*COLOR_BUFFER_BIT*/); }
     // D3D11 blend / rasterizer / viewport state (was: everything forced off + viewport origin ignored)
     d3dgl_apply_state(rt,vw,vh); rt->last_vpw=vw; rt->last_vph=vh;
+    if(getenv("PELOAD_TRACE_VP") && rt->w>=2048){ static uint64_t seen[256]; static int ns; uint64_t key=((uint64_t)(uintptr_t)rt*31+(uint64_t)vw*7919+(uint64_t)vh)^ps->bchash; int f=0; for(int q=0;q<ns;q++) if(seen[q]==key){ f=1; break; } if(!f && ns<256){ seen[ns++]=key; char m[160]; int k=snprintf(m,sizeof m,"  [vp] rt=%p %ux%u f%u vp=%dx%d at %d,%d n=%u psh=%016llx\n",(void*)rt,rt->w,rt->h,rt->fmt,vw,vh,g_d3dst.vp_x,g_d3dst.vp_y,vcount,(unsigned long long)ps->bchash); (void)!write(2,m,k); } }
     if(g_nullps_color){ g_nullps_color=0; if(G.ColorMask) gs_colormask(0,0,0,0); }   // NULL PS: no colour writes
     // pipeline
     PH(1); g_d3dgl_phase="pipeline";
