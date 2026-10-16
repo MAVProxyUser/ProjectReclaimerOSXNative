@@ -1374,6 +1374,7 @@ static volatile unsigned long g_d3dgl_phase_draw;    // which draw # we were on
 static int d3dgl_enabled(void){ if(g_d3dgl_en<0) g_d3dgl_en=getenv("PELOAD_D3DGL")?1:0; return g_d3dgl_en; }
 static void d3dgl_draw(uint32_t vcount,int indexed,uint32_t instcount,uint32_t start,int32_t base,uint32_t sinst); // fwd
 static void d3dgl_present(void); // fwd (blit the D3DGL backbuffer to the window at Present)
+static int cb_looks_viewproj(const float*m,uint64_t bytes); static int hb_enabled(void); static int hb_is_world_camera(const float*rows); static void hb_capture_view(const float*rows); static void hb_draw_overlay(void); extern volatile int g_hb_taken; // hitbox.c
 static void d3dgl_clear_rtv(void* rtvview,const float* col); // fwd (ClearRenderTargetView -> GL clear)
 static void d3dgl_clear_dsv(void*dsvview,uint32_t flags,float depth,uint8_t stencil); // fwd (ClearDepthStencilView -> GL depth/stencil clear)
 static void MSABI ctx_ClearRTV(void*t,void*rtv,const float*col){ (void)t; if(d3dgl_enabled()) d3dgl_clear_rtv(rtv,col); }
@@ -1687,7 +1688,7 @@ static void draw_log(const char*tag,uint32_t count){ draw_census(); if(!getenv("
 unsigned long g_ct_frame;
 static void flog_present(void);
 static void fps_title_tick(void); // fwd: engine fps + draws/frame in the window title
-static int MSABI swap_Present(void*t,uint32_t sync,uint32_t fl){ (void)sync;(void)fl; d3dtrace(4,"Present"); flog("t%x PRESENT swapchain=%p",pthread_mach_thread_np(pthread_self()),t); g_ct_frame++; flog_present(); fps_title_tick();
+static int MSABI swap_Present(void*t,uint32_t sync,uint32_t fl){ (void)sync;(void)fl; d3dtrace(4,"Present"); flog("t%x PRESENT swapchain=%p",pthread_mach_thread_np(pthread_self()),t); g_ct_frame++; g_hb_taken=0; flog_present(); fps_title_tick();
     // PELOAD_TRACE_PRESENT_RATE: periodic count+timestamp so we can see if/when the engine stops
     // calling Present (render-thread stall) vs keeps calling it (present-bridge stall).
     if(getenv("PELOAD_TRACE_PRESENT_RATE")){ static unsigned long pc; static long t0; struct timeval tv; gettimeofday(&tv,0);
@@ -3542,7 +3543,10 @@ static id oretain(id o){ return ((id(*)(id,SEL))objc_msgSend)(o,osel("retain"));
 // Initial window content size (points): PELOAD_WIN_SIZE=WxH, else the largest 16:9 size that fits 90% of the
 // main screen's usable area (menu bar and Dock excluded), never smaller than the requested w x h. The game
 // renders at its own resolution (swap chain 1920x1080) and the window scales it; input maps by view size.
+static int g_screen_hz;   // the main screen's maximum refresh rate (fps_title_tick never reports more than this)
 static void win_initial_size(double*w,double*h){
+    { id s0=om0(ocls("NSScreen"),"mainScreen"); if(s0 && class_respondsToSelector(object_getClass(s0),osel("maximumFramesPerSecond")))
+        g_screen_hz=(int)((long(*)(id,SEL))objc_msgSend)(s0,osel("maximumFramesPerSecond")); }
     const char*e=getenv("PELOAD_WIN_SIZE"); int ew=0,eh=0;
     if(e && sscanf(e,"%dx%d",&ew,&eh)==2 && ew>=320 && eh>=180){ *w=ew; *h=eh; return; }
     id scr=om0(ocls("NSScreen"),"mainScreen"); if(!scr) return;
@@ -3710,7 +3714,12 @@ static void fps_title_tick(void){
     if(!t0){ t0=now; n0=frames; d0=g_draws_total; return; }
     double dt=now-t0; if(dt<1.0) return;
     double fps=(frames-n0)/dt; double dpf=(frames>n0)?(double)(g_draws_total-d0)/(frames-n0):0;
-    snprintf(g_fps_title,sizeof g_fps_title,"Project Reclaimer (Mac, Wine-free)  |  %.1f fps  |  %.0f draws/frame  |  %.1f ms",fps,dpf,fps>0?1000.0/fps:0);
+    // fps = frames that can reach the screen. When the engine presents faster than the display refreshes (loading
+    // and "synchronizing players" screens spin at ~1000 presents/s with a handful of draws), the screen still shows
+    // at most g_screen_hz of them: report that, and the engine's own rate beside it.
+    if(g_screen_hz>0 && fps>g_screen_hz*1.02)
+        snprintf(g_fps_title,sizeof g_fps_title,"Project Reclaimer (Mac, Wine-free)  |  %d fps (screen max; engine %.0f)  |  %.0f draws/frame",g_screen_hz,fps,dpf);
+    else snprintf(g_fps_title,sizeof g_fps_title,"Project Reclaimer (Mac, Wine-free)  |  %.1f fps  |  %.0f draws/frame  |  %.1f ms",fps,dpf,fps>0?1000.0/fps:0);
     if(getenv("PELOAD_FPS_LOG")){ char m[200]; int k=snprintf(m,sizeof m,"  [fps] %s\n",g_fps_title+35); (void)!write(2,m,k); }
     t0=now; n0=frames; d0=g_draws_total; }
 static int      g_d3dgl_trace, g_d3dgl_depth;
@@ -5475,6 +5484,11 @@ static void d3dgl_draw_impl(uint32_t vcount,int indexed,uint32_t instcount,uint3
     if(getenv("PELOAD_D3DGL_RTTEST") && G.ClearColor){ G.ClearColor(1.0f,0.0f,1.0f,1.0f); G.Clear(0x4000/*COLOR_BUFFER_BIT*/); }
     // D3D11 blend / rasterizer / viewport state (was: everything forced off + viewport origin ignored)
     d3dgl_apply_state(rt,vw,vh); rt->last_vpw=vw; rt->last_vph=vh;
+    // PELOAD_HITBOXES: the world camera = VS cb0 rows 0-3 (view-projection) + row 7 (camera position) of the first
+    // full-size scene draw of the frame (before first-person weapon draws, which use their own projection).
+    if(!g_hb_taken && hb_enabled() && g_d3dst.rtv && vw>=640 && vh>=360){ D3DObj*c=g_d3dst.vscb[0];
+        if(c && c->data){ uint64_t off=(uint64_t)g_d3dst.vscb_1st[0]*16; if(c->size>=off+128){ const float*f=(const float*)((uint8_t*)c->data+off);
+            if(hb_is_world_camera(f)){ hb_capture_view(f); g_hb_taken=1; } } } }
     if(getenv("PELOAD_TRACE_VP") && rt->w>=2048){ static uint64_t seen[256]; static int ns; uint64_t key=((uint64_t)(uintptr_t)rt*31+(uint64_t)vw*7919+(uint64_t)vh)^ps->bchash; int f=0; for(int q=0;q<ns;q++) if(seen[q]==key){ f=1; break; } if(!f && ns<256){ seen[ns++]=key; char m[160]; int k=snprintf(m,sizeof m,"  [vp] rt=%p %ux%u f%u vp=%dx%d at %d,%d n=%u psh=%016llx\n",(void*)rt,rt->w,rt->h,rt->fmt,vw,vh,g_d3dst.vp_x,g_d3dst.vp_y,vcount,(unsigned long long)ps->bchash); (void)!write(2,m,k); } }
     if(g_nullps_color){ g_nullps_color=0; if(G.ColorMask) gs_colormask(0,0,0,0); }   // NULL PS: no colour writes
     // pipeline
@@ -5991,6 +6005,7 @@ static void d3dgl_blit_fullscreen_i(unsigned vao){
     if(g_d3dgl_blit_uloc>=0){ float tw=g_d3dgl_present_tw?g_d3dgl_present_tw:1, th=g_d3dgl_present_th?g_d3dgl_present_th:1;
         float sc[4]={ g_d3dgl_present_vw/tw, g_d3dgl_present_vh/th, 0,0 }; G.ProgramUniform4fv(g_d3dgl_blit_prog,g_d3dgl_blit_uloc,1,sc); }
     G.BindVertexArray(vao); G.DrawArrays(4,0,3);
+    hb_draw_overlay();   // PELOAD_HITBOXES (hitbox.c): object bounding volumes over the frame
     // PELOAD_D3DGL_SHOTWIN=<n>: capture the WINDOW framebuffer (FB 0) right after the blit = EXACTLY what the
     // user sees (not the G-buffer RT dumps, which are a different, often-black buffer). Every n blits.
     if(getenv("PELOAD_D3DGL_SHOTWIN")){ static unsigned long bc; int every=atoi(getenv("PELOAD_D3DGL_SHOTWIN")); if(every<1)every=20;
@@ -6060,7 +6075,9 @@ static int pq_present_wait(unsigned long*seen,int ms){
     G.UseProgram(0); G.BindProgramPipeline(0); G.UseProgram(g_pq_prog);
     G.ActiveTexture(GLE_TEX0); G.BindTexture(GLE_TEX2D,g_pq_tex[slot]); if(G.BindSampler) G.BindSampler(0,0);
     if(g_pq_sloc>=0) G.ProgramUniform1i(g_pq_prog,g_pq_sloc,0);
-    G.BindVertexArray(g_pq_vao); G.DrawArrays(4,0,3); G.Flush(); if(pc) CGLUnlockContext(pc);
+    G.BindVertexArray(g_pq_vao); G.DrawArrays(4,0,3);
+    hb_draw_overlay();   // PELOAD_HITBOXES (hitbox.c): object bounding volumes over the frame
+    G.Flush(); if(pc) CGLUnlockContext(pc);
     pthread_mutex_lock(&g_pq_mx); g_pq_reading=-1; pthread_mutex_unlock(&g_pq_mx);
     if(getenv("PELOAD_D3DGL_SHOTWIN")){ static unsigned long bc; int every=atoi(getenv("PELOAD_D3DGL_SHOTWIN")); if(every<1)every=20;
         // optional window (seconds after "gameplay presentation ready"): PELOAD_D3DGL_SHOTWIN_FROM / _TO

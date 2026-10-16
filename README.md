@@ -26,7 +26,8 @@ Game, Customize, Settings, Credits):
 
 On an M4 the menu is up about 17 s after launch, a hosted match loads in ~6 s, and gameplay averages
 ~85–120 fps depending on the map and scene. The window title shows the elapsed time, the load time and
-the live frame rate.
+the live frame rate (never more than the screen's refresh rate; when the engine runs faster, e.g. on
+loading screens, its own rate is shown beside it).
 
 Known gaps:
 - **No MCC pause menu** (by design in standalone mode); F1 releases the mouse.
@@ -132,6 +133,7 @@ Options go in front of the command, e.g. `PELOAD_INVERT_PITCH=0 bash shim/play.s
 | `RECLAIMER_EXE=<path>` | use the client exe at this path |
 | `RECLAIMER_JOIN=host:port` | join that server as soon as the menu is up, e.g. `RECLAIMER_JOIN=203.0.113.7:11774` |
 | `RECLAIMER_DIRECT=1` | skip the menu: straight into a local Guardian match (no scoreboard text) |
+| `PELOAD_HITBOXES=1` | draw bounding spheres over players (red), vehicles (yellow) and giant units (orange), through walls; `=all` adds weapons (green), equipment (cyan) and projectiles |
 | `PELOAD_H3="name=value,..."` | set Halo 3 engine settings, e.g. `render_debug_depth_render=1`, `camera_fov_scale=1.2` — all 72 are listed in `shim/docs/halo3-engine-globals.md` |
 
 The window opens at the largest 16:9 size that fits your screen (`PELOAD_WIN_SIZE=1280x720` picks a size), can be

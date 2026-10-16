@@ -9,7 +9,6 @@ Kept current as work lands (newest status first). "Done" items name the commit t
 | 1 | **Game audio silent after joining a match from the menu (v0.9.18)** | Direct mode (`RECLAIMER_DIRECT=1`) has audio on v0.9.18 (user heard the "Slayer" announcer). A muted dump of a menu-*hosted* Valhalla match also had audio. The silent case was a menu-runtime **join of a match in progress** (FKK BTB). To reproduce: target.sh host + a muted joiner with `PELOAD_AUDIO_DUMP`. |
 | 2 | **Water doesn't render** | Seen on Valhalla. Not investigated yet. |
 | 3 | **Frame rate** — "any way to increase fps?" | Draw-call bound in GL-on-Metal (~3.6 µs per draw, 1200–2300 draws/frame). Ideas: GL submission thread, draw batching/instancing, fewer state changes. Not started. |
-| 4 | **Hitbox / collision overlay as a launch toggle** | Look for halo3 debug-render flags (collision / physics / object bounding) that can be switched on. Not started. |
 | 5 | **45 s startup watchdog — root cause** | We skip the deadline check (signature patch `watchdog`). On Windows something clears that deadline in time; find what, so the patch can go. |
 | 6 | **Audio desync after a teleporter sound** (reported on v0.9.13) | Possibly the XAudio2 stopped-voice flush bug fixed in 36c3c98; not re-tested. |
 | 7 | **Seams at polygon joins on outer map geometry** (e.g. Valhalla rock walls) | User: low priority. |
@@ -27,3 +26,5 @@ Kept current as work lands (newest status first). "Done" items name the commit t
 - Second player to shoot at: shim/target.sh (input-less client hosting hidden Valhalla) — f4eb1e6, d858a8b
 - Bigger window (largest 16:9 that fits the screen) — 1367a68
 - Reclaimer client v0.9.18 support (signature patches, Bink/Waves DLL support) — a574219
+- Hitbox overlay `PELOAD_HITBOXES=1|all` (halo3's own debug_objects overlays are compiled out; reads the object table, draws bounding spheres with the world camera); verified in a 60-player BTB — HEAD
+- Title fps no longer claims more than the screen can show (loading screens spin at ~1000 presents/s) — HEAD

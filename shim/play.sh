@@ -45,7 +45,7 @@ else echo "warning: $EXE is not a client build this loader was tested with; patc
 
 # Clear leftovers from an earlier launch, but leave a running test target (shim/target.sh) alone.
 TPG="$(cat "$HOME/Library/Application Support/ReclaimerMac/target.pgid" 2>/dev/null)"
-for p in $(pgrep -f 'build/peload'); do
+for p in $(pgrep -f '^[^ ]*build/peload'); do
   [ -n "$TPG" ] && [ "$(ps -o pgid= -p "$p" | tr -d ' ')" = "$TPG" ] && continue
   kill -9 "$p" 2>/dev/null
 done; sleep 1

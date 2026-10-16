@@ -104,6 +104,17 @@ Glitch hunting: `PELOAD_D3DGL_COVQ` (+`_COVQ_FRAC`, `_HUGEPROBE=<t>`) per-draw s
 `PELOAD_D3DGL_WHITEDUMP` (draw flight recorder on auto-exposure spikes), `_LUMLOG`, `_FSLOG`,
 `_FRAMESTAT`, `_CBSCAN`, `_PSCLAMP=<c>`, `_SKIPVSH=<hash,..>`, `_DUMPHASH=<hash,..>` (GLSL+DXBC to ~).
 
+Hitbox overlay (2026-10-16): `PELOAD_HITBOXES=1|all` (shim/src/hitbox.c). halo3's debug_objects_* overlays are
+compiled out, so the shim reads the "object" data array (TLS index at halo3+0xa39f9c -> TLS block +0x38; datum
++0x1c sphere centre, +0x28 radius) and draws the spheres in the present-queue blit (pq_present_wait -- NOT
+d3dgl_blit_fullscreen_i, which only runs without the present queue). The camera is VS cb0 rows 0-3 + row 7 of
+the first draw whose cb0 passes hb_is_world_camera (camera at the clip-space origin; full-screen passes carry a
+view-space-only projection with row3 = 0,0,1,0). `PELOAD_HITBOXES_LOG` prints counts + the nearest object's NDC.
+NEVER find engine structures by sweeping process memory -- it kernel-panicked the Mac (memory [[no-memory-sweeps]]).
+Test runs: `bash shim/tools/quiet-run.sh "<env>" <secs>` (one instance, visible but input-less; QR_MINIMIZE=1
+minimizes, which can stall the loading screen). Process matches must be anchored (`pgrep -f '^[^ ]*build/peload'`):
+an unanchored pattern also matches shells whose command text mentions build/peload.
+
 ## Render Guardian via the game client (GL-on-Metal, no MCC/Steam)
 `game-client` runs the engine in a standalone native window ("Reclaimer GL (OpenGL on Metal)") and
 actually renders Guardian gameplay. Needs the XAudio2 bypass + skinguard + two crash guards:
