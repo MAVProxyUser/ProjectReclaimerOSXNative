@@ -144,7 +144,7 @@ static int dg_decode_program(const uint8_t*d,size_t len,size_t base,size_t size,
 }
 
 // ---- signatures ----
-typedef struct { char name[64]; uint32_t idx,sysval,reg,mask; } DgSig;
+typedef struct { char name[64]; uint32_t idx,sysval,reg,mask,ctype; } DgSig;   // ctype: 1 uint, 2 sint, 3 float
 static int dg_parse_sig(const uint8_t*d,size_t len,size_t base,DgSig*out,int cap){
     uint32_t n=dg_u32(d,len,base); int m=0;
     for(uint32_t i=0;i<n && (int)i<cap;i++){
@@ -153,7 +153,7 @@ static int dg_parse_sig(const uint8_t*d,size_t len,size_t base,DgSig*out,int cap
         uint32_t reg=dg_u32(d,len,e+16); uint8_t mask=(e+20<len)?d[e+20]:0;
         size_t np=base+noff; out[m].name[0]=0;
         if(np<len){ size_t k=0; while(np+k<len && d[np+k] && k<63){ out[m].name[k]=(char)d[np+k]; k++; } out[m].name[k]=0; }
-        out[m].idx=idx; out[m].sysval=sysval; out[m].reg=reg; out[m].mask=mask; m++;
+        out[m].idx=idx; out[m].sysval=sysval; out[m].reg=reg; out[m].mask=mask; out[m].ctype=dg_u32(d,len,e+12); m++;
     }
     return m;
 }
@@ -170,6 +170,7 @@ static void dg_linsert(DgLines*L,int at,char*s){ if(L->n>=L->cap){ L->cap=L->cap
 static char* dg_pool(void){ static char buf[16][256]; static int pi; char*p=buf[pi++ & 15]; p[0]=0; return p; }
 
 static const char* g_sysin[64];   // input reg -> GLSL builtin (per-shader)
+static int g_dg_nointin=-1;      // PELOAD_D3DGL_NOINTIN: integer VS inputs as plain vec4 (old behaviour)
 
 static void dg_swz(const DgOp*op,char out[5]){
     char s[8]; int sl=0;
@@ -327,6 +328,7 @@ char* dg_emit(const char*stage,const DgSig*isgn,int ni,const DgSig*osgn,int no,D
     int ntemps=maxt+1;
     // _SYSIN + inputs
     for(int i=0;i<64;i++) g_sysin[i]=NULL;
+    if(g_dg_nointin<0) g_dg_nointin=getenv("PELOAD_D3DGL_NOINTIN")?1:0;
     int seen_in[256]={0};
     for(int i=0;i<ni;i++){ const DgSig*s=&isgn[i];
         // PS SV_Position = pixel-center coords in render-target space (top-left origin), z = depth, w = clip w.
@@ -339,6 +341,14 @@ char* dg_emit(const char*stage,const DgSig*isgn,int ni,const DgSig*osgn,int no,D
         if(!strcasecmp(s->name,"SV_VertexID")){ if(s->reg<64) g_sysin[s->reg]="intBitsToFloat(ivec4(gl_VertexID))"; continue; }
         if(!strcasecmp(s->name,"SV_InstanceID")){ if(s->reg<64) g_sysin[s->reg]="intBitsToFloat(ivec4(gl_InstanceID))"; continue; }
         if(s->reg<256){ if(seen_in[s->reg]) continue; seen_in[s->reg]=1; }
+        // integer vertex attributes (BLENDINDICES etc., DXGI *_UINT/_SINT): D3D's input assembler puts the raw
+        // integer into the register, so declare uvec4/ivec4 (the shim feeds them with glVertexAttribIPointer)
+        // and expose the bits. As vec4 they arrived as converted floats (3 -> 3.0f = 0x40400000) and every
+        // bone-palette lookup indexed far out of bounds -> exploded skinned geometry / Inf pixels.
+        if(!strcmp(stage,"vs") && (s->ctype==1||s->ctype==2) && s->reg<64 && !g_dg_nointin){
+            static char ex[64][40]; snprintf(ex[s->reg],sizeof ex[s->reg],"%s(vi%u)",s->ctype==1?"uintBitsToFloat":"intBitsToFloat",s->reg);
+            g_sysin[s->reg]=ex[s->reg];
+            dg_lprintf(&L,"in %s vi%u; // %s%u",s->ctype==1?"uvec4":"ivec4",s->reg,s->name,s->idx); continue; }
         dg_lprintf(&L,"in vec4 v%u; // %s%u",s->reg,s->name,s->idx);
     }
     int seen_out[256]={0};
