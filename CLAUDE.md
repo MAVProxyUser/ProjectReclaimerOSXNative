@@ -24,6 +24,23 @@ presented surface to `~/reclaimer_gdi_*.bmp`), `PELOAD_POKE=<rva>:<u8>` (continu
 byte into guest memory from the present thread). Patches: `PELOAD_PATCH=<mod>+<rva>:<hexbytes>`.
 Kill leftover workers between runs: `pkill -9 -f 'build/peload'`.
 
+## Play (current best path — 2026-10-16)
+```bash
+bash shim/build.sh && bash shim/play.sh      # game-client on the D3D11->GL renderer; log: /tmp/reclaimer_play.log
+```
+Guardian/Slayer renders with correct colors, depth, shadows, skinned meshes (first-person weapon),
+GPU particles (CPU compute interpreter, `shim/src/dxbc_cpu.c`), the loading screen, game audio
+(XAudio2 on CoreAudio, `shim/src/xaudio.c`), controller (XInput on GameController.framework, pitch
+inverted by default) and keyboard/mouse (Raw Input from NSEvents, `shim/src/wininput.c`; click the
+window to capture, F1 releases). The window title shows engine fps / draws per frame; the window is
+resizable and full-screen capable. `play.sh` adds `exe+65ddf9:eb` (skips the client's 45 s startup
+watchdog that otherwise parks the input thread). Key A/B switches: `PELOAD_AUDIO=0`, `PELOAD_INVERT_PITCH=0`,
+`PELOAD_D3DGL_NOPQ/NOSTATECACHE/NORING/NOUBO/NOSRGB/NOCMP/NOYFLIP/NODEPTH`, `PELOAD_NOCSCPU`.
+Diagnostics: `PELOAD_FPS_LOG`, `PELOAD_D3DGL_PROF`, `PELOAD_SAMPLE=<us>`, `PELOAD_TRACE_FAULT`,
+`PELOAD_D3DGL_SHOTWIN=<n>` (+`PELOAD_D3DGL_ALT5` phase-tagged A/B), `PELOAD_INPUT_SCRIPT=walk|fire`,
+`PELOAD_KBM_TEST`, `PELOAD_AUDIO_DUMP=<raw>`. The GLSL translator runs in-process every launch;
+`~/reclaimer_glsl_v4/` is written for inspection only (`PELOAD_D3DGL_GLSLCACHE=1` reads it back).
+
 ## Render Guardian via the game client (GL-on-Metal, no MCC/Steam)
 `game-client` runs the engine in a standalone native window ("Reclaimer GL (OpenGL on Metal)") and
 actually renders Guardian gameplay. Needs the XAudio2 bypass + skinguard + two crash guards:
