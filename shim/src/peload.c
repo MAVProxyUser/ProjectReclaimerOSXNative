@@ -5146,6 +5146,7 @@ static void prof_report(void){ if(!prof_on()) return; uint64_t now=prof_now(); i
     if(getenv("PELOAD_D3DGL_RTCENSUS")){ for(int i=0;i<g_nrtc;i++){ char b[200]; int j=snprintf(b,sizeof b,"  [rtc] rt=%p %ux%u f%u geo=%llu fs=%llu last-t0=%ux%u f%u\n",g_rtc[i].rt,g_rtc[i].w,g_rtc[i].h,g_rtc[i].fmt,(unsigned long long)g_rtc[i].geo,(unsigned long long)g_rtc[i].fs,g_rtc[i].t0w,g_rtc[i].t0h,g_rtc[i].t0f); (void)!write(2,b,j); } g_nrtc=0; }
     g_prof_ns=g_prof_n=g_prof_pres_ns=g_prof_pres_n=0; g_prof_wall0=now; }
 // empty pixel shader for depth-only passes (D3D allows PS=NULL; GL needs a fragment stage in a mono program)
+static int g_nullps_color;   // this draw has a NULL PS but colour targets bound -> mask colour writes
 static D3DObj* d3dgl_null_ps(void){ static D3DObj o; if(!o.glsl){ o.stype=1; o.glsl=strdup("#version 410 core\n// stage=ps\nvoid main(){}\n"); } return &o; }
 static struct { unsigned buf; unsigned comps, type; unsigned char norm; uint32_t stride; uint64_t off; unsigned div; int ipt; } g_va[16];
 static uint32_t g_va_en; static int g_va_nocache=-1;
@@ -5213,7 +5214,7 @@ static void d3dgl_draw_impl(uint32_t vcount,int indexed,uint32_t instcount,uint3
     if(prof_on()) g_ph_t=prof_now();
     if(!d3dgl_ensure()) return;
     if(g_d3dgl_max_draws && g_d3dgl_frame_draws>=g_d3dgl_max_draws) return;
-    d3dgl_ring_reserve();
+    d3dgl_ring_reserve(); g_nullps_color=0;
     // PELOAD_TRACE_D3DGL: tally WHY draws are skipped (so we can see what state is missing)
     static unsigned long c_tot,c_novsps,c_noglsl,c_noprog,c_exec;
     c_tot++;
@@ -5221,6 +5222,12 @@ static void d3dgl_draw_impl(uint32_t vcount,int indexed,uint32_t instcount,uint3
     if(g_d3dgl_trace && (c_tot%100000)==0){ char m[160]; int k=snprintf(m,sizeof m,"  [d3dgl] draws tot=%lu exec=%lu skip(novsps=%lu noglsl=%lu noprog=%lu)\n",c_tot,c_exec,c_novsps,c_noglsl,c_noprog); (void)!write(2,m,k); }
     { D3DObj*rr=g_d3dst.rtv; int tobb=(!rr||rr==g_d3d_backbuf);
       if(!ps && vs && !g_d3dst.rtv && g_d3dst.dsv && !getenv("PELOAD_D3DGL_NODEPTH")) ps=d3dgl_null_ps();   // depth-only pass: no PS
+      // NULL PS with colour targets bound: D3D still runs depth/stencil test+write, colour is left untouched
+      // (stencil-marking / depth-only object passes). Was skipped outright.
+      if(!ps && vs && g_d3dst.rtv && g_d3dst.dsv && !getenv("PELOAD_D3DGL_NODEPTH") && !getenv("PELOAD_D3DGL_SKIPNULLPS")){ ps=d3dgl_null_ps(); g_nullps_color=1; }
+      if((!vs||!ps) && getenv("PELOAD_TRACE_NOVSPS")){ static int nn; if(nn++<60){ D3DObj*r0=g_d3dst.rtv; D3DObj*rr0=(r0&&r0->data&&r0->vkind)?(D3DObj*)r0->data:r0; D3DObj*t0=g_d3dst.psrv[0]; D3DObj*tt0=(t0&&t0->data&&t0->vkind)?(D3DObj*)t0->data:t0;
+          uint64_t ra=(uint64_t)__builtin_return_address(1);
+          char m[260]; int k=snprintf(m,sizeof m,"  [novsps] vs=%p ps=%p rt=%ux%u f%u dsv=%p n=%u inst=%u topo=%u t0=%ux%u f%u ra=0x%llx\n",(void*)vs,(void*)ps,rr0?rr0->w:0,rr0?rr0->h:0,rr0?rr0->fmt:0,(void*)g_d3dst.dsv,vcount,instcount,g_d3dst.topo,tt0?tt0->w:0,tt0?tt0->h:0,tt0?tt0->fmt:0,(unsigned long long)ra); (void)!write(2,m,k); } }
       if(!vs||!ps){ c_novsps++; g_fs.novsps++; if(tobb){ g_bb_skip++; g_bb_skip_reason=1;
           if(getenv("PELOAD_TRACE_COPY")){ static int sk; if(sk++<10){ D3DObj*il0=g_d3dst.il; D3DObj*t0=g_d3dst.psrv[0]; char m[300];
               int k=snprintf(m,sizeof m,"  [bbskip] vs=%p(bc=%u glsl=%d) ps=%p(bc=%u glsl=%d) n=%u idx=%d topo=%u il=%d vb0=%lluB stride=%u t0=%ux%u f%u vp=%dx%d\n",
@@ -5257,6 +5264,7 @@ static void d3dgl_draw_impl(uint32_t vcount,int indexed,uint32_t instcount,uint3
     if(getenv("PELOAD_D3DGL_RTTEST") && G.ClearColor){ G.ClearColor(1.0f,0.0f,1.0f,1.0f); G.Clear(0x4000/*COLOR_BUFFER_BIT*/); }
     // D3D11 blend / rasterizer / viewport state (was: everything forced off + viewport origin ignored)
     d3dgl_apply_state(rt,vw,vh); rt->last_vpw=vw; rt->last_vph=vh;
+    if(g_nullps_color){ g_nullps_color=0; if(G.ColorMask) gs_colormask(0,0,0,0); }   // NULL PS: no colour writes
     // pipeline
     PH(1); g_d3dgl_phase="pipeline";
     if(mono){ G.BindProgramPipeline(0); G.UseProgram(mp->prog); }
