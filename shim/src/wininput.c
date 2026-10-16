@@ -224,12 +224,9 @@ static void wi_click_at(void*h,int x,int y){ int64_t lp=(int64_t)((y<<16)|(x&0xf
     wi_post(h,0x0200,0,lp); usleep(100000);
     g_keydown[1]=1; wi_raw_mouse(0,0,0x1,0); wi_post(h,0x0201,1,lp); usleep(80000);
     g_keydown[1]=0; wi_raw_mouse(0,0,0x2,0); wi_post(h,0x0202,0,lp); }
-static void* wi_auto_thread(void*a){ (void)a;
-    while(!g_menu_ready_t0) usleep(100000);
-    const char*dl=getenv("PELOAD_AUTOCLICK_DELAY"); usleep((useconds_t)((dl?atof(dl):3.0)*1e6));
-    const char*gp=getenv("PELOAD_AUTOCLICK_GAP"); useconds_t gap=(useconds_t)((gp?atof(gp):1.5)*1e6);
-    void*h=fg_hwnd_ext(); char m[96]; int k;
-    for(const char*e=getenv("PELOAD_AUTOCLICK"); e && *e; e=strchr(e,';')?strchr(e,';')+1:0){
+extern volatile int g_games_ended;
+static void wi_run_steps(void*h,const char*e,useconds_t gap){ char m[96]; int k;
+    for(; e && *e; e=strchr(e,';')?strchr(e,';')+1:0){
         int x=0,y=0,n=0; double secs=0; unsigned kc=0;
         if(sscanf(e,"s:%lf",&secs)==1){ usleep((useconds_t)(secs*1e6)); continue; }
         if(sscanf(e,"w:%d,%d,%d",&x,&y,&n)==3){ int64_t lp=(int64_t)((y<<16)|(x&0xffff)); g_wi_cx=x; g_wi_cy=y; wi_post(h,0x0200,0,lp);
@@ -240,7 +237,22 @@ static void* wi_auto_thread(void*a){ (void)a;
         else if(sscanf(e,"k:%x",&kc)==1){ wi_key((unsigned short)kc,1,0); usleep(80000); wi_key((unsigned short)kc,0,0); k=snprintf(m,sizeof m,"  [autoclick] key 0x%x\n",kc); }
         else if(sscanf(e,"%d,%d",&x,&y)==2){ wi_click_at(h,x,y); k=snprintf(m,sizeof m,"  [autoclick] click %d,%d\n",x,y); }
         else break;
-        (void)!write(2,m,k); usleep(gap); }
-    k=snprintf(m,sizeof m,"  [autoclick] done\n"); (void)!write(2,m,k); return 0; }
+        (void)!write(2,m,k); usleep(gap); } }
+// PELOAD_AUTOCLICK_AFTER_GAME="<steps>": run these steps again PELOAD_AUTOCLICK_AFTER_DELAY s (default 8)
+// after every finished match ("Carnage report opened"), e.g. Continue + Start Game so a hosting test
+// target always has a match running.
+static void* wi_auto_thread(void*a){ (void)a;
+    while(!g_menu_ready_t0) usleep(100000);
+    const char*dl=getenv("PELOAD_AUTOCLICK_DELAY"); usleep((useconds_t)((dl?atof(dl):3.0)*1e6));
+    const char*gp=getenv("PELOAD_AUTOCLICK_GAP"); useconds_t gap=(useconds_t)((gp?atof(gp):1.5)*1e6);
+    void*h=fg_hwnd_ext(); int seen=g_games_ended;
+    wi_run_steps(h,getenv("PELOAD_AUTOCLICK"),gap);
+    { const char*t="  [autoclick] done\n"; (void)!write(2,t,strlen(t)); }
+    const char*again=getenv("PELOAD_AUTOCLICK_AFTER_GAME"); if(!again) return 0;
+    const char*ad=getenv("PELOAD_AUTOCLICK_AFTER_DELAY"); useconds_t after=(useconds_t)((ad?atof(ad):8.0)*1e6);
+    for(;;){ while(g_games_ended==seen) usleep(200000); seen=g_games_ended;
+        { const char*t="  [autoclick] match ended; running the after-game steps\n"; (void)!write(2,t,strlen(t)); }
+        usleep(after); wi_run_steps(h,again,gap); }
+    return 0; }
 static void wi_test_start(void){ if(getenv("PELOAD_KBM_TEST")){ pthread_t t; pthread_create(&t,0,wi_test_thread,0); }
     if(getenv("PELOAD_AUTOCLICK")){ pthread_t t; pthread_create(&t,0,wi_auto_thread,0); } }

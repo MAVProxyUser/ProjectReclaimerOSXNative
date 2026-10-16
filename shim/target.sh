@@ -5,7 +5,8 @@
 #     RECLAIMER_JOIN=127.0.0.1:11774 bash shim/play.sh       # join it (about 40 s after starting the target)
 #     bash shim/target.sh stop                               # stop it
 # The target has its own profile ("Target"), no controller/keyboard/mouse, no audio and never takes focus,
-# so it doesn't steal your input. It drives its own menu with scripted clicks (PELOAD_AUTOCLICK) in its
+# so it doesn't steal your input. Its window says "TARGET (no input)" and starts minimized in the Dock
+# (TARGET_MINIMIZE=0 keeps it on screen). It drives its own menu with scripted clicks (PELOAD_AUTOCLICK) in its
 # window: Host Game -> map search -> Network Online -> Hidden server -> Start Game.
 #   TARGET_MAP=<name>   map to host (searched in the map picker), default Valhalla
 # Log: /tmp/reclaimer_target.log
@@ -31,12 +32,16 @@ MAP="${TARGET_MAP:-Valhalla}"
 #   Host Game | Map | search box | type map | USE <MAP> | Network -> Online | Host Settings | scroll down |
 #   Hidden server | Apply changes (returns to the lobby page) | Start Game
 CLICKS="110,503;230,183;300,143;t:$(echo "$MAP" | tr 'A-Z' 'a-z');1047,663;384,440;230,497;w:450,500,-15;808,592;967,668;s:2;230,625"
+# A match ends when its last other player leaves; then dismiss the carnage report (CONTINUE) and start the
+# next one, so there is always a match to join.
+AFTER="1068,52;s:12;230,625"
 
 set -m
 env PELOAD_SKINGUARD=1 PELOAD_VTGUARD=1 PELOAD_ALLOC_GUARD=1 PELOAD_PATCH="$XA" PELOAD_WORKER_INHERIT_STDIO=1 \
     PELOAD_PRESENT=1 PELOAD_HOLD_WINDOW=1 PELOAD_PRESENT_HIDDEN=1 PELOAD_D3DGL=1 \
     PELOAD_NO_PAD=1 PELOAD_NO_KBM=1 PELOAD_NO_SYS_CURSOR=1 PELOAD_NO_FOCUS=1 PELOAD_AUDIO=0 \
-    PELOAD_AUTOCLICK="$CLICKS" RECLAIMER_PROFILE_DIR='C:\ReclaimerProfileTarget' \
+    PELOAD_TITLE_PREFIX="TARGET (no input)" PELOAD_MINIMIZE="${TARGET_MINIMIZE:-1}" \
+    PELOAD_AUTOCLICK="$CLICKS" PELOAD_AUTOCLICK_AFTER_GAME="$AFTER" RECLAIMER_PROFILE_DIR='C:\ReclaimerProfileTarget' $TARGET_ENV \
     arch -x86_64 shim/build/peload "$EXE" game-client \
     --mcc-path "C:\\Program Files\\Steam\\steamapps\\common\\Halo The Master Chief Collection" \
     < /dev/null > /tmp/reclaimer_target.log 2>&1 &

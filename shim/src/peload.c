@@ -623,11 +623,13 @@ static int pipe_name_is(const char*s);                               // fwd
 static void* pipe_client_open(const char*narrow);                    // fwd
 double g_gameplay_t0;   // monotonic seconds when the client logged "gameplay presentation ready" (0 = not yet)
 double g_menu_ready_t0; // ... "Menu loading screen finished" (frontend menu mode)
+volatile int g_games_ended; // count of "Carnage report opened" (a match ended; PELOAD_AUTOCLICK_AFTER_GAME)
 static double mono_s(void){ struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t); return t.tv_sec+t.tv_nsec*1e-9; }
 static int    MSABI i_WriteFile(void *h, const void *buf, uint32_t n, uint32_t *wr, void *ov){
     (void)ov; intptr_t hv=(intptr_t)h;
     if(!g_gameplay_t0 && buf && n>20 && memmem(buf,n,"gameplay presentation ready",27)) g_gameplay_t0=mono_s();
     if(!g_menu_ready_t0 && buf && n>20 && memmem(buf,n,"Menu loading screen finished",28)) g_menu_ready_t0=mono_s();
+    if(buf && n>20 && memmem(buf,n,"Carnage report opened",21)) __atomic_add_fetch(&g_games_ended,1,__ATOMIC_SEQ_CST);
     if(pipe_is(hv)) return pipe_write(h,buf,n,wr);
     int fd = (hv==2)?1 : (hv==3)?2 : (hv>=0x1000)?(int)(hv-0x1000) : -1;
     // PELOAD_CAP_ADV: dump the exact bytes written to a local-server advertisement file
@@ -2738,6 +2740,7 @@ static int MSABI i_NtWriteFile(void*h,void*ev,void*apc,void*apcctx,void*iosb,con
     (void)ev;(void)apc;(void)apcctx;(void)key; intptr_t hv=(intptr_t)h;
     if(!g_gameplay_t0 && buf && len>20 && memmem(buf,len,"gameplay presentation ready",27)) g_gameplay_t0=mono_s();
     { extern double g_menu_ready_t0; if(!g_menu_ready_t0 && buf && len>20 && memmem(buf,len,"Menu loading screen finished",28)) g_menu_ready_t0=mono_s(); }
+    if(buf && len>20 && memmem(buf,len,"Carnage report opened",21)) __atomic_add_fetch(&g_games_ended,1,__ATOMIC_SEQ_CST);
     int fd = (hv==2)?1 : (hv==3)?2 : (hv>=0x1000)?(int)(hv-0x1000) : -1;
     if(fd>=0 && len>8 && len<4096 && getenv("PELOAD_TRACE_BT")){ const char*w=getenv("PELOAD_TRACE_BT");
         if(memmem(buf,len,w,strlen(w))){ (void)!write(2,"  [BT-Nt] matched; stack exe/halo3 returns:\n",44);
@@ -3643,6 +3646,10 @@ static void fps_title_main(void*ctx){ (void)ctx; extern id g_nswin_ext(void); id
     else if(ready) snprintf(t,sizeof t,"%s  |  %s in %.1f s  |  up %d:%02d",g_fps_title,g_gameplay_t0?"match loaded":"menu loaded",ready-g_launch_mono,um,us);
     else snprintf(t,sizeof t,"%s  |  loading...  %d:%02d",g_fps_title,um,us);
     { static int n; if(getenv("PELOAD_FPS_LOG") && (n++%5)==0){ char m[300]; int k=snprintf(m,sizeof m,"  [title] %s\n",t); (void)!write(2,m,k); } }
+    // PELOAD_TITLE_PREFIX labels this window (e.g. "TARGET (no input)" for shim/target.sh); PELOAD_MINIMIZE puts
+    // it in the Dock once it exists (keep PELOAD_PRESENT_HIDDEN=1 so it keeps presenting while minimized).
+    { const char*pre=getenv("PELOAD_TITLE_PREFIX"); if(pre&&*pre){ char t2[300]; snprintf(t2,sizeof t2,"%s  |  %s",pre,t); snprintf(t,sizeof t,"%s",t2); } }
+    { static int mini; if(!mini && getenv("PELOAD_MINIMIZE") && atoi(getenv("PELOAD_MINIMIZE"))){ mini=1; ((void(*)(id,SEL,id))objc_msgSend)(w,sel_registerName("miniaturize:"),(id)0); } }
     id str=((id(*)(id,SEL,const char*))objc_msgSend)((id)objc_getClass("NSString"),sel_registerName("stringWithUTF8String:"),t);
     ((void(*)(id,SEL,id))objc_msgSend)(w,sel_registerName("setTitle:"),str); }
 static void title_timer_start(void){ static int started; if(started||getenv("PELOAD_NO_FPS_TITLE")) return; started=1; launch_time_init();
@@ -9222,7 +9229,12 @@ static void vtguard_one(uint8_t*base,uint64_t rva,int origlen,uint64_t skiprva){
     sys_icache_invalidate(site,origlen);
     char m[128]; int k=snprintf(m,sizeof m,"  [vtguard] @%p tramp=%p (null-vtable release -> skip to +0x%llx)\n",(void*)site,(void*)t,(unsigned long long)skiprva); (void)!write(2,m,k);
 }
-static void vtguard_install(uint8_t*halo3base){ if(!getenv("PELOAD_VTGUARD")) return; vtguard_one(halo3base,0x172bce,17,0x172bee); }
+// Second site, same shared_ptr control-block release (halo3+0x172e88, called from the sweep at 0x172c49): a
+// player joining a match in progress faulted at RVA 0x172FA0 (`call [rax]` with a NULL vtable) a few
+// seconds after the map was ready. mov rax,[rbx] / mov rcx,rbx / call [rax] / mov eax,edi / lock xadd
+// [rbx+0xc],eax = 15 bytes to the boundary at 0x172fa9; skip to the epilogue at 0x172fb7.
+static void vtguard_install(uint8_t*halo3base){ if(!getenv("PELOAD_VTGUARD")) return; vtguard_one(halo3base,0x172bce,17,0x172bee);
+    vtguard_one(halo3base,0x172f9a,15,0x172fb7); }
 static void bp_install(void){ const char*s=getenv("PELOAD_BP"); if(!s||!g_base) return;
     while(*s && g_bp_n<8){ uint64_t rva=strtoull(s,0,16); if(rva){ uint8_t*p=g_base+rva;
             uintptr_t pg=(uintptr_t)p & ~0xFFFull; mprotect((void*)pg,0x2000,PROT_READ|PROT_WRITE|PROT_EXEC);
