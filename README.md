@@ -25,7 +25,13 @@ depending on the scene). The window title shows the elapsed time, the load time 
 Reclaimer's own frontend menu (Halo 3 menu scene with Server Browser, Campaign, Host Game, Customize,
 Settings, Credits) also renders and responds to the mouse: `RECLAIMER_MENU=1 bash shim/play.sh`.
 
+**Online play:** joining a public internet server works. The client joins the lobby, prepares the next
+map when the server rotates, and loads into the match: `RECLAIMER_JOIN=host:port bash shim/play.sh`.
+Only servers running the same client version (0.9.13) can be joined.
+
 Known gaps:
+- **Server Browser list.** The browser finds the servers (its header shows the count), but the list rows
+  aren't drawn yet. Use `RECLAIMER_JOIN=host:port` to join a server in the meantime.
 - **Starting a match from the menu** (Host Game → Start Game) hangs on the loading screen. Use the
   default `bash shim/play.sh`, which goes straight into a Guardian match.
 - **Scoreboard names.** Holding Back/Tab in a match shows the scoreboard bars without names or scores.
@@ -111,6 +117,7 @@ Options go in front of the command, e.g. `PELOAD_INVERT_PITCH=0 bash shim/play.s
 | `PELOAD_VSYNC=1` | vsync the window (off by default) |
 | `RECLAIMER_EXE=<path>` | use the client exe at this path |
 | `RECLAIMER_MENU=1` | start in Reclaimer's frontend menu instead of a match |
+| `RECLAIMER_JOIN=host:port` | start in the menu and join that server, e.g. `RECLAIMER_JOIN=203.0.113.7:11774` |
 
 The window can be resized and made full screen. Developer and diagnostic switches are documented in
 `CLAUDE.md` and in the source.

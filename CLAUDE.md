@@ -41,6 +41,18 @@ Diagnostics: `PELOAD_FPS_LOG`, `PELOAD_D3DGL_PROF`, `PELOAD_SAMPLE=<us>`, `PELOA
 frame `_f<N>`; `PELOAD_D3DGL_ALT5` phase-tagged A/B), `PELOAD_INPUT_SCRIPT=walk|fire|<segments>`,
 `PELOAD_KBM_TEST`, `PELOAD_AUDIO_DUMP=<raw>`. The GLSL translator runs in-process every launch;
 `~/reclaimer_glsl_v5/` is written for inspection only (`PELOAD_D3DGL_GLSLCACHE=1` reads it back).
+Hang debugging: `kill -USR1 <worker pid>` dumps every guest thread (rip + stack-scanned return addrs);
+`PELOAD_PEEK=<hexaddr>:<hexlen>[,...]` adds hex dumps of guest memory to it. `PELOAD_TRACE_LE=<code>`
+logs GetLastError calls returning <code> (with the guest caller and the last failed path).
+
+Online join (2026-10-16): `RECLAIMER_JOIN=host:port bash shim/play.sh` passes the client its own join
+link `reclaimer://join?server=host:port` as argv[1] (what its URL handler / Discord does). The client finds
+MCC itself, boots the menu, joins the lobby, prepares the server's next playlist map and loads in. Proven
+on btb1.coyot.ee:49178 (Epitaph, ~85 fps). `RECLAIMER_JOIN_LINK` env is only read by the Discord thread.
+Two shim bugs blocked it: FindFirstFile handles were never reused (after 64 scans every read_dir failed
+with a stale error -> "Cannot prepare playlist map: os error 80"), and XAudio2 FlushSourceBuffers kept the
+head buffer of a STOPPED voice, so its OnBufferEnd never came and the engine's pre-load "drain every voice"
+wait (halo3+0x1d17be, busy byte at voice+0x38) spun forever.
 
 Perf (2026-10-16, M4, 1280x720 window, 1920x1080 internal): gameplay median ~116 fps, p10 ~80,
 min ~50 (3-min soak). Draw-call bound: ~3.6 us per glDraw* in GL-on-Metal x ~1200-2300 draws/frame;

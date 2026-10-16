@@ -116,9 +116,13 @@ static int MSABI xs_SubmitSourceBuffer(XAVoice*v,const uint8_t*b,const void*wma)
     v->qn++;
     pthread_mutex_unlock(&g_xamx); return 0; }
 static int MSABI xs_FlushSourceBuffers(XAVoice*v){ pthread_mutex_lock(&g_xamx);
-    // flushed (not played) buffers still get OnBufferEnd, except the one currently playing (reported by the
-    // mixer on its next pass so the callback never runs inside the caller's XAudio2 call)
-    while(v->qn>1){ XABuf b=v->q[(v->qh+v->qn-1)%64]; v->qn--; xa_cb_bufend(v,b.ctx); }
+    // Flushed buffers still get OnBufferEnd, in queue order, from the mixer's next pass (never inside the
+    // caller's XAudio2 call). A STARTED voice keeps the buffer it is playing; a STOPPED voice flushes all of
+    // them. Keeping the head of a stopped voice meant its OnBufferEnd never came (the mixer only advances
+    // started voices), and the engine, which waits for every voice to drain before loading a map, hung there.
+    int keep=(v->started && v->qn)?1:0;
+    for(int k=keep;k<v->qn;k++) xa_cb_bufend(v,v->q[(v->qh+k)%64].ctx);
+    if(keep) v->qn=1; else { v->qn=0; v->pos=0; v->frac=0; v->startcb=0; }
     pthread_mutex_unlock(&g_xamx); return 0; }
 static int MSABI xs_ExitLoop(XAVoice*v,uint32_t op){ (void)op; pthread_mutex_lock(&g_xamx); if(v->qn) v->q[v->qh].lcount=0; pthread_mutex_unlock(&g_xamx); return 0; }
 static void MSABI xs_GetState(XAVoice*v,uint8_t*st,uint32_t fl){ (void)fl; if(!st) return; pthread_mutex_lock(&g_xamx);

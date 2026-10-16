@@ -406,7 +406,7 @@ static uint32_t win_err(void){ switch(errno){ case ENOENT: return 2; /*FILE_NOT_
 static __thread char t_lastfail[512];           // last path that failed to open on this thread
 static uint32_t MSABI i_GetLastError(void){
     const char*le=getenv("PELOAD_TRACE_LE");
-    if(le && (g_lasterr==2 || !strcmp(le,"all"))){ void*ra=__builtin_return_address(0); char t[640]; uint64_t r=(uint64_t)ra; snprintf(t,sizeof t,"  [GLE=%u] caller=%s+0x%llx lastfail='%s'\n",g_lasterr,(r>=0x140000000&&r<0x14c000000)?"exe":(r>=0x180000000&&r<0x187000000)?"halo3":"?",(unsigned long long)((r>=0x140000000&&r<0x14c000000)?r-0x140000000:(r>=0x180000000&&r<0x187000000)?r-0x180000000:r),t_lastfail); ws(t); }
+    if(le && (g_lasterr==2 || !strcmp(le,"all") || (atoi(le)>2 && (uint32_t)atoi(le)==g_lasterr))){ void*ra=__builtin_return_address(0); char t[640]; uint64_t r=(uint64_t)ra; snprintf(t,sizeof t,"  [GLE=%u] caller=%s+0x%llx lastfail='%s'\n",g_lasterr,(r>=0x140000000&&r<0x14c000000)?"exe":(r>=0x180000000&&r<0x187000000)?"halo3":"?",(unsigned long long)((r>=0x140000000&&r<0x14c000000)?r-0x140000000:(r>=0x180000000&&r<0x187000000)?r-0x180000000:r),t_lastfail); ws(t); }
     return g_lasterr; }
 static void   MSABI i_SetLastError(uint32_t e){ g_lasterr=e; }
 
@@ -7452,7 +7452,7 @@ static int  MSABI i_UnlockFile(void*h,uint32_t a,uint32_t b,uint32_t c,uint32_t 
 static int  MSABI i_FlushViewOfFile(void*a,uint64_t b){ (void)a;(void)b; return 1; }
 // SetEndOfFile / SetFileInformationByHandle: truncate to current offset
 static int  MSABI i_SetEndOfFile(void*h){ intptr_t hv=(intptr_t)h; if(hv<0x1000) return 1; int fd=(int)(hv-0x1000); off_t cur=lseek(fd,0,SEEK_CUR); if(cur>=0) (void)!ftruncate(fd,cur); return 1; }
-static int  MSABI i_MoveFileExW(const uint16_t*from,const uint16_t*to,uint32_t fl){ (void)fl; char a[2048],b[2048]; char A[2048],B[2048]; win2unix(from,A,sizeof A); if(!to){ int r=unlink(A); if(getenv("PELOAD_TRACE_FS")){ws("  [MoveFileEx del] ");ws(A);ws(r?" FAIL\n":" ok\n");} return r==0; } win2unix(to,B,sizeof B); (void)a;(void)b; int r=rename(A,B);
+static int  MSABI i_MoveFileExW(const uint16_t*from,const uint16_t*to,uint32_t fl){ (void)fl; char a[2048],b[2048]; char A[2048],B[2048]; win2unix(from,A,sizeof A); if(!to){ int r=unlink(A); if(getenv("PELOAD_TRACE_FS")){ws("  [MoveFileEx del] ");ws(A);ws(r?" FAIL\n":" ok\n");} return r==0; } win2unix(to,B,sizeof B); (void)a;(void)b; int r=rename(A,B); if(r) snprintf(t_lastfail,sizeof t_lastfail,"MFX(%d):%s => %s",errno,A,B);
     if(getenv("PELOAD_TRACE_FS")){ws("  [MoveFileEx] ");ws(A);ws(" => ");ws(B);ws(r?" FAIL\n":" ok\n");}
     // DEBUG: for local-server advertisements, confirm the dest exists after rename + snapshot it
     if(getenv("PELOAD_CAP_ADV") && strstr(B,"local-servers") && strstr(B,".json")){
@@ -7811,7 +7811,7 @@ static void*  MSABI i_CreateFileW(const uint16_t *w,uint32_t acc,uint32_t share,
     int fd=open(p, flags, 0644);
     if(fd<0 && (flags&O_CREAT) && errno==ENOENT){ mkparents(p); fd=open(p, flags, 0644); } // scratch mirror
     if(getenv("PELOAD_TRACE_FS")){ char hd[48]; snprintf(hd,sizeof hd,"  [CFW pid=%d disp=%u acc=0x%x] ",getpid(),disp,acc); ws(hd); ws(p); ws(fd<0?"  FAIL\n":"  ok\n"); }
-    if(fd<0){ g_lasterr=win_err(); if(g_lasterr==2) snprintf(t_lastfail,sizeof t_lastfail,"CFW:%s",p[0]?p:"<empty>");
+    if(fd<0){ g_lasterr=win_err(); snprintf(t_lastfail,sizeof t_lastfail,"CFW:%s",p[0]?p:"<empty>");
         if(getenv("PELOAD_TRACE_CFWBT") && errno==ENOENT){ ws("  [CFW-ENOENT] "); ws(p); ws("\n    chain:");
             uint64_t *sp=(uint64_t*)__builtin_frame_address(0); int shown=0;
             for(int i=0;i<800 && shown<8;i++){ uint64_t v=sp[i]; if(v>=0x140001000ULL&&v<0x141aae000ULL){ char t[32]; snprintf(t,sizeof t," +0x%llx",(unsigned long long)(v-0x140000000ULL)); ws(t); shown++; } }
@@ -7928,7 +7928,14 @@ static long MSABI i_RegCloseKey(void*hk){ (void)hk; return 0; }
 // directory enumeration: FindFirstFileExW / FindNextFileW / FindClose
 #include <dirent.h>
 typedef struct { DIR*d; char dir[1536]; char pat[260]; } Find;
-static Find g_finds[64]; static int g_nfinds;
+static Find g_finds[256]; static int g_nfinds; static pthread_mutex_t g_find_m=PTHREAD_MUTEX_INITIALIZER;
+// Claim a free find slot for an open DIR (FindClose frees it). Slots must be reused: the client
+// scans directories thousands of times, and a table that only grows makes every later scan fail.
+static Find* find_slot(DIR*d,const char*dir,const char*pat,int*idx){ pthread_mutex_lock(&g_find_m);
+    int i=0; while(i<g_nfinds && g_finds[i].d) i++;
+    if(i>=(int)(sizeof g_finds/sizeof g_finds[0])){ pthread_mutex_unlock(&g_find_m); return 0; }
+    if(i==g_nfinds) g_nfinds++; Find*f=&g_finds[i]; f->d=d; pthread_mutex_unlock(&g_find_m);
+    snprintf(f->dir,sizeof f->dir,"%s",dir); snprintf(f->pat,sizeof f->pat,"%s",pat); *idx=i; return f; }
 static int pat_match(const char*pat,const char*name){
     if(!strcmp(pat,"*")||!strcmp(pat,"*.*")) return name[0]!='.'||1;
     const char*st=strchr(pat,'*');
@@ -7945,20 +7952,21 @@ static void fill_find(Find*f,struct dirent*de,void*fd){ if(getenv("PELOAD_TRACE_
     *(uint32_t*)d=attr; uint16_t*nm=(uint16_t*)(d+44); int i=0; for(; de->d_name[i]&&i<259;i++) nm[i]=(uint8_t)de->d_name[i]; nm[i]=0;
 }
 static void* MSABI i_FindFirstFileExW(const uint16_t*w,int lvl,void*fd,int op,void*filt,uint32_t fla){
-    (void)lvl;(void)op;(void)filt;(void)fla; if(g_nfinds>=64) return (void*)-1;
+    (void)lvl;(void)op;(void)filt;(void)fla;
     char p[2048]; win2unix(w,p,sizeof p);
     char *slash=strrchr(p,'/'); char dir[1536],pat[260];
     if(slash){ int dl=slash-p; if(dl>1535)dl=1535; memcpy(dir,p,dl); dir[dl]=0; snprintf(pat,sizeof pat,"%s",slash+1); }
     else { snprintf(dir,sizeof dir,"."); snprintf(pat,sizeof pat,"%s",p); }
     if(getenv("PELOAD_TRACE_FS")){ ws("  [FindFirst] dir="); ws(dir); ws(" pat="); ws(pat); ws("\n"); }
     DIR*d=opendir(dir); if(!d){ g_lasterr=win_err(); if(getenv("PELOAD_TRACE_FS")){ws("  [FindFirst] opendir FAIL ");ws(dir);ws("\n");} return (void*)-1; }
-    Find*f=&g_finds[g_nfinds]; f->d=d; snprintf(f->dir,sizeof f->dir,"%s",dir); snprintf(f->pat,sizeof f->pat,"%s",pat);
-    struct dirent*de; while((de=readdir(d))){ if(!strcmp(de->d_name,".")||!strcmp(de->d_name,"..")) continue; if(pat_match(pat,de->d_name)){ if(getenv("PELOAD_TRACE_FS")){ws("  [FindFirst] -> ");ws(de->d_name);ws("\n");} fill_find(f,de,fd); return (void*)(intptr_t)(0x2000+g_nfinds++); } }
+    struct dirent*de; while((de=readdir(d))){ if(!strcmp(de->d_name,".")||!strcmp(de->d_name,"..")) continue; if(pat_match(pat,de->d_name)){ if(getenv("PELOAD_TRACE_FS")){ws("  [FindFirst] -> ");ws(de->d_name);ws("\n");}
+        int idx; Find*f=find_slot(d,dir,pat,&idx); if(!f){ closedir(d); g_lasterr=4; return (void*)-1; } // ERROR_TOO_MANY_OPEN_FILES
+        fill_find(f,de,fd); return (void*)(intptr_t)(0x2000+idx); } }
     closedir(d); g_lasterr=2; if(getenv("PELOAD_TRACE_FS")){ws("  [FindFirst] EMPTY ");ws(dir);ws("\n");} return (void*)-1; // ERROR_FILE_NOT_FOUND
 }
 static int MSABI i_FindNextFileW(void*h,void*fd){ intptr_t hv=(intptr_t)h; int idx=(int)(hv-0x2000); if(idx<0||idx>=g_nfinds||!g_finds[idx].d) return 0;
     Find*f=&g_finds[idx]; struct dirent*de; while((de=readdir(f->d))){ if(!strcmp(de->d_name,".")||!strcmp(de->d_name,"..")) continue; if(pat_match(f->pat,de->d_name)){ fill_find(f,de,fd); return 1; } } g_lasterr=18; return 0; } // ERROR_NO_MORE_FILES
-static int MSABI i_FindClose(void*h){ intptr_t hv=(intptr_t)h; int idx=(int)(hv-0x2000); if(idx>=0&&idx<g_nfinds&&g_finds[idx].d){ closedir(g_finds[idx].d); g_finds[idx].d=0; } return 1; }
+static int MSABI i_FindClose(void*h){ intptr_t hv=(intptr_t)h; int idx=(int)(hv-0x2000); pthread_mutex_lock(&g_find_m); if(idx>=0&&idx<g_nfinds&&g_finds[idx].d){ closedir(g_finds[idx].d); g_finds[idx].d=0; } pthread_mutex_unlock(&g_find_m); return 1; }
 // ANSI variants: halo3 enumerates its maps/ with FindFirstFileA, so a stub here
 // leaves the map catalog EMPTY ("guardian" never resolves). WIN32_FIND_DATAA has
 // cFileName (CHAR[260]) at +44 instead of the wide WCHAR.
@@ -7967,14 +7975,15 @@ static void fill_find_a(Find*f,struct dirent*de,void*fd){ if(getenv("PELOAD_TRAC
     snprintf(full,sizeof full,"%s/%s",f->dir,de->d_name);
     uint32_t attr=0x80; if(stat(full,&st)==0){ attr=S_ISDIR(st.st_mode)?0x10:0x80; *(uint32_t*)(d+28)=(uint32_t)(st.st_size>>32); *(uint32_t*)(d+32)=(uint32_t)st.st_size; }
     *(uint32_t*)d=attr; char*nm=(char*)(d+44); int i=0; for(; de->d_name[i]&&i<259;i++) nm[i]=de->d_name[i]; nm[i]=0; }
-static void* MSABI i_FindFirstFileA(const char*p0,void*fd){ if(g_nfinds>=64) return (void*)-1;
+static void* MSABI i_FindFirstFileA(const char*p0,void*fd){
     char p[2048]; { int i=0; for(; p0&&p0[i]&&i<2047;i++) p[i]=(p0[i]=='\\')?'/':p0[i]; p[i]=0; }
     char *slash=strrchr(p,'/'); char dir[1536],pat[260];
     if(slash){ int dl=slash-p; if(dl>1535)dl=1535; memcpy(dir,p,dl); dir[dl]=0; snprintf(pat,sizeof pat,"%s",slash+1); }
     else { snprintf(dir,sizeof dir,"."); snprintf(pat,sizeof pat,"%s",p); }
     DIR*d=opendir(dir); if(!d){ g_lasterr=win_err(); return (void*)-1; }
-    Find*f=&g_finds[g_nfinds]; f->d=d; snprintf(f->dir,sizeof f->dir,"%s",dir); snprintf(f->pat,sizeof f->pat,"%s",pat);
-    struct dirent*de; while((de=readdir(d))){ if(!strcmp(de->d_name,".")||!strcmp(de->d_name,"..")) continue; if(pat_match(pat,de->d_name)){ fill_find_a(f,de,fd); return (void*)(intptr_t)(0x2000+g_nfinds++); } }
+    struct dirent*de; while((de=readdir(d))){ if(!strcmp(de->d_name,".")||!strcmp(de->d_name,"..")) continue; if(pat_match(pat,de->d_name)){
+        int idx; Find*f=find_slot(d,dir,pat,&idx); if(!f){ closedir(d); g_lasterr=4; return (void*)-1; }
+        fill_find_a(f,de,fd); return (void*)(intptr_t)(0x2000+idx); } }
     closedir(d); g_lasterr=2; return (void*)-1; }
 static int MSABI i_FindNextFileA(void*h,void*fd){ intptr_t hv=(intptr_t)h; int idx=(int)(hv-0x2000); if(idx<0||idx>=g_nfinds||!g_finds[idx].d) return 0;
     Find*f=&g_finds[idx]; struct dirent*de; while((de=readdir(f->d))){ if(!strcmp(de->d_name,".")||!strcmp(de->d_name,"..")) continue; if(pat_match(f->pat,de->d_name)){ fill_find_a(f,de,fd); return 1; } } g_lasterr=18; return 0; }
@@ -9184,6 +9193,12 @@ static void dump_all_guest_stacks(void){
         thread_resume(th[i]);
     }
     (void)!write(2,"==== END DUMP ====\n",19);
+    // PELOAD_PEEK=<hexaddr>:<hexlen>[,...]: also hex-dump guest memory (e.g. engine job/queue state).
+    { const char*pk=getenv("PELOAD_PEEK"); while(pk && *pk){ char*e; uint64_t a=strtoull(pk,&e,16); uint64_t l=(*e==':')?strtoull(e+1,&e,16):0x40;
+        for(uint64_t o=0;o<l;o+=16){ char b[160]; int k=snprintf(b,sizeof b,"  [peek] %llx:",(unsigned long long)(a+o));
+            for(int j=0;j<16;j+=4){ uint64_t q=a+o+j; if(!hook_safe(q)){ k+=snprintf(b+k,sizeof b-k," ????????"); continue; } k+=snprintf(b+k,sizeof b-k," %08x",*(uint32_t*)q); }
+            b[k++]='\n'; (void)!write(2,b,k); }
+        pk=strchr(e,','); if(pk) pk++; } }
     for(unsigned i=0;i<n;i++) mach_port_deallocate(mach_task_self(),th[i]);
     mach_port_deallocate(mach_task_self(),me);
 }
@@ -9200,7 +9215,15 @@ static void crashsig(int sig, siginfo_t *info, void *ucv){
             g_bp_cnt[i]++; uc->uc_mcontext->__ss.__rip=hit;   // rewind to re-execute original insn
             uc->uc_mcontext->__ss.__rflags |= 0x100ull; g_bp_rearm=i;   // single-step, then re-arm
             { static long cap=-1; if(cap<0){ const char*e=getenv("PELOAD_BP_ARGS"); cap=e?atol(e):0; }
-              if(cap>0 && g_bp_cnt[i]<=(uint64_t)cap){ char b[200]; int k=snprintf(b,sizeof b,"[bpa] exe+0x%llx #%llu rcx=0x%llx rdx=0x%llx r8=0x%llx r9=0x%llx\n",(unsigned long long)(hit-(uint64_t)g_base),(unsigned long long)g_bp_cnt[i],
+              { const char*bm=getenv("PELOAD_BP_MEM"); if(bm && g_bp_cnt[i]<=3){   // PELOAD_BP_MEM=<rbp|rsp|rcx|rdx|r12>+<hexoff>: dump 16 dwords there
+                  uint64_t base=0; const char*pl=strchr(bm,'+'); uint64_t off=pl?strtoull(pl+1,0,16):0;
+                  if(!strncmp(bm,"rbp",3)) base=uc->uc_mcontext->__ss.__rbp; else if(!strncmp(bm,"rsp",3)) base=uc->uc_mcontext->__ss.__rsp; else if(!strncmp(bm,"rcx",3)) base=uc->uc_mcontext->__ss.__rcx;
+                  else if(!strncmp(bm,"rdx",3)) base=uc->uc_mcontext->__ss.__rdx; else if(!strncmp(bm,"r12",3)) base=uc->uc_mcontext->__ss.__r12;
+                  if(base>0x10000){ const uint32_t*q=(const uint32_t*)(base+off); char b[900]; int k=snprintf(b,sizeof b,"[bpm] exe+0x%llx %s: ",(unsigned long long)(hit-(uint64_t)g_base),bm);
+                      for(int z=0;z<16;z++){ float f; memcpy(&f,&q[z],4); k+=snprintf(b+k,sizeof b-k,"+%x=%08x(%g) ",z*4,q[z],f); } b[k++]='\n'; (void)!write(2,b,k); } } }
+              if(cap>0 && g_bp_cnt[i]<=(uint64_t)cap){ float x0,x1,x2,x3; memcpy(&x0,&uc->uc_mcontext->__fs.__fpu_xmm0,4); memcpy(&x1,&uc->uc_mcontext->__fs.__fpu_xmm1,4); memcpy(&x2,&uc->uc_mcontext->__fs.__fpu_xmm2,4); memcpy(&x3,&uc->uc_mcontext->__fs.__fpu_xmm3,4);
+                char xb[120]; int xk=snprintf(xb,sizeof xb,"[bpx] xmm0..3 = %g %g %g %g\n",x0,x1,x2,x3); (void)!write(2,xb,xk);
+                char b[200]; int k=snprintf(b,sizeof b,"[bpa] exe+0x%llx #%llu rcx=0x%llx rdx=0x%llx r8=0x%llx r9=0x%llx\n",(unsigned long long)(hit-(uint64_t)g_base),(unsigned long long)g_bp_cnt[i],
                     (unsigned long long)uc->uc_mcontext->__ss.__rcx,(unsigned long long)uc->uc_mcontext->__ss.__rdx,(unsigned long long)uc->uc_mcontext->__ss.__r8,(unsigned long long)uc->uc_mcontext->__ss.__r9); (void)!write(2,b,k); return; } }
             if(g_bp_cnt[i]<=40){ uint64_t rbx=uc->uc_mcontext->__ss.__rbx, rsi=uc->uc_mcontext->__ss.__rsi, rdi=uc->uc_mcontext->__ss.__rdi, r15=uc->uc_mcontext->__ss.__r15;
                 uint64_t rax=uc->uc_mcontext->__ss.__rax, r10=uc->uc_mcontext->__ss.__r10, r9=uc->uc_mcontext->__ss.__r9, r14=uc->uc_mcontext->__ss.__r14;

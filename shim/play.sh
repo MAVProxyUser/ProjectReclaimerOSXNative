@@ -10,6 +10,7 @@
 #   RECLAIMER_EXE=<path>       the Project Reclaimer v0.9.13 client exe (default: client/ or analysis/)
 #   RECLAIMER_MENU=1           start in Reclaimer's own frontend menu (server browser, host game, settings)
 #                              instead of jumping straight into a Guardian match
+#   RECLAIMER_JOIN=host:port   start in the menu and join that server (the client's reclaimer://join link)
 # The window title shows elapsed time, the load time, the engine frame rate, draw calls and frame time.
 # Extra env can be passed in front:  PELOAD_INVERT_PITCH=0 bash shim/play.sh
 # Engine/worker output goes to /tmp/reclaimer_play.log. Quit by closing the window or Ctrl-C.
@@ -42,7 +43,12 @@ pkill -9 -f 'build/peload' 2>/dev/null; sleep 1
 rm -f "$PFX/ReclaimerProfile/starting" 2>/dev/null
 # Direct match: unset RECLAIMER_LOCAL_RUNTIME (the client's default "menu:0" boots its frontend menu).
 RUNTIME=(PELOAD_LOCAL_RUNTIME="__unset__")
-if [ -n "${RECLAIMER_MENU:-}" ]; then
+ARGS=(game-client --mcc-path "$MCC")
+if [ -n "${RECLAIMER_JOIN:-}" ]; then
+  # The same link a browser or Discord hands the client; it finds MCC itself and joins once its menu is up.
+  RUNTIME=(); ARGS=("reclaimer://join?server=$RECLAIMER_JOIN")
+  echo "starting Reclaimer's menu, then joining $RECLAIMER_JOIN; log: /tmp/reclaimer_play.log"
+elif [ -n "${RECLAIMER_MENU:-}" ]; then
   RUNTIME=()
   echo "starting Reclaimer's menu (~17 s); log: /tmp/reclaimer_play.log"
 else
@@ -50,5 +56,4 @@ else
 fi
 env PELOAD_SKINGUARD=1 PELOAD_VTGUARD=1 PELOAD_ALLOC_GUARD=1 "${RUNTIME[@]}" \
     PELOAD_PATCH="$XA" PELOAD_WORKER_INHERIT_STDIO=1 PELOAD_PRESENT=1 PELOAD_HOLD_WINDOW=1 PELOAD_D3DGL=1 \
-    arch -x86_64 shim/build/peload "$EXE" \
-    game-client --mcc-path "$MCC" < <(sleep 86400) > /tmp/reclaimer_play.log 2>&1
+    arch -x86_64 shim/build/peload "$EXE" "${ARGS[@]}" < <(sleep 86400) > /tmp/reclaimer_play.log 2>&1
