@@ -333,8 +333,11 @@ char* dg_emit(const char*stage,const DgSig*isgn,int ni,const DgSig*osgn,int no,D
         // The pipeline renders D3D row y into GL row y (VS y-flip, dx_posfix), so gl_FragCoord.xy IS that;
         // GL's .w is 1/w. (Was: skipped -> read back as an unbound varying in 1841/2426 pixel shaders.)
         if(!strcmp(stage,"ps") && !strcmp(s->name,"SV_Position")){ if(s->reg<64) g_sysin[s->reg]="vec4(gl_FragCoord.xy,gl_FragCoord.z,1.0/gl_FragCoord.w)"; continue; }
-        if(!strcmp(s->name,"SV_VertexID")){ if(s->reg<64) g_sysin[s->reg]="vec4(float(gl_VertexID))"; continue; }
-        if(!strcmp(s->name,"SV_InstanceID")){ if(s->reg<64) g_sysin[s->reg]="vec4(float(gl_InstanceID))"; continue; }
+        // SV_VertexID / SV_InstanceID are UINT registers: expose the integer BITS (shaders and/shift/ld with them).
+        // float(gl_VertexID) made "id & 1" / "id >> 1" zero -> every SV_VertexID fullscreen triangle (loading
+        // screen, post passes) degenerated, and particle VS indexed their state with garbage instance ids.
+        if(!strcasecmp(s->name,"SV_VertexID")){ if(s->reg<64) g_sysin[s->reg]="intBitsToFloat(ivec4(gl_VertexID))"; continue; }
+        if(!strcasecmp(s->name,"SV_InstanceID")){ if(s->reg<64) g_sysin[s->reg]="intBitsToFloat(ivec4(gl_InstanceID))"; continue; }
         if(s->reg<256){ if(seen_in[s->reg]) continue; seen_in[s->reg]=1; }
         dg_lprintf(&L,"in vec4 v%u; // %s%u",s->reg,s->name,s->idx);
     }
