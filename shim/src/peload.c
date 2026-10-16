@@ -7077,7 +7077,9 @@ static uint32_t MSABI i_GetFinalPathNameByHandleW(void*h,uint16_t*buf,uint32_t c
 // hand us a populated one; nuke it for robustness)
 static void rmrf(const char *p){ struct stat st; if(lstat(p,&st)) return;
     if(S_ISDIR(st.st_mode)){ DIR*d=opendir(p); if(d){ struct dirent*e; while((e=readdir(d))){ if(!strcmp(e->d_name,".")||!strcmp(e->d_name,"..")) continue; char c[2300]; snprintf(c,sizeof c,"%s/%s",p,e->d_name); rmrf(c);} closedir(d);} rmdir(p);} else unlink(p); }
-static int MSABI i_RemoveDirectoryW(const uint16_t*w){ char p[2048]; win2unix(w,p,sizeof p); if(rmdir(p)==0) return 1; rmrf(p); return 1; }
+static int MSABI i_RemoveDirectoryW(const uint16_t*w){ char p[2048]; win2unix(w,p,sizeof p);
+    if(getenv("PELOAD_TRACE_DEL")){ static int n; if(n++<40){ char m[2200]; int k=snprintf(m,sizeof m,"  [RemoveDirectoryW] %s\n",p); (void)!write(2,m,k); } }
+    if(rmdir(p)==0) return 1; rmrf(p); return 1; }
 // SetFileInformationByHandle: honor FileDispositionInfo(4)/Ex(21) = delete
 static int MSABI i_SetFileInformationByHandle(void*h,int cls,void*info,uint32_t sz){
     (void)sz; intptr_t hv=(intptr_t)h; if(hv<0x1000) return 1; int fd=(int)(hv-0x1000); if(fd>=MAXFD) return 1;
@@ -7264,7 +7266,8 @@ static int  MSABI i_DeleteFileW(const uint16_t*w){ char p[2048]; win2unix(w,p,si
     // removes <uuid>.json almost immediately). Opt-in; off for the canonical sim path.
     if(getenv("PELOAD_KEEP_ADV") && strstr(p,"local-servers") && strstr(p,".json")){
         if(getenv("PELOAD_TRACE_FS")){ws("  [keep-adv] skip delete ");ws(p);ws("\n");} return 1; }
-    return unlink(p)==0 || 1; }
+    { int rc=unlink(p); if(getenv("PELOAD_TRACE_DEL")){ static int n; if(n++<40){ char m[2200]; int k=snprintf(m,sizeof m,"  [DeleteFileW] %s -> %s\n",p,rc==0?"ok":strerror(errno)); (void)!write(2,m,k); } } }
+    return 1; }
 static int  MSABI i_CopyFileExW(const uint16_t*src,const uint16_t*dst,void*prog,void*data,int*cancel,uint32_t fl){
     (void)prog;(void)data;(void)cancel;(void)fl; char s[2048],d[2048]; win2unix(src,s,sizeof s); win2unix(dst,d,sizeof d);
     int in=open(s,O_RDONLY); if(in<0){ g_lasterr=win_err(); return 0; }
