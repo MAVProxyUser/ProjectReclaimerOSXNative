@@ -179,9 +179,9 @@ static int wi_translate(id ev){
 // ---- PELOAD_KBM_TEST: self-test of the guest keyboard/mouse path (no real devices needed) ----
 // 3 s after gameplay starts: left click (the client captures input on click), hold W for 2 s while the
 // mouse sweeps right, then release. Uses the same queue/raw-input path real NSEvents feed.
-extern double g_gameplay_t0;
+extern double g_gameplay_t0, g_menu_ready_t0;
 static void* wi_test_thread(void*a){ (void)a;
-    while(!g_gameplay_t0) usleep(100000);
+    while(!g_gameplay_t0 && !g_menu_ready_t0) usleep(100000);   // a match, or Reclaimer's frontend menu
     usleep(3000000);
     void*h=fg_hwnd_ext(); char m[64]; int k;
     g_keydown[1]=1; wi_raw_mouse(0,0,0x1,0); wi_post(h,0x0201,1,(int64_t)((WIN_H/2)<<16|(WIN_W/2)));
@@ -193,6 +193,14 @@ static void* wi_test_thread(void*a){ (void)a;
     for(int i=0;i<100;i++){ wi_raw_mouse(8,0,0,0); usleep(20000); }
     wi_key(0x0D,0,0);   // W up
     k=snprintf(m,sizeof m,"  [kbm-test] W held 2 s + mouse sweep done\n"); (void)!write(2,m,k);
+    // PELOAD_KBM_TEST_CLICK=<x>,<y>[;<x>,<y>...] -- then move to and left-click each window point, 2 s apart
+    { const char*e=getenv("PELOAD_KBM_TEST_CLICK"); while(e && *e){ int cx=0,cy=0; if(sscanf(e,"%d,%d",&cx,&cy)!=2) break;
+        usleep(2000000); int64_t lp=(int64_t)((cy<<16)|(cx&0xffff));
+        wi_post(h,0x0200,0,lp); usleep(100000);
+        g_keydown[1]=1; wi_raw_mouse(0,0,0x1,0); wi_post(h,0x0201,1,lp); usleep(80000);
+        g_keydown[1]=0; wi_raw_mouse(0,0,0x2,0); wi_post(h,0x0202,0,lp);
+        k=snprintf(m,sizeof m,"  [kbm-test] clicked %d,%d\n",cx,cy); (void)!write(2,m,k);
+        e=strchr(e,';'); if(e) e++; } }
     // PELOAD_KBM_TEST_HOLD=<mac keycode hex>:<seconds> -- then hold that key (e.g. 30:3 = Tab for 3 s)
     { const char*e=getenv("PELOAD_KBM_TEST_HOLD"); if(e){ unsigned kc=(unsigned)strtoul(e,0,16); double secs=strchr(e,':')?atof(strchr(e,':')+1):2.0;
         usleep(500000); wi_key((uint16_t)kc,1,0); k=snprintf(m,sizeof m,"  [kbm-test] key 0x%x down\n",kc); (void)!write(2,m,k);

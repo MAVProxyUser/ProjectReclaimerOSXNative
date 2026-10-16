@@ -209,8 +209,67 @@ static void __attribute__((ms_abi)) i_glShaderSource(unsigned,int,const char*con
 static void __attribute__((ms_abi)) i_glCompileShader(unsigned); // fwd
 static void __attribute__((ms_abi)) i_glLinkProgram(unsigned); // fwd
 static unsigned __attribute__((ms_abi)) i_glCreateShaderProgramv(unsigned,int,const char*const*); // fwd
+// GL entry points that MIX integer and float arguments can't go through the generic thunk: Win64 passes
+// each float in the xmm register of its argument POSITION (glUniform2f(loc,x,y): x in xmm1, y in xmm2),
+// SysV in the next free xmm register (x in xmm0, y in xmm1), and the generic thunk leaves xmm untouched.
+// egui (Reclaimer's menu UI, drawn through WGL) sets u_screen_size with glUniform2f -> garbage screen size
+// -> every vertex off-screen/NaN -> the menu UI read back fully transparent. Typed ms_abi wrappers let the
+// compiler do the ABI conversion.
+#define GLMIX(ret,name,params,args) static ret (*p_##name) params; static ret __attribute__((ms_abi)) w_##name params { return p_##name args; }
+GLMIX(void,glUniform1f,(int l,float a),(l,a))
+static void (*p_glUniform2f)(int,float,float);
+static void __attribute__((ms_abi)) w_glUniform2f(int l,float a,float b){
+    if(getenv("PELOAD_TRACE_UNIFORM")){ static int n; if(n++<6){ char m[96]; int k=snprintf(m,sizeof m,"  [glUniform2f] loc=%d (%g, %g)\n",l,a,b); (void)!write(2,m,k);
+            if(n==1){ uint64_t*sp=(uint64_t*)__builtin_frame_address(0); int f=0; for(int i=0;i<3000&&f<16;i++){ uint64_t v=sp[i]; if(v>=0x140001000ULL&&v<0x141aae000ULL){ char b[48]; int q=snprintf(b,sizeof b,"     exe+0x%llx\n",(unsigned long long)(v-0x140000000ULL)); (void)!write(2,b,q); f++; } } } } }
+    // Reclaimer's egui painter receives pixels_per_point = <window width> (cause not found yet), so its
+    // u_screen_size arrives as (1, 0.5625) points while the tessellated vertices are laid out for 1280x720
+    // points: every widget lands off-screen and the frontend menu showed only its background. When the
+    // uniform being set is egui's u_screen_size and the value is implausibly small, use the viewport size
+    // (egui's own layout runs at 1 pixel per point). PELOAD_GL_NOFIXSCREEN disables.
+    { static int off=-1; if(off<0) off=getenv("PELOAD_GL_NOFIXSCREEN")?1:0;
+      if(!off && a>0 && a<16.0f && b>0 && b<16.0f){ int prog=0,vp[4]={0}; void(*gi)(unsigned,int*)=dlsym(RTLD_DEFAULT,"glGetIntegerv"); int(*gul)(unsigned,const char*)=dlsym(RTLD_DEFAULT,"glGetUniformLocation");
+        if(gi&&gul){ gi(0x8B8D,&prog); if(prog && gul((unsigned)prog,"u_screen_size")==l){ gi(0x0BA2,vp); if(vp[2]>=64 && vp[3]>=64){ a=(float)vp[2]; b=(float)vp[3]; } } } } }
+    p_glUniform2f(l,a,b); }
+GLMIX(void,glUniform3f,(int l,float a,float b,float c),(l,a,b,c))
+GLMIX(void,glUniform4f,(int l,float a,float b,float c,float d),(l,a,b,c,d))
+GLMIX(void,glProgramUniform1f,(unsigned p,int l,float a),(p,l,a))
+GLMIX(void,glProgramUniform2f,(unsigned p,int l,float a,float b),(p,l,a,b))
+GLMIX(void,glProgramUniform3f,(unsigned p,int l,float a,float b,float c),(p,l,a,b,c))
+GLMIX(void,glProgramUniform4f,(unsigned p,int l,float a,float b,float c,float d),(p,l,a,b,c,d))
+GLMIX(void,glTexParameterf,(unsigned t,unsigned n,float v),(t,n,v))
+GLMIX(void,glSamplerParameterf,(unsigned s,unsigned n,float v),(s,n,v))
+GLMIX(void,glPointParameterf,(unsigned n,float v),(n,v))
+GLMIX(void,glVertexAttrib1f,(unsigned i,float a),(i,a))
+GLMIX(void,glVertexAttrib2f,(unsigned i,float a,float b),(i,a,b))
+GLMIX(void,glVertexAttrib3f,(unsigned i,float a,float b,float c),(i,a,b,c))
+GLMIX(void,glVertexAttrib4f,(unsigned i,float a,float b,float c,float d),(i,a,b,c,d))
+GLMIX(void,glClearBufferfi,(unsigned b,int db,float d,int st),(b,db,d,st))
+GLMIX(void,glTexEnvf,(unsigned t,unsigned n,float v),(t,n,v))
+GLMIX(void,glFogf,(unsigned n,float v),(n,v))
+GLMIX(void,glLightf,(unsigned l,unsigned n,float v),(l,n,v))
+GLMIX(void,glMaterialf,(unsigned f,unsigned n,float v),(f,n,v))
+static void *gl_mixed_wrapper(void *real){
+    static int init; if(!init){ init=1;
+        #define GLMIX_LOAD(name) p_##name=dlsym((void*)-2,#name);
+        GLMIX_LOAD(glUniform1f) GLMIX_LOAD(glUniform2f) GLMIX_LOAD(glUniform3f) GLMIX_LOAD(glUniform4f)
+        GLMIX_LOAD(glProgramUniform1f) GLMIX_LOAD(glProgramUniform2f) GLMIX_LOAD(glProgramUniform3f) GLMIX_LOAD(glProgramUniform4f)
+        GLMIX_LOAD(glTexParameterf) GLMIX_LOAD(glSamplerParameterf) GLMIX_LOAD(glPointParameterf)
+        GLMIX_LOAD(glVertexAttrib1f) GLMIX_LOAD(glVertexAttrib2f) GLMIX_LOAD(glVertexAttrib3f) GLMIX_LOAD(glVertexAttrib4f)
+        GLMIX_LOAD(glClearBufferfi) GLMIX_LOAD(glTexEnvf) GLMIX_LOAD(glFogf) GLMIX_LOAD(glLightf) GLMIX_LOAD(glMaterialf)
+        #undef GLMIX_LOAD
+    }
+    if(getenv("PELOAD_GL_NOMIXWRAP")) return 0;
+    #define GLMIX_PICK(name) if(p_##name && real==(void*)p_##name) return (void*)w_##name;
+    GLMIX_PICK(glUniform1f) GLMIX_PICK(glUniform2f) GLMIX_PICK(glUniform3f) GLMIX_PICK(glUniform4f)
+    GLMIX_PICK(glProgramUniform1f) GLMIX_PICK(glProgramUniform2f) GLMIX_PICK(glProgramUniform3f) GLMIX_PICK(glProgramUniform4f)
+    GLMIX_PICK(glTexParameterf) GLMIX_PICK(glSamplerParameterf) GLMIX_PICK(glPointParameterf)
+    GLMIX_PICK(glVertexAttrib1f) GLMIX_PICK(glVertexAttrib2f) GLMIX_PICK(glVertexAttrib3f) GLMIX_PICK(glVertexAttrib4f)
+    GLMIX_PICK(glClearBufferfi) GLMIX_PICK(glTexEnvf) GLMIX_PICK(glFogf) GLMIX_PICK(glLightf) GLMIX_PICK(glMaterialf)
+    #undef GLMIX_PICK
+    return 0; }
 static void *make_gl_thunk(void *real){
     if(!real) return real;
+    { void*w=gl_mixed_wrapper(real); if(w) return w; }
     // Shader-upload interception by POINTER: the engine may request
     // glShaderSource under an alias (e.g. *ARB) that skips the name-based
     // special-cases, so it reaches here as a raw thunk and its #version is
@@ -484,7 +543,9 @@ static void*  MSABI i_HeapAlloc(void *h, uint32_t fl, uint64_t n){ (void)h;
     if(p&&(fl&8)) memset(p,0,n);
     { const char*ts=getenv("PELOAD_TRACE_ALLOC"); if(ts && n==(uint64_t)strtoull(ts,0,0)){
         void*ret=__builtin_return_address(0); char t[96];
-        int k=snprintf(t,sizeof t,"  [ALLOC %llu] p=%p caller=%p\n",(unsigned long long)n,p,ret); (void)!write(2,t,k); } }
+        int k=snprintf(t,sizeof t,"  [ALLOC %llu] p=%p caller=%p\n",(unsigned long long)n,p,ret); (void)!write(2,t,k);
+        static int ns; if(ns++<3){ uint64_t*sp=(uint64_t*)__builtin_frame_address(0); int found=0;   // exe return addresses on the stack
+            for(int i=0;i<2000 && found<14;i++){ uint64_t v=sp[i]; if(v>=0x140001000ULL&&v<0x141aae000ULL){ char b[48]; int q=snprintf(b,sizeof b,"     exe+0x%llx\n",(unsigned long long)(v-0x140000000ULL)); (void)!write(2,b,q); found++; } } } } }
     return p; }
 static void*  MSABI i_HeapReAlloc(void *h, uint32_t fl, void *p, uint64_t n){ (void)h;(void)fl;
     if(heapdbg()){ HDBlk*b=hd_blk(p); void*q=hd_alloc(n?n:1); if(q&&p){ uint64_t cp = b? (b->size<n?b->size:n) : n; memcpy(q,p,cp); } if(b) hd_free(p); return q; }
@@ -1328,7 +1389,8 @@ static void MSABI ctx_UpdateSubresource(void*t,void*res,uint32_t sub,const void*
     (void)t; D3DObj*o=res; if(!o||!o->data||!src) return;
     cs_wait_res(o);
     if(getenv("PELOAD_TRACE_TEXUPD") && o->kind>=2 && o->w==1280 && o->h==720 && !box){ static int n; if((n++%300)==0){ uint64_t nz=0; const uint8_t*sp=src; for(uint32_t y=0;y<720;y+=4) for(uint32_t x=0;x<1280*4;x+=4) if(sp[(size_t)y*srp+x+3]) nz++;
-        char m[160]; int k=snprintf(m,sizeof m,"  [texupd-px] #%d %p pitch=%u nonzero-alpha samples=%llu/230400\n",n,(void*)o,srp,(unsigned long long)nz); (void)!write(2,m,k); } }
+        uint64_t nzr=0; for(uint32_t y=0;y<720;y+=4) for(uint32_t x=0;x<1280*4;x+=4) if(sp[(size_t)y*srp+x]|sp[(size_t)y*srp+x+1]|sp[(size_t)y*srp+x+2]) nzr++;
+        char m[200]; int k=snprintf(m,sizeof m,"  [texupd-px] #%d %p src=%p pitch=%u nonzero-alpha=%llu nonzero-rgb=%llu /230400\n",n,(void*)o,src,srp,(unsigned long long)nz,(unsigned long long)nzr); (void)!write(2,m,k); } }
     if(getenv("PELOAD_TRACE_TEXUPD") && o->kind>=2 && o->w){ extern double g_gameplay_t0; const uint32_t*bx=box; uint64_t ra=(uint64_t)__builtin_return_address(0);
         char m[220]; int k=snprintf(m,sizeof m,"  [texupd] t=%.2f UpdateSubresource %p %ux%u f%u sub=%u box=%d,%d-%d,%d ra=0x%llx\n",g_gameplay_t0?mono_s()-g_gameplay_t0:-1.0,(void*)o,o->w,o->h,o->fmt,sub,bx?(int)bx[0]:-1,bx?(int)bx[1]:-1,bx?(int)bx[3]:-1,bx?(int)bx[4]:-1,(unsigned long long)(ra>=0x180000000ULL&&ra<0x187000000ULL?ra-0x180000000ULL:ra)); (void)!write(2,m,k); }
     o->gl_dirty=1; o->rvalid=0; o->ver++; if(o->is_cb) o->cb_upd=g_cb_tick;
@@ -2896,7 +2958,14 @@ static int    MSABI i_GetMonitorInfoW(void*h,uint8_t*mi){ (void)h; if(!mi) retur
 #define WIN_W 1280
 #define WIN_H 720
 static int    MSABI i_GetSystemMetrics(int idx){ switch(idx){ case 0:return WIN_W; case 1:return WIN_H; case 4:return 0; default:return 0; } }
-static int    MSABI i_EnumDisplayMonitors(void*dc,const void*clip,void*cb,int64_t data){ (void)dc;(void)clip;(void)cb;(void)data; return 1; }
+// EnumDisplayMonitors: report the one (primary) 1920x1080 monitor that MonitorFromWindow/GetMonitorInfoW
+// describe. It used to return TRUE without calling the callback, so Reclaimer saw zero monitors and its egui
+// UI scale fell back to window_width/1 (pixels_per_point 1280 -> the frontend menu's widgets off-screen).
+static int    MSABI i_EnumDisplayMonitors(void*dc,const void*clip,void*cb,int64_t data){ (void)dc;(void)clip;
+    if(!cb) return 0; int32_t rc[4]={0,0,1920,1080};
+    int (__attribute__((ms_abi)) *fn)(void*,void*,int32_t*,int64_t)=cb;
+    void*mon=(void*)0x4D01;   // the handle MonitorFromWindow/Point/Rect return
+    fn(mon,dc,rc,data); return 1; }
 static int    MSABI i_GetClientRect(void*h,int32_t*r){ (void)h; if(r){r[0]=0;r[1]=0;r[2]=WIN_W;r[3]=WIN_H;} return 1; }
 static int    MSABI i_GetWindowRect(void*h,int32_t*r){ (void)h; if(r){r[0]=0;r[1]=0;r[2]=WIN_W;r[3]=WIN_H;} return 1; }
 static int    MSABI i_SetWindowPos(void*h,void*after,int x,int y,int w,int ht,uint32_t f){ (void)h;(void)after;(void)x;(void)y;(void)w;(void)ht;(void)f; return 1; }
@@ -2906,6 +2975,29 @@ static int64_t MSABI i_SetWindowLongPtrW(void*h,int idx,int64_t v){ WWin*w=h; if
 static int32_t MSABI i_GetWindowLongW(void*h,int idx){ return (int32_t)i_GetWindowLongPtrW(h,idx); }
 static int32_t MSABI i_SetWindowLongW(void*h,int idx,int32_t v){ return (int32_t)i_SetWindowLongPtrW(h,idx,v); }
 static int    MSABI i_AdjustWindowRectEx(int32_t*r,uint32_t s,int m,uint32_t ex){ (void)r;(void)s;(void)m;(void)ex; return 1; }
+// DPI queries: unimplemented they fell through to the 0-returning stub, so Reclaimer's egui UI (its
+// frontend menu and in-game overlays) computed pixels_per_point = 0/96 and painted every widget at zero
+// size -- the menu showed only egui's cleared background. Report a standard 96-DPI display.
+static int    MSABI i_AdjustWindowRectExForDpi(int32_t*r,uint32_t s,int m,uint32_t ex,uint32_t dpi){ (void)dpi; return i_AdjustWindowRectEx(r,s,m,ex); }
+static uint32_t MSABI i_GetDpiForWindow(void*h){ (void)h; return 96; }
+static uint32_t MSABI i_GetDpiForSystem(void){ return 96; }
+static int    MSABI i_IsProcessDPIAware(void){ return 1; }
+// shcore.dll (loaded dynamically by Reclaimer): GetDpiForMonitor must WRITE *dpiX/*dpiY -- the generic
+// stub returned S_OK and left them unset, and egui's pixels_per_point came out as 1280.
+static int    MSABI i_GetDpiForMonitor(void*mon,int type,uint32_t*dx,uint32_t*dy){ (void)mon;(void)type; if(dx)*dx=96; if(dy)*dy=96; return 0; }
+static int    MSABI i_GetScaleFactorForMonitor(void*mon,int*scale){ (void)mon; if(scale)*scale=100; return 0; }   // SCALE_100_PERCENT
+static int    MSABI i_SetProcessDpiAwareness(int v){ (void)v; return 0; }
+static int    MSABI i_SetProcessDpiAwarenessContext(void*v){ (void)v; return 1; }
+static int    MSABI i_GetDeviceCaps(void*hdc,int index){ (void)hdc;
+    switch(index){ case 88: case 90: return 96;      // LOGPIXELSX / LOGPIXELSY
+        case 8: case 118: return 1920;                   // HORZRES / DESKTOPHORZRES
+        case 10: case 117: return 1080;                  // VERTRES / DESKTOPVERTRES
+        case 12: return 32; case 14: return 1;           // BITSPIXEL / PLANES
+        case 116: return 60;                             // VREFRESH
+        case 4: return 508; case 6: return 286;          // HORZSIZE / VERTSIZE (mm, ~23" 16:9)
+        case 24: return -1;                              // NUMCOLORS (true colour)
+        case 2: return 1;                                // TECHNOLOGY: DT_RASDISPLAY
+        default: return 0; } }
 static int    MSABI i_MoveWindow(void*h,int x,int y,int w,int ht,int rp){ (void)h;(void)x;(void)y;(void)w;(void)ht;(void)rp; return 1; }
 static void*  MSABI i_SetFocus(void*h){ return h; }
 static void*  MSABI i_SetCapture(void*h){ return h; }
@@ -6472,7 +6564,17 @@ static void MSABI i_glTextureSubImage2D(unsigned tex,int l,int xo,int yo,int w,i
     void(*r)(unsigned,int,int,int,int,int,unsigned,unsigned,const void*)=dlsym(RTLD_DEFAULT,"glTextureSubImage2D"); if(r)r(tex,l,xo,yo,w,h,fmt,type,d); }
 static void MSABI i_glReadPixels(int x,int y,int w,int h,unsigned fmt,unsigned type,void*d){
     if(getenv("PELOAD_TRACE_TEX")) gl_check_src("glReadPixels(DST)",w,h,fmt,type,d);
-    void(*r)(int,int,int,int,unsigned,unsigned,void*)=dlsym(RTLD_DEFAULT,"glReadPixels"); if(r)r(x,y,w,h,fmt,type,d); }
+    void(*r)(int,int,int,int,unsigned,unsigned,void*)=dlsym(RTLD_DEFAULT,"glReadPixels"); if(r)r(x,y,w,h,fmt,type,d);
+    if(getenv("PELOAD_TRACE_READPX")){ static int n; if((n++%200)==0){ int fb=0,rb=0,vp[4]={0}; unsigned err=0;
+        void(*gi)(unsigned,int*)=dlsym(RTLD_DEFAULT,"glGetIntegerv"); unsigned(*ge)(void)=dlsym(RTLD_DEFAULT,"glGetError");
+        if(gi){ gi(0x8CAA,&fb); gi(0x0C02,&rb); gi(0x0BA2,vp); } if(ge) err=ge();
+        uint64_t nz=0; if(d && (fmt==0x1908||fmt==0x80E1) && w>0 && h>0){ const uint8_t*q=d; for(long i=0;i<(long)w*h;i+=7) if(q[i*4]|q[i*4+1]|q[i*4+2]|q[i*4+3]) nz++; }
+        extern unsigned long g_guest_gl_draws_x, g_guest_gl_idx_x;
+        char m[300]; int k=snprintf(m,sizeof m,"  [readpx] #%d %d,%d %dx%d fmt=0x%x type=0x%x dst=%p readfb=%d readbuf=0x%x vp=%d,%d,%d,%d glerr=0x%x nonzero=%llu cur=%p guest drawElements so far=%lu (%lu idx)\n",n,x,y,w,h,fmt,type,d,fb,rb,vp[0],vp[1],vp[2],vp[3],err,(unsigned long long)nz,(void*)CGLGetCurrentContext(),g_guest_gl_draws_x,g_guest_gl_idx_x); (void)!write(2,m,k);
+        static int dumped; if(nz && !dumped && n>400 && w>0 && h>0 && w<=4096 && h<=4096){ dumped=1; unsigned char*c=malloc((size_t)w*h*4); if(c){ const uint8_t*q=d;
+            for(long i=0;i<(long)w*h;i++){ uint8_t b0=q[i*4],b1=q[i*4+1],b2=q[i*4+2],a=q[i*4+3]; if(fmt==0x80E1){ c[i*4]=b2; c[i*4+1]=b1; c[i*4+2]=b0; } else { c[i*4]=b0; c[i*4+1]=b1; c[i*4+2]=b2; } c[i*4+3]=a; }
+            const char*hm=getenv("HOME"); char pth[300]; snprintf(pth,sizeof pth,"%s/reclaimer_readpx.bmp",hm?hm:"/tmp"); bmp_write_rgba(pth,w,h,c);
+            for(long i=0;i<(long)w*h;i++){ c[i*4]=c[i*4+1]=c[i*4+2]=c[i*4+3]; } snprintf(pth,sizeof pth,"%s/reclaimer_readpx_alpha.bmp",hm?hm:"/tmp"); bmp_write_rgba(pth,w,h,c); free(c); } } } } }
 static void MSABI i_glGetTexImage(unsigned tgt,int l,unsigned fmt,unsigned type,void*d){
     if(getenv("PELOAD_TRACE_TEX")){ // query the bound texture's level dimensions for the size check
         void(*gl)(unsigned,int,unsigned,int*)=dlsym(RTLD_DEFAULT,"glGetTexLevelParameteriv");
@@ -6516,7 +6618,23 @@ static void gl_capture_resolve(void){
 // engine never SwapBuffers, so its rendered frame never reaches the window. Throttled
 // present_frontend/gdi_present_main here (state-safe: they save/restore FBO bindings)
 // flushes the frontend FBO + GDI composite to the visible window. PELOAD_PRESENT gates.
-static void MSABI i_glDrawElements(unsigned mode,int count,unsigned type,const void*idx){ void(*r)(unsigned,int,unsigned,const void*)=dlsym(RTLD_DEFAULT,"glDrawElements"); if(r)r(mode,count,type,idx);
+unsigned long g_guest_gl_draws_x, g_guest_gl_idx_x;   // guest (WGL) draw counters, reported by PELOAD_TRACE_READPX
+#define g_guest_gl_draws g_guest_gl_draws_x
+#define g_guest_gl_idx g_guest_gl_idx_x
+static void MSABI i_glDrawElements(unsigned mode,int count,unsigned type,const void*idx){ void(*r)(unsigned,int,unsigned,const void*)=dlsym(RTLD_DEFAULT,"glDrawElements"); g_guest_gl_draws++; g_guest_gl_idx+=(unsigned long)count;
+    static int st=-1; if(st<0) st=getenv("PELOAD_TRACE_GUESTDRAW")?1:0;
+    if(st && g_guest_gl_draws>=600 && g_guest_gl_draws<612){ void(*gi)(unsigned,int*)=dlsym(RTLD_DEFAULT,"glGetIntegerv"); void(*gf)(unsigned,float*)=dlsym(RTLD_DEFAULT,"glGetFloatv"); unsigned(*ge)(void)=dlsym(RTLD_DEFAULT,"glGetError"); unsigned char(*ie)(unsigned)=dlsym(RTLD_DEFAULT,"glIsEnabled");
+        unsigned e0=ge(); int fb=0,prog=0,vao=0,vp[4]={0},sc[4]={0},tex=0,ab=0,eb=0; gi(0x8CA6,&fb); gi(0x8B8D,&prog); gi(0x85B5,&vao); gi(0x0BA2,vp); gi(0x0C10,sc); gi(0x8069,&tex); gi(0x8894,&ab); gi(0x8895,&eb);
+        int scis=ie(0x0C11), blend=ie(0x0BE2), depth=ie(0x0B71), cull=ie(0x0B44), srgb=ie(0x8DB9); int bs=0,bd=0; gi(0x80C9,&bs); gi(0x80C8,&bd); float cm[4]={0}; (void)gf;
+        int loc=-1; int(*gul)(unsigned,const char*)=dlsym(RTLD_DEFAULT,"glGetUniformLocation"); void(*guf)(unsigned,int,float*)=dlsym(RTLD_DEFAULT,"glGetUniformfv"); float ss[4]={-1,-1,-1,-1};
+        if(gul&&guf&&prog){ loc=gul((unsigned)prog,"u_screen_size"); if(loc>=0) guf((unsigned)prog,loc,ss); }
+        unsigned char cmask[4]={0}; void(*gb)(unsigned,unsigned char*)=dlsym(RTLD_DEFAULT,"glGetBooleanv"); if(gb) gb(0x0C23,cmask);
+        { void(*gbs)(unsigned,long,long,void*)=dlsym(RTLD_DEFAULT,"glGetBufferSubData"); float v[20]={0}; if(gbs&&ab){ gbs(0x8892,0,80,v);
+            char m2[300]; int k2=snprintf(m2,sizeof m2,"  [guestvtx] #%lu v0 pos=(%g,%g) uv=(%g,%g) | v1 pos=(%g,%g) | v2 pos=(%g,%g) | v3 pos=(%g,%g)\n",g_guest_gl_draws,v[0],v[1],v[2],v[3],v[5],v[6],v[10],v[11],v[15],v[16]); (void)!write(2,m2,k2); } }
+        if(r)r(mode,count,type,idx); unsigned e1=ge();
+        char m[400]; int k=snprintf(m,sizeof m,"  [guestdraw] #%lu mode=%u n=%d type=0x%x idx=%p err-before=0x%x after=0x%x fb=%d prog=%d vao=%d tex=%d ab=%d eb=%d vp=%d,%d,%d,%d scissor=%d [%d,%d,%d,%d] blend=%d(src=0x%x dst=0x%x) depth=%d cull=%d srgb=%d cmask=%d%d%d%d u_screen_size=(%g,%g) loc=%d\n",
+            g_guest_gl_draws,mode,count,type,idx,e0,e1,fb,prog,vao,tex,ab,eb,vp[0],vp[1],vp[2],vp[3],scis,sc[0],sc[1],sc[2],sc[3],blend,bs,bd,depth,cull,srgb,cmask[0],cmask[1],cmask[2],cmask[3],ss[0],ss[1],loc); (void)!write(2,m,k); return; }
+    if(r)r(mode,count,type,idx);
     if(getenv("PELOAD_SHOT")) gl_capture_resolve();
     static unsigned long dc; if(getenv("PELOAD_PRESENT") && (dc++ % 200)==0){ present_frontend(); gdi_present_main(); } }
 static void MSABI i_glBlitFramebuffer(int sx0,int sy0,int sx1,int sy1,int dx0,int dy0,int dx1,int dy1,unsigned mask,unsigned filter){
@@ -8347,6 +8465,15 @@ static void *resolve_impl(const char *fn){
         {"GetWindowLongW",(void*)i_GetWindowLongW},
         {"SetWindowLongW",(void*)i_SetWindowLongW},
         {"AdjustWindowRectEx",(void*)i_AdjustWindowRectEx},
+        {"AdjustWindowRectExForDpi",(void*)i_AdjustWindowRectExForDpi},
+        {"GetDpiForWindow",(void*)i_GetDpiForWindow},
+        {"GetDpiForSystem",(void*)i_GetDpiForSystem},
+        {"IsProcessDPIAware",(void*)i_IsProcessDPIAware},
+        {"GetDpiForMonitor",(void*)i_GetDpiForMonitor},
+        {"GetScaleFactorForMonitor",(void*)i_GetScaleFactorForMonitor},
+        {"SetProcessDpiAwareness",(void*)i_SetProcessDpiAwareness},
+        {"SetProcessDpiAwarenessContext",(void*)i_SetProcessDpiAwarenessContext},
+        {"GetDeviceCaps",(void*)i_GetDeviceCaps},
         {"MoveWindow",(void*)i_MoveWindow},
         {"SetFocus",(void*)i_SetFocus},
         {"SetCapture",(void*)i_SetCapture},
