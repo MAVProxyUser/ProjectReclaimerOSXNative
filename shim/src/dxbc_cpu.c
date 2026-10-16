@@ -59,7 +59,10 @@ static CsProg* cs_compile(const uint8_t* d, size_t len){
 // ---- texture fetch (sample_l / ld) on the CPU copy of a texture: mip 0, bilinear ----
 typedef struct { D3DObj* tex; uint32_t ver; int w,h; float* px; } CsTexCache;
 static CsTexCache g_cstex[16];
-static const float* cs_tex_rgba(D3DObj* t,int* w,int* h){
+static pthread_mutex_t g_cstex_mx=PTHREAD_MUTEX_INITIALIZER;   // parallel compute chunks share the cache
+static const float* cs_tex_rgba_l(D3DObj* t,int* w,int* h);
+static const float* cs_tex_rgba(D3DObj* t,int* w,int* h){ pthread_mutex_lock(&g_cstex_mx); const float*r=cs_tex_rgba_l(t,w,h); pthread_mutex_unlock(&g_cstex_mx); return r; }
+static const float* cs_tex_rgba_l(D3DObj* t,int* w,int* h){
     if(!t||!t->data||!t->w) return 0;
     for(int i=0;i<16;i++) if(g_cstex[i].tex==t && g_cstex[i].ver==t->ver){ *w=g_cstex[i].w; *h=g_cstex[i].h; return g_cstex[i].px; }
     int W=(int)t->w, H=(int)(t->h?t->h:1); if((uint64_t)W*H>4096ull*4096ull) return 0;
@@ -278,15 +281,32 @@ static int cs_exec_thread(CsThread* T){
     return 1; }
 
 // Run Dispatch(gx,gy,gz). Returns threads run, or <0 = -opcode of an unsupported instruction.
-static long cs_dispatch(CsProg* p,CsCtx* c,uint32_t gx,uint32_t gy,uint32_t gz){
-    if(!p||!p->ok) return 0;
-    int nr=p->ntemps>0?p->ntemps:1; CsV4* r=calloc((size_t)nr,sizeof(CsV4)); CsV4* x=calloc((size_t)(p->xtotal>0?p->xtotal:1),sizeof(CsV4));
-    if(!r||!x){ free(r); free(x); return 0; }
-    CsThread T; memset(&T,0,sizeof T); T.p=p; T.c=c; T.r=r; T.x=x; long ran=0;
-    for(uint32_t gk=0;gk<gz;gk++) for(uint32_t gj=0;gj<gy;gj++) for(uint32_t gi=0;gi<gx;gi++)
-    for(uint32_t lk=0;lk<p->tg[2];lk++) for(uint32_t lj=0;lj<p->tg[1];lj++) for(uint32_t li=0;li<p->tg[0];li++){
+// Threads are independent (no group-shared memory in these kernels), so the thread range is split into
+// chunks that can run in parallel with GCD (PELOAD_CS_PARALLEL; measured no gain for 64-thread dispatches,
+// so serial is the default). Each chunk has its own registers.
+#include <dispatch/dispatch.h>
+typedef struct { CsProg* p; CsCtx* c; uint32_t gx,gy,gz; uint64_t total; uint32_t chunks; volatile long ran; volatile long bad; } CsJob;
+static void cs_chunk(void* ctx,size_t ci){
+    CsJob* J=ctx; CsProg* p=J->p; uint64_t per=(J->total+J->chunks-1)/J->chunks, lo=ci*per, hi=lo+per; if(hi>J->total) hi=J->total; if(lo>=hi) return;
+    int nr=p->ntemps>0?p->ntemps:1; CsV4* r=calloc((size_t)nr,sizeof(CsV4)); CsV4* x=calloc((size_t)(p->xtotal>0?p->xtotal:1),sizeof(CsV4)); if(!r||!x){ free(r); free(x); return; }
+    CsThread T; memset(&T,0,sizeof T); T.p=p; T.c=J->c; T.r=r; T.x=x;
+    uint32_t tgn=p->tg[0]*p->tg[1]*p->tg[2];
+    for(uint64_t i=lo;i<hi;i++){
+        uint64_t g=i/tgn, l=i%tgn;
+        uint32_t gi=(uint32_t)(g%J->gx), gj=(uint32_t)((g/J->gx)%J->gy), gk=(uint32_t)(g/((uint64_t)J->gx*J->gy));
+        uint32_t li=(uint32_t)(l%p->tg[0]), lj=(uint32_t)((l/p->tg[0])%p->tg[1]), lk=(uint32_t)(l/((uint64_t)p->tg[0]*p->tg[1]));
         T.gid[0]=gi; T.gid[1]=gj; T.gid[2]=gk; T.ltid[0]=li; T.ltid[1]=lj; T.ltid[2]=lk;
         T.tid[0]=gi*p->tg[0]+li; T.tid[1]=gj*p->tg[1]+lj; T.tid[2]=gk*p->tg[2]+lk;
         memset(r,0,(size_t)nr*sizeof(CsV4));
-        int rc=cs_exec_thread(&T); if(rc<0){ free(r); free(x); return rc; } ran++; }
-    free(r); free(x); return ran; }
+        int rc=cs_exec_thread(&T); if(rc<0){ J->bad=rc; break; } __sync_fetch_and_add(&J->ran,1); }
+    free(r); free(x); }
+static long cs_dispatch(CsProg*p,CsCtx*c,uint32_t gx,uint32_t gy,uint32_t gz){
+    if(!p||!p->ok) return 0;
+    CsJob J; memset(&J,0,sizeof J); J.p=p; J.c=c; J.gx=gx?gx:1; J.gy=gy?gy:1; J.gz=gz?gz:1;
+    J.total=(uint64_t)J.gx*J.gy*J.gz*p->tg[0]*p->tg[1]*p->tg[2];
+    static int serial=-1; if(serial<0) serial=getenv("PELOAD_CS_PARALLEL")?0:1;   // 64-thread dispatches: GCD fan-out costs more than it saves
+    J.chunks = serial||J.total<32 ? 1 : (uint32_t)(J.total/16 < 8 ? J.total/16 : 8);
+    if(J.chunks<=1){ J.chunks=1; cs_chunk(&J,0); }
+    else dispatch_apply_f(J.chunks,dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE,0),&J,cs_chunk);
+    if(J.bad) return J.bad;
+    return J.ran; }
