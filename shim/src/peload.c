@@ -1132,6 +1132,7 @@ static char* d3dgl_load_glsl(const void*bc,uint64_t len){
     if(!(bc && len>=4 && !memcmp(bc,"DXBC",4)) || getenv("PELOAD_D3DGL_NOXLAT")) return 0;
     g_dg_ubo = getenv("PELOAD_D3DGL_NOUBO")?0:1;
     g_dg_nodclsz = getenv("PELOAD_D3DGL_NODCLSZ")?1:0;
+    g_dg_nocmp = getenv("PELOAD_D3DGL_NOCMP")?1:0;
     char*g=dg_translate((const uint8_t*)bc,(size_t)len);
     if(!g) return 0;
     char gdir[400]; snprintf(gdir,sizeof gdir,"%s/reclaimer_glsl_" D3DGL_XLAT_VER,home?home:"/tmp"); mkdir(gdir,0755);
@@ -4213,6 +4214,7 @@ static unsigned d3d_addr_gl(uint32_t a){ switch(a){ case 1:return 0x2901; case 2
 // D3D11_SAMPLER_DESC {Filter, AddressU,V,W, MipLODBias, MaxAnisotropy, ComparisonFunc, BorderColor[4], MinLOD, MaxLOD}
 static unsigned d3dgl_glsampler_x(D3DObj*s,int hasmips,int skip);
 static unsigned d3dgl_glsampler(D3DObj*s,int hasmips){ return d3dgl_glsampler_x(s,hasmips,0); }
+static unsigned d3d_cmp_gl(uint32_t f); // fwd
 static unsigned d3dgl_glsampler_x(D3DObj*s,int hasmips,int skip){
     if(!s||s->stkind!=4||!G.GenSamplers||!G.SamplerParameteri) return 0;
     unsigned*slot=skip?(hasmips?&s->glsamp_skip:&s->glsamp_nomip_skip):(hasmips?&s->glsamp:&s->glsamp_nomip); if(*slot) return *slot;
@@ -4226,6 +4228,8 @@ static unsigned d3dgl_glsampler_x(D3DObj*s,int hasmips,int skip){
         if(aniso) G.SamplerParameterf(g,0x84FE,(float)(d[5]<1?1:(d[5]>16?16:d[5]))); }
     if(G.SamplerParameterfv) G.SamplerParameterfv(g,0x1004,(const float*)&d[7]);
     G.SamplerParameteri(g,0x8A48/*TEXTURE_SRGB_DECODE_EXT*/,skip?0x8A4A/*SKIP_DECODE*/:0x8A49/*DECODE*/);
+    // COMPARISON_* filters (0x80): hardware depth compare with the D3D ComparisonFunc (shadow samplers)
+    if((d[0]&0x80) && !getenv("PELOAD_D3DGL_NOCMP")){ G.SamplerParameteri(g,0x884C/*TEXTURE_COMPARE_MODE*/,0x884E/*COMPARE_REF_TO_TEXTURE*/); G.SamplerParameteri(g,0x884D/*COMPARE_FUNC*/,(int)d3d_cmp_gl(d[6])); }
     return g; }
 // ---- depth-stencil textures + per-(RTVs,DSV) framebuffers ---------------------------------------
 // A DSV resource becomes a real GL depth(-stencil) texture (also sampleable through its SRV: GL returns
@@ -4340,6 +4344,7 @@ static void d3dgl_scan_tt_p(const char*src,signed char*tt,const char*pfx){
     for(const char*p=src; p && (p=strstr(p,"uniform ")); ){ p+=8; int k=-1;
         if(!strncmp(p,"usamplerBuffer ",15)) k=5;
         else if(!strncmp(p,"sampler",7)){ const char*t=p+7;
+            if(!strncmp(t,"2DArrayShadow ",14)) k=3; else if(!strncmp(t,"2DShadow ",9)) k=0; else if(!strncmp(t,"CubeShadow ",11)) k=2; else
             if(!strncmp(t,"2DArray ",8)) k=3; else if(!strncmp(t,"2D ",3)) k=0; else if(!strncmp(t,"3D ",3)) k=1;
             else if(!strncmp(t,"CubeArray ",10)) k=4; else if(!strncmp(t,"Cube ",5)) k=2; }
         const char*q=strchr(p,' '); int r; if(k>=0 && q && sscanf(q,pat,&r)==1 && r>=0 && r<32) tt[r]=(signed char)k; } }

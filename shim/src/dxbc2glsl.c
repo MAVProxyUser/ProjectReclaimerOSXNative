@@ -45,7 +45,8 @@ typedef struct { int op; const char*name; int test; int nop; DgOp ops[8]; uint32
 // dcl_constantbuffer) instead of plain uniform arrays: plain arrays hit GL's 4096-component limit for
 // dynamically indexed palettes (skinned meshes failed to link) and cost a full copy per draw. 0 = old arrays.
 static int g_dg_ubo = 1;
-static int g_dg_nodclsz = 0;   // A/B: ignore dcl_constantbuffer sizes (old max-index heuristic)
+static int g_dg_nodclsz = 0;
+static int g_dg_nocmp = 0;     // A/B: old manual compare for sample_c   // A/B: ignore dcl_constantbuffer sizes (old max-index heuristic)
 // immediate constant buffer (dcl_immediateConstantBuffer customdata), per translated shader
 static uint32_t g_icb[4096*4]; static int g_icbn;
 
@@ -310,6 +311,10 @@ char* dg_emit(const char*stage,const DgSig*isgn,int ni,const DgSig*osgn,int no,D
     // StructuredBuffer / ByteAddressBuffer SRVs (dcl_resource_structured 162 / _raw 161): GL texture buffer of R32UI
     // dwords (particle state read by the particle vertex shaders). rdim 100 = structured, 101 = raw; stride kept.
     int rstride[256]={0};
+    // resources read with sample_c / sample_c_lz -> GL shadow samplers (hardware compare + PCF with the D3D
+    // sampler's ComparisonFunc). Was: texture().r >= ref, ignoring the comparison function and filtering.
+    int rcmp[256]={0};
+    for(int x=0;x<nins;x++) if((ins[x].op==70||ins[x].op==71) && ins[x].nop>2 && ins[x].ops[2].nidx){ uint32_t r=ins[x].ops[2].idx[0].val; if(r<256) rcmp[r]=1; }
     for(int x=0;x<nins;x++) if((ins[x].op==162||ins[x].op==161) && ins[x].nop && ins[x].ops[0].type==T_RESOURCE && ins[x].ops[0].nidx){ uint32_t r=ins[x].ops[0].idx[0].val;
         if(r<256){ rdim[r]=ins[x].op==162?100:101; rstride[r]=ins[x].op==162?(int)ins[x].raw[2]:4; res_[r]=1; } }
     for(int x=0;x<nins;x++){ for(int k=0;k<ins[x].nop;k++){ DgOp*op=&ins[x].ops[k];
@@ -342,7 +347,10 @@ char* dg_emit(const char*stage,const DgSig*isgn,int ni,const DgSig*osgn,int no,D
     }
     for(int b=0;b<64;b++) if(cbused[b]){ int n = (dclsz[b] && !g_dg_nodclsz) ? dclsz[b] : cbs[b];
         if(g_dg_ubo) dg_lprintf(&L,"layout(std140) uniform cb%d_blk { vec4 cb%d[%d]; };",b,b,n); else dg_lprintf(&L,"uniform vec4 cb%d[%d];",b,n); }
-    for(int r=0;r<256;r++) if(res_[r]) dg_lprintf(&L,"uniform %s t%d;",dg_samptype(rdim[r]),r);
+    for(int r=0;r<256;r++) if(res_[r]){
+        if(rcmp[r] && !g_dg_nocmp){ const char*st = (rdim[r]==6)?"samplerCubeShadow":(rdim[r]==8||rdim[r]==7)?"sampler2DArrayShadow":"sampler2DShadow";
+            dg_lprintf(&L,"uniform %s t%d;",st,r); }
+        else dg_lprintf(&L,"uniform %s t%d;",dg_samptype(rdim[r]),r); }
     int isvs=!strcmp(stage,"vs");
     // D3D -> GL clip space at every VS exit: y is flipped so GL row y holds D3D row y (render targets match
     // D3D's top-down layout, like uploaded textures; present flips once), and D3D's z in [0,w] maps onto
@@ -498,7 +506,12 @@ char* dg_emit(const char*stage,const DgSig*isgn,int ni,const DgSig*osgn,int no,D
         else if(!strcmp(n,"sample_l")) line=dg_asg(&ctx,&o[0],({char*t=dg_pool(); const char*of=dg_offs(DIM2,&ins[x]);
             if(of[0]) snprintf(t,256,"textureLodOffset(t%u,%s,(%s).x,%s).%s",(unsigned)TX(2),dg_crd(DIM2,S(1)),S(4),of,RSW(2));
             else snprintf(t,256,"textureLod(t%u,%s,(%s).x).%s",(unsigned)TX(2),dg_crd(DIM2,S(1)),S(4),RSW(2)); t;}));
-        else if(!strcmp(n,"sample_c")||!strcmp(n,"sample_c_lz")) line=dg_asg(&ctx,&o[0],({char*t=dg_pool();snprintf(t,256,"vec4(textureLod(t%u,%s,0.0).r >= (%s).x ?1.0:0.0)",(unsigned)TX(2),dg_crd(DIM2,S(1)), nopn>4?S(4):"vec4(0.5)");t;}));
+        else if(!strcmp(n,"sample_c")||!strcmp(n,"sample_c_lz")){ char*t=dg_pool(); const char*ref=nopn>4?S(4):"vec4(0.5)"; int dm=DIM2;
+            if(g_dg_nocmp) snprintf(t,256,"vec4(textureLod(t%u,%s,0.0).r >= (%s).x ?1.0:0.0)",(unsigned)TX(2),dg_crd(dm,S(1)),ref);
+            else if(dm==6) snprintf(t,256,"vec4(texture(t%u,vec4((%s).xyz,(%s).x)))",(unsigned)TX(2),S(1),ref);
+            else if(dm==8||dm==7) snprintf(t,256,"vec4(texture(t%u,vec4((%s).xyz,(%s).x)))",(unsigned)TX(2),S(1),ref);
+            else snprintf(t,256,"vec4(texture(t%u,vec3((%s).xy,(%s).x)))",(unsigned)TX(2),S(1),ref);
+            line=dg_asg(&ctx,&o[0],t); }
         else dg_lprintf(&L,"  // UNTRANSLATED: %s",n);
         if(line) dg_lpush(&L,line);
     }
