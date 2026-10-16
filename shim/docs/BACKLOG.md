@@ -29,5 +29,5 @@ Kept current as work lands (newest status first). "Done" items name the commit t
 - Bigger window (largest 16:9 that fits the screen) — 1367a68
 - Reclaimer client v0.9.18 support (signature patches, Bink/Waves DLL support) — a574219
 - Hitbox overlay `PELOAD_HITBOXES=1|all` (halo3's own debug_objects overlays are compiled out; reads the object table, draws bounding spheres with the world camera); verified in a 60-player BTB (FKK, High Ground) — f73252e
-- Real hitboxes: `PELOAD_HITBOXES=1` now draws each object's collision model (what damage tests) posed on its live node matrices — HEAD
+- Real hitboxes: `PELOAD_HITBOXES=1` now draws each object's collision model (what damage tests) posed on its live node matrices — 76a80c8
 - Title fps no longer claims more than the screen can show (loading screens spin at ~1000 presents/s) — f73252e
