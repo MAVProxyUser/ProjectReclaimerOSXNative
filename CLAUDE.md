@@ -37,9 +37,24 @@ resizable and full-screen capable. `play.sh` adds `exe+65ddf9:eb` (skips the cli
 watchdog that otherwise parks the input thread). Key A/B switches: `PELOAD_AUDIO=0`, `PELOAD_INVERT_PITCH=0`,
 `PELOAD_D3DGL_NOPQ/NOSTATECACHE/NORING/NOUBO/NOSRGB/NOCMP/NOYFLIP/NODEPTH`, `PELOAD_NOCSCPU`.
 Diagnostics: `PELOAD_FPS_LOG`, `PELOAD_D3DGL_PROF`, `PELOAD_SAMPLE=<us>`, `PELOAD_TRACE_FAULT`,
-`PELOAD_D3DGL_SHOTWIN=<n>` (+`PELOAD_D3DGL_ALT5` phase-tagged A/B), `PELOAD_INPUT_SCRIPT=walk|fire`,
+`PELOAD_D3DGL_SHOTWIN=<n>` (+`_FROM/_TO` seconds after gameplay start; capture names carry the engine
+frame `_f<N>`; `PELOAD_D3DGL_ALT5` phase-tagged A/B), `PELOAD_INPUT_SCRIPT=walk|fire|<segments>`,
 `PELOAD_KBM_TEST`, `PELOAD_AUDIO_DUMP=<raw>`. The GLSL translator runs in-process every launch;
-`~/reclaimer_glsl_v4/` is written for inspection only (`PELOAD_D3DGL_GLSLCACHE=1` reads it back).
+`~/reclaimer_glsl_v5/` is written for inspection only (`PELOAD_D3DGL_GLSLCACHE=1` reads it back).
+
+Perf (2026-10-16, M4, 1280x720 window, 1920x1080 internal): gameplay median ~116 fps, p10 ~80,
+min ~50 (3-min soak). Draw-call bound: ~3.6 us per glDraw* in GL-on-Metal x ~1200-2300 draws/frame;
+the next big step would be a GL submission thread. CPU particle compute runs on a worker thread
+(`PELOAD_CS_SYNC` = inline). Window flips are vsynced (`PELOAD_NOVSYNC`); the engine never waits on them.
+First-use shader stalls: every linked VS/PS pair is recorded (by bytecode hash) in
+`~/Library/Application Support/ReclaimerMac/glpairs_v1.txt` and pre-built during the next loading
+screen (`PELOAD_D3DGL_NOPRELINK`; `PELOAD_D3DGL_PROGTIME` logs build costs).
+Correctness switches added 2026-10-16: `PELOAD_D3DGL_NOINTIN` (integer vertex attributes as floats --
+the old cause of one-frame white flashes / exploded skinned geometry), `PELOAD_D3DGL_NOQUERY`
+(occlusion queries), `PELOAD_D3DGL_NOCANON` (identical-bytecode shader sharing).
+Glitch hunting: `PELOAD_D3DGL_COVQ` (+`_COVQ_FRAC`, `_HUGEPROBE=<t>`) per-draw sample counts,
+`PELOAD_D3DGL_WHITEDUMP` (draw flight recorder on auto-exposure spikes), `_LUMLOG`, `_FSLOG`,
+`_FRAMESTAT`, `_CBSCAN`, `_PSCLAMP=<c>`, `_SKIPVSH=<hash,..>`, `_DUMPHASH=<hash,..>` (GLSL+DXBC to ~).
 
 ## Render Guardian via the game client (GL-on-Metal, no MCC/Steam)
 `game-client` runs the engine in a standalone native window ("Reclaimer GL (OpenGL on Metal)") and
