@@ -7065,6 +7065,26 @@ static void seh_decode_cpp(uint32_t code,uint32_t n,const void*args){
                 else { for(int i=0;i<180 && m[i];i++){ if(m[i]<32||m[i]>126){k=0;break;} out[k++]=(char)m[i]; } }
                 if(k>=4){ out[k]=0; char t[260]; snprintf(t,sizeof t,"    obj+0x%x%s: \"%s\"\n",off,c?" ->":"",out); ws(t); } } } }
 }
+// MiniDumpWriteDump (dbghelp): the client's crash handler calls it with the exception that is about to end the
+// process, then fast-fails. Log that exception (code, address as module+offset, C++ type) so every crash says
+// what happened, even without PELOAD_TRACE_* switches; write no dump file.
+static const char* addr_mod(uint64_t a,uint64_t*off){
+    if(g_base){ OPT64*o=(OPT64*)((uint8_t*)g_base+((DOS*)g_base)->e_lfanew+sizeof(COFF)); if(a>=(uint64_t)g_base && a<(uint64_t)g_base+o->ImageSize){ *off=a-(uint64_t)g_base; return "exe"; } }
+    for(int k=0;k<g_nmods;k++){ uint8_t*bs=g_mods[k].base; OPT64*o=(OPT64*)(bs+((DOS*)bs)->e_lfanew+sizeof(COFF)); if(a>=(uint64_t)bs && a<(uint64_t)bs+o->ImageSize){ *off=a-(uint64_t)bs; return g_mods[k].name; } }
+    *off=a; return "?"; }
+static int MSABI i_MiniDumpWriteDump(void*proc,uint32_t pid,void*file,uint32_t type,const uint8_t*exparam,void*us,void*cb){ (void)proc;(void)pid;(void)file;(void)type;(void)us;(void)cb;
+    char m[400]; int k=snprintf(m,sizeof m,"  [crash-report] the client's crash handler is writing a minidump\n"); (void)!write(2,m,k);
+    if(exparam){ const uint64_t*ep=*(const uint64_t* const*)(exparam+8);   // EXCEPTION_POINTERS*
+        if(ep && ep[0]){ const uint8_t*rec=(const uint8_t*)(uintptr_t)ep[0]; uint32_t code=*(const uint32_t*)rec; uint64_t addr=*(const uint64_t*)(rec+16); uint32_t np=*(const uint32_t*)(rec+24);
+            const uint64_t*info=(const uint64_t*)(rec+32); uint64_t off; const char*mod=addr_mod(addr,&off);
+            k=snprintf(m,sizeof m,"  [crash-report] exception 0x%08x at %s+0x%llx (thread %u)",code,mod,(unsigned long long)off,*(const uint32_t*)exparam); (void)!write(2,m,k);
+            if(code==0xC0000005 && np>=2){ k=snprintf(m,sizeof m,"  %s address 0x%llx",info[0]==1?"write":info[0]==8?"execute":"read",(unsigned long long)info[1]); (void)!write(2,m,k); }
+            (void)!write(2,"\n",1);
+            if(ep[1]){ const uint8_t*ctx=(const uint8_t*)(uintptr_t)ep[1]; uint64_t rsp=*(const uint64_t*)(ctx+0x98); int shown=0;
+                for(int w=0;w<400 && shown<12;w++){ uint64_t v; mach_vm_size_t got=0; if(mach_vm_read_overwrite(mach_task_self(),(mach_vm_address_t)(rsp+8*w),8,(mach_vm_address_t)(uintptr_t)&v,&got)!=KERN_SUCCESS) break;
+                    uint64_t o2; const char*mm=addr_mod(v,&o2); if(mm[0]!='?'){ k=snprintf(m,sizeof m,"      %s+0x%llx\n",mm,(unsigned long long)o2); (void)!write(2,m,k); shown++; } } }
+            if(code==0xE06D7363 && np>=4){ setenv("PELOAD_TRACE_SEH","1",0); seh_decode_cpp(code,np,info); } } }
+    return 0; }
 // drive/volume queries: present C: as a fixed NTFS volume with free space, so
 // the client accepts the cache/scratch as "a drive of this PC".
 static uint32_t MSABI i_GetDriveTypeW(const uint16_t*root){ (void)root; return 3; } // DRIVE_FIXED
@@ -7304,6 +7324,7 @@ static uintptr_t MSABI i_beginthreadex(void*sec,unsigned stack,WinThreadProc sta
 static void MSABI i_endthreadex(unsigned code){ (void)code; pthread_exit(0); }
 static uintptr_t MSABI i_beginthread(WinThreadProc start,unsigned stack,void*arg){ uint32_t tid=0; return (uintptr_t)i_CreateThread(0,(uint64_t)stack,start,arg,0,&tid); }
 #include "xaudio.c"
+#include "hitbox.c"
 static void MSABI i_endthread(void){ pthread_exit(0); }
 static uint32_t MSABI i_GetThreadId(void*h){ if(is_sync((intptr_t)h)) return ((SyncObj*)h)->tid; return (uint32_t)(uintptr_t)h; }
 static int MSABI i_GetExitCodeThread(void*h,uint32_t*code){
@@ -8537,7 +8558,7 @@ static void *resolve_impl(const char *fn){
         {"TerminateProcess",(void*)i_TerminateProcess},
         {"GetModuleFileNameW",(void*)i_GetModuleFileNameW},
         {"GetEnvironmentVariableW",(void*)i_GetEnvironmentVariableW},
-        {"GetStartupInfoW",(void*)i_GetStartupInfoW},{"GetStartupInfoA",(void*)i_GetStartupInfoA},{"HeapSetInformation",(void*)i_HeapSetInformation},
+        {"GetStartupInfoW",(void*)i_GetStartupInfoW},{"MiniDumpWriteDump",(void*)i_MiniDumpWriteDump},{"GetStartupInfoA",(void*)i_GetStartupInfoA},{"HeapSetInformation",(void*)i_HeapSetInformation},
         {"SetEnvironmentVariableW",(void*)i_SetEnvironmentVariableW},
         {"SetStdHandle",(void*)i_SetStdHandle},
         {"DuplicateHandle",(void*)i_DuplicateHandle},
@@ -9576,8 +9597,9 @@ static void crashsig(int sig, siginfo_t *info, void *ucv){
     { int k=snprintf(b,sizeof b,"    [d3dgl] last phase=%s draw#=%lu\n",g_d3dgl_phase?(const char*)g_d3dgl_phase:"?",g_d3dgl_phase_draw); (void)!write(2,b,k); }
     { uint64_t gs58=0; __asm__ volatile("movq %%gs:0x58,%0":"=r"(gs58));
       uint64_t t0=(gs58>0x10000)?*(uint64_t*)gs58:0;
-      int nn=snprintf(b,sizeof b,"    gs:0x58(tls_array)=0x%llx  tls[0]=0x%llx  mach_tid=0x%x  mainthr=%d\n",
-        (unsigned long long)gs58,(unsigned long long)t0,pthread_mach_thread_np(pthread_self()),pthread_main_np());
+      char tn[64]={0}; pthread_getname_np(pthread_self(),tn,sizeof tn);
+      int nn=snprintf(b,sizeof b,"    gs:0x58(tls_array)=0x%llx  tls[0]=0x%llx  mach_tid=0x%x  mainthr=%d  thread='%s'\n",
+        (unsigned long long)gs58,(unsigned long long)t0,pthread_mach_thread_np(pthread_self()),pthread_main_np(),tn);
       (void)!write(2,b,nn); }
     // manual stack scan: Win64 code defeats backtrace(); find return addresses
     // that land inside a loaded module and print module+offset (the call chain).
@@ -9673,6 +9695,7 @@ static void* sampler_thread(void*a){ (void)a;
 int main(int argc, char **argv){
     if(getenv("PELOAD_SAMPLE")){ pthread_t st; pthread_create(&st,0,sampler_thread,0); }
     wi_test_start();
+    hitbox_start();
     { struct sigaction sa; memset(&sa,0,sizeof sa); sa.sa_sigaction=crashsig; sa.sa_flags=SA_SIGINFO;
       sigaction(SIGSEGV,&sa,0); sigaction(SIGBUS,&sa,0); sigaction(SIGILL,&sa,0); sigaction(SIGABRT,&sa,0);
       if(getenv("PELOAD_BP")) sigaction(SIGTRAP,&sa,0); }  // PELOAD_BP software breakpoints need SIGTRAP caught (else "Trace/BPT trap")
