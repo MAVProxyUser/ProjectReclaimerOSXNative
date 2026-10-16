@@ -9031,6 +9031,9 @@ static void crashsig(int sig, siginfo_t *info, void *ucv){
         for(int i=0;i<g_bp_n;i++) if(g_bp_addr[i]==hit){ uint8_t*p=(uint8_t*)hit; *p=g_bp_orig[i]; sys_icache_invalidate(p,1);
             g_bp_cnt[i]++; uc->uc_mcontext->__ss.__rip=hit;   // rewind to re-execute original insn
             uc->uc_mcontext->__ss.__rflags |= 0x100ull; g_bp_rearm=i;   // single-step, then re-arm
+            { static long cap=-1; if(cap<0){ const char*e=getenv("PELOAD_BP_ARGS"); cap=e?atol(e):0; }
+              if(cap>0 && g_bp_cnt[i]<=(uint64_t)cap){ char b[200]; int k=snprintf(b,sizeof b,"[bpa] exe+0x%llx #%llu rcx=0x%llx rdx=0x%llx r8=0x%llx r9=0x%llx\n",(unsigned long long)(hit-(uint64_t)g_base),(unsigned long long)g_bp_cnt[i],
+                    (unsigned long long)uc->uc_mcontext->__ss.__rcx,(unsigned long long)uc->uc_mcontext->__ss.__rdx,(unsigned long long)uc->uc_mcontext->__ss.__r8,(unsigned long long)uc->uc_mcontext->__ss.__r9); (void)!write(2,b,k); return; } }
             if(g_bp_cnt[i]<=40){ uint64_t rbx=uc->uc_mcontext->__ss.__rbx, rsi=uc->uc_mcontext->__ss.__rsi, rdi=uc->uc_mcontext->__ss.__rdi, r15=uc->uc_mcontext->__ss.__r15;
                 uint64_t rax=uc->uc_mcontext->__ss.__rax, r10=uc->uc_mcontext->__ss.__r10, r9=uc->uc_mcontext->__ss.__r9, r14=uc->uc_mcontext->__ss.__r14;
                 uint64_t vbx = (rbx>0x1000)? *(uint64_t*)rbx : 0;
