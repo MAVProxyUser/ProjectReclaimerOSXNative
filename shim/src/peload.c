@@ -1386,7 +1386,7 @@ static volatile unsigned long g_d3dgl_phase_draw;    // which draw # we were on
 static int d3dgl_enabled(void){ if(g_d3dgl_en<0) g_d3dgl_en=getenv("PELOAD_D3DGL")?1:0; return g_d3dgl_en; }
 static void d3dgl_draw(uint32_t vcount,int indexed,uint32_t instcount,uint32_t start,int32_t base,uint32_t sinst); // fwd
 static void d3dgl_present(void); // fwd (blit the D3DGL backbuffer to the window at Present)
-static int cb_looks_viewproj(const float*m,uint64_t bytes); static int hb_enabled(void); static int hb_is_world_camera(const float*rows); static void hb_capture_view(const float*rows); static void hb_draw_overlay(void); static void hb_note_map(const char*p); extern volatile int g_hb_taken; // hitbox.c
+static int cb_looks_viewproj(const float*m,uint64_t bytes); static int hb_enabled(void); static int hb_is_world_camera(const float*rows); static void hb_capture_view(const float*rows); static void hb_draw_overlay(void); static void hb_note_map(const char*p); extern volatile int g_hb_taken; static void hb_note_dsv(void*ds); static void hb_capture_tick(void); // hitbox.c
 static void d3dgl_clear_rtv(void* rtvview,const float* col); // fwd (ClearRenderTargetView -> GL clear)
 static void d3dgl_clear_dsv(void*dsvview,uint32_t flags,float depth,uint8_t stencil); // fwd (ClearDepthStencilView -> GL depth/stencil clear)
 static void MSABI ctx_ClearRTV(void*t,void*rtv,const float*col){ (void)t; if(d3dgl_enabled()) d3dgl_clear_rtv(rtv,col); }
@@ -5610,7 +5610,7 @@ static void d3dgl_draw_impl(uint32_t vcount,int indexed,uint32_t instcount,uint3
     // full-size scene draw of the frame (before first-person weapon draws, which use their own projection).
     if(!g_hb_taken && hb_enabled() && g_d3dst.rtv && vw>=640 && vh>=360){ D3DObj*c=g_d3dst.vscb[0];
         if(c && c->data){ uint64_t off=(uint64_t)g_d3dst.vscb_1st[0]*16; if(c->size>=off+128){ const float*f=(const float*)((uint8_t*)c->data+off);
-            if(hb_is_world_camera(f)){ hb_capture_view(f); g_hb_taken=1; } } } }
+            if(hb_is_world_camera(f)){ hb_capture_view(f); hb_note_dsv(dsv); g_hb_taken=1; } } } }
     if(getenv("PELOAD_TRACE_VP") && rt->w>=2048){ static uint64_t seen[256]; static int ns; uint64_t key=((uint64_t)(uintptr_t)rt*31+(uint64_t)vw*7919+(uint64_t)vh)^ps->bchash; int f=0; for(int q=0;q<ns;q++) if(seen[q]==key){ f=1; break; } if(!f && ns<256){ seen[ns++]=key; char m[160]; int k=snprintf(m,sizeof m,"  [vp] rt=%p %ux%u f%u vp=%dx%d at %d,%d n=%u psh=%016llx\n",(void*)rt,rt->w,rt->h,rt->fmt,vw,vh,g_d3dst.vp_x,g_d3dst.vp_y,vcount,(unsigned long long)ps->bchash); (void)!write(2,m,k); } }
     if(g_nullps_color){ g_nullps_color=0; if(G.ColorMask) gs_colormask(0,0,0,0); }   // NULL PS: no colour writes
     // pipeline
@@ -6379,6 +6379,7 @@ static void d3dgl_present_impl(void){
             const char*home=getenv("HOME"); char p[512]; snprintf(p,sizeof p,"%s/reclaimer_rt_%03d_%dx%d.bmp",home?home:"/tmp",g_rtdumped,(int)rt->w,(int)rt->h);
             bmp_write_rgba(p,w,h,cap); char m[220]; int k=snprintf(m,sizeof m,"  [d3dgl] RT dump %d: %dx%d rgbsum=%lu fmt=%u -> %s\n",g_rtdumped,(int)rt->w,(int)rt->h,sum,rt->fmt,p); (void)!write(2,m,k); free(cap); }
             G.BindFramebuffer(GLE_FBO,0); } }
+    hb_capture_tick();   // F8 / stats page: frame + depth + camera capture (hitbox.c)
     g_d3dgl_frame_draws=0;
 }
 // PELOAD_D3DGL_SELFTEST: drive the REAL executor (d3dgl_prog separable-link -> FBO -> texture
@@ -9614,7 +9615,7 @@ static void hbdel_install(uint8_t*base){
     if(!entry_hook(base+0x9d22c,frame_pro,15,(void*)hb_frame_hook)) (void)!write(2,"  [hook] frame-timing prologue differs: engine jobs disabled\n",61);
     if(getenv("PELOAD_NO_DELHOOK")) return;
     static const uint8_t pro[14]={0x48,0x89,0x5C,0x24,0x10,0x48,0x89,0x6C,0x24,0x18,0x56,0x57,0x41,0x54};
-    if(entry_hook(base+0x342ed8,pro,14,(void*)hb_on_delete)) (void)!write(2,"  [hbdel] object_delete hooked (projectile impacts for the tracer overlay)\n",74);
+    if(entry_hook(base+0x342ed8,pro,14,(void*)hb_on_delete)){ extern volatile int g_hb_delhook; g_hb_delhook=1; (void)!write(2,"  [hbdel] object_delete hooked (projectile impacts for the tracer overlay)\n",74); }
     else (void)!write(2,"  [hbdel] object_delete prologue differs: not hooked\n",52); }
 static void vtguard_install(uint8_t*halo3base){ if(!getenv("PELOAD_VTGUARD")) return; vtguard_one(halo3base,0x172bce,17,0x172bee);
     vtguard_one(halo3base,0x172f9a,15,0x172fb7); }

@@ -126,6 +126,11 @@ Startup sequence:
 - Host Game → Start Game for a local match, or Server Browser to join a server.
 - The engine log goes to `/tmp/reclaimer_play.log`.
 
+To jump straight into a server, give its address: `RECLAIMER_JOIN=host:port bash shim/play.sh`.
+`bash shim/tools/servers.sh` lists the busiest servers (64-127 players) with their addresses and the mods
+each one needs; [shim/docs/mods.md](shim/docs/mods.md) explains mods, including downloading Workshop-only
+ones with DepotDownloader.
+
 `RECLAIMER_DIRECT=1 bash shim/play.sh` skips the menu and goes straight into a local Guardian match
 (about 12 s). In that mode Reclaimer's in-game UI doesn't run, so the scoreboard has no names or scores.
 
@@ -195,15 +200,17 @@ Options go in front of the command, e.g. `PELOAD_INVERT_PITCH=0 bash shim/play.s
 | `PELOAD_HB_INFO=1` | player info above each player: shield and health %, held weapon, grenades, active camo, in a vehicle; **F4** toggles |
 | `PELOAD_HB_ITEMS=1` | weapons and equipment lying on the map, by name; **F5** toggles |
 | `PELOAD_HB_TEAMS=enemies` | show only enemies (`friends`: only teammates). Hitboxes are red/yellow for enemies, blue for teammates; **F6** cycles all / enemies / friends |
-| `PELOAD_STATS_HTTP=8765` | live game stats on http://127.0.0.1:8765/ (details below) |
+| `PELOAD_STATS_HTTP=<port>` | live game stats page; on by default at http://127.0.0.1:8765/, `=0` turns it off (details below) |
+| **F8** | capture: saves the frame, its depth buffer and the camera position to `~/reclaimer_cap_*` (for reporting rendering glitches at a spot) |
 | `PELOAD_D3DGL_INVARIANT=1` | experimental: vertex positions computed bit-identically in every pass; try it if you see seams/speckles along polygon edges (e.g. Valhalla's rock walls) |
 | `PELOAD_ALLOW_TELEPORT=1` | **experimental, currently crashes the game**: F7 teleports you to the opposite point of the map using the game's own teleport |
 | `PELOAD_H3="name=value,..."` | set Halo 3 engine settings, e.g. `render_debug_depth_render=1`, `camera_fov_scale=1.2` — all 72 are listed in `shim/docs/halo3-engine-globals.md` |
 
 ### Live game stats over HTTP
 
-`PELOAD_STATS_HTTP=<port> bash shim/play.sh` serves what the game knows about the match, 10 times a second, on
-`127.0.0.1:<port>` (`PELOAD_STATS_ADDR=<ip>` to listen on another address, e.g. to watch from another device):
+`play.sh` serves what the game knows about the match, 10 times a second, on http://127.0.0.1:8765/
+(`PELOAD_STATS_HTTP=<port>` for another port, `=0` to turn it off; `PELOAD_STATS_ADDR=<ip>` to listen on another
+address, e.g. to watch from another device):
 
 - `/` -- a live table (team, shield and health, weapon, deaths, grenades, vehicle, speed) and a **death heatmap**:
   where players died, from blue (few) to red (many), over a grey picture of where players walk, with everyone's live
@@ -211,6 +218,11 @@ Options go in front of the command, e.g. `PELOAD_INVERT_PITCH=0 bash shim/play.s
   heatmaps/`, so the map fills in over time). Click a player for everything known about them: camo, all weapons,
   grenades, vehicle and seat, deaths, current and longest life, distance moved, top speed, projectiles fired, facing --
   with their deaths ringed on the heatmap
+- the page's **In-game overlay** buttons switch the same overlay features as the function keys: Hitboxes (F2),
+  Tracers (F3), Player info (F4), Items (F5), Show all / enemies / friends (F6), Teleport (F7, only with
+  `PELOAD_ALLOW_TELEPORT`) and Capture frame (F8). They send `POST /control?do=<hitboxes|tracers|info|items|teams|
+  teleport|capture>` with an `X-Reclaimer-Control: 1` header (so other web pages can't press them);
+  `PELOAD_STATS_READONLY=1` turns them off. The current switches are in each snapshot's `overlay`
 - `/heat.json` -- the heatmap data: visited cells (`cell` units wide) and deaths (`x, y, z, team, name, match, seconds`)
 - `/stats.json` -- the latest snapshot: `players` (name, team, you, alive, health, shield, camo, weapon, weapons,
   grenades, vehicle, pos, speed, facing, deaths, life, longest_life, distance, top_speed, shots), `vehicles` (type,

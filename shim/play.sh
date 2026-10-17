@@ -11,6 +11,7 @@
 #   RECLAIMER_EXE=<path>       the Project Reclaimer client exe (default: the newest supported one in client/)
 #   RECLAIMER_JOIN=host:port   start in the menu and join that server (the client's reclaimer://join link)
 #   PELOAD_H3="name=value,..." set Halo 3 engine settings (shim/docs/halo3-engine-globals.md)
+#   PELOAD_STATS_HTTP=<port>   live stats page port (default 8765: http://127.0.0.1:8765/); 0 turns it off
 #   RECLAIMER_DIRECT=1         skip the menu and go straight into a local Guardian match (~12 s). Reclaimer's
 #                              in-game UI (scoreboard names/scores, chat, game menu) only runs under its menu,
 #                              so in this mode the scoreboard shows bars without text.
@@ -64,6 +65,7 @@ elif [ -n "${RECLAIMER_DIRECT:-}" ]; then
 else
   echo "starting Reclaimer's menu (~17 s); log: /tmp/reclaimer_play.log"
 fi
-env PELOAD_SKINGUARD=1 PELOAD_VTGUARD=1 PELOAD_ALLOC_GUARD=1 "${RUNTIME[@]}" \
+[ "${PELOAD_STATS_HTTP:-8765}" != 0 ] && echo "live stats: http://127.0.0.1:${PELOAD_STATS_HTTP:-8765}/"
+env PELOAD_SKINGUARD=1 PELOAD_VTGUARD=1 PELOAD_ALLOC_GUARD=1 "${RUNTIME[@]}" PELOAD_STATS_HTTP="${PELOAD_STATS_HTTP:-8765}" \
     PELOAD_RECLAIMER_PATCHES=all PELOAD_WORKER_INHERIT_STDIO=1 PELOAD_PRESENT=1 PELOAD_HOLD_WINDOW=1 PELOAD_D3DGL=1 \
     arch -x86_64 shim/build/peload "$EXE" "${ARGS[@]}" < <(sleep 86400) > /tmp/reclaimer_play.log 2>&1

@@ -28,12 +28,27 @@ canvas{width:100%;height:auto;display:block;background:#0b0b0b;border-radius:4px
 #det dl{display:grid;grid-template-columns:auto 1fr;gap:3px 12px;margin:8px 0 0}
 #det dt{color:var(--dim)}#det dd{margin:0;overflow-wrap:anywhere}
 .note{color:var(--dim);font-size:12px;margin-top:8px}
+#ov{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:0 0 12px}
+#ov .lbl{color:var(--dim);margin-right:4px}
+#ov button{background:#222;color:var(--fg);border:1px solid var(--line);border-radius:4px;padding:4px 10px;font:inherit;cursor:pointer}
+#ov button:hover{border-color:#555}#ov button.on{background:#1d3a55;border-color:var(--accent);color:#fff}
+#ov button:disabled{opacity:.4;cursor:default}#ov kbd{color:var(--dim);font-size:11px;margin-left:4px}
+#ovmsg{color:var(--dim);font-size:12px}
 </style></head>
 <body>
 <h1>Reclaimer live stats</h1><div id="hd">connecting...</div>
+<div id="ov"><span class="lbl">In-game overlay</span>
+ <button data-a="hitboxes" title="Collision hitboxes of players and vehicles">Hitboxes<kbd>F2</kbd></button>
+ <button data-a="tracers" title="Projectile trails and bullet lines">Tracers<kbd>F3</kbd></button>
+ <button data-a="info" title="Shield, health, weapon, grenades, camo and vehicle labels over players">Player info<kbd>F4</kbd></button>
+ <button data-a="items" title="Weapons and equipment lying on the map">Items<kbd>F5</kbd></button>
+ <button data-a="teams" title="Which players the overlay shows">Show: all<kbd>F6</kbd></button>
+ <button data-a="teleport" title="Teleport to the far side of the map (needs PELOAD_ALLOW_TELEPORT; matches you host)">Teleport<kbd>F7</kbd></button>
+ <button data-a="capture" title="Save the next frame, its depth buffer and the camera position to your home folder">Capture frame<kbd>F8</kbd></button>
+ <span id="ovmsg"></span></div>
 <div class="grid">
  <div class="panel"><div class="wrap"><table><thead><tr>
-  <th>Player</th><th>Shield</th><th>Health</th><th>Weapon</th><th>Deaths</th><th>Grenades</th><th>Vehicle</th><th>Speed</th></tr></thead>
+  <th>Player</th><th>Shield</th><th>Health</th><th>Weapon</th><th>Deaths</th><th>Shots</th><th>Accuracy</th><th>Grenades</th><th>Vehicle</th><th>Speed</th></tr></thead>
   <tbody id="tb"></tbody></table></div>
   <div class="note">Click a player for details. Their deaths are ringed on the heatmap.</div></div>
  <div class="panel"><h2 id="mt">Death heatmap</h2><canvas id="cv" width="560" height="560"></canvas>
@@ -58,7 +73,7 @@ function renderTable(){
   document.getElementById('tb').innerHTML=ps.map(p=>`<tr data-s="${p.slot}" class="${p.alive?'':'dead'} ${p.you?'you':''} ${p.slot===sel?'sel':''}">
    <td><span class="sw" style="background:${C[p.team_name]||'#888'}"></span>${E(p.name)}${p.you?' (you)':''}</td>
    <td>${B(p.shield,'#58b8ff')}</td><td>${B(p.health,'#7ddf6a')}</td><td>${E(p.weapon||(p.alive?'':'respawning'))}</td>
-   <td>${p.deaths??''}</td><td>${p.grenades.frag}f ${p.grenades.plasma}p ${p.grenades.spike}s ${p.grenades.firebomb}b</td>
+   <td>${p.deaths??''}</td><td>${p.shots??''}</td><td>${p.shots?Math.round(p.accuracy*100)+'%':''}</td><td>${p.grenades.frag}f ${p.grenades.plasma}p ${p.grenades.spike}s ${p.grenades.firebomb}b</td>
    <td>${E(p.vehicle||'')}</td><td>${p.speed.toFixed(1)}</td></tr>`).join('');
 }
 // pointerdown, not click: the rows are rebuilt 10 times a second, so a click's down and up land on different rows
@@ -74,9 +89,9 @@ function renderDet(){
    ['Vehicle',p.vehicle?E(p.vehicle)+(p.seat!=null?` (seat ${p.seat})`:''):'on foot'],
    ['Deaths',`${p.deaths??0} this match`+(scope()==='all'?` · ${myDeaths} on the map`:'')],['This life',fmtT(p.life)],['Longest life',fmtT(p.longest_life)],
    ['Distance',`${(p.distance||0).toFixed(0)} units`],['Speed',`${p.speed.toFixed(2)} (top ${(p.top_speed||0).toFixed(2)})`],
-   ['Projectiles fired',p.shots??0],['Facing',p.facing!=null?p.facing+'°':''],['Position',p.pos.map(v=>v.toFixed(1)).join(', ')],['Object',p.handle]];
+   ['Shots fired',p.shots??0],['Hits',`${p.hits??0}`+(p.shots?` (${Math.round(p.accuracy*100)}% accuracy)`:'')],['Facing',p.facing!=null?p.facing+'°':''],['Position',p.pos.map(v=>v.toFixed(1)).join(', ')],['Object',p.handle]];
   el.innerHTML=`<button class="x" onclick="closeDet()" aria-label="Close">×</button><b>${E(p.name)}${p.you?' (you)':''}</b><dl>${rows.map(r=>`<dt>${r[0]}</dt><dd>${r[1]}</dd>`).join('')}</dl>
-   <div class="note">Projectiles fired counts grenades, rockets and plasma; most bullets live too briefly to be seen.</div>`;
+   <div class="note">Shots counts every projectile (each shotgun pellet is one). A hit is a shot that ended inside another player's body bounds -- an estimate; turret shots count for the vehicle, not the gunner.</div>`;
   el.style.display='block';
 }
 function closeDet(){sel=null;renderTable();renderDet();drawMap()}
@@ -123,11 +138,24 @@ function drawMap(){
 }
 async function pollHeat(){ try{ heat=await (await fetch('/heat.json')).json(); buildLayers(); drawMap(); }catch(e){} setTimeout(pollHeat,4000) }
 for(const id of ['scope','fp','pd']) document.getElementById(id).addEventListener('change',()=>{buildLayers();drawMap();renderDet()});
+// ---- overlay controls (the function keys' switches; POST so other sites can't flip them) ----
+const ovNames={all:'all',enemies:'enemies',friends:'friends'};
+function renderOverlay(){ const o=snap&&snap.overlay; if(!o) return;
+  for(const b of document.querySelectorAll('#ov button')){ const a=b.dataset.a;
+    if(a==='teams'){ b.firstChild.textContent='Show: '+ovNames[o.teams]; b.classList.toggle('on',o.teams!=='all'); }
+    else if(a in o && typeof o[a]==='boolean' && a!=='teleport') b.classList.toggle('on',o[a]);
+    b.disabled=!o.controls||(a==='teleport'&&!o.teleport); }
+  document.getElementById('ovmsg').textContent=o.controls?'':'controls are off (PELOAD_STATS_READONLY)'; }
+document.getElementById('ov').addEventListener('click',async e=>{ const b=e.target.closest('button'); if(!b||b.disabled) return;
+  const msg=document.getElementById('ovmsg');
+  try{ const r=await fetch('/control?do='+b.dataset.a,{method:'POST',headers:{'X-Reclaimer-Control':'1'}}); const j=await r.json();
+    msg.textContent=j.ok?(b.dataset.a==='capture'?'captured: ~/reclaimer_cap_*.bmp/.txt':''):(j.error||'failed'); }
+  catch(err){ msg.textContent='not connected'; } });
 // ---- live snapshots ----
 const es=new EventSource('/events');
 es.onmessage=m=>{snap=JSON.parse(m.data);
   document.getElementById('hd').textContent=`${snap.map||'-'}  |  ${snap.in_match?'match time '+fmtT(snap.time):'not in a match'}  |  ${snap.players.length} players, ${snap.vehicles.length} vehicles, ${snap.projectiles.length} projectiles in flight`;
-  renderTable(); renderDet(); drawMap()};
+  renderTable(); renderDet(); renderOverlay(); drawMap()};
 es.onerror=()=>{document.getElementById('hd').textContent='disconnected (is the game running with PELOAD_STATS_HTTP?)'};
 pollHeat();
 </script></body></html>

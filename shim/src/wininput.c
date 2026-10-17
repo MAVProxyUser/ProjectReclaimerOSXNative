@@ -138,6 +138,7 @@ static int wi_translate(id ev){
         signed char rep=type==10?((signed char(*)(id,SEL))objc_msgSend)(ev,sel_registerName("isARepeat")):0;
         if(kc==0x62){ if(type==10 && !rep){ static int ok=-1; if(ok<0) ok=getenv("PELOAD_ALLOW_TELEPORT")?1:0;   // F7: teleport (hitbox.c)
                 extern volatile int g_hb_job_pending; if(ok){ __atomic_store_n(&g_hb_job_pending,1,__ATOMIC_RELEASE); (void)!write(2,"  [teleport] F7: requested\n",27); } } return 1; }
+        if(kc==0x64){ if(type==10 && !rep){ extern volatile int g_hb_cap_req; __atomic_store_n(&g_hb_cap_req,1,__ATOMIC_RELEASE); (void)!write(2,"  [capture] F8: capturing the next frame\n",41); } return 1; }   // F8: frame capture (hitbox.c)
         if(kc==0x61){ if(type==10 && !rep){ g_hb_teamcycle++; static const char*const nm[3]={"all","enemies only","friends only"}; char m[64]; int q=snprintf(m,sizeof m,"  [hitbox] F6: showing %s\n",nm[g_hb_teamcycle%3]); (void)!write(2,m,q); } return 1; }   // F6
         { int bit = kc==0x78?0 : kc==0x63?1 : kc==0x76?2 : kc==0x60?3 : -1;   // F2 hitboxes, F3 tracers, F4 player info, F5 items
           if(bit>=0){ if(type==10 && !rep){ g_hb_toggle^=1<<bit; char m[64]; int q=snprintf(m,sizeof m,"  [hitbox] F%d: overlay feature toggled\n",bit+2); (void)!write(2,m,q); } return 1; } }

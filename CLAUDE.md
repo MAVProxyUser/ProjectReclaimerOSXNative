@@ -114,18 +114,31 @@ screen (`PELOAD_D3DGL_NOPRELINK`; `PELOAD_D3DGL_PROGTIME` logs build costs).
 Correctness switches added 2026-10-16: `PELOAD_D3DGL_NOINTIN` (integer vertex attributes as floats --
 the old cause of one-frame white flashes / exploded skinned geometry), `PELOAD_D3DGL_NOQUERY`
 (occlusion queries), `PELOAD_D3DGL_NOCANON` (identical-bytecode shader sharing).
-Live stats: `PELOAD_STATS_HTTP=<port>` (shim/src/stats.c) -- a loader thread snapshots the object + players tables
+Live stats: `PELOAD_STATS_HTTP=<port>` (shim/src/stats.c; play.sh turns it on by default at 8765, `=1` also means 8765,
+`=0` off) -- a loader thread snapshots the object + players tables
 (TLS +0x38 / +0x10; player +0x28 unit, +0x58 UTF-16 name) every 100 ms into JSON; served on 127.0.0.1 (/, /stats.json,
 /events SSE, /heat.json); only the process that loads halo3.dll binds. Page = shim/src/stats_page.html, embedded with
 #embed at build time. Players come from the players table (slot-keyed tracker: deaths, lives, distance, top speed,
-projectiles fired by owner +0xC0); a death = any biped going alive -> dead (corpses persist, 10 Hz catches it).
+shots/hits); a death = any biped going alive -> dead (corpses persist, 10 Hz catches it). Shots: hb_on_delete (the
+object_delete hook, sim thread) logs every projectile's owner (+0xC0) and the biped whose bounding sphere (+0x1c centre,
++0x28 radius) contains its end point (= estimated hit) into g_hbshot (8192 ring); stats consumes it (falls back to
+counting projectiles seen in flight when the hook isn't installed). Page controls: POST /control?do=hitboxes|tracers|
+info|items|teams|teleport|capture with header X-Reclaimer-Control (CSRF guard; PELOAD_STATS_READONLY=1 disables)
+flip the same g_hb_toggle bits as F2-F6; snapshot "overlay" reports them. F8 / do=capture (hitbox.c hb_capture_tick,
+render-thread Present): ~/reclaimer_cap_<pid>_<n>.bmp (backbuffer), _depth.bmp (log distance, magenta = 1-px "crack"
+pixels much farther than both neighbours), _depth.f32 (raw, GL rows bottom-up; the DSV of the frame's camera draw),
+.txt (camera pos, forward, yaw/pitch, view-proj rows, depth min/max, crack count).
 Heatmap per map (switched only when there is data -- menus open campaign maps for scenery): footprint cells (0.5 u)
 + deaths, saved as ~/Library/Application Support/ReclaimerMac/heatmaps/<map>.bin (RHM2). Map collision geometry for
 a real background is in MCC's structure_bsp_tag_resources (resource section), not the sbsp meta -- not decoded yet.
-Mods/Workshop: the client's own `workshop-download --subscribe <PublishedFileId>` helper needs Steam; DepotDownloader
+Mods/Workshop (user guide: shim/docs/mods.md; `shim/tools/servers.sh` = busiest servers + their mods from `discover`,
+whose JSON has per-server mods[{title, maps[{stem,digest}], size, shared}]): the client's own `workshop-download
+--subscribe <PublishedFileId>` helper needs Steam (its command line is in /tmp/reclaimer_play.log); DepotDownloader
 3.4 does `-app 976730 -pubfile <id>` (+ -filelist / -manifest-only) with the remembered login (-username ...
--remember-password); the client reads steamapps\workshop\content\976730\<id>\ (ModInfo.json) and checks each file
-against the server's SHA-256 manifest. Seams check: `PELOAD_D3DGL_DFCENSUS` (draws per depth
+-remember-password; saved tokens expire -> the user signs in again in a terminal, never us); the client reads
+steamapps\workshop\content\976730\<id>\ (ModInfo.json; "Program Files (x86)/Steam/steamapps" in the prefix is a
+symlink to "Program Files/Steam/steamapps") and checks each file against the server's SHA-256 manifest. Ultimate
+Forge 2.0 (2933266434) ships its own halo3/maps/shared.map + campaign.map besides the Forge-world maps. Seams check: `PELOAD_D3DGL_DFCENSUS` (draws per depth
 func), `PELOAD_D3DGL_INVARIANT` (invariant gl_Position, opt-in); the main depth buffer is DXGI 19 (D32F_S8, reverse-Z).
 Unfocused/hidden clients are held at 60 fps by the engine; PELOAD_MAX_FPS caps lower (default 30 when hidden).
 Betrayal popup (backlog 15): halo3's native GUI screen c_gui_screen_boot_betrayer, posted by halo3+0xff5fc when

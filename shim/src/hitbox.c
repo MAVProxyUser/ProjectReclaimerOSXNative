@@ -113,9 +113,11 @@ typedef struct { float c[3], r, o[3], vel[3]; int type; uint32_t handle; uint64_
 // Local player's team (the biped the camera is inside) and the friend/enemy filter: F6 or PELOAD_HB_TEAMS=all|enemies|friends.
 static int g_hb_myteam=-1, g_hb_teamfilter=-1;
 static int hb_is_friend(const HbObj*o){ return g_hb_myteam>=0 && o->type==0 && o->team==g_hb_myteam; }
-static int hb_team_shown(const HbObj*o){ if(o->type!=0) return 1;
+static int hb_team_mode(void){   // 0 all, 1 enemies only, 2 friends only
     if(g_hb_teamfilter<0){ const char*e=getenv("PELOAD_HB_TEAMS"); g_hb_teamfilter = e&&!strcasecmp(e,"enemies")?1 : e&&!strcasecmp(e,"friends")?2 : 0; }
-    int f=(g_hb_teamfilter + g_hb_teamcycle)%3; return f==0 || (f==1 && !hb_is_friend(o)) || (f==2 && hb_is_friend(o)); }
+    return (g_hb_teamfilter + g_hb_teamcycle)%3; }
+static int hb_team_shown(const HbObj*o){ if(o->type!=0) return 1;
+    int f=hb_team_mode(); return f==0 || (f==1 && !hb_is_friend(o)) || (f==2 && hb_is_friend(o)); }
 // PELOAD_INPUT_FACE (test helper for unattended overlay checks): steer the scripted pad toward the nearest other biped.
 static float g_hb_tgt[3], g_hb_cam[3], g_hb_fwd[3]; static volatile int g_hb_tgt_ok;
 int hb_face_target(float*rx,float*ry){ if(!g_hb_tgt_ok) return 0;
@@ -381,6 +383,13 @@ static void hb_engine_jobs(void){
 static void hb_teleport_tick(void){ static int fired, on=-1; if(on<0) on=getenv("PELOAD_TELEPORT_TEST")&&getenv("PELOAD_ALLOW_TELEPORT")?1:0; extern double g_gameplay_t0;
     if(on && !fired && g_gameplay_t0 && mono_s()-g_gameplay_t0>atof(getenv("PELOAD_TELEPORT_TEST"))){ fired=1; __atomic_store_n(&g_hb_job_pending,1,__ATOMIC_RELEASE); } }
 static HbImpact g_hbimp[256]; static volatile unsigned g_hbimp_n;
+// Every projectile's end, for the live stats' shots fired / hits (stats.c reads the ring 10 times a second): who fired
+// it (datum +0xC0, the owner unit) and the biped it ended inside -- an estimated hit: the impact point lies within
+// another biped's bounding sphere (centre +0x1c, radius +0x28). Bullets live less than a tick, so only this hook sees
+// them all.
+typedef struct { uint32_t owner, victim, def; } HbShot;
+static HbShot g_hbshot[8192]; static volatile unsigned g_hbshot_n; volatile int g_hb_delhook;
+static int stats_on(void);
 void __attribute__((ms_abi)) hb_on_delete(uint32_t handle){
     if(!g_hb_simthread_ok){ g_hb_simthread=pthread_self(); g_hb_simthread_ok=1; }   // object_delete runs on the simulation thread
     if(handle==0xFFFFFFFFu) return; static uint32_t idx=0xFFFFFFFFu; uint8_t*h3=hb_halo3_base(); if(!h3) return;
@@ -390,6 +399,13 @@ void __attribute__((ms_abi)) hb_on_delete(uint32_t handle){
     uint8_t*data=*(uint8_t**)(arr+0x48); int i=handle&0xFFFF; if(!data || i>=*(int32_t*)(arr+0x20)) return;
     uint8_t*e=data+(size_t)i*0x18; if(e[3]!=5 || *(uint16_t*)e!=(uint16_t)(handle>>16)) return;   // projectiles only
     uint8_t*p=*(uint8_t**)(e+0x10); if(!p) return;
+    if(stats_on()){ uint32_t own=*(uint32_t*)(p+0xC0), vic=0xFFFFFFFFu; const float*ip=(const float*)(p+0x1c); int hi=*(int32_t*)(arr+0x3c);
+        if(own!=0xFFFFFFFFu && hi>0 && hi<=65536) for(int j=0;j<hi;j++){ uint8_t*b=data+(size_t)j*0x18; if(b[3]!=0 || !*(uint16_t*)b) continue;
+            uint32_t bh=((uint32_t)*(uint16_t*)b<<16)|(uint32_t)j; if(bh==own) continue; uint8_t*bp=*(uint8_t**)(b+0x10); if(!bp) continue;
+            const float*c=(const float*)(bp+0x1c); float r=c[3]+0.1f, dx=ip[0]-c[0], dy=ip[1]-c[1], dz=ip[2]-c[2];
+            if(r>0 && r<5 && dx*dx+dy*dy+dz*dz<=r*r){ vic=bh; break; } }
+        unsigned q=__atomic_load_n(&g_hbshot_n,__ATOMIC_RELAXED)&8191; g_hbshot[q].owner=own; g_hbshot[q].victim=vic; g_hbshot[q].def=*(uint32_t*)p;
+        __atomic_store_n(&g_hbshot_n,g_hbshot_n+1,__ATOMIC_RELEASE); }   // one writer: the simulation thread
     unsigned k=__atomic_fetch_add(&g_hbimp_n,1,__ATOMIC_RELAXED)&255; HbImpact*r=&g_hbimp[k];
     r->def=*(uint32_t*)p; r->handle=handle; memcpy(r->pos,p+0x1c,12); memcpy(r->vel,p+0x74,12); memcpy(r->raw,p,sizeof r->raw);
     { double tv=mono_s(); __atomic_store(&r->t,&tv,__ATOMIC_RELEASE); }
@@ -499,5 +515,58 @@ static void hb_draw_overlay(void){
     G.EnableVertexAttribArray(0); G.VertexAttribPointer(0,2,0x1406/*FLOAT*/,0,20,(void*)0);
     G.EnableVertexAttribArray(1); G.VertexAttribPointer(1,3,0x1406,0,20,(void*)8);
     G.DrawArrays(1/*LINES*/,0,nv); G.BindVertexArray(0); }
+// ---- frame capture (F8 or the stats page's Capture button): the frame, its depth and the camera ------------------
+// For chasing rendering glitches at a spot a player found. At the next Present (render thread, hb_capture_tick) this
+// writes ~/reclaimer_cap_<n>.bmp (the frame as rendered: internal resolution, HUD included),
+// ~/reclaimer_cap_<n>_depth.bmp (distance, log grey scale; black = nothing drawn; magenta = "crack" pixels, i.e.
+// pixels much farther than both neighbours on a row or column: background showing through a one-pixel gap),
+// ~/reclaimer_cap_<n>_depth.f32 (raw window depth, w*h floats, top row first like the images) and
+// ~/reclaimer_cap_<n>.txt (camera position, view direction, view-projection rows, depth statistics).
+// The depth buffer is the one the frame's first world draw (the camera draw, hb_capture_view) used.
+volatile int g_hb_cap_req; static D3DObj* g_hb_dsv; static unsigned long g_hb_ncap;
+static void hb_note_dsv(void*ds){ g_hb_dsv=(D3DObj*)ds; }
+// GL row 0 of the game's targets is the D3D top row (d3dgl_flipy) and bmp_write_rgba writes GL order (row 0 = bottom):
+// flip so the files come out upright
+static void hb_cap_flip(void*px,size_t pitch,int h){ if(!d3dgl_flipy()) return; unsigned char*t=malloc(pitch); if(!t) return; unsigned char*b=px;
+    for(int y=0;y<h/2;y++){ memcpy(t,b+(size_t)y*pitch,pitch); memcpy(b+(size_t)y*pitch,b+(size_t)(h-1-y)*pitch,pitch); memcpy(b+(size_t)(h-1-y)*pitch,t,pitch); } free(t); }
+static void hb_capture_tick(void){
+    if(!__atomic_exchange_n(&g_hb_cap_req,0,__ATOMIC_ACQ_REL)) return;
+    char m[600]; int k;
+    if(!G.ReadPixels || !g_d3d_backbuf || !g_d3d_backbuf->glfbo){ (void)!write(2,"  [capture] no frame to capture yet\n",36); return; }
+    const char*home=getenv("HOME"); if(!home) home="/tmp";
+    unsigned long n=g_hb_ncap++; char base[400]; snprintf(base,sizeof base,"%s/reclaimer_cap_%d_%02lu",home,(int)getpid(),n);
+    char p[480];
+    int w=g_d3dgl_present_vw, h=g_d3dgl_present_vh;
+    if(w>0 && h>0 && (long)w*h<=(64<<20)){ unsigned char*cap=calloc(1,(size_t)w*h*4);
+        if(cap){ G.BindFramebuffer(GLE_FBO,g_d3d_backbuf->glfbo); if(G.ReadBuffer) G.ReadBuffer(GLE_CA0); G.ReadPixels(0,0,w,h,GLE_RGBA,GLE_UBYTE,cap);
+            hb_cap_flip(cap,(size_t)w*4,h); snprintf(p,sizeof p,"%s.bmp",base); bmp_write_rgba(p,w,h,cap); free(cap); } }
+    float vp[32]={0}; for(int t=0;t<100;t++){ unsigned s0=g_hb_vpseq; if(s0&1) continue; memcpy(vp,g_hb_vp,sizeof vp); if(g_hb_vpseq==s0) break; }
+    const float*eye=vp+28; float fx=vp[12],fy=vp[13],fz=vp[14], fl=sqrtf(fx*fx+fy*fy+fz*fz); if(fl>0){ fx/=fl; fy/=fl; fz/=fl; }
+    double yaw=atan2(fy,fx)*180/M_PI, pitch=asin(fz>1?1:fz<-1?-1:fz)*180/M_PI;
+    // depth: grey = log distance (reverse-Z: window depth ~ near/distance), magenta = crack pixels
+    D3DObj*ds=g_hb_dsv; long cracks=0, drawn=0; float dmin=1e30f, dmax=0; int dw=0, dh=0;
+    if(ds && ds->gltex && ds->gldsatt){ dw=(int)(ds->w>4096?4096:ds->w); dh=(int)(ds->h>4096?4096:ds->h);
+        float*d=dw>0&&dh>0?malloc((size_t)dw*dh*4):0; unsigned char*img=d?calloc(1,(size_t)dw*dh*4):0;
+        if(d && img){ unsigned fbo=d3dgl_fbo_for(0,0,ds); G.BindFramebuffer(GLE_FBO,fbo); G.ReadPixels(0,0,dw,dh,0x1902/*DEPTH_COMPONENT*/,0x1406/*FLOAT*/,d);
+            hb_cap_flip(d,(size_t)dw*4,dh); snprintf(p,sizeof p,"%s_depth.f32",base); FILE*f=fopen(p,"wb"); if(f){ fwrite(d,4,(size_t)dw*dh,f); fclose(f); }
+            for(long i=0;i<(long)dw*dh;i++){ float v=d[i]; if(v>0){ drawn++; if(v<dmin) dmin=v; if(v>dmax) dmax=v; } }
+            double lmin=log(dmin>0&&dmin<1e30f?dmin:1e-7), lmax=log(dmax>0?dmax:1); if(lmax-lmin<1e-6) lmax=lmin+1e-6;
+            for(int y=0;y<dh;y++) for(int x=0;x<dw;x++){ long i=(long)y*dw+x; float v=d[i]; unsigned char*o=img+i*4; o[3]=255;
+                if(!(v>0)) continue;
+                int crack=0;
+                if(x>0 && x<dw-1){ float a=d[i-1], b=d[i+1]; if(a>0 && b>0 && v<0.5f*a && v<0.5f*b) crack=1; }
+                if(!crack && y>0 && y<dh-1){ float a=d[i-dw], b=d[i+dw]; if(a>0 && b>0 && v<0.5f*a && v<0.5f*b) crack=1; }
+                if(crack){ cracks++; o[0]=255; o[1]=0; o[2]=255; continue; }
+                unsigned char g=(unsigned char)(40+215*((log(v)-lmin)/(lmax-lmin))); o[0]=o[1]=o[2]=g; }
+            snprintf(p,sizeof p,"%s_depth.bmp",base); bmp_write_rgba(p,dw,dh,img); }
+        free(d); free(img); }
+    G.BindFramebuffer(GLE_FBO,0);
+    snprintf(p,sizeof p,"%s.txt",base); FILE*f=fopen(p,"w");
+    if(f){ fprintf(f,"camera %.4f %.4f %.4f\nforward %.5f %.5f %.5f\nyaw_deg %.2f\npitch_deg %.2f\n",eye[0],eye[1],eye[2],fx,fy,fz,yaw,pitch);
+        for(int r=0;r<4;r++) fprintf(f,"viewproj_row%d %.9g %.9g %.9g %.9g\n",r,vp[r*4],vp[r*4+1],vp[r*4+2],vp[r*4+3]);
+        fprintf(f,"frame %dx%d\ndepth %dx%d fmt %u drawn %ld min %.9g max %.9g cracks %ld\n",w,h,dw,dh,ds?ds->fmt:0,drawn,drawn?dmin:0,dmax,cracks);
+        extern double g_gameplay_t0; fprintf(f,"match_time %.1f\n",g_gameplay_t0?mono_s()-g_gameplay_t0:0.0); fclose(f); }
+    k=snprintf(m,sizeof m,"  [capture] %s.{bmp,txt}%s: camera (%.2f %.2f %.2f) yaw %.1f pitch %.1f, depth %dx%d, %ld crack pixels\n",
+        base,ds?" + _depth.{bmp,f32}":"",eye[0],eye[1],eye[2],yaw,pitch,dw,dh,cracks); (void)!write(2,m,k); }
 static void hitbox_start(void){
     if(getenv("PELOAD_OBJDUMP")){ pthread_t t; pthread_create(&t,0,objdump_thread,0); } }

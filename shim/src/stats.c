@@ -11,7 +11,7 @@
 #include <arpa/inet.h>
 
 static int g_st_port=-1;
-static int stats_on(void){ if(g_st_port<0){ const char*e=getenv("PELOAD_STATS_HTTP"); g_st_port=e?atoi(e):0; if(g_st_port<0||g_st_port>65535) g_st_port=0; } return g_st_port>0; }
+static int stats_on(void){ if(g_st_port<0){ const char*e=getenv("PELOAD_STATS_HTTP"); g_st_port=e?atoi(e):0; if(g_st_port==1) g_st_port=8765; if(g_st_port<0||g_st_port>65535) g_st_port=0; } return g_st_port>0; }
 static pthread_mutex_t g_st_mx=PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_st_cv=PTHREAD_COND_INITIALIZER;
 static char* g_st_json; static size_t g_st_len; static unsigned long g_st_seq;
 
@@ -86,7 +86,7 @@ static void hm_json(StBuf*s){ pthread_mutex_lock(&g_hm_mx);
     sb_put(s,"]}"); pthread_mutex_unlock(&g_hm_mx); }
 
 // ---- per-player tracking: deaths, lives, distance, top speed, projectiles fired ----------------------------------
-typedef struct { char name[64]; int slot, team, deaths, shots, alive; uint32_t unit; double life_start, longest, dist; float pos[3], top_speed; } StTrack;
+typedef struct { char name[64]; int slot, team, deaths, shots, hits, alive; uint32_t unit; double life_start, longest, dist; float pos[3], top_speed; } StTrack;
 static StTrack g_trk[256]; static int g_ntrk; static char g_trk_map[64];
 // keyed by player slot + name (names repeat: everyone who never set one is "Player")
 static StTrack* st_track(const StPlayer*p){ for(int i=0;i<g_ntrk;i++) if(g_trk[i].slot==p->slot && !strcmp(g_trk[i].name,p->name)) return &g_trk[i];
@@ -96,6 +96,21 @@ typedef struct { uint32_t h; int alive, ti; } StBip;
 static StBip g_bip[2048]; static int g_nbip;
 static struct { uint32_t h; double t; } g_proj[8192];
 
+// Page controls (POST /control?do=<action>): the same switches as the function keys -- hitboxes (F2), tracers (F3),
+// info (F4), items (F5), teams (F6: all -> enemies -> friends), teleport (F7, only with PELOAD_ALLOW_TELEPORT) and
+// capture (F8). A POST with a custom header, which another web site's page cannot send to this port without a CORS
+// preflight we never answer. PELOAD_STATS_READONLY=1 turns the controls off.
+static int st_controls_ok(void){ static int ro=-1; if(ro<0){ const char*e=getenv("PELOAD_STATS_READONLY"); ro=e&&*e&&strcmp(e,"0")?1:0; } return !ro; }
+static int st_control(const char*act){
+    char m[96]; int k=0;
+    static const char*const feat[HBF_N]={"hitboxes","tracers","info","items"};
+    for(int f=0;f<HBF_N;f++) if(!strcmp(act,feat[f])){ __atomic_fetch_xor(&g_hb_toggle,1<<f,__ATOMIC_ACQ_REL);
+        k=snprintf(m,sizeof m,"  [stats] page: %s %s\n",feat[f],hb_feat(f)?"on":"off"); (void)!write(2,m,k); return 1; }
+    if(!strcmp(act,"teams")){ static const char*const tm[3]={"all","enemies only","friends only"}; __atomic_fetch_add(&g_hb_teamcycle,1,__ATOMIC_ACQ_REL);
+        k=snprintf(m,sizeof m,"  [stats] page: showing %s\n",tm[hb_team_mode()]); (void)!write(2,m,k); return 1; }
+    if(!strcmp(act,"teleport")){ if(!getenv("PELOAD_ALLOW_TELEPORT")) return 0; __atomic_store_n(&g_hb_job_pending,1,__ATOMIC_RELEASE); (void)!write(2,"  [teleport] page: requested\n",29); return 1; }
+    if(!strcmp(act,"capture")){ __atomic_store_n(&g_hb_cap_req,1,__ATOMIC_RELEASE); (void)!write(2,"  [capture] page: capturing the next frame\n",43); return 1; }
+    return 0; }
 static void st_snapshot(StBuf*s){
     static const char* teams[8]={"red","blue","green","orange","purple","gold","brown","pink"};
     extern double g_gameplay_t0; double now=mono_s();
@@ -106,6 +121,10 @@ static void st_snapshot(StBuf*s){
       if(!mp[0] && g_hb_nmappaths) snprintf(mp,sizeof mp,"%s",g_hb_mappaths[0]);
       pthread_mutex_unlock(&g_hb_mapmx);
       const char*b=strrchr(mp,'/'); b=b?b+1:mp; snprintf(m,sizeof m,"%s",b); char*dot=strrchr(m,'.'); if(dot)*dot=0; sb_put(s,",\"map\":"); sb_str(s,m); }
+    { static int tp=-1; if(tp<0) tp=getenv("PELOAD_ALLOW_TELEPORT")?1:0; static const char*const tm[3]={"all","enemies","friends"};
+      sb_put(s,",\"overlay\":{\"hitboxes\":%s,\"tracers\":%s,\"info\":%s,\"items\":%s,\"teams\":\"%s\",\"teleport\":%s,\"controls\":%s}",
+          hb_feat(HBF_HITBOX)?"true":"false",hb_feat(HBF_TRACER)?"true":"false",hb_feat(HBF_INFO)?"true":"false",hb_feat(HBF_ITEMS)?"true":"false",
+          tm[hb_team_mode()],tp?"true":"false",st_controls_ok()?"true":"false"); }
     if(strcmp(m,g_trk_map)){ snprintf(g_trk_map,sizeof g_trk_map,"%s",m); g_ntrk=0; g_nbip=0; memset(g_proj,0,sizeof g_proj); }   // new map: new match stats
     pthread_mutex_lock(&g_hm_mx); snprintf(g_hm_cur,sizeof g_hm_cur,"%s",m); if(g_hm.dirty && now-g_hm.saved>30){ hm_save(); g_hm.saved=now; } pthread_mutex_unlock(&g_hm_mx);
     static uint8_t tab[8192*0x18]; int hi=0; uint64_t arr=hb_object_array(); uint8_t hdr[0x60];
@@ -128,8 +147,12 @@ static void st_snapshot(StBuf*s){
                   if(t || getenv("PELOAD_STATS_ALL_BIPEDS")){ pthread_mutex_lock(&g_hm_mx); hm_death((const float*)(d+0x1c),team,t?t->slot:-1,t?t->name:""); pthread_mutex_unlock(&g_hm_mx); } } }
           nb[nn].h=h; nb[nn].alive=alive; nb[nn].ti=ti; nn++; }
       memcpy(g_bip,nb,(size_t)nn*sizeof *nb); g_nbip=nn; }
-    // projectiles: count each new one for its owner
-    for(int i=0;i<hi;i++){ const uint8_t*e=tab+i*0x18; if(!*(const uint16_t*)e || e[3]!=5) continue; uint64_t p=*(const uint64_t*)(e+0x10); uint32_t own=0;
+    // shots: every projectile that ended since the last snapshot (hitbox.c's object_delete hook), with the biped it
+    // hit if any; without the hook, count the projectiles seen in flight (misses most bullets)
+    if(g_hb_delhook){ static unsigned seen; unsigned n=__atomic_load_n(&g_hbshot_n,__ATOMIC_ACQUIRE); if(n-seen>8192) seen=n-8192;
+        for(;seen!=n;seen++){ const HbShot*r=&g_hbshot[seen&8191];
+            for(int k=0;k<np;k++) if(pl[k].unit==r->owner){ StTrack*t=st_track(&pl[k]); if(t){ t->shots++; if(r->victim!=0xFFFFFFFFu) t->hits++; } break; } } }
+    else for(int i=0;i<hi;i++){ const uint8_t*e=tab+i*0x18; if(!*(const uint16_t*)e || e[3]!=5) continue; uint64_t p=*(const uint64_t*)(e+0x10); uint32_t own=0;
         uint32_t h=((uint32_t)*(const uint16_t*)e<<16)|(uint32_t)i; uint32_t slot=(h*2654435761u)>>19, j=slot; int known=0;
         for(int q=0;q<16;q++,j=(j+1)&8191){ if(g_proj[j].h==h && now-g_proj[j].t<60){ known=1; break; } if(!g_proj[j].h || now-g_proj[j].t>=60) break; }
         if(known) continue; g_proj[j].h=h; g_proj[j].t=now;
@@ -159,7 +182,7 @@ static void st_snapshot(StBuf*s){
             const float*fw=(const float*)(d+0x5c); sb_put(s,",\"facing\":%.0f",atan2f(fw[1],fw[0])*57.2958f); }
         else sb_put(s,"null,\"weapons\":[],\"grenades\":{\"frag\":0,\"plasma\":0,\"spike\":0,\"firebomb\":0},\"vehicle\":null");
         sb_put(s,",\"pos\":"); sb_f3(s,o); sb_put(s,",\"speed\":%.2f",spd);
-        if(t) sb_put(s,",\"deaths\":%d,\"shots\":%d,\"life\":%.1f,\"longest_life\":%.1f,\"distance\":%.1f,\"top_speed\":%.2f",t->deaths,t->shots,t->alive?now-t->life_start:0.0,
+        if(t) sb_put(s,",\"deaths\":%d,\"hits\":%d,\"accuracy\":%.3f,\"shots\":%d,\"life\":%.1f,\"longest_life\":%.1f,\"distance\":%.1f,\"top_speed\":%.2f",t->deaths,t->hits,t->shots?(double)t->hits/t->shots:0.0,t->shots,t->alive?now-t->life_start:0.0,
                      t->longest>(t->alive?now-t->life_start:0)?t->longest:(t->alive?now-t->life_start:0),t->dist,t->top_speed);
         sb_put(s,"}"); }
     sb_put(s,"]");
@@ -193,9 +216,17 @@ static int st_send(int fd,const char*b,size_t n){ while(n){ ssize_t k=send(fd,b,
 static void* st_conn(void*a){ int fd=(int)(intptr_t)a; pthread_setname_np("shim-stats-http");
     int one=1; setsockopt(fd,SOL_SOCKET,SO_NOSIGPIPE,&one,sizeof one); setsockopt(fd,IPPROTO_TCP,TCP_NODELAY,&one,sizeof one);
     char req[2048]; ssize_t n=recv(fd,req,sizeof req-1,0); if(n<=0){ close(fd); return 0; } req[n]=0;
-    char path[256]="/"; sscanf(req,"GET %255s",path); char*q=strchr(path,'?'); if(q)*q=0;
+    char meth[8]="", path[256]="/", qs[128]=""; sscanf(req,"%7s %255s",meth,path); char*q=strchr(path,'?'); if(q){ snprintf(qs,sizeof qs,"%s",q+1); *q=0; }
     char h[512];
-    if(!strcmp(path,"/events")){
+    if(!strcmp(path,"/control")){
+        // POST + X-Reclaimer-Control header (see st_controls_ok); ?do=<action>
+        char act[32]=""; const char*d=strstr(qs,"do="); if(d) sscanf(d+3,"%31[a-z]",act);
+        int hdr=strcasestr(req,"\r\nX-Reclaimer-Control:")!=0, code=!strcmp(meth,"POST")&&hdr?(st_controls_ok()?(st_control(act)?200:400):403):403;
+        const char*body=code==200?"{\"ok\":true}":code==400?"{\"ok\":false,\"error\":\"unknown or disabled action\"}":!st_controls_ok()?"{\"ok\":false,\"error\":\"controls are off\"}":"{\"ok\":false,\"error\":\"needs POST with an X-Reclaimer-Control header\"}";
+        int k=snprintf(h,sizeof h,"HTTP/1.1 %d %s\r\nContent-Type: application/json\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n%s",code,code==200?"OK":code==400?"Bad Request":"Forbidden",strlen(body),body);
+        st_send(fd,h,(size_t)k); }
+    else if(strcmp(meth,"GET")){ const char*na="HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"; st_send(fd,na,strlen(na)); }
+    else if(!strcmp(path,"/events")){
         int k=snprintf(h,sizeof h,"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\nAccess-Control-Allow-Origin: *\r\n\r\n");
         if(st_send(fd,h,(size_t)k)) for(unsigned long seen=0;;){ pthread_mutex_lock(&g_st_mx); while(g_st_seq==seen) pthread_cond_wait(&g_st_cv,&g_st_mx);
                 seen=g_st_seq; size_t len=g_st_len; char*j=malloc(len+16); if(j){ memcpy(j,"data: ",6); memcpy(j+6,g_st_json,len); memcpy(j+6+len,"\n\n",2); } pthread_mutex_unlock(&g_st_mx);
