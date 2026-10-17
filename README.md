@@ -221,7 +221,9 @@ watch from another device). From top to bottom the page shows:
   order. Players who are talking light up green. The speaker beside each name mutes or unmutes their voice (a red cross
   = muted); **Mute all** / **Unmute all** do everyone. This is the client's own voice mute (the same list as its
   scoreboard Mute buttons): it only affects what you hear and lasts until the game closes.
-- **Event feed** and **Chat** side by side, newest first. The feed shows joins and leaves (the client's own roster
+- **Event feed** and **Chat** side by side, newest first. Chat is every line the client's text chat shows (players'
+  messages with TEAM / NEARBY marks, the server's [SERVER] lines and welcome message, its own notices such as "sending
+  messages too quickly"), read from the client as each line arrives. The feed shows joins and leaves (the client's own roster
   notices; when you join, everyone already there becomes one "N players in the game" line), kills, deaths, votes,
   server notices (team shuffles, kicks) and match start and end, each kind with its own checkbox. Kills marked ≈ are
   estimates: the killer is the last player whose projectile ended inside the body within 1.5 s before it died, and the
@@ -254,7 +256,8 @@ Machine-readable endpoints:
   `overlay` (the switches), `vehicles`, `projectiles` in flight, `map`, `in_match`, match `time`
 - `/events` -- the same JSON as a stream (Server-Sent Events): `curl -N http://127.0.0.1:8765/events`
 - `/feed.json?since=<seq>` -- the event feed after event `seq` (the last 1,024 kept): `kind` (join, leave, kill, death,
-  vote, server, game, chat), `text`, `t` (Unix time), `a`/`b` (players), `how` (weapon), `estimated`; the snapshot's
+  vote, server, game, chat), `text`, `t` (Unix time), `a`/`b` (players; chat: the sender), `how` (weapon; chat: the
+  channel -- team, nearby, server, notice, empty = everyone), `estimated`, `mine` (a chat line we sent); the snapshot's
   `feed_seq` is the newest event's number. `PELOAD_FEED_LOG=1` also prints each event to the log
 - `/heat.json` -- the heatmap data (visited cells, deaths); `/maptop/<map>.png|json` -- the map picture and its world
   bounds

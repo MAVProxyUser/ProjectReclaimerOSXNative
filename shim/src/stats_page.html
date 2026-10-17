@@ -63,7 +63,7 @@ canvas{width:100%;height:auto;display:block;background:#0b0b0b;border-radius:4px
 #fl,#cm{height:260px;overflow-y:auto;font-size:12px;line-height:1.5;resize:vertical}
 #fl .ev,#cm .ev{padding:1px 0;border-bottom:1px solid #1f1f1f;overflow-wrap:anywhere}
 #fl time,#cm time{color:#777;font-variant-numeric:tabular-nums;margin-right:8px}
-#cm .tm{color:#58b8ff;font-size:11px;margin-right:4px}
+#cm .tm{color:#58b8ff;font-size:11px;margin-right:6px}#cm .tm.sv{color:#ffd75a}#cm .nt{color:#888;font-style:italic}
 #fl .w{display:inline-block;background:#2a2f36;border-radius:3px;padding:0 5px;margin:0 5px;font-size:11px;color:#cfd8e0}
 #fl .est{color:#777;margin-left:4px;cursor:help}
 #fl .k-join .tx{color:#7ddf6a}#fl .k-leave .tx{color:#c9a46a}#fl .k-server .tx,#fl .k-vote .tx,#fl .k-log .tx{color:#ffd75a}
@@ -98,7 +98,7 @@ canvas{width:100%;height:auto;display:block;background:#0b0b0b;border-radius:4px
  <div class="note">Newest first. Kills marked ≈ are estimates: the killer is the last player whose projectile ended inside the body (within 1.5 s), and the weapon is the one in their hands, the vehicle or turret they sit in, or the grenade. Melee, splash, splatter and fall deaths show as "died".</div></div>
 <div id="chat" class="panel"><div class="fh"><h2>Chat</h2></div>
  <div id="cm" class="note">no chat yet</div>
- <div class="note">Newest first: what players type in the game's text chat, team messages marked TEAM.</div></div>
+ <div class="note">Newest first: what players type in the game's text chat (TEAM and NEARBY mark those channels), the server's messages, and the client's own chat notices.</div></div>
 </div>
 <div id="rules" class="panel"><h2 id="rt">Game rules</h2><div id="rb" class="note">not in a match</div></div>
 <div class="grid">
@@ -370,7 +370,7 @@ const MAPN={armory:"Rat's Nest",bunkerworld:'Standoff',chill:'Narrows',chillout:
  deadlock:'High Ground',descent:'Assembly',docks:'Longshore',fortress:'Citadel',ghosttown:'Ghost Town',guardian:'Guardian',isolation:'Isolation',
  lockout:'Blackout',midship:'Heretic',riverworld:'Valhalla',salvation:'Epitaph',sandbox:'Sandbox',shrine:'Sandtrap',sidewinder:'Avalanche',
  snowbound:'Snowbound',spacecamp:'Orbital',warehouse:'Foundry',zanzibar:'Last Resort'};
-let feedSeq=0, feedBusy=false, feedN=0, chatN=0; const fl=document.getElementById('fl'), cm=document.getElementById('cm');
+let feedSeq=0, feedBusy=false, feedN=0, chatN=0; const lastLeave=new Map(); const fl=document.getElementById('fl'), cm=document.getElementById('cm');
 const two=n=>String(n).padStart(2,'0'), clock=t=>{const d=new Date(t*1000);return two(d.getHours())+':'+two(d.getMinutes())+':'+two(d.getSeconds())};
 function feedName(n,team){ const teams=snap&&snap.variant&&snap.variant.rounds&&snap.variant.rounds.teams, c=teams&&team>=0?C[TN[team]]:null;
   return `<b${c?` style="color:${c}"`:''}>${E(n)}</b>`; }
@@ -381,10 +381,15 @@ function feedRow(e){
   else if(e.kind==='game' && e.a) body=`<span class="tx">Match started: ${E(MAPN[e.a]||e.a)}</span>`;
   else body=`<span class="tx">${E(e.text)}</span>`;
   const est=e.estimated?' <span class="est" title="estimated: the last player whose projectile ended inside the body">≈</span>':'';
-  return `<div class="ev k-${E(e.kind)}"><time>${clock(e.t)}</time> ${body}${est}</div>`; }
-// chat: a = sender (team colour), how = the channel ("team", "nearby"; empty = everyone), text = the message
-function chatRow(e){ const ch=e.how?`<span class="tm">${E(e.how.toUpperCase())}</span>`:'';
-  return `<div class="ev"><time>${clock(e.t)}</time>${ch}${e.a?feedName(e.a,e.ta)+': ':''}${E(e.text)}</div>`; }
+  const dn=e.kind==='death'?` data-n="${E(e.b)}" data-t="${e.t}"`:'';
+  return `<div class="ev k-${E(e.kind)}"${dn}><time>${clock(e.t)}</time> ${body}${est}</div>`; }
+// chat: a = sender, how = the channel ("team", "nearby"; empty = everyone), "server" for [SERVER] lines, "notice" for
+// the client's own notices; flags 2 = we sent it. The sender's colour is their team's when teams are on.
+function chatRow(e){
+  if(e.how==='server') return `<div class="ev"><time>${clock(e.t)}</time> <span class="tm sv">SERVER</span>${E(e.text)}</div>`;
+  if(e.how==='notice') return `<div class="ev nt"><time>${clock(e.t)}</time> ${E(e.text)}</div>`;
+  const p=snap&&snap.players?snap.players.find(q=>q.name===e.a):null, ch=e.how?`<span class="tm">${E(e.how.toUpperCase())}</span>`:'';
+  return `<div class="ev"><time>${clock(e.t)}</time> ${ch}${feedName(e.a,p?p.team:-1)}${e.mine?' <span class="est">(you)</span>':''}: ${E(e.text)}</div>`; }
 async function pollFeed(){ if(feedBusy) return; feedBusy=true;
   try{ const j=await (await fetch('/feed.json?since='+feedSeq)).json();
     if(j.seq<feedSeq){ feedSeq=0; feedN=0; chatN=0; fl.textContent=''; cm.textContent=''; feedBusy=false; return pollFeed(); }   // the game restarted
@@ -392,7 +397,11 @@ async function pollFeed(){ if(feedBusy) return; feedBusy=true;
     const runs=[]; for(const e of j.events){ const r=runs[runs.length-1];
       if(e.kind==='join' && r && r[0].kind==='join' && Math.abs(e.t-r[r.length-1].t)<0.25) r.push(e); else runs.push([e]); }
     const evs=runs.flatMap(r=>r.length>=4?[{...r[r.length-1],a:'',text:`${r.length} players in the game: ${r.map(e=>e.a).join(', ')}`}]:r);
-    const chats=evs.filter(e=>e.kind==='chat'), other=evs.filter(e=>e.kind!=='chat');
+    // a player who leaves loses their body: no "died" line for a death within 3 s of their leave (either order)
+    for(const e of evs) if(e.kind==='leave'){ lastLeave.set(e.a,e.t);
+      for(const r of fl.querySelectorAll('.k-death[data-n]')) if(r.dataset.n===e.a && Math.abs(+r.dataset.t-e.t)<3) r.remove(); }
+    const chats=evs.filter(e=>e.kind==='chat'), other=evs.filter(e=>e.kind!=='chat' && !(e.kind==='death' && lastLeave.has(e.b) && Math.abs(lastLeave.get(e.b)-e.t)<3)
+      && !(e.kind==='death' && evs.some(l=>l.kind==='leave' && l.a===e.b && Math.abs(l.t-e.t)<3)));
     if(chats.length){ if(!chatN) cm.textContent=''; cm.insertAdjacentHTML('afterbegin',chats.map(chatRow).reverse().join('')); chatN+=chats.length;
       while(cm.childElementCount>600){ cm.lastElementChild.remove(); chatN--; } }
     if(other.length){ if(!feedN) fl.textContent=''; fl.insertAdjacentHTML('afterbegin',other.map(feedRow).reverse().join('')); feedN+=other.length;

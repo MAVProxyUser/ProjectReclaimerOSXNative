@@ -130,6 +130,14 @@ hook on the client's voice_recv (installed at exe load, st_voice_install) stampi
 the F-keys (g_hb_toggle bits; F9 = visible only). F8 / do=capture (hb_capture_tick, render-thread Present):
 ~/reclaimer_cap_<pid>_<n>.bmp (the game backbuffer -- the overlay is drawn later, at the window blit, so it is NOT in
 it), _depth.bmp/.f32 (the camera draw's DSV, rows top-first), .txt (camera, view-proj, depth stats).
+Event feed + chat (2026-10-17, stats.c st_event ring, GET /feed.json?since=<seq>, snapshot feed_seq; PELOAD_FEED_LOG=1
+prints events): the client's log lines are tapped in NtWriteFile (Rust's std writes stdio there, NOT WriteFile) +
+WriteFile/WriteConsoleW (st_feed_log: "Community roster: X joined/left the server", votes, shuffles, match start/end).
+Chat = entry hook on the client's TextChat::push_history (exe+0xb89930 in 0.9.18, by signature, st_chat_install): every
+chat / [SERVER] / notice line, UTF-8 Rust Strings in a 0x40-byte Line (shim/docs/halo3-event-feed.md section 1). Kills
+are ESTIMATED from the death tracker + object_delete shots (g_lasthit; weapon in hand / seat object / grenade) until a
+halo3 game-engine event hook exists (same doc). The roster notices go to halo3 chud_messaging_post (halo3+0x2d3f2c;
+its prologue is NOT position-independent).
 Heatmap per map: footprint cells (0.5 u) + deaths, ~/Library/Application Support/ReclaimerMac/heatmaps/<map>.bin (RHM2),
 drawn over a top-down picture of the map: re-tools/h3bsp.py decodes the collision BSP + instanced geometry from the
 .map's resource section (sbsp +0x38C -> zone structure_bsp_tag_resources -> raw-deflate page; shim/docs/

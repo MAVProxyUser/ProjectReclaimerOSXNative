@@ -26,7 +26,8 @@ static void sb_f3(StBuf*s,const float*v){ sb_put(s,"[%.2f,%.2f,%.2f]",v[0],v[1],
 // joins and leaves, kills, votes, server notices, match start and end. Sources: the client's own log lines
 // (st_feed_log, from WriteFile on its standard handles) and the death tracker (st_snapshot: a death, and the player
 // whose projectile ended inside that biped just before it as the estimated killer).
-// kind: join leave kill death vote server game. a/b: the players (killer, victim), how: the weapon. flags: 1 = estimated.
+// kind: join leave kill death vote server game chat. a/b: the players (killer, victim; chat: sender), how: the weapon
+// (chat: the channel). flags: 1 = estimated, 2 = we sent it (chat).
 typedef struct { uint32_t seq; int flags, ta, tb; double t; char kind[12], a[64], b[64], how[64], text[320]; } StEvt;
 static char g_st_curmap[64];   // the map the last snapshot saw
 enum { ST_NEV=1024 };
@@ -44,7 +45,7 @@ static void st_feed_json(StBuf*s,uint32_t since){
     for(uint32_t q=lo;q<=hi;q++){ const StEvt*e=&g_ev[q%ST_NEV];
         sb_put(s,"%s{\"seq\":%u,\"t\":%.3f,\"kind\":\"%s\",\"text\":",q>lo?",":"",e->seq,e->t,e->kind); sb_str(s,e->text);
         if(e->a[0]){ sb_put(s,",\"a\":"); sb_str(s,e->a); } if(e->b[0]){ sb_put(s,",\"b\":"); sb_str(s,e->b); } if(e->how[0]){ sb_put(s,",\"how\":"); sb_str(s,e->how); }
-        if(e->ta>=0) sb_put(s,",\"ta\":%d",e->ta); if(e->tb>=0) sb_put(s,",\"tb\":%d",e->tb); if(e->flags&1) sb_put(s,",\"estimated\":true"); sb_put(s,"}"); }
+        if(e->ta>=0) sb_put(s,",\"ta\":%d",e->ta); if(e->tb>=0) sb_put(s,",\"tb\":%d",e->tb); if(e->flags&1) sb_put(s,",\"estimated\":true"); if(e->flags&2) sb_put(s,",\"mine\":true"); sb_put(s,"}"); }
     sb_put(s,"]}"); pthread_mutex_unlock(&g_ev_mx); }
 // One line of the client's log ("HH:MM:SS.mmm <text>"): the notices it also shows its player.
 // PELOAD_FEED_MATCH=<text>[,<text>...] adds lines containing any of those texts (kind "log").
@@ -216,6 +217,32 @@ static void __attribute__((ms_abi)) st_on_voice(void*state,uint64_t sender){ (vo
     g_talk[o].id=sender; g_talk[o].t=now; pthread_mutex_unlock(&g_talk_mx); }
 static double st_talk_age(uint64_t id){ double t=0; pthread_mutex_lock(&g_talk_mx); for(int i=0;i<128;i++) if(g_talk[i].id==id){ t=g_talk[i].t; break; } pthread_mutex_unlock(&g_talk_mx);
     return t>0?mono_s()-t:1e9; }
+// Chat (shim/docs/halo3-event-feed.md section 1): every line the client's text chat shows -- players' messages,
+// [SERVER] lines, its own notices -- passes through one function before its chat panel draws it (exe+0xb89930 in
+// 0.9.18, found by signature; the first 19 bytes are position-independent): push_history(state, Line*, mine,
+// timestamp). It owns the line, so the hook only reads it. Line (0x40 bytes, Rust Strings = {cap, ptr, len}, UTF-8):
+//   q0 >= 0: a player's message: +0x00 sender name, +0x18 text, +0x30 sender peer id, +0x3c channel (0 all, 1 team,
+//            2 nearby);  q0 = 0x8000000000000001: a server line, String at +0x08;  q0 = 0x8000000000000000: a notice,
+//            kind byte at +0x08. Chat never goes through halo3.
+static int st_rstr(uint64_t at,char*out,size_t on){   // a Rust String {cap, ptr, len} at `at` -> NUL-terminated
+    uint64_t f[3]; out[0]=0; if(!hb_read(at,f,sizeof f) || !f[1] || f[2]>4096) return 0;
+    size_t n=f[2]<on-1?(size_t)f[2]:on-1; if(n && !hb_read(f[1],out,n)) return 0; out[n]=0;
+    for(size_t i=0;i<n;i++) if((unsigned char)out[i]<0x20) out[i]=' '; return 1; }
+static void __attribute__((ms_abi)) st_on_chat(void*state,const uint8_t*line,uint64_t mine){ (void)state;
+    int64_t q0=0; if(!line || !hb_read((uint64_t)(uintptr_t)line,&q0,8)) return;
+    char a[64], txt[600]; int fl=(mine&0xFF)?2:0;   // flags 2: we sent it
+    if(q0>=0){ uint8_t ch=0; hb_read((uint64_t)(uintptr_t)line+0x3c,&ch,1);
+        if(!st_rstr((uint64_t)(uintptr_t)line,a,sizeof a) || !st_rstr((uint64_t)(uintptr_t)line+0x18,txt,sizeof txt)) return;
+        st_event("chat",a,0,ch==1?"team":ch==2?"nearby":"",-1,-1,fl,"%s",txt); }
+    else if((uint64_t)q0==0x8000000000000001ull){ if(st_rstr((uint64_t)(uintptr_t)line+8,txt,sizeof txt)) st_event("chat",0,0,"server",-1,-1,fl,"%s",txt); }
+    else if((uint64_t)q0==0x8000000000000000ull){ uint8_t k=0xFF; hb_read((uint64_t)(uintptr_t)line+8,&k,1);   // the client's own wording
+        static const char*const nt[5]={"You are sending messages too quickly.","Team chat is only available in team games.",
+            "Proximity chat is only available while alive in a game.","The host has turned text chat off.","Your message could not be delivered."};
+        st_event("chat",0,0,"notice",-1,-1,fl,"%s",k<5?nt[k]:"(chat notice)"); } }
+static void st_chat_install(void){
+    uint8_t b[96],m[96]; int n=sig_parse("55 41 57 41 56 41 55 41 54 56 57 53 48 81 EC A8 00 00 00 48 8D AC 24 80 00 00 00 48 C7 45 20 FE FF FF FF 80 B9 F8 00 00 00 00 0F 84",b,m,96);
+    int64_t r=sig_find(g_base,b,m,n); int ok=r>=0 && entry_hook(g_base+r,b,19,(void*)st_on_chat);
+    char msg[120]; int k=snprintf(msg,sizeof msg,"  [stats] chat: %s\n",ok?"hooked (event feed)":"unavailable (push_history not found)"); (void)!write(2,msg,k); }
 // Runs at exe load (single-threaded, before the entry point), only with the stats page on.
 static void st_voice_install(void){ if(!stats_on() || !g_base) return;
     uint8_t b[96],m[96]; int n; int64_t r; char msg[220]; int k;
@@ -224,7 +251,7 @@ static void st_voice_install(void){ if(!stats_on() || !g_base) return;
     n=sig_parse("55 41 57 41 56 41 55 41 54 56 57 53 48 81 EC 18 01 00 00 48 8D AC 24 80 00 00 00 0F 29 B5 80 00 00 00 48 C7 45 78 FE FF FF FF 4D 89 CE 4C 89 C7 49 89 D7 48 89 CB",b,m,96);
     int64_t rv=sig_find(g_base,b,m,n); int hooked=rv>=0 && entry_hook(g_base+rv,b,19,(void*)st_on_voice);
     k=snprintf(msg,sizeof msg,"  [stats] voice: mute %s, talking indicator %s\n",g_st_setmuted?"available":"unavailable (set_muted not found)",hooked?"hooked":"unavailable (voice_recv not found)");
-    (void)!write(2,msg,k); }
+    (void)!write(2,msg,k); st_chat_install(); }
 static void st_voice_init(void){ static int done; if(done || !g_base) return; done=1;
     // 0.9.18: set_muted at its known place -> the client's expanded-session flag is at its known place too; other
     // builds pick the layout by which one holds valid records
