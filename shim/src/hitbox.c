@@ -88,7 +88,7 @@ static int hb_overlay_on(void){ for(int f=0;f<HBF_N;f++) if(hb_feat(f)) return 1
 // The camera tracker (VS cb0 of the frame's first world draw) feeds the overlay and the teleport's "which body is
 // mine"; it runs when either needs it.
 static int stats_on(void);   // stats.c: the live stats service uses the camera to mark "you"
-static int hb_enabled(void){ static int tp=-1; if(tp<0) tp=getenv("PELOAD_ALLOW_TELEPORT")?1:0; return tp || hb_overlay_on() || stats_on(); }
+static int hb_enabled(void){ static int tp=-1; if(tp<0) tp=getenv("PELOAD_ALLOW_TELEPORT")||getenv("PELOAD_TEST_BOOT_PROMPT")?1:0; return tp || hb_overlay_on() || stats_on(); }
 // A world camera: rows 0-3 are a perspective view-projection (cb_looks_viewproj) AND row 7 is the camera position
 // it was built from -- the camera sits at the clip-space origin (x = y = w = 0). Rejects the view-space-only
 // projections of full-screen passes (row 3 = 0,0,1,0), shadow-map views and the first-person weapon's view.

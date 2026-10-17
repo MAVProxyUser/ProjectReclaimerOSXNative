@@ -128,6 +128,13 @@ Mods/Workshop: the client's own `workshop-download --subscribe <PublishedFileId>
 against the server's SHA-256 manifest. Seams check: `PELOAD_D3DGL_DFCENSUS` (draws per depth
 func), `PELOAD_D3DGL_INVARIANT` (invariant gl_Position, opt-in); the main depth buffer is DXGI 19 (D32F_S8, reverse-Z).
 Unfocused/hidden clients are held at 60 fps by the engine; PELOAD_MAX_FPS caps lower (default 30 when hidden).
+Betrayal popup (backlog 15): halo3's native GUI screen c_gui_screen_boot_betrayer, posted by halo3+0xff5fc when
+halo3+0xfcc20 is true (player dead: +0x28 unit NONE; betrayer handle at player +0x1F0; variant betrayal booting on).
+`PELOAD_TEST_BOOT_PROMPT=1|<local player name>` names a betrayer whenever the local player is dead (test hook).
+Test server: C:\ReclaimerTestServer\betrayal.toml (Team Slayer, friendly fire + betrayal booting, min_players 1,
+anti-cheat off -- with it on, a 2nd local client is refused). RCON `team` moves do NOT kill the player; a client killed
+with kill -9 lingers ~45 s server-side (rejoining sooner times out). Native popups do render text (the "Team Slayer /
+Kill the enemy team" intro toast is legible), so the boot screen's empty text is specific to that screen.
 Glitch hunting: `PELOAD_D3DGL_COVQ` (+`_COVQ_FRAC`, `_HUGEPROBE=<t>`) per-draw sample counts,
 `PELOAD_D3DGL_WHITEDUMP` (draw flight recorder on auto-exposure spikes), `_LUMLOG`, `_FSLOG`,
 `_FRAMESTAT`, `_CBSCAN`, `_PSCLAMP=<c>`, `_SKIPVSH=<hash,..>`, `_DUMPHASH=<hash,..>` (GLSL+DXBC to ~).

@@ -9905,7 +9905,7 @@ int main(int argc, char **argv){
     std_tee_start(2,"PELOAD_STDERR_TEE"); std_tee_start(1,"PELOAD_STDOUT_TEE");
     if(getenv("PELOAD_SAMPLE")){ pthread_t st; pthread_create(&st,0,sampler_thread,0); }
     wi_test_start();
-    hitbox_start(); stats_start();
+    hitbox_start(); stats_start(); bootprompt_test_start();
     { struct sigaction sa; memset(&sa,0,sizeof sa); sa.sa_sigaction=crashsig; sa.sa_flags=SA_SIGINFO;
       sigaction(SIGSEGV,&sa,0); sigaction(SIGBUS,&sa,0); sigaction(SIGILL,&sa,0); sigaction(SIGABRT,&sa,0);
       if(getenv("PELOAD_BP")) sigaction(SIGTRAP,&sa,0); }  // PELOAD_BP software breakpoints need SIGTRAP caught (else "Trace/BPT trap")

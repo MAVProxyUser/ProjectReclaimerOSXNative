@@ -226,3 +226,40 @@ static void* st_listen_thread(void*a){ (void)a; pthread_setname_np("shim-stats-l
     for(;;){ int fd=accept(ls,0,0); if(fd<0){ if(errno==EINTR) continue; usleep(100000); continue; } pthread_t c; if(pthread_create(&c,0,st_conn,(void*)(intptr_t)fd)) close(fd); else pthread_detach(c); }
     return 0; }
 static void stats_start(void){ if(!stats_on()) return; pthread_t t; pthread_create(&t,0,st_listen_thread,0); pthread_detach(t); }
+
+// ---- PELOAD_TEST_BOOT_PROMPT=1: open halo3's native "boot the betrayer?" popup on demand (test hook) --------------
+// halo3+0xfcc20 shows the popup while a player is dead (player +0x28 unit = NONE) and its record holds a betrayer
+// handle at +0x1F0 (and the game variant has betrayal booting on). When the local player (the one whose biped held the
+// camera; or PELOAD_TEST_BOOT_PROMPT=<its name>) is dead and has no betrayer, this names the first other player as the
+// betrayer, once per death.
+static void* st_bootprompt_thread(void*a){ (void)a; pthread_setname_np("shim-test-bootprompt"); int local=-1; uint32_t done_for=0xFFFFFFFFu;
+    for(;;){ usleep(200000);
+        uint8_t*h3=hb_halo3_base(); uint32_t idx=0; if(!h3 || !hb_read((uint64_t)(h3+0xa39f9c),&idx,4) || idx>=128) continue;
+        void**arrs[1025]; int na=0; arrs[na++]=g_tls_array; pthread_mutex_lock(&g_tlsm); for(int q=0;q<g_ntarrs&&na<1025;q++) arrs[na++]=g_tarrs[q]; pthread_mutex_unlock(&g_tlsm);
+        uint64_t pd=0; int32_t es=0, hi=0;
+        for(int q=0;q<na;q++){ uint64_t blk=(uint64_t)arrs[q][idx], parr=0, oarr=0; uint8_t hdr[0x60];
+            if(!blk || !hb_read(blk+0x38,&oarr,8) || !oarr || !hb_read(blk+0x10,&parr,8) || !parr || !hb_read(parr,hdr,sizeof hdr) || *(uint32_t*)(hdr+0x2c)!=0x64407440) continue;
+            es=*(int32_t*)(hdr+0x24); hi=*(int32_t*)(hdr+0x3c); pd=*(uint64_t*)(hdr+0x48); break; }
+        if(!pd || es<0x200 || hi<=0 || hi>256) continue;
+        // the local player: its biped contains the camera
+        float vp[32]; unsigned s0=g_hb_vpseq; memcpy(vp,g_hb_vp,sizeof vp); int camok=!(s0&1) && g_hb_vpseq==s0 && (vp[28]||vp[29]||vp[30]);
+        uint64_t arr=hb_object_array(); uint8_t ohdr[0x60]; uint64_t odata=0; int ohi=0;
+        if(arr && hb_read(arr,ohdr,sizeof ohdr) && *(uint32_t*)(ohdr+0x2c)==0x64407440){ odata=*(uint64_t*)(ohdr+0x48); ohi=*(int32_t*)(ohdr+0x3c); }
+        const char*want=getenv("PELOAD_TEST_BOOT_PROMPT"); int byname=want && strcmp(want,"1");
+        for(int i=0;i<hi && camok && odata && !byname;i++){ uint8_t rec[0x30]; if(!hb_read(pd+(uint64_t)i*es,rec,sizeof rec) || !*(uint16_t*)rec) continue; uint32_t u=*(uint32_t*)(rec+0x28);
+            if(u==0xFFFFFFFFu || (int)(u&0xFFFF)>=ohi) continue; uint8_t e[0x18]; uint64_t p=0; float c[4];
+            if(!hb_read(odata+(uint64_t)(u&0xFFFF)*0x18,e,sizeof e) || *(uint16_t*)e!=(uint16_t)(u>>16) || !(p=*(uint64_t*)(e+0x10)) || !hb_read(p+0x1c,c,16)) continue;
+            float dx=c[0]-vp[28],dy=c[1]-vp[29],dz=c[2]-vp[30]; if(dx*dx+dy*dy+dz*dz<(c[3]+0.3f)*(c[3]+0.3f)){ if(local!=i){ local=i; char m[80]; int k=snprintf(m,sizeof m,"  [bootprompt] local player = slot %d\n",i); (void)!write(2,m,k); } break; } }
+        // PELOAD_TEST_BOOT_PROMPT=<name>: the local player by name (works before the first spawn, while still dead)
+        { const char*nm=getenv("PELOAD_TEST_BOOT_PROMPT"); if(nm && strcmp(nm,"1")) for(int i=0;i<hi;i++){ uint8_t rec[0x98]; if(!hb_read(pd+(uint64_t)i*es,rec,sizeof rec) || !*(uint16_t*)rec) continue;
+              char n8[40]; int j=0; const uint16_t*w=(const uint16_t*)(rec+0x58); for(int c=0;c<32 && w[c] && j<38;c++) n8[j++]=(char)(w[c]<128?w[c]:'?'); n8[j]=0;
+              if(!strcmp(n8,nm)){ if(local!=i){ local=i; char m[80]; int k=snprintf(m,sizeof m,"  [bootprompt] local player %s = slot %d\n",nm,i); (void)!write(2,m,k); } break; } } }
+        if(local<0) continue;
+        uint8_t*me=(uint8_t*)(uintptr_t)(pd+(uint64_t)local*es); uint32_t unit=*(volatile uint32_t*)(me+0x28), betrayer=*(volatile uint32_t*)(me+0x1F0);
+        if(unit!=0xFFFFFFFFu){ done_for=0xFFFFFFFFu; continue; }   // alive
+        if(betrayer!=0xFFFFFFFFu || done_for==1) continue;
+        for(int i=0;i<hi;i++){ if(i==local) continue; uint16_t salt=*(volatile uint16_t*)(uintptr_t)(pd+(uint64_t)i*es); if(!salt) continue;
+            uint32_t h=((uint32_t)salt<<16)|(uint32_t)i; *(volatile uint32_t*)(me+0x1F0)=h; done_for=1;
+            char m[120]; int k=snprintf(m,sizeof m,"  [bootprompt] local player (slot %d) is dead: betrayer set to player %08x\n",local,h); (void)!write(2,m,k); break; } }
+    return 0; }
+static void bootprompt_test_start(void){ if(!getenv("PELOAD_TEST_BOOT_PROMPT")) return; pthread_t t; pthread_create(&t,0,st_bootprompt_thread,0); pthread_detach(t); }
