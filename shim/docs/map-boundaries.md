@@ -248,3 +248,14 @@ Invisible walls are unchanged (section 3).
 host with `PELOAD_ALLOW_TELEPORT=1`, tick **click to teleport** under the map and click a spot: the page looks up the
 ground there and sends `tpto` to 0.6 above it. With the boundary patches above you stay alive outside the play area
 (tested: Valhalla east cliff, (110, -80) -> standing at z 19.1).
+
+### One-click from the stats page (2026-10-17)
+
+In a game you host with `PELOAD_ALLOW_TELEPORT=1` (no launch patch needed) the overlay controls show:
+- **Boundaries on / off**: writes or restores the two call-site patches at run time, from the simulation thread at the
+  frame safe point (between ticks), all or nothing and only over the expected bytes (POST `/control?do=bounds&off=0|1`).
+- **Valhalla: east cliff** (on riverworld): boundaries off, then teleports you to (114, -100, 22.6)
+  (POST `/control?do=explore&spot=valhalla_cliff`). More spots: `g_st_spots` in shim/src/stats.c.
+
+Tested: explore -> alive on the cliff; boundaries back on while standing there -> dead within a second (as with the
+launch-time patch). A dead or respawning player can't be teleported ("no body at the camera"): click again once you spawn.

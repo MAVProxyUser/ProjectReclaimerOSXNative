@@ -284,6 +284,13 @@ static int st_forward_tp(const char*hostport,int slot,int who){
     int ok=0; if(!connect(fd,(struct sockaddr*)&a,sizeof a)){ char rq[256]; int k=snprintf(rq,sizeof rq,"POST /control?do=tpnext&slot=%d&who=%d HTTP/1.1\r\nHost: %s\r\nX-Reclaimer-Control: 1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",slot,who,host);
         if(send(fd,rq,(size_t)k,0)==k){ char rs[256]; ssize_t n=recv(fd,rs,sizeof rs-1,0); if(n>0){ rs[n]=0; ok=strstr(rs,"\"ok\":true")!=0; } } }
     close(fd); char m[140]; int k=snprintf(m,sizeof m,"  [teleport] forwarded to the host %s (slot %d next to %d): %s\n",hostport,who,slot,ok?"accepted":"refused"); (void)!write(2,m,k); return ok; }
+// Spots past the map's edges, tested alive with the boundaries off (shim/docs/map-boundaries.md)
+typedef struct { const char*map, *id, *label; float x,y,z; } StSpot;
+static const StSpot g_st_spots[]={
+    {"riverworld","valhalla_cliff","Valhalla: east cliff",114.0f,-100.0f,22.6f},   // outside the safe zone (x > 106.3); ground 22.25
+};
+static char g_st_curmap[64];   // the map the last snapshot saw
+int hb_bounds_off(void);
 static int st_control(const char*act,const char*qs){
     char m[96]; int k=0;
     static const char*const feat[HBF_N]={"hitboxes","tracers","info","items","visible"};
@@ -296,6 +303,15 @@ static int st_control(const char*act,const char*qs){
         float d[3]={0,0,0}; const char*v; if((v=strstr(qs,"dx="))) d[0]=(float)atof(v+3); if((v=strstr(qs,"dy="))) d[1]=(float)atof(v+3); if((v=strstr(qs,"dz="))) d[2]=(float)atof(v+3);
         for(int i=0;i<3;i++) if(!(d[i]>=-50 && d[i]<=50)) return 0;
         extern volatile int g_hb_tp_by; extern float g_hb_tp_delta[3]; memcpy(g_hb_tp_delta,d,12); g_hb_tp_by=1; __atomic_store_n(&g_hb_job_pending,1,__ATOMIC_RELEASE); return 1; }
+    // exploring spots past a map's edges (map-boundaries.md): boundaries off, then teleport there -- host only
+    if(!strcmp(act,"explore") || !strcmp(act,"bounds")){
+        if(!getenv("PELOAD_ALLOW_TELEPORT") || !st_is_host()) return 0; extern volatile int g_hb_bnd_req;
+        if(!strcmp(act,"bounds")){ const char*v=strstr(qs,"off="); if(!v) return 0; extern volatile int g_hb_bnd_only; g_hb_bnd_req=atoi(v+4)?1:0; g_hb_bnd_only=1;
+            __atomic_store_n(&g_hb_job_pending,1,__ATOMIC_RELEASE); return 1; }
+        const char*v=strstr(qs,"spot="); if(!v) return 0; const StSpot*sp=0; for(int i=0;i<(int)(sizeof g_st_spots/sizeof g_st_spots[0]);i++) if(!strncmp(v+5,g_st_spots[i].id,strlen(g_st_spots[i].id))) sp=&g_st_spots[i];
+        if(!sp || strcmp(g_st_curmap,sp->map)) return 0;   // that spot is on another map
+        extern volatile int g_hb_tp_to, g_hb_tp_to_who; extern float g_hb_tp_dest[3]; g_hb_bnd_req=1; g_hb_tp_dest[0]=sp->x; g_hb_tp_dest[1]=sp->y; g_hb_tp_dest[2]=sp->z; g_hb_tp_to_who=-1; g_hb_tp_to=1;
+        __atomic_store_n(&g_hb_job_pending,1,__ATOMIC_RELEASE); char m[120]; int k=snprintf(m,sizeof m,"  [explore] page: boundaries off, to %s\n",sp->label); (void)!write(2,m,k); return 1; }
     if(!strcmp(act,"tpto")){   // move a player (slot=, default us) to x,y,z -- host only (exploring, boundary tests)
         if(!getenv("PELOAD_ALLOW_TELEPORT") || !st_is_host()) return 0; const char*v; float d[3]; int got=0;
         if((v=strstr(qs,"x="))){ d[0]=(float)atof(v+2); got++; } if((v=strstr(qs,"y="))){ d[1]=(float)atof(v+2); got++; } if((v=strstr(qs,"z="))){ d[2]=(float)atof(v+2); got++; }
@@ -334,9 +350,12 @@ static void st_snapshot(StBuf*s){
       pthread_mutex_unlock(&g_hb_mapmx);
       const char*b=strrchr(mp,'/'); b=b?b+1:mp; snprintf(m,sizeof m,"%s",b); char*dot=strrchr(m,'.'); if(dot)*dot=0; sb_put(s,",\"map\":"); sb_str(s,m); }
     { static int tp=-1; if(tp<0) tp=getenv("PELOAD_ALLOW_TELEPORT")?1:0; static const char*const tm[3]={"all","enemies","friends"};
-      sb_put(s,",\"overlay\":{\"hitboxes\":%s,\"tracers\":%s,\"info\":%s,\"items\":%s,\"visible\":%s,\"teams\":\"%s\",\"teleport\":%s,\"host\":%s,\"tp_forward\":%s,\"controls\":%s,\"text_px\":%d,\"spar\":%s,\"spar_aim\":%.1f}",
+      sb_put(s,",\"overlay\":{\"hitboxes\":%s,\"tracers\":%s,\"info\":%s,\"items\":%s,\"visible\":%s,\"teams\":\"%s\",\"teleport\":%s,\"host\":%s,\"tp_forward\":%s,\"controls\":%s,\"text_px\":%d,\"spar\":%s,\"spar_aim\":%.1f,\"bounds_off\":%s",
           hb_feat(HBF_HITBOX)?"true":"false",hb_feat(HBF_TRACER)?"true":"false",hb_feat(HBF_INFO)?"true":"false",hb_feat(HBF_ITEMS)?"true":"false",hb_feat(HBF_VISIBLE)?"true":"false",
-          tm[hb_team_mode()],tp?"true":"false",st_is_host()?"true":"false",getenv("PELOAD_TELEPORT_HOST")?"true":"false",st_controls_ok()?"true":"false",g_hb_text_px>0?g_hb_text_px:7,hb_spar_enabled()?"true":"false",g_spar_ok?(double)g_spar_err:-1.0); }
+          tm[hb_team_mode()],tp?"true":"false",st_is_host()?"true":"false",getenv("PELOAD_TELEPORT_HOST")?"true":"false",st_controls_ok()?"true":"false",g_hb_text_px>0?g_hb_text_px:7,hb_spar_enabled()?"true":"false",g_spar_ok?(double)g_spar_err:-1.0,hb_bounds_off()==1?"true":hb_bounds_off()==0?"false":"null");
+      sb_put(s,",\"spots\":["); int ns=0; for(int i=0;i<(int)(sizeof g_st_spots/sizeof g_st_spots[0]);i++) if(!strcmp(g_st_spots[i].map,m)){
+          sb_put(s,"%s{\"id\":\"%s\",\"label\":\"%s\",\"x\":%.1f,\"y\":%.1f,\"z\":%.1f}",ns++?",":"",g_st_spots[i].id,g_st_spots[i].label,g_st_spots[i].x,g_st_spots[i].y,g_st_spots[i].z); }
+      sb_put(s,"]}"); snprintf(g_st_curmap,sizeof g_st_curmap,"%s",m); }
     if(strcmp(m,g_trk_map)){ snprintf(g_trk_map,sizeof g_trk_map,"%s",m); g_ntrk=0; g_nbip=0; memset(g_proj,0,sizeof g_proj); g_hb_local_slot=-1; }   // new map: new match stats
     pthread_mutex_lock(&g_hm_mx); snprintf(g_hm_cur,sizeof g_hm_cur,"%s",m); if(g_hm.dirty && now-g_hm.saved>30){ hm_save(); g_hm.saved=now; } pthread_mutex_unlock(&g_hm_mx);
     static uint8_t tab[8192*0x18]; int hi=0; uint64_t arr=hb_object_array(); uint8_t hdr[0x60];

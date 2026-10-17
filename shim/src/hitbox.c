@@ -442,6 +442,25 @@ static void hb_tp_next(uint8_t*h3,uint8_t*tls,uint8_t*data,int hi,uint32_t me,in
     ((void(__attribute__((ms_abi))*)(uint32_t,const float*,const float*,const float*,uint8_t))(h3+0x259410))(me,pos,fwd,up,1);
     k=snprintf(m,sizeof m,"  [teleport] object %08x moved\n",me); (void)!write(2,m,k); }
 static void hb_engine_jobs_locked(uint8_t*h3,void**tarr,uint32_t idx,uint8_t*arr);
+// ---- Map boundaries off / on at run time (shim/docs/map-boundaries.md "Tested live"): bipeds skip the kill-volume /
+// safe-zone test (halo3+37b816 jne -> jmp) and the player soft-ceiling response (halo3+37b734 je -> jmp) -- the same
+// bytes as PELOAD_PATCH=halo3+37b816:E95501000090,halo3+37b734:EB at launch. Written by the host's simulation thread at
+// the frame safe point (between ticks: biped_update is not running), all or nothing, only over the expected bytes.
+// (The entry patch of halo3+1b8e00 is NOT usable: the client checks that function's entry and refuses to start.)
+typedef struct { uint32_t rva; int n; uint8_t orig[6], patch[6]; } HbBnd;
+static const HbBnd g_hb_bnd[2]={ {0x37b816,6,{0x0F,0x85,0x54,0x01,0x00,0x00},{0xE9,0x55,0x01,0x00,0x00,0x90}}, {0x37b734,1,{0x74},{0xEB}} };
+volatile int g_hb_bnd_req=-1;   // stats page: 1 = boundaries off, 0 = back on
+volatile int g_hb_bnd_only;      // that request carries no teleport (a bare job would otherwise mean F7's map reflection)
+int hb_bounds_off(void){ uint8_t*h3=hb_halo3_base(); if(!h3) return -1; int off=1, on=1;
+    for(int i=0;i<2;i++){ const uint8_t*p=h3+g_hb_bnd[i].rva; if(memcmp(p,g_hb_bnd[i].patch,g_hb_bnd[i].n)) off=0; if(memcmp(p,g_hb_bnd[i].orig,g_hb_bnd[i].n)) on=0; }
+    return off?1:on?0:-1; }   // -1: neither (another halo3 build, or partly patched)
+static void hb_bounds_set(uint8_t*h3,int off){
+    for(int i=0;i<2;i++){ const HbBnd*b=&g_hb_bnd[i]; const uint8_t*p=h3+b->rva;
+        if(memcmp(p,off?b->orig:b->patch,b->n) && memcmp(p,off?b->patch:b->orig,b->n)){
+            char m[120]; int k=snprintf(m,sizeof m,"  [bounds] halo3+%x holds unexpected bytes: not changed\n",b->rva); (void)!write(2,m,k); return; } }
+    for(int i=0;i<2;i++){ const HbBnd*b=&g_hb_bnd[i]; uint8_t*p=h3+b->rva; const uint8_t*want=off?b->patch:b->orig; if(!memcmp(p,want,b->n)) continue;
+        uintptr_t pg=(uintptr_t)p & ~0xFFFull; mprotect((void*)pg,0x2000,PROT_READ|PROT_WRITE|PROT_EXEC); memcpy(p,want,(size_t)b->n); sys_icache_invalidate(p,(size_t)b->n); }
+    (void)!write(2,off?"  [bounds] map boundaries OFF (kill volumes, safe zones, soft ceilings skipped for players)\n":"  [bounds] map boundaries back ON\n",off?92:36); }
 static void hb_engine_jobs(void){
     // the simulation thread: its own TLS block holds the live object table (worker threads have no game state there)
     static int why_logged; uint8_t*h3=hb_halo3_base(); if(!h3) return; uint32_t idx=*(volatile uint32_t*)(h3+0xa39f9c); if(idx>=128) return;
@@ -458,7 +477,8 @@ static void hb_engine_jobs(void){
     // halo3's game-state lock (what it holds around every tick)
     if(!*(uint64_t*)(h3+0x8f4028) || *(int32_t*)((uint8_t*)tarr[idx]+0x18)<0 || *(int32_t*)((uint8_t*)tarr[idx]+0x18)>=32){ (void)!write(2,"  [teleport] engine not ready\n",30); return; }
     int tok=((HbLockFn)(h3+0x12c948))();
-    hb_engine_jobs_locked(h3,tarr,idx,arr);
+    { int r=g_hb_bnd_req; if(r>=0){ g_hb_bnd_req=-1; hb_bounds_set(h3,r); } }   // boundaries first: an explore teleport follows
+    if(!__atomic_exchange_n(&g_hb_bnd_only,0,__ATOMIC_ACQ_REL)) hb_engine_jobs_locked(h3,tarr,idx,arr);
     ((HbUnlockFn)(h3+0x12c9a0))(&tok); }
 static void hb_engine_jobs_locked(uint8_t*h3,void**tarr,uint32_t idx,uint8_t*arr){
     float vp[32]; unsigned s0=g_hb_vpseq; memcpy(vp,g_hb_vp,sizeof vp); if((s0&1) || g_hb_vpseq!=s0 || (!vp[28]&&!vp[29]&&!vp[30])){ (void)!write(2,"  [teleport] no camera yet\n",27); return; }
