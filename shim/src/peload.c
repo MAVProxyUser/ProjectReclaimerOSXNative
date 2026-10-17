@@ -3085,9 +3085,11 @@ static void*  MSABI i_CreateWindowExW(uint32_t ex,const void*cls,const void*name
         win->wndproc(win, 0x0001/*WM_CREATE*/,  0, (int64_t)(intptr_t)cs);
     }
     ws("  [CreateWindowExW] real HWND\n"); return win; }
-static int    MSABI i_DestroyWindow(void*h){ (void)h; return 1; }
+static void lay_show(void*h,int shown);   // layered windows (below)
+static int    MSABI i_DestroyWindow(void*h){ lay_show(h,-1); return 1; }
 static int64_t MSABI i_DefWindowProcW(void*h,uint32_t m,uint64_t wp,int64_t lp){ (void)h;(void)wp;(void)lp; if(m==0x0081/*WM_NCCREATE*/) return 1; return 0; }
 static int    MSABI i_ShowWindow(void*h,int c){ int act=(c==1||c==2||c==3||c==5||c==9||c==10)||(getenv("PELOAD_FG_LASTSHOWN")&&c);
+    lay_show(h,c!=0);
     if(act && fg_can_activate(h)) g_shown_hwnd=h;
     // log state changes per window (the menu runtime re-hides two overlay windows every frame)
     { static void*lh[16]; static int lc[16], n; int i; for(i=0;i<n && lh[i]!=h;i++){} if(i==n && n<16){ lh[n]=h; lc[n++]=-1; }
@@ -3282,7 +3284,8 @@ void* fg_hwnd_ext(void);
 #include <CoreGraphics/CoreGraphics.h>
 #include "wininput.c"
 static int    MSABI i_SetLayeredWindowAttributes(void*h,uint32_t key,uint8_t a,uint32_t f){ (void)h;(void)key;(void)a;(void)f; return 1; }
-static int    MSABI i_UpdateLayeredWindow(void*h,void*dc,void*pd,void*ps,void*sd,void*sp,uint32_t key,void*bf,uint32_t f){ (void)h;(void)dc;(void)pd;(void)ps;(void)sd;(void)sp;(void)key;(void)bf;(void)f; return 1; }
+static int lay_update(void*h,const int32_t*pd,const int32_t*ps,void*sd,const int32_t*sp,const uint8_t*bf);   // layered windows (below)
+static int    MSABI i_UpdateLayeredWindow(void*h,void*dc,void*pd,void*ps,void*sd,void*sp,uint32_t key,void*bf,uint32_t f){ (void)dc;(void)key;(void)f; return lay_update(h,pd,ps,sd,sp,bf); }
 #include <CoreGraphics/CoreGraphics.h>
 #include <CoreText/CoreText.h>
 // ---- GDI DIB surface (the menu renders into a CPU bitmap, then presents) ----
@@ -3305,6 +3308,36 @@ static void gdi_fill(GdiObj*d,int x,int y,int w,int h,uint32_t px){
     if(!d||!d->bits||d->bpp!=32||d->w<=0||d->h<=0) return;
     if(x<0){w+=x;x=0;} if(y<0){h+=y;y=0;} if(x+w>d->w)w=d->w-x; if(y+h>d->h)h=d->h-y; if(w<=0||h<=0)return;
     for(int j=0;j<h;j++){ uint32_t*row=gdi_rowp(d,y+j); for(int i=0;i<w;i++) row[x+i]=px; } }
+// ---- layered windows (UpdateLayeredWindow): drawn over the game frame at the window blit (lay_draw) ------------------
+// The client shows its screens (loading screen, menus) as layered child windows whenever the game stops presenting for
+// over a second ("Client screens now shown as layered windows" -- a heavy map load does that again and again).
+// UpdateLayeredWindow was a no-op, so its loading screen vanished and the game's own (no artwork on modded maps) showed
+// over a stale frame: text drawn over text. Each window keeps its last bitmap, position, alpha and visibility; screen
+// coordinates are the game window's client coordinates (ClientToScreen is the identity here). PELOAD_NO_LAYERED = off.
+typedef struct { void*hwnd; int x,y,w,h, alpha, premul, visible, dirty, used; uint32_t*px; unsigned tex; } LayWin;
+static LayWin g_lay[8]; static pthread_mutex_t g_lay_mx=PTHREAD_MUTEX_INITIALIZER; static volatile int g_lay_any;
+static struct { void*h; int shown; } g_vis[64];   // last ShowWindow state per window (also before its first update)
+static int lay_off(void){ static int o=-1; if(o<0) o=getenv("PELOAD_NO_LAYERED")?1:0; return o; }
+static void lay_show(void*h,int shown){   // shown: 1 visible, 0 hidden, -1 destroyed
+    pthread_mutex_lock(&g_lay_mx); int i=0; for(; i<64 && g_vis[i].h && g_vis[i].h!=h; i++){}
+    if(i<64){ if(shown<0) g_vis[i].h=0; else { g_vis[i].h=h; g_vis[i].shown=shown; } }
+    for(int k=0;k<8;k++) if(g_lay[k].used && g_lay[k].hwnd==h){ if(shown<0){ free(g_lay[k].px); g_lay[k].px=0; g_lay[k].used=0; g_lay[k].visible=0; } else g_lay[k].visible=shown; }
+    pthread_mutex_unlock(&g_lay_mx); }
+static int lay_update(void*h,const int32_t*pd,const int32_t*ps,void*sdc,const int32_t*sp,const uint8_t*bf){
+    if(lay_off()) return 1;
+    pthread_mutex_lock(&g_lay_mx); LayWin*l=0; for(int k=0;k<8;k++) if(g_lay[k].used && g_lay[k].hwnd==h) l=&g_lay[k];
+    if(!l) for(int k=0;k<8;k++) if(!g_lay[k].used){ l=&g_lay[k]; memset(l,0,sizeof *l); l->used=1; l->hwnd=h; l->alpha=255;
+        l->visible=1; for(int i=0;i<64;i++) if(g_vis[i].h==h) l->visible=g_vis[i].shown; break; }
+    if(l){ if(pd){ l->x=pd[0]; l->y=pd[1]; } if(bf){ l->alpha=bf[2]; l->premul=bf[3]&1; }
+        GdiDC*sd=sdc; if(ps && sd && sd->magic==GDIDC_MAGIC && sd->bmp && sd->bmp->bits && sd->bmp->bpp==32){
+            GdiObj*bm=sd->bmp; int w=ps[0], hh=ps[1], sx=sp?sp[0]:0, sy=sp?sp[1]:0;
+            if(w>0 && hh>0 && w<=8192 && hh<=8192){ uint32_t*np=realloc(l->px,(size_t)w*hh*4);
+                if(np){ l->px=np; l->w=w; l->h=hh; memset(np,0,(size_t)w*hh*4);
+                    for(int j=0;j<hh;j++){ int y=sy+j; if(y<0||y>=bm->h) continue; int x0=sx<0?0:sx, x1=sx+w>bm->w?bm->w:sx+w; if(x1<=x0) continue;
+                        memcpy(np+(size_t)j*w+(x0-sx),gdi_rowp(bm,y)+x0,(size_t)(x1-x0)*4); }
+                    l->dirty=1; } } }
+        g_lay_any=1; }
+    pthread_mutex_unlock(&g_lay_mx); return 1; }
 // scaled blit src->dst (nearest). alpha: 0=copy, 1=src-alpha over dst.
 static void gdi_blit(GdiObj*d,int dx,int dy,int dw,int dh, GdiObj*s,int sx,int sy,int sw,int sh,int alpha){
     if(!d||!d->bits||d->bpp!=32||!s||!s->bits||s->bpp!=32) return;
@@ -4460,6 +4493,32 @@ static void d3dgl_ensure_depth(D3DObj*o); // fwd (depth-stencil resources)
 // context (uploads, RT/depth creation, blits) invalidates it
 static unsigned g_unit_tex[32], g_unit_tgt[32], g_unit_samp[32]; static int g_unitcache_ok;
 #define TEXCACHE_INVALIDATE() (g_unitcache_ok=0)
+// Visible layered windows over the frame (current viewport = the client area), in creation order. The client's
+// bitmaps are premultiplied BGRA (AC_SRC_ALPHA) or opaque; SourceConstantAlpha scales either.
+static void lay_draw(void){
+    if(!g_lay_any || lay_off()) return;
+    static unsigned prog; static int lrect=-1, lalpha=-1; static void*vctx; static unsigned vao;
+    if(!prog){ const char*vs="#version 410 core\nuniform vec4 r; out vec2 uv; void main(){ vec2 c=vec2(gl_VertexID&1,(gl_VertexID>>1)&1); uv=c;"
+            " gl_Position=vec4(mix(r.x,r.z,c.x),mix(r.y,r.w,c.y),0.0,1.0); }\n";
+        const char*fs="#version 410 core\nuniform sampler2D t; uniform vec4 a; in vec2 uv; out vec4 o; void main(){ vec4 c=texture(t,uv);"
+            " if(a.y<0.5) c=vec4(c.rgb*c.a,c.a); o=c*a.x; }\n";
+        unsigned v=G.CreateShader(GLE_VS),f=G.CreateShader(GLE_FS); G.ShaderSource(v,1,&vs,0); G.CompileShader(v); G.ShaderSource(f,1,&fs,0); G.CompileShader(f);
+        prog=G.CreateProgram(); G.AttachShader(prog,v); G.AttachShader(prog,f); G.LinkProgram(prog); G.DeleteShader(v); G.DeleteShader(f);
+        lrect=G.GetUniformLocation(prog,"r"); lalpha=G.GetUniformLocation(prog,"a"); }
+    void*cur=CGLGetCurrentContext(); if(cur!=vctx){ vctx=cur; G.GenVertexArrays(1,&vao); }
+    pthread_mutex_lock(&g_lay_mx);
+    int drew=0;
+    for(int k=0;k<8;k++){ LayWin*l=&g_lay[k]; if(!l->used || !l->visible || !l->px || l->w<=0 || l->h<=0 || !l->alpha) continue;
+        if(!drew){ drew=1; G.UseProgram(0); G.BindProgramPipeline(0); G.UseProgram(prog); G.BindVertexArray(vao); G.Enable(0x0BE2); G.BlendFunc(1,0x0303); G.ActiveTexture(GLE_TEX0); if(G.BindSampler) G.BindSampler(0,0); }
+        if(!l->tex){ G.GenTextures(1,&l->tex); G.BindTexture(GLE_TEX2D,l->tex); G.TexParameteri(GLE_TEX2D,0x2801,0x2601); G.TexParameteri(GLE_TEX2D,0x2800,0x2601);
+            G.TexParameteri(GLE_TEX2D,0x2802,0x812F); G.TexParameteri(GLE_TEX2D,0x2803,0x812F); l->dirty=1; }
+        G.BindTexture(GLE_TEX2D,l->tex);
+        if(l->dirty){ G.TexImage2D(GLE_TEX2D,0,0x8058/*RGBA8*/,l->w,l->h,0,0x80E1/*BGRA*/,0x8367/*UINT_8_8_8_8_REV*/,l->px); l->dirty=0; }
+        // client pixels (top-down) -> NDC: rows go downwards, so the quad's v=0 is the window's top edge
+        float r[4]={ l->x/(float)WIN_W*2-1, 1-l->y/(float)WIN_H*2, (l->x+l->w)/(float)WIN_W*2-1, 1-(l->y+l->h)/(float)WIN_H*2 }, a[4]={ l->alpha/255.0f, (float)l->premul, 0,0 };
+        G.ProgramUniform4fv(prog,lrect,1,r); G.ProgramUniform4fv(prog,lalpha,1,a); G.DrawArrays(5/*TRIANGLE_STRIP*/,0,4); }
+    if(drew){ G.Disable(0x0BE2); TEXCACHE_INVALIDATE(); }
+    pthread_mutex_unlock(&g_lay_mx); }
 // DXGI -> GL upload format for uncompressed textures. swz: 1 = A8 (0,0,0,R), 2 = X8 formats (alpha = 1).
 // Anything not listed (integer/depth formats) falls back to the 1x1 magenta placeholder.
 typedef struct { unsigned ifmt, fmt, type; int swz; } GLFmt;
@@ -6476,6 +6535,7 @@ static void d3dgl_blit_fullscreen_i(unsigned vao){
     if(g_d3dgl_blit_uloc>=0){ float tw=g_d3dgl_present_tw?g_d3dgl_present_tw:1, th=g_d3dgl_present_th?g_d3dgl_present_th:1;
         float sc[4]={ g_d3dgl_present_vw/tw, g_d3dgl_present_vh/th, 0,0 }; G.ProgramUniform4fv(g_d3dgl_blit_prog,g_d3dgl_blit_uloc,1,sc); }
     G.BindVertexArray(vao); G.DrawArrays(4,0,3);
+    lay_draw();          // the client's layered windows (loading screen / menus while the game is not presenting)
     hb_draw_overlay();   // PELOAD_HITBOXES (hitbox.c): object bounding volumes over the frame
     // PELOAD_D3DGL_SHOTWIN=<n>: capture the WINDOW framebuffer (FB 0) right after the blit = EXACTLY what the
     // user sees (not the G-buffer RT dumps, which are a different, often-black buffer). Every n blits.
@@ -6547,6 +6607,7 @@ static int pq_present_wait(unsigned long*seen,int ms){
     G.ActiveTexture(GLE_TEX0); G.BindTexture(GLE_TEX2D,g_pq_tex[slot]); if(G.BindSampler) G.BindSampler(0,0);
     if(g_pq_sloc>=0) G.ProgramUniform1i(g_pq_prog,g_pq_sloc,0);
     G.BindVertexArray(g_pq_vao); G.DrawArrays(4,0,3);
+    lay_draw();          // the client's layered windows (loading screen / menus while the game is not presenting)
     hb_draw_overlay();   // PELOAD_HITBOXES (hitbox.c): object bounding volumes over the frame
     G.Flush(); if(pc) CGLUnlockContext(pc);
     pthread_mutex_lock(&g_pq_mx); g_pq_reading=-1; pthread_mutex_unlock(&g_pq_mx);

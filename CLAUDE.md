@@ -152,6 +152,10 @@ PELOAD_MIC_MUTED=1; stats do=mic&on=. The client sends voice only with its talk 
 Zones overlay (F10 / PELOAD_HB_ZONES, hitbox.c hbz_*): kill/safe trigger volumes (scnr +0x258/+0x484/+0x490) and soft
 ceilings (sddt) read from the map being played (hb_current_map: halo3/maps or a Workshop folder), drawn with
 hb_seg_clip. Host speed control: stats do=speed&v=<tl_speed index> writes the variant's base player speed trait.
+Layered windows (2026-10-17): UpdateLayeredWindow stores each window's bitmap/position/alpha and ShowWindow its
+visibility; lay_draw draws them over the frame at the window blit. The client falls back to layered windows whenever
+the game stops presenting for >1 s ("Client screens now shown as layered windows"); before this its loading screen
+vanished during heavy loads (backlog 25). PELOAD_NO_LAYERED = old no-op.
 Patch points across releases: shim/docs/patch-addresses.md (all 34 client releases surveyed statically, downloads in
 ~/Library/Application Support/ReclaimerMac/releases/<tag>/; never run them). No fixed exe RVA survives a release; a
 unique signature hit can still be the wrong function -- validate by meaning (st_voice_install refuses a set_muted hit
