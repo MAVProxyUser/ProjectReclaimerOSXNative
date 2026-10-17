@@ -480,7 +480,7 @@ static void* st_conn(void*a){ int fd=(int)(intptr_t)a; pthread_setname_np("shim-
         // top-down map pictures made from the .map files (shim/tools/maptop.sh -> re-tools/h3bsp.py):
         // ~/Library/Application Support/ReclaimerMac/maptop/<map>.png + <map>.json (world bounds)
         const char*nm=path+8; size_t L=strlen(nm); int ok=L>4 && L<64; for(size_t i=0;ok && i<L;i++){ char c=nm[i]; ok=(c>='a'&&c<='z')||(c>='0'&&c<='9')||c=='_'||c=='.'; }
-        const char*ct=ok&&L>4&&!strcmp(nm+L-4,".png")?"image/png":ok&&L>5&&!strcmp(nm+L-5,".json")?"application/json":0;
+        const char*ct=ok&&L>4&&!strcmp(nm+L-4,".png")?"image/png":ok&&L>5&&!strcmp(nm+L-5,".json")?"application/json":ok&&L>6&&!strcmp(nm+L-6,".z.bin")?"application/octet-stream":0;   // .z.bin: ground heights (teleport here)
         char fp[1024]; const char*home=getenv("HOME"); FILE*f=0; if(ct && !strstr(nm,"..")){ snprintf(fp,sizeof fp,"%s/Library/Application Support/ReclaimerMac/maptop/%s",home?home:"",nm); f=fopen(fp,"rb"); }
         char*buf=0; long n=0; if(f){ fseek(f,0,SEEK_END); n=ftell(f); fseek(f,0,SEEK_SET); if(n>0 && n<(32<<20) && (buf=malloc((size_t)n)) && fread(buf,1,(size_t)n,f)==(size_t)n){} else { free(buf); buf=0; } fclose(f); }
         if(buf){ int k=snprintf(h,sizeof h,"HTTP/1.1 200 OK\r\nContent-Type: %s\r\nContent-Length: %ld\r\nCache-Control: max-age=60\r\nConnection: close\r\n\r\n",ct,n);

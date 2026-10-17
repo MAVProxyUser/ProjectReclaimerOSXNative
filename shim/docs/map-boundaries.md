@@ -240,3 +240,11 @@ PELOAD_ALLOW_TELEPORT=1 PELOAD_PATCH=halo3+37b816:E95501000090,halo3+37b734:EB
 (bipeds skip the kill-volume / safe-zone test and the player soft-ceiling response), then teleport with `tpto`.
 Joining clients' own prediction still runs the soft ceilings (push-back / slip) unless they run the `37b734` patch too.
 Invisible walls are unchanged (section 3).
+
+### Exploring from the stats page (2026-10-17)
+
+`shim/tools/maptop.sh` (FORCE=1 to redo) now also writes `<map>.z.bin`: the top surface height every world unit
+(roofs and cliff tops included, no z cut; format in the map's .json `zgrid`). On the live stats page of a game you
+host with `PELOAD_ALLOW_TELEPORT=1`, tick **click to teleport** under the map and click a spot: the page looks up the
+ground there and sends `tpto` to 0.6 above it. With the boundary patches above you stay alive outside the play area
+(tested: Valhalla east cliff, (110, -80) -> standing at z 19.1).

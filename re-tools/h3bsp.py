@@ -429,6 +429,7 @@ def main():
         tris, kinds = tris[keep], kinds[keep]
     pts = play_points(m)
     roofed = None
+    all_tris = tris                      # before the z cut (the teleport height grid wants cliff tops and roofs too)
     if opts.zcut == 'auto':
         zcut, roofed = auto_zcut(tris, pts, log)
     else:
@@ -493,6 +494,18 @@ def main():
             'pixel': 'px = (x - x0) * px_per_unit, py = (y1 - y) * px_per_unit; top-left origin; +x right, +y up; '
                      'brightness = height (zmin dark .. zmax light)',
             'source': 'collision BSP%s' % ('' if opts.no_instances else ' + instanced geometry')}
+    # ground-height grid for teleporting (the stats page's "teleport here"): the TOP surface of every upward-facing
+    # triangle, no z cut (so cliff tops outside the play area count), 1 world unit per cell, over the geometry box.
+    # <map>.z.bin = int16 little-endian, z * 10, -32768 = nothing; row 0 = the north edge (y = gy1), column 0 = gx0.
+    gx0, gy0, gx1, gy1 = float(glo[0]), float(glo[1]), float(ghi[0]), float(ghi[1])
+    gw, gh = int(np.ceil(gx1 - gx0)), int(np.ceil(gy1 - gy0))
+    if 0 < gw * gh <= 4_000_000:
+        zg = rasterize(all_tris, gx0, gy1, 1.0, gw, gh)
+        zi = np.where(np.isfinite(zg), np.clip(np.round(zg * 10), -32767, 32767), -32768).astype('<i2')
+        zpath = os.path.splitext(opts.out)[0] + '.z.bin'
+        zi.tofile(zpath)
+        meta['zgrid'] = {'file': os.path.basename(zpath), 'x0': round(gx0, 4), 'y1': round(gy1, 4), 'cell': 1.0, 'w': gw, 'h': gh,
+                         'format': 'int16 LE z*10, -32768 none; row 0 = y1 (north), col 0 = x0; top surface, no z cut'}
     jpath = os.path.splitext(opts.out)[0] + '.json'
     with open(jpath, 'w') as f:
         json.dump(meta, f, indent=1)
