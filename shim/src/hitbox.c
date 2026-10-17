@@ -510,21 +510,21 @@ static void hb_vis_tick(void){
     if(!fbo){ TEXCACHE_INVALIDATE(); G.GenTextures(1,&tex); G.BindTexture(GLE_TEX2D,tex);
         G.TexImage2D(GLE_TEX2D,0,0x8CAD/*DEPTH32F_STENCIL8*/,HBV_W,HBV_H,0,0x84F9/*DEPTH_STENCIL*/,0x8DAD/*FLOAT_32_UNSIGNED_INT_24_8_REV*/,0);
         G.TexParameteri(GLE_TEX2D,0x2801,0x2600); G.TexParameteri(GLE_TEX2D,0x2800,0x2600);
-        G.GenFramebuffers(1,&fbo); G.BindFramebuffer(GLE_FBO,fbo); G.FramebufferTexture2D(GLE_FBO,0x821A/*DEPTH_STENCIL_ATTACHMENT*/,GLE_TEX2D,tex,0);
+        G.GenFramebuffers(1,&fbo); gl_bindfbo_any(GLE_FBO,fbo); G.FramebufferTexture2D(GLE_FBO,0x821A/*DEPTH_STENCIL_ATTACHMENT*/,GLE_TEX2D,tex,0);
         if(G.DrawBuffer) G.DrawBuffer(0); if(G.ReadBuffer) G.ReadBuffer(0);
         G.GenBuffers(3,pbo); for(int i=0;i<3;i++){ G.BindBuffer(0x88EB/*PIXEL_PACK*/,pbo[i]); G.BufferData(0x88EB,HBV_W*HBV_H*4,0,0x88E1/*STREAM_READ*/); }
-        G.BindBuffer(0x88EB,0); G.BindFramebuffer(GLE_FBO,0); }
+        G.BindBuffer(0x88EB,0); gl_bindfbo_any(GLE_FBO,0); }
     float vp[32]; unsigned s0=g_hb_vpseq; memcpy(vp,g_hb_vp,sizeof vp); if((s0&1) || g_hb_vpseq!=s0) return;
     unsigned src=d3dgl_fbo_for(0,0,ds);
-    G.BindFramebuffer(0x8CA8/*READ*/,src); G.BindFramebuffer(0x8CA9/*DRAW*/,fbo);
+    gl_bindfbo_any(0x8CA8/*READ*/,src); gl_bindfbo_any(0x8CA9/*DRAW*/,fbo);
     G.BlitFramebuffer(0,0,(int)ds->w,(int)ds->h,0,0,HBV_W,HBV_H,0x100/*DEPTH_BUFFER_BIT*/,0x2600/*NEAREST*/);
-    G.BindFramebuffer(0x8CA8,fbo); G.BindBuffer(0x88EB,pbo[idx]); G.ReadPixels(0,0,HBV_W,HBV_H,0x1902/*DEPTH_COMPONENT*/,0x1406/*FLOAT*/,0);
+    gl_bindfbo_any(0x8CA8,fbo); G.BindBuffer(0x88EB,pbo[idx]); G.ReadPixels(0,0,HBV_W,HBV_H,0x1902/*DEPTH_COMPONENT*/,0x1406/*FLOAT*/,0);
     memcpy(vps[idx],vp,64); filled[idx]=1;
     int rd=(idx+1)%3;   // the oldest copy: two frames old, long done on the GPU
     if(filled[rd]){ G.BindBuffer(0x88EB,pbo[rd]); const void*m=G.MapBufferRange(0x88EB,0,HBV_W*HBV_H*4,0x1/*MAP_READ*/);
         if(m){ g_hbv_seq++; __atomic_thread_fence(__ATOMIC_SEQ_CST); memcpy(g_hbv_depth,m,sizeof g_hbv_depth); memcpy(g_hbv_vp,vps[rd],64);
             __atomic_thread_fence(__ATOMIC_SEQ_CST); g_hbv_seq++; g_hbv_ok=1; G.UnmapBuffer(0x88EB); } }
-    G.BindBuffer(0x88EB,0); G.BindFramebuffer(GLE_FBO,0); idx=(idx+1)%3; }
+    G.BindBuffer(0x88EB,0); gl_bindfbo_any(GLE_FBO,0); idx=(idx+1)%3; }
 static int hb_vis(const HbObj*o){
     if(!g_hbv_ok) return 1; unsigned s0=g_hbv_seq; if(s0&1) return 1;
     float vp[16]; memcpy(vp,g_hbv_vp,64); float f[3]={vp[12],vp[13],vp[14]}, fl=sqrtf(f[0]*f[0]+f[1]*f[1]+f[2]*f[2]); if(fl<1e-6f) return 1;
@@ -670,7 +670,7 @@ static void hb_capture_tick(void){
     char p[480];
     int w=g_d3dgl_present_vw, h=g_d3dgl_present_vh;
     if(w>0 && h>0 && (long)w*h<=(64<<20)){ unsigned char*cap=calloc(1,(size_t)w*h*4);
-        if(cap){ G.BindFramebuffer(GLE_FBO,g_d3d_backbuf->glfbo); if(G.ReadBuffer) G.ReadBuffer(GLE_CA0); G.ReadPixels(0,0,w,h,GLE_RGBA,GLE_UBYTE,cap);
+        if(cap){ gl_bindfbo_any(GLE_FBO,g_d3d_backbuf->glfbo); if(G.ReadBuffer) G.ReadBuffer(GLE_CA0); G.ReadPixels(0,0,w,h,GLE_RGBA,GLE_UBYTE,cap);
             hb_cap_flip(cap,(size_t)w*4,h); snprintf(p,sizeof p,"%s.bmp",base); bmp_write_rgba(p,w,h,cap); free(cap); } }
     float vp[32]={0}; for(int t=0;t<100;t++){ unsigned s0=g_hb_vpseq; if(s0&1) continue; memcpy(vp,g_hb_vp,sizeof vp); if(g_hb_vpseq==s0) break; }
     const float*eye=vp+28; float fx=vp[12],fy=vp[13],fz=vp[14], fl=sqrtf(fx*fx+fy*fy+fz*fz); if(fl>0){ fx/=fl; fy/=fl; fz/=fl; }
@@ -679,7 +679,7 @@ static void hb_capture_tick(void){
     D3DObj*ds=g_hb_dsv; long cracks=0, drawn=0; float dmin=1e30f, dmax=0; int dw=0, dh=0;
     if(ds && ds->gltex && ds->gldsatt){ dw=(int)(ds->w>4096?4096:ds->w); dh=(int)(ds->h>4096?4096:ds->h);
         float*d=dw>0&&dh>0?malloc((size_t)dw*dh*4):0; unsigned char*img=d?calloc(1,(size_t)dw*dh*4):0;
-        if(d && img){ unsigned fbo=d3dgl_fbo_for(0,0,ds); G.BindFramebuffer(GLE_FBO,fbo); G.ReadPixels(0,0,dw,dh,0x1902/*DEPTH_COMPONENT*/,0x1406/*FLOAT*/,d);
+        if(d && img){ unsigned fbo=d3dgl_fbo_for(0,0,ds); gl_bindfbo_any(GLE_FBO,fbo); G.ReadPixels(0,0,dw,dh,0x1902/*DEPTH_COMPONENT*/,0x1406/*FLOAT*/,d);
             hb_cap_flip(d,(size_t)dw*4,dh); snprintf(p,sizeof p,"%s_depth.f32",base); FILE*f=fopen(p,"wb"); if(f){ fwrite(d,4,(size_t)dw*dh,f); fclose(f); }
             for(long i=0;i<(long)dw*dh;i++){ float v=d[i]; if(v>0){ drawn++; if(v<dmin) dmin=v; if(v>dmax) dmax=v; } }
             double lmin=log(dmin>0&&dmin<1e30f?dmin:1e-7), lmax=log(dmax>0?dmax:1); if(lmax-lmin<1e-6) lmax=lmin+1e-6;
@@ -692,7 +692,7 @@ static void hb_capture_tick(void){
                 unsigned char g=(unsigned char)(40+215*((log(v)-lmin)/(lmax-lmin))); o[0]=o[1]=o[2]=g; }
             snprintf(p,sizeof p,"%s_depth.bmp",base); bmp_write_rgba(p,dw,dh,img); }
         free(d); free(img); }
-    G.BindFramebuffer(GLE_FBO,0);
+    gl_bindfbo_any(GLE_FBO,0);
     snprintf(p,sizeof p,"%s.txt",base); FILE*f=fopen(p,"w");
     if(f){ fprintf(f,"camera %.4f %.4f %.4f\nforward %.5f %.5f %.5f\nyaw_deg %.2f\npitch_deg %.2f\n",eye[0],eye[1],eye[2],fx,fy,fz,yaw,pitch);
         for(int r=0;r<4;r++) fprintf(f,"viewproj_row%d %.9g %.9g %.9g %.9g\n",r,vp[r*4],vp[r*4+1],vp[r*4+2],vp[r*4+3]);

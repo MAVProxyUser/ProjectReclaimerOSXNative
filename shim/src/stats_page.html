@@ -55,6 +55,7 @@ canvas{width:100%;height:auto;display:block;background:#0b0b0b;border-radius:4px
 .pc.talk{border-color:#3c3;background:#1c3a1c;box-shadow:0 0 6px #3c36}.pc.muted{opacity:.6}
 #ch{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px}#ch h2{margin:0 auto 0 0}
 .talkic{color:#4d4;margin-left:6px}
+.hostb{display:inline-block;background:#5a4a12;color:#ffd75a;border:1px solid #a8862a;border-radius:3px;font-size:10px;font-weight:700;padding:0 4px;margin-left:6px;vertical-align:1px}
 </style></head>
 <body>
 <h1>Reclaimer live stats</h1><div id="hd">connecting...</div>
@@ -103,7 +104,7 @@ let snap=null, heat=null, sel=null;   // sel = the selected player's slot
 function renderTable(){
   const ps=snap.players.slice().sort((a,b)=>a.team-b.team||a.name.localeCompare(b.name));
   document.getElementById('tb').innerHTML=ps.map(p=>`<tr data-s="${p.slot}" class="${p.alive?'':'dead'} ${p.you?'you':''} ${p.slot===sel?'sel':''}">
-   <td><span class="sw" style="background:${C[p.team_name]||'#888'}"></span>${E(p.name)}${p.you?' (you)':''}${p.talking?'<span class="talkic" title="talking">🔊</span>':''}${p.muted?' 🔇':''}</td>
+   <td><span class="sw" style="background:${C[p.team_name]||'#888'}"></span>${E(p.name)}${p.you?' (you)':''}${p.host?'<span class="hostb" title="hosts this game">★ HOST</span>':''}${p.talking?'<span class="talkic" title="talking">🔊</span>':''}${p.muted?' 🔇':''}</td>
    <td>${B(p.shield,'#58b8ff')}</td><td>${B(p.health,'#7ddf6a')}</td><td>${E(p.weapon||(p.alive?'':'respawning'))}</td>
    <td>${p.deaths??''}</td><td>${p.shots??''}</td><td>${p.shots?Math.round(p.accuracy*100)+'%':''}</td><td>${p.grenades.frag}f ${p.grenades.plasma}p ${p.grenades.spike}s ${p.grenades.firebomb}b</td>
    <td>${E(p.vehicle||'')}</td><td>${p.alive?p.pos.map(v=>v.toFixed(1)).join(', '):''}</td><td>${p.speed.toFixed(1)}</td><td>${traitBadges(p,3)}</td></tr>`).join('');
@@ -132,7 +133,7 @@ const bigMute=(voice,muted)=>`<button class="bigmute mb ${muted?'on':''}" data-v
 // not jump around as people talk (rows are added or removed only when players join or leave).
 const connChips=new Map(); let connMute=null;
 function renderConn(){ const ss=(snap&&snap.session)||[], el=document.getElementById('cl'), canMute=!!(snap&&snap.mute);
-  document.getElementById('ct').textContent=`Connected (${ss.length})`;
+  const hp=ss.find(p=>p.host); document.getElementById('ct').textContent=`Connected (${ss.length})`+(hp?` · hosted by ${hp.name}`:(snap&&snap.dedicated?' · dedicated server':''));
   for(const id of ['muteall','unmuteall']) document.getElementById(id).disabled=!canMute;
   if(!ss.length){ connChips.clear(); el.className='note'; el.textContent='no network session'; return; }
   if(el.className==='note'){ el.className=''; el.textContent=''; }
@@ -140,7 +141,8 @@ function renderConn(){ const ss=(snap&&snap.session)||[], el=document.getElement
   for(const p of ss){ seen.add(p.voice); let c=connChips.get(p.voice);
     if(!c){ c=document.createElement('span'); c.className='pc'; c.dataset.name=p.name; c.innerHTML=`<span class="nm"></span>${muteBtn(p.voice,false)}`; connChips.set(p.voice,c); added=true; }
     if(c.dataset.name!==p.name){ c.dataset.name=p.name; added=true; }
-    c.querySelector('.nm').textContent=p.name; c.title=p.talking?'talking':'';
+    c.querySelector('.nm').textContent=p.name; c.title=(p.host?'hosts this game':'')+(p.talking?(p.host?', ':'')+'talking':'');
+    let hb=c.querySelector('.hostb'); if(p.host&&!hb){ hb=document.createElement('span'); hb.className='hostb'; hb.textContent='★ HOST'; c.querySelector('.nm').after(hb); } else if(!p.host&&hb) hb.remove();
     c.classList.toggle('talk',!!p.talking); c.classList.toggle('muted',!!p.muted);
     const b=c.querySelector('.mb'); b.classList.toggle('on',!!p.muted); b.dataset.m=p.muted?'1':'0'; b.title=p.muted?'Unmute':'Mute'; b.disabled=!canMute; }
   for(const [v,c] of connChips) if(!seen.has(v)){ c.remove(); connChips.delete(v); }

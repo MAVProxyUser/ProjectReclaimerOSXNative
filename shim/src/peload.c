@@ -75,6 +75,9 @@ static char* peload_cgetenv(const char*name){
         if(k==name) return __atomic_load_n(&ready[s],__ATOMIC_ACQUIRE) ? vals[s] : getenv(name); }
     return getenv(name); }
 #define getenv(n) peload_cgetenv(n)
+// GENV1("PELOAD_X"): read a PELOAD_* switch once per call site and keep it in a static -- for the per-draw path, where
+// even the cached lookup above (hash + compare, ~20-40 ns translated) adds up over thousands of draws a frame
+#define GENV1(n) ({ static const char* _gv=(const char*)1; if(__builtin_expect(_gv==(const char*)1,0)) _gv=peload_cgetenv(n); _gv; })
 #include <sys/ioctl.h>
 #include <CommonCrypto/CommonDigest.h>
 #include <libkern/OSCacheControl.h>
@@ -326,7 +329,21 @@ static void *make_gl_thunk(void *real){
 // ---- full-call tracer (PELOAD_TRACE_ALL): a trampoline that logs the import
 // name, then tail-jumps to the real target with args intact. ----
 static void *imp_real[8192];
-void __attribute__((ms_abi)) on_trace(uint32_t idx){ if(idx<(uint32_t)imp_count){ ws("  >> "); ws(imp_dll[idx]); ws("!"); ws(imp_fn[idx]); ws("\n"); } }
+// PELOAD_CALLCOUNT=<thread name part>: count the Win32 imports called by threads whose name contains it (every 10 s:
+// the top ones) instead of printing every call (PELOAD_TRACE_ALL) -- finds busy loops (a wait that returns at once).
+static __thread int t_cc_on=-1, t_cc_n; static unsigned long g_cc[8192];
+static double mono_s(void);
+void __attribute__((ms_abi)) on_trace(uint32_t idx){
+    static const char*cc=(const char*)1; if(cc==(const char*)1) cc=getenv("PELOAD_CALLCOUNT");
+    if(cc){ if(t_cc_on<0 || (++t_cc_n&4095)==0){ char nm[64]={0}; pthread_getname_np(pthread_self(),nm,sizeof nm); t_cc_on=strstr(nm,cc)!=0; }
+        if(t_cc_on && idx<8192) __atomic_add_fetch(&g_cc[idx],1,__ATOMIC_RELAXED);
+        static double last; static pthread_mutex_t mx=PTHREAD_MUTEX_INITIALIZER; double now=mono_s();
+        if(now-last>=10.0 && !pthread_mutex_trylock(&mx)){ if(now-last>=10.0){ last=now; char m[200]; int k=snprintf(m,sizeof m,"  [callcount] threads named *%s*, last 10 s:",cc); (void)!write(2,m,k);
+                for(int t=0;t<15;t++){ int bi=-1; unsigned long bc=0; for(int i=0;i<imp_count && i<8192;i++) if(g_cc[i]>bc){ bc=g_cc[i]; bi=i; } if(bi<0) break;
+                    k=snprintf(m,sizeof m," %s %lu,",imp_fn[bi],bc); (void)!write(2,m,k); g_cc[bi]=0; }
+                memset(g_cc,0,sizeof g_cc); (void)!write(2,"\n",1); } pthread_mutex_unlock(&mx); }
+        return; }
+    if(idx<(uint32_t)imp_count){ ws("  >> "); ws(imp_dll[idx]); ws("!"); ws(imp_fn[idx]); ws("\n"); } }
 static uint8_t *g_trpool; static size_t g_troff; static int g_trexec;
 static void *make_trace_stub(uint32_t idx, void *real){
     if(g_trexec) mprotect(g_trpool, 96*8192, PROT_READ|PROT_WRITE);
@@ -833,6 +850,13 @@ typedef struct { void** vtbl; uint32_t kind; uint32_t rowpitch; uint64_t size; v
     unsigned glfbo;               // GL framebuffer (render targets: FBO wrapping gltex)
     unsigned glprog;              // GL program (translated shader)
     int gl_dirty;                 // backing data changed since last GL upload
+    void* rdata;                  // PELOAD_D3DGL_SUBMIT: the newest data block the game was handed (Map); o->data is
+    void* rpend;                  //   the one the GL thread uses; rpend: a WRITE_DISCARD block to commit at Unmap
+    void* volatile rfree;         //   recycled blocks (a lock-free stack through each block's first 8 bytes)
+    uint32_t rmapped;             //   the pending Map type (5 NO_OVERWRITE: commit "dirty" at Unmap)
+    uint32_t rgen;                //   g_sub_gen when rdata was last valid (the thread can be switched off and on)
+    void* cs_snap;                // compute: the latest read-only snapshot of this buffer (CsSnap, shared by jobs while ver matches)
+    uint64_t sq_wpend;            // PELOAD_D3DGL_SUBMIT: queue position after the last queued copy/update into this resource
     uint8_t dpart, dmin;          // dpart: every change since the last upload named its subresource (Map/UpdateSubresource),
                                   //   dmin = the lowest one; any other write clears dpart (whole resource)
     uint8_t up_base1;             // BC-decoded 2D upload: 1 + the DXGI mip used as GL level 0 (0 = other path)
@@ -880,7 +904,10 @@ typedef struct { void** vtbl; uint32_t kind; uint32_t rowpitch; uint64_t size; v
 typedef struct { GUID_ g; uint32_t sz; uint8_t buf[64]; } PDEnt;
 typedef struct { int n; PDEnt e[12]; } PDStore;
 // Bound pipeline state we track to interpret/translate draws.
-static struct {
+// The bound pipeline state. g_d3dst is what the GL executor draws with (the GL thread under PELOAD_D3DGL_SUBMIT);
+// g_rst is what the game's context calls set (its thread). Each draw hands g_rst over (d3dsubmit.c: copied inline,
+// or queued as a snapshot when it changed).
+typedef struct D3DState {
     D3DObj *il, *vb[8], *ib, *psrv[32], *rtv;
     D3DObj *psrvv[32], *rtvv[8];               // the bound VIEW objects (format: sRGB vs UNORM view of a TYPELESS resource)
     D3DObj *rtvs[8]; int num_rt; D3DObj *dsv;  // multiple render targets (deferred G-buffer) + depth
@@ -891,7 +918,19 @@ static struct {
     float blendf[4]; uint32_t sref; int sc_l,sc_t,sc_r,sc_b; int vp_x, vp_y; D3DObj *pssamp[16], *vssamp[16];
     float vp_zn, vp_zf; int vp_set;           // viewport MinDepth/MaxDepth (first-person view models use their own slice)
     uint32_t vstride[8], voff[8], ibfmt, iboff, topo; int vp_w, vp_h;
-} g_d3dst;
+} D3DState;
+static D3DState g_d3dst, g_rst;
+// D3D11 context entry points that do work: the wrappers (d3dsubmit.c) run the ctxi_* implementations inline, or queue
+// them for the GL thread under PELOAD_D3DGL_SUBMIT
+static int  MSABI ctx_Map(void*t,void*res,uint32_t sub,uint32_t type,uint32_t fl,void*pM); static void MSABI ctx_Unmap(void*t,void*res,uint32_t sub);
+static void MSABI ctx_UpdateSubresource(void*t,void*res,uint32_t sub,const void*box,const void*src,uint32_t srp,uint32_t sdp);
+static void MSABI ctx_CopyResource(void*t,void*dst,void*src);
+static void MSABI ctx_CopySubresourceRegion(void*t,void*dstR,uint32_t dstSub,uint32_t dstX,uint32_t dstY,uint32_t dstZ,void*srcR,uint32_t srcSub,const void*srcBox);
+static void MSABI ctx_ClearRTV(void*t,void*rtv,const float*col); static void MSABI ctx_ClearDSV(void*t,void*dsv,uint32_t fl,float d,uint8_t s);
+static void MSABI ctx_Dispatch(void*t,uint32_t a,uint32_t b,uint32_t c);
+static void MSABI ctx_ClearUAVUint(void*t,void*uav,const uint32_t*vals); static void MSABI ctx_ClearUAVFloat(void*t,void*uav,const float*vals);
+static void MSABI ctx_Begin(void*t,void*a); static void MSABI ctx_End(void*t,void*a); static int MSABI ctx_GetData(void*t,void*a,void*data,uint32_t size,uint32_t flags);
+static void sub_draw(uint32_t vcount,int indexed,uint32_t instcount,uint32_t start,int32_t base,uint32_t sinst); static void sub_present(void); static int sub_on(void);
 // IA/VS census (PELOAD_IA_CENSUS): is halo3 submitting classic VB geometry, or vertex-pulling via
 // VS shader-resources (slot 25, historically unhooked => invisible)? This settles "geometry=0".
 static struct { uint64_t ia_vb, ia_il, vs_srv, vs_classic, vs_pull, vs_set; } g_iacen;
@@ -1343,7 +1382,7 @@ static struct { unsigned exec, novsps, noglsl, noprog, ringfail, wraps, disp, co
 static void d3d_dirty_sub(D3DObj*o,uint32_t sub){ uint8_t s8=sub>255?255:(uint8_t)sub;
     if(!o->gl_dirty){ o->dpart=1; o->dmin=s8; } else if(o->dpart && s8<o->dmin) o->dmin=s8;
     o->gl_dirty=1; }
-static int  MSABI ctx_Map(void*t,void*res,uint32_t sub,uint32_t type,uint32_t fl,void*pM){ (void)t;(void)sub;(void)type;(void)fl;
+static int  MSABI ctxi_Map(void*t,void*res,uint32_t sub,uint32_t type,uint32_t fl,void*pM){ (void)t;(void)sub;(void)type;(void)fl;
     g_fs.maps++; if(type==1||type==3) g_fs.mapread++;
     cs_wait_res((D3DObj*)res);
     if(getenv("PELOAD_TRACE_TEXUPD") && res && ((D3DObj*)res)->kind>=2 && ((D3DObj*)res)->w){ D3DObj*q=res; extern double g_gameplay_t0; uint64_t ra=(uint64_t)__builtin_return_address(0);
@@ -1382,7 +1421,7 @@ static uint64_t g_d3dcnt[8]; // 0 Draw,1 DrawIndexed,2 DrawInstanced,3 DrawIdxIn
 static void d3dtrace(int i,const char*nm){ if(!getenv("PELOAD_TRACE_D3D")) return; if((g_d3dcnt[i]++ %200)==0){ char b[80]; int k=snprintf(b,sizeof b,"  [d3d] %s #%llu\n",nm,(unsigned long long)g_d3dcnt[i]); (void)!write(2,b,k);} }
 // A fullscreen-quad draw (4-vert tri-strip, no VB) sampling a >=640x360 texture is the
 // engine presenting its composited frame. Capture that texture as the frame to show.
-static void d3d_capture_frame(uint32_t n){ if(n>6) return; D3DObj* tx=g_d3dst.psrv[0];
+static void d3d_capture_frame(uint32_t n){ if(n>6) return; D3DObj* tx=g_rst.psrv[0];
     // psrv[0] is a BOUND INPUT texture; in-game it's usually a square shadow map / atlas
     // (1024x1024), not the final frame. Only latch a window-aspect (16:9-ish, wide) texture so
     // intermediates can't hijack the presented frame with left-crushed garbage.
@@ -1398,8 +1437,8 @@ static void d3dgl_present(void); // fwd (blit the D3DGL backbuffer to the window
 static int cb_looks_viewproj(const float*m,uint64_t bytes); static int hb_enabled(void); static int hb_is_world_camera(const float*rows); static void hb_capture_view(const float*rows); static void hb_draw_overlay(void); static void hb_note_map(const char*p); extern volatile int g_hb_taken; static void hb_note_dsv(void*ds); static void hb_capture_tick(void); static void hb_vis_tick(void); // hitbox.c
 static void d3dgl_clear_rtv(void* rtvview,const float* col); // fwd (ClearRenderTargetView -> GL clear)
 static void d3dgl_clear_dsv(void*dsvview,uint32_t flags,float depth,uint8_t stencil); // fwd (ClearDepthStencilView -> GL depth/stencil clear)
-static void MSABI ctx_ClearRTV(void*t,void*rtv,const float*col){ (void)t; if(d3dgl_enabled()) d3dgl_clear_rtv(rtv,col); }
-static void MSABI ctx_ClearDSV(void*t,void*dsv,uint32_t fl,float d,uint8_t s){ (void)t; if(d3dgl_enabled()) d3dgl_clear_dsv(dsv,fl,d,s); }
+static void MSABI ctxi_ClearRTV(void*t,void*rtv,const float*col){ (void)t; if(d3dgl_enabled()) d3dgl_clear_rtv(rtv,col); }
+static void MSABI ctxi_ClearDSV(void*t,void*dsv,uint32_t fl,float d,uint8_t s){ (void)t; if(d3dgl_enabled()) d3dgl_clear_dsv(dsv,fl,d,s); }
 // PELOAD_DRAW_CALLER: log the first few distinct halo3 return addresses that call each draw type,
 // so we can decompile the actual geometry-submit function and find why it binds no input layout.
 static void draw_caller(const char*tag,void*ra,uint32_t vcount){ if(!getenv("PELOAD_DRAW_CALLER")) return;
@@ -1407,11 +1446,11 @@ static void draw_caller(const char*tag,void*ra,uint32_t vcount){ if(!getenv("PEL
     for(int i=0;i<ns;i++) if(seen[i]==v) return; if(ns<64) seen[ns++]=v;
     const char*mod="?"; uint64_t off=v; if(v>=0x180000000ULL&&v<0x187000000ULL){mod="halo3";off=v-0x180000000ULL;} else if(v>=0x140000000ULL&&v<0x14c000000ULL){mod="exe";off=v-0x140000000ULL;}
     char m[128]; int k=snprintf(m,sizeof m,"  [draw-caller] %s ra=%s+0x%llx n=%u vb0=%lluB stride=%u classicVS=%d il=%p\n",tag,mod,(unsigned long long)off,vcount,
-        g_d3dst.vb[0]?(unsigned long long)g_d3dst.vb[0]->size:0,g_d3dst.vstride[0], (g_d3dst.vs?g_d3dst.vs->vs_vtxin:-1), (void*)g_d3dst.il); (void)!write(2,m,k); }
+        g_rst.vb[0]?(unsigned long long)g_rst.vb[0]->size:0,g_rst.vstride[0], (g_rst.vs?g_rst.vs->vs_vtxin:-1), (void*)g_rst.il); (void)!write(2,m,k); }
 static void stg_note_draw(uint32_t n);
-static void MSABI ctx_DrawIndexed(void*t,uint32_t n,uint32_t s,int b){ (void)t;(void)s;(void)b; d3dtrace(1,"DrawIndexed"); stg_note_draw(n); draw_caller("DrawIndexed",__builtin_return_address(0),n); draw_log("drawI",n); d3d_capture_frame(n); if(d3dgl_enabled()) d3dgl_draw(n,1,1,s,b,0); }
-static void MSABI ctx_Draw(void*t,uint32_t n,uint32_t s){ (void)t;(void)s; d3dtrace(0,"Draw"); stg_note_draw(n); draw_caller("Draw",__builtin_return_address(0),n); draw_log("draw",n); d3d_capture_frame(n); if(d3dgl_enabled()) d3dgl_draw(n,0,1,s,0,0); }
-static void MSABI ctx_UpdateSubresource(void*t,void*res,uint32_t sub,const void*box,const void*src,uint32_t srp,uint32_t sdp){
+static void MSABI ctx_DrawIndexed(void*t,uint32_t n,uint32_t s,int b){ (void)t;(void)s;(void)b; d3dtrace(1,"DrawIndexed"); stg_note_draw(n); draw_caller("DrawIndexed",__builtin_return_address(0),n); draw_log("drawI",n); d3d_capture_frame(n); if(d3dgl_enabled()) sub_draw(n,1,1,s,b,0); }
+static void MSABI ctx_Draw(void*t,uint32_t n,uint32_t s){ (void)t;(void)s; d3dtrace(0,"Draw"); stg_note_draw(n); draw_caller("Draw",__builtin_return_address(0),n); draw_log("draw",n); d3d_capture_frame(n); if(d3dgl_enabled()) sub_draw(n,0,1,s,0,0); }
+static void MSABI ctxi_UpdateSubresource(void*t,void*res,uint32_t sub,const void*box,const void*src,uint32_t srp,uint32_t sdp){
     (void)t; D3DObj*o=res; if(!o||!o->data||!src) return;
     cs_wait_res(o);
     if(getenv("PELOAD_TRACE_TEXUPD") && o->kind>=2 && o->w==1280 && o->h==720 && !box){ static int n; if((n++%300)==0){ uint64_t nz=0; const uint8_t*sp=src; for(uint32_t y=0;y<720;y+=4) for(uint32_t x=0;x<1280*4;x+=4) if(sp[(size_t)y*srp+x+3]) nz++;
@@ -1452,12 +1491,12 @@ static void copy_trace(const char*what,D3DObj*dst,D3DObj*src){ if(dst&&src) flog
     (void)!write(2,m,k); }
 static void d3dgl_ensure_rt(D3DObj*o); static int d3dgl_ensure(void); // fwd
 static int d3dgl_gpu_copy(D3DObj*dst,D3DObj*src,uint32_t sx,uint32_t sy,uint32_t sw,uint32_t sh,uint32_t dx,uint32_t dy); // fwd (impl after the GL table)
-static void MSABI ctx_CopyResource(void*t,void*dst,void*src){ (void)t; D3DObj*a=dst,*b=src; g_fs.copies++; cs_wait_res(a); cs_wait_res(b); copy_trace("CopyResource",a,b); if(a) a->ver++;
+static void MSABI ctxi_CopyResource(void*t,void*dst,void*src){ (void)t; D3DObj*a=dst,*b=src; g_fs.copies++; cs_wait_res(a); cs_wait_res(b); copy_trace("CopyResource",a,b); if(a) a->ver++;
     if(a&&b&&d3dgl_gpu_copy(a,b,0,0,b->w>4096?4096:b->w,b->h>4096?4096:b->h,0,0)) return; if(a&&b&&a->data&&b->data){ uint64_t n=a->size<b->size?a->size:b->size; memcpy(a->data,b->data,n); if(a){ a->gl_dirty=1; a->dpart=0; }
     if(getenv("PELOAD_TRACE_TEXPATH") && a->w>=512 && ((a->fmt>=70&&a->fmt<=84)||(a->fmt>=94&&a->fmt<=99))){ char m[128]; int k=snprintf(m,sizeof m,"  [texpath] COPYRES dst%ux%u f%u <- src%ux%u (%lluB)\n",a->w,a->h,a->fmt,b->w,b->h,(unsigned long long)n); (void)!write(2,m,k);} } }
 // CopySubresourceRegion(dst,dstSub,dstX,dstY,dstZ,src,srcSub,pSrcBox). Was a no-op -> 12k/frame copies
 // (texture staging / composite steps) were dropped. Implement the CPU copy (full or box region).
-static void MSABI ctx_CopySubresourceRegion(void*t,void*dstR,uint32_t dstSub,uint32_t dstX,uint32_t dstY,uint32_t dstZ,void*srcR,uint32_t srcSub,const void*srcBox){
+static void MSABI ctxi_CopySubresourceRegion(void*t,void*dstR,uint32_t dstSub,uint32_t dstX,uint32_t dstY,uint32_t dstZ,void*srcR,uint32_t srcSub,const void*srcBox){
     (void)t; D3DObj*dst=dstR,*src=srcR; cs_wait_res(dst); cs_wait_res(src); copy_trace("CopySubresourceRegion",dst,src); if(dst) dst->ver++;
     if(dst&&src&&srcSub==0&&dstSub==0&&src->glfbo){ const uint32_t*bx=srcBox; uint32_t l=bx?bx[0]:0,tp=bx?bx[1]:0,r=bx?bx[3]:src->w,bt=bx?bx[4]:src->h;
         if(r>l&&bt>tp&&d3dgl_gpu_copy(dst,src,l,tp,r-l,bt-tp,dstX,dstY)) return; }
@@ -1495,43 +1534,79 @@ static void MSABI ctx_CopySubresourceRegion(void*t,void*dstR,uint32_t dstSub,uin
         uint64_t soff=(uint64_t)y*srp+(uint64_t)left*sbpp, doff=(uint64_t)dy*drp+(uint64_t)dstX*sbpp;
         if(soff+rw<=src->size && doff+rw<=dst->size) memcpy((char*)dst->data+doff,(char*)src->data+soff,rw); } }
 static void draw_census(void); // fwd
-static void MSABI ctx_DrawIndexedInstanced(void*t,uint32_t a,uint32_t b,uint32_t c,int d,uint32_t e){ (void)t; d3dtrace(3,"DrawIndexedInstanced"); stg_note_draw(a); draw_caller("DrawIdxInst",__builtin_return_address(0),a); draw_census(); if(d3dgl_enabled() && b) d3dgl_draw(a,1,b,c,d,e); }
-static void MSABI ctx_DrawInstanced(void*t,uint32_t a,uint32_t b,uint32_t c,uint32_t d){ (void)t; d3dtrace(2,"DrawInstanced"); stg_note_draw(a); draw_caller("DrawInst",__builtin_return_address(0),a); draw_census(); if(d3dgl_enabled() && b) d3dgl_draw(a,0,b,c,0,d); }
+static void MSABI ctx_DrawIndexedInstanced(void*t,uint32_t a,uint32_t b,uint32_t c,int d,uint32_t e){ (void)t; d3dtrace(3,"DrawIndexedInstanced"); stg_note_draw(a); draw_caller("DrawIdxInst",__builtin_return_address(0),a); draw_census(); if(d3dgl_enabled() && b) sub_draw(a,1,b,c,d,e); }
+static void MSABI ctx_DrawInstanced(void*t,uint32_t a,uint32_t b,uint32_t c,uint32_t d){ (void)t; d3dtrace(2,"DrawInstanced"); stg_note_draw(a); draw_caller("DrawInst",__builtin_return_address(0),a); draw_census(); if(d3dgl_enabled() && b) sub_draw(a,0,b,c,0,d); }
 // ---- compute stage state (particles) ----
-static struct { D3DObj*cs; D3DObj*srv[32]; D3DObj*uav[8]; D3DObj*cb[16]; uint32_t cbfirst[16]; D3DObj*samp[16]; } g_cs;
+typedef struct CsState { D3DObj*cs; D3DObj*srv[32]; D3DObj*uav[8]; D3DObj*cb[16]; uint32_t cbfirst[16]; D3DObj*samp[16]; } CsState;
+static CsState g_cs, g_rcs;   // g_cs: what Dispatch runs with (the GL thread under SUBMIT); g_rcs: what CSSet* set
 static void cscensus(const char*what,uint32_t a,uint32_t b,uint32_t c){ if(!getenv("PELOAD_CSCENSUS")) return;
     static unsigned long n; n++; if(n>400 && (n%500)) return;
-    char m[300]; int k=snprintf(m,sizeof m,"  [cscensus] %s(%u,%u,%u) cs=%p bc=%u uav0=%p(%lluB stride %u) srv4=%p srv5=%p cb0=%p\n",what,a,b,c,(void*)g_cs.cs,g_cs.cs?g_cs.cs->bclen:0,
-        g_cs.uav[0]?g_cs.uav[0]->data:0,g_cs.uav[0]&&g_cs.uav[0]->data?(unsigned long long)((D3DObj*)g_cs.uav[0]->data)->size:0ull,g_cs.uav[0]&&g_cs.uav[0]->data?((D3DObj*)g_cs.uav[0]->data)->depth:0,
-        g_cs.srv[4]?g_cs.srv[4]->data:0,g_cs.srv[5]?g_cs.srv[5]->data:0,(void*)g_cs.cb[0]); (void)!write(2,m,k); }
+    char m[300]; int k=snprintf(m,sizeof m,"  [cscensus] %s(%u,%u,%u) cs=%p bc=%u uav0=%p(%lluB stride %u) srv4=%p srv5=%p cb0=%p\n",what,a,b,c,(void*)g_rcs.cs,g_rcs.cs?g_rcs.cs->bclen:0,
+        g_rcs.uav[0]?g_rcs.uav[0]->data:0,g_rcs.uav[0]&&g_rcs.uav[0]->data?(unsigned long long)((D3DObj*)g_rcs.uav[0]->data)->size:0ull,g_rcs.uav[0]&&g_rcs.uav[0]->data?((D3DObj*)g_rcs.uav[0]->data)->depth:0,
+        g_rcs.srv[4]?g_rcs.srv[4]->data:0,g_rcs.srv[5]?g_rcs.srv[5]->data:0,(void*)g_rcs.cb[0]); (void)!write(2,m,k); }
 // Dispatch -> run the compute shader on the CPU (dxbc_cpu.c) over the CPU copies of its buffers; written UAV
 // buffers get a new version so their GL texture-buffer copies refresh before the particle draws read them.
-static void MSABI ctx_Begin(void*t,void*a); static void MSABI ctx_End(void*t,void*a); static int MSABI ctx_GetData(void*t,void*a,void*data,uint32_t size,uint32_t flags); // fwd (queries)
+static void MSABI ctxi_Begin(void*t,void*a); static void MSABI ctxi_End(void*t,void*a); static int MSABI ctxi_GetData(void*t,void*a,void*data,uint32_t size,uint32_t flags); // fwd (queries)
 // ---- asynchronous compute: Dispatch queues the CPU kernel on a worker thread so the particle simulation
 // overlaps the opaque draws; the render thread waits only where it touches a buffer a queued job writes
 // (texture-buffer upload for the particle draws, Map/Update/Copy/Clear). Constant buffers and read-only
 // structured buffers are snapshotted at Dispatch time (the game rewrites them for the next dispatch).
 // PELOAD_CS_SYNC runs every dispatch inline (old behaviour).
-typedef struct CsQJob { CsProg*p; CsCtx cx; uint32_t a,b,c; void*own[64]; int nown; D3DObj* uavres[8]; struct CsQJob*next; } CsQJob;
+typedef struct CsQJob { CsProg*p; CsCtx cx; uint32_t a,b,c; void*own[64]; int nown; D3DObj* uavres[8]; D3DObj* rdres[32]; int nrd, running; struct CsSnap* snaps[48]; int nsnap; struct CsQJob*next; } CsQJob;
+// A read-only compute input (constant buffer or SRV buffer) copied once per resource version and shared by every job
+// that reads that version (halo3 issues ~100 particle dispatches a frame against the same buffers: copying them per
+// dispatch was ~0.5 GB/s on the GL thread). refs: one for the resource's cache slot + one per job.
+typedef struct CsSnap { volatile int refs; uint32_t ver; uint64_t size; D3DObj obj; } CsSnap;
+static void cs_snap_put(CsSnap*s){ if(s && __atomic_sub_fetch(&s->refs,1,__ATOMIC_ACQ_REL)==0) free(s); }
+static CsSnap* cs_snap_get(D3DObj*r){   // (GL / render thread) the snapshot of r's current contents, +1 ref for the caller
+    CsSnap*sn=r->cs_snap; extern uint64_t g_cs_snapbytes;
+    if(!sn || sn->ver!=r->ver || sn->size!=r->size){
+        CsSnap*nw=malloc(sizeof(CsSnap)+r->size); if(!nw) return 0;
+        nw->refs=1; nw->ver=r->ver; nw->size=r->size; nw->obj=*r; nw->obj.vkind=0; nw->obj.data=(uint8_t*)(nw+1); nw->obj.cs_snap=0;
+        memcpy(nw->obj.data,r->data,r->size); g_cs_snapbytes+=r->size;
+        if(sn) cs_snap_put(sn); r->cs_snap=sn=nw; }
+    __atomic_add_fetch(&sn->refs,1,__ATOMIC_ACQ_REL); return sn; }
 static pthread_mutex_t g_csq_mx=PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_csq_cv=PTHREAD_COND_INITIALIZER, g_csq_done=PTHREAD_COND_INITIALIZER;
 static CsQJob *g_csq_head,*g_csq_tail; static volatile int g_csq_n; static int g_csq_started;
+// PELOAD_CS_WORKERS (default 4): dispatches run on several workers. A queued dispatch may start once no EARLIER queued
+// or running one writes a resource it reads or writes, or reads one it writes (uavres = written, rdres = read live;
+// read-only buffers were snapshotted at Dispatch and don't count). Halo 3 issues many small independent particle
+// dispatches per frame; one worker made the GL thread wait ~10 ms a frame in 100-player games.
+static int g_csq_nrun, g_csq_maxrun;
+static int csq_conflict(const CsQJob*a,const CsQJob*b){   // a queued before b
+    for(int i=0;i<8;i++){ const D3DObj*w=b->uavres[i]; if(!w) continue;
+        for(int k=0;k<8;k++) if(a->uavres[k]==w) return 1;
+        for(int k=0;k<a->nrd;k++) if(a->rdres[k]==w) return 1; }
+    for(int k=0;k<b->nrd;k++){ const D3DObj*r=b->rdres[k]; for(int i=0;i<8;i++) if(a->uavres[i]==r) return 1; }
+    return 0; }
+static CsQJob* csq_pick(void){   // (g_csq_mx held) the oldest job that doesn't depend on an earlier one
+    int scanned=0;
+    for(CsQJob*j=g_csq_head;j && scanned<96;j=j->next,scanned++){ if(j->running) continue; int ok=1;
+        for(CsQJob*e=g_csq_head;e!=j;e=e->next) if(csq_conflict(e,j)){ ok=0; break; }
+        if(ok) return j; }
+    return 0; }
 static void* csq_worker(void*arg){ (void)arg; pthread_setname_np("shim-compute");
-    for(;;){ pthread_mutex_lock(&g_csq_mx); while(!g_csq_head) pthread_cond_wait(&g_csq_cv,&g_csq_mx); CsQJob*j=g_csq_head; pthread_mutex_unlock(&g_csq_mx);
+    for(;;){ pthread_mutex_lock(&g_csq_mx); CsQJob*j; while(!(j=csq_pick())) pthread_cond_wait(&g_csq_cv,&g_csq_mx);
+        j->running=1; if(++g_csq_nrun>g_csq_maxrun) g_csq_maxrun=g_csq_nrun; pthread_mutex_unlock(&g_csq_mx);
         uint64_t t0=prof_on()?prof_now():0;
         long rc=cs_dispatch(j->p,&j->cx,j->a,j->b,j->c);
-        if(t0){ static uint64_t acc,nn,lacc,lins; acc+=prof_now()-t0; if((++nn%200)==0){ char m[160]; long ins=g_cs_instrs; int k=snprintf(m,sizeof m,"  [cs-cpu] %llu dispatches (async), last 200: %.1f us/dispatch, %.0f instrs/dispatch\n",(unsigned long long)nn,(acc-lacc)/1e3/200,(ins-lins)/200.0); (void)!write(2,m,k); lacc=acc; lins=ins; } }
+        if(t0){ static uint64_t acc,nn,lacc,lins; acc+=prof_now()-t0; if((++nn%200)==0){ char m[200]; long ins=g_cs_instrs; int k=snprintf(m,sizeof m,"  [cs-cpu] %llu dispatches (async, up to %d at once), last 200: %.1f us/dispatch, %.0f instrs/dispatch\n",(unsigned long long)nn,g_csq_maxrun,(acc-lacc)/1e3/200,(ins-lins)/200.0); (void)!write(2,m,k); lacc=acc; lins=ins; g_csq_maxrun=0; } }
         if(rc<0){ static int warned; if(warned++<8){ char m[120]; int k=snprintf(m,sizeof m,"  [cs-cpu] unsupported opcode %ld\n",-rc); (void)!write(2,m,k); } }
-        pthread_mutex_lock(&g_csq_mx); g_csq_head=j->next; if(!g_csq_head) g_csq_tail=0; g_csq_n--;
+        pthread_mutex_lock(&g_csq_mx);
+        { CsQJob**pp=&g_csq_head, *prev=0; while(*pp && *pp!=j){ prev=*pp; pp=&(*pp)->next; } if(*pp){ *pp=j->next; if(g_csq_tail==j) g_csq_tail=prev; } }
+        g_csq_n--; g_csq_nrun--;
         for(int i=0;i<8;i++) if(j->uavres[i]) j->uavres[i]->cs_pending--;
-        pthread_cond_broadcast(&g_csq_done); pthread_mutex_unlock(&g_csq_mx);
-        for(int i=0;i<j->nown;i++) free(j->own[i]); free(j); }
+        pthread_cond_broadcast(&g_csq_done); pthread_cond_broadcast(&g_csq_cv); pthread_mutex_unlock(&g_csq_mx);
+        for(int i=0;i<j->nown;i++) free(j->own[i]); for(int i=0;i<j->nsnap;i++) cs_snap_put(j->snaps[i]); free(j); }
     return 0; }
-static void cs_wait_res(D3DObj*r){ if(!r||!r->cs_pending) return; uint64_t t0=prof_on()?prof_now():0;
-    pthread_mutex_lock(&g_csq_mx); while(r->cs_pending) pthread_cond_wait(&g_csq_done,&g_csq_mx); pthread_mutex_unlock(&g_csq_mx);
+double g_cswait_s;   // time the renderer spent waiting for compute results ([submit] stats)
+uint64_t g_cs_snapbytes;   // bytes copied for compute job inputs (constant + read-only buffers)
+static void cs_wait_res(D3DObj*r){ if(!r||!r->cs_pending) return; uint64_t t0=prof_on()?prof_now():0; double w0=mono_s();
+    pthread_mutex_lock(&g_csq_mx); while(r->cs_pending) pthread_cond_wait(&g_csq_done,&g_csq_mx); pthread_mutex_unlock(&g_csq_mx); g_cswait_s+=mono_s()-w0;
     if(t0){ static uint64_t acc,nn; acc+=prof_now()-t0; if((++nn%500)==0){ char m[100]; int k=snprintf(m,sizeof m,"  [cs-cpu] render thread waited %.0f us avg (%llu waits)\n",acc/1e3/nn,(unsigned long long)nn); (void)!write(2,m,k); } } }
 static void cs_wait_view(void*v){ D3DObj*o=v; if(!o) return; cs_wait_res(o); if(o->vkind&&o->data) cs_wait_res((D3DObj*)o->data); }
 static int cs_async(void){ static int a=-1; if(a<0) a=getenv("PELOAD_CS_SYNC")?0:1; return a; }
-static void MSABI ctx_Dispatch(void*t,uint32_t a,uint32_t b,uint32_t c){ (void)t; d3dtrace(7,"Dispatch"); g_fs.disp++; cscensus("Dispatch",a,b,c);
+static void MSABI ctxi_Dispatch(void*t,uint32_t a,uint32_t b,uint32_t c){ (void)t; d3dtrace(7,"Dispatch"); g_fs.disp++; cscensus("Dispatch",a,b,c);
     D3DObj*cs=g_cs.cs; if(!cs||!cs->bc||getenv("PELOAD_NOCSCPU")) return;
     if(!cs->csprog){ CsProg*p=cs_compile(cs->bc,cs->bclen); cs->csprog=p;
         char m[200]; int k=snprintf(m,sizeof m,"  [cs-cpu] compiled cs %p (%u B): %s, %d instrs, temps %d, numthreads(%u,%u,%u)\n",(void*)cs,cs->bclen,p&&p->ok?"ok":(p?p->why:"oom"),p?p->nins:0,p?p->ntemps:0,p?p->tg[0]:0,p?p->tg[1]:0,p?p->tg[2]:0); (void)!write(2,m,k); }
@@ -1539,18 +1614,25 @@ static void MSABI ctx_Dispatch(void*t,uint32_t a,uint32_t b,uint32_t c){ (void)t
     if((uint64_t)a*b*c*p->tg[0]*p->tg[1]*p->tg[2] > (1u<<20)) return;   // runaway guard
     if(cs_async()){
         CsQJob*j=calloc(1,sizeof *j); if(!j) return; j->p=p; j->a=a; j->b=b; j->c=c;
+        static int noshare=-1; if(noshare<0) noshare=getenv("PELOAD_CS_NOSNAPSHARE")?1:0;   // old: copy inputs per dispatch
         for(int i=0;i<16;i++){ D3DObj*cb=g_cs.cb[i]; if(cb&&cb->data&&cb->size){ uint64_t off=(uint64_t)g_cs.cbfirst[i]*16; if(off>=cb->size) off=0;
-                uint64_t n=cb->size-off; if(n>65536) n=65536; uint8_t*cp=malloc(n); if(!cp||j->nown>=64){ free(cp); continue; } memcpy(cp,(const uint8_t*)cb->data+off,n); j->own[j->nown++]=cp; j->cx.cb[i]=cp; j->cx.cbsz[i]=(uint32_t)n; } }
+                uint64_t n=cb->size-off; if(n>65536) n=65536;
+                if(!noshare && !cb->cs_pending && cb->size<=(1u<<20) && j->nsnap<48){ CsSnap*sn=cs_snap_get(cb); if(sn){ j->snaps[j->nsnap++]=sn; j->cx.cb[i]=(const uint8_t*)sn->obj.data+off; j->cx.cbsz[i]=(uint32_t)n; continue; } }
+                uint8_t*cp=malloc(n); if(!cp||j->nown>=64){ free(cp); continue; } memcpy(cp,(const uint8_t*)cb->data+off,n); g_cs_snapbytes+=n; j->own[j->nown++]=cp; j->cx.cb[i]=cp; j->cx.cbsz[i]=(uint32_t)n; } }
         for(int i=0;i<32;i++){ D3DObj*v=g_cs.srv[i]; if(!v) continue; D3DObj*r=(v->data&&v->vkind)?(D3DObj*)v->data:v; j->cx.srv[i]=v;
-            if(r && r->kind==1 && r->data && r->size && r->size<=(8u<<20) && !r->cs_pending && j->nown<62){   // read-only buffer: snapshot
-                D3DObj*sh=malloc(sizeof(D3DObj)); uint8_t*d=malloc(r->size); if(!sh||!d){ free(sh); free(d); continue; }
-                *sh=*r; sh->vkind=0; sh->data=d; memcpy(d,r->data,r->size); j->own[j->nown++]=sh; j->own[j->nown++]=d; j->cx.srv[i]=sh; } }
+            if(r && r->kind==1 && r->data && r->size && r->size<=(8u<<20) && !r->cs_pending){   // read-only buffer: snapshot
+                if(!noshare && j->nsnap<48){ CsSnap*sn=cs_snap_get(r); if(sn){ j->snaps[j->nsnap++]=sn; j->cx.srv[i]=&sn->obj; continue; } }
+                if(j->nown>=62){ j->rdres[j->nrd++]=r; continue; }
+                D3DObj*sh=malloc(sizeof(D3DObj)); uint8_t*d=malloc(r->size); if(!sh||!d){ free(sh); free(d); if(r) j->rdres[j->nrd++]=r; continue; }
+                *sh=*r; sh->vkind=0; sh->data=d; memcpy(d,r->data,r->size); g_cs_snapbytes+=r->size; j->own[j->nown++]=sh; j->own[j->nown++]=d; j->cx.srv[i]=sh; }
+            else if(r) j->rdres[j->nrd++]=r; }   // read live: ordered after earlier writers
         for(int i=0;i<16;i++) j->cx.samp[i]=g_cs.samp[i];
         pthread_mutex_lock(&g_csq_mx);
         for(int i=0;i<8;i++){ D3DObj*v=g_cs.uav[i]; j->cx.uav[i]=v; D3DObj*r=(v&&v->data&&v->vkind)?(D3DObj*)v->data:v;
             if(r){ r->cs_pending++; j->uavres[i]=r; r->ver++; r->gl_dirty=1; r->dpart=0; r->rvalid=0; } }
         if(g_csq_tail) g_csq_tail->next=j; else g_csq_head=j; g_csq_tail=j; g_csq_n++;
-        if(!g_csq_started){ g_csq_started=1; pthread_t th; pthread_attr_t at; pthread_attr_init(&at); pthread_attr_set_qos_class_np(&at,QOS_CLASS_USER_INTERACTIVE,0); pthread_create(&th,&at,csq_worker,0); }
+        if(!g_csq_started){ g_csq_started=1; const char*e=getenv("PELOAD_CS_WORKERS"); int nw=e?atoi(e):4; if(nw<1) nw=1; if(nw>16) nw=16;
+            for(int w=0;w<nw;w++){ pthread_t th; pthread_attr_t at; pthread_attr_init(&at); pthread_attr_set_qos_class_np(&at,QOS_CLASS_USER_INTERACTIVE,0); pthread_create(&th,&at,csq_worker,0); } }
         pthread_cond_signal(&g_csq_cv); pthread_mutex_unlock(&g_csq_mx);
         return; }
     CsCtx cx; memset(&cx,0,sizeof cx);
@@ -1566,11 +1648,11 @@ static void MSABI ctx_Dispatch(void*t,uint32_t a,uint32_t b,uint32_t c){ (void)t
 static void MSABI ctx_DispatchIndirect(void*t,void*args,uint32_t off){ (void)t;(void)args; cscensus("DispatchIndirect",off,0,0); }
 static void stg_note_indirect(const char*what,uint32_t off){ if(!getenv("PELOAD_TRACE_STAGES")) return; static unsigned long n; n++;
     if(n<=20 || !(n%2000)){ char m[220]; int k=snprintf(m,sizeof m,"  [stages] %s #%lu off=%u vs=%016llx ps=%016llx\n",what,n,off,
-        (unsigned long long)(g_d3dst.vs?g_d3dst.vs->bchash:0),(unsigned long long)(g_d3dst.ps?g_d3dst.ps->bchash:0)); (void)!write(2,m,k); } }
+        (unsigned long long)(g_rst.vs?g_rst.vs->bchash:0),(unsigned long long)(g_rst.ps?g_rst.ps->bchash:0)); (void)!write(2,m,k); } }
 static void MSABI ctx_DrawInstancedIndirect(void*t,void*args,uint32_t off){ (void)t;(void)args; cscensus("DrawInstancedIndirect",off,0,0); stg_note_indirect("DrawInstancedIndirect",off); }
 static void MSABI ctx_DrawIndexedInstancedIndirect(void*t,void*args,uint32_t off){ (void)t;(void)args; cscensus("DrawIndexedInstancedIndirect",off,0,0); stg_note_indirect("DrawIndexedInstancedIndirect",off); }
 static void MSABI ctx_CopyStructureCount(void*t,void*dst,uint32_t off,void*uav){ (void)t;(void)dst;(void)uav; cscensus("CopyStructureCount",off,0,0); }
-static void MSABI ctx_CSSetShader(void*t,void*cs,void*ci,uint32_t n){ (void)t;(void)ci;(void)n; g_cs.cs=cs; }
+static void MSABI ctx_CSSetShader(void*t,void*cs,void*ci,uint32_t n){ (void)t;(void)ci;(void)n; g_rcs.cs=cs; }
 // Geometry / hull / domain shader stages: tracked so draws that use them can be found (PELOAD_TRACE_STAGES); the GL
 // translation only runs VS+PS.
 static struct { D3DObj *gs,*hs,*ds; void* so; unsigned long ngs,nhs,nso,nall; } g_stg;
@@ -1581,38 +1663,38 @@ static void MSABI ctx_SOSetTargets(void*t,uint32_t n,void*const*b,const uint32_t
 static void stg_note_draw(uint32_t n){ static int on=-1; if(on<0) on=getenv("PELOAD_TRACE_STAGES")?1:0; if(!on) return;
     g_stg.nall++; if(g_stg.gs) g_stg.ngs++; if(g_stg.hs||g_stg.ds) g_stg.nhs++; if(g_stg.so) g_stg.nso++;
     if((g_stg.gs||g_stg.hs||g_stg.ds||g_stg.so)){ static int shown; if(shown<40){ shown++; char m[256];
-        int k=snprintf(m,sizeof m,"  [stages] draw n=%u topo=%u vs=%016llx ps=%016llx gs=%016llx hs=%016llx ds=%016llx so=%p\n",n,g_d3dst.topo,
-            (unsigned long long)(g_d3dst.vs?g_d3dst.vs->bchash:0),(unsigned long long)(g_d3dst.ps?g_d3dst.ps->bchash:0),(unsigned long long)(g_stg.gs?g_stg.gs->bchash:0),
+        int k=snprintf(m,sizeof m,"  [stages] draw n=%u topo=%u vs=%016llx ps=%016llx gs=%016llx hs=%016llx ds=%016llx so=%p\n",n,g_rst.topo,
+            (unsigned long long)(g_rst.vs?g_rst.vs->bchash:0),(unsigned long long)(g_rst.ps?g_rst.ps->bchash:0),(unsigned long long)(g_stg.gs?g_stg.gs->bchash:0),
             (unsigned long long)(g_stg.hs?g_stg.hs->bchash:0),(unsigned long long)(g_stg.ds?g_stg.ds->bchash:0),g_stg.so); (void)!write(2,m,k); } }
     static double t0; double now=mono_s(); if(now-t0>5){ t0=now; char m[160]; int k=snprintf(m,sizeof m,"  [stages] draws %lu: with GS %lu, HS/DS %lu, stream-out %lu\n",g_stg.nall,g_stg.ngs,g_stg.nhs,g_stg.nso); (void)!write(2,m,k); } }
-static void MSABI ctx_CSSetShaderResources(void*t,uint32_t st,uint32_t n,void*const*v){ (void)t; for(uint32_t i=0;i<n&&st+i<32;i++) g_cs.srv[st+i]=v?(D3DObj*)v[i]:0; }
-static void MSABI ctx_CSSetSamplers(void*t,uint32_t st,uint32_t n,void*const*v){ (void)t; for(uint32_t i=0;i<n&&st+i<16;i++) g_cs.samp[st+i]=v?(D3DObj*)v[i]:0; }
+static void MSABI ctx_CSSetShaderResources(void*t,uint32_t st,uint32_t n,void*const*v){ (void)t; for(uint32_t i=0;i<n&&st+i<32;i++) g_rcs.srv[st+i]=v?(D3DObj*)v[i]:0; }
+static void MSABI ctx_CSSetSamplers(void*t,uint32_t st,uint32_t n,void*const*v){ (void)t; for(uint32_t i=0;i<n&&st+i<16;i++) g_rcs.samp[st+i]=v?(D3DObj*)v[i]:0; }
 static void MSABI ctx_CSSetConstantBuffers1(void*t,uint32_t st,uint32_t n,void*const*v,const uint32_t*first,const uint32_t*cnt){ (void)t;(void)cnt;
-    for(uint32_t i=0;i<n&&st+i<16;i++){ g_cs.cb[st+i]=v?(D3DObj*)v[i]:0; g_cs.cbfirst[st+i]=first?first[i]:0; } }
+    for(uint32_t i=0;i<n&&st+i<16;i++){ g_rcs.cb[st+i]=v?(D3DObj*)v[i]:0; g_rcs.cbfirst[st+i]=first?first[i]:0; } }
 // ClearUnorderedAccessView{Uint,Float} on buffers (particle pools are reset this way)
 static void cs_clear_uav(void*view,uint32_t v0){ D3DObj*v=view; D3DObj*r=(v&&v->data&&v->vkind)?(D3DObj*)v->data:v; if(!r||!r->data||r->kind!=1) return;
     cs_wait_res(r);
     uint32_t*d=(uint32_t*)r->data; for(uint64_t i=0;i<r->size/4;i++) d[i]=v0; r->ver++; r->gl_dirty=1; r->dpart=0; r->rvalid=0; }
-static void MSABI ctx_ClearUAVUint(void*t,void*uav,const uint32_t*vals){ (void)t; cs_clear_uav(uav,vals?vals[0]:0); }
-static void MSABI ctx_ClearUAVFloat(void*t,void*uav,const float*vals){ (void)t; uint32_t b=0; if(vals) memcpy(&b,vals,4); cs_clear_uav(uav,b); }
-static void MSABI ctx_CSSetUAVs(void*t,uint32_t st,uint32_t n,void*const*v,const uint32_t*cnt){ (void)t;(void)cnt; for(uint32_t i=0;i<n&&st+i<8;i++) g_cs.uav[st+i]=v?(D3DObj*)v[i]:0; }
-static void MSABI ctx_CSSetConstantBuffers(void*t,uint32_t st,uint32_t n,void*const*v){ (void)t; for(uint32_t i=0;i<n&&st+i<16;i++){ g_cs.cb[st+i]=v?(D3DObj*)v[i]:0; g_cs.cbfirst[st+i]=0; } }
+static void MSABI ctxi_ClearUAVUint(void*t,void*uav,const uint32_t*vals){ (void)t; cs_clear_uav(uav,vals?vals[0]:0); }
+static void MSABI ctxi_ClearUAVFloat(void*t,void*uav,const float*vals){ (void)t; uint32_t b=0; if(vals) memcpy(&b,vals,4); cs_clear_uav(uav,b); }
+static void MSABI ctx_CSSetUAVs(void*t,uint32_t st,uint32_t n,void*const*v,const uint32_t*cnt){ (void)t;(void)cnt; for(uint32_t i=0;i<n&&st+i<8;i++) g_rcs.uav[st+i]=v?(D3DObj*)v[i]:0; }
+static void MSABI ctx_CSSetConstantBuffers(void*t,uint32_t st,uint32_t n,void*const*v){ (void)t; for(uint32_t i=0;i<n&&st+i<16;i++){ g_rcs.cb[st+i]=v?(D3DObj*)v[i]:0; g_rcs.cbfirst[st+i]=0; } }
 // ---- pipeline-state recorders (hooked into the context vtable) ----
 static void iacen_log(void){ if(!getenv("PELOAD_IA_CENSUS")) return; static uint64_t last;
     uint64_t tot=g_iacen.vs_set; if(tot<last+20000) return; last=tot;
     char m[200]; int k=snprintf(m,sizeof m,"  [ia-census] IASetVB=%llu IASetIL=%llu VSSetSRV=%llu | VSSet classic=%llu pull=%llu total=%llu\n",
         (unsigned long long)g_iacen.ia_vb,(unsigned long long)g_iacen.ia_il,(unsigned long long)g_iacen.vs_srv,
         (unsigned long long)g_iacen.vs_classic,(unsigned long long)g_iacen.vs_pull,(unsigned long long)g_iacen.vs_set); (void)!write(2,m,k); }
-static void MSABI ctx_IASetInputLayout(void*t,void*il){ (void)t; g_d3dst.il=il; if(il)g_iacen.ia_il++; }
+static void MSABI ctx_IASetInputLayout(void*t,void*il){ (void)t; g_rst.il=il; if(il)g_iacen.ia_il++; }
 static void MSABI ctx_IASetVertexBuffers(void*t,uint32_t start,uint32_t num,void*const*vbs,const uint32_t*str,const uint32_t*off){ (void)t;
-    for(uint32_t i=0;i<num&&start+i<8;i++){ g_d3dst.vb[start+i]=vbs?(D3DObj*)vbs[i]:0; g_d3dst.vstride[start+i]=str?str[i]:0; g_d3dst.voff[start+i]=off?off[i]:0; if(vbs&&vbs[i])g_iacen.ia_vb++; } }
+    for(uint32_t i=0;i<num&&start+i<8;i++){ g_rst.vb[start+i]=vbs?(D3DObj*)vbs[i]:0; g_rst.vstride[start+i]=str?str[i]:0; g_rst.voff[start+i]=off?off[i]:0; if(vbs&&vbs[i])g_iacen.ia_vb++; } }
 static void MSABI ctx_VSSetShaderResources(void*t,uint32_t start,uint32_t num,void*const*srvs){ (void)t;
-    for(uint32_t i=0;i<num&&start+i<32;i++){ D3DObj*v=srvs?(D3DObj*)srvs[i]:0; g_d3dst.vssrv[start+i]=(v&&v->data)?(D3DObj*)v->data:v; g_d3dst.vssrvv[start+i]=(v&&v->vkind)?v:0; if(srvs&&srvs[i])g_iacen.vs_srv++; } }
-static void MSABI ctx_IASetIndexBuffer(void*t,void*ib,uint32_t fmt,uint32_t off){ (void)t; g_d3dst.ib=(D3DObj*)ib; g_d3dst.ibfmt=fmt; g_d3dst.iboff=off; }
-static void MSABI ctx_IASetPrimitiveTopology(void*t,uint32_t topo){ (void)t; g_d3dst.topo=topo; }
-static void MSABI ctx_VSSetShader(void*t,void*sh,void*ci,uint32_t nci){ (void)t;(void)ci;(void)nci; g_d3dst.vs=(D3DObj*)sh;
+    for(uint32_t i=0;i<num&&start+i<32;i++){ D3DObj*v=srvs?(D3DObj*)srvs[i]:0; g_rst.vssrv[start+i]=(v&&v->data)?(D3DObj*)v->data:v; g_rst.vssrvv[start+i]=(v&&v->vkind)?v:0; if(srvs&&srvs[i])g_iacen.vs_srv++; } }
+static void MSABI ctx_IASetIndexBuffer(void*t,void*ib,uint32_t fmt,uint32_t off){ (void)t; g_rst.ib=(D3DObj*)ib; g_rst.ibfmt=fmt; g_rst.iboff=off; }
+static void MSABI ctx_IASetPrimitiveTopology(void*t,uint32_t topo){ (void)t; g_rst.topo=topo; }
+static void MSABI ctx_VSSetShader(void*t,void*sh,void*ci,uint32_t nci){ (void)t;(void)ci;(void)nci; g_rst.vs=(D3DObj*)sh;
     if(sh){ D3DObj*o=sh; g_iacen.vs_set++; if(o->vs_vtxin)g_iacen.vs_classic++; else g_iacen.vs_pull++; iacen_log(); } }
-static void MSABI ctx_PSSetShader(void*t,void*sh,void*ci,uint32_t nci){ (void)t;(void)ci;(void)nci; g_d3dst.ps=(D3DObj*)sh; }
+static void MSABI ctx_PSSetShader(void*t,void*sh,void*ci,uint32_t nci){ (void)t;(void)ci;(void)nci; g_rst.ps=(D3DObj*)sh; }
 static uint64_t g_cbcnt[4]; // VSSetCB, VSSetCB1, PSSetCB, PSSetCB1 call counters (PELOAD_TRACE_CB)
 static const char* guest_sym(uint64_t v,char*buf,size_t n){
     if(v>=0x140000000ULL&&v<0x142000000ULL) snprintf(buf,n,"exe+0x%llx",(unsigned long long)(v-0x140000000ULL));
@@ -1631,69 +1713,69 @@ D3DObj* g_last_b12;  // most recent buffer bound to VS slot 12 (per-object world
 D3DObj* g_last_smallcb;  // most recent small (32-96B) CB mapped/updated — candidate vertex-decompress cb1
 float g_b12_org[32][3]; int g_nb12_org;   // recent distinct per-object world origins (for view-proj convention search)
 static void MSABI ctx_VSSetConstantBuffers(void*t,uint32_t start,uint32_t num,void*const*cbs){ (void)t; cb_trace2(0,start,num,cbs,__builtin_return_address(0));
-    for(uint32_t i=0;i<num&&start+i<16;i++){ g_d3dst.vscb[start+i]=cbs?(D3DObj*)cbs[i]:0; g_d3dst.vscb_1st[start+i]=0; g_d3dst.vscb_cnt[start+i]=0;
+    for(uint32_t i=0;i<num&&start+i<16;i++){ g_rst.vscb[start+i]=cbs?(D3DObj*)cbs[i]:0; g_rst.vscb_1st[start+i]=0; g_rst.vscb_cnt[start+i]=0;
         if(start+i==12 && cbs && cbs[i]){ D3DObj*o=(D3DObj*)cbs[i]; g_last_b12=o;
             if(o->data && o->size>=48){ const float*f=(const float*)o->data; float x=f[3],y=f[7],z=f[11];
                 if((x==x)&&(y==y)&&(z==z)&&(x||y||z) && g_nb12_org<32){ int dup=0; for(int k=0;k<g_nb12_org;k++){ float*p=g_b12_org[k]; float dx=p[0]-x,dy=p[1]-y,dz=p[2]-z; if((dx<0?-dx:dx)<0.5f&&(dy<0?-dy:dy)<0.5f&&(dz<0?-dz:dz)<0.5f){dup=1;break;} }
                     if(!dup){ g_b12_org[g_nb12_org][0]=x; g_b12_org[g_nb12_org][1]=y; g_b12_org[g_nb12_org][2]=z; g_nb12_org++; } } } } } }
 static void MSABI ctx_PSSetConstantBuffers(void*t,uint32_t start,uint32_t num,void*const*cbs){ (void)t; cb_trace2(2,start,num,cbs,__builtin_return_address(0));
-    for(uint32_t i=0;i<num&&start+i<16;i++){ g_d3dst.pscb[start+i]=cbs?(D3DObj*)cbs[i]:0; g_d3dst.pscb_1st[start+i]=0; g_d3dst.pscb_cnt[start+i]=0; } }
+    for(uint32_t i=0;i<num&&start+i<16;i++){ g_rst.pscb[start+i]=cbs?(D3DObj*)cbs[i]:0; g_rst.pscb_1st[start+i]=0; g_rst.pscb_cnt[start+i]=0; } }
 // ID3D11DeviceContext1::*SetConstantBuffers1 — bind a RANGE (FirstConstant/NumConstants, in 16-byte
 // units) of a shared constant buffer. halo3 uses THESE (not the plain versions) for its matrices, so
 // without hooking them the VS gets no cb0/cb1 -> gl_Position computes against zeros -> black geometry.
 static void MSABI ctx_VSSetConstantBuffers1(void*t,uint32_t start,uint32_t num,void*const*cbs,const uint32_t*first,const uint32_t*cnt){ (void)t; cb_trace2(1,start,num,cbs,__builtin_return_address(0));
-    for(uint32_t i=0;i<num&&start+i<16;i++){ g_d3dst.vscb[start+i]=cbs?(D3DObj*)cbs[i]:0;
-        g_d3dst.vscb_1st[start+i]=first?first[i]:0; g_d3dst.vscb_cnt[start+i]=cnt?cnt[i]:0; } }
+    for(uint32_t i=0;i<num&&start+i<16;i++){ g_rst.vscb[start+i]=cbs?(D3DObj*)cbs[i]:0;
+        g_rst.vscb_1st[start+i]=first?first[i]:0; g_rst.vscb_cnt[start+i]=cnt?cnt[i]:0; } }
 static void MSABI ctx_PSSetConstantBuffers1(void*t,uint32_t start,uint32_t num,void*const*cbs,const uint32_t*first,const uint32_t*cnt){ (void)t; cb_trace2(3,start,num,cbs,__builtin_return_address(0));
-    for(uint32_t i=0;i<num&&start+i<16;i++){ g_d3dst.pscb[start+i]=cbs?(D3DObj*)cbs[i]:0;
-        g_d3dst.pscb_1st[start+i]=first?first[i]:0; g_d3dst.pscb_cnt[start+i]=cnt?cnt[i]:0; } }
+    for(uint32_t i=0;i<num&&start+i<16;i++){ g_rst.pscb[start+i]=cbs?(D3DObj*)cbs[i]:0;
+        g_rst.pscb_1st[start+i]=first?first[i]:0; g_rst.pscb_cnt[start+i]=cnt?cnt[i]:0; } }
 static void MSABI ctx_PSSetShaderResources(void*t,uint32_t start,uint32_t num,void*const*srvs){ (void)t;
-    for(uint32_t i=0;i<num&&start+i<32;i++){ D3DObj*v=srvs?(D3DObj*)srvs[i]:0; g_d3dst.psrv[start+i]=(v&&v->data)?(D3DObj*)v->data:v; g_d3dst.psrvv[start+i]=(v&&v->vkind)?v:0; } }
+    for(uint32_t i=0;i<num&&start+i<32;i++){ D3DObj*v=srvs?(D3DObj*)srvs[i]:0; g_rst.psrv[start+i]=(v&&v->data)?(D3DObj*)v->data:v; g_rst.psrvv[start+i]=(v&&v->vkind)?v:0; } }
 static void MSABI ctx_OMSetRenderTargets(void*t,uint32_t num,void*const*rtvs,void*dsv){ (void)t;
-    g_d3dst.num_rt=0;
-    for(uint32_t i=0;i<num&&i<8;i++){ D3DObj*v=rtvs?(D3DObj*)rtvs[i]:0; D3DObj*res=(v&&v->data)?(D3DObj*)v->data:v; g_d3dst.rtvs[i]=res; g_d3dst.rtvv[i]=(v&&v->vkind)?v:0; if(res)g_d3dst.num_rt=i+1; }
-    for(uint32_t i=num;i<8;i++){ g_d3dst.rtvs[i]=0; g_d3dst.rtvv[i]=0; }
-    g_d3dst.rtv=g_d3dst.rtvs[0];
-    { D3DObj*d=(D3DObj*)dsv; g_d3dst.dsv=(d&&d->data)?(D3DObj*)d->data:d; } }
-static void MSABI ctx_RSSetViewports(void*t,uint32_t num,const void*vps){ (void)t; if(num&&vps){ const float*f=vps; g_d3dst.vp_x=(int)f[0]; g_d3dst.vp_y=(int)f[1]; g_d3dst.vp_w=(int)f[2]; g_d3dst.vp_h=(int)f[3];
-    g_d3dst.vp_zn=f[4]; g_d3dst.vp_zf=f[5]; g_d3dst.vp_set=1; } }
-static void MSABI ctx_OMSetBlendState(void*t,void*bs,const float*bf,uint32_t mask){ (void)t;(void)mask; g_d3dst.blend=bs;
-    for(int i=0;i<4;i++) g_d3dst.blendf[i]=bf?bf[i]:1.0f; }
-static void MSABI ctx_OMSetDepthStencilState(void*t,void*ds,uint32_t ref){ (void)t; g_d3dst.depth=ds; g_d3dst.sref=ref; }
-static void MSABI ctx_RSSetState(void*t,void*rs){ (void)t; g_d3dst.raster=rs; }
-static void MSABI ctx_RSSetScissorRects(void*t,uint32_t num,const int32_t*r){ (void)t; if(num&&r){ g_d3dst.sc_l=r[0]; g_d3dst.sc_t=r[1]; g_d3dst.sc_r=r[2]; g_d3dst.sc_b=r[3]; } }
-static void MSABI ctx_PSSetSamplers(void*t,uint32_t st,uint32_t n,void*const*ss){ (void)t; for(uint32_t i=0;i<n&&st+i<16;i++) g_d3dst.pssamp[st+i]=ss?(D3DObj*)ss[i]:0; }
-static void MSABI ctx_VSSetSamplers(void*t,uint32_t st,uint32_t n,void*const*ss){ (void)t; for(uint32_t i=0;i<n&&st+i<16;i++) g_d3dst.vssamp[st+i]=ss?(D3DObj*)ss[i]:0; }
+    g_rst.num_rt=0;
+    for(uint32_t i=0;i<num&&i<8;i++){ D3DObj*v=rtvs?(D3DObj*)rtvs[i]:0; D3DObj*res=(v&&v->data)?(D3DObj*)v->data:v; g_rst.rtvs[i]=res; g_rst.rtvv[i]=(v&&v->vkind)?v:0; if(res)g_rst.num_rt=i+1; }
+    for(uint32_t i=num;i<8;i++){ g_rst.rtvs[i]=0; g_rst.rtvv[i]=0; }
+    g_rst.rtv=g_rst.rtvs[0];
+    { D3DObj*d=(D3DObj*)dsv; g_rst.dsv=(d&&d->data)?(D3DObj*)d->data:d; } }
+static void MSABI ctx_RSSetViewports(void*t,uint32_t num,const void*vps){ (void)t; if(num&&vps){ const float*f=vps; g_rst.vp_x=(int)f[0]; g_rst.vp_y=(int)f[1]; g_rst.vp_w=(int)f[2]; g_rst.vp_h=(int)f[3];
+    g_rst.vp_zn=f[4]; g_rst.vp_zf=f[5]; g_rst.vp_set=1; } }
+static void MSABI ctx_OMSetBlendState(void*t,void*bs,const float*bf,uint32_t mask){ (void)t;(void)mask; g_rst.blend=bs;
+    for(int i=0;i<4;i++) g_rst.blendf[i]=bf?bf[i]:1.0f; }
+static void MSABI ctx_OMSetDepthStencilState(void*t,void*ds,uint32_t ref){ (void)t; g_rst.depth=ds; g_rst.sref=ref; }
+static void MSABI ctx_RSSetState(void*t,void*rs){ (void)t; g_rst.raster=rs; }
+static void MSABI ctx_RSSetScissorRects(void*t,uint32_t num,const int32_t*r){ (void)t; if(num&&r){ g_rst.sc_l=r[0]; g_rst.sc_t=r[1]; g_rst.sc_r=r[2]; g_rst.sc_b=r[3]; } }
+static void MSABI ctx_PSSetSamplers(void*t,uint32_t st,uint32_t n,void*const*ss){ (void)t; for(uint32_t i=0;i<n&&st+i<16;i++) g_rst.pssamp[st+i]=ss?(D3DObj*)ss[i]:0; }
+static void MSABI ctx_VSSetSamplers(void*t,uint32_t st,uint32_t n,void*const*ss){ (void)t; for(uint32_t i=0;i<n&&st+i<16;i++) g_rst.vssamp[st+i]=ss?(D3DObj*)ss[i]:0; }
 static const char* dxgi_fmt_name(uint32_t f){ switch(f){ case 2:return"RGBA32F";case 6:return"RGBA32U";case 16:return"RGBA16F";case 28:return"RGBA8";case 87:return"BGRA8";case 41:return"R32F";case 42:return"R32U";case 49:return"R8";case 57:return"R8U";default:return"?";} }
 // Draw census (PELOAD_DRAW_CENSUS): tally fullscreen (no VB) vs geometry (VB-backed) draws and
 // the distinct input-layout signatures, so we know whether this worker renders the 3D world.
 static void slotcen_dump(void);
 static void draw_census(void){ slotcen_dump(); if(!getenv("PELOAD_DRAW_CENSUS")) return;
     static uint64_t fs, geo, geo_vcapture; static int reported;
-    D3DObj*vb=g_d3dst.vb[0]; D3DObj*il=g_d3dst.il;
+    D3DObj*vb=g_rst.vb[0]; D3DObj*il=g_rst.il;
     if(vb && vb->size && il && il->nelem) { geo++; if(vb->data) geo_vcapture++; } else fs++;
     if(((fs+geo)%500)==0 && reported!=(int)(fs+geo)){ reported=(int)(fs+geo);
         char m[128]; int k=snprintf(m,sizeof m,"  [census] fullscreen=%llu geometry=%llu (with-vdata=%llu)\n",
             (unsigned long long)fs,(unsigned long long)geo,(unsigned long long)geo_vcapture); (void)!write(2,m,k); } }
 static void draw_log(const char*tag,uint32_t count){ draw_census(); if(!getenv("PELOAD_TRACE_DRAW")) return;
-    D3DObj*il0=g_d3dst.il,*rt0=g_d3dst.rtv;
+    D3DObj*il0=g_rst.il,*rt0=g_rst.rtv;
     // PELOAD_TRACE_DRAW_RTW=<w>: only log draws whose render target has this width (e.g. 1920 = the
     // scene G-buffer, skipping the thousands of 4096 backbuffer/UI draws). Also dump psrv slots 0..31.
     const char*rtw=getenv("PELOAD_TRACE_DRAW_RTW");
     if(rtw && (!rt0 || rt0->w!=(uint32_t)atoi(rtw))) return;
     // PELOAD_D3DGL_DUMPSHADER: dump the bound VS/PS GLSL for scene draws that bind >=6 textures (the
     // map MATERIAL shaders, not the texture-less dither/discard passes) so we can read the material math.
-    if(rtw && getenv("PELOAD_D3DGL_DUMPSHADER")){ static int ds; if(ds<4){ int nt=0; for(int r=0;r<32;r++) if(g_d3dst.psrv[r]) nt++;
-        D3DObj*vs=g_d3dst.vs,*ps=g_d3dst.ps;
+    if(rtw && getenv("PELOAD_D3DGL_DUMPSHADER")){ static int ds; if(ds<4){ int nt=0; for(int r=0;r<32;r++) if(g_rst.psrv[r]) nt++;
+        D3DObj*vs=g_rst.vs,*ps=g_rst.ps;
         if(nt>=6 && vs&&vs->glsl&&ps&&ps->glsl){ char p[64]; int k=snprintf(p,sizeof p,"/tmp/scene_ps_%d.glsl",ds); FILE*f=fopen(p,"wb"); if(f){fwrite(ps->glsl,1,strlen(ps->glsl),f);fclose(f);}
             k=snprintf(p,sizeof p,"/tmp/scene_vs_%d.glsl",ds); f=fopen(p,"wb"); if(f){fwrite(vs->glsl,1,strlen(vs->glsl),f);fclose(f);} ds++;
-            D3DObj*c13p=g_d3dst.pscb[13],*c13v=g_d3dst.vscb[13],*c12=g_d3dst.vscb[12]; char cm[300]; int ck=snprintf(cm,sizeof cm,"  [cbdata] pscb13=%p(%lluB) vscb13=%p(%lluB) vscb12=%p(%lluB)",(void*)c13p,c13p?(unsigned long long)c13p->size:0,(void*)c13v,c13v?(unsigned long long)c13v->size:0,(void*)c12,c12?(unsigned long long)c12->size:0);
+            D3DObj*c13p=g_rst.pscb[13],*c13v=g_rst.vscb[13],*c12=g_rst.vscb[12]; char cm[300]; int ck=snprintf(cm,sizeof cm,"  [cbdata] pscb13=%p(%lluB) vscb13=%p(%lluB) vscb12=%p(%lluB)",(void*)c13p,c13p?(unsigned long long)c13p->size:0,(void*)c13v,c13v?(unsigned long long)c13v->size:0,(void*)c12,c12?(unsigned long long)c12->size:0);
             if(c13p&&c13p->data&&c13p->size>=16){ const float*fp=(const float*)c13p->data; int nv=(int)(c13p->size/16); if(nv>10)nv=10;
                 ck+=snprintf(cm+ck,sizeof cm-ck," pscb13[0..%d]=",nv-1); for(int v=0;v<nv&&ck<(int)sizeof cm-40;v++) ck+=snprintf(cm+ck,sizeof cm-ck,"[%.2f %.2f %.2f %.2f]",fp[v*4],fp[v*4+1],fp[v*4+2],fp[v*4+3]); }
             ck+=snprintf(cm+ck,sizeof cm-ck,"\n"); (void)!write(2,cm,ck);
             // VERTEX FORMAT + sample: is POSITION compressed (16-bit, needs cb3 decompress) or float3?
             // Interpret vertex 0's first bytes both ways so we can tell which path the geometry needs.
-            D3DObj*il=g_d3dst.il, *vb=g_d3dst.vb[0]; uint32_t vstr=g_d3dst.vstride[0];
+            D3DObj*il=g_rst.il, *vb=g_rst.vb[0]; uint32_t vstr=g_rst.vstride[0];
             char vm2[380]; int vk=snprintf(vm2,sizeof vm2,"  [vtxfmt] stride=%u elems=%d:",vstr,il?il->nelem:0);
             if(il) for(int e=0;e<il->nelem&&vk<260;e++) vk+=snprintf(vm2+vk,sizeof vm2-vk," %s@%u/%s",il->elem[e].sem,il->elem[e].off,dxgi_fmt_name(il->elem[e].fmt));
             if(vb&&vb->data&&vstr>=6){ const uint8_t*v0=(const uint8_t*)vb->data; const float*ff=(const float*)v0; const int16_t*ss=(const int16_t*)v0;
@@ -1701,13 +1783,13 @@ static void draw_log(const char*tag,uint32_t count){ draw_census(); if(!getenv("
             vk+=snprintf(vm2+vk,sizeof vm2-vk,"\n"); (void)!write(2,vm2,vk);
             // ALL VS cbuffer slots for this compressed draw: which are bound + first 2 vec4 (find cb1 =
             // the vertex-decompression scale/offset, needed to un-collapse the [-1,1] compressed positions).
-            char vb2[420]; int vk2=snprintf(vb2,sizeof vb2,"  [vscbs]"); for(int b=0;b<16;b++){ D3DObj*cc=g_d3dst.vscb[b]; if(!cc)continue;
+            char vb2[420]; int vk2=snprintf(vb2,sizeof vb2,"  [vscbs]"); for(int b=0;b<16;b++){ D3DObj*cc=g_rst.vscb[b]; if(!cc)continue;
                 vk2+=snprintf(vb2+vk2,sizeof vb2-vk2," b%d=%lluB",b,(unsigned long long)cc->size);
                 if(cc->data&&cc->size>=32&&vk2<340){ const float*ff=(const float*)cc->data; vk2+=snprintf(vb2+vk2,sizeof vb2-vk2,"[%.2f %.2f %.2f %.2f|%.2f %.2f %.2f %.2f]",ff[0],ff[1],ff[2],ff[3],ff[4],ff[5],ff[6],ff[7]); } }
             vk2+=snprintf(vb2+vk2,sizeof vb2-vk2,"\n"); (void)!write(2,vb2,vk2);
             // sample the bound textures' raw data: how many nonzero bytes (black vs has-content) + the
             // GL-uploaded flag + format, for slots 0..8 (the terrain blend/detail textures)
-            char tm[400]; int tk2=snprintf(tm,sizeof tm,"  [texdata]"); for(int r=0;r<9;r++){ D3DObj*t=g_d3dst.psrv[r];
+            char tm[400]; int tk2=snprintf(tm,sizeof tm,"  [texdata]"); for(int r=0;r<9;r++){ D3DObj*t=g_rst.psrv[r];
                 if(!t){ tk2+=snprintf(tm+tk2,sizeof tm-tk2," t%d=-",r); continue; }
                 int nz=0; if(t->data&&t->size>=1024){ const uint8_t*d=t->data; uint64_t step=t->size/2048; if(step<1)step=1; for(uint64_t i=0;i<t->size&&nz<40;i+=step) if(d[i])nz++; }
                 // for small (1x1/4x4) multiplier textures, show the first texel bytes (the value actually sampled)
@@ -1715,13 +1797,13 @@ static void draw_log(const char*tag,uint32_t count){ draw_census(); if(!getenv("
                 tk2+=snprintf(tm+tk2,sizeof tm-tk2," t%d=%ux%u(f%u,%lluB,nz%d,gl%u%s)",r,t->w,t->h,t->fmt,(unsigned long long)t->size,nz,t->gltex,px); }
             tk2+=snprintf(tm+tk2,sizeof tm-tk2,"\n"); (void)!write(2,tm,tk2); } } }
     static int c; if(c++>=(rtw?400:200)) return;
-    if(rtw){ int ntex=0; char tb[160]; int tk=0; for(int r=0;r<32;r++){ D3DObj*t=g_d3dst.psrv[r]; if(t){ntex++; if(tk<140)tk+=snprintf(tb+tk,sizeof tb-tk," t%d=%ux%u(f%u)",r,t->w,t->h,t->fmt);} } if(!ntex){tb[0]=' ';tb[1]='n';tb[2]='o';tb[3]='n';tb[4]='e';tb[5]=0;}
-        char cbb[96]; int ck=snprintf(cbb,sizeof cbb," VScb:"); for(int b=0;b<16;b++) if(g_d3dst.vscb[b]) ck+=snprintf(cbb+ck,sizeof cbb-ck,"%d ",b); ck+=snprintf(cbb+ck,sizeof cbb-ck,"PScb:"); for(int b=0;b<16;b++) if(g_d3dst.pscb[b]) ck+=snprintf(cbb+ck,sizeof cbb-ck,"%d ",b);
-        char m2[500]; int k2=snprintf(m2,sizeof m2,"  [%s] rt=%ux%u stride=%u elems=%d ntex=%d%s:%s |",tag,rt0->w,rt0->h,g_d3dst.vstride[0],il0?il0->nelem:0,ntex,cbb,tb);
+    if(rtw){ int ntex=0; char tb[160]; int tk=0; for(int r=0;r<32;r++){ D3DObj*t=g_rst.psrv[r]; if(t){ntex++; if(tk<140)tk+=snprintf(tb+tk,sizeof tb-tk," t%d=%ux%u(f%u)",r,t->w,t->h,t->fmt);} } if(!ntex){tb[0]=' ';tb[1]='n';tb[2]='o';tb[3]='n';tb[4]='e';tb[5]=0;}
+        char cbb[96]; int ck=snprintf(cbb,sizeof cbb," VScb:"); for(int b=0;b<16;b++) if(g_rst.vscb[b]) ck+=snprintf(cbb+ck,sizeof cbb-ck,"%d ",b); ck+=snprintf(cbb+ck,sizeof cbb-ck,"PScb:"); for(int b=0;b<16;b++) if(g_rst.pscb[b]) ck+=snprintf(cbb+ck,sizeof cbb-ck,"%d ",b);
+        char m2[500]; int k2=snprintf(m2,sizeof m2,"  [%s] rt=%ux%u stride=%u elems=%d ntex=%d%s:%s |",tag,rt0->w,rt0->h,g_rst.vstride[0],il0?il0->nelem:0,ntex,cbb,tb);
         if(il0) for(int i=0;i<il0->nelem&&k2<380;i++) k2+=snprintf(m2+k2,sizeof m2-k2," %s",il0->elem[i].sem);
         if(k2<398){m2[k2++]='\n';m2[k2]=0;} (void)!write(2,m2,k2); return; }
-    D3DObj*il=g_d3dst.il,*vb=g_d3dst.vb[0],*tex=g_d3dst.psrv[0],*rt=g_d3dst.rtv;
-    char m[640]; int k=snprintf(m,sizeof m,"  [%s] n=%u topo=%u stride=%u vb=%lluB ibfmt=%u tex=%ux%u(f%u) rt=%ux%u vp=%dx%d elems=%d:",tag,count,g_d3dst.topo,g_d3dst.vstride[0],vb?(unsigned long long)vb->size:0,g_d3dst.ibfmt,tex?tex->w:0,tex?tex->h:0,tex?tex->fmt:0,rt?rt->w:0,rt?rt->h:0,g_d3dst.vp_w,g_d3dst.vp_h,il?il->nelem:0);
+    D3DObj*il=g_rst.il,*vb=g_rst.vb[0],*tex=g_rst.psrv[0],*rt=g_rst.rtv;
+    char m[640]; int k=snprintf(m,sizeof m,"  [%s] n=%u topo=%u stride=%u vb=%lluB ibfmt=%u tex=%ux%u(f%u) rt=%ux%u vp=%dx%d elems=%d:",tag,count,g_rst.topo,g_rst.vstride[0],vb?(unsigned long long)vb->size:0,g_rst.ibfmt,tex?tex->w:0,tex?tex->h:0,tex?tex->fmt:0,rt?rt->w:0,rt?rt->h:0,g_rst.vp_w,g_rst.vp_h,il?il->nelem:0);
     if(il) for(int i=0;i<il->nelem&&k<600;i++) k+=snprintf(m+k,sizeof m-k," %s@%u/%s",il->elem[i].sem,il->elem[i].off,dxgi_fmt_name(il->elem[i].fmt));
     if(k<638){ m[k++]='\n'; m[k]=0; } (void)!write(2,m,k); }
 unsigned long g_ct_frame;
@@ -1733,7 +1815,7 @@ static void fps_title_tick(void); // fwd: engine fps + draws/frame in the window
 static int win_hidden(void);
 static void present_cap(void){ static double per=-1, next; if(per<0){ const char*e=getenv("PELOAD_MAX_FPS"); double f=e?atof(e):(win_hidden()?30:0); per=f>0?1.0/f:0; }
     if(!per) return; double now=mono_s(); if(next>now){ usleep((useconds_t)((next-now)*1e6)); next+=per; } else next=now+per; }
-static int MSABI swap_Present(void*t,uint32_t sync,uint32_t fl){ (void)sync;(void)fl; d3dtrace(4,"Present"); flog("t%x PRESENT swapchain=%p",pthread_mach_thread_np(pthread_self()),t); g_ct_frame++; g_hb_taken=0; hb_teleport_tick(); flog_present(); fps_title_tick();
+static int MSABI swap_Present(void*t,uint32_t sync,uint32_t fl){ (void)sync;(void)fl; d3dtrace(4,"Present"); flog("t%x PRESENT swapchain=%p",pthread_mach_thread_np(pthread_self()),t); g_ct_frame++; if(!sub_on()) g_hb_taken=0; hb_teleport_tick(); flog_present(); fps_title_tick();
     // PELOAD_TRACE_PRESENT_RATE: periodic count+timestamp so we can see if/when the engine stops
     // calling Present (render-thread stall) vs keeps calling it (present-bridge stall).
     if(getenv("PELOAD_TRACE_PRESENT_RATE")){ static unsigned long pc; static long t0; struct timeval tv; gettimeofday(&tv,0);
@@ -1743,7 +1825,7 @@ static int MSABI swap_Present(void*t,uint32_t sync,uint32_t fl){ (void)sync;(voi
         for(int i=0;i<400;i++){ uint64_t v=sp[i];
             if(v>=0x180000000ULL&&v<0x187000000ULL){ char b[48]; int n=snprintf(b,sizeof b,"   halo3+0x%llx\n",(unsigned long long)(v-0x180000000ULL)); (void)!write(2,b,n); }
             else if(v>=0x140000000ULL&&v<0x14c000000ULL){ char b[48]; int n=snprintf(b,sizeof b,"   exe+0x%llx\n",(unsigned long long)(v-0x140000000ULL)); (void)!write(2,b,n); } } } }
-    if(d3dgl_enabled()) d3dgl_present();
+    if(d3dgl_enabled()) sub_present();
     present_cap();
     return HR_OK; }
 // The back buffer must be STABLE across GetBuffer calls (the engine caches/compares it and
@@ -1849,7 +1931,7 @@ static void d3d_init(void){
     void** x=g_d3dctx_vtbl; for(int i=0;i<160;i++) x[i]=(void*)ctx_ret0;
     x[0]=(void*)d3d_QI;x[1]=(void*)d3d_AddRef;x[2]=(void*)d3d_Release;x[3]=(void*)ctx_GetDevice;x[4]=(void*)d3d_GetPD;x[5]=(void*)d3d_SetPD;x[6]=(void*)d3d_SetPDI;
     x[12]=(void*)ctx_DrawIndexed; x[13]=(void*)ctx_Draw;                                             // DrawIndexed, Draw
-    x[14]=(void*)ctx_Map;                                                                            // Map (Unmap=15 stays ret0)
+    x[14]=(void*)ctx_Map; x[15]=(void*)ctx_Unmap;                                                     // Map / Unmap
     x[20]=(void*)ctx_DrawIndexedInstanced; x[21]=(void*)ctx_DrawInstanced; x[41]=(void*)ctx_Dispatch;
     x[39]=(void*)ctx_DrawIndexedInstancedIndirect; x[40]=(void*)ctx_DrawInstancedIndirect; x[42]=(void*)ctx_DispatchIndirect; x[49]=(void*)ctx_CopyStructureCount;
     x[23]=(void*)ctx_GSSetShader; x[60]=(void*)ctx_HSSetShader; x[64]=(void*)ctx_DSSetShader; x[37]=(void*)ctx_SOSetTargets;
@@ -3703,6 +3785,11 @@ typedef struct {
 static void bmp_write_rgba(const char*path,int W,int H,const unsigned char*px); // fwd (defined in gl_selftest section)
 static unsigned char* bmp_load_rgba(const char*path,int*pw,int*ph);              // fwd (defined in gl_selftest section)
 static D3DGLApi G;
+// The framebuffer the render context's draws last bound (per-draw cache: rebinding the same FBO makes Apple's GL
+// revalidate). Every other glBindFramebuffer goes through gl_bindfbo_any, which forgets it (also the present
+// thread's own context: at worst one extra bind per frame). PELOAD_D3DGL_NOFBOCACHE binds on every draw.
+static unsigned g_gl_fbo=~0u;
+static inline void gl_bindfbo_any(unsigned t,unsigned f){ G.BindFramebuffer(t,f); g_gl_fbo=~0u; }
 static pthread_mutex_t g_d3dgl_lock=PTHREAD_MUTEX_INITIALIZER; // guards one-time init (race-free)
 // halo3 drives the D3D11 immediate context from MORE THAN ONE thread: gameplay draws on the render
 // thread, but the end-of-frame CopyResource(backbuffer <- final frame) + Present (and some clears) come
@@ -3711,7 +3798,8 @@ static pthread_mutex_t g_d3dgl_lock=PTHREAD_MUTEX_INITIALIZER; // guards one-tim
 // shared by every calling thread, serialized by this recursive mutex (same context => FBO/VAO names stay
 // valid, which a second shared context would not give us).
 static pthread_mutex_t g_glmx=PTHREAD_RECURSIVE_MUTEX_INITIALIZER;
-#define GLLOCK()   pthread_mutex_lock(&g_glmx)
+double g_glwait_s;   // time spent waiting for g_glmx held by another thread ([submit] stats)
+#define GLLOCK()   do{ if(pthread_mutex_trylock(&g_glmx)){ double _t=mono_s(); pthread_mutex_lock(&g_glmx); g_glwait_s+=mono_s()-_t; } }while(0)
 #define GLUNLOCK() pthread_mutex_unlock(&g_glmx)
 static int      g_d3dgl_ready;           // init completed (context + pipeline live)
 static int      g_d3dgl_offscreen;       // 1 = render-thread offscreen ctx; present via present thread
@@ -3925,17 +4013,17 @@ static int d3dgl_make_offscreen(void){
 // Only active with the GL renderer; otherwise GetData keeps the old "S_OK, nothing written" behaviour.
 static D3DObj* g_q_active;   // occlusion query currently recording (GL allows one per target)
 static int q_gl(D3DObj*o){ return (o->sd[0]==1||o->sd[0]==5) && g_d3dgl_ready && G.BeginQuery && G.EndQuery && G.GenQueries && G.GetQueryObjectiv && !getenv("PELOAD_D3DGL_NOQUERY"); }
-static void MSABI ctx_Begin(void*t,void*a){ (void)t; D3DObj*o=a; if(!o||o->stkind!=5) return;
+static void MSABI ctxi_Begin(void*t,void*a){ (void)t; D3DObj*o=a; if(!o||o->stkind!=5) return;
     if(q_gl(o)){ GLLOCK(); if(CGLGetCurrentContext()!=g_d3dgl_cgl) CGLSetCurrentContext(g_d3dgl_cgl);
         if(!o->glq) G.GenQueries(1,&o->glq);
         if(g_q_active){ G.EndQuery(0x8914/*SAMPLES_PASSED*/); g_q_active->qstate=2; g_q_active=0; }
         G.BeginQuery(0x8914,o->glq); g_q_active=o; GLUNLOCK(); }
     o->qstate=1; }
-static void MSABI ctx_End(void*t,void*a){ (void)t; D3DObj*o=a; if(!o||o->stkind!=5) return;
+static void MSABI ctxi_End(void*t,void*a){ (void)t; D3DObj*o=a; if(!o||o->stkind!=5) return;
     if(o->sd[0]==2) o->qval=(uint64_t)(mono_s()*1e9);                    // TIMESTAMP (ns; disjoint reports 1 GHz)
     if(g_q_active==o){ GLLOCK(); if(CGLGetCurrentContext()!=g_d3dgl_cgl) CGLSetCurrentContext(g_d3dgl_cgl); G.EndQuery(0x8914); GLUNLOCK(); g_q_active=0; }
     o->qstate=2; }
-static int MSABI ctx_GetData(void*t,void*a,void*data,uint32_t size,uint32_t flags){ (void)t; D3DObj*o=a;
+static int MSABI ctxi_GetData(void*t,void*a,void*data,uint32_t size,uint32_t flags){ (void)t; D3DObj*o=a;
     if(!o||o->stkind!=5||!d3dgl_enabled()) return 0;
     uint8_t buf[88]; memset(buf,0,sizeof buf); uint32_t ty=o->sd[0], n=query_GetDataSize(o);
     switch(ty){
@@ -4279,7 +4367,7 @@ static unsigned long g_tx_up, g_tx_dec, g_tx_skip; static uint64_t g_tx_bytes; s
 static int prof_on(void);
 static void d3dgl_ensure_tex(D3DObj*o){
     if(!o) return;
-    if((o->bindf&0x40) && !getenv("PELOAD_D3DGL_NODEPTH")){ d3dgl_ensure_depth(o); return; }   // DSV resource sampled via an SRV
+    if((o->bindf&0x40) && !GENV1("PELOAD_D3DGL_NODEPTH")){ d3dgl_ensure_depth(o); return; }   // DSV resource sampled via an SRV
     // cube / array / 3D resources get their own GL target (render targets are always plain 2D here)
     if(!o->gltarget) o->gltarget=(o->gltex||o->glfbo)?GLE_TEX2D:d3dgl_tex_target(o);
     if(o->gltarget!=GLE_TEX2D){
@@ -4297,14 +4385,14 @@ static void d3dgl_ensure_tex(D3DObj*o){
         // Terrain/detail textures TILE (halo3's cb13 UV scales reach 8-48x); D3D11's default sampler is
         // WRAP, so REPEAT is the correct default. CLAMP_TO_EDGE made tiled UVs sample only the edge texel
         // -> dark/black terrain. PELOAD_D3DGL_CLAMP forces the old clamp.
-        unsigned wrap = getenv("PELOAD_D3DGL_CLAMP")?GLE_CLAMP:GLE_REPEAT;
+        unsigned wrap = GENV1("PELOAD_D3DGL_CLAMP")?GLE_CLAMP:GLE_REPEAT;
         G.TexParameteri(GLE_TEX2D,0x2802,wrap); G.TexParameteri(GLE_TEX2D,0x2803,wrap);
         o->gl_uploaded=0; }
     if(o->gl_uploaded && !o->gl_dirty) return;
     // Streaming of lower-resolution mips only: the BC-decode upload below uses one base level and regenerates the
     // smaller ones on the GPU, so writes below that base change nothing we upload -- skip the decode + re-upload (the
     // costliest part of busy frames). PELOAD_D3DGL_NOMIPSKIP re-uploads anyway.
-    { static int nos=-1; if(nos<0) nos=getenv("PELOAD_D3DGL_NOMIPSKIP")?1:0;
+    { static int nos=-1; if(nos<0) nos=GENV1("PELOAD_D3DGL_NOMIPSKIP")?1:0;
       if(!nos && o->gl_uploaded && o->dpart && o->up_base1 && o->arr<=1 && o->dmin>=o->up_base1){ o->gl_dirty=0; o->dpart=0; g_tx_skip++; return; } }
     double tx_t0=prof_on()?mono_s():0; g_tx_up++; o->up_base1=0;
     TEXCACHE_INVALIDATE(); G.BindTexture(GLE_TEX2D,o->gltex);
@@ -4312,7 +4400,7 @@ static void d3dgl_ensure_tex(D3DObj*o){
     // Block-compressed (BC/DXT) upload: the real artwork assets ship compressed. Upload level 0
     // untouched; GL decodes it. Only when the backing buffer holds the level-0 block bytes.
     unsigned bcif; int bcbb;
-    if(!getenv("PELOAD_NO_BC") && o->data && d3dgl_bc_glfmt(o->fmt,&bcif,&bcbb)){
+    if(!GENV1("PELOAD_NO_BC") && o->data && d3dgl_bc_glfmt(o->fmt,&bcif,&bcbb)){
         uint64_t csz=(uint64_t)((w+3)/4)*((h+3)/4)*bcbb;
         static void(*cti)(unsigned,int,unsigned,int,int,int,int,const void*);
         static int cti_init; if(!cti_init){ cti=dlsym(RTLD_DEFAULT,"glCompressedTexImage2D"); cti_init=1; }
@@ -4324,7 +4412,7 @@ static void d3dgl_ensure_tex(D3DObj*o){
             // terrain sampling, show as a regular grid of gaps). So upload the HIGHEST-RESOLUTION mip that
             // is SUBSTANTIALLY complete (>= thresh of sampled bytes nonzero); fall back to the most-
             // complete mip available (the smallest mip is always complete). PELOAD_D3DGL_MIPTHRESH tunes it.
-            double thresh=getenv("PELOAD_D3DGL_MIPTHRESH")?atof(getenv("PELOAD_D3DGL_MIPTHRESH")):0.55; if(thresh<=0||thresh>1)thresh=0.55;
+            double thresh=GENV1("PELOAD_D3DGL_MIPTHRESH")?atof(GENV1("PELOAD_D3DGL_MIPTHRESH")):0.55; if(thresh<=0||thresh>1)thresh=0.55;
             uint32_t uw=w,uh=h; uint64_t uoff=0,usz=csz; int picked=0,baselvl=0; double bestfrac=-1; uint32_t bw=w,bh=h; uint64_t boff=0,bsz=csz; int bbl=0;
             for(uint32_t lvl=0;lvl<15;lvl++){ uint32_t mw=w>>lvl; if(!mw)mw=1; uint32_t mh=h>>lvl; if(!mh)mh=1;
                 uint64_t msz=0,moff=tex_sub_off(o->w,o->h,o->fmt,lvl,&msz); if(!msz||moff+msz>o->size) break;
@@ -4340,7 +4428,7 @@ static void d3dgl_ensure_tex(D3DObj*o){
             // moiré) with no way to mip them while compressed. Fix: DECODE the BC block to RGBA8 in the shim,
             // upload uncompressed, glGenerateMipmap, trilinear -> proper anti-aliasing. PELOAD_D3DGL_NOBCDECODE
             // keeps the raw compressed upload (single level, no mips).
-            if(!getenv("PELOAD_D3DGL_NOBCDECODE")){
+            if(!GENV1("PELOAD_D3DGL_NOBCDECODE")){
                 uint8_t*rgba=dg_bc_decode(o->fmt,(const uint8_t*)o->data+uoff,(size_t)(o->size-uoff),(int)uw,(int)uh);
                 if(rgba){ static void(*genmip)(unsigned); static int gmi; if(!gmi){ genmip=dlsym(RTLD_DEFAULT,"glGenerateMipmap"); gmi=1; }
                     if(gerr) gerr();
@@ -4350,19 +4438,19 @@ static void d3dgl_ensure_tex(D3DObj*o){
                     unsigned iform=issn?0x8F97/*RGBA8_SNORM*/:issrgb?0x8C43/*SRGB8_ALPHA8*/:GLE_RGBA8; o->glsrgb=(iform==0x8C43);
                     G.TexImage2D(GLE_TEX2D,0,iform,(int)uw,(int)uh,0,GLE_RGBA,issn?0x1400/*BYTE*/:GLE_UBYTE,rgba);
                     unsigned de=gerr?gerr():0; free(rgba);
-                    if(!de){ int mip=!getenv("PELOAD_D3DGL_NOMIP");
+                    if(!de){ int mip=!GENV1("PELOAD_D3DGL_NOMIP");
                         if(mip&&genmip){ genmip(GLE_TEX2D); o->glhasmips=1; G.TexParameteri(GLE_TEX2D,0x2801,0x2703/*LINEAR_MIPMAP_LINEAR*/); G.TexParameteri(GLE_TEX2D,0x813D/*MAX_LEVEL*/,1000);
                             // anisotropic filtering: the terrain is viewed at grazing angles (one UV axis
                             // hugely minified) -> isotropic trilinear still aliases into vertical scanline
                             // moiré. GL_TEXTURE_MAX_ANISOTROPY (0x84FE) fixes grazing-angle sampling.
                             static void(*tpf)(unsigned,unsigned,float); static void(*gfv)(unsigned,float*); static int qa; static float qmax;
                             if(!qa){ qa=1; tpf=dlsym(RTLD_DEFAULT,"glTexParameterf"); gfv=dlsym(RTLD_DEFAULT,"glGetFloatv"); qmax=1; if(gfv) gfv(0x84FF/*MAX_TEXTURE_MAX_ANISOTROPY*/,&qmax); if(qmax<1)qmax=1; }
-                            if(!getenv("PELOAD_D3DGL_NOANISO")){ float ma=16.0f; if(ma>qmax)ma=qmax; if(tpf) tpf(GLE_TEX2D,0x84FE/*TEXTURE_MAX_ANISOTROPY*/,ma); }
+                            if(!GENV1("PELOAD_D3DGL_NOANISO")){ float ma=16.0f; if(ma>qmax)ma=qmax; if(tpf) tpf(GLE_TEX2D,0x84FE/*TEXTURE_MAX_ANISOTROPY*/,ma); }
                             // PELOAD_D3DGL_LODBIAS=<f>: positive bias blurs (lower-res mip) -> softens the
                             // grazing-angle silhouette streaks that extreme tiling (48x) + aniso can't resolve.
-                            if(getenv("PELOAD_D3DGL_LODBIAS")&&tpf){ float lb=atof(getenv("PELOAD_D3DGL_LODBIAS")); tpf(GLE_TEX2D,0x8501/*TEXTURE_LOD_BIAS*/,lb); } }
+                            if(GENV1("PELOAD_D3DGL_LODBIAS")&&tpf){ float lb=atof(GENV1("PELOAD_D3DGL_LODBIAS")); tpf(GLE_TEX2D,0x8501/*TEXTURE_LOD_BIAS*/,lb); } }
                         else G.TexParameteri(GLE_TEX2D,0x2801,GLE_LINEAR);
-                        if(getenv("PELOAD_TRACE_TEXUP")){ static int dc; if(dc++<3){ static float qmx; static int qd; if(!qd){ qd=1; void(*gf)(unsigned,float*)=dlsym(RTLD_DEFAULT,"glGetFloatv"); qmx=0; if(gf)gf(0x84FF,&qmx); } char b[180]; int k=snprintf(b,sizeof b,"  [texup-bcdec] %dx%d fmt=%u -> RGBA8 base=%ux%u(dl%d) mips=%d maxaniso=%.1f\n",w,h,o->fmt,uw,uh,baselvl,mip&&genmip?1:0,qmx); (void)!write(2,b,k);} }
+                        if(GENV1("PELOAD_TRACE_TEXUP")){ static int dc; if(dc++<3){ static float qmx; static int qd; if(!qd){ qd=1; void(*gf)(unsigned,float*)=dlsym(RTLD_DEFAULT,"glGetFloatv"); qmx=0; if(gf)gf(0x84FF,&qmx); } char b[180]; int k=snprintf(b,sizeof b,"  [texup-bcdec] %dx%d fmt=%u -> RGBA8 base=%ux%u(dl%d) mips=%d maxaniso=%.1f\n",w,h,o->fmt,uw,uh,baselvl,mip&&genmip?1:0,qmx); (void)!write(2,b,k);} }
                         o->gl_uploaded=1; o->gl_dirty=0; o->dpart=0; if(picked && baselvl<254) o->up_base1=(uint8_t)(baselvl+1);
                         g_tx_dec++; g_tx_bytes+=(uint64_t)uw*uh*4; if(tx_t0) g_tx_ms+=(mono_s()-tx_t0)*1000;
                         dg_gltex_dump((int)uw,(int)uh,o->fmt); return; }
@@ -4373,7 +4461,7 @@ static void d3dgl_ensure_tex(D3DObj*o){
             // — the smaller mips stream first so they're complete). A real chain + trilinear filtering kills
             // the aliasing MOIRÉ on the heavily-tiled (8-48x) terrain/normal textures. PELOAD_D3DGL_NOMIPCHAIN
             // uploads only the base level. (BC can't glGenerateMipmap, so upload the asset's own mips.)
-            unsigned e=0; int gl_lvl=0; int domip=getenv("PELOAD_D3DGL_MIPCHAIN")?1:0;
+            unsigned e=0; int gl_lvl=0; int domip=GENV1("PELOAD_D3DGL_MIPCHAIN")?1:0;
             for(int dl=baselvl; dl<15; dl++){ uint32_t mw=w>>dl; if(!mw)mw=1; uint32_t mh=h>>dl; if(!mh)mh=1;
                 uint64_t msz=0,moff=tex_sub_off(o->w,o->h,o->fmt,dl,&msz); if(!msz||moff+msz>o->size) break;
                 if(gerr) gerr();   // clear before each level
@@ -4387,13 +4475,13 @@ static void d3dgl_ensure_tex(D3DObj*o){
             }
             if(!e){ // base ok (chain may be truncated): trilinear only if >1 level, cap max level
                 unsigned minf=GLE_LINEAR;
-                if(domip&&gl_lvl>1) minf=getenv("PELOAD_D3DGL_MIPNEAREST")?0x2701/*LINEAR_MIPMAP_NEAREST*/
-                                        :getenv("PELOAD_D3DGL_MIPLINEAR")?GLE_LINEAR/*bilinear base, chain present*/
+                if(domip&&gl_lvl>1) minf=GENV1("PELOAD_D3DGL_MIPNEAREST")?0x2701/*LINEAR_MIPMAP_NEAREST*/
+                                        :GENV1("PELOAD_D3DGL_MIPLINEAR")?GLE_LINEAR/*bilinear base, chain present*/
                                         :0x2703/*LINEAR_MIPMAP_LINEAR*/;
                 G.TexParameteri(GLE_TEX2D,0x2801/*MIN*/, minf);
                 G.TexParameteri(GLE_TEX2D,0x813D/*MAX_LEVEL*/, gl_lvl>0?gl_lvl-1:0); o->glhasmips=(gl_lvl>1);
             }
-            if(getenv("PELOAD_TRACE_TEXUP")){ static int bc; if(bc++<40){ char b[180]; int k=snprintf(b,sizeof b,"  [texup-bc] %dx%d fmt=%u ifmt=0x%x base=%ux%u@%llu(dl%d) levels=%d err=0x%x%s\n",w,h,o->fmt,bcif,uw,uh,(unsigned long long)uoff,baselvl,gl_lvl,e,e?" (FALLBACK)":""); (void)!write(2,b,k);} }
+            if(GENV1("PELOAD_TRACE_TEXUP")){ static int bc; if(bc++<40){ char b[180]; int k=snprintf(b,sizeof b,"  [texup-bc] %dx%d fmt=%u ifmt=0x%x base=%ux%u@%llu(dl%d) levels=%d err=0x%x%s\n",w,h,o->fmt,bcif,uw,uh,(unsigned long long)uoff,baselvl,gl_lvl,e,e?" (FALLBACK)":""); (void)!write(2,b,k);} }
             if(!e){ o->glsrgb=(o->fmt==72||o->fmt==75||o->fmt==78); o->gl_uploaded=1; o->gl_dirty=0; dg_gltex_dump((int)uw,(int)uh,o->fmt); return; } // success: BPTC may fail on GL4.1 -> fall through
         }
     }
@@ -4403,7 +4491,7 @@ static void d3dgl_ensure_tex(D3DObj*o){
     // PELOAD_TRACE_TEXUP: for sizeable textures, report w/h/fmt/can + whether the backing data is all
     // black (so we can tell if the loading-screen 1280x720 texture is uploaded empty vs the engine
     // actually rendered content into it).
-    if(getenv("PELOAD_TRACE_TEXUP") && w>=256 && h>=256){ uint64_t sum=0; int nz=0;
+    if(GENV1("PELOAD_TRACE_TEXUP") && w>=256 && h>=256){ uint64_t sum=0; int nz=0;
         if(o->data && o->size>=1024){ const uint8_t*d=o->data; uint64_t step=o->size/4096; if(step<1)step=1;
             for(uint64_t i=0;i<o->size && nz<32; i+=step){ if(d[i]){ sum+=d[i]; nz++; } } }
         static int tc; if(tc++<60){ char b[160]; int k=snprintf(b,sizeof b,"  [texup] %dx%d fmt=%u size=%lluB can=%d data=%p nonzero-samples=%d sum=%llu%s\n",
@@ -4434,7 +4522,7 @@ static void d3dgl_ensure_rt(D3DObj*o){
         // drives auto-exposure) clamped at 1.0 in RGBA8 -> blown-out white frame
         G.TexImage2D(GLE_TEX2D,0,(int)d3dgl_rt_ifmt(o->fmt),w,h,0,GLE_RGBA,GLE_UBYTE,0); G.TexParameteri(GLE_TEX2D,0x813D/*MAX_LEVEL*/,0); o->gl_uploaded=1;
         o->glsrgb=(d3dgl_rt_ifmt(o->fmt)==0x8C43); }
-    if(!o->glfbo){ G.GenFramebuffers(1,&o->glfbo); G.BindFramebuffer(GLE_FBO,o->glfbo);
+    if(!o->glfbo){ G.GenFramebuffers(1,&o->glfbo); gl_bindfbo_any(GLE_FBO,o->glfbo);
         G.FramebufferTexture2D(GLE_FBO,GLE_CA0,GLE_TEX2D,o->gltex,0);
         if(G.CheckFramebufferStatus){ unsigned st=G.CheckFramebufferStatus(GLE_FBO); if(st!=0x8CD5){ static int nb; if(nb++<20){ char m[200];
             int k=snprintf(m,sizeof m,"  [d3dgl] FBO INCOMPLETE status=0x%x rt=%p %ux%u f%u kind%u gltex=%u (gl_uploaded=%d)\n",st,(void*)o,o->w,o->h,o->fmt,o->kind,o->gltex,o->gl_uploaded); (void)!write(2,m,k);} } }
@@ -4479,7 +4567,7 @@ static int d3dgl_gpu_copy_impl(D3DObj*dst,D3DObj*src,uint32_t sx,uint32_t sy,uin
     if(!sw||!sh||sx+sw>(src->w>4096?4096:src->w)||sy+sh>SH) return 0;
     d3dgl_ensure_rt(dst);
     int sy0=d3dgl_fbo_y(SH,sy,sh), dy0=d3dgl_fbo_y(DH,dy,sh);
-    G.BindFramebuffer(0x8CA8/*READ*/,src->glfbo); G.BindFramebuffer(0x8CA9/*DRAW*/,dst->glfbo); d3dgl_reset_raster_ops();
+    gl_bindfbo_any(0x8CA8/*READ*/,src->glfbo); gl_bindfbo_any(0x8CA9/*DRAW*/,dst->glfbo); d3dgl_reset_raster_ops();
     G.BlitFramebuffer((int)sx,sy0,(int)(sx+sw),sy0+(int)sh,(int)dx,dy0,(int)(dx+sw),dy0+(int)sh,0x4000/*COLOR*/,0x2600/*NEAREST*/);
     dst->gl_dirty=0; dst->gl_uploaded=1; dst->copydst=1;
     if(dst==g_d3d_backbuf && getenv("PELOAD_TRACE_VP")){ static int n; if((n++%300)==0){ char m[200]; int k=snprintf(m,sizeof m,"  [bbcopy] src=%p %ux%u f%u last_vp=%dx%d copy %ux%u at %u,%u\n",(void*)src,src->w,src->h,src->fmt,src->last_vpw,src->last_vph,sw,sh,sx,sy); (void)!write(2,m,k); } }
@@ -4487,9 +4575,9 @@ static int d3dgl_gpu_copy_impl(D3DObj*dst,D3DObj*src,uint32_t sx,uint32_t sy,uin
         // the engine composited its frame into (0,0,last_vp) of the source: present exactly that region
         g_d3dgl_present_tex=dst->gltex; g_d3dgl_present_tw=(int)(dst->w>4096?4096:dst->w); g_d3dgl_present_th=(int)(dst->h>4096?4096:dst->h);
         g_d3dgl_present_vw=src->last_vpw; g_d3dgl_present_vh=src->last_vph; }
-    if(dst==g_d3d_backbuf && !getenv("PELOAD_D3DGL_NOFINISH") && getenv("PELOAD_D3DGL_NOPQ")){ G.BindFramebuffer(GLE_FBO,0); if(G.Finish) G.Finish(); else if(G.Flush) G.Flush(); }
+    if(dst==g_d3d_backbuf && !getenv("PELOAD_D3DGL_NOFINISH") && getenv("PELOAD_D3DGL_NOPQ")){ gl_bindfbo_any(GLE_FBO,0); if(G.Finish) G.Finish(); else if(G.Flush) G.Flush(); }
     if(getenv("PELOAD_D3DGL_COPYDUMP") && dst==g_d3d_backbuf && G.ReadPixels){ static unsigned long cn; static int nd2; unsigned long skip=strtoul(getenv("PELOAD_D3DGL_COPYDUMP"),0,10); cn++; if(cn>skip && (cn%60)==0 && nd2<4){
-        static uint8_t*cb3; if(!cb3) cb3=malloc(1920u*1080u*4u); G.BindFramebuffer(0x8CA8,dst->glfbo);
+        static uint8_t*cb3; if(!cb3) cb3=malloc(1920u*1080u*4u); gl_bindfbo_any(0x8CA8,dst->glfbo);
         int y0=d3dgl_fbo_y(DH,0,1080); if(cb3){ G.ReadPixels(0,y0,1920,1080,GLE_RGBA,GLE_UBYTE,cb3); const char*home=getenv("HOME"); char pth[256];
             snprintf(pth,sizeof pth,"%s/reclaimer_bbcopy_%d.bmp",home?home:"/tmp",nd2++); bmp_write_rgba(pth,1920,1080,cb3);
             char m[200]; int k=snprintf(m,sizeof m,"  [copydump] backbuffer after GPU copy -> %s\n",pth); (void)!write(2,m,k); } } }
@@ -4500,7 +4588,7 @@ static int d3dgl_gpu_copy_impl(D3DObj*dst,D3DObj*src,uint32_t sx,uint32_t sy,uin
         for(uint32_t r=0;r<sh;r++){ uint32_t srow=g_d3dgl_flipy?r:(sh-1-r);   // GL rows come bottom-up
             uint64_t o=(uint64_t)(dy+r)*pitch+(uint64_t)dx*bpp; if(o+(uint64_t)sw*bpp>dst->size) break;
             memcpy((uint8_t*)dst->data+o,tmp+(uint64_t)srow*sw*bpp,(size_t)sw*bpp); } }
-    G.BindFramebuffer(GLE_FBO,0);
+    gl_bindfbo_any(GLE_FBO,0);
     if(getenv("PELOAD_TRACE_COPY")){ static unsigned long c; c++; if(c<12||(c%200)==0){ char m[240]; int k=snprintf(m,sizeof m,"  [gpucopy #%lu] dst=%p%s %ux%u f%u <- src=%p %ux%u f%u rect(%u,%u %ux%u)->(%u,%u)%s\n",c,(void*)dst,dst==g_d3d_backbuf?"(BACKBUFFER)":"",dst->w,dst->h,dst->fmt,(void*)src,src->w,src->h,src->fmt,sx,sy,sw,sh,dx,dy,((uint64_t)sw*sh<=65536)?" +readback":""); (void)!write(2,m,k);} }
     return 1; }
 static unsigned d3dgl_topo(uint32_t t){ switch(t){ case 1:return 0; /*POINTS*/ case 2:return 1;/*LINES*/ case 3:return 3;/*LINE_STRIP*/
@@ -4668,7 +4756,7 @@ static unsigned d3dgl_glsampler_x(D3DObj*s,int hasmips,int skip){
     if(G.SamplerParameterfv) G.SamplerParameterfv(g,0x1004,(const float*)&d[7]);
     G.SamplerParameteri(g,0x8A48/*TEXTURE_SRGB_DECODE_EXT*/,skip?0x8A4A/*SKIP_DECODE*/:0x8A49/*DECODE*/);
     // COMPARISON_* filters (0x80): hardware depth compare with the D3D ComparisonFunc (shadow samplers)
-    if((d[0]&0x80) && !getenv("PELOAD_D3DGL_NOCMP")){ G.SamplerParameteri(g,0x884C/*TEXTURE_COMPARE_MODE*/,0x884E/*COMPARE_REF_TO_TEXTURE*/); G.SamplerParameteri(g,0x884D/*COMPARE_FUNC*/,(int)d3d_cmp_gl(d[6])); }
+    if((d[0]&0x80) && !GENV1("PELOAD_D3DGL_NOCMP")){ G.SamplerParameteri(g,0x884C/*TEXTURE_COMPARE_MODE*/,0x884E/*COMPARE_REF_TO_TEXTURE*/); G.SamplerParameteri(g,0x884D/*COMPARE_FUNC*/,(int)d3d_cmp_gl(d[6])); }
     return g; }
 // ---- depth-stencil textures + per-(RTVs,DSV) framebuffers ---------------------------------------
 // A DSV resource becomes a real GL depth(-stencil) texture (also sampleable through its SRV: GL returns
@@ -4695,14 +4783,16 @@ static D3DGLFbo g_fbos[512]; static int g_nfbo;
 static unsigned d3dgl_fbo_for(D3DObj*const*rts,int n,D3DObj*ds){
     if(n>8) n=8;
     if(!ds && n==1 && rts[0]){ d3dgl_ensure_rt(rts[0]); return rts[0]->glfbo; }      // common case: the RT's own FBO
+    // consecutive draws nearly always use the same targets: check the last hit before scanning the cache
+    static D3DGLFbo* last; if(last && last->ds==ds && last->n==n && last->fbo){ int same=1; for(int k=0;k<n;k++) if(last->c[k]!=rts[k]){ same=0; break; } if(same) return last->fbo; }
     for(int i=0;i<g_nfbo;i++){ D3DGLFbo*e=&g_fbos[i]; if(e->ds!=ds||e->n!=n) continue; int same=1;
-        for(int k=0;k<n;k++) if(e->c[k]!=rts[k]){ same=0; break; } if(same) return e->fbo; }
-    D3DGLFbo*e=&g_fbos[g_nfbo<512?g_nfbo++:(int)(rand()%512)];
+        for(int k=0;k<n;k++) if(e->c[k]!=rts[k]){ same=0; break; } if(same){ last=e; return e->fbo; } }
+    D3DGLFbo*e=&g_fbos[g_nfbo<512?g_nfbo++:(int)(rand()%512)]; last=e;
     memset(e,0,sizeof *e); e->ds=ds; e->n=n; for(int k=0;k<n;k++) e->c[k]=rts[k];
     unsigned bufs[8]; int nb=0;
     for(int k=0;k<n;k++){ if(rts[k]) d3dgl_ensure_rt(rts[k]); }
     if(ds) d3dgl_ensure_depth(ds);
-    G.GenFramebuffers(1,&e->fbo); G.BindFramebuffer(GLE_FBO,e->fbo);
+    G.GenFramebuffers(1,&e->fbo); gl_bindfbo_any(GLE_FBO,e->fbo);
     for(int k=0;k<n;k++){ if(rts[k]&&rts[k]->gltex){ G.FramebufferTexture2D(GLE_FBO,GLE_CA0+k,GLE_TEX2D,rts[k]->gltex,0); bufs[k]=GLE_CA0+k; nb=k+1; } else bufs[k]=0; }
     if(ds&&ds->gltex) G.FramebufferTexture2D(GLE_FBO,ds->gldsatt,GLE_TEX2D,ds->gltex,0);
     if(nb && G.DrawBuffers) G.DrawBuffers(nb,bufs); else if(!nb){ if(G.DrawBuffer) G.DrawBuffer(0); if(G.ReadBuffer) G.ReadBuffer(0); }
@@ -4742,14 +4832,14 @@ static void gs_pipeline(unsigned p){ gs_ok(); if(g_gs.pipe==p) return; g_gs.pipe
 static void gs_depthmask(unsigned char m){ gs_ok(); if(g_gs.dmask==(int)m) return; g_gs.dmask=m; G.DepthMask(m); }
 static int g_dbg_nodepth;   // PELOAD_TRACE_HASH_NODEPTH: draws of the traced shader hashes ignore depth
 static void d3dgl_apply_depth(void){
-    D3DObj*d=g_d3dst.depth; int hasds=g_d3dst.dsv!=0 && !getenv("PELOAD_D3DGL_NODEPTH") && !g_dbg_nodepth;
+    D3DObj*d=g_d3dst.depth; int hasds=g_d3dst.dsv!=0 && !GENV1("PELOAD_D3DGL_NODEPTH") && !g_dbg_nodepth;
     uint32_t de=1,dw=1,df=2,se=0,rm=0xff,wm=0xff; const uint32_t*fr=0,*bk=0;
     if(d && d->stkind==2){ de=d->sd[0]; dw=d->sd[1]; df=d->sd[2]; se=d->sd[3]; rm=d->sd[4]&0xff; wm=(d->sd[4]>>8)&0xff; fr=&d->sd[5]; bk=&d->sd[9]; }
     if(hasds && de){ gs_cap(0x0B71,1); if(G.DepthFunc) gs_depthfunc(d3d_cmp_gl(df)); if(G.DepthMask) gs_depthmask(dw?1:0); }
     else { gs_cap(0x0B71,0); if(G.DepthMask) gs_depthmask(0); }
     // PELOAD_D3DGL_DFCENSUS: per 300 frames, how many draws ran with each D3D depth func (1 never .. 8 always),
     // split by depth write on/off; [0] = depth test off
-    { static int on=-1; if(on<0) on=getenv("PELOAD_D3DGL_DFCENSUS")?1:0;
+    { static int on=-1; if(on<0) on=GENV1("PELOAD_D3DGL_DFCENSUS")?1:0;
       if(on){ static unsigned long cnt[9][2], fr0; extern unsigned long g_eng_present_no_x; unsigned i=(hasds&&de&&df<=8)?df:0; cnt[i][dw?1:0]++;
         if(g_eng_present_no_x-fr0>=300){ char m[400]; int k=snprintf(m,sizeof m,"  [dfcensus] %lu frames:",g_eng_present_no_x-fr0);
           static const char*nm[9]={"off","never","less","equal","lequal","greater","notequal","gequal","always"};
@@ -4768,7 +4858,7 @@ static void d3dgl_apply_state(D3DObj*rt,int vw,int vh){
     d3dgl_apply_depth();
     D3DObj*b=g_d3dst.blend; int be=0; uint32_t wm=0xF;
     // IndependentBlendEnable with MRT: each RT has its own blend + write mask (indexed GL state)
-    if(b && b->stkind==1 && b->sd[1] && g_d3dst.num_rt>1 && G.Enablei && G.BlendFuncSeparatei && G.ColorMaski && !getenv("PELOAD_D3DGL_NOBLEND")){
+    if(b && b->stkind==1 && b->sd[1] && g_d3dst.num_rt>1 && G.Enablei && G.BlendFuncSeparatei && G.ColorMaski && !GENV1("PELOAD_D3DGL_NOBLEND")){
         for(int i=0;i<g_d3dst.num_rt && i<8;i++){ const uint32_t*ri=b->sd+2+8*i; uint32_t m=ri[7]&0xF;
             if(ri[0]){ G.Enablei(0x0BE2,i); G.BlendFuncSeparatei(i,d3d_blend_gl(ri[1]),d3d_blend_gl(ri[2]),d3d_blend_gl(ri[4]),d3d_blend_gl(ri[5]));
                 if(G.BlendEquationSeparatei) G.BlendEquationSeparatei(i,d3d_blendop_gl(ri[3]),d3d_blendop_gl(ri[6])); }
@@ -4777,7 +4867,7 @@ static void d3dgl_apply_state(D3DObj*rt,int vw,int vh){
         if(G.BlendColor) gs_blendcolor(g_d3dst.blendf[0],g_d3dst.blendf[1],g_d3dst.blendf[2],g_d3dst.blendf[3]);
         g_gs.cap[0]=0xff; memset(g_gs.cm,0xff,4); memset(g_gs.bf,0xff,sizeof g_gs.bf); memset(g_gs.be,0xff,sizeof g_gs.be);   // indexed blend touched global state
         b=0; be=-1; }
-    if(b && b->stkind==1 && !getenv("PELOAD_D3DGL_NOBLEND")){ const uint32_t*r0=b->sd+2; be=(int)r0[0]; wm=r0[7]&0xF;
+    if(b && b->stkind==1 && !GENV1("PELOAD_D3DGL_NOBLEND")){ const uint32_t*r0=b->sd+2; be=(int)r0[0]; wm=r0[7]&0xF;
         if(be){ gs_cap(0x0BE2,1);
             if(G.BlendFuncSeparate) gs_blendfunc(d3d_blend_gl(r0[1]),d3d_blend_gl(r0[2]),d3d_blend_gl(r0[4]),d3d_blend_gl(r0[5]));
             if(G.BlendEquationSeparate) gs_blendeq(d3d_blendop_gl(r0[3]),d3d_blendop_gl(r0[6]));
@@ -4786,14 +4876,14 @@ static void d3dgl_apply_state(D3DObj*rt,int vw,int vh){
         if(G.ColorMask) gs_colormask(wm&1,(wm>>1)&1,(wm>>2)&1,(wm>>3)&1); }
     D3DObj*r=g_d3dst.raster; uint32_t cull=3, fccw=0, scis=0;   // D3D default: cull back, front = CW, no scissor
     if(r && r->stkind==3){ cull=r->sd[1]; fccw=r->sd[2]; scis=r->sd[7]; }
-    if(cull==1 || getenv("PELOAD_D3DGL_NOCULL") || !G.CullFace) gs_cap(0x0B44,0);
+    if(cull==1 || GENV1("PELOAD_D3DGL_NOCULL") || !G.CullFace) gs_cap(0x0B44,0);
     else { gs_cap(0x0B44,1); gs_cullface(cull==2?0x0404:0x0405);
         // D3D judges winding in y-DOWN pixel space, GL in y-UP window space: the same triangle flips, so
         // D3D front=CW maps to GL front=CCW (and vice versa).
         // (Exact with the y-flipped VS: GL's image is D3D's mirrored vertically. Under PELOAD_D3DGL_NOYFLIP
         //  the image is NOT mirrored and this mapping is inverted -- kept only to reproduce the old layout.)
         if(G.FrontFace) gs_frontface(fccw?0x0900/*CW*/:0x0901/*CCW*/); }
-    if(scis && G.Scissor && !getenv("PELOAD_D3DGL_NOSCISSOR")){ int sw=g_d3dst.sc_r-g_d3dst.sc_l, sh=g_d3dst.sc_b-g_d3dst.sc_t; if(sw<0)sw=0; if(sh<0)sh=0;
+    if(scis && G.Scissor && !GENV1("PELOAD_D3DGL_NOSCISSOR")){ int sw=g_d3dst.sc_r-g_d3dst.sc_l, sh=g_d3dst.sc_b-g_d3dst.sc_t; if(sw<0)sw=0; if(sh<0)sh=0;
         gs_cap(0x0C11,1); gs_scissor(g_d3dst.sc_l, d3dgl_flipy()?g_d3dst.sc_t:H-g_d3dst.sc_b, sw, sh); }
     else gs_cap(0x0C11,0);
     gs_viewport(g_d3dst.vp_x, d3dgl_flipy()?g_d3dst.vp_y:H-(g_d3dst.vp_y+vh), vw, vh);
@@ -4801,15 +4891,15 @@ static void d3dgl_apply_state(D3DObj*rt,int vw,int vh){
     // [0,1]), depth clip, depth bias. Without the range the first-person weapon (own depth slice) is buried.
     { static void(*dr)(double,double); static void(*po)(float,float); static int ini; if(!ini){ ini=1; dr=dlsym(RTLD_DEFAULT,"glDepthRange"); po=dlsym(RTLD_DEFAULT,"glPolygonOffset"); }
       float zn=g_d3dst.vp_set?g_d3dst.vp_zn:0.0f, zf=g_d3dst.vp_set?g_d3dst.vp_zf:1.0f;
-      if(dr && !getenv("PELOAD_D3DGL_NODEPTHRANGE")) gs_depthrange(dr,zn,zf);
+      if(dr && !GENV1("PELOAD_D3DGL_NODEPTHRANGE")) gs_depthrange(dr,zn,zf);
       D3DObj*rs=g_d3dst.raster; int dclip=1; float bias=0,slope=0;
       if(rs && rs->stkind==3){ int32_t db=(int32_t)rs->sd[3]; memcpy(&slope,&rs->sd[5],4); bias=(float)db; dclip=rs->sd[6]?1:0; }
-      int alton = !getenv("PELOAD_D3DGL_ALT5") || (((long)(mono_s()/5.0))&1);
+      int alton = !GENV1("PELOAD_D3DGL_ALT5") || (((long)(mono_s()/5.0))&1);
       // D3D DepthClipEnable=FALSE -> GL_DEPTH_CLAMP made primitives crossing behind the eye rasterize as huge
       // screen-covering polygons on GL-on-Metal (A/B: 4/86 frames vs 0/86). Keep clipping unless opted in.
-      if(!getenv("PELOAD_D3DGL_DEPTHCLAMP")) dclip=1;
-      if(getenv("PELOAD_D3DGL_NODEPTHCLAMP") && alton) dclip=1;
-      if(getenv("PELOAD_D3DGL_NOPOLYOFS") && alton){ bias=0; slope=0; }
+      if(!GENV1("PELOAD_D3DGL_DEPTHCLAMP")) dclip=1;
+      if(GENV1("PELOAD_D3DGL_NODEPTHCLAMP") && alton) dclip=1;
+      if(GENV1("PELOAD_D3DGL_NOPOLYOFS") && alton){ bias=0; slope=0; }
       if(dclip) gs_cap(0x864F,0); else gs_cap(0x864F,1);
       if((bias!=0||slope!=0) && po){ gs_cap(0x8037,1); gs_polyofs(po,slope,bias); } else gs_cap(0x8037,0); } }
 // state that must NOT leak into clears / copies (D3D clears & copies ignore blend, write mask and scissor)
@@ -4849,7 +4939,7 @@ static inline void gs_active(unsigned u){ if(g_active_unit!=u){ G.ActiveTexture(
 static void d3dgl_bind_res(unsigned prog,const int*tloc,const signed char*tt,int*units_set,D3DObj**srvs,D3DObj**views,D3DObj**samps,int ubase,int umax){
     if(!prog) return; int unit=ubase;
     if(!g_unitcache_ok){ memset(g_unit_tex,0xff,sizeof g_unit_tex); memset(g_unit_tgt,0,sizeof g_unit_tgt); memset(g_unit_samp,0xff,sizeof g_unit_samp); g_unitcache_ok=1; g_active_unit=~0u; }
-    int nocache=getenv("PELOAD_D3DGL_NOBINDCACHE")!=0;
+    int nocache=GENV1("PELOAD_D3DGL_NOBINDCACHE")!=0;
     // halo3 binds the map/material textures to high, SPARSE SRV slots (seen: t13,t14,t16,t17), not just
     // t0-t7. Cover slots 0..31, and PACK each declared sampler into the next contiguous GL texture unit
     // (Apple GL-on-Metal has ~16 fragment units, so binding to unit 17 would fail) -- the sampler uniform
@@ -4857,7 +4947,7 @@ static void d3dgl_bind_res(unsigned prog,const int*tloc,const signed char*tt,int
     for(int r=0;r<32 && unit<umax;r++){ int loc=tloc[r]; if(loc<0) continue; D3DObj*tx=srvs[r];
         // PELOAD_TEXCENSUS: log each distinct (format, dimension, RT-ness) texture class the frame SAMPLES,
         // with whether the uploader can represent it (anything else is a 1x1 magenta placeholder).
-        if(tx && getenv("PELOAD_TEXCENSUS")){ static uint64_t seen[512]; static int ns;
+        if(tx && GENV1("PELOAD_TEXCENSUS")){ static uint64_t seen[512]; static int ns;
             uint64_t key=((uint64_t)tx->fmt)|((uint64_t)(tx->arr>1)<<8)|((uint64_t)((tx->misc&4)!=0)<<9)|((uint64_t)(tx->kind&7)<<10)|((uint64_t)(tx->glfbo!=0)<<13)|((uint64_t)(tx->depth>1)<<14);
             int f=0; for(int i=0;i<ns;i++) if(seen[i]==key){ f=1; break; }
             if(!f && ns<512){ seen[ns++]=key; unsigned gf,gt,bi; int bb; int up=d3dgl_tex_upload_fmt(tx->fmt,&gf,&gt)||d3dgl_bc_glfmt(tx->fmt,&bi,&bb);
@@ -4869,21 +4959,21 @@ static void d3dgl_bind_res(unsigned prog,const int*tloc,const signed char*tt,int
         unsigned wtex = 0; if(isbuf){ if(want==0x8C2A) wtex=tx->gltbo; }
         else if(tx){ unsigned have=tx->gltarget?tx->gltarget:GLE_TEX2D; if(!tt) want=have; if(have==want) wtex=tx->gltex; }
         D3DObj*sv=views?views[r]:0; int skip = !isbuf && tx && tx->glsrgb && !dxgi_is_srgb(sv?sv->vfmt:tx->fmt);   // UNORM view of sRGB storage: raw read
-        unsigned wsamp = (!isbuf && G.BindSampler && r<16 && samps && !getenv("PELOAD_D3DGL_NOSAMPLER")) ? d3dgl_glsampler_x(samps[r],tx?tx->glhasmips:0,skip) : 0;
+        unsigned wsamp = (!isbuf && G.BindSampler && r<16 && samps && !GENV1("PELOAD_D3DGL_NOSAMPLER")) ? d3dgl_glsampler_x(samps[r],tx?tx->glhasmips:0,skip) : 0;
         if(!wsamp && tx && tx->glsrgb && wtex){ gs_active(unit); G.BindTexture(want,wtex); G.TexParameteri(want,0x8A48,skip?0x8A4A:0x8A49); g_unit_tex[unit]=~0u; }   // no sampler object: texture's own decode state
         if(!(units_set&&*units_set)){ G.ProgramUniform1i(prog,loc,unit); g_tb_uni++; }
         int texsame=!nocache && g_unitcache_ok && g_unit_tex[unit]==wtex && g_unit_tgt[unit]==want, sampsame=!nocache && g_unitcache_ok && g_unit_samp[unit]==wsamp;
         if(texsame && sampsame){ unit++; continue; }
-        if(texsame && !getenv("PELOAD_D3DGL_NOSPLITBIND")){   // only the sampler changed: glBindSampler names its unit itself
+        if(texsame && !GENV1("PELOAD_D3DGL_NOSPLITBIND")){   // only the sampler changed: glBindSampler names its unit itself
             g_unit_samp[unit]=wsamp; if(G.BindSampler){ G.BindSampler((unsigned)unit,wsamp); g_tb_samp++; } unit++; continue; }
         gs_active(unit); g_tb_tex++;
-        int bindsamp=!sampsame || getenv("PELOAD_D3DGL_NOSPLITBIND");
+        int bindsamp=!sampsame || GENV1("PELOAD_D3DGL_NOSPLITBIND");
         g_unit_tex[unit]=wtex; g_unit_tgt[unit]=want; g_unit_samp[unit]=wsamp;
         if(isbuf) G.BindTexture(want,wtex);
         else if(tx){ unsigned have=tx->gltarget?tx->gltarget:GLE_TEX2D;
             if(have==want) G.BindTexture(want,tx->gltex);
             else { G.BindTexture(want,0);   // shader's resource dimension != the resource's (view mismatch): sample black
-                if(getenv("PELOAD_TEXCENSUS")){ static uint64_t ms[64]; static int nms; uint64_t key=((uint64_t)have<<32)|((uint64_t)want<<8)|tx->fmt; int f=0;
+                if(GENV1("PELOAD_TEXCENSUS")){ static uint64_t ms[64]; static int nms; uint64_t key=((uint64_t)have<<32)|((uint64_t)want<<8)|tx->fmt; int f=0;
                     for(int i=0;i<nms;i++) if(ms[i]==key){ f=1; break; }
                     if(!f && nms<64){ ms[nms++]=key; char m[200]; int k=snprintf(m,sizeof m,"  [texcensus] MISMATCH t%d shader-wants=0x%x resource=0x%x %ux%u arr=%u f%u\n",r,want,have,tx->w,tx->h,tx->arr,tx->fmt); (void)!write(2,m,k); } } } }
         else G.BindTexture(want,0);
@@ -4911,7 +5001,7 @@ static void d3dgl_ubo_upload(D3DObj*cb,uint32_t extent){
 static long d3dgl_ring_put(const void*src,uint64_t n); static unsigned g_ring; static uint32_t g_ring_gen; static uint64_t g_cbring_bytes, g_cbring_puts, g_cbbind_calls;
 static void d3dgl_bind_ubo(unsigned binding,D3DObj*cb,uint32_t first,int nvec){
     long need=(long)nvec*16, off=0; unsigned buf; g_cbbind_calls++;
-    if(cb && cb->data && cb->size && !getenv("PELOAD_D3DGL_NORING") && !getenv("PELOAD_D3DGL_NORING_CB")){
+    if(cb && cb->data && cb->size && !GENV1("PELOAD_D3DGL_NORING") && !GENV1("PELOAD_D3DGL_NORING_CB")){
         // stream the CB through the ring: one unsynchronized copy per CPU write (ver) per ring generation
         long sub=(long)first*16; if((uint64_t)sub>=cb->size) sub=0;
         if(cb->uboglver!=cb->ver || cb->ubosz!=g_ring_gen || cb->glubo==0){
@@ -4928,7 +5018,7 @@ static void d3dgl_bind_ubo(unsigned binding,D3DObj*cb,uint32_t first,int nvec){
     else { if(!g_zero_ubo){ G.GenBuffers(1,&g_zero_ubo); G.BindBuffer(0x8A11,g_zero_ubo); void*z=calloc(1,65536); G.BufferData(0x8A11,65536,z,0x88E4); free(z); }
         buf=g_zero_ubo; off=0; }
 bind:
-    if(binding<32 && g_ubo_bound[binding].buf==buf && g_ubo_bound[binding].off==off && g_ubo_bound[binding].sz==need && !getenv("PELOAD_D3DGL_NOBINDCACHE")) return;
+    if(binding<32 && g_ubo_bound[binding].buf==buf && g_ubo_bound[binding].off==off && g_ubo_bound[binding].sz==need && !GENV1("PELOAD_D3DGL_NOBINDCACHE")) return;
     G.BindBufferRange(0x8A11,binding,buf,off,need);
     if(binding<32){ g_ubo_bound[binding].buf=buf; g_ubo_bound[binding].off=off; g_ubo_bound[binding].sz=need; } }
 // ---- Monolithic (non-separable) program path ------------------------------------------------
@@ -5304,7 +5394,7 @@ static void d3dgl_clear_rtv(void* rtvview,const float* col){
     if(!g_d3dgl_ready) return; g_fs.rtclears++;
     D3DObj* v=rtvview; D3DObj* rt=(v&&v->data)?(D3DObj*)v->data:v; if(!rt) return;
     GLLOCK(); if(CGLGetCurrentContext()!=g_d3dgl_cgl) CGLSetCurrentContext(g_d3dgl_cgl);
-    d3dgl_ensure_rt(rt); G.BindFramebuffer(GLE_FBO,rt->glfbo); d3dgl_reset_raster_ops();
+    d3dgl_ensure_rt(rt); gl_bindfbo_any(GLE_FBO,rt->glfbo); d3dgl_reset_raster_ops();
     if(rt->glsrgb && dxgi_is_srgb((v&&v->vkind)?v->vfmt:rt->fmt)) gs_cap(0x8DB9,1);   // D3D encodes the clear colour for _SRGB RTVs
     if(col) G.ClearColor(col[0],col[1],col[2],col[3]); else G.ClearColor(0,0,0,0);
     G.Clear(GLE_COLORBIT); gs_cap(0x8DB9,0); GLUNLOCK(); }
@@ -5312,12 +5402,12 @@ static void d3dgl_clear_dsv(void*dsvview,uint32_t flags,float depth,uint8_t sten
     if(!g_d3dgl_ready || getenv("PELOAD_D3DGL_NODEPTH")) return; g_fs.dsclears++;
     D3DObj* v=dsvview; D3DObj* ds=(v&&v->data)?(D3DObj*)v->data:v; if(!ds) return;
     GLLOCK(); if(CGLGetCurrentContext()!=g_d3dgl_cgl) CGLSetCurrentContext(g_d3dgl_cgl);
-    unsigned fbo=d3dgl_fbo_for(0,0,ds); G.BindFramebuffer(GLE_FBO,fbo); d3dgl_reset_raster_ops();
+    unsigned fbo=d3dgl_fbo_for(0,0,ds); gl_bindfbo_any(GLE_FBO,fbo); d3dgl_reset_raster_ops();
     unsigned bits=0;
     if(flags&1){ gs_depthmask(1); if(G.ClearDepth) G.ClearDepth((double)depth); bits|=0x100; }      // D3D11_CLEAR_DEPTH
     if((flags&2) && ds->gldsatt==0x821A){ if(G.StencilMask) G.StencilMask(0xff); if(G.ClearStencil) G.ClearStencil(stencil); bits|=0x400; } // _STENCIL
     if(bits) G.Clear(bits);
-    G.BindFramebuffer(GLE_FBO,0); GLUNLOCK(); }
+    gl_bindfbo_any(GLE_FBO,0); GLUNLOCK(); }
 // DXGI vertex-attribute format -> GL (components, type, normalized) for glVertexAttribPointer.
 static void d3dgl_attrib_fmt(uint32_t f,unsigned*comps,unsigned*gt,unsigned char*norm){ *norm=0;
     switch(f){
@@ -5403,7 +5493,7 @@ static long d3dgl_ring_put(const void*src,uint64_t n){
         // vertex streams) lives in the current storage and its bindings would silently move to the fresh,
         // uninitialised storage -> one frame with a garbage transform (screen-covering polygons, stray lines).
         // d3dgl_ring_reserve() wraps between draws; a put that still doesn't fit uses the synchronous path.
-        static int old=-1; if(old<0) old=getenv("PELOAD_D3DGL_RINGWRAP_OLD")?1:0;
+        static int old=-1; if(old<0) old=GENV1("PELOAD_D3DGL_RINGWRAP_OLD")?1:0;
         if(!old){ g_fs.ringfail++; return -1; }
         G.BufferData(GLE_ARRAY,(long)g_ring_sz,0,0x88E0); g_ring_off=0; g_ring_gen++; }
     void*p=G.MapBufferRange(GLE_ARRAY,(long)g_ring_off,(long)n,0x0002/*WRITE*/|0x0004/*INVALIDATE_RANGE*/|0x0020/*UNSYNCHRONIZED*/);
@@ -5458,15 +5548,15 @@ static void d3dgl_draw(uint32_t vcount,int indexed,uint32_t instcount,uint32_t s
     GLLOCK();
     // PELOAD_D3DGL_SLOWDRAW=<ms>: glFinish after every draw; a draw whose GPU work exceeds <ms> (e.g. the
     // shader behind a "Caused GPU Hang" error) is logged with its VS/PS and both GLSL sources are dumped.
-    static int sd=-1; if(sd<0) sd=getenv("PELOAD_D3DGL_SLOWDRAW")?atoi(getenv("PELOAD_D3DGL_SLOWDRAW")):0;
+    static int sd=-1; if(sd<0) sd=GENV1("PELOAD_D3DGL_SLOWDRAW")?atoi(GENV1("PELOAD_D3DGL_SLOWDRAW")):0;
     uint64_t t0=sd?prof_now():0;
     // PELOAD_TRACE_HASH=<hash,...>: log draws whose VS or PS bytecode hash is listed (state, targets, resources)
     // and how many samples they actually wrote (own SAMPLES_PASSED query, read back synchronously).
-    static int nth=-1; static uint64_t th[16]; if(nth<0){ nth=0; const char*e=getenv("PELOAD_TRACE_HASH"); while(e&&*e&&nth<16){ th[nth++]=strtoull(e,(char**)&e,16); if(*e==',') e++; else break; } }
+    static int nth=-1; static uint64_t th[16]; if(nth<0){ nth=0; const char*e=GENV1("PELOAD_TRACE_HASH"); while(e&&*e&&nth<16){ th[nth++]=strtoull(e,(char**)&e,16); if(*e==',') e++; else break; } }
     int traced=0; unsigned tq=0;
     if(nth){ D3DObj*vs=g_d3dst.vs,*ps=g_d3dst.ps; for(int i=0;i<nth;i++) if((vs&&vs->bchash==th[i])||(ps&&ps->bchash==th[i])) traced=1;
         static unsigned long tn; static double tsec; static int tcount; double now=mono_s(); if(now-tsec>3.0){ tsec=now; tcount=0; }
-        int match=traced; static int nd=-1; if(nd<0) nd=getenv("PELOAD_TRACE_HASH_NODEPTH")?1:0; g_dbg_nodepth=match&&nd;
+        int match=traced; static int nd=-1; if(nd<0) nd=GENV1("PELOAD_TRACE_HASH_NODEPTH")?1:0; g_dbg_nodepth=match&&nd;
         if(traced && tcount++<6){ D3DObj*rt=g_d3dst.rtv, *rr=rt&&rt->data&&rt->vkind?(D3DObj*)rt->data:rt; D3DObj*dv=g_d3dst.dsv; D3DObj*b=g_d3dst.blend,*d=g_d3dst.depth,*r=g_d3dst.raster;
             char m[700]; int k=snprintf(m,sizeof m,"  [hashdraw #%lu f%lu] vs=%016llx ps=%016llx n=%u idx=%d inst=%u topo=%u rt=%ux%u f%u nrt=%d dsv=%s vp=%dx%d+%d+%d z%.2f-%.2f"
                 " blend=%s(%u:%u,%u,%u wm%x) depth=%s(en%u w%u f%u st%u) rast=%s(fill%u cull%u ccw%u) il=%d vb0=%u/%u\n",
@@ -5600,15 +5690,15 @@ static void d3dgl_draw_impl(uint32_t vcount,int indexed,uint32_t instcount,uint3
     D3DObj*vs=g_d3dst.vs,*ps=g_d3dst.ps;
     if(g_d3dgl_trace && (c_tot%100000)==0){ char m[160]; int k=snprintf(m,sizeof m,"  [d3dgl] draws tot=%lu exec=%lu skip(novsps=%lu noglsl=%lu noprog=%lu)\n",c_tot,c_exec,c_novsps,c_noglsl,c_noprog); (void)!write(2,m,k); }
     { D3DObj*rr=g_d3dst.rtv; int tobb=(!rr||rr==g_d3d_backbuf);
-      if(!ps && vs && !g_d3dst.rtv && g_d3dst.dsv && !getenv("PELOAD_D3DGL_NODEPTH")) ps=d3dgl_null_ps();   // depth-only pass: no PS
+      if(!ps && vs && !g_d3dst.rtv && g_d3dst.dsv && !GENV1("PELOAD_D3DGL_NODEPTH")) ps=d3dgl_null_ps();   // depth-only pass: no PS
       // NULL PS with colour targets bound: D3D still runs depth/stencil test+write, colour is left untouched
       // (stencil-marking / depth-only object passes). Was skipped outright.
-      if(!ps && vs && g_d3dst.rtv && g_d3dst.dsv && !getenv("PELOAD_D3DGL_NODEPTH") && !getenv("PELOAD_D3DGL_SKIPNULLPS")){ ps=d3dgl_null_ps(); g_nullps_color=1; }
-      if((!vs||!ps) && getenv("PELOAD_TRACE_NOVSPS")){ static int nn; if(nn++<60){ D3DObj*r0=g_d3dst.rtv; D3DObj*rr0=(r0&&r0->data&&r0->vkind)?(D3DObj*)r0->data:r0; D3DObj*t0=g_d3dst.psrv[0]; D3DObj*tt0=(t0&&t0->data&&t0->vkind)?(D3DObj*)t0->data:t0;
+      if(!ps && vs && g_d3dst.rtv && g_d3dst.dsv && !GENV1("PELOAD_D3DGL_NODEPTH") && !GENV1("PELOAD_D3DGL_SKIPNULLPS")){ ps=d3dgl_null_ps(); g_nullps_color=1; }
+      if((!vs||!ps) && GENV1("PELOAD_TRACE_NOVSPS")){ static int nn; if(nn++<60){ D3DObj*r0=g_d3dst.rtv; D3DObj*rr0=(r0&&r0->data&&r0->vkind)?(D3DObj*)r0->data:r0; D3DObj*t0=g_d3dst.psrv[0]; D3DObj*tt0=(t0&&t0->data&&t0->vkind)?(D3DObj*)t0->data:t0;
           uint64_t ra=(uint64_t)__builtin_return_address(1);
           char m[260]; int k=snprintf(m,sizeof m,"  [novsps] vs=%p ps=%p rt=%ux%u f%u dsv=%p n=%u inst=%u topo=%u t0=%ux%u f%u ra=0x%llx\n",(void*)vs,(void*)ps,rr0?rr0->w:0,rr0?rr0->h:0,rr0?rr0->fmt:0,(void*)g_d3dst.dsv,vcount,instcount,g_d3dst.topo,tt0?tt0->w:0,tt0?tt0->h:0,tt0?tt0->fmt:0,(unsigned long long)ra); (void)!write(2,m,k); } }
       if(!vs||!ps){ c_novsps++; g_fs.novsps++; if(tobb){ g_bb_skip++; g_bb_skip_reason=1;
-          if(getenv("PELOAD_TRACE_COPY")){ static int sk; if(sk++<10){ D3DObj*il0=g_d3dst.il; D3DObj*t0=g_d3dst.psrv[0]; char m[300];
+          if(GENV1("PELOAD_TRACE_COPY")){ static int sk; if(sk++<10){ D3DObj*il0=g_d3dst.il; D3DObj*t0=g_d3dst.psrv[0]; char m[300];
               int k=snprintf(m,sizeof m,"  [bbskip] vs=%p(bc=%u glsl=%d) ps=%p(bc=%u glsl=%d) n=%u idx=%d topo=%u il=%d vb0=%lluB stride=%u t0=%ux%u f%u vp=%dx%d\n",
                   (void*)vs,vs?vs->bclen:0,vs&&vs->glsl?1:0,(void*)ps,ps?ps->bclen:0,ps&&ps->glsl?1:0,vcount,indexed,g_d3dst.topo,il0?il0->nelem:-1,
                   g_d3dst.vb[0]?(unsigned long long)g_d3dst.vb[0]->size:0ull,g_d3dst.vstride[0],t0?t0->w:0,t0?t0->h:0,t0?t0->fmt:0,g_d3dst.vp_w,g_d3dst.vp_h); (void)!write(2,m,k);} } }
@@ -5617,7 +5707,7 @@ static void d3dgl_draw_impl(uint32_t vcount,int indexed,uint32_t instcount,uint3
     g_d3dgl_phase_draw=c_tot; g_d3dgl_phase="prog";
     // Default to the monolithic (VS+FS linked) program path; PELOAD_D3DGL_SEP forces the old separable
     // program-pipeline path (which Apple GL-on-Metal fails to build -> all-SW fallback). See d3dgl_monoprog.
-    int mono=!getenv("PELOAD_D3DGL_SEP");
+    int mono=!GENV1("PELOAD_D3DGL_SEP");
     unsigned vsp=0,psp=0; MonoProg*mp=0;
     if(mono){ mp=d3dgl_monoprog(vs->canon?vs->canon:vs,ps->canon?ps->canon:ps); if(!mp||!mp->prog){ c_noprog++; g_fs.noprog++; return; } }
     else { vsp=d3dgl_prog(vs,GLE_VS); psp=d3dgl_prog(ps,GLE_FS); if(!vsp||!psp){ c_noprog++; return; } }
@@ -5626,12 +5716,12 @@ static void d3dgl_draw_impl(uint32_t vcount,int indexed,uint32_t instcount,uint3
     PH(0); g_d3dgl_phase="rt";
     // No render target bound = a depth-only pass (shadow maps, occlusion): D3D discards colour. The old
     // "fall back to the backbuffer" scribbled every shadow-caster draw over the swap-chain image.
-    D3DObj*rt=g_d3dst.rtv; D3DObj*dsv=getenv("PELOAD_D3DGL_NODEPTH")?0:g_d3dst.dsv;
-    if(!rt && !dsv){ if(!getenv("PELOAD_D3DGL_NULLRT_BB")) return; rt=swap_backbuf(); }
-    if(!rt && getenv("PELOAD_D3DGL_NODEPTHONLY")) return;      // A/B: skip depth-only (shadow/occlusion) passes
+    D3DObj*rt=g_d3dst.rtv; D3DObj*dsv=GENV1("PELOAD_D3DGL_NODEPTH")?0:g_d3dst.dsv;
+    if(!rt && !dsv){ if(!GENV1("PELOAD_D3DGL_NULLRT_BB")) return; rt=swap_backbuf(); }
+    if(!rt && GENV1("PELOAD_D3DGL_NODEPTHONLY")) return;      // A/B: skip depth-only (shadow/occlusion) passes
     { D3DObj*one[1]={rt}; unsigned fbo = (g_d3dst.num_rt>1&&rt) ? d3dgl_fbo_for(g_d3dst.rtvs,g_d3dst.num_rt,dsv) : d3dgl_fbo_for(rt?one:0,rt?1:0,dsv);
       { static unsigned lastfbo; if(fbo!=lastfbo){ g_fs.fbochg++; lastfbo=fbo; } }
-      G.BindFramebuffer(GLE_FBO,fbo); }
+      if(g_gl_fbo!=fbo || GENV1("PELOAD_D3DGL_NOFBOCACHE")){ G.BindFramebuffer(GLE_FBO,fbo); g_gl_fbo=fbo; } }
     { D3DObj*v0=g_d3dst.rtvv[0]; int enc = rt && rt->glsrgb && dxgi_is_srgb(v0?v0->vfmt:rt->fmt);   // _SRGB RTV: encode on write
       gs_cap(0x8DB9,enc); }
     if(!rt) rt=dsv;                                            // depth-only: size/viewport from the depth target
@@ -5640,7 +5730,7 @@ static void d3dgl_draw_impl(uint32_t vcount,int indexed,uint32_t instcount,uint3
     // PELOAD_D3DGL_RTTEST: paint every RT a real draw binds a distinctive magenta. If the RT dump then
     // shows magenta, the FBO-bind + capture pipeline is sound and the black frame is purely geometry
     // projection (bad cb0); if it stays black, the FBO/capture path itself is broken.
-    if(getenv("PELOAD_D3DGL_RTTEST") && G.ClearColor){ G.ClearColor(1.0f,0.0f,1.0f,1.0f); G.Clear(0x4000/*COLOR_BUFFER_BIT*/); }
+    if(GENV1("PELOAD_D3DGL_RTTEST") && G.ClearColor){ G.ClearColor(1.0f,0.0f,1.0f,1.0f); G.Clear(0x4000/*COLOR_BUFFER_BIT*/); }
     // D3D11 blend / rasterizer / viewport state (was: everything forced off + viewport origin ignored)
     d3dgl_apply_state(rt,vw,vh); rt->last_vpw=vw; rt->last_vph=vh;
     // PELOAD_HITBOXES: the world camera = VS cb0 rows 0-3 (view-projection) + row 7 (camera position) of the first
@@ -5648,7 +5738,7 @@ static void d3dgl_draw_impl(uint32_t vcount,int indexed,uint32_t instcount,uint3
     if(!g_hb_taken && hb_enabled() && g_d3dst.rtv && vw>=640 && vh>=360){ D3DObj*c=g_d3dst.vscb[0];
         if(c && c->data){ uint64_t off=(uint64_t)g_d3dst.vscb_1st[0]*16; if(c->size>=off+128){ const float*f=(const float*)((uint8_t*)c->data+off);
             if(hb_is_world_camera(f)){ hb_capture_view(f); hb_note_dsv(dsv); g_hb_taken=1; } } } }
-    if(getenv("PELOAD_TRACE_VP") && rt->w>=2048){ static uint64_t seen[256]; static int ns; uint64_t key=((uint64_t)(uintptr_t)rt*31+(uint64_t)vw*7919+(uint64_t)vh)^ps->bchash; int f=0; for(int q=0;q<ns;q++) if(seen[q]==key){ f=1; break; } if(!f && ns<256){ seen[ns++]=key; char m[160]; int k=snprintf(m,sizeof m,"  [vp] rt=%p %ux%u f%u vp=%dx%d at %d,%d n=%u psh=%016llx\n",(void*)rt,rt->w,rt->h,rt->fmt,vw,vh,g_d3dst.vp_x,g_d3dst.vp_y,vcount,(unsigned long long)ps->bchash); (void)!write(2,m,k); } }
+    if(GENV1("PELOAD_TRACE_VP") && rt->w>=2048){ static uint64_t seen[256]; static int ns; uint64_t key=((uint64_t)(uintptr_t)rt*31+(uint64_t)vw*7919+(uint64_t)vh)^ps->bchash; int f=0; for(int q=0;q<ns;q++) if(seen[q]==key){ f=1; break; } if(!f && ns<256){ seen[ns++]=key; char m[160]; int k=snprintf(m,sizeof m,"  [vp] rt=%p %ux%u f%u vp=%dx%d at %d,%d n=%u psh=%016llx\n",(void*)rt,rt->w,rt->h,rt->fmt,vw,vh,g_d3dst.vp_x,g_d3dst.vp_y,vcount,(unsigned long long)ps->bchash); (void)!write(2,m,k); } }
     if(g_nullps_color){ g_nullps_color=0; if(G.ColorMask) gs_colormask(0,0,0,0); }   // NULL PS: no colour writes
     // pipeline
     PH(1); g_d3dgl_phase="pipeline";
@@ -5669,14 +5759,14 @@ static void d3dgl_draw_impl(uint32_t vcount,int indexed,uint32_t instcount,uint3
     // cb0 = P(FOV 70, aspect = scene w/h) * V, where V is the camera VIEW matrix found at runtime
     // (the fresh pool CB whose P*V projects the current object on-screen). Inject into unbound VS slot 0.
     int vs_has_cb0 = mono ? (mp->vcb[0]>=0) : (vs->gl_cbloc[0]>=0);
-    if(getenv("PELOAD_D3DGL_SYNVP") && vs && (!vscb_eff[0]||!vscb_eff[0]->data) && vs_has_cb0 && g_last_b12 && g_last_b12->data){
+    if(GENV1("PELOAD_D3DGL_SYNVP") && vs && (!vscb_eff[0]||!vscb_eff[0]->data) && vs_has_cb0 && g_last_b12 && g_last_b12->data){
         if(d3dgl_synth_cb0()) vscb_eff[0]=&g_syn_cb0; }
     // PER-DRAW decompress gate: the VS runs its vertex-decompress branch when cb0[12]!=0. synth_cb0 sets it
     // =1 globally for DECOMP, but only COMPRESSED-position draws (R16 UNORM/SNORM, fmt 11/13) are actually
     // packed; forcing it on UNCOMPRESSED (float32, fmt 2/6) object draws re-scales already-world verts into
     // the radiating "streaks". Gate it by THIS draw's position format. (Default on with DECOMP; PELOAD_D3DGL_
     // DECOMP_ALL keeps the old force-everything behavior.)
-    if(getenv("PELOAD_D3DGL_DECOMP") && vscb_eff[0]==&g_syn_cb0 && g_d3dst.il && g_d3dst.il->nelem && !getenv("PELOAD_D3DGL_DECOMP_ALL")){
+    if(GENV1("PELOAD_D3DGL_DECOMP") && vscb_eff[0]==&g_syn_cb0 && g_d3dst.il && g_d3dst.il->nelem && !GENV1("PELOAD_D3DGL_DECOMP_ALL")){
         uint32_t pfmt=g_d3dst.il->elem[0].fmt; int compressed=(pfmt==11||pfmt==13||pfmt==35);
         float*c0=(float*)g_syn_cb0_buf; float g=compressed?1.0f:0.0f; c0[48]=c0[49]=c0[50]=c0[51]=g; }
     // PELOAD_D3DGL_DECOMP: the terrain BSP vertices are 16-bit COMPRESSED to [-1,1]; the VS if-branch
@@ -5685,7 +5775,7 @@ static void d3dgl_draw_impl(uint32_t vcount,int indexed,uint32_t instcount,uint3
     // Synthesize cb1 with a uniform scale (PELOAD_D3DGL_DSCALE, offset via _DOFF) so the sections spread
     // out via their bound cb12 placement -> the map LAYOUT emerges even without exact per-mesh bounds.
     // (synth_cb0 sets cb0[12]=1 when DECOMP so the if-branch runs.)
-    if(getenv("PELOAD_D3DGL_DECOMP") && vs){
+    if(GENV1("PELOAD_D3DGL_DECOMP") && vs){
         // PELOAD_D3DGL_REALCB1: use the most-recently-mapped small CB (g_last_smallcb) as the real per-mesh
         // decompression cb1 (the engine maps it right before each draw, even though the BIND is on the dead
         // material path) -> correct per-section scale/offset = no stretched-spike sections. Falls back to
@@ -5694,11 +5784,11 @@ static void d3dgl_draw_impl(uint32_t vcount,int indexed,uint32_t instcount,uint3
         // engine's own scale/offset/uv) instead of the uniform DSCALE guess -> correct per-section bounds,
         // no stretched "spike" sections. PELOAD_D3DGL_CAPSNORM halves the extent + centers the offset for
         // SNORM-packed positions ([-1,1]); PELOAD_D3DGL_CAPSCALE multiplies the position scale (debug).
-        if(getenv("PELOAD_D3DGL_CAPCB1") && g_decomp_cap_valid){
+        if(GENV1("PELOAD_D3DGL_CAPCB1") && g_decomp_cap_valid){
             float lc[12]; for(int i=0;i<12;i++) lc[i]=g_decomp_cap[i];   // snapshot (avoid torn read)
             float*c1=(float*)g_syn_cb1_buf; memset(c1,0,256);
-            float sm=getenv("PELOAD_D3DGL_CAPSCALE")?atof(getenv("PELOAD_D3DGL_CAPSCALE")):1.0f;
-            if(getenv("PELOAD_D3DGL_CAPSNORM")){ // v0 in [-1,1]: decompressed = (v0*0.5+0.5)*ext+min
+            float sm=GENV1("PELOAD_D3DGL_CAPSCALE")?atof(GENV1("PELOAD_D3DGL_CAPSCALE")):1.0f;
+            if(GENV1("PELOAD_D3DGL_CAPSNORM")){ // v0 in [-1,1]: decompressed = (v0*0.5+0.5)*ext+min
                 c1[0]=lc[0]*0.5f*sm; c1[1]=lc[1]*0.5f*sm; c1[2]=lc[2]*0.5f*sm; c1[3]=1.0f;
                 c1[4]=lc[4]+lc[0]*0.5f; c1[5]=lc[5]+lc[1]*0.5f; c1[6]=lc[6]+lc[2]*0.5f;
             } else {                               // v0 in [0,1]: decompressed = v0*ext+min
@@ -5708,31 +5798,31 @@ static void d3dgl_draw_impl(uint32_t vcount,int indexed,uint32_t instcount,uint3
             c1[8]=lc[8]; c1[9]=lc[9]; c1[10]=lc[10]; c1[11]=lc[11];     // texcoord scale+offset
             g_syn_cb1.data=g_syn_cb1_buf; g_syn_cb1.size=256; g_syn_cb1.is_cb=1; g_syn_cb1.ver++;
             if(!vscb_eff[1]||!vscb_eff[1]->data) vscb_eff[1]=&g_syn_cb1;
-        } else if(getenv("PELOAD_D3DGL_REALCB1") && g_last_smallcb && g_last_smallcb->data && g_last_smallcb->size>=48){
+        } else if(GENV1("PELOAD_D3DGL_REALCB1") && g_last_smallcb && g_last_smallcb->data && g_last_smallcb->size>=48){
             if(!vscb_eff[1]||!vscb_eff[1]->data) vscb_eff[1]=g_last_smallcb;
-            if(getenv("PELOAD_D3DGL_CAMDBG")){ static int rc; if(rc++<6){ const float*f=(const float*)g_last_smallcb->data; char mm[200]; int k=snprintf(mm,sizeof mm,"  [realcb1] %lluB scale=[%.2f %.2f %.2f] off=[%.2f %.2f %.2f] tc=[%.2f %.2f %.2f %.2f]\n",(unsigned long long)g_last_smallcb->size,f[0],f[1],f[2],f[4],f[5],f[6],f[8],f[9],f[10],f[11]); (void)!write(2,mm,k);} }
+            if(GENV1("PELOAD_D3DGL_CAMDBG")){ static int rc; if(rc++<6){ const float*f=(const float*)g_last_smallcb->data; char mm[200]; int k=snprintf(mm,sizeof mm,"  [realcb1] %lluB scale=[%.2f %.2f %.2f] off=[%.2f %.2f %.2f] tc=[%.2f %.2f %.2f %.2f]\n",(unsigned long long)g_last_smallcb->size,f[0],f[1],f[2],f[4],f[5],f[6],f[8],f[9],f[10],f[11]); (void)!write(2,mm,k);} }
         } else {
             float*c1=(float*)g_syn_cb1_buf; memset(c1,0,256);
-            float S=getenv("PELOAD_D3DGL_DSCALE")?atof(getenv("PELOAD_D3DGL_DSCALE")):10.0f;
-            float O=getenv("PELOAD_D3DGL_DOFF")?atof(getenv("PELOAD_D3DGL_DOFF")):0.0f;
+            float S=GENV1("PELOAD_D3DGL_DSCALE")?atof(GENV1("PELOAD_D3DGL_DSCALE")):10.0f;
+            float O=GENV1("PELOAD_D3DGL_DOFF")?atof(GENV1("PELOAD_D3DGL_DOFF")):0.0f;
             c1[0]=c1[1]=c1[2]=S;             // cb1[0] = position scale
             c1[4]=c1[5]=c1[6]=O;             // cb1[1] = position offset
             c1[8]=c1[9]=1.0f;                // cb1[2].xy = texcoord scale (passthrough); .zw offset = 0
             g_syn_cb1.data=g_syn_cb1_buf; g_syn_cb1.size=256; g_syn_cb1.is_cb=1; g_syn_cb1.ver++;
             if(!vscb_eff[1]||!vscb_eff[1]->data) vscb_eff[1]=&g_syn_cb1; } }
     if(mono && g_dg_ubo && G.BindBufferRange){
-        if(getenv("PELOAD_D3DGL_SKIPVSBUF") && (!getenv("PELOAD_D3DGL_ALT5") || (((long)(mono_s()/5.0))&1))){ int hb=0; for(int q=0;q<32;q++) if(mp->vtloc[q]>=0 && mp->vtt[q]==5) hb=1; if(hb) return; }
-        { const char*e=getenv("PELOAD_D3DGL_SKIPRELCB"); if(e && (mp->relcb&atoi(e)) && (!getenv("PELOAD_D3DGL_ALT5") || (((long)(mono_s()/5.0))&1))) return; }
-        { const char*e=getenv("PELOAD_D3DGL_SKIPVSBLK"); if(e){ int sb=atoi(e), mv=strchr(e,':')?atoi(strchr(e,':')+1):1; if(sb>=0&&sb<16&&mp->vblk[sb]>=mv && (!getenv("PELOAD_D3DGL_ALT5") || (((long)(mono_s()/5.0))&1))){ return; } } }
+        if(GENV1("PELOAD_D3DGL_SKIPVSBUF") && (!GENV1("PELOAD_D3DGL_ALT5") || (((long)(mono_s()/5.0))&1))){ int hb=0; for(int q=0;q<32;q++) if(mp->vtloc[q]>=0 && mp->vtt[q]==5) hb=1; if(hb) return; }
+        { const char*e=GENV1("PELOAD_D3DGL_SKIPRELCB"); if(e && (mp->relcb&atoi(e)) && (!GENV1("PELOAD_D3DGL_ALT5") || (((long)(mono_s()/5.0))&1))) return; }
+        { const char*e=GENV1("PELOAD_D3DGL_SKIPVSBLK"); if(e){ int sb=atoi(e), mv=strchr(e,':')?atoi(strchr(e,':')+1):1; if(sb>=0&&sb<16&&mp->vblk[sb]>=mv && (!GENV1("PELOAD_D3DGL_ALT5") || (((long)(mono_s()/5.0))&1))){ return; } } }
         // PELOAD_D3DGL_SKIPPSBLK=<slot>:<minvec>: skip draws whose PS declares cb<slot> with >= minvec vec4s (A/B a shader family)
-        { const char*e=getenv("PELOAD_D3DGL_SKIPPSBLK"); if(e){ int sb=atoi(e), mv=strchr(e,':')?atoi(strchr(e,':')+1):1; if(sb>=0&&sb<16&&mp->pblk[sb]>=mv && (!getenv("PELOAD_D3DGL_ALT5") || (((long)(mono_s()/5.0))&1))){ return; } } }
-        if(getenv("PELOAD_D3DGL_CBCHECK")){ static struct { void*sh; int b; } seen[256]; static int ns;
+        { const char*e=GENV1("PELOAD_D3DGL_SKIPPSBLK"); if(e){ int sb=atoi(e), mv=strchr(e,':')?atoi(strchr(e,':')+1):1; if(sb>=0&&sb<16&&mp->pblk[sb]>=mv && (!GENV1("PELOAD_D3DGL_ALT5") || (((long)(mono_s()/5.0))&1))){ return; } } }
+        if(GENV1("PELOAD_D3DGL_CBCHECK")){ static struct { void*sh; int b; } seen[256]; static int ns;
             for(int b=0;b<16;b++) for(int st=0;st<2;st++){ int used=st?mp->pblk[b]:mp->vblk[b]; D3DObj*c=st?g_d3dst.pscb[b]:vscb_eff[b]; void*sh=st?(void*)ps:(void*)vs;
                 if(!used || (c&&c->data&&c->size)) continue; int f=0; for(int i=0;i<ns;i++) if(seen[i].sh==sh&&seen[i].b==b+16*st){ f=1; break; }
                 if(!f && ns<256){ seen[ns].sh=sh; seen[ns].b=b+16*st; ns++; char m[200]; int k=snprintf(m,sizeof m,"  [cbcheck] %s cb%d UNBOUND (block %d vec4) sh=%p rt=%ux%u f%u\n",st?"PS":"VS",b,used,sh,g_d3dst.rtv?g_d3dst.rtv->w:0,g_d3dst.rtv?g_d3dst.rtv->h:0,g_d3dst.rtv?g_d3dst.rtv->fmt:0); (void)!write(2,m,k); } } }
         // PELOAD_D3DGL_CBSCAN: flag draws whose VS constants hold NaN/Inf/|x|>1e7 (diagnoses one-frame
         // exploded geometry); logs per engine frame with the frame tag used in the window-capture names.
-        { static int cbs=-1; if(cbs<0) cbs=getenv("PELOAD_D3DGL_CBSCAN")?1:0;
+        { static int cbs=-1; if(cbs<0) cbs=GENV1("PELOAD_D3DGL_CBSCAN")?1:0;
           if(cbs){ extern unsigned long g_eng_present_no_x; static unsigned long lastf=~0ul; static int nbad, lines; static char first[200];
             unsigned long fno=g_eng_present_no_x;
             if(fno!=lastf){ if(nbad && lines<600){ char m[300]; int k=snprintf(m,sizeof m,"  [cbscan] frame %lu: %d bad draws; first %s\n",lastf,nbad,first); (void)!write(2,m,k); lines++; } nbad=0; lastf=fno; }
@@ -5759,7 +5849,7 @@ static void d3dgl_draw_impl(uint32_t vcount,int indexed,uint32_t instcount,uint3
     int nattr=0; uint32_t amask=0;
     // PELOAD_D3DGL_DRAWLOG: dump the state of the first geometry draws (what the ENGINE supplies):
     // the VS-cb0 matrix, vertex format/stride, viewport, RT — to see why real geometry stays black.
-    if(getenv("PELOAD_D3DGL_DRAWLOG") && il && il->nelem){
+    if(GENV1("PELOAD_D3DGL_DRAWLOG") && il && il->nelem){
         // Log each DISTINCT VS shader once: which cb slots it references vs which are actually bound,
         // whether it has a vertex input, and whether it draws indexed. Ground truth on the black frame.
         uint64_t vf=(vs&&vs->bc)?d3dgl_fnv(vs->bc,vs->bclen):0;
@@ -5793,13 +5883,13 @@ static void d3dgl_draw_impl(uint32_t vcount,int indexed,uint32_t instcount,uint3
             if(_ts) g_vx_ns[2]+=prof_now()-_ts; }                    // range unknown -> send the whole buffer when dirty
         // ring mode: a dirty dynamic VB feeds this draw and the referenced vertex range is known -> stream the
         // range through the ring and rebase the draw by vmin (static VBs in the same draw shift by +vmin*stride)
-        use_ring = (need_scan==1) && !getenv("PELOAD_D3DGL_NORING") && !getenv("PELOAD_D3DGL_NORING_VB") && G.MapBufferRange;
+        use_ring = (need_scan==1) && !GENV1("PELOAD_D3DGL_NORING") && !GENV1("PELOAD_D3DGL_NORING_VB") && G.MapBufferRange;
         vshift = use_ring ? (int64_t)vmin : 0;
         long ringoff[8]; for(int q=0;q<8;q++) ringoff[q]=-2;
         for(int i=0;i<il->nelem && i<16;i++){
             uint32_t slot=il->elem[i].slot; if(slot>=8) slot=0; D3DObj*sb=g_d3dst.vb[slot]; if(!sb||!sb->data||!sb->size) continue;
             int loc=d3dgl_vs_inreg(vs,il->elem[i].sem,il->elem[i].semidx);
-            if(getenv("PELOAD_D3DGL_IADBG")){ static void* seenvs[256]; static int nsv; int fresh=1; for(int q=0;q<nsv;q++) if(seenvs[q]==(void*)vs){ fresh=0; break; }
+            if(GENV1("PELOAD_D3DGL_IADBG")){ static void* seenvs[256]; static int nsv; int fresh=1; for(int q=0;q<nsv;q++) if(seenvs[q]==(void*)vs){ fresh=0; break; }
                 if(fresh && i==il->nelem-1 && nsv<256) seenvs[nsv++]=vs;
                 if(fresh){ char m[260]; int k=snprintf(m,sizeof m,"  [iadbg] vs=%p rt=%ux%u f%u el%d %s%u fmt%u slot%u off%u cls%u -> loc %d |",(void*)vs,g_d3dst.rtv?g_d3dst.rtv->w:0,g_d3dst.rtv?g_d3dst.rtv->h:0,g_d3dst.rtv?g_d3dst.rtv->fmt:0,i,il->elem[i].sem,il->elem[i].semidx,il->elem[i].fmt,il->elem[i].slot,il->elem[i].off,il->elem[i].cls,loc);
                     if(vs&&vs->isg){ const VsIn*tt=(const VsIn*)vs->isg; for(int q=0;q<vs->nisg && k<240;q++) k+=snprintf(m+k,sizeof m-k," %s%u=v%u",tt[q].name,tt[q].idx,tt[q].reg); }
@@ -5825,7 +5915,7 @@ static void d3dgl_draw_impl(uint32_t vcount,int indexed,uint32_t instcount,uint3
             if(!ringed){ d3dgl_buf_need(sb,GLE_ARRAY,lo,hi);   // also binds GL_ARRAY_BUFFER for the pointer below
                 if(use_ring && !inst) aoff+=(uint64_t)vshift*stride; }
             // attribute state of the shared VAO is cached: only changed pointers/divisors/enables are sent
-            { unsigned cb=ringed?g_ring:sb->glbuf; unsigned dv=inst?step:0; int nc=g_va_nocache<0?(g_va_nocache=getenv("PELOAD_D3DGL_NOSTATECACHE")?1:0):g_va_nocache;
+            { unsigned cb=ringed?g_ring:sb->glbuf; unsigned dv=inst?step:0; int nc=g_va_nocache<0?(g_va_nocache=GENV1("PELOAD_D3DGL_NOSTATECACHE")?1:0):g_va_nocache;
               int ipt=0; if((d3dgl_vs_intin(vs)>>loc)&1u && G.VertexAttribIPointer){ unsigned ic,ig; if(d3dgl_attrib_ifmt(il->elem[i].fmt,&ic,&ig)){ comps=ic; gt=ig; norm=0; ipt=1; } }
               if(nc || g_va[loc].buf!=cb||g_va[loc].comps!=comps||g_va[loc].type!=gt||g_va[loc].norm!=norm||g_va[loc].stride!=(uint32_t)stride||g_va[loc].off!=aoff||g_va[loc].ipt!=ipt){
                   if(ipt) G.VertexAttribIPointer((unsigned)loc,(int)comps,gt,(int)stride,(const void*)(size_t)aoff);
@@ -5837,7 +5927,7 @@ static void d3dgl_draw_impl(uint32_t vcount,int indexed,uint32_t instcount,uint3
         }
         // PELOAD_D3DGL_VTXDUMP: ground-truth the world-space vertex range of element 0 (POSITION) so we
         // can size/aim the camera. Only meaningful for an uncompressed float position (DXGI 2/6).
-        if(getenv("PELOAD_D3DGL_VTXDUMP")){ static int vd; if(vd<5){ D3DObj*sb=g_d3dst.vb[il->elem[0].slot<8?il->elem[0].slot:0];
+        if(GENV1("PELOAD_D3DGL_VTXDUMP")){ static int vd; if(vd<5){ D3DObj*sb=g_d3dst.vb[il->elem[0].slot<8?il->elem[0].slot:0];
             uint32_t stride=g_d3dst.vstride[il->elem[0].slot<8?il->elem[0].slot:0]; uint32_t off=g_d3dst.voff[0]+il->elem[0].off; uint32_t fmt=il->elem[0].fmt;
             if(sb&&sb->data&&stride>=12&&(fmt==2||fmt==6)){ vd++; const uint8_t*d=(const uint8_t*)sb->data; uint64_t nv=sb->size/stride; if(nv>400)nv=400;
                 float mn[3]={1e30f,1e30f,1e30f},mx[3]={-1e30f,-1e30f,-1e30f}; for(uint64_t v=0;v<nv;v++){ const float*p=(const float*)(d+off+v*stride);
@@ -5848,7 +5938,7 @@ static void d3dgl_draw_impl(uint32_t vcount,int indexed,uint32_t instcount,uint3
         // would (decompress via cb1=g_syn_cb1_buf -> world via cb12=g_last_b12 -> clip via cb0=g_syn_cb0_buf),
         // and log the resulting clip/NDC. ONSCREEN iff NDC in [-1,1] & w>0. Grounds the "geometry off-screen"
         // diagnosis in real numbers instead of guessing the camera. Samples a vertex min/max across the draw.
-        if(getenv("PELOAD_D3DGL_CLIPDUMP")){ static int cd2; if(cd2<10 && il->nelem>0){
+        if(GENV1("PELOAD_D3DGL_CLIPDUMP")){ static int cd2; if(cd2<10 && il->nelem>0){
             int slot0=il->elem[0].slot<8?il->elem[0].slot:0; D3DObj*sb=g_d3dst.vb[slot0];
             uint32_t stride=g_d3dst.vstride[slot0]; uint32_t off=g_d3dst.voff[slot0]+il->elem[0].off; uint32_t fmt=il->elem[0].fmt;
             if(sb&&sb->data&&stride>=4&&(uint64_t)off+16<=sb->size){ cd2++;
@@ -5857,7 +5947,7 @@ static void d3dgl_draw_impl(uint32_t vcount,int indexed,uint32_t instcount,uint3
                 else if(fmt==11){ const uint16_t*u=(const uint16_t*)d; v0[0]=u[0]/65535.0f; v0[1]=u[1]/65535.0f; v0[2]=u[2]/65535.0f; }
                 else if(fmt==13){ const int16_t*s=(const int16_t*)d; v0[0]=s[0]/32767.0f; v0[1]=s[1]/32767.0f; v0[2]=s[2]/32767.0f; }
                 float dec[3]={v0[0],v0[1],v0[2]};
-                if(getenv("PELOAD_D3DGL_DECOMP")){ const float*c1=(const float*)g_syn_cb1_buf; dec[0]=v0[0]*c1[0]+c1[4]; dec[1]=v0[1]*c1[1]+c1[5]; dec[2]=v0[2]*c1[2]+c1[6]; }
+                if(GENV1("PELOAD_D3DGL_DECOMP")){ const float*c1=(const float*)g_syn_cb1_buf; dec[0]=v0[0]*c1[0]+c1[4]; dec[1]=v0[1]*c1[1]+c1[5]; dec[2]=v0[2]*c1[2]+c1[6]; }
                 float world[3]={dec[0],dec[1],dec[2]};
                 if(g_last_b12&&g_last_b12->data){ const float*w=(const float*)g_last_b12->data; for(int r=0;r<3;r++) world[r]=w[r*4]*dec[0]+w[r*4+1]*dec[1]+w[r*4+2]*dec[2]+w[r*4+3]; }
                 const float*c0=(const float*)g_syn_cb0_buf; float clip[4]; for(int r=0;r<4;r++) clip[r]=c0[r*4]*world[0]+c0[r*4+1]*world[1]+c0[r*4+2]*world[2]+c0[r*4+3];
@@ -5873,7 +5963,7 @@ static void d3dgl_draw_impl(uint32_t vcount,int indexed,uint32_t instcount,uint3
         // cb1, and report the world-position RANGE + how many verts land FAR from the median (streak verts).
         // A big intra-draw range / many outliers => the draw mixes sections (one cb1 can't fit) or the
         // compression bounds are wrong for part of it = the radiating streaks.
-        if(getenv("PELOAD_D3DGL_RANGEDUMP")){ static int rd; if(rd<400 && il->nelem>0){
+        if(GENV1("PELOAD_D3DGL_RANGEDUMP")){ static int rd; if(rd<400 && il->nelem>0){
             int slot0=il->elem[0].slot<8?il->elem[0].slot:0; D3DObj*sb=g_d3dst.vb[slot0];
             uint32_t stride=g_d3dst.vstride[slot0]; uint32_t off=g_d3dst.voff[slot0]+il->elem[0].off; uint32_t fmt=il->elem[0].fmt;
             if(sb&&sb->data&&stride>=8&&(fmt==11||fmt==13)){ rd++;
@@ -5905,8 +5995,8 @@ static void d3dgl_draw_impl(uint32_t vcount,int indexed,uint32_t instcount,uint3
     // Diagnostic for the streaks: the whole-map terrain meshes (verts spread across the full [-500,500] box)
     // are the streak source; the clean local sections (span ~100) are the ground. Skipping the wide meshes
     // isolates whether they are what streaks (and whether the ground alone renders cleanly).
-    if(getenv("PELOAD_D3DGL_SKIPWIDE") && getenv("PELOAD_D3DGL_DECOMP") && g_d3dst.il && g_d3dst.il->nelem){
-        float thr=atof(getenv("PELOAD_D3DGL_SKIPWIDE")); if(thr<1)thr=400.0f;
+    if(GENV1("PELOAD_D3DGL_SKIPWIDE") && GENV1("PELOAD_D3DGL_DECOMP") && g_d3dst.il && g_d3dst.il->nelem){
+        float thr=atof(GENV1("PELOAD_D3DGL_SKIPWIDE")); if(thr<1)thr=400.0f;
         int slot0=g_d3dst.il->elem[0].slot<8?g_d3dst.il->elem[0].slot:0; D3DObj*sb=g_d3dst.vb[slot0];
         uint32_t st2=g_d3dst.vstride[slot0]; uint32_t vo2=g_d3dst.voff[slot0]+g_d3dst.il->elem[0].off; uint32_t f2=g_d3dst.il->elem[0].fmt;
         if(sb&&sb->data&&st2>=8&&(f2==11||f2==13)){ const float*c1=(const float*)g_syn_cb1_buf;
@@ -5919,19 +6009,19 @@ static void d3dgl_draw_impl(uint32_t vcount,int indexed,uint32_t instcount,uint3
     // PELOAD_D3DGL_SKIPDEGEN=<t>: skip draws whose bound cb1 position scale has any component < t
     // (default 2.0) -- these are DEGENERATE/mis-correlated captures (cb1scale ~[0,0,0]/[1,1,0]) that
     // collapse or stretch the draw. Diagnostic for whether those are the streak source.
-    if(getenv("PELOAD_D3DGL_SKIPDEGEN") && getenv("PELOAD_D3DGL_DECOMP")){
-        const float*c1=(const float*)g_syn_cb1_buf; float t=atof(getenv("PELOAD_D3DGL_SKIPDEGEN")); if(t<=0)t=2.0f;
+    if(GENV1("PELOAD_D3DGL_SKIPDEGEN") && GENV1("PELOAD_D3DGL_DECOMP")){
+        const float*c1=(const float*)g_syn_cb1_buf; float t=atof(GENV1("PELOAD_D3DGL_SKIPDEGEN")); if(t<=0)t=2.0f;
         if(c1[0]<t||c1[1]<t||c1[2]<t) n=0; }
-    double fd0=(mp && !mp->drawn && getenv("PELOAD_D3DGL_PROGTIME"))?mono_s():0;
+    double fd0=(mp && !mp->drawn && GENV1("PELOAD_D3DGL_PROGTIME"))?mono_s():0;
     int covq=covq_begin(vs,ps,vcount,instcount);
     wd_rec(vs,ps,vcount,instcount,mp);
-    { const char*tp=getenv("PELOAD_TRACE_PSH"); if(tp && strstr(tp,"x")==0){ char hx[20]; snprintf(hx,sizeof hx,"%016llx",(unsigned long long)ps->bchash);
+    { const char*tp=GENV1("PELOAD_TRACE_PSH"); if(tp && strstr(tp,"x")==0){ char hx[20]; snprintf(hx,sizeof hx,"%016llx",(unsigned long long)ps->bchash);
         if(strstr(tp,hx)){ extern double g_gameplay_t0; static unsigned long lastf; static int cnt; extern unsigned long g_eng_present_no_x;
           if(g_eng_present_no_x!=lastf){ if(cnt){ char m[120]; int k=snprintf(m,sizeof m,"  [psh] f%lu t=%.2f %d draws\n",lastf,g_gameplay_t0?mono_s()-g_gameplay_t0:-1.0,cnt); (void)!write(2,m,k); } cnt=0; lastf=g_eng_present_no_x; }
           cnt++; } } }
     // PELOAD_D3DGL_DUMPTEX_PS=<pshash>: once, read back the PS's t0 (mip 0, RGBA8) to ~/reclaimer_pstex_<hash>.bmp
-    { const char*dp=getenv("PELOAD_D3DGL_DUMPTEX_PS"); static int dumped;
-      static long seen_n; long skipn=getenv("PELOAD_D3DGL_DUMPTEX_SKIP")?atol(getenv("PELOAD_D3DGL_DUMPTEX_SKIP")):0;
+    { const char*dp=GENV1("PELOAD_D3DGL_DUMPTEX_PS"); static int dumped;
+      static long seen_n; long skipn=GENV1("PELOAD_D3DGL_DUMPTEX_SKIP")?atol(GENV1("PELOAD_D3DGL_DUMPTEX_SKIP")):0;
       if(dp && !dumped && ps->bchash==strtoull(dp,0,16) && seen_n++>=skipn){ D3DObj*x=g_d3dst.psrv[0]; D3DObj*xr=(x&&x->data&&x->vkind)?(D3DObj*)x->data:x;
         static void(*gti)(unsigned,int,unsigned,unsigned,void*); if(!gti) gti=dlsym(RTLD_DEFAULT,"glGetTexImage");
         if(xr && xr->gltex && xr->w && xr->h && xr->w<=4096 && xr->h<=4096 && gti){ dumped=1; unsigned char*px=calloc(1,(size_t)xr->w*xr->h*4);
@@ -5942,14 +6032,14 @@ static void d3dgl_draw_impl(uint32_t vcount,int indexed,uint32_t instcount,uint3
                 char m[340]; int k=snprintf(m,sizeof m,"  [dumptex] %s t0 %ux%u f%u -> %s\n",dp,xr->w,xr->h,xr->fmt,pth); (void)!write(2,m,k); } } } }
     // PELOAD_D3DGL_FSLOG: log every full-screen-ish pass (<=6 verts, 1 instance) with its PS hash, target,
     // blend state and a checksum of the PS constants it reads (finds a stray one-frame overlay).
-    { static int fl=-1; if(fl<0) fl=getenv("PELOAD_D3DGL_FSLOG")?1:0;
+    { static int fl=-1; if(fl<0) fl=GENV1("PELOAD_D3DGL_FSLOG")?1:0;
       if(fl && vcount<=6 && instcount<=1){ extern unsigned long g_eng_present_no_x; D3DObj*rt=g_d3dst.rtv; D3DObj*rr=(rt&&rt->data&&rt->vkind)?(D3DObj*)rt->data:rt;
         uint32_t cs=0; float c0[4]={0,0,0,0};
         for(int b=0;b<4;b++){ D3DObj*c=g_d3dst.pscb[b]; if(!c||!c->data||!mp->pblk[b]) continue; uint64_t o0=(uint64_t)g_d3dst.pscb_1st[b]*16, o1=o0+(uint64_t)mp->pblk[b]*16; if(o1>c->size)o1=c->size;
             for(uint64_t q=o0;q+4<=o1;q+=4){ uint32_t u; memcpy(&u,(const uint8_t*)c->data+q,4); cs=cs*31+u; }
             if(b==0 && o0+16<=c->size) memcpy(c0,(const uint8_t*)c->data+o0,16); }
         char m[260]; int k=snprintf(m,sizeof m,"  [fslog] f%lu psh=%016llx rt=%p %ux%u f%u n=%u blend=%p cbsum=%08x c0=(%.3g %.3g %.3g %.3g)\n",g_eng_present_no_x,(unsigned long long)ps->bchash,(void*)rr,rr?rr->w:0,rr?rr->h:0,rr?rr->fmt:0,vcount,(void*)g_d3dst.blend,cs,c0[0],c0[1],c0[2],c0[3]); (void)!write(2,m,k); } }
-    { static int sk=-1; static uint64_t skh[8]; if(sk<0){ sk=0; const char*e=getenv("PELOAD_D3DGL_SKIPVSH"); while(e&&*e&&sk<8){ skh[sk++]=strtoull(e,0,16); e=strchr(e,','); if(e)e++; } }
+    { static int sk=-1; static uint64_t skh[8]; if(sk<0){ sk=0; const char*e=GENV1("PELOAD_D3DGL_SKIPVSH"); while(e&&*e&&sk<8){ skh[sk++]=strtoull(e,0,16); e=strchr(e,','); if(e)e++; } }
       for(int q=0;q<sk;q++) if(vs->bchash==skh[q]||ps->bchash==skh[q]){ if(covq>=0) covq_end(covq); return; } }   // A/B: drop draws of these shader hashes
     if(indexed && g_d3dst.ib && g_d3dst.ib->data && g_d3dst.ib->size){
         D3DObj*ib=g_d3dst.ib;
@@ -5958,7 +6048,7 @@ static void d3dgl_draw_impl(uint32_t vcount,int indexed,uint32_t instcount,uint3
         uint64_t maxn=(boff<ib->size)?(ib->size-boff)/isz:0; if(n>maxn) n=(unsigned)maxn;
         // dynamic index data streams through the ring too (same NO_OVERWRITE upload stall as vertices)
         { uint64_t lo=boff, hi=boff+(uint64_t)n*isz; int covered = ib->glbuf && (!ib->gl_dirty || (ib->rvalid && lo>=ib->rlo && hi<=ib->rhi)); long ro=-1;
-          if(!covered && ib->gl_dirty && n && hi<=ib->size && !getenv("PELOAD_D3DGL_NORING") && !getenv("PELOAD_D3DGL_NORING_IB")){ uint64_t _t=prof_on()?prof_now():0; cs_wait_res(ib); ro=d3dgl_ring_put((const uint8_t*)ib->data+lo,hi-lo); if(_t) g_vx_ns[1]+=prof_now()-_t; }
+          if(!covered && ib->gl_dirty && n && hi<=ib->size && !GENV1("PELOAD_D3DGL_NORING") && !GENV1("PELOAD_D3DGL_NORING_IB")){ uint64_t _t=prof_on()?prof_now():0; cs_wait_res(ib); ro=d3dgl_ring_put((const uint8_t*)ib->data+lo,hi-lo); if(_t) g_vx_ns[1]+=prof_now()-_t; }
           if(ro>=0){ G.BindBuffer(GLE_ELEM,g_ring); boff=(uint64_t)ro; }
           else d3dgl_buf_need(ib,GLE_ELEM,boff,boff+(uint64_t)n*isz); }
         // D3D11 strip topologies ALWAYS cut at the all-ones index; GL 4.1 needs PRIMITIVE_RESTART + the index,
@@ -5981,12 +6071,12 @@ static void d3dgl_draw_impl(uint32_t vcount,int indexed,uint32_t instcount,uint3
     if(covq>=0) covq_end(covq);
     // PELOAD_D3DGL_LUMLOG: trace the 1x1 luminance targets (auto exposure): value written by draws into a
     // 1x1 RT and the 1x1 textures each draw samples (GPU readback; diagnostic only, stalls the pipeline).
-    { static int ll=-1; if(ll<0) ll=getenv("PELOAD_D3DGL_LUMLOG")?1:(wd_on()?2:0);
+    { static int ll=-1; if(ll<0) ll=GENV1("PELOAD_D3DGL_LUMLOG")?1:(wd_on()?2:0);
       if(ll){ extern unsigned long g_eng_present_no_x; static void(*gi)(unsigned,int*); static void(*gti)(unsigned,int,unsigned,unsigned,void*);
         if(!gi){ gi=dlsym(RTLD_DEFAULT,"glGetIntegerv"); gti=dlsym(RTLD_DEFAULT,"glGetTexImage"); }
         D3DObj*rt=g_d3dst.rtv; D3DObj*rr=(rt&&rt->data&&rt->vkind)?(D3DObj*)rt->data:rt;
         if(rr&&rr->w==1&&rr->h==1&&gi){ int dfb=0,rfb=0; gi(0x8CA6/*DRAW_FB_BINDING*/,&dfb); gi(0x8CAA/*READ_FB_BINDING*/,&rfb); float px[4]={-1,-1,-1,-1};
-            G.BindFramebuffer(0x8CA8,(unsigned)dfb); G.ReadPixels(0,0,1,1,GLE_RGBA,0x1406/*FLOAT*/,px); G.BindFramebuffer(0x8CA8,(unsigned)rfb);
+            gl_bindfbo_any(0x8CA8,(unsigned)dfb); G.ReadPixels(0,0,1,1,GLE_RGBA,0x1406/*FLOAT*/,px); gl_bindfbo_any(0x8CA8,(unsigned)rfb);
             if(rr->fmt==10) wd_lum(px[0]);
             if(ll==1){ char m[200]; int k=snprintf(m,sizeof m,"  [lum] f%lu WRITE rt=%p tex=%u psh=%016llx -> (%g %g %g %g)\n",g_eng_present_no_x,(void*)rr,rr->gltex,(unsigned long long)ps->bchash,px[0],px[1],px[2],px[3]); (void)!write(2,m,k); } }
         for(int t=0;t<32&&gti&&ll==1;t++){ D3DObj*x=g_d3dst.psrv[t]; D3DObj*xr=(x&&x->data&&x->vkind)?(D3DObj*)x->data:x; if(!xr||xr->w!=1||xr->h!=1||!xr->gltex||xr->kind<2) continue;
@@ -6003,12 +6093,12 @@ static void d3dgl_draw_impl(uint32_t vcount,int indexed,uint32_t instcount,uint3
     // PELOAD_D3DGL_COVRT="WxHfF" (e.g. 1920x1080f28): dump THAT render target right after every COVINT'th
     // draw into it (up to 8), instead of coverage new-highs -- to capture a specific stage of the frame graph
     // such as the engine's final tonemapped frame.
-    if(getenv("PELOAD_D3DGL_COVRT") && n>0 && G.ReadPixels && g_d3dst.rtv){ static unsigned fw,fh,ff; static int parsed;
-        if(!parsed){ sscanf(getenv("PELOAD_D3DGL_COVRT"),"%ux%uf%u",&fw,&fh,&ff); parsed=1; }
-        D3DObj*r=g_d3dst.rtv; const char*psf=getenv("PELOAD_D3DGL_COVPS");   // optional PS reflected-name substring filter
+    if(GENV1("PELOAD_D3DGL_COVRT") && n>0 && G.ReadPixels && g_d3dst.rtv){ static unsigned fw,fh,ff; static int parsed;
+        if(!parsed){ sscanf(GENV1("PELOAD_D3DGL_COVRT"),"%ux%uf%u",&fw,&fh,&ff); parsed=1; }
+        D3DObj*r=g_d3dst.rtv; const char*psf=GENV1("PELOAD_D3DGL_COVPS");   // optional PS reflected-name substring filter
         if(psf && !(g_d3dst.ps && strstr(g_d3dst.ps->rname,psf))) r=0;
         if(r && r->w==fw && r->h==fh && r->fmt==ff){ static long hits; static int nd; hits++;
-            int interval=getenv("PELOAD_D3DGL_COVINT")?atoi(getenv("PELOAD_D3DGL_COVINT")):20; if(interval<1)interval=20;
+            int interval=GENV1("PELOAD_D3DGL_COVINT")?atoi(GENV1("PELOAD_D3DGL_COVINT")):20; if(interval<1)interval=20;
             if(nd<8 && (hits%interval)==0){ static uint8_t*cb2; if(!cb2) cb2=malloc(4096u*4096u*4u);
                 int W=(int)fw>4096?4096:(int)fw, H=(int)fh>4096?4096:(int)fh;
                 { static void(*gi)(unsigned,int*); static unsigned char(*isen)(unsigned); static void(*gb)(unsigned,unsigned char*); if(!gi){ gi=dlsym(RTLD_DEFAULT,"glGetIntegerv"); isen=dlsym(RTLD_DEFAULT,"glIsEnabled"); gb=dlsym(RTLD_DEFAULT,"glGetBooleanv"); }
@@ -6032,8 +6122,8 @@ static void d3dgl_draw_impl(uint32_t vcount,int indexed,uint32_t instcount,uint3
                             char m4[160]; int k4=snprintf(m4,sizeof m4,"  [covrt]   ps binds %s type=%u -> slot %u\n",rf_str(R,rf_u32(R,e)),rf_u32(R,e+4),rf_u32(R,e+20)); (void)!write(2,m4,k4); }
                             refl2_Release(R); } } }
                     for(int t=0;t<16;t++){ D3DObj*x=g_d3dst.psrv[t]; if(x){ char m3[160]; int k3=snprintf(m3,sizeof m3,"  [covrt]   ps t%d %p %ux%u f%u%s samp=%p\n",t,(void*)x,x->w,x->h,x->fmt,x->glfbo?" RT":"",(void*)g_d3dst.pssamp[t]); (void)!write(2,m3,k3);} } } } } }
-    if(getenv("PELOAD_D3DGL_COVPROBE") && nattr>0 && n>0 && G.ReadPixels && g_d3dst.rtv && g_d3dst.rtv->w>=512){
-        static long gdraw; gdraw++; int interval=getenv("PELOAD_D3DGL_COVINT")?atoi(getenv("PELOAD_D3DGL_COVINT")):40; if(interval<1)interval=40;
+    if(GENV1("PELOAD_D3DGL_COVPROBE") && nattr>0 && n>0 && G.ReadPixels && g_d3dst.rtv && g_d3dst.rtv->w>=512){
+        static long gdraw; gdraw++; int interval=GENV1("PELOAD_D3DGL_COVINT")?atoi(GENV1("PELOAD_D3DGL_COVINT")):40; if(interval<1)interval=40;
         if((gdraw%interval)==0){
             int W=g_d3dst.vp_w>0?g_d3dst.vp_w:1280, H=g_d3dst.vp_h>0?g_d3dst.vp_h:720; if(W>1920)W=1920; if(H>1080)H=1080;
             static uint8_t*cbuf; if(!cbuf) cbuf=malloc(1920*1080*4);
@@ -6052,7 +6142,7 @@ static void d3dgl_draw_impl(uint32_t vcount,int indexed,uint32_t instcount,uint3
     // PELOAD_D3DGL_COLORTRACK=<frame>: on that present-frame, after every draw into a >=1280-wide target, read
     // a 32x32 block at the viewport centre and log draws that change it sharply (pinpoints which pass
     // produces / destroys a colour channel). Keeps the last value per target.
-    if(getenv("PELOAD_D3DGL_COLORTRACK") && G.ReadPixels && rt->w>=1280){ extern unsigned long g_ct_frame; unsigned long want=strtoul(getenv("PELOAD_D3DGL_COLORTRACK"),0,10);
+    if(GENV1("PELOAD_D3DGL_COLORTRACK") && G.ReadPixels && rt->w>=1280){ extern unsigned long g_ct_frame; unsigned long want=strtoul(GENV1("PELOAD_D3DGL_COLORTRACK"),0,10);
         if(g_ct_frame==want){ static void*rts[8]; static float last[8][3]; static int nr; int ri=-1; for(int q=0;q<nr;q++) if(rts[q]==rt){ ri=q; break; }
             if(ri<0 && nr<8){ ri=nr++; rts[ri]=rt; last[ri][0]=last[ri][1]=last[ri][2]=-1; }
             if(ri>=0){ uint8_t px[8*8*4]; float m[3]={0,0,0}; int RH=(int)(rt->h>4096?4096:rt->h);
@@ -6065,7 +6155,7 @@ static void d3dgl_draw_impl(uint32_t vcount,int indexed,uint32_t instcount,uint3
                         last[ri][0],last[ri][1],last[ri][2],m[0],m[1],m[2],ps?ps->rname:"-",r0?r0[0]:0,r0?r0[1]:0,r0?r0[2]:0,r0?(r0[7]&0xF):0xF,t0?t0->w:0,t0?t0->h:0,t0?t0->fmt:0,n); (void)!write(2,mm,k); }
                 last[ri][0]=m[0]; last[ri][1]=m[1]; last[ri][2]=m[2]; } } }
     if(rt==g_d3d_backbuf){ g_bb_draws++; g_bb_vp=(unsigned long)vw<<16|(unsigned long)vh; if(g_d3dst.psrv[0]){ g_bb_t0w=g_d3dst.psrv[0]->w; g_bb_t0h=g_d3dst.psrv[0]->h; g_bb_t0f=g_d3dst.psrv[0]->fmt; } }
-    if(getenv("PELOAD_TRACE_COPY")) for(int t=0;t<16;t++){ D3DObj*x=g_d3dst.psrv[t]; if(x&&x->copydst){ static int cc; if(cc++<20){ char m[200];
+    if(GENV1("PELOAD_TRACE_COPY")) for(int t=0;t<16;t++){ D3DObj*x=g_d3dst.psrv[t]; if(x&&x->copydst){ static int cc; if(cc++<20){ char m[200];
         int k=snprintf(m,sizeof m,"  [copyuse] draw samples copy-dst %ux%u f%u at t%d -> writes rt=%p %ux%u f%u%s vp=%dx%d\n",x->w,x->h,x->fmt,t,(void*)rt,rt->w,rt->h,rt->fmt,rt==g_d3d_backbuf?" (BACKBUFFER)":"",vw,vh); (void)!write(2,m,k);} break; } }
     // Latch the present source. The backbuffer (final composite) is preferred; if the engine never
     // composites to it, fall back to the largest sizeable RT drawn into so we still show the scene.
@@ -6080,7 +6170,7 @@ static void d3dgl_draw_impl(uint32_t vcount,int indexed,uint32_t instcount,uint3
     // (= the 3D scene color buffer -- the terrain/object draws submit millions of verts, while UI text
     // quads and the loading-screen composite blit submit a handful). This reliably picks the scene RT
     // regardless of its size/aspect, where the loading-screen overlay and square shadow RTs do not.
-    if(getenv("PELOAD_D3DGL_PRESENT_GEOM") && !(rt==g_d3d_backbuf) && nattr>0 && n>0 && rt->w>=256 && rt->h>=256){
+    if(GENV1("PELOAD_D3DGL_PRESENT_GEOM") && !(rt==g_d3d_backbuf) && nattr>0 && n>0 && rt->w>=256 && rt->h>=256){
         static struct { unsigned tex; double verts; int w,h,vw,vh; } gtbl[64]; static int ngtbl; static unsigned gbesttex;
         int fi=-1; for(int i=0;i<ngtbl;i++) if(gtbl[i].tex==rt->gltex){ fi=i; break; }
         if(fi<0 && ngtbl<64){ fi=ngtbl++; gtbl[fi].tex=rt->gltex; gtbl[fi].verts=0; }
@@ -6091,10 +6181,10 @@ static void d3dgl_draw_impl(uint32_t vcount,int indexed,uint32_t instcount,uint3
                 g_d3dgl_present_tw=(gtbl[mi].w>4096?4096:gtbl[mi].w); g_d3dgl_present_th=(gtbl[mi].h>4096?4096:gtbl[mi].h);
                 if(g_d3dgl_present_tw<1)g_d3dgl_present_tw=gtbl[mi].vw; if(g_d3dgl_present_th<1)g_d3dgl_present_th=gtbl[mi].vh;
                 g_d3dgl_present_vw=g_d3dgl_present_tw; g_d3dgl_present_vh=g_d3dgl_present_th;
-                if(getenv("PELOAD_TRACE_D3DGL")){ char m[160]; int k=snprintf(m,sizeof m,"  [present-geom] latch tex=%u %dx%d verts=%.0f\n",gtbl[mi].tex,gtbl[mi].w,gtbl[mi].h,mx); (void)!write(2,m,k);} } }
+                if(GENV1("PELOAD_TRACE_D3DGL")){ char m[160]; int k=snprintf(m,sizeof m,"  [present-geom] latch tex=%u %dx%d verts=%.0f\n",gtbl[mi].tex,gtbl[mi].w,gtbl[mi].h,mx); (void)!write(2,m,k);} } }
         return;
     }
-    int scene_mode = getenv("PELOAD_D3DGL_PRESENT_SCENE")!=0;
+    int scene_mode = GENV1("PELOAD_D3DGL_PRESENT_SCENE")!=0;
     if(vw>=512 && vh>=288){ long a=(long)vw*vh; static long best;
         int isbb=(rt==g_d3d_backbuf);
         // In scene mode prefer a 16:9 RT (the scene COLOR buffer, 1920x1080 / 1280x720) over square
@@ -6153,7 +6243,7 @@ static void d3dgl_blit_fullscreen_i(unsigned vao);
 static void d3dgl_blit_fullscreen(unsigned vao){ d3dgl_blit_fullscreen_i(vao); gs_invalidate(); }
 static void d3dgl_blit_fullscreen_i(unsigned vao){
     if(!g_d3dgl_present_tex) return;
-    G.BindFramebuffer(GLE_FBO,0); G.Viewport(0,0,g_d3dgl_W,g_d3dgl_H);
+    gl_bindfbo_any(GLE_FBO,0); G.Viewport(0,0,g_d3dgl_W,g_d3dgl_H);
     G.Disable(0x0B71); G.Disable(0x0BE2);
     G.ClearColor(0.02f,0.02f,0.05f,1.0f); G.Clear(GLE_COLORBIT);
     G.UseProgram(0); G.BindProgramPipeline(0); G.UseProgram(g_d3dgl_blit_prog);
@@ -6170,7 +6260,7 @@ static void d3dgl_blit_fullscreen_i(unsigned vao){
     if(getenv("PELOAD_D3DGL_SHOTWIN")){ static unsigned long bc; int every=atoi(getenv("PELOAD_D3DGL_SHOTWIN")); if(every<1)every=20;
         if((bc++ % every)==0 && G.ReadPixels){ int w=g_d3dgl_W,h=g_d3dgl_H; if(w>0&&h>0&&(long)w*h<=(32<<20)){
             unsigned char*cap=calloc(1,(size_t)w*h*4);
-            if(cap){ G.BindFramebuffer(GLE_FBO,0); if(G.ReadBuffer)G.ReadBuffer(0x0405/*BACK*/); if(G.GetError)G.GetError();
+            if(cap){ gl_bindfbo_any(GLE_FBO,0); if(G.ReadBuffer)G.ReadBuffer(0x0405/*BACK*/); if(G.GetError)G.GetError();
                 G.ReadPixels(0,0,w,h,GLE_RGBA,GLE_UBYTE,cap);
                 static int wn; const char*home=getenv("HOME"); char p[512]; snprintf(p,sizeof p,"%s/reclaimer_win_%d_%03d%s.bmp",home?home:"/tmp",(int)getpid(),wn++, getenv("PELOAD_D3DGL_ALT5")?((((long)(mono_s()/5.0))&1)?"_B":"_A"):"");
                 bmp_write_rgba(p,w,h,cap); char m[160]; int k=snprintf(m,sizeof m,"  [d3dgl] win-shot -> %s (%dx%d)\n",p,w,h); (void)!write(2,m,k); free(cap); } } } }
@@ -6199,14 +6289,14 @@ static void pq_publish(void){
     if(g_pq_w!=W||g_pq_h!=H||!g_pq_tex[0]){ for(int i=0;i<3;i++){ if(!g_pq_tex[i]){ G.GenTextures(1,&g_pq_tex[i]); G.GenFramebuffers(1,&g_pq_fbo[i]); }
             TEXCACHE_INVALIDATE(); G.BindTexture(GLE_TEX2D,g_pq_tex[i]); G.TexImage2D(GLE_TEX2D,0,GLE_RGBA8,W,H,0,GLE_RGBA,GLE_UBYTE,0);
             G.TexParameteri(GLE_TEX2D,0x2801,GLE_LINEAR); G.TexParameteri(GLE_TEX2D,0x2800,GLE_LINEAR); G.TexParameteri(GLE_TEX2D,0x2802,GLE_CLAMP); G.TexParameteri(GLE_TEX2D,0x2803,GLE_CLAMP); G.TexParameteri(GLE_TEX2D,0x813D,0);
-            G.BindFramebuffer(GLE_FBO,g_pq_fbo[i]); G.FramebufferTexture2D(GLE_FBO,GLE_CA0,GLE_TEX2D,g_pq_tex[i],0); }
+            gl_bindfbo_any(GLE_FBO,g_pq_fbo[i]); G.FramebufferTexture2D(GLE_FBO,GLE_CA0,GLE_TEX2D,g_pq_tex[i],0); }
         g_pq_w=W; g_pq_h=H; }
     int vw=g_d3dgl_present_vw>0?g_d3dgl_present_vw:g_d3dgl_present_tw, vh=g_d3dgl_present_vh>0?g_d3dgl_present_vh:g_d3dgl_present_th;
     d3dgl_reset_raster_ops();
-    G.BindFramebuffer(0x8CA8,bb->glfbo); G.BindFramebuffer(0x8CA9,g_pq_fbo[slot]);
+    gl_bindfbo_any(0x8CA8,bb->glfbo); gl_bindfbo_any(0x8CA9,g_pq_fbo[slot]);
     // raw bytes (FRAMEBUFFER_SRGB off), scaled to the window; D3D row 0 (GL row 0) lands at the window TOP
     G.BlitFramebuffer(0,0,vw,vh, 0,H,W,0, 0x4000,0x2601/*LINEAR*/);
-    G.BindFramebuffer(GLE_FBO,0);
+    gl_bindfbo_any(GLE_FBO,0);
     void*f=pq_fencesync(0x9117/*SYNC_GPU_COMMANDS_COMPLETE*/,0); G.Flush();
     pthread_mutex_lock(&g_pq_mx); g_pq_fence[slot]=f; g_pq_latest=slot; g_pq_seq++; g_pq_frameno[slot]=g_eng_present_no; pthread_cond_signal(&g_pq_cv); pthread_mutex_unlock(&g_pq_mx); }
 // present thread: wait (up to ms) for a frame newer than *seen; draw it. Returns 1 if a frame was shown.
@@ -6226,7 +6316,7 @@ static int pq_present_wait(unsigned long*seen,int ms){
         g_pq_prog=G.CreateProgram(); G.AttachShader(g_pq_prog,v); G.AttachShader(g_pq_prog,fr); G.LinkProgram(g_pq_prog); G.DeleteShader(v); G.DeleteShader(fr);
         g_pq_sloc=G.GetUniformLocation(g_pq_prog,"s"); G.GenVertexArrays(1,&g_pq_vao); }
     CGLContextObj pc=CGLGetCurrentContext(); if(pc) CGLLockContext(pc);
-    G.BindFramebuffer(GLE_FBO,0); G.Disable(0x0B71); G.Disable(0x0BE2); G.Disable(0x0C11); G.Disable(0x8DB9);
+    gl_bindfbo_any(GLE_FBO,0); G.Disable(0x0B71); G.Disable(0x0BE2); G.Disable(0x0C11); G.Disable(0x8DB9);
     { int dw=g_win_pw>0?g_win_pw:g_d3dgl_W, dh=g_win_ph>0?g_win_ph:g_d3dgl_H;   // letterbox the frame's aspect into the window
       double ar=(double)g_d3dgl_W/g_d3dgl_H; int vw=dw, vh=(int)(dw/ar+0.5); if(vh>dh){ vh=dh; vw=(int)(dh*ar+0.5); }
       if(vw!=dw||vh!=dh){ G.Viewport(0,0,dw,dh); G.ClearColor(0,0,0,1); G.Clear(GLE_COLORBIT); }
@@ -6397,11 +6487,11 @@ static void d3dgl_present_impl(void){
         static unsigned long sc; int every=atoi(getenv("PELOAD_D3DGL_SHOT")); if(every<1)every=60;
         if((sc++ % every)==0){ int w=g_d3dgl_present_vw,h=g_d3dgl_present_vh; if(w>0&&h>0&&(long)w*h<=(64<<20)){
             unsigned char*cap=calloc(1,(size_t)w*h*4);
-            if(cap){ G.BindFramebuffer(GLE_FBO,g_d3d_backbuf->glfbo); if(G.ReadBuffer)G.ReadBuffer(GLE_CA0); if(G.GetError)G.GetError();
+            if(cap){ gl_bindfbo_any(GLE_FBO,g_d3d_backbuf->glfbo); if(G.ReadBuffer)G.ReadBuffer(GLE_CA0); if(G.GetError)G.GetError();
                 G.ReadPixels(0,0,w,h,GLE_RGBA,GLE_UBYTE,cap);
                 static int sn; const char*home=getenv("HOME"); char p[512]; snprintf(p,sizeof p,"%s/reclaimer_d3dgl_%03d.bmp",home?home:"/tmp",sn++);
                 bmp_write_rgba(p,w,h,cap); char m[200]; int k=snprintf(m,sizeof m,"  [d3dgl] shot -> %s (%dx%d)\n",p,w,h); (void)!write(2,m,k); free(cap);
-                G.BindFramebuffer(GLE_FBO,0); } } }
+                gl_bindfbo_any(GLE_FBO,0); } } }
     }
     if(g_d3dgl_trace){ static unsigned long pc; if((pc++ %120)==0){ char m[96]; int k=snprintf(m,sizeof m,"  [d3dgl] present #%lu draws/frame=%ld tex=%u %dx%d\n",pc,g_d3dgl_frame_draws,g_d3dgl_present_tex,g_d3dgl_present_vw,g_d3dgl_present_vh); (void)!write(2,m,k);} }
     // PELOAD_D3DGL_DUMP_RT: once ~90 presents in (so RTs have content), dump every distinct RT's
@@ -6410,12 +6500,12 @@ static void d3dgl_present_impl(void){
         if(pc2++>=90){ for(; g_rtdumped<g_nrtseen; g_rtdumped++){ D3DObj*rt=g_rtseen[g_rtdumped]; if(!rt||!rt->glfbo) continue;
             int w=rt->w>2048?2048:(int)rt->w, h=rt->h>2048?2048:(int)rt->h; if(w<1||h<1)continue; if((long)w*h>(16<<20))continue;
             unsigned char*cap=calloc(1,(size_t)w*h*4); if(!cap)continue;
-            G.BindFramebuffer(GLE_FBO,rt->glfbo); if(G.ReadBuffer)G.ReadBuffer(GLE_CA0); if(G.GetError)G.GetError();
+            gl_bindfbo_any(GLE_FBO,rt->glfbo); if(G.ReadBuffer)G.ReadBuffer(GLE_CA0); if(G.GetError)G.GetError();
             G.ReadPixels(0,0,w,h,GLE_RGBA,GLE_UBYTE,cap);
             unsigned long sum=0; for(long k=0;k<(long)w*h*4;k+=4) sum+=cap[k]+cap[k+1]+cap[k+2];
             const char*home=getenv("HOME"); char p[512]; snprintf(p,sizeof p,"%s/reclaimer_rt_%03d_%dx%d.bmp",home?home:"/tmp",g_rtdumped,(int)rt->w,(int)rt->h);
             bmp_write_rgba(p,w,h,cap); char m[220]; int k=snprintf(m,sizeof m,"  [d3dgl] RT dump %d: %dx%d rgbsum=%lu fmt=%u -> %s\n",g_rtdumped,(int)rt->w,(int)rt->h,sum,rt->fmt,p); (void)!write(2,m,k); free(cap); }
-            G.BindFramebuffer(GLE_FBO,0); } }
+            gl_bindfbo_any(GLE_FBO,0); } }
     hb_vis_tick();       // visible-only overlay: async depth readback (hitbox.c)
     hb_capture_tick();   // F8 / stats page: frame + depth + camera capture (hitbox.c)
     g_d3dgl_frame_draws=0;
@@ -6483,13 +6573,13 @@ static void d3dgl_selftest(void){
     if(g_d3d_backbuf && g_d3d_backbuf->glfbo && G.ReadPixels){
         int w=g_d3dgl_present_vw>0?g_d3dgl_present_vw:g_d3dgl_W, h=g_d3dgl_present_vh>0?g_d3dgl_present_vh:g_d3dgl_H;
         unsigned char*cap=calloc(1,(size_t)w*h*4);
-        if(cap){ G.BindFramebuffer(GLE_FBO,g_d3d_backbuf->glfbo); if(G.ReadBuffer)G.ReadBuffer(GLE_CA0); if(G.GetError)G.GetError();
+        if(cap){ gl_bindfbo_any(GLE_FBO,g_d3d_backbuf->glfbo); if(G.ReadBuffer)G.ReadBuffer(GLE_CA0); if(G.GetError)G.GetError();
             G.ReadPixels(0,0,w,h,GLE_RGBA,GLE_UBYTE,cap);
             unsigned long sum=0; for(long k=0;k<(long)w*h*4;k++) sum+=cap[k];
             const char*home=getenv("HOME"); char p[512]; snprintf(p,sizeof p,"%s/reclaimer_d3dgl_selftest.bmp",home?home:"/tmp");
             bmp_write_rgba(p,w,h,cap);
             char m[220]; int kk=snprintf(m,sizeof m,"  [d3dgl-selftest] %dx%d rendered via executor; pixelsum=%lu -> %s\n",w,h,sum,p); (void)!write(2,m,kk); free(cap);
-            G.BindFramebuffer(GLE_FBO,0); }
+            gl_bindfbo_any(GLE_FBO,0); }
     }
     ws("  [d3dgl-selftest] done\n");
 }
@@ -7502,6 +7592,7 @@ static uintptr_t MSABI i_beginthreadex(void*sec,unsigned stack,WinThreadProc sta
     uint32_t tid=0; void* h=i_CreateThread(sec,(uint64_t)stack,start,arg,initflag,&tid); if(thrdaddr)*thrdaddr=tid; return (uintptr_t)h; }
 static void MSABI i_endthreadex(unsigned code){ (void)code; pthread_exit(0); }
 static uintptr_t MSABI i_beginthread(WinThreadProc start,unsigned stack,void*arg){ uint32_t tid=0; return (uintptr_t)i_CreateThread(0,(uint64_t)stack,start,arg,0,&tid); }
+#include "d3dsubmit.c"
 #include "xaudio.c"
 #include "wasapi.c"
 #include "hitbox.c"
@@ -9027,10 +9118,37 @@ static int is_crt_dll(const char *d){
            !strcasecmp(d,"ucrtbased.dll");
 }
 
+// Big memcpy/memmove/memset go to the host's (Rosetta runs libsystem's memmove/memset natively: the
+// _platform_memmove$VARIANT$Rosetta in samples); vcruntime's own copy loop is translated x86 and halo3 copies its whole
+// game state with it every frame (halo3+0x13f23a: ~23% of the main thread in a 100-player game). Small sizes keep the
+// guest routine (no ms_abi -> SysV switch, which saves xmm6-15 on every call). A stub per function:
+//     cmp r8, [g_memcpy_min] ; jae big ; jmp guest ; big: jmp host
+// PELOAD_GUEST_MEMCPY=1 = old behavior; PELOAD_MEMCPY_MIN=<bytes> (default 2048).
+uint64_t g_memcpy_min=2048;   // PELOAD_AB=memcpy flips it to ~0 (guest routine for every size)
+static void* __attribute__((ms_abi,noinline)) crt_big_memmove(void*d,const void*s,size_t n){ return memmove(d,s,n); }
+static void* __attribute__((ms_abi,noinline)) crt_big_memset(void*d,int c,size_t n){ return memset(d,c,n); }
+static void* crt_fast_stub(const char*fn,void*guest){
+    if(getenv("PELOAD_GUEST_MEMCPY")) return guest;
+    void*host=!strcmp(fn,"memset")?(void*)crt_big_memset:(!strcmp(fn,"memcpy")||!strcmp(fn,"memmove"))?(void*)crt_big_memmove:0;
+    if(!host || !guest) return guest;
+    static uint8_t*pool; static int used; if(!pool){ pool=mmap(0,4096,PROT_READ|PROT_WRITE|PROT_EXEC,MAP_PRIVATE|MAP_ANON,-1,0); if(pool==MAP_FAILED){ pool=0; return guest; } }
+    if(used+64>4096) return guest;
+    const char*e=getenv("PELOAD_MEMCPY_MIN"); if(e) g_memcpy_min=strtoull(e,0,0);
+    uint8_t*p=pool+used; int o=0; used+=48; uint64_t*thr=&g_memcpy_min;
+    p[o++]=0x48;p[o++]=0xB8; memcpy(p+o,&thr,8); o+=8;                               // mov rax,&g_memcpy_min
+    p[o++]=0x4C;p[o++]=0x3B;p[o++]=0x00;                                             // cmp r8,[rax]
+    p[o++]=0x73;p[o++]=0x0C;                                                         // jae +12
+    p[o++]=0x48;p[o++]=0xB8; memcpy(p+o,&guest,8); o+=8; p[o++]=0xFF;p[o++]=0xE0;    // mov rax,guest ; jmp rax
+    p[o++]=0x48;p[o++]=0xB8; memcpy(p+o,&host,8); o+=8; p[o++]=0xFF;p[o++]=0xE0;     // mov rax,host ; jmp rax
+    sys_icache_invalidate(p,o); return p; }
+
 // unified resolver: CRT names -> guest exports; else native impl; else NULL
 static void *uni_resolve(const char *dll, const char *fn){
     if(is_crt_dll(dll)){
-        for(int m=0;m<g_nmods;m++){ void *r=export_lookup(g_mods[m].base, fn); if(r) return r; }
+        for(int m=0;m<g_nmods;m++){ void *r=export_lookup(g_mods[m].base, fn); if(r){
+                if(fn[0]=='m' && (!strcmp(fn,"memcpy")||!strcmp(fn,"memmove")||!strcmp(fn,"memset"))){ static void*cache[3][2];
+                    int k=fn[3]=='c'?0:fn[3]=='m'?1:2; if(cache[k][0]!=r){ cache[k][0]=r; cache[k][1]=crt_fast_stub(fn,r); } return cache[k][1]; }
+                return r; } }
     }
     // An import from another GUEST DLL that is already loaded (Waves' l360.dll/q10.dll import C++ classes from
     // WavesLibDLL.dll, loaded just before them) binds to that DLL's real export.
@@ -9081,7 +9199,7 @@ static void bind_imports(uint8_t *base, OPT64 *opt){
     for(; d->Name; d++){
         const char *dll=(char*)(base+d->Name);
         uint64_t *oft=(uint64_t*)(base+(d->OFT?d->OFT:d->FT)), *ft=(uint64_t*)(base+d->FT);
-        int trace = getenv("PELOAD_TRACE_ALL")!=0;
+        int trace = getenv("PELOAD_TRACE_ALL")!=0 || getenv("PELOAD_CALLCOUNT")!=0;
         int is_ws2 = name_is_ws2(dll); int is_xa = name_has(dll,"xaudio");
         for(int i=0; oft[i]; i++){
             const char *fn = (oft[i]>>63)? 0 : (char*)(base+(uint32_t)oft[i]+2);
@@ -9894,11 +10012,38 @@ static void net_selftest(const char* spec){
 // Every <us> microseconds each other thread is suspended and its x86 RIP read (thread_get_state works for
 // translated processes); every 10 s the top hotspots are printed: guest code as exe+RVA / halo3+RVA,
 // shim and system code via dladdr (shim statics: resolve offline with atos -o shim/build/peload).
-typedef struct { uint64_t rip; uint32_t cnt; uint32_t th; } SmpEnt;
+typedef struct { uint64_t key; uint32_t cnt; uint32_t th; uint64_t ret; } SmpEnt;   // ret: [rsp] when first seen (unknown code)
+enum { SMP_HALO3, SMP_EXE, SMP_SHIM, SMP_GL, SMP_METAL, SMP_SYS, SMP_NCLS };
+static const char*const g_smp_cls[SMP_NCLS]={"halo3","exe","loader","GL","Metal","system"};
+// the function a sample is in: guest code -> its .pdata entry (start), native code -> the dladdr symbol
+static uint64_t smp_func(uint64_t rip,int*cls){
+    if(rip>=0x140000000ULL&&rip<0x190000000ULL){ uint64_t b=0; RUNFN*f=i_RtlLookupFunctionEntry(rip,&b,0);
+        *cls=rip>=0x180000000ULL?SMP_HALO3:SMP_EXE; return f?b+f->Begin:rip; }
+    Dl_info di; if(dladdr((void*)rip,&di)){ const char*fn=di.dli_fname?di.dli_fname:"";
+        static uint64_t self_base; if(!self_base){ Dl_info me; if(dladdr((void*)smp_func,&me)) self_base=(uint64_t)me.dli_fbase; }
+        if((uint64_t)di.dli_fbase==self_base) *cls=SMP_SHIM;
+        else if(strstr(fn,"OpenGL")||strstr(fn,"GLEngine")||strstr(fn,"libGL")) *cls=SMP_GL;
+        else if(strstr(fn,"Metal")||strstr(fn,"AGX")||strstr(fn,"IOGPU")) *cls=SMP_METAL;
+        else *cls=SMP_SYS;
+        return di.dli_saddr?(uint64_t)di.dli_saddr:rip; }
+    *cls=SMP_SYS; return rip; }
+static void smp_name(uint64_t key,char*w,size_t n){ Dl_info di;
+    if(key>=0x140000000ULL&&key<0x150000000ULL) snprintf(w,n,"exe+0x%llx",(unsigned long long)(key-0x140000000ULL));
+    else if(key>=0x180000000ULL&&key<0x190000000ULL) snprintf(w,n,"halo3+0x%llx",(unsigned long long)(key-0x180000000ULL));
+    else if(dladdr((void*)key,&di)){ const char*f=di.dli_fname?(strrchr(di.dli_fname,'/')?strrchr(di.dli_fname,'/')+1:di.dli_fname):"?";
+        if(di.dli_sname) snprintf(w,n,"%s:%s",f,di.dli_sname); else snprintf(w,n,"%s+0x%llx",f,(unsigned long long)(key-(uint64_t)di.dli_fbase)); }
+    else { const char*pool=0; uint64_t base=0;   // the loader's generated code: say which pool
+        if(g_stubpool && key>=(uint64_t)g_stubpool && key<(uint64_t)g_stubpool+32*8192){ pool="import-stub"; base=(uint64_t)g_stubpool; }
+        else if(g_trpool && key>=(uint64_t)g_trpool && key<(uint64_t)g_trpool+96*8192){ pool="trace-stub"; base=(uint64_t)g_trpool; }
+        else if(g_glthunk && key>=(uint64_t)g_glthunk && key<(uint64_t)g_glthunk+128*8192){ pool="gl-thunk"; base=(uint64_t)g_glthunk; }
+        else if(g_hookpool && key>=(uint64_t)g_hookpool && key<(uint64_t)g_hookpool+(1<<20)){ pool="hook"; base=(uint64_t)g_hookpool; }
+        if(pool) snprintf(w,n,"%s+0x%llx",pool,(unsigned long long)(key-base)); else snprintf(w,n,"0x%llx",(unsigned long long)key); } }
+// Every <us> microseconds each other thread is suspended and its RIP read; every 10 s, for each busy thread: its name,
+// busy share, time per module class and its top functions (guest: function start RVA; shim statics: atos -o shim/build/peload).
 static void* sampler_thread(void*a){ (void)a; pthread_setname_np("shim-sampler");
     int us=atoi(getenv("PELOAD_SAMPLE")); if(us<200) us=1000;
-    static SmpEnt tab[65536]; uint64_t total=0; double tlast=mono_s();
-    static struct { thread_t t; uint64_t n, busy; } thr[64]; int nthr=0;
+    static SmpEnt tab[65536]; double tlast=mono_s();
+    static struct { thread_t t; uint64_t n, busy, cls[SMP_NCLS]; char name[64]; } thr[96]; int nthr=0;
     mach_port_t self=mach_thread_self();
     for(;;){
         thread_act_array_t th; mach_msg_type_number_t n=0;
@@ -9907,28 +10052,34 @@ static void* sampler_thread(void*a){ (void)a; pthread_setname_np("shim-sampler")
                 if(t!=self && thread_suspend(t)==KERN_SUCCESS){
                     x86_thread_state64_t st; mach_msg_type_number_t c=x86_THREAD_STATE64_COUNT;
                     int ok=thread_get_state(t,x86_THREAD_STATE64,(thread_state_t)&st,&c)==KERN_SUCCESS;
+                    // nothing that can take a lock while the thread is stopped (it may hold dyld's or malloc's): one stack read
+                    uint64_t rtop=0; if(ok && st.__rsp && !(st.__rsp&7)) rtop=*(volatile uint64_t*)st.__rsp;
                     thread_resume(t);
-                    if(ok){ uint64_t rip=st.__rip; int ti=-1; for(int k=0;k<nthr;k++) if(thr[k].t==t){ ti=k; break; } if(ti<0 && nthr<64){ ti=nthr++; thr[ti].t=t; thr[ti].n=thr[ti].busy=0; }
-                        Dl_info di; int idle=0; if(dladdr((void*)rip,&di) && di.dli_sname && (strstr(di.dli_sname,"mach_msg")||strstr(di.dli_sname,"__psynch")||strstr(di.dli_sname,"__semwait")||strstr(di.dli_sname,"nanosleep")||strstr(di.dli_sname,"__select")||strstr(di.dli_sname,"kevent")||strstr(di.dli_sname,"__wait4")||strstr(di.dli_sname,"__workq")||strstr(di.dli_sname,"pid_for_task")||!strcmp(di.dli_sname,"poll")||strstr(di.dli_sname,"__sigsuspend"))) idle=1;
-                        if(ti>=0){ thr[ti].n++; if(!idle) thr[ti].busy++; }
-                        if(!idle){ uint64_t key=rip>>4; uint32_t h=(uint32_t)(key*2654435761u)&65535;
-                            for(int pr=0;pr<64;pr++){ SmpEnt*e=&tab[(h+pr)&65535]; if(e->rip==0){ e->rip=rip&~15ULL; e->cnt=1; e->th=ti; break; } if(e->rip==(rip&~15ULL)){ e->cnt++; break; } }
-                            total++; } } }
+                    if(ok){ uint64_t rip=st.__rip; int ti=-1; for(int k=0;k<nthr;k++) if(thr[k].t==t){ ti=k; break; }
+                        if(ti<0 && nthr<96){ ti=nthr++; memset(&thr[ti],0,sizeof thr[ti]); thr[ti].t=t;
+                            pthread_t pt=pthread_from_mach_thread_np(t); if(pt) pthread_getname_np(pt,thr[ti].name,sizeof thr[ti].name);
+                            if(!thr[ti].name[0]) snprintf(thr[ti].name,sizeof thr[ti].name,"port%u",(unsigned)t); }
+                        Dl_info di; int idle=0; if(dladdr((void*)rip,&di) && di.dli_sname && (strstr(di.dli_sname,"mach_msg")||strstr(di.dli_sname,"__psynch")||strstr(di.dli_sname,"__semwait")||strstr(di.dli_sname,"nanosleep")||strstr(di.dli_sname,"__select")||strstr(di.dli_sname,"__workq")||strstr(di.dli_sname,"kevent")||strstr(di.dli_sname,"__ulock")||strstr(di.dli_sname,"__wait4")||strstr(di.dli_sname,"__recvfrom")||strstr(di.dli_sname,"__read_nocancel")||strstr(di.dli_sname,"__accept")||strstr(di.dli_sname,"__sigsuspend")||strstr(di.dli_sname,"poll"))) idle=1;
+                        if(ti>=0){ thr[ti].n++; if(!idle){ thr[ti].busy++; int cls=SMP_SYS; uint64_t key=smp_func(rip,&cls); thr[ti].cls[cls]++;
+                            uint32_t h=(uint32_t)((key>>2)*2654435761u ^ (uint32_t)ti*0x9E37u)&65535;
+                            for(int pr=0;pr<64;pr++){ SmpEnt*e=&tab[(h+pr)&65535]; if(e->key==0){ e->key=key; e->cnt=1; e->th=(uint32_t)ti; e->ret=(cls==SMP_SYS && key==rip)?rtop:0; break; } if(e->key==key && e->th==(uint32_t)ti){ e->cnt++; break; } } } } } }
                 mach_port_deallocate(mach_task_self(),t); }
             vm_deallocate(mach_task_self(),(vm_address_t)th,n*sizeof(thread_t)); }
         usleep(us);
-        if(mono_s()-tlast>=10.0){ tlast=mono_s();
-            char m[256]; int k=snprintf(m,sizeof m,"  [sample] ---- %llu busy samples; threads (busy/total):",(unsigned long long)total); (void)!write(2,m,k);
-            for(int i=0;i<nthr;i++) if(thr[i].busy>20){ k=snprintf(m,sizeof m," t%d=%llu/%llu",i,(unsigned long long)thr[i].busy,(unsigned long long)thr[i].n); (void)!write(2,m,k); } (void)!write(2,"\n",1);
-            for(int top=0;top<40;top++){ int bi=-1; uint32_t bc=0; for(int i=0;i<65536;i++) if(tab[i].cnt>bc){ bc=tab[i].cnt; bi=i; }
-                if(bi<0||bc<5) break; uint64_t rip=tab[bi].rip; Dl_info di; char where[160];
-                if(rip>=0x140000000ULL&&rip<0x150000000ULL) snprintf(where,sizeof where,"exe+0x%llx",(unsigned long long)(rip-0x140000000ULL));
-                else if(rip>=0x180000000ULL&&rip<0x190000000ULL) snprintf(where,sizeof where,"halo3+0x%llx",(unsigned long long)(rip-0x180000000ULL));
-                else if(dladdr((void*)rip,&di)) snprintf(where,sizeof where,"%s:%s+0x%llx",di.dli_fname?strrchr(di.dli_fname,'/')?strrchr(di.dli_fname,'/')+1:di.dli_fname:"?",di.dli_sname?di.dli_sname:"?",(unsigned long long)(di.dli_saddr?rip-(uint64_t)di.dli_saddr:0));
-                else snprintf(where,sizeof where,"0x%llx",(unsigned long long)rip);
-                k=snprintf(m,sizeof m,"  [sample] %5.1f%% t%u %s\n",100.0*bc/(total?total:1),tab[bi].th,where); (void)!write(2,m,k);
-                tab[bi].cnt=0; }   // (printed entries reset; counts restart for the next window)
-            memset(tab,0,sizeof tab); total=0; for(int i=0;i<nthr;i++){ thr[i].n=thr[i].busy=0; } } }
+        if(mono_s()-tlast>=10.0){ tlast=mono_s(); char m[1400]; int k;
+            for(int ti=0;ti<nthr;ti++){ if(!thr[ti].n || thr[ti].busy*20<thr[ti].n) continue;   // threads busy >= 5% of the time
+                k=snprintf(m,sizeof m,"  [sample] %-26s busy %3.0f%% |",thr[ti].name,100.0*thr[ti].busy/thr[ti].n);
+                for(int c=0;c<SMP_NCLS;c++) if(thr[ti].cls[c]*50>=thr[ti].busy) k+=snprintf(m+k,sizeof m-k," %s %.0f%%",g_smp_cls[c],100.0*thr[ti].cls[c]/thr[ti].busy);
+                m[k++]='\n'; (void)!write(2,m,k);
+                k=snprintf(m,sizeof m,"  [sample]   top:");
+                for(int top=0;top<8;top++){ int bi=-1; uint32_t bc=0; for(int i=0;i<65536;i++) if(tab[i].th==(uint32_t)ti && tab[i].cnt>bc){ bc=tab[i].cnt; bi=i; }
+                    if(bi<0 || bc*100<thr[ti].busy) break; char w[120]; smp_name(tab[bi].key,w,sizeof w); if(k>(int)sizeof m-320) break;
+                    k+=snprintf(m+k,sizeof m-k," %s %.1f%%,",w,100.0*bc/thr[ti].busy);
+                    if(tab[bi].ret){ char r[120]; smp_name(tab[bi].ret,r,sizeof r); k+=snprintf(m+k,sizeof m-k," (called from %s; code",r);
+                        for(int q=0;q<12;q++) k+=snprintf(m+k,sizeof m-k," %02x",((volatile uint8_t*)tab[bi].key)[q]); k+=snprintf(m+k,sizeof m-k,"),"); }
+                    tab[bi].cnt=0; }
+                m[k-1]='\n'; (void)!write(2,m,k); }
+            memset(tab,0,sizeof tab); for(int i=0;i<nthr;i++){ thr[i].n=thr[i].busy=0; memset(thr[i].cls,0,sizeof thr[i].cls); } } }
     return 0; }
 // PELOAD_STDERR_TEE=<file> / PELOAD_STDOUT_TEE=<file> (%p = pid): copy everything this process writes to stderr /
 // stdout into that file as well. For processes whose stdio another process owns, e.g. the dedicated server's

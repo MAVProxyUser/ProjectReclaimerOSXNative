@@ -290,14 +290,235 @@ static int cs_exec_thread_i(CsThread* T,long*budgetp){
     }
     *budgetp=budget; return 1; }
 
+// ---- SIMT executor: each instruction runs for up to 64 threads before the next one -------------------------------
+// The per-thread interpreter above decodes every operand of every instruction for every thread (~21 ns/instruction
+// under Rosetta; a 64-thread particle dispatch took ~235 us and the GL thread waited ~25% of its time for them).
+// Here an instruction is decoded once per 64 lanes and the lane loops are plain array work. Divergent control flow
+// uses execution masks: if/else/endif and loop/break/continue keep a mask stack, ret/retc retire lanes.
+// PELOAD_CS_SCALAR=1 = the per-thread interpreter; PELOAD_CS_CHECK=1 runs both on every dispatch and compares the UAVs.
+#define CSL 64
+typedef struct { const CsProg* p; CsCtx* c; int n; CsV4* r; CsV4* x; uint32_t tid[3][CSL], gid[3][CSL], ltid[3][CSL]; uint64_t mcur; int na; uint8_t act[CSL]; } CsGrp;
+// lane loops visit only the active lanes (most particle threads retire within a few instructions; the live ones run long)
+#define FORL for(int q_=0,l=0; q_<G->na && ((l=G->act[q_]),1); q_++)
+static inline void csg_setmask(CsGrp* G,uint64_t m){ if(m==G->mcur) return; G->mcur=m; int k=0; while(m){ int l=__builtin_ctzll(m); G->act[k++]=(uint8_t)l; m&=m-1; } G->na=k; }
+typedef struct { int kind; uint64_t saved, other, brk, cont; int pc; } CsCf;   // kind 0 if, 1 loop
+static inline int32_t csg_relidx(const CsGrp* G,const DgIdx* ix,int l){
+    int32_t v=(int32_t)ix->val;
+    if(ix->kind==1){ uint32_t comp=(uint32_t)(ix->rcomp&3);
+        if(ix->rtype==T_TEMP && (int)ix->rreg<G->p->ntemps) v+=G->r[(size_t)ix->rreg*CSL+l].i[comp];
+        else if(ix->rtype==T_INDEXABLE_TEMP){ uint32_t xr=ix->rreg&0xffff, xi=ix->rreg>>16;
+            for(int k=0;k<G->p->nx;k++) if(G->p->xreg[k]==xr && xi<G->p->xcount[k]) v+=G->x[(size_t)(G->p->xbase[k]+xi)*CSL+l].i[comp]; } }
+    return v; }
+static CsV4* csg_xref(const CsGrp* G,const DgOp* o,int l){
+    uint32_t xr=o->nidx?o->idx[0].val:0; int32_t i=o->nidx>1?csg_relidx(G,&o->idx[1],l):0;
+    for(int k=0;k<G->p->nx;k++) if(G->p->xreg[k]==xr){ if(i<0||(uint32_t)i>=G->p->xcount[k]) return 0; return &G->x[(size_t)(G->p->xbase[k]+(uint32_t)i)*CSL+l]; }
+    return 0; }
+// source operand for lanes 0..n-1 (raw bits, swizzled, NEG/ABS as float or int per isint)
+static void csg_src(const CsGrp* G,const DgOp* o,int isint,CsV4* out){
+    int n=G->n;
+    switch(o->type){
+    case T_TEMP: if(o->nidx && (int)o->idx[0].val<G->p->ntemps){ const CsV4* src=&G->r[(size_t)o->idx[0].val*CSL]; if(G->na==n) memcpy(out,src,(size_t)n*sizeof(CsV4)); else FORL out[l]=src[l]; } else FORL memset(&out[l],0,16); break;
+    case T_IMM32: { CsV4 v; if(o->immn==1) v.u[0]=v.u[1]=v.u[2]=v.u[3]=o->imm[0]; else for(int k=0;k<4;k++) v.u[k]=o->imm[k]; FORL out[l]=v; } break;
+    case T_CB: { uint32_t b=o->nidx?o->idx[0].val:0; const uint8_t* cb=b<16?G->c->cb[b]:0; uint32_t sz=b<16?G->c->cbsz[b]:0;
+        if(o->nidx>1 && o->idx[1].kind==1){ FORL { int32_t i=csg_relidx(G,&o->idx[1],l);
+                if(cb && i>=0 && (uint64_t)(i+1)*16<=sz) memcpy(&out[l],cb+(size_t)i*16,16); else memset(&out[l],0,16); } }
+        else { int32_t i=o->nidx>1?(int32_t)o->idx[1].val:0; CsV4 v; memset(&v,0,sizeof v); if(cb && i>=0 && (uint64_t)(i+1)*16<=sz) memcpy(&v,cb+(size_t)i*16,16); FORL out[l]=v; } } break;
+    case T_ICB: if(o->nidx && o->idx[0].kind==1){ FORL { int32_t i=csg_relidx(G,&o->idx[0],l); if(i>=0 && i*4+4<=G->p->icbn) memcpy(&out[l],&G->p->icb[i*4],16); else memset(&out[l],0,16); } }
+        else { int32_t i=o->nidx?(int32_t)o->idx[0].val:0; CsV4 v; memset(&v,0,sizeof v); if(i>=0 && i*4+4<=G->p->icbn) memcpy(&v,&G->p->icb[i*4],16); FORL out[l]=v; } break;
+    case T_INDEXABLE_TEMP: FORL { CsV4* p=csg_xref(G,o,l); if(p) out[l]=*p; else memset(&out[l],0,16); } break;
+    case 32: FORL { out[l].u[0]=G->tid[0][l]; out[l].u[1]=G->tid[1][l]; out[l].u[2]=G->tid[2][l]; out[l].u[3]=0; } break;
+    case 33: FORL { out[l].u[0]=G->gid[0][l]; out[l].u[1]=G->gid[1][l]; out[l].u[2]=G->gid[2][l]; out[l].u[3]=0; } break;
+    case 34: FORL { out[l].u[0]=G->ltid[0][l]; out[l].u[1]=G->ltid[1][l]; out[l].u[2]=G->ltid[2][l]; out[l].u[3]=0; } break;
+    case 35: FORL { uint32_t f=G->ltid[0][l]+G->ltid[1][l]*G->p->tg[0]+G->ltid[2][l]*G->p->tg[0]*G->p->tg[1]; out[l].u[0]=out[l].u[1]=out[l].u[2]=out[l].u[3]=f; } break;
+    default: FORL memset(&out[l],0,16); break; }
+    if(o->numc==2){ const uint8_t* sw=o->csw; if(!(sw[0]==0&&sw[1]==1&&sw[2]==2&&sw[3]==3)) FORL { CsV4 v=out[l]; out[l].u[0]=v.u[sw[0]]; out[l].u[1]=v.u[sw[1]]; out[l].u[2]=v.u[sw[2]]; out[l].u[3]=v.u[sw[3]]; } }
+    else if(o->numc==1){ FORL out[l].u[1]=out[l].u[2]=out[l].u[3]=out[l].u[0]; }
+    if(o->emod&2){ if(isint){ FORL for(int k=0;k<4;k++) out[l].i[k]=out[l].i[k]<0?-out[l].i[k]:out[l].i[k]; } else { FORL for(int k=0;k<4;k++) out[l].u[k]&=0x7fffffffu; } }
+    if(o->emod&1){ if(isint){ FORL for(int k=0;k<4;k++) out[l].i[k]=-out[l].i[k]; } else { FORL for(int k=0;k<4;k++) out[l].u[k]^=0x80000000u; } } }
+static void csg_dst(CsGrp* G,const DgOp* o,CsV4* v,int sat,uint64_t m){
+    (void)m; if(o->type==T_NULL) return; int n=G->n; int wm=o->mask?o->mask:0xf;
+    if(sat) FORL for(int k=0;k<4;k++){ float f=v[l].f[k]; v[l].f[k]=(f>0.0f)?(f<1.0f?f:1.0f):0.0f; }   // NaN -> 0
+    if(o->type==T_TEMP){ if(!o->nidx || (int)o->idx[0].val>=G->p->ntemps) return; CsV4* d=&G->r[(size_t)o->idx[0].val*CSL];
+        if(G->na==n && wm==0xf){ memcpy(d,v,(size_t)n*sizeof(CsV4)); return; }
+        if(wm==0xf) FORL d[l]=v[l]; else FORL for(int k=0;k<4;k++) if(wm&(1<<k)) d[l].u[k]=v[l].u[k]; }
+    else if(o->type==T_INDEXABLE_TEMP){ FORL { CsV4* d=csg_xref(G,o,l); if(d) for(int k=0;k<4;k++) if(wm&(1<<k)) d->u[k]=v[l].u[k]; } } }
+static uint64_t csg_lanes_true(const CsGrp* G,const CsV4* a,int test){ uint64_t t=0; FORL if((a[l].u[0]!=0)==(test!=0)) t|=1ull<<l; return t; }
+static CsCf* csg_innerloop(CsCf* st,int sp){ for(int i=sp-1;i>=0;i--) if(st[i].kind==1) return &st[i]; return 0; }
+static uint64_t csg_loopout(CsCf* st,int sp){ CsCf* L=csg_innerloop(st,sp); return L?(L->brk|L->cont):0; }
+static int cs_exec_group(CsGrp* G,long* budgetp){
+    const CsProg* p=G->p; const DgIns* in=p->ins; int nins=p->nins, n=G->n;
+    uint64_t full=n==64?~0ull:((1ull<<n)-1), m=full, done=0;
+    CsCf st[64]; int sp=0; long budget=*budgetp;
+    CsV4 A[CSL],B[CSL],C[CSL],D[CSL],R[CSL],R2[CSL];
+    #define LOOPL FORL
+    #define F1 csg_src(G,&o[1],0,A)
+    #define F2 csg_src(G,&o[1],0,A); csg_src(G,&o[2],0,B)
+    #define F3 csg_src(G,&o[1],0,A); csg_src(G,&o[2],0,B); csg_src(G,&o[3],0,C)
+    #define U1 csg_src(G,&o[1],1,A)
+    #define U2 csg_src(G,&o[1],1,A); csg_src(G,&o[2],1,B)
+    #define U3 csg_src(G,&o[1],1,A); csg_src(G,&o[2],1,B); csg_src(G,&o[3],1,C)
+    #define OUT(s) csg_dst(G,&o[0],R,(s),m)
+    for(int pc=0; pc<nins; pc++){
+        if(--budget<0){ *budgetp=budget; return 0; }
+        const DgIns* I=&in[pc]; int op=I->op; const DgOp* o=I->ops; int sat=(op<88)&&((I->tok>>13)&1);
+        csg_setmask(G,m);
+        switch(op){   // control flow runs even with no lane active (it keeps the mask stack balanced)
+        case 31: { uint64_t t=0; if(m){ csg_src(G,&o[0],1,A); t=csg_lanes_true(G,A,I->test)&m; }
+            if(sp<64){ st[sp].kind=0; st[sp].saved=m; st[sp].other=m&~t; sp++; } m=t;
+            if(!m) pc=p->jump[pc]-1;   // no lane takes it: straight to its else / endif
+            continue; }
+        case 18: if(sp && st[sp-1].kind==0){ m=st[sp-1].other&~done&~csg_loopout(st,sp-1); if(!m) pc=p->jump[pc]-1; } continue;   // empty else: to endif
+        case 21: if(sp && st[sp-1].kind==0){ sp--; m=st[sp].saved&~done&~csg_loopout(st,sp); } continue;
+        case 48: if(!m){ pc=p->jump[pc]; continue; }   // nobody enters: past endloop
+            if(sp<64){ st[sp].kind=1; st[sp].saved=m; st[sp].brk=st[sp].cont=0; st[sp].pc=pc; sp++; } continue;
+        case 22: if(sp && st[sp-1].kind==1){ CsCf* L=&st[sp-1]; uint64_t again=(m|L->cont)&~done&~L->brk;
+                if(again){ m=again; L->cont=0; pc=L->pc; } else { m=L->saved&~done; sp--; } } continue;
+        case 2: { CsCf* L=csg_innerloop(st,sp); if(L) L->brk|=m; m=0; } goto cf_left;
+        case 3: if(m){ csg_src(G,&o[0],1,A); uint64_t c=csg_lanes_true(G,A,I->test)&m; CsCf* L=csg_innerloop(st,sp); if(L) L->brk|=c; m&=~c; } goto cf_left;
+        case 7: { CsCf* L=csg_innerloop(st,sp); if(L) L->cont|=m; m=0; } goto cf_left;
+        case 8: if(m){ csg_src(G,&o[0],1,A); uint64_t c=csg_lanes_true(G,A,I->test)&m; CsCf* L=csg_innerloop(st,sp); if(L) L->cont|=c; m&=~c; } goto cf_left;
+        cf_left:   // every lane left the loop body and nothing between here and the loop's endloop can bring one back
+            if(!m && sp && st[sp-1].kind==1) pc=p->jump[st[sp-1].pc]-1;
+            continue;
+        case 62: done|=m; m=0; if((done&full)==full){ *budgetp=budget; return 1; } continue;
+        case 63: if(m){ csg_src(G,&o[0],1,A); uint64_t c=csg_lanes_true(G,A,I->test)&m; done|=c; m&=~c; if((done&full)==full){ *budgetp=budget; return 1; } } continue;
+        case 13: continue;
+        default: break; }
+        if(!m) continue;
+        switch(op){
+        // ---- float ALU ----
+        case 0: F2; LOOPL for(int k=0;k<4;k++) R[l].f[k]=A[l].f[k]+B[l].f[k]; OUT(sat); break;
+        case 56: F2; LOOPL for(int k=0;k<4;k++) R[l].f[k]=A[l].f[k]*B[l].f[k]; OUT(sat); break;
+        case 50: F3; LOOPL for(int k=0;k<4;k++) R[l].f[k]=A[l].f[k]*B[l].f[k]+C[l].f[k]; OUT(sat); break;
+        case 14: F2; LOOPL for(int k=0;k<4;k++) R[l].f[k]=A[l].f[k]/B[l].f[k]; OUT(sat); break;
+        case 51: F2; LOOPL for(int k=0;k<4;k++) R[l].f[k]=fminf(A[l].f[k],B[l].f[k]); OUT(sat); break;
+        case 52: F2; LOOPL for(int k=0;k<4;k++) R[l].f[k]=fmaxf(A[l].f[k],B[l].f[k]); OUT(sat); break;
+        case 75: F1; LOOPL for(int k=0;k<4;k++) R[l].f[k]=sqrtf(A[l].f[k]); OUT(sat); break;
+        case 68: F1; LOOPL for(int k=0;k<4;k++) R[l].f[k]=1.0f/sqrtf(A[l].f[k]); OUT(sat); break;
+        case 129: F1; LOOPL for(int k=0;k<4;k++) R[l].f[k]=1.0f/A[l].f[k]; OUT(sat); break;
+        case 25: F1; LOOPL for(int k=0;k<4;k++) R[l].f[k]=exp2f(A[l].f[k]); OUT(sat); break;
+        case 47: F1; LOOPL for(int k=0;k<4;k++) R[l].f[k]=log2f(A[l].f[k]); OUT(sat); break;
+        case 26: F1; LOOPL for(int k=0;k<4;k++) R[l].f[k]=A[l].f[k]-floorf(A[l].f[k]); OUT(sat); break;
+        case 64: F1; LOOPL for(int k=0;k<4;k++) R[l].f[k]=rintf(A[l].f[k]); OUT(sat); break;
+        case 65: F1; LOOPL for(int k=0;k<4;k++) R[l].f[k]=floorf(A[l].f[k]); OUT(sat); break;
+        case 66: F1; LOOPL for(int k=0;k<4;k++) R[l].f[k]=ceilf(A[l].f[k]); OUT(sat); break;
+        case 67: F1; LOOPL for(int k=0;k<4;k++) R[l].f[k]=truncf(A[l].f[k]); OUT(sat); break;
+        case 15: F2; LOOPL { float d=A[l].f[0]*B[l].f[0]+A[l].f[1]*B[l].f[1]; R[l].f[0]=R[l].f[1]=R[l].f[2]=R[l].f[3]=d; } OUT(sat); break;
+        case 16: F2; LOOPL { float d=A[l].f[0]*B[l].f[0]+A[l].f[1]*B[l].f[1]+A[l].f[2]*B[l].f[2]; R[l].f[0]=R[l].f[1]=R[l].f[2]=R[l].f[3]=d; } OUT(sat); break;
+        case 17: F2; LOOPL { float d=A[l].f[0]*B[l].f[0]+A[l].f[1]*B[l].f[1]+A[l].f[2]*B[l].f[2]+A[l].f[3]*B[l].f[3]; R[l].f[0]=R[l].f[1]=R[l].f[2]=R[l].f[3]=d; } OUT(sat); break;
+        case 77: csg_src(G,&o[2],0,A); LOOPL for(int k=0;k<4;k++){ R[l].f[k]=sinf(A[l].f[k]); R2[l].f[k]=cosf(A[l].f[k]); } csg_dst(G,&o[0],R,sat,m); csg_dst(G,&o[1],R2,sat,m); break;
+        case 54: F1; csg_dst(G,&o[0],A,sat,m); break;                                                     // mov (bits)
+        case 55: csg_src(G,&o[1],1,A); csg_src(G,&o[2],0,B); csg_src(G,&o[3],0,C); LOOPL for(int k=0;k<4;k++) R[l].u[k]=A[l].u[k]?B[l].u[k]:C[l].u[k]; OUT(sat); break;  // movc
+        case 49: F2; LOOPL for(int k=0;k<4;k++) R[l].u[k]=A[l].f[k]<B[l].f[k]?~0u:0; OUT(0); break;
+        case 29: F2; LOOPL for(int k=0;k<4;k++) R[l].u[k]=A[l].f[k]>=B[l].f[k]?~0u:0; OUT(0); break;
+        case 24: F2; LOOPL for(int k=0;k<4;k++) R[l].u[k]=A[l].f[k]==B[l].f[k]?~0u:0; OUT(0); break;
+        case 57: F2; LOOPL for(int k=0;k<4;k++) R[l].u[k]=A[l].f[k]!=B[l].f[k]?~0u:0; OUT(0); break;
+        case 11: case 12: case 122: case 123: case 124: case 125: LOOPL memset(&R[l],0,16); OUT(sat); break;   // derivatives: 0
+        case 131: U1; LOOPL for(int k=0;k<4;k++) R[l].u[k]=cs_h2f_bits(A[l].u[k]&0xffff); OUT(sat); break;   // f16tof32
+        case 130: F1; LOOPL for(int k=0;k<4;k++) R[l].u[k]=cs_f2h(A[l].f[k]); OUT(0); break;                 // f32tof16
+        // ---- integer ALU ----
+        case 30: U2; LOOPL for(int k=0;k<4;k++) R[l].u[k]=A[l].u[k]+B[l].u[k]; OUT(0); break;
+        case 38: if(I->nop>3){ csg_src(G,&o[2],1,A); csg_src(G,&o[3],1,B); LOOPL for(int k=0;k<4;k++){ int64_t mm=(int64_t)A[l].i[k]*B[l].i[k]; R[l].i[k]=(int32_t)mm; R2[l].i[k]=(int32_t)(mm>>32); } csg_dst(G,&o[0],R2,0,m); csg_dst(G,&o[1],R,0,m); } break;
+        case 81: if(I->nop>3){ csg_src(G,&o[2],1,A); csg_src(G,&o[3],1,B); LOOPL for(int k=0;k<4;k++){ uint64_t mm=(uint64_t)A[l].u[k]*B[l].u[k]; R[l].u[k]=(uint32_t)mm; R2[l].u[k]=(uint32_t)(mm>>32); } csg_dst(G,&o[0],R2,0,m); csg_dst(G,&o[1],R,0,m); } break;
+        case 78: if(I->nop>3){ csg_src(G,&o[2],1,A); csg_src(G,&o[3],1,B); LOOPL for(int k=0;k<4;k++){ R2[l].u[k]=B[l].u[k]?A[l].u[k]/B[l].u[k]:~0u; R[l].u[k]=B[l].u[k]?A[l].u[k]%B[l].u[k]:~0u; } csg_dst(G,&o[0],R2,0,m); csg_dst(G,&o[1],R,0,m); } break;
+        case 35: case 82: U3; LOOPL for(int k=0;k<4;k++) R[l].u[k]=A[l].u[k]*B[l].u[k]+C[l].u[k]; OUT(0); break;
+        case 36: U2; LOOPL for(int k=0;k<4;k++) R[l].i[k]=A[l].i[k]>B[l].i[k]?A[l].i[k]:B[l].i[k]; OUT(0); break;
+        case 37: U2; LOOPL for(int k=0;k<4;k++) R[l].i[k]=A[l].i[k]<B[l].i[k]?A[l].i[k]:B[l].i[k]; OUT(0); break;
+        case 83: U2; LOOPL for(int k=0;k<4;k++) R[l].u[k]=A[l].u[k]>B[l].u[k]?A[l].u[k]:B[l].u[k]; OUT(0); break;
+        case 84: U2; LOOPL for(int k=0;k<4;k++) R[l].u[k]=A[l].u[k]<B[l].u[k]?A[l].u[k]:B[l].u[k]; OUT(0); break;
+        case 40: U1; LOOPL for(int k=0;k<4;k++) R[l].i[k]=-A[l].i[k]; OUT(0); break;
+        case 41: U2; LOOPL for(int k=0;k<4;k++) R[l].u[k]=A[l].u[k]<<(B[l].u[k]&31); OUT(0); break;
+        case 42: U2; LOOPL for(int k=0;k<4;k++) R[l].i[k]=A[l].i[k]>>(B[l].u[k]&31); OUT(0); break;
+        case 85: U2; LOOPL for(int k=0;k<4;k++) R[l].u[k]=A[l].u[k]>>(B[l].u[k]&31); OUT(0); break;
+        case 1: U2; LOOPL for(int k=0;k<4;k++) R[l].u[k]=A[l].u[k]&B[l].u[k]; OUT(0); break;
+        case 60: U2; LOOPL for(int k=0;k<4;k++) R[l].u[k]=A[l].u[k]|B[l].u[k]; OUT(0); break;
+        case 87: U2; LOOPL for(int k=0;k<4;k++) R[l].u[k]=A[l].u[k]^B[l].u[k]; OUT(0); break;
+        case 59: U1; LOOPL for(int k=0;k<4;k++) R[l].u[k]=~A[l].u[k]; OUT(0); break;
+        case 32: U2; LOOPL for(int k=0;k<4;k++) R[l].u[k]=A[l].u[k]==B[l].u[k]?~0u:0; OUT(0); break;
+        case 39: U2; LOOPL for(int k=0;k<4;k++) R[l].u[k]=A[l].u[k]!=B[l].u[k]?~0u:0; OUT(0); break;
+        case 34: U2; LOOPL for(int k=0;k<4;k++) R[l].u[k]=A[l].i[k]<B[l].i[k]?~0u:0; OUT(0); break;
+        case 33: U2; LOOPL for(int k=0;k<4;k++) R[l].u[k]=A[l].i[k]>=B[l].i[k]?~0u:0; OUT(0); break;
+        case 79: U2; LOOPL for(int k=0;k<4;k++) R[l].u[k]=A[l].u[k]<B[l].u[k]?~0u:0; OUT(0); break;
+        case 80: U2; LOOPL for(int k=0;k<4;k++) R[l].u[k]=A[l].u[k]>=B[l].u[k]?~0u:0; OUT(0); break;
+        case 43: U1; LOOPL for(int k=0;k<4;k++) R[l].f[k]=(float)A[l].i[k]; OUT(sat); break;   // itof
+        case 86: U1; LOOPL for(int k=0;k<4;k++) R[l].f[k]=(float)A[l].u[k]; OUT(sat); break;   // utof
+        case 27: F1; LOOPL for(int k=0;k<4;k++){ float f=A[l].f[k]; R[l].i[k]= f!=f?0 : f>=2147483647.0f?0x7fffffff : f<=-2147483648.0f?(int32_t)0x80000000 : (int32_t)f; } OUT(0); break;   // ftoi
+        case 28: F1; LOOPL for(int k=0;k<4;k++){ float f=A[l].f[k]; R[l].u[k]= (f!=f||f<=0)?0 : f>=4294967295.0f?0xffffffffu : (uint32_t)f; } OUT(0); break;  // ftou
+        case 138: case 139: U3; LOOPL for(int k=0;k<4;k++){ uint32_t w=A[l].u[k]&31, of=B[l].u[k]&31, cv=C[l].u[k];   // ubfe/ibfe width, offset, src
+                if(!w){ R[l].u[k]=0; continue; } if(w+of<32){ if(op==138) R[l].u[k]=(cv<<(32-w-of))>>(32-w); else R[l].i[k]=(int32_t)(cv<<(32-w-of))>>(32-w); }
+                else { if(op==138) R[l].u[k]=cv>>of; else R[l].i[k]=(int32_t)cv>>of; } } OUT(0); break;
+        case 140: U3; csg_src(G,&o[4],1,D); LOOPL for(int k=0;k<4;k++){ uint32_t W=A[l].u[k]&31, O=B[l].u[k]&31; uint32_t mask=(W==32?~0u:(((1u<<W)-1)<<O)); R[l].u[k]=((C[l].u[k]<<O)&mask)|(D[l].u[k]&~mask); } OUT(0); break;
+        case 134: U1; LOOPL for(int k=0;k<4;k++) R[l].u[k]=(uint32_t)__builtin_popcount(A[l].u[k]); OUT(0); break;
+        // ---- memory ----
+        case 167: case 165: {   // ld_structured dst, idx, byteoff, t#/u#  |  ld_raw dst, byteaddr, t#/u#
+            int ri=op==167?3:2; const DgOp* ro=&o[ri]; uint32_t reg=ro->nidx?ro->idx[0].val:0;
+            D3DObj* res=0; uint32_t stride=4;
+            if(ro->type==30/*UAV*/){ if(reg<8){ res=cs_res(G->c->uav[reg]); stride=p->uavstride[reg]; } }
+            else if(ro->type==T_RESOURCE){ if(reg<32){ res=cs_res(G->c->srv[reg]); stride=p->srvstride[reg]; } }
+            U1; if(op==167) csg_src(G,&o[2],1,B);
+            LOOPL { uint64_t addr= op==167 ? (uint64_t)A[l].u[0]*stride+B[l].u[0] : A[l].u[0]; CsV4 raw4;
+                for(int k=0;k<4;k++) raw4.u[k]= res? cs_rd_u32(res->data,res->size,addr+4u*k) : 0;
+                for(int k=0;k<4;k++) R[l].u[k]=raw4.u[ro->csw[k]]; }
+            OUT(0); } break;
+        case 168: case 166: {   // store_structured u#.mask, idx, byteoff, src  |  store_raw u#.mask, byteaddr, src (lanes in order)
+            uint32_t reg=o[0].nidx?o[0].idx[0].val:0; if(reg>=8) break; D3DObj* res=cs_res(G->c->uav[reg]); if(!res||!res->data) break;
+            U1; if(op==168){ csg_src(G,&o[2],1,B); csg_src(G,&o[3],1,C); } else csg_src(G,&o[2],1,C);
+            int wm=o[0].mask?o[0].mask:1;
+            FORL { uint64_t addr= op==168 ? (uint64_t)A[l].u[0]*p->uavstride[reg]+B[l].u[0] : A[l].u[0]; int j=0;
+                for(int k=0;k<4;k++) if(wm&(1<<k)){ uint64_t off=addr+4u*(uint64_t)j++; if(off+4<=res->size) memcpy((uint8_t*)res->data+off,&C[l].u[k],4); } }
+            } break;
+        case 72: case 69: case 74: {   // sample_l / sample / sample_b dst, uv, t#, s#, lod  (mip 0, bilinear)
+            F1; uint32_t tr=o[2].nidx?o[2].idx[0].val:0, sr=o[3].nidx?o[3].idx[0].val:0; D3DObj* s=sr<16?G->c->samp[sr]:0;
+            LOOPL { float px[4]; if(tr<32) cs_sample(G->c->tpx[tr],G->c->tw[tr],G->c->th[tr],s,A[l].f[0],A[l].f[1],px); else memset(px,0,sizeof px); CsV4 v; memcpy(&v,px,16);
+                for(int k=0;k<4;k++) R[l].u[k]=v.u[o[2].csw[k]]; }
+            OUT(sat); } break;
+        case 45: {   // ld dst, int addr, t#
+            U1; uint32_t tr=o[2].nidx?o[2].idx[0].val:0; int W=tr<32?G->c->tw[tr]:0,H=tr<32?G->c->th[tr]:0; const float* px=tr<32?G->c->tpx[tr]:0;
+            LOOPL { CsV4 v; memset(&v,0,sizeof v); if(px && A[l].i[0]>=0 && A[l].i[1]>=0 && A[l].i[0]<W && A[l].i[1]<H) memcpy(&v,px+((size_t)A[l].i[1]*W+A[l].i[0])*4,16);
+                for(int k=0;k<4;k++) R[l].u[k]=v.u[o[2].csw[k]]; }
+            OUT(sat); } break;
+        default:
+            if(op>=88 && op<=106) break;       // declarations
+            if(op==53||op==58||op>=143) break; // customdata, nop, SM5 dcls
+            *budgetp=budget; return -op;       // unsupported instruction
+        }
+    }
+    #undef LOOPL
+    #undef F1
+    #undef F2
+    #undef F3
+    #undef U1
+    #undef U2
+    #undef U3
+    #undef OUT
+    *budgetp=budget; return 1; }
+
 // Run Dispatch(gx,gy,gz). Returns threads run, or <0 = -opcode of an unsupported instruction.
 // Threads are independent (no group-shared memory in these kernels), so the thread range is split into
 // chunks that can run in parallel with GCD (PELOAD_CS_PARALLEL; measured no gain for 64-thread dispatches,
 // so serial is the default). Each chunk has its own registers.
 #include <dispatch/dispatch.h>
-typedef struct { CsProg* p; CsCtx* c; uint32_t gx,gy,gz; uint64_t total; uint32_t chunks; volatile long ran; volatile long bad; long tmax,tsum,tbusy; } CsJob;
+typedef struct { CsProg* p; CsCtx* c; uint32_t gx,gy,gz; uint64_t total; uint32_t chunks; volatile long ran; volatile long bad; long tmax,tsum,tbusy; int scalar; } CsJob;
+static int cs_scalar(void){ static int s=-1; if(s<0) s=getenv("PELOAD_CS_SCALAR")?1:0; return s; }
+static void cs_chunk_simt(CsJob* J,uint64_t lo,uint64_t hi){
+    CsProg* p=J->p; int nr=p->ntemps>0?p->ntemps:1, nx=p->xtotal>0?p->xtotal:1;
+    CsV4* r=calloc((size_t)nr*CSL,sizeof(CsV4)); CsV4* x=calloc((size_t)nx*CSL,sizeof(CsV4)); CsGrp* G=calloc(1,sizeof(CsGrp)); if(!r||!x||!G){ free(r); free(x); free(G); return; }
+    G->p=p; G->c=J->c; G->r=r; G->x=x;
+    uint32_t tgn=p->tg[0]*p->tg[1]*p->tg[2];
+    for(uint64_t base=lo; base<hi; base+=CSL){
+        int n=(int)(hi-base<CSL?hi-base:CSL); G->n=n; G->mcur=0; G->na=0;
+        for(int l=0;l<n;l++){ uint64_t i=base+(uint64_t)l, g=i/tgn, li=i%tgn;
+            uint32_t gi=(uint32_t)(g%J->gx), gj=(uint32_t)((g/J->gx)%J->gy), gk=(uint32_t)(g/((uint64_t)J->gx*J->gy));
+            uint32_t a=(uint32_t)(li%p->tg[0]), b=(uint32_t)((li/p->tg[0])%p->tg[1]), c=(uint32_t)(li/((uint64_t)p->tg[0]*p->tg[1]));
+            G->gid[0][l]=gi; G->gid[1][l]=gj; G->gid[2][l]=gk; G->ltid[0][l]=a; G->ltid[1][l]=b; G->ltid[2][l]=c;
+            G->tid[0][l]=gi*p->tg[0]+a; G->tid[1][l]=gj*p->tg[1]+b; G->tid[2][l]=gk*p->tg[2]+c; }
+        memset(r,0,(size_t)nr*CSL*sizeof(CsV4)); memset(x,0,(size_t)nx*CSL*sizeof(CsV4));
+        long budget=4000000; int rc=cs_exec_group(G,&budget); g_cs_instrs+=(4000000-budget)*(long)n;
+        if(rc<0){ J->bad=rc; break; } __sync_fetch_and_add(&J->ran,n); }
+    free(r); free(x); free(G); }
 static void cs_chunk(void* ctx,size_t ci){
     CsJob* J=ctx; CsProg* p=J->p; uint64_t per=(J->total+J->chunks-1)/J->chunks, lo=ci*per, hi=lo+per; if(hi>J->total) hi=J->total; if(lo>=hi) return;
+    if(!J->scalar){ cs_chunk_simt(J,lo,hi); return; }
     int nr=p->ntemps>0?p->ntemps:1; CsV4* r=calloc((size_t)nr,sizeof(CsV4)); CsV4* x=calloc((size_t)(p->xtotal>0?p->xtotal:1),sizeof(CsV4)); if(!r||!x){ free(r); free(x); return; }
     CsThread T; memset(&T,0,sizeof T); T.p=p; T.c=J->c; T.r=r; T.x=x;
     uint32_t tgn=p->tg[0]*p->tg[1]*p->tg[2];
@@ -320,7 +541,25 @@ static long cs_dispatch(CsProg*p,CsCtx*c,uint32_t gx,uint32_t gy,uint32_t gz){
         if(t && t->kind>=2 && t->kind<=4 && t->w && p->usestex) c->tpx[i]=cs_tex_rgba(t,&c->tw[i],&c->th[i]); }
     static int serial=-1; if(serial<0) serial=getenv("PELOAD_CS_PARALLEL")?0:1;   // 64-thread dispatches: GCD fan-out costs more than it saves
     J.chunks = serial||J.total<32 ? 1 : (uint32_t)(J.total/16 < 8 ? J.total/16 : 8);
-    if(J.chunks<=1){ J.chunks=1; cs_chunk(&J,0); }
+    J.scalar=cs_scalar();
+    // PELOAD_CS_CHECK: run the per-thread interpreter first on a copy of every UAV, then the SIMT one, and compare
+    static int check=-1; if(check<0) check=getenv("PELOAD_CS_CHECK")?1:0;
+    D3DObj* ures[8]={0}; uint8_t* before[8]={0}; uint8_t* sref[8]={0}; int nu=0;
+    if(check && !J.scalar){ for(int i=0;i<8;i++){ D3DObj* r=cs_res(c->uav[i]); if(!r||!r->data||!r->size) continue; int dup=0; for(int k=0;k<nu;k++) if(ures[k]==r) dup=1; if(dup) continue;
+            ures[nu]=r; before[nu]=malloc(r->size); if(before[nu]) memcpy(before[nu],r->data,r->size); nu++; }
+        J.scalar=1; J.chunks=1; cs_chunk(&J,0); long ran_s=J.ran, bad_s=J.bad;
+        for(int k=0;k<nu;k++){ sref[k]=malloc(ures[k]->size); if(sref[k]) memcpy(sref[k],ures[k]->data,ures[k]->size); if(before[k]) memcpy(ures[k]->data,before[k],ures[k]->size); }
+        J.scalar=0; J.ran=0; J.bad=0;
+        cs_chunk(&J,0);
+        static long nchk, nbad; nchk++; int mism=0;
+        for(int k=0;k<nu;k++) if(sref[k] && memcmp(sref[k],ures[k]->data,ures[k]->size)){ mism=1;
+            if(nbad<20){ uint64_t off=0; while(off<ures[k]->size && ((uint8_t*)ures[k]->data)[off]==sref[k][off]) off++;
+                char m[220]; int kk=snprintf(m,sizeof m,"  [cs-check] MISMATCH prog %p (%d instrs) uav %d size %llu first diff at byte %llu (ran scalar %ld simt %ld, bad %ld/%ld)\n",
+                    (void*)p,p->nins,k,(unsigned long long)ures[k]->size,(unsigned long long)off,ran_s,J.ran,bad_s,J.bad); (void)!write(2,m,kk); } }
+        if(mism) nbad++;
+        if(nchk%2000==0){ char m[120]; int kk=snprintf(m,sizeof m,"  [cs-check] %ld dispatches compared, %ld differed\n",nchk,nbad); (void)!write(2,m,kk); }
+        for(int k=0;k<nu;k++){ free(before[k]); free(sref[k]); } }
+    else if(J.chunks<=1){ J.chunks=1; cs_chunk(&J,0); }
     else dispatch_apply_f(J.chunks,dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE,0),&J,cs_chunk);
     { static int n; if(getenv("PELOAD_CS_THRSTAT") && n++<40){ char m[200]; int k=snprintf(m,sizeof m,"  [cs-thr] prog %p nins %d threads %llu: instrs sum %ld max/thread %ld busy threads %ld\n",(void*)p,p->nins,(unsigned long long)J.total,J.tsum,J.tmax,J.tbusy); (void)!write(2,m,k); } }
     if(J.bad) return J.bad;

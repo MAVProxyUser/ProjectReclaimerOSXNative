@@ -129,3 +129,63 @@ set_muted / set_volume, so mutes last for the process lifetime.
 Runtime check before shipping (one run, no sweeps): log the session peer ids, click "Mute voice" in the client's
 scoreboard, and check that the id appended to MUTED (exe+0x27d7858/0x27d7860) matches the peer id this map gives
 for that player.
+
+## Host peer
+
+Static RE (halo3.dll + client 0.9.18), not checked at runtime yet. The membership object is at `sess+0x30` (host
+create halo3+0xdbac: `lea rbp,[rcx+0x30]` is passed as `this` to the membership calls), and its shared part starts at
+`sess+0x38` in Halo 3's usual order: update number, leader, host, slot counts, peer count, peer mask (+0x54), peers (+0x58).
+
+| field | offset (both layouts) | status |
+|---|---|---|
+| update number (-1 = no membership yet) | `sess+0x38` | CONFIRMED |
+| leader peer index | `sess+0x3c` | CONFIRMED |
+| **host peer index** | `sess+0x40` | CONFIRMED |
+| **local peer index** | `sess+0x3dc4` | CONFIRMED |
+| incremental update number | `sess+0x3dc8` | CONFIRMED |
+| local state | `sess+0x67b70` (4 = established peer, 6..9 = host states) | CONFIRMED that 6..9 gates host-only code; names GUESSED |
+
+Evidence:
+- halo3+0x33a454 is a UI text token that resolves to the host player's name. It loads `eax=[sess+0x40]`, walks the
+  player mask `sess+0x126c`, and matches `[sess+0x127c+i*0xc8]` (player +0x0c peer index) against it. It then calls
+  0x2b9154(i), which returns `&player[i]+0x20`, and copies `+0x78` (= record +0x98, the name).
+- halo3+0xdbac creates the host session. With no membership to restore (0xdcf2 -> 0xde21), it adds peer 0 in state 4
+  (0x1a000 with edx=0), then `mov qword [sess+0x3c], r13` (r13=0: leader = host = 0), `mov [sess+0x3dc4], r13d`
+  (local = 0), and `inc [sess+0x38]`. On the restore path (host migration) it sets each valid peer's state to
+  `peer == [sess+0x40] ? 4 : 2` (0xdd2a).
+- halo3+0x10338 runs only in host states 6..9. It sets the leader to local (`[0x3c]=[0x3dc4]`, bumps 0x38/0x3dc8),
+  then commits (call 0x9cf8) only if `[0x38] != -1 && [0x40] != -1 && [0x3dc4] == [0x40]`. Only the host broadcasts
+  membership changes.
+- Every is-leader check uses `[sess+0x38] != -1 && [sess+0x3dc4] == [sess+0x3c]` (e.g. 0x17cd1, 0x16d8d, 0x126f6).
+- The 128-slot layout keeps these offsets. Reclaimer's 128-slot patcher (exe+0x9e41b0) copies only the arrays: old
+  +0x58 / +0x1f18 / +0x1270 / +0x3130 / +0x3dcc go to +0x1381c0 / +0x140ac0 / +0x1493c0 / +0x14f8c0 / +0x155dc0.
+  Its own team-balance commit, exe+0x9b8f1f..0x9b8f62, is the same idiom on the same session (players at
+  +0x1270 / +0x1493c0 chosen by flag X): `[sess+0x38]++`, `ecx=[sess+0x40]`, `[sess+0x3dc8]++`,
+  `cmp [sess+0x3dc4],ecx`, `jmp halo3+0x9cf8`. exe+0x9bd83e (128-peer loop) reads `[sess+0x3dc4]` to skip its own
+  peer.
+- GUESSED by absence: the client exe never reads `sess+0x40`. The callers of its guarded read exe+0x75d320 read only
+  +0x67b70, +0x3dc4, +0x24 and +0x4144 from the session, so its roster and scoreboard have no host marker.
+
+Dedicated server: a freshly created host session puts the hosting machine at **peer 0**, so leader = host = local = 0
+there (CONFIRMED static path). A Reclaimer dedicated server has no local player, so on the server and on every
+client `host == 0` (the indices are shared through the membership updates) and no player record has peer index 0.
+On a session hosted by a player, that player (and any split-screen players on the same machine) have peer == host.
+Read `sess+0x40` on every snapshot; do not hard-code 0. The restore path (host migration) keeps the old peer
+indices, so a migrated host is not peer 0, and the field can be -1.
+
+```c
+// stats.c snapshot, after sess and lay (flag X) are read as in the voice map above
+int32_t st=0, upd=-1, host=-1, local=-1;
+hb_read(sess+0x67b70,&st,4); hb_read(sess+0x38,&upd,4);
+if(st>=4 && st<=9 && upd!=-1){ hb_read(sess+0x40,&host,4); hb_read(sess+0x3dc4,&local,4); }
+int nq = lay?128:17;
+if(host<0 || host>=nq || !peer_bit(sess+0x54,host)) host=-1;   // peer mask: 17 / 128 bits at sess+0x54
+int self_is_host = (st>=6 && st<=9);                           // equivalently local==host
+int host_has_player = 0;
+for(each valid player i){                                      // rec = sess+(lay?0x1493c0:0x1270)+i*0xc8
+    int32_t peer = *(int32_t*)(rec+0x0c);
+    e->host  = (host>=0 && peer==host);  host_has_player |= e->host;
+    e->local = (local>=0 && peer==local);
+}
+// host>=0 && !host_has_player  ->  "dedicated server (peer <host>)"; host<0 -> no session / unknown
+```

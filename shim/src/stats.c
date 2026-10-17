@@ -151,7 +151,8 @@ static void st_tag(StBuf*s,uint32_t def){ sb_str(s,hb_tag_name(def)); }
 // The client's voice mute is one global Mutex<Vec<peer id>> changed by set_muted(id, bool) (Win64; exe+0x66bea0 in
 // 0.9.18, found by signature); its own scoreboard Mute buttons use the same list, so both stay in sync. Mutes last
 // until the client exits. The call runs on a guest thread: the halo3 main loop's frame hook (st_voice_jobs).
-typedef struct { char name[64]; int idx, peer; uint64_t voice; int muted; } StSess;
+typedef struct { char name[64]; int idx, peer; uint64_t voice; int muted, host; } StSess;
+static int g_st_hostpeer=-1, g_st_localpeer=-1;   // the session's host / our peer (sess+0x40 / +0x3dc4; -1 unknown)
 static uint8_t* g_st_setmuted; static uint64_t g_st_mutedvec; static int g_st_layout=-1;   // -1 unknown, 0 normal, 1 extended
 static int sig_parse(const char*s,uint8_t*b,uint8_t*m,int cap); static int64_t sig_find(uint8_t*base,const uint8_t*b,const uint8_t*m,int n);
 static int entry_hook(uint8_t*site,const uint8_t*pro,int len,void*fn);   // peload.c
@@ -179,7 +180,11 @@ static void st_voice_init(void){ static int done; if(done || !g_base) return; do
 static int st_session(StSess*out,int max,uint32_t*state){
     uint8_t*h3=hb_halo3_base(); if(!h3) return 0; st_voice_init();
     uint64_t sess=0; if(!hb_read((uint64_t)(h3+0x1e250d0),&sess,8) || !sess) return 0;
-    if(state) hb_read(sess+0x67b70,state,4);
+    uint32_t st=0; hb_read(sess+0x67b70,&st,4); if(state) *state=st;
+    // host / local peer (reclaimer-voice-mute.md "Host peer"): valid once membership exists (update number != -1) and
+    // the session is up (state 4..9); a dedicated server is host peer 0 with no player of its own
+    { int32_t upd=-1, hp=-1, lp=-1; if(hb_read(sess+0x38,&upd,4) && upd!=-1 && st>=4 && st<=9 && hb_read(sess+0x40,&hp,4) && hb_read(sess+0x3dc4,&lp,4)){ g_st_hostpeer=hp; g_st_localpeer=lp; }
+      else { g_st_hostpeer=-1; g_st_localpeer=-1; } }
     if(g_st_setmuted==g_base+0x66bea0){ uint8_t x=0; if(hb_read((uint64_t)(g_base+0x27f7210),&x,1) && x<=1) g_st_layout=x; }   // set once Reclaimer patches halo3
     uint64_t muted[256]; int nm=0; { uint64_t ptr=0, len=0; if(g_st_mutedvec && hb_read(g_st_mutedvec+0x10,&ptr,8) && hb_read(g_st_mutedvec+0x18,&len,8) && len<=256 && ptr>1 && len) if(hb_read(ptr,muted,len*8)) nm=(int)len; }
     int best=0;
@@ -189,7 +194,7 @@ static int st_session(StSess*out,int max,uint32_t*state){
         for(int i=0;i<np && n<max;i++){ if(!((pm[i>>3]>>(i&7))&1)) continue; uint8_t r[0xc8]; if(!hb_read(pbase+(uint64_t)i*0xc8,r,sizeof r) || !*(uint64_t*)(r+4)) continue;
             int pi=*(int32_t*)(r+0xc); if(pi<0 || pi>=nq || !((qm[pi>>3]>>(pi&7))&1)) continue;
             uint8_t q[0x10]; if(!hb_read(qbase+(uint64_t)pi*0x110,q,sizeof q)) continue;
-            StSess*e=&out[n]; e->idx=i; e->peer=pi; e->voice=*(uint64_t*)q; e->muted=0; for(int k=0;k<nm;k++) if(muted[k]==e->voice){ e->muted=1; break; }
+            StSess*e=&out[n]; e->idx=i; e->peer=pi; e->voice=*(uint64_t*)q; e->muted=0; e->host=g_st_hostpeer>=0 && pi==g_st_hostpeer; for(int k=0;k<nm;k++) if(muted[k]==e->voice){ e->muted=1; break; }
             int j=0, ok=1; const uint16_t*w=(const uint16_t*)(r+0x98);
             for(int c=0;c<16 && w[c] && j<60;c++){ uint16_t u=w[c]; if(u<0x20){ ok=0; break; }
                 if(u<0x80) e->name[j++]=(char)u; else if(u<0x800){ e->name[j++]=(char)(0xC0|(u>>6)); e->name[j++]=(char)(0x80|(u&63)); }
@@ -303,6 +308,7 @@ static int st_control(const char*act,const char*qs){
         return st_voice_request(id,!strcmp(act,"mute")); }
     if(!strcmp(act,"textup") || !strcmp(act,"textdown")){ int v=g_hb_text_px>0?g_hb_text_px:7; v+=!strcmp(act,"textup")?1:-1; if(v<4) v=4; if(v>60) v=60; g_hb_text_px=v;
         char m[64]; int k=snprintf(m,sizeof m,"  [stats] page: label text %d px\n",v); (void)!write(2,m,k); return 1; }
+    if(!strcmp(act,"submit")){ const char*v=strstr(qs,"on="); if(!v) return 0; g_sub_want=atoi(v+3)?1:0; return 1; }   // GL submission thread (d3dsubmit.c)
     if(!strcmp(act,"capture")){ __atomic_store_n(&g_hb_cap_req,1,__ATOMIC_RELEASE); (void)!write(2,"  [capture] page: capturing the next frame\n",43); return 1; }
     return 0; }
 static void st_snapshot(StBuf*s){
@@ -375,8 +381,10 @@ static void st_snapshot(StBuf*s){
     st_variant(s);   // the game's options and trait sets (st_players found the TLS block)
     static StSess ss[128]; uint32_t sst=0; int nss=st_session(ss,128,&sst);
     sb_put(s,",\"session\":["); for(int k=0;k<nss;k++){ sb_put(s,"%s{\"name\":",k?",":""); sb_str(s,ss[k].name);
-        sb_put(s,",\"index\":%d,\"voice\":\"%016llx\",\"muted\":%s,\"talking\":%s}",ss[k].idx,(unsigned long long)ss[k].voice,ss[k].muted?"true":"false",st_talk_age(ss[k].voice)<0.5?"true":"false"); }
-    sb_put(s,"],\"session_state\":%u,\"mute\":%s",sst,g_st_setmuted&&st_controls_ok()?"true":"false");
+        sb_put(s,",\"index\":%d,\"peer\":%d,\"host\":%s,\"voice\":\"%016llx\",\"muted\":%s,\"talking\":%s}",ss[k].idx,ss[k].peer,ss[k].host?"true":"false",(unsigned long long)ss[k].voice,ss[k].muted?"true":"false",st_talk_age(ss[k].voice)<0.5?"true":"false"); }
+    { int hostplayer=0; for(int k=0;k<nss;k++) if(ss[k].host) hostplayer=1;
+      sb_put(s,"],\"session_state\":%u,\"host_peer\":%d,\"local_peer\":%d,\"dedicated\":%s,\"mute\":%s",sst,g_st_hostpeer,g_st_localpeer,
+          g_st_hostpeer>=0 && nss && !hostplayer?"true":"false",g_st_setmuted&&st_controls_ok()?"true":"false"); }
     sb_put(s,",\"players\":["); int first=1;
     for(int k=0;k<np;k++){ StTrack*t=st_track(&pl[k]); uint32_t h=pl[k].unit; uint64_t p=ST_DATUM(h); static uint8_t d[0x380];
         int have = p && ST_TYPE(h)==0 && hb_read(p,d,sizeof d); int dead = !have || ((*(const uint32_t*)(d+0x110)>>2)&1);
@@ -406,7 +414,7 @@ static void st_snapshot(StBuf*s){
         if(g_st_var_ok) st_player_traits(s,pl[k].rec);
         { const StSess*vs=0; for(int q=0;q<nss && !vs;q++) if(ss[q].idx==pl[k].slot && !strcmp(ss[q].name,pl[k].name)) vs=&ss[q];
           for(int q=0;q<nss && !vs;q++) if(!strcmp(ss[q].name,pl[k].name)) vs=&ss[q];
-          if(vs) sb_put(s,",\"voice\":\"%016llx\",\"muted\":%s,\"talking\":%s",(unsigned long long)vs->voice,vs->muted?"true":"false",st_talk_age(vs->voice)<0.5?"true":"false"); }
+          if(vs) sb_put(s,",\"voice\":\"%016llx\",\"muted\":%s,\"talking\":%s,\"host\":%s",(unsigned long long)vs->voice,vs->muted?"true":"false",st_talk_age(vs->voice)<0.5?"true":"false",vs->host?"true":"false"); }
         sb_put(s,"}"); }
     sb_put(s,"]");
     // vehicles and projectiles in flight
