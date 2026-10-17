@@ -3277,7 +3277,13 @@ static int    MSABI i_EnumDisplayMonitors(void*dc,const void*clip,void*cb,int64_
     fn(mon,dc,rc,data); return 1; }
 static int    MSABI i_GetClientRect(void*h,int32_t*r){ (void)h; if(r){r[0]=0;r[1]=0;r[2]=WIN_W;r[3]=WIN_H;} return 1; }
 static int    MSABI i_GetWindowRect(void*h,int32_t*r){ (void)h; if(r){r[0]=0;r[1]=0;r[2]=WIN_W;r[3]=WIN_H;} return 1; }
-static int    MSABI i_SetWindowPos(void*h,void*after,int x,int y,int w,int ht,uint32_t f){ (void)h;(void)after;(void)x;(void)y;(void)w;(void)ht;(void)f; return 1; }
+static void lay_pos(void*h,int x,int y,int setpos,int alpha);   // layered windows (below)
+// SetWindowPos: only its show/hide flags and the move matter here (the client hides and moves its layered screens with it)
+static int    MSABI i_SetWindowPos(void*h,void*after,int x,int y,int w,int ht,uint32_t f){ (void)after;(void)w;(void)ht;
+    if(getenv("PELOAD_TRACE_LAYERED")){ char m[140]; int k=snprintf(m,sizeof m,"  [layered] SetWindowPos %p %d,%d %dx%d flags 0x%x\n",h,x,y,w,ht,f); (void)!write(2,m,k); }
+    if(!getenv("PELOAD_LAYERED_NOSWP")){ if(f&0x80/*SWP_HIDEWINDOW*/) lay_show(h,0); else if(f&0x40/*SWP_SHOWWINDOW*/) lay_show(h,1);
+        if(!(f&0x2/*SWP_NOMOVE*/)) lay_pos(h,x,y,1,-1); }
+    return 1; }
 static int64_t g_winlong[8];
 static int64_t MSABI i_GetWindowLongPtrW(void*h,int idx){ WWin*w=h; if(w&&w->magic==WWIN_MAGIC){ if(idx==-21)return w->userdata; if(idx==-4)return (int64_t)(intptr_t)w->wndproc; if(idx>=0&&idx<128)return w->extra[idx/8]; return 0; } return (idx>=-8&&idx<0)? g_winlong[-idx-1]:0; }
 static int64_t MSABI i_SetWindowLongPtrW(void*h,int idx,int64_t v){ WWin*w=h; if(w&&w->magic==WWIN_MAGIC){ int64_t o=0; if(idx==-21){o=w->userdata;w->userdata=v;} else if(idx==-4){o=(int64_t)(intptr_t)w->wndproc;w->wndproc=(WNDPROC_t)(intptr_t)v;} else if(idx>=0&&idx<128){o=w->extra[idx/8];w->extra[idx/8]=v;} return o; } if(idx>=-8&&idx<0){ int64_t o=g_winlong[-idx-1]; g_winlong[-idx-1]=v; return o;} return 0; }
@@ -3327,7 +3333,10 @@ static void*  MSABI i_SetCursor(void*c){ return c; }
 void* fg_hwnd_ext(void);
 #include <CoreGraphics/CoreGraphics.h>
 #include "wininput.c"
-static int    MSABI i_SetLayeredWindowAttributes(void*h,uint32_t key,uint8_t a,uint32_t f){ (void)h;(void)key;(void)a;(void)f; return 1; }
+static int    MSABI i_SetLayeredWindowAttributes(void*h,uint32_t key,uint8_t a,uint32_t f){ (void)key;
+    if(getenv("PELOAD_TRACE_LAYERED")){ char m[120]; int k=snprintf(m,sizeof m,"  [layered] SetLayeredWindowAttributes %p alpha %u flags 0x%x\n",h,a,f); (void)!write(2,m,k); }
+    if((f&0x2/*LWA_ALPHA*/) && !getenv("PELOAD_LAYERED_NOSWP")) lay_pos(h,0,0,0,a);
+    return 1; }
 static int lay_update(void*h,const int32_t*pd,const int32_t*ps,void*sd,const int32_t*sp,const uint8_t*bf);   // layered windows (below)
 static int    MSABI i_UpdateLayeredWindow(void*h,void*dc,void*pd,void*ps,void*sd,void*sp,uint32_t key,void*bf,uint32_t f){ (void)dc;(void)key;(void)f; return lay_update(h,pd,ps,sd,sp,bf); }
 #include <CoreGraphics/CoreGraphics.h>
@@ -3363,12 +3372,18 @@ static LayWin g_lay[8]; static pthread_mutex_t g_lay_mx=PTHREAD_MUTEX_INITIALIZE
 static struct { void*h; int shown; } g_vis[64];   // last ShowWindow state per window (also before its first update)
 static int lay_off(void){ static int o=-1; if(o<0) o=getenv("PELOAD_NO_LAYERED")?1:0; return o; }
 static void lay_show(void*h,int shown){   // shown: 1 visible, 0 hidden, -1 destroyed
+    if(getenv("PELOAD_TRACE_LAYERED")){ char m[100]; int k=snprintf(m,sizeof m,"  [layered] show %p -> %d\n",h,shown); (void)!write(2,m,k); }
     pthread_mutex_lock(&g_lay_mx); int i=0; for(; i<64 && g_vis[i].h && g_vis[i].h!=h; i++){}
     if(i<64){ if(shown<0) g_vis[i].h=0; else { g_vis[i].h=h; g_vis[i].shown=shown; } }
     for(int k=0;k<8;k++) if(g_lay[k].used && g_lay[k].hwnd==h){ if(shown<0){ free(g_lay[k].px); g_lay[k].px=0; g_lay[k].used=0; g_lay[k].visible=0; } else g_lay[k].visible=shown; }
     pthread_mutex_unlock(&g_lay_mx); }
+static void lay_pos(void*h,int x,int y,int setpos,int alpha){   // SetWindowPos move / SetLayeredWindowAttributes alpha
+    pthread_mutex_lock(&g_lay_mx);
+    for(int k=0;k<8;k++) if(g_lay[k].used && g_lay[k].hwnd==h){ if(setpos){ g_lay[k].x=x; g_lay[k].y=y; } if(alpha>=0) g_lay[k].alpha=alpha; }
+    pthread_mutex_unlock(&g_lay_mx); }
 static int lay_update(void*h,const int32_t*pd,const int32_t*ps,void*sdc,const int32_t*sp,const uint8_t*bf){
     if(lay_off()) return 1;
+    if(getenv("PELOAD_TRACE_LAYERED")){ static int n; if(n++<400){ char m[160]; int k=snprintf(m,sizeof m,"  [layered] update %p pos %d,%d size %dx%d alpha %d\n",h,pd?pd[0]:-1,pd?pd[1]:-1,ps?ps[0]:-1,ps?ps[1]:-1,bf?bf[2]:-1); (void)!write(2,m,k); } }
     pthread_mutex_lock(&g_lay_mx); LayWin*l=0; for(int k=0;k<8;k++) if(g_lay[k].used && g_lay[k].hwnd==h) l=&g_lay[k];
     if(!l) for(int k=0;k<8;k++) if(!g_lay[k].used){ l=&g_lay[k]; memset(l,0,sizeof *l); l->used=1; l->hwnd=h; l->alpha=255;
         l->visible=1; for(int i=0;i<64;i++) if(g_vis[i].h==h) l->visible=g_vis[i].shown; break; }
@@ -3417,11 +3432,16 @@ GdiObj* g_gdi_mainsurf;
 static void*  MSABI i_CreateCompatibleBitmap(void*hdc,int w,int h){ (void)hdc; if(w<=0)w=1; if(h<=0)h=1; void*b=calloc(1,(size_t)w*h*4); GdiObj*g=gdi_new(w,h,32,b,1); if(g)g->topdown=1; return g; }
 static void*  MSABI i_CreateSolidBrush(uint32_t color){ GdiObj*g=gdi_new(1,1,32,0,0); if(g){g->kind=1;g->color=color;} return g?g:(void*)0x1; }
 static void*  MSABI i_CreatePen(int style,int w,uint32_t color){ (void)style;(void)w; GdiObj*g=gdi_new(1,1,32,0,0); if(g){g->kind=2;g->color=color;} return g?g:(void*)0x1; }
+static GdiObj* gdi_text_target(GdiDC*d); // fwd (defined with the text rendering)
 static int    MSABI i_FillRect(void*dc,const int32_t*rc,void*br){ GdiDC*d=dc; GdiObj*b=br;
     if(getenv("PELOAD_TRACE_TEXT") && rc){ char m[160]; snprintf(m,sizeof m,"  [FillRect] dc=%p win=%d %d,%d-%d,%d brush=%p kind=%d color=%06x\n",dc,d&&d->magic==GDIDC_MAGIC?d->iswin:-1,rc[0],rc[1],rc[2],rc[3],br,b&&b->magic==GDI_MAGIC?b->kind:-1,b&&b->magic==GDI_MAGIC?b->color:0); ws(m); }
     if(!d||d->magic!=GDIDC_MAGIC||!d->bmp||!rc) return 1;
     uint32_t px = (b&&b->magic==GDI_MAGIC&&b->kind==1)? gdi_colorref_to_px(b->color) : 0xFF000000u;
-    gdi_fill(d->bmp,rc[0],rc[1],rc[2]-rc[0],rc[3]-rc[1],px); if(d->iswin) gdi_present_window(); return 1; }
+    // same destination as the DC's text (gdi_text_target): the client clears its loading screen with a full-size FillRect
+    // on a pixel-less memory DC whose text lands on the main surface -- filling the empty bitmap cleared nothing and every
+    // frame's text piled up there ("CAPTURE THE FLAG" doubled, the progress line garbled: backlog 25). PELOAD_GDI_FILL_OLD = old
+    { GdiObj*dst=getenv("PELOAD_GDI_FILL_OLD")?d->bmp:gdi_text_target(d); gdi_fill(dst?dst:d->bmp,rc[0],rc[1],rc[2]-rc[0],rc[3]-rc[1],px); }
+    if(d->iswin) gdi_present_window(); return 1; }
 static int    MSABI i_GdiAlphaBlend(void*dst,int xd,int yd,int wd,int hd,void*src,int xs,int ys,int ws,int hs,uint32_t blend){
     GdiDC*dd=dst,*sd=src; if(dd&&dd->magic==GDIDC_MAGIC&&sd&&sd->magic==GDIDC_MAGIC&&dd->bmp&&sd->bmp) gdi_blit(dd->bmp,xd,yd,wd,hd,sd->bmp,xs,ys,ws,hs,1);
     if(dd&&dd->magic==GDIDC_MAGIC&&dd->iswin) gdi_present_window(); (void)blend; return 1; }
@@ -6016,6 +6036,19 @@ static void d3dgl_draw_impl(uint32_t vcount,int indexed,uint32_t instcount,uint3
     if(prof_on()) g_ph_t=prof_now();
     if(!d3dgl_ensure()) return;
     if(g_d3dgl_max_draws && g_d3dgl_frame_draws>=g_d3dgl_max_draws) return;
+    // PELOAD_DUMP_UITEX=<n>: every n-th draw of a 1280x720 texture into the back buffer (the client compositing its own
+    // screens into the game's frame), write that texture's CPU copy to ~/reclaimer_uitex_<k>.bmp (backlog 25)
+    { const char*ue=GENV1("PELOAD_DUMP_UITEX"); D3DObj*t=g_d3dst.psrv[0];
+      if(ue && t && t->data && t->w==1280 && t->h==720 && g_d3dst.rtv==g_d3d_backbuf && (t->fmt==87||t->fmt==88||t->fmt==90||t->fmt==91||t->fmt==28)){
+        static unsigned long n; static int k; unsigned long every=strtoul(ue,0,10); if(every<1) every=60;
+        if((n++%every)==0 && k<12){ unsigned char*px=malloc(1280u*720u*4u); if(px){ const uint8_t*src=t->data; uint32_t rp=t->rowpitch?t->rowpitch:1280*4;
+            int bgr=(t->fmt>=87&&t->fmt<=91); for(int y=0;y<720;y++) for(int x=0;x<1280;x++){ const uint8_t*q=src+(size_t)y*rp+(size_t)x*4; uint8_t*o=px+((size_t)y*1280+x)*4;
+                o[0]=bgr?q[2]:q[0]; o[1]=q[1]; o[2]=bgr?q[0]:q[2]; o[3]=q[3]; }
+            const char*h=getenv("HOME"); char pth[300]; snprintf(pth,sizeof pth,"%s/reclaimer_uitex_%02d_v%u.bmp",h?h:"/tmp",k++,t->ver);
+            unsigned long a0=0,amid=0,a255=0; for(int y=0;y<720;y+=4) for(int x=0;x<1280;x+=4){ uint8_t a=src[(size_t)y*rp+(size_t)x*4+3]; if(!a) a0++; else if(a==255) a255++; else amid++; }
+            bmp_write_rgba(pth,1280,720,px); free(px); char m[400]; int kk=snprintf(m,sizeof m,"  [uitex] %s (fmt %u ver %u gl_dirty %d) alpha: 0 %lu, partial %lu, 255 %lu | blend %s\n",pth,t->fmt,t->ver,t->gl_dirty,a0,amid,a255,
+                g_d3dst.blend?(g_d3dst.blend->sd[2]?"on":"off"):"none"); (void)!write(2,m,kk);
+            if(g_d3dst.blend){ kk=snprintf(m,sizeof m,"  [uitex] blend src %u dst %u op %u, alpha src %u dst %u\n",g_d3dst.blend->sd[3],g_d3dst.blend->sd[4],g_d3dst.blend->sd[5],g_d3dst.blend->sd[6],g_d3dst.blend->sd[7]); (void)!write(2,m,kk); } } } } }
     d3dgl_ring_reserve(); g_nullps_color=0;
     // PELOAD_TRACE_D3DGL: tally WHY draws are skipped (so we can see what state is missing)
     static unsigned long c_tot,c_novsps,c_noglsl,c_noprog,c_exec;
