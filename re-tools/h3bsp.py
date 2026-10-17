@@ -442,6 +442,23 @@ def main():
 
     glo, ghi = tris[:, :, :2].reshape(-1, 2).min(0), tris[:, :, :2].reshape(-1, 2).max(0)
     core = (pts[:, :2].min(0), pts[:, :2].max(0)) if len(pts) >= 2 else geometry_core(tris)
+    # the play crop also covers the scenario's safe zones = the real playable area (being outside every one kills): on
+    # big maps (Sandtrap, Sandbox) players drive far past the spawns and weapons, and the stats page's heatmap and paths
+    # ran off the picture's edge (re-tools/h3bounds.py reads the trigger volumes)
+    safe_box = None
+    try:
+        import h3bounds
+        sc = m.find('scnr')
+        if sc:
+            tvs, _, _ = h3bounds.read_trigger_volumes(m, m.meta(sc[0], 0x800))
+            boxes = [tv['aabb'] for tv in tvs if tv['kind'] == 'safe']
+            if boxes:
+                safe_box = (np.array([min(b['x'][0] for b in boxes), min(b['y'][0] for b in boxes)]),
+                            np.array([max(b['x'][1] for b in boxes), max(b['y'][1] for b in boxes)]))
+    except Exception as e:      # the picture still works without it
+        log('safe zones not read: %s' % e)
+    if safe_box is not None:
+        core = (np.maximum(np.minimum(core[0], safe_box[0]), glo), np.minimum(np.maximum(core[1], safe_box[1]), ghi))
     if opts.bounds:
         x0, y0, x1, y1 = (float(v) for v in opts.bounds.split(','))
         crop = 'bounds'
@@ -488,6 +505,7 @@ def main():
             'px_per_unit': ppu, 'w': w, 'h': h, 'zmin': round(zlo, 3), 'zmax': round(zhi, 3),
             'z_in_image': [round(float(zv.min()), 3), round(float(zv.max()), 3)],
             'play_box': [round(float(v), 3) for v in (core[0][0], core[0][1], core[1][0], core[1][1])],
+            'safe_zone_box': None if safe_box is None else [round(float(v), 3) for v in (safe_box[0][0], safe_box[0][1], safe_box[1][0], safe_box[1][1])],
             'geometry_box': [round(float(v), 3) for v in (glo[0], glo[1], ghi[0], ghi[1])],
             'crop': crop, 'zcut': None if zcut is None else round(zcut, 3),
             'roofed_points': None if roofed is None else [round(v, 3) for v in roofed],
