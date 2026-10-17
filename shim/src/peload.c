@@ -9971,13 +9971,14 @@ static void dump_all_guest_stacks(void){
     char hdr[64]; int hk=snprintf(hdr,sizeof hdr,"\n==== GUEST THREAD DUMP (%u threads) ====\n",n); (void)!write(2,hdr,hk);
     for(unsigned i=0;i<n;i++){
         if(th[i]==me || th[i]==g_tee_ports[0] || th[i]==g_tee_ports[1]) continue;
+        char tn[64]={0}; { pthread_t pt=pthread_from_mach_thread_np(th[i]); if(pt) pthread_getname_np(pt,tn,sizeof tn); }   // before suspending: it can take libpthread's list lock
         thread_suspend(th[i]);
         x86_thread_state64_t st; mach_msg_type_number_t sc=x86_THREAD_STATE64_COUNT;
         if(thread_get_state(th[i],x86_THREAD_STATE64,(thread_state_t)&st,&sc)==KERN_SUCCESS){
             uint64_t rip=st.__rip,rsp=st.__rsp;
             const char* mn=(rip>=0x140000000ULL&&rip<0x14c000000ULL)?"exe+0x":(rip>=0x180000000ULL&&rip<0x187000000ULL)?"halo3+0x":"jit:0x";
             uint64_t ro=(rip>=0x180000000ULL&&rip<0x187000000ULL)?rip-0x180000000ULL:(rip>=0x140000000ULL&&rip<0x14c000000ULL)?rip-0x140000000ULL:rip;
-            char b[160]; int k=snprintf(b,sizeof b,"-- thr%u rip=%s%llx rsp=0x%llx\n",i,mn,(unsigned long long)ro,(unsigned long long)rsp); (void)!write(2,b,k);
+            char b[240]; int k=snprintf(b,sizeof b,"-- thr%u '%s' rip=%s%llx rsp=0x%llx\n",i,tn,mn,(unsigned long long)ro,(unsigned long long)rsp); (void)!write(2,b,k);
             static int depth=-1, words=700; if(depth<0){ const char*e=getenv("PELOAD_DUMP_DEPTH"); depth=e?atoi(e):16; if(depth<1) depth=16; if(depth>16) words=depth*60; }   // frames shown per thread
             int shown=0; for(int w=0;w<words && shown<depth;w++){ uint64_t sa=rsp+(uint64_t)w*8; if(!hook_safe(sa)) break; uint64_t v=*(uint64_t*)sa;
                 if(v>=0x180000000ULL&&v<0x187000000ULL){ char c[48]; int kk=snprintf(c,sizeof c,"      halo3+0x%llx\n",(unsigned long long)(v-0x180000000ULL)); (void)!write(2,c,kk); shown++; }
