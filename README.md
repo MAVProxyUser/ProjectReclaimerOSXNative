@@ -205,10 +205,16 @@ Options go in front of the command, e.g. `PELOAD_INVERT_PITCH=0 bash shim/play.s
 `PELOAD_STATS_HTTP=<port> bash shim/play.sh` serves what the game knows about the match, 10 times a second, on
 `127.0.0.1:<port>` (`PELOAD_STATS_ADDR=<ip>` to listen on another address, e.g. to watch from another device):
 
-- `/` -- a live table: every player's team, shield and health, weapon, grenades, vehicle, active camo, speed, position
+- `/` -- a live table (team, shield and health, weapon, deaths, grenades, vehicle, speed) and a **death heatmap**:
+  where players died, from blue (few) to red (many), over a grey picture of where players walk, with everyone's live
+  position. Deaths for this match or all matches on that map (kept in `~/Library/Application Support/ReclaimerMac/
+  heatmaps/`, so the map fills in over time). Click a player for everything known about them: camo, all weapons,
+  grenades, vehicle and seat, deaths, current and longest life, distance moved, top speed, projectiles fired, facing --
+  with their deaths ringed on the heatmap
+- `/heat.json` -- the heatmap data: visited cells (`cell` units wide) and deaths (`x, y, z, team, name, match, seconds`)
 - `/stats.json` -- the latest snapshot: `players` (name, team, you, alive, health, shield, camo, weapon, weapons,
-  grenades, vehicle, pos, speed), `vehicles` (type, health, shield, pos), `projectiles` in flight (type, owner, pos,
-  speed), plus `map`, `in_match` and match `time`
+  grenades, vehicle, pos, speed, facing, deaths, life, longest_life, distance, top_speed, shots), `vehicles` (type,
+  health, shield, pos), `projectiles` in flight (type, owner, pos, speed), plus `map`, `in_match` and match `time`
 - `/events` -- the same JSON as a stream (Server-Sent Events), e.g. `curl -N http://127.0.0.1:8765/events`
 
 It reads the game's own object table (Halo 3 sends every player's state to every client), like the overlay, and works

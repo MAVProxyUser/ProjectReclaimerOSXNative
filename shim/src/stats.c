@@ -23,7 +23,7 @@ static void sb_str(StBuf*s,const char*v){ sb_put(s,"\""); for(const unsigned cha
 static void sb_f3(StBuf*s,const float*v){ sb_put(s,"[%.2f,%.2f,%.2f]",v[0],v[1],v[2]); }
 
 // The engine's players table (TLS block +0x10, a data array like the object table): +0x28 unit handle, +0x58 name.
-typedef struct { uint32_t unit; char name[64]; } StPlayer;
+typedef struct { uint32_t unit; int slot; char name[64]; } StPlayer;
 static int st_players(StPlayer*out,int max){
     uint8_t*h3=hb_halo3_base(); uint32_t idx=0; if(!h3 || !hb_read((uint64_t)(h3+0xa39f9c),&idx,4) || idx>=128) return 0;
     void**arrs[1025]; int na=0; arrs[na++]=g_tls_array; pthread_mutex_lock(&g_tlsm); for(int q=0;q<g_ntarrs&&na<1025;q++) arrs[na++]=g_tarrs[q]; pthread_mutex_unlock(&g_tlsm);
@@ -32,7 +32,7 @@ static int st_players(StPlayer*out,int max){
         if(!hb_read(blk+0x10,&parr,8) || !parr || !hb_read(parr,hdr,sizeof hdr) || *(uint32_t*)(hdr+0x2c)!=0x64407440) continue;
         int32_t es=*(int32_t*)(hdr+0x24), hi=*(int32_t*)(hdr+0x3c); uint64_t pd=*(uint64_t*)(hdr+0x48); if(es<0x98 || es>0x10000 || hi<=0 || hi>256) continue;
         int n=0; for(int i=0;i<hi && n<max;i++){ uint8_t rec[0x98]; if(!hb_read(pd+(uint64_t)i*es,rec,sizeof rec) || !*(uint16_t*)rec) continue;
-            StPlayer*p=&out[n]; p->unit=*(uint32_t*)(rec+0x28); int j=0; const uint16_t*w=(const uint16_t*)(rec+0x58);
+            StPlayer*p=&out[n]; p->unit=*(uint32_t*)(rec+0x28); p->slot=i; int j=0; const uint16_t*w=(const uint16_t*)(rec+0x58);
             for(int c=0;c<32 && w[c] && j<60;c++){ uint16_t u=w[c]; if(u<0x80) p->name[j++]=(char)u;
                 else if(u<0x800){ p->name[j++]=(char)(0xC0|(u>>6)); p->name[j++]=(char)(0x80|(u&63)); }
                 else { p->name[j++]=(char)(0xE0|(u>>12)); p->name[j++]=(char)(0x80|((u>>6)&63)); p->name[j++]=(char)(0x80|(u&63)); } }
@@ -42,40 +42,126 @@ static int st_players(StPlayer*out,int max){
 
 static void st_tag(StBuf*s,uint32_t def){ sb_str(s,hb_tag_name(def)); }
 
+// ---- death heatmap + footprint, per map, kept across matches -------------------------------------------------------
+// footprint: how often a live player stood in each 0.5-unit cell (it draws the map's playable layout over time);
+// deaths: where each player died. Saved to ~/Library/Application Support/ReclaimerMac/heatmaps/<map>.bin every 30 s.
+#define HM_CELL 0.5f
+typedef struct { int32_t x,y; uint32_t n; } HmCell;
+typedef struct { float x,y,z; int32_t team, slot; char name[48]; uint32_t match; float t; } HmDeath;
+static struct { char map[64]; HmCell*cells; uint32_t cap, used; HmDeath*d; uint32_t nd, dcap, match, maxmatch; int dirty; double saved, match_t0; } g_hm;
+static pthread_mutex_t g_hm_mx=PTHREAD_MUTEX_INITIALIZER;
+static void hm_path(const char*map,char*out,size_t n){ const char*h=getenv("HOME"); snprintf(out,n,"%s/Library/Application Support/ReclaimerMac/heatmaps/%s.bin",h?h:"/tmp",map); }
+static void hm_cell_add(int32_t x,int32_t y,uint32_t n){
+    if(g_hm.used*10>=g_hm.cap*7){ uint32_t oc=g_hm.cap, nc=oc?oc*2:65536; HmCell*nt=calloc(nc,sizeof *nt), *ot=g_hm.cells; if(!nt) return;
+        g_hm.cells=nt; g_hm.cap=nc; g_hm.used=0; for(uint32_t i=0;i<oc;i++) if(ot[i].n) hm_cell_add(ot[i].x,ot[i].y,ot[i].n); free(ot); }
+    uint32_t m=g_hm.cap-1, i=((uint32_t)x*73856093u ^ (uint32_t)y*19349663u)&m;
+    for(;;i=(i+1)&m){ HmCell*c=&g_hm.cells[i]; if(!c->n){ c->x=x; c->y=y; c->n=n; g_hm.used++; return; } if(c->x==x && c->y==y){ c->n+=n; return; } } }
+static void hm_save(void){ if(!g_hm.map[0] || !g_hm.dirty) return; char p[1024]; hm_path(g_hm.map,p,sizeof p);
+    char dir[1024]; snprintf(dir,sizeof dir,"%s",p); char*sl=strrchr(dir,'/'); if(sl){ *sl=0; mkdir(dir,0755); }
+    char tmp[1100]; snprintf(tmp,sizeof tmp,"%s.tmp",p); FILE*f=fopen(tmp,"wb"); if(!f) return;
+    float cell=HM_CELL; fwrite("RHM2",1,4,f); fwrite(&cell,4,1,f); fwrite(&g_hm.used,4,1,f); fwrite(&g_hm.nd,4,1,f); fwrite(&g_hm.maxmatch,4,1,f);
+    for(uint32_t i=0;i<g_hm.cap;i++) if(g_hm.cells[i].n) fwrite(&g_hm.cells[i],sizeof(HmCell),1,f);
+    fwrite(g_hm.d,sizeof(HmDeath),g_hm.nd,f); int ok=!ferror(f); fclose(f); if(ok) rename(tmp,p); else unlink(tmp); g_hm.dirty=0; }
+static void hm_switch(const char*map){   // (g_hm_mx held)
+    if(!strcmp(map,g_hm.map)) return; hm_save();
+    free(g_hm.cells); free(g_hm.d); memset(&g_hm,0,sizeof g_hm); snprintf(g_hm.map,sizeof g_hm.map,"%s",map); if(!map[0]) return;
+    char p[1024]; hm_path(map,p,sizeof p); FILE*f=fopen(p,"rb"); uint32_t nc=0,nd=0;
+    if(f){ char mg[4]; float cell=0; if(fread(mg,1,4,f)==4 && !memcmp(mg,"RHM2",4) && fread(&cell,4,1,f)==1 && cell==HM_CELL && fread(&nc,4,1,f)==1 && fread(&nd,4,1,f)==1 && fread(&g_hm.maxmatch,4,1,f)==1 && nc<(1u<<24) && nd<(1u<<22)){
+            for(uint32_t i=0;i<nc;i++){ HmCell c; if(fread(&c,sizeof c,1,f)!=1) break; hm_cell_add(c.x,c.y,c.n); }
+            g_hm.d=malloc((nd?nd:1)*sizeof(HmDeath)); g_hm.dcap=nd?nd:1; g_hm.nd=g_hm.d?(uint32_t)fread(g_hm.d,sizeof(HmDeath),nd,f):0; }
+        fclose(f); }
+    g_hm.match=++g_hm.maxmatch; g_hm.match_t0=mono_s(); g_hm.saved=mono_s(); g_hm.dirty=0;
+    char m[1200]; int k=snprintf(m,sizeof m,"  [stats] heatmap %s: %u cells, %u deaths from earlier matches\n",map,g_hm.used,g_hm.nd); (void)!write(2,m,k); }
+// the map being played: switched to when there is something to record (menus open campaign maps for scenery)
+static char g_hm_cur[64];
+static void hm_death(const float*pos,int team,int slot,const char*name){   // (g_hm_mx held)
+    hm_switch(g_hm_cur);
+    if(g_hm.nd>=g_hm.dcap){ uint32_t nc=g_hm.dcap?g_hm.dcap*2:256; HmDeath*nd=realloc(g_hm.d,nc*sizeof *nd); if(!nd) return; g_hm.d=nd; g_hm.dcap=nc; }
+    HmDeath*d=&g_hm.d[g_hm.nd++]; memset(d,0,sizeof *d); d->x=pos[0]; d->y=pos[1]; d->z=pos[2]; d->team=team; d->slot=slot; snprintf(d->name,sizeof d->name,"%s",name?name:"");
+    d->match=g_hm.match; d->t=(float)(mono_s()-g_hm.match_t0); g_hm.dirty=1; }
+static void hm_json(StBuf*s){ pthread_mutex_lock(&g_hm_mx);
+    sb_put(s,"{\"map\":"); sb_str(s,g_hm.map); sb_put(s,",\"cell\":%.2f,\"match\":%u,\"cells\":[",HM_CELL,g_hm.match);
+    int first=1; for(uint32_t i=0;i<g_hm.cap;i++) if(g_hm.cells[i].n){ sb_put(s,"%s%d,%d,%u",first?"":",",g_hm.cells[i].x,g_hm.cells[i].y,g_hm.cells[i].n); first=0; }
+    sb_put(s,"],\"deaths\":["); for(uint32_t i=0;i<g_hm.nd;i++){ HmDeath*d=&g_hm.d[i]; sb_put(s,"%s[%.2f,%.2f,%.2f,%d,",i?",":"",d->x,d->y,d->z,d->team); sb_str(s,d->name); sb_put(s,",%u,%.0f,%d]",d->match,d->t,d->slot); }
+    sb_put(s,"]}"); pthread_mutex_unlock(&g_hm_mx); }
+
+// ---- per-player tracking: deaths, lives, distance, top speed, projectiles fired ----------------------------------
+typedef struct { char name[64]; int slot, team, deaths, shots, alive; uint32_t unit; double life_start, longest, dist; float pos[3], top_speed; } StTrack;
+static StTrack g_trk[256]; static int g_ntrk; static char g_trk_map[64];
+// keyed by player slot + name (names repeat: everyone who never set one is "Player")
+static StTrack* st_track(const StPlayer*p){ for(int i=0;i<g_ntrk;i++) if(g_trk[i].slot==p->slot && !strcmp(g_trk[i].name,p->name)) return &g_trk[i];
+    if(g_ntrk>=256) return 0; StTrack*t=&g_trk[g_ntrk++]; memset(t,0,sizeof *t); snprintf(t->name,sizeof t->name,"%s",p->name); t->slot=p->slot; t->team=-1; t->unit=0xFFFFFFFFu; return t; }
+// bipeds seen last snapshot (death = a biped going from alive to dead), projectiles already counted
+typedef struct { uint32_t h; int alive, ti; } StBip;
+static StBip g_bip[2048]; static int g_nbip;
+static struct { uint32_t h; double t; } g_proj[8192];
+
 static void st_snapshot(StBuf*s){
     static const char* teams[8]={"red","blue","green","orange","purple","gold","brown","pink"};
     extern double g_gameplay_t0; double now=mono_s();
     sb_put(s,"{\"time\":%.2f,\"in_match\":%s",g_gameplay_t0?now-g_gameplay_t0:0.0,g_gameplay_t0?"true":"false");
+    char m[64]="";
     { char mp[1024]=""; pthread_mutex_lock(&g_hb_mapmx);   // newest map the game opened from halo3/maps (not a cache file)
       for(int k=0;k<g_hb_nmappaths;k++) if(strstr(g_hb_mappaths[k],"/halo3/maps/")){ snprintf(mp,sizeof mp,"%s",g_hb_mappaths[k]); break; }
       if(!mp[0] && g_hb_nmappaths) snprintf(mp,sizeof mp,"%s",g_hb_mappaths[0]);
       pthread_mutex_unlock(&g_hb_mapmx);
-      const char*b=strrchr(mp,'/'); b=b?b+1:mp; char m[64]; snprintf(m,sizeof m,"%s",b); char*dot=strrchr(m,'.'); if(dot)*dot=0; sb_put(s,",\"map\":"); sb_str(s,m); }
+      const char*b=strrchr(mp,'/'); b=b?b+1:mp; snprintf(m,sizeof m,"%s",b); char*dot=strrchr(m,'.'); if(dot)*dot=0; sb_put(s,",\"map\":"); sb_str(s,m); }
+    if(strcmp(m,g_trk_map)){ snprintf(g_trk_map,sizeof g_trk_map,"%s",m); g_ntrk=0; g_nbip=0; memset(g_proj,0,sizeof g_proj); }   // new map: new match stats
+    pthread_mutex_lock(&g_hm_mx); snprintf(g_hm_cur,sizeof g_hm_cur,"%s",m); if(g_hm.dirty && now-g_hm.saved>30){ hm_save(); g_hm.saved=now; } pthread_mutex_unlock(&g_hm_mx);
     static uint8_t tab[8192*0x18]; int hi=0; uint64_t arr=hb_object_array(); uint8_t hdr[0x60];
     if(arr && hb_read(arr,hdr,sizeof hdr) && *(uint32_t*)(hdr+0x2c)==0x64407440 && *(int32_t*)(hdr+0x24)==0x18){
         hi=*(int32_t*)(hdr+0x3c); if(hi<0||hi>8192||hi>*(int32_t*)(hdr+0x20) || !hb_read(*(uint64_t*)(hdr+0x48),tab,(size_t)hi*0x18)) hi=0; }
     #define ST_DATUM(h) ((((h)&0xFFFF)<(uint32_t)hi && (h)!=0xFFFFFFFFu && *(uint16_t*)(tab+((h)&0xFFFF)*0x18)==(uint16_t)((h)>>16)) ? *(uint64_t*)(tab+((h)&0xFFFF)*0x18+0x10) : 0)
+    #define ST_TYPE(h) (tab[((h)&0xFFFF)*0x18+3])
     StPlayer pl[256]; int np=st_players(pl,256);
     float cam[3]={0}; int camok=0; { float vp[32]; unsigned s0=g_hb_vpseq; memcpy(vp,g_hb_vp,sizeof vp); if(!(s0&1) && g_hb_vpseq==s0 && (vp[28]||vp[29]||vp[30])){ memcpy(cam,vp+28,12); camok=1; } }
-    // players: every biped (with its player's name when it has one)
+    // deaths: every biped, alive -> dead (the body stays a while, so 10 Hz catches it); the player it belonged to.
+    // Positions are the world-space bounding centre (+0x1c): the origin (+0x50) is vehicle-relative when seated.
+    { StBip nb[2048]; int nn=0;
+      for(int i=0;i<hi && nn<2048;i++){ const uint8_t*e=tab+i*0x18; if(!*(const uint16_t*)e || e[3]!=0) continue; uint64_t p=*(const uint64_t*)(e+0x10); uint8_t d[0x178]; if(!p || !hb_read(p,d,sizeof d)) continue;
+          uint32_t h=((uint32_t)*(const uint16_t*)e<<16)|(uint32_t)i; int alive=!((*(const uint32_t*)(d+0x110)>>2)&1), ti=-1;
+          for(int k=0;k<np;k++) if(pl[k].unit==h){ StTrack*t=st_track(&pl[k]); if(t) ti=(int)(t-g_trk); break; }
+          int prev=-1; for(int b=0;b<g_nbip;b++) if(g_bip[b].h==h){ prev=b; break; }
+          if(prev>=0){ if(ti<0) ti=g_bip[prev].ti;
+              if(g_bip[prev].alive && !alive){ StTrack*t=ti>=0?&g_trk[ti]:0; int team=*(const int32_t*)(d+0x174);
+                  if(t){ t->deaths++; t->alive=0; if(now-t->life_start>t->longest) t->longest=now-t->life_start; }
+                  if(t || getenv("PELOAD_STATS_ALL_BIPEDS")){ pthread_mutex_lock(&g_hm_mx); hm_death((const float*)(d+0x1c),team,t?t->slot:-1,t?t->name:""); pthread_mutex_unlock(&g_hm_mx); } } }
+          nb[nn].h=h; nb[nn].alive=alive; nb[nn].ti=ti; nn++; }
+      memcpy(g_bip,nb,(size_t)nn*sizeof *nb); g_nbip=nn; }
+    // projectiles: count each new one for its owner
+    for(int i=0;i<hi;i++){ const uint8_t*e=tab+i*0x18; if(!*(const uint16_t*)e || e[3]!=5) continue; uint64_t p=*(const uint64_t*)(e+0x10); uint32_t own=0;
+        uint32_t h=((uint32_t)*(const uint16_t*)e<<16)|(uint32_t)i; uint32_t slot=(h*2654435761u)>>19, j=slot; int known=0;
+        for(int q=0;q<16;q++,j=(j+1)&8191){ if(g_proj[j].h==h && now-g_proj[j].t<60){ known=1; break; } if(!g_proj[j].h || now-g_proj[j].t>=60) break; }
+        if(known) continue; g_proj[j].h=h; g_proj[j].t=now;
+        if(p && hb_read(p+0xC0,&own,4)) for(int k=0;k<np;k++) if(pl[k].unit==own){ StTrack*t=st_track(&pl[k]); if(t) t->shots++; break; } }
+    // players: the engine's player table (a player between lives has no live biped)
     sb_put(s,",\"players\":["); int first=1;
-    for(int i=0;i<hi;i++){ const uint8_t*e=tab+i*0x18; if(!*(const uint16_t*)e || e[3]!=0) continue; uint64_t p=*(const uint64_t*)(e+0x10);
-        static uint8_t d[0x380]; if(!p || !hb_read(p,d,sizeof d)) continue;
-        uint32_t h=((uint32_t)*(const uint16_t*)e<<16)|(uint32_t)i; const char*name=0; for(int k=0;k<np;k++) if(pl[k].unit==h){ name=pl[k].name; break; }
-        if(!name && !getenv("PELOAD_STATS_ALL_BIPEDS")) continue;   // AI / leftover bodies
-        const float*c=(const float*)(d+0x1c), *o=(const float*)(d+0x50), *v=(const float*)(d+0x74);
-        int dead=(*(const uint32_t*)(d+0x110)>>2)&1, team=*(const int32_t*)(d+0x174), seat=*(const int16_t*)(d+0x24E), ws=*(const int8_t*)(d+0x262);
-        float hp=dead?0:*(const float*)(d+0xF4), sh=dead?0:*(const float*)(d+0xF8), camo=*(const float*)(d+0x360);
-        const uint32_t*wp=(const uint32_t*)(d+0x268); const int8_t*gr=(const int8_t*)(d+0x294); uint32_t parent=*(const uint32_t*)(d+0x10);
-        int you=0; if(camok){ float dx=c[0]-cam[0],dy=c[1]-cam[1],dz=c[2]-cam[2]; you = dx*dx+dy*dy+dz*dz < (c[3]+0.3f)*(c[3]+0.3f); }
-        sb_put(s,"%s{\"name\":",first?"":","); first=0; sb_str(s,name?name:"");
+    for(int k=0;k<np;k++){ StTrack*t=st_track(&pl[k]); uint32_t h=pl[k].unit; uint64_t p=ST_DATUM(h); static uint8_t d[0x380];
+        int have = p && ST_TYPE(h)==0 && hb_read(p,d,sizeof d); int dead = !have || ((*(const uint32_t*)(d+0x110)>>2)&1);
+        // world-space centre (the origin at +0x50 is vehicle-relative when seated)
+        const float*o=have?(const float*)(d+0x1c):(t?t->pos:(const float[3]){0,0,0}); float spd=0; int team=have?*(const int32_t*)(d+0x174):(t?t->team:-1);
+        if(have){ const float*v=(const float*)(d+0x74); spd=sqrtf(v[0]*v[0]+v[1]*v[1]+v[2]*v[2]); }
+        if(t){ if(have && !dead){ if(!t->alive || t->unit!=h){ t->alive=1; t->life_start=now; }
+                   else { float dx=o[0]-t->pos[0],dy=o[1]-t->pos[1],dz=o[2]-t->pos[2],dd=sqrtf(dx*dx+dy*dy+dz*dz); if(dd<20) t->dist+=dd; }
+                   if(spd>t->top_speed && spd<50) t->top_speed=spd; memcpy(t->pos,o,12);
+                   if(g_gameplay_t0){ pthread_mutex_lock(&g_hm_mx); hm_switch(g_hm_cur); hm_cell_add((int32_t)floorf(o[0]/HM_CELL),(int32_t)floorf(o[1]/HM_CELL),1); g_hm.dirty=1; pthread_mutex_unlock(&g_hm_mx); } }
+               else if(t->alive && !have){ t->alive=0; }   // biped gone without us seeing it die
+               t->unit=h; if(team>=0) t->team=team; }
+        int you=0; if(have && camok){ const float*c=(const float*)(d+0x1c); float dx=c[0]-cam[0],dy=c[1]-cam[1],dz=c[2]-cam[2]; you = dx*dx+dy*dy+dz*dz < (c[3]+0.3f)*(c[3]+0.3f); }
+        sb_put(s,"%s{\"name\":",first?"":","); first=0; sb_str(s,pl[k].name); sb_put(s,",\"slot\":%d",pl[k].slot);
         sb_put(s,",\"handle\":\"%08x\",\"team\":%d,\"team_name\":\"%s\",\"you\":%s,\"alive\":%s,\"health\":%.3f,\"shield\":%.3f,\"camo\":%.3f",
-               h,team,(team>=0&&team<8)?teams[team]:"none",you?"true":"false",dead?"false":"true",hp,sh,camo);
-        sb_put(s,",\"weapon\":"); { uint64_t wd=(ws>=0&&ws<4)?ST_DATUM(wp[ws]):0; uint32_t def=0; if(wd && hb_read(wd,&def,4)) st_tag(s,def); else sb_put(s,"null"); }
-        sb_put(s,",\"weapons\":["); for(int w=0,fw=1;w<4;w++){ uint64_t wd=ST_DATUM(wp[w]); uint32_t def=0; if(!wd || !hb_read(wd,&def,4)) continue; sb_put(s,"%s",fw?"":","); fw=0; st_tag(s,def); } sb_put(s,"]");
-        sb_put(s,",\"grenades\":{\"frag\":%d,\"plasma\":%d,\"spike\":%d,\"firebomb\":%d}",gr[0],gr[1],gr[2],gr[3]);
-        sb_put(s,",\"vehicle\":"); { uint64_t vd=parent!=0xFFFFFFFFu?ST_DATUM(parent):0; uint32_t def=0; if(vd && hb_read(vd,&def,4)){ st_tag(s,def); sb_put(s,",\"seat\":%d",seat); } else sb_put(s,"null"); }
-        sb_put(s,",\"pos\":"); sb_f3(s,o); sb_put(s,",\"speed\":%.2f}",sqrtf(v[0]*v[0]+v[1]*v[1]+v[2]*v[2])); }
+               h,team,(team>=0&&team<8)?teams[team]:"none",you?"true":"false",dead?"false":"true",dead?0:*(const float*)(d+0xF4),dead?0:*(const float*)(d+0xF8),have?*(const float*)(d+0x360):0);
+        sb_put(s,",\"weapon\":");
+        if(have && !dead){ int ws=*(const int8_t*)(d+0x262); const uint32_t*wp=(const uint32_t*)(d+0x268); uint64_t wd=(ws>=0&&ws<4)?ST_DATUM(wp[ws]):0; uint32_t def=0; if(wd && hb_read(wd,&def,4)) st_tag(s,def); else sb_put(s,"null");
+            sb_put(s,",\"weapons\":["); for(int w=0,fw=1;w<4;w++){ uint64_t wd2=ST_DATUM(wp[w]); uint32_t df=0; if(!wd2 || !hb_read(wd2,&df,4)) continue; sb_put(s,"%s",fw?"":","); fw=0; st_tag(s,df); } sb_put(s,"]");
+            const int8_t*gr=(const int8_t*)(d+0x294); sb_put(s,",\"grenades\":{\"frag\":%d,\"plasma\":%d,\"spike\":%d,\"firebomb\":%d}",gr[0],gr[1],gr[2],gr[3]);
+            uint32_t parent=*(const uint32_t*)(d+0x10); sb_put(s,",\"vehicle\":"); { uint64_t vd=parent!=0xFFFFFFFFu?ST_DATUM(parent):0; uint32_t df=0; if(vd && hb_read(vd,&df,4)){ st_tag(s,df); sb_put(s,",\"seat\":%d",*(const int16_t*)(d+0x24E)); } else sb_put(s,"null"); }
+            const float*fw=(const float*)(d+0x5c); sb_put(s,",\"facing\":%.0f",atan2f(fw[1],fw[0])*57.2958f); }
+        else sb_put(s,"null,\"weapons\":[],\"grenades\":{\"frag\":0,\"plasma\":0,\"spike\":0,\"firebomb\":0},\"vehicle\":null");
+        sb_put(s,",\"pos\":"); sb_f3(s,o); sb_put(s,",\"speed\":%.2f",spd);
+        if(t) sb_put(s,",\"deaths\":%d,\"shots\":%d,\"life\":%.1f,\"longest_life\":%.1f,\"distance\":%.1f,\"top_speed\":%.2f",t->deaths,t->shots,t->alive?now-t->life_start:0.0,
+                     t->longest>(t->alive?now-t->life_start:0)?t->longest:(t->alive?now-t->life_start:0),t->dist,t->top_speed);
+        sb_put(s,"}"); }
     sb_put(s,"]");
     // vehicles and projectiles in flight
     sb_put(s,",\"vehicles\":["); first=1;
@@ -89,31 +175,20 @@ static void st_snapshot(StBuf*s){
         sb_put(s,",\"owner\":"); sb_str(s,on?on:""); sb_put(s,",\"pos\":"); sb_f3(s,(const float*)(d+0x50)); sb_put(s,",\"speed\":%.1f}",sqrtf(v[0]*v[0]+v[1]*v[1]+v[2]*v[2])); }
     sb_put(s,"]}");
     #undef ST_DATUM
+    #undef ST_TYPE
 }
 static void* st_snap_thread(void*a){ (void)a; pthread_setname_np("shim-stats-snap");
     for(;;){ StBuf s={0}; st_snapshot(&s); if(s.b){ pthread_mutex_lock(&g_st_mx); free(g_st_json); g_st_json=s.b; g_st_len=s.n; g_st_seq++; pthread_cond_broadcast(&g_st_cv); pthread_mutex_unlock(&g_st_mx); }
         usleep(100000); }
     return 0; }
 
-static const char g_st_page[]=
-"<!doctype html><html><head><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><title>Reclaimer live stats</title><style>"
-":root{color-scheme:dark}body{margin:0;padding:16px;background:#111;color:#ddd;font:13px/1.4 -apple-system,system-ui,sans-serif}"
-"h1{font-size:16px;margin:0 0 8px}#hd{color:#999;margin-bottom:10px}table{border-collapse:collapse;width:100%}th,td{text-align:left;padding:4px 8px;border-bottom:1px solid #2a2a2a;white-space:nowrap}"
-"th{color:#999;font-weight:500}.bar{display:inline-block;width:70px;height:8px;background:#333;vertical-align:middle;margin-right:6px}.bar i{display:block;height:100%}"
-".dead{opacity:.4}.you td:first-child{font-weight:700}.sw{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:6px;vertical-align:middle}"
-".wrap{overflow-x:auto}</style></head><body><h1>Reclaimer live stats</h1><div id=hd>connecting...</div><div class=wrap><table><thead><tr>"
-"<th>Player</th><th>Shield</th><th>Health</th><th>Weapon</th><th>Grenades</th><th>Vehicle</th><th>Camo</th><th>Speed</th><th>Position</th></tr></thead><tbody id=tb></tbody></table></div>"
-"<script>const C={red:'#e04040',blue:'#4070f0',green:'#40c060',orange:'#f09030',purple:'#a050e0',gold:'#e0c040',brown:'#9a6a40',pink:'#f080c0',none:'#888'};"
-"const E=s=>String(s==null?'':s).replace(/[&<>\"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;'}[c]));"
-"const B=(v,c)=>`<span class=bar><i style='width:${Math.max(0,Math.min(1,v))*100}%;background:${c}'></i></span>${Math.round(v*100)}%`;"
-"const es=new EventSource('/events');es.onmessage=m=>{const d=JSON.parse(m.data);"
-"document.getElementById('hd').textContent=`${d.map||'-'}  |  ${d.in_match?'match time '+d.time.toFixed(0)+' s':'not in a match'}  |  ${d.players.length} players, ${d.vehicles.length} vehicles, ${d.projectiles.length} projectiles in flight`;"
-"const ps=d.players.slice().sort((a,b)=>a.team-b.team||a.name.localeCompare(b.name));"
-"document.getElementById('tb').innerHTML=ps.map(p=>`<tr class='${p.alive?'':'dead'} ${p.you?'you':''}'><td><span class=sw style='background:${C[p.team_name]||'#888'}'></span>${E(p.name)}${p.you?' (you)':''}</td>"
-"<td>${B(p.shield,'#58b8ff')}</td><td>${B(p.health,'#7ddf6a')}</td><td>${E(p.weapon||'')}</td><td>${p.grenades.frag}f ${p.grenades.plasma}p ${p.grenades.spike}s ${p.grenades.firebomb}b</td>"
-"<td>${E(p.vehicle||'')}</td><td>${p.camo>0.01?Math.round(p.camo*100)+'%':''}</td><td>${p.speed.toFixed(1)}</td><td>${p.pos.map(v=>v.toFixed(1)).join(', ')}</td></tr>`).join('');};"
-"es.onerror=()=>{document.getElementById('hd').textContent='disconnected (is the game running?)'};</script></body></html>";
-
+// the page: shim/src/stats_page.html, embedded at build time
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wc23-extensions"
+static const char g_st_page[]={
+#embed "stats_page.html"
+,0};
+#pragma clang diagnostic pop
 static int st_send(int fd,const char*b,size_t n){ while(n){ ssize_t k=send(fd,b,n,0); if(k<=0){ if(k<0&&errno==EINTR) continue; return 0; } b+=k; n-=(size_t)k; } return 1; }
 static void* st_conn(void*a){ int fd=(int)(intptr_t)a; pthread_setname_np("shim-stats-http");
     int one=1; setsockopt(fd,SOL_SOCKET,SO_NOSIGPIPE,&one,sizeof one); setsockopt(fd,IPPROTO_TCP,TCP_NODELAY,&one,sizeof one);
@@ -125,6 +200,10 @@ static void* st_conn(void*a){ int fd=(int)(intptr_t)a; pthread_setname_np("shim-
         if(st_send(fd,h,(size_t)k)) for(unsigned long seen=0;;){ pthread_mutex_lock(&g_st_mx); while(g_st_seq==seen) pthread_cond_wait(&g_st_cv,&g_st_mx);
                 seen=g_st_seq; size_t len=g_st_len; char*j=malloc(len+16); if(j){ memcpy(j,"data: ",6); memcpy(j+6,g_st_json,len); memcpy(j+6+len,"\n\n",2); } pthread_mutex_unlock(&g_st_mx);
                 int ok=j && st_send(fd,j,len+8); free(j); if(!ok) break; } }
+    else if(!strcmp(path,"/heat.json")){
+        StBuf b={0}; hm_json(&b);
+        int k=snprintf(h,sizeof h,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %zu\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n",b.n);
+        if(st_send(fd,h,(size_t)k) && b.n) st_send(fd,b.b,b.n); free(b.b); }
     else if(!strcmp(path,"/stats.json")){
         pthread_mutex_lock(&g_st_mx); size_t len=g_st_len; char*j=malloc(len+1); if(j && g_st_json) memcpy(j,g_st_json,len); else len=0; pthread_mutex_unlock(&g_st_mx);
         int k=snprintf(h,sizeof h,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %zu\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n",len);

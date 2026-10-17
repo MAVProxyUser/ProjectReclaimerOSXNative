@@ -116,7 +116,16 @@ the old cause of one-frame white flashes / exploded skinned geometry), `PELOAD_D
 (occlusion queries), `PELOAD_D3DGL_NOCANON` (identical-bytecode shader sharing).
 Live stats: `PELOAD_STATS_HTTP=<port>` (shim/src/stats.c) -- a loader thread snapshots the object + players tables
 (TLS +0x38 / +0x10; player +0x28 unit, +0x58 UTF-16 name) every 100 ms into JSON; served on 127.0.0.1 (/, /stats.json,
-/events SSE); only the process that loads halo3.dll binds. Seams check: `PELOAD_D3DGL_DFCENSUS` (draws per depth
+/events SSE, /heat.json); only the process that loads halo3.dll binds. Page = shim/src/stats_page.html, embedded with
+#embed at build time. Players come from the players table (slot-keyed tracker: deaths, lives, distance, top speed,
+projectiles fired by owner +0xC0); a death = any biped going alive -> dead (corpses persist, 10 Hz catches it).
+Heatmap per map (switched only when there is data -- menus open campaign maps for scenery): footprint cells (0.5 u)
++ deaths, saved as ~/Library/Application Support/ReclaimerMac/heatmaps/<map>.bin (RHM2). Map collision geometry for
+a real background is in MCC's structure_bsp_tag_resources (resource section), not the sbsp meta -- not decoded yet.
+Mods/Workshop: the client's own `workshop-download --subscribe <PublishedFileId>` helper needs Steam; DepotDownloader
+3.4 does `-app 976730 -pubfile <id>` (+ -filelist / -manifest-only) with the remembered login (-username ...
+-remember-password); the client reads steamapps\workshop\content\976730\<id>\ (ModInfo.json) and checks each file
+against the server's SHA-256 manifest. Seams check: `PELOAD_D3DGL_DFCENSUS` (draws per depth
 func), `PELOAD_D3DGL_INVARIANT` (invariant gl_Position, opt-in); the main depth buffer is DXGI 19 (D32F_S8, reverse-Z).
 Unfocused/hidden clients are held at 60 fps by the engine; PELOAD_MAX_FPS caps lower (default 30 when hidden).
 Glitch hunting: `PELOAD_D3DGL_COVQ` (+`_COVQ_FRAC`, `_HUGEPROBE=<t>`) per-draw sample counts,

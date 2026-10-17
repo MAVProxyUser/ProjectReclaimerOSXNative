@@ -1,0 +1,133 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Reclaimer live stats</title>
+<style>
+:root{color-scheme:dark;--bg:#111;--panel:#181818;--line:#2a2a2a;--fg:#ddd;--dim:#999;--accent:#58b8ff}
+*{box-sizing:border-box}
+body{margin:0;padding:16px;background:var(--bg);color:var(--fg);font:13px/1.4 -apple-system,system-ui,sans-serif}
+h1{font-size:16px;margin:0 0 4px}h2{font-size:13px;margin:0 0 8px;color:var(--dim);font-weight:500}
+#hd{color:var(--dim);margin-bottom:12px}
+.grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(320px,560px);gap:16px;align-items:start}
+@media (max-width:1000px){.grid{grid-template-columns:minmax(0,1fr)}}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:12px;min-width:0}
+.wrap{overflow-x:auto}
+table{border-collapse:collapse;width:100%}
+th,td{text-align:left;padding:4px 8px;border-bottom:1px solid var(--line);white-space:nowrap}
+th{color:var(--dim);font-weight:500}
+tbody tr{cursor:pointer}tbody tr:hover{background:#222}tbody tr.sel{background:#1d2a38}
+.bar{display:inline-block;width:60px;height:8px;background:#333;vertical-align:middle;margin-right:6px}.bar i{display:block;height:100%}
+.dead{opacity:.45}.you td:first-child{font-weight:700}
+.sw{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:6px;vertical-align:middle}
+canvas{width:100%;height:auto;display:block;background:#0b0b0b;border-radius:4px}
+.ctl{display:flex;flex-wrap:wrap;gap:6px 14px;margin:8px 0 0;color:var(--dim)}
+.ctl label{cursor:pointer}.ctl select{background:#222;color:var(--fg);border:1px solid var(--line);border-radius:4px}
+.legend{display:flex;align-items:center;gap:8px;margin-top:6px;color:var(--dim)}
+.ramp{height:8px;width:140px;border-radius:2px;background:linear-gradient(90deg,#1840ff,#18d0ff,#30e060,#f0e040,#ff3020)}
+#det{position:fixed;right:16px;top:16px;width:340px;max-width:calc(100vw - 32px);max-height:calc(100vh - 32px);overflow:auto;display:none;z-index:5;box-shadow:0 6px 30px #000a}
+#det .x{float:right;cursor:pointer;background:none;border:0;color:var(--dim);font-size:18px;line-height:1}
+#det dl{display:grid;grid-template-columns:auto 1fr;gap:3px 12px;margin:8px 0 0}
+#det dt{color:var(--dim)}#det dd{margin:0;overflow-wrap:anywhere}
+.note{color:var(--dim);font-size:12px;margin-top:8px}
+</style></head>
+<body>
+<h1>Reclaimer live stats</h1><div id="hd">connecting...</div>
+<div class="grid">
+ <div class="panel"><div class="wrap"><table><thead><tr>
+  <th>Player</th><th>Shield</th><th>Health</th><th>Weapon</th><th>Deaths</th><th>Grenades</th><th>Vehicle</th><th>Speed</th></tr></thead>
+  <tbody id="tb"></tbody></table></div>
+  <div class="note">Click a player for details. Their deaths are ringed on the heatmap.</div></div>
+ <div class="panel"><h2 id="mt">Death heatmap</h2><canvas id="cv" width="560" height="560"></canvas>
+  <div class="ctl">
+   <label>Deaths <select id="scope"><option value="match">this match</option><option value="all">all matches</option></select></label>
+   <label><input type="checkbox" id="fp" checked> where players go</label>
+   <label><input type="checkbox" id="pd" checked> players now</label>
+  </div>
+  <div class="legend"><span>fewer</span><span class="ramp"></span><span>more deaths</span><span id="dc"></span></div></div>
+</div>
+<div id="det" class="panel"></div>
+<script>
+const C={red:'#e04040',blue:'#4070f0',green:'#40c060',orange:'#f09030',purple:'#a050e0',gold:'#e0c040',brown:'#9a6a40',pink:'#f080c0',none:'#888'};
+const TN=['red','blue','green','orange','purple','gold','brown','pink'];
+const E=s=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const B=(v,c)=>`<span class="bar"><i style="width:${Math.max(0,Math.min(1,v))*100}%;background:${c}"></i></span>${Math.round(v*100)}%`;
+const fmtT=s=>{s=Math.round(s||0);return s>=60?Math.floor(s/60)+'m '+(s%60)+'s':s+'s'};
+let snap=null, heat=null, sel=null;   // sel = the selected player's slot
+// ---- table + details ----
+function renderTable(){
+  const ps=snap.players.slice().sort((a,b)=>a.team-b.team||a.name.localeCompare(b.name));
+  document.getElementById('tb').innerHTML=ps.map(p=>`<tr data-s="${p.slot}" class="${p.alive?'':'dead'} ${p.you?'you':''} ${p.slot===sel?'sel':''}">
+   <td><span class="sw" style="background:${C[p.team_name]||'#888'}"></span>${E(p.name)}${p.you?' (you)':''}</td>
+   <td>${B(p.shield,'#58b8ff')}</td><td>${B(p.health,'#7ddf6a')}</td><td>${E(p.weapon||(p.alive?'':'respawning'))}</td>
+   <td>${p.deaths??''}</td><td>${p.grenades.frag}f ${p.grenades.plasma}p ${p.grenades.spike}s ${p.grenades.firebomb}b</td>
+   <td>${E(p.vehicle||'')}</td><td>${p.speed.toFixed(1)}</td></tr>`).join('');
+}
+// pointerdown, not click: the rows are rebuilt 10 times a second, so a click's down and up land on different rows
+document.getElementById('tb').addEventListener('pointerdown',e=>{const tr=e.target.closest('tr');if(!tr)return;const s=+tr.dataset.s;sel=(sel===s)?null:s;renderTable();renderDet();drawMap()});
+function renderDet(){
+  const el=document.getElementById('det'); if(!sel||!snap){el.style.display='none';return}
+  const p=snap.players.find(q=>q.slot===sel); if(!p){el.innerHTML=`<button class="x" onclick="closeDet()">×</button><div class="note">that player left the game</div>`;el.style.display='block';return}
+  const myDeaths=heat?heat.deaths.filter(d=>d[7]===sel&&d[4]===p.name&&(scope()==='all'||d[5]===heat.match)).length:0;
+  const rows=[['Team',`<span class="sw" style="background:${C[p.team_name]||'#888'}"></span>${E(p.team_name)}`],['Status',p.alive?'alive':'dead / respawning'],
+   ['Shield',B(p.shield,'#58b8ff')],['Health',B(p.health,'#7ddf6a')],['Active camo',p.camo>0.01?Math.round(p.camo*100)+'%':'off'],
+   ['Weapon',E(p.weapon||'')],['Carrying',E((p.weapons||[]).join(', '))],
+   ['Grenades',`frag ${p.grenades.frag}, plasma ${p.grenades.plasma}, spike ${p.grenades.spike}, firebomb ${p.grenades.firebomb}`],
+   ['Vehicle',p.vehicle?E(p.vehicle)+(p.seat!=null?` (seat ${p.seat})`:''):'on foot'],
+   ['Deaths',`${p.deaths??0} this match`+(scope()==='all'?` · ${myDeaths} on the map`:'')],['This life',fmtT(p.life)],['Longest life',fmtT(p.longest_life)],
+   ['Distance',`${(p.distance||0).toFixed(0)} units`],['Speed',`${p.speed.toFixed(2)} (top ${(p.top_speed||0).toFixed(2)})`],
+   ['Projectiles fired',p.shots??0],['Facing',p.facing!=null?p.facing+'°':''],['Position',p.pos.map(v=>v.toFixed(1)).join(', ')],['Object',p.handle]];
+  el.innerHTML=`<button class="x" onclick="closeDet()" aria-label="Close">×</button><b>${E(p.name)}${p.you?' (you)':''}</b><dl>${rows.map(r=>`<dt>${r[0]}</dt><dd>${r[1]}</dd>`).join('')}</dl>
+   <div class="note">Projectiles fired counts grenades, rockets and plasma; most bullets live too briefly to be seen.</div>`;
+  el.style.display='block';
+}
+function closeDet(){sel=null;renderTable();renderDet();drawMap()}
+// ---- heatmap ----
+const cv=document.getElementById('cv'), cx=cv.getContext('2d'); let base=null, heatImg=null, view=null;
+const scope=()=>document.getElementById('scope').value;
+const LUT=(()=>{const st=[[0,[24,64,255]],[.25,[24,208,255]],[.5,[48,224,96]],[.75,[240,224,64]],[1,[255,48,32]]],o=[];
+  for(let i=0;i<256;i++){const t=i/255;let k=0;while(k<st.length-2&&t>st[k+1][0])k++;const [t0,c0]=st[k],[t1,c1]=st[k+1],f=(t-t0)/(t1-t0);
+   o.push([0,1,2].map(j=>Math.round(c0[j]+(c1[j]-c0[j])*f)).concat([Math.round((0.25+0.75*Math.min(1,t*1.6))*215)]))}return o})();
+function buildLayers(){
+  if(!heat) return; const W=cv.width,H=cv.height, cells=heat.cells, cs=heat.cell;
+  let x0=1e9,y0=1e9,x1=-1e9,y1=-1e9,maxn=1;
+  for(let i=0;i<cells.length;i+=3){const x=cells[i],y=cells[i+1];if(x<x0)x0=x;if(x>x1)x1=x;if(y<y0)y0=y;if(y>y1)y1=y;if(cells[i+2]>maxn)maxn=cells[i+2]}
+  const ds=heat.deaths.filter(d=>scope()==='all'||d[5]===heat.match);
+  for(const d of heat.deaths){const x=Math.floor(d[0]/cs),y=Math.floor(d[1]/cs);if(x<x0)x0=x;if(x>x1)x1=x;if(y<y0)y0=y;if(y>y1)y1=y}
+  if(x0>x1){view=null;base=null;heatImg=null;return}
+  const pad=Math.max(4,(x1-x0)*0.04), wx0=(x0-pad)*cs, wy0=(y0-pad)*cs, ww=(x1-x0+2*pad+1)*cs, wh=(y1-y0+2*pad+1)*cs, sc=Math.min(W/ww,H/wh);
+  const ox=(W-ww*sc)/2, oy=(H-wh*sc)/2; view={sc,ox,oy,wx0,wy0,wh};
+  // footprint: grey by log(visits)
+  base=document.createElement('canvas'); base.width=W; base.height=H; const b=base.getContext('2d'); const lm=Math.log(1+maxn), px=Math.max(1,cs*sc);
+  for(let i=0;i<cells.length;i+=3){const v=Math.log(1+cells[i+2])/lm, g=Math.round(45+v*120); b.fillStyle=`rgb(${g},${g},${g})`;
+   const [sx,sy]=toScreen(cells[i]*cs,cells[i+1]*cs+cs); b.fillRect(sx,sy,px+0.5,px+0.5)}
+  // deaths: gaussian splats -> colour ramp
+  const G=new Float32Array(W*H), r=Math.max(3,1.1*sc), r2=r*r, R=Math.ceil(r*3); let mx=0;
+  for(const d of ds){const [sx,sy]=toScreen(d[0],d[1]); const ix=Math.round(sx),iy=Math.round(sy);
+   for(let y=Math.max(0,iy-R);y<Math.min(H,iy+R);y++)for(let x=Math.max(0,ix-R);x<Math.min(W,ix+R);x++){const q=(x-sx)**2+(y-sy)**2;const v=Math.exp(-q/(2*r2));const k=y*W+x;G[k]+=v;if(G[k]>mx)mx=G[k]}}
+  heatImg=document.createElement('canvas'); heatImg.width=W; heatImg.height=H; const h=heatImg.getContext('2d'), im=h.createImageData(W,H);
+  if(mx>0) for(let k=0;k<W*H;k++){if(G[k]<mx*0.04)continue;const c=LUT[Math.min(255,Math.round(Math.sqrt(G[k]/mx)*255))];im.data.set(c,k*4)}
+  h.putImageData(im,0,0);
+  document.getElementById('dc').textContent=`${ds.length} deaths`;
+  document.getElementById('mt').textContent=`Death heatmap — ${heat.map||'?'}`;
+}
+function toScreen(x,y){return [view.ox+(x-view.wx0)*view.sc, view.oy+(view.wh-(y-view.wy0))*view.sc]}
+function drawMap(){
+  cx.fillStyle='#0b0b0b'; cx.fillRect(0,0,cv.width,cv.height);
+  if(!view){cx.fillStyle='#777';cx.font='14px system-ui';cx.textAlign='center';cx.fillText('the map fills in as players move and die',cv.width/2,cv.height/2);return}
+  if(document.getElementById('fp').checked&&base) cx.drawImage(base,0,0);
+  if(heatImg) cx.drawImage(heatImg,0,0);
+  const sp=sel!=null&&snap?snap.players.find(q=>q.slot===sel):null;
+  if(sp&&heat){cx.strokeStyle='#fff';cx.lineWidth=1.5;for(const d of heat.deaths){if(d[7]!==sel||d[4]!==sp.name||(scope()!=='all'&&d[5]!==heat.match))continue;const [x,y]=toScreen(d[0],d[1]);cx.beginPath();cx.arc(x,y,6,0,7);cx.stroke()}}
+  if(document.getElementById('pd').checked&&snap) for(const p of snap.players){ if(!p.alive)continue; const [x,y]=toScreen(p.pos[0],p.pos[1]);
+   cx.fillStyle=C[p.team_name]||'#888'; cx.beginPath(); cx.arc(x,y,p.slot===sel?6:3.5,0,7); cx.fill();
+   if(p.slot===sel||p.you){cx.strokeStyle=p.you?'#fff':'#ff0';cx.lineWidth=2;cx.stroke()} }
+}
+async function pollHeat(){ try{ heat=await (await fetch('/heat.json')).json(); buildLayers(); drawMap(); }catch(e){} setTimeout(pollHeat,4000) }
+for(const id of ['scope','fp','pd']) document.getElementById(id).addEventListener('change',()=>{buildLayers();drawMap();renderDet()});
+// ---- live snapshots ----
+const es=new EventSource('/events');
+es.onmessage=m=>{snap=JSON.parse(m.data);
+  document.getElementById('hd').textContent=`${snap.map||'-'}  |  ${snap.in_match?'match time '+fmtT(snap.time):'not in a match'}  |  ${snap.players.length} players, ${snap.vehicles.length} vehicles, ${snap.projectiles.length} projectiles in flight`;
+  renderTable(); renderDet(); drawMap()};
+es.onerror=()=>{document.getElementById('hd').textContent='disconnected (is the game running with PELOAD_STATS_HTTP?)'};
+pollHeat();
+</script></body></html>
