@@ -129,6 +129,52 @@ process maps the ring, creates the GL context and replays the calls natively.
 - Effort: multiple days. The `G` table has ~150 entry points, so generate the encoders and decoders
   from one signature list.
 
+#### Experiment 2026-10-17: shim/tools/glring (a two-process GL stream)
+
+`bash shim/tools/glring.sh [draws] [frames] [textures/draw] [cbs/draw]`: glbench's draw stream (texture + sampler
+binds, 256-byte uniform uploads, a program change every 4 draws, blend/depth toggles, indexed draws into a 1080p FBO),
+encoded by an x86_64 producer (Rosetta, like the loader) into a 64 MB shared-memory ring and replayed by a native arm64
+consumer that owns the GL context; up to 2 frames in flight. First numbers (1000 draws, 6 textures + 2 cbs per draw;
+measured while a game ran, to be repeated on an idle machine):
+
+| | us per draw |
+|---|---|
+| in-process x86_64 (today's loader) | 3.58 |
+| in-process arm64 | 2.44 |
+| ring: producer encoding (x86_64) | **0.18** |
+| ring: consumer replay (arm64, Apple's driver) | 2.45 |
+| ring: end to end, both in parallel | 2.72 (1.3x) |
+
+What it says for the real helper: the loader's GL thread would spend ~0.2 us per draw on GL instead of ~3.6 (Apple's
+driver under Rosetta), so its D3D11->GL translation (~2.5-3 us per draw in BTB) and the native driver (~2.4 us) run in
+parallel instead of in sequence: in BTB-sized frames (~4,000 draws, ~6.3 us per draw today) the bound becomes the
+larger of the two, roughly 2x. The ring and the encoding are cheap; the remaining work is breadth (every G entry point),
+object names, the synchronous calls, buffer/texture data and presentation (below).
+
+Plan, in steps that each stay usable behind PELOAD_GL_HELPER (0 = in-process, the default until it wins an in-game A/B):
+1. Generate the encoder/decoder pair from one list of the G table's ~150 signatures (scalars inline; pointer arguments
+   with a size rule: BufferSubData/TexImage*/UniformBlock data, ShaderSource strings).
+2. Names: the loader allocates GL names itself (Gen*/Create* answered locally), the helper maps them.
+3. Synchronous calls (GetUniformLocation, GetProgramiv, link status, query results, fences, ReadPixels): a round trip
+   that waits for the helper; they happen at link time, for occlusion queries (already harvested in batches) and
+   captures.
+4. Streaming data: the loader's uniform ring and dynamic buffers become shared memory the helper maps as client storage,
+   so constant uploads cost a memcpy, not a ring copy.
+5. Presentation: the helper renders into an IOSurface, the game window shows it through a CALayer (no copy); the
+   present queue (pq_*) moves into the helper.
+6. In-game A/B (PELOAD_AB=helper:<secs>) in a 60-player BTB and a 100-player game.
+
+Inventory of the loader's G table (100 entry points, D3DGLApi in peload.c) by how the helper carries them:
+
+| Kind | Entry points | Transport |
+|---|---|---|
+| state and draws, scalar arguments (the hot path) | ActiveTexture BindTexture TexParameteri BindSampler SamplerParameteri/f BindFramebuffer BindVertexArray BindBuffer BindBufferRange VertexAttribPointer VertexAttribIPointer VertexAttribDivisor Enable/DisableVertexAttribArray UseProgram BindProgramPipeline UseProgramStages UniformBlockBinding Viewport Scissor Enable Disable Enablei Disablei BlendFunc BlendFuncSeparate(i) BlendEquationSeparate(i) BlendColor ColorMask(i) DepthMask DepthFunc CullFace FrontFace StencilFuncSeparate StencilOpSeparate StencilMask PrimitiveRestartIndex ClearColor ClearDepth ClearStencil Clear DrawArrays(Instanced) DrawElements(Instanced)(BaseVertex) BlitFramebuffer FramebufferTexture2D FramebufferRenderbuffer RenderbufferStorage ReadBuffer DrawBuffer BeginQuery EndQuery Flush | fixed-size records in the ring |
+| small arrays | ProgramUniform4fv ProgramUniform1i SamplerParameterfv DrawBuffers | inline payload |
+| names | GenTextures GenBuffers GenVertexArrays GenFramebuffers GenRenderbuffers GenQueries GenSamplers GenProgramPipelines CreateShader CreateProgram | allocated by the loader, mapped by the helper |
+| data | TexImage2D BufferData BufferSubData TexBuffer ShaderSource MapBufferRange/UnmapBuffer | ring payload (small) or shared memory (uniform ring, dynamic buffers, big textures) |
+| synchronous | GetError GetShaderiv GetShaderInfoLog GetProgramiv GetProgramInfoLog GetUniformLocation GetUniformBlockIndex CheckFramebufferStatus GetQueryObjectiv/ui64v ReadPixels Finish | round trip (link time, query harvest, captures) |
+| setup | AttachShader DetachShader DeleteShader CompileShader LinkProgram ProgramParameteri | records; LinkProgram's status read back lazily |
+
 ### 2. Submission thread inside the process (DONE 2026-10-17: +10-15% in 60-100 player games, -7% alone; `auto` mode)
 
 Run the whole D3D11→GL translation on a GL thread; the engine's `ID3D11DeviceContext` calls only
