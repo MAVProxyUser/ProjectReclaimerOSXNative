@@ -9217,7 +9217,10 @@ static void apply_patch(uint8_t*base,uint64_t rva,const uint8_t*bytes,int n){
 //                  and the drop dispatch so it takes the no-drop path that just releases the borrow.
 //   xaudio         the client's XAudio2 integrity check (4 halo3 callback slots must point into the retail
 //                  XAudio2) fails against our XAudio2 shim; NOP its 4 mismatch branches.
-//   watchdog       the worker's 45 s startup deadline parks the input thread ("lost control"); never take it.
+//   watchdog       the worker's "engine hang watchdog" (exe+0x793f40 in v0.9.18) waits on the engine thread and gives up
+//                  on it ("still running after N seconds", N = 15/45/240) when RECLAIMER_LOCAL_RUNTIME asks for a
+//                  time-limited run: unset (the direct-match probe, mode 2) or "<role>:<seconds>" with seconds > 0.
+//                  The menu runtime passes "menu:0" and never arms it; only the direct path needs this patch.
 // PELOAD_RECLAIMER_PATCHES=all | comma list of names enables the optional ones (play.sh: all).
 typedef struct { const char*name; int dflt; const char*sig; int n; int off[2]; const char*orig[2]; const char*repl[2]; } SigPatch;
 static const SigPatch g_sigpatches[]={

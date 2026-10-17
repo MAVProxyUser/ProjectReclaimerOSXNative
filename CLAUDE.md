@@ -38,8 +38,9 @@ GPU particles (CPU compute interpreter, `shim/src/dxbc_cpu.c`), the loading scre
 (XAudio2 on CoreAudio, `shim/src/xaudio.c`), controller (XInput on GameController.framework, pitch
 inverted by default) and keyboard/mouse (Raw Input from NSEvents, `shim/src/wininput.c`; click the
 window to capture, F1 releases). The window title shows engine fps / draws per frame; the window is
-resizable and full-screen capable. `play.sh` adds `exe+65ddf9:eb` (skips the client's 45 s startup
-watchdog that otherwise parks the input thread). Key A/B switches: `PELOAD_AUDIO=0`, `PELOAD_INVERT_PITCH=0`,
+resizable and full-screen capable. `play.sh` sets PELOAD_RECLAIMER_PATCHES=all (signature patches, peload.c
+g_sigpatches); its `watchdog` patch only matters for RECLAIMER_DIRECT=1: the worker's engine hang watchdog arms
+only when RECLAIMER_LOCAL_RUNTIME is unset or "<role>:<secs>" with secs > 0 (menu mode passes "menu:0"). Key A/B switches: `PELOAD_AUDIO=0`, `PELOAD_INVERT_PITCH=0`,
 `PELOAD_D3DGL_NOPQ/NOSTATECACHE/NORING/NOUBO/NOSRGB/NOCMP/NOYFLIP/NODEPTH`, `PELOAD_NOCSCPU`.
 Diagnostics: `PELOAD_FPS_LOG`, `PELOAD_D3DGL_PROF`, `PELOAD_SAMPLE=<us>`, `PELOAD_TRACE_FAULT`,
 `PELOAD_D3DGL_SHOTWIN=<n>` (+`_FROM/_TO` seconds after gameplay start; capture names carry the engine
