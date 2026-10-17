@@ -9,6 +9,7 @@
 #define GL_SILENCE_DEPRECATION 1
 #include "glh_shm.h"
 #include <spawn.h>
+#include <os/os_sync_wait_on_address.h>
 #include <sys/mman.h>
 #include <mach-o/dyld.h>
 #include <IOSurface/IOSurface.h>
@@ -22,15 +23,24 @@ static pid_t g_glh_pid; static int g_glh_wakefd=-1;
 static pthread_mutex_t g_glh_mx=PTHREAD_RECURSIVE_MUTEX_INITIALIZER;   // one writer at a time (render-context users also hold g_glmx)
 static uint64_t g_glh_wpos;              // next write position (only under g_glh_mx)
 static uint64_t g_glh_syncseq;           // synchronous calls sent
-static unsigned long g_glh_nsync, g_glh_ncmd; static double g_glh_syncwait_s, g_glh_fullwait_s;
+static unsigned long g_glh_nsync, g_glh_ncmd; static double g_glh_syncwait_s, g_glh_fullwait_s, g_glh_pqwait_s;
 
 static int glh_wanted(void){ if(g_glh_want<0){ const char*e=getenv("PELOAD_GL_HELPER"); g_glh_want=(e&&atoi(e))?1:0; } return g_glh_want; }
 static void* glh_real_dlsym(const char*n){ return dlsym(RTLD_DEFAULT,n); }
 static inline int glh_active(void){ return g_glh_on && g_d3dgl_cgl && CGLGetCurrentContext()==g_d3dgl_cgl; }
 
 // ---- the ring ----------------------------------------------------------------------------------------------------------
-static void glh_kick(void){ if(atomic_load(&g_glh->helper_sleeping) && g_glh_wakefd>=0){   // seq_cst: pairs with the helper's sleep check
-    char b=1; (void)!write(g_glh_wakefd,&b,1); } }
+// wake the helper when it sleeps: a shared-memory wait/wake (no file descriptor: a pipe end was closed under us twice)
+// the helper owns every GL object of the render context: if it dies the game cannot go on (no frozen window instead)
+static void glh_check_alive(void){ static double tl; double now=mono_s(); if(now-tl<0.25) return; tl=now;
+    int st=0; pid_t r=waitpid(g_glh_pid,&st,WNOHANG); if(r==0 || (r<0 && errno!=ECHILD)) return; if(r<0 && !kill(g_glh_pid,0)) return;
+    char m[400]; snprintf(m,sizeof m,"  [glh] the native GL helper (pid %d) exited%s -- the game cannot continue without it. A crash report is in "
+        "/Library/Logs/DiagnosticReports/glhelper-*.ips. Restart the game, or play without the helper: PELOAD_GL_HELPER=0\n",(int)g_glh_pid,
+        r>0&&WIFSIGNALED(st)?" (crashed)":"");
+    (void)!write(2,m,strlen(m)); _exit(70); }
+static void glh_kick(void){ if(atomic_load(&g_glh->helper_sleeping)){   // seq_cst: pairs with the helper's sleep check
+    atomic_fetch_add(&g_glh->wake_seq,1); os_sync_wake_by_address_any((void*)&g_glh->wake_seq,4,OS_SYNC_WAKE_BY_ADDRESS_SHARED); } }
+
 static uint8_t* glh_begin(uint32_t op,uint64_t len){
     if(!g_glh) return 0;
     len=GLH_AL8(len); if(len>GLH_RING/2){ static int w; if(w++<5){ char m[120]; int k=snprintf(m,sizeof m,"  [glh] command %u of %llu bytes is too large: dropped\n",op,(unsigned long long)len); (void)!write(2,m,k); } return 0; }
@@ -38,11 +48,11 @@ static uint8_t* glh_begin(uint32_t op,uint64_t len){
     uint64_t off=g_glh_wpos%GLH_RING;
     if(off+len>GLH_RING){   // does not fit before the end: pad to the start
         uint64_t pad=GLH_RING-off;
-        while(g_glh_wpos+pad-atomic_load_explicit(&g_glh->tail,memory_order_acquire)>GLH_RING){ glh_kick(); sched_yield(); }
+        while(g_glh_wpos+pad-atomic_load_explicit(&g_glh->tail,memory_order_acquire)>GLH_RING){ glh_kick(); glh_check_alive(); sched_yield(); }
         uint8_t*w=glh_ring(g_glh)+off; ((uint16_t*)w)[0]=GLH_X_WRAP; ((uint16_t*)w)[1]=0; ((uint32_t*)w)[1]=(uint32_t)(pad>0xFFFFFFFFull?0:pad);
         g_glh_wpos+=pad; atomic_store_explicit(&g_glh->head,g_glh_wpos,memory_order_release); off=0; }
     if(g_glh_wpos+len-atomic_load_explicit(&g_glh->tail,memory_order_acquire)>GLH_RING){ double t0=mono_s();
-        while(g_glh_wpos+len-atomic_load_explicit(&g_glh->tail,memory_order_acquire)>GLH_RING){ glh_kick(); usleep(50); }
+        while(g_glh_wpos+len-atomic_load_explicit(&g_glh->tail,memory_order_acquire)>GLH_RING){ glh_kick(); glh_check_alive(); usleep(50); }
         g_glh_fullwait_s+=mono_s()-t0; }
     uint8_t*c=glh_ring(g_glh)+off; ((uint16_t*)c)[0]=(uint16_t)op; ((uint16_t*)c)[1]=0; ((uint32_t*)c)[1]=(uint32_t)len;
     return c; }
@@ -54,7 +64,7 @@ static const uint8_t* glh_end_sync(uint8_t*c,uint64_t*rv){ uint32_t len=((uint32
     double t0=mono_s(); int spins=0;
     while(atomic_load_explicit(&g_glh->sync_done,memory_order_acquire)<want){
         if(atomic_load(&g_glh->failed)) break;
-        if(++spins<2000) sched_yield(); else usleep(20); }
+        if(++spins<2000) sched_yield(); else { usleep(20); glh_check_alive(); } }
     g_glh_syncwait_s+=mono_s()-t0; g_glh_nsync++;
     if(rv) *rv=g_glh->sync_rv; return glh_reply(g_glh); }
 static void glh_sync_release(void){ pthread_mutex_unlock(&g_glh_mx); }
@@ -183,6 +193,21 @@ static void s_glGetQueryObjectiv(GLuint id,GLenum pn,GLint*p){ if(!glh_active())
 static void s_glGetQueryObjectui64v(GLuint id,GLenum pn,GLuint64*p){ if(!glh_active()){ GLR.glGetQueryObjectui64v(id,pn,p); return; }
     uint64_t v=0; if(pn==0x8867){ *p=glh_query_ready(id,0,0); return; } glh_query_ready(id,&v,1); *p=v; }
 
+// link time: every uniform location / block index of a program in ONE round trip (a link used to make ~128 of them)
+static int glh_locs(unsigned prog,const char (*names)[24],int n,int firstblk,int*out){
+    if(!glh_active()) return 0;
+    uint64_t tot=0; for(int i=0;i<n;i++) tot+=strlen(names[i])+1;
+    uint8_t*c=glh_begin(GLH_X_LOCS,32+GLH_AL8(tot)); if(!c) return 0; uint64_t*s=(uint64_t*)(c+8); s[0]=prog; s[1]=(uint64_t)n; s[2]=(uint64_t)firstblk;
+    char*p=(char*)(c+32); for(int i=0;i<n;i++){ size_t l=strlen(names[i])+1; memcpy(p,names[i],l); p+=l; }
+    uint64_t rv; const uint8_t*r=glh_end_sync(c,&rv); if(r) memcpy(out,r,(size_t)n*4); glh_sync_release(); return r!=0; }
+// asynchronous readback of a PIXEL_PACK buffer (whose ReadPixels ran frames ago): the helper copies it into mailbox
+// slot `slot` (up to 4 MB each) and posts the ticket; glh_rb_ready says when that ticket is in
+static uint64_t g_glh_rb_ticket;
+static uint64_t glh_rb_request(unsigned buf,uint64_t bytes,int slot){ if(bytes>(4u<<20)) return 0;
+    uint8_t*c=glh_begin(GLH_X_READBACK,40); if(!c) return 0; uint64_t*s=(uint64_t*)(c+8); uint64_t t=++g_glh_rb_ticket;
+    s[0]=buf; s[1]=bytes; s[2]=(uint64_t)slot*(4u<<20); s[3]=t; glh_end(c); return t; }
+static const uint8_t* glh_rb_ready(uint64_t ticket,int slot){ if(!g_glh||!ticket||atomic_load_explicit(&g_glh->rb_done,memory_order_acquire)<ticket) return 0;
+    return glh_reply(g_glh)+GLH_MAILBOX+(uint64_t)slot*(4u<<20); }
 // ---- start-up ----------------------------------------------------------------------------------------------------------
 static void glh_log(const char*m){ (void)!write(2,m,strlen(m)); }
 static int glh_start(void){
@@ -225,7 +250,8 @@ static void glh_pq_publish(unsigned srcfbo,int vw,int vh,int W,int H,unsigned lo
     s[0]=srcfbo; s[1]=(uint64_t)vw; s[2]=(uint64_t)vh; s[3]=(uint64_t)W; s[4]=(uint64_t)H; s[5]=frameno; glh_end(c);
     atomic_store(&g_glh->frames_sent,sent);
     // stay at most 2 frames ahead of the helper (latency, and the frames in flight)
-    double t0=mono_s(); while(sent>atomic_load(&g_glh->frames_done)+2 && !atomic_load(&g_glh->failed) && mono_s()-t0<1.0){ glh_kick(); usleep(100); } }
+    double t0=mono_s(); while(sent>atomic_load(&g_glh->frames_done)+2 && !atomic_load(&g_glh->failed) && mono_s()-t0<1.0){ glh_kick(); glh_check_alive(); usleep(100); }
+    g_glh_pqwait_s+=mono_s()-t0; }
 // present side (window context current): wait (up to ms) for a frame newer than *seen; bind it as a rectangle texture
 static unsigned g_glh_ptex[3]; static uint32_t g_glh_pios[3]; static int g_glh_pw, g_glh_ph;
 static int glh_pq_acquire(unsigned long*seen,int ms,unsigned*tex,int*w,int*h){
@@ -248,7 +274,8 @@ static int glh_pq_acquire(unsigned long*seen,int ms,unsigned*tex,int*w,int*h){
 static void glh_pq_release(void){ atomic_store(&g_glh->pq_reading,-1); }
 // [glh] line for PELOAD_D3DGL_PROF / PELOAD_GLH_STATS: commands, synchronous round trips and the time spent waiting
 static void glh_stats(void){ if(!g_glh) return; static double tl; double now=mono_s(); if(now-tl<2.0) return; tl=now;
-    static unsigned long lc, ls; static double lw, lf; char m[300];
-    int k=snprintf(m,sizeof m,"  [glh] per 2 s: %lu commands, %lu synchronous (%.1f ms waiting), ring full %.1f ms | helper: %llu commands, busy %.0f%%\n",
-        g_glh_ncmd-lc,g_glh_nsync-ls,(g_glh_syncwait_s-lw)*1000,(g_glh_fullwait_s-lf)*1000,(unsigned long long)g_glh->st_cmds,g_glh->st_busy_s*50.0);
-    lc=g_glh_ncmd; ls=g_glh_nsync; lw=g_glh_syncwait_s; lf=g_glh_fullwait_s; g_glh->st_busy_s=0; (void)!write(2,m,k); }
+    static unsigned long lc, ls; static double lw, lf, lp, lg; static uint64_t lgn, lhc; char m[360];
+    double gs=g_glh->st_gpu_s-lg; uint64_t gn=g_glh->st_gpu_n-lgn;
+    int k=snprintf(m,sizeof m,"  [glh] per 2 s: %lu commands, %lu synchronous (%.1f ms waiting), ring full %.1f ms, waiting for the helper's frames %.0f ms | helper: %llu commands, busy %.0f%%, frame blit->GPU done %.1f ms avg\n",
+        g_glh_ncmd-lc,g_glh_nsync-ls,(g_glh_syncwait_s-lw)*1000,(g_glh_fullwait_s-lf)*1000,(g_glh_pqwait_s-lp)*1000,(unsigned long long)(g_glh->st_cmds-lhc),g_glh->st_busy_s*50.0,gn?gs/gn*1000:0);
+    lc=g_glh_ncmd; ls=g_glh_nsync; lw=g_glh_syncwait_s; lf=g_glh_fullwait_s; lp=g_glh_pqwait_s; lg=g_glh->st_gpu_s; lgn=g_glh->st_gpu_n; lhc=g_glh->st_cmds; g_glh->st_busy_s=0; (void)!write(2,m,k); }

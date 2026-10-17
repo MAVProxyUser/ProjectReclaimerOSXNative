@@ -284,8 +284,13 @@ Output in `~/speedstep-demo-<date>/`: positions.csv, summary.txt (walking vs ste
 
 ### Frame rate in big games
 
-Big Team Battle with 60 players runs at about 15-25 fps: the game issues 3,000-4,700 draw calls a frame and each one
-costs about 9 µs in the loader plus Apple's OpenGL driver (both run translated under Rosetta). The client's own
+Apple's OpenGL driver runs in a small native helper process (`shim/build/glhelper`, on by default since 2026-10-17)
+instead of translated under Rosetta inside the game process, so it runs at native speed and in parallel with the game.
+Measured on an M4 Max: Big Team Battle with 45-60 players (4,500-4,900 draw calls a frame) went from 13-25 fps to a median
+of 49 fps (p10 37) over a 25-minute game; alone on Guardian 122 -> 204 fps; map loads are faster too. Without it
+(`PELOAD_GL_HELPER=0 bash shim/play.sh`) each draw call costs about 6-9 µs in the loader plus the translated driver.
+In big games the rest of the time goes to the game itself (translated) and its particle simulation (`PELOAD_CS_WORKERS`,
+default: the performance cores minus two). The client's own
 **Settings → Graphics → Advanced graphics** cuts draw calls: **Shadows** (each shadow caster draws again into the
 shadow maps), Level of detail, Draw distance, Effects and Decals. The window title shows draws per frame next to the
 frame rate. A 60 Hz display caps what reaches the screen; the title shows the engine's own rate beside it.

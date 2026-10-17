@@ -5678,15 +5678,22 @@ static MonoProg* d3dgl_monoprog(D3DObj*vs,D3DObj*ps){
                 if(!any){ ws("  [d3dgl] mono link FAIL (no ERROR line): "); ws(log); ws("\n"); }
                 if(getenv("PELOAD_D3DGL_LINKDUMP")){ static int ld; if(ld<4){ char pth[256]; const char*h=getenv("HOME"); snprintf(pth,sizeof pth,"%s/reclaimer_linkfail_%d_vs.glsl",h?h:"/tmp",ld); FILE*f=fopen(pth,"w"); if(f){ fputs(m_vsrc_keep?m_vsrc_keep:"",f); fclose(f);} snprintf(pth,sizeof pth,"%s/reclaimer_linkfail_%d_ps.glsl",h?h:"/tmp",ld); f=fopen(pth,"w"); if(f){ fputs(m_psrc_keep?m_psrc_keep:"",f); fclose(f);} ld++; } } } return m; }
         m->prog=prog; char nm[24];
-        for(int b=0;b<16;b++){ snprintf(nm,sizeof nm,"vXcb%d",b); m->vcb[b]=G.GetUniformLocation(prog,nm);
-                               snprintf(nm,sizeof nm,"pXcb%d",b); m->pcb[b]=G.GetUniformLocation(prog,nm); }
-        for(int b=0;b<32;b++){ snprintf(nm,sizeof nm,"t%d",b);    m->tloc[b]=G.GetUniformLocation(prog,nm); }
-        for(int b=0;b<32;b++){ snprintf(nm,sizeof nm,"vt%d",b);   m->vtloc[b]=G.GetUniformLocation(prog,nm); }
+        // every name this program is asked about, in one list (the GL helper answers them in a single round trip)
+        static char lnames[128][24]; static int lvals[128]; int nl=0;
+        for(int b=0;b<16;b++){ snprintf(lnames[nl++],24,"vXcb%d",b); snprintf(lnames[nl++],24,"pXcb%d",b); }
+        for(int b=0;b<32;b++) snprintf(lnames[nl++],24,"t%d",b);
+        for(int b=0;b<32;b++) snprintf(lnames[nl++],24,"vt%d",b);
+        for(int b=0;b<16;b++) for(int st=0;st<2;st++) snprintf(lnames[nl++],24,"%cXcb%d_blk",st?'p':'v',b);
+        if(!glh_locs(prog,(const char(*)[24])lnames,nl,96,lvals)){
+            for(int i=0;i<96;i++) lvals[i]=G.GetUniformLocation(prog,lnames[i]);
+            for(int i=96;i<nl;i++) lvals[i]=G.GetUniformBlockIndex?(int)G.GetUniformBlockIndex(prog,lnames[i]):-1; }
+        for(int b=0;b<16;b++){ m->vcb[b]=lvals[2*b]; m->pcb[b]=lvals[2*b+1]; }
+        for(int b=0;b<32;b++){ m->tloc[b]=lvals[32+b]; m->vtloc[b]=lvals[64+b]; }
         m->vunits_set=0;
         // constant-buffer blocks: VS slot b -> binding b, PS slot b -> binding 16+b
         memset(m->vblk,0,sizeof m->vblk); memset(m->pblk,0,sizeof m->pblk);
         if(G.GetUniformBlockIndex && G.UniformBlockBinding) for(int b=0;b<16;b++){
-            for(int st=0;st<2;st++){ snprintf(nm,sizeof nm,"%cXcb%d_blk",st?'p':'v',b); unsigned bi=G.GetUniformBlockIndex(prog,nm);
+            for(int st=0;st<2;st++){ snprintf(nm,sizeof nm,"%cXcb%d_blk",st?'p':'v',b); unsigned bi=(unsigned)lvals[96+2*b+st];
                 if(bi==0xFFFFFFFFu) continue; G.UniformBlockBinding(prog,bi,(unsigned)(st?16+b:b));
                 const char*src=st?m_psrc_keep:m_vsrc_keep; int n=0; char pat[40]; snprintf(pat,sizeof pat,"uniform %cXcb%d_blk { vec4 %cXcb%d[",st?'p':'v',b,st?'p':'v',b);
                 const char*q=src?strstr(src,pat):0; if(q) n=atoi(q+strlen(pat)); if(n<=0) n=4096;
@@ -6871,7 +6878,7 @@ static void d3dgl_present_impl(void){
             const char*home=getenv("HOME"); char p[512]; snprintf(p,sizeof p,"%s/reclaimer_rt_%03d_%dx%d.bmp",home?home:"/tmp",g_rtdumped,(int)rt->w,(int)rt->h);
             bmp_write_rgba(p,w,h,cap); char m[220]; int k=snprintf(m,sizeof m,"  [d3dgl] RT dump %d: %dx%d rgbsum=%lu fmt=%u -> %s\n",g_rtdumped,(int)rt->w,(int)rt->h,sum,rt->fmt,p); (void)!write(2,m,k); free(cap); }
             gl_bindfbo_any(GLE_FBO,0); } }
-    if(!g_glh_on) hb_vis_tick();       // visible-only overlay: async depth readback (hitbox.c; not with the GL helper yet)
+    hb_vis_tick();       // visible-only overlay: async depth readback (hitbox.c; with the GL helper through glh_rb_request)
     hb_capture_tick();   // F8 / stats page: frame + depth + camera capture (hitbox.c)
     g_d3dgl_frame_draws=0;
 }

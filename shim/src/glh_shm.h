@@ -6,12 +6,13 @@
 #include <stdatomic.h>
 
 #define GLH_MAGIC   0x31484C47u        // "GLH1"
-#define GLH_VERSION 3
+#define GLH_VERSION 5
 #define GLH_RING    (256ull<<20)       // command ring
 #define GLH_REPLY   (64ull<<20)        // results of synchronous calls (one in flight at a time)
 #define GLH_POOLN   4096               // pre-generated GL names per kind
 #define GLH_QMAX    65536              // occlusion-query results, indexed by query name
 #define GLH_AL8(n)  (((uint64_t)(n)+7)&~7ull)
+#define GLH_MAILBOX (GLH_REPLY/2)          // asynchronous readbacks land in the reply area's upper half
 
 enum { GLH_POOL_TEX, GLH_POOL_BUF, GLH_POOL_FBO, GLH_POOL_RBO, GLH_POOL_VAO, GLH_POOL_SAMP, GLH_POOL_QUERY, GLH_POOL_PIPE,
        GLH_POOL_PROG, GLH_POOL_VS, GLH_POOL_FS, GLH_NPOOL };
@@ -36,7 +37,8 @@ enum { GLH_X_BASE=1000,
        GLH_X_GETTEXIMAGE,   // sync: target, level, format, type -> the bytes (the helper sizes them)
        GLH_X_PQ_BLIT,       // present: slot, source framebuffer, source w, h, frame number
        GLH_X_NOP_SYNC,      // sync: nothing (wait until everything before it ran)
-       GLH_X_READBACK,      // async readback: read fbo, x, y, w, h, format, type, mailbox offset, ticket
+       GLH_X_READBACK,      // async: buffer, bytes, mailbox offset, ticket -> copy a PIXEL_PACK buffer into the mailbox, then rb_done=ticket
+       GLH_X_LOCS,          // sync: program, name count, first block name -> int per name (uniform locations, then block indices)
        GLH_X_END };
 
 typedef struct {
@@ -46,7 +48,7 @@ typedef struct {
     _Atomic uint64_t head, tail;                 // ring byte positions (monotonic)
     _Atomic uint64_t sync_req, sync_done;        // synchronous call sequence numbers
     uint64_t sync_rv, sync_len;                  // return value / reply byte count of the last synchronous call
-    _Atomic uint32_t helper_sleeping, pad1;
+    _Atomic uint32_t helper_sleeping, wake_seq;     // wake_seq: the loader bumps it and wakes the helper (os_sync_wake_by_address, shared)
     _Atomic uint32_t pool_head[GLH_NPOOL], pool_tail[GLH_NPOOL];
     uint32_t pool[GLH_NPOOL][GLH_POOLN];
     // presentation: three IOSurface-backed frames (global IDs, looked up by the loader's present thread)
@@ -61,6 +63,7 @@ typedef struct {
     struct { _Atomic uint32_t gen; _Atomic uint32_t avail; uint64_t value; } q[GLH_QMAX];
     // statistics (helper)
     uint64_t st_cmds, st_bytes, st_syncs; double st_busy_s, st_wait_s;
+    double st_gpu_s; uint64_t st_gpu_n;          // present fences: time from the frame's blit to its fence signalling (sum, count)
     char err[256];
 } GlhHdr;
 

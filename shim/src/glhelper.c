@@ -18,6 +18,8 @@
 #include <time.h>
 #include <unistd.h>
 #include <errno.h>
+#include <os/os_sync_wait_on_address.h>
+#include <mach/mach_time.h>
 #include <pthread.h>
 #include "glh_shm.h"
 #include "glh_dec.inc"
@@ -51,16 +53,20 @@ static void pools_fill(void){ for(int k=0;k<GLH_NPOOL;k++) pool_fill(k); }
 enum { NFENCE=4096 };
 static struct { uint64_t id; GLsync s; } fences[NFENCE];
 static GLsync fence_get(uint64_t id){ return fences[id%NFENCE].id==id?fences[id%NFENCE].s:0; }
-static struct { GLuint id; uint32_t gen; } qactive[2], qpend[4096]; static int nqpend;
+// ended queries, oldest first (a ring): results become available in submission order, so polling stops at the first one
+// that is not ready (polling every pending query every 2 ms was thousands of GL calls)
+enum { QP=8192 };
+static struct { GLuint id; uint32_t gen; } qactive[2], qpend[QP]; static unsigned qp_head, qp_tail;
+static unsigned long st_qpolls;
 static void queries_poll(void){
-    for(int i=0;i<nqpend;i++){ GLint av=0; glGetQueryObjectiv(qpend[i].id,GL_QUERY_RESULT_AVAILABLE,&av); if(!av) continue;
-        GLuint64 v=0; glGetQueryObjectui64v(qpend[i].id,GL_QUERY_RESULT,&v); GLuint id=qpend[i].id;
-        if(id<GLH_QMAX){ H->q[id].value=v; atomic_store_explicit(&H->q[id].avail,1,memory_order_relaxed); atomic_store_explicit(&H->q[id].gen,qpend[i].gen,memory_order_release); }
-        qpend[i]=qpend[--nqpend]; i--; } }
+    while(qp_tail!=qp_head){ unsigned k=qp_tail%QP; GLint av=0; glGetQueryObjectiv(qpend[k].id,GL_QUERY_RESULT_AVAILABLE,&av); st_qpolls++; if(!av) break;
+        GLuint64 v=0; glGetQueryObjectui64v(qpend[k].id,GL_QUERY_RESULT,&v); GLuint id=qpend[k].id;
+        if(id<GLH_QMAX){ H->q[id].value=v; atomic_store_explicit(&H->q[id].avail,1,memory_order_relaxed); atomic_store_explicit(&H->q[id].gen,qpend[k].gen,memory_order_release); }
+        qp_tail++; } }
 
 // ---- presentation ---------------------------------------------------------------------------------------------------------
 static IOSurfaceRef pq_surf[3]; static GLuint pq_tex[3], pq_fbo[3]; static int pq_w, pq_h;
-static struct { int slot; GLsync f; uint64_t frameno; } pq_pend[3]; static int npq;
+static struct { int slot; GLsync f; uint64_t frameno; double t; } pq_pend[3]; static int npq;
 static CGLContextObj ctx;
 static CFNumberRef num(int v){ return CFNumberCreate(0,kCFNumberIntType,&v); }
 static void pq_make(int W,int Hh){
@@ -91,10 +97,10 @@ static void pq_blit(const uint64_t*s){
     glBindFramebuffer(GL_READ_FRAMEBUFFER,(GLuint)rfb); glBindFramebuffer(GL_DRAW_FRAMEBUFFER,(GLuint)dfb);
     if(sc) glEnable(GL_SCISSOR_TEST); if(fs) glEnable(GL_FRAMEBUFFER_SRGB); glColorMask(cm[0],cm[1],cm[2],cm[3]);
     GLsync f=glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE,0); glFlush();
-    pq_pend[npq].slot=slot; pq_pend[npq].f=f; pq_pend[npq].frameno=fno; npq++; }
+    pq_pend[npq].slot=slot; pq_pend[npq].f=f; pq_pend[npq].frameno=fno; pq_pend[npq].t=now_s(); npq++; }
 static void pq_poll(int wait){
     for(int i=0;i<npq;i++){ GLenum r=glClientWaitSync(pq_pend[i].f,0,wait?2000000ull:0); if(r!=GL_ALREADY_SIGNALED && r!=GL_CONDITION_SATISFIED) continue;
-        int s=pq_pend[i].slot; H->pq_frameno[s]=pq_pend[i].frameno; glDeleteSync(pq_pend[i].f);
+        int s=pq_pend[i].slot; H->pq_frameno[s]=pq_pend[i].frameno; glDeleteSync(pq_pend[i].f); H->st_gpu_s+=now_s()-pq_pend[i].t; H->st_gpu_n++;
         atomic_store(&H->pq_latest,s); atomic_fetch_add(&H->pq_seq,1); atomic_store(&H->frames_done,atomic_load(&H->frames_done)+1);
         pq_pend[i]=pq_pend[--npq]; i--; } }
 
@@ -134,7 +140,8 @@ static int run_one(const uint8_t*c){
     case GLH_X_FINISH: glFinish(); sync_finish(0,0); return 1;
     case GLH_X_NOP_SYNC: sync_finish(0,0); return 1;
     case GLH_X_BEGINQUERY: { glBeginQuery((GLenum)s[0],(GLuint)s[1]); int t=s[0]==GL_SAMPLES_PASSED?0:1; qactive[t].id=(GLuint)s[1]; qactive[t].gen=(uint32_t)s[2]; return 0; }
-    case GLH_X_ENDQUERY: { glEndQuery((GLenum)s[0]); int t=s[0]==GL_SAMPLES_PASSED?0:1; if(qactive[t].id && nqpend<4096){ qpend[nqpend].id=qactive[t].id; qpend[nqpend].gen=qactive[t].gen; nqpend++; } qactive[t].id=0; return 0; }
+    case GLH_X_ENDQUERY: { glEndQuery((GLenum)s[0]); int t=s[0]==GL_SAMPLES_PASSED?0:1;
+        if(qactive[t].id){ if(qp_head-qp_tail>=QP) qp_tail++; qpend[qp_head%QP].id=qactive[t].id; qpend[qp_head%QP].gen=qactive[t].gen; qp_head++; } qactive[t].id=0; return 0; }
     case GLH_X_CREATESHADER: sync_finish(glCreateShader((GLenum)s[0]),0); return 1;
     case GLH_X_GETTEXIMAGE: { GLenum t=(GLenum)s[0]; GLint lv=(GLint)(int64_t)s[1]; GLint w=0,h=0,d=0;
         GLenum qt=(t>=GL_TEXTURE_CUBE_MAP_POSITIVE_X&&t<=GL_TEXTURE_CUBE_MAP_NEGATIVE_Z)?t:t;
@@ -146,6 +153,13 @@ static int run_one(const uint8_t*c){
         uint64_t row=((uint64_t)w*bpp+pa-1)/pa*pa; uint64_t need=row*(uint64_t)h*(d>0?d:1);
         if(n && need<=GLH_REPLY){ glGetTexImage(t,lv,(GLenum)s[2],(GLenum)s[3],reply); sync_finish(0,need); } else sync_finish(0,0);
         return 1; }
+    case GLH_X_LOCS: { GLuint prog=(GLuint)s[0]; int n=(int)s[1], fb=(int)s[2]; const char*nm=(const char*)(s+3); int*out=(int*)reply;
+        for(int i=0;i<n && (uint64_t)i*4<GLH_REPLY;i++){ out[i]=i<fb?glGetUniformLocation(prog,nm):(int)glGetUniformBlockIndex(prog,nm); nm+=strlen(nm)+1; }
+        sync_finish(0,(uint64_t)n*4); return 1; }
+    case GLH_X_READBACK: { GLint prev=0; glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING,&prev); glBindBuffer(GL_PIXEL_PACK_BUFFER,(GLuint)s[0]);
+        uint64_t n=s[1], off=s[2]; if(off+n<=GLH_REPLY-GLH_MAILBOX){ const void*p=glMapBufferRange(GL_PIXEL_PACK_BUFFER,0,(GLsizeiptr)n,GL_MAP_READ_BIT);
+            if(p){ memcpy(glh_reply(H)+GLH_MAILBOX+off,p,(size_t)n); glUnmapBuffer(GL_PIXEL_PACK_BUFFER); } }
+        glBindBuffer(GL_PIXEL_PACK_BUFFER,(GLuint)prev); atomic_store_explicit(&H->rb_done,s[3],memory_order_release); return 0; }
     case GLH_X_PQ_BLIT: pq_blit(s); return 0;
     default: { char e[80]; snprintf(e,sizeof e,"unknown command %u",op); fail(e); } }
     return 0; }
@@ -173,26 +187,27 @@ int main(int argc,char**argv){
         (const char*)glGetString(GL_RENDERER));
     // the wake pipe doubles as the loader's lifeline: it reads end-of-file once the loader is gone
     uint64_t tail=atomic_load(&H->tail), ncmd=0; double busy0=now_s(), lastpoll=0;
-    struct pollfd p={wake,POLLIN,0};
+    mach_timebase_info_data_t tbi; mach_timebase_info(&tbi); uint64_t tb_num=tbi.numer, tb_den=tbi.denom;
+    (void)wake;
     for(;;){
         uint64_t head=atomic_load_explicit(&H->head,memory_order_acquire);
         if(head==tail){
             pq_poll(0); queries_poll(); pools_fill();
             atomic_store_explicit(&H->tail,tail,memory_order_release);
             H->st_busy_s+=now_s()-busy0;
+            uint32_t seq=atomic_load(&H->wake_seq);
             atomic_store(&H->helper_sleeping,1);   // seq_cst, then a seq_cst load of head: pairs with the loader's store head / load sleeping
             if(atomic_load(&H->head)==tail){
-                int t=npq||nqpend?1:20;
-                if(p.fd>=0){ int r=poll(&p,1,t); if(r>0){ char b[256]; ssize_t n=read(wake,b,sizeof b); if(n==0){ p.fd=-1; fprintf(stderr,"  [glhelper] wake pipe closed: polling instead\n"); } } }
-                else usleep(200);
-                if(kill(loader,0) && errno==ESRCH) _exit(0); }   // the loader is gone
+                int t=npq||qp_head!=qp_tail?1:20;   // ms: sooner while a frame or a query result is pending
+                os_sync_wait_on_address_with_timeout((void*)&H->wake_seq,seq,4,OS_SYNC_WAIT_ON_ADDRESS_SHARED,OS_CLOCK_MACH_ABSOLUTE_TIME,(uint64_t)t*1000000ull*tb_den/tb_num);
+                { static double lk; double tn=now_s(); if(tn-lk>0.25){ lk=tn; if(kill(loader,0) && errno==ESRCH) _exit(0); } } }   // the loader is gone
             atomic_store(&H->helper_sleeping,0); busy0=now_s(); continue; }
         while(tail!=head){
             const uint8_t*c=glh_ring(H)+tail%GLH_RING; uint16_t op=((const uint16_t*)c)[0]; uint32_t len=((const uint32_t*)c)[1];
             if(op==GLH_X_WRAP){ tail+=GLH_RING-tail%GLH_RING; continue; }
             if(!len) fail("corrupt ring (zero-length command)");
             run_one(c); tail+=len; ncmd++; H->st_cmds=ncmd;
-            if((ncmd&255)==0){ atomic_store_explicit(&H->tail,tail,memory_order_release); double t=now_s(); if(t-lastpoll>0.002){ lastpoll=t; pq_poll(0); queries_poll(); } }
+            if((ncmd&255)==0){ atomic_store_explicit(&H->tail,tail,memory_order_release); double t=now_s(); H->st_busy_s+=t-busy0; busy0=t; if(t-lastpoll>0.002){ lastpoll=t; pq_poll(0); queries_poll(); } }
             if((ncmd&4095)==0) pools_fill(); }
         atomic_store_explicit(&H->tail,tail,memory_order_release); }
 }

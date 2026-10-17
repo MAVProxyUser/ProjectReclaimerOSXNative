@@ -691,6 +691,13 @@ static void hb_vis_tick(void){
     gl_bindfbo_any(0x8CA8,fbo); G.BindBuffer(0x88EB,pbo[idx]); G.ReadPixels(0,0,HBV_W,HBV_H,0x1902/*DEPTH_COMPONENT*/,0x1406/*FLOAT*/,0);
     memcpy(vps[idx],vp,64); filled[idx]=1;
     int rd=(idx+1)%3;   // the oldest copy: two frames old, long done on the GPU
+    if(g_glh_on){   // native GL helper: an asynchronous fetch of that copy; the result of the previous one is used now
+        static uint64_t tk[2]; static float tvp[2][16]; static int ts;
+        const uint8_t*m=glh_rb_ready(tk[ts^1],ts^1);
+        if(m){ g_hbv_seq++; __atomic_thread_fence(__ATOMIC_SEQ_CST); memcpy(g_hbv_depth,m,sizeof g_hbv_depth); memcpy(g_hbv_vp,tvp[ts^1],64);
+            __atomic_thread_fence(__ATOMIC_SEQ_CST); g_hbv_seq++; g_hbv_ok=1; tk[ts^1]=0; }
+        if(filled[rd] && !tk[ts]){ tk[ts]=glh_rb_request(pbo[rd],HBV_W*HBV_H*4,ts); memcpy(tvp[ts],vps[rd],64); ts^=1; }
+        G.BindBuffer(0x88EB,0); gl_bindfbo_any(GLE_FBO,0); idx=(idx+1)%3; return; }
     if(filled[rd]){ G.BindBuffer(0x88EB,pbo[rd]); const void*m=G.MapBufferRange(0x88EB,0,HBV_W*HBV_H*4,0x1/*MAP_READ*/);
         if(m){ g_hbv_seq++; __atomic_thread_fence(__ATOMIC_SEQ_CST); memcpy(g_hbv_depth,m,sizeof g_hbv_depth); memcpy(g_hbv_vp,vps[rd],64);
             __atomic_thread_fence(__ATOMIC_SEQ_CST); g_hbv_seq++; g_hbv_ok=1; G.UnmapBuffer(0x88EB); } }

@@ -175,6 +175,51 @@ Inventory of the loader's G table (100 entry points, D3DGLApi in peload.c) by ho
 | synchronous | GetError GetShaderiv GetShaderInfoLog GetProgramiv GetProgramInfoLog GetUniformLocation GetUniformBlockIndex CheckFramebufferStatus GetQueryObjectiv/ui64v ReadPixels Finish | round trip (link time, query harvest, captures) |
 | setup | AttachShader DetachShader DeleteShader CompileShader LinkProgram ProgramParameteri | records; LinkProgram's status read back lazily |
 
+#### The real helper (2026-10-17): PELOAD_GL_HELPER=1
+
+Built as planned (shim/src/glh_client.c, glhelper.c, glh_shm.h; encoders/decoders generated from gl3.h by
+shim/tools/glh_gen.py). How it fits in: peload.c redefines `dlsym` after the D3DGL globals, so every GL entry point the
+D3D11->GL path resolves becomes a router that encodes the call into a 256 MB shared-memory ring while the render context
+(a dummy in helper mode) is current, and calls the real function on every other context (present thread, the client's own
+GL UI). Names come from pools the helper keeps filled; results come back by round trip only for link-time and Get* calls
+(a program link asks for all its uniform locations and block indices in ONE round trip, GLH_X_LOCS); GetError and
+CheckFramebufferStatus answer without one; occlusion-query results come back through a result table; the F9 depth readback
+and other PBO reads are asynchronous (GLH_X_READBACK into a mailbox); frames come back as three global IOSurfaces the
+present thread samples as rectangle textures. The helper wakes on a shared-memory os_sync wait (a wake pipe's write end
+was closed under us by the game's handle traffic).
+
+Clean-machine experiment (shim/tools/glring.sh, before the real helper; us per draw):
+
+| | 1000 draws | 2000 | 4000 |
+|---|---|---|---|
+| in-process x86_64 (the loader today) | 2.9 | 2.9 | 3.0-3.2 |
+| in-process arm64 | 2.0 | 2.0 | 2.0 |
+| ring producer (loader side) | 0.15 | 0.14 | 0.12 |
+| ring consumer (native driver) | 2.2 | 2.3 | 2.2-2.3 |
+| end to end, pipelined | 2.3 | 2.3 | 2.3-2.45 |
+
+In the game (the draw count follows the random spawn, so compare us per frame-draw):
+
+| scene | in-process | helper |
+|---|---|---|
+| direct Guardian match, alone | 122 fps @ 1,379 draws (5.9 us/draw); 140 fps @ 1,245 (queries off) | 204 fps @ 1,883 (2.6 us/draw) |
+| UK Hugegrass, 56 players, wide views (~9,500 draws/frame) | 11.7 fps (8.9 us/draw) | 17-19 fps (6.1 us/draw) |
+| same server, ~1,800-2,000 draws/frame | -- | 22-43 fps |
+
+What limits big games with the helper on (Hugegrass, PELOAD_D3DGL_PROF + PELOAD_SAMPLE + `sample` of the helper):
+- the GL thread's own work fell to ~2.3 us per draw (in-draw 378 ms per 2 s at 82k draws/s); it now mostly waits;
+- particle compute: with 4 workers the GL thread waited ~1.6 s per 2 s for compute jobs; PELOAD_CS_WORKERS=8 cut that to
+  0.08-0.65 s (the M4 Max has 10 performance cores);
+- the helper: 20-95% busy depending on the scene, ~19 GL calls per draw at ~0.6 us each natively; the GPU finishes a frame
+  1-24 ms after its blit;
+- the engine's render thread (Rosetta): ~30% of it is halo3 copying its game state every frame (already the host memmove);
+- two client threads burn a core each in a modded game: the mods scan (stat/open/getdirentries non-stop; "Mods scan took
+  7 s" again and again) and halo3's streaming thread (memmove + open). Worth a look on the file-system side.
+
+Next: a long soak, then make it the play.sh default (the in-process path stays behind PELOAD_GL_HELPER=0); move the CPU
+particle compute into the helper (native arm64, ~1.5-2x) or onto the GPU; cut the link-time round trips further (the
+link status itself is still one per program).
+
 ### 2. Submission thread inside the process (DONE 2026-10-17: +10-15% in 60-100 player games, -7% alone; `auto` mode)
 
 Run the whole D3D11→GL translation on a GL thread; the engine's `ID3D11DeviceContext` calls only
