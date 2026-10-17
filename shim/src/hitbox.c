@@ -179,7 +179,10 @@ typedef struct { char path[1024]; int fd; uint32_t tagoff; uint64_t vbase, fsize
 pthread_mutex_t g_hb_collect_mx=PTHREAD_MUTEX_INITIALIZER;   // hb_collect fills shared statics (overlay vs sparring)
 volatile int g_spar_on=-1;
 static volatile float g_spar_rx, g_spar_ry, g_spar_err; static volatile int g_spar_ok; static volatile uint32_t g_spar_tgt=0xFFFFFFFFu;
-int hb_spar_enabled(void){ if(g_spar_on<0) g_spar_on=getenv("PELOAD_SPAR")?1:0; return g_spar_on; }
+// Only in the input-less second client (shim/target.sh: PELOAD_NO_PAD): in a player's own client it would take over
+// their controller (the stick, no triggers) -- 2026-10-17 the user switched it on in their own client by mistake.
+int hb_spar_available(void){ static int a=-1; if(a<0) a=getenv("PELOAD_NO_PAD")?1:0; return a; }
+int hb_spar_enabled(void){ if(g_spar_on<0) g_spar_on=getenv("PELOAD_SPAR")?1:0; return g_spar_on && hb_spar_available(); }
 void hb_spar_tick(void){
     if(!hb_spar_enabled()){ g_spar_ok=0; return; }
     static double tl; double now=mono_s(); if(now-tl<1.0/60) return; tl=now;

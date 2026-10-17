@@ -16,7 +16,8 @@ struct WaStream {
     volatile int ref, svc; pthread_mutex_t m;                // svc: references held on the render client + clock
     int inited, started; uint32_t rate, ch, bits, blk, isfloat, bufframes;
     uint8_t*ring, *scratch; uint32_t scratch_cap; uint64_t rd, wr, played;   // ring positions in frames (monotonic)
-    void*event; AudioQueueRef q; int closing; };   // closing: the queue is being stopped/disposed -- callbacks must not re-enqueue
+    void*event; AudioQueueRef q; int closing;      // closing: the queue is being stopped -- callbacks must not re-enqueue
+    struct WaAq*aq; };                             // the pooled AudioQueue this stream plays through (q = aq->q)
 #define WA_E_NOINTERFACE 0x80004002
 #define WA_E_POINTER     0x80004003
 #define WA_E_NOT_INIT    0x88890001
@@ -34,26 +35,38 @@ static void wa_log(const char*s){ if(getenv("PELOAD_TRACE_WASAPI")) (void)!write
 // client's voice retries create and dispose a queue every ~5 s, and a create racing another stream's dispose still
 // tripped caulk's allocator trap with per-stream locking (2026-10-17, input-less test client).
 static pthread_mutex_t g_wa_lm=PTHREAD_MUTEX_INITIALIZER;
+// AudioQueues are POOLED, never disposed in normal use (2026-10-17): the client's voice chat retries every ~5 s without a
+// microphone and each try builds and drops a playback stream; creating and disposing an AudioQueue that often kept
+// tripping caulk's allocator trap (SIGILL in caulk::alloc, "exception 0xC000001D at unmapped module") even with every
+// create/dispose serialised -- in the user's own game as well as the test target. Now an idle stream hands its queue,
+// stopped, with its three buffers, back to g_wa_pool, and the next stream of the same format takes it. A queue's
+// callback reaches its current stream through WaAq.s under g_wa_cbmx (NULL while pooled). PELOAD_WASAPI_NOPOOL=1 =
+// dispose as before.
+typedef struct WaAq { AudioQueueRef q; AudioQueueBufferRef buf[3]; int nbuf; uint32_t rate, ch, bits, blk, isfloat, bytes; WaStream*s; struct WaAq*next; } WaAq;
+static WaAq*g_wa_pool;                                      // idle queues (under g_wa_lm)
+static pthread_mutex_t g_wa_cbmx=PTHREAD_MUTEX_INITIALIZER; // WaAq.s: callbacks vs streams binding/unbinding
 static void wa_aq_cb(void*ud,AudioQueueRef q,AudioQueueBufferRef b){
-    WaStream*s=ud; uint32_t frames=b->mAudioDataBytesCapacity/s->blk;
+    WaAq*aq=ud; pthread_mutex_lock(&g_wa_cbmx); WaStream*s=aq->s; if(!s){ pthread_mutex_unlock(&g_wa_cbmx); return; }   // pooled: idle
+    uint32_t frames=b->mAudioDataBytesCapacity/s->blk;
     pthread_mutex_lock(&s->m);
-    if(s->closing || q!=s->q){ pthread_mutex_unlock(&s->m); return; }
+    if(s->closing || q!=s->q){ pthread_mutex_unlock(&s->m); pthread_mutex_unlock(&g_wa_cbmx); return; }
     uint64_t avail=s->wr-s->rd; uint32_t n=avail<frames?(uint32_t)avail:frames;
     for(uint32_t i=0;i<n;){ uint32_t pos=(uint32_t)((s->rd+i)%s->bufframes), run=s->bufframes-pos; if(run>n-i) run=n-i;
         memcpy((uint8_t*)b->mAudioData+(size_t)i*s->blk, s->ring+(size_t)pos*s->blk, (size_t)run*s->blk); i+=run; }
     if(n<frames) memset((uint8_t*)b->mAudioData+(size_t)n*s->blk,0,(size_t)(frames-n)*s->blk);   // underrun: silence
     s->rd+=n; s->played+=frames; void*ev=s->event;
     b->mAudioDataByteSize=frames*s->blk; AudioQueueEnqueueBuffer(q,b,0,0);
-    pthread_mutex_unlock(&s->m);
+    pthread_mutex_unlock(&s->m); pthread_mutex_unlock(&g_wa_cbmx);
     if(ev) i_SetEvent(ev); }                                  // room in the buffer: let the client refill
-// Stop + dispose a stream's queue: take it out of the stream and mark it closing in ONE locked step (no callback is
-// mid-enqueue, and a second closer -- two Releases racing on different threads -- finds no queue: it used to find the
-// same one still set and dispose it twice, caulk's SIGILL again), then tear it down outside the lock (a synchronous
-// dispose waits for a running callback, which would block on the lock).
+// Take the queue out of the stream (one locked step: a second closer finds none), unbind it from the stream, stop it,
+// and put it in the pool. The stop runs outside the stream and callback locks (it waits for a running callback).
 static void wa_close_queue(WaStream*s){
     pthread_mutex_lock(&g_wa_lm);
-    pthread_mutex_lock(&s->m); AudioQueueRef q=s->q; s->q=0; s->closing=1; s->started=0; pthread_mutex_unlock(&s->m);
-    if(q){ AudioQueueStop(q,1); AudioQueueDispose(q,1); }
+    pthread_mutex_lock(&s->m); WaAq*aq=s->aq; s->aq=0; s->q=0; s->closing=1; s->started=0; pthread_mutex_unlock(&s->m);
+    if(aq){ pthread_mutex_lock(&g_wa_cbmx); aq->s=0; pthread_mutex_unlock(&g_wa_cbmx);
+        AudioQueueStop(aq->q,1);
+        if(getenv("PELOAD_WASAPI_NOPOOL")){ AudioQueueDispose(aq->q,1); free(aq); }
+        else { aq->next=g_wa_pool; g_wa_pool=aq; } }
     pthread_mutex_unlock(&g_wa_lm); }
 static void wa_free(WaStream*s){
     if(s->q) wa_close_queue(s);
@@ -75,15 +88,24 @@ static int MSABI wa_QI(WaItf*self,GUID_*riid,void**ppv){ if(!ppv) return WA_E_PO
     *ppv=self; wa_AddRef(self); return HR_OK; }
 
 // IAudioClient
-static int wa_open_queue(WaStream*s){
-    AudioStreamBasicDescription f={0}; f.mSampleRate=s->rate; f.mFormatID=kAudioFormatLinearPCM;
-    f.mFormatFlags=(s->isfloat?kAudioFormatFlagIsFloat:kAudioFormatFlagIsSignedInteger)|kAudioFormatFlagIsPacked;
-    f.mFramesPerPacket=1; f.mChannelsPerFrame=s->ch; f.mBitsPerChannel=s->bits; f.mBytesPerFrame=s->blk; f.mBytesPerPacket=s->blk;
-    AudioQueueRef nq=0; OSStatus st=AudioQueueNewOutput(&f,wa_aq_cb,s,0,0,0,&nq);
-    pthread_mutex_lock(&s->m); s->q=nq; s->closing=0; pthread_mutex_unlock(&s->m);
-    if(st||!s->q){ s->q=0; char t[96]; int k=snprintf(t,sizeof t,"  [wasapi] AudioQueueNewOutput failed %d\n",(int)st); (void)!write(2,t,k); return 0; }
-    if(!xa_real()) AudioQueueSetParameter(s->q,kAudioQueueParam_Volume,0.0f);   // PELOAD_AUDIO=0: keep the clock running, play nothing
-    uint32_t per=s->rate/100; for(int i=0;i<3;i++){ AudioQueueBufferRef b=0; if(!AudioQueueAllocateBuffer(s->q,per*s->blk,&b)){ memset(b->mAudioData,0,per*s->blk); b->mAudioDataByteSize=per*s->blk; AudioQueueEnqueueBuffer(s->q,b,0,0); } }
+static int wa_open_queue(WaStream*s){   // (g_wa_lm held)
+    uint32_t bytes=(s->rate/100)*s->blk; WaAq*aq=0;
+    for(WaAq**pp=&g_wa_pool;*pp;pp=&(*pp)->next){ WaAq*c=*pp;
+        if(c->rate==s->rate && c->ch==s->ch && c->bits==s->bits && c->blk==s->blk && c->isfloat==s->isfloat && c->bytes==bytes){ *pp=c->next; aq=c; break; } }
+    if(!aq){
+        aq=calloc(1,sizeof *aq); if(!aq) return 0; aq->rate=s->rate; aq->ch=s->ch; aq->bits=s->bits; aq->blk=s->blk; aq->isfloat=s->isfloat; aq->bytes=bytes;
+        AudioStreamBasicDescription f={0}; f.mSampleRate=s->rate; f.mFormatID=kAudioFormatLinearPCM;
+        f.mFormatFlags=(s->isfloat?kAudioFormatFlagIsFloat:kAudioFormatFlagIsSignedInteger)|kAudioFormatFlagIsPacked;
+        f.mFramesPerPacket=1; f.mChannelsPerFrame=s->ch; f.mBitsPerChannel=s->bits; f.mBytesPerFrame=s->blk; f.mBytesPerPacket=s->blk;
+        OSStatus st=AudioQueueNewOutput(&f,wa_aq_cb,aq,0,0,0,&aq->q);
+        if(st||!aq->q){ char t[96]; int k=snprintf(t,sizeof t,"  [wasapi] AudioQueueNewOutput failed %d\n",(int)st); (void)!write(2,t,k); free(aq); return 0; }
+        if(!xa_real()) AudioQueueSetParameter(aq->q,kAudioQueueParam_Volume,0.0f);   // PELOAD_AUDIO=0: keep the clock running, play nothing
+        for(int i=0;i<3;i++){ AudioQueueBufferRef bf=0; if(!AudioQueueAllocateBuffer(aq->q,bytes,&bf)) aq->buf[aq->nbuf++]=bf; }
+        wa_log("  [wasapi] new AudioQueue\n"); }
+    else wa_log("  [wasapi] AudioQueue reused from the pool\n");
+    pthread_mutex_lock(&s->m); s->aq=aq; s->q=aq->q; s->closing=0; pthread_mutex_unlock(&s->m);
+    pthread_mutex_lock(&g_wa_cbmx); aq->s=s; pthread_mutex_unlock(&g_wa_cbmx);
+    for(int i=0;i<aq->nbuf;i++){ AudioQueueBufferRef bf=aq->buf[i]; memset(bf->mAudioData,0,bytes); bf->mAudioDataByteSize=bytes; AudioQueueEnqueueBuffer(aq->q,bf,0,0); }
     return 1; }
 static int MSABI wac_Initialize(WaItf*self,int mode,uint32_t flags,int64_t dur,int64_t period,const uint8_t*fmt,const GUID_*session){
     (void)period;(void)session; WaStream*s=self->s; if(!fmt) return WA_E_POINTER; if(s->inited) return WA_E_ALREADY;
