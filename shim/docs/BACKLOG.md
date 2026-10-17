@@ -12,7 +12,6 @@ order they will be worked; frame rate is deliberately last (user, 2026-10-16).
 | 6 | **Seams at polygon joins on outer map geometry** (e.g. Valhalla rock walls) | Quick check whether the cracks can be found programmatically (e.g. T-junctions or depth gaps in a capture); low priority. |
 | 7 | **Headless `dedicated` server** | Loads the map, then idles at "waiting for the native game client". Possibly expected until a client joins: test a join against it. |
 | 7b | **Teleport (F7, PELOAD_ALLOW_TELEPORT) -- experimental, crashes** | Uses halo3's own teleport (halo3+0x259410). Run from an arbitrary QueryPerformanceCounter call it crashed in the physics update (halo3+0x23300E, mid-tick); run from an entry hook on the main loop's frame-timing function (halo3+0x9d22c) it crashed at halo3+0x1ECA6 reading TLS block +0x240 (null on that thread). Thread dumps show halo3 spreading game work over job-system worker threads, so the safe point is the simulation job's own tick -- not found yet. Destination snapping to a map item spawn works (computed correctly on Guardian and Valhalla). |
-| 8 | **Release bundle + USB stick installer** | User: "can you package up a release, also make a script to make a USB stick that copies the entire game, and everything needed to start it and add instructions on how to use it to the .md" -- to run on their other Mac without DepotDownloader. Release named for the client version (0.9.18): loader + scripts, no game files. USB script: the user's own MCC files + client exe + loader + VC++ runtime DLLs + launcher, with README instructions. USB part done: shim/tools/make-usb.sh + install.sh (README "Copy to another Mac with a USB stick"). |
 | 9 | **Unexplained crashes** (watch) | (a) v0.9.18 SIGTRAP during a direct Guardian match; (b) one startup SIGSEGV with guest code on a thread without TLS. Not seen again since the thread-id fix (55811fa); loader threads are now named for the next [CRASH] line. |
 | 10 | **Minimized window stalls loading** (watch) | A client minimized during loading never reaches gameplay. Test runs no longer minimize. |
 | 11 | **Frame rate** (last) | shim/docs/PERF-PLAN.md. Done: redundant glUseProgram cache (4afd0a9). Small wins left; big step: native arm64 GL helper process (up to ~2x). |
@@ -30,6 +29,8 @@ Closed by the user 2026-10-16: teleporter audio desync (not seen since the XAudi
 - Bigger window (largest 16:9 that fits the screen) — 1367a68
 - Reclaimer client v0.9.18 support (signature patches, Bink/Waves DLL support) — a574219
 - Game audio after joining a match in progress (user heard full audio in FKK BTB)
+- Release "Project Reclaimer 0.9.18 for Mac" (tag reclaimer-0.9.18; releases now named for the client version;
+  shim/tools/make-release.sh) and the USB stick installer (shim/tools/make-usb.sh + install.sh)
 - Menu music and voice playback: a real WASAPI render endpoint on CoreAudio for the client's cpal audio
   (shim/src/wasapi.c); user confirmed menu music plays
 - Overlay features (user: "these features all rock"): F3 projectile/bullet tracers, F4 player info, F5 item labels
