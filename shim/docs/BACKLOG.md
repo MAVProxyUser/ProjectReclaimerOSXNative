@@ -25,7 +25,7 @@ Closed by the user 2026-10-16: teleporter audio desync (not seen since the XAudi
 ## Done (2026-10-16)
 
 - Stats page (2026-10-17, later): heatmap over a top-down picture of the map made from the .map file (re-tools/h3bsp.py,
-  shim/tools/maptop.sh, all 27 MP maps); overlay "visible only" (F9) and Text -/+ (labels 7 px by default, were ~4x
+  shim/tools/maptop.sh, all 27 MP maps); overlay "visible only" (F9; user: "worked perfectly") and Text -/+ (labels 7 px by default, were ~4x
   larger); speaker mute icons + Mute all, mute acting on press (clicks were lost to 10 Hz redraws), big Mute button in
   the player details; exact local player from halo3's player mapping; burst / rocket-impact captures removed (user)
 - Stats page: lobby/session player list (works in the lobby), voice Mute / Mute all through the client's own mute list,
