@@ -681,6 +681,10 @@ static int    MSABI i_WriteFile(void *h, const void *buf, uint32_t n, uint32_t *
     // real stderr when the mapped fd is bad, and always report the full count written.
     long k = fd>=0? write(fd,buf,n) : -1;
     if(k<0 && (hv==1||hv==2||hv==3||fd>=0)){ (void)!write(2,buf,n); k=n; }
+    // log files (*.log) are also copied to stderr: the launch scripts and tests read the client's log from there
+    // (PELOAD_NO_LOG_TEE: files only)
+    else if(k>0 && fd>2 && fd<MAXFD && g_fdpath[fd]){ static int tee=-1; if(tee<0) tee=getenv("PELOAD_NO_LOG_TEE")?0:1;
+        size_t pl=strlen(g_fdpath[fd]); if(tee && pl>4 && !strcasecmp(g_fdpath[fd]+pl-4,".log")) (void)!write(2,buf,(size_t)k); }
     if(wr)*wr=(uint32_t)(k<0?0:k);
     return (fd>=0 || hv==1||hv==2||hv==3) ? 1 : 0; }
 static int    MSABI i_WriteConsoleW(void *h, const uint16_t *s, uint32_t n, uint32_t *wr, void *rsv){
@@ -2714,7 +2718,10 @@ static int MSABI i_CreateProcessW(const uint16_t*app,uint16_t*cmd,void*pa,void*t
     // child stdio from STARTUPINFOW (x64: dwFlags@60, hStdInput@80/out@88/err@96)
     int cfd[3]={-1,-1,-1};
     if(si){ uint32_t dwFlags=*(uint32_t*)(si+60); if(dwFlags&0x100){ // STARTF_USESTDHANDLES
-        for(int k=0;k<3;k++){ intptr_t hv=*(intptr_t*)(si+80+8*k); if(hv>=0x1000) cfd[k]=(int)(hv-0x1000); else if(hv==1)cfd[k]=0; else if(hv==2)cfd[k]=1; else if(hv==3)cfd[k]=2; } } }
+        for(int k=0;k<3;k++){ intptr_t hv=*(intptr_t*)(si+80+8*k); if(hv>=0x1000) cfd[k]=(int)(hv-0x1000); else if(hv==1)cfd[k]=0; else if(hv==2)cfd[k]=1; else if(hv==3)cfd[k]=2; } }
+      char m[400]; int k=snprintf(m,sizeof m,"    stdio fds in=%d out=%d err=%d (flags 0x%x)",cfd[0],cfd[1],cfd[2],dwFlags);
+      for(int i=0;i<3;i++) if(cfd[i]>2 && cfd[i]<MAXFD && g_fdpath[cfd[i]]) k+=snprintf(m+k,sizeof m-k," [%d]=%s",i,g_fdpath[cfd[i]]);
+      ws(m); ws("\n"); }
     posix_spawn_file_actions_t fa; posix_spawn_file_actions_init(&fa);
     if(!getenv("PELOAD_WORKER_INHERIT_STDIO")) // debug: let worker inherit our terminal
         for(int k=0;k<3;k++){ if(cfd[k]>=0) posix_spawn_file_actions_adddup2(&fa,cfd[k],k); }
@@ -8060,7 +8067,14 @@ static void*  MSABI i_CreateFileW(const uint16_t *w,uint32_t acc,uint32_t share,
         if(!getenv("PELOAD_NO_EMPTY_FIX")){ if(g_playlist[0]&&access(g_playlist,R_OK)==0) snprintf(p,sizeof p,"%s",g_playlist); else snprintf(p,sizeof p,"/dev/null"); }
     }
     if(acc&0x80000000) font_subst(p,sizeof p);    // read opens only
-    int flags = (acc & 0x40000000)? O_RDWR : O_RDONLY; // GENERIC_WRITE?
+    // write access: GENERIC_WRITE, GENERIC_ALL, FILE_WRITE_DATA or FILE_APPEND_DATA. Rust's OpenOptions::append(true)
+    // asks for FILE_GENERIC_WRITE & ~FILE_WRITE_DATA (0x120114): append-only = O_APPEND. Only GENERIC_WRITE used to
+    // count, so every append-mode file (client.log, the dedicated server's server.log) opened read-only and its
+    // writes failed (WriteFile copied them to stderr). PELOAD_APPEND_RO = old behavior.
+    static int aro=-1; if(aro<0) aro=getenv("PELOAD_APPEND_RO")?1:0;
+    int wacc = aro ? (acc&0x40000000) : (acc&(0x40000000|0x10000000|0x2|0x4));
+    int flags = wacc? O_RDWR : O_RDONLY;
+    if(!aro && (acc&0x4) && !(acc&(0x40000000|0x10000000|0x2))) flags|=O_APPEND;
     switch(disp){                                   // Win32 creation disposition
         case 1: flags|=O_CREAT|O_EXCL;  break;      // CREATE_NEW
         case 2: flags|=O_CREAT|O_TRUNC; flags=(flags&~O_RDONLY)|O_RDWR; break; // CREATE_ALWAYS
@@ -9600,13 +9614,14 @@ static void bp_install(void){ const char*s=getenv("PELOAD_BP"); if(!s||!g_base) 
 // On SIGUSR1, suspend every thread and print its guest x86 rip + a scan of its stack for
 // exe/halo3 return addresses. Rosetta exposes x86_THREAD_STATE64, so this shows exactly where
 // each thread is blocked/spinning (unlike `sample`, which shows the ARM/JIT translation).
+volatile mach_port_t g_tee_ports[2];   // PELOAD_*_TEE copy threads: never suspended (the dump writes through them)
 static void dump_all_guest_stacks(void){
     thread_act_array_t th; mach_msg_type_number_t n=0;
     if(task_threads(mach_task_self(),&th,&n)!=KERN_SUCCESS) return;
     mach_port_t me=mach_thread_self();
     char hdr[64]; int hk=snprintf(hdr,sizeof hdr,"\n==== GUEST THREAD DUMP (%u threads) ====\n",n); (void)!write(2,hdr,hk);
     for(unsigned i=0;i<n;i++){
-        if(th[i]==me) continue;
+        if(th[i]==me || th[i]==g_tee_ports[0] || th[i]==g_tee_ports[1]) continue;
         thread_suspend(th[i]);
         x86_thread_state64_t st; mach_msg_type_number_t sc=x86_THREAD_STATE64_COUNT;
         if(thread_get_state(th[i],x86_THREAD_STATE64,(thread_state_t)&st,&sc)==KERN_SUCCESS){
@@ -9614,7 +9629,8 @@ static void dump_all_guest_stacks(void){
             const char* mn=(rip>=0x140000000ULL&&rip<0x14c000000ULL)?"exe+0x":(rip>=0x180000000ULL&&rip<0x187000000ULL)?"halo3+0x":"jit:0x";
             uint64_t ro=(rip>=0x180000000ULL&&rip<0x187000000ULL)?rip-0x180000000ULL:(rip>=0x140000000ULL&&rip<0x14c000000ULL)?rip-0x140000000ULL:rip;
             char b[160]; int k=snprintf(b,sizeof b,"-- thr%u rip=%s%llx rsp=0x%llx\n",i,mn,(unsigned long long)ro,(unsigned long long)rsp); (void)!write(2,b,k);
-            int shown=0; for(int w=0;w<700 && shown<16;w++){ uint64_t sa=rsp+(uint64_t)w*8; if(!hook_safe(sa)) break; uint64_t v=*(uint64_t*)sa;
+            static int depth=-1, words=700; if(depth<0){ const char*e=getenv("PELOAD_DUMP_DEPTH"); depth=e?atoi(e):16; if(depth<1) depth=16; if(depth>16) words=depth*60; }   // frames shown per thread
+            int shown=0; for(int w=0;w<words && shown<depth;w++){ uint64_t sa=rsp+(uint64_t)w*8; if(!hook_safe(sa)) break; uint64_t v=*(uint64_t*)sa;
                 if(v>=0x180000000ULL&&v<0x187000000ULL){ char c[48]; int kk=snprintf(c,sizeof c,"      halo3+0x%llx\n",(unsigned long long)(v-0x180000000ULL)); (void)!write(2,c,kk); shown++; }
                 else if(v>=0x140000000ULL&&v<0x14c000000ULL){ char c[48]; int kk=snprintf(c,sizeof c,"      exe+0x%llx\n",(unsigned long long)(v-0x140000000ULL)); (void)!write(2,c,kk); shown++; } }
         }
@@ -9857,7 +9873,23 @@ static void* sampler_thread(void*a){ (void)a; pthread_setname_np("shim-sampler")
                 tab[bi].cnt=0; }   // (printed entries reset; counts restart for the next window)
             memset(tab,0,sizeof tab); total=0; for(int i=0;i<nthr;i++){ thr[i].n=thr[i].busy=0; } } }
     return 0; }
+// PELOAD_STDERR_TEE=<file> / PELOAD_STDOUT_TEE=<file> (%p = pid): copy everything this process writes to stderr /
+// stdout into that file as well. For processes whose stdio another process owns, e.g. the dedicated server's
+// game-server workers (stderr is a pipe to their parent, stdout is NUL): set it on the supervisor and every worker
+// writes its own file. Both may name the same file.
+typedef struct { int rd, out, file; } StdTee;
+static void* std_tee_thread(void*a){ StdTee*t=a; pthread_setname_np("shim-stdio-tee"); char b[16384];
+    { extern volatile mach_port_t g_tee_ports[2]; g_tee_ports[g_tee_ports[0]?1:0]=mach_thread_self(); }
+    for(;;){ ssize_t n=read(t->rd,b,sizeof b); if(n<=0){ if(n<0&&errno==EINTR) continue; break; } (void)!write(t->out,b,(size_t)n); (void)!write(t->file,b,(size_t)n); }
+    return 0; }
+static void std_tee_start(int fd,const char*env){ const char*e=getenv(env); if(!e||!*e) return;
+    char path[1024]; size_t j=0; for(const char*c=e; *c && j<sizeof path-16; c++){ if(c[0]=='%'&&c[1]=='p'){ j+=(size_t)snprintf(path+j,sizeof path-j,"%d",(int)getpid()); c++; } else path[j++]=*c; } path[j]=0;
+    int f=open(path,O_WRONLY|O_CREAT|O_APPEND,0644); int pp[2]; if(f<0 || pipe(pp)) return;
+    StdTee*t=malloc(sizeof *t); t->rd=pp[0]; t->out=dup(fd); t->file=f;
+    fcntl(t->out,F_SETFD,FD_CLOEXEC); fcntl(f,F_SETFD,FD_CLOEXEC); fcntl(pp[0],F_SETFD,FD_CLOEXEC);
+    dup2(pp[1],fd); close(pp[1]); pthread_t th; pthread_create(&th,0,std_tee_thread,t); }
 int main(int argc, char **argv){
+    std_tee_start(2,"PELOAD_STDERR_TEE"); std_tee_start(1,"PELOAD_STDOUT_TEE");
     if(getenv("PELOAD_SAMPLE")){ pthread_t st; pthread_create(&st,0,sampler_thread,0); }
     wi_test_start();
     hitbox_start();

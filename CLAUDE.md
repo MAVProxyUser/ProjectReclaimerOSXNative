@@ -14,9 +14,14 @@ PELOAD_SKINGUARD=1 PELOAD_PATCH="exe+4e066d:909090909090" PELOAD_LOCAL_RUNTIME="
 ```
 `PELOAD_SKINGUARD=1` installs the armor-skin null-key guard (entry detour on halo3+0x2ac24c);
 without it round-start faults at RVA 0x2AC329. With it: map loads 100%, player spawns,
-`simulation_ready:true`, "gameplay presentation ready". Read the worker's stdout for state —
-the engine's `C:\ReclaimerProfile\Logs\client.log` file stays empty, so always run with
-`PELOAD_WORKER_INHERIT_STDIO=1` and parse stdout (see memory [[reclaimer-skinguard-simstart]]).
+`simulation_ready:true`, "gameplay presentation ready". Read the worker's stdout for state
+(see memory [[reclaimer-skinguard-simstart]]). `C:\ReclaimerProfile\Logs\client.log` stays empty: the client opens it
+(OPEN_ALWAYS, GENERIC_WRITE) but never writes to it under the loader (fd offset stays 0; cause unknown, harmless).
+Rust append-mode opens (FILE_APPEND_DATA without GENERIC_WRITE, 0x120114, e.g. the dedicated supervisor's
+server.log) used to open read-only so every write failed and WriteFile dumped it to stderr; since 2026-10-16 they
+are O_APPEND (PELOAD_APPEND_RO = old), and writes to *.log files are also copied to stderr (PELOAD_NO_LOG_TEE).
+`PELOAD_STDERR_TEE=<file>` / `PELOAD_STDOUT_TEE=<file>` (`%p` = pid) copy a process's stdio into a file, inherited by
+every child: the way to read processes whose stdio another process owns (dedicated server workers).
 `PELOAD_WORKER_INHERIT_STDIO=1` makes the spawned `probe-engine-worker` child log to our
 terminal (it's a separate process; the orchestrator spawns it via CreateProcessW).
 Useful env: `PELOAD_TRACE_NET/_D3D/_DRAW/_TEXT/_GDI/_SWAP/_MSG`, `PELOAD_SHOT` (dumps the
@@ -42,7 +47,8 @@ frame `_f<N>`; `PELOAD_D3DGL_ALT5` phase-tagged A/B), `PELOAD_INPUT_SCRIPT=walk|
 `PELOAD_KBM_TEST`, `PELOAD_AUDIO_DUMP=<raw>`. The GLSL translator runs in-process every launch;
 `~/reclaimer_glsl_v5/` is written for inspection only (`PELOAD_D3DGL_GLSLCACHE=1` reads it back).
 Hang debugging: `kill -USR1 <worker pid>` dumps every guest thread (rip + stack-scanned return addrs);
-`PELOAD_PEEK=<hexaddr>:<hexlen>[,...]` adds hex dumps of guest memory to it. `PELOAD_TRACE_LE=<code>`
+`PELOAD_PEEK=<hexaddr>:<hexlen>[,...]` adds hex dumps of guest memory to it; `PELOAD_DUMP_DEPTH=<n>` shows n frames
+per thread (default 16). `PELOAD_TRACE_LE=<code>`
 logs GetLastError calls returning <code> (with the guest caller and the last failed path).
 
 Online join (2026-10-16): `RECLAIMER_JOIN=host:port bash shim/play.sh` passes the client its own join
@@ -80,10 +86,15 @@ local-server ticket ("Invalid client ticket"). Its pgid lives in ~/Library/Appli
 target.pgid and play.sh's leftover-kill skips it. It runs windowless: `PELOAD_HIDE_WINDOW=1` (Accessory app, the
 NSWindow is never ordered in, the present thread idles; PELOAD_AUTOCLICK still works because it posts to the
 guest wndproc) + `PELOAD_MAX_FPS` (Present sleeps; default 30 when hidden). TARGET_SHOW=1 = the old minimized window.
-Headless `dedicated` server (dedicated init/check/run, C:\ReclaimerTestServer test folder with game/halo3 ->
-MCC symlink): config/check/online setup work, but its local-server worker idles at "Private native host
-descriptor verified; waiting for the native game client" (halo3 main loop never runs) -> server stays
-ready:false. Not solved. Shim fixes found on the way: CreateDirectoryW now returns real errors (183/3; it
+Headless `dedicated` server WORKS (2026-10-16, v0.9.18): `bash shim/dedicated.sh` (start/status/stop; first use runs
+`dedicated init`, links game/halo3 to MCC and writes a LOCAL-ONLY config: hidden, master off, upnp off, 127.0.0.1,
+Valhalla Slayer UDP 49190). Tree: supervisor -> `local-server` -> `probe-engine-worker ... --allow-empty-match
+--real-client` (stdout NUL, stderr = pipe to the supervisor, so read them via PELOAD_STDERR_TEE, which dedicated.sh
+sets: /tmp/reclaimer_dedicated_<pid>.log). The server sits in its lobby until min_players (1) join -- "Private native
+host descriptor verified; waiting for the native game client" is client_bridge.rs (real-MCC private bridge) and
+benign, every host prints it. A join takes ~20 s; the first join right after a server start can fail ("Public
+admission rejected: aborted by peer ... during the handshake" / client "Public join timed out"): retry. The
+supervisor never fills data/<server>/server.log (it reads the worker pipes; not chased). Shim fixes found on the way: CreateDirectoryW now returns real errors (183/3; it
 always claimed success, so create_dir_all never made parents; PELOAD_MKDIR_LAX = old), WSADuplicateSocketW +
 WSASocketW(FROM_PROTOCOL_INFO) for Rust try_clone (was a stub -> WSAEAFNOSUPPORT 10047), overlapped ReadFile
 on pipes/sockets uses read() + async completion (pread -> ESPIPE made parents stop reading children's

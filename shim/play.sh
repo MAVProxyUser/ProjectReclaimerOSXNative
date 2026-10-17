@@ -43,10 +43,11 @@ else echo "warning: $EXE is not a client build this loader was tested with; patc
 [ -x shim/build/peload ] || { echo "shim/build/peload missing: run 'bash shim/build.sh' (or use a release bundle)"; exit 1; }
 [ -d "$MCC_DIR/halo3" ] || { echo "MCC files not found in: $MCC_DIR"; echo "run: ./reclaimer-mac.sh download"; exit 1; }
 
-# Clear leftovers from an earlier launch, but leave a running test target (shim/target.sh) alone.
-TPG="$(cat "$HOME/Library/Application Support/ReclaimerMac/target.pgid" 2>/dev/null)"
+# Clear leftovers from an earlier launch, but leave a running test target (shim/target.sh) and dedicated server
+# (shim/dedicated.sh) alone.
+KEEP=" $(cat "$HOME/Library/Application Support/ReclaimerMac/target.pgid" "$HOME/Library/Application Support/ReclaimerMac/dedicated.pgid" 2>/dev/null | tr '\n' ' ') "
 for p in $(pgrep -f '^[^ ]*build/peload'); do
-  [ -n "$TPG" ] && [ "$(ps -o pgid= -p "$p" | tr -d ' ')" = "$TPG" ] && continue
+  case "$KEEP" in *" $(ps -o pgid= -p "$p" | tr -d ' ') "*) continue;; esac
   kill -9 "$p" 2>/dev/null
 done; sleep 1
 rm -f "$PFX/ReclaimerProfile/starting" 2>/dev/null

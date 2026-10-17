@@ -157,6 +157,24 @@ window (minimized in the Dock; add `TARGET_MINIMIZE=0` to keep it on screen).
 Any client can run that way: `PELOAD_HIDE_WINDOW=1` (no window, no Dock icon) and `PELOAD_MAX_FPS=<n>` (frame
 cap; 30 by default with a hidden window, `0` = uncapped).
 
+### A dedicated server on this Mac
+
+Project Reclaimer's headless dedicated server runs too (no window, in the background):
+
+```bash
+bash shim/dedicated.sh                                  # start it
+RECLAIMER_JOIN=127.0.0.1:49190 bash shim/play.sh        # join it
+bash shim/dedicated.sh status                           # what it is playing, players, ready
+bash shim/dedicated.sh stop                             # stop it
+```
+
+The first start creates the server folder (`C:\ReclaimerTestServer` in the loader's prefix; `DED_FOLDER='C:\<name>'`
+for another) with a local-only `dedicated.toml`: Valhalla Slayer on UDP 49190, hidden, not listed on any master, no
+UPnP. The server waits in its lobby until a player joins, then starts the match. If the very first join after
+starting it times out, join again. To host for other people, edit `dedicated.toml` (its options are documented in
+`dedicated.toml.example` next to it) -- that makes the server public, so only do it on purpose. `play.sh` leaves a
+running server alone. Logs: `/tmp/reclaimer_dedicated.log` and `/tmp/reclaimer_dedicated_<pid>.log`.
+
 ## Controls and options
 
 - **Controller:** any controller macOS supports. Look pitch is inverted by default.

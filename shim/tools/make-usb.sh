@@ -34,7 +34,7 @@ echo "space needed ~$((NEED/1048576)) GB, available ~$((HAVE/1048576)) GB on $(d
 R="rsync -a --exclude=.DS_Store"
 echo "== loader and scripts"
 $R shim/build/peload "$OUT/app/shim/build/"; $R shim/crt/ "$OUT/app/shim/crt/"
-$R shim/play.sh shim/target.sh shim/build.sh "$OUT/app/shim/"; $R shim/tools/quiet-run.sh "$OUT/app/shim/tools/"
+$R shim/play.sh shim/target.sh shim/dedicated.sh shim/build.sh "$OUT/app/shim/"; $R shim/tools/quiet-run.sh "$OUT/app/shim/tools/"
 $R README.md "$OUT/app/"; $R "$EXE" "$OUT/app/client/"
 cp shim/tools/usb-install.sh "$OUT/install.sh"; chmod +x "$OUT/install.sh" "$OUT/app/shim/build/peload"
 echo "== Reclaimer caches and fonts"

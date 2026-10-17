@@ -11,7 +11,7 @@ NAME="ProjectReclaimerOSXNative-reclaimer-$VER${SUF:+-$SUF}-macos"
 bash shim/build.sh >/dev/null
 rm -rf "dist/$NAME"; mkdir -p "dist/$NAME/shim/build" "dist/$NAME/shim/crt" "dist/$NAME/shim/tools" "dist/$NAME/client"
 cp shim/build/peload "dist/$NAME/shim/build/"; cp shim/crt/*.dll "dist/$NAME/shim/crt/"
-cp shim/play.sh shim/target.sh shim/build.sh "dist/$NAME/shim/"
+cp shim/play.sh shim/target.sh shim/dedicated.sh shim/build.sh "dist/$NAME/shim/"
 cp shim/tools/quiet-run.sh shim/tools/make-usb.sh shim/tools/usb-install.sh "dist/$NAME/shim/tools/"
 cp reclaimer-mac.sh README.md "dist/$NAME/"; touch "dist/$NAME/client/.gitkeep"
 chmod +x "dist/$NAME/shim/build/peload" "dist/$NAME"/shim/*.sh "dist/$NAME"/shim/tools/*.sh "dist/$NAME/reclaimer-mac.sh"
