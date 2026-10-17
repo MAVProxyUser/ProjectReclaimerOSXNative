@@ -9609,7 +9609,9 @@ static int entry_hook(uint8_t*site,const uint8_t*pro,int len,void*fn){
 void __attribute__((ms_abi)) hb_on_delete(uint32_t handle);
 // Entry hook on halo3's frame-timing function (halo3+0x9d22c), called from the top of the main loop every frame:
 // the safe point where engine jobs (teleport) run -- between ticks, nothing is mid-update.
-static void __attribute__((ms_abi)) hb_frame_hook(void){ if(__builtin_expect(g_hb_job_pending,0)) hb_engine_jobs(); }
+static void __attribute__((ms_abi)) hb_frame_hook(void){
+    if(__builtin_expect(g_st_voice_pending,0)) st_voice_jobs();   // stats page voice mutes (stats.c)
+    if(__builtin_expect(g_hb_job_pending,0)) hb_engine_jobs(); }
 static void hbdel_install(uint8_t*base){
     static const uint8_t frame_pro[15]={0x40,0x53,0x48,0x83,0xEC,0x20,0x65,0x48,0x8B,0x04,0x25,0x58,0x00,0x00,0x00};
     if(!entry_hook(base+0x9d22c,frame_pro,15,(void*)hb_frame_hook)) (void)!write(2,"  [hook] frame-timing prologue differs: engine jobs disabled\n",61);
@@ -10068,6 +10070,7 @@ int main(int argc, char **argv){
         ws("  PELOAD_WAIT: pid "); whex(getpid()); sleep(atoi(getenv("PELOAD_WAIT"))); }
     bp_install();   // PELOAD_BP software breakpoints (diagnostic)
     reentrancy_fix(); // built-in: neutralise the ui_composition RefCell re-entrancy
+    st_voice_install(); // stats page: voice mute + talking indicator (stats.c)
     patch_install(); hook_install(); // PELOAD_PATCH overwrites + PELOAD_HOOK trace detours
     ws("peload: calling entry (expect stub logs, then a fault at the first\n"
        "        unimplemented behavior — that is the signal we want)\n");

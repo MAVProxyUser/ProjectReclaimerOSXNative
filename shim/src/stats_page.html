@@ -23,7 +23,8 @@ canvas{width:100%;height:auto;display:block;background:#0b0b0b;border-radius:4px
 .ctl label{cursor:pointer}.ctl select{background:#222;color:var(--fg);border:1px solid var(--line);border-radius:4px}
 .legend{display:flex;align-items:center;gap:8px;margin-top:6px;color:var(--dim)}
 .ramp{height:8px;width:140px;border-radius:2px;background:linear-gradient(90deg,#1840ff,#18d0ff,#30e060,#f0e040,#ff3020)}
-#det{position:fixed;right:16px;top:16px;width:340px;max-width:calc(100vw - 32px);max-height:calc(100vh - 32px);overflow:auto;display:none;z-index:5;box-shadow:0 6px 30px #000a}
+.col{display:flex;flex-direction:column;gap:16px;min-width:0}
+#det{min-width:0}
 #det .x{float:right;cursor:pointer;background:none;border:0;color:var(--dim);font-size:18px;line-height:1}
 #det dl{display:grid;grid-template-columns:auto 1fr;gap:3px 12px;margin:8px 0 0}
 #det dt{color:var(--dim)}#det dd{margin:0;overflow-wrap:anywhere}
@@ -34,13 +35,20 @@ canvas{width:100%;height:auto;display:block;background:#0b0b0b;border-radius:4px
 #ov button:hover{border-color:#555}#ov button.on{background:#1d3a55;border-color:var(--accent);color:#fff}
 #ov button:disabled{opacity:.4;cursor:default}#ov kbd{color:var(--dim);font-size:11px;margin-left:4px}
 #ovmsg{color:var(--dim);font-size:12px}
-#rules{margin-top:16px}
+#rules{margin-bottom:16px}
 #rules .cols{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:10px 16px}
 #rules h3{font-size:12px;margin:0 0 4px;color:var(--accent);font-weight:600}
 #rules dl{display:grid;grid-template-columns:auto 1fr;gap:2px 10px;margin:0}
 #rules dt{color:var(--dim)}#rules dd{margin:0}
 .tr{display:inline-block;background:#26303a;border-radius:3px;padding:0 5px;margin:1px 3px 1px 0;font-size:12px}
 .tr.fx{background:#4a2a2a}
+#conn{margin-top:16px}#cl{display:flex;flex-wrap:wrap;gap:6px}
+.pc{display:inline-flex;align-items:center;gap:6px;background:#202020;border:1px solid var(--line);border-radius:4px;padding:2px 4px 2px 8px}
+.mb{background:#222;color:var(--fg);border:1px solid var(--line);border-radius:4px;padding:1px 8px;font:inherit;font-size:12px;cursor:pointer}
+.mb.on{background:#5a2626;border-color:#c55}.mb:disabled{opacity:.4;cursor:default}
+.pc.talk{border-color:#3c3;background:#1c3a1c;box-shadow:0 0 6px #3c36}.pc.muted{opacity:.6}
+#ch{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px}#ch h2{margin:0 auto 0 0}
+.spk{color:#4d4;margin-left:6px}
 </style></head>
 <body>
 <h1>Reclaimer live stats</h1><div id="hd">connecting...</div>
@@ -53,11 +61,13 @@ canvas{width:100%;height:auto;display:block;background:#0b0b0b;border-radius:4px
  <button data-a="teleport" title="Teleport to the far side of the map (needs PELOAD_ALLOW_TELEPORT; matches you host)">Teleport<kbd>F7</kbd></button>
  <button data-a="capture" title="Save the next frame, its depth buffer and the camera position to your home folder">Capture frame<kbd>F8</kbd></button>
  <span id="ovmsg"></span></div>
+<div id="rules" class="panel"><h2 id="rt">Game rules</h2><div id="rb" class="note">not in a match</div></div>
 <div class="grid">
  <div class="panel"><div class="wrap"><table><thead><tr>
   <th>Player</th><th>Shield</th><th>Health</th><th>Weapon</th><th>Deaths</th><th>Shots</th><th>Accuracy</th><th>Grenades</th><th>Vehicle</th><th>Speed</th><th>Traits</th></tr></thead>
   <tbody id="tb"></tbody></table></div>
   <div class="note">Click a player for details. Their deaths are ringed on the heatmap.</div></div>
+ <div class="col">
  <div class="panel"><h2 id="mt">Death heatmap</h2><canvas id="cv" width="560" height="560"></canvas>
   <div class="ctl">
    <label>Deaths <select id="scope"><option value="match">this match</option><option value="all">all matches</option></select></label>
@@ -65,9 +75,13 @@ canvas{width:100%;height:auto;display:block;background:#0b0b0b;border-radius:4px
    <label><input type="checkbox" id="pd" checked> players now</label>
   </div>
   <div class="legend"><span>fewer</span><span class="ramp"></span><span>more deaths</span><span id="dc"></span></div></div>
+ <div id="det" class="panel"><h2>Player details</h2><div class="note">Click a player in the table.</div></div>
+ </div>
 </div>
-<div id="rules" class="panel"><h2 id="rt">Game rules</h2><div id="rb" class="note">not in a match</div></div>
-<div id="det" class="panel"></div>
+<div id="conn" class="panel"><div id="ch"><h2 id="ct">Connected</h2>
+ <button class="mb" id="muteall">Mute all</button><button class="mb" id="unmuteall">Unmute all</button></div><div id="cl" class="note">-</div>
+ <div class="note">Everyone in the game's network session, the lobby included. Mute only affects what you hear (the same
+ list as the client's own scoreboard Mute buttons) and lasts until the game closes.</div></div>
 <script>
 const C={red:'#e04040',blue:'#4070f0',green:'#40c060',orange:'#f09030',purple:'#a050e0',gold:'#e0c040',brown:'#9a6a40',pink:'#f080c0',none:'#888'};
 const TN=['red','blue','green','orange','purple','gold','brown','pink'];
@@ -79,7 +93,7 @@ let snap=null, heat=null, sel=null;   // sel = the selected player's slot
 function renderTable(){
   const ps=snap.players.slice().sort((a,b)=>a.team-b.team||a.name.localeCompare(b.name));
   document.getElementById('tb').innerHTML=ps.map(p=>`<tr data-s="${p.slot}" class="${p.alive?'':'dead'} ${p.you?'you':''} ${p.slot===sel?'sel':''}">
-   <td><span class="sw" style="background:${C[p.team_name]||'#888'}"></span>${E(p.name)}${p.you?' (you)':''}</td>
+   <td><span class="sw" style="background:${C[p.team_name]||'#888'}"></span>${E(p.name)}${p.you?' (you)':''}${p.talking?'<span class="spk" title="talking">🔊</span>':''}${p.muted?' 🔇':''}</td>
    <td>${B(p.shield,'#58b8ff')}</td><td>${B(p.health,'#7ddf6a')}</td><td>${E(p.weapon||(p.alive?'':'respawning'))}</td>
    <td>${p.deaths??''}</td><td>${p.shots??''}</td><td>${p.shots?Math.round(p.accuracy*100)+'%':''}</td><td>${p.grenades.frag}f ${p.grenades.plasma}p ${p.grenades.spike}s ${p.grenades.firebomb}b</td>
    <td>${E(p.vehicle||'')}</td><td>${p.speed.toFixed(1)}</td><td>${traitBadges(p,3)}</td></tr>`).join('');
@@ -98,6 +112,20 @@ function traitBadges(p,max){ const t=p.traits||{}, ks=Object.keys(t), fx=(p.effe
   let h=fx.map(f=>`<span class="tr fx">${E(f.what)} ${Math.ceil(f.left)}s</span>`).join('');
   h+=ks.slice(0,max).map(k=>`<span class="tr">${E((TK[k]||k).toLowerCase())} ${E(t[k])}</span>`).join('');
   if(ks.length>max) h+=`<span class="tr">+${ks.length-max}</span>`; return h; }
+// ---- connected players (network session) + voice mute ----
+const muteBtn=(voice,muted)=>`<button class="mb ${muted?'on':''}" data-voice="${voice}" data-m="${muted?1:0}" ${snap&&snap.mute?'':'disabled'}>${muted?'Unmute':'Mute'}</button>`;
+let connKey='';
+function renderConn(){ const ss=(snap&&snap.session)||[], key=JSON.stringify(ss)+(snap&&snap.mute); if(key===connKey) return; connKey=key;
+  document.getElementById('ct').textContent=`Connected (${ss.length})`; const el=document.getElementById('cl');
+  if(!ss.length){ el.className='note'; el.textContent='no network session'; return; }
+  el.className=''; el.innerHTML=ss.slice().sort((a,b)=>(b.talking-a.talking)||a.name.localeCompare(b.name))
+    .map(p=>`<span class="pc ${p.talking?'talk':''} ${p.muted?'muted':''}" title="${p.talking?'talking':''}">${p.talking?'🔊 ':''}${E(p.name)}${muteBtn(p.voice,p.muted)}</span>`).join('');
+  for(const id of ['muteall','unmuteall']) document.getElementById(id).disabled=!(snap&&snap.mute); }
+for(const id of ['muteall','unmuteall']) document.getElementById(id).addEventListener('click',async()=>{
+  try{ await fetch(`/control?do=${id}`,{method:'POST',headers:{'X-Reclaimer-Control':'1'}}); }catch(err){} });
+document.addEventListener('click',async e=>{ const b=e.target.closest('.mb'); if(!b||b.disabled) return;
+  const act=b.dataset.m==='1'?'unmute':'mute'; b.disabled=true;
+  try{ await fetch(`/control?do=${act}&voice=${b.dataset.voice}`,{method:'POST',headers:{'X-Reclaimer-Control':'1'}}); }catch(err){} });
 let rulesKey='';
 function renderRules(){
   const v=snap&&snap.variant, el=document.getElementById('rb');
@@ -122,7 +150,7 @@ function renderRules(){
 // pointerdown, not click: the rows are rebuilt 10 times a second, so a click's down and up land on different rows
 document.getElementById('tb').addEventListener('pointerdown',e=>{const tr=e.target.closest('tr');if(!tr)return;const s=+tr.dataset.s;sel=(sel===s)?null:s;renderTable();renderDet();drawMap()});
 function renderDet(){
-  const el=document.getElementById('det'); if(!sel||!snap){el.style.display='none';return}
+  const el=document.getElementById('det'); if(sel==null||!snap){el.innerHTML='<h2>Player details</h2><div class="note">Click a player in the table.</div>';return}
   const p=snap.players.find(q=>q.slot===sel); if(!p){el.innerHTML=`<button class="x" onclick="closeDet()">×</button><div class="note">that player left the game</div>`;el.style.display='block';return}
   const myDeaths=heat?heat.deaths.filter(d=>d[7]===sel&&d[4]===p.name&&(scope()==='all'||d[5]===heat.match)).length:0;
   const rows=[['Team',`<span class="sw" style="background:${C[p.team_name]||'#888'}"></span>${E(p.team_name)}`],['Status',p.alive?'alive':'dead / respawning'],
@@ -134,6 +162,7 @@ function renderDet(){
    ['Distance',`${(p.distance||0).toFixed(0)} units`],['Speed',`${p.speed.toFixed(2)} (top ${(p.top_speed||0).toFixed(2)})`],
    ['Active traits',Object.keys(p.traits||{}).length?Object.entries(p.traits).map(([k,x])=>`${E(TK[k]||k)}: ${E(x)}`).join('<br>'):(snap.variant?'game defaults':'')],
    ['Effects',(p.effects||[]).map(f=>`${E(f.what)}, ${Math.ceil(f.left)} s left`).join('<br>')||'none'],
+   ['Voice',p.voice?muteBtn(p.voice,p.muted)+(p.muted?' muted':''):'no voice connection'],
    ['Shots fired',p.shots??0],['Hits',`${p.hits??0}`+(p.shots?` (${Math.round(p.accuracy*100)}% accuracy)`:'')],['Facing',p.facing!=null?p.facing+'°':''],['Position',p.pos.map(v=>v.toFixed(1)).join(', ')],['Object',p.handle]];
   el.innerHTML=`<button class="x" onclick="closeDet()" aria-label="Close">×</button><b>${E(p.name)}${p.you?' (you)':''}</b><dl>${rows.map(r=>`<dt>${r[0]}</dt><dd>${r[1]}</dd>`).join('')}</dl>
    <div class="note">Shots counts every projectile (each shotgun pellet is one). A hit is a shot that ended inside another player's body bounds -- an estimate; turret shots count for the vehicle, not the gunner.</div>`;
@@ -200,7 +229,7 @@ document.getElementById('ov').addEventListener('click',async e=>{ const b=e.targ
 const es=new EventSource('/events');
 es.onmessage=m=>{snap=JSON.parse(m.data);
   document.getElementById('hd').textContent=`${snap.map||'-'}  |  ${snap.in_match?'match time '+fmtT(snap.time):'not in a match'}  |  ${snap.players.length} players, ${snap.vehicles.length} vehicles, ${snap.projectiles.length} projectiles in flight`;
-  renderTable(); renderDet(); renderOverlay(); renderRules(); drawMap()};
+  renderTable(); renderDet(); renderOverlay(); renderRules(); renderConn(); drawMap()};
 es.onerror=()=>{document.getElementById('hd').textContent='disconnected (is the game running with PELOAD_STATS_HTTP?)'};
 pollHeat();
 </script></body></html>

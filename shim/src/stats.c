@@ -138,6 +138,72 @@ static void st_player_traits(StBuf*s,uint64_t rec){
 
 static void st_tag(StBuf*s,uint32_t def){ sb_str(s,hb_tag_name(def)); }
 
+// ---- the network session: everyone connected (also in the lobby, where the players table is empty) + voice mute -----
+// (shim/docs/reclaimer-voice-mute.md) Halo 3's session membership: sess = *(u64*)(halo3+0x1e250d0). Reclaimer patches
+// halo3 for 128 players and then keeps the records in an extended area (flag byte exe+0x27f7210 in 0.9.18):
+//   player valid mask sess+0x126c (16 / 128 bits); player i at sess+0x1270+i*0xc8 (extended sess+0x1493c0+i*0xc8):
+//     +0x04 u64 identifier (0 = none), +0x0c i32 peer index, +0x98 UTF-16 name[16]
+//   peer valid mask sess+0x54 (17 / 128 bits); peer p at sess+0x58+p*0x110 (extended sess+0x1381c0+p*0x110):
+//     +0x00 u64 peer id (= the client's voice id), +0x08 u32 state (8 = joined)
+// The client's voice mute is one global Mutex<Vec<peer id>> changed by set_muted(id, bool) (Win64; exe+0x66bea0 in
+// 0.9.18, found by signature); its own scoreboard Mute buttons use the same list, so both stay in sync. Mutes last
+// until the client exits. The call runs on a guest thread: the halo3 main loop's frame hook (st_voice_jobs).
+typedef struct { char name[64]; int idx, peer; uint64_t voice; int muted; } StSess;
+static uint8_t* g_st_setmuted; static uint64_t g_st_mutedvec; static int g_st_layout=-1;   // -1 unknown, 0 normal, 1 extended
+static int sig_parse(const char*s,uint8_t*b,uint8_t*m,int cap); static int64_t sig_find(uint8_t*base,const uint8_t*b,const uint8_t*m,int n);
+static int entry_hook(uint8_t*site,const uint8_t*pro,int len,void*fn);   // peload.c
+// Who is talking: an entry hook on the client's voice packet handler (voice_recv(state, sender peer id, payload, len);
+// exe+0x684080 in 0.9.18, by signature; its first 19 bytes are position-independent) stamps the sender's last packet.
+static pthread_mutex_t g_talk_mx=PTHREAD_MUTEX_INITIALIZER; static struct { uint64_t id; double t; } g_talk[128];
+static void __attribute__((ms_abi)) st_on_voice(void*state,uint64_t sender){ (void)state; double now=mono_s(); int o=0;
+    pthread_mutex_lock(&g_talk_mx); for(int i=0;i<128;i++){ if(g_talk[i].id==sender){ o=i; break; } if(g_talk[i].t<g_talk[o].t) o=i; }
+    g_talk[o].id=sender; g_talk[o].t=now; pthread_mutex_unlock(&g_talk_mx); }
+static double st_talk_age(uint64_t id){ double t=0; pthread_mutex_lock(&g_talk_mx); for(int i=0;i<128;i++) if(g_talk[i].id==id){ t=g_talk[i].t; break; } pthread_mutex_unlock(&g_talk_mx);
+    return t>0?mono_s()-t:1e9; }
+// Runs at exe load (single-threaded, before the entry point), only with the stats page on.
+static void st_voice_install(void){ if(!stats_on() || !g_base) return;
+    uint8_t b[96],m[96]; int n; int64_t r; char msg[220]; int k;
+    n=sig_parse("55 56 57 53 48 83 EC 38 48 8D 6C 24 30 48 C7 45 00 FE FF FF FF 48 89 CE B1 01 31 C0 F0 0F B0 0D ?? ?? ?? ?? 0F 85",b,m,96);
+    r=sig_find(g_base,b,m,n); if(r>=0){ g_st_setmuted=g_base+r; g_st_mutedvec=(uint64_t)(g_st_setmuted+0x24+*(int32_t*)(g_st_setmuted+0x20)); }
+    n=sig_parse("55 41 57 41 56 41 55 41 54 56 57 53 48 81 EC 18 01 00 00 48 8D AC 24 80 00 00 00 0F 29 B5 80 00 00 00 48 C7 45 78 FE FF FF FF 4D 89 CE 4C 89 C7 49 89 D7 48 89 CB",b,m,96);
+    int64_t rv=sig_find(g_base,b,m,n); int hooked=rv>=0 && entry_hook(g_base+rv,b,19,(void*)st_on_voice);
+    k=snprintf(msg,sizeof msg,"  [stats] voice: mute %s, talking indicator %s\n",g_st_setmuted?"available":"unavailable (set_muted not found)",hooked?"hooked":"unavailable (voice_recv not found)");
+    (void)!write(2,msg,k); }
+static void st_voice_init(void){ static int done; if(done || !g_base) return; done=1;
+    // 0.9.18: set_muted at its known place -> the client's expanded-session flag is at its known place too; other
+    // builds pick the layout by which one holds valid records
+    if(g_st_setmuted==g_base+0x66bea0){ uint8_t x=0; if(hb_read((uint64_t)(g_base+0x27f7210),&x,1) && x<=1) g_st_layout=x; } }
+static int st_session(StSess*out,int max,uint32_t*state){
+    uint8_t*h3=hb_halo3_base(); if(!h3) return 0; st_voice_init();
+    uint64_t sess=0; if(!hb_read((uint64_t)(h3+0x1e250d0),&sess,8) || !sess) return 0;
+    if(state) hb_read(sess+0x67b70,state,4);
+    if(g_st_setmuted==g_base+0x66bea0){ uint8_t x=0; if(hb_read((uint64_t)(g_base+0x27f7210),&x,1) && x<=1) g_st_layout=x; }   // set once Reclaimer patches halo3
+    uint64_t muted[256]; int nm=0; { uint64_t ptr=0, len=0; if(g_st_mutedvec && hb_read(g_st_mutedvec+0x10,&ptr,8) && hb_read(g_st_mutedvec+0x18,&len,8) && len<=256 && ptr>1 && len) if(hb_read(ptr,muted,len*8)) nm=(int)len; }
+    int best=0;
+    for(int lay=1;lay>=0;lay--){ if(g_st_layout>=0 && lay!=g_st_layout) continue;
+        uint8_t pm[16]={0}, qm[16]={0}; if(!hb_read(sess+0x126c,pm,lay?16:4) || !hb_read(sess+0x54,qm,lay?16:4)) continue;
+        int np=lay?128:16, nq=lay?128:17; uint64_t pbase=sess+(lay?0x1493c0:0x1270), qbase=sess+(lay?0x1381c0:0x58); int n=0;
+        for(int i=0;i<np && n<max;i++){ if(!((pm[i>>3]>>(i&7))&1)) continue; uint8_t r[0xc8]; if(!hb_read(pbase+(uint64_t)i*0xc8,r,sizeof r) || !*(uint64_t*)(r+4)) continue;
+            int pi=*(int32_t*)(r+0xc); if(pi<0 || pi>=nq || !((qm[pi>>3]>>(pi&7))&1)) continue;
+            uint8_t q[0x10]; if(!hb_read(qbase+(uint64_t)pi*0x110,q,sizeof q)) continue;
+            StSess*e=&out[n]; e->idx=i; e->peer=pi; e->voice=*(uint64_t*)q; e->muted=0; for(int k=0;k<nm;k++) if(muted[k]==e->voice){ e->muted=1; break; }
+            int j=0, ok=1; const uint16_t*w=(const uint16_t*)(r+0x98);
+            for(int c=0;c<16 && w[c] && j<60;c++){ uint16_t u=w[c]; if(u<0x20){ ok=0; break; }
+                if(u<0x80) e->name[j++]=(char)u; else if(u<0x800){ e->name[j++]=(char)(0xC0|(u>>6)); e->name[j++]=(char)(0x80|(u&63)); }
+                else { e->name[j++]=(char)(0xE0|(u>>12)); e->name[j++]=(char)(0x80|((u>>6)&63)); e->name[j++]=(char)(0x80|(u&63)); } }
+            if(!ok || !j) continue; e->name[j]=0; n++; }
+        if(n){ if(g_st_layout<0) g_st_layout=lay; return n; } best=n; }
+    return best; }
+// mute requests from the page, run on the halo3 main loop (hb_frame_hook)
+static pthread_mutex_t g_vq_mx=PTHREAD_MUTEX_INITIALIZER; static struct { uint64_t id; uint8_t on; } g_vq[256]; static int g_vqn; volatile int g_st_voice_pending;
+static void st_voice_jobs(void){
+    uint64_t id[256]; uint8_t on[256]; int n;
+    pthread_mutex_lock(&g_vq_mx); n=g_vqn; for(int i=0;i<n;i++){ id[i]=g_vq[i].id; on[i]=g_vq[i].on; } g_vqn=0; __atomic_store_n(&g_st_voice_pending,0,__ATOMIC_RELEASE); pthread_mutex_unlock(&g_vq_mx);
+    for(int i=0;i<n && g_st_setmuted;i++){ ((void(__attribute__((ms_abi))*)(uint64_t,uint8_t))g_st_setmuted)(id[i],on[i]);
+        char m[96]; int k=snprintf(m,sizeof m,"  [stats] voice %016llx %s\n",(unsigned long long)id[i],on[i]?"muted":"unmuted"); (void)!write(2,m,k); } }
+static int st_voice_request(uint64_t id,int on){ if(!g_st_setmuted || !id) return 0;
+    pthread_mutex_lock(&g_vq_mx); int ok=g_vqn<256; if(ok){ g_vq[g_vqn].id=id; g_vq[g_vqn].on=(uint8_t)!!on; g_vqn++; __atomic_store_n(&g_st_voice_pending,1,__ATOMIC_RELEASE); } pthread_mutex_unlock(&g_vq_mx); return ok; }
+
 // ---- death heatmap + footprint, per map, kept across matches -------------------------------------------------------
 // footprint: how often a live player stood in each 0.5-unit cell (it draws the map's playable layout over time);
 // deaths: where each player died. Saved to ~/Library/Application Support/ReclaimerMac/heatmaps/<map>.bin every 30 s.
@@ -197,7 +263,7 @@ static struct { uint32_t h; double t; } g_proj[8192];
 // capture (F8). A POST with a custom header, which another web site's page cannot send to this port without a CORS
 // preflight we never answer. PELOAD_STATS_READONLY=1 turns the controls off.
 static int st_controls_ok(void){ static int ro=-1; if(ro<0){ const char*e=getenv("PELOAD_STATS_READONLY"); ro=e&&*e&&strcmp(e,"0")?1:0; } return !ro; }
-static int st_control(const char*act){
+static int st_control(const char*act,const char*qs){
     char m[96]; int k=0;
     static const char*const feat[HBF_N]={"hitboxes","tracers","info","items"};
     for(int f=0;f<HBF_N;f++) if(!strcmp(act,feat[f])){ __atomic_fetch_xor(&g_hb_toggle,1<<f,__ATOMIC_ACQ_REL);
@@ -205,6 +271,11 @@ static int st_control(const char*act){
     if(!strcmp(act,"teams")){ static const char*const tm[3]={"all","enemies only","friends only"}; __atomic_fetch_add(&g_hb_teamcycle,1,__ATOMIC_ACQ_REL);
         k=snprintf(m,sizeof m,"  [stats] page: showing %s\n",tm[hb_team_mode()]); (void)!write(2,m,k); return 1; }
     if(!strcmp(act,"teleport")){ if(!getenv("PELOAD_ALLOW_TELEPORT")) return 0; __atomic_store_n(&g_hb_job_pending,1,__ATOMIC_RELEASE); (void)!write(2,"  [teleport] page: requested\n",29); return 1; }
+    if(!strcmp(act,"muteall") || !strcmp(act,"unmuteall")){ static StSess ss[128]; int n=st_session(ss,128,0), ok=0;
+        for(int i=0;i<n;i++) if(ss[i].muted!=!strcmp(act,"muteall")) ok+=st_voice_request(ss[i].voice,!strcmp(act,"muteall"));
+        char m[80]; int k=snprintf(m,sizeof m,"  [stats] page: %s (%d players)\n",act,ok); (void)!write(2,m,k); return n>0; }
+    if(!strcmp(act,"mute") || !strcmp(act,"unmute")){ const char*v=strstr(qs,"voice="); unsigned long long id=v?strtoull(v+6,0,16):0;
+        return st_voice_request(id,!strcmp(act,"mute")); }
     if(!strcmp(act,"capture")){ __atomic_store_n(&g_hb_cap_req,1,__ATOMIC_RELEASE); (void)!write(2,"  [capture] page: capturing the next frame\n",43); return 1; }
     return 0; }
 static void st_snapshot(StBuf*s){
@@ -221,7 +292,7 @@ static void st_snapshot(StBuf*s){
       sb_put(s,",\"overlay\":{\"hitboxes\":%s,\"tracers\":%s,\"info\":%s,\"items\":%s,\"teams\":\"%s\",\"teleport\":%s,\"controls\":%s}",
           hb_feat(HBF_HITBOX)?"true":"false",hb_feat(HBF_TRACER)?"true":"false",hb_feat(HBF_INFO)?"true":"false",hb_feat(HBF_ITEMS)?"true":"false",
           tm[hb_team_mode()],tp?"true":"false",st_controls_ok()?"true":"false"); }
-    if(strcmp(m,g_trk_map)){ snprintf(g_trk_map,sizeof g_trk_map,"%s",m); g_ntrk=0; g_nbip=0; memset(g_proj,0,sizeof g_proj); }   // new map: new match stats
+    if(strcmp(m,g_trk_map)){ snprintf(g_trk_map,sizeof g_trk_map,"%s",m); g_ntrk=0; g_nbip=0; memset(g_proj,0,sizeof g_proj); g_hb_local_slot=-1; }   // new map: new match stats
     pthread_mutex_lock(&g_hm_mx); snprintf(g_hm_cur,sizeof g_hm_cur,"%s",m); if(g_hm.dirty && now-g_hm.saved>30){ hm_save(); g_hm.saved=now; } pthread_mutex_unlock(&g_hm_mx);
     static uint8_t tab[8192*0x18]; int hi=0; uint64_t arr=hb_object_array(); uint8_t hdr[0x60];
     if(arr && hb_read(arr,hdr,sizeof hdr) && *(uint32_t*)(hdr+0x2c)==0x64407440 && *(int32_t*)(hdr+0x24)==0x18){
@@ -229,7 +300,18 @@ static void st_snapshot(StBuf*s){
     #define ST_DATUM(h) ((((h)&0xFFFF)<(uint32_t)hi && (h)!=0xFFFFFFFFu && *(uint16_t*)(tab+((h)&0xFFFF)*0x18)==(uint16_t)((h)>>16)) ? *(uint64_t*)(tab+((h)&0xFFFF)*0x18+0x10) : 0)
     #define ST_TYPE(h) (tab[((h)&0xFFFF)*0x18+3])
     StPlayer pl[256]; int np=st_players(pl,256);
-    float cam[3]={0}; int camok=0; { float vp[32]; unsigned s0=g_hb_vpseq; memcpy(vp,g_hb_vp,sizeof vp); if(!(s0&1) && g_hb_vpseq==s0 && (vp[28]||vp[29]||vp[30])){ memcpy(cam,vp+28,12); camok=1; } }
+    float cam[3]={0}, fwd[3]={0}; int camok=0; { float vp[32]; unsigned s0=g_hb_vpseq; memcpy(vp,g_hb_vp,sizeof vp); if(!(s0&1) && g_hb_vpseq==s0 && (vp[28]||vp[29]||vp[30])){ memcpy(cam,vp+28,12);
+        float l=sqrtf(vp[12]*vp[12]+vp[13]*vp[13]+vp[14]*vp[14]); if(l>0){ fwd[0]=vp[12]/l; fwd[1]=vp[13]/l; fwd[2]=vp[14]/l; camok=1; } } }
+    // The local player (stats "you", the overlay's friend/enemy split): the biped the camera is inside (first person),
+    // else the nearest biped just ahead on the camera's view ray (third person); its players-table slot is kept while
+    // it is dead, seated in a vehicle or not on screen
+    if(camok){ uint32_t best=0xFFFFFFFFu; float bd=1e9f; int inside=0;
+        for(int k=0;k<np;k++){ uint32_t h=pl[k].unit; uint64_t p=ST_DATUM(h); float c[4]; if(!p || ST_TYPE(h)!=0 || !hb_read(p+0x1c,c,16)) continue;
+            float v[3]={c[0]-cam[0],c[1]-cam[1],c[2]-cam[2]}, d2=v[0]*v[0]+v[1]*v[1]+v[2]*v[2], r=c[3];
+            if(d2<(r+0.3f)*(r+0.3f)){ best=h; inside=1; break; }
+            float a=v[0]*fwd[0]+v[1]*fwd[1]+v[2]*fwd[2], perp2=d2-a*a; if(a>0.3f && a<6.0f && perp2<(r+0.4f)*(r+0.4f) && a<bd){ bd=a; best=h; } }
+        (void)inside; if(best!=0xFFFFFFFFu) for(int k=0;k<np;k++) if(pl[k].unit==best){ g_hb_local_slot=pl[k].slot; break; } }
+    g_hb_local_unit=0xFFFFFFFFu; for(int k=0;k<np;k++) if(pl[k].slot==g_hb_local_slot){ g_hb_local_unit=pl[k].unit; break; }
     // deaths: every biped, alive -> dead (the body stays a while, so 10 Hz catches it); the player it belonged to.
     // Positions are the world-space bounding centre (+0x1c): the origin (+0x50) is vehicle-relative when seated.
     { StBip nb[2048]; int nn=0;
@@ -255,6 +337,10 @@ static void st_snapshot(StBuf*s){
         if(p && hb_read(p+0xC0,&own,4)) for(int k=0;k<np;k++) if(pl[k].unit==own){ StTrack*t=st_track(&pl[k]); if(t) t->shots++; break; } }
     // players: the engine's player table (a player between lives has no live biped)
     st_variant(s);   // the game's options and trait sets (st_players found the TLS block)
+    static StSess ss[128]; uint32_t sst=0; int nss=st_session(ss,128,&sst);
+    sb_put(s,",\"session\":["); for(int k=0;k<nss;k++){ sb_put(s,"%s{\"name\":",k?",":""); sb_str(s,ss[k].name);
+        sb_put(s,",\"index\":%d,\"voice\":\"%016llx\",\"muted\":%s,\"talking\":%s}",ss[k].idx,(unsigned long long)ss[k].voice,ss[k].muted?"true":"false",st_talk_age(ss[k].voice)<0.5?"true":"false"); }
+    sb_put(s,"],\"session_state\":%u,\"mute\":%s",sst,g_st_setmuted&&st_controls_ok()?"true":"false");
     sb_put(s,",\"players\":["); int first=1;
     for(int k=0;k<np;k++){ StTrack*t=st_track(&pl[k]); uint32_t h=pl[k].unit; uint64_t p=ST_DATUM(h); static uint8_t d[0x380];
         int have = p && ST_TYPE(h)==0 && hb_read(p,d,sizeof d); int dead = !have || ((*(const uint32_t*)(d+0x110)>>2)&1);
@@ -267,7 +353,7 @@ static void st_snapshot(StBuf*s){
                    if(g_gameplay_t0){ pthread_mutex_lock(&g_hm_mx); hm_switch(g_hm_cur); hm_cell_add((int32_t)floorf(o[0]/HM_CELL),(int32_t)floorf(o[1]/HM_CELL),1); g_hm.dirty=1; pthread_mutex_unlock(&g_hm_mx); } }
                else if(t->alive && !have){ t->alive=0; }   // biped gone without us seeing it die
                t->unit=h; if(team>=0) t->team=team; }
-        int you=0; if(have && camok){ const float*c=(const float*)(d+0x1c); float dx=c[0]-cam[0],dy=c[1]-cam[1],dz=c[2]-cam[2]; you = dx*dx+dy*dy+dz*dz < (c[3]+0.3f)*(c[3]+0.3f); }
+        int you=pl[k].slot==g_hb_local_slot;
         sb_put(s,"%s{\"name\":",first?"":","); first=0; sb_str(s,pl[k].name); sb_put(s,",\"slot\":%d",pl[k].slot);
         sb_put(s,",\"handle\":\"%08x\",\"team\":%d,\"team_name\":\"%s\",\"you\":%s,\"alive\":%s,\"health\":%.3f,\"shield\":%.3f,\"camo\":%.3f",
                h,team,(team>=0&&team<8)?teams[team]:"none",you?"true":"false",dead?"false":"true",dead?0:*(const float*)(d+0xF4),dead?0:*(const float*)(d+0xF8),have?*(const float*)(d+0x360):0);
@@ -282,6 +368,9 @@ static void st_snapshot(StBuf*s){
         if(t) sb_put(s,",\"deaths\":%d,\"hits\":%d,\"accuracy\":%.3f,\"shots\":%d,\"life\":%.1f,\"longest_life\":%.1f,\"distance\":%.1f,\"top_speed\":%.2f",t->deaths,t->hits,t->shots?(double)t->hits/t->shots:0.0,t->shots,t->alive?now-t->life_start:0.0,
                      t->longest>(t->alive?now-t->life_start:0)?t->longest:(t->alive?now-t->life_start:0),t->dist,t->top_speed);
         if(g_st_var_ok) st_player_traits(s,pl[k].rec);
+        { const StSess*vs=0; for(int q=0;q<nss && !vs;q++) if(ss[q].idx==pl[k].slot && !strcmp(ss[q].name,pl[k].name)) vs=&ss[q];
+          for(int q=0;q<nss && !vs;q++) if(!strcmp(ss[q].name,pl[k].name)) vs=&ss[q];
+          if(vs) sb_put(s,",\"voice\":\"%016llx\",\"muted\":%s,\"talking\":%s",(unsigned long long)vs->voice,vs->muted?"true":"false",st_talk_age(vs->voice)<0.5?"true":"false"); }
         sb_put(s,"}"); }
     sb_put(s,"]");
     // vehicles and projectiles in flight
@@ -319,7 +408,7 @@ static void* st_conn(void*a){ int fd=(int)(intptr_t)a; pthread_setname_np("shim-
     if(!strcmp(path,"/control")){
         // POST + X-Reclaimer-Control header (see st_controls_ok); ?do=<action>
         char act[32]=""; const char*d=strstr(qs,"do="); if(d) sscanf(d+3,"%31[a-z]",act);
-        int hdr=strcasestr(req,"\r\nX-Reclaimer-Control:")!=0, code=!strcmp(meth,"POST")&&hdr?(st_controls_ok()?(st_control(act)?200:400):403):403;
+        int hdr=strcasestr(req,"\r\nX-Reclaimer-Control:")!=0, code=!strcmp(meth,"POST")&&hdr?(st_controls_ok()?(st_control(act,qs)?200:400):403):403;
         const char*body=code==200?"{\"ok\":true}":code==400?"{\"ok\":false,\"error\":\"unknown or disabled action\"}":!st_controls_ok()?"{\"ok\":false,\"error\":\"controls are off\"}":"{\"ok\":false,\"error\":\"needs POST with an X-Reclaimer-Control header\"}";
         int k=snprintf(h,sizeof h,"HTTP/1.1 %d %s\r\nContent-Type: application/json\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n%s",code,code==200?"OK":code==400?"Bad Request":"Forbidden",strlen(body),body);
         st_send(fd,h,(size_t)k); }

@@ -112,6 +112,7 @@ typedef struct { float c[3], r, o[3], vel[3]; int type; uint32_t handle; uint64_
     float health, shield, camo; int team, seat, wslot, dead; uint32_t weapons[4], parent; int8_t gren[4]; int rcount; uint16_t roff; } HbObj;
 // Local player's team (the biped the camera is inside) and the friend/enemy filter: F6 or PELOAD_HB_TEAMS=all|enemies|friends.
 static int g_hb_myteam=-1, g_hb_teamfilter=-1;
+static volatile int g_hb_local_slot=-1; static volatile uint32_t g_hb_local_unit=0xFFFFFFFFu;   // stats.c finds the local player (also in third person)
 static int hb_is_friend(const HbObj*o){ return g_hb_myteam>=0 && o->type==0 && o->team==g_hb_myteam; }
 static int hb_team_mode(void){   // 0 all, 1 enemies only, 2 friends only
     if(g_hb_teamfilter<0){ const char*e=getenv("PELOAD_HB_TEAMS"); g_hb_teamfilter = e&&!strcasecmp(e,"enemies")?1 : e&&!strcasecmp(e,"friends")?2 : 0; }
@@ -453,8 +454,11 @@ static void hb_draw_overlay(void){
                             static int once; if(!once){ once=1; char m[160]; int k=snprintf(m,sizeof m,"  [selfdump] players array: element 0x%x, %d slots; ours = slot %d\n",es,hi,pl); (void)!write(2,m,k); } break; } }
                     break; } }
             FILE*f=fopen(sd,"ab"); if(f){ fwrite(rec,1,sizeof rec,f); fclose(f); } break; } } }
-    g_hb_myteam=-1; for(int i=0;i<n;i++){ const HbObj*o=&objs[i]; if(o->type) continue; float dx=o->c[0]-vp[28],dy=o->c[1]-vp[29],dz=o->c[2]-vp[30];
-        if(dx*dx+dy*dy+dz*dz < (o->r+0.3f)*(o->r+0.3f)){ g_hb_myteam=o->team; break; } }   // the biped the camera is inside = us
+    // our team: the biped the camera is inside (first person), else the local player the stats thread tracks (third
+    // person, vehicles); kept while neither is found (dead, respawning)
+    { int found=0; for(int i=0;i<n;i++){ const HbObj*o=&objs[i]; if(o->type) continue; float dx=o->c[0]-vp[28],dy=o->c[1]-vp[29],dz=o->c[2]-vp[30];
+          if(dx*dx+dy*dy+dz*dz < (o->r+0.3f)*(o->r+0.3f)){ g_hb_myteam=o->team; found=1; break; } }
+      uint32_t lu=g_hb_local_unit; if(!found && lu!=0xFFFFFFFFu) for(int i=0;i<n;i++) if(objs[i].type==0 && objs[i].handle==lu){ g_hb_myteam=objs[i].team; break; } }
     enum { HB_CAP=400000 }; static float verts[HB_CAP*5]; int nv=0; const float*cam=vp+28;   // cb0[7] = camera position
     static const float cwhite[3]={1,1,1}, cgrey[3]={0.7f,0.7f,0.7f}, ctrace[3]={1,0.95f,0.55f}, cvel[3]={1,0.5f,0.1f}, citem[3]={0.3f,1,0.45f}, cequip[3]={0.3f,0.9f,1};
     for(int i=0;i<n;i++){ const HbObj*o=&objs[i]; int unit=o->type==0||o->type==1||o->type==12;
