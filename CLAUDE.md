@@ -208,6 +208,7 @@ symlink to "Program Files/Steam/steamapps") and checks each file against the ser
 Forge 2.0 (2933266434) ships its own halo3/maps/shared.map + campaign.map besides the Forge-world maps.
 Rock-wall seams (tabled by the user, display-only): `PELOAD_D3DGL_DFCENSUS` (draws per depth func), `PELOAD_D3DGL_INVARIANT`
 (invariant gl_Position, opt-in); the main depth buffer is DXGI 19 (D32F_S8, reverse-Z) and keeps full float precision.
+play.sh's stdin feeder is `sleep 86400.<pid>` (killed when the game exits; it used to hold a caller's `| tail` for 24 h).
 Unfocused/hidden clients are held at 60 fps by the engine; PELOAD_MAX_FPS caps lower (default 30 when hidden).
 Betrayal popup (backlog 15): halo3's native GUI screen c_gui_screen_boot_betrayer, posted by halo3+0xff5fc when
 halo3+0xfcc20 is true (player dead: +0x28 unit NONE; betrayer handle at player +0x1F0; variant betrayal booting on).
@@ -340,6 +341,11 @@ direct `lea` ref — search a distinctive substring that IS referenced directly.
 
 ## RE findings index
 - `shim/docs/RE-findings-menu-reentrancy.md` — the running RE log (sessions 1–8).
+- `shim/docs/easyanticheat-eos.md` — static analysis of MCC's Easy Anti-Cheat (EOS) service: upload-only telemetry
+  (2 events), crash-dump commands, kernel-driver load via the world-writable `Global\EasyAntiCheat_EOSBin` section.
+  Reclaimer never loads MCC-Win64-Shipping.exe / EOSSDK, so none of it runs under the loader.
+- `shim/docs/patch-addresses.md` — every patch/hook/call/data address in halo3.dll and the client, with signatures
+  (section 8) and how to re-find them after an MCC update (section 9).
 - Memory files under `~/.claude/projects/.../memory/` — net/AFD, GDI text, goal.
 - SOLVED: map load (was 15% stall) now reaches 100% via the ucontext fiber fix; round-start
   (was 0xC0000005 @ RVA 0x2AC329) now passes via `PELOAD_SKINGUARD`. Sim starts:

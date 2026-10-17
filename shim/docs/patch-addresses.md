@@ -372,3 +372,161 @@ regex (`??` = any byte) over the executable sections, counting overlapping match
 every rip-relative disp32 in .text once, so string `lea`s, callers and data references are dictionary lookups; take
 function bounds from .pdata (following chained unwind info). Read the releases as data only: they are untrusted
 binaries and are kept outside the repo.
+
+## 8. Everything the loader touches
+
+Static, 2026-10-17, same rules as above. Every byte the loader patches, every function it detours or calls, every
+return address it compares and every variable it reads or writes, in **both** binaries, from `shim/src/*.c`.
+
+**halo3.dll**: the MCC copy in the prefix (`.../Halo The Master Chief Collection/halo3/halo3.dll`), 11,127,768 bytes,
+SHA-256 `b209d8454b12dc77e54ccd2c9924ec8d44b8619d21cf98e36ffaf601e67efb63`, PE timestamp 2025-08-16 20:45 UTC,
+ImageBase 0x180000000, .text 0x6f811c bytes. **Only this one version is available locally**, so the halo3 signatures
+below are verified unique in this file only; whether they survive an MCC update is untested. **exe**: client v0.9.18
+(RVAs) and all 34 releases (coverage).
+
+Signatures follow `sig_parse`/`sig_find`: `??` = any byte; every rel8/rel32 branch or call target and every
+rip-relative disp32 is `??`. Each one matches **exactly once** in the executable section(s) and at the RVA given
+(CONFIRMED by scanning). "Site" = the offset of the touched byte inside the signature. For data, the anchor is a unique
+instruction sequence that references the variable: address = hit + (end of that instruction) + the disp32 stored in it.
+
+### 8.1 halo3.dll: code we patch or detour
+
+| RVA | What | How we touch it | Source | Found today | Proposed signature | Site | Original bytes at site |
+|---|---|---|---|---|---|---|---|
+| 0x342ed8 | object_delete | entry hook: 14 bytes compared, then relocated | peload.c `hbdel_install` -> hitbox.c `hb_on_delete` (off with `PELOAD_NO_DELHOOK`) | fixed RVA + prologue compare | `48 89 5C 24 10 48 89 6C 24 18 56 57 41 54 41 56 41 57 48 83 EC 50` | +0 | `48 89 5C 24 10 48 89 6C 24 18 56 57 41 54` |
+| 0xb2250 | main_loop_body (frame safe point) | entry hook: 20 bytes compared + relocated | peload.c `hbdel_install` -> `hb_frame_hook` (teleport, bounds, stats voice mutes) | fixed + compare | `48 8B C4 57 48 81 EC 60 02 00 00 48 C7 44 24 30 FE FF FF FF 48 89 58 18` | +0 | `48 8B C4 57 48 81 EC 60 02 00 00 48 C7 44 24 30 FE FF FF FF` |
+| 0x11b0ec | game_engine_display_event | entry hook: 17 bytes compared + relocated | stats.c `st_events_install` -> `st_on_display_event` (off with `PELOAD_NO_EVHOOK`) | fixed + compare | `40 53 48 83 EC 40 41 83 C8 FF 48 8B D9 44 39 41 0C 75 ??` | +0 | `40 53 48 83 EC 40 41 83 C8 FF 48 8B D9 44 39 41 0C` |
+| 0x2d3f2c | chud_messaging_post | `entry_hook_tail`: 16 bytes compared; the replay tail re-runs `sub rsp,0x28 ; cmp ecx,4 ; jge`, loads the TLS index from the absolute address halo3+0xa39f9c and jumps to +0x10 (0x2d3f3c); r9 = the return address | stats.c `st_events_install` -> `st_on_chud` | fixed + compare. The 16 compared bytes contain a rip-relative disp32, so any rebuild breaks the compare even when the code is the same | `48 83 EC 28 83 F9 04 7D ?? 44 8B 0D ?? ?? ?? ?? 65 48 8B 04 25 58 00 00 00` | +0 (resume +0x10) | `48 83 EC 28 83 F9 04 7D 36 44 8B 0D 60 60 76 00` |
+| 0x2ac24c | armor-skin key registration (sub_1802ac24c) | entry detour, 14 bytes relocated, **not compared**: `test r8,r8 ; jz -> xor eax,eax ; ret` | peload.c `skinguard_install` / `skinguard_one` (`PELOAD_SKINGUARD`) | fixed RVA, no check | `48 8B C4 55 56 57 41 54 41 55 41 56 41 57 48 8D 68 A1 48 81 EC 90 00 00 00 48 C7 45 C7 FE FF FF FF` | +0 | `48 8B C4 55 56 57 41 54 41 55 41 56 41 57` |
+| 0x28e8e0 | per-section decompression cb builder (sub_18028e8e0) | trace detour `hook_one` id 0xdec0, 14 bytes relocated, not compared | peload.c `capcb1_install` (`PELOAD_D3DGL_CAPCB1`) | fixed, no check | `40 55 48 8B EC 48 83 EC 50 F3 0F 10 51 04 48 8D 55 D0` | +0 | `40 55 48 8B EC 48 83 EC 50 F3 0F 10 51 04` |
+| 0x172bce | NULL-vtable release in the resource sweep (FUNC 0x172ad0) | mid-function detour, 17 bytes relocated, not compared; NULL vtable -> jump to 0x172bee | peload.c `vtguard_install` / `vtguard_one` (`PELOAD_VTGUARD`) | fixed RVA and fixed skip RVA | `75 ?? 49 8B 06 49 8B CE FF 10 83 C8 FF F0 41 0F C1 46 0C 83 F8 01 75 ?? 49 8B 06` | +2. Skip = the target of the leading `jne`: site + (int8)sig[1] | `49 8B 06 49 8B CE FF 10 83 C8 FF F0 41 0F C1 46 0C` |
+| 0x172f9a | NULL-vtable release, shared_ptr release (FUNC 0x172e88) | same, 15 bytes; skip 0x172fb7 | same | fixed | `75 ?? 48 8B 03 48 8B CB FF 10 8B C7 F0 0F C1 43 0C 03 C7 75 ??` | +2. Skip = site + (int8)sig[1] | `48 8B 03 48 8B CB FF 10 8B C7 F0 0F C1 43 0C` |
+| 0x37b816 | map boundary test (FUNC 0x37b6c8) | patch `0F 85 54 01 00 00` -> `E9 55 01 00 00 90` (same target; new rel32 = old rel32 + 1) | hitbox.c `g_hb_bnd` / `hb_bounds_set` (stats page `do=bounds`, written at the frame safe point) | fixed RVA; original or patched bytes compared before writing | `0F 85 ?? ?? ?? ?? 48 8D 95 C8 00 00 00 8B CF E8 ?? ?? ?? ??` | +0 | `0F 85 54 01 00 00` |
+| 0x37b734 | second boundary test (same function) | `74` -> `EB` | same | same | `74 ?? 8B CF E8 ?? ?? ?? ?? 8B C8 E8 ?? ?? ?? ??` | +0 | `74 41` |
+| 0x219c1f | biped ground test (FUNC 0x2199c4) | `75 06` -> `EB 46`: jump to the target of the `je` at +6 (0x219c67) | same | same | `75 ?? F6 43 63 02 74 ?? 83 38 FF F2 0F 10 40 24` | +0. New rel8 = (int8)sig[7] + 6 | `75 06` |
+
+Not patched, listed so nobody does: 0x1b8e00 (a boundary function whose entry the client checks; patching it is
+refused, map-boundaries.md) and 0x118a1c game_engine_player_killed (the client detours it itself). Signatures in 8.5.
+
+### 8.2 halo3.dll: functions we call
+
+| RVA | Function | Source | Found today | Proposed signature (entry, site +0) |
+|---|---|---|---|---|
+| 0x259410 | object teleport (object, pos*, fwd*, up*, 1) | hitbox.c `hb_engine_jobs` / `hb_engine_jobs_locked` | fixed RVA; the first 16 bytes are compared before the first call | `48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57 41 54 41 55 41 56 41 57 48 81 EC 80 00 00 00 44 8B 15 ?? ?? ?? ??` |
+| 0x3a3c4c | unit_exit_vehicle (unit, 0) | hitbox.c `hb_engine_jobs_locked` | fixed, no check | `48 89 5C 24 08 55 48 8B EC 48 83 EC 60 41 83 CB FF` |
+| 0x9bc78 | scenario_location_from_point (u16* out, float* point) | hitbox.c `hb_engine_jobs_locked` | fixed, no check | `48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57 48 83 EC 20 44 8B 05 ?? ?? ?? ?? 83 CD FF 66 89 29` |
+| 0x12c948 | game-state lock (returns a token) | hitbox.c `hb_engine_jobs` | fixed, no check | `48 83 EC 28 4C 8B 05 ?? ?? ?? ?? 33 D2 41 83 78 50 FF` |
+| 0x12c9a0 | game-state unlock (&token) | hitbox.c `hb_engine_jobs` | fixed, no check | `48 89 5C 24 08 57 48 83 EC 20 83 39 01 48 8B F9` (16 generic bytes: unique today, the first to go ambiguous; it is the function the lock's callers call next with `&token`) |
+
+### 8.3 halo3.dll: return addresses we compare
+
+stats.c `st_on_chud` labels each HUD line by the return address of the call into chud_messaging_post. Each signature
+covers the `call` (its rel32 is `??`); after a match, check that the call's target is the chud_messaging_post found
+in 8.1.
+
+| Return address | Caller | Proposed signature | Call at | Return = |
+|---|---|---|---|---|
+| 0x11b860 | game-engine event display (src 0; FUNC 0x11b6e8) | `48 8D 95 F0 04 00 00 8B CF E8 ?? ?? ?? ?? 8B 53 14` | +9 | hit + 0xe |
+| 0x2d3f1b | post by string id (src 1; FUNC 0x2d3ee4) | `44 8B C7 48 8D 54 24 20 8B CB E8 ?? ?? ?? ?? 48 8B 9C 24 F0 02 00 00` | +0xa | hit + 0xf |
+| 0x2ddd18 | one-time hint (src 2; FUNC 0x2ddc60) | `48 8D 54 24 30 8B CE E8 ?? ?? ?? ?? C6 84 1F 7C 1E 00 00 01` | +7 | hit + 0xc |
+
+Without the leading `44 8B C7` the 0x2d3f1b signature also matches 0x2d5026, a twin helper that calls another function.
+
+### 8.4 halo3.dll: data we read or write
+
+| RVA | What | How | Source | Found today | Anchor signature | Address = |
+|---|---|---|---|---|---|---|
+| 0xa39f9c | static TLS index (u32); the TLS block is `gs:[0x58][index]` | read | hitbox.c (TLS block lookups, `hb_engine_jobs`, `hb_on_delete`, the snapshot), stats.c (players, betrayal), the chud replay tail | fixed | the chud_messaging_post signature (8.1) | hit + 0x10 + disp32@+0xc (6413 references in .text) |
+| 0x1e250d0 | network session pointer (u64) | read | stats.c `st_session` | fixed | `48 83 EC 28 45 33 C9 44 38 0D ?? ?? ?? ?? 74 ?? 4C 8B 15 ?? ?? ?? ??` (FUNC 0x126cc) | hit + 0x17 + disp32@+0x13 |
+| 0x8f4028 | engine-ready pointer (u64, non-null once the game state exists) | read | hitbox.c `hb_engine_jobs` | fixed | the game-state lock signature (8.2) | hit + 0xb + disp32@+7 |
+| 0x46bb780 .. 0x46bb7f0 | WavesFX_* function-pointer table (15 slots; WavesFX_Initialize = 0x46bb7c8) | write: no-op stubs, Initialize returns a dummy context | peload.c `waves_prefill` | fixed | `48 81 EC 18 01 00 00 48 8D 05 ?? ?? ?? ?? 48 89 44 24 30 48 8D 05 ?? ?? ?? ?? 48 89 44 24 38` (FUNC 0x25a720, which builds {slot, name} pairs for GetProcAddress) | Initialize = hit + 0xe + disp32@+0xa; its name `lea` at +0x13 points at "WavesFX_Initialize". Each further `lea rax,[rip+slot]` / `lea rax,[rip+name]` pair gives one more slot |
+| 0xa39e10 / 18 / 20 / 28 | XAudio2 import slots | not touched by the loader; read and replaced by the client's headless-audio code (whose check we NOP) | exe | the exe embeds these four RVAs as constants | `FF 15 ?? ?? ?? ?? F6 47 10 04 F3 42 0F 10 94 3E B8 01 00 00` (a `call [slot1]`) | slot 1 = hit + 6 + disp32@+2; slots 2-4 = +8 / +0x10 / +0x18 |
+| 0x21c2398 | the `_Mtx` from the thread-id note (info) | none | peload.c comment | -- | `48 83 EC 38 48 C7 44 24 20 FE FF FF FF BA 02 01 00 00 48 8D 0D ?? ?? ?? ??` (FUNC 0x5170) | hit + 0x19 + disp32@+0x15 |
+| HaloScript globals | `PELOAD_H3=name=value` | write | peload.c `h3set_install` | by name at run time ("\0name\0" -> the 24-byte table entry -> storage) | -- | nothing to update |
+
+### 8.5 halo3.dll: referenced only in comments and docs (info)
+
+| RVA | What | Function | Signature | Site |
+|---|---|---|---|---|
+| 0x13003c | data_array_new | FUNC 0x13003c | `48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57 41 56 41 57 48 83 EC 30 4C 8B 74 24 70` | +0 |
+| 0x130244 | data array header user (hitbox.c note) | FUNC 0x130244 | `48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57 48 83 EC 20 48 8B DA 41 8B F8` | +0 |
+| 0x33f5bf | "object" array creation (call site) | FUNC 0x33f2dc | `48 8D 0D ?? ?? ?? ?? 89 15 ?? ?? ?? ?? 45 8D 41 18` | +0 |
+| 0x3457d8 | object_set_permutation | FUNC 0x3457d8 | `48 89 5C 24 18 89 54 24 10 89 4C 24 08 55 56 57 41 54 41 55 41 56 41 57 48 83 EC 50` | +0 |
+| 0x345d38 | object_set_permutation (2nd) | FUNC 0x345d38 | `48 89 5C 24 08 48 89 74 24 10 48 89 7C 24 18 44 8B 15 ?? ?? ?? ?? 49 8B F0` | +0 |
+| 0x2aacf0 | armor skin RB-tree | FUNC 0x2aacf0 | `48 89 5C 24 18 48 89 7C 24 20 55 48 8B EC 48 83 EC 50` | +0 |
+| 0x2af4ef | D3DReflect call site | FUNC 0x2af4b8 | `FF 15 ?? ?? ?? ?? 85 C0 0F 88 ?? ?? ?? ?? 48 8B 4D 38` | +0 |
+| 0x13f23a | main-thread memcpy call site | FUNC 0x13f168 | `E8 ?? ?? ?? ?? 49 8B 84 FC A0 4A 00 00 8B EB 4C 8B 70 10` | +0 |
+| 0x9d22c | old ms timer (no longer hooked) | FUNC 0x9d22c | `40 53 48 83 EC 20 65 48 8B 04 25 58 00 00 00 8B 0D ?? ?? ?? ?? BA 80 00 00 00` | +0 |
+| 0xfcc20 | betrayal-popup condition | FUNC 0xfcc20 | `48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20 44 8B 05 ?? ?? ?? ?? 33 DB 65 48 8B 04 25 58 00 00 00 48 8B F2 0F B7 C9 48 69 F9 F8 02 00 00` | +0 |
+| 0xff5fc | betrayal popup post | FUNC 0xff5fc | `48 89 5C 24 08 55 56 57 41 54 41 55 41 56 41 57 48 83 EC 40 0F 29 74 24 30` | +0 |
+| 0x118a1c | game_engine_player_killed (**the client detours it: do not hook**) | FUNC 0x118a1c | `48 8B C4 48 89 58 08 44 88 48 20 44 89 40 18 89 50 10 55 56 57 41 54 41 55 41 56 41 57 48 8D 68 B9` | +0 |
+| 0x1b8e00 | boundary function the client checks (**do not patch**) | FUNC 0x1b8e00 | `48 8B C4 48 89 58 08 48 89 68 10 48 89 70 18 48 89 78 20 41 54 41 56 41 57 48 83 EC 20 48 8B 1D ?? ?? ?? ?? 45 32 FF` | +0 |
+| 0x172ad0 | refcounted-resource sweep (vtguard site 1) | FUNC 0x172ad0 | `48 8B C4 48 89 48 08 55 56 57 41 54 41 55 41 56 41 57 48 8B EC` | +0 |
+| 0x172e88 | shared_ptr release (vtguard site 2) | FUNC 0x172e88 | `48 8B C4 4C 89 40 18 57 48 83 EC 30 48 C7 40 E8 FE FF FF FF 48 89 58 08 48 89 70 10 49 8B F8` | +0 |
+
+Debug-only fixed addresses, not maintained: the `hook_log` trace modes (halo3+0x76a0b0 callback table, id 0xd15) and
+the decompressor fault dump (halo3+0x5fc000..0x601000, 0x5fec1a); v0.9.13 exe globals 0x2263c60/64 and
+0x2264458..0x2264950 (trace ids 0x2263c / 0xca70); and the user-supplied RVAs of `PELOAD_PATCH`, `PELOAD_HOOK`,
+`PELOAD_BP`, `PELOAD_POKE` and `PELOAD_PEEK`.
+
+### 8.6 Reclaimer exe (client)
+
+Coverage = releases (of 34) where the signature matches once **and** at the place the anchor search (sections 3-5)
+found; no recommended signature matches a wrong place in any release.
+
+| Item | v0.9.18 RVA | What / how | Source | Found today | Recommended signature | Site | Original -> new (v0.9.18) | Coverage |
+|---|---|---|---|---|---|---|---|---|
+| ui-reentrancy | 0x65703d, 0x657051 | patch, on by default | peload.c `g_sigpatches` / `reentrancy_fix` | signature (same) | `C6 43 68 01 48 83 3B 00 0F 85 ?? ?? ?? ?? 48 C7 03 FF FF FF FF 81 7B 10 00 CA 9A 3B 75 ?? 31 C0 EB ??` | +8, +0x1c | `0F 85 rel32` -> 6x `90`; `75 xx` -> `90 90` | 16/34 = every build that has the code (v0.9.2+) |
+| xaudio #1 / #2 / #3 | 0x53d134 / 0x53d16b / 0x53d1a2 | patch (`PELOAD_RECLAIMER_PATCHES`) | peload.c `g_sigpatches` "xaudio" | signature, 16/34 | `16 C4 60 00 48 39 44 24 ?? 0F 85` / `22 C4 60 00 ...` / `0A C4 60 00 ...` | +9 | `0F 85 rel32` -> 6x `90` | 34/34 |
+| xaudio #4 | 0x53d1d5 | patch | same | signature, 16/34 | four forms, section 6 | +9 or +7 | `75 75` -> `90 90` | 34/34 |
+| watchdog | 0x7963f6 | patch je -> jmp (`RECLAIMER_DIRECT=1` only) | peload.c `g_sigpatches` "watchdog" | signature, 28/34 | `00 CA 9A 3B 74 ?? E8 ?? ?? ?? ?? 90 48 8B 8D ?? ?? ?? ?? 48 39 C8 75` | +4 | `74 28` -> `EB 28` | 34/34 |
+| set_muted | 0x66bea0 | called (`rcx` id, `dl` muted) from the frame hook | stats.c `st_voice_install`, `st_voice_jobs` | signature + is_muted pairing (since 2026-10-17) | current (v0.9.2+) and old shape `55 41 56 56 57 53 48 83 EC 30 48 8D 6C 24 30 48 C7 45 F8 FE FF FF FF 48 89 CE B1 01 31 C0 F0 0F B0 0D ?? ?? ?? ?? 0F 85`, each accepted only if paired | +0 | -- | 34/34 |
+| is_muted (pairing only) | 0xb29fd0 | scanned: must lock the same byte as set_muted | stats.c `st_voice_install` | 13-byte scan of the image | `56 48 83 EC 20 B2 01 31 C0 F0 0F B0 15 ?? ?? ?? ??` (v0.9.2+) / `56 57 48 83 EC 28 B2 01 31 C0 F0 0F B0 15 ?? ?? ?? ??` (up to v0.9.1); several matches by design | lock byte = hit + 0x11 + disp32@+0xd (old: + 0x12, @+0xe) | -- | pairs in 34/34 |
+| MUTED | 0x27d7848 | read (`Vec` ptr +0x10, len +0x18) | stats.c `st_session` | derived from set_muted | set_muted + 0x24 + disp32@+0x20 (old shape: + 0x26, @+0x22) | -- | -- | 34/34 |
+| voice_recv | 0x684080 | entry hook, 19 bytes compared + relocated | stats.c `st_voice_install` -> `st_on_voice` | signature | current | +0 | `55 41 57 41 56 41 55 41 54 56 57 53 48 81 EC 18 01 00 00` | 4/34 (v0.9.15+); other builds by call graph (section 5) |
+| push_history | 0xb89930 | entry hook, 19 bytes | stats.c `st_chat_install` -> `st_on_chat` | signature, 7/34 | `55 41 57 41 56 41 55 41 54 56 57 53 48 81 EC A8 00 00 00 48 8D AC 24 80 00 00 00 48 C7 45 20 FE FF FF FF 80 B9 ?? ?? 00 00 00 0F 84` | +0 | `55 41 57 41 56 41 55 41 54 56 57 53 48 81 EC A8 00 00 00` | 12/34 (v0.9.6+) |
+| expanded-session flag | 0x27f7210 | read byte (0 = 16-player, 1 = 128-player layout) | stats.c `st_voice_init`, `st_session` | **fixed RVA**, only when set_muted sits at 0x66bea0 | `31 C0 48 3B 45 ?? 0F 81 ?? ?? ?? ?? 48 89 3D ?? ?? ?? ?? C6 05 ?? ?? ?? ?? 01` (the single writer, v0.9.18 0x9e4a42) | writer `C6 05` at +0x13 | flag = hit + 0x1a + disp32@+0x15 | 16/34 = every build that has it (v0.9.2+) |
+| guardian-refusal | 0x5cc021 | patch jno -> 6x NOP (manual `PELOAD_PATCH`) | CLAUDE.md / RE notes: `exe+4e066d:909090909090` | **fixed RVA**, v0.9.13 only | `31 C0 48 3B 85 ?? ?? ?? ?? 0F 81 ?? ?? ?? ?? 48 8B 8D ?? ?? ?? ?? E8` | +9 | `0F 81 36 0B 00 00` -> 6x `90` | 13/34 (v0.9.5+; older builds: string anchor, section 5) |
+| xaudio presets | = the xaudio sites | manual `PELOAD_PATCH=exe+460294,...` | CLAUDE.md | **fixed RVAs**, v0.9.13 only | the xaudio signatures above | | | |
+
+**The workshop-download command line** (not a patch). peload.c's `CreateProcessW` replaces the client's
+`<exe> workshop-download ...` child with `shim/tools/workshop-helper.sh`. It takes the item id from the token after
+`--subscribe` or `--update` and the MCC path from `--mcc-path`; with no id it starts `/usr/bin/true`, which prints
+nothing. The argv the client builds (CONFIRMED by string references in the spawner functions; the id is formatted
+inline with a divide-by-10 loop):
+
+| Builds | Spawners and argv | Effect under the loader |
+|---|---|---|
+| v0.8.1 .. v0.8.11 | none ("workshop-download" is not in the exe) | -- |
+| v0.8.12 .. v0.9.1 | two spawners, both `workshop-download --mcc-path <path>` (+ env `SteamAppId`/`SteamGameId`); neither formats an item id | no id: `/usr/bin/true`, so the client sees "Workshop helper has no output" (GUESSED: these builds passed the item some other way, or the helper only reported subscriptions) |
+| v0.9.2 .. v0.9.5 | main spawner `workshop-download --mcc-path <path> [--update] <id>`; a second one without an id | the id is found only with `--update`. GUESSED: a first download passes the id without a flag, so the loader misses it |
+| v0.9.6 .. v0.9.18 | main spawner (v0.9.18 exe+0x803290) `workshop-download --mcc-path <path> [--update] [--subscribe] <id>`; the item-less one (v0.9.18 exe+0x8096a0) passes only `--mcc-path <path>` | works as designed (workshop-helper.md); the item-less call gets `/usr/bin/true` |
+
+## 9. Re-finding the halo3.dll items after an MCC update
+
+1. Compare the new halo3.dll's SHA-256 with the one in section 8. If it differs, every fixed RVA in 8.1-8.4 is
+   suspect. The loader already refuses the prologue-checked hooks (object_delete, main_loop_body, display_event,
+   chud post, the teleport call) and checks the boundary bytes. These would write or jump blind: skinguard, capcb1,
+   vtguard, the four unchecked calls (unit_exit_vehicle, scenario_location_from_point, lock, unlock), and
+   `waves_prefill`, which writes 15 pointers at fixed .data RVAs on every load. The fixed-RVA reads (TLS index,
+   session, engine-ready) would return garbage. Gate all of them on a signature match first.
+2. Run each signature over .text. Exactly one match = take it; check the original bytes at the site before
+   patching. No match or several: anchor first on something semantic, then rebuild the signature around it:
+   - the chud_messaging_post callers, through their return-address signatures (8.3);
+   - the TLS index, through any `gs:[0x58]` read (`65 48 8B 04 25 58 00 00 00` next to a `mov r32,[rip+disp]`);
+   - the WavesFX table, through the "WavesFX_Initialize" string (`lea` in FUNC 0x25a720);
+   - the session pointer and the game-state lock, through their callers;
+   - the boundary sites, through the kill/safe-zone logic in map-boundaries.md.
+3. Recompute what depends on positions, not just the site:
+   - chud post's replay tail: the TLS index address (from the disp32 at +0xc) and the resume point (+0x10);
+   - vtguard skip targets: the leading `jne`'s target;
+   - the 0x37b816 patch: `E9` + (old rel32 + 1) + `90`;
+   - the 0x219c1f patch: `EB` + ((int8)sig[7] + 6);
+   - data addresses: the disp32 formulas in 8.4.
+4. The exe side moves with **MCC** too. The client's XAudio2 check embeds halo3+0xa39e10..28 and the retail values
+   halo3+0x60c416/22/0a/385, and its own player_killed detour checks halo3's 15-byte prologue. A Reclaimer build for
+   a new MCC changes those constants, so the xaudio signatures here (which contain them) must be rebuilt from the new
+   halo3 RVAs (slot RVAs = the `call [rip+disp]` targets in 8.4).
+5. Prefer copying compared prologue bytes from the image after a signature match. Don't keep them as constants in
+   the source: a constant breaks on any rebuild that moves a rip-relative operand (chud post) and hides the real
+   reason in a "prologue differs" log line.

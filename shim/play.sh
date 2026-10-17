@@ -75,4 +75,8 @@ fi
 env PELOAD_SKINGUARD=1 PELOAD_VTGUARD=1 PELOAD_ALLOC_GUARD=1 "${RUNTIME[@]}" PELOAD_STATS_HTTP="${PELOAD_STATS_HTTP:-8765}" \
     PELOAD_D3DGL_SUBMIT="${PELOAD_D3DGL_SUBMIT:-auto}" \
     PELOAD_RECLAIMER_PATCHES=all PELOAD_WORKER_INHERIT_STDIO=1 PELOAD_PRESENT=1 PELOAD_HOLD_WINDOW=1 PELOAD_D3DGL=1 \
-    arch -x86_64 shim/build/peload "$EXE" "${ARGS[@]}" < <(sleep 86400) > /tmp/reclaimer_play.log 2>&1
+    arch -x86_64 shim/build/peload "$EXE" "${ARGS[@]}" < <(exec sleep 86400.$$ 2>/dev/null) > /tmp/reclaimer_play.log 2>&1
+# the stdin feeder above (an open pipe that never sends anything) must not outlive the game: it used to hold the
+# caller's stderr for 24 h (so `play.sh | tail` never returned) and piled up as orphaned shells. bash 3.2 reparents
+# it to launchd, so it is found by its pid-tagged duration.
+rc=$?; pkill -f "^sleep 86400\.$$\$" 2>/dev/null; exit $rc
