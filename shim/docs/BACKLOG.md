@@ -7,19 +7,21 @@ order they will be worked; frame rate is deliberately last (user, 2026-10-16).
 
 | # | Item | Status / notes |
 |---|---|---|
-| 1 | **Unexplained crashes** | (a) v0.9.18 SIGTRAP during a direct Guardian match the user played (earlier session; MiniDumpWriteDump now logs the exception, module+offset and return addresses). (b) A SIGSEGV at startup: guest code (Rust thread-local, exe+0x1d6455d) ran on a thread with no TLS (`gs:[0x58]`=0), seen once. Loader threads are now named, so the next [CRASH] line says which thread. Both possibly the same root cause as the thread-id bug fixed in 55811fa; watch for recurrence. |
-| 2 | **Minimized window stalls the game** | A client minimized during loading stops presenting ("presentation callback stalled") and never reaches gameplay. Hit by test runs with PELOAD_MINIMIZE; would also hit a player who minimizes during a load. |
-| 3 | **Class-selection screen input** (servers with abilities, e.g. "UNSC vs Covenant") | The user reported the class picker while input seemed unavailable. Re-check that controller and keyboard drive that screen. |
-| 4 | **Controller in menu-joined matches** | "Input was nil" reported once, probably focus on the input-less Target window. Re-check. |
-| 5 | **Audio desync after a teleporter sound** (reported on v0.9.13) | Not re-tested. Candidate fixes since then: XAudio2 stopped-voice flush (36c3c98) and the thread-id/std::mutex fix (55811fa). |
-| 6 | **Menu music / voice chat output** | The client logs "Menu music output unavailable: No music playback device" and "Voice audio unavailable": the client's own audio output (not XAudio2) finds no device under the loader. |
-| 7 | **Hitbox overlay polish** | Elite heads use the default helmet's collision shape (permutation 0), not each player's helmet; optional: teammates vs enemies in different colours (needs the team field in the biped data). |
-| 8 | **45 s startup watchdog — root cause** | The signature patch `watchdog` skips the deadline check. On Windows something clears that deadline in time; find what, so the patch can go. |
-| 9 | **v0.9.13 regression check** | Loader changes for v0.9.18 (module handles, TLS, CreateDirectoryW, pipes) and today's fixes are not verified on v0.9.13; it is only a fallback now. |
-| 10 | **Seams at polygon joins on outer map geometry** (e.g. Valhalla rock walls) | User: low priority. |
-| 11 | **Headless `dedicated` server** | Configures, binds, sets up Online, loads the map, then its worker idles at "waiting for the native game client" (halo3 main loop never runs). target.sh covers the "second player to shoot at" need. |
-| 12 | **Release bundle** | GitHub release v0.1.0 predates all of this; a new bundle (loader + scripts, no game files) needs the user's go-ahead. |
-| 13 | **Frame rate** (last) | Measured and planned in shim/docs/PERF-PLAN.md: ~77% of each frame is the GL driver path (Apple GL-on-Metal, translated under Rosetta, 1.5–4.7× native per call). Done: redundant glUseProgram cache (4afd0a9). Small wins left (state-change counts, PrimitiveRestartIndex cache); big step proposed: native arm64 GL helper process (up to ~2×). |
+| 1 | **Hitbox overlay: Elite helmets, team colours, friend/enemy filter** | Elite heads use the default helmet's collision shape (permutation 0); must follow each player's helmet. Colour by team relative to the local player, with a key to show enemies only / friends only. |
+| 2 | **Overlay features: player info, projectile tracers, item labels** (user request) | F3 tracers, F4 shield/health/weapon/grenades/camo/vehicle per player, F5 weapon/equipment labels; launch variables PELOAD_HB_TRACERS / _INFO / _ITEMS. Fields confirmed from halo3's HaloScript getters (shim/docs/halo3-objects.md). Still to confirm: aim direction, crouch, player names, scores, objective state. |
+| 3 | **Menu music / voice chat output** | The client logs "Menu music output unavailable: No music playback device" and "Voice audio unavailable": the client's own audio output (not XAudio2) finds no device under the loader. Game audio works, so this should be a missing/stubbed device API. |
+| 4 | **Second test player without a window** | target.sh shows a (minimized) game window; the user wants test opponents to run as a backend with no GUI. |
+| 5 | **45 s startup watchdog — find the gate** | The signature patch `watchdog` skips the deadline check. On Windows something clears that deadline in time; find which step does not complete under the loader. |
+| 6 | **Seams at polygon joins on outer map geometry** (e.g. Valhalla rock walls) | Quick check whether the cracks can be found programmatically (e.g. T-junctions or depth gaps in a capture); low priority. |
+| 7 | **Headless `dedicated` server** | Loads the map, then idles at "waiting for the native game client". Possibly expected until a client joins: test a join against it. |
+| 8 | **Release bundle** | New release named for the client version it supports (e.g. "for Reclaimer 0.9.18"); loader + scripts, no game files. User approved 2026-10-16. |
+| 9 | **Unexplained crashes** (watch) | (a) v0.9.18 SIGTRAP during a direct Guardian match; (b) one startup SIGSEGV with guest code on a thread without TLS. Not seen again since the thread-id fix (55811fa); loader threads are now named for the next [CRASH] line. |
+| 10 | **Minimized window stalls loading** (watch) | A client minimized during loading never reaches gameplay. Test runs no longer minimize. |
+| 11 | **Frame rate** (last) | shim/docs/PERF-PLAN.md. Done: redundant glUseProgram cache (4afd0a9). Small wins left; big step: native arm64 GL helper process (up to ~2x). |
+
+Closed by the user 2026-10-16: teleporter audio desync (not seen since the XAudio2 and thread-id fixes), class-selection input
+(fine; only scripted tests lacked input), controller in menu-joined matches (caused by a second window), v0.9.13 checks
+(old client no longer supported).
 
 ## Done (2026-10-16)
 
