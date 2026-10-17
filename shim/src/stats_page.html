@@ -81,9 +81,13 @@ canvas{width:100%;height:auto;display:block;background:#0b0b0b;border-radius:4px
  <button data-a="textdown" title="Smaller label text">Text −</button><span id="tpx" class="lbl"></span><button data-a="textup" title="Larger label text">Text +</button>
  <button data-a="teams" title="Which players the overlay shows">Show: all<kbd>F6</kbd></button>
  <button data-a="visible" title="Hitboxes and labels only for objects you can actually see (not behind walls)">Visible only<kbd>F9</kbd></button>
+ <button data-a="zones" title="The map's boundaries in the game view: kill zones red, safe zones green (outside every safe zone kills), soft ceilings pink (soft kill), orange (push back) and yellow (slip surface)">Kill/safe zones<kbd>F10</kbd></button>
  <button data-a="teleport" title="Teleport to the far side of the map (needs PELOAD_ALLOW_TELEPORT; matches you host)">Teleport<kbd>F7</kbd></button>
+ <button data-a="mic" title="Your microphone for the game's voice chat. The client only sends voice while its talk key is held or toggled; Muted sends silence even then. PELOAD_MIC=0 at launch removes the microphone entirely.">Mic</button>
  <button data-a="capture" title="Save the next frame, its depth buffer and the camera position to your home folder">Capture frame<kbd>F8</kbd></button>
  <span id="expl"></span>
+ <label id="spdl" class="lbl" style="display:none" title="Everyone's movement speed in a game you host: the game variant's base player trait, which the host hands to every player">Speed
+  <select id="spd"><option value="0">variant</option><option value="1">25%</option><option value="2">50%</option><option value="3">75%</option><option value="4">90%</option><option value="5">100%</option><option value="6">110%</option><option value="7">125%</option><option value="8">150%</option><option value="9">200%</option><option value="10">300%</option></select></label>
  <button data-a="spar" title="Sparring partner: this client turns its view toward the nearest enemy's head (aim only: it never moves or fires). Meant for the second player (shim/target.sh) in local practice games.">Sparring aim</button><span id="spr" class="lbl"></span>
  <span id="ovmsg"></span></div>
 <div id="conn" class="panel"><div id="ch"><h2 id="ct">Connected</h2>
@@ -95,7 +99,7 @@ canvas{width:100%;height:auto;display:block;background:#0b0b0b;border-radius:4px
  <label><input type="checkbox" data-f="kills" checked> kills</label><label><input type="checkbox" data-f="players" checked> joins and leaves</label>
  <label><input type="checkbox" data-f="server" checked> server</label><label><input type="checkbox" data-f="game" checked> match</label></div>
  <div id="fl" class="note">waiting for events...</div>
- <div class="note">Newest first. Kills marked ≈ are estimates: the killer is the last player whose projectile ended inside the body (within 1.5 s), and the weapon is the one in their hands, the vehicle or turret they sit in, or the grenade. Melee, splash, splatter and fall deaths show as "died".</div></div>
+ <div class="note">Newest first. Kills come from the game itself (weapon or vehicle, headshot, melee, splatter, stuck). A client is only told about kills involving its team (all of them in team games, only its own in free-for-all); the rest are estimated, marked ≈: the last player whose projectile ended inside the body, and the weapon in their hands, the vehicle or turret they sit in, or the grenade.</div></div>
 <div id="chat" class="panel"><div class="fh"><h2>Chat</h2></div>
  <div id="cm" class="note">no chat yet</div>
  <div class="note">Newest first: what players type in the game's text chat (TEAM and NEARBY mark those channels), the server's messages, and the client's own chat notices.</div></div>
@@ -346,6 +350,8 @@ function renderOverlay(){ const o=snap&&snap.overlay; if(!o) return;
     if(a==='teams'){ b.firstChild.textContent='Show: '+ovNames[o.teams]; b.classList.toggle('on',o.teams!=='all'); }
     else if(a in o && typeof o[a]==='boolean' && a!=='teleport') b.classList.toggle('on',o[a]);
     b.disabled=!o.controls||(a==='teleport'&&!o.teleport); }
+  { const mb=document.querySelector('#ov button[data-a="mic"]'); if(mb){ mb.style.display=o.mic&&o.mic!=='off'?'':'none';
+      mb.textContent=o.mic==='muted'?'Mic: muted':o.mic==='tone'?'Mic: test tone':'Mic: live'; mb.classList.toggle('on',o.mic==='live'||o.mic==='tone'); } }
   document.getElementById('tpx').textContent=o.text_px?o.text_px+' px':'';
   document.getElementById('spr').textContent=o.spar?(o.spar_aim>=0?'aim off by '+o.spar_aim.toFixed(1)+'°':'no enemy'):'';
   { const sb=document.querySelector('#ov button[data-a="spar"]'); if(sb) sb.style.display=o.spar_available?'':'none'; }   // the bot's page only
@@ -358,10 +364,13 @@ function renderOverlay(){ const o=snap&&snap.overlay; if(!o) return;
         b.title=can?(o.bounds_off?'Kill zones, safe zones and soft ceilings are skipped for players. Click to turn them back on.':'Click to switch off the kill zones, safe zones and soft ceilings for players (games you host).'):'host the game with PELOAD_ALLOW_TELEPORT=1'; ex.appendChild(b); }
       for(const p of spots){ const b=document.createElement('button'); b.dataset.a='explore'; b.dataset.spot=p.id; b.textContent=p.label; b.disabled=!can;
         b.title=can?`Boundaries off, then teleport yourself to ${p.x}, ${p.y}, ${p.z} (past the map's edge)`:'host the game with PELOAD_ALLOW_TELEPORT=1'; ex.appendChild(b); } } }
+  { const sl=document.getElementById('spdl'), sel=document.getElementById('spd'), can=o.controls&&o.host&&snap&&snap.variant;
+    sl.style.display=can?'':'none';
+    if(can && document.activeElement!==sel){ const r=snap.variant.raw, v=r?parseInt(r.substr((0x134+0x10)*2,2),16):0; if(!isNaN(v)) sel.value=String(v); } }
   document.getElementById('ovmsg').textContent=o.controls?'':'controls are off (PELOAD_STATS_READONLY)'; }
 document.getElementById('ov').addEventListener('click',async e=>{ const b=e.target.closest('button'); if(!b||b.disabled) return;
   const msg=document.getElementById('ovmsg');
-  const ov=snap&&snap.overlay, extra=b.dataset.a==='spar'?'&on='+(ov&&ov.spar?0:1):b.dataset.a==='bounds'?'&off='+(ov&&ov.bounds_off?0:1):b.dataset.a==='explore'?'&spot='+encodeURIComponent(b.dataset.spot):'';
+  const ov=snap&&snap.overlay, extra=b.dataset.a==='spar'?'&on='+(ov&&ov.spar?0:1):b.dataset.a==='bounds'?'&off='+(ov&&ov.bounds_off?0:1):b.dataset.a==='explore'?'&spot='+encodeURIComponent(b.dataset.spot):b.dataset.a==='mic'?'&on='+(ov&&ov.mic==='muted'?1:0):'';
   try{ const r=await fetch('/control?do='+b.dataset.a+extra,{method:'POST',headers:{'X-Reclaimer-Control':'1'}}); const j=await r.json();
     msg.textContent=j.ok?(b.dataset.a==='capture'?'captured: ~/reclaimer_cap_*.bmp/.txt':''):(j.error||'failed'); }
   catch(err){ msg.textContent='not connected'; } });
@@ -376,8 +385,9 @@ function feedName(n,team){ const teams=snap&&snap.variant&&snap.variant.rounds&&
   return `<b${c?` style="color:${c}"`:''}>${E(n)}</b>`; }
 function feedRow(e){
   let body;
-  if(e.kind==='kill') body=`${feedName(e.a,e.ta)} killed ${feedName(e.b,e.tb)}${e.how?` <span class="w">(${E(e.how)})</span>`:''}`;
-  else if(e.kind==='death') body=`${feedName(e.b,e.tb)} <span class="tx">died</span>`;
+  if(e.kind==='kill') body=`${feedName(e.a,e.ta)} ${E(e.verb||(e.betrayal?'betrayed':'killed'))} ${feedName(e.b,e.tb)}${e.how?` <span class="w">(${E(e.how)})</span>`:''}`;
+  else if(e.kind==='death'){ const rest=e.b&&e.text.startsWith(e.b)?e.text.slice(e.b.length):' died', m=rest.match(/^(.*?) \((.*)\)$/);
+    body=`${feedName(e.b,e.tb)} <span class="tx">${E((m?m[1]:rest).trim())}</span>${m?` <span class="w">(${E(m[2])})</span>`:''}`; }
   else if(e.kind==='game' && e.a) body=`<span class="tx">Match started: ${E(MAPN[e.a]||e.a)}</span>`;
   else body=`<span class="tx">${E(e.text)}</span>`;
   const est=e.estimated?' <span class="est" title="estimated: the last player whose projectile ended inside the body">≈</span>':'';
@@ -413,6 +423,9 @@ async function pollFeed(){ if(feedBusy) return; feedBusy=true;
     cb.addEventListener('change',()=>{ fl.classList.toggle('h-'+cb.dataset.f,!cb.checked);
       try{ localStorage.setItem('feedHide',JSON.stringify([...document.querySelectorAll('#feed input[data-f]')].filter(c=>!c.checked).map(c=>c.dataset.f))); }catch(err){} }); } }
 pollFeed();
+document.getElementById('spd').addEventListener('change',async e=>{ const msg=document.getElementById('ovmsg');
+  try{ const j=await (await fetch('/control?do=speed&v='+e.target.value,{method:'POST',headers:{'X-Reclaimer-Control':'1'}})).json(); msg.textContent=j.ok?'':(j.error||'refused (host only)'); }
+  catch(err){ msg.textContent='not connected'; } });
 // ---- live snapshots ----
 const es=new EventSource('/events');
 es.onmessage=m=>{snap=JSON.parse(m.data);

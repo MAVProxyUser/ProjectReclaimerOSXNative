@@ -204,6 +204,8 @@ Options go in front of the command, e.g. `PELOAD_INVERT_PITCH=0 bash shim/play.s
 | **F8** | capture: saves the frame, its depth buffer and the camera position to `~/reclaimer_cap_*` (for reporting rendering glitches at a spot; the overlay is not in it) |
 | `PELOAD_HB_VISIBLE=1` | visible only: hitboxes and labels only for objects you can actually see, not behind walls (a small copy of the game's depth buffer, read back every frame); **F9** toggles |
 | `PELOAD_HB_TEXT_PX=7` | overlay label height in window pixels (Text − / + on the stats page) |
+| `PELOAD_HB_ZONES=1` | the map's boundaries in the game view: kill zones red, safe zones green (outside every safe zone you die), soft ceilings pink (soft kill), orange (push back) and yellow (slip surface), read from the map being played (Workshop maps too); **F10** toggles |
+| `PELOAD_MIC=0` | no microphone for voice chat (by default the Mac's microphone is the client's; it only sends voice while its talk key is held or toggled -- Communication settings). `PELOAD_MIC_MUTED=1` starts it muted; the stats page's **Mic** button mutes it during play. macOS asks once whether Terminal may use the microphone |
 | `PELOAD_D3DGL_INVARIANT=1` | experimental: vertex positions computed bit-identically in every pass; try it if you see seams/speckles along polygon edges (e.g. Valhalla's rock walls) |
 | `PELOAD_ALLOW_TELEPORT=1` | teleport, **in games you host** (Host Game from the menu): the stats page's player details get **Teleport next to them** (you land beside that player, facing them, at a spot inside the map), F7 jumps to the opposite side of the map. It uses the game's own teleport on the host, between frames, so every player sees the move. A client can't move itself (the host puts it straight back -- tested); in a private game where the host also runs this loader, set `PELOAD_TELEPORT_HOST=<host ip>:<its stats port>` on the client and its button asks the host to move you |
 | `PELOAD_H3="name=value,..."` | set Halo 3 engine settings, e.g. `render_debug_depth_render=1`, `camera_fov_scale=1.2` — all 72 are listed in `shim/docs/halo3-engine-globals.md` |
@@ -215,8 +217,9 @@ Options go in front of the command, e.g. `PELOAD_INVERT_PITCH=0 bash shim/play.s
 watch from another device). From top to bottom the page shows:
 
 - **In-game overlay** buttons -- the same switches as the function keys: Hitboxes (F2), Tracers (F3), Player info (F4),
-  Items (F5), Text − / + (label size), Show all / enemies / friends (F6), Visible only (F9), Teleport (F7, only with
-  `PELOAD_ALLOW_TELEPORT`) and Capture frame (F8).
+  Items (F5), Text − / + (label size), Show all / enemies / friends (F6), Visible only (F9), Kill/safe zones (F10),
+  Teleport (F7, only with `PELOAD_ALLOW_TELEPORT`), Capture frame (F8), **Mic** (live / muted), and in games you host a
+  **Speed** menu: everyone's movement speed (the game variant's own speed trait, 25% to 300%).
 - **Connected** -- everyone in the game's network session, also in the lobby before a match starts, in alphabetical
   order. Players who are talking light up green. The speaker beside each name mutes or unmutes their voice (a red cross
   = muted); **Mute all** / **Unmute all** do everyone. This is the client's own voice mute (the same list as its
@@ -225,10 +228,12 @@ watch from another device). From top to bottom the page shows:
   messages with TEAM / NEARBY marks, the server's [SERVER] lines and welcome message, its own notices such as "sending
   messages too quickly"), read from the client as each line arrives. The feed shows joins and leaves (the client's own roster
   notices; when you join, everyone already there becomes one "N players in the game" line), kills, deaths, votes,
-  server notices (team shuffles, kicks) and match start and end, each kind with its own checkbox. Kills marked ≈ are
-  estimates: the killer is the last player whose projectile ended inside the body within 1.5 s before it died, and the
-  weapon is the one in their hands, the vehicle or turret they sit in, or the grenade; melee, splash, splatter and fall
-  deaths show as "died".
+  server notices (team shuffles, kicks), the game's own feed lines ("X has become a zombie", flag events) and match
+  start and end, each kind with its own checkbox. Kills come from the game itself -- killer, victim, weapon or vehicle,
+  headshot, splatter, stuck, beat down, betrayals, suicides and falls -- wherever it tells this client: kills involving
+  your team, so all of them in team games but only your own in free-for-all and Infection. The others are estimates,
+  marked ≈: the last player whose projectile ended inside the body within 1.5 s before it died, with the weapon in their
+  hands, the vehicle or turret they sit in, or the grenade (a death with no such shot shows as "died").
 - **Game rules** -- the running game's options (rounds, respawn, map, powerups, score and points) and every trait set
   with what it changes: everyone, after spawning, each powerup, and the mode's roles (leader, flag carrier, infected,
   last survivor, ...).

@@ -79,9 +79,9 @@ static void* objdump_thread(void*a){ (void)a; pthread_setname_np("shim-objdump")
 //   F4 PELOAD_HB_INFO    player info: shield/health %, weapon, grenades, active camo, vehicle seat
 //   F5 PELOAD_HB_ITEMS   weapons and equipment lying on the map, by tag name
 //   F9 PELOAD_HB_VISIBLE visible only: hitboxes and labels only for objects the player can actually see
-enum { HBF_HITBOX, HBF_TRACER, HBF_INFO, HBF_ITEMS, HBF_VISIBLE, HBF_N };
+enum { HBF_HITBOX, HBF_TRACER, HBF_INFO, HBF_ITEMS, HBF_VISIBLE, HBF_ZONES, HBF_N };
 static int g_hbf_init, g_hbf_on[HBF_N], g_hb_all, g_hb_spheres;
-static void hbf_init(void){ if(g_hbf_init) return; static const char*const env[HBF_N]={"PELOAD_HITBOXES","PELOAD_HB_TRACERS","PELOAD_HB_INFO","PELOAD_HB_ITEMS","PELOAD_HB_VISIBLE"};
+static void hbf_init(void){ if(g_hbf_init) return; static const char*const env[HBF_N]={"PELOAD_HITBOXES","PELOAD_HB_TRACERS","PELOAD_HB_INFO","PELOAD_HB_ITEMS","PELOAD_HB_VISIBLE","PELOAD_HB_ZONES"};
     for(int f=0;f<HBF_N;f++){ const char*e=getenv(env[f]); g_hbf_on[f]=e&&*e&&strcmp(e,"0"); }
     const char*e=getenv("PELOAD_HITBOXES"); g_hb_all=e&&!strcasecmp(e,"all"); g_hb_spheres=e&&!strcasecmp(e,"spheres"); g_hbf_init=1; }
 static int hb_feat(int f){ hbf_init(); return g_hbf_on[f] ^ ((g_hb_toggle>>f)&1); }
@@ -226,6 +226,12 @@ static void hb_note_map(const char*p){     // CreateFileW: remember the scenario
     if(k==g_hb_nmappaths && k<8) g_hb_nmappaths++; if(k>=8) k=7;
     for(; k>0; k--) memcpy(g_hb_mappaths[k],g_hb_mappaths[k-1],1024); snprintf(g_hb_mappaths[0],1024,"%s",p);
     pthread_mutex_unlock(&g_hb_mapmx); }
+// The map being played: the newest scenario map the game opened from halo3/maps or a Workshop mod's folder (the menu
+// opens campaign maps for its backgrounds first; a mod's map lives in steamapps/workshop/content/976730/<id>/maps).
+static int hb_current_map(char*out,size_t n){ out[0]=0; pthread_mutex_lock(&g_hb_mapmx);
+    for(int k=0;k<g_hb_nmappaths && !out[0];k++) if(strstr(g_hb_mappaths[k],"/halo3/maps/") || strstr(g_hb_mappaths[k],"/workshop/content/")) snprintf(out,n,"%s",g_hb_mappaths[k]);
+    if(!out[0] && g_hb_nmappaths) snprintf(out,n,"%s",g_hb_mappaths[0]);
+    pthread_mutex_unlock(&g_hb_mapmx); return out[0]!=0; }
 static int hbm_read(HbMap*m,uint64_t va,void*dst,size_t n){ if(va<m->vbase) return 0; uint64_t off=m->tagoff+(va-m->vbase); if(off+n>m->fsize) return 0;
     return pread(m->fd,dst,n,(off_t)off)==(ssize_t)n; }
 static HbMap* hbm_get(const char*path){
@@ -376,6 +382,60 @@ static int hb_proj(const float*vp,const float*w,float*nx,float*ny){   // world p
 static int hb_seg(float*verts,int nv,int cap,const float*vp,const float*a,const float*b,const float*col){
     float ax,ay,bx,by; if(nv+2>cap || !hb_proj(vp,a,&ax,&ay) || !hb_proj(vp,b,&bx,&by)) return nv; float*d=verts+nv*5;
     d[0]=ax; d[1]=ay; d[2]=col[0]; d[3]=col[1]; d[4]=col[2]; d[5]=bx; d[6]=by; d[7]=col[0]; d[8]=col[1]; d[9]=col[2]; return nv+2; }
+// A segment clipped at the camera plane (hb_seg drops any segment with an end behind the camera): zone boxes are often
+// larger than the view.
+static int hb_seg_clip(float*verts,int nv,int cap,const float*vp,const float*a,const float*b,const float*col){
+    float ca[3], cb[3]; for(int r=0;r<3;r++){ int i=r==2?12:r*4; ca[r]=a[0]*vp[i]+a[1]*vp[i+1]+a[2]*vp[i+2]+vp[i+3]; cb[r]=b[0]*vp[i]+b[1]*vp[i+1]+b[2]*vp[i+2]+vp[i+3]; }   // x, y, w
+    const float E=0.05f; if(nv+2>cap || (ca[2]<E && cb[2]<E)) return nv;
+    if(ca[2]<E){ float t=(E-ca[2])/(cb[2]-ca[2]); for(int r=0;r<3;r++) ca[r]+=t*(cb[r]-ca[r]); }
+    else if(cb[2]<E){ float t=(E-cb[2])/(ca[2]-cb[2]); for(int r=0;r<3;r++) cb[r]+=t*(ca[r]-cb[r]); }
+    float*d=verts+nv*5; d[0]=ca[0]/ca[2]; d[1]=ca[1]/ca[2]; d[2]=col[0]; d[3]=col[1]; d[4]=col[2]; d[5]=cb[0]/cb[2]; d[6]=cb[1]/cb[2]; d[7]=col[0]; d[8]=col[1]; d[9]=col[2]; return nv+2; }
+// ---- map boundaries overlay (F10 / PELOAD_HB_ZONES; shim/docs/map-boundaries.md, re-tools/h3bounds.py) -------------
+// From the scenario of the map being played: trigger volumes that kill (scnr +0x484 list, or a kill trigger index at
+// +0x40) red, safe zones (+0x490) green -- oriented boxes: +0x0C forward, +0x18 up, +0x24 a corner, +0x30 extents,
+// left = up x forward; soft ceilings from each structure BSP's structure_design (scnr +0x18 -> sddt +0x10, triangles
+// 0x44 with vertices at +0x20/+0x2C/+0x38): soft kill pink, acceleration orange, slip surface yellow.
+typedef struct { float c[8][3]; int kind; } HbZBox;      // kind 0 kill, 1 safe
+typedef struct { float v[3][3]; int type; } HbZTri;      // type 0 acceleration, 1 soft kill, 2 slip surface
+static struct { char path[1024]; HbZBox*box; int nbox; HbZTri*tri; int ntri; } g_hbz;
+static void hbz_load(const char*path){
+    if(!strcmp(g_hbz.path,path)) return; free(g_hbz.box); free(g_hbz.tri); memset(&g_hbz,0,sizeof g_hbz); snprintf(g_hbz.path,sizeof g_hbz.path,"%s",path);
+    HbMap*m=hbm_get(path); if(!m) return; int si=-1; for(int i=0;i<m->ntags;i++) if(m->grp[i]=='scnr'){ si=i; break; }
+    uint8_t d[0x4A0]; if(si<0 || !hbm_read(m,(uint64_t)m->tp[si]<<2,d,sizeof d)) return;
+    uint8_t*kl=0,*sl=0,*tv=0; int nk=hbm_block(m,d,0x484,2,&kl,4096), ns=hbm_block(m,d,0x490,2,&sl,4096), nt=hbm_block(m,d,0x258,0x44,&tv,4096);
+    g_hbz.box=calloc(nt>0?nt:1,sizeof(HbZBox));
+    for(int i=0;i<nt && g_hbz.box;i++){ const uint8_t*e=tv+i*0x44; int kind=-1;
+        for(int k=0;k<nk;k++) if(*(int16_t*)(kl+k*2)==i) kind=0; if(kind<0 && *(int16_t*)(e+0x40)>=0) kind=0;
+        if(kind<0) for(int k=0;k<ns;k++) if(*(int16_t*)(sl+k*2)==i) kind=1;
+        if(kind<0) continue; const float*f=(const float*)(e+0x0C), *u=(const float*)(e+0x18), *p=(const float*)(e+0x24), *x=(const float*)(e+0x30);
+        float l[3]={u[1]*f[2]-u[2]*f[1], u[2]*f[0]-u[0]*f[2], u[0]*f[1]-u[1]*f[0]}; HbZBox*b=&g_hbz.box[g_hbz.nbox++]; b->kind=kind;
+        for(int c=0;c<8;c++) for(int r=0;r<3;r++) b->c[c][r]=p[r]+((c&1)?x[0]*f[r]:0)+((c&2)?x[1]*l[r]:0)+((c&4)?x[2]*u[r]:0); }
+    free(kl); free(sl); free(tv);
+    uint8_t*bs=0; int nb=hbm_block(m,d,0x18,0x6C,&bs,64); int cap=0;
+    for(int b=0;b<nb;b++){ uint32_t sd=*(uint32_t*)(bs+b*0x6C+0x10+12); if(sd==0xFFFFFFFFu || (int)(sd&0xFFFF)>=m->ntags) continue;
+        uint8_t sm[0x40]; if(!hbm_read(m,(uint64_t)m->tp[sd&0xFFFF]<<2,sm,sizeof sm)) continue;
+        uint8_t*sc=0; int nsc=hbm_block(m,sm,0x10,0x14,&sc,256);
+        for(int c=0;c<nsc;c++){ int ty=*(int16_t*)(sc+c*0x14+4); uint8_t*tr=0; int ntr=hbm_block(m,sc+c*0x14,8,0x44,&tr,65536);
+            for(int t=0;t<ntr;t++){ if(g_hbz.ntri>=cap){ cap=cap?cap*2:1024; HbZTri*nt2=realloc(g_hbz.tri,(size_t)cap*sizeof(HbZTri)); if(!nt2) break; g_hbz.tri=nt2; }
+                HbZTri*z=&g_hbz.tri[g_hbz.ntri++]; z->type=ty; memcpy(z->v,tr+t*0x44+0x20,36); }
+            free(tr); }
+        free(sc); }
+    free(bs);
+    int nkb=0; for(int i=0;i<g_hbz.nbox;i++) nkb+=g_hbz.box[i].kind==0;
+    const char*bn=strrchr(path,'/'); char msg[300]; int k=snprintf(msg,sizeof msg,"  [zones] %s: %d kill volumes, %d safe zones, %d soft-ceiling triangles\n",bn?bn+1:path,nkb,g_hbz.nbox-nkb,g_hbz.ntri); (void)!write(2,msg,k); }
+static int hbz_draw(float*verts,int nv,int cap,const float*vp){
+    char mp[1024]; if(!hb_current_map(mp,sizeof mp)) return nv; hbz_load(mp);
+    static const float ckill[3]={1,0.15f,0.15f}, csafe[3]={0.2f,1,0.35f}, csoft[3][3]={{1,0.6f,0.1f},{1,0.25f,0.65f},{1,0.92f,0.2f}};
+    const float*cam=vp+28;
+    for(int i=0;i<g_hbz.nbox;i++){ const HbZBox*b=&g_hbz.box[i]; const float*col=b->kind?csafe:ckill;
+        for(int c=0;c<8;c++) for(int bit=1;bit<8;bit<<=1) if(!(c&bit)) nv=hb_seg_clip(verts,nv,cap,vp,b->c[c],b->c[c|bit],col);
+        float ctr[3]={(b->c[0][0]+b->c[7][0])/2,(b->c[0][1]+b->c[7][1])/2,(b->c[0][2]+b->c[7][2])/2}, tx,ty, dx=ctr[0]-cam[0],dy=ctr[1]-cam[1],dz=ctr[2]-cam[2];
+        if(dx*dx+dy*dy+dz*dz<150.f*150.f && hb_proj(vp,ctr,&tx,&ty)){ const char*t=b->kind?"SAFE ZONE":"KILL ZONE"; nv=hb_text(verts,nv,cap,tx-strlen(t)*2.5f*g_hb_px,ty,t,col); } }
+    for(int i=0;i<g_hbz.ntri;i++){ const HbZTri*z=&g_hbz.tri[i]; float dx=z->v[0][0]-cam[0], dy=z->v[0][1]-cam[1];
+        if(g_hbz.ntri>4000 && dx*dx+dy*dy>200.f*200.f) continue;   // big soft ceilings: the part around the camera
+        const float*col=csoft[z->type>=0&&z->type<3?z->type:1];
+        nv=hb_seg_clip(verts,nv,cap,vp,z->v[0],z->v[1],col); nv=hb_seg_clip(verts,nv,cap,vp,z->v[1],z->v[2],col); nv=hb_seg_clip(verts,nv,cap,vp,z->v[2],z->v[0],col); }
+    return nv; }
 // Projectile trails: positions seen on recent frames, per projectile handle; kept briefly after the projectile is gone.
 typedef struct { uint32_t h; int n; float p[32][3]; double seen; } HbTrail;
 static HbTrail g_hb_trails[256];
@@ -729,6 +789,7 @@ static void hb_draw_overlay(void){
                 float sp=sqrtf(r->vel[0]*r->vel[0]+r->vel[1]*r->vel[1]+r->vel[2]*r->vel[2]); memcpy(a,r->pos,12); if(sp>1e-5f) for(int q=0;q<3;q++) a[q]-=r->vel[q]/sp*3.0f; }
             nv=hb_seg(verts,nv,HB_CAP,vp,a,r->pos,ctrace);
             float x0[3]={r->pos[0]-0.05f,r->pos[1],r->pos[2]}, x1[3]={r->pos[0]+0.05f,r->pos[1],r->pos[2]}; nv=hb_seg(verts,nv,HB_CAP,vp,x0,x1,cvel); } }
+    if(hb_feat(HBF_ZONES)) nv=hbz_draw(verts,nv,HB_CAP,vp);   // kill / safe zones, soft ceilings (F10)
     if(!nv) return;
     G.Disable(0x0B71/*DEPTH_TEST*/); G.Disable(0x0BE2/*BLEND*/); G.Disable(0x0C11/*SCISSOR*/);
     G.UseProgram(g_hb_prog); G.BindVertexArray(g_hb_vao); G.BindBuffer(0x8892/*ARRAY_BUFFER*/,g_hb_vbo);

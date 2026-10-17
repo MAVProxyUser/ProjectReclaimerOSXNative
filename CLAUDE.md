@@ -138,6 +138,27 @@ chat / [SERVER] / notice line, UTF-8 Rust Strings in a 0x40-byte Line (shim/docs
 are ESTIMATED from the death tracker + object_delete shots (g_lasthit; weapon in hand / seat object / grenade) until a
 halo3 game-engine event hook exists (same doc). The roster notices go to halo3 chud_messaging_post (halo3+0x2d3f2c;
 its prologue is NOT position-independent).
+Engine events (2026-10-17, st_events_install): entry hook on display_event halo3+0x11b0ec (event* in rcx, 0x2c bytes:
+type/index/cause/effect handles+teams, damage byte +0x24 = reporting type | special<<6, +0x25 bit0 = kill info) gives
+exact kills; chud_messaging_post is hooked through entry_hook_tail (a custom replay tail for its rip-relative prologue;
+ret_r9 passes the caller's return address: halo3+0x11b860 = an event line, exe = the client's roster line). A CLIENT
+only receives kills involving its team: all in 2-team games, only its own in FFA and Infection (every player has its
+own team number there). Estimated deaths wait 2 s for an engine event before going out. PELOAD_FEED_RAW=1 prints every
+raw event; PELOAD_NO_EVHOOK off. Damage type 0 with a killer = an unnamed (modded) weapon.
+Microphone (2026-10-17, wasapi.c): the Mac mic is the client's WASAPI capture endpoint (AudioQueueNewInput ->
+IAudioCaptureClient); with a mic the client's voice chat starts once instead of rebuilding a playback stream every 5 s
+(the caulk crash trigger). PELOAD_MIC=0 none, =tone a test tone (quiet-run uses 0 unless QR_MIC=tone; target.sh 0),
+PELOAD_MIC_MUTED=1; stats do=mic&on=. The client sends voice only with its talk key (Hold/Toggle to talk).
+Zones overlay (F10 / PELOAD_HB_ZONES, hitbox.c hbz_*): kill/safe trigger volumes (scnr +0x258/+0x484/+0x490) and soft
+ceilings (sddt) read from the map being played (hb_current_map: halo3/maps or a Workshop folder), drawn with
+hb_seg_clip. Host speed control: stats do=speed&v=<tl_speed index> writes the variant's base player speed trait.
+Workshop helper (2026-10-17): CreateProcessW runs shim/tools/workshop-helper.sh (DepotDownloader, account name from
+STEAM_USER or ~/Library/Application Support/ReclaimerMac/steam_user, never a password) in place of the client's
+`workshop-download --subscribe|--update <id>`, on the client's pipes, own process group (shim/docs/workshop-helper.md;
+PELOAD_NO_WORKSHOP_HELPER = old). Shim fixes for it: ReadFileEx on sockets/pipes reads sequentially (pread -> ESPIPE;
+PELOAD_READEX_PREAD = old), TerminateProcess(child handle) kills the child (+ its group) instead of exiting the loader
+(PELOAD_TERMINATE_SELF = old). PELOAD_TRACE_PIPEIO=1 logs pipe/socket reads. The client finds Workshop mods by the id in
+each folder's ModInfo.json (any folder name), and a mod folder with a file missing is a verify error, not a download.
 Heatmap per map: footprint cells (0.5 u) + deaths, ~/Library/Application Support/ReclaimerMac/heatmaps/<map>.bin (RHM2),
 drawn over a top-down picture of the map: re-tools/h3bsp.py decodes the collision BSP + instanced geometry from the
 .map's resource section (sbsp +0x38C -> zone structure_bsp_tag_resources -> raw-deflate page; shim/docs/

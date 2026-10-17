@@ -667,10 +667,16 @@ static void* pipe_client_open(const char*narrow);                    // fwd
 double g_gameplay_t0;   // monotonic seconds when the client logged "gameplay presentation ready" (0 = not yet)
 double g_menu_ready_t0; // ... "Menu loading screen finished" (frontend menu mode)
 volatile int g_games_ended; // count of "Carnage report opened" (a match ended; PELOAD_AUTOCLICK_AFTER_GAME)
+static __thread int t_apc_ran;   // completion routines run on this thread since its last alertable wait (i_SleepEx)
 static double mono_s(void){ struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t); return t.tv_sec+t.tv_nsec*1e-9; }
 // microseconds -> mach_absolute_time units (nanoseconds under Rosetta, 24 MHz ticks natively)
 static uint64_t mt_us(uint64_t us){ static double f; if(!f){ mach_timebase_info_data_t tb; mach_timebase_info(&tb); f=1000.0*tb.denom/tb.numer; } return (uint64_t)(us*f); }
 static void st_feed_log(int fd,const char*buf,size_t n);   // stats.c: the live event feed reads the client's log lines
+// PELOAD_TRACE_PIPEIO=1: reads from pipes / sockets (which call, fd, size, result, the first bytes)
+static void pipeio_log(const char*who,int fd,uint32_t n,long k,const void*buf){ static int on=-1; if(on<0) on=getenv("PELOAD_TRACE_PIPEIO")?1:0; if(!on) return;
+    struct stat st; if(fstat(fd,&st) || !(S_ISSOCK(st.st_mode)||S_ISFIFO(st.st_mode))) return;
+    char m[200]; int q=snprintf(m,sizeof m,"  [pipeio] %s fd %d n %u -> %ld '",who,fd,n,k); for(long i=0;i<k && i<48 && q<190;i++){ char c=((const char*)buf)[i]; m[q++]=(c>=32&&c<127)?c:'.'; }
+    m[q++]='\''; m[q++]='\n'; (void)!write(2,m,(size_t)q); }
 static int    MSABI i_WriteFile(void *h, const void *buf, uint32_t n, uint32_t *wr, void *ov){
     (void)ov; intptr_t hv=(intptr_t)h;
     if(!g_gameplay_t0 && buf && n>20 && memmem(buf,n,"gameplay presentation ready",27)) g_gameplay_t0=mono_s();
@@ -2754,7 +2760,14 @@ static void   MSABI i_ExitProcess(uint32_t c){
     // rendered window on screen (instead of exiting on the "no map selected" abort).
     if(getenv("PELOAD_HOLD_WINDOW") && g_present_started){ ws("  [hold-window] worker exit suppressed; keeping window up\n"); for(;;){ struct timespec ts={1,0}; nanosleep(&ts,0); } }
     _exit((int)c); }
-static void   MSABI i_TerminateProcess(void *h,uint32_t c){ (void)h;
+static pid_t g_childpgrp[64]; static int g_nchildpgrp;   // children started in their own process group (CreateProcessW)
+static int    MSABI i_TerminateProcess(void *h,uint32_t c){
+    // another process (a child we started: 0x8000+pid): kill it, not us -- the client terminates a Workshop helper
+    // that is still running when it gives up on it (PELOAD_TERMINATE_SELF = old: any handle exits the loader)
+    { intptr_t hv=(intptr_t)h; pid_t pid=hv>=0x8000 && hv<0x100000 ? (pid_t)(hv-0x8000) : 0;
+      if(pid>0 && pid!=getpid() && !getenv("PELOAD_TERMINATE_SELF")){ int grp=0; for(int i=0;i<g_nchildpgrp;i++) if(g_childpgrp[i]==pid) grp=1;
+          if(grp) kill(-pid,SIGKILL); kill(pid,SIGKILL);
+          char m[96]; int k=snprintf(m,sizeof m,"  [TerminateProcess] child %d%s killed\n",(int)pid,grp?" (and its process group)":""); (void)!write(2,m,k); return 1; } }
     { uint64_t r=(uint64_t)__builtin_return_address(0); char m[160]; int k=snprintf(m,sizeof m,"  [TerminateProcess] code=0x%x caller=%s+0x%llx\n",c,
         (r>=0x140000000ULL&&r<0x150000000ULL)?"exe":(r>=0x180000000ULL&&r<0x190000000ULL)?"halo3":"?",(unsigned long long)((r>=0x140000000ULL&&r<0x150000000ULL)?r-0x140000000ULL:(r>=0x180000000ULL&&r<0x190000000ULL)?r-0x180000000ULL:r)); (void)!write(2,m,k);
       // guest return addresses on the stack (who decided to terminate)
@@ -2855,6 +2868,31 @@ static int MSABI i_CreateProcessW(const uint16_t*app,uint16_t*cmd,void*pa,void*t
         char *start=&tokbuf[bi]; if(*p=='"'){ p++; while(*p&&*p!='"'&&bi<4094) tokbuf[bi++]=*p++; if(*p=='"')p++; }
         else { while(*p&&*p!=' '&&bi<4094) tokbuf[bi++]=*p++; }
         tokbuf[bi++]=0; if(nt<63) tok[nt++]=start; } }
+    // The client's Workshop helper (`workshop-download --subscribe|--update <id>`, started by its REQUIRED MODS screen)
+    // needs a running Steam client. Run shim/tools/workshop-helper.sh instead: DepotDownloader, natively, answering on
+    // the client's pipe in the helper's own JSON lines (shim/docs/workshop-helper.md). Its root is
+    // <mcc-path>\..\..\workshop\content\976730\<id>, the folder the client uses in place when it matches. Own process
+    // group, so TerminateProcess also stops DepotDownloader. The spawn without an item prints nothing: /usr/bin/true.
+    // PELOAD_NO_WORKSHOP_HELPER = the client's own helper, as before.
+    if(nt>=2 && !strcmp(tok[1],"workshop-download") && !getenv("PELOAD_NO_WORKSHOP_HELPER")){
+        const char*id=0,*mcc=0; for(int k=2;k+1<nt;k++){ if(!strcmp(tok[k],"--subscribe")||!strcmp(tok[k],"--update")) id=tok[k+1]; if(!strcmp(tok[k],"--mcc-path")) mcc=tok[k+1]; }
+        char root[1024]="", rootu[2048]="", script[2100], self[2048];
+        if(id && mcc){ char m[1024]; snprintf(m,sizeof m,"%s",mcc); size_t L=strlen(m); while(L && (m[L-1]=='\\'||m[L-1]=='/')) m[--L]=0;
+            for(int up=0;up<2;up++){ char*b=strrchr(m,'\\'); if(b) *b=0; }
+            snprintf(root,sizeof root,"%s\\workshop\\content\\976730\\%s",m,id);
+            uint16_t w[1024]; int i=0; for(; root[i] && i<1023; i++) w[i]=(uint8_t)root[i]; w[i]=0; win2unix(w,rootu,sizeof rootu); }
+        snprintf(self,sizeof self,"%s",g_self); char*sl=strrchr(self,'/'); if(sl) *sl=0; else snprintf(self,sizeof self,".");
+        snprintf(script,sizeof script,"%s/../tools/workshop-helper.sh",self);
+        posix_spawn_file_actions_t wfa; posix_spawn_file_actions_init(&wfa);
+        for(int k=0;k<2;k++) if(cfd[k]>=0) posix_spawn_file_actions_adddup2(&wfa,cfd[k],k);   // stdin/stdout: the client's pipes; stderr: our log
+        posix_spawnattr_t at; posix_spawnattr_init(&at); posix_spawnattr_setflags(&at,POSIX_SPAWN_SETPGROUP); posix_spawnattr_setpgroup(&at,0);
+        char*wav[8]; int wi=0; if(id && root[0] && rootu[0]){ wav[wi++]="/bin/bash"; wav[wi++]=script; wav[wi++]=(char*)id; wav[wi++]=root; wav[wi++]=rootu; } else wav[wi++]="/usr/bin/true"; wav[wi]=0;
+        pid_t wpid=0; int wrc=posix_spawn(&wpid,wav[0],&wfa,&at,wav,environ); posix_spawn_file_actions_destroy(&wfa); posix_spawnattr_destroy(&at);
+        { char m[1400]; int k=snprintf(m,sizeof m,"  [workshop] item %s: DepotDownloader helper %s (pid %d) -> %s\n",id?id:"-",wrc?"failed":"started",(int)wpid,rootu[0]?rootu:"-"); (void)!write(2,m,k); }
+        if(wrc){ g_lasterr=win_err(); return 0; }
+        if(g_nchild<256) g_childpid[g_nchild++]=wpid; if(g_nchildpgrp<64) g_childpgrp[g_nchildpgrp++]=wpid;
+        if(pi){ *(void**)(pi+0)=(void*)(intptr_t)(0x8000+wpid); *(void**)(pi+8)=(void*)(intptr_t)(0x8000+wpid); *(uint32_t*)(pi+16)=(uint32_t)wpid; *(uint32_t*)(pi+20)=(uint32_t)wpid; }
+        return 1; }
     // exec peload DIRECTLY (x86_64 -> Rosetta auto-engages). NOT via /usr/bin/arch,
     // which is an Apple platform binary and strips DYLD_INSERT_LIBRARIES.
     char *av[80]; int ai=0; av[ai++]=(char*)g_self; av[ai++]=exe;
@@ -2955,7 +2993,7 @@ static int MSABI i_NtWriteFile(void*h,void*ev,void*apc,void*apcctx,void*iosb,con
 }
 static int MSABI i_NtReadFile(void*h,void*ev,void*apc,void*apcctx,void*iosb,void*buf,uint32_t len,int64_t*off,void*key){
     (void)ev;(void)apc;(void)apcctx;(void)key; intptr_t hv=(intptr_t)h;
-    long k=-1; if(hv>=0x1000){ int fd=(int)(hv-0x1000); k = (off&&*off>=0)? pread(fd,buf,len,*off) : read(fd,buf,len); }
+    long k=-1; if(hv>=0x1000){ int fd=(int)(hv-0x1000); k = (off&&*off>=0)? pread(fd,buf,len,*off) : read(fd,buf,len); pipeio_log("NtReadFile",fd,len,k,buf); }
     if(iosb){ ((uint64_t*)iosb)[0]= (k<0)?0xC0000008ULL:0; ((uint64_t*)iosb)[1]=(uint64_t)(k<0?0:k); }
     if(k==0) return (int)0xC0000011; // STATUS_END_OF_FILE
     return k<0 ? (int)0xC0000008 : 0;  // STATUS_INVALID_HANDLE : SUCCESS
@@ -7608,7 +7646,13 @@ static uint32_t MSABI i_WaitForSingleObjectEx(void*h,uint32_t ms,int alert){ (vo
 static uint32_t MSABI i_WaitForMultipleObjectsEx(uint32_t n,void*const*h,int all,uint32_t ms,int alert){ (void)alert; return i_WaitForMultipleObjects(n,h,all,ms); }
 // Sleep: a no-op Sleep breaks yield/backoff-based coordination. Actually sleep.
 static void     MSABI i_Sleep(uint32_t ms){ if(ms==0){ sched_yield(); return; } struct timespec ts={ms/1000,(long)(ms%1000)*1000000L}; nanosleep(&ts,0); }
-static uint32_t MSABI i_SleepEx(uint32_t ms,int alert){ (void)alert; i_Sleep(ms); return 0; }
+// An alertable SleepEx returns WAIT_IO_COMPLETION once an I/O completion routine has run on this thread. ReadFileEx
+// runs its routine inline (before returning), and Rust's pipe reads then wait in SleepEx(INFINITE, TRUE) until the
+// routine has run -- which slept forever: the client's Workshop helper reader got one line and hung.
+// PELOAD_SLEEPEX_PLAIN = the old plain sleep.
+static uint32_t MSABI i_SleepEx(uint32_t ms,int alert){ static int plain=-1; if(plain<0) plain=getenv("PELOAD_SLEEPEX_PLAIN")?1:0;
+    if(alert && t_apc_ran && !plain){ t_apc_ran=0; return 0xC0; }   // WAIT_IO_COMPLETION
+    i_Sleep(ms); return 0; }
 // ---- critical sections / SRW locks / condition variables (real pthreads) ----
 static pthread_mutex_t g_lazy=PTHREAD_MUTEX_INITIALIZER;
 static void MSABI i_InitializeCriticalSection(void*cs){ pthread_mutex_t*m=malloc(sizeof *m); pthread_mutexattr_t a; pthread_mutexattr_init(&a); pthread_mutexattr_settype(&a,PTHREAD_MUTEX_RECURSIVE); pthread_mutex_init(m,&a); *(void**)cs=m; }
@@ -8433,6 +8477,7 @@ static void*  MSABI i_CreateFileW(const uint16_t *w,uint32_t acc,uint32_t share,
 static int fd_is_stream(int fd){ if(fd<0) return 0; if(fd<MAXFD && g_pipe_other[fd]) return 1; struct stat st;
     return fstat(fd,&st)==0 && (S_ISSOCK(st.st_mode)||S_ISFIFO(st.st_mode)||S_ISCHR(st.st_mode)); }
 static void ovread_complete(int fd,uint8_t*ov,long k){
+    { char z[1]={0}; pipeio_log("ReadFile(overlapped)",fd,0,k,z); }
     void*ev=*(void**)(ov+24); int noport=((uintptr_t)ev)&1;
     *(uint64_t*)(ov+8)=(uint64_t)(k>0?k:0);
     __atomic_store_n((uint64_t*)(ov+0), k>0? 0ULL : k==0? 0xC000014BULL /*STATUS_PIPE_BROKEN*/ : 0xC0000001ULL, __ATOMIC_RELEASE);
@@ -8454,6 +8499,7 @@ static int    MSABI i_ReadFile(void*h,void*buf,uint32_t n,uint32_t*rd,uint8_t*ov
                if(pthread_create(&t,0,ovread_thread,r)!=0){ free(r); g_lasterr=8; return 0; } pthread_detach(t); }
         if(rd)*rd=0; g_lasterr=997/*ERROR_IO_PENDING*/; return 0; }
     long k; if(ov){ uint64_t off=*(uint64_t*)(ov+16); k=pread(fd,buf,n,(off_t)off); } else k=read(fd,buf,n);
+    pipeio_log("ReadFile",fd,n,k,buf);
     if(rd)*rd=(uint32_t)(k<0?0:k);
     if(ov){ *(uint64_t*)(ov+0)=0; *(uint64_t*)(ov+8)=(uint64_t)(k<0?0:k);  // Internal, InternalHigh
         if(fd>=0&&fd<MAXFD&&g_fdiocp[fd]){ iocp_post(g_fdiocp[fd],(uint64_t)(k<0?0:k),g_fdiocpkey[fd],ov);
@@ -8480,9 +8526,13 @@ static void*  MSABI i_CreateFileA(const char*a,uint32_t acc,uint32_t share,void*
 static int    MSABI i_ReadFileEx(void*h,void*buf,uint32_t n,uint8_t*ov,void*completion){
     intptr_t hv=(intptr_t)h; if(hv<0x1000) return 0; int fd=(int)(hv-0x1000);
     uint64_t off = ov? *(uint64_t*)(ov+16) : 0;                 // OVERLAPPED.Offset (Offset/OffsetHigh union)
-    long k = ov? pread(fd,buf,n,(off_t)off) : read(fd,buf,n);
+    // pipes and sockets have no offset: Rust reads a child's piped stdout with ReadFileEx (pread failed with ESPIPE, so
+    // the client saw its Workshop helper's output end at once); PELOAD_READEX_PREAD = old
+    struct stat st; int seq = !getenv("PELOAD_READEX_PREAD") && fstat(fd,&st)==0 && (S_ISSOCK(st.st_mode) || S_ISFIFO(st.st_mode));
+    long k = ov && !seq? pread(fd,buf,n,(off_t)off) : read(fd,buf,n);
+    pipeio_log("ReadFileEx",fd,n,k,buf);
     if(ov){ *(uint64_t*)(ov+0)=0; *(uint64_t*)(ov+8)=(uint64_t)(k<0?0:k); } // Internal=0, InternalHigh=bytes
-    if(completion){ void(__attribute__((ms_abi))*cr)(uint32_t,uint32_t,void*)=completion; cr(k<0?5u:0u,(uint32_t)(k<0?0:k),ov); }
+    if(completion){ void(__attribute__((ms_abi))*cr)(uint32_t,uint32_t,void*)=completion; cr(k<0?5u:0u,(uint32_t)(k<0?0:k),ov); t_apc_ran=1; }
     return k>=0; }
 static int    MSABI i_CloseHandleReal(void*h){ intptr_t hv=(intptr_t)h;
     if(pipe_is(hv)) return pipe_close(h);
@@ -9466,7 +9516,7 @@ static uint8_t *load_guest(const char *path, const char *name){
     // BEFORE its DllMain/TLS callbacks run, so its __declspec(thread) globals resolve
     // to its own data instead of aliasing the exe's TLS block (index 0).
     if(opt->Dir[DIR_TLS].VA) register_tls((void*)(base+opt->Dir[DIR_TLS].VA), base, -1);
-    if(strcasestr(name,"halo3")){ waves_prefill(base); patch_install(); hook_install(); skinguard_install(base); vtguard_install(base); hbdel_install(base); capcb1_install(base); h3set_install(base); } // patches can target halo3 now it's mapped
+    if(strcasestr(name,"halo3")){ waves_prefill(base); patch_install(); hook_install(); skinguard_install(base); vtguard_install(base); hbdel_install(base); st_events_install(base); capcb1_install(base); h3set_install(base); } // patches can target halo3 now it's mapped
     ws("  guest "); ws(name); ws(" @ "); whex((uint64_t)base);
     uint64_t ep=opt->EntryRVA;
     if(ep){ int (MSABI *dm)(void*,uint32_t,void*)=(void*)(base+ep); int r=dm(base,1,0);
@@ -9931,7 +9981,12 @@ void __attribute__((ms_abi)) hb_on_delete(uint32_t handle);
 // Entry hook: at `site` (whose first `len` bytes must equal `pro` and be position-independent), call the Win64 function
 // `fn` with the original rcx/rdx/r8/r9 (volatile registers + xmm0-5 preserved), then run the relocated prologue and
 // continue the original function. Returns 1 if installed.
-static int entry_hook(uint8_t*site,const uint8_t*pro,int len,void*fn){
+// entry_hook_tail: the same, but after fn the trampoline runs `tail` (tail_len bytes) instead of the relocated prologue +
+// jump back -- for prologues that are not position-independent; the tail must end in its own jump (or ret). ret_r9:
+// fn gets the hooked function's return address as its 4th argument (r9; only for functions with 3 arguments or fewer).
+static int entry_hook_tail(uint8_t*site,const uint8_t*pro,int len,void*fn,const uint8_t*tail,int tail_len,int ret_r9);
+static int entry_hook(uint8_t*site,const uint8_t*pro,int len,void*fn){ return entry_hook_tail(site,pro,len,fn,0,0,0); }
+static int entry_hook_tail(uint8_t*site,const uint8_t*pro,int len,void*fn,const uint8_t*tail,int tail_len,int ret_r9){
     if(len<14 || memcmp(site,pro,(size_t)len)) return 0;
     if(!g_hookpool){ g_hookpool=mmap(0,1<<20,PROT_READ|PROT_WRITE|PROT_EXEC,MAP_PRIVATE|MAP_ANON,-1,0); if(g_hookpool==MAP_FAILED){g_hookpool=0;return 0;} }
     uint8_t*t=g_hookpool+g_hookoff, *w=t;
@@ -9940,10 +9995,12 @@ static int entry_hook(uint8_t*site,const uint8_t*pro,int len,void*fn){
     static const uint8_t rest[]={0xF3,0x0F,0x6F,0x44,0x24,0x20, 0xF3,0x0F,0x6F,0x4C,0x24,0x30, 0xF3,0x0F,0x6F,0x54,0x24,0x40, 0xF3,0x0F,0x6F,0x5C,0x24,0x50, 0xF3,0x0F,0x6F,0x64,0x24,0x60, 0xF3,0x0F,0x6F,0x6C,0x24,0x70,
         0x48,0x81,0xC4,0x80,0,0,0, 0x41,0x5B,0x41,0x5A,0x58,0x41,0x59,0x41,0x58,0x5A,0x59};
     memcpy(w,save,sizeof save); w+=sizeof save;
+    if(ret_r9){ static const uint8_t mr[8]={0x4C,0x8B,0x8C,0x24,0xB8,0,0,0}; memcpy(w,mr,8); w+=8; }   // mov r9,[rsp+0xB8] = the return address
     *w++=0x48; *w++=0xB8; *(uint64_t*)w=(uint64_t)(uintptr_t)fn; w+=8; *w++=0xFF; *w++=0xD0;          // mov rax,fn; call rax
     memcpy(w,rest,sizeof rest); w+=sizeof rest;
-    memcpy(w,pro,(size_t)len); w+=len;                                                                  // relocated prologue
-    *w++=0x49; *w++=0xBB; *(uint64_t*)w=(uint64_t)(site+len); w+=8; *w++=0x41; *w++=0xFF; *w++=0xE3;   // jmp site+len
+    if(tail){ memcpy(w,tail,(size_t)tail_len); w+=tail_len; }                                          // custom replay
+    else { memcpy(w,pro,(size_t)len); w+=len;                                                           // relocated prologue
+        *w++=0x49; *w++=0xBB; *(uint64_t*)w=(uint64_t)(site+len); w+=8; *w++=0x41; *w++=0xFF; *w++=0xE3; }   // jmp site+len
     sys_icache_invalidate(t,w-t); g_hookoff+=(w-t+15)&~15ull;
     uintptr_t pg=(uintptr_t)site & ~0xFFFull; mprotect((void*)pg,0x2000,PROT_READ|PROT_WRITE|PROT_EXEC);
     uint8_t*q=site; *q++=0x49; *q++=0xBB; *(uint64_t*)q=(uint64_t)(uintptr_t)t; q+=8; *q++=0x41; *q++=0xFF; *q++=0xE3;   // mov r11,t; jmp r11

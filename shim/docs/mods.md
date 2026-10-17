@@ -56,7 +56,19 @@ automatically with `"auto_download_mods": true` in the profile's `settings.json`
 `C:\ReclaimerContent\Mods\Downloaded` inside the loader's prefix
 (`~/Library/Application Support/ReclaimerMac/prefix/drive_c/ReclaimerContent/Mods/Downloaded`).
 
-## 4. Workshop-only mods: download them with DepotDownloader
+## 4. Workshop-only mods: the client's REQUIRED MODS screen uses DepotDownloader
+
+Since 2026-10-17 the loader runs `shim/tools/workshop-helper.sh` in place of the client's own Workshop helper (which
+needs a running Steam client): when a server needs a Workshop mod you don't have, the client's REQUIRED MODS screen
+(DOWNLOAD / TRY AGAIN, or straight away with "Download the mods servers share without asking") fetches it with
+DepotDownloader into the client's Workshop folder and shows its progress; then the join goes on. It needs:
+- DepotDownloader installed and signed in once (steps 1 and 3 below; it never asks for or passes a password -- when
+  the saved login expires the screen says so, and you sign in again in a terminal);
+- your Steam account name in `~/Library/Application Support/ReclaimerMac/steam_user` (one line), or `STEAM_USER` set.
+Log: `$TMPDIR/reclaimer_workshop_<id>.log`. `PELOAD_NO_WORKSHOP_HELPER=1` = the client's own helper (Steam only).
+The steps below do the same by hand.
+
+### By hand
 
 If the listing says **workshop** (the client shows "Direct sharing is disabled" or asks you to start Steam), the files
 only come from Steam Workshop. There is no Steam client in this setup; DepotDownloader fetches Workshop items with your
