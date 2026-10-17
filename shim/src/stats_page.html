@@ -42,7 +42,7 @@ canvas{width:100%;height:auto;display:block;background:#0b0b0b;border-radius:4px
 #rules dt{color:var(--dim)}#rules dd{margin:0}
 .tr{display:inline-block;background:#26303a;border-radius:3px;padding:0 5px;margin:1px 3px 1px 0;font-size:12px}
 .tr.fx{background:#4a2a2a}
-#conn{margin-top:16px}#cl{display:flex;flex-wrap:wrap;gap:6px}
+#conn{margin-bottom:16px}#cl{display:flex;flex-wrap:wrap;gap:6px}
 .pc{display:inline-flex;align-items:center;gap:6px;background:#202020;border:1px solid var(--line);border-radius:4px;padding:2px 4px 2px 8px}
 .mb{background:#222;color:var(--fg);border:1px solid var(--line);border-radius:4px;padding:1px 8px;font:inherit;font-size:12px;cursor:pointer}
 .mb.on{background:#5a2626;border-color:#c55}.mb:disabled{opacity:.4;cursor:default}
@@ -62,6 +62,10 @@ canvas{width:100%;height:auto;display:block;background:#0b0b0b;border-radius:4px
  <button data-a="capture" title="Save the next frame, its depth buffer and the camera position to your home folder">Capture frame<kbd>F8</kbd></button>
  <button data-a="burst" title="Capture the next 8 frames in a row (for glitches that flicker)">Burst<kbd>⇧F8</kbd></button>
  <span id="ovmsg"></span></div>
+<div id="conn" class="panel"><div id="ch"><h2 id="ct">Connected</h2>
+ <button class="mb" id="muteall">Mute all</button><button class="mb" id="unmuteall">Unmute all</button></div><div id="cl" class="note">-</div>
+ <div class="note">Everyone in the game's network session, the lobby included. Mute only affects what you hear (the same
+ list as the client's own scoreboard Mute buttons) and lasts until the game closes.</div></div>
 <div id="rules" class="panel"><h2 id="rt">Game rules</h2><div id="rb" class="note">not in a match</div></div>
 <div class="grid">
  <div class="panel"><div class="wrap"><table><thead><tr>
@@ -79,10 +83,6 @@ canvas{width:100%;height:auto;display:block;background:#0b0b0b;border-radius:4px
  <div id="det" class="panel"><h2>Player details</h2><div class="note">Click a player in the table.</div></div>
  </div>
 </div>
-<div id="conn" class="panel"><div id="ch"><h2 id="ct">Connected</h2>
- <button class="mb" id="muteall">Mute all</button><button class="mb" id="unmuteall">Unmute all</button></div><div id="cl" class="note">-</div>
- <div class="note">Everyone in the game's network session, the lobby included. Mute only affects what you hear (the same
- list as the client's own scoreboard Mute buttons) and lasts until the game closes.</div></div>
 <script>
 const C={red:'#e04040',blue:'#4070f0',green:'#40c060',orange:'#f09030',purple:'#a050e0',gold:'#e0c040',brown:'#9a6a40',pink:'#f080c0',none:'#888'};
 const TN=['red','blue','green','orange','purple','gold','brown','pink'];
@@ -115,13 +115,23 @@ function traitBadges(p,max){ const t=p.traits||{}, ks=Object.keys(t), fx=(p.effe
   if(ks.length>max) h+=`<span class="tr">+${ks.length-max}</span>`; return h; }
 // ---- connected players (network session) + voice mute ----
 const muteBtn=(voice,muted)=>`<button class="mb ${muted?'on':''}" data-voice="${voice}" data-m="${muted?1:0}" ${snap&&snap.mute?'':'disabled'}>${muted?'Unmute':'Mute'}</button>`;
-let connKey='';
-function renderConn(){ const ss=(snap&&snap.session)||[], key=JSON.stringify(ss)+(snap&&snap.mute); if(key===connKey) return; connKey=key;
-  document.getElementById('ct').textContent=`Connected (${ss.length})`; const el=document.getElementById('cl');
-  if(!ss.length){ el.className='note'; el.textContent='no network session'; return; }
-  el.className=''; el.innerHTML=ss.slice().sort((a,b)=>(b.talking-a.talking)||a.name.localeCompare(b.name))
-    .map(p=>`<span class="pc ${p.talking?'talk':''} ${p.muted?'muted':''}" title="${p.talking?'talking':''}">${p.talking?'🔊 ':''}${E(p.name)}${muteBtn(p.voice,p.muted)}</span>`).join('');
-  for(const id of ['muteall','unmuteall']) document.getElementById(id).disabled=!(snap&&snap.mute); }
+// Alphabetical and stable: a chip per voice id is created once and only its classes / button change, so the list does
+// not jump around as people talk (rows are added or removed only when players join or leave).
+const connChips=new Map(); let connMute=null;
+function renderConn(){ const ss=(snap&&snap.session)||[], el=document.getElementById('cl'), canMute=!!(snap&&snap.mute);
+  document.getElementById('ct').textContent=`Connected (${ss.length})`;
+  for(const id of ['muteall','unmuteall']) document.getElementById(id).disabled=!canMute;
+  if(!ss.length){ connChips.clear(); el.className='note'; el.textContent='no network session'; return; }
+  if(el.className==='note'){ el.className=''; el.textContent=''; }
+  const seen=new Set(); let added=false;
+  for(const p of ss){ seen.add(p.voice); let c=connChips.get(p.voice);
+    if(!c){ c=document.createElement('span'); c.className='pc'; c.dataset.name=p.name; c.innerHTML=`<span class="nm"></span>${muteBtn(p.voice,false)}`; connChips.set(p.voice,c); added=true; }
+    if(c.dataset.name!==p.name){ c.dataset.name=p.name; added=true; }
+    c.querySelector('.nm').textContent=(p.talking?'🔊 ':'')+p.name;
+    c.classList.toggle('talk',!!p.talking); c.classList.toggle('muted',!!p.muted);
+    const b=c.querySelector('.mb'); b.classList.toggle('on',!!p.muted); b.dataset.m=p.muted?'1':'0'; b.textContent=p.muted?'Unmute':'Mute'; b.disabled=!canMute; }
+  for(const [v,c] of connChips) if(!seen.has(v)){ c.remove(); connChips.delete(v); }
+  if(added||connMute!==canMute){ connMute=canMute; [...connChips.values()].sort((a,b)=>a.dataset.name.localeCompare(b.dataset.name,undefined,{sensitivity:'base'})).forEach(c=>el.appendChild(c)); } }
 for(const id of ['muteall','unmuteall']) document.getElementById(id).addEventListener('click',async()=>{
   try{ await fetch(`/control?do=${id}`,{method:'POST',headers:{'X-Reclaimer-Control':'1'}}); }catch(err){} });
 document.addEventListener('click',async e=>{ const b=e.target.closest('.mb'); if(!b||b.disabled) return;

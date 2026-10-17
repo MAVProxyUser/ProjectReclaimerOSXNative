@@ -303,10 +303,19 @@ static void st_snapshot(StBuf*s){
     StPlayer pl[256]; int np=st_players(pl,256);
     float cam[3]={0}, fwd[3]={0}; int camok=0; { float vp[32]; unsigned s0=g_hb_vpseq; memcpy(vp,g_hb_vp,sizeof vp); if(!(s0&1) && g_hb_vpseq==s0 && (vp[28]||vp[29]||vp[30])){ memcpy(cam,vp+28,12);
         float l=sqrtf(vp[12]*vp[12]+vp[13]*vp[13]+vp[14]*vp[14]); if(l>0){ fwd[0]=vp[12]/l; fwd[1]=vp[13]/l; fwd[2]=vp[14]/l; camok=1; } } }
-    // The local player (stats "you", the overlay's friend/enemy split): the biped the camera is inside (first person),
-    // else the nearest biped just ahead on the camera's view ray (third person); its players-table slot is kept while
-    // it is dead, seated in a vehicle or not on screen
-    if(camok){ uint32_t best=0xFFFFFFFFu; float bd=1e9f; int inside=0;
+    // The local player (stats "you", the overlay's friend/enemy split). Halo 3's player mapping (TLS +0x110; layout in
+    // shim/docs/halo3-variant-traits.md section 6): output user 0..3 -> player handle at +0xB8 -- what the HUD and
+    // cameras use, right in third person, vehicles and while dead. Else a player whose machine index (+0x1A) is the
+    // local machine (players globals TLS +0x40, +0x7C). Last resort: the biped the camera is inside / just ahead on
+    // the view ray. The slot is kept while none of these answers.
+    int mapped=-1;
+    { uint64_t pm=0; int32_t ou[4]; if(g_st_tls && hb_read(g_st_tls+0x110,&pm,8) && pm && hb_read(pm+0xB8,ou,16))
+          for(int u=0;u<4 && mapped<0;u++) if(ou[u]!=-1) for(int k=0;k<np;k++) if(pl[k].slot==(ou[u]&0xFFFF)){ mapped=pl[k].slot; break; }
+      uint64_t pg=0; int32_t lm=-1;
+      if(mapped<0 && g_st_tls && hb_read(g_st_tls+0x40,&pg,8) && pg && hb_read(pg+0x7C,&lm,4) && lm>=0)
+          for(int k=0;k<np;k++){ int16_t mi=-1; if(hb_read(pl[k].rec+0x1A,&mi,2) && mi==lm){ mapped=pl[k].slot; break; } } }
+    if(mapped>=0) g_hb_local_slot=mapped;
+    else if(camok){ uint32_t best=0xFFFFFFFFu; float bd=1e9f; int inside=0;
         for(int k=0;k<np;k++){ uint32_t h=pl[k].unit; uint64_t p=ST_DATUM(h); float c[4]; if(!p || ST_TYPE(h)!=0 || !hb_read(p+0x1c,c,16)) continue;
             float v[3]={c[0]-cam[0],c[1]-cam[1],c[2]-cam[2]}, d2=v[0]*v[0]+v[1]*v[1]+v[2]*v[2], r=c[3];
             if(d2<(r+0.3f)*(r+0.3f)){ best=h; inside=1; break; }
@@ -428,8 +437,13 @@ static void* st_conn(void*a){ int fd=(int)(intptr_t)a; pthread_setname_np("shim-
         int k=snprintf(h,sizeof h,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %zu\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n",len);
         if(st_send(fd,h,(size_t)k) && len) st_send(fd,j,len); free(j); }
     else if(!strcmp(path,"/")){
-        int k=snprintf(h,sizeof h,"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n",sizeof g_st_page-1);
-        if(st_send(fd,h,(size_t)k)) st_send(fd,g_st_page,sizeof g_st_page-1); }
+        // PELOAD_STATS_PAGE=<file>: serve the page from disk on every request (play.sh sets it in a source checkout, so
+        // page edits show on a browser refresh); otherwise the copy embedded at build time
+        const char*pg=g_st_page; size_t pn=sizeof g_st_page-1; char*disk=0; const char*pf=getenv("PELOAD_STATS_PAGE");
+        if(pf && *pf){ FILE*f=fopen(pf,"rb"); if(f){ fseek(f,0,SEEK_END); long n=ftell(f); fseek(f,0,SEEK_SET);
+                if(n>0 && n<(8<<20) && (disk=malloc((size_t)n)) && fread(disk,1,(size_t)n,f)==(size_t)n){ pg=disk; pn=(size_t)n; } fclose(f); } }
+        int k=snprintf(h,sizeof h,"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: %zu\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n",pn);
+        if(st_send(fd,h,(size_t)k)) st_send(fd,pg,pn); free(disk); }
     else { const char*nf="HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"; st_send(fd,nf,strlen(nf)); }
     close(fd); return 0; }
 static void* st_listen_thread(void*a){ (void)a; pthread_setname_np("shim-stats-listen");

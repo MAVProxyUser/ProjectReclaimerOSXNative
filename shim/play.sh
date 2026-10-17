@@ -66,6 +66,8 @@ else
   echo "starting Reclaimer's menu (~17 s); log: /tmp/reclaimer_play.log"
 fi
 [ "${PELOAD_STATS_HTTP:-8765}" != 0 ] && echo "live stats: http://127.0.0.1:${PELOAD_STATS_HTTP:-8765}/"
+# in a source checkout the stats page is served from shim/src (edits show on a browser refresh)
+[ -f shim/src/stats_page.html ] && [ -z "${PELOAD_STATS_PAGE:-}" ] && export PELOAD_STATS_PAGE="$PWD/shim/src/stats_page.html"
 env PELOAD_SKINGUARD=1 PELOAD_VTGUARD=1 PELOAD_ALLOC_GUARD=1 "${RUNTIME[@]}" PELOAD_STATS_HTTP="${PELOAD_STATS_HTTP:-8765}" \
     PELOAD_RECLAIMER_PATCHES=all PELOAD_WORKER_INHERIT_STDIO=1 PELOAD_PRESENT=1 PELOAD_HOLD_WINDOW=1 PELOAD_D3DGL=1 \
     arch -x86_64 shim/build/peload "$EXE" "${ARGS[@]}" < <(sleep 86400) > /tmp/reclaimer_play.log 2>&1
