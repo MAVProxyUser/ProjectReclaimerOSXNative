@@ -114,6 +114,11 @@ screen (`PELOAD_D3DGL_NOPRELINK`; `PELOAD_D3DGL_PROGTIME` logs build costs).
 Correctness switches added 2026-10-16: `PELOAD_D3DGL_NOINTIN` (integer vertex attributes as floats --
 the old cause of one-frame white flashes / exploded skinned geometry), `PELOAD_D3DGL_NOQUERY`
 (occlusion queries), `PELOAD_D3DGL_NOCANON` (identical-bytecode shader sharing).
+Live stats: `PELOAD_STATS_HTTP=<port>` (shim/src/stats.c) -- a loader thread snapshots the object + players tables
+(TLS +0x38 / +0x10; player +0x28 unit, +0x58 UTF-16 name) every 100 ms into JSON; served on 127.0.0.1 (/, /stats.json,
+/events SSE); only the process that loads halo3.dll binds. Seams check: `PELOAD_D3DGL_DFCENSUS` (draws per depth
+func), `PELOAD_D3DGL_INVARIANT` (invariant gl_Position, opt-in); the main depth buffer is DXGI 19 (D32F_S8, reverse-Z).
+Unfocused/hidden clients are held at 60 fps by the engine; PELOAD_MAX_FPS caps lower (default 30 when hidden).
 Glitch hunting: `PELOAD_D3DGL_COVQ` (+`_COVQ_FRAC`, `_HUGEPROBE=<t>`) per-draw sample counts,
 `PELOAD_D3DGL_WHITEDUMP` (draw flight recorder on auto-exposure spikes), `_LUMLOG`, `_FSLOG`,
 `_FRAMESTAT`, `_CBSCAN`, `_PSCLAMP=<c>`, `_SKIPVSH=<hash,..>`, `_DUMPHASH=<hash,..>` (GLSL+DXBC to ~).

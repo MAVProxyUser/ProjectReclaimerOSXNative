@@ -195,8 +195,26 @@ Options go in front of the command, e.g. `PELOAD_INVERT_PITCH=0 bash shim/play.s
 | `PELOAD_HB_INFO=1` | player info above each player: shield and health %, held weapon, grenades, active camo, in a vehicle; **F4** toggles |
 | `PELOAD_HB_ITEMS=1` | weapons and equipment lying on the map, by name; **F5** toggles |
 | `PELOAD_HB_TEAMS=enemies` | show only enemies (`friends`: only teammates). Hitboxes are red/yellow for enemies, blue for teammates; **F6** cycles all / enemies / friends |
+| `PELOAD_STATS_HTTP=8765` | live game stats on http://127.0.0.1:8765/ (details below) |
+| `PELOAD_D3DGL_INVARIANT=1` | experimental: vertex positions computed bit-identically in every pass; try it if you see seams/speckles along polygon edges (e.g. Valhalla's rock walls) |
 | `PELOAD_ALLOW_TELEPORT=1` | **experimental, currently crashes the game**: F7 teleports you to the opposite point of the map using the game's own teleport |
 | `PELOAD_H3="name=value,..."` | set Halo 3 engine settings, e.g. `render_debug_depth_render=1`, `camera_fov_scale=1.2` — all 72 are listed in `shim/docs/halo3-engine-globals.md` |
+
+### Live game stats over HTTP
+
+`PELOAD_STATS_HTTP=<port> bash shim/play.sh` serves what the game knows about the match, 10 times a second, on
+`127.0.0.1:<port>` (`PELOAD_STATS_ADDR=<ip>` to listen on another address, e.g. to watch from another device):
+
+- `/` -- a live table: every player's team, shield and health, weapon, grenades, vehicle, active camo, speed, position
+- `/stats.json` -- the latest snapshot: `players` (name, team, you, alive, health, shield, camo, weapon, weapons,
+  grenades, vehicle, pos, speed), `vehicles` (type, health, shield, pos), `projectiles` in flight (type, owner, pos,
+  speed), plus `map`, `in_match` and match `time`
+- `/events` -- the same JSON as a stream (Server-Sent Events), e.g. `curl -N http://127.0.0.1:8765/events`
+
+It reads the game's own object table (Halo 3 sends every player's state to every client), like the overlay, and works
+with the overlay off. Health and shield are fractions (1.0 = full; shields can go above 1 when overcharged). On public
+servers this is information the other players don't have -- it is meant for your own and your dedicated server's
+matches.
 
 The window opens at the largest 16:9 size that fits your screen (`PELOAD_WIN_SIZE=1280x720` picks a size), can be
 resized, and can go full screen (green button or Ctrl-Cmd-F). Developer and diagnostic switches are documented in
@@ -211,6 +229,7 @@ resized, and can go full screen (green button or Ctrl-Cmd-F). Developer and diag
 | `shim/src/dxbc_cpu.c` | CPU interpreter for the compute shaders (particles), run on a worker thread |
 | `shim/src/xaudio.c` | XAudio2 / X3DAudio on CoreAudio |
 | `shim/src/wininput.c` | keyboard/mouse → Raw Input and window messages |
+| `shim/src/hitbox.c` / `shim/src/stats.c` | overlay (hitboxes, tracers, labels) / live stats over HTTP |
 | `shim/play.sh` / `shim/build.sh` | launcher / build script |
 | `re-tools/` | reverse-engineering helpers (angr decompile, xrefs) |
 | `shim/docs/` | research notes |

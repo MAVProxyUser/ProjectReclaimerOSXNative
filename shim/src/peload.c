@@ -4665,6 +4665,7 @@ static void d3dgl_ensure_depth(D3DObj*o){
     else if(f>=53&&f<=56){ ifmt=0x81A5; fmt=0x1902; type=0x1403; att=0x8D00; }     // D16 -> DEPTH_COMPONENT16
     else { ifmt=0x88F0; fmt=0x84F9; type=0x84FA; att=0x821A; }                     // D24_UNORM_S8 (44..46) -> DEPTH24_STENCIL8
     int w=o->w?(int)o->w:g_d3dgl_W, h=o->h?(int)o->h:g_d3dgl_H; if(w>4096)w=4096; if(h>4096)h=4096;
+    { static uint64_t seen; if(f<64 && !(seen&(1ull<<f))){ seen|=1ull<<f; char m[96]; int k=snprintf(m,sizeof m,"  [d3dgl] depth buffer DXGI format %u (%dx%d) -> GL 0x%x\n",f,w,h,ifmt); (void)!write(2,m,k); } }
     TEXCACHE_INVALIDATE(); G.GenTextures(1,&o->gltex); G.BindTexture(GLE_TEX2D,o->gltex);
     G.TexParameteri(GLE_TEX2D,0x2801,GLE_LINEAR); G.TexParameteri(GLE_TEX2D,0x2800,GLE_LINEAR);
     G.TexParameteri(GLE_TEX2D,0x2802,GLE_CLAMP); G.TexParameteri(GLE_TEX2D,0x2803,GLE_CLAMP); G.TexParameteri(GLE_TEX2D,0x813D,0);
@@ -4727,6 +4728,14 @@ static void d3dgl_apply_depth(void){
     if(d && d->stkind==2){ de=d->sd[0]; dw=d->sd[1]; df=d->sd[2]; se=d->sd[3]; rm=d->sd[4]&0xff; wm=(d->sd[4]>>8)&0xff; fr=&d->sd[5]; bk=&d->sd[9]; }
     if(hasds && de){ gs_cap(0x0B71,1); if(G.DepthFunc) gs_depthfunc(d3d_cmp_gl(df)); if(G.DepthMask) gs_depthmask(dw?1:0); }
     else { gs_cap(0x0B71,0); if(G.DepthMask) gs_depthmask(0); }
+    // PELOAD_D3DGL_DFCENSUS: per 300 frames, how many draws ran with each D3D depth func (1 never .. 8 always),
+    // split by depth write on/off; [0] = depth test off
+    { static int on=-1; if(on<0) on=getenv("PELOAD_D3DGL_DFCENSUS")?1:0;
+      if(on){ static unsigned long cnt[9][2], fr0; extern unsigned long g_eng_present_no_x; unsigned i=(hasds&&de&&df<=8)?df:0; cnt[i][dw?1:0]++;
+        if(g_eng_present_no_x-fr0>=300){ char m[400]; int k=snprintf(m,sizeof m,"  [dfcensus] %lu frames:",g_eng_present_no_x-fr0);
+          static const char*nm[9]={"off","never","less","equal","lequal","greater","notequal","gequal","always"};
+          for(int f=0;f<9;f++) if(cnt[f][0]||cnt[f][1]) k+=snprintf(m+k,sizeof m-k," %s=%lu/%lu",nm[f],cnt[f][1],cnt[f][0]);
+          k+=snprintf(m+k,sizeof m-k," (write/nowrite)\n"); (void)!write(2,m,k); memset(cnt,0,sizeof cnt); fr0=g_eng_present_no_x; } } }
     if(hasds && se && fr && G.StencilFuncSeparate && G.StencilOpSeparate){ gs_cap(0x0B90,1);
         G.StencilFuncSeparate(0x0404,d3d_cmp_gl(fr[3]),(int)g_d3dst.sref,rm); G.StencilOpSeparate(0x0404,d3d_stencilop_gl(fr[0]),d3d_stencilop_gl(fr[1]),d3d_stencilop_gl(fr[2]));
         G.StencilFuncSeparate(0x0405,d3d_cmp_gl(bk[3]),(int)g_d3dst.sref,rm); G.StencilOpSeparate(0x0405,d3d_stencilop_gl(bk[0]),d3d_stencilop_gl(bk[1]),d3d_stencilop_gl(bk[2]));
@@ -7457,6 +7466,7 @@ static uintptr_t MSABI i_beginthread(WinThreadProc start,unsigned stack,void*arg
 #include "xaudio.c"
 #include "wasapi.c"
 #include "hitbox.c"
+#include "stats.c"
 static void MSABI i_endthread(void){ pthread_exit(0); }
 static uint32_t MSABI i_GetThreadId(void*h){ if(is_sync((intptr_t)h)) return ((SyncObj*)h)->tid; if(h==(void*)-2) return i_GetCurrentThreadId(); return (uint32_t)(uintptr_t)h; }
 static int MSABI i_GetExitCodeThread(void*h,uint32_t*code){
@@ -9895,7 +9905,7 @@ int main(int argc, char **argv){
     std_tee_start(2,"PELOAD_STDERR_TEE"); std_tee_start(1,"PELOAD_STDOUT_TEE");
     if(getenv("PELOAD_SAMPLE")){ pthread_t st; pthread_create(&st,0,sampler_thread,0); }
     wi_test_start();
-    hitbox_start();
+    hitbox_start(); stats_start();
     { struct sigaction sa; memset(&sa,0,sizeof sa); sa.sa_sigaction=crashsig; sa.sa_flags=SA_SIGINFO;
       sigaction(SIGSEGV,&sa,0); sigaction(SIGBUS,&sa,0); sigaction(SIGILL,&sa,0); sigaction(SIGABRT,&sa,0);
       if(getenv("PELOAD_BP")) sigaction(SIGTRAP,&sa,0); }  // PELOAD_BP software breakpoints need SIGTRAP caught (else "Trace/BPT trap")

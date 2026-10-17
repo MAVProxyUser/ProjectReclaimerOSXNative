@@ -7,7 +7,7 @@ order they will be worked; frame rate is deliberately last (user, 2026-10-16).
 
 | # | Item | Status / notes |
 |---|---|---|
-| 6 | **Seams at polygon joins on outer map geometry** (e.g. Valhalla rock walls) | Quick check whether the cracks can be found programmatically (e.g. T-junctions or depth gaps in a capture); low priority. |
+| 6 | **Seams at polygon joins on outer map geometry** (e.g. Valhalla rock walls) | Checked (2026-10-16): the world is drawn reverse-Z into a 32-bit float depth buffer (DXGI 19), ~835 depth-writing GEQUAL draws + ~625 GEQUAL no-write passes over them per frame (PELOAD_D3DGL_DFCENSUS). Two suspects: (a) a later pass computing a position 1 ulp off fails GEQUAL along edges -- `PELOAD_D3DGL_INVARIANT=1` declares gl_Position invariant (no fps loss seen below the 60 fps unfocused limit); needs a look by the user at the rock walls with and without it; (b) GL 4.1 has no clip control, so the D3D [0,1] -> GL [-1,1] depth mapping costs ~5000x precision on far geometry (z-fighting at distance; not fixable on this GL). |
 | 7b | **Teleport (F7, PELOAD_ALLOW_TELEPORT) -- experimental, crashes** | Uses halo3's own teleport (halo3+0x259410). Run from an arbitrary QueryPerformanceCounter call it crashed in the physics update (halo3+0x23300E, mid-tick); run from an entry hook on the main loop's frame-timing function (halo3+0x9d22c) it crashed at halo3+0x1ECA6 reading TLS block +0x240 (null on that thread). Thread dumps show halo3 spreading game work over job-system worker threads, so the safe point is the simulation job's own tick -- not found yet. Destination snapping to a map item spawn works (computed correctly on Guardian and Valhalla). |
 | 9 | **Unexplained crashes** (watch) | (a) v0.9.18 SIGTRAP during a direct Guardian match; (b) one startup SIGSEGV with guest code on a thread without TLS. Not seen again since the thread-id fix (55811fa); loader threads are now named for the next [CRASH] line. |
 | 11 | **Frame rate** (last) | shim/docs/PERF-PLAN.md. Done: redundant glUseProgram cache (4afd0a9). Small wins left; big step: native arm64 GL helper process (up to ~2x). |
@@ -39,6 +39,8 @@ Closed by the user 2026-10-16: teleporter audio desync (not seen since the XAudi
 - Title fps no longer claims more than the screen can show (loading screens spin at ~1000 presents/s) — f73252e
 - Intermittent hang at match start: GetCurrentThreadId returned 0x1000 on every thread, which disabled every
   msvcp140 std::mutex — 55811fa
+- Live game stats over HTTP (user request): PELOAD_STATS_HTTP=<port> -- /, /stats.json, /events (shim/src/stats.c);
+  verified in a Valhalla match (names, teams, you, weapons, grenades, 18 vehicles, projectiles)
 - 45 s startup watchdog, the gate found: it is the worker's "engine hang watchdog" (exe+0x793f40), armed only for
   time-limited runs -- RECLAIMER_LOCAL_RUNTIME unset (the direct-match probe: 15/45/240 s, "still running after N
   seconds") or "<role>:<seconds>" with seconds > 0. The menu runtime passes "menu:0" and never arms it; nothing on

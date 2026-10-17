@@ -561,6 +561,11 @@ char* dg_emit(const char*stage,const DgSig*isgn,int ni,const DgSig*osgn,int no,D
     for(int m=0;m<256;m++) if(ref_cb[m]&&!has_cb[m]){ char*s; if(g_dg_ubo) asprintf(&s,"layout(std140) uniform cb%d_blk { vec4 cb%d[4096]; };",m,m); else asprintf(&s,"uniform vec4 cb%d[4096];",m); dg_linsert(&L,ins_at++,s); mi++; }
     for(int m=0;m<256;m++) if(ref_v[m]&&!has_v[m]){ char*s; asprintf(&s,"in vec4 v%d;",m); dg_linsert(&L,ins_at++,s); mi++; }
     for(int m=0;m<256;m++) if(ref_o[m]&&!has_o[m]){ if(m!=0||!has_glpos){ char*s; asprintf(&s,"out vec4 o%d;",m); dg_linsert(&L,ins_at++,s); mi++; } }
+    // PELOAD_D3DGL_INVARIANT: the same position math in two programs (a depth pass and the colour pass with depth
+    // EQUAL) must give bit-identical gl_Position, or edge pixels fail the test (speckled seams). GLSL only promises
+    // that for 'invariant' outputs.
+    { static int inv=-1; if(inv<0) inv=getenv("PELOAD_D3DGL_INVARIANT")?1:0;
+      if(inv && has_glpos && !strcmp(stage,"vs")){ dg_linsert(&L,ins_at++,strdup("invariant gl_Position;")); mi++; } }
     if(need_ldb){ dg_linsert(&L,ins_at++,strdup("uvec4 dx_ldb(usamplerBuffer b,int dw){ return uvec4(texelFetch(b,dw).x,texelFetch(b,dw+1).x,texelFetch(b,dw+2).x,texelFetch(b,dw+3).x); }")); mi++; }
     // half-float helpers (packHalf2x16/unpackHalf2x16 are GLSL 4.20; we target 4.10)
     if(need_h2f){ dg_linsert(&L,ins_at++,strdup("float dx_h2f1(uint h){ uint e=(h>>10)&31u, m=h&1023u; float v = e==0u ? float(m)*exp2(-24.0) : (e==31u ? (m==0u?uintBitsToFloat(0x7f800000u):uintBitsToFloat(0x7fc00000u)) : (1.0+float(m)/1024.0)*exp2(float(e)-15.0)); return ((h>>15)&1u)!=0u ? -v : v; }\nvec4 dx_h2f(uvec4 h){ return vec4(dx_h2f1(h.x),dx_h2f1(h.y),dx_h2f1(h.z),dx_h2f1(h.w)); }")); mi++; }

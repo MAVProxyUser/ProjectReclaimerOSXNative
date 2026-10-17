@@ -34,7 +34,7 @@ MAP="${TARGET_MAP:-Valhalla}"
 CLICKS="110,503;230,183;300,143;t:$(echo "$MAP" | tr 'A-Z' 'a-z');s:1.5;1047,663;384,440;230,497;w:450,500,-15;808,592;967,668;s:2;230,625"
 # A match ends when its last other player leaves; then dismiss the carnage report (CONTINUE) and start the
 # next one, so there is always a match to join.
-AFTER="1068,52;s:12;230,625"
+AFTER="1068,52;s:30;230,625"
 
 if [ -n "${TARGET_SHOW:-}" ]; then WINENV="PELOAD_PRESENT_HIDDEN=1 PELOAD_MINIMIZE=${TARGET_MINIMIZE:-1}"; else WINENV="PELOAD_HIDE_WINDOW=1"; fi
 set -m

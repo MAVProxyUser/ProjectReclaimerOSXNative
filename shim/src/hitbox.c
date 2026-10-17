@@ -87,7 +87,8 @@ static int hb_feat(int f){ hbf_init(); return g_hbf_on[f] ^ ((g_hb_toggle>>f)&1)
 static int hb_overlay_on(void){ for(int f=0;f<HBF_N;f++) if(hb_feat(f)) return 1; return 0; }
 // The camera tracker (VS cb0 of the frame's first world draw) feeds the overlay and the teleport's "which body is
 // mine"; it runs when either needs it.
-static int hb_enabled(void){ static int tp=-1; if(tp<0) tp=getenv("PELOAD_ALLOW_TELEPORT")?1:0; return tp || hb_overlay_on(); }
+static int stats_on(void);   // stats.c: the live stats service uses the camera to mark "you"
+static int hb_enabled(void){ static int tp=-1; if(tp<0) tp=getenv("PELOAD_ALLOW_TELEPORT")?1:0; return tp || hb_overlay_on() || stats_on(); }
 // A world camera: rows 0-3 are a perspective view-projection (cb_looks_viewproj) AND row 7 is the camera position
 // it was built from -- the camera sits at the clip-space origin (x = y = w = 0). Rejects the view-space-only
 // projections of full-screen passes (row 3 = 0,0,1,0), shadow-map views and the first-person weapon's view.
@@ -279,7 +280,10 @@ static int hb_emit_hitbox(const HbObj*o,const float*vp,float*verts,int nv,int ca
         d[0]=q[0][0]; d[1]=q[0][1]; d[2]=col[0]; d[3]=col[1]; d[4]=col[2]; d[5]=q[1][0]; d[6]=q[1][1]; d[7]=col[0]; d[8]=col[1]; d[9]=col[2]; added+=2; }
     return added?added:-1; }   // -1: posed but entirely behind the camera
 // Short display name of an object definition (last path component of its tag name, '_' -> ' ', upper case).
-static const char* hb_tag_name(uint32_t def){
+static const char* hb_tag_name_l(uint32_t def);
+static const char* hb_tag_name(uint32_t def){   // also called by the stats thread (stats.c)
+    static pthread_mutex_t mx=PTHREAD_MUTEX_INITIALIZER; pthread_mutex_lock(&mx); const char*r=hb_tag_name_l(def); pthread_mutex_unlock(&mx); return r; }
+static const char* hb_tag_name_l(uint32_t def){
     static struct { uint32_t def; char nm[32]; } cache[256]; static int nc;
     for(int i=0;i<nc;i++) if(cache[i].def==def) return cache[i].nm;
     char out[32]="?"; char paths[8][1024]; int np; pthread_mutex_lock(&g_hb_mapmx); np=g_hb_nmappaths; memcpy(paths,g_hb_mappaths,sizeof paths); pthread_mutex_unlock(&g_hb_mapmx);
