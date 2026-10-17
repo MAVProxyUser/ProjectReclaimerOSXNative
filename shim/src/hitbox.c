@@ -450,20 +450,26 @@ static void hb_engine_jobs_locked(uint8_t*h3,void**tarr,uint32_t idx,uint8_t*arr
 // bytes as PELOAD_PATCH=halo3+37b816:E95501000090,halo3+37b734:EB at launch. Written by the host's simulation thread at
 // the frame safe point (between ticks: biped_update is not running), all or nothing, only over the expected bytes.
 // (The entry patch of halo3+1b8e00 is NOT usable: the client checks that function's entry and refuses to start.)
+// A third patch makes slip surfaces walkable (map-boundaries.md "Soft ceilings as ground"): the cliff tops around
+// Valhalla's valley are SLIP terrain (collision flag 0x40), never ground for a biped in multiplayer -- a player teleported
+// there could look but not move and slid down the slope. halo3+219c1f jne -> jmp 0x219c67 in the biped ground test skips
+// both slip checks (BSP slip flag and the soft-ceiling slip bit). Affects every biped in ground mode (players and AI).
 typedef struct { uint32_t rva; int n; uint8_t orig[6], patch[6]; } HbBnd;
-static const HbBnd g_hb_bnd[2]={ {0x37b816,6,{0x0F,0x85,0x54,0x01,0x00,0x00},{0xE9,0x55,0x01,0x00,0x00,0x90}}, {0x37b734,1,{0x74},{0xEB}} };
+#define HB_NBND 3
+static const HbBnd g_hb_bnd[HB_NBND]={ {0x37b816,6,{0x0F,0x85,0x54,0x01,0x00,0x00},{0xE9,0x55,0x01,0x00,0x00,0x90}}, {0x37b734,1,{0x74},{0xEB}},
+    {0x219c1f,2,{0x75,0x06},{0xEB,0x46}} };
 volatile int g_hb_bnd_req=-1;   // stats page: 1 = boundaries off, 0 = back on
 volatile int g_hb_bnd_only;      // that request carries no teleport (a bare job would otherwise mean F7's map reflection)
 int hb_bounds_off(void){ uint8_t*h3=hb_halo3_base(); if(!h3) return -1; int off=1, on=1;
     for(int i=0;i<2;i++){ const uint8_t*p=h3+g_hb_bnd[i].rva; if(memcmp(p,g_hb_bnd[i].patch,g_hb_bnd[i].n)) off=0; if(memcmp(p,g_hb_bnd[i].orig,g_hb_bnd[i].n)) on=0; }
-    return off?1:on?0:-1; }   // -1: neither (another halo3 build, or partly patched)
+    return off?1:on?0:-1; }   // the kill/safe + soft-ceiling pair decides (a launch PELOAD_PATCH may lack the slip one); -1: neither
 static void hb_bounds_set(uint8_t*h3,int off){
-    for(int i=0;i<2;i++){ const HbBnd*b=&g_hb_bnd[i]; const uint8_t*p=h3+b->rva;
+    for(int i=0;i<HB_NBND;i++){ const HbBnd*b=&g_hb_bnd[i]; const uint8_t*p=h3+b->rva;
         if(memcmp(p,off?b->orig:b->patch,b->n) && memcmp(p,off?b->patch:b->orig,b->n)){
             char m[120]; int k=snprintf(m,sizeof m,"  [bounds] halo3+%x holds unexpected bytes: not changed\n",b->rva); (void)!write(2,m,k); return; } }
-    for(int i=0;i<2;i++){ const HbBnd*b=&g_hb_bnd[i]; uint8_t*p=h3+b->rva; const uint8_t*want=off?b->patch:b->orig; if(!memcmp(p,want,b->n)) continue;
+    for(int i=0;i<HB_NBND;i++){ const HbBnd*b=&g_hb_bnd[i]; uint8_t*p=h3+b->rva; const uint8_t*want=off?b->patch:b->orig; if(!memcmp(p,want,b->n)) continue;
         uintptr_t pg=(uintptr_t)p & ~0xFFFull; mprotect((void*)pg,0x2000,PROT_READ|PROT_WRITE|PROT_EXEC); memcpy(p,want,(size_t)b->n); sys_icache_invalidate(p,(size_t)b->n); }
-    (void)!write(2,off?"  [bounds] map boundaries OFF (kill volumes, safe zones, soft ceilings skipped for players)\n":"  [bounds] map boundaries back ON\n",off?92:36); }
+    (void)!write(2,off?"  [bounds] map boundaries OFF (kill volumes, safe zones, soft ceilings skipped; slip surfaces walkable)\n":"  [bounds] map boundaries back ON\n",off?104:36); }
 static void hb_engine_jobs(void){
     // the simulation thread: its own TLS block holds the live object table (worker threads have no game state there)
     static int why_logged; uint8_t*h3=hb_halo3_base(); if(!h3) return; uint32_t idx=*(volatile uint32_t*)(h3+0xa39f9c); if(idx>=128) return;

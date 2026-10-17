@@ -252,10 +252,110 @@ ground there and sends `tpto` to 0.6 above it. With the boundary patches above y
 ### One-click from the stats page (2026-10-17)
 
 In a game you host with `PELOAD_ALLOW_TELEPORT=1` (no launch patch needed) the overlay controls show:
-- **Boundaries on / off**: writes or restores the two call-site patches at run time, from the simulation thread at the
+- **Boundaries on / off**: writes or restores the call-site patches at run time (kill/safe zones, soft ceilings and,
+  since 2026-10-17, the slip-surface ground patch halo3+219c1f:EB46 from the next section), from the simulation thread at the
   frame safe point (between ticks), all or nothing and only over the expected bytes (POST `/control?do=bounds&off=0|1`).
 - **Valhalla: east cliff** (on riverworld): boundaries off, then teleports you to (114, -100, 22.6)
   (POST `/control?do=explore&spot=valhalla_cliff`). More spots: `g_st_spots` in shim/src/stats.c.
 
 Tested: explore -> alive on the cliff; boundaries back on while standing there -> dead within a second (as with the
 launch-time patch). A dead or respawning player can't be teleported ("no body at the camera"): click again once you spawn.
+
+## Soft ceilings as ground (east cliff)
+
+Static RE, 2026-10-17. Explains the live result above: on the east cliff top, (114, -100), with
+`37b816` + `37b734` patched, the player can look but cannot walk and slowly slides. At (44, -24) it walks normally.
+
+**Answer: it is not the soft ceiling.** The cliff-top terrain is itself a **slip surface**: its collision BSP surface
+flag is 0x40. A biped never counts a slip contact as ground on a multiplayer map, and Havok gives slip contacts
+zero friction. The `th` drape only happens to lie 0.4 above the same terrain.
+- Soft-ceiling triangles are never Havok collision. With `37b734` patched, they do nothing to a walking biped.
+- The live data agrees. At (110, -80), the biped stood at z 19.1. `th` is at 19.25 there, so the biped was below the drape, not resting on it.
+
+New tool: `python3 re-tools/h3surf.py <map> x,y [...]` lists every collision surface (flags, material, slope) and
+soft ceiling above and below a point. `--slip` summarises the slip-flagged surfaces.
+
+| Point (riverworld) | Collision surface under the feet | `th` soft kill | Live result |
+|---|---|---|---|
+| (114, -100) | z 22.21, **flags 0x40 slip**, material 29 `riverworld_ground_cliff` (hard_terrain_stone), slope 13.7 deg | z 22.60 | Can't walk, slides |
+| (110, -80) | z 18.86, **flags 0x40 slip**, same material, slope 13.1 deg | z 19.25 | Stood at z 19.1 |
+| (44, -24) | z 9.50, flags 0 (material 30 `riverworld_cliff_blend`), slope 18.4 deg | none | Walks |
+
+`--slip` on Valhalla finds 2252 of the 70238 collision triangles flagged slip:
+- 1786 are the `riverworld_ground_cliff` terrain (x 42.8..123.2, y -177.7..-33.0, z 7.3..36.3): every cliff top around the valley.
+- 438 are invisible + slip player clip (flags 0x43).
+- 28 are on a forerunner panel.
+
+The other (type 2) soft ceiling, `slidey` (x <= 107.5), is not at the test point.
+
+### Where the slip flag acts (CONFIRMED unless marked)
+
+| Address | What |
+|---|---|
+| `0x205524` | Collision-surface flags getter: small BSP surface `+0xA` (12-byte stride) or large `+0xE` (16-byte stride). `0x2054d0` is the material getter |
+| `0x21b4d8` | Builds the Havok shape for one BSP surface. The shape type is 0x1E, the vtable `0x7fbc58`, and the convex radius 0.0164 (= 0.05 m). It stores the material at shape `+0x30` (`0x21b745`) and the **flags at +0x32** (`0x21b752`) |
+| `0x21d9c0` | Havok contact listener. When the shape type is 0x1E, it takes the flags from shape `+0x32` (`0x21db5f`). It then calls `0x15ec74` -> `0x15edbc`, which appends a 0x44-byte contact record with the **flags at +0x40** (`0x15eee4`), the normal at +0x24, and the object at +0x14 (-1 = BSP) |
+| `0x15e1e0` (`0x15e2b1`) | Havok contact material for **every** object: a slip contact gets **friction 0** |
+| `0x2199c4` (`0x219c11..0x219c7d`) | Biped **ground-support test**, run each tick in ground mode. It loops over the body's contacts (iterator `0x221354` / `0x221478` / `0x221514` / `0x221380`). If `contact+0x40 & 0x40` **or** `phys+0x63 & 2`, and `0x1b8bd8()` > normal.z, it raises the ground threshold `[rsp+0x70]` to `normal.z + 0.001` (`0x846968`). In the selection loop, a contact is ground only if `normal.z > threshold` (`0x21a03f`) |
+| `0x1b8bd8` | The slip threshold. Returns **1.0 when `game_globals+0x10 == 2`** (multiplayer; the name is GUESSED), otherwise `*(tls+0x130)+0x1C`. So on MP maps, a slip contact is ground only if it is perfectly flat |
+| `0x218ffc` (`0x2195d4`) | Ground physics, character mode 1. It calls `0x2199c4`; when that fails (no ground), it sets `[rsi+4] \|= 1`. At its end, `0x219546` clears `phys+0x63` bit 1, so the soft-ceiling slip lasts one tick |
+| Call chain | Biped physics update `0x3bae08` -> `0x1dcb74` (mode dispatch: mode 1 -> `0x218ffc`, mode 3 -> `0x2452a8`) -> `0x218ffc` -> `0x2199c4`. The character-physics block is `biped+0x4DC`: mode at +2 (= biped +0x4DE), flags at +0x6B (= biped +0x547, `phys+0x63` above relative to the ground data at +8) |
+
+So on a slip surface the biped has no ground (airborne-like: input does not move it) and its contact has no
+friction, so it slides down the 13-14 deg slope slowly. This is the map's own anti-breakout design, independent of
+the soft-kill drape.
+
+### Every soft-ceiling user (none is physical)
+
+The soft-ceiling triangles (sddt +0x10, 0x44 each) are indexed only in `0x1bb1d0`, `0x1b9474`, `0x1b9af4` and
+`0x1b9d6c`. This was checked with an `imul ..., 0x44` scan over all of .text. Every one of them reads the design BSP through `0x9bc28`.
+The other users of `0x9bc28` (`0x9bfe0`, `0x16b038`, `0x16b608`) are water queries (sddt +0x1C / +0x28 / +0x34). No
+Havok shape is built from the design BSP.
+
+| User | Called from | Effect |
+|---|---|---|
+| `0x1bb1d0` query, via `0x1bac00` response | `biped_update` `0x37b766` (players). `vehicle_update` `0x36bcd8` (type 1 slot +0x88; `0x36bd7b`, only for a parentless vehicle whose tag `+0x2BC` bit 11 is set (huge vehicle), with prev-pos vehicle+0x78C). `0x117798` (`0x11789c`) | Acceleration (velocity reflection), the soft-kill timer, and the slip flag `biped+0x547 \|= 2`. That flag feeds the **same** `0x219c21` test above. It also sets/clears `parent+0xA8` bit 19 every call |
+| `0x1b9474` | `0x213718` / `0x213904` | Sphere query over **acceleration (type 0)** ceilings only. Not traced (GUESSED: AI / huge-vehicle avoidance) |
+| `0x1b9af4` | `0x1fe800` | Camera. GUESSED from the global `debug_structure_soft_ceilings_camera` |
+| `0x1b9d6c` | `0x117a24` <- `0x117798` | Same object list as the `0x11789c` call (tls+0x20, +0xE4B8). GUESSED: multiplayer item/object out-of-bounds handling |
+
+With `37b734` patched, nothing soft-ceiling related touches a player biped.
+
+### Patch: make slip surfaces walkable
+
+`PELOAD_PATCH` / run-time write, at call sites inside function bodies (no entry bytes are touched):
+
+| Goal | Patch | Original bytes | Notes |
+|---|---|---|---|
+| **Bipeds ignore slip for grounding (BSP + soft-ceiling slip)** (recommended) | `halo3+219c1f:EB46` | `75 06` | `jne 0x219c27` becomes `jmp 0x219c67`: the slip loop body is skipped for every contact, so the threshold stays the tag value |
+| Bipeds ignore BSP slip only (keep the soft-ceiling slip flag) | `halo3+219c1f:9090` | `75 06` | Falls through to `test [rbx+0x63],2`. With `37b734` patched, this is the same as the row above |
+| Optional: normal friction on slip contacts | `halo3+15e2b6:EB06` | `74 06` | `je` becomes `jmp`: the slip override (friction 0) is skipped. This affects **every** Havok object on slip surfaces (vehicles, crates, weapons). Use it only if a standing biped still creeps |
+
+Exploring recipe (host):
+```
+PELOAD_ALLOW_TELEPORT=1 PELOAD_PATCH=halo3+37b816:E95501000090,halo3+37b734:EB,halo3+219c1f:EB46
+```
+
+- **Context:** simulation (main) thread, inside the per-object physics update of each game tick, under the
+  game-state lock: the same place as biped_update. A run-time write is safe at the frame safe point, as the stats page's
+  "Boundaries on/off" does for the other two patches. Check `75 06` first.
+- **Who is affected:** every biped in ground mode, players and AI alike.
+  - GUESSED: creatures too, via `0x3e14e4` -> `0x1dcb74`.
+  - Slip-flagged surfaces become normal ground, subject to the biped's usual max-slope.
+  - On other maps, ledges or rails that designers made unstandable become standable too.
+  - Not affected: vehicles (their physics does not use `0x2199c4`), projectiles, the camera, and soft-ceiling acceleration / soft kill (those are `37b734`).
+- **Clients:** each machine runs this test for the bipeds it simulates. The host does all bipeds; a joining client
+  does its own predicted biped. Patch only the host, and a remote player's prediction still slides while the host
+  walks it, so the client keeps getting corrected (GUESSED rubber-banding). Patch the clients too (same
+  bytes). The host's own player needs only the host patch.
+- **Entry checks:** the Reclaimer client refused `1b8e00`'s *entry* bytes. `0x219c1f` is 0x25B bytes into
+  `0x2199c4`, like the accepted `37b734` / `37b816`. GUESSED safe; not run live.
+
+### Confidence
+
+| Claim | Confidence |
+|---|---|
+| The cliff top is slip-flagged terrain, and the soft-ceiling geometry is not physical | High (map data + the full list of soft-ceiling users) |
+| The chain BSP flags -> shape `+0x32` -> contact `+0x40` -> `0x219c1b` / `0x15e2b1` | High (every hop read in the code) |
+| `0x1b8bd8` == 1.0 on MP maps | Medium. The gg+0x10 == 2 "multiplayer" meaning is GUESSED |
+| `219c1f:EB46` alone gives normal walking | Medium. The zero-friction contact remains (GUESSED harmless while grounded; add `15e2b6:EB06` if not) |

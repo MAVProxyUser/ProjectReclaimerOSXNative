@@ -287,8 +287,8 @@ static int st_forward_tp(const char*hostport,int slot,int who){
 // Spots past the map's edges, tested alive with the boundaries off (shim/docs/map-boundaries.md)
 typedef struct { const char*map, *id, *label; float x,y,z; } StSpot;
 static const StSpot g_st_spots[]={
-    {"riverworld","valhalla_cliff","Valhalla: east cliff",114.0f,-100.0f,22.6f},   // outside the safe zone (x > 106.3); ground 22.25 -- but the
-                                                                                     //   soft-kill surface lies 0.4 above it: you slide, can't walk
+    {"riverworld","valhalla_cliff","Valhalla: east cliff",114.0f,-100.0f,22.6f},   // outside the safe zone (x > 106.3); ground 22.25: SLIP
+                                                                                     //   terrain, walkable only with the slip patch (boundaries off)
     {"riverworld","valhalla_north","Valhalla: north ridge",44.0f,-24.0f,10.0f},    // past the north end (y > -31.9); ground 9.4, no soft ceiling
 };
 static char g_st_curmap[64];   // the map the last snapshot saw
