@@ -221,10 +221,17 @@ watch from another device). From top to bottom the page shows:
   order. Players who are talking light up green. The speaker beside each name mutes or unmutes their voice (a red cross
   = muted); **Mute all** / **Unmute all** do everyone. This is the client's own voice mute (the same list as its
   scoreboard Mute buttons): it only affects what you hear and lasts until the game closes.
+- **Event feed** and **Chat** side by side, newest first. The feed shows joins and leaves (the client's own roster
+  notices; when you join, everyone already there becomes one "N players in the game" line), kills, deaths, votes,
+  server notices (team shuffles, kicks) and match start and end, each kind with its own checkbox. Kills marked ≈ are
+  estimates: the killer is the last player whose projectile ended inside the body within 1.5 s before it died, and the
+  weapon is the one in their hands, the vehicle or turret they sit in, or the grenade; melee, splash, splatter and fall
+  deaths show as "died".
 - **Game rules** -- the running game's options (rounds, respawn, map, powerups, score and points) and every trait set
   with what it changes: everyone, after spawning, each powerup, and the mode's roles (leader, flag carrier, infected,
   last survivor, ...).
-- **Players** -- team, shield and health, weapon, deaths, shots and accuracy, grenades, vehicle, speed and active
+- **Players** -- living players first, then players waiting to respawn, then those who quit (still in the game's
+  player list but gone from its network session). Team, shield and health, weapon, deaths, shots and accuracy, grenades, vehicle, speed and active
   traits (where they differ from the defaults, with powerup and respawn-trait countdowns). 🔊 marks a talker, 🔇 a
   muted player, "(you)" the local player (from Halo 3's own player mapping, so also right in third person and vehicles).
   Shots count every projectile (each shotgun pellet is one); a hit is a shot that ended inside another player's body
@@ -246,6 +253,9 @@ Machine-readable endpoints:
   traits, effects, voice, muted, talking), `session` (the connected list), `variant` (options and trait sets),
   `overlay` (the switches), `vehicles`, `projectiles` in flight, `map`, `in_match`, match `time`
 - `/events` -- the same JSON as a stream (Server-Sent Events): `curl -N http://127.0.0.1:8765/events`
+- `/feed.json?since=<seq>` -- the event feed after event `seq` (the last 1,024 kept): `kind` (join, leave, kill, death,
+  vote, server, game, chat), `text`, `t` (Unix time), `a`/`b` (players), `how` (weapon), `estimated`; the snapshot's
+  `feed_seq` is the newest event's number. `PELOAD_FEED_LOG=1` also prints each event to the log
 - `/heat.json` -- the heatmap data (visited cells, deaths); `/maptop/<map>.png|json` -- the map picture and its world
   bounds
 - `POST /control?do=<hitboxes|tracers|info|items|visible|teams|textup|textdown|teleport|capture|mute|unmute|muteall|

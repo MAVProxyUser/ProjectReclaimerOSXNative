@@ -670,6 +670,7 @@ volatile int g_games_ended; // count of "Carnage report opened" (a match ended; 
 static double mono_s(void){ struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t); return t.tv_sec+t.tv_nsec*1e-9; }
 // microseconds -> mach_absolute_time units (nanoseconds under Rosetta, 24 MHz ticks natively)
 static uint64_t mt_us(uint64_t us){ static double f; if(!f){ mach_timebase_info_data_t tb; mach_timebase_info(&tb); f=1000.0*tb.denom/tb.numer; } return (uint64_t)(us*f); }
+static void st_feed_log(int fd,const char*buf,size_t n);   // stats.c: the live event feed reads the client's log lines
 static int    MSABI i_WriteFile(void *h, const void *buf, uint32_t n, uint32_t *wr, void *ov){
     (void)ov; intptr_t hv=(intptr_t)h;
     if(!g_gameplay_t0 && buf && n>20 && memmem(buf,n,"gameplay presentation ready",27)) g_gameplay_t0=mono_s();
@@ -677,6 +678,7 @@ static int    MSABI i_WriteFile(void *h, const void *buf, uint32_t n, uint32_t *
     if(buf && n>20 && memmem(buf,n,"Carnage report opened",21)) __atomic_add_fetch(&g_games_ended,1,__ATOMIC_SEQ_CST);
     if(pipe_is(hv)) return pipe_write(h,buf,n,wr);
     int fd = (hv==2)?1 : (hv==3)?2 : (hv>=0x1000)?(int)(hv-0x1000) : -1;
+    if(fd==1||fd==2) st_feed_log(fd,(const char*)buf,n);
     // PELOAD_CAP_ADV: dump the exact bytes written to a local-server advertisement file
     // (the <uuid>.partial / .json), so we learn the real schema the discovery validator wants.
     if(fd>=0 && fd<MAXFD && g_fdpath[fd] && buf && n>0 && n<8192 && getenv("PELOAD_CAP_ADV")
@@ -716,7 +718,19 @@ static int    MSABI i_WriteConsoleW(void *h, const uint16_t *s, uint32_t n, uint
     (void)rsv; int fd=(h==(void*)3)?2:1;
     if(!g_gameplay_t0 && s && n>20){ char a[512]; uint32_t m=n<511?n:511; for(uint32_t i=0;i<m;i++) a[i]=(s[i]<128)?(char)s[i]:'?'; if(memmem(a,m,"gameplay presentation ready",27)) g_gameplay_t0=mono_s(); }
     if(!g_menu_ready_t0 && s && n>20){ char a[512]; uint32_t m=n<511?n:511; for(uint32_t i=0;i<m;i++) a[i]=(s[i]<128)?(char)s[i]:'?'; if(memmem(a,m,"Menu loading screen finished",28)) g_menu_ready_t0=mono_s(); }
-    for(uint32_t i=0;i<n;i++){ char c=(s[i]<128)?(char)s[i]:'?'; (void)!write(fd,&c,1);} if(wr)*wr=n; return 1; }
+    // UTF-16 -> UTF-8, written in one go and passed to the live event feed (PELOAD_CONSOLE_ASCII: the old copy, one
+    // write per character with '?' for anything non-ASCII)
+    static int ascii=-1; if(ascii<0) ascii=getenv("PELOAD_CONSOLE_ASCII")?1:0;
+    if(ascii){ for(uint32_t i=0;i<n;i++){ char c=(s[i]<128)?(char)s[i]:'?'; (void)!write(fd,&c,1);} if(wr)*wr=n; return 1; }
+    char u[2048]; size_t j=0;
+    for(uint32_t i=0;s && i<n;i++){ uint32_t c=s[i];
+        if(c>=0xD800 && c<0xDC00 && i+1<n && s[i+1]>=0xDC00 && s[i+1]<0xE000){ c=0x10000+((c-0xD800)<<10)+(s[i+1]-0xDC00); i++; }
+        if(j+4>=sizeof u){ st_feed_log(fd,u,j); (void)!write(fd,u,j); j=0; }
+        if(c<0x80) u[j++]=(char)c; else if(c<0x800){ u[j++]=(char)(0xC0|(c>>6)); u[j++]=(char)(0x80|(c&63)); }
+        else if(c<0x10000){ u[j++]=(char)(0xE0|(c>>12)); u[j++]=(char)(0x80|((c>>6)&63)); u[j++]=(char)(0x80|(c&63)); }
+        else { u[j++]=(char)(0xF0|(c>>18)); u[j++]=(char)(0x80|((c>>12)&63)); u[j++]=(char)(0x80|((c>>6)&63)); u[j++]=(char)(0x80|(c&63)); } }
+    if(j){ st_feed_log(fd,u,j); (void)!write(fd,u,j); }
+    if(wr)*wr=n; return 1; }
 // ReadConsoleW/A: the dedicated server's game-server host reads its console (stdin) to wait for a
 // shutdown command / EOF while its server threads run. The old generic stub returned 0 (FALSE) ->
 // Rust saw a read error -> the host shut down immediately (exit code 1). Read from the real stdin fd,
@@ -2926,6 +2940,7 @@ static int MSABI i_NtWriteFile(void*h,void*ev,void*apc,void*apcctx,void*iosb,con
     { extern double g_menu_ready_t0; if(!g_menu_ready_t0 && buf && len>20 && memmem(buf,len,"Menu loading screen finished",28)) g_menu_ready_t0=mono_s(); }
     if(buf && len>20 && memmem(buf,len,"Carnage report opened",21)) __atomic_add_fetch(&g_games_ended,1,__ATOMIC_SEQ_CST);
     int fd = (hv==2)?1 : (hv==3)?2 : (hv>=0x1000)?(int)(hv-0x1000) : -1;
+    if(fd==1||fd==2) st_feed_log(fd,(const char*)buf,len);   // Rust's std writes its stdio here
     if(fd>=0 && len>8 && len<4096 && getenv("PELOAD_TRACE_BT")){ const char*w=getenv("PELOAD_TRACE_BT");
         if(memmem(buf,len,w,strlen(w))){ (void)!write(2,"  [BT-Nt] matched; stack exe/halo3 returns:\n",44);
             uint64_t*sp=(uint64_t*)__builtin_frame_address(0); int pr=0;

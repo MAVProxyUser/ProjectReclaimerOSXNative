@@ -16,7 +16,7 @@ th,td{text-align:left;padding:4px 8px;border-bottom:1px solid var(--line);white-
 th{color:var(--dim);font-weight:500}
 tbody tr{cursor:pointer}tbody tr:hover{background:#222}tbody tr.sel{background:#1d2a38}
 .bar{display:inline-block;width:60px;height:8px;background:#333;vertical-align:middle;margin-right:6px}.bar i{display:block;height:100%}
-.dead{opacity:.45}.you td:first-child{font-weight:700}
+.dead{opacity:.45}.quit{opacity:.25}.you td:first-child{font-weight:700}
 .sw{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:6px;vertical-align:middle}
 canvas{width:100%;height:auto;display:block;background:#0b0b0b;border-radius:4px}
 .ctl{display:flex;flex-wrap:wrap;gap:6px 14px;margin:8px 0 0;color:var(--dim)}
@@ -56,6 +56,20 @@ canvas{width:100%;height:auto;display:block;background:#0b0b0b;border-radius:4px
 #ch{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px}#ch h2{margin:0 auto 0 0}
 .talkic{color:#4d4;margin-left:6px}
 .hostb{display:inline-block;background:#5a4a12;color:#ffd75a;border:1px solid #a8862a;border-radius:3px;font-size:10px;font-weight:700;padding:0 4px;margin-left:6px;vertical-align:1px}
+.feeds{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px;margin-bottom:16px}
+@media (max-width:1000px){.feeds{grid-template-columns:minmax(0,1fr)}}
+#feed .fh{display:flex;align-items:center;gap:6px 12px;flex-wrap:wrap;margin-bottom:8px}#feed .fh h2{margin:0 auto 0 0}
+#feed .fh label{color:var(--dim);font-size:12px;cursor:pointer}
+#fl,#cm{height:260px;overflow-y:auto;font-size:12px;line-height:1.5;resize:vertical}
+#fl .ev,#cm .ev{padding:1px 0;border-bottom:1px solid #1f1f1f;overflow-wrap:anywhere}
+#fl time,#cm time{color:#777;font-variant-numeric:tabular-nums;margin-right:8px}
+#cm .tm{color:#58b8ff;font-size:11px;margin-right:4px}
+#fl .w{display:inline-block;background:#2a2f36;border-radius:3px;padding:0 5px;margin:0 5px;font-size:11px;color:#cfd8e0}
+#fl .est{color:#777;margin-left:4px;cursor:help}
+#fl .k-join .tx{color:#7ddf6a}#fl .k-leave .tx{color:#c9a46a}#fl .k-server .tx,#fl .k-vote .tx,#fl .k-log .tx{color:#ffd75a}
+#fl .k-game .tx{color:var(--accent);font-weight:600}#fl .k-death .tx{color:#aaa}
+#fl.h-kills .k-kill,#fl.h-kills .k-death,#fl.h-players .k-join,#fl.h-players .k-leave,
+#fl.h-server .k-server,#fl.h-server .k-vote,#fl.h-server .k-log,#fl.h-game .k-game{display:none}
 </style></head>
 <body>
 <h1>Reclaimer live stats</h1><div id="hd">connecting...</div>
@@ -76,6 +90,16 @@ canvas{width:100%;height:auto;display:block;background:#0b0b0b;border-radius:4px
  <button class="mb" id="muteall">Mute all</button><button class="mb" id="unmuteall">Unmute all</button></div><div id="cl" class="note">-</div>
  <div class="note">Everyone in the game's network session, the lobby included. Mute only affects what you hear (the same
  list as the client's own scoreboard Mute buttons) and lasts until the game closes.</div></div>
+<div class="feeds">
+<div id="feed" class="panel"><div class="fh"><h2>Event feed</h2>
+ <label><input type="checkbox" data-f="kills" checked> kills</label><label><input type="checkbox" data-f="players" checked> joins and leaves</label>
+ <label><input type="checkbox" data-f="server" checked> server</label><label><input type="checkbox" data-f="game" checked> match</label></div>
+ <div id="fl" class="note">waiting for events...</div>
+ <div class="note">Newest first. Kills marked ≈ are estimates: the killer is the last player whose projectile ended inside the body (within 1.5 s), and the weapon is the one in their hands, the vehicle or turret they sit in, or the grenade. Melee, splash, splatter and fall deaths show as "died".</div></div>
+<div id="chat" class="panel"><div class="fh"><h2>Chat</h2></div>
+ <div id="cm" class="note">no chat yet</div>
+ <div class="note">Newest first: what players type in the game's text chat, team messages marked TEAM.</div></div>
+</div>
 <div id="rules" class="panel"><h2 id="rt">Game rules</h2><div id="rb" class="note">not in a match</div></div>
 <div class="grid">
  <div class="panel"><div class="wrap"><table><thead><tr>
@@ -104,11 +128,22 @@ const B=(v,c)=>`<span class="bar"><i style="width:${Math.max(0,Math.min(1,v))*10
 const fmtT=s=>{s=Math.round(s||0);return s>=60?Math.floor(s/60)+'m '+(s%60)+'s':s+'s'};
 let snap=null, heat=null, sel=null;   // sel = the selected player's slot
 // ---- table + details ----
+// A player without a body is "respawning"; "quit" once they are gone from the game's network session (they left), or,
+// without session data, dead for over 60 s in a game with unlimited lives. Living players first, then respawning, then quit.
+const deadSince=new Map();   // slot|name -> when this page first saw them without a body
+function pState(p){ const k=p.slot+'|'+p.name, now=performance.now()/1000;
+  if(p.alive){ deadSince.delete(k); return 'alive'; }
+  if(!deadSince.has(k)) deadSince.set(k,now);
+  const ss=snap.session||[]; if(ss.length) return ss.some(s=>s.name===p.name)?'respawning':'quit';
+  const lives=snap.variant&&snap.variant.respawn?snap.variant.respawn.lives:0;
+  return !lives && now-deadSince.get(k)>60?'quit':'respawning'; }
+const PRANK={alive:0,respawning:1,quit:2};
 function renderTable(){
-  const ps=snap.players.slice().sort((a,b)=>a.team-b.team||a.name.localeCompare(b.name));
-  document.getElementById('tb').innerHTML=ps.map(p=>`<tr data-s="${p.slot}" class="${p.alive?'':'dead'} ${p.you?'you':''} ${p.slot===sel?'sel':''}">
+  const st=new Map(snap.players.map(p=>[p,pState(p)]));
+  const ps=snap.players.slice().sort((a,b)=>PRANK[st.get(a)]-PRANK[st.get(b)]||a.team-b.team||a.name.localeCompare(b.name));
+  document.getElementById('tb').innerHTML=ps.map(p=>`<tr data-s="${p.slot}" class="${p.alive?'':st.get(p)==='quit'?'quit':'dead'} ${p.you?'you':''} ${p.slot===sel?'sel':''}">
    <td><span class="sw" style="background:${C[p.team_name]||'#888'}"></span>${E(p.name)}${p.you?' (you)':''}${p.host?'<span class="hostb" title="hosts this game">★ HOST</span>':''}${p.talking?'<span class="talkic" title="talking">🔊</span>':''}${p.muted?' 🔇':''}</td>
-   <td>${B(p.shield,'#58b8ff')}</td><td>${B(p.health,'#7ddf6a')}</td><td>${E(p.weapon||(p.alive?'':'respawning'))}</td>
+   <td>${B(p.shield,'#58b8ff')}</td><td>${B(p.health,'#7ddf6a')}</td><td>${E(p.weapon||(p.alive?'':st.get(p)))}</td>
    <td>${p.deaths??''}</td><td>${p.shots??''}</td><td>${p.shots?Math.round(p.accuracy*100)+'%':''}</td><td>${p.grenades.frag}f ${p.grenades.plasma}p ${p.grenades.spike}s ${p.grenades.firebomb}b</td>
    <td>${E(p.vehicle||'')}</td><td>${p.alive?p.pos.map(v=>v.toFixed(1)).join(', '):''}</td><td>${p.speed.toFixed(1)}</td><td>${traitBadges(p,3)}</td></tr>`).join('');
 }
@@ -216,7 +251,7 @@ function renderDet(){
   const el=document.getElementById('det'); if(sel==null||!snap){el.innerHTML='<h2>Player details</h2><div class="note">Click a player in the table.</div>';return}
   const p=snap.players.find(q=>q.slot===sel); if(!p){el.innerHTML=`<button class="x" onclick="closeDet()">×</button><div class="note">that player left the game</div>`;el.style.display='block';return}
   const myDeaths=heat?heat.deaths.filter(d=>d[7]===sel&&d[4]===p.name&&(scope()==='all'||d[5]===heat.match)).length:0;
-  const rows=[['Team',`<span class="sw" style="background:${C[p.team_name]||'#888'}"></span>${E(p.team_name)}`],['Status',p.alive?'alive':'dead / respawning'],
+  const rows=[['Team',`<span class="sw" style="background:${C[p.team_name]||'#888'}"></span>${E(p.team_name)}`],['Status',p.alive?'alive':pState(p)==='quit'?'quit (left the game)':'dead / respawning'],
    ['Shield',B(p.shield,'#58b8ff')],['Health',B(p.health,'#7ddf6a')],['Active camo',p.camo>0.01?Math.round(p.camo*100)+'%':'off'],
    ['Weapon',E(p.weapon||'')],['Carrying',E((p.weapons||[]).join(', '))],
    ['Grenades',`frag ${p.grenades.frag}, plasma ${p.grenades.plasma}, spike ${p.grenades.spike}, firebomb ${p.grenades.firebomb}`],
@@ -330,9 +365,49 @@ document.getElementById('ov').addEventListener('click',async e=>{ const b=e.targ
   try{ const r=await fetch('/control?do='+b.dataset.a+extra,{method:'POST',headers:{'X-Reclaimer-Control':'1'}}); const j=await r.json();
     msg.textContent=j.ok?(b.dataset.a==='capture'?'captured: ~/reclaimer_cap_*.bmp/.txt':''):(j.error||'failed'); }
   catch(err){ msg.textContent='not connected'; } });
+// ---- event feed: /feed.json?since=<seq> whenever the snapshot's feed_seq moves ----
+const MAPN={armory:"Rat's Nest",bunkerworld:'Standoff',chill:'Narrows',chillout:'Cold Storage',construct:'Construct',cyberdyne:'The Pit',
+ deadlock:'High Ground',descent:'Assembly',docks:'Longshore',fortress:'Citadel',ghosttown:'Ghost Town',guardian:'Guardian',isolation:'Isolation',
+ lockout:'Blackout',midship:'Heretic',riverworld:'Valhalla',salvation:'Epitaph',sandbox:'Sandbox',shrine:'Sandtrap',sidewinder:'Avalanche',
+ snowbound:'Snowbound',spacecamp:'Orbital',warehouse:'Foundry',zanzibar:'Last Resort'};
+let feedSeq=0, feedBusy=false, feedN=0, chatN=0; const fl=document.getElementById('fl'), cm=document.getElementById('cm');
+const two=n=>String(n).padStart(2,'0'), clock=t=>{const d=new Date(t*1000);return two(d.getHours())+':'+two(d.getMinutes())+':'+two(d.getSeconds())};
+function feedName(n,team){ const teams=snap&&snap.variant&&snap.variant.rounds&&snap.variant.rounds.teams, c=teams&&team>=0?C[TN[team]]:null;
+  return `<b${c?` style="color:${c}"`:''}>${E(n)}</b>`; }
+function feedRow(e){
+  let body;
+  if(e.kind==='kill') body=`${feedName(e.a,e.ta)} killed ${feedName(e.b,e.tb)}${e.how?` <span class="w">(${E(e.how)})</span>`:''}`;
+  else if(e.kind==='death') body=`${feedName(e.b,e.tb)} <span class="tx">died</span>`;
+  else if(e.kind==='game' && e.a) body=`<span class="tx">Match started: ${E(MAPN[e.a]||e.a)}</span>`;
+  else body=`<span class="tx">${E(e.text)}</span>`;
+  const est=e.estimated?' <span class="est" title="estimated: the last player whose projectile ended inside the body">≈</span>':'';
+  return `<div class="ev k-${E(e.kind)}"><time>${clock(e.t)}</time> ${body}${est}</div>`; }
+// chat: a = sender (team colour), how = the channel ("team", "nearby"; empty = everyone), text = the message
+function chatRow(e){ const ch=e.how?`<span class="tm">${E(e.how.toUpperCase())}</span>`:'';
+  return `<div class="ev"><time>${clock(e.t)}</time>${ch}${e.a?feedName(e.a,e.ta)+': ':''}${E(e.text)}</div>`; }
+async function pollFeed(){ if(feedBusy) return; feedBusy=true;
+  try{ const j=await (await fetch('/feed.json?since='+feedSeq)).json();
+    if(j.seq<feedSeq){ feedSeq=0; feedN=0; chatN=0; fl.textContent=''; cm.textContent=''; feedBusy=false; return pollFeed(); }   // the game restarted
+    // a burst of joins (the roster announces everyone already in the game when we join) becomes one row
+    const runs=[]; for(const e of j.events){ const r=runs[runs.length-1];
+      if(e.kind==='join' && r && r[0].kind==='join' && Math.abs(e.t-r[r.length-1].t)<0.25) r.push(e); else runs.push([e]); }
+    const evs=runs.flatMap(r=>r.length>=4?[{...r[r.length-1],a:'',text:`${r.length} players in the game: ${r.map(e=>e.a).join(', ')}`}]:r);
+    const chats=evs.filter(e=>e.kind==='chat'), other=evs.filter(e=>e.kind!=='chat');
+    if(chats.length){ if(!chatN) cm.textContent=''; cm.insertAdjacentHTML('afterbegin',chats.map(chatRow).reverse().join('')); chatN+=chats.length;
+      while(cm.childElementCount>600){ cm.lastElementChild.remove(); chatN--; } }
+    if(other.length){ if(!feedN) fl.textContent=''; fl.insertAdjacentHTML('afterbegin',other.map(feedRow).reverse().join('')); feedN+=other.length;
+      while(fl.childElementCount>600){ fl.lastElementChild.remove(); feedN--; } }
+    feedSeq=j.seq; }catch(err){}
+  feedBusy=false; }
+{ let hide=[]; try{ hide=JSON.parse(localStorage.getItem('feedHide')||'[]'); }catch(err){}
+  for(const cb of document.querySelectorAll('#feed input[data-f]')){ cb.checked=!hide.includes(cb.dataset.f); fl.classList.toggle('h-'+cb.dataset.f,!cb.checked);
+    cb.addEventListener('change',()=>{ fl.classList.toggle('h-'+cb.dataset.f,!cb.checked);
+      try{ localStorage.setItem('feedHide',JSON.stringify([...document.querySelectorAll('#feed input[data-f]')].filter(c=>!c.checked).map(c=>c.dataset.f))); }catch(err){} }); } }
+pollFeed();
 // ---- live snapshots ----
 const es=new EventSource('/events');
 es.onmessage=m=>{snap=JSON.parse(m.data);
+  if(snap.feed_seq!==undefined && snap.feed_seq!==feedSeq) pollFeed();
   document.getElementById('hd').textContent=`${snap.map||'-'}  |  ${snap.in_match?'match time '+fmtT(snap.time):'not in a match'}  |  ${snap.players.length} players, ${snap.vehicles.length} vehicles, ${snap.projectiles.length} projectiles in flight`;
   renderTable(); renderDet(); renderOverlay(); renderRules(); renderConn(); drawMap()};
 es.onerror=()=>{document.getElementById('hd').textContent='disconnected (is the game running with PELOAD_STATS_HTTP?)'};

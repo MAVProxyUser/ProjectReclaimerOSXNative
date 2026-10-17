@@ -22,6 +22,58 @@ static void sb_str(StBuf*s,const char*v){ sb_put(s,"\""); for(const unsigned cha
         if(*p=='"'||*p=='\\') sb_put(s,"\\%c",*p); else if(*p<0x20) sb_put(s,"\\u%04x",*p); else sb_put(s,"%c",*p); } sb_put(s,"\""); }
 static void sb_f3(StBuf*s,const float*v){ sb_put(s,"[%.2f,%.2f,%.2f]",v[0],v[1],v[2]); }
 
+// ---- event feed (GET /feed.json?since=<seq>; the snapshot carries "feed_seq"): what the game tells its players --
+// joins and leaves, kills, votes, server notices, match start and end. Sources: the client's own log lines
+// (st_feed_log, from WriteFile on its standard handles) and the death tracker (st_snapshot: a death, and the player
+// whose projectile ended inside that biped just before it as the estimated killer).
+// kind: join leave kill death vote server game. a/b: the players (killer, victim), how: the weapon. flags: 1 = estimated.
+typedef struct { uint32_t seq; int flags, ta, tb; double t; char kind[12], a[64], b[64], how[64], text[320]; } StEvt;
+static char g_st_curmap[64];   // the map the last snapshot saw
+enum { ST_NEV=1024 };
+static StEvt g_ev[ST_NEV]; static uint32_t g_ev_seq; static pthread_mutex_t g_ev_mx=PTHREAD_MUTEX_INITIALIZER;
+static void st_event(const char*kind,const char*a,const char*b,const char*how,int ta,int tb,int flags,const char*fmt,...){
+    StEvt e; memset(&e,0,sizeof e); struct timeval tv; gettimeofday(&tv,0); e.t=tv.tv_sec+tv.tv_usec*1e-6; e.flags=flags; e.ta=ta; e.tb=tb;
+    snprintf(e.kind,sizeof e.kind,"%s",kind); snprintf(e.a,sizeof e.a,"%s",a?a:""); snprintf(e.b,sizeof e.b,"%s",b?b:""); snprintf(e.how,sizeof e.how,"%s",how?how:"");
+    va_list ap; va_start(ap,fmt); vsnprintf(e.text,sizeof e.text,fmt,ap); va_end(ap);
+    pthread_mutex_lock(&g_ev_mx); e.seq=++g_ev_seq; g_ev[e.seq%ST_NEV]=e; pthread_mutex_unlock(&g_ev_mx);
+    static int lg=-1; if(lg<0) lg=getenv("PELOAD_FEED_LOG")?1:0;   // PELOAD_FEED_LOG=1: also print each event
+    if(lg){ char m[440]; int k=snprintf(m,sizeof m,"  [feed] %s: %s\n",e.kind,e.text); if(k>(int)sizeof m-1) k=(int)sizeof m-1; (void)!write(2,m,(size_t)k); } }
+static void st_feed_json(StBuf*s,uint32_t since){
+    pthread_mutex_lock(&g_ev_mx); uint32_t hi=g_ev_seq, lo=hi>=ST_NEV?hi-ST_NEV+1:1; if(since>=lo && since<=hi) lo=since+1;
+    sb_put(s,"{\"seq\":%u,\"events\":[",hi);
+    for(uint32_t q=lo;q<=hi;q++){ const StEvt*e=&g_ev[q%ST_NEV];
+        sb_put(s,"%s{\"seq\":%u,\"t\":%.3f,\"kind\":\"%s\",\"text\":",q>lo?",":"",e->seq,e->t,e->kind); sb_str(s,e->text);
+        if(e->a[0]){ sb_put(s,",\"a\":"); sb_str(s,e->a); } if(e->b[0]){ sb_put(s,",\"b\":"); sb_str(s,e->b); } if(e->how[0]){ sb_put(s,",\"how\":"); sb_str(s,e->how); }
+        if(e->ta>=0) sb_put(s,",\"ta\":%d",e->ta); if(e->tb>=0) sb_put(s,",\"tb\":%d",e->tb); if(e->flags&1) sb_put(s,",\"estimated\":true"); sb_put(s,"}"); }
+    sb_put(s,"]}"); pthread_mutex_unlock(&g_ev_mx); }
+// One line of the client's log ("HH:MM:SS.mmm <text>"): the notices it also shows its player.
+// PELOAD_FEED_MATCH=<text>[,<text>...] adds lines containing any of those texts (kind "log").
+static void st_feed_line(const char*ln){
+    if(!(ln[0]>='0'&&ln[0]<='9' && ln[2]==':' && ln[5]==':' && ln[8]=='.' && ln[12]==' ')) return;   // client log lines only
+    const char*p=ln+13; size_t L=strlen(p);
+    if(!strncmp(p,"Community roster: ",18)){ const char*r=p+18; size_t rl=strlen(r); char nm[64];
+        if(rl>18 && !strcmp(r+rl-18," joined the server")){ snprintf(nm,sizeof nm,"%.*s",(int)(rl-18),r); st_event("join",nm,0,0,-1,-1,0,"%s joined the server",nm); }
+        else if(rl>16 && !strcmp(r+rl-16," left the server")){ snprintf(nm,sizeof nm,"%.*s",(int)(rl-16),r); st_event("leave",nm,0,0,-1,-1,0,"%s left the server",nm); }
+        else st_event("server",0,0,0,-1,-1,0,"%s",r);
+        return; }
+    if(strstr(p," called a vote to ") || !strncmp(p,"Vote ",5)){ st_event("vote",0,0,0,-1,-1,0,"%s",p); return; }
+    static const char*const srv[]={"Team shuffle:","Teams have been shuffled","Teams shuffled","You were kicked","Host roster lost","A player still joining",
+        "Moderation:","The kick-vote target"};
+    for(size_t i=0;i<sizeof srv/sizeof*srv;i++) if(!strncmp(p,srv[i],strlen(srv[i]))){ st_event("server",0,0,0,-1,-1,0,"%s",p); return; }
+    if(!strncmp(p,"Carnage report opened",21)){ st_event("game",0,0,0,-1,-1,0,"Game over"); return; }
+    if(!strncmp(p,"Loading screen complete",23)){ char mp[64]; snprintf(mp,sizeof mp,"%s",g_st_curmap); st_event("game",mp,0,0,-1,-1,0,"Match started: %s",mp); return; }
+    static char mt[512]; static int mi=-1; if(mi<0){ const char*e=getenv("PELOAD_FEED_MATCH"); snprintf(mt,sizeof mt,"%s",e?e:""); mi=1; }
+    if(mt[0] && L){ char w[512]; snprintf(w,sizeof w,"%s",mt); char*sv=0; for(char*tk=strtok_r(w,",",&sv); tk; tk=strtok_r(0,",",&sv)) if(*tk && strstr(p,tk)){ st_event("log",0,0,0,-1,-1,0,"%s",p); return; } } }
+static void st_feed_log(int fd,const char*buf,size_t n){
+    if(!stats_on() || (fd!=1 && fd!=2) || !buf) return;
+    static char lb[2][1024]; static size_t ll[2]; static int skip[2]; static pthread_mutex_t mx=PTHREAD_MUTEX_INITIALIZER; int w=fd==2;
+    pthread_mutex_lock(&mx);
+    for(size_t i=0;i<n;i++){ char c=buf[i];
+        if(c=='\n'){ if(!skip[w] && ll[w]>13){ lb[w][ll[w]]=0; st_feed_line(lb[w]); } ll[w]=0; skip[w]=0; }
+        else if(c=='\r') continue;
+        else if(ll[w]<sizeof lb[w]-1) lb[w][ll[w]++]=c; else skip[w]=1; }   // longer lines (the shell's JSON) are skipped
+    pthread_mutex_unlock(&mx); }
+
 // The engine's players table (TLS block +0x10, a data array like the object table): +0x28 unit handle, +0x58 name.
 typedef struct { uint32_t unit; int slot; char name[64]; uint64_t rec; } StPlayer;
 static uint64_t g_st_tls;   // the engine thread's halo3 TLS block (st_players found it)
@@ -291,7 +343,6 @@ static const StSpot g_st_spots[]={
                                                                                      //   terrain, walkable only with the slip patch (boundaries off)
     {"riverworld","valhalla_north","Valhalla: north ridge",44.0f,-24.0f,10.0f},    // past the north end (y > -31.9); ground 9.4, no soft ceiling
 };
-static char g_st_curmap[64];   // the map the last snapshot saw
 int hb_bounds_off(void); int hb_spar_available(void);
 static int st_control(const char*act,const char*qs){
     char m[96]; int k=0;
@@ -342,10 +393,39 @@ static int st_control(const char*act,const char*qs){
     if(!strcmp(act,"submit")){ const char*v=strstr(qs,"on="); if(!v) return 0; g_sub_want=atoi(v+3)?1:0; return 1; }   // GL submission thread (d3dsubmit.c)
     if(!strcmp(act,"capture")){ __atomic_store_n(&g_hb_cap_req,1,__ATOMIC_RELEASE); (void)!write(2,"  [capture] page: capturing the next frame\n",43); return 1; }
     return 0; }
+// Estimated hits (hitbox.c's object_delete hook: a projectile that ended inside a biped), the newest per biped, so a
+// death can name the player whose shot ended in that body just before it -- an estimate: grenades, melee, splatters
+// and environmental deaths have no projectile inside the body (then the feed says "died").
+typedef struct { uint32_t victim, owner, def; double t; } StHit;
+static StHit g_lasthit[256];
+// tag names (hb_tag_name: "GAUSS BULLET") in sentence case: "Gauss bullet"
+static void st_sentence(char*o,size_t on,const char*tag){ size_t j=0; if(!tag || !strcmp(tag,"?")){ o[0]=0; return; }
+    for(const char*c=tag; *c && j+1<on; c++){ char ch=*c=='_'?' ':*c; o[j]=(char)(j==0?toupper((unsigned char)ch):tolower((unsigned char)ch)); j++; } o[j]=0; }
+static void st_death_event(const char*victim,int vteam,uint32_t h,int np,const StPlayer*pl,const uint8_t*tab,int hi,double now){
+    #define ST_OBJ(hh) ((int)((hh)&0xFFFF)<hi && (hh)!=0xFFFFFFFFu && *(const uint16_t*)(tab+((hh)&0xFFFF)*0x18)==(uint16_t)((hh)>>16) ? *(const uint64_t*)(tab+((hh)&0xFFFF)*0x18+0x10) : 0)
+    const StHit*lh=&g_lasthit[(h*2654435761u)>>24]; const char*killer=0; int kteam=-1; char how[96]="";
+    if(lh->victim==h && now-lh->t<1.5) for(int k=0;k<np;k++) if(pl[k].unit==lh->owner){ killer=pl[k].name;
+        // what fired it: a grenade is named by its projectile; a killer seated in a vehicle or turret by that object;
+        // otherwise the weapon in the killer's hands (the projectile's name when none of these is known)
+        char proj[48]; st_sentence(proj,sizeof proj,hb_tag_name(lh->def)); uint8_t d[0x278]; uint64_t up=ST_OBJ(lh->owner);
+        int have=up && hb_read(up,d,sizeof d); if(have) kteam=*(const int32_t*)(d+0x174);
+        uint32_t parent=have?*(const uint32_t*)(d+0x10):0xFFFFFFFFu; uint64_t vp=ST_OBJ(parent); uint32_t vdef=0;
+        if(strcasestr(proj,"grenade")) snprintf(how,sizeof how,"%s",proj);
+        else if(vp && tab[(parent&0xFFFF)*0x18+3]==1 && hb_read(vp,&vdef,4)){ char vn[48]; st_sentence(vn,sizeof vn,hb_tag_name(vdef));
+            snprintf(how,sizeof how,"%s",vn); }   // the seat's object: "Gauss", "Chaingun" (a Warthog's turrets), "Chopper"
+        else if(have){ int ws=*(const int8_t*)(d+0x262); uint32_t wh=(ws>=0&&ws<4)?*(const uint32_t*)(d+0x268+ws*4):0xFFFFFFFFu; uint64_t wp=ST_OBJ(wh); uint32_t def=0;
+            if(wp && hb_read(wp,&def,4)) st_sentence(how,sizeof how,hb_tag_name(def)); }
+        if(!how[0]) snprintf(how,sizeof how,"%s",proj);
+        break; }
+    #undef ST_OBJ
+    // a kill is an estimate (flag 1); a death without a recent hit is certain, its cause unknown
+    if(killer) st_event("kill",killer,victim,how,kteam,vteam,1,"%s killed %s%s%s%s",killer,victim,how[0]?" (":"",how,how[0]?")":"");
+    else st_event("death",0,victim,0,-1,vteam,0,"%s died",victim); }
 static void st_snapshot(StBuf*s){
     static const char* teams[8]={"red","blue","green","orange","purple","gold","brown","pink"};
     extern double g_gameplay_t0; double now=mono_s();
     sb_put(s,"{\"time\":%.2f,\"in_match\":%s",g_gameplay_t0?now-g_gameplay_t0:0.0,g_gameplay_t0?"true":"false");
+    { pthread_mutex_lock(&g_ev_mx); uint32_t fs=g_ev_seq; pthread_mutex_unlock(&g_ev_mx); sb_put(s,",\"feed_seq\":%u",fs); }
     char m[64]="";
     { char mp[1024]=""; pthread_mutex_lock(&g_hb_mapmx);   // newest map the game opened from halo3/maps (not a cache file)
       for(int k=0;k<g_hb_nmappaths;k++) if(strstr(g_hb_mappaths[k],"/halo3/maps/")){ snprintf(mp,sizeof mp,"%s",g_hb_mappaths[k]); break; }
@@ -359,7 +439,7 @@ static void st_snapshot(StBuf*s){
       sb_put(s,",\"spots\":["); int ns=0; for(int i=0;i<(int)(sizeof g_st_spots/sizeof g_st_spots[0]);i++) if(!strcmp(g_st_spots[i].map,m)){
           sb_put(s,"%s{\"id\":\"%s\",\"label\":\"%s\",\"x\":%.1f,\"y\":%.1f,\"z\":%.1f}",ns++?",":"",g_st_spots[i].id,g_st_spots[i].label,g_st_spots[i].x,g_st_spots[i].y,g_st_spots[i].z); }
       sb_put(s,"]}"); snprintf(g_st_curmap,sizeof g_st_curmap,"%s",m); }
-    if(strcmp(m,g_trk_map)){ snprintf(g_trk_map,sizeof g_trk_map,"%s",m); g_ntrk=0; g_nbip=0; memset(g_proj,0,sizeof g_proj); g_hb_local_slot=-1; }   // new map: new match stats
+    if(strcmp(m,g_trk_map)){ memset(g_lasthit,0,sizeof g_lasthit); snprintf(g_trk_map,sizeof g_trk_map,"%s",m); g_ntrk=0; g_nbip=0; memset(g_proj,0,sizeof g_proj); g_hb_local_slot=-1; }   // new map: new match stats
     pthread_mutex_lock(&g_hm_mx); snprintf(g_hm_cur,sizeof g_hm_cur,"%s",m); if(g_hm.dirty && now-g_hm.saved>30){ hm_save(); g_hm.saved=now; } pthread_mutex_unlock(&g_hm_mx);
     static uint8_t tab[8192*0x18]; int hi=0; uint64_t arr=hb_object_array(); uint8_t hdr[0x60];
     if(arr && hb_read(arr,hdr,sizeof hdr) && *(uint32_t*)(hdr+0x2c)==0x64407440 && *(int32_t*)(hdr+0x24)==0x18){
@@ -388,6 +468,17 @@ static void st_snapshot(StBuf*s){
             float a=v[0]*fwd[0]+v[1]*fwd[1]+v[2]*fwd[2], perp2=d2-a*a; if(a>0.3f && a<6.0f && perp2<(r+0.4f)*(r+0.4f) && a<bd){ bd=a; best=h; } }
         (void)inside; if(best!=0xFFFFFFFFu) for(int k=0;k<np;k++) if(pl[k].unit==best){ g_hb_local_slot=pl[k].slot; break; } }
     g_hb_local_unit=0xFFFFFFFFu; for(int k=0;k<np;k++) if(pl[k].slot==g_hb_local_slot){ g_hb_local_unit=pl[k].unit; break; }
+    // shots: every projectile that ended since the last snapshot (hitbox.c's object_delete hook), with the biped it
+    // hit if any; without the hook, count the projectiles seen in flight (misses most bullets)
+    if(g_hb_delhook){ static unsigned seen; unsigned n=__atomic_load_n(&g_hbshot_n,__ATOMIC_ACQUIRE); if(n-seen>8192) seen=n-8192;
+        for(;seen!=n;seen++){ const HbShot*r=&g_hbshot[seen&8191];
+            if(r->victim!=0xFFFFFFFFu){ StHit*lh=&g_lasthit[(r->victim*2654435761u)>>24]; lh->victim=r->victim; lh->owner=r->owner; lh->def=r->def; lh->t=now; }
+            for(int k=0;k<np;k++) if(pl[k].unit==r->owner){ StTrack*t=st_track(&pl[k]); if(t){ t->shots++; if(r->victim!=0xFFFFFFFFu) t->hits++; } break; } } }
+    else for(int i=0;i<hi;i++){ const uint8_t*e=tab+i*0x18; if(!*(const uint16_t*)e || e[3]!=5) continue; uint64_t p=*(const uint64_t*)(e+0x10); uint32_t own=0;
+        uint32_t h=((uint32_t)*(const uint16_t*)e<<16)|(uint32_t)i; uint32_t slot=(h*2654435761u)>>19, j=slot; int known=0;
+        for(int q=0;q<16;q++,j=(j+1)&8191){ if(g_proj[j].h==h && now-g_proj[j].t<60){ known=1; break; } if(!g_proj[j].h || now-g_proj[j].t>=60) break; }
+        if(known) continue; g_proj[j].h=h; g_proj[j].t=now;
+        if(p && hb_read(p+0xC0,&own,4)) for(int k=0;k<np;k++) if(pl[k].unit==own){ StTrack*t=st_track(&pl[k]); if(t) t->shots++; break; } }
     // deaths: every biped, alive -> dead (the body stays a while, so 10 Hz catches it); the player it belonged to.
     // Positions are the world-space bounding centre (+0x1c): the origin (+0x50) is vehicle-relative when seated.
     { StBip nb[2048]; int nn=0;
@@ -398,19 +489,10 @@ static void st_snapshot(StBuf*s){
           if(prev>=0){ if(ti<0) ti=g_bip[prev].ti;
               if(g_bip[prev].alive && !alive){ StTrack*t=ti>=0?&g_trk[ti]:0; int team=*(const int32_t*)(d+0x174);
                   if(t){ t->deaths++; t->alive=0; if(now-t->life_start>t->longest) t->longest=now-t->life_start; }
+                  if(t) st_death_event(t->name,team,h,np,pl,tab,hi,now);
                   if(t || getenv("PELOAD_STATS_ALL_BIPEDS")){ pthread_mutex_lock(&g_hm_mx); hm_death((const float*)(d+0x1c),team,t?t->slot:-1,t?t->name:""); pthread_mutex_unlock(&g_hm_mx); } } }
           nb[nn].h=h; nb[nn].alive=alive; nb[nn].ti=ti; nn++; }
       memcpy(g_bip,nb,(size_t)nn*sizeof *nb); g_nbip=nn; }
-    // shots: every projectile that ended since the last snapshot (hitbox.c's object_delete hook), with the biped it
-    // hit if any; without the hook, count the projectiles seen in flight (misses most bullets)
-    if(g_hb_delhook){ static unsigned seen; unsigned n=__atomic_load_n(&g_hbshot_n,__ATOMIC_ACQUIRE); if(n-seen>8192) seen=n-8192;
-        for(;seen!=n;seen++){ const HbShot*r=&g_hbshot[seen&8191];
-            for(int k=0;k<np;k++) if(pl[k].unit==r->owner){ StTrack*t=st_track(&pl[k]); if(t){ t->shots++; if(r->victim!=0xFFFFFFFFu) t->hits++; } break; } } }
-    else for(int i=0;i<hi;i++){ const uint8_t*e=tab+i*0x18; if(!*(const uint16_t*)e || e[3]!=5) continue; uint64_t p=*(const uint64_t*)(e+0x10); uint32_t own=0;
-        uint32_t h=((uint32_t)*(const uint16_t*)e<<16)|(uint32_t)i; uint32_t slot=(h*2654435761u)>>19, j=slot; int known=0;
-        for(int q=0;q<16;q++,j=(j+1)&8191){ if(g_proj[j].h==h && now-g_proj[j].t<60){ known=1; break; } if(!g_proj[j].h || now-g_proj[j].t>=60) break; }
-        if(known) continue; g_proj[j].h=h; g_proj[j].t=now;
-        if(p && hb_read(p+0xC0,&own,4)) for(int k=0;k<np;k++) if(pl[k].unit==own){ StTrack*t=st_track(&pl[k]); if(t) t->shots++; break; } }
     // players: the engine's player table (a player between lives has no live biped)
     st_variant(s);   // the game's options and trait sets (st_players found the TLS block)
     static StSess ss[128]; uint32_t sst=0; int nss=st_session(ss,128,&sst);
@@ -514,6 +596,10 @@ static void* st_conn(void*a){ int fd=(int)(intptr_t)a; pthread_setname_np("shim-
         if(st_send(fd,h,(size_t)k)) for(unsigned long seen=0;;){ pthread_mutex_lock(&g_st_mx); while(g_st_seq==seen) pthread_cond_wait(&g_st_cv,&g_st_mx);
                 seen=g_st_seq; size_t len=g_st_len; char*j=malloc(len+16); if(j){ memcpy(j,"data: ",6); memcpy(j+6,g_st_json,len); memcpy(j+6+len,"\n\n",2); } pthread_mutex_unlock(&g_st_mx);
                 int ok=j && st_send(fd,j,len+8); free(j); if(!ok) break; } }
+    else if(!strcmp(path,"/feed.json")){   // events after ?since=<seq> (the last 1024 at most)
+        const char*v=strstr(qs,"since="); uint32_t since=v?(uint32_t)strtoul(v+6,0,10):0; StBuf b={0}; st_feed_json(&b,since);
+        int k=snprintf(h,sizeof h,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %zu\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n",b.n);
+        if(st_send(fd,h,(size_t)k) && b.n) st_send(fd,b.b,b.n); free(b.b); }
     else if(!strcmp(path,"/heat.json")){
         StBuf b={0}; hm_json(&b);
         int k=snprintf(h,sizeof h,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %zu\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n",b.n);
