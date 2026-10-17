@@ -375,6 +375,7 @@ def top_z_at(tris, pts, ppu=4.0):
 PLAY_RADIUS = 6.0      # world units around play points whose heights set the shading range
 ROOF_CLEARANCE = 1.5   # a surface this far above a spawn point / item = it is under a roof (Spartan ~0.7 units tall)
 CUT_HEADROOM = 2.5     # auto z cut = highest spawn point / item + this
+SAFE_SLACK = 5.0       # placements this far outside the safe zones' box are unreachable leftovers
 
 
 def auto_zcut(tris, pts, log):
@@ -458,6 +459,15 @@ def main():
     except Exception as e:      # the picture still works without it
         log('safe zones not read: %s' % e)
     if safe_box is not None:
+        # placements far outside every safe zone can't be reached (The Pit's stock Warthog sits behind the north wall
+        # at y=32): leave them out of the crop and the shading range
+        far = ((pts[:, 0] < safe_box[0][0] - SAFE_SLACK) | (pts[:, 0] > safe_box[1][0] + SAFE_SLACK) |
+               (pts[:, 1] < safe_box[0][1] - SAFE_SLACK) | (pts[:, 1] > safe_box[1][1] + SAFE_SLACK))
+        if far.any() and (~far).sum() >= 2:
+            log('%d placement(s) more than %.0f units outside the safe zones left out: %s' % (int(far.sum()), SAFE_SLACK,
+                ', '.join('(%.1f, %.1f)' % (x, y) for x, y in pts[far][:, :2])))
+            pts = pts[~far]
+            core = (pts[:, :2].min(0), pts[:, :2].max(0))
         core = (np.maximum(np.minimum(core[0], safe_box[0]), glo), np.minimum(np.maximum(core[1], safe_box[1]), ghi))
     if opts.bounds:
         x0, y0, x1, y1 = (float(v) for v in opts.bounds.split(','))
