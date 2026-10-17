@@ -209,6 +209,21 @@ Forge 2.0 (2933266434) ships its own halo3/maps/shared.map + campaign.map beside
 Rock-wall seams (tabled by the user, display-only): `PELOAD_D3DGL_DFCENSUS` (draws per depth func), `PELOAD_D3DGL_INVARIANT`
 (invariant gl_Position, opt-in); the main depth buffer is DXGI 19 (D32F_S8, reverse-Z) and keeps full float precision.
 play.sh's stdin feeder is `sleep 86400.<pid>` (killed when the game exits; it used to hold a caller's `| tail` for 24 h).
+Native GL helper (2026-10-17, PELOAD_GL_HELPER=1, opt-in; shim/src/glh_client.c + glhelper.c + glh_shm.h, generated glh_gen.inc /
+glh_dec.inc from shim/tools/glh_gen.py, which build.sh reruns): peload.c redefines dlsym (after the D3DGL globals) so every GL name
+resolves to a router that encodes the call into a shared-memory ring while the render context (g_d3dgl_cgl, a dummy in helper mode) is
+current, else calls the real function. The helper (native arm64, its own GL context) replays them. Names come from pools it keeps filled;
+Get*/link-time calls are synchronous round trips; GetError -> 0 and CheckFramebufferStatus -> complete without a round trip
+(PELOAD_GLH_SYNCERR/_SYNCFBO); occlusion queries come back through a result table; pq_publish -> GLH_X_PQ_BLIT into 3 global IOSurfaces,
+the present thread samples them as rectangle textures. Every pointer argument needs a size rule in glh_gen.py (it refuses to generate
+otherwise: an unencoded pointer crashed the helper). Debug: PELOAD_GLH_TRACE=<n> (first n commands), PELOAD_GLH_STATS=1, crash reports
+in /Library/Logs/DiagnosticReports/glhelper-*. hb_vis (F9) is off in helper mode. The helper's write end of the wake pipe sits at fd >= 4000
+(the game's CloseHandle once closed a low one).
+D3D object lifetime (2026-10-17, backlog 27): refcounted D3DObjs, freed via d3dobj_stage/d3dobj_reap (see the BACKLOG entry); PELOAD_D3D_NOFREE=1 = old.
+Map pictures (2026-10-17): hb_note_map only keeps real cache maps ("daeh" v13; the engine's autosaves are also .map files); the stats
+server makes a missing maptop picture in the background the first time a map is played (st_maptop_ensure: arch -arm64 python3
+re-tools/h3bsp.py; PELOAD_MAPTOP_TOOL, PELOAD_NO_MAPTOP); maptop.sh also covers Workshop maps; h3bsp.py reads editing-kit (H3EK) maps,
+whose play tag is empty: the layout tables are in the zone tag (+0x1C ext, +0x34 pages, +0x58 segments) and page offsets are file offsets.
 Unfocused/hidden clients are held at 60 fps by the engine; PELOAD_MAX_FPS caps lower (default 30 when hidden).
 Betrayal popup (backlog 15): halo3's native GUI screen c_gui_screen_boot_betrayer, posted by halo3+0xff5fc when
 halo3+0xfcc20 is true (player dead: +0x28 unit NONE; betrayer handle at player +0x1F0; variant betrayal booting on).

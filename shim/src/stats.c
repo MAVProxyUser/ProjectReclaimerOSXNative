@@ -350,8 +350,44 @@ static void hm_death(const float*pos,int team,int slot,const char*name){   // (g
     if(g_hm.nd>=g_hm.dcap){ uint32_t nc=g_hm.dcap?g_hm.dcap*2:256; HmDeath*nd=realloc(g_hm.d,nc*sizeof *nd); if(!nd) return; g_hm.d=nd; g_hm.dcap=nc; }
     HmDeath*d=&g_hm.d[g_hm.nd++]; memset(d,0,sizeof *d); d->x=pos[0]; d->y=pos[1]; d->z=pos[2]; d->team=team; d->slot=slot; snprintf(d->name,sizeof d->name,"%s",name?name:"");
     d->match=g_hm.match; d->t=(float)(mono_s()-g_hm.match_t0); g_hm.dirty=1; }
+// ---- the top-down map picture behind the heatmap: made automatically for every map played (stock or Workshop) --------
+// The first time a map without a picture is played, re-tools/h3bsp.py runs in the background (native python3 with numpy
+// and Pillow) on the very .map file the game opened and writes ~/Library/Application Support/ReclaimerMac/maptop/<map>.png
+// + .json (+ .z.bin); the page keeps asking until it is there. PELOAD_MAPTOP_TOOL = the h3bsp.py to run (default: the
+// re-tools/ next to shim/build/, as in a checkout and in the release bundle); PELOAD_NO_MAPTOP=1 off. Log: <map>.log.
+static volatile int g_mt_state;   // 0 none/unknown, 1 ready, 2 making, 3 failed, 4 no tool
+static char g_mt_name[96], g_mt_png[1100], g_mt_js[1100];
+static void* st_maptop_wait(void*a){ pid_t pid=(pid_t)(intptr_t)a; int st=0; while(waitpid(pid,&st,0)<0 && errno==EINTR){}
+    g_mt_state=(!access(g_mt_png,R_OK) && !access(g_mt_js,R_OK))?1:3;   // judged by the files (another waiter may reap the child)
+    char m[200]; int k=snprintf(m,sizeof m,"  [stats] map picture for %s: %s\n",g_mt_name,g_mt_state==1?"made":"FAILED (see its .log in maptop/)"); (void)!write(2,m,k); return 0; }
+static void st_maptop_ensure(const char*mp,const char*name){
+    static char last[96]; if(!name[0] || !mp[0] || !strcmp(last,name)) return; snprintf(last,sizeof last,"%s",name);
+    snprintf(g_mt_name,sizeof g_mt_name,"%s",name);
+    if(name[0]>='0'&&name[0]<='9') { g_mt_state=0; return; }                       // campaign levels, the menu: no picture
+    if(!strcmp(name,"mainmenu")||!strcmp(name,"shared")||!strcmp(name,"campaign")){ g_mt_state=0; return; }
+    const char*home=getenv("HOME"); char dir[1024], png[1100], js[1100], lg[1100];
+    snprintf(dir,sizeof dir,"%s/Library/Application Support/ReclaimerMac/maptop",home?home:"/tmp");
+    snprintf(png,sizeof png,"%s/%s.png",dir,name); snprintf(js,sizeof js,"%s/%s.json",dir,name); snprintf(lg,sizeof lg,"%s/%s.log",dir,name);
+    snprintf(g_mt_png,sizeof g_mt_png,"%s",png); snprintf(g_mt_js,sizeof g_mt_js,"%s",js);
+    if(!access(png,R_OK) && !access(js,R_OK)){ g_mt_state=1; return; }
+    if(getenv("PELOAD_NO_MAPTOP")){ g_mt_state=4; return; }
+    char tool[1100]; const char*e=getenv("PELOAD_MAPTOP_TOOL");
+    if(e&&*e) snprintf(tool,sizeof tool,"%s",e);
+    else { char exe[1024]; uint32_t es=sizeof exe; tool[0]=0; if(!_NSGetExecutablePath(exe,&es)){ char*sl=strrchr(exe,'/'); if(sl){ *sl=0; snprintf(tool,sizeof tool,"%s/../../re-tools/h3bsp.py",exe); } } }
+    if(!tool[0] || access(tool,R_OK)){ g_mt_state=4; char m[1200]; int k=snprintf(m,sizeof m,"  [stats] no map picture for %s: %s not found\n",name,tool[0]?tool:"h3bsp.py"); (void)!write(2,m,k); return; }
+    mkdir(dir,0755);
+    // native python3 (the loader runs under Rosetta: a plain spawn would pick python's x86_64 slice, without numpy)
+    char*argv[]={(char*)"/usr/bin/arch",(char*)"-arm64",(char*)"python3",tool,(char*)mp,png,(char*)"--size",(char*)"1024",0}; extern char**environ;
+    posix_spawn_file_actions_t fa; posix_spawn_file_actions_init(&fa); posix_spawn_file_actions_addopen(&fa,0,"/dev/null",O_RDONLY,0);
+    posix_spawn_file_actions_addopen(&fa,1,lg,O_WRONLY|O_CREAT|O_TRUNC,0644); posix_spawn_file_actions_adddup2(&fa,1,2);
+    posix_spawnattr_t at; posix_spawnattr_init(&at); posix_spawnattr_setflags(&at,POSIX_SPAWN_SETPGROUP); posix_spawnattr_setpgroup(&at,0);
+    pid_t pid=0; int r=posix_spawn(&pid,"/usr/bin/arch",&fa,&at,argv,environ); posix_spawn_file_actions_destroy(&fa); posix_spawnattr_destroy(&at);
+    if(r){ g_mt_state=3; return; }
+    g_mt_state=2; { char m[1200]; int k=snprintf(m,sizeof m,"  [stats] making the map picture for %s (%s)\n",name,mp); (void)!write(2,m,k); }
+    pthread_t th; pthread_create(&th,0,st_maptop_wait,(void*)(intptr_t)pid); pthread_detach(th); }
 static void hm_json(StBuf*s){ pthread_mutex_lock(&g_hm_mx);
-    sb_put(s,"{\"map\":"); sb_str(s,g_hm.map); sb_put(s,",\"cell\":%.2f,\"match\":%u,\"cells\":[",HM_CELL,g_hm.match);
+    { static const char*const mts[5]={"none","ready","making","failed","no tool"}; int st=g_mt_state; sb_put(s,"{\"maptop\":\"%s\",",strcmp(g_mt_name,g_hm.map)?"none":mts[st<0||st>4?0:st]); }
+    sb_put(s,"\"map\":"); sb_str(s,g_hm.map); sb_put(s,",\"cell\":%.2f,\"match\":%u,\"cells\":[",HM_CELL,g_hm.match);
     int first=1; for(uint32_t i=0;i<g_hm.cap;i++) if(g_hm.cells[i].n){ sb_put(s,"%s%d,%d,%u",first?"":",",g_hm.cells[i].x,g_hm.cells[i].y,g_hm.cells[i].n); first=0; }
     sb_put(s,"],\"deaths\":["); for(uint32_t i=0;i<g_hm.nd;i++){ HmDeath*d=&g_hm.d[i]; sb_put(s,"%s[%.2f,%.2f,%.2f,%d,",i?",":"",d->x,d->y,d->z,d->team); sb_str(s,d->name); sb_put(s,",%u,%.0f,%d]",d->match,d->t,d->slot); }
     sb_put(s,"]}"); pthread_mutex_unlock(&g_hm_mx); }
@@ -611,7 +647,8 @@ static void st_snapshot(StBuf*s){
     { pthread_mutex_lock(&g_ev_mx); uint32_t fs=g_ev_seq; pthread_mutex_unlock(&g_ev_mx); sb_put(s,",\"feed_seq\":%u",fs); }
     char m[64]="";
     { char mp[1024]=""; hb_current_map(mp,sizeof mp);   // the map being played (halo3/maps or a Workshop mod's folder)
-      const char*b=strrchr(mp,'/'); b=b?b+1:mp; snprintf(m,sizeof m,"%s",b); char*dot=strrchr(m,'.'); if(dot)*dot=0; sb_put(s,",\"map\":"); sb_str(s,m); }
+      const char*b=strrchr(mp,'/'); b=b?b+1:mp; snprintf(m,sizeof m,"%s",b); char*dot=strrchr(m,'.'); if(dot)*dot=0; sb_put(s,",\"map\":"); sb_str(s,m);
+      st_maptop_ensure(mp,m); }
     { static int tp=-1; if(tp<0) tp=getenv("PELOAD_ALLOW_TELEPORT")?1:0; static const char*const tm[3]={"all","enemies","friends"};
       sb_put(s,",\"overlay\":{\"zones\":%s,\"hitboxes\":%s,\"tracers\":%s,\"info\":%s,\"items\":%s,\"visible\":%s,\"teams\":\"%s\",\"teleport\":%s,\"host\":%s,\"tp_forward\":%s,\"controls\":%s,\"text_px\":%d,\"spar\":%s,\"spar_aim\":%.1f,\"spar_available\":%s,\"bounds_off\":%s,\"mic\":\"%s\",\"mic_in_use\":%s",
           hb_feat(HBF_ZONES)?"true":"false",hb_feat(HBF_HITBOX)?"true":"false",hb_feat(HBF_TRACER)?"true":"false",hb_feat(HBF_INFO)?"true":"false",hb_feat(HBF_ITEMS)?"true":"false",hb_feat(HBF_VISIBLE)?"true":"false",

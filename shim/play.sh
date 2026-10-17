@@ -68,7 +68,9 @@ else
 fi
 [ "${PELOAD_STATS_HTTP:-8765}" != 0 ] && echo "live stats: http://127.0.0.1:${PELOAD_STATS_HTTP:-8765}/"
 # top-down map pictures for the stats page's heatmap (made once from the .map files; needs python3 + numpy + Pillow)
-[ "${PELOAD_STATS_HTTP:-8765}" != 0 ] && [ -f shim/tools/maptop.sh ] && [ ! -f "$HOME/Library/Application Support/ReclaimerMac/maptop/riverworld.png" ] && \
+# (every launch: it only makes the ones still missing, e.g. newly downloaded Workshop maps; the stats page also makes the
+# picture of any map played that has none)
+[ "${PELOAD_STATS_HTTP:-8765}" != 0 ] && [ -f shim/tools/maptop.sh ] && \
   (bash shim/tools/maptop.sh > /tmp/reclaimer_maptop.log 2>&1 &)
 # in a source checkout the stats page is served from shim/src (edits show on a browser refresh)
 [ -f shim/src/stats_page.html ] && [ -z "${PELOAD_STATS_PAGE:-}" ] && export PELOAD_STATS_PAGE="$PWD/shim/src/stats_page.html"

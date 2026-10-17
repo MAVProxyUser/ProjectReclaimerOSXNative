@@ -283,10 +283,12 @@ let mapTop=null, mapTopName=null, zGrid=null;
 function groundZ(x,y){ if(!zGrid) return null; const g=zGrid.g, c=Math.floor(x-g.x0), r=Math.floor(g.y1-y); if(c<0||r<0||c>=g.w||r>=g.h) return null;
   let best=null; for(let dr=-1;dr<=1;dr++) for(let dc=-1;dc<=1;dc++){ const rr=r+dr, cc=c+dc; if(rr<0||cc<0||rr>=g.h||cc>=g.w) continue; const v=zGrid.z[rr*g.w+cc]; if(v!==-32768 && (best===null||v>best)) best=v; }
   return best===null?null:best/10; }
-async function loadMapTop(name){ if(name===mapTopName) return; mapTopName=name; mapTop=null;
-  if(!name) return; try{ const j=await (await fetch('/maptop/'+name+'.json')).json(); const im=new Image();
+async function loadMapTop(name){ if(name===mapTopName) return; mapTopName=name; mapTop=null; zGrid=null;
+  if(!name) return; try{ const r=await fetch('/maptop/'+name+'.json'); if(!r.ok){ mapTopName=null; return; }   // not made yet: the next poll asks again
+    const j=await r.json(); const im=new Image();
     if(j.zgrid) fetch('/maptop/'+j.zgrid.file).then(r=>r.ok?r.arrayBuffer():null).then(b=>{ if(b&&mapTopName===name) zGrid={g:j.zgrid,z:new Int16Array(b)}; }).catch(()=>{});
-    im.onload=()=>{ if(mapTopName===name){ mapTop={j,im}; buildLayers(); drawMap(); } }; im.src='/maptop/'+name+'.png'; }catch(e){} }
+    im.onload=()=>{ if(mapTopName===name){ mapTop={j,im}; buildLayers(); drawMap(); } }; im.onerror=()=>{ if(mapTopName===name) mapTopName=null; };
+    im.src='/maptop/'+name+'.png'; }catch(e){ mapTopName=null; } }
 function buildLayers(){
   if(!heat) return; const W=cv.width,H=cv.height, cells=heat.cells, cs=heat.cell;
   let x0=1e9,y0=1e9,x1=-1e9,y1=-1e9,maxn=1;
@@ -310,7 +312,8 @@ function buildLayers(){
   if(mx>0) for(let k=0;k<W*H;k++){if(G[k]<mx*0.04)continue;const c=LUT[Math.min(255,Math.round(Math.sqrt(G[k]/mx)*255))];im.data.set(c,k*4)}
   h.putImageData(im,0,0);
   document.getElementById('dc').textContent=`${ds.length} deaths`;
-  document.getElementById('mt').textContent=`Death heatmap — ${heat.map||'?'}`;
+  { const mt={making:' (making the map picture...)',failed:' (no map picture: it could not be made, see maptop/<map>.log)','no tool':' (no map picture: re-tools/h3bsp.py not found)'}[heat.maptop]||'';
+    document.getElementById('mt').textContent=`Death heatmap — ${heat.map||'?'}${mt}`; }
 }
 function toScreen(x,y){return [view.ox+(x-view.wx0)*view.sc, view.oy+(view.wh-(y-view.wy0))*view.sc]}
 function drawMap(){

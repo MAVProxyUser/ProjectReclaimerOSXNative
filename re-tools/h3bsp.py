@@ -33,21 +33,31 @@ class Resources:
     def __init__(self, m):
         self.m = m
         z = m.meta(m.find('zone')[0], 0x220)
-        pl = m.meta(m.find('play')[0], 0x60)
         self.types = m.block(z, 0x04, 0x1C)                 # resource types (guid, name sid at +0x18)
         self.entries = m.block(z, 0x64, 0x40)               # resource table
         isz, = struct.unpack_from('<i', z, 0x148); iaddr, = struct.unpack_from('<I', z, 0x154)
         self.info = m.read_p(iaddr, isz)                    # definition ("resource info") buffer
-        self.ext = m.block(pl, 0x0C, 0x108)                 # external cache files (shared.map, ...)
-        self.pages = m.block(pl, 0x18, 0x58)                # raw pages
-        self.segs = m.block(pl, 0x3C, 0x10)                 # raw segments
+        play = m.find('play')
+        if play and m.tags[play[0]][2]:                     # stock MCC maps: the layout table is the play tag
+            pl = m.meta(play[0], 0x60)
+            self.ext = m.block(pl, 0x0C, 0x108)             # external cache files (shared.map, ...)
+            self.pages = m.block(pl, 0x18, 0x58)            # raw pages
+            self.segs = m.block(pl, 0x3C, 0x10)             # raw segments
+        else:                                               # maps built with the Halo 3 editing kit (most Workshop
+            self.ext = m.block(z, 0x1C, 0x108)              # maps): an empty play tag, the same three tables live in
+            self.pages = m.block(z, 0x34, 0x58)             # the zone tag itself
+            self.segs = m.block(z, 0x58, 0x10)
         self.raw_off = (m.sections[1][0] + m.masks[1]) & 0xFFFFFFFF   # resource section file offset
+        if not (play and m.tags[play[0]][2]): self.raw_off = 0   # editing-kit maps: page offsets are file offsets
         self._pages = {}
 
     def page(self, idx):
         if idx in self._pages:
             return self._pages[idx]
         salt, flags, codec, shared, _u, off, csz, usz = struct.unpack_from('<HBbhhiii', self.pages[idx], 0)
+        if off < 0 or csz <= 0:                             # the empty page (editing-kit maps point unused halves at it)
+            self._pages[idx] = b''
+            return b''
         if shared != -1:
             raise NotImplementedError('resource page %d lives in external cache file %r' % (
                 idx, self.ext[shared][:0x100].split(b'\0')[0]))

@@ -12,6 +12,8 @@
 # dedicated.toml: hidden, not listed on any master, no UPnP, public address 127.0.0.1, one Valhalla Slayer server on
 # UDP 49190 with RCON on TCP 127.0.0.1:49190. To host for other people, edit it (dedicated.toml.example next to it
 # documents every option) -- that publishes the server, so only do it on purpose.
+# DED_VOICE=1 / DED_VOICE=0 switches the server's voice chat on / off in its dedicated.toml before it starts (off by default;
+# on is needed to exercise a client's microphone path).
 # Logs: /tmp/reclaimer_dedicated.log (the supervisor) and /tmp/reclaimer_dedicated_<pid>.log (every game-server
 # process: the supervisor reads their output through pipes, so the loader copies it to these files).
 cd "$(dirname "$0")/.."
@@ -98,6 +100,10 @@ EOF
   echo "checking it:"; pel dedicated --config "$FOLDER\\dedicated.toml" check | grep -av '^$' | sed 's/^/  /' | head -20
 fi
 
+case "${DED_VOICE:-}" in
+  1) sed -i '' 's/^voice = false/voice = true/' "$UFOLDER/dedicated.toml";;
+  0) sed -i '' 's/^voice = true/voice = false/' "$UFOLDER/dedicated.toml";;
+esac
 rm -f /tmp/reclaimer_dedicated_[0-9]*.log
 set -m
 env PELOAD_SKINGUARD=1 PELOAD_VTGUARD=1 PELOAD_ALLOC_GUARD=1 PELOAD_RECLAIMER_PATCHES=all \
