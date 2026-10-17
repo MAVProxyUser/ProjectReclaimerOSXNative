@@ -216,7 +216,16 @@ What limits big games with the helper on (Hugegrass, PELOAD_D3DGL_PROF + PELOAD_
 - two client threads burn a core each in a modded game: the mods scan (stat/open/getdirentries non-stop; "Mods scan took
   7 s" again and again) and halo3's streaming thread (memmove + open). Worth a look on the file-system side.
 
-Next: a long soak, then make it the play.sh default (the in-process path stays behind PELOAD_GL_HELPER=0); move the CPU
+Inside the helper (PELOAD_GLH_OPSTATS=1: calls and time per GL function every 4 s; direct Guardian, ~1,900 draws/frame):
+19 GL calls per draw, ~2.7 us of helper time per draw, 90% busy. DrawElements 2.9 us each and DrawArrays 1.2 us = 70% of
+it (the native driver's real per-draw cost); BlitFramebuffer ~270 us each, ~2.5 a frame (the engine's 1920x1080 frame copy
+and the present blit; Apple's driver encodes a render pass's deferred draws when the pass ends at a blit, so that time is
+largely draw cost); BindBuffer 6 a draw but 0.015 us each. Not worth it (in-session A/B, us per draw): Apple's
+multithreaded GL engine in the helper (PELOAD_GLH_MP=1 / ab:<secs>: 5.80 vs 5.78) and the loader's GL state cache with the
+helper (PELOAD_AB=glcache:30: 4.9 vs 5.1, noise). What would still help: fewer draws (the client's graphics settings), the
+particle simulation natively, parallel command encoding (several contexts, much more work).
+
+DONE: a 25-minute BTB soak (median 49 fps) and the play.sh default (the in-process path stays behind PELOAD_GL_HELPER=0). Next: move the CPU
 particle compute into the helper (native arm64, ~1.5-2x) or onto the GPU; cut the link-time round trips further (the
 link status itself is still one per program).
 
