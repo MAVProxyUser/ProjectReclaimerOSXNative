@@ -248,7 +248,7 @@ player handle, `r9b` betrayal flag, `[rsp+0x28]` (5th, u8) damage byte. On a dis
 builds no event and only calls the MCC report (`119c0e`); the client learns about kills from the host's event.
 
 **The Reclaimer client detours this function itself.** Its custom-mode runtime checks the 15-byte prologue
-(signature at `exe+0x1fec2c0`) and installs `exe+0x601a90` with its hook installer `exe+0x6ddb00` (`exe+0x5aa05b`,
+(signature at `exe+0x1fec270`) and installs `exe+0x601a90` with its hook installer `exe+0x6ddb00` (`exe+0x5aa05b`,
 `5aa2e9`; "Lost .. native death events", "Custom mode native contract mismatch"). Do not hook it: `entry_hook`'s
 prologue check would fail, or the client would refuse to start.
 

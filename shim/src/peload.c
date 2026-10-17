@@ -3340,7 +3340,9 @@ GdiObj* g_gdi_mainsurf;
 static void*  MSABI i_CreateCompatibleBitmap(void*hdc,int w,int h){ (void)hdc; if(w<=0)w=1; if(h<=0)h=1; void*b=calloc(1,(size_t)w*h*4); GdiObj*g=gdi_new(w,h,32,b,1); if(g)g->topdown=1; return g; }
 static void*  MSABI i_CreateSolidBrush(uint32_t color){ GdiObj*g=gdi_new(1,1,32,0,0); if(g){g->kind=1;g->color=color;} return g?g:(void*)0x1; }
 static void*  MSABI i_CreatePen(int style,int w,uint32_t color){ (void)style;(void)w; GdiObj*g=gdi_new(1,1,32,0,0); if(g){g->kind=2;g->color=color;} return g?g:(void*)0x1; }
-static int    MSABI i_FillRect(void*dc,const int32_t*rc,void*br){ GdiDC*d=dc; GdiObj*b=br; if(!d||d->magic!=GDIDC_MAGIC||!d->bmp||!rc) return 1;
+static int    MSABI i_FillRect(void*dc,const int32_t*rc,void*br){ GdiDC*d=dc; GdiObj*b=br;
+    if(getenv("PELOAD_TRACE_TEXT") && rc){ char m[160]; snprintf(m,sizeof m,"  [FillRect] dc=%p win=%d %d,%d-%d,%d brush=%p kind=%d color=%06x\n",dc,d&&d->magic==GDIDC_MAGIC?d->iswin:-1,rc[0],rc[1],rc[2],rc[3],br,b&&b->magic==GDI_MAGIC?b->kind:-1,b&&b->magic==GDI_MAGIC?b->color:0); ws(m); }
+    if(!d||d->magic!=GDIDC_MAGIC||!d->bmp||!rc) return 1;
     uint32_t px = (b&&b->magic==GDI_MAGIC&&b->kind==1)? gdi_colorref_to_px(b->color) : 0xFF000000u;
     gdi_fill(d->bmp,rc[0],rc[1],rc[2]-rc[0],rc[3]-rc[1],px); if(d->iswin) gdi_present_window(); return 1; }
 static int    MSABI i_GdiAlphaBlend(void*dst,int xd,int yd,int wd,int hd,void*src,int xs,int ys,int ws,int hs,uint32_t blend){
@@ -3379,7 +3381,8 @@ static int    MSABI i_StretchDIBits(void*dc,int xd,int yd,int wd,int hd,int xs,i
 static int    MSABI i_SetStretchBltMode(void*dc,int mode){ (void)dc;(void)mode; return 1; }
 static int    MSABI i_SetBrushOrgEx(void*dc,int x,int y,void*pt){ (void)dc;(void)x;(void)y; if(pt){((int32_t*)pt)[0]=0;((int32_t*)pt)[1]=0;} return 1; }
 static uint32_t MSABI i_SetTextColor(void*dc,uint32_t c){ GdiDC*d=dc; uint32_t o=0; if(d&&d->magic==GDIDC_MAGIC){o=d->textcolor;d->textcolor=c;} return o; }
-static int    MSABI i_SetBkMode(void*dc,int m){ GdiDC*d=dc; int o=2; if(d&&d->magic==GDIDC_MAGIC){o=d->bkmode;d->bkmode=m;} return o; }
+static int    MSABI i_SetBkMode(void*dc,int m){ GdiDC*d=dc; int o=2; if(d&&d->magic==GDIDC_MAGIC){o=d->bkmode;d->bkmode=m;}
+    if(getenv("PELOAD_TRACE_TEXT")){ char t[80]; snprintf(t,sizeof t,"  [SetBkMode] dc=%p %d\n",dc,m); ws(t); } return o; }
 static uint32_t MSABI i_SetBkColor(void*dc,uint32_t c){ GdiDC*d=dc; uint32_t o=0xFFFFFF; if(d&&d->magic==GDIDC_MAGIC){ o=d->bkcolor; d->bkcolor=c; } return o; }
 // ---- CoreText glyph rasterization into the GDI BGRA DIB ----
 // The Reclaimer frontend composites its menu into a CPU DIB (which we present) and
@@ -3563,10 +3566,12 @@ static int    MSABI i_ExtTextOutW(void*dc,int x,int y,uint32_t f,const void*rc,c
     // ETO_OPAQUE: fill the rectangle with the DC background colour first -- the client erases its previous
     // status line this way ("LOADING MAP" was drawn over the stale "LOADING ENGINE")
     if((f&2) && rc && d && d->magic==GDIDC_MAGIC){ const int32_t*r=rc; GdiObj*t=gdi_text_target(d); if(t) gdi_fill(t,r[0],r[1],r[2]-r[0],r[3]-r[1],gdi_colorref_to_px(d->bkcolor)); }
-    if(getenv("PELOAD_TRACE_TEXT")){ char m[96]; snprintf(m,sizeof m,"  [ExtTextOutW] dc=%p dcok=%d bmp=%p c=%u\n",dc,d&&d->magic==GDIDC_MAGIC,(d&&d->magic==GDIDC_MAGIC)?(void*)d->bmp:0,c); ws(m); }
+    if(getenv("PELOAD_TRACE_TEXT")){ char m[300]; int q=snprintf(m,sizeof m,"  [ExtTextOutW] dc=%p bmp=%p f=0x%x bk=%d at %d,%d '",dc,(d&&d->magic==GDIDC_MAGIC)?(void*)d->bmp:0,f,d&&d->magic==GDIDC_MAGIC?d->bkmode:-1,x,y);
+        for(uint32_t i=0; s && i<c && i<60 && q<290; i++) m[q++]=(char)(s[i]<128?s[i]:'?'); m[q++]='\''; m[q++]='\n'; (void)!write(2,m,(size_t)q); }
     if(d&&d->magic==GDIDC_MAGIC){ gdi_text_render(gdi_text_target(d),x,y,s,(int)c,d->textcolor,d->font_h?d->font_h:16); if(d->iswin) gdi_present_window(); } return 1; }
 static int    MSABI i_DrawTextW(void*dc,const uint16_t*s,int count,int32_t*rc,uint32_t fmt){ GdiDC*d=dc;
-    if(getenv("PELOAD_TRACE_TEXT")){ char m[96]; snprintf(m,sizeof m,"  [DrawTextW] dc=%p dcok=%d bmp=%p fmt=0x%x cnt=%d\n",dc,d&&d->magic==GDIDC_MAGIC,(d&&d->magic==GDIDC_MAGIC)?(void*)d->bmp:0,fmt,count); ws(m); }
+    if(getenv("PELOAD_TRACE_TEXT")){ char m[300]; int q=snprintf(m,sizeof m,"  [DrawTextW] dc=%p bmp=%p fmt=0x%x bk=%d rc=%d,%d-%d,%d '",dc,(d&&d->magic==GDIDC_MAGIC)?(void*)d->bmp:0,fmt,d&&d->magic==GDIDC_MAGIC?d->bkmode:-1,rc?rc[0]:0,rc?rc[1]:0,rc?rc[2]:0,rc?rc[3]:0);
+        for(int i=0; s && (count<0?s[i]!=0:i<count) && i<60 && q<290; i++) m[q++]=(char)(s[i]<128?s[i]:'?'); m[q++]='\''; m[q++]='\n'; (void)!write(2,m,(size_t)q); }
     if(!d||d->magic!=GDIDC_MAGIC||!rc) return 0;
     int ph=d->font_h?d->font_h:16; int clen=count; if(clen<0){ clen=0; while(s&&s[clen])clen++; }
     double asc=0,desc=0; double w=ct_measure(s,clen,ph,&asc,&desc); int th=(int)(asc+desc+0.5);

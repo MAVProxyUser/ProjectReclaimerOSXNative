@@ -260,6 +260,13 @@ static void st_voice_install(void){ if(!stats_on() || !g_base) return;
     uint8_t b[96],m[96]; int n; int64_t r; char msg[220]; int k;
     n=sig_parse("55 56 57 53 48 83 EC 38 48 8D 6C 24 30 48 C7 45 00 FE FF FF FF 48 89 CE B1 01 31 C0 F0 0F B0 0D ?? ?? ?? ?? 0F 85",b,m,96);
     r=sig_find(g_base,b,m,n); if(r>=0){ g_st_setmuted=g_base+r; g_st_mutedvec=(uint64_t)(g_st_setmuted+0x24+*(int32_t*)(g_st_setmuted+0x20)); }
+    // a unique match can be the wrong function: in clients 0.8.16 .. 0.9.1 this shape is a Forge Mutex<Vec> setter
+    // (shim/docs/patch-addresses.md). The real set_muted's lock byte is also taken by is_muted
+    // (56 48 83 EC 20 B2 01 31 C0 F0 0F B0 15 <disp32>): no such function -> no mute.
+    if(g_st_setmuted){ DOS*dh=(DOS*)g_base; OPT64*oh=(OPT64*)(g_base+dh->e_lfanew+sizeof(COFF)); uint8_t*lockb=g_st_setmuted+0x24+*(int32_t*)(g_st_setmuted+0x20);
+        static const uint8_t im[13]={0x56,0x48,0x83,0xEC,0x20,0xB2,0x01,0x31,0xC0,0xF0,0x0F,0xB0,0x15}; int paired=0;
+        for(uint8_t*q=g_base+0x1000; q+17<g_base+oh->ImageSize && !paired; q++) if(q[0]==0x56 && !memcmp(q,im,13) && q+17+*(int32_t*)(q+13)==lockb) paired=1;
+        if(!paired){ g_st_setmuted=0; g_st_mutedvec=0; ws("  [stats] voice: the set_muted match has no is_muted partner (another client build?): mute off\n"); } }
     n=sig_parse("55 41 57 41 56 41 55 41 54 56 57 53 48 81 EC 18 01 00 00 48 8D AC 24 80 00 00 00 0F 29 B5 80 00 00 00 48 C7 45 78 FE FF FF FF 4D 89 CE 4C 89 C7 49 89 D7 48 89 CB",b,m,96);
     int64_t rv=sig_find(g_base,b,m,n); int hooked=rv>=0 && entry_hook(g_base+rv,b,19,(void*)st_on_voice);
     k=snprintf(msg,sizeof msg,"  [stats] voice: mute %s, talking indicator %s\n",g_st_setmuted?"available":"unavailable (set_muted not found)",hooked?"hooked":"unavailable (voice_recv not found)");
@@ -516,6 +523,18 @@ static void st_u16_utf8(const uint16_t*w,char*o,size_t on){ size_t j=0;
 static const char* st_ev_name(int32_t h,const StPlayer*pl,int np){ if(h==-1) return 0;
     for(int k=0;k<np;k++) if(pl[k].slot==(h&0xFFFF)){ uint16_t salt=0; if(hb_read(pl[k].rec,&salt,2) && salt==(uint16_t)((uint32_t)h>>16)) return pl[k].name; }
     return 0; }
+static void st_sentence(char*o,size_t on,const char*tag);
+// the vehicle a player (event handle) sits in, by its tag name ("Warthog"); 0 if on foot
+static int st_player_vehicle(int32_t h,const StPlayer*pl,int np,char*out,size_t on){
+    for(int k=0;k<np;k++) if(pl[k].slot==(h&0xFFFF)){ uint64_t arr=hb_object_array(); uint8_t hdr[0x60]; uint32_t u=pl[k].unit;
+        if(!arr || u==0xFFFFFFFFu || !hb_read(arr,hdr,sizeof hdr) || *(uint32_t*)(hdr+0x2c)!=0x64407440) return 0;
+        uint64_t data=*(uint64_t*)(hdr+0x48); int hi=*(int32_t*)(hdr+0x3c);
+        #define ST_ENT(hh,e) ((int)((hh)&0xFFFF)<hi && hb_read(data+(uint64_t)((hh)&0xFFFF)*0x18,e,0x18) && *(uint16_t*)(e)==(uint16_t)((hh)>>16))
+        uint8_t e[0x18]; uint32_t parent=0xFFFFFFFFu, def=0; if(!ST_ENT(u,e) || !hb_read(*(uint64_t*)(e+0x10)+0x10,&parent,4) || parent==0xFFFFFFFFu) return 0;
+        if(!ST_ENT(parent,e) || e[3]!=1 || !hb_read(*(uint64_t*)(e+0x10),&def,4)) return 0;
+        #undef ST_ENT
+        st_sentence(out,on,hb_tag_name(def)); return out[0]!=0; }
+    return 0; }
 static void st_engine_events(const StPlayer*pl,int np){
     static unsigned ge_seen, hud_seen;
     unsigned n=__atomic_load_n(&g_ge_n,__ATOMIC_ACQUIRE); if(n-ge_seen>512) ge_seen=n-512;
@@ -528,8 +547,10 @@ static void st_engine_events(const StPlayer*pl,int np){
         if(!(e[0x25]&1)) continue;   // no kill info: its HUD line (if any) becomes the feed line
         int dmg=e[0x24]&0x3f, special=e[0x24]>>6, mods=((e[0x25]>>1)&0x7f)|((e[0x26]&1)<<7);
         const char*a=st_ev_name(cause,pl,np), *b=st_ev_name(effect,pl,np); if(!b) continue;
-        // damage type 0 ("Guardians") with a killer: a weapon without a reporting type (modded maps' weapons) -- unnamed
+        // damage type 0 ("Guardians") with a killer: a weapon without a reporting type (modded maps' weapons) -- unnamed;
+        // collision (a splatter): the vehicle the killer drives
         char how[96]; int k=snprintf(how,sizeof how,"%s",dmg==0 && a && cause!=effect ? "" : dmg<63?g_dmg_name[dmg]:"?");
+        if(dmg==2 && a && cause!=effect){ char vn[64]; if(st_player_vehicle(cause,pl,np,vn,sizeof vn)) k=snprintf(how,sizeof how,"%s",vn); }
         // the general event says how: splatter, melee, sticky, sniper headshot, assassination (halo3-event-feed.md 3.6)
         const char*verb = type!=0 ? "killed" : idx==0x24 ? "splattered" : idx==0x25 ? "beat down" : idx==0x2a ? "stuck" : idx==0x2b ? "sniped" :
             idx==0x2c ? "assassinated" : idx==2 ? "betrayed" : "killed";

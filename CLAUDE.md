@@ -152,6 +152,11 @@ PELOAD_MIC_MUTED=1; stats do=mic&on=. The client sends voice only with its talk 
 Zones overlay (F10 / PELOAD_HB_ZONES, hitbox.c hbz_*): kill/safe trigger volumes (scnr +0x258/+0x484/+0x490) and soft
 ceilings (sddt) read from the map being played (hb_current_map: halo3/maps or a Workshop folder), drawn with
 hb_seg_clip. Host speed control: stats do=speed&v=<tl_speed index> writes the variant's base player speed trait.
+Patch points across releases: shim/docs/patch-addresses.md (all 34 client releases surveyed statically, downloads in
+~/Library/Application Support/ReclaimerMac/releases/<tag>/; never run them). No fixed exe RVA survives a release; a
+unique signature hit can still be the wrong function -- validate by meaning (st_voice_install refuses a set_muted hit
+whose lock byte no is_muted function takes). Speed-step demo for the developers: shim/tools/speedstep-demo.sh (local
+dedicated server only).
 Workshop helper (2026-10-17): CreateProcessW runs shim/tools/workshop-helper.sh (DepotDownloader, account name from
 STEAM_USER or ~/Library/Application Support/ReclaimerMac/steam_user, never a password) in place of the client's
 `workshop-download --subscribe|--update <id>`, on the client's pipes, own process group (shim/docs/workshop-helper.md;

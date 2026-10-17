@@ -23,10 +23,17 @@ echo "local dedicated server (Valhalla Slayer on 127.0.0.1:49190, stats on 127.0
 DED_ENV="PELOAD_STATS_HTTP=8767" bash shim/dedicated.sh >"$OUT/server-start.log" 2>&1
 cleanup(){ bash shim/dedicated.sh stop >/dev/null 2>&1; [ -n "${QR:-}" ] && kill "$QR" 2>/dev/null; for p in $(others); do kill -9 -- -"$(ps -o pgid= -p "$p" | tr -d ' ')" 2>/dev/null; done; }
 trap cleanup EXIT
-sleep 8
-echo "test client joining it (no input, no microphone; scripted walk 3 s after the match starts)"
-QR_PAD=1 QR_MINIMIZE=1 bash shim/tools/quiet-run.sh "PELOAD_STATS_HTTP=8765 PELOAD_TELEPORT_CLIENT_TEST=1 PELOAD_ALLOW_TELEPORT=1 PELOAD_INPUT_SCRIPT=6:0,1,0,0;600:0,0,0,0 PELOAD_INPUT_DELAY=3" 600 "reclaimer://join?server=127.0.0.1:49190" >/dev/null 2>&1 &
-QR=$!
+sleep 20
+# the client: no input, no microphone; scripted walk 3 s after the match starts. The first join right after a server
+# start often times out ("Public join timed out"): up to 3 tries.
+client(){ QR_PAD=1 QR_MINIMIZE=1 bash shim/tools/quiet-run.sh "PELOAD_STATS_HTTP=8765 PELOAD_TELEPORT_CLIENT_TEST=1 PELOAD_ALLOW_TELEPORT=1 PELOAD_INPUT_SCRIPT=6:0,1,0,0;600:0,0,0,0 PELOAD_INPUT_DELAY=3" 600 "reclaimer://join?server=127.0.0.1:49190" >/dev/null 2>&1 & QR=$!; }
+for try in 1 2 3; do
+  echo "test client joining it (try $try)"; client; sleep 10
+  for i in $(seq 1 120); do grep -aq 'Loading screen complete' /tmp/quiet-run.log 2>/dev/null && break 2
+    grep -aq 'Joining server failed' /tmp/quiet-run.log 2>/dev/null && break; sleep 1; done
+  echo "  join failed: $(grep -a 'Joining server failed' /tmp/quiet-run.log | tail -1 | cut -c14-)"
+  kill "$QR" 2>/dev/null; for p in $(others); do g="$(ps -o pgid= -p "$p" | tr -d ' ')"; [ "$g" != "$(cat "$HOME/Library/Application Support/ReclaimerMac/dedicated.pgid" 2>/dev/null)" ] && kill -9 -- -"$g" 2>/dev/null; done; sleep 3
+done
 python3 shim/tools/speedstep-demo.py --client 127.0.0.1:8765 --server 127.0.0.1:8767 --step "$STEP" --interval "$INTERVAL" --count "$COUNT" --out "$OUT"
 rc=$?
 echo "results: $OUT"; ls "$OUT"

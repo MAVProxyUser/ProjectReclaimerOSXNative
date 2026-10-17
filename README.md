@@ -275,6 +275,13 @@ Halo 3 sends to every client -- and works with the overlay off. Health and shiel
 can go above 1 when overcharged). On public servers this is information other players don't have; it is meant for
 your own and your dedicated server's matches.
 
+### Speed-step demonstration (for a bug report)
+
+`bash shim/tools/speedstep-demo.sh` shows, on your OWN local dedicated server only, that the server takes client-reported
+player positions that jump up to ~2.5 units per update without a speed check (shim/docs/net-authority.md): it walks a
+test player normally, then has the client step its own position forward, and records where the server puts the player.
+Output in `~/speedstep-demo-<date>/`: positions.csv, summary.txt (walking vs stepping speed) and speedstep-demo.mp4.
+
 ### Frame rate in big games
 
 Big Team Battle with 60 players runs at about 15-25 fps: the game issues 3,000-4,700 draw calls a frame and each one

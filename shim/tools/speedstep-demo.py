@@ -2,7 +2,7 @@
 """Recorder and renderer for shim/tools/speedstep-demo.sh (see there). Talks only to 127.0.0.1 stats pages: the local
 test client's (it asks it to step its own player) and the local dedicated server's (where the player really is).
 Refuses any other address."""
-import argparse, csv, json, math, os, subprocess, sys, time, urllib.request
+import argparse, csv, json, math, os, subprocess, sys, threading, time, urllib.request
 
 def get(addr, path, timeout=2):
     with urllib.request.urlopen('http://%s%s' % (addr, path), timeout=timeout) as r:
@@ -30,7 +30,14 @@ def main():
     ap.add_argument('--client', required=True); ap.add_argument('--server', required=True)
     ap.add_argument('--step', type=float, default=2.0); ap.add_argument('--interval', type=float, default=0.25)
     ap.add_argument('--count', type=int, default=24); ap.add_argument('--out', required=True)
+    ap.add_argument('--render-only', metavar='MAP', help='redraw the video from OUT/positions.csv (map name, e.g. riverworld)')
     a = ap.parse_args()
+    if a.render_only:   # positions.csv from an earlier run
+        rows = [[float(r[0]), r[1]] + [float(v) for v in r[2:]] for r in list(csv.reader(open(os.path.join(a.out, 'positions.csv'))))[1:]]
+        def sp(ph):
+            r = [x for x in rows if x[1] == ph]
+            return sum(math.hypot(r[i][2] - r[i - 1][2], r[i][3] - r[i - 1][3]) for i in range(1, len(r))) / max(r[-1][0] - r[0][0], 1e-3) if len(r) > 1 else 0.0
+        render(a, rows, a.render_only, sp('walk'), sp('step')); return
     for addr in (a.client, a.server):
         if not addr.startswith('127.0.0.1:'):
             sys.exit('local only: %s is not 127.0.0.1' % addr)
@@ -51,40 +58,42 @@ def main():
         sys.exit('the client did not get into the match within 5 minutes')
     log('in the match as "%s" on %s' % (name, c.get('map')))
 
-    rows = []; phase = ['walk']
-    def sample():
-        try:
-            s = by_name(get(a.server, '/stats.json', 1), name); c = me(get(a.client, '/stats.json', 1))
-        except Exception:
-            return
-        if s and c:
-            rows.append([round(time.time() - t0, 3), phase[0]] + [round(v, 3) for v in s['pos']] + [round(v, 3) for v in c['pos']])
+    rows = []; phase = ['walk']; mapname = c.get('map'); stop = [False]
+    def sampler():   # 10 Hz, on its own thread: the server's and the client's position of the player
+        while not stop[0]:
+            t = time.time()
+            try:
+                s = by_name(get(a.server, '/stats.json', 1), name); cc = me(get(a.client, '/stats.json', 1))
+                if s and cc:
+                    rows.append([round(t - t0, 3), phase[0]] + [round(v, 3) for v in s['pos']] + [round(v, 3) for v in cc['pos']])
+            except Exception:
+                pass
+            time.sleep(max(0.0, 0.1 - (time.time() - t)))
+    th = threading.Thread(target=sampler, daemon=True); th.start()
 
-    # 2. the scripted walk runs 3..9 s after the match starts: record it, then stand still briefly
-    t_walk = time.time()
-    while time.time() - t_walk < 9:
-        sample(); time.sleep(0.1)
-    phase[0] = 'stand'
-    for _ in range(20):
-        sample(); time.sleep(0.1)
+    # 2. the scripted walk runs 3..9 s after the match starts; then stand still briefly
+    time.sleep(9); phase[0] = 'stand'; time.sleep(2)
 
-    # 3. client-side steps along the player's facing
-    c = me(get(a.client, '/stats.json')); f = math.radians(c.get('facing') or 0.0)
-    dx, dy = a.step * math.cos(f), a.step * math.sin(f)
-    log('stepping %d x %.2f units every %.2f s (client-side test hook)' % (a.count, a.step, a.interval))
+    # 3. client-side steps back along the walked path (known to be open ground), no further than the walk went
+    w = [r for r in rows if r[1] == 'walk']
+    if len(w) < 2 or math.hypot(w[-1][2] - w[0][2], w[-1][3] - w[0][3]) < 4:
+        stop[0] = True; sys.exit('the scripted walk did not move the player (is the client in the match?)')
+    ddx, ddy = w[0][2] - w[-1][2], w[0][3] - w[-1][3]; dist = math.hypot(ddx, ddy)
+    n = max(1, min(a.count, int(dist * 0.9 / a.step)))
+    dx, dy = ddx / dist * a.step, ddy / dist * a.step
+    log('stepping %d x %.2f units every %.2f s back along the walked path (client-side test hook)' % (n, a.step, a.interval))
     phase[0] = 'step'
-    for i in range(a.count):
+    for i in range(n):
+        t_step = time.time()
         try:
-            post(a.client, '/control?do=tpby&dx=%.3f&dy=%.3f' % (dx, dy))
+            r = post(a.client, '/control?do=tpby&dx=%.3f&dy=%.3f' % (dx, dy))
+            if not r.get('ok'):
+                log('step %d refused: %s' % (i, r))
         except Exception as e:
             log('step %d: %s' % (i, e))
-        end = time.time() + a.interval
-        while time.time() < end:
-            sample(); time.sleep(0.05)
-    phase[0] = 'after'
-    for _ in range(30):
-        sample(); time.sleep(0.1)
-
+        time.sleep(max(0.0, a.interval - (time.time() - t_step)))
+    phase[0] = 'after'; time.sleep(3); stop[0] = True; th.join(2)
+    a.count = n
     with open(os.path.join(a.out, 'positions.csv'), 'w', newline='') as fh:
         w = csv.writer(fh); w.writerow(['t', 'phase', 'server_x', 'server_y', 'server_z', 'client_x', 'client_y', 'client_z'])
         w.writerows(rows)
@@ -102,9 +111,9 @@ def main():
                'walking (stick input):          %.2f units/s over %.1f units\n'
                'client-side steps of %.2f units: %.2f units/s over %.1f units (%d steps, every %.2f s)\n'
                'ratio: %.1fx the walking speed, accepted by the server without a correction.\n'
-               % (time.strftime('%Y-%m-%d %H:%M'), c.get('map'), vw, dw, a.step, vs, ds, a.count, a.interval, vs / vw if vw > 0 else float('nan')))
+               % (time.strftime('%Y-%m-%d %H:%M'), mapname, vw, dw, a.step, vs, ds, a.count, a.interval, vs / vw if vw > 0 else float('nan')))
     open(os.path.join(a.out, 'summary.txt'), 'w').write(summary); print(summary)
-    render(a, rows, c.get('map'), vw, vs)
+    render(a, rows, mapname, vw, vs)
 
 def render(a, rows, mapname, vw, vs):
     from PIL import Image, ImageDraw, ImageFont
@@ -115,10 +124,15 @@ def render(a, rows, mapname, vw, vs):
         print('  no map picture for %s (%s): no video' % (mapname, e)); return
     xs = [r[2] for r in rows]; ys = [r[3] for r in rows]; pad = 15
     x0, x1, y0, y1 = min(xs) - pad, max(xs) + pad, min(ys) - pad, max(ys) + pad
+    # at least 4:3 (wide), so a straight north-south track still shows the ground around it
+    cxm, cym, wd, ht = (x0 + x1) / 2, (y0 + y1) / 2, x1 - x0, y1 - y0
+    if wd < ht * 4 / 3: wd = ht * 4 / 3
+    elif ht < wd * 3 / 4: ht = wd * 3 / 4
+    x0, x1, y0, y1 = cxm - wd / 2, cxm + wd / 2, cym - ht / 2, cym + ht / 2
     ppu = meta['px_per_unit']
     def px(x, y): return ((x - meta['x0']) * ppu, (meta['y1'] - y) * ppu)
     (cx0, cy0), (cx1, cy1) = px(x0, y1), px(x1, y0)
-    crop = base.crop((int(cx0), int(cy0), int(cx1), int(cy1))); sc = 720 / max(crop.size)
+    crop = base.crop((int(cx0), int(cy0), int(cx1), int(cy1))); sc = 960 / crop.size[0]
     crop = crop.resize((max(1, int(crop.size[0] * sc)), max(1, int(crop.size[1] * sc))))
     def cp(x, y):
         X, Y = px(x, y); return ((X - cx0) * sc, (Y - cy0) * sc)
@@ -133,8 +147,9 @@ def render(a, rows, mapname, vw, vs):
     for fi in range(n):
         t = t_start + fi / 10.0; shown = [r for r in rows if r[0] <= t]
         im = Image.new('RGB', (W, H), (16, 16, 16)); im.paste(crop, (0, 0)); dr = ImageDraw.Draw(im)
-        for i in range(1, len(shown)):
-            dr.line([cp(shown[i - 1][2], shown[i - 1][3]), cp(shown[i][2], shown[i][3])], fill=col[shown[i][1]], width=3)
+        for i in range(1, len(shown)):   # the steps retrace the walk: drawn 5 px to the side so both show
+            off = 5 if shown[i][1] == 'step' else 0; p0 = cp(shown[i - 1][2], shown[i - 1][3]); p1 = cp(shown[i][2], shown[i][3])
+            dr.line([(p0[0] + off, p0[1]), (p1[0] + off, p1[1])], fill=col[shown[i][1]], width=3)
         if shown:
             X, Y = cp(shown[-1][2], shown[-1][3]); dr.ellipse([X - 6, Y - 6, X + 6, Y + 6], outline=(255, 255, 255), width=2)
             last = [r for r in shown if r[0] >= t - 1.0]
