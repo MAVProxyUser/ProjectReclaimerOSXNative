@@ -291,3 +291,23 @@ special-case path.
 - The exact update period that produces the observed 1-2 s.
 - Whether any other path (anti-cheat, or Reclaimer's own Rust side) limits client movement speed. No such limit
   was searched for in Reclaimer.
+
+## Test 2026-10-17: small steps ARE accepted (our own local dedicated server)
+
+Setup: `DED_ENV=PELOAD_STATS_HTTP=8767 bash shim/dedicated.sh` (Valhalla Slayer, anti-cheat at its default), one client
+joined with `PELOAD_STATS_HTTP=8765 PELOAD_ALLOW_TELEPORT=1 PELOAD_TELEPORT_CLIENT_TEST=1`; each step = POST
+`/control?do=tpby&dx=..` to the CLIENT (a client-side `object_teleport` of its own unit, run on its simulation thread),
+positions read from both stats servers (client 8765, server 8767).
+
+| client steps | client after | server after | 3 s later | verdict |
+|---|---|---|---|---|
+| 10 x +2.0 x, 0.5 s apart | x 81.6 -> 101.3 | 101.3 | both 101.3 | **accepted** (+19.7 units) |
+| 5 x -3.0 x, 0.5 s apart | 89.3 | 101.3 | client snapped back to 101.3 | rejected (> 2.5) |
+| 20 x -2.4 x, 0.1 s apart | 71.1 | 95.1 | client snapped back to 95.1 | partly: once the client ran > 2.5 ahead of the server, the rest was dropped |
+| 3 x +2.0 z, 0.3 s apart | z 0.8 -> 4.9 | 4.9 | -- | **accepted** (into the air) |
+
+So the host adopts any client-predicted position within 2.5 units of its own copy, with no speed or vertical check:
+a modified client can move horizontally or vertically at roughly 2.5 units per accepted update, limited only by the host's
+update rate (0.5 s steps all landed; 0.1 s steps outran it) and by collision (a capsule test; steps into a wall stop).
+This is stock Halo 3 client-predicted movement; whether Reclaimer's own anti-cheat watches for it was not tested beyond
+this (anti-cheat at the server's default, no kick or warning in 4 runs). Worth reporting to the Reclaimer developers.
