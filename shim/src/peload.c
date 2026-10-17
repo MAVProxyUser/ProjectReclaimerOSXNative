@@ -2842,6 +2842,10 @@ static void*  MSABI i_SetStdHandle(uint32_t id,void*h){ (void)id; return h; } //
 // Win64 environment. Child stdio is wired from STARTUPINFOW's std handles.
 #include <spawn.h>
 #include <sys/wait.h>
+// PELOAD_TEST_LOADER_FAULT=<secs>: a loader thread (no TEB) reads address 0 after <secs>, to check that such faults are
+// reported as loader faults and never handed to the game's exception handlers (backlog 19).
+static void* loader_fault_test(void*a){ (void)a; pthread_setname_np("shim-faulttest"); sleep((unsigned)atoi(getenv("PELOAD_TEST_LOADER_FAULT")));
+    return (void*)(uintptr_t)*(volatile uint64_t*)(uintptr_t)(a); }
 extern char **environ;
 static const char *g_self;          // path to this peload binary (argv[0])
 static pid_t g_childpid[256]; static int g_nchild;
@@ -7942,6 +7946,11 @@ static void register_tls(void* tlsdir, uint8_t* modbase, int fixed_index){
         for(int i=0; cb[i]; i++){ ws("  TLS callback "); whex(cb[i]);
             void (__attribute__((ms_abi)) *fn)(void*,uint32_t,void*) = (void*)cb[i]; fn(modbase,1/*PROCESS_ATTACH*/,0); } }
 }
+// 1 on threads that have a Windows TEB (the main thread, every CreateThread thread). Loader threads (present,
+// GL submission, compute workers, stats, ...) have none: a fault there must NOT go to the game's exception
+// handlers -- they are Rust/C++ code that reads gs:[0x58] and fault again (Rust's eprintln at exe+0x1d6455d in
+// 0.9.18), which hid the real fault (backlog 19). PELOAD_SEH_ALL_THREADS=1 = old (dispatch on every thread).
+static __thread int g_guest_thr;
 typedef uint32_t (MSABI *WinThreadProc)(void*);
 typedef struct { WinThreadProc fn; void *param; SyncObj *done; } TArg;
 static void *thread_tramp(void *a){
@@ -7968,6 +7977,7 @@ static void *thread_tramp(void *a){
     __asm__ volatile("movq %0,%%gs:0x30"::"r"((uint64_t)teb));
     __asm__ volatile("movq %0,%%gs:0x60"::"r"((uint64_t)g_peb_ptr));
     __asm__ volatile("movq %0,%%gs:0x58"::"r"((uint64_t)tarr));
+    g_guest_thr=1;
     if(getenv("PELOAD_TRACE_THREAD")){ char tb[96]; int nn=snprintf(tb,sizeof tb,"  [TT] enter tid=0x%x gs58=0x%llx fn=%p\n",pthread_mach_thread_np(pthread_self()),(unsigned long long)(uint64_t)tarr,(void*)t->fn); (void)!write(2,tb,nn); }
     uint32_t r = t->fn ? t->fn(t->param) : 0;
     // The Windows TEB fields live in macOS TSD slots 0x30/0x58/0x60. On this
@@ -10498,7 +10508,11 @@ static void crashsig(int sig, siginfo_t *info, void *ucv){
     }
     // First try to dispatch the fault as a Windows exception (the engine faults
     // deliberately inside probes and expects a handler to recover + continue).
-    if(uc && !g_in_crashsig && (sig==SIGILL||sig==SIGSEGV||sig==SIGBUS||sig==SIGFPE||sig==SIGTRAP)){
+    static int seh_all=-1; if(seh_all<0) seh_all=getenv("PELOAD_SEH_ALL_THREADS")?1:0;
+    if(uc && !g_in_crashsig && !g_guest_thr && !seh_all && (sig==SIGILL||sig==SIGSEGV||sig==SIGBUS||sig==SIGFPE)){
+        char tn[64]={0}; pthread_getname_np(pthread_self(),tn,sizeof tn); char m[200];
+        int k=snprintf(m,sizeof m,"\n[CRASH] fault on loader thread '%s' (no TEB): not passed to the game's exception handlers\n",tn); (void)!write(2,m,k); }
+    if(uc && !g_in_crashsig && (g_guest_thr||seh_all) && (sig==SIGILL||sig==SIGSEGV||sig==SIGBUS||sig==SIGFPE||sig==SIGTRAP)){
         g_in_crashsig=1;
         // unblock these so a nested fault during dispatch isn't silently fatal
         sigset_t us; sigemptyset(&us); sigaddset(&us,SIGILL); sigaddset(&us,SIGSEGV);
@@ -10521,6 +10535,9 @@ static void crashsig(int sig, siginfo_t *info, void *ucv){
         if(rip>=(uint64_t)g_mods[m].base && rip<(uint64_t)g_mods[m].base+o->ImageSize){ mod=g_mods[m].name; moff=rip-(uint64_t)g_mods[m].base; } }
     int n=snprintf(b,sizeof b,"\n[CRASH] sig=%d faultaddr=%p RIP=0x%llx (%s+0x%llx)\n",sig,info?info->si_addr:0,(unsigned long long)rip,mod,(unsigned long long)moff);
     (void)!write(2,b,n);
+    if(!moff){ Dl_info di; if(dladdr((void*)rip,&di)){ const char*fn=di.dli_fname?strrchr(di.dli_fname,'/'):0;
+        int k=snprintf(b,sizeof b,"    in %s: %s+0x%llx\n",fn?fn+1:(di.dli_fname?di.dli_fname:"?"),di.dli_sname?di.dli_sname:"?",
+            (unsigned long long)(rip-(uint64_t)(di.dli_saddr?di.dli_saddr:di.dli_fbase))); (void)!write(2,b,k); } }
     { int k=snprintf(b,sizeof b,"    [d3dgl] last phase=%s draw#=%lu\n",g_d3dgl_phase?(const char*)g_d3dgl_phase:"?",g_d3dgl_phase_draw); (void)!write(2,b,k); }
     { uint64_t gs58=0; __asm__ volatile("movq %%gs:0x58,%0":"=r"(gs58));
       uint64_t t0=(gs58>0x10000)?*(uint64_t*)gs58:0;
@@ -10677,6 +10694,7 @@ static void std_tee_start(int fd,const char*env){ const char*e=getenv(env); if(!
 int main(int argc, char **argv){
     std_tee_start(2,"PELOAD_STDERR_TEE"); std_tee_start(1,"PELOAD_STDOUT_TEE");
     if(getenv("PELOAD_SAMPLE")){ pthread_t st; pthread_create(&st,0,sampler_thread,0); }
+    if(getenv("PELOAD_TEST_LOADER_FAULT")){ pthread_t ft; pthread_create(&ft,0,loader_fault_test,0); }   // crash-report test
     wi_test_start();
     hitbox_start(); stats_start(); bootprompt_test_start();
     { struct sigaction sa; memset(&sa,0,sizeof sa); sa.sa_sigaction=crashsig; sa.sa_flags=SA_SIGINFO;
@@ -10732,7 +10750,7 @@ int main(int argc, char **argv){
     __asm__ volatile("movq %0, %%gs:0x30" :: "r"((uint64_t)teb));
     __asm__ volatile("movq %0, %%gs:0x60" :: "r"((uint64_t)peb));
     __asm__ volatile("movq %0, %%gs:0x58" :: "r"((uint64_t)tls_array));
-    g_peb_ptr=peb;
+    g_peb_ptr=peb; g_guest_thr=1;
     ws("  TEB @ "); whexn((uint64_t)teb); ws("  PEB @ "); whex((uint64_t)peb);
 
     // ---- filesystem roots + env defaults for the game client ----

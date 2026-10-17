@@ -40,6 +40,13 @@ mkdir -p "$DIR" || err "Cannot create $DIR"
 if grep -q 'Total downloaded' "$LOG" && [ -f "$DIR/ModInfo.json" ]; then
   printf '{"Progress":{"done":%s,"total":%s}}\n' "$TOTAL" "$TOTAL"
   printf '{"Ready":{"root":"%s","subscribed":true}}\n' "$(esc "$ROOT")"
+  # the stats page's top-down pictures of the item's maps (heatmap background), made now rather than when first
+  # played: detached (own session, off the client's pipe), native arm64 python (this script may run translated)
+  MT="$(cd "$(dirname "$0")" && pwd)/maptop.sh"
+  if [ -f "$MT" ] && [ -z "${PELOAD_NO_MAPTOP:-}" ]; then
+    find "$DIR" -name '*.map' -print0 2>/dev/null | xargs -0 /usr/bin/python3 -c 'import os,sys; os.setsid(); os.execv("/usr/bin/arch",["arch","-arm64","/bin/bash"]+sys.argv[1:])' "$MT" \
+      >>"${TMPDIR:-/tmp}/reclaimer_workshop_${ID}_maptop.log" 2>&1 &
+  fi
 else
   signin_err; err "DepotDownloader did not finish Workshop item $ID (log: $LOG)"
 fi

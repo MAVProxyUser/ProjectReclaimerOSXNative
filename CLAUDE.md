@@ -222,7 +222,8 @@ in /Library/Logs/DiagnosticReports/glhelper-*. hb_vis (F9) is off in helper mode
 D3D object lifetime (2026-10-17, backlog 27): refcounted D3DObjs, freed via d3dobj_stage/d3dobj_reap (see the BACKLOG entry); PELOAD_D3D_NOFREE=1 = old.
 Map pictures (2026-10-17): hb_note_map only keeps real cache maps ("daeh" v13; the engine's autosaves are also .map files); the stats
 server makes a missing maptop picture in the background the first time a map is played (st_maptop_ensure: arch -arm64 python3
-re-tools/h3bsp.py; PELOAD_MAPTOP_TOOL, PELOAD_NO_MAPTOP); maptop.sh also covers Workshop maps; h3bsp.py reads editing-kit (H3EK) maps,
+re-tools/h3bsp.py; PELOAD_MAPTOP_TOOL, PELOAD_NO_MAPTOP); maptop.sh also covers Workshop maps (and takes map files as arguments:
+workshop-helper.sh runs it on a finished DepotDownloader item); h3bsp.py reads editing-kit (H3EK) maps,
 whose play tag is empty: the layout tables are in the zone tag (+0x1C ext, +0x34 pages, +0x58 segments) and page offsets are file offsets.
 Unfocused/hidden clients are held at 60 fps by the engine; PELOAD_MAX_FPS caps lower (default 30 when hidden).
 Betrayal popup (backlog 15): halo3's native GUI screen c_gui_screen_boot_betrayer, posted by halo3+0xff5fc when
@@ -261,6 +262,10 @@ minimizes, QR_HIDE=1 = no window for log-only runs). The old "minimized client s
 mutex bug (55811fa), not minimizing. Process matches must be anchored (`pgrep -f '^[^ ]*build/peload'`):
 an unanchored pattern also matches shells whose command text mentions build/peload.
 
+Faults on loader threads (2026-10-17, backlog 19): only threads with a TEB (main + CreateThread, __thread g_guest_thr) hand a
+hardware fault to the game's exception handlers; a loader thread's fault is reported as "[CRASH] fault on loader thread '<name>'"
+with the loader function (dladdr). Before, the game's handler (Rust) ran there and faulted on gs:[0x58]=0 (exe+0x1d6455d,
+eprintln) or the crash handler faulted, hiding the real fault. PELOAD_SEH_ALL_THREADS=1 = old; PELOAD_TEST_LOADER_FAULT=<secs> tests it.
 Thread ids (2026-10-16): GetCurrentThreadId MUST be unique per thread (mach thread port; CreateThread's id and
 GetThreadId match it). It returned 0x1000 everywhere, which silently disabled every msvcp140 std::mutex (its owner
 check skips the lock when the ids match) -> data races + a lock left held -> intermittent hang at match start.

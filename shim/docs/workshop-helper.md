@@ -40,6 +40,11 @@ Literal lines for a successful `--subscribe` of item 2933266434 with the default
 
 A failure is a single line, for example `{"Error":"Steam Workshop download timed out"}`.
 
+Our replacement, shim/tools/workshop-helper.sh (DepotDownloader), also makes the stats page's top-down pictures of the
+item's maps once it has printed `Ready`: `maptop.sh <the item's .map files>` in its own session, off the client's pipe,
+under native arm64 python (the script itself may run translated), log `$TMPDIR/reclaimer_workshop_<id>_maptop.log`.
+`PELOAD_NO_MAPTOP=1` skips it. (Before, a downloaded map got its picture the first time it was played.)
+
 ## 1. The command line and how the parent spawns it (CONFIRMED)
 
 Spawner **exe+0x803290** (`fn(out, self, item_id: u64, update: bool, cancel: &AtomicBool, progress_data,
