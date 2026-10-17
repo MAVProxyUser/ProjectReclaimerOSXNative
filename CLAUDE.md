@@ -140,14 +140,25 @@ Overlay "visible only" (F9 / PELOAD_HB_VISIBLE): hb_vis_tick blits the camera dr
 and reads it back through a 3-PBO ring (2 frames late, no stall); hb_vis keeps an object when the scene at its centre /
 top / bottom is not nearer than its front (centre moved toward the camera by radius + 0.3). Label text is
 PELOAD_HB_TEXT_PX window pixels tall (default 7; the page's Text -/+).
-Frame rate (2026-10-17, FKK BTB, 60 players, `PELOAD_D3DGL_PROF`): 3,000-4,700 draws/frame, ~9 us of loader + driver
-per draw. The biggest phase is "texs" (texture/sampler binds: 0.4-1.2 s per 2 s) -- NOT uploads (texture re-uploads
-7-430 ms, buffer textures ~15 ms per 2 s; `[prof] textures` / `[prof] buffer textures` lines) and not compute waits
-(none): it is Apple's GL driver revalidating on each bind, translated under Rosetta. Real fix = PERF-PLAN.md option 1
-(native GL helper process). Done meanwhile: getenv cache (cgetenv: the loader's 553 getenv calls on literal keys hit a
--- removed again: peload_cgetenv already caches PELOAD_* lookups), and a skip for re-uploads
-when only mips below the BC-decoded base level changed (dpart/dmin per resource; PELOAD_D3DGL_NOMIPSKIP; 0 hits in BTB
-so far: halo3 rewrites whole textures). The client's Advanced graphics settings (Shadows, LOD, draw distance) cut draws.
+Frame rate (overnight 2026-10-17; details + numbers in shim/docs/PERF-PLAN.md "Overnight"): 100-player Infection
+15-24 -> 37-48 fps. Particle compute (dxbc_cpu.c) is a SIMT executor (64 lanes, active lanes only; PELOAD_CS_SCALAR = old,
+PELOAD_CS_CHECK compares both byte for byte) on PELOAD_CS_WORKERS (4) dependency-ordered workers with read-only inputs
+snapshotted once per resource version (CsSnap). GL submission thread = shim/src/d3dsubmit.c (PELOAD_D3DGL_SUBMIT=1/0/auto;
+play.sh: auto = on at 40+ session players; switchable at run time at a Present: stats control do=submit&on=, in-game A/B
+PELOAD_AB=submit|memcpy|glcache|cbbatch:<secs> logs [ab] per phase -- the way to compare anything in a live game, since
+scenes vary too much between runs). Under it: Map(READ,DO_NOT_WAIT) never drains (WAS_STILL_DRAWING), Map(WRITE) renames
+blocks, queries are harvested every 128 commands, 1 frame of lead. Diagnostics: PELOAD_SAMPLE (per-thread module/function
+breakdown, callers of memmove/memcpy, generated-code pools named), PELOAD_GLCOUNT (GL calls per 2 s), PELOAD_D3DGL_PROF
+[submit] line (GL-thread waits for work/compute/GL lock, compute input bytes), PELOAD_CALLCOUNT=<thread name> (Win32 calls
+per thread), PELOAD_TRACE_WOA=<thread>. tools/glbench.sh: Apple's GL driver is ~1.5x faster native than under Rosetta --
+the native GL helper (PERF-PLAN option 1) is the next big step for BTB-sized games, where the GL thread (~6.3 us/draw)
+is the limit; the GPU is 15-27% busy. Not worth it (A/B neutral): the GL state cache (PELOAD_D3DGL_GLCACHE=1, 31 -> 18
+calls/draw), batched CB maps. mach_absolute_time is NANOSECONDS under Rosetta (timebase 1/1): convert with mt_us().
+Busy-poll damper: the client's mcc-voice thread (no mic) polls GetAsyncKeyState ~500k/s; PELOAD_POLL_DAMP(_THREADS).
+Big guest memcpy/memset (>= 2 KB) run on the host's (PELOAD_GUEST_MEMCPY=1 = old). Trace stubs (PELOAD_TRACE_ALL,
+CALLCOUNT) are RWX-permanent and keep xmm0-3; never trace halo3's ws2 imports (the client checks them: "Native transport
+instruction/import mismatch"). The texture-bind notes: texs = Apple's driver revalidating on binds; the client's Advanced
+graphics settings (Shadows, LOD, draw distance) cut draws.
 Mods/Workshop (user guide: shim/docs/mods.md; `shim/tools/servers.sh` = busiest servers + their mods from `discover`,
 whose JSON has per-server mods[{title, maps[{stem,digest}], size, shared}]): the client's own `workshop-download
 --subscribe <PublishedFileId>` helper needs Steam (its command line is in /tmp/reclaimer_play.log); DepotDownloader

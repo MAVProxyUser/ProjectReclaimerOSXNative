@@ -1,5 +1,50 @@
 # Frame-rate plan
 
+## Overnight 2026-10-17: where big games stand
+
+Targets (the user: at least as good as existing Mac ports; the best published one is a Wine+DXVK+MoltenVK Reclaimer
+port, steady 60 capped / ~95-120 uncapped on an M2 Max, BTB "playable"): small games 120 fps median, BTB a steady 60,
+100+ players 60 median (dips to 45).
+
+| game (M4 Max, quiet-run client) | before | after |
+|---|---|---|
+| [US-W] Infection, ~90-100 players, Valhalla | 15-24 fps @ ~3,000 draws | 37-48 fps @ 2,900-3,300 draws |
+| same server, 57-62 players, Sandtrap (auto mode) | -- | 35-61 fps (mostly 42-53) @ 1,300-1,800 draws |
+| 66-player Slayer (AU), Snowbound | -- | 55-68 fps @ ~2,500 draws (submit on or off) |
+| local Valhalla, 1 player, spawn view | -- | 62-64 fps @ 2,190 draws (submit off) |
+
+What moved the 100-player number, in order of effect:
+1. **CPU particle compute** (`dxbc_cpu.c`): the renderer waited ~10 ms a frame for particle results. Now a SIMT
+   executor (each instruction across 64 lanes, active lanes only; `PELOAD_CS_SCALAR` = old, `PELOAD_CS_CHECK` runs both
+   and compares the UAVs byte for byte -- 0 differences over 10k+ dispatches), 4 dependency-ordered workers
+   (`PELOAD_CS_WORKERS`), and read-only inputs copied once per resource version instead of per dispatch (was ~0.5 GB/s).
+   235 -> 87 us per dispatch; compute waits 22-55% -> 1-11% of the GL thread.
+2. **No per-frame queue drains** under the submission thread: `Map(READ, DO_NOT_WAIT)` of a staging texture answers
+   `DXGI_ERROR_WAS_STILL_DRAWING` while a queued copy into it hasn't run; `Map(WRITE)` renames the block like
+   WRITE_DISCARD (copying the newest contents) when no queued write targets the resource.
+3. **GL submission thread** (`PELOAD_D3DGL_SUBMIT`, d3dsubmit.c), in-game A/B (`PELOAD_AB=submit:20` flips it every 20 s
+   and logs each phase): +10-15% with ~60-100 players, even at 66, -7% alone (its per-draw cost plus up to a frame staler
+   occlusion results = ~4% more draws). So `play.sh` runs it in `auto` mode: on at 40+ players in the session.
+
+Measured and found NOT to be the limit (keep for reference):
+- **GPU**: 15-27% utilised in a 57-player game at 28 fps (`ioreg ... "Device Utilization %"`).
+- **Redundant GL calls**: big games make ~31 GL calls per draw (`PELOAD_GLCOUNT=1`): BindBuffer 8, Map/Unmap 2.6 each,
+  BindBufferRange 2.6, VertexAttribPointer 2.4, stencil 2.6. A per-context state cache (`PELOAD_D3DGL_GLCACHE=1`) cuts
+  that to ~18 with no measurable fps change -- Apple's driver returns early on redundant binds; the cost is in real state
+  changes, the draw calls themselves and copies. Batching a draw's CB uploads into one ring map: neutral too.
+- **halo3's main thread**: copies its whole game state with vcruntime's memcpy every frame (23% of that thread); big
+  copies now run on the host's memmove (`PELOAD_GUEST_MEMCPY=1` = old), but the main thread wasn't the limit (A/B neutral).
+- Some phases of public games are limited outside this Mac (an Australian server: every thread mostly idle at 17-33 fps).
+
+Native GL helper (option 1 below), re-measured with `shim/tools/glbench.sh` (the same GL draw loop built x86_64 and
+arm64): Apple's driver is **~1.5x** faster natively (2.9 -> 1.9 us per draw with 2 textures + 2 CBs; 3.3 -> 2.1 with
+6 + 4), not ~2x. With the GL thread the limit in BTB-sized games (~6.3 us per draw, ~160k draws/s), that is the
+remaining big step towards a steady 60 there.
+
+Other finds on the way: the client's `mcc-voice` thread polled the push-to-talk key ~500k times a second with no sleep
+(no microphone) -- now damped (`PELOAD_POLL_DAMP`); `mach_absolute_time` is in nanoseconds under Rosetta (timebase 1/1),
+so tick math assuming 24 MHz was 41x off.
+
 Status 2026-10-16, Big Team Battle numbers added 2026-10-17. Measurements are from a direct Guardian match on an M4 Max (`PELOAD_D3DGL_PROF=1`,
 2-second windows) unless noted.
 
@@ -65,7 +110,7 @@ Takeaways:
 
 ## Options
 
-### 1. Native GL helper process (recommended big step; estimated up to ~2× fps)
+### 1. Native GL helper process (recommended big step; the driver is ~1.5× faster natively, glbench 2026-10-17)
 
 Every GL call already goes through one function table (`G.*`, loaded with dlsym). Point those entries at
 encoders that append opcodes and arguments to a shared-memory ring. A small native arm64 helper
@@ -84,7 +129,7 @@ process maps the ring, creates the GL context and replays the calls natively.
 - Effort: multiple days. The `G` table has ~150 entry points, so generate the encoders and decoders
   from one signature list.
 
-### 2. Submission thread inside the process (estimated +25–30%)
+### 2. Submission thread inside the process (DONE 2026-10-17: +10-15% in 60-100 player games, -7% alone; `auto` mode)
 
 Run the whole D3D11→GL translation on a GL thread; the engine's `ID3D11DeviceContext` calls only
 enqueue. Overlaps the engine's ~22% with the loader and driver, but the driver stays translated.
@@ -98,7 +143,7 @@ enqueue. Overlaps the engine's ~22% with the loader and driver, but the driver s
 - Program switches are the most expensive real state change; count them per frame (`PELOAD_D3DGL_PROF`
   could report program/texture/UBO changes), and see whether an identical-bytecode shader shares
   programs (`canon`) more aggressively across materials.
-- `PrimitiveRestartIndex` is set on every strip draw; cache it.
+- `PrimitiveRestartIndex` is set on every strip draw; cache it. (Done in the opt-in GL cache, 2026-10-17: no fps change.)
 - Uniform buffers: ~6 range binds per draw; one combined block per program would cut binds but needs
   translator support.
 
