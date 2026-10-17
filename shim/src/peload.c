@@ -4842,9 +4842,13 @@ static void d3dgl_ensure_tbo(D3DObj*o){
 static void d3dgl_bind_res(unsigned prog,const int*tloc,const signed char*tt,int*units_set,D3DObj**srvs,D3DObj**views,D3DObj**samps,int ubase,int umax);
 static void d3dgl_bind_texs_p(unsigned prog,const int*tloc,const signed char*tt,int*units_set){
     d3dgl_bind_res(prog,tloc,tt,units_set,g_d3dst.psrv,g_d3dst.psrvv,g_d3dst.pssamp,0,16); }
+// The active texture unit of the render context (glActiveTexture is a full driver call under Rosetta: skip it when
+// the unit is already active). ~0u = unknown (after anything else may have switched it).
+static unsigned g_active_unit=~0u; static unsigned long g_tb_active, g_tb_tex, g_tb_samp, g_tb_uni;   // PELOAD_D3DGL_PROF counts
+static inline void gs_active(unsigned u){ if(g_active_unit!=u){ G.ActiveTexture(GLE_TEX0+u); g_active_unit=u; g_tb_active++; } }
 static void d3dgl_bind_res(unsigned prog,const int*tloc,const signed char*tt,int*units_set,D3DObj**srvs,D3DObj**views,D3DObj**samps,int ubase,int umax){
     if(!prog) return; int unit=ubase;
-    if(!g_unitcache_ok){ memset(g_unit_tex,0xff,sizeof g_unit_tex); memset(g_unit_tgt,0,sizeof g_unit_tgt); memset(g_unit_samp,0xff,sizeof g_unit_samp); g_unitcache_ok=1; }
+    if(!g_unitcache_ok){ memset(g_unit_tex,0xff,sizeof g_unit_tex); memset(g_unit_tgt,0,sizeof g_unit_tgt); memset(g_unit_samp,0xff,sizeof g_unit_samp); g_unitcache_ok=1; g_active_unit=~0u; }
     int nocache=getenv("PELOAD_D3DGL_NOBINDCACHE")!=0;
     // halo3 binds the map/material textures to high, SPARSE SRV slots (seen: t13,t14,t16,t17), not just
     // t0-t7. Cover slots 0..31, and PACK each declared sampler into the next contiguous GL texture unit
@@ -4860,17 +4864,20 @@ static void d3dgl_bind_res(unsigned prog,const int*tloc,const signed char*tt,int
                 char m[240]; int k=snprintf(m,sizeof m,"  [texcensus] t%d f%u kind%u %ux%u arr=%u depth=%u mips=%u misc=0x%x bind=0x%x %s uploadable=%d\n",r,tx->fmt,tx->kind,tx->w,tx->h,tx->arr,tx->depth,tx->mips,tx->misc,tx->bindf,tx->glfbo?"RT":"asset",up||tx->glfbo); (void)!write(2,m,k); } }
         unsigned want = tt ? g_tt_target[(tt[r]>=0&&tt[r]<6)?tt[r]:0] : GLE_TEX2D;
         int isbuf = tx && tx->kind==1;
-        if(isbuf){ if(want==0x8C2A){ G.ActiveTexture(GLE_TEX0+unit); d3dgl_ensure_tbo(tx); } }
-        else if(tx && (!tx->gltex || tx->gl_dirty || !tx->gl_uploaded)){ G.ActiveTexture(GLE_TEX0+unit); d3dgl_ensure_tex(tx); }   // upload (binds on this unit) first
+        if(isbuf){ if(want==0x8C2A){ gs_active(unit); d3dgl_ensure_tbo(tx); g_unit_tex[unit]=~0u; } }
+        else if(tx && (!tx->gltex || tx->gl_dirty || !tx->gl_uploaded)){ gs_active(unit); d3dgl_ensure_tex(tx); g_unit_tex[unit]=~0u; }   // upload (binds on this unit) first
         unsigned wtex = 0; if(isbuf){ if(want==0x8C2A) wtex=tx->gltbo; }
         else if(tx){ unsigned have=tx->gltarget?tx->gltarget:GLE_TEX2D; if(!tt) want=have; if(have==want) wtex=tx->gltex; }
         D3DObj*sv=views?views[r]:0; int skip = !isbuf && tx && tx->glsrgb && !dxgi_is_srgb(sv?sv->vfmt:tx->fmt);   // UNORM view of sRGB storage: raw read
         unsigned wsamp = (!isbuf && G.BindSampler && r<16 && samps && !getenv("PELOAD_D3DGL_NOSAMPLER")) ? d3dgl_glsampler_x(samps[r],tx?tx->glhasmips:0,skip) : 0;
-        if(!wsamp && tx && tx->glsrgb && wtex){ G.ActiveTexture(GLE_TEX0+unit); G.BindTexture(want,wtex); G.TexParameteri(want,0x8A48,skip?0x8A4A:0x8A49); g_unit_tex[unit]=~0u; }   // no sampler object: texture's own decode state
-        if(!nocache && g_unitcache_ok && g_unit_tex[unit]==wtex && g_unit_tgt[unit]==want && g_unit_samp[unit]==wsamp){
-            if(!(units_set&&*units_set)) G.ProgramUniform1i(prog,loc,unit);
-            unit++; continue; }
-        G.ActiveTexture(GLE_TEX0+unit);
+        if(!wsamp && tx && tx->glsrgb && wtex){ gs_active(unit); G.BindTexture(want,wtex); G.TexParameteri(want,0x8A48,skip?0x8A4A:0x8A49); g_unit_tex[unit]=~0u; }   // no sampler object: texture's own decode state
+        if(!(units_set&&*units_set)){ G.ProgramUniform1i(prog,loc,unit); g_tb_uni++; }
+        int texsame=!nocache && g_unitcache_ok && g_unit_tex[unit]==wtex && g_unit_tgt[unit]==want, sampsame=!nocache && g_unitcache_ok && g_unit_samp[unit]==wsamp;
+        if(texsame && sampsame){ unit++; continue; }
+        if(texsame && !getenv("PELOAD_D3DGL_NOSPLITBIND")){   // only the sampler changed: glBindSampler names its unit itself
+            g_unit_samp[unit]=wsamp; if(G.BindSampler){ G.BindSampler((unsigned)unit,wsamp); g_tb_samp++; } unit++; continue; }
+        gs_active(unit); g_tb_tex++;
+        int bindsamp=!sampsame || getenv("PELOAD_D3DGL_NOSPLITBIND");
         g_unit_tex[unit]=wtex; g_unit_tgt[unit]=want; g_unit_samp[unit]=wsamp;
         if(isbuf) G.BindTexture(want,wtex);
         else if(tx){ unsigned have=tx->gltarget?tx->gltarget:GLE_TEX2D;
@@ -4880,8 +4887,7 @@ static void d3dgl_bind_res(unsigned prog,const int*tloc,const signed char*tt,int
                     for(int i=0;i<nms;i++) if(ms[i]==key){ f=1; break; }
                     if(!f && nms<64){ ms[nms++]=key; char m[200]; int k=snprintf(m,sizeof m,"  [texcensus] MISMATCH t%d shader-wants=0x%x resource=0x%x %ux%u arr=%u f%u\n",r,want,have,tx->w,tx->h,tx->arr,tx->fmt); (void)!write(2,m,k); } } } }
         else G.BindTexture(want,0);
-        if(G.BindSampler) G.BindSampler((unsigned)unit, wsamp);
-        if(!(units_set&&*units_set)) G.ProgramUniform1i(prog,loc,unit);
+        if(bindsamp && G.BindSampler){ G.BindSampler((unsigned)unit, wsamp); g_tb_samp++; }
         unit++; }
     if(units_set) *units_set=1;   // the unit assignment is fixed per program: sampler uniforms set once
 }
@@ -5511,6 +5517,8 @@ static void prof_report(void){ if(!prof_on()) return; uint64_t now=prof_now(); i
       for(int i=0;i<8;i++){ j+=snprintf(b+j,sizeof b-j," %s=%.0f",nm[i],g_ph_ns[i]/1e6); g_ph_ns[i]=0; } b[j++]='\n'; (void)!write(2,b,j); }
     { char b[200]; int j=snprintf(b,sizeof b,"  [prof] textures: %lu uploads (%lu BC-decoded, %.1f MB, %.0f ms), %lu skipped (only lower mips changed)\n",
           g_tx_up,g_tx_dec,g_tx_bytes/1e6,g_tx_ms,g_tx_skip); (void)!write(2,b,j); g_tx_up=g_tx_dec=g_tx_skip=0; g_tx_bytes=0; g_tx_ms=0;
+      j=snprintf(b,sizeof b,"  [prof] texture binds: %lu unit switches, %lu texture binds, %lu sampler binds, %lu sampler uniforms\n",g_tb_active,g_tb_tex,g_tb_samp,g_tb_uni);
+      (void)!write(2,b,j); g_tb_active=g_tb_tex=g_tb_samp=g_tb_uni=0;
       j=snprintf(b,sizeof b,"  [prof] buffer textures: %lu re-uploads, %.1f MB, %.0f ms; biggest:",g_tbo_up,g_tbo_bytes/1e6,g_tbo_ms);
       for(int i=0;i<8;i++) if(g_tbo_top[i].o && g_tbo_top[i].bytes>1000000 && j<180) j+=snprintf(b+j,sizeof b-j," %lluKBx%lu",(unsigned long long)(g_tbo_top[i].o->size>>10),g_tbo_top[i].n);
       b[j++]='\n'; (void)!write(2,b,j); g_tbo_up=0; g_tbo_bytes=0; g_tbo_ms=0; memset(g_tbo_top,0,sizeof g_tbo_top); }
@@ -6149,7 +6157,7 @@ static void d3dgl_blit_fullscreen_i(unsigned vao){
     G.Disable(0x0B71); G.Disable(0x0BE2);
     G.ClearColor(0.02f,0.02f,0.05f,1.0f); G.Clear(GLE_COLORBIT);
     G.UseProgram(0); G.BindProgramPipeline(0); G.UseProgram(g_d3dgl_blit_prog);
-    TEXCACHE_INVALIDATE(); G.ActiveTexture(GLE_TEX0); G.BindTexture(GLE_TEX2D,g_d3dgl_present_tex);
+    TEXCACHE_INVALIDATE(); G.ActiveTexture(GLE_TEX0); g_active_unit=0; G.BindTexture(GLE_TEX2D,g_d3dgl_present_tex);
     // present shows the raw stored bytes (the swap chain is UNORM; the game already sRGB-encoded via its RTV)
     if(G.BindSampler) G.BindSampler(0,0); G.TexParameteri(GLE_TEX2D,0x8A48,0x8A4A/*SKIP_DECODE*/); G.Disable(0x8DB9);
     if(g_d3dgl_blit_sloc>=0) G.ProgramUniform1i(g_d3dgl_blit_prog,g_d3dgl_blit_sloc,0);

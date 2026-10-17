@@ -30,6 +30,12 @@ FKK BTB, 60 players, Sandtrap/Avalanche/High Ground, `PELOAD_D3DGL_PROF=1` (per 
 | buffer-texture re-uploads | ~130 per 2 s (3 buffers, once per frame each), ~136 MB, ~15 ms |
 | compute (particles) waits at bind | none |
 
+Per-call counts (2026-10-17, `[prof] texture binds`, local Valhalla, ~2,200 draws/frame): per 2 s ~110k
+glActiveTexture, ~120k glBindTexture, ~68k glBindSampler = ~300k calls in 540-590 ms, about 1.9 us per call -- the
+game changes about one texture per draw. Trimmed: the active unit is cached (gs_active) and a slot whose texture is
+unchanged only rebinds its sampler (glBindSampler names its unit; PELOAD_D3DGL_NOSPLITBIND = old). GL 4.1 on Apple has
+no multi-bind (glBindTextures is 4.4) or DSA, so each texture change stays two driver calls.
+
 So "texs" is the driver's cost for texture and sampler binds themselves, which grows with the number of distinct
 materials on screen (60 players' armour, weapons, effects). Caching can't remove it (binds that repeat are already
 skipped); fewer draws (the client's Advanced graphics settings) or a native driver (option 1) can.
