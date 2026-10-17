@@ -13,7 +13,8 @@
 //     the newest block and queue a "dirty" at Unmap. READ / WRITE / READ_WRITE maps wait for the queue to drain.
 //   * UpdateSubresource copies the source bytes into the queue.
 //   * Queries: Begin/End are queued; GetData answers occlusion results the GL thread harvested (S_FALSE until then).
-//   * Present is queued; the game may run at most PELOAD_D3DGL_SUBMIT_FRAMES (default 2) frames ahead.
+//   * Present is queued; the game may run at most PELOAD_D3DGL_SUBMIT_FRAMES (default 1) frames ahead (more = staler
+//     occlusion results, so more draws).
 // Without PELOAD_D3DGL_SUBMIT everything runs inline exactly as before (state is copied g_rst -> g_d3dst per draw).
 
 // The thread can be switched at run time (at a Present, once nothing is mapped): the stats page's submit control or
@@ -197,7 +198,7 @@ static void sub_present(void){
     sub_switch();
     if(!sub_on()){ d3dgl_present(); return; } sub_start();
     (void)sub_alloc(SQ_PRESENT,0); sub_push(); uint64_t want=++g_sq_pres_req;
-    static int ahead=-1; if(ahead<0){ const char*e=getenv("PELOAD_D3DGL_SUBMIT_FRAMES"); ahead=e?atoi(e):2; if(ahead<1) ahead=1; if(ahead>4) ahead=4; }
+    static int ahead=-1; if(ahead<0){ const char*e=getenv("PELOAD_D3DGL_SUBMIT_FRAMES"); ahead=e?atoi(e):1; if(ahead<1) ahead=1; if(ahead>4) ahead=4; }
     if(want>(uint64_t)ahead && __atomic_load_n(&g_sq_pres_done,__ATOMIC_ACQUIRE)<want-(uint64_t)ahead){ double t0=mono_s(); g_sq_waitframe++;
         pthread_mutex_lock(&g_sq_mx); __atomic_store_n(&g_sq_psleep,1,__ATOMIC_SEQ_CST); while(__atomic_load_n(&g_sq_pres_done,__ATOMIC_ACQUIRE)<want-(uint64_t)ahead) sub_wait(&g_sq_pcv); g_sq_psleep=0; pthread_mutex_unlock(&g_sq_mx);
         g_sq_waitms+=(mono_s()-t0)*1000; }
@@ -245,7 +246,7 @@ static void* sub_thread(void*a){ (void)a; pthread_setname_np("shim-gl-submit");
             // caught up with the game thread: poll for a while before sleeping -- a condvar wake per command costs
             // tens of microseconds and the game thread pushes thousands of commands a frame
             { static int spin_us=-1; if(spin_us<0){ const char*e=getenv("PELOAD_D3DGL_SUBMIT_SPIN"); spin_us=e?atoi(e):500; }
-              uint64_t t0=mach_absolute_time(), lim=(uint64_t)spin_us*24;   // mach ticks are ~41.7 ns on Apple silicon (24 MHz)
+              uint64_t t0=mach_absolute_time(), lim=mt_us((uint64_t)spin_us);
               while(g_sq_tail==__atomic_load_n(&g_sq_head,__ATOMIC_ACQUIRE) && mach_absolute_time()-t0<lim) __asm__ volatile("pause");
               if(g_sq_tail!=__atomic_load_n(&g_sq_head,__ATOMIC_ACQUIRE)) continue; }
             sub_harvest_queries(); double w0=mono_s();
@@ -254,6 +255,8 @@ static void* sub_thread(void*a){ (void)a; pthread_setname_np("shim-gl-submit");
             g_sq_csleep=0; pthread_mutex_unlock(&g_sq_mx); g_sq_idle_s+=mono_s()-w0; continue; }
         SqHdr*c=(SqHdr*)(g_sq+t%SQ_BYTES); uint32_t type=c->type, sz=c->size;
         if(type!=SQ_WRAP) sub_exec(type,(uint8_t*)(c+1));
+        // occlusion results as soon as the GPU has them (the game polls GetData; "not ready" makes it draw the object)
+        { static unsigned hn; if(g_sq_nqpend && (++hn&127)==0) sub_harvest_queries(); }
         __atomic_store_n(&g_sq_tail,t+sz,__ATOMIC_RELEASE);
         __atomic_thread_fence(__ATOMIC_SEQ_CST);
         if(type==SQ_FENCE || type==SQ_PRESENT || __atomic_load_n(&g_sq_psleep,__ATOMIC_SEQ_CST)){ pthread_mutex_lock(&g_sq_mx); pthread_cond_broadcast(&g_sq_pcv); pthread_mutex_unlock(&g_sq_mx); } }

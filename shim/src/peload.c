@@ -346,15 +346,18 @@ void __attribute__((ms_abi)) on_trace(uint32_t idx){
     if(idx<(uint32_t)imp_count){ ws("  >> "); ws(imp_dll[idx]); ws("!"); ws(imp_fn[idx]); ws("\n"); } }
 static uint8_t *g_trpool; static size_t g_troff; static int g_trexec;
 static void *make_trace_stub(uint32_t idx, void *real){
-    if(g_trexec) mprotect(g_trpool, 96*8192, PROT_READ|PROT_WRITE);
-    uint8_t *p=g_trpool+g_troff; g_troff+=96; int o=0;
-    // frame: sub 0x48 keeps 16-align; [rsp..+0x20) = on_trace's shadow,
-    // saves live at +0x28..+0x40 (safely below the shadow region).
-    p[o++]=0x48;p[o++]=0x83;p[o++]=0xEC;p[o++]=0x48;                       // sub rsp,0x48
+    // the pool stays RWX (set up in main): toggling it RW while another thread runs a stub faulted (SIGBUS) when
+    // halo3.dll's imports were bound at run time under PELOAD_TRACE_ALL / PELOAD_CALLCOUNT
+    static pthread_mutex_t tm=PTHREAD_MUTEX_INITIALIZER; pthread_mutex_lock(&tm);
+    uint8_t *p=g_trpool+g_troff; g_troff+=144; int o=0;
+    // frame: sub 0x88 keeps 16-align; [rsp..+0x20) = on_trace's shadow; integer args saved at +0x28..+0x40 and the
+    // float args (xmm0-3: on_trace may clobber them -- CRT math calls go through these stubs too) at +0x48..+0x78
+    p[o++]=0x48;p[o++]=0x81;p[o++]=0xEC;p[o++]=0x88;p[o++]=0;p[o++]=0;p[o++]=0;   // sub rsp,0x88
     p[o++]=0x48;p[o++]=0x89;p[o++]=0x4C;p[o++]=0x24;p[o++]=0x28;           // mov [rsp+0x28],rcx
     p[o++]=0x48;p[o++]=0x89;p[o++]=0x54;p[o++]=0x24;p[o++]=0x30;           // mov [rsp+0x30],rdx
     p[o++]=0x4C;p[o++]=0x89;p[o++]=0x44;p[o++]=0x24;p[o++]=0x38;           // mov [rsp+0x38],r8
     p[o++]=0x4C;p[o++]=0x89;p[o++]=0x4C;p[o++]=0x24;p[o++]=0x40;           // mov [rsp+0x40],r9
+    { static const uint8_t xs[4]={0x44,0x4C,0x54,0x5C}; for(int k=0;k<4;k++){ p[o++]=0xF3;p[o++]=0x0F;p[o++]=0x7F;p[o++]=xs[k];p[o++]=0x24;p[o++]=(uint8_t)(0x48+16*k); } }  // movdqu [rsp+0x48+16k],xmmk
     p[o++]=0xB9; *(uint32_t*)(p+o)=idx; o+=4;                              // mov ecx,idx
     p[o++]=0x48;p[o++]=0xB8; *(uint64_t*)(p+o)=(uint64_t)&on_trace; o+=8;  // mov rax,&on_trace
     p[o++]=0xFF;p[o++]=0xD0;                                               // call rax
@@ -362,10 +365,11 @@ static void *make_trace_stub(uint32_t idx, void *real){
     p[o++]=0x48;p[o++]=0x8B;p[o++]=0x54;p[o++]=0x24;p[o++]=0x30;           // mov rdx,[rsp+0x30]
     p[o++]=0x4C;p[o++]=0x8B;p[o++]=0x44;p[o++]=0x24;p[o++]=0x38;           // mov r8,[rsp+0x38]
     p[o++]=0x4C;p[o++]=0x8B;p[o++]=0x4C;p[o++]=0x24;p[o++]=0x40;           // mov r9,[rsp+0x40]
-    p[o++]=0x48;p[o++]=0x83;p[o++]=0xC4;p[o++]=0x48;                       // add rsp,0x48
+    { static const uint8_t xs[4]={0x44,0x4C,0x54,0x5C}; for(int k=0;k<4;k++){ p[o++]=0xF3;p[o++]=0x0F;p[o++]=0x6F;p[o++]=xs[k];p[o++]=0x24;p[o++]=(uint8_t)(0x48+16*k); } }  // movdqu xmmk,[rsp+0x48+16k]
+    p[o++]=0x48;p[o++]=0x81;p[o++]=0xC4;p[o++]=0x88;p[o++]=0;p[o++]=0;p[o++]=0;   // add rsp,0x88
     p[o++]=0x48;p[o++]=0xB8; *(uint64_t*)(p+o)=(uint64_t)real; o+=8;       // mov rax,real
     p[o++]=0xFF;p[o++]=0xE0;                                               // jmp rax
-    if(g_trexec) mprotect(g_trpool, 96*8192, PROT_READ|PROT_EXEC);
+    sys_icache_invalidate(p,144); pthread_mutex_unlock(&tm);
     return p;
 }
 
@@ -664,6 +668,8 @@ double g_gameplay_t0;   // monotonic seconds when the client logged "gameplay pr
 double g_menu_ready_t0; // ... "Menu loading screen finished" (frontend menu mode)
 volatile int g_games_ended; // count of "Carnage report opened" (a match ended; PELOAD_AUTOCLICK_AFTER_GAME)
 static double mono_s(void){ struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t); return t.tv_sec+t.tv_nsec*1e-9; }
+// microseconds -> mach_absolute_time units (nanoseconds under Rosetta, 24 MHz ticks natively)
+static uint64_t mt_us(uint64_t us){ static double f; if(!f){ mach_timebase_info_data_t tb; mach_timebase_info(&tb); f=1000.0*tb.denom/tb.numer; } return (uint64_t)(us*f); }
 static int    MSABI i_WriteFile(void *h, const void *buf, uint32_t n, uint32_t *wr, void *ov){
     (void)ov; intptr_t hv=(intptr_t)h;
     if(!g_gameplay_t0 && buf && n>20 && memmem(buf,n,"gameplay presentation ready",27)) g_gameplay_t0=mono_s();
@@ -7468,7 +7474,14 @@ static int g_wab_ready;
 static void wab_ensure(void){ static pthread_mutex_t im=PTHREAD_MUTEX_INITIALIZER; if(g_wab_ready) return;
     pthread_mutex_lock(&im); if(!g_wab_ready){ for(int i=0;i<WAB_N;i++){ pthread_mutex_init(&g_wab[i].m,0); pthread_cond_init(&g_wab[i].c,0);} g_wab_ready=1; } pthread_mutex_unlock(&im); }
 static int wab_bucket(const volatile void*a){ return (int)(((uintptr_t)a>>3) & (WAB_N-1)); }
+// PELOAD_TRACE_WOA=<thread name part>: log that thread's WaitOnAddress calls (timeout, already-changed, waited us, caller)
+static __thread int t_woa=-1, t_woa_n;
 static int MSABI i_WaitOnAddress(volatile void*addr, void*cmp, uint64_t size, uint32_t ms){
+    { static const char*tw=(const char*)1; if(tw==(const char*)1) tw=getenv("PELOAD_TRACE_WOA");
+      if(tw){ if(t_woa<0 || (++t_woa_n&1023)==0){ char nm[64]={0}; pthread_getname_np(pthread_self(),nm,sizeof nm); t_woa=strstr(nm,tw)!=0; }
+        if(t_woa){ static int shown; int pre=addr&&cmp&&size&&size<=8&&memcmp((const void*)addr,cmp,(size_t)size)!=0; double t0=mono_s();
+            if(shown<60){ shown++; char m[200]; int k=snprintf(m,sizeof m,"  [woa] ms=%u size=%llu changed-before=%d caller=%p\n",ms,(unsigned long long)size,pre,__builtin_return_address(0)); (void)!write(2,m,k); }
+            (void)t0; } } }
     wab_ensure(); if(!addr||!cmp||size==0||size>8){ return 1; } int b=wab_bucket(addr);
     pthread_mutex_lock(&g_wab[b].m);
     int changed = memcmp((const void*)addr,cmp,(size_t)size)!=0;
@@ -9205,7 +9218,10 @@ static void bind_imports(uint8_t *base, OPT64 *opt){
             const char *fn = (oft[i]>>63)? 0 : (char*)(base+(uint32_t)oft[i]+2);
             if(!fn){ char ob[24]; snprintf(ob,sizeof ob,"#%u",(unsigned)(oft[i]&0xffff)); fn=strdup(ob); }   // ordinal (named in stub logs)
             // ws2_32: bind through the shared ordinal/name table (see WS2_HANDLE)
-            if(is_ws2){ ft[i]=(uint64_t)((oft[i]>>63)? ws2_by_ordinal((uint32_t)(oft[i]&0xffff)) : ws2_resolve_name(fn)); continue; }
+            if(is_ws2){ void*w=(oft[i]>>63)? ws2_by_ordinal((uint32_t)(oft[i]&0xffff)) : ws2_resolve_name(fn); ft[i]=(uint64_t)w;
+                // (exe only: the client checks halo3's ws2 import slots -- "Native transport instruction/import mismatch")
+                if(w && trace && (uint64_t)base==0x140000000ULL && imp_count<8192){ imp_dll[imp_count]=dll; imp_fn[imp_count]=fn; imp_real[imp_count]=w; ft[i]=(uint64_t)make_trace_stub(imp_count,w); imp_count++; }
+                continue; }
             if(is_xa){ void* xr=xa_resolve((oft[i]>>63)?(uint32_t)(oft[i]&0xffff):0, (oft[i]>>63)?0:fn); if(xr){ ft[i]=(uint64_t)xr; continue; } }
             void *r = uni_resolve(dll, fn);
             if(r && trace && imp_count<8192){ imp_dll[imp_count]=dll; imp_fn[imp_count]=fn; imp_real[imp_count]=r; ft[i]=(uint64_t)make_trace_stub(imp_count,r); imp_count++; }
@@ -10034,7 +10050,7 @@ static void smp_name(uint64_t key,char*w,size_t n){ Dl_info di;
         if(di.dli_sname) snprintf(w,n,"%s:%s",f,di.dli_sname); else snprintf(w,n,"%s+0x%llx",f,(unsigned long long)(key-(uint64_t)di.dli_fbase)); }
     else { const char*pool=0; uint64_t base=0;   // the loader's generated code: say which pool
         if(g_stubpool && key>=(uint64_t)g_stubpool && key<(uint64_t)g_stubpool+32*8192){ pool="import-stub"; base=(uint64_t)g_stubpool; }
-        else if(g_trpool && key>=(uint64_t)g_trpool && key<(uint64_t)g_trpool+96*8192){ pool="trace-stub"; base=(uint64_t)g_trpool; }
+        else if(g_trpool && key>=(uint64_t)g_trpool && key<(uint64_t)g_trpool+144*8192){ pool="trace-stub"; base=(uint64_t)g_trpool; }
         else if(g_glthunk && key>=(uint64_t)g_glthunk && key<(uint64_t)g_glthunk+128*8192){ pool="gl-thunk"; base=(uint64_t)g_glthunk; }
         else if(g_hookpool && key>=(uint64_t)g_hookpool && key<(uint64_t)g_hookpool+(1<<20)){ pool="hook"; base=(uint64_t)g_hookpool; }
         if(pool) snprintf(w,n,"%s+0x%llx",pool,(unsigned long long)(key-base)); else snprintf(w,n,"0x%llx",(unsigned long long)key); } }
@@ -10059,7 +10075,7 @@ static void* sampler_thread(void*a){ (void)a; pthread_setname_np("shim-sampler")
                         if(ti<0 && nthr<96){ ti=nthr++; memset(&thr[ti],0,sizeof thr[ti]); thr[ti].t=t;
                             pthread_t pt=pthread_from_mach_thread_np(t); if(pt) pthread_getname_np(pt,thr[ti].name,sizeof thr[ti].name);
                             if(!thr[ti].name[0]) snprintf(thr[ti].name,sizeof thr[ti].name,"port%u",(unsigned)t); }
-                        Dl_info di; int idle=0; if(dladdr((void*)rip,&di) && di.dli_sname && (strstr(di.dli_sname,"mach_msg")||strstr(di.dli_sname,"__psynch")||strstr(di.dli_sname,"__semwait")||strstr(di.dli_sname,"nanosleep")||strstr(di.dli_sname,"__select")||strstr(di.dli_sname,"__workq")||strstr(di.dli_sname,"kevent")||strstr(di.dli_sname,"__ulock")||strstr(di.dli_sname,"__wait4")||strstr(di.dli_sname,"__recvfrom")||strstr(di.dli_sname,"__read_nocancel")||strstr(di.dli_sname,"__accept")||strstr(di.dli_sname,"__sigsuspend")||strstr(di.dli_sname,"poll"))) idle=1;
+                        Dl_info di; int idle=0; if(dladdr((void*)rip,&di) && di.dli_sname && (strstr(di.dli_sname,"mach_msg")||strstr(di.dli_sname,"__psynch")||strstr(di.dli_sname,"__semwait")||strstr(di.dli_sname,"nanosleep")||strstr(di.dli_sname,"__select")||strstr(di.dli_sname,"__workq")||strstr(di.dli_sname,"kevent")||strstr(di.dli_sname,"__ulock")||strstr(di.dli_sname,"__wait4")||strstr(di.dli_sname,"__recvfrom")||strstr(di.dli_sname,"__read_nocancel")||strstr(di.dli_sname,"__accept")||strstr(di.dli_sname,"__sigsuspend")||strstr(di.dli_sname,"poll")||strstr(di.dli_sname,"semaphore_"))) idle=1;
                         if(ti>=0){ thr[ti].n++; if(!idle){ thr[ti].busy++; int cls=SMP_SYS; uint64_t key=smp_func(rip,&cls); thr[ti].cls[cls]++;
                             uint32_t h=(uint32_t)((key>>2)*2654435761u ^ (uint32_t)ti*0x9E37u)&65535;
                             for(int pr=0;pr<64;pr++){ SmpEnt*e=&tab[(h+pr)&65535]; if(e->key==0){ e->key=key; e->cnt=1; e->th=(uint32_t)ti; e->ret=(cls==SMP_SYS && key==rip)?rtop:0; break; } if(e->key==key && e->th==(uint32_t)ti){ e->cnt++; break; } } } } } }
@@ -10139,8 +10155,8 @@ int main(int argc, char **argv){
     g_stubpool = mmap(0, 32*8192, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANON, -1, 0);
     mprotect(g_stubpool, 32*8192, PROT_READ|PROT_WRITE|PROT_EXEC); g_pool_exec=0; // permanent RWX (thread-safe)
     g_pool_exec = 1;
-    g_trpool = mmap(0, 96*8192, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANON, -1, 0);
-    mprotect(g_trpool, 96*8192, PROT_READ|PROT_EXEC); g_trexec = 1;
+    g_trpool = mmap(0, 144*8192, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANON, -1, 0);
+    mprotect(g_trpool, 144*8192, PROT_READ|PROT_WRITE|PROT_EXEC); g_trexec = 1;   // permanent RWX (thread-safe; no toggle)
     g_glthunk = mmap(0, 128*8192, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANON, -1, 0);
     mprotect(g_glthunk, 128*8192, PROT_READ|PROT_WRITE|PROT_EXEC); g_glth_exec = 0; // permanent RWX (thread-safe; no toggle)
 

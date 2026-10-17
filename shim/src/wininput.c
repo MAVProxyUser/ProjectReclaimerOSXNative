@@ -65,7 +65,20 @@ static uint32_t MSABI wi_GetRawInputDeviceInfoW(void*dev,uint32_t cmd,void*data,
     if(!sz) return (uint32_t)-1;
     if(cmd==0x2000000b/*RIDI_DEVICEINFO*/){ uint32_t need=32; if(!data){ *sz=need; return 0; } if(*sz<need) return (uint32_t)-1; memset(data,0,need); uint32_t*u=data; u[0]=need; u[1]=(dev==(void*)0x4B42)?1:0; return need; }
     if(!data){ *sz=1; return 0; } if(*sz>=1){ ((uint16_t*)data)[0]=0; return 1; } return (uint32_t)-1; }
-static int16_t MSABI wi_GetAsyncKeyState(int k){ return (k>=0&&k<256&&g_keydown[k])?(int16_t)0x8000:0; }
+// Busy-poll damper: the client's "mcc-voice" thread (no microphone) polls the push-to-talk key + the clock in a loop with no
+// sleep -- ~500k GetAsyncKeyState calls a second, a whole core. On threads named in PELOAD_POLL_DAMP_THREADS (default
+// "mcc-voice"), more than 4 polls within 1 ms sleep 0.5 ms here: push-to-talk still reacts within a millisecond.
+// PELOAD_POLL_DAMP=0 = off.
+static __thread int t_damp=-1, t_damp_chk; static __thread uint64_t t_damp_win; static __thread int t_damp_n;
+static void wi_poll_damp(void){
+    static int on=-1; static const char*names; if(on<0){ const char*e=getenv("PELOAD_POLL_DAMP"); on=!(e&&!strcmp(e,"0")); names=getenv("PELOAD_POLL_DAMP_THREADS"); if(!names) names="mcc-voice"; }
+    if(!on) return;
+    if(t_damp<0 || (++t_damp_chk&8191)==0){ char nm[64]={0}; pthread_getname_np(pthread_self(),nm,sizeof nm); t_damp=0;
+        for(const char*p=names; *p; ){ const char*c=strchr(p,','); size_t n=c?(size_t)(c-p):strlen(p); if(n && n<sizeof nm){ char w[64]; memcpy(w,p,n); w[n]=0; if(strstr(nm,w)) t_damp=1; } if(!c) break; p=c+1; } }
+    if(!t_damp) return;
+    uint64_t now=mach_absolute_time(); if(now-t_damp_win>mt_us(1000)){ t_damp_win=now; t_damp_n=0; }
+    if(++t_damp_n>4){ usleep(500); t_damp_win=mach_absolute_time(); t_damp_n=0; } }
+static int16_t MSABI wi_GetAsyncKeyState(int k){ wi_poll_damp(); return (k>=0&&k<256&&g_keydown[k])?(int16_t)0x8000:0; }
 static int16_t MSABI wi_GetKeyState(int k){ if(k<0||k>=256) return 0; return (int16_t)((g_keydown[k]?0x8000:0)|(g_keytoggle[k]?1:0)); }
 static int MSABI wi_GetKeyboardState(uint8_t*s){ if(!s) return 0; for(int i=0;i<256;i++) s[i]=(uint8_t)((g_keydown[i]?0x80:0)|(g_keytoggle[i]?1:0)); return 1; }
 
