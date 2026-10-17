@@ -369,15 +369,8 @@ static void   MSABI i_GetSystemTimeAsFileTime(uint64_t *ft){
     // 100ns ticks since 1601-01-01; 11644473600s between 1601 and 1970
     if(ft) *ft = ((uint64_t)tv.tv_sec + 11644473600ULL)*10000000ULL + (uint64_t)tv.tv_usec*10;
 }
-extern volatile int g_hb_job_pending; static void hb_engine_jobs(void); static void hb_teleport_tick(void);   // hitbox.c: engine-thread jobs (teleport)
-// Engine jobs (teleport) run only when halo3's frame-timing function (halo3+0x9d22c, called at the top of the main
-// loop) queries the clock: between ticks, nothing is mid-update. Running them from an arbitrary QPC call crashed
-// in the physics update (the caller can be in the middle of the tick).
-static uint64_t g_h3_qpc_ra1, g_h3_qpc_ra2;
-static int    MSABI i_QueryPerformanceCounter(uint64_t *c){ if(c) *c=mach_absolute_time();
-    if(__builtin_expect(g_hb_job_pending,0) && g_h3_qpc_ra1){ uint64_t ra=(uint64_t)__builtin_return_address(0); if(ra==g_h3_qpc_ra1||ra==g_h3_qpc_ra2) hb_engine_jobs();
-        else if(getenv("PELOAD_TRACE_QPC")){ static int n; if(n<40){ n++; char m[96]; int k=snprintf(m,sizeof m,"  [qpc] pending job, caller %s+0x%llx\n",ra>=0x180000000ull&&ra<0x187000000ull?"halo3":"?",(unsigned long long)(ra>=0x180000000ull&&ra<0x187000000ull?ra-0x180000000ull:ra)); (void)!write(2,m,k); } } }
-    return 1; }
+extern volatile int g_hb_job_pending; static void hb_engine_jobs(void); static void hb_teleport_tick(void);   // hitbox.c: engine-thread jobs (teleport, run from the frame-timing hook)
+static int    MSABI i_QueryPerformanceCounter(uint64_t *c){ if(c) *c=mach_absolute_time(); return 1; }
 static int    MSABI i_QueryPerformanceFrequency(uint64_t *f){ if(f) *f=1000000000ULL; return 1; }
 // Must be unique per thread: msvcp140's std::mutex (_Mtx_lock) records the owner's GetCurrentThreadId() and SKIPS
 // the real lock when the caller's id equals it ("recursive" re-entry). The old constant 0x1000 made every thread
@@ -9547,28 +9540,40 @@ static void h3set_install(uint8_t*base){ const char*e=getenv("PELOAD_H3"); if(!e
 // checked before patching (another halo3 build is left alone) and relocated (no rip-relative operands).
 // PELOAD_NO_DELHOOK disables it.
 void __attribute__((ms_abi)) hb_on_delete(uint32_t handle);
-static void hbdel_install(uint8_t*base){
-    { static const uint8_t qpc_call[2]={0xFF,0x15};   // the two QPC calls in halo3's frame-timing function (engine-job safe point)
-      if(!memcmp(base+0x9d25a,qpc_call,2) && !memcmp(base+0x9d2d2,qpc_call,2)){ g_h3_qpc_ra1=(uint64_t)(base+0x9d260); g_h3_qpc_ra2=(uint64_t)(base+0x9d2d8); } }
-    if(getenv("PELOAD_NO_DELHOOK")) return;
-    static const uint8_t pro[14]={0x48,0x89,0x5C,0x24,0x10,0x48,0x89,0x6C,0x24,0x18,0x56,0x57,0x41,0x54};
-    uint8_t*site=base+0x342ed8; if(memcmp(site,pro,14)){ (void)!write(2,"  [hbdel] object_delete prologue differs: not hooked\n",52); return; }
-    if(!g_hookpool){ g_hookpool=mmap(0,1<<20,PROT_READ|PROT_WRITE|PROT_EXEC,MAP_PRIVATE|MAP_ANON,-1,0); if(g_hookpool==MAP_FAILED){g_hookpool=0;return;} }
+// Entry hook: at `site` (whose first `len` bytes must equal `pro` and be position-independent), call the Win64 function
+// `fn` with the original rcx/rdx/r8/r9 (volatile registers + xmm0-5 preserved), then run the relocated prologue and
+// continue the original function. Returns 1 if installed.
+static int entry_hook(uint8_t*site,const uint8_t*pro,int len,void*fn){
+    if(len<14 || memcmp(site,pro,(size_t)len)) return 0;
+    if(!g_hookpool){ g_hookpool=mmap(0,1<<20,PROT_READ|PROT_WRITE|PROT_EXEC,MAP_PRIVATE|MAP_ANON,-1,0); if(g_hookpool==MAP_FAILED){g_hookpool=0;return 0;} }
     uint8_t*t=g_hookpool+g_hookoff, *w=t;
     static const uint8_t save[]={0x51,0x52,0x41,0x50,0x41,0x51,0x50,0x41,0x52,0x41,0x53, 0x48,0x81,0xEC,0x80,0,0,0,
         0xF3,0x0F,0x7F,0x44,0x24,0x20, 0xF3,0x0F,0x7F,0x4C,0x24,0x30, 0xF3,0x0F,0x7F,0x54,0x24,0x40, 0xF3,0x0F,0x7F,0x5C,0x24,0x50, 0xF3,0x0F,0x7F,0x64,0x24,0x60, 0xF3,0x0F,0x7F,0x6C,0x24,0x70};
     static const uint8_t rest[]={0xF3,0x0F,0x6F,0x44,0x24,0x20, 0xF3,0x0F,0x6F,0x4C,0x24,0x30, 0xF3,0x0F,0x6F,0x54,0x24,0x40, 0xF3,0x0F,0x6F,0x5C,0x24,0x50, 0xF3,0x0F,0x6F,0x64,0x24,0x60, 0xF3,0x0F,0x6F,0x6C,0x24,0x70,
         0x48,0x81,0xC4,0x80,0,0,0, 0x41,0x5B,0x41,0x5A,0x58,0x41,0x59,0x41,0x58,0x5A,0x59};
     memcpy(w,save,sizeof save); w+=sizeof save;
-    *w++=0x48; *w++=0xB8; *(uint64_t*)w=(uint64_t)(uintptr_t)hb_on_delete; w+=8; *w++=0xFF; *w++=0xD0;   // mov rax,fn; call rax
+    *w++=0x48; *w++=0xB8; *(uint64_t*)w=(uint64_t)(uintptr_t)fn; w+=8; *w++=0xFF; *w++=0xD0;          // mov rax,fn; call rax
     memcpy(w,rest,sizeof rest); w+=sizeof rest;
-    memcpy(w,pro,14); w+=14;                                                                          // relocated prologue
-    *w++=0x49; *w++=0xBB; *(uint64_t*)w=(uint64_t)(site+14); w+=8; *w++=0x41; *w++=0xFF; *w++=0xE3;   // jmp site+14
+    memcpy(w,pro,(size_t)len); w+=len;                                                                  // relocated prologue
+    *w++=0x49; *w++=0xBB; *(uint64_t*)w=(uint64_t)(site+len); w+=8; *w++=0x41; *w++=0xFF; *w++=0xE3;   // jmp site+len
     sys_icache_invalidate(t,w-t); g_hookoff+=(w-t+15)&~15ull;
     uintptr_t pg=(uintptr_t)site & ~0xFFFull; mprotect((void*)pg,0x2000,PROT_READ|PROT_WRITE|PROT_EXEC);
-    uint8_t*q=site; *q++=0x49; *q++=0xBB; *(uint64_t*)q=(uint64_t)(uintptr_t)t; q+=8; *q++=0x41; *q++=0xFF; *q++=0xE3; *q=0x90;   // mov r11,t; jmp r11; nop
-    sys_icache_invalidate(site,14);
-    (void)!write(2,"  [hbdel] object_delete hooked (projectile impacts for the tracer overlay)\n",74); }
+    uint8_t*q=site; *q++=0x49; *q++=0xBB; *(uint64_t*)q=(uint64_t)(uintptr_t)t; q+=8; *q++=0x41; *q++=0xFF; *q++=0xE3;   // mov r11,t; jmp r11
+    for(int k=13;k<len;k++) site[k]=0x90;
+    sys_icache_invalidate(site,(size_t)len); return 1; }
+// Entry hook on halo3 object_delete (halo3+0x342ed8): hb_on_delete(handle) (hitbox.c) records projectiles -- bullets
+// are created and deleted inside one engine tick. PELOAD_NO_DELHOOK disables it.
+void __attribute__((ms_abi)) hb_on_delete(uint32_t handle);
+// Entry hook on halo3's frame-timing function (halo3+0x9d22c), called from the top of the main loop every frame:
+// the safe point where engine jobs (teleport) run -- between ticks, nothing is mid-update.
+static void __attribute__((ms_abi)) hb_frame_hook(void){ if(__builtin_expect(g_hb_job_pending,0)) hb_engine_jobs(); }
+static void hbdel_install(uint8_t*base){
+    static const uint8_t frame_pro[15]={0x40,0x53,0x48,0x83,0xEC,0x20,0x65,0x48,0x8B,0x04,0x25,0x58,0x00,0x00,0x00};
+    if(!entry_hook(base+0x9d22c,frame_pro,15,(void*)hb_frame_hook)) (void)!write(2,"  [hook] frame-timing prologue differs: engine jobs disabled\n",61);
+    if(getenv("PELOAD_NO_DELHOOK")) return;
+    static const uint8_t pro[14]={0x48,0x89,0x5C,0x24,0x10,0x48,0x89,0x6C,0x24,0x18,0x56,0x57,0x41,0x54};
+    if(entry_hook(base+0x342ed8,pro,14,(void*)hb_on_delete)) (void)!write(2,"  [hbdel] object_delete hooked (projectile impacts for the tracer overlay)\n",74);
+    else (void)!write(2,"  [hbdel] object_delete prologue differs: not hooked\n",52); }
 static void vtguard_install(uint8_t*halo3base){ if(!getenv("PELOAD_VTGUARD")) return; vtguard_one(halo3base,0x172bce,17,0x172bee);
     vtguard_one(halo3base,0x172f9a,15,0x172fb7); }
 static void bp_install(void){ const char*s=getenv("PELOAD_BP"); if(!s||!g_base) return;
