@@ -534,7 +534,9 @@ static void hb_note_dsv(void*ds){ g_hb_dsv=(D3DObj*)ds; }
 static void hb_cap_flip(void*px,size_t pitch,int h){ if(!d3dgl_flipy()) return; unsigned char*t=malloc(pitch); if(!t) return; unsigned char*b=px;
     for(int y=0;y<h/2;y++){ memcpy(t,b+(size_t)y*pitch,pitch); memcpy(b+(size_t)y*pitch,b+(size_t)(h-1-y)*pitch,pitch); memcpy(b+(size_t)(h-1-y)*pitch,t,pitch); } free(t); }
 static void hb_capture_tick(void){
-    if(!__atomic_exchange_n(&g_hb_cap_req,0,__ATOMIC_ACQ_REL)) return;
+    // g_hb_cap_req = frames still to capture (F8 / Capture: 1, Shift+F8 / Burst: 8 consecutive frames, for glitches
+    // that flicker)
+    int left=__atomic_load_n(&g_hb_cap_req,__ATOMIC_ACQUIRE); if(left<=0) return; __atomic_fetch_sub(&g_hb_cap_req,1,__ATOMIC_ACQ_REL);
     char m[600]; int k;
     if(!G.ReadPixels || !g_d3d_backbuf || !g_d3d_backbuf->glfbo){ (void)!write(2,"  [capture] no frame to capture yet\n",36); return; }
     const char*home=getenv("HOME"); if(!home) home="/tmp";

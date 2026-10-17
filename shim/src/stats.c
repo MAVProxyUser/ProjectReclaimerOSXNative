@@ -114,11 +114,11 @@ static void st_variant(StBuf*s){
     typedef struct { const char*n; int off; } TS; static const TS base[5]={{"player",0x134},{"respawn_traits",0x110},{"red_powerup",0x154},{"blue_powerup",0x170},{"yellow_powerup",0x18C}};
     TS role[8]; int nr=0;
     switch(eng){ case 1: role[nr++]=(TS){"flag_carrier",0x1C0}; break; case 2: role[nr++]=(TS){"leader",0x1C4}; break; case 3: role[nr++]=(TS){"ball_carrier",0x1C4}; break;
-        case 4: role[nr++]=(TS){"in_hill",0x1C0}; break; case 5: role[nr++]=(TS){"editor",0x1B8}; break;
+        case 4: role[nr++]=(TS){"hill_occupant",0x1C0}; break; case 5: role[nr++]=(TS){"editor",0x1B8}; break;
         case 6: role[nr++]=(TS){"vip_team",0x1C6}; role[nr++]=(TS){"vip_proximity",0x1E2}; role[nr++]=(TS){"vip",0x1FE}; break;
         case 7: role[nr++]=(TS){"juggernaut",0x1C4}; break; case 8: role[nr++]=(TS){"defender",0x1BC}; role[nr++]=(TS){"attacker",0x1D8}; break;
-        case 9: role[nr++]=(TS){"bomb_carrier",0x1C8}; role[nr++]=(TS){"arming",0x1E4}; break;
-        case 10: role[nr++]=(TS){"zombie",0x1C0}; role[nr++]=(TS){"alpha_zombie",0x1DC}; role[nr++]=(TS){"safe_haven",0x1F8}; role[nr++]=(TS){"last_human",0x214}; break;
+        case 9: role[nr++]=(TS){"bomb_carrier",0x1C8}; role[nr++]=(TS){"bomb_arming",0x1E4}; break;
+        case 10: role[nr++]=(TS){"infected",0x1C0}; role[nr++]=(TS){"initial_infected",0x1DC}; role[nr++]=(TS){"safe_haven",0x1F8}; role[nr++]=(TS){"last_survivor",0x214}; break;
         case 12: role[nr++]=(TS){"final_tier",0x2D0}; role[nr++]=(TS){"leader",0x2EC}; break; }
     sb_put(s,",\"traits\":{"); for(int k=0;k<5;k++){ sb_put(s,"%s\"%s\":",k?",":"",base[k].n); st_traits(s,v+base[k].off,0); }
     for(int k=0;k<nr;k++){ sb_put(s,",\"%s\":",role[k].n); st_traits(s,v+role[k].off,0); }
@@ -276,6 +276,7 @@ static int st_control(const char*act,const char*qs){
         char m[80]; int k=snprintf(m,sizeof m,"  [stats] page: %s (%d players)\n",act,ok); (void)!write(2,m,k); return n>0; }
     if(!strcmp(act,"mute") || !strcmp(act,"unmute")){ const char*v=strstr(qs,"voice="); unsigned long long id=v?strtoull(v+6,0,16):0;
         return st_voice_request(id,!strcmp(act,"mute")); }
+    if(!strcmp(act,"burst")){ __atomic_store_n(&g_hb_cap_req,8,__ATOMIC_RELEASE); (void)!write(2,"  [capture] page: capturing the next 8 frames\n",47); return 1; }
     if(!strcmp(act,"capture")){ __atomic_store_n(&g_hb_cap_req,1,__ATOMIC_RELEASE); (void)!write(2,"  [capture] page: capturing the next frame\n",43); return 1; }
     return 0; }
 static void st_snapshot(StBuf*s){

@@ -51,7 +51,9 @@ one playlist game per key and parses the validator's messages.
 
 The same trait keys exist in several trait sets: `player.*` (everyone), `respawn_traits.*` (after spawning),
 `red_powerup.*`, `blue_powerup.*`, `yellow_powerup.*`, `leader.*` (Slayer), `flag_carrier.*` (CTF),
-`ball_carrier.*` (Oddball) and the other modes' role sets.
+`ball_carrier.*` (Oddball) and the other modes' role sets (table below: `hill_occupant`, `vip_team`, `vip_proximity`,
+`vip`, `juggernaut`, `defender`, `attacker`, `bomb_carrier`, `bomb_arming`, `infected`, `initial_infected`,
+`safe_haven`, `last_survivor`, `editor`).
 
 | Trait | What | Values |
 |---|---|---|
@@ -95,6 +97,25 @@ When not carried by enemy, Away from home, Always), `mode.flag_type` (Multi flag
 `mode.carrier_kill` carrier kill points, `mode.ball_count`, `mode.spawn_delay`, `mode.reset` ball reset delay,
 `mode.ball_effect` (Off, On), `mode.auto_pickup` (Off, On), `mode.kill`; traits `ball_carrier.*`.
 
-King of the Hill, Assault, Infection, Territories, Juggernaut and VIP: their labels are in the client (hill
-points, bomb arming/fuse, infected counts and safe havens, capture time, juggernaut delay, VIP radius ...); keys
-not verified yet.
+**King of the Hill, VIP, Juggernaut, Territories, Assault, Infection, Forge** -- read from the client's option table
+(the `key` + label pairs in `src/game_options.rs`'s strings), not yet run through the validator. Keys that several
+modes share (`score`, `kill`, `death`, `suicide`, `betrayal`, `reset`, `sudden_death`) have no string of their own
+next to these labels, so where a label has no key in front of it the key is marked "probably".
+
+| Mode | Keys |
+|---|---|
+| King of the Hill | `mode.score` (probably), `mode.uncontested` uncontested bonus, `mode.inside` inside hill points, `mode.outside` outside hill points, `mode.opaque_hill` (Off, On), `mode.hill_movement` (10 seconds, 15 seconds, 30 seconds, 1 minute, 2 minutes, 3 minutes, 4 minutes, 5 minutes), `mode.hill_order` (Random, Sequence), `mode.team_scoring` (Sum of team, Minimum score, Maximum score); traits `hill_occupant.*` |
+| VIP | `mode.score`, `mode.takedown` VIP takedown points, `mode.vip_kill` kill as VIP points, `mode.vip_death` VIP death points, `mode.arrival` destination arrival points, `mode.vip_suicide` VIP betrayal points, VIP influence radius (key not next to its label), `mode.single_vip`, `mode.destinations`, `mode.end_on_vip_death` (Off, On), `mode.vip_selection` (Random, Next respawn, Next kill, Unchanged), `mode.destination_movement` (On arrival, On switch), `mode.destination_order` (Random, Sequence); traits `vip_team.*`, `vip_proximity.*`, `vip.*` |
+| Juggernaut | `mode.score`, Juggernaut kill points (probably `mode.takedown`), `mode.juggernaut_kill` kill as Juggernaut points, `mode.juggernaut_delay` (s), `mode.allied_against_juggernaut`, `mode.respawn_on_lone_juggernaut` (Off, On), `mode.initial_juggernaut` (Random, First kill, First death), `mode.next_juggernaut` (Killer of Juggernaut, Killed by Juggernaut, ...); traits `juggernaut.*` |
+| Territories | `mode.capture` capture time (s), `mode.one_sided`, `mode.lock_on_capture` (Off, On), `mode.objective_respawn` (respawn on capture: Off, On friendly capture, On enemy capture, On any capture); traits `defender.*`, `attacker.*` |
+| Assault | `mode.score` bombs to win, `mode.reset` bomb reset (s), `mode.arming`, `mode.disarming`, `mode.fuse` (s), `mode.reset_on_disarm` (Off, On), `mode.bomb_type` (Multi bomb, One bomb, Neutral bomb), `mode.bomb_waypoint` (enemy bomb waypoint: Never, When armed, ...), `mode.objective_respawn` (respawn on detonation: On friendly / enemy / any detonation), `mode.sudden_death` (probably); traits `bomb_carrier.*`, `bomb_arming.*` |
+| Infection | `mode.initial_count` initial infected count (1 player .. 15 players, or 25% / 50%), `mode.safe_havens` (Off, On), `mode.haven_seconds` safe haven movement (s), `mode.respawn_on_haven_move` (Off, On), `mode.next_infected` (Winner, Loser, ...), infected kill points (probably `mode.kill`), `mode.infection` infection points, safe haven arrival points (probably `mode.arrival`), last survivor bonus (probably `mode.last_survivor`); traits `infected.*`, `initial_infected.*`, `safe_haven.*`, `last_survivor.*` |
+| Forge | `mode.edit_mode` (Everyone, Host only); traits `editor.*` |
+
+Per-team characters: `teams.<color>_character_set` and `teams.<color>_character` (red, blue, green, orange, purple,
+gold, brown, pink; values as `character_set` / `character` above).
+
+## Reading the running game's options
+
+The live stats page (`play.sh`, http://127.0.0.1:8765/) shows the options and every trait set of the game you are in,
+read from halo3's own copy of the variant (shim/docs/halo3-variant-traits.md), using these key names.

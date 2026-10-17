@@ -60,6 +60,7 @@ canvas{width:100%;height:auto;display:block;background:#0b0b0b;border-radius:4px
  <button data-a="teams" title="Which players the overlay shows">Show: all<kbd>F6</kbd></button>
  <button data-a="teleport" title="Teleport to the far side of the map (needs PELOAD_ALLOW_TELEPORT; matches you host)">Teleport<kbd>F7</kbd></button>
  <button data-a="capture" title="Save the next frame, its depth buffer and the camera position to your home folder">Capture frame<kbd>F8</kbd></button>
+ <button data-a="burst" title="Capture the next 8 frames in a row (for glitches that flicker)">Burst<kbd>⇧F8</kbd></button>
  <span id="ovmsg"></span></div>
 <div id="rules" class="panel"><h2 id="rt">Game rules</h2><div id="rb" class="note">not in a match</div></div>
 <div class="grid">
@@ -104,10 +105,10 @@ const TK={resistance:'Damage resistance',recharge:'Shield recharge',vampirism:'V
  ammo:'Ammo',pickup:'Weapon pickup',speed:'Speed',gravity:'Gravity',vehicles:'Vehicle use',camouflage:'Active camo',waypoint:'Waypoint',aura:'Aura',
  color:'Forced color',radar:'Motion tracker',radar_range:'Tracker range'};
 const TS={player:'Everyone',respawn_traits:'After spawning',red_powerup:'Red powerup',blue_powerup:'Blue powerup',yellow_powerup:'Yellow powerup',
- leader:'Leader',flag_carrier:'Flag carrier',ball_carrier:'Ball carrier',in_hill:'In the hill',editor:'Forge editor',vip_team:'VIP team',
+ leader:'Leader',flag_carrier:'Flag carrier',ball_carrier:'Ball carrier',hill_occupant:'In the hill',editor:'Forge editor',vip_team:'VIP team',
  vip_proximity:'Near the VIP',vip:'VIP',juggernaut:'Juggernaut',defender:'Defending a territory',attacker:'Attacking a territory',
- bomb_carrier:'Bomb carrier',arming:'Arming the bomb',zombie:'Zombies',alpha_zombie:'Alpha zombies',safe_haven:'In a safe haven',
- last_human:'Last human',final_tier:'Final weapon tier'};
+ bomb_carrier:'Bomb carrier',bomb_arming:'Arming the bomb',infected:'Infected',initial_infected:'Initial infected',safe_haven:'In a safe haven',
+ last_survivor:'Last survivor',final_tier:'Final weapon tier'};
 function traitBadges(p,max){ const t=p.traits||{}, ks=Object.keys(t), fx=(p.effects||[]);
   let h=fx.map(f=>`<span class="tr fx">${E(f.what)} ${Math.ceil(f.left)}s</span>`).join('');
   h+=ks.slice(0,max).map(k=>`<span class="tr">${E((TK[k]||k).toLowerCase())} ${E(t[k])}</span>`).join('');
@@ -223,7 +224,7 @@ function renderOverlay(){ const o=snap&&snap.overlay; if(!o) return;
 document.getElementById('ov').addEventListener('click',async e=>{ const b=e.target.closest('button'); if(!b||b.disabled) return;
   const msg=document.getElementById('ovmsg');
   try{ const r=await fetch('/control?do='+b.dataset.a,{method:'POST',headers:{'X-Reclaimer-Control':'1'}}); const j=await r.json();
-    msg.textContent=j.ok?(b.dataset.a==='capture'?'captured: ~/reclaimer_cap_*.bmp/.txt':''):(j.error||'failed'); }
+    msg.textContent=j.ok?(b.dataset.a==='capture'||b.dataset.a==='burst'?'captured: ~/reclaimer_cap_*.bmp/.txt':''):(j.error||'failed'); }
   catch(err){ msg.textContent='not connected'; } });
 // ---- live snapshots ----
 const es=new EventSource('/events');
