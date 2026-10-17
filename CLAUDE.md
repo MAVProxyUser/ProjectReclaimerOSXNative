@@ -227,6 +227,13 @@ render endpoint (IMMDeviceEnumerator/IMMDevice/IMMEndpoint/IPropertyStore/IAudio
 with one AudioQueue per stream; no capture device. `PELOAD_NO_WASAPI` = old no-device stub, `PELOAD_TRACE_WASAPI` logs
 (incl. per-interface AddRef/Release). Without a mic the voice system retries every ~5 s and leaves each playback stream
 with 1 reference: once only that is left (svc refs 0) the AudioQueue is closed (PELOAD_WASAPI_KEEP_IDLE = keep).
+Sparring partner (2026-10-17): `TARGET_ENV="PELOAD_SPAR=1" TARGET_STATS_HTTP=8766 bash shim/target.sh` -- hitbox.c hb_spar_tick
+(every Present) picks the nearest live enemy, XInputGetState pad 0 reports only a right stick toward its head (aim only);
+stats page "Sparring aim" toggle (do=spar&on=). hb_collect has a units-only mode for it (the overlay switches otherwise
+decide what it gathers). Map boundaries tested live: host with PELOAD_PATCH=halo3+37b816:E95501000090,halo3+37b734:EB
+(the entry patch of halo3+1b8e00 is refused: the client checks that function's entry bytes), host-only teleport to a
+point POST /control?do=tpto&x=&y=&z=[&slot=] (shim/docs/map-boundaries.md). Speed-step test: the host adopts client
+positions within 2.5 units with no speed check (shim/docs/net-authority.md).
 Teleport (PELOAD_ALLOW_TELEPORT; stats page "Teleport next to them" = POST /control?do=tpnext&slot=N, F7 = opposite
 side): shim/docs/teleport.md. halo3+0x259410 (object, pos*, fwd*, up*, 1) run from hb_engine_jobs in an entry hook on
 main_loop_body (halo3+0xb2250, engine main thread, before the frame's ticks -- where the Reclaimer client teleports)
