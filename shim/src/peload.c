@@ -9664,14 +9664,17 @@ static int entry_hook(uint8_t*site,const uint8_t*pro,int len,void*fn){
 // Entry hook on halo3 object_delete (halo3+0x342ed8): hb_on_delete(handle) (hitbox.c) records projectiles -- bullets
 // are created and deleted inside one engine tick. PELOAD_NO_DELHOOK disables it.
 void __attribute__((ms_abi)) hb_on_delete(uint32_t handle);
-// Entry hook on halo3's frame-timing function (halo3+0x9d22c), called from the top of the main loop every frame:
-// the safe point where engine jobs (teleport) run -- between ticks, nothing is mid-update.
+// Entry hook on halo3's main_loop_body (halo3+0xb2250): once per frame on the engine main thread, before the frame's
+// ticks -- the safe point for engine jobs (teleport, stats page voice mutes).
 static void __attribute__((ms_abi)) hb_frame_hook(void){
     if(__builtin_expect(g_st_voice_pending,0)) st_voice_jobs();   // stats page voice mutes (stats.c)
     if(__builtin_expect(g_hb_job_pending,0)) hb_engine_jobs(); }
 static void hbdel_install(uint8_t*base){
-    static const uint8_t frame_pro[15]={0x40,0x53,0x48,0x83,0xEC,0x20,0x65,0x48,0x8B,0x04,0x25,0x58,0x00,0x00,0x00};
-    if(!entry_hook(base+0x9d22c,frame_pro,15,(void*)hb_frame_hook)) (void)!write(2,"  [hook] frame-timing prologue differs: engine jobs disabled\n",61);
+    // main_loop_body (halo3+0xb2250): the engine main thread, once per frame, before the frame's ticks -- where the
+    // Reclaimer client itself runs teleports (shim/docs/teleport.md). (The old hook, halo3+0x9d22c, is a ms timer
+    // called from 421 places, many mid-tick: a teleport from there crashed in the physics update.)
+    static const uint8_t main_pro[20]={0x48,0x8B,0xC4,0x57,0x48,0x81,0xEC,0x60,0x02,0x00,0x00,0x48,0xC7,0x44,0x24,0x30,0xFE,0xFF,0xFF,0xFF};
+    if(!entry_hook(base+0xb2250,main_pro,20,(void*)hb_frame_hook)) (void)!write(2,"  [hook] main_loop_body prologue differs: engine jobs (teleport, voice mute) disabled\n",86);
     if(getenv("PELOAD_NO_DELHOOK")) return;
     static const uint8_t pro[14]={0x48,0x89,0x5C,0x24,0x10,0x48,0x89,0x6C,0x24,0x18,0x56,0x57,0x41,0x54};
     if(entry_hook(base+0x342ed8,pro,14,(void*)hb_on_delete)){ extern volatile int g_hb_delhook; g_hb_delhook=1; (void)!write(2,"  [hbdel] object_delete hooked (projectile impacts for the tracer overlay)\n",74); }

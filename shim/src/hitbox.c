@@ -351,7 +351,49 @@ typedef struct { double t; uint32_t def, handle; float pos[3], vel[3]; uint8_t r
 // Meant for matches this client hosts; on someone else's server the host would correct the position anyway.
 static pthread_t g_hb_simthread; static volatile int g_hb_simthread_ok;
 volatile int g_hb_job_pending;
+volatile int g_hb_tp_slot=-1;   // stats page "Teleport next to them": that players-table slot; -1 = F7's map reflection
 static const char* hb_tag_name(uint32_t def);
+// Teleport next to another player (stats page "Teleport next to them"), the way the Reclaimer client teleports
+// (shim/docs/teleport.md): host only, on the engine main thread at main_loop_body (between ticks), inside halo3's
+// game-state lock; out of any vehicle first; the destination is beside the other player (right, left, behind, close
+// behind) and must be inside the map structure (scenario_location_from_point) at knee and head height.
+typedef int  (__attribute__((ms_abi)) *HbLockFn)(void);
+typedef void (__attribute__((ms_abi)) *HbUnlockFn)(int*);
+static int g_hb_tp_retry;
+static void hb_tp_next(uint8_t*h3,uint8_t*tls,uint8_t*data,int hi,uint32_t me,int tps){
+    char m[240]; int k;
+    uint8_t*parr=*(uint8_t**)(tls+0x10); if(!parr || *(uint32_t*)(parr+0x2c)!=0x64407440) return;
+    int32_t es=*(int32_t*)(parr+0x24), ph=*(int32_t*)(parr+0x3c); uint8_t*pd=*(uint8_t**)(parr+0x48); if(!pd || tps>=ph || es<0x30) return;
+    uint8_t*rec=pd+(size_t)tps*es; uint32_t tu=*(uint32_t*)(rec+0x28); int ti=tu&0xFFFF;
+    if(!*(uint16_t*)rec || tu==0xFFFFFFFFu || ti>=hi || tu==me){ (void)!write(2,"  [teleport] that player has no body right now\n",47); return; }
+    uint8_t*te=data+(size_t)ti*0x18; uint8_t*tp=*(uint8_t**)(te+0x10); if(te[3]!=0 || *(uint16_t*)te!=(uint16_t)(tu>>16) || !tp) return;
+    uint8_t*me_e=data+(size_t)(me&0xFFFF)*0x18; uint8_t*mp=*(uint8_t**)(me_e+0x10); if(!mp || me_e[3]!=0 || *(uint16_t*)me_e!=(uint16_t)(me>>16)) return;
+    if((*(uint32_t*)(mp+0x110)>>2)&1){ (void)!write(2,"  [teleport] you are dead\n",26); return; }
+    // in a vehicle: get out first, teleport on a later frame
+    if(*(uint32_t*)(mp+0x10)!=0xFFFFFFFFu || *(int16_t*)(mp+0x24E)!=-1){
+        if(g_hb_tp_retry++<3){ ((void(__attribute__((ms_abi))*)(uint32_t,int))(h3+0x3a3c4c))(me,0); g_hb_tp_slot=tps; __atomic_store_n(&g_hb_job_pending,1,__ATOMIC_RELEASE);
+            (void)!write(2,"  [teleport] leaving the vehicle first\n",39); }
+        else { g_hb_tp_retry=0; (void)!write(2,"  [teleport] could not leave the vehicle\n",41); }
+        return; }
+    g_hb_tp_retry=0;
+    const float*to=(const float*)(tp+0x50), *tf=(const float*)(tp+0x5c);
+    float fx=tf[0], fy=tf[1], fl=sqrtf(fx*fx+fy*fy); if(fl<1e-4f){ fx=1; fy=0; } else { fx/=fl; fy/=fl; }
+    const float cand[4][2]={{fy,-fx},{-fy,fx},{-fx,-fy},{-0.35f*fx,-0.35f*fy}};   // right, left, behind, close behind
+    static const char*const cn[4]={"right","left","behind","close behind"};
+    float pos[3]; int ok=-1;
+    for(int c=0;c<4 && ok<0;c++){ pos[0]=to[0]+cand[c][0]; pos[1]=to[1]+cand[c][1]; pos[2]=to[2]+0.1f;
+        if(fabsf(pos[0])>30000||fabsf(pos[1])>30000||fabsf(pos[2])>30000) continue;   // past 32768 the host deletes the unit
+        uint16_t loc=0xFFFF; float p1[3]={pos[0],pos[1],pos[2]+0.3f}, p2[3]={pos[0],pos[1],pos[2]+1.2f};
+        ((void(__attribute__((ms_abi))*)(uint16_t*,const float*))(h3+0x9bc78))(&loc,p1); if(loc==0xFFFF) continue;
+        loc=0xFFFF; ((void(__attribute__((ms_abi))*)(uint16_t*,const float*))(h3+0x9bc78))(&loc,p2); if(loc==0xFFFF) continue;
+        ok=c; }
+    if(ok<0){ k=snprintf(m,sizeof m,"  [teleport] no open spot next to slot %d at (%.2f %.2f %.2f)\n",tps,to[0],to[1],to[2]); (void)!write(2,m,k); return; }
+    float fwd[3]={to[0]-pos[0], to[1]-pos[1], 0}, l=sqrtf(fwd[0]*fwd[0]+fwd[1]*fwd[1]); if(l>1e-4f){ fwd[0]/=l; fwd[1]/=l; } else { fwd[0]=fx; fwd[1]=fy; }
+    float up[3]={0,0,1};
+    k=snprintf(m,sizeof m,"  [teleport] next to slot %d at (%.2f %.2f %.2f): %s -> (%.2f %.2f %.2f)\n",tps,to[0],to[1],to[2],cn[ok],pos[0],pos[1],pos[2]); (void)!write(2,m,k);
+    ((void(__attribute__((ms_abi))*)(uint32_t,const float*,const float*,const float*,uint8_t))(h3+0x259410))(me,pos,fwd,up,1);
+    k=snprintf(m,sizeof m,"  [teleport] object %08x moved\n",me); (void)!write(2,m,k); }
+static void hb_engine_jobs_locked(uint8_t*h3,void**tarr,uint32_t idx,uint8_t*arr);
 static void hb_engine_jobs(void){
     // the simulation thread: its own TLS block holds the live object table (worker threads have no game state there)
     static int why_logged; uint8_t*h3=hb_halo3_base(); if(!h3) return; uint32_t idx=*(volatile uint32_t*)(h3+0xa39f9c); if(idx>=128) return;
@@ -360,6 +402,15 @@ static void hb_engine_jobs(void){
     if(!__atomic_exchange_n(&g_hb_job_pending,0,__ATOMIC_ACQ_REL)) return;
     static const uint8_t pro[16]={0x48,0x89,0x5C,0x24,0x08,0x48,0x89,0x6C,0x24,0x10,0x48,0x89,0x74,0x24,0x18,0x57};
     if(memcmp(h3+0x259410,pro,16)){ (void)!write(2,"  [teleport] halo3 teleport function not recognised: skipped\n",60); return; }
+    // host only: on a client the host's update snaps the body back (and the old mid-tick client call crashed)
+    { uint8_t*gg=*(uint8_t**)((uint8_t*)tarr[idx]+0x48); int st=gg?gg[0x11]:-1;
+      if(st!=5 && st!=1){ char m[140]; int k=snprintf(m,sizeof m,"  [teleport] refused: this game is hosted elsewhere (simulation type %d); only the host can move players\n",st); (void)!write(2,m,k); g_hb_tp_slot=-1; return; } }
+    // halo3's game-state lock (what it holds around every tick)
+    if(!*(uint64_t*)(h3+0x8f4028) || *(int32_t*)((uint8_t*)tarr[idx]+0x18)<0 || *(int32_t*)((uint8_t*)tarr[idx]+0x18)>=32){ (void)!write(2,"  [teleport] engine not ready\n",30); return; }
+    int tok=((HbLockFn)(h3+0x12c948))();
+    hb_engine_jobs_locked(h3,tarr,idx,arr);
+    ((HbUnlockFn)(h3+0x12c9a0))(&tok); }
+static void hb_engine_jobs_locked(uint8_t*h3,void**tarr,uint32_t idx,uint8_t*arr){
     float vp[32]; unsigned s0=g_hb_vpseq; memcpy(vp,g_hb_vp,sizeof vp); if((s0&1) || g_hb_vpseq!=s0 || (!vp[28]&&!vp[29]&&!vp[30])){ (void)!write(2,"  [teleport] no camera yet\n",27); return; }
     // walk the object table directly (we are the thread that owns it): our body = the biped containing the camera;
     // map centre = mean of the weapons/equipment lying on the map
@@ -369,7 +420,17 @@ static void hb_engine_jobs(void){
         const float*c=(const float*)(p+0x1c), r=c[3]; const float*o=(const float*)(p+0x50);
         if(t==0){ float dx=c[0]-vp[28],dy=c[1]-vp[29],dz=c[2]-vp[30]; if(dx*dx+dy*dy+dz*dz<(r+0.3f)*(r+0.3f)){ me=((uint32_t)*(uint16_t*)e<<16)|(uint32_t)i; memcpy(mo,o,12); } }
         else if((t==2||t==3) && *(uint32_t*)(p+0x10)==0xFFFFFFFFu){ cx+=o[0]; cy+=o[1]; ni++; } }
+    { // the local player: halo3's player mapping (TLS +0x110: output user 0 -> player handle at +0xB8 -> player +0x28
+      // unit), right in third person and vehicles; else the stats thread's pick
+      uint8_t*tls=(uint8_t*)tarr[idx]; uint8_t*pm=*(uint8_t**)(tls+0x110), *parr=*(uint8_t**)(tls+0x10); uint32_t lu=0xFFFFFFFFu;
+      if(pm && parr && *(uint32_t*)(parr+0x2c)==0x64407440){ int32_t ph=*(int32_t*)(pm+0xB8), es=*(int32_t*)(parr+0x24), pn=*(int32_t*)(parr+0x3c); uint8_t*pd=*(uint8_t**)(parr+0x48);
+          if(ph!=-1 && pd && (ph&0xFFFF)<pn) lu=*(uint32_t*)(pd+(size_t)(ph&0xFFFF)*es+0x28); }
+      if(lu==0xFFFFFFFFu) lu=g_hb_local_unit;
+      int li=lu&0xFFFF; if(lu!=0xFFFFFFFFu && li<hi){ uint8_t*e=data+(size_t)li*0x18; uint8_t*p=*(uint8_t**)(e+0x10);
+          if(e[3]==0 && *(uint16_t*)e==(uint16_t)(lu>>16) && p){ me=lu; memcpy(mo,p+0x50,12); } } }
     if(me==0xFFFFFFFFu){ (void)!write(2,"  [teleport] no body at the camera (dead or in a vehicle?)\n",59); return; }
+    int tps=g_hb_tp_slot; g_hb_tp_slot=-1;
+    if(tps>=0){ hb_tp_next(h3,(uint8_t*)tarr[idx],data,hi,me,tps); return; }
     if(ni<4){ (void)!write(2,"  [teleport] too few map items to find the centre\n",50); return; }
     cx/=ni; cy/=ni; float rx=(float)(2*cx-mo[0]), ry=(float)(2*cy-mo[1]);
     // the reflected point itself can be inside geometry (maps are mirror-, not point-symmetric; a first try landed

@@ -10,6 +10,8 @@
 # It drives its own menu with scripted clicks (PELOAD_AUTOCLICK, sent to the client's window procedure):
 # Host Game -> map search -> Network Online -> Hidden server -> Start Game.
 #   TARGET_MAP=<name>   map to host (searched in the map picker), default Valhalla
+#   TARGET_JOIN=host:port  join that game instead of hosting one (e.g. a game you host from the menu: Host Game ->
+#                          Network Online -> Start Game, port 11774; then teleport tests run on your client = the host)
 # Log: /tmp/reclaimer_target.log
 cd "$(dirname "$0")/.."
 PFX="$HOME/Library/Application Support/ReclaimerMac/prefix/drive_c"
@@ -37,16 +39,19 @@ CLICKS="110,503;230,183;300,143;t:$(echo "$MAP" | tr 'A-Z' 'a-z');s:1.5;1047,663
 AFTER="1068,52;s:30;230,625"
 
 if [ -n "${TARGET_SHOW:-}" ]; then WINENV="PELOAD_PRESENT_HIDDEN=1 PELOAD_MINIMIZE=${TARGET_MINIMIZE:-1}"; else WINENV="PELOAD_HIDE_WINDOW=1"; fi
+ARGS=(game-client --mcc-path "C:\\Program Files\\Steam\\steamapps\\common\\Halo The Master Chief Collection")
+if [ -n "${TARGET_JOIN:-}" ]; then ARGS=("reclaimer://join?server=$TARGET_JOIN"); CLICKS=""; AFTER=""; fi
 set -m
 env PELOAD_SKINGUARD=1 PELOAD_VTGUARD=1 PELOAD_ALLOC_GUARD=1 PELOAD_RECLAIMER_PATCHES=all PELOAD_WORKER_INHERIT_STDIO=1 \
     PELOAD_PRESENT=1 PELOAD_HOLD_WINDOW=1 PELOAD_D3DGL=1 $WINENV \
     PELOAD_NO_PAD=1 PELOAD_NO_KBM=1 PELOAD_NO_SYS_CURSOR=1 PELOAD_NO_FOCUS=1 PELOAD_AUDIO=0 \
     PELOAD_TITLE_PREFIX="TARGET (no input)" \
-    PELOAD_AUTOCLICK="$CLICKS" PELOAD_AUTOCLICK_AFTER_GAME="$AFTER" RECLAIMER_PROFILE_DIR='C:\ReclaimerProfileTarget' $TARGET_ENV \
-    arch -x86_64 shim/build/peload "$EXE" game-client \
-    --mcc-path "C:\\Program Files\\Steam\\steamapps\\common\\Halo The Master Chief Collection" \
+    PELOAD_AUTOCLICK="$CLICKS" PELOAD_AUTOCLICK_AFTER_GAME="$AFTER" RECLAIMER_PROFILE_DIR='C:\ReclaimerProfileTarget' \
+    PELOAD_STATS_HTTP="${TARGET_STATS_HTTP:-0}" $TARGET_ENV \
+    arch -x86_64 shim/build/peload "$EXE" "${ARGS[@]}" \
     < /dev/null > /tmp/reclaimer_target.log 2>&1 &
 echo $! > "$PIDFILE"
-echo "target starting: hosting $MAP (hidden, Online) in ~40 s, no window; log: /tmp/reclaimer_target.log"
-echo "then join it:  RECLAIMER_JOIN=127.0.0.1:11774 bash shim/play.sh"
+if [ -n "${TARGET_JOIN:-}" ]; then echo "target starting: joining $TARGET_JOIN in ~30 s, no window; log: /tmp/reclaimer_target.log"
+else echo "target starting: hosting $MAP (hidden, Online) in ~40 s, no window; log: /tmp/reclaimer_target.log"
+     echo "then join it:  RECLAIMER_JOIN=127.0.0.1:11774 bash shim/play.sh"; fi
 echo "stop it:       bash shim/target.sh stop"

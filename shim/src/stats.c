@@ -100,6 +100,9 @@ static void st_variant(StBuf*s){
     nm[j]=0;
     static const char*const tc[3]={"Disabled","Enabled","Balancing only"}; uint16_t soc=*(const uint16_t*)(v+0x12C), tch=*(const uint16_t*)(v+0x12E); uint32_t mo=*(const uint32_t*)(v+0x130);
     sb_put(s,",\"variant\":{\"engine\":%d,\"mode\":",eng); sb_str(s,en[eng]); sb_put(s,",\"name\":"); sb_str(s,nm);
+    // the raw variant (0x4C4 bytes): the page decodes every option from it with the client's option table
+    { static const char hx[]="0123456789abcdef"; char raw[sizeof g_st_var*2+1]; for(size_t i=0;i<sizeof g_st_var;i++){ raw[2*i]=hx[g_st_var[i]>>4]; raw[2*i+1]=hx[g_st_var[i]&15]; }
+      raw[sizeof g_st_var*2]=0; sb_put(s,",\"raw\":\"%s\"",raw); }
     sb_put(s,",\"rounds\":{\"teams\":%s,\"team_changing\":\"%s\",\"friendly_fire\":%s,\"betrayal_booting\":%s,\"reset_players\":%s,\"reset_map\":%s,\"minutes\":%d,\"limit\":%d,\"early_victory\":%d}",
         v[0x104]&1?"true":"false",tch<3?tc[tch]:"?",soc&1?"true":"false",soc&2?"true":"false",v[0x104]&2?"true":"false",v[0x104]&4?"true":"false",v[0x105],v[0x106],v[0x107]);
     sb_put(s,",\"respawn\":{\"lives\":%d,\"team_lives\":%d,\"seconds\":%d,\"suicide\":%d,\"betrayal\":%d,\"growth\":%d,\"traits_duration\":%d,\"synchronize\":%s,\"on_kills\":%s}",
@@ -262,6 +265,8 @@ static struct { uint32_t h; double t; } g_proj[8192];
 // info (F4), items (F5), teams (F6: all -> enemies -> friends), teleport (F7, only with PELOAD_ALLOW_TELEPORT) and
 // capture (F8). A POST with a custom header, which another web site's page cannot send to this port without a CORS
 // preflight we never answer. PELOAD_STATS_READONLY=1 turns the controls off.
+// this process hosts the game (halo3 game_globals +0x11: 5 = network host, 1 = local): only the host can teleport
+static int st_is_host(void){ uint64_t gg=0; uint8_t st=0; return g_st_tls && hb_read(g_st_tls+0x48,&gg,8) && gg && hb_read(gg+0x11,&st,1) && (st==5||st==1); }
 static int st_controls_ok(void){ static int ro=-1; if(ro<0){ const char*e=getenv("PELOAD_STATS_READONLY"); ro=e&&*e&&strcmp(e,"0")?1:0; } return !ro; }
 static int st_control(const char*act,const char*qs){
     char m[96]; int k=0;
@@ -270,7 +275,10 @@ static int st_control(const char*act,const char*qs){
         k=snprintf(m,sizeof m,"  [stats] page: %s %s\n",feat[f],hb_feat(f)?"on":"off"); (void)!write(2,m,k); return 1; }
     if(!strcmp(act,"teams")){ static const char*const tm[3]={"all","enemies only","friends only"}; __atomic_fetch_add(&g_hb_teamcycle,1,__ATOMIC_ACQ_REL);
         k=snprintf(m,sizeof m,"  [stats] page: showing %s\n",tm[hb_team_mode()]); (void)!write(2,m,k); return 1; }
-    if(!strcmp(act,"teleport")){ if(!getenv("PELOAD_ALLOW_TELEPORT")) return 0; __atomic_store_n(&g_hb_job_pending,1,__ATOMIC_RELEASE); (void)!write(2,"  [teleport] page: requested\n",29); return 1; }
+    if(!strcmp(act,"tpnext")){ if(!getenv("PELOAD_ALLOW_TELEPORT")) return 0; const char*v=strstr(qs,"slot="); int sl=v?atoi(v+5):-1; if(sl<0 || sl>255) return 0;
+        extern volatile int g_hb_tp_slot; g_hb_tp_slot=sl; __atomic_store_n(&g_hb_job_pending,1,__ATOMIC_RELEASE);
+        char m[80]; int k=snprintf(m,sizeof m,"  [teleport] page: next to player slot %d requested\n",sl); (void)!write(2,m,k); return 1; }
+    if(!strcmp(act,"teleport")){ extern volatile int g_hb_tp_slot; g_hb_tp_slot=-1; if(!getenv("PELOAD_ALLOW_TELEPORT")) return 0; __atomic_store_n(&g_hb_job_pending,1,__ATOMIC_RELEASE); (void)!write(2,"  [teleport] page: requested\n",29); return 1; }
     if(!strcmp(act,"muteall") || !strcmp(act,"unmuteall")){ static StSess ss[128]; int n=st_session(ss,128,0), ok=0;
         for(int i=0;i<n;i++) if(ss[i].muted!=!strcmp(act,"muteall")) ok+=st_voice_request(ss[i].voice,!strcmp(act,"muteall"));
         char m[80]; int k=snprintf(m,sizeof m,"  [stats] page: %s (%d players)\n",act,ok); (void)!write(2,m,k); return n>0; }
@@ -291,9 +299,9 @@ static void st_snapshot(StBuf*s){
       pthread_mutex_unlock(&g_hb_mapmx);
       const char*b=strrchr(mp,'/'); b=b?b+1:mp; snprintf(m,sizeof m,"%s",b); char*dot=strrchr(m,'.'); if(dot)*dot=0; sb_put(s,",\"map\":"); sb_str(s,m); }
     { static int tp=-1; if(tp<0) tp=getenv("PELOAD_ALLOW_TELEPORT")?1:0; static const char*const tm[3]={"all","enemies","friends"};
-      sb_put(s,",\"overlay\":{\"hitboxes\":%s,\"tracers\":%s,\"info\":%s,\"items\":%s,\"visible\":%s,\"teams\":\"%s\",\"teleport\":%s,\"controls\":%s,\"text_px\":%d}",
+      sb_put(s,",\"overlay\":{\"hitboxes\":%s,\"tracers\":%s,\"info\":%s,\"items\":%s,\"visible\":%s,\"teams\":\"%s\",\"teleport\":%s,\"host\":%s,\"controls\":%s,\"text_px\":%d}",
           hb_feat(HBF_HITBOX)?"true":"false",hb_feat(HBF_TRACER)?"true":"false",hb_feat(HBF_INFO)?"true":"false",hb_feat(HBF_ITEMS)?"true":"false",hb_feat(HBF_VISIBLE)?"true":"false",
-          tm[hb_team_mode()],tp?"true":"false",st_controls_ok()?"true":"false",g_hb_text_px>0?g_hb_text_px:7); }
+          tm[hb_team_mode()],tp?"true":"false",st_is_host()?"true":"false",st_controls_ok()?"true":"false",g_hb_text_px>0?g_hb_text_px:7); }
     if(strcmp(m,g_trk_map)){ snprintf(g_trk_map,sizeof g_trk_map,"%s",m); g_ntrk=0; g_nbip=0; memset(g_proj,0,sizeof g_proj); g_hb_local_slot=-1; }   // new map: new match stats
     pthread_mutex_lock(&g_hm_mx); snprintf(g_hm_cur,sizeof g_hm_cur,"%s",m); if(g_hm.dirty && now-g_hm.saved>30){ hm_save(); g_hm.saved=now; } pthread_mutex_unlock(&g_hm_mx);
     static uint8_t tab[8192*0x18]; int hi=0; uint64_t arr=hb_object_array(); uint8_t hdr[0x60];
@@ -409,6 +417,11 @@ static void* st_snap_thread(void*a){ (void)a; pthread_setname_np("shim-stats-sna
 static const char g_st_page[]={
 #embed "stats_page.html"
 ,0};
+// every game option the client accepts: key, label, game types, choices, where it lands in halo3's variant
+// (shim/docs/option-map.json, from the client's option table; shim/docs/game-options.md)
+static const char g_st_optmap[]={
+#embed "../docs/option-map.json"
+,0};
 #pragma clang diagnostic pop
 static int st_send(int fd,const char*b,size_t n){ while(n){ ssize_t k=send(fd,b,n,0); if(k<=0){ if(k<0&&errno==EINTR) continue; return 0; } b+=k; n-=(size_t)k; } return 1; }
 static void* st_conn(void*a){ int fd=(int)(intptr_t)a; pthread_setname_np("shim-stats-http");
@@ -423,6 +436,9 @@ static void* st_conn(void*a){ int fd=(int)(intptr_t)a; pthread_setname_np("shim-
         const char*body=code==200?"{\"ok\":true}":code==400?"{\"ok\":false,\"error\":\"unknown or disabled action\"}":!st_controls_ok()?"{\"ok\":false,\"error\":\"controls are off\"}":"{\"ok\":false,\"error\":\"needs POST with an X-Reclaimer-Control header\"}";
         int k=snprintf(h,sizeof h,"HTTP/1.1 %d %s\r\nContent-Type: application/json\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n%s",code,code==200?"OK":code==400?"Bad Request":"Forbidden",strlen(body),body);
         st_send(fd,h,(size_t)k); }
+    else if(!strcmp(path,"/option-map.json")){
+        int k=snprintf(h,sizeof h,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %zu\r\nCache-Control: max-age=300\r\nConnection: close\r\n\r\n",sizeof g_st_optmap-1);
+        if(st_send(fd,h,(size_t)k)) st_send(fd,g_st_optmap,sizeof g_st_optmap-1); }
     else if(!strncmp(path,"/maptop/",8)){
         // top-down map pictures made from the .map files (shim/tools/maptop.sh -> re-tools/h3bsp.py):
         // ~/Library/Application Support/ReclaimerMac/maptop/<map>.png + <map>.json (world bounds)

@@ -205,7 +205,7 @@ Options go in front of the command, e.g. `PELOAD_INVERT_PITCH=0 bash shim/play.s
 | `PELOAD_HB_VISIBLE=1` | visible only: hitboxes and labels only for objects you can actually see, not behind walls (a small copy of the game's depth buffer, read back every frame); **F9** toggles |
 | `PELOAD_HB_TEXT_PX=7` | overlay label height in window pixels (Text − / + on the stats page) |
 | `PELOAD_D3DGL_INVARIANT=1` | experimental: vertex positions computed bit-identically in every pass; try it if you see seams/speckles along polygon edges (e.g. Valhalla's rock walls) |
-| `PELOAD_ALLOW_TELEPORT=1` | **experimental, currently crashes the game**: F7 teleports you to the opposite point of the map using the game's own teleport |
+| `PELOAD_ALLOW_TELEPORT=1` | teleport, **in games you host** (Host Game from the menu): the stats page's player details get **Teleport next to them** (you land beside that player, facing them, at a spot inside the map), F7 jumps to the opposite side of the map. It uses the game's own teleport on the host, between frames, so every player sees the move; clients can't teleport (the host would put them back) |
 | `PELOAD_H3="name=value,..."` | set Halo 3 engine settings, e.g. `render_debug_depth_render=1`, `camera_fov_scale=1.2` — all 72 are listed in `shim/docs/halo3-engine-globals.md` |
 
 ### Live game stats over HTTP
@@ -234,7 +234,8 @@ watch from another device). From top to bottom the page shows:
   `~/Library/Application Support/ReclaimerMac/heatmaps/`). The map pictures are made once from the game's own `.map`
   files (`bash shim/tools/maptop.sh`; `play.sh` runs it in the background when they are missing; needs python3 with
   numpy and Pillow).
-- **Player details** (click a player in the table) -- under the heatmap: a big Mute / Unmute button, camo, all weapons,
+- **Player details** (click a player in the table) -- under the heatmap: a big Mute / Unmute button, **Teleport next to
+  them** (when you host the game and started it with `PELOAD_ALLOW_TELEPORT=1`), camo, all weapons,
   grenades, vehicle and seat, deaths, current and longest life, distance, top speed, shots, hits, accuracy, active
   traits, facing and position; their deaths are ringed on the heatmap.
 

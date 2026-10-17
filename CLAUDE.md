@@ -216,8 +216,16 @@ render endpoint (IMMDeviceEnumerator/IMMDevice/IMMEndpoint/IPropertyStore/IAudio
 with one AudioQueue per stream; no capture device. `PELOAD_NO_WASAPI` = old no-device stub, `PELOAD_TRACE_WASAPI` logs
 (incl. per-interface AddRef/Release). Without a mic the voice system retries every ~5 s and leaves each playback stream
 with 1 reference: once only that is left (svc refs 0) the AudioQueue is closed (PELOAD_WASAPI_KEEP_IDLE = keep).
-Teleport (PELOAD_ALLOW_TELEPORT, F7): halo3+0x259410 (object, pos*, fwd*, up*, bool) run on the simulation thread
-via hb_engine_jobs() from QueryPerformanceCounter (the sim thread = the one that runs object_delete).
+Teleport (PELOAD_ALLOW_TELEPORT; stats page "Teleport next to them" = POST /control?do=tpnext&slot=N, F7 = opposite
+side): shim/docs/teleport.md. halo3+0x259410 (object, pos*, fwd*, up*, 1) run from hb_engine_jobs in an entry hook on
+main_loop_body (halo3+0xb2250, engine main thread, before the frame's ticks -- where the Reclaimer client teleports)
+inside the game-state lock (halo3+0x12c948 / 0x12c9a0), host only (game_globals+0x11 == 5, or 1 local; a client's body
+is snapped back by the host), unit_exit_vehicle (halo3+0x3a3c4c) first, destination checked with
+scenario_location_from_point (halo3+0x9bc78) at +0.3 and +1.2, |coord| < 30000 (past 32768 the host deletes the unit).
+The engine marks the object for network update itself. The old hook halo3+0x9d22c is a ms timer called from 421
+places (many mid-tick) -- that is why teleports crashed. Test: target.sh as host with TARGET_STATS_HTTP=8766
+TARGET_ENV=PELOAD_ALLOW_TELEPORT=1, a quiet-run joiner (visible window: a hidden joiner crashed once in Apple's GL
+driver on the present thread), POST tpnext on 8766, compare positions on 8766 and 8765.
 
 ## Render Guardian via the game client (GL-on-Metal, no MCC/Steam)
 `game-client` runs the engine in a standalone native window ("Reclaimer GL (OpenGL on Metal)") and

@@ -8,8 +8,8 @@ order they are being worked (2026-10-17: frame rate is now active, at the user's
 | # | Item | Status / notes |
 |---|---|---|
 | 14 | **Join Workshop-only servers (e.g. CHAOS 128P)** (user, 2026-10-17) | Download path works (2026-10-17): DepotDownloader (brew cask) signed in by the user, `-pubfile 2933266434 -filelist` fetched the desert_sandbox subset (1.73 GB: map + the mod's own shared.map/campaign.map) into steamapps/workshop/content/976730/2933266434. The join itself is unverified: CHAOS (65.59.89.203:11774) did not answer that night. Guide: shim/docs/mods.md; busiest servers + their mods: shim/tools/servers.sh |
-| 7b | **Teleport, fixed properly** (user, 2026-10-17) | Wanted: live x/y of every player on the stats page and "teleport next to <player>" (small offset) without crashing client or server, tested locally. Known: halo3+0x259410 crashed in the physics update when run on a networked client. In progress: static RE of every place a player's position lives (object, physics, player, network/simulation state) and of how the Reclaimer client teleports safely itself (Forge monitor TELEPORT, script Teleport/ExitVehicle actions via object_teleport / unit_exit_vehicle) -> shim/docs/teleport.md; then do it on the host (server) so it replicates. |
-| 16 | **Every game option, exact** (user, 2026-10-17) | No guessing: keys, choices, ranges and the native variant field of every option from the client's option table (static RE in progress -> shim/docs/option-map.json), then show every mode's settings on the stats page. |
+| 16 | **Every game option, exact** (user, 2026-10-17) | Done statically: shim/docs/option-map.json (639 keys, exact native offsets) and the page decodes them; next: check the decoded panel in a live game of each mode. |
+| 17 | **Sparring partner: auto-targeting only** (user, 2026-10-17) | The windowless second player (shim/target.sh) aims at the nearest enemy's head, with an on/off toggle on its stats page; tested by the user against it on a private server. After the frame-rate work. |
 | 11 | **Frame rate** (active) | BTB (60 players): 15-25 fps, 3,000-4,700 draws/frame at ~9 us each; the biggest phase is texture/sampler binds in Apple's GL driver (not uploads, not compute; CLAUDE.md "Frame rate"). Done: getenv cache, mip-streaming upload skip, profiler counters. Next: PERF-PLAN.md option 1 (native GL helper process, up to ~2x); meanwhile the client's Advanced graphics settings cut draws. |
 
 Tabled by the user 2026-10-17: rock-wall seams (backlog 6) -- a minor display-only glitch (seen over rocks during a
@@ -24,6 +24,14 @@ Closed by the user 2026-10-16: teleporter audio desync (not seen since the XAudi
 
 ## Done (2026-10-16)
 
+- Teleport next to a selected player (2026-10-17): host only, from an entry hook on main_loop_body (halo3+0xb2250,
+  engine main thread, between ticks) inside halo3's game-state lock; leaves a vehicle first; destination beside the
+  other player (right/left/behind/close behind) accepted only inside the map structure. Tested host + joiner on
+  Valhalla: the host moved from (81.6,-147.4) to 1 unit beside the joiner, the joiner's stats showed the same position
+  within 1 s; no crash. A client's request is refused (the host would snap it back). shim/docs/teleport.md. The old
+  crashes: halo3+0x9d22c is a ms timer called mid-tick, not the top of the main loop
+- Stats page: X, Y, Z per player, names + coordinates on the map, coordinates under the mouse; every game option of
+  the running mode decoded from the raw variant with the client's option table (shim/docs/option-map.json)
 - Stats page (2026-10-17, later): heatmap over a top-down picture of the map made from the .map file (re-tools/h3bsp.py,
   shim/tools/maptop.sh, all 27 MP maps); overlay "visible only" (F9; user: "worked perfectly") and Text -/+ (labels 7 px by default, were ~4x
   larger); speaker mute icons + Mute all, mute acting on press (clicks were lost to 10 Hz redraws), big Mute button in

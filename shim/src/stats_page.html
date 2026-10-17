@@ -49,7 +49,8 @@ canvas{width:100%;height:auto;display:block;background:#0b0b0b;border-radius:4px
 .spk:hover{color:#fff}.spk svg{width:16px;height:16px}.spk .x{display:none}.spk.on .x{display:inline}.spk.on{color:#888}
 .spk:disabled{opacity:.35;cursor:default}
 .bigmute{display:inline-flex;align-items:center;gap:6px;margin-top:4px;padding:5px 12px;border-radius:5px;border:1px solid #3a6;background:#1c3a26;color:#dfe;font:inherit;font-weight:600;cursor:pointer}
-.bigmute.on{border-color:#c55;background:#4a1f1f;color:#fdd}.bigmute svg{width:16px;height:16px}.bigmute .x{display:none}.bigmute.on .x{display:inline}
+.bigmute.on{border-color:#c55;background:#4a1f1f;color:#fdd}
+.bigmute.tp{border-color:#58b8ff;background:#1d2f45;color:#dff}.bigmute:disabled{opacity:.4;cursor:default}.detbtns{display:flex;gap:8px;flex-wrap:wrap}.bigmute svg{width:16px;height:16px}.bigmute .x{display:none}.bigmute.on .x{display:inline}
 .mb.on{background:#5a2626;border-color:#c55}.mb:disabled{opacity:.4;cursor:default}
 .pc.talk{border-color:#3c3;background:#1c3a1c;box-shadow:0 0 6px #3c36}.pc.muted{opacity:.6}
 #ch{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px}#ch h2{margin:0 auto 0 0}
@@ -75,7 +76,7 @@ canvas{width:100%;height:auto;display:block;background:#0b0b0b;border-radius:4px
 <div id="rules" class="panel"><h2 id="rt">Game rules</h2><div id="rb" class="note">not in a match</div></div>
 <div class="grid">
  <div class="panel"><div class="wrap"><table><thead><tr>
-  <th>Player</th><th>Shield</th><th>Health</th><th>Weapon</th><th>Deaths</th><th>Shots</th><th>Accuracy</th><th>Grenades</th><th>Vehicle</th><th>Speed</th><th>Traits</th></tr></thead>
+  <th>Player</th><th>Shield</th><th>Health</th><th>Weapon</th><th>Deaths</th><th>Shots</th><th>Accuracy</th><th>Grenades</th><th>Vehicle</th><th>X, Y, Z</th><th>Speed</th><th>Traits</th></tr></thead>
   <tbody id="tb"></tbody></table></div>
   <div class="note">Click a player for details. Their deaths are ringed on the heatmap.</div></div>
  <div class="col">
@@ -84,6 +85,8 @@ canvas{width:100%;height:auto;display:block;background:#0b0b0b;border-radius:4px
    <label>Deaths <select id="scope"><option value="match">this match</option><option value="all">all matches</option></select></label>
    <label><input type="checkbox" id="fp" checked> where players go</label>
    <label><input type="checkbox" id="pd" checked> players now</label>
+   <label><input type="checkbox" id="pl"> names on map</label>
+   <span id="hov" class="note" style="margin:0"></span>
   </div>
   <div class="legend"><span>fewer</span><span class="ramp"></span><span>more deaths</span><span id="dc"></span></div></div>
  <div id="det" class="panel"><h2>Player details</h2><div class="note">Click a player in the table.</div></div>
@@ -103,7 +106,7 @@ function renderTable(){
    <td><span class="sw" style="background:${C[p.team_name]||'#888'}"></span>${E(p.name)}${p.you?' (you)':''}${p.talking?'<span class="talkic" title="talking">🔊</span>':''}${p.muted?' 🔇':''}</td>
    <td>${B(p.shield,'#58b8ff')}</td><td>${B(p.health,'#7ddf6a')}</td><td>${E(p.weapon||(p.alive?'':'respawning'))}</td>
    <td>${p.deaths??''}</td><td>${p.shots??''}</td><td>${p.shots?Math.round(p.accuracy*100)+'%':''}</td><td>${p.grenades.frag}f ${p.grenades.plasma}p ${p.grenades.spike}s ${p.grenades.firebomb}b</td>
-   <td>${E(p.vehicle||'')}</td><td>${p.speed.toFixed(1)}</td><td>${traitBadges(p,3)}</td></tr>`).join('');
+   <td>${E(p.vehicle||'')}</td><td>${p.alive?p.pos.map(v=>v.toFixed(1)).join(', '):''}</td><td>${p.speed.toFixed(1)}</td><td>${traitBadges(p,3)}</td></tr>`).join('');
 }
 // ---- traits: labels for the trait keys (playlist option names) ----
 const TK={resistance:'Damage resistance',recharge:'Shield recharge',vampirism:'Vampirism',headshots:'Headshot immunity',shields:'Shields',
@@ -148,6 +151,36 @@ document.addEventListener('pointerdown',async e=>{ const b=e.target.closest('.mb
   e.preventDefault(); const act=b.dataset.m==='1'?'unmute':'mute';
   b.classList.toggle('on',act==='mute'); b.dataset.m=act==='mute'?'1':'0';   // show it at once; the next snapshot confirms
   try{ await fetch(`/control?do=${act}&voice=${b.dataset.voice}`,{method:'POST',headers:{'X-Reclaimer-Control':'1'}}); }catch(err){} });
+// teleport next to a player: lights up for another living player when teleport is enabled
+function tpBtn(p){ const o=snap&&snap.overlay, ok=o&&o.teleport&&o.controls&&o.host&&p.alive;
+  const why=!o||!o.teleport?'start the game with PELOAD_ALLOW_TELEPORT=1':!o.host?'only the host of the game can teleport (host it from the menu)':!p.alive?'they are dead':'';
+  return `<button class="bigmute tp" data-slot="${p.slot}" ${ok?'':'disabled'} title="${E(why||'Teleport next to '+p.name)}">⤳ Teleport next to them</button>`; }
+document.addEventListener('pointerdown',async e=>{ const b=e.target.closest('button.tp'); if(!b||b.disabled||e.button) return; e.preventDefault();
+  const msg=document.getElementById('ovmsg');
+  try{ const r=await fetch(`/control?do=tpnext&slot=${b.dataset.slot}`,{method:'POST',headers:{'X-Reclaimer-Control':'1'}}); const j=await r.json(); msg.textContent=j.ok?'teleport requested':(j.error||'teleport failed'); }
+  catch(err){ msg.textContent='not connected'; } });
+// Every option of the running game, decoded from the raw variant with the client's own option table
+// (/option-map.json: key, label, game types, choices and the byte/bit each lands on in halo3's variant)
+let optMap=null; fetch('/option-map.json').then(r=>r.json()).then(j=>{ optMap=j; rulesKey=''; renderRules(); }).catch(()=>{});
+const GT={1:'Capture the Flag',2:'Slayer',3:'Oddball',4:'King of the Hill',5:'Forge',6:'VIP',7:'Juggernaut',8:'Territories',9:'Assault',10:'Infection',12:'Escalation Slayer'};
+const GROUP={rounds:'Rounds',respawn:'Respawn',map:'Map',powerups:'Powerups',mode:'Mode'};
+function optValue(raw,v){ const o=v.offset; if(o+v.size>raw.length) return null; let x=raw[o]|(v.size>1?raw[o+1]<<8:0);
+  if(v.bit!=null) return (raw[o]>>v.bit)&1; if(v.signed) x=v.size>1?(x<<16)>>16:(x<<24)>>24; return x; }
+function optSections(vr){
+  if(!optMap||!vr.raw) return null; const raw=new Uint8Array(vr.raw.match(/../g).map(h=>parseInt(h,16))), gt=GT[vr.engine]; if(!gt) return null;
+  const groups=new Map();
+  for(const e of optMap){ if(!e.variant||!(e.modes.includes('all')||e.modes.includes(gt))) continue;
+    const val=optValue(raw,e.variant); if(val==null) continue; const set=e.key.split('.')[0], isTrait=!(set in GROUP);
+    const ch=e.choices&&e.choices.find(c=>c[0]===val), lab=ch?ch[1]:String(val);
+    if(isTrait && (lab==='Unchanged')) continue;   // trait sets: only what they change
+    if(!groups.has(set)) groups.set(set,[]); groups.get(set).push([e.label,lab]); }
+  const order=['rounds','respawn','map','powerups','mode']; const out=[];
+  for(const g of order) if(groups.has(g)) out.push([GROUP[g]+(g==='mode'?' ('+gt+')':''),groups.get(g)]);
+  for(const [g,rows] of groups) if(!order.includes(g)) out.push([(TS[g]||g)+' traits',rows]);
+  // trait sets that change nothing still deserve a line
+  for(const e of optMap){ const g=e.key.split('.')[0]; if(g in GROUP||!e.variant||groups.has(g)||!(e.modes.includes('all')||e.modes.includes(gt))) continue;
+    if(!out.some(x=>x[0]===(TS[g]||g)+' traits')) out.push([(TS[g]||g)+' traits',[['','no changes']]]); }
+  return out; }
 let rulesKey='';
 function renderRules(){
   const v=snap&&snap.variant, el=document.getElementById('rb');
@@ -156,7 +189,8 @@ function renderRules(){
   document.getElementById('rt').textContent=`Game rules — ${v.name||'?'} (${v.mode})`;
   const yn=b=>b?'on':'off', sec=n=>n+' s', r=v.rounds, rs=v.respawn;
   const sect=(title,rows)=>`<div><h3>${E(title)}</h3><dl>${rows.map(([a,b])=>`<dt>${E(a)}</dt><dd>${b}</dd>`).join('')}</dl></div>`;
-  const parts=[];
+  const parts=[]; const secs=optSections(v);
+  if(secs){ for(const [t,rows] of secs) parts.push(sect(t,rows.map(([a,b])=>[a,E(b)]))); el.className='cols'; el.innerHTML=parts.join(''); return; }
   parts.push(sect('Rounds',[['Teams',yn(r.teams)],['Team changing',E(r.team_changing)],['Friendly fire',yn(r.friendly_fire)],['Betrayal booting',yn(r.betrayal_booting)],
     ['Time limit',r.minutes?r.minutes+' min':'none'],['Rounds',r.limit],['Early victory',r.early_victory||'off'],['Reset players / map',yn(r.reset_players)+' / '+yn(r.reset_map)]]
     .concat(v.score_to_win!=null?[['Score to win',v.score_to_win<0?'unlimited':v.score_to_win]]:[])));
@@ -186,7 +220,7 @@ function renderDet(){
    ['Effects',(p.effects||[]).map(f=>`${E(f.what)}, ${Math.ceil(f.left)} s left`).join('<br>')||'none'],
    ['Voice',p.voice?(p.muted?'muted (only for you)':'audible'):'no voice connection'],
    ['Shots fired',p.shots??0],['Hits',`${p.hits??0}`+(p.shots?` (${Math.round(p.accuracy*100)}% accuracy)`:'')],['Facing',p.facing!=null?p.facing+'°':''],['Position',p.pos.map(v=>v.toFixed(1)).join(', ')],['Object',p.handle]];
-  el.innerHTML=`<button class="x" onclick="closeDet()" aria-label="Close">×</button><b>${E(p.name)}${p.you?' (you)':''}</b>${p.voice&&!p.you?'<div>'+bigMute(p.voice,p.muted)+'</div>':''}<dl>${rows.map(r=>`<dt>${r[0]}</dt><dd>${r[1]}</dd>`).join('')}</dl>
+  el.innerHTML=`<button class="x" onclick="closeDet()" aria-label="Close">×</button><b>${E(p.name)}${p.you?' (you)':''}</b><div class="detbtns">${p.voice&&!p.you?bigMute(p.voice,p.muted):''}${p.you?'':tpBtn(p)}</div><dl>${rows.map(r=>`<dt>${r[0]}</dt><dd>${r[1]}</dd>`).join('')}</dl>
    <div class="note">Shots counts every projectile (each shotgun pellet is one). A hit is a shot that ended inside another player's body bounds -- an estimate; turret shots count for the vehicle, not the gunner.</div>`;
   el.style.display='block';
 }
@@ -238,10 +272,16 @@ function drawMap(){
   if(sp&&heat){cx.strokeStyle='#fff';cx.lineWidth=1.5;for(const d of heat.deaths){if(d[7]!==sel||d[4]!==sp.name||(scope()!=='all'&&d[5]!==heat.match))continue;const [x,y]=toScreen(d[0],d[1]);cx.beginPath();cx.arc(x,y,6,0,7);cx.stroke()}}
   if(document.getElementById('pd').checked&&snap) for(const p of snap.players){ if(!p.alive)continue; const [x,y]=toScreen(p.pos[0],p.pos[1]);
    cx.fillStyle=C[p.team_name]||'#888'; cx.beginPath(); cx.arc(x,y,p.slot===sel?6:3.5,0,7); cx.fill();
-   if(p.slot===sel||p.you){cx.strokeStyle=p.you?'#fff':'#ff0';cx.lineWidth=2;cx.stroke()} }
+   if(p.slot===sel||p.you){cx.strokeStyle=p.you?'#fff':'#ff0';cx.lineWidth=2;cx.stroke()}
+   if(p.slot===sel||p.you||document.getElementById('pl').checked){ const t=`${p.name}${p.you?' (you)':''}  ${p.pos[0].toFixed(1)}, ${p.pos[1].toFixed(1)}`;
+     cx.font='11px system-ui'; cx.textAlign='left'; cx.lineWidth=3; cx.strokeStyle='#000c'; cx.strokeText(t,x+7,y-6); cx.fillStyle=p.slot===sel?'#ff0':'#fff'; cx.fillText(t,x+7,y-6); } }
 }
 async function pollHeat(){ try{ heat=await (await fetch('/heat.json')).json(); loadMapTop(heat.map); buildLayers(); drawMap(); }catch(e){} setTimeout(pollHeat,4000) }
-for(const id of ['scope','fp','pd']) document.getElementById(id).addEventListener('change',()=>{buildLayers();drawMap();renderDet()});
+for(const id of ['scope','fp','pd','pl']) document.getElementById(id).addEventListener('change',()=>{buildLayers();drawMap();renderDet()});
+// world coordinates under the mouse
+cv.addEventListener('mousemove',e=>{ if(!view) return; const r=cv.getBoundingClientRect(), sx=(e.clientX-r.left)*cv.width/r.width, sy=(e.clientY-r.top)*cv.height/r.height;
+  const x=view.wx0+(sx-view.ox)/view.sc, y=view.wy0+view.wh-(sy-view.oy)/view.sc; document.getElementById('hov').textContent=`x ${x.toFixed(1)}, y ${y.toFixed(1)}`; });
+cv.addEventListener('mouseleave',()=>{ document.getElementById('hov').textContent=''; });
 // ---- overlay controls (the function keys' switches; POST so other sites can't flip them) ----
 const ovNames={all:'all',enemies:'enemies',friends:'friends'};
 function renderOverlay(){ const o=snap&&snap.overlay; if(!o) return;
