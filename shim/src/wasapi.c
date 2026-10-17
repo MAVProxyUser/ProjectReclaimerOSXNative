@@ -13,7 +13,7 @@ typedef struct WaStream WaStream;
 typedef struct { void**vtbl; WaStream*s; } WaItf;           // one COM interface of a stream (container: WaStream)
 struct WaStream {
     WaItf ac, rc, clk;                                       // IAudioClient, IAudioRenderClient, IAudioClock
-    volatile int ref; pthread_mutex_t m;
+    volatile int ref, svc; pthread_mutex_t m;                // svc: references held on the render client + clock
     int inited, started; uint32_t rate, ch, bits, blk, isfloat, bufframes;
     uint8_t*ring, *scratch; uint32_t scratch_cap; uint64_t rd, wr, played;   // ring positions in frames (monotonic)
     void*event; AudioQueueRef q; };
@@ -41,11 +41,32 @@ static void wa_aq_cb(void*ud,AudioQueueRef q,AudioQueueBufferRef b){
 static void wa_free(WaStream*s){
     if(s->q){ AudioQueueStop(s->q,1); AudioQueueDispose(s->q,1); s->q=0; }
     free(s->ring); free(s->scratch); pthread_mutex_destroy(&s->m); free(s); wa_log("  [wasapi] stream released\n"); }
-static unsigned MSABI wa_AddRef(WaItf*self){ return (unsigned)__atomic_add_fetch(&self->s->ref,1,__ATOMIC_ACQ_REL); }
-static unsigned MSABI wa_Release(WaItf*self){ WaStream*s=self->s; int r=__atomic_sub_fetch(&s->ref,1,__ATOMIC_ACQ_REL); if(r==0) wa_free(s); return (unsigned)(r<0?0:r); }
-static int MSABI wa_QI(WaItf*self,GUID_*riid,void**ppv){ if(!ppv) return WA_E_POINTER; *ppv=self; wa_AddRef(self); (void)riid; return HR_OK; }
+static void wa_ref_log(const char*op,WaItf*self,int r){ if(!getenv("PELOAD_TRACE_WASAPI")) return; char m[120];
+    const char*w=self==&self->s->ac?"client":self==&self->s->rc?"render":"clock"; int k=snprintf(m,sizeof m,"  [wasapi] %s %s %p -> %d\n",op,w,(void*)self->s,r); (void)!write(2,m,k); }
+// The client's voice chat retries every ~5 s while there is no microphone, and each try builds a playback stream that
+// it drops with one IAudioClient reference still held: the stream is never freed. Once nothing holds its render
+// client or clock any more and only that one reference is left, the stream is idle -- close its AudioQueue (no
+// callbacks, no CoreAudio resources) and reopen it if the client starts the stream again.
+static unsigned MSABI wa_AddRef(WaItf*self){ int r=__atomic_add_fetch(&self->s->ref,1,__ATOMIC_ACQ_REL); if(self!=&self->s->ac) __atomic_add_fetch(&self->s->svc,1,__ATOMIC_ACQ_REL);
+    wa_ref_log("AddRef",self,r); return (unsigned)r; }
+static unsigned MSABI wa_Release(WaItf*self){ WaStream*s=self->s; int sv=self!=&s->ac ? __atomic_sub_fetch(&s->svc,1,__ATOMIC_ACQ_REL) : s->svc;
+    int r=__atomic_sub_fetch(&s->ref,1,__ATOMIC_ACQ_REL); wa_ref_log("Release",self,r); if(r==0){ wa_free(s); return 0; }
+    if(r==1 && sv<=0 && s->q && s->inited && !getenv("PELOAD_WASAPI_KEEP_IDLE")){ AudioQueueStop(s->q,1); AudioQueueDispose(s->q,1); s->q=0; s->started=0; wa_log("  [wasapi] stream idle: queue closed\n"); }
+    return (unsigned)(r<0?0:r); }
+static int MSABI wa_QI(WaItf*self,GUID_*riid,void**ppv){ if(!ppv) return WA_E_POINTER;
+    if(getenv("PELOAD_TRACE_WASAPI")){ char m[96]; int k=snprintf(m,sizeof m,"  [wasapi] QI %08x\n",riid?riid->D1:0); (void)!write(2,m,k); }
+    *ppv=self; wa_AddRef(self); return HR_OK; }
 
 // IAudioClient
+static int wa_open_queue(WaStream*s){
+    AudioStreamBasicDescription f={0}; f.mSampleRate=s->rate; f.mFormatID=kAudioFormatLinearPCM;
+    f.mFormatFlags=(s->isfloat?kAudioFormatFlagIsFloat:kAudioFormatFlagIsSignedInteger)|kAudioFormatFlagIsPacked;
+    f.mFramesPerPacket=1; f.mChannelsPerFrame=s->ch; f.mBitsPerChannel=s->bits; f.mBytesPerFrame=s->blk; f.mBytesPerPacket=s->blk;
+    OSStatus st=AudioQueueNewOutput(&f,wa_aq_cb,s,0,0,0,&s->q);
+    if(st||!s->q){ s->q=0; char t[96]; int k=snprintf(t,sizeof t,"  [wasapi] AudioQueueNewOutput failed %d\n",(int)st); (void)!write(2,t,k); return 0; }
+    if(!xa_real()) AudioQueueSetParameter(s->q,kAudioQueueParam_Volume,0.0f);   // PELOAD_AUDIO=0: keep the clock running, play nothing
+    uint32_t per=s->rate/100; for(int i=0;i<3;i++){ AudioQueueBufferRef b=0; if(!AudioQueueAllocateBuffer(s->q,per*s->blk,&b)){ memset(b->mAudioData,0,per*s->blk); b->mAudioDataByteSize=per*s->blk; AudioQueueEnqueueBuffer(s->q,b,0,0); } }
+    return 1; }
 static int MSABI wac_Initialize(WaItf*self,int mode,uint32_t flags,int64_t dur,int64_t period,const uint8_t*fmt,const GUID_*session){
     (void)period;(void)session; WaStream*s=self->s; if(!fmt) return WA_E_POINTER; if(s->inited) return WA_E_ALREADY;
     uint16_t tag=*(const uint16_t*)fmt, ch=*(const uint16_t*)(fmt+2), blk=*(const uint16_t*)(fmt+12), bits=*(const uint16_t*)(fmt+14);
@@ -54,13 +75,7 @@ static int MSABI wac_Initialize(WaItf*self,int mode,uint32_t flags,int64_t dur,i
     s->rate=rate; s->ch=ch; s->bits=bits; s->blk=blk; s->isfloat=isfloat;
     uint64_t want=dur>0?(uint64_t)dur*rate/10000000ull:0; if(want<rate/10) want=rate/10; if(want>rate) want=rate;   // 100 ms .. 1 s
     s->bufframes=(uint32_t)want; s->ring=calloc(s->bufframes,blk); s->scratch_cap=s->bufframes; s->scratch=calloc(s->scratch_cap,blk);
-    AudioStreamBasicDescription f={0}; f.mSampleRate=rate; f.mFormatID=kAudioFormatLinearPCM;
-    f.mFormatFlags=(isfloat?kAudioFormatFlagIsFloat:kAudioFormatFlagIsSignedInteger)|kAudioFormatFlagIsPacked;
-    f.mFramesPerPacket=1; f.mChannelsPerFrame=ch; f.mBitsPerChannel=bits; f.mBytesPerFrame=blk; f.mBytesPerPacket=blk;
-    OSStatus st=AudioQueueNewOutput(&f,wa_aq_cb,s,0,0,0,&s->q);
-    if(st||!s->q){ char t[96]; int k=snprintf(t,sizeof t,"  [wasapi] AudioQueueNewOutput failed %d\n",(int)st); (void)!write(2,t,k); return WA_E_UNSUPPORTED; }
-    if(!xa_real()) AudioQueueSetParameter(s->q,kAudioQueueParam_Volume,0.0f);   // PELOAD_AUDIO=0: keep the clock running, play nothing
-    uint32_t per=rate/100; for(int i=0;i<3;i++){ AudioQueueBufferRef b=0; if(!AudioQueueAllocateBuffer(s->q,per*blk,&b)){ memset(b->mAudioData,0,per*blk); b->mAudioDataByteSize=per*blk; AudioQueueEnqueueBuffer(s->q,b,0,0); } }
+    if(!wa_open_queue(s)) return WA_E_UNSUPPORTED;
     s->inited=1;
     { char t[200]; int k=snprintf(t,sizeof t,"  [wasapi] stream: %u Hz, %u ch, %u-bit %s, buffer %u frames, mode %d flags 0x%x\n",rate,ch,bits,isfloat?"float":"int",s->bufframes,mode,flags); (void)!write(2,t,k); }
     return HR_OK; }
@@ -79,7 +94,7 @@ static uint8_t* wa_mixformat(void){   // WAVEFORMATEXTENSIBLE: 48 kHz stereo flo
     memcpy(w+24,sub,16); return w; }
 static int MSABI wac_GetMixFormat(WaItf*self,uint8_t**pp){ (void)self; if(!pp) return WA_E_POINTER; *pp=wa_mixformat(); return HR_OK; }
 static int MSABI wac_GetDevicePeriod(WaItf*self,int64_t*def,int64_t*min){ (void)self; if(def)*def=100000; if(min)*min=30000; return HR_OK; }
-static int MSABI wac_Start(WaItf*self){ WaStream*s=self->s; if(!s->inited) return WA_E_NOT_INIT; if(!s->started){ AudioQueueStart(s->q,0); s->started=1; if(s->event) i_SetEvent(s->event); } return HR_OK; }
+static int MSABI wac_Start(WaItf*self){ WaStream*s=self->s; if(!s->inited) return WA_E_NOT_INIT; if(!s->q && !wa_open_queue(s)) return WA_E_UNSUPPORTED; if(!s->started){ AudioQueueStart(s->q,0); s->started=1; if(s->event) i_SetEvent(s->event); } return HR_OK; }
 static int MSABI wac_Stop(WaItf*self){ WaStream*s=self->s; if(!s->inited) return WA_E_NOT_INIT; if(s->started){ AudioQueuePause(s->q); s->started=0; } return HR_OK; }
 static int MSABI wac_Reset(WaItf*self){ WaStream*s=self->s; if(!s->inited) return WA_E_NOT_INIT; pthread_mutex_lock(&s->m); s->rd=s->wr; pthread_mutex_unlock(&s->m); return HR_OK; }
 static int MSABI wac_SetEventHandle(WaItf*self,void*h){ self->s->event=h; return HR_OK; }

@@ -175,7 +175,9 @@ Shader hashes by name: dump with PELOAD_DUMP_SHADERS and grep the DXBC RDEF stri
 
 Client audio (2026-10-16): Reclaimer's own menu music / voice playback use cpal (WASAPI). shim/src/wasapi.c is a real
 render endpoint (IMMDeviceEnumerator/IMMDevice/IMMEndpoint/IPropertyStore/IAudioClient/IAudioRenderClient/IAudioClock)
-with one AudioQueue per stream; no capture device. `PELOAD_NO_WASAPI` = old no-device stub, `PELOAD_TRACE_WASAPI` logs.
+with one AudioQueue per stream; no capture device. `PELOAD_NO_WASAPI` = old no-device stub, `PELOAD_TRACE_WASAPI` logs
+(incl. per-interface AddRef/Release). Without a mic the voice system retries every ~5 s and leaves each playback stream
+with 1 reference: once only that is left (svc refs 0) the AudioQueue is closed (PELOAD_WASAPI_KEEP_IDLE = keep).
 Teleport (PELOAD_ALLOW_TELEPORT, F7): halo3+0x259410 (object, pos*, fwd*, up*, bool) run on the simulation thread
 via hb_engine_jobs() from QueryPerformanceCounter (the sim thread = the one that runs object_delete).
 
