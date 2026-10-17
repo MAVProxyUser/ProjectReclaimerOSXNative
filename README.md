@@ -73,6 +73,40 @@ No game files are included in this repository or its releases.
    `RECLAIMER_EXE=/path/to/exe` at it. The first launch of a new client version builds its Forge asset
    library (about 2.5 minutes, "BUILDING ASSET LIBRARY"); later launches reach the menu in ~20 s.
 
+## Copy to another Mac with a USB stick
+
+If one Mac is already set up, you can move everything to another Apple Silicon Mac on a USB stick: no Steam login
+or DepotDownloader download on the second Mac. The stick needs about 31 GB free (25 GB with `--minimal`); format it
+APFS or Mac OS Extended so it can hold files over 4 GB.
+
+On the Mac that already plays (from the repository folder):
+
+```bash
+bash shim/tools/make-usb.sh /Volumes/RECLAIMER
+```
+
+That copies, into `ReclaimerMac/` on the stick, the loader and launch scripts, the VC++ runtime DLLs, your Reclaimer
+client exe, your MCC files (the whole MCC folder; `--minimal` copies only what Project Reclaimer reads) and the
+client's caches and fonts (the Forge asset cache, so the second Mac skips the 2.5-minute first-launch build). Add
+`--with-profile` to bring your Reclaimer profile (nickname and identity) along -- then don't play on both Macs at once.
+
+On the other Mac, plug in the stick and run:
+
+```bash
+bash /Volumes/RECLAIMER/ReclaimerMac/install.sh
+```
+
+It checks for Rosetta 2, then copies the game files to the same place `./reclaimer-mac.sh download` would
+(`~/Library/Application Support/ReclaimerMac/prefix/drive_c/Program Files/Steam/steamapps/common/Halo The Master
+Chief Collection`) and the loader to `~/ReclaimerMac` (pass another folder as an argument to change that). Then:
+
+```bash
+cd ~/ReclaimerMac && bash shim/play.sh
+```
+
+Both scripts are resumable -- run them again if a copy was interrupted. The files are your own game copy, for your
+own Macs; don't share the stick.
+
 ## Launch
 
 ```bash
