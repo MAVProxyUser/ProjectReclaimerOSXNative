@@ -10,6 +10,7 @@
 #include "glh_shm.h"
 #include <spawn.h>
 #include <os/os_sync_wait_on_address.h>
+#include <os/lock.h>
 #include <sys/mman.h>
 #include <mach-o/dyld.h>
 #include <IOSurface/IOSurface.h>
@@ -20,7 +21,7 @@ static GlhHdr* g_glh;                    // the shared header (NULL = helper not
 static volatile int g_glh_on;            // routers encode (render context current)
 static int g_glh_want=-1;                // PELOAD_GL_HELPER
 static pid_t g_glh_pid; static int g_glh_wakefd=-1;
-static pthread_mutex_t g_glh_mx=PTHREAD_RECURSIVE_MUTEX_INITIALIZER;   // one writer at a time (render-context users also hold g_glmx)
+static os_unfair_lock g_glh_mx=OS_UNFAIR_LOCK_INIT;   // one writer at a time (render-context users also hold g_glmx); never nested
 static uint64_t g_glh_wpos;              // next write position (only under g_glh_mx)
 static uint64_t g_glh_syncseq;           // synchronous calls sent
 static unsigned long g_glh_nsync, g_glh_ncmd; static double g_glh_syncwait_s, g_glh_fullwait_s, g_glh_pqwait_s;
@@ -44,7 +45,7 @@ static void glh_kick(void){ if(atomic_load(&g_glh->helper_sleeping)){   // seq_c
 static uint8_t* glh_begin(uint32_t op,uint64_t len){
     if(!g_glh) return 0;
     len=GLH_AL8(len); if(len>GLH_RING/2){ static int w; if(w++<5){ char m[120]; int k=snprintf(m,sizeof m,"  [glh] command %u of %llu bytes is too large: dropped\n",op,(unsigned long long)len); (void)!write(2,m,k); } return 0; }
-    pthread_mutex_lock(&g_glh_mx);
+    os_unfair_lock_lock(&g_glh_mx);
     uint64_t off=g_glh_wpos%GLH_RING;
     if(off+len>GLH_RING){   // does not fit before the end: pad to the start
         uint64_t pad=GLH_RING-off;
@@ -57,7 +58,7 @@ static uint8_t* glh_begin(uint32_t op,uint64_t len){
     uint8_t*c=glh_ring(g_glh)+off; ((uint16_t*)c)[0]=(uint16_t)op; ((uint16_t*)c)[1]=0; ((uint32_t*)c)[1]=(uint32_t)len;
     return c; }
 static void glh_end(uint8_t*c){ uint32_t len=((uint32_t*)c)[1]; g_glh_wpos+=len; g_glh_ncmd++;
-    atomic_store(&g_glh->head,g_glh_wpos); glh_kick(); pthread_mutex_unlock(&g_glh_mx); }
+    atomic_store(&g_glh->head,g_glh_wpos); glh_kick(); os_unfair_lock_unlock(&g_glh_mx); }
 // publish, then wait until the helper has run it; the lock stays held until glh_sync_release (the reply area is shared)
 static const uint8_t* glh_end_sync(uint8_t*c,uint64_t*rv){ uint32_t len=((uint32_t*)c)[1]; g_glh_wpos+=len; g_glh_ncmd++; uint64_t want=++g_glh_syncseq;
     atomic_store(&g_glh->head,g_glh_wpos); glh_kick();
@@ -67,7 +68,7 @@ static const uint8_t* glh_end_sync(uint8_t*c,uint64_t*rv){ uint32_t len=((uint32
         if(++spins<2000) sched_yield(); else { usleep(20); glh_check_alive(); } }
     g_glh_syncwait_s+=mono_s()-t0; g_glh_nsync++;
     if(rv) *rv=g_glh->sync_rv; return glh_reply(g_glh); }
-static void glh_sync_release(void){ pthread_mutex_unlock(&g_glh_mx); }
+static void glh_sync_release(void){ os_unfair_lock_unlock(&g_glh_mx); }
 
 // ---- payload sizes -----------------------------------------------------------------------------------------------------
 static int g_glh_unpack[4]={0,4,0,0}, g_glh_pack[4]={0,4,0,0};   // row length, alignment, skip rows, skip pixels

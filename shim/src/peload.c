@@ -10632,7 +10632,7 @@ static void* sampler_thread(void*a){ (void)a; pthread_setname_np("shim-sampler")
                             pthread_t pt=pthread_from_mach_thread_np(t); if(pt) pthread_getname_np(pt,thr[ti].name,sizeof thr[ti].name);
                             if(!thr[ti].name[0]) snprintf(thr[ti].name,sizeof thr[ti].name,"port%u",(unsigned)t); }
                         Dl_info di={0}; int idle=0; if(dladdr((void*)rip,&di) && di.dli_sname && (strstr(di.dli_sname,"mach_msg")||strstr(di.dli_sname,"__psynch")||strstr(di.dli_sname,"__semwait")||strstr(di.dli_sname,"nanosleep")||strstr(di.dli_sname,"__select")||strstr(di.dli_sname,"__workq")||strstr(di.dli_sname,"kevent")||strstr(di.dli_sname,"__ulock")||strstr(di.dli_sname,"__wait4")||strstr(di.dli_sname,"__recvfrom")||strstr(di.dli_sname,"__read_nocancel")||strstr(di.dli_sname,"__accept")||strstr(di.dli_sname,"__sigsuspend")||strstr(di.dli_sname,"poll")||strstr(di.dli_sname,"semaphore_"))) idle=1;
-                        if(ti>=0 && !idle && rtop && di.dli_sname && (strstr(di.dli_sname,"memmove")||strstr(di.dli_sname,"memcpy")||strstr(di.dli_sname,"memset")||strstr(di.dli_sname,"memcmp"))){
+                        if(ti>=0 && !idle && rtop && di.dli_sname && (strstr(di.dli_sname,"memmove")||strstr(di.dli_sname,"memcpy")||strstr(di.dli_sname,"memset")||strstr(di.dli_sname,"memcmp")||strstr(di.dli_sname,"strncmp")||strstr(di.dli_sname,"strcmp")||strstr(di.dli_sname,"mutex"))){
                             int cc=0; uint64_t ck=smp_func(rtop,&cc); for(int q=0;q<256;q++){ if(g_smp_mc[q].key==ck && g_smp_mc[q].th==(uint32_t)ti){ g_smp_mc[q].cnt++; break; } if(!g_smp_mc[q].key){ g_smp_mc[q].key=ck; g_smp_mc[q].th=(uint32_t)ti; g_smp_mc[q].cnt=1; break; } } }
                         if(ti>=0){ thr[ti].n++; if(!idle){ thr[ti].busy++; int cls=SMP_SYS; uint64_t key=smp_func(rip,&cls); thr[ti].cls[cls]++;
                             uint32_t h=(uint32_t)((key>>2)*2654435761u ^ (uint32_t)ti*0x9E37u)&65535;
@@ -10653,7 +10653,7 @@ static void* sampler_thread(void*a){ (void)a; pthread_setname_np("shim-sampler")
                         for(int q=0;q<12;q++) k+=snprintf(m+k,sizeof m-k," %02x",((volatile uint8_t*)tab[bi].key)[q]); k+=snprintf(m+k,sizeof m-k,"),"); }
                     tab[bi].cnt=0; }
                 m[k-1]='\n'; (void)!write(2,m,k);
-                { int kk=snprintf(m,sizeof m,"  [sample]   memory routines called from:"); int any=0;
+                { int kk=snprintf(m,sizeof m,"  [sample]   memory/string/lock routines called from:"); int any=0;
                   for(int top=0;top<5;top++){ int bi=-1; uint32_t bc=0; for(int q=0;q<256;q++) if(g_smp_mc[q].th==(uint32_t)ti && g_smp_mc[q].cnt>bc){ bc=g_smp_mc[q].cnt; bi=q; }
                       if(bi<0 || bc*100<thr[ti].busy) break; char w[120]; smp_name(g_smp_mc[bi].key,w,sizeof w); kk+=snprintf(m+kk,sizeof m-kk," %s %.1f%%,",w,100.0*bc/thr[ti].busy); g_smp_mc[bi].cnt=0; any=1; }
                   if(any){ m[kk-1]='\n'; (void)!write(2,m,kk); } } }
