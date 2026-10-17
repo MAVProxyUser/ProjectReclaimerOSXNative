@@ -135,7 +135,7 @@ static int hb_collect(HbObj*out,int max){
     int n=0;
     for(int i=0;i<hi && n<max;i++){ const uint8_t*e=g_hb_tab+i*0x18; if(!*(const uint16_t*)e) continue; int t=e[3];
         int unit = t==0||t==1||t==12;
-        int want = (unit && (fh||fi)) || (t==5 && (ft || (fh&&g_hb_all))) || ((t==2||t==3) && (fw || (fh&&g_hb_all))); if(!want) continue;
+        int want = (unit && (fh||fi||g_hb_tp_request)) || (t==5 && (ft || (fh&&g_hb_all))) || ((t==2||t==3) && (fw || (fh&&g_hb_all))); if(!want) continue;
         uint64_t p=*(const uint64_t*)(e+0x10); static uint8_t dh[0x380]; size_t rd=unit?0x380:0x140; if(!p || !hb_read(p,dh,rd)) continue;
         const float*od=(const float*)(dh+0x1c);
         HbObj*o=&out[n]; memset(o,0,sizeof *o); o->c[0]=od[0]; o->c[1]=od[1]; o->c[2]=od[2]; o->r=od[3]; memcpy(o->o,dh+0x50,12); memcpy(o->vel,dh+0x74,12);
@@ -342,7 +342,10 @@ typedef struct { double t; uint32_t def, handle; float pos[3], vel[3]; uint8_t r
 static pthread_t g_hb_simthread; static volatile int g_hb_simthread_ok;
 volatile int g_hb_job_pending; static uint32_t g_hb_tp_handle; static float g_hb_tp_pos[3], g_hb_tp_fwd[3];
 static void hb_engine_jobs(void){
-    if(!g_hb_simthread_ok || !pthread_equal(pthread_self(),g_hb_simthread)) return;
+    // the simulation thread: its own TLS block holds the live object table (worker threads have no game state there)
+    { uint8_t*h3=hb_halo3_base(); if(!h3) return; uint32_t idx=*(volatile uint32_t*)(h3+0xa39f9c); if(idx>=128) return;
+      void**tarr; __asm__ volatile("movq %%gs:0x58,%0":"=r"(tarr)); if(!tarr || !tarr[idx]) return;
+      uint8_t*arr=*(uint8_t**)((uint8_t*)tarr[idx]+0x38); if(!arr || *(uint32_t*)(arr+0x2c)!=0x64407440 || memcmp(arr,"object",7)) return; }
     if(!__atomic_exchange_n(&g_hb_job_pending,0,__ATOMIC_ACQ_REL)) return;
     uint8_t*h3=hb_halo3_base(); static const uint8_t pro[16]={0x48,0x89,0x5C,0x24,0x08,0x48,0x89,0x6C,0x24,0x10,0x48,0x89,0x74,0x24,0x18,0x57};
     if(!h3 || memcmp(h3+0x259410,pro,16)){ (void)!write(2,"  [teleport] halo3 teleport function not recognised: skipped\n",60); return; }
@@ -412,10 +415,16 @@ static void hb_draw_overlay(void){
     if(g_hb_tp_request && selfi>=0){ g_hb_tp_request=0;   // F7 / PELOAD_TELEPORT_TEST: reflect our position through the map centre
         double cx=0,cy=0; int ni=0; for(int i=0;i<n;i++){ const HbObj*o=&objs[i]; if((o->type==2||o->type==3) && o->parent==0xFFFFFFFFu){ cx+=o->o[0]; cy+=o->o[1]; ni++; } }
         if(ni>=4){ cx/=ni; cy/=ni; const HbObj*me=&objs[selfi];
-            g_hb_tp_pos[0]=(float)(2*cx-me->o[0]); g_hb_tp_pos[1]=(float)(2*cy-me->o[1]); g_hb_tp_pos[2]=me->o[2]+0.3f;
+            // the reflected point itself can be inside geometry (maps are mirror-, not point-symmetric; a first try landed
+            // below the far base's floor and crashed in the physics update): stand on the map item nearest to it instead
+            float rx=(float)(2*cx-me->o[0]), ry=(float)(2*cy-me->o[1]); int best=-1; float bd=1e30f;
+            for(int i=0;i<n;i++){ const HbObj*o=&objs[i]; if(!((o->type==2||o->type==3) && o->parent==0xFFFFFFFFu)) continue;
+                float dx=o->o[0]-rx, dy=o->o[1]-ry, d=dx*dx+dy*dy; if(d<bd){ bd=d; best=i; } }
+            if(best<0){ (void)!write(2,"  [teleport] no map item to stand on\n",37); return; }
+            g_hb_tp_pos[0]=objs[best].o[0]; g_hb_tp_pos[1]=objs[best].o[1]; g_hb_tp_pos[2]=objs[best].o[2]+0.5f;
             float fx=-vp[12], fy=-vp[13], fl=sqrtf(fx*fx+fy*fy); g_hb_tp_fwd[0]=fl>1e-4f?fx/fl:1; g_hb_tp_fwd[1]=fl>1e-4f?fy/fl:0; g_hb_tp_fwd[2]=0;
             g_hb_tp_handle=me->handle; __atomic_store_n(&g_hb_job_pending,1,__ATOMIC_RELEASE);
-            char m[200]; int k=snprintf(m,sizeof m,"  [teleport] map centre (%.2f %.2f) from %d items; from (%.2f %.2f %.2f) to (%.2f %.2f %.2f)\n",cx,cy,ni,me->o[0],me->o[1],me->o[2],g_hb_tp_pos[0],g_hb_tp_pos[1],g_hb_tp_pos[2]); (void)!write(2,m,k); }
+            char m[200]; int k=snprintf(m,sizeof m,"  [teleport] map centre (%.2f %.2f) from %d items; from (%.2f %.2f %.2f), reflected (%.2f %.2f) -> on %s at (%.2f %.2f %.2f)\n",cx,cy,ni,me->o[0],me->o[1],me->o[2],rx,ry,hb_tag_name(objs[best].def),g_hb_tp_pos[0],g_hb_tp_pos[1],g_hb_tp_pos[2]); (void)!write(2,m,k); }
         else (void)!write(2,"  [teleport] too few map items to find the centre\n",50); }
     enum { HB_CAP=400000 }; static float verts[HB_CAP*5]; int nv=0; const float*cam=vp+28;   // cb0[7] = camera position
     static const float cwhite[3]={1,1,1}, cgrey[3]={0.7f,0.7f,0.7f}, ctrace[3]={1,0.95f,0.55f}, cvel[3]={1,0.5f,0.1f}, citem[3]={0.3f,1,0.45f}, cequip[3]={0.3f,0.9f,1};

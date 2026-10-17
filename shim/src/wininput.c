@@ -125,7 +125,9 @@ static void wi_key(unsigned short kc,int down,int repeat){
 static volatile int g_hb_toggle, g_hb_teamcycle, g_hb_tp_request;   // F6 cycles the team filter (all -> enemies -> friends); g_hb_tp_request: F7 teleport
 // ---- NSEvent translation (main thread, from cocoa_pump). Returns 1 = consumed (don't forward to AppKit). ----
 static int wi_translate(id ev){
-    static int off=-1; if(off<0) off=getenv("PELOAD_NO_KBM")?1:0; if(off) return 0;
+    static int off=-1; if(off<0) off=getenv("PELOAD_NO_KBM")?1:0;
+    if(off){ unsigned long t=((unsigned long(*)(id,SEL))objc_msgSend)(ev,sel_registerName("type")), md=((unsigned long(*)(id,SEL))objc_msgSend)(ev,sel_registerName("modifierFlags"));
+        return (t==10||t==11) && !(md&(1ul<<20)); }   // input-less test client: swallow keys (no system beep), keep Cmd shortcuts
     unsigned long type=((unsigned long(*)(id,SEL))objc_msgSend)(ev,sel_registerName("type"));
     unsigned long mods=((unsigned long(*)(id,SEL))objc_msgSend)(ev,sel_registerName("modifierFlags"));
     void*h=fg_hwnd_ext();
