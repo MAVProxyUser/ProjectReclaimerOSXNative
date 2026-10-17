@@ -311,6 +311,8 @@ static int st_control(const char*act,const char*qs){
         return st_voice_request(id,!strcmp(act,"mute")); }
     if(!strcmp(act,"textup") || !strcmp(act,"textdown")){ int v=g_hb_text_px>0?g_hb_text_px:7; v+=!strcmp(act,"textup")?1:-1; if(v<4) v=4; if(v>60) v=60; g_hb_text_px=v;
         char m[64]; int k=snprintf(m,sizeof m,"  [stats] page: label text %d px\n",v); (void)!write(2,m,k); return 1; }
+    if(!strcmp(act,"spar")){ const char*v=strstr(qs,"on="); if(!v) return 0; extern volatile int g_spar_on; g_spar_on=atoi(v+3)?1:0;   // sparring partner aim
+        char m[64]; int k=snprintf(m,sizeof m,"  [spar] page: sparring aim %s\n",g_spar_on?"on":"off"); (void)!write(2,m,k); return 1; }
     if(!strcmp(act,"submit")){ const char*v=strstr(qs,"on="); if(!v) return 0; g_sub_want=atoi(v+3)?1:0; return 1; }   // GL submission thread (d3dsubmit.c)
     if(!strcmp(act,"capture")){ __atomic_store_n(&g_hb_cap_req,1,__ATOMIC_RELEASE); (void)!write(2,"  [capture] page: capturing the next frame\n",43); return 1; }
     return 0; }
@@ -325,9 +327,9 @@ static void st_snapshot(StBuf*s){
       pthread_mutex_unlock(&g_hb_mapmx);
       const char*b=strrchr(mp,'/'); b=b?b+1:mp; snprintf(m,sizeof m,"%s",b); char*dot=strrchr(m,'.'); if(dot)*dot=0; sb_put(s,",\"map\":"); sb_str(s,m); }
     { static int tp=-1; if(tp<0) tp=getenv("PELOAD_ALLOW_TELEPORT")?1:0; static const char*const tm[3]={"all","enemies","friends"};
-      sb_put(s,",\"overlay\":{\"hitboxes\":%s,\"tracers\":%s,\"info\":%s,\"items\":%s,\"visible\":%s,\"teams\":\"%s\",\"teleport\":%s,\"host\":%s,\"tp_forward\":%s,\"controls\":%s,\"text_px\":%d}",
+      sb_put(s,",\"overlay\":{\"hitboxes\":%s,\"tracers\":%s,\"info\":%s,\"items\":%s,\"visible\":%s,\"teams\":\"%s\",\"teleport\":%s,\"host\":%s,\"tp_forward\":%s,\"controls\":%s,\"text_px\":%d,\"spar\":%s,\"spar_aim\":%.1f}",
           hb_feat(HBF_HITBOX)?"true":"false",hb_feat(HBF_TRACER)?"true":"false",hb_feat(HBF_INFO)?"true":"false",hb_feat(HBF_ITEMS)?"true":"false",hb_feat(HBF_VISIBLE)?"true":"false",
-          tm[hb_team_mode()],tp?"true":"false",st_is_host()?"true":"false",getenv("PELOAD_TELEPORT_HOST")?"true":"false",st_controls_ok()?"true":"false",g_hb_text_px>0?g_hb_text_px:7); }
+          tm[hb_team_mode()],tp?"true":"false",st_is_host()?"true":"false",getenv("PELOAD_TELEPORT_HOST")?"true":"false",st_controls_ok()?"true":"false",g_hb_text_px>0?g_hb_text_px:7,hb_spar_enabled()?"true":"false",g_spar_ok?(double)g_spar_err:-1.0); }
     if(strcmp(m,g_trk_map)){ snprintf(g_trk_map,sizeof g_trk_map,"%s",m); g_ntrk=0; g_nbip=0; memset(g_proj,0,sizeof g_proj); g_hb_local_slot=-1; }   // new map: new match stats
     pthread_mutex_lock(&g_hm_mx); snprintf(g_hm_cur,sizeof g_hm_cur,"%s",m); if(g_hm.dirty && now-g_hm.saved>30){ hm_save(); g_hm.saved=now; } pthread_mutex_unlock(&g_hm_mx);
     static uint8_t tab[8192*0x18]; int hi=0; uint64_t arr=hb_object_array(); uint8_t hdr[0x60];

@@ -951,8 +951,17 @@ static void*  g_d3ddev_vtbl[48];
 static void*  g_d3dctx_vtbl[160];
 static void*  g_dxgiswap_vtbl[40];
 static uint8_t g_d3dscratch[1<<20];  // fallback Map target
+// D3D objects are never freed (Release is a no-op): every resource/view/state the game creates stays allocated. Counted
+// for the leak audit: [d3dobj] every 30 s under PELOAD_D3DGL_PROF or PELOAD_D3DOBJ_LOG (objects, CPU bytes, by kind).
+static volatile uint64_t g_d3do_n[8], g_d3do_bytes[8];
+static void d3dobj_log(void){ static double tl; double now=mono_s(); if(now-tl<30.0) return; tl=now;
+    if(!getenv("PELOAD_D3DOBJ_LOG") && !getenv("PELOAD_D3DGL_PROF")) return;
+    char m[300]; int k=snprintf(m,sizeof m,"  [d3dobj] created so far (never freed):"); uint64_t tn=0,tb=0;
+    for(int i=0;i<8;i++){ if(!g_d3do_n[i]) continue; tn+=g_d3do_n[i]; tb+=g_d3do_bytes[i]; k+=snprintf(m+k,sizeof m-k," kind%d %llu (%.1f MB)",i,(unsigned long long)g_d3do_n[i],g_d3do_bytes[i]/1048576.0); }
+    k+=snprintf(m+k,sizeof m-k," | total %llu, %.1f MB\n",(unsigned long long)tn,tb/1048576.0); (void)!write(2,m,k); }
 static D3DObj* d3dobj(void** vt, uint32_t kind, uint64_t size){
     D3DObj* o=calloc(1,sizeof *o); o->vtbl=vt; o->kind=kind; o->size=size;
+    __atomic_add_fetch(&g_d3do_n[kind&7],1,__ATOMIC_RELAXED); __atomic_add_fetch(&g_d3do_bytes[kind&7],size,__ATOMIC_RELAXED);
     if(size){
         if(getenv("PELOAD_D3D_GUARD")){
             // place the buffer's END against a PROT_NONE guard page so any write
@@ -1821,7 +1830,7 @@ static void fps_title_tick(void); // fwd: engine fps + draws/frame in the window
 static int win_hidden(void);
 static void present_cap(void){ static double per=-1, next; if(per<0){ const char*e=getenv("PELOAD_MAX_FPS"); double f=e?atof(e):(win_hidden()?30:0); per=f>0?1.0/f:0; }
     if(!per) return; double now=mono_s(); if(next>now){ usleep((useconds_t)((next-now)*1e6)); next+=per; } else next=now+per; }
-static int MSABI swap_Present(void*t,uint32_t sync,uint32_t fl){ (void)sync;(void)fl; d3dtrace(4,"Present"); flog("t%x PRESENT swapchain=%p",pthread_mach_thread_np(pthread_self()),t); g_ct_frame++; if(!sub_on()) g_hb_taken=0; hb_teleport_tick(); flog_present(); fps_title_tick();
+static int MSABI swap_Present(void*t,uint32_t sync,uint32_t fl){ (void)sync;(void)fl; d3dtrace(4,"Present"); { extern void hb_spar_tick(void); hb_spar_tick(); } flog("t%x PRESENT swapchain=%p",pthread_mach_thread_np(pthread_self()),t); g_ct_frame++; if(!sub_on()) g_hb_taken=0; hb_teleport_tick(); flog_present(); fps_title_tick();
     // PELOAD_TRACE_PRESENT_RATE: periodic count+timestamp so we can see if/when the engine stops
     // calling Present (render-thread stall) vs keeps calling it (present-bridge stall).
     if(getenv("PELOAD_TRACE_PRESENT_RATE")){ static unsigned long pc; static long t0; struct timeval tv; gettimeofday(&tv,0);
@@ -3642,6 +3651,10 @@ static uint32_t MSABI i_XInputGetState(uint32_t idx,void*st){
     if(idx>3||!st) return 160; /*ERROR_BAD_ARGUMENTS*/
     // PELOAD_NO_PAD: this instance sees no controllers (e.g. a second client used as a test target, so it
     // doesn't share the player's pad: GameController delivers pad input to every process, focused or not)
+    // sparring partner (hitbox.c hb_spar_tick): pad 0 = a right stick toward the nearest enemy's head, nothing else
+    { extern int hb_spar_enabled(void); extern int hb_spar_stick(float*,float*);
+      if(idx==0 && hb_spar_enabled()){ static uint32_t sp_pkt; float rx=0,ry=0; hb_spar_stick(&rx,&ry); uint8_t*o=st; memset(o,0,16);
+          int16_t sx=ax16(rx), sy=ax16(ry); *(uint32_t*)o=++sp_pkt; memcpy(o+12,&sx,2); memcpy(o+14,&sy,2); return 0; } }
     { static int nopad=-1; if(nopad<0) nopad=getenv("PELOAD_NO_PAD")?1:0; if(nopad) return 1167; /*ERROR_DEVICE_NOT_CONNECTED*/ }
     static uint32_t pkt[4]; static XPad last[4]; static int logged;
     XPad p; memset(&p,0,sizeof p); int con=gc_read(idx,&p);
@@ -6595,7 +6608,7 @@ static void cb_dump_scan(void){ if(!getenv("PELOAD_CB_DUMP")) return; static int
                   k=snprintf(m,sizeof m,"   BEST so far: %s\n",bestdesc); (void)!write(2,m,k); } } } }
         k=snprintf(m,sizeof m,"  [cb0find] BEST convention: %s\n",bestdesc); (void)!write(2,m,k); } }
 static void d3dgl_present_impl(void);
-static void d3dgl_present(void){ GLLOCK(); gl_count_report(); if(!prof_on()) d3dgl_present_impl();
+static void d3dgl_present(void){ GLLOCK(); gl_count_report(); d3dobj_log(); if(!prof_on()) d3dgl_present_impl();
     else { uint64_t t=prof_now(); d3dgl_present_impl(); g_prof_pres_ns+=prof_now()-t; g_prof_pres_n++; prof_report(); } GLUNLOCK(); }
 static void d3dgl_present_impl(void){
     if(getenv("PELOAD_TRACE_COPY")){ static unsigned long pc; if((pc++%100)==0){ char m[200]; int k=snprintf(m,sizeof m,"  [presentsrc] present #%lu tex=%u backbuf.gltex=%u vw/vh=%d/%d tw/th=%d/%d | bb draws since last=%lu lastvp=%lux%lu t0=%ux%u f%u | bb SKIPPED=%lu reason=%lu\n",pc,g_d3dgl_present_tex,g_d3d_backbuf?g_d3d_backbuf->gltex:0,g_d3dgl_present_vw,g_d3dgl_present_vh,g_d3dgl_present_tw,g_d3dgl_present_th,g_bb_draws,g_bb_vp>>16,g_bb_vp&0xffff,g_bb_t0w,g_bb_t0h,g_bb_t0f,g_bb_skip,g_bb_skip_reason); g_bb_draws=0; g_bb_skip=0; (void)!write(2,m,k);} }

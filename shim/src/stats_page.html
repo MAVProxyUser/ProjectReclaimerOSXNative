@@ -69,6 +69,7 @@ canvas{width:100%;height:auto;display:block;background:#0b0b0b;border-radius:4px
  <button data-a="visible" title="Hitboxes and labels only for objects you can actually see (not behind walls)">Visible only<kbd>F9</kbd></button>
  <button data-a="teleport" title="Teleport to the far side of the map (needs PELOAD_ALLOW_TELEPORT; matches you host)">Teleport<kbd>F7</kbd></button>
  <button data-a="capture" title="Save the next frame, its depth buffer and the camera position to your home folder">Capture frame<kbd>F8</kbd></button>
+ <button data-a="spar" title="Sparring partner: this client turns its view toward the nearest enemy's head (aim only: it never moves or fires). Meant for the second player (shim/target.sh) in local practice games.">Sparring aim</button><span id="spr" class="lbl"></span>
  <span id="ovmsg"></span></div>
 <div id="conn" class="panel"><div id="ch"><h2 id="ct">Connected</h2>
  <button class="mb" id="muteall">Mute all</button><button class="mb" id="unmuteall">Unmute all</button></div><div id="cl" class="note">-</div>
@@ -294,10 +295,12 @@ function renderOverlay(){ const o=snap&&snap.overlay; if(!o) return;
     else if(a in o && typeof o[a]==='boolean' && a!=='teleport') b.classList.toggle('on',o[a]);
     b.disabled=!o.controls||(a==='teleport'&&!o.teleport); }
   document.getElementById('tpx').textContent=o.text_px?o.text_px+' px':'';
+  document.getElementById('spr').textContent=o.spar?(o.spar_aim>=0?'aim off by '+o.spar_aim.toFixed(1)+'°':'no enemy'):'';
   document.getElementById('ovmsg').textContent=o.controls?'':'controls are off (PELOAD_STATS_READONLY)'; }
 document.getElementById('ov').addEventListener('click',async e=>{ const b=e.target.closest('button'); if(!b||b.disabled) return;
   const msg=document.getElementById('ovmsg');
-  try{ const r=await fetch('/control?do='+b.dataset.a,{method:'POST',headers:{'X-Reclaimer-Control':'1'}}); const j=await r.json();
+  const extra=b.dataset.a==='spar'?'&on='+(snap&&snap.overlay&&snap.overlay.spar?0:1):'';
+  try{ const r=await fetch('/control?do='+b.dataset.a+extra,{method:'POST',headers:{'X-Reclaimer-Control':'1'}}); const j=await r.json();
     msg.textContent=j.ok?(b.dataset.a==='capture'?'captured: ~/reclaimer_cap_*.bmp/.txt':''):(j.error||'failed'); }
   catch(err){ msg.textContent='not connected'; } });
 // ---- live snapshots ----

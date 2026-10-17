@@ -30,6 +30,10 @@ static void wa_log(const char*s){ if(getenv("PELOAD_TRACE_WASAPI")) (void)!write
 // Runs on the AudioQueue's own thread. The enqueue happens under s->m and not at all once the queue is closing: a
 // callback that re-enqueued a buffer while another thread disposed the queue tripped caulk's allocator check (a SIGILL
 // in caulk::alloc, seen as "exception 0xC000001D at unmapped module" right after the client's 5 s voice retries).
+// Every AudioQueue create / start / stop / dispose, in all streams, under one lock (callbacks never take it): the
+// client's voice retries create and dispose a queue every ~5 s, and a create racing another stream's dispose still
+// tripped caulk's allocator trap with per-stream locking (2026-10-17, input-less test client).
+static pthread_mutex_t g_wa_lm=PTHREAD_MUTEX_INITIALIZER;
 static void wa_aq_cb(void*ud,AudioQueueRef q,AudioQueueBufferRef b){
     WaStream*s=ud; uint32_t frames=b->mAudioDataBytesCapacity/s->blk;
     pthread_mutex_lock(&s->m);
@@ -42,12 +46,15 @@ static void wa_aq_cb(void*ud,AudioQueueRef q,AudioQueueBufferRef b){
     b->mAudioDataByteSize=frames*s->blk; AudioQueueEnqueueBuffer(q,b,0,0);
     pthread_mutex_unlock(&s->m);
     if(ev) i_SetEvent(ev); }                                  // room in the buffer: let the client refill
-// Stop + dispose a stream's queue: mark it closing first (under the lock, so no callback is mid-enqueue), then tear it
-// down outside the lock (a synchronous dispose waits for a running callback, which would block on the lock)
+// Stop + dispose a stream's queue: take it out of the stream and mark it closing in ONE locked step (no callback is
+// mid-enqueue, and a second closer -- two Releases racing on different threads -- finds no queue: it used to find the
+// same one still set and dispose it twice, caulk's SIGILL again), then tear it down outside the lock (a synchronous
+// dispose waits for a running callback, which would block on the lock).
 static void wa_close_queue(WaStream*s){
-    pthread_mutex_lock(&s->m); AudioQueueRef q=s->q; s->closing=1; pthread_mutex_unlock(&s->m);
+    pthread_mutex_lock(&g_wa_lm);
+    pthread_mutex_lock(&s->m); AudioQueueRef q=s->q; s->q=0; s->closing=1; s->started=0; pthread_mutex_unlock(&s->m);
     if(q){ AudioQueueStop(q,1); AudioQueueDispose(q,1); }
-    pthread_mutex_lock(&s->m); s->q=0; s->started=0; pthread_mutex_unlock(&s->m); }
+    pthread_mutex_unlock(&g_wa_lm); }
 static void wa_free(WaStream*s){
     if(s->q) wa_close_queue(s);
     free(s->ring); free(s->scratch); pthread_mutex_destroy(&s->m); free(s); wa_log("  [wasapi] stream released\n"); }
@@ -86,7 +93,7 @@ static int MSABI wac_Initialize(WaItf*self,int mode,uint32_t flags,int64_t dur,i
     s->rate=rate; s->ch=ch; s->bits=bits; s->blk=blk; s->isfloat=isfloat;
     uint64_t want=dur>0?(uint64_t)dur*rate/10000000ull:0; if(want<rate/10) want=rate/10; if(want>rate) want=rate;   // 100 ms .. 1 s
     s->bufframes=(uint32_t)want; s->ring=calloc(s->bufframes,blk); s->scratch_cap=s->bufframes; s->scratch=calloc(s->scratch_cap,blk);
-    if(!wa_open_queue(s)) return WA_E_UNSUPPORTED;
+    pthread_mutex_lock(&g_wa_lm); int ok=wa_open_queue(s); pthread_mutex_unlock(&g_wa_lm); if(!ok) return WA_E_UNSUPPORTED;
     s->inited=1;
     { char t[200]; int k=snprintf(t,sizeof t,"  [wasapi] stream: %u Hz, %u ch, %u-bit %s, buffer %u frames, mode %d flags 0x%x\n",rate,ch,bits,isfloat?"float":"int",s->bufframes,mode,flags); (void)!write(2,t,k); }
     return HR_OK; }
@@ -105,8 +112,11 @@ static uint8_t* wa_mixformat(void){   // WAVEFORMATEXTENSIBLE: 48 kHz stereo flo
     memcpy(w+24,sub,16); return w; }
 static int MSABI wac_GetMixFormat(WaItf*self,uint8_t**pp){ (void)self; if(!pp) return WA_E_POINTER; *pp=wa_mixformat(); return HR_OK; }
 static int MSABI wac_GetDevicePeriod(WaItf*self,int64_t*def,int64_t*min){ (void)self; if(def)*def=100000; if(min)*min=30000; return HR_OK; }
-static int MSABI wac_Start(WaItf*self){ WaStream*s=self->s; if(!s->inited) return WA_E_NOT_INIT; if(!s->q && !wa_open_queue(s)) return WA_E_UNSUPPORTED; if(!s->started){ AudioQueueStart(s->q,0); s->started=1; if(s->event) i_SetEvent(s->event); } return HR_OK; }
-static int MSABI wac_Stop(WaItf*self){ WaStream*s=self->s; if(!s->inited) return WA_E_NOT_INIT; if(s->started){ AudioQueuePause(s->q); s->started=0; } return HR_OK; }
+static int MSABI wac_Start(WaItf*self){ WaStream*s=self->s; if(!s->inited) return WA_E_NOT_INIT;
+    pthread_mutex_lock(&g_wa_lm); if(!s->q && !wa_open_queue(s)){ pthread_mutex_unlock(&g_wa_lm); return WA_E_UNSUPPORTED; }
+    if(!s->started){ AudioQueueStart(s->q,0); s->started=1; if(s->event) i_SetEvent(s->event); } pthread_mutex_unlock(&g_wa_lm); return HR_OK; }
+static int MSABI wac_Stop(WaItf*self){ WaStream*s=self->s; if(!s->inited) return WA_E_NOT_INIT;
+    pthread_mutex_lock(&g_wa_lm); if(s->started && s->q) AudioQueuePause(s->q); s->started=0; pthread_mutex_unlock(&g_wa_lm); return HR_OK; }
 static int MSABI wac_Reset(WaItf*self){ WaStream*s=self->s; if(!s->inited) return WA_E_NOT_INIT; pthread_mutex_lock(&s->m); s->rd=s->wr; pthread_mutex_unlock(&s->m); return HR_OK; }
 static int MSABI wac_SetEventHandle(WaItf*self,void*h){ self->s->event=h; return HR_OK; }
 static int MSABI wac_GetService(WaItf*self,GUID_*riid,void**ppv){ WaStream*s=self->s; if(!ppv) return WA_E_POINTER; *ppv=0;

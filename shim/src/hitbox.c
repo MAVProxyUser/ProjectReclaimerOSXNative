@@ -131,6 +131,7 @@ int hb_face_target(float*rx,float*ry){ if(!g_hb_tgt_ok) return 0;
 static uint8_t g_hb_tab[8192*0x18]; static int g_hb_hi;   // last object-table snapshot (for handle -> datum lookups)
 static uint64_t hb_handle_datum(uint32_t h){ int i=h&0xFFFF; if(h==0xFFFFFFFFu || i>=g_hb_hi) return 0; const uint8_t*e=g_hb_tab+i*0x18;
     if(*(const uint16_t*)e!=(uint16_t)(h>>16)) return 0; return *(const uint64_t*)(e+0x10); }
+static int g_hb_units_only;   // (under g_hb_collect_mx) collect every unit whatever the overlay switches say: sparring
 static int hb_collect(HbObj*out,int max){
     static uint64_t arr; static double tarr; double now=mono_s(); if(!arr || now-tarr>2.0){ arr=hb_object_array(); tarr=now; } if(!arr) return 0;
     uint8_t hdr[0x60]; if(!hb_read(arr,hdr,sizeof hdr) || *(uint32_t*)(hdr+0x2c)!=0x64407440){ arr=0; return 0; }
@@ -141,7 +142,8 @@ static int hb_collect(HbObj*out,int max){
     int n=0;
     for(int i=0;i<hi && n<max;i++){ const uint8_t*e=g_hb_tab+i*0x18; if(!*(const uint16_t*)e) continue; int t=e[3];
         int unit = t==0||t==1||t==12;
-        int want = (unit && (fh||fi)) || (t==5 && (ft || (fh&&g_hb_all))) || ((t==2||t==3) && (fw || (fh&&g_hb_all))); if(!want) continue;
+        int want = (unit && (fh||fi)) || (t==5 && (ft || (fh&&g_hb_all))) || ((t==2||t==3) && (fw || (fh&&g_hb_all)));
+        if(g_hb_units_only) want=unit; if(!want) continue;
         uint64_t p=*(const uint64_t*)(e+0x10); static uint8_t dh[0x380]; size_t rd=unit?0x380:0x140; if(!p || !hb_read(p,dh,rd)) continue;
         const float*od=(const float*)(dh+0x1c);
         HbObj*o=&out[n]; memset(o,0,sizeof *o); o->c[0]=od[0]; o->c[1]=od[1]; o->c[2]=od[2]; o->r=od[3]; memcpy(o->o,dh+0x50,12); memcpy(o->vel,dh+0x74,12);
@@ -169,6 +171,49 @@ static int hb_collect(HbObj*out,int max){
 // Node matrices (real_matrix4x3: scale, forward, left, up, position) are in the object datum; the header block
 // reference at datum+0x136 {u16 size, u16 offset} locates them (mp_masterchief: 0xa5c = 51 x 52 bytes at +0x758).
 typedef struct { char path[1024]; int fd; uint32_t tagoff; uint64_t vbase, fsize; int ntags; uint32_t*tp; uint16_t*salt; uint32_t*grp; char*names; int32_t*noff; } HbMap;
+// ---- Sparring partner (shim/target.sh with PELOAD_SPAR=1, or its stats page: POST /control?do=spar&on=0|1) ----------
+// Aim only: this client's pad 0 reports a right stick that turns its view toward the nearest live enemy's head; no
+// movement, no firing (XInputGetState below). For local practice games against the windowless second player. The camera
+// is the frame's captured world camera (hb_capture_view: needs hb_enabled(), true while the stats server runs); objects
+// come from the same object table the overlay reads. hb_spar_tick runs at every Present on the render thread.
+pthread_mutex_t g_hb_collect_mx=PTHREAD_MUTEX_INITIALIZER;   // hb_collect fills shared statics (overlay vs sparring)
+volatile int g_spar_on=-1;
+static volatile float g_spar_rx, g_spar_ry, g_spar_err; static volatile int g_spar_ok; static volatile uint32_t g_spar_tgt=0xFFFFFFFFu;
+int hb_spar_enabled(void){ if(g_spar_on<0) g_spar_on=getenv("PELOAD_SPAR")?1:0; return g_spar_on; }
+void hb_spar_tick(void){
+    if(!hb_spar_enabled()){ g_spar_ok=0; return; }
+    static double tl; double now=mono_s(); if(now-tl<1.0/60) return; tl=now;
+    float vp[32]; unsigned s1,s2; int tries=0; do{ s1=g_hb_vpseq; memcpy(vp,(const void*)g_hb_vp,sizeof vp); s2=g_hb_vpseq; }while((s1!=s2 || (s1&1)) && ++tries<8);
+    #define SPAR_WHY(w) do{ if(getenv("PELOAD_SPAR_LOG")){ static double tw; if(now-tw>2.0){ tw=now; char m_[200]; int k_=snprintf(m_,sizeof m_,"  [spar] no aim: %s (camera seq %u, objects %d)\n",w,g_hb_vpseq,n_dbg); (void)!write(2,m_,k_); } } }while(0)
+    int n_dbg=-1;
+    const float*cam=vp+28, *fwd=vp+12; if(cam[0]==0 && cam[1]==0 && cam[2]==0){ SPAR_WHY("no world camera captured yet"); g_spar_ok=0; return; }
+    static HbObj objs[1024]; pthread_mutex_lock(&g_hb_collect_mx); g_hb_units_only=1; int n=hb_collect(objs,1024); g_hb_units_only=0; pthread_mutex_unlock(&g_hb_collect_mx); n_dbg=n;
+    int myteam=-1; uint32_t me=0xFFFFFFFFu;
+    for(int i=0;i<n;i++){ const HbObj*o=&objs[i]; if(o->type) continue; float dx=o->c[0]-cam[0],dy=o->c[1]-cam[1],dz=o->c[2]-cam[2];
+        if(dx*dx+dy*dy+dz*dz < (o->r+0.3f)*(o->r+0.3f) || o->handle==g_hb_local_unit){ myteam=o->team; me=o->handle; break; } }
+    float bd=1e30f; int bi=-1;
+    for(int pass=0;pass<2 && bi<0;pass++)   // enemies first; nobody on another team (free-for-all may share one): anyone else
+        for(int i=0;i<n;i++){ const HbObj*o=&objs[i]; if(o->type || o->dead || o->handle==me) continue;
+            if(!pass && myteam>=0 && o->team==myteam) continue;
+            float dx=o->c[0]-cam[0],dy=o->c[1]-cam[1],dz=o->c[2]-cam[2], d=dx*dx+dy*dy+dz*dz; if(d<bd){ bd=d; bi=i; } }
+    if(bi<0){ SPAR_WHY(me==0xFFFFFFFFu?"no other live biped (and our own body not found)":"no other live biped"); g_spar_ok=0; g_spar_tgt=0xFFFFFFFFu; return; }
+    const HbObj*t=&objs[bi]; float head[3]={t->c[0],t->c[1],t->c[2]+0.55f*t->r};   // the head: top of the bounding sphere's core
+    float d[3]={head[0]-cam[0],head[1]-cam[1],head[2]-cam[2]}; float h=sqrtf(d[0]*d[0]+d[1]*d[1]); if(h<0.01f){ g_spar_ok=0; return; }
+    float yaw_err=atan2f(d[1],d[0])-atan2f(fwd[1],fwd[0]); while(yaw_err>3.14159f) yaw_err-=6.28318f; while(yaw_err<-3.14159f) yaw_err+=6.28318f;
+    float fh=sqrtf(fwd[0]*fwd[0]+fwd[1]*fwd[1]); float pitch_err=atan2f(d[2],h)-atan2f(fwd[2],fh);
+    static float k=-1, ps=0, mx, dz0, tol; if(k<0){ k=getenv("PELOAD_SPAR_GAIN")?atof(getenv("PELOAD_SPAR_GAIN")):5.0f; ps=getenv("PELOAD_SPAR_PITCH")?atof(getenv("PELOAD_SPAR_PITCH")):1.0f;
+        mx=getenv("PELOAD_SPAR_MAX")?atof(getenv("PELOAD_SPAR_MAX")):0.85f; dz0=getenv("PELOAD_SPAR_MIN")?atof(getenv("PELOAD_SPAR_MIN")):0.26f;
+        tol=(getenv("PELOAD_SPAR_TOL")?atof(getenv("PELOAD_SPAR_TOL")):0.2f)/57.2958f; }
+    // proportional steering, clamped; small corrections are lifted over the stick dead zone until within PELOAD_SPAR_TOL
+    // degrees per axis (default 0.2: a head at ~40 units)
+    float x=-yaw_err*k, y=ps*pitch_err*k;
+    if(fabsf(yaw_err)>tol && fabsf(x)<dz0) x=x<0?-dz0:dz0; if(fabsf(yaw_err)<=tol) x=0;
+    if(fabsf(pitch_err)>tol && fabsf(y)<dz0) y=y<0?-dz0:dz0; if(fabsf(pitch_err)<=tol) y=0;
+    g_spar_rx=x>mx?mx:x<-mx?-mx:x; g_spar_ry=y>mx?mx:y<-mx?-mx:y; g_spar_err=sqrtf(yaw_err*yaw_err+pitch_err*pitch_err)*57.2958f; g_spar_tgt=t->handle; g_spar_ok=1;
+    if(getenv("PELOAD_SPAR_LOG")){ static double tp; if(now-tp>1.0){ tp=now; char m[200]; int kk=snprintf(m,sizeof m,"  [spar] target %08x at %.1f u, aim error %.1f deg (yaw %.1f pitch %.1f) -> stick %.2f %.2f\n",
+        t->handle,sqrtf(bd),g_spar_err,yaw_err*57.2958f,pitch_err*57.2958f,g_spar_rx,g_spar_ry); (void)!write(2,m,kk); } } }
+int hb_spar_stick(float*rx,float*ry){ if(!hb_spar_enabled() || !g_spar_ok) return 0; *rx=g_spar_rx; *ry=g_spar_ry; return 1; }
+
 static HbMap g_hbm[6]; static int g_hbm_n;
 static char g_hb_mappaths[8][1024]; static int g_hb_nmappaths; static pthread_mutex_t g_hb_mapmx=PTHREAD_MUTEX_INITIALIZER;
 static void hb_note_map(const char*p){     // CreateFileW: remember the scenario maps the game opens (newest first)
@@ -554,7 +599,7 @@ static void hb_draw_overlay(void){
     { static void*vctx; void*cur=CGLGetCurrentContext(); if(cur!=vctx){ vctx=cur; G.GenVertexArrays(1,&g_hb_vao); } }   // VAOs are per context
     int fh=hb_feat(HBF_HITBOX), ft=hb_feat(HBF_TRACER), fi=hb_feat(HBF_INFO), fw=hb_feat(HBF_ITEMS), fv=hb_feat(HBF_VISIBLE); double now=mono_s();
 
-    static HbObj objs[1024]; int n=hb_collect(objs,1024);
+    static HbObj objs[1024]; extern pthread_mutex_t g_hb_collect_mx; pthread_mutex_lock(&g_hb_collect_mx); int n=hb_collect(objs,1024); pthread_mutex_unlock(&g_hb_collect_mx);
     if(getenv("PELOAD_HITBOXES_LOG")){ static double tl; if(now-tl>3.0){ tl=now; int cnt[16]={0}; for(int i=0;i<n;i++) if(objs[i].type<16) cnt[objs[i].type]++;
         char m[300]; int k=snprintf(m,sizeof m,"  [hitbox] cam (%.1f %.1f %.1f) objects: bipeds %d vehicles %d weapons %d equipment %d projectiles %d | hitboxes %lu, spheres: no-geometry %lu no-nodes %lu nodes-not-set %lu\n",
             vp[28],vp[29],vp[30],cnt[0],cnt[1],cnt[2],cnt[3],cnt[5],g_hbx_stat[0],g_hbx_stat[1],g_hbx_stat[2],g_hbx_stat[3]); (void)!write(2,m,k); memset(g_hbx_stat,0,sizeof g_hbx_stat); } }
