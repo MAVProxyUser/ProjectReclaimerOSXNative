@@ -218,3 +218,25 @@ changes nothing for movement. Options, all NOT done or verified:
 - **Kill volumes and safe zones, high.** Every branch was read, and the patch sites are plain jcc/entry overwrites with the bytes checked against the file. Not run live.
 - **Soft ceilings, high for the control flow; medium for the result-flag meanings** (2 = soft kill, 4 = slip).
 - **Player clip, high for the negative result** (only the vector tests filter the bit). The Havok filter location is unknown.
+
+
+## Tested live 2026-10-17 (Valhalla, our own hosted game)
+
+Host = `shim/target.sh` (it hosts a hidden Valhalla game), moved with the new host-only teleport-to-a-point control
+`POST /control?do=tpto&x=..&y=..&z=..[&slot=N]` (PELOAD_ALLOW_TELEPORT=1; the point must be inside the map structure,
+|coord| < 30000; slot = a players-table slot, default = the host's own player). Ground heights off the map's collision
+BSP: `re-tools/h3bsp.py` `top_z_at` (the east cliff tops, x 110-122 / y -60..-140, are z 16-29).
+
+| host patches | teleport to (114, -100, 22.6): east cliff top, outside the safe zone (x > 106.3) |
+|---|---|
+| none | dead within 1 s (safe-zone kill) |
+| `PELOAD_PATCH=halo3+1b8e00:31C04885D27403C60201C3,...` | **refused by the Reclaimer client**: "Native function contract mismatch at 0x1801b8e00" -- it checks that function's entry bytes; the worker exits |
+| `PELOAD_PATCH=halo3+37b816:E95501000090,halo3+37b734:EB` (call-site variants inside biped_update) | **alive** 15+ s, standing on the cliff (slides slowly down its slope) |
+
+So for exploring, host the game with
+```
+PELOAD_ALLOW_TELEPORT=1 PELOAD_PATCH=halo3+37b816:E95501000090,halo3+37b734:EB
+```
+(bipeds skip the kill-volume / safe-zone test and the player soft-ceiling response), then teleport with `tpto`.
+Joining clients' own prediction still runs the soft ceilings (push-back / slip) unless they run the `37b734` patch too.
+Invisible walls are unchanged (section 3).

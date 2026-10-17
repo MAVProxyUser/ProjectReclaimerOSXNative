@@ -399,6 +399,7 @@ volatile int g_hb_job_pending;
 volatile int g_hb_tp_slot=-1;   // stats page "Teleport next to them": that players-table slot; -1 = F7's map reflection
 volatile int g_hb_tp_who=-1;    // who moves: a players-table slot (a client's request forwarded to this host); -1 = us
 volatile int g_hb_tp_by; float g_hb_tp_delta[3];   // move us by a delta (stats page tpby; tests)
+volatile int g_hb_tp_to; float g_hb_tp_dest[3]; volatile int g_hb_tp_to_who=-1;   // move a player (slot; -1 = us) TO a point (stats page tpto)
 static const char* hb_tag_name(uint32_t def);
 // Teleport next to another player (stats page "Teleport next to them"), the way the Reclaimer client teleports
 // (shim/docs/teleport.md): host only, on the engine main thread at main_loop_body (between ticks), inside halo3's
@@ -485,6 +486,20 @@ static void hb_engine_jobs_locked(uint8_t*h3,void**tarr,uint32_t idx,uint8_t*arr
         char m[160]; int k=snprintf(m,sizeof m,"  [teleport] by (%.2f %.2f %.2f): (%.2f %.2f %.2f) -> (%.2f %.2f %.2f)%s\n",g_hb_tp_delta[0],g_hb_tp_delta[1],g_hb_tp_delta[2],o[0],o[1],o[2],pos[0],pos[1],pos[2],loc==0xFFFF?" refused: outside the map":""); (void)!write(2,m,k);
         if(loc==0xFFFF) return;
         ((void(__attribute__((ms_abi))*)(uint32_t,const float*,const float*,const float*,uint8_t))(h3+0x259410))(me,pos,fwd,up,1); return; }
+    if(g_hb_tp_to){ g_hb_tp_to=0; int who2=g_hb_tp_to_who; g_hb_tp_to_who=-1; uint32_t u=me;   // TO a point: exploring / boundary tests
+        if(who2>=0){ uint8_t*parr=*(uint8_t**)((uint8_t*)tarr[idx]+0x10); if(!parr || *(uint32_t*)(parr+0x2c)!=0x64407440) return;
+            int32_t es=*(int32_t*)(parr+0x24), pn=*(int32_t*)(parr+0x3c); uint8_t*pd=*(uint8_t**)(parr+0x48); if(!pd || who2>=pn || es<0x30) return;
+            uint8_t*rec=pd+(size_t)who2*es; if(!*(uint16_t*)rec) return; u=*(uint32_t*)(rec+0x28); }
+        if(u==0xFFFFFFFFu || (int)(u&0xFFFF)>=hi){ (void)!write(2,"  [teleport] that player has no body\n",37); return; }
+        uint8_t*up_=*(uint8_t**)(data+(size_t)(u&0xFFFF)*0x18+0x10); if(!up_) return;
+        if(*(uint32_t*)(up_+0x10)!=0xFFFFFFFFu || *(int16_t*)(up_+0x24E)!=-1){ ((void(__attribute__((ms_abi))*)(uint32_t,int))(h3+0x3a3c4c))(u,0); }   // out of a vehicle
+        float pos[3]={g_hb_tp_dest[0],g_hb_tp_dest[1],g_hb_tp_dest[2]}; char m[200]; int k;
+        if(fabsf(pos[0])>30000||fabsf(pos[1])>30000||fabsf(pos[2])>30000){ (void)!write(2,"  [teleport] refused: past the engine's 32768 limit\n",52); return; }
+        uint16_t loc=0xFFFF; float p1[3]={pos[0],pos[1],pos[2]+0.3f}; ((void(__attribute__((ms_abi))*)(uint16_t*,const float*))(h3+0x9bc78))(&loc,p1);
+        if(loc==0xFFFF){ k=snprintf(m,sizeof m,"  [teleport] to (%.2f %.2f %.2f) refused: outside the map structure\n",pos[0],pos[1],pos[2]); (void)!write(2,m,k); return; }
+        const float*f=(const float*)(up_+0x5c); float fwd[3]={f[0],f[1],0}, l=sqrtf(fwd[0]*fwd[0]+fwd[1]*fwd[1]); if(l>1e-4f){ fwd[0]/=l; fwd[1]/=l; } else { fwd[0]=1; fwd[1]=0; } float upv[3]={0,0,1};
+        k=snprintf(m,sizeof m,"  [teleport] %08x to (%.2f %.2f %.2f)\n",u,pos[0],pos[1],pos[2]); (void)!write(2,m,k);
+        ((void(__attribute__((ms_abi))*)(uint32_t,const float*,const float*,const float*,uint8_t))(h3+0x259410))(u,pos,fwd,upv,1); return; }
     int tps=g_hb_tp_slot, who=g_hb_tp_who; g_hb_tp_slot=-1; g_hb_tp_who=-1;
     if(tps>=0 && who>=0){   // a forwarded request: move that player, not us
         uint8_t*parr=*(uint8_t**)((uint8_t*)tarr[idx]+0x10); if(!parr || *(uint32_t*)(parr+0x2c)!=0x64407440) return;
