@@ -137,6 +137,7 @@ Options go in front of the command, e.g. `PELOAD_INVERT_PITCH=0 bash shim/play.s
 | `PELOAD_HB_TRACERS=1` | projectile tracers: grenades/rockets/plasma as trails, bullets as lines from muzzle to impact; **F3** toggles |
 | `PELOAD_HB_INFO=1` | player info above each player: shield and health %, held weapon, grenades, active camo, in a vehicle; **F4** toggles |
 | `PELOAD_HB_ITEMS=1` | weapons and equipment lying on the map, by name; **F5** toggles |
+| `PELOAD_HB_TEAMS=enemies` | show only enemies (`friends`: only teammates). Hitboxes are red/yellow for enemies, blue for teammates; **F6** cycles all / enemies / friends |
 | `PELOAD_H3="name=value,..."` | set Halo 3 engine settings, e.g. `render_debug_depth_render=1`, `camera_fov_scale=1.2` — all 72 are listed in `shim/docs/halo3-engine-globals.md` |
 
 The window opens at the largest 16:9 size that fits your screen (`PELOAD_WIN_SIZE=1280x720` picks a size), can be

@@ -105,7 +105,13 @@ static void hb_capture_view(const float*rows){ g_hb_vpseq++; __atomic_thread_fen
 // unit (biped/vehicle/giant): +0x174 team index  +0x24E seat (-1 = on foot)  +0x262 current weapon slot (s8)
 //   +0x268 weapon object handles[4]  +0x294 grenade counts[4] (frag, plasma, spike, firebomb)  +0x360 active camo
 typedef struct { float c[3], r, o[3], vel[3]; int type; uint32_t handle; uint64_t p; uint32_t def; uint16_t nmsz, nmoff;
-    float health, shield, camo; int team, seat, wslot, dead; uint32_t weapons[4], parent; int8_t gren[4]; } HbObj;
+    float health, shield, camo; int team, seat, wslot, dead; uint32_t weapons[4], parent; int8_t gren[4]; int rcount; uint16_t roff; } HbObj;
+// Local player's team (the biped the camera is inside) and the friend/enemy filter: F6 or PELOAD_HB_TEAMS=all|enemies|friends.
+static int g_hb_myteam=-1, g_hb_teamfilter=-1;
+static int hb_is_friend(const HbObj*o){ return g_hb_myteam>=0 && o->type==0 && o->team==g_hb_myteam; }
+static int hb_team_shown(const HbObj*o){ if(o->type!=0) return 1;
+    if(g_hb_teamfilter<0){ const char*e=getenv("PELOAD_HB_TEAMS"); g_hb_teamfilter = e&&!strcasecmp(e,"enemies")?1 : e&&!strcasecmp(e,"friends")?2 : 0; }
+    int f=(g_hb_teamfilter + g_hb_teamcycle)%3; return f==0 || (f==1 && !hb_is_friend(o)) || (f==2 && hb_is_friend(o)); }
 // PELOAD_INPUT_FACE (test helper for unattended overlay checks): steer the scripted pad toward the nearest other biped.
 static float g_hb_tgt[3], g_hb_cam[3], g_hb_fwd[3]; static volatile int g_hb_tgt_ok;
 int hb_face_target(float*rx,float*ry){ if(!g_hb_tgt_ok) return 0;
@@ -133,6 +139,7 @@ static int hb_collect(HbObj*out,int max){
         HbObj*o=&out[n]; memset(o,0,sizeof *o); o->c[0]=od[0]; o->c[1]=od[1]; o->c[2]=od[2]; o->r=od[3]; memcpy(o->o,dh+0x50,12); memcpy(o->vel,dh+0x74,12);
         o->type=t; o->handle=((uint32_t)*(const uint16_t*)e<<16)|(uint32_t)i; o->p=p; o->def=*(const uint32_t*)dh; o->parent=*(const uint32_t*)(dh+0x10);
         o->nmsz=*(const uint16_t*)(dh+0x136); o->nmoff=*(const uint16_t*)(dh+0x138);
+        { int16_t rs=*(const int16_t*)(dh+0x13a); if((*(const uint32_t*)(dh+4)>>11)&1) rs-=0x20; o->rcount=rs>0?rs/10:0; o->roff=*(const uint16_t*)(dh+0x13c); }
         o->dead=(*(const uint32_t*)(dh+0x110)>>2)&1; o->health=o->dead?0:*(const float*)(dh+0xF4); o->shield=o->dead?0:*(const float*)(dh+0xF8);
         if(unit){ o->team=*(const int32_t*)(dh+0x174); o->seat=*(const int16_t*)(dh+0x24E); o->wslot=*(const int8_t*)(dh+0x262);
             memcpy(o->weapons,dh+0x268,16); memcpy(o->gren,dh+0x294,4); o->camo=*(const float*)(dh+0x360); }
@@ -186,28 +193,41 @@ static HbMap* hbm_get(const char*path){
     return m;
   bad: { char msg[1200]; int k=snprintf(msg,sizeof msg,"  [hitbox] could not read map %s\n",path); (void)!write(2,msg,k); }
     if(m->fd>=0) close(m->fd); m->fd=-1; return 0; }
-typedef struct { uint32_t def; int ok, nseg, nreg, maxnode; int16_t*node; uint8_t*reg; float*pts; } HbGeom;
+// Per definition: every collision BSP edge of every region and permutation, plus the model's (hlmt) collision-region
+// table that maps the object's per-region permutation bytes to collision permutations:
+//   hlmt +0xA0 Collision Regions[0x14] { +0 name, +4 s8 collision region, +8 Permutations[8] { +0 name, +5 s8 collision perm } }
+// Objects keep one byte per hlmt collision region (the chosen permutation): block reference at datum+0x13A
+// {s16 size, s16 offset}, count = (size - (datum+4 bit 11 ? 0x20 : 0)) / 10, bytes at datum + offset + count*8
+// (found in halo3 object_set_permutation, halo3+0x3457d8 / +0x345d38). Elite helmets are permutations of "head".
+typedef struct { uint32_t def; int ok, nseg, nreg, maxnode; int16_t*node; uint8_t*reg, *perm; float*pts;
+    int nhreg; int8_t hcreg[32], hnperm[32], hcperm[32][64]; } HbGeom;
 static HbGeom g_hbg[96]; static int g_hbg_n;
 static int hbm_block(HbMap*m,const uint8_t*d,int off,int esz,uint8_t**out,int maxn){   // tag block {count, p32} -> malloc'd elements
     int32_t c=*(const int32_t*)(d+off); uint32_t p=*(const uint32_t*)(d+off+4); *out=0; if(c<=0 || c>maxn || !p) return 0;
     uint8_t*b=malloc((size_t)c*esz); if(!b || !hbm_read(m,(uint64_t)p<<2,b,(size_t)c*esz)){ free(b); return 0; } *out=b; return c; }
 static void hbg_build(HbGeom*g,HbMap*m,int ti){
-    uint8_t ob[0x60], hl[0x40], co[0x44]; int cap=0;
+    uint8_t ob[0x60], hl[0xB0], co[0x44]; int cap=0;
     if(!hbm_read(m,(uint64_t)m->tp[ti]<<2,ob,sizeof ob)) return; uint32_t hd=*(uint32_t*)(ob+0x34+12); if(hd==0xFFFFFFFF || (hd&0xFFFF)>=(uint32_t)m->ntags) return;
     if(!hbm_read(m,(uint64_t)m->tp[hd&0xFFFF]<<2,hl,sizeof hl)) return; uint32_t cd=*(uint32_t*)(hl+0x10+12); if(cd==0xFFFFFFFF || (cd&0xFFFF)>=(uint32_t)m->ntags) return;
     if(!hbm_read(m,(uint64_t)m->tp[cd&0xFFFF]<<2,co,sizeof co)) return;
     uint8_t*regs; int nr=hbm_block(m,co,0x20,0x10,&regs,64);
-    for(int r=0;r<nr && r<255;r++){ uint8_t*perms; int np=hbm_block(m,regs+r*0x10,4,0x28,&perms,256); if(!np) continue;   // permutation 0 = default
-        uint8_t*bsps; int nb=hbm_block(m,perms,4,0x64,&bsps,256);
-        for(int b=0;b<nb;b++){ const uint8_t*bp=bsps+b*0x64; int16_t node=*(const int16_t*)bp; uint8_t*ed,*vx;
-            int ne=hbm_block(m,bp,0x4C,0xC,&ed,4096), nvx=hbm_block(m,bp,0x58,0x10,&vx,4096);
-            for(int e=0;e<ne;e++){ int16_t a=*(int16_t*)(ed+e*12), z=*(int16_t*)(ed+e*12+2); if(a<0||z<0||a>=nvx||z>=nvx) continue;
-                if(g->nseg>=cap){ cap=cap?cap*2:256; g->node=realloc(g->node,cap*2); g->reg=realloc(g->reg,cap); g->pts=realloc(g->pts,cap*6*4); }
-                g->node[g->nseg]=node; g->reg[g->nseg]=(uint8_t)r; memcpy(g->pts+g->nseg*6,vx+a*16,12); memcpy(g->pts+g->nseg*6+3,vx+z*16,12); g->nseg++;
-                if(node>g->maxnode) g->maxnode=node; }
-            free(ed); free(vx); }
-        free(bsps); free(perms); if(r+1>g->nreg) g->nreg=r+1; }
-    free(regs); g->ok=g->nseg>0; }
+    for(int r=0;r<nr && r<255;r++){ uint8_t*perms; int np=hbm_block(m,regs+r*0x10,4,0x28,&perms,64);
+        for(int pi=0;pi<np;pi++){ uint8_t*bsps; int nb=hbm_block(m,perms+pi*0x28,4,0x64,&bsps,256);
+            for(int b=0;b<nb;b++){ const uint8_t*bp=bsps+b*0x64; int16_t node=*(const int16_t*)bp; uint8_t*ed,*vx;
+                int ne=hbm_block(m,bp,0x4C,0xC,&ed,4096), nvx=hbm_block(m,bp,0x58,0x10,&vx,4096);
+                for(int e=0;e<ne;e++){ int16_t a=*(int16_t*)(ed+e*12), z=*(int16_t*)(ed+e*12+2); if(a<0||z<0||a>=nvx||z>=nvx) continue;
+                    if(g->nseg>=cap){ cap=cap?cap*2:256; g->node=realloc(g->node,cap*2); g->reg=realloc(g->reg,cap); g->perm=realloc(g->perm,cap); g->pts=realloc(g->pts,cap*6*4); }
+                    g->node[g->nseg]=node; g->reg[g->nseg]=(uint8_t)r; g->perm[g->nseg]=(uint8_t)pi; memcpy(g->pts+g->nseg*6,vx+a*16,12); memcpy(g->pts+g->nseg*6+3,vx+z*16,12); g->nseg++;
+                    if(node>g->maxnode) g->maxnode=node; }
+                free(ed); free(vx); }
+            free(bsps); }
+        free(perms); if(r+1>g->nreg) g->nreg=r+1; }
+    free(regs);
+    uint8_t*hr; int nh=hbm_block(m,hl,0xA0,0x14,&hr,32); g->nhreg=nh;   // model collision regions -> collision region / permutations
+    for(int i=0;i<nh;i++){ g->hcreg[i]=(int8_t)hr[i*0x14+4]; uint8_t*hp; int np=hbm_block(m,hr+i*0x14,8,8,&hp,64); g->hnperm[i]=(int8_t)np;
+        for(int q=0;q<np;q++) g->hcperm[i][q]=(int8_t)hp[q*8+5]; free(hp); }
+    free(hr); g->ok=g->nseg>0; }
+static const char* hb_tag_name_early(uint32_t def,HbMap*m,int ti){ (void)def; if(!m->names||ti>=m->ntags) return "?"; const char*f=m->names+m->noff[ti]; const char*b=strrchr(f,'\\'); return b?b+1:f; }
 // The collision geometry of an object definition (datum index), from whichever recently opened map holds that tag.
 static HbGeom* hb_geom(uint32_t def){
     for(int i=0;i<g_hbg_n;i++) if(g_hbg[i].def==def) return g_hbg[i].ok?&g_hbg[i]:0;
@@ -215,7 +235,7 @@ static HbGeom* hb_geom(uint32_t def){
     char paths[8][1024]; int np; pthread_mutex_lock(&g_hb_mapmx); np=g_hb_nmappaths; memcpy(paths,g_hb_mappaths,sizeof paths); pthread_mutex_unlock(&g_hb_mapmx);
     for(int k=0;k<np && !g->ok;k++){ HbMap*m=hbm_get(paths[k]); int ti=def&0xFFFF; if(!m || ti>=m->ntags || m->salt[ti]!=(def>>16)) continue;
         if(m->grp[ti]!='bipd' && m->grp[ti]!='vehi' && m->grp[ti]!='gint') continue; hbg_build(g,m,ti);
-        char msg[300]; int kk=snprintf(msg,sizeof msg,"  [hitbox] definition %08x: %d collision edges in %d regions, nodes 0-%d\n",def,g->nseg,g->nreg,g->maxnode); (void)!write(2,msg,kk); }
+        char msg[300]; int kk=snprintf(msg,sizeof msg,"  [hitbox] definition %08x (%s): %d collision edges in %d regions (%d model regions), nodes 0-%d\n",def,hb_tag_name_early(def,m,ti),g->nseg,g->nreg,g->nhreg,g->maxnode); (void)!write(2,msg,kk); }
     return g->ok?g:0; }
 // Append one object's posed collision edges as clip-space line vertices; returns vertices added (0 = no geometry).
 // Why objects fall back to spheres: [0] drawn as hitboxes, [1] no collision geometry for the definition, [2] node
@@ -225,17 +245,28 @@ static void hbx_why(const HbObj*o,int why){ g_hbx_stat[why]++; static uint32_t s
     for(int i=0;i<ns;i++) if(seen[i]==key) return; if(ns<256) seen[ns++]=key;
     static const char*const nm[4]={"","no collision geometry","node block missing","node matrices not set up"};
     char m[200]; int k=snprintf(m,sizeof m,"  [hitbox] type %d definition %08x drawn as a sphere: %s (nodes %u B at +0x%x)\n",o->type,o->def,nm[why],o->nmsz,o->nmoff); (void)!write(2,m,k); }
+static const char* hb_tag_name(uint32_t def);
 static int hb_emit_hitbox(const HbObj*o,const float*vp,float*verts,int nv,int cap){
     HbGeom*g=hb_geom(o->def); if(!g){ hbx_why(o,1); return 0; }
     int nn=o->nmsz/52; if(o->nmsz%52 || nn<=g->maxnode || nn>128 || o->nmoff<0x100){ hbx_why(o,2); return 0; }
     static float mt[128*13]; if(!hb_read(o->p+o->nmoff,mt,(size_t)nn*52) || fabsf(mt[0]-1.0f)>0.1f){ hbx_why(o,3); return 0; }
     g_hbx_stat[0]++;
+    uint8_t sel[256]; memset(sel,0,sizeof sel);   // chosen collision permutation per collision region (default 0)
+    if(g->nhreg>0 && o->rcount>0 && o->rcount<=32){ uint8_t pb[32]; if(hb_read(o->p+o->roff+(uint64_t)o->rcount*8,pb,(size_t)o->rcount)){
+        for(int i=0;i<g->nhreg && i<o->rcount;i++){ int pi=pb[i]; if(pi>=g->hnperm[i]) pi=0; int cr=g->hcreg[i], cp=g->hnperm[i]?g->hcperm[i][pi]:0; if(cr>=0 && cr<256 && cp>=0) sel[cr]=(uint8_t)cp; }
+        { static uint64_t seen[128]; static int ns; uint64_t key=o->def; for(int i=0;i<o->rcount&&i<8;i++) key=key*131+pb[i]; int f=0; for(int q=0;q<ns;q++) if(seen[q]==key) f=1;
+          if(!f && ns<128){ seen[ns++]=key; char m[300]; int k=snprintf(m,sizeof m,"  [hitbox] %s %08x: %d model regions, permutation bytes",hb_tag_name(o->def),o->def,o->rcount);
+              for(int i=0;i<o->rcount&&i<16;i++) k+=snprintf(m+k,sizeof m-k," %d",pb[i]); k+=snprintf(m+k,sizeof m-k," -> collision permutations");
+              for(int r=0;r<g->nreg&&r<16;r++) k+=snprintf(m+k,sizeof m-k," r%d:%d",r,sel[r]); m[k++]='\n'; (void)!write(2,m,k); } } } }
     int head=-1;   // bipeds: the region whose nodes sit highest is the head
-    if(o->type==0 && g->nreg>=2){ float zs[256]={0}; int zc[256]={0}; for(int s=0;s<g->nseg;s++){ zs[g->reg[s]]+=mt[g->node[s]*13+12]; zc[g->reg[s]]++; }
+    if(o->type==0 && g->nreg>=2){ float zs[256]={0}; int zc[256]={0}; for(int s=0;s<g->nseg;s++){ if(g->perm[s]!=sel[g->reg[s]]) continue; zs[g->reg[s]]+=mt[g->node[s]*13+12]; zc[g->reg[s]]++; }
         float best=-1e30f; for(int r=0;r<g->nreg;r++) if(zc[r] && zs[r]/zc[r]>best){ best=zs[r]/zc[r]; head=r; } }
-    static const float cbody[3]={1,0.15f,0.15f}, chead[3]={1,0.95f,0.1f}, cveh[3]={0.3f,0.75f,1};
+    // enemies red with a yellow head, teammates blue with a light-blue head (relative to the local player's team)
+    static const float cbody[3]={1,0.15f,0.15f}, chead[3]={1,0.95f,0.1f}, fbody[3]={0.25f,0.5f,1}, fhead[3]={0.6f,0.95f,1}, cveh[3]={0.3f,0.75f,1};
+    int friend_=hb_is_friend(o); const float*cb=friend_?fbody:cbody, *ch=friend_?fhead:chead;
     int added=0;
-    for(int s=0;s<g->nseg && nv+added+2<=cap;s++){ const float*M=mt+g->node[s]*13, *P=g->pts+s*6; const float*col=o->type==0?(g->reg[s]==head?chead:cbody):cveh;
+    for(int s=0;s<g->nseg && nv+added+2<=cap;s++){ if(g->perm[s]!=sel[g->reg[s]]) continue;
+        const float*M=mt+g->node[s]*13, *P=g->pts+s*6; const float*col=o->type==0?(g->reg[s]==head?ch:cb):cveh;
         float q[2][2]; int okk=1;
         for(int e=0;e<2;e++){ const float*v=P+e*3; float w[3];
             for(int a=0;a<3;a++) w[a]=M[10+a]+M[0]*(v[0]*M[1+a]+v[1]*M[4+a]+v[2]*M[7+a]);   // pos + scale*(x*fwd + y*left + z*up)
@@ -339,6 +370,8 @@ static void hb_draw_overlay(void){
       const char*fp=getenv("PELOAD_INPUT_FACE_POINT"); float pt[3];   // "x,y,z": aim at a fixed world point instead
       if(fp && sscanf(fp,"%f,%f,%f",&pt[0],&pt[1],&pt[2])==3){ memcpy(g_hb_tgt,pt,12); memcpy(g_hb_cam,vp+28,12); memcpy(g_hb_fwd,vp+12,12); g_hb_tgt_ok=1; } }
     { float W=(float)(g_d3dgl_W>0?g_d3dgl_W:1920), H=(float)(g_d3dgl_H>0?g_d3dgl_H:1080); g_hb_px=2.0f*2.2f/W; g_hb_py=2.0f*2.2f/H; }   // ~13 px glyphs at 1080p
+    g_hb_myteam=-1; for(int i=0;i<n;i++){ const HbObj*o=&objs[i]; if(o->type) continue; float dx=o->c[0]-vp[28],dy=o->c[1]-vp[29],dz=o->c[2]-vp[30];
+        if(dx*dx+dy*dy+dz*dz < (o->r+0.3f)*(o->r+0.3f)){ g_hb_myteam=o->team; break; } }   // the biped the camera is inside = us
     enum { HB_CAP=400000 }; static float verts[HB_CAP*5]; int nv=0; const float*cam=vp+28;   // cb0[7] = camera position
     static const float cwhite[3]={1,1,1}, cgrey[3]={0.7f,0.7f,0.7f}, ctrace[3]={1,0.95f,0.55f}, cvel[3]={1,0.5f,0.1f}, citem[3]={0.3f,1,0.45f}, cequip[3]={0.3f,0.9f,1};
     for(int i=0;i<n;i++){ const HbObj*o=&objs[i]; int unit=o->type==0||o->type==1||o->type==12;
@@ -352,7 +385,7 @@ static void hb_draw_overlay(void){
             const float*col=o->type==2?citem:cequip; nv=hb_seg(verts,nv,HB_CAP,vp,a,b,col); nv=hb_seg(verts,nv,HB_CAP,vp,c2,d2,col);
             float tx,ty; if(hb_proj(vp,o->c,&tx,&ty)){ const char*nm=hb_tag_name(o->def); nv=hb_text(verts,nv,HB_CAP,tx-strlen(nm)*2.5f*g_hb_px,ty+8*g_hb_py,nm,col); }
             if(!(fh&&g_hb_all)) continue; }
-        if(self) continue;
+        if(self || !hb_team_shown(o)) continue;
         if(unit && fh && !g_hb_spheres){ int a=hb_emit_hitbox(o,vp,verts,nv,HB_CAP); if(a>0) nv+=a; if(a!=0) goto info; }
         if(fh && (unit || g_hb_all)){
             static const float pal[6][3]={{1,0.5f,0.5f},{1,0.85f,0.1f},{1,0.4f,0},{0.2f,1,0.3f},{0.2f,0.9f,1},{1,0.3f,1}};   // biped fallback sphere is pink, not hitbox red

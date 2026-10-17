@@ -28,6 +28,14 @@ datums observed live. Offsets are from the object datum (object table entry +0x1
 | +0x110 | flags; bit 2 set -> health and shield read as 0 (dead) | same getters |
 | +0x136 | node matrices block reference {u16 size, u16 offset}; real_matrix4x3 (scale, fwd, left, up, pos) per node | observed |
 
+| +0x13A | region permutations block reference {s16 size, s16 offset}: count = (size - (+0x4 bit 11 ? 0x20 : 0)) / 10; per region 8 bytes of state, then one permutation byte per region at offset + count*8 (indexes the model's Collision Regions[r].Permutations) | object_set_permutation (halo3+0x3457d8, +0x345d38) |
+
+## Tags in memory
+`object_set_permutation` also shows the engine's own tag lookup: tag table = `*(u64*)(halo3+0xA49018)`, 8-byte
+entries, u32 address at +4; tag pointer = `*(u64*)(halo3+0x1FCF4C8)` + address*4. Object definition +0x40 = model
+tag datum; model (hlmt) +0xA0 Collision Regions[0x14] { +4 collision region, +8 Permutations[8] { +5 collision
+permutation } }.
+
 ## Units (biped / vehicle / giant)
 | Offset | Field | Source |
 |---|---|---|
