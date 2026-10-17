@@ -6,3 +6,4 @@ shim/build/
 /tmp/
 .DS_Store
 shim/crt/
+dist/
