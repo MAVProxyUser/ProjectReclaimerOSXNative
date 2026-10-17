@@ -122,7 +122,7 @@ static void wi_key(unsigned short kc,int down,int repeat){
     if(getenv("PELOAD_TRACE_INPUT")){ char m[96]; int q=snprintf(m,sizeof m,"  [kbm] key kc=0x%x vk=0x%x sc=0x%x %s\n",kc,g,k.sc,down?"down":"up"); (void)!write(2,m,q); } }
 
 // F2-F5 toggle the overlay features (hitbox.c: hitboxes, projectile tracers, player info, items); not forwarded to the game.
-static volatile int g_hb_toggle, g_hb_teamcycle, g_hb_tp_request;   // F6 cycles the team filter (all -> enemies -> friends); g_hb_tp_request: F7 teleport
+static volatile int g_hb_toggle, g_hb_teamcycle;   // F6 cycles the team filter (all -> enemies -> friends)
 // ---- NSEvent translation (main thread, from cocoa_pump). Returns 1 = consumed (don't forward to AppKit). ----
 static int wi_translate(id ev){
     static int off=-1; if(off<0) off=getenv("PELOAD_NO_KBM")?1:0;
@@ -137,7 +137,7 @@ static int wi_translate(id ev){
         unsigned short kc=((unsigned short(*)(id,SEL))objc_msgSend)(ev,sel_registerName("keyCode"));
         signed char rep=type==10?((signed char(*)(id,SEL))objc_msgSend)(ev,sel_registerName("isARepeat")):0;
         if(kc==0x62){ if(type==10 && !rep){ static int ok=-1; if(ok<0) ok=getenv("PELOAD_ALLOW_TELEPORT")?1:0;   // F7: teleport (hitbox.c)
-                if(ok){ g_hb_tp_request=1; (void)!write(2,"  [teleport] F7: requested\n",27); } } return 1; }
+                extern volatile int g_hb_job_pending; if(ok){ __atomic_store_n(&g_hb_job_pending,1,__ATOMIC_RELEASE); (void)!write(2,"  [teleport] F7: requested\n",27); } } return 1; }
         if(kc==0x61){ if(type==10 && !rep){ g_hb_teamcycle++; static const char*const nm[3]={"all","enemies only","friends only"}; char m[64]; int q=snprintf(m,sizeof m,"  [hitbox] F6: showing %s\n",nm[g_hb_teamcycle%3]); (void)!write(2,m,q); } return 1; }   // F6
         { int bit = kc==0x78?0 : kc==0x63?1 : kc==0x76?2 : kc==0x60?3 : -1;   // F2 hitboxes, F3 tracers, F4 player info, F5 items
           if(bit>=0){ if(type==10 && !rep){ g_hb_toggle^=1<<bit; char m[64]; int q=snprintf(m,sizeof m,"  [hitbox] F%d: overlay feature toggled\n",bit+2); (void)!write(2,m,q); } return 1; } }
