@@ -144,6 +144,12 @@ something "doesn't render". `PELOAD_TRACE_HASH=<vs/ps hash,..>` logs those draws
 CPU-projected instance corners and samples passed (`PELOAD_TRACE_HASH_NODEPTH=1` draws them without depth test).
 Shader hashes by name: dump with PELOAD_DUMP_SHADERS and grep the DXBC RDEF strings (e.g. "WaterPS").
 
+Client audio (2026-10-16): Reclaimer's own menu music / voice playback use cpal (WASAPI). shim/src/wasapi.c is a real
+render endpoint (IMMDeviceEnumerator/IMMDevice/IMMEndpoint/IPropertyStore/IAudioClient/IAudioRenderClient/IAudioClock)
+with one AudioQueue per stream; no capture device. `PELOAD_NO_WASAPI` = old no-device stub, `PELOAD_TRACE_WASAPI` logs.
+Teleport (PELOAD_ALLOW_TELEPORT, F7): halo3+0x259410 (object, pos*, fwd*, up*, bool) run on the simulation thread
+via hb_engine_jobs() from QueryPerformanceCounter (the sim thread = the one that runs object_delete).
+
 ## Render Guardian via the game client (GL-on-Metal, no MCC/Steam)
 `game-client` runs the engine in a standalone native window ("Reclaimer GL (OpenGL on Metal)") and
 actually renders Guardian gameplay. Needs the XAudio2 bypass + skinguard + two crash guards:

@@ -84,7 +84,9 @@ static void hbf_init(void){ if(g_hbf_init) return; static const char*const env[H
     for(int f=0;f<HBF_N;f++){ const char*e=getenv(env[f]); g_hbf_on[f]=e&&*e&&strcmp(e,"0"); }
     const char*e=getenv("PELOAD_HITBOXES"); g_hb_all=e&&!strcasecmp(e,"all"); g_hb_spheres=e&&!strcasecmp(e,"spheres"); g_hbf_init=1; }
 static int hb_feat(int f){ hbf_init(); return g_hbf_on[f] ^ ((g_hb_toggle>>f)&1); }
-static int hb_enabled(void){ for(int f=0;f<HBF_N;f++) if(hb_feat(f)) return 1; return 0; }   // any overlay on: capture the camera
+// g_hb_tp_request (wininput.c): F7 / PELOAD_TELEPORT_TEST (see hb_engine_jobs)
+static int hb_enabled(void){ if(g_hb_tp_request) return 1; for(int f=0;f<HBF_N;f++) if(hb_feat(f)) return 1;
+    static int tp=-1; if(tp<0) tp=getenv("PELOAD_ALLOW_TELEPORT")?1:0; return tp; }   // any overlay on (or teleport allowed): capture the camera
 // A world camera: rows 0-3 are a perspective view-projection (cb_looks_viewproj) AND row 7 is the camera position
 // it was built from -- the camera sits at the clip-space origin (x = y = w = 0). Rejects the view-space-only
 // projections of full-screen passes (row 3 = 0,0,1,0), shadow-map views and the first-person weapon's view.
@@ -129,7 +131,7 @@ static int hb_collect(HbObj*out,int max){
     int32_t maxc=*(int32_t*)(hdr+0x20), esz=*(int32_t*)(hdr+0x24), hi=*(int32_t*)(hdr+0x3c); uint64_t data=*(uint64_t*)(hdr+0x48);
     if(esz!=0x18 || hi<=0 || hi>maxc || hi>8192) return 0;
     if(!hb_read(data,g_hb_tab,(size_t)hi*0x18)) return 0; g_hb_hi=hi;
-    int fh=hb_feat(HBF_HITBOX), ft=hb_feat(HBF_TRACER), fi=hb_feat(HBF_INFO), fw=hb_feat(HBF_ITEMS);
+    int fh=hb_feat(HBF_HITBOX), ft=hb_feat(HBF_TRACER), fi=hb_feat(HBF_INFO), fw=hb_feat(HBF_ITEMS)||g_hb_tp_request;
     int n=0;
     for(int i=0;i<hi && n<max;i++){ const uint8_t*e=g_hb_tab+i*0x18; if(!*(const uint16_t*)e) continue; int t=e[3];
         int unit = t==0||t==1||t==12;
@@ -330,8 +332,26 @@ static void hb_trail_add(uint32_t h,const float*pos,double now){
 // Projectile datum (from the bullet datums at deletion, 2026-10-16): +0x1c position (= impact at deletion), +0x74
 // velocity, +0x1b0 distance travelled, +0x1dc speed, +0x1e8 start position (where it was fired from).
 typedef struct { double t; uint32_t def, handle; float pos[3], vel[3]; uint8_t raw[0x200]; } HbImpact;
+// ---- teleport (PELOAD_ALLOW_TELEPORT=1; F7 or PELOAD_TELEPORT_TEST=<seconds after gameplay>) -------------------------
+// Moves the local player to the point reflection of its position through the map centre (the mean position of the
+// weapons and equipment lying on the map; Halo multiplayer maps are mostly symmetric), turned to face the other way.
+// Uses halo3's own teleport (halo3+0x259410: object, position*, forward*, up*, bool -- what the object_teleport script
+// functions call), which has to run on the simulation thread: the request is queued here and executed by
+// hb_engine_jobs() from QueryPerformanceCounter on that thread (identified as the thread that runs object_delete).
+// Meant for matches this client hosts; on someone else's server the host would correct the position anyway.
+static pthread_t g_hb_simthread; static volatile int g_hb_simthread_ok;
+volatile int g_hb_job_pending; static uint32_t g_hb_tp_handle; static float g_hb_tp_pos[3], g_hb_tp_fwd[3];
+static void hb_engine_jobs(void){
+    if(!g_hb_simthread_ok || !pthread_equal(pthread_self(),g_hb_simthread)) return;
+    if(!__atomic_exchange_n(&g_hb_job_pending,0,__ATOMIC_ACQ_REL)) return;
+    uint8_t*h3=hb_halo3_base(); static const uint8_t pro[16]={0x48,0x89,0x5C,0x24,0x08,0x48,0x89,0x6C,0x24,0x10,0x48,0x89,0x74,0x24,0x18,0x57};
+    if(!h3 || memcmp(h3+0x259410,pro,16)){ (void)!write(2,"  [teleport] halo3 teleport function not recognised: skipped\n",60); return; }
+    float up[3]={0,0,1};
+    ((void(__attribute__((ms_abi))*)(uint32_t,const float*,const float*,const float*,uint8_t))(h3+0x259410))(g_hb_tp_handle,g_hb_tp_pos,g_hb_tp_fwd,up,1);
+    char m[160]; int k=snprintf(m,sizeof m,"  [teleport] object %08x -> (%.2f %.2f %.2f)\n",g_hb_tp_handle,g_hb_tp_pos[0],g_hb_tp_pos[1],g_hb_tp_pos[2]); (void)!write(2,m,k); }
 static HbImpact g_hbimp[256]; static volatile unsigned g_hbimp_n;
 void __attribute__((ms_abi)) hb_on_delete(uint32_t handle){
+    if(!g_hb_simthread_ok){ g_hb_simthread=pthread_self(); g_hb_simthread_ok=1; }   // object_delete runs on the simulation thread
     if(handle==0xFFFFFFFFu) return; static uint32_t idx=0xFFFFFFFFu; uint8_t*h3=hb_halo3_base(); if(!h3) return;
     if(idx==0xFFFFFFFFu) idx=*(volatile uint32_t*)(h3+0xa39f9c); if(idx>=128) return;
     void**tarr; __asm__ volatile("movq %%gs:0x58,%0":"=r"(tarr)); if(!tarr || !tarr[idx]) return;   // the engine thread's own TLS
@@ -360,6 +380,8 @@ static void hb_draw_overlay(void){
         G.GenBuffers(1,&g_hb_vbo); }
     { static void*vctx; void*cur=CGLGetCurrentContext(); if(cur!=vctx){ vctx=cur; G.GenVertexArrays(1,&g_hb_vao); } }   // VAOs are per context
     int fh=hb_feat(HBF_HITBOX), ft=hb_feat(HBF_TRACER), fi=hb_feat(HBF_INFO), fw=hb_feat(HBF_ITEMS); double now=mono_s();
+    { static int fired; const char*tt=getenv("PELOAD_TELEPORT_TEST"); extern double g_gameplay_t0;
+      if(tt && !fired && g_gameplay_t0 && now-g_gameplay_t0>atof(tt) && getenv("PELOAD_ALLOW_TELEPORT")){ fired=1; g_hb_tp_request=1; } }
     static HbObj objs[1024]; int n=hb_collect(objs,1024);
     if(getenv("PELOAD_HITBOXES_LOG")){ static double tl; if(now-tl>3.0){ tl=now; int cnt[16]={0}; for(int i=0;i<n;i++) if(objs[i].type<16) cnt[objs[i].type]++;
         char m[300]; int k=snprintf(m,sizeof m,"  [hitbox] cam (%.1f %.1f %.1f) objects: bipeds %d vehicles %d weapons %d equipment %d projectiles %d | hitboxes %lu, spheres: no-geometry %lu no-nodes %lu nodes-not-set %lu\n",
@@ -385,8 +407,16 @@ static void hb_draw_overlay(void){
                             static int once; if(!once){ once=1; char m[160]; int k=snprintf(m,sizeof m,"  [selfdump] players array: element 0x%x, %d slots; ours = slot %d\n",es,hi,pl); (void)!write(2,m,k); } break; } }
                     break; } }
             FILE*f=fopen(sd,"ab"); if(f){ fwrite(rec,1,sizeof rec,f); fclose(f); } break; } } }
-    g_hb_myteam=-1; for(int i=0;i<n;i++){ const HbObj*o=&objs[i]; if(o->type) continue; float dx=o->c[0]-vp[28],dy=o->c[1]-vp[29],dz=o->c[2]-vp[30];
-        if(dx*dx+dy*dy+dz*dz < (o->r+0.3f)*(o->r+0.3f)){ g_hb_myteam=o->team; break; } }   // the biped the camera is inside = us
+    g_hb_myteam=-1; int selfi=-1; for(int i=0;i<n;i++){ const HbObj*o=&objs[i]; if(o->type) continue; float dx=o->c[0]-vp[28],dy=o->c[1]-vp[29],dz=o->c[2]-vp[30];
+        if(dx*dx+dy*dy+dz*dz < (o->r+0.3f)*(o->r+0.3f)){ g_hb_myteam=o->team; selfi=i; break; } }   // the biped the camera is inside = us
+    if(g_hb_tp_request && selfi>=0){ g_hb_tp_request=0;   // F7 / PELOAD_TELEPORT_TEST: reflect our position through the map centre
+        double cx=0,cy=0; int ni=0; for(int i=0;i<n;i++){ const HbObj*o=&objs[i]; if((o->type==2||o->type==3) && o->parent==0xFFFFFFFFu){ cx+=o->o[0]; cy+=o->o[1]; ni++; } }
+        if(ni>=4){ cx/=ni; cy/=ni; const HbObj*me=&objs[selfi];
+            g_hb_tp_pos[0]=(float)(2*cx-me->o[0]); g_hb_tp_pos[1]=(float)(2*cy-me->o[1]); g_hb_tp_pos[2]=me->o[2]+0.3f;
+            float fx=-vp[12], fy=-vp[13], fl=sqrtf(fx*fx+fy*fy); g_hb_tp_fwd[0]=fl>1e-4f?fx/fl:1; g_hb_tp_fwd[1]=fl>1e-4f?fy/fl:0; g_hb_tp_fwd[2]=0;
+            g_hb_tp_handle=me->handle; __atomic_store_n(&g_hb_job_pending,1,__ATOMIC_RELEASE);
+            char m[200]; int k=snprintf(m,sizeof m,"  [teleport] map centre (%.2f %.2f) from %d items; from (%.2f %.2f %.2f) to (%.2f %.2f %.2f)\n",cx,cy,ni,me->o[0],me->o[1],me->o[2],g_hb_tp_pos[0],g_hb_tp_pos[1],g_hb_tp_pos[2]); (void)!write(2,m,k); }
+        else (void)!write(2,"  [teleport] too few map items to find the centre\n",50); }
     enum { HB_CAP=400000 }; static float verts[HB_CAP*5]; int nv=0; const float*cam=vp+28;   // cb0[7] = camera position
     static const float cwhite[3]={1,1,1}, cgrey[3]={0.7f,0.7f,0.7f}, ctrace[3]={1,0.95f,0.55f}, cvel[3]={1,0.5f,0.1f}, citem[3]={0.3f,1,0.45f}, cequip[3]={0.3f,0.9f,1};
     for(int i=0;i<n;i++){ const HbObj*o=&objs[i]; int unit=o->type==0||o->type==1||o->type==12;

@@ -369,7 +369,8 @@ static void   MSABI i_GetSystemTimeAsFileTime(uint64_t *ft){
     // 100ns ticks since 1601-01-01; 11644473600s between 1601 and 1970
     if(ft) *ft = ((uint64_t)tv.tv_sec + 11644473600ULL)*10000000ULL + (uint64_t)tv.tv_usec*10;
 }
-static int    MSABI i_QueryPerformanceCounter(uint64_t *c){ if(c) *c=mach_absolute_time(); return 1; }
+extern volatile int g_hb_job_pending; static void hb_engine_jobs(void);   // hitbox.c: engine-thread jobs (teleport)
+static int    MSABI i_QueryPerformanceCounter(uint64_t *c){ if(c) *c=mach_absolute_time(); if(__builtin_expect(g_hb_job_pending,0)) hb_engine_jobs(); return 1; }
 static int    MSABI i_QueryPerformanceFrequency(uint64_t *f){ if(f) *f=1000000000ULL; return 1; }
 // Must be unique per thread: msvcp140's std::mutex (_Mtx_lock) records the owner's GetCurrentThreadId() and SKIPS
 // the real lock when the caller's id equals it ("recursive" re-entry). The old constant 0x1000 made every thread
@@ -2114,11 +2115,13 @@ static int   MSABI i_CoInitializeEx(void*p,uint32_t m){ (void)p;(void)m; return 
 static void  MSABI i_CoUninitialize(void){ }
 static void* MSABI i_CoTaskMemAlloc(uint64_t n){ return malloc(n?n:1); }
 static void  MSABI i_CoTaskMemFree(void*p){ free(p); }
-static int   MSABI i_PropVariantClear(void*p){ (void)p; return HR_OK; }
+static int   MSABI i_PropVariantClear(void*p){ if(p){ uint16_t vt=*(uint16_t*)p; if(vt==31||vt==30) free(*(void**)((uint8_t*)p+8)); memset(p,0,24); } return HR_OK; }   // VT_LPWSTR/LPSTR own CoTaskMem strings
+static void* wasapi_enumerator(void); // wasapi.c
 static int   MSABI i_CoCreateInstance(GUID_*clsid, void*outer, uint32_t ctx, GUID_*iid, void**ppv){
     (void)outer;(void)ctx;(void)iid;
     // CLSID_MMDeviceEnumerator = BCDE0395-E52F-467C-8E3D-C4579291692E
-    if(clsid && clsid->D1==0xBCDE0395u && clsid->D2==0xE52F && clsid->D3==0x467C){ if(ppv)*ppv=&g_mmde; return HR_OK; }
+    if(clsid && clsid->D1==0xBCDE0395u && clsid->D2==0xE52F && clsid->D3==0x467C){   // MMDeviceEnumerator (wasapi.c)
+        if(ppv)*ppv = getenv("PELOAD_NO_WASAPI") ? (void*)&g_mmde : wasapi_enumerator(); return HR_OK; }
     if(getenv("PELOAD_TRACE_VA")&&clsid){ char t[96]; snprintf(t,sizeof t,"  [CoCreateInstance] clsid=%08x-%04x-%04x unhandled\n",clsid->D1,clsid->D2,clsid->D3); ws(t);}
     if(ppv)*ppv=0; return HR_CLASSNOTREG; }
 // ---- ws2_32 (Winsock) consistent resolution --------------------------------
@@ -7430,6 +7433,7 @@ static uintptr_t MSABI i_beginthreadex(void*sec,unsigned stack,WinThreadProc sta
 static void MSABI i_endthreadex(unsigned code){ (void)code; pthread_exit(0); }
 static uintptr_t MSABI i_beginthread(WinThreadProc start,unsigned stack,void*arg){ uint32_t tid=0; return (uintptr_t)i_CreateThread(0,(uint64_t)stack,start,arg,0,&tid); }
 #include "xaudio.c"
+#include "wasapi.c"
 #include "hitbox.c"
 static void MSABI i_endthread(void){ pthread_exit(0); }
 static uint32_t MSABI i_GetThreadId(void*h){ if(is_sync((intptr_t)h)) return ((SyncObj*)h)->tid; if(h==(void*)-2) return i_GetCurrentThreadId(); return (uint32_t)(uintptr_t)h; }

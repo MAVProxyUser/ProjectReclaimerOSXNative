@@ -7,12 +7,11 @@ order they will be worked; frame rate is deliberately last (user, 2026-10-16).
 
 | # | Item | Status / notes |
 |---|---|---|
-| 3 | **Menu music / voice chat output** | The client logs "Menu music output unavailable: No music playback device" and "Voice audio unavailable": the client's own audio output (not XAudio2) finds no device under the loader. Game audio works, so this should be a missing/stubbed device API. |
 | 4 | **Second test player without a window** | target.sh shows a (minimized) game window; the user wants test opponents to run as a backend with no GUI. |
 | 5 | **45 s startup watchdog — find the gate** | The signature patch `watchdog` skips the deadline check. On Windows something clears that deadline in time; find which step does not complete under the loader. |
 | 6 | **Seams at polygon joins on outer map geometry** (e.g. Valhalla rock walls) | Quick check whether the cracks can be found programmatically (e.g. T-junctions or depth gaps in a capture); low priority. |
 | 7 | **Headless `dedicated` server** | Loads the map, then idles at "waiting for the native game client". Possibly expected until a client joins: test a join against it. |
-| 8 | **Release bundle** | New release named for the client version it supports (e.g. "for Reclaimer 0.9.18"); loader + scripts, no game files. User approved 2026-10-16. |
+| 8 | **Release bundle + USB stick installer** | User: "can you package up a release, also make a script to make a USB stick that copies the entire game, and everything needed to start it and add instructions on how to use it to the .md" -- to run on their other Mac without DepotDownloader. Release named for the client version (0.9.18): loader + scripts, no game files. USB script: the user's own MCC files + client exe + loader + VC++ runtime DLLs + launcher, with README instructions. |
 | 9 | **Unexplained crashes** (watch) | (a) v0.9.18 SIGTRAP during a direct Guardian match; (b) one startup SIGSEGV with guest code on a thread without TLS. Not seen again since the thread-id fix (55811fa); loader threads are now named for the next [CRASH] line. |
 | 10 | **Minimized window stalls loading** (watch) | A client minimized during loading never reaches gameplay. Test runs no longer minimize. |
 | 11 | **Frame rate** (last) | shim/docs/PERF-PLAN.md. Done: redundant glUseProgram cache (4afd0a9). Small wins left; big step: native arm64 GL helper process (up to ~2x). |
@@ -30,6 +29,8 @@ Closed by the user 2026-10-16: teleporter audio desync (not seen since the XAudi
 - Bigger window (largest 16:9 that fits the screen) — 1367a68
 - Reclaimer client v0.9.18 support (signature patches, Bink/Waves DLL support) — a574219
 - Game audio after joining a match in progress (user heard full audio in FKK BTB)
+- Menu music and voice playback: a real WASAPI render endpoint on CoreAudio for the client's cpal audio
+  (shim/src/wasapi.c); user confirmed menu music plays
 - Overlay features (user: "these features all rock"): F3 projectile/bullet tracers, F4 player info, F5 item labels
   (8448a06); per-player collision permutations for Elite helmets, enemy/teammate colours, F6 team filter (635bc46);
   object layout documented in shim/docs/halo3-objects.md (d1054ea). Tested in a 70-player FKK BTB: every player drawn
