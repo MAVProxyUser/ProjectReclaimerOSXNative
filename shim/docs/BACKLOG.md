@@ -7,8 +7,6 @@ order they will be worked; frame rate is deliberately last (user, 2026-10-16).
 
 | # | Item | Status / notes |
 |---|---|---|
-| 1 | **Hitbox overlay: Elite helmets, team colours, friend/enemy filter** | Elite heads use the default helmet's collision shape (permutation 0); must follow each player's helmet. Colour by team relative to the local player, with a key to show enemies only / friends only. |
-| 2 | **Overlay features: player info, projectile tracers, item labels** (user request) | F3 tracers, F4 shield/health/weapon/grenades/camo/vehicle per player, F5 weapon/equipment labels; launch variables PELOAD_HB_TRACERS / _INFO / _ITEMS. Fields confirmed from halo3's HaloScript getters (shim/docs/halo3-objects.md). Still to confirm: aim direction, crouch, player names, scores, objective state. |
 | 3 | **Menu music / voice chat output** | The client logs "Menu music output unavailable: No music playback device" and "Voice audio unavailable": the client's own audio output (not XAudio2) finds no device under the loader. Game audio works, so this should be a missing/stubbed device API. |
 | 4 | **Second test player without a window** | target.sh shows a (minimized) game window; the user wants test opponents to run as a backend with no GUI. |
 | 5 | **45 s startup watchdog — find the gate** | The signature patch `watchdog` skips the deadline check. On Windows something clears that deadline in time; find which step does not complete under the loader. |
@@ -32,6 +30,10 @@ Closed by the user 2026-10-16: teleporter audio desync (not seen since the XAudi
 - Bigger window (largest 16:9 that fits the screen) — 1367a68
 - Reclaimer client v0.9.18 support (signature patches, Bink/Waves DLL support) — a574219
 - Game audio after joining a match in progress (user heard full audio in FKK BTB)
+- Overlay features (user: "these features all rock"): F3 projectile/bullet tracers, F4 player info, F5 item labels
+  (8448a06); per-player collision permutations for Elite helmets, enemy/teammate colours, F6 team filter (635bc46);
+  object layout documented in shim/docs/halo3-objects.md (d1054ea). Tested in a 70-player FKK BTB: every player drawn
+  as a hitbox, no sphere fallbacks.
 - Hitbox overlay: bounding spheres (f73252e), then the real hitboxes — each object's collision model posed on
   its live node matrices (76a80c8); F2 toggles it in-game (c1f12f8). Verified on Valhalla vehicles, a Guardian
   Spartan and a 60-player BTB.

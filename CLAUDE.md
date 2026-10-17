@@ -104,17 +104,25 @@ Glitch hunting: `PELOAD_D3DGL_COVQ` (+`_COVQ_FRAC`, `_HUGEPROBE=<t>`) per-draw s
 `PELOAD_D3DGL_WHITEDUMP` (draw flight recorder on auto-exposure spikes), `_LUMLOG`, `_FSLOG`,
 `_FRAMESTAT`, `_CBSCAN`, `_PSCLAMP=<c>`, `_SKIPVSH=<hash,..>`, `_DUMPHASH=<hash,..>` (GLSL+DXBC to ~).
 
-Hitbox overlay (2026-10-16): `PELOAD_HITBOXES=1|all|spheres` (shim/src/hitbox.c). halo3's debug_objects_* overlays
-are compiled out, so the shim reads the "object" data array (TLS index at halo3+0xa39f9c -> TLS block +0x38; datum
-+0 definition datum index, +0x1c sphere centre, +0x28 radius, +0x136 {u16 size, u16 offset} = node matrices
-(real_matrix4x3 x nodes)). Real hitboxes = the object's COLLISION MODEL: hb_note_map (CreateFileW) remembers opened
-.map files; hb_geom reads the definition's tag from that map file (bipd/vehi +0x34 model -> hlmt +0x10 coll ->
-regions/permutation 0/bsps {node, edges, vertices}; layouts from Assembly's Halo3MCC plugins, reader also in
-re-tools/h3map.py) and each edge is posed by the node matrix. Drawn in the present-queue blit (pq_present_wait -- NOT
-d3dgl_blit_fullscreen_i, which only runs without the present queue). Camera = VS cb0 rows 0-3 + row 7 of the first
-draw passing hb_is_world_camera (camera at the clip-space origin). `PELOAD_HITBOXES_LOG` logs maps/definitions/counts.
-Test helper: `PELOAD_INPUT_FACE=1` (with PELOAD_INPUT_SCRIPT, segments after the first) steers the pad at the nearest
-other biped. Known gap: Elite helmets use permutation 0's head shape.
+Overlay (2026-10-16, shim/src/hitbox.c; field layout in shim/docs/halo3-objects.md). Features, each a launch
+variable + function key (wininput.c flips bits of g_hb_toggle; keys are consumed, not sent to the game):
+F2 `PELOAD_HITBOXES=1|all|spheres` hitboxes, F3 `PELOAD_HB_TRACERS` projectile trails + bullet lines, F4
+`PELOAD_HB_INFO` shield/health/weapon/grenades/camo/vehicle labels, F5 `PELOAD_HB_ITEMS` weapon/equipment labels,
+F6 / `PELOAD_HB_TEAMS=all|enemies|friends` team filter (enemies red/yellow head, teammates blue). Objects come from the
+"object" data array (TLS index halo3+0xa39f9c -> TLS block +0x38). Real hitboxes = the object's COLLISION MODEL read
+from the .map file the game opened (hb_note_map in CreateFileW; bipd/vehi +0x34 model -> hlmt +0x10 coll ->
+regions/permutations/bsps; all permutations cached, each object picks its own via its region permutation bytes at
+datum+0x13A -- Elite helmets), each edge posed by the node matrices (datum+0x136). Bullets live < 1 tick, so an
+entry hook on halo3 object_delete (halo3+0x342ed8, hbdel_install, prologue-checked; PELOAD_NO_DELHOOK) records
+projectile datums at deletion (start +0x1e8, impact +0x1c). Text = a stroke font in the same GL_LINES batch, tag
+names from the map file. Drawn in the present-queue blit (pq_present_wait -- NOT d3dgl_blit_fullscreen_i, which
+only runs without the present queue). Camera = VS cb0 rows 0-3 + row 7 of the first draw passing
+hb_is_world_camera. Diagnostics: `PELOAD_HITBOXES_LOG` (counts, sphere fallback reasons, permutation bytes),
+`PELOAD_HB_DELDUMP=<n>` (raw projectile datums), `PELOAD_HB_SELFDUMP=<file>` (own unit + player record every
+0.25 s for offline field hunting), `PELOAD_OBJDUMP`. Finding fields: halo3's HaloScript getters are in the release
+build (re-tools/hsfuncs.py prints a script function's table entry -> its evaluate function -> the datum offset).
+Test helpers: `PELOAD_INPUT_FACE=1` steers scripted pad segments with a zero right stick at the nearest other biped
+(`PELOAD_INPUT_FACE_POINT=x,y,z` at a fixed point).
 NEVER find engine structures by sweeping process memory -- it kernel-panicked the Mac (memory [[no-memory-sweeps]]).
 Test runs: `bash shim/tools/quiet-run.sh "<env>" <secs>` (one instance, visible but input-less; QR_MINIMIZE=1
 minimizes, which can stall the loading screen). Process matches must be anchored (`pgrep -f '^[^ ]*build/peload'`):
