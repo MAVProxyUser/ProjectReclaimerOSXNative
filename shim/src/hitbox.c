@@ -396,10 +396,28 @@ static int hb_seg_clip(float*verts,int nv,int cap,const float*vp,const float*a,c
 // left = up x forward; soft ceilings from each structure BSP's structure_design (scnr +0x18 -> sddt +0x10, triangles
 // 0x44 with vertices at +0x20/+0x2C/+0x38): soft kill pink, acceleration orange, slip surface yellow.
 typedef struct { float c[8][3]; int kind; } HbZBox;      // kind 0 kill, 1 safe
-typedef struct { float v[3][3]; int type; } HbZTri;      // type 0 acceleration, 1 soft kill, 2 slip surface
-static struct { char path[1024]; HbZBox*box; int nbox; HbZTri*tri; int ntri; } g_hbz;
+typedef struct { float v[3][3]; int type, group; } HbZTri;   // type 0 acceleration, 1 soft kill, 2 slip surface
+typedef struct { float a[3], b[3]; int type; } HbZSeg;
+// a soft ceiling's outline: the edges only one of its triangles has (its full mesh is thousands of lines -- Valhalla
+// has 5268 triangles -- and hides the view)
+typedef struct { int32_t k[6]; int tri, e; } HbZEdge;
+static int hbz_edge_cmp(const void*x,const void*y){ return memcmp(((const HbZEdge*)x)->k,((const HbZEdge*)y)->k,sizeof(int32_t)*6); }
+static struct { char path[1024]; HbZBox*box; int nbox; HbZTri*tri; int ntri; HbZSeg*seg; int nseg; } g_hbz;
+static void hbz_outline(void){
+    free(g_hbz.seg); g_hbz.seg=0; g_hbz.nseg=0; if(!g_hbz.ntri) return;
+    HbZEdge*ed=malloc((size_t)g_hbz.ntri*3*sizeof *ed); g_hbz.seg=malloc((size_t)g_hbz.ntri*3*sizeof *g_hbz.seg); if(!ed || !g_hbz.seg){ free(ed); return; }
+    int ne=0; for(int t=0;t<g_hbz.ntri;t++) for(int e=0;e<3;e++){ const float*p=g_hbz.tri[t].v[e], *q=g_hbz.tri[t].v[(e+1)%3]; int32_t a[3],b[3];
+        for(int r=0;r<3;r++){ a[r]=(int32_t)lrintf(p[r]*100); b[r]=(int32_t)lrintf(q[r]*100); }   // 1 cm
+        int sw=memcmp(a,b,12)>0; HbZEdge*x=&ed[ne++]; memcpy(x->k,sw?b:a,12); memcpy(x->k+3,sw?a:b,12); x->tri=t; x->e=e; }
+    // an edge that two triangles of the same ceiling share is interior
+    qsort(ed,(size_t)ne,sizeof *ed,hbz_edge_cmp);
+    for(int i=0;i<ne;){ int j=i+1; while(j<ne && !memcmp(ed[j].k,ed[i].k,sizeof(int32_t)*6)) j++;
+        int interior=0; for(int a2=i;a2<j && !interior;a2++) for(int b2=a2+1;b2<j;b2++) if(g_hbz.tri[ed[a2].tri].group==g_hbz.tri[ed[b2].tri].group){ interior=1; break; }
+        if(!interior){ const HbZTri*z=&g_hbz.tri[ed[i].tri]; HbZSeg*sg=&g_hbz.seg[g_hbz.nseg++]; memcpy(sg->a,z->v[ed[i].e],12); memcpy(sg->b,z->v[(ed[i].e+1)%3],12); sg->type=z->type; }
+        i=j; }
+    free(ed); }
 static void hbz_load(const char*path){
-    if(!strcmp(g_hbz.path,path)) return; free(g_hbz.box); free(g_hbz.tri); memset(&g_hbz,0,sizeof g_hbz); snprintf(g_hbz.path,sizeof g_hbz.path,"%s",path);
+    if(!strcmp(g_hbz.path,path)) return; free(g_hbz.box); free(g_hbz.tri); free(g_hbz.seg); memset(&g_hbz,0,sizeof g_hbz); snprintf(g_hbz.path,sizeof g_hbz.path,"%s",path);
     HbMap*m=hbm_get(path); if(!m) return; int si=-1; for(int i=0;i<m->ntags;i++) if(m->grp[i]=='scnr'){ si=i; break; }
     uint8_t d[0x4A0]; if(si<0 || !hbm_read(m,(uint64_t)m->tp[si]<<2,d,sizeof d)) return;
     uint8_t*kl=0,*sl=0,*tv=0; int nk=hbm_block(m,d,0x484,2,&kl,4096), ns=hbm_block(m,d,0x490,2,&sl,4096), nt=hbm_block(m,d,0x258,0x44,&tv,4096);
@@ -415,14 +433,15 @@ static void hbz_load(const char*path){
     for(int b=0;b<nb;b++){ uint32_t sd=*(uint32_t*)(bs+b*0x6C+0x10+12); if(sd==0xFFFFFFFFu || (int)(sd&0xFFFF)>=m->ntags) continue;
         uint8_t sm[0x40]; if(!hbm_read(m,(uint64_t)m->tp[sd&0xFFFF]<<2,sm,sizeof sm)) continue;
         uint8_t*sc=0; int nsc=hbm_block(m,sm,0x10,0x14,&sc,256);
-        for(int c=0;c<nsc;c++){ int ty=*(int16_t*)(sc+c*0x14+4); uint8_t*tr=0; int ntr=hbm_block(m,sc+c*0x14,8,0x44,&tr,65536);
+        for(int c=0;c<nsc;c++){ int ty=*(int16_t*)(sc+c*0x14+4); uint8_t*tr=0; int ntr=hbm_block(m,sc+c*0x14,8,0x44,&tr,65536); static int grp; grp++;
             for(int t=0;t<ntr;t++){ if(g_hbz.ntri>=cap){ cap=cap?cap*2:1024; HbZTri*nt2=realloc(g_hbz.tri,(size_t)cap*sizeof(HbZTri)); if(!nt2) break; g_hbz.tri=nt2; }
-                HbZTri*z=&g_hbz.tri[g_hbz.ntri++]; z->type=ty; memcpy(z->v,tr+t*0x44+0x20,36); }
+                HbZTri*z=&g_hbz.tri[g_hbz.ntri++]; z->type=ty; z->group=grp; memcpy(z->v,tr+t*0x44+0x20,36); }
             free(tr); }
         free(sc); }
     free(bs);
+    hbz_outline();
     int nkb=0; for(int i=0;i<g_hbz.nbox;i++) nkb+=g_hbz.box[i].kind==0;
-    const char*bn=strrchr(path,'/'); char msg[300]; int k=snprintf(msg,sizeof msg,"  [zones] %s: %d kill volumes, %d safe zones, %d soft-ceiling triangles\n",bn?bn+1:path,nkb,g_hbz.nbox-nkb,g_hbz.ntri); (void)!write(2,msg,k); }
+    const char*bn=strrchr(path,'/'); char msg[300]; int k=snprintf(msg,sizeof msg,"  [zones] %s: %d kill volumes, %d safe zones, %d soft-ceiling triangles (%d outline edges)\n",bn?bn+1:path,nkb,g_hbz.nbox-nkb,g_hbz.ntri,g_hbz.nseg); (void)!write(2,msg,k); }
 static int hbz_draw(float*verts,int nv,int cap,const float*vp){
     char mp[1024]; if(!hb_current_map(mp,sizeof mp)) return nv; hbz_load(mp);
     static const float ckill[3]={1,0.15f,0.15f}, csafe[3]={0.2f,1,0.35f}, csoft[3][3]={{1,0.6f,0.1f},{1,0.25f,0.65f},{1,0.92f,0.2f}};
@@ -431,10 +450,8 @@ static int hbz_draw(float*verts,int nv,int cap,const float*vp){
         for(int c=0;c<8;c++) for(int bit=1;bit<8;bit<<=1) if(!(c&bit)) nv=hb_seg_clip(verts,nv,cap,vp,b->c[c],b->c[c|bit],col);
         float ctr[3]={(b->c[0][0]+b->c[7][0])/2,(b->c[0][1]+b->c[7][1])/2,(b->c[0][2]+b->c[7][2])/2}, tx,ty, dx=ctr[0]-cam[0],dy=ctr[1]-cam[1],dz=ctr[2]-cam[2];
         if(dx*dx+dy*dy+dz*dz<150.f*150.f && hb_proj(vp,ctr,&tx,&ty)){ const char*t=b->kind?"SAFE ZONE":"KILL ZONE"; nv=hb_text(verts,nv,cap,tx-strlen(t)*2.5f*g_hb_px,ty,t,col); } }
-    for(int i=0;i<g_hbz.ntri;i++){ const HbZTri*z=&g_hbz.tri[i]; float dx=z->v[0][0]-cam[0], dy=z->v[0][1]-cam[1];
-        if(g_hbz.ntri>4000 && dx*dx+dy*dy>200.f*200.f) continue;   // big soft ceilings: the part around the camera
-        const float*col=csoft[z->type>=0&&z->type<3?z->type:1];
-        nv=hb_seg_clip(verts,nv,cap,vp,z->v[0],z->v[1],col); nv=hb_seg_clip(verts,nv,cap,vp,z->v[1],z->v[2],col); nv=hb_seg_clip(verts,nv,cap,vp,z->v[2],z->v[0],col); }
+    for(int i=0;i<g_hbz.nseg;i++){ const HbZSeg*z=&g_hbz.seg[i]; const float*col=csoft[z->type>=0&&z->type<3?z->type:1];   // soft ceilings: outlines
+        nv=hb_seg_clip(verts,nv,cap,vp,z->a,z->b,col); }
     return nv; }
 // Projectile trails: positions seen on recent frames, per projectile handle; kept briefly after the projectile is gone.
 typedef struct { uint32_t h; int n; float p[32][3]; double seen; } HbTrail;
