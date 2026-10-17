@@ -9644,7 +9644,48 @@ static int is_crt_dll(const char *d){
 //     cmp r8, [g_memcpy_min] ; jae big ; jmp guest ; big: jmp host
 // PELOAD_GUEST_MEMCPY=1 = old behavior; PELOAD_MEMCPY_MIN=<bytes> (default 2048).
 uint64_t g_memcpy_min=2048;   // PELOAD_AB=memcpy flips it to ~0 (guest routine for every size)
-static void* __attribute__((ms_abi,noinline)) crt_big_memmove(void*d,const void*s,size_t n){ return memmove(d,s,n); }
+// PELOAD_MEMCPY_LOG=1: every 5 s, the big copies by caller (size, alignment) -- is halo3's per-frame game-state copy a
+// candidate for copy-on-write (vm_copy needs 16 KB-aligned source, destination and length)?
+static struct { uint64_t ra, n, bytes, aligned, maxsz; } g_mcl[16]; static pthread_mutex_t g_mcl_mx=PTHREAD_MUTEX_INITIALIZER;
+static void mcl_note(uint64_t ra,const void*d,const void*s,size_t n){ pthread_mutex_lock(&g_mcl_mx); int k=-1;
+    for(int i=0;i<16;i++) if(g_mcl[i].ra==ra){ k=i; break; } if(k<0) for(int i=0;i<16;i++) if(!g_mcl[i].ra){ k=i; g_mcl[i].ra=ra; break; }
+    if(k>=0){ g_mcl[k].n++; g_mcl[k].bytes+=n; if(!(((uintptr_t)d-(uintptr_t)s)&16383)) g_mcl[k].aligned++; if(n>g_mcl[k].maxsz) g_mcl[k].maxsz=n;
+        if(n>(4u<<20)){ static int shown; if(shown++<6){ char m[160]; int kk=snprintf(m,sizeof m,"  [memcpy] big: dst %p src %p (dst-src)%%16K %llu, dst%%16K %llu, n %zu\n",d,s,(unsigned long long)(((uintptr_t)d-(uintptr_t)s)&16383),(unsigned long long)((uintptr_t)d&16383),n); (void)!write(2,m,kk); } } }
+    static double tl; double now=mono_s(); if(now-tl>5.0){ tl=now; for(int i=0;i<16;i++) if(g_mcl[i].ra){ char m[200];
+        uint64_t ra2=g_mcl[i].ra; int k2=snprintf(m,sizeof m,"  [memcpy] %s+0x%llx: %llu calls, %.1f MB (largest %.2f MB), %llu with dst-src a multiple of 16 KB\n",ra2>=0x180000000ull&&ra2<0x190000000ull?"halo3":ra2>=0x140000000ull&&ra2<0x150000000ull?"exe":"?",
+            (unsigned long long)(ra2>=0x180000000ull&&ra2<0x190000000ull?ra2-0x180000000ull:ra2>=0x140000000ull&&ra2<0x150000000ull?ra2-0x140000000ull:ra2),(unsigned long long)g_mcl[i].n,g_mcl[i].bytes/1048576.0,g_mcl[i].maxsz/1048576.0,(unsigned long long)g_mcl[i].aligned);
+        (void)!write(2,m,k2); } memset(g_mcl,0,sizeof g_mcl); }
+    pthread_mutex_unlock(&g_mcl_mx); }
+// Default on (PELOAD_MEMCPY_COW=0 off; PELOAD_AB=cow:<secs> flips it): a copy of >= 1 MB whose source and destination are the same distance
+// apart modulo 16 KB is done copy-on-write for its whole pages (mach_vm_copy) -- halo3 copies its ~14 MB game state ~5
+// times a frame (halo3+0x13f23f, 13 GB/s alone on Guardian), always 16 KB-congruent
+volatile int g_memcpy_cow=-1; uint64_t g_cow_n, g_cow_bytes;
+// only private memory: a copy-on-write replacement of a SHARED mapping's pages (the client and its game worker talk through
+// shared memory) would cut the sharing. Checked once per (dst, src, size) and remembered.
+static int cow_private_range(mach_vm_address_t a,mach_vm_size_t n){
+    while(n){ mach_vm_address_t ra=a; mach_vm_size_t rs=0; vm_region_extended_info_data_t ei; mach_msg_type_number_t cnt=VM_REGION_EXTENDED_INFO_COUNT; mach_port_t obj=MACH_PORT_NULL;
+        if(mach_vm_region(mach_task_self(),&ra,&rs,VM_REGION_EXTENDED_INFO,(vm_region_info_t)&ei,&cnt,&obj)!=KERN_SUCCESS || ra>a) return 0;
+        if(ei.share_mode!=SM_PRIVATE && ei.share_mode!=SM_COW && ei.share_mode!=SM_EMPTY) return 0;
+        if(!(ei.protection&VM_PROT_WRITE)) return 0;
+        mach_vm_size_t take=ra+rs-a; if(take>=n) return 1; a+=take; n-=take; }
+    return 1; }
+static int cow_ok(uintptr_t D,uintptr_t S,size_t mid){ static struct { uintptr_t d,s; size_t n; int ok; } c[8]; static int ci; static pthread_mutex_t mx=PTHREAD_MUTEX_INITIALIZER;
+    pthread_mutex_lock(&mx); for(int i=0;i<8;i++) if(c[i].d==D && c[i].s==S && c[i].n==mid){ int ok=c[i].ok; pthread_mutex_unlock(&mx); return ok; }
+    int ok=cow_private_range(D,mid) && cow_private_range(S,mid); c[ci].d=D; c[ci].s=S; c[ci].n=mid; c[ci].ok=ok; ci=(ci+1)&7; pthread_mutex_unlock(&mx); return ok; }
+static void* __attribute__((ms_abi,noinline)) crt_big_memmove(void*d,const void*s,size_t n){
+    static int lg=-1; if(lg<0) lg=getenv("PELOAD_MEMCPY_LOG")?1:0;
+    if(lg) mcl_note((uint64_t)__builtin_return_address(0),d,s,n);
+    if(g_memcpy_cow<0){ const char*e=getenv("PELOAD_MEMCPY_COW"); g_memcpy_cow=e?atoi(e)!=0:1; }   // default on
+    uintptr_t D=(uintptr_t)d, S=(uintptr_t)s;
+    if(g_memcpy_cow && n>=(1u<<20) && !((D-S)&16383) && (D+n<=S || S+n<=D)){
+        size_t head=(16384-(D&16383))&16383, mid=(n-head)&~(size_t)16383;
+        if(mid>=(256u<<10) && cow_ok(D+head,S+head,mid)){
+            if(head) memmove(d,s,head);
+            if(mach_vm_copy(mach_task_self(),(mach_vm_address_t)(S+head),(mach_vm_size_t)mid,(mach_vm_address_t)(D+head))!=KERN_SUCCESS) memmove((char*)d+head,(const char*)s+head,mid);
+            else { g_cow_n++; g_cow_bytes+=mid; }
+            size_t tail=n-head-mid; if(tail) memmove((char*)d+head+mid,(const char*)s+head+mid,tail);
+            return d; } }
+    return memmove(d,s,n); }
 static void* __attribute__((ms_abi,noinline)) crt_big_memset(void*d,int c,size_t n){ return memset(d,c,n); }
 static void* crt_fast_stub(const char*fn,void*guest){
     if(getenv("PELOAD_GUEST_MEMCPY")) return guest;

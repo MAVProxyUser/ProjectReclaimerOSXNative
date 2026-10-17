@@ -229,6 +229,15 @@ DONE: a 25-minute BTB soak (median 49 fps) and the play.sh default (the in-proce
 particle compute into the helper (native arm64, ~1.5-2x) or onto the GPU; cut the link-time round trips further (the
 link status itself is still one per program).
 
+#### Copy-on-write game-state copies (2026-10-17, default on)
+
+PELOAD_MEMCPY_LOG=1 (big copies by caller every 5 s) showed one call site doing nearly all of them: halo3+0x13f23f copies
+its ~14 MB game state about 5 times a frame (13 GB/s on Guardian alone; ~15% of the engine thread in big games), always
+with source and destination the same distance apart modulo 16 KB. The host memmove stub now does such copies (>= 1 MB,
+private memory on both sides -- never a shared mapping) copy-on-write for their whole pages with mach_vm_copy. In-session
+A/B (PELOAD_AB=cow:15, direct Guardian with the helper, same scene): 243-250 vs 226-233 fps, and 194 vs 183-187 with the
+private-memory check: +5-7%. PELOAD_MEMCPY_COW=0 = plain copies.
+
 ### 2. Submission thread inside the process (DONE 2026-10-17: +10-15% in 60-100 player games, -7% alone; `auto` mode)
 
 Run the whole D3D11→GL translation on a GL thread; the engine's `ID3D11DeviceContext` calls only
