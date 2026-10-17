@@ -370,6 +370,21 @@ static void hb_draw_overlay(void){
       const char*fp=getenv("PELOAD_INPUT_FACE_POINT"); float pt[3];   // "x,y,z": aim at a fixed world point instead
       if(fp && sscanf(fp,"%f,%f,%f",&pt[0],&pt[1],&pt[2])==3){ memcpy(g_hb_tgt,pt,12); memcpy(g_hb_cam,vp+28,12); memcpy(g_hb_fwd,vp+12,12); g_hb_tgt_ok=1; } }
     { float W=(float)(g_d3dgl_W>0?g_d3dgl_W:1920), H=(float)(g_d3dgl_H>0?g_d3dgl_H:1080); g_hb_px=2.0f*2.2f/W; g_hb_py=2.0f*2.2f/H; }   // ~13 px glyphs at 1080p
+    // PELOAD_HB_SELFDUMP=<file>: every 0.25 s append {time, camera forward[3], camera pos[3], our unit datum 0x800 B,
+    // our player datum 0x400 B} -- raw material for locating aim / crouch / name / score fields offline.
+    { const char*sd=getenv("PELOAD_HB_SELFDUMP"); static double ts; if(sd && now-ts>0.25){ ts=now;
+        for(int i=0;i<n;i++){ const HbObj*o=&objs[i]; if(o->type) continue; float dx=o->c[0]-vp[28],dy=o->c[1]-vp[29],dz=o->c[2]-vp[30];
+            if(dx*dx+dy*dy+dz*dz >= (o->r+0.3f)*(o->r+0.3f)) continue;
+            static uint8_t rec[8+24+0x800+0x400]; memset(rec,0,sizeof rec); memcpy(rec,&now,8); memcpy(rec+8,vp+12,12); memcpy(rec+20,vp+28,12);
+            hb_read(o->p,rec+32,0x800);
+            uint8_t*h3=hb_halo3_base(); uint32_t idx=0; void**arrs[1025]; int na=0;
+            if(h3 && hb_read((uint64_t)(h3+0xa39f9c),&idx,4) && idx<128){ arrs[na++]=g_tls_array; pthread_mutex_lock(&g_tlsm); for(int q=0;q<g_ntarrs&&na<1025;q++) arrs[na++]=g_tarrs[q]; pthread_mutex_unlock(&g_tlsm);
+                for(int q=0;q<na;q++){ uint64_t blk=(uint64_t)arrs[q][idx], parr=0; uint8_t hdr[0x60]; if(!blk||!hb_read(blk+0x10,&parr,8)||!parr||!hb_read(parr,hdr,sizeof hdr)||*(uint32_t*)(hdr+0x2c)!=0x64407440) continue;
+                    int32_t es=*(int32_t*)(hdr+0x24), hi=*(int32_t*)(hdr+0x3c); uint64_t pd=*(uint64_t*)(hdr+0x48); if(es<=0x28||es>0x10000||hi<=0||hi>64) continue;
+                    for(int pl=0;pl<hi;pl++){ uint32_t uh=0; if(hb_read(pd+(uint64_t)pl*es+0x28,&uh,4) && uh==o->handle){ hb_read(pd+(uint64_t)pl*es,rec+32+0x800,(size_t)(es<0x400?es:0x400));
+                            static int once; if(!once){ once=1; char m[160]; int k=snprintf(m,sizeof m,"  [selfdump] players array: element 0x%x, %d slots; ours = slot %d\n",es,hi,pl); (void)!write(2,m,k); } break; } }
+                    break; } }
+            FILE*f=fopen(sd,"ab"); if(f){ fwrite(rec,1,sizeof rec,f); fclose(f); } break; } } }
     g_hb_myteam=-1; for(int i=0;i<n;i++){ const HbObj*o=&objs[i]; if(o->type) continue; float dx=o->c[0]-vp[28],dy=o->c[1]-vp[29],dz=o->c[2]-vp[30];
         if(dx*dx+dy*dy+dz*dz < (o->r+0.3f)*(o->r+0.3f)){ g_hb_myteam=o->team; break; } }   // the biped the camera is inside = us
     enum { HB_CAP=400000 }; static float verts[HB_CAP*5]; int nv=0; const float*cam=vp+28;   // cb0[7] = camera position

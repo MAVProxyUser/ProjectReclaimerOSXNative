@@ -3517,7 +3517,7 @@ static int input_script(XPad*p){
     double t=mono_s()-g_gameplay_t0-delay; if(t<0) return 0;
     if(getenv("PELOAD_INPUT_LOOP") && total>0) t=fmod(t,total); else if(t>=total) return 0;
     for(int i=0;i<nseg;i++){ if(t<seg[i].dur){ p->lx=ax16(seg[i].lx); p->ly=ax16(seg[i].ly); p->rx=ax16(seg[i].rx); p->ry=ax16(seg[i].ry); p->buttons=seg[i].b;
-            { extern int hb_face_target(float*,float*); float fx,fy; if(i>0 && getenv("PELOAD_INPUT_FACE") && hb_face_target(&fx,&fy)){ p->rx=ax16(fx); p->ry=ax16(fy); } }
+            { extern int hb_face_target(float*,float*); float fx,fy; if(i>0 && seg[i].rx==0 && seg[i].ry==0 && getenv("PELOAD_INPUT_FACE") && hb_face_target(&fx,&fy)){ p->rx=ax16(fx); p->ry=ax16(fy); } }
             p->rt=(uint8_t)(seg[i].rt*255.0f); p->lt=(uint8_t)(seg[i].lt*255.0f);
             static int last=-1; if(i!=last){ last=i; char m[120]; int k=snprintf(m,sizeof m,"  [input] script segment %d: L=(%.2f,%.2f) R=(%.2f,%.2f) b=%x\n",i,seg[i].lx,seg[i].ly,seg[i].rx,seg[i].ry,seg[i].b); (void)!write(2,m,k); }
             return 1; } t-=seg[i].dur; }

@@ -45,6 +45,23 @@ permutation } }.
 | +0x268 | weapon object handles [4] | halo3+0x356388 |
 | +0x294 | grenade counts [4] (s8: frag, plasma, spike, firebomb) | `unit_get_total_grenade_count` |
 | +0x360 | active camouflage amount (float; > 0 = camo active) | `player_active_camouflage_on` |
+| +0x1A0, +0x1AC, +0x1C4, +0x1D0 | aiming / looking vectors (unit vectors; all equal the camera forward for the local player in 100% of samples over a 15 degree pitch sweep) | recorded live (PELOAD_HB_SELFDUMP) |
+| +0x384 | crouch amount (float: 1.0 crouched, 0 standing) | recorded live: 1.0 exactly while crouch was held |
+
+Verified live with a scripted self-grenade (2026-10-16): grenade counts 2 -> 1 -> 0 as thrown; shield 1.0 -> 0 and
+health 1.0 -> 0.82 from the blast; after respawning, a new unit (handle changes in the player record) with full
+health/shield and 2 grenades.
+
+## Players
+Data array at TLS block +0x10, element 0x2F8 bytes (Slayer, 2 slots in a 2-player game).
+| Offset | Field | Source |
+|---|---|---|
+| +0x28 | unit handle (changes on respawn) | `player_active_camouflage_on`; recorded |
+| +0x4C | position (3 floats) | recorded |
+| +0x58 | nickname (UTF-16) | recorded ("Shiz") |
+| +0x294 | increments on respawn (lives used / spawn count) | recorded |
+Kills / deaths / score: not in the player record (no field changed on a suicide except the respawn ones); the
+scoreboard numbers are presumably in the game engine's statistics -- not located yet.
 
 ## Projectiles
 | Offset | Field | Source |
@@ -52,10 +69,12 @@ permutation } }.
 | +0x1b0 | distance travelled | bullet datums at deletion |
 | +0x1dc | speed | same |
 | +0x1e8 | start position (where it was fired from) | same |
+| +0xC0 | owner unit handle (the shooter) | bullet datum = the firing player's unit (player record +0x28) |
 
 Most bullets (e.g. the assault rifle's) are created and deleted inside one engine tick, so they never appear in
 the object table between frames. `object_delete` (halo3+0x342ed8, handle in ecx) sees them: the loader hooks its
 entry (`hbdel_install`) and records projectile datums; at deletion +0x1c is the impact point.
 
 ## Still to confirm
-Aim direction, crouch / movement state, player names and scores, objective state (flags, territories).
+Kills / deaths / score (game engine statistics), objective state (flags, territories, hills; needs an objective
+game variant to observe).
