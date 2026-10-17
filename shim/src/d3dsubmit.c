@@ -21,7 +21,11 @@
 // PELOAD_D3DGL_SUBMIT_AB=<secs>, which alternates on/off every <secs> and logs each phase's fps -- an A/B in one game.
 static int g_sub_cur=-1; static volatile int g_sub_want=-1; static uint32_t g_sub_gen=1; static int g_sub_nmapped;
 static unsigned long g_sub_ndraw;
-static inline int sub_on(void){ if(__builtin_expect(g_sub_cur<0,0)){ const char*e=getenv("PELOAD_D3DGL_SUBMIT"); g_sub_cur=e&&*e&&strcmp(e,"0")?1:0;
+// PELOAD_D3DGL_SUBMIT=auto: on only in big games (>= PELOAD_D3DGL_SUBMIT_AUTO_MIN players, default 40), checked every 5 s.
+// A/B 2026-10-17: +10-15% with ~60-100 players (the engine's render thread has a lot of its own work to overlap), even
+// at 66, -7% alone on Valhalla (the thread's per-draw cost + staler occlusion results with nothing to overlap).
+static int g_sub_auto=-1;
+static inline int sub_on(void){ if(__builtin_expect(g_sub_cur<0,0)){ const char*e=getenv("PELOAD_D3DGL_SUBMIT"); g_sub_auto=e&&!strcmp(e,"auto"); g_sub_cur=e&&*e&&strcmp(e,"0")&&!g_sub_auto?1:0;
         if(getenv("PELOAD_D3DGL_SUBMIT_AB") || (getenv("PELOAD_AB") && !strncmp(getenv("PELOAD_AB"),"submit",6))) g_sub_cur=0; } return g_sub_cur; }
 
 // ---- the queue: variable-size commands in a ring --------------------------------------------------------------------
@@ -190,6 +194,10 @@ static void sub_switch(void){   // game thread, at a Present
                 feat==1?"memcpy":feat==2?"glcache":feat==3?"cbbatch":"submit",ph?"on ":"off",fn/dt,fn?dn/fn:0,dt,sum[1]>0?fr[1]/sum[1]:0,nph[1],sum[0]>0?fr[0]/sum[0]:0,nph[0]); (void)!write(2,m,k);
             if(feat==1) g_memcpy_min=ph?~0ull:mc_on; else if(feat==2){ if(!ph) g_glc_gen++; g_glc_on=!ph; } else if(feat==3) g_cbbatch_on=!ph; else g_sub_want=!ph;
             t0=now; f0=g_ct_frame; d0=g_sub_ndraw; } }
+    if(g_sub_auto>0 && g_sub_want<0){ static double ta; double now=mono_s(); if(now-ta>=5.0){ ta=now; extern int st_player_count(void);
+            static int min=-1; if(min<0){ const char*e=getenv("PELOAD_D3DGL_SUBMIT_AUTO_MIN"); min=e?atoi(e):40; }
+            int n=st_player_count(), want=n>=min; if(want!=sub_on()){ g_sub_want=want;
+                char m[120]; int k=snprintf(m,sizeof m,"  [submit] auto: %d players -> GL submission thread %s\n",n,want?"on":"off"); (void)!write(2,m,k); } } }
     int w=g_sub_want; if(w<0) return; if(w==sub_on()){ g_sub_want=-1; return; } if(g_sub_nmapped>0) return;
     if(sub_on()) sub_drain();                         // off: everything queued happens first; the GL thread then idles
     else { g_sq_sent_ok=0; g_sq_cssent_ok=0; }        // on: send full state with the first draw / dispatch

@@ -203,6 +203,9 @@ static int st_session(StSess*out,int max,uint32_t*state){
         if(n){ if(g_st_layout<0) g_st_layout=lay; return n; } best=n; }
     return best; }
 // mute requests from the page, run on the halo3 main loop (hb_frame_hook)
+// players in the network session (d3dsubmit.c's auto mode switches the submission thread by it)
+int st_player_count(void){ static StSess ss[128]; return st_session(ss,128,0); }
+
 static pthread_mutex_t g_vq_mx=PTHREAD_MUTEX_INITIALIZER; static struct { uint64_t id; uint8_t on; } g_vq[256]; static int g_vqn; volatile int g_st_voice_pending;
 static void st_voice_jobs(void){
     uint64_t id[256]; uint8_t on[256]; int n;
