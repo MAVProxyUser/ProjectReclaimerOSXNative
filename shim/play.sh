@@ -66,6 +66,9 @@ else
   echo "starting Reclaimer's menu (~17 s); log: /tmp/reclaimer_play.log"
 fi
 [ "${PELOAD_STATS_HTTP:-8765}" != 0 ] && echo "live stats: http://127.0.0.1:${PELOAD_STATS_HTTP:-8765}/"
+# top-down map pictures for the stats page's heatmap (made once from the .map files; needs python3 + numpy + Pillow)
+[ "${PELOAD_STATS_HTTP:-8765}" != 0 ] && [ -f shim/tools/maptop.sh ] && [ ! -f "$HOME/Library/Application Support/ReclaimerMac/maptop/riverworld.png" ] && \
+  (bash shim/tools/maptop.sh > /tmp/reclaimer_maptop.log 2>&1 &)
 # in a source checkout the stats page is served from shim/src (edits show on a browser refresh)
 [ -f shim/src/stats_page.html ] && [ -z "${PELOAD_STATS_PAGE:-}" ] && export PELOAD_STATS_PAGE="$PWD/shim/src/stats_page.html"
 env PELOAD_SKINGUARD=1 PELOAD_VTGUARD=1 PELOAD_ALLOC_GUARD=1 "${RUNTIME[@]}" PELOAD_STATS_HTTP="${PELOAD_STATS_HTTP:-8765}" \

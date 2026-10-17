@@ -1,15 +1,16 @@
 # Backlog — requests from the user, and their status
 
 Kept current as work lands. "Done" items name the commit that delivered them. Open items are in the
-order they will be worked; frame rate is deliberately last (user, 2026-10-16).
+order they are being worked (2026-10-17: frame rate is now active, at the user's request).
 
 ## Open
 
 | # | Item | Status / notes |
 |---|---|---|
 | 14 | **Join Workshop-only servers (e.g. CHAOS 128P)** (user, 2026-10-17) | Download path works (2026-10-17): DepotDownloader (brew cask) signed in by the user, `-pubfile 2933266434 -filelist` fetched the desert_sandbox subset (1.73 GB: map + the mod's own shared.map/campaign.map) into steamapps/workshop/content/976730/2933266434. The join itself is unverified: CHAOS (65.59.89.203:11774) did not answer that night. Guide: shim/docs/mods.md; busiest servers + their mods: shim/tools/servers.sh |
-| 7b | **Teleport (F7, PELOAD_ALLOW_TELEPORT) -- experimental, crashes** | Uses halo3's own teleport (halo3+0x259410). Run from an arbitrary QueryPerformanceCounter call it crashed in the physics update (halo3+0x23300E, mid-tick); run from an entry hook on the main loop's frame-timing function (halo3+0x9d22c) it crashed at halo3+0x1ECA6 reading TLS block +0x240 (null on that thread). Thread dumps show halo3 spreading game work over job-system worker threads, so the safe point is the simulation job's own tick -- not found yet. Destination snapping to a map item spawn works (computed correctly on Guardian and Valhalla). |
-| 11 | **Frame rate** (last) | shim/docs/PERF-PLAN.md. Done: redundant glUseProgram cache (4afd0a9). Small wins left; big step: native arm64 GL helper process (up to ~2x). |
+| 7b | **Teleport, fixed properly** (user, 2026-10-17) | Wanted: live x/y of every player on the stats page and "teleport next to <player>" (small offset) without crashing client or server, tested locally. Known: halo3+0x259410 crashed in the physics update when run on a networked client. In progress: static RE of every place a player's position lives (object, physics, player, network/simulation state) and of how the Reclaimer client teleports safely itself (Forge monitor TELEPORT, script Teleport/ExitVehicle actions via object_teleport / unit_exit_vehicle) -> shim/docs/teleport.md; then do it on the host (server) so it replicates. |
+| 16 | **Every game option, exact** (user, 2026-10-17) | No guessing: keys, choices, ranges and the native variant field of every option from the client's option table (static RE in progress -> shim/docs/option-map.json), then show every mode's settings on the stats page. |
+| 11 | **Frame rate** (active) | BTB (60 players): 15-25 fps, 3,000-4,700 draws/frame at ~9 us each; the biggest phase is texture/sampler binds in Apple's GL driver (not uploads, not compute; CLAUDE.md "Frame rate"). Done: getenv cache, mip-streaming upload skip, profiler counters. Next: PERF-PLAN.md option 1 (native GL helper process, up to ~2x); meanwhile the client's Advanced graphics settings cut draws. |
 
 Tabled by the user 2026-10-17: rock-wall seams (backlog 6) -- a minor display-only glitch (seen over rocks during a
 rocket blast); the F8 captures of the rendered frame never show it, and depth/precision/invariance were ruled out.
@@ -23,6 +24,10 @@ Closed by the user 2026-10-16: teleporter audio desync (not seen since the XAudi
 
 ## Done (2026-10-16)
 
+- Stats page (2026-10-17, later): heatmap over a top-down picture of the map made from the .map file (re-tools/h3bsp.py,
+  shim/tools/maptop.sh, all 27 MP maps); overlay "visible only" (F9) and Text -/+ (labels 7 px by default, were ~4x
+  larger); speaker mute icons + Mute all, mute acting on press (clicks were lost to 10 Hz redraws), big Mute button in
+  the player details; exact local player from halo3's player mapping; burst / rocket-impact captures removed (user)
 - Stats page: lobby/session player list (works in the lobby), voice Mute / Mute all through the client's own mute list,
   talking highlight, details panel under the heatmap (2026-10-17, e400dae) -- backlog 13
 - Game options for every mode documented from the client's option table (shim/docs/game-options.md)

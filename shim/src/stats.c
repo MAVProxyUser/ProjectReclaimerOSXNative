@@ -265,7 +265,7 @@ static struct { uint32_t h; double t; } g_proj[8192];
 static int st_controls_ok(void){ static int ro=-1; if(ro<0){ const char*e=getenv("PELOAD_STATS_READONLY"); ro=e&&*e&&strcmp(e,"0")?1:0; } return !ro; }
 static int st_control(const char*act,const char*qs){
     char m[96]; int k=0;
-    static const char*const feat[HBF_N]={"hitboxes","tracers","info","items"};
+    static const char*const feat[HBF_N]={"hitboxes","tracers","info","items","visible"};
     for(int f=0;f<HBF_N;f++) if(!strcmp(act,feat[f])){ __atomic_fetch_xor(&g_hb_toggle,1<<f,__ATOMIC_ACQ_REL);
         k=snprintf(m,sizeof m,"  [stats] page: %s %s\n",feat[f],hb_feat(f)?"on":"off"); (void)!write(2,m,k); return 1; }
     if(!strcmp(act,"teams")){ static const char*const tm[3]={"all","enemies only","friends only"}; __atomic_fetch_add(&g_hb_teamcycle,1,__ATOMIC_ACQ_REL);
@@ -276,7 +276,8 @@ static int st_control(const char*act,const char*qs){
         char m[80]; int k=snprintf(m,sizeof m,"  [stats] page: %s (%d players)\n",act,ok); (void)!write(2,m,k); return n>0; }
     if(!strcmp(act,"mute") || !strcmp(act,"unmute")){ const char*v=strstr(qs,"voice="); unsigned long long id=v?strtoull(v+6,0,16):0;
         return st_voice_request(id,!strcmp(act,"mute")); }
-    if(!strcmp(act,"burst")){ __atomic_store_n(&g_hb_cap_req,8,__ATOMIC_RELEASE); (void)!write(2,"  [capture] page: capturing the next 8 frames\n",47); return 1; }
+    if(!strcmp(act,"textup") || !strcmp(act,"textdown")){ int v=g_hb_text_px>0?g_hb_text_px:7; v+=!strcmp(act,"textup")?1:-1; if(v<4) v=4; if(v>60) v=60; g_hb_text_px=v;
+        char m[64]; int k=snprintf(m,sizeof m,"  [stats] page: label text %d px\n",v); (void)!write(2,m,k); return 1; }
     if(!strcmp(act,"capture")){ __atomic_store_n(&g_hb_cap_req,1,__ATOMIC_RELEASE); (void)!write(2,"  [capture] page: capturing the next frame\n",43); return 1; }
     return 0; }
 static void st_snapshot(StBuf*s){
@@ -290,9 +291,9 @@ static void st_snapshot(StBuf*s){
       pthread_mutex_unlock(&g_hb_mapmx);
       const char*b=strrchr(mp,'/'); b=b?b+1:mp; snprintf(m,sizeof m,"%s",b); char*dot=strrchr(m,'.'); if(dot)*dot=0; sb_put(s,",\"map\":"); sb_str(s,m); }
     { static int tp=-1; if(tp<0) tp=getenv("PELOAD_ALLOW_TELEPORT")?1:0; static const char*const tm[3]={"all","enemies","friends"};
-      sb_put(s,",\"overlay\":{\"hitboxes\":%s,\"tracers\":%s,\"info\":%s,\"items\":%s,\"teams\":\"%s\",\"teleport\":%s,\"controls\":%s}",
-          hb_feat(HBF_HITBOX)?"true":"false",hb_feat(HBF_TRACER)?"true":"false",hb_feat(HBF_INFO)?"true":"false",hb_feat(HBF_ITEMS)?"true":"false",
-          tm[hb_team_mode()],tp?"true":"false",st_controls_ok()?"true":"false"); }
+      sb_put(s,",\"overlay\":{\"hitboxes\":%s,\"tracers\":%s,\"info\":%s,\"items\":%s,\"visible\":%s,\"teams\":\"%s\",\"teleport\":%s,\"controls\":%s,\"text_px\":%d}",
+          hb_feat(HBF_HITBOX)?"true":"false",hb_feat(HBF_TRACER)?"true":"false",hb_feat(HBF_INFO)?"true":"false",hb_feat(HBF_ITEMS)?"true":"false",hb_feat(HBF_VISIBLE)?"true":"false",
+          tm[hb_team_mode()],tp?"true":"false",st_controls_ok()?"true":"false",g_hb_text_px>0?g_hb_text_px:7); }
     if(strcmp(m,g_trk_map)){ snprintf(g_trk_map,sizeof g_trk_map,"%s",m); g_ntrk=0; g_nbip=0; memset(g_proj,0,sizeof g_proj); g_hb_local_slot=-1; }   // new map: new match stats
     pthread_mutex_lock(&g_hm_mx); snprintf(g_hm_cur,sizeof g_hm_cur,"%s",m); if(g_hm.dirty && now-g_hm.saved>30){ hm_save(); g_hm.saved=now; } pthread_mutex_unlock(&g_hm_mx);
     static uint8_t tab[8192*0x18]; int hi=0; uint64_t arr=hb_object_array(); uint8_t hdr[0x60];
@@ -422,6 +423,16 @@ static void* st_conn(void*a){ int fd=(int)(intptr_t)a; pthread_setname_np("shim-
         const char*body=code==200?"{\"ok\":true}":code==400?"{\"ok\":false,\"error\":\"unknown or disabled action\"}":!st_controls_ok()?"{\"ok\":false,\"error\":\"controls are off\"}":"{\"ok\":false,\"error\":\"needs POST with an X-Reclaimer-Control header\"}";
         int k=snprintf(h,sizeof h,"HTTP/1.1 %d %s\r\nContent-Type: application/json\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n%s",code,code==200?"OK":code==400?"Bad Request":"Forbidden",strlen(body),body);
         st_send(fd,h,(size_t)k); }
+    else if(!strncmp(path,"/maptop/",8)){
+        // top-down map pictures made from the .map files (shim/tools/maptop.sh -> re-tools/h3bsp.py):
+        // ~/Library/Application Support/ReclaimerMac/maptop/<map>.png + <map>.json (world bounds)
+        const char*nm=path+8; size_t L=strlen(nm); int ok=L>4 && L<64; for(size_t i=0;ok && i<L;i++){ char c=nm[i]; ok=(c>='a'&&c<='z')||(c>='0'&&c<='9')||c=='_'||c=='.'; }
+        const char*ct=ok&&L>4&&!strcmp(nm+L-4,".png")?"image/png":ok&&L>5&&!strcmp(nm+L-5,".json")?"application/json":0;
+        char fp[1024]; const char*home=getenv("HOME"); FILE*f=0; if(ct && !strstr(nm,"..")){ snprintf(fp,sizeof fp,"%s/Library/Application Support/ReclaimerMac/maptop/%s",home?home:"",nm); f=fopen(fp,"rb"); }
+        char*buf=0; long n=0; if(f){ fseek(f,0,SEEK_END); n=ftell(f); fseek(f,0,SEEK_SET); if(n>0 && n<(32<<20) && (buf=malloc((size_t)n)) && fread(buf,1,(size_t)n,f)==(size_t)n){} else { free(buf); buf=0; } fclose(f); }
+        if(buf){ int k=snprintf(h,sizeof h,"HTTP/1.1 200 OK\r\nContent-Type: %s\r\nContent-Length: %ld\r\nCache-Control: max-age=60\r\nConnection: close\r\n\r\n",ct,n);
+            if(st_send(fd,h,(size_t)k)) st_send(fd,buf,(size_t)n); free(buf); }
+        else { const char*nf="HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"; st_send(fd,nf,strlen(nf)); } }
     else if(strcmp(meth,"GET")){ const char*na="HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"; st_send(fd,na,strlen(na)); }
     else if(!strcmp(path,"/events")){
         int k=snprintf(h,sizeof h,"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\nAccess-Control-Allow-Origin: *\r\n\r\n");

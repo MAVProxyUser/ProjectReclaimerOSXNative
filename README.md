@@ -201,43 +201,68 @@ Options go in front of the command, e.g. `PELOAD_INVERT_PITCH=0 bash shim/play.s
 | `PELOAD_HB_ITEMS=1` | weapons and equipment lying on the map, by name; **F5** toggles |
 | `PELOAD_HB_TEAMS=enemies` | show only enemies (`friends`: only teammates). Hitboxes are red/yellow for enemies, blue for teammates; **F6** cycles all / enemies / friends |
 | `PELOAD_STATS_HTTP=<port>` | live game stats page; on by default at http://127.0.0.1:8765/, `=0` turns it off (details below) |
-| **F8** | capture: saves the frame, its depth buffer and the camera position to `~/reclaimer_cap_*` (for reporting rendering glitches at a spot) |
+| **F8** | capture: saves the frame, its depth buffer and the camera position to `~/reclaimer_cap_*` (for reporting rendering glitches at a spot; the overlay is not in it) |
+| `PELOAD_HB_VISIBLE=1` | visible only: hitboxes and labels only for objects you can actually see, not behind walls (a small copy of the game's depth buffer, read back every frame); **F9** toggles |
+| `PELOAD_HB_TEXT_PX=7` | overlay label height in window pixels (Text − / + on the stats page) |
 | `PELOAD_D3DGL_INVARIANT=1` | experimental: vertex positions computed bit-identically in every pass; try it if you see seams/speckles along polygon edges (e.g. Valhalla's rock walls) |
 | `PELOAD_ALLOW_TELEPORT=1` | **experimental, currently crashes the game**: F7 teleports you to the opposite point of the map using the game's own teleport |
 | `PELOAD_H3="name=value,..."` | set Halo 3 engine settings, e.g. `render_debug_depth_render=1`, `camera_fov_scale=1.2` — all 72 are listed in `shim/docs/halo3-engine-globals.md` |
 
 ### Live game stats over HTTP
 
-`play.sh` serves what the game knows about the match, 10 times a second, on http://127.0.0.1:8765/
-(`PELOAD_STATS_HTTP=<port>` for another port, `=0` to turn it off; `PELOAD_STATS_ADDR=<ip>` to listen on another
-address, e.g. to watch from another device):
+`play.sh` serves what the game knows about the match on http://127.0.0.1:8765/, updated 10 times a second
+(`PELOAD_STATS_HTTP=<port>` for another port, `=0` off; `PELOAD_STATS_ADDR=<ip>` to listen on another address, e.g. to
+watch from another device). From top to bottom the page shows:
 
-- `/` -- a live table (team, shield and health, weapon, deaths, grenades, vehicle, speed) and a **death heatmap**:
-  where players died, from blue (few) to red (many), over a grey picture of where players walk, with everyone's live
-  position. Deaths for this match or all matches on that map (kept in `~/Library/Application Support/ReclaimerMac/
-  heatmaps/`, so the map fills in over time). Click a player for everything known about them: camo, all weapons,
-  grenades, vehicle and seat, deaths, current and longest life, distance moved, top speed, projectiles fired, facing --
-  with their deaths ringed on the heatmap
-- **Game rules**: the running game's options (rounds, respawn, map, powerups, score and points) and every trait set
-  (everyone, after spawning, each powerup and the mode's roles: leader, flag carrier, zombies, last human ...) with
-  what each changes; the player table's **Traits** column shows each player's active traits where they differ from
-  the defaults, with powerup and respawn-trait countdowns
-- the page's **In-game overlay** buttons switch the same overlay features as the function keys: Hitboxes (F2),
-  Tracers (F3), Player info (F4), Items (F5), Show all / enemies / friends (F6), Teleport (F7, only with
-  `PELOAD_ALLOW_TELEPORT`) and Capture frame (F8). They send `POST /control?do=<hitboxes|tracers|info|items|teams|
-  teleport|capture>` with an `X-Reclaimer-Control: 1` header (so other web pages can't press them);
-  `PELOAD_STATS_READONLY=1` turns them off. The current switches are in each snapshot's `overlay`
-- `/heat.json` -- the heatmap data: visited cells (`cell` units wide) and deaths (`x, y, z, team, name, match, seconds`)
-- `/stats.json` -- the latest snapshot: `players` (name, team, you, alive, health, shield, camo, weapon, weapons,
-  grenades, vehicle, pos, speed, facing, deaths, life, longest_life, distance, top_speed, shots, hits, accuracy,
-  traits, effects), `variant` (the game's options and trait sets), `overlay`, `vehicles` (type,
-  health, shield, pos), `projectiles` in flight (type, owner, pos, speed), plus `map`, `in_match` and match `time`
-- `/events` -- the same JSON as a stream (Server-Sent Events), e.g. `curl -N http://127.0.0.1:8765/events`
+- **In-game overlay** buttons -- the same switches as the function keys: Hitboxes (F2), Tracers (F3), Player info (F4),
+  Items (F5), Text − / + (label size), Show all / enemies / friends (F6), Visible only (F9), Teleport (F7, only with
+  `PELOAD_ALLOW_TELEPORT`) and Capture frame (F8).
+- **Connected** -- everyone in the game's network session, also in the lobby before a match starts, in alphabetical
+  order. Players who are talking light up green. The speaker beside each name mutes or unmutes their voice (a red cross
+  = muted); **Mute all** / **Unmute all** do everyone. This is the client's own voice mute (the same list as its
+  scoreboard Mute buttons): it only affects what you hear and lasts until the game closes.
+- **Game rules** -- the running game's options (rounds, respawn, map, powerups, score and points) and every trait set
+  with what it changes: everyone, after spawning, each powerup, and the mode's roles (leader, flag carrier, infected,
+  last survivor, ...).
+- **Players** -- team, shield and health, weapon, deaths, shots and accuracy, grenades, vehicle, speed and active
+  traits (where they differ from the defaults, with powerup and respawn-trait countdowns). 🔊 marks a talker, 🔇 a
+  muted player, "(you)" the local player (from Halo 3's own player mapping, so also right in third person and vehicles).
+  Shots count every projectile (each shotgun pellet is one); a hit is a shot that ended inside another player's body
+  bounds -- an estimate.
+- **Death heatmap** -- where players died (blue = few, red = many) over a top-down picture of the map and a grey
+  "where players walk" layer, with everyone's live position. Deaths for this match or all matches on that map (kept in
+  `~/Library/Application Support/ReclaimerMac/heatmaps/`). The map pictures are made once from the game's own `.map`
+  files (`bash shim/tools/maptop.sh`; `play.sh` runs it in the background when they are missing; needs python3 with
+  numpy and Pillow).
+- **Player details** (click a player in the table) -- under the heatmap: a big Mute / Unmute button, camo, all weapons,
+  grenades, vehicle and seat, deaths, current and longest life, distance, top speed, shots, hits, accuracy, active
+  traits, facing and position; their deaths are ringed on the heatmap.
 
-It reads the game's own object table (Halo 3 sends every player's state to every client), like the overlay, and works
-with the overlay off. Health and shield are fractions (1.0 = full; shields can go above 1 when overcharged). On public
-servers this is information the other players don't have -- it is meant for your own and your dedicated server's
-matches.
+Machine-readable endpoints:
+
+- `/stats.json` -- the latest snapshot: `players` (name, slot, team, you, alive, health, shield, camo, weapon(s),
+  grenades, vehicle, seat, pos, speed, facing, deaths, life, longest_life, distance, top_speed, shots, hits, accuracy,
+  traits, effects, voice, muted, talking), `session` (the connected list), `variant` (options and trait sets),
+  `overlay` (the switches), `vehicles`, `projectiles` in flight, `map`, `in_match`, match `time`
+- `/events` -- the same JSON as a stream (Server-Sent Events): `curl -N http://127.0.0.1:8765/events`
+- `/heat.json` -- the heatmap data (visited cells, deaths); `/maptop/<map>.png|json` -- the map picture and its world
+  bounds
+- `POST /control?do=<hitboxes|tracers|info|items|visible|teams|textup|textdown|teleport|capture|mute|unmute|muteall|
+  unmuteall>[&voice=<id>]` with an `X-Reclaimer-Control: 1` header (other web pages can't send it);
+  `PELOAD_STATS_READONLY=1` turns the controls off
+
+It reads the game's own memory (object and player tables, the network session, the game variant) -- the information
+Halo 3 sends to every client -- and works with the overlay off. Health and shield are fractions (1.0 = full; shields
+can go above 1 when overcharged). On public servers this is information other players don't have; it is meant for
+your own and your dedicated server's matches.
+
+### Frame rate in big games
+
+Big Team Battle with 60 players runs at about 15-25 fps: the game issues 3,000-4,700 draw calls a frame and each one
+costs about 9 µs in the loader plus Apple's OpenGL driver (both run translated under Rosetta). The client's own
+**Settings → Graphics → Advanced graphics** cuts draw calls: **Shadows** (each shadow caster draws again into the
+shadow maps), Level of detail, Draw distance, Effects and Decals. The window title shows draws per frame next to the
+frame rate. A 60 Hz display caps what reaches the screen; the title shows the engine's own rate beside it.
 
 The window opens at the largest 16:9 size that fits your screen (`PELOAD_WIN_SIZE=1280x720` picks a size), can be
 resized, and can go full screen (green button or Ctrl-Cmd-F). Developer and diagnostic switches are documented in
@@ -252,7 +277,11 @@ resized, and can go full screen (green button or Ctrl-Cmd-F). Developer and diag
 | `shim/src/dxbc_cpu.c` | CPU interpreter for the compute shaders (particles), run on a worker thread |
 | `shim/src/xaudio.c` | XAudio2 / X3DAudio on CoreAudio |
 | `shim/src/wininput.c` | keyboard/mouse → Raw Input and window messages |
-| `shim/src/hitbox.c` / `shim/src/stats.c` | overlay (hitboxes, tracers, labels) / live stats over HTTP |
+| `shim/src/wasapi.c` | WASAPI render endpoint (the client's menu music and voice chat) on AudioQueue |
+| `shim/src/hitbox.c` / `shim/src/stats.c` | overlay (hitboxes, tracers, labels, visible only, F8 capture) / live stats over HTTP |
+| `shim/src/stats_page.html` | the stats page (embedded at build time; served from the file in a source checkout) |
 | `shim/play.sh` / `shim/build.sh` | launcher / build script |
-| `re-tools/` | reverse-engineering helpers (angr decompile, xrefs) |
-| `shim/docs/` | research notes |
+| `shim/target.sh` / `shim/dedicated.sh` | windowless second player / local dedicated server |
+| `shim/tools/servers.sh` / `shim/tools/maptop.sh` | busiest public servers and their mods / top-down map pictures for the heatmap |
+| `re-tools/` | reverse-engineering helpers (angr decompile, xrefs, `.map` reader `h3map.py`, map geometry `h3bsp.py`) |
+| `shim/docs/` | research notes (index in `CLAUDE.md`); user guides: `mods.md`, `game-options.md` |

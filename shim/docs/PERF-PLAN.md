@@ -1,6 +1,6 @@
 # Frame-rate plan
 
-Status 2026-10-16. Measurements are from a direct Guardian match on an M4 Max (`PELOAD_D3DGL_PROF=1`,
+Status 2026-10-16, Big Team Battle numbers added 2026-10-17. Measurements are from a direct Guardian match on an M4 Max (`PELOAD_D3DGL_PROF=1`,
 2-second windows) unless noted.
 
 ## Where the time goes
@@ -16,6 +16,23 @@ Status 2026-10-16. Measurements are from a direct Guardian match on an M4 Max (`
 - About 1,400–1,700 draw calls per frame in Guardian, about 4,000 in a 60-player Big Team Battle (27 fps there).
 - Total loader time per draw is about 5.7 µs. Before the program-bind cache (4afd0a9) it was 6.0 µs, and
   the draw call alone was 3.8 µs.
+
+## Big Team Battle measurements (2026-10-17)
+
+FKK BTB, 60 players, Sandtrap/Avalanche/High Ground, `PELOAD_D3DGL_PROF=1` (per 2 s; split = loader phases):
+
+| | value |
+|---|---|
+| draws per frame | 3,000-4,700 (Guardian: ~1,400) |
+| fps | 13-25 |
+| split ms (typical) | prog 8-14, rt 17-38, pipe 9-21, cbs 110-270, **texs 430-1220**, vtx 60-140, draw 320-720 |
+| texture re-uploads | 60-430 per 2 s, 2-430 ms (BC decode on the CPU + upload + glGenerateMipmap) |
+| buffer-texture re-uploads | ~130 per 2 s (3 buffers, once per frame each), ~136 MB, ~15 ms |
+| compute (particles) waits at bind | none |
+
+So "texs" is the driver's cost for texture and sampler binds themselves, which grows with the number of distinct
+materials on screen (60 players' armour, weapons, effects). Caching can't remove it (binds that repeat are already
+skipped); fewer draws (the client's Advanced graphics settings) or a native driver (option 1) can.
 
 ## Why a draw costs so much: Apple's GL driver, under Rosetta
 

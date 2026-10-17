@@ -78,13 +78,14 @@ static void* objdump_thread(void*a){ (void)a; pthread_setname_np("shim-objdump")
 //   F3 PELOAD_HB_TRACERS projectile tracers (trail + velocity)
 //   F4 PELOAD_HB_INFO    player info: shield/health %, weapon, grenades, active camo, vehicle seat
 //   F5 PELOAD_HB_ITEMS   weapons and equipment lying on the map, by tag name
-enum { HBF_HITBOX, HBF_TRACER, HBF_INFO, HBF_ITEMS, HBF_N };
+//   F9 PELOAD_HB_VISIBLE visible only: hitboxes and labels only for objects the player can actually see
+enum { HBF_HITBOX, HBF_TRACER, HBF_INFO, HBF_ITEMS, HBF_VISIBLE, HBF_N };
 static int g_hbf_init, g_hbf_on[HBF_N], g_hb_all, g_hb_spheres;
-static void hbf_init(void){ if(g_hbf_init) return; static const char*const env[HBF_N]={"PELOAD_HITBOXES","PELOAD_HB_TRACERS","PELOAD_HB_INFO","PELOAD_HB_ITEMS"};
+static void hbf_init(void){ if(g_hbf_init) return; static const char*const env[HBF_N]={"PELOAD_HITBOXES","PELOAD_HB_TRACERS","PELOAD_HB_INFO","PELOAD_HB_ITEMS","PELOAD_HB_VISIBLE"};
     for(int f=0;f<HBF_N;f++){ const char*e=getenv(env[f]); g_hbf_on[f]=e&&*e&&strcmp(e,"0"); }
     const char*e=getenv("PELOAD_HITBOXES"); g_hb_all=e&&!strcasecmp(e,"all"); g_hb_spheres=e&&!strcasecmp(e,"spheres"); g_hbf_init=1; }
 static int hb_feat(int f){ hbf_init(); return g_hbf_on[f] ^ ((g_hb_toggle>>f)&1); }
-static int hb_overlay_on(void){ for(int f=0;f<HBF_N;f++) if(hb_feat(f)) return 1; return 0; }
+static int hb_overlay_on(void){ for(int f=0;f<HBF_N;f++) if(f!=HBF_VISIBLE && hb_feat(f)) return 1; return 0; }   // (visible-only alone draws nothing)
 // The camera tracker (VS cb0 of the frame's first world draw) feeds the overlay and the teleport's "which body is
 // mine"; it runs when either needs it.
 static int stats_on(void);   // stats.c: the live stats service uses the camera to mark "you"
@@ -314,6 +315,7 @@ static const char* hb_glyph(char c){
     case '/': return "0046";  case '+': return "03432125";  case '?': return "05060646464444222221";  case '(': return "3616162020101034";
     default: return ""; } }
 static float g_hb_px, g_hb_py;   // NDC size of one font-grid unit
+static volatile int g_hb_text_px;   // label glyph height in window pixels (0 = not set yet)
 static int hb_text(float*verts,int nv,int cap,float x,float y,const char*s,const float*col){   // x,y = NDC of the text's top-left
     for(; *s; s++, x+=5*g_hb_px){ char ch=*s; if(ch>='a'&&ch<='z') ch-=32; const char*g=hb_glyph(ch);
         for(; g[0]&&g[1]&&g[2]&&g[3] && nv+2<=cap; g+=4){ float*d=verts+nv*5;
@@ -416,6 +418,52 @@ void __attribute__((ms_abi)) hb_on_delete(uint32_t handle){
             m[q++]='\n'; (void)!write(2,m,q); } } }
 static const float g_hb_teamcol[8][3]={{1,0.3f,0.25f},{0.35f,0.6f,1},{0.35f,1,0.35f},{1,0.6f,0.15f},{0.75f,0.4f,1},{1,0.9f,0.2f},{0.75f,0.55f,0.35f},{1,0.55f,0.8f}};
 static unsigned g_hb_prog, g_hb_vao, g_hb_vbo;
+// ---- visible only (F9 / PELOAD_HB_VISIBLE / the stats page) -------------------------------------------------------
+// Each frame (render thread, at Present: hb_vis_tick) the frame's depth buffer -- the one the camera draw used,
+// g_hb_dsv -- is blitted down to 480x270 and read back through a ring of three pixel-pack buffers, so the CPU reads a
+// copy two frames old and never waits for the GPU. An object counts as visible when at its centre, near its top or near
+// its bottom the scene is not nearer than the object's front (its centre moved toward the camera by radius + 0.3 units).
+static D3DObj* g_hb_dsv;   // the depth buffer of the frame's camera draw (hb_note_dsv)
+enum { HBV_W=480, HBV_H=270 };
+static float g_hbv_depth[HBV_W*HBV_H], g_hbv_vp[16]; static volatile unsigned g_hbv_seq; static volatile int g_hbv_ok;
+static void hb_vis_tick(void){
+    if(!hb_overlay_on() || !hb_feat(HBF_VISIBLE)){ g_hbv_ok=0; return; }
+    D3DObj*ds=g_hb_dsv; if(!ds || !ds->gltex || !ds->gldsatt || !G.BlitFramebuffer || !G.MapBufferRange || !G.ReadPixels) return;
+    static unsigned fbo, tex, pbo[3]; static int idx, filled[3]; static float vps[3][16];
+    if(!fbo){ TEXCACHE_INVALIDATE(); G.GenTextures(1,&tex); G.BindTexture(GLE_TEX2D,tex);
+        G.TexImage2D(GLE_TEX2D,0,0x8CAD/*DEPTH32F_STENCIL8*/,HBV_W,HBV_H,0,0x84F9/*DEPTH_STENCIL*/,0x8DAD/*FLOAT_32_UNSIGNED_INT_24_8_REV*/,0);
+        G.TexParameteri(GLE_TEX2D,0x2801,0x2600); G.TexParameteri(GLE_TEX2D,0x2800,0x2600);
+        G.GenFramebuffers(1,&fbo); G.BindFramebuffer(GLE_FBO,fbo); G.FramebufferTexture2D(GLE_FBO,0x821A/*DEPTH_STENCIL_ATTACHMENT*/,GLE_TEX2D,tex,0);
+        if(G.DrawBuffer) G.DrawBuffer(0); if(G.ReadBuffer) G.ReadBuffer(0);
+        G.GenBuffers(3,pbo); for(int i=0;i<3;i++){ G.BindBuffer(0x88EB/*PIXEL_PACK*/,pbo[i]); G.BufferData(0x88EB,HBV_W*HBV_H*4,0,0x88E1/*STREAM_READ*/); }
+        G.BindBuffer(0x88EB,0); G.BindFramebuffer(GLE_FBO,0); }
+    float vp[32]; unsigned s0=g_hb_vpseq; memcpy(vp,g_hb_vp,sizeof vp); if((s0&1) || g_hb_vpseq!=s0) return;
+    unsigned src=d3dgl_fbo_for(0,0,ds);
+    G.BindFramebuffer(0x8CA8/*READ*/,src); G.BindFramebuffer(0x8CA9/*DRAW*/,fbo);
+    G.BlitFramebuffer(0,0,(int)ds->w,(int)ds->h,0,0,HBV_W,HBV_H,0x100/*DEPTH_BUFFER_BIT*/,0x2600/*NEAREST*/);
+    G.BindFramebuffer(0x8CA8,fbo); G.BindBuffer(0x88EB,pbo[idx]); G.ReadPixels(0,0,HBV_W,HBV_H,0x1902/*DEPTH_COMPONENT*/,0x1406/*FLOAT*/,0);
+    memcpy(vps[idx],vp,64); filled[idx]=1;
+    int rd=(idx+1)%3;   // the oldest copy: two frames old, long done on the GPU
+    if(filled[rd]){ G.BindBuffer(0x88EB,pbo[rd]); const void*m=G.MapBufferRange(0x88EB,0,HBV_W*HBV_H*4,0x1/*MAP_READ*/);
+        if(m){ g_hbv_seq++; __atomic_thread_fence(__ATOMIC_SEQ_CST); memcpy(g_hbv_depth,m,sizeof g_hbv_depth); memcpy(g_hbv_vp,vps[rd],64);
+            __atomic_thread_fence(__ATOMIC_SEQ_CST); g_hbv_seq++; g_hbv_ok=1; G.UnmapBuffer(0x88EB); } }
+    G.BindBuffer(0x88EB,0); G.BindFramebuffer(GLE_FBO,0); idx=(idx+1)%3; }
+static int hb_vis(const HbObj*o){
+    if(!g_hbv_ok) return 1; unsigned s0=g_hbv_seq; if(s0&1) return 1;
+    float vp[16]; memcpy(vp,g_hbv_vp,64); float f[3]={vp[12],vp[13],vp[14]}, fl=sqrtf(f[0]*f[0]+f[1]*f[1]+f[2]*f[2]); if(fl<1e-6f) return 1;
+    f[0]/=fl; f[1]/=fl; f[2]/=fl; float r=o->r>0.05f&&o->r<20?o->r:0.5f; int any=0, vis=0;
+    const float dz[3]={0,0.6f*r,-0.4f*r};
+    for(int k=0;k<3 && !vis;k++){ float p[3]={o->c[0],o->c[1],o->c[2]+dz[k]};
+        float cx=p[0]*vp[0]+p[1]*vp[1]+p[2]*vp[2]+vp[3], cy=p[0]*vp[4]+p[1]*vp[5]+p[2]*vp[6]+vp[7], cw=p[0]*vp[12]+p[1]*vp[13]+p[2]*vp[14]+vp[15];
+        if(cw<0.05f) continue; float nx=cx/cw, ny=cy/cw; if(nx<-1||nx>1||ny<-1||ny>1) continue; any=1;
+        float q[3]={p[0]-f[0]*(r+0.3f),p[1]-f[1]*(r+0.3f),p[2]-f[2]*(r+0.3f)};
+        float qz=q[0]*vp[8]+q[1]*vp[9]+q[2]*vp[10]+vp[11], qw=q[0]*vp[12]+q[1]*vp[13]+q[2]*vp[14]+vp[15];
+        if(qw<0.05f){ vis=1; break; }   // right in front of the camera: nothing can be in between
+        float thr=qz/qw; int col=(int)((nx*0.5f+0.5f)*HBV_W), row=(int)((d3dgl_flipy()?(0.5f-ny*0.5f):(ny*0.5f+0.5f))*HBV_H);
+        if(col<0) col=0; if(col>=HBV_W) col=HBV_W-1; if(row<0) row=0; if(row>=HBV_H) row=HBV_H-1;
+        if(g_hbv_depth[row*HBV_W+col]<=thr) vis=1; }   // reverse-Z: larger = nearer; scene not nearer than our front
+    if(g_hbv_seq!=s0) return 1;
+    return vis || !any; }   // off screen: leave it to the projection (nothing gets drawn there anyway)
 static void hb_draw_overlay(void){
     if(!hb_overlay_on() || !G.DrawArrays || !G.CreateShader) return;
     float vp[32]; unsigned s0=g_hb_vpseq; if(s0&1) return; memcpy(vp,g_hb_vp,sizeof vp); if(g_hb_vpseq!=s0) return;
@@ -427,7 +475,7 @@ static void hb_draw_overlay(void){
         g_hb_prog=G.CreateProgram(); G.AttachShader(g_hb_prog,v); G.AttachShader(g_hb_prog,f); G.LinkProgram(g_hb_prog); G.DeleteShader(v); G.DeleteShader(f);
         G.GenBuffers(1,&g_hb_vbo); }
     { static void*vctx; void*cur=CGLGetCurrentContext(); if(cur!=vctx){ vctx=cur; G.GenVertexArrays(1,&g_hb_vao); } }   // VAOs are per context
-    int fh=hb_feat(HBF_HITBOX), ft=hb_feat(HBF_TRACER), fi=hb_feat(HBF_INFO), fw=hb_feat(HBF_ITEMS); double now=mono_s();
+    int fh=hb_feat(HBF_HITBOX), ft=hb_feat(HBF_TRACER), fi=hb_feat(HBF_INFO), fw=hb_feat(HBF_ITEMS), fv=hb_feat(HBF_VISIBLE); double now=mono_s();
 
     static HbObj objs[1024]; int n=hb_collect(objs,1024);
     if(getenv("PELOAD_HITBOXES_LOG")){ static double tl; if(now-tl>3.0){ tl=now; int cnt[16]={0}; for(int i=0;i<n;i++) if(objs[i].type<16) cnt[objs[i].type]++;
@@ -438,7 +486,9 @@ static void hb_draw_overlay(void){
       if(bi>=0){ memcpy(g_hb_tgt,objs[bi].c,12); memcpy(g_hb_cam,vp+28,12); memcpy(g_hb_fwd,vp+12,12); g_hb_tgt_ok=1; } else g_hb_tgt_ok=0;
       const char*fp=getenv("PELOAD_INPUT_FACE_POINT"); float pt[3];   // "x,y,z": aim at a fixed world point instead
       if(fp && sscanf(fp,"%f,%f,%f",&pt[0],&pt[1],&pt[2])==3){ memcpy(g_hb_tgt,pt,12); memcpy(g_hb_cam,vp+28,12); memcpy(g_hb_fwd,vp+12,12); g_hb_tgt_ok=1; } }
-    { float W=(float)(g_d3dgl_W>0?g_d3dgl_W:1920), H=(float)(g_d3dgl_H>0?g_d3dgl_H:1080); g_hb_px=2.0f*2.2f/W; g_hb_py=2.0f*2.2f/H; }   // ~13 px glyphs at 1080p
+    // label text: glyphs g_hb_text_px window pixels tall (PELOAD_HB_TEXT_PX, default 7; the stats page's Text -/+)
+    { if(g_hb_text_px<=0){ const char*e=getenv("PELOAD_HB_TEXT_PX"); g_hb_text_px=e?atoi(e):7; if(g_hb_text_px<4) g_hb_text_px=4; if(g_hb_text_px>60) g_hb_text_px=60; }
+      float W=(float)(g_win_pw>0?g_win_pw:1920), H=(float)(g_win_ph>0?g_win_ph:1080), u=g_hb_text_px/6.0f; g_hb_px=2.0f*u/W; g_hb_py=2.0f*u/H; }
     // PELOAD_HB_SELFDUMP=<file>: every 0.25 s append {time, camera forward[3], camera pos[3], our unit datum 0x800 B,
     // our player datum 0x400 B} -- raw material for locating aim / crouch / name / score fields offline.
     { const char*sd=getenv("PELOAD_HB_SELFDUMP"); static double ts; if(sd && now-ts>0.25){ ts=now;
@@ -462,11 +512,12 @@ static void hb_draw_overlay(void){
     enum { HB_CAP=400000 }; static float verts[HB_CAP*5]; int nv=0; const float*cam=vp+28;   // cb0[7] = camera position
     static const float cwhite[3]={1,1,1}, cgrey[3]={0.7f,0.7f,0.7f}, ctrace[3]={1,0.95f,0.55f}, cvel[3]={1,0.5f,0.1f}, citem[3]={0.3f,1,0.45f}, cequip[3]={0.3f,0.9f,1};
     for(int i=0;i<n;i++){ const HbObj*o=&objs[i]; int unit=o->type==0||o->type==1||o->type==12;
-        float dx=o->c[0]-cam[0], dy=o->c[1]-cam[1], dz=o->c[2]-cam[2]; int self = dx*dx+dy*dy+dz*dz < (o->r+0.3f)*(o->r+0.3f);   // our own body
+        float dx=o->c[0]-cam[0], dy=o->c[1]-cam[1], dz=o->c[2]-cam[2]; int self = dx*dx+dy*dy+dz*dz < (o->r+0.3f)*(o->r+0.3f) || (o->type==0 && o->handle==g_hb_local_unit);   // our own body
         if(o->type==5 && ft){ hb_trail_add(o->handle,o->c,now);
             if(getenv("PELOAD_HITBOXES_LOG")){ static uint32_t seen[64]; static int ns; int f=0; for(int q=0;q<ns;q++) if(seen[q]==o->def) f=1;
                 if(!f && ns<64){ seen[ns++]=o->def; char m[160]; int k=snprintf(m,sizeof m,"  [hitbox] projectile type seen: %s (%08x) speed %.2f\n",hb_tag_name(o->def),o->def,sqrtf(o->vel[0]*o->vel[0]+o->vel[1]*o->vel[1]+o->vel[2]*o->vel[2])); (void)!write(2,m,k); } }
             continue; }
+        if(fv && o->type!=5 && !hb_vis(o)) continue;   // visible only: hidden behind the world
         if((o->type==2||o->type==3) && fw && o->parent==0xFFFFFFFFu){   // lying on the map (not held)
             float a[3]={o->c[0]-0.15f,o->c[1],o->c[2]}, b[3]={o->c[0]+0.15f,o->c[1],o->c[2]}, c2[3]={o->c[0],o->c[1]-0.15f,o->c[2]}, d2[3]={o->c[0],o->c[1]+0.15f,o->c[2]};
             const float*col=o->type==2?citem:cequip; nv=hb_seg(verts,nv,HB_CAP,vp,a,b,col); nv=hb_seg(verts,nv,HB_CAP,vp,c2,d2,col);
@@ -527,16 +578,14 @@ static void hb_draw_overlay(void){
 // ~/reclaimer_cap_<n>_depth.f32 (raw window depth, w*h floats, top row first like the images) and
 // ~/reclaimer_cap_<n>.txt (camera position, view direction, view-projection rows, depth statistics).
 // The depth buffer is the one the frame's first world draw (the camera draw, hb_capture_view) used.
-volatile int g_hb_cap_req; static D3DObj* g_hb_dsv; static unsigned long g_hb_ncap;
+volatile int g_hb_cap_req; static unsigned long g_hb_ncap;
 static void hb_note_dsv(void*ds){ g_hb_dsv=(D3DObj*)ds; }
 // GL row 0 of the game's targets is the D3D top row (d3dgl_flipy) and bmp_write_rgba writes GL order (row 0 = bottom):
 // flip so the files come out upright
 static void hb_cap_flip(void*px,size_t pitch,int h){ if(!d3dgl_flipy()) return; unsigned char*t=malloc(pitch); if(!t) return; unsigned char*b=px;
     for(int y=0;y<h/2;y++){ memcpy(t,b+(size_t)y*pitch,pitch); memcpy(b+(size_t)y*pitch,b+(size_t)(h-1-y)*pitch,pitch); memcpy(b+(size_t)(h-1-y)*pitch,t,pitch); } free(t); }
 static void hb_capture_tick(void){
-    // g_hb_cap_req = frames still to capture (F8 / Capture: 1, Shift+F8 / Burst: 8 consecutive frames, for glitches
-    // that flicker)
-    int left=__atomic_load_n(&g_hb_cap_req,__ATOMIC_ACQUIRE); if(left<=0) return; __atomic_fetch_sub(&g_hb_cap_req,1,__ATOMIC_ACQ_REL);
+    if(!__atomic_exchange_n(&g_hb_cap_req,0,__ATOMIC_ACQ_REL)) return;
     char m[600]; int k;
     if(!G.ReadPixels || !g_d3d_backbuf || !g_d3d_backbuf->glfbo){ (void)!write(2,"  [capture] no frame to capture yet\n",36); return; }
     const char*home=getenv("HOME"); if(!home) home="/tmp";

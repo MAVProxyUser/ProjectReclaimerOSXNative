@@ -114,23 +114,40 @@ screen (`PELOAD_D3DGL_NOPRELINK`; `PELOAD_D3DGL_PROGTIME` logs build costs).
 Correctness switches added 2026-10-16: `PELOAD_D3DGL_NOINTIN` (integer vertex attributes as floats --
 the old cause of one-frame white flashes / exploded skinned geometry), `PELOAD_D3DGL_NOQUERY`
 (occlusion queries), `PELOAD_D3DGL_NOCANON` (identical-bytecode shader sharing).
-Live stats: `PELOAD_STATS_HTTP=<port>` (shim/src/stats.c; play.sh turns it on by default at 8765, `=1` also means 8765,
-`=0` off) -- a loader thread snapshots the object + players tables
-(TLS +0x38 / +0x10; player +0x28 unit, +0x58 UTF-16 name) every 100 ms into JSON; served on 127.0.0.1 (/, /stats.json,
-/events SSE, /heat.json); only the process that loads halo3.dll binds. Page = shim/src/stats_page.html, embedded with
-#embed at build time. Players come from the players table (slot-keyed tracker: deaths, lives, distance, top speed,
-shots/hits); a death = any biped going alive -> dead (corpses persist, 10 Hz catches it). Shots: hb_on_delete (the
-object_delete hook, sim thread) logs every projectile's owner (+0xC0) and the biped whose bounding sphere (+0x1c centre,
-+0x28 radius) contains its end point (= estimated hit) into g_hbshot (8192 ring); stats consumes it (falls back to
-counting projectiles seen in flight when the hook isn't installed). Page controls: POST /control?do=hitboxes|tracers|
-info|items|teams|teleport|capture with header X-Reclaimer-Control (CSRF guard; PELOAD_STATS_READONLY=1 disables)
-flip the same g_hb_toggle bits as F2-F6; snapshot "overlay" reports them. F8 / do=capture (hitbox.c hb_capture_tick,
-render-thread Present): ~/reclaimer_cap_<pid>_<n>.bmp (backbuffer), _depth.bmp (log distance, magenta = 1-px "crack"
-pixels much farther than both neighbours), _depth.f32 (raw, GL rows bottom-up; the DSV of the frame's camera draw),
-.txt (camera pos, forward, yaw/pitch, view-proj rows, depth min/max, crack count).
-Heatmap per map (switched only when there is data -- menus open campaign maps for scenery): footprint cells (0.5 u)
-+ deaths, saved as ~/Library/Application Support/ReclaimerMac/heatmaps/<map>.bin (RHM2). Map collision geometry for
-a real background is in MCC's structure_bsp_tag_resources (resource section), not the sbsp meta -- not decoded yet.
+Live stats (shim/src/stats.c; user docs in README "Live game stats over HTTP"): `PELOAD_STATS_HTTP=<port>` (play.sh:
+8765 by default, `=1` = 8765, `=0` off). A loader thread snapshots halo3 memory every 100 ms into JSON; only the process
+that loads halo3.dll binds. Page = shim/src/stats_page.html, #embed-ed at build time; play.sh sets PELOAD_STATS_PAGE to
+the source file in a checkout, so page edits need only a browser refresh. Sources (all CONFIRMED by static RE, docs in
+shim/docs): players table TLS +0x10 (player +0x28 unit, +0x58 name, +0x1FC active traits), objects TLS +0x38, game
+variant = game_globals (TLS +0x48) + 0x1608 (halo3-variant-traits.md), local player = player mapping TLS +0x110,
+output user -> player handle at +0xB8 (section 6; camera-in-biped / view-ray guess only as fallback), network session
+`*(u64*)(halo3+0x1e250d0)` for the Connected list (works in the lobby; reclaimer-voice-mute.md). Deaths: any biped
+alive -> dead. Shots: the object_delete hook (hb_on_delete, sim thread) logs every projectile's owner (+0xC0) and the
+biped whose bounding sphere holds its end point (estimated hit) into g_hbshot (8192 ring). Voice: set_muted(id,bool)
+(found by signature, run from the halo3 frame hook via st_voice_jobs) = the client's own mute list; talking = an entry
+hook on the client's voice_recv (installed at exe load, st_voice_install) stamping each sender. Controls: POST
+/control?do=... + header X-Reclaimer-Control (CSRF guard; PELOAD_STATS_READONLY=1 disables) flip the same switches as
+the F-keys (g_hb_toggle bits; F9 = visible only). F8 / do=capture (hb_capture_tick, render-thread Present):
+~/reclaimer_cap_<pid>_<n>.bmp (the game backbuffer -- the overlay is drawn later, at the window blit, so it is NOT in
+it), _depth.bmp/.f32 (the camera draw's DSV, rows top-first), .txt (camera, view-proj, depth stats).
+Heatmap per map: footprint cells (0.5 u) + deaths, ~/Library/Application Support/ReclaimerMac/heatmaps/<map>.bin (RHM2),
+drawn over a top-down picture of the map: re-tools/h3bsp.py decodes the collision BSP + instanced geometry from the
+.map's resource section (sbsp +0x38C -> zone structure_bsp_tag_resources -> raw-deflate page; shim/docs/
+h3-map-geometry.md) into maptop/<map>.png + .json (world bounds); shim/tools/maptop.sh makes all 27 (needs python3 +
+numpy + Pillow); served as /maptop/<map>.png|json. (re-tools/h3map.py's string-id decoding is wrong for these builds;
+h3bsp.sid_name is right.)
+Overlay "visible only" (F9 / PELOAD_HB_VISIBLE): hb_vis_tick blits the camera draw's depth (D32F_S8) down to 480x270
+and reads it back through a 3-PBO ring (2 frames late, no stall); hb_vis keeps an object when the scene at its centre /
+top / bottom is not nearer than its front (centre moved toward the camera by radius + 0.3). Label text is
+PELOAD_HB_TEXT_PX window pixels tall (default 7; the page's Text -/+).
+Frame rate (2026-10-17, FKK BTB, 60 players, `PELOAD_D3DGL_PROF`): 3,000-4,700 draws/frame, ~9 us of loader + driver
+per draw. The biggest phase is "texs" (texture/sampler binds: 0.4-1.2 s per 2 s) -- NOT uploads (texture re-uploads
+7-430 ms, buffer textures ~15 ms per 2 s; `[prof] textures` / `[prof] buffer textures` lines) and not compute waits
+(none): it is Apple's GL driver revalidating on each bind, translated under Rosetta. Real fix = PERF-PLAN.md option 1
+(native GL helper process). Done meanwhile: getenv cache (cgetenv: the loader's 553 getenv calls on literal keys hit a
+pointer-keyed table; setenv/unsetenv/putenv bump a generation; PELOAD_NO_GETENV_CACHE off), and a skip for re-uploads
+when only mips below the BC-decoded base level changed (dpart/dmin per resource; PELOAD_D3DGL_NOMIPSKIP; 0 hits in BTB
+so far: halo3 rewrites whole textures). The client's Advanced graphics settings (Shadows, LOD, draw distance) cut draws.
 Mods/Workshop (user guide: shim/docs/mods.md; `shim/tools/servers.sh` = busiest servers + their mods from `discover`,
 whose JSON has per-server mods[{title, maps[{stem,digest}], size, shared}]): the client's own `workshop-download
 --subscribe <PublishedFileId>` helper needs Steam (its command line is in /tmp/reclaimer_play.log); DepotDownloader
@@ -138,8 +155,9 @@ whose JSON has per-server mods[{title, maps[{stem,digest}], size, shared}]): the
 -remember-password; saved tokens expire -> the user signs in again in a terminal, never us); the client reads
 steamapps\workshop\content\976730\<id>\ (ModInfo.json; "Program Files (x86)/Steam/steamapps" in the prefix is a
 symlink to "Program Files/Steam/steamapps") and checks each file against the server's SHA-256 manifest. Ultimate
-Forge 2.0 (2933266434) ships its own halo3/maps/shared.map + campaign.map besides the Forge-world maps. Seams check: `PELOAD_D3DGL_DFCENSUS` (draws per depth
-func), `PELOAD_D3DGL_INVARIANT` (invariant gl_Position, opt-in); the main depth buffer is DXGI 19 (D32F_S8, reverse-Z).
+Forge 2.0 (2933266434) ships its own halo3/maps/shared.map + campaign.map besides the Forge-world maps.
+Rock-wall seams (tabled by the user, display-only): `PELOAD_D3DGL_DFCENSUS` (draws per depth func), `PELOAD_D3DGL_INVARIANT`
+(invariant gl_Position, opt-in); the main depth buffer is DXGI 19 (D32F_S8, reverse-Z) and keeps full float precision.
 Unfocused/hidden clients are held at 60 fps by the engine; PELOAD_MAX_FPS caps lower (default 30 when hidden).
 Betrayal popup (backlog 15): halo3's native GUI screen c_gui_screen_boot_betrayer, posted by halo3+0xff5fc when
 halo3+0xfcc20 is true (player dead: +0x28 unit NONE; betrayer handle at player +0x1F0; variant betrayal booting on).

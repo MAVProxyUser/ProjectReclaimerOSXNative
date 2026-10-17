@@ -13,7 +13,8 @@ rm -rf "dist/$NAME"; mkdir -p "dist/$NAME/shim/build" "dist/$NAME/shim/crt" "dis
 cp shim/build/peload "dist/$NAME/shim/build/"; cp shim/crt/*.dll "dist/$NAME/shim/crt/"
 cp shim/play.sh shim/target.sh shim/dedicated.sh shim/build.sh "dist/$NAME/shim/"
 mkdir -p "dist/$NAME/shim/docs"; cp shim/docs/mods.md shim/docs/game-options.md "dist/$NAME/shim/docs/"
-cp shim/tools/quiet-run.sh shim/tools/servers.sh shim/tools/make-usb.sh shim/tools/usb-install.sh "dist/$NAME/shim/tools/"
+mkdir -p "dist/$NAME/re-tools"; cp re-tools/h3map.py re-tools/h3bsp.py "dist/$NAME/re-tools/"
+cp shim/tools/quiet-run.sh shim/tools/servers.sh shim/tools/maptop.sh shim/tools/make-usb.sh shim/tools/usb-install.sh "dist/$NAME/shim/tools/"
 cp reclaimer-mac.sh README.md "dist/$NAME/"; touch "dist/$NAME/client/.gitkeep"
 chmod +x "dist/$NAME/shim/build/peload" "dist/$NAME"/shim/*.sh "dist/$NAME"/shim/tools/*.sh "dist/$NAME/reclaimer-mac.sh"
 ( cd dist && tar czf "$NAME.tar.gz" "$NAME" && shasum -a 256 "$NAME.tar.gz" > "$NAME.tar.gz.sha256" )
