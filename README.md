@@ -218,6 +218,10 @@ address, e.g. to watch from another device):
   heatmaps/`, so the map fills in over time). Click a player for everything known about them: camo, all weapons,
   grenades, vehicle and seat, deaths, current and longest life, distance moved, top speed, projectiles fired, facing --
   with their deaths ringed on the heatmap
+- **Game rules**: the running game's options (rounds, respawn, map, powerups, score and points) and every trait set
+  (everyone, after spawning, each powerup and the mode's roles: leader, flag carrier, zombies, last human ...) with
+  what each changes; the player table's **Traits** column shows each player's active traits where they differ from
+  the defaults, with powerup and respawn-trait countdowns
 - the page's **In-game overlay** buttons switch the same overlay features as the function keys: Hitboxes (F2),
   Tracers (F3), Player info (F4), Items (F5), Show all / enemies / friends (F6), Teleport (F7, only with
   `PELOAD_ALLOW_TELEPORT`) and Capture frame (F8). They send `POST /control?do=<hitboxes|tracers|info|items|teams|
@@ -225,7 +229,8 @@ address, e.g. to watch from another device):
   `PELOAD_STATS_READONLY=1` turns them off. The current switches are in each snapshot's `overlay`
 - `/heat.json` -- the heatmap data: visited cells (`cell` units wide) and deaths (`x, y, z, team, name, match, seconds`)
 - `/stats.json` -- the latest snapshot: `players` (name, team, you, alive, health, shield, camo, weapon, weapons,
-  grenades, vehicle, pos, speed, facing, deaths, life, longest_life, distance, top_speed, shots), `vehicles` (type,
+  grenades, vehicle, pos, speed, facing, deaths, life, longest_life, distance, top_speed, shots, hits, accuracy,
+  traits, effects), `variant` (the game's options and trait sets), `overlay`, `vehicles` (type,
   health, shield, pos), `projectiles` in flight (type, owner, pos, speed), plus `map`, `in_match` and match `time`
 - `/events` -- the same JSON as a stream (Server-Sent Events), e.g. `curl -N http://127.0.0.1:8765/events`
 

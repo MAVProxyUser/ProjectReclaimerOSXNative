@@ -23,7 +23,8 @@ static void sb_str(StBuf*s,const char*v){ sb_put(s,"\""); for(const unsigned cha
 static void sb_f3(StBuf*s,const float*v){ sb_put(s,"[%.2f,%.2f,%.2f]",v[0],v[1],v[2]); }
 
 // The engine's players table (TLS block +0x10, a data array like the object table): +0x28 unit handle, +0x58 name.
-typedef struct { uint32_t unit; int slot; char name[64]; } StPlayer;
+typedef struct { uint32_t unit; int slot; char name[64]; uint64_t rec; } StPlayer;
+static uint64_t g_st_tls;   // the engine thread's halo3 TLS block (st_players found it)
 static int st_players(StPlayer*out,int max){
     uint8_t*h3=hb_halo3_base(); uint32_t idx=0; if(!h3 || !hb_read((uint64_t)(h3+0xa39f9c),&idx,4) || idx>=128) return 0;
     void**arrs[1025]; int na=0; arrs[na++]=g_tls_array; pthread_mutex_lock(&g_tlsm); for(int q=0;q<g_ntarrs&&na<1025;q++) arrs[na++]=g_tarrs[q]; pthread_mutex_unlock(&g_tlsm);
@@ -32,13 +33,108 @@ static int st_players(StPlayer*out,int max){
         if(!hb_read(blk+0x10,&parr,8) || !parr || !hb_read(parr,hdr,sizeof hdr) || *(uint32_t*)(hdr+0x2c)!=0x64407440) continue;
         int32_t es=*(int32_t*)(hdr+0x24), hi=*(int32_t*)(hdr+0x3c); uint64_t pd=*(uint64_t*)(hdr+0x48); if(es<0x98 || es>0x10000 || hi<=0 || hi>256) continue;
         int n=0; for(int i=0;i<hi && n<max;i++){ uint8_t rec[0x98]; if(!hb_read(pd+(uint64_t)i*es,rec,sizeof rec) || !*(uint16_t*)rec) continue;
-            StPlayer*p=&out[n]; p->unit=*(uint32_t*)(rec+0x28); p->slot=i; int j=0; const uint16_t*w=(const uint16_t*)(rec+0x58);
+            StPlayer*p=&out[n]; p->unit=*(uint32_t*)(rec+0x28); p->slot=i; p->rec=pd+(uint64_t)i*es; int j=0; const uint16_t*w=(const uint16_t*)(rec+0x58);
             for(int c=0;c<32 && w[c] && j<60;c++){ uint16_t u=w[c]; if(u<0x80) p->name[j++]=(char)u;
                 else if(u<0x800){ p->name[j++]=(char)(0xC0|(u>>6)); p->name[j++]=(char)(0x80|(u&63)); }
                 else { p->name[j++]=(char)(0xE0|(u>>12)); p->name[j++]=(char)(0x80|((u>>6)&63)); p->name[j++]=(char)(0x80|(u&63)); } }
             p->name[j]=0; n++; }
-        return n; }
+        g_st_tls=blk; return n; }
     return 0; }
+
+// ---- game variant and player traits (layout: shim/docs/halo3-variant-traits.md) -------------------------------------
+// The running variant is game_globals (TLS block +0x48) + 0x1608 (0x4C4 bytes), only while game_globals+0x10 == 2
+// (multiplayer). A trait set is 0x1C bytes; 0 = "Unchanged" in a variant's sets (weapons: -2). Each player's record
+// holds its resolved active traits at +0x1FC, recomputed every tick (base -> mode role -> powerup -> respawn traits).
+// Names and value labels follow the playlist option keys (shim/docs/game-options.md).
+static const char*const tl_res[]={"Unchanged","10%","50%","90%","100%","110%","150%","200%","300%","500%","1000%","2000%","Invulnerable","Invulnerable (incl. assassinations)"};
+static const char*const tl_rech[]={"Unchanged","-25%","-10%","-5%","Disabled","50%","90%","100%","110%","200%"};
+static const char*const tl_vamp[]={"Unchanged","Off","10%","25%","50%","100%"};
+static const char*const tl_head[]={"Unchanged","Immune","Vulnerable"};
+static const char*const tl_shield[]={"Unchanged","None","Normal","2x","3x","4x"};
+static const char*const tl_gren[]={"Unchanged","Map default","None"};
+static const char*const tl_dmg[]={"Unchanged","0%","25%","50%","75%","90%","100%","110%","125%","150%","200%","300%","Instant kill"};
+static const char*const tl_regen[]={"Unchanged","On","Off","On, with firebombs"};
+static const char*const tl_ammo[]={"Unchanged","Normal","Infinite","Bottomless clip"};
+static const char*const tl_pick[]={"Unchanged","Allowed","Disabled"};
+static const char*const tl_speed[]={"Unchanged","25%","50%","75%","90%","100%","110%","125%","150%","200%","300%"};
+static const char*const tl_grav[]={"Unchanged","50%","75%","100%","150%","200%"};
+static const char*const tl_veh[]={"Unchanged","None","Passenger only","Full use"};
+static const char*const tl_camo[]={"Unchanged","Off","Poor","Good","Invisible"};
+static const char*const tl_wp[]={"Unchanged","Off","Allies","Everyone"};
+static const char*const tl_aura[]={"Unchanged","Off","Team color","Black","White"};
+static const char*const tl_radar[]={"Unchanged","Off","Allies only","Normal","Enhanced"};
+static const char*const tl_range[]={"Unchanged","10m","15m","25m","50m","75m","100m","150m"};
+static const char*const tl_weap[]={"Battle rifle","Assault rifle","Plasma pistol","Spiker","SMG","Carbine","Energy sword","Magnum","Needler",
+    "Plasma rifle","Rocket launcher","Shotgun","Sniper rifle","Brute shot","Unarmed","Beam rifle","Spartan laser","No weapon","Gravity hammer",
+    "Mauler","Flamethrower","Missile pod","Sentinel beam","Fuel rod gun","Silenced SMG","Automag","Brute plasma rifle","Machine gun turret",
+    "Plasma turret","Golf club"};
+#define TL(a) a,(int)(sizeof a/sizeof*a)
+typedef struct { const char*key; int off, sz; const char*const*lab; int nlab; int def; } StTraitF;   // sz: 1 u8, 2 u16, -1 i8 weapon, 0 colour
+static const StTraitF g_trait_f[]={
+    {"resistance",0x00,1,TL(tl_res),4},{"recharge",0x01,1,TL(tl_rech),7},{"vampirism",0x02,1,TL(tl_vamp),1},{"headshots",0x03,1,TL(tl_head),2},
+    {"shields",0x04,1,TL(tl_shield),2},{"grenades",0x08,2,TL(tl_gren),1},{"primary_weapon",0x0A,-1,TL(tl_weap),-1},{"secondary_weapon",0x0B,-1,TL(tl_weap),-1},
+    {"damage",0x0C,1,TL(tl_dmg),6},{"grenade_regeneration",0x0D,1,TL(tl_regen),2},{"ammo",0x0E,1,TL(tl_ammo),1},{"pickup",0x0F,1,TL(tl_pick),1},
+    {"speed",0x10,1,TL(tl_speed),5},{"gravity",0x11,1,TL(tl_grav),3},{"vehicles",0x12,1,TL(tl_veh),3},{"camouflage",0x14,1,TL(tl_camo),1},
+    {"waypoint",0x15,1,TL(tl_wp),2},{"aura",0x16,1,TL(tl_aura),1},{"color",0x17,0,0,0,1},{"radar",0x18,2,TL(tl_radar),3},{"radar_range",0x1A,2,TL(tl_range),3}};
+// active=0: a variant's trait set, listing the fields it changes; active=1: a player's resolved traits, listing the
+// fields that differ from Halo 3's defaults
+static void st_traits(StBuf*s,const uint8_t*t,int active){
+    sb_put(s,"{"); int first=1;
+    for(size_t i=0;i<sizeof g_trait_f/sizeof*g_trait_f;i++){ const StTraitF*f=&g_trait_f[i]; int v; char buf[48]; const char*lab=0;
+        if(f->sz==2) v=*(const uint16_t*)(t+f->off); else if(f->sz==-1) v=*(const int8_t*)(t+f->off); else v=t[f->off];
+        if(f->sz==-1){ if(active?v==f->def:v==-2) continue;
+            if(v==-3) lab="Random"; else if(v==-1) lab="Map default"; else if(v==-2) lab="Unchanged"; else if(v>=0 && v<f->nlab) lab=f->lab[v]; }
+        else { if(active?v==f->def:v==0) continue;
+            if(f->lab && v>=0 && v<f->nlab) lab=f->lab[v]; else if(!f->lab){ if(v==0) lab="Unchanged"; else if(v==1) lab="Off"; else { snprintf(buf,sizeof buf,"Color %d",v-2); lab=buf; } } }
+        if(!lab){ snprintf(buf,sizeof buf,"%d",v); lab=buf; }
+        sb_put(s,"%s\"%s\":",first?"":",",f->key); sb_str(s,lab); first=0; }
+    sb_put(s,"}"); }
+static uint8_t g_st_var[0x4C4]; static int g_st_var_ok;   // this snapshot's variant (for the players' powerup durations)
+static void st_variant(StBuf*s){
+    g_st_var_ok=0; uint64_t gg=0; uint8_t mode=0;
+    if(!g_st_tls || !hb_read(g_st_tls+0x48,&gg,8) || !gg || !hb_read(gg+0x10,&mode,1) || mode!=2 || !hb_read(gg+0x1608,g_st_var,sizeof g_st_var)) return;
+    const uint8_t*v=g_st_var; int32_t eng=*(const int32_t*)v; if(eng<1 || eng>12 || eng==11) return; g_st_var_ok=1;
+    static const char*const en[13]={"","Capture the Flag","Slayer","Oddball","King of the Hill","Forge","VIP","Juggernaut","Territories","Assault","Infection","","Gun Game"};
+    char nm[64]; int j=0; for(int c=0;c<16 && j<60;c++){ uint16_t u=*(const uint16_t*)(v+0x14+c*2); if(!u) break;
+        if(u<0x80) nm[j++]=(char)u; else if(u<0x800){ nm[j++]=(char)(0xC0|(u>>6)); nm[j++]=(char)(0x80|(u&63)); } else { nm[j++]=(char)(0xE0|(u>>12)); nm[j++]=(char)(0x80|((u>>6)&63)); nm[j++]=(char)(0x80|(u&63)); } }
+    nm[j]=0;
+    static const char*const tc[3]={"Disabled","Enabled","Balancing only"}; uint16_t soc=*(const uint16_t*)(v+0x12C), tch=*(const uint16_t*)(v+0x12E); uint32_t mo=*(const uint32_t*)(v+0x130);
+    sb_put(s,",\"variant\":{\"engine\":%d,\"mode\":",eng); sb_str(s,en[eng]); sb_put(s,",\"name\":"); sb_str(s,nm);
+    sb_put(s,",\"rounds\":{\"teams\":%s,\"team_changing\":\"%s\",\"friendly_fire\":%s,\"betrayal_booting\":%s,\"reset_players\":%s,\"reset_map\":%s,\"minutes\":%d,\"limit\":%d,\"early_victory\":%d}",
+        v[0x104]&1?"true":"false",tch<3?tc[tch]:"?",soc&1?"true":"false",soc&2?"true":"false",v[0x104]&2?"true":"false",v[0x104]&4?"true":"false",v[0x105],v[0x106],v[0x107]);
+    sb_put(s,",\"respawn\":{\"lives\":%d,\"team_lives\":%d,\"seconds\":%d,\"suicide\":%d,\"betrayal\":%d,\"growth\":%d,\"traits_duration\":%d,\"synchronize\":%s,\"on_kills\":%s}",
+        v[0x109],v[0x10A],v[0x10B],v[0x10C],v[0x10D],v[0x10E],v[0x10F],v[0x108]&2?"true":"false",v[0x108]&8?"true":"false");
+    sb_put(s,",\"map\":{\"grenades\":\"%s\",\"indestructible_vehicles\":%s}",mo&1?"Map default":"None",mo&2?"true":"false");
+    sb_put(s,",\"powerups\":{\"red_duration\":%d,\"blue_duration\":%d,\"yellow_duration\":%d}",v[0x1A8],v[0x1A9],v[0x1AA]);
+    { int sw=0; switch(eng){ case 2: case 6: case 7: sw=0x1B4; break; case 3: case 4: sw=0x1B8; break; case 1: case 9: sw=0x1BC; break; case 12: sw=0x1BE; break; }
+      if(sw) sb_put(s,",\"score_to_win\":%d",*(const int16_t*)(v+sw)); }
+    if(eng==2){ static const char*const pk[12]={"assist","death","suicide","betrayal","leader_kill","elimination","assassination","headshot","beatdown","sticky","splatter","spree"};
+        sb_put(s,",\"points\":{\"kill\":%d",*(const int16_t*)(v+0x1B6)); for(int k=0;k<12;k++) sb_put(s,",\"%s\":%d",pk[k],(int8_t)v[0x1B8+k]); sb_put(s,"}"); }
+    // trait sets: the base ones, then this mode's role sets
+    typedef struct { const char*n; int off; } TS; static const TS base[5]={{"player",0x134},{"respawn_traits",0x110},{"red_powerup",0x154},{"blue_powerup",0x170},{"yellow_powerup",0x18C}};
+    TS role[8]; int nr=0;
+    switch(eng){ case 1: role[nr++]=(TS){"flag_carrier",0x1C0}; break; case 2: role[nr++]=(TS){"leader",0x1C4}; break; case 3: role[nr++]=(TS){"ball_carrier",0x1C4}; break;
+        case 4: role[nr++]=(TS){"in_hill",0x1C0}; break; case 5: role[nr++]=(TS){"editor",0x1B8}; break;
+        case 6: role[nr++]=(TS){"vip_team",0x1C6}; role[nr++]=(TS){"vip_proximity",0x1E2}; role[nr++]=(TS){"vip",0x1FE}; break;
+        case 7: role[nr++]=(TS){"juggernaut",0x1C4}; break; case 8: role[nr++]=(TS){"defender",0x1BC}; role[nr++]=(TS){"attacker",0x1D8}; break;
+        case 9: role[nr++]=(TS){"bomb_carrier",0x1C8}; role[nr++]=(TS){"arming",0x1E4}; break;
+        case 10: role[nr++]=(TS){"zombie",0x1C0}; role[nr++]=(TS){"alpha_zombie",0x1DC}; role[nr++]=(TS){"safe_haven",0x1F8}; role[nr++]=(TS){"last_human",0x214}; break;
+        case 12: role[nr++]=(TS){"final_tier",0x2D0}; role[nr++]=(TS){"leader",0x2EC}; break; }
+    sb_put(s,",\"traits\":{"); for(int k=0;k<5;k++){ sb_put(s,"%s\"%s\":",k?",":"",base[k].n); st_traits(s,v+base[k].off,0); }
+    for(int k=0;k<nr;k++){ sb_put(s,",\"%s\":",role[k].n); st_traits(s,v+role[k].off,0); }
+    sb_put(s,"}}"); }
+// A player's active traits and what is driving them right now (a powerup, respawn traits)
+static void st_player_traits(StBuf*s,uint64_t rec){
+    uint8_t r[0x228]; if(!rec || !hb_read(rec,r,sizeof r)) return;
+    sb_put(s,",\"traits\":"); st_traits(s,r+0x1FC,1);
+    sb_put(s,",\"effects\":["); int first=1;
+    uint64_t t=0; int32_t now=0; float spt=0;
+    if(g_st_tls && hb_read(g_st_tls+0xc8,&t,8) && t && hb_read(t+0xC,&now,4) && hb_read(t+0x8,&spt,4) && spt>0 && spt<1 && g_st_var_ok){
+        static const char*const pn[3]={"red powerup","blue powerup","yellow powerup"}; int best=-1; int32_t bt=0;
+        for(int k=0;k<3;k++){ int32_t tk=*(const int32_t*)(r+0x218+k*4); if(tk>0 && tk>bt){ bt=tk; best=k; } }
+        if(best>=0){ double left=g_st_var[0x1A8+best]-(now-bt)*(double)spt; if(left>0){ sb_put(s,"{\"what\":\"%s\",\"left\":%.1f}",pn[best],left); first=0; } }
+        int16_t rt=*(const int16_t*)(r+0x1D4); if(rt>0 && !r[0x1D6]){ sb_put(s,"%s{\"what\":\"respawn traits\",\"left\":%.1f}",first?"":",",rt*(double)spt); first=0; } }
+    sb_put(s,"]"); }
 
 static void st_tag(StBuf*s,uint32_t def){ sb_str(s,hb_tag_name(def)); }
 
@@ -158,6 +254,7 @@ static void st_snapshot(StBuf*s){
         if(known) continue; g_proj[j].h=h; g_proj[j].t=now;
         if(p && hb_read(p+0xC0,&own,4)) for(int k=0;k<np;k++) if(pl[k].unit==own){ StTrack*t=st_track(&pl[k]); if(t) t->shots++; break; } }
     // players: the engine's player table (a player between lives has no live biped)
+    st_variant(s);   // the game's options and trait sets (st_players found the TLS block)
     sb_put(s,",\"players\":["); int first=1;
     for(int k=0;k<np;k++){ StTrack*t=st_track(&pl[k]); uint32_t h=pl[k].unit; uint64_t p=ST_DATUM(h); static uint8_t d[0x380];
         int have = p && ST_TYPE(h)==0 && hb_read(p,d,sizeof d); int dead = !have || ((*(const uint32_t*)(d+0x110)>>2)&1);
@@ -184,6 +281,7 @@ static void st_snapshot(StBuf*s){
         sb_put(s,",\"pos\":"); sb_f3(s,o); sb_put(s,",\"speed\":%.2f",spd);
         if(t) sb_put(s,",\"deaths\":%d,\"hits\":%d,\"accuracy\":%.3f,\"shots\":%d,\"life\":%.1f,\"longest_life\":%.1f,\"distance\":%.1f,\"top_speed\":%.2f",t->deaths,t->hits,t->shots?(double)t->hits/t->shots:0.0,t->shots,t->alive?now-t->life_start:0.0,
                      t->longest>(t->alive?now-t->life_start:0)?t->longest:(t->alive?now-t->life_start:0),t->dist,t->top_speed);
+        if(g_st_var_ok) st_player_traits(s,pl[k].rec);
         sb_put(s,"}"); }
     sb_put(s,"]");
     // vehicles and projectiles in flight

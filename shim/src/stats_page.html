@@ -34,6 +34,13 @@ canvas{width:100%;height:auto;display:block;background:#0b0b0b;border-radius:4px
 #ov button:hover{border-color:#555}#ov button.on{background:#1d3a55;border-color:var(--accent);color:#fff}
 #ov button:disabled{opacity:.4;cursor:default}#ov kbd{color:var(--dim);font-size:11px;margin-left:4px}
 #ovmsg{color:var(--dim);font-size:12px}
+#rules{margin-top:16px}
+#rules .cols{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:10px 16px}
+#rules h3{font-size:12px;margin:0 0 4px;color:var(--accent);font-weight:600}
+#rules dl{display:grid;grid-template-columns:auto 1fr;gap:2px 10px;margin:0}
+#rules dt{color:var(--dim)}#rules dd{margin:0}
+.tr{display:inline-block;background:#26303a;border-radius:3px;padding:0 5px;margin:1px 3px 1px 0;font-size:12px}
+.tr.fx{background:#4a2a2a}
 </style></head>
 <body>
 <h1>Reclaimer live stats</h1><div id="hd">connecting...</div>
@@ -48,7 +55,7 @@ canvas{width:100%;height:auto;display:block;background:#0b0b0b;border-radius:4px
  <span id="ovmsg"></span></div>
 <div class="grid">
  <div class="panel"><div class="wrap"><table><thead><tr>
-  <th>Player</th><th>Shield</th><th>Health</th><th>Weapon</th><th>Deaths</th><th>Shots</th><th>Accuracy</th><th>Grenades</th><th>Vehicle</th><th>Speed</th></tr></thead>
+  <th>Player</th><th>Shield</th><th>Health</th><th>Weapon</th><th>Deaths</th><th>Shots</th><th>Accuracy</th><th>Grenades</th><th>Vehicle</th><th>Speed</th><th>Traits</th></tr></thead>
   <tbody id="tb"></tbody></table></div>
   <div class="note">Click a player for details. Their deaths are ringed on the heatmap.</div></div>
  <div class="panel"><h2 id="mt">Death heatmap</h2><canvas id="cv" width="560" height="560"></canvas>
@@ -59,6 +66,7 @@ canvas{width:100%;height:auto;display:block;background:#0b0b0b;border-radius:4px
   </div>
   <div class="legend"><span>fewer</span><span class="ramp"></span><span>more deaths</span><span id="dc"></span></div></div>
 </div>
+<div id="rules" class="panel"><h2 id="rt">Game rules</h2><div id="rb" class="note">not in a match</div></div>
 <div id="det" class="panel"></div>
 <script>
 const C={red:'#e04040',blue:'#4070f0',green:'#40c060',orange:'#f09030',purple:'#a050e0',gold:'#e0c040',brown:'#9a6a40',pink:'#f080c0',none:'#888'};
@@ -74,8 +82,43 @@ function renderTable(){
    <td><span class="sw" style="background:${C[p.team_name]||'#888'}"></span>${E(p.name)}${p.you?' (you)':''}</td>
    <td>${B(p.shield,'#58b8ff')}</td><td>${B(p.health,'#7ddf6a')}</td><td>${E(p.weapon||(p.alive?'':'respawning'))}</td>
    <td>${p.deaths??''}</td><td>${p.shots??''}</td><td>${p.shots?Math.round(p.accuracy*100)+'%':''}</td><td>${p.grenades.frag}f ${p.grenades.plasma}p ${p.grenades.spike}s ${p.grenades.firebomb}b</td>
-   <td>${E(p.vehicle||'')}</td><td>${p.speed.toFixed(1)}</td></tr>`).join('');
+   <td>${E(p.vehicle||'')}</td><td>${p.speed.toFixed(1)}</td><td>${traitBadges(p,3)}</td></tr>`).join('');
 }
+// ---- traits: labels for the trait keys (playlist option names) ----
+const TK={resistance:'Damage resistance',recharge:'Shield recharge',vampirism:'Vampirism',headshots:'Headshot immunity',shields:'Shields',
+ grenades:'Grenades',primary_weapon:'Primary weapon',secondary_weapon:'Secondary weapon',damage:'Damage',grenade_regeneration:'Grenade regeneration',
+ ammo:'Ammo',pickup:'Weapon pickup',speed:'Speed',gravity:'Gravity',vehicles:'Vehicle use',camouflage:'Active camo',waypoint:'Waypoint',aura:'Aura',
+ color:'Forced color',radar:'Motion tracker',radar_range:'Tracker range'};
+const TS={player:'Everyone',respawn_traits:'After spawning',red_powerup:'Red powerup',blue_powerup:'Blue powerup',yellow_powerup:'Yellow powerup',
+ leader:'Leader',flag_carrier:'Flag carrier',ball_carrier:'Ball carrier',in_hill:'In the hill',editor:'Forge editor',vip_team:'VIP team',
+ vip_proximity:'Near the VIP',vip:'VIP',juggernaut:'Juggernaut',defender:'Defending a territory',attacker:'Attacking a territory',
+ bomb_carrier:'Bomb carrier',arming:'Arming the bomb',zombie:'Zombies',alpha_zombie:'Alpha zombies',safe_haven:'In a safe haven',
+ last_human:'Last human',final_tier:'Final weapon tier'};
+function traitBadges(p,max){ const t=p.traits||{}, ks=Object.keys(t), fx=(p.effects||[]);
+  let h=fx.map(f=>`<span class="tr fx">${E(f.what)} ${Math.ceil(f.left)}s</span>`).join('');
+  h+=ks.slice(0,max).map(k=>`<span class="tr">${E((TK[k]||k).toLowerCase())} ${E(t[k])}</span>`).join('');
+  if(ks.length>max) h+=`<span class="tr">+${ks.length-max}</span>`; return h; }
+let rulesKey='';
+function renderRules(){
+  const v=snap&&snap.variant, el=document.getElementById('rb');
+  const key=v?JSON.stringify(v):''; if(key===rulesKey) return; rulesKey=key;
+  if(!v){ document.getElementById('rt').textContent='Game rules'; el.className='note'; el.textContent='not in a multiplayer match'; return; }
+  document.getElementById('rt').textContent=`Game rules — ${v.name||'?'} (${v.mode})`;
+  const yn=b=>b?'on':'off', sec=n=>n+' s', r=v.rounds, rs=v.respawn;
+  const sect=(title,rows)=>`<div><h3>${E(title)}</h3><dl>${rows.map(([a,b])=>`<dt>${E(a)}</dt><dd>${b}</dd>`).join('')}</dl></div>`;
+  const parts=[];
+  parts.push(sect('Rounds',[['Teams',yn(r.teams)],['Team changing',E(r.team_changing)],['Friendly fire',yn(r.friendly_fire)],['Betrayal booting',yn(r.betrayal_booting)],
+    ['Time limit',r.minutes?r.minutes+' min':'none'],['Rounds',r.limit],['Early victory',r.early_victory||'off'],['Reset players / map',yn(r.reset_players)+' / '+yn(r.reset_map)]]
+    .concat(v.score_to_win!=null?[['Score to win',v.score_to_win<0?'unlimited':v.score_to_win]]:[])));
+  parts.push(sect('Respawn',[['Lives',rs.lives||'unlimited'],['Team lives',rs.team_lives||'unlimited'],['Respawn time',sec(rs.seconds)],['Suicide penalty',sec(rs.suicide)],
+    ['Betrayal penalty',sec(rs.betrayal)],['Growth',sec(rs.growth)],['Respawn traits',sec(rs.traits_duration)],['Synchronize with team',yn(rs.synchronize)],['Respawn on kills',yn(rs.on_kills)]]));
+  parts.push(sect('Map and powerups',[['Grenades on map',E(v.map.grenades)],['Indestructible vehicles',yn(v.map.indestructible_vehicles)],
+    ['Red / blue / yellow',`${v.powerups.red_duration} / ${v.powerups.blue_duration} / ${v.powerups.yellow_duration} s`]]));
+  if(v.points) parts.push(sect('Points',Object.entries(v.points).map(([k,n])=>[k.replace('_',' '),n])));
+  for(const [set,t] of Object.entries(v.traits)){ const rows=Object.entries(t).map(([k,x])=>[TK[k]||k,E(x)]);
+    let title=TS[set]||set; if(set==='respawn_traits') title+=` (${rs.traits_duration} s)`; if(set.endsWith('_powerup')) title+=` (${v.powerups[set.replace('_powerup','_duration')]} s)`;
+    parts.push(sect(title+' traits',rows.length?rows:[['','no changes']])); }
+  el.className='cols'; el.innerHTML=parts.join(''); }
 // pointerdown, not click: the rows are rebuilt 10 times a second, so a click's down and up land on different rows
 document.getElementById('tb').addEventListener('pointerdown',e=>{const tr=e.target.closest('tr');if(!tr)return;const s=+tr.dataset.s;sel=(sel===s)?null:s;renderTable();renderDet();drawMap()});
 function renderDet(){
@@ -89,6 +132,8 @@ function renderDet(){
    ['Vehicle',p.vehicle?E(p.vehicle)+(p.seat!=null?` (seat ${p.seat})`:''):'on foot'],
    ['Deaths',`${p.deaths??0} this match`+(scope()==='all'?` · ${myDeaths} on the map`:'')],['This life',fmtT(p.life)],['Longest life',fmtT(p.longest_life)],
    ['Distance',`${(p.distance||0).toFixed(0)} units`],['Speed',`${p.speed.toFixed(2)} (top ${(p.top_speed||0).toFixed(2)})`],
+   ['Active traits',Object.keys(p.traits||{}).length?Object.entries(p.traits).map(([k,x])=>`${E(TK[k]||k)}: ${E(x)}`).join('<br>'):(snap.variant?'game defaults':'')],
+   ['Effects',(p.effects||[]).map(f=>`${E(f.what)}, ${Math.ceil(f.left)} s left`).join('<br>')||'none'],
    ['Shots fired',p.shots??0],['Hits',`${p.hits??0}`+(p.shots?` (${Math.round(p.accuracy*100)}% accuracy)`:'')],['Facing',p.facing!=null?p.facing+'°':''],['Position',p.pos.map(v=>v.toFixed(1)).join(', ')],['Object',p.handle]];
   el.innerHTML=`<button class="x" onclick="closeDet()" aria-label="Close">×</button><b>${E(p.name)}${p.you?' (you)':''}</b><dl>${rows.map(r=>`<dt>${r[0]}</dt><dd>${r[1]}</dd>`).join('')}</dl>
    <div class="note">Shots counts every projectile (each shotgun pellet is one). A hit is a shot that ended inside another player's body bounds -- an estimate; turret shots count for the vehicle, not the gunner.</div>`;
@@ -155,7 +200,7 @@ document.getElementById('ov').addEventListener('click',async e=>{ const b=e.targ
 const es=new EventSource('/events');
 es.onmessage=m=>{snap=JSON.parse(m.data);
   document.getElementById('hd').textContent=`${snap.map||'-'}  |  ${snap.in_match?'match time '+fmtT(snap.time):'not in a match'}  |  ${snap.players.length} players, ${snap.vehicles.length} vehicles, ${snap.projectiles.length} projectiles in flight`;
-  renderTable(); renderDet(); renderOverlay(); drawMap()};
+  renderTable(); renderDet(); renderOverlay(); renderRules(); drawMap()};
 es.onerror=()=>{document.getElementById('hd').textContent='disconnected (is the game running with PELOAD_STATS_HTTP?)'};
 pollHeat();
 </script></body></html>

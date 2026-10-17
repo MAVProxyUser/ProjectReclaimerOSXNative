@@ -7,7 +7,6 @@ order they will be worked; frame rate is deliberately last (user, 2026-10-16).
 
 | # | Item | Status / notes |
 |---|---|---|
-| 16 | **Stats page: game options and player traits** (user, 2026-10-17) | Show the variant's settings and the trait sets (player, respawn, red/blue/yellow powerup, leader, flag/ball carrier, ...) -- and each player's active traits -- on the stats page. Needs the variant's location and c_player_traits layout in halo3 memory (static RE under way; the server status reply has no option details) |
 | 13 | **Stats page: mute a player** (user, 2026-10-17) | The client has per-player "MUTE VOICE" in its scoreboard/player details; wiring it to the web page needs its mute toggle found and called on the right thread. |
 | 14 | **Join Workshop-only servers (e.g. CHAOS 128P)** (user, 2026-10-17) | Download path works (2026-10-17): DepotDownloader (brew cask) signed in by the user, `-pubfile 2933266434 -filelist` fetched the desert_sandbox subset (1.73 GB: map + the mod's own shared.map/campaign.map) into steamapps/workshop/content/976730/2933266434. The join itself is unverified: CHAOS (65.59.89.203:11774) did not answer that night. Guide: shim/docs/mods.md; busiest servers + their mods: shim/tools/servers.sh |
 | 15 | **Betrayal popup: no text, can't answer** (user, 2026-10-17) | Halo3's native GUI screen c_gui_screen_boot_betrayer: halo3+0xff5fc posts c_load_boot_betrayer_screen_message when halo3+0xfcc20 holds (player dead: +0x28 unit NONE; betrayer handle at player +0x1F0; variant betrayal booting on). Test hook PELOAD_TEST_BOOT_PROMPT=<local player name> names a betrayer while the local player is dead; local test server C:\ReclaimerTestServer\betrayal.toml (Team Slayer, friendly fire + betrayal booting). Still needs a mid-round death to capture the screen (RCON team moves don't kill; self-grenades didn't). Its strings are in the map ("BOOT BETRAYER?", "<betrayer-name/> betrayed you. Hold <button> to eject this betrayer..."); other native popups render text, so the cause is this screen's font/markup/input path. |
@@ -22,6 +21,9 @@ Closed by the user 2026-10-16: teleporter audio desync (not seen since the XAudi
 
 ## Done (2026-10-16)
 
+- Stats page: game rules and traits (2026-10-17) -- the running variant (game_globals+0x1608: rounds, respawn, map,
+  powerups, score/points, every trait set incl. the mode's role sets) and each player's active traits (player +0x1FC)
+  with powerup / respawn-trait countdowns; layout found statically, shim/docs/halo3-variant-traits.md
 - Stats page (2026-10-17): on by default in play.sh (http://127.0.0.1:8765/); In-game overlay buttons for F2-F8
   (POST /control); shots fired per player from the object_delete hook (every projectile, not just the slow ones) with
   estimated hits and accuracy; F8 frame + depth + camera capture for reporting glitches at a spot
