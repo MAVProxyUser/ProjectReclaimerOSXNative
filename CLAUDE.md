@@ -77,7 +77,9 @@ that hosts a hidden Online game via `PELOAD_AUTOCLICK` ("x,y;w:x,y,n;t:text;k:he
 after the menu is up). Game port 11774; join with RECLAIMER_JOIN=127.0.0.1:11774. A LOCAL-mode host is NOT
 joinable by address (only its 127.0.0.3 transport; "Public join timed out"), and `local-join` needs a
 local-server ticket ("Invalid client ticket"). Its pgid lives in ~/Library/Application Support/ReclaimerMac/
-target.pgid and play.sh's leftover-kill skips it.
+target.pgid and play.sh's leftover-kill skips it. It runs windowless: `PELOAD_HIDE_WINDOW=1` (Accessory app, the
+NSWindow is never ordered in, the present thread idles; PELOAD_AUTOCLICK still works because it posts to the
+guest wndproc) + `PELOAD_MAX_FPS` (Present sleeps; default 30 when hidden). TARGET_SHOW=1 = the old minimized window.
 Headless `dedicated` server (dedicated init/check/run, C:\ReclaimerTestServer test folder with game/halo3 ->
 MCC symlink): config/check/online setup work, but its local-server worker idles at "Private native host
 descriptor verified; waiting for the native game client" (halo3 main loop never runs) -> server stays
@@ -125,7 +127,8 @@ Test helpers: `PELOAD_INPUT_FACE=1` steers scripted pad segments with a zero rig
 (`PELOAD_INPUT_FACE_POINT=x,y,z` at a fixed point).
 NEVER find engine structures by sweeping process memory -- it kernel-panicked the Mac (memory [[no-memory-sweeps]]).
 Test runs: `bash shim/tools/quiet-run.sh "<env>" <secs>` (one instance, visible but input-less; QR_MINIMIZE=1
-minimizes, which can stall the loading screen). Process matches must be anchored (`pgrep -f '^[^ ]*build/peload'`):
+minimizes, QR_HIDE=1 = no window for log-only runs). The old "minimized client stalls loading" was the thread-id
+mutex bug (55811fa), not minimizing. Process matches must be anchored (`pgrep -f '^[^ ]*build/peload'`):
 an unanchored pattern also matches shells whose command text mentions build/peload.
 
 Thread ids (2026-10-16): GetCurrentThreadId MUST be unique per thread (mach thread port; CreateThread's id and

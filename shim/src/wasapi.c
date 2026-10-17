@@ -7,7 +7,7 @@
 // unavailable: No music playback device", "Voice audio unavailable"). PELOAD_NO_WASAPI=1 brings that stub back.
 // Each IAudioClient gets its own AudioQueue in exactly the format the client initialised (no conversion); its callback
 // drains the stream's ring buffer every 10 ms and signals the client's event so it refills. Capture (microphone) is
-// not provided: eCapture has no endpoints.
+// not provided: eCapture has no endpoints. PELOAD_AUDIO=0 (test players) mutes these queues too.
 
 typedef struct WaStream WaStream;
 typedef struct { void**vtbl; WaStream*s; } WaItf;           // one COM interface of a stream (container: WaStream)
@@ -59,6 +59,7 @@ static int MSABI wac_Initialize(WaItf*self,int mode,uint32_t flags,int64_t dur,i
     f.mFramesPerPacket=1; f.mChannelsPerFrame=ch; f.mBitsPerChannel=bits; f.mBytesPerFrame=blk; f.mBytesPerPacket=blk;
     OSStatus st=AudioQueueNewOutput(&f,wa_aq_cb,s,0,0,0,&s->q);
     if(st||!s->q){ char t[96]; int k=snprintf(t,sizeof t,"  [wasapi] AudioQueueNewOutput failed %d\n",(int)st); (void)!write(2,t,k); return WA_E_UNSUPPORTED; }
+    if(!xa_real()) AudioQueueSetParameter(s->q,kAudioQueueParam_Volume,0.0f);   // PELOAD_AUDIO=0: keep the clock running, play nothing
     uint32_t per=rate/100; for(int i=0;i<3;i++){ AudioQueueBufferRef b=0; if(!AudioQueueAllocateBuffer(s->q,per*blk,&b)){ memset(b->mAudioData,0,per*blk); b->mAudioDataByteSize=per*blk; AudioQueueEnqueueBuffer(s->q,b,0,0); } }
     s->inited=1;
     { char t[200]; int k=snprintf(t,sizeof t,"  [wasapi] stream: %u Hz, %u ch, %u-bit %s, buffer %u frames, mode %d flags 0x%x\n",rate,ch,bits,isfloat?"float":"int",s->bufframes,mode,flags); (void)!write(2,t,k); }

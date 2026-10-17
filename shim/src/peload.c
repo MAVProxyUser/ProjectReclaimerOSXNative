@@ -1714,6 +1714,12 @@ static void draw_log(const char*tag,uint32_t count){ draw_census(); if(!getenv("
 unsigned long g_ct_frame;
 static void flog_present(void);
 static void fps_title_tick(void); // fwd: engine fps + draws/frame in the window title
+// PELOAD_MAX_FPS=<n>: cap the engine's frame rate (sleep in Present). Default 30 for a hidden window (PELOAD_HIDE_WINDOW,
+// test players: their frames are never shown), uncapped otherwise; PELOAD_MAX_FPS=0 = uncapped. The simulation keeps
+// its 60 ticks/s (the engine runs as many ticks per frame as elapsed time asks for).
+static int win_hidden(void);
+static void present_cap(void){ static double per=-1, next; if(per<0){ const char*e=getenv("PELOAD_MAX_FPS"); double f=e?atof(e):(win_hidden()?30:0); per=f>0?1.0/f:0; }
+    if(!per) return; double now=mono_s(); if(next>now){ usleep((useconds_t)((next-now)*1e6)); next+=per; } else next=now+per; }
 static int MSABI swap_Present(void*t,uint32_t sync,uint32_t fl){ (void)sync;(void)fl; d3dtrace(4,"Present"); flog("t%x PRESENT swapchain=%p",pthread_mach_thread_np(pthread_self()),t); g_ct_frame++; g_hb_taken=0; hb_teleport_tick(); flog_present(); fps_title_tick();
     // PELOAD_TRACE_PRESENT_RATE: periodic count+timestamp so we can see if/when the engine stops
     // calling Present (render-thread stall) vs keeps calling it (present-bridge stall).
@@ -1725,6 +1731,7 @@ static int MSABI swap_Present(void*t,uint32_t sync,uint32_t fl){ (void)sync;(voi
             if(v>=0x180000000ULL&&v<0x187000000ULL){ char b[48]; int n=snprintf(b,sizeof b,"   halo3+0x%llx\n",(unsigned long long)(v-0x180000000ULL)); (void)!write(2,b,n); }
             else if(v>=0x140000000ULL&&v<0x14c000000ULL){ char b[48]; int n=snprintf(b,sizeof b,"   exe+0x%llx\n",(unsigned long long)(v-0x140000000ULL)); (void)!write(2,b,n); } } } }
     if(d3dgl_enabled()) d3dgl_present();
+    present_cap();
     return HR_OK; }
 // The back buffer must be STABLE across GetBuffer calls (the engine caches/compares it and
 // renders into it each frame); a fresh texture per call breaks present bookkeeping.
@@ -2916,7 +2923,9 @@ static int    MSABI i_DestroyWindow(void*h){ (void)h; return 1; }
 static int64_t MSABI i_DefWindowProcW(void*h,uint32_t m,uint64_t wp,int64_t lp){ (void)h;(void)wp;(void)lp; if(m==0x0081/*WM_NCCREATE*/) return 1; return 0; }
 static int    MSABI i_ShowWindow(void*h,int c){ int act=(c==1||c==2||c==3||c==5||c==9||c==10)||(getenv("PELOAD_FG_LASTSHOWN")&&c);
     if(act && fg_can_activate(h)) g_shown_hwnd=h;
-    { static void*lh; static int lc=-1; if(h!=lh||c!=lc){ lh=h; lc=c; char m[80]; int k=snprintf(m,sizeof m,"  [ShowWindow] hwnd=%p cmd=%d\n",h,c); (void)!write(2,m,k); } } return 1; }
+    // log state changes per window (the menu runtime re-hides two overlay windows every frame)
+    { static void*lh[16]; static int lc[16], n; int i; for(i=0;i<n && lh[i]!=h;i++){} if(i==n && n<16){ lh[n]=h; lc[n++]=-1; }
+      if(i<16 && lc[i]!=c){ lc[i]=c; char m[80]; int k=snprintf(m,sizeof m,"  [ShowWindow] hwnd=%p cmd=%d\n",h,c); (void)!write(2,m,k); } } return 1; }
 static int    MSABI i_UpdateWindow(void*h){ (void)h; return 1; }
 // The engine's present loop calls MsgWaitForMultipleObjectsEx and only keeps
 // looping (rendering + presenting each frame) when it returns WAIT_TIMEOUT
@@ -3584,11 +3593,15 @@ static void win_initial_size(double*w,double*h){
     double mw=vf.w*0.9, mh=vf.h*0.9; if(mw<=0||mh<=0) return;
     double fw=mw, fh=mw*9.0/16.0; if(fh>mh){ fh=mh; fw=mh*16.0/9.0; }
     if(fw>*w){ *w=(double)(int)fw; *h=(double)(int)fh; } }
+// PELOAD_HIDE_WINDOW=1: no window and no Dock icon at all (a background test player, shim/target.sh). The engine
+// renders offscreen as usual and the present thread idles (an unshown window is never visible); scripted input
+// (PELOAD_AUTOCLICK) goes to the guest's window procedure, not the NSWindow, so it still works.
+static int win_hidden(void){ static int h=-1; if(h<0){ const char*e=getenv("PELOAD_HIDE_WINDOW"); h=(e&&atoi(e))?1:0; } return h; }
 static CGLContextObj cocoa_make_gl_window(int w,int h){
     if(g_nsctx){ return (CGLContextObj)((void*(*)(id,SEL))objc_msgSend)(g_nsctx,osel("CGLContextObj")); }
     objc_autoreleasePoolPush(); // AppKit object creation needs a pool (we never run the runloop); leak it so objects live
     g_nsapp = om0(ocls("NSApplication"),"sharedApplication");
-    ((void(*)(id,SEL,long))objc_msgSend)(g_nsapp,osel("setActivationPolicy:"),0); // Regular
+    ((void(*)(id,SEL,long))objc_msgSend)(g_nsapp,osel("setActivationPolicy:"),win_hidden()?1:0); // Regular (Accessory = no Dock icon)
     om0(g_nsapp,"finishLaunching");
     uint32_t attrs[]={5/*DoubleBuffer*/,99/*Profile*/,0x4100/*4.1 Core*/,8/*ColorSize*/,24,11/*AlphaSize*/,8,12/*DepthSize*/,24,13/*Stencil*/,8,73/*Accelerated*/,72/*NoRecovery*/,0};
     id pf = ((id(*)(id,SEL,const uint32_t*))objc_msgSend)(om0(ocls("NSOpenGLPixelFormat"),"alloc"),osel("initWithAttributes:"),attrs); g_nspf=pf;
@@ -3604,7 +3617,8 @@ static CGLContextObj cocoa_make_gl_window(int w,int h){
     // mouse-moved events (with deltas) are only delivered to windows that ask for them (keyboard/mouse input)
     ((void(*)(id,SEL,signed char))objc_msgSend)(win,osel("setAcceptsMouseMovedEvents:"),1);
     ((void(*)(id,SEL,unsigned long))objc_msgSend)(win,osel("setCollectionBehavior:"),1ul<<7/*FullScreenPrimary: green button = full screen*/);
-    if(getenv("PELOAD_NO_FOCUS")){
+    if(win_hidden()){}   // never shown
+    else if(getenv("PELOAD_NO_FOCUS")){
         // show the window WITHOUT making it key or activating our app, so it never
         // steals the user's keyboard/focus (used for background testing).
         ((void(*)(id,SEL,id))objc_msgSend)(win,osel("orderFrontRegardless"),(id)0);
@@ -3729,7 +3743,7 @@ static void fps_title_main(void*ctx){ (void)ctx; extern id g_nswin_ext(void); id
     // PELOAD_TITLE_PREFIX labels this window (e.g. "TARGET (no input)" for shim/target.sh); PELOAD_MINIMIZE puts
     // it in the Dock once it exists (keep PELOAD_PRESENT_HIDDEN=1 so it keeps presenting while minimized).
     { const char*pre=getenv("PELOAD_TITLE_PREFIX"); if(pre&&*pre){ char t2[300]; snprintf(t2,sizeof t2,"%s  |  %s",pre,t); snprintf(t,sizeof t,"%s",t2); } }
-    { static int mini; if(!mini && getenv("PELOAD_MINIMIZE") && atoi(getenv("PELOAD_MINIMIZE"))){ mini=1; ((void(*)(id,SEL,id))objc_msgSend)(w,sel_registerName("miniaturize:"),(id)0); } }
+    { static int mini; if(!mini && !win_hidden() && getenv("PELOAD_MINIMIZE") && atoi(getenv("PELOAD_MINIMIZE"))){ mini=1; ((void(*)(id,SEL,id))objc_msgSend)(w,sel_registerName("miniaturize:"),(id)0); } }
     id str=((id(*)(id,SEL,const char*))objc_msgSend)((id)objc_getClass("NSString"),sel_registerName("stringWithUTF8String:"),t);
     ((void(*)(id,SEL,id))objc_msgSend)(w,sel_registerName("setTitle:"),str); }
 static void title_timer_start(void){ static int started; if(started||getenv("PELOAD_NO_FPS_TITLE")) return; started=1; launch_time_init();
@@ -3820,7 +3834,7 @@ static int d3dgl_loadgl(void){
 static int d3dgl_make_window(void){
     objc_autoreleasePoolPush();
     id app = om0(ocls("NSApplication"),"sharedApplication");
-    ((void(*)(id,SEL,long))objc_msgSend)(app,osel("setActivationPolicy:"),0);
+    ((void(*)(id,SEL,long))objc_msgSend)(app,osel("setActivationPolicy:"),win_hidden()?1:0);
     om0(app,"finishLaunching");
     uint32_t attrs[]={5,99,0x4100,8,24,11,8,12,24,13,8,73,72,0};
     id pf = ((id(*)(id,SEL,const uint32_t*))objc_msgSend)(om0(ocls("NSOpenGLPixelFormat"),"alloc"),osel("initWithAttributes:"),attrs);
@@ -3836,7 +3850,8 @@ static int d3dgl_make_window(void){
     ((void(*)(id,SEL,id))objc_msgSend)(ctx,osel("setView:"),view);
     ((void(*)(id,SEL,id))objc_msgSend)(win,osel("center"),(id)0);
     ((void(*)(id,SEL,signed char))objc_msgSend)(win,osel("setAcceptsMouseMovedEvents:"),1);
-    if(getenv("PELOAD_NO_FOCUS")) ((void(*)(id,SEL,id))objc_msgSend)(win,osel("orderFrontRegardless"),(id)0);
+    if(win_hidden()){}
+    else if(getenv("PELOAD_NO_FOCUS")) ((void(*)(id,SEL,id))objc_msgSend)(win,osel("orderFrontRegardless"),(id)0);
     else { ((void(*)(id,SEL,id))objc_msgSend)(win,osel("makeKeyAndOrderFront:"),(id)0);
            ((void(*)(id,SEL,signed char))objc_msgSend)(app,osel("activateIgnoringOtherApps:"),1); }
     om0(ctx,"makeCurrentContext"); om0(ctx,"update");
@@ -6592,7 +6607,7 @@ static void* present_thread_fn(void*a){ (void)a; pthread_setname_np("shim-presen
         int use_d3dgl = d3dgl_enabled() && g_d3dgl_ready && g_d3dgl_offscreen && g_d3dgl_present_tex;
         if(getenv("PELOAD_TRACE_PRESENT")){ static int lp; if((lp++ %60)==0){ char m[96]; int k=snprintf(m,sizeof m,"  [present] branch=%s d3dgl(en=%d ready=%d off=%d tex=%u)\n",use_d3dgl?"d3dgl_blit":"gdi_main",d3dgl_enabled(),g_d3dgl_ready,g_d3dgl_offscreen,g_d3dgl_present_tex); (void)!write(2,m,k);} }
         static unsigned long pq_seen; int pq_shown=0;
-        { extern volatile int g_win_visible_x; if(use_d3dgl && !g_win_visible_x && !getenv("PELOAD_PRESENT_HIDDEN")){ usleep(20000); continue; } }
+        { extern volatile int g_win_visible_x; if(use_d3dgl && (win_hidden() || (!g_win_visible_x && !getenv("PELOAD_PRESENT_HIDDEN")))){ usleep(20000); continue; } }
         if(use_d3dgl && pq_on()){
             if(pq_present_wait(&pq_seen,50)){ pq_shown=1; if(cglflush&&g_present_glctx){ CGLLockContext((CGLContextObj)g_present_glctx); cglflush(g_present_glctx); CGLUnlockContext((CGLContextObj)g_present_glctx); } }
             else if(!g_pq_seq){ d3dgl_blit_present(); if(cglflush&&g_present_glctx) cglflush(g_present_glctx); }   // nothing queued yet

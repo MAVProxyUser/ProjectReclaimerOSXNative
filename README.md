@@ -142,8 +142,8 @@ launches pre-build them during the loading screen.
 
 `shim/target.sh` starts a second copy of the client as a stationary target: it hosts a hidden Online game
 on Valhalla by itself (scripted clicks in its own window) and stands in the match. It has its own profile
-("Target"), no controller, keyboard, mouse or audio, and never takes focus, so it doesn't touch your
-input. Then join it:
+("Target"), no controller, keyboard, mouse or audio, no window and no Dock icon (it runs in the background,
+capped at 30 fps since nobody sees its frames), so it doesn't touch your input. Then join it:
 
 ```bash
 bash shim/target.sh
@@ -151,7 +151,11 @@ RECLAIMER_JOIN=127.0.0.1:11774 bash shim/play.sh
 ```
 
 The target is in its match about 50 s after starting; `TARGET_MAP=<name>` picks another map, and
-`bash shim/target.sh stop` stops it (`play.sh` leaves a running target alone).
+`bash shim/target.sh stop` stops it (`play.sh` leaves a running target alone). `TARGET_SHOW=1` gives it a
+window (minimized in the Dock; add `TARGET_MINIMIZE=0` to keep it on screen).
+
+Any client can run that way: `PELOAD_HIDE_WINDOW=1` (no window, no Dock icon) and `PELOAD_MAX_FPS=<n>` (frame
+cap; 30 by default with a hidden window, `0` = uncapped).
 
 ## Controls and options
 

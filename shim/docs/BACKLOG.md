@@ -7,13 +7,11 @@ order they will be worked; frame rate is deliberately last (user, 2026-10-16).
 
 | # | Item | Status / notes |
 |---|---|---|
-| 4 | **Second test player without a window** | target.sh shows a (minimized) game window; the user wants test opponents to run as a backend with no GUI. |
 | 5 | **45 s startup watchdog — find the gate** | The signature patch `watchdog` skips the deadline check. On Windows something clears that deadline in time; find which step does not complete under the loader. |
 | 6 | **Seams at polygon joins on outer map geometry** (e.g. Valhalla rock walls) | Quick check whether the cracks can be found programmatically (e.g. T-junctions or depth gaps in a capture); low priority. |
 | 7 | **Headless `dedicated` server** | Loads the map, then idles at "waiting for the native game client". Possibly expected until a client joins: test a join against it. |
 | 7b | **Teleport (F7, PELOAD_ALLOW_TELEPORT) -- experimental, crashes** | Uses halo3's own teleport (halo3+0x259410). Run from an arbitrary QueryPerformanceCounter call it crashed in the physics update (halo3+0x23300E, mid-tick); run from an entry hook on the main loop's frame-timing function (halo3+0x9d22c) it crashed at halo3+0x1ECA6 reading TLS block +0x240 (null on that thread). Thread dumps show halo3 spreading game work over job-system worker threads, so the safe point is the simulation job's own tick -- not found yet. Destination snapping to a map item spawn works (computed correctly on Guardian and Valhalla). |
 | 9 | **Unexplained crashes** (watch) | (a) v0.9.18 SIGTRAP during a direct Guardian match; (b) one startup SIGSEGV with guest code on a thread without TLS. Not seen again since the thread-id fix (55811fa); loader threads are now named for the next [CRASH] line. |
-| 10 | **Minimized window stalls loading** (watch) | A client minimized during loading never reaches gameplay. Test runs no longer minimize. |
 | 11 | **Frame rate** (last) | shim/docs/PERF-PLAN.md. Done: redundant glUseProgram cache (4afd0a9). Small wins left; big step: native arm64 GL helper process (up to ~2x). |
 
 Closed by the user 2026-10-16: teleporter audio desync (not seen since the XAudio2 and thread-id fixes), class-selection input
@@ -43,4 +41,8 @@ Closed by the user 2026-10-16: teleporter audio desync (not seen since the XAudi
 - Title fps no longer claims more than the screen can show (loading screens spin at ~1000 presents/s) — f73252e
 - Intermittent hang at match start: GetCurrentThreadId returned 0x1000 on every thread, which disabled every
   msvcp140 std::mutex — 55811fa
+- Second test player without a window: shim/target.sh runs windowless (PELOAD_HIDE_WINDOW: no window, no Dock icon)
+  with a 30 fps cap (PELOAD_MAX_FPS) and its menu music muted; quiet-run.sh QR_HIDE=1 does the same for test clients
+- Minimized window stalled loading: not the minimizing -- the GetCurrentThreadId mutex bug (55811fa); a minimized test
+  client now loads in 12.8 s
 - Water renders: the water shader pair never linked (varying locations >= 14 on Apple GL) — 434db9b (user confirmed)

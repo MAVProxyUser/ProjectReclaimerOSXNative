@@ -1,9 +1,10 @@
 #!/bin/bash
 # Unattended test run: ONE instance, own profile (C:\ReclaimerProfileTest), no input/focus/audio, visible window
-# (QR_MINIMIZE=1 minimizes it; a minimized client can stall its loading screen), keeps presenting while hidden; stopped (own process group only) after SECS. Log: /tmp/quiet-run.log
+# (QR_MINIMIZE=1 minimizes it), keeps presenting while hidden; stopped (own process group only) after SECS. Log: /tmp/quiet-run.log
 #   bash shim/tools/quiet-run.sh "<extra env>" <secs> [client args...]
 #   e.g. bash shim/tools/quiet-run.sh "PELOAD_LOCAL_RUNTIME=__unset__" 60      # direct Guardian match
 # QR_PAD=1 lets the pad path run (needed for PELOAD_INPUT_SCRIPT scripted input).
+# QR_HIDE=1 runs with no window at all (PELOAD_HIDE_WINDOW; log-only tests -- window captures need the window).
 # Refuses to start while any other game process is running (never runs beside the user's game).
 cd "$(dirname "$0")/../.."
 EXTRA="$1"; SECS="${2:-60}"; shift 2
@@ -16,7 +17,7 @@ ARGS=("$@"); [ ${#ARGS[@]} -eq 0 ] && ARGS=(game-client --mcc-path "C:\\Program 
 mkdir -p "$HOME/Library/Application Support/ReclaimerMac/prefix/drive_c/ReclaimerProfileTest"
 rm -f "$HOME"/reclaimer_win_*.bmp; : > /tmp/quiet-run.log
 PADENV="PELOAD_NO_PAD=1"; [ -n "${QR_PAD:-}" ] && PADENV=""
-MINENV=""; [ -n "${QR_MINIMIZE:-}" ] && MINENV="PELOAD_MINIMIZE=1"
+MINENV=""; [ -n "${QR_MINIMIZE:-}" ] && MINENV="PELOAD_MINIMIZE=1"; [ -n "${QR_HIDE:-}" ] && MINENV="PELOAD_HIDE_WINDOW=1"
 set -m
 env PELOAD_SKINGUARD=1 PELOAD_VTGUARD=1 PELOAD_ALLOC_GUARD=1 PELOAD_RECLAIMER_PATCHES=all PELOAD_WORKER_INHERIT_STDIO=1 \
   PELOAD_PRESENT=1 PELOAD_HOLD_WINDOW=1 PELOAD_PRESENT_HIDDEN=1 PELOAD_D3DGL=1 PELOAD_FPS_LOG=1 \

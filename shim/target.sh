@@ -5,9 +5,10 @@
 #     RECLAIMER_JOIN=127.0.0.1:11774 bash shim/play.sh       # join it (about 40 s after starting the target)
 #     bash shim/target.sh stop                               # stop it
 # The target has its own profile ("Target"), no controller/keyboard/mouse, no audio and never takes focus,
-# so it doesn't steal your input. Its window says "TARGET (no input)" and starts minimized in the Dock
-# (TARGET_MINIMIZE=0 keeps it on screen). It drives its own menu with scripted clicks (PELOAD_AUTOCLICK) in its
-# window: Host Game -> map search -> Network Online -> Hidden server -> Start Game.
+# so it doesn't steal your input. It runs with no window and no Dock icon (PELOAD_HIDE_WINDOW); TARGET_SHOW=1
+# gives it a window titled "TARGET (no input)", minimized in the Dock (plus TARGET_MINIMIZE=0: on screen).
+# It drives its own menu with scripted clicks (PELOAD_AUTOCLICK, sent to the client's window procedure):
+# Host Game -> map search -> Network Online -> Hidden server -> Start Game.
 #   TARGET_MAP=<name>   map to host (searched in the map picker), default Valhalla
 # Log: /tmp/reclaimer_target.log
 cd "$(dirname "$0")/.."
@@ -35,16 +36,17 @@ CLICKS="110,503;230,183;300,143;t:$(echo "$MAP" | tr 'A-Z' 'a-z');s:1.5;1047,663
 # next one, so there is always a match to join.
 AFTER="1068,52;s:12;230,625"
 
+if [ -n "${TARGET_SHOW:-}" ]; then WINENV="PELOAD_PRESENT_HIDDEN=1 PELOAD_MINIMIZE=${TARGET_MINIMIZE:-1}"; else WINENV="PELOAD_HIDE_WINDOW=1"; fi
 set -m
 env PELOAD_SKINGUARD=1 PELOAD_VTGUARD=1 PELOAD_ALLOC_GUARD=1 PELOAD_RECLAIMER_PATCHES=all PELOAD_WORKER_INHERIT_STDIO=1 \
-    PELOAD_PRESENT=1 PELOAD_HOLD_WINDOW=1 PELOAD_PRESENT_HIDDEN=1 PELOAD_D3DGL=1 \
+    PELOAD_PRESENT=1 PELOAD_HOLD_WINDOW=1 PELOAD_D3DGL=1 $WINENV \
     PELOAD_NO_PAD=1 PELOAD_NO_KBM=1 PELOAD_NO_SYS_CURSOR=1 PELOAD_NO_FOCUS=1 PELOAD_AUDIO=0 \
-    PELOAD_TITLE_PREFIX="TARGET (no input)" PELOAD_MINIMIZE="${TARGET_MINIMIZE:-1}" \
+    PELOAD_TITLE_PREFIX="TARGET (no input)" \
     PELOAD_AUTOCLICK="$CLICKS" PELOAD_AUTOCLICK_AFTER_GAME="$AFTER" RECLAIMER_PROFILE_DIR='C:\ReclaimerProfileTarget' $TARGET_ENV \
     arch -x86_64 shim/build/peload "$EXE" game-client \
     --mcc-path "C:\\Program Files\\Steam\\steamapps\\common\\Halo The Master Chief Collection" \
     < /dev/null > /tmp/reclaimer_target.log 2>&1 &
 echo $! > "$PIDFILE"
-echo "target starting: hosting $MAP (hidden, Online) in ~40 s; log: /tmp/reclaimer_target.log"
+echo "target starting: hosting $MAP (hidden, Online) in ~40 s, no window; log: /tmp/reclaimer_target.log"
 echo "then join it:  RECLAIMER_JOIN=127.0.0.1:11774 bash shim/play.sh"
 echo "stop it:       bash shim/target.sh stop"
