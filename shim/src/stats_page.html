@@ -171,7 +171,9 @@ function optSections(vr){
   const groups=new Map();
   for(const e of optMap){ if(!e.variant||!(e.modes.includes('all')||e.modes.includes(gt))) continue;
     const val=optValue(raw,e.variant); if(val==null) continue; const set=e.key.split('.')[0], isTrait=!(set in GROUP);
-    const ch=e.choices&&e.choices.find(c=>c[0]===val), lab=ch?ch[1]:String(val);
+    let ch=e.choices&&e.choices.find(c=>c[0]===val);
+    // halo3 keeps "use the map's own" as -1 in some 16-bit fields the client's table doesn't list (weapon/vehicle set)
+    let lab=ch?ch[1]:String(val); if(!ch && e.variant.size===2 && val===0xFFFF) lab='Map default';
     if(isTrait && (lab==='Unchanged')) continue;   // trait sets: only what they change
     if(!groups.has(set)) groups.set(set,[]); groups.get(set).push([e.label,lab]); }
   const order=['rounds','respawn','map','powerups','mode']; const out=[];

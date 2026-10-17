@@ -8,7 +8,6 @@ order they are being worked (2026-10-17: frame rate is now active, at the user's
 | # | Item | Status / notes |
 |---|---|---|
 | 14 | **Join Workshop-only servers (e.g. CHAOS 128P)** (user, 2026-10-17) | Download path works (2026-10-17): DepotDownloader (brew cask) signed in by the user, `-pubfile 2933266434 -filelist` fetched the desert_sandbox subset (1.73 GB: map + the mod's own shared.map/campaign.map) into steamapps/workshop/content/976730/2933266434. The join itself is unverified: CHAOS (65.59.89.203:11774) did not answer that night. Guide: shim/docs/mods.md; busiest servers + their mods: shim/tools/servers.sh |
-| 16 | **Every game option, exact** (user, 2026-10-17) | Done statically: shim/docs/option-map.json (639 keys, exact native offsets) and the page decodes them; next: check the decoded panel in a live game of each mode. |
 | 17 | **Sparring partner: auto-targeting only** (user, 2026-10-17) | The windowless second player (shim/target.sh) aims at the nearest enemy's head, with an on/off toggle on its stats page; tested by the user against it on a private server. After the frame-rate work. |
 | 11 | **Frame rate** (active) | BTB (60 players): 15-25 fps, 3,000-4,700 draws/frame at ~9 us each; the biggest phase is texture/sampler binds in Apple's GL driver (not uploads, not compute; CLAUDE.md "Frame rate"). Done: getenv cache, mip-streaming upload skip, profiler counters. Next: PERF-PLAN.md option 1 (native GL helper process, up to ~2x); meanwhile the client's Advanced graphics settings cut draws. |
 
@@ -24,6 +23,13 @@ Closed by the user 2026-10-16: teleporter audio desync (not seen since the XAudi
 
 ## Done (2026-10-16)
 
+- Every game option, exact (2026-10-17): shim/docs/option-map.json from the client's option table (639 keys, offsets,
+  bits, choices); the stats page decodes every option of the running mode from the raw variant. Checked live on
+  Slayer (all rounds/respawn/map/powerup/points values and the powerup trait sets match the game); halo3's -1 in the
+  16-bit weapon/vehicle set fields shows as "Map default"
+- Teleport from either end (2026-10-17): a client-side move is rejected by the host (tested: shown < 1 s, then snapped
+  back); a client's request is forwarded to the host's loader (PELOAD_TELEPORT_HOST), which moves the requester.
+  Audio crash fixed on the way (AudioQueue callback vs dispose race, caulk SIGILL)
 - Teleport next to a selected player (2026-10-17): host only, from an entry hook on main_loop_body (halo3+0xb2250,
   engine main thread, between ticks) inside halo3's game-state lock; leaves a vehicle first; destination beside the
   other player (right/left/behind/close behind) accepted only inside the map structure. Tested host + joiner on
