@@ -73,9 +73,18 @@ static void* objdump_thread(void*a){ (void)a; pthread_setname_np("shim-objdump")
 // d3dgl_draw hands us cb0 rows 0-7 from the first full-size scene draw of each frame (hb_capture_view).
 // PELOAD_HITBOXES=1: collision hitboxes (what damage tests) for bipeds, vehicles and giants -- bounding spheres where
 // no collision model is found; =all also spheres for weapons, equipment and projectiles; =spheres: bounding spheres only.
-static int g_hb_on=-1, g_hb_all, g_hb_spheres;
-static int hb_enabled(void){ if(g_hb_on<0){ const char*e=getenv("PELOAD_HITBOXES"); g_hb_on=e&&*e&&strcmp(e,"0"); g_hb_all=e&&!strcasecmp(e,"all"); g_hb_spheres=e&&!strcasecmp(e,"spheres"); }
-    return g_hb_on ^ g_hb_toggle; }   // F2 (wininput.c) flips it at runtime
+// Overlay features: each has a launch variable and a function key (wininput.c flips bit f of g_hb_toggle):
+//   F2 PELOAD_HITBOXES   hitboxes (=all adds weapon/equipment/projectile spheres, =spheres: bounding spheres only)
+//   F3 PELOAD_HB_TRACERS projectile tracers (trail + velocity)
+//   F4 PELOAD_HB_INFO    player info: shield/health %, weapon, grenades, active camo, vehicle seat
+//   F5 PELOAD_HB_ITEMS   weapons and equipment lying on the map, by tag name
+enum { HBF_HITBOX, HBF_TRACER, HBF_INFO, HBF_ITEMS, HBF_N };
+static int g_hbf_init, g_hbf_on[HBF_N], g_hb_all, g_hb_spheres;
+static void hbf_init(void){ if(g_hbf_init) return; static const char*const env[HBF_N]={"PELOAD_HITBOXES","PELOAD_HB_TRACERS","PELOAD_HB_INFO","PELOAD_HB_ITEMS"};
+    for(int f=0;f<HBF_N;f++){ const char*e=getenv(env[f]); g_hbf_on[f]=e&&*e&&strcmp(e,"0"); }
+    const char*e=getenv("PELOAD_HITBOXES"); g_hb_all=e&&!strcasecmp(e,"all"); g_hb_spheres=e&&!strcasecmp(e,"spheres"); g_hbf_init=1; }
+static int hb_feat(int f){ hbf_init(); return g_hbf_on[f] ^ ((g_hb_toggle>>f)&1); }
+static int hb_enabled(void){ for(int f=0;f<HBF_N;f++) if(hb_feat(f)) return 1; return 0; }   // any overlay on: capture the camera
 // A world camera: rows 0-3 are a perspective view-projection (cb_looks_viewproj) AND row 7 is the camera position
 // it was built from -- the camera sits at the clip-space origin (x = y = w = 0). Rejects the view-space-only
 // projections of full-screen passes (row 3 = 0,0,1,0), shadow-map views and the first-person weapon's view.
@@ -88,7 +97,15 @@ static int hb_is_world_camera(const float*m){
     return 1; }
 static float g_hb_vp[32]; static volatile unsigned g_hb_vpseq; volatile int g_hb_taken;
 static void hb_capture_view(const float*rows){ g_hb_vpseq++; __atomic_thread_fence(__ATOMIC_SEQ_CST); memcpy(g_hb_vp,rows,sizeof g_hb_vp); __atomic_thread_fence(__ATOMIC_SEQ_CST); g_hb_vpseq++; }
-typedef struct { float c[3], r, o[3]; int type; uint64_t p; uint32_t def; uint16_t nmsz, nmoff; } HbObj;
+// Object datum fields (MCC halo3, from the evaluate functions of its HaloScript getters -- shim/docs/halo3-objects.md):
+//   +0x00 definition tag datum   +0x10 parent object (the vehicle when seated)   +0x1c bounding centre, +0x28 radius
+//   +0x50 origin   +0x5c forward   +0x68 up   +0x74 velocity   +0x80 angular velocity
+//   +0xF4 health (body vitality)  +0xF8 shield vitality  +0x110 flags (bit 2: vitality zeroed; health/shield read as 0)
+//   +0x136 node matrices {u16 size, u16 offset}
+// unit (biped/vehicle/giant): +0x174 team index  +0x24E seat (-1 = on foot)  +0x262 current weapon slot (s8)
+//   +0x268 weapon object handles[4]  +0x294 grenade counts[4] (frag, plasma, spike, firebomb)  +0x360 active camo
+typedef struct { float c[3], r, o[3], vel[3]; int type; uint32_t handle; uint64_t p; uint32_t def; uint16_t nmsz, nmoff;
+    float health, shield, camo; int team, seat, wslot, dead; uint32_t weapons[4], parent; int8_t gren[4]; } HbObj;
 // PELOAD_INPUT_FACE (test helper for unattended overlay checks): steer the scripted pad toward the nearest other biped.
 static float g_hb_tgt[3], g_hb_cam[3], g_hb_fwd[3]; static volatile int g_hb_tgt_ok;
 int hb_face_target(float*rx,float*ry){ if(!g_hb_tgt_ok) return 0;
@@ -97,20 +114,29 @@ int hb_face_target(float*rx,float*ry){ if(!g_hb_tgt_ok) return 0;
     float fh=sqrtf(g_hb_fwd[0]*g_hb_fwd[0]+g_hb_fwd[1]*g_hb_fwd[1]); float pitch_err=atan2f(d[2],h)-atan2f(g_hb_fwd[2],fh);
     float k=getenv("PELOAD_INPUT_FACE_GAIN")?atof(getenv("PELOAD_INPUT_FACE_GAIN")):1.5f, ps=getenv("PELOAD_INPUT_FACE_PITCH")?atof(getenv("PELOAD_INPUT_FACE_PITCH")):-1.0f;
     float x=-yaw_err*k, y=ps*pitch_err*k; *rx=x>0.6f?0.6f:x<-0.6f?-0.6f:x; *ry=y>0.6f?0.6f:y<-0.6f?-0.6f:y; return 1; }
+static uint8_t g_hb_tab[8192*0x18]; static int g_hb_hi;   // last object-table snapshot (for handle -> datum lookups)
+static uint64_t hb_handle_datum(uint32_t h){ int i=h&0xFFFF; if(h==0xFFFFFFFFu || i>=g_hb_hi) return 0; const uint8_t*e=g_hb_tab+i*0x18;
+    if(*(const uint16_t*)e!=(uint16_t)(h>>16)) return 0; return *(const uint64_t*)(e+0x10); }
 static int hb_collect(HbObj*out,int max){
     static uint64_t arr; static double tarr; double now=mono_s(); if(!arr || now-tarr>2.0){ arr=hb_object_array(); tarr=now; } if(!arr) return 0;
     uint8_t hdr[0x60]; if(!hb_read(arr,hdr,sizeof hdr) || *(uint32_t*)(hdr+0x2c)!=0x64407440){ arr=0; return 0; }
     int32_t maxc=*(int32_t*)(hdr+0x20), esz=*(int32_t*)(hdr+0x24), hi=*(int32_t*)(hdr+0x3c); uint64_t data=*(uint64_t*)(hdr+0x48);
     if(esz!=0x18 || hi<=0 || hi>maxc || hi>8192) return 0;
-    static uint8_t tab[8192*0x18]; if(!hb_read(data,tab,(size_t)hi*0x18)) return 0;
+    if(!hb_read(data,g_hb_tab,(size_t)hi*0x18)) return 0; g_hb_hi=hi;
+    int fh=hb_feat(HBF_HITBOX), ft=hb_feat(HBF_TRACER), fi=hb_feat(HBF_INFO), fw=hb_feat(HBF_ITEMS);
     int n=0;
-    for(int i=0;i<hi && n<max;i++){ const uint8_t*e=tab+i*0x18; if(!*(const uint16_t*)e) continue; int t=e[3];
-        int want = t==0||t==1||t==12 || (g_hb_all && (t==2||t==3||t==5)); if(!want) continue;
-        uint64_t p=*(const uint64_t*)(e+0x10); uint8_t dh[0x140]; if(!p || !hb_read(p,dh,sizeof dh)) continue;
-        const float*od=(const float*)(dh+0x1c);   // +0x1c centre, +0x28 radius, +0x50 origin
-        HbObj*o=&out[n]; o->c[0]=od[0]; o->c[1]=od[1]; o->c[2]=od[2]; o->r=od[3]; o->o[0]=od[13]; o->o[1]=od[14]; o->o[2]=od[15]; o->type=t;
-        o->p=p; o->def=*(const uint32_t*)dh; o->nmsz=*(const uint16_t*)(dh+0x136); o->nmoff=*(const uint16_t*)(dh+0x138);
-        if(!(o->r>0.01f && o->r<50.f) || o->c[0]!=o->c[0]) continue; n++; }
+    for(int i=0;i<hi && n<max;i++){ const uint8_t*e=g_hb_tab+i*0x18; if(!*(const uint16_t*)e) continue; int t=e[3];
+        int unit = t==0||t==1||t==12;
+        int want = (unit && (fh||fi)) || (t==5 && (ft || (fh&&g_hb_all))) || ((t==2||t==3) && (fw || (fh&&g_hb_all))); if(!want) continue;
+        uint64_t p=*(const uint64_t*)(e+0x10); static uint8_t dh[0x380]; size_t rd=unit?0x380:0x140; if(!p || !hb_read(p,dh,rd)) continue;
+        const float*od=(const float*)(dh+0x1c);
+        HbObj*o=&out[n]; memset(o,0,sizeof *o); o->c[0]=od[0]; o->c[1]=od[1]; o->c[2]=od[2]; o->r=od[3]; memcpy(o->o,dh+0x50,12); memcpy(o->vel,dh+0x74,12);
+        o->type=t; o->handle=((uint32_t)*(const uint16_t*)e<<16)|(uint32_t)i; o->p=p; o->def=*(const uint32_t*)dh; o->parent=*(const uint32_t*)(dh+0x10);
+        o->nmsz=*(const uint16_t*)(dh+0x136); o->nmoff=*(const uint16_t*)(dh+0x138);
+        o->dead=(*(const uint32_t*)(dh+0x110)>>2)&1; o->health=o->dead?0:*(const float*)(dh+0xF4); o->shield=o->dead?0:*(const float*)(dh+0xF8);
+        if(unit){ o->team=*(const int32_t*)(dh+0x174); o->seat=*(const int16_t*)(dh+0x24E); o->wslot=*(const int8_t*)(dh+0x262);
+            memcpy(o->weapons,dh+0x268,16); memcpy(o->gren,dh+0x294,4); o->camo=*(const float*)(dh+0x360); }
+        if(!(o->r>0.001f && o->r<50.f) || o->c[0]!=o->c[0]) continue; n++; }
     return n; }
 // ---- real hitboxes: the object's collision model, posed by its live node matrices --------------------------------
 // Damage tests use the model's collision model (coll): per region (head, body, arms, legs), per permutation, a set of
@@ -127,7 +153,7 @@ static int hb_collect(HbObj*out,int max){
 // Collision node indices equal the model's node indices (checked: mp_masterchief 51/51, mp_elite 55/55).
 // Node matrices (real_matrix4x3: scale, forward, left, up, position) are in the object datum; the header block
 // reference at datum+0x136 {u16 size, u16 offset} locates them (mp_masterchief: 0xa5c = 51 x 52 bytes at +0x758).
-typedef struct { char path[1024]; int fd; uint32_t tagoff; uint64_t vbase, fsize; int ntags; uint32_t*tp; uint16_t*salt; uint32_t*grp; } HbMap;
+typedef struct { char path[1024]; int fd; uint32_t tagoff; uint64_t vbase, fsize; int ntags; uint32_t*tp; uint16_t*salt; uint32_t*grp; char*names; int32_t*noff; } HbMap;
 static HbMap g_hbm[6]; static int g_hbm_n;
 static char g_hb_mappaths[8][1024]; static int g_hb_nmappaths; static pthread_mutex_t g_hb_mapmx=PTHREAD_MUTEX_INITIALIZER;
 static void hb_note_map(const char*p){     // CreateFileW: remember the scenario maps the game opens (newest first)
@@ -151,7 +177,12 @@ static HbMap* hbm_get(const char*path){
       if(!g||!t||!m->tp||!m->salt||!m->grp || !hbm_read(m,*(uint64_t*)(ix+8),g,(size_t)ng*16) || !hbm_read(m,*(uint64_t*)(ix+0x18),t,(size_t)nt*8)){ free(g); free(t); goto bad; }
       for(int i=0;i<nt;i++){ int16_t gi=*(int16_t*)(t+i*8); m->salt[i]=*(uint16_t*)(t+i*8+2); m->tp[i]=*(uint32_t*)(t+i*8+4); m->grp[i]=(gi>=0&&gi<ng)?*(uint32_t*)(g+gi*16):0; }
       m->ntags=nt; free(g); free(t); }
-    { char msg[1200]; int k=snprintf(msg,sizeof msg,"  [hitbox] map %s: %d tags\n",path,m->ntags); (void)!write(2,msg,k); }
+    { // tag names: header +0x20 count, +0x24 names offset, +0x28 names size, +0x2C index offset; file offset = value + debug mask (+0x4CC[0])
+      int32_t cnt=*(int32_t*)(h+0x20), sz=*(int32_t*)(h+0x28); uint32_t dm=*(uint32_t*)(h+0x4CC), no=(uint32_t)(*(uint32_t*)(h+0x24)+dm), io=(uint32_t)(*(uint32_t*)(h+0x2C)+dm);
+      if(cnt==m->ntags && sz>0 && sz<(64<<20)){ m->names=malloc((size_t)sz+1); m->noff=malloc((size_t)cnt*4);
+          if(!m->names||!m->noff || pread(m->fd,m->names,(size_t)sz,(off_t)no)!=sz || pread(m->fd,m->noff,(size_t)cnt*4,(off_t)io)!=cnt*4){ free(m->names); free(m->noff); m->names=0; m->noff=0; }
+          else m->names[sz]=0; } }
+    { char msg[1200]; int k=snprintf(msg,sizeof msg,"  [hitbox] map %s: %d tags%s\n",path,m->ntags,m->names?" (with names)":""); (void)!write(2,msg,k); }
     return m;
   bad: { char msg[1200]; int k=snprintf(msg,sizeof msg,"  [hitbox] could not read map %s\n",path); (void)!write(2,msg,k); }
     if(m->fd>=0) close(m->fd); m->fd=-1; return 0; }
@@ -187,10 +218,18 @@ static HbGeom* hb_geom(uint32_t def){
         char msg[300]; int kk=snprintf(msg,sizeof msg,"  [hitbox] definition %08x: %d collision edges in %d regions, nodes 0-%d\n",def,g->nseg,g->nreg,g->maxnode); (void)!write(2,msg,kk); }
     return g->ok?g:0; }
 // Append one object's posed collision edges as clip-space line vertices; returns vertices added (0 = no geometry).
+// Why objects fall back to spheres: [0] drawn as hitboxes, [1] no collision geometry for the definition, [2] node
+// block missing/too small, [3] node matrices unreadable or not set up (scale != 1). Logged with PELOAD_HITBOXES_LOG.
+static unsigned long g_hbx_stat[4];
+static void hbx_why(const HbObj*o,int why){ g_hbx_stat[why]++; static uint32_t seen[256]; static int ns; uint32_t key=o->def^((uint32_t)why<<30);
+    for(int i=0;i<ns;i++) if(seen[i]==key) return; if(ns<256) seen[ns++]=key;
+    static const char*const nm[4]={"","no collision geometry","node block missing","node matrices not set up"};
+    char m[200]; int k=snprintf(m,sizeof m,"  [hitbox] type %d definition %08x drawn as a sphere: %s (nodes %u B at +0x%x)\n",o->type,o->def,nm[why],o->nmsz,o->nmoff); (void)!write(2,m,k); }
 static int hb_emit_hitbox(const HbObj*o,const float*vp,float*verts,int nv,int cap){
-    HbGeom*g=hb_geom(o->def); if(!g) return 0;
-    int nn=o->nmsz/52; if(o->nmsz%52 || nn<=g->maxnode || nn>128 || o->nmoff<0x100) return 0;
-    static float mt[128*13]; if(!hb_read(o->p+o->nmoff,mt,(size_t)nn*52) || fabsf(mt[0]-1.0f)>0.1f) return 0;
+    HbGeom*g=hb_geom(o->def); if(!g){ hbx_why(o,1); return 0; }
+    int nn=o->nmsz/52; if(o->nmsz%52 || nn<=g->maxnode || nn>128 || o->nmoff<0x100){ hbx_why(o,2); return 0; }
+    static float mt[128*13]; if(!hb_read(o->p+o->nmoff,mt,(size_t)nn*52) || fabsf(mt[0]-1.0f)>0.1f){ hbx_why(o,3); return 0; }
+    g_hbx_stat[0]++;
     int head=-1;   // bipeds: the region whose nodes sit highest is the head
     if(o->type==0 && g->nreg>=2){ float zs[256]={0}; int zc[256]={0}; for(int s=0;s<g->nseg;s++){ zs[g->reg[s]]+=mt[g->node[s]*13+12]; zc[g->reg[s]]++; }
         float best=-1e30f; for(int r=0;r<g->nreg;r++) if(zc[r] && zs[r]/zc[r]>best){ best=zs[r]/zc[r]; head=r; } }
@@ -205,6 +244,78 @@ static int hb_emit_hitbox(const HbObj*o,const float*vp,float*verts,int nv,int ca
         if(!okk) continue; float*d=verts+(nv+added)*5;
         d[0]=q[0][0]; d[1]=q[0][1]; d[2]=col[0]; d[3]=col[1]; d[4]=col[2]; d[5]=q[1][0]; d[6]=q[1][1]; d[7]=col[0]; d[8]=col[1]; d[9]=col[2]; added+=2; }
     return added?added:-1; }   // -1: posed but entirely behind the camera
+// Short display name of an object definition (last path component of its tag name, '_' -> ' ', upper case).
+static const char* hb_tag_name(uint32_t def){
+    static struct { uint32_t def; char nm[32]; } cache[256]; static int nc;
+    for(int i=0;i<nc;i++) if(cache[i].def==def) return cache[i].nm;
+    char out[32]="?"; char paths[8][1024]; int np; pthread_mutex_lock(&g_hb_mapmx); np=g_hb_nmappaths; memcpy(paths,g_hb_mappaths,sizeof paths); pthread_mutex_unlock(&g_hb_mapmx);
+    for(int k=0;k<np;k++){ HbMap*m=hbm_get(paths[k]); int ti=def&0xFFFF; if(!m || !m->names || ti>=m->ntags || m->salt[ti]!=(def>>16)) continue;
+        const char*full=m->names+m->noff[ti]; const char*b=strrchr(full,'\\'); b=b?b+1:full; int j=0;
+        for(; b[j] && j<31; j++) out[j]=(char)(b[j]=='_'?' ':(b[j]>='a'&&b[j]<='z'?b[j]-32:b[j])); out[j]=0; break; }
+    if(nc<256){ cache[nc].def=def; snprintf(cache[nc].nm,sizeof cache[nc].nm,"%s",out); return cache[nc++].nm; }
+    static char last[32]; snprintf(last,sizeof last,"%s",out); return last; }
+// Stroke font: each glyph is a list of segments "x1y1x2y2" on a 4x6 grid (y up), drawn as GL lines with the overlay.
+static const char* hb_glyph(char c){
+    switch(c){
+    case '0': return "0040404646060600";  case '1': return "202626151030";  case '2': return "06464643430303000040";
+    case '3': return "0646464040000343";  case '4': return "060303434640";  case '5': return "46060603034343404000";
+    case '6': return "46060600004040434303";  case '7': return "06464620";  case '8': return "00404046460606000343";
+    case '9': return "43030306064646404000";  case 'A': return "00040426264444400242";  case 'B': return "000606363645453333034342424131300000";
+    case 'C': return "460606000040";  case 'D': return "000606363644444242303000";  case 'E': return "4606060000400333";
+    case 'F': return "460606000333";  case 'G': return "46060600004040434323";  case 'H': return "000640460343";
+    case 'I': return "064620260040";  case 'J': return "464040000002";  case 'K': return "000603460340";
+    case 'L': return "06000040";  case 'M': return "0006062323464640";  case 'N': return "000606404046";
+    case 'O': return "0040404646060600";  case 'P': return "0006064646434303";  case 'Q': return "00404046460606002241";
+    case 'R': return "00060646464343031340";  case 'S': return "46060603034343404000";  case 'T': return "06462620";
+    case 'U': return "060000404046";  case 'V': return "06202046";  case 'W': return "0600002323404046";
+    case 'X': return "00460640";  case 'Y': return "062346232320";  case 'Z': return "064646000040";
+    case '%': return "004605160616304131404131";  case ':': return "21222425";  case '-': return "0343";  case '.': return "2021";
+    case '/': return "0046";  case '+': return "03432125";  case '?': return "05060646464444222221";  case '(': return "3616162020101034";
+    default: return ""; } }
+static float g_hb_px, g_hb_py;   // NDC size of one font-grid unit
+static int hb_text(float*verts,int nv,int cap,float x,float y,const char*s,const float*col){   // x,y = NDC of the text's top-left
+    for(; *s; s++, x+=5*g_hb_px){ char ch=*s; if(ch>='a'&&ch<='z') ch-=32; const char*g=hb_glyph(ch);
+        for(; g[0]&&g[1]&&g[2]&&g[3] && nv+2<=cap; g+=4){ float*d=verts+nv*5;
+            d[0]=x+(g[0]-'0')*g_hb_px; d[1]=y-(6-(g[1]-'0'))*g_hb_py; d[2]=col[0]; d[3]=col[1]; d[4]=col[2];
+            d[5]=x+(g[2]-'0')*g_hb_px; d[6]=y-(6-(g[3]-'0'))*g_hb_py; d[7]=col[0]; d[8]=col[1]; d[9]=col[2]; nv+=2; } }
+    return nv; }
+static int hb_proj(const float*vp,const float*w,float*nx,float*ny){   // world point -> NDC; 0 if behind the camera
+    float cx=w[0]*vp[0]+w[1]*vp[1]+w[2]*vp[2]+vp[3], cy=w[0]*vp[4]+w[1]*vp[5]+w[2]*vp[6]+vp[7], cw=w[0]*vp[12]+w[1]*vp[13]+w[2]*vp[14]+vp[15];
+    if(cw<0.05f) return 0; *nx=cx/cw; *ny=cy/cw; return 1; }
+static int hb_seg(float*verts,int nv,int cap,const float*vp,const float*a,const float*b,const float*col){
+    float ax,ay,bx,by; if(nv+2>cap || !hb_proj(vp,a,&ax,&ay) || !hb_proj(vp,b,&bx,&by)) return nv; float*d=verts+nv*5;
+    d[0]=ax; d[1]=ay; d[2]=col[0]; d[3]=col[1]; d[4]=col[2]; d[5]=bx; d[6]=by; d[7]=col[0]; d[8]=col[1]; d[9]=col[2]; return nv+2; }
+// Projectile trails: positions seen on recent frames, per projectile handle; kept briefly after the projectile is gone.
+typedef struct { uint32_t h; int n; float p[32][3]; double seen; } HbTrail;
+static HbTrail g_hb_trails[256];
+static void hb_trail_add(uint32_t h,const float*pos,double now){
+    HbTrail*t=0,*old=&g_hb_trails[0]; for(int i=0;i<256;i++){ if(g_hb_trails[i].h==h && g_hb_trails[i].n){ t=&g_hb_trails[i]; break; } if(g_hb_trails[i].seen<old->seen) old=&g_hb_trails[i]; }
+    if(!t){ t=old; t->h=h; t->n=0; }
+    if(t->n){ const float*l=t->p[(t->n-1)&31]; float dx=pos[0]-l[0],dy=pos[1]-l[1],dz=pos[2]-l[2]; if(dx*dx+dy*dy+dz*dz<1e-6f){ t->seen=now; return; } }
+    memcpy(t->p[t->n&31],pos,12); t->n++; t->seen=now; }
+// ---- bullets: halo3 resolves most bullets inside the tick that fires them, so they never show up in the object
+// table between frames. object_delete (halo3+0x342ed8, entry-hooked in peload.c: hbdel_install) sees every one:
+// at deletion the datum still holds the impact point and velocity. Recorded here, drawn by the tracer feature.
+// Projectile datum (from the bullet datums at deletion, 2026-10-16): +0x1c position (= impact at deletion), +0x74
+// velocity, +0x1b0 distance travelled, +0x1dc speed, +0x1e8 start position (where it was fired from).
+typedef struct { double t; uint32_t def, handle; float pos[3], vel[3]; uint8_t raw[0x200]; } HbImpact;
+static HbImpact g_hbimp[256]; static volatile unsigned g_hbimp_n;
+void __attribute__((ms_abi)) hb_on_delete(uint32_t handle){
+    if(handle==0xFFFFFFFFu) return; static uint32_t idx=0xFFFFFFFFu; uint8_t*h3=hb_halo3_base(); if(!h3) return;
+    if(idx==0xFFFFFFFFu) idx=*(volatile uint32_t*)(h3+0xa39f9c); if(idx>=128) return;
+    void**tarr; __asm__ volatile("movq %%gs:0x58,%0":"=r"(tarr)); if(!tarr || !tarr[idx]) return;   // the engine thread's own TLS
+    uint8_t*arr=*(uint8_t**)((uint8_t*)tarr[idx]+0x38); if(!arr || *(uint32_t*)(arr+0x2c)!=0x64407440) return;
+    uint8_t*data=*(uint8_t**)(arr+0x48); int i=handle&0xFFFF; if(!data || i>=*(int32_t*)(arr+0x20)) return;
+    uint8_t*e=data+(size_t)i*0x18; if(e[3]!=5 || *(uint16_t*)e!=(uint16_t)(handle>>16)) return;   // projectiles only
+    uint8_t*p=*(uint8_t**)(e+0x10); if(!p) return;
+    unsigned k=__atomic_fetch_add(&g_hbimp_n,1,__ATOMIC_RELAXED)&255; HbImpact*r=&g_hbimp[k];
+    r->def=*(uint32_t*)p; r->handle=handle; memcpy(r->pos,p+0x1c,12); memcpy(r->vel,p+0x74,12); memcpy(r->raw,p,sizeof r->raw);
+    { double tv=mono_s(); __atomic_store(&r->t,&tv,__ATOMIC_RELEASE); }
+    static int dumped; const char*dd=getenv("PELOAD_HB_DELDUMP"); if(dd && dumped<atoi(dd)){ dumped++; char m[700];
+        for(int o=0;o<0x200;o+=0x40){ int q=snprintf(m,sizeof m,"  [hbdel] %08x +%03x:",r->def,o);
+            for(int j=0;j<0x40;j+=4){ float f=*(float*)(p+o+j); uint32_t u=*(uint32_t*)(p+o+j); q+= (f>-100000.f&&f<100000.f&&(f>0.0005f||f<-0.0005f)) ? snprintf(m+q,sizeof m-q," %9.3f",f) : snprintf(m+q,sizeof m-q," %9x",u); }
+            m[q++]='\n'; (void)!write(2,m,q); } } }
+static const float g_hb_teamcol[8][3]={{1,0.3f,0.25f},{0.35f,0.6f,1},{0.35f,1,0.35f},{1,0.6f,0.15f},{0.75f,0.4f,1},{1,0.9f,0.2f},{0.75f,0.55f,0.35f},{1,0.55f,0.8f}};
 static unsigned g_hb_prog, g_hb_vao, g_hb_vbo;
 static void hb_draw_overlay(void){
     if(!hb_enabled() || !G.DrawArrays || !G.CreateShader) return;
@@ -217,33 +328,70 @@ static void hb_draw_overlay(void){
         g_hb_prog=G.CreateProgram(); G.AttachShader(g_hb_prog,v); G.AttachShader(g_hb_prog,f); G.LinkProgram(g_hb_prog); G.DeleteShader(v); G.DeleteShader(f);
         G.GenBuffers(1,&g_hb_vbo); }
     { static void*vctx; void*cur=CGLGetCurrentContext(); if(cur!=vctx){ vctx=cur; G.GenVertexArrays(1,&g_hb_vao); } }   // VAOs are per context
-    static HbObj objs[512]; int n=hb_collect(objs,512);
-    if(getenv("PELOAD_HITBOXES_LOG")){ static double tl; double now=mono_s(); if(now-tl>2.0){ tl=now; char m[400]; int best=-1; float bd=1e30f;
-        for(int i=0;i<n;i++){ float dx=objs[i].c[0]-vp[28],dy=objs[i].c[1]-vp[29],dz=objs[i].c[2]-vp[30],d=dx*dx+dy*dy+dz*dz; if(d<bd && d>1.0f){ bd=d; best=i; } }
-        int k=snprintf(m,sizeof m,"  [hitbox] objs %d cam (%.2f %.2f %.2f) row3 (%.3f %.3f %.3f %.3f)",n,vp[28],vp[29],vp[30],vp[12],vp[13],vp[14],vp[15]);
-        if(best>=0){ const float*w=objs[best].c; float cx=w[0]*vp[0]+w[1]*vp[1]+w[2]*vp[2]+vp[3], cy=w[0]*vp[4]+w[1]*vp[5]+w[2]*vp[6]+vp[7], cw=w[0]*vp[12]+w[1]*vp[13]+w[2]*vp[14]+vp[15];
-            k+=snprintf(m+k,sizeof m-k," nearest type %d at (%.2f %.2f %.2f) r %.2f dist %.1f -> ndc (%.2f %.2f) w %.2f",objs[best].type,w[0],w[1],w[2],objs[best].r,sqrtf(bd),cw?cx/cw:0,cw?cy/cw:0,cw); }
-        m[k++]='\n'; (void)!write(2,m,k); } }
+    int fh=hb_feat(HBF_HITBOX), ft=hb_feat(HBF_TRACER), fi=hb_feat(HBF_INFO), fw=hb_feat(HBF_ITEMS); double now=mono_s();
+    static HbObj objs[1024]; int n=hb_collect(objs,1024);
+    if(getenv("PELOAD_HITBOXES_LOG")){ static double tl; if(now-tl>3.0){ tl=now; int cnt[16]={0}; for(int i=0;i<n;i++) if(objs[i].type<16) cnt[objs[i].type]++;
+        char m[300]; int k=snprintf(m,sizeof m,"  [hitbox] cam (%.1f %.1f %.1f) objects: bipeds %d vehicles %d weapons %d equipment %d projectiles %d | hitboxes %lu, spheres: no-geometry %lu no-nodes %lu nodes-not-set %lu\n",
+            vp[28],vp[29],vp[30],cnt[0],cnt[1],cnt[2],cnt[3],cnt[5],g_hbx_stat[0],g_hbx_stat[1],g_hbx_stat[2],g_hbx_stat[3]); (void)!write(2,m,k); memset(g_hbx_stat,0,sizeof g_hbx_stat); } }
     { float bd=1e30f; int bi=-1; for(int i=0;i<n;i++){ if(objs[i].type) continue; float dx=objs[i].c[0]-vp[28],dy=objs[i].c[1]-vp[29],dz=objs[i].c[2]-vp[30],d=dx*dx+dy*dy+dz*dz;
           if(d>(objs[i].r+0.3f)*(objs[i].r+0.3f) && d<bd){ bd=d; bi=i; } }
       if(bi>=0){ memcpy(g_hb_tgt,objs[bi].c,12); memcpy(g_hb_cam,vp+28,12); memcpy(g_hb_fwd,vp+12,12); g_hb_tgt_ok=1; } else g_hb_tgt_ok=0;
       const char*fp=getenv("PELOAD_INPUT_FACE_POINT"); float pt[3];   // "x,y,z": aim at a fixed world point instead
       if(fp && sscanf(fp,"%f,%f,%f",&pt[0],&pt[1],&pt[2])==3){ memcpy(g_hb_tgt,pt,12); memcpy(g_hb_cam,vp+28,12); memcpy(g_hb_fwd,vp+12,12); g_hb_tgt_ok=1; } }
-    if(!n) return;
+    { float W=(float)(g_d3dgl_W>0?g_d3dgl_W:1920), H=(float)(g_d3dgl_H>0?g_d3dgl_H:1080); g_hb_px=2.0f*2.2f/W; g_hb_py=2.0f*2.2f/H; }   // ~13 px glyphs at 1080p
     enum { HB_CAP=400000 }; static float verts[HB_CAP*5]; int nv=0; const float*cam=vp+28;   // cb0[7] = camera position
-    for(int i=0;i<n;i++){ const HbObj*o=&objs[i];
-        float dx=o->c[0]-cam[0], dy=o->c[1]-cam[1], dz=o->c[2]-cam[2]; if(dx*dx+dy*dy+dz*dz < (o->r+0.3f)*(o->r+0.3f)) continue;   // our own body
-        if(!g_hb_spheres && (o->type==0||o->type==1||o->type==12)){ int a=hb_emit_hitbox(o,vp,verts,nv,HB_CAP); if(a>0){ nv+=a; continue; } if(a<0) continue; }
-        static const float pal[6][3]={{1,0.15f,0.15f},{1,0.85f,0.1f},{1,0.4f,0},{0.2f,1,0.3f},{0.2f,0.9f,1},{1,0.3f,1}};
-        const float*col = pal[o->type==0?0 : o->type==1?1 : o->type==12?2 : o->type==2?3 : o->type==3?4 : 5];
-        for(int axis=0;axis<3;axis++){ float prev[2]; int pv=0;
-            for(int sgi=0;sgi<=24;sgi++){ float a=(float)sgi*(6.2831853f/24.f), ca=cosf(a)*o->r, sa=sinf(a)*o->r; float w[3]={o->c[0],o->c[1],o->c[2]};
-                if(axis==0){ w[0]+=ca; w[1]+=sa; } else if(axis==1){ w[0]+=ca; w[2]+=sa; } else { w[1]+=ca; w[2]+=sa; }
-                float cx=w[0]*vp[0]+w[1]*vp[1]+w[2]*vp[2]+vp[3], cy=w[0]*vp[4]+w[1]*vp[5]+w[2]*vp[6]+vp[7], cw=w[0]*vp[12]+w[1]*vp[13]+w[2]*vp[14]+vp[15];
-                if(cw<0.05f){ pv=0; continue; } float nx=cx/cw, ny=cy/cw;
-                if(pv && nv+2<=HB_CAP){ float*q=verts+nv*5; q[0]=prev[0]; q[1]=prev[1]; q[2]=col[0]; q[3]=col[1]; q[4]=col[2];
-                    q[5]=nx; q[6]=ny; q[7]=col[0]; q[8]=col[1]; q[9]=col[2]; nv+=2; }
-                prev[0]=nx; prev[1]=ny; pv=1; } } }
+    static const float cwhite[3]={1,1,1}, cgrey[3]={0.7f,0.7f,0.7f}, ctrace[3]={1,0.95f,0.55f}, cvel[3]={1,0.5f,0.1f}, citem[3]={0.3f,1,0.45f}, cequip[3]={0.3f,0.9f,1};
+    for(int i=0;i<n;i++){ const HbObj*o=&objs[i]; int unit=o->type==0||o->type==1||o->type==12;
+        float dx=o->c[0]-cam[0], dy=o->c[1]-cam[1], dz=o->c[2]-cam[2]; int self = dx*dx+dy*dy+dz*dz < (o->r+0.3f)*(o->r+0.3f);   // our own body
+        if(o->type==5 && ft){ hb_trail_add(o->handle,o->c,now);
+            if(getenv("PELOAD_HITBOXES_LOG")){ static uint32_t seen[64]; static int ns; int f=0; for(int q=0;q<ns;q++) if(seen[q]==o->def) f=1;
+                if(!f && ns<64){ seen[ns++]=o->def; char m[160]; int k=snprintf(m,sizeof m,"  [hitbox] projectile type seen: %s (%08x) speed %.2f\n",hb_tag_name(o->def),o->def,sqrtf(o->vel[0]*o->vel[0]+o->vel[1]*o->vel[1]+o->vel[2]*o->vel[2])); (void)!write(2,m,k); } }
+            continue; }
+        if((o->type==2||o->type==3) && fw && o->parent==0xFFFFFFFFu){   // lying on the map (not held)
+            float a[3]={o->c[0]-0.15f,o->c[1],o->c[2]}, b[3]={o->c[0]+0.15f,o->c[1],o->c[2]}, c2[3]={o->c[0],o->c[1]-0.15f,o->c[2]}, d2[3]={o->c[0],o->c[1]+0.15f,o->c[2]};
+            const float*col=o->type==2?citem:cequip; nv=hb_seg(verts,nv,HB_CAP,vp,a,b,col); nv=hb_seg(verts,nv,HB_CAP,vp,c2,d2,col);
+            float tx,ty; if(hb_proj(vp,o->c,&tx,&ty)){ const char*nm=hb_tag_name(o->def); nv=hb_text(verts,nv,HB_CAP,tx-strlen(nm)*2.5f*g_hb_px,ty+8*g_hb_py,nm,col); }
+            if(!(fh&&g_hb_all)) continue; }
+        if(self) continue;
+        if(unit && fh && !g_hb_spheres){ int a=hb_emit_hitbox(o,vp,verts,nv,HB_CAP); if(a>0) nv+=a; if(a!=0) goto info; }
+        if(fh && (unit || g_hb_all)){
+            static const float pal[6][3]={{1,0.5f,0.5f},{1,0.85f,0.1f},{1,0.4f,0},{0.2f,1,0.3f},{0.2f,0.9f,1},{1,0.3f,1}};   // biped fallback sphere is pink, not hitbox red
+            const float*col = pal[o->type==0?0 : o->type==1?1 : o->type==12?2 : o->type==2?3 : o->type==3?4 : 5];
+            for(int axis=0;axis<3;axis++){ float prev[3]; int pv=0;
+                for(int sgi=0;sgi<=24;sgi++){ float an=(float)sgi*(6.2831853f/24.f), ca=cosf(an)*o->r, sa=sinf(an)*o->r; float w[3]={o->c[0],o->c[1],o->c[2]};
+                    if(axis==0){ w[0]+=ca; w[1]+=sa; } else if(axis==1){ w[0]+=ca; w[2]+=sa; } else { w[1]+=ca; w[2]+=sa; }
+                    if(pv) nv=hb_seg(verts,nv,HB_CAP,vp,prev,w,col); memcpy(prev,w,12); pv=1; } } }
+      info:
+        if(fi && o->type==0){   // player info above the head: shield/health %, held weapon, grenades, camo, vehicle
+            float top[3]={o->c[0],o->c[1],o->c[2]+o->r+0.12f}, tx,ty; if(!hb_proj(vp,top,&tx,&ty)) continue;
+            const float*tc = o->team>=0&&o->team<8 ? g_hb_teamcol[o->team] : cwhite;
+            char l1[48], l2[48], l3[48]; l3[0]=0;
+            if(o->dead) snprintf(l1,sizeof l1,"DEAD");
+            else snprintf(l1,sizeof l1,"S%d H%d",(int)(o->shield*100.f+0.5f),(int)(o->health*100.f+0.5f));
+            uint32_t wh=(o->wslot>=0&&o->wslot<4)?o->weapons[o->wslot]:0xFFFFFFFFu; uint64_t wd=hb_handle_datum(wh); uint32_t wdef=0; if(wd) hb_read(wd,&wdef,4);
+            snprintf(l2,sizeof l2,"%s",wd?hb_tag_name(wdef):"-");
+            int g=o->gren[0]+o->gren[1]+o->gren[2]+o->gren[3]; int k3=0;
+            if(g>0) k3+=snprintf(l3+k3,sizeof l3-k3,"G%d ",g);
+            if(o->camo>0.05f) k3+=snprintf(l3+k3,sizeof l3-k3,"CAMO %d ",(int)(o->camo*100.f+0.5f));
+            if(o->seat>=0) k3+=snprintf(l3+k3,sizeof l3-k3,"VEH");
+            float lh=8*g_hb_py; float y=ty+3*lh;
+            nv=hb_text(verts,nv,HB_CAP,tx-strlen(l1)*2.5f*g_hb_px,y,l1,tc); y-=lh;
+            nv=hb_text(verts,nv,HB_CAP,tx-strlen(l2)*2.5f*g_hb_px,y,l2,cwhite); y-=lh;
+            if(l3[0]) nv=hb_text(verts,nv,HB_CAP,tx-strlen(l3)*2.5f*g_hb_px,y,l3,o->camo>0.05f?cequip:cgrey); } }
+    if(ft){ for(int t=0;t<256;t++){ HbTrail*tr=&g_hb_trails[t]; if(!tr->n) continue; if(now-tr->seen>0.6){ tr->n=0; continue; }   // gone: keep 0.6 s
+            int cnt=tr->n<32?tr->n:32; for(int k=1;k<cnt;k++) nv=hb_seg(verts,nv,HB_CAP,vp,tr->p[(tr->n-1-k)&31],tr->p[(tr->n-k)&31],ctrace); }
+        for(int i=0;i<n;i++){ const HbObj*o=&objs[i]; if(o->type!=5) continue; float sp=sqrtf(o->vel[0]*o->vel[0]+o->vel[1]*o->vel[1]+o->vel[2]*o->vel[2]); if(sp<1e-4f) continue;
+            float e[3]={o->c[0]+o->vel[0]/sp*1.5f,o->c[1]+o->vel[1]/sp*1.5f,o->c[2]+o->vel[2]/sp*1.5f}; nv=hb_seg(verts,nv,HB_CAP,vp,o->c,e,cvel); } }   // 1.5 units along the velocity
+    if(ft){ unsigned nimp=__atomic_load_n(&g_hbimp_n,__ATOMIC_ACQUIRE); for(unsigned k=0;k<256 && k<nimp;k++){ HbImpact*r=&g_hbimp[(nimp-1-k)&255];
+            double t; __atomic_load(&r->t,&t,__ATOMIC_ACQUIRE); if(now-t>0.5) continue;
+            // projectile datum: +0x1e8 start position (muzzle), +0x1b0 distance travelled -- the tracer runs start -> impact
+            const float*st=(const float*)(r->raw+0x1e8); float trav=*(const float*)(r->raw+0x1b0);
+            float ddx=r->pos[0]-st[0], ddy=r->pos[1]-st[1], ddz=r->pos[2]-st[2], dd=sqrtf(ddx*ddx+ddy*ddy+ddz*ddz);
+            float a[3]={st[0],st[1],st[2]};
+            if(!(trav>0.0f && fabsf(dd-trav)<0.25f*trav+0.5f)){   // start not recorded: 3 units back along the velocity
+                float sp=sqrtf(r->vel[0]*r->vel[0]+r->vel[1]*r->vel[1]+r->vel[2]*r->vel[2]); memcpy(a,r->pos,12); if(sp>1e-5f) for(int q=0;q<3;q++) a[q]-=r->vel[q]/sp*3.0f; }
+            nv=hb_seg(verts,nv,HB_CAP,vp,a,r->pos,ctrace);
+            float x0[3]={r->pos[0]-0.05f,r->pos[1],r->pos[2]}, x1[3]={r->pos[0]+0.05f,r->pos[1],r->pos[2]}; nv=hb_seg(verts,nv,HB_CAP,vp,x0,x1,cvel); } }
     if(!nv) return;
     G.Disable(0x0B71/*DEPTH_TEST*/); G.Disable(0x0BE2/*BLEND*/); G.Disable(0x0C11/*SCISSOR*/);
     G.UseProgram(g_hb_prog); G.BindVertexArray(g_hb_vao); G.BindBuffer(0x8892/*ARRAY_BUFFER*/,g_hb_vbo);

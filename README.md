@@ -134,6 +134,9 @@ Options go in front of the command, e.g. `PELOAD_INVERT_PITCH=0 bash shim/play.s
 | `RECLAIMER_JOIN=host:port` | join that server as soon as the menu is up, e.g. `RECLAIMER_JOIN=203.0.113.7:11774` |
 | `RECLAIMER_DIRECT=1` | skip the menu: straight into a local Guardian match (no scoreboard text) |
 | `PELOAD_HITBOXES=1` | draw the real hitboxes (each player's and vehicle's collision model, which is what shots hit) posed on their live skeletons, through walls: players red with the head yellow, vehicles blue. `=spheres` draws bounding spheres instead; `=all` adds spheres for weapons, equipment and projectiles. **F2** toggles the overlay during play (any launch) |
+| `PELOAD_HB_TRACERS=1` | projectile tracers: grenades/rockets/plasma as trails, bullets as lines from muzzle to impact; **F3** toggles |
+| `PELOAD_HB_INFO=1` | player info above each player: shield and health %, held weapon, grenades, active camo, in a vehicle; **F4** toggles |
+| `PELOAD_HB_ITEMS=1` | weapons and equipment lying on the map, by name; **F5** toggles |
 | `PELOAD_H3="name=value,..."` | set Halo 3 engine settings, e.g. `render_debug_depth_render=1`, `camera_fov_scale=1.2` — all 72 are listed in `shim/docs/halo3-engine-globals.md` |
 
 The window opens at the largest 16:9 size that fits your screen (`PELOAD_WIN_SIZE=1280x720` picks a size), can be

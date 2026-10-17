@@ -121,7 +121,7 @@ static void wi_key(unsigned short kc,int down,int repeat){
     wi_post(h,msg,g,lp);
     if(getenv("PELOAD_TRACE_INPUT")){ char m[96]; int q=snprintf(m,sizeof m,"  [kbm] key kc=0x%x vk=0x%x sc=0x%x %s\n",kc,g,k.sc,down?"down":"up"); (void)!write(2,m,q); } }
 
-// F2 toggles the hitbox overlay (hitbox.c) at any time; the key is not forwarded to the game.
+// F2-F5 toggle the overlay features (hitbox.c: hitboxes, projectile tracers, player info, items); not forwarded to the game.
 static volatile int g_hb_toggle;
 // ---- NSEvent translation (main thread, from cocoa_pump). Returns 1 = consumed (don't forward to AppKit). ----
 static int wi_translate(id ev){
@@ -134,7 +134,8 @@ static int wi_translate(id ev){
         if(mods&(1ul<<20)) return 0;                       // Command shortcuts go to AppKit (Cmd+Q, Cmd+Tab ...)
         unsigned short kc=((unsigned short(*)(id,SEL))objc_msgSend)(ev,sel_registerName("keyCode"));
         signed char rep=type==10?((signed char(*)(id,SEL))objc_msgSend)(ev,sel_registerName("isARepeat")):0;
-        if(kc==0x78){ if(type==10 && !rep){ g_hb_toggle^=1; (void)!write(2,"  [hitbox] F2: overlay toggled\n",31); } return 1; }   // F2
+        { int bit = kc==0x78?0 : kc==0x63?1 : kc==0x76?2 : kc==0x60?3 : -1;   // F2 hitboxes, F3 tracers, F4 player info, F5 items
+          if(bit>=0){ if(type==10 && !rep){ g_hb_toggle^=1<<bit; char m[64]; int q=snprintf(m,sizeof m,"  [hitbox] F%d: overlay feature toggled\n",bit+2); (void)!write(2,m,q); } return 1; } }
         wi_key(kc,type==10,rep);
         if(type==10){ id s=((id(*)(id,SEL))objc_msgSend)(ev,sel_registerName("characters"));   // WM_CHAR (text entry)
             const char*u=s?((const char*(*)(id,SEL))objc_msgSend)(s,sel_registerName("UTF8String")):0;

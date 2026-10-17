@@ -7722,6 +7722,7 @@ static void patch_install(void); // fwd (PELOAD_PATCH guest-code overwrites)
 static void hook_install(void); // fwd (PELOAD_HOOK trace detours)
 static void skinguard_install(uint8_t*halo3base); // fwd (PELOAD_SKINGUARD null-key guard)
 static void vtguard_install(uint8_t*halo3base); // fwd (PELOAD_VTGUARD null-vtable release guard)
+static void hbdel_install(uint8_t*base);
 static void h3set_install(uint8_t*halo3base);   // fwd (PELOAD_H3 engine globals)
 static void capcb1_install(uint8_t*halo3base); // fwd (PELOAD_D3DGL_CAPCB1 per-section decompression capture)
 static void *export_lookup(uint8_t *base, const char *want);    // fwd
@@ -9076,7 +9077,7 @@ static uint8_t *load_guest(const char *path, const char *name){
     // BEFORE its DllMain/TLS callbacks run, so its __declspec(thread) globals resolve
     // to its own data instead of aliasing the exe's TLS block (index 0).
     if(opt->Dir[DIR_TLS].VA) register_tls((void*)(base+opt->Dir[DIR_TLS].VA), base, -1);
-    if(strcasestr(name,"halo3")){ waves_prefill(base); patch_install(); hook_install(); skinguard_install(base); vtguard_install(base); capcb1_install(base); h3set_install(base); } // patches can target halo3 now it's mapped
+    if(strcasestr(name,"halo3")){ waves_prefill(base); patch_install(); hook_install(); skinguard_install(base); vtguard_install(base); hbdel_install(base); capcb1_install(base); h3set_install(base); } // patches can target halo3 now it's mapped
     ws("  guest "); ws(name); ws(" @ "); whex((uint64_t)base);
     uint64_t ep=opt->EntryRVA;
     if(ep){ int (MSABI *dm)(void*,uint32_t,void*)=(void*)(base+ep); int r=dm(base,1,0);
@@ -9530,6 +9531,31 @@ static void h3set_install(uint8_t*base){ const char*e=getenv("PELOAD_H3"); if(!e
         H3Set*h=&g_h3set[g_nh3set++]; h->addr=(volatile uint8_t*)ad; h->type=(int)ty; h->v=v; snprintf(h->name,sizeof h->name,"%s",nm); h3set_write(h);
         k=snprintf(m,sizeof m,"  [h3] %s = %g (%s @ halo3+0x%llx)\n",nm,v,ty==5?"bool":ty==6?"real":ty==7?"short":"long",(unsigned long long)(ad-(uint64_t)base)); (void)!write(2,m,k); }
     if(g_nh3set){ pthread_t t; pthread_create(&t,0,h3set_thread,0); } }
+// Entry hook on halo3 object_delete (halo3+0x342ed8): calls hb_on_delete(handle) (hitbox.c) first, so the overlay
+// can record projectiles -- bullets are created and deleted inside one engine tick. The 14 prologue bytes are
+// checked before patching (another halo3 build is left alone) and relocated (no rip-relative operands).
+// PELOAD_NO_DELHOOK disables it.
+void __attribute__((ms_abi)) hb_on_delete(uint32_t handle);
+static void hbdel_install(uint8_t*base){
+    if(getenv("PELOAD_NO_DELHOOK")) return;
+    static const uint8_t pro[14]={0x48,0x89,0x5C,0x24,0x10,0x48,0x89,0x6C,0x24,0x18,0x56,0x57,0x41,0x54};
+    uint8_t*site=base+0x342ed8; if(memcmp(site,pro,14)){ (void)!write(2,"  [hbdel] object_delete prologue differs: not hooked\n",52); return; }
+    if(!g_hookpool){ g_hookpool=mmap(0,1<<20,PROT_READ|PROT_WRITE|PROT_EXEC,MAP_PRIVATE|MAP_ANON,-1,0); if(g_hookpool==MAP_FAILED){g_hookpool=0;return;} }
+    uint8_t*t=g_hookpool+g_hookoff, *w=t;
+    static const uint8_t save[]={0x51,0x52,0x41,0x50,0x41,0x51,0x50,0x41,0x52,0x41,0x53, 0x48,0x81,0xEC,0x80,0,0,0,
+        0xF3,0x0F,0x7F,0x44,0x24,0x20, 0xF3,0x0F,0x7F,0x4C,0x24,0x30, 0xF3,0x0F,0x7F,0x54,0x24,0x40, 0xF3,0x0F,0x7F,0x5C,0x24,0x50, 0xF3,0x0F,0x7F,0x64,0x24,0x60, 0xF3,0x0F,0x7F,0x6C,0x24,0x70};
+    static const uint8_t rest[]={0xF3,0x0F,0x6F,0x44,0x24,0x20, 0xF3,0x0F,0x6F,0x4C,0x24,0x30, 0xF3,0x0F,0x6F,0x54,0x24,0x40, 0xF3,0x0F,0x6F,0x5C,0x24,0x50, 0xF3,0x0F,0x6F,0x64,0x24,0x60, 0xF3,0x0F,0x6F,0x6C,0x24,0x70,
+        0x48,0x81,0xC4,0x80,0,0,0, 0x41,0x5B,0x41,0x5A,0x58,0x41,0x59,0x41,0x58,0x5A,0x59};
+    memcpy(w,save,sizeof save); w+=sizeof save;
+    *w++=0x48; *w++=0xB8; *(uint64_t*)w=(uint64_t)(uintptr_t)hb_on_delete; w+=8; *w++=0xFF; *w++=0xD0;   // mov rax,fn; call rax
+    memcpy(w,rest,sizeof rest); w+=sizeof rest;
+    memcpy(w,pro,14); w+=14;                                                                          // relocated prologue
+    *w++=0x49; *w++=0xBB; *(uint64_t*)w=(uint64_t)(site+14); w+=8; *w++=0x41; *w++=0xFF; *w++=0xE3;   // jmp site+14
+    sys_icache_invalidate(t,w-t); g_hookoff+=(w-t+15)&~15ull;
+    uintptr_t pg=(uintptr_t)site & ~0xFFFull; mprotect((void*)pg,0x2000,PROT_READ|PROT_WRITE|PROT_EXEC);
+    uint8_t*q=site; *q++=0x49; *q++=0xBB; *(uint64_t*)q=(uint64_t)(uintptr_t)t; q+=8; *q++=0x41; *q++=0xFF; *q++=0xE3; *q=0x90;   // mov r11,t; jmp r11; nop
+    sys_icache_invalidate(site,14);
+    (void)!write(2,"  [hbdel] object_delete hooked (projectile impacts for the tracer overlay)\n",74); }
 static void vtguard_install(uint8_t*halo3base){ if(!getenv("PELOAD_VTGUARD")) return; vtguard_one(halo3base,0x172bce,17,0x172bee);
     vtguard_one(halo3base,0x172f9a,15,0x172fb7); }
 static void bp_install(void){ const char*s=getenv("PELOAD_BP"); if(!s||!g_base) return;
