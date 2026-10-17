@@ -227,7 +227,9 @@ places (many mid-tick) -- that is why teleports crashed. Test: target.sh as host
 TARGET_ENV=PELOAD_ALLOW_TELEPORT=1, a quiet-run joiner (visible window: a hidden joiner crashed once in Apple's GL
 driver on the present thread), POST tpnext on 8766, compare positions on 8766 and 8765.
 Tested 2026-10-17: a client-side teleport (PELOAD_TELEPORT_CLIENT_TEST=1) shows on the client for <1 s and the host
-never accepts it (server-authoritative, no bug). Client requests are forwarded to the host's loader instead
+never accepts it (server-authoritative, no bug). Same against our local Reclaimer DEDICATED server (what public BTB
+servers run; anti-cheat at its default, one client): POST tpby&dx=10 moved the client's own view to x+10 for ~1.5 s,
+the server's stats (DED_ENV=PELOAD_STATS_HTTP=8767) never moved, the client snapped back -- nothing to report. Client requests are forwarded to the host's loader instead
 (PELOAD_TELEPORT_HOST=<host stats addr>; POST tpnext&slot=<target>&who=<requester>): the host moves the requester,
 both views agree within 0.5 s.
 WASAPI crash fixed 2026-10-17: "Experimental startup exception 0xC000001D at unmapped module" (rbx/rdi in

@@ -353,6 +353,7 @@ static pthread_t g_hb_simthread; static volatile int g_hb_simthread_ok;
 volatile int g_hb_job_pending;
 volatile int g_hb_tp_slot=-1;   // stats page "Teleport next to them": that players-table slot; -1 = F7's map reflection
 volatile int g_hb_tp_who=-1;    // who moves: a players-table slot (a client's request forwarded to this host); -1 = us
+volatile int g_hb_tp_by; float g_hb_tp_delta[3];   // move us by a delta (stats page tpby; tests)
 static const char* hb_tag_name(uint32_t def);
 // Teleport next to another player (stats page "Teleport next to them"), the way the Reclaimer client teleports
 // (shim/docs/teleport.md): host only, on the engine main thread at main_loop_body (between ticks), inside halo3's
@@ -432,6 +433,13 @@ static void hb_engine_jobs_locked(uint8_t*h3,void**tarr,uint32_t idx,uint8_t*arr
       int li=lu&0xFFFF; if(lu!=0xFFFFFFFFu && li<hi){ uint8_t*e=data+(size_t)li*0x18; uint8_t*p=*(uint8_t**)(e+0x10);
           if(e[3]==0 && *(uint16_t*)e==(uint16_t)(lu>>16) && p){ me=lu; memcpy(mo,p+0x50,12); } } }
     if(me==0xFFFFFFFFu){ (void)!write(2,"  [teleport] no body at the camera (dead or in a vehicle?)\n",59); return; }
+    if(g_hb_tp_by){ g_hb_tp_by=0; uint8_t*mp=*(uint8_t**)(data+(size_t)(me&0xFFFF)*0x18+0x10); if(!mp) return;
+        const float*o=(const float*)(mp+0x50), *f=(const float*)(mp+0x5c); float pos[3]={o[0]+g_hb_tp_delta[0],o[1]+g_hb_tp_delta[1],o[2]+g_hb_tp_delta[2]};
+        float fwd[3]={f[0],f[1],0}, l=sqrtf(fwd[0]*fwd[0]+fwd[1]*fwd[1]); if(l>1e-4f){ fwd[0]/=l; fwd[1]/=l; } else { fwd[0]=1; fwd[1]=0; } float up[3]={0,0,1};
+        uint16_t loc=0xFFFF; float p1[3]={pos[0],pos[1],pos[2]+0.3f}; ((void(__attribute__((ms_abi))*)(uint16_t*,const float*))(h3+0x9bc78))(&loc,p1);
+        char m[160]; int k=snprintf(m,sizeof m,"  [teleport] by (%.2f %.2f %.2f): (%.2f %.2f %.2f) -> (%.2f %.2f %.2f)%s\n",g_hb_tp_delta[0],g_hb_tp_delta[1],g_hb_tp_delta[2],o[0],o[1],o[2],pos[0],pos[1],pos[2],loc==0xFFFF?" refused: outside the map":""); (void)!write(2,m,k);
+        if(loc==0xFFFF) return;
+        ((void(__attribute__((ms_abi))*)(uint32_t,const float*,const float*,const float*,uint8_t))(h3+0x259410))(me,pos,fwd,up,1); return; }
     int tps=g_hb_tp_slot, who=g_hb_tp_who; g_hb_tp_slot=-1; g_hb_tp_who=-1;
     if(tps>=0 && who>=0){   // a forwarded request: move that player, not us
         uint8_t*parr=*(uint8_t**)((uint8_t*)tarr[idx]+0x10); if(!parr || *(uint32_t*)(parr+0x2c)!=0x64407440) return;

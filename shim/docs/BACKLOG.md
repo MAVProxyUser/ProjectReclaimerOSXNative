@@ -27,8 +27,9 @@ Closed by the user 2026-10-16: teleporter audio desync (not seen since the XAudi
   bits, choices); the stats page decodes every option of the running mode from the raw variant. Checked live on
   Slayer (all rounds/respawn/map/powerup/points values and the powerup trait sets match the game); halo3's -1 in the
   16-bit weapon/vehicle set fields shows as "Map default"
-- Teleport from either end (2026-10-17): a client-side move is rejected by the host (tested: shown < 1 s, then snapped
-  back); a client's request is forwarded to the host's loader (PELOAD_TELEPORT_HOST), which moves the requester.
+- Teleport from either end (2026-10-17): a client-side move is rejected by the host (tested on a listen host and on our
+  local Reclaimer dedicated server -- the software public BTB servers run: shown ~1.5 s, never accepted, snapped back;
+  nothing to report); a client's request is forwarded to the host's loader (PELOAD_TELEPORT_HOST), which moves the requester.
   Audio crash fixed on the way (AudioQueue callback vs dispose race, caulk SIGILL)
 - Teleport next to a selected player (2026-10-17): host only, from an entry hook on main_loop_body (halo3+0xb2250,
   engine main thread, between ticks) inside halo3's game-state lock; leaves a vehicle first; destination beside the

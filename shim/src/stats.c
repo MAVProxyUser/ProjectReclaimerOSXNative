@@ -283,6 +283,11 @@ static int st_control(const char*act,const char*qs){
         k=snprintf(m,sizeof m,"  [stats] page: %s %s\n",feat[f],hb_feat(f)?"on":"off"); (void)!write(2,m,k); return 1; }
     if(!strcmp(act,"teams")){ static const char*const tm[3]={"all","enemies only","friends only"}; __atomic_fetch_add(&g_hb_teamcycle,1,__ATOMIC_ACQ_REL);
         k=snprintf(m,sizeof m,"  [stats] page: showing %s\n",tm[hb_team_mode()]); (void)!write(2,m,k); return 1; }
+    if(!strcmp(act,"tpby")){   // move us by a delta (host; or a client with PELOAD_TELEPORT_CLIENT_TEST for the authority test)
+        if(!getenv("PELOAD_ALLOW_TELEPORT") || (!st_is_host() && !getenv("PELOAD_TELEPORT_CLIENT_TEST"))) return 0;
+        float d[3]={0,0,0}; const char*v; if((v=strstr(qs,"dx="))) d[0]=(float)atof(v+3); if((v=strstr(qs,"dy="))) d[1]=(float)atof(v+3); if((v=strstr(qs,"dz="))) d[2]=(float)atof(v+3);
+        for(int i=0;i<3;i++) if(!(d[i]>=-50 && d[i]<=50)) return 0;
+        extern volatile int g_hb_tp_by; extern float g_hb_tp_delta[3]; memcpy(g_hb_tp_delta,d,12); g_hb_tp_by=1; __atomic_store_n(&g_hb_job_pending,1,__ATOMIC_RELEASE); return 1; }
     if(!strcmp(act,"tpnext")){ if(!getenv("PELOAD_ALLOW_TELEPORT")) return 0; const char*v=strstr(qs,"slot="); int sl=v?atoi(v+5):-1; if(sl<0 || sl>255) return 0;
         const char*w=strstr(qs,"who="); int who=w?atoi(w+4):-1; if(who>255) return 0;
         // a client can't move itself (the host snaps it back): forward to the host's loader (PELOAD_TELEPORT_HOST =
