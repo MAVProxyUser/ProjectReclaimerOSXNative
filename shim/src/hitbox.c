@@ -74,7 +74,8 @@ static void* objdump_thread(void*a){ (void)a; pthread_setname_np("shim-objdump")
 // PELOAD_HITBOXES=1: collision hitboxes (what damage tests) for bipeds, vehicles and giants -- bounding spheres where
 // no collision model is found; =all also spheres for weapons, equipment and projectiles; =spheres: bounding spheres only.
 static int g_hb_on=-1, g_hb_all, g_hb_spheres;
-static int hb_enabled(void){ if(g_hb_on<0){ const char*e=getenv("PELOAD_HITBOXES"); g_hb_on=e&&*e&&strcmp(e,"0"); g_hb_all=e&&!strcasecmp(e,"all"); g_hb_spheres=e&&!strcasecmp(e,"spheres"); } return g_hb_on; }
+static int hb_enabled(void){ if(g_hb_on<0){ const char*e=getenv("PELOAD_HITBOXES"); g_hb_on=e&&*e&&strcmp(e,"0"); g_hb_all=e&&!strcasecmp(e,"all"); g_hb_spheres=e&&!strcasecmp(e,"spheres"); }
+    return g_hb_on ^ g_hb_toggle; }   // F2 (wininput.c) flips it at runtime
 // A world camera: rows 0-3 are a perspective view-projection (cb_looks_viewproj) AND row 7 is the camera position
 // it was built from -- the camera sits at the clip-space origin (x = y = w = 0). Rejects the view-space-only
 // projections of full-screen passes (row 3 = 0,0,1,0), shadow-map views and the first-person weapon's view.
@@ -130,7 +131,7 @@ typedef struct { char path[1024]; int fd; uint32_t tagoff; uint64_t vbase, fsize
 static HbMap g_hbm[6]; static int g_hbm_n;
 static char g_hb_mappaths[8][1024]; static int g_hb_nmappaths; static pthread_mutex_t g_hb_mapmx=PTHREAD_MUTEX_INITIALIZER;
 static void hb_note_map(const char*p){     // CreateFileW: remember the scenario maps the game opens (newest first)
-    if(!hb_enabled() || !p) return; size_t n=strlen(p); if(n<5 || strcasecmp(p+n-4,".map")) return;
+    if(!p) return; size_t n=strlen(p); if(n<5 || strcasecmp(p+n-4,".map")) return;   // always: F2 can enable the overlay later
     const char*b=strrchr(p,'/'); b=b?b+1:p; if(!strcasecmp(b,"shared.map") || !strcasecmp(b,"campaign.map")) return;
     pthread_mutex_lock(&g_hb_mapmx); int k=0; for(; k<g_hb_nmappaths; k++) if(!strcmp(g_hb_mappaths[k],p)) break;
     if(k==g_hb_nmappaths && k<8) g_hb_nmappaths++; if(k>=8) k=7;
