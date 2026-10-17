@@ -65,13 +65,15 @@ static uint32_t MSABI wi_GetRawInputDeviceInfoW(void*dev,uint32_t cmd,void*data,
     if(!sz) return (uint32_t)-1;
     if(cmd==0x2000000b/*RIDI_DEVICEINFO*/){ uint32_t need=32; if(!data){ *sz=need; return 0; } if(*sz<need) return (uint32_t)-1; memset(data,0,need); uint32_t*u=data; u[0]=need; u[1]=(dev==(void*)0x4B42)?1:0; return need; }
     if(!data){ *sz=1; return 0; } if(*sz>=1){ ((uint16_t*)data)[0]=0; return 1; } return (uint32_t)-1; }
-// Busy-poll damper: the client's "mcc-voice" thread (no microphone) polls the push-to-talk key + the clock in a loop with no
-// sleep -- ~500k GetAsyncKeyState calls a second, a whole core. On threads named in PELOAD_POLL_DAMP_THREADS (default
-// "mcc-voice"), more than 4 polls within 1 ms sleep 0.5 ms here: push-to-talk still reacts within a millisecond.
-// PELOAD_POLL_DAMP=0 = off.
+// Busy-poll damper (OPT-IN, PELOAD_POLL_DAMP=1): the client's "mcc-voice" thread (no microphone) polls the push-to-talk key
+// + the clock in a loop with no sleep -- ~500k GetAsyncKeyState calls a second, a whole core. On threads named in
+// PELOAD_POLL_DAMP_THREADS (default "mcc-voice"), more than 4 polls within 1 ms sleep 0.5 ms here. OFF by default since
+// 2026-10-17: the key poll (exe+0x7385e0) holds a lock the game's MAIN thread also takes (it polls keys through the same
+// function), so sleeping inside GetAsyncKeyState stalled the main thread -- sluggish sticks, choppy movement. A safe
+// damping point has to be outside that lock.
 static __thread int t_damp=-1, t_damp_chk; static __thread uint64_t t_damp_win; static __thread int t_damp_n;
 static void wi_poll_damp(void){
-    static int on=-1; static const char*names; if(on<0){ const char*e=getenv("PELOAD_POLL_DAMP"); on=!(e&&!strcmp(e,"0")); names=getenv("PELOAD_POLL_DAMP_THREADS"); if(!names) names="mcc-voice"; }
+    static int on=-1; static const char*names; if(on<0){ const char*e=getenv("PELOAD_POLL_DAMP"); on=e&&*e&&strcmp(e,"0"); names=getenv("PELOAD_POLL_DAMP_THREADS"); if(!names) names="mcc-voice"; }
     if(!on) return;
     if(t_damp<0 || (++t_damp_chk&8191)==0){ char nm[64]={0}; pthread_getname_np(pthread_self(),nm,sizeof nm); t_damp=0;
         for(const char*p=names; *p; ){ const char*c=strchr(p,','); size_t n=c?(size_t)(c-p):strlen(p); if(n && n<sizeof nm){ char w[64]; memcpy(w,p,n); w[n]=0; if(strstr(nm,w)) t_damp=1; } if(!c) break; p=c+1; } }
