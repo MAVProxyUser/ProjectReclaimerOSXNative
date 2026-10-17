@@ -3910,11 +3910,128 @@ static void d3dgl_note_rt(D3DObj* rt){ if(!rt||!getenv("PELOAD_D3DGL_DUMP_RT")) 
 #define GLE_LSTAT 0x8B82
 #define GLE_STREAM 0x88E0
 #define GLE_COLORBIT 0x4000
+// PELOAD_GLCOUNT=1: every GL entry point goes through a counting thunk; each present prints the most-called ones per
+// 2 s (which GL calls a draw costs). Off: the real pointers, untouched.
+static const char* g_glc_name[1024]; static volatile uint64_t g_glc_n[1024]; static int g_glc_cnt;
+static void* gl_count_wrap(void*real,const char*name){
+    static int on=-1; if(on<0) on=getenv("PELOAD_GLCOUNT")?1:0;
+    if(!on || !real || g_glc_cnt>=1024) return real;
+    static uint8_t*pool; if(!pool){ pool=mmap(0,1024*32,PROT_READ|PROT_WRITE|PROT_EXEC,MAP_PRIVATE|MAP_ANON,-1,0); if(pool==MAP_FAILED){ pool=0; return real; } }
+    int i=g_glc_cnt++; g_glc_name[i]=name; uint8_t*p=pool+i*32; int o=0; volatile uint64_t*c=&g_glc_n[i];
+    p[o++]=0x48;p[o++]=0xB8; memcpy(p+o,&c,8); o+=8;              // mov rax,&counter
+    p[o++]=0xF0;p[o++]=0x48;p[o++]=0xFF;p[o++]=0x00;             // lock inc qword [rax]
+    p[o++]=0x48;p[o++]=0xB8; memcpy(p+o,&real,8); o+=8;           // mov rax,real
+    p[o++]=0xFF;p[o++]=0xE0;                                      // jmp rax
+    sys_icache_invalidate(p,32); return p; }
+static void gl_count_report(void){
+    if(!g_glc_cnt) return; static double tl; double now=mono_s(); if(now-tl<2.0) return; tl=now;
+    uint64_t tot=0; for(int i=0;i<g_glc_cnt;i++) tot+=g_glc_n[i];
+    char m[1600]; int k=snprintf(m,sizeof m,"  [glcount] %llu GL calls in 2 s:",(unsigned long long)tot);
+    for(int t=0;t<24;t++){ int bi=-1; uint64_t bc=0; for(int i=0;i<g_glc_cnt;i++) if(g_glc_n[i]>bc){ bc=g_glc_n[i]; bi=i; } if(bi<0) break;
+        k+=snprintf(m+k,sizeof m-k," %s %llu,",g_glc_name[bi]+2,(unsigned long long)bc); g_glc_n[bi]=0; if(k>(int)sizeof m-80) break; }
+    for(int i=0;i<g_glc_cnt;i++) g_glc_n[i]=0; m[k++]='\n'; (void)!write(2,m,k); }
+
+
+// ---- GL state shadow: skip GL calls that set what is already set -------------------------------------------------------
+// The GL thread makes ~31 GL calls per draw in big games (PELOAD_GLCOUNT), each ~0.2-0.3 us in Apple's driver under
+// Rosetta; many re-bind the bound buffer / VAO / program or re-set identical stencil, enable and blend state. One shadow
+// per CGL context (the present thread has its own); nothing in the loader deletes buffers, VAOs or programs, so cached
+// names can't go stale. Opt-in (PELOAD_D3DGL_GLCACHE=1): in a 57-player game the 40% fewer calls gave no measurable fps --
+// Apple's driver already returns early on redundant binds; the cost is in real state changes, draws and copies.
+typedef struct { unsigned buf, type; int size, stride; unsigned char norm, isint, ok; const void* ptr; } GlcAttr;
+typedef struct {
+    void* ctx;
+    unsigned buf[8]; unsigned char bufok[8];
+    unsigned vao; unsigned char vaook;
+    GlcAttr attr[32];
+    unsigned prog; unsigned char progok;
+    struct { unsigned func, mask, sfail, dpfail, dppass; int ref; unsigned char fok, ook; } st[2];
+    unsigned smask; unsigned char smaskok;
+    uint32_t cap, capok;
+    unsigned prim; unsigned char primok;
+    struct { unsigned char cm[4], blend, cmok, bfok, beok, blendok; unsigned bf[4], be[2]; } rt[8];
+    unsigned gen;
+} GlShadow;
+static GlShadow g_gls[4]; static int g_gls_next; volatile int g_glc_on=1; volatile unsigned g_glc_gen=1;   // PELOAD_AB=glcache flips g_glc_on
+
+static struct { void(*BindBuffer)(unsigned,unsigned); void(*BindBufferRange)(unsigned,unsigned,unsigned,long,long); void(*BindVertexArray)(unsigned);
+    void(*VertexAttribPointer)(unsigned,int,unsigned,unsigned char,int,const void*); void(*VertexAttribIPointer)(unsigned,int,unsigned,int,const void*);
+    void(*StencilFuncSeparate)(unsigned,unsigned,int,unsigned); void(*StencilOpSeparate)(unsigned,unsigned,unsigned,unsigned); void(*StencilMask)(unsigned);
+    void(*Enable)(unsigned); void(*Disable)(unsigned); void(*Enablei)(unsigned,unsigned); void(*Disablei)(unsigned,unsigned);
+    void(*PrimitiveRestartIndex)(unsigned); void(*UseProgram)(unsigned);
+    void(*ColorMaski)(unsigned,unsigned char,unsigned char,unsigned char,unsigned char); void(*ColorMask)(unsigned char,unsigned char,unsigned char,unsigned char);
+    void(*BlendFuncSeparatei)(unsigned,unsigned,unsigned,unsigned,unsigned); void(*BlendFuncSeparate)(unsigned,unsigned,unsigned,unsigned); void(*BlendFunc)(unsigned,unsigned);
+    void(*BlendEquationSeparatei)(unsigned,unsigned,unsigned); void(*BlendEquationSeparate)(unsigned,unsigned); } GR;
+static GlShadow* gls(void){ void*c=CGLGetCurrentContext(); GlShadow*s=0;
+    for(int i=0;i<4;i++) if(g_gls[i].ctx==c){ s=&g_gls[i]; break; }
+    if(!s){ s=&g_gls[g_gls_next]; g_gls_next=(g_gls_next+1)&3; memset(s,0,sizeof *s); s->ctx=c; s->gen=g_glc_gen; }
+    if(s->gen!=g_glc_gen){ memset(s,0,sizeof *s); s->ctx=c; s->gen=g_glc_gen; }   // the cache was off: forget everything
+    return s; }
+static int glc_tgt(unsigned t){ switch(t){ case 0x8892: return 0; case 0x8893: return 1; case 0x8A11: return 2; case 0x8C2A: return 3; case 0x8F36: return 4; case 0x8F37: return 5; case 0x88EB: return 6; case 0x88EC: return 7; } return -1; }
+static void glc_BindBuffer(unsigned t,unsigned b){ if(!g_glc_on){ GR.BindBuffer(t,b); return; } GlShadow*s=gls(); int i=glc_tgt(t); if(i>=0 && s->bufok[i] && s->buf[i]==b) return; GR.BindBuffer(t,b); if(i>=0){ s->buf[i]=b; s->bufok[i]=1; } }
+static void glc_BindBufferRange(unsigned t,unsigned idx,unsigned b,long off,long sz){ if(!g_glc_on){ GR.BindBufferRange(t,idx,b,off,sz); return; } GR.BindBufferRange(t,idx,b,off,sz); GlShadow*s=gls(); int i=glc_tgt(t); if(i>=0){ s->buf[i]=b; s->bufok[i]=1; } }   // also sets the generic binding
+static void glc_BindVertexArray(unsigned v){ if(!g_glc_on){ GR.BindVertexArray(v); return; } GlShadow*s=gls(); if(s->vaook && s->vao==v) return; GR.BindVertexArray(v); s->vao=v; s->vaook=1; s->bufok[1]=0; for(int a=0;a<32;a++) s->attr[a].ok=0; }
+static void glc_VertexAttribPointer(unsigned i,int size,unsigned type,unsigned char norm,int stride,const void*ptr){ if(!g_glc_on){ GR.VertexAttribPointer(i,size,type,norm,stride,ptr); return; } GlShadow*s=gls();
+    if(i<32 && s->vaook && s->bufok[0]){ GlcAttr*A=&s->attr[i]; if(A->ok && !A->isint && A->buf==s->buf[0] && A->size==size && A->type==type && A->norm==norm && A->stride==stride && A->ptr==ptr) return; }
+    GR.VertexAttribPointer(i,size,type,norm,stride,ptr);
+    if(i<32){ GlcAttr*A=&s->attr[i]; if(s->vaook && s->bufok[0]){ A->buf=s->buf[0]; A->size=size; A->type=type; A->norm=norm; A->stride=stride; A->ptr=ptr; A->isint=0; A->ok=1; } else A->ok=0; } }
+static void glc_VertexAttribIPointer(unsigned i,int size,unsigned type,int stride,const void*ptr){ if(!g_glc_on){ GR.VertexAttribIPointer(i,size,type,stride,ptr); return; } GlShadow*s=gls();
+    if(i<32 && s->vaook && s->bufok[0]){ GlcAttr*A=&s->attr[i]; if(A->ok && A->isint && A->buf==s->buf[0] && A->size==size && A->type==type && A->stride==stride && A->ptr==ptr) return; }
+    GR.VertexAttribIPointer(i,size,type,stride,ptr);
+    if(i<32){ GlcAttr*A=&s->attr[i]; if(s->vaook && s->bufok[0]){ A->buf=s->buf[0]; A->size=size; A->type=type; A->norm=0; A->stride=stride; A->ptr=ptr; A->isint=1; A->ok=1; } else A->ok=0; } }
+static void glc_StencilFuncSeparate(unsigned face,unsigned func,int ref,unsigned mask){ if(!g_glc_on){ GR.StencilFuncSeparate(face,func,ref,mask); return; } GlShadow*s=gls(); int f0=face==0x404||face==0x408, f1=face==0x405||face==0x408;
+    if(f0||f1){ int same=1; for(int k=0;k<2;k++) if((k?f1:f0) && !(s->st[k].fok && s->st[k].func==func && s->st[k].ref==ref && s->st[k].mask==mask)) same=0; if(same) return; }
+    GR.StencilFuncSeparate(face,func,ref,mask); for(int k=0;k<2;k++) if(k?f1:f0){ s->st[k].func=func; s->st[k].ref=ref; s->st[k].mask=mask; s->st[k].fok=1; } }
+static void glc_StencilOpSeparate(unsigned face,unsigned sf,unsigned df,unsigned dp){ if(!g_glc_on){ GR.StencilOpSeparate(face,sf,df,dp); return; } GlShadow*s=gls(); int f0=face==0x404||face==0x408, f1=face==0x405||face==0x408;
+    if(f0||f1){ int same=1; for(int k=0;k<2;k++) if((k?f1:f0) && !(s->st[k].ook && s->st[k].sfail==sf && s->st[k].dpfail==df && s->st[k].dppass==dp)) same=0; if(same) return; }
+    GR.StencilOpSeparate(face,sf,df,dp); for(int k=0;k<2;k++) if(k?f1:f0){ s->st[k].sfail=sf; s->st[k].dpfail=df; s->st[k].dppass=dp; s->st[k].ook=1; } }
+static void glc_StencilMask(unsigned m){ if(!g_glc_on){ GR.StencilMask(m); return; } GlShadow*s=gls(); if(s->smaskok && s->smask==m) return; GR.StencilMask(m); s->smask=m; s->smaskok=1; }
+static int glc_cap(unsigned c){ switch(c){ case 0x0BE2: return 0; case 0x0B71: return 1; case 0x0B90: return 2; case 0x0B44: return 3; case 0x0C11: return 4; case 0x8037: return 5;
+    case 0x8F9D: return 6; case 0x8DB9: return 7; case 0x864F: return 8; case 0x809E: return 9; case 0x809D: return 10; case 0x8C89: return 11; case 0x2A02: return 12; case 0x884F: return 13; } return -1; }
+static void glc_able(unsigned c,int on){ if(!g_glc_on){ if(on) GR.Enable(c); else GR.Disable(c); return; } GlShadow*s=gls(); int i=glc_cap(c);
+    if(i>=0 && (s->capok>>i&1) && ((s->cap>>i&1)==(unsigned)on)) return;
+    if(on) GR.Enable(c); else GR.Disable(c);
+    if(i>=0){ s->capok|=1u<<i; if(on) s->cap|=1u<<i; else s->cap&=~(1u<<i); }
+    if(i==0) for(int r=0;r<8;r++){ s->rt[r].blend=(unsigned char)on; s->rt[r].blendok=1; } }
+static void glc_Enable(unsigned c){ glc_able(c,1); }
+static void glc_Disable(unsigned c){ glc_able(c,0); }
+static void glc_ablei(unsigned c,unsigned idx,int on){ if(!g_glc_on){ if(on) GR.Enablei(c,idx); else GR.Disablei(c,idx); return; } GlShadow*s=gls();
+    if(c==0x0BE2 && idx<8){ if(s->rt[idx].blendok && s->rt[idx].blend==on) return; if(on) GR.Enablei(c,idx); else GR.Disablei(c,idx); s->rt[idx].blend=(unsigned char)on; s->rt[idx].blendok=1; s->capok&=~1u; return; }
+    if(on) GR.Enablei(c,idx); else GR.Disablei(c,idx); }
+static void glc_Enablei(unsigned c,unsigned i){ glc_ablei(c,i,1); }
+static void glc_Disablei(unsigned c,unsigned i){ glc_ablei(c,i,0); }
+static void glc_PrimitiveRestartIndex(unsigned v){ if(!g_glc_on){ GR.PrimitiveRestartIndex(v); return; } GlShadow*s=gls(); if(s->primok && s->prim==v) return; GR.PrimitiveRestartIndex(v); s->prim=v; s->primok=1; }
+static void glc_UseProgram(unsigned p){ if(!g_glc_on){ GR.UseProgram(p); return; } GlShadow*s=gls(); if(s->progok && s->prog==p) return; GR.UseProgram(p); s->prog=p; s->progok=1; }
+static void glc_ColorMaski(unsigned i,unsigned char r,unsigned char g,unsigned char b,unsigned char a){ if(!g_glc_on){ GR.ColorMaski(i,r,g,b,a); return; } GlShadow*s=gls();
+    if(i<8 && s->rt[i].cmok && s->rt[i].cm[0]==r && s->rt[i].cm[1]==g && s->rt[i].cm[2]==b && s->rt[i].cm[3]==a) return;
+    GR.ColorMaski(i,r,g,b,a); if(i<8){ s->rt[i].cm[0]=r; s->rt[i].cm[1]=g; s->rt[i].cm[2]=b; s->rt[i].cm[3]=a; s->rt[i].cmok=1; } }
+static void glc_ColorMask(unsigned char r,unsigned char g,unsigned char b,unsigned char a){ GlShadow*s=gls(); GR.ColorMask(r,g,b,a);
+    for(int i=0;i<8;i++){ s->rt[i].cm[0]=r; s->rt[i].cm[1]=g; s->rt[i].cm[2]=b; s->rt[i].cm[3]=a; s->rt[i].cmok=1; } }
+static void glc_BlendFuncSeparatei(unsigned i,unsigned a,unsigned b,unsigned c,unsigned d){ if(!g_glc_on){ GR.BlendFuncSeparatei(i,a,b,c,d); return; } GlShadow*s=gls();
+    if(i<8 && s->rt[i].bfok && s->rt[i].bf[0]==a && s->rt[i].bf[1]==b && s->rt[i].bf[2]==c && s->rt[i].bf[3]==d) return;
+    GR.BlendFuncSeparatei(i,a,b,c,d); if(i<8){ s->rt[i].bf[0]=a; s->rt[i].bf[1]=b; s->rt[i].bf[2]=c; s->rt[i].bf[3]=d; s->rt[i].bfok=1; } }
+static void glc_BlendFuncSeparate(unsigned a,unsigned b,unsigned c,unsigned d){ GlShadow*s=gls(); GR.BlendFuncSeparate(a,b,c,d);
+    for(int i=0;i<8;i++){ s->rt[i].bf[0]=a; s->rt[i].bf[1]=b; s->rt[i].bf[2]=c; s->rt[i].bf[3]=d; s->rt[i].bfok=1; } }
+static void glc_BlendFunc(unsigned a,unsigned b){ GlShadow*s=gls(); GR.BlendFunc(a,b);
+    for(int i=0;i<8;i++){ s->rt[i].bf[0]=a; s->rt[i].bf[1]=b; s->rt[i].bf[2]=a; s->rt[i].bf[3]=b; s->rt[i].bfok=1; } }
+static void glc_BlendEquationSeparatei(unsigned i,unsigned a,unsigned b){ if(!g_glc_on){ GR.BlendEquationSeparatei(i,a,b); return; } GlShadow*s=gls();
+    if(i<8 && s->rt[i].beok && s->rt[i].be[0]==a && s->rt[i].be[1]==b) return;
+    GR.BlendEquationSeparatei(i,a,b); if(i<8){ s->rt[i].be[0]=a; s->rt[i].be[1]=b; s->rt[i].beok=1; } }
+static void glc_BlendEquationSeparate(unsigned a,unsigned b){ GlShadow*s=gls(); GR.BlendEquationSeparate(a,b); for(int i=0;i<8;i++){ s->rt[i].be[0]=a; s->rt[i].be[1]=b; s->rt[i].beok=1; } }
+#define GLC_WRAP(n) do{ if(G.n){ GR.n=(void*)G.n; G.n=(void*)glc_##n; } }while(0)
+static void glc_install(void){ if(!getenv("PELOAD_D3DGL_GLCACHE")) return;   // opt-in: cut GL calls 31 -> 18 a draw, no measurable fps change
+    if(!G.BindBuffer||!G.BindVertexArray||!G.Enable||!G.Disable) return;
+    GLC_WRAP(BindBuffer); GLC_WRAP(BindBufferRange); GLC_WRAP(BindVertexArray); GLC_WRAP(VertexAttribPointer); GLC_WRAP(VertexAttribIPointer);
+    GLC_WRAP(StencilFuncSeparate); GLC_WRAP(StencilOpSeparate); GLC_WRAP(StencilMask); GLC_WRAP(Enable); GLC_WRAP(Disable);
+    if(G.Enablei && G.Disablei){ GLC_WRAP(Enablei); GLC_WRAP(Disablei); }
+    GLC_WRAP(PrimitiveRestartIndex); GLC_WRAP(UseProgram); GLC_WRAP(ColorMaski); GLC_WRAP(ColorMask);
+    GLC_WRAP(BlendFuncSeparatei); GLC_WRAP(BlendFuncSeparate); GLC_WRAP(BlendFunc); GLC_WRAP(BlendEquationSeparatei); GLC_WRAP(BlendEquationSeparate); }
+
 static int d3dgl_loadgl(void){
     static int done,ok;
     if(done) return ok;
     done=1;
-    #define L(n) G.n=dlsym(RTLD_DEFAULT,"gl" #n)
+    #define L(n) G.n=gl_count_wrap(dlsym(RTLD_DEFAULT,"gl" #n),"gl" #n)
     L(CreateShader);L(ShaderSource);L(CompileShader);L(GetShaderiv);L(GetShaderInfoLog);
     L(CreateProgram);L(AttachShader);L(DetachShader);L(DeleteShader);L(LinkProgram);L(GetProgramiv);
     L(GetProgramInfoLog);L(ProgramParameteri);L(GenProgramPipelines);L(BindProgramPipeline);L(UseProgramStages);
@@ -3935,6 +4052,7 @@ static int d3dgl_loadgl(void){
     L(DrawBuffers);L(DrawBuffer);L(DepthFunc);L(ClearDepth);L(ClearStencil);L(StencilFuncSeparate);L(StencilOpSeparate);L(StencilMask);
     L(Enablei);L(Disablei);L(BlendFuncSeparatei);L(BlendEquationSeparatei);L(ColorMaski);
     #undef L
+    glc_install();
     ok = G.CreateShader && G.LinkProgram && G.GenProgramPipelines && G.UseProgramStages &&
          G.GenFramebuffers && G.DrawArrays && G.ProgramUniform4fv;
     if(!ok) ws("  [d3dgl] GL symbols missing (need 4.1 core + separable programs)\n");
@@ -5004,7 +5122,30 @@ static void d3dgl_ubo_upload(D3DObj*cb,uint32_t extent){
     G.BufferData(0x8A11,(long)cb->ubosz,0,0x88E8/*DYNAMIC_DRAW: orphan old storage*/);
     G.BufferSubData(0x8A11,0,(long)cb->size,cb->data);
     cb->uboglver=cb->ver; }
-static long d3dgl_ring_put(const void*src,uint64_t n); static unsigned g_ring; static uint32_t g_ring_gen; static uint64_t g_cbring_bytes, g_cbring_puts, g_cbbind_calls;
+static long d3dgl_ring_put(const void*src,uint64_t n); static unsigned g_ring; static uint32_t g_ring_gen; static uint64_t g_cbring_bytes, g_cbring_puts, g_cbbind_calls; static uint64_t g_ring_off, g_ring_sz;
+// Stage all of a draw's constant buffers that need re-sending (changed since their last ring copy) with one
+// MapBufferRange/UnmapBuffer instead of one pair each (~1.7 a draw in big games); d3dgl_bind_ubo then only binds.
+// PELOAD_D3DGL_NOCBBATCH = one map per buffer.
+static uint64_t g_cbbatch_n, g_cbbatch_cbs; volatile int g_cbbatch_on=-1;   // PELOAD_AB=cbbatch flips it
+static void d3dgl_ubo_batch(D3DObj*const*cbs,const uint32_t*firsts,const int*nvecs,int count){
+    if(g_cbbatch_on<0) g_cbbatch_on=GENV1("PELOAD_D3DGL_NOCBBATCH")?0:1;
+    if(count<2 || !g_ring || !G.MapBufferRange || !g_cbbatch_on || GENV1("PELOAD_D3DGL_NORING") || GENV1("PELOAD_D3DGL_NORING_CB")) return;
+    D3DObj* u[32]; uint64_t un[32]; int nu=0; uint64_t total=0;
+    for(int i=0;i<count;i++){ D3DObj*cb=cbs[i]; if(!cb||!cb->data||!cb->size) continue;
+        if(!(cb->uboglver!=cb->ver || cb->ubosz!=g_ring_gen || cb->glubo==0)) continue;   // its ring copy is current
+        long sub=(long)firsts[i]*16; if((uint64_t)sub>=cb->size) sub=0;
+        uint64_t n=cb->size; if(n<(uint64_t)(sub+(long)nvecs[i]*16)) n=(uint64_t)(sub+(long)nvecs[i]*16);
+        int k; for(k=0;k<nu;k++) if(u[k]==cb) break;
+        if(k<nu){ if(n>un[k]){ total+=((n+255)&~255ull)-((un[k]+255)&~255ull); un[k]=n; } continue; }
+        u[nu]=cb; un[nu]=n; nu++; total+=(n+255)&~255ull; }
+    if(nu<2 || total>g_ring_sz || g_ring_off+total>g_ring_sz) return;   // one buffer, or no room: the per-buffer path
+    G.BindBuffer(GLE_ARRAY,g_ring);
+    uint8_t*p=G.MapBufferRange(GLE_ARRAY,(long)g_ring_off,(long)total,0x0002/*WRITE*/|0x0004/*INVALIDATE_RANGE*/|0x0020/*UNSYNCHRONIZED*/);
+    if(!p) return;
+    uint64_t o=0;
+    for(int k=0;k<nu;k++){ D3DObj*cb=u[k]; memcpy(p+o,cb->data,(size_t)cb->size); if(un[k]>cb->size) memset(p+o+cb->size,0,(size_t)(un[k]-cb->size));
+        cb->uboglver=cb->ver; cb->ubosz=g_ring_gen; cb->glubo=(unsigned)(g_ring_off+o+1); g_cbring_bytes+=un[k]; o+=(un[k]+255)&~255ull; }
+    G.UnmapBuffer(GLE_ARRAY); g_ring_off+=total; g_cbbatch_n++; g_cbbatch_cbs+=nu; }
 static void d3dgl_bind_ubo(unsigned binding,D3DObj*cb,uint32_t first,int nvec){
     long need=(long)nvec*16, off=0; unsigned buf; g_cbbind_calls++;
     if(cb && cb->data && cb->size && !GENV1("PELOAD_D3DGL_NORING") && !GENV1("PELOAD_D3DGL_NORING_CB")){
@@ -5837,6 +5978,10 @@ static void d3dgl_draw_impl(uint32_t vcount,int indexed,uint32_t instcount,uint3
                 for(uint64_t q=o0;q+4<=o1;q+=4){ float f; memcpy(&f,(const uint8_t*)c->data+q,4); uint32_t u; memcpy(&u,&f,4);
                     if(((u>>23)&0xff)==0xff || fabsf(f)>1e7f){ if(!nbad) snprintf(first,sizeof first,"vs=%p ps=%p b%d vec%llu.%llu=%08x n=%u",(void*)vs,(void*)ps,b,(unsigned long long)((q-o0)/16),(unsigned long long)((q-o0)%16/4),u,vcount); bad=1; break; } } }
             if(bad) nbad++; } }
+        { D3DObj* bc[32]; uint32_t bf[32]; int bn[32]; int nb=0;   // stage every constant buffer this draw re-sends in ONE ring map
+          for(int b=0;b<16;b++){ if(mp->vblk[b]){ bc[nb]=vscb_eff[b]; bf[nb]=g_d3dst.vscb_1st[b]; bn[nb]=mp->vblk[b]; nb++; }
+                                 if(mp->pblk[b]){ bc[nb]=g_d3dst.pscb[b]; bf[nb]=g_d3dst.pscb_1st[b]; bn[nb]=mp->pblk[b]; nb++; } }
+          d3dgl_ubo_batch(bc,bf,bn,nb); }
         for(int b=0;b<16;b++){ if(mp->vblk[b]) d3dgl_bind_ubo((unsigned)b,vscb_eff[b],g_d3dst.vscb_1st[b],mp->vblk[b]);
                                if(mp->pblk[b]) d3dgl_bind_ubo((unsigned)(16+b),g_d3dst.pscb[b],g_d3dst.pscb_1st[b],mp->pblk[b]); }
         PH(3); g_d3dgl_phase="texs"; d3dgl_bind_texs_p(mp->prog,mp->tloc,mp->tt,&mp->units_set);
@@ -6450,7 +6595,7 @@ static void cb_dump_scan(void){ if(!getenv("PELOAD_CB_DUMP")) return; static int
                   k=snprintf(m,sizeof m,"   BEST so far: %s\n",bestdesc); (void)!write(2,m,k); } } } }
         k=snprintf(m,sizeof m,"  [cb0find] BEST convention: %s\n",bestdesc); (void)!write(2,m,k); } }
 static void d3dgl_present_impl(void);
-static void d3dgl_present(void){ GLLOCK(); if(!prof_on()) d3dgl_present_impl();
+static void d3dgl_present(void){ GLLOCK(); gl_count_report(); if(!prof_on()) d3dgl_present_impl();
     else { uint64_t t=prof_now(); d3dgl_present_impl(); g_prof_pres_ns+=prof_now()-t; g_prof_pres_n++; prof_report(); } GLUNLOCK(); }
 static void d3dgl_present_impl(void){
     if(getenv("PELOAD_TRACE_COPY")){ static unsigned long pc; if((pc++%100)==0){ char m[200]; int k=snprintf(m,sizeof m,"  [presentsrc] present #%lu tex=%u backbuf.gltex=%u vw/vh=%d/%d tw/th=%d/%d | bb draws since last=%lu lastvp=%lux%lu t0=%ux%u f%u | bb SKIPPED=%lu reason=%lu\n",pc,g_d3dgl_present_tex,g_d3d_backbuf?g_d3d_backbuf->gltex:0,g_d3dgl_present_vw,g_d3dgl_present_vh,g_d3dgl_present_tw,g_d3dgl_present_th,g_bb_draws,g_bb_vp>>16,g_bb_vp&0xffff,g_bb_t0w,g_bb_t0h,g_bb_t0f,g_bb_skip,g_bb_skip_reason); g_bb_draws=0; g_bb_skip=0; (void)!write(2,m,k);} }
@@ -10056,6 +10201,7 @@ static void smp_name(uint64_t key,char*w,size_t n){ Dl_info di;
         if(pool) snprintf(w,n,"%s+0x%llx",pool,(unsigned long long)(key-base)); else snprintf(w,n,"0x%llx",(unsigned long long)key); } }
 // Every <us> microseconds each other thread is suspended and its RIP read; every 10 s, for each busy thread: its name,
 // busy share, time per module class and its top functions (guest: function start RVA; shim statics: atos -o shim/build/peload).
+static SmpEnt g_smp_mc[256];   // who calls memmove/memcpy/memset/memcmp: [rsp] at the sample (leaf routines, so [rsp] is the caller)
 static void* sampler_thread(void*a){ (void)a; pthread_setname_np("shim-sampler");
     int us=atoi(getenv("PELOAD_SAMPLE")); if(us<200) us=1000;
     static SmpEnt tab[65536]; double tlast=mono_s();
@@ -10075,7 +10221,9 @@ static void* sampler_thread(void*a){ (void)a; pthread_setname_np("shim-sampler")
                         if(ti<0 && nthr<96){ ti=nthr++; memset(&thr[ti],0,sizeof thr[ti]); thr[ti].t=t;
                             pthread_t pt=pthread_from_mach_thread_np(t); if(pt) pthread_getname_np(pt,thr[ti].name,sizeof thr[ti].name);
                             if(!thr[ti].name[0]) snprintf(thr[ti].name,sizeof thr[ti].name,"port%u",(unsigned)t); }
-                        Dl_info di; int idle=0; if(dladdr((void*)rip,&di) && di.dli_sname && (strstr(di.dli_sname,"mach_msg")||strstr(di.dli_sname,"__psynch")||strstr(di.dli_sname,"__semwait")||strstr(di.dli_sname,"nanosleep")||strstr(di.dli_sname,"__select")||strstr(di.dli_sname,"__workq")||strstr(di.dli_sname,"kevent")||strstr(di.dli_sname,"__ulock")||strstr(di.dli_sname,"__wait4")||strstr(di.dli_sname,"__recvfrom")||strstr(di.dli_sname,"__read_nocancel")||strstr(di.dli_sname,"__accept")||strstr(di.dli_sname,"__sigsuspend")||strstr(di.dli_sname,"poll")||strstr(di.dli_sname,"semaphore_"))) idle=1;
+                        Dl_info di={0}; int idle=0; if(dladdr((void*)rip,&di) && di.dli_sname && (strstr(di.dli_sname,"mach_msg")||strstr(di.dli_sname,"__psynch")||strstr(di.dli_sname,"__semwait")||strstr(di.dli_sname,"nanosleep")||strstr(di.dli_sname,"__select")||strstr(di.dli_sname,"__workq")||strstr(di.dli_sname,"kevent")||strstr(di.dli_sname,"__ulock")||strstr(di.dli_sname,"__wait4")||strstr(di.dli_sname,"__recvfrom")||strstr(di.dli_sname,"__read_nocancel")||strstr(di.dli_sname,"__accept")||strstr(di.dli_sname,"__sigsuspend")||strstr(di.dli_sname,"poll")||strstr(di.dli_sname,"semaphore_"))) idle=1;
+                        if(ti>=0 && !idle && rtop && di.dli_sname && (strstr(di.dli_sname,"memmove")||strstr(di.dli_sname,"memcpy")||strstr(di.dli_sname,"memset")||strstr(di.dli_sname,"memcmp"))){
+                            int cc=0; uint64_t ck=smp_func(rtop,&cc); for(int q=0;q<256;q++){ if(g_smp_mc[q].key==ck && g_smp_mc[q].th==(uint32_t)ti){ g_smp_mc[q].cnt++; break; } if(!g_smp_mc[q].key){ g_smp_mc[q].key=ck; g_smp_mc[q].th=(uint32_t)ti; g_smp_mc[q].cnt=1; break; } } }
                         if(ti>=0){ thr[ti].n++; if(!idle){ thr[ti].busy++; int cls=SMP_SYS; uint64_t key=smp_func(rip,&cls); thr[ti].cls[cls]++;
                             uint32_t h=(uint32_t)((key>>2)*2654435761u ^ (uint32_t)ti*0x9E37u)&65535;
                             for(int pr=0;pr<64;pr++){ SmpEnt*e=&tab[(h+pr)&65535]; if(e->key==0){ e->key=key; e->cnt=1; e->th=(uint32_t)ti; e->ret=(cls==SMP_SYS && key==rip)?rtop:0; break; } if(e->key==key && e->th==(uint32_t)ti){ e->cnt++; break; } } } } } }
@@ -10094,8 +10242,12 @@ static void* sampler_thread(void*a){ (void)a; pthread_setname_np("shim-sampler")
                     if(tab[bi].ret){ char r[120]; smp_name(tab[bi].ret,r,sizeof r); k+=snprintf(m+k,sizeof m-k," (called from %s; code",r);
                         for(int q=0;q<12;q++) k+=snprintf(m+k,sizeof m-k," %02x",((volatile uint8_t*)tab[bi].key)[q]); k+=snprintf(m+k,sizeof m-k,"),"); }
                     tab[bi].cnt=0; }
-                m[k-1]='\n'; (void)!write(2,m,k); }
-            memset(tab,0,sizeof tab); for(int i=0;i<nthr;i++){ thr[i].n=thr[i].busy=0; memset(thr[i].cls,0,sizeof thr[i].cls); } } }
+                m[k-1]='\n'; (void)!write(2,m,k);
+                { int kk=snprintf(m,sizeof m,"  [sample]   memory routines called from:"); int any=0;
+                  for(int top=0;top<5;top++){ int bi=-1; uint32_t bc=0; for(int q=0;q<256;q++) if(g_smp_mc[q].th==(uint32_t)ti && g_smp_mc[q].cnt>bc){ bc=g_smp_mc[q].cnt; bi=q; }
+                      if(bi<0 || bc*100<thr[ti].busy) break; char w[120]; smp_name(g_smp_mc[bi].key,w,sizeof w); kk+=snprintf(m+kk,sizeof m-kk," %s %.1f%%,",w,100.0*bc/thr[ti].busy); g_smp_mc[bi].cnt=0; any=1; }
+                  if(any){ m[kk-1]='\n'; (void)!write(2,m,kk); } } }
+            memset(tab,0,sizeof tab); memset(g_smp_mc,0,sizeof g_smp_mc); for(int i=0;i<nthr;i++){ thr[i].n=thr[i].busy=0; memset(thr[i].cls,0,sizeof thr[i].cls); } } }
     return 0; }
 // PELOAD_STDERR_TEE=<file> / PELOAD_STDOUT_TEE=<file> (%p = pid): copy everything this process writes to stderr /
 // stdout into that file as well. For processes whose stdio another process owns, e.g. the dedicated server's
