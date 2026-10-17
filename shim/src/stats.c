@@ -268,6 +268,14 @@ static struct { uint32_t h; double t; } g_proj[8192];
 // this process hosts the game (halo3 game_globals +0x11: 5 = network host, 1 = local): only the host can teleport
 static int st_is_host(void){ uint64_t gg=0; uint8_t st=0; return g_st_tls && hb_read(g_st_tls+0x48,&gg,8) && gg && hb_read(gg+0x11,&st,1) && (st==5||st==1); }
 static int st_controls_ok(void){ static int ro=-1; if(ro<0){ const char*e=getenv("PELOAD_STATS_READONLY"); ro=e&&*e&&strcmp(e,"0")?1:0; } return !ro; }
+// forward a teleport request to the host's stats server: POST /control?do=tpnext&slot=<target>&who=<our slot>
+static int st_forward_tp(const char*hostport,int slot,int who){
+    char host[64]; int port=8765; if(sscanf(hostport,"%63[^:]:%d",host,&port)<1) return 0;
+    int fd=socket(AF_INET,SOCK_STREAM,0); if(fd<0) return 0; struct sockaddr_in a; memset(&a,0,sizeof a); a.sin_family=AF_INET; a.sin_port=htons((uint16_t)port); a.sin_addr.s_addr=inet_addr(host);
+    struct timeval tv={2,0}; setsockopt(fd,SOL_SOCKET,SO_RCVTIMEO,&tv,sizeof tv); setsockopt(fd,SOL_SOCKET,SO_SNDTIMEO,&tv,sizeof tv);
+    int ok=0; if(!connect(fd,(struct sockaddr*)&a,sizeof a)){ char rq[256]; int k=snprintf(rq,sizeof rq,"POST /control?do=tpnext&slot=%d&who=%d HTTP/1.1\r\nHost: %s\r\nX-Reclaimer-Control: 1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",slot,who,host);
+        if(send(fd,rq,(size_t)k,0)==k){ char rs[256]; ssize_t n=recv(fd,rs,sizeof rs-1,0); if(n>0){ rs[n]=0; ok=strstr(rs,"\"ok\":true")!=0; } } }
+    close(fd); char m[140]; int k=snprintf(m,sizeof m,"  [teleport] forwarded to the host %s (slot %d next to %d): %s\n",hostport,who,slot,ok?"accepted":"refused"); (void)!write(2,m,k); return ok; }
 static int st_control(const char*act,const char*qs){
     char m[96]; int k=0;
     static const char*const feat[HBF_N]={"hitboxes","tracers","info","items","visible"};
@@ -276,8 +284,12 @@ static int st_control(const char*act,const char*qs){
     if(!strcmp(act,"teams")){ static const char*const tm[3]={"all","enemies only","friends only"}; __atomic_fetch_add(&g_hb_teamcycle,1,__ATOMIC_ACQ_REL);
         k=snprintf(m,sizeof m,"  [stats] page: showing %s\n",tm[hb_team_mode()]); (void)!write(2,m,k); return 1; }
     if(!strcmp(act,"tpnext")){ if(!getenv("PELOAD_ALLOW_TELEPORT")) return 0; const char*v=strstr(qs,"slot="); int sl=v?atoi(v+5):-1; if(sl<0 || sl>255) return 0;
-        extern volatile int g_hb_tp_slot; g_hb_tp_slot=sl; __atomic_store_n(&g_hb_job_pending,1,__ATOMIC_RELEASE);
-        char m[80]; int k=snprintf(m,sizeof m,"  [teleport] page: next to player slot %d requested\n",sl); (void)!write(2,m,k); return 1; }
+        const char*w=strstr(qs,"who="); int who=w?atoi(w+4):-1; if(who>255) return 0;
+        // a client can't move itself (the host snaps it back): forward to the host's loader (PELOAD_TELEPORT_HOST =
+        // its stats address, in private games where both ends run this loader); the host moves our player
+        if(!st_is_host()){ const char*hp=getenv("PELOAD_TELEPORT_HOST"); if(!hp || who>=0 || g_hb_local_slot<0) return 0; return st_forward_tp(hp,sl,g_hb_local_slot); }
+        extern volatile int g_hb_tp_slot, g_hb_tp_who; g_hb_tp_who=who; g_hb_tp_slot=sl; __atomic_store_n(&g_hb_job_pending,1,__ATOMIC_RELEASE);
+        char m[100]; int k=snprintf(m,sizeof m,"  [teleport] page: %s next to player slot %d requested\n",who>=0?"move a client":"move us",sl); (void)!write(2,m,k); return 1; }
     if(!strcmp(act,"teleport")){ extern volatile int g_hb_tp_slot; g_hb_tp_slot=-1; if(!getenv("PELOAD_ALLOW_TELEPORT")) return 0; __atomic_store_n(&g_hb_job_pending,1,__ATOMIC_RELEASE); (void)!write(2,"  [teleport] page: requested\n",29); return 1; }
     if(!strcmp(act,"muteall") || !strcmp(act,"unmuteall")){ static StSess ss[128]; int n=st_session(ss,128,0), ok=0;
         for(int i=0;i<n;i++) if(ss[i].muted!=!strcmp(act,"muteall")) ok+=st_voice_request(ss[i].voice,!strcmp(act,"muteall"));
@@ -299,9 +311,9 @@ static void st_snapshot(StBuf*s){
       pthread_mutex_unlock(&g_hb_mapmx);
       const char*b=strrchr(mp,'/'); b=b?b+1:mp; snprintf(m,sizeof m,"%s",b); char*dot=strrchr(m,'.'); if(dot)*dot=0; sb_put(s,",\"map\":"); sb_str(s,m); }
     { static int tp=-1; if(tp<0) tp=getenv("PELOAD_ALLOW_TELEPORT")?1:0; static const char*const tm[3]={"all","enemies","friends"};
-      sb_put(s,",\"overlay\":{\"hitboxes\":%s,\"tracers\":%s,\"info\":%s,\"items\":%s,\"visible\":%s,\"teams\":\"%s\",\"teleport\":%s,\"host\":%s,\"controls\":%s,\"text_px\":%d}",
+      sb_put(s,",\"overlay\":{\"hitboxes\":%s,\"tracers\":%s,\"info\":%s,\"items\":%s,\"visible\":%s,\"teams\":\"%s\",\"teleport\":%s,\"host\":%s,\"tp_forward\":%s,\"controls\":%s,\"text_px\":%d}",
           hb_feat(HBF_HITBOX)?"true":"false",hb_feat(HBF_TRACER)?"true":"false",hb_feat(HBF_INFO)?"true":"false",hb_feat(HBF_ITEMS)?"true":"false",hb_feat(HBF_VISIBLE)?"true":"false",
-          tm[hb_team_mode()],tp?"true":"false",st_is_host()?"true":"false",st_controls_ok()?"true":"false",g_hb_text_px>0?g_hb_text_px:7); }
+          tm[hb_team_mode()],tp?"true":"false",st_is_host()?"true":"false",getenv("PELOAD_TELEPORT_HOST")?"true":"false",st_controls_ok()?"true":"false",g_hb_text_px>0?g_hb_text_px:7); }
     if(strcmp(m,g_trk_map)){ snprintf(g_trk_map,sizeof g_trk_map,"%s",m); g_ntrk=0; g_nbip=0; memset(g_proj,0,sizeof g_proj); g_hb_local_slot=-1; }   // new map: new match stats
     pthread_mutex_lock(&g_hm_mx); snprintf(g_hm_cur,sizeof g_hm_cur,"%s",m); if(g_hm.dirty && now-g_hm.saved>30){ hm_save(); g_hm.saved=now; } pthread_mutex_unlock(&g_hm_mx);
     static uint8_t tab[8192*0x18]; int hi=0; uint64_t arr=hb_object_array(); uint8_t hdr[0x60];

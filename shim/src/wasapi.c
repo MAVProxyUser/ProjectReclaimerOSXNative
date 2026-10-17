@@ -16,7 +16,7 @@ struct WaStream {
     volatile int ref, svc; pthread_mutex_t m;                // svc: references held on the render client + clock
     int inited, started; uint32_t rate, ch, bits, blk, isfloat, bufframes;
     uint8_t*ring, *scratch; uint32_t scratch_cap; uint64_t rd, wr, played;   // ring positions in frames (monotonic)
-    void*event; AudioQueueRef q; };
+    void*event; AudioQueueRef q; int closing; };   // closing: the queue is being stopped/disposed -- callbacks must not re-enqueue
 #define WA_E_NOINTERFACE 0x80004002
 #define WA_E_POINTER     0x80004003
 #define WA_E_NOT_INIT    0x88890001
@@ -27,19 +27,29 @@ static int wa_guid(const GUID_*g,uint32_t d1){ return g && g->D1==d1; }
 static void wa_log(const char*s){ if(getenv("PELOAD_TRACE_WASAPI")) (void)!write(2,s,strlen(s)); }
 
 // ---- the stream ---------------------------------------------------------------------------------------------------
+// Runs on the AudioQueue's own thread. The enqueue happens under s->m and not at all once the queue is closing: a
+// callback that re-enqueued a buffer while another thread disposed the queue tripped caulk's allocator check (a SIGILL
+// in caulk::alloc, seen as "exception 0xC000001D at unmapped module" right after the client's 5 s voice retries).
 static void wa_aq_cb(void*ud,AudioQueueRef q,AudioQueueBufferRef b){
     WaStream*s=ud; uint32_t frames=b->mAudioDataBytesCapacity/s->blk;
     pthread_mutex_lock(&s->m);
+    if(s->closing || q!=s->q){ pthread_mutex_unlock(&s->m); return; }
     uint64_t avail=s->wr-s->rd; uint32_t n=avail<frames?(uint32_t)avail:frames;
     for(uint32_t i=0;i<n;){ uint32_t pos=(uint32_t)((s->rd+i)%s->bufframes), run=s->bufframes-pos; if(run>n-i) run=n-i;
         memcpy((uint8_t*)b->mAudioData+(size_t)i*s->blk, s->ring+(size_t)pos*s->blk, (size_t)run*s->blk); i+=run; }
     if(n<frames) memset((uint8_t*)b->mAudioData+(size_t)n*s->blk,0,(size_t)(frames-n)*s->blk);   // underrun: silence
     s->rd+=n; s->played+=frames; void*ev=s->event;
-    pthread_mutex_unlock(&s->m);
     b->mAudioDataByteSize=frames*s->blk; AudioQueueEnqueueBuffer(q,b,0,0);
+    pthread_mutex_unlock(&s->m);
     if(ev) i_SetEvent(ev); }                                  // room in the buffer: let the client refill
+// Stop + dispose a stream's queue: mark it closing first (under the lock, so no callback is mid-enqueue), then tear it
+// down outside the lock (a synchronous dispose waits for a running callback, which would block on the lock)
+static void wa_close_queue(WaStream*s){
+    pthread_mutex_lock(&s->m); AudioQueueRef q=s->q; s->closing=1; pthread_mutex_unlock(&s->m);
+    if(q){ AudioQueueStop(q,1); AudioQueueDispose(q,1); }
+    pthread_mutex_lock(&s->m); s->q=0; s->started=0; pthread_mutex_unlock(&s->m); }
 static void wa_free(WaStream*s){
-    if(s->q){ AudioQueueStop(s->q,1); AudioQueueDispose(s->q,1); s->q=0; }
+    if(s->q) wa_close_queue(s);
     free(s->ring); free(s->scratch); pthread_mutex_destroy(&s->m); free(s); wa_log("  [wasapi] stream released\n"); }
 static void wa_ref_log(const char*op,WaItf*self,int r){ if(!getenv("PELOAD_TRACE_WASAPI")) return; char m[120];
     const char*w=self==&self->s->ac?"client":self==&self->s->rc?"render":"clock"; int k=snprintf(m,sizeof m,"  [wasapi] %s %s %p -> %d\n",op,w,(void*)self->s,r); (void)!write(2,m,k); }
@@ -51,7 +61,7 @@ static unsigned MSABI wa_AddRef(WaItf*self){ int r=__atomic_add_fetch(&self->s->
     wa_ref_log("AddRef",self,r); return (unsigned)r; }
 static unsigned MSABI wa_Release(WaItf*self){ WaStream*s=self->s; int sv=self!=&s->ac ? __atomic_sub_fetch(&s->svc,1,__ATOMIC_ACQ_REL) : s->svc;
     int r=__atomic_sub_fetch(&s->ref,1,__ATOMIC_ACQ_REL); wa_ref_log("Release",self,r); if(r==0){ wa_free(s); return 0; }
-    if(r==1 && sv<=0 && s->q && s->inited && !getenv("PELOAD_WASAPI_KEEP_IDLE")){ AudioQueueStop(s->q,1); AudioQueueDispose(s->q,1); s->q=0; s->started=0; wa_log("  [wasapi] stream idle: queue closed\n"); }
+    if(r==1 && sv<=0 && s->q && s->inited && !getenv("PELOAD_WASAPI_KEEP_IDLE")){ wa_close_queue(s); wa_log("  [wasapi] stream idle: queue closed\n"); }
     return (unsigned)(r<0?0:r); }
 static int MSABI wa_QI(WaItf*self,GUID_*riid,void**ppv){ if(!ppv) return WA_E_POINTER;
     if(getenv("PELOAD_TRACE_WASAPI")){ char m[96]; int k=snprintf(m,sizeof m,"  [wasapi] QI %08x\n",riid?riid->D1:0); (void)!write(2,m,k); }
@@ -62,7 +72,8 @@ static int wa_open_queue(WaStream*s){
     AudioStreamBasicDescription f={0}; f.mSampleRate=s->rate; f.mFormatID=kAudioFormatLinearPCM;
     f.mFormatFlags=(s->isfloat?kAudioFormatFlagIsFloat:kAudioFormatFlagIsSignedInteger)|kAudioFormatFlagIsPacked;
     f.mFramesPerPacket=1; f.mChannelsPerFrame=s->ch; f.mBitsPerChannel=s->bits; f.mBytesPerFrame=s->blk; f.mBytesPerPacket=s->blk;
-    OSStatus st=AudioQueueNewOutput(&f,wa_aq_cb,s,0,0,0,&s->q);
+    AudioQueueRef nq=0; OSStatus st=AudioQueueNewOutput(&f,wa_aq_cb,s,0,0,0,&nq);
+    pthread_mutex_lock(&s->m); s->q=nq; s->closing=0; pthread_mutex_unlock(&s->m);
     if(st||!s->q){ s->q=0; char t[96]; int k=snprintf(t,sizeof t,"  [wasapi] AudioQueueNewOutput failed %d\n",(int)st); (void)!write(2,t,k); return 0; }
     if(!xa_real()) AudioQueueSetParameter(s->q,kAudioQueueParam_Volume,0.0f);   // PELOAD_AUDIO=0: keep the clock running, play nothing
     uint32_t per=s->rate/100; for(int i=0;i<3;i++){ AudioQueueBufferRef b=0; if(!AudioQueueAllocateBuffer(s->q,per*s->blk,&b)){ memset(b->mAudioData,0,per*s->blk); b->mAudioDataByteSize=per*s->blk; AudioQueueEnqueueBuffer(s->q,b,0,0); } }

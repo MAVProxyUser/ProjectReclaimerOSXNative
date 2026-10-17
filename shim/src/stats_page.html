@@ -152,8 +152,8 @@ document.addEventListener('pointerdown',async e=>{ const b=e.target.closest('.mb
   b.classList.toggle('on',act==='mute'); b.dataset.m=act==='mute'?'1':'0';   // show it at once; the next snapshot confirms
   try{ await fetch(`/control?do=${act}&voice=${b.dataset.voice}`,{method:'POST',headers:{'X-Reclaimer-Control':'1'}}); }catch(err){} });
 // teleport next to a player: lights up for another living player when teleport is enabled
-function tpBtn(p){ const o=snap&&snap.overlay, ok=o&&o.teleport&&o.controls&&o.host&&p.alive;
-  const why=!o||!o.teleport?'start the game with PELOAD_ALLOW_TELEPORT=1':!o.host?'only the host of the game can teleport (host it from the menu)':!p.alive?'they are dead':'';
+function tpBtn(p){ const o=snap&&snap.overlay, ok=o&&o.teleport&&o.controls&&(o.host||o.tp_forward)&&p.alive;
+  const why=!o||!o.teleport?'start the game with PELOAD_ALLOW_TELEPORT=1':!(o.host||o.tp_forward)?'only the host can move players: host the game, or set PELOAD_TELEPORT_HOST to the host\'s stats address':!p.alive?'they are dead':'';
   return `<button class="bigmute tp" data-slot="${p.slot}" ${ok?'':'disabled'} title="${E(why||'Teleport next to '+p.name)}">⤳ Teleport next to them</button>`; }
 document.addEventListener('pointerdown',async e=>{ const b=e.target.closest('button.tp'); if(!b||b.disabled||e.button) return; e.preventDefault();
   const msg=document.getElementById('ovmsg');

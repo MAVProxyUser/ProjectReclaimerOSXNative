@@ -145,7 +145,7 @@ per draw. The biggest phase is "texs" (texture/sampler binds: 0.4-1.2 s per 2 s)
 7-430 ms, buffer textures ~15 ms per 2 s; `[prof] textures` / `[prof] buffer textures` lines) and not compute waits
 (none): it is Apple's GL driver revalidating on each bind, translated under Rosetta. Real fix = PERF-PLAN.md option 1
 (native GL helper process). Done meanwhile: getenv cache (cgetenv: the loader's 553 getenv calls on literal keys hit a
-pointer-keyed table; setenv/unsetenv/putenv bump a generation; PELOAD_NO_GETENV_CACHE off), and a skip for re-uploads
+-- removed again: peload_cgetenv already caches PELOAD_* lookups), and a skip for re-uploads
 when only mips below the BC-decoded base level changed (dpart/dmin per resource; PELOAD_D3DGL_NOMIPSKIP; 0 hits in BTB
 so far: halo3 rewrites whole textures). The client's Advanced graphics settings (Shadows, LOD, draw distance) cut draws.
 Mods/Workshop (user guide: shim/docs/mods.md; `shim/tools/servers.sh` = busiest servers + their mods from `discover`,
@@ -226,6 +226,15 @@ The engine marks the object for network update itself. The old hook halo3+0x9d22
 places (many mid-tick) -- that is why teleports crashed. Test: target.sh as host with TARGET_STATS_HTTP=8766
 TARGET_ENV=PELOAD_ALLOW_TELEPORT=1, a quiet-run joiner (visible window: a hidden joiner crashed once in Apple's GL
 driver on the present thread), POST tpnext on 8766, compare positions on 8766 and 8765.
+Tested 2026-10-17: a client-side teleport (PELOAD_TELEPORT_CLIENT_TEST=1) shows on the client for <1 s and the host
+never accepts it (server-authoritative, no bug). Client requests are forwarded to the host's loader instead
+(PELOAD_TELEPORT_HOST=<host stats addr>; POST tpnext&slot=<target>&who=<requester>): the host moves the requester,
+both views agree within 0.5 s.
+WASAPI crash fixed 2026-10-17: "Experimental startup exception 0xC000001D at unmapped module" (rbx/rdi in
+caulk::alloc::make_audio_buffer_resource) = an AudioQueue callback re-enqueueing a buffer while another thread
+disposed the queue (the client's 5 s voice retries abandon streams; wasapi.c closes their queues). Now a closing flag
+under the stream lock, the enqueue inside the lock, dispose outside it (wa_close_queue). Tip: identify a system address
+from a crash report with a tiny x86_64 dladdr helper -- the shared cache is at the same address in every process.
 
 ## Render Guardian via the game client (GL-on-Metal, no MCC/Steam)
 `game-client` runs the engine in a standalone native window ("Reclaimer GL (OpenGL on Metal)") and

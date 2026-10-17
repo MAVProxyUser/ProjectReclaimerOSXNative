@@ -80,33 +80,6 @@ static char* peload_cgetenv(const char*name){
 #include <libkern/OSCacheControl.h>
 #include <mach-o/getsect.h>
 #include <mach-o/dyld.h>
-// ---- getenv cache --------------------------------------------------------------------------------------------------
-// The loader reads its PELOAD_* switches with getenv() all over its hot paths (dozens of times per draw call). A libc
-// getenv scans the whole environment (~100 entries here): ~0.1 us under Rosetta, i.e. several ms per frame at 2-3k
-// draws. getenv() with a string LITERAL (the switch names) is answered from a pointer-keyed cache instead; any other key
-// goes to libc. setenv/unsetenv/putenv (the guest's SetEnvironmentVariable, a few loader paths) bump a generation
-// that invalidates the cache. PELOAD_NO_GETENV_CACHE=1 turns it off.
-static volatile unsigned g_env_gen=1;
-static const char* cgetenv(const char*k){
-    static const char*lo, *hi; static int st;   // 0 unknown, 1 on, 2 off
-    if(__builtin_expect(st!=1,0)){ if(st==2) return (getenv)(k);
-        if((getenv)("PELOAD_NO_GETENV_CACHE")){ st=2; return (getenv)(k); }
-        extern const struct mach_header_64 __dso_handle; unsigned long sz=0; const uint8_t*cs=getsectiondata(&__dso_handle,"__TEXT","__cstring",&sz);
-        if(!cs||!sz){ st=2; return (getenv)(k); } lo=(const char*)cs; hi=(const char*)cs+sz; st=1; }
-    if(k<lo || k>=hi) return (getenv)(k);
-    static struct { const char*volatile key; const char*volatile val; volatile unsigned gen; } tab[2048];
-    uintptr_t h=((uintptr_t)k>>3)*0x9E3779B97F4A7C15ull; unsigned i=(unsigned)(h>>53)&2047, g=__atomic_load_n(&g_env_gen,__ATOMIC_ACQUIRE);
-    for(int pr=0;pr<16;pr++,i=(i+1)&2047){ const char*kk=__atomic_load_n(&tab[i].key,__ATOMIC_ACQUIRE);
-        if(kk==k){ if(__atomic_load_n(&tab[i].gen,__ATOMIC_ACQUIRE)==g) return tab[i].val;
-            const char*v=(getenv)(k); tab[i].val=v; __atomic_store_n(&tab[i].gen,g,__ATOMIC_RELEASE); return v; }
-        if(!kk){ const char*exp=0; if(__atomic_compare_exchange_n(&tab[i].key,&exp,k,0,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE)){
-                const char*v=(getenv)(k); tab[i].val=v; __atomic_store_n(&tab[i].gen,g,__ATOMIC_RELEASE); return v; }
-            if(exp==k){ pr--; i=(i-1)&2047; } } }   // another thread took this slot for the same key: re-check it
-    return (getenv)(k); }
-#define getenv(k) cgetenv(k)
-#define setenv(a,b,c) (__atomic_fetch_add(&g_env_gen,1,__ATOMIC_ACQ_REL), setenv(a,b,c))
-#define unsetenv(a) (__atomic_fetch_add(&g_env_gen,1,__ATOMIC_ACQ_REL), unsetenv(a))
-#define putenv(a) (__atomic_fetch_add(&g_env_gen,1,__ATOMIC_ACQ_REL), putenv(a))
 
 // ---- SEH register capture/restore (CONTEXT at rcx; Win64/ms_abi) ------------
 // seh_capture fills a CONTEXT from the caller's registers (Rip = return address,

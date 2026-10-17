@@ -352,6 +352,7 @@ typedef struct { double t; uint32_t def, handle; float pos[3], vel[3]; uint8_t r
 static pthread_t g_hb_simthread; static volatile int g_hb_simthread_ok;
 volatile int g_hb_job_pending;
 volatile int g_hb_tp_slot=-1;   // stats page "Teleport next to them": that players-table slot; -1 = F7's map reflection
+volatile int g_hb_tp_who=-1;    // who moves: a players-table slot (a client's request forwarded to this host); -1 = us
 static const char* hb_tag_name(uint32_t def);
 // Teleport next to another player (stats page "Teleport next to them"), the way the Reclaimer client teleports
 // (shim/docs/teleport.md): host only, on the engine main thread at main_loop_body (between ticks), inside halo3's
@@ -404,7 +405,9 @@ static void hb_engine_jobs(void){
     if(memcmp(h3+0x259410,pro,16)){ (void)!write(2,"  [teleport] halo3 teleport function not recognised: skipped\n",60); return; }
     // host only: on a client the host's update snaps the body back (and the old mid-tick client call crashed)
     { uint8_t*gg=*(uint8_t**)((uint8_t*)tarr[idx]+0x48); int st=gg?gg[0x11]:-1;
-      if(st!=5 && st!=1){ char m[140]; int k=snprintf(m,sizeof m,"  [teleport] refused: this game is hosted elsewhere (simulation type %d); only the host can move players\n",st); (void)!write(2,m,k); g_hb_tp_slot=-1; return; } }
+      // PELOAD_TELEPORT_CLIENT_TEST=1: run it on a client anyway -- an experiment to see whether the host accepts or
+      // corrects a position the client set itself (local test games only)
+      if(st!=5 && st!=1 && !getenv("PELOAD_TELEPORT_CLIENT_TEST")){ char m[140]; int k=snprintf(m,sizeof m,"  [teleport] refused: this game is hosted elsewhere (simulation type %d); only the host can move players\n",st); (void)!write(2,m,k); g_hb_tp_slot=-1; return; } }
     // halo3's game-state lock (what it holds around every tick)
     if(!*(uint64_t*)(h3+0x8f4028) || *(int32_t*)((uint8_t*)tarr[idx]+0x18)<0 || *(int32_t*)((uint8_t*)tarr[idx]+0x18)>=32){ (void)!write(2,"  [teleport] engine not ready\n",30); return; }
     int tok=((HbLockFn)(h3+0x12c948))();
@@ -429,7 +432,12 @@ static void hb_engine_jobs_locked(uint8_t*h3,void**tarr,uint32_t idx,uint8_t*arr
       int li=lu&0xFFFF; if(lu!=0xFFFFFFFFu && li<hi){ uint8_t*e=data+(size_t)li*0x18; uint8_t*p=*(uint8_t**)(e+0x10);
           if(e[3]==0 && *(uint16_t*)e==(uint16_t)(lu>>16) && p){ me=lu; memcpy(mo,p+0x50,12); } } }
     if(me==0xFFFFFFFFu){ (void)!write(2,"  [teleport] no body at the camera (dead or in a vehicle?)\n",59); return; }
-    int tps=g_hb_tp_slot; g_hb_tp_slot=-1;
+    int tps=g_hb_tp_slot, who=g_hb_tp_who; g_hb_tp_slot=-1; g_hb_tp_who=-1;
+    if(tps>=0 && who>=0){   // a forwarded request: move that player, not us
+        uint8_t*parr=*(uint8_t**)((uint8_t*)tarr[idx]+0x10); if(!parr || *(uint32_t*)(parr+0x2c)!=0x64407440) return;
+        int32_t es=*(int32_t*)(parr+0x24), pn=*(int32_t*)(parr+0x3c); uint8_t*pd=*(uint8_t**)(parr+0x48); if(!pd || who>=pn || es<0x30) return;
+        uint8_t*rec=pd+(size_t)who*es; if(!*(uint16_t*)rec) return; me=*(uint32_t*)(rec+0x28);
+        if(me==0xFFFFFFFFu || (int)(me&0xFFFF)>=hi){ (void)!write(2,"  [teleport] the requesting player has no body\n",47); return; } }
     if(tps>=0){ hb_tp_next(h3,(uint8_t*)tarr[idx],data,hi,me,tps); return; }
     if(ni<4){ (void)!write(2,"  [teleport] too few map items to find the centre\n",50); return; }
     cx/=ni; cy/=ni; float rx=(float)(2*cx-mo[0]), ry=(float)(2*cy-mo[1]);
