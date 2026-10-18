@@ -93,13 +93,16 @@ static Resp get(const char*path,const char*qs,const char*extra){
     o.n=r.r.n-hl-4; o.body=malloc(o.n+1); memcpy(o.body,e+4,o.n); o.body[o.n]=0; free(r.r.b); return o; }
 static void save(const char*dir,const char*name,const Resp*r){ char p[1200]; snprintf(p,sizeof p,"%s/%s",dir,name); FILE*f=fopen(p,"wb"); if(f){ fwrite(r->body,1,r->n,f); fclose(f); } }
 
-static void payload(uint8_t*o,size_t*on,int ch,uint64_t seq,const uint8_t*opus,size_t n){ o[0]=(uint8_t)ch; memcpy(o+1,&seq,8); memcpy(o+9,opus,n); *on=9+n; }
+// the client's payload: [0] channel, [1..9] sequence, [9] frame count (1 in every live packet seen), [10..] one Opus packet
+static void payload(uint8_t*o,size_t*on,int ch,uint64_t seq,const uint8_t*opus,size_t n){ o[0]=(uint8_t)ch; memcpy(o+1,&seq,8); o[9]=1; memcpy(o+10,opus,n); *on=10+n; }
 static int cmd_pipeline(const char*in,const char*dir){
     size_t fn; uint8_t*fb=slurp(in,&fn); Pk*pk; int bad, pages, eos; int np=demux(fb,fn,&pk,&bad,&pages,&eos); if(np<260){ printf("FAIL %s: need >= 258 audio packets\n",in); return 1; }
     Pk*a=pk+2; int na=np-2; int ps=opus_packet_samples(a[0].p,a[0].n), same=1; for(int i=0;i<na;i++) same&=opus_packet_samples(a[i].p,a[i].n)==ps;
     if(!same || ps<=0){ printf("FAIL %s: the pipeline test needs packets of one length\n",in); return 1; }
     char fd[1100]; snprintf(fd,sizeof fd,"%s/forensics",dir); setenv("PELOAD_FORENSIC_DIR",fd,1); unsetenv("PELOAD_FORENSIC");
     fx_init();
+    CHECK(g_fx_set.consent && g_fx_set.voice,"a fresh archive starts with one-party consent and voice audio on (the user's default)");
+    CHECK(fx_control("do=forensic&consent=0") && !g_fx_set.voice,"withdrawing consent turns voice audio off");
     CHECK(!fx_control("do=forensic&voice=1"),"voice audio refused without one-party consent");
     CHECK(fx_control("do=forensic&consent=1&voice=1") && g_fx_audio,"consent + voice audio accepted");
     { char p[1200]; snprintf(p,sizeof p,"%s/settings.json",fd); char*j=fx_slurp(p,0,1<<20); int c=0, v=0; double t=0;

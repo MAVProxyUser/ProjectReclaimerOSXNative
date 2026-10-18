@@ -256,6 +256,7 @@ static int rec_start_q(int ao,double secs,const char*name,int vw,int vh,char*err
         NSDictionary*vs=@{ AVVideoCodecKey:hevc?AVVideoCodecTypeHEVC:AVVideoCodecTypeH264, AVVideoWidthKey:@(w), AVVideoHeightKey:@(h), AVVideoCompressionPropertiesKey:comp,
             AVVideoColorPropertiesKey:@{ AVVideoColorPrimariesKey:AVVideoColorPrimaries_ITU_R_709_2, AVVideoTransferFunctionKey:AVVideoTransferFunction_ITU_R_709_2, AVVideoYCbCrMatrixKey:AVVideoYCbCrMatrix_ITU_R_709_2 } };
         vin=[[AVAssetWriterInput alloc] initWithMediaType:AVMediaTypeVideo outputSettings:vs]; vin.expectsMediaDataInRealTime=YES;
+        vin.mediaTimeScale=REC_VTS;   // (the default track time scale, 600, rounded two frames presented within 1.7 ms onto one timestamp)
         NSDictionary*pa=@{ (id)kCVPixelBufferPixelFormatTypeKey:@(kCVPixelFormatType_32BGRA), (id)kCVPixelBufferWidthKey:@(w), (id)kCVPixelBufferHeightKey:@(h),
             (id)kCVPixelBufferIOSurfacePropertiesKey:@{}, (id)kCVPixelBufferOpenGLCompatibilityKey:@YES };
         ad=[[AVAssetWriterInputPixelBufferAdaptor alloc] initWithAssetWriterInput:vin sourcePixelBufferAttributes:pa];

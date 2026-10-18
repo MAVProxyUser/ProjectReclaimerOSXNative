@@ -114,8 +114,14 @@ Then one record per packet, append-only: a 40-byte header followed by `stored` b
 | 8 | u64 | arrival time, unix ns (CLOCK_REALTIME, taken in the hook) |
 | 16 | u64 | sender peer id (voice_recv's rdx) |
 | 24 | u64 | sequence = payload[1..9] as u64 LE |
-| 32 | u8, u8 | the Opus TOC byte and the byte after it (packet duration even without audio) |
+| 32 | u8, u8 | payload[9] and payload[10]: the frame-count byte (see below) and the Opus TOC byte (packet duration even without audio) |
 | 34 | 6 bytes | 0 |
+
+**Voice payload (live, 2026-10-18):** `[0]` channel, `[1..9]` sequence (u64 LE), `[9]` a frame-count byte -- 1 in all
+22,091 audio packets of a live BTB session -- then ONE Opus packet (TOC 0x48 there: SILK wideband, 20 ms, mono, 50
+packets a second, ~20 kbit/s). The stored bytes are payload[9..] exactly as received; the readers skip the count byte
+when it is 1 (the first version decoded from it: garbled playback, half the packets invalid Opus). Verified: 250 live
+packets re-wrapped decode in ffmpeg with no error to exactly 5.0 s.
 
 A reader that meets a bad sync (a torn write) scans forward to the next record with a valid sync, a sane length and a
 time within a day before / 40 days after the header's creation time (the viewer counts them as `bad_records`); an

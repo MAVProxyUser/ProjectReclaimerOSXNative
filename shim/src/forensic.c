@@ -286,7 +286,9 @@ static void* fx_writer(void*a){ (void)a; pthread_setname_np("shim-forensic");
 
 // ---- page controls: POST /control?do=forensic&archive=0|1&voice=0|1&consent=0|1 ---------------------------------------
 // voice=1 is refused unless consent is on record (consent=1 in the same request counts). consent=0 also turns voice off.
+static int fx_delete(const char*qs);   // (below: it needs the session reader)
 static int fx_control(const char*qs){ fx_init(); if(g_fx_env_off) return 0;
+    if(strstr(qs,"delete=")) return fx_delete(qs);
     int a=-1, v=-1, c=-1; const char*p;
     if((p=strstr(qs,"archive="))) a=atoi(p+8)?1:0; if((p=strstr(qs,"voice="))) v=atoi(p+6)?1:0; if((p=strstr(qs,"consent="))) c=atoi(p+8)?1:0;
     if(a<0 && v<0 && c<0) return 0;
@@ -341,6 +343,12 @@ static void fx_parse(FxSess*s){
         if(o+h->rsize+r.slen>s->n) break;   // the writer's last record is not complete yet
         if(s->np>=s->pcap){ int nc=s->pcap?s->pcap*2:4096; FxPk*np=realloc(s->pk,(size_t)nc*sizeof *np); if(!np) break; s->pk=np; s->pcap=nc; }
         FxPk*k=&s->pk[s->np++]; k->t=r.t; k->id=r.id; k->seq=r.seq; k->ch=r.ch; k->fl=r.fl; k->toc=r.toc; k->toc2=r.toc2; k->olen=r.olen; k->slen=r.slen; k->off=o+h->rsize; k->utt=-1;
+        // After channel + sequence the client's voice payload is a 1-byte prefix -- 0x01 in all 22,091 packets of a live BTB
+        // session (2026-10-18; probably "one frame follows") -- and then one Opus packet (TOC 0x48 there: SILK wideband,
+        // 20 ms, mono). voice.bin keeps the bytes as received; readers skip the prefix (the first player tests decoded from
+        // it: "garbled" playback, half the packets invalid Opus).
+        if(!(k->fl&(FXF_CONTROL|FXF_SHORT)) && k->olen>1 && k->toc==0x01){ k->olen--; k->toc=k->toc2;
+            if((k->fl&FXF_AUDIO) && k->slen>1){ k->off++; k->slen--; k->toc2=k->slen>1?s->buf[k->off+1]:0; } else k->toc2=0; }
         o+=h->rsize+r.slen; }
     s->poff=o; }
 static int fx_load(const char*name){
@@ -430,6 +438,18 @@ static void fx_index_json(StBuf*s,const char*name){
 // An Ogg Opus file of packets: a whole utterance (uttn >= 0), or every utterance of one sender (id) with each gap
 // between two of them shortened to at most 1 s of silence. Deterministic (serial from the name), so range requests of
 // the same file agree.
+// POST /control?do=forensic&delete=<session>: the session's folder and every file in it, from this computer (the page's
+// Delete button, confirmed there). The live session is closed first (the next record opens a new one).
+static int fx_delete(const char*qs){
+    const char*p=strstr(qs,"delete="); if(!p) return 0; p+=7; char name[160]; size_t n=0; while(p[n] && p[n]!='&' && n+1<sizeof name){ name[n]=p[n]; n++; } name[n]=0;
+    if(!fx_name_ok(name,n)) return 0;
+    char dir[1300]; snprintf(dir,sizeof dir,"%s/%s",g_fx_base,name); struct stat st; if(stat(dir,&st) || !S_ISDIR(st.st_mode)) return 0;
+    pthread_mutex_lock(&g_fxw_mx); if(g_fxw.open && !strcmp(g_fxw.name,name)) fx_sess_close(); pthread_mutex_unlock(&g_fxw_mx);
+    pthread_mutex_lock(&g_fxc_mx); if(!strcmp(g_fxc.name,name)){ free(g_fxc.buf); free(g_fxc.pk); free(g_fxc.u); memset(&g_fxc,0,sizeof g_fxc); } pthread_mutex_unlock(&g_fxc_mx);
+    DIR*d=opendir(dir); int left=0; if(d){ struct dirent*e; while((e=readdir(d))){ if(!strcmp(e->d_name,".")||!strcmp(e->d_name,"..")) continue;
+            char f[1600]; snprintf(f,sizeof f,"%s/%s",dir,e->d_name); if(unlink(f)) left++; } closedir(d); }
+    int ok=!left && !rmdir(dir);
+    char m[400]; int k=snprintf(m,sizeof m,"  [forensic] session %s deleted%s\n",name,ok?"":" (not completely)"); (void)!write(2,m,(size_t)k); return ok; }
 static int fx_ogg(OggW*w,const char*name,int uttn,uint64_t id){
     memset(w,0,sizeof *w); const FxSess*d=&g_fxc; int first=-1; for(int i=0;i<d->np && first<0;i++){ const FxPk*k=&d->pk[i]; if(k->utt<0 || !(k->fl&FXF_AUDIO) || (k->fl&FXF_TRUNC)) continue;
         if(uttn>=0?k->utt==uttn:k->id==id) first=i; }
