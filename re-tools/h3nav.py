@@ -7,7 +7,8 @@
 Built from the same collision geometry as h3bsp.py (structure BSPs + instanced geometry, invisible player-clip
 surfaces included), as a layered height field: the map's play area is cut into square cells; every upward-facing,
 not-slippery collision surface over a cell gives that cell a floor level (several where floors overlap: bridges,
-rooms under rooms). A floor needs CLEAR_H of free space above it (no collision there). Neighbouring floors (8
+rooms under rooms). The scenario's placed scenery and crates (barricades, crates, their own collision models) count as
+collision too (--no-objects leaves them out). A floor needs CLEAR_H of free space above it (no collision there). Neighbouring floors (8
 directions) connect when their heights differ by at most STEP (both ways) or the step is a drop of up to DROP
 (one way down); a diagonal needs both of its straight neighbours. Floors inside a kill trigger volume, or outside
 every safe zone when the map has some, are left out.
@@ -22,13 +23,13 @@ out.nav (little-endian), read by shim/src/nav.c:
 World units as object positions; a biped's feet stand at the node's z.
 Read-only, static file work.
 """
-import argparse, collections, os, struct, sys, time
+import argparse, collections, math, os, struct, sys, time
 
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from h3map import H3Map  # noqa: E402
-from h3bsp import Resources, level_triangles  # noqa: E402
+from h3bsp import Resources, level_triangles, fan  # noqa: E402
 from h3bounds import read_trigger_volumes  # noqa: E402
 
 SF_SLIP = 0x40
@@ -39,6 +40,104 @@ CLEAR_H = 0.6          # free space a floor needs above it (a crouching Spartan 
 CLEAR_EPS = 0.08       # collision closer than this above the floor counts as the floor itself
 LEVEL_GAP = 0.3        # floor samples in one cell further apart than this are separate levels
 DIRS = [(1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1), (0, -1), (1, -1)]
+
+
+# placed objects: scenery (scnr +0xB4 [0xB4], palette +0xC0) and crates (+0x5BC [0xB0], palette +0x5C8) -- their own
+# collision models, not part of the level geometry (Rat's Nest barricades, crates). Placement: +4 flags (bit 3 never
+# placed), +8 position, +0x14 yaw / pitch / roll (radians), +0x20 scale. Object definition +0x34 model -> hlmt +0x10 coll,
+# hlmt +0xAC nodes [0x5C] (+0x28 default inverse scale, +0x2C/+0x38/+0x44 inverse forward/left/up, +0x50 inverse
+# position); coll +0x20 regions [0x10] -> +4 permutations [0x28] (the first) -> +4 bsps [0x64] (+0 node, +0x40 surfaces
+# [0xC], +0x4C edges [0xC], +0x58 vertices [0x10]).
+OBJ_BLOCKS = ((0xB4, 0xB4, 0xC0), (0x5BC, 0xB0, 0x5C8))
+
+
+def coll_polys_tag(m, b):
+    surfs, edges, verts = m.block(b, 0x40, 0xC), m.block(b, 0x4C, 0xC), m.block(b, 0x58, 0x10)
+    if not surfs or not verts:
+        return None
+    V = np.array([struct.unpack_from('<3f', v, 0) for v in verts], np.float64)
+    E = [struct.unpack_from('<6h', e, 0) for e in edges]
+    polys, fl = [], []
+    for si, sf in enumerate(surfs):
+        fe, = struct.unpack_from('<H', sf, 2); ring, ei = [], fe
+        for _ in range(256):
+            if not 0 <= ei < len(E):
+                ring = []; break
+            st, en, fw, rv, left, _r = E[ei]
+            if left == si:
+                ring.append(st); ei = fw
+            else:
+                ring.append(en); ei = rv
+            if ei == fe:
+                break
+        polys.append(ring); fl.append(sf[0xA])
+    return V, polys, np.array(fl, np.uint8)
+
+
+def object_model_tris(m, ti, cache):
+    """an object definition's collision triangles in model space (+ surface flags), first permutation of each region"""
+    if ti in cache:
+        return cache[ti]
+    out = None
+    try:
+        hl = m.tagref(m.meta(ti, 0x48), 0x34)
+        if hl >= 0 and m.tags[hl][0] == 'hlmt' and m.tags[hl][2]:
+            h = m.meta(hl, 0xB8); co = m.tagref(h, 0x10)
+            nodes = m.block(h, 0xAC, 0x5C)
+            if co >= 0 and m.tags[co][0] == 'coll' and m.tags[co][2]:
+                tl, fl = [], []
+                for r in m.block(m.meta(co, 0x30), 0x20, 0x10):
+                    perms = m.block(r, 0x04, 0x28)
+                    if not perms:
+                        continue
+                    for b in m.block(perms[0], 0x04, 0x64):
+                        cp = coll_polys_tag(m, b)
+                        if cp is None:
+                            continue
+                        V, polys, sfl = cp
+                        node, = struct.unpack_from('<h', b, 0)
+                        if 0 <= node < len(nodes):          # node space -> model space (the node's default pose)
+                            e = nodes[node]; sc, = struct.unpack_from('<f', e, 0x28)
+                            B = np.array([struct.unpack_from('<3f', e, o) for o in (0x2C, 0x38, 0x44)])   # rows f, l, u
+                            pos = np.array(struct.unpack_from('<3f', e, 0x50))
+                            # inverse pose: p_node = s * (x*f + y*l + z*u) + pos  ->  p_model[k] = (row k) . (p_node - pos) / s
+                            V = np.stack([((V - pos) * B[k]).sum(1) for k in range(3)], 1) / (sc if sc else 1.0)
+                        t, owner = fan(polys)
+                        if len(t):
+                            tl.append(V[t]); fl.append(sfl[owner])
+                if tl:
+                    out = (np.concatenate(tl), np.concatenate(fl))
+    except Exception:
+        out = None
+    cache[ti] = out
+    return out
+
+
+def placed_object_tris(m, d, log):
+    """world-space triangles + flags of the scenario's placed scenery and crates"""
+    cache, tl, fl, n = {}, [], [], 0
+    for blk, esz, pal in OBJ_BLOCKS:
+        palette = [m.tagref(e, 0) for e in m.block(d, pal, 0x10)]
+        for e in m.block(d, blk, esz):
+            pi, = struct.unpack_from('<h', e, 0); pflags, = struct.unpack_from('<I', e, 4)
+            if pflags & 8 or not 0 <= pi < len(palette) or palette[pi] < 0:
+                continue
+            mt = object_model_tris(m, palette[pi], cache)
+            if mt is None:
+                continue
+            pos = np.array(struct.unpack_from('<3f', e, 8)); yaw, pitch, roll = struct.unpack_from('<3f', e, 0x14)
+            scale, = struct.unpack_from('<f', e, 0x20); scale = scale if scale > 0 else 1.0
+            cy, sy, cp, sp, cr, sr = math.cos(yaw), math.sin(yaw), math.cos(pitch), math.sin(pitch), math.cos(roll), math.sin(roll)
+            Rz = np.array([[cy, -sy, 0], [sy, cy, 0], [0, 0, 1]]); Ry = np.array([[cp, 0, -sp], [0, 1, 0], [sp, 0, cp]])
+            Rx = np.array([[1, 0, 0], [0, cr, -sr], [0, sr, cr]]); R = Rz @ Ry @ Rx
+            t = mt[0]
+            w = np.stack([(t * R[k]).sum(-1) for k in range(3)], -1) * scale + pos
+            tl.append(w); fl.append(mt[1]); n += 1
+    log('%d placed objects with collision (%d definitions), %d triangles' % (
+        n, sum(1 for v in cache.values() if v is not None), sum(len(x) for x in tl)))
+    if not tl:
+        return np.zeros((0, 3, 3)), np.zeros(0, np.uint8)
+    return np.concatenate(tl), np.concatenate(fl)
 
 
 def samples(tris, spacing):
@@ -78,6 +177,7 @@ def main():
     ap.add_argument('--cell', type=float, default=0.25)
     ap.add_argument('--png', help='preview picture (components / wall distance)')
     ap.add_argument('--quiet', action='store_true')
+    ap.add_argument('--no-objects', action='store_true', help='level geometry only (no placed scenery / crates)')
     o = ap.parse_args()
     log = (lambda *a: None) if o.quiet else (lambda *a: print(*a, file=sys.stderr))
     t0 = time.time()
@@ -88,6 +188,10 @@ def main():
     tris, _kinds, two, flags = level_triangles(m, res, Opts, log=log, with_flags=True)
     sc = m.find('scnr')[0]; d = m.meta(sc, 0x4A0)
     tvs, _k, _s = read_trigger_volumes(m, d)
+    if not o.no_objects:
+        ot, of = placed_object_tris(m, m.meta(sc, 0x5D4), log)
+        if len(ot):
+            tris = np.concatenate([tris, ot]); two = np.concatenate([two, np.zeros(len(ot), bool)]); flags = np.concatenate([flags, of])
     kills = [t for t in tvs if t['kind'] == 'kill']; safes = [t for t in tvs if t['kind'] == 'safe']
     # play area: the safe zones' extent, else where most of the geometry is
     if safes:

@@ -8,7 +8,7 @@
 // the first time a map is played: ~/Library/Application Support/ReclaimerMac/maptop/<map>.nav (PELOAD_NAV_TOOL = the
 // script, PELOAD_NAV_FILE = a file to use instead). Paths keep away from walls (cost by wall distance); our position
 // is our biped (the one the camera sits in, or the stats thread's local unit). Stuck (under 0.35 units in 1.5 s while
-// walking): jump, raise the cost of the next stretch of path, replan; four times in 10 s: a new goal.
+// walking): back off and sidestep, jump, raise the cost of the next stretch of path, replan; four times in 10 s: a new goal.
 // Runs 30 times a second on its own thread (shim-nav, started from the first Present); XInputGetState takes the sticks
 // from nav_pad. Starts PELOAD_INPUT_DELAY s (default 3) after gameplay starts. PELOAD_NAV_LOG=1 logs goals, paths, stuck
 // events and a status line every 2 s. PELOAD_NAV_PITCH fixes the look-pitch sign (default: found by trying, -1 first;
@@ -104,6 +104,7 @@ static void nav_ensure(void){
     { char m[1300]; int k=snprintf(m,sizeof m,"  [nav] making the walking graph for %s (%s)\n",name,mp); (void)!write(2,m,k); }
     snprintf(g_nav_making,sizeof g_nav_making,"%s",path); pthread_t th; pthread_create(&th,0,nav_wait,(void*)(intptr_t)pid); pthread_detach(th); }
 static void nav_step(void);
+static void nav_publish(const int32_t*path,int from,int plen,int goal);
 static void* nav_thread(void*a){ (void)a; pthread_setname_np("shim-nav"); for(;;){ usleep(33000); nav_step(); } return 0; }
 // called at each Present: starts the nav thread (planning a long path over a big map takes tens of ms -- not on the
 // render thread)
@@ -118,7 +119,7 @@ static void nav_step(void){
     static HbObj objs[1024]; pthread_mutex_lock(&g_hb_collect_mx); g_hb_units_only=1; int n=hb_collect(objs,1024); g_hb_units_only=0; pthread_mutex_unlock(&g_hb_collect_mx);
     int me=-1; for(int i=0;i<n;i++){ const HbObj*o=&objs[i]; if(o->type) continue; float dx=o->c[0]-cam[0],dy=o->c[1]-cam[1],dz=o->c[2]-cam[2];
         if(dx*dx+dy*dy+dz*dz < (o->r+0.3f)*(o->r+0.3f) || o->handle==g_hb_local_unit){ me=i; break; } }
-    static int32_t path[8192]; static int plen, pidx, goal=-1; static double tplan, tstat, tjump, tstuck[4]; static float hist[64][3]; static double histt[64]; static int hh;
+    static int32_t path[8192]; static int plen, pidx, goal=-1; static double tplan, tstat, tjump, tback, tstuck[4]; static float bstr; static float hist[64][3]; static double histt[64]; static int hh;
     if(me<0 || objs[me].dead || objs[me].seat>=0){ g_nav_act=0; plen=0; return; }   // dead, respawning, or in a vehicle
     const HbObj*o=&objs[me]; float pos[3]={o->c[0],o->c[1],o->c[2]-0.35f};   // feet: just under the bounding centre
     int cur=nav_node_at(pos); if(cur<0){ g_nav_act=0; return; }
@@ -138,6 +139,7 @@ static void nav_step(void){
     // follow: nearest path node ahead of the last one, then aim PELOAD_NAV_LOOK nodes beyond it
     { float bd=1e30f; int bi=pidx; for(int i=pidx;i<plen && i<pidx+60;i++){ float p[3]; nav_pos(path[i],p); float d=(p[0]-pos[0])*(p[0]-pos[0])+(p[1]-pos[1])*(p[1]-pos[1]); if(d<bd){ bd=d; bi=i; } } pidx=bi;
       if(bd>4.0f) tplan=0; }   // more than 2 units off the path: replan next tick
+    { static double tpub; if(now-tpub>0.25){ tpub=now; nav_publish(path,pidx,plen,goal); } }
     static int look=-1; if(look<0){ const char*e=getenv("PELOAD_NAV_LOOK"); look=e?atoi(e):6; if(look<1) look=1; }
     int ti=pidx+look<plen?pidx+look:plen-1; float tp[3]; nav_pos(path[ti],tp);
     float yaw_err=atan2f(tp[1]-pos[1],tp[0]-pos[0])-atan2f(fwd[1],fwd[0]); while(yaw_err>3.14159f) yaw_err-=6.28318f; while(yaw_err<-3.14159f) yaw_err+=6.28318f;
@@ -146,21 +148,43 @@ static void nav_step(void){
     float fh=sqrtf(fwd[0]*fwd[0]+fwd[1]*fwd[1]); float pitch=atan2f(fwd[2],fh), perr=-0.08f-pitch; float ry=ps*perr*2.0f; ry=ry>0.5f?0.5f:ry<-0.5f?-0.5f:ry;   // look a little down
     // the look-pitch sign depends on the profile's inverted-look setting: flip it when holding the stick makes the pitch
     // error grow (unless PELOAD_NAV_PITCH sets it)
-    { static double tp; static float pe0, ry0; if(!psfix && now-tp>0.5){ if(fabsf(ry0)>=0.2f && fabsf(pe0)>0.05f && fabsf(perr)>fabsf(pe0)+0.02f){ ps=-ps; nav_say("  [nav] look pitch sign flipped to %+.0f\n",ps); }
+    // two worse half-seconds in a row (not while jumping) flip it; two better ones after that lock it
+    { static double tp; static float pe0, ry0; static int worse, better; if(!psfix && now-tp>0.5){
+        if(now-tjump>1.0 && fabsf(ry0)>=0.2f && fabsf(pe0)>0.05f && !(hb_spar_enabled() && g_spar_ok)){   // (the sparring aim owns the view)
+            if(fabsf(perr)>fabsf(pe0)+0.02f){ better=0; if(++worse>=2){ ps=-ps; worse=0; nav_say("  [nav] look pitch sign flipped to %+.0f\n",ps); } }
+            else if(fabsf(perr)<fabsf(pe0)-0.02f){ worse=0; if(++better>=2){ psfix=1; nav_say("  [nav] look pitch sign %+.0f confirmed\n",ps); } } }
         tp=now; pe0=perr; ry0=ry; } }
-    float mv=fabsf(yaw_err)>1.05f?0.25f:1.0f; float lx=-sinf(yaw_err)*mv, ly=cosf(yaw_err)*mv; if(ly<0) ly=0;
+    // with the sparring partner's aim on (PELOAD_SPAR) the view is not ours to turn: walk the path in any direction
+    // relative to it; in enemy mode within PELOAD_NAV_NEAR units (default 4) of the target, strafe side to side instead
+    int spar=hb_spar_enabled() && g_spar_ok;
+    float mv=(!spar && fabsf(yaw_err)>1.05f)?0.25f:1.0f; float lx=-sinf(yaw_err)*mv, ly=cosf(yaw_err)*mv; if(ly<0 && !spar) ly=0;
+    if(mode==2){ static float near=-1; if(near<0){ const char*e=getenv("PELOAD_NAV_NEAR"); near=e?atof(e):4.0f; } float gp[3]; nav_pos(goal,gp);
+        if((gp[0]-pos[0])*(gp[0]-pos[0])+(gp[1]-pos[1])*(gp[1]-pos[1])<near*near){ lx=fmod(now,3.0)<1.5?0.8f:-0.8f; ly=0; } }
     // stuck: barely moved in 1.5 s while walking -> jump, penalise the next stretch, replan
     uint16_t btn=0; hist[hh&63][0]=pos[0]; hist[hh&63][1]=pos[1]; hist[hh&63][2]=pos[2]; histt[hh&63]=now; hh++;
     { int j=hh-1; while(j>0 && hh-j<63 && now-histt[(j-1)&63]<=1.5) j--; float dx=pos[0]-hist[j&63][0], dy=pos[1]-hist[j&63][1];
-      if(now-histt[j&63]>=1.4 && dx*dx+dy*dy<0.35f*0.35f && now-tjump>1.5){ tjump=now; hh=0;
+      if(now-histt[j&63]>=1.4 && dx*dx+dy*dy<0.35f*0.35f && now-tjump>1.5){ tjump=now; hh=0; tback=now; bstr=(nav_rand()&1)?0.7f:-0.7f;
           for(int i=pidx;i<plen && i<pidx+10;i++) g_nav.pen[path[i]]+=4.0f;
           memmove(tstuck,tstuck+1,3*sizeof(double)); tstuck[3]=now;
           if(now-tstuck[0]<10.0){ nav_say("  [nav] stuck 4 times at (%.1f %.1f %.1f): a new goal\n",pos[0],pos[1],pos[2]); if(mode!=2) goal=-1; memset(tstuck,0,sizeof tstuck); }
           else nav_say("  [nav] stuck at (%.1f %.1f %.1f): jump and replan\n",pos[0],pos[1],pos[2]);
           tplan=0; } }
     if(now-tjump<0.25) btn|=0x1000;   // A = jump
+    if(now-tback<0.6){ lx=bstr; ly=-0.8f; rx=0; }   // first back off and sidestep (a corner the next plan may lead into again)
     g_nav_lx=lx; g_nav_ly=ly; g_nav_rx=rx; g_nav_ry=ry; g_nav_btn=btn; g_nav_act=1;
     if(now-tstat>2.0){ tstat=now; nav_say("  [nav] at (%.1f %.1f %.1f) node %d, path %d/%d, next (%.1f %.1f %.1f), turn %.0f deg -> L=(%.2f,%.2f) R=(%.2f,%.2f)\n",
         pos[0],pos[1],pos[2],cur,pidx,plen,tp[0],tp[1],tp[2],yaw_err*57.2958f,lx,ly,rx,ry); } }
+// the stats page's map: the walker's goal and the rest of its path (at most 160 points)
+static pthread_mutex_t g_nav_pmx=PTHREAD_MUTEX_INITIALIZER; static float g_nav_pts[160][2], g_nav_goalp[3]; static int g_nav_npts, g_nav_hasgoal;
+static void nav_publish(const int32_t*path,int from,int plen,int goal){ pthread_mutex_lock(&g_nav_pmx); g_nav_npts=0; g_nav_hasgoal=goal>=0;
+    if(goal>=0) nav_pos(goal,g_nav_goalp);
+    int left=plen-from, step=left>159?(left+158)/159:1; for(int i=from;i<plen && g_nav_npts<159;i+=step){ float p[3]; nav_pos(path[i],p); g_nav_pts[g_nav_npts][0]=p[0]; g_nav_pts[g_nav_npts][1]=p[1]; g_nav_npts++; }
+    if(plen>from && g_nav_npts<160){ float p[3]; nav_pos(path[plen-1],p); g_nav_pts[g_nav_npts][0]=p[0]; g_nav_pts[g_nav_npts][1]=p[1]; g_nav_npts++; }
+    pthread_mutex_unlock(&g_nav_pmx); }
+static void nav_json(StBuf*s){ if(!nav_mode()) return; static const char*const mn[4]={"","roam","enemy","point"};
+    pthread_mutex_lock(&g_nav_pmx); sb_put(s,",\"nav\":{\"mode\":\"%s\",\"active\":%s",mn[nav_mode()&3],g_nav_act?"true":"false");
+    if(g_nav_hasgoal) sb_put(s,",\"goal\":[%.2f,%.2f,%.2f]",g_nav_goalp[0],g_nav_goalp[1],g_nav_goalp[2]);
+    sb_put(s,",\"path\":["); for(int i=0;i<g_nav_npts;i++) sb_put(s,"%s[%.2f,%.2f]",i?",":"",g_nav_pts[i][0],g_nav_pts[i][1]); sb_put(s,"]}");
+    pthread_mutex_unlock(&g_nav_pmx); }
 int nav_pad(int16_t*lx,int16_t*ly,int16_t*rx,int16_t*ry,uint16_t*b){
     if(!g_nav_act) return 0; *lx=ax16(g_nav_lx); *ly=ax16(g_nav_ly); *rx=ax16(g_nav_rx); *ry=ax16(g_nav_ry); *b=g_nav_btn; return 1; }

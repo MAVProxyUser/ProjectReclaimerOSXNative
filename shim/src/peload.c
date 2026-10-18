@@ -401,8 +401,10 @@ static int    MSABI i_QueryPerformanceFrequency(uint64_t *f){ if(f) *f=100000000
 // rwlock (refused by macOS) -> locks left held -> halo3 hung at match start in _Mtx_lock(halo3+0x21c2398) from
 // 0x173bb0. The mach thread port name is unique per live thread (and is what the thread dumps print as mach_tid).
 // PELOAD_TID_CONST = old behavior.
-static uint32_t MSABI i_GetCurrentThreadId(void){ static int k=-1; if(k<0) k=getenv("PELOAD_TID_CONST")?1:0; if(k) return 0x1000;
-    return (uint32_t)pthread_mach_thread_np(pthread_self()); }
+static __thread uint32_t t_tid;   // (the engine's main thread asks ~900k times a second in a 100-player game)
+static uint32_t MSABI i_GetCurrentThreadId(void){ if(__builtin_expect(t_tid!=0,1)) return t_tid;
+    static int k=-1; if(k<0) k=getenv("PELOAD_TID_CONST")?1:0; if(k) return 0x1000;
+    return t_tid=(uint32_t)pthread_mach_thread_np(pthread_self()); }
 static uint32_t MSABI i_GetCurrentProcessId(void){ return (uint32_t)getpid(); }
 static void   MSABI i_InitializeSListHead(void *h){ if(h) memset(h,0,16); }
 // Interlocked SList: Windows' LOCK-FREE singly-linked list, used by the engine for
@@ -3856,7 +3858,12 @@ static uint32_t MSABI i_XInputGetState(uint32_t idx,void*st){
     // sparring partner (hitbox.c hb_spar_tick): pad 0 = a right stick toward the nearest enemy's head, nothing else
     { extern int hb_spar_enabled(void); extern int hb_spar_stick(float*,float*);
       if(idx==0 && hb_spar_enabled()){ static uint32_t sp_pkt; float rx=0,ry=0; hb_spar_stick(&rx,&ry); uint8_t*o=st; memset(o,0,16);
-          int16_t sx=ax16(rx), sy=ax16(ry); *(uint32_t*)o=++sp_pkt; memcpy(o+12,&sx,2); memcpy(o+14,&sy,2); return 0; } }
+          int16_t sx=ax16(rx), sy=ax16(ry); *(uint32_t*)o=++sp_pkt; memcpy(o+12,&sx,2); memcpy(o+14,&sy,2);
+          // + PELOAD_NAV (e.g. =enemy): it walks too -- nav's left stick (relative to the current view, which the aim
+          // owns) and its jump; the aim keeps the right stick
+          { extern int nav_pad(int16_t*,int16_t*,int16_t*,int16_t*,uint16_t*); int16_t lx,ly,nrx,nry; uint16_t b;
+            if(nav_pad(&lx,&ly,&nrx,&nry,&b)){ memcpy(o+8,&lx,2); memcpy(o+10,&ly,2); memcpy(o+4,&b,2); } }
+          return 0; } }
     { static int nopad=-1; if(nopad<0) nopad=getenv("PELOAD_NO_PAD")?1:0; if(nopad) return 1167; /*ERROR_DEVICE_NOT_CONNECTED*/ }
     static uint32_t pkt[4]; static XPad last[4]; static int logged;
     XPad p; memset(&p,0,sizeof p); int con=gc_read(idx,&p);

@@ -370,6 +370,11 @@ function drawMap(){
   if(document.getElementById('vh').checked&&snap&&snap.vehicles) for(const v of snap.vehicles){ if(!v.pos) continue; const [x,y]=toScreen(v.pos[0],v.pos[1]);
    const dead=!(v.health>0); cx.globalAlpha=dead?0.35:1; cx.fillStyle='#e8e8e8'; cx.strokeStyle='#000'; cx.lineWidth=1; cx.fillRect(x-4,y-4,8,8); cx.strokeRect(x-4,y-4,8,8);
    const nm=String(v.type||'').split(/[\\/]/).pop().replace(/_/g,' '); cx.font='10px system-ui'; cx.textAlign='left'; cx.lineWidth=3; cx.strokeStyle='#000c'; cx.strokeText(nm,x+6,y+3); cx.fillStyle='#cfd8e0'; cx.fillText(nm,x+6,y+3); cx.globalAlpha=1; }
+  if(snap&&snap.nav&&snap.nav.path&&snap.nav.path.length>1){   // PELOAD_NAV: where the test walker is heading
+   cx.save(); cx.setLineDash([5,4]); cx.strokeStyle='#7df9ff'; cx.lineWidth=2; cx.beginPath();
+   snap.nav.path.forEach((q,i)=>{ const [x,y]=toScreen(q[0],q[1]); i?cx.lineTo(x,y):cx.moveTo(x,y); }); cx.stroke(); cx.restore();
+   if(snap.nav.goal){ const [x,y]=toScreen(snap.nav.goal[0],snap.nav.goal[1]); cx.strokeStyle='#7df9ff'; cx.lineWidth=2; cx.beginPath(); cx.arc(x,y,7,0,7); cx.stroke();
+     cx.font='10px system-ui'; cx.textAlign='left'; cx.lineWidth=3; cx.strokeStyle='#000c'; cx.strokeText('walker goal ('+snap.nav.mode+')',x+9,y+3); cx.fillStyle='#7df9ff'; cx.fillText('walker goal ('+snap.nav.mode+')',x+9,y+3); } }
   if(document.getElementById('pd').checked&&snap) for(const p of snap.players){ if(!p.alive)continue; const [x,y]=toScreen(p.pos[0],p.pos[1]);
    cx.fillStyle=C[p.team_name]||'#888'; cx.beginPath(); cx.arc(x,y,p.slot===sel?6:3.5,0,7); cx.fill();
    if(p.slot===sel||p.you){cx.strokeStyle=p.you?'#fff':'#ff0';cx.lineWidth=2;cx.stroke()}

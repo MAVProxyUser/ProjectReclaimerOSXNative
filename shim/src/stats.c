@@ -652,6 +652,7 @@ static void st_death_event(const char*victim,int vteam,uint32_t h,int np,const S
     #undef ST_OBJ
     // a kill is an estimate (flag 1); a death without a recent hit is certain, its cause unknown
     st_pending_death(victim,vteam,killer,kteam,how); }
+static void nav_json(StBuf*s);   // nav.c (PELOAD_NAV: the walker's goal and path)
 static void st_snapshot(StBuf*s){
     static const char* teams[8]={"red","blue","green","orange","purple","gold","brown","pink"};
     extern double g_gameplay_t0; double now=mono_s();
@@ -776,7 +777,7 @@ static void st_snapshot(StBuf*s){
         uint32_t own=*(const uint32_t*)(d+0xC0); const char*on=0; for(int k=0;k<np;k++) if(pl[k].unit==own){ on=pl[k].name; break; }
         const float*v=(const float*)(d+0x74); sb_put(s,"%s{\"type\":",first?"":","); first=0; st_tag(s,*(const uint32_t*)d);
         sb_put(s,",\"owner\":"); sb_str(s,on?on:""); sb_put(s,",\"pos\":"); sb_f3(s,(const float*)(d+0x50)); sb_put(s,",\"speed\":%.1f}",sqrtf(v[0]*v[0]+v[1]*v[1]+v[2]*v[2])); }
-    sb_put(s,"]}");
+    sb_put(s,"]"); nav_json(s); sb_put(s,"}");
     #undef ST_DATUM
     #undef ST_TYPE
 }
