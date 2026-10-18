@@ -926,6 +926,7 @@ typedef struct { void** vtbl; uint32_t kind; uint32_t rowpitch; uint64_t size; v
     // lifetime (backlog 27): COM reference count; Release to 0 queues the object for d3dobj_stage/d3dobj_reap, which free
     // it once nothing bound or queued can still use it. keep: never freed (shaders, layouts, the back buffer...).
     volatile int refs; uint8_t keep, dead, pstage; uint32_t pframe; void* pnext;   // pstage 1 released, 2 seen unbound at frame pframe
+    uint64_t pqpos;               // GL submission queue position when it was seen unbound: freed only after the GL thread passed it
 } D3DObj;
 // ID3D11DeviceChild private data: halo3 stashes the VS bytecode-blob pointer on the shader object
 // (SetPrivateData with GUID g_180801e00) and reads it back for CreateInputLayout. Our old no-op
@@ -1073,7 +1074,9 @@ static int  MSABI adapter_GetDesc(void*s,void*pd){ (void)s; if(getenv("PELOAD_TR
 static unsigned MSABI d3d_AddRef(void*s){ (void)s; return 1; }    // singletons (device, context, factory, swap chain)
 static unsigned MSABI d3d_Release(void*s){ (void)s; return 0; }
 // D3DObj reference counting (the child / resource / view / query vtables)
-static int d3d_nofree(void){ static int v=-1; if(v<0) v=getenv("PELOAD_D3D_NOFREE")?1:0; return v; }
+// 2026-10-17 21:15: OFF by default again (PELOAD_D3D_FREE=1 = free): after a map change a public BTB rendered player models
+// over everything and white splotches; freeing and copy-on-write are both suspects until an A/B clears one of them.
+static int d3d_nofree(void){ static int v=-1; if(v<0){ const char*f=getenv("PELOAD_D3D_FREE"); v=getenv("PELOAD_D3D_NOFREE")?1:(f&&atoi(f)?0:1); } return v; }
 static void d3dobj_pend(D3DObj*o);   // queue for freeing (defined with d3dobj_reap)
 static void d3dobj_stage(void); static void d3dobj_reap(int gl);
 static unsigned MSABI obj_AddRef(void*s){ if(!live_has(s)) return 1; return (unsigned)__atomic_add_fetch(&((D3DObj*)s)->refs,1,__ATOMIC_ACQ_REL); }
@@ -1756,6 +1759,11 @@ static void MSABI ctxi_Dispatch(void*t,uint32_t a,uint32_t b,uint32_t c){ (void)
     if(t0){ static uint64_t acc,nn,lacc,lins; acc+=prof_now()-t0; if((++nn%200)==0){ char m[160]; long ins=g_cs_instrs; int k=snprintf(m,sizeof m,"  [cs-cpu] %llu dispatches, avg %.1f us | last 200: %.1f us/dispatch, %.0f instrs/dispatch, %.1f ns/instr\n",(unsigned long long)nn,acc/1e3/nn,(acc-lacc)/1e3/200,(ins-lins)/200.0,(ins-lins)?(double)(acc-lacc)/(double)(ins-lins):0.0); (void)!write(2,m,k); lacc=acc; lins=ins; } }
     if(rc<0){ static int warned; if(warned++<8){ char m[120]; int k=snprintf(m,sizeof m,"  [cs-cpu] unsupported opcode %ld in cs %p\n",-rc,(void*)cs); (void)!write(2,m,k); } return; }
     for(int i=0;i<8;i++){ D3DObj*v=g_cs.uav[i]; D3DObj*r=(v&&v->data&&v->vkind)?(D3DObj*)v->data:v; if(r){ r->ver++; r->gl_dirty=1; r->dpart=0; r->rvalid=0; } } }
+// SetPredication(pred, value): ignored (draws always run). PELOAD_TRACE_PRED counts the game's calls.
+static void MSABI ctx_SetPredication(void*t,void*pred,int value){ (void)t;
+    static int tr=-1; if(tr<0) tr=getenv("PELOAD_TRACE_PRED")?1:0; if(!tr) return;
+    static unsigned long n,nset; static double t0; n++; if(pred) nset++; double now=mono_s(); if(!t0) t0=now;
+    if(now-t0>=5.0){ char m[160]; int k=snprintf(m,sizeof m,"  [pred] SetPredication: %lu calls in %.0f s (%lu with a predicate, last value %d)\n",n,now-t0,nset,value); (void)!write(2,m,k); n=nset=0; t0=now; } }
 static void MSABI ctx_DispatchIndirect(void*t,void*args,uint32_t off){ (void)t;(void)args; cscensus("DispatchIndirect",off,0,0); }
 static void stg_note_indirect(const char*what,uint32_t off){ if(!getenv("PELOAD_TRACE_STAGES")) return; static unsigned long n; n++;
     if(n<=20 || !(n%2000)){ char m[220]; int k=snprintf(m,sizeof m,"  [stages] %s #%lu off=%u vs=%016llx ps=%016llx\n",what,n,off,
@@ -2056,6 +2064,7 @@ static void d3d_init(void){
     x[35]=(void*)ctx_OMSetBlendState; x[36]=(void*)ctx_OMSetDepthStencilState; x[43]=(void*)ctx_RSSetState; x[45]=(void*)ctx_RSSetScissorRects;
     x[10]=(void*)ctx_PSSetSamplers; x[26]=(void*)ctx_VSSetSamplers;
     x[27]=(void*)ctx_Begin; x[28]=(void*)ctx_End; x[29]=(void*)ctx_GetData;   // ID3D11Asynchronous (queries)
+    x[30]=(void*)ctx_SetPredication;
     x[46]=(void*)ctx_CopySubresourceRegion; x[47]=(void*)ctx_CopyResource; x[48]=(void*)ctx_UpdateSubresource;
     x[50]=(void*)ctx_ClearRTV; x[53]=(void*)ctx_ClearDSV;   // ClearRenderTargetView / ClearDepthStencilView (d3dgl)
     x[119]=(void*)ctx_VSSetConstantBuffers1; x[123]=(void*)ctx_PSSetConstantBuffers1;  // ID3D11DeviceContext1 (halo3 binds matrices here)
@@ -8303,11 +8312,15 @@ static void d3dobj_stage(void){ uint32_t f=++g_pf_game; if(!g_d3dpend) return;
     D3DObj**pp=&g_d3dpend;
     while(*pp){ D3DObj*o=*pp;
         if(o->refs>0){ *pp=o->pnext; o->pstage=0; o->pnext=0; g_d3d_pending--; continue; }   // AddRef'd again: alive
-        if(o->pstage==1 && !d3d_in_state(&g_rst,o) && !d3d_in_cs(&g_rcs,o)){ o->pstage=2; o->pframe=f; }
+        if(o->pstage==1 && !d3d_in_state(&g_rst,o) && !d3d_in_cs(&g_rcs,o)){ o->pstage=2; o->pframe=f; o->pqpos=__atomic_load_n(&g_sq_head,__ATOMIC_ACQUIRE); }
         pp=(D3DObj**)&o->pnext; }
     pthread_mutex_unlock(&g_pend_mx); }
+// queued / running CPU particle jobs still using o: as a resource they write or read live, OR as one of the views and samplers
+// they were dispatched with (cx.srv / cx.uav / cx.samp -- until 2026-10-17 only resources were checked, so a view the game
+// released right after a dispatch could be freed under its job: garbage particles after map changes in big games)
 static int d3d_in_csjobs(const D3DObj*o){ int r=0; pthread_mutex_lock(&g_csq_mx);
-    for(CsQJob*j=g_csq_head;j && !r;j=j->next){ for(int i=0;i<8;i++) if(j->uavres[i]==o) r=1; for(int i=0;i<j->nrd;i++) if(j->rdres[i]==o) r=1; }
+    for(CsQJob*j=g_csq_head;j && !r;j=j->next){ for(int i=0;i<8;i++) if(j->uavres[i]==o || j->cx.uav[i]==o) r=1; for(int i=0;i<j->nrd;i++) if(j->rdres[i]==o) r=1;
+        for(int i=0;i<32 && !r;i++) if(j->cx.srv[i]==o) r=1; for(int i=0;i<16 && !r;i++) if(j->cx.samp[i]==o) r=1; }
     pthread_mutex_unlock(&g_csq_mx); return r; }
 static D3DObj* g_quar[4096]; static unsigned g_quar_i;
 static void cs_texcache_forget(const D3DObj*t){ pthread_mutex_lock(&g_cstex_mx);
@@ -8354,7 +8367,9 @@ static void d3dobj_reap(int gl){ uint32_t f=++g_pf_gl; if(!g_d3dpend) return;
     D3DObj**pp=&g_d3dpend;
     while(*pp && n<MAXB){ D3DObj*o=*pp;
         if(o->refs>0){ *pp=o->pnext; o->pstage=0; o->pnext=0; g_d3d_pending--; continue; }
-        if(o->pstage==2 && f>=o->pframe+1 && !d3d_in_state(&g_d3dst,o) && !d3d_in_cs(&g_cs,o) && !o->cs_pending && o->qstate!=1 && o!=g_q_active){
+        // (every command queued before it was staged has run: the frame count alone assumed the game's and the GL side's
+        //  Present counts stay in step, which the submission thread switching on mid-game or extra presents can break)
+        if(o->pstage==2 && f>=o->pframe+1 && __atomic_load_n(&g_sq_tail,__ATOMIC_ACQUIRE)>=o->pqpos && !d3d_in_state(&g_d3dst,o) && !d3d_in_cs(&g_cs,o) && !o->cs_pending && o->qstate!=1 && o!=g_q_active){
             int qp=0; for(int i=0;i<g_sq_nqpend;i++) if(g_sq_qpend[i]==o) qp=1;
             if(!qp && !d3d_in_csjobs(o)){ *pp=o->pnext; o->pnext=0; g_d3d_pending--; batch[n++]=o; continue; } }
         pp=(D3DObj**)&o->pnext; }
@@ -9930,7 +9945,7 @@ static int cow_ok(uintptr_t D,uintptr_t S,size_t mid){ static struct { uintptr_t
 static void* __attribute__((ms_abi,noinline)) crt_big_memmove(void*d,const void*s,size_t n){
     static int lg=-1; if(lg<0) lg=getenv("PELOAD_MEMCPY_LOG")?1:0;
     if(lg) mcl_note((uint64_t)__builtin_return_address(0),d,s,n);
-    if(g_memcpy_cow<0){ const char*e=getenv("PELOAD_MEMCPY_COW"); g_memcpy_cow=e?atoi(e)!=0:1; }   // default on
+    if(g_memcpy_cow<0){ const char*e=getenv("PELOAD_MEMCPY_COW"); g_memcpy_cow=e?atoi(e)!=0:0; }   // default OFF since 2026-10-17 21:15 (map-change corruption suspect)
     uintptr_t D=(uintptr_t)d, S=(uintptr_t)s;
     if(g_memcpy_cow && n>=(1u<<20) && !((D-S)&16383) && (D+n<=S || S+n<=D)){
         size_t head=(16384-(D&16383))&16383, mid=(n-head)&~(size_t)16383;

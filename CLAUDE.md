@@ -219,7 +219,7 @@ the present thread samples them as rectangle textures. Every pointer argument ne
 otherwise: an unencoded pointer crashed the helper). Debug: PELOAD_GLH_TRACE=<n> (first n commands), PELOAD_GLH_STATS=1, crash reports
 in /Library/Logs/DiagnosticReports/glhelper-*. hb_vis (F9) is off in helper mode. The helper's write end of the wake pipe sits at fd >= 4000
 (the game's CloseHandle once closed a low one).
-D3D object lifetime (2026-10-17, backlog 27): refcounted D3DObjs, freed via d3dobj_stage/d3dobj_reap (see the BACKLOG entry); PELOAD_D3D_NOFREE=1 = old.
+D3D object lifetime (2026-10-17, backlog 27): refcounted D3DObjs, freed via d3dobj_stage/d3dobj_reap -- OFF by default since 21:15 (PELOAD_D3D_FREE=1 on) after map-change corruption in a public BTB; copy-on-write (PELOAD_MEMCPY_COW=1) off too. Map-change test server: DED_CONFIG=mapchange.toml bash shim/dedicated.sh (3 x 1-minute games).
 Map pictures (2026-10-17): hb_note_map only keeps real cache maps ("daeh" v13; the engine's autosaves are also .map files); the stats
 server makes a missing maptop picture in the background the first time a map is played (st_maptop_ensure: arch -arm64 python3
 re-tools/h3bsp.py; PELOAD_MAPTOP_TOOL, PELOAD_NO_MAPTOP); maptop.sh also covers Workshop maps (and takes map files as arguments:

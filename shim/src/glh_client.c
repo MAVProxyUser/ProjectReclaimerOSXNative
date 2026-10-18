@@ -229,8 +229,13 @@ static int glh_start(void){
     int pfd[2]; if(pipe(pfd)){ munmap(m,glh_shm_size()); shm_unlink(name); return 0; }
     char fds[16], pids[16]; snprintf(fds,sizeof fds,"%d",pfd[0]); snprintf(pids,sizeof pids,"%d",(int)getpid());
     char*argv[]={exe,name,fds,pids,0}; extern char**environ;
-    posix_spawn_file_actions_t fa; posix_spawn_file_actions_init(&fa); posix_spawn_file_actions_addclose(&fa,pfd[1]);
-    int r=posix_spawn(&g_glh_pid,exe,&fa,0,argv,environ); posix_spawn_file_actions_destroy(&fa); close(pfd[0]);
+    // the helper gets stdio and its pipe end only (it used to inherit every descriptor the game had open -- sockets, the
+    // stats server's listening port, files)
+    posix_spawn_file_actions_t fa; posix_spawn_file_actions_init(&fa);
+    for(int i=0;i<3;i++) posix_spawn_file_actions_addinherit_np(&fa,i);
+    posix_spawn_file_actions_addinherit_np(&fa,pfd[0]);
+    posix_spawnattr_t sa; posix_spawnattr_init(&sa); posix_spawnattr_setflags(&sa,POSIX_SPAWN_CLOEXEC_DEFAULT);
+    int r=posix_spawn(&g_glh_pid,exe,&fa,&sa,argv,environ); posix_spawn_file_actions_destroy(&fa); posix_spawnattr_destroy(&sa); close(pfd[0]);
     if(r){ close(pfd[1]); munmap(m,glh_shm_size()); shm_unlink(name); glh_log("  [glh] could not start the helper\n"); return 0; }
     // keep the write end far away from the low descriptors the game's Windows handles map to (a CloseHandle on a
     // recycled number closed it once, and the helper took the end-of-file for the loader exiting)

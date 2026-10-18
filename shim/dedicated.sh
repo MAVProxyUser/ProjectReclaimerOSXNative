@@ -12,6 +12,7 @@
 # dedicated.toml: hidden, not listed on any master, no UPnP, public address 127.0.0.1, one Valhalla Slayer server on
 # UDP 49190 with RCON on TCP 127.0.0.1:49190. To host for other people, edit it (dedicated.toml.example next to it
 # documents every option) -- that publishes the server, so only do it on purpose.
+# DED_CONFIG=<file>.toml runs another config in the same folder (e.g. mapchange.toml: three 1-minute games, a test of map changes).
 # DED_VOICE=1 / DED_VOICE=0 switches the server's voice chat on / off in its dedicated.toml before it starts (off by default;
 # on is needed to exercise a client's microphone path).
 # Logs: /tmp/reclaimer_dedicated.log (the supervisor) and /tmp/reclaimer_dedicated_<pid>.log (every game-server
@@ -109,10 +110,10 @@ set -m
 env PELOAD_SKINGUARD=1 PELOAD_VTGUARD=1 PELOAD_ALLOC_GUARD=1 PELOAD_RECLAIMER_PATCHES=all \
     PELOAD_HIDE_WINDOW=1 PELOAD_AUDIO=0 PELOAD_NO_PAD=1 PELOAD_NO_KBM=1 PELOAD_NO_SYS_CURSOR=1 PELOAD_NO_FOCUS=1 \
     PELOAD_STDERR_TEE='/tmp/reclaimer_dedicated_%p.log' $DED_ENV \
-    arch -x86_64 shim/build/peload "$EXE" dedicated --config "$FOLDER\\dedicated.toml" run \
+    arch -x86_64 shim/build/peload "$EXE" dedicated --config "$FOLDER\\${DED_CONFIG:-dedicated.toml}" run \
     < /dev/null > /tmp/reclaimer_dedicated.log 2>&1 &
 echo $! > "$PIDFILE"
-PORT="$(grep -m1 -A3 '^\[\[server\]\]' "$UFOLDER/dedicated.toml" | grep -m1 '^port' | tr -dc 0-9)"
+PORT="$(grep -m1 -A3 '^\[\[server\]\]' "$UFOLDER/${DED_CONFIG:-dedicated.toml}" | grep -m1 '^port' | tr -dc 0-9)"
 echo "dedicated server starting ($FOLDER); log: /tmp/reclaimer_dedicated.log"
 echo "join it:  RECLAIMER_JOIN=127.0.0.1:${PORT:-49190} bash shim/play.sh"
 echo "stop it:  bash shim/dedicated.sh stop"
