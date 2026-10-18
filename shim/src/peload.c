@@ -3396,12 +3396,13 @@ static int    MSABI i_EnumDisplayMonitors(void*dc,const void*clip,void*cb,int64_
     fn(mon,dc,rc,data); return 1; }
 static int    MSABI i_GetClientRect(void*h,int32_t*r){ (void)h; if(r){r[0]=0;r[1]=0;r[2]=WIN_W;r[3]=WIN_H;} return 1; }
 static int    MSABI i_GetWindowRect(void*h,int32_t*r){ (void)h; if(r){r[0]=0;r[1]=0;r[2]=WIN_W;r[3]=WIN_H;} return 1; }
-static void lay_pos(void*h,int x,int y,int setpos,int alpha);   // layered windows (below)
+static void lay_pos(void*h,int x,int y,int setpos,int alpha); static void lay_zorder(void*h,void*after);   // layered windows (below)
 // SetWindowPos: only its show/hide flags and the move matter here (the client hides and moves its layered screens with it)
-static int    MSABI i_SetWindowPos(void*h,void*after,int x,int y,int w,int ht,uint32_t f){ (void)after;(void)w;(void)ht;
-    if(getenv("PELOAD_TRACE_LAYERED")){ char m[140]; int k=snprintf(m,sizeof m,"  [layered] SetWindowPos %p %d,%d %dx%d flags 0x%x\n",h,x,y,w,ht,f); (void)!write(2,m,k); }
+static int    MSABI i_SetWindowPos(void*h,void*after,int x,int y,int w,int ht,uint32_t f){ (void)w;(void)ht;
+    if(getenv("PELOAD_TRACE_LAYERED")){ char m[160]; int k=snprintf(m,sizeof m,"  [layered] SetWindowPos %p after %p %d,%d %dx%d flags 0x%x\n",h,after,x,y,w,ht,f); (void)!write(2,m,k); }
     if(!getenv("PELOAD_LAYERED_NOSWP")){ if(f&0x80/*SWP_HIDEWINDOW*/) lay_show(h,0); else if(f&0x40/*SWP_SHOWWINDOW*/) lay_show(h,1);
-        if(!(f&0x2/*SWP_NOMOVE*/)) lay_pos(h,x,y,1,-1); }
+        if(!(f&0x2/*SWP_NOMOVE*/)) lay_pos(h,x,y,1,-1);
+        if(!(f&0x4/*SWP_NOZORDER*/) && !getenv("PELOAD_LAYERED_NOZ")) lay_zorder(h,after); }
     return 1; }
 static int64_t g_winlong[8];
 static int64_t MSABI i_GetWindowLongPtrW(void*h,int idx){ WWin*w=h; if(w&&w->magic==WWIN_MAGIC){ if(idx==-21)return w->userdata; if(idx==-4)return (int64_t)(intptr_t)w->wndproc; if(idx>=0&&idx<128)return w->extra[idx/8]; return 0; } return (idx>=-8&&idx<0)? g_winlong[-idx-1]:0; }
@@ -3486,8 +3487,14 @@ static void gdi_fill(GdiObj*d,int x,int y,int w,int h,uint32_t px){
 // UpdateLayeredWindow was a no-op, so its loading screen vanished and the game's own (no artwork on modded maps) showed
 // over a stale frame: text drawn over text. Each window keeps its last bitmap, position, alpha and visibility; screen
 // coordinates are the game window's client coordinates (ClientToScreen is the identity here). PELOAD_NO_LAYERED = off.
-typedef struct { void*hwnd; int x,y,w,h, alpha, premul, visible, dirty, used; uint32_t*px; unsigned tex; } LayWin;
+typedef struct { void*hwnd; int x,y,w,h, alpha, premul, visible, dirty, used; uint32_t*px; unsigned tex; double z; } LayWin;
 static LayWin g_lay[8]; static pthread_mutex_t g_lay_mx=PTHREAD_MUTEX_INITIALIZER; static volatile int g_lay_any;
+// Z order (2026-10-18): the windows used to be drawn in slot order, whatever the client stacked -- a loading splash could
+// cover the lobby (its map vote never showed on a joined client). New windows go on top; SetWindowPos without
+// SWP_NOZORDER moves one to the top (HWND_TOP / TOPMOST / NOTOPMOST), the bottom (HWND_BOTTOM) or just behind the window
+// given; lay_draw draws bottom to top. PELOAD_LAYERED_NOZ = the old slot order.
+static double g_lay_ztop, g_lay_zbot;
+static LayWin* lay_find(void*h){ for(int k=0;k<8;k++) if(g_lay[k].used && g_lay[k].hwnd==h) return &g_lay[k]; return 0; }
 static struct { void*h; int shown; } g_vis[64];   // last ShowWindow state per window (also before its first update)
 static int lay_off(void){ static int o=-1; if(o<0) o=getenv("PELOAD_NO_LAYERED")?1:0; return o; }
 static void lay_show(void*h,int shown){   // shown: 1 visible, 0 hidden, -1 destroyed
@@ -3495,6 +3502,12 @@ static void lay_show(void*h,int shown){   // shown: 1 visible, 0 hidden, -1 dest
     pthread_mutex_lock(&g_lay_mx); int i=0; for(; i<64 && g_vis[i].h && g_vis[i].h!=h; i++){}
     if(i<64){ if(shown<0) g_vis[i].h=0; else { g_vis[i].h=h; g_vis[i].shown=shown; } }
     for(int k=0;k<8;k++) if(g_lay[k].used && g_lay[k].hwnd==h){ if(shown<0){ free(g_lay[k].px); g_lay[k].px=0; g_lay[k].used=0; g_lay[k].visible=0; } else g_lay[k].visible=shown; }
+    pthread_mutex_unlock(&g_lay_mx); }
+static void lay_zorder(void*h,void*after){   // SetWindowPos without SWP_NOZORDER
+    pthread_mutex_lock(&g_lay_mx); LayWin*l=lay_find(h);
+    if(l){ intptr_t a=(intptr_t)after; if(a==0||a==-1||a==-2) l->z=++g_lay_ztop; else if(a==1) l->z=--g_lay_zbot;
+        else { LayWin*b=lay_find(after); if(b){ double below=b->z-1.0; for(int k=0;k<8;k++) if(&g_lay[k]!=l && &g_lay[k]!=b && g_lay[k].used && g_lay[k].z<b->z && g_lay[k].z>below) below=g_lay[k].z;
+                l->z=(below+b->z)/2; } } }
     pthread_mutex_unlock(&g_lay_mx); }
 static void lay_pos(void*h,int x,int y,int setpos,int alpha){   // SetWindowPos move / SetLayeredWindowAttributes alpha
     pthread_mutex_lock(&g_lay_mx);
@@ -3504,7 +3517,7 @@ static int lay_update(void*h,const int32_t*pd,const int32_t*ps,void*sdc,const in
     if(lay_off()) return 1;
     if(getenv("PELOAD_TRACE_LAYERED")){ static int n; if(n++<400){ char m[160]; int k=snprintf(m,sizeof m,"  [layered] update %p pos %d,%d size %dx%d alpha %d\n",h,pd?pd[0]:-1,pd?pd[1]:-1,ps?ps[0]:-1,ps?ps[1]:-1,bf?bf[2]:-1); (void)!write(2,m,k); } }
     pthread_mutex_lock(&g_lay_mx); LayWin*l=0; for(int k=0;k<8;k++) if(g_lay[k].used && g_lay[k].hwnd==h) l=&g_lay[k];
-    if(!l) for(int k=0;k<8;k++) if(!g_lay[k].used){ l=&g_lay[k]; memset(l,0,sizeof *l); l->used=1; l->hwnd=h; l->alpha=255;
+    if(!l) for(int k=0;k<8;k++) if(!g_lay[k].used){ l=&g_lay[k]; memset(l,0,sizeof *l); l->used=1; l->hwnd=h; l->alpha=255; l->z=++g_lay_ztop;
         l->visible=1; for(int i=0;i<64;i++) if(g_vis[i].h==h) l->visible=g_vis[i].shown; break; }
     if(l){ if(pd){ l->x=pd[0]; l->y=pd[1]; } if(bf){ l->alpha=bf[2]; l->premul=bf[3]&1; }
         GdiDC*sd=sdc; if(ps && sd && sd->magic==GDIDC_MAGIC && sd->bmp && sd->bmp->bits && sd->bmp->bpp==32){
@@ -4712,7 +4725,9 @@ static void lay_draw(void){
     void*cur=CGLGetCurrentContext(); if(cur!=vctx){ vctx=cur; G.GenVertexArrays(1,&vao); }
     pthread_mutex_lock(&g_lay_mx);
     int drew=0;
-    for(int k=0;k<8;k++){ LayWin*l=&g_lay[k]; if(!l->used || !l->visible || !l->px || l->w<=0 || l->h<=0 || !l->alpha) continue;
+    int ord[8]; for(int k=0;k<8;k++) ord[k]=k;
+    if(!getenv("PELOAD_LAYERED_NOZ")) for(int i=1;i<8;i++){ int v=ord[i], j=i; while(j>0 && g_lay[ord[j-1]].z>g_lay[v].z){ ord[j]=ord[j-1]; j--; } ord[j]=v; }   // bottom to top
+    for(int kk=0;kk<8;kk++){ int k=ord[kk]; LayWin*l=&g_lay[k]; if(!l->used || !l->visible || !l->px || l->w<=0 || l->h<=0 || !l->alpha) continue;
         if(!drew){ drew=1; G.UseProgram(0); G.BindProgramPipeline(0); G.UseProgram(prog); G.BindVertexArray(vao); G.Enable(0x0BE2); G.BlendFunc(1,0x0303); G.ActiveTexture(GLE_TEX0); if(G.BindSampler) G.BindSampler(0,0); }
         if(!l->tex){ G.GenTextures(1,&l->tex); G.BindTexture(GLE_TEX2D,l->tex); G.TexParameteri(GLE_TEX2D,0x2801,0x2601); G.TexParameteri(GLE_TEX2D,0x2800,0x2601);
             G.TexParameteri(GLE_TEX2D,0x2802,0x812F); G.TexParameteri(GLE_TEX2D,0x2803,0x812F); l->dirty=1; }
