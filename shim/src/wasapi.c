@@ -62,6 +62,7 @@ static void wa_aq_cb(void*ud,AudioQueueRef q,AudioQueueBufferRef b){
     for(uint32_t i=0;i<n;){ uint32_t pos=(uint32_t)((s->rd+i)%s->bufframes), run=s->bufframes-pos; if(run>n-i) run=n-i;
         memcpy((uint8_t*)b->mAudioData+(size_t)i*s->blk, s->ring+(size_t)pos*s->blk, (size_t)run*s->blk); i+=run; }
     if(n<frames) memset((uint8_t*)b->mAudioData+(size_t)n*s->blk,0,(size_t)(frames-n)*s->blk);   // underrun: silence
+    if(g_rec_audio) rec_audio_push(s,b->mAudioData,frames,(int)s->ch,(int)s->rate,(int)s->bits,(int)s->blk,(int)s->isfloat);   // clip recording (rec.m): menu music, voices
     s->rd+=n; s->played+=frames; void*ev=s->event;
     b->mAudioDataByteSize=frames*s->blk; AudioQueueEnqueueBuffer(q,b,0,0);
     pthread_mutex_unlock(&s->m); pthread_mutex_unlock(&g_wa_cbmx);

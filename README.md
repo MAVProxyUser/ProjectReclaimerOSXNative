@@ -223,6 +223,12 @@ watch from another device). From top to bottom the page shows:
   its depth buffer and the camera position to `~/reclaimer_cap_*` for reporting a rendering glitch at a spot; the overlay
   is not in it), **Mic** (live / muted), and in games you host a **Speed** menu: everyone's movement speed (the game
   variant's own speed trait, 25% to 300%). Every switch costs nothing while it is off.
+- **Record** -- a clip of what the game window shows (overlay included) with the game's sound (and the client's menu
+  music and voice chat), as `.mp4` (H.264 + AAC, the window's picture up to 1920x1080, up to 60 fps), or **Audio only**
+  as `.m4a`: set the length in seconds (1-600), press Record; it stops by itself (or Stop), a red `REC 0:12` counts
+  while it runs. Clips go to `~/Movies/Reclaimer/<map>_<date-time>.mp4`; the list under the row downloads or plays
+  them. Hardware encoding; nothing runs while you don't record. A bigger or full-screen window gives a sharper clip.
+  Details: `shim/docs/recording.md`.
 - **Connected** -- everyone in the game's network session, also in the lobby before a match starts, in alphabetical
   order. Players who are talking light up green. The speaker beside each name mutes or unmutes their voice (a red cross
   = muted); **Mute all** / **Unmute all** do everyone. This is the client's own voice mute (the same list as its
@@ -270,8 +276,11 @@ Machine-readable endpoints:
   `feed_seq` is the newest event's number. `PELOAD_FEED_LOG=1` also prints each event to the log
 - `/heat.json` -- the heatmap data (visited cells, deaths); `/maptop/<map>.png|json` -- the map picture and its world
   bounds
+- `/recordings.json` -- the clips in `~/Movies/Reclaimer` (file, size, duration, time); `/recordings/<file>` -- one clip;
+  the snapshot's `rec` -- the recorder's state (`POST /control?do=rec&secs=<n>&mode=av|audio` starts one, `do=recstop`
+  ends it)
 - `POST /control?do=<hitboxes|tracers|info|items|vehicles|visible|zones|zonetype&t=|weaktype&t=|teams|textup|textdown|
-  teleport|tpnext&slot=|tpto&x=&y=&z=|capture|mic&on=|speed&v=|mute|unmute|muteall|unmuteall>[&voice=<id>]` with an
+  teleport|tpnext&slot=|tpto&x=&y=&z=|capture|mic&on=|speed&v=|rec&secs=&mode=|recstop|mute|unmute|muteall|unmuteall>[&voice=<id>]` with an
   `X-Reclaimer-Control: 1` header (other web pages can't send it);
   `PELOAD_STATS_READONLY=1` turns the controls off
 
@@ -316,6 +325,7 @@ resized, and can go full screen (green button or Ctrl-Cmd-F). Developer and diag
 | `shim/src/wasapi.c` | WASAPI render endpoint (the client's menu music and voice chat) on AudioQueue |
 | `shim/src/hitbox.c` / `shim/src/stats.c` | overlay (hitboxes, tracers, labels, visible only, zones, frame capture) / live stats over HTTP |
 | `shim/src/stats_page.html` | the stats page (embedded at build time; served from the file in a source checkout) |
+| `shim/src/rec.m` / `shim/tools/rec-test.sh` | clip recording (mp4 / m4a from the stats page) / its offline test |
 | `shim/play.sh` / `shim/build.sh` | launcher / build script |
 | `shim/target.sh` / `shim/dedicated.sh` | windowless second player / local dedicated server |
 | `shim/tools/servers.sh` / `shim/tools/maptop.sh` | busiest public servers and their mods / top-down map pictures for the heatmap |

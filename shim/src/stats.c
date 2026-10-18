@@ -435,6 +435,14 @@ static const StSpot g_st_spots[]={
     {"riverworld","valhalla_north","Valhalla: north ridge",44.0f,-24.0f,10.0f},    // past the north end (y > -31.9); ground 9.4, no soft ceiling
 };
 int hb_bounds_off(void); int hb_spar_available(void);
+// ---- clip recording (rec.m; shim/docs/recording.md): POST /control?do=rec&secs=<n>&mode=av|audio, do=recstop; GET
+// /recordings.json, /recordings/<file>; the snapshot's "rec". The picture is the window's (its size now); no window
+// (PELOAD_HIDE_WINDOW) = sound only. The file is named after the map being played.
+static int st_rec_start(const char*qs){
+    const char*v=strstr(qs,"secs="); double secs=v?atof(v+5):30; const char*m=strstr(qs,"mode="); int ao=m && !strncmp(m+5,"audio",5);
+    int r[4]={0,0,0,0}; if(!ao && !win_hidden()) rec_pic_rect(r);
+    char map[64]; snprintf(map,sizeof map,"%s",g_st_curmap[0]?g_st_curmap:"game"); char err[200];
+    return rec_start(ao,secs,map,r[2],r[3],err,sizeof err); }
 static int st_control(const char*act,const char*qs){
     char m[96]; int k=0;
     static const char*const feat[HBF_N]={"hitboxes","tracers","info","items","visible","zones","vehicles"};
@@ -500,6 +508,8 @@ static int st_control(const char*act,const char*qs){
         char m[64]; int k=snprintf(m,sizeof m,"  [stats] page: microphone %s\n",g_mic_muted?"muted":"live"); (void)!write(2,m,k); return 1; }
     if(!strcmp(act,"submit")){ const char*v=strstr(qs,"on="); if(!v) return 0; g_sub_want=atoi(v+3)?1:0; return 1; }   // GL submission thread (d3dsubmit.c)
     if(!strcmp(act,"capture")){ __atomic_store_n(&g_hb_cap_req,1,__ATOMIC_RELEASE); (void)!write(2,"  [capture] page: capturing the next frame\n",43); return 1; }
+    if(!strcmp(act,"rec")) return st_rec_start(qs);   // clip recording (rec.m): secs=<n>&mode=av|audio; why it refused: the snapshot's rec.last_error
+    if(!strcmp(act,"recstop")){ rec_stop(); return 1; }
     return 0; }
 // ---- the engine's own events (shim/docs/halo3-event-feed.md sections 2-3) -----------------------------------------
 // display_event (halo3+0x11b0ec, event* in rcx) runs once for every event the HUD shows -- local, received from the
@@ -663,6 +673,7 @@ static void st_snapshot(StBuf*s){
     extern double g_gameplay_t0; double now=mono_s();
     sb_put(s,"{\"time\":%.2f,\"in_match\":%s,\"inst\":%d",g_gameplay_t0?now-g_gameplay_t0:0.0,g_gameplay_t0?"true":"false",(int)getpid());   // inst: a new game -> open pages reload
     { pthread_mutex_lock(&g_ev_mx); uint32_t fs=g_ev_seq; pthread_mutex_unlock(&g_ev_mx); sb_put(s,",\"feed_seq\":%u",fs); }
+    { char rj[1024]; rec_status_json(rj,sizeof rj,!win_hidden()); sb_put(s,",\"rec\":%s",rj); }   // clip recording (rec.m)
     char m[64]="";
     { char mp[1024]=""; hb_current_map(mp,sizeof mp);   // the map being played (halo3/maps or a Workshop mod's folder)
       const char*b=strrchr(mp,'/'); b=b?b+1:mp; snprintf(m,sizeof m,"%s",b); char*dot=strrchr(m,'.'); if(dot)*dot=0; sb_put(s,",\"map\":"); sb_str(s,m);
@@ -805,6 +816,21 @@ static const char g_st_optmap[]={
 #pragma clang diagnostic pop
 static int st_send(int fd,const char*b,size_t n){ while(n){ ssize_t k=send(fd,b,n,0); if(k<=0){ if(k<0&&errno==EINTR) continue; return 0; } b+=k; n-=(size_t)k; } return 1; }
 static volatile unsigned long g_st_hits;   // page requests (/events, /stats.json): a tab is showing this game
+// GET /recordings/<file>: a clip from ~/Movies/Reclaimer (rec_file_path checks the name), streamed; Range requests are
+// answered (a browser playing the clip in a tab seeks with them)
+static void st_rec_file(int fd,const char*req,const char*name){
+    char fp[1100], h[512]; struct stat st; int f=rec_file_path(name,fp,sizeof fp)?open(fp,O_RDONLY):-1;
+    if(f<0 || fstat(f,&st)){ const char*nf="HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"; st_send(fd,nf,strlen(nf)); if(f>=0) close(f); return; }
+    long long a=0, b=(long long)st.st_size-1; int part=0; const char*rg=strcasestr(req,"\r\nRange: bytes=");
+    if(rg && st.st_size>0){ long long x=-1, y=-1; int c=sscanf(rg+15,"%lld-%lld",&x,&y); if(c>=1 && x>=0 && x<st.st_size){ a=x; if(c==2 && y>=a && y<st.st_size) b=y; part=1; } }
+    int k=snprintf(h,sizeof h,"HTTP/1.1 %s\r\nContent-Type: %s\r\nContent-Length: %lld\r\nAccept-Ranges: bytes\r\n",part?"206 Partial Content":"200 OK",
+        strstr(name,".m4a")?"audio/mp4":"video/mp4",st.st_size?b-a+1:0);
+    if(part) k+=snprintf(h+k,sizeof h-(size_t)k,"Content-Range: bytes %lld-%lld/%lld\r\n",a,b,(long long)st.st_size);
+    k+=snprintf(h+k,sizeof h-(size_t)k,"Content-Disposition: inline; filename=\"%s\"\r\nConnection: close\r\n\r\n",name);
+    if(st_send(fd,h,(size_t)k) && st.st_size){ char*buf=malloc(1<<18); long long left=b-a+1, off=a;
+        while(buf && left>0){ ssize_t n=pread(f,buf,left<(1<<18)?(size_t)left:(size_t)(1<<18),off); if(n<=0 || !st_send(fd,buf,(size_t)n)) break; off+=n; left-=n; }
+        free(buf); }
+    close(f); }
 static void* st_conn(void*a){ int fd=(int)(intptr_t)a; pthread_setname_np("shim-stats-http");
     int one=1; setsockopt(fd,SOL_SOCKET,SO_NOSIGPIPE,&one,sizeof one); setsockopt(fd,IPPROTO_TCP,TCP_NODELAY,&one,sizeof one);
     char req[2048]; ssize_t n=recv(fd,req,sizeof req-1,0); if(n<=0){ close(fd); return 0; } req[n]=0;
@@ -840,6 +866,11 @@ static void* st_conn(void*a){ int fd=(int)(intptr_t)a; pthread_setname_np("shim-
         const char*v=strstr(qs,"since="); uint32_t since=v?(uint32_t)strtoul(v+6,0,10):0; StBuf b={0}; st_feed_json(&b,since);
         int k=snprintf(h,sizeof h,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %zu\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n",b.n);
         if(st_send(fd,h,(size_t)k) && b.n) st_send(fd,b.b,b.n); free(b.b); }
+    else if(!strcmp(path,"/recordings.json")){   // clip recording (rec.m): ~/Movies/Reclaimer's clips, newest first
+        size_t n=0; char*j=rec_list_json(&n);
+        int k=snprintf(h,sizeof h,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %zu\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n",j?n:0);
+        if(st_send(fd,h,(size_t)k) && j) st_send(fd,j,n); free(j); }
+    else if(!strncmp(path,"/recordings/",12)) st_rec_file(fd,req,path+12);
     else if(!strcmp(path,"/heat.json")){
         StBuf b={0}; hm_json(&b);
         int k=snprintf(h,sizeof h,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %zu\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n",b.n);
