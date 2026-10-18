@@ -238,7 +238,7 @@ int main(int argc,char**argv){
             atomic_store(&H->helper_sleeping,1);   // seq_cst, then a seq_cst load of head: pairs with the loader's store head / load sleeping
             if(atomic_load(&H->head)==tail){
                 int t=npq||qp_head!=qp_tail?1:20;   // ms: sooner while a frame or a query result is pending
-                os_sync_wait_on_address_with_timeout((void*)&H->wake_seq,seq,4,OS_SYNC_WAIT_ON_ADDRESS_SHARED,OS_CLOCK_MACH_ABSOLUTE_TIME,(uint64_t)t*1000000ull*tb_den/tb_num);
+                glh_addr_wait_ms(&H->wake_seq,seq,t,tb_num,tb_den);
                 { static double lk; double tn=now_s(); if(tn-lk>0.25){ lk=tn; if(kill(loader,0) && errno==ESRCH) _exit(0); } } }   // the loader is gone
             atomic_store(&H->helper_sleeping,0); busy0=now_s(); continue; }
         while(tail!=head){

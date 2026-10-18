@@ -352,6 +352,12 @@ Render-target dump (2026-10-18): stats POST /control?do=rtdump -- every target t
 in 8 MB strips, `[rtdump]` line with mean / max per channel, ~/reclaimer_rtd_<pid>_<n>_<i>_<w>x<h>_f<fmt>.bmp scaled by its own 99th
 percentile. Halo 3 renders the scene into 8-bit sRGB targets (fmt 29) with exposure applied in the material shaders; the
 120x68 -> 30x17 -> 1x1 (fmt 10) chain measures luminance for the next frame (1x1 = log average).
+Pixel probe (2026-10-18): stats POST /control?do=pixwho[&x=&y=] -- the next frame, after every draw into a >= 1280-wide target,
+reads one pixel (default the centre) and logs each draw that changed it (`[pixwho]` VS/PS hashes, target, value, PS textures) and
+writes ~/reclaimer_pixwho_d<draw>.txt (both shaders' GLSL + every bound VS/PS constant buffer). Hugegrass: albedo 0.37 at draw 292,
+then the static-lighting PS 7bcaa3c3c92f37d7 (cubes t0-t2, lightmap arrays t13 768x768x8 / t14 x2 BC3) writes 0.008.
+PELOAD_TRACE_LAYERED (array uploads: non-zero share per slice), "[d3dgl] vertex attribute format N not translated" (once per
+format; integer inputs still take the IPointer path). Binaries target macOS 13 (build.sh MACOS_MIN).
 Glitch hunting: `PELOAD_D3DGL_COVQ` (+`_COVQ_FRAC`, `_HUGEPROBE=<t>`) per-draw sample counts,
 `PELOAD_D3DGL_WHITEDUMP` (draw flight recorder on auto-exposure spikes), `_LUMLOG`, `_FSLOG`,
 `_FRAMESTAT`, `_CBSCAN`, `_PSCLAMP=<c>`, `_SKIPVSH=<hash,..>`, `_DUMPHASH=<hash,..>` (GLSL+DXBC to ~).

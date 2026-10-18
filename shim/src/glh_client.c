@@ -40,7 +40,7 @@ static void glh_check_alive(void){ static double tl; double now=mono_s(); if(now
         r>0&&WIFSIGNALED(st)?" (crashed)":"");
     (void)!write(2,m,strlen(m)); _exit(70); }
 static void glh_kick(void){ if(atomic_load(&g_glh->helper_sleeping)){   // seq_cst: pairs with the helper's sleep check
-    atomic_fetch_add(&g_glh->wake_seq,1); os_sync_wake_by_address_any((void*)&g_glh->wake_seq,4,OS_SYNC_WAKE_BY_ADDRESS_SHARED); } }
+    atomic_fetch_add(&g_glh->wake_seq,1); glh_addr_wake(&g_glh->wake_seq); } }
 
 static uint8_t* glh_begin(uint32_t op,uint64_t len){
     if(!g_glh) return 0;

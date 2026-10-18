@@ -36,8 +36,9 @@ Known gaps:
 
 ## Requirements
 
-- An Apple Silicon Mac with **Rosetta 2** (`softwareupdate --install-rosetta --agree-to-license`).
-  Developed and tested on an M4 running macOS 26.
+- An Apple Silicon Mac (M1 or newer) with **Rosetta 2** (`softwareupdate --install-rosetta --agree-to-license`) and
+  **macOS 13 or newer** (the binaries are built for 13.0). Developed and tested on an M4 running macOS 26; 16 GB of memory
+  or more is recommended (a 100-player game on a big Workshop map uses ~10 GB for the game and 1-8 GB for the GL helper).
 - Your own copy of **Halo: The Master Chief Collection** on Steam, with the Halo 3 Multiplayer files.
 - **Project Reclaimer client v0.9.20** — `project-reclaimer-client-v0.9.20.exe` from
   https://github.com/ProjectReclaimer/project-reclaimer-releases/releases (SHA-256
@@ -84,8 +85,8 @@ No game files are included in this repository or its releases.
 ## Copy to another Mac with a USB stick
 
 If one Mac is already set up, you can move everything to another Apple Silicon Mac on a USB stick: no Steam login
-or DepotDownloader download on the second Mac. The stick needs about 31 GB free (25 GB with `--minimal`); format it
-APFS or Mac OS Extended so it can hold files over 4 GB.
+or DepotDownloader download on the second Mac. The stick needs about 31 GB free (25 GB with `--minimal`) plus your
+downloaded Workshop mods (`--no-workshop` leaves them out); format it APFS or Mac OS Extended so it can hold files over 4 GB.
 
 On the Mac that already plays (from the repository folder):
 
@@ -93,10 +94,16 @@ On the Mac that already plays (from the repository folder):
 bash shim/tools/make-usb.sh /Volumes/RECLAIMER
 ```
 
-That copies, into `ReclaimerMac/` on the stick, the loader and launch scripts, the VC++ runtime DLLs, your Reclaimer
-client exe, your MCC files (the whole MCC folder; `--minimal` copies only what Project Reclaimer reads) and the
-client's caches and fonts (the Forge asset cache, so the second Mac skips the 2.5-minute first-launch build). Add
+That copies, into `ReclaimerMac/` on the stick, the loader and its native GL helper, the launch scripts and map tools,
+the VC++ runtime DLLs, the newest Reclaimer client exe, your MCC files (the whole MCC folder; `--minimal` copies only what
+Project Reclaimer reads), your downloaded Workshop mods, the client's caches and fonts (the Forge asset cache, so the second
+Mac skips the 2.5-minute first-launch build) and the stats page's map pictures, walking graphs and heatmaps. Add
 `--with-profile` to bring your Reclaimer profile (nickname and identity) along -- then don't play on both Macs at once.
+
+**Updating a stick:** run the same command again. Only what changed is copied (new loader binaries, a new client exe,
+new or updated Workshop mods...); unchanged MCC files are skipped, older client exes are removed from the stick, and each
+part lists the files it copied. `--no-game` skips even checking the MCC files. Then run `install.sh` on the other Mac again:
+it also copies only what changed.
 
 On the other Mac, plug in the stick and run:
 

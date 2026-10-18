@@ -10,7 +10,7 @@ h2{font-size:13px;margin:0 0 8px;color:var(--dim);font-weight:500}
 a{color:var(--accent)}
 #hd{color:var(--dim);margin-bottom:12px}
 .panel{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:12px;min-width:0}
-.grid{display:grid;grid-template-columns:290px minmax(0,1fr);gap:16px;align-items:start}
+.grid{display:grid;grid-template-columns:320px minmax(0,1fr);gap:16px;align-items:start}
 @media (max-width:900px){.grid{grid-template-columns:minmax(0,1fr)}}
 .col{display:flex;flex-direction:column;gap:16px;min-width:0}
 .note{color:var(--dim);font-size:12px;margin-top:6px}.warn{color:#e8c070}.err{color:#f08080}
@@ -21,7 +21,7 @@ code{font:11px ui-monospace,Menlo,monospace;color:#bbb;overflow-wrap:anywhere}
 #settings{margin-bottom:16px}
 #sl{display:flex;flex-direction:column;gap:2px;max-height:min(75vh,640px);overflow-y:auto}
 #sl .s{padding:5px 8px;border-radius:4px;cursor:pointer;border:1px solid transparent;display:flex;gap:8px;align-items:flex-start}
-.sbar{display:flex;gap:6px;margin:-2px 0 8px}
+.sbar{display:flex;flex-wrap:wrap;gap:6px;margin:-2px 0 8px}#selc{font-weight:400}
 #sl .s .ck{margin:2px 0 0;flex:none;cursor:pointer}#sl .s .sb{min-width:0;flex:1}
 #sl .s:hover{background:#222}#sl .s.sel{background:#1d2a38;border-color:#2c4a66}
 #sl .s small{display:block;color:var(--dim);font-size:11px}
@@ -89,7 +89,7 @@ tr.hl{background:#2a2a14}
 </div>
 
 <div class="grid">
-  <div class="panel"><h2>Sessions</h2><div class="sbar"><button class="btn danger" id="delsel" disabled title="Delete the checked sessions' files from this computer. Cannot be undone.">Delete selected</button><button class="btn danger" id="clrall" title="Delete every session's files from this computer, the live one included. Cannot be undone.">Clear all</button></div><div id="sl"><span class="note">none yet</span></div></div>
+  <div class="panel"><h2>Sessions <span id="selc"></span></h2><div class="sbar"><button class="btn" id="selall" title="Check every session (again: uncheck them all)">Select all</button><button class="btn danger" id="delsel" disabled title="Delete the checked sessions' files from this computer. Cannot be undone.">Delete selected</button><button class="btn danger" id="clrall" title="Delete every session's files from this computer, the live one included. Cannot be undone.">Clear all</button></div><div id="sl"><span class="note">none yet</span></div></div>
   <div class="col">
     <div class="panel" id="sum"><span class="note">Pick a session.</span></div>
     <div class="panel"><div class="fh"><h2>Timeline</h2>
@@ -233,18 +233,29 @@ $('#sl').onclick=e=>{ const d=e.target.closest('.s'); if(!d) return;
   select(d.dataset.n); };
 // the checked sessions (kept across the 5 s refresh); Delete selected / Clear all, both confirmed here and done by the loader
 const CK=new Set();
-function renderDelButtons(){ const b=$('#delsel'); b.disabled=!CK.size; b.textContent=CK.size?`Delete selected (${CK.size})`:'Delete selected'; $('#clrall').disabled=!(S&&S.sessions&&S.sessions.length); }
+function renderDelButtons(){ const n=(S&&S.sessions||[]).length, all=n>0&&CK.size===n; if(!busy){ $('#delsel').disabled=!CK.size; $('#clrall').disabled=!n; }
+  $('#selall').disabled=!n||busy; $('#selall').textContent=all?'Select none':'Select all';
+  $('#selc').textContent=CK.size?`\u00b7 ${CK.size} of ${n} selected`:n?`\u00b7 ${n}`:''; }
+let busy=false;
+$('#selall').onclick=()=>{ const ns=(S&&S.sessions||[]).map(s=>s.name); if(ns.length && CK.size===ns.length) CK.clear(); else ns.forEach(n=>CK.add(n)); renderSessions(); };
+// one delete=<name> per session, the button counting; returns the names the loader refused
+async function delEach(names,b){ const bad=[]; let i=0; for(const n of names){ b.textContent=`deleting ${++i} / ${names.length}...`;
+    if(await ctl('delete='+encodeURIComponent(n))) CK.delete(n); else bad.push(n); } return bad; }
+const badMsg=bad=>`Could not delete ${bad.length} session${bad.length>1?'s':''}:\n${bad.slice(0,12).join('\n')}${bad.length>12?`\n... and ${bad.length-12} more`:''}\n\nThe loader's log has a "[forensic] session ... deleted (not completely)" line for a folder it could not empty.`;
 function forget(msg){ cur=null; X=null; $('#sum').innerHTML='<span class="note">'+esc(msg)+'</span>'; $('#tl').innerHTML=''; $('#ls').innerHTML=''; $('#det').classList.remove('open'); }
 $('#delsel').onclick=async()=>{ const names=[...CK]; if(!names.length) return; const live=names.includes(S.current);
   if(!confirm(`Delete ${names.length} session${names.length>1?'s':''}?\n\n${names.slice(0,12).join('\n')}${names.length>12?`\n... and ${names.length-12} more`:''}\n\nEvery local file of ${names.length>1?'them':'it'} (voice, chat, events, roster) is removed from this computer.${live?' The live session is among them: recording continues in a new session.':''} This cannot be undone.`)) return;
-  const b=$('#delsel'); b.disabled=true; b.textContent='deleting...'; const bad=[];
-  for(const n of names){ if(await ctl('delete='+encodeURIComponent(n))) CK.delete(n); else bad.push(n); }
+  const b=$('#delsel'); busy=true; b.disabled=$('#clrall').disabled=true; const bad=await delEach(names,b); busy=false; b.textContent='Delete selected';
   if(cur && names.includes(cur) && !bad.includes(cur)) forget(`${names.length-bad.length} session${names.length-bad.length===1?'':'s'} deleted`);
-  await loadSessions(); if(bad.length) alert('Could not delete:\n'+bad.join('\n')); };
-$('#clrall').onclick=async()=>{ const n=(S&&S.sessions||[]).length; if(!n) return;
+  await loadSessions(); if(bad.length) alert(badMsg(bad)); };
+$('#clrall').onclick=async()=>{ const names=(S&&S.sessions||[]).map(s=>s.name), n=names.length; if(!n) return;
   if(!confirm(`Delete ALL ${n} session${n>1?'s':''}?\n\nEvery local file of every session (voice, chat, events, roster) is removed from this computer${S.current?', the live session included (recording continues in a new session)':''}. This cannot be undone.`)) return;
-  const b=$('#clrall'); b.disabled=true; b.textContent='deleting...'; const ok=await ctl('delete=all'); b.textContent='Clear all';
-  CK.clear(); forget('every session deleted'); await loadSessions(); if(!ok) alert('Some sessions could not be deleted completely (see the loader log).'); };
+  const b=$('#clrall'); busy=true; b.disabled=$('#delsel').disabled=true; b.textContent='deleting...';
+  await ctl('delete=all'); await loadSessions();
+  // what is still listed of what was shown (a loader older than delete=all refuses it): one by one
+  const left=names.filter(x=>S.sessions.some(s=>s.name===x)); const bad=left.length?await delEach(left,b):[];
+  busy=false; b.textContent='Clear all'; for(const x of names) if(!bad.includes(x)) CK.delete(x);
+  if(!bad.includes(cur)) forget(`${n-bad.length} session${n-bad.length===1?'':'s'} deleted`); await loadSessions(); if(bad.length) alert(badMsg(bad)); };
 
 async function select(name){
   if(name!==cur){ cur=name; playing=-1; $('#det').classList.remove('open'); }

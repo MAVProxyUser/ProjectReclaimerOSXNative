@@ -3225,7 +3225,7 @@ static int MSABI i_CreateProcessW(const uint16_t*app,uint16_t*cmd,void*pa,void*t
     posix_spawn_file_actions_t fa; posix_spawn_file_actions_init(&fa);
     if(!getenv("PELOAD_WORKER_INHERIT_STDIO")) // debug: let worker inherit our terminal
         for(int k=0;k<3;k++){ if(cfd[k]>=0) posix_spawn_file_actions_adddup2(&fa,cfd[k],k); }
-    if(cwd){ char wd[2048]; win2unix(cwd,wd,sizeof wd); posix_spawn_file_actions_addchdir(&fa,wd);
+    if(cwd){ char wd[2048]; win2unix(cwd,wd,sizeof wd); if(__builtin_available(macOS 26.0,*)) posix_spawn_file_actions_addchdir(&fa,wd); else posix_spawn_file_actions_addchdir_np(&fa,wd);
         ws("    cwd="); ws(wd); ws("\n"); }
     // Tokenize the Windows command line (honoring double-quotes), DROP token0
     // (the original exe path), keep the worker's real args. Then re-exec the
@@ -3243,6 +3243,9 @@ static int MSABI i_CreateProcessW(const uint16_t*app,uint16_t*cmd,void*pa,void*t
     // PELOAD_NO_WORKSHOP_HELPER = the client's own helper, as before.
     if(nt>=2 && !strcmp(tok[1],"workshop-download") && !getenv("PELOAD_NO_WORKSHOP_HELPER")){
         const char*id=0,*mcc=0; for(int k=2;k+1<nt;k++){ if(!strcmp(tok[k],"--subscribe")||!strcmp(tok[k],"--update")) id=tok[k+1]; if(!strcmp(tok[k],"--mcc-path")) mcc=tok[k+1]; }
+        // the dedicated server's `workshop-download --mcc-path <path> <id>` names the item last, with no flag before it
+        // (2026-10-18: "item -", then "Steam Workshop is unavailable"): a trailing all-digit token is the id
+        if(!id && nt>2){ const char*t=tok[nt-1]; int dig=t[0]!=0; for(const char*c=t;*c;c++) if(*c<'0'||*c>'9') dig=0; if(dig && (nt<4 || strcmp(tok[nt-2],"--mcc-path"))) id=t; }
         char root[1024]="", rootu[2048]="", script[2100], self[2048];
         if(id && mcc){ char m[1024]; snprintf(m,sizeof m,"%s",mcc); size_t L=strlen(m); while(L && (m[L-1]=='\\'||m[L-1]=='/')) m[--L]=0;
             for(int up=0;up<2;up++){ char*b=strrchr(m,'\\'); if(b) *b=0; }
@@ -5091,6 +5094,12 @@ static void d3dgl_upload_layered(D3DObj*o,unsigned tgt){
             ti3(tgt,0,g.ifmt,(int)mw,(int)mh,(int)ns,0,g.fmt,g.type,all); free(all); } }
     if(psi) psi(0x0CF5,4);
     unsigned e=ge?ge():0;
+    if(getenv("PELOAD_TRACE_LAYERED") && o->data){ static unsigned long nl; if(nl++<400){   // per slice: share of non-zero bytes at the uploaded level
+        char m[400]; int k=snprintf(m,sizeof m,"  [layered] %p %ux%u f%u slices=%u level=%u/%u ifmt=0x%x nz%%:",(void*)o,o->w,o->h,o->fmt,ns,L,nm,g.ifmt);
+        for(uint32_t sl=0;sl<ns && sl<24 && k<360;sl++){ uint64_t sz; uint32_t rp,rows,a,b,c; uint64_t off=tex_sub(o,sl*nm+L,&sz,&rp,&rows,&a,&b,&c); int nz=0,n=0;
+            if(off!=UINT64_MAX){ uint64_t st=sz/256?sz/256:1; for(uint64_t i=0;i<sz && off+i<o->size;i+=st){ n++; if(((const uint8_t*)o->data)[off+i]) nz++; } }
+            k+=snprintf(m+k,sizeof m-k," %d",n?nz*100/n:-1); }
+        m[k++]='\n'; (void)!write(2,m,k); } }
     d3dgl_apply_swz(tgt,g.swz); o->glsrgb=(g.ifmt==0x8C43);
     o->glhasmips=0;
     if(!e && nm-L>1 && gm && !getenv("PELOAD_D3DGL_NOMIP")){ gm(tgt); if(!(ge&&ge())){ o->glhasmips=1; G.TexParameteri(tgt,0x2801,0x2703); G.TexParameteri(tgt,0x813D,1000); } }
@@ -5302,6 +5311,32 @@ static int d3dgl_flipy(void){ if(g_d3dgl_flipy_v<0) g_d3dgl_flipy_v=getenv("PELO
 #define g_d3dgl_flipy (d3dgl_flipy())
 static unsigned long g_bb_draws, g_bb_vp, g_bb_skip, g_bb_skip_reason; static unsigned g_bb_t0w,g_bb_t0h,g_bb_t0f;
 static int d3dgl_fbo_y(uint32_t H,uint32_t top,uint32_t h){ return g_d3dgl_flipy ? (int)top : (int)H-(int)(top+h); }
+// Stats control do=pixwho[&x=&y=] (2026-10-18, dark Hugegrass): for the NEXT frame, after every draw into a >= 1280-wide
+// target read back one pixel (default the centre) and log each draw that changed it -- VS / PS hashes, target, the value,
+// the pixel shader's bound textures -- "[pixwho]". Finds the draw that makes a pixel black. One frame of round trips.
+volatile int g_pw_req; static int g_pw_state; static int g_pw_x=-1, g_pw_y=-1; static D3DObj* g_pw_rt[8]; static float g_pw_last[8][4]; static int g_pw_n; static unsigned long g_pw_draw;
+void pixwho_request(int x,int y){ g_pw_x=x; g_pw_y=y; __atomic_store_n(&g_pw_req,1,__ATOMIC_RELEASE); }
+static void pixwho_tick(void){ if(g_pw_state==2){ g_pw_state=0; (void)!write(2,"  [pixwho] frame done\n",22); }
+    if(__atomic_exchange_n(&g_pw_req,0,__ATOMIC_ACQ_REL)){ g_pw_state=2; g_pw_n=0; g_pw_draw=0; } }
+static void pixwho_draw(D3DObj*rt){ if(g_pw_state!=2 || !rt || !G.ReadPixels) return; D3DObj*rr=(rt->data&&rt->vkind)?(D3DObj*)rt->data:rt; g_pw_draw++;
+    if(rr->w<1280) return; int x=g_pw_x>=0?g_pw_x:(int)rr->w/2, y=g_pw_y>=0?g_pw_y:(int)rr->h/2; float px[4]={-9,-9,-9,-9};
+    G.ReadPixels(x,d3dgl_fbo_y(rr->h,(uint32_t)y,1),1,1,0x1908/*RGBA*/,0x1406/*FLOAT*/,px);
+    int k=-1; for(int i=0;i<g_pw_n;i++) if(g_pw_rt[i]==rr) k=i; if(k<0 && g_pw_n<8){ k=g_pw_n++; g_pw_rt[k]=rr; for(int c=0;c<4;c++) g_pw_last[k][c]=-1e30f; } if(k<0) return;
+    if(!memcmp(px,g_pw_last[k],16)) return; memcpy(g_pw_last[k],px,16);
+    D3DObj*vs=g_d3dst.vs,*ps=g_d3dst.ps; char m[900]; int n=snprintf(m,sizeof m,"  [pixwho] draw %lu rt %p %ux%u f%u vs %016llx ps %016llx -> (%.4g %.4g %.4g %.4g) | ps-srv:",
+        g_pw_draw,(void*)rr,rr->w,rr->h,rr->fmt,(unsigned long long)(vs?vs->bchash:0),(unsigned long long)(ps?ps->bchash:0),px[0],px[1],px[2],px[3]);
+    for(int i=0;i<20 && n<820;i++){ D3DObj*v=g_d3dst.psrv[i]; if(!v) continue; D3DObj*xx=v->data&&v->vkind?(D3DObj*)v->data:v; n+=snprintf(m+n,sizeof m-n," t%d=%ux%ux%u f%u",i,xx->w,xx->h,xx->arr,xx->fmt); }
+    m[n++]='\n'; (void)!write(2,m,n);
+    // the shaders and every bound constant buffer of this draw -> ~/reclaimer_pixwho_d<draw>.txt (what the pixel was made from)
+    { const char*home=getenv("HOME"); char pth[300]; snprintf(pth,sizeof pth,"%s/reclaimer_pixwho_d%lu.txt",home?home:"/tmp",g_pw_draw); FILE*f=fopen(pth,"w");
+      if(f){ fprintf(f,"draw %lu vs %016llx ps %016llx -> (%g %g %g %g)\n",g_pw_draw,(unsigned long long)(vs?vs->bchash:0),(unsigned long long)(ps?ps->bchash:0),px[0],px[1],px[2],px[3]);
+        for(int st=0;st<2;st++){ D3DObj**cb=st?g_d3dst.pscb:g_d3dst.vscb; const uint32_t*c1=st?g_d3dst.pscb_1st:g_d3dst.vscb_1st, *cn=st?g_d3dst.pscb_cnt:g_d3dst.vscb_cnt;
+            for(int b=0;b<16;b++){ D3DObj*c=cb[b]; if(!c||!c->data) continue; uint64_t off=(uint64_t)c1[b]*16, nv=cn[b]?cn[b]:(c->size-off)/16; if(nv>256) nv=256;
+                fprintf(f,"\n%s cb%d (%llu bytes, from vec4 %u, %llu shown):\n",st?"PS":"VS",b,(unsigned long long)c->size,c1[b],(unsigned long long)nv);
+                for(uint64_t r=0;r<nv && off+(r+1)*16<=c->size;r++){ const float*v=(const float*)((const uint8_t*)c->data+off+r*16); fprintf(f,"  c%-3llu %12.6g %12.6g %12.6g %12.6g\n",(unsigned long long)r,v[0],v[1],v[2],v[3]); } } }
+        for(int st=0;st<2;st++){ D3DObj*o=st?ps:vs; if(!o) continue; const char*src=o->monosrc?o->monosrc:o->glsl; fprintf(f,"\n==== %s GLSL ====\n%s\n",st?"PS":"VS",src?src:"(none)"); }
+        fclose(f); } } }
+
 static int d3dgl_rt_readfmt(uint32_t f,unsigned*fmt,unsigned*type,unsigned*bpp){
     switch(f){ case 27: case 28: case 29: *fmt=0x1908; *type=0x1401; *bpp=4; return 1;     // RGBA8 (+SRGB)
                case 87: case 90: case 91: *fmt=0x80E1; *type=0x1401; *bpp=4; return 1;     // BGRA8
@@ -6423,7 +6458,9 @@ static void d3dgl_attrib_fmt(uint32_t f,unsigned*comps,unsigned*gt,unsigned char
         case 49:*comps=2;*gt=0x1401;*norm=1;break;               // R8G8_UNORM
         case 61:*comps=1;*gt=0x1401;*norm=1;break;               // R8_UNORM
         case 24:*comps=4;*gt=0x8368;*norm=1;break;               // R10G10B10A2_UNORM -> UINT_2_10_10_10_REV
-        default:*comps=4;*gt=0x1406;break;
+        default:*comps=4;*gt=0x1406;
+            { static uint8_t seen[256]; if(f<256 && !seen[f]){ seen[f]=1; char m[120]; int k=snprintf(m,sizeof m,"  [d3dgl] vertex attribute format %u not translated (read as 4 floats)\n",f); (void)!write(2,m,k); } }
+            break;
     } }
 // DXGI format -> (components, GL integer type) for glVertexAttribIPointer, used when the VS declares the input as
 // uvec4/ivec4 (DXBC signature component type uint/sint). 32-bit float formats pass their raw bits (D3D puts
@@ -7149,7 +7186,7 @@ static void d3dgl_draw_impl(uint32_t vcount,int indexed,uint32_t instcount,uint3
                     bmp_write_rgba(p,W,H,cbuf);
                     char m[220]; int k=snprintf(m,sizeof m,"  [covprobe] NEWHIGH DUMP -> %s (vp=%dx%d fbo=%u red=%d nonblack=%d glerr=%u)\n",p,W,H,crt?crt->glfbo:0,red,nb,ge); (void)!write(2,m,k); } } } }
     PH(6);   // (attribute arrays stay enabled for the next draw; stale ones are disabled before each draw)
-    g_d3dgl_phase="done"; g_d3dgl_frame_draws++; g_draws_total++; d3dgl_note_rt(rt); rtd_note(rt); rtc_note(rt,rt->w,rt->h,rt->fmt,nattr>0,g_d3dst.psrv[0]);
+    g_d3dgl_phase="done"; g_d3dgl_frame_draws++; g_draws_total++; d3dgl_note_rt(rt); rtd_note(rt); pixwho_draw(rt); rtc_note(rt,rt->w,rt->h,rt->fmt,nattr>0,g_d3dst.psrv[0]);
     { D3DObj*t0=g_d3dst.psrv[0]; { D3DObj*b=g_d3dst.blend; const uint32_t*r0=(b&&b->stkind==1)?b->sd+2:0;
       flog("draw rt=%06lx %ux%u f%u vp=%dx%d ps=[%.40s] t0=%06lx %ux%u f%u t1=%06lx blend=%u:%u/%u wm=%x",((unsigned long)rt>>4)&0xffffff,rt->w,rt->h,rt->fmt,vw,vh,ps?ps->rname:"-",
         ((unsigned long)t0>>4)&0xffffff,t0?t0->w:0,t0?t0->h:0,t0?t0->fmt:0,((unsigned long)g_d3dst.psrv[1]>>4)&0xffffff,r0?r0[0]:0,r0?r0[1]:0,r0?r0[2]:0,r0?(r0[7]&0xF):0xF); } }
@@ -7564,6 +7601,7 @@ static void d3dgl_present_impl(void){
             bmp_write_rgba(p,w,h,cap); char m[220]; int k=snprintf(m,sizeof m,"  [d3dgl] RT dump %d: %dx%d rgbsum=%lu fmt=%u -> %s\n",g_rtdumped,(int)rt->w,(int)rt->h,sum,rt->fmt,p); (void)!write(2,m,k); free(cap); }
             gl_bindfbo_any(GLE_FBO,0); } }
     rtd_tick();          // stats control do=rtdump: the next frame's render targets
+    pixwho_tick();       // stats control do=pixwho: one frame of per-draw pixel readbacks
     hb_vis_tick();       // visible-only overlay: async depth readback (hitbox.c; with the GL helper through glh_rb_request)
     hb_capture_tick();   // F8 / stats page: frame + depth + camera capture (hitbox.c)
     g_d3dgl_frame_draws=0;

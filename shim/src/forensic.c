@@ -450,6 +450,15 @@ static void fx_index_json(StBuf*s,const char*name){
 // Delete session / Delete selected buttons, confirmed there). The live session is closed first (the next record opens a new
 // one). delete=all (the page's Clear all) = every session folder (a session name always has a '_', so none is "all").
 static int fx_delete_one(const char*name);
+// everything inside dir (files, symlinks -- removed, never followed -- and folders, 8 levels deep) except the entry named
+// keep at the top; returns how many entries are left
+static int fx_rm_tree(const char*dir,int depth,const char*keep){
+    DIR*d=opendir(dir); if(!d) return 1; int left=0; struct dirent*e;
+    while((e=readdir(d))){ if(!strcmp(e->d_name,".")||!strcmp(e->d_name,"..")||(keep && !strcmp(e->d_name,keep))) continue;
+        char f[1600]; snprintf(f,sizeof f,"%s/%s",dir,e->d_name); struct stat st;
+        if(!lstat(f,&st) && S_ISDIR(st.st_mode)){ int l=depth<8?fx_rm_tree(f,depth+1,0):1; if(l || rmdir(f)) left+=l?l:1; }
+        else if(unlink(f)) left++; }
+    closedir(d); return left; }
 static int fx_delete(const char*qs){
     const char*p=strstr(qs,"delete="); if(!p) return 0; p+=7; char name[160]; size_t n=0; while(p[n] && p[n]!='&' && n+1<sizeof name){ name[n]=p[n]; n++; } name[n]=0;
     if(!strcmp(name,"all")){ DIR*dr=opendir(g_fx_base); if(!dr) return 1; char (*nm)[128]=0; int nn=0, cap=0; struct dirent*de;
@@ -464,9 +473,10 @@ static int fx_delete_one(const char*name){ size_t n=strlen(name);
     char dir[1300]; snprintf(dir,sizeof dir,"%s/%s",g_fx_base,name); struct stat st; if(stat(dir,&st) || !S_ISDIR(st.st_mode)) return 0;
     pthread_mutex_lock(&g_fxw_mx); if(g_fxw.open && !strcmp(g_fxw.name,name)) fx_sess_close(); pthread_mutex_unlock(&g_fxw_mx);
     pthread_mutex_lock(&g_fxc_mx); if(!strcmp(g_fxc.name,name)){ free(g_fxc.buf); free(g_fxc.pk); free(g_fxc.u); memset(&g_fxc,0,sizeof g_fxc); } pthread_mutex_unlock(&g_fxc_mx);
-    DIR*d=opendir(dir); int left=0; if(d){ struct dirent*e; while((e=readdir(d))){ if(!strcmp(e->d_name,".")||!strcmp(e->d_name,"..")) continue;
-            char f[1600]; snprintf(f,sizeof f,"%s/%s",dir,e->d_name); if(unlink(f)) left++; } closedir(d); }
-    int ok=!left && !rmdir(dir);
+    // session.json goes last: a folder that can't be emptied stays listed (and reported) instead of vanishing from the
+    // list with files left in it
+    int left=fx_rm_tree(dir,0,"session.json"); char sj[1400]; snprintf(sj,sizeof sj,"%s/session.json",dir);
+    int ok=!left && (!unlink(sj) || errno==ENOENT) && !rmdir(dir);
     char m[400]; int k=snprintf(m,sizeof m,"  [forensic] session %s deleted%s\n",name,ok?"":" (not completely)"); (void)!write(2,m,(size_t)k); return ok; }
 static int fx_ogg(OggW*w,const char*name,int uttn,uint64_t id){
     memset(w,0,sizeof *w); const FxSess*d=&g_fxc; int first=-1; for(int i=0;i<d->np && first<0;i++){ const FxPk*k=&d->pk[i]; if(k->utt<0 || !(k->fl&FXF_AUDIO) || (k->fl&FXF_TRUNC)) continue;

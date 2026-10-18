@@ -69,7 +69,12 @@ bash shim/target.sh                                       # an input-less second
 RECLAIMER_JOIN=127.0.0.1:11774 bash shim/play.sh          # ... to join and shoot at
 
 bash shim/tools/quiet-run.sh "PELOAD_D3DOBJ_LOG=1" 600 "reclaimer://join?server=127.0.0.1:49190"   # unattended test client
+
+bash shim/tools/make-usb.sh /Volumes/<stick>              # copy everything to a USB stick; run again to UPDATE it (only changes)
+bash /Volumes/<stick>/ReclaimerMac/install.sh             # on the other Mac (again after each update: only changes)
 ```
+Requirements: an Apple Silicon Mac (M1 or newer) with Rosetta 2 and macOS 13 or newer (the binaries are built for 13.0;
+tested on macOS 26).
 While a game runs: live stats at http://127.0.0.1:8765/ (players, heatmap, overlay switches, recording) and the forensic
 archive at http://127.0.0.1:8765/forensics. Logs: `/tmp/reclaimer_play.log` (play.sh), `/tmp/quiet-run.log`,
 `/tmp/reclaimer_dedicated*.log`. Several client builds can sit in `client/` side by side: the launchers take the newest unless
@@ -250,6 +255,9 @@ patch variants by signature (section 16; shim/docs/patch-addresses.md).
   Why: a generator inherited the stats listening socket and kept port 8765 bound after its game was killed; the GL
   helper inherited stray fds. How: POSIX_SPAWN_CLOEXEC_DEFAULT / only stdio + its pipe; the stats listener is
   FD_CLOEXEC. (10-17 8035d4e, 10-18 0261ef3)
+
+- **Child working directory on older macOS** — `posix_spawn_file_actions_addchdir` exists only from macOS 26; before it the
+  `_np` call (10.15+) sets a CreateProcessW child's working directory. (10-18)
 
 ## 3. Memory
 
@@ -854,6 +862,13 @@ oracle. Fixes below apply to both unless noted.
   mode. How: re-present the helper's last IOSurface with the layered loading screens on top (`glh_pq_acquire` stale).
   Old: `PELOAD_GLH_PQ_FALLBACK=1`. (10-17 335a1fb)
 
+- **GL helper wake / wait on macOS before 14.4** — Why: `os_sync_wait_on_address` / `os_sync_wake_by_address_any` (the
+  ring's cross-process sleep) exist only from macOS 14.4, and the binaries were built for macOS 26 (the build machine), so
+  neither would start on an older Mac. How: build.sh targets macOS 13 (`MACOS_MIN`); glh_shm.h `glh_addr_wait_ms` /
+  `glh_addr_wake` use the os_sync calls when available, else the kernel's `__ulock_wait` / `__ulock_wake` with
+  `UL_COMPARE_AND_WAIT_SHARED` (what libc++'s atomic wait uses, macOS 10.12+; checked across two processes natively and
+  under Rosetta). (10-18)
+
 ## 15. CPU particle compute (dxbc_cpu.c)
 
 - **Compute on the CPU** — Why: macOS GL 4.1 has no compute shaders/SSBOs; halo3's particle kernels never ran (no muzzle
@@ -1046,6 +1061,11 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   count byte (half the packets invalid, garbled playback). How: skip it. (10-18 4edd201)
 - **Forensic sessions per server** — Why: the menu's background scenes opened a session each. How: sessions follow the
   host peer id; map changes stay in the server's session. (10-18 e9c3b31)
+- **Forensic session delete** — Why: a session folder holding anything unlink() refuses (a subfolder) lost its
+  session.json first, vanished from the list and stayed on disk; a loader older than delete=all refused Clear all ("could
+  not be deleted completely"). How: fx_rm_tree removes everything inside (folders too, 8 deep; symlinks removed, never
+  followed) and session.json goes last, so a folder that can't be emptied stays listed and is named; the page's Clear all
+  deletes what is still listed one by one after delete=all; Select all / Select none. (10-18)
 - **Forensic page: unreadable session** — Why: a session folder without voice.bin (index.json answers
   {"ok":false,...}) threw in the page (X.utterances not iterable) and left the previous session's timeline up. How: the
   summary shows the loader's error and the timeline / list are cleared. Delete selected / Clear all (delete=all) added
@@ -1144,6 +1164,17 @@ Numbers are from the commit messages; PERF-PLAN.md has the measurements. Compare
   existing files silently; the client gives up after 45 s without progress ("Steam Workshop download timed out" at 863 MB
   of 8.9 GB). How: every 2 s the larger of the percentage and the bytes on disk, at most 99%, +1 byte heartbeat.
   (10-18 3eb0680)
+- **Workshop helper item id from the dedicated server** — Why: the dedicated server runs `workshop-download --mcc-path
+  <path> <id>` (the id last, no flag before it); the substitution found no id ("item -") and the server reported "Steam
+  Workshop is unavailable". How: a trailing all-digit token not preceded by --mcc-path is the item id. (10-18)
+- **make-usb.sh / usb-install.sh** — Why: the stick from 10-16 had no GL helper (play.sh's default since 10-17: the game
+  could not render on the other Mac), no Workshop mods, no map tools; an update re-checked or recopied everything and
+  kept old client exes beside new ones; 1.2 GB of the client's per-launch scratch folders (ReclaimerCache/Temp) were copied.
+  How: incremental (rsync size + mtime; each part lists the files it copied), the app folder staged exactly (--delete: only
+  the newest exe, peload + glhelper), Workshop content, maptop / heatmaps / glpairs, Steam's library files; Temp excluded
+  and removed from the stick; the installer copies only changes, keeps --delete inside the folders the stick owns,
+  recreates "Program Files (x86)/Steam/steamapps" as a RELATIVE link (it was absolute, with this Mac's user name), checks
+  macOS >= 13. (10-18)
 - **re-tools/setup.sh** — oxidizer's `uv sync` fails on this macOS (pinned pyvex builds VEX, pycparser "Unmatched '}'");
   PyPI angr 10.0.3 wheels + bitstring 4.1.4 instead. (10-14 da262fb)
 - **re-tools/dxbc2glsl.py** — kept byte-identical with the C translator as the oracle (the opcode-table, opcode and
@@ -1196,6 +1227,8 @@ Numbers are from the commit messages; PERF-PLAN.md has the measurements. Compare
   restarted servers in a loop) -- don't use it there; `PELOAD_STDERR_TEE` instead.
 - **CreateProcessW applies the child's environment with setenv() in the loader itself** (SteamAppId stays set after the
   first Workshop helper; GUESSED harmless; workshop-helper.md section 6).
+- **ReclaimerCache/Temp/mcc-startup-* accumulate** — 1,322 folders / 1.2 GB after a week of test launches: the client's
+  per-launch scratch copies are not removed (maybe only at a clean exit; test runs end with kill -9). Not chased yet.
 - **First join right after a dedicated server starts** can fail its handshake; a retry works.
 - Backlog 60 (client crash in object_get_origin on a deleted object during Forge placement sync, seen once), 61 (Hugegrass
   renders nearly black wherever its own lighting matters -- emissive surfaces, the sky and the HUD are fine; not a regression:

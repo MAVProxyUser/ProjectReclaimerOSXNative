@@ -192,8 +192,11 @@ static int cmd_pipeline(const char*in,const char*dir,int keep){
       snprintf(p,sizeof p,"%s/20990101-000002_nometa",fd); mkdir(p,0755);
       struct stat st;
       CHECK(!fx_control("do=forensic&delete=..%2Fx") && !fx_control("do=forensic&delete=a/b") && !fx_control("do=forensic&delete=nosuch_session"),"delete: bad / missing names refused");
+      snprintf(p,sizeof p,"%s/20990101-000000_fakea/sub/deeper",fd); mkdir(p,0755); *strrchr(p,'/')=0; strcat(p,"/f.txt"); { FILE*f=fopen(p,"w"); if(f) fclose(f); }
+      snprintf(p,sizeof p,"%s/20990101-000000_fakea/link",fd); { char t[1300]; snprintf(t,sizeof t,"%s/notes",fd); (void)!symlink(t,p); }
       snprintf(p,sizeof p,"%s/20990101-000000_fakea",fd);
-      CHECK(fx_control("do=forensic&delete=20990101-000000_fakea") && stat(p,&st),"delete=<session> removes that session's folder");
+      CHECK(fx_control("do=forensic&delete=20990101-000000_fakea") && stat(p,&st),"delete=<session> removes that session's folder (subfolders too)");
+      snprintf(p,sizeof p,"%s/notes/session.json",fd); CHECK(!stat(p,&st),"a symlink in a session is removed, not followed");
       if(!keep){
         CHECK(fx_control("do=forensic&delete=all"),"delete=all");
         r=get("/forensics/sessions.json","",0); CHECK(strstr(r.body,"\"sessions\":[]"),"delete=all: no session left");

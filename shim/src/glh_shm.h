@@ -71,3 +71,17 @@ typedef struct {
 static inline uint8_t* glh_ring(GlhHdr*h){ return (uint8_t*)(h+1); }
 static inline uint8_t* glh_reply(GlhHdr*h){ return (uint8_t*)(h+1)+GLH_RING; }
 static inline uint64_t glh_shm_size(void){ return sizeof(GlhHdr)+GLH_RING+GLH_REPLY; }
+
+// Cross-process wait / wake on wake_seq: os_sync_*_address (public, macOS 14.4+), else the kernel's __ulock calls (what
+// libc++'s std::atomic::wait uses; macOS 10.12+) -- the build targets macOS 13 so older Macs (an M1 on Ventura) run it.
+#include <os/os_sync_wait_on_address.h>
+extern int __ulock_wait(uint32_t operation,void*addr,uint64_t value,uint32_t timeout_us);
+extern int __ulock_wake(uint32_t operation,void*addr,uint64_t wake_value);
+#define GLH_UL_COMPARE_AND_WAIT_SHARED 3u
+#define GLH_ULF_NO_ERRNO 0x01000000u
+static inline void glh_addr_wake(_Atomic uint32_t*a){
+    if(__builtin_available(macOS 14.4,*)) os_sync_wake_by_address_any((void*)a,4,OS_SYNC_WAKE_BY_ADDRESS_SHARED);
+    else __ulock_wake(GLH_UL_COMPARE_AND_WAIT_SHARED|GLH_ULF_NO_ERRNO,(void*)a,0); }
+static inline void glh_addr_wait_ms(_Atomic uint32_t*a,uint32_t seq,int ms,uint64_t tb_num,uint64_t tb_den){
+    if(__builtin_available(macOS 14.4,*)) os_sync_wait_on_address_with_timeout((void*)a,seq,4,OS_SYNC_WAIT_ON_ADDRESS_SHARED,OS_CLOCK_MACH_ABSOLUTE_TIME,(uint64_t)ms*1000000ull*tb_den/tb_num);
+    else __ulock_wait(GLH_UL_COMPARE_AND_WAIT_SHARED|GLH_ULF_NO_ERRNO,(void*)a,seq,(uint32_t)ms*1000u); }

@@ -768,6 +768,8 @@ static int st_control(const char*act,const char*qs){
     if(!strcmp(act,"mic")){ const char*v=strstr(qs,"on="); if(!v || !wa_mic_mode() || wa_mic_mode()==3) return 0; g_mic_muted=atoi(v+3)?0:1;   // the microphone (wasapi.c)
         char m[64]; int k=snprintf(m,sizeof m,"  [stats] page: microphone %s\n",g_mic_muted?"muted":"live"); (void)!write(2,m,k); return 1; }
     if(!strcmp(act,"submit")){ const char*v=strstr(qs,"on="); if(!v) return 0; g_sub_want=atoi(v+3)?1:0; return 1; }   // GL submission thread (d3dsubmit.c)
+    if(!strcmp(act,"pixwho")){ extern void pixwho_request(int,int); const char*xv=strstr(qs,"x="), *yv=strstr(qs,"y="); pixwho_request(xv?atoi(xv+2):-1,yv?atoi(yv+2):-1);
+        (void)!write(2,"  [pixwho] page: tracing the next frame's draws at one pixel\n",61); return 1; }
     if(!strcmp(act,"rtdump")){ extern volatile int g_rtd_req; __atomic_store_n(&g_rtd_req,1,__ATOMIC_RELEASE); (void)!write(2,"  [rtdump] page: dumping the next frame's render targets\n",57); return 1; }
     if(!strcmp(act,"capture")){ __atomic_store_n(&g_hb_cap_req,1,__ATOMIC_RELEASE); (void)!write(2,"  [capture] page: capturing the next frame\n",43); return 1; }
     // test hook: run PELOAD_AUTOCLICK steps now (s=<url-encoded steps>: clicks, k:<macOS keycode>, t:<text>, s:<secs>),
