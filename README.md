@@ -195,16 +195,16 @@ Options go in front of the command, e.g. `PELOAD_INVERT_PITCH=0 bash shim/play.s
 | `RECLAIMER_EXE=<path>` | use the client exe at this path |
 | `RECLAIMER_JOIN=host:port` | join that server as soon as the menu is up, e.g. `RECLAIMER_JOIN=203.0.113.7:11774` |
 | `RECLAIMER_DIRECT=1` | skip the menu: straight into a local Guardian match (no scoreboard text) |
-| `PELOAD_HITBOXES=1` | draw the real hitboxes (each player's and vehicle's collision model, which is what shots hit) posed on their live skeletons, through walls: players red with the head yellow, vehicles cyan with their weak spots yellow (damage there alone destroys it: the Wraith's back hatch) or orange (breaking it exposes the driver: Wraith cockpit, Scorpion hatch). `=spheres` draws bounding spheres instead; `=all` adds spheres for weapons, equipment and projectiles. The stats page's **Hitboxes** button toggles it during play (any launch) |
-| `PELOAD_HB_TRACERS=1` | projectile tracers: grenades/rockets/plasma as trails, bullets as lines from muzzle to impact; the page's **Tracers** button toggles |
-| `PELOAD_HB_INFO=1` | player info above each player: shield and health %, weapon in hand / other weapon, grenades, active camo, in a vehicle; the page's **Player info** button toggles |
-| `PELOAD_HB_ITEMS=1` | weapons and equipment lying on the map, by name; the page's **Items** button toggles |
-| `PELOAD_HB_TEAMS=enemies` | show only enemies (`friends`: only teammates). Hitboxes are red/yellow for enemies, blue for teammates; the page's **Show** button cycles all / enemies / friends |
+| `PELOAD_HITBOXES=1` | draw the players' real hitboxes (each player's collision model, which is what shots hit) posed on their live skeletons: enemies red with the head yellow, teammates blue. `=spheres` draws bounding spheres instead; `=all` adds spheres for weapons, equipment and projectiles. The stats page's overlay panel (**Hitboxes** row) switches it during play (any launch) |
+| `PELOAD_HB_TRACERS=1` | projectile tracers: grenades/rockets/plasma as trails, bullets as lines from muzzle to impact; the panel's **Tracers** row |
+| `PELOAD_HB_INFO=1` | player info above each player: shield and health %, weapon in hand / other weapon, grenades, active camo, in a vehicle; the panel's **Player info** row |
+| `PELOAD_HB_ITEMS=1` | weapons and equipment lying on the map, by name; the panel's **Items** row |
+| `PELOAD_HB_TEAMS=enemies` | start every overlay feature showing only enemies (`friends`: only teammates); the panel sets it per feature (**Show**) |
 | `PELOAD_STATS_HTTP=<port>` | live game stats page; on by default at http://127.0.0.1:8765/, `=0` turns it off (details below) |
-| `PELOAD_HB_VEHICLES=0` | leave vehicles out of the overlay (the page's **Vehicles** button; on by default) |
-| `PELOAD_HB_VISIBLE=1` | visible only: hitboxes and labels only for objects you can actually see, not behind walls (a small copy of the game's depth buffer, read back every frame while it is on); the page's **Visible only** button toggles |
-| `PELOAD_HB_TEXT_PX=7` | overlay label height in window pixels (Text − / + on the stats page) |
-| `PELOAD_HB_ZONES=1` | the map's boundaries in the game view: kill zones red, safe zones green (outside every safe zone you die), soft ceilings pink (soft kill), orange (push back) and yellow (slip surface), read from the map being played (Workshop maps too), drawn only where you can see them; the page's **Kill/safe zones** button toggles them, a chip per kind |
+| `PELOAD_HB_VEHICLES=1` | vehicle hitboxes: cyan, with their weak spots yellow (damage there alone destroys it: the Wraith's back hatch) or orange (breaking it exposes the driver: Wraith cockpit, Scorpion hatch); off by default, the panel's **Vehicles** row |
+| `PELOAD_HB_VISIBLE=1` | start every overlay feature as visible only: drawn only for what you can actually see, not behind walls (a small copy of the game's depth buffer, read back every frame while a feature that is on uses it); the panel sets it per feature (**Walls**) |
+| `PELOAD_HB_TEXT_PX=7` | overlay label height in window pixels, every feature's start value (the panel's **Text**, per feature) |
+| `PELOAD_HB_ZONES=1` | the map's boundaries in the game view: kill zones red, safe zones green (outside every safe zone you die), soft ceilings pink (soft kill), orange (push back) and yellow (slip surface), read from the map being played (Workshop maps too), drawn only where you can see them; the panel's **Kill/safe zones** row, a chip per kind |
 | `PELOAD_MIC=0` | don't use the Mac's microphone: the client gets a silent one, so its voice chat still works for listening (by default the Mac's microphone is the client's; it only sends voice while its talk key is held or toggled -- Communication settings). `=none` gives it no microphone at all (its voice chat then retries every 5 s). `PELOAD_MIC_MUTED=1` starts it muted; the stats page's **Mic** button mutes it during play. macOS asks once whether Terminal may use the microphone |
 | `PELOAD_D3DGL_INVARIANT=1` | experimental: vertex positions computed bit-identically in every pass; try it if you see seams/speckles along polygon edges (e.g. Valhalla's rock walls) |
 | `PELOAD_ALLOW_TELEPORT=1` | teleport, **in games you host** (Host Game from the menu): the stats page's player details get **Teleport next to them** (you land beside that player, facing them, at a spot inside the map), the page's **Teleport** button jumps to the opposite side of the map. It uses the game's own teleport on the host, between frames, so every player sees the move. A client can't move itself (the host puts it straight back -- tested); in a private game where the host also runs this loader, set `PELOAD_TELEPORT_HOST=<host ip>:<its stats port>` on the client and its button asks the host to move you |
@@ -216,13 +216,23 @@ Options go in front of the command, e.g. `PELOAD_INVERT_PITCH=0 bash shim/play.s
 (`PELOAD_STATS_HTTP=<port>` for another port, `=0` off; `PELOAD_STATS_ADDR=<ip>` to listen on another address, e.g. to
 watch from another device). From top to bottom the page shows:
 
-- **In-game overlay** buttons (the function keys of earlier versions are gone; `PELOAD_HB_FKEYS=1` brings them back):
-  Hitboxes, Tracers, Player info, Items, Vehicles (with chips for the two kinds of weak spots), Text − / + (label size),
-  Show all / enemies / friends, Visible only, Kill/safe zones (with a chip per kind: kill zones, safe zones, soft-kill and
-  push-back ceilings, slip surfaces), Teleport (only with `PELOAD_ALLOW_TELEPORT`), **Capture frame** (saves the frame,
+- **In-game overlay** panel (the function keys of earlier versions are gone; `PELOAD_HB_FKEYS=1` brings them back): a
+  row per feature -- Hitboxes (the players'), Vehicles (with chips for the two kinds of weak spots), Tracers, Player info,
+  Items, Kill/safe zones (a chip per kind: kill zones, safe zones, soft-kill and push-back ceilings, slip surfaces). Each
+  row has its own on / off switch and its own settings: **Show** All / Enemies / Friends (a player's team; a vehicle's is
+  whoever sits in it, so an empty vehicle shows under All only; a tracer's is the shooter's), **Walls** Through walls /
+  Visible only (only what you can actually see), and **Text** − / + (label size, for the features with labels). A
+  setting that doesn't apply to a feature is greyed (items have no team; zones are always drawn only where you can see
+  them). Tick rows on the left and the bar above them sets On / Off, Show, Walls or Text for all of them at once (a
+  value lights up when every ticked row shares it). **Presets**: Off, Enemies through walls, Everything visible only,
+  My team, and **Save as preset…** keeps the current settings of every row under a name of your own (in that browser).
+  Every feature costs nothing while it is off; the depth copy for "visible only" is made only while a feature that is
+  on uses it. The settings last until the game closes (`PELOAD_HB_TEAMS` / `PELOAD_HB_VISIBLE` / `PELOAD_HB_TEXT_PX`
+  set every feature's start value).
+- **Tools**: Teleport (only with `PELOAD_ALLOW_TELEPORT`), **Capture frame** (saves the frame,
   its depth buffer and the camera position to `~/reclaimer_cap_*` for reporting a rendering glitch at a spot; the overlay
   is not in it), **Mic** (live / muted), and in games you host a **Speed** menu: everyone's movement speed (the game
-  variant's own speed trait, 25% to 300%). Every switch costs nothing while it is off.
+  variant's own speed trait, 25% to 300%).
 - **Connected** -- everyone in the game's network session, also in the lobby before a match starts, in alphabetical
   order. Players who are talking light up green. The speaker beside each name mutes or unmutes their voice (a red cross
   = muted); **Mute all** / **Unmute all** do everyone. This is the client's own voice mute (the same list as its
@@ -262,7 +272,8 @@ Machine-readable endpoints:
 - `/stats.json` -- the latest snapshot: `players` (name, slot, team, you, alive, health, shield, camo, weapon(s),
   grenades, vehicle, seat, pos, speed, facing, deaths, life, longest_life, distance, top_speed, shots, hits, accuracy,
   traits, effects, voice, muted, talking), `session` (the connected list), `variant` (options and trait sets),
-  `overlay` (the switches), `vehicles`, `projectiles` in flight, `map`, `in_match`, match `time`
+  `overlay` (the switches; `overlay.features` = each overlay feature's `on`, `team`, `vis`, `px`, null where a setting
+  doesn't apply), `vehicles`, `projectiles` in flight, `map`, `in_match`, match `time`
 - `/events` -- the same JSON as a stream (Server-Sent Events): `curl -N http://127.0.0.1:8765/events`
 - `/feed.json?since=<seq>` -- the event feed after event `seq` (the last 1,024 kept): `kind` (join, leave, kill, death,
   vote, server, game, chat), `text`, `t` (Unix time), `a`/`b` (players; chat: the sender), `how` (weapon; chat: the
@@ -273,7 +284,10 @@ Machine-readable endpoints:
 - `POST /control?do=<hitboxes|tracers|info|items|vehicles|visible|zones|zonetype&t=|weaktype&t=|teams|textup|textdown|
   teleport|tpnext&slot=|tpto&x=&y=&z=|capture|mic&on=|speed&v=|mute|unmute|muteall|unmuteall>[&voice=<id>]` with an
   `X-Reclaimer-Control: 1` header (other web pages can't send it);
-  `PELOAD_STATS_READONLY=1` turns the controls off
+  `PELOAD_STATS_READONLY=1` turns the controls off. The overlay panel's per-feature settings:
+  `POST /control?do=feat&f=<hitboxes|vehicles|tracers|info|items|zones, comma-separated, or all>` with any of `&on=0|1`,
+  `&team=all|enemies|friends`, `&vis=0|1`, `&px=4..60` (each lands where the feature has that setting); the old
+  `teams` / `visible` / `textup` / `textdown` apply to every feature
 
 It reads the game's own memory (object and player tables, the network session, the game variant) -- the information
 Halo 3 sends to every client -- and works with the overlay off. Health and shield are fractions (1.0 = full; shields

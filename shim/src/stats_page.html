@@ -25,7 +25,40 @@ canvas{width:100%;height:auto;display:block;background:#0b0b0b;border-radius:4px
 .ramp{height:8px;width:140px;border-radius:2px;background:linear-gradient(90deg,#1840ff,#18d0ff,#30e060,#f0e040,#ff3020)}
 .col{display:flex;flex-direction:column;gap:16px;min-width:0}
 #det{min-width:0}
-#zchips .zc,#wchips .zc{background:#222;color:var(--dim);border:1px solid var(--line);border-radius:12px;padding:2px 9px;font:inherit;font-size:12px;cursor:pointer;margin-left:2px}#zchips .zc i,#wchips .zc i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:5px;vertical-align:middle;opacity:.35}#zchips .zc.on,#wchips .zc.on{color:#fff;border-color:#666}#zchips .zc.on i,#wchips .zc.on i{opacity:1}
+/* ---- in-game overlay panel (user, 2026-10-18): a row per feature with its own Show / Walls / Text; the Selected bar sets many ---- */
+#ovp{margin:0 0 12px}
+#ovp .ovh{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;margin-bottom:8px}#ovp .ovh h2{margin:0 4px 0 0}
+#ovp button{background:#222;color:var(--fg);border:1px solid var(--line);border-radius:4px;padding:3px 9px;font:inherit;font-size:12px;cursor:pointer}
+#ovp button:hover:not(:disabled){border-color:#666}#ovp button:disabled{opacity:.35;cursor:default}
+#ovp select{background:#222;color:var(--fg);border:1px solid var(--line);border-radius:4px;font:inherit;font-size:12px;padding:2px 2px}
+#ovp .lbl{color:var(--dim);font-size:12px}#ovpmsg{color:#f0a040;font-size:12px}
+#ovp .pres{display:flex;flex-wrap:wrap;align-items:center;gap:6px}#ovp .pres button.on{background:#1d3a55;border-color:var(--accent);color:#fff}
+#ovp .pres .mine{display:inline-flex}#ovp .pres .mine button:first-child{border-radius:4px 0 0 4px}#ovp .pres .mine .del{border-radius:0 4px 4px 0;margin-left:-1px;padding:3px 6px;color:var(--dim)}
+.seg{display:inline-flex;vertical-align:middle}#ovp .seg button{border-radius:0;margin-left:-1px;white-space:nowrap}#ovp .seg button:first-child{border-radius:4px 0 0 4px;margin-left:0}#ovp .seg button:last-child{border-radius:0 4px 4px 0}
+#ovp .seg button.on{background:#1d3a55;border-color:var(--accent);color:#fff;position:relative;z-index:1}
+#ovp .na{opacity:.3}#ovp .na button{cursor:default}
+.step{display:inline-flex;align-items:center;gap:4px}.step .pv{min-width:40px;text-align:center;font-variant-numeric:tabular-nums;font-size:12px}
+/* one column set for every row (subgrid), so the header and the rows line up; a feature's chips get a line of their own */
+#ovrows{display:grid;grid-template-columns:20px minmax(150px,max-content) max-content max-content max-content minmax(0,1fr);column-gap:14px}
+#ovrows .fr{display:grid;grid-column:1/-1;grid-template-columns:subgrid;row-gap:6px;align-items:center;padding:6px 4px;border-top:1px solid var(--line)}
+@supports not (grid-template-columns:subgrid){#ovrows .fr{grid-template-columns:20px 190px 172px 202px 104px minmax(0,1fr);column-gap:14px}}
+#ovrows .fr .opt{grid-column:3/-1}#ovrows .fr .opt:empty{display:none}
+#ovrows .fr .ctl2{display:contents}#ovrows .fr.hdr{color:var(--dim);font-size:11px;border-top:0;padding-top:0;padding-bottom:2px}
+#ovrows .fr.sel{background:#16202b}#ovrows .fr.off .ctl2>*,#ovrows .fr.off .opt{opacity:.5}#ovrows .fr.off .na{opacity:.2}
+#ovrows .rs,#ovbar input[type=checkbox]{width:15px;height:15px;margin:0;cursor:pointer;accent-color:var(--accent)}
+.fn{display:flex;align-items:center;gap:9px;min-width:0}.fn b{font-weight:600}.fn small{display:block;color:var(--dim);font-size:11px;line-height:1.25}
+#ovp button.tg{width:34px;height:18px;border-radius:9px;padding:0;position:relative;background:#333;border:1px solid #444;flex:none}
+#ovp button.tg::after{content:'';position:absolute;top:2px;left:2px;width:12px;height:12px;border-radius:6px;background:#888;transition:left .12s}
+#ovp button.tg.on{background:#1d4a2e;border-color:#3a6}#ovp button.tg.on::after{left:18px;background:#7ddf6a}
+.opt{display:flex;flex-wrap:wrap;gap:4px}
+#ovp .chip{color:var(--dim);border-radius:12px;padding:2px 9px}#ovp .chip i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:5px;vertical-align:middle;opacity:.35}
+#ovp .chip.on{color:#fff;border-color:#666}#ovp .chip.on i{opacity:1}
+#ovbar{display:flex;flex-wrap:wrap;align-items:center;gap:6px 14px;padding:6px 8px;margin:0 0 6px;background:#18222e;border:1px solid #2a3a4c;border-radius:5px}
+#ovbar.none{background:transparent;border-color:var(--line)}#ovbar .grp{display:inline-flex;align-items:center;gap:6px}#ovbar .hint{color:var(--dim);font-size:12px}
+#ovbar label{display:inline-flex;align-items:center;gap:6px;cursor:pointer}
+@media (max-width:780px){   /* phone: name on the first line, the controls wrap under it */
+ #ovrows{display:block}#ovrows .fr{grid-template-columns:20px minmax(0,1fr);column-gap:10px;padding:8px 2px}#ovrows .fr.hdr{display:none}
+ #ovrows .fr .ctl2{display:flex;flex-wrap:wrap;gap:6px 10px;grid-column:2}#ovrows .fr .opt{grid-column:2}#ovrows .fr .na{display:none}}
 body.stale .panel,body.stale #ov{opacity:.45}body.stale #hd{color:#f0a040}
 th .srt{display:inline-block;margin-left:2px;padding:0 2px;cursor:pointer;color:#555;font-size:10px;user-select:none}th .srt:hover{color:#ccc}th .srt.on{color:var(--accent)}
 .sortmode{display:flex;gap:12px;align-items:center;margin:0 0 6px;color:var(--dim)}.sortmode label{cursor:pointer}
@@ -82,27 +115,18 @@ th .srt{display:inline-block;margin-left:2px;padding:0 2px;cursor:pointer;color:
 </style></head>
 <body>
 <h1>Reclaimer live stats <a href="/forensics" title="voice, chat and events archive + viewer" style="font-size:12px;font-weight:400;color:var(--accent);margin-left:10px;text-decoration:none">forensic archive</a></h1><div id="hd">connecting...</div>
-<div id="ov"><span class="lbl">In-game overlay</span>
- <button data-a="hitboxes" title="Collision hitboxes of the players (vehicles: the Vehicles button)">Hitboxes</button>
- <button data-a="tracers" title="Projectile trails and bullet lines">Tracers</button>
- <button data-a="info" title="Shield, health, weapon, grenades, camo and vehicle labels over players">Player info</button>
- <button data-a="items" title="Weapons and equipment lying on the map">Items</button>
- <button data-a="vehicles" title="Vehicle hitboxes in the game view, on their own (Hitboxes = the players'). Weak spots are colored: yellow = damage there destroys the vehicle on its own (Wraith back hatch: 75 of its 750), orange = breaking it exposes the shielded driver to full hits (Wraith cockpit, Scorpion driver hatch); the rest cyan">Vehicles</button>
- <span id="wchips" style="display:none" title="Vehicle weak spots, from each vehicle's damage data in the map file (re-tools/h3dmg.py). Only some vehicles have them: the Wraith (back hatch kills it: 75 of 750; cockpit opens the driver) and the Scorpion (driver hatch); the rest stay cyan">
-  <button class="zc" data-w="1" title="Lethal section: damage there alone kills the vehicle (Wraith back hatch / rear engine: 75 of its 750)"><i style="background:#fff21a"></i>Weak: kills it</button>
-  <button class="zc" data-w="2" title="Opens the driver: break it and the shielded driver takes full hits (Wraith cockpit, Scorpion driver hatch: 113)"><i style="background:#ff8c1a"></i>Weak: exposes driver</button>
- </span>
- <button data-a="textdown" title="Smaller label text">Text −</button><span id="tpx" class="lbl"></span><button data-a="textup" title="Larger label text">Text +</button>
- <button data-a="teams" title="Which players the overlay shows">Show: all</button>
- <button data-a="visible" title="Hitboxes and labels only for objects you can actually see (not behind walls)">Visible only</button>
- <button data-a="zones" title="The map's boundaries in the game view: kill zones red, safe zones green (outside every safe zone kills), soft ceilings pink (soft kill), orange (push back) and yellow (slip surface)">Kill/safe zones</button>
- <span id="zchips" style="display:none">
-  <button class="zc" data-z="1" title="Kill zone: a volume where the game kills you (out of bounds)"><i style="background:#ff2626"></i>Kill zones</button>
-  <button class="zc" data-z="2" title="Safe zone: the playable area -- outside every safe zone the game kills you"><i style="background:#33ff59"></i>Safe zones</button>
-  <button class="zc" data-z="8" title="Soft-kill ceiling: go through it and you die after a moment"><i style="background:#ff40a6"></i>Soft-kill ceilings</button>
-  <button class="zc" data-z="4" title="Acceleration ceiling: pushes you back down / away"><i style="background:#ff991a"></i>Push-back ceilings</button>
-  <button class="zc" data-z="16" title="Slip surface: too steep to stand on, you slide off"><i style="background:#ffeb33"></i>Slip surfaces</button>
- </span>
+<!-- in-game overlay panel (user, 2026-10-18): rows and presets are built by the script (FEATS, PRESETS) -->
+<div id="ovp" class="panel"><div class="ovh"><h2 title="What the game window draws over the frame. Each row has its own settings; tick rows on the left to set several at once">In-game overlay</h2>
+ <span class="pres" id="pres"></span><span id="ovpmsg"></span></div>
+ <div id="ovbar" class="none">
+  <label title="Select every row (or tick single rows on the left)"><input type="checkbox" id="selall"><span><b id="nsel">0</b> selected</span></label>
+  <span class="seg" data-k="on"><button data-v="1" title="Turn the selected features on">On</button><button data-v="0" title="Turn the selected features off">Off</button></span>
+  <span class="grp"><span class="lbl">Show</span><span class="seg" data-k="team"></span></span>
+  <span class="grp"><span class="lbl">Walls</span><span class="seg" data-k="vis"></span></span>
+  <span class="grp"><span class="lbl">Text</span><span class="step" data-k="px"><button data-d="-1" title="Every selected feature's labels 1 px smaller">−</button><select id="bpx" title="Label height in window pixels for every selected feature that has labels"></select><button data-d="1" title="Every selected feature's labels 1 px larger">+</button></span></span>
+  <span class="hint" id="ovhint">tick rows on the left to set several at once</span></div>
+ <div id="ovrows"></div></div>
+<div id="ov"><span class="lbl">Tools</span>
  <button data-a="teleport" title="Teleport to the far side of the map (needs PELOAD_ALLOW_TELEPORT; matches you host)">Teleport</button>
  <button data-a="mic" title="Your microphone for the game's voice chat. The client only sends voice while its talk key is held or toggled; Muted sends silence even then. PELOAD_MIC=0 at launch removes the microphone entirely.">Mic</button>
  <button data-a="capture" title="Save the next frame, its depth buffer and the camera position to your home folder">Capture frame</button>
@@ -416,24 +440,122 @@ cv.addEventListener('pointerdown',async e=>{ if(!document.getElementById('tph').
   const z=gz+0.6; hov.textContent=`teleporting to ${x.toFixed(1)}, ${y.toFixed(1)}, ${z.toFixed(1)}...`;
   try{ const j=await (await fetch(`/control?do=tpto&x=${x.toFixed(2)}&y=${y.toFixed(2)}&z=${z.toFixed(2)}`,{method:'POST',headers:{'X-Reclaimer-Control':'1'}})).json();
     hov.textContent=j.ok?`teleported to ${x.toFixed(1)}, ${y.toFixed(1)}, ${z.toFixed(1)}`:'refused'; }catch(err){ hov.textContent='not connected'; } });
-// ---- overlay controls (the function keys' switches; POST so other sites can't flip them) ----
-const ovNames={all:'all',enemies:'enemies',friends:'friends'};
-document.getElementById('wchips').addEventListener('pointerdown',async e=>{ const b=e.target.closest('.zc'); if(!b||e.button) return; e.preventDefault();
-  try{ await fetch('/control?do=weaktype&t='+b.dataset.w,{method:'POST',headers:{'X-Reclaimer-Control':'1'}}); }catch(err){} });
-document.getElementById('zchips').addEventListener('pointerdown',async e=>{ const b=e.target.closest('.zc'); if(!b||e.button) return; e.preventDefault();
-  try{ await fetch('/control?do=zonetype&t='+b.dataset.z,{method:'POST',headers:{'X-Reclaimer-Control':'1'}}); }catch(err){} });
-function renderOverlay(){ const o=snap&&snap.overlay; if(!o) return;
-  { const wc=document.getElementById('wchips'); wc.style.display=o.vehicles?'':'none'; const ws=snap.weak_show??3;
-    for(const b of wc.querySelectorAll('.zc')){ b.classList.toggle('on',!!(ws&+b.dataset.w)); b.disabled=!o.controls; } }
-  { const zc=document.getElementById('zchips'); zc.style.display=o.zones?'':'none'; const zs=snap.zone_show??31;
-    for(const b of zc.querySelectorAll('.zc')){ b.classList.toggle('on',!!(zs&+b.dataset.z)); b.disabled=!o.controls; } }
+// ---- the in-game overlay panel (user, 2026-10-18): a row per feature, each with its own Show (team filter), Walls (visible
+// only) and Text size; null in the snapshot's overlay.features = that setting doesn't apply there (greyed). Clicks POST
+// /control?do=feat&f=<features>&on=|team=|vis=|px= (POST so other sites can't flip them) and show the new value at once
+// (pend); the next snapshot that agrees confirms it, and after 3 s the real state wins (a refused or lost request).
+// The DOM is built once and only updated, so nothing flickers or swallows clicks at 10 snapshots a second.
+const FEATS=[
+ {f:'hitboxes',n:'Hitboxes',d:"players' collision hitboxes",t:"What shots actually hit: each player's collision model on its live skeleton. Enemies red with a yellow head, teammates blue"},
+ {f:'vehicles',n:'Vehicles',d:'vehicle hitboxes, weak spots',t:"Vehicle (and Scarab) hitboxes, cyan; weak spots colored by the chips. A vehicle's team is whoever sits in it",chips:'w'},
+ {f:'tracers',n:'Tracers',d:'projectile trails, bullet lines',t:"Grenade / rocket / plasma trails and bullet lines from muzzle to impact. Team = the shooter's"},
+ {f:'info',n:'Player info',d:'shield, health, weapons, grenades',t:'A label over each player: shield and health %, weapon in hand / other weapon, grenades, active camo, in a vehicle'},
+ {f:'items',n:'Items',d:'weapons, equipment on the map',t:'Weapons and equipment lying on the map, by name'},
+ {f:'zones',n:'Kill/safe zones',d:"the map's boundaries",t:"The map's boundaries, read from the map file, a chip per kind; always drawn only where you can see them",chips:'z'}];
+const FN=FEATS.map(x=>x.f);
+const TEAMOPT=[['all','All','Everyone'],['enemies','Enemies','Players not on your team (everyone else in free-for-all)'],['friends','Friends','Your team']];
+const VISOPT=[['0','Through walls','Drawn even where it is behind walls'],['1','Visible only',"Only what you can actually see (a small copy of the game's depth buffer is read back while any feature uses it)"]];
+const TEAM_TIP={hitboxes:'Whose hitboxes',vehicles:'By whoever sits in it: an empty vehicle shows under All only',tracers:"By the shooter's team: shots from unknown shooters show under All only",info:'Whose labels'};
+const NA_TIP={team:{items:'Items have no team',zones:'Zones belong to the map, not to a team'},vis:{zones:'Zones are always drawn only where you can see them (per pixel)'},
+ px:{hitboxes:'No text labels',vehicles:'No text labels',tracers:'No text labels',zones:'No labels (only the old line mode, PELOAD_HB_ZONES_XRAY=1, has them)'}};
+const CHIPS={z:[[1,'#ff2626','Kill','Kill zone: a volume where the game kills you (out of bounds)'],[2,'#33ff59','Safe','Safe zone: the playable area -- outside every safe zone the game kills you'],
+  [8,'#ff40a6','Soft kill','Soft-kill ceiling: go through it and you die after a moment'],[4,'#ff991a','Push back','Acceleration ceiling: pushes you back down / away'],[16,'#ffeb33','Slip','Slip surface: too steep to stand on, you slide off']],
+ w:[[1,'#fff21a','Weak: kills it','Lethal section: damage there alone destroys the vehicle (Wraith back hatch: 75 of its 750)'],[2,'#ff8c1a','Weak: exposes driver','Breaking it exposes the shielded driver to full hits (Wraith cockpit, Scorpion driver hatch)']]};
+const PRESETS=[
+ {id:'off',n:'Off',t:'Every overlay feature off (nothing drawn or read back: costs nothing)',set:{all:{on:false}}},
+ {id:'enemies',n:'Enemies through walls',t:'Enemy hitboxes, vehicles, player info and tracers, also behind walls; items and zones off',
+  set:{hitboxes:{on:true,team:'enemies',vis:false},vehicles:{on:true,team:'enemies',vis:false},info:{on:true,team:'enemies',vis:false},tracers:{on:true,team:'enemies',vis:false},items:{on:false},zones:{on:false}}},
+ {id:'visible',n:'Everything, visible only',t:'Every feature on for all teams, but only what you can actually see',set:{all:{on:true,team:'all',vis:true}}},
+ {id:'team',n:'My team',t:"Your teammates' hitboxes and info through walls; nothing else",
+  set:{hitboxes:{on:true,team:'friends',vis:false},info:{on:true,team:'friends',vis:false},vehicles:{on:false},tracers:{on:false},items:{on:false},zones:{on:false}}}];
+let myPresets=[]; try{ myPresets=JSON.parse(localStorage.getItem('ovPresets')||'[]').filter(p=>p&&p.n&&p.set); }catch(err){}
+function savePresets(){ try{ localStorage.setItem('ovPresets',JSON.stringify(myPresets)); }catch(err){} }
+let selF=new Set(); try{ selF=new Set(JSON.parse(localStorage.getItem('ovSel')||'[]').filter(f=>FN.includes(f))); }catch(err){}
+function saveSel(){ try{ localStorage.setItem('ovSel',JSON.stringify([...selF])); }catch(err){} }
+const pend=new Map(); let fsReal=null;   // pend: 'feature.key' or 'zone_show' / 'weak_show' -> {v, t}
+function featState(o){ if(o.features) return o.features;   // (an older loader: only its global switches)
+  const r={}; for(const f of FN) r[f]={on:!!o[f],team:f==='items'||f==='zones'?null:(o.teams||'all'),vis:f==='zones'?null:!!o.visible,px:f==='info'||f==='items'?(o.text_px||7):null}; return r; }
+function realV(k){ const i=k.indexOf('.'); if(i<0) return snap?snap[k]:undefined; const s=fsReal&&fsReal[k.slice(0,i)]; return s?s[k.slice(i+1)]:undefined; }
+function cur(f,k){ const p=pend.get(f+'.'+k); return p?p.v:realV(f+'.'+k); }
+function curMask(k){ const p=pend.get(k); return p?p.v:(snap&&snap[k]!=null?snap[k]:(k==='zone_show'?31:3)); }
+function applies(f,k){ if(k==='on') return true; const v=realV(f+'.'+k); return v!==null&&v!==undefined; }
+function reconcile(){ const now=Date.now(); for(const [k,p] of pend) if(realV(k)===p.v||now-p.t>3000) pend.delete(k); }
+async function ovPost(q){ try{ return await (await fetch('/control?'+q,{method:'POST',headers:{'X-Reclaimer-Control':'1'}})).json(); }catch(err){ return {ok:false,error:'not connected'}; } }
+function ovMsg(t){ const m=document.getElementById('ovpmsg'); m.textContent=t||''; clearTimeout(ovMsg.tm); if(t) ovMsg.tm=setTimeout(()=>{ m.textContent=''; },5000); }
+async function setFeat(fs,ps){   // ps: {on:bool, team:'all'|'enemies'|'friends', vis:bool, px:4..60}; lands where it applies
+  const keys=Object.keys(ps); fs=fs.filter(f=>keys.some(k=>applies(f,k))); if(!fs.length) return;
+  const now=Date.now(); for(const f of fs) for(const k of keys) if(applies(f,k)) pend.set(f+'.'+k,{v:ps[k],t:now});
+  renderPanel();
+  const j=await ovPost('do=feat&f='+(fs.length===FN.length?'all':fs.join(','))+keys.map(k=>'&'+k+'='+(typeof ps[k]==='boolean'?(ps[k]?1:0):ps[k])).join(''));
+  if(!j.ok){ for(const f of fs) for(const k of keys) pend.delete(f+'.'+k); renderPanel(); ovMsg(j.error||'refused'); } }
+function bumpPx(fs,d){ const by=new Map();   // each row its own +-1: one request per resulting size
+  for(const f of fs){ if(!applies(f,'px')) continue; const v=Math.max(4,Math.min(60,(+cur(f,'px')||7)+d)); by.set(v,(by.get(v)||[]).concat(f)); }
+  for(const [v,g] of by) setFeat(g,{px:v}); }
+async function toggleChip(key,bit){ pend.set(key,{v:curMask(key)^bit,t:Date.now()}); renderPanel();
+  const j=await ovPost(`do=${key==='zone_show'?'zonetype':'weaktype'}&t=${bit}`); if(!j.ok){ pend.delete(key); renderPanel(); ovMsg(j.error||'refused'); } }
+function applyPreset(set){ if(set.all) return setFeat(FN,set.all);
+  const groups=new Map(); for(const f of FN){ const ps=set[f]; if(!ps) continue; const k=JSON.stringify(ps); if(!groups.has(k)) groups.set(k,{ps,fs:[]}); groups.get(k).fs.push(f); }
+  for(const g of groups.values()) setFeat(g.fs,g.ps); }   // (rows with the same settings in one request)
+function presetMatch(set){ for(const f of FN){ const ps=set.all||set[f]; if(!ps) continue;
+    for(const k in ps){ if(!applies(f,k)) continue; const v=cur(f,k); if(k==='on'||k==='vis'?!!v!==!!ps[k]:v!==ps[k]) return false; } } return true; }
+function currentSet(){ const set={}; for(const f of FN){ const ps={on:!!cur(f,'on')}; for(const k of ['team','vis','px']) if(applies(f,k)) ps[k]=k==='vis'?!!cur(f,k):cur(f,k); set[f]=ps; } return set; }
+{ const segH=opts=>opts.map(([v,l,t])=>`<button data-v="${v}" title="${E(t)}">${E(l)}</button>`).join('');
+  document.querySelector('#ovbar .seg[data-k="team"]').innerHTML=segH(TEAMOPT); document.querySelector('#ovbar .seg[data-k="vis"]').innerHTML=segH(VISOPT);
+  document.getElementById('bpx').innerHTML='<option value="">–</option>'+Array.from({length:57},(_,i)=>`<option value="${i+4}">${i+4} px</option>`).join('');
+  document.getElementById('ovrows').innerHTML='<div class="fr hdr"><span></span><span>Feature</span><span title="Whose: everyone, the other teams, or your team">Show</span><span title="Through walls, or only what you can see">Walls</span><span title="Label height in window pixels">Text</span></div>'+FEATS.map(F=>
+   `<div class="fr" data-f="${F.f}"><input type="checkbox" class="rs" title="Select ${E(F.n)} for the bar above (set several rows at once)">
+    <span class="fn" title="${E(F.t)}"><button class="tg" role="switch" aria-label="${E(F.n)}" title="${E(F.n)} on / off"></button><span><b>${E(F.n)}</b><small>${E(F.d)}</small></span></span>
+    <span class="ctl2"><span class="seg" data-k="team">${segH(TEAMOPT)}</span><span class="seg" data-k="vis">${segH(VISOPT)}</span>
+     <span class="step" data-k="px"><button data-d="-1" title="Smaller label text">−</button><span class="pv"></span><button data-d="1" title="Larger label text">+</button></span></span>
+    <span class="opt">${(CHIPS[F.chips]||[]).map(([b,c,l,t])=>`<button class="chip" data-${F.chips}="${b}" title="${E(t)}"><i style="background:${c}"></i>${E(l)}</button>`).join('')}</span></div>`).join(''); }
+function renderPresets(){ document.getElementById('pres').innerHTML='<span class="lbl">Presets</span>'+PRESETS.map(p=>`<button data-p="${p.id}" title="${E(p.t)}">${E(p.n)}</button>`).join('')
+   +myPresets.map((p,i)=>`<span class="mine"><button data-my="${i}" title="Your preset (kept in this browser)">${E(p.n)}</button><button class="del" data-del="${i}" title="Delete this preset">×</button></span>`).join('')
+   +'<button data-save="1" title="Save every row\'s current settings as a preset of your own (kept in this browser)">Save as preset…</button>'; }
+renderPresets();
+function renderPanel(){ const o=snap&&snap.overlay; if(!o) return; fsReal=featState(o); reconcile(); const ctl=!!o.controls;
+  for(const row of document.querySelectorAll('#ovrows .fr[data-f]')){ const f=row.dataset.f, on=!!cur(f,'on'), sl=selF.has(f);
+    row.classList.toggle('off',!on); row.classList.toggle('sel',sl); row.querySelector('.rs').checked=sl;
+    const tg=row.querySelector('.tg'); tg.classList.toggle('on',on); tg.setAttribute('aria-checked',on?'true':'false'); tg.disabled=!ctl;
+    for(const sg of row.querySelectorAll('[data-k]')){ const k=sg.dataset.k, na=!applies(f,k), v=cur(f,k);
+      sg.classList.toggle('na',na); sg.title=na?((NA_TIP[k]||{})[f]||'Does not apply here'):k==='team'?(TEAM_TIP[f]||''):k==='px'?'Label height in window pixels':'';
+      if(k==='px') sg.querySelector('.pv').textContent=na?'—':v+' px';
+      for(const b of sg.querySelectorAll('button')){ b.disabled=!ctl||na; if(k==='px') continue;
+        const pr=!na&&(k==='vis'?(b.dataset.v==='1')===!!v:b.dataset.v===v); b.classList.toggle('on',pr); b.setAttribute('aria-pressed',pr?'true':'false'); } }
+    for(const c of row.querySelectorAll('.chip')){ const key=c.dataset.z?'zone_show':'weak_show'; c.classList.toggle('on',!!(curMask(key)&+(c.dataset.z||c.dataset.w))); c.disabled=!ctl; } }
+  // the Selected bar: a value lights up when every selected row that has the setting shares it
+  const fs=FN.filter(f=>selF.has(f)), n=fs.length, bar=document.getElementById('ovbar'), sa=document.getElementById('selall');
+  document.getElementById('nsel').textContent=n; sa.checked=n===FN.length; sa.indeterminate=n>0&&n<FN.length; bar.classList.toggle('none',!n);
+  document.getElementById('ovhint').textContent=!ctl?'controls are off (PELOAD_STATS_READONLY)':n?'':'tick rows on the left to set several at once';
+  for(const sg of bar.querySelectorAll('[data-k]')){ const k=sg.dataset.k, app=fs.filter(f=>applies(f,k));
+    const vals=new Set(app.map(f=>k==='on'||k==='vis'?(cur(f,k)?'1':'0'):String(cur(f,k)))), common=vals.size===1?[...vals][0]:null;
+    sg.classList.toggle('na',!app.length);
+    for(const b of sg.querySelectorAll('button')){ b.disabled=!ctl||!app.length; if(k!=='px') b.classList.toggle('on',common!==null&&b.dataset.v===common); }
+    if(k==='px'){ const s=document.getElementById('bpx'); s.disabled=!ctl||!app.length; if(document.activeElement!==s) s.value=common??''; } }
+  for(const b of document.querySelectorAll('#pres button')){ const p=b.dataset.p?PRESETS.find(x=>x.id===b.dataset.p):b.dataset.my?myPresets[+b.dataset.my]:null;
+    if(p) b.classList.toggle('on',presetMatch(p.set)); b.disabled=!ctl&&!b.dataset.del; } }
+document.getElementById('ovp').addEventListener('click',e=>{ const b=e.target.closest('button'); if(!b||b.disabled) return;
+  if(b.dataset.p){ const p=PRESETS.find(x=>x.id===b.dataset.p); if(p) applyPreset(p.set); return; }
+  if(b.dataset.my){ const p=myPresets[+b.dataset.my]; if(p) applyPreset(p.set); return; }
+  if(b.dataset.del){ const i=+b.dataset.del; if(myPresets[i] && confirm(`Delete the preset "${myPresets[i].n}"?`)){ myPresets.splice(i,1); savePresets(); renderPresets(); renderPanel(); } return; }
+  if(b.dataset.save){ const nm=(prompt('Name for this preset (every row\'s current settings):','')||'').trim().slice(0,40); if(!nm) return;
+    const i=myPresets.findIndex(p=>p.n===nm), p={n:nm,set:currentSet()}; if(i>=0) myPresets[i]=p; else myPresets.push(p); savePresets(); renderPresets(); renderPanel(); return; }
+  if(b.classList.contains('chip')){ if(b.dataset.z) toggleChip('zone_show',+b.dataset.z); else toggleChip('weak_show',+b.dataset.w); return; }
+  const row=b.closest('.fr[data-f]'), fs=row?[row.dataset.f]:b.closest('#ovbar')?FN.filter(f=>selF.has(f)):[]; if(!fs.length) return;
+  if(b.classList.contains('tg')){ setFeat(fs,{on:!cur(fs[0],'on')}); return; }
+  const sg=b.closest('[data-k]'); if(!sg) return; const k=sg.dataset.k;
+  if(k==='on') setFeat(fs,{on:b.dataset.v==='1'}); else if(k==='team') setFeat(fs,{team:b.dataset.v});
+  else if(k==='vis') setFeat(fs,{vis:b.dataset.v==='1'}); else if(k==='px') bumpPx(fs,+b.dataset.d); });
+document.getElementById('ovrows').addEventListener('change',e=>{ const c=e.target.closest('.rs'); if(!c) return; const f=c.closest('.fr').dataset.f;
+  if(c.checked) selF.add(f); else selF.delete(f); saveSel(); renderPanel(); });
+document.getElementById('selall').addEventListener('change',e=>{ selF=new Set(e.target.checked?FN:[]); saveSel(); renderPanel(); });
+document.getElementById('bpx').addEventListener('change',e=>{ const v=+e.target.value; if(v) setFeat(FN.filter(f=>selF.has(f)),{px:v}); e.target.blur(); });
+// ---- the other tools (#ov: teleport, mic, capture, exploring, speed, sparring; POST so other sites can't flip them) ----
+function renderOverlay(){ const o=snap&&snap.overlay; if(!o) return; renderPanel();
   for(const b of document.querySelectorAll('#ov button')){ const a=b.dataset.a; if(b.closest('#expl')) continue;   // (set below)
-    if(a==='teams'){ b.firstChild.textContent='Show: '+ovNames[o.teams]; b.classList.toggle('on',o.teams!=='all'); }
-    else if(a in o && typeof o[a]==='boolean' && a!=='teleport') b.classList.toggle('on',o[a]);
+    if(a in o && typeof o[a]==='boolean' && a!=='teleport') b.classList.toggle('on',o[a]);
     b.disabled=!o.controls||(a==='teleport'&&!o.teleport); }
   { const mb=document.querySelector('#ov button[data-a="mic"]'); if(mb){ mb.style.display=o.mic&&o.mic!=='off'?'':'none';
       mb.textContent=o.mic==='muted'?'Mic: muted':o.mic==='tone'?'Mic: test tone':'Mic: live'; mb.classList.toggle('on',o.mic==='live'||o.mic==='tone'); } }
-  document.getElementById('tpx').textContent=o.text_px?o.text_px+' px':'';
   document.getElementById('spr').textContent=o.spar?(o.spar_aim>=0?'aim off by '+o.spar_aim.toFixed(1)+'°':'no enemy'):'';
   { const sb=document.querySelector('#ov button[data-a="spar"]'); if(sb) sb.style.display=o.spar_available?'':'none'; }   // the bot's page only
   // exploring past the map's edges (games you host with PELOAD_ALLOW_TELEPORT=1): boundaries switch + this map's spots
