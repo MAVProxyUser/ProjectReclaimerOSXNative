@@ -959,6 +959,7 @@ typedef struct { void** vtbl; uint32_t kind; uint32_t rowpitch; uint64_t size; v
     uint64_t bchash;              // shader: FNV-1a of the bytecode (identifies it across runs for the pair pre-link list)
     unsigned shc_id[4]; uint64_t shc_mask[4]; int shc_n; // shader: compiled GL shaders per interface-padding mask
     void* canon;                  // shader: first-created object with identical bytecode (programs are keyed by it)
+    uint8_t bcshared;             // shader: bc / glsl are the canon's (a duplicate: freed when released, its data not)
     uint32_t intin; int intin_ok; // VS: input registers declared uvec4/ivec4 (integer vertex attributes)
     volatile int cs_pending;      // buffer: queued async compute jobs that write it (wait before reading its CPU copy)
     unsigned glq; int qstate; uint64_t qval; // query: GL query object, 0 idle / 1 begun / 2 ended, cached result (timestamps)
@@ -1020,14 +1021,14 @@ static uint8_t g_d3dscratch[1<<20];  // fallback Map target
 // state objects and queries for freeing (d3dobj_stage / d3dobj_reap, defined after the GL code). Counted for the leak
 // audit: [d3dobj] every 30 s under PELOAD_D3DGL_PROF or PELOAD_D3DOBJ_LOG (live objects, CPU bytes, by kind).
 // PELOAD_D3D_NOFREE=1 = the old behaviour (nothing is ever freed).
-static volatile uint64_t g_d3do_n[8], g_d3do_bytes[8], g_d3do_nfree[8], g_d3do_bfree[8], g_d3d_underflow, g_d3d_pending, g_d3d_keptdead, g_d3d_keptdead_b;
+static volatile uint64_t g_d3do_n[8], g_d3do_bytes[8], g_d3do_nfree[8], g_d3do_bfree[8], g_d3d_underflow, g_d3d_pending, g_d3d_keptdead, g_d3d_keptdead_il, g_d3d_keptdead_b;
 static void d3dobj_log(void){ static double tl; double now=mono_s(); if(now-tl<30.0) return; tl=now;
     if(!getenv("PELOAD_D3DOBJ_LOG") && !getenv("PELOAD_D3DGL_PROF")) return;
     char m[600]; int k=snprintf(m,sizeof m,"  [d3dobj] live:"); uint64_t tn=0,tb=0,fn=0,fb=0;
     for(int i=0;i<8;i++){ if(!g_d3do_n[i]) continue; uint64_t n=g_d3do_n[i]-g_d3do_nfree[i], b=g_d3do_bytes[i]-g_d3do_bfree[i]; tn+=n; tb+=b; fn+=g_d3do_nfree[i]; fb+=g_d3do_bfree[i];
         k+=snprintf(m+k,sizeof m-k," kind%d %llu (%.1f MB)",i,(unsigned long long)n,b/1048576.0); }
-    k+=snprintf(m+k,sizeof m-k," | total %llu, %.1f MB | freed %llu (%.1f MB), pending %llu, underflows %llu | released but kept (shaders, layouts) %llu, %.1f MB bytecode\n",(unsigned long long)tn,tb/1048576.0,
-        (unsigned long long)fn,fb/1048576.0,(unsigned long long)g_d3d_pending,(unsigned long long)g_d3d_underflow,(unsigned long long)g_d3d_keptdead,g_d3d_keptdead_b/1048576.0); (void)!write(2,m,k); }
+    k+=snprintf(m+k,sizeof m-k," | total %llu, %.1f MB | freed %llu (%.1f MB), pending %llu, underflows %llu | released but kept: shaders %llu (%.1f MB bytecode), input layouts %llu\n",(unsigned long long)tn,tb/1048576.0,
+        (unsigned long long)fn,fb/1048576.0,(unsigned long long)g_d3d_pending,(unsigned long long)g_d3d_underflow,(unsigned long long)g_d3d_keptdead,g_d3d_keptdead_b/1048576.0,(unsigned long long)g_d3d_keptdead_il); (void)!write(2,m,k); }
 // Registry of live D3DObjs (open addressing, linear probing): AddRef/Release only touch pointers found here, so a
 // static object, a double release or a stray pointer is ignored instead of corrupting memory.
 static pthread_mutex_t g_live_mx=PTHREAD_MUTEX_INITIALIZER; static void** g_live; static size_t g_live_cap, g_live_n;
@@ -1130,7 +1131,7 @@ static unsigned MSABI obj_Release(void*s){ if(!live_has(s)) return 0; D3DObj*o=s
             (void)!write(2,m,k); } }
         return 0; }
     if(r==0 && !o->keep && !d3d_nofree()) d3dobj_pend(o);
-    if(r==0 && o->keep){ __atomic_add_fetch(&g_d3d_keptdead,1,__ATOMIC_RELAXED); __atomic_add_fetch(&g_d3d_keptdead_b,(uint64_t)o->bclen,__ATOMIC_RELAXED); }   // audit
+    if(r==0 && o->keep){ __atomic_add_fetch(o->bc?&g_d3d_keptdead:&g_d3d_keptdead_il,1,__ATOMIC_RELAXED); __atomic_add_fetch(&g_d3d_keptdead_b,(uint64_t)o->bclen,__ATOMIC_RELAXED); }   // audit
     return (unsigned)r; }
 static void qi_trace(const char*who,GUID_*r);
 static int MSABI obj_QI(void*s,GUID_*r,void**pp){ qi_trace("obj",r); if(pp){ *pp=s; obj_AddRef(s); } return HR_OK; }   // QueryInterface hands out a reference
@@ -1437,9 +1438,16 @@ static int MSABI dev_crShader(int stage,const void*bc,uint64_t len,void**pp){
     if(bc&&len&&len<(16<<20)){ o->bc=malloc(len); if(o->bc){ memcpy(o->bc,bc,len); o->bclen=(uint32_t)len; } }
     if(getenv("PELOAD_FRAMELOG")) shader_rname(o);
     if(stage==0 && o->bc) o->vs_vtxin=dxbc_has_vtxinput(o->bc,o->bclen);
-    if(getenv("PELOAD_D3DGL") && o->bc){ o->glsl=d3dgl_load_glsl(o->bc,o->bclen);
+    if(getenv("PELOAD_D3DGL") && o->bc){
         { uint64_t h=1469598103934665603ull; for(uint32_t i=0;i<o->bclen;i++){ h^=((const uint8_t*)o->bc)[i]; h*=1099511628211ull; }
           o->bchash=h|1; d3dgl_prelink_register(o); }
+        // A duplicate of a shader we already keep (identical bytecode, o->canon): share its bytecode and GLSL instead of
+        // translating again, and let the game free it (backlog 27, 2026-10-18: every map load made fresh duplicates of the
+        // same shaders and none was ever freed -- 8,335 objects / 70 MB of bytecode after two map changes, plus their GLSL).
+        // The canon objects stay: programs are keyed by them. VS / PS only. PELOAD_D3D_KEEPDUPS=1 = the old behaviour.
+        D3DObj*c=o->canon; static int keepdups=-1; if(keepdups<0) keepdups=getenv("PELOAD_D3D_KEEPDUPS")?1:0;
+        if(c && c->glsl && (stage==0||stage==1) && !keepdups){ free(o->bc); o->bc=c->bc; o->glsl=c->glsl; o->bcshared=1; if(!d3d_nofree()) o->keep=0; }
+        else o->glsl=d3dgl_load_glsl(o->bc,o->bclen);
         if(getenv("PELOAD_TRACE_D3DGL")){ static int lo,hi; if(o->glsl)hi++; else lo++; if(((lo+hi)%200)==0){ char m[64]; int k=snprintf(m,sizeof m,"  [d3dgl] shaders translated=%d miss=%d\n",hi,lo); (void)!write(2,m,k);} } }
     int idx=g_shcount[stage]++;
     if(getenv("PELOAD_DUMP_SHADERS") && o->bc){ char d[512]; const char*h=getenv("HOME");
@@ -4592,13 +4600,13 @@ static unsigned d3dgl_prog(D3DObj*o,unsigned glstage){
     int ok=0; G.GetShaderiv(sh,GLE_CSTAT,&ok);
     if(!ok){ if(g_d3dgl_trace){ char log[1024]={0}; if(G.GetShaderInfoLog)G.GetShaderInfoLog(sh,1024,0,log);
             ws("  [d3dgl] shader compile FAIL: "); ws(log); ws("\n"); }
-        G.DeleteShader(sh); free(inj); free(o->glsl); o->glsl=0; return 0; }
+        G.DeleteShader(sh); free(inj); o->glsl=0; return 0; }   // (not freed: duplicates may share it -- o->bcshared)
     unsigned prog=G.CreateProgram(); G.ProgramParameteri(prog,GLE_SEPARABLE,1);
     G.AttachShader(prog,sh); G.LinkProgram(prog); G.DetachShader(prog,sh); G.DeleteShader(sh); free(inj);
     int lok=0; G.GetProgramiv(prog,GLE_LSTAT,&lok);
     if(!lok){ if(g_d3dgl_trace){ char log[1024]={0}; if(G.GetProgramInfoLog)G.GetProgramInfoLog(prog,1024,0,log);
             ws("  [d3dgl] program link FAIL: "); ws(log); ws("\n"); }
-        free(o->glsl); o->glsl=0; return 0; }
+        o->glsl=0; return 0; }   // (not freed: duplicates may share it)
     o->glprog=prog;
     // populate the uniform-location cache for this program's shader
     o->gl_locinit=1; char nm[16];
@@ -8496,6 +8504,10 @@ static void d3dobj_destroy(D3DObj*o,int gl){
         if(o->rdata && o->rdata!=o->data && o->rgen==g_sub_gen) free(o->rdata);
         free(o->data); }
     o->data=0; o->rdata=o->rpend=0;
+    if(o->bc || o->glsl || o->shc_n || o->glprog){   // a shader (a freed duplicate: its bc / glsl are the canon's)
+        static void(*del_sh)(unsigned), (*del_prog)(unsigned); if(gl && !del_sh){ del_sh=dlsym(RTLD_DEFAULT,"glDeleteShader"); del_prog=dlsym(RTLD_DEFAULT,"glDeleteProgram"); }
+        if(gl){ for(int i=0;i<o->shc_n && i<4;i++) if(o->shc_id[i] && del_sh) del_sh(o->shc_id[i]); if(o->glprog && del_prog) del_prog(o->glprog); }
+        o->shc_n=0; o->glprog=0; if(!o->bcshared){ free(o->bc); free(o->glsl); } o->bc=0; o->glsl=0; o->bclen=0; }
     free(o->pdata); o->pdata=0; free(o->isg); o->isg=0;
     __atomic_add_fetch(&g_d3do_nfree[o->kind&7],1,__ATOMIC_RELAXED); __atomic_add_fetch(&g_d3do_bfree[o->kind&7],o->size,__ATOMIC_RELAXED);
     live_del(o); o->dead=1;
