@@ -738,23 +738,28 @@ function renderOverlay(){ const o=snap&&snap.overlay; if(!o) return; renderPanel
   document.getElementById('spr').textContent=o.spar?(o.spar_aim>=0?'aim off by '+o.spar_aim.toFixed(1)+'°':'no enemy'):'';
   { const sb=document.querySelector('#ov button[data-a="spar"]'); if(sb) sb.style.display=o.spar_available?'':'none'; }   // the bot's page only
   // exploring past the map's edges (games you host with PELOAD_ALLOW_TELEPORT=1): boundaries switch + this map's spots
-  { const ex=document.getElementById('expl'), can=o.controls&&o.teleport&&o.host, spots=o.spots||[];
-    const key=JSON.stringify([spots.map(p=>p.id),o.bounds_off,can]);
+  { const ex=document.getElementById('expl'), can=o.controls&&o.teleport&&o.host, fwd=o.controls&&!o.host&&o.tp_forward, spots=can?(o.spots||[]):[];
+    const sp2=o.speed_idx===9, cansp=o.controls&&(o.host||fwd)&&('speed_idx' in o);   // ('speed_idx': a loader that forwards speed)
+    const key=JSON.stringify([spots.map(p=>p.id),o.bounds_off,can,fwd,sp2,cansp]);
     if(ex.dataset.k!==key){ ex.dataset.k=key; ex.textContent='';
+      // 2x speed for everyone (the host's variant trait): games you host, or a client of our local server (forwarded)
+      if(cansp){ const b=document.createElement('button'); b.dataset.a='speed2x'; b.classList.toggle('on',sp2); b.textContent=sp2?'Speed 2x (on)':'Speed 2x';
+        b.disabled=!cansp; b.title=cansp?(sp2?'Everyone moves at 200%. Click for the game\'s own speed.':'Everyone (you and anyone who joined) moves at 200% -- for exploring big maps.'):'only in a game you host, or on our local server (dedicated.sh)'; ex.appendChild(b); }
       if(o.bounds_off!==null && o.bounds_off!==undefined){ const b=document.createElement('button'); b.dataset.a='bounds'; b.classList.toggle('on',!!o.bounds_off);
-        b.textContent=o.bounds_off?'Boundaries off':'Boundaries on'; b.disabled=!can;
+        b.textContent=o.bounds_off?'Boundaries off':'Boundaries on'; b.disabled=!(can||fwd);
         b.title=can?(o.bounds_off?'Kill zones, safe zones and soft ceilings are skipped for players. Click to turn them back on.':'Click to switch off the kill zones, safe zones and soft ceilings for players (games you host).'):'host the game with PELOAD_ALLOW_TELEPORT=1'; ex.appendChild(b); }
       for(const p of spots){ const b=document.createElement('button'); b.dataset.a='explore'; b.dataset.spot=p.id; b.textContent=p.label; b.disabled=!can;
         b.title=can?`Boundaries off, then teleport yourself to ${p.x}, ${p.y}, ${p.z} (past the map's edge)`:'host the game with PELOAD_ALLOW_TELEPORT=1'; ex.appendChild(b); } } }
-  { const sl=document.getElementById('spdl'), sel=document.getElementById('spd'), can=o.controls&&o.host&&snap&&snap.variant;
+  { const sl=document.getElementById('spdl'), sel=document.getElementById('spd'), can=o.controls&&(o.host&&snap&&snap.variant || !o.host&&o.tp_forward&&('speed_idx' in o));
     sl.style.display=can?'':'none';
-    if(can && document.activeElement!==sel){ const r=snap.variant.raw, v=r?parseInt(r.substr((0x134+0x10)*2,2),16):0; if(!isNaN(v)) sel.value=String(v); } }
+    if(can && document.activeElement!==sel && o.speed_idx!=null && o.speed_idx>=0) sel.value=String(o.speed_idx); }
   { const av=snap&&snap.autovote; if(av){ for(const [id,v] of [['avm',av.map],['avc',av.calls]]){ const e=document.getElementById(id); e.disabled=!o.controls; if(document.activeElement!==e && v!=null) e.value=String(v); } } }
   document.getElementById('ovmsg').textContent=o.controls?'':'controls are off (PELOAD_STATS_READONLY)'; }
 document.getElementById('ov').addEventListener('click',async e=>{ const b=e.target.closest('button[data-a]'); if(!b||b.disabled) return;   // (the zone chips post their own)
   const msg=document.getElementById('ovmsg');
   const ov=snap&&snap.overlay, extra=b.dataset.a==='spar'?'&on='+(ov&&ov.spar?0:1):b.dataset.a==='bounds'?'&off='+(ov&&ov.bounds_off?0:1):b.dataset.a==='explore'?'&spot='+encodeURIComponent(b.dataset.spot):b.dataset.a==='mic'?'&on='+(ov&&ov.mic==='muted'?1:0):'';
-  try{ const r=await fetch('/control?do='+b.dataset.a+extra,{method:'POST',headers:{'X-Reclaimer-Control':'1'}}); const j=await r.json();
+  const q=b.dataset.a==='speed2x'?'speed&v='+(ov&&ov.speed_idx===9?0:9):b.dataset.a+extra;
+  try{ const r=await fetch('/control?do='+q,{method:'POST',headers:{'X-Reclaimer-Control':'1'}}); const j=await r.json();
     msg.textContent=j.ok?(b.dataset.a==='capture'?'captured: ~/reclaimer_cap_*.bmp/.txt':''):(j.error||'failed'); }
   catch(err){ msg.textContent='not connected'; } });
 // ---- clip recording (rec.m): POST do=rec&secs=&mode=av|audio / do=recstop, the snapshot's "rec", GET /recordings.json ----

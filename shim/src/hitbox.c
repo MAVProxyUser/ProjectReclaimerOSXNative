@@ -732,6 +732,7 @@ static const HbBnd g_hb_bnd[HB_NBND]={ {0x37b816,6,{0x0F,0x85,0x54,0x01,0x00,0x0
     {0x219c1f,2,{0x75,0x06},{0xEB,0x46}} };
 volatile int g_hb_bnd_req=-1;   // stats page: 1 = boundaries off, 0 = back on
 volatile int g_hb_bnd_only;      // that request carries no teleport (a bare job would otherwise mean F7's map reflection)
+volatile int g_hb_bnd_client;    // a client of our host: patch its own movement prediction (stats.c forwards the switch to the host)
 int hb_bounds_off(void){ uint8_t*h3=hb_halo3_base(); if(!h3) return -1; int off=1, on=1;
     for(int i=0;i<2;i++){ const uint8_t*p=h3+g_hb_bnd[i].rva; if(memcmp(p,g_hb_bnd[i].patch,g_hb_bnd[i].n)) off=0; if(memcmp(p,g_hb_bnd[i].orig,g_hb_bnd[i].n)) on=0; }
     return off?1:on?0:-1; }   // the kill/safe + soft-ceiling pair decides (a launch PELOAD_PATCH may lack the slip one); -1: neither
@@ -754,6 +755,8 @@ static void hb_engine_jobs(void){
     { uint8_t*gg=*(uint8_t**)((uint8_t*)tarr[idx]+0x48); int st=gg?gg[0x11]:-1;
       // PELOAD_TELEPORT_CLIENT_TEST=1: run it on a client anyway -- an experiment to see whether the host accepts or
       // corrects a position the client set itself (local test games only)
+      if(st!=5 && st!=1 && g_hb_bnd_client && g_hb_bnd_only && g_hb_bnd_req>=0){   // boundaries on a client of our host: only the patches
+          int tok=((HbLockFn)(h3+0x12c948))(); int r=g_hb_bnd_req; g_hb_bnd_req=-1; hb_bounds_set(h3,r); g_hb_bnd_only=0; g_hb_bnd_client=0; ((HbUnlockFn)(h3+0x12c9a0))(&tok); return; }
       if(st!=5 && st!=1 && !getenv("PELOAD_TELEPORT_CLIENT_TEST")){ char m[140]; int k=snprintf(m,sizeof m,"  [teleport] refused: this game is hosted elsewhere (simulation type %d); only the host can move players\n",st); (void)!write(2,m,k); g_hb_tp_slot=-1; return; } }
     // halo3's game-state lock (what it holds around every tick)
     if(!*(uint64_t*)(h3+0x8f4028) || *(int32_t*)((uint8_t*)tarr[idx]+0x18)<0 || *(int32_t*)((uint8_t*)tarr[idx]+0x18)>=32){ (void)!write(2,"  [teleport] engine not ready\n",30); return; }

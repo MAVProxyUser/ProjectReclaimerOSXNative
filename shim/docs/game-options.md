@@ -289,3 +289,34 @@ characters, 2 Random, 3..18 Customization mod 1..16) and `teams.<color>_characte
   running variant held -1 (0xFFFF) there, a value no client choice produces; the stats page shows any 16-bit option
   holding 0xFFFF without a matching choice as "Map default". Whether the client's choice 0 "Default" ends up as 0 or
   -1 was not checked.
+
+## Graphics quality: Settings -> Advanced graphics (client v0.9.20; found 2026-10-18)
+
+Where: `C:\ReclaimerProfile\settings.json` (the Mac path is `~/Library/Application Support/ReclaimerMac/prefix/drive_c/
+ReclaimerProfile/settings.json`; a test profile via `RECLAIMER_PROFILE_DIR=C:\<folder>`). The client writes the block when
+you press **Apply changes** (BACK discards unsaved changes) and applies it at once, in a running game too -- no restart.
+Written by the client itself (Low preset):
+
+```json
+"quality": {
+  "one": "low",
+  "detail": { "decals": "low", "draw_distance": "low", "effects": "low", "level_of_detail": "low",
+              "lighting": "low", "shadows": "low", "water": "low" }
+}
+```
+
+- `one` = the one-player preset the menu shows; `detail` = the levels actually used (the menu's Shadows, Dynamic lights,
+  Effects, Draw distance, Level of detail, Decals, Water). A file with `one` but no `detail` is refused ("one setting this
+  build cannot use kept its default (quality.one)") -- the client then uses High.
+- Levels: `auto`, `off`, `low`, `medium`, `high`, `ultra` (serde names in the client; "off" only where the menu offers it,
+  e.g. Shadows). High is what Halo 3 drew before these settings, Medium the Xbox 360's own detail, Ultra goes past it.
+- Other keys (defaults when absent): `split` (the split-screen preset, `auto`), `texture_filtering` (`original`, `4x`,
+  `8x`, `16x`), `motion_blur` and `antialiasing` (true/false).
+- What the engine gets (the client's log line "Graphics detail for 1 view(s): ..."):
+  - High: 1500 shadow casters at 1.00, lights 1000+1000 at 1.00/1.00, effects 3.00, fades 8.00/3.00/3.00, models 3.00, decals 1.00, water 3.00.
+  - Low: 2 shadow casters at 0.35, lights 1+3 at 0.50/0.50, effects 0.50, fades 0.25/0.50/0.50, models 0.50, decals 0.50, water 0.30.
+- The log line "Graphics quality: one view High; split screen Auto; textures Original, motion blur on, antialiasing on."
+  confirms what was read at start.
+
+Frame rate effect (fixed vista on Hugegrass, local server, same spot and view each run): see shim/docs/PERF-PLAN.md
+"Advanced graphics settings".

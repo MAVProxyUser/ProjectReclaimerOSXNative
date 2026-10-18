@@ -358,6 +358,16 @@ writes ~/reclaimer_pixwho_d<draw>.txt (both shaders' GLSL + every bound VS/PS co
 then the static-lighting PS 7bcaa3c3c92f37d7 (cubes t0-t2, lightmap arrays t13 768x768x8 / t14 x2 BC3) writes 0.008.
 PELOAD_TRACE_LAYERED (array uploads: non-zero share per slice), "[d3dgl] vertex attribute format N not translated" (once per
 format; integer inputs still take the IPointer path). Binaries target macOS 13 (build.sh MACOS_MIN).
+Host controls from a client (2026-10-18): stats.c st_forward POSTs speed / bounds / tpto to PELOAD_TELEPORT_HOST (the host loader's
+stats address) when this client isn't the host; play.sh sets it (+ PELOAD_ALLOW_TELEPORT) for RECLAIMER_JOIN=127.0.0.1:<port> when
+our dedicated server answers on 8767 (dedicated.sh now always runs it with PELOAD_STATS_HTTP=8767, ALLOW_TELEPORT, STATS_OPEN=0;
+DED_STATS_HTTP). A client applying "Boundaries off" also patches its own prediction (g_hb_bnd_client). Page: "Speed 2x" toggle
+(do=speed&v=9 / v=0), shown only when the snapshot has overlay.speed_idx (a loader that forwards). Speed = the variant's base
+player trait: the host gives it to every player (a friend on another Mac too).
+Graphics quality (game-options.md): settings.json quality.one + quality.detail{shadows,lighting,effects,draw_distance,
+level_of_detail,decals,water}, levels auto/off/low/medium/high/ultra; written on the menu's Apply changes, applied live.
+UI automation of a test client: PELOAD_STATS_UISTEPS=1 + POST do=uisteps&s=<steps> (1280x720 client coords) and a frame of the
+window from a 1.5 s clip (do=rec, then ffmpeg -ss 0.8 -frames:v 1) -- the menu is not in do=capture; never screenshot the desktop.
 Glitch hunting: `PELOAD_D3DGL_COVQ` (+`_COVQ_FRAC`, `_HUGEPROBE=<t>`) per-draw sample counts,
 `PELOAD_D3DGL_WHITEDUMP` (draw flight recorder on auto-exposure spikes), `_LUMLOG`, `_FSLOG`,
 `_FRAMESTAT`, `_CBSCAN`, `_PSCLAMP=<c>`, `_SKIPVSH=<hash,..>`, `_DUMPHASH=<hash,..>` (GLSL+DXBC to ~).

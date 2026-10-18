@@ -73,6 +73,15 @@ fi
 rm -f "$PFX/ReclaimerProfile/starting" 2>/dev/null
 RUNTIME=()
 ARGS=(game-client --mcc-path "$MCC")
+# Joining our own local dedicated server (dedicated.sh): its loader's stats page is the host's, so this client's page can
+# hand it the host controls (2x speed, boundaries off, map-click teleport). Public servers have no such page.
+case "${RECLAIMER_JOIN:-}" in
+  127.0.0.1:*|localhost:*)
+    if [ -z "${PELOAD_TELEPORT_HOST:-}" ] && curl -s -m 1 "http://127.0.0.1:${DED_STATS_HTTP:-8767}/stats.json" 2>/dev/null | grep -q '"dedicated":true'; then
+      export PELOAD_TELEPORT_HOST="127.0.0.1:${DED_STATS_HTTP:-8767}" PELOAD_ALLOW_TELEPORT="${PELOAD_ALLOW_TELEPORT:-1}"
+      echo "local dedicated server found: host controls on this client's stats page go to its loader ($PELOAD_TELEPORT_HOST)"
+    fi;;
+esac
 if [ -n "${RECLAIMER_JOIN:-}" ]; then
   # The same link a browser or Discord hands the client; it finds MCC itself and joins once its menu is up.
   ARGS=("reclaimer://join?server=$RECLAIMER_JOIN")

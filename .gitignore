@@ -7,3 +7,4 @@ shim/build/
 .DS_Store
 shim/crt/
 dist/
+.claude/worktrees/

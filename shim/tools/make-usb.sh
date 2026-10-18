@@ -63,7 +63,7 @@ part(){ local name="$1"; shift; local log; log=$(mktemp)
 
 echo "== loader, GL helper, scripts, newest client exe"
 # the app folder is staged exactly (--delete): the stick never keeps an old exe, binary or script next to the new ones
-APPST=$(mktemp -d); trap 'rm -rf "$APPST"' EXIT
+APPST=$(mktemp -d); trap 'rm -rf "$APPST"' EXIT; chmod 755 "$APPST"   # mktemp makes it 0700, which rsync -a would give the stick's app/
 mkdir -p "$APPST/shim/build" "$APPST/shim/tools" "$APPST/shim/docs" "$APPST/re-tools" "$APPST/client"
 ln shim/build/peload shim/build/glhelper "$APPST/shim/build/" 2>/dev/null || cp -p shim/build/peload shim/build/glhelper "$APPST/shim/build/"
 cp -pR shim/crt "$APPST/shim/"

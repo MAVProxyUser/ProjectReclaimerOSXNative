@@ -13,6 +13,8 @@
 # UDP 49190 with RCON on TCP 127.0.0.1:49190. To host for other people, edit it (dedicated.toml.example next to it
 # documents every option) -- that publishes the server, so only do it on purpose.
 # DED_CONFIG=<file>.toml runs another config in the same folder (e.g. mapchange.toml: three 1-minute games, a test of map changes).
+# The server's own stats page (the host's view: speed, boundaries, teleport) is http://127.0.0.1:8767 (DED_STATS_HTTP);
+# a client joined with play.sh RECLAIMER_JOIN=127.0.0.1:<port> finds it and forwards those controls to it from its page.
 # DED_VOICE=1 / DED_VOICE=0 switches the server's voice chat on / off in its dedicated.toml before it starts (off by default;
 # on is needed to exercise a client's microphone path).
 # Logs: /tmp/reclaimer_dedicated.log (the supervisor) and /tmp/reclaimer_dedicated_<pid>.log (every game-server
@@ -109,6 +111,7 @@ rm -f /tmp/reclaimer_dedicated_[0-9]*.log
 set -m
 env PELOAD_SKINGUARD=1 PELOAD_VTGUARD=1 PELOAD_ALLOC_GUARD=1 PELOAD_RECLAIMER_PATCHES=all \
     PELOAD_HIDE_WINDOW=1 PELOAD_AUDIO=0 PELOAD_NO_PAD=1 PELOAD_NO_KBM=1 PELOAD_NO_SYS_CURSOR=1 PELOAD_NO_FOCUS=1 \
+    PELOAD_STATS_HTTP="${DED_STATS_HTTP:-8767}" PELOAD_STATS_OPEN=0 PELOAD_ALLOW_TELEPORT=1 \
     PELOAD_STDERR_TEE='/tmp/reclaimer_dedicated_%p.log' $DED_ENV \
     arch -x86_64 shim/build/peload "$EXE" dedicated --config "$FOLDER\\${DED_CONFIG:-dedicated.toml}" run \
     < /dev/null > /tmp/reclaimer_dedicated.log 2>&1 &

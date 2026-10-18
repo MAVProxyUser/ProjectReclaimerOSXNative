@@ -1113,6 +1113,13 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
 - **Recording time scale** — rec.m. Why: the default 600 time scale rounded two frames onto one timestamp. How: 90000.
   (10-18 4edd201) `PELOAD_REC_DIR` keeps test recordings out of ~/Movies (cf2f4f5).
 
+- **Host controls from a client of our local server** — `st_forward` (stats.c), play.sh, dedicated.sh. Why: the stats
+  page's speed / boundaries / map-click teleport are host actions; a client joined to our local dedicated server got
+  "unknown or disabled action" (the user, trying 2x speed). How: when this client isn't the host and knows the host
+  loader's stats address (PELOAD_TELEPORT_HOST: play.sh sets it for 127.0.0.1 joins when dedicated.sh's page answers on
+  8767, which dedicated.sh now always serves), the request goes to the host; "Boundaries off" also patches this client's
+  own prediction. The page shows the controls (and the new "Speed 2x" toggle) only for loaders that forward. (10-18)
+
 ## 19. Performance
 
 Numbers are from the commit messages; PERF-PLAN.md has the measurements. Compare only inside one match

@@ -641,14 +641,18 @@ static struct { uint32_t h; double t; } g_proj[8192];
 // this process hosts the game (halo3 game_globals +0x11: 5 = network host, 1 = local): only the host can teleport
 static int st_is_host(void){ uint64_t gg=0; uint8_t st=0; return g_st_tls && hb_read(g_st_tls+0x48,&gg,8) && gg && hb_read(gg+0x11,&st,1) && (st==5||st==1); }
 static int st_controls_ok(void){ static int ro=-1; if(ro<0){ const char*e=getenv("PELOAD_STATS_READONLY"); ro=e&&*e&&strcmp(e,"0")?1:0; } return !ro; }
-// forward a teleport request to the host's stats server: POST /control?do=tpnext&slot=<target>&who=<our slot>
-static int st_forward_tp(const char*hostport,int slot,int who){
+// Host controls from a client of OUR host (PELOAD_TELEPORT_HOST = the host loader's stats address: our local dedicated server
+// or a friend's game where both ends run this loader; never a public server, whose host has no such page): the request
+// goes to the host's /control and the host does it. POST /control?<qs>; 1 = the host said ok.
+static int st_forward(const char*hostport,const char*qs){
     char host[64]; int port=8765; if(sscanf(hostport,"%63[^:]:%d",host,&port)<1) return 0;
     int fd=socket(AF_INET,SOCK_STREAM,0); if(fd<0) return 0; struct sockaddr_in a; memset(&a,0,sizeof a); a.sin_family=AF_INET; a.sin_port=htons((uint16_t)port); a.sin_addr.s_addr=inet_addr(host);
     struct timeval tv={2,0}; setsockopt(fd,SOL_SOCKET,SO_RCVTIMEO,&tv,sizeof tv); setsockopt(fd,SOL_SOCKET,SO_SNDTIMEO,&tv,sizeof tv);
-    int ok=0; if(!connect(fd,(struct sockaddr*)&a,sizeof a)){ char rq[256]; int k=snprintf(rq,sizeof rq,"POST /control?do=tpnext&slot=%d&who=%d HTTP/1.1\r\nHost: %s\r\nX-Reclaimer-Control: 1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",slot,who,host);
-        if(send(fd,rq,(size_t)k,0)==k){ char rs[256]; ssize_t n=recv(fd,rs,sizeof rs-1,0); if(n>0){ rs[n]=0; ok=strstr(rs,"\"ok\":true")!=0; } } }
-    close(fd); char m[140]; int k=snprintf(m,sizeof m,"  [teleport] forwarded to the host %s (slot %d next to %d): %s\n",hostport,who,slot,ok?"accepted":"refused"); (void)!write(2,m,k); return ok; }
+    int ok=0; if(!connect(fd,(struct sockaddr*)&a,sizeof a)){ char rq[512]; int k=snprintf(rq,sizeof rq,"POST /control?%s HTTP/1.1\r\nHost: %s\r\nX-Reclaimer-Control: 1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",qs,hostport);
+        if(k>0 && k<(int)sizeof rq && send(fd,rq,(size_t)k,0)==k){ char rs[256]; ssize_t n=recv(fd,rs,sizeof rs-1,0); if(n>0){ rs[n]=0; ok=strstr(rs,"\"ok\":true")!=0; } } }
+    close(fd); char m[300]; int k=snprintf(m,sizeof m,"  [host] forwarded to the host %s: %s -> %s\n",hostport,qs,ok?"done":"refused / unreachable"); (void)!write(2,m,(size_t)k); return ok; }
+static int st_forward_tp(const char*hostport,int slot,int who){ char q[96]; snprintf(q,sizeof q,"do=tpnext&slot=%d&who=%d",slot,who); return st_forward(hostport,q); }
+static int g_st_fwd_speed=-1;   // the speed index last set on our host through it (-1: not since we started)
 // Spots past the map's edges, tested alive with the boundaries off (shim/docs/map-boundaries.md)
 typedef struct { const char*map, *id, *label; float x,y,z; } StSpot;
 static const StSpot g_st_spots[]={
@@ -717,6 +721,12 @@ static int st_control(const char*act,const char*qs){
         for(int i=0;i<3;i++) if(!(d[i]>=-50 && d[i]<=50)) return 0;
         extern volatile int g_hb_tp_by; extern float g_hb_tp_delta[3]; memcpy(g_hb_tp_delta,d,12); g_hb_tp_by=1; __atomic_store_n(&g_hb_job_pending,1,__ATOMIC_RELEASE); return 1; }
     // exploring spots past a map's edges (map-boundaries.md): boundaries off, then teleport there -- host only
+    // a client of our host: the host switches them for everyone, and this client patches its own movement prediction too
+    // (soft ceilings are simulated on the predicted biped; without it the client is pushed back until the host corrects it)
+    if(!strcmp(act,"bounds") && !st_is_host()){ const char*hp=getenv("PELOAD_TELEPORT_HOST"), *v=strstr(qs,"off="); if(!hp || !v) return 0;
+        int off=atoi(v+4)?1:0; char q[48]; snprintf(q,sizeof q,"do=bounds&off=%d",off); int ok=st_forward(hp,q);
+        extern volatile int g_hb_bnd_req, g_hb_bnd_only, g_hb_bnd_client; g_hb_bnd_req=off; g_hb_bnd_only=1; g_hb_bnd_client=1; __atomic_store_n(&g_hb_job_pending,1,__ATOMIC_RELEASE);
+        return ok; }
     if(!strcmp(act,"explore") || !strcmp(act,"bounds")){
         if(!getenv("PELOAD_ALLOW_TELEPORT") || !st_is_host()) return 0; extern volatile int g_hb_bnd_req;
         if(!strcmp(act,"bounds")){ const char*v=strstr(qs,"off="); if(!v) return 0; extern volatile int g_hb_bnd_only; g_hb_bnd_req=atoi(v+4)?1:0; g_hb_bnd_only=1;
@@ -726,7 +736,10 @@ static int st_control(const char*act,const char*qs){
         extern volatile int g_hb_tp_to, g_hb_tp_to_who; extern float g_hb_tp_dest[3]; g_hb_bnd_req=1; g_hb_tp_dest[0]=sp->x; g_hb_tp_dest[1]=sp->y; g_hb_tp_dest[2]=sp->z; g_hb_tp_to_who=-1; g_hb_tp_to=1;
         __atomic_store_n(&g_hb_job_pending,1,__ATOMIC_RELEASE); char m[120]; int k=snprintf(m,sizeof m,"  [explore] page: boundaries off, to %s\n",sp->label); (void)!write(2,m,k); return 1; }
     if(!strcmp(act,"tpto")){   // move a player (slot=, default us) to x,y,z -- host only (exploring, boundary tests)
-        if(!getenv("PELOAD_ALLOW_TELEPORT") || !st_is_host()) return 0; const char*v; float d[3]; int got=0;
+        if(!st_is_host()){ const char*hp=getenv("PELOAD_TELEPORT_HOST"); if(!hp || strstr(qs,"slot=") || g_hb_local_slot<0) return 0;   // a client of our host: the host moves us
+            const char*v; float d[3]; int got=0; if((v=strstr(qs,"x="))){ d[0]=(float)atof(v+2); got++; } if((v=strstr(qs,"y="))){ d[1]=(float)atof(v+2); got++; } if((v=strstr(qs,"z="))){ d[2]=(float)atof(v+2); got++; }
+            if(got!=3) return 0; char q[160]; snprintf(q,sizeof q,"do=tpto&x=%.2f&y=%.2f&z=%.2f&slot=%d",d[0],d[1],d[2],g_hb_local_slot); return st_forward(hp,q); }
+        if(!getenv("PELOAD_ALLOW_TELEPORT")) return 0; const char*v; float d[3]; int got=0;
         if((v=strstr(qs,"x="))){ d[0]=(float)atof(v+2); got++; } if((v=strstr(qs,"y="))){ d[1]=(float)atof(v+2); got++; } if((v=strstr(qs,"z="))){ d[2]=(float)atof(v+2); got++; }
         if(got!=3) return 0; for(int i=0;i<3;i++) if(!(d[i]>-30000 && d[i]<30000)) return 0;
         const char*w=strstr(qs,"slot="); int who=w?atoi(w+5):-1; if(who>255) return 0;
@@ -761,7 +774,8 @@ static int st_control(const char*act,const char*qs){
     // Movement speed for everyone, in a game you host: the game variant's base player traits (game_globals +0x1608
     // +0x134, speed byte +0x10: tl_speed's index, 0 = unchanged, 5 = 100%). The host recomputes every player's traits
     // from the variant each tick and sends them to the clients (halo3-variant-traits.md), so joined players move at it.
-    if(!strcmp(act,"speed")){ const char*v=strstr(qs,"v="); int sp=v?atoi(v+2):-1; if(sp<0 || sp>=(int)(sizeof tl_speed/sizeof*tl_speed) || !st_is_host()) return 0;
+    if(!strcmp(act,"speed")){ const char*v=strstr(qs,"v="); int sp=v?atoi(v+2):-1; if(sp<0 || sp>=(int)(sizeof tl_speed/sizeof*tl_speed)) return 0;
+        if(!st_is_host()){ const char*hp=getenv("PELOAD_TELEPORT_HOST"); if(!hp) return 0; char q[32]; snprintf(q,sizeof q,"do=speed&v=%d",sp); int ok=st_forward(hp,q); if(ok) g_st_fwd_speed=sp; return ok; }
         uint64_t gg=0; uint8_t mode=0; if(!g_st_tls || !hb_read(g_st_tls+0x48,&gg,8) || !gg || !hb_read(gg+0x10,&mode,1) || mode!=2) return 0;
         *(volatile uint8_t*)(uintptr_t)(gg+0x1608+0x134+0x10)=(uint8_t)sp;
         char m[80]; int k=snprintf(m,sizeof m,"  [stats] page: movement speed %s (everyone)\n",tl_speed[sp]); (void)!write(2,m,k); return 1; }
@@ -1076,6 +1090,8 @@ static void st_snapshot(StBuf*s){
           hb_feat(HBF_VEH)?"true":"false",hb_feat(HBF_ZONES)?"true":"false",hb_feat(HBF_HITBOX)?"true":"false",hb_feat(HBF_TRACER)?"true":"false",hb_feat(HBF_INFO)?"true":"false",hb_feat(HBF_ITEMS)?"true":"false",hb_feat(HBF_VISIBLE)?"true":"false",
           tm[hb_team_mode()],tp?"true":"false",st_is_host()?"true":"false",getenv("PELOAD_TELEPORT_HOST")?"true":"false",st_controls_ok()?"true":"false",g_hb_text_px>0?g_hb_text_px:7,hb_spar_enabled()?"true":"false",g_spar_ok?(double)g_spar_err:-1.0,hb_spar_available()?"true":"false",hb_bounds_off()==1?"true":hb_bounds_off()==0?"false":"null",
           !wa_mic_mode()||wa_mic_mode()==3?"off":wa_mic_muted()?"muted":wa_mic_mode()==2?"tone":"live",g_mic_streams>0?"true":"false");
+      { int si=-1; uint64_t gg=0; uint8_t b=0; if(st_is_host()){ if(g_st_tls && hb_read(g_st_tls+0x48,&gg,8) && gg && hb_read(gg+0x1608+0x134+0x10,&b,1)) si=b; } else si=g_st_fwd_speed;
+        sb_put(s,",\"speed_idx\":%d",si); }   // the movement speed index (tl_speed; 0 = the variant's own, 9 = 200%%), -1 unknown
       st_overlay_features(s);   // the overlay panel's per-feature settings (the keys above stay for older pages)
       sb_put(s,",\"spots\":["); int ns=0; for(int i=0;i<(int)(sizeof g_st_spots/sizeof g_st_spots[0]);i++) if(!strcmp(g_st_spots[i].map,m)){
           sb_put(s,"%s{\"id\":\"%s\",\"label\":\"%s\",\"x\":%.1f,\"y\":%.1f,\"z\":%.1f}",ns++?",":"",g_st_spots[i].id,g_st_spots[i].label,g_st_spots[i].x,g_st_spots[i].y,g_st_spots[i].z); }
