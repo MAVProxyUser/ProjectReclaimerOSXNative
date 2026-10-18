@@ -331,9 +331,8 @@ static int hb_current_map(char*out,size_t n){
     pthread_mutex_lock(&mx); double now=mono_s();
     char paths[HB_NPATHS][1024]; int np; pthread_mutex_lock(&g_hb_mapmx); np=g_hb_nmappaths; memcpy(paths,g_hb_mappaths,sizeof(paths[0])*(size_t)np); pthread_mutex_unlock(&g_hb_mapmx);
     if(!cur[0] || now-tchk>2.0 || np!=last_np){ tchk=now; last_np=np;
-        // the engine's own scenario name decides when one candidate file carries it (Workshop maps built on the same
-        // tag base -- Hugegrass and Ultimate Forge's savannah_sandbox -- match the same live definitions, and the newer
-        // of two tied files used to win: 2026-10-18 the walker went off to build a graph for savannah_sandbox)
+        // the engine's own scenario name decides when one candidate file carries it (the definition match is a vote:
+        // Workshop maps built on the same tag base can tie on it, and the newer of two tied files used to win)
         static uint32_t defs[256]; int nd=hb_live_defs(defs,256); int best=-1, bs=-1, cs=-1; char sn[128]; int hs=hb_scenario_name(sn,sizeof sn);
         for(int k=0;k<np;k++){ if(!strstr(paths[k],"/halo3/maps/") && !strstr(paths[k],"/workshop/content/")) continue;
             if(hs){ const char*b=strrchr(paths[k],'/'); b=b?b+1:paths[k]; size_t L=strlen(sn); if(!strncasecmp(b,sn,L) && !strcasecmp(b+L,".map")){ best=k; bs=-2; break; } }
