@@ -4276,6 +4276,37 @@ static int      g_d3dgl_trace, g_d3dgl_depth;
 static D3DObj*  g_rtseen[128]; static int g_nrtseen, g_rtdumped;
 static void d3dgl_note_rt(D3DObj* rt){ if(!rt||!getenv("PELOAD_D3DGL_DUMP_RT")) return;
     for(int i=0;i<g_nrtseen;i++) if(g_rtseen[i]==rt) return; if(g_nrtseen<128) g_rtseen[g_nrtseen++]=rt; }
+// Stats control do=rtdump (2026-10-18, dark / white scenes: lighting or exposure?): every render target the NEXT frame draws
+// into (slot 0), read back as float in strips at that frame's Present, logged with its mean / max per channel and written as
+// ~/reclaimer_rtd_<pid>_<n>_<i>_<w>x<h>_f<fmt>.bmp scaled by its own 99th-percentile luminance (gamma 2.2).
+volatile int g_rtd_req; static int g_rtd_state; static D3DObj* g_rtd_list[64]; static int g_rtd_n; static unsigned g_rtd_no;
+static void rtd_note(D3DObj*rt){ if(g_rtd_state!=1 || !rt) return; for(int i=0;i<g_rtd_n;i++) if(g_rtd_list[i]==rt) return; if(g_rtd_n<64) g_rtd_list[g_rtd_n++]=rt; }
+static void rtd_forget(const D3DObj*o){ for(int i=0;i<g_rtd_n;i++) if(g_rtd_list[i]==o) g_rtd_list[i]=0; }
+static int rtd_fcmp(const void*a,const void*b){ float x=*(const float*)a, y=*(const float*)b; return x<y?-1:x>y; }
+static unsigned d3dgl_fbo_for(D3DObj*const*rts,int n,D3DObj*ds);
+static void rtd_tick(void){
+    if(g_rtd_state==0){ if(__atomic_exchange_n(&g_rtd_req,0,__ATOMIC_ACQ_REL)){ g_rtd_state=1; g_rtd_n=0; } return; }
+    g_rtd_state=0; if(!G.ReadPixels) return; unsigned no=g_rtd_no++; const char*home=getenv("HOME"); if(!home) home="/tmp";
+    for(int i=0;i<g_rtd_n;i++){ D3DObj*rt=g_rtd_list[i]; if(!rt) continue; D3DObj*rr=(rt->data&&rt->vkind)?(D3DObj*)rt->data:rt;
+        unsigned fbo=rt->glfbo?rt->glfbo:d3dgl_fbo_for(&rt,1,0);   // (a target only ever drawn with others has no FBO of its own)
+        if(!fbo){ char m[160]; int k=snprintf(m,sizeof m,"  [rtdump] %u.%d %ux%u fmt %u: no framebuffer\n",no,i,rr->w,rr->h,rr->fmt); (void)!write(2,m,k); continue; }
+        int w=(int)(rr->w?rr->w:rt->w), h=(int)(rr->h?rr->h:rt->h); if(w<1||h<1||(long)w*h>(16L<<20)) continue;
+        float*px=malloc((size_t)w*h*16); unsigned char*img=malloc((size_t)w*h*4); float*lum=malloc(((size_t)w*h/16+1)*4); if(!px||!img||!lum){ free(px); free(img); free(lum); continue; }
+        gl_bindfbo_any(0x8D40/*FRAMEBUFFER*/,fbo); if(G.ReadBuffer) G.ReadBuffer(0x8CE0/*COLOR_ATTACHMENT0*/); if(G.GetError) G.GetError();
+        int rows=(int)((8u<<20)/((unsigned)w*16)); if(rows<1) rows=1; unsigned err=0;
+        for(int y=0;y<h;y+=rows){ int n=h-y<rows?h-y:rows; G.ReadPixels(0,y,w,n,0x1908/*RGBA*/,0x1406/*FLOAT*/,px+(size_t)y*w*4); if(G.GetError && (err=G.GetError())) break; }
+        double sum[4]={0}; float mx[4]={0}; long nl=0;
+        if(!err) for(long q=0;q<(long)w*h;q++){ const float*c=px+q*4; for(int k=0;k<4;k++){ float v=c[k]; if(!(v==v)) v=0; sum[k]+=v; if(v>mx[k]) mx[k]=v; }
+            if(!(q&15)) lum[nl++]=0.2126f*c[0]+0.7152f*c[1]+0.0722f*c[2]; }
+        float p99=1; if(nl){ qsort(lum,(size_t)nl,4,rtd_fcmp); p99=lum[(long)(nl*0.99)]; if(!(p99>1e-12f)) p99=mx[0]>mx[1]?(mx[0]>mx[2]?mx[0]:mx[2]):(mx[1]>mx[2]?mx[1]:mx[2]); if(!(p99>1e-12f)) p99=1; }
+        char path[512]; snprintf(path,sizeof path,"%s/reclaimer_rtd_%d_%02u_%02d_%dx%d_f%u.bmp",home,(int)getpid(),no,i,w,h,rr->fmt);
+        if(!err){ for(long q=0;q<(long)w*h;q++){ long yy=q/w, xx=q%w; const float*c=px+((h-1-yy)*(long)w+xx)*4; unsigned char*o=img+q*4;   // rows top-first
+                for(int k=0;k<3;k++){ float v=c[k]/p99; v=v<0?0:v>1?1:v; o[k]=(unsigned char)(powf(v,1/2.2f)*255+0.5f); } o[3]=255; }
+            bmp_write_rgba(path,w,h,img); }
+        double np=(double)w*h; char m[400]; int k=snprintf(m,sizeof m,"  [rtdump] %u.%d %dx%d fmt %u: %s mean (%.4g %.4g %.4g %.4g) max (%.4g %.4g %.4g %.4g) p99 lum %.4g -> %s\n",
+            no,i,w,h,rr->fmt,err?"READ FAILED":"",sum[0]/np,sum[1]/np,sum[2]/np,sum[3]/np,mx[0],mx[1],mx[2],mx[3],p99,err?"-":path); (void)!write(2,m,k);
+        free(px); free(img); free(lum); }
+    gl_bindfbo_any(0x8D40/*FRAMEBUFFER*/,0); g_rtd_n=0; }
 #define GLE_ARRAY 0x8892
 #define GLE_ELEM  0x8893
 #define GLE_TEX2D 0x0DE1
@@ -6949,7 +6980,7 @@ static void d3dgl_draw_impl(uint32_t vcount,int indexed,uint32_t instcount,uint3
                     bmp_write_rgba(p,W,H,cbuf);
                     char m[220]; int k=snprintf(m,sizeof m,"  [covprobe] NEWHIGH DUMP -> %s (vp=%dx%d fbo=%u red=%d nonblack=%d glerr=%u)\n",p,W,H,crt?crt->glfbo:0,red,nb,ge); (void)!write(2,m,k); } } } }
     PH(6);   // (attribute arrays stay enabled for the next draw; stale ones are disabled before each draw)
-    g_d3dgl_phase="done"; g_d3dgl_frame_draws++; g_draws_total++; d3dgl_note_rt(rt); rtc_note(rt,rt->w,rt->h,rt->fmt,nattr>0,g_d3dst.psrv[0]);
+    g_d3dgl_phase="done"; g_d3dgl_frame_draws++; g_draws_total++; d3dgl_note_rt(rt); rtd_note(rt); rtc_note(rt,rt->w,rt->h,rt->fmt,nattr>0,g_d3dst.psrv[0]);
     { D3DObj*t0=g_d3dst.psrv[0]; { D3DObj*b=g_d3dst.blend; const uint32_t*r0=(b&&b->stkind==1)?b->sd+2:0;
       flog("draw rt=%06lx %ux%u f%u vp=%dx%d ps=[%.40s] t0=%06lx %ux%u f%u t1=%06lx blend=%u:%u/%u wm=%x",((unsigned long)rt>>4)&0xffffff,rt->w,rt->h,rt->fmt,vw,vh,ps?ps->rname:"-",
         ((unsigned long)t0>>4)&0xffffff,t0?t0->w:0,t0?t0->h:0,t0?t0->fmt:0,((unsigned long)g_d3dst.psrv[1]>>4)&0xffffff,r0?r0[0]:0,r0?r0[1]:0,r0?r0[2]:0,r0?(r0[7]&0xF):0xF); } }
@@ -7363,6 +7394,7 @@ static void d3dgl_present_impl(void){
             const char*home=getenv("HOME"); char p[512]; snprintf(p,sizeof p,"%s/reclaimer_rt_%03d_%dx%d.bmp",home?home:"/tmp",g_rtdumped,(int)rt->w,(int)rt->h);
             bmp_write_rgba(p,w,h,cap); char m[220]; int k=snprintf(m,sizeof m,"  [d3dgl] RT dump %d: %dx%d rgbsum=%lu fmt=%u -> %s\n",g_rtdumped,(int)rt->w,(int)rt->h,sum,rt->fmt,p); (void)!write(2,m,k); free(cap); }
             gl_bindfbo_any(GLE_FBO,0); } }
+    rtd_tick();          // stats control do=rtdump: the next frame's render targets
     hb_vis_tick();       // visible-only overlay: async depth readback (hitbox.c; with the GL helper through glh_rb_request)
     hb_capture_tick();   // F8 / stats page: frame + depth + camera capture (hitbox.c)
     g_d3dgl_frame_draws=0;
@@ -8598,7 +8630,7 @@ static void d3dobj_destroy(D3DObj*o,int gl){
     for(int i=0;i<g_ncbreg;i++) if(g_cbreg[i]==o){ g_cbreg[i]=g_cbreg[--g_ncbreg]; g_cbreg[g_ncbreg]=0; i--; }
     for(int i=0;i<g_nrtseen;i++) if(g_rtseen[i]==o){ g_rtseen[i]=g_rtseen[--g_nrtseen]; i--; }
     for(int i=0;i<8;i++) if(g_tbo_top[i].o==o) memset(&g_tbo_top[i],0,sizeof g_tbo_top[i]);
-    if(g_cam_latch==o) g_cam_latch=0; if(g_last_b12==o) g_last_b12=0; if(g_last_smallcb==o) g_last_smallcb=0; if(g_hb_dsv==o) g_hb_dsv=0;
+    rtd_forget(o); if(g_cam_latch==o) g_cam_latch=0; if(g_last_b12==o) g_last_b12=0; if(g_last_smallcb==o) g_last_smallcb=0; if(g_hb_dsv==o) g_hb_dsv=0;
     if(g_stg.gs==o) g_stg.gs=0; if(g_stg.hs==o) g_stg.hs=0; if(g_stg.ds==o) g_stg.ds=0;
     cs_texcache_forget(o);
     if(!isview && o->data && g_d3d_frame_bits==o->data) g_d3d_frame_bits=0;   // the no-GL frame capture's source

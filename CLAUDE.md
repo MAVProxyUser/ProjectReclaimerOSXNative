@@ -335,6 +335,10 @@ Test server: C:\ReclaimerTestServer\betrayal.toml (Team Slayer, friendly fire + 
 anti-cheat off -- with it on, a 2nd local client is refused). RCON `team` moves do NOT kill the player; a client killed
 with kill -9 lingers ~45 s server-side (rejoining sooner times out). Native popups do render text (the "Team Slayer /
 Kill the enemy team" intro toast is legible), so the boot screen's empty text is specific to that screen.
+Render-target dump (2026-10-18): stats POST /control?do=rtdump -- every target the next frame draws into (slot 0) read back as float
+in 8 MB strips, `[rtdump]` line with mean / max per channel, ~/reclaimer_rtd_<pid>_<n>_<i>_<w>x<h>_f<fmt>.bmp scaled by its own 99th
+percentile. Halo 3 renders the scene into 8-bit sRGB targets (fmt 29) with exposure applied in the material shaders; the
+120x68 -> 30x17 -> 1x1 (fmt 10) chain measures luminance for the next frame (1x1 = log average).
 Glitch hunting: `PELOAD_D3DGL_COVQ` (+`_COVQ_FRAC`, `_HUGEPROBE=<t>`) per-draw sample counts,
 `PELOAD_D3DGL_WHITEDUMP` (draw flight recorder on auto-exposure spikes), `_LUMLOG`, `_FSLOG`,
 `_FRAMESTAT`, `_CBSCAN`, `_PSCLAMP=<c>`, `_SKIPVSH=<hash,..>`, `_DUMPHASH=<hash,..>` (GLSL+DXBC to ~).
