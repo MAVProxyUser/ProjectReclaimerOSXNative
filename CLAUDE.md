@@ -116,6 +116,8 @@ BC textures (2026-10-18): uploaded COMPRESSED with the asset's own mip chain dow
 5.0-5.3 -> 3.0 GB on savannah_sandbox 5 min in, texture upload work on the GL thread 1.5 s -> 0.02 s. PELOAD_D3DGL_BCDECODE=1 =
 the old RGBA8 decode + glGenerateMipmap (also the fallback when a compressed upload fails); PELOAD_D3DGL_BCSRGB=1 stores BC1-3
 UNORM as sRGB like the decode path (made big white bloom blobs: UNORM data such as normal maps got decoded); PELOAD_AB=bcdec:<secs>.
+The chain stops at the texture's MipLevels (the CPU copy has room for a full chain, zero-filled); TYPELESS BC (70/73/76/97) stays on
+the decode path (an _SRGB view needs sRGB storage, a UNORM view can't skip it on compressed storage).
 The [d3dobj] audit's second line splits textures' CPU copies by class: halo3 makes no IMMUTABLE textures (2.2k DEFAULT ones,
 1.9 GB resident on savannah_sandbox, streamed by copies), so freeing copies after upload needs a redesign (shim/docs/PERF-PLAN.md).
 Correctness switches added 2026-10-16: `PELOAD_D3DGL_NOINTIN` (integer vertex attributes as floats --
