@@ -153,6 +153,8 @@ th .srt{display:inline-block;margin-left:2px;padding:0 2px;cursor:pointer;color:
  <span id="expl"></span>
  <label id="spdl" class="lbl" style="display:none" title="Everyone's movement speed in a game you host: the game variant's base player trait, which the host hands to every player">Speed
   <select id="spd"><option value="0">variant</option><option value="1">25%</option><option value="2">50%</option><option value="3">75%</option><option value="4">90%</option><option value="5">100%</option><option value="6">110%</option><option value="7">125%</option><option value="8">150%</option><option value="9">200%</option><option value="10">300%</option></select></label>
+ <label id="qul" class="lbl" style="display:none" title="The client's Settings > Advanced graphics > One player > Preset, changed through its own menu (it opens for a few seconds), saved by the client. Lower = shorter draw distance = fewer draw calls: about +20% fps at Hugegrass's widest views (PERF-PLAN.md)">Quality
+  <select id="qus"><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="ultra">Ultra</option></select> <span id="qum" class="note"></span></label>
  <label class="lbl" title="Between games, vote this card of the lobby's map ballot for you (the client's own vote, sent as the ballot opens; a joined client never shows the ballot screen here). PELOAD_AUTOVOTE_MAP at launch.">Map vote
   <select id="avm"><option value="off">off</option><option value="1">card 1</option><option value="2">card 2</option><option value="3">card 3</option><option value="none">none of the above</option></select></label>
  <label class="lbl" title="Answer votes other players call (kick a player, end the round or game, shuffle teams) with F5 = yes or F6 = no, half a second after the server announces one. PELOAD_AUTOVOTE at launch.">Called votes
@@ -753,6 +755,10 @@ function renderOverlay(){ const o=snap&&snap.overlay; if(!o) return; renderPanel
   { const sl=document.getElementById('spdl'), sel=document.getElementById('spd'), can=o.controls&&(o.host&&snap&&snap.variant || !o.host&&o.tp_forward&&('speed_idx' in o));
     sl.style.display=can?'':'none';
     if(can && document.activeElement!==sel && o.speed_idx!=null && o.speed_idx>=0) sel.value=String(o.speed_idx); }
+  { const ql=document.getElementById('qul'), qs=document.getElementById('qus'), qm=document.getElementById('qum'), q=snap&&snap.overlay&&snap.overlay.quality;
+    ql.style.display=(o.controls&&q)?'':'none';
+    if(q && document.activeElement!==qs && ['low','medium','high','ultra'].includes(q)) qs.value=q;
+    const pend=snap.overlay.quality_pending; qm.textContent=pend?('applying '+pend+'...'):(q&&!['low','medium','high','ultra'].includes(q)?'('+q+')':''); }
   { const av=snap&&snap.autovote; if(av){ for(const [id,v] of [['avm',av.map],['avc',av.calls]]){ const e=document.getElementById(id); e.disabled=!o.controls; if(document.activeElement!==e && v!=null) e.value=String(v); } } }
   document.getElementById('ovmsg').textContent=o.controls?'':'controls are off (PELOAD_STATS_READONLY)'; }
 document.getElementById('ov').addEventListener('click',async e=>{ const b=e.target.closest('button[data-a]'); if(!b||b.disabled) return;   // (the zone chips post their own)
@@ -858,6 +864,9 @@ async function pollFeed(){ if(feedBusy) return; feedBusy=true;
     cb.addEventListener('change',()=>{ fl.classList.toggle('h-'+cb.dataset.f,!cb.checked);
       try{ localStorage.setItem('feedHide',JSON.stringify([...document.querySelectorAll('#feed input[data-f]')].filter(c=>!c.checked).map(c=>c.dataset.f))); }catch(err){} }); } }
 pollFeed();
+document.getElementById('qus').addEventListener('change',async e=>{ const msg=document.getElementById('ovmsg');
+  try{ const j=await (await fetch('/control?do=quality&v='+e.target.value,{method:'POST',headers:{'X-Reclaimer-Control':'1'}})).json(); msg.textContent=j.ok?'':(j.error||'refused'); }
+  catch(err){ msg.textContent='not connected'; } });
 document.getElementById('spd').addEventListener('change',async e=>{ const msg=document.getElementById('ovmsg');
   try{ const j=await (await fetch('/control?do=speed&v='+e.target.value,{method:'POST',headers:{'X-Reclaimer-Control':'1'}})).json(); msg.textContent=j.ok?'':(j.error||'refused (host only)'); }
   catch(err){ msg.textContent='not connected'; } });

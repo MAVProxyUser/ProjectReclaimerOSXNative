@@ -150,9 +150,13 @@ static void st_av_tick(double now){   // stats thread, every snapshot (100 ms)
     char m[80]; int k=snprintf(m,sizeof m,"  [autovote] vote: pressing %s (try %d)\n",g_av_calls==1?"F5 (yes)":"F6 (no)",g_av_tries); (void)!write(2,m,k); }
 // One line of the client's log ("HH:MM:SS.mmm <text>"): the notices it also shows its player.
 // PELOAD_FEED_MATCH=<text>[,<text>...] adds lines containing any of those texts (kind "log").
+// Graphics quality (backlog 68; game-options.md "Graphics quality"): the client's one-view preset, from its own log line
+// "Graphics quality: one view <Preset>; split screen ..." (printed at start and on every Apply in its Settings menu)
+static char g_st_qual[24]; static double g_st_qual_t; static char g_st_qual_want[16];
 static void st_feed_line(const char*ln){
     if(!(ln[0]>='0'&&ln[0]<='9' && ln[2]==':' && ln[5]==':' && ln[8]=='.' && ln[12]==' ')) return;   // client log lines only
     const char*p=ln+13; size_t L=strlen(p);
+    if(!strncmp(p,"Graphics quality: one view ",27)){ const char*q=p+27; size_t k=0; while(q[k] && q[k]!=';' && k+1<sizeof g_st_qual){ g_st_qual[k]=(char)tolower((unsigned char)q[k]); k++; } g_st_qual[k]=0; g_st_qual_t=st_wall(); g_st_qual_want[0]=0; }
     if(!strncmp(p,"Community roster: ",18)){ const char*r=p+18; size_t rl=strlen(r); char nm[64];
         if(rl>18 && !strcmp(r+rl-18," joined the server")){ snprintf(nm,sizeof nm,"%.*s",(int)(rl-18),r); st_event("join",nm,0,0,-1,-1,0,"%s joined the server",nm); }
         else if(rl>16 && !strcmp(r+rl-16," left the server")){ snprintf(nm,sizeof nm,"%.*s",(int)(rl-16),r); st_event("leave",nm,0,0,-1,-1,0,"%s left the server",nm); }
@@ -779,6 +783,20 @@ static int st_control(const char*act,const char*qs){
         uint64_t gg=0; uint8_t mode=0; if(!g_st_tls || !hb_read(g_st_tls+0x48,&gg,8) || !gg || !hb_read(gg+0x10,&mode,1) || mode!=2) return 0;
         *(volatile uint8_t*)(uintptr_t)(gg+0x1608+0x134+0x10)=(uint8_t)sp;
         char m[80]; int k=snprintf(m,sizeof m,"  [stats] page: movement speed %s (everyone)\n",tl_speed[sp]); (void)!write(2,m,k); return 1; }
+    // do=quality&v=low|medium|high|ultra: the client's Settings > Advanced graphics > One player > Preset, changed through its
+    // own menu (the client then saves settings.json and applies it at once -- it never rereads the file by itself). Clicks
+    // in its 1280x720 UI: in a match Esc > SETTINGS (110,503), else the main menu's SETTINGS (110,587); ADVANCED GRAPHICS
+    // (185,208); the preset row's arrows (605,312 / 825,312), one step per preset; APPLY CHANGES (139,669); BACK (1046,66);
+    // in a match RESUME GAME (132,467). The page shows the result from the client's next "Graphics quality" line.
+    if(!strcmp(act,"quality")){ const char*v=strstr(qs,"v="); if(!v) return 0; static const char*const lv[4]={"low","medium","high","ultra"};
+        int to=-1, from=-1; for(int i=0;i<4;i++){ if(!strncmp(v+2,lv[i],strlen(lv[i]))) to=i; if(!strcmp(g_st_qual,lv[i])) from=i; }
+        if(to<0) return 0; if(from<0) from=2;   // unknown / custom: the client's default is High
+        if(from==to){ return 1; }
+        char st[400]; int n=snprintf(st,sizeof st,"%s185,208;s:1.8",g_gameplay_t0?"k:35;s:1.5;110,503;s:1.8;":"110,587;s:1.8;");
+        for(int i=0;i<abs(to-from) && n<300;i++) n+=snprintf(st+n,sizeof st-n,";%s;s:0.6",to>from?"825,312":"605,312");
+        n+=snprintf(st+n,sizeof st-n,";s:0.5;139,669;s:2.5;1046,66%s",g_gameplay_t0?";s:1.8;132,467":"");
+        snprintf(g_st_qual_want,sizeof g_st_qual_want,"%s",lv[to]); wi_steps_async(st);
+        char m[160]; int k=snprintf(m,sizeof m,"  [stats] page: graphics quality %s -> %s (through the client's Settings menu)\n",from>=0?lv[from]:"?",lv[to]); (void)!write(2,m,k); return 1; }
     if(!strcmp(act,"mic")){ const char*v=strstr(qs,"on="); if(!v || !wa_mic_mode() || wa_mic_mode()==3) return 0; g_mic_muted=atoi(v+3)?0:1;   // the microphone (wasapi.c)
         char m[64]; int k=snprintf(m,sizeof m,"  [stats] page: microphone %s\n",g_mic_muted?"muted":"live"); (void)!write(2,m,k); return 1; }
     if(!strcmp(act,"submit")){ const char*v=strstr(qs,"on="); if(!v) return 0; g_sub_want=atoi(v+3)?1:0; return 1; }   // GL submission thread (d3dsubmit.c)
@@ -1091,7 +1109,8 @@ static void st_snapshot(StBuf*s){
           tm[hb_team_mode()],tp?"true":"false",st_is_host()?"true":"false",getenv("PELOAD_TELEPORT_HOST")?"true":"false",st_controls_ok()?"true":"false",g_hb_text_px>0?g_hb_text_px:7,hb_spar_enabled()?"true":"false",g_spar_ok?(double)g_spar_err:-1.0,hb_spar_available()?"true":"false",hb_bounds_off()==1?"true":hb_bounds_off()==0?"false":"null",
           !wa_mic_mode()||wa_mic_mode()==3?"off":wa_mic_muted()?"muted":wa_mic_mode()==2?"tone":"live",g_mic_streams>0?"true":"false");
       { int si=-1; uint64_t gg=0; uint8_t b=0; if(st_is_host()){ if(g_st_tls && hb_read(g_st_tls+0x48,&gg,8) && gg && hb_read(gg+0x1608+0x134+0x10,&b,1)) si=b; } else si=g_st_fwd_speed;
-        sb_put(s,",\"speed_idx\":%d",si); }   // the movement speed index (tl_speed; 0 = the variant's own, 9 = 200%%), -1 unknown
+        sb_put(s,",\"speed_idx\":%d",si); }
+      sb_put(s,",\"quality\":"); sb_str(s,g_st_qual); sb_put(s,",\"quality_pending\":"); sb_str(s,g_st_qual_want);   // the movement speed index (tl_speed; 0 = the variant's own, 9 = 200%%), -1 unknown
       st_overlay_features(s);   // the overlay panel's per-feature settings (the keys above stay for older pages)
       sb_put(s,",\"spots\":["); int ns=0; for(int i=0;i<(int)(sizeof g_st_spots/sizeof g_st_spots[0]);i++) if(!strcmp(g_st_spots[i].map,m)){
           sb_put(s,"%s{\"id\":\"%s\",\"label\":\"%s\",\"x\":%.1f,\"y\":%.1f,\"z\":%.1f}",ns++?",":"",g_st_spots[i].id,g_st_spots[i].label,g_st_spots[i].x,g_st_spots[i].y,g_st_spots[i].z); }

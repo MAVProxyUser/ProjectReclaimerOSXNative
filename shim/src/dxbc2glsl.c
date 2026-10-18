@@ -451,6 +451,7 @@ char* dg_emit(const char*stage,const DgSig*isgn,int ni,const DgSig*osgn,int no,D
         else if(!strcmp(n,"imax")) line=dg_asg_i(&ctx,&o[0],({char*t=dg_pool();snprintf(t,256,"max(%s,%s)",SI(1),SI(2));t;}));
         // unsigned min / max (2026-10-18: were never translated -- "UNTRANSLATED: umax" in 484 shaders, among them the
         // deferred shadow pass a42824308404ea6d, whose umax of the shadow map's size left a stale register as the texel size)
+        else if((!strcmp(n,"umin")||!strcmp(n,"umax")) && getenv("PELOAD_D3DGL_NOUMAX")) line=0;   // A/B: the old untranslated umin/umax
         else if(!strcmp(n,"umin")) line=dg_asg_i(&ctx,&o[0],({char*t=dg_pool();snprintf(t,256,"ivec4(min(uvec4(%s),uvec4(%s)))",SI(1),SI(2));t;}));
         else if(!strcmp(n,"umax")) line=dg_asg_i(&ctx,&o[0],({char*t=dg_pool();snprintf(t,256,"ivec4(max(uvec4(%s),uvec4(%s)))",SI(1),SI(2));t;}));
         else if(!strcmp(n,"imad")) line=dg_asg_i(&ctx,&o[0],({char*t=dg_pool();snprintf(t,256,"%s*%s+%s",SI(1),SI(2),SI(3));t;}));

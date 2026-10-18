@@ -366,6 +366,9 @@ DED_STATS_HTTP). A client applying "Boundaries off" also patches its own predict
 player trait: the host gives it to every player (a friend on another Mac too).
 Graphics quality (game-options.md): settings.json quality.one + quality.detail{shadows,lighting,effects,draw_distance,
 level_of_detail,decals,water}, levels auto/off/low/medium/high/ultra; written on the menu's Apply changes, applied live.
+Quality control (stats do=quality&v=low|medium|high|ultra, page "Quality"): stats.c clicks the client's Settings > Advanced graphics
+preset arrows + Apply (in a match: Esc 110,503 ... Resume 132,467; menu: 110,587) by the step count from the current preset, read
+from the client's log line "Graphics quality: one view X" (g_st_qual; snapshot overlay.quality / quality_pending).
 UI automation of a test client: PELOAD_STATS_UISTEPS=1 + POST do=uisteps&s=<steps> (1280x720 client coords) and a frame of the
 window from a 1.5 s clip (do=rec, then ffmpeg -ss 0.8 -frames:v 1) -- the menu is not in do=capture; never screenshot the desktop.
 Glitch hunting: `PELOAD_D3DGL_COVQ` (+`_COVQ_FRAC`, `_HUGEPROBE=<t>`) per-draw sample counts,
