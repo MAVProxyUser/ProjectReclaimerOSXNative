@@ -216,6 +216,8 @@ Options go in front of the command, e.g. `PELOAD_INVERT_PITCH=0 bash shim/play.s
 (`PELOAD_STATS_HTTP=<port>` for another port, `=0` off; `PELOAD_STATS_ADDR=<ip>` to listen on another address, e.g. to
 watch from another device). From top to bottom the page shows:
 
+*Screenshots: a live ~60-player public match, player names and chat anonymized by the page's demo mode (`?demo=1`).*
+
 - **In-game overlay** panel (the function keys of earlier versions are gone; `PELOAD_HB_FKEYS=1` brings them back): a
   row per feature -- Hitboxes (the players'), Vehicles (with chips for the two kinds of weak spots), Tracers, Player info,
   Items, Kill/safe zones (a chip per kind: kill zones, safe zones, soft-kill and push-back ceilings, slip surfaces). Each
@@ -229,6 +231,8 @@ watch from another device). From top to bottom the page shows:
   Every feature costs nothing while it is off; the depth copy for "visible only" is made only while a feature that is
   on uses it. The settings last until the game closes (`PELOAD_HB_TEAMS` / `PELOAD_HB_VISIBLE` / `PELOAD_HB_TEXT_PX`
   set every feature's start value).
+
+  ![In-game overlay panel: a row per feature with its own Show, Walls and Text settings](shim/docs/img/stats-overlay.png)
 - **Tools**: Teleport (only with `PELOAD_ALLOW_TELEPORT`), **Capture frame** (saves the frame,
   its depth buffer and the camera position to `~/reclaimer_cap_*` for reporting a rendering glitch at a spot; the overlay
   is not in it), **Mic** (live / muted), and in games you host a **Speed** menu: everyone's movement speed (the game
@@ -239,10 +243,14 @@ watch from another device). From top to bottom the page shows:
   while it runs. Clips go to `~/Movies/Reclaimer/<map>_<date-time>.mp4`; the list under the row downloads or plays
   them. Hardware encoding; nothing runs while you don't record. A bigger or full-screen window gives a sharper clip.
   Details: `shim/docs/recording.md`.
+
+  <img src="shim/docs/img/stats-record.png" width="520" alt="Record row with the list of recorded clips">
 - **Connected** -- everyone in the game's network session, also in the lobby before a match starts, in alphabetical
   order. Players who are talking light up green. The speaker beside each name mutes or unmutes their voice (a red cross
   = muted); **Mute all** / **Unmute all** do everyone. This is the client's own voice mute (the same list as its
   scoreboard Mute buttons): it only affects what you hear and lasts until the game closes.
+
+  ![Connected: everyone in the network session, talkers green, a mute button each](shim/docs/img/stats-connected.png)
 - **Event feed** and **Chat** side by side, newest first. Chat is every line the client's text chat shows (players'
   messages with TEAM / NEARBY marks, the server's [SERVER] lines and welcome message, its own notices such as "sending
   messages too quickly"), read from the client as each line arrives. The feed shows joins and leaves (the client's own roster
@@ -253,25 +261,43 @@ watch from another device). From top to bottom the page shows:
   your team, so all of them in team games but only your own in free-for-all and Infection. The others are estimates,
   marked ≈: the last player whose projectile ended inside the body within 1.5 s before it died, with the weapon in their
   hands, the vehicle or turret they sit in, or the grenade (a death with no such shot shows as "died").
+
+  <img src="shim/docs/img/stats-feed.png" width="49%" alt="Event feed: kills with weapon, estimated kills marked"> <img src="shim/docs/img/stats-chat.png" width="49%" alt="Chat: players' lines and the server's messages">
 - **Game rules** -- the running game's options (rounds, respawn, map, powerups, score and points) and every trait set
   with what it changes: everyone, after spawning, each powerup, and the mode's roles (leader, flag carrier, infected,
   last survivor, ...).
+
+  ![Game rules: the running game's options and trait sets](shim/docs/img/stats-rules.png)
 - **Players** -- living players first, then players waiting to respawn, then those who quit (still in the game's
   player list but gone from its network session); click a column title to sort (by team, or the whole list). Team, shield and health, weapon, kills, deaths, K/D, shots and accuracy, grenades, vehicle, speed and active
   traits (where they differ from the defaults, with powerup and respawn-trait countdowns). 🔊 marks a talker, 🔇 a
   muted player, "(you)" the local player (from Halo 3's own player mapping, so also right in third person and vehicles).
   Shots count every projectile (each shotgun pellet is one); a hit is a shot that ended inside another player's body
   bounds -- an estimate.
+
+  ![Players table sorted by kills, the selected player highlighted](shim/docs/img/stats-players.png)
 - **Death heatmap** -- where players died (blue = few, red = many) over a top-down picture of the map and a grey
   "where players walk" layer, with everyone's live position and the vehicles. Deaths for this match or all matches on
   that map (always collected, kept in `~/Library/Application Support/ReclaimerMac/heatmaps/`; the **heatmap** checkbox
   only shows or hides them). Click the map (or "full window") to fill the browser window; X or Esc closes it. The map pictures are made once from the game's own `.map`
   files (`bash shim/tools/maptop.sh`; `play.sh` runs it in the background when they are missing; needs python3 with
   numpy and Pillow).
+
+  <img src="shim/docs/img/stats-heatmap.png" width="400" alt="Death heatmap over the map picture, the selected player's deaths ringed">
 - **Player details** (click a player in the table) -- under the heatmap: a big Mute / Unmute button, **Teleport next to
   them** (when you host the game and started it with `PELOAD_ALLOW_TELEPORT=1`), camo, all weapons,
   grenades, vehicle and seat, deaths, current and longest life, distance, top speed, shots, hits, accuracy, active
   traits, facing and position; their deaths are ringed on the heatmap.
+
+  <img src="shim/docs/img/stats-player.png" width="400" alt="Player details">
+
+The **forensic archive** link at the top opens the archive of voice, chat and game events this client received
+(`shim/docs/forensics.md`). Add `?demo=1` to either page's address (`http://127.0.0.1:8765/?demo=1`,
+`/forensics?demo=1`) for screenshots: every player becomes "Player 1", "Player 2", ... (the same alias everywhere on the
+page, event texts and map labels included; players who share a name share its alias), ids are fake, players' chat lines
+are placeholders, the archive's folder is shown as the default one. Nothing else changes, and without it the pages are
+as before. `bash shim/tools/pageshot.sh` remakes these pictures from a running game (`shim/tools/pageshot.m`: an
+offscreen WKWebView that takes CSS-selected sections of a page as PNGs; `TEXT=<dir>` also keeps their text to check).
 
 Machine-readable endpoints:
 
@@ -310,18 +336,52 @@ player positions that jump up to ~2.5 units per update without a speed check (sh
 test player normally, then has the client step its own position forward, and records where the server puts the player.
 Output in `~/speedstep-demo-<date>/`: positions.csv, summary.txt (walking vs stepping speed) and speedstep-demo.mp4.
 
+### How it runs: the loader, the GL helper and your cores
+
+Two processes do the work:
+
+1. **The loader** (`shim/build/peload`, x86-64, runs under **Rosetta 2**). It loads the Reclaimer client (a Rust Windows
+   exe) and MCC's `halo3.dll`, implements the Windows APIs they call, and translates their Direct3D 11 rendering into
+   OpenGL calls. The game's own code is x86-64 machine code, so this process can only run translated: it cannot be
+   made native ARM.
+2. **The GL helper** (`shim/build/glhelper`, **native arm64**, on by default since 2026-10-17). The loader encodes every
+   OpenGL call into a 256 MB shared-memory ring; the helper replays them on its own OpenGL context, so Apple's driver
+   runs at native speed and in parallel with the game. It renders each frame into one of three shared IOSurfaces,
+   which the loader's present thread shows in the window. `PELOAD_GL_HELPER=0` = everything in one process (slower).
+
+What runs on your cores (an M4 Max has 10 performance + 4 efficiency cores):
+
+| Thread / process | What it does |
+|---|---|
+| halo3's **main thread** (translated) | the game loop: simulation, AI/physics, render preparation, ~14 MB game-state copies a few times a frame. **The limit in 80-100 player games** (99% busy) |
+| halo3's render thread (translated) | issues the Direct3D 11 calls the loader translates |
+| `shim-gl-submit` (loader) | takes the translated draw calls off the render thread; on automatically in games with 40+ players |
+| `shim-compute` × N (loader) | the game's GPU particle compute shaders, run on the CPU (Apple's OpenGL has no compute shaders): 64-lane SIMT interpreter; play.sh starts one per performance core minus two, 4..8 (8 on an M4 Max; `PELOAD_CS_WORKERS`) |
+| **GL helper** process (native) | Apple's OpenGL driver: every draw call |
+| `shim-present` (loader) | shows each frame, draws the overlay, the client's layered windows and clip recording |
+| `shim-copy` × 3 (loader, opt-in) | splits big copies across cores (`PELOAD_PAR_MEMCPY=3`); off by default because copy-on-write (below) measured faster |
+| `shim-stats-*`, `shim-forensic`, `shim-nav`, recorder | live stats snapshot every 100 ms, the forensic archive writer, the test walker, clip encoding (hardware) |
+| the client's own threads | network, voice (`mcc-voice` polls the push-to-talk key and keeps one core busy), Rust thread pools |
+
+What takes load off halo3's main thread (all default): the game-state copies are done **copy-on-write** (pages are
+remapped instead of copied; +4% in a 70-player match), big copies go to the host's native `memmove`, the game and the
+client are told the real CPU count (it used to be 1: the client's thread pools and halo3's locks now size and spin
+accordingly; +1.7%), and hot Windows calls (thread ids, environment lookups) are cached. Each was measured with an
+in-match A/B (`PELOAD_AB=...`), because scenes vary too much between runs to compare runs.
+
 ### Frame rate in big games
 
-Apple's OpenGL driver runs in a small native helper process (`shim/build/glhelper`, on by default since 2026-10-17)
-instead of translated under Rosetta inside the game process, so it runs at native speed and in parallel with the game.
-Measured on an M4 Max: Big Team Battle with 45-60 players (4,500-4,900 draw calls a frame) went from 13-25 fps to a median
-of 49 fps (p10 37) over a 25-minute game; alone on Guardian 122 -> 204 fps; map loads are faster too. Without it
-(`PELOAD_GL_HELPER=0 bash shim/play.sh`) each draw call costs about 6-9 µs in the loader plus the translated driver.
-In big games the rest of the time goes to the game itself (translated) and its particle simulation (`PELOAD_CS_WORKERS`,
-default: the performance cores minus two). The client's own
-**Settings → Graphics → Advanced graphics** cuts draw calls: **Shadows** (each shadow caster draws again into the
-shadow maps), Level of detail, Draw distance, Effects and Decals. The window title shows draws per frame next to the
-frame rate. A 60 Hz display caps what reaches the screen; the title shows the engine's own rate beside it.
+Measured on an M4 Max, 1920x1080 internal resolution:
+
+- Big Team Battle, 80 players: Valhalla median 63 fps (p10 39), Highground 50 (p10 28); in the heaviest fights 20-30.
+  Before the GL helper the same games ran 13-25 fps. Alone on Guardian: ~200 fps.
+- In the slowest stretches the game waits 0 ms for the GL helper: the limit is halo3's own main thread, translated by
+  Rosetta. Only less work for that thread helps there.
+
+The client's own **Settings → Graphics → Advanced graphics** cuts draw calls and render preparation: **Shadows** (each
+shadow caster draws again into the shadow maps), Level of detail, Draw distance, Effects and Decals. The window title shows
+draws per frame next to the frame rate. A 60 Hz display caps what reaches the screen; the title shows the engine's own
+rate beside it. Details and every measurement: `shim/docs/PERF-PLAN.md`.
 
 The window opens at the largest 16:9 size that fits your screen (`PELOAD_WIN_SIZE=1280x720` picks a size), can be
 resized, and can go full screen (green button or Ctrl-Cmd-F). Developer and diagnostic switches are documented in

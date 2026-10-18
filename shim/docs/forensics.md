@@ -3,7 +3,39 @@
 `shim/src/forensic.c` (included by peload.c right after stats.c) keeps an archive of what this client receives from the
 server it is connected to -- voice packets, chat lines, the game's event feed and who was in the session -- so abusive or
 cheating players can be documented afterwards. The viewer is `http://127.0.0.1:8765/forensics` (linked at the top of
-the stats page). Written 2026-10-18 (backlog 43); tested offline only (see "Testing" and "Not verified yet").
+the stats page). Written 2026-10-18 (backlog 43); tested offline ("Testing") and live in public Big Team Battle matches
+("Verified live").
+
+## What it looks like
+
+*Screenshots: a session archived by a test client in a live public Big Team Battle match (Capture the Flag on
+Valhalla, 17 speakers), player names, ids and chat anonymized by the page's demo mode (`?demo=1`).*
+
+The header and the **Recording** settings: what is being recorded into which session, this run's counters, the consent
+on record, the three switches (see "Consent" and "Settings and switches") and where the files are.
+
+![Recording header and settings](img/forensics-recording.png)
+
+The **sessions** (LIVE = being written) and the selected one: map, server, host and this client's peer ids, start and
+end, voice and event counts, the raw files to download, and every **speaker** with team colour, how often and how long
+they talked, and all their audio as one `.ogg`.
+
+![Session list and the selected session's summary and speakers](img/forensics-session.png)
+
+The **timeline**: chat, kills and other events as ticks, then a lane per speaker with a block per utterance (blue
+global, green team, orange proximity, striped = no audio kept); click a block to play it.
+
+![Timeline](img/forensics-timeline.png)
+
+**Everything, in order**: voice, chat, kills and events in one list with filters (player, channel, kinds); each voice
+row has play, its `.ogg` and its decoded packets.
+
+![Everything, in order](img/forensics-events.png)
+
+`/forensics?demo=1` shows every player as "Player 1", "Player 2", ... (numbered per session; the same alias everywhere
+on the page, event texts included), fake peer / sender ids, placeholder chat lines and the default archive folder, for
+screenshots; without it nothing changes. A speaker's `.ogg` download doesn't work in demo mode (its URL carries the
+real id). `bash shim/tools/pageshot.sh` remakes these pictures from a running game.
 
 ## What is and is not captured
 
@@ -30,9 +62,30 @@ the stats page). Written 2026-10-18 (backlog 43); tested offline only (see "Test
 
 Voice on a public server is transmitted to everyone in the channel it is sent on (global, team or proximity); once the
 client has joined, it is one of the recipients the packets are addressed to -- like a scanner tuned to talk groups, it
-keeps what it was sent and nothing else. Recording what a participant receives is allowed in one-party-consent places
-such as Ohio (Ohio Revised Code 2933.52); some places require every party's consent, and whether in-game voice counts as
-a private conversation there can vary (not legal advice). The user is in Ohio (2026-10-18), so:
+keeps what it was sent and nothing else. Where one-party consent applies, a participant may record what they receive;
+where every party must consent, voice audio should stay off (only who talked when is kept). Players can be anywhere, and
+a place that requires everyone's consent may apply its law to its own residents; whether in-game voice counts as a
+private conversation can vary. Not legal advice; laws change -- check the current statutes.
+
+Where one-party consent applies (as commonly cited, 2026):
+
+- **United States, one-party:** federal law (18 U.S.C. 2511(2)(d)), District of Columbia, Alabama, Alaska, Arizona,
+  Arkansas, Colorado, Georgia, Hawaii, Idaho, Indiana, Iowa, Kansas, Kentucky, Louisiana, Maine, Minnesota, Mississippi,
+  Missouri, Nebraska, New Jersey, New Mexico, New York, North Carolina, North Dakota, Ohio (Ohio Revised Code 2933.52),
+  Oklahoma, Rhode Island, South Carolina, South Dakota, Tennessee, Texas, Utah, Vermont (no statute), Virginia, West
+  Virginia, Wisconsin, Wyoming.
+- **United States, mixed:** Connecticut (one-party in person, all-party for calls), Michigan (participants may record
+  their own conversations), Nevada (one-party in person, all-party for calls), Oregon (one-party for calls, all-party in
+  person).
+- **United States, every party:** California, Delaware, Florida, Illinois, Maryland, Massachusetts, Montana, New
+  Hampshire, Pennsylvania, Washington.
+- **Elsewhere, commonly treated as one-party / a participant may record:** Canada, the United Kingdom, Ireland, New
+  Zealand, Israel, South Africa, Japan, the Netherlands, Denmark, Sweden, Norway, Finland, Italy, Spain, Brazil, India.
+  Australia differs by state (Victoria, Queensland and the Northern Territory one-party; the others stricter).
+- **Stricter** (recording a private conversation without everyone's consent is an offence): e.g. Germany, France,
+  Switzerland, Austria.
+
+The user is in a one-party place (2026-10-18), so:
 
 - with no `settings.json` yet, one-party consent and voice audio start ON (the time is recorded as the confirmation);
   unticking "One-party consent: I'm a participant in the channels sent to this client and choose to record them" on the
@@ -230,12 +283,23 @@ session refreshes every 5 s.
 
 `forensic-oggtest serve <in.ogg> <dir> <port>` serves that test archive on 127.0.0.1:<port> to look at the page.
 
-## Not verified yet (needs a live game)
+## Verified live (2026-10-18, public Big Team Battle matches)
 
-- The hook's 3rd / 4th arguments (payload, length) in a running client: the entry hook passes rcx/rdx/r8/r9 unchanged
-  and voice_recv's prologue moves r8 / r9 to rdi / r14 (the signature), but no live packet has been archived yet.
-- Real voice packets: frame size, whether the sequence steps by 1, how often channel-0 packets come and from whom.
-- Session boundaries on a public server across map changes, and the host peer id staying the same within one server.
-- The chat sender id (Line +0x30) on received lines.
+- The hook receives payload and length: 9,000+ voice packets per session archived, every audio packet decodes.
+- The payload: `[0]` channel, `[1..9]` sequence (u64 LE, steps by exactly 1 per sender, no gaps), `[9]` a frame-count
+  byte (1 in all 22,091 packets of one session), then one Opus packet (SILK wideband, 20 ms, mono, ~20 kbit/s). The first
+  viewer decoded from the count byte (garbled playback); fixed in the readers.
+- Control packets (channel 0) come from one id every ~100 ms (the voice server, GUESSED).
+- Session boundaries: one session per server (host peer id) across map changes (the first version also split on the
+  map, so the menu's background scenes each opened a session).
+- What arrives: global voice from both teams; team-channel voice only from this client's own team (zero packets from the
+  other team in two sessions, which did talk on global); no proximity packets seen. So the other team's team voice is
+  dropped upstream (server or sender), not by this client -- the archive records before the client's own filtering.
+
+## Not verified yet
+
+- Who fans voice out (the sender's client or a server relay): the client reads its UDP through WSARecvMsg;
+  `PELOAD_VOICE_SRCSTAT=1` tallies the sources of `MC?1`/`LC?1` datagrams there (aggregate only) -- next live run.
+- The chat sender id (Line +0x30) on received lines (the viewer shows ids next to chat senders; not cross-checked).
 - Playback of the page's Ogg files in Safari (the test browser played them; Safari's Ogg Opus support depends on its
   version -- the page says so and offers downloads when `canPlayType` says no).

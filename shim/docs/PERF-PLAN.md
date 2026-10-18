@@ -64,7 +64,7 @@ CRT's malloc), memcpy 423k, towlower 151k (3.8 M/s while loading), GetAsyncKeySt
 share is mostly halo3's per-frame ~14 MB game-state copies (~5 a frame). Every Win32 call costs the ms_abi->SysV
 transition under Rosetta; the allocation churn costs malloc + free + clearing.
 
-Levers for that thread (2026-10-18, backlog 41; each opt-in until a BTB A/B says so):
+Levers for that thread (2026-10-18, backlog 41; each was opt-in until a BTB A/B said so):
 - **Copy-on-write** (`PELOAD_MEMCPY_COW`, section below): ON by default again since 2026-10-18 00:35 (off 2026-10-17 21:15
   .. then as a map-change corruption suspect): BTB in-match A/B (`PELOAD_AB=cow`) +4% over 16 phase pairs, clean across a
   map change, and a 40-minute BTB soak with object freeing + COW (3 maps, 21.8 GB freed) showed no corruption.
@@ -72,9 +72,10 @@ Levers for that thread (2026-10-18, backlog 41; each opt-in until a BTB A/B says
   copy is cut into 1 MB chunks that the caller and the `shim-copy` threads copy together (one copy at a time). Rosetta
   microbenchmark 5 x 14 MB: 4.0 ms on one thread, 2.0 on four. `PELOAD_PAR_CHECK=1` compares every copy (6,145 copies,
   0 mismatches); `PELOAD_AB=parcopy:<secs>` (3 helpers) is the in-game A/B. BTB in-match A/B (2026-10-18): with COW on (the default) the game-state copies go COW and parallel copies change nothing (0.98 over 16 pairs); COW vs parallel copies (`PELOAD_PAR_MEMCPY=3 PELOAD_AB=cow`, 71 players, Avalanche): COW 7.7% faster over 21 pairs -- remapping the pages once beats copying them faster. Stays opt-in, for copies COW can't take.
-- **Real CPU count** (`PELOAD_SYSINFO=real`, `PELOAD_NCPU`): GetSystemInfo still says ONE processor (and allocation
-  granularity 0) by default; the client sizes ~10 thread pools from the count and halo3's locks (halo3+0x620170 ...) spin
-  before blocking only when it is > 1. Not measured yet.
+- **Real CPU count** (default since 2026-10-18; `PELOAD_SYSINFO=old` = the old values, `PELOAD_NCPU` overrides): GetSystemInfo
+  used to say ONE processor (and allocation granularity 0); the client sizes ~10 thread pools from the count and halo3's
+  locks (halo3+0x620170 ...) spin before blocking only when it is > 1. In-match A/B of halo3's own count
+  (`PELOAD_AB=ncpu`, pokes halo3+0xa3a48c): +1.7%. The client's pools keep the count they got at startup.
 - Done: GetCurrentThreadId returns a per-thread cached id; every `PELOAD_*` getenv is cached (`PELOAD_GETENV_STATS=1` counts
   the remaining real lookups: negligible). `PELOAD_HEAP_STATS=<thread>` gives a HeapAlloc size histogram for a
   per-thread small-block cache in HeapAlloc/HeapFree (an idea, not built).

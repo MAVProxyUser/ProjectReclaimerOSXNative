@@ -71,7 +71,13 @@ tr.hl{background:#2a2a14}
     <label id="l_voice"><input type="checkbox" id="s_voice"> Voice audio (the Opus packets, as received)</label>
   </div>
   <div class="note">Archived: every voice packet the server sends this client &mdash; every channel you can hear (global, team, proximity), muted players included &mdash; with who said it (name, team, ids), plus every chat line, join / leave, kill and server message. Voice from channels this client doesn't receive (e.g. the other team's team chat) never reaches this computer. <span id="dirn"></span></div>
-  <div class="note warn">Voice on a public server is transmitted to everyone in the channel it is sent on (global, team or proximity); once you have joined, your client is one of the recipients it is addressed to &mdash; like a scanner tuned to talk groups, it keeps what it was sent. Recording what you receive as a participant is allowed in one-party-consent places such as Ohio, so the box is ticked by default. Some places require every party's consent, and whether in-game voice counts as a private conversation there can vary: untick it there, and only who talked when is kept, no audio.</div>
+  <div class="note warn">Voice on a public server is transmitted to everyone in the channel it is sent on (global, team or proximity); once you have joined, your client is one of the recipients it is addressed to &mdash; like a scanner tuned to talk groups, it keeps what it was sent. Where one-party consent applies, a participant may record what they receive, so the box is ticked by default. Where every party must consent, untick it: only who talked when is kept, no audio. Players can be anywhere, and a place that requires everyone's consent may apply its law to its own residents. Not legal advice; laws change.
+   <details style="margin-top:4px"><summary style="cursor:pointer">Where one-party consent applies</summary>
+   <div style="margin-top:4px"><b>United States</b> &mdash; one-party: federal law (18 U.S.C. &sect; 2511(2)(d)), District of Columbia, Alabama, Alaska, Arizona, Arkansas, Colorado, Georgia, Hawaii, Idaho, Indiana, Iowa, Kansas, Kentucky, Louisiana, Maine, Minnesota, Mississippi, Missouri, Nebraska, New Jersey, New Mexico, New York, North Carolina, North Dakota, Ohio, Oklahoma, Rhode Island, South Carolina, South Dakota, Tennessee, Texas, Utah, Vermont (no statute), Virginia, West Virginia, Wisconsin, Wyoming.
+   Mixed: Connecticut (one-party in person, all-party for calls), Michigan (participants may record their own conversations), Nevada (one-party in person, all-party for calls), Oregon (one-party for calls, all-party in person).
+   Every party: California, Delaware, Florida, Illinois, Maryland, Massachusetts, Montana, New Hampshire, Pennsylvania, Washington.</div>
+   <div style="margin-top:4px"><b>Elsewhere</b> &mdash; commonly treated as one-party / a participant may record: Canada, the United Kingdom, Ireland, New Zealand, Israel, South Africa, Japan, the Netherlands, Denmark, Sweden, Norway, Finland, Italy, Spain, Brazil, India. Australia differs by state (Victoria, Queensland and the Northern Territory one-party; others stricter). Stricter (recording a private conversation without everyone's consent is an offence): e.g. Germany, France, Switzerland, Austria.</div>
+   </details></div>
   <div class="note" id="smsg"></div>
 </div>
 
@@ -96,6 +102,44 @@ tr.hl{background:#2a2a14}
 
 <script>
 'use strict';
+// ==== demo mode: ?demo=1 only (anonymized screenshots for the docs; shim/tools/pageshot.sh). Without it nothing here runs. ====
+// It rewrites the JSON this page fetches before anything renders: every player name becomes "Player N" (numbered per
+// session in order of first appearance, the same alias everywhere, inside event texts too), peer / sender ids become
+// stable fake hex, players' chat lines become neutral placeholders, and the archive folder is shown as the default one
+// (the real path names the Mac user). Server lines stay (their names aliased). Per-speaker .ogg downloads don't work in
+// demo mode (their URL carries the id).
+if(new URLSearchParams(location.search).get('demo')==='1'){
+  const names=new Map(), ids=new Map(); let re=null;
+  const PH=['gg','nice shot','on me','push left','need a ride?','flag is out','sniper on top','watch the banshee','one more?',
+   'rockets are up','behind you','thanks for the save','hold the base','good game all','anyone on mic?','grab the hog'];
+  const PAT=[/^Welcome to .+?, (.+?)! /,/^(.+?) (?:joined|left) (?:the server|your team)$/,/^(.+?) (?:is on an? .+? \(\d+ in a row\)|got an? .+? \(\d+ kills\))!?$/,/^(.+?) called a vote to (?:kick (.+?)\. )?/,/the vote to kick (.+?)\.$/];
+  const nm=n=>{ if(typeof n!=='string'||!n) return n; let a=names.get(n); if(!a){ a='Player '+(names.size+1); names.set(n,a); re=null; } return a; };
+  const id=v=>{ if(v==null||v==='') return v; const k=String(v); let f=ids.get(k);
+    if(!f){ let x=Math.imul(ids.size+1,0x9E3779B1)>>>0, s=''; while(s.length<k.length){ x=Math.imul(x^(x>>>15),0x2C1B3C6D)>>>0; s+=x.toString(16).padStart(8,'0'); } f=s.slice(0,k.length); ids.set(k,f); }
+    return f; };
+  const tx=t=>{ if(typeof t!=='string'||!names.size) return t;   // (a name without a letter, like "30", stays: it reads as a number)
+    if(!re) re=new RegExp('(?<![\\p{L}\\p{N}_])(?:'+[...names.keys()].filter(s=>/\p{L}/u.test(s)).sort((a,b)=>b.length-a.length).map(s=>s.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')).join('|')+')(?![\\p{L}\\p{N}_])','gu');
+    return t.replace(re,m=>names.get(m)); };
+  // kill / death / join / leave lines start with their names: only those are swapped (a name that is also a word, such
+  // as a vehicle's, stays a word in the rest of the line); other lines get every known name swapped
+  const pre=(t,f,to)=>typeof t==='string'&&t.startsWith(f)?to+t.slice(f.length):null;
+  const named=e=>e.kind==='kill'&&e.a&&e.b?pre(e.text,e.a+' '+e.verb+' '+e.b,nm(e.a)+' '+e.verb+' '+nm(e.b)):e.kind==='death'&&e.b?pre(e.text,e.b,nm(e.b))
+    :(e.kind==='join'||e.kind==='leave')&&e.a?pre(e.text,e.a,nm(e.a)):null;
+  const index=j=>{ const ps=[...(j.people||[]),...(j.speakers||[])], all=[...ps,...(j.utterances||[])], evs=j.events||[]; names.clear(); re=null;
+    for(const p of all){ nm(p.name); (p.names||[]).forEach(nm); }   // every name first (roster order), then the texts
+    for(const e of evs){ if(e.kind!=='game'){ nm(e.a); nm(e.b); } for(const p of PAT){ const m=String(e.text||'').match(p); if(m) m.slice(1).forEach(nm); } }
+    for(const p of all){ p.name=nm(p.name); if(p.names) p.names=p.names.map(nm); p.id=id(p.id); }
+    for(const c of j.control||[]) c.id=id(c.id);
+    for(const e of evs){ const t=named(e); if(e.kind!=='game'){ e.a=nm(e.a); e.b=nm(e.b); } if(e.sender_id) e.sender_id=id(e.sender_id);
+      e.text=e.kind==='chat'&&!/^(server|notice)$/.test(e.how||e.channel||'')?PH[(Math.imul((e.seq|0)+11,0x9E3779B1)>>>0)%PH.length]:t??tx(e.text); }
+    const s=j.session||{}; s.host_id=id(s.host_id); s.self_id=id(s.self_id); return j; };
+  const T=[[/^\/forensics\/sessions\.json$/,j=>(j.dir='~/Library/Application Support/ReclaimerMac/forensics',j)],[/^\/forensics\/[^/]+\/index\.json$/,index],
+   [/^\/forensics\/[^/]+\/utt\/\d+\.json$/,j=>((j.packets||[]).forEach(q=>{ q.id=id(q.id); }),j)]];
+  const of=window.fetch.bind(window);
+  window.fetch=async(u,o)=>{ const r=await of(u,o), p=new URL(String(u),location.href).pathname, f=(T.find(([rx])=>rx.test(p))||[])[1]; if(!f||!r.ok) return r;
+    return new Response(JSON.stringify(f(await r.json())),{status:r.status,headers:{'Content-Type':'application/json'}}); };
+}
+// ==== end of demo mode ====
 const $=s=>document.querySelector(s);
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const TEAM={red:'#e05050',blue:'#5a8cf0',green:'#40c060',orange:'#f09030',purple:'#a060e0',gold:'#e0c040',brown:'#a07050',pink:'#f080c0',none:'#777'};
@@ -129,7 +173,7 @@ function renderSettings(){
 }
 $('#s_archive').onchange=async e=>{ if(!await ctl('archive='+(e.target.checked?1:0))) $('#smsg').textContent='refused (are the stats page controls off? PELOAD_STATS_READONLY)'; loadSessions(); };
 $('#s_consent').onchange=async e=>{
-  if(e.target.checked && !confirm('One-party consent\n\nYou confirm that you are a participant in the voice channels this client receives (it joined the server and the voice is sent to it), and that where you are a participant may record what they receive (e.g. Ohio: one-party consent).\n\nThe time of this confirmation is stored with the archive.')){ e.target.checked=false; return; }
+  if(e.target.checked && !confirm('One-party consent\n\nYou confirm that you are a participant in the voice channels this client receives (it joined the server and the voice is sent to it), and that where you are a participant may record what they receive (one-party consent: most US states, e.g. Ohio, Texas, New York; Canada, the UK and others -- see the list on the page).\n\nThe time of this confirmation is stored with the archive.')){ e.target.checked=false; return; }
   if(!await ctl('consent='+(e.target.checked?1:0))) $('#smsg').textContent='refused'; else $('#smsg').textContent=e.target.checked?'Consent recorded. Turn on "Voice audio" to keep the audio.':'Consent withdrawn: voice audio is off.';
   loadSessions(); };
 $('#s_voice').onchange=async e=>{ if(!await ctl('voice='+(e.target.checked?1:0))) $('#smsg').textContent='refused: voice audio needs the one-party-consent box'; loadSessions(); };

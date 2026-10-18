@@ -260,7 +260,12 @@ GL helper (0 ms waited in the slowest stretches). BTB: Valhalla median 63 fps / 
 BTB A/B: COW (default) beats it by 7.7%, so it stays opt-in.
 GetSystemInfo said ONE processor + allocation granularity 0 (the client sizes ~10 thread pools from the count; halo3's
 locks at halo3+0x620170.. spin before blocking only when it is > 1 and wake at most that many waiters):
-PELOAD_SYSINFO=real reports Windows' values (hw.logicalcpu or PELOAD_NCPU). Both opt-in until a big-game A/B.
+Since 2026-10-18 it reports Windows' values by default (hw.logicalcpu or PELOAD_NCPU; in-match A/B of halo3's count via
+PELOAD_AB=ncpu: +1.7%); PELOAD_SYSINFO=old = 1 processor / granularity 0.
+Processes and cores (README "How it runs"): the LOADER (x86-64 under Rosetta: client exe + halo3.dll, Win32, D3D11->GL encode,
+audio, input; can never be native, the game code is x86-64) and the GL HELPER (native arm64, Apple's GL driver, 256 MB command
+ring + 3 IOSurfaces). Loader threads: halo3 main (the limit), halo3 render, shim-gl-submit (40+ players), shim-compute x N
+(play.sh: P-cores minus 2, 4..8; code default 4), shim-present, shim-copy (opt-in), shim-stats-*, shim-forensic, shim-nav.
 Diagnostics: PELOAD_GETENV_STATS (real environment lookups per site: every PELOAD_* is cached by peload_cgetenv, the rest is
 ~20-260/s), PELOAD_HEAP_STATS=<thread> (HeapAlloc sizes), PELOAD_CALLCOUNT=guest-0x18000a120 (Win32 calls of the main thread:
 ~3.5 M/s in a BTB: GetCurrentThreadId (now cached per thread), GetProcessHeap, memset, HeapAlloc/Free, memcpy).

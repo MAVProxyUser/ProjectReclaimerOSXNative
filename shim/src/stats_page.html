@@ -190,6 +190,42 @@ th .srt{display:inline-block;margin-left:2px;padding:0 2px;cursor:pointer;color:
  </div>
 </div>
 <script>
+// ==== demo mode: ?demo=1 only (anonymized screenshots for the docs; shim/tools/pageshot.sh). Without it nothing here runs. ====
+// It rewrites the JSON this page reads (fetch + the /events stream) before anything renders: every player name becomes
+// "Player N" (in order of first appearance, the same alias everywhere: tables, feeds, event texts, the map's labels), voice
+// ids and object handles become stable fake hex, players' chat lines become neutral placeholders; server lines stay
+// (their names aliased).
+if(new URLSearchParams(location.search).get('demo')==='1'){
+  const names=new Map(), ids=new Map(); let re=null;
+  const PH=['gg','nice shot','on me','push left','need a ride?','flag is out','sniper on top','watch the banshee','one more?',
+   'rockets are up','behind you','thanks for the save','hold the base','good game all','anyone on mic?','grab the hog'];
+  const PAT=[/^Welcome to .+?, (.+?)! /,/^(.+?) (?:joined|left) (?:the server|your team)$/,/^(.+?) (?:is on an? .+? \(\d+ in a row\)|got an? .+? \(\d+ kills\))!?$/,/^(.+?) called a vote to (?:kick (.+?)\. )?/,/the vote to kick (.+?)\.$/];
+  const nm=n=>{ if(typeof n!=='string'||!n) return n; let a=names.get(n); if(!a){ a='Player '+(names.size+1); names.set(n,a); re=null; } return a; };
+  const id=v=>{ if(v==null||v==='') return v; const k=String(v); let f=ids.get(k);
+    if(!f){ let x=Math.imul(ids.size+1,0x9E3779B1)>>>0, s=''; while(s.length<k.length){ x=Math.imul(x^(x>>>15),0x2C1B3C6D)>>>0; s+=x.toString(16).padStart(8,'0'); } f=s.slice(0,k.length); ids.set(k,f); }
+    return f; };
+  const tx=t=>{ if(typeof t!=='string'||!names.size) return t;   // (a name without a letter, like "30", stays: it reads as a number)
+    if(!re) re=new RegExp('(?<![\\p{L}\\p{N}_])(?:'+[...names.keys()].filter(s=>/\p{L}/u.test(s)).sort((a,b)=>b.length-a.length).map(s=>s.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')).join('|')+')(?![\\p{L}\\p{N}_])','gu');
+    return t.replace(re,m=>names.get(m)); };
+  // kill / death / join / leave lines start with their names: only those are swapped (a name that is also a word, such
+  // as a vehicle's, stays a word in the rest of the line); other lines get every known name swapped
+  const pre=(t,f,to)=>typeof t==='string'&&t.startsWith(f)?to+t.slice(f.length):null;
+  const named=e=>e.kind==='kill'&&e.a&&e.b?pre(e.text,e.a+' '+e.verb+' '+e.b,nm(e.a)+' '+e.verb+' '+nm(e.b)):e.kind==='death'&&e.b?pre(e.text,e.b,nm(e.b))
+    :(e.kind==='join'||e.kind==='leave')&&e.a?pre(e.text,e.a,nm(e.a)):null;
+  const events=evs=>{ for(const e of evs){ if(e.kind!=='game'){ nm(e.a); nm(e.b); } for(const p of PAT){ const m=String(e.text||'').match(p); if(m) m.slice(1).forEach(nm); } }   // the batch's names first
+    for(const e of evs){ const t=named(e); if(e.kind!=='game'){ e.a=nm(e.a); e.b=nm(e.b); }
+      e.text=e.kind==='chat'&&!/^(server|notice)$/.test(e.how||'')?PH[(Math.imul((e.seq|0)+11,0x9E3779B1)>>>0)%PH.length]:t??tx(e.text); } };
+  const snapT=s=>{ for(const p of (s.players||[]).concat(s.session||[])){ p.name=nm(p.name); p.voice=id(p.voice); if(p.handle) p.handle=id(p.handle); } return s; };
+  const T={'/feed.json':j=>(events(j.events||[]),j),'/heat.json':j=>((j.deaths||[]).forEach(d=>{ d[4]=names.get(d[4])||''; }),j)};
+  const of=window.fetch.bind(window);
+  let seeded=null;   // the page reads the whole feed before the first snapshot: the players' names first, for the feed's free-text lines
+  const seed=()=>seeded||(seeded=of('/stats.json').then(r=>r.json()).then(snapT).catch(()=>{}));
+  window.fetch=async(u,o)=>{ const f=T[new URL(String(u),location.href).pathname]; if(f) await seed(); const r=await of(u,o); if(!f||!r.ok) return r;
+    return new Response(JSON.stringify(f(await r.json())),{status:r.status,headers:{'Content-Type':'application/json'}}); };
+  const OES=window.EventSource;
+  window.EventSource=class extends OES{ set onmessage(f){ super.onmessage=f&&(m=>f({data:JSON.stringify(snapT(JSON.parse(m.data)))})); } get onmessage(){ return super.onmessage; } };
+}
+// ==== end of demo mode ====
 const C={red:'#e04040',blue:'#4070f0',green:'#40c060',orange:'#f09030',purple:'#a050e0',gold:'#e0c040',brown:'#9a6a40',pink:'#f080c0',none:'#888'};
 const TN=['red','blue','green','orange','purple','gold','brown','pink'];
 const E=s=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
