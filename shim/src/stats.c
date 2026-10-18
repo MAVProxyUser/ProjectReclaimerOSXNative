@@ -30,6 +30,9 @@ static void sb_f3(StBuf*s,const float*v){ sb_put(s,"[%.2f,%.2f,%.2f]",v[0],v[1],
 // kind: join leave kill death vote server game chat. a/b: the players (killer, victim; chat: sender), how: the weapon
 // (chat: the channel). flags: 1 = estimated, 2 = we sent it (chat), 4 = a betrayal.
 typedef struct { uint32_t seq; int flags, ta, tb; double t; char kind[12], a[64], b[64], how[64], verb[24], text[320]; } StEvt;
+// forensic.c (included after this file; shim/docs/forensics.md) archives every event, voice packet and roster change.
+// g_fx_on is the hooks' one check while it is off; t_st_chat_id hands it a chat line's sender peer id (st_on_chat).
+static volatile int g_fx_on; static void fx_event(const StEvt*e); static __thread uint64_t t_st_chat_id;
 static char g_st_curmap[64];   // the map the last snapshot saw
 enum { ST_NEV=1024 };
 static StEvt g_ev[ST_NEV]; static uint32_t g_ev_seq; static pthread_mutex_t g_ev_mx=PTHREAD_MUTEX_INITIALIZER;
@@ -40,6 +43,7 @@ static void st_eventv(double at,const char*kind,const char*a,const char*b,const 
     snprintf(e.kind,sizeof e.kind,"%s",kind); snprintf(e.a,sizeof e.a,"%s",a?a:""); snprintf(e.b,sizeof e.b,"%s",b?b:""); snprintf(e.how,sizeof e.how,"%s",how?how:"");
     vsnprintf(e.text,sizeof e.text,fmt,ap);
     pthread_mutex_lock(&g_ev_mx); e.seq=++g_ev_seq; g_ev[e.seq%ST_NEV]=e; pthread_mutex_unlock(&g_ev_mx);
+    if(g_fx_on) fx_event(&e);   // the forensic archive (forensic.c)
     static int lg=-1; if(lg<0) lg=getenv("PELOAD_FEED_LOG")?1:0;   // PELOAD_FEED_LOG=1: also print each event
     if(lg){ char m[440]; int k=snprintf(m,sizeof m,"  [feed] %s: %s\n",e.kind,e.text); if(k>(int)sizeof m-1) k=(int)sizeof m-1; (void)!write(2,m,(size_t)k); } }
 static void st_event(const char*kind,const char*a,const char*b,const char*how,int ta,int tb,int flags,const char*fmt,...){
@@ -232,10 +236,14 @@ static int entry_hook(uint8_t*site,const uint8_t*pro,int len,void*fn);   // pelo
 static int entry_hook_tail(uint8_t*site,const uint8_t*pro,int len,void*fn,const uint8_t*tail,int tail_len,int ret_r9);
 // Who is talking: an entry hook on the client's voice packet handler (voice_recv(state, sender peer id, payload, len);
 // exe+0x684080 in 0.9.18, by signature; its first 19 bytes are position-independent) stamps the sender's last packet.
+// entry_hook passes rcx/rdx/r8/r9 untouched; the payload (guest memory) is [0] channel, [1..9] sequence, [9..] Opus.
+static void fx_voice(uint64_t sender,const uint8_t*payload,uint64_t len); static int fx_control(const char*qs);   // forensic.c
+static void fx_http(int fd,const char*path,const char*qs,const char*req); static void fx_roster_tick(const char*map,const StSess*ss,int nss,const StPlayer*pl,int np);
 static pthread_mutex_t g_talk_mx=PTHREAD_MUTEX_INITIALIZER; static struct { uint64_t id; double t; } g_talk[128];
-static void __attribute__((ms_abi)) st_on_voice(void*state,uint64_t sender){ (void)state; double now=mono_s(); int o=0;
+static void __attribute__((ms_abi)) st_on_voice(void*state,uint64_t sender,const uint8_t*payload,uint64_t len){ (void)state; double now=mono_s(); int o=0;
     pthread_mutex_lock(&g_talk_mx); for(int i=0;i<128;i++){ if(g_talk[i].id==sender){ o=i; break; } if(g_talk[i].t<g_talk[o].t) o=i; }
-    g_talk[o].id=sender; g_talk[o].t=now; pthread_mutex_unlock(&g_talk_mx); }
+    g_talk[o].id=sender; g_talk[o].t=now; pthread_mutex_unlock(&g_talk_mx);
+    if(g_fx_on) fx_voice(sender,payload,len); }   // the forensic archive: every packet, before the client's mute / channel checks
 static double st_talk_age(uint64_t id){ double t=0; pthread_mutex_lock(&g_talk_mx); for(int i=0;i<128;i++) if(g_talk[i].id==id){ t=g_talk[i].t; break; } pthread_mutex_unlock(&g_talk_mx);
     return t>0?mono_s()-t:1e9; }
 // Chat (shim/docs/halo3-event-feed.md section 1): every line the client's text chat shows -- players' messages,
@@ -254,7 +262,8 @@ static void __attribute__((ms_abi)) st_on_chat(void*state,const uint8_t*line,uin
     char a[64], txt[600]; int fl=(mine&0xFF)?2:0;   // flags 2: we sent it
     if(q0>=0){ uint8_t ch=0; hb_read((uint64_t)(uintptr_t)line+0x3c,&ch,1);
         if(!st_rstr((uint64_t)(uintptr_t)line,a,sizeof a) || !st_rstr((uint64_t)(uintptr_t)line+0x18,txt,sizeof txt)) return;
-        st_event("chat",a,0,ch==1?"team":ch==2?"nearby":"",-1,-1,fl,"%s",txt); }
+        if(g_fx_on) hb_read((uint64_t)(uintptr_t)line+0x30,&t_st_chat_id,8);   // the sender's peer id, for the forensic archive
+        st_event("chat",a,0,ch==1?"team":ch==2?"nearby":"",-1,-1,fl,"%s",txt); t_st_chat_id=0; }
     else if((uint64_t)q0==0x8000000000000001ull){ if(st_rstr((uint64_t)(uintptr_t)line+8,txt,sizeof txt)) st_event("chat",0,0,"server",-1,-1,fl,"%s",txt); }
     else if((uint64_t)q0==0x8000000000000000ull){ uint8_t k=0xFF; hb_read((uint64_t)(uintptr_t)line+8,&k,1);   // the client's own wording
         static const char*const nt[5]={"You are sending messages too quickly.","Team chat is only available in team games.",
@@ -500,6 +509,7 @@ static int st_control(const char*act,const char*qs){
         char m[64]; int k=snprintf(m,sizeof m,"  [stats] page: microphone %s\n",g_mic_muted?"muted":"live"); (void)!write(2,m,k); return 1; }
     if(!strcmp(act,"submit")){ const char*v=strstr(qs,"on="); if(!v) return 0; g_sub_want=atoi(v+3)?1:0; return 1; }   // GL submission thread (d3dsubmit.c)
     if(!strcmp(act,"capture")){ __atomic_store_n(&g_hb_cap_req,1,__ATOMIC_RELEASE); (void)!write(2,"  [capture] page: capturing the next frame\n",43); return 1; }
+    if(!strcmp(act,"forensic")) return fx_control(qs);   // archive / voice audio / one-party consent (forensic.c)
     return 0; }
 // ---- the engine's own events (shim/docs/halo3-event-feed.md sections 2-3) -----------------------------------------
 // display_event (halo3+0x11b0ec, event* in rcx) runs once for every event the HUD shows -- local, received from the
@@ -772,6 +782,7 @@ static void st_snapshot(StBuf*s){
           if(vs) sb_put(s,",\"voice\":\"%016llx\",\"muted\":%s,\"talking\":%s,\"host\":%s",(unsigned long long)vs->voice,vs->muted?"true":"false",st_talk_age(vs->voice)<0.5?"true":"false",vs->host?"true":"false"); }
         sb_put(s,"}"); }
     sb_put(s,"]");
+    fx_roster_tick(m,ss,nss,pl,np);   // forensic archive: roster changes + session boundaries (forensic.c)
     // vehicles and projectiles in flight
     sb_put(s,",\"vehicles\":["); first=1;
     for(int i=0;i<hi;i++){ const uint8_t*e=tab+i*0x18; if(!*(const uint16_t*)e || e[3]!=1) continue; uint64_t p=*(const uint64_t*)(e+0x10); uint8_t d[0x120]; if(!p || !hb_read(p,d,sizeof d)) continue;
@@ -831,6 +842,7 @@ static void* st_conn(void*a){ int fd=(int)(intptr_t)a; pthread_setname_np("shim-
             if(st_send(fd,h,(size_t)k)) st_send(fd,buf,(size_t)n); free(buf); }
         else { const char*nf="HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"; st_send(fd,nf,strlen(nf)); } }
     else if(strcmp(meth,"GET")){ const char*na="HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"; st_send(fd,na,strlen(na)); }
+    else if(!strncmp(path,"/forensics",10) && (!path[10] || path[10]=='/')) fx_http(fd,path,qs,req);   // the forensic archive viewer (forensic.c)
     else if(!strcmp(path,"/events")){ g_st_hits++;
         int k=snprintf(h,sizeof h,"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\nAccess-Control-Allow-Origin: *\r\n\r\n");
         if(st_send(fd,h,(size_t)k)) for(unsigned long seen=0;;){ pthread_mutex_lock(&g_st_mx); while(g_st_seq==seen) pthread_cond_wait(&g_st_cv,&g_st_mx);
