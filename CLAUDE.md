@@ -147,7 +147,8 @@ own team number there). Estimated deaths wait 2 s for an engine event before goi
 raw event; PELOAD_NO_EVHOOK off. Damage type 0 with a killer = an unnamed (modded) weapon.
 Microphone (2026-10-17, wasapi.c): the Mac mic is the client's WASAPI capture endpoint (AudioQueueNewInput ->
 IAudioCaptureClient); with a mic the client's voice chat starts once instead of rebuilding a playback stream every 5 s
-(the caulk crash trigger). PELOAD_MIC=0 none, =tone a test tone (quiet-run uses 0 unless QR_MIC=tone; target.sh 0),
+(the caulk crash trigger). PELOAD_MIC=0 a SILENT mic (also the fallback when the real one can't open), =none no device (the
+crash-prone old 0), =tone a test tone (quiet-run uses 0 unless QR_MIC=tone; target.sh 0),
 PELOAD_MIC_MUTED=1; stats do=mic&on=. The client sends voice only with its talk key (Hold/Toggle to talk).
 Stats page (2026-10-17, backlog 29-31): Kills (st_kill_at counts every kill event per match by name; betrayals/suicides
 excluded) + K/D beside Deaths; every column sortable (team sort / full sort, remembered in localStorage); the map opens in the

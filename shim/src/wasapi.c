@@ -24,7 +24,7 @@ struct WaStream {
     uint8_t*ring, *scratch; uint32_t scratch_cap; uint64_t rd, wr, played;   // ring positions in frames (monotonic)
     void*event; AudioQueueRef q; int closing;      // closing: the queue is being stopped -- callbacks must not re-enqueue
     struct WaAq*aq;                                // the pooled AudioQueue this stream plays through (q = aq->q)
-    int capture; WaItf cc; AudioQueueRef iq; AudioQueueBufferRef ib[3]; uint32_t packet; pthread_t tone; volatile int tone_run; double tone_ph; };   // capture streams
+    int capture; WaItf cc; AudioQueueRef iq; AudioQueueBufferRef ib[3]; uint32_t packet; pthread_t tone; volatile int tone_run; double tone_ph; int silent; };   // capture streams (silent: zeros, no device)
 #define WA_E_NOINTERFACE 0x80004002
 #define WA_E_POINTER     0x80004003
 #define WA_E_NOT_INIT    0x88890001
@@ -76,7 +76,11 @@ static void wa_close_queue(WaStream*s){
         else { aq->next=g_wa_pool; g_wa_pool=aq; } }
     pthread_mutex_unlock(&g_wa_lm); }
 // ---- capture: an input AudioQueue (or the test tone) fills the ring; the client takes 10 ms packets with GetBuffer --
-static int wa_mic_mode(void){ static int m=-1; if(m<0){ const char*e=getenv("PELOAD_MIC"); m=e&&!strcmp(e,"0")?0:e&&!strcmp(e,"tone")?2:1; } return m; }   // 0 off, 1 mic, 2 tone
+// 0 none (no capture device), 1 the Mac's microphone, 2 a test tone, 3 silence. Without a capture device the client's voice
+// chat rebuilds a playback stream every ~5 s, which still trips caulk's allocator trap now and then (backlog 22): so
+// PELOAD_MIC=0 is a SILENT microphone (the voice chat starts once, sends nothing), and a real microphone that cannot be
+// opened (permission refused) falls back to silence too. PELOAD_MIC=none = no device at all (old PELOAD_MIC=0).
+static int wa_mic_mode(void){ static int m=-1; if(m<0){ const char*e=getenv("PELOAD_MIC"); m=e&&!strcmp(e,"none")?0:e&&!strcmp(e,"0")?3:e&&!strcmp(e,"tone")?2:1; } return m; }
 volatile int g_mic_muted=-1;   // -1: not read yet (PELOAD_MIC_MUTED)
 static int wa_mic_muted(void){ if(g_mic_muted<0) g_mic_muted=getenv("PELOAD_MIC_MUTED")?1:0; return g_mic_muted; }
 static volatile int g_mic_streams;   // capture streams open (the stats page shows the mic as in use)
@@ -93,7 +97,8 @@ static void wa_in_cb(void*ud,AudioQueueRef q,AudioQueueBufferRef b,const AudioTi
 static void* wa_tone_thread(void*a){ WaStream*s=a; pthread_setname_np("shim-mic-tone");
     uint32_t n=s->packet; uint8_t*buf=calloc(n,s->blk);
     while(s->tone_run){ usleep(10000);
-        for(uint32_t i=0;i<n;i++){ double v=0.05*sin(s->tone_ph); s->tone_ph+=2*3.14159265358979*440.0/s->rate;
+        double amp=(wa_mic_mode()==2 && !s->silent)?0.05:0.0;   // silence: the same 10 ms packets, all zero
+        for(uint32_t i=0;i<n;i++){ double v=amp*sin(s->tone_ph); s->tone_ph+=2*3.14159265358979*440.0/s->rate;
             for(uint32_t c=0;c<s->ch;c++){ uint8_t*o=buf+(size_t)i*s->blk+(size_t)c*(s->bits/8);
                 if(s->isfloat && s->bits==32) *(float*)o=(float)v; else if(s->bits==16) *(int16_t*)o=(int16_t)(v*32767);
                 else if(s->bits==32) *(int32_t*)o=(int32_t)(v*2147483647.0); else { int32_t x=(int32_t)(v*8388607); o[0]=(uint8_t)x; o[1]=(uint8_t)(x>>8); o[2]=(uint8_t)(x>>16); } } }
@@ -101,16 +106,17 @@ static void* wa_tone_thread(void*a){ WaStream*s=a; pthread_setname_np("shim-mic-
     free(buf); return 0; }
 static int wa_cap_open(WaStream*s){   // (g_wa_lm held)
     s->packet=s->rate/100; if(!s->packet) s->packet=480;
-    if(wa_mic_mode()==2){ __atomic_add_fetch(&g_mic_streams,1,__ATOMIC_ACQ_REL); return 1; }   // the tone thread starts with the stream
+    if(wa_mic_mode()==2 || wa_mic_mode()==3){ s->silent=wa_mic_mode()==3; __atomic_add_fetch(&g_mic_streams,1,__ATOMIC_ACQ_REL); return 1; }   // the tone thread starts with the stream
     AudioStreamBasicDescription f={0}; f.mSampleRate=s->rate; f.mFormatID=kAudioFormatLinearPCM;
     f.mFormatFlags=(s->isfloat?kAudioFormatFlagIsFloat:kAudioFormatFlagIsSignedInteger)|kAudioFormatFlagIsPacked;
     f.mFramesPerPacket=1; f.mChannelsPerFrame=s->ch; f.mBitsPerChannel=s->bits; f.mBytesPerFrame=s->blk; f.mBytesPerPacket=s->blk;
     OSStatus st=AudioQueueNewInput(&f,wa_in_cb,s,0,0,0,&s->iq);
-    if(st || !s->iq){ char t[96]; int k=snprintf(t,sizeof t,"  [wasapi] microphone: AudioQueueNewInput failed %d\n",(int)st); (void)!write(2,t,k); s->iq=0; return 0; }
+    if(st || !s->iq){ char t[120]; int k=snprintf(t,sizeof t,"  [wasapi] microphone: AudioQueueNewInput failed %d -- a silent microphone instead\n",(int)st); (void)!write(2,t,k);
+        s->iq=0; s->silent=1; __atomic_add_fetch(&g_mic_streams,1,__ATOMIC_ACQ_REL); return 1; }
     for(int i=0;i<3;i++){ AudioQueueBufferRef bf=0; if(!AudioQueueAllocateBuffer(s->iq,s->packet*s->blk,&bf)){ s->ib[i]=bf; AudioQueueEnqueueBuffer(s->iq,bf,0,0); } }
     __atomic_add_fetch(&g_mic_streams,1,__ATOMIC_ACQ_REL); return 1; }
 static void wa_cap_start(WaStream*s){   // (g_wa_lm held)
-    if(wa_mic_mode()==2){ if(!s->tone_run){ s->tone_run=1; pthread_create(&s->tone,0,wa_tone_thread,s); } }
+    if(wa_mic_mode()==2 || s->silent){ if(!s->tone_run){ s->tone_run=1; pthread_create(&s->tone,0,wa_tone_thread,s); } }
     else if(s->iq) AudioQueueStart(s->iq,0); }
 static void wa_cap_stop(WaStream*s){   // (g_wa_lm held)
     if(s->tone_run){ s->tone_run=0; pthread_join(s->tone,0); }
@@ -186,7 +192,7 @@ static int MSABI wac_Initialize(WaItf*self,int mode,uint32_t flags,int64_t dur,i
     s->bufframes=(uint32_t)want; s->ring=calloc(s->bufframes,blk); s->scratch_cap=s->bufframes; s->scratch=calloc(s->scratch_cap,blk);
     pthread_mutex_lock(&g_wa_lm); int ok=s->capture?wa_cap_open(s):wa_open_queue(s); pthread_mutex_unlock(&g_wa_lm); if(!ok) return WA_E_UNSUPPORTED;
     s->inited=1;
-    { char t[200]; int k=snprintf(t,sizeof t,"  [wasapi] %s: %u Hz, %u ch, %u-bit %s, buffer %u frames, mode %d flags 0x%x\n",s->capture?(wa_mic_mode()==2?"microphone (test tone)":"microphone"):"stream",rate,ch,bits,isfloat?"float":"int",s->bufframes,mode,flags); (void)!write(2,t,k); }
+    { char t[200]; int k=snprintf(t,sizeof t,"  [wasapi] %s: %u Hz, %u ch, %u-bit %s, buffer %u frames, mode %d flags 0x%x\n",s->capture?(wa_mic_mode()==2?"microphone (test tone)":s->silent?"microphone (silent)":"microphone"):"stream",rate,ch,bits,isfloat?"float":"int",s->bufframes,mode,flags); (void)!write(2,t,k); }
     return HR_OK; }
 static int MSABI wac_GetBufferSize(WaItf*self,uint32_t*n){ if(!n) return WA_E_POINTER; if(!self->s->inited) return WA_E_NOT_INIT; *n=self->s->bufframes; return HR_OK; }
 static int MSABI wac_GetStreamLatency(WaItf*self,int64_t*l){ (void)self; if(l)*l=100000; return HR_OK; }   // 10 ms
@@ -263,7 +269,7 @@ static void* g_wa_ep_vtbl[]={ (void*)wadev_QI,(void*)com_AddRef,(void*)com_Relea
 static int MSABI waps_GetCount(void*self,uint32_t*n){ (void)self; if(n)*n=1; return HR_OK; }
 static int MSABI waps_GetAt(void*self,uint32_t i,void*key){ (void)self;(void)i; if(key) memset(key,0,20); return HR_OK; }
 static int MSABI waps_GetValue(void*self,const void*key,uint8_t*pv){ (void)key; if(!pv) return WA_E_POINTER; memset(pv,0,24);
-    *(uint16_t*)pv=31; *(uint16_t**)(pv+8)=wa_wstr(self==&g_wa_cprops?(wa_mic_mode()==2?"Test tone (no microphone)":"Mac microphone (CoreAudio)"):"Mac speakers (CoreAudio)"); return HR_OK; }
+    *(uint16_t*)pv=31; *(uint16_t**)(pv+8)=wa_wstr(self==&g_wa_cprops?(wa_mic_mode()==2?"Test tone (no microphone)":wa_mic_mode()==3?"Silent microphone":"Mac microphone (CoreAudio)"):"Mac speakers (CoreAudio)"); return HR_OK; }
 static int MSABI waps_SetValue(void*self,const void*key,const void*pv){ (void)self;(void)key;(void)pv; return HR_OK; }
 static int MSABI waps_Commit(void*self){ (void)self; return HR_OK; }
 static void* g_wa_props_vtbl[]={ (void*)com_QI,(void*)com_AddRef,(void*)com_Release,(void*)waps_GetCount,(void*)waps_GetAt,(void*)waps_GetValue,(void*)waps_SetValue,(void*)waps_Commit };
