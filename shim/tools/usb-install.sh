@@ -12,10 +12,32 @@
 # longer has is removed from the install folder). Resumable if interrupted. Then play with:
 #   cd ~/ReclaimerMac && bash shim/play.sh
 #
-#   bash /Volumes/<stick>/ReclaimerMac/install.sh [--skip-space-check] [install-folder]
+#   bash /Volumes/<stick>/ReclaimerMac/install.sh [--keep-on-stick | --minimal | --no-movies | --no-workshop] [--dry-run] [--skip-space-check] [install-folder]
 set -e
 SRC="$(cd "$(dirname "$0")" && pwd)"
-SKIPSPACE=0; [ "${1:-}" = "--skip-space-check" ] && { SKIPSPACE=1; shift; }
+SKIPSPACE=0; NOMOVIES=0; WORKSHOP=1; ONSTICK=0; DRYRUN=0
+while [ "${1:-}" != "${1#--}" ]; do case "$1" in
+  --skip-space-check) SKIPSPACE=1;;
+  --no-workshop) WORKSHOP=0;;
+  --no-movies) NOMOVIES=1;;
+  --minimal) NOMOVIES=1; WORKSHOP=0;;
+  --keep-on-stick) ONSTICK=1;;
+  --dry-run) DRYRUN=1;;
+  *) echo "unknown option $1"; exit 1;;
+esac; shift; done
+# Space (tested 2026-10-18 against a stripped MCC copy): the client REFUSES to start without the Halo 3 campaign maps
+# ("requires BOTH Halo 3 Campaign and Halo 3 Multiplayer"), and its engine worker exits without MCC/Content/Paks/
+# MCC-WindowsNoEditor.pak (10.2 GB; "MCC Conduit font archive unavailable"). Not needed: MCC/Content/Movies (4.6 GB) and the
+# Workshop mods (15 GB; a modded server's mods download when you join it).
+#   --no-movies       leave the movies out                                   (~41 GB)
+#   --no-workshop     leave the Workshop mods out                            (~31 GB)
+#   --minimal         both                                                   (~25 GB)
+#   --dry-run         only print what the copy needs and what this Mac has
+#   --keep-on-stick   the pak, the movies and the Workshop mods stay on the stick, linked from this Mac (~15 GB);
+#                     the stick must be plugged in (as /Volumes/<same name>) to play. Run again without it to copy them.
+MCCN="Halo The Master Chief Collection"
+EXCL=(); [ $NOMOVIES = 1 ] || [ $ONSTICK = 1 ] && EXCL+=(MCC/Content/Movies); [ $ONSTICK = 1 ] && EXCL+=(MCC/Content/Paks)
+[ $ONSTICK = 1 ] && WORKSHOP=0
 APP="${1:-$HOME/ReclaimerMac}"
 SUP="$HOME/Library/Application Support/ReclaimerMac"
 PFX="$SUP/prefix/drive_c"
@@ -34,8 +56,10 @@ fi
 # space: only what this Mac doesn't have yet counts (per part: the stick's size minus the installed size)
 kb(){ local t=0 x; for x in "$@"; do [ -e "$x" ] && t=$((t + $(du -sk "$x" | cut -f1))); done; echo $t; }
 delta(){ local a=$1 b=$2; [ $a -gt $b ] && echo $((a-b)) || echo 0; }
-NEED=$(( $(delta "$(kb "$SRC/app")" "$(kb "$APP")") + $(delta "$(kb "$SRC/game")" "$(kb "$STEAM/common")") \
-  + $(delta "$(kb "$SRC/workshop")" "$(kb "$STEAM/workshop")") + $(delta "$(kb "$SRC/drive_c")" "$(kb "$PFX/ReclaimerCache" "$PFX/ReclaimerContent" "$PFX/ReclaimerFonts")") + 300000 ))
+GAMEKB=$(kb "$SRC/game"); for x in ${EXCL[@]+"${EXCL[@]}"}; do GAMEKB=$((GAMEKB - $(kb "$SRC/game/$MCCN/$x"))); done
+WSKB=0; [ $WORKSHOP = 1 ] && WSKB=$(delta "$(kb "$SRC/workshop")" "$(kb "$STEAM/workshop")")
+NEED=$(( $(delta "$(kb "$SRC/app")" "$(kb "$APP")") + $(delta "$GAMEKB" "$(kb "$STEAM/common")") \
+  + WSKB + $(delta "$(kb "$SRC/drive_c")" "$(kb "$PFX/ReclaimerCache" "$PFX/ReclaimerContent" "$PFX/ReclaimerFonts")") + 300000 ))
 # free space: what Finder shows ("available for important usage": includes purgeable space -- iCloud caches, local
 # snapshots -- that macOS frees as files are written), else df's (only what is free right now; it was the only number
 # used, and refused a Mac with 69.7 GB free in Finder for a ~46 GB copy). Both in KB, like NEED.
@@ -43,6 +67,7 @@ DF=$(df -k "$HOME" | awk 'NR==2{print $4}')
 IMP=$(osascript -l JavaScript -e 'ObjC.import("Foundation"); var r=$.NSURL.fileURLWithPath("'"$HOME"'").resourceValuesForKeysError(["NSURLVolumeAvailableCapacityForImportantUsageKey"], null); var n=r.objectForKey("NSURLVolumeAvailableCapacityForImportantUsageKey"); String(Math.floor(n.longLongValue/1024))' 2>/dev/null | tr -dc 0-9)
 HAVE=$DF; [ -n "$IMP" ] && [ "$IMP" -gt "$DF" ] && HAVE=$IMP
 echo "to copy: up to ~$((NEED/1048576)) GB; free on this Mac: ~$((HAVE/1048576)) GB as Finder counts it (~$((DF/1048576)) GB without purgeable space)"
+[ $DRYRUN = 1 ] && { echo "(dry run: nothing copied)"; exit 0; }
 if [ "$HAVE" -le "$NEED" ]; then
   if [ "$SKIPSPACE" = 1 ]; then echo "not enough free space by that count -- going on anyway (--skip-space-check)"
   else echo "not enough free space (free some, or run again with --skip-space-check)"; exit 1; fi
@@ -63,13 +88,19 @@ part "scripts and docs" --exclude=client --exclude=shim/build --exclude=shim/too
 echo "== Reclaimer caches/fonts -> $PFX"
 mkdir -p "$PFX"; part "caches/fonts" "$SRC/drive_c/" "$PFX/"
 if [ -d "$SRC/support" ]; then echo "== map pictures, walking graphs, heatmaps, shader list -> $SUP"; mkdir -p "$SUP"; part "support" "$SRC/support/" "$SUP/"; fi
-if [ -d "$SRC/workshop" ]; then echo "== Workshop mods -> $STEAM/workshop"; mkdir -p "$STEAM/workshop"; part "workshop" --delete "$SRC/workshop/" "$STEAM/workshop/"; fi
+if [ -d "$SRC/workshop" ] && [ $WORKSHOP = 1 ]; then echo "== Workshop mods -> $STEAM/workshop"; mkdir -p "$STEAM/workshop"; part "workshop" --delete "$SRC/workshop/" "$STEAM/workshop/"; fi
 if [ -d "$SRC/steam" ]; then mkdir -p "$STEAM"; for f in "$SRC"/steam/*; do [ -f "$f" ] && [ ! -f "$STEAM/$(basename "$f")" ] && cp -p "$f" "$STEAM/"; done; fi
 # the client also looks under "Program Files (x86)\Steam\steamapps": the same folder (a relative link, so it survives a
 # different user name)
 X86="$PFX/Program Files (x86)/Steam"; mkdir -p "$X86"
 [ -e "$X86/steamapps" ] || [ -L "$X86/steamapps" ] || ln -s "../../Program Files/Steam/steamapps" "$X86/steamapps"
-if [ -d "$SRC/game" ]; then echo "== MCC files -> $STEAM/common (only new or changed files)"; mkdir -p "$STEAM/common"; part "MCC" "$SRC/game/" "$STEAM/common/"; fi
+if [ -d "$SRC/game" ]; then echo "== MCC files -> $STEAM/common (only new or changed files${EXCL[*]+; left out: ${EXCL[*]}})"; mkdir -p "$STEAM/common"
+  EX=(); for x in ${EXCL[@]+"${EXCL[@]}"}; do EX+=("--exclude=/$MCCN/$x"); done
+  part "MCC" ${EX[@]+"${EX[@]}"} "$SRC/game/" "$STEAM/common/"
+  if [ $ONSTICK = 1 ]; then   # link what stays on the stick
+    for x in MCC/Content/Paks MCC/Content/Movies; do d="$STEAM/common/$MCCN/$x"; [ -d "$d" ] && [ ! -L "$d" ] && continue; mkdir -p "$(dirname "$d")"; ln -sfn "$SRC/game/$MCCN/$x" "$d"; done
+    [ -e "$STEAM/workshop" ] && [ ! -L "$STEAM/workshop" ] || ln -sfn "$SRC/workshop" "$STEAM/workshop"
+    echo "   linked to the stick: the pak, the movies, the Workshop mods (keep the stick plugged in to play)"; fi; fi
 
 xattr -dr com.apple.quarantine "$APP" 2>/dev/null || true
 chmod +x "$APP/shim/build/peload" "$APP/shim/build/glhelper" "$APP"/shim/*.sh "$APP"/shim/tools/*.sh 2>/dev/null || true

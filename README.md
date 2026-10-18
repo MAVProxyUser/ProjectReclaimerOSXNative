@@ -100,6 +100,20 @@ Project Reclaimer reads), your downloaded Workshop mods, the client's caches and
 Mac skips the 2.5-minute first-launch build) and the stats page's map pictures, walking graphs and heatmaps. Add
 `--with-profile` to bring your Reclaimer profile (nickname and identity) along -- then don't play on both Macs at once.
 
+**Short on space on the other Mac?** The installer takes options (`--dry-run` shows what one needs first):
+
+| Option | Copies | Leaves out |
+|---|---|---|
+| (none) | ~44 GB | nothing |
+| `--no-movies` | ~40 GB | MCC's cutscene movies (not used) |
+| `--no-workshop` | ~29 GB | the Workshop mods (a modded server's mods download when you join it) |
+| `--minimal` | ~25 GB | both |
+| `--keep-on-stick` | ~15 GB | the 10 GB MCC pak, the movies and the mods stay on the stick, linked: keep it plugged in to play |
+
+The Halo 3 campaign maps and MCC's pak can't be left out: the client refuses to start without the campaign maps and its
+engine worker stops without the pak (it reads a font from it). Free space is counted as Finder does (purgeable space
+included); `--skip-space-check` goes on anyway.
+
 **Updating a stick:** run the same command again. Only what changed is copied (new loader binaries, a new client exe,
 new or updated Workshop mods...); unchanged MCC files are skipped, older client exes are removed from the stick, and each
 part lists the files it copied. `--no-game` skips even checking the MCC files. Then run `install.sh` on the other Mac again:
