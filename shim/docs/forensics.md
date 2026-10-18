@@ -53,11 +53,22 @@ real id). `bash shim/tools/pageshot.sh` remakes these pictures from a running ga
   deaths, votes, `[SERVER]` lines, chat notices, match start / end, and spawns: weapons, equipment, vehicles and power-ups
   appearing on the map (with position), weapon pickups and power-ups taken.
 - Nothing is sent anywhere; nothing is read from other processes or the network beyond what the client already gets.
-- **Who fans voice out is not known yet** -- whether each speaker's client sends a copy to every listener or a server
-  relays them. Each voice datagram carries a sender id (datagram +0x14) and a recipient id (+0x1c) that the receive loop
-  compares with its own id (reclaimer-voice-mute.md section 3), so packets are addressed per recipient either way. A
-  speaker the server or the speaker's client does not send to this client (e.g. the other team's team channel) is never
-  in the archive.
+- **The server relays voice and picks the listeners** (static analysis of the 0.9.18 client, 2026-10-18; the dedicated
+  server is the same code). Each client sends its voice once, to the host. The host's voice_recv (exe+0x684080) forwards a
+  packet to each member for whom `audible(sender, recipient, channel)` (exe+0xb25d30, called at exe+0x684da5) is true,
+  one MCV1 datagram per recipient (recipient id at +0x1c): global = everyone, team = the same team, **proximity = both
+  alive and less than 10 world units apart** (about 30 m; gain = clamp((10 - d) / 7.5, 0, 1), exe+0xb256a0; positions =
+  each player's unit origin from the host's own simulation). So a client gets proximity voice only from speakers within
+  10 units of it, and never the other team's team channel. There is no client-side filter before our hook -- nothing to
+  remove locally: the archive already keeps everything this client is sent (a 128-player Forge World session held 3,284
+  proximity packets from 6 speakers; the FKK BTB sessions none). Servers announce what they allow in the channel-0
+  control packets (archived): mask bit 2 = proximity on (codes 0x84-0x87, 0x8c-0x8f, or the legacy 1-4); config keys
+  `voice`, `voice_global`, `voice_team`, `voice_proximity`, `voice_proximity_only`, `voice_team_only`.
+- **Everything, every distance: only on a host we run.** In a game this loader hosts (menu Host Game, or
+  `shim/dedicated.sh` with `DED_VOICE=1`, `voice_proximity = true` and `DED_ENV=PELOAD_STATS_HTTP=<port>`), the hooked
+  voice_recv is the HOST's: it receives every client's voice -- all channels, all distances, server-muted senders too --
+  before the relay filter. Not tested yet. Recording other players' conversations you are not part of is outside the
+  one-party-consent reasoning above (announce it, e.g. in the server's welcome lines; not legal advice).
 - Voice audio is the Opus bytes exactly as received (no decoding, no re-encoding). It is only stored with the **voice
   audio** switch on, which requires the **one-party consent** box (below). Without it the archive still keeps who talked
   when: time, sender, channel, sequence, packet length and the Opus TOC byte(s) (mode / bandwidth / frame size), but no
@@ -318,8 +329,7 @@ session refreshes every 5 s.
 
 ## Not verified yet
 
-- Who fans voice out (the sender's client or a server relay): the client reads its UDP through WSARecvMsg;
-  `PELOAD_VOICE_SRCSTAT=1` tallies the sources of `MC?1`/`LC?1` datagrams there (aggregate only) -- next live run.
+- The host-side archive (every channel and distance) in a game we host: built in, not run yet.
 - The chat sender id (Line +0x30) on received lines (the viewer shows ids next to chat senders; not cross-checked).
 - Playback of the page's Ogg files in Safari (the test browser played them; Safari's Ogg Opus support depends on its
   version -- the page says so and offers downloads when `canPlayType` says no).
