@@ -355,6 +355,10 @@ patch variants by signature (section 16; shim/docs/patch-addresses.md).
 - **~20 s pre-loading stall** — Why (diagnosed with `PELOAD_TRACE_DEL`): the client's log rotation walked 707k empty
   directories left in ReclaimerProfile/Logs "by an old bug" (which bug is not recorded: UNCONFIRMED). (10-16 9c65850)
 
+- **MoveFileA / MoveFileW / MoveFileExA** — Why: halo3.dll calls MoveFileA mid-match (seen in a 128-player Hugegrass game
+  on client 0.9.20); it was a logging stub. How: MoveFileW fails with ERROR_ALREADY_EXISTS when the destination exists
+  (no replace), else MoveFileExW's rename; the A versions take the bytes as they are. (10-18)
+
 ## 5. Sync objects and timers
 
 - **Real synchronisation primitives** — CRITICAL_SECTION (recursive mutex), SRWLOCK (rwlock), CONDITION_VARIABLE,
@@ -706,6 +710,11 @@ oracle. Fixes below apply to both unless noted.
   with a location >= `PELOAD_D3DGL_VARYING_SLOTS` (14) get their varyings renumbered 0..n-1 on both sides.
   (10-16 434db9b)
 
+- **umax / umin** — `dxbc2glsl.c` + `re-tools/dxbc2glsl.py`. Why: named in the opcode table but never translated
+  ("// UNTRANSLATED: umax" in 484 of 4,180 shaders); the deferred shadow pass a42824308404ea6d takes umax of the shadow
+  map's textureSize, so a stale register became the shadow texel size and the pass darkened lit pixels 0.051 -> 0.004
+  (backlog 61). How: ivec4(max/min(uvec4(a), uvec4(b))). The CPU compute interpreter already had them. (10-18)
+
 ## 12. D3D11->GL: textures
 
 - **TYPELESS / SRGB 8-bit formats** — `d3dgl_tex_upload_fmt`. Why: the loading-screen composite is format 90
@@ -752,6 +761,16 @@ oracle. Fixes below apply to both unless noted.
 - **BC chain bounded by MipLevels; TYPELESS BC decoded** — Why: levels past the texture's MipLevels were zero-filled
   memory, so minified 1-level textures went black/transparent; TYPELESS BC (70/73/76/97) can't pick sRGB storage per view
   on compressed storage. How: the chain stops at MipLevels; TYPELESS BC back on the decode path. (10-18 410a6ee)
+
+- **Decoded BC UNORM in plain RGBA8 storage** — `bc_srgb_storage` (d3dgl_sub_pixels = arrays / cubes / 3D, and the 2D
+  decode path). Why: decoded BC1-3 were ALL kept in sRGB storage (SRGB8_ALPHA8), UNORM views reading it with the sRGB
+  decode skipped -- but the skip sits on the SAMPLER object whenever one is bound, and texelFetch ignores sampler objects.
+  Halo 3's static-lighting shaders texelFetch their SH lightmap arrays (t13 x8 / t14 x2 slices, BC3_UNORM, decoded as
+  (a+b)*2-2 times alpha times a cb4 scale), so the coefficients came back sRGB-decoded (0.5 -> 0.21: about -1.2 instead
+  of 0) and interiors went black while the sky, emissives, the HUD and the scope's night vision were fine (backlog 61,
+  Hugegrass; found with the do=pixwho probe: albedo 0.31, then the lighting PS 7bcaa3c3c92f37d7 wrote 0-0.016). How:
+  sRGB storage only for the _SRGB (72/75/78) and TYPELESS (70/73/76) formats -- a UNORM resource can only have UNORM
+  views. `PELOAD_D3DGL_BCUNORM_SRGB=1` = old. (10-18)
 
 ## 13. D3D11->GL: buffers, state, draws, queries
 

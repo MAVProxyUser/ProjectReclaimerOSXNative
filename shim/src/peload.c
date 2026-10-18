@@ -5048,6 +5048,13 @@ static unsigned d3dgl_tex_target(const D3DObj*o){
     if((o->misc&4) && o->arr>=6 && o->arr%6==0) return o->arr==6?0x8513:0x9009;     // CUBE_MAP / CUBE_MAP_ARRAY
     if(o->arr>1) return 0x8C1A;                                                     // TEXTURE_2D_ARRAY
     return GLE_TEX2D; }
+// Decoded BC1-3 kept in sRGB storage: the _SRGB formats (72/75/78) and the TYPELESS ones (70/73/76: a view picks sRGB or
+// UNORM, the UNORM one skipping the decode). UNORM resources (71/74/77) can only have UNORM views: plain RGBA8. They were
+// sRGB storage too, read through a per-view "skip decode" -- set on the SAMPLER object when one is bound, which texelFetch
+// ignores: Halo 3's static-lighting shaders texelFetch their SH lightmap arrays (BC3_UNORM), got sRGB-decoded
+// coefficients and lit interiors almost black (backlog 61, Hugegrass). PELOAD_D3DGL_BCUNORM_SRGB=1 = old (all of 70-78).
+static int bc_srgb_storage(uint32_t f){ static int old=-1; if(old<0) old=getenv("PELOAD_D3DGL_BCUNORM_SRGB")?1:0;
+    if(old) return f>=70 && f<=78; return f==72||f==75||f==78||f==70||f==73||f==76; }
 // Pixels of subresource (slice sl, mip m) ready for GL: BC -> decoded RGBA8 / RGBA8_SNORM (malloc'd, *own=1);
 // uncompressed -> pointer into o->data (rows are tight). NULL = unsupported. *bpp = bytes per uploaded texel.
 static const uint8_t* d3dgl_sub_pixels(D3DObj*o,uint32_t sl,uint32_t m,GLFmt*g,int*own,uint32_t*bpp,uint32_t*mw,uint32_t*mh,uint32_t*md){
@@ -5057,7 +5064,7 @@ static const uint8_t* d3dgl_sub_pixels(D3DObj*o,uint32_t sl,uint32_t m,GLFmt*g,i
         uint64_t lsz=(uint64_t)rp*rows; size_t pl=(size_t)(*mw)*(*mh)*4; uint8_t*out=malloc(pl*(*md)); if(!out) return 0;
         for(uint32_t z=0;z<*md;z++){ uint8_t*dz=dg_bc_decode(o->fmt,(const uint8_t*)o->data+off+z*lsz,(size_t)lsz,(int)*mw,(int)*mh);
             if(!dz){ free(out); return 0; } memcpy(out+z*pl,dz,pl); free(dz); }
-        if(!nosrgb() && o->fmt>=70 && o->fmt<=78) srgb=1;
+        if(!nosrgb() && bc_srgb_storage(o->fmt)) srgb=1;
         g->ifmt=sn?0x8F97:(srgb?0x8C43:GLE_RGBA8); g->fmt=GLE_RGBA; g->type=sn?0x1400:GLE_UBYTE; g->swz=0; *own=1; *bpp=4; return out; }
     if(!d3dgl_fmt(o->fmt,g)) return 0;
     *bpp=dxgi_bpp(o->fmt); return (const uint8_t*)o->data+off; }
@@ -5095,7 +5102,7 @@ static void d3dgl_upload_layered(D3DObj*o,unsigned tgt){
     if(psi) psi(0x0CF5,4);
     unsigned e=ge?ge():0;
     if(getenv("PELOAD_TRACE_LAYERED") && o->data){ static unsigned long nl; if(nl++<400){   // per slice: share of non-zero bytes at the uploaded level
-        char m[400]; int k=snprintf(m,sizeof m,"  [layered] %p %ux%u f%u slices=%u level=%u/%u ifmt=0x%x nz%%:",(void*)o,o->w,o->h,o->fmt,ns,L,nm,g.ifmt);
+        char m[400]; int k=snprintf(m,sizeof m,"  [layered] %p %ux%u f%u slices=%u level=%u/%u ifmt=0x%x nz%% at that level:",(void*)o,o->w,o->h,o->fmt,ns,L,nm,g.ifmt);
         for(uint32_t sl=0;sl<ns && sl<24 && k<360;sl++){ uint64_t sz; uint32_t rp,rows,a,b,c; uint64_t off=tex_sub(o,sl*nm+L,&sz,&rp,&rows,&a,&b,&c); int nz=0,n=0;
             if(off!=UINT64_MAX){ uint64_t st=sz/256?sz/256:1; for(uint64_t i=0;i<sz && off+i<o->size;i+=st){ n++; if(((const uint8_t*)o->data)[off+i]) nz++; } }
             k+=snprintf(m+k,sizeof m-k," %d",n?nz*100/n:-1); }
@@ -5184,7 +5191,7 @@ static void d3dgl_ensure_tex(D3DObj*o){
                     if(gerr) gerr();
                     // SRGB BC formats (BC1/BC2/BC3 _SRGB) store gamma-encoded color -> upload as SRGB8_ALPHA8
                     // so GL de-gammas to linear on sample (matches the compressed-SRGB path we replaced).
-                    int issrgb=nosrgb()?(o->fmt==72||o->fmt==75||o->fmt==78):(o->fmt>=70&&o->fmt<=78), issn=(o->fmt==81||o->fmt==84);
+                    int issrgb=nosrgb()?(o->fmt==72||o->fmt==75||o->fmt==78):bc_srgb_storage(o->fmt), issn=(o->fmt==81||o->fmt==84);
                     unsigned iform=issn?0x8F97/*RGBA8_SNORM*/:issrgb?0x8C43/*SRGB8_ALPHA8*/:GLE_RGBA8; o->glsrgb=(iform==0x8C43);
                     G.TexImage2D(GLE_TEX2D,0,iform,(int)uw,(int)uh,0,GLE_RGBA,issn?0x1400/*BYTE*/:GLE_UBYTE,rgba);
                     unsigned de=gerr?gerr():0; free(rgba);
@@ -5334,6 +5341,9 @@ static void pixwho_draw(D3DObj*rt){ if(g_pw_state!=2 || !rt || !G.ReadPixels) re
             for(int b=0;b<16;b++){ D3DObj*c=cb[b]; if(!c||!c->data) continue; uint64_t off=(uint64_t)c1[b]*16, nv=cn[b]?cn[b]:(c->size-off)/16; if(nv>256) nv=256;
                 fprintf(f,"\n%s cb%d (%llu bytes, from vec4 %u, %llu shown):\n",st?"PS":"VS",b,(unsigned long long)c->size,c1[b],(unsigned long long)nv);
                 for(uint64_t r=0;r<nv && off+(r+1)*16<=c->size;r++){ const float*v=(const float*)((const uint8_t*)c->data+off+r*16); fprintf(f,"  c%-3llu %12.6g %12.6g %12.6g %12.6g\n",(unsigned long long)r,v[0],v[1],v[2],v[3]); } } }
+        if(g_d3dst.il){ D3DObj*il=g_d3dst.il; fprintf(f,"\ninput layout (first vertex of the draw's buffers, raw bytes):\n");
+            for(int e=0;e<il->nelem;e++){ uint32_t sl=il->elem[e].slot; D3DObj*vb=sl<8?g_d3dst.vb[sl]:0; fprintf(f,"  %s%u slot%u +%u fmt %u cls %u stride %u:",il->elem[e].sem,il->elem[e].semidx,sl,il->elem[e].off,il->elem[e].fmt,il->elem[e].cls,sl<8?g_d3dst.vstride[sl]:0);
+                if(vb && vb->data){ uint64_t o=(uint64_t)g_d3dst.voff[sl]+il->elem[e].off; for(int b=0;b<16 && o+b<vb->size;b++) fprintf(f," %02x",((const uint8_t*)vb->data)[o+b]); } fprintf(f,"\n"); } }
         for(int st=0;st<2;st++){ D3DObj*o=st?ps:vs; if(!o) continue; const char*src=o->monosrc?o->monosrc:o->glsl; fprintf(f,"\n==== %s GLSL ====\n%s\n",st?"PS":"VS",src?src:"(none)"); }
         fclose(f); } } }
 
@@ -9141,6 +9151,13 @@ static int  MSABI i_MoveFileExW(const uint16_t*from,const uint16_t*to,uint32_t f
         struct stat st; int ex=(stat(B,&st)==0); char m[2200]; int k=snprintf(m,sizeof m,"  [adv] rename r=%d dest-exists=%d size=%lld %s\n",r,ex,ex?(long long)st.st_size:-1,B); (void)!write(2,m,k);
         if(ex){ char cap[2300]; snprintf(cap,sizeof cap,"/tmp/reclaimer-adv-%d.json",getpid()); int in=open(B,O_RDONLY),out=open(cap,O_WRONLY|O_CREAT|O_TRUNC,0644); if(in>=0&&out>=0){ char bf[8192]; ssize_t n; while((n=read(in,bf,sizeof bf))>0)(void)!write(out,bf,n);} if(in>=0)close(in); if(out>=0)close(out); } }
     if(r)g_lasterr=win_err(); return r==0; }
+// MoveFileW / MoveFileA (2026-10-18: halo3.dll calls MoveFileA mid-match -- it was a stub): fail with ERROR_ALREADY_EXISTS
+// when the destination exists (no MOVEFILE_REPLACE_EXISTING), else MoveFileExW. ANSI names are taken byte for byte.
+static int  MSABI i_MoveFileW(const uint16_t*from,const uint16_t*to){ if(!from||!to){ g_lasterr=87; return 0; }
+    char B[2048]; struct stat st; win2unix(to,B,sizeof B); if(!lstat(B,&st)){ g_lasterr=183; return 0; } return i_MoveFileExW(from,to,0); }
+static void a2w_path(const char*a,uint16_t*w,int n){ int i=0; for(; a&&a[i]&&i<n-1;i++) w[i]=(uint8_t)a[i]; w[i]=0; }
+static int  MSABI i_MoveFileA(const char*from,const char*to){ if(!from||!to){ g_lasterr=87; return 0; } uint16_t a[2048],b[2048]; a2w_path(from,a,2048); a2w_path(to,b,2048); return i_MoveFileW(a,b); }
+static int  MSABI i_MoveFileExA(const char*from,const char*to,uint32_t fl){ if(!from){ g_lasterr=87; return 0; } uint16_t a[2048],b[2048]; a2w_path(from,a,2048); if(to) a2w_path(to,b,2048); return i_MoveFileExW(a,to?b:0,fl); }
 static int  MSABI i_DeleteFileW(const uint16_t*w){ char p[2048]; win2unix(w,p,sizeof p);
     // PELOAD_KEEP_ADV: keep local-server advertisement files alive so a concurrently
     // launched client has a stable discovery window (the host otherwise writes then
@@ -10196,6 +10213,7 @@ static void *resolve_impl(const char *fn){
         {"FlushViewOfFile",(void*)i_FlushViewOfFile},
         {"SetEndOfFile",(void*)i_SetEndOfFile},
         {"MoveFileExW",(void*)i_MoveFileExW},
+        {"MoveFileW",(void*)i_MoveFileW}, {"MoveFileA",(void*)i_MoveFileA}, {"MoveFileExA",(void*)i_MoveFileExA},
         {"DeleteFileW",(void*)i_DeleteFileW},
         {"CopyFileExW",(void*)i_CopyFileExW},
         {"CopyFileW",(void*)i_CopyFileW},

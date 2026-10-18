@@ -299,6 +299,8 @@ def emit(stage,isgn,osgn,ins):
             if n=='imul': L.append(asg_i(o[0],'%s * %s'%(si(2),si(3)) if len(o)>3 else '%s*%s'%(si(1),si(2)))); continue
             if n=='imin': L.append(asg_i(o[0],'min(%s,%s)'%(si(1),si(2)))); continue
             if n=='imax': L.append(asg_i(o[0],'max(%s,%s)'%(si(1),si(2)))); continue
+            if n=='umin': L.append(asg_i(o[0],'ivec4(min(uvec4(%s),uvec4(%s)))'%(si(1),si(2)))); continue
+            if n=='umax': L.append(asg_i(o[0],'ivec4(max(uvec4(%s),uvec4(%s)))'%(si(1),si(2)))); continue
             if n=='imad': L.append(asg_i(o[0],'%s*%s+%s'%(si(1),si(2),si(3)))); continue
             if n=='and': L.append(asg_i(o[0],'%s & %s'%(si(1),si(2)))); continue
             if n=='or':  L.append(asg_i(o[0],'%s | %s'%(si(1),si(2)))); continue
