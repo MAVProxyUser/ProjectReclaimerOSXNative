@@ -47,9 +47,17 @@ static void st_event_at(double at,const char*kind,const char*a,const char*b,cons
     va_list ap; va_start(ap,fmt); st_eventv(at,kind,a,b,how,0,ta,tb,flags,fmt,ap); va_end(ap); }
 static void st_event_verb(double at,const char*kind,const char*a,const char*b,const char*how,const char*verb,int ta,int tb,int flags,const char*fmt,...){
     va_list ap; va_start(ap,fmt); st_eventv(at,kind,a,b,how,verb,ta,tb,flags,fmt,ap); va_end(ap); }
+// kills per player this match (every kill event, exact or estimated; betrayals and suicides don't count), by name;
+// cleared with the per-match player tracking (a new map)
+static pthread_mutex_t g_kc_mx=PTHREAD_MUTEX_INITIALIZER; static struct { char name[64]; int kills; } g_kc[256]; static int g_nkc;
+static void st_kills_reset(void){ pthread_mutex_lock(&g_kc_mx); g_nkc=0; pthread_mutex_unlock(&g_kc_mx); }
+static void st_kills_add(const char*a){ pthread_mutex_lock(&g_kc_mx); int i; for(i=0;i<g_nkc;i++) if(!strcmp(g_kc[i].name,a)) break;
+    if(i==g_nkc && g_nkc<256){ snprintf(g_kc[i].name,sizeof g_kc[i].name,"%s",a); g_kc[i].kills=0; g_nkc++; } if(i<g_nkc) g_kc[i].kills++; pthread_mutex_unlock(&g_kc_mx); }
+static int st_kills_of(const char*a){ int k=0; pthread_mutex_lock(&g_kc_mx); for(int i=0;i<g_nkc;i++) if(!strcmp(g_kc[i].name,a)){ k=g_kc[i].kills; break; } pthread_mutex_unlock(&g_kc_mx); return k; }
 static void st_kill_at(double at,const char*a,const char*b,const char*how,const char*verb,int ta,int tb,int flags){   // "A <verb> B (how)"
     char hw[110]=""; if(how && how[0]) snprintf(hw,sizeof hw," (%s)",how);
-    st_event_verb(at,"kill",a,b,how,verb,ta,tb,flags,"%s %s %s%s",a,verb,b,hw); }
+    st_event_verb(at,"kill",a,b,how,verb,ta,tb,flags,"%s %s %s%s",a,verb,b,hw);
+    if(a && a[0] && b && strcmp(a,b) && !(flags&4)) st_kills_add(a); }
 static void st_feed_json(StBuf*s,uint32_t since){
     pthread_mutex_lock(&g_ev_mx); uint32_t hi=g_ev_seq, lo=hi>=ST_NEV?hi-ST_NEV+1:1; if(since>=lo && since<=hi) lo=since+1;
     sb_put(s,"{\"seq\":%u,\"events\":[",hi);
@@ -428,7 +436,7 @@ static const StSpot g_st_spots[]={
 int hb_bounds_off(void); int hb_spar_available(void);
 static int st_control(const char*act,const char*qs){
     char m[96]; int k=0;
-    static const char*const feat[HBF_N]={"hitboxes","tracers","info","items","visible","zones"};
+    static const char*const feat[HBF_N]={"hitboxes","tracers","info","items","visible","zones","vehicles"};
     for(int f=0;f<HBF_N;f++) if(!strcmp(act,feat[f])){ __atomic_fetch_xor(&g_hb_toggle,1<<f,__ATOMIC_ACQ_REL);
         k=snprintf(m,sizeof m,"  [stats] page: %s %s\n",feat[f],hb_feat(f)?"on":"off"); (void)!write(2,m,k); return 1; }
     if(!strcmp(act,"teams")){ static const char*const tm[3]={"all","enemies only","friends only"}; __atomic_fetch_add(&g_hb_teamcycle,1,__ATOMIC_ACQ_REL);
@@ -650,14 +658,14 @@ static void st_snapshot(StBuf*s){
       const char*b=strrchr(mp,'/'); b=b?b+1:mp; snprintf(m,sizeof m,"%s",b); char*dot=strrchr(m,'.'); if(dot)*dot=0; sb_put(s,",\"map\":"); sb_str(s,m);
       st_maptop_ensure(mp,m); }
     { static int tp=-1; if(tp<0) tp=getenv("PELOAD_ALLOW_TELEPORT")?1:0; static const char*const tm[3]={"all","enemies","friends"};
-      sb_put(s,",\"overlay\":{\"zones\":%s,\"hitboxes\":%s,\"tracers\":%s,\"info\":%s,\"items\":%s,\"visible\":%s,\"teams\":\"%s\",\"teleport\":%s,\"host\":%s,\"tp_forward\":%s,\"controls\":%s,\"text_px\":%d,\"spar\":%s,\"spar_aim\":%.1f,\"spar_available\":%s,\"bounds_off\":%s,\"mic\":\"%s\",\"mic_in_use\":%s",
-          hb_feat(HBF_ZONES)?"true":"false",hb_feat(HBF_HITBOX)?"true":"false",hb_feat(HBF_TRACER)?"true":"false",hb_feat(HBF_INFO)?"true":"false",hb_feat(HBF_ITEMS)?"true":"false",hb_feat(HBF_VISIBLE)?"true":"false",
+      sb_put(s,",\"overlay\":{\"vehicles\":%s,\"zones\":%s,\"hitboxes\":%s,\"tracers\":%s,\"info\":%s,\"items\":%s,\"visible\":%s,\"teams\":\"%s\",\"teleport\":%s,\"host\":%s,\"tp_forward\":%s,\"controls\":%s,\"text_px\":%d,\"spar\":%s,\"spar_aim\":%.1f,\"spar_available\":%s,\"bounds_off\":%s,\"mic\":\"%s\",\"mic_in_use\":%s",
+          hb_feat(HBF_VEH)?"true":"false",hb_feat(HBF_ZONES)?"true":"false",hb_feat(HBF_HITBOX)?"true":"false",hb_feat(HBF_TRACER)?"true":"false",hb_feat(HBF_INFO)?"true":"false",hb_feat(HBF_ITEMS)?"true":"false",hb_feat(HBF_VISIBLE)?"true":"false",
           tm[hb_team_mode()],tp?"true":"false",st_is_host()?"true":"false",getenv("PELOAD_TELEPORT_HOST")?"true":"false",st_controls_ok()?"true":"false",g_hb_text_px>0?g_hb_text_px:7,hb_spar_enabled()?"true":"false",g_spar_ok?(double)g_spar_err:-1.0,hb_spar_available()?"true":"false",hb_bounds_off()==1?"true":hb_bounds_off()==0?"false":"null",
           !wa_mic_mode()?"off":wa_mic_muted()?"muted":wa_mic_mode()==2?"tone":"live",g_mic_streams>0?"true":"false");
       sb_put(s,",\"spots\":["); int ns=0; for(int i=0;i<(int)(sizeof g_st_spots/sizeof g_st_spots[0]);i++) if(!strcmp(g_st_spots[i].map,m)){
           sb_put(s,"%s{\"id\":\"%s\",\"label\":\"%s\",\"x\":%.1f,\"y\":%.1f,\"z\":%.1f}",ns++?",":"",g_st_spots[i].id,g_st_spots[i].label,g_st_spots[i].x,g_st_spots[i].y,g_st_spots[i].z); }
       sb_put(s,"]}"); snprintf(g_st_curmap,sizeof g_st_curmap,"%s",m); }
-    if(strcmp(m,g_trk_map)){ memset(g_lasthit,0,sizeof g_lasthit); snprintf(g_trk_map,sizeof g_trk_map,"%s",m); g_ntrk=0; g_nbip=0; memset(g_proj,0,sizeof g_proj); g_hb_local_slot=-1; }   // new map: new match stats
+    if(strcmp(m,g_trk_map)){ memset(g_lasthit,0,sizeof g_lasthit); snprintf(g_trk_map,sizeof g_trk_map,"%s",m); g_ntrk=0; g_nbip=0; memset(g_proj,0,sizeof g_proj); g_hb_local_slot=-1; st_kills_reset(); }   // new map: new match stats
     pthread_mutex_lock(&g_hm_mx); snprintf(g_hm_cur,sizeof g_hm_cur,"%s",m); if(g_hm.dirty && now-g_hm.saved>30){ hm_save(); g_hm.saved=now; } pthread_mutex_unlock(&g_hm_mx);
     static uint8_t tab[8192*0x18]; int hi=0; uint64_t arr=hb_object_array(); uint8_t hdr[0x60];
     if(arr && hb_read(arr,hdr,sizeof hdr) && *(uint32_t*)(hdr+0x2c)==0x64407440 && *(int32_t*)(hdr+0x24)==0x18){
@@ -744,6 +752,7 @@ static void st_snapshot(StBuf*s){
             const float*fw=(const float*)(d+0x5c); sb_put(s,",\"facing\":%.0f",atan2f(fw[1],fw[0])*57.2958f); }
         else sb_put(s,"null,\"weapons\":[],\"grenades\":{\"frag\":0,\"plasma\":0,\"spike\":0,\"firebomb\":0},\"vehicle\":null");
         sb_put(s,",\"pos\":"); sb_f3(s,o); sb_put(s,",\"speed\":%.2f",spd);
+        sb_put(s,",\"kills\":%d",st_kills_of(pl[k].name));
         if(t) sb_put(s,",\"deaths\":%d,\"hits\":%d,\"accuracy\":%.3f,\"shots\":%d,\"life\":%.1f,\"longest_life\":%.1f,\"distance\":%.1f,\"top_speed\":%.2f",t->deaths,t->hits,t->shots?(double)t->hits/t->shots:0.0,t->shots,t->alive?now-t->life_start:0.0,
                      t->longest>(t->alive?now-t->life_start:0)?t->longest:(t->alive?now-t->life_start:0),t->dist,t->top_speed);
         if(g_st_var_ok) st_player_traits(s,pl[k].rec);

@@ -25,6 +25,13 @@ canvas{width:100%;height:auto;display:block;background:#0b0b0b;border-radius:4px
 .ramp{height:8px;width:140px;border-radius:2px;background:linear-gradient(90deg,#1840ff,#18d0ff,#30e060,#f0e040,#ff3020)}
 .col{display:flex;flex-direction:column;gap:16px;min-width:0}
 #det{min-width:0}
+th .srt{display:inline-block;margin-left:2px;padding:0 2px;cursor:pointer;color:#555;font-size:10px;user-select:none}th .srt:hover{color:#ccc}th .srt.on{color:var(--accent)}
+.sortmode{display:flex;gap:12px;align-items:center;margin:0 0 6px;color:var(--dim)}.sortmode label{cursor:pointer}
+#mapfs{position:fixed;inset:0;z-index:50;background:#0b0b0b;display:none;flex-direction:column;align-items:center;justify-content:center;padding:12px;box-sizing:border-box}
+#mapfs.open{display:flex}#mapfs canvas{width:auto;height:auto;max-width:100%;max-height:calc(100vh - 70px)}
+#mapfs .fsx{position:absolute;top:8px;right:12px;width:34px;height:34px;border-radius:17px;border:1px solid #555;background:#222;color:#ddd;font-size:22px;line-height:30px;cursor:pointer;z-index:51}
+#mapfs .fsx:hover{background:#333;color:#fff}#mapfs .ctl{margin-top:8px}
+#cv{cursor:zoom-in}#mapfs #cv{cursor:crosshair}
 #det .x{float:right;cursor:pointer;background:none;border:0;color:var(--dim);font-size:18px;line-height:1}
 #det dl{display:grid;grid-template-columns:auto 1fr;gap:3px 12px;margin:8px 0 0}
 #det dt{color:var(--dim)}#det dd{margin:0;overflow-wrap:anywhere}
@@ -78,6 +85,7 @@ canvas{width:100%;height:auto;display:block;background:#0b0b0b;border-radius:4px
  <button data-a="tracers" title="Projectile trails and bullet lines">Tracers<kbd>F3</kbd></button>
  <button data-a="info" title="Shield, health, weapon, grenades, camo and vehicle labels over players">Player info<kbd>F4</kbd></button>
  <button data-a="items" title="Weapons and equipment lying on the map">Items<kbd>F5</kbd></button>
+ <button data-a="vehicles" title="Vehicles in the overlay: their hitboxes and info labels (on by default)">Vehicles</button>
  <button data-a="textdown" title="Smaller label text">Text −</button><span id="tpx" class="lbl"></span><button data-a="textup" title="Larger label text">Text +</button>
  <button data-a="teams" title="Which players the overlay shows">Show: all<kbd>F6</kbd></button>
  <button data-a="visible" title="Hitboxes and labels only for objects you can actually see (not behind walls)">Visible only<kbd>F9</kbd></button>
@@ -106,8 +114,11 @@ canvas{width:100%;height:auto;display:block;background:#0b0b0b;border-radius:4px
 </div>
 <div id="rules" class="panel"><h2 id="rt">Game rules</h2><div id="rb" class="note">not in a match</div></div>
 <div class="grid">
- <div class="panel"><div class="wrap"><table><thead><tr>
-  <th>Player</th><th>Shield</th><th>Health</th><th>Weapon</th><th>Deaths</th><th>Shots</th><th>Accuracy</th><th>Grenades</th><th>Vehicle</th><th>X, Y, Z</th><th>Speed</th><th>Traits</th></tr></thead>
+ <div class="panel"><div class="sortmode" title="With a column's sort (the arrows by each heading): team sort keeps each team together and sorts inside it; full sort orders everyone together">
+  Sort: <label><input type="radio" name="smode" value="team" checked> team sort</label><label><input type="radio" name="smode" value="full"> full sort</label>
+  <span id="sortlbl"></span><button id="sortclr" style="display:none;background:none;border:0;color:var(--accent);cursor:pointer;font:inherit">reset</button></div>
+ <div class="wrap"><table><thead><tr id="thr">
+  <th data-k="name">Player</th><th data-k="shield">Shield</th><th data-k="health">Health</th><th data-k="weapon">Weapon</th><th data-k="kills">Kills</th><th data-k="deaths">Deaths</th><th data-k="kd">K/D</th><th data-k="shots">Shots</th><th data-k="accuracy">Accuracy</th><th data-k="grenades">Grenades</th><th data-k="vehicle">Vehicle</th><th data-k="pos">X, Y, Z</th><th data-k="speed">Speed</th><th data-k="traits">Traits</th></tr></thead>
   <tbody id="tb"></tbody></table></div>
   <div class="note">Click a player for details. Their deaths are ringed on the heatmap.</div></div>
  <div class="col">
@@ -117,6 +128,8 @@ canvas{width:100%;height:auto;display:block;background:#0b0b0b;border-radius:4px
    <label><input type="checkbox" id="fp" checked> where players go</label>
    <label><input type="checkbox" id="pd" checked> players now</label>
    <label><input type="checkbox" id="pl"> names on map</label>
+   <label title="Vehicles: a square with the vehicle's name, dimmed when destroyed"><input type="checkbox" id="vh" checked> vehicles</label>
+   <button id="fsb" title="Show the map in the whole browser window (or click the map); Esc or the X closes it" style="background:#222;color:var(--fg);border:1px solid var(--line);border-radius:4px;padding:2px 8px;cursor:pointer;font:inherit">⤢ full window</button>
    <label title="In a game you host with PELOAD_ALLOW_TELEPORT=1: click a spot on the map to teleport yourself there (onto the highest surface at that point, roofs and cliff tops included). For exploring past the map's edges with the boundary patches (shim/docs/map-boundaries.md)."><input type="checkbox" id="tph"> click to teleport</label>
    <span id="hov" class="note" style="margin:0"></span>
   </div>
@@ -142,13 +155,33 @@ function pState(p){ const k=p.slot+'|'+p.name, now=performance.now()/1000;
   const lives=snap.variant&&snap.variant.respawn?snap.variant.respawn.lives:0;
   return !lives && now-deadSince.get(k)>60?'quit':'respawning'; }
 const PRANK={alive:0,respawning:1,quit:2};
+// ---- sorting: a column's arrows (ascending / descending); team sort keeps each team together ----
+function kdOf(p){ return (p.kills||0)/Math.max(1,p.deaths||0); }
+const SORTV={name:p=>p.name.toLowerCase(),shield:p=>p.shield,health:p=>p.health,weapon:p=>(p.weapon||'').toLowerCase(),kills:p=>p.kills||0,deaths:p=>p.deaths||0,
+ kd:kdOf,shots:p=>p.shots||0,accuracy:p=>p.shots?p.accuracy:-1,grenades:p=>p.grenades?p.grenades.frag+p.grenades.plasma+p.grenades.spike+p.grenades.firebomb:0,
+ vehicle:p=>(p.vehicle||'').toLowerCase(),pos:p=>p.alive?p.pos[0]:-1e9,speed:p=>p.speed||0,traits:p=>Object.keys(p.traits||{}).length};
+let sortK=null, sortD=1, sortMode='team';
+try{ const j=JSON.parse(localStorage.getItem('statsSort')||'null'); if(j){ sortK=j.k in SORTV?j.k:null; sortD=j.d===-1?-1:1; sortMode=j.m==='full'?'full':'team'; } }catch(err){}
+function saveSort(){ try{ localStorage.setItem('statsSort',JSON.stringify({k:sortK,d:sortD,m:sortMode})); }catch(err){} }
+function sortHeads(){ for(const th of document.querySelectorAll('#thr th')){ const k=th.dataset.k; if(!th.querySelector('.srt'))
+    th.insertAdjacentHTML('beforeend',`<span class="srt" data-k="${k}" data-d="1" title="ascending">▲</span><span class="srt" data-k="${k}" data-d="-1" title="descending">▼</span>`);
+    for(const a of th.querySelectorAll('.srt')) a.classList.toggle('on',sortK===k&&+a.dataset.d===sortD); }
+  for(const r of document.querySelectorAll('input[name="smode"]')) r.checked=r.value===sortMode;
+  document.getElementById('sortclr').style.display=sortK?'':'none'; }
+document.getElementById('thr').addEventListener('click',e=>{ const a=e.target.closest('.srt'); if(!a) return; e.stopPropagation();
+  const k=a.dataset.k, d=+a.dataset.d; if(sortK===k&&sortD===d) sortK=null; else { sortK=k; sortD=d; } saveSort(); sortHeads(); if(snap) renderTable(); });
+for(const r of document.querySelectorAll('input[name="smode"]')) r.addEventListener('change',()=>{ sortMode=r.value; saveSort(); if(snap) renderTable(); });
+document.getElementById('sortclr').addEventListener('click',()=>{ sortK=null; saveSort(); sortHeads(); if(snap) renderTable(); });
+sortHeads();
 function renderTable(){
   const st=new Map(snap.players.map(p=>[p,pState(p)]));
-  const ps=snap.players.slice().sort((a,b)=>PRANK[st.get(a)]-PRANK[st.get(b)]||a.team-b.team||a.name.localeCompare(b.name));
+  const cmpv=(x,y)=>x<y?-1:x>y?1:0;
+  const ps=snap.players.slice().sort(sortK?((a,b)=>(sortMode==='team'?a.team-b.team:0)||sortD*cmpv(SORTV[sortK](a),SORTV[sortK](b))||a.name.localeCompare(b.name))
+    :((a,b)=>PRANK[st.get(a)]-PRANK[st.get(b)]||a.team-b.team||a.name.localeCompare(b.name)));
   document.getElementById('tb').innerHTML=ps.map(p=>`<tr data-s="${p.slot}" class="${p.alive?'':st.get(p)==='quit'?'quit':'dead'} ${p.you?'you':''} ${p.slot===sel?'sel':''}">
    <td><span class="sw" style="background:${C[p.team_name]||'#888'}"></span>${E(p.name)}${p.you?' (you)':''}${p.host?'<span class="hostb" title="hosts this game">★ HOST</span>':''}${p.talking?'<span class="talkic" title="talking">🔊</span>':''}${p.muted?' 🔇':''}</td>
    <td>${B(p.shield,'#58b8ff')}</td><td>${B(p.health,'#7ddf6a')}</td><td>${E(p.weapon||(p.alive?'':st.get(p)))}</td>
-   <td>${p.deaths??''}</td><td>${p.shots??''}</td><td>${p.shots?Math.round(p.accuracy*100)+'%':''}</td><td>${p.grenades.frag}f ${p.grenades.plasma}p ${p.grenades.spike}s ${p.grenades.firebomb}b</td>
+   <td>${p.kills??''}</td><td>${p.deaths??''}</td><td>${kdOf(p).toFixed(2)}</td><td>${p.shots??''}</td><td>${p.shots?Math.round(p.accuracy*100)+'%':''}</td><td>${p.grenades.frag}f ${p.grenades.plasma}p ${p.grenades.spike}s ${p.grenades.firebomb}b</td>
    <td>${E(p.vehicle||'')}</td><td>${p.alive?p.pos.map(v=>v.toFixed(1)).join(', '):''}</td><td>${p.speed.toFixed(1)}</td><td>${traitBadges(p,3)}</td></tr>`).join('');
 }
 // ---- traits: labels for the trait keys (playlist option names) ----
@@ -324,6 +357,9 @@ function drawMap(){
   if(heatImg) cx.drawImage(heatImg,0,0);
   const sp=sel!=null&&snap?snap.players.find(q=>q.slot===sel):null;
   if(sp&&heat){cx.strokeStyle='#fff';cx.lineWidth=1.5;for(const d of heat.deaths){if(d[7]!==sel||d[4]!==sp.name||(scope()!=='all'&&d[5]!==heat.match))continue;const [x,y]=toScreen(d[0],d[1]);cx.beginPath();cx.arc(x,y,6,0,7);cx.stroke()}}
+  if(document.getElementById('vh').checked&&snap&&snap.vehicles) for(const v of snap.vehicles){ if(!v.pos) continue; const [x,y]=toScreen(v.pos[0],v.pos[1]);
+   const dead=!(v.health>0); cx.globalAlpha=dead?0.35:1; cx.fillStyle='#e8e8e8'; cx.strokeStyle='#000'; cx.lineWidth=1; cx.fillRect(x-4,y-4,8,8); cx.strokeRect(x-4,y-4,8,8);
+   const nm=String(v.type||'').split(/[\\/]/).pop().replace(/_/g,' '); cx.font='10px system-ui'; cx.textAlign='left'; cx.lineWidth=3; cx.strokeStyle='#000c'; cx.strokeText(nm,x+6,y+3); cx.fillStyle='#cfd8e0'; cx.fillText(nm,x+6,y+3); cx.globalAlpha=1; }
   if(document.getElementById('pd').checked&&snap) for(const p of snap.players){ if(!p.alive)continue; const [x,y]=toScreen(p.pos[0],p.pos[1]);
    cx.fillStyle=C[p.team_name]||'#888'; cx.beginPath(); cx.arc(x,y,p.slot===sel?6:3.5,0,7); cx.fill();
    if(p.slot===sel||p.you){cx.strokeStyle=p.you?'#fff':'#ff0';cx.lineWidth=2;cx.stroke()}
@@ -331,7 +367,22 @@ function drawMap(){
      cx.font='11px system-ui'; cx.textAlign='left'; cx.lineWidth=3; cx.strokeStyle='#000c'; cx.strokeText(t,x+7,y-6); cx.fillStyle=p.slot===sel?'#ff0':'#fff'; cx.fillText(t,x+7,y-6); } }
 }
 async function pollHeat(){ try{ heat=await (await fetch('/heat.json')).json(); loadMapTop(heat.map); buildLayers(); drawMap(); }catch(e){} setTimeout(pollHeat,4000) }
-for(const id of ['scope','fp','pd','pl']) document.getElementById(id).addEventListener('change',()=>{buildLayers();drawMap();renderDet()});
+for(const id of ['scope','fp','pd','pl','vh']) document.getElementById(id).addEventListener('change',()=>{buildLayers();drawMap();renderDet()});
+// ---- the map in the whole browser window: click the map (or "full window"); the X or Esc puts it back ----
+const mapfs=document.createElement('div'); mapfs.id='mapfs'; mapfs.innerHTML='<button class="fsx" title="Close (Esc)">×</button>'; document.body.appendChild(mapfs);
+let fsHome=null;
+function fsSize(){ cv.width=Math.max(200,Math.floor(window.innerWidth-24)); cv.height=Math.max(200,Math.floor(window.innerHeight-80)); buildLayers(); drawMap(); }
+function openMapFs(){ if(mapfs.classList.contains('open')) return; const ctl=cv.parentNode.querySelector('.ctl'), lg=cv.parentNode.querySelector('.legend');
+  fsHome={parent:cv.parentNode,next:cv.nextSibling}; mapfs.appendChild(cv); if(ctl) mapfs.appendChild(ctl); if(lg) mapfs.appendChild(lg);
+  mapfs.classList.add('open'); fsSize(); }
+function closeMapFs(){ if(!mapfs.classList.contains('open')||!fsHome) return; const ctl=mapfs.querySelector('.ctl'), lg=mapfs.querySelector('.legend');
+  fsHome.parent.insertBefore(cv,fsHome.next); if(ctl) fsHome.parent.insertBefore(ctl,cv.nextSibling); if(lg) fsHome.parent.insertBefore(lg,(ctl||cv).nextSibling);
+  mapfs.classList.remove('open'); cv.width=560; cv.height=560; buildLayers(); drawMap(); }
+mapfs.querySelector('.fsx').addEventListener('click',closeMapFs);
+document.getElementById('fsb').addEventListener('click',()=>{ mapfs.classList.contains('open')?closeMapFs():openMapFs(); });
+cv.addEventListener('click',()=>{ if(!mapfs.classList.contains('open') && !document.getElementById('tph').checked) openMapFs(); });
+document.addEventListener('keydown',e=>{ if(e.key==='Escape') closeMapFs(); });
+window.addEventListener('resize',()=>{ if(mapfs.classList.contains('open')) fsSize(); });
 // world coordinates under the mouse
 cv.addEventListener('mousemove',e=>{ if(!view) return; const r=cv.getBoundingClientRect(), sx=(e.clientX-r.left)*cv.width/r.width, sy=(e.clientY-r.top)*cv.height/r.height;
   const x=view.wx0+(sx-view.ox)/view.sc, y=view.wy0+view.wh-(sy-view.oy)/view.sc; document.getElementById('hov').textContent=`x ${x.toFixed(1)}, y ${y.toFixed(1)}`; });

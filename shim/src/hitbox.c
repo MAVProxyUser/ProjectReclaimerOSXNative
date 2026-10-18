@@ -79,13 +79,14 @@ static void* objdump_thread(void*a){ (void)a; pthread_setname_np("shim-objdump")
 //   F4 PELOAD_HB_INFO    player info: shield/health %, weapon, grenades, active camo, vehicle seat
 //   F5 PELOAD_HB_ITEMS   weapons and equipment lying on the map, by tag name
 //   F9 PELOAD_HB_VISIBLE visible only: hitboxes and labels only for objects the player can actually see
-enum { HBF_HITBOX, HBF_TRACER, HBF_INFO, HBF_ITEMS, HBF_VISIBLE, HBF_ZONES, HBF_N };
+//      PELOAD_HB_VEHICLES (default on; the stats page's Vehicles button) vehicles in the hitboxes / info labels
+enum { HBF_HITBOX, HBF_TRACER, HBF_INFO, HBF_ITEMS, HBF_VISIBLE, HBF_ZONES, HBF_VEH, HBF_N };
 static int g_hbf_init, g_hbf_on[HBF_N], g_hb_all, g_hb_spheres;
-static void hbf_init(void){ if(g_hbf_init) return; static const char*const env[HBF_N]={"PELOAD_HITBOXES","PELOAD_HB_TRACERS","PELOAD_HB_INFO","PELOAD_HB_ITEMS","PELOAD_HB_VISIBLE","PELOAD_HB_ZONES"};
-    for(int f=0;f<HBF_N;f++){ const char*e=getenv(env[f]); g_hbf_on[f]=e&&*e&&strcmp(e,"0"); }
+static void hbf_init(void){ if(g_hbf_init) return; static const char*const env[HBF_N]={"PELOAD_HITBOXES","PELOAD_HB_TRACERS","PELOAD_HB_INFO","PELOAD_HB_ITEMS","PELOAD_HB_VISIBLE","PELOAD_HB_ZONES","PELOAD_HB_VEHICLES"};
+    for(int f=0;f<HBF_N;f++){ const char*e=getenv(env[f]); g_hbf_on[f]= f==HBF_VEH ? !(e&&!strcmp(e,"0")) : (e&&*e&&strcmp(e,"0")); }
     const char*e=getenv("PELOAD_HITBOXES"); g_hb_all=e&&!strcasecmp(e,"all"); g_hb_spheres=e&&!strcasecmp(e,"spheres"); g_hbf_init=1; }
 static int hb_feat(int f){ hbf_init(); return g_hbf_on[f] ^ ((g_hb_toggle>>f)&1); }
-static int hb_overlay_on(void){ for(int f=0;f<HBF_N;f++) if(f!=HBF_VISIBLE && hb_feat(f)) return 1; return 0; }   // (visible-only alone draws nothing)
+static int hb_overlay_on(void){ for(int f=0;f<HBF_N;f++) if(f!=HBF_VISIBLE && f!=HBF_VEH && hb_feat(f)) return 1; return 0; }   // (visible-only / vehicles alone draw nothing)
 // The camera tracker (VS cb0 of the frame's first world draw) feeds the overlay and the teleport's "which body is
 // mine"; it runs when either needs it.
 static int stats_on(void);   // stats.c: the live stats service uses the camera to mark "you"
@@ -143,6 +144,7 @@ static int hb_collect(HbObj*out,int max){
     for(int i=0;i<hi && n<max;i++){ const uint8_t*e=g_hb_tab+i*0x18; if(!*(const uint16_t*)e) continue; int t=e[3];
         int unit = t==0||t==1||t==12;
         int want = (unit && (fh||fi)) || (t==5 && (ft || (fh&&g_hb_all))) || ((t==2||t==3) && (fw || (fh&&g_hb_all)));
+        if(t==1 && !hb_feat(HBF_VEH)) want=0;   // vehicles switched off (the stats page's Vehicles button)
         if(g_hb_units_only) want=unit; if(!want) continue;
         uint64_t p=*(const uint64_t*)(e+0x10); static uint8_t dh[0x380]; size_t rd=unit?0x380:0x140; if(!p || !hb_read(p,dh,rd)) continue;
         const float*od=(const float*)(dh+0x1c);
