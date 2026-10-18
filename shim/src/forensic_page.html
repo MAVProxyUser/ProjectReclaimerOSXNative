@@ -221,7 +221,7 @@ $('#s_voice').onchange=async e=>{ if(!await ctl('voice='+(e.target.checked?1:0))
 function renderSessions(){
   const el=$('#sl'); if(!S.sessions.length){ el.innerHTML='<span class="note">none yet: sessions start when this client is in a game session</span>'; return; }
   el.innerHTML=S.sessions.map(s=>{ const m=s.session||{}; const live=s.name===S.current;
-    return `<div class="s${s.name===cur?' sel':''}" data-n="${esc(s.name)}"><b>${esc(m.map||m.label||s.name)}</b>${live?'<span class="live">LIVE</span>':''}<small>${esc(m.started_unix?fD(m.started_unix):s.name)}${m.server?' &middot; '+esc(m.server):''}<br>voice ${fB(s.voice_bytes)} &middot; events ${fB(s.events_bytes)}</small></div>`; }).join('');
+    return `<div class="s${s.name===cur?' sel':''}" data-n="${esc(s.name)}"><b>${esc(m.map||m.label||s.name)}</b>${live?'<span class="live">LIVE</span>':''}<small>${esc(m.started_unix?fD(m.started_unix):s.name)}${m.server?' &middot; '+esc(m.server):''}<br><span title="Every voice packet record: speech AND the server's voice control packets (one per player about every 0.1 s, no audio) -- a session can hold megabytes with nobody talking; open it to see the utterances">voice log ${fB(s.voice_bytes)}</span> &middot; events ${fB(s.events_bytes)}</small></div>`; }).join('');
 }
 $('#sl').onclick=e=>{ const d=e.target.closest('.s'); if(d) select(d.dataset.n); };
 

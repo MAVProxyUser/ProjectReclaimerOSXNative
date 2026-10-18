@@ -1028,13 +1028,14 @@ static void st_snapshot(StBuf*s){
     sb_put(s,",\"session\":["); for(int k=0;k<nss;k++){ sb_put(s,"%s{\"name\":",k?",":""); sb_str(s,ss[k].name);
         sb_put(s,",\"index\":%d,\"peer\":%d,\"host\":%s,\"voice\":\"%016llx\",\"muted\":%s,\"talking\":%s",ss[k].idx,ss[k].peer,ss[k].host?"true":"false",(unsigned long long)ss[k].voice,ss[k].muted?"true":"false",st_talk_age(ss[k].voice)<0.5?"true":"false");
         { const char*ip=st_addr_of(ss[k].voice); if(ip){ sb_put(s,",\"ip\":"); sb_str(s,ip); } } sb_put(s,"}"); }
-    // addresses: "host" = this client hosts (players' addresses from its moderation table), "client" = only the server's
-    { char srv[96]=""; const char*p=strstr(g_cmdlineA,"join?server="); if(p){ p+=12; size_t j2=0; while(*p && *p!=' ' && *p!='"' && *p!='&' && j2+1<sizeof srv) srv[j2++]=*p++; srv[j2]=0; }
-      sb_put(s,",\"addr_role\":\"%s\"",!st_ips_ok()?"hidden":g_st_hosting?"host":srv[0]?"client":"none");
-      if(srv[0] && st_ips_ok() && !g_st_hosting){ sb_put(s,",\"server_addr\":"); sb_str(s,srv); } }
     { int hostplayer=0; for(int k=0;k<nss;k++) if(ss[k].host) hostplayer=1;
       sb_put(s,"],\"session_state\":%u,\"host_peer\":%d,\"local_peer\":%d,\"dedicated\":%s,\"mute\":%s",sst,g_st_hostpeer,g_st_localpeer,
           g_st_hostpeer>=0 && nss && !hostplayer?"true":"false",g_st_setmuted&&st_controls_ok()?"true":"false"); }
+    // addresses: "host" = this client hosts (players' addresses from its moderation table), "client" = only the server's
+    { char srv[96]=""; const char*p=strstr(g_cmdlineA,"join?server="); if(p){ p+=12; size_t j2=0; while(*p && *p!=' ' && *p!='"' && *p!='&' && j2+1<sizeof srv) srv[j2++]=*p++; srv[j2]=0; }
+      int client=srv[0] || (nss && g_st_hostpeer>=0 && g_st_hostpeer!=g_st_localpeer);   // (the join link is on the menu process's command line, not always ours)
+      sb_put(s,",\"addr_role\":\"%s\"",!st_ips_ok()?"hidden":g_st_hosting?"host":client?"client":"none");
+      if(srv[0] && st_ips_ok() && !g_st_hosting){ sb_put(s,",\"server_addr\":"); sb_str(s,srv); } }
     sb_put(s,",\"players\":["); int first=1;
     for(int k=0;k<np;k++){ StTrack*t=st_track(&pl[k]); uint32_t h=pl[k].unit; uint64_t p=ST_DATUM(h); static uint8_t d[0x380];
         int have = p && ST_TYPE(h)==0 && hb_read(p,d,sizeof d); int dead = !have || ((*(const uint32_t*)(d+0x110)>>2)&1);

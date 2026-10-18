@@ -483,6 +483,14 @@ def main():
             pts = pts[~far]
             core = (pts[:, :2].min(0), pts[:, :2].max(0))
         core = (np.maximum(np.minimum(core[0], safe_box[0]), glo), np.minimum(np.maximum(core[1], safe_box[1]), ghi))
+    if safe_box is None and len(pts) >= 2:
+        # no safe zones and the placements cover a sliver of the map (a Forge canvas: Forge World's default objects span
+        # 26 x 153 units of a ~255 x 460 play area; the stats page's heatmap ran far off the picture): the bulk of the
+        # geometry (1st..99th percentile of the vertices, as re-tools/h3nav.py frames its graph) joins the crop
+        c = tris[:, :, :2].reshape(-1, 2); plo, phi = np.percentile(c, 1, 0), np.percentile(c, 99, 0)
+        if np.prod(core[1] - core[0]) < 0.2 * np.prod(phi - plo):
+            log('placements cover %.0f of %.0f square units: framing the bulk of the geometry too' % (np.prod(core[1] - core[0]), np.prod(phi - plo)))
+            core = (np.minimum(core[0], plo), np.maximum(core[1], phi))
     if opts.bounds:
         x0, y0, x1, y1 = (float(v) for v in opts.bounds.split(','))
         crop = 'bounds'
