@@ -285,7 +285,11 @@ watch from another device). From top to bottom the page shows:
 - **Death heatmap** -- where players died (blue = few, red = many) over a top-down picture of the map and a grey
   "where players walk" layer, with everyone's live position and the vehicles. Deaths for this match or all matches on
   that map (always collected, kept in `~/Library/Application Support/ReclaimerMac/heatmaps/`; the **heatmap** checkbox
-  only shows or hides them). Click the map (or "full window") to fill the browser window; X or Esc closes it. The map pictures are made once from the game's own `.map`
+  only shows or hides them). The "on map" checkboxes **names**, **x/y** and **health / shield** label every living
+  player's dot, one line each, stacked (name on top); each adds or removes its own line and is remembered by the browser. Your own label and the
+  selected player's always show the name. Labels of players standing close together are moved apart with a thin line back to
+  their dot; when there is no room left the rest are left out (the map's corner says how many; the full window has more
+  room). Click the map (or "full window") to fill the browser window; X or Esc closes it. The map pictures are made once from the game's own `.map`
   files (`bash shim/tools/maptop.sh`; `play.sh` runs it in the background when they are missing; needs python3 with
   numpy and Pillow).
 

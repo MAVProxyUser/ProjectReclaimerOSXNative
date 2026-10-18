@@ -21,7 +21,7 @@ tbody tr{cursor:pointer}tbody tr:hover{background:#222}tbody tr.sel{background:#
 .sw{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:6px;vertical-align:middle}
 canvas{width:100%;height:auto;display:block;background:#0b0b0b;border-radius:4px}
 .ctl{display:flex;flex-wrap:wrap;gap:6px 14px;margin:8px 0 0;color:var(--dim)}
-.ctl label{cursor:pointer}.ctl select{background:#222;color:var(--fg);border:1px solid var(--line);border-radius:4px}
+.ctl label{cursor:pointer}.ctl .ctlg{display:inline-flex;flex-wrap:wrap;align-items:center;gap:6px 10px}.ctl select{background:#222;color:var(--fg);border:1px solid var(--line);border-radius:4px}
 .legend{display:flex;align-items:center;gap:8px;margin-top:6px;color:var(--dim)}
 .ramp{height:8px;width:140px;border-radius:2px;background:linear-gradient(90deg,#1840ff,#18d0ff,#30e060,#f0e040,#ff3020)}
 .col{display:flex;flex-direction:column;gap:16px;min-width:0}
@@ -168,7 +168,10 @@ th .srt{display:inline-block;margin-left:2px;padding:0 2px;cursor:pointer;color:
    <label title="Deaths per spot (collected for every map all the time, this switch only shows or hides it)"><input type="checkbox" id="hmv" checked> heatmap</label>
    <label><input type="checkbox" id="fp" checked> where players go</label>
    <label><input type="checkbox" id="pd" checked> players now</label>
-   <label><input type="checkbox" id="pl"> names on map</label>
+   <span class="ctlg" title="A label beside every living player's dot, its lines stacked: name, then x/y, then health / shield. Each switch adds or removes its own line. Your own label and the selected player's always show the name. Labels of players standing close together are moved apart, with a thin line back to their dot; when there is no room left, the rest are left out (the map's corner says how many).">on map
+    <label><input type="checkbox" id="pl"> names</label>
+    <label><input type="checkbox" id="pxy"> x/y</label>
+    <label><input type="checkbox" id="phs"> health / shield</label></span>
    <label title="Vehicles: a square with the vehicle's name, dimmed when destroyed"><input type="checkbox" id="vh" checked> vehicles</label>
    <button id="fsb" title="Show the map in the whole browser window (or click the map); Esc or the X closes it" style="background:#222;color:var(--fg);border:1px solid var(--line);border-radius:4px;padding:2px 8px;cursor:pointer;font:inherit">⤢ full window</button>
    <label title="In a game you host with PELOAD_ALLOW_TELEPORT=1: click a spot on the map to teleport yourself there (onto the highest surface at that point, roofs and cliff tops included). For exploring past the map's edges with the boundary patches (shim/docs/map-boundaries.md)."><input type="checkbox" id="tph"> click to teleport</label>
@@ -500,22 +503,85 @@ function drawMap(){
   if(heatImg && document.getElementById('hmv').checked) cx.drawImage(heatImg,0,0);
   const sp=sel!=null&&snap?snap.players.find(q=>q.slot===sel):null;
   if(sp&&heat){cx.strokeStyle='#fff';cx.lineWidth=1.5;for(const d of heat.deaths){if(d[7]!==sel||d[4]!==sp.name||(scope()!=='all'&&d[5]!==heat.match))continue;const [x,y]=toScreen(d[0],d[1]);cx.beginPath();cx.arc(x,y,6,0,7);cx.stroke()}}
+  const vobs=[];   // the vehicles' squares + names: player labels keep off them when there is room
   if(document.getElementById('vh').checked&&snap&&snap.vehicles) for(const v of snap.vehicles){ if(!v.pos) continue; const [x,y]=toScreen(v.pos[0],v.pos[1]);
    const dead=!(v.health>0); cx.globalAlpha=dead?0.35:1; cx.fillStyle='#e8e8e8'; cx.strokeStyle='#000'; cx.lineWidth=1; cx.fillRect(x-4,y-4,8,8); cx.strokeRect(x-4,y-4,8,8);
-   const nm=String(v.type||'').split(/[\\/]/).pop().replace(/_/g,' '); cx.font='10px system-ui'; cx.textAlign='left'; cx.lineWidth=3; cx.strokeStyle='#000c'; cx.strokeText(nm,x+6,y+3); cx.fillStyle='#cfd8e0'; cx.fillText(nm,x+6,y+3); cx.globalAlpha=1; }
+   const nm=String(v.type||'').split(/[\\/]/).pop().replace(/_/g,' '); cx.font='10px system-ui'; cx.textAlign='left'; cx.lineWidth=3; cx.strokeStyle='#000c'; cx.strokeText(nm,x+6,y+3); cx.fillStyle='#cfd8e0'; cx.fillText(nm,x+6,y+3); cx.globalAlpha=1;
+   vobs.push([x-5,y-5,x+8+cx.measureText(nm).width,y+5]); }
   if(snap&&snap.nav&&snap.nav.path&&snap.nav.path.length>1){   // PELOAD_NAV: where the test walker is heading
    cx.save(); cx.setLineDash([5,4]); cx.strokeStyle='#7df9ff'; cx.lineWidth=2; cx.beginPath();
    snap.nav.path.forEach((q,i)=>{ const [x,y]=toScreen(q[0],q[1]); i?cx.lineTo(x,y):cx.moveTo(x,y); }); cx.stroke(); cx.restore();
    if(snap.nav.goal){ const [x,y]=toScreen(snap.nav.goal[0],snap.nav.goal[1]); cx.strokeStyle='#7df9ff'; cx.lineWidth=2; cx.beginPath(); cx.arc(x,y,7,0,7); cx.stroke();
      cx.font='10px system-ui'; cx.textAlign='left'; cx.lineWidth=3; cx.strokeStyle='#000c'; cx.strokeText('walker goal ('+snap.nav.mode+')',x+9,y+3); cx.fillStyle='#7df9ff'; cx.fillText('walker goal ('+snap.nav.mode+')',x+9,y+3); } }
-  if(document.getElementById('pd').checked&&snap) for(const p of snap.players){ if(!p.alive)continue; const [x,y]=toScreen(p.pos[0],p.pos[1]);
-   cx.fillStyle=C[p.team_name]||'#888'; cx.beginPath(); cx.arc(x,y,p.slot===sel?6:3.5,0,7); cx.fill();
-   if(p.slot===sel||p.you){cx.strokeStyle=p.you?'#fff':'#ff0';cx.lineWidth=2;cx.stroke()}
-   if(p.slot===sel||p.you||document.getElementById('pl').checked){ const t=`${p.name}${p.you?' (you)':''}  ${p.pos[0].toFixed(1)}, ${p.pos[1].toFixed(1)}`;
-     cx.font='11px system-ui'; cx.textAlign='left'; cx.lineWidth=3; cx.strokeStyle='#000c'; cx.strokeText(t,x+7,y-6); cx.fillStyle=p.slot===sel?'#ff0':'#fff'; cx.fillText(t,x+7,y-6); } }
+  if(document.getElementById('pd').checked&&snap){ const on=[];
+   for(const p of snap.players){ if(!p.alive||!p.pos)continue; const [x,y]=toScreen(p.pos[0],p.pos[1]); on.push({p,x,y});
+    cx.fillStyle=C[p.team_name]||'#888'; cx.beginPath(); cx.arc(x,y,p.slot===sel?6:3.5,0,7); cx.fill();
+    if(p.slot===sel||p.you){cx.strokeStyle=p.you?'#fff':'#ff0';cx.lineWidth=2;cx.stroke()} }
+   drawLabels(on,vobs); }   // after every dot: no dot is drawn over a label
+}
+// ---- player labels on the map (user, 2026-10-18): "names", "x/y" and "health / shield" are separate switches, remembered in
+// localStorage; a label's lines stack (name, x/y, health / shield), a line whose switch is off is left out. You and the selected
+// player always show the name. Each stack gets a dark box edged in its team colour; labels are placed one by one (selected, you,
+// then by slot) at the nearest free spot around their dot -- above / below, right / left, then pushed further out, clear of the
+// labels already placed, the other dots and the vehicles -- with a thin line back to the dot when it had to move away. A label
+// with no room left at all (a crowd: the boxes would only pile up) is left out and counted in the map's corner; the full window
+// has room for more. Yours and the selected player's are placed first, so they are never left out.
+const LBLS={n:'pl',xy:'pxy',hs:'phs'};
+try{ const j=JSON.parse(localStorage.getItem('mapLabels')||'null'); if(j) for(const k in LBLS) if(typeof j[k]==='boolean') document.getElementById(LBLS[k]).checked=j[k]; }catch(err){}
+function saveLabels(){ try{ const o={}; for(const k in LBLS) o[k]=document.getElementById(LBLS[k]).checked; localStorage.setItem('mapLabels',JSON.stringify(o)); }catch(err){} }
+for(const id of Object.values(LBLS)) document.getElementById(id).addEventListener('change',saveLabels);
+// a label's lines, each a list of [text, colour] pieces drawn side by side
+function labLines(p){ const L=[], on=id=>document.getElementById(id).checked, pc=v=>Math.round((v||0)*100)+'%';
+  if(on('pl')||p.you||p.slot===sel) L.push([[`${p.name}${p.you?' (you)':''}`,p.slot===sel?'#ff0':'#fff']]);
+  if(on('pxy')) L.push([[`${p.pos[0].toFixed(1)}, ${p.pos[1].toFixed(1)}`,'#d8dde2']]);
+  if(on('phs')&&typeof p.health==='number') L.push([['health '+pc(p.health),'#7ddf6a'],[' / ','#aaa'],['shield '+pc(p.shield),'#58b8ff']]);
+  return L; }
+const labPrev=new Map();   // slot -> the spot its label had last frame: tried first, so labels don't hop about as players move
+function drawLabels(ps,vobs){
+  const LH=13, PX=4, PY=2, G=5, NB=8, W=cv.width, H=cv.height;
+  cx.font='11px system-ui'; cx.textAlign='left'; cx.textBaseline='alphabetic';
+  const labs=[];
+  ps.forEach((q,i)=>{ const L=labLines(q.p); if(!L.length) return;
+    const w=Math.max(...L.map(l=>l.reduce((s,[t])=>s+cx.measureText(t).width,0)));
+    labs.push(Object.assign({i,L,w:Math.ceil(w)+2*PX,h:L.length*LH+2*PY},q)); });
+  if(!labs.length) return;
+  const pri=l=>l.p.slot===sel?0:l.p.you?1:2;
+  labs.sort((a,b)=>pri(a)-pri(b)||a.p.slot-b.p.slot);
+  const dots=ps.map(q=>[q.x-5,q.y-5,q.x+5,q.y+5]), cores=ps.map(q=>[q.x-2,q.y-2,q.x+2,q.y+2]), placed=[]; let hidden=0;
+  const hit=(r,rs,skip=-1)=>{ for(let j=0;j<rs.length;j++){ const s=rs[j]; if(j!==skip&&r[0]<s[2]&&r[2]>s[0]&&r[1]<s[3]&&r[3]>s[1]) return true; } return false; };
+  for(const l of labs){ const {x,y,w,h}=l;
+    // the first NB spots touch the dot (above right first: where the label always was), then the same ones pushed out a step at a
+    // time (a line up / down, 16 px sideways), so the spots are tried nearest first
+    const S=[[x+G,y-G-h],[x+G,y+G],[x-G-w,y-G-h],[x-G-w,y+G],[x+G+3,y-h/2],[x-G-3-w,y-h/2],[x-w/2,y-G-h-4],[x-w/2,y+G+4]];
+    for(let k=1;k<=8;k++){ const d=k*LH, e=k*16;
+      S.push([x+G,y-G-h-d],[x+G,y+G+d],[x-G-w,y-G-h-d],[x-G-w,y+G+d],[x+G+3+e,y-h/2],[x-G-3-w-e,y-h/2],[x-w/2,y-G-h-4-d],[x-w/2,y+G+4+d]); }
+    const rect=i=>[S[i][0],S[i][1],S[i][0]+w,S[i][1]+h], inside=r=>r[0]>=0&&r[1]>=0&&r[2]<=W&&r[3]<=H;
+    // last frame's spot first; one further out only after the NB next to the dot (so a label moves back in when there is room)
+    const prev=labPrev.get(l.p.slot), order=prev==null||prev>=S.length?[...S.keys()]:prev<NB?[prev,...S.keys()]:[...S.keys()].slice(0,NB).concat(prev,[...S.keys()]);
+    let pick=-1;
+    // a spot next to the dot it had last frame stays while no label or vehicle covers it and no other dot is well inside it
+    if(prev!=null&&prev<NB){ const r=rect(prev); if(inside(r)&&!hit(r,placed)&&!hit(r,vobs)&&!hit(r,cores,l.i)) pick=prev; }
+    for(const strict of [true,false]){ if(pick>=0) break;   // first clear of the other dots and the vehicles too, then of labels only
+      for(const i of order){ const r=rect(i); if(inside(r)&&!hit(r,placed)&&!(strict&&(hit(r,dots,l.i)||hit(r,vobs)))){ pick=i; break; } } }
+    let r;
+    if(pick<0&&pri(l)===2){ labPrev.delete(l.p.slot); hidden++; continue; }
+    if(pick<0){ pick=0; r=rect(0); const dx=Math.max(0,-r[0])-Math.max(0,r[2]-W), dy=Math.max(0,-r[1])-Math.max(0,r[3]-H); r=[r[0]+dx,r[1]+dy,r[2]+dx,r[3]+dy]; }   // its usual spot, kept on the canvas
+    else r=rect(pick);
+    labPrev.set(l.p.slot,pick); placed.push(r); l.r=r; }
+  // drawn lowest priority first: the selected player's and your labels end up on top
+  for(let n=labs.length-1;n>=0;n--){ const l=labs[n], r=l.r, p=l.p; if(!r) continue; const edge=p.slot===sel?'#ff0':p.you?'#fff':(C[p.team_name]||'#888');
+    const nx=Math.max(r[0],Math.min(l.x,r[2])), ny=Math.max(r[1],Math.min(l.y,r[3]));
+    if(Math.hypot(nx-l.x,ny-l.y)>G+4){ cx.globalAlpha=0.8; cx.strokeStyle=edge; cx.lineWidth=1; cx.beginPath(); cx.moveTo(l.x,l.y); cx.lineTo(nx,ny); cx.stroke(); cx.globalAlpha=1; }
+    cx.fillStyle='rgba(0,0,0,0.6)'; cx.beginPath(); if(cx.roundRect) cx.roundRect(r[0],r[1],r[2]-r[0],r[3]-r[1],3); else cx.rect(r[0],r[1],r[2]-r[0],r[3]-r[1]); cx.fill();
+    cx.globalAlpha=0.85; cx.strokeStyle=edge; cx.lineWidth=1; cx.stroke(); cx.globalAlpha=1;
+    l.L.forEach((line,k)=>{ const by=r[1]+PY+k*LH+10; let tx=r[0]+PX; const at=line.map(([t,c])=>{ const a=tx; tx+=cx.measureText(t).width; return a; });
+      cx.lineWidth=3; cx.strokeStyle='#000c'; line.forEach(([t],j)=>cx.strokeText(t,at[j],by));   // the outline under every piece first,
+      line.forEach(([t,c],j)=>{ cx.fillStyle=c; cx.fillText(t,at[j],by); }); }); }   // then the letters
+  if(hidden){ const t=`${hidden} label${hidden>1?'s':''} left out: no room${mapfs.classList.contains('open')?'':' (full window has more)'}`;
+    cx.font='11px system-ui'; cx.textAlign='left'; cx.lineWidth=3; cx.strokeStyle='#000c'; cx.strokeText(t,6,H-7); cx.fillStyle='#f0c060'; cx.fillText(t,6,H-7); }
 }
 async function pollHeat(){ try{ heat=await (await fetch('/heat.json')).json(); loadMapTop(heat.map); buildLayers(); drawMap(); }catch(e){} setTimeout(pollHeat,4000) }
-for(const id of ['scope','fp','pd','pl','vh','hmv']) document.getElementById(id).addEventListener('change',()=>{buildLayers();drawMap();renderDet()});
+for(const id of ['scope','fp','pd','pl','pxy','phs','vh','hmv']) document.getElementById(id).addEventListener('change',()=>{buildLayers();drawMap();renderDet()});
 // ---- the map in the whole browser window: click the map (or "full window"); the X or Esc puts it back ----
 const mapfs=document.createElement('div'); mapfs.id='mapfs'; mapfs.innerHTML='<button class="fsx" title="Close (Esc)">×</button>'; document.body.appendChild(mapfs);
 let fsHome=null;
