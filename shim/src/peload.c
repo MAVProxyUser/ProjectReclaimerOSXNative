@@ -8185,6 +8185,26 @@ static void     MSABI i_Sleep(uint32_t ms){ if(ms==0){ sched_yield(); return; } 
 static uint32_t MSABI i_SleepEx(uint32_t ms,int alert){ static int plain=-1; if(plain<0) plain=getenv("PELOAD_SLEEPEX_PLAIN")?1:0;
     if(alert && t_apc_ran && !plain){ t_apc_ran=0; return 0xC0; }   // WAIT_IO_COMPLETION
     i_Sleep(ms); return 0; }
+// ntdll NtDelayExecution(alertable, interval in 100 ns units: < 0 relative, > 0 absolute FILETIME). It was missing, so
+// GetProcAddress handed out a no-op stub -- and the client sleeps with it whenever it thinks it runs under Wine (it does:
+// GetProcAddress(ntdll, "wine_get_version") is a stub too, not NULL). Its voice worker (mcc-voice, exe+0x66f390; also the
+// dedicated server's) sleeps 20 ms a loop that way: it spun ~210,000 times a second instead, a local server sent ~23,700
+// voice control packets a second (backlog 51) and every client's mcc-voice thread took a whole core (GetAsyncKeyState
+// ~500k/s, lock contention with the main thread). The client's frame limiter / runtime pacing (exe+0xa398e0) uses the same
+// sleep. PELOAD_NTDELAY_STUB=1 = the old no-op.
+static int32_t MSABI i_NtDelayExecution(uint8_t alertable,const int64_t*iv){
+    static int stub=-1; if(stub<0) stub=getenv("PELOAD_NTDELAY_STUB")?1:0; if(stub) return 0;
+    if(!iv) return (int32_t)0xC0000005;
+    if(alertable && t_apc_ran){ t_apc_ran=0; return 0xC0; }   // STATUS_USER_APC
+    int64_t v=*iv; uint64_t t100=0;
+    if(v<0) t100=(uint64_t)0-(uint64_t)v;
+    else if(v>0){ struct timespec n; clock_gettime(CLOCK_REALTIME,&n);
+        uint64_t n100=(uint64_t)n.tv_sec*10000000ULL+(uint64_t)n.tv_nsec/100+116444736000000000ULL; t100=(uint64_t)v>n100?(uint64_t)v-n100:0; }
+    if(!t100){ sched_yield(); return 0; }
+    if(t100>315360000000000ULL) t100=315360000000000ULL;
+    struct timespec ts={(time_t)(t100/10000000ULL),(long)(t100%10000000ULL)*100L};
+    while(nanosleep(&ts,&ts)==-1 && errno==EINTR){}
+    return 0; }
 // ---- critical sections / SRW locks / condition variables (real pthreads) ----
 static pthread_mutex_t g_lazy=PTHREAD_MUTEX_INITIALIZER;
 static void MSABI i_InitializeCriticalSection(void*cs){ pthread_mutex_t*m=malloc(sizeof *m); pthread_mutexattr_t a; pthread_mutexattr_init(&a); pthread_mutexattr_settype(&a,PTHREAD_MUTEX_RECURSIVE); pthread_mutex_init(m,&a); *(void**)cs=m; }
@@ -9926,6 +9946,7 @@ static void *resolve_impl(const char *fn){
         {"WaitForSingleObjectEx",(void*)i_WaitForSingleObjectEx},
         {"WaitForMultipleObjectsEx",(void*)i_WaitForMultipleObjectsEx},
         {"Sleep",(void*)i_Sleep},
+        {"NtDelayExecution",(void*)i_NtDelayExecution},
         {"SleepEx",(void*)i_SleepEx},
         {"WaitForMultipleObjects",(void*)i_WaitForMultipleObjects},
         {"CreateThread",(void*)i_CreateThread},

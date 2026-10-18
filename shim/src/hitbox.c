@@ -729,7 +729,11 @@ static void hb_engine_jobs(void){
     if(!__atomic_exchange_n(&g_hb_bnd_only,0,__ATOMIC_ACQ_REL)) hb_engine_jobs_locked(h3,tarr,idx,arr);
     ((HbUnlockFn)(h3+0x12c9a0))(&tok); }
 static void hb_engine_jobs_locked(uint8_t*h3,void**tarr,uint32_t idx,uint8_t*arr){
-    float vp[32]; unsigned s0=g_hb_vpseq; memcpy(vp,g_hb_vp,sizeof vp); if((s0&1) || g_hb_vpseq!=s0 || (!vp[28]&&!vp[29]&&!vp[30])){ (void)!write(2,"  [teleport] no camera yet\n",27); return; }
+    // a dedicated server has no camera: moving a player given by slot (tpto&slot=) doesn't need one, "us" does
+    int byslot=g_hb_tp_to && g_hb_tp_to_who>=0;
+    float vp[32]; unsigned s0=g_hb_vpseq; memcpy(vp,g_hb_vp,sizeof vp); int nocam=(s0&1) || g_hb_vpseq!=s0 || (!vp[28]&&!vp[29]&&!vp[30]);
+    if(nocam && !byslot){ (void)!write(2,"  [teleport] no camera yet\n",27); return; }
+    if(nocam){ vp[28]=vp[29]=vp[30]=1e30f; }   // (no body is "at the camera")
     // walk the object table directly (we are the thread that owns it): our body = the biped containing the camera;
     // map centre = mean of the weapons/equipment lying on the map
     uint8_t*data=*(uint8_t**)(arr+0x48); int hi=*(int32_t*)(arr+0x3c); if(!data || hi<=0 || hi>8192) return;
@@ -746,7 +750,7 @@ static void hb_engine_jobs_locked(uint8_t*h3,void**tarr,uint32_t idx,uint8_t*arr
       if(lu==0xFFFFFFFFu) lu=g_hb_local_unit;
       int li=lu&0xFFFF; if(lu!=0xFFFFFFFFu && li<hi){ uint8_t*e=data+(size_t)li*0x18; uint8_t*p=*(uint8_t**)(e+0x10);
           if(e[3]==0 && *(uint16_t*)e==(uint16_t)(lu>>16) && p){ me=lu; memcpy(mo,p+0x50,12); } } }
-    if(me==0xFFFFFFFFu){ (void)!write(2,"  [teleport] no body at the camera (dead or in a vehicle?)\n",59); return; }
+    if(me==0xFFFFFFFFu && !byslot){ (void)!write(2,"  [teleport] no body at the camera (dead or in a vehicle?)\n",59); return; }
     if(g_hb_tp_by){ g_hb_tp_by=0; uint8_t*mp=*(uint8_t**)(data+(size_t)(me&0xFFFF)*0x18+0x10); if(!mp) return;
         const float*o=(const float*)(mp+0x50), *f=(const float*)(mp+0x5c); float pos[3]={o[0]+g_hb_tp_delta[0],o[1]+g_hb_tp_delta[1],o[2]+g_hb_tp_delta[2]};
         float fwd[3]={f[0],f[1],0}, l=sqrtf(fwd[0]*fwd[0]+fwd[1]*fwd[1]); if(l>1e-4f){ fwd[0]/=l; fwd[1]/=l; } else { fwd[0]=1; fwd[1]=0; } float up[3]={0,0,1};
