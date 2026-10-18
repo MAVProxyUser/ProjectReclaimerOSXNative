@@ -8178,6 +8178,21 @@ static uint32_t MSABI i_WaitForMultipleObjects(uint32_t n,void*const*h,int all,u
 static uint32_t MSABI i_WaitForSingleObjectEx(void*h,uint32_t ms,int alert){ (void)alert; return i_WaitForSingleObject(h,ms); }
 static uint32_t MSABI i_WaitForMultipleObjectsEx(uint32_t n,void*const*h,int all,uint32_t ms,int alert){ (void)alert; return i_WaitForMultipleObjects(n,h,all,ms); }
 // Sleep: a no-op Sleep breaks yield/backoff-based coordination. Actually sleep.
+#include <wctype.h>
+// LCMapStringEx (2026-10-18): was a stub returning 0; the client calls it. Lower / upper case (BMP, towlower/towupper)
+// and a plain copy; anything else (sort keys, width / kana folding) fails with ERROR_INVALID_FLAGS as an unsupported flag
+// would on Windows. cchSrc -1 = NUL-terminated (the NUL counts); cchDest 0 = return the length needed.
+static int MSABI i_LCMapStringEx(const uint16_t*loc,uint32_t fl,const uint16_t*src,int cs,uint16_t*dst,int cd,void*v,void*r,intptr_t sh){
+    (void)loc;(void)v;(void)r;(void)sh; uint32_t f=fl&~0x01000000u;   // LCMAP_LINGUISTIC_CASING: same result here
+    if(!src || (f & ~(0x100u|0x200u))){ g_lasterr=1004/*ERROR_INVALID_FLAGS*/; return 0; }
+    int n=cs; if(n<0){ n=0; while(src[n]) n++; n++; }
+    if(!cd) return n; if(!dst || cd<n){ g_lasterr=122/*ERROR_INSUFFICIENT_BUFFER*/; return 0; }
+    for(int i=0;i<n;i++){ uint16_t c=src[i]; if(f&0x100) c=(uint16_t)towlower(c); else if(f&0x200) c=(uint16_t)towupper(c); dst[i]=c; }
+    return n; }
+static int MSABI i_RoGetActivationFactory(void*cls,const void*iid,void**f){ (void)cls;(void)iid; if(f) *f=0; return (int)0x80040154; }   // REGDB_E_CLASSNOTREG: no WinRT here
+static int MSABI i_RoInitialize(int t){ (void)t; return 0; }
+static void MSABI i_RoUninitialize(void){}
+static int MSABI i_VirtualUnlock(void*a,size_t n){ (void)a;(void)n; return 1; }
 static void     MSABI i_Sleep(uint32_t ms){ if(ms==0){ sched_yield(); return; } struct timespec ts={ms/1000,(long)(ms%1000)*1000000L}; nanosleep(&ts,0); }
 // An alertable SleepEx returns WAIT_IO_COMPLETION once an I/O completion routine has run on this thread. ReadFileEx
 // runs its routine inline (before returning), and Rust's pipe reads then wait in SleepEx(INFINITE, TRUE) until the
@@ -9854,6 +9869,8 @@ static void *resolve_impl(const char *fn){
         {"SetTimer",(void*)i_SetTimer},
         {"KillTimer",(void*)i_KillTimer},
         {"GetAsyncKeyState",(void*)wi_GetAsyncKeyState},
+        {"MapVirtualKeyExW",(void*)wi_MapVirtualKeyExW}, {"MapVirtualKeyExA",(void*)wi_MapVirtualKeyExW},
+        {"MapVirtualKeyW",(void*)wi_MapVirtualKeyW}, {"MapVirtualKeyA",(void*)wi_MapVirtualKeyW},
         {"GetKeyState",(void*)wi_GetKeyState},
         {"ShowCursor",(void*)wi_ShowCursor},
         {"ClipCursor",(void*)wi_ClipCursor},
@@ -9948,6 +9965,8 @@ static void *resolve_impl(const char *fn){
         {"WaitForSingleObjectEx",(void*)i_WaitForSingleObjectEx},
         {"WaitForMultipleObjectsEx",(void*)i_WaitForMultipleObjectsEx},
         {"Sleep",(void*)i_Sleep},
+        {"LCMapStringEx",(void*)i_LCMapStringEx}, {"RoGetActivationFactory",(void*)i_RoGetActivationFactory},
+        {"RoInitialize",(void*)i_RoInitialize}, {"RoUninitialize",(void*)i_RoUninitialize}, {"VirtualUnlock",(void*)i_VirtualUnlock},
         {"NtDelayExecution",(void*)i_NtDelayExecution},
         {"SleepEx",(void*)i_SleepEx},
         {"WaitForMultipleObjects",(void*)i_WaitForMultipleObjects},

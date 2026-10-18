@@ -124,6 +124,29 @@ static WiKey wi_keymap(unsigned short kc){
         {0x5B,0x68,0x48,0},{0x5C,0x69,0x49,0},{0x41,0x6E,0x53,0},{0x43,0x6A,0x37,0},{0x45,0x6B,0x4E,0},{0x4E,0x6D,0x4A,0},{0x4B,0x6F,0x35,1},{0x4C,0x0D,0x1C,1} };
     for(unsigned i=0;i<sizeof T/sizeof T[0];i++) if(T[i].kc==kc){ WiKey k={T[i].vk,T[i].sc,T[i].e0}; return k; }
     WiKey z={0,0,0}; return z; }
+// MapVirtualKey(Ex)(A/W) (2026-10-18): it was missing (a stub returning 0), and the client calls it -- key names in its
+// bindings UI / text input. Built from the table above (US layout). Types: 0 VK -> scan, 1 scan -> VK (generic shift /
+// ctrl / alt), 2 VK -> unshifted character, 3 scan -> VK with left / right, 4 VK -> scan with 0xE0xx for extended keys.
+static uint8_t wi_generic_vk(uint8_t vk);
+static uint8_t g_mvk_sc[256], g_mvk_e0[256], g_mvk_vkx[256]; static int g_mvk_init;
+static void wi_mvk_init(void){ if(g_mvk_init) return;
+    for(unsigned kc=0;kc<0x80;kc++){ WiKey k=wi_keymap((unsigned short)kc); if(!k.vk || !k.sc) continue;
+        if(!g_mvk_sc[k.vk]){ g_mvk_sc[k.vk]=k.sc; g_mvk_e0[k.vk]=k.e0; }
+        int idx=k.sc|(k.e0?0x80:0); if(!g_mvk_vkx[idx]) g_mvk_vkx[idx]=k.vk; }
+    g_mvk_sc[0x10]=0x2A; g_mvk_sc[0x11]=0x1D; g_mvk_sc[0x12]=0x38; g_mvk_init=1; }
+static unsigned MSABI wi_MapVirtualKeyExW(unsigned code,unsigned type,void*hkl){ (void)hkl; wi_mvk_init();
+    switch(type){
+    case 0: case 4: { if(code>255) return 0; unsigned sc=g_mvk_sc[code]; if(!sc) return 0; return type==4 && g_mvk_e0[code] ? 0xE000|sc : sc; }
+    case 1: case 3: { unsigned sc=code&0xFF; int ext=(code&0xFF00)==0xE000 || (code&0xFF00)==0xE100; uint8_t vk=g_mvk_vkx[sc|(ext?0x80:0)]; if(!vk) vk=g_mvk_vkx[sc];
+        return type==1 ? wi_generic_vk(vk) : vk; }
+    case 2: { if(code>='A'&&code<='Z') return code; if(code>='0'&&code<='9') return code; if(code>=0x60&&code<=0x69) return '0'+(code-0x60);
+        switch(code){ case 0x20: return ' '; case 0x0D: return '\r'; case 0x09: return '\t'; case 0x08: return 8; case 0x1B: return 0x1B;
+            case 0xBA: return ';'; case 0xBB: return '='; case 0xBC: return ','; case 0xBD: return '-'; case 0xBE: return '.'; case 0xBF: return '/';
+            case 0xC0: return '`'; case 0xDB: return '['; case 0xDC: return '\\'; case 0xDD: return ']'; case 0xDE: return '\'';
+            case 0x6A: return '*'; case 0x6B: return '+'; case 0x6D: return '-'; case 0x6E: return '.'; case 0x6F: return '/'; }
+        return 0; } }
+    return 0; }
+static unsigned MSABI wi_MapVirtualKeyW(unsigned code,unsigned type){ return wi_MapVirtualKeyExW(code,type,0); }
 static uint8_t wi_generic_vk(uint8_t vk){ switch(vk){ case 0xA0: case 0xA1: return 0x10; case 0xA2: case 0xA3: return 0x11; case 0xA4: case 0xA5: return 0x12; } return vk; }
 static void wi_key(unsigned short kc,int down,int repeat){
     WiKey k=wi_keymap(kc); if(!k.vk) return;
