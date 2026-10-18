@@ -181,17 +181,21 @@ static void nav_step(void){
     if(mode==2){ float bd=1e30f; int bi=-1; for(int pass=0;pass<2 && bi<0;pass++) for(int i=0;i<n;i++){ const HbObj*t=&objs[i]; if(t->type || t->dead || i==me) continue;
             if(!pass && o->team>=0 && t->team==o->team) continue; float dx=t->c[0]-pos[0],dy=t->c[1]-pos[1],d=dx*dx+dy*dy; if(d<bd){ bd=d; bi=i; } }
         if(bi>=0){ float tp[3]={objs[bi].c[0],objs[bi].c[1],objs[bi].c[2]-0.35f}; int gn=nav_node_at(tp); if(gn>=0) goal=gn; } }
-    static float vtgt[3]; static int vok;   // vehicle mode: the target vehicle's centre
-    if(mode==4){ const char*want=getenv("PELOAD_NAV")+8; float bd=1e30f; int bi=-1;
+    static float vtgt[3]; static int vok; static uint32_t vh, vbad[32]; static double vbadt[32];   // vehicle mode: the target vehicle's centre / handle
+    if(mode==4){ const char*want=getenv("PELOAD_NAV")+8; float bd=1e30f; int bi=-1;   // nearest in 3D (a flying or parked-overhead one is far), not one found unreachable in the last 60 s
         for(int i=0;i<n;i++){ const HbObj*t=&objs[i]; if((t->type!=1 && t->type!=12) || t->dead) continue; if(!nav_ci_has(hb_tag_name(t->def),want)) continue;
-            float dx=t->c[0]-pos[0],dy=t->c[1]-pos[1],d=dx*dx+dy*dy; if(d<bd){ bd=d; bi=i; } }
-        vok=bi>=0; if(vok){ const HbObj*t=&objs[bi]; memcpy(vtgt,t->c,12); float d=sqrtf(bd)+1e-3f, back=t->r+1.5f;   // stand beside it, on our side
+            int bad=0; for(int k=0;k<32;k++) if(vbad[k]==t->handle && now-vbadt[k]<60.0) bad=1; if(bad) continue;
+            float dx=t->c[0]-pos[0],dy=t->c[1]-pos[1],dz=t->c[2]-pos[2],d=dx*dx+dy*dy+dz*dz; if(d<bd){ bd=d; bi=i; } }
+        vok=bi>=0; if(vok){ const HbObj*t=&objs[bi]; vh=t->handle; memcpy(vtgt,t->c,12); float dx=t->c[0]-pos[0],dy=t->c[1]-pos[1], d=sqrtf(dx*dx+dy*dy)+1e-3f, back=t->r+1.5f;   // stand beside it, on our side
             float tp[3]={t->c[0]-(t->c[0]-pos[0])/d*back, t->c[1]-(t->c[1]-pos[1])/d*back, t->c[2]}; int gn=nav_node_at(tp); if(gn>=0 && (need || goal<0)) goal=gn; } }
     else if(mode==3 && goal<0){ float tp[3]; if(sscanf(getenv("PELOAD_NAV"),"%f,%f,%f",&tp[0],&tp[1],&tp[2])==3) goal=nav_node_at(tp); }
     else if(mode==1 && goal<0) goal=nav_pick_roam(cur);
     if(goal<0){ g_nav_act=0; return; }
     if(need){ double t0=mono_s(); int np=nav_astar(cur,goal,path,8192); tplan=now;
-        if(np<2){ if(mode!=2){ nav_say("  [nav] no path from node %d to %d: a new goal\n",cur,goal); goal=-1; } plen=0; g_nav_act=0; return; }
+        if(np<2){ if(mode!=2){ nav_say("  [nav] no path from node %d to %d: a new goal\n",cur,goal); goal=-1; }
+            if(mode==4 && vok){ int k=0; for(int q=1;q<32;q++) if(vbadt[q]<vbadt[k]) k=q; vbad[k]=vh; vbadt[k]=now;   // try another one for a minute
+                nav_say("  [nav] vehicle %08x at (%.1f %.1f %.1f) is out of reach: skipped for 60 s\n",vh,vtgt[0],vtgt[1],vtgt[2]); }
+            plen=0; g_nav_act=0; return; }
         if(!plen || need){ char hs[120]=""; double ms=(mono_s()-t0)*1000;
             if(nav_log() && g_nav.dng){   // hotspot nodes (danger > 0.5) on this path vs on the same plan without avoidance
                 static int32_t alt[8192]; int hp=0, ha=0; for(int i=0;i<np;i++) hp+=g_nav.dng[path[i]]>0.5f;
@@ -205,7 +209,7 @@ static void nav_step(void){
     { static double tpub; if(now-tpub>0.25){ tpub=now; nav_publish(path,pidx,plen,goal); } }
     static int look=-1; if(look<0){ const char*e=getenv("PELOAD_NAV_LOOK"); look=e?atoi(e):6; if(look<1) look=1; }
     int ti=pidx+look<plen?pidx+look:plen-1; float tp[3]; nav_pos(path[ti],tp);
-    int vnear=0; if(mode==4 && vok){ float dx=vtgt[0]-pos[0], dy=vtgt[1]-pos[1]; if(dx*dx+dy*dy<64.0f){ vnear=1; memcpy(tp,vtgt,12); } }   // within 8 units: look at it
+    int vnear=0; if(mode==4 && vok){ float dx=vtgt[0]-pos[0], dy=vtgt[1]-pos[1]; if(dx*dx+dy*dy<64.0f && fabsf(vtgt[2]-pos[2])<8.0f){ vnear=1; memcpy(tp,vtgt,12); } }   // within 8 units: look at it
     float yaw_err=atan2f(tp[1]-pos[1],tp[0]-pos[0])-atan2f(fwd[1],fwd[0]); while(yaw_err>3.14159f) yaw_err-=6.28318f; while(yaw_err<-3.14159f) yaw_err+=6.28318f;
     static float kt=-1, ps; static int psfix; if(kt<0){ const char*e=getenv("PELOAD_NAV_TURN"); kt=e?atof(e):2.5f; e=getenv("PELOAD_NAV_PITCH"); ps=e?atof(e):-1.0f; psfix=e!=0; }
     float rx=-yaw_err*kt; rx=rx>0.8f?0.8f:rx<-0.8f?-0.8f:rx;
@@ -246,8 +250,8 @@ static void nav_publish(const int32_t*path,int from,int plen,int goal){ pthread_
     int left=plen-from, step=left>159?(left+158)/159:1; for(int i=from;i<plen && g_nav_npts<159;i+=step){ float p[3]; nav_pos(path[i],p); g_nav_pts[g_nav_npts][0]=p[0]; g_nav_pts[g_nav_npts][1]=p[1]; g_nav_npts++; }
     if(plen>from && g_nav_npts<160){ float p[3]; nav_pos(path[plen-1],p); g_nav_pts[g_nav_npts][0]=p[0]; g_nav_pts[g_nav_npts][1]=p[1]; g_nav_npts++; }
     pthread_mutex_unlock(&g_nav_pmx); }
-static void nav_json(StBuf*s){ if(!nav_mode()) return; static const char*const mn[4]={"","roam","enemy","point"};
-    pthread_mutex_lock(&g_nav_pmx); sb_put(s,",\"nav\":{\"mode\":\"%s\",\"active\":%s",mn[nav_mode()&3],g_nav_act?"true":"false");
+static void nav_json(StBuf*s){ if(!nav_mode()) return; static const char*const mn[5]={"","roam","enemy","point","vehicle"};
+    pthread_mutex_lock(&g_nav_pmx); sb_put(s,",\"nav\":{\"mode\":\"%s\",\"active\":%s",mn[nav_mode()<5?nav_mode():0],g_nav_act?"true":"false");
     if(g_nav_hasgoal) sb_put(s,",\"goal\":[%.2f,%.2f,%.2f]",g_nav_goalp[0],g_nav_goalp[1],g_nav_goalp[2]);
     sb_put(s,",\"path\":["); for(int i=0;i<g_nav_npts;i++) sb_put(s,"%s[%.2f,%.2f]",i?",":"",g_nav_pts[i][0],g_nav_pts[i][1]); sb_put(s,"]}");
     pthread_mutex_unlock(&g_nav_pmx); }
