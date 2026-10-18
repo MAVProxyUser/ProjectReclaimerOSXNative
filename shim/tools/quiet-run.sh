@@ -26,6 +26,8 @@ if [ "$SPORT" != 0 ]; then
 fi
 PADENV="PELOAD_NO_PAD=1"; [ -n "${QR_PAD:-}" ] && PADENV=""
 MINENV=""; [ -n "${QR_MINIMIZE:-}" ] && MINENV="PELOAD_MINIMIZE=1"; [ -n "${QR_HIDE:-}" ] && MINENV="PELOAD_HIDE_WINDOW=1"
+# the stats / forensic pages come from the source files in a checkout (as play.sh): page edits show on a browser refresh
+[ -f shim/src/stats_page.html ] && [ -z "${PELOAD_STATS_PAGE:-}" ] && export PELOAD_STATS_PAGE="$PWD/shim/src/stats_page.html"
 set -m
 env PELOAD_SKINGUARD=1 PELOAD_VTGUARD=1 PELOAD_ALLOC_GUARD=1 PELOAD_RECLAIMER_PATCHES=all PELOAD_WORKER_INHERIT_STDIO=1 \
   PELOAD_PRESENT=1 PELOAD_HOLD_WINDOW=1 PELOAD_PRESENT_HIDDEN=1 PELOAD_D3DGL=1 PELOAD_FPS_LOG=1 \

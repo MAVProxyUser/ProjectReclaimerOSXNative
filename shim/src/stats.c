@@ -399,11 +399,12 @@ static void st_slots_install(void){
     char msg[160]; int k=why?snprintf(msg,sizeof msg,"  [stats] player slots: %s -- the session's limit only\n",why)
         :snprintf(msg,sizeof msg,"  [stats] player slots: server max at exe+0x%llx +0x%x\n",(unsigned long long)(g_st_hslot-g_base),g_st_mpoff); (void)!write(2,msg,k); }
 static int st_max_players(const char**src){   // the server's max players, 0 = not known
-    *src=0; int hosting=0;
-    if(g_st_hslot){ uint64_t a=0,a2=0,strong=0,first=0; uint8_t v=0;
+    *src=0; int hosting=0, ingame=!g_st_hslot;   // (without the slot global: the session's limit, whatever the state)
+    if(g_st_hslot){ uint64_t a=0,a2=0,strong=0,first=0; uint8_t v=0; ingame=0;
         if(hb_read((uint64_t)(uintptr_t)g_st_hslot,&a,8) && a && hb_read(a,&strong,8) && strong>=1 && strong<100000 && hb_read(a+0x10,&first,8)){
-            if(first==0x8000000000000000ull) hosting=1;
+            ingame=1; if(first==0x8000000000000000ull) hosting=1;
             else if(hb_read(a+(uint64_t)g_st_mpoff,&v,1) && hb_read((uint64_t)(uintptr_t)g_st_hslot,&a2,8) && a2==a && v>=1 && v<=128){ *src="server"; return v; } } }
+    if(!ingame) return 0;   // the menu's own local session (limit 16) is not a game
     uint8_t*h3=hb_halo3_base(); uint64_t sess=0; uint32_t st=0, fl=0; int32_t mx=0;
     if(h3 && hb_read((uint64_t)(h3+0x1e250d0),&sess,8) && sess && hb_read(sess+0x67b70,&st,4) && st>=4 && st<=9 && hb_read(sess+0x4194,&fl,4) && (fl&1)
        && hb_read(sess+0x419c,&mx,4) && mx>=1 && mx<=128){ *src=hosting?"host":"session"; return mx; }
