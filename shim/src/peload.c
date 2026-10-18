@@ -2804,6 +2804,8 @@ static int MSABI i_ws2_WSARecvMsg(WSASOCK s,uint8_t*msg,uint32_t*recvd,uint8_t*o
     struct sockaddr_storage ss; socklen_t sl=sizeof ss;
     ssize_t r=recvfrom((int)s,rbuf,sizeof rbuf,0,(struct sockaddr*)&ss,&sl);
     if(r<0){ ws2_err(errno); return -1; }
+    { extern void st_voice_wiretally(const char*buf,long n,uint32_t ip,uint16_t port); if(r>=8 && ss.ss_family==AF_INET && (rbuf[0]=='M'||rbuf[0]=='L') && rbuf[1]=='C' && rbuf[3]=='1')
+        st_voice_wiretally(rbuf,(long)r,((struct sockaddr_in*)&ss)->sin_addr.s_addr,ntohs(((struct sockaddr_in*)&ss)->sin_port)); }   // (PELOAD_VOICE_SRCSTAT)
     uint32_t cap=0; for(uint32_t i=0;i<cnt;i++) cap+=*(uint32_t*)(bufs+(size_t)i*16);
     uint32_t off=0; for(uint32_t i=0;i<cnt && off<(uint32_t)r;i++){ uint32_t blen=*(uint32_t*)(bufs+(size_t)i*16); char*bp=*(char**)(bufs+(size_t)i*16+8);
         uint32_t n=(uint32_t)r-off; if(n>blen)n=blen; if(bp&&n) memcpy(bp,rbuf+off,n); off+=n; }
