@@ -828,7 +828,7 @@ static const StWcls* st_wclass(uint32_t def,int type){
     static StWcls c; memset(&c,0,sizeof c); c.def=def; c.color=-1;
     char p[256]; int known=st_tag_path(def,p,sizeof p); for(char*q=p;*q;q++) *q=(char)tolower((unsigned char)*q);
     const char*b=strrchr(p,'\\'); b=b?b+1:p; size_t bl=strlen(b); int eq=!strncmp(p,"objects\\equipment\\",18), held=bl>10 && !strcmp(b+bl-10,"_equipment");
-    if(type==1) c.kind=eq?-1:1;
+    if(type==1) c.kind=(eq || strstr(b,"camera"))?-1:1;   // not the deployed auto turret, nor security cameras (vehicle objects too: The Pit)
     else if(strstr(p,"grenade")) c.kind=-1;
     else if(strstr(p,"\\multi\\powerups\\") || !strncmp(b,"powerup",7)){ c.kind=2; c.color=strstr(b,"red")?0:strstr(b,"blue")?1:strstr(b,"yellow")?2:-1; }
     else if(type==3 && eq && !held) c.kind=-1;

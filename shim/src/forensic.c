@@ -144,7 +144,7 @@ enum { FXI_VOICE=1, FXI_EVENT=2, FXI_ROSTER=3, FXI_SWITCH=4 };
 typedef struct { char label[64], map[64], server[96]; uint64_t host, self; int none; } FxSw;
 typedef struct { uint8_t*b; size_t n, cap; } FxQ;
 static FxQ g_fxq, g_fxq_spare; static pthread_mutex_t g_fxq_mx=PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_fxq_cv=PTHREAD_COND_INITIALIZER;
-static uint64_t g_fx_dropped, g_fx_nvoice, g_fx_naudio, g_fx_nevent;
+static uint64_t g_fx_dropped, g_fx_nvoice, g_fx_naudio, g_fx_nevent, g_fx_nctlskip;
 #define FX_QMAX ((size_t)64<<20)   // 64 MB pending (the writer stalled for a long time): newer records are dropped and counted
 static int fx_push(int kind,const void*a,size_t an,const void*b,size_t bn){
     uint32_t len=(uint32_t)(an+bn); int ok=0; pthread_mutex_lock(&g_fxq_mx); size_t need=g_fxq.n+8+len;
@@ -176,7 +176,12 @@ static void fx_voice_at(uint64_t tns,uint64_t sender,const uint8_t*payload,uint6
     else if(len<9){ r.fl|=FXF_SHORT; r.ch=buf[0]; r.olen=(uint16_t)len; if(audio){ stored=want; r.fl|=FXF_AUDIO; } }   // malformed: kept raw (with audio on)
     else { r.ch=buf[0]; memcpy(&r.seq,buf+1,8); uint64_t ol=len-9; r.olen=(uint16_t)(ol>65535?65535:ol); sp=buf+9;
         if(ol){ r.toc=buf[9]; if(want>10) r.toc2=buf[10]; }
-        if(r.ch==0){ r.fl|=FXF_CONTROL; stored=want-9; }                     // the voice server's control byte(s): not audio
+        if(r.ch==0){ r.fl|=FXF_CONTROL; stored=want-9;                      // the voice server's control byte(s): not audio
+            // at most one control packet per sender per 50 ms is kept (public servers: one per ~100 ms; our own local
+            // dedicated server once sent ~23,700/s, 1 M records in 44 s): the rest are only counted
+            static uint64_t cid[32], ct[32]; int slot=(int)((sender*0x9E3779B97F4A7C15ull)>>59);
+            if(cid[slot]==sender && tns-ct[slot]<50000000ull){ __atomic_fetch_add(&g_fx_nctlskip,1,__ATOMIC_RELAXED); return; }
+            cid[slot]=sender; ct[slot]=tns; }
         else if(audio && ol){ stored=want-9; r.fl|=FXF_AUDIO; if(stored<ol) r.fl|=FXF_TRUNC; } }
     r.slen=(uint16_t)stored; fx_push(FXI_VOICE,&r,sizeof r,sp,stored);
     __atomic_fetch_add(&g_fx_nvoice,1,__ATOMIC_RELAXED); if(r.fl&FXF_AUDIO) __atomic_fetch_add(&g_fx_naudio,1,__ATOMIC_RELAXED); }
@@ -505,7 +510,7 @@ static void fx_sessions_json(StBuf*s){
         g_fx_set.archive?"true":"false",g_fx_set.voice?"true":"false",g_fx_set.consent?"true":"false",g_fx_set.consent?g_fx_set.consent_t:0.0,iso,g_fx_env_off?"true":"false",g_fx_on?"true":"false",g_fx_on&&g_fx_audio?"true":"false");
     pthread_mutex_unlock(&g_fx_setmx);
     pthread_mutex_lock(&g_fxw_mx); sb_put(s,",\"current\":"); sb_str(s,g_fxw.open?g_fxw.name:""); pthread_mutex_unlock(&g_fxw_mx);
-    sb_put(s,",\"counters\":{\"voice_packets\":%llu,\"audio_packets\":%llu,\"events\":%llu,\"dropped\":%llu},\"dir\":",(unsigned long long)g_fx_nvoice,(unsigned long long)g_fx_naudio,(unsigned long long)g_fx_nevent,(unsigned long long)g_fx_dropped);
+    sb_put(s,",\"counters\":{\"voice_packets\":%llu,\"audio_packets\":%llu,\"events\":%llu,\"dropped\":%llu,\"control_not_kept\":%llu},\"dir\":",(unsigned long long)g_fx_nvoice,(unsigned long long)g_fx_naudio,(unsigned long long)g_fx_nevent,(unsigned long long)g_fx_dropped,(unsigned long long)g_fx_nctlskip);
     sb_str(s,g_fx_base); sb_put(s,",\"sessions\":[");
     DIR*dr=opendir(g_fx_base); char (*names)[128]=0; int nn=0, cap=0;
     if(dr){ struct dirent*de; while((de=readdir(dr))){ size_t L=strlen(de->d_name); if(!fx_name_ok(de->d_name,L) || !strchr(de->d_name,'_')) continue;
