@@ -487,11 +487,42 @@ static int st_rec_start(const char*qs){
     int r[4]={0,0,0,0}; if(!ao && !win_hidden()) rec_pic_rect(r);
     char map[64]; snprintf(map,sizeof map,"%s",g_st_curmap[0]?g_st_curmap:"game"); char err[200];
     return rec_start(ao,secs,map,r[2],r[3],err,sizeof err); }
+// ---- the overlay panel (user, 2026-10-18): per-feature settings, hitbox.c g_hbs / hb_feat_set ------------------------
+// POST /control?do=feat&f=<feature>[,<feature>...] (f= may repeat; f=all = every one) with any of on=0|1,
+// team=all|enemies|friends, vis=0|1, px=4..60 -- each applied where the feature has that setting (the rest skip it).
+static const char*const g_st_featname[HBF_N]={"hitboxes","tracers","info","items",0,"zones","vehicles"};   // (HBF_VISIBLE: a global)
+static int st_feat(const char*qs){
+    char b[160]; snprintf(b,sizeof b,"%s",qs); unsigned mask=0; int on=-1, team=-1, vis=-1, px=-1;
+    for(char*p=b; (p=strcasestr(p,"%2c")); ) { *p=','; memmove(p+1,p+3,strlen(p+3)+1); }   // an encoded comma list
+    for(char*sv=0,*t=strtok_r(b,"&",&sv); t; t=strtok_r(0,"&",&sv)){ char*v=strchr(t,'='); if(!v) continue; *v++=0;
+        if(!strcmp(t,"f")){ for(char*s2=0,*w=strtok_r(v,",",&s2); w; w=strtok_r(0,",",&s2)){ int f=-1;
+                for(int q=0;q<HBF_N;q++) if(g_st_featname[q] && !strcmp(w,g_st_featname[q])) f=q;
+                if(!strcmp(w,"all")) mask|=((1u<<HBF_N)-1)&~(1u<<HBF_VISIBLE); else if(f<0) return 0; else mask|=1u<<f; } }
+        else if(!strcmp(t,"on") || !strcmp(t,"vis")){ if(strcmp(v,"0") && strcmp(v,"1")) return 0; if(t[0]=='o') on=v[0]-'0'; else vis=v[0]-'0'; }
+        else if(!strcmp(t,"team")){ team=!strcmp(v,"all")?0:!strcmp(v,"enemies")?1:!strcmp(v,"friends")?2:-2; if(team<0) return 0; }
+        else if(!strcmp(t,"px")){ char*e; long x=strtol(v,&e,10); if(*e || x<4 || x>60) return 0; px=(int)x; } }
+    if(!mask || (on<0 && team<0 && vis<0 && px<0)) return 0;
+    int n=hb_feat_set(mask,on,team,vis,px);
+    static const char*const tn[3]={"all","enemies","friends"}; char m[240]; int k=snprintf(m,sizeof m,"  [stats] page: overlay");   // (fits: <= ~130 chars)
+    for(int f=0;f<HBF_N;f++) if((mask>>f)&1) k+=snprintf(m+k,sizeof m-k," %s",g_st_featname[f]);
+    k+=snprintf(m+k,sizeof m-k,":"); if(on>=0) k+=snprintf(m+k,sizeof m-k," %s",on?"on":"off"); if(team>=0) k+=snprintf(m+k,sizeof m-k," show %s",tn[team]);
+    if(vis>=0) k+=snprintf(m+k,sizeof m-k," %s",vis?"visible-only":"through-walls"); if(px>0) k+=snprintf(m+k,sizeof m-k," text %d px",px);
+    k+=snprintf(m+k,sizeof m-k,"\n"); (void)!write(2,m,(size_t)k); return n>0; }
+// the snapshot's overlay.features: {"hitboxes":{"on":..,"team":"all|enemies|friends","vis":..,"px":..},...}; null = that
+// setting doesn't apply to the feature
+static void st_overlay_features(StBuf*s){
+    static const int ord[6]={HBF_HITBOX,HBF_VEH,HBF_TRACER,HBF_INFO,HBF_ITEMS,HBF_ZONES}; static const char*const tm[3]={"\"all\"","\"enemies\"","\"friends\""};
+    hbs_sync(); sb_put(s,",\"features\":{");
+    for(int i=0;i<6;i++){ int f=ord[i]; HbSet h=g_hbs[f]; char px[16]; snprintf(px,sizeof px,"%d",h.px);
+        sb_put(s,"%s\"%s\":{\"on\":%s,\"team\":%s,\"vis\":%s,\"px\":%s}",i?",":"",g_st_featname[f],hb_feat(f)?"true":"false",
+            h.team>=0&&h.team<3?tm[h.team]:"null",h.vis<0?"null":h.vis?"true":"false",h.px>0?px:"null"); }
+    sb_put(s,"}"); }
 static int st_control(const char*act,const char*qs){
     char m[96]; int k=0;
     static const char*const feat[HBF_N]={"hitboxes","tracers","info","items","visible","zones","vehicles"};
-    for(int f=0;f<HBF_N;f++) if(!strcmp(act,feat[f])){ __atomic_fetch_xor(&g_hb_toggle,1<<f,__ATOMIC_ACQ_REL);
+    for(int f=0;f<HBF_N;f++) if(!strcmp(act,feat[f])){ __atomic_fetch_xor(&g_hb_toggle,1<<f,__ATOMIC_ACQ_REL); hbs_sync();   // (visible: applies to all)
         k=snprintf(m,sizeof m,"  [stats] page: %s %s\n",feat[f],hb_feat(f)?"on":"off"); (void)!write(2,m,k); return 1; }
+    if(!strcmp(act,"feat")) return st_feat(qs);   // the overlay panel: per-feature settings
     if(!strcmp(act,"weaktype")){   // one kind of vehicle weak spot on/off: t = 1 lethal, 2 opens the driver
         const char*v=strstr(qs,"t="); int b=v?atoi(v+2):0; if(b!=1 && b!=2) return 0;
         extern volatile int g_hb_wkshow; extern int hb_wkshow(void); hb_wkshow(); __atomic_fetch_xor(&g_hb_wkshow,b,__ATOMIC_ACQ_REL);
@@ -500,7 +531,7 @@ static int st_control(const char*act,const char*qs){
         const char*v=strstr(qs,"t="); int b=v?atoi(v+2):0; if(b!=1&&b!=2&&b!=4&&b!=8&&b!=16) return 0;
         extern volatile int g_hbz_show; extern int hbz_show(void); hbz_show(); __atomic_fetch_xor(&g_hbz_show,b,__ATOMIC_ACQ_REL);
         k=snprintf(m,sizeof m,"  [stats] page: zone kinds now 0x%x\n",g_hbz_show); (void)!write(2,m,k); return 1; }
-    if(!strcmp(act,"teams")){ static const char*const tm[3]={"all","enemies only","friends only"}; __atomic_fetch_add(&g_hb_teamcycle,1,__ATOMIC_ACQ_REL);
+    if(!strcmp(act,"teams")){ static const char*const tm[3]={"all","enemies only","friends only"}; __atomic_fetch_add(&g_hb_teamcycle,1,__ATOMIC_ACQ_REL); hbs_sync();   // every feature
         k=snprintf(m,sizeof m,"  [stats] page: showing %s\n",tm[hb_team_mode()]); (void)!write(2,m,k); return 1; }
     if(!strcmp(act,"tpby")){   // move us by a delta (host; or a client with PELOAD_TELEPORT_CLIENT_TEST for the authority test)
         if(!getenv("PELOAD_ALLOW_TELEPORT") || (!st_is_host() && !getenv("PELOAD_TELEPORT_CLIENT_TEST"))) return 0;
@@ -536,7 +567,7 @@ static int st_control(const char*act,const char*qs){
         char m[80]; int k=snprintf(m,sizeof m,"  [stats] page: %s (%d players)\n",act,ok); (void)!write(2,m,k); return n>0; }
     if(!strcmp(act,"mute") || !strcmp(act,"unmute")){ const char*v=strstr(qs,"voice="); unsigned long long id=v?strtoull(v+6,0,16):0;
         return st_voice_request(id,!strcmp(act,"mute")); }
-    if(!strcmp(act,"textup") || !strcmp(act,"textdown")){ int v=g_hb_text_px>0?g_hb_text_px:7; v+=!strcmp(act,"textup")?1:-1; if(v<4) v=4; if(v>60) v=60; g_hb_text_px=v;
+    if(!strcmp(act,"textup") || !strcmp(act,"textdown")){ hbf_init(); int v=g_hb_text_px>0?g_hb_text_px:7; v+=!strcmp(act,"textup")?1:-1; if(v<4) v=4; if(v>60) v=60; g_hb_text_px=v; hbs_sync();   // every feature's labels
         char m[64]; int k=snprintf(m,sizeof m,"  [stats] page: label text %d px\n",v); (void)!write(2,m,k); return 1; }
     if(!strcmp(act,"spar")){ const char*v=strstr(qs,"on="); if(!v) return 0; extern int hb_spar_available(void); if(!hb_spar_available()) return 0;   // the bot only
         extern volatile int g_spar_on; g_spar_on=atoi(v+3)?1:0;   // sparring partner aim
@@ -729,6 +760,7 @@ static void st_snapshot(StBuf*s){
           hb_feat(HBF_VEH)?"true":"false",hb_feat(HBF_ZONES)?"true":"false",hb_feat(HBF_HITBOX)?"true":"false",hb_feat(HBF_TRACER)?"true":"false",hb_feat(HBF_INFO)?"true":"false",hb_feat(HBF_ITEMS)?"true":"false",hb_feat(HBF_VISIBLE)?"true":"false",
           tm[hb_team_mode()],tp?"true":"false",st_is_host()?"true":"false",getenv("PELOAD_TELEPORT_HOST")?"true":"false",st_controls_ok()?"true":"false",g_hb_text_px>0?g_hb_text_px:7,hb_spar_enabled()?"true":"false",g_spar_ok?(double)g_spar_err:-1.0,hb_spar_available()?"true":"false",hb_bounds_off()==1?"true":hb_bounds_off()==0?"false":"null",
           !wa_mic_mode()||wa_mic_mode()==3?"off":wa_mic_muted()?"muted":wa_mic_mode()==2?"tone":"live",g_mic_streams>0?"true":"false");
+      st_overlay_features(s);   // the overlay panel's per-feature settings (the keys above stay for older pages)
       sb_put(s,",\"spots\":["); int ns=0; for(int i=0;i<(int)(sizeof g_st_spots/sizeof g_st_spots[0]);i++) if(!strcmp(g_st_spots[i].map,m)){
           sb_put(s,"%s{\"id\":\"%s\",\"label\":\"%s\",\"x\":%.1f,\"y\":%.1f,\"z\":%.1f}",ns++?",":"",g_st_spots[i].id,g_st_spots[i].label,g_st_spots[i].x,g_st_spots[i].y,g_st_spots[i].z); }
       sb_put(s,"]}"); snprintf(g_st_curmap,sizeof g_st_curmap,"%s",m); }

@@ -81,11 +81,14 @@ static void* objdump_thread(void*a){ (void)a; pthread_setname_np("shim-objdump")
 //   F9 PELOAD_HB_VISIBLE visible only: hitboxes and labels only for objects the player can actually see
 //      PELOAD_HB_VEHICLES (the stats page's Vehicles button; default off) vehicle hitboxes (+ weak spots), on their own --
 //      independent of Hitboxes, which then means the players' hitboxes (user, 2026-10-18)
+// Since 2026-10-18 the team filter, visible only and the label size are PER FEATURE (g_hbs, below: the stats page's
+// overlay panel, POST /control?do=feat); F6 / F9 / PELOAD_HB_TEAMS / PELOAD_HB_VISIBLE / PELOAD_HB_TEXT_PX apply to all.
 enum { HBF_HITBOX, HBF_TRACER, HBF_INFO, HBF_ITEMS, HBF_VISIBLE, HBF_ZONES, HBF_VEH, HBF_N };
 static int g_hbf_init, g_hbf_on[HBF_N], g_hb_all, g_hb_spheres;
+static void hbs_init(void);   // per-feature settings (below)
 static void hbf_init(void){ if(g_hbf_init) return; static const char*const env[HBF_N]={"PELOAD_HITBOXES","PELOAD_HB_TRACERS","PELOAD_HB_INFO","PELOAD_HB_ITEMS","PELOAD_HB_VISIBLE","PELOAD_HB_ZONES","PELOAD_HB_VEHICLES"};
     for(int f=0;f<HBF_N;f++){ const char*e=getenv(env[f]); g_hbf_on[f]= e&&*e&&strcmp(e,"0"); }
-    const char*e=getenv("PELOAD_HITBOXES"); g_hb_all=e&&!strcasecmp(e,"all"); g_hb_spheres=e&&!strcasecmp(e,"spheres"); g_hbf_init=1; }
+    const char*e=getenv("PELOAD_HITBOXES"); g_hb_all=e&&!strcasecmp(e,"all"); g_hb_spheres=e&&!strcasecmp(e,"spheres"); hbs_init(); g_hbf_init=1; }
 static int hb_feat(int f){ hbf_init(); return g_hbf_on[f] ^ ((g_hb_toggle>>f)&1); }
 static int hb_overlay_on(void){ for(int f=0;f<HBF_N;f++) if(f!=HBF_VISIBLE && hb_feat(f)) return 1; return 0; }   // (visible-only alone draws nothing)
 // The camera tracker (VS cb0 of the frame's first world draw) feeds the overlay and the teleport's "which body is
@@ -112,7 +115,7 @@ static void hb_capture_view(const float*rows){ g_hb_vpseq++; __atomic_thread_fen
 // unit (biped/vehicle/giant): +0x174 team index  +0x24E seat (-1 = on foot)  +0x262 current weapon slot (s8)
 //   +0x268 weapon object handles[4]  +0x294 grenade counts[4] (frag, plasma, spike, firebomb)  +0x360 active camo
 typedef struct { float c[3], r, o[3], vel[3]; int type; uint32_t handle; uint64_t p; uint32_t def; uint16_t nmsz, nmoff;
-    float health, shield, camo; int team, seat, wslot, dead; uint32_t weapons[4], parent; int8_t gren[4]; int rcount; uint16_t roff; } HbObj;
+    float health, shield, camo; int team, seat, wslot, dead; uint32_t weapons[4], parent, owner; int8_t gren[4]; int rcount; uint16_t roff; } HbObj;   // owner: projectiles' +0xC0
 // Local player's team (the biped the camera is inside) and the friend/enemy filter: F6 or PELOAD_HB_TEAMS=all|enemies|friends.
 static int g_hb_myteam=-1, g_hb_teamfilter=-1;
 static volatile int g_hb_local_slot=-1; static volatile uint32_t g_hb_local_unit=0xFFFFFFFFu;   // stats.c finds the local player (also in third person)
@@ -120,8 +123,60 @@ static int hb_is_friend(const HbObj*o){ return g_hb_myteam>=0 && o->type==0 && o
 static int hb_team_mode(void){   // 0 all, 1 enemies only, 2 friends only
     if(g_hb_teamfilter<0){ const char*e=getenv("PELOAD_HB_TEAMS"); g_hb_teamfilter = e&&!strcasecmp(e,"enemies")?1 : e&&!strcasecmp(e,"friends")?2 : 0; }
     return (g_hb_teamfilter + g_hb_teamcycle)%3; }
-static int hb_team_shown(const HbObj*o){ if(o->type!=0) return 1;
-    int f=hb_team_mode(); return f==0 || (f==1 && !hb_is_friend(o)) || (f==2 && hb_is_friend(o)); }
+// ---- per-feature settings: the stats page's overlay panel (user, 2026-10-18: "I shouldn't have to all or nothing the
+// 'visible' only ... set visible all for one thing, and visible only enemies on something else") -------------------------
+// Each drawing feature has its own team filter (0 all, 1 enemies, 2 friends), visible-only switch and label size in window
+// pixels; -1 = that setting doesn't apply to the feature (the page greys the control):
+//   hitboxes  team (the player's), visible only      (=all's extra weapon/equipment spheres: visible only, no team)
+//   vehicles  team = its occupants' (bipeds whose parent +0x10 is the vehicle; mixed crews count as both; an EMPTY vehicle
+//             has no team and shows under "all" only), visible only
+//   tracers   team = the shooter's (projectile +0xC0 owner -> its biped; a vehicle owner -- turret shots -- its occupants;
+//             an unknown owner shows under "all" only), visible only (each line drawn only where the depth readback sees it)
+//   info      team, visible only, text size          items  visible only, text size (items have no team)
+//   zones     always drawn per pixel where visible (hbz_gpu); text size only with PELOAD_HB_ZONES_XRAY (its labels)
+// "Enemies" = not on the local player's team (everyone else in free-for-all), as the hitbox colors. The old global
+// switches are "apply to all": PELOAD_HB_TEAMS / PELOAD_HB_VISIBLE / PELOAD_HB_TEXT_PX give every feature its default,
+// and do=teams / do=visible / do=textup|textdown (and the F6 / F9 keys) set every feature's value whenever they change
+// (hbs_sync notices the change: three compares per frame). On / off stays hb_feat (env ^ g_hb_toggle).
+typedef struct { int team, vis, px; } HbSet;
+static HbSet g_hbs[HBF_N]; static pthread_mutex_t g_hbs_mx=PTHREAD_MUTEX_INITIALIZER;
+static int g_hbs_tc, g_hbs_vb, g_hbs_px;   // the global values last applied to every feature
+static volatile int g_hb_text_px;   // the global label glyph height in window pixels (PELOAD_HB_TEXT_PX, default 7)
+static int hbz_xray(void);
+static void hbs_init(void){   // (from hbf_init: reads g_hbf_on directly, hb_feat would recurse)
+    static const signed char has[HBF_N][3]={ {1,1,0}, {1,1,0}, {1,1,1}, {0,1,1}, {0,0,0}, {0,0,0}, {1,1,0} };   // team, vis, px by HBF_*
+    if(g_hb_text_px<=0){ const char*e=getenv("PELOAD_HB_TEXT_PX"); int v=e?atoi(e):7; g_hb_text_px=v<4?4:v>60?60:v; }
+    int tm=hb_team_mode(), vb=g_hbf_on[HBF_VISIBLE]^((g_hb_toggle>>HBF_VISIBLE)&1);
+    for(int f=0;f<HBF_N;f++){ g_hbs[f].team=has[f][0]?tm:-1; g_hbs[f].vis=has[f][1]?vb:-1; g_hbs[f].px=has[f][2]||(f==HBF_ZONES&&hbz_xray())?g_hb_text_px:-1; }
+    g_hbs_tc=g_hb_teamcycle; g_hbs_vb=vb; g_hbs_px=g_hb_text_px; }
+static void hbs_sync(void){   // a global "apply to all" switch changed since last time: give its value to every feature
+    hbf_init(); if(g_hb_teamcycle==g_hbs_tc && hb_feat(HBF_VISIBLE)==g_hbs_vb && g_hb_text_px==g_hbs_px) return;
+    pthread_mutex_lock(&g_hbs_mx);   // (re-read inside the lock: a stale value read outside must not undo a newer setting)
+    int tc=g_hb_teamcycle, vb=hb_feat(HBF_VISIBLE), px=g_hb_text_px;
+    if(tc!=g_hbs_tc){ g_hbs_tc=tc; int m=hb_team_mode(); for(int f=0;f<HBF_N;f++) if(g_hbs[f].team>=0) g_hbs[f].team=m; }
+    if(vb!=g_hbs_vb){ g_hbs_vb=vb; for(int f=0;f<HBF_N;f++) if(g_hbs[f].vis>=0) g_hbs[f].vis=vb; }
+    if(px!=g_hbs_px && px>=4 && px<=60){ g_hbs_px=px; for(int f=0;f<HBF_N;f++) if(g_hbs[f].px>=0) g_hbs[f].px=px; }
+    pthread_mutex_unlock(&g_hbs_mx); }
+// The page's do=feat (stats.c st_feat): mask = features (bit = HBF_*), on / team / vis / px < 0 = leave as they are; each
+// setting lands only where the feature has it. Returns how many features it named.
+int hb_feat_set(unsigned mask,int on,int team,int vis,int px){
+    hbs_sync(); int n=0; pthread_mutex_lock(&g_hbs_mx);
+    for(int f=0;f<HBF_N;f++){ if(!((mask>>f)&1) || f==HBF_VISIBLE) continue; n++;
+        if(on>=0 && hb_feat(f)!=(on?1:0)) __atomic_fetch_xor(&g_hb_toggle,1<<f,__ATOMIC_ACQ_REL);
+        if(team>=0 && team<3 && g_hbs[f].team>=0) g_hbs[f].team=team;
+        if(vis>=0 && g_hbs[f].vis>=0) g_hbs[f].vis=vis?1:0;
+        if(px>0 && g_hbs[f].px>=0) g_hbs[f].px=px<4?4:px>60?60:px; }
+    pthread_mutex_unlock(&g_hbs_mx); return n; }
+// Friend / enemy class for the team filters: bit 0 enemy, bit 1 friend, 0 = no team (shown under "all" only). A filter
+// mode (1 enemies, 2 friends) shows an object when its class has that bit.
+static int hb_bip_cls(const HbObj*o){ return hb_is_friend(o)?2:1; }
+static int hb_team_ok(int mode,int cls){ return mode<=0 || (cls&mode); }
+static int hb_occ_cls(uint32_t veh,const HbObj*objs,int n){ int c=0;   // a vehicle: whoever sits in it
+    for(int i=0;i<n;i++) if(objs[i].type==0 && objs[i].parent==veh) c|=hb_bip_cls(&objs[i]); return c; }
+static int hb_owner_cls(uint32_t h,const HbObj*objs,int n){   // a projectile: whoever fired it
+    if(h==0xFFFFFFFFu) return 0;
+    for(int i=0;i<n;i++) if(objs[i].handle==h) return objs[i].type==0?hb_bip_cls(&objs[i]):hb_occ_cls(h,objs,n);
+    return hb_occ_cls(h,objs,n); }   // not gathered (a turret while Vehicles is off; a body already gone): its occupants
 // PELOAD_INPUT_FACE (test helper for unattended overlay checks): steer the scripted pad toward the nearest other biped.
 static float g_hb_tgt[3], g_hb_cam[3], g_hb_fwd[3]; static volatile int g_hb_tgt_ok;
 int hb_face_target(float*rx,float*ry){ if(!g_hb_tgt_ok) return 0;
@@ -141,11 +196,14 @@ static int hb_collect(HbObj*out,int max){
     if(esz!=0x18 || hi<=0 || hi>maxc || hi>8192) return 0;
     if(!hb_read(data,g_hb_tab,(size_t)hi*0x18)) return 0; g_hb_hi=hi;
     int fh=hb_feat(HBF_HITBOX), ft=hb_feat(HBF_TRACER), fi=hb_feat(HBF_INFO), fw=hb_feat(HBF_ITEMS);
+    int fveh=hb_feat(HBF_VEH);   // vehicles (+ giants: Scarabs) on their own switch; Hitboxes / Player info = the players
+    // bipeds also when a Vehicles or Tracers team filter needs them: a vehicle's team is its occupants', a turret's shots
+    // its gunner's, and the local team comes from our own body
+    int fb = fh || fi || (fveh && g_hbs[HBF_VEH].team>0) || (ft && g_hbs[HBF_TRACER].team>0);
     int n=0;
     for(int i=0;i<hi && n<max;i++){ const uint8_t*e=g_hb_tab+i*0x18; if(!*(const uint16_t*)e) continue; int t=e[3];
         int unit = t==0||t==1||t==12;
-        int fveh=hb_feat(HBF_VEH);   // vehicles (+ giants: Scarabs) on their own switch; Hitboxes / Player info = the players
-        int want = (t==0 && (fh||fi)) || ((t==1||t==12) && fveh) || (t==5 && (ft || (fh&&g_hb_all))) || ((t==2||t==3) && (fw || (fh&&g_hb_all)));
+        int want = (t==0 && fb) || ((t==1||t==12) && fveh) || (t==5 && (ft || (fh&&g_hb_all))) || ((t==2||t==3) && (fw || (fh&&g_hb_all)));
         if(g_hb_units_only) want=unit; if(!want) continue;
         uint64_t p=*(const uint64_t*)(e+0x10); static uint8_t dh[0x380]; size_t rd=unit?0x380:0x140; if(!p || !hb_read(p,dh,rd)) continue;
         const float*od=(const float*)(dh+0x1c);
@@ -156,6 +214,7 @@ static int hb_collect(HbObj*out,int max){
         o->dead=(*(const uint32_t*)(dh+0x110)>>2)&1; o->health=o->dead?0:*(const float*)(dh+0xF4); o->shield=o->dead?0:*(const float*)(dh+0xF8);
         if(unit){ o->team=*(const int32_t*)(dh+0x174); o->seat=*(const int16_t*)(dh+0x24E); o->wslot=*(const int8_t*)(dh+0x262);
             memcpy(o->weapons,dh+0x268,16); memcpy(o->gren,dh+0x294,4); o->camo=*(const float*)(dh+0x360); }
+        o->owner = t==5 ? *(const uint32_t*)(dh+0xC0) : 0xFFFFFFFFu;   // projectile: the unit that fired it (tracers' team filter)
         if(!(o->r>0.001f && o->r<50.f) || o->c[0]!=o->c[0]) continue; n++; }
     return n; }
 // ---- real hitboxes: the object's collision model, posed by its live node matrices --------------------------------
@@ -449,7 +508,8 @@ static const char* hb_glyph(char c){
     case '/': return "0046";  case '+': return "03432125";  case '?': return "05060646464444222221";  case '(': return "3616162020101034";
     default: return ""; } }
 static float g_hb_px, g_hb_py;   // NDC size of one font-grid unit
-static volatile int g_hb_text_px;   // label glyph height in window pixels (0 = not set yet)
+static void hb_text_size(int px){   // label glyphs px window pixels tall (each feature its own: g_hbs[f].px)
+    if(px<4) px=4; if(px>60) px=60; float W=(float)(g_win_pw>0?g_win_pw:1920), H=(float)(g_win_ph>0?g_win_ph:1080), u=px/6.0f; g_hb_px=2.0f*u/W; g_hb_py=2.0f*u/H; }
 static int hb_text(float*verts,int nv,int cap,float x,float y,const char*s,const float*col){   // x,y = NDC of the text's top-left
     for(; *s; s++, x+=5*g_hb_px){ char ch=*s; if(ch>='a'&&ch<='z') ch-=32; const char*g=hb_glyph(ch);
         for(; g[0]&&g[1]&&g[2]&&g[3] && nv+2<=cap; g+=4){ float*d=verts+nv*5;
@@ -526,8 +586,9 @@ static void hbz_load(const char*path){
 // the scene's depth (the visible-only readback, hb_vis_tick) at its middle is not nearer than the piece, moved 0.3 units
 // toward the camera so lines lying on the ground stay. PELOAD_HB_ZONES_XRAY=1 = through walls (old).
 static int hb_pt_vis(const float*p); static int hbz_xray(void);
-static int hb_seg_vis(float*verts,int nv,int cap,const float*vp,const float*a,const float*b,const float*col){
-    extern int g_hbv_ok_x(void); if(hbz_xray() || !g_hbv_ok_x()) return hb_seg_clip(verts,nv,cap,vp,a,b,col);
+// (also the tracers' visible only: a line drawn only in the pieces the depth readback sees; no readback yet = whole)
+static int hb_seg_occ(float*verts,int nv,int cap,const float*vp,const float*a,const float*b,const float*col){
+    extern int g_hbv_ok_x(void); if(!g_hbv_ok_x()) return hb_seg_clip(verts,nv,cap,vp,a,b,col);
     float d[3]={b[0]-a[0],b[1]-a[1],b[2]-a[2]}; float len=sqrtf(d[0]*d[0]+d[1]*d[1]+d[2]*d[2]); int n=(int)(len/1.5f)+1; if(n>48) n=48;
     int run=-1; for(int i=0;i<=n;i++){ int vis=0;
         if(i<n){ float m[3]={a[0]+d[0]*(i+0.5f)/n,a[1]+d[1]*(i+0.5f)/n,a[2]+d[2]*(i+0.5f)/n}; vis=hb_pt_vis(m)!=0; }
@@ -535,6 +596,8 @@ static int hb_seg_vis(float*verts,int nv,int cap,const float*vp,const float*a,co
         if(!vis && run>=0){ float p0[3]={a[0]+d[0]*run/n,a[1]+d[1]*run/n,a[2]+d[2]*run/n}, p1[3]={a[0]+d[0]*i/n,a[1]+d[1]*i/n,a[2]+d[2]*i/n};
             nv=hb_seg_clip(verts,nv,cap,vp,p0,p1,col); run=-1; } }
     return nv; }
+static int hb_seg_vis(float*verts,int nv,int cap,const float*vp,const float*a,const float*b,const float*col){
+    return hbz_xray() ? hb_seg_clip(verts,nv,cap,vp,a,b,col) : hb_seg_occ(verts,nv,cap,vp,a,b,col); }
 static int hbz_draw(float*verts,int nv,int cap,const float*vp){
     char mp[1024]; if(!hb_current_map(mp,sizeof mp)) return nv; hbz_load(mp);
     static const float ckill[3]={1,0.15f,0.15f}, csafe[3]={0.2f,1,0.35f}, csoft[3][3]={{1,0.6f,0.1f},{1,0.25f,0.65f},{1,0.92f,0.2f}};
@@ -764,8 +827,12 @@ static D3DObj* g_hb_dsv;   // the depth buffer of the frame's camera draw (hb_no
 enum { HBV_W=480, HBV_H=270 };
 static float g_hbv_depth[HBV_W*HBV_H], g_hbv_vp[16]; static volatile unsigned g_hbv_seq; static volatile int g_hbv_ok;
 static int hbz_xray(void){ static int x=-1; if(x<0) x=getenv("PELOAD_HB_ZONES_XRAY")?1:0; return x; }
+// The readback runs only while an ENABLED feature draws visible only (its own setting), or zones are on (always per pixel)
+static int hb_vis_needed(void){ hbs_sync();
+    for(int f=0;f<HBF_N;f++) if(f!=HBF_VISIBLE && f!=HBF_ZONES && g_hbs[f].vis>0 && hb_feat(f)) return 1;
+    return hb_feat(HBF_ZONES) && !hbz_xray(); }
 static void hb_vis_tick(void){
-    if(!hb_overlay_on() || !(hb_feat(HBF_VISIBLE) || (hb_feat(HBF_ZONES) && !hbz_xray()))){ g_hbv_ok=0; return; }   // zones always draw visible parts only
+    if(!hb_overlay_on() || !hb_vis_needed()){ g_hbv_ok=0; return; }
     D3DObj*ds=g_hb_dsv;
     { static int lg=-1; if(lg<0) lg=getenv("PELOAD_HB_VISLOG")?1:0; static double tl; double now=mono_s();   // PELOAD_HB_VISLOG: readback state every 2 s
       if(lg && now-tl>2.0){ tl=now; char m[200]; int k=snprintf(m,sizeof m,"  [hbvis] dsv %p gltex %u att %u ok %d seq %u depth[mid] %.6f\n",(void*)ds,ds?ds->gltex:0,ds?ds->gldsatt:0,g_hbv_ok,g_hbv_seq,g_hbv_depth[(HBV_H/2)*HBV_W+HBV_W/2]); (void)!write(2,m,k); } }
@@ -900,6 +967,17 @@ static void hbz_gpu(const float*vp){
     if(g_hbz_ntri) G.DrawArrays(4/*TRIANGLES*/,0,g_hbz_ntri);
     if(g_hbz_nline) G.DrawArrays(1/*LINES*/,g_hbz_ntri,g_hbz_nline);
     G.BindVertexArray(0); G.Disable(0x0BE2); }
+// A bounding sphere (three great circles), and a unit's box: its real hitboxes (collision model posed on its nodes), or the
+// sphere where none is found (or PELOAD_HITBOXES=spheres)
+static int hb_sphere(float*verts,int nv,int cap,const float*vp,const HbObj*o,const float*col){
+    for(int axis=0;axis<3;axis++){ float prev[3]; int pv=0;
+        for(int sgi=0;sgi<=24;sgi++){ float an=(float)sgi*(6.2831853f/24.f), ca=cosf(an)*o->r, sa=sinf(an)*o->r; float w[3]={o->c[0],o->c[1],o->c[2]};
+            if(axis==0){ w[0]+=ca; w[1]+=sa; } else if(axis==1){ w[0]+=ca; w[2]+=sa; } else { w[1]+=ca; w[2]+=sa; }
+            if(pv) nv=hb_seg(verts,nv,cap,vp,prev,w,col); memcpy(prev,w,12); pv=1; } }
+    return nv; }
+static int hb_unit_box(float*verts,int nv,int cap,const float*vp,const HbObj*o,const float*sphcol){
+    if(!g_hb_spheres){ int a=hb_emit_hitbox(o,vp,verts,nv,cap); if(a>0) return nv+a; if(a<0) return nv; }   // -1: posed, all behind the camera
+    return hb_sphere(verts,nv,cap,vp,o,sphcol); }
 static void hb_draw_overlay(void){
     if(!hb_overlay_on() || !G.DrawArrays || !G.CreateShader) return;
     float vp[32]; unsigned s0=g_hb_vpseq; if(s0&1) return; memcpy(vp,g_hb_vp,sizeof vp); if(g_hb_vpseq!=s0) return;
@@ -911,7 +989,8 @@ static void hb_draw_overlay(void){
         g_hb_prog=G.CreateProgram(); G.AttachShader(g_hb_prog,v); G.AttachShader(g_hb_prog,f); G.LinkProgram(g_hb_prog); G.DeleteShader(v); G.DeleteShader(f);
         G.GenBuffers(1,&g_hb_vbo); }
     { static void*vctx; void*cur=CGLGetCurrentContext(); if(cur!=vctx){ vctx=cur; G.GenVertexArrays(1,&g_hb_vao); } }   // VAOs are per context
-    int fh=hb_feat(HBF_HITBOX), ft=hb_feat(HBF_TRACER), fi=hb_feat(HBF_INFO), fw=hb_feat(HBF_ITEMS), fv=hb_feat(HBF_VISIBLE); double now=mono_s();
+    hbs_sync(); int fh=hb_feat(HBF_HITBOX), ft=hb_feat(HBF_TRACER), fi=hb_feat(HBF_INFO), fw=hb_feat(HBF_ITEMS), fveh=hb_feat(HBF_VEH); double now=mono_s();
+    const HbSet s_hit=g_hbs[HBF_HITBOX], s_veh=g_hbs[HBF_VEH], s_trc=g_hbs[HBF_TRACER], s_inf=g_hbs[HBF_INFO], s_itm=g_hbs[HBF_ITEMS], s_zon=g_hbs[HBF_ZONES];   // this frame's settings
 
     static HbObj objs[1024]; extern pthread_mutex_t g_hb_collect_mx; pthread_mutex_lock(&g_hb_collect_mx); int n=hb_collect(objs,1024); pthread_mutex_unlock(&g_hb_collect_mx);
     if(getenv("PELOAD_HITBOXES_LOG")){ static double tl; if(now-tl>3.0){ tl=now; int cnt[16]={0}; for(int i=0;i<n;i++) if(objs[i].type<16) cnt[objs[i].type]++;
@@ -922,9 +1001,7 @@ static void hb_draw_overlay(void){
       if(bi>=0){ memcpy(g_hb_tgt,objs[bi].c,12); memcpy(g_hb_cam,vp+28,12); memcpy(g_hb_fwd,vp+12,12); g_hb_tgt_ok=1; } else g_hb_tgt_ok=0;
       const char*fp=getenv("PELOAD_INPUT_FACE_POINT"); float pt[3];   // "x,y,z": aim at a fixed world point instead
       if(fp && sscanf(fp,"%f,%f,%f",&pt[0],&pt[1],&pt[2])==3){ memcpy(g_hb_tgt,pt,12); memcpy(g_hb_cam,vp+28,12); memcpy(g_hb_fwd,vp+12,12); g_hb_tgt_ok=1; } }
-    // label text: glyphs g_hb_text_px window pixels tall (PELOAD_HB_TEXT_PX, default 7; the stats page's Text -/+)
-    { if(g_hb_text_px<=0){ const char*e=getenv("PELOAD_HB_TEXT_PX"); g_hb_text_px=e?atoi(e):7; if(g_hb_text_px<4) g_hb_text_px=4; if(g_hb_text_px>60) g_hb_text_px=60; }
-      float W=(float)(g_win_pw>0?g_win_pw:1920), H=(float)(g_win_ph>0?g_win_ph:1080), u=g_hb_text_px/6.0f; g_hb_px=2.0f*u/W; g_hb_py=2.0f*u/H; }
+    // label text: each feature's own size (g_hbs[f].px; hb_text_size before its labels)
     // PELOAD_HB_SELFDUMP=<file>: every 0.25 s append {time, camera forward[3], camera pos[3], our unit datum 0x800 B,
     // our player datum 0x400 B} -- raw material for locating aim / crouch / name / score fields offline.
     { const char*sd=getenv("PELOAD_HB_SELFDUMP"); static double ts; if(sd && now-ts>0.25){ ts=now;
@@ -947,31 +1024,38 @@ static void hb_draw_overlay(void){
       uint32_t lu=g_hb_local_unit; if(!found && lu!=0xFFFFFFFFu) for(int i=0;i<n;i++) if(objs[i].type==0 && objs[i].handle==lu){ g_hb_myteam=objs[i].team; break; } }
     enum { HB_CAP=400000 }; static float verts[HB_CAP*5]; int nv=0; const float*cam=vp+28;   // cb0[7] = camera position
     static const float cwhite[3]={1,1,1}, cgrey[3]={0.7f,0.7f,0.7f}, ctrace[3]={1,0.95f,0.55f}, cvel[3]={1,0.5f,0.1f}, citem[3]={0.3f,1,0.45f}, cequip[3]={0.3f,0.9f,1};
-    for(int i=0;i<n;i++){ const HbObj*o=&objs[i]; int unit=o->type==0||o->type==1||o->type==12;
+    // fallback spheres (no collision model found): bipeds pink, vehicles grey (yellow = weak spots), giants orange, weapons green, equipment cyan
+    static const float pal[6][3]={{1,0.5f,0.5f},{0.55f,0.6f,0.65f},{1,0.4f,0},{0.2f,1,0.3f},{0.2f,0.9f,1},{1,0.3f,1}};   // (+ projectiles magenta)
+    // Every feature applies its own team filter / visible only / label size right where it draws (g_hbs, per-feature
+    // settings). hb_vis is worked out at most once per object, and only when a visible-only feature asks for it.
+    #define HB_SEEN() (vis<0?(vis=hb_vis(o)):vis)
+    for(int i=0;i<n;i++){ const HbObj*o=&objs[i]; int veh=o->type==1||o->type==12, vis=-1;
         float dx=o->c[0]-cam[0], dy=o->c[1]-cam[1], dz=o->c[2]-cam[2]; int self = dx*dx+dy*dy+dz*dz < (o->r+0.3f)*(o->r+0.3f) || (o->type==0 && o->handle==g_hb_local_unit);   // our own body
-        if(o->type==5 && ft){ hb_trail_add(o->handle,o->c,now);
+        if(o->type==5){   // projectiles: Tracers (trail positions), filtered by the shooter's team
+            if(!ft){ if(fh && g_hb_all && !self && (s_hit.vis<=0 || HB_SEEN())) nv=hb_sphere(verts,nv,HB_CAP,vp,o,pal[5]); continue; }   // PELOAD_HITBOXES=all
+            if(s_trc.team>0 && !hb_team_ok(s_trc.team,hb_owner_cls(o->owner,objs,n))) continue;
+            hb_trail_add(o->handle,o->c,now);
             if(getenv("PELOAD_HITBOXES_LOG")){ static uint32_t seen[64]; static int ns; int f=0; for(int q=0;q<ns;q++) if(seen[q]==o->def) f=1;
                 if(!f && ns<64){ seen[ns++]=o->def; char m[160]; int k=snprintf(m,sizeof m,"  [hitbox] projectile type seen: %s (%08x) speed %.2f\n",hb_tag_name(o->def),o->def,sqrtf(o->vel[0]*o->vel[0]+o->vel[1]*o->vel[1]+o->vel[2]*o->vel[2])); (void)!write(2,m,k); } }
             continue; }
-        if(fv && o->type!=5 && !hb_vis(o)) continue;   // visible only: hidden behind the world
-        if((o->type==2||o->type==3) && fw && o->parent==0xFFFFFFFFu){   // lying on the map (not held)
-            float a[3]={o->c[0]-0.15f,o->c[1],o->c[2]}, b[3]={o->c[0]+0.15f,o->c[1],o->c[2]}, c2[3]={o->c[0],o->c[1]-0.15f,o->c[2]}, d2[3]={o->c[0],o->c[1]+0.15f,o->c[2]};
-            const float*col=o->type==2?citem:cequip; nv=hb_seg(verts,nv,HB_CAP,vp,a,b,col); nv=hb_seg(verts,nv,HB_CAP,vp,c2,d2,col);
-            float tx,ty; if(hb_proj(vp,o->c,&tx,&ty)){ const char*nm=hb_tag_name(o->def); nv=hb_text(verts,nv,HB_CAP,tx-strlen(nm)*2.5f*g_hb_px,ty+8*g_hb_py,nm,col); }
-            if(!(fh&&g_hb_all)) continue; }
-        if(self || !hb_team_shown(o)) continue;
-        int fbox = o->type==0 ? fh : (o->type==1||o->type==12) ? hb_feat(HBF_VEH) : fh;   // players: Hitboxes; vehicles: Vehicles
-        if(unit && fbox && !g_hb_spheres){ int a=hb_emit_hitbox(o,vp,verts,nv,HB_CAP); if(a>0) nv+=a; if(a!=0) goto info; }
-        if(fbox && (unit || g_hb_all)){
-            static const float pal[6][3]={{1,0.5f,0.5f},{0.55f,0.6f,0.65f},{1,0.4f,0},{0.2f,1,0.3f},{0.2f,0.9f,1},{1,0.3f,1}};   // fallback spheres (no collision model found): bipeds pink, vehicles grey (yellow = weak spots)
-            const float*col = pal[o->type==0?0 : o->type==1?1 : o->type==12?2 : o->type==2?3 : o->type==3?4 : 5];
-            for(int axis=0;axis<3;axis++){ float prev[3]; int pv=0;
-                for(int sgi=0;sgi<=24;sgi++){ float an=(float)sgi*(6.2831853f/24.f), ca=cosf(an)*o->r, sa=sinf(an)*o->r; float w[3]={o->c[0],o->c[1],o->c[2]};
-                    if(axis==0){ w[0]+=ca; w[1]+=sa; } else if(axis==1){ w[0]+=ca; w[2]+=sa; } else { w[1]+=ca; w[2]+=sa; }
-                    if(pv) nv=hb_seg(verts,nv,HB_CAP,vp,prev,w,col); memcpy(prev,w,12); pv=1; } } }
-      info:
-        if(fi && o->type==0){   // player info above the head: shield/health %, held weapon, grenades, camo, vehicle
+        if(o->type==2||o->type==3){   // weapons / equipment
+            if(fw && o->parent==0xFFFFFFFFu && (s_itm.vis<=0 || HB_SEEN())){   // Items: lying on the map (not held); no team
+                float a[3]={o->c[0]-0.15f,o->c[1],o->c[2]}, b[3]={o->c[0]+0.15f,o->c[1],o->c[2]}, c2[3]={o->c[0],o->c[1]-0.15f,o->c[2]}, d2[3]={o->c[0],o->c[1]+0.15f,o->c[2]};
+                const float*col=o->type==2?citem:cequip; nv=hb_seg(verts,nv,HB_CAP,vp,a,b,col); nv=hb_seg(verts,nv,HB_CAP,vp,c2,d2,col);
+                float tx,ty; if(hb_proj(vp,o->c,&tx,&ty)){ hb_text_size(s_itm.px); const char*nm=hb_tag_name(o->def); nv=hb_text(verts,nv,HB_CAP,tx-strlen(nm)*2.5f*g_hb_px,ty+8*g_hb_py,nm,col); } }
+            if(fh && g_hb_all && !self && (s_hit.vis<=0 || HB_SEEN())) nv=hb_sphere(verts,nv,HB_CAP,vp,o,pal[o->type==2?3:4]);   // PELOAD_HITBOXES=all
+            continue; }
+        if(self) continue;
+        if(veh){   // vehicles and giants (Scarabs): the Vehicles feature; team = its occupants' (empty: under "all" only)
+            if(fveh && (s_veh.team<=0 || hb_team_ok(s_veh.team,hb_occ_cls(o->handle,objs,n))) && (s_veh.vis<=0 || HB_SEEN()))
+                nv=hb_unit_box(verts,nv,HB_CAP,vp,o,pal[o->type==1?1:2]);
+            continue; }
+        if(o->type!=0) continue;
+        int cls=hb_bip_cls(o);   // players: Hitboxes and Player info, each with its own filters
+        if(fh && hb_team_ok(s_hit.team,cls) && (s_hit.vis<=0 || HB_SEEN())) nv=hb_unit_box(verts,nv,HB_CAP,vp,o,pal[0]);
+        if(fi && hb_team_ok(s_inf.team,cls) && (s_inf.vis<=0 || HB_SEEN())){   // player info above the head: shield/health %, held weapon, grenades, camo, vehicle
             float top[3]={o->c[0],o->c[1],o->c[2]+o->r+0.12f}, tx,ty; if(!hb_proj(vp,top,&tx,&ty)) continue;
+            hb_text_size(s_inf.px);
             const float*tc = o->team>=0&&o->team<8 ? g_hb_teamcol[o->team] : cwhite;
             char l1[48], l2[80], l3[48]; l3[0]=0;
             if(o->dead) snprintf(l1,sizeof l1,"DEAD");
@@ -988,21 +1072,29 @@ static void hb_draw_overlay(void){
             nv=hb_text(verts,nv,HB_CAP,tx-strlen(l1)*2.5f*g_hb_px,y,l1,tc); y-=lh;
             nv=hb_text(verts,nv,HB_CAP,tx-strlen(l2)*2.5f*g_hb_px,y,l2,cwhite); y-=lh;
             if(l3[0]) nv=hb_text(verts,nv,HB_CAP,tx-strlen(l3)*2.5f*g_hb_px,y,l3,o->camo>0.05f?cequip:cgrey); } }
-    if(ft){ for(int t=0;t<256;t++){ HbTrail*tr=&g_hb_trails[t]; if(!tr->n) continue; if(now-tr->seen>0.6){ tr->n=0; continue; }   // gone: keep 0.6 s
-            int cnt=tr->n<32?tr->n:32; for(int k=1;k<cnt;k++) nv=hb_seg(verts,nv,HB_CAP,vp,tr->p[(tr->n-1-k)&31],tr->p[(tr->n-k)&31],ctrace); }
+    #undef HB_SEEN
+    if(ft){ int tv=s_trc.vis>0;   // Tracers; visible only = each line drawn in the pieces the depth readback sees
+        #define HB_TSEG(a,b,c) (nv = tv ? hb_seg_occ(verts,nv,HB_CAP,vp,a,b,c) : hb_seg(verts,nv,HB_CAP,vp,a,b,c))
+        for(int t=0;t<256;t++){ HbTrail*tr=&g_hb_trails[t]; if(!tr->n) continue; if(now-tr->seen>0.6){ tr->n=0; continue; }   // gone: keep 0.6 s
+            int cnt=tr->n<32?tr->n:32; for(int k=1;k<cnt;k++) HB_TSEG(tr->p[(tr->n-1-k)&31],tr->p[(tr->n-k)&31],ctrace); }   // (team: filtered when recorded)
         for(int i=0;i<n;i++){ const HbObj*o=&objs[i]; if(o->type!=5) continue; float sp=sqrtf(o->vel[0]*o->vel[0]+o->vel[1]*o->vel[1]+o->vel[2]*o->vel[2]); if(sp<1e-4f) continue;
-            float e[3]={o->c[0]+o->vel[0]/sp*1.5f,o->c[1]+o->vel[1]/sp*1.5f,o->c[2]+o->vel[2]/sp*1.5f}; nv=hb_seg(verts,nv,HB_CAP,vp,o->c,e,cvel); } }   // 1.5 units along the velocity
-    if(ft){ unsigned nimp=__atomic_load_n(&g_hbimp_n,__ATOMIC_ACQUIRE); for(unsigned k=0;k<256 && k<nimp;k++){ HbImpact*r=&g_hbimp[(nimp-1-k)&255];
+            if(s_trc.team>0 && !hb_team_ok(s_trc.team,hb_owner_cls(o->owner,objs,n))) continue;
+            float e[3]={o->c[0]+o->vel[0]/sp*1.5f,o->c[1]+o->vel[1]/sp*1.5f,o->c[2]+o->vel[2]/sp*1.5f}; HB_TSEG(o->c,e,cvel); }   // 1.5 units along the velocity
+        unsigned nimp=__atomic_load_n(&g_hbimp_n,__ATOMIC_ACQUIRE); for(unsigned k=0;k<256 && k<nimp;k++){ HbImpact*r=&g_hbimp[(nimp-1-k)&255];
             double t; __atomic_load(&r->t,&t,__ATOMIC_ACQUIRE); if(now-t>0.5) continue;
+            if(s_trc.team>0 && !hb_team_ok(s_trc.team,hb_owner_cls(*(const uint32_t*)(r->raw+0xC0),objs,n))) continue;   // the shooter (+0xC0 owner)
             // projectile datum: +0x1e8 start position (muzzle), +0x1b0 distance travelled -- the tracer runs start -> impact
             const float*st=(const float*)(r->raw+0x1e8); float trav=*(const float*)(r->raw+0x1b0);
             float ddx=r->pos[0]-st[0], ddy=r->pos[1]-st[1], ddz=r->pos[2]-st[2], dd=sqrtf(ddx*ddx+ddy*ddy+ddz*ddz);
             float a[3]={st[0],st[1],st[2]};
             if(!(trav>0.0f && fabsf(dd-trav)<0.25f*trav+0.5f)){   // start not recorded: 3 units back along the velocity
                 float sp=sqrtf(r->vel[0]*r->vel[0]+r->vel[1]*r->vel[1]+r->vel[2]*r->vel[2]); memcpy(a,r->pos,12); if(sp>1e-5f) for(int q=0;q<3;q++) a[q]-=r->vel[q]/sp*3.0f; }
-            nv=hb_seg(verts,nv,HB_CAP,vp,a,r->pos,ctrace);
-            float x0[3]={r->pos[0]-0.05f,r->pos[1],r->pos[2]}, x1[3]={r->pos[0]+0.05f,r->pos[1],r->pos[2]}; nv=hb_seg(verts,nv,HB_CAP,vp,x0,x1,cvel); } }
-    if(hb_feat(HBF_ZONES)){ if(hbz_xray()) nv=hbz_draw(verts,nv,HB_CAP,vp); else hbz_gpu(vp); }   // kill / safe zones, soft ceilings (F10)
+            HB_TSEG(a,r->pos,ctrace);
+            float x0[3]={r->pos[0]-0.05f,r->pos[1],r->pos[2]}, x1[3]={r->pos[0]+0.05f,r->pos[1],r->pos[2]}; HB_TSEG(x0,x1,cvel); }
+        #undef HB_TSEG
+    }
+    if(hb_feat(HBF_ZONES)){   // kill / safe zones, soft ceilings (F10); labels only in the old line mode (PELOAD_HB_ZONES_XRAY)
+        if(hbz_xray()){ hb_text_size(s_zon.px>0?s_zon.px:g_hb_text_px); nv=hbz_draw(verts,nv,HB_CAP,vp); } else hbz_gpu(vp); }
     if(!nv) return;
     G.Disable(0x0B71/*DEPTH_TEST*/); G.Disable(0x0BE2/*BLEND*/); G.Disable(0x0C11/*SCISSOR*/);
     G.UseProgram(g_hb_prog); G.BindVertexArray(g_hb_vao); G.BindBuffer(0x8892/*ARRAY_BUFFER*/,g_hb_vbo);

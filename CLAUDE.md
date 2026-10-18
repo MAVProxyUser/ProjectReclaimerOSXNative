@@ -199,10 +199,16 @@ drawn over a top-down picture of the map: re-tools/h3bsp.py decodes the collisio
 h3-map-geometry.md) into maptop/<map>.png + .json (world bounds); shim/tools/maptop.sh makes all 27 (needs python3 +
 numpy + Pillow); served as /maptop/<map>.png|json. (re-tools/h3map.py's string-id decoding is wrong for these builds;
 h3bsp.sid_name is right.)
-Overlay "visible only" (page button / PELOAD_HB_VISIBLE): hb_vis_tick blits the camera draw's depth (D32F_S8) down to 480x270
+Overlay "visible only": hb_vis_tick blits the camera draw's depth (D32F_S8) down to 480x270
 and reads it back through a 3-PBO ring (2 frames late, no stall); hb_vis keeps an object when the scene at its centre /
-top / bottom is not nearer than its front (centre moved toward the camera by radius + 0.3). Label text is
-PELOAD_HB_TEXT_PX window pixels tall (default 7; the page's Text -/+).
+top / bottom is not nearer than its front (centre moved toward the camera by radius + 0.3).
+Overlay panel (2026-10-18, backlog 45): team filter, visible only and label px are PER FEATURE (hitbox.c g_hbs[HBF_*], -1 = n/a:
+items/zones no team, zones always per pixel, px only info/items (+ zones' labels in XRAY mode)); vehicles' team = occupants' (bipeds
+whose +0x10 parent is it; empty = "all" only), tracers' = the shooter's (+0xC0 owner). POST /control?do=feat&f=<a,b|all>[&on=][&team=]
+[&vis=][&px=4..60] (stats.c st_feat -> hb_feat_set); snapshot overlay.features (null = n/a). The old globals (PELOAD_HB_TEAMS /
+_VISIBLE / _TEXT_PX, do=teams / visible / textup|textdown, F6 / F9) are "apply to all" (hbs_sync notices a change). The readback runs
+only while an ENABLED feature has vis on, or zones are on. Offline: shim/tools/overlay-feat-test.sh (the real C, extracted),
+shim/tools/overlay-panel-mock.py (the page against a fake stats server; never port 8765).
 Frame rate (overnight 2026-10-17; details + numbers in shim/docs/PERF-PLAN.md "Overnight"): 100-player Infection
 15-24 -> 37-48 fps. Particle compute (dxbc_cpu.c) is a SIMT executor (64 lanes, active lanes only; PELOAD_CS_SCALAR = old,
 PELOAD_CS_CHECK compares both byte for byte) on PELOAD_CS_WORKERS (4) dependency-ordered workers with read-only inputs
