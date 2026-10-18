@@ -25,6 +25,8 @@
 // _DARWIN_C_SOURCE keeps all the BSD/mach APIs visible alongside _XOPEN_SOURCE.
 #define _XOPEN_SOURCE 700
 #define _DARWIN_C_SOURCE 1
+#include <libproc.h>
+#include <ftw.h>
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
@@ -170,6 +172,7 @@ static int g_prefer_base;   // map next image at its preferred base (exe, halo3.
 #include <dirent.h>
 #define MAXFD 8192
 static char g_drivec[1024];        // abs path of the Wine prefix's drive_c
+static void scratch_note_owner(const char*dir,pid_t pid);   // fwd: the scratch-folder sweep (backlog 66), defined before main
 static char *g_fdpath[MAXFD];       // boxed-fd -> real unix path
 static DIR  *g_fddir[MAXFD];        // boxed-fd -> open dir stream (lazy)
 static int   g_fddel[MAXFD];        // delete-on-close flag
@@ -3297,6 +3300,7 @@ static int MSABI i_CreateProcessW(const uint16_t*app,uint16_t*cmd,void*pa,void*t
     pid_t pid=0; int rc=posix_spawn(&pid,g_self,&fa,0,av,environ);
     posix_spawn_file_actions_destroy(&fa);
     if(rc!=0){ g_lasterr=win_err(); return 0; }
+    if(cwd){ char wd[2048]; win2unix(cwd,wd,sizeof wd); scratch_note_owner(wd,pid); }   // the game worker in its scratch folder
     if(g_nchild<256) g_childpid[g_nchild++]=pid;
     if(pi){ *(void**)(pi+0)=(void*)(intptr_t)(0x8000+pid); *(void**)(pi+8)=(void*)(intptr_t)(0x8000+pid);
             *(uint32_t*)(pi+16)=(uint32_t)pid; *(uint32_t*)(pi+20)=(uint32_t)pid; }
@@ -11578,6 +11582,40 @@ static void std_tee_start(int fd,const char*env){ const char*e=getenv(env); if(!
     StdTee*t=malloc(sizeof *t); t->rd=pp[0]; t->out=dup(fd); t->file=f;
     fcntl(t->out,F_SETFD,FD_CLOEXEC); fcntl(f,F_SETFD,FD_CLOEXEC); fcntl(pp[0],F_SETFD,FD_CLOEXEC);
     dup2(pp[1],fd); close(pp[1]); pthread_t th; pthread_create(&th,0,std_tee_thread,t); }
+// ---- the client's per-launch scratch folders (backlog 66) ------------------------------------------------------------------
+// The client makes C:\ReclaimerCache\Temp\mcc-startup-<uuid> for every game worker ("Private runtime scratch (removed after
+// worker exit)") and runs the worker inside it; under the loader it was never removed (1,322 folders / 1.2 GB in a week).
+// scratch_note_owner records the worker's pid when CreateProcessW starts one inside such a folder; scratch_sweep (a thread
+// at every loader start, 20 s in) removes each mcc-startup-* folder that is more than 2 minutes old, whose recorded owner
+// is gone and that no running process has as its working directory. PELOAD_NO_SCRATCH_SWEEP=1 = off.
+static void scratch_owner_path(const char*name,char*out,size_t n){ const char*h=getenv("HOME");
+    snprintf(out,n,"%s/Library/Application Support/ReclaimerMac/scratch-owners/%s",h?h:"/tmp",name); }
+static void scratch_note_owner(const char*dir,pid_t pid){ const char*b=strstr(dir,"/ReclaimerCache/Temp/mcc-startup-"); if(!b) return;
+    b=strrchr(dir,'/')+1; char pth[1200]; scratch_owner_path("",pth,sizeof pth); mkdir(pth,0755); scratch_owner_path(b,pth,sizeof pth);
+    FILE*f=fopen(pth,"w"); if(f){ fprintf(f,"%d\n",(int)pid); fclose(f); } }
+static int sw_rm_cb(const char*p,const struct stat*sb,int tf,struct FTW*fw){ (void)sb;(void)fw; if(tf==FTW_DP) rmdir(p); else unlink(p); return 0; }
+static void* scratch_sweep(void*a){ (void)a; pthread_setname_np("shim-sweep"); sleep(20);
+    char tdir[1200]; snprintf(tdir,sizeof tdir,"%s/ReclaimerCache/Temp",g_drivec);
+    int n=proc_listallpids(NULL,0); if(n<0) n=0; pid_t*pids=calloc((size_t)n+64,sizeof(pid_t)); if(!pids) return 0;
+    n=proc_listallpids(pids,(int)(((size_t)n+64)*sizeof(pid_t))); if(n<0) n=0;
+    char (*cwds)[MAXPATHLEN]=calloc((size_t)(n>0?n:1),MAXPATHLEN); int nc=0;
+    for(int i=0;i<n && cwds;i++){ struct proc_vnodepathinfo vi; if(proc_pidinfo(pids[i],PROC_PIDVNODEPATHINFO,0,&vi,sizeof vi)==(int)sizeof vi && strstr(vi.pvi_cdir.vip_path,"/ReclaimerCache/Temp/"))
+            snprintf(cwds[nc++],MAXPATHLEN,"%s",vi.pvi_cdir.vip_path); }
+    free(pids);
+    DIR*d=opendir(tdir); int removed=0, kept=0; time_t now=time(0);
+    if(d){ struct dirent*e; while((e=readdir(d))){ if(strncmp(e->d_name,"mcc-startup-",12)) continue;
+            char p[1400]; snprintf(p,sizeof p,"%s/%s",tdir,e->d_name); struct stat st; if(lstat(p,&st) || !S_ISDIR(st.st_mode) || now-st.st_mtime<120){ kept++; continue; }
+            int used=0; size_t pl=strlen(p); for(int i=0;i<nc && !used;i++) if(!strncmp(cwds[i],p,pl) && (cwds[i][pl]==0||cwds[i][pl]=='/')) used=1;
+            char op[1200]; scratch_owner_path(e->d_name,op,sizeof op); FILE*f=fopen(op,"r"); if(f){ int pid=0; if(fscanf(f,"%d",&pid)==1 && pid>0 && (kill(pid,0)==0 || errno==EPERM)) used=1; fclose(f); }
+            if(used){ kept++; continue; }
+            nftw(p,sw_rm_cb,16,FTW_DEPTH|FTW_PHYS); if(lstat(p,&st)) { removed++; unlink(op); } } closedir(d); }
+    free(cwds);
+    // owner records whose folder is gone
+    { char od[1200]; scratch_owner_path("",od,sizeof od); DIR*o=opendir(od); if(o){ struct dirent*e; while((e=readdir(o))){ if(strncmp(e->d_name,"mcc-startup-",12)) continue;
+            char p[1400]; snprintf(p,sizeof p,"%s/%s",tdir,e->d_name); struct stat st; if(lstat(p,&st)){ char op[1400]; snprintf(op,sizeof op,"%s%s",od,e->d_name); unlink(op); } } closedir(o); } }
+    if(removed){ char m[200]; int k=snprintf(m,sizeof m,"  [sweep] removed %d stale ReclaimerCache\\Temp\\mcc-startup-* folder%s (%d kept: in use or new)\n",removed,removed==1?"":"s",kept); (void)!write(2,m,(size_t)k); }
+    return 0; }
+static void scratch_sweep_start(void){ if(getenv("PELOAD_NO_SCRATCH_SWEEP") || !g_drivec[0]) return; pthread_t t; if(!pthread_create(&t,0,scratch_sweep,0)) pthread_detach(t); }
 int main(int argc, char **argv){ mt_start();
     std_tee_start(2,"PELOAD_STDERR_TEE"); std_tee_start(1,"PELOAD_STDOUT_TEE");
     if(getenv("PELOAD_SAMPLE")){ pthread_t st; pthread_create(&st,0,sampler_thread,0); }
@@ -11643,6 +11681,7 @@ int main(int argc, char **argv){ mt_start();
     // ---- filesystem roots + env defaults for the game client ----
     { const char *h=getenv("HOME");
       if(h) snprintf(g_drivec,sizeof g_drivec,"%s/Library/Application Support/ReclaimerMac/prefix/drive_c",h);
+      scratch_sweep_start();
       // exe path (Windows form) for GetModuleFileNameW / Rust current_exe().
       // Computed here (after g_drivec) so unix2win maps it correctly (the exe
       // lives outside drive_c -> Z:\ , which win2unix round-trips back).

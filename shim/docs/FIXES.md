@@ -359,6 +359,14 @@ patch variants by signature (section 16; shim/docs/patch-addresses.md).
   on client 0.9.20); it was a logging stub. How: MoveFileW fails with ERROR_ALREADY_EXISTS when the destination exists
   (no replace), else MoveFileExW's rename; the A versions take the bytes as they are. (10-18)
 
+- **Per-launch scratch folders removed** — `scratch_sweep`, `scratch_note_owner`. Why: the client makes
+  C:\ReclaimerCache\Temp\mcc-startup-<uuid> for every game worker ("Private runtime scratch (removed after worker exit)")
+  and runs the worker inside it, but under the loader none was ever removed: 1,322 folders / 1.2 GB after a week (backlog
+  66). How: CreateProcessW records the worker's pid for a folder it starts a process in
+  (~/Library/Application Support/ReclaimerMac/scratch-owners/<name>); every loader start sweeps (20 s in, own thread) the
+  mcc-startup-* folders older than 2 minutes whose owner is gone and that no running process has as its working directory
+  (proc_pidinfo), removing them with nftw (no symlinks followed). `PELOAD_NO_SCRATCH_SWEEP=1` = off. (10-18)
+
 ## 5. Sync objects and timers
 
 - **Real synchronisation primitives** — CRITICAL_SECTION (recursive mutex), SRWLOCK (rwlock), CONDITION_VARIABLE,
@@ -1249,8 +1257,6 @@ Numbers are from the commit messages; PERF-PLAN.md has the measurements. Compare
 - **Runtime-compiled shaders are no-ops** — D3DCompile returns a placeholder DXBC without code for halo3's 5 HLSL shaders
   (video playback CopyToScreen / YUVToRGB + VS, a night-vision-style luminance CS); backlog 67. `PELOAD_REFUSE_EMPTY_SHADER=1`
   refuses such blobs with E_INVALIDARG as D3D11 would.
-- **ReclaimerCache/Temp/mcc-startup-* accumulate** — 1,322 folders / 1.2 GB after a week of test launches: the client's
-  per-launch scratch copies are not removed (maybe only at a clean exit; test runs end with kill -9). Not chased yet.
 - **First join right after a dedicated server starts** can fail its handshake; a retry works.
 - Backlog 60 (client crash in object_get_origin on a deleted object during Forge placement sync, seen once), 61 (Hugegrass
   renders nearly black wherever its own lighting matters -- emissive surfaces, the sky and the HUD are fine; not a regression:
