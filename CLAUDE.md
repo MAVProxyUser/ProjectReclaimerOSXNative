@@ -229,6 +229,12 @@ otherwise: an unencoded pointer crashed the helper). Debug: PELOAD_GLH_TRACE=<n>
 in /Library/Logs/DiagnosticReports/glhelper-*. hb_vis (F9) is off in helper mode. The helper's write end of the wake pipe sits at fd >= 4000
 (the game's CloseHandle once closed a low one).
 D3D object lifetime (2026-10-17, backlog 27): refcounted D3DObjs, freed via d3dobj_stage/d3dobj_reap -- OFF by default since 21:15 (PELOAD_D3D_FREE=1 on) after map-change corruption in a public BTB; copy-on-write (PELOAD_MEMCPY_COW=1) off too. Map-change test server: DED_CONFIG=mapchange.toml bash shim/dedicated.sh (3 x 1-minute games).
+Walking with the map (2026-10-17, backlog 32): PELOAD_NAV=roam|enemy|x,y,z drives pad 0 along A* paths of a floor graph
+(re-tools/h3nav.py -> maptop/<map>.nav, made in the background on first play; shim/src/nav.c, own thread shim-nav;
+PELOAD_NAV_LOG). Use it for unattended test movement instead of PELOAD_INPUT_SCRIPT (needs QR_PAD=1). Vehicle weak spots
+(backlog 31): re-tools/h3dmg.py <map> prints each vehicle's damage sections / seats; the hitbox overlay colors lethal
+sections yellow and driver-exposing ones orange (hitbox.c hbg_weak; Wraith back hatch = 75 of 750 kills it). String ids:
+re-tools/h3bsp.sid_name (19-bit index, namespace at bit 19) -- h3map.H3Map.sid mis-resolves namespace-0 continuations.
 Map pictures (2026-10-17): hb_note_map only keeps real cache maps ("daeh" v13; the engine's autosaves are also .map files); the stats
 server makes a missing maptop picture in the background the first time a map is played (st_maptop_ensure: arch -arm64 python3
 re-tools/h3bsp.py; PELOAD_MAPTOP_TOOL, PELOAD_NO_MAPTOP); maptop.sh also covers Workshop maps (and takes map files as arguments:

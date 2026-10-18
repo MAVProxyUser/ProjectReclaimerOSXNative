@@ -78,3 +78,30 @@ entry (`hbdel_install`) and records projectile datums; at deletion +0x1c is the 
 ## Still to confirm
 Kills / deaths / score (game engine statistics), objective state (flags, territories, hills; needs an objective
 game variant to observe).
+
+## Vehicle weak spots: the model's damage info (2026-10-17, backlog 31)
+
+Static, from the .map (re-tools/h3dmg.py <map> prints it; the overlay's hbg_weak in shim/src/hitbox.c uses the same rule).
+Layouts: Assembly Halo3MCC hlmt.xml / coll.xml.
+
+- object def (vehi/bipd) +0x34 model tagref -> hlmt. hlmt +0x7C Materials [0x14] (+0 name sid, +6 s16 damage section),
+  +0x88 New Damage Info [0xA4], +0x94 Targets [0x20] (aim/lock-on markers: +0xC section, +0x18 flags bit 2 headshot,
+  bit 3 vulnerable), +0xA0 Collision Regions.
+- New Damage Info: +0xC body vitality, +0x20 shield vitality, +0x68 Damage Sections [0x2C] (+0 name, +4 flags: bit 0
+  absorbs body damage, 7 headshotable, 8 ignores shields; +8 share of body vitality; +0xC Instant Responses [0x88]:
+  +8 flags (bit 0 kills, 7 destroys, 16 kills except solo, 23 only on special death), +0xC threshold, +0x40 region sid,
+  +0x44 new state 0-4, +0x78 ejected seat), +0x8C Damage Seats [0x20] (+0 seat label, +4 direct damage scale = share of a
+  hit on the rider that reaches the rider, +0x14 region-specific [0x2C]: +0 region, +8/+0x14/+0x20 direct scale at
+  minor/medium/major damage).
+- A hit's section: collision surface (coll region/permutation/bsp +0x40 surfaces [0xC], material s16 at +4) -> coll +0x14
+  materials (name sid) -> the hlmt material with the same name -> its section. Section damage also counts against the body
+  unless the section absorbs it; parts (fenders, wings, rudders) only change damage states.
+- String ids in these builds: 19-bit index, namespace at bit 19; namespace-0 indices past namespace 0's count continue
+  after all namespaced strings (re-tools/h3bsp.sid_name; h3map.H3Map.sid gets the second part wrong).
+
+What the stock vehicles have (Sandbox, every MP vehicle): Wraith back hatch / rear engine section = 10% (75 of 750): its
+response KILLS the Wraith. Wraith cockpit (15%, 113) and Scorpion driver hatch (15%, 113): at "major" the driver's direct
+damage scale goes 0 -> 1. Other vehicles have no lethal section; damage anywhere drains the same body pool. Riders:
+Mongoose / Chopper driver 1.0, Warthog / Ghost / Mauler / gunners 0.9 (Ghost 1.0 once its hull is damaged), Banshee /
+Hornet pilot 0.2-0.5 by hull state, boarding seats 1.0. The Ghost has a 5% (20) gas_tank section that kills it, but no
+collision material feeds it.

@@ -562,7 +562,8 @@ static void*  MSABI i_HeapAlloc(void *h, uint32_t fl, uint64_t n){ (void)h;
     if(heapdbg()){ void*p=hd_alloc(n?n:1); if(p&&(fl&8)) memset(p,0,n); return p; }
     void*p; if(hg_want(n)){ p=hg_alloc(n); if(p) hg_add(p,n); } else p=malloc(n?n:1);
     if(p&&(fl&8)) memset(p,0,n);
-    { const char*ts=getenv("PELOAD_TRACE_ALLOC"); if(ts && n==(uint64_t)strtoull(ts,0,0)){
+    { static const char*ts=(const char*)1; if(ts==(const char*)1) ts=getenv("PELOAD_TRACE_ALLOC");   // (cached: HeapAlloc is hot)
+      if(ts && n==(uint64_t)strtoull(ts,0,0)){
         void*ret=__builtin_return_address(0); char t[96];
         int k=snprintf(t,sizeof t,"  [ALLOC %llu] p=%p caller=%p\n",(unsigned long long)n,p,ret); (void)!write(2,t,k);
         static int ns; if(ns++<3){ uint64_t*sp=(uint64_t*)__builtin_frame_address(0); int found=0;   // exe return addresses on the stack
@@ -1934,7 +1935,7 @@ static void fps_title_tick(void); // fwd: engine fps + draws/frame in the window
 static int win_hidden(void);
 static void present_cap(void){ static double per=-1, next; if(per<0){ const char*e=getenv("PELOAD_MAX_FPS"); double f=e?atof(e):(win_hidden()?30:0); per=f>0?1.0/f:0; }
     if(!per) return; double now=mono_s(); if(next>now){ usleep((useconds_t)((next-now)*1e6)); next+=per; } else next=now+per; }
-static int MSABI swap_Present(void*t,uint32_t sync,uint32_t fl){ (void)sync;(void)fl; d3dtrace(4,"Present"); { extern void hb_spar_tick(void); hb_spar_tick(); } flog("t%x PRESENT swapchain=%p",pthread_mach_thread_np(pthread_self()),t); g_ct_frame++; if(!sub_on()) g_hb_taken=0; hb_teleport_tick(); flog_present(); fps_title_tick();
+static int MSABI swap_Present(void*t,uint32_t sync,uint32_t fl){ (void)sync;(void)fl; d3dtrace(4,"Present"); { extern void hb_spar_tick(void), nav_tick(void); hb_spar_tick(); nav_tick(); } flog("t%x PRESENT swapchain=%p",pthread_mach_thread_np(pthread_self()),t); g_ct_frame++; if(!sub_on()) g_hb_taken=0; hb_teleport_tick(); flog_present(); fps_title_tick();
     // PELOAD_TRACE_PRESENT_RATE: periodic count+timestamp so we can see if/when the engine stops
     // calling Present (render-thread stall) vs keeps calling it (present-bridge stall).
     if(getenv("PELOAD_TRACE_PRESENT_RATE")){ static unsigned long pc; static long t0; struct timeval tv; gettimeofday(&tv,0);
@@ -3860,6 +3861,7 @@ static uint32_t MSABI i_XInputGetState(uint32_t idx,void*st){
     static uint32_t pkt[4]; static XPad last[4]; static int logged;
     XPad p; memset(&p,0,sizeof p); int con=gc_read(idx,&p);
     if(idx==0 && input_script(&p)) con=1;
+    { extern int nav_pad(int16_t*,int16_t*,int16_t*,int16_t*,uint16_t*); if(idx==0 && nav_pad(&p.lx,&p.ly,&p.rx,&p.ry,&p.buttons)) con=1; }   // PELOAD_NAV (nav.c)
     if(!logged){ logged=1; char m[96]; int k=snprintf(m,sizeof m,"  [input] XInputGetState first call (pad0 %s)\n",con?"connected":"absent"); (void)!write(2,m,k); }
     if(!con) return 1167; /*ERROR_DEVICE_NOT_CONNECTED*/
     if(memcmp(&p,&last[idx],sizeof p)){ last[idx]=p; pkt[idx]++;
@@ -3869,7 +3871,7 @@ static uint32_t MSABI i_XInputGetState(uint32_t idx,void*st){
     return 0; }
 static uint32_t MSABI i_XInputSetState(uint32_t idx,void*vib){ (void)vib; XPad p; return (idx<4 && (gc_read(idx,&p)||idx==0))?0:1167; }
 static uint32_t MSABI i_XInputGetCapabilities(uint32_t idx,uint32_t fl,void*cap){ (void)fl; XPad p; if(idx>3) return 160; if(getenv("PELOAD_NO_PAD")) return 1167;
-    if(!gc_read(idx,&p) && !(idx==0&&getenv("PELOAD_INPUT_SCRIPT"))) return 1167;
+    if(!gc_read(idx,&p) && !(idx==0&&(getenv("PELOAD_INPUT_SCRIPT")||getenv("PELOAD_NAV")))) return 1167;
     if(cap){ memset(cap,0,20); uint8_t*c=cap; c[0]=1/*GAMEPAD*/; c[1]=1/*SUBTYPE_GAMEPAD*/; *(uint16_t*)(c+4)=0xF3FF; c[6]=c[7]=255; *(int16_t*)(c+8)=*(int16_t*)(c+10)=*(int16_t*)(c+12)=*(int16_t*)(c+14)=(int16_t)0xFFC0; } return 0; }
 static void MSABI i_XInputEnable(int en){ (void)en; }
 static void*  MSABI i_GetForegroundWindow(void){ return fg_hwnd(); }
@@ -8279,6 +8281,7 @@ static uintptr_t MSABI i_beginthread(WinThreadProc start,unsigned stack,void*arg
 #include "wasapi.c"
 #include "hitbox.c"
 #include "stats.c"
+#include "nav.c"
 // ---- D3D object lifetime (backlog 27) ----------------------------------------------------------------------------------
 // D3D11 keeps an object alive while the pipeline has it bound, and the GL side (the submission thread, compute jobs) may
 // still use it for a frame or two after the game's last Release. So a released object goes through two stages:

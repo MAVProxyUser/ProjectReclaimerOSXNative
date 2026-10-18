@@ -48,6 +48,21 @@ so tick math assuming 24 MHz was 41x off.
 Status 2026-10-16, Big Team Battle numbers added 2026-10-17. Measurements are from a direct Guardian match on an M4 Max (`PELOAD_D3DGL_PROF=1`,
 2-second windows) unless noted.
 
+## 80-100 player games with the helper (2026-10-17 late): the engine's main thread is the wall
+
+BTB with the helper, submit=auto, 8 compute workers (80 players, Valhalla -> Highground): Valhalla median 63 fps, p10 39,
+min 21; Highground median 50, p10 28. In the slowest stretches (20-30 fps at 3,000-5,000 draws a frame) the game waits
+0 ms for the helper and the helper is 50-75% busy: the limit is in the game process. PELOAD_SAMPLE in a 76-player Sandtrap
+game: halo3's main thread (guest-0x18000a120) 99% busy every sample -- halo3 code 55-60%, the client's hooks 8-10%,
+system 30-33% (host memmove ~20-22%, malloc internals); the render thread (guest-0x1800d1e9c) 39-49%, the GL submission
+thread 36-41%, mcc-voice 99% (its key poll, own core). PELOAD_CALLCOUNT on that thread in gameplay, per second:
+GetCurrentThreadId 887k, GetProcessHeap 662k, memset 444k, HeapAlloc/HeapFree ~400k each (a quarter of them via the
+CRT's malloc), memcpy 423k, towlower 151k (3.8 M/s while loading), GetAsyncKeyState 94k, TlsGetValue 68k. The memmove
+share is mostly halo3's per-frame ~14 MB game-state copies (copy-on-write path PELOAD_MEMCPY_COW, off since the map-change
+corruption report; being re-tested with PELOAD_AB=cow). Every Win32 call costs the ms_abi->SysV transition under
+Rosetta; the allocation churn costs malloc + free + clearing. Ideas: COW back on if clean, a per-thread small-block cache in
+HeapAlloc/HeapFree, cheaper hot imports (GetCurrentThreadId / GetProcessHeap / TlsGetValue as tiny hand-written stubs).
+
 ## Where the time goes
 
 | | per 2 s of wall time | share |

@@ -91,10 +91,10 @@ class Resources:
 
 
 def sid_name(m, v):
-    """string id -> text for these builds: 16-bit index, 8-bit namespace (h3map.H3Map.sid assumes a 19-bit index
-    and mis-resolves e.g. resource type names). Namespace 0 indices past namespace 0's count continue after all
-    namespaced strings."""
-    idx, ns = v & 0xFFFF, (v >> 16) & 0xFF
+    """string id -> text for these builds: 19-bit index, 8-bit namespace at bit 19 (Assembly's MCC stringid layout).
+    Namespace 0 indices past namespace 0's count continue after all namespaced strings (h3map.H3Map.sid gets that part
+    wrong: e.g. the Warthog's "hull" damage section)."""
+    idx, ns = v & 0x7FFFF, (v >> 19) & 0xFF
     if ns == 0:
         g = idx if idx < m.ns_start[1] else idx - m.ns_start[1] + m.ns_start[-1]
     else:
@@ -167,11 +167,12 @@ def scenario_bsps(m):
     return out or m.find('sbsp')
 
 
-def level_triangles(m, res, opts, log=print):
+def level_triangles(m, res, opts, log=print, with_flags=False):
     """-> world-space triangles (T,3,3) for every structure BSP + placed instance, a per-triangle kind
-    (0 = structure BSP, 1 = instanced geometry) and a two-sided mask. Triangles keep the surface's edge-ring
-    winding, which is counter-clockwise around the surface plane normal (checked against the planes block)."""
-    tri_list, kinds, two = [], [], []
+    (0 = structure BSP, 1 = instanced geometry) and a two-sided mask (+ the surface flags per triangle with
+    with_flags). Triangles keep the surface's edge-ring winding, which is counter-clockwise around the surface
+    plane normal (checked against the planes block)."""
+    tri_list, kinds, two, fl = [], [], [], []
     for si in scenario_bsps(m):
         d = m.meta(si, 0x3A0)
         datum, = struct.unpack_from('<I', d, 0x38C)        # structure_bsp_tag_resources
@@ -199,6 +200,7 @@ def level_triangles(m, res, opts, log=print):
                 t = t[:, ::-1]
             tri_list.append(v[t]); kinds.append(np.full(len(t), kind, np.uint8))
             two.append((flags[idx[owner]] & SF_TWO_SIDED) != 0)
+            fl.append(flags[idx[owner]])
             return len(t)
 
         n = 0
@@ -229,6 +231,8 @@ def level_triangles(m, res, opts, log=print):
             m.names[si], len(defs), ni, skipped, nt))
     if not tri_list:
         raise SystemExit('no level geometry found')
+    if with_flags:
+        return np.concatenate(tri_list), np.concatenate(kinds), np.concatenate(two), np.concatenate(fl)
     return np.concatenate(tri_list), np.concatenate(kinds), np.concatenate(two)
 
 
