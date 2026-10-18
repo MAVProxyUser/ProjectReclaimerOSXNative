@@ -2874,8 +2874,9 @@ static int    MSABI i_WideCharToMultiByte(uint32_t cp,uint32_t fl,const uint16_t
 // +32 number of processors, +36 processor type, +40 allocation granularity, +44 u16 level, +46 u16 revision.
 // It used to say ONE processor (and allocation granularity 0, with the 4096 meant for it in the processor-type slot): the
 // client sizes ~10 thread pools from the count (min(n-1, 8) ...), halo3's locks (halo3+0x620170 ...) spin before blocking
-// only when it is > 1 and wake at most that many waiters. PELOAD_SYSINFO=real reports what Windows would (logical CPUs =
-// hw.logicalcpu, or PELOAD_NCPU); default still the old values until it has been measured in big games.
+// only when it is > 1 and wake at most that many waiters. Reports what Windows would (logical CPUs = hw.logicalcpu, or
+// PELOAD_NCPU) by default since 2026-10-18 (BTB in-match A/B of halo3's count, PELOAD_AB=ncpu: +1.7% over 15 pairs, two
+// clean BTB runs with it); PELOAD_SYSINFO=old = the old values (1 processor, granularity 0).
 // PELOAD_AB=ncpu:<secs>: halo3's lock code (halo3+0x620170..) reads the CPU count it got from GetSystemInfo from an s16
 // at halo3+0xa3a48c on every lock: phases write 1 (off: what the loader reported until 2026-10-18) or hw.logicalcpu (on).
 // The client's thread pools keep whatever PELOAD_SYSINFO gave them at startup. ab_ncpu(-1) = current state.
@@ -2883,7 +2884,7 @@ int ab_ncpu(int set){ static int on=-1; uint8_t*h3=0; for(int k=0;k<g_nmods;k++)
     if(!h3) return 0; volatile int16_t*v=(volatile int16_t*)(h3+0xa3a48c); if(on<0) on=*v>1;
     if(set>=0){ int lc=8; size_t sz=sizeof lc; sysctlbyname("hw.logicalcpu",&lc,&sz,0,0); *v=(int16_t)(set?lc:1); on=set; } return on; }
 static void   MSABI i_GetSystemInfo(void *si){ if(!si) return;
-    static int real=-1; static uint32_t ncpu; if(real<0){ const char*e=getenv("PELOAD_SYSINFO"); real=e&&!strcmp(e,"real");
+    static int real=-1; static uint32_t ncpu; if(real<0){ const char*e=getenv("PELOAD_SYSINFO"); real=!(e&&!strcmp(e,"old"));   // default real since 2026-10-18
         const char*n=getenv("PELOAD_NCPU"); int v=n?atoi(n):0; if(v<=0){ int lc=0; size_t sz=sizeof lc; if(sysctlbyname("hw.logicalcpu",&lc,&sz,0,0)) lc=8; v=lc; } if(v>64) v=64; if(v<1) v=1; ncpu=(uint32_t)v; }
     uint8_t*b=si; memset(b,0,48);
     if(!real){ *(uint32_t*)(b+4)=4096; *(uint32_t*)(b+32)=1; *(uint32_t*)(b+36)=4096; return; }

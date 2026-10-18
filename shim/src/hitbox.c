@@ -79,14 +79,15 @@ static void* objdump_thread(void*a){ (void)a; pthread_setname_np("shim-objdump")
 //   F4 PELOAD_HB_INFO    player info: shield/health %, weapon, grenades, active camo, vehicle seat
 //   F5 PELOAD_HB_ITEMS   weapons and equipment lying on the map, by tag name
 //   F9 PELOAD_HB_VISIBLE visible only: hitboxes and labels only for objects the player can actually see
-//      PELOAD_HB_VEHICLES (default on; the stats page's Vehicles button) vehicles in the hitboxes / info labels
+//      PELOAD_HB_VEHICLES (the stats page's Vehicles button; default off) vehicle hitboxes (+ weak spots), on their own --
+//      independent of Hitboxes, which then means the players' hitboxes (user, 2026-10-18)
 enum { HBF_HITBOX, HBF_TRACER, HBF_INFO, HBF_ITEMS, HBF_VISIBLE, HBF_ZONES, HBF_VEH, HBF_N };
 static int g_hbf_init, g_hbf_on[HBF_N], g_hb_all, g_hb_spheres;
 static void hbf_init(void){ if(g_hbf_init) return; static const char*const env[HBF_N]={"PELOAD_HITBOXES","PELOAD_HB_TRACERS","PELOAD_HB_INFO","PELOAD_HB_ITEMS","PELOAD_HB_VISIBLE","PELOAD_HB_ZONES","PELOAD_HB_VEHICLES"};
-    for(int f=0;f<HBF_N;f++){ const char*e=getenv(env[f]); g_hbf_on[f]= f==HBF_VEH ? !(e&&!strcmp(e,"0")) : (e&&*e&&strcmp(e,"0")); }
+    for(int f=0;f<HBF_N;f++){ const char*e=getenv(env[f]); g_hbf_on[f]= e&&*e&&strcmp(e,"0"); }
     const char*e=getenv("PELOAD_HITBOXES"); g_hb_all=e&&!strcasecmp(e,"all"); g_hb_spheres=e&&!strcasecmp(e,"spheres"); g_hbf_init=1; }
 static int hb_feat(int f){ hbf_init(); return g_hbf_on[f] ^ ((g_hb_toggle>>f)&1); }
-static int hb_overlay_on(void){ for(int f=0;f<HBF_N;f++) if(f!=HBF_VISIBLE && f!=HBF_VEH && hb_feat(f)) return 1; return 0; }   // (visible-only / vehicles alone draw nothing)
+static int hb_overlay_on(void){ for(int f=0;f<HBF_N;f++) if(f!=HBF_VISIBLE && hb_feat(f)) return 1; return 0; }   // (visible-only alone draws nothing)
 // The camera tracker (VS cb0 of the frame's first world draw) feeds the overlay and the teleport's "which body is
 // mine"; it runs when either needs it.
 static int stats_on(void);   // stats.c: the live stats service uses the camera to mark "you"
@@ -143,8 +144,8 @@ static int hb_collect(HbObj*out,int max){
     int n=0;
     for(int i=0;i<hi && n<max;i++){ const uint8_t*e=g_hb_tab+i*0x18; if(!*(const uint16_t*)e) continue; int t=e[3];
         int unit = t==0||t==1||t==12;
-        int want = (unit && (fh||fi)) || (t==5 && (ft || (fh&&g_hb_all))) || ((t==2||t==3) && (fw || (fh&&g_hb_all)));
-        if(t==1 && !hb_feat(HBF_VEH)) want=0;   // vehicles switched off (the stats page's Vehicles button)
+        int fveh=hb_feat(HBF_VEH);   // vehicles (+ giants: Scarabs) on their own switch; Hitboxes / Player info = the players
+        int want = (t==0 && (fh||fi)) || ((t==1||t==12) && fveh) || (t==5 && (ft || (fh&&g_hb_all))) || ((t==2||t==3) && (fw || (fh&&g_hb_all)));
         if(g_hb_units_only) want=unit; if(!want) continue;
         uint64_t p=*(const uint64_t*)(e+0x10); static uint8_t dh[0x380]; size_t rd=unit?0x380:0x140; if(!p || !hb_read(p,dh,rd)) continue;
         const float*od=(const float*)(dh+0x1c);
@@ -959,8 +960,9 @@ static void hb_draw_overlay(void){
             float tx,ty; if(hb_proj(vp,o->c,&tx,&ty)){ const char*nm=hb_tag_name(o->def); nv=hb_text(verts,nv,HB_CAP,tx-strlen(nm)*2.5f*g_hb_px,ty+8*g_hb_py,nm,col); }
             if(!(fh&&g_hb_all)) continue; }
         if(self || !hb_team_shown(o)) continue;
-        if(unit && fh && !g_hb_spheres){ int a=hb_emit_hitbox(o,vp,verts,nv,HB_CAP); if(a>0) nv+=a; if(a!=0) goto info; }
-        if(fh && (unit || g_hb_all)){
+        int fbox = o->type==0 ? fh : (o->type==1||o->type==12) ? hb_feat(HBF_VEH) : fh;   // players: Hitboxes; vehicles: Vehicles
+        if(unit && fbox && !g_hb_spheres){ int a=hb_emit_hitbox(o,vp,verts,nv,HB_CAP); if(a>0) nv+=a; if(a!=0) goto info; }
+        if(fbox && (unit || g_hb_all)){
             static const float pal[6][3]={{1,0.5f,0.5f},{0.55f,0.6f,0.65f},{1,0.4f,0},{0.2f,1,0.3f},{0.2f,0.9f,1},{1,0.3f,1}};   // fallback spheres (no collision model found): bipeds pink, vehicles grey (yellow = weak spots)
             const float*col = pal[o->type==0?0 : o->type==1?1 : o->type==12?2 : o->type==2?3 : o->type==3?4 : 5];
             for(int axis=0;axis<3;axis++){ float prev[3]; int pv=0;

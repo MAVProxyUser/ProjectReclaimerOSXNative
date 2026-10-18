@@ -83,11 +83,11 @@ th .srt{display:inline-block;margin-left:2px;padding:0 2px;cursor:pointer;color:
 <body>
 <h1>Reclaimer live stats</h1><div id="hd">connecting...</div>
 <div id="ov"><span class="lbl">In-game overlay</span>
- <button data-a="hitboxes" title="Collision hitboxes of players and vehicles">Hitboxes</button>
+ <button data-a="hitboxes" title="Collision hitboxes of the players (vehicles: the Vehicles button)">Hitboxes</button>
  <button data-a="tracers" title="Projectile trails and bullet lines">Tracers</button>
  <button data-a="info" title="Shield, health, weapon, grenades, camo and vehicle labels over players">Player info</button>
  <button data-a="items" title="Weapons and equipment lying on the map">Items</button>
- <button data-a="vehicles" title="Vehicles in the overlay: their hitboxes and info labels (on by default). With Hitboxes on, weak spots are colored: yellow = damage there kills the vehicle on its own (Wraith back hatch: 75 of its 750), orange = breaking it exposes the shielded driver to full hits (Wraith cockpit, Scorpion driver hatch); the rest cyan">Vehicles</button>
+ <button data-a="vehicles" title="Vehicle hitboxes in the game view, on their own (Hitboxes = the players'). Weak spots are colored: yellow = damage there destroys the vehicle on its own (Wraith back hatch: 75 of its 750), orange = breaking it exposes the shielded driver to full hits (Wraith cockpit, Scorpion driver hatch); the rest cyan">Vehicles</button>
  <span id="wchips" style="display:none" title="Vehicle weak spots, from each vehicle's damage data in the map file (re-tools/h3dmg.py). Only some vehicles have them: the Wraith (back hatch kills it: 75 of 750; cockpit opens the driver) and the Scorpion (driver hatch); the rest stay cyan">
   <button class="zc" data-w="1" title="Lethal section: damage there alone kills the vehicle (Wraith back hatch / rear engine: 75 of its 750)"><i style="background:#fff21a"></i>Weak: kills it</button>
   <button class="zc" data-w="2" title="Opens the driver: break it and the shielded driver takes full hits (Wraith cockpit, Scorpion driver hatch: 113)"><i style="background:#ff8c1a"></i>Weak: exposes driver</button>
@@ -423,7 +423,7 @@ document.getElementById('wchips').addEventListener('pointerdown',async e=>{ cons
 document.getElementById('zchips').addEventListener('pointerdown',async e=>{ const b=e.target.closest('.zc'); if(!b||e.button) return; e.preventDefault();
   try{ await fetch('/control?do=zonetype&t='+b.dataset.z,{method:'POST',headers:{'X-Reclaimer-Control':'1'}}); }catch(err){} });
 function renderOverlay(){ const o=snap&&snap.overlay; if(!o) return;
-  { const wc=document.getElementById('wchips'); wc.style.display=o.hitboxes&&o.vehicles?'':'none'; const ws=snap.weak_show??3;
+  { const wc=document.getElementById('wchips'); wc.style.display=o.vehicles?'':'none'; const ws=snap.weak_show??3;
     for(const b of wc.querySelectorAll('.zc')){ b.classList.toggle('on',!!(ws&+b.dataset.w)); b.disabled=!o.controls; } }
   { const zc=document.getElementById('zchips'); zc.style.display=o.zones?'':'none'; const zs=snap.zone_show??31;
     for(const b of zc.querySelectorAll('.zc')){ b.classList.toggle('on',!!(zs&+b.dataset.z)); b.disabled=!o.controls; } }
