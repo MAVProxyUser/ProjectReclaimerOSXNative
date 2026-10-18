@@ -119,6 +119,11 @@ static void s_glShaderSource(GLuint sh,GLsizei count,const GLchar*const*str,cons
     uint64_t tot=0; for(GLsizei i=0;i<count;i++) tot+=str[i]?(len&&len[i]>=0?(uint64_t)len[i]:strlen(str[i])):0;
     uint8_t*c=glh_begin(GLH_X_SHADERSOURCE,24+GLH_AL8(tot+1)); if(!c) return; ((uint64_t*)c)[1]=sh; ((uint64_t*)c)[2]=tot;
     uint8_t*p=c+24; for(GLsizei i=0;i<count;i++){ if(!str[i]) continue; uint64_t n=len&&len[i]>=0?(uint64_t)len[i]:strlen(str[i]); memcpy(p,str[i],n); p+=n; } *p=0; glh_end(c); }
+// transform-feedback varying names (GPU particles, peload.c cs_tf_*): the strings travel NUL-separated
+static void s_glTransformFeedbackVaryings(GLuint prog,GLsizei count,const GLchar*const*names,GLenum mode){ if(!glh_active()){ GLR.glTransformFeedbackVaryings(prog,count,names,mode); return; }
+    uint64_t tot=0; for(GLsizei i=0;i<count;i++) tot+=strlen(names[i])+1;
+    uint8_t*c=glh_begin(GLH_X_TFVARYINGS,32+GLH_AL8(tot)); if(!c) return; ((uint64_t*)c)[1]=prog; ((uint64_t*)c)[2]=(uint64_t)count; ((uint64_t*)c)[3]=mode;
+    uint8_t*p=c+32; for(GLsizei i=0;i<count;i++){ size_t n=strlen(names[i])+1; memcpy(p,names[i],n); p+=n; } glh_end(c); }
 static void s_glPixelStorei(GLenum p,GLint v){ if(!glh_active()){ GLR.glPixelStorei(p,v); return; }
     switch(p){ case 0x0CF2: g_glh_unpack[0]=v; break; case 0x0CF5: g_glh_unpack[1]=v; break; case 0x0CF3: g_glh_unpack[2]=v; break; case 0x0CF4: g_glh_unpack[3]=v; break;
                case 0x0D02: g_glh_pack[0]=v; break; case 0x0D05: g_glh_pack[1]=v; break; case 0x0D03: g_glh_pack[2]=v; break; case 0x0D04: g_glh_pack[3]=v; break; }

@@ -39,18 +39,19 @@ glStencilFuncSeparate glStencilMask glStencilOpSeparate glTexBuffer glTexImage2D
 glTexParameterf glTexParameteri glTexSubImage2D glUniformBlockBinding glUnmapBuffer glUseProgram glUseProgramStages
 glVertexAttribDivisor glVertexAttribIPointer glVertexAttribPointer glViewport glWaitSync glDeleteVertexArrays
 glDeleteRenderbuffers glDeleteProgram glDeleteProgramPipelines glTexSubImage3D glCopyTexSubImage2D glPolygonMode
-glUniform1i glUniform4fv glGetActiveUniformBlockiv glValidateProgram glBindAttribLocation glBindFragDataLocation""".split()
+glUniform1i glUniform4fv glGetActiveUniformBlockiv glValidateProgram glBindAttribLocation glBindFragDataLocation
+glBeginTransformFeedback glEndTransformFeedback glCopyBufferSubData glBindBufferBase glTransformFeedbackVaryings""".split()
 
 # loader side hand-written (shim/src/glh_client.c): no router generated (an encoder e_<name> still is, unless HELPER_SPECIAL)
 CLIENT_SPECIAL = set("""glGenBuffers glGenFramebuffers glGenProgramPipelines glGenQueries glGenRenderbuffers glGenSamplers glGenTextures
 glGenVertexArrays glCreateProgram glCreateShader glShaderSource glMapBufferRange glUnmapBuffer glFenceSync glWaitSync glDeleteSync
 glGetError glGetString glCheckFramebufferStatus glFinish glGetQueryObjectiv glGetQueryObjectui64v glBeginQuery glEndQuery
-glPixelStorei glBindBuffer glGetTexImage glReadPixels""".split())
+glPixelStorei glBindBuffer glGetTexImage glReadPixels glTransformFeedbackVaryings""".split())
 # wire format differs: neither encoder nor decoder generated (shim/src/glh_client.c + shim/src/glhelper.c)
 HELPER_SPECIAL = set("""glGenBuffers glGenFramebuffers glGenProgramPipelines glGenQueries glGenRenderbuffers glGenSamplers glGenTextures
 glGenVertexArrays glCreateProgram glCreateShader glShaderSource glMapBufferRange glUnmapBuffer glFenceSync glWaitSync glDeleteSync
 glGetError glGetString glCheckFramebufferStatus glFinish glGetQueryObjectiv glGetQueryObjectui64v glBeginQuery glEndQuery
-glGetTexImage""".split())
+glGetTexImage glTransformFeedbackVaryings""".split())
 SPECIAL = CLIENT_SPECIAL
 
 # input pointers carried as payloads: byte-size expressions over the C argument names

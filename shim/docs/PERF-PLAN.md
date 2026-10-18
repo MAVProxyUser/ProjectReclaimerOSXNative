@@ -229,6 +229,36 @@ DONE: a 25-minute BTB soak (median 49 fps) and the play.sh default (the in-proce
 particle compute into the helper (native arm64, ~1.5-2x) or onto the GPU; cut the link-time round trips further (the
 link status itself is still one per program).
 
+#### GPU particle compute (2026-10-17, experimental, OFF: PELOAD_CS_GPU=1)
+
+macOS GL stops at 4.1 (Apple's own driver, not MCC: MCC is D3D11 only): no compute shaders, so halo3's 7 particle kernels
+(numthreads(64,1,1), one RWStructuredBuffer u0) run on the CPU interpreter (dxbc_cpu.c). Five of them (update, collision,
+init: 803-3923 instructions) only touch their own element u0[SV_DispatchThreadID.x + cbN[i].c] (cstf_analyze proves it from
+the bytecode); with PELOAD_CS_GPU=1 those run on the GPU as transform-feedback vertex shaders (dxbc2glsl g_dg_tf_dw: one
+vertex per thread, the element written back whole into the buffer's GL storage). The two 26-28 instruction spawn kernels
+scatter to listed slots: they stay on the CPU and only the elements they wrote are sent (write log in dxbc_cpu.c).
+Staging copies into a GPU-owned buffer go straight into its GL storage; any other CPU access reads it back (logged).
+
+Correct now: PELOAD_CS_GPUCHECK=<n> runs every n-th dispatch on the CPU too and compares: 248,775 dwords exact, 311 within
+float rounding (max rel 1e-6), 2 different of ~250k. Muzzle flashes, tracers and grenade explosions render. Three Apple
+GL-on-Metal facts it took to get there (all reproduced natively in tiny CGL programs):
+- glCopyBufferSubData is not implemented ("gldCopyBufferSubData: NEEDS IMPLEMENTATION", nothing is copied): the copy of the
+  dispatched range is a transform-feedback pass too (one point per dword, read through the buffer's texture buffer).
+- A transform-feedback write is NOT ordered before a later read of that buffer inside the same render pass (the game's
+  open pass): the kernels read stale input and particles vanished. The passes run on their own 4x4 framebuffer
+  (one render-pass break per run of dispatches, ~1 a frame).
+- A draw without a complete framebuffer fails with GL_INVALID_FRAMEBUFFER_OPERATION even under RASTERIZER_DISCARD.
+
+But slower: in-match A/B (PELOAD_AB=csgpu:20, local Valhalla, 26 dispatches/frame): GPU 100-116 fps vs CPU 151-161. No
+read-backs or synchronous calls in the GPU phases; the game waits ~1.07 s per 2 s for the helper's frames (CPU phases
+~0.2 s): Apple's driver spends ~60 us per transform-feedback pass (2 per dispatch). A BTB-size frame (~100 dispatches) would
+lose more. Ideas left: fewer passes per dispatch (render the kernel into an RGBA32UI target and glReadPixels into the buffer
+as a pack buffer), batching every dispatch of a frame behind one framebuffer switch, or Metal compute in the helper.
+
+CPU interpreter bug found with it (fixed, default): a 4-component immediate l(a,b,c,d) was broadcast from lane x
+("and r2.yz, r2.zzwz, l(0,65535,65535,0)" gave 0), so halo3's particle kernels unpacked their packed half-float fields to
+zero. PELOAD_CS_IMMBCAST=1 = old.
+
 #### Copy-on-write game-state copies (2026-10-17, default on)
 
 PELOAD_MEMCPY_LOG=1 (big copies by caller every 5 s) showed one call site doing nearly all of them: halo3+0x13f23f copies

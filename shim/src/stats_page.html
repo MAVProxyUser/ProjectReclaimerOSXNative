@@ -431,7 +431,9 @@ document.getElementById('spd').addEventListener('change',async e=>{ const msg=do
   catch(err){ msg.textContent='not connected'; } });
 // ---- live snapshots ----
 const es=new EventSource('/events');
+let gameInst=null;   // the game process this page shows; a new one (the game was restarted) -> reload the page for it
 es.onmessage=m=>{snap=JSON.parse(m.data);
+  if(snap.inst!==undefined){ if(gameInst===null) gameInst=snap.inst; else if(snap.inst!==gameInst){ location.reload(); return; } }
   if(snap.feed_seq!==undefined && snap.feed_seq!==feedSeq) pollFeed();
   document.getElementById('hd').textContent=`${snap.map||'-'}  |  ${snap.in_match?'match time '+fmtT(snap.time):'not in a match'}  |  ${snap.players.length} players, ${snap.vehicles.length} vehicles, ${snap.projectiles.length} projectiles in flight`;
   renderTable(); renderDet(); renderOverlay(); renderRules(); renderConn(); drawMap()};

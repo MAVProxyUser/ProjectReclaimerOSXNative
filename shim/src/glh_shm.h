@@ -6,7 +6,7 @@
 #include <stdatomic.h>
 
 #define GLH_MAGIC   0x31484C47u        // "GLH1"
-#define GLH_VERSION 5
+#define GLH_VERSION 6
 #define GLH_RING    (256ull<<20)       // command ring
 #define GLH_REPLY   (64ull<<20)        // results of synchronous calls (one in flight at a time)
 #define GLH_POOLN   4096               // pre-generated GL names per kind
@@ -39,6 +39,7 @@ enum { GLH_X_BASE=1000,
        GLH_X_NOP_SYNC,      // sync: nothing (wait until everything before it ran)
        GLH_X_READBACK,      // async: buffer, bytes, mailbox offset, ticket -> copy a PIXEL_PACK buffer into the mailbox, then rb_done=ticket
        GLH_X_LOCS,          // sync: program, name count, first block name -> int per name (uniform locations, then block indices)
+       GLH_X_TFVARYINGS,    // program, count, buffer mode, then the names (each NUL-terminated)
        GLH_X_END };
 
 typedef struct {

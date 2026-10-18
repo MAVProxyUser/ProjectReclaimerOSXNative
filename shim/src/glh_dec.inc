@@ -142,7 +142,12 @@ enum {
     GLH_OP_glValidateProgram=139,
     GLH_OP_glBindAttribLocation=140,
     GLH_OP_glBindFragDataLocation=141,
-    GLH_OP_GEN_END=142 };
+    GLH_OP_glBeginTransformFeedback=142,
+    GLH_OP_glEndTransformFeedback=143,
+    GLH_OP_glCopyBufferSubData=144,
+    GLH_OP_glBindBufferBase=145,
+    GLH_OP_glTransformFeedbackVaryings=146,
+    GLH_OP_GEN_END=147 };
 static int glh_exec_gen(uint16_t op,uint16_t m,const uint64_t*s,const uint8_t*p,uint8_t*reply,uint64_t*rv){
     (void)m;(void)p;(void)reply;(void)rv; switch(op){
     case GLH_OP_glActiveTexture: {
@@ -756,4 +761,21 @@ static int glh_exec_gen(uint16_t op,uint16_t m,const uint64_t*s,const uint8_t*p,
         GLuint a1=(GLuint)s[1];
         const GLchar * a2=(m&4)?(const GLchar *)p:(const GLchar *)(uintptr_t)s[2]; if(m&4) p+=GLH_AL8(s[2]);
         glBindFragDataLocation(a0, a1, a2); return 0; }
+    case GLH_OP_glBeginTransformFeedback: {
+        GLenum a0=(GLenum)s[0];
+        glBeginTransformFeedback(a0); return 0; }
+    case GLH_OP_glEndTransformFeedback: {
+        glEndTransformFeedback(); return 0; }
+    case GLH_OP_glCopyBufferSubData: {
+        GLenum a0=(GLenum)s[0];
+        GLenum a1=(GLenum)s[1];
+        GLintptr a2=(GLintptr)(int64_t)s[2];
+        GLintptr a3=(GLintptr)(int64_t)s[3];
+        GLsizeiptr a4=(GLsizeiptr)(int64_t)s[4];
+        glCopyBufferSubData(a0, a1, a2, a3, a4); return 0; }
+    case GLH_OP_glBindBufferBase: {
+        GLenum a0=(GLenum)s[0];
+        GLuint a1=(GLuint)s[1];
+        GLuint a2=(GLuint)s[2];
+        glBindBufferBase(a0, a1, a2); return 0; }
     default: return -1; } }

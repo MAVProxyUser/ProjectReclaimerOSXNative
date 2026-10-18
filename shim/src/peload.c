@@ -914,6 +914,8 @@ typedef struct { void** vtbl; uint32_t kind; uint32_t rowpitch; uint64_t size; v
     unsigned glubo; uint32_t uboglver, ubosz; // constant buffer: GL uniform-buffer copy, the ver it holds, its byte size
     unsigned gltbo, gltbobuf; uint32_t tbover; int tbook; // buffer SRV: GL texture buffer (R32UI) + its storage, uploaded ver
     void* csprog;                 // compute shader: CPU-interpreter program (dxbc_cpu.c), compiled on first Dispatch
+    void* cstf;                   // compute shader: its transform-feedback form (CsTf, GPU particles), built on first Dispatch
+    int cs_gpu;                   // buffer: its GL copy is the current contents (written by GPU compute); the CPU copy is stale
     char* monosrc;                // shader: mono-path GLSL (injected + renamed), built once and shared by every pair
     uint64_t bchash;              // shader: FNV-1a of the bytecode (identifies it across runs for the pair pre-link list)
     unsigned shc_id[4]; uint64_t shc_mask[4]; int shc_n; // shader: compiled GL shaders per interface-padding mask
@@ -1331,6 +1333,8 @@ static int g_shcount[6];
 static uint8_t* dg_bc_decode(uint32_t fmt,const uint8_t*src,size_t srclen,int w,int h); // fwd (BC decoder, defined with the GL uploads)
 static uint64_t prof_now(void); static int prof_on(void);                                 // fwd (profiling)
 #include "dxbc_cpu.c"
+static void cs_gpu_readback(D3DObj*r,const char*why);   // GPU particles: a GPU-owned buffer back into its CPU copy (fwd)
+static void cstf_upload_range(D3DObj*dst,uint64_t off,uint64_t n,const void*src);   // GPU particles: CPU bytes into a GPU-owned buffer (fwd)
 // FNV-1a 64 over the DXBC bytes (matches the cache key) -> ~/reclaimer_glsl/<hash>.glsl.
 static uint64_t d3dgl_fnv(const void*b,uint64_t n){ const uint8_t*p=b; uint64_t h=0xcbf29ce484222325ULL;
     for(uint64_t i=0;i<n;i++){ h^=p[i]; h*=0x100000001b3ULL; } return h; }
@@ -1460,7 +1464,7 @@ static struct { unsigned exec, novsps, noglsl, noprog, ringfail, wraps, disp, co
 static void d3d_dirty_sub(D3DObj*o,uint32_t sub){ uint8_t s8=sub>255?255:(uint8_t)sub;
     if(!o->gl_dirty){ o->dpart=1; o->dmin=s8; } else if(o->dpart && s8<o->dmin) o->dmin=s8;
     o->gl_dirty=1; }
-static int  MSABI ctxi_Map(void*t,void*res,uint32_t sub,uint32_t type,uint32_t fl,void*pM){ (void)t;(void)sub;(void)type;(void)fl;
+static int  MSABI ctxi_Map(void*t,void*res,uint32_t sub,uint32_t type,uint32_t fl,void*pM){ (void)t;(void)sub;(void)type;(void)fl; if(res && ((D3DObj*)res)->cs_gpu) cs_gpu_readback((D3DObj*)res,"Map");
     g_fs.maps++; if(type==1||type==3) g_fs.mapread++;
     cs_wait_res((D3DObj*)res);
     if(getenv("PELOAD_TRACE_TEXUPD") && res && ((D3DObj*)res)->kind>=2 && ((D3DObj*)res)->w){ D3DObj*q=res; extern double g_gameplay_t0; uint64_t ra=(uint64_t)__builtin_return_address(0);
@@ -1530,7 +1534,7 @@ static void MSABI ctx_DrawIndexed(void*t,uint32_t n,uint32_t s,int b){ (void)t;(
 static void MSABI ctx_Draw(void*t,uint32_t n,uint32_t s){ (void)t;(void)s; d3dtrace(0,"Draw"); stg_note_draw(n); draw_caller("Draw",__builtin_return_address(0),n); draw_log("draw",n); d3d_capture_frame(n); if(d3dgl_enabled()) sub_draw(n,0,1,s,0,0); }
 static void MSABI ctxi_UpdateSubresource(void*t,void*res,uint32_t sub,const void*box,const void*src,uint32_t srp,uint32_t sdp){
     (void)t; D3DObj*o=res; if(!o||!o->data||!src) return;
-    cs_wait_res(o);
+    cs_wait_res(o); if(o->cs_gpu) cs_gpu_readback(o,"UpdateSubresource");
     if(getenv("PELOAD_TRACE_TEXUPD") && o->kind>=2 && o->w==1280 && o->h==720 && !box){ static int n; if((n++%300)==0){ uint64_t nz=0; const uint8_t*sp=src; for(uint32_t y=0;y<720;y+=4) for(uint32_t x=0;x<1280*4;x+=4) if(sp[(size_t)y*srp+x+3]) nz++;
         uint64_t nzr=0; for(uint32_t y=0;y<720;y+=4) for(uint32_t x=0;x<1280*4;x+=4) if(sp[(size_t)y*srp+x]|sp[(size_t)y*srp+x+1]|sp[(size_t)y*srp+x+2]) nzr++;
         char m[200]; int k=snprintf(m,sizeof m,"  [texupd-px] #%d %p src=%p pitch=%u nonzero-alpha=%llu nonzero-rgb=%llu /230400\n",n,(void*)o,src,srp,(unsigned long long)nz,(unsigned long long)nzr); (void)!write(2,m,k); } }
@@ -1569,13 +1573,26 @@ static void copy_trace(const char*what,D3DObj*dst,D3DObj*src){ if(dst&&src) flog
     (void)!write(2,m,k); }
 static void d3dgl_ensure_rt(D3DObj*o); static int d3dgl_ensure(void); // fwd
 static int d3dgl_gpu_copy(D3DObj*dst,D3DObj*src,uint32_t sx,uint32_t sy,uint32_t sw,uint32_t sh,uint32_t dx,uint32_t dy); // fwd (impl after the GL table)
-static void MSABI ctxi_CopyResource(void*t,void*dst,void*src){ (void)t; D3DObj*a=dst,*b=src; g_fs.copies++; cs_wait_res(a); cs_wait_res(b); copy_trace("CopyResource",a,b); if(a) a->ver++;
+static void MSABI ctxi_CopyResource(void*t,void*dst,void*src){ (void)t; D3DObj*a=dst,*b=src; g_fs.copies++; cs_wait_res(a); cs_wait_res(b); if(a&&a->cs_gpu) cs_gpu_readback(a,"CopyResource"); if(b&&b->cs_gpu) cs_gpu_readback(b,"CopyResource"); copy_trace("CopyResource",a,b); if(a) a->ver++;
     if(a&&b&&d3dgl_gpu_copy(a,b,0,0,b->w>4096?4096:b->w,b->h>4096?4096:b->h,0,0)) return; if(a&&b&&a->data&&b->data){ uint64_t n=a->size<b->size?a->size:b->size; memcpy(a->data,b->data,n); if(a){ a->gl_dirty=1; a->dpart=0; }
     if(getenv("PELOAD_TRACE_TEXPATH") && a->w>=512 && ((a->fmt>=70&&a->fmt<=84)||(a->fmt>=94&&a->fmt<=99))){ char m[128]; int k=snprintf(m,sizeof m,"  [texpath] COPYRES dst%ux%u f%u <- src%ux%u (%lluB)\n",a->w,a->h,a->fmt,b->w,b->h,(unsigned long long)n); (void)!write(2,m,k);} } }
 // CopySubresourceRegion(dst,dstSub,dstX,dstY,dstZ,src,srcSub,pSrcBox). Was a no-op -> 12k/frame copies
 // (texture staging / composite steps) were dropped. Implement the CPU copy (full or box region).
 static void MSABI ctxi_CopySubresourceRegion(void*t,void*dstR,uint32_t dstSub,uint32_t dstX,uint32_t dstY,uint32_t dstZ,void*srcR,uint32_t srcSub,const void*srcBox){
-    (void)t; D3DObj*dst=dstR,*src=srcR; cs_wait_res(dst); cs_wait_res(src); copy_trace("CopySubresourceRegion",dst,src); if(dst) dst->ver++;
+    (void)t; D3DObj*dst=dstR,*src=srcR; cs_wait_res(dst); cs_wait_res(src);
+    // GPU particles: halo3 uploads new particles by copying a CPU-written staging buffer into a range of the particle buffer
+    // the GPU owns -- write that range straight into its GL storage (and the CPU copy); the GPU keeps the buffer.
+    if(dst && src && dst->cs_gpu && !src->cs_gpu && dst->kind==1 && src->kind==1 && !dstSub && !srcSub && dst->gltbobuf && src->data && dst->data){
+        const uint32_t*bx=srcBox; uint64_t l=bx?bx[0]:0, r=bx?bx[3]:src->size; if(r>src->size) r=src->size;
+        if(r>l && dstX<dst->size){ uint64_t n=r-l; if(dstX+n>dst->size) n=dst->size-dstX;
+            memcpy((uint8_t*)dst->data+dstX,(const uint8_t*)src->data+l,(size_t)n);
+            cstf_upload_range(dst,dstX,n,(const uint8_t*)src->data+l); }
+        return; }
+    if((dst&&dst->cs_gpu)||(src&&src->cs_gpu)){ static char why[240]; const uint32_t*bx=srcBox;
+        snprintf(why,sizeof why,"CopySubresourceRegion (%s GPU-owned; src %lluB bind 0x%x misc 0x%x stride %u -> dst %lluB bind 0x%x misc 0x%x stride %u at %u; box %u..%u)",
+            src&&src->cs_gpu?(dst&&dst->cs_gpu?"both":"source"):"destination",src?(unsigned long long)src->size:0,src?src->bindf:0,src?src->misc:0,src?src->depth:0,
+            dst?(unsigned long long)dst->size:0,dst?dst->bindf:0,dst?dst->misc:0,dst?dst->depth:0,dstX,bx?bx[0]:0,bx?bx[3]:0);
+        if(dst&&dst->cs_gpu) cs_gpu_readback(dst,why); if(src&&src->cs_gpu) cs_gpu_readback(src,why); } copy_trace("CopySubresourceRegion",dst,src); if(dst) dst->ver++;
     if(dst&&src&&srcSub==0&&dstSub==0&&src->glfbo){ const uint32_t*bx=srcBox; uint32_t l=bx?bx[0]:0,tp=bx?bx[1]:0,r=bx?bx[3]:src->w,bt=bx?bx[4]:src->h;
         if(r>l&&bt>tp&&d3dgl_gpu_copy(dst,src,l,tp,r-l,bt-tp,dstX,dstY)) return; }
     if(!dst||!src||!dst->data||!src->data) return;
@@ -1624,6 +1641,8 @@ static void cscensus(const char*what,uint32_t a,uint32_t b,uint32_t c){ if(!gete
         g_rcs.srv[4]?g_rcs.srv[4]->data:0,g_rcs.srv[5]?g_rcs.srv[5]->data:0,(void*)g_rcs.cb[0]); (void)!write(2,m,k); }
 // Dispatch -> run the compute shader on the CPU (dxbc_cpu.c) over the CPU copies of its buffers; written UAV
 // buffers get a new version so their GL texture-buffer copies refresh before the particle draws read them.
+static int cstf_dispatch(D3DObj*cs,CsProg*p,uint32_t a,uint32_t b,uint32_t c); static int cstf_scatter(CsProg*p,CsCtx*cx,uint32_t a,uint32_t b,uint32_t c);   // GPU particles (fwd)
+static int cs_gpu_on(void); static unsigned long g_cstf_cpu; static D3DObj* cs_resof(D3DObj*v);
 static void MSABI ctxi_Begin(void*t,void*a); static void MSABI ctxi_End(void*t,void*a); static int MSABI ctxi_GetData(void*t,void*a,void*data,uint32_t size,uint32_t flags); // fwd (queries)
 // ---- asynchronous compute: Dispatch queues the CPU kernel on a worker thread so the particle simulation
 // overlaps the opaque draws; the render thread waits only where it touches a buffer a queued job writes
@@ -1690,6 +1709,20 @@ static void MSABI ctxi_Dispatch(void*t,uint32_t a,uint32_t b,uint32_t c){ (void)
         char m[200]; int k=snprintf(m,sizeof m,"  [cs-cpu] compiled cs %p (%u B): %s, %d instrs, temps %d, numthreads(%u,%u,%u)\n",(void*)cs,cs->bclen,p&&p->ok?"ok":(p?p->why:"oom"),p?p->nins:0,p?p->ntemps:0,p?p->tg[0]:0,p?p->tg[1]:0,p?p->tg[2]:0); (void)!write(2,m,k); }
     CsProg*p=cs->csprog; if(!p||!p->ok) return;
     if((uint64_t)a*b*c*p->tg[0]*p->tg[1]*p->tg[2] > (1u<<20)) return;   // runaway guard
+    if(cs_gpu_on()){   // GPU particles: the kernel on the GPU, or a spawn kernel's elements sent; else the CPU needs every buffer it touches
+        if(cstf_dispatch(cs,p,a,b,c)) return;
+        D3DObj*u0=cs_resof(g_cs.uav[0]);
+        if(u0 && u0->cs_gpu){ CsCtx sx; memset(&sx,0,sizeof sx);
+            for(int i=0;i<16;i++){ D3DObj*cb=g_cs.cb[i]; if(cb&&cb->data&&cb->size){ uint64_t off=(uint64_t)g_cs.cbfirst[i]*16; if(off>=cb->size) off=0; sx.cb[i]=(const uint8_t*)cb->data+off; sx.cbsz[i]=(uint32_t)(cb->size-off); } }
+            for(int i=0;i<32;i++){ sx.srv[i]=g_cs.srv[i]; D3DObj*r=cs_resof(g_cs.srv[i]); if(r) cs_wait_res(r); }
+            for(int i=0;i<8;i++) sx.uav[i]=g_cs.uav[i];
+            for(int i=0;i<16;i++) sx.samp[i]=g_cs.samp[i];
+            cs_wait_res(u0);
+            if(cstf_scatter(p,&sx,a,b,c)) return; }
+        g_cstf_cpu++; }
+    // (also with GPU particles switched off at run time: buffers the GPU still owns come back before the CPU uses them)
+    for(int i=0;i<8;i++){ D3DObj*r=cs_resof(g_cs.uav[i]); if(r && r->cs_gpu) cs_gpu_readback(r,"a CPU kernel"); }
+    for(int i=0;i<32;i++){ D3DObj*r=cs_resof(g_cs.srv[i]); if(r && r->cs_gpu) cs_gpu_readback(r,"a CPU kernel's input"); }
     if(cs_async()){
         CsQJob*j=calloc(1,sizeof *j); if(!j) return; j->p=p; j->a=a; j->b=b; j->c=c;
         static int noshare=-1; if(noshare<0) noshare=getenv("PELOAD_CS_NOSNAPSHARE")?1:0;   // old: copy inputs per dispatch
@@ -1751,7 +1784,7 @@ static void MSABI ctx_CSSetConstantBuffers1(void*t,uint32_t st,uint32_t n,void*c
     for(uint32_t i=0;i<n&&st+i<16;i++){ g_rcs.cb[st+i]=v?(D3DObj*)v[i]:0; g_rcs.cbfirst[st+i]=first?first[i]:0; } }
 // ClearUnorderedAccessView{Uint,Float} on buffers (particle pools are reset this way)
 static void cs_clear_uav(void*view,uint32_t v0){ D3DObj*v=view; D3DObj*r=(v&&v->data&&v->vkind)?(D3DObj*)v->data:v; if(!r||!r->data||r->kind!=1) return;
-    cs_wait_res(r);
+    cs_wait_res(r); if(r->cs_gpu){ r->cs_gpu=0; { static int nl; if(nl++<4) (void)!write(2,"  [cs-gpu] ClearUnorderedAccessView on a GPU particle buffer (re-sent whole)\n",77); } }   // all overwritten: the CPU copy is current again
     uint32_t*d=(uint32_t*)r->data; for(uint64_t i=0;i<r->size/4;i++) d[i]=v0; r->ver++; r->gl_dirty=1; r->dpart=0; r->rvalid=0; }
 static void MSABI ctxi_ClearUAVUint(void*t,void*uav,const uint32_t*vals){ (void)t; cs_clear_uav(uav,vals?vals[0]:0); }
 static void MSABI ctxi_ClearUAVFloat(void*t,void*uav,const float*vals){ (void)t; uint32_t b=0; if(vals) memcpy(&b,vals,4); cs_clear_uav(uav,b); }
@@ -3959,6 +3992,8 @@ typedef struct {
     void(*StencilFuncSeparate)(unsigned,unsigned,int,unsigned); void(*StencilOpSeparate)(unsigned,unsigned,unsigned,unsigned); void(*StencilMask)(unsigned);
     void(*Enablei)(unsigned,unsigned); void(*Disablei)(unsigned,unsigned); void(*BlendFuncSeparatei)(unsigned,unsigned,unsigned,unsigned,unsigned);
     void(*BlendEquationSeparatei)(unsigned,unsigned,unsigned); void(*ColorMaski)(unsigned,unsigned char,unsigned char,unsigned char,unsigned char);
+    void(*TransformFeedbackVaryings)(unsigned,int,const char*const*,unsigned); void(*BeginTransformFeedback)(unsigned); void(*EndTransformFeedback)(void);
+    void(*CopyBufferSubData)(unsigned,unsigned,long,long,long); void(*BindBufferBase)(unsigned,unsigned,unsigned); void(*GetBufferSubData)(unsigned,long,long,void*);
 } D3DGLApi;
 static void bmp_write_rgba(const char*path,int W,int H,const unsigned char*px); // fwd (defined in gl_selftest section)
 static unsigned char* bmp_load_rgba(const char*path,int*pw,int*ph);              // fwd (defined in gl_selftest section)
@@ -3967,7 +4002,8 @@ static D3DGLApi G;
 // revalidate). Every other glBindFramebuffer goes through gl_bindfbo_any, which forgets it (also the present
 // thread's own context: at worst one extra bind per frame). PELOAD_D3DGL_NOFBOCACHE binds on every draw.
 static unsigned g_gl_fbo=~0u;
-static inline void gl_bindfbo_any(unsigned t,unsigned f){ G.BindFramebuffer(t,f); g_gl_fbo=~0u; }
+static unsigned long g_fbo_serial;   // framebuffer binds outside the draw cache (GPU particles: is ours still bound?)
+static inline void gl_bindfbo_any(unsigned t,unsigned f){ G.BindFramebuffer(t,f); g_gl_fbo=~0u; g_fbo_serial++; }
 static pthread_mutex_t g_d3dgl_lock=PTHREAD_MUTEX_INITIALIZER; // guards one-time init (race-free)
 // halo3 drives the D3D11 immediate context from MORE THAN ONE thread: gameplay draws on the render
 // thread, but the end-of-frame CopyResource(backbuffer <- final frame) + Present (and some clears) come
@@ -4019,6 +4055,12 @@ static void launch_time_init(void){ if(g_launch_mono) return; struct timeval tv;
 // Window title, refreshed every second on the main queue (also while the window is still black during
 // startup): "starting... m:ss" until the first engine frame, then fps / draws / frame time, the load time
 // once the match or the frontend menu is ready, and the elapsed time since launch.
+// PELOAD_AB=hidewin:<secs> (d3dsubmit.c sub_switch): take the window off the screen and back every <secs>, from the main
+// queue, without activating it (orderOut: / orderFrontRegardless) -- what a minimized test window saves vs a visible one.
+volatile int g_ab_winhidden;
+static void win_ab_hide_main(void*ctx){ extern id g_nswin_ext(void); id w=g_nswin_ext(); if(!w) return;
+    ((void(*)(id,SEL,id))objc_msgSend)(w,sel_registerName(ctx?"orderOut:":"orderFrontRegardless"),(id)0); }
+void win_ab_hide(int on){ g_ab_winhidden=on; dispatch_async_f(dispatch_get_main_queue(),(void*)(intptr_t)on,win_ab_hide_main); }
 static void fps_title_main(void*ctx){ (void)ctx; extern id g_nswin_ext(void); id w=g_nswin_ext(); if(!w) return;
     extern double g_gameplay_t0, g_menu_ready_t0; launch_time_init(); double up=mono_s()-g_launch_mono; int um=(int)(up/60), us=(int)up%60;
     char t[260]; double ready=g_gameplay_t0?g_gameplay_t0:g_menu_ready_t0;
@@ -4227,6 +4269,7 @@ static int d3dgl_loadgl(void){
     L(GetUniformBlockIndex);L(UniformBlockBinding);L(BindBufferRange);L(MapBufferRange);L(UnmapBuffer);L(TexBuffer);
     L(DrawBuffers);L(DrawBuffer);L(DepthFunc);L(ClearDepth);L(ClearStencil);L(StencilFuncSeparate);L(StencilOpSeparate);L(StencilMask);
     L(Enablei);L(Disablei);L(BlendFuncSeparatei);L(BlendEquationSeparatei);L(ColorMaski);
+    L(TransformFeedbackVaryings);L(BeginTransformFeedback);L(EndTransformFeedback);L(CopyBufferSubData);L(BindBufferBase);L(GetBufferSubData);
     #undef L
     glc_install();
     ok = G.CreateShader && G.LinkProgram && G.GenProgramPipelines && G.UseProgramStages &&
@@ -5371,6 +5414,206 @@ bind:
     if(binding<32 && g_ubo_bound[binding].buf==buf && g_ubo_bound[binding].off==off && g_ubo_bound[binding].sz==need && !GENV1("PELOAD_D3DGL_NOBINDCACHE")) return;
     G.BindBufferRange(0x8A11,binding,buf,off,need);
     if(binding<32){ g_ubo_bound[binding].buf=buf; g_ubo_bound[binding].off=off; g_ubo_bound[binding].sz=need; } }
+// ---- GPU particle compute (PELOAD_CS_GPU=1): halo3's particle kernels as transform-feedback vertex shaders --------------
+// macOS GL 4.1 has no compute shaders, so dxbc_cpu.c runs halo3's particle kernels on the CPU and each particle buffer is
+// re-sent to GL whole after it changed. Five of halo3's seven kernels (update, collision, init) touch only their own element
+// of their one RWStructuredBuffer, u0[SV_DispatchThreadID.x + cbN[i].c]; cstf_analyze proves that from the bytecode and those
+// run on the GPU instead: dxbc2glsl emits the kernel as a vertex shader (one vertex per thread, g_dg_tf_dw) whose element
+// leaves through transform feedback straight into the buffer's GL storage (gltbobuf, which the particle draws read as a
+// texture buffer); its input is a GPU copy of the dispatched range. The two spawn kernels scatter new particles to listed
+// slots and read only CPU-written inputs: they keep running on the CPU and just the elements they wrote are sent.
+// A buffer the GPU wrote is cs_gpu: GL holds its contents, the CPU copy is stale; any CPU access reads GL back first
+// (cs_gpu_readback, logged -- not expected in play). PELOAD_CS_GPU_LOG=1 logs kernels and counts.
+typedef struct CsTf { int state; const char*why; uint32_t stride, dw, tgx; int bcb, bvec, bcomp; int cbn[16];
+    unsigned prog; int u0loc, u0set, units_set; int tloc[32]; signed char tt[32]; int hasu0ld; } CsTf;
+static unsigned g_cstf_scr, g_cstf_scrtex, g_cstf_vao, g_cstf_copyprog, g_cstf_fbo; static int g_cstf_copysrc=-1, g_cstf_copyoff=-1; static uint64_t g_cstf_scrsz;
+uint64_t g_cstf_upbytes_x;   // staging copies into GPU-owned particle buffers (bytes)
+static void cstf_upload_range(D3DObj*dst,uint64_t off,uint64_t n,const void*src){
+    GLLOCK(); if(CGLGetCurrentContext()!=g_d3dgl_cgl) CGLSetCurrentContext(g_d3dgl_cgl);
+    G.BindBuffer(0x8C2A,dst->gltbobuf); G.BufferSubData(0x8C2A,(long)off,(long)n,src); GLUNLOCK(); g_cstf_upbytes_x+=n; }
+static unsigned long g_cstf_n, g_cstf_scat, g_cstf_rb, g_cstf_breaks; static uint64_t g_cstf_scatbytes, g_cstf_rbbytes;
+volatile int g_cs_gpu=-1;   // PELOAD_CS_GPU; switchable at run time (PELOAD_AB=csgpu:<secs>): GPU-owned buffers come back on the next CPU use
+static int cs_gpu_on(void){ if(g_cs_gpu<0){ const char*e=getenv("PELOAD_CS_GPU"); g_cs_gpu=e?atoi(e):0; } return g_cs_gpu>0 && G.TransformFeedbackVaryings && G.BeginTransformFeedback && g_dg_ubo; }
+static int cs_gpu_log(void){ static int l=-1; if(l<0) l=getenv("PELOAD_CS_GPU_LOG")?1:0; return l; }
+static D3DObj* cs_resof(D3DObj*v){ return (v&&v->data&&v->vkind)?(D3DObj*)v->data:v; }
+static int cstf_comp0(const DgOp*o){ return o->selmode==2?o->sel:(o->has_swz?o->swz[0]:0); }
+// instructions whose ops[0] is not a destination
+static int cstf_nodst(int op){ return op==31||op==3||op==8||op==63||op==13||op==76||op==168||op==166||op==164||op==53||(op>=88&&op<=106)||(op>=155&&op<=162); }
+static int cstf_twodst(int op){ return op==38||op==81||op==78||op==77||op==132||op==133||op==142; }
+static void cstf_analyze(CsTf*t,CsProg*p,const uint8_t*bc,uint32_t bclen){
+    #define TFNO(w) do{ t->state=-1; t->why=(w); return; }while(0)
+    if(!p||!p->ok) TFNO("no CPU program");
+    if(p->tg[1]!=1||p->tg[2]!=1||!p->tg[0]) TFNO("numthreads not (N,1,1)");
+    t->tgx=p->tg[0]; t->stride=p->uavstride[0]; if(!t->stride||(t->stride&3)||t->stride>256) TFNO("u0 stride");
+    t->dw=t->stride/4;
+    int A=-1,C=-1,defi=-1,depth=0;
+    for(int i=0;i<p->nins;i++){ DgIns*in=&p->ins[i]; int op=in->op;
+        if(op==31||op==48||op==76) depth++; else if(op==21||op==22||op==23) depth--;
+        if((op>=169&&op<=190)||op==159||op==160||op==156||op==157||op==163||op==164||op==165||op==166) TFNO("atomics / shared memory / raw or typed UAV");
+        if(op==158){ if(in->nop && in->ops[0].nidx && in->ops[0].idx[0].val!=0) TFNO("a UAV other than u0"); continue; }
+        if(op==89 && in->nop && in->ops[0].nidx>1){ uint32_t b=in->ops[0].idx[0].val, n=in->ops[0].idx[1].val; if(b<16) t->cbn[b]=(int)(n?n:1); continue; }
+        // the own-element index: iadd rA.c, vThreadID.x, cbK[I].c'  (either order), once, at the top level
+        if(op==30 && A<0 && in->nop==3 && in->ops[0].type==T_TEMP && in->ops[0].mask && !(in->ops[0].mask&(in->ops[0].mask-1)) && depth==0){
+            const DgOp*a=&in->ops[1],*b=&in->ops[2]; if(a->type!=32){ const DgOp*x=a; a=b; b=x; }
+            if(a->type==32 && cstf_comp0(a)==0 && !a->emod && b->type==T_CB && b->nidx==2 && b->idx[0].kind==0 && b->idx[1].kind==0 && !b->emod && b->idx[0].val<16){
+                A=(int)in->ops[0].idx[0].val; C=__builtin_ctz(in->ops[0].mask); defi=i; t->bcb=(int)b->idx[0].val; t->bvec=(int)b->idx[1].val; t->bcomp=cstf_comp0(b); continue; } }
+        // nothing else may write rA.c
+        if(A>=0 && i!=defi && !cstf_nodst(op)) for(int k=0;k<(cstf_twodst(op)?2:1) && k<in->nop;k++){ const DgOp*d=&in->ops[k];
+            if(d->type==T_TEMP && d->nidx && (int)d->idx[0].val==A && (d->mask&(1<<C))) TFNO("own index register rewritten"); }
+        // every u0 access: this thread's own element, at a constant aligned offset inside the element
+        for(int k=0;k<in->nop;k++){ if(in->ops[k].type!=30) continue;
+            if(!((op==167&&k==3)||(op==168&&k==0))) TFNO("other use of u0");
+            const DgOp*ix=&in->ops[1],*of=&in->ops[2];
+            if(A<0 || ix->type!=T_TEMP || !ix->nidx || (int)ix->idx[0].val!=A || cstf_comp0(ix)!=C || ix->emod) TFNO("u0 index is not the thread's own");
+            if(of->type!=T_IMM32 || (of->imm[0]&3) || of->imm[0]>=t->stride) TFNO("u0 offset not constant");
+            if(op==167) t->hasu0ld=1; } }
+    if(A<0) TFNO("no own-index definition");
+    g_dg_tf_dw=(int)t->dw; char*src=dg_translate(bc,bclen); g_dg_tf_dw=0;
+    if(!src) TFNO("translation failed");
+    if(strstr(src,"UNTRANSLATED")){ free(src); TFNO("untranslated instruction"); }
+    unsigned sh=G.CreateShader(GLE_VS); const char*ss=src; G.ShaderSource(sh,1,&ss,0); G.CompileShader(sh);
+    int ok=0; G.GetShaderiv(sh,GLE_CSTAT,&ok);
+    if(!ok){ char lg[1024]={0}; G.GetShaderInfoLog(sh,sizeof lg,0,lg); char m[1300]; int k=snprintf(m,sizeof m,"  [cs-gpu] compile failed: %s\n",lg); (void)!write(2,m,k); G.DeleteShader(sh); free(src); TFNO("compile failed"); }
+    unsigned pr=G.CreateProgram(); G.AttachShader(pr,sh);
+    char nb[16][12]; const char*names[16]; int nv=(int)(t->dw+3)/4; for(int i=0;i<nv;i++){ snprintf(nb[i],sizeof nb[i],"dx_tf%d",i); names[i]=nb[i]; }
+    G.TransformFeedbackVaryings(pr,nv,names,0x8C8C/*INTERLEAVED_ATTRIBS*/); G.LinkProgram(pr); G.DeleteShader(sh);
+    int lk=0; G.GetProgramiv(pr,0x8B82/*LINK_STATUS*/,&lk);
+    if(!lk){ char lg[1024]={0}; G.GetProgramInfoLog(pr,sizeof lg,0,lg); char m[1300]; int k=snprintf(m,sizeof m,"  [cs-gpu] link failed: %s\n",lg); (void)!write(2,m,k); free(src); TFNO("link failed"); }
+    t->u0loc=G.GetUniformLocation(pr,"dx_u0in");
+    for(int r=0;r<32;r++){ char n[8]; snprintf(n,sizeof n,"t%d",r); t->tloc[r]=G.GetUniformLocation(pr,n); }
+    memset(t->tt,0,sizeof t->tt); d3dgl_scan_tt(src,t->tt);
+    for(int b=0;b<16;b++) if(t->cbn[b]){ char n[16]; snprintf(n,sizeof n,"cb%d_blk",b); unsigned bi=G.GetUniformBlockIndex(pr,n); if(bi!=0xFFFFFFFFu) G.UniformBlockBinding(pr,bi,(unsigned)b); else t->cbn[b]=0; }
+    free(src); t->prog=pr; t->state=1;
+    #undef TFNO
+}
+// a GPU-owned buffer's contents back into its CPU copy (before any CPU read or partial write of it)
+static void cs_gpu_readback(D3DObj*r,const char*why){
+    if(!r||!r->cs_gpu) return;
+    GLLOCK(); if(CGLGetCurrentContext()!=g_d3dgl_cgl) CGLSetCurrentContext(g_d3dgl_cgl);
+    if(r->gltbobuf && r->data && G.GetBufferSubData){ G.BindBuffer(0x8F36,r->gltbobuf);
+        for(uint64_t o=0;o<r->size;o+=(8u<<20)){ uint64_t n=r->size-o; if(n>(8u<<20)) n=8u<<20; G.GetBufferSubData(0x8F36,(long)o,(long)n,(uint8_t*)r->data+o); } }
+    r->cs_gpu=0; r->tbover=r->ver; r->tbook=1; g_cstf_rb++; g_cstf_rbbytes+=r->size;
+    GLUNLOCK();
+    { static int nl; if(nl++<12){ char m[200]; int k=snprintf(m,sizeof m,"  [cs-gpu] read back a GPU particle buffer (%llu B) for %s\n",(unsigned long long)r->size,why); (void)!write(2,m,k); } } }
+// GPU dispatch of an eligible kernel. 0 = not handled (run it on the CPU).
+static int cstf_dispatch(D3DObj*cs,CsProg*p,uint32_t a,uint32_t b,uint32_t c){
+    if(!cs_gpu_on() || b!=1 || c!=1) return 0;
+    CsTf*t=cs->cstf;
+    if(!t){ t=calloc(1,sizeof *t); if(!t) return 0; cs->cstf=t;
+        GLLOCK(); if(CGLGetCurrentContext()!=g_d3dgl_cgl) CGLSetCurrentContext(g_d3dgl_cgl); cstf_analyze(t,p,cs->bc,cs->bclen); GLUNLOCK();
+        char m[220]; int k=snprintf(m,sizeof m,"  [cs-gpu] kernel %016llx (%d instrs, element %u B): %s%s\n",(unsigned long long)cs->bchash,p?p->nins:0,t->stride,
+            t->state>0?"GPU (transform feedback)":"CPU: ",t->state>0?"":t->why); (void)!write(2,m,k); }
+    if(t->state<=0) return 0;
+    D3DObj*ur=cs_resof(g_cs.uav[0]); if(!ur||ur->kind!=1||!ur->data||!ur->size) return 0;
+    D3DObj*cb=g_cs.cb[t->bcb]; if(!cb||!cb->data) return 0;
+    uint64_t bo=(uint64_t)g_cs.cbfirst[t->bcb]*16+(uint64_t)t->bvec*16+(uint64_t)t->bcomp*4; if(bo+4>cb->size) return 0;
+    uint32_t base; memcpy(&base,(const uint8_t*)cb->data+bo,4);
+    uint64_t elems=ur->size/t->stride; if(base>=elems) return 1;
+    uint64_t n=(uint64_t)a*t->tgx; if(n>elems-base) n=elems-base; if(!n) return 1;
+    uint64_t bytes=n*t->stride, off=(uint64_t)base*t->stride;
+    // inputs the CPU may still be writing (queued CPU kernels) / GPU-owned inputs read as SRVs are fine as they are
+    GLLOCK(); if(CGLGetCurrentContext()!=g_d3dgl_cgl) CGLSetCurrentContext(g_d3dgl_cgl);
+    d3dgl_ensure_tbo(ur);   // the GL copy holds the current contents (uploads the CPU copy unless the GPU owns it)
+    ur->cs_gpu=1;
+    if(!g_cstf_scr){ G.GenBuffers(1,&g_cstf_scr); G.GenTextures(1,&g_cstf_scrtex); G.GenVertexArrays(1,&g_cstf_vao);
+        // the passes run on their own tiny framebuffer, not inside the game's render pass (PELOAD_CS_GPU_GAMEFBO=1 = in it)
+        unsigned rb=0; G.GenFramebuffers(1,&g_cstf_fbo); G.GenRenderbuffers(1,&rb); G.BindRenderbuffer(0x8D41,rb); G.RenderbufferStorage(0x8D41,0x8058/*RGBA8*/,4,4);
+        gl_bindfbo_any(GLE_FBO,g_cstf_fbo); G.FramebufferRenderbuffer(GLE_FBO,GLE_CA0,0x8D41,rb); }
+    { static unsigned long last=~0ul, lastfb=~0ul; extern unsigned long g_draw_serial_x(void); unsigned long ds=g_draw_serial_x();   // no draw and no other bind since: still ours
+      if(ds!=last || g_fbo_serial!=lastfb){ g_cstf_breaks++; if(!getenv("PELOAD_CS_GPU_GAMEFBO")) gl_bindfbo_any(GLE_FBO,g_cstf_fbo); } last=ds; lastfb=g_fbo_serial; }
+    if(bytes>g_cstf_scrsz){ uint64_t sz=(bytes+65535)&~65535ull; G.BindBuffer(0x8C2A,g_cstf_scr); G.BufferData(0x8C2A,(long)sz,0,0x88EA/*DYNAMIC_COPY*/); g_cstf_scrsz=sz;
+        TEXCACHE_INVALIDATE(); G.BindTexture(0x8C2A,g_cstf_scrtex); G.TexBuffer(0x8C2A,0x8236/*R32UI*/,g_cstf_scr); }
+    // the kernel's input: the dispatched range copied into the scratch buffer. Apple's GL-on-Metal has no glCopyBufferSubData
+    // ("gldCopyBufferSubData: NEEDS IMPLEMENTATION", the copy silently does nothing), so the copy is a transform-feedback pass
+    // too: one point per dword, read through the particle buffer's own texture buffer (gltbo).
+    if(!g_cstf_copyprog){ const char*vs="#version 410 core\nuniform usamplerBuffer src; uniform int off; flat out uint c; void main(){ c=texelFetch(src,off+gl_VertexID).x; gl_Position=vec4(0.0); }\n";
+        unsigned sh=G.CreateShader(GLE_VS); G.ShaderSource(sh,1,&vs,0); G.CompileShader(sh); unsigned pr=G.CreateProgram(); G.AttachShader(pr,sh);
+        const char*nm[1]={"c"}; G.TransformFeedbackVaryings(pr,1,nm,0x8C8C); G.LinkProgram(pr); G.DeleteShader(sh);
+        int lk=0; G.GetProgramiv(pr,0x8B82,&lk); if(!lk){ (void)!write(2,"  [cs-gpu] copy program failed to link: GPU particles off\n",58); t->state=-1; GLUNLOCK(); return 0; }
+        g_cstf_copyprog=pr; g_cstf_copysrc=G.GetUniformLocation(pr,"src"); g_cstf_copyoff=G.GetUniformLocation(pr,"off"); G.ProgramUniform1i(pr,g_cstf_copysrc,15); }
+    gs_useprog(g_cstf_copyprog); G.ProgramUniform1i(g_cstf_copyprog,g_cstf_copyoff,(int)(off/4));
+    gs_active(15); G.BindTexture(0x8C2A,ur->gltbo); g_unit_tex[15]=ur->gltbo; g_unit_tgt[15]=0x8C2A;
+    G.Enable(0x8C89/*RASTERIZER_DISCARD*/); G.BindVertexArray(g_cstf_vao);
+    G.BindBufferRange(0x8C8E,0,g_cstf_scr,0,(long)bytes);
+    G.BeginTransformFeedback(0); G.DrawArrays(0,0,(int)(bytes/4)); G.EndTransformFeedback();
+    G.BindBufferBase(0x8C8E,0,0); G.Disable(0x8C89);
+    // PELOAD_CS_GPUCHECK=1: run the same dispatch on the CPU interpreter from the same input and compare the elements
+    static int chk=-1; if(chk<0){ const char*e=getenv("PELOAD_CS_GPUCHECK"); chk=e?(atoi(e)>0?atoi(e):1):0; }   // =<n>: every n-th dispatch
+    static unsigned long nseen; uint8_t*cin=0; if(chk && (nseen++%(unsigned long)chk)==0 && G.GetBufferSubData){ cin=malloc(bytes); if(cin){ G.BindBuffer(0x8F36,g_cstf_scr); G.GetBufferSubData(0x8F36,0,(long)bytes,cin); } }
+    gs_useprog(t->prog);
+    for(int k=0;k<16;k++) if(t->cbn[k]) d3dgl_bind_ubo((unsigned)k,g_cs.cb[k],g_cs.cbfirst[k],t->cbn[k]);
+    D3DObj*sr[32],*sv[32]; for(int i=0;i<32;i++){ sv[i]=g_cs.srv[i]; sr[i]=cs_resof(g_cs.srv[i]); if(sr[i]) cs_wait_res(sr[i]); }
+    d3dgl_bind_res(t->prog,t->tloc,t->tt,&t->units_set,sr,sv,g_cs.samp,0,15);
+    gs_active(15); G.BindTexture(0x8C2A,g_cstf_scrtex); g_unit_tex[15]=g_cstf_scrtex; g_unit_tgt[15]=0x8C2A;
+    if(!t->u0set && t->u0loc>=0){ G.ProgramUniform1i(t->prog,t->u0loc,15); t->u0set=1; }
+    if(cin && !g_glh_on){ static int np; if(np++<4){ static void(*gi)(unsigned,int*); static void(*gu)(unsigned,int,int*); if(!gi){ gi=dlsym(RTLD_DEFAULT,"glGetIntegerv"); gu=dlsym(RTLD_DEFAULT,"glGetUniformiv"); }
+        int au=0,tb=0,cp=0,uv=-1; gi(0x84E0/*ACTIVE_TEXTURE*/,&au); G.ActiveTexture(GLE_TEX0+15); gi(0x8C2C/*TEXTURE_BINDING_BUFFER*/,&tb); G.ActiveTexture((unsigned)au); g_active_unit=~0u;
+        gi(0x8B8D/*CURRENT_PROGRAM*/,&cp); if(gu&&t->u0loc>=0) gu(t->prog,t->u0loc,&uv);
+        char m2[240]; int k=snprintf(m2,sizeof m2,"  [cs-probe] active unit %d, unit 15 texture %d (scratch %u, u0 %u), program %d (kernel %u), dx_u0in -> unit %d (loc %d)\n",au-GLE_TEX0,tb,g_cstf_scrtex,ur->gltbo,cp,t->prog,uv,t->u0loc); (void)!write(2,m2,k); } }
+    G.Enable(0x8C89/*RASTERIZER_DISCARD*/); G.BindVertexArray(g_cstf_vao);
+    G.BindBufferRange(0x8C8E/*TRANSFORM_FEEDBACK_BUFFER*/,0,ur->gltbobuf,(long)off,(long)bytes);
+    G.BeginTransformFeedback(0/*POINTS*/); G.DrawArrays(0,0,(int)n); G.EndTransformFeedback();
+    G.BindBufferBase(0x8C8E,0,0); G.Disable(0x8C89); G.BindVertexArray(g_d3dgl_vao);
+    if(cin){ uint8_t*gout=malloc(bytes); D3DObj tmp=*ur; tmp.data=calloc(1,ur->size); tmp.vkind=0; tmp.cs_snap=0;
+        if(gout && tmp.data){ G.BindBuffer(0x8F36,ur->gltbobuf); G.GetBufferSubData(0x8F36,(long)off,(long)bytes,gout); memcpy((uint8_t*)tmp.data+off,cin,bytes);
+            CsCtx cx; memset(&cx,0,sizeof cx);
+            for(int i=0;i<16;i++){ D3DObj*cb2=g_cs.cb[i]; if(cb2&&cb2->data&&cb2->size){ uint64_t o2=(uint64_t)g_cs.cbfirst[i]*16; if(o2>=cb2->size) o2=0; cx.cb[i]=(const uint8_t*)cb2->data+o2; cx.cbsz[i]=(uint32_t)(cb2->size-o2); } }
+            for(int i=0;i<32;i++) cx.srv[i]=g_cs.srv[i]; for(int i=0;i<16;i++) cx.samp[i]=g_cs.samp[i]; cx.uav[0]=&tmp;
+            { static int traced; const char*tn=getenv("PELOAD_CS_TRACE_NINS"); if(tn && !traced && atoi(tn)==p->nins){ traced=1; cx.trace=1;   // thread 0 of the first dispatch
+                char m2[160]; int k=snprintf(m2,sizeof m2,"  [cs-trace] kernel %016llx base %u: input element",(unsigned long long)cs->bchash,base); (void)!write(2,m2,k);
+                for(uint32_t w=0;w<t->dw;w++){ k=snprintf(m2,sizeof m2," %08x",((const uint32_t*)cin)[w]); (void)!write(2,m2,k); } (void)!write(2,"\n",1); } }
+            cs_dispatch(p,&cx,a,b,c);
+            if(cx.trace){ char m2[160]; int k=snprintf(m2,sizeof m2,"  [cs-trace] gpu output element"); (void)!write(2,m2,k);
+                for(uint32_t w=0;w<t->dw;w++){ k=snprintf(m2,sizeof m2," %08x",((const uint32_t*)gout)[w]); (void)!write(2,m2,k); } (void)!write(2,"\n",1); }
+            // (diagnostics) the copy pass: the scratch input vs the buffer's own range; a wrong GPU element vs every CPU element
+            { static int nd; if(nd<6){ uint8_t*u0r=malloc(bytes); if(u0r){ G.BindBuffer(0x8F36,ur->gltbobuf); 
+                  // (ur now holds the kernel's output: compare the scratch with what the CPU copy pass produced instead)
+                  free(u0r); } }
+              const uint32_t*cu0=(const uint32_t*)((uint8_t*)tmp.data+off), *gu0=(const uint32_t*)gout;
+              for(uint64_t e=0;e<n && nd<6;e++){ if(!memcmp(cu0+e*t->dw,gu0+e*t->dw,t->dw*4)) continue; nd++;
+                  long match=-1; for(uint64_t f=0;f<n;f++) if(!memcmp(cu0+f*t->dw,gu0+e*t->dw,t->dw*4)){ match=(long)f; break; }
+                  long inm=-1; for(uint64_t f=0;f<n;f++) if(!memcmp((const uint32_t*)cin+f*t->dw,gu0+e*t->dw,t->dw*4)){ inm=(long)f; break; }
+                  char m2[400]; int k=snprintf(m2,sizeof m2,"  [cs-diag] kernel %016llx n=%llu base=%u element %llu differs; equals CPU element %ld, input element %ld\n",(unsigned long long)cs->bchash,(unsigned long long)n,base,(unsigned long long)e,match,inm); (void)!write(2,m2,k);
+                  const char*lbl[3]={"in ","cpu","gpu"}; const uint32_t*rows[3]={(const uint32_t*)cin+e*t->dw,cu0+e*t->dw,gu0+e*t->dw};
+                  for(int r=0;r<3;r++){ k=snprintf(m2,sizeof m2,"    %s",lbl[r]); for(uint32_t w=0;w<t->dw && k<380;w++) k+=snprintf(m2+k,sizeof m2-k," %08x",rows[r][w]); m2[k++]='\n'; (void)!write(2,m2,k); } } }
+            static unsigned long nchk, nexact, nclose, nfar, nchg; static double maxrel; const uint32_t*cu=(const uint32_t*)((uint8_t*)tmp.data+off), *gu=(const uint32_t*)gout, *iu=(const uint32_t*)cin;
+            for(uint64_t w=0;w<bytes/4;w++){ if(cu[w]!=iu[w]) nchg++; if(cu[w]==gu[w]){ nexact++; continue; }
+                float cf,gf; memcpy(&cf,&cu[w],4); memcpy(&gf,&gu[w],4); double d=fabs((double)cf-gf), m=fmax(fabs(cf),fabs(gf)); double rel=m>1e-6?d/m:d;
+                if(cf==cf && gf==gf && (rel<1e-3 || d<1e-5)){ nclose++; if(rel>maxrel) maxrel=rel; continue; }
+                if(nfar++<12){ char m2[220]; int k=snprintf(m2,sizeof m2,"  [cs-check] kernel %016llx element %llu dword %llu: cpu %08x (%g) gpu %08x (%g) in %08x\n",(unsigned long long)cs->bchash,
+                    (unsigned long long)(base+w/t->dw),(unsigned long long)(w%t->dw),cu[w],cf,gu[w],gf,iu[w]); (void)!write(2,m2,k); } }
+            if((++nchk%200)==0){ char m2[220]; int k=snprintf(m2,sizeof m2,"  [cs-check] %lu GPU dispatches checked: %lu dwords exact, %lu close (max rel %.2g), %lu different; %lu changed by the kernels\n",nchk,nexact,nclose,maxrel,nfar,nchg); (void)!write(2,m2,k); } }
+        free(gout); free(tmp.data); free(cin); }
+    GLUNLOCK();
+    g_cstf_n++; return 1; }
+// A CPU kernel writing a GPU-owned u0 without reading it (the spawn kernels): run it on the CPU, then send only the
+// elements it wrote. Returns 0 if this doesn't apply (the caller reads the buffer back and runs it the normal way).
+static int cstf_u32cmp(const void*x,const void*y){ uint32_t a=*(const uint32_t*)x, b=*(const uint32_t*)y; return a<b?-1:a>b; }
+static int cstf_scatter(CsProg*p,CsCtx*cx,uint32_t a,uint32_t b,uint32_t c){
+    D3DObj*ur=cs_resof(cx->uav[0]); if(!ur||!ur->cs_gpu||!ur->gltbobuf) return 0;
+    for(int i=1;i<8;i++) if(cs_resof(cx->uav[i])) return 0;
+    for(int i=0;i<p->nins;i++){ DgIns*in=&p->ins[i]; if(in->op==167 && in->nop>3 && in->ops[3].type==30) return 0; if(in->op==166||in->op==165) return 0; }
+    for(int i=0;i<32;i++){ D3DObj*r=cs_resof(cx->srv[i]); if(r && r->cs_gpu) cs_gpu_readback(r,"a CPU kernel's input"); }
+    uint32_t stride=p->uavstride[0]; if(!stride) return 0;
+    static uint32_t*wl; static int wcap; if(!wl){ wcap=1<<16; wl=malloc(sizeof(uint32_t)*wcap); if(!wl) return 0; }
+    cx->wlog=wl; cx->wlogcap=wcap; cx->wlogn=0; cx->wlogovf=0;
+    long rc=cs_dispatch(p,cx,a,b,c); cx->wlog=0;
+    if(rc<0) return 0;
+    if(cx->wlogovf){ cs_gpu_readback(ur,"an unlogged CPU write"); return 1; }   // (CPU copy now complete and newest: re-sent whole)
+    // (each store instruction logs every lane: sort, drop repeats, then send each run of adjacent elements once)
+    qsort(wl,(size_t)cx->wlogn,sizeof(uint32_t),cstf_u32cmp);   // (cx->wlog is already detached)
+    { int w=0; for(int i=0;i<cx->wlogn;i++) if(!w || wl[i]!=wl[w-1]) wl[w++]=wl[i]; cx->wlogn=w; }
+    GLLOCK(); if(CGLGetCurrentContext()!=g_d3dgl_cgl) CGLSetCurrentContext(g_d3dgl_cgl);
+    G.BindBuffer(0x8C2A,ur->gltbobuf);
+    for(int i=0;i<cx->wlogn;){ uint32_t e0=wl[i], e1=e0; int j=i+1; while(j<cx->wlogn && wl[j]==e1+1){ e1++; j++; }
+        uint64_t o=(uint64_t)e0*stride, nb=(uint64_t)(e1-e0+1)*stride; if(o<ur->size){ if(o+nb>ur->size) nb=ur->size-o; G.BufferSubData(0x8C2A,(long)o,(long)nb,(uint8_t*)ur->data+o); g_cstf_scatbytes+=nb; }
+        i=j; }
+    GLUNLOCK(); g_cstf_scat++; return 1; }
+static void cstf_stats(void){ if(!cs_gpu_on()||!cs_gpu_log()) return; static double t0; double now=mono_s(); if(now-t0<5.0) return; t0=now;
+    extern unsigned long g_eng_present_no_x; static unsigned long f0, b0, n0; unsigned long fr=g_eng_present_no_x-f0;
+    char m[300]; int k=snprintf(m,sizeof m,"  [cs-gpu] %lu GPU dispatches, %lu spawn dispatches (%.1f KB sent), %.1f KB staging copies, %lu on the CPU, %lu read-backs (%.1f MB) | last 5 s: %.1f dispatches, %.1f render-pass breaks per frame\n",
+        g_cstf_n,g_cstf_scat,g_cstf_scatbytes/1024.0,g_cstf_upbytes_x/1024.0,g_cstf_cpu,g_cstf_rb,g_cstf_rbbytes/1048576.0,fr?(double)(g_cstf_n-n0)/fr:0.0,fr?(double)(g_cstf_breaks-b0)/fr:0.0); (void)!write(2,m,k);
+    f0=g_eng_present_no_x; b0=g_cstf_breaks; n0=g_cstf_n; }
 // ---- Monolithic (non-separable) program path ------------------------------------------------
 // Apple's OpenGL-on-Metal fails to build a Metal pipeline from a SEPARABLE program pipeline
 // (GL_ARB_separate_shader_objects) for halo3's real gameplay shaders: it logs "buildPipelineState
@@ -5901,8 +6144,10 @@ static void rtc_note(void*rt,uint32_t w,uint32_t h,uint32_t fmt,int geo,D3DObj*t
 #define PH(i) do{ if(prof_on()){ uint64_t _n=prof_now(); g_ph_ns[i]+=_n-g_ph_t; g_ph_t=_n; } }while(0)
 static uint64_t prof_now(void){ struct timespec ts; clock_gettime(CLOCK_MONOTONIC,&ts); return (uint64_t)ts.tv_sec*1000000000ull+(uint64_t)ts.tv_nsec; }
 static int prof_on(void){ static int p=-1; if(p<0) p=getenv("PELOAD_D3DGL_PROF")!=0; return p; }
+static unsigned long g_draw_serial; unsigned long g_draw_serial_x(void);   // draws issued (GPU particles: a dispatch after a draw breaks the game's render pass)
+unsigned long g_draw_serial_x(void){ return g_draw_serial; }
 static void d3dgl_draw(uint32_t vcount,int indexed,uint32_t instcount,uint32_t start,int32_t base,uint32_t sinst){
-    GLLOCK();
+    GLLOCK(); g_draw_serial++;
     // PELOAD_D3DGL_SLOWDRAW=<ms>: glFinish after every draw; a draw whose GPU work exceeds <ms> (e.g. the
     // shader behind a "Caused GPU Hang" error) is logged with its VS/PS and both GLSL sources are dumped.
     static int sd=-1; if(sd<0) sd=GENV1("PELOAD_D3DGL_SLOWDRAW")?atoi(GENV1("PELOAD_D3DGL_SLOWDRAW")):0;
@@ -6854,7 +7099,7 @@ static void cb_dump_scan(void){ if(!getenv("PELOAD_CB_DUMP")) return; static int
 static void d3dgl_present_impl(void);
 static void d3dgl_present(void){ GLLOCK(); gl_count_report(); d3dobj_log(); if(!prof_on()) d3dgl_present_impl();
     else { uint64_t t=prof_now(); d3dgl_present_impl(); g_prof_pres_ns+=prof_now()-t; g_prof_pres_n++; prof_report(); }
-    d3dobj_reap(1); if(g_glh_on && (prof_on()||getenv("PELOAD_GLH_STATS"))) glh_stats(); GLUNLOCK(); }
+    d3dobj_reap(1); if(g_glh_on && (prof_on()||getenv("PELOAD_GLH_STATS"))) glh_stats(); cstf_stats(); GLUNLOCK(); }
 static void d3dgl_present_impl(void){
     if(getenv("PELOAD_TRACE_COPY")){ static unsigned long pc; if((pc++%100)==0){ char m[200]; int k=snprintf(m,sizeof m,"  [presentsrc] present #%lu tex=%u backbuf.gltex=%u vw/vh=%d/%d tw/th=%d/%d | bb draws since last=%lu lastvp=%lux%lu t0=%ux%u f%u | bb SKIPPED=%lu reason=%lu\n",pc,g_d3dgl_present_tex,g_d3d_backbuf?g_d3d_backbuf->gltex:0,g_d3dgl_present_vw,g_d3dgl_present_vh,g_d3dgl_present_tw,g_d3dgl_present_th,g_bb_draws,g_bb_vp>>16,g_bb_vp&0xffff,g_bb_t0w,g_bb_t0h,g_bb_t0f,g_bb_skip,g_bb_skip_reason); g_bb_draws=0; g_bb_skip=0; (void)!write(2,m,k);} }
     g_cb_tick++;                                   // advance CB freshness clock each present

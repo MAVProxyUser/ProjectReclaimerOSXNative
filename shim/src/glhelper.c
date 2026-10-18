@@ -164,6 +164,8 @@ static int run_one(const uint8_t*c){
         return 0; }
     switch(op){
     case GLH_X_POOLFILL: pools_fill(); sync_finish(0,0); return 1;
+    case GLH_X_TFVARYINGS: { const char*nm[64]; int n=(int)s[1]; if(n>64) n=64; const char*q=(const char*)(s+3);
+        for(int i=0;i<n;i++){ nm[i]=q; q+=strlen(q)+1; } glTransformFeedbackVaryings((GLuint)s[0],n,nm,(GLenum)s[2]); return 0; }
     case GLH_X_SHADERSOURCE: { const GLchar*src=(const GLchar*)(s+2); GLint n=(GLint)s[1]; glShaderSource((GLuint)s[0],1,&src,&n); return 0; }
     case GLH_X_MAPWRITE: { void*p=glMapBufferRange((GLenum)s[0],(GLintptr)s[1],(GLsizeiptr)s[2],(GLbitfield)s[3]); if(p){ memcpy(p,s+4,(size_t)s[2]); glUnmapBuffer((GLenum)s[0]); } return 0; }
     case GLH_X_MAPREAD: { uint64_t n=s[2]>GLH_REPLY?GLH_REPLY:s[2]; void*p=glMapBufferRange((GLenum)s[0],(GLintptr)s[1],(GLsizeiptr)n,GL_MAP_READ_BIT);

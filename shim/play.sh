@@ -12,6 +12,7 @@
 #   RECLAIMER_JOIN=host:port   start in the menu and join that server (the client's reclaimer://join link)
 #   PELOAD_H3="name=value,..." set Halo 3 engine settings (shim/docs/halo3-engine-globals.md)
 #   PELOAD_STATS_HTTP=<port>   live stats page port (default 8765: http://127.0.0.1:8765/); 0 turns it off
+#   PELOAD_STATS_OPEN=0        don't open the stats page in the browser at launch (an open tab reconnects by itself)
 #   PELOAD_D3DGL_SUBMIT=auto   GL submission thread: auto (default) = on in games with 40+ players, 1 = always, 0 = never
 #   RECLAIMER_DIRECT=1         skip the menu and go straight into a local Guardian match (~12 s). Reclaimer's
 #                              in-game UI (scoreboard names/scores, chat, game menu) only runs under its menu,
@@ -79,7 +80,7 @@ PC="$(sysctl -n hw.perflevel0.physicalcpu 2>/dev/null || echo 6)"; CSW=$((PC-2))
 [ -x shim/build/glhelper ] || { [ "${PELOAD_GL_HELPER:-1}" != 0 ] && echo "shim/build/glhelper missing (bash shim/build.sh): GL stays in-process"; }
 # in a source checkout the stats page is served from shim/src (edits show on a browser refresh)
 [ -f shim/src/stats_page.html ] && [ -z "${PELOAD_STATS_PAGE:-}" ] && export PELOAD_STATS_PAGE="$PWD/shim/src/stats_page.html"
-env PELOAD_SKINGUARD=1 PELOAD_VTGUARD=1 PELOAD_ALLOC_GUARD=1 "${RUNTIME[@]}" PELOAD_STATS_HTTP="${PELOAD_STATS_HTTP:-8765}" \
+env PELOAD_SKINGUARD=1 PELOAD_VTGUARD=1 PELOAD_ALLOC_GUARD=1 "${RUNTIME[@]}" PELOAD_STATS_HTTP="${PELOAD_STATS_HTTP:-8765}" PELOAD_STATS_OPEN="${PELOAD_STATS_OPEN:-1}" \
     PELOAD_D3DGL_SUBMIT="${PELOAD_D3DGL_SUBMIT:-auto}" PELOAD_GL_HELPER="${PELOAD_GL_HELPER:-1}" PELOAD_CS_WORKERS="${PELOAD_CS_WORKERS:-$CSW}" \
     PELOAD_RECLAIMER_PATCHES=all PELOAD_WORKER_INHERIT_STDIO=1 PELOAD_PRESENT=1 PELOAD_HOLD_WINDOW=1 PELOAD_D3DGL=1 \
     arch -x86_64 shim/build/peload "$EXE" "${ARGS[@]}" < <(exec sleep 86400.$$ 2>/dev/null) > /tmp/reclaimer_play.log 2>&1

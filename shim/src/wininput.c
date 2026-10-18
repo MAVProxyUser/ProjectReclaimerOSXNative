@@ -187,6 +187,21 @@ static int wi_translate(id ev){
     case 1: case 2: case 3: case 4: case 25: case 26: {   // mouse buttons
         long btn = (type==1||type==2)?0 : (type==3||type==4)?1 : ((long(*)(id,SEL))objc_msgSend)(ev,sel_registerName("buttonNumber"));
         int down = (type==1||type==3||type==25);
+        // A press outside the game's content area (the title bar, the frame) belongs to the window: dragging, the
+        // traffic-light buttons. Sent to the game it was a click, and in a match the game answers a click by capturing
+        // the mouse, so the title bar could not be dragged (backlog 28). Neither the press nor its release reach the
+        // game; macOS gets the event. While captured every click is the game's. PELOAD_TITLEBAR_CLICKS=1 = old.
+        { static uint8_t swallowed[8]; static int old=-1; if(old<0) old=getenv("PELOAD_TITLEBAR_CLICKS")?1:0; int bi=(int)(btn&7);
+          if(!down && swallowed[bi]){ swallowed[bi]=0; return 0; }
+          if(down) swallowed[bi]=0;   // (AppKit's title-bar drag loop eats the release itself: never carry the flag past a press)
+          if(down && !old && !g_wi_captured){ id win=((id(*)(id,SEL))objc_msgSend)(ev,sel_registerName("window"));
+            id view=win?((id(*)(id,SEL))objc_msgSend)(win,sel_registerName("contentView")):0;
+            if(view){ typedef struct { double x,y; } P; typedef struct { double x,y,w,h; } R;
+                P p=((P(*)(id,SEL))objc_msgSend)(ev,sel_registerName("locationInWindow")); R b={0,0,0,0};
+                ((void(*)(R*,id,SEL))objc_msgSend_stret)(&b,view,sel_registerName("frame"));   // content rect in window coordinates
+                if(b.w>0 && b.h>0 && (p.x<b.x || p.y<b.y || p.x>=b.x+b.w || p.y>=b.y+b.h)){ swallowed[bi]=1;
+                    if(getenv("PELOAD_TRACE_INPUT")) (void)!write(2,"  [kbm] click outside the content area: left to the window\n",59);
+                    return 0; } } } }
         uint8_t vk = btn==0?1 : btn==1?2 : btn==2?4 : btn==3?5 : 6;
         g_keydown[vk]=(uint8_t)down;
         uint16_t bf = btn==0?(down?0x1:0x2) : btn==1?(down?0x4:0x8) : btn==2?(down?0x10:0x20) : btn==3?(down?0x40:0x80) : (down?0x100:0x200);

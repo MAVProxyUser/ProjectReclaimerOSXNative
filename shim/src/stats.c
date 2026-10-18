@@ -643,7 +643,7 @@ static void st_death_event(const char*victim,int vteam,uint32_t h,int np,const S
 static void st_snapshot(StBuf*s){
     static const char* teams[8]={"red","blue","green","orange","purple","gold","brown","pink"};
     extern double g_gameplay_t0; double now=mono_s();
-    sb_put(s,"{\"time\":%.2f,\"in_match\":%s",g_gameplay_t0?now-g_gameplay_t0:0.0,g_gameplay_t0?"true":"false");
+    sb_put(s,"{\"time\":%.2f,\"in_match\":%s,\"inst\":%d",g_gameplay_t0?now-g_gameplay_t0:0.0,g_gameplay_t0?"true":"false",(int)getpid());   // inst: a new game -> open pages reload
     { pthread_mutex_lock(&g_ev_mx); uint32_t fs=g_ev_seq; pthread_mutex_unlock(&g_ev_mx); sb_put(s,",\"feed_seq\":%u",fs); }
     char m[64]="";
     { char mp[1024]=""; hb_current_map(mp,sizeof mp);   // the map being played (halo3/maps or a Workshop mod's folder)
@@ -784,6 +784,7 @@ static const char g_st_optmap[]={
 ,0};
 #pragma clang diagnostic pop
 static int st_send(int fd,const char*b,size_t n){ while(n){ ssize_t k=send(fd,b,n,0); if(k<=0){ if(k<0&&errno==EINTR) continue; return 0; } b+=k; n-=(size_t)k; } return 1; }
+static volatile unsigned long g_st_hits;   // page requests (/events, /stats.json): a tab is showing this game
 static void* st_conn(void*a){ int fd=(int)(intptr_t)a; pthread_setname_np("shim-stats-http");
     int one=1; setsockopt(fd,SOL_SOCKET,SO_NOSIGPIPE,&one,sizeof one); setsockopt(fd,IPPROTO_TCP,TCP_NODELAY,&one,sizeof one);
     char req[2048]; ssize_t n=recv(fd,req,sizeof req-1,0); if(n<=0){ close(fd); return 0; } req[n]=0;
@@ -810,7 +811,7 @@ static void* st_conn(void*a){ int fd=(int)(intptr_t)a; pthread_setname_np("shim-
             if(st_send(fd,h,(size_t)k)) st_send(fd,buf,(size_t)n); free(buf); }
         else { const char*nf="HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"; st_send(fd,nf,strlen(nf)); } }
     else if(strcmp(meth,"GET")){ const char*na="HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"; st_send(fd,na,strlen(na)); }
-    else if(!strcmp(path,"/events")){
+    else if(!strcmp(path,"/events")){ g_st_hits++;
         int k=snprintf(h,sizeof h,"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\nAccess-Control-Allow-Origin: *\r\n\r\n");
         if(st_send(fd,h,(size_t)k)) for(unsigned long seen=0;;){ pthread_mutex_lock(&g_st_mx); while(g_st_seq==seen) pthread_cond_wait(&g_st_cv,&g_st_mx);
                 seen=g_st_seq; size_t len=g_st_len; char*j=malloc(len+16); if(j){ memcpy(j,"data: ",6); memcpy(j+6,g_st_json,len); memcpy(j+6+len,"\n\n",2); } pthread_mutex_unlock(&g_st_mx);
@@ -823,7 +824,7 @@ static void* st_conn(void*a){ int fd=(int)(intptr_t)a; pthread_setname_np("shim-
         StBuf b={0}; hm_json(&b);
         int k=snprintf(h,sizeof h,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %zu\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n",b.n);
         if(st_send(fd,h,(size_t)k) && b.n) st_send(fd,b.b,b.n); free(b.b); }
-    else if(!strcmp(path,"/stats.json")){
+    else if(!strcmp(path,"/stats.json")){ g_st_hits++;
         pthread_mutex_lock(&g_st_mx); size_t len=g_st_len; char*j=malloc(len+1); if(j && g_st_json) memcpy(j,g_st_json,len); else len=0; pthread_mutex_unlock(&g_st_mx);
         int k=snprintf(h,sizeof h,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %zu\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n",len);
         if(st_send(fd,h,(size_t)k) && len) st_send(fd,j,len); free(j); }
@@ -837,6 +838,17 @@ static void* st_conn(void*a){ int fd=(int)(intptr_t)a; pthread_setname_np("shim-
         if(st_send(fd,h,(size_t)k)) st_send(fd,pg,pn); free(disk); }
     else { const char*nf="HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"; st_send(fd,nf,strlen(nf)); }
     close(fd); return 0; }
+// PELOAD_STATS_OPEN=1 (play.sh, quiet-run.sh): show the page when the game starts. A tab that is already open reconnects on
+// its own (EventSource retries every few seconds) and reloads itself for the new game (the snapshot's "inst"), so the
+// browser is only asked to open the page (macOS `open <url>`: a new tab, or the browser started) when no page request
+// arrived within PELOAD_STATS_OPEN_WAIT seconds (default 5) of the server starting.
+static void* st_open_thread(void*a){ (void)a; pthread_setname_np("shim-stats-open");
+    const char*w=getenv("PELOAD_STATS_OPEN_WAIT"); double ws=w?atof(w):5.0; usleep((useconds_t)(ws*1e6));
+    if(g_st_hits) return 0;
+    const char*ad=getenv("PELOAD_STATS_ADDR"); char url[128]; snprintf(url,sizeof url,"http://%s:%d/",ad&&*ad&&strcmp(ad,"0.0.0.0")?ad:"127.0.0.1",g_st_port);
+    char*argv[]={"/usr/bin/open",url,0}; pid_t pid; extern char**environ;
+    if(posix_spawn(&pid,"/usr/bin/open",0,0,argv,environ)==0){ int st; waitpid(pid,&st,0); char m[200]; int k=snprintf(m,sizeof m,"  [stats] opened %s in the browser\n",url); (void)!write(2,m,k); }
+    return 0; }
 static void* st_listen_thread(void*a){ (void)a; pthread_setname_np("shim-stats-listen");
     // only the process that runs the engine serves (the client's launcher process inherits the variable too)
     while(!hb_halo3_base()) usleep(500000);
@@ -847,6 +859,7 @@ static void* st_listen_thread(void*a){ (void)a; pthread_setname_np("shim-stats-l
     if(ls<0 || bind(ls,(struct sockaddr*)&sa,sizeof sa) || listen(ls,16)){ k=snprintf(m,sizeof m,"  [stats] cannot listen on %s:%d (%s)\n",ad&&*ad?ad:"127.0.0.1",g_st_port,strerror(errno)); (void)!write(2,m,k); if(ls>=0) close(ls); return 0; }
     k=snprintf(m,sizeof m,"  [stats] live game stats on http://%s:%d/ (also /stats.json, /events)\n",ad&&*ad?ad:"127.0.0.1",g_st_port); (void)!write(2,m,k);
     pthread_t t; pthread_create(&t,0,st_snap_thread,0); pthread_detach(t);
+    { const char*o=getenv("PELOAD_STATS_OPEN"); if(o && atoi(o)){ pthread_t ot; pthread_create(&ot,0,st_open_thread,0); pthread_detach(ot); } }
     for(;;){ int fd=accept(ls,0,0); if(fd<0){ if(errno==EINTR) continue; usleep(100000); continue; } pthread_t c; if(pthread_create(&c,0,st_conn,(void*)(intptr_t)fd)) close(fd); else pthread_detach(c); }
     return 0; }
 static void stats_start(void){ if(!stats_on()) return; pthread_t t; pthread_create(&t,0,st_listen_thread,0); pthread_detach(t); }

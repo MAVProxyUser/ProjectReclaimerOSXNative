@@ -142,7 +142,12 @@ enum {
     GLH_OP_glValidateProgram=139,
     GLH_OP_glBindAttribLocation=140,
     GLH_OP_glBindFragDataLocation=141,
-    GLH_OP_GEN_END=142 };
+    GLH_OP_glBeginTransformFeedback=142,
+    GLH_OP_glEndTransformFeedback=143,
+    GLH_OP_glCopyBufferSubData=144,
+    GLH_OP_glBindBufferBase=145,
+    GLH_OP_glTransformFeedbackVaryings=146,
+    GLH_OP_GEN_END=147 };
 static struct {
     void(*glActiveTexture)(GLenum);
     void(*glAttachShader)(GLuint, GLuint);
@@ -285,6 +290,11 @@ static struct {
     void(*glValidateProgram)(GLuint);
     void(*glBindAttribLocation)(GLuint, GLuint, const GLchar *);
     void(*glBindFragDataLocation)(GLuint, GLuint, const GLchar *);
+    void(*glBeginTransformFeedback)(GLenum);
+    void(*glEndTransformFeedback)(void);
+    void(*glCopyBufferSubData)(GLenum, GLenum, GLintptr, GLintptr, GLsizeiptr);
+    void(*glBindBufferBase)(GLenum, GLuint, GLuint);
+    void(*glTransformFeedbackVaryings)(GLuint, GLsizei, const GLchar* const *, GLenum);
 } GLR;
 static void glh_load_real(void){
     GLR.glActiveTexture=glh_real_dlsym("glActiveTexture");
@@ -428,6 +438,11 @@ static void glh_load_real(void){
     GLR.glValidateProgram=glh_real_dlsym("glValidateProgram");
     GLR.glBindAttribLocation=glh_real_dlsym("glBindAttribLocation");
     GLR.glBindFragDataLocation=glh_real_dlsym("glBindFragDataLocation");
+    GLR.glBeginTransformFeedback=glh_real_dlsym("glBeginTransformFeedback");
+    GLR.glEndTransformFeedback=glh_real_dlsym("glEndTransformFeedback");
+    GLR.glCopyBufferSubData=glh_real_dlsym("glCopyBufferSubData");
+    GLR.glBindBufferBase=glh_real_dlsym("glBindBufferBase");
+    GLR.glTransformFeedbackVaryings=glh_real_dlsym("glTransformFeedbackVaryings");
 }
 static void e_glActiveTexture(GLenum texture);
 static void r_glActiveTexture(GLenum texture){ if(!glh_active()) GLR.glActiveTexture(texture); else e_glActiveTexture(texture); }
@@ -2060,6 +2075,55 @@ static void e_glBindFragDataLocation(GLuint program, GLuint color, const GLchar 
     ((uint16_t*)c)[1]=m;
     glh_end(c); }
 }
+static void e_glBeginTransformFeedback(GLenum primitiveMode);
+static void r_glBeginTransformFeedback(GLenum primitiveMode){ if(!glh_active()) GLR.glBeginTransformFeedback(primitiveMode); else e_glBeginTransformFeedback(primitiveMode); }
+static void e_glBeginTransformFeedback(GLenum primitiveMode){
+    {
+    uint8_t*c=glh_begin(GLH_OP_glBeginTransformFeedback,16); if(!c) return;
+    uint16_t m=0; uint64_t*s=(uint64_t*)(c+8);
+    s[0]=(uint64_t)primitiveMode;
+    uint8_t*p=(uint8_t*)(s+1);
+    ((uint16_t*)c)[1]=m;
+    glh_end(c); }
+}
+static void e_glEndTransformFeedback(void);
+static void r_glEndTransformFeedback(void){ if(!glh_active()) GLR.glEndTransformFeedback(); else e_glEndTransformFeedback(); }
+static void e_glEndTransformFeedback(void){
+    {
+    uint8_t*c=glh_begin(GLH_OP_glEndTransformFeedback,8); if(!c) return;
+    uint16_t m=0; uint64_t*s=(uint64_t*)(c+8);
+    uint8_t*p=(uint8_t*)(s+0);
+    ((uint16_t*)c)[1]=m;
+    glh_end(c); }
+}
+static void e_glCopyBufferSubData(GLenum readTarget, GLenum writeTarget, GLintptr readOffset, GLintptr writeOffset, GLsizeiptr size);
+static void r_glCopyBufferSubData(GLenum readTarget, GLenum writeTarget, GLintptr readOffset, GLintptr writeOffset, GLsizeiptr size){ if(!glh_active()) GLR.glCopyBufferSubData(readTarget, writeTarget, readOffset, writeOffset, size); else e_glCopyBufferSubData(readTarget, writeTarget, readOffset, writeOffset, size); }
+static void e_glCopyBufferSubData(GLenum readTarget, GLenum writeTarget, GLintptr readOffset, GLintptr writeOffset, GLsizeiptr size){
+    {
+    uint8_t*c=glh_begin(GLH_OP_glCopyBufferSubData,48); if(!c) return;
+    uint16_t m=0; uint64_t*s=(uint64_t*)(c+8);
+    s[0]=(uint64_t)readTarget;
+    s[1]=(uint64_t)writeTarget;
+    s[2]=(uint64_t)(int64_t)readOffset;
+    s[3]=(uint64_t)(int64_t)writeOffset;
+    s[4]=(uint64_t)(int64_t)size;
+    uint8_t*p=(uint8_t*)(s+5);
+    ((uint16_t*)c)[1]=m;
+    glh_end(c); }
+}
+static void e_glBindBufferBase(GLenum target, GLuint index, GLuint buffer);
+static void r_glBindBufferBase(GLenum target, GLuint index, GLuint buffer){ if(!glh_active()) GLR.glBindBufferBase(target, index, buffer); else e_glBindBufferBase(target, index, buffer); }
+static void e_glBindBufferBase(GLenum target, GLuint index, GLuint buffer){
+    {
+    uint8_t*c=glh_begin(GLH_OP_glBindBufferBase,32); if(!c) return;
+    uint16_t m=0; uint64_t*s=(uint64_t*)(c+8);
+    s[0]=(uint64_t)target;
+    s[1]=(uint64_t)index;
+    s[2]=(uint64_t)buffer;
+    uint8_t*p=(uint8_t*)(s+3);
+    ((uint16_t*)c)[1]=m;
+    glh_end(c); }
+}
 static void s_glBeginQuery(GLenum target, GLuint id);
 static void s_glBindBuffer(GLenum target, GLuint buffer);
 static GLenum s_glCheckFramebufferStatus(GLenum target);
@@ -2088,6 +2152,7 @@ static void s_glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLen
 static void s_glShaderSource(GLuint shader, GLsizei count, const GLchar* const * string, const GLint * length);
 static GLboolean s_glUnmapBuffer(GLenum target);
 static void s_glWaitSync(GLsync sync, GLbitfield flags, GLuint64 timeout);
+static void s_glTransformFeedbackVaryings(GLuint program, GLsizei count, const GLchar* const * varyings, GLenum bufferMode);
 static void* glh_router_for(const char*n){
     if(!strcmp(n,"glActiveTexture")) return (void*)r_glActiveTexture;
     if(!strcmp(n,"glAttachShader")) return (void*)r_glAttachShader;
@@ -2230,4 +2295,9 @@ static void* glh_router_for(const char*n){
     if(!strcmp(n,"glValidateProgram")) return (void*)r_glValidateProgram;
     if(!strcmp(n,"glBindAttribLocation")) return (void*)r_glBindAttribLocation;
     if(!strcmp(n,"glBindFragDataLocation")) return (void*)r_glBindFragDataLocation;
+    if(!strcmp(n,"glBeginTransformFeedback")) return (void*)r_glBeginTransformFeedback;
+    if(!strcmp(n,"glEndTransformFeedback")) return (void*)r_glEndTransformFeedback;
+    if(!strcmp(n,"glCopyBufferSubData")) return (void*)r_glCopyBufferSubData;
+    if(!strcmp(n,"glBindBufferBase")) return (void*)r_glBindBufferBase;
+    if(!strcmp(n,"glTransformFeedbackVaryings")) return (void*)s_glTransformFeedbackVaryings;
     return 0; }

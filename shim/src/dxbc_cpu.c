@@ -23,7 +23,10 @@ typedef struct {
     const uint8_t* cb[16]; uint32_t cbsz[16];   // constant buffer bytes
     D3DObj* srv[32]; D3DObj* uav[8]; D3DObj* samp[16];
     const float* tpx[32]; int tw[32], th[32];   // SRV textures decoded to RGBA32F once per dispatch (lock-free in threads)
+    uint32_t* wlog; int wlogn, wlogcap, wlogovf;   // optional: u0 elements store_structured wrote (GPU particles: upload just those)
+    int trace;                                     // debug: print thread 0's every destination register (scalar interpreter)
 } CsCtx;
+static inline void cs_wlog(CsCtx*c,uint32_t e){ if(!c->wlog) return; if(c->wlogn && c->wlog[c->wlogn-1]==e) return; if(c->wlogn<c->wlogcap) c->wlog[c->wlogn++]=e; else c->wlogovf=1; }
 
 static uint32_t cs_rd_u32(const uint8_t* p, uint64_t size, uint64_t off){ uint32_t v=0; if(off+4<=size) memcpy(&v,p+off,4); return v; }
 
@@ -58,7 +61,13 @@ static CsProg* cs_compile(const uint8_t* d, size_t len){
         if(op==72||op==69||op==74||op==45) p->usestex=1;
     }
     if(p->ntemps>4096||p->xtotal>65536){ p->why="too many registers"; return p; }
+    // A 4-component immediate l(a,b,c,d) has no component selection (mask mode, empty mask), which dg_swz reads as .xxxx:
+    // its lanes are taken as they are. (Until 2026-10-17 every such immediate was broadcast from lane x -- e.g.
+    // "and r2.yz, r2.zzwz, l(0,65535,65535,0)" gave 0 -- and halo3's particle kernels unpacked their packed half-float
+    // fields to zero; found by comparing with the GPU form, PELOAD_CS_GPUCHECK. PELOAD_CS_IMMBCAST=1 = old.)
+    static int immold=-1; if(immold<0) immold=getenv("PELOAD_CS_IMMBCAST")?1:0;
     for(int i=0;i<p->nins;i++) for(int k=0;k<8;k++){ DgOp* o=&p->ins[i].ops[k]; char sw[5]; dg_swz(o,sw);
+        if(o->type==T_IMM32 && !immold){ for(int c=0;c<4;c++) o->csw[c]=(uint8_t)c; continue; }
         for(int c=0;c<4;c++) o->csw[c]=(uint8_t)(sw[c]=='x'?0:sw[c]=='y'?1:sw[c]=='z'?2:3); }
     p->ok=1; return p;
 }
@@ -265,7 +274,7 @@ static int cs_exec_thread_i(CsThread* T,long*budgetp){
         case 168: case 166: {   // store_structured u#.mask, idx, byteoff, src  |  store_raw u#.mask, byteaddr, src
             uint32_t reg=o[0].nidx?o[0].idx[0].val:0; if(reg>=8) break; D3DObj* res=cs_res(T->c->uav[reg]); if(!res||!res->data) break;
             a=U(1); uint64_t addr; CsV4 v;
-            if(op==168){ b=U(2); addr=(uint64_t)a.u[0]*p->uavstride[reg]+b.u[0]; v=U(3); } else { addr=a.u[0]; v=U(2); }
+            if(op==168){ b=U(2); addr=(uint64_t)a.u[0]*p->uavstride[reg]+b.u[0]; v=U(3); if(reg==0) cs_wlog(T->c,a.u[0]); } else { addr=a.u[0]; v=U(2); if(reg==0 && T->c->wlog) T->c->wlogovf=1; }
             int m=o[0].mask?o[0].mask:1; int j=0;
             for(int k=0;k<4;k++) if(m&(1<<k)){ uint64_t off=addr+4u*(uint64_t)j++; if(off+4<=res->size) memcpy((uint8_t*)res->data+off,&v.u[k],4); }
             } break;
@@ -285,6 +294,8 @@ static int cs_exec_thread_i(CsThread* T,long*budgetp){
             if(op==53||op==58||op>=143) break; // customdata, nop, SM5 dcls
             *budgetp=budget; return -op;       // unsupported instruction
         }
+        if(T->c->trace && T->tid[0]==0 && I->nop && o[0].type==0/*temp*/ && o[0].nidx){ uint32_t rg=o[0].idx[0].val; const CsV4*v=&T->r[rg]; char m[200];
+            int k=snprintf(m,sizeof m,"  [cs-trace] %4d op%-3d r%u = %08x %08x %08x %08x  (%g %g %g %g)\n",pc,op,rg,v->u[0],v->u[1],v->u[2],v->u[3],v->f[0],v->f[1],v->f[2],v->f[3]); (void)!write(2,m,k); }
         #undef F
         #undef U
     }
@@ -464,6 +475,7 @@ static int cs_exec_group(CsGrp* G,long* budgetp){
             uint32_t reg=o[0].nidx?o[0].idx[0].val:0; if(reg>=8) break; D3DObj* res=cs_res(G->c->uav[reg]); if(!res||!res->data) break;
             U1; if(op==168){ csg_src(G,&o[2],1,B); csg_src(G,&o[3],1,C); } else csg_src(G,&o[2],1,C);
             int wm=o[0].mask?o[0].mask:1;
+            if(reg==0 && G->c->wlog){ if(op==168){ FORL cs_wlog(G->c,A[l].u[0]); } else G->c->wlogovf=1; }
             FORL { uint64_t addr= op==168 ? (uint64_t)A[l].u[0]*p->uavstride[reg]+B[l].u[0] : A[l].u[0]; int j=0;
                 for(int k=0;k<4;k++) if(wm&(1<<k)){ uint64_t off=addr+4u*(uint64_t)j++; if(off+4<=res->size) memcpy((uint8_t*)res->data+off,&C[l].u[k],4); } }
             } break;
@@ -540,8 +552,8 @@ static long cs_dispatch(CsProg*p,CsCtx*c,uint32_t gx,uint32_t gy,uint32_t gz){
     for(int i=0;i<32;i++){ c->tpx[i]=0; c->tw[i]=c->th[i]=0; D3DObj* t=cs_res(c->srv[i]);
         if(t && t->kind>=2 && t->kind<=4 && t->w && p->usestex) c->tpx[i]=cs_tex_rgba(t,&c->tw[i],&c->th[i]); }
     static int serial=-1; if(serial<0) serial=getenv("PELOAD_CS_PARALLEL")?0:1;   // 64-thread dispatches: GCD fan-out costs more than it saves
-    J.chunks = serial||J.total<32 ? 1 : (uint32_t)(J.total/16 < 8 ? J.total/16 : 8);
-    J.scalar=cs_scalar();
+    J.chunks = serial||J.total<32||c->wlog ? 1 : (uint32_t)(J.total/16 < 8 ? J.total/16 : 8);   // (the write log is single-threaded)
+    J.scalar=cs_scalar()||c->trace;
     // PELOAD_CS_CHECK: run the per-thread interpreter first on a copy of every UAV, then the SIMT one, and compare
     static int check=-1; if(check<0) check=getenv("PELOAD_CS_CHECK")?1:0;
     D3DObj* ures[8]={0}; uint8_t* before[8]={0}; uint8_t* sref[8]={0}; int nu=0;

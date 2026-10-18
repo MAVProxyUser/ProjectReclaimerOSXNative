@@ -47,6 +47,12 @@ typedef struct { int op; const char*name; int test; int nop; DgOp ops[8]; uint32
 // dynamically indexed palettes (skinned meshes failed to link) and cost a full copy per draw. 0 = old arrays.
 static int g_dg_ubo = 1;
 static int g_dg_nodclsz = 0;
+// Compute shader -> transform-feedback vertex shader (GPU particles, peload.c cs_tf_*): set to the u0 element size in
+// dwords before dg_emit of a "cs" shader that passed cs_tf_analyze (every u0 access is this thread's own element). One
+// vertex per thread (gl_VertexID = SV_DispatchThreadID.x); the element starts as the old contents (dx_u0in, a copy of the
+// dispatched range), loads/stores go to the local copy dx_e, and the whole element leaves as interleaved flat uvec4
+// varyings dx_tf0.. (written for every thread, so elements a thread never stores come back unchanged). 0 = off.
+static int g_dg_tf_dw = 0;
 static int g_dg_nocmp = 0;     // A/B: old manual compare for sample_c   // A/B: ignore dcl_constantbuffer sizes (old max-index heuristic)
 // immediate constant buffer (dcl_immediateConstantBuffer customdata), per translated shader
 static uint32_t g_icb[4096*4]; static int g_icbn;
@@ -212,6 +218,11 @@ static const char* dg_src(const DgOp*op){
         case T_ICB:    { char ie[96]; if(op->nidx) dg_idxexpr(&op->idx[0],ie,sizeof ie); else snprintf(ie,sizeof ie,"0"); snprintf(base,sizeof base,"dx_icb[%s]",ie); } break;
         case T_CONST:  snprintf(base,sizeof base,"r%u",dg_ix(op,0)); break;
         case T_INPUT_GSV: case 11: snprintf(base,sizeof base,"gl_FragCoord"); break;
+        // compute thread ids (transform-feedback mode: one vertex per thread, numthreads(N,1,1), Dispatch(n,1,1))
+        case 32: snprintf(base,sizeof base,"intBitsToFloat(ivec4(gl_VertexID,0,0,0))"); break;                 // vThreadID
+        case 33: snprintf(base,sizeof base,"intBitsToFloat(ivec4(gl_VertexID/dx_tgx,0,0,0))"); break;          // vThreadGroupID
+        case 34: snprintf(base,sizeof base,"intBitsToFloat(ivec4(gl_VertexID%%dx_tgx,0,0,0))"); break;         // vThreadIDInGroup
+        case 35: snprintf(base,sizeof base,"intBitsToFloat(ivec4(gl_VertexID%%dx_tgx))"); break;               // vThreadIDInGroupFlattened
         default: snprintf(base,sizeof base,"vec4(0.0)"); break;
     }
     char s[5]; dg_swz(op,s);
@@ -375,7 +386,15 @@ char* dg_emit(const char*stage,const DgSig*isgn,int ni,const DgSig*osgn,int no,D
         for(int v=0;v<nv;v++){ char f[4][48]; for(int c=0;c<4;c++) dg_fmtf(g_icb[v*4+c],f[c],sizeof f[c]);
             bl+=snprintf(b+bl,cap-bl,"%svec4(%s,%s,%s,%s)",v?",":"",f[0],f[1],f[2],f[3]); }
         snprintf(b+bl,cap-bl,");"); dg_lpush(&L,b); }
-    dg_lprintf(&L,"void main(){");
+    int tfdw = (!strcmp(stage,"cs") && g_dg_tf_dw>0 && g_dg_tf_dw<=64) ? g_dg_tf_dw : 0;
+    if(tfdw){ int tgx=1; for(int x=0;x<nins;x++) if(ins[x].op==155) tgx=(int)ins[x].raw[0];
+        dg_lprintf(&L,"const int dx_tgx=%d;",tgx>0?tgx:1);
+        dg_lprintf(&L,"uniform usamplerBuffer dx_u0in;");
+        dg_lprintf(&L,"uint dx_e[%d];",tfdw);
+        dg_lprintf(&L,"uint dx_eg(int i){ return (i>=0 && i<%d) ? dx_e[i] : 0u; }",tfdw);
+        dg_lprintf(&L,"void dx_es(int i,uint v){ if(i>=0 && i<%d) dx_e[i]=v; }",tfdw);
+        for(int k=0;k<(tfdw+3)/4;k++){ int n=tfdw-4*k; if(n>4) n=4; dg_lprintf(&L,"flat out %s dx_tf%d;",n==1?"uint":n==2?"uvec2":n==3?"uvec3":"uvec4",k); } }
+    dg_lprintf(&L,tfdw?"void main_body(){":"void main(){");
     for(int i=0;i<ntemps;i++) dg_lprintf(&L,"  vec4 r%d=vec4(0.0);",i);
     for(int x=0;x<nins;x++) if(ins[x].op==105){ unsigned xr=ins[x].raw[0], xn=ins[x].raw[1]; if(xn>0 && xn<=4096) dg_lprintf(&L,"  vec4 x%u[%u];",xr,xn); }
 
@@ -455,6 +474,15 @@ char* dg_emit(const char*stage,const DgSig*isgn,int ni,const DgSig*osgn,int no,D
             else snprintf(t,256,"(%s).%s",sz,RSW(2));
             line=dg_asg(&ctx,&o[0],t); }
         else if(!strcmp(n,"mov")) line=dg_asg(&ctx,&o[0],S(1));
+        else if(tfdw && ins[x].op==167 && nopn>=4 && o[3].type==30){   // own u0 element: the local copy
+            char sw[5]; dg_swz(&o[3],sw); char e[512];
+            snprintf(e,512,"uintBitsToFloat(uvec4(dx_eg(%s.x>>2),dx_eg((%s.x>>2)+1),dx_eg((%s.x>>2)+2),dx_eg((%s.x>>2)+3))).%s",SI(2),SI(2),SI(2),SI(2),sw);
+            line=dg_asg(&ctx,&o[0],e); }
+        else if(tfdw && ins[x].op==168 && nopn>=4 && o[0].type==30){   // store_structured u0.mask, idx(own), byteoff, value
+            char e[768]; int m=o[0].mask?o[0].mask:1, j=0, k2=0; char off[256]; snprintf(off,256,"%s",SI(2));
+            k2+=snprintf(e+k2,sizeof e-k2,"  { uvec4 _v=floatBitsToUint(%s); int _b=%s.x>>2;",S(3),off);
+            for(int c=0;c<4;c++) if(m&(1<<c)){ k2+=snprintf(e+k2,sizeof e-k2," dx_es(_b+%d,_v.%c);",j,COMP[c]); j++; }
+            snprintf(e+k2,sizeof e-k2," }"); line=strdup(e); }
         else if((ins[x].op==167||ins[x].op==165) && nopn>=3){   // ld_structured dst, idx, byteoff, t# | ld_raw dst, byteaddr, t#
             int ri=ins[x].op==167?3:2; unsigned tr=(ri<nopn&&o[ri].nidx)?o[ri].idx[0].val:0; char sw[5]; if(ri<nopn) dg_swz(&o[ri],sw); else strcpy(sw,"xyzw");
             char a1[256]; snprintf(a1,256,"%s",SI(1)); char e[512];
@@ -583,6 +611,15 @@ char* dg_emit(const char*stage,const DgSig*isgn,int ni,const DgSig*osgn,int no,D
         dg_lpush(&L,s); }
     if(isvs) dg_lprintf(&L,"  dx_posfix();");
     dg_lprintf(&L,"}");
+    if(tfdw){ dg_lprintf(&L,"void main(){");
+        dg_lprintf(&L,"  for(int k=0;k<%d;k++) dx_e[k]=texelFetch(dx_u0in,gl_VertexID*%d+k).x;",tfdw,tfdw);
+        dg_lprintf(&L,"  main_body();");
+        for(int k=0;k<(tfdw+3)/4;k++){ int n=tfdw-4*k; if(n>4) n=4; char e[160]; int q=0;
+            q+=snprintf(e+q,sizeof e-q,"  dx_tf%d=%s(",k,n==1?"uint":n==2?"uvec2":n==3?"uvec3":"uvec4");
+            for(int c=0;c<n;c++) q+=snprintf(e+q,sizeof e-q,"%sdx_e[%d]",c?",":"",4*k+c);
+            snprintf(e+q,sizeof e-q,");"); dg_lprintf(&L,"%s",e); }
+        dg_lprintf(&L,"  gl_Position=vec4(0.0);");
+        dg_lprintf(&L,"}"); }
     char*out=dg_join(&L);
     for(int i=0;i<L.n;i++) free(L.v[i]); free(L.v);
     return out;
@@ -619,6 +656,7 @@ char* dg_translate(const uint8_t*d,size_t len){
 int main(int argc,char**argv){
     if(argc<2){ fprintf(stderr,"usage: %s <shader.dxbc>\n",argv[0]); return 2; }
     FILE*f=fopen(argv[1],"rb"); if(!f){ perror("open"); return 1; }
+    if(getenv("DG_TF_DW")) g_dg_tf_dw=atoi(getenv("DG_TF_DW"));   // test the transform-feedback form of a compute shader
     fseek(f,0,SEEK_END); long n=ftell(f); fseek(f,0,SEEK_SET);
     uint8_t*d=malloc(n); if(fread(d,1,n,f)!=(size_t)n){ return 1; } fclose(f);
     char*g=dg_translate(d,n);

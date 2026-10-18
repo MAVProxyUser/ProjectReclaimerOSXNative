@@ -225,7 +225,11 @@ server makes a missing maptop picture in the background the first time a map is 
 re-tools/h3bsp.py; PELOAD_MAPTOP_TOOL, PELOAD_NO_MAPTOP); maptop.sh also covers Workshop maps (and takes map files as arguments:
 workshop-helper.sh runs it on a finished DepotDownloader item); h3bsp.py reads editing-kit (H3EK) maps,
 whose play tag is empty: the layout tables are in the zone tag (+0x1C ext, +0x34 pages, +0x58 segments) and page offsets are file offsets.
-Unfocused/hidden clients are held at 60 fps by the engine; PELOAD_MAX_FPS caps lower (default 30 when hidden).
+Focus and fps (2026-10-17): the engine never sees the Mac window's focus -- the loader always reports its game window as the
+foreground/active window -- so there is no unfocused 60 fps cap; the "60 fps (screen max; engine N)" title only labels the screen
+rate. Hidden vs shown measured in ONE match (PELOAD_AB=hidewin:30, orderOut/orderFrontRegardless, never activates): ~100 vs ~100
+fps. Compare runs only inside one match: two runs of the same local server differed 110 vs 142 by spawn/scene alone.
+PELOAD_MAX_FPS caps a client (default 30 when PELOAD_HIDE_WINDOW).
 Betrayal popup (backlog 15): halo3's native GUI screen c_gui_screen_boot_betrayer, posted by halo3+0xff5fc when
 halo3+0xfcc20 is true (player dead: +0x28 unit NONE; betrayer handle at player +0x1F0; variant betrayal booting on).
 `PELOAD_TEST_BOOT_PROMPT=1|<local player name>` names a betrayer whenever the local player is dead (test hook).
@@ -262,6 +266,13 @@ minimizes, QR_HIDE=1 = no window for log-only runs). The old "minimized client s
 mutex bug (55811fa), not minimizing. Process matches must be anchored (`pgrep -f '^[^ ]*build/peload'`):
 an unanchored pattern also matches shells whose command text mentions build/peload.
 
+GPU particles (2026-10-17, OFF, PELOAD_CS_GPU=1; PERF-PLAN "GPU particle compute"): own-element kernels as transform-feedback
+vertex shaders (cstf_* in peload.c, dxbc2glsl g_dg_tf_dw), spawn kernels on the CPU with a write log; correct
+(PELOAD_CS_GPUCHECK=<n>) but slower on Apple's GL. Apple GL-on-Metal: no glCopyBufferSubData (silently nothing), no ordering of a
+TF write before a read in the same render pass (own FBO needed), draws need a complete FBO even with RASTERIZER_DISCARD.
+PELOAD_AB=csgpu|hidewin:<secs> A/B them. CPU interpreter: 4-component immediates were broadcast from lane x until 2026-10-17
+(PELOAD_CS_IMMBCAST=1 = old). Stats page: play.sh / quiet-run open it in the browser unless a tab reconnects within 5 s
+(PELOAD_STATS_OPEN, _WAIT; an open tab reloads itself for a new game via the snapshot's "inst").
 Faults on loader threads (2026-10-17, backlog 19): only threads with a TEB (main + CreateThread, __thread g_guest_thr) hand a
 hardware fault to the game's exception handlers; a loader thread's fault is reported as "[CRASH] fault on loader thread '<name>'"
 with the loader function (dladdr). Before, the game's handler (Rust) ran there and faulted on gs:[0x58]=0 (exe+0x1d6455d,
