@@ -156,6 +156,11 @@ IAudioCaptureClient); with a mic the client's voice chat starts once instead of 
 (the caulk crash trigger). PELOAD_MIC=0 a SILENT mic (also the fallback when the real one can't open), =none no device (the
 crash-prone old 0), =tone a test tone (quiet-run uses 0 unless QR_MIC=tone; target.sh 0),
 PELOAD_MIC_MUTED=1; stats do=mic&on=. The client sends voice only with its talk key (Hold/Toggle to talk).
+Clip recording (2026-10-18, backlog 42; shim/docs/recording.md): stats page Record row (do=rec&secs=&mode=av|audio, do=recstop,
+GET /recordings.json + /recordings/<file>, snapshot "rec") -> ~/Movies/Reclaimer/<map>_<time>.mp4 (H.264 + AAC) or .m4a. shim/src/rec.m
+(ObjC, MRR, built beside peload.c; rec.h): the present paths' REC_FRAME() blits the window back buffer's picture rect into
+CVOpenGLTextureCache/IOSurface pixel buffers -> AVAssetWriter (hardware H.264, no B-frames: they broke fragmented finishes); xa_aq_cb /
+wa_aq_cb tap rec_audio_push into a 48 kHz timeline ring. Off = g_rec_video / g_rec_audio flag tests. Offline test: shim/tools/rec-test.sh.
 Stats page (2026-10-17, backlog 29-31): Kills (st_kill_at counts every kill event per match by name; betrayals/suicides
 excluded) + K/D beside Deaths; every column sortable (team sort / full sort, remembered in localStorage); the map opens in the
 whole window (click it or "full window"; X / Esc closes; the canvas is resized and redrawn); a "vehicles" map layer; overlay

@@ -100,6 +100,7 @@ static char* peload_cgetenv(const char*name){
 #include <libkern/OSCacheControl.h>
 #include <mach-o/getsect.h>
 #include <mach-o/dyld.h>
+#include "rec.h"   // clip recording (rec.m, compiled beside this file): the present paths' and audio callbacks' hooks
 
 // ---- SEH register capture/restore (CONTEXT at rcx; Win64/ms_abi) ------------
 // seh_capture fills a CONTEXT from the caller's registers (Rip = return address,
@@ -6953,6 +6954,7 @@ static void d3dgl_blit_fullscreen_i(unsigned vao){
     G.BindVertexArray(vao); G.DrawArrays(4,0,3);
     lay_draw();          // the client's layered windows (loading screen / menus while the game is not presenting)
     hb_draw_overlay();   // PELOAD_HITBOXES (hitbox.c): object bounding volumes over the frame
+    if(g_rec_video) rec_video_frame(0,0,0,g_d3dgl_W,g_d3dgl_H);   // clip recording (rec.m): off = this flag test
     // PELOAD_D3DGL_SHOTWIN=<n>: capture the WINDOW framebuffer (FB 0) right after the blit = EXACTLY what the
     // user sees (not the G-buffer RT dumps, which are a different, often-black buffer). Every n blits.
     if(getenv("PELOAD_D3DGL_SHOTWIN")){ static unsigned long bc; int every=atoi(getenv("PELOAD_D3DGL_SHOTWIN")); if(every<1)every=20;
@@ -7011,6 +7013,12 @@ static void pq_shotwin(unsigned long frameno){
                 static int wn; const char*home=getenv("HOME"); char p[512]; snprintf(p,sizeof p,"%s/reclaimer_win_%d_%03d_f%lu%s.bmp",home?home:"/tmp",(int)getpid(),wn++,frameno, getenv("PELOAD_D3DGL_ALT5")?((((long)(mono_s()/5.0))&1)?"_B":"_A"):"");
                 bmp_write_rgba(p,w,h,cap); free(cap); } } }
 }
+// clip recording (rec.m; shim/docs/recording.md): the game picture's rect in the window, letterboxed as the two present
+// paths below draw it; REC_FRAME copies it (with the layered windows and the overlay) into the recording. Off = the flag test.
+static void rec_pic_rect(int r[4]){ int dw=g_win_pw>0?g_win_pw:g_d3dgl_W, dh=g_win_ph>0?g_win_ph:g_d3dgl_H;
+    double ar=(double)g_d3dgl_W/g_d3dgl_H; int vw=dw, vh=(int)(dw/ar+0.5); if(vh>dh){ vh=dh; vw=(int)(dh*ar+0.5); }
+    r[0]=(dw-vw)/2; r[1]=(dh-vh)/2; r[2]=vw; r[3]=vh; }
+#define REC_FRAME() do{ if(g_rec_video){ int rr_[4]; rec_pic_rect(rr_); rec_video_frame(0,rr_[0],rr_[1],rr_[2],rr_[3]); } }while(0)
 static unsigned g_pq_prog, g_pq_vao; static int g_pq_sloc=-1;
 // native GL helper: the frame is an IOSurface the helper rendered (rectangle texture in this, the window's, context)
 static unsigned g_pq_rprog; static int g_pq_rsloc=-1, g_pq_rzloc=-1; static unsigned long g_glh_pq_seen;
@@ -7032,7 +7040,7 @@ static int pq_present_wait_glh(unsigned long*seen,int ms){
     if(g_pq_rsloc>=0) G.ProgramUniform1i(g_pq_rprog,g_pq_rsloc,0);
     if(g_pq_rzloc>=0){ float sz[4]={(float)tw,(float)th,0,0}; static void(*pu2)(unsigned,int,int,const float*); if(!pu2) pu2=dlsym(RTLD_DEFAULT,"glProgramUniform2fv"); if(pu2) pu2(g_pq_rprog,g_pq_rzloc,1,sz); }
     G.BindVertexArray(g_pq_vao); G.DrawArrays(4,0,3);
-    lay_draw(); hb_draw_overlay();
+    lay_draw(); hb_draw_overlay(); REC_FRAME();
     G.Flush(); if(pc) CGLUnlockContext(pc);
     glh_pq_release();
     pq_shotwin((unsigned long)g_glh->pq_frameno[slot]);   // PELOAD_D3DGL_SHOTWIN window captures, as in-process
@@ -7064,6 +7072,7 @@ static int pq_present_wait(unsigned long*seen,int ms){
     G.BindVertexArray(g_pq_vao); G.DrawArrays(4,0,3);
     lay_draw();          // the client's layered windows (loading screen / menus while the game is not presenting)
     hb_draw_overlay();   // PELOAD_HITBOXES (hitbox.c): object bounding volumes over the frame
+    REC_FRAME();         // clip recording (rec.m)
     G.Flush(); if(pc) CGLUnlockContext(pc);
     pthread_mutex_lock(&g_pq_mx); g_pq_reading=-1; pthread_mutex_unlock(&g_pq_mx);
     pq_shotwin(g_pq_frameno[slot]);

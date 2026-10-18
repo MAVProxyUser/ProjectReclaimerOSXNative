@@ -44,6 +44,14 @@ th .srt{display:inline-block;margin-left:2px;padding:0 2px;cursor:pointer;color:
 #ov button:hover{border-color:#555}#ov button.on{background:#1d3a55;border-color:var(--accent);color:#fff}
 #ov button:disabled{opacity:.4;cursor:default}#ov kbd{color:var(--dim);font-size:11px;margin-left:4px}
 #ovmsg{color:var(--dim);font-size:12px}
+#rec{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:-4px 0 12px}#rec .lbl{color:var(--dim);margin-right:4px}
+#rec input,#rec select{background:#222;color:var(--fg);border:1px solid var(--line);border-radius:4px;padding:3px 6px;font:inherit}#rec input{width:64px}
+#rec button{background:#222;color:var(--fg);border:1px solid var(--line);border-radius:4px;padding:4px 10px;font:inherit;cursor:pointer}
+#rec button:hover{border-color:#555}#rec button:disabled{opacity:.4;cursor:default}#recb:not(:disabled){border-color:#a33;color:#fdd}
+#recind{color:#ff4b4b;font-weight:700;font-variant-numeric:tabular-nums}#recind.on::before{content:'';display:inline-block;width:9px;height:9px;border-radius:50%;background:#ff3030;margin-right:6px;animation:recblink 1s steps(2,start) infinite}
+@keyframes recblink{to{visibility:hidden}}
+#recl{flex-basis:100%;color:var(--dim)}#recl summary{cursor:pointer;font-size:12px}
+#recls{max-height:160px;overflow-y:auto;margin-top:4px;font-size:12px}#recls div{padding:1px 0}#recls a{color:var(--accent);text-decoration:none}#recls a:hover{text-decoration:underline}
 #rules{margin-bottom:16px}
 #rules .cols{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:10px 16px}
 #rules h3{font-size:12px;margin:0 0 4px;color:var(--accent);font-weight:600}
@@ -111,6 +119,12 @@ th .srt{display:inline-block;margin-left:2px;padding:0 2px;cursor:pointer;color:
   <select id="spd"><option value="0">variant</option><option value="1">25%</option><option value="2">50%</option><option value="3">75%</option><option value="4">90%</option><option value="5">100%</option><option value="6">110%</option><option value="7">125%</option><option value="8">150%</option><option value="9">200%</option><option value="10">300%</option></select></label>
  <button data-a="spar" title="Sparring partner: this client turns its view toward the nearest enemy's head (aim only: it never moves or fires). Meant for the second player (shim/target.sh) in local practice games.">Sparring aim</button><span id="spr" class="lbl"></span>
  <span id="ovmsg"></span></div>
+<div id="rec"><span class="lbl">Record</span>
+ <label class="lbl" title="The clip's length: it stops by itself (1 to 600 seconds)"><input id="recs" type="number" min="1" max="600" step="1" value="30"> s</label>
+ <select id="recm" title="Video + audio: what the game window shows (overlay included) with the game's sound, as .mp4 (H.264 + AAC, up to 1920x1080 at 60 fps). Audio only: the sound as .m4a (AAC)."><option value="av">Video + audio</option><option value="audio">Audio only</option></select>
+ <button id="recb" title="Start recording into ~/Movies/Reclaimer on this Mac">Record</button><button id="recx" title="Stop now and keep what was recorded">Stop</button>
+ <span id="recind"></span><span id="recmsg" class="lbl"></span>
+ <details id="recl"><summary>Recordings in ~/Movies/Reclaimer</summary><div id="recls">none yet</div></details></div>
 <div id="conn" class="panel"><div id="ch"><h2 id="ct">Connected</h2>
  <button class="mb" id="muteall">Mute all</button><button class="mb" id="unmuteall">Unmute all</button></div><div id="cl" class="note">-</div>
  <div class="note">Everyone in the game's network session, the lobby included. Mute only affects what you hear (the same
@@ -455,6 +469,33 @@ document.getElementById('ov').addEventListener('click',async e=>{ const b=e.targ
   try{ const r=await fetch('/control?do='+b.dataset.a+extra,{method:'POST',headers:{'X-Reclaimer-Control':'1'}}); const j=await r.json();
     msg.textContent=j.ok?(b.dataset.a==='capture'?'captured: ~/reclaimer_cap_*.bmp/.txt':''):(j.error||'failed'); }
   catch(err){ msg.textContent='not connected'; } });
+// ---- clip recording (rec.m): POST do=rec&secs=&mode=av|audio / do=recstop, the snapshot's "rec", GET /recordings.json ----
+const recE=id=>document.getElementById(id); let recState='';
+try{ const v=localStorage.getItem('recSecs'), m=localStorage.getItem('recMode'); if(v) recE('recs').value=v; if(m) recE('recm').value=m; }catch(err){}
+const mmss=s=>{s=Math.max(0,Math.floor(s||0)); return Math.floor(s/60)+':'+String(s%60).padStart(2,'0')};
+const fsize=b=>b>=1048576?(b/1048576).toFixed(1)+' MB':Math.max(1,Math.round(b/1024))+' KB';
+async function recPost(q){ try{ return await (await fetch('/control?do='+q,{method:'POST',headers:{'X-Reclaimer-Control':'1'}})).json(); }catch(err){ return {ok:false,error:'not connected'}; } }
+recE('recb').addEventListener('click',async()=>{ const s=Math.max(1,Math.min(600,Math.round(+recE('recs').value)||30)), m=recE('recm').value; recE('recs').value=s;
+  try{ localStorage.setItem('recSecs',s); localStorage.setItem('recMode',m); }catch(err){}
+  recE('recmsg').textContent='starting...'; const j=await recPost(`rec&secs=${s}&mode=${m}`);
+  recE('recmsg').textContent=j.ok?'':(j.error==='unknown or disabled action'?'refused':j.error||'refused'); });   // the reason follows with the next snapshot (rec.last_error)
+recE('recx').addEventListener('click',()=>recPost('recstop'));
+async function recList(){ try{ const l=await (await fetch('/recordings.json')).json(), el=recE('recls');
+    recE('recl').querySelector('summary').textContent=`Recordings in ~/Movies/Reclaimer (${l.length})`;
+    el.innerHTML=l.length?l.map(r=>{ const u='/recordings/'+encodeURIComponent(r.file);
+      return `<div><a href="${u}" download>${E(r.file)}</a> <span>${mmss(r.duration)} · ${fsize(r.size)} · ${new Date(r.time*1000).toLocaleString()}</span> <a href="${u}" target="_blank" title="Play in a new tab">play</a></div>`; }).join(''):'none yet'; }catch(err){} }
+recE('recl').addEventListener('toggle',()=>{ if(recE('recl').open) recList(); });
+function renderRec(){ const r=snap&&snap.rec; if(!r) return; const busy=r.state!=='idle', ctl=!!(snap.overlay&&snap.overlay.controls);
+  const av=recE('recm').querySelector('option[value="av"]'); av.disabled=!r.video_ok; if(!r.video_ok && recE('recm').value==='av') recE('recm').value='audio';
+  av.title=r.video_ok?'':'no game window to record (PELOAD_HIDE_WINDOW)';
+  recE('recb').disabled=busy||!ctl; recE('recx').disabled=r.state!=='recording'||!ctl; recE('recs').disabled=recE('recm').disabled=busy;
+  const ind=recE('recind'); ind.classList.toggle('on',r.state==='recording');
+  ind.textContent=r.state==='recording'?`REC ${mmss(r.elapsed)} / ${mmss(r.secs)}`:r.state==='finishing'?'saving...':'';
+  ind.title=r.state==='recording'?`${r.file}${r.mode==='av'?` (${r.width}x${r.height}, ${r.frames} frames${r.dropped?', '+r.dropped+' dropped':''})`:''}`:'';
+  if(r.state!==recState){ if(recState && !busy){ recList(); recE('recmsg').textContent=r.last_error?'failed: '+r.last_error:r.last_file?'saved '+r.last_file:''; }
+    else if(busy) recE('recmsg').textContent=''; recState=r.state; }
+  if(!busy && r.last_error && recE('recmsg').textContent.startsWith('refused')) recE('recmsg').textContent='refused: '+r.last_error; }
+recList();
 // ---- event feed: /feed.json?since=<seq> whenever the snapshot's feed_seq moves ----
 const MAPN={armory:"Rat's Nest",bunkerworld:'Standoff',chill:'Narrows',chillout:'Cold Storage',construct:'Construct',cyberdyne:'The Pit',
  deadlock:'High Ground',descent:'Assembly',docks:'Longshore',fortress:'Citadel',ghosttown:'Ghost Town',guardian:'Guardian',isolation:'Isolation',
@@ -514,7 +555,7 @@ es.onmessage=m=>{snap=JSON.parse(m.data);
   if(snap.inst!==undefined){ if(gameInst===null) gameInst=snap.inst; else if(snap.inst!==gameInst){ location.reload(); return; } }
   if(snap.feed_seq!==undefined && snap.feed_seq!==feedSeq) pollFeed();
   document.getElementById('hd').textContent=`${snap.map||'-'}  |  ${snap.in_match?'match time '+fmtT(snap.time):'not in a match'}  |  ${snap.players.length} players, ${snap.vehicles.length} vehicles, ${snap.projectiles.length} projectiles in flight`;
-  renderTable(); renderDet(); renderOverlay(); renderRules(); renderConn(); drawMap()};
+  renderTable(); renderDet(); renderOverlay(); renderRules(); renderConn(); renderRec(); drawMap()};
 // no game serving this port (it ended, or a test client is between runs): keep the last data but grey it out and say so;
 // EventSource keeps retrying, and the first snapshot of a new game reloads the page (inst)
 let lastSnapAt=0;
