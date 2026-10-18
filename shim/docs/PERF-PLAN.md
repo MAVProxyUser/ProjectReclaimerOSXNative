@@ -358,6 +358,21 @@ The Mac this runs on has 36 GB; in a 100-player Workshop game the worker sat at 
   upload so its pages can be evicted. Render-target copies (0.4 GB resident) are dead weight but sampled-before-render and the
   small GPU->CPU readbacks into them need care.
 
+#### Map-change memory (2026-10-18)
+
+A local map-change server (`DED_CONFIG=mapchange.toml bash shim/dedicated.sh`, three 1-minute games) and one client,
+`[d3dobj]` audit + the worker's footprint every minute, ~20 loads:
+- **Guest threads:** ~34 start and return per map load. They were joinable and never joined (each kept its stack) and their
+  TEB / TLS array / TLS blocks were never freed, the arrays piling up in a 1024-entry table that filled after ~25 loads.
+  Now detached and reaped 30 s after they return: 23 live guest threads throughout.
+- **Capture streams (wasapi.c):** the client opens a microphone stream per map load and drops the old one holding a reference;
+  each kept its tone thread (or, with the real microphone, a live input queue): 18 `shim-mic-tone` threads after 18 loads.
+  Now closed when idle like the playback streams: 13 closed in 7 minutes, one tone thread, the process at 56-57 threads.
+- **What still grows:** the worker's footprint went 6.2 -> 9.8 GB over 6 loads. Most is not a leak: texture CPU copies
+  follow the map (3.6-4.7 GB), and the rest is halo3's fixed 4.37 GB VirtualAlloc reservation being touched (bounded).
+  The heap outside D3D objects grows ~50 MB a load (720 -> 1,038 MB over ~6 loads; earlier measurement: +60 MB) -- the client's
+  or halo3's own allocations, not found yet (a per-caller live-heap tracker in HeapAlloc would name it).
+
 #### GPU particle compute (2026-10-17, experimental, OFF: PELOAD_CS_GPU=1)
 
 macOS GL stops at 4.1 (Apple's own driver, not MCC: MCC is D3D11 only): no compute shaders, so halo3's 7 particle kernels

@@ -401,6 +401,9 @@ render endpoint (IMMDeviceEnumerator/IMMDevice/IMMEndpoint/IPropertyStore/IAudio
 with one AudioQueue per stream; no capture device. `PELOAD_NO_WASAPI` = old no-device stub, `PELOAD_TRACE_WASAPI` logs
 (incl. per-interface AddRef/Release). Without a mic the voice system retries every ~5 s and leaves each playback stream
 with 1 reference: once only that is left (svc refs 0) the AudioQueue is closed (PELOAD_WASAPI_KEEP_IDLE = keep).
+Capture streams the same since 2026-10-18 (wa_cap_idle): the client opens a new one with every map load and dropped the
+old one holding a reference, so their tone threads (silent / tone mic) or live input queues (real mic) piled up -- 18
+shim-mic-tone threads after 18 loads; reopened if the client starts one again.
 Sparring partner (2026-10-17): `TARGET_ENV="PELOAD_SPAR=1" TARGET_STATS_HTTP=8766 bash shim/target.sh` -- hitbox.c hb_spar_tick
 (every Present) picks the nearest live enemy, XInputGetState pad 0 reports only a right stick toward its head (aim only);
 stats page "Sparring aim" toggle (do=spar&on=). hb_collect has a units-only mode for it (the overlay switches otherwise
