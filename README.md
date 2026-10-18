@@ -45,6 +45,8 @@ Known gaps:
   code paths it patches by byte signature, so other builds usually work too; v0.9.13 is also tested.
   Servers and players are almost all on the newest release.
 - About 25 GB of disk space for the MCC files.
+- Memory (measured 2026-10-18 on a 36 GB Mac): stock maps take the loader 6-9 GB and the GL helper ~1.5 GB; a 100-player
+  Workshop map such as Hugegrass about 9-11 GB and 3-5 GB.
 
 No game files are included in this repository or its releases.
 
