@@ -125,7 +125,7 @@ static void nav_ensure(void){
     char*argv[]={(char*)"/usr/bin/arch",(char*)"-arm64",(char*)"python3",tool,mp,path,(char*)"--quiet",0}; extern char**environ;
     posix_spawn_file_actions_t fa; posix_spawn_file_actions_init(&fa); posix_spawn_file_actions_addopen(&fa,0,"/dev/null",O_RDONLY,0);
     posix_spawn_file_actions_addopen(&fa,1,lg,O_WRONLY|O_CREAT|O_TRUNC,0644); posix_spawn_file_actions_adddup2(&fa,1,2);
-    posix_spawnattr_t at; posix_spawnattr_init(&at); posix_spawnattr_setflags(&at,POSIX_SPAWN_SETPGROUP); posix_spawnattr_setpgroup(&at,0);
+    posix_spawnattr_t at; posix_spawnattr_init(&at); posix_spawnattr_setflags(&at,POSIX_SPAWN_SETPGROUP|POSIX_SPAWN_CLOEXEC_DEFAULT); posix_spawnattr_setpgroup(&at,0);   // only its stdio
     pid_t pid=0; int r=posix_spawn(&pid,"/usr/bin/arch",&fa,&at,argv,environ); posix_spawn_file_actions_destroy(&fa); posix_spawnattr_destroy(&at);
     if(r){ g_nav.failed=2; return; }
     { char m[1300]; int k=snprintf(m,sizeof m,"  [nav] making the walking graph for %s (%s)\n",name,mp); (void)!write(2,m,k); }

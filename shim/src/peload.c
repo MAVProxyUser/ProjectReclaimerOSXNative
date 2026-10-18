@@ -3035,7 +3035,8 @@ static int MSABI i_CreateProcessW(const uint16_t*app,uint16_t*cmd,void*pa,void*t
         snprintf(script,sizeof script,"%s/../tools/workshop-helper.sh",self);
         posix_spawn_file_actions_t wfa; posix_spawn_file_actions_init(&wfa);
         for(int k=0;k<2;k++) if(cfd[k]>=0) posix_spawn_file_actions_adddup2(&wfa,cfd[k],k);   // stdin/stdout: the client's pipes; stderr: our log
-        posix_spawnattr_t at; posix_spawnattr_init(&at); posix_spawnattr_setflags(&at,POSIX_SPAWN_SETPGROUP); posix_spawnattr_setpgroup(&at,0);
+        posix_spawn_file_actions_addinherit_np(&wfa,2);
+        posix_spawnattr_t at; posix_spawnattr_init(&at); posix_spawnattr_setflags(&at,POSIX_SPAWN_SETPGROUP|POSIX_SPAWN_CLOEXEC_DEFAULT); posix_spawnattr_setpgroup(&at,0);   // nothing else inherited
         char*wav[8]; int wi=0; if(id && root[0] && rootu[0]){ wav[wi++]="/bin/bash"; wav[wi++]=script; wav[wi++]=(char*)id; wav[wi++]=root; wav[wi++]=rootu; } else wav[wi++]="/usr/bin/true"; wav[wi]=0;
         pid_t wpid=0; int wrc=posix_spawn(&wpid,wav[0],&wfa,&at,wav,environ); posix_spawn_file_actions_destroy(&wfa); posix_spawnattr_destroy(&at);
         { char m[1400]; int k=snprintf(m,sizeof m,"  [workshop] item %s: DepotDownloader helper %s (pid %d) -> %s\n",id?id:"-",wrc?"failed":"started",(int)wpid,rootu[0]?rootu:"-"); (void)!write(2,m,k); }

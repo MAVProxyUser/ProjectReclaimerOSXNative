@@ -414,7 +414,7 @@ static void st_maptop_ensure(const char*mp,const char*name){
     char*argv[]={(char*)"/usr/bin/arch",(char*)"-arm64",(char*)"python3",tool,(char*)mp,png,(char*)"--size",(char*)"1024",0}; extern char**environ;
     posix_spawn_file_actions_t fa; posix_spawn_file_actions_init(&fa); posix_spawn_file_actions_addopen(&fa,0,"/dev/null",O_RDONLY,0);
     posix_spawn_file_actions_addopen(&fa,1,lg,O_WRONLY|O_CREAT|O_TRUNC,0644); posix_spawn_file_actions_adddup2(&fa,1,2);
-    posix_spawnattr_t at; posix_spawnattr_init(&at); posix_spawnattr_setflags(&at,POSIX_SPAWN_SETPGROUP); posix_spawnattr_setpgroup(&at,0);
+    posix_spawnattr_t at; posix_spawnattr_init(&at); posix_spawnattr_setflags(&at,POSIX_SPAWN_SETPGROUP|POSIX_SPAWN_CLOEXEC_DEFAULT); posix_spawnattr_setpgroup(&at,0);   // only its stdio
     pid_t pid=0; int r=posix_spawn(&pid,"/usr/bin/arch",&fa,&at,argv,environ); posix_spawn_file_actions_destroy(&fa); posix_spawnattr_destroy(&at);
     if(r){ g_mt_state=3; return; }
     g_mt_state=2; { char m[1200]; int k=snprintf(m,sizeof m,"  [stats] making the map picture for %s (%s)\n",name,mp); (void)!write(2,m,k); }
@@ -897,23 +897,30 @@ static void* st_open_thread(void*a){ (void)a; pthread_setname_np("shim-stats-ope
     char*argv[]={"/usr/bin/open",url,0}; pid_t pid; extern char**environ;
     if(posix_spawn(&pid,"/usr/bin/open",0,0,argv,environ)==0){ int st; waitpid(pid,&st,0); char m[200]; int k=snprintf(m,sizeof m,"  [stats] opened %s in the browser\n",url); (void)!write(2,m,k); }
     return 0; }
+// One listening socket, close-on-exec: children (map picture / walking graph generators, the Workshop helper) used to
+// inherit it, and one still running after its game was killed kept 8765 bound -- the next launch had no stats page
+// (2026-10-18). The port: PELOAD_STATS_HTTP (8765), retried every second; after 10 s also the first free one of the next
+// 10 (logged), still preferring the configured one only at startup.
+static int st_bind(int port,const char*ad){ int ls=socket(AF_INET,SOCK_STREAM,0); if(ls<0) return -1; int one=1; setsockopt(ls,SOL_SOCKET,SO_REUSEADDR,&one,sizeof one);
+    fcntl(ls,F_SETFD,FD_CLOEXEC); struct sockaddr_in sa; memset(&sa,0,sizeof sa); sa.sin_family=AF_INET; sa.sin_port=htons((uint16_t)port); sa.sin_addr.s_addr=inet_addr(ad);
+    if(bind(ls,(struct sockaddr*)&sa,sizeof sa) || listen(ls,16)){ int e=errno; close(ls); errno=e; return -1; } return ls; }
 static void* st_listen_thread(void*a){ (void)a; pthread_setname_np("shim-stats-listen");
     // only the process that runs the engine serves (the client's launcher process inherits the variable too)
     while(!hb_halo3_base()) usleep(500000);
-    int ls=socket(AF_INET,SOCK_STREAM,0); int one=1; setsockopt(ls,SOL_SOCKET,SO_REUSEADDR,&one,sizeof one);
-    struct sockaddr_in sa; memset(&sa,0,sizeof sa); sa.sin_family=AF_INET; sa.sin_port=htons((uint16_t)g_st_port);
-    const char*ad=getenv("PELOAD_STATS_ADDR"); sa.sin_addr.s_addr=inet_addr(ad&&*ad?ad:"127.0.0.1");
-    char m[160]; int k;
-    // a previous instance that was just killed can still hold the port for a while (2026-10-18: a restarted client lost its
-    // stats page -- "Address already in use" -- and the open page showed "cannot reach the loader"): retry for 30 s
-    for(int tr=0; ls>=0 && tr<30 && (bind(ls,(struct sockaddr*)&sa,sizeof sa) || listen(ls,16)); tr++){ if(errno!=EADDRINUSE) break;
-        if(!tr){ k=snprintf(m,sizeof m,"  [stats] %s:%d busy, retrying for 30 s\n",ad&&*ad?ad:"127.0.0.1",g_st_port); (void)!write(2,m,k); }
-        sleep(1); if(tr==29){ errno=EADDRINUSE; close(ls); ls=-1; } }
-    if(ls<0 || listen(ls,16)){ k=snprintf(m,sizeof m,"  [stats] cannot listen on %s:%d (%s)\n",ad&&*ad?ad:"127.0.0.1",g_st_port,strerror(errno)); (void)!write(2,m,k); if(ls>=0) close(ls); return 0; }
-    k=snprintf(m,sizeof m,"  [stats] live game stats on http://%s:%d/ (also /stats.json, /events)\n",ad&&*ad?ad:"127.0.0.1",g_st_port); (void)!write(2,m,k);
-    pthread_t t; pthread_create(&t,0,st_snap_thread,0); pthread_detach(t);
+    // collection (snapshot: heatmap, kills, forensic roster ...) runs whether or not the page can be served
+    { pthread_t t; pthread_create(&t,0,st_snap_thread,0); pthread_detach(t); }
+    const char*ad=getenv("PELOAD_STATS_ADDR"); if(!ad||!*ad) ad="127.0.0.1";
+    char m[200]; int k; int ls=-1, port=g_st_port;
+    for(int tr=0; ls<0; tr++){
+        ls=st_bind(g_st_port,ad); if(ls>=0){ port=g_st_port; break; }
+        if(errno!=EADDRINUSE && tr==0){ k=snprintf(m,sizeof m,"  [stats] cannot listen on %s:%d (%s), retrying\n",ad,g_st_port,strerror(errno)); (void)!write(2,m,k); }
+        if(tr==0 && errno==EADDRINUSE){ k=snprintf(m,sizeof m,"  [stats] %s:%d busy, retrying\n",ad,g_st_port); (void)!write(2,m,k); }
+        if(tr>=10) for(int p2=g_st_port+1; p2<=g_st_port+10 && ls<0; p2++){ ls=st_bind(p2,ad); if(ls>=0) port=p2; }
+        if(ls<0) sleep(1); }
+    g_st_port=port;
+    k=snprintf(m,sizeof m,"  [stats] live game stats on http://%s:%d/ (also /stats.json, /events, /forensics)\n",ad,port); (void)!write(2,m,k);
     { const char*o=getenv("PELOAD_STATS_OPEN"); if(o && atoi(o)){ pthread_t ot; pthread_create(&ot,0,st_open_thread,0); pthread_detach(ot); } }
-    for(;;){ int fd=accept(ls,0,0); if(fd<0){ if(errno==EINTR) continue; usleep(100000); continue; } pthread_t c; if(pthread_create(&c,0,st_conn,(void*)(intptr_t)fd)) close(fd); else pthread_detach(c); }
+    for(;;){ int fd=accept(ls,0,0); if(fd<0){ if(errno==EINTR) continue; usleep(100000); continue; } fcntl(fd,F_SETFD,FD_CLOEXEC); pthread_t c; if(pthread_create(&c,0,st_conn,(void*)(intptr_t)fd)) close(fd); else pthread_detach(c); }
     return 0; }
 static void stats_start(void){ if(!stats_on()) return; pthread_t t; pthread_create(&t,0,st_listen_thread,0); pthread_detach(t); }
 
