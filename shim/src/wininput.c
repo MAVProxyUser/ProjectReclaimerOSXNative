@@ -285,6 +285,9 @@ static void wi_run_steps(void*h,const char*e,useconds_t gap){ char m[96]; int k;
         else if(sscanf(e,"%d,%d",&x,&y)==2){ wi_click_at(h,x,y); k=snprintf(m,sizeof m,"  [autoclick] click %d,%d\n",x,y); }
         else break;
         (void)!write(2,m,k); usleep(gap); } }
+// the stats page's test hook (do=uisteps): run steps now on their own thread
+static void* wi_steps_thread(void*a){ char*e=a; void*h=fg_hwnd_ext(); wi_run_steps(h,e,800000); free(e); return 0; }
+void wi_steps_async(const char*e){ char*c=strdup(e); if(!c) return; pthread_t t; if(pthread_create(&t,0,wi_steps_thread,c)) free(c); else pthread_detach(t); }
 // PELOAD_AUTOCLICK_AFTER_GAME="<steps>": run these steps again PELOAD_AUTOCLICK_AFTER_DELAY s (default 8)
 // after every finished match ("Carnage report opened"), e.g. Continue + Start Game so a hosting test
 // target always has a match running.

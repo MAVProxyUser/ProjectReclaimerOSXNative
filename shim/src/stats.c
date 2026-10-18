@@ -583,6 +583,12 @@ static int st_control(const char*act,const char*qs){
         char m[64]; int k=snprintf(m,sizeof m,"  [stats] page: microphone %s\n",g_mic_muted?"muted":"live"); (void)!write(2,m,k); return 1; }
     if(!strcmp(act,"submit")){ const char*v=strstr(qs,"on="); if(!v) return 0; g_sub_want=atoi(v+3)?1:0; return 1; }   // GL submission thread (d3dsubmit.c)
     if(!strcmp(act,"capture")){ __atomic_store_n(&g_hb_cap_req,1,__ATOMIC_RELEASE); (void)!write(2,"  [capture] page: capturing the next frame\n",43); return 1; }
+    // test hook: run PELOAD_AUTOCLICK steps now (s=<url-encoded steps>: clicks, k:<macOS keycode>, t:<text>, s:<secs>),
+    // e.g. to find which key opens the client's text chat; only with PELOAD_STATS_UISTEPS=1 (a test client's page)
+    if(!strcmp(act,"uisteps")){ if(!getenv("PELOAD_STATS_UISTEPS")) return 0; const char*v=strstr(qs,"s="); if(!v) return 0;
+        static char steps[512]; size_t j=0; for(const char*q=v+2; *q && *q!='&' && j+1<sizeof steps; q++){
+            if(*q=='%' && q[1] && q[2]){ char h[3]={q[1],q[2],0}; steps[j++]=(char)strtol(h,0,16); q+=2; } else steps[j++]=*q=='+'?' ':*q; } steps[j]=0;
+        extern void wi_steps_async(const char*); wi_steps_async(steps); return 1; }
     if(!strcmp(act,"forensic")) return fx_control(qs);   // archive / voice audio / one-party consent (forensic.c)
     if(!strcmp(act,"rec")) return st_rec_start(qs);   // clip recording (rec.m): secs=<n>&mode=av|audio; why it refused: the snapshot's rec.last_error
     if(!strcmp(act,"recstop")){ rec_stop(); return 1; }
