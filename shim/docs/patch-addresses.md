@@ -166,6 +166,23 @@ set_muted, the flag from the writer pattern in section 6, the client rows from t
 | client: its detour | 4b7350 | 4cd8d0 | 4f15b0 | 4f95b0 | 4fd620 | 4fea40 | 502d10 | 53edf0 | 57f970 | 58a200 | 601a90 |
 | client: hook installer (call sites) | 580dd0 (58) | 59a1a0 (62) | 5c1970 (68) | 5ca0b0 (70) | 5cf9b0 (72) | 5d0e80 (73) | 5d6830 (74) | 60f700 (76) | 64d8d0 (79) | 65c5e0 (88) | 6ddb00 (93) |
 
+### Client exe, v0.9.20 (2026-10-18; v0.9.19 skipped -- it was current for three hours)
+
+Ported the day it came out (servers refuse older clients). SHA-256 `0850d10888d984aa270e0fd5bfa833505010e9e646d789ca657a49b6e45a8a0d`.
+
+| point | v0.9.20 | how it is found now |
+|---|---|---|
+| ui-reentrancy jne (sig+8) | 6e0d3f | same signature |
+| xaudio slots 1-4 | 5c2e50 / 5c2e7f / 5c2eb6 / 5c2eeb | **new shape** (new signatures, slots xaudio1-4): the check is a routine (5c2de0) handed a table of four {halo3 slot, expected callback offset, replacement} entries; each mismatch is `cmp [rsp+0x30], <reg>; jne fail` after `add <reg>, r13` (r13 = halo3 base). The caller for our halo3 (slots a39e10.., expected 60c416 / 60c422 / 60c40a / 60c385) is 5c3000; a second caller (5c2d40, slots a8f970.., expected 6606e0 ..) is for another halo3 layout and shares the routine |
+| watchdog je (sig+0xa) | 82baf1 | new signature: the deadline is compared with rbx instead of a reload from the frame (`48 39 D8`); the loop still waits 17 ms per WaitForSingleObject |
+| set_muted (entry) / MUTED list | 6fa4b0 / 29fd798 | same signature + is_muted pairing |
+| voice_recv (entry) | 712360 | same signature |
+| push_history (entry) | c7d0c0 | same signature |
+| cast_vote / ballot cache | 9b3910 / 29f7838 (0x3b0 bytes; was 0x320) | same signatures; the size is read from the code |
+| max_players getter / hosted-session slot | 6edbc0 / 2a037b8, byte at Arc+0x233 (was +0x22d) | **second signature**: the getter also pushes rdi now, so the clone call is found by what follows it (`test rax,rax`) |
+| moderation table lock / players Vec len | 29f50b8 / 29f5160 | **no fixed RVA any more** (it was 27cf790 in v0.9.18): the first `lock cmpxchg byte [rip+d]` before the code that formats "You are banned from this server. Reason: "; the Vec ends at lock+0xa8 (same layout: the lock's neighbours +0x8 / +0x28 / +0x30 / +0x70 / +0x78 are read the same way in both builds) |
+| expanded-session flag | not ported | the fixed-RVA shortcut only applies to v0.9.18; other builds pick the session layout from which one holds valid records |
+
 ### Dedicated exe (not loaded by our scripts), v0.8.14 .. v0.9.7
 
 | point | v0.8.14 | v0.8.15 | v0.8.16 | v0.9.0 | v0.9.1 | v0.9.2 | v0.9.3 | v0.9.4 | v0.9.5 | v0.9.6 | v0.9.7 |

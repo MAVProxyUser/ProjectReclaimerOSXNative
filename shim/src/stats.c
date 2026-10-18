@@ -401,13 +401,23 @@ static void st_chat_install(void){
 // none, voice is relayed): only the server's (= the host player's in a player-hosted game). Shown only while the stats page
 // is on this Mac (PELOAD_STATS_ADDR loopback or unset) unless PELOAD_STATS_IPS=1; PELOAD_STATS_IPS=0 hides them always.
 static uint8_t*g_st_modlen;
+// the client's moderation table (bans + the players Vec with their addresses): its lock is the first `lock cmpxchg byte
+// [rip+d]` before the code that formats "You are banned from this server. Reason: "; the players Vec {cap, ptr, len}
+// ends at lock+0xa8 (L = its len). Same layout in v0.9.18 (lock exe+0x27cf6e8) and v0.9.20 (exe+0x29f50b8).
 static void st_addr_install(void){
-    if(!g_base) return; DOS*dh=(DOS*)g_base; OPT64*oh=(OPT64*)(g_base+dh->e_lfanew+sizeof(COFF)); if(oh->ImageSize<=0x27cf800) return;
-    uint8_t*L=g_base+0x27cf790, *lk=L-0xa8; int paired=0;
-    for(uint8_t*q=g_base+0x1000; q+8<g_base+0x27cf000 && !paired; q++)
-        if(q[0]==0xF0 && q[1]==0x0F && q[2]==0xB0 && (q[3]&0xC7)==0x05 && q+8+*(int32_t*)(q+4)==lk) paired=1;
-    if(paired) g_st_modlen=L;
-    char m[120]; int k=snprintf(m,sizeof m,"  [stats] player addresses: %s\n",paired?"host table found (shown while hosting)":"host table not found (another client build?): off"); (void)!write(2,m,k); }
+    if(!g_base) return; DOS*dh=(DOS*)g_base; OPT64*oh=(OPT64*)(g_base+dh->e_lfanew+sizeof(COFF)); uint32_t isz=oh->ImageSize;
+    uint32_t pe=*(uint32_t*)(g_base+0x3c); uint16_t ns=*(uint16_t*)(g_base+pe+6), so=*(uint16_t*)(g_base+pe+20); uint8_t*st=g_base+pe+24+so;
+    static const char needle[]="You are banned from this server. Reason: "; size_t nl=sizeof needle-1; uint8_t*str=0;
+    for(int i=0;i<ns && !str;i++){ uint8_t*sh=st+i*40; uint32_t vs=*(uint32_t*)(sh+8), va=*(uint32_t*)(sh+12), ch=*(uint32_t*)(sh+36);
+        if(ch&0x20000000) continue; for(uint32_t k=0;k+nl<=vs && va+k+nl<=isz;k++) if(g_base[va+k]=='Y' && !memcmp(g_base+va+k,needle,nl)){ str=g_base+va+k; break; } }
+    uint8_t*lock=0;
+    if(str) for(int i=0;i<ns && !lock;i++){ uint8_t*sh=st+i*40; uint32_t vs=*(uint32_t*)(sh+8), va=*(uint32_t*)(sh+12), ch=*(uint32_t*)(sh+36); if(!(ch&0x20000000)) continue;
+        uint8_t*p=g_base+va; for(uint32_t k=0;k+7<=vs && !lock;k++){ if((p[k]!=0x48 && p[k]!=0x4C) || p[k+1]!=0x8D || (p[k+2]&0xC7)!=0x05) continue;
+            uint8_t*t=p+k+7+*(int32_t*)(p+k+3); if(t<str-8 || t>str) continue;   // (the literal may start a byte or two earlier: Rust concatenates them)
+            for(uint8_t*q=p+k; q>p+k-0x800 && q>p; q--) if(q[0]==0xF0 && q[1]==0x0F && q[2]==0xB0 && q[3]==0x0D && q[8]==0x75){ lock=q+8+*(int32_t*)(q+4); break; } } }
+    if(lock && lock>g_base && lock+0xb0<g_base+isz) g_st_modlen=lock+0xa8;
+    char m[160]; int k=snprintf(m,sizeof m,"  [stats] player addresses: %s\n",g_st_modlen?"host table found (shown while hosting)":"host table not found (another client build?): off"); (void)!write(2,m,k);
+    if(g_st_modlen){ k=snprintf(m,sizeof m,"  [stats] player addresses: table lock exe+0x%llx\n",(unsigned long long)(lock-g_base)); (void)!write(2,m,k); } }
 static int st_ips_ok(void){ static int v=-1; if(v<0){ const char*e=getenv("PELOAD_STATS_IPS"), *ad=getenv("PELOAD_STATS_ADDR");
         int local=!ad || !*ad || !strncmp(ad,"127.",4) || !strcmp(ad,"::1") || !strcmp(ad,"localhost"); v=e?atoi(e)!=0:local; } return v; }
 typedef struct { uint64_t peer; char ip[48]; } StAddr;
@@ -439,10 +449,16 @@ static const char* st_addr_of(uint64_t peer){ if(!peer) return 0; for(int i=0;i<
 // count, sess+0x419c when sess+0x4194 bit 0 (halo3 get_maximum_player_count halo3+0x11db4).
 static uint8_t*g_st_hslot; static int g_st_mpoff;
 static void st_slots_install(void){
-    uint8_t b[96],m[96]; int n=sig_parse("55 56 48 81 EC ?? ?? 00 00 48 8D AC 24 80 00 00 00 48 C7 85 ?? ?? 00 00 FE FF FF FF E8 ?? ?? ?? ?? 48 85 C0 74 16 31 C9 48 3B 48 10 71 ?? F0 48 FF 08 75 08 48 89 C1 E8 ?? ?? ?? ?? 48 8D 4D ?? E8 ?? ?? ?? ?? B0 10",b,m,96);
-    int64_t r=sig_find(g_base,b,m,n); const char*why="getter not found (another client build?)";
-    if(r>=0){ uint8_t*G=g_base+r, *C=G+0x21+*(int32_t*)(G+0x1d); static const uint8_t pro[13]={0x56,0x48,0x83,0xEC,0x20,0xB1,0x01,0x31,0xC0,0xF0,0x0F,0xB0,0x0D};
-        if(memcmp(C,pro,13)) why="clone function has an unexpected shape";
+    // the getter's prologue: v0.9.18 pushes rbp, rsi; v0.9.20 also rdi (the clone call moves one byte; max_players at
+    // Arc+0x22d in 0.9.18, +0x233 in 0.9.20 -- both read from the getter itself)
+    static const char*const sigs[2]={
+        "55 56 48 81 EC ?? ?? 00 00 48 8D AC 24 80 00 00 00 48 C7 85 ?? ?? 00 00 FE FF FF FF E8 ?? ?? ?? ?? 48 85 C0 74 16 31 C9 48 3B 48 10 71 ?? F0 48 FF 08 75 08 48 89 C1 E8 ?? ?? ?? ?? 48 8D 4D ?? E8 ?? ?? ?? ?? B0 10",
+        "55 56 57 48 81 EC ?? ?? 00 00 48 8D AC 24 80 00 00 00 48 C7 85 ?? ?? 00 00 FE FF FF FF E8 ?? ?? ?? ?? 48 85 C0 74 16 31 C9 48 3B 48 10 71 ?? F0 48 FF 08 75 08 48 89 C1 E8 ?? ?? ?? ?? 48 8D 4D ?? E8 ?? ?? ?? ??" };
+    uint8_t b[128],m[128]; int64_t r=-1; for(int v=0;v<2 && r<0;v++){ int n=sig_parse(sigs[v],b,m,128); r=sig_find(g_base,b,m,n); }
+    const char*why="getter not found (another client build?)";
+    if(r>=0){ uint8_t*G=g_base+r, *C=0; static const uint8_t pro[13]={0x56,0x48,0x83,0xEC,0x20,0xB1,0x01,0x31,0xC0,0xF0,0x0F,0xB0,0x0D};
+        for(uint8_t*q=G;q<G+0x30 && !C;q++) if(q[0]==0xE8 && q[5]==0x48 && q[6]==0x85 && q[7]==0xC0) C=q+5+*(int32_t*)(q+1);   // call clone; test rax,rax
+        if(!C || memcmp(C,pro,13)) why="clone function has an unexpected shape";
         else { uint8_t*L=C+0x11+*(int32_t*)(C+0xd); int off=-1;
             for(uint8_t*q=G;q<G+0x100;q++) if(q[0]==0x0F && q[1]==0xB6 && q[2]==0xB0 && q[7]==0xF0 && q[8]==0x48 && q[9]==0xFF && q[10]==0x08){ off=*(int32_t*)(q+3); break; }
             if(off>0x18 && off<0x1000){ g_st_hslot=L+8; g_st_mpoff=off; why=0; } else why="max_players offset not found"; } }

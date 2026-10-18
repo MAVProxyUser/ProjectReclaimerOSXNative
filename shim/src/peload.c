@@ -10712,19 +10712,35 @@ static void apply_patch(uint8_t*base,uint64_t rva,const uint8_t*bytes,int n){
 //                  time-limited run: unset (the direct-match probe, mode 2) or "<role>:<seconds>" with seconds > 0.
 //                  The menu runtime passes "menu:0" and never arms it; only the direct path needs this patch.
 // PELOAD_RECLAIMER_PATCHES=all | comma list of names enables the optional ones (play.sh: all).
-typedef struct { const char*name; int dflt; const char*sig; int n; int off[2]; const char*orig[2]; const char*repl[2]; } SigPatch;
+// slot: one check / branch; a build needs ONE variant of each slot (variants = the shapes different client builds compile
+// it to). v0.9.13 / v0.9.18 share the first set; v0.9.20 (2026-10-18) moved the XAudio2 check into a table-driven routine
+// (four {halo3 slot, expected callback, our replacement} entries checked by one function) and rebuilt the watchdog loop.
+typedef struct { const char*name; const char*slot; int dflt; const char*sig; int n; int off[2]; const char*orig[2]; const char*repl[2]; } SigPatch;
 static const SigPatch g_sigpatches[]={
-  {"ui-reentrancy",1,"C6 43 68 01 48 83 3B 00 0F 85 ?? ?? ?? ?? 48 C7 03 FF FF FF FF 81 7B 10 00 CA 9A 3B 75 ?? 31 C0 EB ??",
+  {"ui-reentrancy","ui-reentrancy",1,"C6 43 68 01 48 83 3B 00 0F 85 ?? ?? ?? ?? 48 C7 03 FF FF FF FF 81 7B 10 00 CA 9A 3B 75 ?? 31 C0 EB ??",
      2,{8,0x1c},{"0F 85","75"},{"90 90 90 90 90 90","90 90"}},
-  {"xaudio",0,"48 8B 44 24 20 48 89 C1 48 F7 D9 0F 81 ?? ?? ?? ?? 48 8D 83 16 C4 60 00 48 39 44 24 28 0F 85 ?? ?? ?? ?? 4C 8D B3 18 9E A3 00",
+  // v0.9.13 / v0.9.18: four inline checks, each "lea rax,[halo3+expected]; cmp [rsp+0x28],rax; jne fail"
+  {"xaudio","xaudio1",0,"48 8B 44 24 20 48 89 C1 48 F7 D9 0F 81 ?? ?? ?? ?? 48 8D 83 16 C4 60 00 48 39 44 24 28 0F 85 ?? ?? ?? ?? 4C 8D B3 18 9E A3 00",
      1,{0x1d},{"0F 85"},{"90 90 90 90 90 90"}},
-  {"xaudio",0,"48 8B 44 24 20 48 89 C1 48 F7 D9 0F 81 ?? ?? ?? ?? 48 8D 83 22 C4 60 00 48 39 44 24 28 0F 85 ?? ?? ?? ?? 4C 8D BB 20 9E A3 00",
+  {"xaudio","xaudio2",0,"48 8B 44 24 20 48 89 C1 48 F7 D9 0F 81 ?? ?? ?? ?? 48 8D 83 22 C4 60 00 48 39 44 24 28 0F 85 ?? ?? ?? ?? 4C 8D BB 20 9E A3 00",
      1,{0x1d},{"0F 85"},{"90 90 90 90 90 90"}},
-  {"xaudio",0,"48 8B 44 24 20 48 89 C1 48 F7 D9 0F 81 ?? ?? ?? ?? 48 8D 83 0A C4 60 00 48 39 44 24 28 0F 85 ?? ?? ?? ?? 4C 8D A3 28 9E A3 00",
+  {"xaudio","xaudio3",0,"48 8B 44 24 20 48 89 C1 48 F7 D9 0F 81 ?? ?? ?? ?? 48 8D 83 0A C4 60 00 48 39 44 24 28 0F 85 ?? ?? ?? ?? 4C 8D A3 28 9E A3 00",
      1,{0x1d},{"0F 85"},{"90 90 90 90 90 90"}},
-  {"xaudio",0,"48 8B 44 24 20 48 89 C1 48 F7 D9 71 ?? 48 81 C3 85 C3 60 00 48 39 5C 24 28 75 ?? 48 8D 05",
+  {"xaudio","xaudio4",0,"48 8B 44 24 20 48 89 C1 48 F7 D9 71 ?? 48 81 C3 85 C3 60 00 48 39 5C 24 28 75 ?? 48 8D 05",
      1,{0x19},{"75"},{"90 90"}},
-  {"watchdog",0,"81 BD ?? ?? ?? ?? 00 CA 9A 3B 74 ?? E8 ?? ?? ?? ?? 90 48 8B 8D ?? ?? ?? ?? 48 39 C8 75 ?? 3B 95 ?? ?? ?? ?? 72 ??",
+  // v0.9.20: the shared routine (exe+0x5c2de0) compares each slot's value with base + the entry's expected offset
+  {"xaudio","xaudio1",0,"48 F7 D9 0F 81 ?? ?? ?? ?? 4D 01 EE 4C 39 74 24 30 0F 85 ?? ?? ?? ?? 4C 01 EB",
+     1,{0x11},{"0F 85"},{"90 90 90 90 90 90"}},
+  {"xaudio","xaudio2",0,"48 F7 D9 0F 81 ?? ?? ?? ?? 4C 01 ED 48 39 6C 24 30 0F 85 ?? ?? ?? ?? 4D 01 EF",
+     1,{0x11},{"0F 85"},{"90 90 90 90 90 90"}},
+  {"xaudio","xaudio3",0,"48 F7 D9 0F 81 ?? ?? ?? ?? 48 8B 44 24 50 4C 01 E8 48 39 44 24 30 0F 85 ?? ?? ?? ?? 48 8B 54 24 48",
+     1,{0x16},{"0F 85"},{"90 90 90 90 90 90"}},
+  {"xaudio","xaudio4",0,"48 F7 D9 71 ?? 48 8B 44 24 40 4C 01 E8 48 39 44 24 30 75 ?? 48 8B 47 10",
+     1,{0x12},{"75"},{"90 90"}},
+  {"watchdog","watchdog",0,"81 BD ?? ?? ?? ?? 00 CA 9A 3B 74 ?? E8 ?? ?? ?? ?? 90 48 8B 8D ?? ?? ?? ?? 48 39 C8 75 ?? 3B 95 ?? ?? ?? ?? 72 ??",
+     1,{0x0a},{"74"},{"EB"}},
+  // v0.9.20: the deadline is in rbx now
+  {"watchdog","watchdog",0,"81 BD ?? ?? ?? ?? 00 CA 9A 3B 74 ?? E8 ?? ?? ?? ?? 90 48 39 D8 75 ?? 3B 95 ?? ?? ?? ?? 72 ??",
      1,{0x0a},{"74"},{"EB"}},
 };
 static int sig_parse(const char*s,uint8_t*b,uint8_t*m,int cap){ int n=0; while(*s && n<cap){ while(*s==' ')s++; if(!*s)break;
@@ -10741,14 +10757,18 @@ static int sig_enabled(const SigPatch*sp){ const char*e=getenv("PELOAD_RECLAIMER
     if(!strcmp(sp->name,"ui-reentrancy") && getenv("PELOAD_NO_REENTRANCY_FIX")) return 0;
     if(e && (!strcmp(e,"all") || strstr(e,sp->name))) return 1; return sp->dflt; }
 static void reentrancy_fix(void){ if(!g_base) return;   // (name kept: applies every enabled signature patch)
-    for(size_t i=0;i<sizeof g_sigpatches/sizeof g_sigpatches[0];i++){ const SigPatch*sp=&g_sigpatches[i]; if(!sig_enabled(sp)) continue;
+    enum { NSP=sizeof g_sigpatches/sizeof g_sigpatches[0] }; int done[NSP]; memset(done,0,sizeof done);   // per entry: 1 applied
+    for(size_t i=0;i<NSP;i++){ const SigPatch*sp=&g_sigpatches[i]; if(!sig_enabled(sp)) continue;
         uint8_t b[128],m[128]; int n=sig_parse(sp->sig,b,m,128); int64_t rva=sig_find(g_base,b,m,n); char msg[200]; int k;
-        if(rva<0){ k=snprintf(msg,sizeof msg,"  [sigpatch] %s: signature %s -- NOT applied (unsupported client build?)\n",sp->name,rva==-1?"not found":"ambiguous"); (void)!write(2,msg,k); continue; }
-        int ok=1; for(int e=0;e<sp->n;e++){ uint8_t ob[16],om[16],rb[16],rm[16]; int on=sig_parse(sp->orig[e],ob,om,16); (void)rm;
-            if(memcmp(g_base+rva+sp->off[e],ob,on)) ok=0; (void)sig_parse(sp->repl[e],rb,rm,16); }
-        if(!ok){ k=snprintf(msg,sizeof msg,"  [sigpatch] %s: unexpected bytes at exe+0x%llx -- NOT applied\n",sp->name,(unsigned long long)rva); (void)!write(2,msg,k); continue; }
+        if(rva==-2){ k=snprintf(msg,sizeof msg,"  [sigpatch] %s (%s): signature ambiguous -- NOT applied\n",sp->name,sp->slot); (void)!write(2,msg,k); continue; }
+        if(rva<0) continue;   // another build's variant (reported below if no variant of its slot matched)
+        int ok=1; for(int e=0;e<sp->n;e++){ uint8_t ob[16],om[16]; int on=sig_parse(sp->orig[e],ob,om,16); if(memcmp(g_base+rva+sp->off[e],ob,on)) ok=0; }
+        if(!ok){ k=snprintf(msg,sizeof msg,"  [sigpatch] %s (%s): unexpected bytes at exe+0x%llx -- NOT applied\n",sp->name,sp->slot,(unsigned long long)rva); (void)!write(2,msg,k); continue; }
         for(int e=0;e<sp->n;e++){ uint8_t rb[16],rm[16]; int rn=sig_parse(sp->repl[e],rb,rm,16); apply_patch(g_base,(uint64_t)rva+sp->off[e],rb,rn); }
-        k=snprintf(msg,sizeof msg,"  [sigpatch] %s @ exe+0x%llx\n",sp->name,(unsigned long long)(rva+sp->off[0])); (void)!write(2,msg,k); } }
+        done[i]=1; k=snprintf(msg,sizeof msg,"  [sigpatch] %s @ exe+0x%llx\n",sp->name,(unsigned long long)(rva+sp->off[0])); (void)!write(2,msg,k); }
+    for(size_t i=0;i<NSP;i++){ const SigPatch*sp=&g_sigpatches[i]; if(!sig_enabled(sp)) continue; int first=1, any=0;
+        for(size_t j=0;j<NSP;j++) if(!strcmp(g_sigpatches[j].slot,sp->slot)){ if(j<i) first=0; if(done[j]) any=1; }
+        if(first && !any){ char msg[200]; int k=snprintf(msg,sizeof msg,"  [sigpatch] %s (%s): no variant matches this client build -- NOT applied\n",sp->name,sp->slot); (void)!write(2,msg,k); } } }
 // ---- JMP-trampoline trace hooks (int3 doesn't work under Rosetta; code detours do) ----
 // PELOAD_HOOK=<mod>+<rva>:<origlen>:<id>[,...]  installs a detour at rva that logs
 // id + the guest rbx/rsi/rdi/rbp (so we can watch RefCell borrow sites etc.), runs
