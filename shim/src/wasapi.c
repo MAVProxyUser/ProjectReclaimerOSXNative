@@ -11,7 +11,8 @@
 // Capture (2026-10-17): the Mac's microphone is the client's capture endpoint, so its voice chat starts once instead of
 // retrying (and building a playback stream) every 5 s without one -- those retries were the trigger of the caulk crash.
 // The client sends voice only while its talk key is held or toggled (its modes: Voice off / Mic off / Hold to talk /
-// Toggle to talk). PELOAD_MIC=0: no capture device (the old behaviour); PELOAD_MIC=tone: a quiet 440 Hz test tone
+// Toggle to talk). PELOAD_MIC=0: a SILENT microphone (no Mac mic opened; the client's voice chat starts once and listens);
+// PELOAD_MIC=none: no capture device (the old behaviour: retries every 5 s); PELOAD_MIC=tone: a quiet 440 Hz test tone
 // instead of the microphone (test clients; never opens the real one); PELOAD_MIC_MUTED=1 starts muted; the stats page's
 // Mic button (POST /control?do=mic&on=0|1) mutes it -- the client then gets silence, flagged AUDCLNT_BUFFERFLAGS_SILENT.
 

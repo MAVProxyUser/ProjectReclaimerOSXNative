@@ -1,5 +1,17 @@
 # Reclaimer menu re-entrancy — RE findings (session 5)
 
+> **Historical log (sessions 5-11, 2026-10-11 .. 2026-10-14), kept as written; read it for method, not status.**
+> Current state (2026-10-18): CLAUDE.md, `shim/docs/BACKLOG.md`, `PERF-PLAN.md`; every address the loader touches
+> today, with signatures, is in `patch-addresses.md` (client v0.9.18). Exe RVAs below are **v0.9.13**
+> (`analysis/project-reclaimer-v0.9.13.exe`, also what `analysis/reclaimer-exe-symmap.tsv` maps); every one moved in
+> later releases. Everything left open here was solved later: the re-entrancy fix is the `ui-reentrancy` signature
+> patch (peload.c `g_sigpatches`, on by default); the map catalog chain was resolved within this log (session 8, by
+> closing the remaining stubs), and play.sh now runs Reclaimer's real menu runtime and joins online games; the black
+> frame of session 11 was the loader's `D3DReflect` stub reporting no constant buffers, so halo3's constant registry
+> (FUNC halo3+0x2af4b8) bound nothing, and a real RDEF reflector fixed it (the "material bind path never runs"
+> explanation there was a symptom). Corrections: software breakpoints (`PELOAD_BP`) do work (note below), and
+> halo3+0x2ac24c is the input-layout builder, not an armor-skin registry (session 10).
+
 Deep reverse-engineering of the single remaining blocker to a visible menu: a
 `RefCell already borrowed` panic in the custom OpenGL frontend. This documents
 exactly what it is, what's been ruled out, and the concrete next levers — so the
@@ -20,6 +32,11 @@ next session continues without re-deriving.
   guest-code tracing via breakpoints is out. SIGSEGV (guard pages) DOES work, and
   guest-code JMP-trampoline patches work (PELOAD_PATCH). `PELOAD_BP` is kept but
   is a no-op here.
+  **Correction (2026-10-14):** software breakpoints do work under Rosetta once
+  the loader catches SIGTRAP (peload.c installs the handler when `PELOAD_BP` is
+  set): the one-shot breakpoints pinned the dedicated server's spawn failure, and
+  `PELOAD_BP_ARGS=<n>` logs rcx/rdx/r8/r9. One Rosetta-translated network
+  thread did crash on them once; `PELOAD_HOOK` detours are the safe fallback.
 
 ## The panic — precisely located
 - Function: `exe+0x550e00` (28 KB) = the frontend UI draw. Sources:
@@ -117,8 +134,8 @@ RefCell borrow and surfaces as the "already borrowed" re-entrancy panic.
   point after each call) and make each one return success with a valid out pointer.
   Candidate methods to complete: the DXGI device QI (IDXGIDevice), and the method at
   `[r12+0x20] vtable +0x138`. Also verify `[r12+0x20]`'s object type.
-- Tracer caveat: single-step re-arm / int3 DON'T work under Rosetta; the detour
-  (PELOAD_HOOK) is the working mechanism. Hook only sites whose first >=13 bytes are
+- Tracer caveat: single-step re-arm / int3 DON'T work under Rosetta (see the 2026-10-14 correction at the top:
+  int3 does, with a SIGTRAP handler); the detour (PELOAD_HOOK) is the working mechanism. Hook only sites whose first >=13 bytes are
   whole, non-rip-relative, non-rel-branch instructions.
 
 ---

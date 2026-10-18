@@ -6,8 +6,10 @@ against the client's own validator (`dedicated --config <toml> check`), which na
 mean ...?"), lists the allowed choices for a wrong value and prints numeric ranges. Choice values are strings
 (`"On"`, `"Assault rifles"`, ...; case-insensitive). Numbers are JSON numbers (a quoted number is rejected).
 
-Helper: `re-tools`-style probe in the session scratchpad (`optcheck.py <game type> <value> <key,key,...>`) builds
-one playlist game per key and parses the validator's messages.
+The probe used then (a scratch script, not kept) built one playlist game per key and parsed the validator's
+messages. To repeat a check: write the game into a playlist in the server folder `shim/dedicated.sh` creates
+(`C:\ReclaimerTestServer`), point a config's `playlist =` at it and run the client's `dedicated --config <toml>
+check` (this Mac's prefix has `optprobe.toml` + `playlists/optprobe.playlist.json` for that; not in the repo).
 
 ## Rounds (all game types)
 
@@ -98,7 +100,8 @@ When not carried by enemy, Away from home, Always), `mode.flag_type` (Multi flag
 `mode.ball_effect` (Off, On), `mode.auto_pickup` (Off, On), `mode.kill`; traits `ball_carrier.*`.
 
 **King of the Hill, VIP, Juggernaut, Territories, Assault, Infection, Forge** -- read from the client's option table
-(the `key` + label pairs in `src/game_options.rs`'s strings), not yet run through the validator. Keys that several
+(the `key` + label pairs in `src/game_options.rs`'s strings), not yet run through the validator. The exact keys are
+in "Exact keys" below, which resolves every "probably" in this table. Keys that several
 modes share (`score`, `kill`, `death`, `suicide`, `betrayal`, `reset`, `sudden_death`) have no string of their own
 next to these labels, so where a label has no key in front of it the key is marked "probably".
 
@@ -118,7 +121,10 @@ gold, brown, pink; values as `character_set` / `character` above).
 ## Reading the running game's options
 
 The live stats page (`play.sh`, http://127.0.0.1:8765/) shows the options and every trait set of the game you are in,
-read from halo3's own copy of the variant (shim/docs/halo3-variant-traits.md), using these key names.
+read from halo3's own copy of the variant (shim/docs/halo3-variant-traits.md), using these key names. It decodes every
+option of the running mode with `option-map.json` (below; built into the loader with `#embed` and served as
+`/option-map.json`). Checked live on Slayer (2026-10-17): all rounds / respawn / map / powerup / points values and the
+powerup trait sets matched the game.
 
 ## Exact keys (from the client's option table)
 
@@ -279,4 +285,7 @@ characters, 2 Random, 3..18 Customization mod 1..16) and `teams.<color>_characte
 - **Native meaning of `map.weapons` / `map.vehicles`**: the client writes the raw choice index (weapons 0 Default ..
   12 Random, 13 ODST weapons; vehicles 0 Default .. 9 All) into the i16 fields at v+0x150 / v+0x152. How halo3 maps
   these numbers (halo3-variant-traits.md has -1 = map default there) was not checked; the read-back check above only
-  guarantees that the engine did not change the value (hosting fails otherwise).
+  guarantees that the engine did not change the value (hosting fails otherwise). Seen live (Slayer, 2026-10-17): the
+  running variant held -1 (0xFFFF) there, a value no client choice produces; the stats page shows any 16-bit option
+  holding 0xFFFF without a matching choice as "Map default". Whether the client's choice 0 "Default" ends up as 0 or
+  -1 was not checked.

@@ -24,7 +24,8 @@ static void sb_f3(StBuf*s,const float*v){ sb_put(s,"[%.2f,%.2f,%.2f]",v[0],v[1],
 
 // ---- event feed (GET /feed.json?since=<seq>; the snapshot carries "feed_seq"): what the game tells its players --
 // joins and leaves, kills, votes, server notices, match start and end. Sources: the client's own log lines
-// (st_feed_log, from WriteFile on its standard handles) and the death tracker (st_snapshot: a death, and the player
+// (st_feed_log, from NtWriteFile -- where Rust's std writes stdio --, WriteFile and WriteConsoleW on its standard handles),
+// the chat hook, halo3's display_event / chud hooks, and the death tracker (st_snapshot: a death, and the player
 // whose projectile ended inside that biped just before it as the estimated killer).
 // kind: join leave kill death vote server game chat. a/b: the players (killer, victim; chat: sender), how: the weapon
 // (chat: the channel). flags: 1 = estimated, 2 = we sent it (chat), 4 = a betrayal.

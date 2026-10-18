@@ -1,7 +1,8 @@
 # Who owns a player's position on the network (halo3.dll, distributed MP)
 
-Static RE only, 2026-10-17. Tools: capstone, `re-tools/hdis.py`, `re-tools/refs.py`, plus a scratch call/xref index.
-Nothing was read from a live process.
+Static RE, 2026-10-17. Tools: capstone, `re-tools/hdis.py`, `re-tools/refs.py`, plus a scratch call/xref index.
+The RE read nothing from a live process; the trust issue (TL;DR 5) was then tested live against our own local
+dedicated server (last two sections).
 Binary: `$HOME/Library/Application Support/ReclaimerMac/prefix/drive_c/Program Files/Steam/steamapps/common/Halo The Master Chief Collection/halo3/halo3.dll`
 (base 0x180000000; all addresses below are RVAs).
 **CONFIRMED** means read from code, with evidence given. **GUESSED** means a name or meaning was inferred.
@@ -38,8 +39,9 @@ TLS is as in `teleport.md`: objects `tls+0x38`, players `tls+0x10` (0x2f8-byte r
    (or drives the vehicle), the 4-bit epoch matches, the values are finite and the axes are orthonormal, and for
    bipeds the destination capsule is clear. **No check against the unit's possible speed was found.** A modified
    client could therefore move in steps of just under 2.5 units per update: a speed hack, or a "teleport" made of many
-   steps. This is stock Halo 3 design (client-predicted movement), not a shim bug. CONFIRMED for the code path.
-   GUESSED that nothing else limits it, because no further rate limit was searched for exhaustively.
+   steps. This is stock Halo 3 design (client-predicted movement), not a shim bug. CONFIRMED for the code path, and
+   CONFIRMED live (2026-10-17, our local dedicated server, Reclaimer anti-cheat at its default): 2-unit steps,
+   horizontal and vertical, were adopted by the server; 3-unit steps were snapped back (last two sections).
 
 ## 1. Client to host: the per-player control channel
 
@@ -269,6 +271,10 @@ special-case path.
   thresholds above.
 - "Teleport next to player B" normally moves the body far more than 3 units, so the client snaps on the first host
   position update. The `0x382d88` warp message and the absence of smoothing make the snap instant.
+- As built (hitbox.c `hb_engine_jobs_locked`, host only, from the main_loop_body hook halo3+0xb2250): the loader's
+  teleport does **not** call `0xe6f10`. Its destinations (next to another player, a map spot, a forwarded client
+  request) are all far more than 3 units away, and host and client views agree within 0.5 s (teleport.md). Only
+  the `tpby` test action makes short moves.
 
 ## Confidence
 
@@ -290,14 +296,15 @@ special-case path.
 
 - The exact update period that produces the observed 1-2 s.
 - Whether any other path (anti-cheat, or Reclaimer's own Rust side) limits client movement speed. No such limit
-  was searched for in Reclaimer.
+  was searched for in Reclaimer statically; live, with the server's anti-cheat at its default, nothing kicked,
+  warned or corrected the stepping client (tests below).
 
 ## Test 2026-10-17: small steps ARE accepted (our own local dedicated server)
 
 Setup: `DED_ENV=PELOAD_STATS_HTTP=8767 bash shim/dedicated.sh` (Valhalla Slayer, anti-cheat at its default), one client
 joined with `PELOAD_STATS_HTTP=8765 PELOAD_ALLOW_TELEPORT=1 PELOAD_TELEPORT_CLIENT_TEST=1`; each step = POST
-`/control?do=tpby&dx=..` to the CLIENT (a client-side `object_teleport` of its own unit, run on its simulation thread),
-positions read from both stats servers (client 8765, server 8767).
+`/control?do=tpby&dx=..` to the CLIENT (a client-side `object_teleport` of its own unit, run from the main_loop_body
+hook on the engine main thread), positions read from both stats servers (client 8765, server 8767).
 
 | client steps | client after | server after | 3 s later | verdict |
 |---|---|---|---|---|
@@ -311,3 +318,13 @@ a modified client can move horizontally or vertically at roughly 2.5 units per a
 update rate (0.5 s steps all landed; 0.1 s steps outran it) and by collision (a capsule test; steps into a wall stop).
 This is stock Halo 3 client-predicted movement; whether Reclaimer's own anti-cheat watches for it was not tested beyond
 this (anti-cheat at the server's default, no kick or warning in 4 runs). Worth reporting to the Reclaimer developers.
+
+## Speed-step demo (2026-10-17, `shim/tools/speedstep-demo.sh`)
+
+A repeatable version for the developers. It starts this Mac's own local dedicated server (shim/dedicated.sh:
+127.0.0.1, hidden; its recorder `speedstep-demo.py` refuses any address but 127.0.0.1) and one input-less client: a
+scripted 6 s walk, then client-side steps through the same test hook (`STEP`=2.0 units every `INTERVAL`=0.25 s,
+`COUNT`=24), positions sampled from the SERVER's stats page at 10 Hz -> `positions.csv`, `summary.txt` and
+`speedstep-demo.mp4` (the server-side track over the map picture; `speedstep-demo.py --render-only <map>` redraws the
+video from the CSV). First run, Valhalla: walking 3.59 u/s, stepping 7.46 u/s (2.1x; 26 of 28 units) accepted without
+a correction.

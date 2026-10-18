@@ -2,7 +2,10 @@
 
 halo3.dll keeps a table of its HaloScript globals — 24-byte entries `{name, type, storage}` (1251 of them in
 the MCC build the loader runs). The retail build **compiled out the storage of ~1030** (storage address 0),
-so most debug switches are gone; **72 settings remain live**. The loader can set any of them at launch:
+so most debug switches are gone. Of the 219 entries with storage (re-counted 2026-10-18 from the halo3.dll in the
+prefix), 138 are AI enum constants (`ai_movement_*`, `ai_activity_*`, `morph_form_*`, type short), 2 are AI handles
+(`ai_current_squad` / `ai_current_actor`, type 19), and **79 are settings** (36 bool, 35 real, 8 long): the tables
+below. The loader can set bool / real / short / long globals at launch (other types are reported as unsupported):
 
 ```bash
 PELOAD_H3="render_debug_depth_render=1,camera_fov_scale=1.2" bash shim/play.sh
@@ -18,7 +21,8 @@ Effects not marked "verified" are inferred from the names — try them.
 (`cheat_deathless_player`, `cheat_infinite_ammo`, `cheat_bottomless_clip`, `cheat_super_jump`, `cheat_medusa`,
 `cheat_omnipotent`, `cheat_jetpack`, …) all have no storage — their variables and drawing code are not in the
 retail DLL. Compiled-out families by prefix: debug 244, ai 216, render 117, net 76, collision 55, havok 19,
-cheat 12, and smaller ones. The loader draws its own hitboxes instead (`PELOAD_HITBOXES`, see README).
+cheat 12, and smaller ones. The loader draws its own hitboxes instead (the stats page's Hitboxes button, or
+`PELOAD_HITBOXES` at launch; see README).
 
 
 ## Rendering and post-processing
@@ -116,6 +120,13 @@ cheat 12, and smaller ones. The loader draws its own hitboxes instead (`PELOAD_H
 | `enable_console_window` | bool | 1 | engine console window flag (no console UI in MCC builds). |
 | `sapien_keyboard_toggle_for_camera_movement` | bool | 0 |  |
 | `enable_pc_joystick` | bool | 1 |  |
-| `ai_current_squad` | ? | 0 |  |
-| `ai_current_actor` | ? | 0 |  |
+| `ai_current_squad` | AI handle (type 19) | 0 | not settable with `PELOAD_H3` (unsupported type). |
+| `ai_current_actor` | AI handle (type 19) | 0 | not settable with `PELOAD_H3` (unsupported type). |
 | `debug_controller_latency` | bool | 0 |  |
+
+## Flood morph (campaign AI; no effect in multiplayer)
+
+| Setting | Type | Default | Notes |
+|---|---|---|---|
+| `morph_disallowed` | bool | 0 | Flood pure forms never morph. |
+| `morph_time_ranged_tank`, `morph_time_ranged_stealth`, `morph_time_tank_ranged`, `morph_time_tank_stealth`, `morph_time_stealth_ranged`, `morph_time_stealth_tank` | real | 1.5 | morph duration (s) between the forms. |

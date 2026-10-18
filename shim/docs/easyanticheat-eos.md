@@ -1,8 +1,8 @@
 # Easy Anti-Cheat (EOS) in MCC: what it does, what it sends, how its driver gets loaded
 
-Static analysis of `easyanticheat_eos_setup.exe` as shipped with Halo: The Master Chief Collection. It was done
-after users asked whether the file is malware or a rootkit, and why Project Reclaimer works without it. Nothing was
-executed: the binary was only read as data.
+Static analysis (2026-10-17) of `easyanticheat_eos_setup.exe` as shipped with Halo: The Master Chief Collection. It
+was done after users asked whether the file is malware or a rootkit, and why Project Reclaimer works without it.
+Nothing was executed: the binary was only read as data.
 - **Tools:** an angr call graph of the whole binary (4,240 functions), capstone, and a small interpreter for its
   obfuscated strings.
 - **Addresses:** virtual addresses (ImageBase 0x400000; the file is 32-bit x86).

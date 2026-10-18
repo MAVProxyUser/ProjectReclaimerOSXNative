@@ -1,7 +1,8 @@
 # Event feed: chat, HUD message lines, kill events (static RE)
 
-Static RE only, 2026-10-17. Tools: capstone over every `.pdata` function of both binaries, `re-tools/refs.py`,
-`re-tools/hdis.py`, `re-tools/hsfuncs.py`, `re-tools/h3map.py`. No process was run and no live memory was read.
+Static RE, 2026-10-17. Tools: capstone over every `.pdata` function of both binaries, `re-tools/refs.py`,
+`re-tools/hdis.py`, `re-tools/hsfuncs.py`, `re-tools/h3map.py`. The RE itself read no live memory; all three hooks
+below have been in use since the same day (section 0).
 Binaries:
 - `$HOME/Library/Application Support/ReclaimerMac/prefix/drive_c/Program Files/Steam/steamapps/common/Halo The Master Chief Collection/halo3/halo3.dll`
   (base 0x180000000, addresses `halo3+RVA`)
@@ -21,6 +22,32 @@ unchanged. TLS: `tls = gs:[0x58][*(u32*)(halo3+0xa39f9c)]`, players data array `
 | Structured game-engine events: kills with damage type and modifiers, joins, flag, infection... | `halo3+0x11b0ec` game_engine_display_event | 17, PIC | rcx `event*` (0x2c bytes) |
 
 Do **not** hook `halo3+0x118a1c` (game_engine_player_killed). The client detours that function itself (see 3.4).
+
+## 0. In use: the stats page event feed (stats.c, since 2026-10-17)
+
+All three hooks are installed whenever the stats server is on (`PELOAD_STATS_HTTP`, play.sh default 8765). The two
+halo3 hooks only copy into rings, which the stats thread turns into feed events; the chat hook adds its line
+directly. Verified live (a public team game, HugeGrass LA). Feed: `GET /feed.json?since=<seq>` (last 1024 events),
+the snapshot carries `feed_seq`; `PELOAD_FEED_LOG=1` prints each event, `PELOAD_FEED_RAW=1` every raw engine event.
+
+- **Chat**: `st_chat_install` finds push_history by signature (patch-addresses.md 8.6; v0.9.6+) and hooks it with
+  `st_on_chat`: chat lines with their channel (all / team / nearby), `[SERVER]` lines, notices.
+- **Kills**: `st_events_install` hooks display_event (`st_on_display_event`, `PELOAD_NO_EVHOOK` = off). Events with
+  +0x25 bit 0 become exact kill lines: the verb from the general index (0x24 splattered, 0x25 beat down, 0x2a stuck,
+  0x2b sniped, 0x2c assassinated, 0x02 betrayed, 0x01 suicide, 0x23 fall), the weapon from 3.5 (stats.c `g_dmg_name`
+  follows the projectile column, not the client's shifted names), a collision kill names the killer's vehicle, damage
+  type 0 with a killer = an unnamed (modded) weapon. Betrayals and suicides do not count as kills on the page.
+- **HUD lines**: chud_messaging_post through `entry_hook_tail` (peload.c) with the replay tail of 2.1; `ret_r9`
+  passes the caller's return address in r9, which `st_on_chud` uses to label the line: halo3+0x11b860 = an event
+  line (paired with the display_event in flight on that thread), halo3+0x2d3f1b = post by string id, halo3+0x2ddd18 =
+  the one-time hint, inside the exe = the client's roster line (patch-addresses.md 8.3).
+- **Estimates**: deaths the stats thread's death tracker sees wait 2 s for an engine kill event (0.15 s on the host
+  plus the network to a client) before they go out as estimated (`"estimated": true`, the page's ≈) with the
+  last-hit shot as the killer. A client gets only kills involving its team (3.3): all of them in two-team games,
+  only its own in free-for-all and Infection, where every player has a team number of its own.
+- **Client log lines**: `st_feed_log` reads the client's stdio writes (NtWriteFile, which Rust's std uses, plus
+  WriteFile / WriteConsoleW): roster joins and leaves, votes, shuffles, kicks, match start ("Loading screen complete")
+  and end ("Carnage report opened"); `PELOAD_FEED_MATCH=<text>[,...]` adds lines containing those texts.
 
 ## 1. Chat (Reclaimer's own text chat, not halo3)
 
@@ -54,8 +81,8 @@ b8993c  48 81 ec a8 00 00 00    sub rsp, 0xa8          <- 19 bytes end here
 b89943  48 8d ac 24 80 00 00 00 lea rbp, [rsp+0x80]
 ```
 `entry_hook(exe_base+0xb89930, pro, 19, fn)` calls `fn(rcx, rdx, r8, r9)` with the arguments untouched. The hook
-must only read `line`. The exe is not verified by the client the way it verifies halo3 code. GUESSED; nothing found
-that checks it.
+must only read `line`. The client does not check this prologue: hooked in every stats-page run since 2026-10-17
+without a complaint from it.
 
 **`Line` (0x40 bytes, Rust enum, niche in the first qword).** CONFIRMED from the chat panel drawer `exe+0x2da7e0`
 ("[TEAM] " at `2db082`, "[NEARBY] " at `2dad72`, "[SERVER] " at `2dae9f`; name from +0x08/+0x10 at `2db08f`, text
@@ -80,8 +107,8 @@ The strings are **UTF-8 Rust Strings, not wide chars and not NUL-terminated**: u
 | `exe+0x691db3` | `exe+0x691c80` | Server lines produced locally (`exe+0xb89c10`; GUESSED: the replies to chat commands such as /help) |
 
 On a dedicated server the lines come from the server, through `exe+0x682f60`. The text chat runs in the process
-that loads halo3.dll. That process owns the remote-host connection `exe+0x68c790`, the same one the teleport code
-uses (`teleport.md`). GUESSED, so check it at runtime.
+that loads halo3.dll (CONFIRMED at runtime: the hook catches chat there, the only process whose stats server binds).
+That process owns the remote-host connection `exe+0x68c790`, the same one the teleport code uses (`teleport.md`).
 
 **Join/leave lines are different:** they go into halo3's HUD feed, see 2. The client's chat panel never sees them, and
 `push_history` does not catch them.
@@ -139,7 +166,8 @@ trampoline cannot copy them unchanged. After `fn(rcx, rdx, r8, r9)` it should ru
 41 FF E3                         jmp r11
 Lret: 48 83 C4 28 C3             add rsp, 0x28 ; ret
 ```
-r9 and r11 are overwritten by the original code anyway. A mid-function hook at `2d3f3c` (15 PIC bytes) would also
+r9 and r11 are overwritten by the original code anyway. This is what stats.c `st_events_install` builds and passes
+to `entry_hook_tail` (section 0). A mid-function hook at `2d3f3c` (15 PIC bytes) would also
 work, but there `rsp` is 16-byte aligned, so `entry_hook`'s frame would call `fn` misaligned. That needs an extra
 8-byte adjust. The client does not check this prologue: no copy of its bytes is in the exe.
 
@@ -226,7 +254,8 @@ this holds on the dedicated server.
 11b0f9  44 39 41 0c              cmp [rcx+0xc], r8d     <- 17 bytes, all PIC
 11b0fd  75 61                    jne 0x11b160           (rel8: do not copy)
 ```
-`entry_hook(base+0x11b0ec, {40 53 48 83 ec 40 41 83 c8 ff 48 8b d9 44 39 41 0c}, 17, fn)`. The trampoline's final
+`entry_hook(base+0x11b0ec, {40 53 48 83 ec 40 41 83 c8 ff 48 8b d9 44 39 41 0c}, 17, fn)` (stats.c
+`st_events_install`, installed when halo3.dll is mapped). The trampoline's final
 `mov r11,imm64; jmp r11` leaves the flags of the copied `cmp` intact for the `jne` at 11b0fd. The client has no
 reference to this function and no copy of its bytes. It runs on the engine main thread inside the tick, so the hook
 should only copy the event into a ring. Names and teams can be resolved later from the players table, unless the
@@ -235,7 +264,8 @@ victim has left the game by then.
 **What a client does not see:** the host sends an event only to machines whose players have a definition for it
 (`1eec5`/`1eeec`). General kill definitions exist only for the cause/effect player and cause/effect team
 (3.6), so a client receives kills that involve itself or its team. In free-for-all that means only its own kills
-and deaths; a team game covers nearly all. The host, and the dedicated server, see every event.
+and deaths; a two-team game covers nearly all. CONFIRMED live (2026-10-17): Infection behaves like free-for-all
+(every player has a team number of its own). The host, and the dedicated server, see every event.
 
 Alternative: `halo3+0x11b184` send_event (rcx event, dl queue), 16 PIC bytes
 `48 89 5c 24 08 57 48 83 ec 20 40 8a fa 48 8b d9` (the next instruction is a `call rel32`). It fires when an

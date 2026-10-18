@@ -5,7 +5,16 @@ Static review of `project-reclaimer-dedicated-v0.9.13.exe` and
 modified for this review. Static evidence (strings, imports, exports) shows
 what code *exists* and roughly how it's gated; it does **not** prove runtime
 reachability. Confirming the reachable paths needs the dynamic pass (fuzzing
-a local server), which the shim will enable.
+a local server).
+
+Status 2026-10-18: the dedicated server now runs on the Mac under the loader
+(since 2026-10-16): `bash shim/dedicated.sh` runs the v0.9.18 client exe's
+`dedicated` subcommand with a LOCAL-ONLY config (hidden, master off, UPnP
+off, 127.0.0.1, RCON on TCP 127.0.0.1:49190 with a random 16-character
+password). So the dynamic pass is possible now, but it has **not** been done.
+The review was not redone for v0.9.18; spot check: the v0.9.18 client exe
+still carries the same RCON strings ("RCON is not encrypted ...", "gave a
+wrong password", `rcon_password`) and the SteamCMD path.
 
 ## Direct answers
 
@@ -73,7 +82,9 @@ From the client's own arg surface and the server's help/response strings:
 `vote` (+ `vote image`), `end` (end game) / start new round, `team` + `team
 shuffle`, `map` / `variant` / `playlist` selection, and `--watch` (stream
 console + live events). All operate on the running match. None sets config,
-installs Workshop items, writes files, or changes ports.
+installs Workshop items, writes files, or changes ports. Seen in use on our
+local server (2026-10-17): `team` moves a player to another team without
+killing it.
 
 ## Flawed-logic / risk notes (static, to verify dynamically)
 
@@ -93,4 +104,7 @@ installs Workshop items, writes files, or changes ports.
    or crosses the `halo3.dll` FFI (UB). Answerable only at runtime.
 
 Nothing here is a filed remote vulnerability. The actionable items today are
-deployment hygiene (#1, #2). The rest resolves in the dynamic pass.
+deployment hygiene (#1, #2). The rest resolves in the dynamic pass (not done
+yet). The one game-protocol finding so far is elsewhere: a server adopts
+client-predicted positions up to ~2.5 units per update with no speed check
+(net-authority.md, tested against our local dedicated server).

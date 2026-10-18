@@ -10568,12 +10568,11 @@ static void hook_install(void){ const char*s=getenv("PELOAD_HOOK"); if(!s) retur
         char*plus=strchr(tok,'+'),*c1=strchr(tok,':'); if(!plus||!c1) continue; char*c2=strchr(c1+1,':'); if(!c2) continue;
         *plus=0;*c1=0;*c2=0; uint8_t*base = !strcasecmp(tok,"exe")? g_base : mod_base(tok); if(!base) continue;
         hook_one(base,strtoull(plus+1,0,16),(int)strtoull(c1+1,0,10),strtoull(c2+1,0,16)); } }
-// ---- Armor/skin-registry null-key guard (PELOAD_SKINGUARD) --------------------
-// During round-start the engine registers each player's custom armor material into an
-// RB-tree (halo3+0x2aacf0). It derives the tree key by calling a provider's field_20
-// virtual, which hands sub_1802ac24c a "key object" (arg3 = r8). Under our stubbed GPU
-// the provider is a valid object but its backing render resource is absent, so field_20
-// yields a NULL key object -> sub_1802ac24c dereferences it (`mov rax,[r14]`) and faults.
+// ---- Input-layout null-key guard (PELOAD_SKINGUARD; the name is historical) --------------------
+// sub_1802ac24c builds a D3D11 input layout (CreateInputLayout with the vertex shader blob it gets via GetPrivateData)
+// for the input-layout cache, an RB-tree at halo3+0x2aacf0 -- first misread as an armor/skin registry (RE log session
+// 10; shim/docs/patch-addresses.md). At round start it is handed a NULL "key object" (arg3 = r8) when the backing
+// render resource is absent and dereferences it (`mov rax,[r14]`) -> fault.
 // The engine's own contract already tolerates an empty registration (the parent checks
 // `if(result)`), so we install an entry detour on sub_1802ac24c: when the key object is
 // null, return 0 (skip the hash/insert) instead of crashing. Non-null keys run normally.

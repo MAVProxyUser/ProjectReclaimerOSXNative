@@ -1,7 +1,19 @@
 # The `--native-udp` native-transport integrity gate — PASSED
 
-Status: **PASSED** as of 2026-10-11. The gate below is defeated; the current
-blocker moved on to `Error: System error 2 (os error 2)` (see the last section).
+Status: **PASSED** as of 2026-10-11. The gate below is defeated. Everything
+after it in this file is history (2026-10-11): the `os error 2` blocker was
+fixed the same day (last section), a real NSWindow came the same evening, and
+the client now runs its menu, joins online games and renders them (CLAUDE.md).
+
+**Still true today:** the client checks halo3.dll's ws2_32 import slots on
+every run (the play log's "Selected native loopback bind; shell peer
+transport=true." is the passed gate). Every ws2_32 import (exe and halo3) is
+bound through the one ordinal/name table that `GetProcAddress(WS2_HANDLE,
+...)` also uses (peload.c
+`ws2_by_ordinal` / `ws2_resolve_name`); the trace stubs of `PELOAD_TRACE_ALL`
+/ `PELOAD_CALLCOUNT` wrap only the **exe's** ws2 imports, never halo3's (a
+stub there would differ from GetProcAddress and trip "Native transport
+instruction/import mismatch; refused").
 
 ## How the gate was passed (summary)
 
@@ -145,9 +157,10 @@ the exact compare constants live in the gate function (to be pinned down).
    present loop without the transport — e.g. by making the gate's refusal
    non-fatal or by driving the menu render directly.
 
-## Separate remaining work for a *visible* screen
+## Separate remaining work for a *visible* screen (DONE 2026-10-11, `548d4ce`)
 
-Even past the gate, nothing is shown yet:
+Done: a real NSWindow + GL context (later the present thread and the D3D11->GL
+renderer). As written at the time, even past the gate, nothing was shown yet:
 
 - `CreateWindowExW` is a stub returning a fake HWND — no Cocoa window exists.
 - The GL context is an **offscreen CGL context**; `SwapBuffers`→`CGLFlushDrawable`
@@ -160,7 +173,17 @@ A cheaper interim proof is to `glReadPixels` one rendered frame and write a PNG.
 
 ---
 
-## CURRENT BLOCKER: `Error: System error 2 (os error 2)`
+## FIXED (2026-10-11, `2a8f65e`): `Error: System error 2 (os error 2)`
+
+Resolution: `PELOAD_TRACE_EMPTY=1` (the exe return addresses of a
+`CreateFileW("")`) showed the empty path was cloned from an empty global
+String, the **playlist path**. The loader now stages
+`C:\ReclaimerContent\default.playlist.json` (an empty rotation) and redirects
+empty-path opens to it (`PELOAD_NO_EMPTY_FIX` = old; `/dev/null` when the file
+is missing). The same commit made `GetEnvironmentVariableW` report
+ERROR_ENVVAR_NOT_FOUND for unset variables (Rust saw `Some("")` for every one)
+and `GetModuleFileNameW` return the exe path. The findings as written before
+the fix:
 
 The worker exits 1 with this after audio init. Findings so far:
 

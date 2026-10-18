@@ -81,8 +81,9 @@ The fixed RVAs `exe+0x4e066d`, `0x460294`, `0x4602cb`, `0x460302`, `0x460335` ho
 v0.9.13 and in no other build; `0x66bea0` / `0x684080` / `0xb89930` (set_muted / voice_recv / push_history) only in
 v0.9.18. CONFIRMED for all 34 builds.
 
-Correction to `halo3-event-feed.md` 3.4: in v0.9.18 the 15 prologue bytes the client checks are at **exe+0x1fec270**
-(the `lea r8` at 0x5aa2d1). exe+0x1fec2c0 is inside the string "Custom mode native contract mismatch".
+In v0.9.18 the 15 prologue bytes the client checks are at **exe+0x1fec270** (the `lea r8` at 0x5aa2d1;
+`halo3-event-feed.md` 3.4 has been corrected to it). exe+0x1fec2c0, the address given earlier, is inside the string
+"Custom mode native contract mismatch".
 
 The loader's own halo3.dll hooks (main_loop_body halo3+0xb2250, object_delete +0x342ed8, display_event +0x11b0ec,
 chud post +0x2d3f2c) are not affected by Reclaimer releases (they depend on MCC's halo3.dll). No client build carries
@@ -375,8 +376,10 @@ binaries and are kept outside the repo.
 
 ## 8. Everything the loader touches
 
-Static, 2026-10-17, same rules as above. Every byte the loader patches, every function it detours or calls, every
-return address it compares and every variable it reads or writes, in **both** binaries, from `shim/src/*.c`.
+Static, 2026-10-17, same rules as above; re-checked against `shim/src/*.c` on 2026-10-18 (nav.c, the walker, and
+wininput.c touch no fixed address; nothing new was hooked since). Every byte the loader patches, every function it
+detours or calls, every return address it compares and every variable it reads or writes, in **both** binaries, from
+`shim/src/*.c`.
 
 **halo3.dll**: the MCC copy in the prefix (`.../Halo The Master Chief Collection/halo3/halo3.dll`), 11,127,768 bytes,
 SHA-256 `b209d8454b12dc77e54ccd2c9924ec8d44b8619d21cf98e36ffaf601e67efb63`, PE timestamp 2025-08-16 20:45 UTC,
@@ -397,7 +400,7 @@ instruction sequence that references the variable: address = hit + (end of that 
 | 0xb2250 | main_loop_body (frame safe point) | entry hook: 20 bytes compared + relocated | peload.c `hbdel_install` -> `hb_frame_hook` (teleport, bounds, stats voice mutes) | fixed + compare | `48 8B C4 57 48 81 EC 60 02 00 00 48 C7 44 24 30 FE FF FF FF 48 89 58 18` | +0 | `48 8B C4 57 48 81 EC 60 02 00 00 48 C7 44 24 30 FE FF FF FF` |
 | 0x11b0ec | game_engine_display_event | entry hook: 17 bytes compared + relocated | stats.c `st_events_install` -> `st_on_display_event` (off with `PELOAD_NO_EVHOOK`) | fixed + compare | `40 53 48 83 EC 40 41 83 C8 FF 48 8B D9 44 39 41 0C 75 ??` | +0 | `40 53 48 83 EC 40 41 83 C8 FF 48 8B D9 44 39 41 0C` |
 | 0x2d3f2c | chud_messaging_post | `entry_hook_tail`: 16 bytes compared; the replay tail re-runs `sub rsp,0x28 ; cmp ecx,4 ; jge`, loads the TLS index from the absolute address halo3+0xa39f9c and jumps to +0x10 (0x2d3f3c); r9 = the return address | stats.c `st_events_install` -> `st_on_chud` | fixed + compare. The 16 compared bytes contain a rip-relative disp32, so any rebuild breaks the compare even when the code is the same | `48 83 EC 28 83 F9 04 7D ?? 44 8B 0D ?? ?? ?? ?? 65 48 8B 04 25 58 00 00 00` | +0 (resume +0x10) | `48 83 EC 28 83 F9 04 7D 36 44 8B 0D 60 60 76 00` |
-| 0x2ac24c | armor-skin key registration (sub_1802ac24c) | entry detour, 14 bytes relocated, **not compared**: `test r8,r8 ; jz -> xor eax,eax ; ret` | peload.c `skinguard_install` / `skinguard_one` (`PELOAD_SKINGUARD`) | fixed RVA, no check | `48 8B C4 55 56 57 41 54 41 55 41 56 41 57 48 8D 68 A1 48 81 EC 90 00 00 00 48 C7 45 C7 FE FF FF FF` | +0 | `48 8B C4 55 56 57 41 54 41 55 41 56 41 57` |
+| 0x2ac24c | input-layout build (sub_1802ac24c, called by the input-layout cache 0x2aacf0; it runs `CreateInputLayout` with the VS blob from `GetPrivateData`). The old name "armor-skin key registration" (still in the peload.c comment) was wrong: RE log session 10 | entry detour, 14 bytes relocated, **not compared**: `test r8,r8 ; jz -> xor eax,eax ; ret` | peload.c `skinguard_install` / `skinguard_one` (`PELOAD_SKINGUARD`; set by play.sh, target.sh, quiet-run.sh, dedicated.sh) | fixed RVA, no check | `48 8B C4 55 56 57 41 54 41 55 41 56 41 57 48 8D 68 A1 48 81 EC 90 00 00 00 48 C7 45 C7 FE FF FF FF` | +0 | `48 8B C4 55 56 57 41 54 41 55 41 56 41 57` |
 | 0x28e8e0 | per-section decompression cb builder (sub_18028e8e0) | trace detour `hook_one` id 0xdec0, 14 bytes relocated, not compared | peload.c `capcb1_install` (`PELOAD_D3DGL_CAPCB1`) | fixed, no check | `40 55 48 8B EC 48 83 EC 50 F3 0F 10 51 04 48 8D 55 D0` | +0 | `40 55 48 8B EC 48 83 EC 50 F3 0F 10 51 04` |
 | 0x172bce | NULL-vtable release in the resource sweep (FUNC 0x172ad0) | mid-function detour, 17 bytes relocated, not compared; NULL vtable -> jump to 0x172bee | peload.c `vtguard_install` / `vtguard_one` (`PELOAD_VTGUARD`) | fixed RVA and fixed skip RVA | `75 ?? 49 8B 06 49 8B CE FF 10 83 C8 FF F0 41 0F C1 46 0C 83 F8 01 75 ?? 49 8B 06` | +2. Skip = the target of the leading `jne`: site + (int8)sig[1] | `49 8B 06 49 8B CE FF 10 83 C8 FF F0 41 0F C1 46 0C` |
 | 0x172f9a | NULL-vtable release, shared_ptr release (FUNC 0x172e88) | same, 15 bytes; skip 0x172fb7 | same | fixed | `75 ?? 48 8B 03 48 8B CB FF 10 8B C7 F0 0F C1 43 0C 03 C7 75 ??` | +2. Skip = site + (int8)sig[1] | `48 8B 03 48 8B CB FF 10 8B C7 F0 0F C1 43 0C` |
@@ -444,6 +447,12 @@ Without the leading `44 8B C7` the 0x2d3f1b signature also matches 0x2d5026, a t
 | 0x21c2398 | the `_Mtx` from the thread-id note (info) | none | peload.c comment | -- | `48 83 EC 38 48 C7 44 24 20 FE FF FF FF BA 02 01 00 00 48 8D 0D ?? ?? ?? ??` (FUNC 0x5170) | hit + 0x19 + disp32@+0x15 |
 | HaloScript globals | `PELOAD_H3=name=value` | write | peload.c `h3set_install` | by name at run time ("\0name\0" -> the 24-byte table entry -> storage) | -- | nothing to update |
 
+Game-state fields reached through the TLS block (offsets inside halo3's structures, not RVAs: an MCC update can move
+them only by changing the struct layouts; halo3-variant-traits.md, halo3-objects.md): the loader **writes** two of
+them: the variant's base speed trait `game_globals + 0x1608 + 0x134 + 0x10` (stats `do=speed`, host only) and player
++0x1F0, the betrayer handle (`PELOAD_TEST_BOOT_PROMPT` test hook). Everything else there (players +0x10, objects
++0x38, game_globals +0x48, player mapping +0x110, ...) is read only.
+
 ### 8.5 halo3.dll: referenced only in comments and docs (info)
 
 | RVA | What | Function | Signature | Site |
@@ -453,9 +462,10 @@ Without the leading `44 8B C7` the 0x2d3f1b signature also matches 0x2d5026, a t
 | 0x33f5bf | "object" array creation (call site) | FUNC 0x33f2dc | `48 8D 0D ?? ?? ?? ?? 89 15 ?? ?? ?? ?? 45 8D 41 18` | +0 |
 | 0x3457d8 | object_set_permutation | FUNC 0x3457d8 | `48 89 5C 24 18 89 54 24 10 89 4C 24 08 55 56 57 41 54 41 55 41 56 41 57 48 83 EC 50` | +0 |
 | 0x345d38 | object_set_permutation (2nd) | FUNC 0x345d38 | `48 89 5C 24 08 48 89 74 24 10 48 89 7C 24 18 44 8B 15 ?? ?? ?? ?? 49 8B F0` | +0 |
-| 0x2aacf0 | armor skin RB-tree | FUNC 0x2aacf0 | `48 89 5C 24 18 48 89 7C 24 20 55 48 8B EC 48 83 EC 50` | +0 |
+| 0x2aacf0 | input-layout cache (an RB-tree; first called the armor-skin registry, see 0x2ac24c) | FUNC 0x2aacf0 | `48 89 5C 24 18 48 89 7C 24 20 55 48 8B EC 48 83 EC 50` | +0 |
 | 0x2af4ef | D3DReflect call site | FUNC 0x2af4b8 | `FF 15 ?? ?? ?? ?? 85 C0 0F 88 ?? ?? ?? ?? 48 8B 4D 38` | +0 |
-| 0x13f23a | main-thread memcpy call site | FUNC 0x13f168 | `E8 ?? ?? ?? ?? 49 8B 84 FC A0 4A 00 00 8B EB 4C 8B 70 10` | +0 |
+| 0x13f23a | main-thread memcpy call site: halo3's ~14 MB game-state copy, ~5 a frame (return address 0x13f23f is what `PELOAD_MEMCPY_LOG` prints; the copy `PELOAD_MEMCPY_COW` and `PELOAD_PAR_MEMCPY` were built for, both opt-in and applied to any big copy) | FUNC 0x13f168 | `E8 ?? ?? ?? ?? 49 8B 84 FC A0 4A 00 00 8B EB 4C 8B 70 10` | +0 |
+| 0x620170 | spin-then-block lock acquire: it spins (`pause` loop) only while the processor count is > 1. Count = s16 at 0xa3a48c, stored at 0x620295 from `GetSystemInfo` (call at 0x620275; the allocation granularity goes to 0xa3a488). Read by 0x62018a and six more sites in 0x620229..0x620898. Why `PELOAD_SYSINFO=real` matters (peload.c `i_GetSystemInfo`; default still 1 processor) | FUNC 0x620170 | `48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 48 89 7C 24 20 41 56 48 83 EC 20 0F BF 35 ?? ?? ?? ?? 8B EA 48 8B D9 41 BE 01 00 00 00` (count = hit + 0x21 + disp32@+0x1d) | +0 |
 | 0x9d22c | old ms timer (no longer hooked) | FUNC 0x9d22c | `40 53 48 83 EC 20 65 48 8B 04 25 58 00 00 00 8B 0D ?? ?? ?? ?? BA 80 00 00 00` | +0 |
 | 0xfcc20 | betrayal-popup condition | FUNC 0xfcc20 | `48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20 44 8B 05 ?? ?? ?? ?? 33 DB 65 48 8B 04 25 58 00 00 00 48 8B F2 0F B7 C9 48 69 F9 F8 02 00 00` | +0 |
 | 0xff5fc | betrayal popup post | FUNC 0xff5fc | `48 89 5C 24 08 55 56 57 41 54 41 55 41 56 41 57 48 83 EC 40 0F 29 74 24 30` | +0 |
@@ -488,6 +498,12 @@ found; no recommended signature matches a wrong place in any release.
 | expanded-session flag | 0x27f7210 | read byte (0 = 16-player, 1 = 128-player layout) | stats.c `st_voice_init`, `st_session` | **fixed RVA**, only when set_muted sits at 0x66bea0 | `31 C0 48 3B 45 ?? 0F 81 ?? ?? ?? ?? 48 89 3D ?? ?? ?? ?? C6 05 ?? ?? ?? ?? 01` (the single writer, v0.9.18 0x9e4a42) | writer `C6 05` at +0x13 | flag = hit + 0x1a + disp32@+0x15 | 16/34 = every build that has it (v0.9.2+) |
 | guardian-refusal | 0x5cc021 | patch jno -> 6x NOP (manual `PELOAD_PATCH`) | CLAUDE.md / RE notes: `exe+4e066d:909090909090` | **fixed RVA**, v0.9.13 only | `31 C0 48 3B 85 ?? ?? ?? ?? 0F 81 ?? ?? ?? ?? 48 8B 8D ?? ?? ?? ?? E8` | +9 | `0F 81 36 0B 00 00` -> 6x `90` | 13/34 (v0.9.5+; older builds: string anchor, section 5) |
 | xaudio presets | = the xaudio sites | manual `PELOAD_PATCH=exe+460294,...` | CLAUDE.md | **fixed RVAs**, v0.9.13 only | the xaudio signatures above | | | |
+
+Also: `st_on_chud` labels a HUD line as the client's (src 3) when the return address lies inside the exe image
+(`[exe, exe+0x3000000)`), not by a fixed RVA. Exe RVAs that appear only in source comments (not touched, not
+maintained): v0.9.18 0x7385e0 (the mcc-voice thread's key poll that holds a lock the main thread takes;
+`PELOAD_POLL_DAMP`), 0x1d6455d (Rust `eprintln`, the TEB-less loader-thread fault), 0x793f40 (the watchdog
+function); v0.9.13 0x550e00 / 0x551043 / 0x553ad9 (ui-reentrancy), 0x4b9480, 0x481560.
 
 **The workshop-download command line** (not a patch). peload.c's `CreateProcessW` replaces the client's
 `<exe> workshop-download ...` child with `shim/tools/workshop-helper.sh`. It takes the item id from the token after

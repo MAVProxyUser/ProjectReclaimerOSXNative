@@ -2,10 +2,17 @@
 
 Found 2026-10-17 by static RE only (capstone/angr on
 `$HOME/Library/Application Support/ReclaimerMac/prefix/drive_c/Program Files/Steam/steamapps/common/Halo The Master Chief Collection/halo3/halo3.dll`,
-ImageBase 0x180000000; all addresses below are RVAs, `halo3+0x...`). Nothing was read from a live process.
+ImageBase 0x180000000; all addresses below are RVAs, `halo3+0x...`). The RE read nothing from a live process.
 **CONFIRMED** = the offset/encoding is read or written that way in code (evidence given). **GUESSED** = name or
 meaning inferred (H3/ElDewrito naming, validator order in `game-options.md`, MCC setting-id order), offset itself
 may still be confirmed.
+
+In use since 2026-10-17 (stats.c): the stats page shows the running variant (`gg+0x1608`, only while `gg+0x10 == 2`),
+every option decoded with `option-map.json` (game-options.md), every trait set, and each player's active traits
+(player +0x1FC) with powerup / respawn-trait countdowns. Checked live on Slayer: rounds, respawn, map, powerup and
+points values and the powerup trait sets matched the game. Host only, the page's Speed menu (`do=speed&v=<index>`)
+writes the base player traits' speed byte (`v+0x134+0x10`); the host recomputes every player's traits from it each
+tick. The local player comes from the player mapping (section 6: `pm+0xB8`, then the local machine index).
 
 ## 1. Where the active variant lives
 
@@ -203,7 +210,8 @@ if (gg && gg[0x10] == 2) {
 
 Found 2026-10-17, static only (same halo3.dll). The engine keeps an explicit user -> player mapping, so the local
 player never has to be guessed from the camera. Function names are ours (H3 naming, GUESSED); the offsets and
-behaviour are CONFIRMED by the instructions cited.
+behaviour are CONFIRMED by the instructions cited. stats.c uses 6.1 and 6.2 (the camera / view-ray guess is only
+its last resort) for the page's "you" and the overlay's friend/enemy split; 6.4's observer camera is not used.
 
 ### 6.1 player mapping globals: `pm = *(u64*)(tls + 0x110)`, 0xE8 bytes (the answer)
 

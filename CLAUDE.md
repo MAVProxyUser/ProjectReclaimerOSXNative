@@ -12,7 +12,7 @@ PELOAD_SKINGUARD=1 PELOAD_PATCH="exe+4e066d:909090909090" PELOAD_LOCAL_RUNTIME="
   PELOAD_PRESENT=1 PELOAD_HOLD_WINDOW=1 PELOAD_WORKER_INHERIT_STDIO=1 \
   arch -x86_64 shim/build/peload analysis/project-reclaimer-v0.9.13.exe
 ```
-`PELOAD_SKINGUARD=1` installs the armor-skin null-key guard (entry detour on halo3+0x2ac24c);
+`PELOAD_SKINGUARD=1` installs the null-key guard on halo3's input-layout builder (entry detour on halo3+0x2ac24c; first misread as an armor-skin registry);
 without it round-start faults at RVA 0x2AC329. With it: map loads 100%, player spawns,
 `simulation_ready:true`, "gameplay presentation ready". Read the worker's stdout for state
 (see memory [[reclaimer-skinguard-simstart]]). `C:\ReclaimerProfile\Logs\client.log` stays empty: the client opens it

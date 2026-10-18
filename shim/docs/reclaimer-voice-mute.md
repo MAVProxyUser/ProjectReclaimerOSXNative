@@ -4,6 +4,12 @@ Client `client/project-reclaimer-client-v0.9.18.exe` (ImageBase 0x140000000; add
 `halo3+`). Found with `re-tools/refs.py`, `re-tools/hdis.py` and rip-relative/call xref scans only; nothing was run.
 CONFIRMED = read in the disassembly. GUESSED = inferred, check it at runtime before relying on it.
 
+**In use since 2026-10-17** (stats.c, stats page "Connected" list): per-player Mute / Unmute and Mute all through
+`set_muted` (section 6), the talking highlight from the `voice_recv` hook, the host badge (section "Host peer").
+Checked live: in an 89-player lobby a page mute was read back from the client's own MUTED list and unmuted again;
+against our local dedicated server the client reported host peer 0, its own peer 1, "dedicated server". Every RVA
+here is v0.9.18 only; other client builds: patch-addresses.md.
+
 ## Summary
 
 Mute is a process-global `Mutex<Vec<PeerId>>`, changed through one free function, `set_muted(id, bool)` at
@@ -91,8 +97,9 @@ halo3 for 128 slots.
   GUESSED (same size and field layout).
 - GUESSED consequences: split-screen players on one PC share one peer id, so one mute silences all of them. A
   reconnect may get a new peer id, and the old mute then no longer applies.
-- GUESSED: session player index `i` == the Halo players-table slot that stats.c reports. Check by comparing the
-  name at record+0x98 with players-table +0x58, and fall back to matching by name.
+- GUESSED: session player index `i` == the Halo players-table slot that stats.c reports. stats.c therefore pairs a
+  session record with a players-table row only when the index equals the slot **and** the names match; the
+  "Connected" list itself comes from the session alone (it works in the lobby, where the players table is empty).
 - Own id: VoiceClient+0x290, where VoiceClient = the Arc in `static Mutex<Option<Arc<..>>>` at exe+0x27dd660 (Arc
   pointer at exe+0x27dd668; accessor 0x68c790 clones it). Do not mute it.
 
@@ -115,8 +122,9 @@ set_muted / set_volume, so mutes last for the process lifetime.
    For `"muted"`, either scan MUTED's ptr/len (racy but bounded; ptr can be freed by a concurrent push, so prefer
    copying under the futex byte: cmpxchg 0->1, copy, xchg 0, call the shim's WakeByAddressSingle if the old value
    was 2), or call `is_muted` on the guest thread below.
-3. **Apply**: queue `(id, muted)` from the HTTP handler and run it on a guest thread. For example, the existing
-   `hb_frame_hook` (halo3+0x9d22c entry hook, halo3 main loop) like the teleport job:
+3. **Apply**: queue `(id, muted)` from the HTTP handler and run it on a guest thread. stats.c does it in
+   `st_voice_jobs`, called from `hb_frame_hook` (peload.c), the entry hook on main_loop_body (halo3+0xb2250, the
+   engine main thread once per frame; the old halo3+0x9d22c timer hook is gone), like the teleport job:
    `((void(__attribute__((ms_abi))*)(uint64_t,uint8_t))(exe+0x66bea0))(id, 1 or 0);`
    Any thread works for the state itself; the UI calls it from the egui thread, and it only touches the global
    Mutex plus allocator imports. A guest thread just keeps it like every other guest call. Per-player volume works
@@ -126,13 +134,31 @@ set_muted / set_volume, so mutes last for the process lifetime.
 5. **Do not** detour `is_muted`. Its rip-relative `lock cmpxchg` starts at +9, so `entry_hook` cannot relocate 14
    bytes, and a private mute list would desync from the client's own Mute/Unmute buttons.
 
-Runtime check before shipping (one run, no sweeps): log the session peer ids, click "Mute voice" in the client's
-scoreboard, and check that the id appended to MUTED (exe+0x27d7858/0x27d7860) matches the peer id this map gives
-for that player.
+What stats.c does now: `st_voice_install` (at exe load, stats page on) finds set_muted by the signature above and
+keeps it only if an is_muted-shaped function (`56 48 83 EC 20 B2 01 31 C0 F0 0F B0 15 <disp32>`) locks the same byte
+(in clients 0.8.16 .. 0.9.1 the signature hits a Forge setter instead; patch-addresses.md section 5); it hooks
+voice_recv (`st_on_voice`) and push_history (the chat feed, halo3-event-feed.md). `st_session` reads MUTED's ptr/len
+directly (no lock) for the page's "muted" flags; flag `X` is read at its fixed v0.9.18 RVA only when set_muted sits at
+exe+0x66bea0, other builds pick the layout whose records are valid. Per-player volume is not used.
+
+Runtime check: done 2026-10-17 (89-player lobby): a page mute was read back from the client's MUTED list, and
+unmute removed it.
+
+## 7. Microphone under the loader (wasapi.c)
+
+The Mac microphone is the client's WASAPI capture endpoint (AudioQueue input), so its voice chat starts once instead
+of rebuilding a playback stream every ~5 s (the old caulk crash trigger). `PELOAD_MIC` unset = the real microphone
+(a microphone that cannot be opened falls back to silence); `PELOAD_MIC=0` = a silent microphone (an endpoint that
+delivers silence: the voice chat still starts once); `=none` = no capture device (the old, crash-prone behaviour);
+`=tone` = a quiet test tone. `PELOAD_MIC_MUTED=1` starts muted; stats page `do=mic&on=0|1` (real microphone or tone
+only). The client sends voice only while its talk key is held (Hold) or toggled on (Toggle). quiet-run.sh uses
+`PELOAD_MIC=0` (`QR_MIC=tone` for the tone); target.sh runs without WASAPI (`PELOAD_NO_WASAPI=1`).
 
 ## Host peer
 
-Static RE (halo3.dll + client 0.9.18), not checked at runtime yet. The membership object is at `sess+0x30` (host
+Static RE (halo3.dll + client 0.9.18); checked at runtime 2026-10-17 against our local dedicated server (the joined
+client read host peer 0, local peer 1, no player on peer 0 = "dedicated server"; stats.c `st_session`, the page's
+★ HOST badge). The membership object is at `sess+0x30` (host
 create halo3+0xdbac: `lea rbp,[rcx+0x30]` is passed as `this` to the membership calls), and its shared part starts at
 `sess+0x38` in Halo 3's usual order: update number, leader, host, slot counts, peer count, peer mask (+0x54), peers (+0x58).
 
@@ -173,6 +199,8 @@ On a session hosted by a player, that player (and any split-screen players on th
 Read `sess+0x40` on every snapshot; do not hard-code 0. The restore path (host migration) keeps the old peer
 indices, so a migrated host is not peer 0, and the field can be -1.
 
+stats.c implements it (`st_session`: `g_st_hostpeer` / `g_st_localpeer`, valid only while the update number is not -1
+and the state is 4..9). The sketch it was written from:
 ```c
 // stats.c snapshot, after sess and lay (flag X) are read as in the voice map above
 int32_t st=0, upd=-1, host=-1, local=-1;

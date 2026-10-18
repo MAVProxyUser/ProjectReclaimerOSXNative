@@ -5,6 +5,11 @@ Scope: static review of `project-reclaimer-dedicated-v0.9.13.exe` and
 `SHA256SUMS.txt`). This is review of binaries we run on our own machine,
 for hardening our own server. No live server was attacked.
 
+Status 2026-10-18: not redone for v0.9.18, but the v0.9.18 client exe (whose
+`dedicated` subcommand is what `shim/dedicated.sh` runs) still carries the
+same RCON help and auth strings. The server runs under the loader since
+2026-10-16 (below), so the dynamic pass is possible; it has not been done.
+
 ## Headline: the toolchain changes which bugs are even possible
 
 Both binaries are **Rust** (rustc 1.x, confirmed by `rustc/<hash>` paths,
@@ -83,8 +88,12 @@ Strings show the *shape* of the code, not the control flow from
 
 ## Recommended next step: dynamic, in-context
 
-These unknowns are answerable precisely once the server runs — which is the
-other half of this project. Concretely, against a **local** instance:
+These unknowns are answerable precisely now that the server runs: `bash
+shim/dedicated.sh` starts a local-only server under the loader (127.0.0.1,
+hidden, master and UPnP off, RCON on TCP 127.0.0.1:49190 with a random
+password in its `dedicated.toml`; `DED_CONFIG=<file>.toml` for other configs;
+every game-server process logs to `/tmp/reclaimer_dedicated_<pid>.log`).
+Concretely, against that **local** instance:
 
 1. Fuzz the Source RCON TCP port with malformed frames: negative/huge length
    prefixes, truncated bodies, oversized bodies, missing terminators,
@@ -100,4 +109,6 @@ other half of this project. Concretely, against a **local** instance:
 
 Nothing here is a filed vulnerability yet. The one actionable hardening
 item today is deployment: **never expose the RCON port; loopback + tunnel
-only.** The rest is a dynamic pass once the server is up.
+only.** The rest is the dynamic pass (not done yet). A separate game-protocol
+finding, from a live test against our local server: the host adopts client
+positions up to ~2.5 units per update with no speed check (net-authority.md).
