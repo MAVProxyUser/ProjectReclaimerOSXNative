@@ -82,6 +82,11 @@ Levers for that thread (2026-10-18, backlog 41; each was opt-in until a BTB A/B 
 
 ### Import fast paths (2026-10-18, backlog 11 / 41): `PELOAD_FASTCALL`, opt-in until an in-match A/B
 
+**Measured in a match (2026-10-18):** a 128-player Forge World game, `PELOAD_FASTCALL=all PELOAD_AB=fastcall:20`, a
+stationary client: 32 on/off pairs, median +1.3%, mean +1.5%, ahead in 18 of 32 -- what the per-call numbers predicted
+(1.4-2.8%), not clearly above the scene noise. The same with the test walker (scenes change with every death): 24 pairs,
+median 0.99, mean 1.03. Stays opt-in.
+
 `shim/src/fastcall.c`. Measured offline with `bash shim/tools/callcost.sh`: Win64 caller loops in generated code (translated
 like halo3's) doing `call [slot]` into the loader's REAL implementations (cut out of peload.c / wininput.c by marker), into
 fastcall.c, and into building blocks. Rosetta, M4 Max, best of 5-7, four runs with a game running on other cores (hence ranges):
