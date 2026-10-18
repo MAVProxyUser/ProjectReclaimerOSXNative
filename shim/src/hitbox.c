@@ -71,10 +71,10 @@ static void* objdump_thread(void*a){ (void)a; pthread_setname_np("shim-objdump")
 // equipment and projectiles.
 // Camera: the world vertex shaders compute clip = dot(worldpos, cb0[0..3]) and cb0[7] is the camera position;
 // d3dgl_draw hands us cb0 rows 0-7 from the first full-size scene draw of each frame (hb_capture_view).
-// PELOAD_HITBOXES=1: collision hitboxes (what damage tests) for bipeds, vehicles and giants -- bounding spheres where
-// no collision model is found; =all also spheres for weapons, equipment and projectiles; =spheres: bounding spheres only.
+// PELOAD_HITBOXES=1: collision hitboxes (what damage tests) for bipeds, vehicles and giants; nothing where no collision
+// model is found (no stand-in spheres, ever -- the user, 2026-10-18).
 // Overlay features: each has a launch variable and a function key (wininput.c flips bit f of g_hb_toggle):
-//   F2 PELOAD_HITBOXES   hitboxes (=all adds weapon/equipment/projectile spheres, =spheres: bounding spheres only)
+//   F2 PELOAD_HITBOXES   hitboxes
 //   F3 PELOAD_HB_TRACERS projectile tracers (trail + velocity)
 //   F4 PELOAD_HB_INFO    player info: shield/health %, weapon, grenades, active camo, vehicle seat
 //   F5 PELOAD_HB_ITEMS   weapons and equipment lying on the map, by tag name
@@ -84,11 +84,11 @@ static void* objdump_thread(void*a){ (void)a; pthread_setname_np("shim-objdump")
 // Since 2026-10-18 the team filter, visible only and the label size are PER FEATURE (g_hbs, below: the stats page's
 // overlay panel, POST /control?do=feat); F6 / F9 / PELOAD_HB_TEAMS / PELOAD_HB_VISIBLE / PELOAD_HB_TEXT_PX apply to all.
 enum { HBF_HITBOX, HBF_TRACER, HBF_INFO, HBF_ITEMS, HBF_VISIBLE, HBF_ZONES, HBF_VEH, HBF_N };
-static int g_hbf_init, g_hbf_on[HBF_N], g_hb_all, g_hb_spheres;
+static int g_hbf_init, g_hbf_on[HBF_N];
 static void hbs_init(void);   // per-feature settings (below)
 static void hbf_init(void){ if(g_hbf_init) return; static const char*const env[HBF_N]={"PELOAD_HITBOXES","PELOAD_HB_TRACERS","PELOAD_HB_INFO","PELOAD_HB_ITEMS","PELOAD_HB_VISIBLE","PELOAD_HB_ZONES","PELOAD_HB_VEHICLES"};
     for(int f=0;f<HBF_N;f++){ const char*e=getenv(env[f]); g_hbf_on[f]= e&&*e&&strcmp(e,"0"); }
-    const char*e=getenv("PELOAD_HITBOXES"); g_hb_all=e&&!strcasecmp(e,"all"); g_hb_spheres=e&&!strcasecmp(e,"spheres"); hbs_init(); g_hbf_init=1; }
+    hbs_init(); g_hbf_init=1; }
 static int hb_feat(int f){ hbf_init(); return g_hbf_on[f] ^ ((g_hb_toggle>>f)&1); }
 static int hb_overlay_on(void){ for(int f=0;f<HBF_N;f++) if(f!=HBF_VISIBLE && hb_feat(f)) return 1; return 0; }   // (visible-only alone draws nothing)
 // The camera tracker (VS cb0 of the frame's first world draw) feeds the overlay and the teleport's "which body is
@@ -127,7 +127,7 @@ static int hb_team_mode(void){   // 0 all, 1 enemies only, 2 friends only
 // 'visible' only ... set visible all for one thing, and visible only enemies on something else") -------------------------
 // Each drawing feature has its own team filter (0 all, 1 enemies, 2 friends), visible-only switch and label size in window
 // pixels; -1 = that setting doesn't apply to the feature (the page greys the control):
-//   hitboxes  team (the player's), visible only      (=all's extra weapon/equipment spheres: visible only, no team)
+//   hitboxes  team (the player's), visible only
 //   vehicles  team = its occupants' (bipeds whose parent +0x10 is the vehicle; mixed crews count as both; an EMPTY vehicle
 //             has no team and shows under "all" only), visible only
 //   tracers   team = the shooter's (projectile +0xC0 owner -> its biped; a vehicle owner -- turret shots -- its occupants;
@@ -203,7 +203,7 @@ static int hb_collect(HbObj*out,int max){
     int n=0;
     for(int i=0;i<hi && n<max;i++){ const uint8_t*e=g_hb_tab+i*0x18; if(!*(const uint16_t*)e) continue; int t=e[3];
         int unit = t==0||t==1||t==12;
-        int want = (t==0 && fb) || ((t==1||t==12) && fveh) || (t==5 && (ft || (fh&&g_hb_all))) || ((t==2||t==3) && (fw || (fh&&g_hb_all)));
+        int want = (t==0 && fb) || ((t==1||t==12) && fveh) || (t==5 && ft) || ((t==2||t==3) && fw);
         if(g_hb_units_only) want=unit; if(!want) continue;
         uint64_t p=*(const uint64_t*)(e+0x10); static uint8_t dh[0x380]; size_t rd=unit?0x380:0x140; if(!p || !hb_read(p,dh,rd)) continue;
         const float*od=(const float*)(dh+0x1c);
@@ -435,13 +435,13 @@ static HbGeom* hb_geom(uint32_t def){
         char msg[300]; int kk=snprintf(msg,sizeof msg,"  [hitbox] definition %08x (%s): %d collision edges in %d regions (%d model regions), nodes 0-%d; weak-spot edges: %d lethal, %d driver, %d disabling\n",def,hb_tag_name_early(def,m,ti),g->nseg,g->nreg,g->nhreg,g->maxnode,nw[2],nw[1],nw[3]); (void)!write(2,msg,kk); }
     return g->ok?g:0; }
 // Append one object's posed collision edges as clip-space line vertices; returns vertices added (0 = no geometry).
-// Why objects fall back to spheres: [0] drawn as hitboxes, [1] no collision geometry for the definition, [2] node
+// Why objects get no hitboxes: [0] drawn as hitboxes, [1] no collision geometry for the definition, [2] node
 // block missing/too small, [3] node matrices unreadable or not set up (scale != 1). Logged with PELOAD_HITBOXES_LOG.
 static unsigned long g_hbx_stat[4];
 static void hbx_why(const HbObj*o,int why){ g_hbx_stat[why]++; static uint32_t seen[256]; static int ns; uint32_t key=o->def^((uint32_t)why<<30);
     for(int i=0;i<ns;i++) if(seen[i]==key) return; if(ns<256) seen[ns++]=key;
     static const char*const nm[4]={"","no collision geometry","node block missing","node matrices not set up"};
-    char m[200]; int k=snprintf(m,sizeof m,"  [hitbox] type %d definition %08x drawn as a sphere: %s (nodes %u B at +0x%x)\n",o->type,o->def,nm[why],o->nmsz,o->nmoff); (void)!write(2,m,k); }
+    char m[200]; int k=snprintf(m,sizeof m,"  [hitbox] type %d definition %08x not drawn (no hitboxes): %s (nodes %u B at +0x%x)\n",o->type,o->def,nm[why],o->nmsz,o->nmoff); (void)!write(2,m,k); }
 static const char* hb_tag_name(uint32_t def);
 // which weak-spot kinds the hitboxes color (the stats page's chips): bit 1 lethal (yellow), bit 2 opens the driver (orange)
 volatile int g_hb_wkshow=-1;
@@ -984,17 +984,11 @@ static void hbz_gpu(const float*vp){
     if(g_hbz_ntri) G.DrawArrays(4/*TRIANGLES*/,0,g_hbz_ntri);
     if(g_hbz_nline) G.DrawArrays(1/*LINES*/,g_hbz_ntri,g_hbz_nline);
     G.BindVertexArray(0); G.Disable(0x0BE2); }
-// A bounding sphere (three great circles), and a unit's box: its real hitboxes (collision model posed on its nodes), or the
-// sphere where none is found (or PELOAD_HITBOXES=spheres)
-static int hb_sphere(float*verts,int nv,int cap,const float*vp,const HbObj*o,const float*col){
-    for(int axis=0;axis<3;axis++){ float prev[3]; int pv=0;
-        for(int sgi=0;sgi<=24;sgi++){ float an=(float)sgi*(6.2831853f/24.f), ca=cosf(an)*o->r, sa=sinf(an)*o->r; float w[3]={o->c[0],o->c[1],o->c[2]};
-            if(axis==0){ w[0]+=ca; w[1]+=sa; } else if(axis==1){ w[0]+=ca; w[2]+=sa; } else { w[1]+=ca; w[2]+=sa; }
-            if(pv) nv=hb_seg(verts,nv,cap,vp,prev,w,col); memcpy(prev,w,12); pv=1; } }
-    return nv; }
-static int hb_unit_box(float*verts,int nv,int cap,const float*vp,const HbObj*o,const float*sphcol){
-    if(!g_hb_spheres){ int a=hb_emit_hitbox(o,vp,verts,nv,cap); if(a>0) return nv+a; if(a<0) return nv; }   // -1: posed, all behind the camera
-    return hb_sphere(verts,nv,cap,vp,o,sphcol); }
+// A unit's box: its real hitboxes (collision model posed on its nodes). Where no collision model is found NOTHING is
+// drawn -- never a stand-in shape (the user, 2026-10-18: no bounding-sphere / "circular orbit" overlay, ever; it was
+// the fallback and PELOAD_HITBOXES=all|spheres until then).
+static int hb_unit_box(float*verts,int nv,int cap,const float*vp,const HbObj*o){
+    int a=hb_emit_hitbox(o,vp,verts,nv,cap); return a>0?nv+a:nv; }
 static void hb_draw_overlay(void){
     if(!hb_overlay_on() || !G.DrawArrays || !G.CreateShader) return;
     float vp[32]; unsigned s0=g_hb_vpseq; if(s0&1) return; memcpy(vp,g_hb_vp,sizeof vp); if(g_hb_vpseq!=s0) return;
@@ -1011,7 +1005,7 @@ static void hb_draw_overlay(void){
 
     static HbObj objs[1024]; extern pthread_mutex_t g_hb_collect_mx; pthread_mutex_lock(&g_hb_collect_mx); int n=hb_collect(objs,1024); pthread_mutex_unlock(&g_hb_collect_mx);
     if(getenv("PELOAD_HITBOXES_LOG")){ static double tl; if(now-tl>3.0){ tl=now; int cnt[16]={0}; for(int i=0;i<n;i++) if(objs[i].type<16) cnt[objs[i].type]++;
-        char m[300]; int k=snprintf(m,sizeof m,"  [hitbox] cam (%.1f %.1f %.1f) objects: bipeds %d vehicles %d weapons %d equipment %d projectiles %d | hitboxes %lu, spheres: no-geometry %lu no-nodes %lu nodes-not-set %lu\n",
+        char m[300]; int k=snprintf(m,sizeof m,"  [hitbox] cam (%.1f %.1f %.1f) objects: bipeds %d vehicles %d weapons %d equipment %d projectiles %d | hitboxes %lu, not drawn: no-geometry %lu no-nodes %lu nodes-not-set %lu\n",
             vp[28],vp[29],vp[30],cnt[0],cnt[1],cnt[2],cnt[3],cnt[5],g_hbx_stat[0],g_hbx_stat[1],g_hbx_stat[2],g_hbx_stat[3]); (void)!write(2,m,k); memset(g_hbx_stat,0,sizeof g_hbx_stat); } }
     { float bd=1e30f; int bi=-1; for(int i=0;i<n;i++){ if(objs[i].type) continue; float dx=objs[i].c[0]-vp[28],dy=objs[i].c[1]-vp[29],dz=objs[i].c[2]-vp[30],d=dx*dx+dy*dy+dz*dz;
           if(d>(objs[i].r+0.3f)*(objs[i].r+0.3f) && d<bd){ bd=d; bi=i; } }
@@ -1041,15 +1035,13 @@ static void hb_draw_overlay(void){
       uint32_t lu=g_hb_local_unit; if(!found && lu!=0xFFFFFFFFu) for(int i=0;i<n;i++) if(objs[i].type==0 && objs[i].handle==lu){ g_hb_myteam=objs[i].team; break; } }
     enum { HB_CAP=400000 }; static float verts[HB_CAP*5]; int nv=0; const float*cam=vp+28;   // cb0[7] = camera position
     static const float cwhite[3]={1,1,1}, cgrey[3]={0.7f,0.7f,0.7f}, ctrace[3]={1,0.95f,0.55f}, cvel[3]={1,0.5f,0.1f}, citem[3]={0.3f,1,0.45f}, cequip[3]={0.3f,0.9f,1};
-    // fallback spheres (no collision model found): bipeds pink, vehicles grey (yellow = weak spots), giants orange, weapons green, equipment cyan
-    static const float pal[6][3]={{1,0.5f,0.5f},{0.55f,0.6f,0.65f},{1,0.4f,0},{0.2f,1,0.3f},{0.2f,0.9f,1},{1,0.3f,1}};   // (+ projectiles magenta)
     // Every feature applies its own team filter / visible only / label size right where it draws (g_hbs, per-feature
     // settings). hb_vis is worked out at most once per object, and only when a visible-only feature asks for it.
     #define HB_SEEN() (vis<0?(vis=hb_vis(o)):vis)
     for(int i=0;i<n;i++){ const HbObj*o=&objs[i]; int veh=o->type==1||o->type==12, vis=-1;
         float dx=o->c[0]-cam[0], dy=o->c[1]-cam[1], dz=o->c[2]-cam[2]; int self = dx*dx+dy*dy+dz*dz < (o->r+0.3f)*(o->r+0.3f) || (o->type==0 && o->handle==g_hb_local_unit);   // our own body
         if(o->type==5){   // projectiles: Tracers (trail positions), filtered by the shooter's team
-            if(!ft){ if(fh && g_hb_all && !self && (s_hit.vis<=0 || HB_SEEN())) nv=hb_sphere(verts,nv,HB_CAP,vp,o,pal[5]); continue; }   // PELOAD_HITBOXES=all
+            if(!ft) continue;
             if(s_trc.team>0 && !hb_team_ok(s_trc.team,hb_owner_cls(o->owner,objs,n))) continue;
             hb_trail_add(o->handle,o->c,now);
             if(getenv("PELOAD_HITBOXES_LOG")){ static uint32_t seen[64]; static int ns; int f=0; for(int q=0;q<ns;q++) if(seen[q]==o->def) f=1;
@@ -1060,16 +1052,15 @@ static void hb_draw_overlay(void){
                 float a[3]={o->c[0]-0.15f,o->c[1],o->c[2]}, b[3]={o->c[0]+0.15f,o->c[1],o->c[2]}, c2[3]={o->c[0],o->c[1]-0.15f,o->c[2]}, d2[3]={o->c[0],o->c[1]+0.15f,o->c[2]};
                 const float*col=o->type==2?citem:cequip; nv=hb_seg(verts,nv,HB_CAP,vp,a,b,col); nv=hb_seg(verts,nv,HB_CAP,vp,c2,d2,col);
                 float tx,ty; if(hb_proj(vp,o->c,&tx,&ty)){ hb_text_size(s_itm.px); const char*nm=hb_tag_name(o->def); nv=hb_text(verts,nv,HB_CAP,tx-strlen(nm)*2.5f*g_hb_px,ty+8*g_hb_py,nm,col); } }
-            if(fh && g_hb_all && !self && (s_hit.vis<=0 || HB_SEEN())) nv=hb_sphere(verts,nv,HB_CAP,vp,o,pal[o->type==2?3:4]);   // PELOAD_HITBOXES=all
             continue; }
         if(self) continue;
         if(veh){   // vehicles and giants (Scarabs): the Vehicles feature; team = its occupants' (empty: under "all" only)
             if(fveh && (s_veh.team<=0 || hb_team_ok(s_veh.team,hb_occ_cls(o->handle,objs,n))) && (s_veh.vis<=0 || HB_SEEN()))
-                nv=hb_unit_box(verts,nv,HB_CAP,vp,o,pal[o->type==1?1:2]);
+                nv=hb_unit_box(verts,nv,HB_CAP,vp,o);
             continue; }
         if(o->type!=0) continue;
         int cls=hb_bip_cls(o);   // players: Hitboxes and Player info, each with its own filters
-        if(fh && hb_team_ok(s_hit.team,cls) && (s_hit.vis<=0 || HB_SEEN())) nv=hb_unit_box(verts,nv,HB_CAP,vp,o,pal[0]);
+        if(fh && hb_team_ok(s_hit.team,cls) && (s_hit.vis<=0 || HB_SEEN())) nv=hb_unit_box(verts,nv,HB_CAP,vp,o);
         if(fi && hb_team_ok(s_inf.team,cls) && (s_inf.vis<=0 || HB_SEEN())){   // player info above the head: shield/health %, held weapon, grenades, camo, vehicle
             float top[3]={o->c[0],o->c[1],o->c[2]+o->r+0.12f}, tx,ty; if(!hb_proj(vp,top,&tx,&ty)) continue;
             hb_text_size(s_inf.px);

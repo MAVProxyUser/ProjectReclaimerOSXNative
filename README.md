@@ -195,7 +195,7 @@ Options go in front of the command, e.g. `PELOAD_INVERT_PITCH=0 bash shim/play.s
 | `RECLAIMER_EXE=<path>` | use the client exe at this path |
 | `RECLAIMER_JOIN=host:port` | join that server as soon as the menu is up, e.g. `RECLAIMER_JOIN=203.0.113.7:11774` |
 | `RECLAIMER_DIRECT=1` | skip the menu: straight into a local Guardian match (no scoreboard text) |
-| `PELOAD_HITBOXES=1` | draw the players' real hitboxes (each player's collision model, which is what shots hit) posed on their live skeletons: enemies red with the head yellow, teammates blue. `=spheres` draws bounding spheres instead; `=all` adds spheres for weapons, equipment and projectiles. The stats page's overlay panel (**Hitboxes** row) switches it during play (any launch) |
+| `PELOAD_HITBOXES=1` | draw the players' real hitboxes (each player's collision model, which is what shots hit) posed on their live skeletons: enemies red with the head yellow, teammates blue. An object whose collision model can't be read gets nothing (no stand-in shapes). The stats page's overlay panel (**Hitboxes** row) switches it during play (any launch) |
 | `PELOAD_HB_TRACERS=1` | projectile tracers: grenades/rockets/plasma as trails, bullets as lines from muzzle to impact; the panel's **Tracers** row |
 | `PELOAD_HB_INFO=1` | player info above each player: shield and health %, weapon in hand / other weapon, grenades, active camo, in a vehicle; the panel's **Player info** row |
 | `PELOAD_HB_ITEMS=1` | weapons and equipment lying on the map, by name; the panel's **Items** row |

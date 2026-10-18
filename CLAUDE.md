@@ -325,7 +325,7 @@ Glitch hunting: `PELOAD_D3DGL_COVQ` (+`_COVQ_FRAC`, `_HUGEPROBE=<t>`) per-draw s
 
 Overlay (2026-10-16, shim/src/hitbox.c; field layout in shim/docs/halo3-objects.md). Features, each a launch
 variable + a stats page button (bits of g_hb_toggle; the old F2-F10 keys only with PELOAD_HB_FKEYS=1):
-`PELOAD_HITBOXES=1|all|spheres` hitboxes, `PELOAD_HB_TRACERS` projectile trails + bullet lines,
+`PELOAD_HITBOXES=1` hitboxes (NEVER a stand-in sphere / ring shape: the user hates it -- objects without a collision model get nothing), `PELOAD_HB_TRACERS` projectile trails + bullet lines,
 `PELOAD_HB_INFO` shield/health/"<weapon in hand> / <other weapon>"/grenades/camo/vehicle labels, `PELOAD_HB_ITEMS` weapon/equipment
 labels, `PELOAD_HB_TEAMS=all|enemies|friends` team filter (enemies red/yellow head, teammates blue), `PELOAD_HB_VEHICLES`
 (weak spots yellow/orange/magenta, chips do=weaktype&t=1|2|4). Objects come from the
@@ -337,7 +337,7 @@ entry hook on halo3 object_delete (halo3+0x342ed8, hbdel_install, prologue-check
 projectile datums at deletion (start +0x1e8, impact +0x1c). Text = a stroke font in the same GL_LINES batch, tag
 names from the map file. Drawn in the present-queue blit (pq_present_wait -- NOT d3dgl_blit_fullscreen_i, which
 only runs without the present queue). Camera = VS cb0 rows 0-3 + row 7 of the first draw passing
-hb_is_world_camera. Diagnostics: `PELOAD_HITBOXES_LOG` (counts, sphere fallback reasons, permutation bytes),
+hb_is_world_camera. Diagnostics: `PELOAD_HITBOXES_LOG` (counts, why an object has no hitboxes, permutation bytes),
 `PELOAD_HB_DELDUMP=<n>` (raw projectile datums), `PELOAD_HB_SELFDUMP=<file>` (own unit + player record every
 0.25 s for offline field hunting), `PELOAD_OBJDUMP`. Finding fields: halo3's HaloScript getters are in the release
 build (re-tools/hsfuncs.py prints a script function's table entry -> its evaluate function -> the datum offset).
