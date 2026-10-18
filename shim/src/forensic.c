@@ -12,7 +12,8 @@
 //   roster  every session member (peer id, name, team, player slot, host / self flags) whenever that list changes.
 // Layout: <base>/<YYYYmmdd-HHMMSS>_<map>/{session.json, voice.bin, roster.jsonl, events.jsonl} and <base>/settings.json,
 // base = $HOME/Library/Application Support/ReclaimerMac/forensics (PELOAD_FORENSIC_DIR overrides). A new session starts
-// when the server (the session's host peer id) or the map changes, or when the client was out of any session for 5 s.
+// when the server (the session's host peer id) changes, or when the client was out of any session for 5 s; map changes
+// within one server stay in its session (each roster line carries the map).
 // Threads: the hooks append to an in-memory queue under one short lock (g_fxq_mx); fx_writer, a loader thread, writes
 // it out once a second. With the archive off the hooks cost one flag check (g_fx_on), the snapshot thread one more.
 // FX_TEST=1 (shim/tools/forensic-oggtest.c) compiles only the parts that need no engine: the Ogg writer, the archive,
@@ -198,7 +199,9 @@ static void fx_roster_members(double now,const char*map,const FxMem*m,int n,uint
     if(!on){ g_fx_on=0; g_fxr.armed=0; return; }
     g_fx_self_id=self_id;
     int in=n>0 || host_id; char realmap[64]; snprintf(realmap,sizeof realmap,"%s",map && strcmp(map,"mainmenu")?map:"");
-    char key[200]=""; if(in) snprintf(key,sizeof key,"%016llx|%s",(unsigned long long)host_id,realmap);
+    // a session = the server we are connected to (its host peer id); the map is in every roster line. (Keying on the map
+    // too split the menu into a session per background scene -- the menu shows guardian, 005_intro ... -- 2026-10-18.)
+    char key[200]=""; if(in) snprintf(key,sizeof key,"%016llx",(unsigned long long)host_id);
     int sw=0;
     if(!g_fxr.armed){ sw=strcmp(key,g_fxr.key)!=0; g_fxr.armed=1; snprintf(g_fxr.cand,sizeof g_fxr.cand,"%s",key); }   // archive (re)enabled: no debounce
     else if(strcmp(key,g_fxr.key)){

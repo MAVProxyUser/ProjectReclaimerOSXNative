@@ -169,13 +169,17 @@ static int cmd_pipeline(const char*in,const char*dir){
     fx_flush(); r=get(path,"",0); save(dir,"index2.json",&r); nu=0; for(char*q=r.body;(q=strstr(q,"{\"n\":"));q++) nu++;
     CHECK(r.code==200 && nu==6 && strstr(r.body,"\"bad_records\":1"),"incremental read: %d utterances, the damaged record skipped",nu);
     snprintf(path,sizeof path,"%s/utt/5.ogg",base); r=get(path,"",0); save(dir,"utt5.ogg",&r); CHECK(r.code==200,"utt/5.ogg after the damage"); if(ex) fprintf(ex,"utt5.ogg %ld\n",30L*ps);
-    // a new map: a new session after the 2 s debounce
-    fx_roster_members(now+2,"guardian",m,3,HOST,ME,0,3); fx_roster_members(now+3,"guardian",m,3,HOST,ME,0,3); fx_flush();
-    CHECK(g_fxw.open && strstr(g_fxw.name,"_riverworld"),"map change, 1 s later: still debouncing (the old session stays open)");
-    fx_roster_members(now+4.5,"guardian",m,3,HOST,ME,0,3); fx_flush();
+    // a new map on the same server: the same session (sessions follow the server's host peer id)
+    fx_roster_members(now+2,"guardian",m,3,HOST,ME,0,3); fx_roster_members(now+4.5,"guardian",m,3,HOST,ME,0,3); fx_flush();
+    CHECK(g_fxw.open && strstr(g_fxw.name,"_riverworld"),"map change on the same server: the session stays open");
+    // another server (host peer id): a new session after the 2 s debounce
+    const uint64_t HOST2=0x8888888888888888ull;
+    fx_roster_members(now+5,"guardian",m,3,HOST2,ME,0,3); fx_roster_members(now+6,"guardian",m,3,HOST2,ME,0,3); fx_flush();
+    CHECK(g_fxw.open && strstr(g_fxw.name,"_riverworld"),"server change, 1 s later: still debouncing (the old session stays open)");
+    fx_roster_members(now+7.5,"guardian",m,3,HOST2,ME,0,3); fx_flush();
     fx_event_rec(st_wall(),4,"game","guardian",0,0,0,-1,-1,0,"Match started: guardian",0); fx_flush();
     r=get("/forensics/sessions.json","",0); save(dir,"sessions2.json",&r);
-    CHECK(strstr(r.body,"_guardian\"") && strstr(r.body,"_riverworld\""),"map change -> a second session");
+    CHECK(strstr(r.body,"_guardian\"") && strstr(r.body,"_riverworld\""),"server change -> a second session");
     { char p[1200]; snprintf(p,sizeof p,"%s/%s/session.json",fd,sname); char*j=fx_slurp(p,0,1<<20); double e=0;
       CHECK(j && fx_jnum(j,"ended_unix",&e) && e>0 && strstr(j,"\"server\":\"203.0.113.7:11774\"") && strstr(j,"\"host_id\":\"9999999999999999\""),"the first session.json: ended, server from the join link, host peer id"); free(j); }
     CHECK(fx_control("do=forensic&archive=0") && !g_fx_on,"archive off: the hooks' flag is 0");

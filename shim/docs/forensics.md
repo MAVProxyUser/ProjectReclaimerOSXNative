@@ -70,8 +70,9 @@ shows the count). Files are flushed every second, so a crash loses at most the l
 the server from a `reclaimer://join?server=<host:port>` launch (play.sh `RECLAIMER_JOIN`), else `lobby`. A new session
 starts when, stable for 2 s (map loads flicker):
 
-- the network session's **host peer id** changes (another server, or a new session on the same one), or
-- the **map** changes (each game of a playlist gets its own directory);
+- the network session's **host peer id** changes (another server, or a new session on the same one); map changes
+  within one server stay in its session -- every roster line carries the map (2026-10-18: keying on the map as well
+  split the main menu into a session per background scene: guardian, 005_intro, ...);
 
 the current one also closes when the client has been out of any session for 5 s. Records that arrive with no session
 open (rare: a notice in the main menu) open a `<time>_menu` session. A server joined from the Server Browser has no
@@ -213,7 +214,7 @@ session refreshes every 5 s.
 2. 50 silence frames decode to 1 s of zeros.
 3. The archive end to end: consent refused / accepted / persisted, roster lines, 4 speakers' packets with a pause, a
    missing sequence number, a control packet, a malformed packet, our own echo, voice audio switched off mid-session,
-   chat with sender id, a torn record followed by more packets, a map change (debounce, a second session) -- then every
+   chat with sender id, a torn record followed by more packets, a map change (debounce, a second session; the test predates the host-only key) -- then every
    endpoint over a socketpair: names / teams at the time, Range requests, 404s, and every .ogg served decodes cleanly to
    the expected length; every JSON reply parses.
 
