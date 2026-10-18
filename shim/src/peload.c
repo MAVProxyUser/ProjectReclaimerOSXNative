@@ -8330,6 +8330,7 @@ static uintptr_t MSABI i_beginthread(WinThreadProc start,unsigned stack,void*arg
 #include "wasapi.c"
 #include "hitbox.c"
 #include "stats.c"
+#include "forensic.c"   // forensic archive of voice / chat / events + its viewer (/forensics); uses stats.c
 #include "nav.c"
 // ---- D3D object lifetime (backlog 27) ----------------------------------------------------------------------------------
 // D3D11 keeps an object alive while the pipeline has it bound, and the GL side (the submission thread, compute jobs) may

@@ -1,0 +1,250 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Reclaimer forensic archive</title>
+<style>
+:root{color-scheme:dark;--bg:#111;--panel:#181818;--line:#2a2a2a;--fg:#ddd;--dim:#999;--accent:#58b8ff;--c1:#58b8ff;--c2:#4fd06a;--c3:#f0a040;--lbl:160px}
+*{box-sizing:border-box}
+body{margin:0;padding:16px 16px 84px;background:var(--bg);color:var(--fg);font:13px/1.4 -apple-system,system-ui,sans-serif}
+h1{font-size:16px;margin:0 0 4px;display:flex;gap:14px;align-items:baseline}h1 a{font-size:12px;font-weight:400;color:var(--accent);text-decoration:none}
+h2{font-size:13px;margin:0 0 8px;color:var(--dim);font-weight:500}
+a{color:var(--accent)}
+#hd{color:var(--dim);margin-bottom:12px}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:12px;min-width:0}
+.grid{display:grid;grid-template-columns:290px minmax(0,1fr);gap:16px;align-items:start}
+@media (max-width:900px){.grid{grid-template-columns:minmax(0,1fr)}}
+.col{display:flex;flex-direction:column;gap:16px;min-width:0}
+.note{color:var(--dim);font-size:12px;margin-top:6px}.warn{color:#e8c070}.err{color:#f08080}
+.ctl{display:flex;flex-wrap:wrap;gap:6px 18px;align-items:center}.ctl label{cursor:pointer}.ctl label.off{opacity:.45;cursor:default}
+.ctl select{background:#222;color:var(--fg);border:1px solid var(--line);border-radius:4px;font:inherit}
+code{font:11px ui-monospace,Menlo,monospace;color:#bbb;overflow-wrap:anywhere}
+.mono{font:12px ui-monospace,Menlo,monospace}
+#settings{margin-bottom:16px}
+#sl{display:flex;flex-direction:column;gap:2px;max-height:75vh;overflow-y:auto}
+#sl .s{padding:5px 8px;border-radius:4px;cursor:pointer;border:1px solid transparent}
+#sl .s:hover{background:#222}#sl .s.sel{background:#1d2a38;border-color:#2c4a66}
+#sl .s small{display:block;color:var(--dim);font-size:11px}
+.live{display:inline-block;background:#5a1f1f;color:#ffb0b0;border-radius:3px;font-size:10px;font-weight:700;padding:0 4px;margin-left:6px;vertical-align:1px}
+.btn,.dl{background:#222;color:var(--fg);border:1px solid var(--line);border-radius:4px;padding:2px 8px;font:inherit;font-size:12px;cursor:pointer;text-decoration:none;display:inline-block}
+.btn:hover,.dl:hover{border-color:#555}.btn:disabled{opacity:.35;cursor:default}
+#sum dl{display:grid;grid-template-columns:auto 1fr;gap:3px 14px;margin:0}#sum dt{color:var(--dim)}#sum dd{margin:0;overflow-wrap:anywhere}
+.dls{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
+#spk{display:flex;flex-wrap:wrap;gap:6px}
+.pc{display:inline-flex;align-items:center;gap:6px;background:#202020;border:1px solid var(--line);border-radius:4px;padding:2px 4px 2px 8px}
+.sw{display:inline-block;width:10px;height:10px;border-radius:2px;vertical-align:middle}
+#tlw{overflow-x:auto;border:1px solid var(--line);border-radius:4px;background:#0d0d0d;max-height:60vh;overflow-y:auto}
+#tl{position:relative}
+.lane{position:relative;height:22px;border-bottom:1px solid #1c1c1c}
+.lane .lbl{position:sticky;left:0;z-index:3;display:block;width:var(--lbl);height:21px;line-height:21px;padding:0 6px;background:#151515;border-right:1px solid var(--line);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:12px}
+.axis{height:20px;position:sticky;top:0;z-index:4;background:#121212}.axis span{position:absolute;top:3px;font-size:10px;color:#777;transform:translateX(-50%);white-space:nowrap}
+.axis i{position:absolute;top:15px;width:1px;height:5px;background:#444}
+.blk{position:absolute;top:4px;height:13px;border-radius:2px;cursor:pointer;min-width:3px;z-index:1}
+.blk.c1{background:var(--c1)}.blk.c2{background:var(--c2)}.blk.c3{background:var(--c3)}
+.blk.na{opacity:.5;background-image:repeating-linear-gradient(45deg,transparent 0 3px,#000a 3px 6px)}
+.blk.on{outline:2px solid #fff;z-index:2}
+.mk{position:absolute;top:3px;width:3px;height:15px;border-radius:1px;cursor:pointer;z-index:1}
+.mk.chat{background:#cfd8e0}.mk.c2{background:var(--c2)}.mk.c3{background:var(--c3)}.mk.srv{background:#ffd75a}.mk.kill{background:#e05050}.mk.ev{background:#888}
+.fh{display:flex;align-items:center;gap:6px 14px;flex-wrap:wrap;margin-bottom:8px}.fh h2{margin:0 auto 0 0}
+.fh label{color:var(--dim);font-size:12px;cursor:pointer}
+#ls{max-height:60vh;overflow-y:auto}
+table{border-collapse:collapse;width:100%}
+th,td{text-align:left;padding:3px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+th{color:var(--dim);font-weight:500;position:sticky;top:0;background:var(--panel)}
+td.t{white-space:nowrap;color:#777;font-variant-numeric:tabular-nums}
+tr.hl{background:#2a2a14}
+.k{display:inline-block;border-radius:3px;padding:0 5px;font-size:11px;background:#2a2f36;color:#cfd8e0}
+.k.voice{background:#1d3a55}.k.chat{background:#2b2b40}.k.kill{background:#4a1f1f}.k.event{background:#333}
+.ch1{color:var(--c1)}.ch2{color:var(--c2)}.ch3{color:var(--c3)}
+#det{display:none;margin-top:12px}#det.open{display:block}#det .x{float:right;cursor:pointer;background:none;border:0;color:var(--dim);font-size:18px;line-height:1}
+#det table{font:11px ui-monospace,Menlo,monospace}
+#pb{position:fixed;left:0;right:0;bottom:0;z-index:20;display:flex;align-items:center;gap:12px;padding:8px 16px;background:#161616ee;border-top:1px solid var(--line)}
+#pb audio{height:32px;flex:0 0 420px;max-width:55vw}#now{color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+</style></head>
+<body>
+<h1>Reclaimer forensic archive <a href="/">live stats</a></h1>
+<div id="hd">loading...</div>
+
+<div class="panel" id="settings">
+  <h2>Recording</h2>
+  <div class="ctl">
+    <label id="l_archive"><input type="checkbox" id="s_archive"> Archive chat, game events, the roster and who talked when</label>
+    <label id="l_consent"><input type="checkbox" id="s_consent"> One-party consent: I take part in these voice channels and choose to record them</label>
+    <label id="l_voice"><input type="checkbox" id="s_voice"> Voice audio (the Opus packets, as received)</label>
+  </div>
+  <div class="note warn">Recording other people's voices is governed by consent laws: in one-party-consent states such as Ohio a participant in a conversation may record it; all-party states (e.g. California, Illinois, Washington) and some countries require everyone's consent. Without the box ticked no audio is stored &mdash; only who talked when.</div>
+  <div class="note">Only what is addressed to this client is archived: the voice packets its voice code receives (muted players included), the chat lines and game events it shows. <span id="dirn"></span></div>
+  <div class="note" id="smsg"></div>
+</div>
+
+<div class="grid">
+  <div class="panel"><h2>Sessions</h2><div id="sl"><span class="note">none yet</span></div></div>
+  <div class="col">
+    <div class="panel" id="sum"><span class="note">Pick a session.</span></div>
+    <div class="panel"><div class="fh"><h2>Timeline</h2>
+        <label>zoom <select id="zoom"><option value="0">fit</option><option value="0.5">0.5 px/s</option><option value="2">2 px/s</option><option value="5">5 px/s</option><option value="10">10 px/s</option><option value="25">25 px/s</option><option value="60">60 px/s</option></select></label>
+        <span class="note" style="margin:0"><span class="sw" style="background:var(--c1)"></span> global <span class="sw" style="background:var(--c2)"></span> team <span class="sw" style="background:var(--c3)"></span> proximity &nbsp; striped = no audio kept</span></div>
+      <div id="tlw"><div id="tl"></div></div></div>
+    <div class="panel"><div class="fh"><h2>Everything, in order</h2>
+        <label>player <select id="f_pl"><option value="">everyone</option></select></label>
+        <label>channel <select id="f_ch"><option value="">all</option><option value="1">global / all chat</option><option value="2">team</option><option value="3">proximity / nearby</option></select></label>
+        <label><input type="checkbox" id="f_voice" checked> voice</label><label><input type="checkbox" id="f_chat" checked> chat</label>
+        <label><input type="checkbox" id="f_kill" checked> kills</label><label><input type="checkbox" id="f_ev" checked> other events</label></div>
+      <div id="ls"></div>
+      <div id="det"><button class="x" id="detx" title="close">&times;</button><h2 id="deth"></h2><div id="detb" style="max-height:40vh;overflow:auto"></div></div></div>
+  </div>
+</div>
+<div id="pb"><audio id="au" controls preload="none"></audio><span id="now">Click a voice block or a play button.</span></div>
+
+<script>
+'use strict';
+const $=s=>document.querySelector(s);
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const TEAM={red:'#e05050',blue:'#5a8cf0',green:'#40c060',orange:'#f09030',purple:'#a060e0',gold:'#e0c040',brown:'#a07050',pink:'#f080c0',none:'#777'};
+const CHN={0:'control',1:'global',2:'team',3:'proximity'};
+const CHATCH={all:1,team:2,nearby:3};
+const fT=t=>new Date(t*1000).toLocaleTimeString([],{hour12:false});
+const fD=t=>new Date(t*1000).toLocaleString([],{hour12:false});
+const fDur=s=>s<60?s.toFixed(1)+' s':s<3600?Math.floor(s/60)+' min '+Math.round(s%60)+' s':Math.floor(s/3600)+' h '+Math.round(s%3600/60)+' min';
+const fB=b=>b<1024?b+' B':b<1048576?(b/1024).toFixed(1)+' KB':(b/1048576).toFixed(1)+' MB';
+const au=$('#au'); const canOgg=au.canPlayType('audio/ogg; codecs=opus')!=='';
+let S=null, cur=null, X=null, items=[], playing=-1, lastKey='';
+const sp=()=>'/forensics/'+encodeURIComponent(cur);
+
+async function ctl(q){ try{ const r=await fetch('/control?do=forensic&'+q,{method:'POST',headers:{'X-Reclaimer-Control':'1'}}); const j=await r.json(); return r.ok&&j.ok; }catch(e){ return false; } }
+async function loadSessions(){
+  try{ S=await (await fetch('/forensics/sessions.json',{cache:'no-store'})).json(); }catch(e){ $('#hd').textContent='cannot reach the loader'; return; }
+  renderSettings(); renderSessions();
+  if(!cur && S.sessions.length) select(S.current||S.sessions[0].name);
+}
+function renderSettings(){
+  const st=S.settings;
+  $('#s_archive').checked=st.archive; $('#s_consent').checked=st.one_party_consent; $('#s_voice').checked=st.voice_audio&&st.one_party_consent;
+  $('#s_voice').disabled=!st.one_party_consent||st.disabled; $('#l_voice').classList.toggle('off',$('#s_voice').disabled);
+  for(const id of ['s_archive','s_consent']) $('#'+id).disabled=st.disabled;
+  $('#dirn').innerHTML='Files: <code>'+esc(S.dir)+'</code>';
+  const c=S.counters;
+  $('#hd').innerHTML=st.disabled?'<span class="err">Disabled by PELOAD_FORENSIC=0: nothing is recorded.</span>':
+    (st.recording?'Recording '+(st.recording_audio?'<b>with voice audio</b>':'without voice audio (who talked when only)'):'Not recording'+(st.archive?' (waiting for the stats snapshot)':''))+
+    (S.current?' into <b>'+esc(S.current)+'</b>':'')+' &middot; this run: '+c.voice_packets+' voice packets ('+c.audio_packets+' with audio), '+c.events+' events'+(c.dropped?', <span class="err">'+c.dropped+' dropped</span>':'')+
+    (st.one_party_consent?' &middot; consent on record since '+esc(fD(st.consent_confirmed_unix)):'')+(canOgg?'':' &middot; <span class="warn">this browser cannot play Ogg Opus: use the download links (VLC, ffplay, Chrome and Firefox play them)</span>');
+}
+$('#s_archive').onchange=async e=>{ if(!await ctl('archive='+(e.target.checked?1:0))) $('#smsg').textContent='refused (are the stats page controls off? PELOAD_STATS_READONLY)'; loadSessions(); };
+$('#s_consent').onchange=async e=>{
+  if(e.target.checked && !confirm('One-party consent\n\nYou confirm that you take part in the voice channels this client receives, and that the law where you are lets a participant record them (e.g. Ohio: one-party consent).\n\nThe time of this confirmation is stored with the archive.')){ e.target.checked=false; return; }
+  if(!await ctl('consent='+(e.target.checked?1:0))) $('#smsg').textContent='refused'; else $('#smsg').textContent=e.target.checked?'Consent recorded. Turn on "Voice audio" to keep the audio.':'Consent withdrawn: voice audio is off.';
+  loadSessions(); };
+$('#s_voice').onchange=async e=>{ if(!await ctl('voice='+(e.target.checked?1:0))) $('#smsg').textContent='refused: voice audio needs the one-party-consent box'; loadSessions(); };
+
+function renderSessions(){
+  const el=$('#sl'); if(!S.sessions.length){ el.innerHTML='<span class="note">none yet: sessions start when this client is in a game session</span>'; return; }
+  el.innerHTML=S.sessions.map(s=>{ const m=s.session||{}; const live=s.name===S.current;
+    return `<div class="s${s.name===cur?' sel':''}" data-n="${esc(s.name)}"><b>${esc(m.map||m.label||s.name)}</b>${live?'<span class="live">LIVE</span>':''}<small>${esc(m.started_unix?fD(m.started_unix):s.name)}${m.server?' &middot; '+esc(m.server):''}<br>voice ${fB(s.voice_bytes)} &middot; events ${fB(s.events_bytes)}</small></div>`; }).join('');
+}
+$('#sl').onclick=e=>{ const d=e.target.closest('.s'); if(d) select(d.dataset.n); };
+
+async function select(name){
+  if(name!==cur){ cur=name; playing=-1; $('#det').classList.remove('open'); }
+  renderSessions();
+  try{ X=await (await fetch(sp()+'/index.json',{cache:'no-store'})).json(); }catch(e){ $('#sum').innerHTML='<span class="err">cannot read this session</span>'; return; }
+  build(); render();
+}
+function build(){
+  items=[];
+  for(const u of X.utterances) items.push({t:u.start,end:u.end,kind:'voice',u});
+  for(const e of X.events){ const k=e.kind==='chat'?'chat':(e.kind==='kill'||e.kind==='death')?'kill':'event'; items.push({t:e.t,kind:k,e}); }
+  items.sort((a,b)=>a.t-b.t);
+  // the player filter: everyone the roster listed (by peer id), plus names that only appear in events
+  const sel=$('#f_pl'), keep=sel.value, opts=new Map();
+  for(const p of X.people) opts.set('id:'+p.id,{label:p.name+(p.names.length>1?' (aka '+p.names.filter(n=>n!==p.name).join(', ')+')':''),id:p.id,names:p.names});
+  for(const s of X.speakers) if(!opts.has('id:'+s.id)) opts.set('id:'+s.id,{label:s.name,id:s.id,names:s.names.length?s.names:[s.name]});
+  const known=new Set([...opts.values()].flatMap(o=>o.names));
+  for(const e of X.events) for(const n of [e.a,e.b]) if(n&&!known.has(n)){ known.add(n); opts.set('name:'+n,{label:n,names:[n]}); }
+  window.PL=opts;
+  sel.innerHTML='<option value="">everyone</option>'+[...opts.entries()].sort((a,b)=>a[1].label.localeCompare(b[1].label)).map(([k,o])=>`<option value="${esc(k)}">${esc(o.label)}</option>`).join('');
+  sel.value=opts.has(keep)?keep:'';
+}
+function pass(it){
+  const fp=$('#f_pl').value, fc=$('#f_ch').value;
+  if(it.kind==='voice'&&!$('#f_voice').checked) return false; if(it.kind==='chat'&&!$('#f_chat').checked) return false;
+  if(it.kind==='kill'&&!$('#f_kill').checked) return false; if(it.kind==='event'&&!$('#f_ev').checked) return false;
+  if(fc){ if(it.kind==='voice'){ if(String(it.u.channel)!==fc) return false; }
+    else if(it.kind==='chat'){ if(String(CHATCH[it.e.channel]||'')!==fc) return false; } else return false; }
+  if(fp){ const o=PL.get(fp); if(!o) return true;
+    if(it.kind==='voice') return o.id?it.u.id===o.id:o.names.includes(it.u.name);
+    if(it.kind==='chat'&&o.id&&it.e.sender_id) return it.e.sender_id===o.id;
+    return o.names.includes(it.e.a)||o.names.includes(it.e.b); }
+  return true;
+}
+function render(){
+  const ss=X.session||{}, st=X.stats;
+  const nk=k=>X.events.filter(e=>e.kind===k).length;
+  const dur=(st.last&&st.first)?st.last-st.first:0;
+  $('#sum').innerHTML=`<h2>${esc(X.name)}</h2><dl>
+    <dt>map</dt><dd>${esc(ss.map||'-')}</dd><dt>server</dt><dd>${esc(ss.server||'(not from a join link)')}</dd>
+    <dt>host peer id</dt><dd class="mono">${esc(ss.host_id||'-')}</dd><dt>this client</dt><dd class="mono">${esc(ss.self_id||'-')}</dd>
+    <dt>started</dt><dd>${ss.started_unix?esc(fD(ss.started_unix)):'-'}${ss.ended_unix?' &middot; ended '+esc(fD(ss.ended_unix)):''}</dd>
+    <dt>voice</dt><dd>${st.packets} packets (${st.audio_packets} with audio, ${st.control_packets} control${st.bad_records?', <span class="err">'+st.bad_records+' damaged records skipped</span>':''}) over ${fDur(dur)}, ${X.utterances.length} utterances by ${X.speakers.length} speakers</dd>
+    <dt>audio kept</dt><dd>${ss.voice_audio?'yes, one-party consent confirmed '+esc(fD(ss.consent_confirmed_unix)):'no (only who talked when) when the session started'}</dd>
+    <dt>events</dt><dd>${nk('chat')} chat, ${nk('kill')} kills, ${nk('death')} deaths, ${nk('join')} joins, ${nk('leave')} leaves, ${nk('vote')} votes, ${nk('server')} server lines</dd></dl>
+    <div class="dls"><a class="dl" href="${sp()}/index.json">index.json</a><a class="dl" href="${sp()}/events.jsonl?dl=1">events.jsonl</a><a class="dl" href="${sp()}/roster.jsonl?dl=1">roster.jsonl</a><a class="dl" href="${sp()}/voice.bin">voice.bin</a><a class="dl" href="${sp()}/session.json?dl=1">session.json</a></div>
+    <h2 style="margin-top:12px">Speakers</h2><div id="spk">${X.speakers.map(s=>`<span class="pc"><span class="sw" style="background:${TEAM[s.team_name]||'#777'}"></span><span title="peer id ${esc(s.id)}${s.names.length>1?' &middot; also called '+esc(s.names.join(', ')):''}">${esc(s.name)}</span><span class="note" style="margin:0">${s.utterances}&times;, ${fDur(s.seconds)}</span>${s.audio_packets?`<a class="dl" href="${sp()}/speaker/${s.id}.ogg?dl=1" title="all of this speaker's audio, gaps shortened to at most 1 s">.ogg</a>`:''}</span>`).join('')||'<span class="note">nobody talked</span>'}</div>`;
+  renderTimeline(); renderList();
+}
+function renderTimeline(){
+  const vis=items.filter(pass); const tl=$('#tl');
+  if(!items.length){ tl.innerHTML='<div class="note" style="padding:8px">nothing recorded yet</div>'; return; }
+  let t0=Infinity,t1=-Infinity; for(const it of items){ t0=Math.min(t0,it.t); t1=Math.max(t1,it.end||it.t); }
+  const lw=160, avail=Math.max(200,$('#tlw').clientWidth-lw-24); let pps=+$('#zoom').value; if(!pps) pps=avail/Math.max(1,t1-t0);
+  const W=lw+Math.ceil((t1-t0)*pps)+20, x=t=>lw+(t-t0)*pps;
+  let step=[1,2,5,10,15,30,60,120,300,600,900,1800,3600,7200].find(s=>s*pps>=80)||7200;
+  let h=`<div class="lane axis" style="width:${W}px"><span class="lbl" style="position:sticky;left:0;transform:none;top:0;height:19px;line-height:19px;font-size:11px;color:var(--dim)">${esc(fT(t0))}</span>`;
+  for(let t=Math.ceil(t0/step)*step;t<=t1;t+=step) h+=`<span style="left:${x(t)}px">${esc(fT(t))}</span><i style="left:${x(t)}px"></i>`;
+  h+='</div>';
+  const lane=(label,body,title)=>`<div class="lane" style="width:${W}px"><span class="lbl" title="${esc(title||label)}">${label}</span>${body}</div>`;
+  const mk=(it,cls,tip)=>`<span class="mk ${cls}" style="left:${x(it.t)}px" title="${esc(tip)}" data-i="${items.indexOf(it)}"></span>`;
+  h+=lane('Chat',vis.filter(i=>i.kind==='chat').map(i=>{ const c=i.e.channel; return mk(i,c==='team'?'c2':c==='nearby'?'c3':c==='server'||c==='notice'?'srv':'chat',fT(i.t)+' '+(i.e.a?i.e.a+': ':'['+c+'] ')+i.e.text); }).join(''));
+  h+=lane('Kills',vis.filter(i=>i.kind==='kill').map(i=>mk(i,'kill',fT(i.t)+' '+i.e.text)).join(''));
+  h+=lane('Events',vis.filter(i=>i.kind==='event').map(i=>mk(i,'ev',fT(i.t)+' '+i.e.kind+': '+i.e.text)).join(''));
+  for(const s of X.speakers){ const us=vis.filter(i=>i.kind==='voice'&&i.u.id===s.id); if(!us.length&&$('#f_pl').value) continue;
+    h+=lane(`<span class="sw" style="background:${TEAM[s.team_name]||'#777'}"></span> ${esc(s.name)}`,us.map(i=>{ const u=i.u;
+      return `<span class="blk c${u.channel}${u.audio_packets?'':' na'}${u.n===playing?' on':''}" data-u="${u.n}" style="left:${x(u.start)}px;width:${Math.max(3,(u.end-u.start)*pps)}px" title="${esc(`${u.name} - ${CHN[u.channel]} - ${fT(u.start)}, ${(u.end-u.start).toFixed(1)} s, ${u.packets} packets${u.audio_packets?'':' (no audio kept)'}`)}"></span>`; }).join(''),s.name+' - peer id '+s.id); }
+  tl.innerHTML=h;
+}
+$('#tl').onclick=e=>{ const b=e.target.closest('.blk'); if(b){ play(+b.dataset.u); return; }
+  const m=e.target.closest('.mk'); if(m){ const r=document.querySelector(`#ls tr[data-i="${m.dataset.i}"]`); if(r){ document.querySelectorAll('#ls tr.hl').forEach(x=>x.classList.remove('hl')); r.classList.add('hl'); r.scrollIntoView({block:'center'}); } } };
+function renderList(){
+  const vis=items.filter(pass).slice(-5000);
+  if(!vis.length){ $('#ls').innerHTML='<span class="note">nothing matches</span>'; return; }
+  $('#ls').innerHTML='<table><thead><tr><th>time</th><th>what</th><th>who</th><th>channel</th><th>detail</th><th></th></tr></thead><tbody>'+vis.map(it=>{
+    const i=items.indexOf(it);
+    if(it.kind==='voice'){ const u=it.u;
+      return `<tr data-i="${i}"><td class="t">${esc(fT(u.start))}</td><td><span class="k voice">voice</span></td><td><span class="sw" style="background:${TEAM[u.team_name]||'#777'}"></span> ${esc(u.name)} <span class="note mono" style="margin:0">${esc(u.id)}</span></td>`+
+        `<td class="ch${u.channel}">${CHN[u.channel]||u.channel}</td><td>${(u.end-u.start).toFixed(1)} s, ${u.packets} packets${u.seq_gaps?', '+u.seq_gaps+' missing':''}, ${esc(u.opus.mode)} ${esc(u.opus.bandwidth)} ${u.opus.frame_ms} ms${u.opus.stereo?' stereo':''}, ${(u.bytes*8/Math.max(0.02,u.audio_s)/1000).toFixed(0)} kbit/s${u.audio_packets?'':' <span class="warn">(no audio kept)</span>'}</td>`+
+        `<td style="white-space:nowrap"><button class="btn" data-play="${u.n}"${u.audio_packets?'':' disabled'}>play</button> ${u.audio_packets?`<a class="dl" href="${sp()}/utt/${u.n}.ogg?dl=1">.ogg</a> `:''}<button class="btn" data-pk="${u.n}">packets</button></td></tr>`; }
+    const e=it.e, who=e.kind==='chat'?(e.a||''):[e.a,e.b].filter(Boolean).join(' / ');
+    const ch=e.kind==='chat'?e.channel:''; const cc=CHATCH[ch];
+    return `<tr data-i="${i}"><td class="t">${esc(fT(e.t))}</td><td><span class="k ${it.kind}">${esc(e.kind)}</span></td><td>${esc(who)}${e.sender_id?' <span class="note mono" style="margin:0">'+esc(e.sender_id)+'</span>':''}</td><td${cc?' class="ch'+cc+'"':''}>${esc(ch)}</td><td>${esc(e.text)}${e.estimated?' <span class="note" style="margin:0">(estimated)</span>':''}</td><td></td></tr>`;
+  }).join('')+'</tbody></table>';
+}
+$('#ls').onclick=async e=>{ const p=e.target.closest('[data-play]'); if(p){ play(+p.dataset.play); return; }
+  const k=e.target.closest('[data-pk]'); if(k){ const n=+k.dataset.pk, u=X.utterances[n];
+    $('#deth').textContent=`Utterance ${n}: ${u.name} (${u.id}), ${CHN[u.channel]}, ${fD(u.start)}`; $('#detb').innerHTML='loading...'; $('#det').classList.add('open');
+    try{ const j=await (await fetch(sp()+'/utt/'+n+'.json',{cache:'no-store'})).json();
+      $('#detb').innerHTML='<table><thead><tr><th>+ms</th><th>sequence</th><th>bytes</th><th>kept</th><th>TOC</th><th>mode</th><th>band</th><th>frame</th><th>code</th><th>ms</th><th>ch</th></tr></thead><tbody>'+
+        j.packets.slice(0,3000).map(q=>`<tr><td>${Math.max(0,Math.round((q.t-j.packets[0].t)*1000))}</td><td>${q.seq}</td><td>${q.len}</td><td>${q.stored}</td><td>0x${q.toc.toString(16).padStart(2,'0')}</td><td>${q.mode}</td><td>${q.bandwidth}</td><td>${q.frame_ms}${q.stereo?' st':''}</td><td>${q.code}</td><td>${q.ms}</td><td>${q.channel}</td></tr>`).join('')+'</tbody></table>';
+    }catch(err){ $('#detb').textContent='cannot read the packets'; } } };
+$('#detx').onclick=()=>$('#det').classList.remove('open');
+function play(n){
+  const u=X.utterances[n]; if(!u) return;
+  if(!u.audio_packets){ $('#now').textContent=`${u.name}: no audio kept for this utterance (voice audio was off) - only that they talked at ${fT(u.start)}`; return; }
+  playing=n; document.querySelectorAll('.blk.on').forEach(b=>b.classList.remove('on')); const b=document.querySelector(`.blk[data-u="${n}"]`); if(b) b.classList.add('on');
+  au.src=sp()+'/utt/'+n+'.ogg'; au.play().catch(()=>{});
+  $('#now').innerHTML=`<b>${esc(u.name)}</b> &middot; ${CHN[u.channel]} &middot; ${esc(fD(u.start))} &middot; ${(u.end-u.start).toFixed(1)} s`+(canOgg?'':' <span class="warn">(this browser cannot play Ogg Opus: download it)</span>');
+}
+for(const id of ['f_pl','f_ch','f_voice','f_chat','f_kill','f_ev']) $('#'+id).onchange=()=>{ if(X){ renderTimeline(); renderList(); } };
+$('#zoom').onchange=()=>{ if(X) renderTimeline(); };
+window.onresize=()=>{ if(X && $('#zoom').value==='0') renderTimeline(); };
+// the live session: new utterances and events every few seconds (scroll positions kept)
+setInterval(async()=>{ await loadSessions(); if(cur && S && cur===S.current && au.paused){ const a=$('#tlw').scrollLeft, b=$('#ls').scrollTop; await select(cur); $('#tlw').scrollLeft=a; $('#ls').scrollTop=b; } },5000);
+loadSessions();
+</script>
+</body></html>
