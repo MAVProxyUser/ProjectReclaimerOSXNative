@@ -19,13 +19,14 @@ a{color:var(--accent)}
 code{font:11px ui-monospace,Menlo,monospace;color:#bbb;overflow-wrap:anywhere}
 .mono{font:12px ui-monospace,Menlo,monospace}
 #settings{margin-bottom:16px}
-#sl{display:flex;flex-direction:column;gap:2px;max-height:75vh;overflow-y:auto}
+#sl{display:flex;flex-direction:column;gap:2px;max-height:min(75vh,640px);overflow-y:auto}
 #sl .s{padding:5px 8px;border-radius:4px;cursor:pointer;border:1px solid transparent}
 #sl .s:hover{background:#222}#sl .s.sel{background:#1d2a38;border-color:#2c4a66}
 #sl .s small{display:block;color:var(--dim);font-size:11px}
 .live{display:inline-block;background:#5a1f1f;color:#ffb0b0;border-radius:3px;font-size:10px;font-weight:700;padding:0 4px;margin-left:6px;vertical-align:1px}
 .btn,.dl{background:#222;color:var(--fg);border:1px solid var(--line);border-radius:4px;padding:2px 8px;font:inherit;font-size:12px;cursor:pointer;text-decoration:none;display:inline-block}
 .btn:hover,.dl:hover{border-color:#555}.btn:disabled{opacity:.35;cursor:default}
+#spk{max-height:240px;overflow-y:auto}
 #sum dl{display:grid;grid-template-columns:auto 1fr;gap:3px 14px;margin:0}#sum dt{color:var(--dim)}#sum dd{margin:0;overflow-wrap:anywhere}
 .dls{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
 #spk{display:flex;flex-wrap:wrap;gap:6px}

@@ -50,7 +50,7 @@ document.head.appendChild(st); await new Promise(r=>setTimeout(r,800));'
 # forensic viewer: the largest finished session (or FX_SESSION), every lane shown, the list cut at 600 px and scrolled to
 # its first player chat line (voice, chat and kills together)
 FX_JS='
-const st=document.createElement("style"); st.textContent="#sl,#tlw{max-height:none}#ls{max-height:600px}#pb{display:none}"; document.head.appendChild(st);
+const st=document.createElement("style"); st.textContent="#sl{max-height:520px}#tlw{max-height:none}#ls{max-height:600px}#pb{display:none}"; document.head.appendChild(st);
 const want='"'${FX_SESSION:-}'"';
 const pick=want||(S.sessions.filter(s=>s.name!==S.current).sort((a,b)=>b.voice_bytes-a.voice_bytes)[0]||{}).name||S.current;
 await select(pick); await new Promise(r=>setTimeout(r,1000));
