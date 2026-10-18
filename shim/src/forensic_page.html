@@ -67,11 +67,11 @@ tr.hl{background:#2a2a14}
   <h2>Recording</h2>
   <div class="ctl">
     <label id="l_archive"><input type="checkbox" id="s_archive"> Archive chat, game events, the roster and who talked when</label>
-    <label id="l_consent"><input type="checkbox" id="s_consent"> One-party consent: I take part in these voice channels and choose to record them</label>
+    <label id="l_consent"><input type="checkbox" id="s_consent"> One-party consent: I'm a participant in the channels sent to this client and choose to record them</label>
     <label id="l_voice"><input type="checkbox" id="s_voice"> Voice audio (the Opus packets, as received)</label>
   </div>
-  <div class="note warn">Recording other people's voices is governed by consent laws: in one-party-consent states such as Ohio a participant in a conversation may record it; all-party states (e.g. California, Illinois, Washington) and some countries require everyone's consent. Without the box ticked no audio is stored &mdash; only who talked when.</div>
-  <div class="note">Only what is addressed to this client is archived: the voice packets its voice code receives (muted players included), the chat lines and game events it shows. <span id="dirn"></span></div>
+  <div class="note">Archived: every voice packet the server sends this client &mdash; every channel you can hear (global, team, proximity), muted players included &mdash; with who said it (name, team, ids), plus every chat line, join / leave, kill and server message. Voice from channels this client doesn't receive (e.g. the other team's team chat) never reaches this computer. <span id="dirn"></span></div>
+  <div class="note warn">Voice on a public server is transmitted to everyone in the channel it is sent on (global, team or proximity); once you have joined, your client is one of the recipients it is addressed to &mdash; like a scanner tuned to talk groups, it keeps what it was sent. Recording what you receive as a participant is allowed in one-party-consent places such as Ohio, so the box is ticked by default. Some places require every party's consent, and whether in-game voice counts as a private conversation there can vary: untick it there, and only who talked when is kept, no audio.</div>
   <div class="note" id="smsg"></div>
 </div>
 
@@ -129,7 +129,7 @@ function renderSettings(){
 }
 $('#s_archive').onchange=async e=>{ if(!await ctl('archive='+(e.target.checked?1:0))) $('#smsg').textContent='refused (are the stats page controls off? PELOAD_STATS_READONLY)'; loadSessions(); };
 $('#s_consent').onchange=async e=>{
-  if(e.target.checked && !confirm('One-party consent\n\nYou confirm that you take part in the voice channels this client receives, and that the law where you are lets a participant record them (e.g. Ohio: one-party consent).\n\nThe time of this confirmation is stored with the archive.')){ e.target.checked=false; return; }
+  if(e.target.checked && !confirm('One-party consent\n\nYou confirm that you are a participant in the voice channels this client receives (it joined the server and the voice is sent to it), and that where you are a participant may record what they receive (e.g. Ohio: one-party consent).\n\nThe time of this confirmation is stored with the archive.')){ e.target.checked=false; return; }
   if(!await ctl('consent='+(e.target.checked?1:0))) $('#smsg').textContent='refused'; else $('#smsg').textContent=e.target.checked?'Consent recorded. Turn on "Voice audio" to keep the audio.':'Consent withdrawn: voice audio is off.';
   loadSessions(); };
 $('#s_voice').onchange=async e=>{ if(!await ctl('voice='+(e.target.checked?1:0))) $('#smsg').textContent='refused: voice audio needs the one-party-consent box'; loadSessions(); };

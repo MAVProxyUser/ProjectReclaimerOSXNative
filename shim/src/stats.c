@@ -240,7 +240,23 @@ static int entry_hook_tail(uint8_t*site,const uint8_t*pro,int len,void*fn,const 
 static void fx_voice(uint64_t sender,const uint8_t*payload,uint64_t len); static int fx_control(const char*qs);   // forensic.c
 static void fx_http(int fd,const char*path,const char*qs,const char*req); static void fx_roster_tick(const char*map,const StSess*ss,int nss,const StPlayer*pl,int np);
 static pthread_mutex_t g_talk_mx=PTHREAD_MUTEX_INITIALIZER; static struct { uint64_t id; double t; } g_talk[128];
-static void __attribute__((ms_abi)) st_on_voice(void*state,uint64_t sender,const uint8_t*payload,uint64_t len){ (void)state; double now=mono_s(); int o=0;
+// PELOAD_VOICE_SRCSTAT=1 (diagnostic, aggregate only): where voice datagrams come from -- the source address of the
+// recvfrom that delivered each packet (same thread, just before voice_recv). Every 30 s: packets, distinct sources, the
+// top source and its share; an address other than the joined server's is masked (players' addresses are not logged).
+static void st_voice_srcstat(void){
+    static int on=-1; if(on<0) on=getenv("PELOAD_VOICE_SRCSTAT")?1:0; if(!on) return;
+    static pthread_mutex_t mx=PTHREAD_MUTEX_INITIALIZER; static struct { uint32_t ip; uint16_t port; unsigned long n; } t[64]; static int nt; static unsigned long tot; static double tl;
+    pthread_mutex_lock(&mx); tot++; int k=0; for(; k<nt; k++) if(t[k].ip==t_rx_ip && t[k].port==t_rx_port) break;
+    if(k==nt && nt<64){ t[nt].ip=t_rx_ip; t[nt].port=t_rx_port; t[nt].n=0; nt++; } if(k<64) t[k].n++;
+    double now=mono_s(); if(!tl) tl=now;
+    if(now-tl>=30){ int bi=0; for(int q=1;q<nt;q++) if(t[q].n>t[bi].n) bi=q;
+        char srv[80]=""; { const char*p=strstr(g_cmdlineA,"join?server="); if(p){ p+=12; size_t j2=0; while(*p && *p!=':' && *p!=' ' && *p!='"' && j2+1<sizeof srv) srv[j2++]=*p++; srv[j2]=0; } }
+        char ips[32]="?"; struct in_addr a; a.s_addr=nt?t[bi].ip:0; inet_ntop(AF_INET,&a,ips,sizeof ips); int server=srv[0] && !strcmp(srv,ips);
+        if(!server){ char*d=strchr(ips,'.'); if(d){ d=strchr(d+1,'.'); if(d) snprintf(d,sizeof ips-(size_t)(d-ips),".x.x"); } }
+        char m[300]; int kk=snprintf(m,sizeof m,"  [voice] %lu packets in 30 s from %d source address(es); top %s:%u %.0f%%%s\n",tot,nt,ips,nt?t[bi].port:0,nt&&tot?100.0*t[bi].n/tot:0,server?" = the joined server (it relays voice)":"");
+        (void)!write(2,m,kk); tot=0; nt=0; tl=now; }
+    pthread_mutex_unlock(&mx); }
+static void __attribute__((ms_abi)) st_on_voice(void*state,uint64_t sender,const uint8_t*payload,uint64_t len){ st_voice_srcstat(); (void)state; double now=mono_s(); int o=0;
     pthread_mutex_lock(&g_talk_mx); for(int i=0;i<128;i++){ if(g_talk[i].id==sender){ o=i; break; } if(g_talk[i].t<g_talk[o].t) o=i; }
     g_talk[o].id=sender; g_talk[o].t=now; pthread_mutex_unlock(&g_talk_mx);
     if(g_fx_on) fx_voice(sender,payload,len); }   // the forensic archive: every packet, before the client's mute / channel checks
@@ -888,7 +904,12 @@ static void* st_listen_thread(void*a){ (void)a; pthread_setname_np("shim-stats-l
     struct sockaddr_in sa; memset(&sa,0,sizeof sa); sa.sin_family=AF_INET; sa.sin_port=htons((uint16_t)g_st_port);
     const char*ad=getenv("PELOAD_STATS_ADDR"); sa.sin_addr.s_addr=inet_addr(ad&&*ad?ad:"127.0.0.1");
     char m[160]; int k;
-    if(ls<0 || bind(ls,(struct sockaddr*)&sa,sizeof sa) || listen(ls,16)){ k=snprintf(m,sizeof m,"  [stats] cannot listen on %s:%d (%s)\n",ad&&*ad?ad:"127.0.0.1",g_st_port,strerror(errno)); (void)!write(2,m,k); if(ls>=0) close(ls); return 0; }
+    // a previous instance that was just killed can still hold the port for a while (2026-10-18: a restarted client lost its
+    // stats page -- "Address already in use" -- and the open page showed "cannot reach the loader"): retry for 30 s
+    for(int tr=0; ls>=0 && tr<30 && (bind(ls,(struct sockaddr*)&sa,sizeof sa) || listen(ls,16)); tr++){ if(errno!=EADDRINUSE) break;
+        if(!tr){ k=snprintf(m,sizeof m,"  [stats] %s:%d busy, retrying for 30 s\n",ad&&*ad?ad:"127.0.0.1",g_st_port); (void)!write(2,m,k); }
+        sleep(1); if(tr==29){ errno=EADDRINUSE; close(ls); ls=-1; } }
+    if(ls<0 || listen(ls,16)){ k=snprintf(m,sizeof m,"  [stats] cannot listen on %s:%d (%s)\n",ad&&*ad?ad:"127.0.0.1",g_st_port,strerror(errno)); (void)!write(2,m,k); if(ls>=0) close(ls); return 0; }
     k=snprintf(m,sizeof m,"  [stats] live game stats on http://%s:%d/ (also /stats.json, /events)\n",ad&&*ad?ad:"127.0.0.1",g_st_port); (void)!write(2,m,k);
     pthread_t t; pthread_create(&t,0,st_snap_thread,0); pthread_detach(t);
     { const char*o=getenv("PELOAD_STATS_OPEN"); if(o && atoi(o)){ pthread_t ot; pthread_create(&ot,0,st_open_thread,0); pthread_detach(ot); } }

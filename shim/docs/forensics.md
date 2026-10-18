@@ -28,12 +28,16 @@ the stats page). Written 2026-10-18 (backlog 43); tested offline only (see "Test
 
 ## Consent
 
-Recording other people's voices is governed by wiretap / eavesdropping law (not legal advice). In one-party-consent
-states such as Ohio (Ohio Revised Code 2933.52) a participant in a conversation may record it; all-party states (California, Illinois, Washington,
-...) and some countries require everyone's consent. The archive therefore:
+Voice on a public server is transmitted to everyone in the channel it is sent on (global, team or proximity); once the
+client has joined, it is one of the recipients the packets are addressed to -- like a scanner tuned to talk groups, it
+keeps what it was sent and nothing else. Recording what a participant receives is allowed in one-party-consent places
+such as Ohio (Ohio Revised Code 2933.52); some places require every party's consent, and whether in-game voice counts as
+a private conversation there can vary (not legal advice). The user is in Ohio (2026-10-18), so:
 
-- stores no audio until the user ticks "One-party consent: I take part in these voice channels and choose to record
-  them" on the viewer page (a confirmation dialog repeats it), then turns on "Voice audio";
+- with no `settings.json` yet, one-party consent and voice audio start ON (the time is recorded as the confirmation);
+  unticking "One-party consent: I'm a participant in the channels sent to this client and choose to record them" on the
+  viewer page turns voice audio off (only who talked when is kept); ticking it again asks for confirmation;
+  `PELOAD_FORENSIC_AUDIO=0|1` overrides voice audio for one run;
 - persists the confirmation with its time (`one_party_consent: true`, `consent_confirmed_unix`) in
   `forensics/settings.json` and copies it into each session's `session.json`;
 - refuses `voice=1` without consent on record; withdrawing consent turns voice audio off at once;
@@ -55,7 +59,7 @@ turns all of it off.
 
 `/control` needs POST with an `X-Reclaimer-Control` header like every stats page control; `PELOAD_STATS_READONLY=1`
 turns all controls off. Settings are in `forensics/settings.json`:
-`{"archive":true,"voice_audio":false,"one_party_consent":false,"consent_confirmed_unix":0.000,"consent_confirmed":""}`.
+`{"archive":true,"voice_audio":true,"one_party_consent":true,"consent_confirmed_unix":<first start>,"consent_confirmed":"<iso time>"}` (the defaults).
 
 Cost: with the archive off, each hook (voice, chat, event) does one flag check (`g_fx_on`) and the snapshot thread one
 more; the writer thread is not even started. With it on, a hook copies its record into an in-memory queue under one

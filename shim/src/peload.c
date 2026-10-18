@@ -2616,7 +2616,9 @@ static void udp_tracef(const char*dir,WSASOCK s,const struct sockaddr_storage*ss
     int lp=0; { struct sockaddr_in me; socklen_t ml=sizeof me; if(getsockname((int)s,(struct sockaddr*)&me,&ml)==0) lp=ntohs(me.sin_port);}
     char b[160]; int k=snprintf(b,sizeof b,"  [udp] %s fd=%d local:%d %s %s:%d len=%d\n",dir,(int)s,lp,strcmp(dir,"TX")?"<-":"->",ip,port,len); (void)!write(2,b,k); }
 static int MSABI i_ws2_sendto(WSASOCK s,const char*buf,int len,int fl,const void*to,int tl){ struct sockaddr_storage ss; if(to)peer_gip_rec((int)s,to,tl); t_sa_send=1; int bl=to?sa_w2b(to,tl,&ss):0; t_sa_send=0; ssize_t r=sendto((int)s,buf,len,fl,bl?(struct sockaddr*)&ss:0,bl); if(r<0){ws2_err(errno);if(getenv("PELOAD_TRACE_UDP")){char b[96];int k=snprintf(b,sizeof b,"  [udp] TX fd=%d FAIL errno=%d\n",(int)s,errno);(void)!write(2,b,k);}return -1;} if(bl)udp_tracef("TX",s,&ss,(int)r); return (int)r; }
+static __thread uint32_t t_rx_ip; static __thread uint16_t t_rx_port;   // the last datagram's source on this thread (stats.c voice source tally)
 static int MSABI i_ws2_recvfrom(WSASOCK s,char*buf,int len,int fl,void*from,int*fl2){ struct sockaddr_storage ss; socklen_t sl=sizeof ss; ssize_t r=recvfrom((int)s,buf,len,fl,(struct sockaddr*)&ss,&sl); if(r<0){ws2_err(errno);return -1;} if(r>=0)udp_tracef("RX",s,&ss,(int)r);
+    if(ss.ss_family==AF_INET){ t_rx_ip=((struct sockaddr_in*)&ss)->sin_addr.s_addr; t_rx_port=ntohs(((struct sockaddr_in*)&ss)->sin_port); }
     if(getenv("PELOAD_TRACE_SCATTER") && r>200){ void*ra=__builtin_return_address(0); char b[180]; int k=snprintf(b,sizeof b,"  [scatter] recvfrom fd=%d wire=%d bufcap=%d caller=%p%s\n",(int)s,(int)r,len,ra,(r==len)?" (==cap)":""); (void)!write(2,b,k); }
     if(from&&fl2){ sa_b2w((struct sockaddr*)&ss,from,fl2); peer_gip_restore((int)s,from); } return (int)r; }
 // PELOAD_TRACE_WIRE: hex+ascii dump of TCP payloads (to RE the local-server query/join protocol).
@@ -2626,7 +2628,10 @@ static void wire_dump(const char*dir,int fd,const char*buf,int n){ if(!getenv("P
     k+=snprintf(o+k,sizeof o-k," | "); for(int i=0;i<m&&k<2300;i++){ unsigned char c=buf[i]; o[k++]=(c>=32&&c<127)?c:'.'; }
     o[k++]='\n'; (void)!write(2,o,k); }
 static int MSABI i_ws2_send(WSASOCK s,const char*buf,int len,int fl){ ssize_t r=send((int)s,buf,len,fl); if(r<0){ws2_err(errno);net_tracef("[net] send(fd=%d,len=%d) -> errno=%d wsa=%d\n",(int)s,len,errno,t_wsa_err);return -1;} net_tracef("[net] send(fd=%d,len=%d) -> %d\n",(int)s,len,(int)r); wire_dump("TX",(int)s,buf,(int)r); return (int)r; }
-static int MSABI i_ws2_recv(WSASOCK s,char*buf,int len,int fl){ ssize_t r=recv((int)s,buf,len,fl); if(r<0){ws2_err(errno);net_tracef("[net] recv(fd=%d,len=%d) -> errno=%d wsa=%d\n",(int)s,len,errno,t_wsa_err);return -1;} net_tracef("[net] recv(fd=%d,len=%d) -> %d\n",(int)s,len,(int)r); wire_dump("RX",(int)s,buf,(int)r); return (int)r; }
+static int MSABI i_ws2_recv(WSASOCK s,char*buf,int len,int fl){ ssize_t r=recv((int)s,buf,len,fl);
+    { static int vs=-1; if(vs<0) vs=getenv("PELOAD_VOICE_SRCSTAT")?1:0;   // (diagnostic) a connected socket's peer = this datagram's source
+      if(vs && r>0){ struct sockaddr_in pa; socklen_t pl=sizeof pa; if(!getpeername((int)s,(struct sockaddr*)&pa,&pl) && pa.sin_family==AF_INET){ t_rx_ip=pa.sin_addr.s_addr; t_rx_port=ntohs(pa.sin_port); } } }
+    if(r<0){ws2_err(errno);net_tracef("[net] recv(fd=%d,len=%d) -> errno=%d wsa=%d\n",(int)s,len,errno,t_wsa_err);return -1;} net_tracef("[net] recv(fd=%d,len=%d) -> %d\n",(int)s,len,(int)r); wire_dump("RX",(int)s,buf,(int)r); return (int)r; }
 static int MSABI i_ws2_shutdown(WSASOCK s,int how){ return shutdown((int)s,how)==0?0:(ws2_err(errno),-1); }
 static int MSABI i_ws2_getsockname(WSASOCK s,void*name,int*nl){ struct sockaddr_storage ss; socklen_t sl=sizeof ss; if(getsockname((int)s,(struct sockaddr*)&ss,&sl)<0){ws2_err(errno);return -1;} sa_b2w((struct sockaddr*)&ss,name,nl); return 0; }
 static int MSABI i_ws2_getpeername(WSASOCK s,void*name,int*nl){ struct sockaddr_storage ss; socklen_t sl=sizeof ss; if(getpeername((int)s,(struct sockaddr*)&ss,&sl)<0){ws2_err(errno);return -1;} sa_b2w((struct sockaddr*)&ss,name,nl); return 0; }
