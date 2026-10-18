@@ -370,8 +370,18 @@ A local map-change server (`DED_CONFIG=mapchange.toml bash shim/dedicated.sh`, t
   Now closed when idle like the playback streams: 13 closed in 7 minutes, one tone thread, the process at 56-57 threads.
 - **What still grows:** the worker's footprint went 6.2 -> 9.8 GB over 6 loads. Most is not a leak: texture CPU copies
   follow the map (3.6-4.7 GB), and the rest is halo3's fixed 4.37 GB VirtualAlloc reservation being touched (bounded).
-  The heap outside D3D objects grows ~50 MB a load (720 -> 1,038 MB over ~6 loads; earlier measurement: +60 MB) -- the client's
-  or halo3's own allocations, not found yet (a per-caller live-heap tracker in HeapAlloc would name it).
+  The heap outside D3D objects grew ~50 MB a load (720 -> 1,038 MB over ~6 loads). FOUND and fixed the same morning with two
+  new trackers: `PELOAD_HEAP_TRACK=1` (guest HeapAlloc blocks by stack-scanned site: the game's own heap was FLAT at ~464 MB)
+  and `PELOAD_MALLOC_TRACK=1` (libmalloc's malloc_logger hook: every malloc / free by frame-pointer site; `[malloctrack]`
+  every 60 s, sites by live bytes and growth). The growth was the loader's:
+  - **compute programs:** cs_compile reserved a fixed 8192-instruction array (~9 MB) per kernel, and every map load's fresh
+    (byte-identical) compute shaders compiled their own: +18-27 MB a minute. Now trimmed to the program, compiled once per
+    bytecode (on the canon; duplicates run it and are freed when released, like VS / PS): 15 kernels compiled in all.
+  - **XInput polling:** `[GCController controllers]` on every XInputGetState, on game threads whose autorelease pool never
+    drains: ~950 Objective-C objects a second. Now inside a push / pop.
+  - **waitable timers:** Rust's sleeps make and close one ~37 times a second; CloseHandle kept every sync object. Closed
+    timers are freed 30 s later now (other sync objects stay: thread handles are written by their thread at exit).
+  After: 701 -> 746 MB over 8 minutes of map changes (was 719 -> 1,042); what still moves is per-map content.
 
 #### GPU particle compute (2026-10-17, experimental, OFF: PELOAD_CS_GPU=1)
 

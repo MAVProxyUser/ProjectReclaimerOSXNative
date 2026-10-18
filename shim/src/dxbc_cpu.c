@@ -69,6 +69,9 @@ static CsProg* cs_compile(const uint8_t* d, size_t len){
     for(int i=0;i<p->nins;i++) for(int k=0;k<8;k++){ DgOp* o=&p->ins[i].ops[k]; char sw[5]; dg_swz(o,sw);
         if(o->type==T_IMM32 && !immold){ for(int c=0;c<4;c++) o->csw[c]=(uint8_t)c; continue; }
         for(int c=0;c<4;c++) o->csw[c]=(uint8_t)(sw[c]=='x'?0:sw[c]=='y'?1:sw[c]=='z'?2:3); }
+    // the decoder's 8192-entry array (~9 MB) trimmed to the program (2026-10-18: one per compiled kernel was most of the
+    // memory a map change left behind -- every map load compiled its fresh copies of the same kernels)
+    { DgIns*t=realloc(p->ins,(size_t)(p->nins>0?p->nins:1)*sizeof(DgIns)); if(t) p->ins=t; }
     p->ok=1; return p;
 }
 

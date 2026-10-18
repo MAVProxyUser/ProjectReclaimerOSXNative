@@ -34,6 +34,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/mman.h>
+#include <os/lock.h>
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <mach/mach_time.h>
@@ -592,6 +593,113 @@ static void heap_stat(int kind,uint64_t n,uint32_t fl){
         static const char*const nm[6]={"<1K","1-32K","32-256K","256K-1M","1-8M",">8M"};
         for(int kk=0;kk<2;kk++){ k+=snprintf(m+k,sizeof m-k,"%s",kk?" | realloc":"alloc"); for(int i=0;i<6;i++) k+=snprintf(m+k,sizeof m-k," %s %llu/%.1f",nm[i],(unsigned long long)g_hs_n[kk][i],g_hs_b[kk][i]/1048576.0); }
         k+=snprintf(m+k,sizeof m-k," | zeroed %llu\n",(unsigned long long)g_hs_zero); (void)!write(2,m,k); memset(g_hs_n,0,sizeof g_hs_n); memset(g_hs_b,0,sizeof g_hs_b); g_hs_zero=0; } }
+// PELOAD_HEAP_TRACK=1 (diagnostic, 2026-10-18: ~50 MB of guest heap a map load is never given back -- whose?): every live
+// HeapAlloc block with its allocation site = the first 3 return addresses into the exe's / halo3's code found on the stack
+// (Rust's allocator calls HeapAlloc from one place, so the direct caller says nothing). Every 60 s (and at exit of the
+// tracker's window) `[heaptrack]` lists the sites with the most live bytes and the biggest growth since the last report.
+// Blocks from the fast small-block heap are not seen: run it with PELOAD_FASTCALL=tid,keys. Costs a stack scan per call.
+typedef struct { void*p; uint32_t site; uint32_t n; } HtEnt;            // n: bytes (capped at 4 GB)
+typedef struct { uint64_t ra[3]; uint64_t live, cnt, last; } HtSite;
+static HtEnt* g_ht; static HtSite* g_hts; static os_unfair_lock g_ht_lk[64]; static os_unfair_lock g_hts_lk=OS_UNFAIR_LOCK_INIT;
+#define HT_SLOTS (1u<<24)
+#define HT_SITES (1u<<16)
+static int g_ht_on=-1; static uint64_t g_ht_lo[2], g_ht_hi[2]; static volatile uint64_t g_ht_lost;
+static void ht_text(uint64_t base,int i){ const uint8_t*b=(const uint8_t*)base; uint32_t pe=*(const uint32_t*)(b+0x3c); uint16_t ns=*(const uint16_t*)(b+pe+6), oh=*(const uint16_t*)(b+pe+20);
+    const uint8_t*sh=b+pe+24+oh; for(int k=0;k<ns;k++){ const uint8_t*x=sh+k*40; if(*(const uint32_t*)(x+36)&0x20000000){   // executable
+            uint64_t lo=base+*(const uint32_t*)(x+12), hi=lo+*(const uint32_t*)(x+8); if(!g_ht_lo[i]||lo<g_ht_lo[i]) g_ht_lo[i]=lo; if(hi>g_ht_hi[i]) g_ht_hi[i]=hi; } } }
+static int ht_on(void){ if(g_ht_on>=0) return g_ht_on; g_ht_on=0; if(!getenv("PELOAD_HEAP_TRACK")) return 0;
+    g_ht=calloc(HT_SLOTS,sizeof(HtEnt)); g_hts=calloc(HT_SITES,sizeof(HtSite)); if(!g_ht||!g_hts) return 0;
+    for(int i=0;i<64;i++) g_ht_lk[i]=OS_UNFAIR_LOCK_INIT; return g_ht_on=1; }
+static int ht_inmod(uint64_t v){ if(!g_ht_hi[0]) ht_text(0x140000000ull,0);
+    if(!g_ht_hi[1]){ for(int k=0;k<g_nmods;k++) if(g_mods[k].name && strcasestr(g_mods[k].name,"halo3.dll")) ht_text((uint64_t)g_mods[k].base,1); }
+    return (v>=g_ht_lo[0]&&v<g_ht_hi[0]) || (g_ht_hi[1] && v>=g_ht_lo[1]&&v<g_ht_hi[1]); }
+static uint32_t ht_site(const uint64_t*sp){ uint64_t ra[3]={0}; int n=0; for(int i=0;i<160 && n<3;i++){ uint64_t v=sp[i]; if(ht_inmod(v)) ra[n++]=v; }
+    uint64_t h=ra[0]*0x9E3779B97F4A7C15ull ^ ra[1]*0xC2B2AE3D27D4EB4Full ^ ra[2]*0x165667B19E3779F9ull; uint32_t k=(uint32_t)(h>>40)&(HT_SITES-1);
+    os_unfair_lock_lock(&g_hts_lk);
+    for(uint32_t q=0;q<HT_SITES;q++){ HtSite*t=&g_hts[(k+q)&(HT_SITES-1)];
+        if(!t->ra[0] && !t->ra[1] && !t->ra[2] && !t->cnt && !t->live){ if(!t->last){ memcpy(t->ra,ra,sizeof ra); t->last=1; } }
+        if(!memcmp(t->ra,ra,sizeof ra)){ os_unfair_lock_unlock(&g_hts_lk); return (k+q)&(HT_SITES-1); } }
+    os_unfair_lock_unlock(&g_hts_lk); return 0; }
+static void ht_add(void*p,uint64_t n,const uint64_t*sp){ if(!p) return; uint32_t site=ht_site(sp); uint64_t h=((uintptr_t)p>>4)*0x9E3779B97F4A7C15ull; uint32_t k=(uint32_t)(h>>40);
+    os_unfair_lock*l=&g_ht_lk[k&63]; os_unfair_lock_lock(l); int ok=0;
+    for(uint32_t q=0;q<4096;q++){ HtEnt*e=&g_ht[(k+q)&(HT_SLOTS-1)]; if(!e->p || e->p==(void*)1 || e->p==p){ e->p=p; e->site=site; e->n=n>0xFFFFFFFFu?0xFFFFFFFFu:(uint32_t)n; ok=1; break; } }
+    os_unfair_lock_unlock(l); if(!ok){ g_ht_lost++; return; }
+    __atomic_add_fetch(&g_hts[site].live,n,__ATOMIC_RELAXED); __atomic_add_fetch(&g_hts[site].cnt,1,__ATOMIC_RELAXED); }
+static void ht_del(void*p){ if(!p) return; uint64_t h=((uintptr_t)p>>4)*0x9E3779B97F4A7C15ull; uint32_t k=(uint32_t)(h>>40);
+    os_unfair_lock*l=&g_ht_lk[k&63]; os_unfair_lock_lock(l); uint32_t site=0, n=0; int f=0;
+    for(uint32_t q=0;q<4096;q++){ HtEnt*e=&g_ht[(k+q)&(HT_SLOTS-1)]; if(!e->p) break; if(e->p==p){ site=e->site; n=e->n; e->p=(void*)1; f=1; break; } }
+    os_unfair_lock_unlock(l); if(!f) return;
+    __atomic_sub_fetch(&g_hts[site].live,n,__ATOMIC_RELAXED); __atomic_sub_fetch(&g_hts[site].cnt,1,__ATOMIC_RELAXED); }
+static int ht_cmp_live(const void*a,const void*b){ const HtSite*x=*(HtSite*const*)a,*y=*(HtSite*const*)b; return x->live<y->live?1:x->live>y->live?-1:0; }
+static int ht_cmp_grow(const void*a,const void*b){ const HtSite*x=*(HtSite*const*)a,*y=*(HtSite*const*)b; int64_t gx=(int64_t)x->live-(int64_t)x->last, gy=(int64_t)y->live-(int64_t)y->last; return gx<gy?1:gx>gy?-1:0; }
+static void ht_fmt(char*b,size_t n,uint64_t v){ if(!v){ snprintf(b,n,"-"); return; } if(v>=g_ht_lo[0]&&v<g_ht_hi[0]) snprintf(b,n,"exe+0x%llx",(unsigned long long)(v-0x140000000ull));
+    else { uint64_t hb=g_ht_lo[1]&~0xFFFFull; for(int k=0;k<g_nmods;k++) if(g_mods[k].name && strcasestr(g_mods[k].name,"halo3.dll")) hb=(uint64_t)g_mods[k].base; snprintf(b,n,"halo3+0x%llx",(unsigned long long)(v-hb)); } }
+static void ht_report(void){ static double tl; if(g_ht_on!=1) return; double now=mono_s(); if(now-tl<60.0) return; tl=now;
+    static HtSite* v[HT_SITES]; int nv=0; uint64_t tot=0; for(uint32_t i=0;i<HT_SITES;i++){ HtSite*t=&g_hts[i]; if(t->cnt||t->live||t->last>1){ v[nv++]=t; tot+=t->live; } }
+    char m[4096]; int k=snprintf(m,sizeof m,"  [heaptrack] %d sites, %.1f MB live, %llu not tracked (table full)\n",nv,tot/1048576.0,(unsigned long long)g_ht_lost);
+    for(int pass=0;pass<2;pass++){ qsort(v,nv,sizeof v[0],pass?ht_cmp_grow:ht_cmp_live); k+=snprintf(m+k,sizeof m-k,"  [heaptrack] %s:\n",pass?"grew most since the last report":"most live bytes");
+        for(int i=0;i<12 && i<nv && k<(int)sizeof m-200;i++){ HtSite*t=v[i]; char a[3][40]; for(int j=0;j<3;j++) ht_fmt(a[j],sizeof a[j],t->ra[j]);
+            k+=snprintf(m+k,sizeof m-k,"    %8.1f MB (%+.1f) %8llu blocks  %s < %s < %s\n",t->live/1048576.0,((int64_t)t->live-(int64_t)(t->last>1?t->last:0))/1048576.0,(unsigned long long)t->cnt,a[0],a[1],a[2]); } }
+    (void)!write(2,m,k); for(int i=0;i<nv;i++) v[i]->last=v[i]->live>1?v[i]->live:2; }
+static void* i_HeapAlloc_addr(void);
+// PELOAD_MALLOC_TRACK=1 (diagnostic, 2026-10-18): the guest heap stays flat over map changes while malloc grows ~25 MB a
+// minute outside D3D objects -- so who in the loader (or a system library) keeps it? libmalloc's own malloc_logger hook
+// (what MallocStackLogging uses; in-process, nothing reads other memory) records every malloc / free with its site: the
+// first 3 return addresses past libmalloc and i_HeapAlloc, walked by frame pointers. `[malloctrack]` every 60 s: sites by
+// live bytes and by growth; addresses inside peload print as peload+0x.. (atos -o shim/build/peload -l <slide base> ...).
+typedef void (malloc_logger_t)(uint32_t type, uintptr_t a1, uintptr_t a2, uintptr_t a3, uintptr_t result, uint32_t skip);
+extern malloc_logger_t* malloc_logger;
+typedef struct { uintptr_t p; uint32_t site; uint32_t n; } MtEnt;
+typedef struct { uintptr_t ra[3]; uint64_t live, cnt, last; } MtSite;
+#define MT_SLOTS (1u<<24)
+#define MT_SITES (1u<<15)
+static MtEnt* g_mt; static MtSite* g_mts; static os_unfair_lock g_mt_lk[64], g_mts_lk=OS_UNFAIR_LOCK_INIT; static int g_mt_on;
+static uintptr_t g_mt_mlo, g_mt_mhi, g_mt_peb, g_mt_pee; static volatile uint64_t g_mt_lost;
+static pthread_key_t g_mt_key;   // re-entry guard (TSD: a __thread first touch can itself call malloc)
+static uint32_t mt_site(void){ uintptr_t ra[3]={0}; int n=0; uintptr_t*fp=(uintptr_t*)__builtin_frame_address(0);
+    for(int d=0; d<14 && fp && n<3; d++){ uintptr_t r=fp[1]; uintptr_t*nx=(uintptr_t*)fp[0]; if(!r) break;
+        if(!(r>=g_mt_mlo && r<g_mt_mhi) && !(n==0 && r>=(uintptr_t)i_HeapAlloc_addr() && r<(uintptr_t)i_HeapAlloc_addr()+0x400)) ra[n++]=r;
+        if(nx<=fp || (uintptr_t)nx-(uintptr_t)fp>(1u<<20)) break; fp=nx; }
+    uint64_t h=ra[0]*0x9E3779B97F4A7C15ull ^ ra[1]*0xC2B2AE3D27D4EB4Full ^ ra[2]*0x165667B19E3779F9ull; uint32_t k=(uint32_t)(h>>40)&(MT_SITES-1);
+    os_unfair_lock_lock(&g_mts_lk);
+    for(uint32_t q=0;q<MT_SITES;q++){ MtSite*t=&g_mts[(k+q)&(MT_SITES-1)];
+        if(!t->last){ memcpy(t->ra,ra,sizeof ra); t->last=1; }
+        if(!memcmp(t->ra,ra,sizeof ra)){ os_unfair_lock_unlock(&g_mts_lk); return (k+q)&(MT_SITES-1); } }
+    os_unfair_lock_unlock(&g_mts_lk); return 0; }
+static void mt_add(uintptr_t p,uint64_t n){ uint32_t site=mt_site(); uint32_t k=(uint32_t)((((uint64_t)p>>4)*0x9E3779B97F4A7C15ull)>>40);
+    os_unfair_lock*l=&g_mt_lk[k&63]; os_unfair_lock_lock(l); int ok=0;
+    for(uint32_t q=0;q<4096;q++){ MtEnt*e=&g_mt[(k+q)&(MT_SLOTS-1)]; if(!e->p || e->p==1 || e->p==p){ e->p=p; e->site=site; e->n=n>0xFFFFFFFFu?0xFFFFFFFFu:(uint32_t)n; ok=1; break; } }
+    os_unfair_lock_unlock(l); if(!ok){ g_mt_lost++; return; }
+    __atomic_add_fetch(&g_mts[site].live,n,__ATOMIC_RELAXED); __atomic_add_fetch(&g_mts[site].cnt,1,__ATOMIC_RELAXED); }
+static void mt_del(uintptr_t p){ uint32_t k=(uint32_t)((((uint64_t)p>>4)*0x9E3779B97F4A7C15ull)>>40);
+    os_unfair_lock*l=&g_mt_lk[k&63]; os_unfair_lock_lock(l); uint32_t site=0,n=0; int f=0;
+    for(uint32_t q=0;q<4096;q++){ MtEnt*e=&g_mt[(k+q)&(MT_SLOTS-1)]; if(!e->p) break; if(e->p==p){ site=e->site; n=e->n; e->p=1; f=1; break; } }
+    os_unfair_lock_unlock(l); if(!f) return;
+    __atomic_sub_fetch(&g_mts[site].live,n,__ATOMIC_RELAXED); __atomic_sub_fetch(&g_mts[site].cnt,1,__ATOMIC_RELAXED); }
+static void mt_logger(uint32_t type,uintptr_t a1,uintptr_t a2,uintptr_t a3,uintptr_t result,uint32_t skip){ (void)a1; (void)skip;
+    if(!(type&8) || pthread_getspecific(g_mt_key)) return; pthread_setspecific(g_mt_key,(void*)1);   // (zone calls only: malloc / calloc / realloc / free)
+    if((type&6)==6){ if(a2) mt_del(a2); if(result) mt_add(result,a3); }       // realloc: old a2, new size a3
+    else if(type&2){ if(result) mt_add(result,a2); }                        // malloc / calloc (a2 = bytes)
+    else if(type&4){ if(a2) mt_del(a2); }                                   // free
+    pthread_setspecific(g_mt_key,0); }
+static void mt_start(void){ if(!getenv("PELOAD_MALLOC_TRACK")) return;
+    g_mt=mmap(0,(size_t)MT_SLOTS*sizeof(MtEnt),PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANON,-1,0); g_mts=mmap(0,(size_t)MT_SITES*sizeof(MtSite),PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANON,-1,0);
+    if(g_mt==MAP_FAILED||g_mts==MAP_FAILED) return; for(int i=0;i<64;i++) g_mt_lk[i]=OS_UNFAIR_LOCK_INIT;
+    Dl_info di; if(dladdr((void*)malloc,&di)){ g_mt_mlo=(uintptr_t)di.dli_fbase; g_mt_mhi=g_mt_mlo+0x100000; }   // libsystem_malloc (~1 MB)
+    if(dladdr((void*)mt_start,&di)) g_mt_peb=(uintptr_t)di.dli_fbase; g_mt_pee=(uintptr_t)get_etext();
+    if(pthread_key_create(&g_mt_key,0)) return; g_mt_on=1; malloc_logger=mt_logger; char m[160]; int k=snprintf(m,sizeof m,"  [malloctrack] on; peload image at %p (atos -l)\n",(void*)g_mt_peb); (void)!write(2,m,k); }
+static int mt_cmp_live(const void*a,const void*b){ const MtSite*x=*(MtSite*const*)a,*y=*(MtSite*const*)b; return x->live<y->live?1:x->live>y->live?-1:0; }
+static int mt_cmp_grow(const void*a,const void*b){ const MtSite*x=*(MtSite*const*)a,*y=*(MtSite*const*)b; int64_t gx=(int64_t)x->live-(int64_t)x->last, gy=(int64_t)y->live-(int64_t)y->last; return gx<gy?1:gx>gy?-1:0; }
+static void mt_fmt(char*b,size_t n,uintptr_t v){ if(!v){ snprintf(b,n,"-"); return; } if(v>=g_mt_peb && v<g_mt_pee){ snprintf(b,n,"peload+0x%lx",(unsigned long)(v-g_mt_peb)); return; }
+    Dl_info di; if(dladdr((void*)v,&di) && di.dli_fname){ const char*f=strrchr(di.dli_fname,'/'); snprintf(b,n,"%s:%s+0x%lx",f?f+1:di.dli_fname,di.dli_sname?di.dli_sname:"?",(unsigned long)(v-(uintptr_t)(di.dli_saddr?di.dli_saddr:di.dli_fbase))); }
+    else snprintf(b,n,"0x%lx",(unsigned long)v); }
+static void mt_report(void){ static double tl; if(!g_mt_on) return; double now=mono_s(); if(now-tl<60.0) return; tl=now; pthread_setspecific(g_mt_key,(void*)1);
+    static MtSite* v[MT_SITES]; int nv=0; uint64_t tot=0; for(uint32_t i=0;i<MT_SITES;i++){ MtSite*t=&g_mts[i]; if(t->last){ v[nv++]=t; tot+=t->live; } }
+    static char m[8192]; int k=snprintf(m,sizeof m,"  [malloctrack] %d sites, %.1f MB live (since tracking began), %llu not tracked\n",nv,tot/1048576.0,(unsigned long long)g_mt_lost);
+    for(int pass=0;pass<2;pass++){ qsort(v,nv,sizeof v[0],pass?mt_cmp_grow:mt_cmp_live); k+=snprintf(m+k,sizeof m-k,"  [malloctrack] %s:\n",pass?"grew most since the last report":"most live bytes");
+        for(int i=0;i<14 && i<nv && k<(int)sizeof m-400;i++){ MtSite*t=v[i]; char a[3][120]; for(int j=0;j<3;j++) mt_fmt(a[j],sizeof a[j],t->ra[j]);
+            k+=snprintf(m+k,sizeof m-k,"    %8.1f MB (%+.1f) %8llu blocks  %s < %s < %s\n",t->live/1048576.0,((int64_t)t->live-(int64_t)(t->last>1?t->last:0))/1048576.0,(unsigned long long)t->cnt,a[0],a[1],a[2]); } }
+    (void)!write(2,m,k); for(int i=0;i<nv;i++) v[i]->last=v[i]->live>1?v[i]->live:2; pthread_setspecific(g_mt_key,0); }
 static void*  MSABI __attribute__((noinline)) i_HeapAlloc(void *h, uint32_t fl, uint64_t n){ (void)h; heap_stat(0,n,fl);
     if(heapdbg()){ void*p=hd_alloc(n?n:1); if(p&&(fl&8)) memset(p,0,n); return p; }
     void*p; if(hg_want(n)){ p=hg_alloc(n); if(p) hg_add(p,n); } else p=malloc(n?n:1);
@@ -602,7 +710,9 @@ static void*  MSABI __attribute__((noinline)) i_HeapAlloc(void *h, uint32_t fl, 
         int k=snprintf(t,sizeof t,"  [ALLOC %llu] p=%p caller=%p\n",(unsigned long long)n,p,ret); (void)!write(2,t,k);
         static int ns; if(ns++<3){ uint64_t*sp=(uint64_t*)__builtin_frame_address(0); int found=0;   // exe return addresses on the stack
             for(int i=0;i<2000 && found<14;i++){ uint64_t v=sp[i]; if(v>=0x140001000ULL&&v<0x141aae000ULL){ char b[48]; int q=snprintf(b,sizeof b,"     exe+0x%llx\n",(unsigned long long)(v-0x140000000ULL)); (void)!write(2,b,q); found++; } } } } }
+    if(__builtin_expect(g_ht_on!=0,0) && ht_on()) ht_add(p,n,(const uint64_t*)__builtin_frame_address(0));
     return p; }
+static void* i_HeapAlloc_addr(void){ return (void*)i_HeapAlloc; }
 static void*  MSABI __attribute__((noinline)) i_HeapReAlloc(void *h, uint32_t fl, void *p, uint64_t n){ (void)h;(void)fl; heap_stat(1,n,0);
     if(heapdbg()){ HDBlk*b=hd_blk(p); void*q=hd_alloc(n?n:1); if(q&&p){ uint64_t cp = b? (b->size<n?b->size:n) : n; memcpy(q,p,cp); } if(b) hd_free(p); return q; }
     if(heapguard()){ void*q = hg_want(n)? hg_alloc(n) : malloc(n?n:1); if(q&&hg_want(n)) hg_add(q,n);
@@ -610,10 +720,12 @@ static void*  MSABI __attribute__((noinline)) i_HeapReAlloc(void *h, uint32_t fl
             uint64_t cp = osz? (osz<n?osz:n) : (malloc_size(p)<n?malloc_size(p):n); // copy min(old,new): never over-read p
             memcpy(q,p,cp); if(!osz) free(p); }           // guarded old -> leak; malloc'd old -> free
         return q; }
+    if(__builtin_expect(g_ht_on!=0,0) && ht_on()){ ht_del(p); void*q=realloc(p,n?n:1); ht_add(q,n,(const uint64_t*)__builtin_frame_address(0)); return q; }
     return realloc(p,n?n:1); }
 static int    MSABI __attribute__((noinline)) i_HeapFree(void *h, uint32_t fl, void *p){ (void)h;(void)fl;
     if(heapdbg()){ hd_free(p); return 1; }
     if(heapguard()){ if(!hg_del(p)) free(p); return 1; }   // guarded -> leak; else free
+    if(__builtin_expect(g_ht_on!=0,0) && ht_on()) ht_del(p);
     free(p); return 1; }
 static uint64_t MSABI __attribute__((noinline)) i_HeapSize(void *h, uint32_t fl, void *p){ (void)h;(void)fl;
     if(heapdbg()){ HDBlk*b=hd_blk(p); return b? b->size : 0; }
@@ -621,7 +733,7 @@ static uint64_t MSABI __attribute__((noinline)) i_HeapSize(void *h, uint32_t fl,
 // the fast small-block heap's arena (fastcall.c, PELOAD_FASTCALL=heap; size 0 = not in use): its blocks can also reach
 // LocalFree / CoTaskMemFree (one heap on Windows), which then hand them back to it
 static uint8_t* g_fch_base; static uint64_t g_fch_size; static void fch_free_any(void*p);
-static inline void free_or_fch(void*p){ if((uint64_t)((uintptr_t)p-(uintptr_t)g_fch_base)<g_fch_size) fch_free_any(p); else free(p); }
+static inline void free_or_fch(void*p){ if((uint64_t)((uintptr_t)p-(uintptr_t)g_fch_base)<g_fch_size) fch_free_any(p); else { if(g_ht_on==1) ht_del(p); free(p); } }
 static void*  MSABI i_HeapCreate(uint32_t o, uint64_t a, uint64_t b){ (void)o;(void)a;(void)b; return (void*)0x48454150; }
 
 // Virtual memory backed by mmap. Every allocation's size is recorded (base -> size): VirtualFree(p, 0, MEM_RELEASE) -- the
@@ -1510,6 +1622,9 @@ static int MSABI dev_crShader(int stage,const void*bc,uint64_t len,void**pp){
         // The canon objects stay: programs are keyed by them. VS / PS only. PELOAD_D3D_KEEPDUPS=1 = the old behaviour.
         D3DObj*c=o->canon; static int keepdups=-1; if(keepdups<0) keepdups=getenv("PELOAD_D3D_KEEPDUPS")?1:0;
         if(c && c->glsl && (stage==0||stage==1) && !keepdups){ free(o->bc); o->bc=c->bc; o->glsl=c->glsl; o->bcshared=1; if(!d3d_nofree()) o->keep=0; }
+        // compute shaders the same (2026-10-18): a duplicate runs the canon's CPU program (ctxi_Dispatch) -- except with the
+        // experimental GPU particles, whose transform-feedback programs are cached per shader object
+        else if(c && stage==5 && !keepdups && !getenv("PELOAD_CS_GPU")){ free(o->bc); o->bc=c->bc; o->glsl=c->glsl; o->bcshared=1; if(!d3d_nofree()) o->keep=0; }
         else o->glsl=d3dgl_load_glsl(o->bc,o->bclen);
         if(getenv("PELOAD_TRACE_D3DGL")){ static int lo,hi; if(o->glsl)hi++; else lo++; if(((lo+hi)%200)==0){ char m[64]; int k=snprintf(m,sizeof m,"  [d3dgl] shaders translated=%d miss=%d\n",hi,lo); (void)!write(2,m,k);} } }
     int idx=g_shcount[stage]++;
@@ -1825,7 +1940,10 @@ static void cs_wait_view(void*v){ D3DObj*o=v; if(!o) return; cs_wait_res(o); if(
 static int cs_async(void){ static int a=-1; if(a<0) a=getenv("PELOAD_CS_SYNC")?0:1; return a; }
 static void MSABI ctxi_Dispatch(void*t,uint32_t a,uint32_t b,uint32_t c){ (void)t; d3dtrace(7,"Dispatch"); g_fs.disp++; cscensus("Dispatch",a,b,c);
     D3DObj*cs=g_cs.cs; if(!cs||!cs->bc||getenv("PELOAD_NOCSCPU")) return;
-    if(!cs->csprog){ CsProg*p=cs_compile(cs->bc,cs->bclen); cs->csprog=p;
+    // the program lives on the canon (the first object with this bytecode, never freed): duplicates -- every map load
+    // creates the same kernels again -- run it instead of compiling their own (and they are freed when released)
+    { D3DObj*cn=(D3DObj*)cs->canon; if(!cs->csprog && cn && cn->csprog) cs->csprog=cn->csprog; }
+    if(!cs->csprog){ D3DObj*own=cs->canon?(D3DObj*)cs->canon:cs; CsProg*p=cs_compile(own->bc,own->bclen); own->csprog=p; cs->csprog=p;
         char m[200]; int k=snprintf(m,sizeof m,"  [cs-cpu] compiled cs %p (%u B): %s, %d instrs, temps %d, numthreads(%u,%u,%u)\n",(void*)cs,cs->bclen,p&&p->ok?"ok":(p?p->why:"oom"),p?p->nins:0,p?p->ntemps:0,p?p->tg[0]:0,p?p->tg[1]:0,p?p->tg[2]:0); (void)!write(2,m,k); }
     CsProg*p=cs->csprog; if(!p||!p->ok) return;
     if((uint64_t)a*b*c*p->tg[0]*p->tg[1]*p->tg[2] > (1u<<20)) return;   // runaway guard
@@ -3968,7 +4086,12 @@ static id gcm(id o,const char*sel){ return o?((id(*)(id,SEL))objc_msgSend)(o,sel
 static float gcv(id o){ return o?((float(*)(id,SEL))objc_msgSend)(o,sel_registerName("value")):0.0f; }
 static int gcp(id o){ return o?(int)((signed char(*)(id,SEL))objc_msgSend)(o,sel_registerName("isPressed")):0; }
 static int16_t ax16(float v){ if(v>1)v=1; if(v<-1)v=-1; return (int16_t)(v*32767.0f); }
-static int gc_read(uint32_t idx,XPad*p){
+static int gc_read_l(uint32_t idx,XPad*p);
+// XInputGetState runs on the game's threads, which have no autorelease pool that ever drains: [GCController controllers]
+// returned an autoreleased array on every poll and they piled up (~950 objects a second, 2026-10-18 malloc tracking)
+extern void* objc_autoreleasePoolPush(void); extern void objc_autoreleasePoolPop(void*);
+static int gc_read(uint32_t idx,XPad*p){ void*pool=objc_autoreleasePoolPush(); int r=gc_read_l(idx,p); objc_autoreleasePoolPop(pool); return r; }
+static int gc_read_l(uint32_t idx,XPad*p){
     gc_init(); if(!g_gccls) return 0;
     id arr=gcm((id)g_gccls,"controllers"); long n=arr?((long(*)(id,SEL))objc_msgSend)(arr,sel_registerName("count")):0;
     if((long)idx>=n) return 0;
@@ -7331,7 +7454,7 @@ static void cb_dump_scan(void){ if(!getenv("PELOAD_CB_DUMP")) return; static int
                   k=snprintf(m,sizeof m,"   BEST so far: %s\n",bestdesc); (void)!write(2,m,k); } } } }
         k=snprintf(m,sizeof m,"  [cb0find] BEST convention: %s\n",bestdesc); (void)!write(2,m,k); } }
 static void d3dgl_present_impl(void);
-static void d3dgl_present(void){ GLLOCK(); gl_count_report(); d3dobj_log(); if(!prof_on()) d3dgl_present_impl();
+static void d3dgl_present(void){ GLLOCK(); gl_count_report(); d3dobj_log(); ht_report(); mt_report(); if(!prof_on()) d3dgl_present_impl();
     else { uint64_t t=prof_now(); d3dgl_present_impl(); g_prof_pres_ns+=prof_now()-t; g_prof_pres_n++; prof_report(); }
     d3dobj_reap(1); if(g_glh_on && (prof_on()||getenv("PELOAD_GLH_STATS"))) glh_stats(); cstf_stats(); GLUNLOCK(); }
 static void d3dgl_present_impl(void){
@@ -9389,7 +9512,15 @@ static int    MSABI i_ReadFileEx(void*h,void*buf,uint32_t n,uint8_t*ov,void*comp
     return k>=0; }
 static int    MSABI i_CloseHandleReal(void*h){ intptr_t hv=(intptr_t)h;
     if(pipe_is(hv)) return pipe_close(h);
-    if(is_sync(hv)) return 1;   // sync object / thread handle: no-op (leaked; a thread handle may still be live)
+    if(is_sync(hv)){   // sync object / thread handle: no-op (leaked; a thread handle may still be live, duplicates share the pointer)
+        // waitable timers excepted (2026-10-18): Rust's sleeps make, wait on and close one ~37 times a second (2,200 a minute
+        // never freed); a closed timer is freed 30 s later. PELOAD_KEEP_TIMERS=1 = old.
+        SyncObj*so=(SyncObj*)hv; static int keept=-1; if(keept<0) keept=getenv("PELOAD_KEEP_TIMERS")?1:0;
+        if(so->is_timer==1 && !keept){ so->is_timer=2;   /* (2: closed once -- a second CloseHandle must not queue it again) */ static pthread_mutex_t mx=PTHREAD_MUTEX_INITIALIZER; static SyncObj* q[4096]; static double qt[4096]; static int qn;
+            double now=mono_s(); pthread_mutex_lock(&mx); int j=0;
+            for(int i=0;i<qn;i++){ if(now-qt[i]>=30.0){ SyncObj*d=q[i]; d->magic=0; pthread_mutex_destroy(&d->m); pthread_cond_destroy(&d->c); free(d); } else { q[j]=q[i]; qt[j]=qt[i]; j++; } }
+            qn=j; if(qn<4096){ q[qn]=so; qt[qn]=now; qn++; } pthread_mutex_unlock(&mx); }
+        return 1; }
     if(hv>=0x1000 && hv<0x100000){ int fd=(int)(hv-0x1000);
     if(fd>=0 && fd<MAXFD){ if(g_fddir[fd]){ closedir(g_fddir[fd]); g_fddir[fd]=0; }
         // delete-on-close with Windows last-handle-wins semantics: only remove
@@ -11299,7 +11430,7 @@ static void std_tee_start(int fd,const char*env){ const char*e=getenv(env); if(!
     StdTee*t=malloc(sizeof *t); t->rd=pp[0]; t->out=dup(fd); t->file=f;
     fcntl(t->out,F_SETFD,FD_CLOEXEC); fcntl(f,F_SETFD,FD_CLOEXEC); fcntl(pp[0],F_SETFD,FD_CLOEXEC);
     dup2(pp[1],fd); close(pp[1]); pthread_t th; pthread_create(&th,0,std_tee_thread,t); }
-int main(int argc, char **argv){
+int main(int argc, char **argv){ mt_start();
     std_tee_start(2,"PELOAD_STDERR_TEE"); std_tee_start(1,"PELOAD_STDOUT_TEE");
     if(getenv("PELOAD_SAMPLE")){ pthread_t st; pthread_create(&st,0,sampler_thread,0); }
     if(getenv("PELOAD_TEST_LOADER_FAULT")){ pthread_t ft; pthread_create(&ft,0,loader_fault_test,0); }   // crash-report test
