@@ -628,7 +628,7 @@ static void*  MSABI i_HeapCreate(uint32_t o, uint64_t a, uint64_t b){ (void)o;(v
 // normal way to free -- must unmap the WHOLE region; until 2026-10-18 it unmapped 4 KB (munmap(a, n ? n : 4096)), so every
 // released allocation but its first page leaked (a worker grew ~300 MB per map load). PELOAD_VA_OLDFREE=1 = old.
 static pthread_mutex_t g_va_mx=PTHREAD_MUTEX_INITIALIZER; static uintptr_t*g_va_k; static uint64_t*g_va_v; static size_t g_va_cap, g_va_n;
-static volatile uint64_t g_va_rel_n, g_va_rel_b, g_va_unknown; static volatile int64_t g_va_live;   // audit ([d3dobj] line)
+static volatile uint64_t g_va_rel_n, g_va_rel_b, g_va_unknown, g_mv_unmapped; static volatile int64_t g_va_live, g_mv_live;   // audit ([d3dobj] line)
 static size_t va_slot(uintptr_t k,size_t cap){ uint64_t x=k>>12; x^=x>>29; x*=0xbf58476d1ce4e5b9ull; x^=x>>32; return (size_t)x&(cap-1); }
 static void va_add(void*p,uint64_t n){ pthread_mutex_lock(&g_va_mx);
     if((g_va_n+1)*2>=g_va_cap){ size_t nc=g_va_cap?g_va_cap*2:4096; uintptr_t*nk=calloc(nc,sizeof *nk); uint64_t*nv=calloc(nc,sizeof *nv);
@@ -672,10 +672,10 @@ static int    MSABI i_VirtualFree(void *a, uint64_t n, uint32_t t){
     static int old=-1; if(old<0) old=getenv("PELOAD_VA_OLDFREE")?1:0; if(old){ munmap(a,n?n:4096); return 1; }
     if(!a) return 0;
     if(t&0x8000){   // MEM_RELEASE: the whole region (n must be 0 on Windows)
-        uint64_t sz=va_get(a,1); if(!sz){ __atomic_add_fetch(&g_va_unknown,1,__ATOMIC_RELAXED); sz=n?n:4096; } else __atomic_sub_fetch(&g_va_live,(int64_t)sz,__ATOMIC_RELAXED);
+        uint64_t sz=va_get(a,1); if(!sz){ __atomic_add_fetch(&g_va_unknown,1,__ATOMIC_RELAXED); sz=n?n:4096; } else if(sz>>63) sz&=~(1ull<<63); else __atomic_sub_fetch(&g_va_live,(int64_t)sz,__ATOMIC_RELAXED);   // (bit 63: a file view)
         munmap(a,sz); __atomic_add_fetch(&g_va_rel_n,1,__ATOMIC_RELAXED); __atomic_add_fetch(&g_va_rel_b,sz,__ATOMIC_RELAXED); return 1; }
     if(t&0x4000){   // MEM_DECOMMIT: those pages (n == 0: the whole region); the region stays recorded for a later release
-        uint64_t sz=n?n:va_get(a,0); if(!sz) sz=4096; munmap(a,sz); return 1; }
+        uint64_t sz=n?n:(va_get(a,0)&~(1ull<<63)); if(!sz) sz=4096; munmap(a,sz); return 1; }
     munmap(a,n?n:4096); return 1; }
 // VirtualQuery: report a region as FREE or COMMITTED via mach_vm_region, so the
 // engine's "find 64 MB free within 2 GB of the game" scan can proceed.
@@ -1055,8 +1055,8 @@ static void d3dobj_log(void){ static double tl; double now=mono_s(); if(now-tl<3
     char m[900]; int k=snprintf(m,sizeof m,"  [d3dobj] live:"); uint64_t tn=0,tb=0,fn=0,fb=0;
     for(int i=0;i<8;i++){ if(!g_d3do_n[i]) continue; uint64_t n=g_d3do_n[i]-g_d3do_nfree[i], b=g_d3do_bytes[i]-g_d3do_bfree[i]; tn+=n; tb+=b; fn+=g_d3do_nfree[i]; fb+=g_d3do_bfree[i];
         k+=snprintf(m+k,sizeof m-k," kind%d %llu (%.1f MB)",i,(unsigned long long)n,b/1048576.0); }
-    k+=snprintf(m+k,sizeof m-k," | total %llu, %.1f MB | freed %llu (%.1f MB), pending %llu, underflows %llu | released but kept: shaders %llu (%.1f MB bytecode), input layouts %llu | VirtualFree released %llu (%.1f MB), unknown %llu | VirtualAlloc live %.0f MB | malloc in use %.0f MB of %.0f MB\n",(unsigned long long)tn,tb/1048576.0,
-        (unsigned long long)fn,fb/1048576.0,(unsigned long long)g_d3d_pending,(unsigned long long)g_d3d_underflow,(unsigned long long)g_d3d_keptdead,g_d3d_keptdead_b/1048576.0,(unsigned long long)g_d3d_keptdead_il,(unsigned long long)g_va_rel_n,g_va_rel_b/1048576.0,(unsigned long long)g_va_unknown,g_va_live/1048576.0,(double)ms.size_in_use/1048576.0,(double)ms.size_allocated/1048576.0); (void)!write(2,m,k); }
+    k+=snprintf(m+k,sizeof m-k," | total %llu, %.1f MB | freed %llu (%.1f MB), pending %llu, underflows %llu | released but kept: shaders %llu (%.1f MB bytecode), input layouts %llu | VirtualFree released %llu (%.1f MB), unknown %llu | VirtualAlloc live %.0f MB | file views live %.0f MB (%llu unmapped) | malloc in use %.0f MB of %.0f MB\n",(unsigned long long)tn,tb/1048576.0,
+        (unsigned long long)fn,fb/1048576.0,(unsigned long long)g_d3d_pending,(unsigned long long)g_d3d_underflow,(unsigned long long)g_d3d_keptdead,g_d3d_keptdead_b/1048576.0,(unsigned long long)g_d3d_keptdead_il,(unsigned long long)g_va_rel_n,g_va_rel_b/1048576.0,(unsigned long long)g_va_unknown,g_va_live/1048576.0,g_mv_live/1048576.0,(unsigned long long)g_mv_unmapped,(double)ms.size_in_use/1048576.0,(double)ms.size_allocated/1048576.0); (void)!write(2,m,k); }
 // Registry of live D3DObjs (open addressing, linear probing): AddRef/Release only touch pointers found here, so a
 // static object, a double release or a stray pointer is ignored instead of corrupting memory.
 static pthread_mutex_t g_live_mx=PTHREAD_MUTEX_INITIALIZER; static void** g_live; static size_t g_live_cap, g_live_n;
@@ -9109,10 +9109,20 @@ static void*  MSABI i_MapViewOfFile(void*hMap,uint32_t access,uint32_t offHigh,u
     int mflags=(wr&&!cow)?MAP_SHARED:MAP_PRIVATE;
     size_t pg=(int)sysconf(_SC_PAGESIZE); uint64_t aoff=off&~(uint64_t)(pg-1); uint64_t delta=off-aoff;
     void*base=mmap(0,len+delta,prot,mflags,fm->fd,(off_t)aoff);
-    if(base==MAP_FAILED){ g_lasterr=win_err(); return 0; } g_lasterr=0; return (uint8_t*)base+delta; }
+    if(base==MAP_FAILED){ g_lasterr=win_err(); return 0; } g_lasterr=0;
+    va_add((uint8_t*)base+delta,(uint64_t)(len+delta)|(1ull<<63)); __atomic_add_fetch(&g_mv_live,(int64_t)(len+delta),__ATOMIC_RELAXED);   // for UnmapViewOfFile
+    return (uint8_t*)base+delta; }
 static void*  MSABI i_MapViewOfFileEx(void*hMap,uint32_t access,uint32_t offHigh,uint32_t offLow,uint64_t bytes,void*baseHint){
     (void)baseHint; return i_MapViewOfFile(hMap,access,offHigh,offLow,bytes); }
-static int    MSABI i_UnmapViewOfFile(void*p){ (void)p; return 1; } // size unknown here; leak the view (harmless)
+// UnmapViewOfFile (2026-10-18): it was a no-op ("size unknown here; leak the view"), so every file view the client mapped
+// stayed mapped -- with its touched pages -- after it was done with it; a worker grew a few hundred MB per map load. The
+// view's size is recorded at MapViewOfFile (bit 63 marks a view in the VirtualAlloc table). PELOAD_KEEP_VIEWS=1 = old.
+static int    MSABI i_UnmapViewOfFile(void*p){
+    static int keep=-1; if(keep<0) keep=getenv("PELOAD_KEEP_VIEWS")?1:0; if(keep || !p) return 1;
+    uint64_t sz=va_get(p,0); if(!(sz>>63)) return 1;   // not one of our views: leave it
+    va_get(p,1); sz&=~(1ull<<63); size_t pg=(size_t)sysconf(_SC_PAGESIZE);
+    munmap((void*)((uintptr_t)p&~(uintptr_t)(pg-1)),(size_t)sz); __atomic_sub_fetch(&g_mv_live,(int64_t)sz,__ATOMIC_RELAXED); __atomic_add_fetch(&g_mv_unmapped,1,__ATOMIC_RELAXED);
+    return 1; }
 // ---- Named pipes (dedicated-server <-> game-worker IPC) bridged to UNIX domain sockets ----
 // Windows named pipes (\\.\pipe\NAME) cross arbitrary processes by name. Back each with a UNIX socket at
 // /tmp/rnp_<fnv(tail)> where tail is the part after "pipe\\"/"pipe/" (so \\.\pipe\NAME and
