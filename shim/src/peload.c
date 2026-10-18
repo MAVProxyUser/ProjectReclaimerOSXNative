@@ -11171,28 +11171,29 @@ static void vtguard_one(uint8_t*base,uint64_t rva,int origlen,uint64_t skiprva){
 // check: the client's Forge placement sync asked for an object deleted under it and the game crashed (0xC0000005 at RVA
 // 0x3451E8 reading [0+0x10], 2026-10-18, ~100 players). Two loads are guarded: the object (r8 @0x3451e3) and an attached
 // object's parent (r9 @0x345213); a NULL slot zeroes *out and returns it (the function's own return path @0x345232).
-// The original bytes are checked first. OPT-IN (PELOAD_ORIGINGUARD=1): its first test run (Hugegrass, local server,
-// 2026-10-18 16:25) crashed while loading into the match in the NEXT getter, halo3+0x345318 (same table walk, no guard),
-// at RVA 0x34534F with a garbage slot pointer (0x999a0500ffffff02 from handle index 0x51f1), 250 ms after the client's
-// "Developer flames attached to the helmet of 1 biped(s)" -- not yet known whether that also happens without the guard.
+// The original bytes are checked first. The jumps are `jmp [rip+0]` + address and touch NO register: halo3 is built with
+// whole-program optimisation, and callers keep values in registers the callee is known not to write -- halo3+0x57ab3
+// holds the object handle in r11 across this call (then calls object_get_orientation with it). The first version jumped
+// through r11 (mov r11,imm64 / jmp r11) and the next call crashed at RVA 0x34534F on handle 0x51f1 (the low half of the
+// jump address) -- 2 of 2 test loads into Hugegrass. PELOAD_NO_ORIGINGUARD=1 = off.
+static uint8_t* jmp_abs_noreg(uint8_t*w,const void*to){ *w++=0xFF;*w++=0x25; *w++=0;*w++=0;*w++=0;*w++=0; *(uint64_t*)w=(uint64_t)to; return w+8; }   // 14 bytes
 static void originguard_one(uint8_t*base,uint64_t rva,const uint8_t*orig,int origlen,int firstlen,const uint8_t*test3,uint64_t retrva){
-    uint8_t*site=base+rva; if(memcmp(site,orig,(size_t)origlen)){ char m[120]; int k=snprintf(m,sizeof m,"  [originguard] halo3+%llx holds other bytes: not installed\n",(unsigned long long)rva); (void)!write(2,m,k); return; }
+    uint8_t*site=base+rva; if(origlen<14||memcmp(site,orig,(size_t)origlen)){ char m[120]; int k=snprintf(m,sizeof m,"  [originguard] halo3+%llx holds other bytes: not installed\n",(unsigned long long)rva); (void)!write(2,m,k); return; }
     if(!g_hookpool){ g_hookpool=mmap(0,1<<20,PROT_READ|PROT_WRITE|PROT_EXEC,MAP_PRIVATE|MAP_ANON,-1,0); if(g_hookpool==MAP_FAILED){g_hookpool=0;return;} }
     uint8_t*t=g_hookpool+g_hookoff; uint8_t*w=t;
     for(int i=0;i<firstlen;i++) *w++=site[i];                       // the slot pointer load
     for(int i=0;i<3;i++) *w++=test3[i];                              // test reg,reg
     uint8_t*jz=w; *w++=0x74; *w++=0;                                 // jz null
     for(int i=firstlen;i<origlen;i++) *w++=site[i];                  // the rest (position-independent)
-    *w++=0x49;*w++=0xBB; *(uint64_t*)w=(uint64_t)(site+origlen); w+=8; *w++=0x41;*w++=0xFF;*w++=0xE3;   // jmp back
+    w=jmp_abs_noreg(w,site+origlen);                                 // back
     jz[1]=(uint8_t)(w-(jz+2));
     *w++=0x31;*w++=0xC0; *w++=0x49;*w++=0x89;*w++=0x02; *w++=0x41;*w++=0x89;*w++=0x42;*w++=0x08;       // xor eax,eax; mov [r10],rax; mov [r10+8],eax
-    *w++=0x49;*w++=0xBB; *(uint64_t*)w=(uint64_t)(base+retrva); w+=8; *w++=0x41;*w++=0xFF;*w++=0xE3;   // jmp to the return
+    w=jmp_abs_noreg(w,base+retrva);                                  // to the function's return
     sys_icache_invalidate(t,(size_t)(w-t)); g_hookoff+=(uint64_t)((w-t+15)&~15);
     uintptr_t pg=(uintptr_t)site & ~0xFFFull; mprotect((void*)pg,0x3000,PROT_READ|PROT_WRITE|PROT_EXEC);
-    uint8_t*q=site; *q++=0x49;*q++=0xBB; *(uint64_t*)q=(uint64_t)t; q+=8; *q++=0x41;*q++=0xFF;*q++=0xE3;
-    for(int i=13;i<origlen;i++) site[i]=0x90;
+    uint8_t*q=jmp_abs_noreg(site,t); while(q<site+origlen) *q++=0x90;
     sys_icache_invalidate(site,(size_t)origlen); }
-static void originguard_install(uint8_t*base){ if(!getenv("PELOAD_ORIGINGUARD")||getenv("PELOAD_NO_ORIGINGUARD")) return;
+static void originguard_install(uint8_t*base){ if(getenv("PELOAD_NO_ORIGINGUARD")) return;
     static const uint8_t o1[14]={0x4d,0x8b,0x44,0xc1,0x10, 0x41,0x83,0x78,0x10,0xff, 0x49,0x8d,0x50,0x50}, t1[3]={0x4d,0x85,0xc0};   // test r8,r8
     static const uint8_t o2[20]={0x4d,0x8b,0x4c,0xc9,0x10, 0x4d,0x8b,0xc2, 0x48,0x6b,0xc0,0x34, 0x49,0x0f,0xbf,0x89,0x38,0x01,0x00,0x00}, t2[3]={0x4d,0x85,0xc9};   // test r9,r9
     originguard_one(base,0x3451e3,o1,14,5,t1,0x345232); originguard_one(base,0x345213,o2,20,5,t2,0x345232);

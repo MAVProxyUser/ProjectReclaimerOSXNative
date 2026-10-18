@@ -992,15 +992,19 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   in a shared_ptr release (RVA 0x172FA0) when a player joined a match in progress. How: mid-function detours at
   halo3+0x172bce (sweep FUNC 0x172ad0) and +0x172f9a (FUNC 0x172e88): NULL vtable -> jump to the entry cleanup (skip
   0x172bee / 0x172fb7; leaks that stub). (10-12..14 da262fb; second site 10-16 d858a8b)
-- **object_get_origin empty-slot guard** (`PELOAD_ORIGINGUARD=1`, OPT-IN, bytes checked) — `originguard_install`. Why
-  (backlog 60): a client crashed once in a ~100-player Forge game, 0xC0000005 at RVA 0x3451E8 reading [0+0x10]:
+- **object_get_origin empty-slot guard** (default on, bytes checked; `PELOAD_NO_ORIGINGUARD=1` = off) — `originguard_install`.
+  Why (backlog 60): a client crashed once in a ~100-player Forge game, 0xC0000005 at RVA 0x3451E8 reading [0+0x10]:
   object_get_origin (halo3+0x3451b4) was asked for an object deleted under the client's Forge placement sync. How: the two
   table-slot loads (the object @0x3451e3, an attached object's parent @0x345213) go through a trampoline that tests the
   loaded pointer; NULL -> `*out = (0,0,0)` and the function's own return @0x345232; the normal path is the original bytes.
-  Opt-in because its first test run (local Hugegrass, 2026-10-18 16:25) crashed while loading into the match in the next
-  getter, halo3+0x345318 (same table walk, unguarded), at RVA 0x34534F with a GARBAGE (not empty) slot pointer, 250 ms after
-  the client's "Developer flames attached ..." line -- not yet known whether that happens without the guard (a hidden A/B is
-  next). `PELOAD_NO_ORIGINGUARD=1` forces it off.
+  The jumps are `jmp [rip+0]` + address and touch NO register. The first version (e425a5c, then opt-in) jumped through r11
+  (`mov r11,imm64 ; jmp r11`, like the older guards) and crashed 2 of 2 loads into Hugegrass at RVA 0x34534F: halo3 is
+  built with whole-program optimisation, and halo3+0x57ab3 keeps the object handle in r11 across object_get_origin (it
+  knows that leaf never writes r11), then calls object_get_orientation with it -- which got the jump address's low half
+  (0x51f1). Checked: the older guards' sites don't need it (skinguard's function and vtguard's sweeps call imports /
+  virtual functions, so no caller can keep r11 across them, and r11 is not read near the sites). Offline test:
+  `bash shim/tools/originguard-test.sh` (the real code on halo3's own bytes: same origin for a live object, (0,0,0) for an
+  empty object / parent slot, r11 kept, refused on other bytes; it fails on the r11 version). (10-18)
 - **object_delete entry hook** (checked) — halo3+0x342ed8 (`hbdel_install` -> `hb_on_delete`): bullets live < 1 tick, so
   shots are recorded at deletion. Off: `PELOAD_NO_DELHOOK=1`. (10-16 8448a06)
 - **Frame safe point: main_loop_body entry hook** (checked) — halo3+0xb2250 (`hb_frame_hook`). Why: the first teleports
@@ -1286,8 +1290,7 @@ Numbers are from the commit messages; PERF-PLAN.md has the measurements. Compare
   (video playback CopyToScreen / YUVToRGB + VS, a night-vision-style luminance CS); backlog 67. `PELOAD_REFUSE_EMPTY_SHADER=1`
   refuses such blobs with E_INVALIDARG as D3D11 would.
 - **First join right after a dedicated server starts** can fail its handshake; a retry works.
-- Backlog 60 (client crash in object_get_origin on a deleted object during Forge placement sync, seen once; the guard
-  is opt-in, see section 17), 61 (Hugegrass
+- 61 (Hugegrass
   renders nearly black wherever its own lighting matters -- emissive surfaces, the sky and the HUD are fine; not a regression:
   dark with client 0.9.18 too and with every 10-17/18 change reverted; stock maps such as Valhalla render normally with
   0.9.20), 56 (Forge World ground black, probably the same), rock-wall seams (tabled by the user).

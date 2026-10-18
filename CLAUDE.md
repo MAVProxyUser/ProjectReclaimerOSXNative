@@ -395,6 +395,10 @@ hb_is_world_camera. Diagnostics: `PELOAD_HITBOXES_LOG` (counts, why an object ha
 build (re-tools/hsfuncs.py prints a script function's table entry -> its evaluate function -> the datum offset).
 Test helpers: `PELOAD_INPUT_FACE=1` steers scripted pad segments with a zero right stick at the nearest other biped
 (`PELOAD_INPUT_FACE_POINT=x,y,z` at a fixed point).
+halo3 is whole-program optimised: a caller may keep values in VOLATILE registers across a call to a leaf it knows never
+writes them (halo3+0x57ab3 keeps an object handle in r11 across object_get_origin). A detour inside or at the entry of
+such a leaf must touch no register the original doesn't: jump with `jmp [rip+0]` + address (jmp_abs_noreg, 14 bytes), not
+`mov r11,imm64 ; jmp r11` (the first object_get_origin guard crashed that way; FIXES.md section 17, backlog 60).
 NEVER find engine structures by sweeping process memory -- it kernel-panicked the Mac (memory [[no-memory-sweeps]]).
 Test runs: `bash shim/tools/quiet-run.sh "<env>" <secs>` (one instance, visible but input-less; QR_MINIMIZE=1
 minimizes, QR_HIDE=1 = no window for log-only runs). The old "minimized client stalls loading" was the thread-id
