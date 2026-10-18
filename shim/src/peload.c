@@ -2619,6 +2619,8 @@ static int MSABI i_ws2_sendto(WSASOCK s,const char*buf,int len,int fl,const void
 static __thread uint32_t t_rx_ip; static __thread uint16_t t_rx_port;   // the last datagram's source on this thread (stats.c voice source tally)
 static int MSABI i_ws2_recvfrom(WSASOCK s,char*buf,int len,int fl,void*from,int*fl2){ struct sockaddr_storage ss; socklen_t sl=sizeof ss; ssize_t r=recvfrom((int)s,buf,len,fl,(struct sockaddr*)&ss,&sl); if(r<0){ws2_err(errno);return -1;} if(r>=0)udp_tracef("RX",s,&ss,(int)r);
     if(ss.ss_family==AF_INET){ t_rx_ip=((struct sockaddr_in*)&ss)->sin_addr.s_addr; t_rx_port=ntohs(((struct sockaddr_in*)&ss)->sin_port); }
+    { extern void st_voice_wiretally(const char*buf,long n,uint32_t ip,uint16_t port); if(r>=8 && ss.ss_family==AF_INET && (buf[0]=='M'||buf[0]=='L') && buf[1]=='C' && buf[3]=='1')
+        st_voice_wiretally(buf,(long)r,((struct sockaddr_in*)&ss)->sin_addr.s_addr,ntohs(((struct sockaddr_in*)&ss)->sin_port)); }
     if(getenv("PELOAD_TRACE_SCATTER") && r>200){ void*ra=__builtin_return_address(0); char b[180]; int k=snprintf(b,sizeof b,"  [scatter] recvfrom fd=%d wire=%d bufcap=%d caller=%p%s\n",(int)s,(int)r,len,ra,(r==len)?" (==cap)":""); (void)!write(2,b,k); }
     if(from&&fl2){ sa_b2w((struct sockaddr*)&ss,from,fl2); peer_gip_restore((int)s,from); } return (int)r; }
 // PELOAD_TRACE_WIRE: hex+ascii dump of TCP payloads (to RE the local-server query/join protocol).

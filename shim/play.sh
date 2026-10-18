@@ -53,6 +53,21 @@ for p in $(pgrep -f '^[^ ]*build/peload'); do
   case "$KEEP" in *" $(ps -o pgid= -p "$p" | tr -d ' ') "*) continue;; esac
   kill -9 "$p" 2>/dev/null
 done; sleep 1
+# The stats page's port (PELOAD_STATS_HTTP, 8765) must be free before the game starts -- the game never serves on another
+# port. A leftover map-picture / walking-graph generator from an earlier game (python re-tools/h3bsp.py / h3nav.py) is
+# killed; anything else holding it is waited for (shown once, Ctrl-C to give up).
+SPORT="${PELOAD_STATS_HTTP:-8765}"
+if [ "$SPORT" != 0 ]; then
+  waited=0
+  while pids=$(lsof -nP -iTCP:"$SPORT" -sTCP:LISTEN -t 2>/dev/null) && [ -n "$pids" ]; do
+    for p in $pids; do
+      cmd=$(ps -o command= -p "$p" 2>/dev/null)
+      case "$cmd" in *h3bsp.py*|*h3nav.py*|*maptop.sh*) kill -9 "$p" 2>/dev/null; echo "stats port $SPORT: killed a leftover map generator (pid $p)";;
+        *) [ $waited = 0 ] && echo "stats port $SPORT is in use by pid $p ($cmd) -- waiting for it to close (Ctrl-C to give up)";; esac
+    done
+    waited=1; sleep 1
+  done
+fi
 rm -f "$PFX/ReclaimerProfile/starting" 2>/dev/null
 RUNTIME=()
 ARGS=(game-client --mcc-path "$MCC")

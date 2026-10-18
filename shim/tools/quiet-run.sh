@@ -18,6 +18,12 @@ EXE="${QR_EXE:-client/project-reclaimer-client-v0.9.18.exe}"
 ARGS=("$@"); [ ${#ARGS[@]} -eq 0 ] && ARGS=(game-client --mcc-path "C:\\Program Files\\Steam\\steamapps\\common\\Halo The Master Chief Collection")
 mkdir -p "$HOME/Library/Application Support/ReclaimerMac/prefix/drive_c/ReclaimerProfileTest"
 rm -f "$HOME"/reclaimer_win_*.bmp; : > /tmp/quiet-run.log
+# the stats port must be free first (as play.sh): kill a leftover map generator, wait (up to 60 s) for anything else
+SPORT="${QR_STATS:-8765}"
+if [ "$SPORT" != 0 ]; then
+  for i in $(seq 1 60); do pids=$(lsof -nP -iTCP:"$SPORT" -sTCP:LISTEN -t 2>/dev/null); [ -z "$pids" ] && break
+    for p in $pids; do case "$(ps -o command= -p "$p" 2>/dev/null)" in *h3bsp.py*|*h3nav.py*|*maptop.sh*) kill -9 "$p" 2>/dev/null;; esac; done; sleep 1; done
+fi
 PADENV="PELOAD_NO_PAD=1"; [ -n "${QR_PAD:-}" ] && PADENV=""
 MINENV=""; [ -n "${QR_MINIMIZE:-}" ] && MINENV="PELOAD_MINIMIZE=1"; [ -n "${QR_HIDE:-}" ] && MINENV="PELOAD_HIDE_WINDOW=1"
 set -m

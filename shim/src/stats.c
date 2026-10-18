@@ -240,6 +240,25 @@ static int entry_hook_tail(uint8_t*site,const uint8_t*pro,int len,void*fn,const 
 static void fx_voice(uint64_t sender,const uint8_t*payload,uint64_t len); static int fx_control(const char*qs);   // forensic.c
 static void fx_http(int fd,const char*path,const char*qs,const char*req); static void fx_roster_tick(const char*map,const StSess*ss,int nss,const StPlayer*pl,int np);
 static pthread_mutex_t g_talk_mx=PTHREAD_MUTEX_INITIALIZER; static struct { uint64_t id; double t; } g_talk[128];
+// PELOAD_VOICE_SRCSTAT: the client's UDP datagrams with a 4-byte "MC?1" / "LC?1" magic (voice and its session traffic,
+// shim/docs/reclaimer-voice-mute.md) tallied per magic and source as they arrive in recvfrom (thread-independent): every
+// 30 s, per magic, packets / distinct sources / the top source (masked unless it is the joined server).
+void st_voice_wiretally(const char*buf,long n,uint32_t ip,uint16_t port){ (void)n;
+    static int on=-1; if(on<0) on=getenv("PELOAD_VOICE_SRCSTAT")?1:0; if(!on) return;
+    static pthread_mutex_t mx=PTHREAD_MUTEX_INITIALIZER; static struct { char mg[5]; uint32_t ip; uint16_t port; unsigned long n; } t[128]; static int nt; static double tl;
+    pthread_mutex_lock(&mx); int k=0; for(; k<nt; k++) if(!memcmp(t[k].mg,buf,4) && t[k].ip==ip && t[k].port==port) break;
+    if(k==nt && nt<128){ memcpy(t[nt].mg,buf,4); t[nt].mg[4]=0; t[nt].ip=ip; t[nt].port=port; t[nt].n=0; nt++; } if(k<128) t[k].n++;
+    double now=mono_s(); if(!tl) tl=now;
+    if(now-tl>=30){ char srv[80]=""; { const char*p=strstr(g_cmdlineA,"join?server="); if(p){ p+=12; size_t j2=0; while(*p && *p!=':' && *p!=' ' && *p!='"' && j2+1<sizeof srv) srv[j2++]=*p++; srv[j2]=0; } }
+        char done[16][5]; int nd=0;
+        for(int a=0;a<nt;a++){ int seen=0; for(int q=0;q<nd;q++) if(!strcmp(done[q],t[a].mg)) seen=1; if(seen || nd>=16) continue; snprintf(done[nd++],5,"%s",t[a].mg);
+            unsigned long tot=0; int ns=0, bi=a; for(int b=0;b<nt;b++) if(!strcmp(t[b].mg,t[a].mg)){ tot+=t[b].n; ns++; if(t[b].n>t[bi].n) bi=b; }
+            char ips[32]; struct in_addr ia; ia.s_addr=t[bi].ip; inet_ntop(AF_INET,&ia,ips,sizeof ips); int server=srv[0] && !strcmp(srv,ips);
+            if(!server){ char*d=strchr(ips,'.'); if(d){ d=strchr(d+1,'.'); if(d) snprintf(d,sizeof ips-(size_t)(d-ips),".x.x"); } }
+            char m[300]; int kk=snprintf(m,sizeof m,"  [voice-wire] %s: %lu datagrams in 30 s from %d source(s); top %s:%u %.0f%%%s\n",t[a].mg,tot,ns,ips,t[bi].port,tot?100.0*t[bi].n/tot:0,server?" = the joined server":"");
+            (void)!write(2,m,kk); }
+        nt=0; tl=now; }
+    pthread_mutex_unlock(&mx); }
 // PELOAD_VOICE_SRCSTAT=1 (diagnostic, aggregate only): where voice datagrams come from -- the source address of the
 // recvfrom that delivered each packet (same thread, just before voice_recv). Every 30 s: packets, distinct sources, the
 // top source and its share; an address other than the joined server's is masked (players' addresses are not logged).
@@ -899,11 +918,20 @@ static void* st_open_thread(void*a){ (void)a; pthread_setname_np("shim-stats-ope
     return 0; }
 // One listening socket, close-on-exec: children (map picture / walking graph generators, the Workshop helper) used to
 // inherit it, and one still running after its game was killed kept 8765 bound -- the next launch had no stats page
-// (2026-10-18). The port: PELOAD_STATS_HTTP (8765), retried every second; after 10 s also the first free one of the next
-// 10 (logged), still preferring the configured one only at startup.
+// (2026-10-18). The port is always PELOAD_STATS_HTTP (8765; no fallback port -- the user's choice): retried every
+// second; a leftover generator holding it (python running re-tools/h3bsp.py or h3nav.py) is killed; another game holding
+// it is only named in the log (it may be the user's own) and waited for.
 static int st_bind(int port,const char*ad){ int ls=socket(AF_INET,SOCK_STREAM,0); if(ls<0) return -1; int one=1; setsockopt(ls,SOL_SOCKET,SO_REUSEADDR,&one,sizeof one);
     fcntl(ls,F_SETFD,FD_CLOEXEC); struct sockaddr_in sa; memset(&sa,0,sizeof sa); sa.sin_family=AF_INET; sa.sin_port=htons((uint16_t)port); sa.sin_addr.s_addr=inet_addr(ad);
     if(bind(ls,(struct sockaddr*)&sa,sizeof sa) || listen(ls,16)){ int e=errno; close(ls); errno=e; return -1; } return ls; }
+static void st_port_holder(int port){   // who listens on the port (lsof): kill a leftover generator, name anything else
+    char cmd[200]; snprintf(cmd,sizeof cmd,"/usr/sbin/lsof -nP -iTCP:%d -sTCP:LISTEN -t 2>/dev/null",port);
+    FILE*f=popen(cmd,"r"); if(!f) return; char line[64]; int pids[8], n=0; while(n<8 && fgets(line,sizeof line,f)){ int p2=atoi(line); if(p2>0 && p2!=getpid()) pids[n++]=p2; } pclose(f);
+    for(int i=0;i<n;i++){ char pc[300]=""; snprintf(cmd,sizeof cmd,"/bin/ps -o command= -p %d 2>/dev/null",pids[i]); FILE*g=popen(cmd,"r"); if(g){ if(!fgets(pc,sizeof pc,g)) pc[0]=0; pclose(g); }
+        size_t L=strlen(pc); while(L && (pc[L-1]=='\n'||pc[L-1]==' ')) pc[--L]=0;
+        int gen=strstr(pc,"h3bsp.py") || strstr(pc,"h3nav.py") || strstr(pc,"maptop.sh");
+        char m[460]; int k=snprintf(m,sizeof m,"  [stats] port %d is held by pid %d (%.300s)%s\n",port,pids[i],pc[0]?pc:"?",gen?": a leftover map generator, killing it":": waiting for it to close");
+        (void)!write(2,m,k); if(gen) kill(pids[i],SIGKILL); } }
 static void* st_listen_thread(void*a){ (void)a; pthread_setname_np("shim-stats-listen");
     // only the process that runs the engine serves (the client's launcher process inherits the variable too)
     while(!hb_halo3_base()) usleep(500000);
@@ -912,11 +940,11 @@ static void* st_listen_thread(void*a){ (void)a; pthread_setname_np("shim-stats-l
     const char*ad=getenv("PELOAD_STATS_ADDR"); if(!ad||!*ad) ad="127.0.0.1";
     char m[200]; int k; int ls=-1, port=g_st_port;
     for(int tr=0; ls<0; tr++){
-        ls=st_bind(g_st_port,ad); if(ls>=0){ port=g_st_port; break; }
-        if(errno!=EADDRINUSE && tr==0){ k=snprintf(m,sizeof m,"  [stats] cannot listen on %s:%d (%s), retrying\n",ad,g_st_port,strerror(errno)); (void)!write(2,m,k); }
-        if(tr==0 && errno==EADDRINUSE){ k=snprintf(m,sizeof m,"  [stats] %s:%d busy, retrying\n",ad,g_st_port); (void)!write(2,m,k); }
-        if(tr>=10) for(int p2=g_st_port+1; p2<=g_st_port+10 && ls<0; p2++){ ls=st_bind(p2,ad); if(ls>=0) port=p2; }
-        if(ls<0) sleep(1); }
+        ls=st_bind(g_st_port,ad); if(ls>=0) break;
+        int e=errno;
+        if(tr==0){ k=snprintf(m,sizeof m,"  [stats] cannot listen on %s:%d (%s), retrying every second\n",ad,g_st_port,strerror(e)); (void)!write(2,m,k); }
+        if(e==EADDRINUSE && (tr==0 || tr%30==0)) st_port_holder(g_st_port);
+        sleep(1); }
     g_st_port=port;
     k=snprintf(m,sizeof m,"  [stats] live game stats on http://%s:%d/ (also /stats.json, /events, /forensics)\n",ad,port); (void)!write(2,m,k);
     { const char*o=getenv("PELOAD_STATS_OPEN"); if(o && atoi(o)){ pthread_t ot; pthread_create(&ot,0,st_open_thread,0); pthread_detach(ot); } }
