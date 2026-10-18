@@ -1020,14 +1020,14 @@ static uint8_t g_d3dscratch[1<<20];  // fallback Map target
 // state objects and queries for freeing (d3dobj_stage / d3dobj_reap, defined after the GL code). Counted for the leak
 // audit: [d3dobj] every 30 s under PELOAD_D3DGL_PROF or PELOAD_D3DOBJ_LOG (live objects, CPU bytes, by kind).
 // PELOAD_D3D_NOFREE=1 = the old behaviour (nothing is ever freed).
-static volatile uint64_t g_d3do_n[8], g_d3do_bytes[8], g_d3do_nfree[8], g_d3do_bfree[8], g_d3d_underflow, g_d3d_pending;
+static volatile uint64_t g_d3do_n[8], g_d3do_bytes[8], g_d3do_nfree[8], g_d3do_bfree[8], g_d3d_underflow, g_d3d_pending, g_d3d_keptdead, g_d3d_keptdead_b;
 static void d3dobj_log(void){ static double tl; double now=mono_s(); if(now-tl<30.0) return; tl=now;
     if(!getenv("PELOAD_D3DOBJ_LOG") && !getenv("PELOAD_D3DGL_PROF")) return;
-    char m[400]; int k=snprintf(m,sizeof m,"  [d3dobj] live:"); uint64_t tn=0,tb=0,fn=0,fb=0;
+    char m[600]; int k=snprintf(m,sizeof m,"  [d3dobj] live:"); uint64_t tn=0,tb=0,fn=0,fb=0;
     for(int i=0;i<8;i++){ if(!g_d3do_n[i]) continue; uint64_t n=g_d3do_n[i]-g_d3do_nfree[i], b=g_d3do_bytes[i]-g_d3do_bfree[i]; tn+=n; tb+=b; fn+=g_d3do_nfree[i]; fb+=g_d3do_bfree[i];
         k+=snprintf(m+k,sizeof m-k," kind%d %llu (%.1f MB)",i,(unsigned long long)n,b/1048576.0); }
-    k+=snprintf(m+k,sizeof m-k," | total %llu, %.1f MB | freed %llu (%.1f MB), pending %llu, underflows %llu\n",(unsigned long long)tn,tb/1048576.0,
-        (unsigned long long)fn,fb/1048576.0,(unsigned long long)g_d3d_pending,(unsigned long long)g_d3d_underflow); (void)!write(2,m,k); }
+    k+=snprintf(m+k,sizeof m-k," | total %llu, %.1f MB | freed %llu (%.1f MB), pending %llu, underflows %llu | released but kept (shaders, layouts) %llu, %.1f MB bytecode\n",(unsigned long long)tn,tb/1048576.0,
+        (unsigned long long)fn,fb/1048576.0,(unsigned long long)g_d3d_pending,(unsigned long long)g_d3d_underflow,(unsigned long long)g_d3d_keptdead,g_d3d_keptdead_b/1048576.0); (void)!write(2,m,k); }
 // Registry of live D3DObjs (open addressing, linear probing): AddRef/Release only touch pointers found here, so a
 // static object, a double release or a stray pointer is ignored instead of corrupting memory.
 static pthread_mutex_t g_live_mx=PTHREAD_MUTEX_INITIALIZER; static void** g_live; static size_t g_live_cap, g_live_n;
@@ -1130,6 +1130,7 @@ static unsigned MSABI obj_Release(void*s){ if(!live_has(s)) return 0; D3DObj*o=s
             (void)!write(2,m,k); } }
         return 0; }
     if(r==0 && !o->keep && !d3d_nofree()) d3dobj_pend(o);
+    if(r==0 && o->keep){ __atomic_add_fetch(&g_d3d_keptdead,1,__ATOMIC_RELAXED); __atomic_add_fetch(&g_d3d_keptdead_b,(uint64_t)o->bclen,__ATOMIC_RELAXED); }   // audit
     return (unsigned)r; }
 static void qi_trace(const char*who,GUID_*r);
 static int MSABI obj_QI(void*s,GUID_*r,void**pp){ qi_trace("obj",r); if(pp){ *pp=s; obj_AddRef(s); } return HR_OK; }   // QueryInterface hands out a reference
