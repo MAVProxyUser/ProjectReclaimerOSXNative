@@ -87,11 +87,15 @@ The engine's score statistics; objective state (flags, territories, hills; needs
 Static, from the .map (re-tools/h3dmg.py <map> prints it; the overlay's hbg_weak in shim/src/hitbox.c uses the same rule).
 Layouts: Assembly Halo3MCC hlmt.xml / coll.xml.
 
-In the overlay (hitboxes + Vehicles on, 2026-10-17/18): vehicle hitbox edges are cyan; edges whose collision material maps
+In the overlay (Vehicles on, 2026-10-17/18): vehicle hitbox edges are cyan; edges whose collision material maps
 to a lethal section (class 2: a section smaller than the body whose response kills or destroys it) are yellow, to the
-cheapest section that opens a shielded seat at "major" (class 1) orange. Stats page chips under the Vehicles button:
-POST `/control?do=weaktype&t=1|2`, `PELOAD_HB_WEAK_SHOW=<mask>` (default 3; 1 = lethal, 2 = driver). Only the Wraith
-and the Scorpion get any. The `[hitbox] definition ...` log line counts each model's weak-spot edges.
+cheapest section that opens a shielded seat at "major" (class 1) orange, to a section under half the body whose response
+damages a gun trigger, the steering or the engine or forces a weapon drop (class 3, instant response flags bits 4, 8-15;
+2026-10-18) magenta. Stats page chips under the Vehicles button: POST `/control?do=weaktype&t=1|2|4`,
+`PELOAD_HB_WEAK_SHOW=<mask>` (default 7; 1 = lethal, 2 = driver, 4 = disables). The rule runs on EVERY vehicle definition
+(turrets and mounted guns are vehicles too) of the map being played; the `[hitbox] definition ...` log line counts each
+model's weak-spot edges per class. Verified live 2026-10-18 on Avalanche: Wraith back hatch yellow, cockpit orange, the
+Scorpion's driver hatch orange, Warthogs cyan (img/overlay-weakspots.png).
 
 - object def (vehi/bipd) +0x34 model tagref -> hlmt. hlmt +0x7C Materials [0x14] (+0 name sid, +6 s16 damage section),
   +0x88 New Damage Info [0xA4], +0x94 Targets [0x20] (aim/lock-on markers: +0xC section, +0x18 flags bit 2 headshot,
@@ -117,3 +121,199 @@ collision material feeds it.
 
 ![Wraith / Scorpion / Ghost collision models, weak spots colored](img/vehicle-weak-spots.png)
 (top and side views from the .map's collision models; yellow = lethal section, orange = opens the driver, blue = rest)
+
+![Live overlay: a Wraith from behind (yellow back hatch, orange cockpit), a Scorpion behind it (orange driver hatch)](img/overlay-weakspots.png)
+
+Disabling parts (class 3): Ghost wings (20%, 80 of 400: the gun on that side, the left one also the steering), Warthog
+front fenders (15%, 75: steering; also on every Warthog variant and the Workshop treadhogs), Mongoose wheels (20%, 40:
+steering). Turrets (machine-gun turret, plasma cannon, missile pod, Shade, the Warthog / Wraith / Scorpion guns) have one
+damage pool and no weak part; stationary gunners take 100% of a hit, mounted gunners 80-90%.
+
+### Every vehicle (2026-10-18; `python3 re-tools/h3dmg.py --table <maps...>` remakes this)
+
+All 178 vehicle definitions in the stock multiplayer maps and the downloaded Workshop maps (Ultimate Forge desert_sandbox,
+Hugegrass, Permafrost, HugeGrass Rebalance), first map each is found in. "Weak spots" = what the overlay colors: section:
+kind (damage to that part alone); "no surface" = the section exists but no collision material feeds it, so a shot can't
+reach it. "Driver takes" = the first damage seat's direct damage scale (the share of a hit on the
+driver that reaches the driver; 0% = shielded until a part breaks). A "-" vehicle has one damage pool: hits anywhere count the same.
+
+| Vehicle | Weak spots (damage to that part) | Driver takes | Maps |
+|---|---|---|---|
+| aa_gun_left | - | - | desert_sandbox, hugeass_remastered_mcc, hugetowers, fixedHugeGrassTrapasRemix |
+| aa_gun_right | - | - | desert_sandbox, hugeass_remastered_mcc, hugetowers, fixedHugeGrassTrapasRemix |
+| albatross | - | 100% | desert_sandbox, hugeass_remastered_mcc, hugetowers, fixedHugeGrassTrapasRemix |
+| anti_air | - | - | bunkerworld, deadlock, riverworld, sandbox +14 |
+| anti_infantry | - | 80% | armory, bunkerworld, deadlock, deadlock +27 |
+| anti_infantry_anti_air_wraith | - | 80% | bunkerworld, deadlock, riverworld, sandbox +8 |
+| anti_infantry_blue | - | 80% | hugetowers |
+| anti_infantry_red | - | 80% | hugetowers |
+| anti_infantry_snow | - | 80% | sidewinder |
+| autoturret | - | - | armory, bunkerworld, chill, chillout +27 |
+| banshee | - | 20% | bunkerworld, chill, construct, isolation +8 |
+| banshee_ai_blue | - | 20% | hugetowers |
+| banshee_ai_red | - | 20% | hugetowers |
+| beam_turret_left | - | - | desert_sandbox, hugeass_remastered_mcc, hugetowers, fixedHugeGrassTrapasRemix |
+| beam_turret_right | - | - | desert_sandbox, hugeass_remastered_mcc, hugetowers, fixedHugeGrassTrapasRemix |
+| behemoth | - | 100% | sandbox, shrine, sidewinder, desert_sandbox +3 |
+| behemoth_turret | - | 100% | sandbox, shrine, sidewinder, desert_sandbox +3 |
+| bfg | - | 0% | desert_sandbox, hugeass_remastered_mcc, hugetowers, fixedHugeGrassTrapasRemix |
+| bfg_ai_blue | - | 0% | hugetowers |
+| bfg_ai_red | - | 0% | hugetowers |
+| brute_chopper | - | 100% | armory, bunkerworld, deadlock, isolation +10 |
+| cannon | - | 100% | armory, deadlock, riverworld, sandbox +8 |
+| cannon_snow | - | 100% | sidewinder, hugetowers |
+| chaingun | - | 90% | armory, bunkerworld, cyberdyne, deadlock +22 |
+| chaingun_snow | - | 90% | s3d_turf, s3d_waterfall, sidewinder, hugetowers +1 |
+| chin_gun | - | 90% | desert_sandbox, desert_sandbox, desert_sandbox, desert_sandbox +9 |
+| chin_gun_blue | - | - | hugetowers |
+| chin_gun_friendly | - | - | desert_sandbox, hugeass_remastered_mcc, hugetowers, fixedHugeGrassTrapasRemix |
+| chin_gun_reach | - | - | hugeass_remastered_mcc, hugetowers, fixedHugeGrassTrapasRemix |
+| chin_gun_red | - | - | hugetowers |
+| chin_gun_searchlight | - | - | desert_sandbox, hugeass_remastered_mcc, hugetowers, fixedHugeGrassTrapasRemix |
+| chin_gun_snow | - | 90% | hugetowers |
+| condor_h3 | - | 0% | desert_sandbox, hugeass_remastered_mcc, hugetowers, fixedHugeGrassTrapasRemix |
+| cov_defender | - | - | snowbound |
+| cov_guntower | core: kills (100) | 0% | desert_sandbox, hugeass_remastered_mcc, hugetowers, fixedHugeGrassTrapasRemix |
+| cov_guntower_ai_blue | core: kills (100) | 0% | hugetowers |
+| cov_guntower_ai_red | core: kills (100) | 0% | hugetowers |
+| drone_alpha | - | 0% | desert_sandbox, hugeass_remastered_mcc, hugetowers, fixedHugeGrassTrapasRemix |
+| falcon_gl | - | 20% | hugeass_remastered_mcc, fixedHugeGrassTrapasRemix |
+| falcon_mp | - | 20% | desert_sandbox, hugeass_remastered_mcc, fixedHugeGrassTrapasRemix |
+| falcon_mp_gl | - | 20% | desert_sandbox, hugeass_remastered_mcc, fixedHugeGrassTrapasRemix |
+| falcon_mp_snow | - | 20% | hugetowers |
+| falcon_mp_snow_gl | - | 20% | hugetowers |
+| gauss | - | 90% | armory, bunkerworld, cyberdyne, deadlock +19 |
+| gauss_snow | - | 90% | s3d_turf, s3d_waterfall, sidewinder, hugetowers |
+| ghost | gas_tank: kills (20, no surface: cannot be hit); l_wing: disables (breaks gun, turn damage) (80); r_wing: disables (breaks gun) (80) | 90% | armory, bunkerworld, chill, chillout +22 |
+| ghost_aa | gas_tank: kills (20, no surface: cannot be hit); l_wing: disables (breaks gun, turn damage) (80); r_wing: disables (breaks gun) (80) | 90% | hugeass_remastered_mcc, fixedHugeGrassTrapasRemix |
+| ghost_aa_slow | gas_tank: kills (20, no surface: cannot be hit); l_wing: disables (breaks gun, turn damage) (80); r_wing: disables (breaks gun) (80) | 90% | desert_sandbox, hugeass_remastered_mcc, hugetowers, fixedHugeGrassTrapasRemix |
+| ghost_ai_blue | gas_tank: kills (20, no surface: cannot be hit); l_wing: disables (breaks gun, turn damage) (80); r_wing: disables (breaks gun) (80) | 90% | hugetowers |
+| ghost_ai_red | gas_tank: kills (20, no surface: cannot be hit); l_wing: disables (breaks gun, turn damage) (80); r_wing: disables (breaks gun) (80) | 90% | hugetowers |
+| ghost_snow | gas_tank: kills (20, no surface: cannot be hit); l_wing: disables (breaks gun, turn damage) (80); r_wing: disables (breaks gun) (80) | 90% | s3d_waterfall, sidewinder |
+| golf_ball | - | - | sandbox |
+| gravity_throne | - | 100% | hugeass_remastered_mcc, fixedHugeGrassTrapasRemix |
+| grenade_snow | - | 90% | hugetowers |
+| head | - | 80% | desert_sandbox, hugeass_remastered_mcc, fixedHugeGrassTrapasRemix |
+| hornet | - | 20% | chill, construct, riverworld, sandbox +6 |
+| hornet_fast | - | 20% | hugeass_remastered_mcc, fixedHugeGrassTrapasRemix |
+| hornet_lite | - | 20% | sandbox, sidewinder, desert_sandbox, hugeass_remastered_mcc +2 |
+| hornet_lite_pf | - | 20% | hugetowers |
+| hu_civ_car | main: kills (100, no surface: cannot be hit); front: kills (180); rear: kills (180) | 90% | desert_sandbox, hugeass_remastered_mcc, hugetowers, fixedHugeGrassTrapasRemix |
+| hu_police_car | main: kills (100, no surface: cannot be hit); front: kills (180); rear: kills (180) | 90% | desert_sandbox, hugeass_remastered_mcc, hugetowers, fixedHugeGrassTrapasRemix |
+| kestrel_railgun_fast | - | 90% | hugeass_remastered_mcc, fixedHugeGrassTrapasRemix |
+| kestrel_snow | - | 90% | hugetowers |
+| kestrel_snow_chaingun | - | 90% | hugetowers |
+| lich | reactor: kills (35) | 0% | desert_sandbox, hugeass_remastered_mcc, hugetowers, fixedHugeGrassTrapasRemix |
+| longswordh2a | - | 0% | desert_sandbox, hugeass_remastered_mcc, hugetowers, fixedHugeGrassTrapasRemix |
+| mac_turret | - | 0% | desert_sandbox, hugeass_remastered_mcc, hugetowers, fixedHugeGrassTrapasRemix |
+| machinegun_turret | - | 100% | armory, bunkerworld, chill, chillout +31 |
+| main_guns | - | - | desert_sandbox, hugeass_remastered_mcc, hugetowers, fixedHugeGrassTrapasRemix |
+| main_turret | - | - | desert_sandbox, hugeass_remastered_mcc, hugetowers, fixedHugeGrassTrapasRemix |
+| main_turret_blue | - | - | hugetowers |
+| main_turret_forge | - | - | desert_sandbox |
+| main_turret_mp | - | - | desert_sandbox, hugeass_remastered_mcc, fixedHugeGrassTrapasRemix |
+| main_turret_red | - | - | hugetowers |
+| mammoth | main: exposes the driver (32500, no surface: cannot be hit); lf_fender: disables (turn damage) (7500, no surface: cannot be hit); rf_fender: disables (turn damage) (7500, no surface: cannot be hit) | 10% | desert_sandbox, hugeass_remastered_mcc, hugetowers, fixedHugeGrassTrapasRemix |
+| mammoth_main_gun | - | 90% | desert_sandbox, hugeass_remastered_mcc, hugetowers, fixedHugeGrassTrapasRemix |
+| mauler | - | 90% | deadlock, sandbox, shrine, sidewinder +5 |
+| minigun | - | - | hugeass_remastered_mcc, hugetowers, fixedHugeGrassTrapasRemix |
+| missile_pod | - | 100% | sidewinder, desert_sandbox, hugeass_remastered_mcc, hugetowers +1 |
+| missile_pod_uf | - | 100% | hugeass_remastered_mcc, fixedHugeGrassTrapasRemix |
+| mongoose | lf_wheel: disables (turn damage) (40); rf_wheel: disables (turn damage) (40); lb_wheel: disables (turn damage) (40); rb_wheel: disables (turn damage) (40) | 100% | armory, bunkerworld, chill, chillout +23 |
+| mongoose_snow | lf_wheel: disables (turn damage) (40); rf_wheel: disables (turn damage) (40); lb_wheel: disables (turn damage) (40); rb_wheel: disables (turn damage) (40) | 100% | s3d_turf, s3d_waterfall, sidewinder |
+| monitor | - | - | chillout |
+| mortar | - | - | bunkerworld, deadlock, riverworld, sandbox +8 |
+| mortar_blue | - | - | hugetowers |
+| mortar_red | - | - | hugetowers |
+| odst_pod2 | - | - | desert_sandbox, hugeass_remastered_mcc, hugetowers, fixedHugeGrassTrapasRemix |
+| olifaunt | hull: kills (200) | - | desert_sandbox, hugeass_remastered_mcc, hugetowers, fixedHugeGrassTrapasRemix |
+| pelican_multiplayer | - | 0% | desert_sandbox, hugeass_remastered_mcc, fixedHugeGrassTrapasRemix |
+| pelican_multiplayer_snow | - | 0% | hugetowers |
+| pelican_rocket_pod | - | - | s3d_waterfall |
+| pelican_rocket_pod02 | - | - | s3d_waterfall |
+| phantom_blue | engine_left: kills (450, no surface: cannot be hit); engine_right: kills (450, no surface: cannot be hit) | 0% | hugetowers |
+| phantom_red | engine_left: kills (450, no surface: cannot be hit); engine_right: kills (450, no surface: cannot be hit) | 0% | hugetowers |
+| phantom_side_turret | - | - | hugeass_remastered_mcc, fixedHugeGrassTrapasRemix |
+| phantom_test | engine_left: disables (ENGINE DAMAGE) (300); engine_right: disables (ENGINE DAMAGE) (300) | 0% | desert_sandbox, hugeass_remastered_mcc, fixedHugeGrassTrapasRemix |
+| phantom_test_noboost | engine_left: disables (ENGINE DAMAGE) (450); engine_right: disables (ENGINE DAMAGE) (450) | 0% | hugetowers |
+| plasma_cannon | - | 100% | bunkerworld, chill, chillout, construct +26 |
+| rocket | - | 90% | desert_sandbox, hugeass_remastered_mcc, hugetowers, fixedHugeGrassTrapasRemix |
+| sabre | - | 0% | desert_sandbox, hugeass_remastered_mcc, hugetowers, fixedHugeGrassTrapasRemix |
+| sandbox_defender | - | - | sandbox |
+| scarab_h2_turret | - | 0% | desert_sandbox, hugeass_remastered_mcc, fixedHugeGrassTrapasRemix |
+| scarab_h2_turret_ai | - | 0% | desert_sandbox |
+| scarab_h2_turret_ai_forge | - | 0% | desert_sandbox |
+| scarab_h2_turret_rear | - | 0% | desert_sandbox, hugeass_remastered_mcc, fixedHugeGrassTrapasRemix |
+| scarab_h2_turret_rear_ai | - | 0% | desert_sandbox |
+| scarab_h2_turret_rear_ai_forge | - | 0% | desert_sandbox |
+| scorpion | driver_hull: exposes the driver (113) | 0% | armory, deadlock, riverworld, sandbox +6 |
+| scorpion_fast | driver_hull: exposes the driver (113) | 0% | hugeass_remastered_mcc, fixedHugeGrassTrapasRemix |
+| scorpion_snow | driver_hull: exposes the driver (113) | 0% | sidewinder, hugetowers |
+| security_camera | - | - | cyberdyne, docks |
+| seraph_h3 | - | 0% | desert_sandbox, hugeass_remastered_mcc, hugetowers, fixedHugeGrassTrapasRemix |
+| seraph_reach | - | 0% | desert_sandbox, hugeass_remastered_mcc, hugetowers, fixedHugeGrassTrapasRemix |
+| shade | - | 90% | chill, guardian, sandbox, sidewinder +6 |
+| shade_flak_cannon | - | 90% | hugeass_remastered_mcc, fixedHugeGrassTrapasRemix |
+| shade_flak_cannon_ai_blue | - | 90% | hugetowers |
+| shade_flak_cannon_ai_red | - | 90% | hugetowers |
+| shade_reach | - | 90% | hugeass_remastered_mcc, fixedHugeGrassTrapasRemix |
+| shade_reach_ai_blue | - | 90% | hugetowers |
+| shade_reach_ai_red | - | 90% | hugetowers |
+| shadow_fast | - | 90% | desert_sandbox, hugeass_remastered_mcc, hugetowers, fixedHugeGrassTrapasRemix |
+| shrine_defender | - | - | shrine |
+| side_gun_gl_left | - | 90% | desert_sandbox, hugeass_remastered_mcc, hugetowers, fixedHugeGrassTrapasRemix |
+| side_gun_gl_right | - | 90% | desert_sandbox, hugeass_remastered_mcc, hugetowers, fixedHugeGrassTrapasRemix |
+| side_gun_left | - | 90% | desert_sandbox, hugeass_remastered_mcc, hugetowers, fixedHugeGrassTrapasRemix |
+| side_gun_right | - | 90% | desert_sandbox, hugeass_remastered_mcc, hugetowers, fixedHugeGrassTrapasRemix |
+| skiff | - | 90% | desert_sandbox, hugeass_remastered_mcc, hugetowers, fixedHugeGrassTrapasRemix |
+| skiff_fast | - | 90% | hugeass_remastered_mcc, fixedHugeGrassTrapasRemix |
+| skiff_turret | - | 90% | desert_sandbox, hugeass_remastered_mcc, hugetowers, fixedHugeGrassTrapasRemix |
+| soccer_ball | - | - | armory, bunkerworld, chillout, descent +8 |
+| space_banshee | - | 20% | desert_sandbox, hugeass_remastered_mcc, hugetowers, fixedHugeGrassTrapasRemix |
+| space_phantom | engine_left: disables (ENGINE DAMAGE) (300, no surface: cannot be hit); engine_right: disables (ENGINE DAMAGE) (300, no surface: cannot be hit) | 0% | desert_sandbox, hugeass_remastered_mcc, hugetowers, fixedHugeGrassTrapasRemix |
+| space_phantom_blue | engine_left: disables (ENGINE DAMAGE) (600, no surface: cannot be hit); engine_right: disables (ENGINE DAMAGE) (600, no surface: cannot be hit) | 0% | hugetowers |
+| space_phantom_red | engine_left: disables (ENGINE DAMAGE) (600, no surface: cannot be hit); engine_right: disables (ENGINE DAMAGE) (600, no surface: cannot be hit) | 0% | hugetowers |
+| sparrowhawk | wing_l: kills (90); wing_r: kills (90); engine_l: kills (315); engine_r: kills (315); canopy: kills (675) | 10% | desert_sandbox, hugeass_remastered_mcc, hugetowers, fixedHugeGrassTrapasRemix |
+| sparrowhawk_chaingun | wing_l: kills (35); wing_r: kills (35); engine_l: kills (122); engine_r: kills (122); canopy: kills (262) | 10% | desert_sandbox, hugeass_remastered_mcc, hugetowers, fixedHugeGrassTrapasRemix |
+| sparrowhawk_missiles | - | 100% | desert_sandbox, hugeass_remastered_mcc, hugetowers, fixedHugeGrassTrapasRemix |
+| sparrowhawk_railgun | - | 100% | desert_sandbox, hugeass_remastered_mcc, hugetowers, fixedHugeGrassTrapasRemix |
+| sparrowhawk_railgun_2 | - | 100% | desert_sandbox, hugeass_remastered_mcc, hugetowers, fixedHugeGrassTrapasRemix |
+| sparrowhawk_weapons | - | 100% | desert_sandbox, hugeass_remastered_mcc, hugetowers, fixedHugeGrassTrapasRemix |
+| sparrowhawk_weapons_dummy | - | 100% | desert_sandbox, hugeass_remastered_mcc, hugetowers, fixedHugeGrassTrapasRemix |
+| spectre | - | 80% | desert_sandbox, hugeass_remastered_mcc, hugetowers, fixedHugeGrassTrapasRemix |
+| spectre_aa | - | 80% | desert_sandbox, hugeass_remastered_mcc, hugetowers, fixedHugeGrassTrapasRemix |
+| spectre_fast_aa | - | 80% | hugeass_remastered_mcc, fixedHugeGrassTrapasRemix |
+| treadgoose_snow | lf_wheel: disables (turn damage) (40); rf_wheel: disables (turn damage) (40); lb_wheel: disables (turn damage) (40); rb_wheel: disables (turn damage) (40) | 100% | hugetowers |
+| treadhog_snow | lf_fender: disables (turn damage) (75); rf_fender: disables (turn damage) (75) | 90% | hugetowers |
+| treadhog_snow_gauss | lf_fender: disables (turn damage) (75); rf_fender: disables (turn damage) (75) | 90% | hugetowers |
+| treadhog_snow_troop | lf_fender: disables (turn damage) (75); rf_fender: disables (turn damage) (75) | 90% | hugetowers |
+| troop | - | 90% | armory, bunkerworld, cyberdyne, deadlock +15 |
+| troop_odst | - | 90% | desert_sandbox, hugeass_remastered_mcc, fixedHugeGrassTrapasRemix |
+| tuning_fork | - | 100% | desert_sandbox, hugeass_remastered_mcc, hugetowers, fixedHugeGrassTrapasRemix |
+| tuning_fork_turret | - | - | desert_sandbox, hugeass_remastered_mcc, hugetowers, fixedHugeGrassTrapasRemix |
+| tuning_fork_turret_campaign | - | - | desert_sandbox, hugeass_remastered_mcc, hugetowers, fixedHugeGrassTrapasRemix |
+| turret | - | 0% | desert_sandbox, hugeass_remastered_mcc, fixedHugeGrassTrapasRemix |
+| turret2 | - | 90% | desert_sandbox, hugeass_remastered_mcc, hugetowers, fixedHugeGrassTrapasRemix |
+| turret_aa | - | 90% | desert_sandbox, hugeass_remastered_mcc, hugetowers, fixedHugeGrassTrapasRemix |
+| turret_standalone | - | - | desert_sandbox, hugeass_remastered_mcc, hugetowers, fixedHugeGrassTrapasRemix |
+| turret_standalone_chaingun | - | - | desert_sandbox, hugeass_remastered_mcc, hugetowers, fixedHugeGrassTrapasRemix |
+| vulture | main: kills (2500) | 10% | desert_sandbox, hugeass_remastered_mcc, hugetowers, fixedHugeGrassTrapasRemix |
+| warthog | lf_fender: disables (turn damage) (75); rf_fender: disables (turn damage) (75) | 90% | armory, bunkerworld, cyberdyne, deadlock +11 |
+| warthog_civ | lf_fender: disables (turn damage) (75); rf_fender: disables (turn damage) (75) | 90% | desert_sandbox, hugeass_remastered_mcc, hugetowers, fixedHugeGrassTrapasRemix |
+| warthog_fast | lf_fender: disables (turn damage) (75); rf_fender: disables (turn damage) (75) | 90% | hugeass_remastered_mcc, fixedHugeGrassTrapasRemix |
+| warthog_fast_gauss | lf_fender: disables (turn damage) (75); rf_fender: disables (turn damage) (75) | 90% | hugeass_remastered_mcc, fixedHugeGrassTrapasRemix |
+| warthog_gauss | lf_fender: disables (turn damage) (75); rf_fender: disables (turn damage) (75) | 90% | armory, bunkerworld, deadlock, docks +8 |
+| warthog_gauss_snow | lf_fender: disables (turn damage) (75); rf_fender: disables (turn damage) (75) | 90% | s3d_turf, s3d_waterfall, sidewinder |
+| warthog_rocket | lf_fender: disables (turn damage) (75); rf_fender: disables (turn damage) (75) | 90% | desert_sandbox, hugeass_remastered_mcc, hugetowers, fixedHugeGrassTrapasRemix |
+| warthog_rocket_fast | lf_fender: disables (turn damage) (75); rf_fender: disables (turn damage) (75) | 90% | hugeass_remastered_mcc, fixedHugeGrassTrapasRemix |
+| warthog_snow | lf_fender: disables (turn damage) (75); rf_fender: disables (turn damage) (75) | 90% | s3d_turf, s3d_waterfall, sidewinder |
+| warthog_troop | lf_fender: disables (turn damage) (75); rf_fender: disables (turn damage) (75) | 90% | sandbox, sidewinder, warehouse |
+| warthog_troop_mp | lf_fender: disables (turn damage) (75); rf_fender: disables (turn damage) (75) | 90% | desert_sandbox, hugeass_remastered_mcc, fixedHugeGrassTrapasRemix |
+| warthog_wrecked_turret | lf_fender: disables (turn damage) (75); rf_fender: disables (turn damage) (75) | 90% | s3d_edge, s3d_turf, s3d_waterfall, sandbox +6 |
+| wraith | backhatch: kills (75); cockpit: exposes the driver (113) | 0% | bunkerworld, deadlock, riverworld, sandbox +8 |
+| wraith_ai_blue | backhatch: kills (75); cockpit: exposes the driver (113) | 0% | hugetowers |
+| wraith_ai_red | backhatch: kills (75); cockpit: exposes the driver (113) | 0% | hugetowers |
+| wraith_anti_air | backhatch: kills (75); cockpit: exposes the driver (113) | 0% | sandbox, sidewinder, warehouse |
+| wraith_anti_air_uf | backhatch: kills (75); cockpit: exposes the driver (113) | 0% | desert_sandbox, hugeass_remastered_mcc, fixedHugeGrassTrapasRemix |
+| wraith_minigun_anti_air | backhatch: kills (75); cockpit: exposes the driver (113) | 0% | hugetowers |
+| wraith_minigun_anti_air_fast | backhatch: kills (75); cockpit: exposes the driver (113) | 0% | hugeass_remastered_mcc, fixedHugeGrassTrapasRemix |

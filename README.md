@@ -201,7 +201,7 @@ Options go in front of the command, e.g. `PELOAD_INVERT_PITCH=0 bash shim/play.s
 | `PELOAD_HB_ITEMS=1` | weapons and equipment lying on the map, by name; the panel's **Items** row |
 | `PELOAD_HB_TEAMS=enemies` | start every overlay feature showing only enemies (`friends`: only teammates); the panel sets it per feature (**Show**) |
 | `PELOAD_STATS_HTTP=<port>` | live game stats page; on by default at http://127.0.0.1:8765/, `=0` turns it off (details below) |
-| `PELOAD_HB_VEHICLES=1` | vehicle hitboxes: cyan, with their weak spots yellow (damage there alone destroys it: the Wraith's back hatch) or orange (breaking it exposes the driver: Wraith cockpit, Scorpion hatch); off by default, the panel's **Vehicles** row |
+| `PELOAD_HB_VEHICLES=1` | vehicle hitboxes (every vehicle, turret and mounted gun): cyan, with their weak spots yellow (damage there alone destroys it: the Wraith's back hatch), orange (breaking it exposes the driver: Wraith cockpit, Scorpion hatch) or magenta (breaking it disables a gun or the steering: Ghost wings, Warthog front fenders, Mongoose wheels); every vehicle's result is listed in `shim/docs/halo3-objects.md`; off by default, the panel's **Vehicles** row |
 | `PELOAD_HB_VISIBLE=1` | start every overlay feature as visible only: drawn only for what you can actually see, not behind walls (a small copy of the game's depth buffer, read back every frame while a feature that is on uses it); the panel sets it per feature (**Walls**) |
 | `PELOAD_HB_TEXT_PX=7` | overlay label height in window pixels, every feature's start value (the panel's **Text**, per feature) |
 | `PELOAD_HB_ZONES=1` | the map's boundaries in the game view: kill zones red, safe zones green (outside every safe zone you die), soft ceilings pink (soft kill), orange (push back) and yellow (slip surface), read from the map being played (Workshop maps too), drawn only where you can see them; the panel's **Kill/safe zones** row, a chip per kind |
@@ -219,7 +219,7 @@ watch from another device). From top to bottom the page shows:
 *Screenshots: a live ~60-player public match, player names and chat anonymized by the page's demo mode (`?demo=1`).*
 
 - **In-game overlay** panel (the function keys of earlier versions are gone; `PELOAD_HB_FKEYS=1` brings them back): a
-  row per feature -- Hitboxes (the players'), Vehicles (with chips for the two kinds of weak spots), Tracers, Player info,
+  row per feature -- Hitboxes (the players'), Vehicles (with chips for the three kinds of weak spots), Tracers, Player info,
   Items, Kill/safe zones (a chip per kind: kill zones, safe zones, soft-kill and push-back ceilings, slip surfaces). Each
   row has its own on / off switch and its own settings: **Show** All / Enemies / Friends (a player's team; a vehicle's is
   whoever sits in it, so an empty vehicle shows under All only; a tracer's is the shooter's), **Walls** Through walls /

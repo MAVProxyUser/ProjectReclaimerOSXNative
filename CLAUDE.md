@@ -273,9 +273,15 @@ Walking with the map (2026-10-17, backlog 32): PELOAD_NAV=roam|enemy|x,y,z drive
 (re-tools/h3nav.py -> maptop/<map>.nav, made in the background on first play; shim/src/nav.c, own thread shim-nav;
 PELOAD_NAV_LOG). Use it for unattended test movement instead of PELOAD_INPUT_SCRIPT (needs QR_PAD=1). With the sparring partner
 (TARGET_ENV="PELOAD_SPAR=1 PELOAD_NAV=enemy") it also walks: nav's left stick + jump, the aim keeps the right stick; within
-PELOAD_NAV_NEAR (4) units it strafes side to side. The stats page map draws the walker's path and goal (snapshot "nav"). Vehicle weak spots
-(backlog 31): re-tools/h3dmg.py <map> prints each vehicle's damage sections / seats; the hitbox overlay colors lethal
-sections yellow and driver-exposing ones orange (hitbox.c hbg_weak; Wraith back hatch = 75 of 750 kills it). String ids:
+PELOAD_NAV_NEAR (4) units it strafes side to side. The stats page map draws the walker's path and goal (snapshot "nav").
+Death hotspots (nav_danger_update): danger is RELATIVE per map since 2026-10-18 (0.5 at the PELOAD_NAV_HOT quantile, default 0.9, of
+the per-node death sums: ~10% of the floor; a fixed scale had made 59% of Valhalla "hot" from 2,393 stored deaths); with
+PELOAD_NAV_LOG each path line also gives its hotspot nodes vs the same A* without avoidance (public BTB Standoff, 28 plans: 109 vs
+352). The walking graph / map picture are only MADE once gameplay started (the menu borrows other maps). Vehicle weak spots
+(backlog 31/36): re-tools/h3dmg.py <map> prints each vehicle's damage sections / seats (--table <maps...> = every vehicle, the table in
+halo3-objects.md: 178 definitions in stock + Workshop maps, 60 with weak spots); the overlay colors lethal sections yellow,
+driver-exposing ones orange, gun/steering-disabling ones (< half the body, response flag bits 4, 8-15) magenta (hitbox.c hbg_weak,
+PELOAD_HB_WEAK_SHOW mask 1/2/4, default 7; Wraith back hatch = 75 of 750 kills it). Live-checked on Avalanche. String ids:
 re-tools/h3bsp.sid_name (19-bit index, namespace at bit 19) -- h3map.H3Map.sid mis-resolves namespace-0 continuations.
 Map pictures (2026-10-17): hb_note_map only keeps real cache maps ("daeh" v13; the engine's autosaves are also .map files); the stats
 server makes a missing maptop picture in the background the first time a map is played (st_maptop_ensure: arch -arm64 python3
@@ -303,7 +309,7 @@ variable + a stats page button (bits of g_hb_toggle; the old F2-F10 keys only wi
 `PELOAD_HITBOXES=1|all|spheres` hitboxes, `PELOAD_HB_TRACERS` projectile trails + bullet lines,
 `PELOAD_HB_INFO` shield/health/"<weapon in hand> / <other weapon>"/grenades/camo/vehicle labels, `PELOAD_HB_ITEMS` weapon/equipment
 labels, `PELOAD_HB_TEAMS=all|enemies|friends` team filter (enemies red/yellow head, teammates blue), `PELOAD_HB_VEHICLES`
-(default on; weak spots yellow/orange, chips do=weaktype). Objects come from the
+(weak spots yellow/orange/magenta, chips do=weaktype&t=1|2|4). Objects come from the
 "object" data array (TLS index halo3+0xa39f9c -> TLS block +0x38). Real hitboxes = the object's COLLISION MODEL read
 from the .map file the game opened (hb_note_map in CreateFileW; bipd/vehi +0x34 model -> hlmt +0x10 coll ->
 regions/permutations/bsps; all permutations cached, each object picks its own via its region permutation bytes at

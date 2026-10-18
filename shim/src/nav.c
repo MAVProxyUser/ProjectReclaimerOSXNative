@@ -51,9 +51,13 @@ static int nav_node_at(const float*p){
     return -1; }
 // Danger: where players died on this map (the stats heatmap, stats.c g_hm -- earlier matches too). Every death adds
 // 1 - d/R to the floors within R = PELOAD_NAV_AVOID_R units (default 4) and 2 units of its height; a node's danger is
-// 1 - exp(-sum/3) (three nearby deaths ~ 0.63). Walking a node costs (1 + PELOAD_NAV_AVOID x danger) times its length
+// 1 - exp(-sum/s0) with s0 = max(3, T/ln 2), T = the sum at the PELOAD_NAV_HOT quantile of all floor nodes (default 0.9):
+// danger 0.5 marks only about the map's deadliest 10% of floor, also on maps whose heatmap holds thousands of deaths from
+// many sessions (Valhalla 2026-10-18: 2,393 deaths had put 59% of the floor above 0.5 with a fixed s0 = 3; sparse maps
+// keep s0 = 3, three nearby deaths ~ 0.63). Walking a node costs (1 + PELOAD_NAV_AVOID x danger) times its length
 // (default 4: the worst spots cost 5x, so paths detour around them when a detour exists); roam goals skip danger > 0.5.
 // Recomputed every 20 s (deaths keep coming in). PELOAD_NAV_AVOID=0: off.
+static int nav_fcmp(const void*a,const void*b){ float x=*(const float*)a, y=*(const float*)b; return x<y?-1:x>y; }
 static float nav_avoid(void){ static float k=-1; if(k<0){ const char*e=getenv("PELOAD_NAV_AVOID"); k=e?atof(e):4.0f; if(k<0) k=0; } return k; }
 static void nav_danger_update(double now){
     if(!nav_avoid() || (g_nav.dng && now-g_nav.dng_t<20.0)) return; g_nav.dng_t=now;
@@ -70,16 +74,20 @@ static void nav_danger_update(double now){
             for(int dx=-rc;dx<=rc;dx++){ int x=cx+dx; if(x<0||x>=g_nav.w) continue;
                 float px=g_nav.x0+(x+0.5f)*g_nav.cell-pts[k][0], py=g_nav.y0+(y+0.5f)*g_nav.cell-pts[k][1], d=sqrtf(px*px+py*py); if(d>=R) continue;
                 int c=y*g_nav.w+x; for(uint32_t i=g_nav.first[c];i<g_nav.first[c+1];i++) if(fabsf(g_nav.nd[i].z-pts[k][2])<2.0f) g_nav.dng[i]+=1.0f-d/R; } } }
-    int hot=0; for(int i=0;i<g_nav.n;i++){ g_nav.dng[i]=1.0f-expf(-g_nav.dng[i]/3.0f); if(g_nav.dng[i]>0.5f) hot++; }
-    if(nd!=g_nav.dng_nd) nav_say("  [nav] danger from %u deaths on %s: %d of %d floor nodes above 0.5\n",nd,g_nav.name,hot,g_nav.n);
+    static float hq=-1; if(hq<0){ const char*e=getenv("PELOAD_NAV_HOT"); hq=e?atof(e):0.9f; if(hq<0.5f) hq=0.5f; if(hq>0.999f) hq=0.999f; }
+    float s0=3.0f; { float*cp=malloc(4*(size_t)g_nav.n); if(cp){ memcpy(cp,g_nav.dng,4*(size_t)g_nav.n); qsort(cp,(size_t)g_nav.n,4,nav_fcmp);
+        float T=cp[(size_t)((double)hq*(g_nav.n-1))]; free(cp); if(T/0.6931f>s0) s0=T/0.6931f; } }
+    int hot=0; for(int i=0;i<g_nav.n;i++){ g_nav.dng[i]=1.0f-expf(-g_nav.dng[i]/s0); if(g_nav.dng[i]>0.5f) hot++; }
+    if(nd!=g_nav.dng_nd) nav_say("  [nav] danger from %u deaths on %s (scale %.1f): %d of %d floor nodes above 0.5\n",nd,g_nav.name,s0,hot,g_nav.n);
     g_nav.dng_nd=nd; }
+static int g_nav_noavoid;   // set around a comparison plan (PELOAD_NAV_LOG): the same A* without the danger term
 // A* over the floor graph; cost = distance x (1 + wall penalty + avoid x danger) + learned penalties; -> path length
 static int nav_astar(int s,int t,int32_t*path,int maxp){
     if(s<0||t<0) return 0; uint32_t gen=++g_nav.gen; if(!gen){ memset(g_nav.stamp,0,4*(size_t)g_nav.n); gen=g_nav.gen=1; }
     float tp[3]; nav_pos(t,tp); int hn=0;
     #define NAV_PUSH(f_,n_) do{ if(hn<g_nav.hcap){ int i_=hn++; while(i_>0){ int p_=(i_-1)/2; if(g_nav.hf[p_]<=(f_)) break; g_nav.hf[i_]=g_nav.hf[p_]; g_nav.hn[i_]=g_nav.hn[p_]; i_=p_; } g_nav.hf[i_]=(f_); g_nav.hn[i_]=(n_); } }while(0)
     g_nav.stamp[s]=gen; g_nav.g[s]=0; g_nav.came[s]=-1; { float sp[3]; nav_pos(s,sp); float d=sqrtf((sp[0]-tp[0])*(sp[0]-tp[0])+(sp[1]-tp[1])*(sp[1]-tp[1])); NAV_PUSH(d,s); }
-    static const float wpen[16]={3,1.5f,0.6f,0.2f,0,0,0,0,0,0,0,0,0,0,0,0}; int found=0, pops=0; float kav=nav_avoid();
+    static const float wpen[16]={3,1.5f,0.6f,0.2f,0,0,0,0,0,0,0,0,0,0,0,0}; int found=0, pops=0; float kav=g_nav_noavoid?0.0f:nav_avoid();
     while(hn>0){ float f=g_nav.hf[0]; int u=g_nav.hn[0]; (void)f;
         hn--; { float lf=g_nav.hf[hn]; int ln=g_nav.hn[hn]; int i=0; for(;;){ int a=2*i+1,b=a+1,m=i; float mf=lf;
                 if(a<hn && g_nav.hf[a]<mf){ m=a; mf=g_nav.hf[a]; } if(b<hn && g_nav.hf[b]<mf){ m=b; mf=g_nav.hf[b]; } if(m==i) break;
@@ -114,6 +122,9 @@ static void nav_ensure(void){
     char path[1100]; const char*fe=getenv("PELOAD_NAV_FILE"); const char*home=getenv("HOME");
     if(fe&&*fe) snprintf(path,sizeof path,"%s",fe); else snprintf(path,sizeof path,"%s/Library/Application Support/ReclaimerMac/maptop/%s.nav",home?home:"/tmp",name);
     if(nav_load(path)){ nav_say("  [nav] %s: %d floor nodes (%dx%d cells of %.2f) from %s\n",name,g_nav.n,g_nav.w,g_nav.h,g_nav.cell,path); return; }
+    // make one only once a match is running: in the menu the 'map being played' is whatever map its scene borrows from
+    // (Forge's desert_sandbox, Guardian), and building a big map's graph costs a core for a while
+    extern double g_gameplay_t0; if(!g_gameplay_t0) return;
     static char spawned[96]; if(!strcmp(spawned,name) || (fe&&*fe)){ return; }
     snprintf(spawned,sizeof spawned,"%s",name);
     char tool[1100]; const char*e=getenv("PELOAD_NAV_TOOL");
@@ -162,7 +173,12 @@ static void nav_step(void){
     if(goal<0){ g_nav_act=0; return; }
     if(need){ double t0=mono_s(); int np=nav_astar(cur,goal,path,8192); tplan=now;
         if(np<2){ if(mode!=2){ nav_say("  [nav] no path from node %d to %d: a new goal\n",cur,goal); goal=-1; } plen=0; g_nav_act=0; return; }
-        if(!plen || need) nav_say("  [nav] path of %d nodes from (%.1f %.1f %.1f) to node %d, %.1f ms\n",np,pos[0],pos[1],pos[2],goal,(mono_s()-t0)*1000);
+        if(!plen || need){ char hs[120]=""; double ms=(mono_s()-t0)*1000;
+            if(nav_log() && g_nav.dng){   // hotspot nodes (danger > 0.5) on this path vs on the same plan without avoidance
+                static int32_t alt[8192]; int hp=0, ha=0; for(int i=0;i<np;i++) hp+=g_nav.dng[path[i]]>0.5f;
+                g_nav_noavoid=1; int na=nav_astar(cur,goal,alt,8192); g_nav_noavoid=0; for(int i=0;i<na;i++) ha+=g_nav.dng[alt[i]]>0.5f;
+                snprintf(hs,sizeof hs,"; hotspot nodes %d (without avoidance: %d of %d)",hp,ha,na); }
+            nav_say("  [nav] path of %d nodes from (%.1f %.1f %.1f) to node %d, %.1f ms%s\n",np,pos[0],pos[1],pos[2],goal,ms,hs); }
         plen=np; pidx=0; }
     // follow: nearest path node ahead of the last one, then aim PELOAD_NAV_LOOK nodes beyond it
     { float bd=1e30f; int bi=pidx; for(int i=pidx;i<plen && i<pidx+60;i++){ float p[3]; nav_pos(path[i],p); float d=(p[0]-pos[0])*(p[0]-pos[0])+(p[1]-pos[1])*(p[1]-pos[1]); if(d<bd){ bd=d; bi=i; } } pidx=bi;

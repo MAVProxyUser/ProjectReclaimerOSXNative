@@ -6,7 +6,7 @@
 //   voice   every packet the client's voice_recv sees (stats.c st_on_voice, an entry hook that runs BEFORE the client's
 //           own echo / block-list / mute / channel checks, so muted players are included): time, sender peer id,
 //           channel, sequence, Opus length + TOC. The Opus bytes themselves only with "voice audio" on, which needs the
-//           one-party-consent box (ticked by default: the user is in Ohio); without it the archive keeps who talked when.
+//           one-party-consent box (ticked by default, untick it on the page); without it the archive keeps who talked when.
 //   events  every stats.c feed event (st_event): chat with channel and sender peer id, [SERVER] lines, notices, joins,
 //           leaves, kills, deaths, votes, match start / end -- plus the archive's own setting changes.
 //   roster  every session member (peer id, name, team, player slot, host / self flags) whenever that list changes.
@@ -121,8 +121,9 @@ static void fx_init_once(void){
     pthread_mutex_lock(&g_fx_setmx);
     if(j){ int v; double t; if(fx_jbool(j,"archive",&v)) g_fx_set.archive=v; if(fx_jbool(j,"voice_audio",&v)) g_fx_set.voice=v;
         if(fx_jbool(j,"one_party_consent",&v)) g_fx_set.consent=v; if(fx_jnum(j,"consent_confirmed_unix",&t)) g_fx_set.consent_t=t; free(j); }
-    // No settings yet: one-party consent and voice audio ON (the user's instruction 2026-10-18: they are in Ohio, a
-    // one-party-consent state, and a forensic archive without the audio "defeats the purpose"); the page unticks it.
+    // No settings yet: one-party consent and voice audio ON (the user's instruction 2026-10-18: a participant may record
+    // what it receives where one-party consent applies, and a forensic archive without the audio "defeats the purpose");
+    // the page unticks it.
     // PELOAD_FORENSIC_AUDIO=0|1 overrides voice audio for this run.
     if(!j){ g_fx_set.consent=1; g_fx_set.consent_t=st_wall(); g_fx_set.voice=1; fx_settings_save(); }
     { const char*a=getenv("PELOAD_FORENSIC_AUDIO"); if(a) g_fx_set.voice=atoi(a)?1:0; }

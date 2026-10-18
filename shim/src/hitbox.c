@@ -372,6 +372,9 @@ static int hbm_block(HbMap*m,const uint8_t*d,int off,int esz,uint8_t**out,int ma
 // (Wraith back hatch: 10% = 75 of 750). Class 1: the cheapest section whose response puts the region that a shielded
 // seat's region-specific damage (seats +0x8C [0x20]: +4 direct scale, +0x14 [0x2C]: +0 region, +0x20 major direct scale)
 // opens up at "major" into that state (Scorpion driver hatch, Wraith cockpit: the driver then takes full direct hits).
+// Class 3 (2026-10-18): a section under half the body whose response (not only on special death) damages a gun trigger, the
+// steering or the engine or forces a weapon drop (flags bits 4, 8-15): Ghost wings (gun + steering, 80 of 400), Warthog front
+// fenders and Mongoose wheels (steering). Every other vehicle's sections only change its looks: one damage pool.
 static void hbg_weak(HbMap*m,const uint8_t*hl,const uint8_t*co,uint8_t*matcls,int ncm){
     memset(matcls,0,(size_t)ncm); uint8_t*di; if(hbm_block(m,hl,0x88,0xA4,&di,4)<1) return;
     uint8_t*sec; int ns=hbm_block(m,di,0x68,0x2C,&sec,64); uint8_t scls[64]={0};
@@ -382,9 +385,10 @@ static void hbg_weak(HbMap*m,const uint8_t*hl,const uint8_t*co,uint8_t*matcls,in
     for(int i=0;i<ns;i++){ const uint8_t*e=sec+i*0x2C; float vit=*(const float*)(e+8); uint8_t*rs; int nr=hbm_block(m,e,0xC,0x88,&rs,32);
         for(int k=0;k<nr;k++){ uint32_t f=*(uint32_t*)(rs+k*0x88+8), reg=*(uint32_t*)(rs+k*0x88+0x40); int16_t ns_=*(int16_t*)(rs+k*0x88+0x44);
             if((f&(1u|1u<<7|1u<<16)) && !(f&(1u<<23)) && vit<0.99f && vit>0.001f) scls[i]=2;
+            if((f&(1u<<4|0xFFu<<8)) && !(f&(1u<<23)) && vit<0.5f && vit>0.001f && !scls[i]) scls[i]=3;
             for(int q=0;q<nopen;q++) if(reg==open[q] && ns_>=3 && vit<best){ best=vit; bi=i; } }
         free(rs); }
-    if(bi>=0 && !scls[bi]) scls[bi]=1;
+    if(bi>=0 && scls[bi]!=2) scls[bi]=1;
     uint8_t*hm; int nhm=hbm_block(m,hl,0x7C,0x14,&hm,64); uint8_t*cm; int n=hbm_block(m,co,0x14,4,&cm,64);
     for(int c=0;c<n && c<ncm;c++) for(int h=0;h<nhm;h++){ int16_t si=*(int16_t*)(hm+h*0x14+6);
         if(*(uint32_t*)(hm+h*0x14)==*(uint32_t*)(cm+c*4) && si>=0 && si<ns && si<64) matcls[c]=scls[si]; }
@@ -427,8 +431,8 @@ static HbGeom* hb_geom(uint32_t def){
     { pthread_mutex_lock(&g_hb_mapmx); for(int k=0;k<g_hb_nmappaths;k++) if(strcmp(g_hb_mappaths[k],paths[0])) memcpy(paths[np++],g_hb_mappaths[k],1024); pthread_mutex_unlock(&g_hb_mapmx); }
     for(int k=0;k<np && !g->ok;k++){ HbMap*m=hbm_get(paths[k]); int ti=def&0xFFFF; if(!m || ti>=m->ntags || m->salt[ti]!=(def>>16)) continue;
         if(m->grp[ti]!='bipd' && m->grp[ti]!='vehi' && m->grp[ti]!='gint') continue; hbg_build(g,m,ti);
-        int nw[3]={0}; for(int q=0;q<g->nseg;q++) nw[g->wk[q]<3?g->wk[q]:0]++;
-        char msg[300]; int kk=snprintf(msg,sizeof msg,"  [hitbox] definition %08x (%s): %d collision edges in %d regions (%d model regions), nodes 0-%d; weak-spot edges: %d lethal, %d driver\n",def,hb_tag_name_early(def,m,ti),g->nseg,g->nreg,g->nhreg,g->maxnode,nw[2],nw[1]); (void)!write(2,msg,kk); }
+        int nw[4]={0}; for(int q=0;q<g->nseg;q++) nw[g->wk[q]<4?g->wk[q]:0]++;
+        char msg[300]; int kk=snprintf(msg,sizeof msg,"  [hitbox] definition %08x (%s): %d collision edges in %d regions (%d model regions), nodes 0-%d; weak-spot edges: %d lethal, %d driver, %d disabling\n",def,hb_tag_name_early(def,m,ti),g->nseg,g->nreg,g->nhreg,g->maxnode,nw[2],nw[1],nw[3]); (void)!write(2,msg,kk); }
     return g->ok?g:0; }
 // Append one object's posed collision edges as clip-space line vertices; returns vertices added (0 = no geometry).
 // Why objects fall back to spheres: [0] drawn as hitboxes, [1] no collision geometry for the definition, [2] node
@@ -441,7 +445,7 @@ static void hbx_why(const HbObj*o,int why){ g_hbx_stat[why]++; static uint32_t s
 static const char* hb_tag_name(uint32_t def);
 // which weak-spot kinds the hitboxes color (the stats page's chips): bit 1 lethal (yellow), bit 2 opens the driver (orange)
 volatile int g_hb_wkshow=-1;
-int hb_wkshow(void){ if(g_hb_wkshow<0){ const char*e=getenv("PELOAD_HB_WEAK_SHOW"); g_hb_wkshow=e?(int)strtol(e,0,0):3; } return g_hb_wkshow; }
+int hb_wkshow(void){ if(g_hb_wkshow<0){ const char*e=getenv("PELOAD_HB_WEAK_SHOW"); g_hb_wkshow=e?(int)strtol(e,0,0):7; } return g_hb_wkshow; }   // 1 lethal, 2 driver, 4 disables
 static int hb_emit_hitbox(const HbObj*o,const float*vp,float*verts,int nv,int cap){
     HbGeom*g=hb_geom(o->def); if(!g){ hbx_why(o,1); return 0; }
     int nn=o->nmsz/52; if(o->nmsz%52 || nn<=g->maxnode || nn>128 || o->nmoff<0x100){ hbx_why(o,2); return 0; }
@@ -458,14 +462,15 @@ static int hb_emit_hitbox(const HbObj*o,const float*vp,float*verts,int nv,int ca
     if(o->type==0 && g->nreg>=2){ float zs[256]={0}; int zc[256]={0}; for(int s=0;s<g->nseg;s++){ if(g->perm[s]!=sel[g->reg[s]]) continue; zs[g->reg[s]]+=mt[g->node[s]*13+12]; zc[g->reg[s]]++; }
         float best=-1e30f; for(int r=0;r<g->nreg;r++) if(zc[r] && zs[r]/zc[r]>best){ best=zs[r]/zc[r]; head=r; } }
     // enemies red with a yellow head, teammates blue with a light-blue head (relative to the local player's team)
-    // vehicles: cyan, weak spots yellow (a hit there kills it, like a head) / orange (breaking it exposes the driver)
+    // vehicles: cyan, weak spots yellow (a hit there kills it, like a head) / orange (breaking it exposes the driver) /
+    // magenta (breaking it disables a gun or the steering)
     static const float cbody[3]={1,0.15f,0.15f}, chead[3]={1,0.95f,0.1f}, fbody[3]={0.25f,0.5f,1}, fhead[3]={0.6f,0.95f,1}, cveh[3]={0.3f,0.75f,1},
-        cwk[3][3]={{0.3f,0.75f,1},{1,0.55f,0.1f},{1,0.95f,0.1f}};
+        cwk[4][3]={{0.3f,0.75f,1},{1,0.55f,0.1f},{1,0.95f,0.1f},{1,0.3f,0.85f}};
     int friend_=hb_is_friend(o); const float*cb=friend_?fbody:cbody, *ch=friend_?fhead:chead;
     int added=0, wkshow=hb_wkshow();
     for(int s=0;s<g->nseg && nv+added+2<=cap;s++){ if(g->perm[s]!=sel[g->reg[s]]) continue;
-        const float*M=mt+g->node[s]*13, *P=g->pts+s*6; int wk=g->wk[s]; if(wk && !(wkshow&(wk==2?1:2))) wk=0;
-        const float*col=o->type==0?(g->reg[s]==head?ch:cb):(wk<3?cwk[wk]:cveh);
+        const float*M=mt+g->node[s]*13, *P=g->pts+s*6; int wk=g->wk[s]; if(wk && !(wkshow&(wk==2?1:wk==1?2:4))) wk=0;
+        const float*col=o->type==0?(g->reg[s]==head?ch:cb):(wk<4?cwk[wk]:cveh);
         float q[2][2]; int okk=1;
         for(int e=0;e<2;e++){ const float*v=P+e*3; float w[3];
             for(int a=0;a<3;a++) w[a]=M[10+a]+M[0]*(v[0]*M[1+a]+v[1]*M[4+a]+v[2]*M[7+a]);   // pos + scale*(x*fwd + y*left + z*up)

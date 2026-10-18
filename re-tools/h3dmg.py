@@ -2,6 +2,7 @@
 """Damage layout of the vehicles (and bipeds) in a Halo 3 (MCC) .map: where shooting one hurts most.
 
     python3 re-tools/h3dmg.py <file.map> [name substring] [--bipeds] [--json out.json]
+    python3 re-tools/h3dmg.py --table <file.map> [<file.map> ...]     # every vehicle: weak spots, driver exposure (markdown)
 
 Per object definition (vehi/bipd +0x34 model tagref -> hlmt), from the model's "New Damage Info" (Assembly Halo3MCC
 hlmt.xml, offsets below):
@@ -116,7 +117,7 @@ def describe(m, ti):
                    'flags': flags(fl, TGT_FLAGS)})
     r['targets'] = tg
     # weak spots, the same rule as the overlay (shim/src/hitbox.c hbg_weak): a section smaller than the body whose
-    # response kills / destroys the vehicle, and the cheapest section that opens a shielded seat's rider to full hits
+    # response kills / destroys the vehicle, the cheapest section that opens a shielded seat's rider to full hits,
     weak = []
     for s in secs:
         if 0 < s['vitality'] < 0.99 and any(({'KILLS', 'DESTROYS', 'KILLS (not solo)'} & set(x['flags'])) and
@@ -128,6 +129,13 @@ def describe(m, ti):
         s = min(cand, key=lambda s: s['vitality'])
         if not any(w['section'] == s['name'] for w in weak):
             weak.append({'section': s['name'], 'kind': 'exposes the driver', 'damage': s['vitality'] * r['body']})
+    # and sections under half the body whose response disables a gun, the steering or the engine (overlay class 3)
+    dis = {'drops weapon', 'breaks gun', 'breaks gun 2', 'turn damage', 'engine damage', 'ENGINE DAMAGE'}
+    for s in secs:
+        if 0 < s['vitality'] < 0.5 and not any(w['section'] == s['name'] for w in weak) and any(
+                (dis & set(x['flags'])) and 'only on special death' not in x['flags'] for x in s['responses']):
+            fl = sorted({f for x in s['responses'] for f in x['flags'] if f in dis})
+            weak.append({'section': s['name'], 'kind': 'disables (%s)' % ', '.join(fl), 'damage': s['vitality'] * r['body']})
     for w in weak:
         w['materials'] = [x['name'] for x in mats if x['section'] == w['section']]
     r['weak'] = weak
@@ -173,10 +181,46 @@ def show(r):
         print('   (collision regions unreadable: %s)' % r['regions_error'])
 
 
+def table(paths):
+    """--table <map> [<map> ...]: one markdown row per vehicle definition (first map it is found in): its weak spots, the
+    driver seat's direct damage scale, maps. The overlay's rule, so this is what the overlay draws for every vehicle."""
+    rows, where = {}, {}
+    for p in paths:
+        mn = os.path.basename(p)[:-4]
+        try:
+            m = H3Map(p)
+        except Exception as ex:
+            print('<!-- %s: %s -->' % (mn, ex)); continue
+        for ti in m.find('vehi', ''):
+            if not m.tags[ti][2]:
+                continue
+            t = m.names[ti].split('\\')[-1]
+            where.setdefault(t, []).append(mn)
+            if t in rows:
+                continue
+            try:
+                r = describe(m, ti)
+            except Exception:
+                r = None
+            if r:
+                rows[t] = r
+    print('| Vehicle | Weak spots (damage to that part) | Driver takes | Maps |')
+    print('|---|---|---|---|')
+    for t in sorted(rows):
+        r = rows[t]
+        ws = '; '.join('%s: %s (%.0f%s)' % (w['section'], w['kind'], w['damage'],
+                       '' if w['materials'] else ', no surface: cannot be hit') for w in r.get('weak', [])) or '-'
+        dr = ('%.0f%%' % (r['seats'][0]['direct'] * 100)) if r.get('seats') else '-'
+        mp = where.get(t, [])
+        print('| %s | %s | %s | %s |' % (t, ws, dr, ', '.join(mp[:4]) + (' +%d' % (len(mp) - 4) if len(mp) > 4 else '')))
+
+
 def main():
     a = sys.argv[1:]
     if not a:
         print(__doc__); sys.exit(2)
+    if a[0] == '--table':
+        table(a[1:]); return
     js = None
     if '--json' in a:
         i = a.index('--json'); js = a[i + 1]; del a[i:i + 2]

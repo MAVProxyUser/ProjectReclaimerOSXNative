@@ -523,8 +523,8 @@ static int st_control(const char*act,const char*qs){
     for(int f=0;f<HBF_N;f++) if(!strcmp(act,feat[f])){ __atomic_fetch_xor(&g_hb_toggle,1<<f,__ATOMIC_ACQ_REL); hbs_sync();   // (visible: applies to all)
         k=snprintf(m,sizeof m,"  [stats] page: %s %s\n",feat[f],hb_feat(f)?"on":"off"); (void)!write(2,m,k); return 1; }
     if(!strcmp(act,"feat")) return st_feat(qs);   // the overlay panel: per-feature settings
-    if(!strcmp(act,"weaktype")){   // one kind of vehicle weak spot on/off: t = 1 lethal, 2 opens the driver
-        const char*v=strstr(qs,"t="); int b=v?atoi(v+2):0; if(b!=1 && b!=2) return 0;
+    if(!strcmp(act,"weaktype")){   // one kind of vehicle weak spot on/off: t = 1 lethal, 2 opens the driver, 4 disables (gun / steering)
+        const char*v=strstr(qs,"t="); int b=v?atoi(v+2):0; if(b!=1 && b!=2 && b!=4) return 0;
         extern volatile int g_hb_wkshow; extern int hb_wkshow(void); hb_wkshow(); __atomic_fetch_xor(&g_hb_wkshow,b,__ATOMIC_ACQ_REL);
         k=snprintf(m,sizeof m,"  [stats] page: weak-spot kinds now 0x%x\n",g_hb_wkshow); (void)!write(2,m,k); return 1; }
     if(!strcmp(act,"zonetype")){   // one kind of zone on/off: t = its bit (1 kill, 2 safe, 4 acceleration, 8 soft kill, 16 slip)
@@ -796,7 +796,7 @@ static void st_snapshot(StBuf*s){
     char m[64]="";
     { char mp[1024]=""; hb_current_map(mp,sizeof mp);   // the map being played (halo3/maps or a Workshop mod's folder)
       const char*b=strrchr(mp,'/'); b=b?b+1:mp; snprintf(m,sizeof m,"%s",b); char*dot=strrchr(m,'.'); if(dot)*dot=0; sb_put(s,",\"map\":"); sb_str(s,m);
-      st_maptop_ensure(mp,m); }
+      if(g_gameplay_t0) st_maptop_ensure(mp,m); }   // not in the menu: its scene borrows other maps' objects
     { static int tp=-1; if(tp<0) tp=getenv("PELOAD_ALLOW_TELEPORT")?1:0; static const char*const tm[3]={"all","enemies","friends"};
       { extern int hbz_show(void), hb_wkshow(void); sb_put(s,",\"zone_show\":%d,\"weak_show\":%d",hbz_show(),hb_wkshow()); }
       sb_put(s,",\"overlay\":{\"vehicles\":%s,\"zones\":%s,\"hitboxes\":%s,\"tracers\":%s,\"info\":%s,\"items\":%s,\"visible\":%s,\"teams\":\"%s\",\"teleport\":%s,\"host\":%s,\"tp_forward\":%s,\"controls\":%s,\"text_px\":%d,\"spar\":%s,\"spar_aim\":%.1f,\"spar_available\":%s,\"bounds_off\":%s,\"mic\":\"%s\",\"mic_in_use\":%s",
