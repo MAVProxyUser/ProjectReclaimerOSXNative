@@ -43,7 +43,10 @@ Known gaps:
   https://github.com/ProjectReclaimer/project-reclaimer-releases/releases (SHA-256
   `a8d3a37ad27e31abc09d009a94210470976ecefb34908a9fb8e1a245f4924910`). The loader finds the few client
   code paths it patches by byte signature, so other builds usually work too; v0.9.13 is also tested.
-  Servers and players are almost all on the newest release.
+  Servers and players are almost all on the newest release: since 2026-10-18 (v0.9.19, published that morning) servers
+  refuse 0.9.18 clients ("This server runs Project Reclaimer 0.9.19 and you have 0.9.18"). The launchers use the newest
+  `client/project-reclaimer-client-v*.exe`, so dropping the new release in `client/` is enough; 0.9.19 itself is not yet
+  tested here (a client code path whose signature changed only switches its feature off).
 - About 25 GB of disk space for the MCC files.
 - Memory (measured 2026-10-18 on a 36 GB Mac): stock maps take the loader 6-9 GB and the GL helper ~1.5 GB; a 100-player
   Workshop map such as Hugegrass about 9-11 GB and 3-5 GB.

@@ -31,12 +31,13 @@ a393504dc32a8fd35dabb5b26ea1427fbaedabdac76b00133d49ebc44fb8efd1 0.9.13"
 
 EXE="${RECLAIMER_EXE:-}"
 if [ -z "$EXE" ]; then
-  for c in client/project-reclaimer-client-v0.9.18.exe client/project-reclaimer-v0.9.13.exe analysis/project-reclaimer-v0.9.13.exe; do
+  # the newest client release in client/ (servers require the current one), then the older test builds
+  for c in $(ls client/project-reclaimer-client-v*.exe 2>/dev/null | sort -V | tail -1) client/project-reclaimer-v0.9.13.exe analysis/project-reclaimer-v0.9.13.exe; do
     [ -f "$c" ] && EXE="$c" && break
   done
 fi
 if [ -z "$EXE" ] || [ ! -f "$EXE" ]; then
-  echo "Project Reclaimer client not found. Download project-reclaimer-client-v0.9.18.exe from"
+  echo "Project Reclaimer client not found. Download the newest project-reclaimer-client-v<version>.exe from"
   echo "https://github.com/ProjectReclaimer/project-reclaimer-releases/releases and put it in: $(pwd)/client/"
   exit 1
 fi

@@ -14,7 +14,7 @@ EXTRA="$1"; SECS="${2:-60}"; shift 2
 KEEP=" $(cat "$HOME/Library/Application Support/ReclaimerMac/target.pgid" "$HOME/Library/Application Support/ReclaimerMac/dedicated.pgid" 2>/dev/null | tr '\n' ' ') "
 others(){ for p in $(pgrep -f '^[^ ]*build/peload'); do case "$KEEP" in *" $(ps -o pgid= -p "$p" | tr -d ' ') "*) continue;; esac; echo "$p"; done; }
 if [ -n "$(others)" ]; then echo "a game is already running - not starting"; ps -axo pid,pgid,etime,command | grep -E '[0-9] [^ ]*build/peload' | cut -c1-120; exit 3; fi
-EXE="${QR_EXE:-client/project-reclaimer-client-v0.9.18.exe}"
+EXE="${QR_EXE:-$(ls client/project-reclaimer-client-v*.exe 2>/dev/null | sort -V | tail -1)}"   # the newest client release in client/
 ARGS=("$@"); [ ${#ARGS[@]} -eq 0 ] && ARGS=(game-client --mcc-path "C:\\Program Files\\Steam\\steamapps\\common\\Halo The Master Chief Collection")
 mkdir -p "$HOME/Library/Application Support/ReclaimerMac/prefix/drive_c/ReclaimerProfileTest"
 rm -f "$HOME"/reclaimer_win_*.bmp; : > /tmp/quiet-run.log
