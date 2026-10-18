@@ -261,6 +261,12 @@ watch from another device). From top to bottom the page shows:
   your team, so all of them in team games but only your own in free-for-all and Infection. The others are estimates,
   marked ≈: the last player whose projectile ended inside the body within 1.5 s before it died, with the weapon in their
   hands, the vehicle or turret they sit in, or the grenade (a death with no such shot shows as "died").
+  Spawns have three more checkboxes, **weapons**, **vehicles** and **power-ups** (remembered like the others): each
+  weapon, equipment, vehicle and power-up as it appears on the map, with where -- "Wraith spawned at (-38.5, -25.2)",
+  the height on hover -- and the match start's weapons as one "N weapons and equipment spawned: ..." line; who first picks
+  up each spawned weapon, and who takes each power-up (the game's own pickup time for that colour on the player).
+  Vehicles are listed one by one, respawns included; turrets mounted on a vehicle, deployed equipment (a thrown bubble
+  shield, trip mine, auto turret), grenades and weapons dropped by players are left out.
 
   <img src="shim/docs/img/stats-feed.png" width="49%" alt="Event feed: kills with weapon, estimated kills marked"> <img src="shim/docs/img/stats-chat.png" width="49%" alt="Chat: players' lines and the server's messages">
 - **Game rules** -- the running game's options (rounds, respawn, map, powerups, score and points) and every trait set
@@ -295,8 +301,9 @@ The **forensic archive** link at the top opens the archive of voice, chat and ga
 (`shim/docs/forensics.md`). Add `?demo=1` to either page's address (`http://127.0.0.1:8765/?demo=1`,
 `/forensics?demo=1`) for screenshots: every player becomes "Player 1", "Player 2", ... (the same alias everywhere on the
 page, event texts and map labels included; players who share a name share its alias), ids are fake, players' chat lines
-are placeholders, the archive's folder is shown as the default one. Nothing else changes, and without it the pages are
-as before. `bash shim/tools/pageshot.sh` remakes these pictures from a running game (`shim/tools/pageshot.m`: an
+are placeholders, the archive's folder is shown as the default one; a feed or archived session without any spawn events
+gets a few made-up ones (spawns, and pickups by the aliased players) so the pictures show them. Nothing else changes,
+and without it the pages are as before. `bash shim/tools/pageshot.sh` remakes these pictures from a running game (`shim/tools/pageshot.m`: an
 offscreen WKWebView that takes CSS-selected sections of a page as PNGs; `TEXT=<dir>` also keeps their text to check).
 
 Machine-readable endpoints:
@@ -308,9 +315,11 @@ Machine-readable endpoints:
   doesn't apply), `vehicles`, `projectiles` in flight, `map`, `in_match`, match `time`
 - `/events` -- the same JSON as a stream (Server-Sent Events): `curl -N http://127.0.0.1:8765/events`
 - `/feed.json?since=<seq>` -- the event feed after event `seq` (the last 1,024 kept): `kind` (join, leave, kill, death,
-  vote, server, game, chat), `text`, `t` (Unix time), `a`/`b` (players; chat: the sender), `how` (weapon; chat: the
-  channel -- team, nearby, server, notice, empty = everyone), `estimated`, `mine` (a chat line we sent); the snapshot's
-  `feed_seq` is the newest event's number. `PELOAD_FEED_LOG=1` also prints each event to the log
+  vote, server, game, chat, weapon, vehicle, powerup), `text`, `t` (Unix time), `a`/`b` (players; chat: the sender), `how`
+  (weapon; chat: the channel -- team, nearby, server, notice, empty = everyone; spawns: the item), `verb` (kills; spawns:
+  `spawned` or `picked up`), `ta`/`tb` (teams), `pos` (spawns and power-up pickups: `[x, y, z]`), `estimated`, `mine` (a
+  chat line we sent); the snapshot's `feed_seq` is the newest event's number. `PELOAD_FEED_LOG=1` also prints each event
+  to the log, `PELOAD_SPAWN_LOG=1` what became of each spawn candidate (attached, left out, a power-up gone without a pickup)
 - `/heat.json` -- the heatmap data (visited cells, deaths); `/maptop/<map>.png|json` -- the map picture and its world
   bounds
 - `/recordings.json` -- the clips in `~/Movies/Reclaimer` (file, size, duration, time); `/recordings/<file>` -- one clip;

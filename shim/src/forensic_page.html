@@ -43,6 +43,8 @@ code{font:11px ui-monospace,Menlo,monospace;color:#bbb;overflow-wrap:anywhere}
 .blk.on{outline:2px solid #fff;z-index:2}
 .mk{position:absolute;top:3px;width:3px;height:15px;border-radius:1px;cursor:pointer;z-index:1}
 .mk.chat{background:#cfd8e0}.mk.c2{background:var(--c2)}.mk.c3{background:var(--c3)}.mk.srv{background:#ffd75a}.mk.kill{background:#e05050}.mk.ev{background:#888}
+/* spawns and pickups (backlog 47): weapons violet, vehicles teal, power-ups pink; a spawn is dimmer than a pickup, the match-start weapon line wider */
+.mk.wpn{background:#b48cff}.mk.veh{background:#6fd3c2}.mk.pup{background:#ff8fd0}.mk.sp{opacity:.55}.mk.sum{width:7px;opacity:.85}
 .fh{display:flex;align-items:center;gap:6px 14px;flex-wrap:wrap;margin-bottom:8px}.fh h2{margin:0 auto 0 0}
 .fh label{color:var(--dim);font-size:12px;cursor:pointer}
 #ls{max-height:60vh;overflow-y:auto}
@@ -53,6 +55,7 @@ td.t{white-space:nowrap;color:#777;font-variant-numeric:tabular-nums}
 tr.hl{background:#2a2a14}
 .k{display:inline-block;border-radius:3px;padding:0 5px;font-size:11px;background:#2a2f36;color:#cfd8e0}
 .k.voice{background:#1d3a55}.k.chat{background:#2b2b40}.k.kill{background:#4a1f1f}.k.event{background:#333}
+.k.weapon{background:#33284a;color:#dcd0ff}.k.vehicle{background:#1f3532;color:#c8f0e8}.k.powerup{background:#3f2337;color:#ffd6ef}
 .ch1{color:var(--c1)}.ch2{color:var(--c2)}.ch3{color:var(--c3)}
 #det{display:none;margin-top:12px}#det.open{display:block}#det .x{float:right;cursor:pointer;background:none;border:0;color:var(--dim);font-size:18px;line-height:1}
 #det table{font:11px ui-monospace,Menlo,monospace}
@@ -93,7 +96,8 @@ tr.hl{background:#2a2a14}
         <label>player <select id="f_pl"><option value="">everyone</option></select></label>
         <label>channel <select id="f_ch"><option value="">all</option><option value="1">global / all chat</option><option value="2">team</option><option value="3">proximity / nearby</option></select></label>
         <label><input type="checkbox" id="f_voice" checked> voice</label><label><input type="checkbox" id="f_chat" checked> chat</label>
-        <label><input type="checkbox" id="f_kill" checked> kills</label><label><input type="checkbox" id="f_ev" checked> other events</label></div>
+        <label><input type="checkbox" id="f_kill" checked> kills</label><label><input type="checkbox" id="f_wpn" checked> weapons</label>
+        <label><input type="checkbox" id="f_veh" checked> vehicles</label><label><input type="checkbox" id="f_pup" checked> power-ups</label><label><input type="checkbox" id="f_ev" checked> other events</label></div>
       <div id="ls"></div>
       <div id="det"><button class="x" id="detx" title="close">&times;</button><h2 id="deth"></h2><div id="detb" style="max-height:40vh;overflow:auto"></div></div></div>
   </div>
@@ -120,11 +124,32 @@ if(new URLSearchParams(location.search).get('demo')==='1'){
   const tx=t=>{ if(typeof t!=='string'||!names.size) return t;   // (a name without a letter, like "30", stays: it reads as a number)
     if(!re) re=new RegExp('(?<![\\p{L}\\p{N}_])(?:'+[...names.keys()].filter(s=>/\p{L}/u.test(s)).sort((a,b)=>b.length-a.length).map(s=>s.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')).join('|')+')(?![\\p{L}\\p{N}_])','gu');
     return t.replace(re,m=>names.get(m)); };
-  // kill / death / join / leave lines start with their names: only those are swapped (a name that is also a word, such
-  // as a vehicle's, stays a word in the rest of the line); other lines get every known name swapped
+  // kill / death / join / leave / pickup lines start with their names: only those are swapped (a name that is also a word,
+  // such as a vehicle's, stays a word in the rest of the line); spawn lines name no player (kept); other lines get every
+  // known name swapped
   const pre=(t,f,to)=>typeof t==='string'&&t.startsWith(f)?to+t.slice(f.length):null;
+  const SPWN=/^(weapon|vehicle|powerup)$/;
   const named=e=>e.kind==='kill'&&e.a&&e.b?pre(e.text,e.a+' '+e.verb+' '+e.b,nm(e.a)+' '+e.verb+' '+nm(e.b)):e.kind==='death'&&e.b?pre(e.text,e.b,nm(e.b))
-    :(e.kind==='join'||e.kind==='leave')&&e.a?pre(e.text,e.a,nm(e.a)):null;
+    :(e.kind==='join'||e.kind==='leave')&&e.a?pre(e.text,e.a,nm(e.a)):SPWN.test(e.kind)?(e.a?pre(e.text,e.a,nm(e.a)):e.text):null;
+  // made-up spawns and pickups (backlog 47, stats.c st_spawns) for a session that has none (archived before they existed),
+  // so the pictures show the lanes: a match-start weapon line, vehicles, power-ups, weapons, pickups by the session's demo
+  // players (aliases, after the renaming; "Player N" when nobody is listed), spread over the session's time span.
+  const TEAMS=['red','blue','green','orange','purple','gold','brown','pink'];
+  const fakeSpawns=j=>{ const evs=j.events=j.events||[]; if(evs.some(e=>SPWN.test(e.kind))) return;
+    const seen=new Set(), ps=[...(j.people||[]),...(j.speakers||[])].filter(p=>p&&p.name&&!seen.has(p.name)&&seen.add(p.name));
+    const tm=ps.filter(p=>TEAMS.includes(p.team_name)), pool=tm.length?tm:ps, who=k=>pool.length?pool[k%pool.length]:{name:'Player '+(k+1),team_name:'none'};
+    const ts=[...evs.map(e=>e.t),...(j.utterances||[]).flatMap(u=>[u.start,u.end])].filter(t=>t>0), ms=evs.find(e=>e.kind==='game'&&/^Match started/.test(e.text||''));
+    const t1=ts.length?Math.max(...ts):Date.now()/1000; let t0=ms?ms.t+0.3:ts.length?Math.min(...ts):t1-180; if(t1-t0<60) t0=t1-60;
+    const at=f=>t0+(t1-t0)*f, r1=v=>v.toFixed(1);
+    const sp=(f,kind,how,x,y,z)=>({t:at(f),seq:0,kind,verb:'spawned',how,pos:[x,y,z],text:`${how} spawned at (${r1(x)}, ${r1(y)})`});
+    const pu=(f,kind,how,k,pos)=>{ const p=who(k), e={t:at(f),seq:0,kind,verb:'picked up',how,a:p.name,text:`${p.name} picked up ${how}`};
+      const ti=TEAMS.indexOf(p.team_name); if(ti>=0) e.ta=ti; if(pos) e.pos=pos; return e; };
+    const fake=[{t:at(0),seq:0,kind:'weapon',verb:'spawned',text:'14 weapons and equipment spawned: Battle rifle x4, Sniper rifle x2, Rocket launcher, Shotgun x2, Mauler x2, Bubbleshield, Regenerator x2'},
+      sp(0.002,'vehicle','Wraith',-38.5,-25.2,-4.7), sp(0.003,'vehicle','Warthog',-19.6,-30,-6.2), sp(0.004,'vehicle','Ghost',27,-26.7,-3.1), sp(0.005,'powerup','Overshield',0.4,12.9,-2.4),
+      pu(0.06,'weapon','Sniper rifle',0), pu(0.09,'weapon','Rocket launcher',1), pu(0.18,'powerup','Overshield',2,[0.4,12.9,-2.4]),
+      sp(0.42,'weapon','Sniper rifle',-31.6,18.2,4.1), pu(0.47,'weapon','Sniper rifle',1), sp(0.55,'vehicle','Warthog',19.5,-30.3,-6.2),
+      sp(0.66,'powerup','Active camo',-7.9,3.4,1.2), pu(0.71,'powerup','Active camo',0,[-7.9,3.4,1.2]), sp(0.83,'weapon','Rocket launcher',2.2,-14.6,-1.9)];
+    for(const f of fake){ const i=evs.findIndex(e=>e.t>f.t); if(i<0) evs.push(f); else evs.splice(i,0,f); } };
   const index=j=>{ const ps=[...(j.people||[]),...(j.speakers||[])], all=[...ps,...(j.utterances||[])], evs=j.events||[]; names.clear(); re=null;
     for(const p of all){ nm(p.name); (p.names||[]).forEach(nm); }   // every name first (roster order), then the texts
     for(const e of evs){ if(e.kind!=='game'){ nm(e.a); nm(e.b); } for(const p of PAT){ const m=String(e.text||'').match(p); if(m) m.slice(1).forEach(nm); } }
@@ -132,7 +157,7 @@ if(new URLSearchParams(location.search).get('demo')==='1'){
     for(const c of j.control||[]) c.id=id(c.id);
     for(const e of evs){ const t=named(e); if(e.kind!=='game'){ e.a=nm(e.a); e.b=nm(e.b); } if(e.sender_id) e.sender_id=id(e.sender_id);
       e.text=e.kind==='chat'&&!/^(server|notice)$/.test(e.how||e.channel||'')?PH[(Math.imul((e.seq|0)+11,0x9E3779B1)>>>0)%PH.length]:t??tx(e.text); }
-    const s=j.session||{}; s.host_id=id(s.host_id); s.self_id=id(s.self_id); return j; };
+    const s=j.session||{}; s.host_id=id(s.host_id); s.self_id=id(s.self_id); fakeSpawns(j); return j; };
   const T=[[/^\/forensics\/sessions\.json$/,j=>(j.dir='~/Library/Application Support/ReclaimerMac/forensics',j)],[/^\/forensics\/[^/]+\/index\.json$/,index],
    [/^\/forensics\/[^/]+\/utt\/\d+\.json$/,j=>((j.packets||[]).forEach(q=>{ q.id=id(q.id); }),j)]];
   const of=window.fetch.bind(window);
@@ -149,6 +174,21 @@ const fT=t=>new Date(t*1000).toLocaleTimeString([],{hour12:false});
 const fD=t=>new Date(t*1000).toLocaleString([],{hour12:false});
 const fDur=s=>s<60?s.toFixed(1)+' s':s<3600?Math.floor(s/60)+' min '+Math.round(s%60)+' s':Math.floor(s/3600)+' h '+Math.round(s%3600/60)+' min';
 const fB=b=>b<1024?b+' B':b<1048576?(b/1024).toFixed(1)+' KB':(b/1048576).toFixed(1)+' MB';
+// spawns and pickups (stats.c st_spawns), kinds weapon / vehicle / powerup: verb "spawned" (how = the item, pos = [x,y,z],
+// the text ends "at (x, y)") or "picked up" (a = the player; a power-up's pos = where it was); the match start's weapons
+// are one line without how ("N weapons and equipment spawned: A x2, B"). Older archives: upper-case names, "at x, y, z".
+const SPAWNK={weapon:{lane:'Weapons',mk:'wpn',f:'#f_wpn',tip:"weapon and equipment spawns (dim) and each one's first pickup (bright); the match start's weapons are one wide tick"},
+  vehicle:{lane:'Vehicles',mk:'veh',f:'#f_veh',tip:'vehicle spawns: the match start and every respawn'},
+  powerup:{lane:'Power-ups',mk:'pup',f:'#f_pup',tip:'power-up spawns (dim) and who took them (bright)'}};
+const itemName=n=>!n||n==='?'?'unknown item':/[a-z]/.test(n)?n:n.charAt(0)+n.slice(1).toLowerCase();
+// where: x, y as the loader's text rounds them (else from pos), z from pos (old texts: their third number)
+function spawnPos(e){ const m=/ at \(?(-?[\d.]+), (-?[\d.]+)(?:, (-?[\d.]+))?\)?$/.exec(e.text||''), p=Array.isArray(e.pos)&&e.pos.length>=3?e.pos:null, f=v=>(+v).toFixed(1);
+  if(!m&&!p) return null; return {x:m?m[1]:f(p[0]), y:m?m[2]:f(p[1]), z:p?f(p[2]):m[3]!=null?m[3]:null}; }
+function spawnText(e,withZ){ const p=spawnPos(e), xy=p?` at (${p.x}, ${p.y})`+(withZ&&p.z!=null?`, height ${p.z}`:''):'';
+  if(e.verb==='picked up'&&e.a) return `${e.a} picked up ${itemName(e.how)}${xy}`;
+  const m=/^(\d+ weapons and equipment spawned): *(.*)$/.exec(e.text||'');
+  if(m) return m[1]+': '+m[2].split(', ').map(s=>{ const q=/^(.*?)(?: x(\d+))?$/.exec(s); return itemName(q[1])+(q[2]?' ×'+q[2]:''); }).join(', ');
+  return e.how?`${itemName(e.how)} spawned${xy}`:String(e.text||''); }
 const au=$('#au'); const canOgg=au.canPlayType('audio/ogg; codecs=opus')!=='';
 let S=null, cur=null, X=null, items=[], playing=-1, lastKey='';
 const sp=()=>'/forensics/'+encodeURIComponent(cur);
@@ -194,7 +234,7 @@ async function select(name){
 function build(){
   items=[];
   for(const u of X.utterances) items.push({t:u.start,end:u.end,kind:'voice',u});
-  for(const e of X.events){ const k=e.kind==='chat'?'chat':(e.kind==='kill'||e.kind==='death')?'kill':'event'; items.push({t:e.t,kind:k,e}); }
+  for(const e of X.events){ const k=e.kind==='chat'?'chat':(e.kind==='kill'||e.kind==='death')?'kill':SPAWNK[e.kind]?e.kind:'event'; items.push({t:e.t,kind:k,e}); }
   items.sort((a,b)=>a.t-b.t);
   // the player filter: everyone the roster listed (by peer id), plus names that only appear in events
   const sel=$('#f_pl'), keep=sel.value, opts=new Map();
@@ -210,6 +250,7 @@ function pass(it){
   const fp=$('#f_pl').value, fc=$('#f_ch').value;
   if(it.kind==='voice'&&!$('#f_voice').checked) return false; if(it.kind==='chat'&&!$('#f_chat').checked) return false;
   if(it.kind==='kill'&&!$('#f_kill').checked) return false; if(it.kind==='event'&&!$('#f_ev').checked) return false;
+  if(SPAWNK[it.kind]&&!$(SPAWNK[it.kind].f).checked) return false;
   if(fc){ if(it.kind==='voice'){ if(String(it.u.channel)!==fc) return false; }
     else if(it.kind==='chat'){ if(String(CHATCH[it.e.channel]||'')!==fc) return false; } else return false; }
   if(fp){ const o=PL.get(fp); if(!o) return true;
@@ -221,6 +262,7 @@ function pass(it){
 function render(){
   const ss=X.session||{}, st=X.stats;
   const nk=k=>X.events.filter(e=>e.kind===k).length;
+  const sk=k=>X.events.reduce((n,e)=>n+(e.kind!==k||e.verb!=='spawned'?0:e.how?1:parseInt(e.text,10)||0),0), pk=k=>X.events.filter(e=>e.kind===k&&e.verb==='picked up').length;
   const dur=(st.last&&st.first)?st.last-st.first:0;
   $('#sum').innerHTML=`<h2>${esc(X.name)}</h2><dl>
     <dt>map</dt><dd>${esc(ss.map||'-')}</dd><dt>server</dt><dd>${esc(ss.server||'(not from a join link)')}</dd>
@@ -228,7 +270,8 @@ function render(){
     <dt>started</dt><dd>${ss.started_unix?esc(fD(ss.started_unix)):'-'}${ss.ended_unix?' &middot; ended '+esc(fD(ss.ended_unix)):''}</dd>
     <dt>voice</dt><dd>${st.packets} packets (${st.audio_packets} with audio, ${st.control_packets} control${st.bad_records?', <span class="err">'+st.bad_records+' damaged records skipped</span>':''}) over ${fDur(dur)}, ${X.utterances.length} utterances by ${X.speakers.length} speakers</dd>
     <dt>audio kept</dt><dd>${ss.voice_audio?'yes, one-party consent confirmed '+esc(fD(ss.consent_confirmed_unix)):'no (only who talked when) when the session started'}</dd>
-    <dt>events</dt><dd>${nk('chat')} chat, ${nk('kill')} kills, ${nk('death')} deaths, ${nk('join')} joins, ${nk('leave')} leaves, ${nk('vote')} votes, ${nk('server')} server lines</dd></dl>
+    <dt>events</dt><dd>${nk('chat')} chat, ${nk('kill')} kills, ${nk('death')} deaths, ${nk('join')} joins, ${nk('leave')} leaves, ${nk('vote')} votes, ${nk('server')} server lines</dd>
+    <dt>spawns</dt><dd>${sk('weapon')} weapons and equipment (${pk('weapon')} picked up), ${sk('vehicle')} vehicles, ${sk('powerup')} power-ups (${pk('powerup')} taken)</dd></dl>
     <div class="dls"><a class="dl" href="${sp()}/index.json">index.json</a><a class="dl" href="${sp()}/events.jsonl?dl=1">events.jsonl</a><a class="dl" href="${sp()}/roster.jsonl?dl=1">roster.jsonl</a><a class="dl" href="${sp()}/voice.bin">voice.bin</a><a class="dl" href="${sp()}/session.json?dl=1">session.json</a><button class="dl" id="delsess" title="Delete this session's files from this computer (voice, chat, events, roster). Cannot be undone." style="margin-left:12px;color:#ff8a80;border-color:#7a3b3b;background:#2a1414;cursor:pointer">Delete session</button></div>
     <h2 style="margin-top:12px">Speakers</h2><div id="spk">${X.speakers.map(s=>`<span class="pc"><span class="sw" style="background:${TEAM[s.team_name]||'#777'}"></span><span title="peer id ${esc(s.id)}${s.names.length>1?' &middot; also called '+esc(s.names.join(', ')):''}">${esc(s.name)}</span><span class="note" style="margin:0">${s.utterances}&times;, ${fDur(s.seconds)}</span>${s.audio_packets?`<a class="dl" href="${sp()}/speaker/${s.id}.ogg?dl=1" title="all of this speaker's audio, gaps shortened to at most 1 s">.ogg</a>`:''}</span>`).join('')||'<span class="note">nobody talked</span>'}</div>`;
   { const db=$('#delsess'); if(db) db.onclick=async()=>{ const nm=cur; if(!nm || !confirm('Delete session '+nm+'?\n\nEvery local file of it (voice, chat, events, roster) is removed from this computer. This cannot be undone.')) return;
@@ -251,6 +294,8 @@ function renderTimeline(){
   const mk=(it,cls,tip)=>`<span class="mk ${cls}" style="left:${x(it.t)}px" title="${esc(tip)}" data-i="${items.indexOf(it)}"></span>`;
   h+=lane('Chat',vis.filter(i=>i.kind==='chat').map(i=>{ const c=i.e.channel; return mk(i,c==='team'?'c2':c==='nearby'?'c3':c==='server'||c==='notice'?'srv':'chat',fT(i.t)+' '+(i.e.a?i.e.a+': ':'['+c+'] ')+i.e.text); }).join(''));
   h+=lane('Kills',vis.filter(i=>i.kind==='kill').map(i=>mk(i,'kill',fT(i.t)+' '+i.e.text)).join(''));
+  for(const [k,S] of Object.entries(SPAWNK)) h+=lane(S.lane,vis.filter(i=>i.kind===k).map(i=>mk(i,S.mk+(i.e.verb==='spawned'&&k!=='vehicle'?' sp':'')+(i.e.verb==='spawned'&&!i.e.how?' sum':''),
+    fT(i.t)+' '+spawnText(i.e,true))).join(''),S.lane+': '+S.tip);
   h+=lane('Events',vis.filter(i=>i.kind==='event').map(i=>mk(i,'ev',fT(i.t)+' '+i.e.kind+': '+i.e.text)).join(''));
   for(const s of X.speakers){ const us=vis.filter(i=>i.kind==='voice'&&i.u.id===s.id); if(!us.length&&$('#f_pl').value) continue;
     h+=lane(`<span class="sw" style="background:${TEAM[s.team_name]||'#777'}"></span> ${esc(s.name)}`,us.map(i=>{ const u=i.u;
@@ -270,7 +315,7 @@ function renderList(){
         `<td style="white-space:nowrap"><button class="btn" data-play="${u.n}"${u.audio_packets?'':' disabled'}>play</button> ${u.audio_packets?`<a class="dl" href="${sp()}/utt/${u.n}.ogg?dl=1">.ogg</a> `:''}<button class="btn" data-pk="${u.n}">packets</button></td></tr>`; }
     const e=it.e, who=e.kind==='chat'?(e.a||''):[e.a,e.b].filter(Boolean).join(' / ');
     const ch=e.kind==='chat'?e.channel:''; const cc=CHATCH[ch];
-    return `<tr data-i="${i}"><td class="t">${esc(fT(e.t))}</td><td><span class="k ${it.kind}">${esc(e.kind)}</span></td><td>${esc(who)}${e.sender_id?' <span class="note mono" style="margin:0">'+esc(e.sender_id)+'</span>':''}</td><td${cc?' class="ch'+cc+'"':''}>${esc(ch)}</td><td>${esc(e.text)}${e.estimated?' <span class="note" style="margin:0">(estimated)</span>':''}</td><td></td></tr>`;
+    return `<tr data-i="${i}"><td class="t">${esc(fT(e.t))}</td><td><span class="k ${it.kind}">${esc(e.kind)}</span></td><td>${esc(who)}${e.sender_id?' <span class="note mono" style="margin:0">'+esc(e.sender_id)+'</span>':''}</td><td${cc?' class="ch'+cc+'"':''}>${esc(ch)}</td><td>${esc(SPAWNK[it.kind]?spawnText(e,false):e.text)}${e.estimated?' <span class="note" style="margin:0">(estimated)</span>':''}</td><td></td></tr>`;
   }).join('')+'</tbody></table>';
 }
 $('#ls').onclick=async e=>{ const p=e.target.closest('[data-play]'); if(p){ play(+p.dataset.play); return; }
@@ -288,7 +333,7 @@ function play(n){
   au.src=sp()+'/utt/'+n+'.ogg'; au.play().catch(()=>{});
   $('#now').innerHTML=`<b>${esc(u.name)}</b> &middot; ${CHN[u.channel]} &middot; ${esc(fD(u.start))} &middot; ${(u.end-u.start).toFixed(1)} s`+(canOgg?'':' <span class="warn">(this browser cannot play Ogg Opus: download it)</span>');
 }
-for(const id of ['f_pl','f_ch','f_voice','f_chat','f_kill','f_ev']) $('#'+id).onchange=()=>{ if(X){ renderTimeline(); renderList(); } };
+for(const id of ['f_pl','f_ch','f_voice','f_chat','f_kill','f_wpn','f_veh','f_pup','f_ev']) $('#'+id).onchange=()=>{ if(X){ renderTimeline(); renderList(); } };
 $('#zoom').onchange=()=>{ if(X) renderTimeline(); };
 window.onresize=()=>{ if(X && $('#zoom').value==='0') renderTimeline(); };
 // the live session: new utterances and events every few seconds (scroll positions kept)

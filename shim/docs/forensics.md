@@ -22,19 +22,25 @@ they talked, and all their audio as one `.ogg`.
 
 ![Session list and the selected session's summary and speakers](img/forensics-session.png)
 
-The **timeline**: chat, kills and other events as ticks, then a lane per speaker with a block per utterance (blue
-global, green team, orange proximity, striped = no audio kept); click a block to play it.
+The **timeline**: chat, kills, weapons, vehicles, power-ups and other events as ticks, then a lane per speaker with a
+block per utterance (blue global, green team, orange proximity, striped = no audio kept); click a block to play it.
+**Weapons** (violet), **Vehicles** (teal) and **Power-ups** (pink) are the spawn events (stats.c `st_spawns`, backlog
+47): a spawn is a dim tick, a pickup a bright one, the match start's weapons one wide tick; hover a tick for the item,
+the player and where (x, y and height).
 
 ![Timeline](img/forensics-timeline.png)
 
-**Everything, in order**: voice, chat, kills and events in one list with filters (player, channel, kinds); each voice
-row has play, its `.ogg` and its decoded packets.
+**Everything, in order**: voice, chat, kills, spawns and events in one list with filters (player, channel, kinds:
+voice, chat, kills, weapons, vehicles, power-ups, other events); each voice row has play, its `.ogg` and its decoded
+packets; a spawn row says what, where ("Wraith spawned at (-38.5, -25.2)") and, for a pickup, who.
 
 ![Everything, in order](img/forensics-events.png)
 
 `/forensics?demo=1` shows every player as "Player 1", "Player 2", ... (numbered per session; the same alias everywhere
 on the page, event texts included), fake peer / sender ids, placeholder chat lines and the default archive folder, for
-screenshots; without it nothing changes. A speaker's `.ogg` download doesn't work in demo mode (its URL carries the
+screenshots; a session without spawn events (archived before they existed) gets a few made-up ones -- a match-start weapon
+line, vehicles, power-ups, pickups by the session's aliased players -- so the Weapons / Vehicles / Power-ups lanes show;
+without `?demo=1` nothing changes. A speaker's `.ogg` download doesn't work in demo mode (its URL carries the
 real id). `bash shim/tools/pageshot.sh` remakes these pictures from a running game.
 
 ## What is and is not captured
@@ -44,7 +50,8 @@ real id). `bash shim/tools/pageshot.sh` remakes these pictures from a running ga
   checks, so packets from players this client has muted, packets for channels it would not play and its own echo are
   archived too. Chat: every line the client's chat panel gets (`TextChat::push_history`, stats.c `st_on_chat`), with the
   sender's peer id. Events: every line of the stats page's event feed (stats.c `st_event`): joins, leaves, kills and
-  deaths, votes, `[SERVER]` lines, chat notices, match start / end.
+  deaths, votes, `[SERVER]` lines, chat notices, match start / end, and spawns: weapons, equipment, vehicles and power-ups
+  appearing on the map (with position), weapon pickups and power-ups taken.
 - Nothing is sent anywhere; nothing is read from other processes or the network beyond what the client already gets.
 - **Who fans voice out is not known yet** -- whether each speaker's client sends a copy to every listener or a server
   relays them. Each voice datagram carries a sender id (datagram +0x14) and a recipient id (+0x1c) that the receive loop
@@ -221,9 +228,18 @@ peer without a player).
 ### events.jsonl
 
 One line per event, in arrival order: `t` (unix seconds), `seq` (the stats feed's sequence), `kind` (chat, join, leave,
-kill, death, vote, server, game, log, archive), `text`, and when present `a` / `b` (killer, victim; chat: sender name),
-`how` (weapon), `verb`, `ta` / `tb` (teams), `estimated`, `mine`, `betrayal`. Chat lines also carry `channel` (all,
-team, nearby, server, notice) and, for players' messages, `sender_id` (Line +0x30, the sender's peer id).
+kill, death, vote, server, game, log, archive, weapon, vehicle, powerup), `text`, and when present `a` / `b` (killer,
+victim; chat: sender name; a pickup: the player), `how` (weapon; a spawn: the item), `verb` (kills; spawns: `spawned` /
+`picked up`), `ta` / `tb` (teams), `estimated`, `mine`, `betrayal`, `pos` (`[x, y, z]`: where an item spawned, or
+where a power-up was taken). Chat lines also carry `channel` (all, team, nearby, server, notice) and, for players'
+messages, `sender_id` (Line +0x30, the sender's peer id). Spawn lines, e.g.:
+```json
+{"t":1760790000.512,"seq":88,"kind":"vehicle","text":"Wraith spawned at (-38.5, -25.2)","how":"Wraith","verb":"spawned","pos":[-38.48,-25.19,-4.66]}
+{"t":1760790000.512,"seq":89,"kind":"weapon","text":"14 weapons and equipment spawned: Battle rifle x4, Sniper rifle x2, ...","verb":"spawned"}
+{"t":1760790031.104,"seq":97,"kind":"powerup","text":"Bob picked up Overshield","a":"Bob","how":"Overshield","verb":"picked up","ta":1,"pos":[0.42,12.87,-2.35]}
+```
+Sessions archived before the spawn events existed (2026-10-18) have none; the first weapon-only version (that day) wrote
+upper-case names ("SNIPER RIFLE") and "spawned at x, y, z" without `pos` -- the viewer reads both.
 
 ### session.json
 
@@ -261,8 +277,8 @@ so it plays as one recording of everything that person said; the index has the r
 
 The page: the session list (LIVE = being written), a summary with downloads, speakers with team colours and their
 `.ogg`, a timeline with one lane per speaker (blue global, green team, orange proximity, striped = no audio kept) plus
-chat / kill / event lanes, and everything in one list in time order with filters (player by peer id, channel, voice /
-chat / kills / other events). Click a voice block or "play" to listen; "packets" shows the decoded packets. The live
+chat / kill / weapon / vehicle / power-up / event lanes, and everything in one list in time order with filters (player
+by peer id, channel, voice / chat / kills / weapons / vehicles / power-ups / other events). Click a voice block or "play" to listen; "packets" shows the decoded packets. The live
 session refreshes every 5 s.
 
 ## Testing
