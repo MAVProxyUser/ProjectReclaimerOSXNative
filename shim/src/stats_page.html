@@ -8,6 +8,7 @@ body{margin:0;padding:16px;background:var(--bg);color:var(--fg);font:13px/1.4 -a
 h1{font-size:16px;margin:0 0 4px}h2{font-size:13px;margin:0 0 8px;color:var(--dim);font-weight:500}
 #hd{color:var(--dim);margin-bottom:12px}
 .grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(320px,560px);gap:16px;align-items:start}
+.grid.one{grid-template-columns:minmax(0,1fr)}
 @media (max-width:1000px){.grid{grid-template-columns:minmax(0,1fr)}}
 .slots{font-weight:400;font-size:13px;color:var(--dim)}
 .panel{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:12px;min-width:0}
@@ -178,6 +179,7 @@ th .srt{display:inline-block;margin-left:2px;padding:0 2px;cursor:pointer;color:
    <span id="hov" class="note" style="margin:0"></span>
   </div>
   <div class="legend"><span>fewer</span><span class="ramp"></span><span>more deaths</span><span id="dc"></span></div></div>
+  <div id="det" class="panel"><h2>Player details</h2><div class="note">Click a player in the table.</div></div>
  </div>
 </div>
 <div id="conn" class="panel"><div id="ch"><h2 id="ct">Connected</h2>
@@ -197,7 +199,7 @@ th .srt{display:inline-block;margin-left:2px;padding:0 2px;cursor:pointer;color:
  <div id="cm" class="note">no chat yet</div>
  <div class="note">Newest first: what players type in the game's text chat (TEAM and NEARBY mark those channels), the server's messages, and the client's own chat notices.</div></div>
 </div>
-<div class="grid">
+<div class="grid one">
  <div class="panel" id="players"><div class="sortmode" title="With a column's sort (the arrows by each heading): team sort keeps each team together and sorts inside it; full sort orders everyone together">
   Sort: <label><input type="radio" name="smode" value="team" checked> team sort</label><label><input type="radio" name="smode" value="full"> full sort</label>
   <span id="sortlbl"></span><button id="sortclr" style="display:none;background:none;border:0;color:var(--accent);cursor:pointer;font:inherit">reset</button></div>
@@ -205,9 +207,6 @@ th .srt{display:inline-block;margin-left:2px;padding:0 2px;cursor:pointer;color:
   <th data-k="name">Player</th><th data-k="shield">Shield</th><th data-k="health">Health</th><th data-k="weapon">Weapon</th><th data-k="kills">Kills</th><th data-k="deaths">Deaths</th><th data-k="kd">K/D</th><th data-k="shots">Shots</th><th data-k="accuracy">Accuracy</th><th data-k="grenades">Grenades</th><th data-k="vehicle">Vehicle</th><th data-k="pos">X, Y, Z</th><th data-k="speed">Speed</th><th data-k="traits">Traits</th></tr></thead>
   <tbody id="tb"></tbody></table></div>
   <div class="note">Click a player for details. Their deaths are ringed on the heatmap.</div></div>
- <div class="col">
-  <div id="det" class="panel"><h2>Player details</h2><div class="note">Click a player in the table.</div></div>
- </div>
 </div>
 <script>
 // ==== demo mode: ?demo=1 only (anonymized screenshots for the docs; shim/tools/pageshot.sh). Without it nothing here runs. ====
