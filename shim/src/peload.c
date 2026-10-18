@@ -1624,7 +1624,7 @@ static int MSABI dev_crShader(int stage,const void*bc,uint64_t len,void**pp){
         if(c && c->glsl && (stage==0||stage==1) && !keepdups){ free(o->bc); o->bc=c->bc; o->glsl=c->glsl; o->bcshared=1; if(!d3d_nofree()) o->keep=0; }
         // compute shaders the same (2026-10-18): a duplicate runs the canon's CPU program (ctxi_Dispatch) -- except with the
         // experimental GPU particles, whose transform-feedback programs are cached per shader object
-        else if(c && stage==5 && !keepdups && !getenv("PELOAD_CS_GPU")){ free(o->bc); o->bc=c->bc; o->glsl=c->glsl; o->bcshared=1; if(!d3d_nofree()) o->keep=0; }
+        else if(c && stage==5 && !keepdups && !getenv("PELOAD_CS_GPU") && !(getenv("PELOAD_AB") && !strncmp(getenv("PELOAD_AB"),"csgpu",5))){ free(o->bc); o->bc=c->bc; o->glsl=c->glsl; o->bcshared=1; if(!d3d_nofree()) o->keep=0; }
         else o->glsl=d3dgl_load_glsl(o->bc,o->bclen);
         if(getenv("PELOAD_TRACE_D3DGL")){ static int lo,hi; if(o->glsl)hi++; else lo++; if(((lo+hi)%200)==0){ char m[64]; int k=snprintf(m,sizeof m,"  [d3dgl] shaders translated=%d miss=%d\n",hi,lo); (void)!write(2,m,k);} } }
     int idx=g_shcount[stage]++;
@@ -5115,7 +5115,8 @@ static void d3dgl_ensure_tex(D3DObj*o){
             // complete mip available (the smallest mip is always complete). PELOAD_D3DGL_MIPTHRESH tunes it.
             double thresh=GENV1("PELOAD_D3DGL_MIPTHRESH")?atof(GENV1("PELOAD_D3DGL_MIPTHRESH")):0.55; if(thresh<=0||thresh>1)thresh=0.55;
             uint32_t uw=w,uh=h; uint64_t uoff=0,usz=csz; int picked=0,baselvl=0; double bestfrac=-1; uint32_t bw=w,bh=h; uint64_t boff=0,bsz=csz; int bbl=0;
-            for(uint32_t lvl=0;lvl<15;lvl++){ uint32_t mw=w>>lvl; if(!mw)mw=1; uint32_t mh=h>>lvl; if(!mh)mh=1;
+            uint32_t nmip=o->mips?o->mips:1;   // (the backing buffer has room for a full chain whatever MipLevels says: never read past it)
+            for(uint32_t lvl=0;lvl<15 && lvl<nmip;lvl++){ uint32_t mw=w>>lvl; if(!mw)mw=1; uint32_t mh=h>>lvl; if(!mh)mh=1;
                 uint64_t msz=0,moff=tex_sub_off(o->w,o->h,o->fmt,lvl,&msz); if(!msz||moff+msz>o->size) break;
                 int nz=0,ns=0; const uint8_t*dd=(const uint8_t*)o->data+moff; uint64_t step=msz/128?msz/128:1;
                 for(uint64_t i=0;i<msz;i+=step){ ns++; if(dd[i])nz++; }
@@ -5130,7 +5131,10 @@ static void d3dgl_ensure_tex(D3DObj*o){
             // (PELOAD_D3DGL_BCDECODE=1): decode the base level to RGBA8 here and glGenerateMipmap. (The old note that
             // Apple's GL samples compressed textures with a mipmap filter as BLACK predates the MAX_LEVEL cap: an
             // incomplete chain samples black.)
-            int dec_now=bc_dec_on(), comp_done=0;
+            // TYPELESS BC1-3 / BC7 can be viewed as UNORM or as _SRGB: compressed sRGB storage can't serve the UNORM view (its
+            // decode-skip doesn't hold, see below) and linear storage can't serve the sRGB one -- the decode path (SRGB8_ALPHA8 +
+            // per-view skip) does both, as it always did
+            int dec_now=bc_dec_on() || o->fmt==70 || o->fmt==73 || o->fmt==76 || o->fmt==97, comp_done=0;
           bc_decode:
             if(dec_now && !GENV1("PELOAD_D3DGL_NOBCDECODE")){
                 uint8_t*rgba=dg_bc_decode(o->fmt,(const uint8_t*)o->data+uoff,(size_t)(o->size-uoff),(int)uw,(int)uh);
@@ -5173,7 +5177,7 @@ static void d3dgl_ensure_tex(D3DObj*o){
             // blobs (2026-10-18) -- UNORM data such as normal maps evidently got decoded as sRGB
             static int bcsrgb=-1; if(bcsrgb<0) bcsrgb=GENV1("PELOAD_D3DGL_BCSRGB")?1:0;
             int srgbst=bcsrgb && !nosrgb() && o->fmt>=70 && o->fmt<=78; unsigned cif=bcif; if(srgbst) cif=o->fmt<=72?0x8C4D:o->fmt<=75?0x8C4E:0x8C4F;
-            for(int dl=baselvl; dl<15; dl++){ uint32_t mw=w>>dl; if(!mw)mw=1; uint32_t mh=h>>dl; if(!mh)mh=1;
+            for(int dl=baselvl; dl<15 && dl<(int)nmip; dl++){ uint32_t mw=w>>dl; if(!mw)mw=1; uint32_t mh=h>>dl; if(!mh)mh=1;
                 uint64_t msz=0,moff=tex_sub_off(o->w,o->h,o->fmt,dl,&msz); if(!msz||moff+msz>o->size) break;
                 if(gerr) gerr();   // clear before each level
                 cti(GLE_TEX2D,gl_lvl,cif,(int)mw,(int)mh,0,(int)msz,(uint8_t*)o->data+moff); cbytes+=msz;
@@ -8668,9 +8672,10 @@ static void* MSABI i_CreateThread(void*attr,uint64_t stack,WinThreadProc start,v
     if(getenv("PELOAD_NO_THREADS")){ if(tid)*tid=0x7333; return (void*)0x7333; } // diagnostic: don't spawn
     SyncObj* done=sync_new(K_THREAD); done->manual=1;              // thread handle = waitable, manual-reset
     TArg *t=malloc(sizeof *t); t->fn=start; t->param=param; t->done=done;
-    pthread_t th; int pcrc=pthread_create(&th,0,thread_tramp,t); if(!pcrc){ __atomic_add_fetch(&g_gthr_made,1,__ATOMIC_RELAXED); if(!thr_keep()) pthread_detach(th); }
+    pthread_t th; int pcrc=pthread_create(&th,0,thread_tramp,t); if(!pcrc) __atomic_add_fetch(&g_gthr_made,1,__ATOMIC_RELAXED);
     if(pcrc){ if(getenv("PELOAD_TRACE_THREAD")){ char eb[96]; int k=snprintf(eb,sizeof eb,"  [CreateThread] pthread_create FAILED rc=%d (start=%p param=%p)\n",pcrc,(void*)start,param); (void)!write(2,eb,k); } free(t); done->exitcode=0; done->signaled=1; return 0; }
     done->owner=th; done->tid=getenv("PELOAD_TID_CONST")?(uint32_t)(uintptr_t)th:(uint32_t)pthread_mach_thread_np(th);   // = its GetCurrentThreadId()
+    if(!thr_keep()) pthread_detach(th);   // (after reading its id: a detached thread that already ended is gone)
     if(tid)*tid=done->tid; return done;                           // HANDLE = the SyncObj
 }
 // ucrtbase _beginthreadex: the CRT thread spawn halo3 uses. Unimplemented, it
@@ -8684,6 +8689,11 @@ static uintptr_t MSABI i_beginthread(WinThreadProc start,unsigned stack,void*arg
 #include "d3dsubmit.c"
 #include "xaudio.c"
 #include "wasapi.c"
+// every guest thread's TLS block of one module (index idx), copied under g_tlsm: a returned thread's array is freed 30 s
+// later (thr_reap), so callers must not keep the arrays themselves past the lock
+static int tls_blocks(uint32_t idx,void**out,int max){ int n=0; if(idx>=128) return 0; pthread_mutex_lock(&g_tlsm);
+    if(g_tls_array && n<max) out[n++]=g_tls_array[idx]; for(int q=0;q<g_ntarrs && n<max;q++) if(g_tarrs[q]) out[n++]=g_tarrs[q][idx];
+    pthread_mutex_unlock(&g_tlsm); return n; }
 #include "hitbox.c"
 #include "stats.c"
 #include "forensic.c"   // forensic archive of voice / chat / events + its viewer (/forensics); uses stats.c

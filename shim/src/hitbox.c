@@ -23,8 +23,8 @@ static uint8_t* hb_halo3_base(void){ for(int k=0;k<g_nmods;k++) if(g_mods[k].nam
 // header named "object" with the 'd@t@' signature.
 static uint64_t hb_object_array_tls(uint64_t*tls){
     uint8_t*h3=hb_halo3_base(); if(!h3) return 0; uint32_t idx=0; if(!hb_read((uint64_t)(h3+0xa39f9c),&idx,4) || idx>=128) return 0;
-    void**arrs[1025]; int n=0; arrs[n++]=g_tls_array; pthread_mutex_lock(&g_tlsm); for(int i=0;i<g_ntarrs&&n<1025;i++) arrs[n++]=g_tarrs[i]; pthread_mutex_unlock(&g_tlsm);
-    for(int i=0;i<n;i++){ uint64_t blk=(uint64_t)arrs[i][idx]; uint64_t arr=0; if(!blk || !hb_read(blk+0x38,&arr,8) || !arr) continue;
+    void*blks[1025]; int n=tls_blocks(idx,blks,1025);
+    for(int i=0;i<n;i++){ uint64_t blk=(uint64_t)blks[i]; uint64_t arr=0; if(!blk || !hb_read(blk+0x38,&arr,8) || !arr) continue;
         uint8_t hdr[0x60]; if(!hb_read(arr,hdr,sizeof hdr)) continue;
         if(*(uint32_t*)(hdr+0x2c)==0x64407440 && !memcmp(hdr,"object\0",7)){ if(tls) *tls=blk; return arr; } }
     return 0; }
@@ -1044,9 +1044,9 @@ static void hb_draw_overlay(void){
             if(dx*dx+dy*dy+dz*dz >= (o->r+0.3f)*(o->r+0.3f)) continue;
             static uint8_t rec[8+24+0x800+0x400]; memset(rec,0,sizeof rec); memcpy(rec,&now,8); memcpy(rec+8,vp+12,12); memcpy(rec+20,vp+28,12);
             hb_read(o->p,rec+32,0x800);
-            uint8_t*h3=hb_halo3_base(); uint32_t idx=0; void**arrs[1025]; int na=0;
-            if(h3 && hb_read((uint64_t)(h3+0xa39f9c),&idx,4) && idx<128){ arrs[na++]=g_tls_array; pthread_mutex_lock(&g_tlsm); for(int q=0;q<g_ntarrs&&na<1025;q++) arrs[na++]=g_tarrs[q]; pthread_mutex_unlock(&g_tlsm);
-                for(int q=0;q<na;q++){ uint64_t blk=(uint64_t)arrs[q][idx], parr=0; uint8_t hdr[0x60]; if(!blk||!hb_read(blk+0x10,&parr,8)||!parr||!hb_read(parr,hdr,sizeof hdr)||*(uint32_t*)(hdr+0x2c)!=0x64407440) continue;
+            uint8_t*h3=hb_halo3_base(); uint32_t idx=0; void*blks[1025]; int na=0;
+            if(h3 && hb_read((uint64_t)(h3+0xa39f9c),&idx,4) && idx<128){ na=tls_blocks(idx,blks,1025);
+                for(int q=0;q<na;q++){ uint64_t blk=(uint64_t)blks[q], parr=0; uint8_t hdr[0x60]; if(!blk||!hb_read(blk+0x10,&parr,8)||!parr||!hb_read(parr,hdr,sizeof hdr)||*(uint32_t*)(hdr+0x2c)!=0x64407440) continue;
                     int32_t es=*(int32_t*)(hdr+0x24), hi=*(int32_t*)(hdr+0x3c); uint64_t pd=*(uint64_t*)(hdr+0x48); if(es<=0x28||es>0x10000||hi<=0||hi>64) continue;
                     for(int pl=0;pl<hi;pl++){ uint32_t uh=0; if(hb_read(pd+(uint64_t)pl*es+0x28,&uh,4) && uh==o->handle){ hb_read(pd+(uint64_t)pl*es,rec+32+0x800,(size_t)(es<0x400?es:0x400));
                             static int once; if(!once){ once=1; char m[160]; int k=snprintf(m,sizeof m,"  [selfdump] players array: element 0x%x, %d slots; ours = slot %d\n",es,hi,pl); (void)!write(2,m,k); } break; } }

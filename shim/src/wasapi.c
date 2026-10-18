@@ -109,6 +109,7 @@ static void* wa_tone_thread(void*a){ WaStream*s=a; pthread_setname_np("shim-mic-
 static int wa_cap_open(WaStream*s){   // (g_wa_lm held)
     s->packet=s->rate/100; if(!s->packet) s->packet=480;
     if(wa_mic_mode()==2 || wa_mic_mode()==3){ s->silent=wa_mic_mode()==3; __atomic_add_fetch(&g_mic_streams,1,__ATOMIC_ACQ_REL); return 1; }   // the tone thread starts with the stream
+    s->silent=0;   // (a reopen after an idle close tries the real microphone again)
     AudioStreamBasicDescription f={0}; f.mSampleRate=s->rate; f.mFormatID=kAudioFormatLinearPCM;
     f.mFormatFlags=(s->isfloat?kAudioFormatFlagIsFloat:kAudioFormatFlagIsSignedInteger)|kAudioFormatFlagIsPacked;
     f.mFramesPerPacket=1; f.mChannelsPerFrame=s->ch; f.mBitsPerChannel=s->bits; f.mBytesPerFrame=s->blk; f.mBytesPerPacket=s->blk;
@@ -148,7 +149,8 @@ static int MSABI wacc_GetNextPacketSize(WaItf*self,uint32_t*n){ WaStream*s=self-
 // thread / dispose its input queue. The client opens a new one with every map load: 18 tone threads after 18 loads (2026-10-18),
 // and with the real microphone as many live input queues. Reopened if the client starts it again.
 static void wa_cap_idle(WaStream*s){
-    pthread_mutex_lock(&g_wa_lm); wa_cap_stop(s); s->started=0;
+    pthread_mutex_lock(&g_wa_lm); if(s->cap_idle){ pthread_mutex_unlock(&g_wa_lm); return; }   // (two Releases racing here)
+    wa_cap_stop(s); s->started=0;
     pthread_mutex_lock(&s->m); AudioQueueRef q=s->iq; s->iq=0; pthread_mutex_unlock(&s->m);
     if(q){ AudioQueueStop(q,1); AudioQueueDispose(q,1); }
     s->cap_idle=1; __atomic_sub_fetch(&g_mic_streams,1,__ATOMIC_ACQ_REL); pthread_mutex_unlock(&g_wa_lm); }

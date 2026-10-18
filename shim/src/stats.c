@@ -184,8 +184,8 @@ typedef struct { uint32_t unit; int slot; char name[64]; uint64_t rec; } StPlaye
 static uint64_t g_st_tls;   // the engine thread's halo3 TLS block (st_players found it)
 static int st_players(StPlayer*out,int max){
     uint8_t*h3=hb_halo3_base(); uint32_t idx=0; if(!h3 || !hb_read((uint64_t)(h3+0xa39f9c),&idx,4) || idx>=128) return 0;
-    void**arrs[1025]; int na=0; arrs[na++]=g_tls_array; pthread_mutex_lock(&g_tlsm); for(int q=0;q<g_ntarrs&&na<1025;q++) arrs[na++]=g_tarrs[q]; pthread_mutex_unlock(&g_tlsm);
-    for(int q=0;q<na;q++){ uint64_t blk=(uint64_t)arrs[q][idx], parr=0, oarr=0; uint8_t hdr[0x60];
+    void*blks[1025]; int na=tls_blocks(idx,blks,1025);
+    for(int q=0;q<na;q++){ uint64_t blk=(uint64_t)blks[q], parr=0, oarr=0; uint8_t hdr[0x60];
         if(!blk || !hb_read(blk+0x38,&oarr,8) || !oarr) continue;   // the engine thread's block (it also holds the object table)
         if(!hb_read(blk+0x10,&parr,8) || !parr || !hb_read(parr,hdr,sizeof hdr) || *(uint32_t*)(hdr+0x2c)!=0x64407440) continue;
         int32_t es=*(int32_t*)(hdr+0x24), hi=*(int32_t*)(hdr+0x3c); uint64_t pd=*(uint64_t*)(hdr+0x48); if(es<0x98 || es>0x10000 || hi<=0 || hi>256) continue;
@@ -1319,9 +1319,9 @@ static void stats_start(void){ if(!stats_on()) return; pthread_t t; pthread_crea
 static void* st_bootprompt_thread(void*a){ (void)a; pthread_setname_np("shim-test-bootprompt"); int local=-1; uint32_t done_for=0xFFFFFFFFu;
     for(;;){ usleep(200000);
         uint8_t*h3=hb_halo3_base(); uint32_t idx=0; if(!h3 || !hb_read((uint64_t)(h3+0xa39f9c),&idx,4) || idx>=128) continue;
-        void**arrs[1025]; int na=0; arrs[na++]=g_tls_array; pthread_mutex_lock(&g_tlsm); for(int q=0;q<g_ntarrs&&na<1025;q++) arrs[na++]=g_tarrs[q]; pthread_mutex_unlock(&g_tlsm);
+        void*blks[1025]; int na=tls_blocks(idx,blks,1025);
         uint64_t pd=0; int32_t es=0, hi=0;
-        for(int q=0;q<na;q++){ uint64_t blk=(uint64_t)arrs[q][idx], parr=0, oarr=0; uint8_t hdr[0x60];
+        for(int q=0;q<na;q++){ uint64_t blk=(uint64_t)blks[q], parr=0, oarr=0; uint8_t hdr[0x60];
             if(!blk || !hb_read(blk+0x38,&oarr,8) || !oarr || !hb_read(blk+0x10,&parr,8) || !parr || !hb_read(parr,hdr,sizeof hdr) || *(uint32_t*)(hdr+0x2c)!=0x64407440) continue;
             es=*(int32_t*)(hdr+0x24); hi=*(int32_t*)(hdr+0x3c); pd=*(uint64_t*)(hdr+0x48); break; }
         if(!pd || es<0x200 || hi<=0 || hi>256) continue;
