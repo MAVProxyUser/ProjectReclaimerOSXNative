@@ -77,8 +77,8 @@ No game files are included in this repository or its releases.
    ./reclaimer-mac.sh download
    ```
    (Only `download` is needed; that script's other commands are for an older Wine-based setup.)
-3. **Add the client exe.** Put `project-reclaimer-client-v0.9.18.exe` in `client/`, or point
-   `RECLAIMER_EXE=/path/to/exe` at it. The first launch of a new client version builds its Forge asset
+3. **Add the client exe.** `bash shim/tools/client-update.sh` puts the newest release in `client/` (SHA-256 checked), or
+   point `RECLAIMER_EXE=/path/to/exe` at one. The first launch of a new client version builds its Forge asset
    library (about 2.5 minutes, "BUILDING ASSET LIBRARY"); later launches reach the menu in ~20 s.
 
 ## Copy to another Mac with a USB stick

@@ -1,5 +1,8 @@
 # HaloReclaimerMac — project notes for Claude
 
+**Every fix gets an entry in `shim/docs/FIXES.md` in the same commit** (function, why, the logic, the switch that restores the
+old behaviour; the user asked for one place where no fix gets lost). Section 0 there = install / setup / usage examples.
+
 Goal: run Project Reclaimer (fan Halo 3/MCC client; Windows-only Rust exes that load MCC's
 `halo3.dll`) on Apple Silicon **without Wine**, via a from-scratch Win64 PE loader
 (`shim/src/peload.c`) under Rosetta. Success = see the menu render OR launch the game.

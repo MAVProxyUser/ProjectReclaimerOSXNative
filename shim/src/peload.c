@@ -1699,6 +1699,7 @@ static struct { unsigned exec, novsps, noglsl, noprog, ringfail, wraps, disp, co
 static void d3d_dirty_sub(D3DObj*o,uint32_t sub){ uint8_t s8=sub>255?255:(uint8_t)sub;
     if(!o->gl_dirty){ o->dpart=1; o->dmin=s8; } else if(o->dpart && s8<o->dmin) o->dmin=s8;
     o->gl_dirty=1; }
+static void smallrb_trace(const char*what,D3DObj*dst,D3DObj*src,uint32_t type);   // (PELOAD_TRACE_SMALLRB, by the copies)
 static int  MSABI ctxi_Map(void*t,void*res,uint32_t sub,uint32_t type,uint32_t fl,void*pM){ (void)t;(void)sub;(void)type;(void)fl; if(res && ((D3DObj*)res)->cs_gpu) cs_gpu_readback((D3DObj*)res,"Map");
     g_fs.maps++; if(type==1||type==3) g_fs.mapread++;
     cs_wait_res((D3DObj*)res);
@@ -1717,7 +1718,8 @@ static int  MSABI ctxi_Map(void*t,void*res,uint32_t sub,uint32_t type,uint32_t f
         // textures: point at subresource `sub` (mip + slice*MipLevels) with that level's pitches
         if(o && o->kind>=2 && o->kind<=4 && o->data && o->w){ uint64_t sz; uint32_t lrp,rows,mw,mh,md;
             uint64_t off=tex_sub(o,sub,&sz,&lrp,&rows,&mw,&mh,&md); if(off!=UINT64_MAX){ d=(uint8_t*)o->data+off; rp=lrp; dp=lrp*rows; } }
-        *(void**)pM=d; *(uint32_t*)((char*)pM+8)=rp; *(uint32_t*)((char*)pM+12)=dp; } return HR_OK; }
+        *(void**)pM=d; *(uint32_t*)((char*)pM+8)=rp; *(uint32_t*)((char*)pM+12)=dp; }
+    if(o) smallrb_trace("Map",0,o,type); return HR_OK; }
 static void MSABI ctx_GetDevice(void*t,void**pp){ (void)t; if(pp)*pp=&g_d3ddevice; }
 // Context Get* methods (indices 72-109): if left as no-ops they leave the caller's
 // out-param array UNINITIALIZED (stack garbage), and the engine then uses/releases
@@ -1807,14 +1809,25 @@ static void copy_trace(const char*what,D3DObj*dst,D3DObj*src){ if(dst&&src) flog
         (void*)dst,dst->w,dst->h,dst->fmt,dst->kind,dst->glfbo?" RT":"",(void*)src,src->w,src->h,src->fmt,src->kind,src->glfbo?" RT":"",src->glfbo?"  <== GPU-RENDERED SRC (CPU copy is stale)":"");
     (void)!write(2,m,k); }
 static void d3dgl_ensure_rt(D3DObj*o); static int d3dgl_ensure(void); // fwd
+// PELOAD_TRACE_SMALLRB=1: copies to / from tiny textures (<= 4x4: luminance readbacks) and Map of them, with the bytes
+static void smallrb_trace(const char*what,D3DObj*dst,D3DObj*src,uint32_t type){ static int on=-1; if(on<0) on=getenv("PELOAD_TRACE_SMALLRB")?1:0; if(!on) return;
+    D3DObj*o=dst?dst:src; if(!o || o->kind<2 || o->w>4 || o->h>4) { if(!(src && src->kind>=2 && src->w<=4 && src->h<=4)) return; }
+    static unsigned long n; n++; if(n>400 && (n%100)) return; extern unsigned long g_eng_present_no_x;
+    char m[300]; int k=snprintf(m,sizeof m,"  [smallrb] f%lu %s",g_eng_present_no_x,what);
+    if(dst) k+=snprintf(m+k,sizeof m-k," dst=%p %ux%u f%u fbo=%u",(void*)dst,dst->w,dst->h,dst->fmt,dst->glfbo);
+    if(src) k+=snprintf(m+k,sizeof m-k," src=%p %ux%u f%u fbo=%u bind=0x%x copydst=%d tex=%u",(void*)src,src->w,src->h,src->fmt,src->glfbo,src->bindf,src->copydst,src->gltex);
+    if(type) k+=snprintf(m+k,sizeof m-k," type=%u",type);
+    D3DObj*d=dst?dst:src; if(d && d->data){ const uint8_t*b=d->data; k+=snprintf(m+k,sizeof m-k," data=%02x%02x %02x%02x %02x%02x %02x%02x",b[0],b[1],b[2],b[3],b[4],b[5],b[6],b[7]); }
+    m[k++]='\n'; (void)!write(2,m,k); }
 static int d3dgl_gpu_copy(D3DObj*dst,D3DObj*src,uint32_t sx,uint32_t sy,uint32_t sw,uint32_t sh,uint32_t dx,uint32_t dy); // fwd (impl after the GL table)
-static void MSABI ctxi_CopyResource(void*t,void*dst,void*src){ (void)t; D3DObj*a=dst,*b=src; g_fs.copies++; cs_wait_res(a); cs_wait_res(b); if(a&&a->cs_gpu) cs_gpu_readback(a,"CopyResource"); if(b&&b->cs_gpu) cs_gpu_readback(b,"CopyResource"); copy_trace("CopyResource",a,b); if(a) a->ver++;
+static int gpu_copy_src_ok(D3DObj*src);   // fwd
+static void MSABI ctxi_CopyResource(void*t,void*dst,void*src){ (void)t; D3DObj*a=dst,*b=src; g_fs.copies++; smallrb_trace("CopyResource",a,b,0); cs_wait_res(a); cs_wait_res(b); if(a&&a->cs_gpu) cs_gpu_readback(a,"CopyResource"); if(b&&b->cs_gpu) cs_gpu_readback(b,"CopyResource"); copy_trace("CopyResource",a,b); if(a) a->ver++;
     if(a&&b&&d3dgl_gpu_copy(a,b,0,0,b->w>4096?4096:b->w,b->h>4096?4096:b->h,0,0)) return; if(a&&b&&a->data&&b->data){ uint64_t n=a->size<b->size?a->size:b->size; memcpy(a->data,b->data,n); if(a){ a->gl_dirty=1; a->dpart=0; }
     if(getenv("PELOAD_TRACE_TEXPATH") && a->w>=512 && ((a->fmt>=70&&a->fmt<=84)||(a->fmt>=94&&a->fmt<=99))){ char m[128]; int k=snprintf(m,sizeof m,"  [texpath] COPYRES dst%ux%u f%u <- src%ux%u (%lluB)\n",a->w,a->h,a->fmt,b->w,b->h,(unsigned long long)n); (void)!write(2,m,k);} } }
 // CopySubresourceRegion(dst,dstSub,dstX,dstY,dstZ,src,srcSub,pSrcBox). Was a no-op -> 12k/frame copies
 // (texture staging / composite steps) were dropped. Implement the CPU copy (full or box region).
 static void MSABI ctxi_CopySubresourceRegion(void*t,void*dstR,uint32_t dstSub,uint32_t dstX,uint32_t dstY,uint32_t dstZ,void*srcR,uint32_t srcSub,const void*srcBox){
-    (void)t; D3DObj*dst=dstR,*src=srcR; cs_wait_res(dst); cs_wait_res(src);
+    (void)t; D3DObj*dst=dstR,*src=srcR; cs_wait_res(dst); cs_wait_res(src); smallrb_trace("CopySubresourceRegion",dst,src,0);
     // GPU particles: halo3 uploads new particles by copying a CPU-written staging buffer into a range of the particle buffer
     // the GPU owns -- write that range straight into its GL storage (and the CPU copy); the GPU keeps the buffer.
     if(dst && src && dst->cs_gpu && !src->cs_gpu && dst->kind==1 && src->kind==1 && !dstSub && !srcSub && dst->gltbobuf && src->data && dst->data){
@@ -1828,7 +1841,7 @@ static void MSABI ctxi_CopySubresourceRegion(void*t,void*dstR,uint32_t dstSub,ui
             src&&src->cs_gpu?(dst&&dst->cs_gpu?"both":"source"):"destination",src?(unsigned long long)src->size:0,src?src->bindf:0,src?src->misc:0,src?src->depth:0,
             dst?(unsigned long long)dst->size:0,dst?dst->bindf:0,dst?dst->misc:0,dst?dst->depth:0,dstX,bx?bx[0]:0,bx?bx[3]:0);
         if(dst&&dst->cs_gpu) cs_gpu_readback(dst,why); if(src&&src->cs_gpu) cs_gpu_readback(src,why); } copy_trace("CopySubresourceRegion",dst,src); if(dst) dst->ver++;
-    if(dst&&src&&srcSub==0&&dstSub==0&&src->glfbo){ const uint32_t*bx=srcBox; uint32_t l=bx?bx[0]:0,tp=bx?bx[1]:0,r=bx?bx[3]:src->w,bt=bx?bx[4]:src->h;
+    if(dst&&src&&srcSub==0&&dstSub==0&&gpu_copy_src_ok(src)){ const uint32_t*bx=srcBox; uint32_t l=bx?bx[0]:0,tp=bx?bx[1]:0,r=bx?bx[3]:src->w,bt=bx?bx[4]:src->h;
         if(r>l&&bt>tp&&d3dgl_gpu_copy(dst,src,l,tp,r-l,bt-tp,dstX,dstY)) return; }
     if(!dst||!src||!dst->data||!src->data) return;
     dst->gl_dirty=1; dst->dpart=0;
@@ -3281,11 +3294,31 @@ static uint32_t MSABI i_GetExitCodeProcessReal(void*h,uint32_t*code){ intptr_t h
             if(code)*code=c; if(getenv("PELOAD_TRACE_GL")){char t[48];snprintf(t,sizeof t,"  [worker exit] code=0x%x\n",c);ws(t);} }
         else if(code)*code=259; /*STILL_ACTIVE*/ return 1; }
     if(code)*code=0; return 1; }
+// DuplicateHandle (fixed 2026-10-18; PELOAD_DUPHANDLE_OLD=1 = old: every handle >= 0x1000 was dup()ed as an fd, so a sync
+// object's pointer gave EBADF and the call failed for events, timers, threads and pipes, and pseudo-handles came back
+// unchanged). Now per kind: current thread (-2) -> its own thread handle (CreateThread's object, or one made for it);
+// current process (-1) -> 0x8000+pid; sync objects -> the same object (CloseHandle never frees one -- a duplicated timer is
+// marked so its delayed free never happens); pipes -> the same object with one more reference; fds -> dup();
+// DUPLICATE_CLOSE_SOURCE (opt bit 0) closes the source.
+static __thread void* t_self_thread;   // set by thread_tramp: this thread's CreateThread handle
+static void* cur_thread_handle(void); static int is_sync(intptr_t hv); static void sync_dup_mark(intptr_t hv);   // (after SyncObj)
+static void pipe_addref(void*h); static int MSABI i_CloseHandleReal(void*h);   // (after PipeObj / later)
 static int    MSABI i_DuplicateHandle(void*sp,void*src,void*tp,void**tgt,uint32_t acc,int inh,uint32_t opt){
-    (void)sp;(void)tp;(void)acc;(void)inh;(void)opt; intptr_t hv=(intptr_t)src; void*res=src;
+    (void)sp;(void)tp;(void)acc;(void)inh; intptr_t hv=(intptr_t)src; void*res=src;
     if(getenv("PELOAD_TRACE_IPC")){ char b[96]; int k=snprintf(b,sizeof b,"  [DuplicateHandle] srcproc=%p src=%p opt=0x%x\n",sp,src,opt); (void)!write(2,b,k); }
-    if(hv>=0x1000){ int sfd=(int)(hv-0x1000); int nfd=dup(sfd); if(nfd<0){ g_lasterr=win_err(); return 0; }
-        if(sfd<MAXFD && g_fdpath[sfd]) fd_record(nfd, g_fdpath[sfd]); res=(void*)(intptr_t)(0x1000+nfd); }
+    static int old=-1; if(old<0) old=getenv("PELOAD_DUPHANDLE_OLD")?1:0;
+    if(old){ if(hv>=0x1000){ int sfd=(int)(hv-0x1000); int nfd=dup(sfd); if(nfd<0){ g_lasterr=win_err(); return 0; }
+            if(sfd<MAXFD && g_fdpath[sfd]) fd_record(nfd, g_fdpath[sfd]); res=(void*)(intptr_t)(0x1000+nfd); }
+        if(tgt)*tgt=res; return 1; }
+    int closesrc=opt&1;
+    if(hv==-2) res=cur_thread_handle();
+    else if(hv==-1){ int pid=getpid(); if(pid<0x100000-0x8000) res=(void*)(intptr_t)(0x8000+pid); }
+    else if(is_sync(hv)) sync_dup_mark(hv);
+    else if(pipe_is(hv)){ if(!closesrc) pipe_addref(src); closesrc=0; }
+    else if(hv>=0x1000 && hv<0x1000+MAXFD){ int sfd=(int)(hv-0x1000); int nfd=dup(sfd); if(nfd<0){ g_lasterr=win_err(); return 0; }
+        if(g_fdpath[sfd]) fd_record(nfd, g_fdpath[sfd]); res=(void*)(intptr_t)(0x1000+nfd); }
+    else closesrc=0;   // process handles, sockets, PIPE_DEV_HANDLE: the same value
+    if(closesrc && res!=src) i_CloseHandleReal(src);
     if(tgt)*tgt=res; return 1; }
 // RtlPcToFileHeader: return the base of the loaded image containing Pc.
 static void*  MSABI i_RtlPcToFileHeader(void *pc, void **base){
@@ -5281,8 +5314,17 @@ static int d3dgl_rt_readfmt(uint32_t f,unsigned*fmt,unsigned*type,unsigned*bpp){
                default: return 0; } }
 static int d3dgl_gpu_copy_impl(D3DObj*dst,D3DObj*src,uint32_t sx,uint32_t sy,uint32_t sw,uint32_t sh,uint32_t dx,uint32_t dy);
 static void d3dgl_reset_raster_ops(void); // fwd
+// a render target the game only ever drew as part of several (an MRT framebuffer) has no FBO of its own: copies FROM it
+// fell back to its CPU copy, which rendering never writes -- zeros. halo3 reads one pixel of such a 1920x1080 RGBA8 target
+// back every frame (CopySubresourceRegion to a 1x1 staging texture + Map READ) and drives its auto exposure with it: it read
+// 0, so exposure never adapted and every interior stayed at outdoor exposure, nearly black (backlog 61, 2026-10-18).
+// PELOAD_D3DGL_NOMRTCOPY=1 = old.
+static int gpu_copy_src_ok(D3DObj*src){ if(!src) return 0; if(src->glfbo) return 1; static int old=-1; if(old<0) old=getenv("PELOAD_D3DGL_NOMRTCOPY")?1:0;
+    return !old && src->kind==2 && src->gltex && ((src->bindf&0x20) || src->copydst); }   // (copydst: a GPU copy wrote it -- its content is GPU-only)
 static int d3dgl_gpu_copy(D3DObj*dst,D3DObj*src,uint32_t sx,uint32_t sy,uint32_t sw,uint32_t sh,uint32_t dx,uint32_t dy){
-    if(!d3dgl_enabled()||!src||!src->glfbo) return 0; GLLOCK(); int r=d3dgl_gpu_copy_impl(dst,src,sx,sy,sw,sh,dx,dy); GLUNLOCK(); return r; }
+    if(!d3dgl_enabled()||!gpu_copy_src_ok(src)) return 0; GLLOCK();
+    if(!src->glfbo){ D3DObj*one=src; d3dgl_fbo_for(&one,1,0); }   // (its own FBO, made now)
+    int r=d3dgl_gpu_copy_impl(dst,src,sx,sy,sw,sh,dx,dy); GLUNLOCK(); return r; }
 static int d3dgl_gpu_copy_impl(D3DObj*dst,D3DObj*src,uint32_t sx,uint32_t sy,uint32_t sw,uint32_t sh,uint32_t dx,uint32_t dy){
     if(!d3dgl_enabled()||!src||!dst||src==dst||!src->glfbo||!src->gltex||src->kind==1||dst->kind==1) return 0;
     if(!G.BlitFramebuffer||!d3dgl_ensure()) return 0;
@@ -8400,6 +8442,10 @@ static SyncObj* sync_new(int kind){ SyncObj*s=calloc(1,sizeof *s); s->magic=SYNC
     pthread_mutex_init(&s->m,0); pthread_cond_init(&s->c,0); return s; }
 static int is_sync(intptr_t hv){ if(hv<0x100000) return 0; SyncObj*s=(SyncObj*)hv; return s && s->magic==SYNC_MAGIC; }
 static void name_log(const char*api,const uint16_t*nm); // fwd
+static void* cur_thread_handle(void){ if(t_self_thread) return t_self_thread;   // (DuplicateHandle of GetCurrentThread())
+    SyncObj*s=sync_new(K_THREAD); if(!s) return (void*)-2; s->manual=1; s->owner=pthread_self(); s->tid=(uint32_t)pthread_mach_thread_np(pthread_self());
+    t_self_thread=s; return s; }
+static void sync_dup_mark(intptr_t hv){ SyncObj*so=(SyncObj*)hv; if(so->is_timer==1) so->is_timer=3; }   // a duplicated timer: shared, never freed
 static void* MSABI i_CreateEventW(void*sec,int man,int sig,const uint16_t*nm){ (void)sec; name_log("CreateEvent",nm); SyncObj*s=sync_new(K_EVENT); s->manual=man; s->signaled=sig; return s; }
 static void* MSABI i_CreateEventA(void*sec,int man,int sig,const char*nm){ return i_CreateEventW(sec,man,sig,0); }
 static void* MSABI i_CreateEventExW(void*sec,const uint16_t*nm,uint32_t fl,uint32_t acc){ (void)nm;(void)acc; return i_CreateEventW(sec,(fl&1)/*MANUAL_RESET*/,(fl&2)/*INITIAL_SET*/,0); }
@@ -8634,7 +8680,7 @@ static void *thread_tramp(void *a){
     __asm__ volatile("movq %0,%%gs:0x30"::"r"((uint64_t)teb));
     __asm__ volatile("movq %0,%%gs:0x60"::"r"((uint64_t)g_peb_ptr));
     __asm__ volatile("movq %0,%%gs:0x58"::"r"((uint64_t)tarr));
-    g_guest_thr=1;
+    g_guest_thr=1; t_self_thread=t->done;
     if(getenv("PELOAD_TRACE_THREAD")){ char tb[96]; int nn=snprintf(tb,sizeof tb,"  [TT] enter tid=0x%x gs58=0x%llx fn=%p\n",pthread_mach_thread_np(pthread_self()),(unsigned long long)(uint64_t)tarr,(void*)t->fn); (void)!write(2,tb,nn); }
     uint32_t r = t->fn ? t->fn(t->param) : 0;
     __atomic_add_fetch(&g_gthr_exited,1,__ATOMIC_RELAXED);
@@ -9369,7 +9415,7 @@ static int    MSABI i_UnmapViewOfFile(void*p){
 // \Device\NamedPipe\NAME map to the SAME socket). The server (CreateNamedPipeW) binds+listens; a client
 // (CreateFileW/NtCreateFile on a pipe path) connects; ConnectNamedPipe accepts. Synchronous only.
 #define PIPE_MAGIC 0x45504950u  // 'PIPE'
-typedef struct { uint32_t magic; int listenfd; int connfd; int is_server; char sp[108]; } PipeObj;
+typedef struct { uint32_t magic; int listenfd; int connfd; int is_server; char sp[108]; int refs; } PipeObj;   // refs: extra handles (DuplicateHandle)
 static int pipe_name_is(const char*s){ if(!s) return 0;
     for(const char*p=s;p[0]&&p[1]&&p[2]&&p[3]&&p[4];p++)
         if((p[0]|32)=='p'&&(p[1]|32)=='i'&&(p[2]|32)=='p'&&(p[3]|32)=='e'&&(p[4]=='\\'||p[4]=='/')) return 1;
@@ -9409,7 +9455,8 @@ static int pipe_write(void*h,const void*buf,uint32_t n,uint32_t*wr){ PipeObj*o=h
     ssize_t k=(f>=0&&buf)?send(f,buf,n,0):-1; if(wr)*wr=(uint32_t)(k<0?0:k); if(k<0)g_lasterr=win_err(); return k>=0; }
 static int pipe_read(void*h,void*buf,uint32_t n,uint32_t*rd){ PipeObj*o=h; int f=pipe_rw_fd(o);
     ssize_t k=(f>=0&&buf)?recv(f,buf,n,0):-1; if(rd)*rd=(uint32_t)(k<0?0:k); if(k<0)g_lasterr=win_err(); return k>0 || (k==0); }
-static int pipe_close(void*h){ PipeObj*o=h; if(o->connfd>=0)close(o->connfd); if(o->listenfd>=0){ close(o->listenfd); if(o->is_server)unlink(o->sp);} o->magic=0; free(o); return 1; }
+static void pipe_addref(void*h){ ((PipeObj*)h)->refs++; }
+static int pipe_close(void*h){ PipeObj*o=h; if(o->refs>0){ o->refs--; return 1; } if(o->connfd>=0)close(o->connfd); if(o->listenfd>=0){ close(o->listenfd); if(o->is_server)unlink(o->sp);} o->magic=0; free(o); return 1; }
 static void*  MSABI i_CreateFileW(const uint16_t *w,uint32_t acc,uint32_t share,void*sec,uint32_t disp,uint32_t fl,void*tmpl){
     (void)share;(void)sec;(void)fl;(void)tmpl; char p[2048]; win2unix(w,p,sizeof p);
     { char nn[1024]; int i=0; for(; w&&w[i]&&i<1023;i++) nn[i]=(char)(w[i]<128?w[i]:'?'); nn[i]=0;
@@ -9531,6 +9578,7 @@ static int    MSABI i_CloseHandleReal(void*h){ intptr_t hv=(intptr_t)h;
             for(int i=0;i<qn;i++){ if(now-qt[i]>=30.0){ SyncObj*d=q[i]; d->magic=0; pthread_mutex_destroy(&d->m); pthread_cond_destroy(&d->c); free(d); } else { q[j]=q[i]; qt[j]=qt[i]; j++; } }
             qn=j; if(qn<4096){ q[qn]=so; qt[qn]=now; qn++; } pthread_mutex_unlock(&mx); }
         return 1; }
+    if(hv>=0x1000+MAXFD && hv<0x100000) return 1;   // process handles (0x8000+pid), PIPE_DEV_HANDLE: not fds (it used to close(0x7000+pid))
     if(hv>=0x1000 && hv<0x100000){ int fd=(int)(hv-0x1000);
     if(fd>=0 && fd<MAXFD){ if(g_fddir[fd]){ closedir(g_fddir[fd]); g_fddir[fd]=0; }
         // delete-on-close with Windows last-handle-wins semantics: only remove
