@@ -9,6 +9,7 @@ shim/src/stats.c + hitbox.c do for the overlay:
   do=teams / do=visible / do=textup / do=textdown   the old global switches = "apply to all"
   do=hitboxes|tracers|info|items|zones|vehicles     toggle one feature
   do=zonetype&t=<bit> / do=weaktype&t=<bit>         the chips
+  do=bounds&off=0|1 / do=invwalls&off=0|1            the host switches (Boundaries / Invisible walls buttons)
   anything else (capture, mic, teleport, ...)        ok, nothing happens
 
   python3 shim/tools/overlay-panel-mock.py [--port 8799] [--lag 0.8] [--readonly] [--old] [--refuse]
@@ -30,7 +31,7 @@ HAS = {'hitboxes': (1, 1, 0), 'vehicles': (1, 1, 0), 'tracers': (1, 1, 0), 'info
 TEAMS = ['all', 'enemies', 'friends']
 
 lock = threading.Lock()
-state = {'tc': 0, 'visible': False, 'text_px': 7, 'zone_show': 31, 'weak_show': 3, 'feat': {}}
+state = {'tc': 0, 'visible': False, 'text_px': 7, 'zone_show': 31, 'weak_show': 3, 'feat': {}, 'bounds_off': False, 'invwalls_off': False}
 for f in ORDER:
     t, v, p = HAS[f]
     state['feat'][f] = {'on': f in ('hitboxes', 'info'), 'team': 'all' if t else None, 'vis': False if v else None, 'px': 7 if p else None}
@@ -109,6 +110,11 @@ def control(act, qs):
             for s in state['feat'].values():
                 if s['px'] is not None:
                     s['px'] = state['text_px']
+        elif act in ('bounds', 'invwalls'):   # host switches (games you host with PELOAD_ALLOW_TELEPORT=1)
+            v = dict(x.split('=', 1) for x in qs.split('&') if '=' in x).get('off', '')
+            if v not in ('0', '1'):
+                return False
+            state[act + '_off'] = v == '1'
         elif act in ('zonetype', 'weaktype'):
             t = dict(x.split('=', 1) for x in qs.split('&') if '=' in x).get('t', '')
             ok = {'zonetype': ('1', '2', '4', '8', '16'), 'weaktype': ('1', '2')}[act]
@@ -132,9 +138,9 @@ def snapshot():
     with lock:
         feats = json.loads(json.dumps(state['feat']))
         o = {k: feats[k]['on'] for k in ORDER}
-        o.update({'visible': state['visible'], 'teams': TEAMS[state['tc'] % 3], 'teleport': False, 'host': True, 'tp_forward': False,
+        o.update({'visible': state['visible'], 'teams': TEAMS[state['tc'] % 3], 'teleport': True, 'host': True, 'tp_forward': False,
                   'controls': not ARGS.readonly, 'text_px': state['text_px'], 'spar': False, 'spar_aim': -1.0, 'spar_available': False,
-                  'bounds_off': None, 'mic': 'live', 'mic_in_use': False, 'spots': []})
+                  'bounds_off': state['bounds_off'], 'invwalls_off': state['invwalls_off'], 'mic': 'live', 'mic_in_use': False, 'spots': []})
         if not ARGS.old:
             o['features'] = feats
         return {'time': time.time() % 600, 'in_match': True, 'inst': 4242, 'feed_seq': 0, 'map': 'riverworld',

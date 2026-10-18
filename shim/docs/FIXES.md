@@ -1005,6 +1005,15 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   virtual functions, so no caller can keep r11 across them, and r11 is not read near the sites). Offline test:
   `bash shim/tools/originguard-test.sh` (the real code on halo3's own bytes: same origin for a live object, (0,0,0) for an
   empty object / parent slot, r11 kept, refused on other bytes; it fails on the r11 version). (10-18)
+- **Invisible walls off switch** (feature; written at run time, bytes checked) — `invwalls_prepare` (peload.c) +
+  `hb_invwalls_set` (hitbox.c). Why (backlog 18, user: buttons for games you host / our local servers): player clip
+  stopped explorers, and no branch in the vector tests controls it (map-boundaries.md 2c). How: Havok's polygon-shape
+  builder halo3+0x21b4d8 (called by the structure / instance shape collections' getChildShape 0x21c0f8 / 0x21cf6c) gets
+  an exit patch at 0x21b759 (15 bytes -> `jmp [rip+0]`): a surface flagged invisible gets every vertex at z = -20000. The
+  trampoline uses only registers that function writes anyway and no register for its jumps. Written / removed at the
+  frame safe point under the game-state lock (like the boundaries). Stats `do=invwalls&off=`, page button, launch
+  `PELOAD_INVWALLS_OFF=1`, `PELOAD_INVWALLS_LOG=1`. Verified live: walls on, a biped stops at the wall; off (also switched
+  at run time), it walks through. (10-18)
 - **object_delete entry hook** (checked) — halo3+0x342ed8 (`hbdel_install` -> `hb_on_delete`): bullets live < 1 tick, so
   shots are recorded at deletion. Off: `PELOAD_NO_DELHOOK=1`. (10-16 8448a06)
 - **Frame safe point: main_loop_body entry hook** (checked) — halo3+0xb2250 (`hb_frame_hook`). Why: the first teleports
@@ -1246,6 +1255,13 @@ Numbers are from the commit messages; PERF-PLAN.md has the measurements. Compare
   memory budget (section 18).
 - **re-tools/h3map.py** — its string-id decoding is wrong for these builds (namespace-0 continuations); use
   `h3bsp.sid_name`. NOT fixed (CLAUDE.md).
+- **`PELOAD_BSPWATCH=s|e|v|sev` — who reads a collision BSP** (RE tool, debug only) — `bspwatch_install` / `bw_trap` /
+  `bw_fault` / `bw_thread` (peload.c). A breakpoint on halo3+0x2566b7 keeps the collision BSP with the most surfaces
+  (`PELOAD_BSPWATCH_HITS`, 3000 hits), then the pages of the chosen arrays (surfaces / edges / vertices) are made
+  unreadable: each fault records the instruction and [rsp] (the caller, for the frameless accessors), opens that one
+  page, and a thread closes open pages every 20 ms; `[bspwatch]` lists the readers every 5 s. It found Havok's
+  polygon-shape builder (backlog 18). Lessons: open only the faulting page (one hot reader hid every other one), and
+  treat any fault in the watched range as the tool's (another thread can fault before the page reopens). (10-18)
 
 ## 21. Superseded workarounds (kept for history; most switches still exist)
 

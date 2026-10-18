@@ -743,6 +743,21 @@ static void hb_bounds_set(uint8_t*h3,int off){
     for(int i=0;i<HB_NBND;i++){ const HbBnd*b=&g_hb_bnd[i]; uint8_t*p=h3+b->rva; const uint8_t*want=off?b->patch:b->orig; if(!memcmp(p,want,b->n)) continue;
         uintptr_t pg=(uintptr_t)p & ~0xFFFull; mprotect((void*)pg,0x2000,PROT_READ|PROT_WRITE|PROT_EXEC); memcpy(p,want,(size_t)b->n); sys_icache_invalidate(p,(size_t)b->n); }
     (void)!write(2,off?"  [bounds] map boundaries OFF (kill volumes, safe zones, soft ceilings skipped; slip surfaces walkable)\n":"  [bounds] map boundaries back ON\n",off?104:36); }
+// ---- Invisible walls (player clip) off at run time (backlog 18; map-boundaries.md 2c) ----------------------------------------
+// Bipeds and vehicles collide with the level through Havok: for each collision BSP surface its MOPP tree returns, the shape
+// collections' getChildShape (halo3+0x21c0f8 structure, 0x21cf6c instances) build a convex polygon shape with halo3+0x21b4d8
+// (vertex count byte +0x2e, vertices from +0x40, 16 bytes each). The patch at that builder's exit (halo3+0x21b759, prepared
+// by peload.c invwalls_prepare) drops the vertices of a surface flagged invisible (flag 2) to z = -20000, so nothing touches
+// it any more. Bullets and line of sight already passed through (collision_bsp_test_vector skips the flag). Written at the
+// frame safe point like the boundaries, only over the expected bytes. g_inv_hidden counts hidden polygons.
+uint8_t g_inv_orig[15], g_inv_patch[15]; volatile int g_inv_ready; volatile uint64_t g_inv_hidden; volatile int g_hb_inv_req=-1;
+int hb_invwalls_off(void){ uint8_t*h3=hb_halo3_base(); if(!h3 || !g_inv_ready) return -1; const uint8_t*p=h3+0x21b759;
+    return !memcmp(p,g_inv_patch,15)?1:!memcmp(p,g_inv_orig,15)?0:-1; }
+static void hb_invwalls_set(uint8_t*h3,int off){ if(!g_inv_ready) return; uint8_t*p=h3+0x21b759; const uint8_t*want=off?g_inv_patch:g_inv_orig;
+    if(!memcmp(p,want,15)) return;
+    if(memcmp(p,off?g_inv_orig:g_inv_patch,15)){ (void)!write(2,"  [invwalls] halo3+21b759 holds unexpected bytes: not changed\n",62); return; }
+    uintptr_t pg=(uintptr_t)p & ~0xFFFull; mprotect((void*)pg,0x2000,PROT_READ|PROT_WRITE|PROT_EXEC); memcpy(p,want,15); sys_icache_invalidate(p,15);
+    (void)!write(2,off?"  [invwalls] invisible walls OFF (player clip no longer collides)\n":"  [invwalls] invisible walls back ON\n",off?65:37); }
 static void hb_engine_jobs(void){
     // the simulation thread: its own TLS block holds the live object table (worker threads have no game state there)
     static int why_logged; uint8_t*h3=hb_halo3_base(); if(!h3) return; uint32_t idx=*(volatile uint32_t*)(h3+0xa39f9c); if(idx>=128) return;
@@ -755,13 +770,15 @@ static void hb_engine_jobs(void){
     { uint8_t*gg=*(uint8_t**)((uint8_t*)tarr[idx]+0x48); int st=gg?gg[0x11]:-1;
       // PELOAD_TELEPORT_CLIENT_TEST=1: run it on a client anyway -- an experiment to see whether the host accepts or
       // corrects a position the client set itself (local test games only)
-      if(st!=5 && st!=1 && g_hb_bnd_client && g_hb_bnd_only && g_hb_bnd_req>=0){   // boundaries on a client of our host: only the patches
-          int tok=((HbLockFn)(h3+0x12c948))(); int r=g_hb_bnd_req; g_hb_bnd_req=-1; hb_bounds_set(h3,r); g_hb_bnd_only=0; g_hb_bnd_client=0; ((HbUnlockFn)(h3+0x12c9a0))(&tok); return; }
+      if(st!=5 && st!=1 && g_hb_bnd_client && g_hb_bnd_only && (g_hb_bnd_req>=0 || g_hb_inv_req>=0)){   // boundaries / invisible walls on a client of our host: only the patches
+          int tok=((HbLockFn)(h3+0x12c948))(); int r=g_hb_bnd_req; g_hb_bnd_req=-1; if(r>=0) hb_bounds_set(h3,r);
+          r=g_hb_inv_req; g_hb_inv_req=-1; if(r>=0) hb_invwalls_set(h3,r); g_hb_bnd_only=0; g_hb_bnd_client=0; ((HbUnlockFn)(h3+0x12c9a0))(&tok); return; }
       if(st!=5 && st!=1 && !getenv("PELOAD_TELEPORT_CLIENT_TEST")){ char m[140]; int k=snprintf(m,sizeof m,"  [teleport] refused: this game is hosted elsewhere (simulation type %d); only the host can move players\n",st); (void)!write(2,m,k); g_hb_tp_slot=-1; return; } }
     // halo3's game-state lock (what it holds around every tick)
     if(!*(uint64_t*)(h3+0x8f4028) || *(int32_t*)((uint8_t*)tarr[idx]+0x18)<0 || *(int32_t*)((uint8_t*)tarr[idx]+0x18)>=32){ (void)!write(2,"  [teleport] engine not ready\n",30); return; }
     int tok=((HbLockFn)(h3+0x12c948))();
     { int r=g_hb_bnd_req; if(r>=0){ g_hb_bnd_req=-1; hb_bounds_set(h3,r); } }   // boundaries first: an explore teleport follows
+    { int r=g_hb_inv_req; if(r>=0){ g_hb_inv_req=-1; hb_invwalls_set(h3,r); } }
     if(!__atomic_exchange_n(&g_hb_bnd_only,0,__ATOMIC_ACQ_REL)) hb_engine_jobs_locked(h3,tarr,idx,arr);
     ((HbUnlockFn)(h3+0x12c9a0))(&tok); }
 static void hb_engine_jobs_locked(uint8_t*h3,void**tarr,uint32_t idx,uint8_t*arr){

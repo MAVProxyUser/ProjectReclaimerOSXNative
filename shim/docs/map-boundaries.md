@@ -188,20 +188,35 @@ other code looks at the bit.** The sphere/feature tests and the Havok side (bipe
 strings `character_physics` and `hkSimpleShapePhantom`; GUESSED) never filter it. That is why bipeds and vehicles
 collide with player clip.
 
-**Consequence: there is no one-branch patch that lets bipeds through player clip.** Clearing or setting the flag
-changes nothing for movement. Options, all NOT done or verified:
-1. **Filter on the Havok side.** Find the BSP shape-collection callback that turns a MOPP shape key into a surface
-   triangle, and make it return "no shape" for invisible surfaces when the querying body is a biped (or always:
-   player clip is only meant for players and vehicles). It was not located. Edge-walk scans of the
-   physics region (`0x14xxxx..0x16xxxx`) found only the BSP3D point search `0x16a4c4`.
-   Next step: find the hkpMoppBvTreeShape setup from the sbsp "MOPP Codes" block (sbsp +0x298) or the clusters'
-   collision MOPP codes (cluster +0xC8), and its child-shape vtable.
-2. **Data:** serve a modified collision resource from the .map, as the shim already sees the map open (hb_note_map).
-   The sbsp resource is one raw-deflate page (Valhalla page 1420). Invisible surfaces share vertices and edges with
-   real geometry, so they would have to be cut out of the BSP and MOPP, not just moved. This is heavy, and it gives
-   collision that differs from what clients have.
-3. **Live with it:** on Valhalla the player-clip walls are only along the base side and the east cliff, and the
-   map's actual boundary is the safe zone plus the soft kill. Section 2a and 2b remove those.
+**Consequence: there is no one-branch patch in the vector tests that lets bipeds through player clip.** Bipeds and
+vehicles collide through Havok, which builds its own shapes from the same collision BSP:
+
+**The Havok side (FOUND 2026-10-18, CONFIRMED live).** Found dynamically with `PELOAD_BSPWATCH=ev` (peload.c: a breakpoint on
+the small-BSP flag read `0x2566b7` captures the structure BSP, then its edges/vertices pages are made unreadable and every
+reading instruction plus its caller is recorded while a biped walks; FIXES.md section 20). Guardian's structure BSP (8,856
+surfaces, 156 invisible, 7,141 vertices, matching the .map file) is read by the vector tests and by one builder:
+- `0x21b4d8` builds a Havok convex polygon shape for one surface (hkReferencedObject layout: vtable `0x7fbc58`, reference
+  count +0xa; surface index +0x20; vertex count byte +0x2e; vertices from +0x40, 16 bytes each = x, y, z minus the
+  vertex's sink, w = index | 0x3f000000; at most 8). It walks the surface's edge ring through the collision-reference
+  accessors `0x2055c4` (vertex point), `0x205660` (vertex sink), `0x2056b4` (edge vertex), `0x205710` / `0x205770`
+  (next edge), `0x2054d0` (plane). Its surface reference = `{small bsp*, large bsp*}` at [rbp-0x48], index [rbp-0x38]; the
+  tag base is `*(halo3+0x1fcf4c8)`.
+- Its callers are the getChildShape slots of two shape-container vtables: `0x21c0f8` (vtable slot `0x7fbbb0`; the key
+  is the surface index, keys <= 0x1fff also go through a breakable-surface lookup `0x21c9a8`) and `0x21cf6c` (slot
+  `0x7fbb38`, two calls: instanced geometry, with a transform).
+
+**Off switch (2026-10-18):** a patch at the builder's exit (`0x21b759`, 15 bytes) checks the surface's flags and, for an
+invisible one, moves every vertex to z = -20000: the MOPP still returns the key, the narrowphase finds nothing near.
+Stats page button **Invisible walls on/off** (`POST /control?do=invwalls&off=0|1`; host with PELOAD_ALLOW_TELEPORT=1, or a
+client of our host, forwarded: the host and that client both patch, the client only when the host accepted);
+`PELOAD_INVWALLS_OFF=1` at launch; `PELOAD_INVWALLS_LOG=1` counts hidden polygons. Live test (direct Guardian, a thin
+player-clip wall at y = -19.35, floor on both sides, teleported 1.8 units away and walked at it 8 s): walls on, the biped
+stops at y = -19.16 (north side) / -19.54 (south side); switched off at run time, it walks through to -21.24 and falls
+down the drop the wall guards. Not affected: the vector tests (bullets already passed through), object collision models.
+Many invisible walls guard drops or the map's edge: with them off, the kill volumes (2a) are what's left.
+
+Earlier options considered (superseded): serving a modified collision resource from the .map (invisible surfaces share
+vertices and edges with real geometry, and it would differ from what clients have), or living with it.
 
 ### 2d. World limits an explorer meets next
 

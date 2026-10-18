@@ -32,7 +32,7 @@ cat <<'EOF'
 #include <libkern/OSCacheControl.h>
 static uint8_t*g_hookpool; static uint64_t g_hookoff;
 EOF
-cut_block src/peload.c '// ---- object_get_origin on a deleted object (backlog 60)' '// Second site, same shared_ptr'
+cut_block src/peload.c '// ---- object_get_origin on a deleted object (backlog 60)' '// ---- '   # up to the next section
 cat <<'EOF'
 typedef uint64_t (__attribute__((ms_abi)) *thunk_t)(void*table,void*out);
 static int fails;

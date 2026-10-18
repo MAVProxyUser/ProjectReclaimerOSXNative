@@ -272,7 +272,11 @@ beside the death heatmap with the player details under it (right); Connected; th
 - **Tools**: Teleport (only with `PELOAD_ALLOW_TELEPORT`), **Capture frame** (saves the frame,
   its depth buffer and the camera position to `~/reclaimer_cap_*` for reporting a rendering glitch at a spot; the overlay
   is not in it), **Mic** (live / muted), and in games you host a **Speed** menu: everyone's movement speed (the game
-  variant's own speed trait, 25% to 300%). Every switch costs nothing while it is off.
+  variant's own speed trait, 25% to 300%; **Speed 2x** in one click). With `PELOAD_ALLOW_TELEPORT=1` in a game you host,
+  or as a client of our local server (`bash shim/dedicated.sh`; the request goes to the server, which does it for
+  everyone): **Boundaries on/off** (kill zones, safe zones, soft ceilings) and **Invisible walls on/off** (player clip:
+  the collision you can't see -- careful, many of those walls guard drops or the map's edge). Every switch costs nothing
+  while it is off.
   **Map vote** votes a card of the lobby's map ballot between games for you (off / card 1-3 / none of the above; the
   client's own vote, sent as the ballot opens -- a joined client never shows the ballot screen; `PELOAD_AUTOVOTE_MAP` at
   launch) and **Called votes** answers kick / end-round / shuffle votes other players call with F5 (yes) or F6 (no)
@@ -368,7 +372,8 @@ Machine-readable endpoints:
   the snapshot's `rec` -- the recorder's state (`POST /control?do=rec&secs=<n>&mode=av|audio` starts one, `do=recstop`
   ends it)
 - `POST /control?do=<hitboxes|tracers|info|items|vehicles|visible|zones|zonetype&t=|weaktype&t=|teams|textup|textdown|
-  teleport|tpnext&slot=|tpto&x=&y=&z=|capture|mic&on=|speed&v=|rec&secs=&mode=|recstop|mute|unmute|muteall|unmuteall>[&voice=<id>]` with an
+  teleport|tpnext&slot=|tpto&x=&y=&z=|bounds&off=|invwalls&off=|capture|mic&on=|speed&v=|rec&secs=&mode=|recstop|mute|unmute|
+  muteall|unmuteall>[&voice=<id>]` with an
   `X-Reclaimer-Control: 1` header (other web pages can't send it);
   `PELOAD_STATS_READONLY=1` turns the controls off. The overlay panel's per-feature settings:
   `POST /control?do=feat&f=<hitboxes|vehicles|tracers|info|items|zones, comma-separated, or all>` with any of `&on=0|1`,

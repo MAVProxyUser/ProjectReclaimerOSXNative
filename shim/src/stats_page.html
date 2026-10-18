@@ -742,7 +742,7 @@ function renderOverlay(){ const o=snap&&snap.overlay; if(!o) return; renderPanel
   // exploring past the map's edges (games you host with PELOAD_ALLOW_TELEPORT=1): boundaries switch + this map's spots
   { const ex=document.getElementById('expl'), can=o.controls&&o.teleport&&o.host, fwd=o.controls&&!o.host&&o.tp_forward, spots=can?(o.spots||[]):[];
     const sp2=o.speed_idx===9, cansp=o.controls&&(o.host||fwd)&&('speed_idx' in o);   // ('speed_idx': a loader that forwards speed)
-    const key=JSON.stringify([spots.map(p=>p.id),o.bounds_off,can,fwd,sp2,cansp]);
+    const key=JSON.stringify([spots.map(p=>p.id),o.bounds_off,o.invwalls_off,can,fwd,sp2,cansp]);
     if(ex.dataset.k!==key){ ex.dataset.k=key; ex.textContent='';
       // 2x speed for everyone (the host's variant trait): games you host, or a client of our local server (forwarded)
       if(cansp){ const b=document.createElement('button'); b.dataset.a='speed2x'; b.classList.toggle('on',sp2); b.textContent=sp2?'Speed 2x (on)':'Speed 2x';
@@ -750,6 +750,9 @@ function renderOverlay(){ const o=snap&&snap.overlay; if(!o) return; renderPanel
       if(o.bounds_off!==null && o.bounds_off!==undefined){ const b=document.createElement('button'); b.dataset.a='bounds'; b.classList.toggle('on',!!o.bounds_off);
         b.textContent=o.bounds_off?'Boundaries off':'Boundaries on'; b.disabled=!(can||fwd);
         b.title=can?(o.bounds_off?'Kill zones, safe zones and soft ceilings are skipped for players. Click to turn them back on.':'Click to switch off the kill zones, safe zones and soft ceilings for players (games you host).'):'host the game with PELOAD_ALLOW_TELEPORT=1'; ex.appendChild(b); }
+      if(o.invwalls_off!==null && o.invwalls_off!==undefined){ const b=document.createElement('button'); b.dataset.a='invwalls'; b.classList.toggle('on',!!o.invwalls_off);
+        b.textContent=o.invwalls_off?'Invisible walls off':'Invisible walls on'; b.disabled=!(can||fwd);
+        b.title=(can||fwd)?(o.invwalls_off?'Player clip (the invisible walls) no longer stops anyone. Click to put it back.':'Click to switch off the invisible walls (player clip) for everyone -- careful, many guard drops. Games you host / our local server.'):'only in a game you host (PELOAD_ALLOW_TELEPORT=1) or on our local server'; ex.appendChild(b); }
       for(const p of spots){ const b=document.createElement('button'); b.dataset.a='explore'; b.dataset.spot=p.id; b.textContent=p.label; b.disabled=!can;
         b.title=can?`Boundaries off, then teleport yourself to ${p.x}, ${p.y}, ${p.z} (past the map's edge)`:'host the game with PELOAD_ALLOW_TELEPORT=1'; ex.appendChild(b); } } }
   { const sl=document.getElementById('spdl'), sel=document.getElementById('spd'), can=o.controls&&(o.host&&snap&&snap.variant || !o.host&&o.tp_forward&&('speed_idx' in o));
@@ -763,7 +766,7 @@ function renderOverlay(){ const o=snap&&snap.overlay; if(!o) return; renderPanel
   document.getElementById('ovmsg').textContent=o.controls?'':'controls are off (PELOAD_STATS_READONLY)'; }
 document.getElementById('ov').addEventListener('click',async e=>{ const b=e.target.closest('button[data-a]'); if(!b||b.disabled) return;   // (the zone chips post their own)
   const msg=document.getElementById('ovmsg');
-  const ov=snap&&snap.overlay, extra=b.dataset.a==='spar'?'&on='+(ov&&ov.spar?0:1):b.dataset.a==='bounds'?'&off='+(ov&&ov.bounds_off?0:1):b.dataset.a==='explore'?'&spot='+encodeURIComponent(b.dataset.spot):b.dataset.a==='mic'?'&on='+(ov&&ov.mic==='muted'?1:0):'';
+  const ov=snap&&snap.overlay, extra=b.dataset.a==='spar'?'&on='+(ov&&ov.spar?0:1):b.dataset.a==='bounds'?'&off='+(ov&&ov.bounds_off?0:1):b.dataset.a==='invwalls'?'&off='+(ov&&ov.invwalls_off?0:1):b.dataset.a==='explore'?'&spot='+encodeURIComponent(b.dataset.spot):b.dataset.a==='mic'?'&on='+(ov&&ov.mic==='muted'?1:0):'';
   const q=b.dataset.a==='speed2x'?'speed&v='+(ov&&ov.speed_idx===9?0:9):b.dataset.a+extra;
   try{ const r=await fetch('/control?do='+q,{method:'POST',headers:{'X-Reclaimer-Control':'1'}}); const j=await r.json();
     msg.textContent=j.ok?(b.dataset.a==='capture'?'captured: ~/reclaimer_cap_*.bmp/.txt':''):(j.error||'failed'); }

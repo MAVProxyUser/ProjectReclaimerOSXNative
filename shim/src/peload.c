@@ -9214,6 +9214,8 @@ static void hook_install(void); // fwd (PELOAD_HOOK trace detours)
 static void skinguard_install(uint8_t*halo3base); // fwd (PELOAD_SKINGUARD null-key guard)
 static void vtguard_install(uint8_t*halo3base); // fwd (PELOAD_VTGUARD null-vtable release guard)
 static void originguard_install(uint8_t*base); // fwd (backlog 60)
+static void bspwatch_install(uint8_t*base); // fwd (PELOAD_BSPWATCH RE tool)
+static void invwalls_prepare(uint8_t*base); // fwd (backlog 18)
 static void hbdel_install(uint8_t*base);
 static void h3set_install(uint8_t*halo3base);   // fwd (PELOAD_H3 engine globals)
 static void capcb1_install(uint8_t*halo3base); // fwd (PELOAD_D3DGL_CAPCB1 per-section decompression capture)
@@ -10723,7 +10725,7 @@ static uint8_t *load_guest(const char *path, const char *name){
     // BEFORE its DllMain/TLS callbacks run, so its __declspec(thread) globals resolve
     // to its own data instead of aliasing the exe's TLS block (index 0).
     if(opt->Dir[DIR_TLS].VA) register_tls((void*)(base+opt->Dir[DIR_TLS].VA), base, -1);
-    if(strcasestr(name,"halo3")){ waves_prefill(base); patch_install(); hook_install(); skinguard_install(base); vtguard_install(base); originguard_install(base); hbdel_install(base); st_events_install(base); capcb1_install(base); h3set_install(base); } // patches can target halo3 now it's mapped
+    if(strcasestr(name,"halo3")){ waves_prefill(base); patch_install(); hook_install(); skinguard_install(base); vtguard_install(base); originguard_install(base); invwalls_prepare(base); bspwatch_install(base); hbdel_install(base); st_events_install(base); capcb1_install(base); h3set_install(base); } // patches can target halo3 now it's mapped
     ws("  guest "); ws(name); ws(" @ "); whex((uint64_t)base);
     uint64_t ep=opt->EntryRVA;
     if(ep){ int (MSABI *dm)(void*,uint32_t,void*)=(void*)(base+ep); int r=dm(base,1,0);
@@ -11198,6 +11200,60 @@ static void originguard_install(uint8_t*base){ if(getenv("PELOAD_NO_ORIGINGUARD"
     static const uint8_t o2[20]={0x4d,0x8b,0x4c,0xc9,0x10, 0x4d,0x8b,0xc2, 0x48,0x6b,0xc0,0x34, 0x49,0x0f,0xbf,0x89,0x38,0x01,0x00,0x00}, t2[3]={0x4d,0x85,0xc9};   // test r9,r9
     originguard_one(base,0x3451e3,o1,14,5,t1,0x345232); originguard_one(base,0x345213,o2,20,5,t2,0x345232);
     (void)!write(2,"  [originguard] object_get_origin: an empty object / parent slot gives (0,0,0) instead of a crash\n",98); }
+// ---- Invisible walls off: the polygon-shape builder's exit patch (backlog 18; state + switch in hitbox.c) ----------------------
+// halo3+0x21b4d8 builds the Havok convex polygon shape (rbx) of collision BSP surface [rbp-0x38] of the bsp reference at
+// [rbp-0x48] = {small bsp*, large bsp*} (surfaces block address/4 at bsp +0x40 from the tag base *(halo3+0x1fcf4c8); small:
+// 12-byte surfaces, flags +0xa; large: 16-byte, flags +0xe). The patch replaces its exit (15 bytes @0x21b759: mov rax,rbx /
+// lea r11,[rsp+0x80] / mov rbx,[r11+0x38]) with a jump to a check: flag 2 (invisible) -> every vertex's z = -20000. It uses
+// only rax/rcx/rdx/r8/r9 (which that function writes anyway) and jumps without a register (halo3 is whole-program
+// optimised, FIXES.md section 17). Prepared at load; hb_invwalls_set writes / removes the 15 bytes at the frame safe point.
+// PELOAD_INVWALLS_OFF=1 writes it at load (tests).
+static void* invwalls_log(void*a){ (void)a; pthread_setname_np("shim-invwalls"); uint64_t last=0;   // PELOAD_INVWALLS_LOG=1: hidden polygons every 5 s
+    for(;;){ sleep(5); uint64_t n=g_inv_hidden; if(n!=last){ char m[96]; int k=snprintf(m,sizeof m,"  [invwalls] %llu invisible polygons hidden (+%llu)\n",(unsigned long long)n,(unsigned long long)(n-last)); (void)!write(2,m,k); last=n; } }
+    return 0; }
+static void invwalls_prepare(uint8_t*base){
+    static const uint8_t want[19]={0x4c,0x89,0x6b,0x10, 0x48,0x8b,0xc3, 0x4c,0x8d,0x9c,0x24,0x80,0x00,0x00,0x00, 0x49,0x8b,0x5b,0x38};
+    uint8_t*site=base+0x21b759; if(memcmp(site-4,want,19)){ (void)!write(2,"  [invwalls] halo3+21b755 holds other bytes: switch unavailable\n",64); return; }
+    if(!g_hookpool){ g_hookpool=mmap(0,1<<20,PROT_READ|PROT_WRITE|PROT_EXEC,MAP_PRIVATE|MAP_ANON,-1,0); if(g_hookpool==MAP_FAILED){g_hookpool=0;return;} }
+    uint8_t*t=g_hookpool+g_hookoff, *w=t; uint8_t *j_large, *j_done[8]; int nd=0; uint8_t *j_hide, *l_loop, *j_loopdone;
+#define E(...) do{ const uint8_t _b[]={__VA_ARGS__}; memcpy(w,_b,sizeof _b); w+=sizeof _b; }while(0)
+#define JZ_DONE() do{ E(0x74,0); j_done[nd++]=w-1; }while(0)
+    E(0x48,0x8B,0x4D,0xB8);                         // mov rcx,[rbp-0x48]      small bsp*
+    E(0x44,0x8B,0x45,0xC8);                         // mov r8d,[rbp-0x38]      surface index
+    E(0x48,0xB8); { uint64_t a=(uint64_t)(base+0x1fcf4c8); memcpy(w,&a,8); w+=8; }   // mov rax,&tag base
+    E(0x48,0x8B,0x00);                              // mov rax,[rax]
+    E(0x48,0x85,0xC9); E(0x74,0); j_large=w-1;      // test rcx,rcx ; jz large
+    E(0x8B,0x51,0x40); E(0x85,0xD2); JZ_DONE();     // mov edx,[rcx+0x40] ; test edx,edx ; jz done
+    E(0x48,0x8D,0x14,0x90);                         // lea rdx,[rax+rdx*4]     surfaces
+    E(0x4F,0x8D,0x0C,0x40);                         // lea r9,[r8+r8*2]
+    E(0x42,0xF6,0x44,0x8A,0x0A,0x02); JZ_DONE();    // test byte [rdx+r9*4+0xa],2 ; jz done
+    E(0xEB,0); j_hide=w-1;                          // jmp hide
+    *j_large=(uint8_t)(w-(j_large+1));
+    E(0x48,0x8B,0x4D,0xC0);                         // mov rcx,[rbp-0x40]      large bsp*
+    E(0x48,0x85,0xC9); JZ_DONE();
+    E(0x8B,0x51,0x40); E(0x85,0xD2); JZ_DONE();
+    E(0x48,0x8D,0x14,0x90);                         // lea rdx,[rax+rdx*4]
+    E(0x4D,0x8B,0xC8); E(0x49,0xC1,0xE1,0x04);      // mov r9,r8 ; shl r9,4
+    E(0x42,0xF6,0x44,0x0A,0x0E,0x02); JZ_DONE();    // test byte [rdx+r9+0xe],2 ; jz done
+    *j_hide=(uint8_t)(w-(j_hide+1));
+    E(0x48,0xB8); { uint64_t a=(uint64_t)&g_inv_hidden; memcpy(w,&a,8); w+=8; } E(0xF0,0x48,0xFF,0x00);   // lock inc qword [&g_inv_hidden]
+    E(0x0F,0xB6,0x4B,0x2E);                         // movzx ecx,byte [rbx+0x2e]   vertex count
+    E(0x83,0xF9,0x08); E(0x76,0x05); E(0xB9,0x08,0x00,0x00,0x00);   // cmp ecx,8 ; jbe +5 ; mov ecx,8
+    E(0x48,0x8D,0x53,0x48);                         // lea rdx,[rbx+0x48]      vertex 0's z
+    E(0xB8,0x00,0x40,0x9C,0xC6);                    // mov eax,-20000.0f
+    l_loop=w; E(0x85,0xC9); E(0x74,0); j_loopdone=w-1;   // test ecx,ecx ; jz done
+    E(0x89,0x02); E(0x48,0x83,0xC2,0x10); E(0xFF,0xC9); // mov [rdx],eax ; add rdx,16 ; dec ecx
+    E(0xEB,0); w[-1]=(uint8_t)(l_loop-w);           // jmp loop
+    *j_loopdone=(uint8_t)(w-(j_loopdone+1));
+    for(int i=0;i<nd;i++) *j_done[i]=(uint8_t)(w-(j_done[i]+1));
+    memcpy(w,site,15); w+=15;                       // the replaced exit (position-independent)
+    w=jmp_abs_noreg(w,site+15);
+#undef JZ_DONE
+#undef E
+    sys_icache_invalidate(t,(size_t)(w-t)); g_hookoff+=(uint64_t)((w-t+15)&~15);
+    memcpy(g_inv_orig,site,15); jmp_abs_noreg(g_inv_patch,t); g_inv_patch[14]=0x90; g_inv_ready=1;
+    if(getenv("PELOAD_INVWALLS_OFF")) hb_invwalls_set(base,1);
+    if(getenv("PELOAD_INVWALLS_LOG")){ pthread_t th; if(!pthread_create(&th,0,invwalls_log,0)) pthread_detach(th); } }
 // Second site, same shared_ptr control-block release (halo3+0x172e88, called from the sweep at 0x172c49): a
 // player joining a match in progress faulted at RVA 0x172FA0 (`call [rax]` with a NULL vtable) a few
 // seconds after the map was ready. mov rax,[rbx] / mov rcx,rbx / call [rax] / mov eax,edi / lock xadd
@@ -11284,6 +11340,73 @@ static void hbdel_install(uint8_t*base){
     else (void)!write(2,"  [hbdel] object_delete prologue differs: not hooked\n",52); }
 static void vtguard_install(uint8_t*halo3base){ if(!getenv("PELOAD_VTGUARD")) return; vtguard_one(halo3base,0x172bce,17,0x172bee);
     vtguard_one(halo3base,0x172f9a,15,0x172fb7); }
+// ---- PELOAD_BSPWATCH=s|e|v|sev: who reads a collision BSP's surfaces / edges / vertices (backlog 18 RE tool, debug only) -
+// A breakpoint on halo3+0x2566b7 (collision_bsp_test_vector's small-BSP surface flag read: r12 = the collision bsp, r15 =
+// the tag address base; a block = {i32 count, u32 address/4} at +0x3c surfaces (12 B), +0x48 edges (12 B), +0x54 vertices
+// (16 B)) keeps the bsp with the most surfaces over PELOAD_BSPWATCH_HITS (3000) hits. Then the pages of the chosen arrays
+// (letters s/e/v; "1" = all) are made unreadable; a fault records the instruction (per array: s/e/v, or o = other data on
+// a shared page) and opens THAT page only (one hot reader must not hide the rest); the watcher closes open pages again
+// every 20 ms. Every 5 s "[bspwatch]" lists the readers. Purpose: find the Havok shape callback that turns a MOPP key into
+// a surface triangle (invisible walls off, map-boundaries.md 2c).
+static uint64_t g_bw_bp; static uint8_t g_bw_bporig; static __thread int t_bw_rearm;
+static volatile uint64_t g_bw_bsp, g_bw_base; static volatile int g_bw_best=-1, g_bw_hits, g_bw_ready;
+static uint64_t g_bw_lo[3], g_bw_hi[3]; static volatile uint64_t g_bw_pglo, g_bw_pghi;
+#define BW_PAGES 4096
+static uint8_t g_bw_watch[BW_PAGES]; static volatile uint8_t g_bw_open[BW_PAGES];
+#define BW_N 256
+static volatile uint64_t g_bw_rip[BW_N], g_bw_ret[BW_N]; static volatile uint32_t g_bw_cnt[BW_N][4];
+static int bw_trap(ucontext_t*uc,uint64_t hit){      // SIGTRAP: 1 = ours
+    if(t_bw_rearm){ t_bw_rearm=0; if(!g_bw_ready){ *(uint8_t*)g_bw_bp=0xCC; sys_icache_invalidate((void*)g_bw_bp,1); } uc->uc_mcontext->__ss.__rflags&=~0x100ull; return 1; }
+    if(!g_bw_bp || hit!=g_bw_bp) return 0;
+    *(uint8_t*)g_bw_bp=g_bw_bporig; sys_icache_invalidate((void*)g_bw_bp,1); uc->uc_mcontext->__ss.__rip=hit;
+    uint64_t bsp=uc->uc_mcontext->__ss.__r12, base=uc->uc_mcontext->__ss.__r15; int n=*(int32_t*)(bsp+0x3c);
+    if(n>g_bw_best){ g_bw_best=n; g_bw_bsp=bsp; g_bw_base=base; }
+    static long lim=-1; if(lim<0){ const char*e=getenv("PELOAD_BSPWATCH_HITS"); lim=e?atol(e):3000; }
+    if(++g_bw_hits>=lim){ g_bw_ready=1; return 1; }                  // stays off
+    uc->uc_mcontext->__ss.__rflags|=0x100ull; t_bw_rearm=1; return 1; }   // single-step the original, then re-plant
+static int bw_fault(uint64_t a,uint64_t rip,uint64_t rsp){   // SIGSEGV/SIGBUS: 1 = ours (that page opened again)
+    if(!g_bw_pghi || a<g_bw_pglo || a>=g_bw_pghi) return 0;
+    uint64_t pi=(a-g_bw_pglo)>>12; if(!g_bw_watch[pi]) return 0;
+    int k=3; for(int i=0;i<3;i++) if(a>=g_bw_lo[i]&&a<g_bw_hi[i]) k=i;
+    // [rsp] = the caller for a frameless leaf (the collision BSP accessors at halo3+0x2055c4..); else whatever is there
+    uint64_t ret=*(uint64_t*)rsp; if(ret<0x180001000ull||ret>=0x187000000ull) ret=0;
+    for(int i=0;i<BW_N;i++){ uint64_t r=g_bw_rip[i];
+        if(r==rip && g_bw_ret[i]==ret){ __sync_fetch_and_add(&g_bw_cnt[i][k],1); break; }
+        if(!r && __sync_bool_compare_and_swap(&g_bw_rip[i],0,rip)){ g_bw_ret[i]=ret; __sync_fetch_and_add(&g_bw_cnt[i][k],1); break; } }
+    mprotect((void*)(g_bw_pglo+(pi<<12)),0x1000,PROT_READ|PROT_WRITE); g_bw_open[pi]=1; return 1; }
+static void* bw_thread(void*arg){ (void)arg; pthread_setname_np("shim-bspwatch");
+    while(!g_bw_ready) usleep(100000);
+    const char*sel=getenv("PELOAD_BSPWATCH"); int all=!strcmp(sel,"1");
+    uint64_t bsp=g_bw_bsp, base=g_bw_base; static const int off[3]={0x3c,0x48,0x54}, sz[3]={12,12,16};
+    char m[300]; int k=snprintf(m,sizeof m,"  [bspwatch] bsp %llx base %llx after %d hits:",(unsigned long long)bsp,(unsigned long long)base,g_bw_hits);
+    uint64_t lo=~0ull, hi=0;
+    for(int i=0;i<3;i++){ int n=*(int32_t*)(bsp+off[i]); uint32_t ad=*(uint32_t*)(bsp+off[i]+4); g_bw_lo[i]=base+(uint64_t)ad*4; g_bw_hi[i]=g_bw_lo[i]+(uint64_t)n*sz[i];
+        int on=all||strchr(sel,"sev"[i]); k+=snprintf(m+k,sizeof m-k," %c %d @%llx%s","sev"[i],n,(unsigned long long)g_bw_lo[i],on?" (watched)":"");
+        if(on){ if(g_bw_lo[i]<lo) lo=g_bw_lo[i]; if(g_bw_hi[i]>hi) hi=g_bw_hi[i]; } }
+    int inv=0; for(int j=0;j<*(int32_t*)(bsp+0x3c);j++) if(*(uint8_t*)(g_bw_lo[0]+(uint64_t)j*12+0xa)&2) inv++;
+    k+=snprintf(m+k,sizeof m-k,", %d invisible surfaces\n",inv); (void)!write(2,m,k);
+    if(!hi) return 0;
+    uint64_t pglo=lo&~0xFFFull, pghi=(hi+0xFFF)&~0xFFFull; if((pghi-pglo)>>12 > BW_PAGES){ (void)!write(2,"  [bspwatch] too many pages\n",28); return 0; }
+    for(int i=0;i<3;i++) if(all||strchr(sel,"sev"[i])) for(uint64_t pg=g_bw_lo[i]&~0xFFFull; pg<g_bw_hi[i]; pg+=0x1000) g_bw_watch[(pg-pglo)>>12]=1;
+    g_bw_pglo=pglo; __sync_synchronize(); g_bw_pghi=pghi;
+    for(uint64_t pi=0;pi<(pghi-pglo)>>12;pi++) if(g_bw_watch[pi]) mprotect((void*)(pglo+(pi<<12)),0x1000,PROT_NONE);
+    uint64_t last=mach_absolute_time();
+    for(;;){ usleep(20000);
+        for(uint64_t pi=0;pi<(pghi-pglo)>>12;pi++) if(g_bw_open[pi]){ g_bw_open[pi]=0; __sync_synchronize(); mprotect((void*)(pglo+(pi<<12)),0x1000,PROT_NONE); }
+        if(mach_absolute_time()-last>=mt_us(5000000)){ last=mach_absolute_time(); char b[8192]; int q=snprintf(b,sizeof b,"  [bspwatch] readers (rip<[rsp]: surfaces/edges/vertices/other):");
+            for(int i=0;i<BW_N && q<(int)sizeof b-80;i++){ uint64_t r=g_bw_rip[i]; if(!r) break;
+                uint64_t rv=(r>=0x180000000ull&&r<0x187000000ull)?r-0x180000000ull:r;
+                q+=snprintf(b+q,sizeof b-q," %s%llx<%llx:%u/%u/%u/%u",(r>=0x180000000ull&&r<0x187000000ull)?"h+":"",(unsigned long long)rv,
+                    (unsigned long long)(g_bw_ret[i]?g_bw_ret[i]-0x180000000ull:0),g_bw_cnt[i][0],g_bw_cnt[i][1],g_bw_cnt[i][2],g_bw_cnt[i][3]); }
+            b[q++]='\n'; (void)!write(2,b,q); } }
+    return 0; }
+static void bspwatch_install(uint8_t*base){ if(!getenv("PELOAD_BSPWATCH")) return;
+    uint8_t*p=base+0x2566b7; static const uint8_t want[5]={0x42,0x8a,0x44,0x82,0x0a};
+    if(memcmp(p,want,5)){ (void)!write(2,"  [bspwatch] halo3+2566b7 holds other bytes: off\n",49); return; }
+    uintptr_t pg=(uintptr_t)p&~0xFFFull; mprotect((void*)pg,0x2000,PROT_READ|PROT_WRITE|PROT_EXEC);
+    g_bw_bporig=*p; g_bw_bp=(uint64_t)p; *p=0xCC; sys_icache_invalidate(p,1);
+    pthread_t t; if(!pthread_create(&t,0,bw_thread,0)) pthread_detach(t);
+    (void)!write(2,"  [bspwatch] armed on collision_bsp_test_vector (small BSP)\n",60); }
 static void bp_install(void){ const char*s=getenv("PELOAD_BP"); if(!s||!g_base) return;
     while(*s && g_bp_n<8){ uint64_t rva=strtoull(s,0,16); if(rva){ uint8_t*p=g_base+rva;
             uintptr_t pg=(uintptr_t)p & ~0xFFFull; mprotect((void*)pg,0x2000,PROT_READ|PROT_WRITE|PROT_EXEC);
@@ -11329,6 +11452,7 @@ static void dump_all_guest_stacks(void){
 static void usr1sig(int s){ (void)s; dump_all_guest_stacks(); }
 static void crashsig(int sig, siginfo_t *info, void *ucv){
     ucontext_t *uc=ucv; uint64_t rip = uc? (uint64_t)uc->uc_mcontext->__ss.__rip : 0;
+    if(g_bw_bp && uc){ if(sig==SIGTRAP && bw_trap(uc,rip-1)) return; if((sig==SIGSEGV||sig==SIGBUS) && info && bw_fault((uint64_t)info->si_addr,rip,uc->uc_mcontext->__ss.__rsp)) return; }
     if(sig==SIGTRAP && uc){
         // Re-arm phase: a prior hit set TF to single-step over the original insn;
         // this trap re-plants the int3 so the breakpoint counts EVERY hit.
@@ -11657,7 +11781,7 @@ int main(int argc, char **argv){ mt_start();
     hitbox_start(); stats_start(); bootprompt_test_start();
     { struct sigaction sa; memset(&sa,0,sizeof sa); sa.sa_sigaction=crashsig; sa.sa_flags=SA_SIGINFO;
       sigaction(SIGSEGV,&sa,0); sigaction(SIGBUS,&sa,0); sigaction(SIGILL,&sa,0); sigaction(SIGABRT,&sa,0);
-      if(getenv("PELOAD_BP")) sigaction(SIGTRAP,&sa,0); }  // PELOAD_BP software breakpoints need SIGTRAP caught (else "Trace/BPT trap")
+      if(getenv("PELOAD_BP")||getenv("PELOAD_BSPWATCH")) sigaction(SIGTRAP,&sa,0); }  // PELOAD_BP software breakpoints need SIGTRAP caught (else "Trace/BPT trap")
     { struct sigaction su; memset(&su,0,sizeof su); su.sa_handler=usr1sig; sigaction(SIGUSR1,&su,0); }  // SIGUSR1 -> guest thread dump
     { const char* nt=getenv("PELOAD_NETTEST"); if(nt){ net_selftest(nt); } }
     if(getenv("PELOAD_GLTEST")){ gl_selftest(); return 0; }  // direct GL render test; no game loaded

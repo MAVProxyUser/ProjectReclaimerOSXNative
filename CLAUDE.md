@@ -446,7 +446,8 @@ stats page "Sparring aim" toggle (do=spar&on=). hb_collect has a units-only mode
 decide what it gathers). Map boundaries tested live: host with PELOAD_PATCH=halo3+37b816:E95501000090,halo3+37b734:EB
 (the entry patch of halo3+1b8e00 is refused: the client checks that function's entry bytes), host-only teleport to a
 point POST /control?do=tpto&x=&y=&z=[&slot=] (shim/docs/map-boundaries.md); stats page buttons "Boundaries on/off"
-(do=bounds, patches written at run time at the frame safe point) and per-map spots (do=explore&spot=, g_st_spots: Valhalla east cliff). Speed-step test: the host adopts client
+(do=bounds, patches written at run time at the frame safe point) and per-map spots (do=explore&spot=, g_st_spots: Valhalla east cliff). "Invisible walls on/off" (do=invwalls&off=, 2026-10-18): an exit patch on halo3's
+Havok polygon-shape builder 0x21b4d8 moves player-clip surfaces to z = -20000 (map-boundaries.md 2c; found with PELOAD_BSPWATCH). Speed-step test: the host adopts client
 positions within 2.5 units with no speed check (shim/docs/net-authority.md).
 Teleport (PELOAD_ALLOW_TELEPORT; stats page "Teleport next to them" = POST /control?do=tpnext&slot=N, the Teleport button = opposite
 side): shim/docs/teleport.md. halo3+0x259410 (object, pos*, fwd*, up*, 1) run from hb_engine_jobs in an entry hook on

@@ -664,7 +664,7 @@ static const StSpot g_st_spots[]={
                                                                                      //   terrain, walkable only with the slip patch (boundaries off)
     {"riverworld","valhalla_north","Valhalla: north ridge",44.0f,-24.0f,10.0f},    // past the north end (y > -31.9); ground 9.4, no soft ceiling
 };
-int hb_bounds_off(void); int hb_spar_available(void);
+int hb_bounds_off(void); int hb_spar_available(void); int hb_invwalls_off(void);
 // ---- clip recording (rec.m; shim/docs/recording.md): POST /control?do=rec&secs=<n>&mode=av|audio, do=recstop; GET
 // /recordings.json, /recordings/<file>; the snapshot's "rec". The picture is the window's (its size now); no window
 // (PELOAD_HIDE_WINDOW) = sound only. The file is named after the map being played.
@@ -731,6 +731,16 @@ static int st_control(const char*act,const char*qs){
         int off=atoi(v+4)?1:0; char q[48]; snprintf(q,sizeof q,"do=bounds&off=%d",off); int ok=st_forward(hp,q);
         extern volatile int g_hb_bnd_req, g_hb_bnd_only, g_hb_bnd_client; g_hb_bnd_req=off; g_hb_bnd_only=1; g_hb_bnd_client=1; __atomic_store_n(&g_hb_job_pending,1,__ATOMIC_RELEASE);
         return ok; }
+    // invisible walls (player clip) off / on (hitbox.c hb_invwalls_set): the host, or a client of OUR host (forwarded; the client
+    // then patches its own movement too -- Halo 3 trusts a client's own movement within limits, so it is done ONLY when the
+    // host took the request: never on someone else's server)
+    if(!strcmp(act,"invwalls")){ const char*v=strstr(qs,"off="); if(!v) return 0; int off=atoi(v+4)?1:0;
+        extern volatile int g_hb_inv_req, g_hb_bnd_only, g_hb_bnd_client;
+        if(!st_is_host()){ const char*hp=getenv("PELOAD_TELEPORT_HOST"); if(!hp) return 0; char q[48]; snprintf(q,sizeof q,"do=invwalls&off=%d",off);
+            if(!st_forward(hp,q)) return 0;
+            g_hb_inv_req=off; g_hb_bnd_only=1; g_hb_bnd_client=1; __atomic_store_n(&g_hb_job_pending,1,__ATOMIC_RELEASE); return 1; }
+        if(!getenv("PELOAD_ALLOW_TELEPORT")) return 0;
+        g_hb_inv_req=off; g_hb_bnd_only=1; __atomic_store_n(&g_hb_job_pending,1,__ATOMIC_RELEASE); return 1; }
     if(!strcmp(act,"explore") || !strcmp(act,"bounds")){
         if(!getenv("PELOAD_ALLOW_TELEPORT") || !st_is_host()) return 0; extern volatile int g_hb_bnd_req;
         if(!strcmp(act,"bounds")){ const char*v=strstr(qs,"off="); if(!v) return 0; extern volatile int g_hb_bnd_only; g_hb_bnd_req=atoi(v+4)?1:0; g_hb_bnd_only=1;
@@ -1104,9 +1114,9 @@ static void st_snapshot(StBuf*s){
       if(g_gameplay_t0) st_maptop_ensure(mp,m); }   // not in the menu: its scene borrows other maps' objects
     { static int tp=-1; if(tp<0) tp=getenv("PELOAD_ALLOW_TELEPORT")?1:0; static const char*const tm[3]={"all","enemies","friends"};
       { extern int hbz_show(void), hb_wkshow(void); sb_put(s,",\"zone_show\":%d,\"weak_show\":%d",hbz_show(),hb_wkshow()); }
-      sb_put(s,",\"overlay\":{\"vehicles\":%s,\"zones\":%s,\"hitboxes\":%s,\"tracers\":%s,\"info\":%s,\"items\":%s,\"visible\":%s,\"teams\":\"%s\",\"teleport\":%s,\"host\":%s,\"tp_forward\":%s,\"controls\":%s,\"text_px\":%d,\"spar\":%s,\"spar_aim\":%.1f,\"spar_available\":%s,\"bounds_off\":%s,\"mic\":\"%s\",\"mic_in_use\":%s",
+      sb_put(s,",\"overlay\":{\"vehicles\":%s,\"zones\":%s,\"hitboxes\":%s,\"tracers\":%s,\"info\":%s,\"items\":%s,\"visible\":%s,\"teams\":\"%s\",\"teleport\":%s,\"host\":%s,\"tp_forward\":%s,\"controls\":%s,\"text_px\":%d,\"spar\":%s,\"spar_aim\":%.1f,\"spar_available\":%s,\"bounds_off\":%s,\"invwalls_off\":%s,\"mic\":\"%s\",\"mic_in_use\":%s",
           hb_feat(HBF_VEH)?"true":"false",hb_feat(HBF_ZONES)?"true":"false",hb_feat(HBF_HITBOX)?"true":"false",hb_feat(HBF_TRACER)?"true":"false",hb_feat(HBF_INFO)?"true":"false",hb_feat(HBF_ITEMS)?"true":"false",hb_feat(HBF_VISIBLE)?"true":"false",
-          tm[hb_team_mode()],tp?"true":"false",st_is_host()?"true":"false",getenv("PELOAD_TELEPORT_HOST")?"true":"false",st_controls_ok()?"true":"false",g_hb_text_px>0?g_hb_text_px:7,hb_spar_enabled()?"true":"false",g_spar_ok?(double)g_spar_err:-1.0,hb_spar_available()?"true":"false",hb_bounds_off()==1?"true":hb_bounds_off()==0?"false":"null",
+          tm[hb_team_mode()],tp?"true":"false",st_is_host()?"true":"false",getenv("PELOAD_TELEPORT_HOST")?"true":"false",st_controls_ok()?"true":"false",g_hb_text_px>0?g_hb_text_px:7,hb_spar_enabled()?"true":"false",g_spar_ok?(double)g_spar_err:-1.0,hb_spar_available()?"true":"false",hb_bounds_off()==1?"true":hb_bounds_off()==0?"false":"null",hb_invwalls_off()==1?"true":hb_invwalls_off()==0?"false":"null",
           !wa_mic_mode()||wa_mic_mode()==3?"off":wa_mic_muted()?"muted":wa_mic_mode()==2?"tone":"live",g_mic_streams>0?"true":"false");
       { int si=-1; uint64_t gg=0; uint8_t b=0; if(st_is_host()){ if(g_st_tls && hb_read(g_st_tls+0x48,&gg,8) && gg && hb_read(gg+0x1608+0x134+0x10,&b,1)) si=b; } else si=g_st_fwd_speed;
         sb_put(s,",\"speed_idx\":%d",si); }
