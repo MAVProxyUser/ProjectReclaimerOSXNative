@@ -296,6 +296,7 @@ static void wi_click_at(void*h,int x,int y){ int64_t lp=(int64_t)((y<<16)|(x&0xf
     g_keydown[1]=1; wi_raw_mouse(0,0,0x1,0); wi_post(h,0x0201,1,lp); usleep(80000);
     g_keydown[1]=0; wi_raw_mouse(0,0,0x2,0); wi_post(h,0x0202,0,lp); }
 extern volatile int g_games_ended;
+static void wi_type_char(void*h,unsigned char ch);   // (below)
 static void wi_run_steps(void*h,const char*e,useconds_t gap){ char m[96]; int k;
     for(; e && *e; e=strchr(e,';')?strchr(e,';')+1:0){
         int x=0,y=0,n=0; double secs=0; unsigned kc=0;
@@ -303,13 +304,22 @@ static void wi_run_steps(void*h,const char*e,useconds_t gap){ char m[96]; int k;
         if(sscanf(e,"w:%d,%d,%d",&x,&y,&n)==3){ int64_t lp=(int64_t)((y<<16)|(x&0xffff)); g_wi_cx=x; g_wi_cy=y; wi_post(h,0x0200,0,lp);
             for(int i=0;i<(n<0?-n:n);i++){ int16_t d=(int16_t)(n<0?-120:120); wi_raw_mouse(0,0,0x400,d); wi_post(h,0x020A,(uint64_t)((uint32_t)(uint16_t)d<<16),lp); usleep(60000); }
             k=snprintf(m,sizeof m,"  [autoclick] wheel %d at %d,%d\n",n,x,y); }
-        else if(!strncmp(e,"t:",2)){ const char*t=e+2; int c=0; for(; t[c] && t[c]!=';'; c++){ wi_post(h,0x0102/*WM_CHAR*/,(uint64_t)(uint8_t)t[c],1); usleep(40000); }
+        else if(!strncmp(e,"t:",2)){ const char*t=e+2; int c=0; for(; t[c] && t[c]!=';'; c++){ wi_type_char(h,(unsigned char)t[c]); usleep(40000); }
             k=snprintf(m,sizeof m,"  [autoclick] typed %d chars\n",c); }
         else if(sscanf(e,"k:%x",&kc)==1){ wi_key((unsigned short)kc,1,0); usleep(80000); wi_key((unsigned short)kc,0,0); k=snprintf(m,sizeof m,"  [autoclick] key 0x%x\n",kc); }
         else if(sscanf(e,"%d,%d",&x,&y)==2){ wi_click_at(h,x,y); k=snprintf(m,sizeof m,"  [autoclick] click %d,%d\n",x,y); }
         else break;
         (void)!write(2,m,k); usleep(gap); } }
 // the stats page's test hook (do=uisteps): run steps now on their own thread
+// "t:" types like a keyboard (2026-10-18): key down, WM_CHAR, key up -- the client's text input (winit) attaches a character
+// to the key event before it, so bare WM_CHARs never reached the chat box. Unshifted US-layout characters; others: WM_CHAR only.
+static void wi_type_char(void*h,unsigned char ch){
+    unsigned vk=0; if(ch>='a'&&ch<='z') vk=ch-32; else if((ch>='0'&&ch<='9')||ch==' ') vk=ch;
+    else switch(ch){ case '/': vk=0xBF; break; case '-': vk=0xBD; break; case '.': vk=0xBE; break; case ',': vk=0xBC; break; case ';': vk=0xBA; break; case '=': vk=0xBB; break; }
+    int kc=-1; if(vk) for(int k=0;k<0x80 && kc<0;k++){ WiKey wk=wi_keymap((unsigned short)k); if(wk.vk==vk) kc=k; }
+    if(kc>=0) wi_key((unsigned short)kc,1,0);
+    wi_post(h,0x0102/*WM_CHAR*/,(uint64_t)ch,1);
+    if(kc>=0){ usleep(15000); wi_key((unsigned short)kc,0,0); } }
 static void* wi_steps_thread(void*a){ char*e=a; void*h=fg_hwnd_ext(); wi_run_steps(h,e,800000); free(e); return 0; }
 void wi_steps_async(const char*e){ char*c=strdup(e); if(!c) return; pthread_t t; if(pthread_create(&t,0,wi_steps_thread,c)) free(c); else pthread_detach(t); }
 // PELOAD_AUTOCLICK_AFTER_GAME="<steps>": run these steps again PELOAD_AUTOCLICK_AFTER_DELAY s (default 8)
