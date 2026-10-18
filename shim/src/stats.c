@@ -750,6 +750,43 @@ static void st_death_event(const char*victim,int vteam,uint32_t h,int np,const S
     // a kill is an estimate (flag 1); a death without a recent hit is certain, its cause unknown
     st_pending_death(victim,vteam,killer,kteam,how); }
 static void nav_json(StBuf*s);   // nav.c (PELOAD_NAV: the walker's goal and path)
+// Weapon / equipment spawns and pickups (user, 2026-10-18: "add weapon spawns to the timeline") -> events of kind
+// "weapon" (feed, forensic archive). A weapon (object type 2) or equipment (3) that appears with no holder (datum +0x10
+// parent NONE) has spawned on the map: a dropped weapon keeps its object, a respawn loadout starts in a player's hands.
+// The first time a spawned one gets a holder it was picked up (holder = a player's unit, or the vehicle they sit in).
+// Grenades are left out (a dying player drops them as new objects). More than 8 spawns in one 100 ms snapshot (match
+// start) are one summary line. Datum: +0x00 definition, +0x10 parent, +0x50 position; unit +0x174 team.
+static struct { uint16_t salt; uint8_t live, spawned; uint32_t def, parent; } g_wt[8192]; static char g_wt_map[64];
+static void st_weapons(const uint8_t*tab,int hi,const StPlayer*pl,int np,const char*map){
+    if(strcmp(map,g_wt_map)){ memset(g_wt,0,sizeof g_wt); snprintf(g_wt_map,sizeof g_wt_map,"%s",map); }
+    if(!g_gameplay_t0 || !hi) return;
+    struct { char nm[32]; int n; } sum[24]; int ns=0, nnew=0;
+    struct { uint32_t def; float pos[3]; } pend[64]; int np2=0;
+    for(int i=0;i<hi && i<8192;i++){ const uint8_t*e=tab+i*0x18; uint16_t salt=*(const uint16_t*)e; int t=e[3];
+        if(!salt || (t!=2 && t!=3)){ g_wt[i].live=0; continue; }
+        uint64_t p=*(const uint64_t*)(e+0x10); uint8_t d[0x5c]; if(!p || !hb_read(p,d,sizeof d)) continue;
+        uint32_t def=*(const uint32_t*)d, par=*(const uint32_t*)(d+0x10);
+        if(!g_wt[i].live || g_wt[i].salt!=salt){   // a new object
+            g_wt[i].live=1; g_wt[i].salt=salt; g_wt[i].def=def; g_wt[i].parent=par; g_wt[i].spawned=0;
+            if(par!=0xFFFFFFFFu) continue; const char*nm=hb_tag_name(def); if(strstr(nm,"GRENADE")) continue;
+            g_wt[i].spawned=1; nnew++;
+            if(np2<64){ pend[np2].def=def; memcpy(pend[np2].pos,d+0x50,12); np2++; }
+            int k=0; for(; k<ns; k++) if(!strcmp(sum[k].nm,nm)) break; if(k==ns && ns<24){ snprintf(sum[ns].nm,sizeof sum[ns].nm,"%s",nm); sum[ns].n=0; ns++; } if(k<24) sum[k].n++;
+            continue; }
+        if(g_wt[i].spawned==1 && g_wt[i].parent==0xFFFFFFFFu && par!=0xFFFFFFFFu){   // picked up (first time)
+            g_wt[i].spawned=2; uint32_t holder=par; const char*who=0; int team=-1;
+            for(int pass=0;pass<2 && !who;pass++){
+                for(int k=0;k<np;k++) if(pl[k].unit==holder){ who=pl[k].name; uint64_t ud=0; uint16_t hs=*(const uint16_t*)(tab+(holder&0xFFFF)*0x18);
+                        if((holder&0xFFFF)<(uint32_t)hi && hs==(uint16_t)(holder>>16)) ud=*(const uint64_t*)(tab+(holder&0xFFFF)*0x18+0x10); if(ud) hb_read(ud+0x174,&team,4); break; }
+                if(!who && (holder&0xFFFF)<(uint32_t)hi){ uint64_t hd=*(const uint64_t*)(tab+(holder&0xFFFF)*0x18+0x10); uint32_t up=0xFFFFFFFFu; if(hd && hb_read(hd+0x10,&up,4)) holder=up; else break; } }
+            const char*nm=hb_tag_name(def); if(who) st_event_verb(0,"weapon",who,0,nm,"picked up",team,-1,0,"%s picked up %s",who,nm); }
+        g_wt[i].parent=par; }
+    if(!nnew) return;
+    if(nnew>8){ char txt[380]; int k=snprintf(txt,sizeof txt,"%d weapons and equipment spawned:",nnew);
+        for(int q=0;q<ns && k<(int)sizeof txt-40;q++) k+=snprintf(txt+k,sizeof txt-k,"%s %s%s",q?",":"",sum[q].nm,sum[q].n>1?"":""), k+=sum[q].n>1?snprintf(txt+k,sizeof txt-k," x%d",sum[q].n):0;
+        st_event_verb(0,"weapon",0,0,"","spawned",-1,-1,0,"%s",txt); return; }
+    for(int q=0;q<np2;q++){ const char*nm=hb_tag_name(pend[q].def);
+        st_event_verb(0,"weapon",0,0,nm,"spawned",-1,-1,0,"%s spawned at %.1f, %.1f, %.1f",nm,pend[q].pos[0],pend[q].pos[1],pend[q].pos[2]); } }
 static void st_snapshot(StBuf*s){
     static const char* teams[8]={"red","blue","green","orange","purple","gold","brown","pink"};
     extern double g_gameplay_t0; double now=mono_s();
@@ -778,6 +815,7 @@ static void st_snapshot(StBuf*s){
     #define ST_DATUM(h) ((((h)&0xFFFF)<(uint32_t)hi && (h)!=0xFFFFFFFFu && *(uint16_t*)(tab+((h)&0xFFFF)*0x18)==(uint16_t)((h)>>16)) ? *(uint64_t*)(tab+((h)&0xFFFF)*0x18+0x10) : 0)
     #define ST_TYPE(h) (tab[((h)&0xFFFF)*0x18+3])
     StPlayer pl[256]; int np=st_players(pl,256);
+    st_weapons(tab,hi,pl,np,m);   // weapon / equipment spawns + pickups -> events
     float cam[3]={0}, fwd[3]={0}; int camok=0; { float vp[32]; unsigned s0=g_hb_vpseq; memcpy(vp,g_hb_vp,sizeof vp); if(!(s0&1) && g_hb_vpseq==s0 && (vp[28]||vp[29]||vp[30])){ memcpy(cam,vp+28,12);
         float l=sqrtf(vp[12]*vp[12]+vp[13]*vp[13]+vp[14]*vp[14]); if(l>0){ fwd[0]=vp[12]/l; fwd[1]=vp[13]/l; fwd[2]=vp[14]/l; camok=1; } } }
     // The local player (stats "you", the overlay's friend/enemy split). Halo 3's player mapping (TLS +0x110; layout in
