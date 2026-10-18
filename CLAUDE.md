@@ -239,7 +239,8 @@ Big games (2026-10-18, PERF-PLAN "80-100 player games"): the limit is halo3's MA
 Rosetta: halo3 code 55-60%, client hooks 8-10%, host memmove ~20% = its ~14 MB game-state copies ~5 a frame, malloc), not the
 GL helper (0 ms waited in the slowest stretches). BTB: Valhalla median 63 fps / p10 39, Highground 50 / 28. COW in-match A/B
 +4%. PELOAD_PAR_MEMCPY=<helpers> copies big (>= 2 MB) non-overlapping guest copies in 1 MB chunks on helper threads
-(shim-copy; Rosetta bench 5 x 14 MB 4.0 -> 2.0 ms; PELOAD_PAR_CHECK=1 verifies: 6,145 copies, 0 mismatches; PELOAD_AB=parcopy).
+(shim-copy; Rosetta bench 5 x 14 MB 4.0 -> 2.0 ms; PELOAD_PAR_CHECK=1 verifies: 6,145 copies, 0 mismatches; PELOAD_AB=parcopy) --
+BTB A/B: COW (default) beats it by 7.7%, so it stays opt-in.
 GetSystemInfo said ONE processor + allocation granularity 0 (the client sizes ~10 thread pools from the count; halo3's
 locks at halo3+0x620170.. spin before blocking only when it is > 1 and wake at most that many waiters):
 PELOAD_SYSINFO=real reports Windows' values (hw.logicalcpu or PELOAD_NCPU). Both opt-in until a big-game A/B.
