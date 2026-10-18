@@ -90,10 +90,60 @@ static void st_av_init(void){
     if(g_av_map==-2){ const char*e=getenv("PELOAD_AUTOVOTE_MAP"); int v=e?atoi(e):0; g_av_map=!e?-1:!strcmp(e,"none")?3:(v>=1&&v<=3)?v-1:-1; } }
 extern void wi_steps_async(const char*e);
 static void st_av_called(void){ st_av_init(); if(!g_av_calls) return; g_av_tries=0; g_av_due=mono_s()+0.5; }
-static void st_av_lobby(void){ st_av_init(); if(g_av_map<0) return; static const int y[4]={268,348,428,484}; int c=g_av_map; char st[96];
-    snprintf(st,sizeof st,"s:1;640,%d;s:1;640,%d;s:1;640,%d",y[c],y[c],y[c]); wi_steps_async(st);
-    char m[100]; int k=snprintf(m,sizeof m,"  [autovote] map ballot: clicking %s\n",c==3?"none of the above":c==0?"card 1":c==1?"card 2":"card 3"); (void)!write(2,m,k); }
+// Map ballot vote (2026-10-18; static RE of 0.9.15 .. 0.9.18): a joined client never shows the ballot screen under the loader
+// (its loading splash covers the lobby), so clicks can't vote. The client's own cast_vote(const u128*round, u64 choice)
+// (0.9.18 exe+0x8f9fe0; builds the lobby Vote message and sends it to the host) is called directly, with the round of the
+// Ballot the host broadcasts every 250 ms -- cached in a Mutex<Option<Ballot>> (0.9.18 exe+0x27d1ce0: None = 0x8000000000000000
+// in its first qword; round at size-0x20, then counts[4], seconds_left, vote_seconds). It must run on a guest thread (a TEB:
+// its send path reaches thread locals), so a worker made with our CreateThread waits for requests. Confirmed when counts[choice]
+// in the next broadcast goes up; else sent again (3 times at most; the host just overwrites a voter's choice).
+static int sig_parse(const char*s,uint8_t*b,uint8_t*m,int cap); static int64_t sig_find(uint8_t*base,const uint8_t*b,const uint8_t*m,int n);   // (peload.c)
+static void*g_bv_fn; static uint8_t*g_bv_cache; static uint64_t g_bv_size;
+static pthread_mutex_t g_bv_mx=PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_bv_cv=PTHREAD_COND_INITIALIZER;
+static uint8_t g_bv_round[16]; static uint64_t g_bv_choice; static int g_bv_req;
+static uint32_t MSABI st_bv_worker(void*a){ (void)a;
+    for(;;){ uint8_t round[16]; uint64_t ch; pthread_mutex_lock(&g_bv_mx); while(!g_bv_req) pthread_cond_wait(&g_bv_cv,&g_bv_mx);
+        memcpy(round,g_bv_round,16); ch=g_bv_choice; g_bv_req=0; pthread_mutex_unlock(&g_bv_mx);
+        ((void(MSABI*)(const void*,uint64_t))g_bv_fn)(round,ch);
+        char m[80]; int k=snprintf(m,sizeof m,"  [autovote] map ballot: vote sent (choice %d)\n",(int)ch+1); (void)!write(2,m,k); }
+    return 0; }
+static void st_bv_install(void){
+    uint8_t b[128],m[128]; int n=sig_parse("55 56 57 48 81 EC B0 00 00 00 48 8D AC 24 80 00 00 00 48 C7 45 28 FE FF FF FF 48 89 D6 48 89 CF B1 01 31 C0 F0 0F B0 0D ?? ?? ?? ?? 75 22",b,m,128);
+    int64_t r=sig_find(g_base,b,m,n); const char*why=0; uint8_t*fn=0;
+    if(r<0) why="cast_vote not found (0.9.15+ only)";
+    else { fn=g_base+r; int ok=0;   // meaning: it builds Message::Vote (tag 0x80000000000000xx) and calls lobby_send
+        for(uint8_t*q=fn;q<fn+0x120 && !ok;q++) if(q[0]==0x48&&q[1]==0xB8&&q[3]==0&&q[4]==0&&q[5]==0&&q[6]==0&&q[7]==0&&q[8]==0&&q[9]==0x80&&q[10]==0x48&&q[11]==0x89&&q[12]==0x45&&q[13]==0xA8) ok=1;
+        if(!ok) why="cast_vote match has no Vote message (another build?)"; }
+    if(!why){ n=sig_parse("31 C9 48 3B 0D ?? ?? ?? ?? 70 ?? 89 85 ?? ?? ?? ?? 48 8B 3D ?? ?? ?? ?? 8B 1D ?? ?? ?? ?? E8 ?? ?? ?? ?? 90 48 89 45 ?? 89 55 ?? 48 8D 4D ?? 48 89 FA 41 89 D8 E8 ?? ?? ?? ?? 90 81 FA 00 CA 9A 3B 0F 94 C1 48 83 F8 03 0F 92 C0",b,m,128);
+        int64_t h=sig_find(g_base,b,m,n); if(h<0) why="ballot cache not found";
+        else { uint8_t*hit=g_base+h; uint8_t*cache=hit+9+*(int32_t*)(hit+5), *recv=hit+0x18+*(int32_t*)(hit+0x14);
+            uint64_t sz=(uint64_t)(recv-cache); if(sz<0x100 || sz>0x1000) why="ballot cache size implausible"; else { g_bv_fn=fn; g_bv_cache=cache; g_bv_size=sz; } } }
+    char msg[200]; int k=why?snprintf(msg,sizeof msg,"  [stats] map ballot vote: %s\n",why)
+        :snprintf(msg,sizeof msg,"  [stats] map ballot vote: cast_vote exe+0x%llx, ballot cache exe+0x%llx (0x%llx bytes)\n",(unsigned long long)(fn-g_base),(unsigned long long)(g_bv_cache-g_base),(unsigned long long)g_bv_size);
+    (void)!write(2,msg,k);
+    if(g_bv_fn){ uint32_t tid=0; i_CreateThread(0,0,(WinThreadProc)st_bv_worker,0,0,&tid); } }
+static void st_bv_tick(double now){   // stats thread: a new open ballot -> queue our vote; confirm by its counts
+    if(!g_bv_cache || g_av_map<0) return;
+    static uint8_t voted[16]; static int tries; static double tsent; static uint8_t cnt0;
+    uint64_t tag=0; if(!hb_read((uint64_t)(uintptr_t)g_bv_cache,&tag,8) || tag==0x8000000000000000ull) { tries=0; return; }
+    uint8_t rd[0x20], rd2[0x20]; uint64_t off=g_bv_size-0x20;
+    if(!hb_read((uint64_t)(uintptr_t)(g_bv_cache+off),rd,0x20) || !hb_read((uint64_t)(uintptr_t)(g_bv_cache+off),rd2,0x20) || memcmp(rd,rd2,16)) return;
+    uint8_t*counts=rd+0x10; uint32_t left=*(uint32_t*)(rd+0x14); int ch=g_av_map;
+    if(memcmp(voted,rd,16)){   // a new ballot
+        if(!left) return;
+        memcpy(voted,rd,16); tries=0; cnt0=counts[ch];
+        if(g_bv_size==0x320){ char m[400]; int k=snprintf(m,sizeof m,"  [autovote] map ballot open (%u s):",left);   // 0.9.17+ Choice layout: map String at +0x38/+0x40
+            for(int i=0;i<3;i++){ uint64_t mp=0,ml=0; char nm[40]=""; uint8_t*opt=g_bv_cache+0x18+i*0xf8;
+                if(hb_read((uint64_t)(uintptr_t)(opt+0x38),&mp,8) && hb_read((uint64_t)(uintptr_t)(opt+0x40),&ml,8) && mp && ml<39) hb_read(mp,nm,ml);
+                k+=snprintf(m+k,sizeof m-k," %d=%s",i+1,nm[0]?nm:"?"); }
+            k+=snprintf(m+k,sizeof m-k," -> voting %s\n",ch==3?"none of the above":ch==0?"1":ch==1?"2":"3"); (void)!write(2,m,k); } }
+    else if(tries && counts[ch]>cnt0) { if(tries<99){ char m[80]; int k=snprintf(m,sizeof m,"  [autovote] map ballot: counted (%u votes for it)\n",counts[ch]); (void)!write(2,m,k); } tries=99; return; }
+    if(tries>=3 || !left || (tries && now-tsent<1.0)) return;
+    pthread_mutex_lock(&g_bv_mx); memcpy(g_bv_round,rd,16); g_bv_choice=(uint64_t)ch; g_bv_req=1; pthread_cond_signal(&g_bv_cv); pthread_mutex_unlock(&g_bv_mx);
+    tries++; tsent=now; }
+static void st_av_lobby(void){}   // (the ballot is voted through cast_vote now, st_bv_tick)
 static void st_av_tick(double now){   // stats thread, every snapshot (100 ms)
+    st_bv_tick(now);
     double due=g_av_due; if(!due || now<due) return;
     if(!g_av_calls || g_av_tries>=3){ g_av_due=0; return; }
     g_av_tries++; g_av_due=now+1.5; wi_steps_async(g_av_calls==1?"k:60":"k:61");   // macOS key codes: F5 0x60, F6 0x61
@@ -423,7 +473,7 @@ static void st_voice_install(void){ if(!stats_on() || !g_base) return;
     n=sig_parse("55 41 57 41 56 41 55 41 54 56 57 53 48 81 EC 18 01 00 00 48 8D AC 24 80 00 00 00 0F 29 B5 80 00 00 00 48 C7 45 78 FE FF FF FF 4D 89 CE 4C 89 C7 49 89 D7 48 89 CB",b,m,96);
     int64_t rv=sig_find(g_base,b,m,n); int hooked=rv>=0 && entry_hook(g_base+rv,b,19,(void*)st_on_voice);
     k=snprintf(msg,sizeof msg,"  [stats] voice: mute %s, talking indicator %s\n",g_st_setmuted?"available":"unavailable (set_muted not found)",hooked?"hooked":"unavailable (voice_recv not found)");
-    (void)!write(2,msg,k); st_chat_install(); st_addr_install(); st_slots_install(); }
+    (void)!write(2,msg,k); st_chat_install(); st_addr_install(); st_slots_install(); st_bv_install(); }
 static void st_voice_init(void){ static int done; if(done || !g_base) return; done=1;
     // 0.9.18: set_muted at its known place -> the client's expanded-session flag is at its known place too; other
     // builds pick the layout by which one holds valid records

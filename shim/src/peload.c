@@ -624,7 +624,25 @@ static uint8_t* g_fch_base; static uint64_t g_fch_size; static void fch_free_any
 static inline void free_or_fch(void*p){ if((uint64_t)((uintptr_t)p-(uintptr_t)g_fch_base)<g_fch_size) fch_free_any(p); else free(p); }
 static void*  MSABI i_HeapCreate(uint32_t o, uint64_t a, uint64_t b){ (void)o;(void)a;(void)b; return (void*)0x48454150; }
 
-// Virtual memory backed by mmap
+// Virtual memory backed by mmap. Every allocation's size is recorded (base -> size): VirtualFree(p, 0, MEM_RELEASE) -- the
+// normal way to free -- must unmap the WHOLE region; until 2026-10-18 it unmapped 4 KB (munmap(a, n ? n : 4096)), so every
+// released allocation but its first page leaked (a worker grew ~300 MB per map load). PELOAD_VA_OLDFREE=1 = old.
+static pthread_mutex_t g_va_mx=PTHREAD_MUTEX_INITIALIZER; static uintptr_t*g_va_k; static uint64_t*g_va_v; static size_t g_va_cap, g_va_n;
+static volatile uint64_t g_va_rel_n, g_va_rel_b, g_va_unknown; static volatile int64_t g_va_live;   // audit ([d3dobj] line)
+static size_t va_slot(uintptr_t k,size_t cap){ uint64_t x=k>>12; x^=x>>29; x*=0xbf58476d1ce4e5b9ull; x^=x>>32; return (size_t)x&(cap-1); }
+static void va_add(void*p,uint64_t n){ pthread_mutex_lock(&g_va_mx);
+    if((g_va_n+1)*2>=g_va_cap){ size_t nc=g_va_cap?g_va_cap*2:4096; uintptr_t*nk=calloc(nc,sizeof *nk); uint64_t*nv=calloc(nc,sizeof *nv);
+        if(nk&&nv){ for(size_t i=0;i<g_va_cap;i++) if(g_va_k[i]){ size_t s2=va_slot(g_va_k[i],nc); while(nk[s2]) s2=(s2+1)&(nc-1); nk[s2]=g_va_k[i]; nv[s2]=g_va_v[i]; }
+            free(g_va_k); free(g_va_v); g_va_k=nk; g_va_v=nv; g_va_cap=nc; } else { free(nk); free(nv); } }
+    if(g_va_cap){ size_t s2=va_slot((uintptr_t)p,g_va_cap); while(g_va_k[s2] && g_va_k[s2]!=(uintptr_t)p) s2=(s2+1)&(g_va_cap-1);
+        if(!g_va_k[s2]){ g_va_k[s2]=(uintptr_t)p; g_va_n++; } g_va_v[s2]=n; }
+    pthread_mutex_unlock(&g_va_mx); }
+static uint64_t va_get(void*p,int take){ uint64_t n=0; pthread_mutex_lock(&g_va_mx);
+    if(g_va_cap){ size_t s2=va_slot((uintptr_t)p,g_va_cap); while(g_va_k[s2] && g_va_k[s2]!=(uintptr_t)p) s2=(s2+1)&(g_va_cap-1);
+        if(g_va_k[s2]){ n=g_va_v[s2]; if(take){ g_va_k[s2]=0; g_va_n--;   // backward-shift the probe run
+                for(size_t j=(s2+1)&(g_va_cap-1); g_va_k[j]; j=(j+1)&(g_va_cap-1)){ size_t h=va_slot(g_va_k[j],g_va_cap);
+                    if(((j-h)&(g_va_cap-1)) >= ((j-s2)&(g_va_cap-1))){ g_va_k[s2]=g_va_k[j]; g_va_v[s2]=g_va_v[j]; g_va_k[j]=0; s2=j; } } } } }
+    pthread_mutex_unlock(&g_va_mx); return n; }
 static void*  MSABI i_VirtualAlloc(void *addr, uint64_t sz, uint32_t type, uint32_t prot){
     (void)type;(void)prot; uint64_t want=sz?sz:4096;
     // Trailing guard page (PELOAD_ALLOC_GUARD): the GL-on-Metal render path's SIMD texture/buffer
@@ -637,6 +655,7 @@ static void*  MSABI i_VirtualAlloc(void *addr, uint64_t sz, uint32_t type, uint3
     uint64_t guard = (getenv("PELOAD_ALLOC_GUARD") && (hint==0 || hint>=0x200000000ULL)) ? 4096 : 0;
     void *p=mmap(addr, want+guard, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANON, -1,0);
     if(getenv("PELOAD_TRACE_VA")){ char t[144]; snprintf(t,sizeof t,"  [VirtualAlloc] want=%p size=0x%llx type=0x%x -> %p (+0x%llx)\n",addr,(unsigned long long)sz,type,p==MAP_FAILED?0:p,(unsigned long long)guard); ws(t); }
+    if(p!=MAP_FAILED){ va_add(p,want+guard); __atomic_add_fetch(&g_va_live,(int64_t)(want+guard),__ATOMIC_RELAXED); }
     return p==MAP_FAILED?0:p;
 }
 static int    MSABI i_VirtualProtect(void *a, uint64_t n, uint32_t np, uint32_t *op){
@@ -649,7 +668,15 @@ static int    MSABI i_VirtualProtect(void *a, uint64_t n, uint32_t np, uint32_t 
     int r1=mprotect((void*)pg,len,pr), r2=0; if(r1!=0 && (pr&PROT_WRITE)) r2=mprotect((void*)pg,len,PROT_READ|PROT_WRITE);
     if(getenv("PELOAD_TRACE_VA")){ char t[160]; snprintf(t,sizeof t,"  [VirtualProtect] a=%p n=0x%llx np=0x%x -> pg=%p len=0x%zx pr=%d r1=%d(%s) fb=%d\n",a,(unsigned long long)n,np,(void*)pg,len,pr,r1,r1?strerror(errno):"ok",r2); ws(t);}
     return 1; }
-static int    MSABI i_VirtualFree(void *a, uint64_t n, uint32_t t){ (void)t; munmap(a,n?n:4096); return 1; }
+static int    MSABI i_VirtualFree(void *a, uint64_t n, uint32_t t){
+    static int old=-1; if(old<0) old=getenv("PELOAD_VA_OLDFREE")?1:0; if(old){ munmap(a,n?n:4096); return 1; }
+    if(!a) return 0;
+    if(t&0x8000){   // MEM_RELEASE: the whole region (n must be 0 on Windows)
+        uint64_t sz=va_get(a,1); if(!sz){ __atomic_add_fetch(&g_va_unknown,1,__ATOMIC_RELAXED); sz=n?n:4096; } else __atomic_sub_fetch(&g_va_live,(int64_t)sz,__ATOMIC_RELAXED);
+        munmap(a,sz); __atomic_add_fetch(&g_va_rel_n,1,__ATOMIC_RELAXED); __atomic_add_fetch(&g_va_rel_b,sz,__ATOMIC_RELAXED); return 1; }
+    if(t&0x4000){   // MEM_DECOMMIT: those pages (n == 0: the whole region); the region stays recorded for a later release
+        uint64_t sz=n?n:va_get(a,0); if(!sz) sz=4096; munmap(a,sz); return 1; }
+    munmap(a,n?n:4096); return 1; }
 // VirtualQuery: report a region as FREE or COMMITTED via mach_vm_region, so the
 // engine's "find 64 MB free within 2 GB of the game" scan can proceed.
 static uint64_t MSABI i_VirtualQuery(void *addr, uint8_t *mbi, uint64_t len){
@@ -1024,11 +1051,12 @@ static uint8_t g_d3dscratch[1<<20];  // fallback Map target
 static volatile uint64_t g_d3do_n[8], g_d3do_bytes[8], g_d3do_nfree[8], g_d3do_bfree[8], g_d3d_underflow, g_d3d_pending, g_d3d_keptdead, g_d3d_keptdead_il, g_d3d_keptdead_b;
 static void d3dobj_log(void){ static double tl; double now=mono_s(); if(now-tl<30.0) return; tl=now;
     if(!getenv("PELOAD_D3DOBJ_LOG") && !getenv("PELOAD_D3DGL_PROF")) return;
-    char m[600]; int k=snprintf(m,sizeof m,"  [d3dobj] live:"); uint64_t tn=0,tb=0,fn=0,fb=0;
+    malloc_statistics_t ms; memset(&ms,0,sizeof ms); malloc_zone_statistics(NULL,&ms);   // every zone
+    char m[900]; int k=snprintf(m,sizeof m,"  [d3dobj] live:"); uint64_t tn=0,tb=0,fn=0,fb=0;
     for(int i=0;i<8;i++){ if(!g_d3do_n[i]) continue; uint64_t n=g_d3do_n[i]-g_d3do_nfree[i], b=g_d3do_bytes[i]-g_d3do_bfree[i]; tn+=n; tb+=b; fn+=g_d3do_nfree[i]; fb+=g_d3do_bfree[i];
         k+=snprintf(m+k,sizeof m-k," kind%d %llu (%.1f MB)",i,(unsigned long long)n,b/1048576.0); }
-    k+=snprintf(m+k,sizeof m-k," | total %llu, %.1f MB | freed %llu (%.1f MB), pending %llu, underflows %llu | released but kept: shaders %llu (%.1f MB bytecode), input layouts %llu\n",(unsigned long long)tn,tb/1048576.0,
-        (unsigned long long)fn,fb/1048576.0,(unsigned long long)g_d3d_pending,(unsigned long long)g_d3d_underflow,(unsigned long long)g_d3d_keptdead,g_d3d_keptdead_b/1048576.0,(unsigned long long)g_d3d_keptdead_il); (void)!write(2,m,k); }
+    k+=snprintf(m+k,sizeof m-k," | total %llu, %.1f MB | freed %llu (%.1f MB), pending %llu, underflows %llu | released but kept: shaders %llu (%.1f MB bytecode), input layouts %llu | VirtualFree released %llu (%.1f MB), unknown %llu | VirtualAlloc live %.0f MB | malloc in use %.0f MB of %.0f MB\n",(unsigned long long)tn,tb/1048576.0,
+        (unsigned long long)fn,fb/1048576.0,(unsigned long long)g_d3d_pending,(unsigned long long)g_d3d_underflow,(unsigned long long)g_d3d_keptdead,g_d3d_keptdead_b/1048576.0,(unsigned long long)g_d3d_keptdead_il,(unsigned long long)g_va_rel_n,g_va_rel_b/1048576.0,(unsigned long long)g_va_unknown,g_va_live/1048576.0,(double)ms.size_in_use/1048576.0,(double)ms.size_allocated/1048576.0); (void)!write(2,m,k); }
 // Registry of live D3DObjs (open addressing, linear probing): AddRef/Release only touch pointers found here, so a
 // static object, a double release or a stray pointer is ignored instead of corrupting memory.
 static pthread_mutex_t g_live_mx=PTHREAD_MUTEX_INITIALIZER; static void** g_live; static size_t g_live_cap, g_live_n;
