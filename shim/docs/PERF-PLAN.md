@@ -467,8 +467,10 @@ detail for 1 view(s): ...". 15 s medians, M4 Max, 1920x1080 internal.
 | High, level of detail low | 13.4 | 8,530 | models lowered |
 | High, draw distance low | 16.2 | 4,464 | fades 0.25/0.50/0.50 |
 | Medium | 16.4 | 5,810 | 500 casters, lights 500+500, effects 1, fades 1/1/1, models 1 |
+| Low (own run, set in settings.json before start) | 16.2 | 4,599 | 2 shadow casters at 0.35, lights 1+3, effects 0.5, fades 0.25/0.5/0.5, models 0.5 |
+| High (own run, same way, for comparison) | 13.2 | 8,533 | as above |
 
-- At a wide vista the cost is the number of draw calls (halo3's main thread under Rosetta), so **Draw distance** is the
+- Low = Medium = draw distance low in frame rate (+21-23%): the draw distance does the work. At a wide vista the cost is the number of draw calls (halo3's main thread under Rosetta), so **Draw distance** is the
   setting that matters: -48% draws, +21% fps. Medium gets the same gain. Shadows, level of detail and Ultra's extra
   effects/models change almost nothing here (they change triangles and shader work, not draws).
 - Indoors or in small maps the draw count is much lower and the frame rate higher; these numbers are the worst case.
