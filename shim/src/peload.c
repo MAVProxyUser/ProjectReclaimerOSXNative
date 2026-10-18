@@ -3615,12 +3615,14 @@ static int64_t MSABI i_DispatchMessageW(const void*m){ if(!m) return 0; const ui
 static int    MSABI i_TranslateMessage(const void*m){ (void)m; return 0; }
 static void*  MSABI i_DefRawHandle(void){ return (void*)0x4857; }
 // display/monitor: report a single 1920x1080 primary monitor
+#define MON_W 1920
+#define MON_H 1080
 static void*  MSABI i_MonitorFromWindow(void*h,uint32_t f){ (void)h;(void)f; return (void*)0x4D01; }
 static void*  MSABI i_MonitorFromPoint(uint64_t pt,uint32_t f){ (void)pt;(void)f; return (void*)0x4D01; }
 static void*  MSABI i_MonitorFromRect(const void*r,uint32_t f){ (void)r;(void)f; return (void*)0x4D01; }
 static int    MSABI i_GetMonitorInfoW(void*h,uint8_t*mi){ (void)h; if(!mi) return 0; uint32_t cb=*(uint32_t*)mi;
-    int32_t *r=(int32_t*)(mi+4);  r[0]=0;r[1]=0;r[2]=1920;r[3]=1080;      // rcMonitor
-    int32_t *wk=(int32_t*)(mi+20); wk[0]=0;wk[1]=0;wk[2]=1920;wk[3]=1080; // rcWork
+    int32_t *r=(int32_t*)(mi+4);  r[0]=0;r[1]=0;r[2]=MON_W;r[3]=MON_H;      // rcMonitor
+    int32_t *wk=(int32_t*)(mi+20); wk[0]=0;wk[1]=0;wk[2]=MON_W;wk[3]=MON_H; // rcWork
     *(uint32_t*)(mi+36)=1;                                               // MONITORINFOF_PRIMARY
     if(cb>=104){ uint16_t*dev=(uint16_t*)(mi+40); const char*d="\\\\.\\DISPLAY1"; int i=0; for(;d[i];i++)dev[i]=(uint8_t)d[i]; dev[i]=0; }
     return 1; }
@@ -3635,7 +3637,7 @@ static int    MSABI i_GetSystemMetrics(int idx){ switch(idx){ case 0:return WIN_
 // describe. It used to return TRUE without calling the callback, so Reclaimer saw zero monitors and its egui
 // UI scale fell back to window_width/1 (pixels_per_point 1280 -> the frontend menu's widgets off-screen).
 static int    MSABI i_EnumDisplayMonitors(void*dc,const void*clip,void*cb,int64_t data){ (void)dc;(void)clip;
-    if(!cb) return 0; int32_t rc[4]={0,0,1920,1080};
+    if(!cb) return 0; int32_t rc[4]={0,0,MON_W,MON_H};
     int (__attribute__((ms_abi)) *fn)(void*,void*,int32_t*,int64_t)=cb;
     void*mon=(void*)0x4D01;   // the handle MonitorFromWindow/Point/Rect return
     fn(mon,dc,rc,data); return 1; }
@@ -9886,11 +9888,22 @@ static void* MSABI i_GetParent(void*h){ (void)h; return 0; }           // our wi
 static void* MSABI i_GetFocus(void){ return fg_hwnd(); }   // the one logical window
 static int MSABI i_RedrawWindow(void*h,const void*rc,void*rgn,uint32_t fl){ (void)h;(void)rc;(void)rgn;(void)fl; return 1; } // we present on our own thread
 static int MSABI i_EnumWindows(void*proc,int64_t lparam){ extern void* g_last_hwnd; if(!proc) return 0; int(__attribute__((ms_abi))*cb)(void*,int64_t)=proc; cb(g_last_hwnd?g_last_hwnd:(void*)0x4857,lparam); return 1; }
-static int MSABI i_EnumDisplaySettingsW(const uint16_t*dev,uint32_t mode,uint8_t*dm){ (void)dev;(void)mode; if(!dm) return 0;
-    // DEVMODEW: fill the display fields the caller reads. dmSize@68, dmFields@72,
-    // dmBitsPerPel@104, dmPelsWidth@108, dmPelsHeight@112, dmDisplayFrequency@120.
-    *(uint16_t*)(dm+68)=220; *(uint32_t*)(dm+72)=0x40000|0x80000|0x100000|0x400000;
-    *(uint32_t*)(dm+104)=32; *(uint32_t*)(dm+108)=WIN_W; *(uint32_t*)(dm+112)=WIN_H; *(uint32_t*)(dm+120)=60; return 1; }
+// EnumDisplaySettingsW: the one display mode of the monitor GetMonitorInfoW / EnumDisplayMonitors describe (1920x1080, 32 bpp,
+// 60 Hz). DEVMODEW offsets (wide strings: dmDeviceName 32 WCHAR, dmFormName 32 WCHAR): dmSize@68, dmFields@72, dmPosition@76,
+// dmBitsPerPel@168, dmPelsWidth@172, dmPelsHeight@176, dmDisplayFlags@180, dmDisplayFrequency@184. It used to write
+// DEVMODEA's offsets (104/108/112/120), so the client's Settings > Graphics read dmPelsWidth/Height = 0 ("Your display:
+// 0 x 0"; its 5 callers all take ENUM_CURRENT_SETTINGS of MonitorFromWindow's device), and it answered TRUE for every mode
+// number (an enumeration loop would never end): now mode 0 / ENUM_CURRENT (-1) / ENUM_REGISTRY (-2) only.
+// PELOAD_DEVMODE_OLD=1 = the old fill.
+static int MSABI i_EnumDisplaySettingsW(const uint16_t*dev,uint32_t mode,uint8_t*dm){ (void)dev; if(!dm) return 0;
+    if(getenv("PELOAD_DEVMODE_OLD")){ *(uint16_t*)(dm+68)=220; *(uint32_t*)(dm+72)=0x40000|0x80000|0x100000|0x400000;
+        *(uint32_t*)(dm+104)=32; *(uint32_t*)(dm+108)=WIN_W; *(uint32_t*)(dm+112)=WIN_H; *(uint32_t*)(dm+120)=60; return 1; }
+    if(mode!=0 && mode!=0xFFFFFFFFu && mode!=0xFFFFFFFEu) return 0;   // one mode
+    *(uint16_t*)(dm+64)=0x0401; *(uint16_t*)(dm+68)=220; *(uint16_t*)(dm+70)=0;   // dmSpecVersion, dmSize, dmDriverExtra
+    *(uint32_t*)(dm+72)=0x20|0x40000|0x80000|0x100000|0x200000|0x400000;          // POSITION|BITSPERPEL|PELSWIDTH|PELSHEIGHT|DISPLAYFLAGS|DISPLAYFREQUENCY
+    *(int32_t*)(dm+76)=0; *(int32_t*)(dm+80)=0; *(uint32_t*)(dm+84)=0; *(uint32_t*)(dm+88)=0;   // dmPosition, orientation, fixed output
+    *(uint32_t*)(dm+168)=32; *(uint32_t*)(dm+172)=MON_W; *(uint32_t*)(dm+176)=MON_H; *(uint32_t*)(dm+180)=0; *(uint32_t*)(dm+184)=60;
+    return 1; }
 // MISC
 static int MSABI i_SetThreadPriority(void*h,int p){ (void)h;(void)p; return 1; }
 static int32_t MSABI i_SetThreadDescription(void*h,const uint16_t*desc){ (void)h; char nm[64]; int i=0; for(; desc&&desc[i]&&i<63;i++) nm[i]=(char)desc[i]; nm[i]=0; pthread_setname_np(nm); return 0; }

@@ -153,6 +153,15 @@ patch variants by signature (section 16; shim/docs/patch-addresses.md).
 - **DPI and monitor APIs** — Why: GetDpiForWindow / GetDeviceCaps / IsProcessDPIAware / AdjustWindowRectExForDpi and
   shcore's GetDpiForMonitor were unresolved (0-returning stub); EnumDisplayMonitors never called its callback. How: a
   96-DPI 1920x1080 display; the callback is called. (10-16 5666cce)
+- **EnumDisplaySettingsW wrote DEVMODEA offsets** — `i_EnumDisplaySettingsW`. Why (backlog 69): the client's Settings >
+  Graphics said "Your display: 0 x 0". All 5 client callers take ENUM_CURRENT_SETTINGS of MonitorFromWindow's device and read
+  dmPelsWidth/Height at +0xAC/+0xB0; the shim wrote width/height at +108/+112 (the ANSI struct's offsets -- the wide one has
+  two 32-WCHAR names), and it answered TRUE for every mode number (an enumeration loop would never end). The DXGI output
+  guess in the backlog was wrong: nothing calls EnumOutputs. How: the DEVMODEW fields (dmFields POSITION | BITSPERPEL |
+  PELSWIDTH | PELSHEIGHT | DISPLAYFLAGS | DISPLAYFREQUENCY; bpp @168, width @172, height @176, frequency @184) of the same
+  1920x1080 60 Hz monitor GetMonitorInfoW / EnumDisplayMonitors describe (MON_W / MON_H, one definition now); mode 0,
+  ENUM_CURRENT and ENUM_REGISTRY only. Checked: the page reads "Your display: 1920 x 1080"; a Borderless-fullscreen profile
+  still renders at 1920x1080 (scene and back buffer). `PELOAD_DEVMODE_OLD=1` = the old fill. (10-18)
 
 ## 2. Processes, threads, exceptions
 
