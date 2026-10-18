@@ -48,6 +48,22 @@
 #include <dlfcn.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <sys/sysctl.h>
+// PELOAD_GETENV_STATS=1: count the REAL getenv lookups (environment scans) per call site every 10 s. Every PELOAD_* lookup
+// goes through peload_cgetenv's cache below, so the sites shown are its misses and the non-PELOAD names (HOME ...).
+// Measured 2026-10-18 in a match: ~20-260 real lookups a second in total (HOME) -- negligible.
+static struct { const char*file; int line; const char*name; unsigned long n; } g_genv[4096]; static pthread_mutex_t g_genv_mx=PTHREAD_MUTEX_INITIALIZER;
+static char* pl_getenv(const char*n,const char*file,int line){
+    static int st=-1; if(st<0) st=getenv("PELOAD_GETENV_STATS")?1:0;
+    if(st){ unsigned h=((unsigned)(uintptr_t)file*2654435761u ^ (unsigned)line*40503u)&4095;
+        for(int k=0;k<64;k++){ unsigned j=(h+k)&4095; if(g_genv[j].file==file && g_genv[j].line==line){ __atomic_add_fetch(&g_genv[j].n,1,__ATOMIC_RELAXED); break; }
+            if(!g_genv[j].file){ pthread_mutex_lock(&g_genv_mx); if(!g_genv[j].file){ g_genv[j].line=line; g_genv[j].name=n; g_genv[j].n=1; __atomic_store_n(&g_genv[j].file,file,__ATOMIC_RELEASE); pthread_mutex_unlock(&g_genv_mx); break; } pthread_mutex_unlock(&g_genv_mx); k--; } }
+        static time_t tl; time_t now=time(0); if(now-tl>=10 && !pthread_mutex_trylock(&g_genv_mx)){ if(now-tl>=10){ tl=now; char m[1600]; int k=snprintf(m,sizeof m,"  [getenv] busiest call sites, last 10 s:");
+                for(int t=0;t<12;t++){ int bi=-1; unsigned long bc=0; for(int j=0;j<4096;j++) if(g_genv[j].file && g_genv[j].n>bc){ bc=g_genv[j].n; bi=j; } if(bi<0) break;
+                    const char*f=strrchr(g_genv[bi].file,'/'); k+=snprintf(m+k,sizeof m-k," %s:%d %s x%lu,",f?f+1:g_genv[bi].file,g_genv[bi].line,g_genv[bi].name,bc); g_genv[bi].n=0; if(k>(int)sizeof m-200) break; }
+                for(int j=0;j<4096;j++) g_genv[j].n=0; m[k++]='\n'; (void)!write(2,m,k); } pthread_mutex_unlock(&g_genv_mx); } }
+    return getenv(n); }
+#define getenv(n) pl_getenv((n),__FILE__,__LINE__)
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <ifaddrs.h>
@@ -74,6 +90,7 @@ static char* peload_cgetenv(const char*name){
             k=exp; }
         if(k==name) return __atomic_load_n(&ready[s],__ATOMIC_ACQUIRE) ? vals[s] : getenv(name); }
     return getenv(name); }
+#undef getenv   // (PELOAD_GETENV_STATS's macro above now counts only the real lookups, from inside peload_cgetenv)
 #define getenv(n) peload_cgetenv(n)
 // GENV1("PELOAD_X"): read a PELOAD_* switch once per call site and keep it in a static -- for the per-draw path, where
 // even the cached lookup above (hash + compare, ~20-40 ns translated) adds up over thousands of draws a frame
@@ -560,7 +577,19 @@ static void* hg_guardhit(void*f, void**buf, uint64_t*rsz, int64_t*over){
         if(fa>=guard && fa<guard+4096){ if(buf)*buf=u; if(rsz)*rsz=g_hgsz[i];
             if(over)*over=(int64_t)(fa - ((uintptr_t)u + g_hgsz[i])); pthread_mutex_unlock(&g_hgm); return u; } }
     pthread_mutex_unlock(&g_hgm); return 0; }
-static void*  MSABI i_HeapAlloc(void *h, uint32_t fl, uint64_t n){ (void)h;
+// PELOAD_HEAP_STATS=<thread name part>: every 10 s, HeapAlloc / HeapReAlloc calls and bytes by size on the threads whose
+// name contains it (are big allocations frequent enough to be worth a cache?)
+static const uint64_t g_hs_lim[6]={1024,32768,262144,1<<20,8<<20,~0ull}; static uint64_t g_hs_n[2][6], g_hs_b[2][6], g_hs_zero;
+static __thread int t_hs=-1;
+static void heap_stat(int kind,uint64_t n,uint32_t fl){
+    static const char*want=(const char*)1; if(want==(const char*)1) want=getenv("PELOAD_HEAP_STATS"); if(!want) return;
+    if(t_hs<0){ char nm[64]={0}; pthread_getname_np(pthread_self(),nm,sizeof nm); t_hs=strstr(nm,want)!=0; } if(!t_hs) return;
+    int b=0; while(n>=g_hs_lim[b] && b<5) b++; __atomic_add_fetch(&g_hs_n[kind][b],1,__ATOMIC_RELAXED); __atomic_add_fetch(&g_hs_b[kind][b],n,__ATOMIC_RELAXED); if(fl&8) __atomic_add_fetch(&g_hs_zero,1,__ATOMIC_RELAXED);
+    static double tl; double now=mono_s(); if(now-tl>=10.0){ tl=now; char m[600]; int k=snprintf(m,sizeof m,"  [heap] *%s* last 10 s (calls / MB): ",want);
+        static const char*const nm[6]={"<1K","1-32K","32-256K","256K-1M","1-8M",">8M"};
+        for(int kk=0;kk<2;kk++){ k+=snprintf(m+k,sizeof m-k,"%s",kk?" | realloc":"alloc"); for(int i=0;i<6;i++) k+=snprintf(m+k,sizeof m-k," %s %llu/%.1f",nm[i],(unsigned long long)g_hs_n[kk][i],g_hs_b[kk][i]/1048576.0); }
+        k+=snprintf(m+k,sizeof m-k," | zeroed %llu\n",(unsigned long long)g_hs_zero); (void)!write(2,m,k); memset(g_hs_n,0,sizeof g_hs_n); memset(g_hs_b,0,sizeof g_hs_b); g_hs_zero=0; } }
+static void*  MSABI i_HeapAlloc(void *h, uint32_t fl, uint64_t n){ (void)h; heap_stat(0,n,fl);
     if(heapdbg()){ void*p=hd_alloc(n?n:1); if(p&&(fl&8)) memset(p,0,n); return p; }
     void*p; if(hg_want(n)){ p=hg_alloc(n); if(p) hg_add(p,n); } else p=malloc(n?n:1);
     if(p&&(fl&8)) memset(p,0,n);
@@ -571,7 +600,7 @@ static void*  MSABI i_HeapAlloc(void *h, uint32_t fl, uint64_t n){ (void)h;
         static int ns; if(ns++<3){ uint64_t*sp=(uint64_t*)__builtin_frame_address(0); int found=0;   // exe return addresses on the stack
             for(int i=0;i<2000 && found<14;i++){ uint64_t v=sp[i]; if(v>=0x140001000ULL&&v<0x141aae000ULL){ char b[48]; int q=snprintf(b,sizeof b,"     exe+0x%llx\n",(unsigned long long)(v-0x140000000ULL)); (void)!write(2,b,q); found++; } } } } }
     return p; }
-static void*  MSABI i_HeapReAlloc(void *h, uint32_t fl, void *p, uint64_t n){ (void)h;(void)fl;
+static void*  MSABI i_HeapReAlloc(void *h, uint32_t fl, void *p, uint64_t n){ (void)h;(void)fl; heap_stat(1,n,0);
     if(heapdbg()){ HDBlk*b=hd_blk(p); void*q=hd_alloc(n?n:1); if(q&&p){ uint64_t cp = b? (b->size<n?b->size:n) : n; memcpy(q,p,cp); } if(b) hd_free(p); return q; }
     if(heapguard()){ void*q = hg_want(n)? hg_alloc(n) : malloc(n?n:1); if(q&&hg_want(n)) hg_add(q,n);
         if(p&&q){ uint64_t osz=hg_del(p);                 // osz>0 => old block was guarded
@@ -2838,7 +2867,20 @@ static int    MSABI i_MultiByteToWideChar(uint32_t cp,uint32_t fl,const char*s,i
     (void)cp;(void)fl; int n= sl<0? (int)strlen(s)+1 : sl; if(!w||wl==0) return n; int i=0; for(;i<n&&i<wl;i++) w[i]=(uint8_t)s[i]; return i; }
 static int    MSABI i_WideCharToMultiByte(uint32_t cp,uint32_t fl,const uint16_t*w,int wl,char*s,int sl,const char*df,int*du){
     (void)cp;(void)fl;(void)df;(void)du; int n= wl<0? 0:wl; if(wl<0){ while(w[n]) n++; n++; } if(!s||sl==0) return n; int i=0; for(;i<n&&i<sl;i++) s[i]=(char)(w[i]<128?w[i]:'?'); return i; }
-static void   MSABI i_GetSystemInfo(void *si){ if(si){ memset(si,0,48); *(uint32_t*)((char*)si+4)=4096; *(uint32_t*)((char*)si+32)=1; *(uint32_t*)((char*)si+36)=4096; } }
+// SYSTEM_INFO: +0 u16 architecture, +4 page size, +8 / +16 lowest / highest application address, +24 active processor mask,
+// +32 number of processors, +36 processor type, +40 allocation granularity, +44 u16 level, +46 u16 revision.
+// It used to say ONE processor (and allocation granularity 0, with the 4096 meant for it in the processor-type slot): the
+// client sizes ~10 thread pools from the count (min(n-1, 8) ...), halo3's locks (halo3+0x620170 ...) spin before blocking
+// only when it is > 1 and wake at most that many waiters. PELOAD_SYSINFO=real reports what Windows would (logical CPUs =
+// hw.logicalcpu, or PELOAD_NCPU); default still the old values until it has been measured in big games.
+static void   MSABI i_GetSystemInfo(void *si){ if(!si) return;
+    static int real=-1; static uint32_t ncpu; if(real<0){ const char*e=getenv("PELOAD_SYSINFO"); real=e&&!strcmp(e,"real");
+        const char*n=getenv("PELOAD_NCPU"); int v=n?atoi(n):0; if(v<=0){ int lc=0; size_t sz=sizeof lc; if(sysctlbyname("hw.logicalcpu",&lc,&sz,0,0)) lc=8; v=lc; } if(v>64) v=64; if(v<1) v=1; ncpu=(uint32_t)v; }
+    uint8_t*b=si; memset(b,0,48);
+    if(!real){ *(uint32_t*)(b+4)=4096; *(uint32_t*)(b+32)=1; *(uint32_t*)(b+36)=4096; return; }
+    *(uint16_t*)b=9; *(uint32_t*)(b+4)=4096; *(uint64_t*)(b+8)=0x10000; *(uint64_t*)(b+16)=0x7FFFFFFEFFFFull;
+    *(uint64_t*)(b+24)=ncpu>=64?~0ull:((1ull<<ncpu)-1); *(uint32_t*)(b+32)=ncpu; *(uint32_t*)(b+36)=8664; *(uint32_t*)(b+40)=65536;
+    *(uint16_t*)(b+44)=6; *(uint16_t*)(b+46)=0x9A03; }
 static void   MSABI i_ExitProcess(uint32_t c){
     { char t[96]; int k=snprintf(t,sizeof t,"  [i_ExitProcess] code=%u present_started=%d hold=%d\n",c,g_present_started,getenv("PELOAD_HOLD_WINDOW")?1:0); (void)!write(2,t,k); }
     // PELOAD_PROBE_EXIT0: force the probe-engine-worker to report success so the
@@ -9952,6 +9994,48 @@ static int cow_private_range(mach_vm_address_t a,mach_vm_size_t n){
 static int cow_ok(uintptr_t D,uintptr_t S,size_t mid){ static struct { uintptr_t d,s; size_t n; int ok; } c[8]; static int ci; static pthread_mutex_t mx=PTHREAD_MUTEX_INITIALIZER;
     pthread_mutex_lock(&mx); for(int i=0;i<8;i++) if(c[i].d==D && c[i].s==S && c[i].n==mid){ int ok=c[i].ok; pthread_mutex_unlock(&mx); return ok; }
     int ok=cow_private_range(D,mid) && cow_private_range(S,mid); c[ci].d=D; c[ci].s=S; c[ci].n=mid; c[ci].ok=ok; ci=(ci+1)&7; pthread_mutex_unlock(&mx); return ok; }
+// Parallel big copies (PELOAD_PAR_MEMCPY=<helper threads>, e.g. 3; default off until measured; PELOAD_AB=parcopy:<secs> flips it,
+// with 3 helpers; PELOAD_PAR_CHECK=1 compares every parallel copy with its source and logs a mismatch):
+// a non-overlapping guest copy of >= PELOAD_PAR_MIN bytes (default 2 MB) is cut into 1 MB chunks that the calling thread
+// and the helpers copy together; it returns when every chunk is done (same result as memmove). halo3's main thread copies
+// its ~14 MB game state ~5 times a frame (memmove ~20% of that thread in 80-100 player games); Rosetta microbenchmark:
+// 5 x 14 MB 4.0 ms on one thread, 2.0 ms on four. One copy at a time (a second caller meanwhile copies alone). Chunks
+// are claimed from a 64-bit counter tagged with the job number, so a helper running late can never take a chunk of the
+// next job twice.
+volatile int g_pc_on=-1; static int g_pc_nw; static size_t g_pc_min=2u<<20;
+static struct { pthread_mutex_t mx; pthread_cond_t cv; uint64_t ctr; uint32_t gen, sleepers; int busy, done;   // (__atomic builtins)
+    uint32_t job; char*d; const char*s; size_t n, chunk; int nchunks; } g_pc={PTHREAD_MUTEX_INITIALIZER,PTHREAD_COND_INITIALIZER};
+static uint64_t g_pc_n, g_pc_bytes;
+static void pc_run(void){
+    for(;;){ uint64_t c=__atomic_fetch_add(&g_pc.ctr,1,__ATOMIC_ACQ_REL); uint32_t job=(uint32_t)(c>>32), i=(uint32_t)c;
+        if(job!=__atomic_load_n(&g_pc.job,__ATOMIC_ACQUIRE) || i>=(uint32_t)g_pc.nchunks) return;
+        size_t off=(size_t)i*g_pc.chunk, len=g_pc.n-off<g_pc.chunk?g_pc.n-off:g_pc.chunk; memmove(g_pc.d+off,g_pc.s+off,len);
+        __atomic_add_fetch(&g_pc.done,1,__ATOMIC_RELEASE); } }
+static void* pc_worker(void*a){ (void)a; pthread_setname_np("shim-copy"); uint32_t seen=0;
+    for(;;){ uint32_t g; int spins=0;
+        while((g=__atomic_load_n(&g_pc.gen,__ATOMIC_ACQUIRE))==seen){
+            if(++spins<4000){ __asm__ volatile("pause"); continue; }   // ~a few hundred us: the next copy of the frame comes soon
+            pthread_mutex_lock(&g_pc.mx); __atomic_add_fetch(&g_pc.sleepers,1,__ATOMIC_ACQ_REL);
+            while(__atomic_load_n(&g_pc.gen,__ATOMIC_ACQUIRE)==seen) pthread_cond_wait(&g_pc.cv,&g_pc.mx);
+            __atomic_sub_fetch(&g_pc.sleepers,1,__ATOMIC_ACQ_REL); pthread_mutex_unlock(&g_pc.mx); }
+        seen=g; pc_run(); } return 0; }
+static int pc_copy(void*d,const void*s,size_t n){
+    if(g_pc_on<0){ const char*e=getenv("PELOAD_PAR_MEMCPY"); g_pc_nw=e?atoi(e):0; if(getenv("PELOAD_AB") && !strncmp(getenv("PELOAD_AB"),"parcopy",7) && g_pc_nw<=0) g_pc_nw=3; if(g_pc_nw>8) g_pc_nw=8; g_pc_on=g_pc_nw>0;
+        const char*m=getenv("PELOAD_PAR_MIN"); if(m) g_pc_min=strtoull(m,0,0); }
+    if(!g_pc_on || n<g_pc_min || g_pc_nw<=0) return 0;
+    { uintptr_t D=(uintptr_t)d, S=(uintptr_t)s; if(!(D+n<=S || S+n<=D)) return 0; }
+    int z=0; if(!__atomic_compare_exchange_n(&g_pc.busy,&z,1,0,__ATOMIC_ACQUIRE,__ATOMIC_RELAXED)) return 0;
+    static int started; if(!started){ started=1; for(int i=0;i<g_pc_nw;i++){ pthread_t th; pthread_attr_t at; pthread_attr_init(&at); pthread_attr_set_qos_class_np(&at,QOS_CLASS_USER_INTERACTIVE,0); pthread_create(&th,&at,pc_worker,0); pthread_detach(th); } }
+    g_pc.d=d; g_pc.s=s; g_pc.n=n; g_pc.chunk=1u<<20; g_pc.nchunks=(int)((n+g_pc.chunk-1)/g_pc.chunk); __atomic_store_n(&g_pc.done,0,__ATOMIC_RELAXED);
+    uint32_t job=g_pc.job+1; __atomic_store_n(&g_pc.job,job,__ATOMIC_RELEASE); __atomic_store_n(&g_pc.ctr,(uint64_t)job<<32,__ATOMIC_RELEASE);
+    __atomic_add_fetch(&g_pc.gen,1,__ATOMIC_ACQ_REL);
+    if(__atomic_load_n(&g_pc.sleepers,__ATOMIC_ACQUIRE)){ pthread_mutex_lock(&g_pc.mx); pthread_cond_broadcast(&g_pc.cv); pthread_mutex_unlock(&g_pc.mx); }
+    pc_run();
+    while(__atomic_load_n(&g_pc.done,__ATOMIC_ACQUIRE)<g_pc.nchunks) __asm__ volatile("pause");
+    { static int chk=-1; if(chk<0) chk=getenv("PELOAD_PAR_CHECK")?1:0;
+      if(chk){ static unsigned long nck, nbad; nck++; if(memcmp(d,s,n)){ nbad++; char m[160]; int k=snprintf(m,sizeof m,"  [parcopy] MISMATCH: %p <- %p, %zu bytes (%lu of %lu)\n",d,s,n,nbad,nck); (void)!write(2,m,k); }
+          else if((nck&1023)==1){ char m[120]; int k=snprintf(m,sizeof m,"  [parcopy] %lu checked copies, %lu mismatches\n",nck,nbad); (void)!write(2,m,k); } } }
+    g_pc_n++; g_pc_bytes+=n; __atomic_store_n(&g_pc.busy,0,__ATOMIC_RELEASE); return 1; }
 static void* __attribute__((ms_abi,noinline)) crt_big_memmove(void*d,const void*s,size_t n){
     static int lg=-1; if(lg<0) lg=getenv("PELOAD_MEMCPY_LOG")?1:0;
     if(lg) mcl_note((uint64_t)__builtin_return_address(0),d,s,n);
@@ -9965,6 +10049,7 @@ static void* __attribute__((ms_abi,noinline)) crt_big_memmove(void*d,const void*
             else { g_cow_n++; g_cow_bytes+=mid; }
             size_t tail=n-head-mid; if(tail) memmove((char*)d+head+mid,(const char*)s+head+mid,tail);
             return d; } }
+    if(pc_copy(d,s,n)) return d;
     return memmove(d,s,n); }
 static void* __attribute__((ms_abi,noinline)) crt_big_memset(void*d,int c,size_t n){ return memset(d,c,n); }
 static void* crt_fast_stub(const char*fn,void*guest){

@@ -303,7 +303,7 @@ static void hbg_build(HbGeom*g,HbMap*m,int ti){
     if(!hbm_read(m,(uint64_t)m->tp[ti]<<2,ob,sizeof ob)) return; uint32_t hd=*(uint32_t*)(ob+0x34+12); if(hd==0xFFFFFFFF || (hd&0xFFFF)>=(uint32_t)m->ntags) return;
     if(!hbm_read(m,(uint64_t)m->tp[hd&0xFFFF]<<2,hl,sizeof hl)) return; uint32_t cd=*(uint32_t*)(hl+0x10+12); if(cd==0xFFFFFFFF || (cd&0xFFFF)>=(uint32_t)m->ntags) return;
     if(!hbm_read(m,(uint64_t)m->tp[cd&0xFFFF]<<2,co,sizeof co)) return;
-    uint8_t matcls[64]; hbg_weak(m,hl,co,matcls,64);
+    uint8_t matcls[64]; memset(matcls,0,sizeof matcls); if(m->grp[ti]=='vehi') hbg_weak(m,hl,co,matcls,64);   // (bipeds: head / body colors instead)
     uint8_t*regs; int nr=hbm_block(m,co,0x20,0x10,&regs,64);
     for(int r=0;r<nr && r<255;r++){ uint8_t*perms; int np=hbm_block(m,regs+r*0x10,4,0x28,&perms,64);
         for(int pi=0;pi<np;pi++){ uint8_t*bsps; int nb=hbm_block(m,perms+pi*0x28,4,0x64,&bsps,256);

@@ -105,3 +105,6 @@ damage scale goes 0 -> 1. Other vehicles have no lethal section; damage anywhere
 Mongoose / Chopper driver 1.0, Warthog / Ghost / Mauler / gunners 0.9 (Ghost 1.0 once its hull is damaged), Banshee /
 Hornet pilot 0.2-0.5 by hull state, boarding seats 1.0. The Ghost has a 5% (20) gas_tank section that kills it, but no
 collision material feeds it.
+
+![Wraith / Scorpion / Ghost collision models, weak spots colored](img/vehicle-weak-spots.png)
+(top and side views from the .map's collision models; yellow = lethal section, orange = opens the driver, blue = rest)

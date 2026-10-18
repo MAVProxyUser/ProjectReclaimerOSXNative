@@ -16,12 +16,13 @@
 // path nodes ahead it steers at (6 = 1.5 units).
 typedef struct { float z; uint16_t comp; uint8_t wd, fl; int32_t nbr[8]; } NavNode;     // 40 bytes, as h3nav.py writes
 static struct { char name[96], file[1100]; int ok, failed; float x0,y0,cell,step,clearh; int w,h,n; uint32_t*first; NavNode*nd; int32_t*cellof;
-    float*g; float*pen; int32_t*came; uint32_t*stamp; uint32_t gen; float*hf; int32_t*hn; int hcap; } g_nav;
+    float*g; float*pen; int32_t*came; uint32_t*stamp; uint32_t gen; float*hf; int32_t*hn; int hcap;
+    float*dng; double dng_t; uint32_t dng_nd; } g_nav;
 static volatile int g_nav_act; static volatile float g_nav_lx, g_nav_ly, g_nav_rx, g_nav_ry; static volatile uint16_t g_nav_btn;
 static int nav_mode(void){ static int m=-1; if(m<0){ const char*e=getenv("PELOAD_NAV"); m=!e||!*e?0: !strcasecmp(e,"enemy")?2: strchr(e,',')?3: 1; } return m; }
 static int nav_log(void){ static int l=-1; if(l<0) l=getenv("PELOAD_NAV_LOG")?1:0; return l; }
 static void nav_say(const char*fmt,...){ if(!nav_log()) return; char m[400]; va_list ap; va_start(ap,fmt); int k=vsnprintf(m,sizeof m,fmt,ap); va_end(ap); if(k>(int)sizeof m-1) k=sizeof m-1; (void)!write(2,m,k); }
-static void nav_free(void){ free(g_nav.first); free(g_nav.nd); free(g_nav.cellof); free(g_nav.g); free(g_nav.pen); free(g_nav.came); free(g_nav.stamp); free(g_nav.hf); free(g_nav.hn);
+static void nav_free(void){ free(g_nav.dng); free(g_nav.first); free(g_nav.nd); free(g_nav.cellof); free(g_nav.g); free(g_nav.pen); free(g_nav.came); free(g_nav.stamp); free(g_nav.hf); free(g_nav.hn);
     char nm[96]; memcpy(nm,g_nav.name,sizeof nm); memset(&g_nav,0,sizeof g_nav); memcpy(g_nav.name,nm,sizeof nm); }
 static int nav_load(const char*path){
     int fd=open(path,O_RDONLY); if(fd<0) return 0; struct stat st; uint8_t h[64];
@@ -48,13 +49,37 @@ static int nav_node_at(const float*p){
                 else if(best<0 && d<bd){ bd=d+1000; bz=z; best=(int)i; } } }
         if(best>=0) return best; }
     return -1; }
-// A* over the floor graph; cost = distance x (1 + wall penalty) + learned penalties; -> path length (nodes in path[])
+// Danger: where players died on this map (the stats heatmap, stats.c g_hm -- earlier matches too). Every death adds
+// 1 - d/R to the floors within R = PELOAD_NAV_AVOID_R units (default 4) and 2 units of its height; a node's danger is
+// 1 - exp(-sum/3) (three nearby deaths ~ 0.63). Walking a node costs (1 + PELOAD_NAV_AVOID x danger) times its length
+// (default 4: the worst spots cost 5x, so paths detour around them when a detour exists); roam goals skip danger > 0.5.
+// Recomputed every 20 s (deaths keep coming in). PELOAD_NAV_AVOID=0: off.
+static float nav_avoid(void){ static float k=-1; if(k<0){ const char*e=getenv("PELOAD_NAV_AVOID"); k=e?atof(e):4.0f; if(k<0) k=0; } return k; }
+static void nav_danger_update(double now){
+    if(!nav_avoid() || (g_nav.dng && now-g_nav.dng_t<20.0)) return; g_nav.dng_t=now;
+    static float (*pts)[3]; static uint32_t cap; uint32_t nd=0;
+    pthread_mutex_lock(&g_hm_mx);
+    if(!strcmp(g_hm.map,g_nav.name) && g_hm.nd){ nd=g_hm.nd; if(nd>cap){ free(pts); pts=malloc((size_t)nd*12); cap=pts?nd:0; } if(!pts) nd=0;
+        for(uint32_t i=0;i<nd;i++){ pts[i][0]=g_hm.d[i].x; pts[i][1]=g_hm.d[i].y; pts[i][2]=g_hm.d[i].z; } }
+    pthread_mutex_unlock(&g_hm_mx);
+    if(!g_nav.dng){ g_nav.dng=calloc((size_t)g_nav.n,4); if(!g_nav.dng) return; } else memset(g_nav.dng,0,4*(size_t)g_nav.n);
+    static float R=-1; if(R<0){ const char*e=getenv("PELOAD_NAV_AVOID_R"); R=e?atof(e):4.0f; if(R<0.5f) R=0.5f; }
+    int rc=(int)ceilf(R/g_nav.cell);
+    for(uint32_t k=0;k<nd;k++){ int cx=(int)floorf((pts[k][0]-g_nav.x0)/g_nav.cell), cy=(int)floorf((pts[k][1]-g_nav.y0)/g_nav.cell);
+        for(int dy=-rc;dy<=rc;dy++){ int y=cy+dy; if(y<0||y>=g_nav.h) continue;
+            for(int dx=-rc;dx<=rc;dx++){ int x=cx+dx; if(x<0||x>=g_nav.w) continue;
+                float px=g_nav.x0+(x+0.5f)*g_nav.cell-pts[k][0], py=g_nav.y0+(y+0.5f)*g_nav.cell-pts[k][1], d=sqrtf(px*px+py*py); if(d>=R) continue;
+                int c=y*g_nav.w+x; for(uint32_t i=g_nav.first[c];i<g_nav.first[c+1];i++) if(fabsf(g_nav.nd[i].z-pts[k][2])<2.0f) g_nav.dng[i]+=1.0f-d/R; } } }
+    int hot=0; for(int i=0;i<g_nav.n;i++){ g_nav.dng[i]=1.0f-expf(-g_nav.dng[i]/3.0f); if(g_nav.dng[i]>0.5f) hot++; }
+    if(nd!=g_nav.dng_nd) nav_say("  [nav] danger from %u deaths on %s: %d of %d floor nodes above 0.5\n",nd,g_nav.name,hot,g_nav.n);
+    g_nav.dng_nd=nd; }
+// A* over the floor graph; cost = distance x (1 + wall penalty + avoid x danger) + learned penalties; -> path length
 static int nav_astar(int s,int t,int32_t*path,int maxp){
     if(s<0||t<0) return 0; uint32_t gen=++g_nav.gen; if(!gen){ memset(g_nav.stamp,0,4*(size_t)g_nav.n); gen=g_nav.gen=1; }
     float tp[3]; nav_pos(t,tp); int hn=0;
     #define NAV_PUSH(f_,n_) do{ if(hn<g_nav.hcap){ int i_=hn++; while(i_>0){ int p_=(i_-1)/2; if(g_nav.hf[p_]<=(f_)) break; g_nav.hf[i_]=g_nav.hf[p_]; g_nav.hn[i_]=g_nav.hn[p_]; i_=p_; } g_nav.hf[i_]=(f_); g_nav.hn[i_]=(n_); } }while(0)
     g_nav.stamp[s]=gen; g_nav.g[s]=0; g_nav.came[s]=-1; { float sp[3]; nav_pos(s,sp); float d=sqrtf((sp[0]-tp[0])*(sp[0]-tp[0])+(sp[1]-tp[1])*(sp[1]-tp[1])); NAV_PUSH(d,s); }
-    static const float wpen[16]={3,1.5f,0.6f,0.2f,0,0,0,0,0,0,0,0,0,0,0,0}; int found=0, pops=0;
+    static const float wpen[16]={3,1.5f,0.6f,0.2f,0,0,0,0,0,0,0,0,0,0,0,0}; int found=0, pops=0; float kav=nav_avoid();
     while(hn>0){ float f=g_nav.hf[0]; int u=g_nav.hn[0]; (void)f;
         hn--; { float lf=g_nav.hf[hn]; int ln=g_nav.hn[hn]; int i=0; for(;;){ int a=2*i+1,b=a+1,m=i; float mf=lf;
                 if(a<hn && g_nav.hf[a]<mf){ m=a; mf=g_nav.hf[a]; } if(b<hn && g_nav.hf[b]<mf){ m=b; mf=g_nav.hf[b]; } if(m==i) break;
@@ -62,7 +87,7 @@ static int nav_astar(int s,int t,int32_t*path,int maxp){
         if(u==t){ found=1; break; } if(++pops>400000) break;
         float up[3]; nav_pos(u,up); float gu=g_nav.g[u];
         for(int k=0;k<8;k++){ int v=g_nav.nd[u].nbr[k]; if(v<0||v>=g_nav.n) continue; float vp[3]; nav_pos(v,vp);
-            float dx=vp[0]-up[0],dy=vp[1]-up[1],dz=vp[2]-up[2]; float c=sqrtf(dx*dx+dy*dy+dz*dz)*(1.0f+wpen[g_nav.nd[v].wd&15])+g_nav.pen[v]+((g_nav.nd[v].fl&1)?0.5f:0);
+            float dx=vp[0]-up[0],dy=vp[1]-up[1],dz=vp[2]-up[2]; float c=sqrtf(dx*dx+dy*dy+dz*dz)*(1.0f+wpen[g_nav.nd[v].wd&15]+(g_nav.dng?kav*g_nav.dng[v]:0))+g_nav.pen[v]+((g_nav.nd[v].fl&1)?0.5f:0);
             float gv=gu+c; if(g_nav.stamp[v]==gen && g_nav.g[v]<=gv) continue;
             g_nav.stamp[v]=gen; g_nav.g[v]=gv; g_nav.came[v]=u;
             float hx=vp[0]-tp[0],hy=vp[1]-tp[1],hz=vp[2]-tp[2]; NAV_PUSH(gv+sqrtf(hx*hx+hy*hy+hz*hz),v); } }
@@ -71,7 +96,9 @@ static int nav_astar(int s,int t,int32_t*path,int maxp){
     for(int i=0;i<n/2;i++){ int32_t x=path[i]; path[i]=path[n-1-i]; path[n-1-i]=x; } return n; }
 static uint32_t nav_rand(void){ static uint32_t s=0x9e3779b9u; s^=s<<13; s^=s>>17; s^=s<<5; return s; }
 static int nav_pick_roam(int from){ float fp[3]; nav_pos(from,fp); int comp=g_nav.nd[from].comp, best=-1; float bd=0;
-    for(int tr=0;tr<200;tr++){ int i=(int)(nav_rand()%(uint32_t)g_nav.n); if(g_nav.nd[i].comp!=comp || g_nav.nd[i].wd<2) continue; float p[3]; nav_pos(i,p);
+    for(int tr=0;tr<400;tr++){ int i=(int)(nav_rand()%(uint32_t)g_nav.n); if(g_nav.nd[i].comp!=comp || g_nav.nd[i].wd<2) continue;
+        if(g_nav.dng && g_nav.dng[i]>0.5f && tr<300) continue;   // not into a death hotspot (unless nothing else turns up)
+        float p[3]; nav_pos(i,p);
         float d=sqrtf((p[0]-fp[0])*(p[0]-fp[0])+(p[1]-fp[1])*(p[1]-fp[1])); if(d>=12.0f) return i; if(d>bd){ bd=d; best=i; } }
     return best; }
 static char g_nav_making[1100];
@@ -114,6 +141,7 @@ static void nav_step(void){
     nav_ensure();
     double delay=getenv("PELOAD_INPUT_DELAY")?atof(getenv("PELOAD_INPUT_DELAY")):3.0;
     if(!g_nav.ok || !g_gameplay_t0 || now-g_gameplay_t0<delay){ g_nav_act=0; return; }
+    nav_danger_update(now);
     float vp[32]; unsigned s1,s2; int tries=0; do{ s1=g_hb_vpseq; memcpy(vp,(const void*)g_hb_vp,sizeof vp); s2=g_hb_vpseq; }while((s1!=s2 || (s1&1)) && ++tries<8);
     const float*cam=vp+28, *fwd=vp+12; if(cam[0]==0 && cam[1]==0 && cam[2]==0){ g_nav_act=0; return; }
     static HbObj objs[1024]; pthread_mutex_lock(&g_hb_collect_mx); g_hb_units_only=1; int n=hb_collect(objs,1024); g_hb_units_only=0; pthread_mutex_unlock(&g_hb_collect_mx);
@@ -172,8 +200,8 @@ static void nav_step(void){
     if(now-tjump<0.25) btn|=0x1000;   // A = jump
     if(now-tback<0.6){ lx=bstr; ly=-0.8f; rx=0; }   // first back off and sidestep (a corner the next plan may lead into again)
     g_nav_lx=lx; g_nav_ly=ly; g_nav_rx=rx; g_nav_ry=ry; g_nav_btn=btn; g_nav_act=1;
-    if(now-tstat>2.0){ tstat=now; nav_say("  [nav] at (%.1f %.1f %.1f) node %d, path %d/%d, next (%.1f %.1f %.1f), turn %.0f deg -> L=(%.2f,%.2f) R=(%.2f,%.2f)\n",
-        pos[0],pos[1],pos[2],cur,pidx,plen,tp[0],tp[1],tp[2],yaw_err*57.2958f,lx,ly,rx,ry); } }
+    if(now-tstat>2.0){ tstat=now; nav_say("  [nav] at (%.1f %.1f %.1f) node %d (danger %.2f), path %d/%d, next (%.1f %.1f %.1f), turn %.0f deg -> L=(%.2f,%.2f) R=(%.2f,%.2f)\n",
+        pos[0],pos[1],pos[2],cur,g_nav.dng?g_nav.dng[cur]:0.0f,pidx,plen,tp[0],tp[1],tp[2],yaw_err*57.2958f,lx,ly,rx,ry); } }
 // the stats page's map: the walker's goal and the rest of its path (at most 160 points)
 static pthread_mutex_t g_nav_pmx=PTHREAD_MUTEX_INITIALIZER; static float g_nav_pts[160][2], g_nav_goalp[3]; static int g_nav_npts, g_nav_hasgoal;
 static void nav_publish(const int32_t*path,int from,int plen,int goal){ pthread_mutex_lock(&g_nav_pmx); g_nav_npts=0; g_nav_hasgoal=goal>=0;
