@@ -1201,6 +1201,10 @@ Numbers are from the commit messages; PERF-PLAN.md has the measurements. Compare
 - **Workshop helper item id from the dedicated server** — Why: the dedicated server runs `workshop-download --mcc-path
   <path> <id>` (the id last, no flag before it); the substitution found no id ("item -") and the server reported "Steam
   Workshop is unavailable". How: a trailing all-digit token not preceded by --mcc-path is the item id. (10-18)
+- **usb-install.sh free space** — Why: it compared the copy with `df`'s free space only, which leaves out purgeable space
+  (iCloud caches, local snapshots) that Finder counts and macOS frees on demand: a Mac showing 69.7 GB free in Finder was
+  refused for a ~46 GB copy. How: the larger of df and NSURLVolumeAvailableCapacityForImportantUsageKey (via osascript JXA,
+  no python needed), both printed; `--skip-space-check` goes on anyway. (10-18)
 - **make-usb.sh / usb-install.sh** — Why: the stick from 10-16 had no GL helper (play.sh's default since 10-17: the game
   could not render on the other Mac), no Workshop mods, no map tools; an update re-checked or recopied everything and
   kept old client exes beside new ones; 1.2 GB of the client's per-launch scratch folders (ReclaimerCache/Temp) were copied.

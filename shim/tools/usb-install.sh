@@ -12,9 +12,10 @@
 # longer has is removed from the install folder). Resumable if interrupted. Then play with:
 #   cd ~/ReclaimerMac && bash shim/play.sh
 #
-#   bash /Volumes/<stick>/ReclaimerMac/install.sh [install-folder]
+#   bash /Volumes/<stick>/ReclaimerMac/install.sh [--skip-space-check] [install-folder]
 set -e
 SRC="$(cd "$(dirname "$0")" && pwd)"
+SKIPSPACE=0; [ "${1:-}" = "--skip-space-check" ] && { SKIPSPACE=1; shift; }
 APP="${1:-$HOME/ReclaimerMac}"
 SUP="$HOME/Library/Application Support/ReclaimerMac"
 PFX="$SUP/prefix/drive_c"
@@ -35,9 +36,17 @@ kb(){ local t=0 x; for x in "$@"; do [ -e "$x" ] && t=$((t + $(du -sk "$x" | cut
 delta(){ local a=$1 b=$2; [ $a -gt $b ] && echo $((a-b)) || echo 0; }
 NEED=$(( $(delta "$(kb "$SRC/app")" "$(kb "$APP")") + $(delta "$(kb "$SRC/game")" "$(kb "$STEAM/common")") \
   + $(delta "$(kb "$SRC/workshop")" "$(kb "$STEAM/workshop")") + $(delta "$(kb "$SRC/drive_c")" "$(kb "$PFX/ReclaimerCache" "$PFX/ReclaimerContent" "$PFX/ReclaimerFonts")") + 300000 ))
-HAVE=$(df -k "$HOME" | awk 'NR==2{print $4}')
-echo "to copy: up to ~$((NEED/1024)) MB; ~$((HAVE/1048576)) GB free on this Mac"
-[ "$HAVE" -gt "$NEED" ] || { echo "not enough free space"; exit 1; }
+# free space: what Finder shows ("available for important usage": includes purgeable space -- iCloud caches, local
+# snapshots -- that macOS frees as files are written), else df's (only what is free right now; it was the only number
+# used, and refused a Mac with 69.7 GB free in Finder for a ~46 GB copy). Both in KB, like NEED.
+DF=$(df -k "$HOME" | awk 'NR==2{print $4}')
+IMP=$(osascript -l JavaScript -e 'ObjC.import("Foundation"); var r=$.NSURL.fileURLWithPath("'"$HOME"'").resourceValuesForKeysError(["NSURLVolumeAvailableCapacityForImportantUsageKey"], null); var n=r.objectForKey("NSURLVolumeAvailableCapacityForImportantUsageKey"); String(Math.floor(n.longLongValue/1024))' 2>/dev/null | tr -dc 0-9)
+HAVE=$DF; [ -n "$IMP" ] && [ "$IMP" -gt "$DF" ] && HAVE=$IMP
+echo "to copy: up to ~$((NEED/1048576)) GB; free on this Mac: ~$((HAVE/1048576)) GB as Finder counts it (~$((DF/1048576)) GB without purgeable space)"
+if [ "$HAVE" -le "$NEED" ]; then
+  if [ "$SKIPSPACE" = 1 ]; then echo "not enough free space by that count -- going on anyway (--skip-space-check)"
+  else echo "not enough free space (free some, or run again with --skip-space-check)"; exit 1; fi
+fi
 
 R="rsync -a --exclude=.DS_Store"
 part(){ local name="$1"; shift; local log; log=$(mktemp)

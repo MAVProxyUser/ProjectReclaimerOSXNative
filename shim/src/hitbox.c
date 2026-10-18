@@ -1027,7 +1027,10 @@ static void hbz_gpu(const float*vp){
 static int hb_unit_box(float*verts,int nv,int cap,const float*vp,const HbObj*o){
     int a=hb_emit_hitbox(o,vp,verts,nv,cap); return a>0?nv+a:nv; }
 static void hb_draw_overlay(void){
-    if(!hb_overlay_on() || !G.DrawArrays || !G.CreateShader) return;
+    // the scripted-pad aim helper (PELOAD_INPUT_FACE / stats do=facepoint) takes its target from this pass: run it then too
+    // (it returned with every overlay switch off, so the helper never turned -- 2026-10-18, the graphics fps runs)
+    static int facing=-1; if(facing<0) facing=getenv("PELOAD_INPUT_FACE")?1:0;
+    if((!hb_overlay_on() && !facing && !g_hb_facept_on) || !G.DrawArrays || !G.CreateShader) return;
     float vp[32]; unsigned s0=g_hb_vpseq; if(s0&1) return; memcpy(vp,g_hb_vp,sizeof vp); if(g_hb_vpseq!=s0) return;
     if(!vp[0] && !vp[1] && !vp[2]){ static double tn; double now=mono_s(); if(getenv("PELOAD_HITBOXES_LOG") && now-tn>5.0){ tn=now; (void)!write(2,"  [hitbox] no camera matrix captured yet\n",41); } return; }
     if(!g_hb_prog){
