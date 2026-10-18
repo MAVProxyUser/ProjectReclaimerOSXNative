@@ -42,9 +42,12 @@ arm64): Apple's driver is **~1.5x** faster natively (2.9 -> 1.9 us per draw with
 6 + 4), not ~2x. With the GL thread the limit in BTB-sized games (~6.3 us per draw, ~160k draws/s), that is the
 remaining big step towards a steady 60 there. DONE the same day: the helper is the play.sh default ("The real helper" below).
 
-Other finds on the way: the client's `mcc-voice` thread polls the push-to-talk key ~500k times a second with no sleep
-(it burns its own core) -- `PELOAD_POLL_DAMP=1` damps it, OPT-IN only: the key poll holds a lock the main thread also
-takes, so sleeping there made sticks sluggish and movement choppy; `mach_absolute_time` is in nanoseconds under Rosetta
+Other finds on the way: the client's `mcc-voice` thread polled the push-to-talk key ~500k times a second with no sleep
+(it burnt its own core). Root cause found 2026-10-18 (backlog 51): its loop sleeps 20 ms with ntdll NtDelayExecution in
+"Wine mode" (the loader's GetProcAddress made `wine_get_version` look present), and NtDelayExecution was a no-op stub;
+implemented now -> ~260 polls a second, the core is free, and the key poll's lock (also taken by the main thread) is no
+longer hammered (`PELOAD_AB=ntdelay` measures it in a match). `PELOAD_POLL_DAMP=1` (opt-in, obsolete) damped it -- sleeping
+inside the key poll made sticks sluggish and movement choppy; `mach_absolute_time` is in nanoseconds under Rosetta
 (timebase 1/1), so tick math assuming 24 MHz was 41x off.
 
 Status 2026-10-16, Big Team Battle numbers added 2026-10-17. Measurements are from a direct Guardian match on an M4 Max (`PELOAD_D3DGL_PROF=1`,

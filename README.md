@@ -377,7 +377,7 @@ What runs on your cores (an M4 Max has 10 performance + 4 efficiency cores):
 | `shim-present` (loader) | shows each frame, draws the overlay, the client's layered windows and clip recording |
 | `shim-copy` × 3 (loader, opt-in) | splits big copies across cores (`PELOAD_PAR_MEMCPY=3`); off by default because copy-on-write (below) measured faster |
 | `shim-stats-*`, `shim-forensic`, `shim-nav`, recorder | live stats snapshot every 100 ms, the forensic archive writer, the test walker, clip encoding (hardware) |
-| the client's own threads | network, voice (`mcc-voice` polls the push-to-talk key and keeps one core busy), Rust thread pools |
+| the client's own threads | network, voice (`mcc-voice`: since 2026-10-18 it sleeps 20 ms a loop as on Windows -- before, a missing `NtDelayExecution` made it spin and take a whole core), Rust thread pools |
 
 What takes load off halo3's main thread (all default): the game-state copies are done **copy-on-write** (pages are
 remapped instead of copied; +4% in a 70-player match), big copies go to the host's native `memmove`, the game and the
