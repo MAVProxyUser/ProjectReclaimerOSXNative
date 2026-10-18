@@ -124,6 +124,8 @@ turns all of it off.
 | page: Archive | text + events + roster + voice metadata. Default ON. `POST /control?do=forensic&archive=0\|1` |
 | page: One-party consent | `POST /control?do=forensic&consent=1` (records the time) / `consent=0` (also turns voice audio off) |
 | page: Voice audio | `POST /control?do=forensic&voice=0\|1`; `voice=1` is refused without consent (`consent=1&voice=1` in one request works) |
+| page: Delete session / Delete selected | `POST /control?do=forensic&delete=<session>` (one request per checked session): the folder and its files; a live session is closed first, recording continues in a new one |
+| page: Clear all | `POST /control?do=forensic&delete=all`: every session folder (a name with `_` and a `session.json`; other folders and `settings.json` stay) |
 | `PELOAD_FORENSIC=0` | disables recording entirely (the viewer still shows old sessions) |
 | `PELOAD_FORENSIC_DIR=<dir>` | archive somewhere else (default `$HOME/Library/Application Support/ReclaimerMac/forensics`) |
 | `PELOAD_FORENSIC_PAGE=<file>` | serve the viewer from disk; with `PELOAD_STATS_PAGE` set (play.sh does in a checkout) `forensic_page.html` next to it is served, so page edits show on a refresh |
@@ -294,7 +296,8 @@ The page: the session list (LIVE = being written), a summary with downloads, spe
 `.ogg`, a timeline with one lane per speaker (blue global, green team, orange proximity, striped = no audio kept) plus
 chat / kill / weapon / vehicle / power-up / event lanes, and everything in one list in time order with filters (player
 by peer id, channel, voice / chat / kills / weapons / vehicles / power-ups / other events). Click a voice block or "play" to listen; "packets" shows the decoded packets. The live
-session refreshes every 5 s.
+session refreshes every 5 s. Each session row has a checkbox (kept across the refresh): "Delete selected (n)" removes the
+checked sessions, "Clear all" every session, "Delete session" (summary) the open one -- each asks for confirmation first.
 
 ## Testing
 
@@ -310,9 +313,11 @@ session refreshes every 5 s.
    missing sequence number, a control packet, a malformed packet, our own echo, voice audio switched off mid-session,
    chat with sender id, a torn record followed by more packets, a map change (debounce, a second session; the test predates the host-only key) -- then every
    endpoint over a socketpair: names / teams at the time, Range requests, 404s, and every .ogg served decodes cleanly to
-   the expected length; every JSON reply parses.
+   the expected length; every JSON reply parses. Deletes: bad / missing names refused, `delete=<session>`, `delete=all`
+   (folders that aren't sessions stay).
 
-`forensic-oggtest serve <in.ogg> <dir> <port>` serves that test archive on 127.0.0.1:<port> to look at the page.
+`forensic-oggtest serve <in.ogg> <dir> <port>` serves that test archive on 127.0.0.1:<port> to look at the page
+(`PELOAD_FORENSIC_PAGE=<abs path>/shim/src/forensic_page.html` serves the checkout's page, so edits show on a refresh).
 
 ## Verified live (2026-10-18, public Big Team Battle matches)
 

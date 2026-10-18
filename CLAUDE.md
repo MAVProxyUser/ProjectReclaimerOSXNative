@@ -156,6 +156,7 @@ sender peer id via t_st_chat_id) and roster changes (fx_roster_tick in st_snapsh
 forensics/<time>_<map>/{voice.bin,roster.jsonl,events.jsonl}; hooks only queue (g_fx_on is the off check), shim-forensic writes 1/s.
 The SERVER relays voice and filters it (exe+0xb25d30: team = same team, proximity = alive within 10 world units; exe+0x684da5 in voice_recv): a client gets only what it is sent, no client-side filter precedes the hook; as host the hook sees everything (forensics.md). Opus bytes ONLY with voice audio on, which needs the page's one-party-consent box (settings.json); utt/<n>.ogg + speaker/<id>.ogg
 are Ogg Opus built on the fly. PELOAD_FORENSIC=0 off. Offline test: bash shim/tools/forensic-oggtest.sh (ffmpeg + python3).
+Page deletes: per-row checkboxes + Delete selected (one do=forensic&delete=<session> each), Clear all (delete=all: folders with '_' + session.json).
 Engine events (2026-10-17, st_events_install): entry hook on display_event halo3+0x11b0ec (event* in rcx, 0x2c bytes:
 type/index/cause/effect handles+teams, damage byte +0x24 = reporting type | special<<6, +0x25 bit0 = kill info) gives
 exact kills; chud_messaging_post is hooked through entry_hook_tail (a custom replay tail for its rip-relative prologue;

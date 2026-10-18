@@ -20,12 +20,15 @@ code{font:11px ui-monospace,Menlo,monospace;color:#bbb;overflow-wrap:anywhere}
 .mono{font:12px ui-monospace,Menlo,monospace}
 #settings{margin-bottom:16px}
 #sl{display:flex;flex-direction:column;gap:2px;max-height:min(75vh,640px);overflow-y:auto}
-#sl .s{padding:5px 8px;border-radius:4px;cursor:pointer;border:1px solid transparent}
+#sl .s{padding:5px 8px;border-radius:4px;cursor:pointer;border:1px solid transparent;display:flex;gap:8px;align-items:flex-start}
+.sbar{display:flex;gap:6px;margin:-2px 0 8px}
+#sl .s .ck{margin:2px 0 0;flex:none;cursor:pointer}#sl .s .sb{min-width:0;flex:1}
 #sl .s:hover{background:#222}#sl .s.sel{background:#1d2a38;border-color:#2c4a66}
 #sl .s small{display:block;color:var(--dim);font-size:11px}
 .live{display:inline-block;background:#5a1f1f;color:#ffb0b0;border-radius:3px;font-size:10px;font-weight:700;padding:0 4px;margin-left:6px;vertical-align:1px}
 .btn,.dl{background:#222;color:var(--fg);border:1px solid var(--line);border-radius:4px;padding:2px 8px;font:inherit;font-size:12px;cursor:pointer;text-decoration:none;display:inline-block}
 .btn:hover,.dl:hover{border-color:#555}.btn:disabled{opacity:.35;cursor:default}
+.btn.danger{color:#ff8a80;border-color:#7a3b3b;background:#2a1414}.btn.danger:hover:not(:disabled){border-color:#b05050}
 #spk{max-height:240px;overflow-y:auto}
 #sum dl{display:grid;grid-template-columns:auto 1fr;gap:3px 14px;margin:0}#sum dt{color:var(--dim)}#sum dd{margin:0;overflow-wrap:anywhere}
 .dls{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
@@ -86,7 +89,7 @@ tr.hl{background:#2a2a14}
 </div>
 
 <div class="grid">
-  <div class="panel"><h2>Sessions</h2><div id="sl"><span class="note">none yet</span></div></div>
+  <div class="panel"><h2>Sessions</h2><div class="sbar"><button class="btn danger" id="delsel" disabled title="Delete the checked sessions' files from this computer. Cannot be undone.">Delete selected</button><button class="btn danger" id="clrall" title="Delete every session's files from this computer, the live one included. Cannot be undone.">Clear all</button></div><div id="sl"><span class="note">none yet</span></div></div>
   <div class="col">
     <div class="panel" id="sum"><span class="note">Pick a session.</span></div>
     <div class="panel"><div class="fh"><h2>Timeline</h2>
@@ -220,16 +223,34 @@ $('#s_consent').onchange=async e=>{
 $('#s_voice').onchange=async e=>{ if(!await ctl('voice='+(e.target.checked?1:0))) $('#smsg').textContent='refused: voice audio needs the one-party-consent box'; loadSessions(); };
 
 function renderSessions(){
-  const el=$('#sl'); if(!S.sessions.length){ el.innerHTML='<span class="note">none yet: sessions start when this client is in a game session</span>'; return; }
+  const el=$('#sl'), have=new Set(S.sessions.map(s=>s.name)); for(const n of [...CK]) if(!have.has(n)) CK.delete(n); renderDelButtons();
+  if(!S.sessions.length){ el.innerHTML='<span class="note">none yet: sessions start when this client is in a game session</span>'; return; }
   el.innerHTML=S.sessions.map(s=>{ const m=s.session||{}; const live=s.name===S.current;
-    return `<div class="s${s.name===cur?' sel':''}" data-n="${esc(s.name)}"><b>${esc(m.map||m.label||s.name)}</b>${live?'<span class="live">LIVE</span>':''}<small>${esc(m.started_unix?fD(m.started_unix):s.name)}${m.server?' &middot; '+esc(m.server):''}<br><span title="Every voice packet record: speech AND the server's voice control packets (one per player about every 0.1 s, no audio) -- a session can hold megabytes with nobody talking; open it to see the utterances">voice log ${fB(s.voice_bytes)}</span> &middot; events ${fB(s.events_bytes)}</small></div>`; }).join('');
+    return `<div class="s${s.name===cur?' sel':''}" data-n="${esc(s.name)}"><input type="checkbox" class="ck" title="select for Delete selected"${CK.has(s.name)?' checked':''}><div class="sb"><b>${esc(m.map||m.label||s.name)}</b>${live?'<span class="live">LIVE</span>':''}<small>${esc(m.started_unix?fD(m.started_unix):s.name)}${m.server?' &middot; '+esc(m.server):''}<br><span title="Every voice packet record: speech AND the server's voice control packets (one per player about every 0.1 s, no audio) -- a session can hold megabytes with nobody talking; open it to see the utterances">voice log ${fB(s.voice_bytes)}</span> &middot; events ${fB(s.events_bytes)}</small></div></div>`; }).join('');
 }
-$('#sl').onclick=e=>{ const d=e.target.closest('.s'); if(d) select(d.dataset.n); };
+$('#sl').onclick=e=>{ const d=e.target.closest('.s'); if(!d) return;
+  if(e.target.classList.contains('ck')){ if(e.target.checked) CK.add(d.dataset.n); else CK.delete(d.dataset.n); renderDelButtons(); return; }
+  select(d.dataset.n); };
+// the checked sessions (kept across the 5 s refresh); Delete selected / Clear all, both confirmed here and done by the loader
+const CK=new Set();
+function renderDelButtons(){ const b=$('#delsel'); b.disabled=!CK.size; b.textContent=CK.size?`Delete selected (${CK.size})`:'Delete selected'; $('#clrall').disabled=!(S&&S.sessions&&S.sessions.length); }
+function forget(msg){ cur=null; X=null; $('#sum').innerHTML='<span class="note">'+esc(msg)+'</span>'; $('#tl').innerHTML=''; $('#ls').innerHTML=''; $('#det').classList.remove('open'); }
+$('#delsel').onclick=async()=>{ const names=[...CK]; if(!names.length) return; const live=names.includes(S.current);
+  if(!confirm(`Delete ${names.length} session${names.length>1?'s':''}?\n\n${names.slice(0,12).join('\n')}${names.length>12?`\n... and ${names.length-12} more`:''}\n\nEvery local file of ${names.length>1?'them':'it'} (voice, chat, events, roster) is removed from this computer.${live?' The live session is among them: recording continues in a new session.':''} This cannot be undone.`)) return;
+  const b=$('#delsel'); b.disabled=true; b.textContent='deleting...'; const bad=[];
+  for(const n of names){ if(await ctl('delete='+encodeURIComponent(n))) CK.delete(n); else bad.push(n); }
+  if(cur && names.includes(cur) && !bad.includes(cur)) forget(`${names.length-bad.length} session${names.length-bad.length===1?'':'s'} deleted`);
+  await loadSessions(); if(bad.length) alert('Could not delete:\n'+bad.join('\n')); };
+$('#clrall').onclick=async()=>{ const n=(S&&S.sessions||[]).length; if(!n) return;
+  if(!confirm(`Delete ALL ${n} session${n>1?'s':''}?\n\nEvery local file of every session (voice, chat, events, roster) is removed from this computer${S.current?', the live session included (recording continues in a new session)':''}. This cannot be undone.`)) return;
+  const b=$('#clrall'); b.disabled=true; b.textContent='deleting...'; const ok=await ctl('delete=all'); b.textContent='Clear all';
+  CK.clear(); forget('every session deleted'); await loadSessions(); if(!ok) alert('Some sessions could not be deleted completely (see the loader log).'); };
 
 async function select(name){
   if(name!==cur){ cur=name; playing=-1; $('#det').classList.remove('open'); }
   renderSessions();
   try{ X=await (await fetch(sp()+'/index.json',{cache:'no-store'})).json(); }catch(e){ $('#sum').innerHTML='<span class="err">cannot read this session</span>'; return; }
+  if(X && X.ok===false){ $('#sum').innerHTML='<span class="err">cannot read this session: '+esc(X.error||'')+'</span>'; X=null; $('#tl').innerHTML=''; $('#ls').innerHTML=''; return; }
   build(); render();
 }
 function build(){
@@ -278,7 +299,7 @@ function render(){
   { const db=$('#delsess'); if(db) db.onclick=async()=>{ const nm=cur; if(!nm || !confirm('Delete session '+nm+'?\n\nEvery local file of it (voice, chat, events, roster) is removed from this computer. This cannot be undone.')) return;
       db.disabled=true; db.textContent='deleting...'; const ok=await ctl('delete='+encodeURIComponent(nm));
       if(!ok){ db.disabled=false; db.textContent='Delete session'; alert('Could not delete '+nm); return; }
-      cur=null; X=null; $('#sum').innerHTML='<span class="note">session '+esc(nm)+' deleted</span>'; await loadSessions(); }; }
+      CK.delete(nm); forget('session '+nm+' deleted'); await loadSessions(); }; }
   renderTimeline(); renderList();
 }
 function renderTimeline(){

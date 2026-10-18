@@ -95,7 +95,7 @@ static void save(const char*dir,const char*name,const Resp*r){ char p[1200]; snp
 
 // the client's payload: [0] channel, [1..9] sequence, [9] frame count (1 in every live packet seen), [10..] one Opus packet
 static void payload(uint8_t*o,size_t*on,int ch,uint64_t seq,const uint8_t*opus,size_t n){ o[0]=(uint8_t)ch; memcpy(o+1,&seq,8); o[9]=1; memcpy(o+10,opus,n); *on=10+n; }
-static int cmd_pipeline(const char*in,const char*dir){
+static int cmd_pipeline(const char*in,const char*dir,int keep){
     size_t fn; uint8_t*fb=slurp(in,&fn); Pk*pk; int bad, pages, eos; int np=demux(fb,fn,&pk,&bad,&pages,&eos); if(np<260){ printf("FAIL %s: need >= 258 audio packets\n",in); return 1; }
     Pk*a=pk+2; int na=np-2; int ps=opus_packet_samples(a[0].p,a[0].n), same=1; for(int i=0;i<na;i++) same&=opus_packet_samples(a[i].p,a[i].n)==ps;
     if(!same || ps<=0){ printf("FAIL %s: the pipeline test needs packets of one length\n",in); return 1; }
@@ -186,6 +186,19 @@ static int cmd_pipeline(const char*in,const char*dir){
     { char p[1200]; snprintf(p,sizeof p,"%s/%s/session.json",fd,sname); char*j=fx_slurp(p,0,1<<20); double e=0;
       CHECK(j && fx_jnum(j,"ended_unix",&e) && e>0 && strstr(j,"\"server\":\"203.0.113.7:11774\"") && strstr(j,"\"host_id\":\"9999999999999999\""),"the first session.json: ended, server from the join link, host peer id"); free(j); }
     CHECK(fx_control("do=forensic&archive=0") && !g_fx_on,"archive off: the hooks' flag is 0");
+    // the page's Delete selected (one delete=<name> per session) and Clear all (delete=all); folders that aren't sessions stay
+    { char p[1300]; const char*mk[3]={"20990101-000000_fakea","20990101-000001_fakeb","notes"};
+      for(int i=0;i<3;i++){ snprintf(p,sizeof p,"%s/%s",fd,mk[i]); mkdir(p,0755); snprintf(p,sizeof p,"%s/%s/session.json",fd,mk[i]); FILE*f=fopen(p,"w"); if(f){ fputs("{}\n",f); fclose(f); } }
+      snprintf(p,sizeof p,"%s/20990101-000002_nometa",fd); mkdir(p,0755);
+      struct stat st;
+      CHECK(!fx_control("do=forensic&delete=..%2Fx") && !fx_control("do=forensic&delete=a/b") && !fx_control("do=forensic&delete=nosuch_session"),"delete: bad / missing names refused");
+      snprintf(p,sizeof p,"%s/20990101-000000_fakea",fd);
+      CHECK(fx_control("do=forensic&delete=20990101-000000_fakea") && stat(p,&st),"delete=<session> removes that session's folder");
+      if(!keep){
+        CHECK(fx_control("do=forensic&delete=all"),"delete=all");
+        r=get("/forensics/sessions.json","",0); CHECK(strstr(r.body,"\"sessions\":[]"),"delete=all: no session left");
+        snprintf(p,sizeof p,"%s/notes",fd); int a=!stat(p,&st); snprintf(p,sizeof p,"%s/20990101-000002_nometa",fd); int b=!stat(p,&st);
+        CHECK(a && b,"delete=all leaves folders that aren't sessions (no '_', no session.json)"); } }
     if(ex) fclose(ex);
     printf("%s\n",g_fail?"SOME CHECKS FAILED":"all pipeline checks passed"); return g_fail; }
 
@@ -194,7 +207,7 @@ static int cmd_pipeline(const char*in,const char*dir){
 #include <netinet/in.h>
 #include <arpa/inet.h>
 static int cmd_serve(const char*in,const char*dir,int port){
-    cmd_pipeline(in,dir); fx_control("do=forensic&archive=1");
+    cmd_pipeline(in,dir,1); fx_control("do=forensic&archive=1");
     int ls=socket(AF_INET,SOCK_STREAM,0), one=1; setsockopt(ls,SOL_SOCKET,SO_REUSEADDR,&one,sizeof one);
     struct sockaddr_in sa; memset(&sa,0,sizeof sa); sa.sin_family=AF_INET; sa.sin_port=htons((uint16_t)port); sa.sin_addr.s_addr=inet_addr("127.0.0.1");
     if(bind(ls,(struct sockaddr*)&sa,sizeof sa) || listen(ls,16)){ perror("listen"); return 1; }
@@ -212,5 +225,5 @@ int main(int argc,char**argv){
     if(argc>=3 && !strcmp(argv[1],"demux")) return cmd_demux(argv[2]);
     if(argc>=4 && !strcmp(argv[1],"direct")){ long s=rewrap(argv[2],argv[3],1); if(s>=0) printf("samples %ld\n",s); return g_fail||s<0; }
     if(argc>=4 && !strcmp(argv[1],"silence")) return cmd_silence(argv[2],atoi(argv[3]));
-    if(argc>=4 && !strcmp(argv[1],"pipeline")) return cmd_pipeline(argv[2],argv[3]);
+    if(argc>=4 && !strcmp(argv[1],"pipeline")) return cmd_pipeline(argv[2],argv[3],0);
     fprintf(stderr,"usage: %s demux <in.ogg> | direct <in.ogg> <out.ogg> | silence <out.ogg> <frames> | pipeline <in.ogg> <dir>\n",argv[0]); return 2; }

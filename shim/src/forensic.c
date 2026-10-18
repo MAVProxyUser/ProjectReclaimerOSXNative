@@ -447,9 +447,19 @@ static void fx_index_json(StBuf*s,const char*name){
 // between two of them shortened to at most 1 s of silence. Deterministic (serial from the name), so range requests of
 // the same file agree.
 // POST /control?do=forensic&delete=<session>: the session's folder and every file in it, from this computer (the page's
-// Delete button, confirmed there). The live session is closed first (the next record opens a new one).
+// Delete session / Delete selected buttons, confirmed there). The live session is closed first (the next record opens a new
+// one). delete=all (the page's Clear all) = every session folder (a session name always has a '_', so none is "all").
+static int fx_delete_one(const char*name);
 static int fx_delete(const char*qs){
     const char*p=strstr(qs,"delete="); if(!p) return 0; p+=7; char name[160]; size_t n=0; while(p[n] && p[n]!='&' && n+1<sizeof name){ name[n]=p[n]; n++; } name[n]=0;
+    if(!strcmp(name,"all")){ DIR*dr=opendir(g_fx_base); if(!dr) return 1; char (*nm)[128]=0; int nn=0, cap=0; struct dirent*de;
+        while((de=readdir(dr))){ size_t L=strlen(de->d_name); if(!fx_name_ok(de->d_name,L) || !strchr(de->d_name,'_')) continue;
+            if(nn>=cap){ int nc=cap?cap*2:64; void*np=realloc(nm,(size_t)nc*128); if(!np) break; nm=np; cap=nc; } snprintf(nm[nn++],128,"%s",de->d_name); }
+        closedir(dr); int ok=1, done=0; for(int i=0;i<nn;i++){ char sj[1300]; struct stat st; snprintf(sj,sizeof sj,"%s/%s/session.json",g_fx_base,nm[i]); if(stat(sj,&st)) continue;
+            if(fx_delete_one(nm[i])) done++; else ok=0; }
+        free(nm); char m[200]; int k=snprintf(m,sizeof m,"  [forensic] clear all: %d session%s deleted%s\n",done,done==1?"":"s",ok?"":" (some not completely)"); (void)!write(2,m,(size_t)k); return ok; }
+    return fx_delete_one(name); }
+static int fx_delete_one(const char*name){ size_t n=strlen(name);
     if(!fx_name_ok(name,n)) return 0;
     char dir[1300]; snprintf(dir,sizeof dir,"%s/%s",g_fx_base,name); struct stat st; if(stat(dir,&st) || !S_ISDIR(st.st_mode)) return 0;
     pthread_mutex_lock(&g_fxw_mx); if(g_fxw.open && !strcmp(g_fxw.name,name)) fx_sess_close(); pthread_mutex_unlock(&g_fxw_mx);

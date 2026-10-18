@@ -1046,6 +1046,10 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   count byte (half the packets invalid, garbled playback). How: skip it. (10-18 4edd201)
 - **Forensic sessions per server** — Why: the menu's background scenes opened a session each. How: sessions follow the
   host peer id; map changes stay in the server's session. (10-18 e9c3b31)
+- **Forensic page: unreadable session** — Why: a session folder without voice.bin (index.json answers
+  {"ok":false,...}) threw in the page (X.utterances not iterable) and left the previous session's timeline up. How: the
+  summary shows the loader's error and the timeline / list are cleared. Delete selected / Clear all (delete=all) added
+  beside it. (10-18)
 - **Forensic voice-control flood cap** — Why: 1,053,203 control packets in 44 s from our local dedicated server (the
   NtDelayExecution bug). How: at most one control packet per sender per 50 ms kept; the rest counted. (10-18 bfc4650)
 - **Spawn events** — security cameras are vehicle objects: left out (10-18 bfc4650); an object counts as a spawn only
