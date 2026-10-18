@@ -243,6 +243,10 @@ beside the death heatmap with the player details under it (right); Connected; th
   its depth buffer and the camera position to `~/reclaimer_cap_*` for reporting a rendering glitch at a spot; the overlay
   is not in it), **Mic** (live / muted), and in games you host a **Speed** menu: everyone's movement speed (the game
   variant's own speed trait, 25% to 300%). Every switch costs nothing while it is off.
+  **Map vote** votes a card of the lobby's map ballot between games for you (off / card 1-3 / none of the above; the
+  client's own vote, sent as the ballot opens -- a joined client never shows the ballot screen; `PELOAD_AUTOVOTE_MAP` at
+  launch) and **Called votes** answers kick / end-round / shuffle votes other players call with F5 (yes) or F6 (no)
+  (`PELOAD_AUTOVOTE`).
 - **Record** -- a clip of what the game window shows (overlay included) with the game's sound (and the client's menu
   music and voice chat), as `.mp4` (H.264 + AAC, the window's picture up to 1920x1080, up to 60 fps), or **Audio only**
   as `.m4a`: set the length in seconds (1-600), press Record; it stops by itself (or Stop), a red `REC 0:12` counts

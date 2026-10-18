@@ -153,6 +153,10 @@ th .srt{display:inline-block;margin-left:2px;padding:0 2px;cursor:pointer;color:
  <span id="expl"></span>
  <label id="spdl" class="lbl" style="display:none" title="Everyone's movement speed in a game you host: the game variant's base player trait, which the host hands to every player">Speed
   <select id="spd"><option value="0">variant</option><option value="1">25%</option><option value="2">50%</option><option value="3">75%</option><option value="4">90%</option><option value="5">100%</option><option value="6">110%</option><option value="7">125%</option><option value="8">150%</option><option value="9">200%</option><option value="10">300%</option></select></label>
+ <label class="lbl" title="Between games, vote this card of the lobby's map ballot for you (the client's own vote, sent as the ballot opens; a joined client never shows the ballot screen here). PELOAD_AUTOVOTE_MAP at launch.">Map vote
+  <select id="avm"><option value="off">off</option><option value="1">card 1</option><option value="2">card 2</option><option value="3">card 3</option><option value="none">none of the above</option></select></label>
+ <label class="lbl" title="Answer votes other players call (kick a player, end the round or game, shuffle teams) with F5 = yes or F6 = no, half a second after the server announces one. PELOAD_AUTOVOTE at launch.">Called votes
+  <select id="avc"><option value="off">ask me</option><option value="yes">vote yes</option><option value="no">vote no</option></select></label>
  <button data-a="spar" title="Sparring partner: this client turns its view toward the nearest enemy's head (aim only: it never moves or fires). Meant for the second player (shim/target.sh) in local practice games.">Sparring aim</button><span id="spr" class="lbl"></span>
  <span id="ovmsg"></span></div>
 <div id="rec"><span class="lbl">Record</span>
@@ -745,6 +749,7 @@ function renderOverlay(){ const o=snap&&snap.overlay; if(!o) return; renderPanel
   { const sl=document.getElementById('spdl'), sel=document.getElementById('spd'), can=o.controls&&o.host&&snap&&snap.variant;
     sl.style.display=can?'':'none';
     if(can && document.activeElement!==sel){ const r=snap.variant.raw, v=r?parseInt(r.substr((0x134+0x10)*2,2),16):0; if(!isNaN(v)) sel.value=String(v); } }
+  { const av=snap&&snap.autovote; if(av){ for(const [id,v] of [['avm',av.map],['avc',av.calls]]){ const e=document.getElementById(id); e.disabled=!o.controls; if(document.activeElement!==e && v!=null) e.value=String(v); } } }
   document.getElementById('ovmsg').textContent=o.controls?'':'controls are off (PELOAD_STATS_READONLY)'; }
 document.getElementById('ov').addEventListener('click',async e=>{ const b=e.target.closest('button[data-a]'); if(!b||b.disabled) return;   // (the zone chips post their own)
   const msg=document.getElementById('ovmsg');
@@ -851,6 +856,8 @@ pollFeed();
 document.getElementById('spd').addEventListener('change',async e=>{ const msg=document.getElementById('ovmsg');
   try{ const j=await (await fetch('/control?do=speed&v='+e.target.value,{method:'POST',headers:{'X-Reclaimer-Control':'1'}})).json(); msg.textContent=j.ok?'':(j.error||'refused (host only)'); }
   catch(err){ msg.textContent='not connected'; } });
+for(const [id,key] of [['avm','map'],['avc','calls']]) document.getElementById(id).addEventListener('change',async e=>{ const msg=document.getElementById('ovmsg');
+  const j=await ovPost('do=autovote&'+key+'='+encodeURIComponent(e.target.value)); msg.textContent=j.ok?'':(j.error||'refused'); });
 // ---- live snapshots ----
 const es=new EventSource('/events');
 let gameInst=null;   // the game process this page shows; a new one (the game was restarted) -> reload the page for it
