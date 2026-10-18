@@ -21,13 +21,26 @@ static int hb_read(uint64_t a,void*dst,size_t n){ mach_vm_size_t got=0;   // one
 static uint8_t* hb_halo3_base(void){ for(int k=0;k<g_nmods;k++) if(g_mods[k].name && strcasestr(g_mods[k].name,"halo3.dll")) return g_mods[k].base; return 0; }
 // The "object" data array: the TLS block (of whichever guest thread runs the engine) whose +0x38 points at a
 // header named "object" with the 'd@t@' signature.
-static uint64_t hb_object_array(void){
+static uint64_t hb_object_array_tls(uint64_t*tls){
     uint8_t*h3=hb_halo3_base(); if(!h3) return 0; uint32_t idx=0; if(!hb_read((uint64_t)(h3+0xa39f9c),&idx,4) || idx>=128) return 0;
     void**arrs[1025]; int n=0; arrs[n++]=g_tls_array; pthread_mutex_lock(&g_tlsm); for(int i=0;i<g_ntarrs&&n<1025;i++) arrs[n++]=g_tarrs[i]; pthread_mutex_unlock(&g_tlsm);
     for(int i=0;i<n;i++){ uint64_t blk=(uint64_t)arrs[i][idx]; uint64_t arr=0; if(!blk || !hb_read(blk+0x38,&arr,8) || !arr) continue;
         uint8_t hdr[0x60]; if(!hb_read(arr,hdr,sizeof hdr)) continue;
-        if(*(uint32_t*)(hdr+0x2c)==0x64407440 && !memcmp(hdr,"object\0",7)) return arr; }
+        if(*(uint32_t*)(hdr+0x2c)==0x64407440 && !memcmp(hdr,"object\0",7)){ if(tls) *tls=blk; return arr; } }
     return 0; }
+static uint64_t hb_object_array(void){ return hb_object_array_tls(0); }
+// The scenario the engine has loaded: game_options (game_globals = TLS +0x48, options at +0x10; +0x11 is the simulation
+// type) holds its path ("maps\\<name>", char[260]) a few fields in. Found once by looking for "maps\\" in the first 0x100
+// bytes of the options (one known structure, not a memory search) and kept; empty in the menu. -> "<name>" (lower case).
+static int hb_scenario_name(char*out,size_t n){
+    static int off=-1; uint64_t tls=0, gg=0; out[0]=0; if(!hb_object_array_tls(&tls) || !hb_read(tls+0x48,&gg,8) || !gg) return 0;
+    char b[0x100+272]; if(!hb_read(gg+0x10,b,sizeof b)) return 0; b[sizeof b-1]=0;
+    if(off<0){ for(int i=0;i+5<0x100;i++) if(!strncasecmp(b+i,"maps\\",5)){ int st=i; while(st>0 && b[st-1]>=0x20 && b[st-1]<0x7f) st--; off=st;   // (the string's start)
+            char m[200]; int k=snprintf(m,sizeof m,"  [hitbox] scenario path at game_options +0x%x: %.120s\n",st,b+st); (void)!write(2,m,k); break; }
+        if(off<0) return 0; }
+    const char*p=b+off; if(!strcasestr(p,"maps\\")) return 0;
+    const char*q=strrchr(p,'\\'); q=q?q+1:p; size_t k=0; for(; q[k] && q[k]!='.' && k+1<n; k++) out[k]=(char)tolower((unsigned char)q[k]); out[k]=0;
+    return k>0; }
 
 // PELOAD_OBJDUMP=1: every 3 s after gameplay starts, print the object array header and the first in-use
 // entries (raw 0x18-byte headers and the first 0x100 bytes their pointers lead to), to learn the layouts.
@@ -318,14 +331,21 @@ static int hb_current_map(char*out,size_t n){
     pthread_mutex_lock(&mx); double now=mono_s();
     char paths[HB_NPATHS][1024]; int np; pthread_mutex_lock(&g_hb_mapmx); np=g_hb_nmappaths; memcpy(paths,g_hb_mappaths,sizeof(paths[0])*(size_t)np); pthread_mutex_unlock(&g_hb_mapmx);
     if(!cur[0] || now-tchk>2.0 || np!=last_np){ tchk=now; last_np=np;
-        uint32_t defs[48]; int nd=hb_live_defs(defs,48); int best=-1, bs=-1;
+        // the engine's own scenario name decides when one candidate file carries it (Workshop maps built on the same
+        // tag base -- Hugegrass and Ultimate Forge's savannah_sandbox -- match the same live definitions, and the newer
+        // of two tied files used to win: 2026-10-18 the walker went off to build a graph for savannah_sandbox)
+        static uint32_t defs[256]; int nd=hb_live_defs(defs,256); int best=-1, bs=-1, cs=-1; char sn[128]; int hs=hb_scenario_name(sn,sizeof sn);
         for(int k=0;k<np;k++){ if(!strstr(paths[k],"/halo3/maps/") && !strstr(paths[k],"/workshop/content/")) continue;
+            if(hs){ const char*b=strrchr(paths[k],'/'); b=b?b+1:paths[k]; size_t L=strlen(sn); if(!strncasecmp(b,sn,L) && !strcasecmp(b+L,".map")){ best=k; bs=-2; break; } }
             int sc=0; if(nd){ HbMap*m=hbm_get(paths[k]); if(!m) continue;
                 for(int i=0;i<nd;i++){ int ti=defs[i]&0xFFFF; if(ti<m->ntags && m->salt[ti]==(defs[i]>>16) && m->grp[ti]) sc++; } }
-            if(sc>bs){ bs=sc; best=k; } }   // (paths are newest first: ties keep the newer)
+            if(!strcmp(paths[k],cur)) cs=sc;
+            if(sc>bs){ bs=sc; best=k; } }   // (paths are newest first: ties keep the newer...)
+        if(bs>=0 && cs>=bs){ for(int k=0;k<np;k++) if(!strcmp(paths[k],cur)){ best=k; break; } }   // (...but never over the current one)
         if(best<0 && np) best=0;
         if(best>=0 && strcmp(cur,paths[best])){
-            if(cur[0]){ char m[2200]; int kk=snprintf(m,sizeof m,"  [hitbox] map being played: %s (%d of %d live definitions match)\n",paths[best],bs,nd); (void)!write(2,m,kk); }
+            if(cur[0]){ char m[2200]; int kk=bs==-2?snprintf(m,sizeof m,"  [hitbox] map being played: %s (the engine's scenario %s)\n",paths[best],sn)
+                    :snprintf(m,sizeof m,"  [hitbox] map being played: %s (%d of %d live definitions match)\n",paths[best],bs,nd); (void)!write(2,m,kk); }
             snprintf(cur,sizeof cur,"%s",paths[best]); __atomic_add_fetch(&g_hb_mapgen,1,__ATOMIC_ACQ_REL); } }
     snprintf(out,n,"%s",cur); pthread_mutex_unlock(&mx); return out[0]!=0; }
 static int hbm_read(HbMap*m,uint64_t va,void*dst,size_t n){ if(va<m->vbase) return 0; uint64_t off=m->tagoff+(va-m->vbase); if(off+n>m->fsize) return 0;
