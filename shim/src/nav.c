@@ -235,7 +235,8 @@ static void nav_step(void){
       if(now-histt[j&63]>=1.4 && dx*dx+dy*dy<0.35f*0.35f && now-tjump>1.5){ tjump=now; hh=0; tback=now; bstr=(nav_rand()&1)?0.7f:-0.7f;
           for(int i=pidx;i<plen && i<pidx+10;i++) g_nav.pen[path[i]]+=4.0f;
           memmove(tstuck,tstuck+1,3*sizeof(double)); tstuck[3]=now;
-          if(now-tstuck[0]<10.0){ nav_say("  [nav] stuck 4 times at (%.1f %.1f %.1f): a new goal\n",pos[0],pos[1],pos[2]); if(mode!=2) goal=-1; memset(tstuck,0,sizeof tstuck); }
+          if(now-tstuck[0]<10.0){ nav_say("  [nav] stuck 4 times at (%.1f %.1f %.1f): a new goal\n",pos[0],pos[1],pos[2]); if(mode!=2) goal=-1; memset(tstuck,0,sizeof tstuck);
+              if(mode==4 && vok){ int k=0; for(int q=1;q<32;q++) if(vbadt[q]<vbadt[k]) k=q; vbad[k]=vh; vbadt[k]=now; nav_say("  [nav] vehicle %08x: another one for 60 s\n",vh); } }
           else nav_say("  [nav] stuck at (%.1f %.1f %.1f): jump and replan\n",pos[0],pos[1],pos[2]);
           tplan=0; } }
     if(now-tjump<0.25) btn|=0x1000;   // A = jump

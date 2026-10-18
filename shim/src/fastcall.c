@@ -90,7 +90,7 @@ static void fch_put(uint32_t c,void*const*v,uint32_t k){
     memcpy(pl->v+pl->n,v,(size_t)k*sizeof(void*)); pl->n+=k;
     os_unfair_lock_unlock(&pl->lk); }
 static void fch_tc_exit(void*a){ FcTc*tc=a; for(uint32_t c=1;c<FCH_NC;c++) if(tc->n[c]) fch_put(c,tc->b[c],tc->n[c]);
-    *(FcTc*volatile*)(tc->teb+FC_TEB_TC)=FCH_DEAD; free(tc); }   // (TEBs are never freed)
+    *(FcTc*volatile*)(tc->teb+FC_TEB_TC)=FCH_DEAD; free(tc); }   // (a TEB lives 30 s past its thread: peload.c thr_reap)
 // this guest thread's cache, made on first use; 0 on a loader thread / an exiting thread / no memory
 static FcTc* fch_tc(void){ uint8_t*teb=fc_teb(); if(!teb) return 0; FcTc*tc=*(FcTc**)(teb+FC_TEB_TC); if(tc) return tc==FCH_DEAD?0:tc;
     tc=calloc(1,sizeof *tc); if(!tc) return 0; tc->teb=teb; *(FcTc**)(teb+FC_TEB_TC)=tc; pthread_setspecific(g_fch_key,tc); return tc; }

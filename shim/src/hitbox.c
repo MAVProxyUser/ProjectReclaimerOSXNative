@@ -491,6 +491,9 @@ static int hb_emit_hitbox(const HbObj*o,const float*vp,float*verts,int nv,int ca
     for(int s=0;s<g->nseg && nv+added+2<=cap;s++){ if(g->perm[s]!=sel[g->reg[s]]) continue;
         const float*M=mt+g->node[s]*13, *P=g->pts+s*6; int wk=g->wk[s]; if(wk && !(wkshow&(wk==2?1:wk==1?2:4))) wk=0;
         const float*col=o->type==0?(g->reg[s]==head?ch:cb):(wk<4?cwk[wk]:cveh);
+        { static int rc=-1; if(rc<0) rc=getenv("PELOAD_HB_REGION_COLORS")?1:0;   // debug: vehicles' collision regions in 8 colours
+          static const float pal[8][3]={{1,0.2f,0.2f},{0.2f,1,0.2f},{0.3f,0.5f,1},{1,1,0.2f},{1,0.3f,1},{0.2f,1,1},{1,0.6f,0.2f},{1,1,1}};
+          if(rc && o->type) col=pal[g->reg[s]&7]; }
         float q[2][2]; int okk=1;
         for(int e=0;e<2;e++){ const float*v=P+e*3; float w[3];
             for(int a=0;a<3;a++) w[a]=M[10+a]+M[0]*(v[0]*M[1+a]+v[1]*M[4+a]+v[2]*M[7+a]);   // pos + scale*(x*fwd + y*left + z*up)

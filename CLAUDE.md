@@ -288,6 +288,9 @@ a __thread variable, or gets a SysV ".cold.N" part from Apple clang's hot/cold s
 under Rosetta; a plain call is ~1 ns), so fast paths keep per-thread state in the TEB (+0x1FF0 tid, +0x1FF8 heap cache) and are
 noinline. heap = per-thread small-block cache (<= 1 KB, malloc's 16-byte classes) from a 2 GB arena: alloc+free 27-76 -> ~5 ns;
 tid 4 -> 2 ns; GetAsyncKeyState 4.5 -> 1.3 ns. Expected ~1.5-3% of the main thread. Offline bench + checks: bash shim/tools/callcost.sh.
+Guest threads (2026-10-18): detached at CreateThread (an exited joinable thread kept its stack forever); a returned thread's TEB,
+TLS array and TLS blocks are freed 30 s later and its array leaves g_tarrs (1024 entries: ~34 threads come and go per map load,
+so it used to fill after ~25 loads). PELOAD_THREAD_KEEP=1 = old. Counts in the [d3dobj] audit's second line.
 GetSystemInfo said ONE processor + allocation granularity 0 (the client sizes ~10 thread pools from the count; halo3's
 locks at halo3+0x620170.. spin before blocking only when it is > 1 and wake at most that many waiters):
 Since 2026-10-18 it reports Windows' values by default (hw.logicalcpu or PELOAD_NCPU; in-match A/B of halo3's count via

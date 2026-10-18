@@ -344,7 +344,10 @@ The Mac this runs on has 36 GB; in a 100-player Workshop game the worker sat at 
   5.0-5.3 GB -> 3.0 GB; texture uploads 1,367 decoded / 1.86 GB / 1,549 ms of GL-thread time -> 0 / 0.53 GB / 21 ms.
   sRGB: only the _SRGB formats get sRGB storage. Putting BC1-3 UNORM in sRGB storage too (the decode path's rule,
   PELOAD_D3DGL_BCSRGB=1) gave big white bloom blobs: the decode-skip for UNORM views evidently doesn't hold for compressed
-  sRGB storage, so normal maps and the like were linearised. Frame rate: PELOAD_AB=bcdec in-match A/B (below).
+  sRGB storage, so normal maps and the like were linearised. Frame rate: in-match A/B on a 49-player Australian Hugegrass
+  CTF (`PELOAD_AB=bcdec:60`, walker on): 5 gameplay pairs, compressed / decode 24.8/28.1, 32.1/24.6, 33.3/23.2, 15.0/14.0,
+  25.9/17.6 fps -- but draws per frame swung 2,900-9,600 between phases and the cost per draw went both ways (5.8 vs 5.2,
+  8.1 vs 8.1, 10.5 vs 11.7, 7.0 vs 9.1, 10.1 vs 7.9 us): neutral within the scene noise. The gains are memory and load time.
 - **Worker (CPU) side: the CPU copies stay.** The audit's second [d3dobj] line (PELOAD_D3DOBJ_LOG=1) splits textures' CPU
   copies by class with mincore residency: savannah_sandbox 1 IMMUTABLE texture (0 MB), 2,229-3,485 DEFAULT ones (2.8-4.6 GB
   allocated, 1.9-3.4 GB resident), 121 render targets / depth (0.7 GB / 0.4 GB). halo3 streams mips into DEFAULT textures with

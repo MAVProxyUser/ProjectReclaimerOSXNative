@@ -1051,6 +1051,8 @@ static uint8_t g_d3dscratch[1<<20];  // fallback Map target
 // PELOAD_D3D_NOFREE=1 = the old behaviour (nothing is ever freed).
 static volatile uint64_t g_d3do_n[8], g_d3do_bytes[8], g_d3do_nfree[8], g_d3do_bfree[8], g_d3d_underflow, g_d3d_pending, g_d3d_keptdead, g_d3d_keptdead_il, g_d3d_keptdead_b;
 static int d3d_texclass(char*m,size_t n);   // (after the live registry)
+static volatile int g_gthr_made, g_gthr_exited;   // audit: guest threads created / returned (thread_tramp)
+static uint64_t tls_total(void);   // per-thread TLS bytes of every module
 static void d3dobj_log(void){ static double tl; double now=mono_s(); if(now-tl<30.0) return; tl=now;
     if(!getenv("PELOAD_D3DOBJ_LOG") && !getenv("PELOAD_D3DGL_PROF")) return;
     malloc_statistics_t ms; memset(&ms,0,sizeof ms); malloc_zone_statistics(NULL,&ms);   // every zone
@@ -1105,6 +1107,8 @@ static int d3d_texclass(char*m,size_t n){
     static const char*const lab[6]={"immutable","default","rt/ds","uav","dynamic","staging"};
     int k=snprintf(m,n,"  [d3dobj] texture CPU copies (count, MB allocated / resident):");
     for(int c=0;c<6;c++) if(cnt[c]) k+=snprintf(m+k,n-k," %s %llu %.0f/%.0f",lab[c],(unsigned long long)cnt[c],al[c]/1048576.0,rs[c]/1048576.0);
+    { uint64_t tls=tls_total();
+      extern volatile int g_thr_freed; k+=snprintf(m+k,n-k," | guest threads made %d, returned %d, their blocks freed %d (TEB 8 KB + TLS %llu B each)",g_gthr_made,g_gthr_exited,g_thr_freed,(unsigned long long)tls); }
     k+=snprintf(m+k,n-k,"\n"); return k; }
 
 static D3DObj* d3dobj(void** vt, uint32_t kind, uint64_t size){
@@ -8399,6 +8403,7 @@ static uint8_t *g_peb_ptr;
 #define MAX_TLSMODS 16
 static struct { uint8_t* src; uint64_t raw, total; uint32_t index; } g_tlsmods[MAX_TLSMODS];
 static int g_ntlsmods;
+static uint64_t tls_total(void){ uint64_t t=0; for(int i=0;i<g_ntlsmods;i++) t+=g_tlsmods[i].total; return t; }
 static void* g_tls_array[128];   // the MAIN thread's TLS pointer array (published at gs:0x58)
 // Every guest thread's TLS pointer array (thread_tramp's; never freed), so a DLL loaded later can give each
 // EXISTING thread a block for its static-TLS index, as Windows does. Without it a thread that predates the
@@ -8433,6 +8438,19 @@ static void register_tls(void* tlsdir, uint8_t* modbase, int fixed_index){
 static __thread int g_guest_thr;
 typedef uint32_t (MSABI *WinThreadProc)(void*);
 typedef struct { WinThreadProc fn; void *param; SyncObj *done; } TArg;
+// A returned guest thread's TEB, TLS array and per-module TLS blocks, freed 30 s later (2026-10-18; ~34 threads come and
+// go with every map load): the array leaves g_tarrs (1024 entries, which used to fill after ~25 loads) and the blocks are
+// freed. The thread itself is detached, so libpthread frees its stack. PELOAD_THREAD_KEEP=1 = the old (keep everything).
+typedef struct { void*teb; void**tarr; double t; } ThrDead;
+static ThrDead g_thr_dead[256]; static int g_thr_ndead; volatile int g_thr_freed;
+static int thr_keep(void){ static int k=-1; if(k<0) k=getenv("PELOAD_THREAD_KEEP")?1:0; return k; }
+static void thr_reap(int all){   // g_tlsm held
+    double now=mono_s(); int j=0;
+    for(int i=0;i<g_thr_ndead;i++){ ThrDead*d=&g_thr_dead[i]; if(!all && now-d->t<30.0){ g_thr_dead[j++]=*d; continue; }
+        for(int k=0;k<g_ntarrs;k++) if(g_tarrs[k]==d->tarr){ g_tarrs[k]=g_tarrs[--g_ntarrs]; g_tarrs[g_ntarrs]=0; break; }
+        for(int m=0;m<g_ntlsmods;m++){ int ix=g_tlsmods[m].index; if(ix>=0 && ix<128){ free(d->tarr[ix]); d->tarr[ix]=0; } }
+        free(d->tarr); free(d->teb); g_thr_freed++; }
+    g_thr_ndead=j; }
 static void *thread_tramp(void *a){
     TArg *t=a;
     uint8_t *teb=calloc(1,0x2000);
@@ -8460,6 +8478,7 @@ static void *thread_tramp(void *a){
     g_guest_thr=1;
     if(getenv("PELOAD_TRACE_THREAD")){ char tb[96]; int nn=snprintf(tb,sizeof tb,"  [TT] enter tid=0x%x gs58=0x%llx fn=%p\n",pthread_mach_thread_np(pthread_self()),(unsigned long long)(uint64_t)tarr,(void*)t->fn); (void)!write(2,tb,nn); }
     uint32_t r = t->fn ? t->fn(t->param) : 0;
+    __atomic_add_fetch(&g_gthr_exited,1,__ATOMIC_RELAXED);
     // The Windows TEB fields live in macOS TSD slots 0x30/0x58/0x60. On this
     // macOS, slot 12 (gs:0x60) has a pthread destructor that FREES the slot value
     // at thread exit (_pthread_tsd_cleanup). We put the *static* PEB pointer there
@@ -8475,6 +8494,13 @@ static void *thread_tramp(void *a){
     // load) -> corrupted shared state. The handle stays signaled (manual-reset).
     if(t->done){ pthread_mutex_lock(&t->done->m); t->done->exitcode=r; t->done->signaled=1; pthread_cond_broadcast(&t->done->c); pthread_mutex_unlock(&t->done->m); }
     free(t);
+    if(!thr_keep()){ pthread_mutex_lock(&g_tlsm); thr_reap(0);
+        if(g_thr_ndead<(int)(sizeof g_thr_dead/sizeof g_thr_dead[0])){ g_thr_dead[g_thr_ndead].teb=teb; g_thr_dead[g_thr_ndead].tarr=tarr; g_thr_dead[g_thr_ndead].t=mono_s(); g_thr_ndead++; }
+        pthread_mutex_unlock(&g_tlsm);
+        // and out of the macOS TSD slots they sit in (6 and 11): a libpthread destructor on either would free them
+        // during the exit cleanup and the reaper would free them again (fastcall.c's cache destructor reaches the TEB
+        // through its own pointer)
+        __asm__ volatile("movq $0,%%gs:0x30\n\tmovq $0,%%gs:0x58":::"memory"); }
     return (void*)(uintptr_t)r;
 }
 static void* MSABI i_CreateThread(void*attr,uint64_t stack,WinThreadProc start,void*param,uint32_t fl,uint32_t*tid){
@@ -8487,7 +8513,7 @@ static void* MSABI i_CreateThread(void*attr,uint64_t stack,WinThreadProc start,v
     if(getenv("PELOAD_NO_THREADS")){ if(tid)*tid=0x7333; return (void*)0x7333; } // diagnostic: don't spawn
     SyncObj* done=sync_new(K_THREAD); done->manual=1;              // thread handle = waitable, manual-reset
     TArg *t=malloc(sizeof *t); t->fn=start; t->param=param; t->done=done;
-    pthread_t th; int pcrc=pthread_create(&th,0,thread_tramp,t);
+    pthread_t th; int pcrc=pthread_create(&th,0,thread_tramp,t); if(!pcrc){ __atomic_add_fetch(&g_gthr_made,1,__ATOMIC_RELAXED); if(!thr_keep()) pthread_detach(th); }
     if(pcrc){ if(getenv("PELOAD_TRACE_THREAD")){ char eb[96]; int k=snprintf(eb,sizeof eb,"  [CreateThread] pthread_create FAILED rc=%d (start=%p param=%p)\n",pcrc,(void*)start,param); (void)!write(2,eb,k); } free(t); done->exitcode=0; done->signaled=1; return 0; }
     done->owner=th; done->tid=getenv("PELOAD_TID_CONST")?(uint32_t)(uintptr_t)th:(uint32_t)pthread_mach_thread_np(th);   // = its GetCurrentThreadId()
     if(tid)*tid=done->tid; return done;                           // HANDLE = the SyncObj
