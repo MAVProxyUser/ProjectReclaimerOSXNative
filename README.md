@@ -214,10 +214,16 @@ Options go in front of the command, e.g. `PELOAD_INVERT_PITCH=0 bash shim/play.s
 
 `play.sh` serves what the game knows about the match on http://127.0.0.1:8765/, updated 10 times a second
 (`PELOAD_STATS_HTTP=<port>` for another port, `=0` off; `PELOAD_STATS_ADDR=<ip>` to listen on another address, e.g. to
-watch from another device). From top to bottom the page shows:
+watch from another device). The page, top to bottom: Game rules; the in-game overlay controls, Tools and Record (left)
+beside the death heatmap with the player details under it (right); Connected; the event feed and chat; the players table:
 
 *Screenshots: a live ~60-player public match, player names and chat anonymized by the page's demo mode (`?demo=1`).*
 
+- **Game rules** (at the very top) -- the players in the game and the server's slots ("players 40 / 60 slots (20 free)": the limit the client got from the server when it joined; the game's own limit when you host), the running game's options (rounds, respawn, map, powerups, score and points) and every trait set
+  with what it changes: everyone, after spawning, each powerup, and the mode's roles (leader, flag carrier, infected,
+  last survivor, ...).
+
+  ![Game rules: the running game's options and trait sets](shim/docs/img/stats-rules.png)
 - **In-game overlay** panel (the function keys of earlier versions are gone; `PELOAD_HB_FKEYS=1` brings them back): a
   row per feature -- Hitboxes (the players'), Vehicles (with chips for the three kinds of weak spots), Tracers, Player info,
   Items, Kill/safe zones (a chip per kind: kill zones, safe zones, soft-kill and push-back ceilings, slip surfaces). Each
@@ -269,11 +275,6 @@ watch from another device). From top to bottom the page shows:
   shield, trip mine, auto turret), grenades and weapons dropped by players are left out.
 
   <img src="shim/docs/img/stats-feed.png" width="49%" alt="Event feed: kills with weapon, estimated kills marked"> <img src="shim/docs/img/stats-chat.png" width="49%" alt="Chat: players' lines and the server's messages">
-- **Game rules** -- the running game's options (rounds, respawn, map, powerups, score and points) and every trait set
-  with what it changes: everyone, after spawning, each powerup, and the mode's roles (leader, flag carrier, infected,
-  last survivor, ...).
-
-  ![Game rules: the running game's options and trait sets](shim/docs/img/stats-rules.png)
 - **Players** -- living players first, then players waiting to respawn, then those who quit (still in the game's
   player list but gone from its network session); click a column title to sort (by team, or the whole list). Team, shield and health, weapon, kills, deaths, K/D, shots and accuracy, grenades, vehicle, speed and active
   traits (where they differ from the defaults, with powerup and respawn-trait countdowns). 🔊 marks a talker, 🔇 a
