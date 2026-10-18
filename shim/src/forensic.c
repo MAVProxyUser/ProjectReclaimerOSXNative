@@ -182,6 +182,7 @@ static void fx_voice_at(uint64_t tns,uint64_t sender,const uint8_t*payload,uint6
 static void fx_voice(uint64_t sender,const uint8_t*payload,uint64_t len){ fx_voice_at(fx_now_ns(),sender,payload,len); }
 
 // ---- events.jsonl ---------------------------------------------------------------------------------------------------
+static __thread const float*t_fx_pos;   // fx_event: the event's position (stats.c spawns / power-up pickups), else 0
 static void fx_event_rec(double t,uint32_t seq,const char*kind,const char*a,const char*b,const char*how,const char*verb,int ta,int tb,int flags,const char*text,uint64_t sender){
     StBuf s={0}; sb_put(&s,"{\"t\":%.3f,\"seq\":%u,\"kind\":",t,seq); sb_str(&s,kind); sb_put(&s,",\"text\":"); sb_str(&s,text?text:"");
     if(a && a[0]){ sb_put(&s,",\"a\":"); sb_str(&s,a); } if(b && b[0]){ sb_put(&s,",\"b\":"); sb_str(&s,b); } if(how && how[0]){ sb_put(&s,",\"how\":"); sb_str(&s,how); }
@@ -190,6 +191,7 @@ static void fx_event_rec(double t,uint32_t seq,const char*kind,const char*a,cons
     if(flags&1) sb_put(&s,",\"estimated\":true"); if(flags&2) sb_put(&s,",\"mine\":true"); if(flags&4) sb_put(&s,",\"betrayal\":true");
     if(!strcmp(kind,"chat")){ const char*ch=!how||!how[0]?"all":how; sb_put(&s,",\"channel\":"); sb_str(&s,ch); }   // all, team, nearby, server, notice
     if(sender) sb_put(&s,",\"sender_id\":\"%016llx\"",(unsigned long long)sender);
+    if(t_fx_pos) sb_put(&s,",\"pos\":[%.2f,%.2f,%.2f]",t_fx_pos[0],t_fx_pos[1],t_fx_pos[2]);
     sb_put(&s,"}"); if(s.b){ fx_push(FXI_EVENT,s.b,s.n,0,0); __atomic_fetch_add(&g_fx_nevent,1,__ATOMIC_RELAXED); } free(s.b); }
 
 // ---- roster.jsonl + session boundaries (the stats snapshot thread, every 100 ms) -----------------------------------------
@@ -557,7 +559,8 @@ static void fx_http(int fd,const char*path,const char*qs,const char*req){
 // ---- the glue to stats.c / the engine ----------------------------------------------------------------------------------
 static int fx_hbread(uint64_t a,void*d,size_t n){ return hb_read(a,d,n); }
 // one feed event (stats.c st_eventv, after it is in the ring); a chat line's sender peer id rides in t_st_chat_id
-static void fx_event(const StEvt*e){ fx_event_rec(e->t,e->seq,e->kind,e->a,e->b,e->how,e->verb,e->ta,e->tb,e->flags,e->text,!strcmp(e->kind,"chat")?t_st_chat_id:0); }
+static void fx_event(const StEvt*e){ t_fx_pos=e->haspos?e->pos:0;
+    fx_event_rec(e->t,e->seq,e->kind,e->a,e->b,e->how,e->verb,e->ta,e->tb,e->flags,e->text,!strcmp(e->kind,"chat")?t_st_chat_id:0); t_fx_pos=0; }
 static uint64_t fx_peer_id(int pi){   // peer pi's id (reclaimer-voice-mute.md: peer records at sess+0x58 / +0x1381c0, stride 0x110)
     if(pi<0 || g_st_layout<0) return 0; uint8_t*h3=hb_halo3_base(); uint64_t sess=0, id=0; uint8_t qm[16]={0}; int nq=g_st_layout?128:17;
     if(pi>=nq || !h3 || !hb_read((uint64_t)(h3+0x1e250d0),&sess,8) || !sess || !hb_read(sess+0x54,qm,g_st_layout?16:4) || !((qm[pi>>3]>>(pi&7))&1)) return 0;

@@ -118,8 +118,14 @@ th .srt{display:inline-block;margin-left:2px;padding:0 2px;cursor:pointer;color:
 #fl .est{color:#777;margin-left:4px;cursor:help}
 #fl .k-join .tx{color:#7ddf6a}#fl .k-leave .tx{color:#c9a46a}#fl .k-server .tx,#fl .k-vote .tx,#fl .k-log .tx{color:#ffd75a}
 #fl .k-game .tx{color:var(--accent);font-weight:600}#fl .k-death .tx{color:#aaa}
+/* spawns and pickups (backlog 47): weapons violet, vehicles teal, power-ups pink; the item's name in a chip */
+#fl .k-weapon .tx{color:#b48cff}#fl .k-vehicle .tx{color:#6fd3c2}#fl .k-powerup .tx{color:#ff8fd0}
+#fl .k-weapon .w,#fl .k-vehicle .w,#fl .k-powerup .w{margin:1px 0}
+#fl .k-weapon .w{background:#2e2842;color:#dcd0ff}#fl .k-vehicle .w{background:#1f3532;color:#c8f0e8}#fl .k-powerup .w{background:#3f2337;color:#ffd6ef}
+#fl .pos{color:#888;font-size:11px;font-variant-numeric:tabular-nums;margin-left:2px;cursor:help}
 #fl.h-kills .k-kill,#fl.h-kills .k-death,#fl.h-players .k-join,#fl.h-players .k-leave,
-#fl.h-server .k-server,#fl.h-server .k-vote,#fl.h-server .k-log,#fl.h-game .k-game{display:none}
+#fl.h-server .k-server,#fl.h-server .k-vote,#fl.h-server .k-log,#fl.h-game .k-game,
+#fl.h-weapons .k-weapon,#fl.h-vehicles .k-vehicle,#fl.h-powerups .k-powerup{display:none}
 </style></head>
 <body>
 <h1>Reclaimer live stats <a href="/forensics" title="voice, chat and events archive + viewer" style="font-size:12px;font-weight:400;color:var(--accent);margin-left:10px;text-decoration:none">forensic archive</a></h1><div id="hd">connecting...</div>
@@ -156,9 +162,12 @@ th .srt{display:inline-block;margin-left:2px;padding:0 2px;cursor:pointer;color:
 <div class="feeds">
 <div id="feed" class="panel"><div class="fh"><h2>Event feed</h2>
  <label><input type="checkbox" data-f="kills" checked> kills</label><label><input type="checkbox" data-f="players" checked> joins and leaves</label>
- <label><input type="checkbox" data-f="server" checked> server</label><label><input type="checkbox" data-f="game" checked> match</label></div>
+ <label><input type="checkbox" data-f="server" checked> server</label><label><input type="checkbox" data-f="game" checked> match</label>
+ <label title="Weapons and equipment that appear on the map (and where), and the first player to pick each one up"><input type="checkbox" data-f="weapons" checked> weapons</label>
+ <label title="Vehicles that appear on the map, at the start and each respawn (and where)"><input type="checkbox" data-f="vehicles" checked> vehicles</label>
+ <label title="Power-ups (overshield, active camo, custom) that appear on the map (and where), and who takes them"><input type="checkbox" data-f="powerups" checked> power-ups</label></div>
  <div id="fl" class="note">waiting for events...</div>
- <div class="note">Newest first. Kills come from the game itself (weapon or vehicle, headshot, melee, splatter, stuck). A client is only told about kills involving its team (all of them in team games, only its own in free-for-all); the rest are estimated, marked ≈: the last player whose projectile ended inside the body, and the weapon in their hands, the vehicle or turret they sit in, or the grenade.</div></div>
+ <div class="note">Newest first. Kills come from the game itself (weapon or vehicle, headshot, melee, splatter, stuck). A client is only told about kills involving its team (all of them in team games, only its own in free-for-all); the rest are estimated, marked ≈: the last player whose projectile ended inside the body, and the weapon in their hands, the vehicle or turret they sit in, or the grenade. Spawns: weapons, equipment, vehicles and power-ups as they appear on the map, with where (x, y; hover for the height), and who first picks up each weapon and who takes each power-up. The match start's weapons are one line; grenades, weapons dropped by players and turrets mounted on vehicles are left out.</div></div>
 <div id="chat" class="panel"><div class="fh"><h2>Chat</h2></div>
  <div id="cm" class="note">no chat yet</div>
  <div class="note">Newest first: what players type in the game's text chat (TEAM and NEARBY mark those channels), the server's messages, and the client's own chat notices.</div></div>
@@ -207,19 +216,39 @@ if(new URLSearchParams(location.search).get('demo')==='1'){
   const tx=t=>{ if(typeof t!=='string'||!names.size) return t;   // (a name without a letter, like "30", stays: it reads as a number)
     if(!re) re=new RegExp('(?<![\\p{L}\\p{N}_])(?:'+[...names.keys()].filter(s=>/\p{L}/u.test(s)).sort((a,b)=>b.length-a.length).map(s=>s.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')).join('|')+')(?![\\p{L}\\p{N}_])','gu');
     return t.replace(re,m=>names.get(m)); };
-  // kill / death / join / leave lines start with their names: only those are swapped (a name that is also a word, such
-  // as a vehicle's, stays a word in the rest of the line); other lines get every known name swapped
+  // kill / death / join / leave / pickup lines start with their names: only those are swapped (a name that is also a word,
+  // such as a vehicle's, stays a word in the rest of the line); spawn lines name no player (kept); other lines get every
+  // known name swapped
   const pre=(t,f,to)=>typeof t==='string'&&t.startsWith(f)?to+t.slice(f.length):null;
+  const SPWN=/^(weapon|vehicle|powerup)$/;
   const named=e=>e.kind==='kill'&&e.a&&e.b?pre(e.text,e.a+' '+e.verb+' '+e.b,nm(e.a)+' '+e.verb+' '+nm(e.b)):e.kind==='death'&&e.b?pre(e.text,e.b,nm(e.b))
-    :(e.kind==='join'||e.kind==='leave')&&e.a?pre(e.text,e.a,nm(e.a)):null;
+    :(e.kind==='join'||e.kind==='leave')&&e.a?pre(e.text,e.a,nm(e.a)):SPWN.test(e.kind)?(e.a?pre(e.text,e.a,nm(e.a)):e.text):null;
   const events=evs=>{ for(const e of evs){ if(e.kind!=='game'){ nm(e.a); nm(e.b); } for(const p of PAT){ const m=String(e.text||'').match(p); if(m) m.slice(1).forEach(nm); } }   // the batch's names first
     for(const e of evs){ const t=named(e); if(e.kind!=='game'){ e.a=nm(e.a); e.b=nm(e.b); }
       e.text=e.kind==='chat'&&!/^(server|notice)$/.test(e.how||'')?PH[(Math.imul((e.seq|0)+11,0x9E3779B1)>>>0)%PH.length]:t??tx(e.text); } };
   const snapT=s=>{ for(const p of (s.players||[]).concat(s.session||[])){ p.name=nm(p.name); p.voice=id(p.voice); if(p.handle) p.handle=id(p.handle); } return s; };
-  const T={'/feed.json':j=>(events(j.events||[]),j),'/heat.json':j=>((j.deaths||[]).forEach(d=>{ d[4]=names.get(d[4])||''; }),j)};
+  // made-up spawns and pickups (backlog 47, stats.c st_spawns) when the first feed has none, so the pictures show the
+  // kinds: a match-start weapon line, vehicles, power-ups, weapons, pickups by the demo players (their aliases, from the
+  // snapshot; "Player N" when there is none), spread over the feed's time span. Real ones are only aliased.
+  let fakeDone=false, demoSnap=null;
+  const fakeSpawns=evs=>{ if(fakeDone) return; fakeDone=true; if(evs.some(e=>SPWN.test(e.kind))) return;
+    const ps=((demoSnap&&demoSnap.players)||[]).filter(p=>p&&p.name), who=k=>ps.length?ps[k%ps.length]:{name:'Player '+(k+1),team:-1};
+    const ts=evs.map(e=>e.t).filter(t=>t>0), ms=evs.find(e=>e.kind==='game'&&/^Match started/.test(e.text||''));
+    const t1=ts.length?Math.max(...ts):Date.now()/1000; let t0=ms?ms.t+0.3:ts.length?Math.min(...ts):t1-180; if(t1-t0<60) t0=t1-60;
+    const at=f=>t0+(t1-t0)*f, r1=v=>v.toFixed(1);
+    const sp=(f,kind,how,x,y,z)=>({t:at(f),kind,verb:'spawned',how,pos:[x,y,z],text:`${how} spawned at (${r1(x)}, ${r1(y)})`});
+    const pu=(f,kind,how,k,pos)=>{ const p=who(k), e={t:at(f),kind,verb:'picked up',how,a:p.name,text:`${p.name} picked up ${how}`};
+      if(p.team>=0) e.ta=p.team; if(pos) e.pos=pos; return e; };
+    const fake=[{t:at(0),kind:'weapon',verb:'spawned',text:'14 weapons and equipment spawned: Battle rifle x4, Sniper rifle x2, Rocket launcher, Shotgun x2, Mauler x2, Bubbleshield, Regenerator x2'},
+      sp(0.002,'vehicle','Wraith',-38.5,-25.2,-4.7), sp(0.003,'vehicle','Warthog',-19.6,-30,-6.2), sp(0.004,'vehicle','Ghost',27,-26.7,-3.1), sp(0.005,'powerup','Overshield',0.4,12.9,-2.4),
+      pu(0.06,'weapon','Sniper rifle',0), pu(0.09,'weapon','Rocket launcher',1), pu(0.18,'powerup','Overshield',2,[0.4,12.9,-2.4]),
+      sp(0.42,'weapon','Sniper rifle',-31.6,18.2,4.1), pu(0.47,'weapon','Sniper rifle',1), sp(0.55,'vehicle','Warthog',19.5,-30.3,-6.2),
+      sp(0.66,'powerup','Active camo',-7.9,3.4,1.2), pu(0.71,'powerup','Active camo',0,[-7.9,3.4,1.2]), sp(0.83,'weapon','Rocket launcher',2.2,-14.6,-1.9)];
+    for(const f of fake){ const i=evs.findIndex(e=>e.t>f.t); if(i<0) evs.push(f); else evs.splice(i,0,f); } };
+  const T={'/feed.json':j=>(j.events=j.events||[],events(j.events),fakeSpawns(j.events),j),'/heat.json':j=>((j.deaths||[]).forEach(d=>{ d[4]=names.get(d[4])||''; }),j)};
   const of=window.fetch.bind(window);
   let seeded=null;   // the page reads the whole feed before the first snapshot: the players' names first, for the feed's free-text lines
-  const seed=()=>seeded||(seeded=of('/stats.json').then(r=>r.json()).then(snapT).catch(()=>{}));
+  const seed=()=>seeded||(seeded=of('/stats.json').then(r=>r.json()).then(s=>(demoSnap=snapT(s))).catch(()=>{}));
   window.fetch=async(u,o)=>{ const f=T[new URL(String(u),location.href).pathname]; if(f) await seed(); const r=await of(u,o); if(!f||!r.ok) return r;
     return new Response(JSON.stringify(f(await r.json())),{status:r.status,headers:{'Content-Type':'application/json'}}); };
   const OES=window.EventSource;
@@ -663,9 +692,29 @@ let feedSeq=0, feedBusy=false, feedN=0, chatN=0; const lastLeave=new Map(); cons
 const two=n=>String(n).padStart(2,'0'), clock=t=>{const d=new Date(t*1000);return two(d.getHours())+':'+two(d.getMinutes())+':'+two(d.getSeconds())};
 function feedName(n,team){ const teams=snap&&snap.variant&&snap.variant.rounds&&snap.variant.rounds.teams, c=teams&&team>=0?C[TN[team]]:null;
   return `<b${c?` style="color:${c}"`:''}>${E(n)}</b>`; }
+// spawns and pickups (stats.c st_spawns), kinds weapon / vehicle / powerup: verb "spawned" (how = the item, pos = [x,y,z],
+// the text ends "at (x, y)") or "picked up" (a = the player, ta = their team; a power-up's pos = where it was); a burst
+// of weapons at match start is one line without how ("N weapons and equipment spawned: A x2, B"). Older archives had
+// upper-case tag names and "at x, y, z".
+const SPAWNK={weapon:1,vehicle:1,powerup:1};
+const itemName=n=>!n||n==='?'?'unknown item':/[a-z]/.test(n)?n:n.charAt(0)+n.slice(1).toLowerCase();
+// where: "(x, y)" as the loader's text rounds them (else from pos), full = pos's x, y, z for the title
+function spawnPos(e){ const m=/ at \(?(-?[\d.]+), (-?[\d.]+)(?:, (-?[\d.]+))?\)?$/.exec(e.text||''), p=Array.isArray(e.pos)&&e.pos.length>=3?e.pos:null;
+  if(!m&&!p) return null;
+  return {xy:m?`(${m[1]}, ${m[2]})`:`(${(+p[0]).toFixed(1)}, ${(+p[1]).toFixed(1)})`, full:p?'x, y, z: '+p.map(v=>(+v).toFixed(2)).join(', '):'x, y'+(m[3]!=null?', z: ':': ')+[m[1],m[2],m[3]].filter(v=>v!=null).join(', ')}; }
+function spawnBody(e){
+  const ch=n=>`<span class="w">${E(itemName(n))}</span>`;
+  if(e.verb==='picked up' && e.a) return `${feedName(e.a,e.ta)} <span class="tx">picked up</span> ${ch(e.how)}`;
+  const m=/^(\d+) weapons and equipment spawned:\s*(.*)$/.exec(e.text||'');
+  if(m) return `<span class="tx">${m[1]} weapons and equipment spawned</span> `+m[2].split(', ').filter(Boolean).map(s=>{ const q=/^(.*?)(?: x(\d+))?$/.exec(s);
+    return `<span class="w">${E(itemName(q[1]))}${q[2]?' ×'+q[2]:''}</span>`; }).join(' ');
+  if(e.how){ const p=spawnPos(e);
+    return `${ch(e.how)} <span class="tx">spawned${p?' at':''}</span>${p?` <span class="pos" title="${E(p.full)}">${E(p.xy)}</span>`:''}`; }
+  return `<span class="tx">${E(e.text)}</span>`; }
 function feedRow(e){
   let body;
-  if(e.kind==='kill') body=`${feedName(e.a,e.ta)} ${E(e.verb||(e.betrayal?'betrayed':'killed'))} ${feedName(e.b,e.tb)}${e.how?` <span class="w">(${E(e.how)})</span>`:''}`;
+  if(SPAWNK[e.kind]) body=spawnBody(e);
+  else if(e.kind==='kill') body=`${feedName(e.a,e.ta)} ${E(e.verb||(e.betrayal?'betrayed':'killed'))} ${feedName(e.b,e.tb)}${e.how?` <span class="w">(${E(e.how)})</span>`:''}`;
   else if(e.kind==='death'){ const rest=e.b&&e.text.startsWith(e.b)?e.text.slice(e.b.length):' died', m=rest.match(/^(.*?) \((.*)\)$/);
     body=`${feedName(e.b,e.tb)} <span class="tx">${E((m?m[1]:rest).trim())}</span>${m?` <span class="w">(${E(m[2])})</span>`:''}`; }
   else if(e.kind==='game' && e.a) body=`<span class="tx">Match started: ${E(MAPN[e.a]||e.a)}</span>`;
