@@ -293,7 +293,9 @@ Diagnostics: PELOAD_GETENV_STATS (real environment lookups per site: every PELOA
 ~20-260/s), PELOAD_HEAP_STATS=<thread> (HeapAlloc sizes), PELOAD_CALLCOUNT=guest-0x18000a120 (Win32 calls of the main thread:
 ~3.5 M/s in a BTB: GetCurrentThreadId (now cached per thread), GetProcessHeap, memset, HeapAlloc/Free, memcpy).
 Walking with the map (2026-10-17, backlog 32): PELOAD_NAV=roam|enemy|x,y,z|vehicle:<name> (vehicle: walk up to the nearest vehicle whose tag name contains <name>, stop beside it and look at it -- for overlay checks) drives pad 0 along A* paths of a floor graph
-(re-tools/h3nav.py -> maptop/<map>.nav, made in the background on first play; shim/src/nav.c, own thread shim-nav;
+(re-tools/h3nav.py -> maptop/<map>.nav, made in the background on first play; its memory follows a budget of ~14 M REAL
+surface samples -- long triangles are cut, each sampled by area, the cell grows until it fits; peaks 0.8-2 GB, killed past
+PELOAD_NAV_TOOL_MB=4096; shim/src/nav.c, own thread shim-nav;
 PELOAD_NAV_LOG). Use it for unattended test movement instead of PELOAD_INPUT_SCRIPT (needs QR_PAD=1). With the sparring partner
 (TARGET_ENV="PELOAD_SPAR=1 PELOAD_NAV=enemy") it also walks: nav's left stick + jump, the aim keeps the right stick; within
 PELOAD_NAV_NEAR (4) units it strafes side to side. The stats page map draws the walker's path and goal (snapshot "nav").

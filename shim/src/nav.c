@@ -113,11 +113,11 @@ static int nav_pick_roam(int from){ float fp[3]; nav_pos(from,fp); int comp=g_na
         float d=sqrtf((p[0]-fp[0])*(p[0]-fp[0])+(p[1]-fp[1])*(p[1]-fp[1])); if(d>=12.0f) return i; if(d>bd){ bd=d; best=i; } }
     return best; }
 static char g_nav_making[1100];
-// waits for the graph builder; kills it when its resident memory passes PELOAD_NAV_TOOL_MB (default 8192; Forge World peaks at 5.6 GB): a huge map once
+// waits for the graph builder; kills it when its resident memory passes PELOAD_NAV_TOOL_MB (default 4096; since the builder budgets real samples, 2026-10-18, maps peak at 0.8-2 GB: Valhalla 0.76, Forge World 1.26, Ultimate Forge savannah_sandbox 2.0): a huge map once
 // grew it past 6 GB and pushed the game into swap (3 fps); h3nav.py itself now picks coarser cells for big maps
 #include <libproc.h>
 #include <sys/resource.h>
-static void* nav_wait(void*a){ pid_t pid=(pid_t)(intptr_t)a; int st=0, killed=0; const char*e=getenv("PELOAD_NAV_TOOL_MB"); uint64_t lim=(uint64_t)(e?atoi(e):8192)<<20;
+static void* nav_wait(void*a){ pid_t pid=(pid_t)(intptr_t)a; int st=0, killed=0; const char*e=getenv("PELOAD_NAV_TOOL_MB"); uint64_t lim=(uint64_t)(e?atoi(e):4096)<<20;
     for(;;){ pid_t r=waitpid(pid,&st,WNOHANG); if(r==pid || (r<0 && errno!=EINTR)) break;
         struct proc_taskinfo ti; if(!killed && proc_pidinfo(pid,PROC_PIDTASKINFO,0,&ti,sizeof ti)==(int)sizeof ti && ti.pti_resident_size>lim){
             kill(pid,SIGKILL); killed=1; char m[200]; int k=snprintf(m,sizeof m,"  [nav] walking graph builder passed %llu MB: stopped\n",(unsigned long long)(lim>>20)); (void)!write(2,m,k); }

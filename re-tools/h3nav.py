@@ -159,26 +159,67 @@ def samples(tris, spacing):
     return np.concatenate(pts), np.concatenate(own)
 
 
+def split_long(tris, walk, maxlen):
+    """cut triangles along their longest edge until none is longer than maxlen: samples() takes ~(edge/spacing)^2 / 2
+    points per triangle, so a long sliver cost millions (Ultimate Forge's savannah_sandbox: past 8 GB) -- after the cuts
+    the count follows the area"""
+    out_t, out_w = [], []
+    while len(tris):
+        e = np.stack([np.linalg.norm(tris[:, 1] - tris[:, 0], axis=1), np.linalg.norm(tris[:, 2] - tris[:, 1], axis=1),
+                      np.linalg.norm(tris[:, 0] - tris[:, 2], axis=1)], 1)
+        big = e.max(1) > maxlen
+        out_t.append(tris[~big]); out_w.append(walk[~big])
+        tris, walk, e = tris[big], walk[big], e[big]
+        if not len(tris):
+            break
+        k = e.argmax(1); r = np.arange(len(tris))     # the longest edge runs from vertex k to vertex k+1
+        a, b, c = tris[r, k], tris[r, (k + 1) % 3], tris[r, (k + 2) % 3]
+        m = (a + b) * 0.5
+        tris = np.concatenate([np.stack([a, m, c], 1), np.stack([m, b, c], 1)]); walk = np.concatenate([walk, walk])
+    return np.concatenate(out_t), np.concatenate(out_w)
+
+
+def long_first(tris):
+    """vertices rotated so that edge 0 -> 1 is the longest; -> (tris, its length, the height over it)"""
+    e = np.stack([np.linalg.norm(tris[:, 1] - tris[:, 0], axis=1), np.linalg.norm(tris[:, 2] - tris[:, 1], axis=1),
+                  np.linalg.norm(tris[:, 0] - tris[:, 2], axis=1)], 1)
+    k = e.argmax(1); r = np.arange(len(tris))
+    t = np.stack([tris[r, k], tris[r, (k + 1) % 3], tris[r, (k + 2) % 3]], 1)
+    L = e[r, k]; area2 = np.linalg.norm(np.cross(t[:, 1] - t[:, 0], t[:, 2] - t[:, 0]), axis=1)
+    return t, L, area2 / np.maximum(L, 1e-9)
+
+
+def grid_size(L, H, spacing):
+    return np.maximum(1, np.ceil(L / spacing)).astype(np.int64), np.maximum(1, np.ceil(H / spacing)).astype(np.int64)
+
+
+def sample_count(tris, spacing):
+    _, L, H = long_first(tris); k, m = grid_size(L, H, spacing)
+    return float(((k + 1) * (m + 1)).sum())
+
+
 def cell_samples(tris, walk, spacing, x0, y0, cell, w, h):
-    """samples() binned straight away, chunk by chunk, keeping only what the graph needs: cell id (int64), height
-    (float32), on a walkable triangle (bool) -- ~13 bytes a sample instead of ~400 (Forge World: 17 M samples)"""
-    e = np.maximum(np.maximum(np.linalg.norm(tris[:, 1] - tris[:, 0], axis=1), np.linalg.norm(tris[:, 2] - tris[:, 1], axis=1)),
-                   np.linalg.norm(tris[:, 0] - tris[:, 2], axis=1))
-    n = np.maximum(1, np.ceil(e / spacing)).astype(np.int64)
+    """surface samples binned straight away, chunk by chunk, keeping only what the graph needs: cell id (int64), height
+    (float32), on a walkable triangle (bool) -- ~13 bytes a sample instead of ~400 (Forge World: 17 M samples).
+    Per triangle a grid of m+1 rows across its height (toward vertex 2) by k+1 points along its longest edge (0 -> 1),
+    so the count follows the area (a sliver gets 2 rows), not the longest edge squared."""
+    tris, L, H = long_first(tris); kk, mm = grid_size(L, H, spacing)
     C, Z, F = [], [], []
-    for k in np.unique(n):
-        idx = np.nonzero(n == k)[0]
-        i, j = np.meshgrid(np.arange(k + 1), np.arange(k + 1), indexing='ij')
-        keep = (i + j) <= k
-        wb, wc = (i[keep] / k)[None, :, None], (j[keep] / k)[None, :, None]
-        step = max(1, 2000000 // keep.sum())
+    key = kk * 4096 + mm
+    for q in np.unique(key):
+        k, m = int(q // 4096), int(q % 4096)
+        idx = np.nonzero(key == q)[0]
+        u, t = np.meshgrid(np.arange(k + 1) / k, np.arange(m + 1) / m, indexing='ij')
+        u, t = u.ravel(), t.ravel()
+        wb, wc = (u * (1 - t))[None, :, None], t[None, :, None]
+        step = max(1, 2000000 // len(u))
         for c in range(0, len(idx), step):
             ii = idx[c:c + step]
             a, b, cc = tris[ii, 0][:, None], tris[ii, 1][:, None], tris[ii, 2][:, None]
             p = (a + (b - a) * wb + (cc - a) * wc).reshape(-1, 3)
             ix = np.floor((p[:, 0] - x0) / cell).astype(np.int64); iy = np.floor((p[:, 1] - y0) / cell).astype(np.int64)
             ins = (ix >= 0) & (ix < w) & (iy >= 0) & (iy < h)
-            C.append((iy * w + ix)[ins]); Z.append(p[ins, 2].astype(np.float32)); F.append(np.repeat(walk[ii], keep.sum())[ins])
+            C.append((iy * w + ix)[ins]); Z.append(p[ins, 2].astype(np.float32)); F.append(np.repeat(walk[ii], len(u))[ins])
     if not C:
         return np.zeros(0, np.int64), np.zeros(0, np.float32), np.zeros(0, bool)
     return np.concatenate(C), np.concatenate(Z), np.concatenate(F)
@@ -261,7 +302,19 @@ def main():
         cell = math.ceil(need * 8) / 8
         w, h = int(np.ceil((hi[0] - lo[0]) / cell)), int(np.ceil((hi[1] - lo[1]) / cell))
         log('big map (%.0f square units of surface): cells of %.3f instead, %d x %d' % (area, cell, w, h))
-    cid, sz, f = cell_samples(tris, walk, cell * 0.5, x0, y0, cell, w, h)   # per sample: cell, height, on a floor
+    # long triangles cut down (16 sample spacings at most), then the real sample count decides the cell size
+    while True:
+        st, sw = split_long(tris, walk, cell * 0.5 * 16)
+        ns = sample_count(st, cell * 0.5)
+        if ns <= 14e6:
+            break
+        cell = math.ceil(cell * 1.25 * 8) / 8
+        w, h = int(np.ceil((hi[0] - lo[0]) / cell)), int(np.ceil((hi[1] - lo[1]) / cell))
+        log('%.0f M samples: cells of %.3f instead, %d x %d' % (ns / 1e6, cell, w, h))
+    if len(st) != len(tris):
+        log('%d triangles cut into %d (no edge over %.1f), %.1f M samples' % (len(tris), len(st), cell * 8, ns / 1e6))
+    cid, sz, f = cell_samples(st, sw, cell * 0.5, x0, y0, cell, w, h)   # per sample: cell, height, on a floor
+    del st, sw
     log('%d surface samples' % len(cid))
     # solid samples sorted by (cell, z) for the clearance test
     BIG = 1e4
