@@ -226,7 +226,9 @@ if(new URLSearchParams(location.search).get('demo')==='1'){
   const events=evs=>{ for(const e of evs){ if(e.kind!=='game'){ nm(e.a); nm(e.b); } for(const p of PAT){ const m=String(e.text||'').match(p); if(m) m.slice(1).forEach(nm); } }   // the batch's names first
     for(const e of evs){ const t=named(e); if(e.kind!=='game'){ e.a=nm(e.a); e.b=nm(e.b); }
       e.text=e.kind==='chat'&&!/^(server|notice)$/.test(e.how||'')?PH[(Math.imul((e.seq|0)+11,0x9E3779B1)>>>0)%PH.length]:t??tx(e.text); } };
-  const snapT=s=>{ for(const p of (s.players||[]).concat(s.session||[])){ p.name=nm(p.name); p.voice=id(p.voice); if(p.handle) p.handle=id(p.handle); } return s; };
+  const ipf=new Map(), ipT=v=>{ if(!v) return v; let f=ipf.get(v); if(!f){ f='203.0.113.'+(10+ipf.size); ipf.set(v,f); } return f; };   // documentation range
+  const snapT=s=>{ for(const p of (s.players||[]).concat(s.session||[])){ p.name=nm(p.name); p.voice=id(p.voice); if(p.handle) p.handle=id(p.handle); if(p.ip) p.ip=ipT(p.ip); }
+    if(s.server_addr) s.server_addr='198.51.100.10:49176'; return s; };
   // made-up spawns and pickups (backlog 47, stats.c st_spawns) when the first feed has none, so the pictures show the
   // kinds: a match-start weapon line, vehicles, power-ups, weapons, pickups by the demo players (their aliases, from the
   // snapshot; "Player N" when there is none), spread over the feed's time span. Real ones are only aliased.
@@ -415,6 +417,8 @@ function renderDet(){
    ['Active traits',Object.keys(p.traits||{}).length?Object.entries(p.traits).map(([k,x])=>`${E(TK[k]||k)}: ${E(x)}`).join('<br>'):(snap.variant?'game defaults':'')],
    ['Effects',(p.effects||[]).map(f=>`${E(f.what)}, ${Math.ceil(f.left)} s left`).join('<br>')||'none'],
    ['Voice',p.voice?(p.muted?'muted (only for you)':'audible'):'no voice connection'],
+   ['Address',p.ip?E(p.ip):snap.addr_role==='client'?`not known to a client (it only talks to the server${snap.server_addr?': '+E(snap.server_addr):''})`:
+     snap.addr_role==='hidden'?'hidden (this page is reachable from other computers; PELOAD_STATS_IPS=1 shows it)':p.you?'this computer':snap.addr_role==='host'?'not in the host table':'not known'],
    ['Shots fired',p.shots??0],['Hits',`${p.hits??0}`+(p.shots?` (${Math.round(p.accuracy*100)}% accuracy)`:'')],['Facing',p.facing!=null?p.facing+'°':''],['Position',p.pos.map(v=>v.toFixed(1)).join(', ')],['Object',p.handle]];
   el.innerHTML=`<button class="x" onclick="closeDet()" aria-label="Close">×</button><b>${E(p.name)}${p.you?' (you)':''}</b><div class="detbtns">${p.voice&&!p.you?bigMute(p.voice,p.muted):''}${p.you?'':tpBtn(p)}</div><dl>${rows.map(r=>`<dt>${r[0]}</dt><dd>${r[1]}</dd>`).join('')}</dl>
    <div class="note">Shots counts every projectile (each shotgun pellet is one). A hit is a shot that ended inside another player's body bounds -- an estimate; turret shots count for the vehicle, not the gunner.</div>`;

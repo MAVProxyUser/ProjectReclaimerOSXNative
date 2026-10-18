@@ -252,8 +252,12 @@ no-item spawn runs `/usr/bin/true`. The loader logs `[workshop] item <id>: Depot
 The script: the Steam account name from `STEAM_USER` or the first line of
 `~/Library/Application Support/ReclaimerMac/steam_user`; never a password (DepotDownloader must already be signed in,
 mods.md; an expired or missing login comes back as an `Error` line telling the user to sign in in a terminal). A
-`-manifest-only` run gives the total size, the download prints `Progress` lines from DepotDownloader's percentages,
-`Ready` once "Total downloaded" appears and `ModInfo.json` exists. Log `$TMPDIR/reclaimer_workshop_<id>.log`. It then
+`-manifest-only` run gives the total size; during the download a `Progress` line every 2 s: the larger of
+DepotDownloader's last percentage and the bytes on disk in the item folder, at most 99%, and at least one byte more than
+the line before while DepotDownloader runs (2026-10-18: DepotDownloader prints a percentage only when a FILE finishes and
+checks files it already has silently, so a single 1-2 GB Ultimate Forge map passed the client's 45 s stall limit -> "Steam
+Workshop download timed out" at 863 MB of 8.9 GB, and the client killed the helper; the client's 1800 s overall limit
+still applies to slow connections); `Ready` once "Total downloaded" appears and `ModInfo.json` exists. Log `$TMPDIR/reclaimer_workshop_<id>.log`. It then
 makes the stats page's top-down pictures of the item's maps: `maptop.sh <the item's .map files>` in its own session,
 off the client's pipe, under native arm64 python (the script itself may run translated), log
 `$TMPDIR/reclaimer_workshop_<id>_maptop.log`; `PELOAD_NO_MAPTOP=1` skips it.

@@ -340,6 +340,46 @@ static void st_chat_install(void){
     int64_t r=sig_find(g_base,b,m,n); int ok=r>=0 && entry_hook(g_base+r,b,19,(void*)st_on_chat);
     char msg[120]; int k=snprintf(msg,sizeof msg,"  [stats] chat: %s\n",ok?"hooked (event feed)":"unavailable (push_history not found)"); (void)!write(2,msg,k); }
 // Runs at exe load (single-threaded, before the entry point), only with the stats page on.
+// Player addresses (2026-10-18, backlog 49; static RE of the 0.9.18 client). A HOST -- a menu-hosted game or a dedicated
+// server's worker -- keeps Mutex<Option<ModerationState>> for its kick / banip / RCON "players" commands: players Vec at L-8
+// (ptr) / L (len) of 0x68-byte entries {+0 player ID String (64 hex), +0x18 nickname String, +0x48 u64 session peer id (=
+// StSess.voice), +0x50 u32 join number, +0x54 IpAddr tag (0 V4, 1 V6), +0x55 octets (network order)}, kicked Vec at L+0x28 /
+// L+0x30 of 0x30-byte entries (+0x28 peer id), Option None = 0x8000000000000000 at L-0xa0, the futex lock byte at L-0xa8.
+// 0.9.18: L = exe+0x27cf790, accepted only when some `lock cmpxchg byte [rip+L-0xa8]` exists (other builds: off; the
+// layout moved in 0.9.16 and before 0.9.2 there is no such table). Read without the lock: len/ptr, the entries, len/ptr
+// again; kept only when unchanged and every entry looks right. A CLIENT knows no other player's address (the roster has
+// none, voice is relayed): only the server's (= the host player's in a player-hosted game). Shown only while the stats page
+// is on this Mac (PELOAD_STATS_ADDR loopback or unset) unless PELOAD_STATS_IPS=1; PELOAD_STATS_IPS=0 hides them always.
+static uint8_t*g_st_modlen;
+static void st_addr_install(void){
+    if(!g_base) return; DOS*dh=(DOS*)g_base; OPT64*oh=(OPT64*)(g_base+dh->e_lfanew+sizeof(COFF)); if(oh->ImageSize<=0x27cf800) return;
+    uint8_t*L=g_base+0x27cf790, *lk=L-0xa8; int paired=0;
+    for(uint8_t*q=g_base+0x1000; q+8<g_base+0x27cf000 && !paired; q++)
+        if(q[0]==0xF0 && q[1]==0x0F && q[2]==0xB0 && (q[3]&0xC7)==0x05 && q+8+*(int32_t*)(q+4)==lk) paired=1;
+    if(paired) g_st_modlen=L;
+    char m[120]; int k=snprintf(m,sizeof m,"  [stats] player addresses: %s\n",paired?"host table found (shown while hosting)":"host table not found (another client build?): off"); (void)!write(2,m,k); }
+static int st_ips_ok(void){ static int v=-1; if(v<0){ const char*e=getenv("PELOAD_STATS_IPS"), *ad=getenv("PELOAD_STATS_ADDR");
+        int local=!ad || !*ad || !strncmp(ad,"127.",4) || !strcmp(ad,"::1") || !strcmp(ad,"localhost"); v=e?atoi(e)!=0:local; } return v; }
+typedef struct { uint64_t peer; char ip[48]; } StAddr;
+static StAddr g_st_addr[256]; static int g_st_naddr, g_st_hosting;
+static void st_addr_refresh(void){   // snapshot thread, once per snapshot
+    g_st_hosting=0; if(!g_st_modlen || !st_ips_ok()) { g_st_naddr=0; return; }
+    uint64_t opt=0, len=0, ptr=0, len2=0, ptr2=0, klen=0, kptr=0; uint8_t*L=g_st_modlen;
+    if(!hb_read((uint64_t)(uintptr_t)(L-0xa0),&opt,8) || opt==0x8000000000000000ull){ g_st_naddr=0; return; }   // not hosting
+    if(!hb_read((uint64_t)(uintptr_t)L,&len,8) || !hb_read((uint64_t)(uintptr_t)(L-8),&ptr,8) || len>256 || (len && !ptr)) return;
+    hb_read((uint64_t)(uintptr_t)(L+0x30),&klen,8); hb_read((uint64_t)(uintptr_t)(L+0x28),&kptr,8); if(klen>256) klen=0;
+    static uint8_t e[256*0x68], kk[256*0x30];
+    if(len && !hb_read(ptr,e,(size_t)len*0x68)) return; if(klen && (!kptr || !hb_read(kptr,kk,(size_t)klen*0x30))) klen=0;
+    if(!hb_read((uint64_t)(uintptr_t)L,&len2,8) || !hb_read((uint64_t)(uintptr_t)(L-8),&ptr2,8) || len2!=len || ptr2!=ptr) return;   // changed: next time
+    StAddr out[256]; int n=0;
+    for(uint64_t i=0;i<len;i++){ const uint8_t*x=e+i*0x68; uint8_t tag=x[0x54]; uint64_t peer=*(const uint64_t*)(x+0x48), idl=*(const uint64_t*)(x+0x10);
+        if(tag>1 || idl!=64 || !peer) return;   // not what we expect: keep the last result
+        int kicked=0; for(uint64_t q=0;q<klen;q++) if(*(const uint64_t*)(kk+q*0x30+0x28)==peer) kicked=1; if(kicked) continue;
+        StAddr*a=&out[n++]; a->peer=peer;
+        if(tag==0) inet_ntop(AF_INET,x+0x55,a->ip,sizeof a->ip);
+        else { static const uint8_t v4m[12]={0,0,0,0,0,0,0,0,0,0,0xff,0xff}; if(!memcmp(x+0x55,v4m,12)) inet_ntop(AF_INET,x+0x55+12,a->ip,sizeof a->ip); else inet_ntop(AF_INET6,x+0x55,a->ip,sizeof a->ip); } }
+    memcpy(g_st_addr,out,sizeof(StAddr)*(size_t)n); g_st_naddr=n; g_st_hosting=1; }
+static const char* st_addr_of(uint64_t peer){ if(!peer) return 0; for(int i=0;i<g_st_naddr;i++) if(g_st_addr[i].peer==peer) return g_st_addr[i].ip; return 0; }
 static void st_voice_install(void){ if(!stats_on() || !g_base) return;
     uint8_t b[96],m[96]; int n; int64_t r; char msg[220]; int k;
     n=sig_parse("55 56 57 53 48 83 EC 38 48 8D 6C 24 30 48 C7 45 00 FE FF FF FF 48 89 CE B1 01 31 C0 F0 0F B0 0D ?? ?? ?? ?? 0F 85",b,m,96);
@@ -354,7 +394,7 @@ static void st_voice_install(void){ if(!stats_on() || !g_base) return;
     n=sig_parse("55 41 57 41 56 41 55 41 54 56 57 53 48 81 EC 18 01 00 00 48 8D AC 24 80 00 00 00 0F 29 B5 80 00 00 00 48 C7 45 78 FE FF FF FF 4D 89 CE 4C 89 C7 49 89 D7 48 89 CB",b,m,96);
     int64_t rv=sig_find(g_base,b,m,n); int hooked=rv>=0 && entry_hook(g_base+rv,b,19,(void*)st_on_voice);
     k=snprintf(msg,sizeof msg,"  [stats] voice: mute %s, talking indicator %s\n",g_st_setmuted?"available":"unavailable (set_muted not found)",hooked?"hooked":"unavailable (voice_recv not found)");
-    (void)!write(2,msg,k); st_chat_install(); }
+    (void)!write(2,msg,k); st_chat_install(); st_addr_install(); }
 static void st_voice_init(void){ static int done; if(done || !g_base) return; done=1;
     // 0.9.18: set_muted at its known place -> the client's expanded-session flag is at its known place too; other
     // builds pick the layout by which one holds valid records
@@ -984,9 +1024,14 @@ static void st_snapshot(StBuf*s){
       memcpy(g_bip,nb,(size_t)nn*sizeof *nb); g_nbip=nn; }
     // players: the engine's player table (a player between lives has no live biped)
     st_variant(s);   // the game's options and trait sets (st_players found the TLS block)
-    static StSess ss[128]; uint32_t sst=0; int nss=st_session(ss,128,&sst);
+    static StSess ss[128]; uint32_t sst=0; int nss=st_session(ss,128,&sst); st_addr_refresh();
     sb_put(s,",\"session\":["); for(int k=0;k<nss;k++){ sb_put(s,"%s{\"name\":",k?",":""); sb_str(s,ss[k].name);
-        sb_put(s,",\"index\":%d,\"peer\":%d,\"host\":%s,\"voice\":\"%016llx\",\"muted\":%s,\"talking\":%s}",ss[k].idx,ss[k].peer,ss[k].host?"true":"false",(unsigned long long)ss[k].voice,ss[k].muted?"true":"false",st_talk_age(ss[k].voice)<0.5?"true":"false"); }
+        sb_put(s,",\"index\":%d,\"peer\":%d,\"host\":%s,\"voice\":\"%016llx\",\"muted\":%s,\"talking\":%s",ss[k].idx,ss[k].peer,ss[k].host?"true":"false",(unsigned long long)ss[k].voice,ss[k].muted?"true":"false",st_talk_age(ss[k].voice)<0.5?"true":"false");
+        { const char*ip=st_addr_of(ss[k].voice); if(ip){ sb_put(s,",\"ip\":"); sb_str(s,ip); } } sb_put(s,"}"); }
+    // addresses: "host" = this client hosts (players' addresses from its moderation table), "client" = only the server's
+    { char srv[96]=""; const char*p=strstr(g_cmdlineA,"join?server="); if(p){ p+=12; size_t j2=0; while(*p && *p!=' ' && *p!='"' && *p!='&' && j2+1<sizeof srv) srv[j2++]=*p++; srv[j2]=0; }
+      sb_put(s,",\"addr_role\":\"%s\"",!st_ips_ok()?"hidden":g_st_hosting?"host":srv[0]?"client":"none");
+      if(srv[0] && st_ips_ok() && !g_st_hosting){ sb_put(s,",\"server_addr\":"); sb_str(s,srv); } }
     { int hostplayer=0; for(int k=0;k<nss;k++) if(ss[k].host) hostplayer=1;
       sb_put(s,"],\"session_state\":%u,\"host_peer\":%d,\"local_peer\":%d,\"dedicated\":%s,\"mute\":%s",sst,g_st_hostpeer,g_st_localpeer,
           g_st_hostpeer>=0 && nss && !hostplayer?"true":"false",g_st_setmuted&&st_controls_ok()?"true":"false"); }
@@ -1020,7 +1065,8 @@ static void st_snapshot(StBuf*s){
         if(g_st_var_ok) st_player_traits(s,pl[k].rec);
         { const StSess*vs=0; for(int q=0;q<nss && !vs;q++) if(ss[q].idx==pl[k].slot && !strcmp(ss[q].name,pl[k].name)) vs=&ss[q];
           for(int q=0;q<nss && !vs;q++) if(!strcmp(ss[q].name,pl[k].name)) vs=&ss[q];
-          if(vs) sb_put(s,",\"voice\":\"%016llx\",\"muted\":%s,\"talking\":%s,\"host\":%s",(unsigned long long)vs->voice,vs->muted?"true":"false",st_talk_age(vs->voice)<0.5?"true":"false",vs->host?"true":"false"); }
+          if(vs) sb_put(s,",\"voice\":\"%016llx\",\"muted\":%s,\"talking\":%s,\"host\":%s",(unsigned long long)vs->voice,vs->muted?"true":"false",st_talk_age(vs->voice)<0.5?"true":"false",vs->host?"true":"false");
+          { const char*ip=vs?st_addr_of(vs->voice):0; if(ip){ sb_put(s,",\"ip\":"); sb_str(s,ip); } } }
         sb_put(s,"}"); }
     sb_put(s,"]");
     fx_roster_tick(m,ss,nss,pl,np);   // forensic archive: roster changes + session boundaries (forensic.c)

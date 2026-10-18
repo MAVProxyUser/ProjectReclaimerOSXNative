@@ -110,7 +110,16 @@ static int nav_pick_roam(int from){ float fp[3]; nav_pos(from,fp); int comp=g_na
         float d=sqrtf((p[0]-fp[0])*(p[0]-fp[0])+(p[1]-fp[1])*(p[1]-fp[1])); if(d>=12.0f) return i; if(d>bd){ bd=d; best=i; } }
     return best; }
 static char g_nav_making[1100];
-static void* nav_wait(void*a){ pid_t pid=(pid_t)(intptr_t)a; int st=0; while(waitpid(pid,&st,0)<0 && errno==EINTR){}
+// waits for the graph builder; kills it when its resident memory passes PELOAD_NAV_TOOL_MB (default 8192; Forge World peaks at 5.6 GB): a huge map once
+// grew it past 6 GB and pushed the game into swap (3 fps); h3nav.py itself now picks coarser cells for big maps
+#include <libproc.h>
+#include <sys/resource.h>
+static void* nav_wait(void*a){ pid_t pid=(pid_t)(intptr_t)a; int st=0, killed=0; const char*e=getenv("PELOAD_NAV_TOOL_MB"); uint64_t lim=(uint64_t)(e?atoi(e):8192)<<20;
+    for(;;){ pid_t r=waitpid(pid,&st,WNOHANG); if(r==pid || (r<0 && errno!=EINTR)) break;
+        struct proc_taskinfo ti; if(!killed && proc_pidinfo(pid,PROC_PIDTASKINFO,0,&ti,sizeof ti)==(int)sizeof ti && ti.pti_resident_size>lim){
+            kill(pid,SIGKILL); killed=1; char m[200]; int k=snprintf(m,sizeof m,"  [nav] walking graph builder passed %llu MB: stopped\n",(unsigned long long)(lim>>20)); (void)!write(2,m,k); }
+        usleep(500000); }
+    if(killed) unlink(g_nav_making);
     char m[1300]; int k=snprintf(m,sizeof m,"  [nav] walking graph %s: %s\n",g_nav_making,access(g_nav_making,R_OK)?"FAILED (see its .log)":"made"); (void)!write(2,m,k); return 0; }
 // the nav file of the map being played: load it, or make it in the background (once per map)
 static void nav_ensure(void){
@@ -139,6 +148,7 @@ static void nav_ensure(void){
     posix_spawnattr_t at; posix_spawnattr_init(&at); posix_spawnattr_setflags(&at,POSIX_SPAWN_SETPGROUP|POSIX_SPAWN_CLOEXEC_DEFAULT); posix_spawnattr_setpgroup(&at,0);   // only its stdio
     pid_t pid=0; int r=posix_spawn(&pid,"/usr/bin/arch",&fa,&at,argv,environ); posix_spawn_file_actions_destroy(&fa); posix_spawnattr_destroy(&at);
     if(r){ g_nav.failed=2; return; }
+    setpriority(PRIO_PROCESS,pid,10);   // below the game
     { char m[1300]; int k=snprintf(m,sizeof m,"  [nav] making the walking graph for %s (%s)\n",name,mp); (void)!write(2,m,k); }
     snprintf(g_nav_making,sizeof g_nav_making,"%s",path); pthread_t th; pthread_create(&th,0,nav_wait,(void*)(intptr_t)pid); pthread_detach(th); }
 static void nav_step(void);

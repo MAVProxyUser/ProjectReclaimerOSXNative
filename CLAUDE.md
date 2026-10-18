@@ -156,6 +156,17 @@ IAudioCaptureClient); with a mic the client's voice chat starts once instead of 
 (the caulk crash trigger). PELOAD_MIC=0 a SILENT mic (also the fallback when the real one can't open), =none no device (the
 crash-prone old 0), =tone a test tone (quiet-run uses 0 unless QR_MIC=tone; target.sh 0),
 PELOAD_MIC_MUTED=1; stats do=mic&on=. The client sends voice only with its talk key (Hold/Toggle to talk).
+Spawns (2026-10-18, backlog 47; stats.c st_spawns): events kind weapon / vehicle / powerup with "pos" (object +0x50), "<x> spawned
+at (x, y)"; an object counts after two parentless snapshots; vehicles without attached turrets, the deployed auto turret and
+security cameras; power-ups = objects\multi\powerups\powerup_red/blue/yellow (Overshield / Active camo / Custom), pickups from the
+player's pickup ticks +0x218/+0x21C/+0x220 (unverified live); feed filters + forensic lanes; PELOAD_SPAWN_LOG=1; offline
+shim/tools/spawn-test.sh. Live (local The Pit): 41 weapons in one summary, Warthogs, turrets, Overshield, Active camo.
+Auto-vote (2026-10-18, stats.c st_av_*): PELOAD_AUTOVOTE=yes|no presses F5/F6 (client keybindings vote_yes/vote_no, WM_KEYDOWN ->
+exe+0x3bec80 -> answer_vote exe+0x87f840; menu runtime only; one answer per vote) after "... called a vote to ..."; the lobby map
+ballot has no key: PELOAD_AUTOVOTE_MAP=1|2|3|none clicks cards at (640, 268/348/428/484) -- did NOT register on a joined client
+(the loading splash covers the lobby during the 5 s ballot); do=autovote. Chat text typed by "t:" steps did not send (open
+question). Zones never draw without a complete depth copy (a frame meeting the readback mid-update drew everything: the
+push-back flash). Workshop helper: Progress every 2 s from bytes on disk (the client's 45 s stall limit, workshop-helper.md).
 Clip recording (2026-10-18, backlog 42; shim/docs/recording.md): stats page Record row (do=rec&secs=&mode=av|audio, do=recstop,
 GET /recordings.json + /recordings/<file>, snapshot "rec") -> ~/Movies/Reclaimer/<map>_<time>.mp4 (H.264 + AAC) or .m4a. shim/src/rec.m
 (ObjC, MRR, built beside peload.c; rec.h): the present paths' REC_FRAME() blits the window back buffer's picture rect into

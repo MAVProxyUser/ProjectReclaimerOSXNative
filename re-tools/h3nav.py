@@ -159,6 +159,31 @@ def samples(tris, spacing):
     return np.concatenate(pts), np.concatenate(own)
 
 
+def cell_samples(tris, walk, spacing, x0, y0, cell, w, h):
+    """samples() binned straight away, chunk by chunk, keeping only what the graph needs: cell id (int64), height
+    (float32), on a walkable triangle (bool) -- ~13 bytes a sample instead of ~400 (Forge World: 17 M samples)"""
+    e = np.maximum(np.maximum(np.linalg.norm(tris[:, 1] - tris[:, 0], axis=1), np.linalg.norm(tris[:, 2] - tris[:, 1], axis=1)),
+                   np.linalg.norm(tris[:, 0] - tris[:, 2], axis=1))
+    n = np.maximum(1, np.ceil(e / spacing)).astype(np.int64)
+    C, Z, F = [], [], []
+    for k in np.unique(n):
+        idx = np.nonzero(n == k)[0]
+        i, j = np.meshgrid(np.arange(k + 1), np.arange(k + 1), indexing='ij')
+        keep = (i + j) <= k
+        wb, wc = (i[keep] / k)[None, :, None], (j[keep] / k)[None, :, None]
+        step = max(1, 2000000 // keep.sum())
+        for c in range(0, len(idx), step):
+            ii = idx[c:c + step]
+            a, b, cc = tris[ii, 0][:, None], tris[ii, 1][:, None], tris[ii, 2][:, None]
+            p = (a + (b - a) * wb + (cc - a) * wc).reshape(-1, 3)
+            ix = np.floor((p[:, 0] - x0) / cell).astype(np.int64); iy = np.floor((p[:, 1] - y0) / cell).astype(np.int64)
+            ins = (ix >= 0) & (ix < w) & (iy >= 0) & (iy < h)
+            C.append((iy * w + ix)[ins]); Z.append(p[ins, 2].astype(np.float32)); F.append(np.repeat(walk[ii], keep.sum())[ins])
+    if not C:
+        return np.zeros(0, np.int64), np.zeros(0, np.float32), np.zeros(0, bool)
+    return np.concatenate(C), np.concatenate(Z), np.concatenate(F)
+
+
 def in_box(p, tv):
     """points (N,3) inside a trigger volume (h3bounds entry: corner + extents along forward / left / up)"""
     pos, ext = np.array(tv['position']), np.array(tv['extents'])
@@ -218,18 +243,31 @@ def main():
     walk = ((nz >= WALK_NZ) | (two & (nz <= -WALK_NZ))) & ((flags & SF_SLIP) == 0)
     log('%d triangles over the area, %d walkable' % (len(tris), walk.sum()))
 
-    pts, own = samples(tris, cell * 0.5)
-    ix = np.floor((pts[:, 0] - x0) / cell).astype(np.int64); iy = np.floor((pts[:, 1] - y0) / cell).astype(np.int64)
-    inside = (ix >= 0) & (ix < w) & (iy >= 0) & (iy < h)
-    pts, own, ix, iy = pts[inside], own[inside], ix[inside], iy[inside]
-    cid = iy * w + ix
-    log('%d surface samples' % len(pts))
+    # giant non-floor triangles (Forge World: 49 of them, up to 19.7 M square units each -- the map's outer shells) would
+    # take billions of samples and are never within headroom of a floor: left out
+    giant = (~walk) & (ln / 2 > 5000)
+    if giant.any():
+        log('%d giant non-floor triangles left out (%.0f square units)' % (giant.sum(), (ln[giant] / 2).sum()))
+        keep = ~giant; tris, two, flags, nrm, ln, nz, walk = tris[keep], two[keep], flags[keep], nrm[keep], ln[keep], nz[keep], walk[keep]
+    # memory budget (2026-10-18: Forge World at 0.25 grew past 6 GB and pushed the game into swap on a 36 GB Mac -> 3 fps):
+    # at most ~12 M surface samples (half-cell spacing) and 8 M grid cells; a big map gets coarser cells instead
+    area = float(ln.sum()) / 2
+    if os.environ.get('H3NAV_AREA_DEBUG'):
+        ta = ln / 2; o_ = np.argsort(-ta)
+        log('area: walkable %.0f, other %.0f; biggest triangles %s; > 1000 sq units: %d triangles, %.0f total' % (
+            ta[walk].sum(), ta[~walk].sum(), ', '.join('%.0f' % x for x in ta[o_[:8]]), (ta > 1000).sum(), ta[ta > 1000].sum()))
+    need = max(cell, 2 * math.sqrt(area / 12e6), math.sqrt((hi[0] - lo[0]) * (hi[1] - lo[1]) / 8e6))
+    if need > cell * 1.01:
+        cell = math.ceil(need * 8) / 8
+        w, h = int(np.ceil((hi[0] - lo[0]) / cell)), int(np.ceil((hi[1] - lo[1]) / cell))
+        log('big map (%.0f square units of surface): cells of %.3f instead, %d x %d' % (area, cell, w, h))
+    cid, sz, f = cell_samples(tris, walk, cell * 0.5, x0, y0, cell, w, h)   # per sample: cell, height, on a floor
+    log('%d surface samples' % len(cid))
     # solid samples sorted by (cell, z) for the clearance test
     BIG = 1e4
-    skey = np.sort(cid * BIG + (pts[:, 2] + 5000.0))
+    skey = np.sort(cid * BIG + (sz.astype(np.float64) + 5000.0))
     # floor levels per cell: walkable samples clustered by height (level z = the cluster's top)
-    f = walk[own]
-    fc, fz = cid[f], pts[f, 2]
+    fc, fz = cid[f], sz[f].astype(np.float64); del sz, cid, f
     order = np.lexsort((fz, fc)); fc, fz = fc[order], fz[order]
     new = np.ones(len(fc), bool); new[1:] = (fc[1:] != fc[:-1]) | (fz[1:] - fz[:-1] > LEVEL_GAP)
     grp = np.cumsum(new) - 1

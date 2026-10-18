@@ -149,6 +149,10 @@ All integers little-endian. Peer ids are the 8-byte Halo network-session peer id
 
 ### voice.bin
 
+Control packets (channel byte 0) are kept at most once per sender per 50 ms; the rest are only counted (`counters.
+control_not_kept` in the live status). Public servers send about one per player per 100 ms; our own local dedicated
+server sent ~23,700 a second on 2026-10-18 (1,053,203 records in 44 s) -- an open question (backlog 51).
+
 Header, 64 bytes:
 
 | off | type | |
