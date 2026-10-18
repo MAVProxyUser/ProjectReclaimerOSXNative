@@ -9,7 +9,8 @@
 #     (menu: M1 78 fps vs M4 Max ~390). A profile that never chose a graphics preset (no "quality" in its settings.json)
 #     starts at the client's own Medium preset there -- the Xbox 360's detail; High is the client's default. A preset you
 #     choose in Settings > Advanced graphics (or the stats page Quality) is never touched. RECLAIMER_KEEP_QUALITY=1 = never.
-#   - Memory: a big match uses ~10 GB (halo3's reserve + caches) plus ~3 GB in the GL helper; at 8 GB a note is printed.
+#   - Memory: a big match uses ~10 GB (halo3's reserve + caches) plus ~3 GB in the GL helper; at 8 GB a note is printed and
+#     the background walking-graph tool is capped at 1 GB (PELOAD_NAV_TOOL_MB; it may take 4 GB otherwise).
 #   - The display (Retina 2x vs 1x) is not decided here: the loader reads the window's pixel scale itself, every frame
 #     (moving the window to another screen included).
 MACH_CHIP="$(sysctl -n machdep.cpu.brand_string 2>/dev/null)"; [ -n "$MACH_CHIP" ] || MACH_CHIP="unknown chip"
@@ -55,5 +56,7 @@ EOF
     esac
   fi
 fi
-[ "$MACH_MEMGB" -gt 0 ] && [ "$MACH_MEMGB" -le 8 ] && MACH_DO="$MACH_DO; note: 8 GB is tight for big matches (~13 GB in use) -- close other apps"
+# 8 GB: the background walking-graph tool (re-tools/h3nav.py, made once per new map) may take up to 4 GB -- capped at 1 GB here
+if [ "$MACH_MEMGB" -gt 0 ] && [ "$MACH_MEMGB" -le 8 ]; then export PELOAD_NAV_TOOL_MB="${PELOAD_NAV_TOOL_MB:-1024}"
+  MACH_DO="$MACH_DO, map-tool memory cap 1 GB; note: 8 GB is tight for big matches (~13 GB in use) -- close other apps, prefer smaller games"; fi
 MACH_LINE="[machine] $MACH_CHIP: $MACH_PCORES performance + $MACH_ECORES efficiency cores, $MACH_GPU GPU cores ($MACH_TIER), ${MACH_MEMGB} GB -> $MACH_DO"

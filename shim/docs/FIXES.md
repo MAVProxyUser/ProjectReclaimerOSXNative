@@ -1309,7 +1309,8 @@ Numbers are from the commit messages; PERF-PLAN.md has the measurements. Compare
   in 2..8 (it was 4..8: 4 on an M1's 4 performance cores, competing with the main thread); a base-tier GPU's profile that
   never chose a preset (no "quality" in settings.json) gets the client's own Medium preset (decals High, the rest Medium;
   backup settings.json.before-medium; python3 only when it won't open the Command Line Tools dialog), never over a chosen
-  one (RECLAIMER_KEEP_QUALITY=1 = never); a note at 8 GB. One `[machine]` line on the terminal and at the top of
+  one (RECLAIMER_KEEP_QUALITY=1 = never); at 8 GB a note and the background walking-graph tool capped at 1 GB
+  (PELOAD_NAV_TOOL_MB; up to 4 GB otherwise -- the M1 has 8 GB). One `[machine]` line on the terminal and at the top of
   /tmp/reclaimer_play.log. The display scale is the loader's (section 14), read live. Checked: this M4 Max -> 8 workers,
   no change; a stand-in M1 (fake sysctl / ioreg) on a profile copy -> 2 workers, Medium written once, kept on the next run;
   the client reads it ("Graphics quality: one view Medium"). (10-18)
