@@ -46,7 +46,8 @@ Other finds on the way: the client's `mcc-voice` thread polled the push-to-talk 
 (it burnt its own core). Root cause found 2026-10-18 (backlog 51): its loop sleeps 20 ms with ntdll NtDelayExecution in
 "Wine mode" (the loader's GetProcAddress made `wine_get_version` look present), and NtDelayExecution was a no-op stub;
 implemented now -> ~260 polls a second, the core is free, and the key poll's lock (also taken by the main thread) is no
-longer hammered (`PELOAD_AB=ntdelay` measures it in a match). `PELOAD_POLL_DAMP=1` (opt-in, obsolete) damped it -- sleeping
+longer hammered. **In-match A/B (`PELOAD_AB=ntdelay:30`, 128-player Forge World, stationary client, 2026-10-18): 31 pairs,
+median +11.8%, mean +7.9%, the fix ahead in 25 of 31** -- the biggest single main-thread gain since the GL helper. `PELOAD_POLL_DAMP=1` (opt-in, obsolete) damped it -- sleeping
 inside the key poll made sticks sluggish and movement choppy; `mach_absolute_time` is in nanoseconds under Rosetta
 (timebase 1/1), so tick math assuming 24 MHz was 41x off.
 

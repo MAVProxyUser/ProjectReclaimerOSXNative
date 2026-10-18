@@ -383,7 +383,9 @@ What runs on your cores (an M4 Max has 10 performance + 4 efficiency cores):
 What takes load off halo3's main thread (all default): the game-state copies are done **copy-on-write** (pages are
 remapped instead of copied; +4% in a 70-player match), big copies go to the host's native `memmove`, the game and the
 client are told the real CPU count (it used to be 1: the client's thread pools and halo3's locks now size and spin
-accordingly; +1.7%), and hot Windows calls (thread ids, environment lookups) are cached. Each was measured with an
+accordingly; +1.7%), and hot Windows calls (thread ids, environment lookups) are cached. The client's voice thread used to spin
+without ever sleeping (a missing `NtDelayExecution`) and fought the main thread for a lock: fixed on 2026-10-18, +11.8% in a
+128-player game. Each was measured with an
 in-match A/B (`PELOAD_AB=...`), because scenes vary too much between runs to compare runs.
 
 ### Frame rate in big games
