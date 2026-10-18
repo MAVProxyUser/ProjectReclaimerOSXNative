@@ -19,7 +19,10 @@ static struct { char name[96], file[1100]; int ok, failed; float x0,y0,cell,step
     float*g; float*pen; int32_t*came; uint32_t*stamp; uint32_t gen; float*hf; int32_t*hn; int hcap;
     float*dng; double dng_t; uint32_t dng_nd; } g_nav;
 static volatile int g_nav_act; static volatile float g_nav_lx, g_nav_ly, g_nav_rx, g_nav_ry; static volatile uint16_t g_nav_btn;
-static int nav_mode(void){ static int m=-1; if(m<0){ const char*e=getenv("PELOAD_NAV"); m=!e||!*e?0: !strcasecmp(e,"enemy")?2: strchr(e,',')?3: 1; } return m; }
+// PELOAD_NAV=roam | enemy | x,y,z | vehicle:<name> (2026-10-18: walk up to the nearest vehicle whose name contains <name>,
+// e.g. vehicle:hornet, stop beside it and face it -- for looking at one with the overlay in a test run)
+static int nav_mode(void){ static int m=-1; if(m<0){ const char*e=getenv("PELOAD_NAV"); m=!e||!*e?0: !strcasecmp(e,"enemy")?2: !strncasecmp(e,"vehicle:",8)?4: strchr(e,',')?3: 1; } return m; }
+static int nav_ci_has(const char*s,const char*sub){ if(!s||!sub) return 0; size_t n=strlen(sub); for(;*s;s++) if(!strncasecmp(s,sub,n)) return 1; return 0; }
 static int nav_log(void){ static int l=-1; if(l<0) l=getenv("PELOAD_NAV_LOG")?1:0; return l; }
 static void nav_say(const char*fmt,...){ if(!nav_log()) return; char m[400]; va_list ap; va_start(ap,fmt); int k=vsnprintf(m,sizeof m,fmt,ap); va_end(ap); if(k>(int)sizeof m-1) k=sizeof m-1; (void)!write(2,m,k); }
 static void nav_free(void){ free(g_nav.dng); free(g_nav.first); free(g_nav.nd); free(g_nav.cellof); free(g_nav.g); free(g_nav.pen); free(g_nav.came); free(g_nav.stamp); free(g_nav.hf); free(g_nav.hn);
@@ -178,6 +181,12 @@ static void nav_step(void){
     if(mode==2){ float bd=1e30f; int bi=-1; for(int pass=0;pass<2 && bi<0;pass++) for(int i=0;i<n;i++){ const HbObj*t=&objs[i]; if(t->type || t->dead || i==me) continue;
             if(!pass && o->team>=0 && t->team==o->team) continue; float dx=t->c[0]-pos[0],dy=t->c[1]-pos[1],d=dx*dx+dy*dy; if(d<bd){ bd=d; bi=i; } }
         if(bi>=0){ float tp[3]={objs[bi].c[0],objs[bi].c[1],objs[bi].c[2]-0.35f}; int gn=nav_node_at(tp); if(gn>=0) goal=gn; } }
+    static float vtgt[3]; static int vok;   // vehicle mode: the target vehicle's centre
+    if(mode==4){ const char*want=getenv("PELOAD_NAV")+8; float bd=1e30f; int bi=-1;
+        for(int i=0;i<n;i++){ const HbObj*t=&objs[i]; if((t->type!=1 && t->type!=12) || t->dead) continue; if(!nav_ci_has(hb_tag_name(t->def),want)) continue;
+            float dx=t->c[0]-pos[0],dy=t->c[1]-pos[1],d=dx*dx+dy*dy; if(d<bd){ bd=d; bi=i; } }
+        vok=bi>=0; if(vok){ const HbObj*t=&objs[bi]; memcpy(vtgt,t->c,12); float d=sqrtf(bd)+1e-3f, back=t->r+1.5f;   // stand beside it, on our side
+            float tp[3]={t->c[0]-(t->c[0]-pos[0])/d*back, t->c[1]-(t->c[1]-pos[1])/d*back, t->c[2]}; int gn=nav_node_at(tp); if(gn>=0 && (need || goal<0)) goal=gn; } }
     else if(mode==3 && goal<0){ float tp[3]; if(sscanf(getenv("PELOAD_NAV"),"%f,%f,%f",&tp[0],&tp[1],&tp[2])==3) goal=nav_node_at(tp); }
     else if(mode==1 && goal<0) goal=nav_pick_roam(cur);
     if(goal<0){ g_nav_act=0; return; }
@@ -196,6 +205,7 @@ static void nav_step(void){
     { static double tpub; if(now-tpub>0.25){ tpub=now; nav_publish(path,pidx,plen,goal); } }
     static int look=-1; if(look<0){ const char*e=getenv("PELOAD_NAV_LOOK"); look=e?atoi(e):6; if(look<1) look=1; }
     int ti=pidx+look<plen?pidx+look:plen-1; float tp[3]; nav_pos(path[ti],tp);
+    int vnear=0; if(mode==4 && vok){ float dx=vtgt[0]-pos[0], dy=vtgt[1]-pos[1]; if(dx*dx+dy*dy<64.0f){ vnear=1; memcpy(tp,vtgt,12); } }   // within 8 units: look at it
     float yaw_err=atan2f(tp[1]-pos[1],tp[0]-pos[0])-atan2f(fwd[1],fwd[0]); while(yaw_err>3.14159f) yaw_err-=6.28318f; while(yaw_err<-3.14159f) yaw_err+=6.28318f;
     static float kt=-1, ps; static int psfix; if(kt<0){ const char*e=getenv("PELOAD_NAV_TURN"); kt=e?atof(e):2.5f; e=getenv("PELOAD_NAV_PITCH"); ps=e?atof(e):-1.0f; psfix=e!=0; }
     float rx=-yaw_err*kt; rx=rx>0.8f?0.8f:rx<-0.8f?-0.8f:rx;
@@ -212,6 +222,7 @@ static void nav_step(void){
     // relative to it; in enemy mode within PELOAD_NAV_NEAR units (default 4) of the target, strafe side to side instead
     int spar=hb_spar_enabled() && g_spar_ok;
     float mv=(!spar && fabsf(yaw_err)>1.05f)?0.25f:1.0f; float lx=-sinf(yaw_err)*mv, ly=cosf(yaw_err)*mv; if(ly<0 && !spar) ly=0;
+    if(vnear){ float gp[3]; nav_pos(goal,gp); if((gp[0]-pos[0])*(gp[0]-pos[0])+(gp[1]-pos[1])*(gp[1]-pos[1])<2.25f){ lx=0; ly=0; } }   // beside it: stand still
     if(mode==2){ static float near=-1; if(near<0){ const char*e=getenv("PELOAD_NAV_NEAR"); near=e?atof(e):4.0f; } float gp[3]; nav_pos(goal,gp);
         if((gp[0]-pos[0])*(gp[0]-pos[0])+(gp[1]-pos[1])*(gp[1]-pos[1])<near*near){ lx=fmod(now,3.0)<1.5?0.8f:-0.8f; ly=0; } }
     // stuck: barely moved in 1.5 s while walking -> jump, penalise the next stretch, replan
