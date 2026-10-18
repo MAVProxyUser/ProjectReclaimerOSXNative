@@ -164,8 +164,11 @@ player's pickup ticks +0x218/+0x21C/+0x220 (unverified live); feed filters + for
 shim/tools/spawn-test.sh. Live (local The Pit): 41 weapons in one summary, Warthogs, turrets, Overshield, Active camo.
 Auto-vote (2026-10-18, stats.c st_av_*): PELOAD_AUTOVOTE=yes|no presses F5/F6 (client keybindings vote_yes/vote_no, WM_KEYDOWN ->
 exe+0x3bec80 -> answer_vote exe+0x87f840; menu runtime only; one answer per vote) after "... called a vote to ..."; the lobby map
-ballot has no key: PELOAD_AUTOVOTE_MAP=1|2|3|none clicks cards at (640, 268/348/428/484) -- did NOT register on a joined client
-(the loading splash covers the lobby during the 5 s ballot); do=autovote. Chat text typed by "t:" steps did not send (open
+ballot has no key and never shows on a joined client (its loading splash covers the lobby): PELOAD_AUTOVOTE_MAP=1|2|3|none
+(do=autovote&map=) calls the client's cast_vote(const u128*round, u64 choice) (0.9.18 exe+0x8f9fe0) on a guest worker thread (our
+CreateThread: it needs a TEB) with the round from the client's Ballot cache (exe+0x27d1ce0 Option<Ballot>, 0x320 bytes, round at
+size-0x20, then counts[4] / seconds_left / vote_seconds; both by signature, st_bv_install); confirmed by counts[choice] in the
+next 250 ms broadcast (st_bv_tick). Verified: the server selected the voted card 2 of 2. Chat text typed by "t:" steps did not send (open
 question). Zones never draw without a complete depth copy (a frame meeting the readback mid-update drew everything: the
 push-back flash). Workshop helper: Progress every 2 s from bytes on disk (the client's 45 s stall limit, workshop-helper.md).
 Clip recording (2026-10-18, backlog 42; shim/docs/recording.md): stats page Record row (do=rec&secs=&mode=av|audio, do=recstop,
