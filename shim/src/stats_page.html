@@ -9,6 +9,7 @@ h1{font-size:16px;margin:0 0 4px}h2{font-size:13px;margin:0 0 8px;color:var(--di
 #hd{color:var(--dim);margin-bottom:12px}
 .grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(320px,560px);gap:16px;align-items:start}
 @media (max-width:1000px){.grid{grid-template-columns:minmax(0,1fr)}}
+.slots{font-weight:400;font-size:13px;color:var(--dim)}
 .panel{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:12px;min-width:0}
 .wrap{overflow-x:auto}
 table{border-collapse:collapse;width:100%}
@@ -129,8 +130,12 @@ th .srt{display:inline-block;margin-left:2px;padding:0 2px;cursor:pointer;color:
 </style></head>
 <body>
 <h1>Reclaimer live stats <a href="/forensics" title="voice, chat and events archive + viewer" style="font-size:12px;font-weight:400;color:var(--accent);margin-left:10px;text-decoration:none">forensic archive</a></h1><div id="hd">connecting...</div>
+<!-- top (user, 2026-10-18): game rules first, then the overlay controls beside the death heatmap -->
+<div id="rules" class="panel"><h2><span id="rt">Game rules</span> <span id="slots" class="slots"></span></h2><div id="rb" class="note">not in a match</div></div>
+<div class="grid top">
+ <div class="col">
 <!-- in-game overlay panel (user, 2026-10-18): rows and presets are built by the script (FEATS, PRESETS) -->
-<div id="ovp" class="panel"><div class="ovh"><h2 title="What the game window draws over the frame. Each row has its own settings; tick rows on the left to set several at once">In-game overlay</h2>
+<div id="ovp" class="panel"><div class="ovh"><h2 title="What the game window draws over the frame. Each row has its own settings">In-game overlay</h2>
  <span class="pres" id="pres"></span><span id="ovpmsg"></span></div>
  <div id="ovbar" class="none">
   <label title="Select every row (or tick single rows on the left)"><input type="checkbox" id="selall"><span><b id="nsel">0</b> selected</span></label>
@@ -138,7 +143,7 @@ th .srt{display:inline-block;margin-left:2px;padding:0 2px;cursor:pointer;color:
   <span class="grp"><span class="lbl">Show</span><span class="seg" data-k="team"></span></span>
   <span class="grp"><span class="lbl">Walls</span><span class="seg" data-k="vis"></span></span>
   <span class="grp"><span class="lbl">Text</span><span class="step" data-k="px"><button data-d="-1" title="Every selected feature's labels 1 px smaller">−</button><select id="bpx" title="Label height in window pixels for every selected feature that has labels"></select><button data-d="1" title="Every selected feature's labels 1 px larger">+</button></span></span>
-  <span class="hint" id="ovhint">tick rows on the left to set several at once</span></div>
+  <span class="hint" id="ovhint"></span></div>
  <div id="ovrows"></div></div>
 <div id="ov"><span class="lbl">Tools</span>
  <button data-a="teleport" title="Teleport to the far side of the map (needs PELOAD_ALLOW_TELEPORT; matches you host)">Teleport</button>
@@ -155,6 +160,23 @@ th .srt{display:inline-block;margin-left:2px;padding:0 2px;cursor:pointer;color:
  <button id="recb" title="Start recording into ~/Movies/Reclaimer on this Mac">Record</button><button id="recx" title="Stop now and keep what was recorded">Stop</button>
  <span id="recind"></span><span id="recmsg" class="lbl"></span>
  <details id="recl"><summary>Recordings in ~/Movies/Reclaimer</summary><div id="recls">none yet</div></details></div>
+ </div>
+ <div class="col">
+ <div class="panel" id="heat"><h2 id="mt">Death heatmap</h2><canvas id="cv" width="560" height="560"></canvas>
+  <div class="ctl">
+   <label>Deaths <select id="scope"><option value="match">this match</option><option value="all">all matches</option></select></label>
+   <label title="Deaths per spot (collected for every map all the time, this switch only shows or hides it)"><input type="checkbox" id="hmv" checked> heatmap</label>
+   <label><input type="checkbox" id="fp" checked> where players go</label>
+   <label><input type="checkbox" id="pd" checked> players now</label>
+   <label><input type="checkbox" id="pl"> names on map</label>
+   <label title="Vehicles: a square with the vehicle's name, dimmed when destroyed"><input type="checkbox" id="vh" checked> vehicles</label>
+   <button id="fsb" title="Show the map in the whole browser window (or click the map); Esc or the X closes it" style="background:#222;color:var(--fg);border:1px solid var(--line);border-radius:4px;padding:2px 8px;cursor:pointer;font:inherit">⤢ full window</button>
+   <label title="In a game you host with PELOAD_ALLOW_TELEPORT=1: click a spot on the map to teleport yourself there (onto the highest surface at that point, roofs and cliff tops included). For exploring past the map's edges with the boundary patches (shim/docs/map-boundaries.md)."><input type="checkbox" id="tph"> click to teleport</label>
+   <span id="hov" class="note" style="margin:0"></span>
+  </div>
+  <div class="legend"><span>fewer</span><span class="ramp"></span><span>more deaths</span><span id="dc"></span></div></div>
+ </div>
+</div>
 <div id="conn" class="panel"><div id="ch"><h2 id="ct">Connected</h2>
  <button class="mb" id="muteall">Mute all</button><button class="mb" id="unmuteall">Unmute all</button></div><div id="cl" class="note">-</div>
  <div class="note">Everyone in the game's network session, the lobby included. Mute only affects what you hear (the same
@@ -172,9 +194,8 @@ th .srt{display:inline-block;margin-left:2px;padding:0 2px;cursor:pointer;color:
  <div id="cm" class="note">no chat yet</div>
  <div class="note">Newest first: what players type in the game's text chat (TEAM and NEARBY mark those channels), the server's messages, and the client's own chat notices.</div></div>
 </div>
-<div id="rules" class="panel"><h2 id="rt">Game rules</h2><div id="rb" class="note">not in a match</div></div>
 <div class="grid">
- <div class="panel"><div class="sortmode" title="With a column's sort (the arrows by each heading): team sort keeps each team together and sorts inside it; full sort orders everyone together">
+ <div class="panel" id="players"><div class="sortmode" title="With a column's sort (the arrows by each heading): team sort keeps each team together and sorts inside it; full sort orders everyone together">
   Sort: <label><input type="radio" name="smode" value="team" checked> team sort</label><label><input type="radio" name="smode" value="full"> full sort</label>
   <span id="sortlbl"></span><button id="sortclr" style="display:none;background:none;border:0;color:var(--accent);cursor:pointer;font:inherit">reset</button></div>
  <div class="wrap"><table><thead><tr id="thr">
@@ -182,20 +203,7 @@ th .srt{display:inline-block;margin-left:2px;padding:0 2px;cursor:pointer;color:
   <tbody id="tb"></tbody></table></div>
   <div class="note">Click a player for details. Their deaths are ringed on the heatmap.</div></div>
  <div class="col">
- <div class="panel"><h2 id="mt">Death heatmap</h2><canvas id="cv" width="560" height="560"></canvas>
-  <div class="ctl">
-   <label>Deaths <select id="scope"><option value="match">this match</option><option value="all">all matches</option></select></label>
-   <label title="Deaths per spot (collected for every map all the time, this switch only shows or hides it)"><input type="checkbox" id="hmv" checked> heatmap</label>
-   <label><input type="checkbox" id="fp" checked> where players go</label>
-   <label><input type="checkbox" id="pd" checked> players now</label>
-   <label><input type="checkbox" id="pl"> names on map</label>
-   <label title="Vehicles: a square with the vehicle's name, dimmed when destroyed"><input type="checkbox" id="vh" checked> vehicles</label>
-   <button id="fsb" title="Show the map in the whole browser window (or click the map); Esc or the X closes it" style="background:#222;color:var(--fg);border:1px solid var(--line);border-radius:4px;padding:2px 8px;cursor:pointer;font:inherit">⤢ full window</button>
-   <label title="In a game you host with PELOAD_ALLOW_TELEPORT=1: click a spot on the map to teleport yourself there (onto the highest surface at that point, roofs and cliff tops included). For exploring past the map's edges with the boundary patches (shim/docs/map-boundaries.md)."><input type="checkbox" id="tph"> click to teleport</label>
-   <span id="hov" class="note" style="margin:0"></span>
-  </div>
-  <div class="legend"><span>fewer</span><span class="ramp"></span><span>more deaths</span><span id="dc"></span></div></div>
- <div id="det" class="panel"><h2>Player details</h2><div class="note">Click a player in the table.</div></div>
+  <div id="det" class="panel"><h2>Player details</h2><div class="note">Click a player in the table.</div></div>
  </div>
 </div>
 <script>
@@ -380,6 +388,12 @@ function optSections(vr){
     if(!out.some(x=>x[0]===(TS[g]||g)+' traits')) out.push([(TS[g]||g)+' traits',[['','no changes']]]); }
   return out; }
 let rulesKey='';
+// player slots: everyone in the game's network session (the lobby too) / the server's maximum when known (snapshot
+// max_players), and how many are free
+function renderSlots(){ const el=document.getElementById('slots'); if(!snap){ el.textContent=''; return; }
+  const used=(snap.session||[]).length||(snap.players||[]).filter(p=>pState(p)!=='quit').length, mx=snap.max_players;
+  el.textContent=used||mx?`· players ${used}${mx?` / ${mx} slots (${Math.max(0,mx-used)} free)`:''}`:'';
+  el.title=mx?'Players in the game (its network session) / the server\'s player slots':'Players in the game (its network session); the server\'s slot count is not known to this client yet'; }
 function renderRules(){
   const v=snap&&snap.variant, el=document.getElementById('rb');
   const key=v?JSON.stringify(v):''; if(key===rulesKey) return; rulesKey=key;
@@ -616,7 +630,7 @@ function renderPanel(){ const o=snap&&snap.overlay; if(!o) return; fsReal=featSt
   // the Selected bar: a value lights up when every selected row that has the setting shares it
   const fs=FN.filter(f=>selF.has(f)), n=fs.length, bar=document.getElementById('ovbar'), sa=document.getElementById('selall');
   document.getElementById('nsel').textContent=n; sa.checked=n===FN.length; sa.indeterminate=n>0&&n<FN.length; bar.classList.toggle('none',!n);
-  document.getElementById('ovhint').textContent=!ctl?'controls are off (PELOAD_STATS_READONLY)':n?'':'tick rows on the left to set several at once';
+  document.getElementById('ovhint').textContent=!ctl?'controls are off (PELOAD_STATS_READONLY)':'';
   for(const sg of bar.querySelectorAll('[data-k]')){ const k=sg.dataset.k, app=fs.filter(f=>applies(f,k));
     const vals=new Set(app.map(f=>k==='on'||k==='vis'?(cur(f,k)?'1':'0'):String(cur(f,k)))), common=vals.size===1?[...vals][0]:null;
     sg.classList.toggle('na',!app.length);
@@ -774,7 +788,7 @@ es.onmessage=m=>{snap=JSON.parse(m.data);
   if(snap.inst!==undefined){ if(gameInst===null) gameInst=snap.inst; else if(snap.inst!==gameInst){ location.reload(); return; } }
   if(snap.feed_seq!==undefined && snap.feed_seq!==feedSeq) pollFeed();
   document.getElementById('hd').textContent=`${snap.map||'-'}  |  ${snap.in_match?'match time '+fmtT(snap.time):'not in a match'}  |  ${snap.players.length} players, ${snap.vehicles.length} vehicles, ${snap.projectiles.length} projectiles in flight`;
-  renderTable(); renderDet(); renderOverlay(); renderRules(); renderConn(); renderRec(); drawMap()};
+  renderTable(); renderDet(); renderOverlay(); renderRules(); renderSlots(); renderConn(); renderRec(); drawMap()};
 // no game serving this port (it ended, or a test client is between runs): keep the last data but grey it out and say so;
 // EventSource keeps retrying, and the first snapshot of a new game reloads the page (inst)
 let lastSnapAt=0;

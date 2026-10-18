@@ -40,12 +40,12 @@ return "selected slot "+sel+" ("+(pick?pick.kills+" kills, alive "+Math.round(pi
 # then the table alone at full width (it is wider than its column) with its first ~22 rows
 WIDE_JS='
 const st=document.createElement("style");
-st.textContent=".grid{grid-template-columns:minmax(0,1fr)!important}.grid>.panel:first-child .wrap{max-height:640px;overflow:hidden}";
+st.textContent=".grid{grid-template-columns:minmax(0,1fr)!important}#players .wrap{max-height:640px;overflow:hidden}";
 document.head.appendChild(st); await new Promise(r=>setTimeout(r,800));'
 "$BIN" -w 1440 -t 8 ${TX[@]+"${TX[@]}"} -j "$STATS_JS" "$BASE/?demo=1" "$OUT" \
     stats-overlay='#ovp' stats-record='#rec' stats-connected='#conn' stats-feed='#feed' stats-chat='#chat' \
-    stats-rules='#rules' stats-heatmap@1.5='.col > .panel:first-child' stats-player='#det' \
-    -- -w 1880 -j "$WIDE_JS" stats-players='.grid > .panel:first-child'
+    stats-rules='#rules' stats-heatmap@1.5='#heat' stats-player='#det' \
+    -- -w 1880 -j "$WIDE_JS" stats-players='#players'
 
 # forensic viewer: the largest finished session (or FX_SESSION), every lane shown, the list cut at 600 px and scrolled to
 # its first player chat line (voice, chat and kills together)
