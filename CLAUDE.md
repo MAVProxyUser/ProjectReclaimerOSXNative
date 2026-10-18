@@ -258,6 +258,12 @@ GL helper (0 ms waited in the slowest stretches). BTB: Valhalla median 63 fps / 
 +4%. PELOAD_PAR_MEMCPY=<helpers> copies big (>= 2 MB) non-overlapping guest copies in 1 MB chunks on helper threads
 (shim-copy; Rosetta bench 5 x 14 MB 4.0 -> 2.0 ms; PELOAD_PAR_CHECK=1 verifies: 6,145 copies, 0 mismatches; PELOAD_AB=parcopy) --
 BTB A/B: COW (default) beats it by 7.7%, so it stays opt-in.
+Import fast paths (2026-10-18, backlog 11/41; shim/src/fastcall.c, PERF-PLAN "Import fast paths"): PELOAD_FASTCALL=all|tid,heap,keys
+(OPT-IN until an in-match A/B: PELOAD_AB=fastcall:<secs>, run-time safe). An ms_abi import that calls ANY SysV function -- or reads
+a __thread variable, or gets a SysV ".cold.N" part from Apple clang's hot/cold splitting -- saves xmm6-15 on EVERY call (~3 ns
+under Rosetta; a plain call is ~1 ns), so fast paths keep per-thread state in the TEB (+0x1FF0 tid, +0x1FF8 heap cache) and are
+noinline. heap = per-thread small-block cache (<= 1 KB, malloc's 16-byte classes) from a 2 GB arena: alloc+free 27-76 -> ~5 ns;
+tid 4 -> 2 ns; GetAsyncKeyState 4.5 -> 1.3 ns. Expected ~1.5-3% of the main thread. Offline bench + checks: bash shim/tools/callcost.sh.
 GetSystemInfo said ONE processor + allocation granularity 0 (the client sizes ~10 thread pools from the count; halo3's
 locks at halo3+0x620170.. spin before blocking only when it is > 1 and wake at most that many waiters):
 Since 2026-10-18 it reports Windows' values by default (hw.logicalcpu or PELOAD_NCPU; in-match A/B of halo3's count via

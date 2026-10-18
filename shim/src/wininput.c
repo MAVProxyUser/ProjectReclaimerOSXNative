@@ -80,7 +80,8 @@ static void wi_poll_damp(void){
     if(!t_damp) return;
     uint64_t now=mach_absolute_time(); if(now-t_damp_win>mt_us(1000)){ t_damp_win=now; t_damp_n=0; }
     if(++t_damp_n>4){ usleep(500); t_damp_win=mach_absolute_time(); t_damp_n=0; } }
-static int16_t MSABI wi_GetAsyncKeyState(int k){ wi_poll_damp(); return (k>=0&&k<256&&g_keydown[k])?(int16_t)0x8000:0; }
+static int16_t MSABI __attribute__((noinline)) wi_GetAsyncKeyState(int k){   // (noinline: see i_GetCurrentThreadId)
+    wi_poll_damp(); return (k>=0&&k<256&&g_keydown[k])?(int16_t)0x8000:0; }
 static int16_t MSABI wi_GetKeyState(int k){ if(k<0||k>=256) return 0; return (int16_t)((g_keydown[k]?0x8000:0)|(g_keytoggle[k]?1:0)); }
 static int MSABI wi_GetKeyboardState(uint8_t*s){ if(!s) return 0; for(int i=0;i<256;i++) s[i]=(uint8_t)((g_keydown[i]?0x80:0)|(g_keytoggle[i]?1:0)); return 1; }
 

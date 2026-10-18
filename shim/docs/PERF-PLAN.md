@@ -77,8 +77,63 @@ Levers for that thread (2026-10-18, backlog 41; each was opt-in until a BTB A/B 
   locks (halo3+0x620170 ...) spin before blocking only when it is > 1. In-match A/B of halo3's own count
   (`PELOAD_AB=ncpu`, pokes halo3+0xa3a48c): +1.7%. The client's pools keep the count they got at startup.
 - Done: GetCurrentThreadId returns a per-thread cached id; every `PELOAD_*` getenv is cached (`PELOAD_GETENV_STATS=1` counts
-  the remaining real lookups: negligible). `PELOAD_HEAP_STATS=<thread>` gives a HeapAlloc size histogram for a
-  per-thread small-block cache in HeapAlloc/HeapFree (an idea, not built).
+  the remaining real lookups: negligible). `PELOAD_HEAP_STATS=<thread>` gives a HeapAlloc size histogram. The per-thread
+  small-block cache for HeapAlloc/HeapFree is built: `PELOAD_FASTCALL` ("Import fast paths" below; opt-in until an A/B).
+
+### Import fast paths (2026-10-18, backlog 11 / 41): `PELOAD_FASTCALL`, opt-in until an in-match A/B
+
+`shim/src/fastcall.c`. Measured offline with `bash shim/tools/callcost.sh`: Win64 caller loops in generated code (translated
+like halo3's) doing `call [slot]` into the loader's REAL implementations (cut out of peload.c / wininput.c by marker), into
+fastcall.c, and into building blocks. Rosetta, M4 Max, best of 5-7, four runs with a game running on other cores (hence ranges):
+
+| ns per call | now | `PELOAD_FASTCALL` | main thread, BTB | saved |
+|---|---|---|---|---|
+| GetCurrentThreadId | 3.9-4.3 | 2.1 | 887k/s | ~1.8 ms/s |
+| GetAsyncKeyState | 4.3-4.6 | 1.2-1.3 | 94k/s | ~0.3 ms/s (mcc-voice polls ~500k/s on its own core: ~1.5 ms/s there) |
+| HeapAlloc+HeapFree 64 B, LIFO | 27-40 | 4.5-5.3 | ~400k pairs/s | |
+| HeapAlloc+HeapFree 512 B | 54-66 | 4.5-5.3 | | |
+| HEAP_ZERO_MEMORY 256 B | 66-81 | 9-10 | | |
+| 64 / 256 mixed sizes (16..1000), then their frees | 68-76 | 4.9-5.8 | | 12-27 ms/s for the heap |
+| above 1 KB (4000 B: not cached) | 37-41 | +1.5-2 (dispatch) | | |
+
+Building blocks (why): a call into a leaf costs ~1 ns, in loader text or in generated code alike (no penalty for calling
+Rosetta's ahead-of-time translation from just-in-time code); a `mov rax,x; jmp rax` stub in front adds 0.8 ns, a `jmp rel32` 0.3.
+An ms_abi function that calls ANY SysV function -- even on a path it never takes -- costs 4.1-4.5 ns: it saves and restores
+xmm6-15 + rsi/rdi on every call. A `__thread` read from ms_abi code costs the same (it calls tlv_get_addr), and Apple clang
+21's hot/cold splitting can move a branch of an ms_abi function into a SysV `.cold.N` function, which brings the saves back
+(it did, for fc_HeapFree): the fast paths keep per-thread state in the guest thread's TEB (gs:0x30: +0x1FF0 thread id,
++0x1FF8 heap cache; past Windows' TEB layout and the loader's 256 TLS slots) and are noinline (never split). malloc+free
+called from loader C (no switch at all): 22 ns LIFO 64 B, 62-67 ns for 64 mixed sizes -- so in HeapAlloc+HeapFree the switch
+is ~5-10 ns, malloc/free the rest.
+
+The heap part: blocks of 1..1024 bytes in 16-byte classes (= malloc's own rounding, checked at start with malloc_good_size,
+so HeapSize answers what it did) carved from 64 KB one-class slabs of one reserved 2 GB arena (address space only; pages are
+used when touched and never given back). Ours = one range check; class = one table lookup; each guest thread keeps 32 free
+blocks per class in pointer stacks outside the blocks and trades 16 at a time with a per-class pool (os_unfair_lock); blocks
+go back to the pools when a thread exits (pthread key destructor); cross-thread frees are fine. Loader threads (no TEB)
+allocate with malloc and free arena blocks into the pools; LocalFree / CoTaskMemFree / PropVariantClear free arena blocks too.
+HeapReAlloc keeps a block in place when the new size fits and is at least half of it (as malloc's realloc), else moves it.
+
+Not done (measured): GetProcessHeap (a leaf already, ~1.0 ns) and TlsGetValue (a leaf, 2.0-2.8 ns, 68k/s); towlower (ucrtbase's
+guest code, 2.2 ns, no switch); memset/memcpy below 2 KB (guest vcruntime code, 2-10 ns, SSE loops: Rosetta's cpuid has no
+ERMS; crt_fast_stub's indirect jump adds ~0.8 ns = ~0.7 ms/s at 867k calls/s, a `jmp rel32` would save ~0.4 ms/s); `rep stosb`
+/ `rep movsb` routines are far SLOWER under Rosetta (~0.27 ns a byte: 256 B in 74 ns against 3.5-5 ns).
+
+Switches: `PELOAD_FASTCALL=all` or a list of `tid,heap,keys` (unset / 0 = the original functions are bound, the code of
+before); `PELOAD_AB=fastcall:<secs>` flips them (all, or PELOAD_FASTCALL's list) in one match, starting off -- run-time safe:
+once configured the dispatchers stay bound and "off" calls the originals (+0.2-2 ns of dispatch), and blocks the heap handed
+out stay valid. `PELOAD_FASTCALL_ARENA_MB` (default 2048), `PELOAD_FASTCALL_LOG=1` (arena use every 10 s). The heap part
+stays off with PELOAD_HEAP_DEBUG / _GUARD / _STATS / PELOAD_TRACE_ALLOC, keys with PELOAD_POLL_DAMP (it sleeps in there).
+
+Expected: heap ~400k pairs/s x 30-65 ns = 12-26 ms/s, tid ~1.8 ms/s, keys ~0.3 ms/s: about 14-28 ms per second, 1.4-2.8% of
+the main thread -- more if the game's malloc is slower than the microbenchmark's (fragmented heap; the samples put malloc
+internals at several % of that thread), less if many of its blocks are above 1 KB (`PELOAD_HEAP_STATS=guest-0x18000a120`:
+the <1K bucket). Risks: a guest double free or a free of an interior pointer is no longer caught (libmalloc aborts on some):
+the block would be handed out twice; arena memory is never returned to the system; HeapSize after a shrinking HeapReAlloc can
+differ from what malloc's realloc left (both are >= the size asked for). Checks (callcost.sh): HeapSize per request size
+0..1100, zeroing, realloc contents, key state, thread id, HeapFree(NULL) against the originals; a stress run of 8 threads
+(every 4th without a TEB) x 4 rounds x 150k random alloc / free / realloc / cross-thread free / LocalFree with the A/B flipped
+under load, then every carved block found free exactly once at a block start.
 
 ## Where the time goes
 
