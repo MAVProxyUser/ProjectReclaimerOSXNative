@@ -669,6 +669,10 @@ static int st_control(const char*act,const char*qs){
         return st_voice_request(id,!strcmp(act,"mute")); }
     if(!strcmp(act,"textup") || !strcmp(act,"textdown")){ hbf_init(); int v=g_hb_text_px>0?g_hb_text_px:7; v+=!strcmp(act,"textup")?1:-1; if(v<4) v=4; if(v>60) v=60; g_hb_text_px=v; hbs_sync();   // every feature's labels
         char m[64]; int k=snprintf(m,sizeof m,"  [stats] page: label text %d px\n",v); (void)!write(2,m,k); return 1; }
+    if(!strcmp(act,"facepoint")){ if(!getenv("PELOAD_INPUT_FACE")) return 0;   // test helper: the scripted pad turns toward x,y,z
+        extern volatile float g_hb_facept[3]; extern volatile int g_hb_facept_on; const char*v; float d[3]; int got=0;
+        if((v=strstr(qs,"x="))){ d[0]=(float)atof(v+2); got++; } if((v=strstr(qs,"y="))){ d[1]=(float)atof(v+2); got++; } if((v=strstr(qs,"z="))){ d[2]=(float)atof(v+2); got++; }
+        if(got!=3){ g_hb_facept_on=0; return 1; } for(int i=0;i<3;i++) g_hb_facept[i]=d[i]; g_hb_facept_on=1; return 1; }
     if(!strcmp(act,"autovote")){ st_av_init(); const char*v; int ok=0;
         if((v=strstr(qs,"calls="))){ v+=6; if(!strncmp(v,"yes",3)) g_av_calls=1; else if(!strncmp(v,"no",2)) g_av_calls=2; else if(!strncmp(v,"off",3)) g_av_calls=0; else return 0; ok=1; }
         if((v=strstr(qs,"map="))){ v+=4; if(!strncmp(v,"none",4)) g_av_map=3; else if(!strncmp(v,"off",3)) g_av_map=-1; else if(*v>='1'&&*v<='3') g_av_map=*v-'1'; else return 0; ok=1; }

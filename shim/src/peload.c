@@ -8192,8 +8192,9 @@ static uint32_t MSABI i_SleepEx(uint32_t ms,int alert){ static int plain=-1; if(
 // voice control packets a second (backlog 51) and every client's mcc-voice thread took a whole core (GetAsyncKeyState
 // ~500k/s, lock contention with the main thread). The client's frame limiter / runtime pacing (exe+0xa398e0) uses the same
 // sleep. PELOAD_NTDELAY_STUB=1 = the old no-op.
+volatile int g_ntdelay_stub=-1;   // 1 = the old no-op (PELOAD_NTDELAY_STUB=1; PELOAD_AB=ntdelay:<secs> flips it in a match)
 static int32_t MSABI i_NtDelayExecution(uint8_t alertable,const int64_t*iv){
-    static int stub=-1; if(stub<0) stub=getenv("PELOAD_NTDELAY_STUB")?1:0; if(stub) return 0;
+    if(g_ntdelay_stub<0) g_ntdelay_stub=getenv("PELOAD_NTDELAY_STUB")?1:0; if(g_ntdelay_stub) return 0;
     if(!iv) return (int32_t)0xC0000005;
     if(alertable && t_apc_ran){ t_apc_ran=0; return 0xC0; }   // STATUS_USER_APC
     int64_t v=*iv; uint64_t t100=0;

@@ -177,6 +177,7 @@ static int hb_owner_cls(uint32_t h,const HbObj*objs,int n){   // a projectile: w
     if(h==0xFFFFFFFFu) return 0;
     for(int i=0;i<n;i++) if(objs[i].handle==h) return objs[i].type==0?hb_bip_cls(&objs[i]):hb_occ_cls(h,objs,n);
     return hb_occ_cls(h,objs,n); }   // not gathered (a turret while Vehicles is off; a body already gone): its occupants
+volatile float g_hb_facept[3]; volatile int g_hb_facept_on;   // test helper: POST /control?do=facepoint&x=&y=&z= (PELOAD_INPUT_FACE runs only)
 // PELOAD_INPUT_FACE (test helper for unattended overlay checks): steer the scripted pad toward the nearest other biped.
 static float g_hb_tgt[3], g_hb_cam[3], g_hb_fwd[3]; static volatile int g_hb_tgt_ok;
 int hb_face_target(float*rx,float*ry){ if(!g_hb_tgt_ok) return 0;
@@ -1011,7 +1012,8 @@ static void hb_draw_overlay(void){
           if(d>(objs[i].r+0.3f)*(objs[i].r+0.3f) && d<bd){ bd=d; bi=i; } }
       if(bi>=0){ memcpy(g_hb_tgt,objs[bi].c,12); memcpy(g_hb_cam,vp+28,12); memcpy(g_hb_fwd,vp+12,12); g_hb_tgt_ok=1; } else g_hb_tgt_ok=0;
       const char*fp=getenv("PELOAD_INPUT_FACE_POINT"); float pt[3];   // "x,y,z": aim at a fixed world point instead
-      if(fp && sscanf(fp,"%f,%f,%f",&pt[0],&pt[1],&pt[2])==3){ memcpy(g_hb_tgt,pt,12); memcpy(g_hb_cam,vp+28,12); memcpy(g_hb_fwd,vp+12,12); g_hb_tgt_ok=1; } }
+      if(g_hb_facept_on){ memcpy(g_hb_tgt,(const void*)g_hb_facept,12); memcpy(g_hb_cam,vp+28,12); memcpy(g_hb_fwd,vp+12,12); g_hb_tgt_ok=1; }   // stats do=facepoint
+      else if(fp && sscanf(fp,"%f,%f,%f",&pt[0],&pt[1],&pt[2])==3){ memcpy(g_hb_tgt,pt,12); memcpy(g_hb_cam,vp+28,12); memcpy(g_hb_fwd,vp+12,12); g_hb_tgt_ok=1; } }
     // label text: each feature's own size (g_hbs[f].px; hb_text_size before its labels)
     // PELOAD_HB_SELFDUMP=<file>: every 0.25 s append {time, camera forward[3], camera pos[3], our unit datum 0x800 B,
     // our player datum 0x400 B} -- raw material for locating aim / crouch / name / score fields offline.
