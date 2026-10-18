@@ -1120,6 +1120,9 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   8767, which dedicated.sh now always serves), the request goes to the host; "Boundaries off" also patches this client's
   own prediction. The page shows the controls (and the new "Speed 2x" toggle) only for loaders that forward. (10-18)
 
+- **Stats control query length** — Why: `qs[128]` cut longer requests (a do=uisteps step list stopped after ~120 bytes, so the
+  last steps never ran). How: path 1024, query 768. (10-18)
+
 ## 19. Performance
 
 Numbers are from the commit messages; PERF-PLAN.md has the measurements. Compare only inside one match

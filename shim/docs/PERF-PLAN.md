@@ -451,3 +451,26 @@ enqueue. Overlaps the engine's ~22% with the loader and driver, but the driver s
   one small read per object per frame, and one line batch. Compare by toggling it in a busy match; the title shows the
   fps. Off means off (backlog 39): with every overlay switch off only a 128-byte camera copy per frame, a once-per-frame
   engine hook checking a flag, and the object_delete / event / chat hooks remain.
+
+## Advanced graphics settings (2026-10-18, client v0.9.20)
+
+Measured in ONE session (the client applies quality changes live), at a fixed vista on Hugegrass (local dedicated server,
+one player, camera at 414.8,427.7,249.9 looking down the valley; teleported back before every reading), changing the
+setting through the client's own menu (stats do=uisteps) and checking each change in the client's log line "Graphics
+detail for 1 view(s): ...". 15 s medians, M4 Max, 1920x1080 internal.
+
+| Setting (one player) | fps | draws/frame | Engine values (client log) |
+|---|---|---|---|
+| High (default) | 13.3-13.4 | 8,540 | 1500 shadow casters, lights 1000+1000, effects 3, fades 8/3/3, models 3 |
+| Ultra | 13.3 | 8,537 | effects 8, models 8 |
+| High, shadows off | 13.4-13.7 | 8,400 | 0 shadow casters |
+| High, level of detail low | 13.4 | 8,530 | models lowered |
+| High, draw distance low | 16.2 | 4,464 | fades 0.25/0.50/0.50 |
+| Medium | 16.4 | 5,810 | 500 casters, lights 500+500, effects 1, fades 1/1/1, models 1 |
+
+- At a wide vista the cost is the number of draw calls (halo3's main thread under Rosetta), so **Draw distance** is the
+  setting that matters: -48% draws, +21% fps. Medium gets the same gain. Shadows, level of detail and Ultra's extra
+  effects/models change almost nothing here (they change triangles and shader work, not draws).
+- Indoors or in small maps the draw count is much lower and the frame rate higher; these numbers are the worst case.
+- Readings of the same setting differ by up to +-3 fps when the scene or the round changes (a round end respawned the
+  player elsewhere mid-run), so compare draws first and fps only within one stretch.

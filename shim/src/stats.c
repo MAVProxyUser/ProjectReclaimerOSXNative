@@ -1254,7 +1254,7 @@ static void st_rec_file(int fd,const char*req,const char*name){
 static void* st_conn(void*a){ int fd=(int)(intptr_t)a; pthread_setname_np("shim-stats-http");
     int one=1; setsockopt(fd,SOL_SOCKET,SO_NOSIGPIPE,&one,sizeof one); setsockopt(fd,IPPROTO_TCP,TCP_NODELAY,&one,sizeof one);
     char req[2048]; ssize_t n=recv(fd,req,sizeof req-1,0); if(n<=0){ close(fd); return 0; } req[n]=0;
-    char meth[8]="", path[256]="/", qs[128]=""; sscanf(req,"%7s %255s",meth,path); char*q=strchr(path,'?'); if(q){ snprintf(qs,sizeof qs,"%s",q+1); *q=0; }
+    char meth[8]="", path[1024]="/", qs[768]=""; sscanf(req,"%7s %1023s",meth,path); char*q=strchr(path,'?'); if(q){ snprintf(qs,sizeof qs,"%s",q+1); *q=0; }
     char h[512];
     if(!strcmp(path,"/control")){
         // POST + X-Reclaimer-Control header (see st_controls_ok); ?do=<action>
