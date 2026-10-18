@@ -1608,7 +1608,20 @@ static int dxbc_has_vtxinput(const uint8_t*d,uint64_t n){
 }
 static void shader_rname(D3DObj*o); // fwd
 static void d3dgl_prelink_register(D3DObj*o); // fwd
+// A DXBC container without a code chunk (SHEX / SHDR): our own D3DCompile stub's 256-byte placeholder ("DXBC", size 256,
+// 0 chunks) for the 5 shaders halo3 compiles from HLSL at run time (video playback CopyToScreen / YUVToRGB PS + their VS,
+// and a cs_5_0 night-vision-style luminance tint into a 1920x1080 UAV whose pixel the game reads back every frame).
+// Accepted as a no-op shader by default (what the game always got here); PELOAD_REFUSE_EMPTY_SHADER=1 refuses it with
+// E_INVALIDARG like D3D11 would -- the game copes in a match, but on Windows these compile fine, so the failure paths
+// (scoping in, videos) are untested there. Backlog 67: real versions of the 5.
+static int dxbc_has_code(const void*bc,uint64_t len){ const uint8_t*d=bc; if(!d || len<32 || memcmp(d,"DXBC",4)) return 0;
+    uint32_t nch; memcpy(&nch,d+28,4); if(nch>64 || 32+4ull*nch>len) return 0;
+    for(uint32_t i=0;i<nch;i++){ uint32_t o; memcpy(&o,d+32+4*i,4); if((uint64_t)o+8<=len && (!memcmp(d+o,"SHEX",4)||!memcmp(d+o,"SHDR",4))) return 1; } return 0; }
 static int MSABI dev_crShader(int stage,const void*bc,uint64_t len,void**pp){
+    { static int acc=-1; if(acc<0) acc=getenv("PELOAD_REFUSE_EMPTY_SHADER")?0:1;
+      if(!acc && !dxbc_has_code(bc,len)){ static int nw; if(nw++<8){ char m[160]; int k=snprintf(m,sizeof m,"  [d3d] Create%sShader: %llu bytes without a code chunk -> E_INVALIDARG (as D3D11)\n",
+              stage==0?"Vertex":stage==1?"Pixel":stage==2?"Geometry":stage==5?"Compute":"",(unsigned long long)len); (void)!write(2,m,(size_t)k); }
+          if(pp) *pp=0; return (int)0x80070057; } }
     D3DObj*o=d3dobj(g_d3dchild_vtbl,0,0); o->stype=stage;
     if(bc&&len&&len<(16<<20)){ o->bc=malloc(len); if(o->bc){ memcpy(o->bc,bc,len); o->bclen=(uint32_t)len; } }
     if(getenv("PELOAD_FRAMELOG")) shader_rname(o);
@@ -5330,8 +5343,9 @@ static void pixwho_draw(D3DObj*rt){ if(g_pw_state!=2 || !rt || !G.ReadPixels) re
     G.ReadPixels(x,d3dgl_fbo_y(rr->h,(uint32_t)y,1),1,1,0x1908/*RGBA*/,0x1406/*FLOAT*/,px);
     int k=-1; for(int i=0;i<g_pw_n;i++) if(g_pw_rt[i]==rr) k=i; if(k<0 && g_pw_n<8){ k=g_pw_n++; g_pw_rt[k]=rr; for(int c=0;c<4;c++) g_pw_last[k][c]=-1e30f; } if(k<0) return;
     if(!memcmp(px,g_pw_last[k],16)) return; memcpy(g_pw_last[k],px,16);
-    D3DObj*vs=g_d3dst.vs,*ps=g_d3dst.ps; char m[900]; int n=snprintf(m,sizeof m,"  [pixwho] draw %lu rt %p %ux%u f%u vs %016llx ps %016llx -> (%.4g %.4g %.4g %.4g) | ps-srv:",
+    D3DObj*vs=g_d3dst.vs,*ps=g_d3dst.ps; char m[900]; int n=snprintf(m,sizeof m,"  [pixwho] draw %lu rt %p %ux%u f%u vs %016llx ps %016llx -> (%.4g %.4g %.4g %.4g)",
         g_pw_draw,(void*)rr,rr->w,rr->h,rr->fmt,(unsigned long long)(vs?vs->bchash:0),(unsigned long long)(ps?ps->bchash:0),px[0],px[1],px[2],px[3]);
+    { D3DObj*b=g_d3dst.blend; n+=snprintf(m+n,sizeof m-n," | nrt %d blend %s",g_d3dst.num_rt,b?"":"default"); if(b) for(int r=0;r<(b->sd[1]?2:1);r++) n+=snprintf(m+n,sizeof m-n," rt%d(en%u %u:%u op%u wm%x)",r,b->sd[2+r*8],b->sd[3+r*8],b->sd[4+r*8],b->sd[5+r*8],b->sd[9+r*8]); n+=snprintf(m+n,sizeof m-n," | ps-srv:"); }
     for(int i=0;i<20 && n<820;i++){ D3DObj*v=g_d3dst.psrv[i]; if(!v) continue; D3DObj*xx=v->data&&v->vkind?(D3DObj*)v->data:v; n+=snprintf(m+n,sizeof m-n," t%d=%ux%ux%u f%u",i,xx->w,xx->h,xx->arr,xx->fmt); }
     m[n++]='\n'; (void)!write(2,m,n);
     // the shaders and every bound constant buffer of this draw -> ~/reclaimer_pixwho_d<draw>.txt (what the pixel was made from)

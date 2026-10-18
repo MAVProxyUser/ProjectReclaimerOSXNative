@@ -37,7 +37,12 @@ static CsProg* cs_compile(const uint8_t* d, size_t len){
     if(len<32||memcmp(d,"DXBC",4)){ p->why="not DXBC"; return p; }
     uint32_t nch=dg_u32(d,len,28); size_t shex=0,sz=0;
     for(uint32_t i=0;i<nch;i++){ size_t o=dg_u32(d,len,32+4*i); if(o+8>len) continue; if(!memcmp(d+o,"SHEX",4)||!memcmp(d+o,"SHDR",4)){ shex=o+8; sz=dg_u32(d,len,o+4); } }
-    if(!shex){ p->why="no SHEX"; return p; }
+    if(!shex){ p->why="no SHEX";   // keep the blob for a look (~/reclaimer_cs_nocode_<n>.dxbc) + its chunk names in the log
+        static int nd; if(nd<4){ const char*h=getenv("HOME"); char pth[300]; snprintf(pth,sizeof pth,"%s/reclaimer_cs_nocode_%d.dxbc",h?h:"/tmp",nd++); FILE*f=fopen(pth,"wb"); if(f){ fwrite(d,1,len,f); fclose(f); }
+            char m[300]; int k=snprintf(m,sizeof m,"  [cs-cpu] no code chunk in a %zu-byte DXBC (header size %u, %u chunks:",len,dg_u32(d,len,24),nch);
+            for(uint32_t i=0;i<nch && i<12;i++){ size_t o=dg_u32(d,len,32+4*i); if(o+4<=len) k+=snprintf(m+k,sizeof m-k," %.4s",(const char*)d+o); else k+=snprintf(m+k,sizeof m-k," @%zu?",o); }
+            k+=snprintf(m+k,sizeof m-k,")\n"); (void)!write(2,m,(size_t)k); }
+        return p; }
     p->ins=calloc(8192,sizeof(DgIns)); if(!p->ins){ p->why="oom"; return p; }
     g_icbn=0; dg_decode_program(d,len,shex,sz,p->ins,&p->nins,8192);
     if(g_icbn>0){ p->icb=malloc((size_t)g_icbn*4); if(p->icb){ memcpy(p->icb,g_icb,(size_t)g_icbn*4); p->icbn=g_icbn; } }

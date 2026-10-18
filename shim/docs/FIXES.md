@@ -1246,6 +1246,9 @@ Numbers are from the commit messages; PERF-PLAN.md has the measurements. Compare
   restarted servers in a loop) -- don't use it there; `PELOAD_STDERR_TEE` instead.
 - **CreateProcessW applies the child's environment with setenv() in the loader itself** (SteamAppId stays set after the
   first Workshop helper; GUESSED harmless; workshop-helper.md section 6).
+- **Runtime-compiled shaders are no-ops** — D3DCompile returns a placeholder DXBC without code for halo3's 5 HLSL shaders
+  (video playback CopyToScreen / YUVToRGB + VS, a night-vision-style luminance CS); backlog 67. `PELOAD_REFUSE_EMPTY_SHADER=1`
+  refuses such blobs with E_INVALIDARG as D3D11 would.
 - **ReclaimerCache/Temp/mcc-startup-* accumulate** — 1,322 folders / 1.2 GB after a week of test launches: the client's
   per-launch scratch copies are not removed (maybe only at a clean exit; test runs end with kill -9). Not chased yet.
 - **First join right after a dedicated server starts** can fail its handshake; a retry works.
