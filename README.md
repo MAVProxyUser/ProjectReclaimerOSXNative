@@ -293,7 +293,10 @@ watch from another device). From top to bottom the page shows:
 - **Player details** (click a player in the table) -- under the heatmap: a big Mute / Unmute button, **Teleport next to
   them** (when you host the game and started it with `PELOAD_ALLOW_TELEPORT=1`), camo, all weapons,
   grenades, vehicle and seat, deaths, current and longest life, distance, top speed, shots, hits, accuracy, active
-  traits, facing and position; their deaths are ringed on the heatmap.
+  traits, facing and position, and their **address**: their IP when you host the game (from the client's own host table,
+  the one its `banip` uses); a client of someone else's server is never told other players' addresses (only the server's).
+  Addresses are hidden when the page is reachable from other computers (`PELOAD_STATS_ADDR` not loopback) unless
+  `PELOAD_STATS_IPS=1`; `PELOAD_STATS_IPS=0` always hides them. Their deaths are ringed on the heatmap.
 
   <img src="shim/docs/img/stats-player.png" width="400" alt="Player details">
 
