@@ -563,6 +563,7 @@ static char g_mt_name[96], g_mt_png[1100], g_mt_js[1100];
 static void* st_maptop_wait(void*a){ pid_t pid=(pid_t)(intptr_t)a; int st=0; while(waitpid(pid,&st,0)<0 && errno==EINTR){}
     g_mt_state=(!access(g_mt_png,R_OK) && !access(g_mt_js,R_OK))?1:3;   // judged by the files (another waiter may reap the child)
     char m[200]; int k=snprintf(m,sizeof m,"  [stats] map picture for %s: %s\n",g_mt_name,g_mt_state==1?"made":"FAILED (see its .log in maptop/)"); (void)!write(2,m,k); return 0; }
+static void* st_reap_child(void*a){ int st=0; waitpid((pid_t)(intptr_t)a,&st,0); return 0; }   // (no zombie)
 static void st_maptop_ensure(const char*mp,const char*name){
     static char last[96]; if(!name[0] || !mp[0] || !strcmp(last,name)) return; snprintf(last,sizeof last,"%s",name);
     snprintf(g_mt_name,sizeof g_mt_name,"%s",name);
@@ -572,6 +573,17 @@ static void st_maptop_ensure(const char*mp,const char*name){
     snprintf(dir,sizeof dir,"%s/Library/Application Support/ReclaimerMac/maptop",home?home:"/tmp");
     snprintf(png,sizeof png,"%s/%s.png",dir,name); snprintf(js,sizeof js,"%s/%s.json",dir,name); snprintf(lg,sizeof lg,"%s/%s.log",dir,name);
     snprintf(g_mt_png,sizeof g_mt_png,"%s",png); snprintf(g_mt_js,sizeof g_mt_js,"%s",js);
+    // invisible walls for the zones overlay (re-tools/h3inv.py -> <map>.inv.bin, ~0.3 s; read by hitbox.c hbz_load the next
+    // time the map is loaded there)
+    { char inv[1100]; snprintf(inv,sizeof inv,"%s/%s.inv.bin",dir,name);
+      if(access(inv,R_OK) && !getenv("PELOAD_NO_MAPTOP")){ char exe[1024], it[1100]; uint32_t es=sizeof exe; it[0]=0;
+          if(!_NSGetExecutablePath(exe,&es)){ char*sl=strrchr(exe,'/'); if(sl){ *sl=0; snprintf(it,sizeof it,"%s/../../re-tools/h3inv.py",exe); } }
+          if(it[0] && !access(it,R_OK)){ mkdir(dir,0755); char*av[]={(char*)"/usr/bin/arch",(char*)"-arm64",(char*)"python3",it,(char*)mp,inv,0}; extern char**environ;
+              posix_spawn_file_actions_t fa; posix_spawn_file_actions_init(&fa); posix_spawn_file_actions_addopen(&fa,0,"/dev/null",O_RDONLY,0);
+              posix_spawn_file_actions_addopen(&fa,1,"/dev/null",O_WRONLY,0); posix_spawn_file_actions_adddup2(&fa,1,2);
+              posix_spawnattr_t at; posix_spawnattr_init(&at); posix_spawnattr_setflags(&at,POSIX_SPAWN_SETPGROUP|POSIX_SPAWN_CLOEXEC_DEFAULT); posix_spawnattr_setpgroup(&at,0);
+              pid_t pid=0; if(!posix_spawn(&pid,"/usr/bin/arch",&fa,&at,av,environ)){ pthread_t th; if(!pthread_create(&th,0,st_reap_child,(void*)(intptr_t)pid)) pthread_detach(th); }
+              posix_spawn_file_actions_destroy(&fa); posix_spawnattr_destroy(&at); } } }
     if(!access(png,R_OK) && !access(js,R_OK)){ g_mt_state=1; return; }
     if(getenv("PELOAD_NO_MAPTOP")){ g_mt_state=4; return; }
     char tool[1100]; const char*e=getenv("PELOAD_MAPTOP_TOOL");
@@ -677,8 +689,8 @@ static int st_control(const char*act,const char*qs){
         const char*v=strstr(qs,"t="); int b=v?atoi(v+2):0; if(b!=1 && b!=2 && b!=4) return 0;
         extern volatile int g_hb_wkshow; extern int hb_wkshow(void); hb_wkshow(); __atomic_fetch_xor(&g_hb_wkshow,b,__ATOMIC_ACQ_REL);
         k=snprintf(m,sizeof m,"  [stats] page: weak-spot kinds now 0x%x\n",g_hb_wkshow); (void)!write(2,m,k); return 1; }
-    if(!strcmp(act,"zonetype")){   // one kind of zone on/off: t = its bit (1 kill, 2 safe, 4 acceleration, 8 soft kill, 16 slip)
-        const char*v=strstr(qs,"t="); int b=v?atoi(v+2):0; if(b!=1&&b!=2&&b!=4&&b!=8&&b!=16) return 0;
+    if(!strcmp(act,"zonetype")){   // one kind of zone on/off: t = its bit (1 kill, 2 safe, 4 acceleration, 8 soft kill, 16 slip, 32 invisible walls)
+        const char*v=strstr(qs,"t="); int b=v?atoi(v+2):0; if(b!=1&&b!=2&&b!=4&&b!=8&&b!=16&&b!=32) return 0;
         extern volatile int g_hbz_show; extern int hbz_show(void); hbz_show(); __atomic_fetch_xor(&g_hbz_show,b,__ATOMIC_ACQ_REL);
         k=snprintf(m,sizeof m,"  [stats] page: zone kinds now 0x%x\n",g_hbz_show); (void)!write(2,m,k); return 1; }
     if(!strcmp(act,"teams")){ static const char*const tm[3]={"all","enemies only","friends only"}; __atomic_fetch_add(&g_hb_teamcycle,1,__ATOMIC_ACQ_REL); hbs_sync();   // every feature

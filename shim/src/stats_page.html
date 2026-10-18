@@ -638,7 +638,7 @@ const TEAM_TIP={hitboxes:'Whose hitboxes',vehicles:'By whoever sits in it: an em
 const NA_TIP={team:{items:'Items have no team',zones:'Zones belong to the map, not to a team'},vis:{zones:'Zones are always drawn only where you can see them (per pixel)'},
  px:{hitboxes:'No text labels',vehicles:'No text labels',tracers:'No text labels',zones:'No labels (only the old line mode, PELOAD_HB_ZONES_XRAY=1, has them)'}};
 const CHIPS={z:[[1,'#ff2626','Kill','Kill zone: a volume where the game kills you (out of bounds)'],[2,'#33ff59','Safe','Safe zone: the playable area -- outside every safe zone the game kills you'],
-  [8,'#ff40a6','Soft kill','Soft-kill ceiling: go through it and you die after a moment'],[4,'#ff991a','Push back','Acceleration ceiling: pushes you back down / away'],[16,'#ffeb33','Slip','Slip surface: too steep to stand on, you slide off']],
+  [8,'#ff40a6','Soft kill','Soft-kill ceiling: go through it and you die after a moment'],[4,'#ff991a','Push back','Acceleration ceiling: pushes you back down / away'],[16,'#ffeb33','Slip','Slip surface: too steep to stand on, you slide off'],[32,'#73f2ff','Invisible walls','Collision you cannot see: the map\'s surfaces flagged invisible (blockers, ceilings)']],
  w:[[1,'#fff21a','Weak: kills it','Lethal section: damage there alone destroys the vehicle (Wraith back hatch: 75 of its 750)'],[2,'#ff8c1a','Weak: exposes driver','Breaking it exposes the shielded driver to full hits (Wraith cockpit, Scorpion driver hatch)'],[4,'#ff4dd9','Weak: disables','Breaking it disables a gun or the steering (Ghost wings: gun + steering; Warthog front fenders, Mongoose wheels: steering). Other vehicles have one damage pool: their riders are the weak spot (Chopper, Mongoose 100%, Warthog, Ghost, Mauler 90% of a hit; Banshee, Hornet pilots 20%)']]};
 const PRESETS=[
  {id:'off',n:'Off',t:'Every overlay feature off (nothing drawn or read back: costs nothing)',set:{all:{on:false}}},
@@ -656,7 +656,7 @@ function featState(o){ if(o.features) return o.features;   // (an older loader: 
   const r={}; for(const f of FN) r[f]={on:!!o[f],team:f==='items'||f==='zones'?null:(o.teams||'all'),vis:f==='zones'?null:!!o.visible,px:f==='info'||f==='items'?(o.text_px||7):null}; return r; }
 function realV(k){ const i=k.indexOf('.'); if(i<0) return snap?snap[k]:undefined; const s=fsReal&&fsReal[k.slice(0,i)]; return s?s[k.slice(i+1)]:undefined; }
 function cur(f,k){ const p=pend.get(f+'.'+k); return p?p.v:realV(f+'.'+k); }
-function curMask(k){ const p=pend.get(k); return p?p.v:(snap&&snap[k]!=null?snap[k]:(k==='zone_show'?31:3)); }
+function curMask(k){ const p=pend.get(k); return p?p.v:(snap&&snap[k]!=null?snap[k]:(k==='zone_show'?63:3)); }
 function applies(f,k){ if(k==='on') return true; const v=realV(f+'.'+k); return v!==null&&v!==undefined; }
 function reconcile(){ const now=Date.now(); for(const [k,p] of pend) if(realV(k)===p.v||now-p.t>3000) pend.delete(k); }
 async function ovPost(q){ try{ return await (await fetch('/control?'+q,{method:'POST',headers:{'X-Reclaimer-Control':'1'}})).json(); }catch(err){ return {ok:false,error:'not connected'}; } }

@@ -607,9 +607,19 @@ static void hbz_load(const char*path){
             free(tr); }
         free(sc); }
     free(bs);
+    // invisible walls (2026-10-18, backlog 18): the collision surfaces flagged invisible, exported per map by re-tools/h3inv.py
+    // into maptop/<map>.inv.bin (b"RIW1", u32 n, n x 9 float) -- type 3, one group (shared edges are interior)
+    { const char*h=getenv("HOME"); const char*bn=strrchr(path,'/'); char nm[256]; snprintf(nm,sizeof nm,"%s",bn?bn+1:path); char*dot=strrchr(nm,'.'); if(dot) *dot=0;
+      char ip[1400]; snprintf(ip,sizeof ip,"%s/Library/Application Support/ReclaimerMac/maptop/%s.inv.bin",h?h:"",nm);
+      FILE*f=fopen(ip,"rb"); uint8_t hd[8]; uint32_t n=0;
+      if(f && fread(hd,1,8,f)==8 && !memcmp(hd,"RIW1",4) && (n=*(uint32_t*)(hd+4))>0 && n<2000000){
+          HbZTri*nt2=realloc(g_hbz.tri,(size_t)(g_hbz.ntri+n)*sizeof(HbZTri));
+          if(nt2){ g_hbz.tri=nt2; float v[9]; for(uint32_t i=0;i<n && fread(v,4,9,f)==9;i++){ HbZTri*z=&g_hbz.tri[g_hbz.ntri++]; z->type=3; z->group=1<<30; memcpy(z->v,v,36); } } }
+      if(f) fclose(f); }
     hbz_outline();
     int nkb=0; for(int i=0;i<g_hbz.nbox;i++) nkb+=g_hbz.box[i].kind==0;
-    const char*bn=strrchr(path,'/'); char msg[300]; int k=snprintf(msg,sizeof msg,"  [zones] %s: %d kill volumes, %d safe zones, %d soft-ceiling triangles (%d outline edges)\n",bn?bn+1:path,nkb,g_hbz.nbox-nkb,g_hbz.ntri,g_hbz.nseg); (void)!write(2,msg,k); }
+    int ninv=0; for(int i=0;i<g_hbz.ntri;i++) ninv+=g_hbz.tri[i].type==3;
+    const char*bn=strrchr(path,'/'); char msg[300]; int k=snprintf(msg,sizeof msg,"  [zones] %s: %d kill volumes, %d safe zones, %d soft-ceiling triangles, %d invisible-wall triangles (%d outline edges)\n",bn?bn+1:path,nkb,g_hbz.nbox-nkb,g_hbz.ntri-ninv,ninv,g_hbz.nseg); (void)!write(2,msg,k); }
 // Zones (F10) draw only what the player can see (user, 2026-10-17): each edge is cut into pieces and a piece is drawn when
 // the scene's depth (the visible-only readback, hb_vis_tick) at its middle is not nearer than the piece, moved 0.3 units
 // toward the camera so lines lying on the ground stay. PELOAD_HB_ZONES_XRAY=1 = through walls (old).
@@ -628,13 +638,13 @@ static int hb_seg_vis(float*verts,int nv,int cap,const float*vp,const float*a,co
     return hbz_xray() ? hb_seg_clip(verts,nv,cap,vp,a,b,col) : hb_seg_occ(verts,nv,cap,vp,a,b,col); }
 static int hbz_draw(float*verts,int nv,int cap,const float*vp){
     char mp[1024]; if(!hb_current_map(mp,sizeof mp)) return nv; hbz_load(mp);
-    static const float ckill[3]={1,0.15f,0.15f}, csafe[3]={0.2f,1,0.35f}, csoft[3][3]={{1,0.6f,0.1f},{1,0.25f,0.65f},{1,0.92f,0.2f}};
+    static const float ckill[3]={1,0.15f,0.15f}, csafe[3]={0.2f,1,0.35f}, csoft[4][3]={{1,0.6f,0.1f},{1,0.25f,0.65f},{1,0.92f,0.2f},{0.45f,0.95f,1}};
     const float*cam=vp+28;
     for(int i=0;i<g_hbz.nbox;i++){ const HbZBox*b=&g_hbz.box[i]; const float*col=b->kind?csafe:ckill;
         for(int c=0;c<8;c++) for(int bit=1;bit<8;bit<<=1) if(!(c&bit)) nv=hb_seg_vis(verts,nv,cap,vp,b->c[c],b->c[c|bit],col);
         float ctr[3]={(b->c[0][0]+b->c[7][0])/2,(b->c[0][1]+b->c[7][1])/2,(b->c[0][2]+b->c[7][2])/2}, tx,ty, dx=ctr[0]-cam[0],dy=ctr[1]-cam[1],dz=ctr[2]-cam[2];
         if(dx*dx+dy*dy+dz*dz<150.f*150.f && hb_pt_vis(ctr) && hb_proj(vp,ctr,&tx,&ty)){ const char*t=b->kind?"SAFE ZONE":"KILL ZONE"; nv=hb_text(verts,nv,cap,tx-strlen(t)*2.5f*g_hb_px,ty,t,col); } }
-    for(int i=0;i<g_hbz.nseg;i++){ const HbZSeg*z=&g_hbz.seg[i]; const float*col=csoft[z->type>=0&&z->type<3?z->type:1];   // soft ceilings: outlines
+    for(int i=0;i<g_hbz.nseg;i++){ const HbZSeg*z=&g_hbz.seg[i]; const float*col=csoft[z->type>=0&&z->type<4?z->type:1];   // soft ceilings: outlines
         nv=hb_seg_vis(verts,nv,cap,vp,z->a,z->b,col); }
     return nv; }
 // Projectile trails: positions seen on recent frames, per projectile handle; kept briefly after the projectile is gone.
@@ -931,9 +941,10 @@ int g_hbv_ok_x(void){ return g_hbv_ok; }
 // 0.3 units toward the camera so surfaces lying on the ground stay). Kinds (bits of g_hbz_show, the stats page's chips):
 // 1 kill zone (red: inside it you die), 2 safe zone (green: the playable area; outside every one the game kills you),
 // 4 acceleration ceiling (orange: pushes you back), 8 soft-kill ceiling (pink: kills you after a moment), 16 slip surface
-// (yellow: you slide off it). PELOAD_HB_ZONES_SHOW=<mask> (default 31); PELOAD_HB_ZONES_XRAY=1 = the old lines, through walls.
+// (yellow: you slide off it), 32 invisible wall (light cyan: collision you can't see, maptop/<map>.inv.bin from
+// re-tools/h3inv.py). PELOAD_HB_ZONES_SHOW=<mask> (default 63); PELOAD_HB_ZONES_XRAY=1 = the old lines, through walls.
 volatile int g_hbz_show=-1;
-int hbz_show(void){ if(g_hbz_show<0){ const char*e=getenv("PELOAD_HB_ZONES_SHOW"); g_hbz_show=e?(int)strtol(e,0,0):31; } return g_hbz_show; }
+int hbz_show(void){ if(g_hbz_show<0){ const char*e=getenv("PELOAD_HB_ZONES_SHOW"); g_hbz_show=e?(int)strtol(e,0,0):63; } return g_hbz_show; }
 static unsigned g_hbz_prog, g_hbz_vbo, g_hbz_vao, g_hbz_dtex; static void*g_hbz_ctx; static unsigned g_hbz_dseq=~0u;
 static int g_hbz_ntri, g_hbz_nline, g_hbz_builtmask=-1; static char g_hbz_builtpath[1024];
 static int g_hbz_u[12];
@@ -959,19 +970,19 @@ static void hbz_gpu(const float*vp){
         G.GenBuffers(1,&g_hbz_vbo); G.GenVertexArrays(1,&g_hbz_vao); G.GenTextures(1,&g_hbz_dtex); }
     int show=hbz_show();
     if(show!=g_hbz_builtmask || strcmp(mp,g_hbz_builtpath)){   // (re)build the static geometry: triangles, then edges
-        static const float ckill[3]={1,0.15f,0.15f}, csafe[3]={0.2f,1,0.35f}, csoft[3][3]={{1,0.6f,0.1f},{1,0.25f,0.65f},{1,0.92f,0.2f}};
-        static const int tbit[3]={4,8,16};
+        static const float ckill[3]={1,0.15f,0.15f}, csafe[3]={0.2f,1,0.35f}, csoft[4][3]={{1,0.6f,0.1f},{1,0.25f,0.65f},{1,0.92f,0.2f},{0.45f,0.95f,1}};
+        static const int tbit[4]={4,8,16,32};
         size_t cap=(size_t)(g_hbz.nbox*36+g_hbz.ntri*3+g_hbz.nbox*24+g_hbz.nseg*2+16); float*v=malloc(cap*7*sizeof(float)); if(!v) return; int n=0;
         static const int face[6][4]={{0,1,3,2},{4,5,7,6},{0,1,5,4},{2,3,7,6},{0,2,6,4},{1,3,7,5}};
         for(int i=0;i<g_hbz.nbox;i++){ const HbZBox*b=&g_hbz.box[i]; if(!(show&(b->kind?2:1))) continue; const float*c=b->kind?csafe:ckill; float a=b->kind?0.07f:0.20f;
             for(int f=0;f<6;f++){ const int*q=face[f]; hbz_push(v,&n,b->c[q[0]],c,a); hbz_push(v,&n,b->c[q[1]],c,a); hbz_push(v,&n,b->c[q[2]],c,a);
                 hbz_push(v,&n,b->c[q[0]],c,a); hbz_push(v,&n,b->c[q[2]],c,a); hbz_push(v,&n,b->c[q[3]],c,a); } }
-        for(int i=0;i<g_hbz.ntri;i++){ const HbZTri*t=&g_hbz.tri[i]; int k=t->type>=0&&t->type<3?t->type:1; if(!(show&tbit[k])) continue;
+        for(int i=0;i<g_hbz.ntri;i++){ const HbZTri*t=&g_hbz.tri[i]; int k=t->type>=0&&t->type<4?t->type:1; if(!(show&tbit[k])) continue;
             for(int j=0;j<3;j++) hbz_push(v,&n,t->v[j],csoft[k],0.16f); }
         g_hbz_ntri=n;
         for(int i=0;i<g_hbz.nbox;i++){ const HbZBox*b=&g_hbz.box[i]; if(!(show&(b->kind?2:1))) continue; const float*c=b->kind?csafe:ckill;
             for(int cc=0;cc<8;cc++) for(int bit=1;bit<8;bit<<=1) if(!(cc&bit)){ hbz_push(v,&n,b->c[cc],c,0.85f); hbz_push(v,&n,b->c[cc|bit],c,0.85f); } }
-        for(int i=0;i<g_hbz.nseg;i++){ const HbZSeg*z=&g_hbz.seg[i]; int k=z->type>=0&&z->type<3?z->type:1; if(!(show&tbit[k])) continue;
+        for(int i=0;i<g_hbz.nseg;i++){ const HbZSeg*z=&g_hbz.seg[i]; int k=z->type>=0&&z->type<4?z->type:1; if(!(show&tbit[k])) continue;
             hbz_push(v,&n,z->a,csoft[k],0.75f); hbz_push(v,&n,z->b,csoft[k],0.75f); }
         g_hbz_nline=n-g_hbz_ntri;
         G.BindBuffer(0x8892,g_hbz_vbo); G.BufferData(0x8892,(long)n*7*4,v,0x88E4/*STATIC_DRAW*/); free(v);
