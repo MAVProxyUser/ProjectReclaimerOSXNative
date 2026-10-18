@@ -101,10 +101,12 @@ fi
   (bash shim/tools/maptop.sh > /tmp/reclaimer_maptop.log 2>&1 &)
 # The native GL helper (shim/build/glhelper, PELOAD_GL_HELPER=1, the default): Apple's GL driver runs natively in its own
 # process instead of translated inside this one -- about 2-3x the frame rate in big games. PELOAD_GL_HELPER=0 = the old
-# in-process GL. Particle compute workers: the performance cores minus two (4..8); PELOAD_CS_WORKERS overrides.
+# in-process GL. Particle compute workers and other per-Mac choices: shim/tools/machine.sh (the [machine] line);
+# PELOAD_CS_WORKERS overrides the workers.
 # Import fast paths (shim/src/fastcall.c: per-thread heap block cache, cached thread ids, key-state table): on since
 # 2026-10-18 (+1.3% median in a 128-player match; ~40 map loads without a fault); PELOAD_FASTCALL=0 = off.
-PC="$(sysctl -n hw.perflevel0.physicalcpu 2>/dev/null || echo 6)"; CSW=$((PC-2)); [ "$CSW" -lt 4 ] && CSW=4; [ "$CSW" -gt 8 ] && CSW=8
+if [ -f shim/tools/machine.sh ]; then . shim/tools/machine.sh; echo "$MACH_LINE"
+else PC="$(sysctl -n hw.perflevel0.physicalcpu 2>/dev/null || echo 6)"; CSW=$((PC-2)); [ "$CSW" -lt 2 ] && CSW=2; [ "$CSW" -gt 8 ] && CSW=8; MACH_LINE=""; fi
 [ -x shim/build/glhelper ] || { [ "${PELOAD_GL_HELPER:-1}" != 0 ] && echo "shim/build/glhelper missing (bash shim/build.sh): GL stays in-process"; }
 # in a source checkout the stats page is served from shim/src (edits show on a browser refresh)
 [ -f shim/src/stats_page.html ] && [ -z "${PELOAD_STATS_PAGE:-}" ] && export PELOAD_STATS_PAGE="$PWD/shim/src/stats_page.html"
@@ -112,7 +114,7 @@ env PELOAD_SKINGUARD=1 PELOAD_VTGUARD=1 PELOAD_ALLOC_GUARD=1 "${RUNTIME[@]}" PEL
     PELOAD_D3DGL_SUBMIT="${PELOAD_D3DGL_SUBMIT:-auto}" PELOAD_GL_HELPER="${PELOAD_GL_HELPER:-1}" PELOAD_CS_WORKERS="${PELOAD_CS_WORKERS:-$CSW}" \
     PELOAD_FASTCALL="${PELOAD_FASTCALL:-all}" \
     PELOAD_RECLAIMER_PATCHES=all PELOAD_WORKER_INHERIT_STDIO=1 PELOAD_PRESENT=1 PELOAD_HOLD_WINDOW=1 PELOAD_D3DGL=1 \
-    arch -x86_64 shim/build/peload "$EXE" "${ARGS[@]}" < <(exec sleep 86400.$$ 2>/dev/null) > /tmp/reclaimer_play.log 2>&1
+    arch -x86_64 shim/build/peload "$EXE" "${ARGS[@]}" < <(exec sleep 86400.$$ 2>/dev/null) > >( { [ -n "$MACH_LINE" ] && echo "$MACH_LINE"; exec cat; } > /tmp/reclaimer_play.log) 2>&1
 # the stdin feeder above (an open pipe that never sends anything) must not outlive the game: it used to hold the
 # caller's stderr for 24 h (so `play.sh | tail` never returned) and piled up as orphaned shells. bash 3.2 reparents
 # it to launchd, so it is found by its pid-tagged duration.

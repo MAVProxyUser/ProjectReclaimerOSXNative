@@ -68,7 +68,7 @@ mkdir -p "$APPST/shim/build" "$APPST/shim/tools" "$APPST/shim/docs" "$APPST/re-t
 ln shim/build/peload shim/build/glhelper "$APPST/shim/build/" 2>/dev/null || cp -p shim/build/peload shim/build/glhelper "$APPST/shim/build/"
 cp -pR shim/crt "$APPST/shim/"
 cp -p shim/play.sh shim/target.sh shim/dedicated.sh shim/build.sh "$APPST/shim/"
-cp -p shim/tools/quiet-run.sh shim/tools/servers.sh shim/tools/maptop.sh shim/tools/workshop-helper.sh shim/tools/client-update.sh "$APPST/shim/tools/"
+cp -p shim/tools/quiet-run.sh shim/tools/servers.sh shim/tools/maptop.sh shim/tools/workshop-helper.sh shim/tools/client-update.sh shim/tools/machine.sh "$APPST/shim/tools/"
 for f in h3map h3bsp h3nav h3inv h3dmg; do [ -f re-tools/$f.py ] && cp -p re-tools/$f.py "$APPST/re-tools/"; done   # map pictures, walking graphs, invisible walls
 for f in mods.md game-options.md FIXES.md; do [ -f shim/docs/$f ] && cp -p shim/docs/$f "$APPST/shim/docs/"; done
 cp -p README.md "$APPST/"; cp -p "$EXE" "$APPST/client/"

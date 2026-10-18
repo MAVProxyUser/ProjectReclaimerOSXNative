@@ -371,6 +371,10 @@ preset arrows + Apply (in a match: Esc 110,503 ... Resume 132,467; menu: 110,587
 from the client's log line "Graphics quality: one view X" (g_st_qual; snapshot overlay.quality / quality_pending).
 UI automation of a test client: PELOAD_STATS_UISTEPS=1 + POST do=uisteps&s=<steps> (1280x720 client coords) and a frame of the
 window from a 1.5 s clip (do=rec, then ffmpeg -ss 0.8 -frames:v 1) -- the menu is not in do=capture; never screenshot the desktop.
+Retina (2026-10-18): the window's GL surface is in PIXELS (2x on a Retina screen); g_win_pw/ph are pixels (convertRectToBacking in
+cocoa_pump), g_win_scale = pixels per point (PELOAD_RETINA=0 = points-sized surface). This Mac drives a 1x monitor only, so Retina bugs
+never show here -- the M1 MacBook found the quarter-window one. Per-Mac launch choices: shim/tools/machine.sh ([machine] line: workers by
+P-cores, Medium preset on a base-tier GPU's first run). Menu grading (the client's only runtime-compiled shader): rtgrade_* (PELOAD_NO_RTGRADE).
 Glitch hunting: `PELOAD_D3DGL_COVQ` (+`_COVQ_FRAC`, `_HUGEPROBE=<t>`) per-draw sample counts,
 `PELOAD_D3DGL_WHITEDUMP` (draw flight recorder on auto-exposure spikes), `_LUMLOG`, `_FSLOG`,
 `_FRAMESTAT`, `_CBSCAN`, `_PSCLAMP=<c>`, `_SKIPVSH=<hash,..>`, `_DUMPHASH=<hash,..>` (GLSL+DXBC to ~).

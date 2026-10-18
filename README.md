@@ -405,6 +405,14 @@ Two processes do the work:
    runs at native speed and in parallel with the game. It renders each frame into one of three shared IOSurfaces,
    which the loader's present thread shows in the window. `PELOAD_GL_HELPER=0` = everything in one process (slower).
 
+**Different Macs.** `shim/play.sh` checks the Mac it runs on first (`shim/tools/machine.sh`) and prints one line, e.g.
+`[machine] Apple M1: 4 performance + 4 efficiency cores, 8 GPU cores (base), 16 GB -> particle workers 2, graphics preset
+Medium (first run on a base-tier GPU ...)`. It gives the particle workers the performance cores minus two (2 to 8), and on a
+base-tier GPU (8-10 GPU cores: M1, M2, M3, M4 base chips) a profile that never chose a graphics preset starts at the client's
+Medium preset instead of High (Settings > Advanced graphics changes it any time; your own choice is never touched;
+`RECLAIMER_KEEP_QUALITY=1` turns this off). Retina screens are handled by the loader itself: the picture is drawn at the
+window's pixel size on any screen (`[cocoa] window ... (scale 2)` in the log).
+
 What runs on your cores (an M4 Max has 10 performance + 4 efficiency cores):
 
 | Thread / process | What it does |
@@ -412,7 +420,7 @@ What runs on your cores (an M4 Max has 10 performance + 4 efficiency cores):
 | halo3's **main thread** (translated) | the game loop: simulation, AI/physics, render preparation, ~14 MB game-state copies a few times a frame. **The limit in 80-100 player games** (99% busy) |
 | halo3's render thread (translated) | issues the Direct3D 11 calls the loader translates |
 | `shim-gl-submit` (loader) | takes the translated draw calls off the render thread; on automatically in games with 40+ players |
-| `shim-compute` × N (loader) | the game's GPU particle compute shaders, run on the CPU (Apple's OpenGL has no compute shaders): 64-lane SIMT interpreter; play.sh starts one per performance core minus two, 4..8 (8 on an M4 Max; `PELOAD_CS_WORKERS`) |
+| `shim-compute` × N (loader) | the game's GPU particle compute shaders, run on the CPU (Apple's OpenGL has no compute shaders): 64-lane SIMT interpreter; play.sh starts one per performance core minus two, 2..8 (8 on an M4 Max, 2 on an M1; `PELOAD_CS_WORKERS`) |
 | **GL helper** process (native) | Apple's OpenGL driver: every draw call |
 | `shim-present` (loader) | shows each frame, draws the overlay, the client's layered windows and clip recording |
 | `shim-copy` × 3 (loader, opt-in) | splits big copies across cores (`PELOAD_PAR_MEMCPY=3`); off by default because copy-on-write (below) measured faster |

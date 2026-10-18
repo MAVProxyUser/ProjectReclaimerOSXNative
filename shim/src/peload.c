@@ -1967,8 +1967,10 @@ static void cs_wait_res(D3DObj*r){ if(!r||!r->cs_pending) return; uint64_t t0=pr
     if(t0){ static uint64_t acc,nn; acc+=prof_now()-t0; if((++nn%500)==0){ char m[100]; int k=snprintf(m,sizeof m,"  [cs-cpu] render thread waited %.0f us avg (%llu waits)\n",acc/1e3/nn,(unsigned long long)nn); (void)!write(2,m,k); } } }
 static void cs_wait_view(void*v){ D3DObj*o=v; if(!o) return; cs_wait_res(o); if(o->vkind&&o->data) cs_wait_res((D3DObj*)o->data); }
 static int cs_async(void){ static int a=-1; if(a<0) a=getenv("PELOAD_CS_SYNC")?0:1; return a; }
+static int rtgrade_dispatch(D3DObj*cs,uint32_t a,uint32_t b);   // fwd (the client's menu-scene grading: one GL draw)
 static void MSABI ctxi_Dispatch(void*t,uint32_t a,uint32_t b,uint32_t c){ (void)t; d3dtrace(7,"Dispatch"); g_fs.disp++; cscensus("Dispatch",a,b,c);
     D3DObj*cs=g_cs.cs; if(!cs||!cs->bc||getenv("PELOAD_NOCSCPU")) return;
+    if(cs->bclen==76 && !memcmp(cs->bc+36,"RCLG",4)){ rtgrade_dispatch(cs,a,b); return; }
     // the program lives on the canon (the first object with this bytecode, never freed): duplicates -- every map load
     // creates the same kernels again -- run it instead of compiling their own (and they are freed when released)
     { D3DObj*cn=(D3DObj*)cs->canon; if(!cs->csprog && cn && cn->csprog) cs->csprog=cn->csprog; }
@@ -2503,12 +2505,34 @@ static int MSABI i_D3DReflect(const void*src,uint64_t sz,GUID_*iid,void**pp){ (v
 static Blob* make_blob(const void*data,uint64_t n); // fwd
 static int MSABI i_D3DGetInputSignatureBlob(const void*src,uint64_t sz,void**pp){ (void)src;(void)sz;
     uint8_t hdr[64]; memset(hdr,0,sizeof hdr); hdr[0]='D';hdr[1]='X';hdr[2]='B';hdr[3]='C'; if(pp)*pp=make_blob(hdr,sizeof hdr); return HR_OK; }
+// The grading source (menu_scene.rs, constants written by the client): dot(scene[id.xy].rgb, float3(A, B, C)) ... y * float3(D, E, F)
+// + G * y * y * y * y ... float4(color * H, 1.0). Read by structure (a constant may print as "2"); 1 = all eight found.
+static const char* rtg_after(const char*s,const char*e,const char*pat){ size_t n=strlen(pat); for(const char*p=s;p+n<=e;p++) if(!memcmp(p,pat,n)) return p+n; return 0; }
+static int rtg_nums(const char**pp,const char*e,float*out,int n){ const char*p=*pp; for(int i=0;i<n;i++){ while(p<e && (*p==' '||*p==','||*p=='\t')) p++;
+        char buf[32]; int j=0; while(p<e && j<31 && ((*p>='0'&&*p<='9')||*p=='.'||*p=='-'||*p=='e'||*p=='E'||*p=='+')) buf[j++]=*p++; buf[j]=0; if(!j) return 0;
+        char*end; out[i]=strtof(buf,&end); if(*end) return 0; } *pp=p; return 1; }
+static int rtgrade_parse(const char*src,uint64_t n,float*k){ const char*e=src+n;
+    if(!rtg_after(src,e,"RWTexture2D<float4> output_scene") || !rtg_after(src,e,"scene.GetDimensions(width, height)")) return 0;
+    const char*p=rtg_after(src,e,"dot(scene[id.xy].rgb, float3("); if(!p || !rtg_nums(&p,e,k,3)) return 0;
+    p=rtg_after(p,e,"y * float3("); if(!p || !rtg_nums(&p,e,k+3,3)) return 0;
+    p=rtg_after(p,e,") + "); if(!p || !rtg_nums(&p,e,k+6,1)) return 0; if(!rtg_after(p,e,"* y * y * y * y")) return 0;
+    p=rtg_after(p,e,"float4(color * "); if(!p || !rtg_nums(&p,e,k+7,1)) return 0;
+    return 1; }
 static int MSABI i_D3DCompile(const void*src,uint64_t srcsz,const char*name,const void*defs,void*inc,
         const char*entry,const char*target,uint32_t f1,uint32_t f2,void**ppCode,void**ppErr){
     (void)src;(void)srcsz;(void)name;(void)defs;(void)inc;(void)entry;(void)target;(void)f1;(void)f2;
     if(getenv("PELOAD_TRACE_COMPILE")){ static int nc; char m[300]; int k=snprintf(m,sizeof m,"  [D3DCompile #%d] name=%s entry=%s target=%s srclen=%llu\n",nc,name?name:"(null)",entry?entry:"(null)",target?target:"(null)",(unsigned long long)srcsz); (void)!write(2,m,k);
         const char*home=getenv("HOME"); char fp[256]; snprintf(fp,sizeof fp,"%s/reclaimer_hlsl_%d_%s_%s.hlsl",home?home:"/tmp",nc++,entry?entry:"x",target?target:"x");
         FILE*F=fopen(fp,"w"); if(F){ if(src&&srcsz) fwrite(src,1,(size_t)srcsz,F); fclose(F); } }
+    // the client's menu-scene grading compute shader (src/menu_scene.rs: luminance of the menu's back buffer -> blue tones,
+    // Halo 3's own menu look): recognised by its source; its constants go in a marker chunk "RCLG" that ctxi_Dispatch runs
+    // as one GL draw (rtgrade_dispatch). PELOAD_NO_RTGRADE=1 = the old code-less placeholder (no grading).
+    { float gk[8]; if(src && srcsz && target && !strncmp(target,"cs_",3) && !getenv("PELOAD_NO_RTGRADE") && rtgrade_parse((const char*)src,srcsz,gk)){
+        uint8_t b[36+8+32]; memset(b,0,sizeof b); memcpy(b,"DXBC",4); *(uint32_t*)(b+20)=1; *(uint32_t*)(b+24)=sizeof b; *(uint32_t*)(b+28)=1; *(uint32_t*)(b+32)=36;
+        memcpy(b+36,"RCLG",4); *(uint32_t*)(b+40)=32; memcpy(b+44,gk,32);
+        if(ppCode)*ppCode=make_blob(b,sizeof b); if(ppErr)*ppErr=0;
+        char m[200]; int k=snprintf(m,sizeof m,"  [rtgrade] menu-scene grading shader recognised: y=dot(rgb,(%g,%g,%g)), y*(%g,%g,%g)+%g*y^4, x%g\n",gk[0],gk[1],gk[2],gk[3],gk[4],gk[5],gk[6],gk[7]); (void)!write(2,m,k);
+        return HR_OK; } }
     // placeholder DXBC container (magic + zeroed header); real bytecode isn't
     // needed because there's no D3D device to consume it — the engine only reads
     // the blob's pointer/size here.
@@ -4234,7 +4258,8 @@ static CGLContextObj g_cgl;
 #include <objc/message.h>
 typedef struct { double x,y,w,h; } NSRect_;
 static id g_nsapp, g_nswin, g_nsctx, g_nspf; extern id NSDefaultRunLoopMode;
-static volatile int g_win_pw, g_win_ph;   // current window drawable size (0 = not yet known)
+static volatile int g_win_pw, g_win_ph;   // current window drawable size in PIXELS (0 = not yet known)
+static volatile float g_win_scale=1.0f;    // pixels per point of the window's screen (2 on a Retina display, 1 on most external ones)
 id g_nswin_ext(void){ return g_nswin; }
 extern void* objc_autoreleasePoolPush(void);
 static id ocls(const char*n){ return (id)objc_getClass(n); }
@@ -4274,6 +4299,11 @@ static CGLContextObj cocoa_make_gl_window(int w,int h){
     id title = ((id(*)(id,SEL,const char*))objc_msgSend)(ocls("NSString"),osel("stringWithUTF8String:"),"Project Reclaimer (Mac, Wine-free)");
     ((void(*)(id,SEL,id))objc_msgSend)(win,osel("setTitle:"),title);
     id view = om0(win,"contentView");
+    // the GL surface at the screen's full pixel resolution, said explicitly (AppKit's default for this binary is the same): its size
+    // is then the view's bounds converted to backing pixels (cocoa_pump), on a Retina screen 2x the points. The window blit used
+    // the size in POINTS, so on a Retina screen the picture filled the bottom-left quarter (M1 MacBook, 2026-10-18; the external
+    // 1x monitor here never showed it). PELOAD_RETINA=0: a points-sized surface the compositor scales up (softer).
+    { const char*rt=getenv("PELOAD_RETINA"); ((void(*)(id,SEL,signed char))objc_msgSend)(view,osel("setWantsBestResolutionOpenGLSurface:"),(rt&&rt[0]=='0')?0:1); }
     ((void(*)(id,SEL,id))objc_msgSend)(g_nsctx=ctx,osel("setView:"),view); // setView wants main thread; fine on the GL thread here
     ((void(*)(id,SEL,id))objc_msgSend)(win,osel("center"),(id)0);
     // mouse-moved events (with deltas) are only delivered to windows that ask for them (keyboard/mouse input)
@@ -5811,6 +5841,51 @@ static void d3dgl_bind_res(unsigned prog,const int*tloc,const signed char*tt,int
         unit++; }
     if(units_set) *units_set=1;   // the unit assignment is fixed per program: sampler uniforms set once
 }
+// ---- The client's menu-scene grading compute shader as a GL draw (backlog 67) ---------------------------------------------------
+// numthreads(8,8,1); scene = t0 (the menu's back buffer copy), output_scene = u0 (RWTexture2D<float4>); per pixel inside the scene:
+// y = dot(rgb, k0); out = (y*k1 + k6*y^4) * k7, alpha 1. Run as one fullscreen triangle into u0's texture (made a render target, so
+// the client's readbacks and later sampling take the GL copy). Point-to-point (texelFetch at gl_FragCoord), so both textures only
+// need the same row order, which they have (both GL render targets). Every GL cache is reset afterwards.
+static int rtgrade_dispatch(D3DObj*cs,uint32_t a,uint32_t b){
+    D3DObj*sv=g_cs.srv[0], *src=cs_resof(sv), *dst=cs_resof(g_cs.uav[0]); const float*k=(const float*)(cs->bc+44);
+    if(!src || !dst || src->kind!=2 || dst->kind!=2 || !src->w || !dst->w) return 0;
+    static unsigned prog, vao; static int lk0, lk1, lk2, lsz, ls, bad;
+    if(bad) return 0;
+    if(!prog){
+        const char*vs="#version 410 core\nvoid main(){ vec2 p=vec2(float((gl_VertexID<<1)&2), float(gl_VertexID&2)); gl_Position=vec4(p*2.0-1.0,0.0,1.0); }\n";
+        const char*fs="#version 410 core\nuniform sampler2D s; uniform vec4 k0, k1, k2, sz; out vec4 o;\n"
+            "void main(){ ivec2 p=ivec2(gl_FragCoord.xy); if(p.x>=int(sz.x) || p.y>=int(sz.y)) discard;\n"
+            " vec3 c=texelFetch(s,p,0).rgb; float y=dot(c,k0.xyz); vec3 col=y*k1.xyz + k2.x*y*y*y*y; o=vec4(col*k2.y,1.0); }\n";
+        unsigned v=G.CreateShader(0x8B31), f=G.CreateShader(0x8B30); int ok1=0, ok2=0, ok3=0;
+        G.ShaderSource(v,1,&vs,0); G.CompileShader(v); G.GetShaderiv(v,0x8B81,&ok1);
+        G.ShaderSource(f,1,&fs,0); G.CompileShader(f); G.GetShaderiv(f,0x8B81,&ok2);
+        unsigned pr=G.CreateProgram(); G.AttachShader(pr,v); G.AttachShader(pr,f); G.LinkProgram(pr); G.GetProgramiv(pr,0x8B82,&ok3);
+        G.DeleteShader(v); G.DeleteShader(f);
+        if(!ok1||!ok2||!ok3){ bad=1; char m[120]; int n=snprintf(m,sizeof m,"  [rtgrade] GL program failed (vs %d fs %d link %d): grading off\n",ok1,ok2,ok3); (void)!write(2,m,n); return 0; }
+        prog=pr; lk0=G.GetUniformLocation(pr,"k0"); lk1=G.GetUniformLocation(pr,"k1"); lk2=G.GetUniformLocation(pr,"k2"); lsz=G.GetUniformLocation(pr,"sz"); ls=G.GetUniformLocation(pr,"s");
+        G.GenVertexArrays(1,&vao); }
+    // the threads the dispatch covers, inside the target
+    uint32_t w=a*8, h=b*8; if(w>dst->w) w=dst->w; if(h>dst->h) h=dst->h; if(w>4096) w=4096; if(h>4096) h=4096;
+    if(!src->glfbo && (!src->gltex || src->gl_dirty || !src->gl_uploaded)){ gs_active(0); d3dgl_ensure_tex(src); }
+    if(!src->gltex) return 0;
+    d3dgl_ensure_rt(dst); if(!dst->glfbo) return 0;
+    gl_bindfbo_any(GLE_FBO,dst->glfbo);
+    gs_viewport(0,0,(int)w,(int)h);
+    gs_cap(0x0BE2,0); gs_cap(0x0B71,0); gs_cap(0x0B90,0); gs_cap(0x0C11,0); gs_cap(0x0B44,0); gs_cap(0x8DB9,0); gs_cap(0x8C89,0); gs_colormask(1,1,1,1);
+    gs_useprog(prog);
+    float k0[4]={k[0],k[1],k[2],0}, k1[4]={k[3],k[4],k[5],0}, k2[4]={k[6],k[7],1,0}, sz[4]={(float)src->w,(float)src->h,0,0};
+    G.ProgramUniform4fv(prog,lk0,1,k0); G.ProgramUniform4fv(prog,lk1,1,k1); G.ProgramUniform4fv(prog,lk2,1,k2); G.ProgramUniform4fv(prog,lsz,1,sz); G.ProgramUniform1i(prog,ls,0);
+    gs_active(0); G.BindTexture(GLE_TEX2D,src->gltex); if(G.BindSampler) G.BindSampler(0,0);
+    int raw=src->glsrgb && !dxgi_is_srgb(sv&&sv->vkind?sv->vfmt:src->fmt);   // a UNORM view of sRGB storage reads the stored bytes
+    if(raw) G.TexParameteri(GLE_TEX2D,0x8A48,0x8A4A);
+    G.BindVertexArray(vao); G.DrawArrays(4,0,3);
+    if(raw) G.TexParameteri(GLE_TEX2D,0x8A48,0x8A49);
+    dst->gl_dirty=0; dst->ver++;
+    // everything above bypassed the bind caches (uniform buffers and vertex attributes untouched: own empty VAO; the draw path
+    // binds its VAO every draw)
+    TEXCACHE_INVALIDATE(); g_active_unit=~0u; g_gl_fbo=~0u; gs_invalidate(); g_glc_gen++;
+    static int logged; if(!logged){ logged=1; char m[200]; int n=snprintf(m,sizeof m,"  [rtgrade] grading %ux%u (scene %ux%u f%u%s -> %ux%u f%u)\n",w,h,src->w,src->h,src->fmt,raw?" raw":"",dst->w,dst->h,dst->fmt); (void)!write(2,m,n); }
+    return 1; }
 static void d3dgl_bind_texs(D3DObj*sh){
     if(!sh) return; d3dgl_bind_texs_p(sh->glprog,sh->gl_tloc,0,0);
 }
@@ -7923,10 +7998,14 @@ static void cocoa_pump(void){ if(!g_nsapp) return;
     if(g_nswin){ unsigned long os=((unsigned long(*)(id,SEL))objc_msgSend)(g_nswin,osel("occlusionState")); g_win_visible=(os&2UL)?1:0; }
     // window resized / full screen: resize the GL drawable (main thread) and record the new size for present
     if(g_nswin && g_nsctx){ id view=om0(g_nswin,"contentView"); NSRect_ b={0,0,0,0}; if(view) ((void(*)(NSRect_*,id,SEL))objc_msgSend_stret)(&b,view,osel("bounds"));   // x86_64: >16-byte struct returns need _stret
-        int pw=(int)b.w, ph=(int)b.h; if(pw>0 && ph>0 && (pw!=g_win_pw || ph!=g_win_ph)){
+        // the drawable in pixels: the bounds converted to the backing store (Retina 2x; follows the window to another screen)
+        NSRect_ bb=b; static int pts=-1; if(pts<0){ const char*rt=getenv("PELOAD_RETINA"); pts=(rt&&rt[0]=='0')?1:0; }
+        if(view && !pts) ((void(*)(NSRect_*,id,SEL,NSRect_))objc_msgSend_stret)(&bb,view,osel("convertRectToBacking:"),b);
+        int pw=(int)(bb.w+0.5), ph=(int)(bb.h+0.5); if(pw>0 && ph>0 && (pw!=g_win_pw || ph!=g_win_ph)){
             CGLContextObj c=(CGLContextObj)((void*(*)(id,SEL))objc_msgSend)(g_nsctx,osel("CGLContextObj"));
             if(c) CGLLockContext(c); om0(g_nsctx,"update"); if(c) CGLUnlockContext(c);
-            g_win_pw=pw; g_win_ph=ph; } } }
+            g_win_scale=(b.w>0)?(float)(bb.w/b.w):1.0f; g_win_pw=pw; g_win_ph=ph;
+            static int nlog; if(nlog++<8){ char m[120]; int k=snprintf(m,sizeof m,"  [cocoa] window %dx%d points = %dx%d pixels (scale %.2g)\n",(int)b.w,(int)b.h,pw,ph,(double)g_win_scale); (void)!write(2,m,k); } } } }
 static int    MSABI i_ChoosePixelFormat(void*hdc,const void*pfd){ (void)hdc;(void)pfd; return 1; }
 static int    MSABI i_SetPixelFormat(void*hdc,int fmt,const void*pfd){ (void)hdc;(void)fmt;(void)pfd; return 1; }
 static int    MSABI i_GetPixelFormat(void*hdc){ (void)hdc; return 1; }

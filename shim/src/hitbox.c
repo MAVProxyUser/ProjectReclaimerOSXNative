@@ -537,7 +537,7 @@ static const char* hb_glyph(char c){
     default: return ""; } }
 static float g_hb_px, g_hb_py;   // NDC size of one font-grid unit
 static void hb_text_size(int px){   // label glyphs px window pixels tall (each feature its own: g_hbs[f].px)
-    if(px<4) px=4; if(px>60) px=60; float W=(float)(g_win_pw>0?g_win_pw:1920), H=(float)(g_win_ph>0?g_win_ph:1080), u=px/6.0f; g_hb_px=2.0f*u/W; g_hb_py=2.0f*u/H; }
+    if(px<4) px=4; if(px>60) px=60; float sc=g_win_scale>0?g_win_scale:1.0f, W=(float)(g_win_pw>0?g_win_pw:1920)/sc, H=(float)(g_win_ph>0?g_win_ph:1080)/sc, u=px/6.0f; g_hb_px=2.0f*u/W; g_hb_py=2.0f*u/H; }   // label px in points (W, H: the window in points)
 static int hb_text(float*verts,int nv,int cap,float x,float y,const char*s,const float*col){   // x,y = NDC of the text's top-left
     for(; *s; s++, x+=5*g_hb_px){ char ch=*s; if(ch>='a'&&ch<='z') ch-=32; const char*g=hb_glyph(ch);
         for(; g[0]&&g[1]&&g[2]&&g[3] && nv+2<=cap; g+=4){ float*d=verts+nv*5;

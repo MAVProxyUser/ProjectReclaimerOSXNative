@@ -732,6 +732,16 @@ oracle. Fixes below apply to both unless noted.
   map's textureSize, so a stale register became the shadow texel size and the pass darkened lit pixels 0.051 -> 0.004
   (backlog 61). How: ivec4(max/min(uvec4(a), uvec4(b))). The CPU compute interpreter already had them. (10-18)
 
+- **The client's menu-scene grading compute shader runs** (backlog 67) — `rtgrade_parse` (D3DCompile), `rtgrade_dispatch`
+  (ctxi_Dispatch). Why: D3DCompile is a stub, so the one shader the CLIENT compiles (src/menu_scene.rs: the menu's back
+  buffer -> luminance -> blue tones, Halo 3's own menu look) was a no-op and the main menu showed the plain sunset colours.
+  The CPU compute path can't run it (a 1920x1080 typed-UAV texture every menu frame, from a GPU-only render target). How:
+  D3DCompile recognises its source and reads the client's constants by structure (y = dot(rgb, A,B,C); y*(D,E,F) + G*y^4;
+  x H) into a DXBC with one marker chunk "RCLG"; a Dispatch of it is one fullscreen GL draw into u0's texture (made a render
+  target, so the client's one-pixel readback and later sampling take the GL copy), texelFetch of t0 (stored bytes of an sRGB
+  store read through a UNORM view), every GL cache reset afterwards. Checked: the menu turns blue-moonlit as on Windows,
+  menu 380-385 engine fps (390 before). `PELOAD_NO_RTGRADE=1` = the old placeholder. (10-18)
+
 ## 12. D3D11->GL: textures
 
 - **TYPELESS / SRGB 8-bit formats** — `d3dgl_tex_upload_fmt`. Why: the loading-screen composite is format 90
@@ -832,6 +842,14 @@ oracle. Fixes below apply to both unless noted.
 - **GPU copies from MRT-only render targets and copy destinations** — `gpu_copy_src_ok` / `d3dgl_gpu_copy`, `ctxi_CopySubresourceRegion`, peload.c. Why: a GPU-side copy needed the source's own FBO; a target only ever drawn as part of an MRT framebuffer, or a texture whose content came from a GPU copy (`copydst`), has none, so copies from it fell back to its CPU copy -- zeros (halo3 reads one pixel of such a 1920x1080 RGBA8 texture back every frame). How: such a source gets its own FBO on demand (`d3dgl_fbo_for`, which keeps the existing storage) and takes the GPU copy + small-readback path. Old: PELOAD_D3DGL_NOMRTCOPY. Diagnostic: PELOAD_TRACE_SMALLRB (copies / maps of <= 4x4 textures with their bytes). (10-18)
 
 ## 14. GL context, present, GL thunks, GL helper
+
+- **Retina screens: the picture filled the bottom-left quarter** — `cocoa_make_gl_window`, `cocoa_pump`. Why (M1 MacBook,
+  2026-10-18): the window's GL surface is at the screen's pixel resolution (2x on a Retina screen), but its size was taken
+  from the view's bounds in POINTS, so every window blit set a viewport a quarter of the surface. This Mac's 1x external
+  monitor never showed it. How: the surface asks for full resolution explicitly (setWantsBestResolutionOpenGLSurface:YES,
+  AppKit's default here anyway), and its size is the bounds converted to backing pixels (convertRectToBacking:), rechecked
+  every pump (a window moved to another screen follows); g_win_scale = pixels per point (`[cocoa] window ... (scale N)`).
+  Overlay label sizes stay in points. `PELOAD_RETINA=0` = a points-sized surface the compositor scales up. (10-18)
 
 - **Win64 -> SysV GL thunk** — `make_gl_thunk`. Why: macOS GL is SysV (rsi/rdi volatile), the guest calls Win64 (rsi/rdi
   callee-saved): a GL call clobbered rsi holding glow's Context -> crash. How: wrap every GL pointer handed to the guest
@@ -1272,6 +1290,17 @@ Numbers are from the commit messages; PERF-PLAN.md has the measurements. Compare
   polygon-shape builder (backlog 18). Lessons: open only the faulting page (one hot reader hid every other one), and
   treat any fault in the watched range as the tool's (another thread can fault before the page reopens). (10-18)
 
+- **Machine profile: decisions per Mac** (`shim/tools/machine.sh`, sourced by play.sh) — Why (user, 2026-10-18: "detect m1 vs m4
+  and make code decisions accordingly"; M1 menu 78 fps vs ~390 on the M4 Max): chip, performance / efficiency cores, GPU
+  cores (ioreg gpu-core-count; tier base <= 10, pro <= 20, max), memory. Decisions: particle workers = performance cores - 2
+  in 2..8 (it was 4..8: 4 on an M1's 4 performance cores, competing with the main thread); a base-tier GPU's profile that
+  never chose a preset (no "quality" in settings.json) gets the client's own Medium preset (decals High, the rest Medium;
+  backup settings.json.before-medium; python3 only when it won't open the Command Line Tools dialog), never over a chosen
+  one (RECLAIMER_KEEP_QUALITY=1 = never); a note at 8 GB. One `[machine]` line on the terminal and at the top of
+  /tmp/reclaimer_play.log. The display scale is the loader's (section 14), read live. Checked: this M4 Max -> 8 workers,
+  no change; a stand-in M1 (fake sysctl / ioreg) on a profile copy -> 2 workers, Medium written once, kept on the next run;
+  the client reads it ("Graphics quality: one view Medium"). (10-18)
+
 ## 21. Superseded workarounds (kept for history; most switches still exist)
 
 - **Separable GL programs** -> monolithic programs (da262fb). `PELOAD_D3DGL_SEP=1`.
@@ -1311,9 +1340,10 @@ Numbers are from the commit messages; PERF-PLAN.md has the measurements. Compare
   restarted servers in a loop) -- don't use it there; `PELOAD_STDERR_TEE` instead.
 - **CreateProcessW applies the child's environment with setenv() in the loader itself** (SteamAppId stays set after the
   first Workshop helper; GUESSED harmless; workshop-helper.md section 6).
-- **Runtime-compiled shaders are no-ops** — D3DCompile returns a placeholder DXBC without code for halo3's 5 HLSL shaders
-  (video playback CopyToScreen / YUVToRGB + VS, a night-vision-style luminance CS); backlog 67. `PELOAD_REFUSE_EMPTY_SHADER=1`
-  refuses such blobs with E_INVALIDARG as D3D11 would.
+- **halo3's 4 Bink video shaders stay no-ops** (CopyToScreen / YUVToRGB PS + their VS, compiled from HLSL at start):
+  nothing plays them -- Halo 3 ships no .bik files (MCC's .bk2 movies belong to MCC's own shell) and the client refuses mod
+  movies ("Bink import slots differ"). The 5th runtime shader (the client's menu grading) runs since 10-18 (section 11).
+  `PELOAD_REFUSE_EMPTY_SHADER=1` refuses code-less blobs with E_INVALIDARG as D3D11 would.
 - **First join right after a dedicated server starts** can fail its handshake; a retry works.
 - 61 (Hugegrass
   renders nearly black wherever its own lighting matters -- emissive surfaces, the sky and the HUD are fine; not a regression:
