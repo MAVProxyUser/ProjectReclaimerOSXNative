@@ -71,6 +71,29 @@ static void st_feed_json(StBuf*s,uint32_t since){
         if(e->a[0]){ sb_put(s,",\"a\":"); sb_str(s,e->a); } if(e->b[0]){ sb_put(s,",\"b\":"); sb_str(s,e->b); } if(e->how[0]){ sb_put(s,",\"how\":"); sb_str(s,e->how); }
         if(e->ta>=0) sb_put(s,",\"ta\":%d",e->ta); if(e->tb>=0) sb_put(s,",\"tb\":%d",e->tb); if(e->flags&1) sb_put(s,",\"estimated\":true"); if(e->flags&2) sb_put(s,",\"mine\":true"); if(e->flags&4) sb_put(s,",\"betrayal\":true"); if(e->verb[0]){ sb_put(s,",\"verb\":"); sb_str(s,e->verb); } sb_put(s,"}"); }
     sb_put(s,"]}"); pthread_mutex_unlock(&g_ev_mx); }
+// Auto-vote (2026-10-18; static RE of the 0.9.18 client, shim/docs/halo3-event-feed.md "Votes"). Player-called votes (kick,
+// end round / game, shuffle) are answered with the client's own keys, F5 = yes / F6 = no (keybindings vote_yes / vote_no:
+// WM_KEYDOWN to the game window -> exe+0x3bec80 -> answer_vote exe+0x87f840; one answer per vote, only while the vote status
+// is < 2 s old, only in the menu runtime): PELOAD_AUTOVOTE=yes|no (default off) presses 0.5 s after the server's "... called
+// a vote to ..." line, and again (3 at most) until the client logs "Voted yes|no in vote N.". The lobby's map ballot ("VOTE FOR
+// THE NEXT GAME", playlist servers) has no key: PELOAD_AUTOVOTE_MAP=1|2|3|none clicks that card 1, 2 and 3 s after "Menu page:
+// Lobby" (client-area coordinates at 1280x720 from the layout code: cards at y 268 / 348 / 428, "none of the above" 484).
+// Both switchable on the stats page: POST /control?do=autovote&calls=yes|no|off and/or &map=1|2|3|none|off.
+static volatile int g_av_calls=-1, g_av_map=-2;   // calls: 0 off, 1 yes, 2 no; map: -1 off, 0..2 a card, 3 none of the above
+static volatile double g_av_due; static int g_av_tries;
+static void st_av_init(void){
+    if(g_av_calls<0){ const char*e=getenv("PELOAD_AUTOVOTE"); g_av_calls=!e?0:!strcmp(e,"yes")?1:!strcmp(e,"no")?2:0; }
+    if(g_av_map==-2){ const char*e=getenv("PELOAD_AUTOVOTE_MAP"); int v=e?atoi(e):0; g_av_map=!e?-1:!strcmp(e,"none")?3:(v>=1&&v<=3)?v-1:-1; } }
+extern void wi_steps_async(const char*e);
+static void st_av_called(void){ st_av_init(); if(!g_av_calls) return; g_av_tries=0; g_av_due=mono_s()+0.5; }
+static void st_av_lobby(void){ st_av_init(); if(g_av_map<0) return; static const int y[4]={268,348,428,484}; int c=g_av_map; char st[96];
+    snprintf(st,sizeof st,"s:1;640,%d;s:1;640,%d;s:1;640,%d",y[c],y[c],y[c]); wi_steps_async(st);
+    char m[100]; int k=snprintf(m,sizeof m,"  [autovote] map ballot: clicking %s\n",c==3?"none of the above":c==0?"card 1":c==1?"card 2":"card 3"); (void)!write(2,m,k); }
+static void st_av_tick(double now){   // stats thread, every snapshot (100 ms)
+    double due=g_av_due; if(!due || now<due) return;
+    if(!g_av_calls || g_av_tries>=3){ g_av_due=0; return; }
+    g_av_tries++; g_av_due=now+1.5; wi_steps_async(g_av_calls==1?"k:60":"k:61");   // macOS key codes: F5 0x60, F6 0x61
+    char m[80]; int k=snprintf(m,sizeof m,"  [autovote] vote: pressing %s (try %d)\n",g_av_calls==1?"F5 (yes)":"F6 (no)",g_av_tries); (void)!write(2,m,k); }
 // One line of the client's log ("HH:MM:SS.mmm <text>"): the notices it also shows its player.
 // PELOAD_FEED_MATCH=<text>[,<text>...] adds lines containing any of those texts (kind "log").
 static void st_feed_line(const char*ln){
@@ -81,7 +104,10 @@ static void st_feed_line(const char*ln){
         else if(rl>16 && !strcmp(r+rl-16," left the server")){ snprintf(nm,sizeof nm,"%.*s",(int)(rl-16),r); st_event("leave",nm,0,0,-1,-1,0,"%s left the server",nm); }
         else st_event("server",0,0,0,-1,-1,0,"%s",r);
         return; }
-    if(strstr(p," called a vote to ") || !strncmp(p,"Vote ",5)){ st_event("vote",0,0,0,-1,-1,0,"%s",p); return; }
+    if(strstr(p," called a vote to ") || !strncmp(p,"Vote ",5) || !strncmp(p,"Called a vote to ",17) || !strncmp(p,"Voted ",6)){
+        if(!strncmp(p,"Voted ",6)) g_av_due=0; else if(strstr(p," called a vote to ")) st_av_called();
+        st_event("vote",0,0,0,-1,-1,0,"%s",p); return; }
+    if(!strncmp(p,"Menu page: Lobby",16)){ st_av_lobby(); return; }
     static const char*const srv[]={"Team shuffle:","Teams have been shuffled","Teams shuffled","You were kicked","Host roster lost","A player still joining",
         "Moderation:","The kick-vote target"};
     for(size_t i=0;i<sizeof srv/sizeof*srv;i++) if(!strncmp(p,srv[i],strlen(srv[i]))){ st_event("server",0,0,0,-1,-1,0,"%s",p); return; }
@@ -299,7 +325,8 @@ static void __attribute__((ms_abi)) st_on_chat(void*state,const uint8_t*line,uin
         if(!st_rstr((uint64_t)(uintptr_t)line,a,sizeof a) || !st_rstr((uint64_t)(uintptr_t)line+0x18,txt,sizeof txt)) return;
         if(g_fx_on) hb_read((uint64_t)(uintptr_t)line+0x30,&t_st_chat_id,8);   // the sender's peer id, for the forensic archive
         st_event("chat",a,0,ch==1?"team":ch==2?"nearby":"",-1,-1,fl,"%s",txt); t_st_chat_id=0; }
-    else if((uint64_t)q0==0x8000000000000001ull){ if(st_rstr((uint64_t)(uintptr_t)line+8,txt,sizeof txt)) st_event("chat",0,0,"server",-1,-1,fl,"%s",txt); }
+    else if((uint64_t)q0==0x8000000000000001ull){ if(st_rstr((uint64_t)(uintptr_t)line+8,txt,sizeof txt)){ st_event("chat",0,0,"server",-1,-1,fl,"%s",txt);
+            if(strstr(txt," called a vote to ")) st_av_called(); } }
     else if((uint64_t)q0==0x8000000000000000ull){ uint8_t k=0xFF; hb_read((uint64_t)(uintptr_t)line+8,&k,1);   // the client's own wording
         static const char*const nt[5]={"You are sending messages too quickly.","Team chat is only available in team games.",
             "Proximity chat is only available while alive in a game.","The host has turned text chat off.","Your message could not be delivered."};
@@ -569,6 +596,10 @@ static int st_control(const char*act,const char*qs){
         return st_voice_request(id,!strcmp(act,"mute")); }
     if(!strcmp(act,"textup") || !strcmp(act,"textdown")){ hbf_init(); int v=g_hb_text_px>0?g_hb_text_px:7; v+=!strcmp(act,"textup")?1:-1; if(v<4) v=4; if(v>60) v=60; g_hb_text_px=v; hbs_sync();   // every feature's labels
         char m[64]; int k=snprintf(m,sizeof m,"  [stats] page: label text %d px\n",v); (void)!write(2,m,k); return 1; }
+    if(!strcmp(act,"autovote")){ st_av_init(); const char*v; int ok=0;
+        if((v=strstr(qs,"calls="))){ v+=6; if(!strncmp(v,"yes",3)) g_av_calls=1; else if(!strncmp(v,"no",2)) g_av_calls=2; else if(!strncmp(v,"off",3)) g_av_calls=0; else return 0; ok=1; }
+        if((v=strstr(qs,"map="))){ v+=4; if(!strncmp(v,"none",4)) g_av_map=3; else if(!strncmp(v,"off",3)) g_av_map=-1; else if(*v>='1'&&*v<='3') g_av_map=*v-'1'; else return 0; ok=1; }
+        k=snprintf(m,sizeof m,"  [stats] page: autovote calls %s, map %d\n",g_av_calls==1?"yes":g_av_calls==2?"no":"off",g_av_map); (void)!write(2,m,k); return ok; }
     if(!strcmp(act,"spar")){ const char*v=strstr(qs,"on="); if(!v) return 0; extern int hb_spar_available(void); if(!hb_spar_available()) return 0;   // the bot only
         extern volatile int g_spar_on; g_spar_on=atoi(v+3)?1:0;   // sparring partner aim
         char m[64]; int k=snprintf(m,sizeof m,"  [spar] page: sparring aim %s\n",g_spar_on?"on":"off"); (void)!write(2,m,k); return 1; }
@@ -793,6 +824,8 @@ static void st_snapshot(StBuf*s){
     sb_put(s,"{\"time\":%.2f,\"in_match\":%s,\"inst\":%d",g_gameplay_t0?now-g_gameplay_t0:0.0,g_gameplay_t0?"true":"false",(int)getpid());   // inst: a new game -> open pages reload
     { pthread_mutex_lock(&g_ev_mx); uint32_t fs=g_ev_seq; pthread_mutex_unlock(&g_ev_mx); sb_put(s,",\"feed_seq\":%u",fs); }
     { char rj[1024]; rec_status_json(rj,sizeof rj,!win_hidden()); sb_put(s,",\"rec\":%s",rj); }   // clip recording (rec.m)
+    { st_av_init(); st_av_tick(now); static const char*const mn[5]={"off","1","2","3","none"};
+      sb_put(s,",\"autovote\":{\"calls\":\"%s\",\"map\":\"%s\"}",g_av_calls==1?"yes":g_av_calls==2?"no":"off",mn[g_av_map+1]); }
     char m[64]="";
     { char mp[1024]=""; hb_current_map(mp,sizeof mp);   // the map being played (halo3/maps or a Workshop mod's folder)
       const char*b=strrchr(mp,'/'); b=b?b+1:mp; snprintf(m,sizeof m,"%s",b); char*dot=strrchr(m,'.'); if(dot)*dot=0; sb_put(s,",\"map\":"); sb_str(s,m);

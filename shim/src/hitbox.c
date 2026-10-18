@@ -950,14 +950,22 @@ static void hbz_gpu(const float*vp){
         G.BindBuffer(0x8892,g_hbz_vbo); G.BufferData(0x8892,(long)n*7*4,v,0x88E4/*STATIC_DRAW*/); free(v);
         g_hbz_builtmask=show; snprintf(g_hbz_builtpath,sizeof g_hbz_builtpath,"%s",mp); }
     if(!g_hbz_ntri && !g_hbz_nline) return;
-    // the scene depth, as a texture (refreshed when the readback has a new copy)
-    int hasdep=0; float q[16]; unsigned s0=g_hbv_seq;
-    if(g_hbv_ok && !(s0&1)){ memcpy(q,g_hbv_vp,64);
-        if(s0!=g_hbz_dseq){ TEXCACHE_INVALIDATE(); G.ActiveTexture(GLE_TEX0+3); G.BindTexture(GLE_TEX2D,g_hbz_dtex);
-            G.TexImage2D(GLE_TEX2D,0,0x822E/*R32F*/,HBV_W,HBV_H,0,0x1903/*RED*/,0x1406/*FLOAT*/,g_hbv_depth);
-            G.TexParameteri(GLE_TEX2D,0x2801,0x2600); G.TexParameteri(GLE_TEX2D,0x2800,0x2600); G.TexParameteri(GLE_TEX2D,0x2802,0x812F); G.TexParameteri(GLE_TEX2D,0x2803,0x812F);
-            G.ActiveTexture(GLE_TEX0); g_hbz_dseq=s0; }
-        hasdep=g_hbv_seq==s0; }
+    // the scene depth, as a texture (refreshed when the readback has a new copy). Always drawn against the LAST complete
+    // copy and its camera: a frame that met the readback mid-update (sequence odd or changed) used to draw every zone surface
+    // unoccluded for that frame -- the big push-back ceilings flashed over the view at random (user, 2026-10-18). No copy
+    // yet = no zones (PELOAD_HB_ZONES_XRAY draws without depth).
+    static float zq[16]; static int zqok; float q[16]; unsigned s0=g_hbv_seq;
+    if(g_hbz_dseq==~0u) zqok=0;   // new context / texture: nothing uploaded yet
+    if(g_hbv_ok && !(s0&1) && s0!=g_hbz_dseq){ memcpy(q,g_hbv_vp,64);
+        TEXCACHE_INVALIDATE(); G.ActiveTexture(GLE_TEX0+3); G.BindTexture(GLE_TEX2D,g_hbz_dtex);
+        G.TexImage2D(GLE_TEX2D,0,0x822E/*R32F*/,HBV_W,HBV_H,0,0x1903/*RED*/,0x1406/*FLOAT*/,g_hbv_depth);
+        G.TexParameteri(GLE_TEX2D,0x2801,0x2600); G.TexParameteri(GLE_TEX2D,0x2800,0x2600); G.TexParameteri(GLE_TEX2D,0x2802,0x812F); G.TexParameteri(GLE_TEX2D,0x2803,0x812F);
+        G.ActiveTexture(GLE_TEX0);
+        if(g_hbv_seq==s0){ g_hbz_dseq=s0; memcpy(zq,q,64); zqok=1; }   // a complete copy: its camera goes with it
+        else if(zqok){ G.ActiveTexture(GLE_TEX0+3); G.BindTexture(GLE_TEX2D,g_hbz_dtex); G.ActiveTexture(GLE_TEX0); g_hbz_dseq=~1u; }   // torn: next frame again
+    }
+    if(!zqok) return;
+    int hasdep=1; memcpy(q,zq,64);
     G.Disable(0x0B71); G.Disable(0x0C11); G.Enable(0x0BE2); G.BlendFunc(0x0302/*SRC_ALPHA*/,0x0303/*ONE_MINUS_SRC_ALPHA*/);
     G.UseProgram(g_hbz_prog);
     G.ProgramUniform4fv(g_hbz_prog,g_hbz_u[0],1,vp); G.ProgramUniform4fv(g_hbz_prog,g_hbz_u[1],1,vp+4); G.ProgramUniform4fv(g_hbz_prog,g_hbz_u[2],1,vp+12);

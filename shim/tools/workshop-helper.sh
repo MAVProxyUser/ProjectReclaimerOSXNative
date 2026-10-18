@@ -30,11 +30,25 @@ if [ -z "$TOTAL" ]; then signin_err; err "DepotDownloader could not read Worksho
 [ "$TOTAL" -gt 0 ] || TOTAL=1
 printf '{"Progress":{"done":0,"total":%s}}\n' "$TOTAL"
 
-# 2. the download into the client's Workshop folder; DepotDownloader prints " 12.34% <file>" (of the whole item)
+# 2. the download into the client's Workshop folder. DepotDownloader prints " 12.34% <file>" (of the whole item) only when a
+# FILE is done, and checks files it already has without a word -- but the client gives up when "done" doesn't grow for
+# 45 s ("Steam Workshop download timed out", shim/docs/workshop-helper.md), which a single 1-2 GB map took (Ultimate Forge,
+# 2026-10-18). So every 2 s: the larger of its last percentage and the bytes on disk in the item folder (chunks land in
+# preallocated sparse files) up to 99%, and at least one byte more than last time while DepotDownloader runs (never the
+# total before it finished).
 mkdir -p "$DIR" || err "Cannot create $DIR"
-"$DD" -app 976730 -pubfile "$ID" -username "$U" -remember-password -dir "$DIR" </dev/null 2>&1 | tee -a "$LOG" | tr '\r' '\n' |
-  awk -v t="$TOTAL" 'match($0,/^[ \t]*[0-9]+(\.[0-9]+)?%/){ p=substr($0,RSTART,RLENGTH); gsub(/[ \t%]/,"",p); d=p*t/100;
-      if(d>last+t/400 || (p+0>=100 && !full)){ if(p+0>=100) full=1; printf "{\"Progress\":{\"done\":%.0f,\"total\":%.0f}}\n", d, t; fflush(); last=d } }'
+"$DD" -app 976730 -pubfile "$ID" -username "$U" -remember-password -dir "$DIR" </dev/null >>"$LOG" 2>&1 &
+DDP=$!; trap 'kill $DDP 2>/dev/null; rm -rf "$T"' EXIT; LAST=0
+while kill -0 $DDP 2>/dev/null; do
+  sleep 2
+  PCT=$(tr '\r' '\n' < "$LOG" | grep -Eo '^[[:space:]]*[0-9]+(\.[0-9]+)?%' | tail -1 | tr -d ' \t%')
+  D1=$(awk -v p="${PCT:-0}" -v t="$TOTAL" 'BEGIN{ printf "%.0f", p*t/100 }')
+  D2=$(( $(du -sk "$DIR" 2>/dev/null | cut -f1 | head -1) * 1024 ))
+  D=$(( D1 > D2 ? D1 : D2 )); CAP=$(( TOTAL - TOTAL / 100 )); [ "$D" -gt "$CAP" ] && D=$CAP   # measured: at most 99%
+  [ "$D" -le "$LAST" ] && D=$((LAST + 1)); [ "$D" -ge "$TOTAL" ] && D=$((TOTAL - 1))           # the last 1%: the heartbeat
+  [ "$D" -gt "$LAST" ] && { printf '{"Progress":{"done":%s,"total":%s}}\n' "$D" "$TOTAL"; LAST=$D; }
+done
+wait $DDP 2>/dev/null
 
 # 3. finished?
 if grep -q 'Total downloaded' "$LOG" && [ -f "$DIR/ModInfo.json" ]; then
