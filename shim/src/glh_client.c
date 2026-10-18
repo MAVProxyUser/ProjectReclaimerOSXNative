@@ -265,10 +265,13 @@ static void glh_pq_publish(unsigned srcfbo,int vw,int vh,int W,int H,unsigned lo
     g_glh_pqwait_s+=mono_s()-t0; }
 // present side (window context current): wait (up to ms) for a frame newer than *seen; bind it as a rectangle texture
 static unsigned g_glh_ptex[3]; static uint32_t g_glh_pios[3]; static int g_glh_pw, g_glh_ph;
-static int glh_pq_acquire(unsigned long*seen,int ms,unsigned*tex,int*w,int*h){
+// stale: when no new frame came within ms, hand back the latest one again (the window is re-presented with the client's
+// layered loading screens on top) -- the present thread used to fall back to the in-process blit then, which in helper mode
+// has no frame of its own: between games the window showed a stale picture upside down at a quarter of its size.
+static int glh_pq_acquire(unsigned long*seen,int ms,unsigned*tex,int*w,int*h,int stale){
     double t0=mono_s(); uint64_t sq;
     while((sq=atomic_load_explicit(&g_glh->pq_seq,memory_order_acquire))==*seen || atomic_load(&g_glh->pq_latest)<0){
-        if(mono_s()-t0>ms/1000.0) return -1; usleep(250); }
+        if(mono_s()-t0>ms/1000.0){ if(!stale || atomic_load(&g_glh->pq_latest)<0) return -1; sq=*seen; break; } usleep(250); }
     int slot=atomic_load(&g_glh->pq_latest); atomic_store(&g_glh->pq_reading,slot);
     if(atomic_load(&g_glh->pq_latest)!=slot){ atomic_store(&g_glh->pq_reading,-1); return -1; }   // replaced meanwhile: next time
     *seen=sq;

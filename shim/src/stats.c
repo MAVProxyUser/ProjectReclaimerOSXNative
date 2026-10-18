@@ -439,6 +439,10 @@ static int st_control(const char*act,const char*qs){
     static const char*const feat[HBF_N]={"hitboxes","tracers","info","items","visible","zones","vehicles"};
     for(int f=0;f<HBF_N;f++) if(!strcmp(act,feat[f])){ __atomic_fetch_xor(&g_hb_toggle,1<<f,__ATOMIC_ACQ_REL);
         k=snprintf(m,sizeof m,"  [stats] page: %s %s\n",feat[f],hb_feat(f)?"on":"off"); (void)!write(2,m,k); return 1; }
+    if(!strcmp(act,"zonetype")){   // one kind of zone on/off: t = its bit (1 kill, 2 safe, 4 acceleration, 8 soft kill, 16 slip)
+        const char*v=strstr(qs,"t="); int b=v?atoi(v+2):0; if(b!=1&&b!=2&&b!=4&&b!=8&&b!=16) return 0;
+        extern volatile int g_hbz_show; extern int hbz_show(void); hbz_show(); __atomic_fetch_xor(&g_hbz_show,b,__ATOMIC_ACQ_REL);
+        k=snprintf(m,sizeof m,"  [stats] page: zone kinds now 0x%x\n",g_hbz_show); (void)!write(2,m,k); return 1; }
     if(!strcmp(act,"teams")){ static const char*const tm[3]={"all","enemies only","friends only"}; __atomic_fetch_add(&g_hb_teamcycle,1,__ATOMIC_ACQ_REL);
         k=snprintf(m,sizeof m,"  [stats] page: showing %s\n",tm[hb_team_mode()]); (void)!write(2,m,k); return 1; }
     if(!strcmp(act,"tpby")){   // move us by a delta (host; or a client with PELOAD_TELEPORT_CLIENT_TEST for the authority test)
@@ -658,6 +662,7 @@ static void st_snapshot(StBuf*s){
       const char*b=strrchr(mp,'/'); b=b?b+1:mp; snprintf(m,sizeof m,"%s",b); char*dot=strrchr(m,'.'); if(dot)*dot=0; sb_put(s,",\"map\":"); sb_str(s,m);
       st_maptop_ensure(mp,m); }
     { static int tp=-1; if(tp<0) tp=getenv("PELOAD_ALLOW_TELEPORT")?1:0; static const char*const tm[3]={"all","enemies","friends"};
+      { extern int hbz_show(void); sb_put(s,",\"zone_show\":%d",hbz_show()); }
       sb_put(s,",\"overlay\":{\"vehicles\":%s,\"zones\":%s,\"hitboxes\":%s,\"tracers\":%s,\"info\":%s,\"items\":%s,\"visible\":%s,\"teams\":\"%s\",\"teleport\":%s,\"host\":%s,\"tp_forward\":%s,\"controls\":%s,\"text_px\":%d,\"spar\":%s,\"spar_aim\":%.1f,\"spar_available\":%s,\"bounds_off\":%s,\"mic\":\"%s\",\"mic_in_use\":%s",
           hb_feat(HBF_VEH)?"true":"false",hb_feat(HBF_ZONES)?"true":"false",hb_feat(HBF_HITBOX)?"true":"false",hb_feat(HBF_TRACER)?"true":"false",hb_feat(HBF_INFO)?"true":"false",hb_feat(HBF_ITEMS)?"true":"false",hb_feat(HBF_VISIBLE)?"true":"false",
           tm[hb_team_mode()],tp?"true":"false",st_is_host()?"true":"false",getenv("PELOAD_TELEPORT_HOST")?"true":"false",st_controls_ok()?"true":"false",g_hb_text_px>0?g_hb_text_px:7,hb_spar_enabled()?"true":"false",g_spar_ok?(double)g_spar_err:-1.0,hb_spar_available()?"true":"false",hb_bounds_off()==1?"true":hb_bounds_off()==0?"false":"null",

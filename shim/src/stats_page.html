@@ -25,6 +25,8 @@ canvas{width:100%;height:auto;display:block;background:#0b0b0b;border-radius:4px
 .ramp{height:8px;width:140px;border-radius:2px;background:linear-gradient(90deg,#1840ff,#18d0ff,#30e060,#f0e040,#ff3020)}
 .col{display:flex;flex-direction:column;gap:16px;min-width:0}
 #det{min-width:0}
+#zchips .zc{background:#222;color:var(--dim);border:1px solid var(--line);border-radius:12px;padding:2px 9px;font:inherit;font-size:12px;cursor:pointer;margin-left:2px}#zchips .zc i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:5px;vertical-align:middle;opacity:.35}#zchips .zc.on{color:#fff;border-color:#666}#zchips .zc.on i{opacity:1}
+body.stale .panel,body.stale #ov{opacity:.45}body.stale #hd{color:#f0a040}
 th .srt{display:inline-block;margin-left:2px;padding:0 2px;cursor:pointer;color:#555;font-size:10px;user-select:none}th .srt:hover{color:#ccc}th .srt.on{color:var(--accent)}
 .sortmode{display:flex;gap:12px;align-items:center;margin:0 0 6px;color:var(--dim)}.sortmode label{cursor:pointer}
 #mapfs{position:fixed;inset:0;z-index:50;background:#0b0b0b;display:none;flex-direction:column;align-items:center;justify-content:center;padding:12px;box-sizing:border-box}
@@ -81,18 +83,25 @@ th .srt{display:inline-block;margin-left:2px;padding:0 2px;cursor:pointer;color:
 <body>
 <h1>Reclaimer live stats</h1><div id="hd">connecting...</div>
 <div id="ov"><span class="lbl">In-game overlay</span>
- <button data-a="hitboxes" title="Collision hitboxes of players and vehicles">Hitboxes<kbd>F2</kbd></button>
- <button data-a="tracers" title="Projectile trails and bullet lines">Tracers<kbd>F3</kbd></button>
- <button data-a="info" title="Shield, health, weapon, grenades, camo and vehicle labels over players">Player info<kbd>F4</kbd></button>
- <button data-a="items" title="Weapons and equipment lying on the map">Items<kbd>F5</kbd></button>
+ <button data-a="hitboxes" title="Collision hitboxes of players and vehicles">Hitboxes</button>
+ <button data-a="tracers" title="Projectile trails and bullet lines">Tracers</button>
+ <button data-a="info" title="Shield, health, weapon, grenades, camo and vehicle labels over players">Player info</button>
+ <button data-a="items" title="Weapons and equipment lying on the map">Items</button>
  <button data-a="vehicles" title="Vehicles in the overlay: their hitboxes and info labels (on by default)">Vehicles</button>
  <button data-a="textdown" title="Smaller label text">Text −</button><span id="tpx" class="lbl"></span><button data-a="textup" title="Larger label text">Text +</button>
- <button data-a="teams" title="Which players the overlay shows">Show: all<kbd>F6</kbd></button>
- <button data-a="visible" title="Hitboxes and labels only for objects you can actually see (not behind walls)">Visible only<kbd>F9</kbd></button>
- <button data-a="zones" title="The map's boundaries in the game view: kill zones red, safe zones green (outside every safe zone kills), soft ceilings pink (soft kill), orange (push back) and yellow (slip surface)">Kill/safe zones<kbd>F10</kbd></button>
- <button data-a="teleport" title="Teleport to the far side of the map (needs PELOAD_ALLOW_TELEPORT; matches you host)">Teleport<kbd>F7</kbd></button>
+ <button data-a="teams" title="Which players the overlay shows">Show: all</button>
+ <button data-a="visible" title="Hitboxes and labels only for objects you can actually see (not behind walls)">Visible only</button>
+ <button data-a="zones" title="The map's boundaries in the game view: kill zones red, safe zones green (outside every safe zone kills), soft ceilings pink (soft kill), orange (push back) and yellow (slip surface)">Kill/safe zones</button>
+ <span id="zchips" style="display:none">
+  <button class="zc" data-z="1" title="Kill zone: a volume where the game kills you (out of bounds)"><i style="background:#ff2626"></i>Kill zones</button>
+  <button class="zc" data-z="2" title="Safe zone: the playable area -- outside every safe zone the game kills you"><i style="background:#33ff59"></i>Safe zones</button>
+  <button class="zc" data-z="8" title="Soft-kill ceiling: go through it and you die after a moment"><i style="background:#ff40a6"></i>Soft-kill ceilings</button>
+  <button class="zc" data-z="4" title="Acceleration ceiling: pushes you back down / away"><i style="background:#ff991a"></i>Push-back ceilings</button>
+  <button class="zc" data-z="16" title="Slip surface: too steep to stand on, you slide off"><i style="background:#ffeb33"></i>Slip surfaces</button>
+ </span>
+ <button data-a="teleport" title="Teleport to the far side of the map (needs PELOAD_ALLOW_TELEPORT; matches you host)">Teleport</button>
  <button data-a="mic" title="Your microphone for the game's voice chat. The client only sends voice while its talk key is held or toggled; Muted sends silence even then. PELOAD_MIC=0 at launch removes the microphone entirely.">Mic</button>
- <button data-a="capture" title="Save the next frame, its depth buffer and the camera position to your home folder">Capture frame<kbd>F8</kbd></button>
+ <button data-a="capture" title="Save the next frame, its depth buffer and the camera position to your home folder">Capture frame</button>
  <span id="expl"></span>
  <label id="spdl" class="lbl" style="display:none" title="Everyone's movement speed in a game you host: the game variant's base player trait, which the host hands to every player">Speed
   <select id="spd"><option value="0">variant</option><option value="1">25%</option><option value="2">50%</option><option value="3">75%</option><option value="4">90%</option><option value="5">100%</option><option value="6">110%</option><option value="7">125%</option><option value="8">150%</option><option value="9">200%</option><option value="10">300%</option></select></label>
@@ -399,7 +408,11 @@ cv.addEventListener('pointerdown',async e=>{ if(!document.getElementById('tph').
     hov.textContent=j.ok?`teleported to ${x.toFixed(1)}, ${y.toFixed(1)}, ${z.toFixed(1)}`:'refused'; }catch(err){ hov.textContent='not connected'; } });
 // ---- overlay controls (the function keys' switches; POST so other sites can't flip them) ----
 const ovNames={all:'all',enemies:'enemies',friends:'friends'};
+document.getElementById('zchips').addEventListener('pointerdown',async e=>{ const b=e.target.closest('.zc'); if(!b||e.button) return; e.preventDefault();
+  try{ await fetch('/control?do=zonetype&t='+b.dataset.z,{method:'POST',headers:{'X-Reclaimer-Control':'1'}}); }catch(err){} });
 function renderOverlay(){ const o=snap&&snap.overlay; if(!o) return;
+  { const zc=document.getElementById('zchips'); zc.style.display=o.zones?'':'none'; const zs=snap.zone_show??31;
+    for(const b of zc.querySelectorAll('.zc')){ b.classList.toggle('on',!!(zs&+b.dataset.z)); b.disabled=!o.controls; } }
   for(const b of document.querySelectorAll('#ov button')){ const a=b.dataset.a; if(b.closest('#expl')) continue;   // (set below)
     if(a==='teams'){ b.firstChild.textContent='Show: '+ovNames[o.teams]; b.classList.toggle('on',o.teams!=='all'); }
     else if(a in o && typeof o[a]==='boolean' && a!=='teleport') b.classList.toggle('on',o[a]);
@@ -422,7 +435,7 @@ function renderOverlay(){ const o=snap&&snap.overlay; if(!o) return;
     sl.style.display=can?'':'none';
     if(can && document.activeElement!==sel){ const r=snap.variant.raw, v=r?parseInt(r.substr((0x134+0x10)*2,2),16):0; if(!isNaN(v)) sel.value=String(v); } }
   document.getElementById('ovmsg').textContent=o.controls?'':'controls are off (PELOAD_STATS_READONLY)'; }
-document.getElementById('ov').addEventListener('click',async e=>{ const b=e.target.closest('button'); if(!b||b.disabled) return;
+document.getElementById('ov').addEventListener('click',async e=>{ const b=e.target.closest('button[data-a]'); if(!b||b.disabled) return;   // (the zone chips post their own)
   const msg=document.getElementById('ovmsg');
   const ov=snap&&snap.overlay, extra=b.dataset.a==='spar'?'&on='+(ov&&ov.spar?0:1):b.dataset.a==='bounds'?'&off='+(ov&&ov.bounds_off?0:1):b.dataset.a==='explore'?'&spot='+encodeURIComponent(b.dataset.spot):b.dataset.a==='mic'?'&on='+(ov&&ov.mic==='muted'?1:0):'';
   try{ const r=await fetch('/control?do='+b.dataset.a+extra,{method:'POST',headers:{'X-Reclaimer-Control':'1'}}); const j=await r.json();
@@ -488,6 +501,11 @@ es.onmessage=m=>{snap=JSON.parse(m.data);
   if(snap.feed_seq!==undefined && snap.feed_seq!==feedSeq) pollFeed();
   document.getElementById('hd').textContent=`${snap.map||'-'}  |  ${snap.in_match?'match time '+fmtT(snap.time):'not in a match'}  |  ${snap.players.length} players, ${snap.vehicles.length} vehicles, ${snap.projectiles.length} projectiles in flight`;
   renderTable(); renderDet(); renderOverlay(); renderRules(); renderConn(); drawMap()};
-es.onerror=()=>{document.getElementById('hd').textContent='disconnected (is the game running with PELOAD_STATS_HTTP?)'};
+// no game serving this port (it ended, or a test client is between runs): keep the last data but grey it out and say so;
+// EventSource keeps retrying, and the first snapshot of a new game reloads the page (inst)
+let lastSnapAt=0;
+es.addEventListener('message',()=>{ lastSnapAt=Date.now(); document.body.classList.remove('stale'); });
+es.onerror=()=>{ document.body.classList.add('stale'); const t=lastSnapAt?new Date(lastSnapAt).toLocaleTimeString():null;
+  document.getElementById('hd').textContent=t?`not connected: no game is running on this port -- showing the last data, from ${t} (it reconnects by itself)`:'not connected: start the game (play.sh serves this page while it runs)'; };
 pollHeat();
 </script></body></html>

@@ -153,6 +153,10 @@ Stats page (2026-10-17, backlog 29-31): Kills (st_kill_at counts every kill even
 excluded) + K/D beside Deaths; every column sortable (team sort / full sort, remembered in localStorage); the map opens in the
 whole window (click it or "full window"; X / Esc closes; the canvas is resized and redrawn); a "vehicles" map layer; overlay
 switch HBF_VEH = the Vehicles button (do=vehicles; PELOAD_HB_VEHICLES=0 starts off; bit 6 of g_hb_toggle).
+Overlay keys F2-F10 are OFF since 2026-10-17 (PELOAD_HB_FKEYS=1 brings them back): the stats page has every switch. Zones are
+drawn by hbz_gpu (translucent surfaces + edges, static VBO per map, per-pixel occlusion against the hb_vis depth readback as a
+texture; kinds g_hbz_show bits 1 kill, 2 safe, 4 acceleration, 8 soft kill, 16 slip -- page chips, do=zonetype&t=). Helper-mode
+present: a frame that doesn't come within 50 ms re-presents the last IOSurface (no in-process fallback; PELOAD_GLH_PQ_FALLBACK=1 old).
 Zones overlay (F10 / PELOAD_HB_ZONES, hitbox.c hbz_*): kill/safe trigger volumes (scnr +0x258/+0x484/+0x490) and soft
 ceilings (sddt) read from the map being played (hb_current_map: halo3/maps or a Workshop folder), drawn with
 hb_seg_clip. Host speed control: stats do=speed&v=<tl_speed index> writes the variant's base player speed trait.

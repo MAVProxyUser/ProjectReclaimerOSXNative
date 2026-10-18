@@ -6946,7 +6946,7 @@ static unsigned g_pq_prog, g_pq_vao; static int g_pq_sloc=-1;
 // native GL helper: the frame is an IOSurface the helper rendered (rectangle texture in this, the window's, context)
 static unsigned g_pq_rprog; static int g_pq_rsloc=-1, g_pq_rzloc=-1; static unsigned long g_glh_pq_seen;
 static int pq_present_wait_glh(unsigned long*seen,int ms){
-    unsigned tex; int tw,th; (void)seen; int slot=glh_pq_acquire(&g_glh_pq_seen,ms,&tex,&tw,&th); if(slot<0) return 0; *seen=g_glh_pq_seen;
+    unsigned tex; int tw,th; (void)seen; int slot=glh_pq_acquire(&g_glh_pq_seen,ms,&tex,&tw,&th,!getenv("PELOAD_GLH_PQ_FALLBACK")); if(slot<0) return 0; *seen=g_glh_pq_seen;
     if(!g_pq_rprog){ const char*vs="#version 410 core\nout vec2 uv;void main(){vec2 p=vec2((gl_VertexID==1)?3.0:-1.0,(gl_VertexID==2)?3.0:-1.0);uv=p*0.5+0.5;gl_Position=vec4(p,0.0,1.0);}\n";
         const char*fs="#version 410 core\nin vec2 uv;out vec4 c;uniform sampler2DRect s;uniform vec2 sz;void main(){c=vec4(texture(s,uv*sz).rgb,1.0);}\n";
         unsigned v=G.CreateShader(GLE_VS),fr=G.CreateShader(GLE_FS); G.ShaderSource(v,1,&vs,0); G.CompileShader(v); G.ShaderSource(fr,1,&fs,0); G.CompileShader(fr);

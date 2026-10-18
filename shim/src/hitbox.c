@@ -448,16 +448,29 @@ static void hbz_load(const char*path){
     hbz_outline();
     int nkb=0; for(int i=0;i<g_hbz.nbox;i++) nkb+=g_hbz.box[i].kind==0;
     const char*bn=strrchr(path,'/'); char msg[300]; int k=snprintf(msg,sizeof msg,"  [zones] %s: %d kill volumes, %d safe zones, %d soft-ceiling triangles (%d outline edges)\n",bn?bn+1:path,nkb,g_hbz.nbox-nkb,g_hbz.ntri,g_hbz.nseg); (void)!write(2,msg,k); }
+// Zones (F10) draw only what the player can see (user, 2026-10-17): each edge is cut into pieces and a piece is drawn when
+// the scene's depth (the visible-only readback, hb_vis_tick) at its middle is not nearer than the piece, moved 0.3 units
+// toward the camera so lines lying on the ground stay. PELOAD_HB_ZONES_XRAY=1 = through walls (old).
+static int hb_pt_vis(const float*p); static int hbz_xray(void);
+static int hb_seg_vis(float*verts,int nv,int cap,const float*vp,const float*a,const float*b,const float*col){
+    extern int g_hbv_ok_x(void); if(hbz_xray() || !g_hbv_ok_x()) return hb_seg_clip(verts,nv,cap,vp,a,b,col);
+    float d[3]={b[0]-a[0],b[1]-a[1],b[2]-a[2]}; float len=sqrtf(d[0]*d[0]+d[1]*d[1]+d[2]*d[2]); int n=(int)(len/1.5f)+1; if(n>48) n=48;
+    int run=-1; for(int i=0;i<=n;i++){ int vis=0;
+        if(i<n){ float m[3]={a[0]+d[0]*(i+0.5f)/n,a[1]+d[1]*(i+0.5f)/n,a[2]+d[2]*(i+0.5f)/n}; vis=hb_pt_vis(m)!=0; }
+        if(vis && run<0) run=i;
+        if(!vis && run>=0){ float p0[3]={a[0]+d[0]*run/n,a[1]+d[1]*run/n,a[2]+d[2]*run/n}, p1[3]={a[0]+d[0]*i/n,a[1]+d[1]*i/n,a[2]+d[2]*i/n};
+            nv=hb_seg_clip(verts,nv,cap,vp,p0,p1,col); run=-1; } }
+    return nv; }
 static int hbz_draw(float*verts,int nv,int cap,const float*vp){
     char mp[1024]; if(!hb_current_map(mp,sizeof mp)) return nv; hbz_load(mp);
     static const float ckill[3]={1,0.15f,0.15f}, csafe[3]={0.2f,1,0.35f}, csoft[3][3]={{1,0.6f,0.1f},{1,0.25f,0.65f},{1,0.92f,0.2f}};
     const float*cam=vp+28;
     for(int i=0;i<g_hbz.nbox;i++){ const HbZBox*b=&g_hbz.box[i]; const float*col=b->kind?csafe:ckill;
-        for(int c=0;c<8;c++) for(int bit=1;bit<8;bit<<=1) if(!(c&bit)) nv=hb_seg_clip(verts,nv,cap,vp,b->c[c],b->c[c|bit],col);
+        for(int c=0;c<8;c++) for(int bit=1;bit<8;bit<<=1) if(!(c&bit)) nv=hb_seg_vis(verts,nv,cap,vp,b->c[c],b->c[c|bit],col);
         float ctr[3]={(b->c[0][0]+b->c[7][0])/2,(b->c[0][1]+b->c[7][1])/2,(b->c[0][2]+b->c[7][2])/2}, tx,ty, dx=ctr[0]-cam[0],dy=ctr[1]-cam[1],dz=ctr[2]-cam[2];
-        if(dx*dx+dy*dy+dz*dz<150.f*150.f && hb_proj(vp,ctr,&tx,&ty)){ const char*t=b->kind?"SAFE ZONE":"KILL ZONE"; nv=hb_text(verts,nv,cap,tx-strlen(t)*2.5f*g_hb_px,ty,t,col); } }
+        if(dx*dx+dy*dy+dz*dz<150.f*150.f && hb_pt_vis(ctr) && hb_proj(vp,ctr,&tx,&ty)){ const char*t=b->kind?"SAFE ZONE":"KILL ZONE"; nv=hb_text(verts,nv,cap,tx-strlen(t)*2.5f*g_hb_px,ty,t,col); } }
     for(int i=0;i<g_hbz.nseg;i++){ const HbZSeg*z=&g_hbz.seg[i]; const float*col=csoft[z->type>=0&&z->type<3?z->type:1];   // soft ceilings: outlines
-        nv=hb_seg_clip(verts,nv,cap,vp,z->a,z->b,col); }
+        nv=hb_seg_vis(verts,nv,cap,vp,z->a,z->b,col); }
     return nv; }
 // Projectile trails: positions seen on recent frames, per projectile handle; kept briefly after the projectile is gone.
 typedef struct { uint32_t h; int n; float p[32][3]; double seen; } HbTrail;
@@ -675,9 +688,13 @@ static unsigned g_hb_prog, g_hb_vao, g_hb_vbo;
 static D3DObj* g_hb_dsv;   // the depth buffer of the frame's camera draw (hb_note_dsv)
 enum { HBV_W=480, HBV_H=270 };
 static float g_hbv_depth[HBV_W*HBV_H], g_hbv_vp[16]; static volatile unsigned g_hbv_seq; static volatile int g_hbv_ok;
+static int hbz_xray(void){ static int x=-1; if(x<0) x=getenv("PELOAD_HB_ZONES_XRAY")?1:0; return x; }
 static void hb_vis_tick(void){
-    if(!hb_overlay_on() || !hb_feat(HBF_VISIBLE)){ g_hbv_ok=0; return; }
-    D3DObj*ds=g_hb_dsv; if(!ds || !ds->gltex || !ds->gldsatt || !G.BlitFramebuffer || !G.MapBufferRange || !G.ReadPixels) return;
+    if(!hb_overlay_on() || !(hb_feat(HBF_VISIBLE) || (hb_feat(HBF_ZONES) && !hbz_xray()))){ g_hbv_ok=0; return; }   // zones always draw visible parts only
+    D3DObj*ds=g_hb_dsv;
+    { static int lg=-1; if(lg<0) lg=getenv("PELOAD_HB_VISLOG")?1:0; static double tl; double now=mono_s();   // PELOAD_HB_VISLOG: readback state every 2 s
+      if(lg && now-tl>2.0){ tl=now; char m[200]; int k=snprintf(m,sizeof m,"  [hbvis] dsv %p gltex %u att %u ok %d seq %u depth[mid] %.6f\n",(void*)ds,ds?ds->gltex:0,ds?ds->gldsatt:0,g_hbv_ok,g_hbv_seq,g_hbv_depth[(HBV_H/2)*HBV_W+HBV_W/2]); (void)!write(2,m,k); } }
+    if(!ds || !ds->gltex || !ds->gldsatt || !G.BlitFramebuffer || !G.MapBufferRange || !G.ReadPixels) return;
     static unsigned fbo, tex, pbo[3]; static int idx, filled[3]; static float vps[3][16];
     if(!fbo){ TEXCACHE_INVALIDATE(); G.GenTextures(1,&tex); G.BindTexture(GLE_TEX2D,tex);
         G.TexImage2D(GLE_TEX2D,0,0x8CAD/*DEPTH32F_STENCIL8*/,HBV_W,HBV_H,0,0x84F9/*DEPTH_STENCIL*/,0x8DAD/*FLOAT_32_UNSIGNED_INT_24_8_REV*/,0);
@@ -693,12 +710,13 @@ static void hb_vis_tick(void){
     gl_bindfbo_any(0x8CA8,fbo); G.BindBuffer(0x88EB,pbo[idx]); G.ReadPixels(0,0,HBV_W,HBV_H,0x1902/*DEPTH_COMPONENT*/,0x1406/*FLOAT*/,0);
     memcpy(vps[idx],vp,64); filled[idx]=1;
     int rd=(idx+1)%3;   // the oldest copy: two frames old, long done on the GPU
-    if(g_glh_on){   // native GL helper: an asynchronous fetch of that copy; the result of the previous one is used now
-        static uint64_t tk[2]; static float tvp[2][16]; static int ts;
-        const uint8_t*m=glh_rb_ready(tk[ts^1],ts^1);
-        if(m){ g_hbv_seq++; __atomic_thread_fence(__ATOMIC_SEQ_CST); memcpy(g_hbv_depth,m,sizeof g_hbv_depth); memcpy(g_hbv_vp,tvp[ts^1],64);
-            __atomic_thread_fence(__ATOMIC_SEQ_CST); g_hbv_seq++; g_hbv_ok=1; tk[ts^1]=0; }
-        if(filled[rd] && !tk[ts]){ tk[ts]=glh_rb_request(pbo[rd],HBV_W*HBV_H*4,ts); memcpy(tvp[ts],vps[rd],64); ts^=1; }
+    if(g_glh_on){   // native GL helper: an asynchronous fetch of that copy, one in flight at a time (two alternating
+        // tickets checked only one of them: with both outstanding the older was never collected and the copy froze)
+        static uint64_t tk; static float tvp[16];
+        if(tk){ const uint8_t*m=glh_rb_ready(tk,0);
+            if(m){ g_hbv_seq++; __atomic_thread_fence(__ATOMIC_SEQ_CST); memcpy(g_hbv_depth,m,sizeof g_hbv_depth); memcpy(g_hbv_vp,tvp,64);
+                __atomic_thread_fence(__ATOMIC_SEQ_CST); g_hbv_seq++; g_hbv_ok=1; tk=0; } }
+        if(filled[rd] && !tk){ tk=glh_rb_request(pbo[rd],HBV_W*HBV_H*4,0); memcpy(tvp,vps[rd],64); }
         G.BindBuffer(0x88EB,0); gl_bindfbo_any(GLE_FBO,0); idx=(idx+1)%3; return; }
     if(filled[rd]){ G.BindBuffer(0x88EB,pbo[rd]); const void*m=G.MapBufferRange(0x88EB,0,HBV_W*HBV_H*4,0x1/*MAP_READ*/);
         if(m){ g_hbv_seq++; __atomic_thread_fence(__ATOMIC_SEQ_CST); memcpy(g_hbv_depth,m,sizeof g_hbv_depth); memcpy(g_hbv_vp,vps[rd],64);
@@ -720,6 +738,91 @@ static int hb_vis(const HbObj*o){
         if(g_hbv_depth[row*HBV_W+col]<=thr) vis=1; }   // reverse-Z: larger = nearer; scene not nearer than our front
     if(g_hbv_seq!=s0) return 1;
     return vis || !any; }   // off screen: leave it to the projection (nothing gets drawn there anyway)
+// 1 = a world point is visible in the last depth readback (or no data / off screen), 0 = something nearer covers it
+static int hb_pt_vis(const float*p){
+    if(!g_hbv_ok) return 1; unsigned s0=g_hbv_seq; if(s0&1) return 1;
+    const float*vp=g_hbv_vp; float f[3]={vp[12],vp[13],vp[14]}, fl=sqrtf(f[0]*f[0]+f[1]*f[1]+f[2]*f[2]); if(fl<1e-6f) return 1;
+    float cx=p[0]*vp[0]+p[1]*vp[1]+p[2]*vp[2]+vp[3], cy=p[0]*vp[4]+p[1]*vp[5]+p[2]*vp[6]+vp[7], cw=p[0]*vp[12]+p[1]*vp[13]+p[2]*vp[14]+vp[15];
+    if(cw<0.05f) return 1; float nx=cx/cw, ny=cy/cw; if(nx<-1||nx>1||ny<-1||ny>1) return 1;
+    float q[3]={p[0]-f[0]/fl*0.3f,p[1]-f[1]/fl*0.3f,p[2]-f[2]/fl*0.3f};
+    float qz=q[0]*vp[8]+q[1]*vp[9]+q[2]*vp[10]+vp[11], qw=q[0]*vp[12]+q[1]*vp[13]+q[2]*vp[14]+vp[15]; if(qw<0.05f) return 1;
+    int col=(int)((nx*0.5f+0.5f)*HBV_W), row=(int)((d3dgl_flipy()?(0.5f-ny*0.5f):(ny*0.5f+0.5f))*HBV_H);
+    if(col<0) col=0; if(col>=HBV_W) col=HBV_W-1; if(row<0) row=0; if(row>=HBV_H) row=HBV_H-1;
+    int v=g_hbv_depth[row*HBV_W+col]<=qz/qw; if(g_hbv_seq!=s0) return 1; return v; }   // reverse-Z: larger = nearer
+int g_hbv_ok_x(void){ return g_hbv_ok; }
+// ---- zones (F10), drawn on the GPU: translucent surfaces + brighter edges, hidden per pixel behind the scene ------------
+// (user, 2026-10-17: "more than visible stuff is rendering ... awkward wireframe ... no clue what the colours mean -- each a
+// toggle"). The geometry is static per map (one buffer); the fragment shader projects each pixel's world position with the
+// depth readback's camera (hb_vis_tick: 480x270, ~2 frames old) and discards it when the scene there is nearer (moved
+// 0.3 units toward the camera so surfaces lying on the ground stay). Kinds (bits of g_hbz_show, the stats page's chips):
+// 1 kill zone (red: inside it you die), 2 safe zone (green: the playable area; outside every one the game kills you),
+// 4 acceleration ceiling (orange: pushes you back), 8 soft-kill ceiling (pink: kills you after a moment), 16 slip surface
+// (yellow: you slide off it). PELOAD_HB_ZONES_SHOW=<mask> (default 31); PELOAD_HB_ZONES_XRAY=1 = the old lines, through walls.
+volatile int g_hbz_show=-1;
+int hbz_show(void){ if(g_hbz_show<0){ const char*e=getenv("PELOAD_HB_ZONES_SHOW"); g_hbz_show=e?(int)strtol(e,0,0):31; } return g_hbz_show; }
+static unsigned g_hbz_prog, g_hbz_vbo, g_hbz_vao, g_hbz_dtex; static void*g_hbz_ctx; static unsigned g_hbz_dseq=~0u;
+static int g_hbz_ntri, g_hbz_nline, g_hbz_builtmask=-1; static char g_hbz_builtpath[1024];
+static int g_hbz_u[12];
+static void hbz_push(float*v,int*n,const float*w,const float*c,float a){ float*d=v+*n*7; d[0]=w[0]; d[1]=w[1]; d[2]=w[2]; d[3]=c[0]; d[4]=c[1]; d[5]=c[2]; d[6]=a; (*n)++; }
+static void hbz_gpu(const float*vp){
+    char mp[1024]; if(!hb_current_map(mp,sizeof mp)) return; hbz_load(mp);
+    void*cur=CGLGetCurrentContext();
+    if(cur!=g_hbz_ctx){ g_hbz_ctx=cur; g_hbz_prog=0; g_hbz_vbo=0; g_hbz_vao=0; g_hbz_dtex=0; g_hbz_builtmask=-1; g_hbz_dseq=~0u; }
+    if(!g_hbz_prog){
+        const char*vs="#version 410 core\nlayout(location=0) in vec3 w; layout(location=1) in vec4 c; uniform vec4 r0,r1,r3; out vec3 vw; out vec4 vc;\n"
+            "void main(){ vw=w; vc=c; vec4 p=vec4(w,1.0); gl_Position=vec4(dot(r0,p),dot(r1,p),0.0,dot(r3,p)); }\n";
+        const char*fs="#version 410 core\nin vec3 vw; in vec4 vc; out vec4 o; uniform sampler2D dep; uniform int hasdep, flipy; uniform vec4 q0,q1,q2,q3; uniform vec4 fwd;\n"
+            "void main(){ if(hasdep!=0){ vec4 p=vec4(vw,1.0); float cw=dot(q3,p); if(cw>0.05){ vec2 n=vec2(dot(q0,p),dot(q1,p))/cw;\n"
+            "  if(abs(n.x)<=1.0 && abs(n.y)<=1.0){ vec4 q=vec4(vw-fwd.xyz*0.3,1.0); float qw=dot(q3,q); if(qw>0.05){ float qd=dot(q2,q)/qw;\n"
+            "    vec2 uv=vec2(n.x*0.5+0.5, flipy!=0 ? 0.5-n.y*0.5 : n.y*0.5+0.5); if(texture(dep,uv).r>qd) discard; } } } }\n"
+            "  o=vc; }\n";
+        unsigned v=G.CreateShader(GLE_VS),f=G.CreateShader(GLE_FS); G.ShaderSource(v,1,&vs,0); G.CompileShader(v); G.ShaderSource(f,1,&fs,0); G.CompileShader(f);
+        g_hbz_prog=G.CreateProgram(); G.AttachShader(g_hbz_prog,v); G.AttachShader(g_hbz_prog,f); G.LinkProgram(g_hbz_prog); G.DeleteShader(v); G.DeleteShader(f);
+        static const char*const un[12]={"r0","r1","r3","dep","hasdep","flipy","q0","q1","q2","q3","fwd",0};
+        for(int i=0;un[i];i++) g_hbz_u[i]=G.GetUniformLocation(g_hbz_prog,un[i]);
+        G.GenBuffers(1,&g_hbz_vbo); G.GenVertexArrays(1,&g_hbz_vao); G.GenTextures(1,&g_hbz_dtex); }
+    int show=hbz_show();
+    if(show!=g_hbz_builtmask || strcmp(mp,g_hbz_builtpath)){   // (re)build the static geometry: triangles, then edges
+        static const float ckill[3]={1,0.15f,0.15f}, csafe[3]={0.2f,1,0.35f}, csoft[3][3]={{1,0.6f,0.1f},{1,0.25f,0.65f},{1,0.92f,0.2f}};
+        static const int tbit[3]={4,8,16};
+        size_t cap=(size_t)(g_hbz.nbox*36+g_hbz.ntri*3+g_hbz.nbox*24+g_hbz.nseg*2+16); float*v=malloc(cap*7*sizeof(float)); if(!v) return; int n=0;
+        static const int face[6][4]={{0,1,3,2},{4,5,7,6},{0,1,5,4},{2,3,7,6},{0,2,6,4},{1,3,7,5}};
+        for(int i=0;i<g_hbz.nbox;i++){ const HbZBox*b=&g_hbz.box[i]; if(!(show&(b->kind?2:1))) continue; const float*c=b->kind?csafe:ckill; float a=b->kind?0.07f:0.20f;
+            for(int f=0;f<6;f++){ const int*q=face[f]; hbz_push(v,&n,b->c[q[0]],c,a); hbz_push(v,&n,b->c[q[1]],c,a); hbz_push(v,&n,b->c[q[2]],c,a);
+                hbz_push(v,&n,b->c[q[0]],c,a); hbz_push(v,&n,b->c[q[2]],c,a); hbz_push(v,&n,b->c[q[3]],c,a); } }
+        for(int i=0;i<g_hbz.ntri;i++){ const HbZTri*t=&g_hbz.tri[i]; int k=t->type>=0&&t->type<3?t->type:1; if(!(show&tbit[k])) continue;
+            for(int j=0;j<3;j++) hbz_push(v,&n,t->v[j],csoft[k],0.16f); }
+        g_hbz_ntri=n;
+        for(int i=0;i<g_hbz.nbox;i++){ const HbZBox*b=&g_hbz.box[i]; if(!(show&(b->kind?2:1))) continue; const float*c=b->kind?csafe:ckill;
+            for(int cc=0;cc<8;cc++) for(int bit=1;bit<8;bit<<=1) if(!(cc&bit)){ hbz_push(v,&n,b->c[cc],c,0.85f); hbz_push(v,&n,b->c[cc|bit],c,0.85f); } }
+        for(int i=0;i<g_hbz.nseg;i++){ const HbZSeg*z=&g_hbz.seg[i]; int k=z->type>=0&&z->type<3?z->type:1; if(!(show&tbit[k])) continue;
+            hbz_push(v,&n,z->a,csoft[k],0.75f); hbz_push(v,&n,z->b,csoft[k],0.75f); }
+        g_hbz_nline=n-g_hbz_ntri;
+        G.BindBuffer(0x8892,g_hbz_vbo); G.BufferData(0x8892,(long)n*7*4,v,0x88E4/*STATIC_DRAW*/); free(v);
+        g_hbz_builtmask=show; snprintf(g_hbz_builtpath,sizeof g_hbz_builtpath,"%s",mp); }
+    if(!g_hbz_ntri && !g_hbz_nline) return;
+    // the scene depth, as a texture (refreshed when the readback has a new copy)
+    int hasdep=0; float q[16]; unsigned s0=g_hbv_seq;
+    if(g_hbv_ok && !(s0&1)){ memcpy(q,g_hbv_vp,64);
+        if(s0!=g_hbz_dseq){ TEXCACHE_INVALIDATE(); G.ActiveTexture(GLE_TEX0+3); G.BindTexture(GLE_TEX2D,g_hbz_dtex);
+            G.TexImage2D(GLE_TEX2D,0,0x822E/*R32F*/,HBV_W,HBV_H,0,0x1903/*RED*/,0x1406/*FLOAT*/,g_hbv_depth);
+            G.TexParameteri(GLE_TEX2D,0x2801,0x2600); G.TexParameteri(GLE_TEX2D,0x2800,0x2600); G.TexParameteri(GLE_TEX2D,0x2802,0x812F); G.TexParameteri(GLE_TEX2D,0x2803,0x812F);
+            G.ActiveTexture(GLE_TEX0); g_hbz_dseq=s0; }
+        hasdep=g_hbv_seq==s0; }
+    G.Disable(0x0B71); G.Disable(0x0C11); G.Enable(0x0BE2); G.BlendFunc(0x0302/*SRC_ALPHA*/,0x0303/*ONE_MINUS_SRC_ALPHA*/);
+    G.UseProgram(g_hbz_prog);
+    G.ProgramUniform4fv(g_hbz_prog,g_hbz_u[0],1,vp); G.ProgramUniform4fv(g_hbz_prog,g_hbz_u[1],1,vp+4); G.ProgramUniform4fv(g_hbz_prog,g_hbz_u[2],1,vp+12);
+    G.ProgramUniform1i(g_hbz_prog,g_hbz_u[3],3); G.ProgramUniform1i(g_hbz_prog,g_hbz_u[4],hasdep); G.ProgramUniform1i(g_hbz_prog,g_hbz_u[5],d3dgl_flipy()?1:0);
+    if(hasdep){ float fl=sqrtf(q[12]*q[12]+q[13]*q[13]+q[14]*q[14]); float fw[4]={fl>1e-6f?q[12]/fl:0,fl>1e-6f?q[13]/fl:0,fl>1e-6f?q[14]/fl:0,0};
+        G.ProgramUniform4fv(g_hbz_prog,g_hbz_u[6],1,q); G.ProgramUniform4fv(g_hbz_prog,g_hbz_u[7],1,q+4); G.ProgramUniform4fv(g_hbz_prog,g_hbz_u[8],1,q+8); G.ProgramUniform4fv(g_hbz_prog,g_hbz_u[9],1,q+12);
+        G.ProgramUniform4fv(g_hbz_prog,g_hbz_u[10],1,fw);
+        G.ActiveTexture(GLE_TEX0+3); G.BindTexture(GLE_TEX2D,g_hbz_dtex); if(G.BindSampler) G.BindSampler(3,0); G.ActiveTexture(GLE_TEX0); }
+    G.BindVertexArray(g_hbz_vao); G.BindBuffer(0x8892,g_hbz_vbo);
+    G.EnableVertexAttribArray(0); G.VertexAttribPointer(0,3,0x1406,0,28,(void*)0);
+    G.EnableVertexAttribArray(1); G.VertexAttribPointer(1,4,0x1406,0,28,(void*)12);
+    if(g_hbz_ntri) G.DrawArrays(4/*TRIANGLES*/,0,g_hbz_ntri);
+    if(g_hbz_nline) G.DrawArrays(1/*LINES*/,g_hbz_ntri,g_hbz_nline);
+    G.BindVertexArray(0); G.Disable(0x0BE2); }
 static void hb_draw_overlay(void){
     if(!hb_overlay_on() || !G.DrawArrays || !G.CreateShader) return;
     float vp[32]; unsigned s0=g_hb_vpseq; if(s0&1) return; memcpy(vp,g_hb_vp,sizeof vp); if(g_hb_vpseq!=s0) return;
@@ -819,7 +922,7 @@ static void hb_draw_overlay(void){
                 float sp=sqrtf(r->vel[0]*r->vel[0]+r->vel[1]*r->vel[1]+r->vel[2]*r->vel[2]); memcpy(a,r->pos,12); if(sp>1e-5f) for(int q=0;q<3;q++) a[q]-=r->vel[q]/sp*3.0f; }
             nv=hb_seg(verts,nv,HB_CAP,vp,a,r->pos,ctrace);
             float x0[3]={r->pos[0]-0.05f,r->pos[1],r->pos[2]}, x1[3]={r->pos[0]+0.05f,r->pos[1],r->pos[2]}; nv=hb_seg(verts,nv,HB_CAP,vp,x0,x1,cvel); } }
-    if(hb_feat(HBF_ZONES)) nv=hbz_draw(verts,nv,HB_CAP,vp);   // kill / safe zones, soft ceilings (F10)
+    if(hb_feat(HBF_ZONES)){ if(hbz_xray()) nv=hbz_draw(verts,nv,HB_CAP,vp); else hbz_gpu(vp); }   // kill / safe zones, soft ceilings (F10)
     if(!nv) return;
     G.Disable(0x0B71/*DEPTH_TEST*/); G.Disable(0x0BE2/*BLEND*/); G.Disable(0x0C11/*SCISSOR*/);
     G.UseProgram(g_hb_prog); G.BindVertexArray(g_hb_vao); G.BindBuffer(0x8892/*ARRAY_BUFFER*/,g_hb_vbo);

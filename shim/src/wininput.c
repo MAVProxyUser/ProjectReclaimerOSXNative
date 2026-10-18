@@ -152,12 +152,17 @@ static int wi_translate(id ev){
         if(mods&(1ul<<20)) return 0;                       // Command shortcuts go to AppKit (Cmd+Q, Cmd+Tab ...)
         unsigned short kc=((unsigned short(*)(id,SEL))objc_msgSend)(ev,sel_registerName("keyCode"));
         signed char rep=type==10?((signed char(*)(id,SEL))objc_msgSend)(ev,sel_registerName("isARepeat")):0;
+        // F2-F10 overlay keys: retired 2026-10-17 (every one is a button on the stats page) -- the keys go to the game now
+        // (the client answers votes with F5). PELOAD_HB_FKEYS=1 brings them back. F1 (release the mouse) is unaffected.
+        static int fk=-1; if(fk<0){ const char*e=getenv("PELOAD_HB_FKEYS"); fk=e&&atoi(e)?1:0; }
+        if(fk){
         if(kc==0x62){ if(type==10 && !rep){ static int ok=-1; if(ok<0) ok=getenv("PELOAD_ALLOW_TELEPORT")?1:0;   // F7: teleport (hitbox.c)
                 extern volatile int g_hb_job_pending; if(ok){ __atomic_store_n(&g_hb_job_pending,1,__ATOMIC_RELEASE); (void)!write(2,"  [teleport] F7: requested\n",27); } } return 1; }
         if(kc==0x64){ if(type==10 && !rep){ extern volatile int g_hb_cap_req; __atomic_store_n(&g_hb_cap_req,1,__ATOMIC_RELEASE); (void)!write(2,"  [capture] F8: capturing the next frame\n",41); } return 1; }   // F8: frame capture (hitbox.c)
         if(kc==0x61){ if(type==10 && !rep){ g_hb_teamcycle++; static const char*const nm[3]={"all","enemies only","friends only"}; char m[64]; int q=snprintf(m,sizeof m,"  [hitbox] F6: showing %s\n",nm[g_hb_teamcycle%3]); (void)!write(2,m,q); } return 1; }   // F6
         { int bit = kc==0x78?0 : kc==0x63?1 : kc==0x76?2 : kc==0x60?3 : kc==0x65?4 : kc==0x6D?5 : -1;   // F2 hitboxes, F3 tracers, F4 player info, F5 items, F9 visible only, F10 kill/safe zones
           if(bit>=0){ if(type==10 && !rep){ g_hb_toggle^=1<<bit; char m[64]; int q=snprintf(m,sizeof m,"  [hitbox] F%d: overlay feature toggled\n",bit==4?9:bit==5?10:bit+2); (void)!write(2,m,q); } return 1; } }
+        }
         wi_key(kc,type==10,rep);
         if(type==10){ id s=((id(*)(id,SEL))objc_msgSend)(ev,sel_registerName("characters"));   // WM_CHAR (text entry)
             const char*u=s?((const char*(*)(id,SEL))objc_msgSend)(s,sel_registerName("UTF8String")):0;
