@@ -744,6 +744,16 @@ oracle. Fixes below apply to both unless noted.
 
 ## 12. D3D11->GL: textures
 
+- **Big texture arrays went up in one command the GL helper dropped (Forge World black)** — `d3dgl_upload_layered`. Why
+  (backlog 56): the native GL helper drops any command over half its 256 MB ring; Forge World's lightmap array (2048x2048x8
+  BC3, decoded to RGBA8) is 128 MB in one glTexImage3D ("[glh] command 116 of 134217816 bytes is too large: dropped"), so the
+  helper's texture stayed empty, Apple's driver sampled it as zero ("unit 0 GLD_TEXTURE_INDEX_2D_ARRAY is unloadable ...
+  using zero texture") and the map's static lighting came out black -- floors, walls, the terrain. How: layered textures over
+  16 MB are allocated with a NULL glTexImage3D and filled one slice per glTexSubImage3D (missing slices: zeros, as before).
+  Checked: the spawn room's floor pixel's lighting draw writes 0.15 instead of 0, the room is lit. `PELOAD_LAYERED_ONECMD=1` =
+  the old single command. Also new: the helper checks every texture upload with its own glGetError (the loader's answers
+  0 without a round trip) and logs the first 40 failures (`[glhelper] <call> error 0x...`; `PELOAD_GLH_NOTEXERR=1` = off). (10-18)
+
 - **TYPELESS / SRGB 8-bit formats** — `d3dgl_tex_upload_fmt`. Why: the loading-screen composite is format 90
   (B8G8R8A8_TYPELESS), unsupported -> 1x1 placeholder -> black window. How: 27 as RGBA, 90/92/93 as BGRA. (10-14 5081b49)
 - **Block-compressed upload** — `d3dgl_bc_glfmt`, `d3dgl_ensure_tex`. Why: BC1-7 textures were rejected (magenta/black).
@@ -1290,6 +1300,9 @@ Numbers are from the commit messages; PERF-PLAN.md has the measurements. Compare
   polygon-shape builder (backlog 18). Lessons: open only the faulting page (one hot reader hid every other one), and
   treat any fault in the watched range as the tool's (another thread can fault before the page reopens). (10-18)
 
+- **make-usb.sh / install.sh `--update`** — only the loader, GL helper, scripts, docs and client exe (no MCC files, Workshop
+  mods, caches or map pictures; install.sh skips its space check). Why (user, 2026-10-18): "a --update flag that only copies
+  the binaries and not the maps". (10-18)
 - **Machine profile: decisions per Mac** (`shim/tools/machine.sh`, sourced by play.sh) — Why (user, 2026-10-18: "detect m1 vs m4
   and make code decisions accordingly"; M1 menu 78 fps vs ~390 on the M4 Max): chip, performance / efficiency cores, GPU
   cores (ioreg gpu-core-count; tier base <= 10, pro <= 20, max), memory. Decisions: particle workers = performance cores - 2

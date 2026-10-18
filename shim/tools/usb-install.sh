@@ -12,12 +12,15 @@
 # longer has is removed from the install folder). Resumable if interrupted. Then play with:
 #   cd ~/ReclaimerMac && bash shim/play.sh
 #
-#   bash /Volumes/<stick>/ReclaimerMac/install.sh [--keep-on-stick | --minimal | --no-movies | --no-workshop] [--dry-run] [--skip-space-check] [install-folder]
+#   bash /Volumes/<stick>/ReclaimerMac/install.sh [--update | --keep-on-stick | --minimal | --no-movies | --no-workshop] [--dry-run] [--skip-space-check] [install-folder]
+#   --update   ONLY the loader, GL helper, scripts and client exe (seconds): after make-usb.sh --update, on a Mac that has
+#              the game already. No MCC files, Workshop mods, caches or map pictures are copied.
 set -e
 SRC="$(cd "$(dirname "$0")" && pwd)"
-SKIPSPACE=0; NOMOVIES=0; WORKSHOP=1; ONSTICK=0; DRYRUN=0
+SKIPSPACE=0; NOMOVIES=0; WORKSHOP=1; ONSTICK=0; DRYRUN=0; UPDATE=0
 while [ "${1:-}" != "${1#--}" ]; do case "$1" in
   --skip-space-check) SKIPSPACE=1;;
+  --update) UPDATE=1;;
   --no-workshop) WORKSHOP=0;;
   --no-movies) NOMOVIES=1;;
   --minimal) NOMOVIES=1; WORKSHOP=0;;
@@ -53,6 +56,24 @@ fi
 [ -d "$SRC/game/Halo The Master Chief Collection/halo3" ] || [ -d "$STEAM/common/Halo The Master Chief Collection/halo3" ] ||
   { echo "no MCC files on the stick ($SRC/game) or on this Mac"; exit 1; }
 
+R="rsync -a --exclude=.DS_Store"
+part(){ local name="$1"; shift; local log; log=$(mktemp)
+  $R -i "$@" | tee "$log" | awk '/^[>c]f/{ sub(/^[^ ]+ /,""); print "      " $0; fflush() }'; local rc=${PIPESTATUS[0]}
+  local n; n=$(grep -c '^[>c]f' "$log" || true); rm -f "$log"
+  [ "$rc" = 0 ] || { echo "   $name: rsync failed (exit $rc)"; exit 1; }
+  echo "   $name: $n file(s) copied"; }
+app_part(){ echo "== loader -> $APP"
+  # --delete only inside the folders the stick owns (an old client exe, binary or script goes); anything else you keep in
+  # the install folder stays
+  mkdir -p "$APP"
+  for d in client shim/build shim/tools shim/crt re-tools; do [ -d "$SRC/app/$d" ] && mkdir -p "$APP/$d" && part "$d" --delete "$SRC/app/$d/" "$APP/$d/"; done
+  part "scripts and docs" --exclude=client --exclude=shim/build --exclude=shim/tools --exclude=shim/crt --exclude=re-tools "$SRC/app/" "$APP/"
+  xattr -dr com.apple.quarantine "$APP" 2>/dev/null || true
+  chmod +x "$APP/shim/build/peload" "$APP/shim/build/glhelper" "$APP"/shim/*.sh "$APP"/shim/tools/*.sh 2>/dev/null || true; }
+if [ $UPDATE = 1 ]; then
+  [ $DRYRUN = 1 ] && { echo "(dry run: --update copies only $SRC/app -> $APP)"; exit 0; }
+  [ -d "$STEAM/common/Halo The Master Chief Collection/halo3" ] || echo "note: no MCC files on this Mac yet -- run install.sh without --update once"
+  app_part; echo; echo "Updated. Play with:"; echo "   cd \"$APP\" && bash shim/play.sh"; exit 0; fi
 # space: only what this Mac doesn't have yet counts (per part: the stick's size minus the installed size)
 kb(){ local t=0 x; for x in "$@"; do [ -e "$x" ] && t=$((t + $(du -sk "$x" | cut -f1))); done; echo $t; }
 delta(){ local a=$1 b=$2; [ $a -gt $b ] && echo $((a-b)) || echo 0; }
@@ -73,18 +94,7 @@ if [ "$HAVE" -le "$NEED" ]; then
   else echo "not enough free space (free some, or run again with --skip-space-check)"; exit 1; fi
 fi
 
-R="rsync -a --exclude=.DS_Store"
-part(){ local name="$1"; shift; local log; log=$(mktemp)
-  $R -i "$@" | tee "$log" | awk '/^[>c]f/{ sub(/^[^ ]+ /,""); print "      " $0; fflush() }'; local rc=${PIPESTATUS[0]}
-  local n; n=$(grep -c '^[>c]f' "$log" || true); rm -f "$log"
-  [ "$rc" = 0 ] || { echo "   $name: rsync failed (exit $rc)"; exit 1; }
-  echo "   $name: $n file(s) copied"; }
-echo "== loader -> $APP"
-# --delete only inside the folders the stick owns (an old client exe, binary or script goes); anything else you keep in
-# the install folder stays
-mkdir -p "$APP"
-for d in client shim/build shim/tools shim/crt re-tools; do [ -d "$SRC/app/$d" ] && mkdir -p "$APP/$d" && part "$d" --delete "$SRC/app/$d/" "$APP/$d/"; done
-part "scripts and docs" --exclude=client --exclude=shim/build --exclude=shim/tools --exclude=shim/crt --exclude=re-tools "$SRC/app/" "$APP/"
+app_part
 echo "== Reclaimer caches/fonts -> $PFX"
 mkdir -p "$PFX"; part "caches/fonts" "$SRC/drive_c/" "$PFX/"
 if [ -d "$SRC/support" ]; then echo "== map pictures, walking graphs, heatmaps, shader list -> $SUP"; mkdir -p "$SUP"; part "support" "$SRC/support/" "$SUP/"; fi

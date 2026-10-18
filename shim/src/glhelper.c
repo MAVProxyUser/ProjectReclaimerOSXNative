@@ -158,7 +158,17 @@ static int run_one(const uint8_t*c){
                 if(us>200){ ops++; GLint rf=0,df=0; glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING,&rf); glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING,&df);
                     fprintf(stderr,"  [glhelper blit] %.0f us: fbo %d (%lld,%lld %lldx%lld) -> fbo %d (%lld,%lld %lldx%lld) mask 0x%llx filter 0x%llx\n",us,rf,(long long)s[0],(long long)s[1],(long long)(s[2]-s[0]),(long long)(s[3]-s[1]),
                         df,(long long)s[4],(long long)s[5],(long long)(s[6]-s[4]),(long long)(s[7]-s[5]),(unsigned long long)s[8],(unsigned long long)s[9]); } } }
-        else r=glh_exec_gen(op,m,s,0,reply,&rv);
+        else {
+            // texture uploads: the loader's glGetError answers 0 without a round trip, so a rejected upload (a texture then
+            // incomplete: "GLD_TEXTURE_INDEX_2D is unloadable ... using zero texture") went unseen -- check them here, natively
+            // (cheap; uploads are rare), and log the first 40 with their arguments. PELOAD_GLH_NOTEXERR=1 = no check.
+            static int chk=-1; if(chk<0) chk=getenv("PELOAD_GLH_NOTEXERR")?0:1;
+            int tex=chk && (op==GLH_OP_glCompressedTexImage2D||op==GLH_OP_glTexImage2D||op==GLH_OP_glTexImage3D||op==GLH_OP_glTexSubImage2D||op==GLH_OP_glTexSubImage3D);
+            if(tex) while(glGetError()!=GL_NO_ERROR){}
+            r=glh_exec_gen(op,m,s,0,reply,&rv);
+            if(tex){ GLenum e=glGetError(); if(e!=GL_NO_ERROR){ static unsigned long n; n++;
+                if(n<=40) fprintf(stderr,"  [glhelper] %s error 0x%x (args %lld %lld 0x%llx %lld %lld %lld %lld 0x%llx)%s\n",op_name(op),e,(long long)s[0],(long long)s[1],(unsigned long long)s[2],
+                    (long long)s[3],(long long)s[4],(long long)s[5],(long long)s[6],(unsigned long long)s[7],n==40?" -- no more logged":""); } } }
         if(r==1){ sync_finish(rv,0); return 1; }
         if(r<0){ char e[80]; snprintf(e,sizeof e,"unknown GL command %u",op); fail(e); }
         return 0; }

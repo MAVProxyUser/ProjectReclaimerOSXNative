@@ -5144,10 +5144,25 @@ static void d3dgl_upload_layered(D3DObj*o,unsigned tgt){
             G.TexImage2D(0x8515+f,0,g.ifmt,(int)mw,(int)mh,0,g.fmt,g.type,p); if(own) free((void*)p); } }
     else if(tgt==0x806F){ const uint8_t*p=d3dgl_sub_pixels(o,0,L,&g,&own,&bpp,&mw,&mh,&md);
         if(p){ ti3(tgt,0,g.ifmt,(int)mw,(int)mh,(int)md,0,g.fmt,g.type,p); if(own) free((void*)p); } }
-    else { size_t lb=(size_t)mw*mh*bpp; uint8_t*all=calloc(ns,lb);
-        if(all){ for(uint32_t sl=0;sl<ns;sl++){ uint32_t a,b,c; const uint8_t*p=d3dgl_sub_pixels(o,sl,L,&g,&own,&bpp,&a,&b,&c);
+    else { size_t lb=(size_t)mw*mh*bpp;
+        // Big arrays go up one slice per command: the native GL helper drops any command over half its 256 MB ring, and
+        // Forge World's 2048x2048x8 lightmap array (BC3, decoded to RGBA8) is 128 MB in one glTexImage3D -- it was dropped
+        // whole, the texture stayed empty ("2D_ARRAY is unloadable ... using zero texture") and the map's static lighting
+        // came out black (backlog 56). Allocate the array, then glTexSubImage3D each slice (missing slices: zeros, as
+        // before). PELOAD_LAYERED_ONECMD=1 = the old single command.
+        static void(*tsi3)(unsigned,int,int,int,int,int,int,int,unsigned,unsigned,const void*); static int tsi_ini;
+        if(!tsi_ini){ tsi_ini=1; tsi3=dlsym(RTLD_DEFAULT,"glTexSubImage3D"); }
+        if(tsi3 && (uint64_t)lb*ns > (16ull<<20) && !getenv("PELOAD_LAYERED_ONECMD")){
+            ti3(tgt,0,g.ifmt,(int)mw,(int)mh,(int)ns,0,g.fmt,g.type,0); uint8_t*zero=0;
+            for(uint32_t sl=0;sl<ns;sl++){ uint32_t a,b,c; const uint8_t*p=d3dgl_sub_pixels(o,sl,L,&g,&own,&bpp,&a,&b,&c);
+                if(p && a==mw && b==mh) tsi3(tgt,0,0,0,(int)sl,(int)mw,(int)mh,1,g.fmt,g.type,p);
+                else { if(!zero) zero=calloc(1,lb); if(zero) tsi3(tgt,0,0,0,(int)sl,(int)mw,(int)mh,1,g.fmt,g.type,zero); }
+                if(p && own) free((void*)p); }
+            free(zero); }
+        else { uint8_t*all=calloc(ns,lb);
+          if(all){ for(uint32_t sl=0;sl<ns;sl++){ uint32_t a,b,c; const uint8_t*p=d3dgl_sub_pixels(o,sl,L,&g,&own,&bpp,&a,&b,&c);
                 if(p){ if(a==mw&&b==mh) memcpy(all+sl*lb,p,lb); if(own) free((void*)p); } }
-            ti3(tgt,0,g.ifmt,(int)mw,(int)mh,(int)ns,0,g.fmt,g.type,all); free(all); } }
+            ti3(tgt,0,g.ifmt,(int)mw,(int)mh,(int)ns,0,g.fmt,g.type,all); free(all); } } }
     if(psi) psi(0x0CF5,4);
     unsigned e=ge?ge():0;
     if(getenv("PELOAD_TRACE_LAYERED") && o->data){ static unsigned long nl; if(nl++<400){   // per slice: share of non-zero bytes at the uploaded level

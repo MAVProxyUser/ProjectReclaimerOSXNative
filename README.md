@@ -119,6 +119,10 @@ new or updated Workshop mods...); unchanged MCC files are skipped, older client 
 part lists the files it copied. `--no-game` skips even checking the MCC files. Then run `install.sh` on the other Mac again:
 it also copies only what changed.
 
+**Just a new build** (the usual case after a fix): `bash shim/tools/make-usb.sh /Volumes/RECLAIMER --update` copies only the
+loader, GL helper, scripts and client exe (seconds), and on the other Mac `install.sh --update` copies only those too --
+no maps, Workshop mods or caches are looked at.
+
 On the other Mac, plug in the stick and run:
 
 ```bash

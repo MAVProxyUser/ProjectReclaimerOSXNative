@@ -4,7 +4,10 @@
 # files, your downloaded Workshop mods (maps), the client's caches/fonts and the loader's map pictures / walking graphs /
 # shader list. The stick gets ReclaimerMac/install.sh, which copies it all into place on the other Mac.
 #
-#   bash shim/tools/make-usb.sh /Volumes/<stick> [--with-profile] [--minimal] [--no-workshop] [--no-game]
+#   bash shim/tools/make-usb.sh /Volumes/<stick> [--update] [--with-profile] [--minimal] [--no-workshop] [--no-game]
+#
+#   --update        ONLY the loader, GL helper, scripts, docs, newest client exe and install.sh (seconds; no MCC files, no
+#                   Workshop mods, no caches / map pictures). Then on the other Mac: install.sh --update
 #
 #   --with-profile  also copy your Reclaimer profile (nickname, identity key). Don't play on both Macs at once with it.
 #   --minimal       only the MCC files Project Reclaimer reads (~25 GB: halo3/, Data/, MCC/Content/Paks, top-level files)
@@ -20,10 +23,10 @@
 set -e
 cd "$(dirname "$0")/../.."
 DEST="${1:-}"; shift || true
-PROFILE=0; MINIMAL=0; WORKSHOP=1; GAME=1
-for a in "$@"; do case "$a" in --with-profile) PROFILE=1;; --minimal) MINIMAL=1;; --no-workshop) WORKSHOP=0;; --no-game) GAME=0;;
+PROFILE=0; MINIMAL=0; WORKSHOP=1; GAME=1; UPDATE=0
+for a in "$@"; do case "$a" in --with-profile) PROFILE=1;; --minimal) MINIMAL=1;; --no-workshop) WORKSHOP=0;; --no-game) GAME=0;; --update) UPDATE=1; GAME=0; WORKSHOP=0;;
   *) echo "unknown option $a"; exit 1;; esac; done
-[ -n "$DEST" ] && [ -d "$DEST" ] || { echo "usage: bash shim/tools/make-usb.sh /Volumes/<stick> [--with-profile] [--minimal] [--no-workshop] [--no-game]"; exit 1; }
+[ -n "$DEST" ] && [ -d "$DEST" ] || { echo "usage: bash shim/tools/make-usb.sh /Volumes/<stick> [--update] [--with-profile] [--minimal] [--no-workshop] [--no-game]"; exit 1; }
 SUP="$HOME/Library/Application Support/ReclaimerMac"
 PFX="$SUP/prefix/drive_c"
 MCC="$PFX/Program Files/Steam/steamapps/common/Halo The Master Chief Collection"
@@ -41,7 +44,7 @@ G="$OUT/game/Halo The Master Chief Collection"
 kb(){ local t=0 x; for x in "$@"; do [ -e "$x" ] && t=$((t + $(du -sk "$x" | cut -f1))); done; echo $t; }
 delta(){ local a=$1 b=$2; [ $a -gt $b ] && echo $((a-b)) || echo 0; }
 NEED=$(delta "$(kb shim/build/peload shim/build/glhelper "$EXE")" "$(kb "$OUT/app")")
-NEED=$((NEED + $(delta "$(kb "$PFX/ReclaimerCache" "$PFX/ReclaimerContent" "$PFX/ReclaimerFonts")" "$(kb "$OUT/drive_c")") - $(kb "$PFX/ReclaimerCache/Temp")))
+[ $UPDATE = 1 ] || NEED=$((NEED + $(delta "$(kb "$PFX/ReclaimerCache" "$PFX/ReclaimerContent" "$PFX/ReclaimerFonts")" "$(kb "$OUT/drive_c")") - $(kb "$PFX/ReclaimerCache/Temp")))
 [ $WORKSHOP = 1 ] && NEED=$((NEED + $(delta "$(kb "$WS")" "$(kb "$OUT/workshop")")))
 if [ $GAME = 1 ]; then
   if [ $MINIMAL = 1 ]; then H=$(kb "$MCC/halo3" "$MCC/Data" "$MCC/MCC/Content/Paks"); else H=$(kb "$MCC"); fi
@@ -76,6 +79,7 @@ cp -p shim/tools/usb-install.sh "$APPST/install.sh.new"
 part "app (client $(basename "$EXE"))" --delete --exclude=install.sh.new "$APPST/" "$OUT/app/"
 cp "$APPST/install.sh.new" "$OUT/install.sh"; chmod +x "$OUT/install.sh"
 
+if [ $UPDATE = 0 ]; then
 echo "== Reclaimer caches and fonts"
 mkdir -p "$OUT/drive_c"
 # ReclaimerCache/Temp = the client's per-launch scratch folders (mcc-startup-*): never copied (and removed from the stick)
@@ -86,6 +90,7 @@ echo "== map pictures, walking graphs, heatmaps, the shader list (made here; sav
 mkdir -p "$OUT/support"
 for d in maptop heatmaps; do [ -d "$SUP/$d" ] && part "$d" --delete "$SUP/$d" "$OUT/support/"; done
 [ -f "$SUP/glpairs_v1.txt" ] && part "glpairs_v1.txt" "$SUP/glpairs_v1.txt" "$OUT/support/"
+fi
 
 if [ $WORKSHOP = 1 ]; then
   echo "== Workshop mods ($(ls "$WS/content/976730" 2>/dev/null | wc -l | tr -d ' ') downloaded) -- only new or changed files"
@@ -93,7 +98,7 @@ if [ $WORKSHOP = 1 ]; then
 fi
 
 # Steam's library list + MCC's manifest (tiny): how the client finds MCC by itself (a join link, the menu's MCC check)
-mkdir -p "$OUT/steam"; for f in libraryfolders.vdf appmanifest_976730.acf; do [ -f "$PFX/Program Files/Steam/steamapps/$f" ] && cp -p "$PFX/Program Files/Steam/steamapps/$f" "$OUT/steam/"; done
+[ $UPDATE = 1 ] || mkdir -p "$OUT/steam"; [ $UPDATE = 1 ] || for f in libraryfolders.vdf appmanifest_976730.acf; do [ -f "$PFX/Program Files/Steam/steamapps/$f" ] && cp -p "$PFX/Program Files/Steam/steamapps/$f" "$OUT/steam/"; done
 
 if [ $GAME = 1 ]; then
   echo "== MCC files ($([ $MINIMAL = 1 ] && echo minimal || echo full)) -- only new or changed files"
@@ -108,5 +113,7 @@ fi
 echo "== on the stick"
 du -sh "$OUT"/* | sed 's/^/   /'
 echo
-echo "Done. On the other Mac: plug in the stick, then run (again after each update: it copies only what changed)"
-echo "   bash \"/Volumes/$(basename "$DEST")/ReclaimerMac/install.sh\""
+if [ $UPDATE = 1 ]; then echo "Done (update: loader, scripts and client only). On the other Mac, plug in the stick and run"
+  echo "   bash \"/Volumes/$(basename "$DEST")/ReclaimerMac/install.sh\" --update"
+else echo "Done. On the other Mac: plug in the stick, then run (again after each update: it copies only what changed)"
+  echo "   bash \"/Volumes/$(basename "$DEST")/ReclaimerMac/install.sh\""; fi
