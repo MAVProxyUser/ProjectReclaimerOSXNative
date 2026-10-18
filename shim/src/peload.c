@@ -420,7 +420,9 @@ static int    MSABI i_QueryPerformanceFrequency(uint64_t *f){ if(f) *f=100000000
 // 0x173bb0. The mach thread port name is unique per live thread (and is what the thread dumps print as mach_tid).
 // PELOAD_TID_CONST = old behavior.
 static __thread uint32_t t_tid;   // (the engine's main thread asks ~900k times a second in a 100-player game)
-static uint32_t MSABI i_GetCurrentThreadId(void){ if(__builtin_expect(t_tid!=0,1)) return t_tid;
+// (noinline here and on the heap functions below: they are only called through import slots, and fastcall.c's dispatchers
+// must call them, not take in their SysV calls -- which would cost every fast call the xmm6-15 saves)
+static uint32_t MSABI __attribute__((noinline)) i_GetCurrentThreadId(void){ if(__builtin_expect(t_tid!=0,1)) return t_tid;
     static int k=-1; if(k<0) k=getenv("PELOAD_TID_CONST")?1:0; if(k) return 0x1000;
     return t_tid=(uint32_t)pthread_mach_thread_np(pthread_self()); }
 static uint32_t MSABI i_GetCurrentProcessId(void){ return (uint32_t)getpid(); }
@@ -590,7 +592,7 @@ static void heap_stat(int kind,uint64_t n,uint32_t fl){
         static const char*const nm[6]={"<1K","1-32K","32-256K","256K-1M","1-8M",">8M"};
         for(int kk=0;kk<2;kk++){ k+=snprintf(m+k,sizeof m-k,"%s",kk?" | realloc":"alloc"); for(int i=0;i<6;i++) k+=snprintf(m+k,sizeof m-k," %s %llu/%.1f",nm[i],(unsigned long long)g_hs_n[kk][i],g_hs_b[kk][i]/1048576.0); }
         k+=snprintf(m+k,sizeof m-k," | zeroed %llu\n",(unsigned long long)g_hs_zero); (void)!write(2,m,k); memset(g_hs_n,0,sizeof g_hs_n); memset(g_hs_b,0,sizeof g_hs_b); g_hs_zero=0; } }
-static void*  MSABI i_HeapAlloc(void *h, uint32_t fl, uint64_t n){ (void)h; heap_stat(0,n,fl);
+static void*  MSABI __attribute__((noinline)) i_HeapAlloc(void *h, uint32_t fl, uint64_t n){ (void)h; heap_stat(0,n,fl);
     if(heapdbg()){ void*p=hd_alloc(n?n:1); if(p&&(fl&8)) memset(p,0,n); return p; }
     void*p; if(hg_want(n)){ p=hg_alloc(n); if(p) hg_add(p,n); } else p=malloc(n?n:1);
     if(p&&(fl&8)) memset(p,0,n);
@@ -601,7 +603,7 @@ static void*  MSABI i_HeapAlloc(void *h, uint32_t fl, uint64_t n){ (void)h; heap
         static int ns; if(ns++<3){ uint64_t*sp=(uint64_t*)__builtin_frame_address(0); int found=0;   // exe return addresses on the stack
             for(int i=0;i<2000 && found<14;i++){ uint64_t v=sp[i]; if(v>=0x140001000ULL&&v<0x141aae000ULL){ char b[48]; int q=snprintf(b,sizeof b,"     exe+0x%llx\n",(unsigned long long)(v-0x140000000ULL)); (void)!write(2,b,q); found++; } } } } }
     return p; }
-static void*  MSABI i_HeapReAlloc(void *h, uint32_t fl, void *p, uint64_t n){ (void)h;(void)fl; heap_stat(1,n,0);
+static void*  MSABI __attribute__((noinline)) i_HeapReAlloc(void *h, uint32_t fl, void *p, uint64_t n){ (void)h;(void)fl; heap_stat(1,n,0);
     if(heapdbg()){ HDBlk*b=hd_blk(p); void*q=hd_alloc(n?n:1); if(q&&p){ uint64_t cp = b? (b->size<n?b->size:n) : n; memcpy(q,p,cp); } if(b) hd_free(p); return q; }
     if(heapguard()){ void*q = hg_want(n)? hg_alloc(n) : malloc(n?n:1); if(q&&hg_want(n)) hg_add(q,n);
         if(p&&q){ uint64_t osz=hg_del(p);                 // osz>0 => old block was guarded
@@ -609,13 +611,17 @@ static void*  MSABI i_HeapReAlloc(void *h, uint32_t fl, void *p, uint64_t n){ (v
             memcpy(q,p,cp); if(!osz) free(p); }           // guarded old -> leak; malloc'd old -> free
         return q; }
     return realloc(p,n?n:1); }
-static int    MSABI i_HeapFree(void *h, uint32_t fl, void *p){ (void)h;(void)fl;
+static int    MSABI __attribute__((noinline)) i_HeapFree(void *h, uint32_t fl, void *p){ (void)h;(void)fl;
     if(heapdbg()){ hd_free(p); return 1; }
     if(heapguard()){ if(!hg_del(p)) free(p); return 1; }   // guarded -> leak; else free
     free(p); return 1; }
-static uint64_t MSABI i_HeapSize(void *h, uint32_t fl, void *p){ (void)h;(void)fl;
+static uint64_t MSABI __attribute__((noinline)) i_HeapSize(void *h, uint32_t fl, void *p){ (void)h;(void)fl;
     if(heapdbg()){ HDBlk*b=hd_blk(p); return b? b->size : 0; }
     if(heapguard()) return 0; return p? malloc_size(p) : 0; }
+// the fast small-block heap's arena (fastcall.c, PELOAD_FASTCALL=heap; size 0 = not in use): its blocks can also reach
+// LocalFree / CoTaskMemFree (one heap on Windows), which then hand them back to it
+static uint8_t* g_fch_base; static uint64_t g_fch_size; static void fch_free_any(void*p);
+static inline void free_or_fch(void*p){ if((uint64_t)((uintptr_t)p-(uintptr_t)g_fch_base)<g_fch_size) fch_free_any(p); else free(p); }
 static void*  MSABI i_HeapCreate(uint32_t o, uint64_t a, uint64_t b){ (void)o;(void)a;(void)b; return (void*)0x48454150; }
 
 // Virtual memory backed by mmap
@@ -2373,8 +2379,8 @@ static int name_has(const char*s,const char*sub){ if(!s)return 0; for(;*s;s++){ 
 static int   MSABI i_CoInitializeEx(void*p,uint32_t m){ (void)p;(void)m; return HR_OK; }
 static void  MSABI i_CoUninitialize(void){ }
 static void* MSABI i_CoTaskMemAlloc(uint64_t n){ return malloc(n?n:1); }
-static void  MSABI i_CoTaskMemFree(void*p){ free(p); }
-static int   MSABI i_PropVariantClear(void*p){ if(p){ uint16_t vt=*(uint16_t*)p; if(vt==31||vt==30) free(*(void**)((uint8_t*)p+8)); memset(p,0,24); } return HR_OK; }   // VT_LPWSTR/LPSTR own CoTaskMem strings
+static void  MSABI i_CoTaskMemFree(void*p){ free_or_fch(p); }
+static int   MSABI i_PropVariantClear(void*p){ if(p){ uint16_t vt=*(uint16_t*)p; if(vt==31||vt==30) free_or_fch(*(void**)((uint8_t*)p+8)); memset(p,0,24); } return HR_OK; }   // VT_LPWSTR/LPSTR own CoTaskMem strings
 static void* wasapi_enumerator(void); // wasapi.c
 static int   MSABI i_CoCreateInstance(GUID_*clsid, void*outer, uint32_t ctx, GUID_*iid, void**ppv){
     (void)outer;(void)ctx;(void)iid;
@@ -8733,7 +8739,7 @@ static int  MSABI i_CopyFileExW(const uint16_t*src,const uint16_t*dst,void*prog,
 static int  MSABI i_CopyFileW(const uint16_t*src,const uint16_t*dst,int failIfExists){ (void)failIfExists; return i_CopyFileExW(src,dst,0,0,0,0); }
 static int  MSABI i_CreateHardLinkW(const uint16_t*lnk,const uint16_t*tgt,void*sec){ (void)sec; char l[2048],t[2048]; win2unix(lnk,l,sizeof l); win2unix(tgt,t,sizeof t); mkparents(l); if(link(t,l)==0) return 1; return i_CopyFileExW(tgt,lnk,0,0,0,0); }
 static void* MSABI i_LocalAlloc(uint32_t fl,uint64_t n){ void*p=malloc(n?n:1); if(p&&(fl&0x40)) memset(p,0,n); return p; }
-static void* MSABI i_LocalFree(void*p){ free(p); return 0; }
+static void* MSABI i_LocalFree(void*p){ free_or_fch(p); return 0; }
 // DPAPI: no Windows user to bind to, so seal == copy (round-trips correctly,
 // which is all the local community key needs). DATA_BLOB = {u32 cb; u8* p;}.
 typedef struct { uint32_t cb; uint8_t *p; } DBLOB;
@@ -9488,6 +9494,7 @@ static int MSABI i_MessageBoxW(void*h,const uint16_t*text,const uint16_t*cap,uin
     char t[1024],c[256]; int i=0; for(; text&&text[i]&&i<1023;i++) t[i]=(char)(text[i]<128?text[i]:'?'); t[i]=0;
     int j=0; for(; cap&&cap[j]&&j<255;j++) c[j]=(char)(cap[j]<128?cap[j]:'?'); c[j]=0;
     ws("  [MessageBoxW] <"); ws(c[0]?c:"(no title)"); ws("> "); ws(t[0]?t:"(no text)"); ws("\n"); return 1; }
+#include "fastcall.c"   // PELOAD_FASTCALL: fast paths for the main thread's hottest imports (fc_bind below)
 // Named dispatch: returns a real impl for a known name, else NULL.
 static void *resolve_impl(const char *fn){
     struct { const char *n; void *f; } T[] = {
@@ -9948,7 +9955,7 @@ static void *resolve_impl(const char *fn){
         {"GetModuleFileNameA",(void*)i_GetModuleFileNameA},
         {0,0}
     };
-    for(int i=0; T[i].n; i++) if(!strcmp(T[i].n, fn)) return T[i].f;
+    for(int i=0; T[i].n; i++) if(!strcmp(T[i].n, fn)) return fc_bind(T[i].f);   // (fc_bind: the original unless PELOAD_FASTCALL / PELOAD_AB=fastcall)
     return 0;
 }
 

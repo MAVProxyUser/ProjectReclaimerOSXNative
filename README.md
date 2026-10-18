@@ -409,6 +409,7 @@ resized, and can go full screen (green button or Ctrl-Cmd-F). Developer and diag
 | `shim/src/hitbox.c` / `shim/src/stats.c` | overlay (hitboxes, tracers, labels, visible only, zones, frame capture) / live stats over HTTP |
 | `shim/src/stats_page.html` | the stats page (embedded at build time; served from the file in a source checkout) |
 | `shim/src/rec.m` / `shim/tools/rec-test.sh` | clip recording (mp4 / m4a from the stats page) / its offline test |
+| `shim/src/fastcall.c` / `shim/tools/callcost.sh` | opt-in fast paths for the game's hottest Win32 calls (`PELOAD_FASTCALL`) / their per-call costs under Rosetta and checks |
 | `shim/play.sh` / `shim/build.sh` | launcher / build script |
 | `shim/target.sh` / `shim/dedicated.sh` | windowless second player / local dedicated server |
 | `shim/tools/servers.sh` / `shim/tools/maptop.sh` | busiest public servers and their mods / top-down map pictures for the heatmap |
