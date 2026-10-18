@@ -973,6 +973,7 @@ typedef struct { void** vtbl; uint32_t kind; uint32_t rowpitch; uint64_t size; v
     int glsrgb;                   // texture: GL storage is SRGB8_ALPHA8 (decode per view; write-encode per RTV)
     int glhasmips;                // texture: a real GL mip chain was uploaded/generated
     uint32_t mips, arr, depth, misc, bindf; // texture desc: MipLevels (resolved), ArraySize, Depth (3D), MiscFlags, BindFlags
+    uint8_t usage, cpuacc;        // texture desc: Usage (0 default, 1 immutable, 2 dynamic, 3 staging), CPUAccessFlags>>16 (1 write, 2 read)
     unsigned gltarget;            // texture: GL target of gltex (2D / 2D_ARRAY / CUBE_MAP / CUBE_MAP_ARRAY / 3D)
     unsigned gldsatt;             // depth-stencil resource: GL attachment point of gltex (DEPTH / DEPTH_STENCIL), 0 = not a depth texture
     uint32_t vkind, vfmt, vdim, vmip, vfirst, vcount; // view: 1=SRV 2=UAV 3=RTV 4=DSV, desc Format, ViewDimension, mip, first slice, slices
@@ -1049,6 +1050,7 @@ static uint8_t g_d3dscratch[1<<20];  // fallback Map target
 // audit: [d3dobj] every 30 s under PELOAD_D3DGL_PROF or PELOAD_D3DOBJ_LOG (live objects, CPU bytes, by kind).
 // PELOAD_D3D_NOFREE=1 = the old behaviour (nothing is ever freed).
 static volatile uint64_t g_d3do_n[8], g_d3do_bytes[8], g_d3do_nfree[8], g_d3do_bfree[8], g_d3d_underflow, g_d3d_pending, g_d3d_keptdead, g_d3d_keptdead_il, g_d3d_keptdead_b;
+static int d3d_texclass(char*m,size_t n);   // (after the live registry)
 static void d3dobj_log(void){ static double tl; double now=mono_s(); if(now-tl<30.0) return; tl=now;
     if(!getenv("PELOAD_D3DOBJ_LOG") && !getenv("PELOAD_D3DGL_PROF")) return;
     malloc_statistics_t ms; memset(&ms,0,sizeof ms); malloc_zone_statistics(NULL,&ms);   // every zone
@@ -1056,7 +1058,8 @@ static void d3dobj_log(void){ static double tl; double now=mono_s(); if(now-tl<3
     for(int i=0;i<8;i++){ if(!g_d3do_n[i]) continue; uint64_t n=g_d3do_n[i]-g_d3do_nfree[i], b=g_d3do_bytes[i]-g_d3do_bfree[i]; tn+=n; tb+=b; fn+=g_d3do_nfree[i]; fb+=g_d3do_bfree[i];
         k+=snprintf(m+k,sizeof m-k," kind%d %llu (%.1f MB)",i,(unsigned long long)n,b/1048576.0); }
     k+=snprintf(m+k,sizeof m-k," | total %llu, %.1f MB | freed %llu (%.1f MB), pending %llu, underflows %llu | released but kept: shaders %llu (%.1f MB bytecode), input layouts %llu | VirtualFree released %llu (%.1f MB), unknown %llu | VirtualAlloc live %.0f MB | file views live %.0f MB (%llu unmapped) | malloc in use %.0f MB of %.0f MB\n",(unsigned long long)tn,tb/1048576.0,
-        (unsigned long long)fn,fb/1048576.0,(unsigned long long)g_d3d_pending,(unsigned long long)g_d3d_underflow,(unsigned long long)g_d3d_keptdead,g_d3d_keptdead_b/1048576.0,(unsigned long long)g_d3d_keptdead_il,(unsigned long long)g_va_rel_n,g_va_rel_b/1048576.0,(unsigned long long)g_va_unknown,g_va_live/1048576.0,g_mv_live/1048576.0,(unsigned long long)g_mv_unmapped,(double)ms.size_in_use/1048576.0,(double)ms.size_allocated/1048576.0); (void)!write(2,m,k); }
+        (unsigned long long)fn,fb/1048576.0,(unsigned long long)g_d3d_pending,(unsigned long long)g_d3d_underflow,(unsigned long long)g_d3d_keptdead,g_d3d_keptdead_b/1048576.0,(unsigned long long)g_d3d_keptdead_il,(unsigned long long)g_va_rel_n,g_va_rel_b/1048576.0,(unsigned long long)g_va_unknown,g_va_live/1048576.0,g_mv_live/1048576.0,(unsigned long long)g_mv_unmapped,(double)ms.size_in_use/1048576.0,(double)ms.size_allocated/1048576.0); (void)!write(2,m,k);
+    char t[700]; int kt=d3d_texclass(t,sizeof t); if(kt>0) (void)!write(2,t,kt); }
 // Registry of live D3DObjs (open addressing, linear probing): AddRef/Release only touch pointers found here, so a
 // static object, a double release or a stray pointer is ignored instead of corrupting memory.
 static pthread_mutex_t g_live_mx=PTHREAD_MUTEX_INITIALIZER; static void** g_live; static size_t g_live_cap, g_live_n;
@@ -1076,6 +1079,34 @@ static void live_del(const void*p){ pthread_mutex_lock(&g_live_mx);
             for(size_t j=(s+1)&(g_live_cap-1); g_live[j]; j=(j+1)&(g_live_cap-1)){ size_t h=live_slot(g_live[j],g_live_cap);
                 if(((j-h)&(g_live_cap-1)) >= ((j-s)&(g_live_cap-1))){ g_live[s]=g_live[j]; g_live[j]=0; s=j; } } } }
     pthread_mutex_unlock(&g_live_mx); }
+// audit: live textures' CPU copies by class (allocated MB / resident MB from mincore), the second [d3dobj] line: which
+// copies could go once uploaded (IMMUTABLE ones; render targets / depth / UAVs are GPU-written and their copy is dead weight)
+// BC textures: decode to RGBA8 (1) or upload the blocks with their mip chain (0, the default since 2026-10-18;
+// PELOAD_D3DGL_BCDECODE=1 = decode). PELOAD_AB=bcdec:<secs> flips it in a match: every live BC texture is marked dirty,
+// so each re-uploads the other way at its next bind (the decode phase pays its own decode burst).
+static volatile int g_bc_dec=-1;
+static int bc_dec_on(void){ if(g_bc_dec<0) g_bc_dec=getenv("PELOAD_D3DGL_BCDECODE")?1:0; return g_bc_dec; }
+static int is_bc(uint32_t f);
+int ab_bcdec(int set){ if(set<0) return bc_dec_on(); g_bc_dec=set?1:0; int n=0;
+    pthread_mutex_lock(&g_live_mx);
+    for(size_t i=0;i<g_live_cap;i++){ D3DObj*o=g_live[i]; if(!o || o->vkind || o->kind!=2 || !o->gltex || !is_bc(o->fmt)) continue; o->dpart=0; o->gl_dirty=1; n++; }
+    pthread_mutex_unlock(&g_live_mx);
+    char m[120]; int k=snprintf(m,sizeof m,"  [ab] bcdec %s: %d BC textures re-upload\n",set?"on (decode)":"off (compressed)",n); (void)!write(2,m,k); return set; }
+static int d3d_texclass(char*m,size_t n){
+    uint64_t cnt[6]={0}, al[6]={0}, rs[6]={0}; long pg=sysconf(_SC_PAGESIZE); static unsigned char*vec; static size_t vecn;
+    pthread_mutex_lock(&g_live_mx);
+    for(size_t i=0;i<g_live_cap;i++){ D3DObj*o=g_live[i]; if(!o || o->vkind || o->kind<2 || o->kind>4 || !o->data || !o->size) continue;
+        int c=(o->bindf&0x60)?2:(o->bindf&0x80)?3:o->usage==1?0:o->usage==2?4:o->usage==3?5:1;
+        cnt[c]++; al[c]+=o->size;
+        uintptr_t a=(uintptr_t)o->data & ~(uintptr_t)(pg-1); size_t len=(size_t)((uintptr_t)o->data+o->size-a), np=(len+pg-1)/pg;
+        if(np>vecn){ free(vec); vec=malloc(np); vecn=vec?np:0; } if(!vec) continue;
+        if(!mincore((void*)a,len,(char*)vec)){ uint64_t r=0; for(size_t q=0;q<np;q++) if(vec[q]&1) r++; rs[c]+=r*(uint64_t)pg; } }
+    pthread_mutex_unlock(&g_live_mx);
+    static const char*const lab[6]={"immutable","default","rt/ds","uav","dynamic","staging"};
+    int k=snprintf(m,n,"  [d3dobj] texture CPU copies (count, MB allocated / resident):");
+    for(int c=0;c<6;c++) if(cnt[c]) k+=snprintf(m+k,n-k," %s %llu %.0f/%.0f",lab[c],(unsigned long long)cnt[c],al[c]/1048576.0,rs[c]/1048576.0);
+    k+=snprintf(m+k,n-k,"\n"); return k; }
+
 static D3DObj* d3dobj(void** vt, uint32_t kind, uint64_t size){
     D3DObj* o=calloc(1,sizeof *o); o->vtbl=vt; o->kind=kind; o->size=size; o->refs=1; o->keep=1; live_add(o);
     __atomic_add_fetch(&g_d3do_n[kind&7],1,__ATOMIC_RELAXED); __atomic_add_fetch(&g_d3do_bytes[kind&7],size,__ATOMIC_RELAXED);
@@ -1295,7 +1326,7 @@ static void tex_init_copy(D3DObj*tx,const void*init){
     tx->gl_dirty=1; tx->dpart=0; }
 static int MSABI dev_CreateTexture1D(void*t,const void*d,const void*init,void**pp){ (void)t;
     uint32_t w=d?*(const uint32_t*)d:1, arr=d?*(const uint32_t*)((const char*)d+8):1, f=d?*(const uint32_t*)((const char*)d+12):0;
-    D3DObj*tx=mktex(w,1,arr,f,3); if(tx) tx->keep=0; if(tx&&d){ tx->arr=arr?arr:1; tx->depth=1; tx->mips=*(const uint32_t*)((const char*)d+4); tx->bindf=*(const uint32_t*)((const char*)d+20); tx->misc=*(const uint32_t*)((const char*)d+28); }
+    D3DObj*tx=mktex(w,1,arr,f,3); if(tx) tx->keep=0; if(tx&&d){ tx->arr=arr?arr:1; tx->depth=1; tx->mips=*(const uint32_t*)((const char*)d+4); tx->bindf=*(const uint32_t*)((const char*)d+20); tx->misc=*(const uint32_t*)((const char*)d+28); tx->usage=(uint8_t)*(const uint32_t*)((const char*)d+16); tx->cpuacc=(uint8_t)(*(const uint32_t*)((const char*)d+24)>>16); }
     if(tx){ tx->mips=tex_nmips(tx); if(!getenv("PELOAD_NO_TEXINIT")) tex_init_copy(tx,init); }
     if(pp)*pp=tx; return HR_OK; }
 static void d3dtrace(int i,const char*nm); // fwd
@@ -1326,7 +1357,7 @@ static int MSABI dev_CreateTexture2D(void*t,const void*d,const void*init,void**p
                 fclose(fp); char mm[200]; int kk=snprintf(mm,sizeof mm,"  [tex] dumped -> %s\n",p); (void)!write(2,mm,kk); } }
     }
     D3DObj* tx=mktex(w,h,arr,f,2); if(tx) tx->keep=0;
-    if(tx&&d){ tx->arr=arr?arr:1; tx->depth=1; tx->mips=*(const uint32_t*)((const char*)d+8); tx->bindf=*(const uint32_t*)((const char*)d+32); tx->misc=*(const uint32_t*)((const char*)d+40); }
+    if(tx&&d){ tx->arr=arr?arr:1; tx->depth=1; tx->mips=*(const uint32_t*)((const char*)d+8); tx->bindf=*(const uint32_t*)((const char*)d+32); tx->misc=*(const uint32_t*)((const char*)d+40); tx->usage=(uint8_t)*(const uint32_t*)((const char*)d+28); tx->cpuacc=(uint8_t)(*(const uint32_t*)((const char*)d+36)>>16); }
     if(tx) tx->mips=tex_nmips(tx);                                            // MipLevels 0 = full chain
     if(getenv("PELOAD_TRACE_TEXPATH") && w>=512 && h>=512 && ((f>=70&&f<=84)||(f>=94&&f<=99))){ char m[128]; int k=snprintf(m,sizeof m,"  [texpath] CREATE %ux%u f%u init=%s obj=%p\n",w,h,f,init?"DATA":"NULL",(void*)tx); (void)!write(2,m,k); }
     // PELOAD_WATCH_TEX: pick the first 1024x1024 BC texture and log its ENTIRE data history
@@ -1354,7 +1385,7 @@ static int MSABI dev_CreateTexture2D(void*t,const void*d,const void*init,void**p
     if(pp)*pp=tx; return HR_OK; }
 static int MSABI dev_CreateTexture3D(void*t,const void*d,const void*init,void**pp){ (void)t;
     uint32_t w=d?*(const uint32_t*)d:1, h=d?*(const uint32_t*)((const char*)d+4):1, dp=d?*(const uint32_t*)((const char*)d+8):1, f=d?*(const uint32_t*)((const char*)d+16):0;
-    D3DObj*tx=mktex(w,h,dp,f,4); if(tx) tx->keep=0; if(tx&&d){ tx->arr=1; tx->depth=dp?dp:1; tx->mips=*(const uint32_t*)((const char*)d+12); tx->bindf=*(const uint32_t*)((const char*)d+24); tx->misc=*(const uint32_t*)((const char*)d+32); }
+    D3DObj*tx=mktex(w,h,dp,f,4); if(tx) tx->keep=0; if(tx&&d){ tx->arr=1; tx->depth=dp?dp:1; tx->mips=*(const uint32_t*)((const char*)d+12); tx->bindf=*(const uint32_t*)((const char*)d+24); tx->misc=*(const uint32_t*)((const char*)d+32); tx->usage=(uint8_t)*(const uint32_t*)((const char*)d+20); tx->cpuacc=(uint8_t)(*(const uint32_t*)((const char*)d+28)>>16); }
     if(tx){ tx->mips=tex_nmips(tx); if(!getenv("PELOAD_NO_TEXINIT")) tex_init_copy(tx,init); }
     if(getenv("PELOAD_TRACE_TEXDIM")){ char m[160]; int k=snprintf(m,sizeof m,"  [texdim] CREATE3D %ux%ux%u f%u mips=%u init=%p\n",w,h,dp,f,tx?tx->mips:0,init); (void)!write(2,m,k); }
     if(pp)*pp=tx; return HR_OK; }
@@ -4935,12 +4966,15 @@ static void d3dgl_ensure_tex(D3DObj*o){
                 if(frac>=thresh){ uw=mw; uh=mh; uoff=moff; usz=msz; picked=1; baselvl=(int)lvl; break; }   // highest-res complete-enough
                 if(mw==1&&mh==1) break; }
             if(!picked){ uw=bw; uh=bh; uoff=boff; usz=bsz; baselvl=bbl; }   // nothing met thresh -> use the most-complete mip
-            // PELOAD_D3DGL_BCDECODE (default ON): Apple GL-on-Metal CANNOT sample a COMPRESSED texture with
-            // any mipmap min-filter (returns BLACK), so heavily-tiled terrain textures alias badly (blue
-            // moiré) with no way to mip them while compressed. Fix: DECODE the BC block to RGBA8 in the shim,
-            // upload uncompressed, glGenerateMipmap, trilinear -> proper anti-aliasing. PELOAD_D3DGL_NOBCDECODE
-            // keeps the raw compressed upload (single level, no mips).
-            if(!GENV1("PELOAD_D3DGL_NOBCDECODE")){
+            // Two ways up. DEFAULT since 2026-10-18: the blocks as they are, with the asset's own mip chain down to 4x4
+            // (GL_TEXTURE_MAX_LEVEL capped there, so the texture is mipmap-complete) -- 4-8x less GPU memory than RGBA8
+            // (savannah_sandbox: GL helper 1.0 GB instead of 5.1 GB) and no CPU decode. FALLBACK, and the old default
+            // (PELOAD_D3DGL_BCDECODE=1): decode the base level to RGBA8 here and glGenerateMipmap. (The old note that
+            // Apple's GL samples compressed textures with a mipmap filter as BLACK predates the MAX_LEVEL cap: an
+            // incomplete chain samples black.)
+            int dec_now=bc_dec_on(), comp_done=0;
+          bc_decode:
+            if(dec_now && !GENV1("PELOAD_D3DGL_NOBCDECODE")){
                 uint8_t*rgba=dg_bc_decode(o->fmt,(const uint8_t*)o->data+uoff,(size_t)(o->size-uoff),(int)uw,(int)uh);
                 if(rgba){ static void(*genmip)(unsigned); static int gmi; if(!gmi){ genmip=dlsym(RTLD_DEFAULT,"glGenerateMipmap"); gmi=1; }
                     if(gerr) gerr();
@@ -4969,15 +5003,22 @@ static void d3dgl_ensure_tex(D3DObj*o){
                     // decode-upload failed -> fall through to the compressed path
                 }
             }
-            // Upload a MIP CHAIN from the base (GL level 0) down to 1x1 (DXGI levels baselvl, baselvl+1, ...
+            // Upload a MIP CHAIN from the base (GL level 0) down to 4x4 (DXGI levels baselvl, baselvl+1, ...
             // — the smaller mips stream first so they're complete). A real chain + trilinear filtering kills
             // the aliasing MOIRÉ on the heavily-tiled (8-48x) terrain/normal textures. PELOAD_D3DGL_NOMIPCHAIN
-            // uploads only the base level. (BC can't glGenerateMipmap, so upload the asset's own mips.)
-            unsigned e=0; int gl_lvl=0; int domip=GENV1("PELOAD_D3DGL_MIPCHAIN")?1:0;
+            // uploads only the base level. (BC can't glGenerateMipmap, so upload the asset's own mips.) No mip-skip
+            // here (up_base1 stays 0): the smaller levels are uploaded, so writes to them matter.
+            if(!comp_done){ comp_done=1;
+            unsigned e=0; int gl_lvl=0; int domip=GENV1("PELOAD_D3DGL_NOMIPCHAIN")?0:1; uint64_t cbytes=0;
+            // sRGB storage only for the _SRGB formats. PELOAD_D3DGL_BCSRGB=1 = the decode path's rule (BC1-3 all in sRGB
+            // storage, UNORM views sampling it with the decode skipped): with compressed storage that made big white bloom
+            // blobs (2026-10-18) -- UNORM data such as normal maps evidently got decoded as sRGB
+            static int bcsrgb=-1; if(bcsrgb<0) bcsrgb=GENV1("PELOAD_D3DGL_BCSRGB")?1:0;
+            int srgbst=bcsrgb && !nosrgb() && o->fmt>=70 && o->fmt<=78; unsigned cif=bcif; if(srgbst) cif=o->fmt<=72?0x8C4D:o->fmt<=75?0x8C4E:0x8C4F;
             for(int dl=baselvl; dl<15; dl++){ uint32_t mw=w>>dl; if(!mw)mw=1; uint32_t mh=h>>dl; if(!mh)mh=1;
                 uint64_t msz=0,moff=tex_sub_off(o->w,o->h,o->fmt,dl,&msz); if(!msz||moff+msz>o->size) break;
                 if(gerr) gerr();   // clear before each level
-                cti(GLE_TEX2D,gl_lvl,bcif,(int)mw,(int)mh,0,(int)msz,(uint8_t*)o->data+moff);
+                cti(GLE_TEX2D,gl_lvl,cif,(int)mw,(int)mh,0,(int)msz,(uint8_t*)o->data+moff); cbytes+=msz;
                 unsigned ee=gerr?gerr():0;
                 // The BASE level (gl_lvl 0) failing is fatal (fall back); a smaller mip failing (some
                 // drivers reject BC mips < 4x4) just TRUNCATES the chain -- keep the good levels.
@@ -4992,9 +5033,17 @@ static void d3dgl_ensure_tex(D3DObj*o){
                                         :0x2703/*LINEAR_MIPMAP_LINEAR*/;
                 G.TexParameteri(GLE_TEX2D,0x2801/*MIN*/, minf);
                 G.TexParameteri(GLE_TEX2D,0x813D/*MAX_LEVEL*/, gl_lvl>0?gl_lvl-1:0); o->glhasmips=(gl_lvl>1);
+                if(gl_lvl>1){   // anisotropic filtering + PELOAD_D3DGL_LODBIAS, as on the decoded path
+                    static void(*tpf)(unsigned,unsigned,float); static void(*gfv)(unsigned,float*); static int qa; static float qmax;
+                    if(!qa){ qa=1; tpf=dlsym(RTLD_DEFAULT,"glTexParameterf"); gfv=dlsym(RTLD_DEFAULT,"glGetFloatv"); qmax=1; if(gfv) gfv(0x84FF/*MAX_TEXTURE_MAX_ANISOTROPY*/,&qmax); if(qmax<1)qmax=1; }
+                    if(!GENV1("PELOAD_D3DGL_NOANISO")){ float ma=16.0f; if(ma>qmax)ma=qmax; if(tpf) tpf(GLE_TEX2D,0x84FE/*TEXTURE_MAX_ANISOTROPY*/,ma); }
+                    if(GENV1("PELOAD_D3DGL_LODBIAS")&&tpf) tpf(GLE_TEX2D,0x8501/*TEXTURE_LOD_BIAS*/,(float)atof(GENV1("PELOAD_D3DGL_LODBIAS"))); }
             }
             if(GENV1("PELOAD_TRACE_TEXUP")){ static int bc; if(bc++<40){ char b[180]; int k=snprintf(b,sizeof b,"  [texup-bc] %dx%d fmt=%u ifmt=0x%x base=%ux%u@%llu(dl%d) levels=%d err=0x%x%s\n",w,h,o->fmt,bcif,uw,uh,(unsigned long long)uoff,baselvl,gl_lvl,e,e?" (FALLBACK)":""); (void)!write(2,b,k);} }
-            if(!e){ o->glsrgb=(o->fmt==72||o->fmt==75||o->fmt==78); o->gl_uploaded=1; o->gl_dirty=0; dg_gltex_dump((int)uw,(int)uh,o->fmt); return; } // success: BPTC may fail on GL4.1 -> fall through
+            if(!e){ o->glsrgb=srgbst || o->fmt==72||o->fmt==75||o->fmt==78; o->gl_uploaded=1; o->gl_dirty=0; o->dpart=0;
+                g_tx_bytes+=cbytes; if(tx_t0) g_tx_ms+=(mono_s()-tx_t0)*1000;
+                dg_gltex_dump((int)uw,(int)uh,o->fmt); return; } // success: BPTC may fail on GL4.1 -> decode instead
+            if(!dec_now){ dec_now=1; goto bc_decode; } }
         }
     }
     // Only upload real pixels when the backing buffer actually holds >= w*h*4 bytes; otherwise

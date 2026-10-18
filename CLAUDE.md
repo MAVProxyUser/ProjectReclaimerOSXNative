@@ -111,6 +111,13 @@ sleeps (`PELOAD_PRESENT_HIDDEN=1` keeps presenting -- needed for SHOTWIN capture
 First-use shader stalls: every linked VS/PS pair is recorded (by bytecode hash) in
 `~/Library/Application Support/ReclaimerMac/glpairs_v1.txt` and pre-built during the next loading
 screen (`PELOAD_D3DGL_NOPRELINK`; `PELOAD_D3DGL_PROGTIME` logs build costs).
+BC textures (2026-10-18): uploaded COMPRESSED with the asset's own mip chain down to 4x4, GL_TEXTURE_MAX_LEVEL capped there
+(an incomplete chain samples black -- that, not compression, was the old "compressed + mipmaps = black" finding). GL helper
+5.0-5.3 -> 3.0 GB on savannah_sandbox 5 min in, texture upload work on the GL thread 1.5 s -> 0.02 s. PELOAD_D3DGL_BCDECODE=1 =
+the old RGBA8 decode + glGenerateMipmap (also the fallback when a compressed upload fails); PELOAD_D3DGL_BCSRGB=1 stores BC1-3
+UNORM as sRGB like the decode path (made big white bloom blobs: UNORM data such as normal maps got decoded); PELOAD_AB=bcdec:<secs>.
+The [d3dobj] audit's second line splits textures' CPU copies by class: halo3 makes no IMMUTABLE textures (2.2k DEFAULT ones,
+1.9 GB resident on savannah_sandbox, streamed by copies), so freeing copies after upload needs a redesign (shim/docs/PERF-PLAN.md).
 Correctness switches added 2026-10-16: `PELOAD_D3DGL_NOINTIN` (integer vertex attributes as floats --
 the old cause of one-frame white flashes / exploded skinned geometry), `PELOAD_D3DGL_NOQUERY`
 (occlusion queries), `PELOAD_D3DGL_NOCANON` (identical-bytecode shader sharing).

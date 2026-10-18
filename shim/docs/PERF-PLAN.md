@@ -332,6 +332,29 @@ A visible client in a full 60-player BTB (Standoff, ~3,500 draws/frame): median 
 instead (section above). Next: the main-thread levers above; the particle compute natively (the GPU transform-feedback
 version works but is slower, below); cut the link-time round trips further (the link status is still one per program).
 
+#### Texture memory (2026-10-18)
+
+The Mac this runs on has 36 GB; in a 100-player Workshop game the worker sat at 9-11 GB and the GL helper at 5-8.7 GB
+(Hugegrass), leaving little for anything else (the walking-graph builder pushed it into swap once).
+
+- **Helper (GPU) side: BC textures upload compressed now.** Before, every BC1-5 texture was decoded to RGBA8 on the GL thread
+  and mipmapped with glGenerateMipmap: 4x (BC3/BC5) to 8x (BC1/BC4) the GPU memory of the blocks. They now go up as they are,
+  with the asset's own mip chain down to 4x4 (GL_TEXTURE_MAX_LEVEL capped there: without the cap the chain is incomplete and
+  samples black -- the reason the decode was added). savannah_sandbox, same server, 5 min after gameplay starts: helper
+  5.0-5.3 GB -> 3.0 GB; texture uploads 1,367 decoded / 1.86 GB / 1,549 ms of GL-thread time -> 0 / 0.53 GB / 21 ms.
+  sRGB: only the _SRGB formats get sRGB storage. Putting BC1-3 UNORM in sRGB storage too (the decode path's rule,
+  PELOAD_D3DGL_BCSRGB=1) gave big white bloom blobs: the decode-skip for UNORM views evidently doesn't hold for compressed
+  sRGB storage, so normal maps and the like were linearised. Frame rate: PELOAD_AB=bcdec in-match A/B (below).
+- **Worker (CPU) side: the CPU copies stay.** The audit's second [d3dobj] line (PELOAD_D3DOBJ_LOG=1) splits textures' CPU
+  copies by class with mincore residency: savannah_sandbox 1 IMMUTABLE texture (0 MB), 2,229-3,485 DEFAULT ones (2.8-4.6 GB
+  allocated, 1.9-3.4 GB resident), 121 render targets / depth (0.7 GB / 0.4 GB). halo3 streams mips into DEFAULT textures with
+  CopySubresourceRegion and the loader re-uploads from the CPU copy (it also picks the most complete mip from it), copies
+  between textures and the CPU particle interpreter read it -- so a copy can only go once a texture is never written again,
+  which the API doesn't say. Options if it matters: upload streamed subresources straight to GL (glCompressedTexSubImage2D
+  per level) and keep only the levels not yet uploaded; or move a texture's copy to a file-backed private mapping after
+  upload so its pages can be evicted. Render-target copies (0.4 GB resident) are dead weight but sampled-before-render and the
+  small GPU->CPU readbacks into them need care.
+
 #### GPU particle compute (2026-10-17, experimental, OFF: PELOAD_CS_GPU=1)
 
 macOS GL stops at 4.1 (Apple's own driver, not MCC: MCC is D3D11 only): no compute shaders, so halo3's 7 particle kernels
