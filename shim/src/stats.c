@@ -380,6 +380,34 @@ static void st_addr_refresh(void){   // snapshot thread, once per snapshot
         else { static const uint8_t v4m[12]={0,0,0,0,0,0,0,0,0,0,0xff,0xff}; if(!memcmp(x+0x55,v4m,12)) inet_ntop(AF_INET,x+0x55+12,a->ip,sizeof a->ip); else inet_ntop(AF_INET6,x+0x55,a->ip,sizeof a->ip); } }
     memcpy(g_st_addr,out,sizeof(StAddr)*(size_t)n); g_st_naddr=n; g_st_hosting=1; }
 static const char* st_addr_of(uint64_t peer){ if(!peer) return 0; for(int i=0;i<g_st_naddr;i++) if(g_st_addr[i].peer==peer) return g_st_addr[i].ip; return 0; }
+// Player slots (2026-10-18, backlog 53; static RE of releases 0.9.2 .. 0.9.18). A joined client keeps the server's
+// max players from admission in Mutex<Option<Arc<HostedSession>>>: Arc pointer at L+8 (L = the futex lock byte), Arc+0x10
+// = the private-join capability (first field 0x8000000000000000 = this process HOSTS instead), max players = u8 at
+// Arc+off (0.9.18: slot exe+0x27dd668, off 0x22d; the server's own limit, the one in "This server is full (N players)").
+// Found by the client's max_players() getter (signature below; its Arc clone function's lock gives L, its first
+// `movzx esi,byte [rax+d32]` gives off). Hosting (or when that is not there): halo3's session parameter maximum player
+// count, sess+0x419c when sess+0x4194 bit 0 (halo3 get_maximum_player_count halo3+0x11db4).
+static uint8_t*g_st_hslot; static int g_st_mpoff;
+static void st_slots_install(void){
+    uint8_t b[96],m[96]; int n=sig_parse("55 56 48 81 EC ?? ?? 00 00 48 8D AC 24 80 00 00 00 48 C7 85 ?? ?? 00 00 FE FF FF FF E8 ?? ?? ?? ?? 48 85 C0 74 16 31 C9 48 3B 48 10 71 ?? F0 48 FF 08 75 08 48 89 C1 E8 ?? ?? ?? ?? 48 8D 4D ?? E8 ?? ?? ?? ?? B0 10",b,m,96);
+    int64_t r=sig_find(g_base,b,m,n); const char*why="getter not found (another client build?)";
+    if(r>=0){ uint8_t*G=g_base+r, *C=G+0x21+*(int32_t*)(G+0x1d); static const uint8_t pro[13]={0x56,0x48,0x83,0xEC,0x20,0xB1,0x01,0x31,0xC0,0xF0,0x0F,0xB0,0x0D};
+        if(memcmp(C,pro,13)) why="clone function has an unexpected shape";
+        else { uint8_t*L=C+0x11+*(int32_t*)(C+0xd); int off=-1;
+            for(uint8_t*q=G;q<G+0x100;q++) if(q[0]==0x0F && q[1]==0xB6 && q[2]==0xB0 && q[7]==0xF0 && q[8]==0x48 && q[9]==0xFF && q[10]==0x08){ off=*(int32_t*)(q+3); break; }
+            if(off>0x18 && off<0x1000){ g_st_hslot=L+8; g_st_mpoff=off; why=0; } else why="max_players offset not found"; } }
+    char msg[160]; int k=why?snprintf(msg,sizeof msg,"  [stats] player slots: %s -- the session's limit only\n",why)
+        :snprintf(msg,sizeof msg,"  [stats] player slots: server max at exe+0x%llx +0x%x\n",(unsigned long long)(g_st_hslot-g_base),g_st_mpoff); (void)!write(2,msg,k); }
+static int st_max_players(const char**src){   // the server's max players, 0 = not known
+    *src=0; int hosting=0;
+    if(g_st_hslot){ uint64_t a=0,a2=0,strong=0,first=0; uint8_t v=0;
+        if(hb_read((uint64_t)(uintptr_t)g_st_hslot,&a,8) && a && hb_read(a,&strong,8) && strong>=1 && strong<100000 && hb_read(a+0x10,&first,8)){
+            if(first==0x8000000000000000ull) hosting=1;
+            else if(hb_read(a+(uint64_t)g_st_mpoff,&v,1) && hb_read((uint64_t)(uintptr_t)g_st_hslot,&a2,8) && a2==a && v>=1 && v<=128){ *src="server"; return v; } } }
+    uint8_t*h3=hb_halo3_base(); uint64_t sess=0; uint32_t st=0, fl=0; int32_t mx=0;
+    if(h3 && hb_read((uint64_t)(h3+0x1e250d0),&sess,8) && sess && hb_read(sess+0x67b70,&st,4) && st>=4 && st<=9 && hb_read(sess+0x4194,&fl,4) && (fl&1)
+       && hb_read(sess+0x419c,&mx,4) && mx>=1 && mx<=128){ *src=hosting?"host":"session"; return mx; }
+    return 0; }
 static void st_voice_install(void){ if(!stats_on() || !g_base) return;
     uint8_t b[96],m[96]; int n; int64_t r; char msg[220]; int k;
     n=sig_parse("55 56 57 53 48 83 EC 38 48 8D 6C 24 30 48 C7 45 00 FE FF FF FF 48 89 CE B1 01 31 C0 F0 0F B0 0D ?? ?? ?? ?? 0F 85",b,m,96);
@@ -394,7 +422,7 @@ static void st_voice_install(void){ if(!stats_on() || !g_base) return;
     n=sig_parse("55 41 57 41 56 41 55 41 54 56 57 53 48 81 EC 18 01 00 00 48 8D AC 24 80 00 00 00 0F 29 B5 80 00 00 00 48 C7 45 78 FE FF FF FF 4D 89 CE 4C 89 C7 49 89 D7 48 89 CB",b,m,96);
     int64_t rv=sig_find(g_base,b,m,n); int hooked=rv>=0 && entry_hook(g_base+rv,b,19,(void*)st_on_voice);
     k=snprintf(msg,sizeof msg,"  [stats] voice: mute %s, talking indicator %s\n",g_st_setmuted?"available":"unavailable (set_muted not found)",hooked?"hooked":"unavailable (voice_recv not found)");
-    (void)!write(2,msg,k); st_chat_install(); st_addr_install(); }
+    (void)!write(2,msg,k); st_chat_install(); st_addr_install(); st_slots_install(); }
 static void st_voice_init(void){ static int done; if(done || !g_base) return; done=1;
     // 0.9.18: set_muted at its known place -> the client's expanded-session flag is at its known place too; other
     // builds pick the layout by which one holds valid records
@@ -1031,6 +1059,8 @@ static void st_snapshot(StBuf*s){
     { int hostplayer=0; for(int k=0;k<nss;k++) if(ss[k].host) hostplayer=1;
       sb_put(s,"],\"session_state\":%u,\"host_peer\":%d,\"local_peer\":%d,\"dedicated\":%s,\"mute\":%s",sst,g_st_hostpeer,g_st_localpeer,
           g_st_hostpeer>=0 && nss && !hostplayer?"true":"false",g_st_setmuted&&st_controls_ok()?"true":"false"); }
+    { const char*src=0; int mx=st_max_players(&src); sb_put(s,",\"slots\":{\"used\":%d",nss);
+      if(mx){ sb_put(s,",\"max\":%d,\"src\":\"%s\"}",mx,src); } else sb_put(s,",\"max\":null}"); }
     // addresses: "host" = this client hosts (players' addresses from its moderation table), "client" = only the server's
     { char srv[96]=""; const char*p=strstr(g_cmdlineA,"join?server="); if(p){ p+=12; size_t j2=0; while(*p && *p!=' ' && *p!='"' && *p!='&' && j2+1<sizeof srv) srv[j2++]=*p++; srv[j2]=0; }
       int client=srv[0] || (nss && g_st_hostpeer>=0 && g_st_hostpeer!=g_st_localpeer);   // (the join link is on the menu process's command line, not always ours)

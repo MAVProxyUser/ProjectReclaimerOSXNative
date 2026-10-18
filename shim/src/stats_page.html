@@ -391,7 +391,7 @@ let rulesKey='';
 // player slots: everyone in the game's network session (the lobby too) / the server's maximum when known (snapshot
 // max_players), and how many are free
 function renderSlots(){ const el=document.getElementById('slots'); if(!snap){ el.textContent=''; return; }
-  const used=(snap.session||[]).length||(snap.players||[]).filter(p=>pState(p)!=='quit').length, mx=snap.max_players;
+  const used=(snap.slots&&snap.slots.used)||(snap.session||[]).length||(snap.players||[]).filter(p=>pState(p)!=='quit').length, mx=snap.slots&&snap.slots.max;
   el.textContent=used||mx?`· players ${used}${mx?` / ${mx} slots (${Math.max(0,mx-used)} free)`:''}`:'';
   el.title=mx?'Players in the game (its network session) / the server\'s player slots':'Players in the game (its network session); the server\'s slot count is not known to this client yet'; }
 function renderRules(){

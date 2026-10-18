@@ -156,6 +156,7 @@ IAudioCaptureClient); with a mic the client's voice chat starts once instead of 
 (the caulk crash trigger). PELOAD_MIC=0 a SILENT mic (also the fallback when the real one can't open), =none no device (the
 crash-prone old 0), =tone a test tone (quiet-run uses 0 unless QR_MIC=tone; target.sh 0),
 PELOAD_MIC_MUTED=1; stats do=mic&on=. The client sends voice only with its talk key (Hold/Toggle to talk).
+Player slots (2026-10-18, backlog 53; stats.c st_slots_install / st_max_players): the joined server's max players = u8 at Arc+off in the client's Mutex<Option<Arc<HostedSession>>> (signature on its max_players() getter; 0.9.18 exe+0x27dd668, +0x22d; Arc+0x10 == 0x8000000000000000 = we host -> halo3 session sess+0x419c if sess+0x4194 bit 0); snapshot "slots".
 Spawns (2026-10-18, backlog 47; stats.c st_spawns): events kind weapon / vehicle / powerup with "pos" (object +0x50), "<x> spawned
 at (x, y)"; an object counts after two parentless snapshots; vehicles without attached turrets, the deployed auto turret and
 security cameras; power-ups = objects\multi\powerups\powerup_red/blue/yellow (Overshield / Active camo / Custom), pickups from the
