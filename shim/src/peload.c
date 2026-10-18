@@ -1483,6 +1483,9 @@ static uint32_t dxgi_vtx_bytes(uint32_t f){ // byte size of a per-vertex attribu
         default: return 4; } }
 static int MSABI dev_crIL(void*t,const void*d,uint32_t n,const void*bc,uint64_t len,void**pp){ (void)t;(void)bc;(void)len; // CreateInputLayout
     D3DObj* o=d3dobj(g_d3dchild_vtbl,0,0);
+    // freed when released (2026-10-18; ~25 per map load were kept forever): a layout is plain data, read per draw from the
+    // bound state, which the free pipeline checks on both sides; programs are keyed by VS / PS only. PELOAD_D3D_KEEPIL=1 = old.
+    { static int keepil=-1; if(keepil<0) keepil=getenv("PELOAD_D3D_KEEPIL")?1:0; if(o && !keepil && !d3d_nofree()) o->keep=0; }
     // D3D11_INPUT_ELEMENT_DESC (32B): SemanticName*@0, SemanticIndex@8, Format@12, InputSlot@16, AlignedByteOffset@20, ...
     if(d&&n&&o){ int m=n>16?16:(int)n; o->nelem=m; const uint8_t* e=d; uint32_t run[8]={0};
         for(int i=0;i<m;i++){ const uint8_t* el=e+(size_t)i*32; const char* sem=*(const char* const*)el;
