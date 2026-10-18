@@ -52,8 +52,9 @@ static void rec_log(const char*fmt,...){ char m[700]; va_list ap; va_start(ap,fm
 static dispatch_queue_t g_rq;
 static dispatch_queue_t rq(void){ static dispatch_once_t o; dispatch_once(&o,^{ g_rq=dispatch_queue_create("reclaimer.rec",DISPATCH_QUEUE_SERIAL); }); return g_rq; }
 static int rec_fps(void){ const char*e=getenv("PELOAD_REC_FPS"); int f=e?atoi(e):60; return f<1?1:f>120?120:f; }
-// ~/Movies/Reclaimer (made on first use): the only place recordings are written
+// ~/Movies/Reclaimer (made on first use): the only place recordings are written (PELOAD_REC_DIR = another folder, for test runs)
 static int rec_dir(char*d,size_t n,int make){ const char*h=getenv("HOME"); if(!h||!*h) return 0;
+    { const char*o=getenv("PELOAD_REC_DIR"); if(o && *o){ snprintf(d,n,"%s",o); if(make && mkdir(d,0755) && errno!=EEXIST) return 0; return 1; } }   // (test runs: a scratch folder)
     snprintf(d,n,"%s/Movies",h); if(make) mkdir(d,0755);
     snprintf(d,n,"%s/Movies/Reclaimer",h); if(make && mkdir(d,0755) && errno!=EEXIST) return 0; return 1; }
 
