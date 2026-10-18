@@ -27,7 +27,6 @@ datums observed live. Offsets are from the object datum (object table entry +0x1
 | +0xF8 | shield vitality (1.0 = full, more with overshield) | `unit_get_shield` |
 | +0x110 | flags; bit 2 set -> health and shield read as 0 (dead) | same getters |
 | +0x136 | node matrices block reference {u16 size, u16 offset}; real_matrix4x3 (scale, fwd, left, up, pos) per node | observed |
-
 | +0x13A | region permutations block reference {s16 size, s16 offset}: count = (size - (+0x4 bit 11 ? 0x20 : 0)) / 10; per region 8 bytes of state, then one permutation byte per region at offset + count*8 (indexes the model's Collision Regions[r].Permutations) | object_set_permutation (halo3+0x3457d8, +0x345d38) |
 
 ## Tags in memory
@@ -42,7 +41,7 @@ permutation } }.
 | +0x174 | team index | `unit_get_team_index` |
 | +0x24E | seat index (s16, -1 = not in a vehicle) | `unit_in_vehicle` (halo3+0x3a36f4) |
 | +0x262 | current weapon slot (s8) | `unit_get_primary_weapon` |
-| +0x268 | weapon object handles [4] | halo3+0x356388 |
+| +0x268 | weapon object handles [4] (the overlay's player label shows the slot +0x262 one, then " / " the first other one carried) | halo3+0x356388 |
 | +0x294 | grenade counts [4] (s8: frag, plasma, spike, firebomb) | `unit_get_total_grenade_count` |
 | +0x360 | active camouflage amount (float; > 0 = camo active) | `player_active_camouflage_on` |
 | +0x1A0, +0x1AC, +0x1C4, +0x1D0 | aiming / looking vectors (unit vectors; all equal the camera forward for the local player in 100% of samples over a 15 degree pitch sweep) | recorded live (PELOAD_HB_SELFDUMP) |
@@ -60,8 +59,13 @@ Data array at TLS block +0x10, element 0x2F8 bytes (Slayer, 2 slots in a 2-playe
 | +0x4C | position (3 floats) | recorded |
 | +0x58 | nickname (UTF-16) | recorded ("Shiz") |
 | +0x294 | increments on respawn (lives used / spawn count) | recorded |
-Kills / deaths / score: not in the player record (no field changed on a suicide except the respawn ones); the
-scoreboard numbers are presumably in the game engine's statistics -- not located yet.
+| +0x1F0 | betrayer player handle (the boot-betrayer popup reads it) | static RE (CLAUDE.md "Betrayal popup") |
+| +0x1FC | resolved active traits, recomputed every tick | halo3-variant-traits.md |
+
+Local player: player mapping at TLS block +0x110, output user 0 -> player handle at +0xB8 (stats.c, hitbox.c).
+Kills / deaths / score: not in the player record (no field changed on a suicide except the respawn ones). The loader
+gets exact kills from an entry hook on halo3's display_event (halo3+0x11b0ec; shim/docs/halo3-event-feed.md) and
+deaths from any biped going alive -> dead (+0x110 bit 2); the scoreboard's own score fields are not located.
 
 ## Projectiles
 | Offset | Field | Source |
@@ -76,13 +80,18 @@ the object table between frames. `object_delete` (halo3+0x342ed8, handle in ecx)
 entry (`hbdel_install`) and records projectile datums; at deletion +0x1c is the impact point.
 
 ## Still to confirm
-Kills / deaths / score (game engine statistics), objective state (flags, territories, hills; needs an objective
-game variant to observe).
+The engine's score statistics; objective state (flags, territories, hills; needs an objective game variant to observe).
 
 ## Vehicle weak spots: the model's damage info (2026-10-17, backlog 31)
 
 Static, from the .map (re-tools/h3dmg.py <map> prints it; the overlay's hbg_weak in shim/src/hitbox.c uses the same rule).
 Layouts: Assembly Halo3MCC hlmt.xml / coll.xml.
+
+In the overlay (hitboxes + Vehicles on, 2026-10-17/18): vehicle hitbox edges are cyan; edges whose collision material maps
+to a lethal section (class 2: a section smaller than the body whose response kills or destroys it) are yellow, to the
+cheapest section that opens a shielded seat at "major" (class 1) orange. Stats page chips under the Vehicles button:
+POST `/control?do=weaktype&t=1|2`, `PELOAD_HB_WEAK_SHOW=<mask>` (default 3; 1 = lethal, 2 = driver). Only the Wraith
+and the Scorpion get any. The `[hitbox] definition ...` log line counts each model's weak-spot edges.
 
 - object def (vehi/bipd) +0x34 model tagref -> hlmt. hlmt +0x7C Materials [0x14] (+0 name sid, +6 s16 damage section),
   +0x88 New Damage Info [0xA4], +0x94 Targets [0x20] (aim/lock-on markers: +0xC section, +0x18 flags bit 2 headshot,

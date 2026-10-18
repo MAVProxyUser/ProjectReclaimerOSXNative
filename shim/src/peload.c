@@ -1108,7 +1108,10 @@ static unsigned MSABI d3d_Release(void*s){ (void)s; return 0; }
 // D3DObj reference counting (the child / resource / view / query vtables)
 // 2026-10-17 21:15: OFF by default again (PELOAD_D3D_FREE=1 = free): after a map change a public BTB rendered player models
 // over everything and white splotches; freeing and copy-on-write are both suspects until an A/B clears one of them.
-static int d3d_nofree(void){ static int v=-1; if(v<0){ const char*f=getenv("PELOAD_D3D_FREE"); v=getenv("PELOAD_D3D_NOFREE")?1:(f&&atoi(f)?0:1); } return v; }
+// 2026-10-18 00:35: ON by default again (PELOAD_D3D_FREE=0 or PELOAD_D3D_NOFREE=1 = never free): after the two use-after-free
+// fixes a 40-minute public BTB soak with freeing + COW (85 players, Standoff -> Avalanche -> Sandtrap) freed 21.8 GB with no
+// corruption, no crash, no refcount underflow.
+static int d3d_nofree(void){ static int v=-1; if(v<0){ const char*f=getenv("PELOAD_D3D_FREE"); v=getenv("PELOAD_D3D_NOFREE")?1:(f&&!atoi(f)?1:0); } return v; }
 static void d3dobj_pend(D3DObj*o);   // queue for freeing (defined with d3dobj_reap)
 static void d3dobj_stage(void); static void d3dobj_reap(int gl);
 static unsigned MSABI obj_AddRef(void*s){ if(!live_has(s)) return 1; return (unsigned)__atomic_add_fetch(&((D3DObj*)s)->refs,1,__ATOMIC_ACQ_REL); }
@@ -9978,7 +9981,7 @@ static void mcl_note(uint64_t ra,const void*d,const void*s,size_t n){ pthread_mu
             (unsigned long long)(ra2>=0x180000000ull&&ra2<0x190000000ull?ra2-0x180000000ull:ra2>=0x140000000ull&&ra2<0x150000000ull?ra2-0x140000000ull:ra2),(unsigned long long)g_mcl[i].n,g_mcl[i].bytes/1048576.0,g_mcl[i].maxsz/1048576.0,(unsigned long long)g_mcl[i].aligned);
         (void)!write(2,m,k2); } memset(g_mcl,0,sizeof g_mcl); }
     pthread_mutex_unlock(&g_mcl_mx); }
-// Default on (PELOAD_MEMCPY_COW=0 off; PELOAD_AB=cow:<secs> flips it): a copy of >= 1 MB whose source and destination are the same distance
+// Default on (PELOAD_MEMCPY_COW=0 off; PELOAD_AB=cow:<secs> flips it; off 2026-10-17 21:15 .. 2026-10-18 00:35): a copy of >= 1 MB whose source and destination are the same distance
 // apart modulo 16 KB is done copy-on-write for its whole pages (mach_vm_copy) -- halo3 copies its ~14 MB game state ~5
 // times a frame (halo3+0x13f23f, 13 GB/s alone on Guardian), always 16 KB-congruent
 volatile int g_memcpy_cow=-1; uint64_t g_cow_n, g_cow_bytes;
@@ -10039,7 +10042,7 @@ static int pc_copy(void*d,const void*s,size_t n){
 static void* __attribute__((ms_abi,noinline)) crt_big_memmove(void*d,const void*s,size_t n){
     static int lg=-1; if(lg<0) lg=getenv("PELOAD_MEMCPY_LOG")?1:0;
     if(lg) mcl_note((uint64_t)__builtin_return_address(0),d,s,n);
-    if(g_memcpy_cow<0){ const char*e=getenv("PELOAD_MEMCPY_COW"); g_memcpy_cow=e?atoi(e)!=0:0; }   // default OFF since 2026-10-17 21:15 (map-change corruption suspect)
+    if(g_memcpy_cow<0){ const char*e=getenv("PELOAD_MEMCPY_COW"); g_memcpy_cow=e?atoi(e)!=0:1; }   // default ON again since 2026-10-18 (BTB A/B +4%, clean across map changes; was off 2026-10-17 21:15 as a corruption suspect)
     uintptr_t D=(uintptr_t)d, S=(uintptr_t)s;
     if(g_memcpy_cow && n>=(1u<<20) && !((D-S)&16383) && (D+n<=S || S+n<=D)){
         size_t head=(16384-(D&16383))&16383, mid=(n-head)&~(size_t)16383;

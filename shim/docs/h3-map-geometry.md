@@ -9,6 +9,14 @@ python3 re-tools/h3bsp.py "$MAPS/riverworld.map" out.png [--size 2048 | --px-per
 `$MAPS` = `$HOME/Library/Application Support/ReclaimerMac/prefix/drive_c/Program Files/Steam/steamapps/common/Halo The Master Chief Collection/halo3/maps`.
 About 1 to 4 s per map.
 
+Where the pictures come from in practice: `shim/tools/maptop.sh` (all stock + Workshop maps without a picture, or the map
+files given as arguments; FORCE=1 redoes them) writes `~/Library/Application Support/ReclaimerMac/maptop/<map>.png/.json/.z.bin`
+at `--size 1024`; play.sh runs it in the background when pictures are missing, workshop-helper.sh runs it on a finished
+download, and the stats server makes the picture of a map being played that has none (stats.c st_maptop_ensure;
+`PELOAD_MAPTOP_TOOL`, `PELOAD_NO_MAPTOP`). The stats page serves them as `/maptop/<map>.png|json`. `re-tools/h3nav.py`
+(the test walker's floor graph, `<map>.nav` in the same folder) and `re-tools/h3bounds.py` (boundaries overlay picture,
+map-boundaries.md) reuse this reader.
+
 ## Output contract (out.png + out.json)
 - PNG is RGBA. Alpha 0 means there is no geometry. Orthographic, looking down -Z. World +X points right, world +Y points up.
 - `px = (x - x0) * px_per_unit`, `py = (y1 - y) * px_per_unit`, origin at the top-left corner of pixel (0,0).
@@ -22,6 +30,10 @@ About 1 to 4 s per map.
   - `play_box`: the spawn and item bounds.
   - `geometry_box`: the bounds of all drawn triangles.
   - `zcut` and `roofed_points`: the result of the indoor heuristic below.
+  - `safe_zone_box`: the bounding box of the scenario's safe zones (null if none were read).
+  - `zgrid`: `<out>.z.bin`, a ground-height grid for the stats page's click-to-teleport: int16 LE z*10 (-32768 = nothing),
+    1 world unit per cell over the geometry box, row 0 = the north edge (y1), the TOP surface of every upward-facing
+    triangle with no z cut (roofs and cliff tops outside the play area count).
 - Bounds for the verified maps (default crop):
 
   | Map | Default crop (x, y) | Play box (x, y) | Geometry (x, y) |
@@ -56,7 +68,9 @@ About 1 to 4 s per map.
    - type 3 = secondary segment data
 
    A resource tag block is `count, address, pad` (12 bytes). The struct starts at `base & 0x1FFFFFFF`.
-5. **play** tag (cache_file_resource_layout_table):
+5. **play** tag (cache_file_resource_layout_table). Maps built with the Halo 3 editing kit (H3EK; most Workshop maps)
+   have an EMPTY play tag: the same three tables are in the zone tag (+0x1C external files, +0x34 pages, +0x58 segments),
+   and their page offsets are file offsets (not relative to the resource section).
    - +0x00 codecs: one GUID, b42ada7e..., which is raw deflate.
    - +0x0C external cache files (0x108 each): english / mainmenu / shared.map.
    - +0x18 raw pages, 0x58 each:
@@ -94,7 +108,8 @@ About 1 to 4 s per map.
   - If dropping every triangle whose lowest point is above (highest spawn/item z + 2.5) un-roofs at least 15 % of them, the cut is applied.
   - Applied: Construct, Guardian (tree canopy), The Pit, Foundry, Epitaph, Last Resort, ...
   - Not applied: Valhalla, Sandtrap, Standoff, ...
-- **Crop `play`**: the box around the scenario's spawn points and game-mode markers, plus weapon, vehicle and equipment placements, plus `max(16, 25 %)` margin, clipped to the geometry.
+- **Crop `play`**: the box around the scenario's spawn points and game-mode markers, plus weapon, vehicle and equipment placements, widened to cover the scenario's safe zones (the real playable area: on Sandtrap / Sandbox players drive far past the spawns), plus `max(16, 25 %)` margin, clipped to the geometry.
+  - Placements more than 5 units outside the safe zones' box are left out of the crop and the shading range (The Pit's stock Warthog behind the north wall).
   - Scenery counts only if it comes from `objects\multi\`.
   - Vehicles, weapons and equipment count only if they come from `objects\{multi,weapons,vehicles,equipment}\`. This keeps Sandbox's and Sandtrap's out-of-bounds "defender" turrets out of the box.
 
@@ -107,4 +122,4 @@ About 1 to 4 s per map.
 - Not implemented:
   - Resource pages stored in `shared.map` (never needed for sbsp).
   - Real render geometry (vertex/index buffers).
-- `h3map.H3Map.sid` assumes a 19-bit index. These builds use a 16-bit index and an 8-bit namespace; namespace-0 overflow continues after `ns_start[-1]`. `h3bsp.sid_name` has the correct decoding. The h3map `locations` names are wrong because of this.
+- String ids: 19-bit index, 8-bit namespace at bit 19. Namespace-0 indices past namespace 0's count continue after all namespaced strings (`ns_start[-1]`); `h3map.H3Map.sid` resolves those wrongly (e.g. the Warthog's "hull" damage section), `h3bsp.sid_name` is right. The h3map `locations` names are wrong because of this.

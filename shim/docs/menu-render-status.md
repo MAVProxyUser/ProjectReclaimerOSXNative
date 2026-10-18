@@ -1,3 +1,12 @@
+> **Historical log (2026-10-11, sessions 2-4), kept as written.** Current state (2026-10-18): Reclaimer's menu (its own
+> GL UI), Server Browser, lobby and online joins work, and Halo 3 gameplay renders through the loader's D3D11->GL
+> renderer (play.sh; native GL helper by default). Run it with `bash shim/build.sh && bash shim/play.sh`; see
+> CLAUDE.md and shim/docs/BACKLOG.md for the current state and open work. Resolved since these notes: the "non-deterministic corruption" and the glow
+> `glDeleteProgram` / BTreeMap panics were the GL thunk ABI (session 4 below, 3da9e9c; later also xmm6-15, CLAUDE.md
+> "GL call ABI"); the RefCell re-entrancy was patched in session 6 (RE-findings-menu-reentrancy.md); halo3's D3D11 now
+> runs on a real D3D11->GL translation, not the null device; the `%gs` suspicion was wrong and the Wine-style gs-base swap was never needed.
+> The `PELOAD_WINDOW` / v0.9.13 reproduce recipe below is obsolete.
+
 # Where the render stands (2026-10-11, session 3 — null D3D11 + map loads)
 
 ## Session-3 part 3: GL window-size fix; failure modes consolidating

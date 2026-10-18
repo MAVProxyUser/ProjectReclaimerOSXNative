@@ -121,7 +121,8 @@ Vehicles are not tested themselves (no caller passes a vehicle). A seated player
 The test uses the biped's position, so a driver in a kill box dies. GUESSED: that this applies while seated (no
 early-out seen except "at rest").
 
-**Patches** (PELOAD_PATCH is re-applied when halo3.dll is mapped, peload.c:9230). Check the original bytes first.
+**Patches** (PELOAD_PATCH is re-applied when halo3.dll is mapped: peload.c patch_install). Check the original bytes first.
+The Reclaimer client refuses an entry patch of `0x1b8e00` ("Tested live" below): use the call-site rows.
 
 | Goal | Patch | Original bytes | Notes |
 |---|---|---|---|
@@ -165,8 +166,11 @@ PELOAD_PATCH="halo3+1b8e00:31C04885D27403C60201C3,halo3+37b734:EB"
 ```
 
 To also cover joining clients' prediction, run their clients with the soft-ceiling patch (`halo3+37b734:EB`).
-Still to check live: whether the Reclaimer client or its anti-cheat hashes halo3 code. The XAudio2 check
-(CLAUDE.md) only verifies 4 callback slots; a server with anti-cheat on refuses some clients, and the reason was not traced.
+Live result ("Tested live" below): the client checks the ENTRY bytes of some halo3 functions ("Native function contract
+mismatch at 0x1801b8e00", the worker exits) -- so this recipe's first patch is refused; the call-site patches
+`37b816` / `37b734` inside biped_update are accepted. It also checks halo3's ws2 imports (CLAUDE.md). The full list of
+checked entries is not mapped: patch inside function bodies. A server with anti-cheat on refuses some clients; the
+reason was not traced.
 
 ### 2c. Invisible collision (player clip)
 
@@ -239,7 +243,7 @@ PELOAD_ALLOW_TELEPORT=1 PELOAD_PATCH=halo3+37b816:E95501000090,halo3+37b734:EB
 ```
 (bipeds skip the kill-volume / safe-zone test and the player soft-ceiling response), then teleport with `tpto`.
 Joining clients' own prediction still runs the soft ceilings (push-back / slip) unless they run the `37b734` patch too.
-Invisible walls are unchanged (section 3).
+Invisible walls are unchanged (section 2c).
 
 ### Exploring from the stats page (2026-10-17)
 
@@ -256,7 +260,9 @@ In a game you host with `PELOAD_ALLOW_TELEPORT=1` (no launch patch needed) the o
   since 2026-10-17, the slip-surface ground patch halo3+219c1f:EB46 from the next section), from the simulation thread at the
   frame safe point (between ticks), all or nothing and only over the expected bytes (POST `/control?do=bounds&off=0|1`).
 - **Valhalla: east cliff** (on riverworld): boundaries off, then teleports you to (114, -100, 22.6)
-  (POST `/control?do=explore&spot=valhalla_cliff`). More spots: `g_st_spots` in shim/src/stats.c.
+  (POST `/control?do=explore&spot=valhalla_cliff`). **Valhalla: north ridge** (`spot=valhalla_north`, (44, -24, 10)):
+  past the north end (y > -31.9) with no soft ceiling over it. Spots: `g_st_spots` in shim/src/stats.c; the page shows
+  the current map's.
 
 Tested: explore -> alive on the cliff; boundaries back on while standing there -> dead within a second (as with the
 launch-time patch). A dead or respawning player can't be teleported ("no body at the camera"): click again once you spawn.
@@ -349,7 +355,8 @@ PELOAD_ALLOW_TELEPORT=1 PELOAD_PATCH=halo3+37b816:E95501000090,halo3+37b734:EB,h
   walks it, so the client keeps getting corrected (GUESSED rubber-banding). Patch the clients too (same
   bytes). The host's own player needs only the host patch.
 - **Entry checks:** the Reclaimer client refused `1b8e00`'s *entry* bytes. `0x219c1f` is 0x25B bytes into
-  `0x2199c4`, like the accepted `37b734` / `37b816`. GUESSED safe; not run live.
+  `0x2199c4`, like the accepted `37b734` / `37b816`. It is the third patch of the stats page's "Boundaries on/off"
+  switch (hitbox.c g_hb_bnd, since 2026-10-17); a walking test on the cliff with it is not recorded yet.
 
 ### Confidence
 
@@ -359,3 +366,25 @@ PELOAD_ALLOW_TELEPORT=1 PELOAD_PATCH=halo3+37b816:E95501000090,halo3+37b734:EB,h
 | The chain BSP flags -> shape `+0x32` -> contact `+0x40` -> `0x219c1b` / `0x15e2b1` | High (every hop read in the code) |
 | `0x1b8bd8` == 1.0 on MP maps | Medium. The gg+0x10 == 2 "multiplayer" meaning is GUESSED |
 | `219c1f:EB46` alone gives normal walking | Medium. The zero-friction contact remains (GUESSED harmless while grounded; add `15e2b6:EB06` if not) |
+
+## In-game zones overlay (2026-10-17/18)
+
+Stats page button **Kill/safe zones** (POST `/control?do=zones`; launch `PELOAD_HB_ZONES=1`; the F10 key is retired,
+`PELOAD_HB_FKEYS=1` brings it back). shim/src/hitbox.c `hbz_*`, read from the .map being played (hb_current_map:
+halo3/maps or a Workshop folder, so Workshop maps too):
+- Kill volumes (in the scnr +0x484 list or with a kill-trigger index at +0x40) and safe zones (+0x490) as the oriented
+  boxes of section 1; soft ceilings from every structure BSP's sddt (+0x10, triangles 0x44 with vertices at
+  +0x20/+0x2C/+0x38). It logs `[zones] <map>: N kill volumes, N safe zones, N soft-ceiling triangles (N outline edges)`.
+- Drawn on the GPU (`hbz_gpu`, in the present-queue blit): translucent surfaces plus brighter edges (a ceiling's
+  outline = the edges only one of its triangles has: Valhalla 5268 triangles -> 1699 edges), one static buffer per map
+  and kind mask.
+- Per-pixel occlusion: the fragment shader projects each pixel with the camera of the visible-only depth readback
+  (hb_vis_tick: the camera draw's D32F_S8 depth blitted to 480x270, read back 2 frames late; in GL-helper mode as an
+  async readback, one ticket in flight) and discards it where the scene is nearer (point moved 0.3 toward the camera
+  so surfaces on the ground stay). Since 2026-10-18 a pixel outside that depth frame's view (the strip turning into
+  view, or behind its camera) is discarded too: before, zones showed through walls at the screen edges while turning.
+- Each kind is a chip on the page (POST `/control?do=zonetype&t=<bit>`; `PELOAD_HB_ZONES_SHOW=<mask>`, default 31):
+  1 kill zone (red), 2 safe zone (green: outside every one kills), 4 acceleration ceiling (orange), 8 soft-kill
+  ceiling (pink), 16 slip surface (yellow).
+- `PELOAD_HB_ZONES_XRAY=1` = the old CPU line drawing through walls (`hbz_draw` / hb_seg_clip in the overlay's GL_LINES batch).
+- Not drawn: invisible collision (player clip) -- only the map pictures (h3bounds.py, cyan) show it.

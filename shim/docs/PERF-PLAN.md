@@ -33,20 +33,23 @@ Measured and found NOT to be the limit (keep for reference):
   that to ~18 with no measurable fps change -- Apple's driver returns early on redundant binds; the cost is in real state
   changes, the draw calls themselves and copies. Batching a draw's CB uploads into one ring map: neutral too.
 - **halo3's main thread**: copies its whole game state with vcruntime's memcpy every frame (23% of that thread); big
-  copies now run on the host's memmove (`PELOAD_GUEST_MEMCPY=1` = old), but the main thread wasn't the limit (A/B neutral).
+  copies now run on the host's memmove (`PELOAD_GUEST_MEMCPY=1` = old), but the main thread wasn't the limit (A/B neutral)
+  -- with in-process GL. With the helper on it IS the limit in 80-100 player games (section below).
 - Some phases of public games are limited outside this Mac (an Australian server: every thread mostly idle at 17-33 fps).
 
 Native GL helper (option 1 below), re-measured with `shim/tools/glbench.sh` (the same GL draw loop built x86_64 and
 arm64): Apple's driver is **~1.5x** faster natively (2.9 -> 1.9 us per draw with 2 textures + 2 CBs; 3.3 -> 2.1 with
 6 + 4), not ~2x. With the GL thread the limit in BTB-sized games (~6.3 us per draw, ~160k draws/s), that is the
-remaining big step towards a steady 60 there.
+remaining big step towards a steady 60 there. DONE the same day: the helper is the play.sh default ("The real helper" below).
 
-Other finds on the way: the client's `mcc-voice` thread polled the push-to-talk key ~500k times a second with no sleep
-(no microphone) -- now damped (`PELOAD_POLL_DAMP`); `mach_absolute_time` is in nanoseconds under Rosetta (timebase 1/1),
-so tick math assuming 24 MHz was 41x off.
+Other finds on the way: the client's `mcc-voice` thread polls the push-to-talk key ~500k times a second with no sleep
+(it burns its own core) -- `PELOAD_POLL_DAMP=1` damps it, OPT-IN only: the key poll holds a lock the main thread also
+takes, so sleeping there made sticks sluggish and movement choppy; `mach_absolute_time` is in nanoseconds under Rosetta
+(timebase 1/1), so tick math assuming 24 MHz was 41x off.
 
 Status 2026-10-16, Big Team Battle numbers added 2026-10-17. Measurements are from a direct Guardian match on an M4 Max (`PELOAD_D3DGL_PROF=1`,
-2-second windows) unless noted.
+2-second windows) unless noted. The sections from "Where the time goes" to "Options" were measured with in-process GL
+(before the helper).
 
 ## 80-100 player games with the helper (2026-10-17 late): the engine's main thread is the wall
 
@@ -58,10 +61,23 @@ system 30-33% (host memmove ~20-22%, malloc internals); the render thread (guest
 thread 36-41%, mcc-voice 99% (its key poll, own core). PELOAD_CALLCOUNT on that thread in gameplay, per second:
 GetCurrentThreadId 887k, GetProcessHeap 662k, memset 444k, HeapAlloc/HeapFree ~400k each (a quarter of them via the
 CRT's malloc), memcpy 423k, towlower 151k (3.8 M/s while loading), GetAsyncKeyState 94k, TlsGetValue 68k. The memmove
-share is mostly halo3's per-frame ~14 MB game-state copies (copy-on-write path PELOAD_MEMCPY_COW, off since the map-change
-corruption report; being re-tested with PELOAD_AB=cow). Every Win32 call costs the ms_abi->SysV transition under
-Rosetta; the allocation churn costs malloc + free + clearing. Ideas: COW back on if clean, a per-thread small-block cache in
-HeapAlloc/HeapFree, cheaper hot imports (GetCurrentThreadId / GetProcessHeap / TlsGetValue as tiny hand-written stubs).
+share is mostly halo3's per-frame ~14 MB game-state copies (~5 a frame). Every Win32 call costs the ms_abi->SysV
+transition under Rosetta; the allocation churn costs malloc + free + clearing.
+
+Levers for that thread (2026-10-18, backlog 41; each opt-in until a BTB A/B says so):
+- **Copy-on-write** (`PELOAD_MEMCPY_COW`, section below): ON by default again since 2026-10-18 00:35 (off 2026-10-17 21:15
+  .. then as a map-change corruption suspect): BTB in-match A/B (`PELOAD_AB=cow`) +4% over 16 phase pairs, clean across a
+  map change, and a 40-minute BTB soak with object freeing + COW (3 maps, 21.8 GB freed) showed no corruption.
+- **Parallel big copies** (`PELOAD_PAR_MEMCPY=<helper threads>`, max 8; `PELOAD_PAR_MIN`, default 2 MB): a non-overlapping
+  copy is cut into 1 MB chunks that the caller and the `shim-copy` threads copy together (one copy at a time). Rosetta
+  microbenchmark 5 x 14 MB: 4.0 ms on one thread, 2.0 on four. `PELOAD_PAR_CHECK=1` compares every copy (6,145 copies,
+  0 mismatches); `PELOAD_AB=parcopy:<secs>` (3 helpers) is the in-game A/B. Not measured in a big game yet.
+- **Real CPU count** (`PELOAD_SYSINFO=real`, `PELOAD_NCPU`): GetSystemInfo still says ONE processor (and allocation
+  granularity 0) by default; the client sizes ~10 thread pools from the count and halo3's locks (halo3+0x620170 ...) spin
+  before blocking only when it is > 1. Not measured yet.
+- Done: GetCurrentThreadId returns a per-thread cached id; every `PELOAD_*` getenv is cached (`PELOAD_GETENV_STATS=1` counts
+  the remaining real lookups: negligible). `PELOAD_HEAP_STATS=<thread>` gives a HeapAlloc size histogram for a
+  per-thread small-block cache in HeapAlloc/HeapFree (an idea, not built).
 
 ## Where the time goes
 
@@ -125,7 +141,7 @@ Takeaways:
 
 ## Options
 
-### 1. Native GL helper process (recommended big step; the driver is ~1.5× faster natively, glbench 2026-10-17)
+### 1. Native GL helper process (DONE 2026-10-17, the play.sh default; the driver is ~1.5× faster natively)
 
 Every GL call already goes through one function table (`G.*`, loaded with dlsym). Point those entries at
 encoders that append opcodes and arguments to a shared-memory ring. A small native arm64 helper
@@ -166,7 +182,8 @@ parallel instead of in sequence: in BTB-sized frames (~4,000 draws, ~6.3 us per 
 larger of the two, roughly 2x. The ring and the encoding are cheap; the remaining work is breadth (every G entry point),
 object names, the synchronous calls, buffer/texture data and presentation (below).
 
-Plan, in steps that each stay usable behind PELOAD_GL_HELPER (0 = in-process, the default until it wins an in-game A/B):
+Plan, in steps that each stay usable behind PELOAD_GL_HELPER (0 = in-process, the default until it wins an in-game A/B;
+it won -- play.sh sets PELOAD_GL_HELPER=1, while the loader without the variable and quiet-run.sh stay in-process):
 1. Generate the encoder/decoder pair from one list of the G table's ~150 signatures (scalars inline; pointer arguments
    with a size rule: BufferSubData/TexImage*/UniformBlock data, ShaderSource strings).
 2. Names: the loader allocates GL names itself (Gen*/Create* answered locally), the helper maps them.
@@ -198,10 +215,13 @@ D3D11->GL path resolves becomes a router that encodes the call into a 256 MB sha
 (a dummy in helper mode) is current, and calls the real function on every other context (present thread, the client's own
 GL UI). Names come from pools the helper keeps filled; results come back by round trip only for link-time and Get* calls
 (a program link asks for all its uniform locations and block indices in ONE round trip, GLH_X_LOCS); GetError and
-CheckFramebufferStatus answer without one; occlusion-query results come back through a result table; the F9 depth readback
-and other PBO reads are asynchronous (GLH_X_READBACK into a mailbox); frames come back as three global IOSurfaces the
-present thread samples as rectangle textures. The helper wakes on a shared-memory os_sync wait (a wake pipe's write end
-was closed under us by the game's handle traffic).
+CheckFramebufferStatus answer without one; occlusion-query results come back through a result table; the visible-only /
+zones depth readback and other PBO reads are asynchronous (GLH_X_READBACK into a mailbox, one ticket in flight: two
+alternating tickets froze the copy until 2026-10-17); frames come back as three global IOSurfaces the present thread
+samples as rectangle textures (a frame that doesn't come within 50 ms re-presents the latest one; `PELOAD_GLH_PQ_FALLBACK=1`
+= the old in-process fallback, which flipped/shrank the loading screen between games). The helper wakes on a shared-memory
+os_sync wait and exits once the loader is gone (it checks every 0.25 s); the old wake pipe's write end sits at fd >= 4000
+(the game's CloseHandle once closed a low one). It is spawned with only stdio and that pipe (POSIX_SPAWN_CLOEXEC_DEFAULT).
 
 Clean-machine experiment (shim/tools/glring.sh, before the real helper; us per draw):
 
@@ -240,9 +260,11 @@ multithreaded GL engine in the helper (PELOAD_GLH_MP=1 / ab:<secs>: 5.80 vs 5.78
 helper (PELOAD_AB=glcache:30: 4.9 vs 5.1, noise). What would still help: fewer draws (the client's graphics settings), the
 particle simulation natively, parallel command encoding (several contexts, much more work).
 
-DONE: a 25-minute BTB soak (median 49 fps) and the play.sh default (the in-process path stays behind PELOAD_GL_HELPER=0). Next: move the CPU
-particle compute into the helper (native arm64, ~1.5-2x) or onto the GPU; cut the link-time round trips further (the
-link status itself is still one per program).
+DONE: a 25-minute BTB soak (median 49 fps) and the play.sh default (the in-process path stays behind PELOAD_GL_HELPER=0).
+A visible client in a full 60-player BTB (Standoff, ~3,500 draws/frame): median 72 fps, p10 60, the helper 100% busy
+(~2.9 us per draw natively) -- its ceiling at that size. At 80-100 players the game's own main thread is the limit
+instead (section above). Next: the main-thread levers above; the particle compute natively (the GPU transform-feedback
+version works but is slower, below); cut the link-time round trips further (the link status is still one per program).
 
 #### GPU particle compute (2026-10-17, experimental, OFF: PELOAD_CS_GPU=1)
 
@@ -274,14 +296,16 @@ CPU interpreter bug found with it (fixed, default): a 4-component immediate l(a,
 ("and r2.yz, r2.zzwz, l(0,65535,65535,0)" gave 0), so halo3's particle kernels unpacked their packed half-float fields to
 zero. PELOAD_CS_IMMBCAST=1 = old.
 
-#### Copy-on-write game-state copies (2026-10-17, default on)
+#### Copy-on-write game-state copies (2026-10-17; default on -- off 2026-10-17 21:15 .. 2026-10-18 00:35; PELOAD_MEMCPY_COW=0 = off)
 
 PELOAD_MEMCPY_LOG=1 (big copies by caller every 5 s) showed one call site doing nearly all of them: halo3+0x13f23f copies
 its ~14 MB game state about 5 times a frame (13 GB/s on Guardian alone; ~15% of the engine thread in big games), always
 with source and destination the same distance apart modulo 16 KB. The host memmove stub now does such copies (>= 1 MB,
 private memory on both sides -- never a shared mapping) copy-on-write for their whole pages with mach_vm_copy. In-session
 A/B (PELOAD_AB=cow:15, direct Guardian with the helper, same scene): 243-250 vs 226-233 fps, and 194 vs 183-187 with the
-private-memory check: +5-7%. PELOAD_MEMCPY_COW=0 = plain copies.
+private-memory check: +5-7%. Turned off at 21:15 the same day together with D3D object freeing after a public BTB drew
+player models over everything after a map change (backlog 27; not reproduced solo). BTB in-match A/B since: +4% (16 phase
+pairs), clean across a map change; default stays off until the BTB soak with freeing + COW is clean.
 
 ### 2. Submission thread inside the process (DONE 2026-10-17: +10-15% in 60-100 player games, -7% alone; `auto` mode)
 
@@ -290,7 +314,8 @@ enqueue. Overlaps the engine's ~22% with the loader and driver, but the driver s
 
 - `Map(WRITE_DISCARD)` must rename buffers (fresh backing store per discard), `UpdateSubresource` data
   goes into the queue, and readbacks (`Map(READ)`, `GetData`) drain the queue.
-- Superseded by option 1 if that is done; option 1 gets this overlap for free.
+- Still used with the helper (play.sh: `PELOAD_D3DGL_SUBMIT=auto` + `PELOAD_GL_HELPER=1`): the submission thread does the
+  D3D11->GL translation and encodes into the helper's ring, the helper does the driver work.
 
 ### 3. Smaller wins (a few % each)
 
@@ -303,7 +328,9 @@ enqueue. Overlaps the engine's ~22% with the loader and driver, but the driver s
 
 ## Not the bottleneck (checked)
 
-- `getenv` in the draw path: `PELOAD_*` lookups are cached (`peload_cgetenv`).
+- `getenv` in the draw path: `PELOAD_*` lookups are cached (`peload_cgetenv`; `PELOAD_GETENV_STATS=1` counts the rest).
 - Redundant VAO/framebuffer binds and attribute pointers: under 0.05 µs each in the benchmark.
-- The hitbox overlay (`PELOAD_HITBOXES`, F2): one read of the object table plus one small read per
-  object per frame, and one line batch. Compare with F2 in a busy match; the title shows the fps.
+- The hitbox overlay (`PELOAD_HITBOXES`, stats page "Hitboxes"; the F2 key is retired): one read of the object table plus
+  one small read per object per frame, and one line batch. Compare by toggling it in a busy match; the title shows the
+  fps. Off means off (backlog 39): with every overlay switch off only a 128-byte camera copy per frame, a once-per-frame
+  engine hook checking a flag, and the object_delete / event / chat hooks remain.

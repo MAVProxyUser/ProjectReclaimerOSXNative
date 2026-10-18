@@ -1,7 +1,8 @@
 # Reclaimer client: the `workshop-download` helper and its stdout protocol (static RE)
 
 Client `client/project-reclaimer-client-v0.9.18.exe` (ImageBase 0x140000000; addresses are exe RVAs). Found with
-`re-tools/refs.py`, `re-tools/hdis.py`, `re-tools/decomp.py` and rip-relative/call xref scans; nothing was run.
+`re-tools/refs.py`, `re-tools/hdis.py`, `re-tools/decomp.py` and rip-relative/call xref scans; nothing was run for
+sections 1-5 (sections 6-7: the loader's side, run live).
 CONFIRMED = read in the disassembly. GUESSED = inferred, check it at runtime before relying on it.
 
 Purpose: replace the helper (which needs a running Steam client) with DepotDownloader, and write to the parent's
@@ -26,8 +27,9 @@ pipe exactly what a successful helper writes.
 - After `Ready`, the parent uses the Steam folder **in place** ("Using Steam Workshop files directly.") only when
   `subscribed` is true **and** `canonicalize(root) == canonicalize(<mcc-path>\..\..\workshop\content\976730\<id>)`.
   Otherwise it copies the files into its download folder (Mods\Downloaded; the copy wiring is GUESSED).
-- Under the loader today the parent cannot receive any of this: see section 6 (inherited stdio in play.sh,
-  ReadFileEx on pipes, TerminateProcess).
+- Since 2026-10-17 the loader runs shim/tools/workshop-helper.sh (DepotDownloader) in its place (section 7); the
+  shim problems that kept the parent from receiving any of this (section 6) are fixed. Verified end to end the same
+  day (backlog 24: a missing HugeGrass mod fetched from the REQUIRED MODS screen, then the join).
 
 Literal lines for a successful `--subscribe` of item 2933266434 with the default MCC path:
 
@@ -39,11 +41,6 @@ Literal lines for a successful `--subscribe` of item 2933266434 with the default
 ```
 
 A failure is a single line, for example `{"Error":"Steam Workshop download timed out"}`.
-
-Our replacement, shim/tools/workshop-helper.sh (DepotDownloader), also makes the stats page's top-down pictures of the
-item's maps once it has printed `Ready`: `maptop.sh <the item's .map files>` in its own session, off the client's pipe,
-under native arm64 python (the script itself may run translated), log `$TMPDIR/reclaimer_workshop_<id>_maptop.log`.
-`PELOAD_NO_MAPTOP=1` skips it. (Before, a downloaded map got its picture the first time it was played.)
 
 ## 1. The command line and how the parent spawns it (CONFIRMED)
 
@@ -226,19 +223,40 @@ For `workshop-download --mcc-path <M> [--update] [--subscribe] <id>`:
 4. On failure: `{"Error":"<text>"}` (shown to the user), then exit.
 5. No item: print nothing, exit 0.
 
-## 6. Shim problems on this path (CONFIRMED in shim/src/peload.c, not fixed here)
+## 6. Shim problems on this path (found 2026-10-17; the first three FIXED the same day)
 
 - `PELOAD_WORKER_INHERIT_STDIO=1` (set by shim/play.sh and shim/target.sh) makes i_CreateProcessW skip the dup2 of
-  the STARTUPINFO std handles. The real helper's JSON then goes to the loader's log instead of the parent's pipe,
-  the parent reads EOF, and the dialog shows "Steam Workshop is unavailable" -- the observed behaviour. An
-  intercept has to write to the `hStdOutput` handle from STARTUPINFO (0x1000+fd, a socketpair end).
-- i_ReadFileEx does `pread()` at OVERLAPPED.Offset whenever an OVERLAPPED is passed. The parent's reader always
-  passes one, and the pipe is a socketpair, so pread fails (ESPIPE), ReadFileEx returns FALSE and the reader thread
-  ends: "Steam Workshop is unavailable" even with correct output. Stream fds need `read()` (block, call the
-  completion routine with the byte count, return TRUE; at EOF complete with 0 bytes or ERROR_BROKEN_PIPE 109,
-  which Rust treats as EOF). i_ReadFile already does this for overlapped stream reads.
-- i_TerminateProcess ignores its handle and `_exit()`s the loader. The drop guard in section 3 calls it whenever the
-  helper is still alive ~250 ms after being dropped (always on timeout/cancel), which would close the game.
-  It needs `kill(pid)` for `0x8000+pid` child handles.
-- i_CreateProcessW applies the child's environment block with `setenv()` in the loader itself, so `SteamAppId` /
-  `SteamGameId` stay set in the client after the first helper spawn (GUESSED harmless).
+  the STARTUPINFO std handles, so the real helper's JSON went to the loader's log, the parent read EOF and the dialog
+  showed "Steam Workshop is unavailable". Fixed by the intercept (section 7): it always wires the STARTUPINFO
+  stdin/stdout (0x1000+fd, socketpair ends) to the script, whatever PELOAD_WORKER_INHERIT_STDIO says.
+- i_ReadFileEx did `pread()` at OVERLAPPED.Offset whenever an OVERLAPPED was passed: ESPIPE on the socketpair, the
+  reader thread ended. Now sockets and pipes are read sequentially with `read()` (the completion routine gets the byte
+  count; at EOF 0 bytes / ERROR_BROKEN_PIPE), and an alertable SleepEx after an inline completion returns at once
+  (Rust's pipe reads waited forever). `PELOAD_READEX_PREAD=1` / `PELOAD_SLEEPEX_PLAIN=1` = old; `PELOAD_TRACE_PIPEIO=1` logs
+  pipe/socket reads.
+- i_TerminateProcess ignored its handle and `_exit()`ed the loader (the drop guard in section 3 calls it whenever the
+  helper is still alive ~250 ms after being dropped). Now a `0x8000+pid` child handle kills that child, and its process
+  group when the loader started it in its own. `PELOAD_TERMINATE_SELF=1` = old.
+- Still so: i_CreateProcessW applies the child's environment block with `setenv()` in the loader itself, so
+  `SteamAppId` / `SteamGameId` stay set in the client after the first helper spawn (GUESSED harmless).
+
+## 7. The replacement (2026-10-17)
+
+i_CreateProcessW (peload.c) intercepts a command line whose first argument is `workshop-download` (unless
+`PELOAD_NO_WORKSHOP_HELPER=1`, the client's own Steam helper): with `--subscribe|--update <id>` it runs
+`/bin/bash shim/tools/workshop-helper.sh <id> <root, Windows form> <root, Mac form>` (root = `<mcc-path>` minus two
+components + `\workshop\content\976730\<id>`, so the client uses the folder in place), stdin/stdout on the client's
+pipes, stderr to the loader's log, in its own process group (TerminateProcess also stops DepotDownloader); the
+no-item spawn runs `/usr/bin/true`. The loader logs `[workshop] item <id>: DepotDownloader helper started`.
+
+The script: the Steam account name from `STEAM_USER` or the first line of
+`~/Library/Application Support/ReclaimerMac/steam_user`; never a password (DepotDownloader must already be signed in,
+mods.md; an expired or missing login comes back as an `Error` line telling the user to sign in in a terminal). A
+`-manifest-only` run gives the total size, the download prints `Progress` lines from DepotDownloader's percentages,
+`Ready` once "Total downloaded" appears and `ModInfo.json` exists. Log `$TMPDIR/reclaimer_workshop_<id>.log`. It then
+makes the stats page's top-down pictures of the item's maps: `maptop.sh <the item's .map files>` in its own session,
+off the client's pipe, under native arm64 python (the script itself may run translated), log
+`$TMPDIR/reclaimer_workshop_<id>_maptop.log`; `PELOAD_NO_MAPTOP=1` skips it.
+
+Seen live: the client finds Workshop mods by the id in each folder's `ModInfo.json` (any folder name), and a mod folder
+with a file missing is a verify error, not a download.

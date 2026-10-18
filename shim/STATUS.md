@@ -1,5 +1,13 @@
 # Reclaimer-Mac shim — status
 
+> **Historical milestone log (2026-10-10 / 11, newest milestone first), kept as written.** For the current state
+> (2026-10-18) read CLAUDE.md and shim/docs/BACKLOG.md. In short: the full client runs -- menu, Server Browser, online
+> joins, Halo 3 gameplay through the loader's D3D11->GL renderer (native GL helper by default), audio, controller and
+> keyboard/mouse (`bash shim/build.sh && bash shim/play.sh`); the headless `dedicated` server works (`shim/dedicated.sh`).
+> Every "current blocker" / "next step" below was passed long ago: the native-transport gate (M11) is PASSED
+> (docs/native-transport-gate.md), the window is a real NSWindow, the glow crashes were the GL thunk ABI
+> (docs/menu-render-status.md), and the loader is ~16,000 lines over several source files (src/*.c).
+
 Goal: run Project Reclaimer's **dedicated server** on Apple Silicon (M4 Max)
 **without Wine**, by loading the Windows PE binaries directly into a
 macOS/Rosetta process and providing the Windows APIs they call. Graphics are
@@ -437,7 +445,8 @@ entry points. SEH unwinding is the known hard part and comes when engine C++
 starts throwing.
 
 ## Files
-- `src/peload.c` — the loader / diagnostic
+- `src/peload.c` — the loader / diagnostic (2026-10-18: plus d3dsubmit.c, dxbc2glsl.c, dxbc_cpu.c, glh_client.c,
+  glhelper.c, hitbox.c, nav.c, stats.c, wasapi.c, wininput.c, xaudio.c)
 - `docs/security-rcon.md` — RCON + wire-protocol review
-- build: `clang -arch x86_64 -O1 -o build/peload src/peload.c`
-- run:   `arch -x86_64 build/peload <path-to.pe>`
+- build: `bash shim/build.sh` (2026-10-18; was `clang -arch x86_64 -O1 -o build/peload src/peload.c`)
+- run:   `arch -x86_64 shim/build/peload <path-to.pe>`; to play: `bash shim/play.sh`

@@ -1,10 +1,22 @@
 # Teleporting a player safely (halo3.dll + Reclaimer client v0.9.18)
 
-Static RE only, 2026-10-17 (capstone, `re-tools/hdis.py`, `refs.py`, `hsfuncs.py`; nothing was read from a live process).
+Static RE, 2026-10-17 (capstone, `re-tools/hdis.py`, `refs.py`, `hsfuncs.py`; sections 1-5 read nothing from a live process;
+the live results are in the Status paragraph below).
 Binaries: `$HOME/Library/Application Support/ReclaimerMac/prefix/drive_c/Program Files/Steam/steamapps/common/Halo The Master Chief Collection/halo3/halo3.dll`
 (base 0x180000000, addresses `halo3+RVA`) and `client/project-reclaimer-client-v0.9.18.exe` (base 0x140000000, `exe+RVA`).
 **CONFIRMED** = read from code (evidence given). **GUESSED** = name or meaning inferred.
 TLS: `tls = gs:[0x58][*(u32*)(halo3+0xa39f9c)]`, objects `tls+0x38`, players `tls+0x10`, game_globals `gg = *(tls+0x48)`.
+
+**Status (implemented 2026-10-17, as in section 5):** `hb_frame_hook` is an entry hook on `main_loop_body`
+`halo3+0xb2250` (peload.c hbdel_install; the voice-mute jobs run there too); `hb_engine_jobs` (hitbox.c) takes the
+game-state lock, runs on the host only (`gg+0x11` 5 or 1; `PELOAD_TELEPORT_CLIENT_TEST=1` = the client-side
+experiment), exits the vehicle first (up to 3 frames) and checks the destination with `0x9bc78` at +0.3 / +1.2 and
+|coord| < 30000. Needs `PELOAD_ALLOW_TELEPORT=1`. Stats page controls (POST `/control?do=...`; the F7 key is retired,
+`PELOAD_HB_FKEYS=1` brings it back): `tpnext&slot=N` ("Teleport next to them"), `teleport` (old F7: the point
+reflection through the map centre), host-only `tpto&x=&y=&z=[&slot=]` and `explore&spot=` (map-boundaries.md),
+`tpby&dx=&dy=&dz=` (host, or a client with `PELOAD_TELEPORT_CLIENT_TEST`). A client forwards `tpnext` to the host's
+loader (`PELOAD_TELEPORT_HOST=<host stats addr>`; the host moves the requester, both views agree within 0.5 s). Tested live: a client-side teleport shows for < 1 s (listen host)
+/ ~1.5 s (our dedicated server) and snaps back; the host never moves (net-authority.md).
 
 ## Summary
 
@@ -20,13 +32,13 @@ TLS: `tls = gs:[0x58][*(u32*)(halo3+0xa39f9c)]`, objects `tls+0x38`, players `tl
    (type 4) that marking does nothing, so the host never learns about a client-side move. CONFIRMED. The client's own
    unit is locally predicted, and an update from the host that differs by more than 0.2-1.5 world units snaps it back.
    CONFIRMED that those threshold comparisons exist; their exact meaning is GUESSED.
-4. **Why the shim crashed.** `hb_frame_hook` hooks `halo3+0x9d22c`. That is not a top-of-loop function. It is
+4. **Why the shim crashed** (before 2026-10-17). `hb_frame_hook` hooked `halo3+0x9d22c`. That is not a top-of-loop function. It is
    `system_milliseconds` (a QueryPerformanceCounter wrapper) with **421 call sites in 236 functions**, many of them
    inside the tick (simulation, network, AI and object code). The job runs at the first such call on the main thread
    after F7. That can be in the middle of a tick, for example during the physics step or an object-update walk. It also
    ran without the game-state lock, and on a networked *client*. Each of these is a structural reason for the crash.
    CONFIRMED that they exist; which one caused this crash is unproven.
-5. **Fix:** do it the way Reclaimer does. Run on the main thread at the entry of `main_loop_body` (`halo3+0xb2250`),
+5. **Fix (done 2026-10-17):** do it the way Reclaimer does. Run on the main thread at the entry of `main_loop_body` (`halo3+0xb2250`),
    inside `halo3+0x12c948` / `0x12c9a0`, **on the host process only** (dedicated worker or listen host, `gg+0x11` is 5,
    or 1 for local). Validate the target point with `scenario_location_from_point` (`halo3+0x9bc78`), and either get the
    unit out of its vehicle first or refuse.
@@ -112,16 +124,16 @@ names, and 1 = local, are GUESSED from the Halo engine's `e_game_simulation_type
 **Where:** the host or server process. That is the dedicated worker under `dedicated.sh`, or a client that hosts the
 game. Check `*(u8*)(gg+0x11)`: 5 (or 1 for local) means go ahead. **4 (client) means do not call it.** Forward the
 request to the host instead. There is no generic channel for that: Reclaimer's 'MCE1' type 2 only moves the sender's
-own *Forge monitor*. For local tests, the host's own shim could take the request on its `PELOAD_STATS_HTTP` page; the
-worker loads halo3, so it can serve the page.
+own *Forge monitor*. The loader's own channel: the client's stats server forwards the request to the host's
+(`PELOAD_TELEPORT_HOST`, POST `tpnext&slot=<target>&who=<requester>`); the worker loads halo3, so it can serve the page.
 
 **When and on which thread:** the main game thread, between ticks. Use an entry hook on `main_loop_body` `halo3+0xb2250`:
 
 - Prologue (20 bytes, nothing rip-relative): `48 8B C4 57 48 81 EC 60 02 00 00 48 C7 44 24 30 FE FF FF FF`
 - Call: `entry_hook(base+0xb2250, pro, 20, fn)`
 
-Move the existing teleport and voice jobs off `0x9d22c`. Inside the hook, check that `tls` has the object table, as
-`hb_engine_jobs` does now.
+Both the teleport and the voice jobs run there now (they used to run off `0x9d22c`). Inside the hook, `hb_engine_jobs`
+checks that `tls` has the object table.
 
 **Steps:**
 
@@ -139,6 +151,7 @@ Move the existing teleport and voice jobs off `0x9d22c`. Inside the hook, check 
      `pos + (0, 0, 1.2)`, and `|coord| < 30000`. The last check matters: past ±32768 the host **deletes** the unit.
    - Best fallback is Reclaimer's own: keep a trail of B's origins (one point per 0.5 units moved; the stats thread
      already samples players every 100 ms) and use a point 2-4 units back along it. B stood there, so it is open floor.
+     Not implemented: the loader tries the four candidates and refuses when none is open.
    - Not covered: objects such as crates or vehicles. The BSP check only rejects solid structure.
 5. `fwd` = horizontal unit vector from `pos` towards B, `up = (0, 0, 1)`.
 6. `((void(ms_abi*)(u32, const float*, const float*, const float*, u8))(h3+0x259410))(unit, pos, fwd, up, 1)`, then

@@ -195,19 +195,19 @@ Options go in front of the command, e.g. `PELOAD_INVERT_PITCH=0 bash shim/play.s
 | `RECLAIMER_EXE=<path>` | use the client exe at this path |
 | `RECLAIMER_JOIN=host:port` | join that server as soon as the menu is up, e.g. `RECLAIMER_JOIN=203.0.113.7:11774` |
 | `RECLAIMER_DIRECT=1` | skip the menu: straight into a local Guardian match (no scoreboard text) |
-| `PELOAD_HITBOXES=1` | draw the real hitboxes (each player's and vehicle's collision model, which is what shots hit) posed on their live skeletons, through walls: players red with the head yellow, vehicles blue. `=spheres` draws bounding spheres instead; `=all` adds spheres for weapons, equipment and projectiles. **F2** toggles the overlay during play (any launch) |
-| `PELOAD_HB_TRACERS=1` | projectile tracers: grenades/rockets/plasma as trails, bullets as lines from muzzle to impact; **F3** toggles |
-| `PELOAD_HB_INFO=1` | player info above each player: shield and health %, held weapon, grenades, active camo, in a vehicle; **F4** toggles |
-| `PELOAD_HB_ITEMS=1` | weapons and equipment lying on the map, by name; **F5** toggles |
-| `PELOAD_HB_TEAMS=enemies` | show only enemies (`friends`: only teammates). Hitboxes are red/yellow for enemies, blue for teammates; **F6** cycles all / enemies / friends |
+| `PELOAD_HITBOXES=1` | draw the real hitboxes (each player's and vehicle's collision model, which is what shots hit) posed on their live skeletons, through walls: players red with the head yellow, vehicles cyan with their weak spots yellow (damage there alone destroys it: the Wraith's back hatch) or orange (breaking it exposes the driver: Wraith cockpit, Scorpion hatch). `=spheres` draws bounding spheres instead; `=all` adds spheres for weapons, equipment and projectiles. The stats page's **Hitboxes** button toggles it during play (any launch) |
+| `PELOAD_HB_TRACERS=1` | projectile tracers: grenades/rockets/plasma as trails, bullets as lines from muzzle to impact; the page's **Tracers** button toggles |
+| `PELOAD_HB_INFO=1` | player info above each player: shield and health %, weapon in hand / other weapon, grenades, active camo, in a vehicle; the page's **Player info** button toggles |
+| `PELOAD_HB_ITEMS=1` | weapons and equipment lying on the map, by name; the page's **Items** button toggles |
+| `PELOAD_HB_TEAMS=enemies` | show only enemies (`friends`: only teammates). Hitboxes are red/yellow for enemies, blue for teammates; the page's **Show** button cycles all / enemies / friends |
 | `PELOAD_STATS_HTTP=<port>` | live game stats page; on by default at http://127.0.0.1:8765/, `=0` turns it off (details below) |
-| **F8** | capture: saves the frame, its depth buffer and the camera position to `~/reclaimer_cap_*` (for reporting rendering glitches at a spot; the overlay is not in it) |
-| `PELOAD_HB_VISIBLE=1` | visible only: hitboxes and labels only for objects you can actually see, not behind walls (a small copy of the game's depth buffer, read back every frame); **F9** toggles |
+| `PELOAD_HB_VEHICLES=0` | leave vehicles out of the overlay (the page's **Vehicles** button; on by default) |
+| `PELOAD_HB_VISIBLE=1` | visible only: hitboxes and labels only for objects you can actually see, not behind walls (a small copy of the game's depth buffer, read back every frame while it is on); the page's **Visible only** button toggles |
 | `PELOAD_HB_TEXT_PX=7` | overlay label height in window pixels (Text − / + on the stats page) |
-| `PELOAD_HB_ZONES=1` | the map's boundaries in the game view: kill zones red, safe zones green (outside every safe zone you die), soft ceilings pink (soft kill), orange (push back) and yellow (slip surface), read from the map being played (Workshop maps too); **F10** toggles |
-| `PELOAD_MIC=0` | no microphone for voice chat (by default the Mac's microphone is the client's; it only sends voice while its talk key is held or toggled -- Communication settings). `PELOAD_MIC_MUTED=1` starts it muted; the stats page's **Mic** button mutes it during play. macOS asks once whether Terminal may use the microphone |
+| `PELOAD_HB_ZONES=1` | the map's boundaries in the game view: kill zones red, safe zones green (outside every safe zone you die), soft ceilings pink (soft kill), orange (push back) and yellow (slip surface), read from the map being played (Workshop maps too), drawn only where you can see them; the page's **Kill/safe zones** button toggles them, a chip per kind |
+| `PELOAD_MIC=0` | don't use the Mac's microphone: the client gets a silent one, so its voice chat still works for listening (by default the Mac's microphone is the client's; it only sends voice while its talk key is held or toggled -- Communication settings). `=none` gives it no microphone at all (its voice chat then retries every 5 s). `PELOAD_MIC_MUTED=1` starts it muted; the stats page's **Mic** button mutes it during play. macOS asks once whether Terminal may use the microphone |
 | `PELOAD_D3DGL_INVARIANT=1` | experimental: vertex positions computed bit-identically in every pass; try it if you see seams/speckles along polygon edges (e.g. Valhalla's rock walls) |
-| `PELOAD_ALLOW_TELEPORT=1` | teleport, **in games you host** (Host Game from the menu): the stats page's player details get **Teleport next to them** (you land beside that player, facing them, at a spot inside the map), F7 jumps to the opposite side of the map. It uses the game's own teleport on the host, between frames, so every player sees the move. A client can't move itself (the host puts it straight back -- tested); in a private game where the host also runs this loader, set `PELOAD_TELEPORT_HOST=<host ip>:<its stats port>` on the client and its button asks the host to move you |
+| `PELOAD_ALLOW_TELEPORT=1` | teleport, **in games you host** (Host Game from the menu): the stats page's player details get **Teleport next to them** (you land beside that player, facing them, at a spot inside the map), the page's **Teleport** button jumps to the opposite side of the map. It uses the game's own teleport on the host, between frames, so every player sees the move. A client can't move itself (the host puts it straight back -- tested); in a private game where the host also runs this loader, set `PELOAD_TELEPORT_HOST=<host ip>:<its stats port>` on the client and its button asks the host to move you |
 | `PELOAD_H3="name=value,..."` | set Halo 3 engine settings, e.g. `render_debug_depth_render=1`, `camera_fov_scale=1.2` — all 72 are listed in `shim/docs/halo3-engine-globals.md` |
 
 ### Live game stats over HTTP
@@ -216,10 +216,13 @@ Options go in front of the command, e.g. `PELOAD_INVERT_PITCH=0 bash shim/play.s
 (`PELOAD_STATS_HTTP=<port>` for another port, `=0` off; `PELOAD_STATS_ADDR=<ip>` to listen on another address, e.g. to
 watch from another device). From top to bottom the page shows:
 
-- **In-game overlay** buttons -- the same switches as the function keys: Hitboxes (F2), Tracers (F3), Player info (F4),
-  Items (F5), Text − / + (label size), Show all / enemies / friends (F6), Visible only (F9), Kill/safe zones (F10),
-  Teleport (F7, only with `PELOAD_ALLOW_TELEPORT`), Capture frame (F8), **Mic** (live / muted), and in games you host a
-  **Speed** menu: everyone's movement speed (the game variant's own speed trait, 25% to 300%).
+- **In-game overlay** buttons (the function keys of earlier versions are gone; `PELOAD_HB_FKEYS=1` brings them back):
+  Hitboxes, Tracers, Player info, Items, Vehicles (with chips for the two kinds of weak spots), Text − / + (label size),
+  Show all / enemies / friends, Visible only, Kill/safe zones (with a chip per kind: kill zones, safe zones, soft-kill and
+  push-back ceilings, slip surfaces), Teleport (only with `PELOAD_ALLOW_TELEPORT`), **Capture frame** (saves the frame,
+  its depth buffer and the camera position to `~/reclaimer_cap_*` for reporting a rendering glitch at a spot; the overlay
+  is not in it), **Mic** (live / muted), and in games you host a **Speed** menu: everyone's movement speed (the game
+  variant's own speed trait, 25% to 300%). Every switch costs nothing while it is off.
 - **Connected** -- everyone in the game's network session, also in the lobby before a match starts, in alphabetical
   order. Players who are talking light up green. The speaker beside each name mutes or unmutes their voice (a red cross
   = muted); **Mute all** / **Unmute all** do everyone. This is the client's own voice mute (the same list as its
@@ -238,14 +241,15 @@ watch from another device). From top to bottom the page shows:
   with what it changes: everyone, after spawning, each powerup, and the mode's roles (leader, flag carrier, infected,
   last survivor, ...).
 - **Players** -- living players first, then players waiting to respawn, then those who quit (still in the game's
-  player list but gone from its network session). Team, shield and health, weapon, deaths, shots and accuracy, grenades, vehicle, speed and active
+  player list but gone from its network session); click a column title to sort (by team, or the whole list). Team, shield and health, weapon, kills, deaths, K/D, shots and accuracy, grenades, vehicle, speed and active
   traits (where they differ from the defaults, with powerup and respawn-trait countdowns). 🔊 marks a talker, 🔇 a
   muted player, "(you)" the local player (from Halo 3's own player mapping, so also right in third person and vehicles).
   Shots count every projectile (each shotgun pellet is one); a hit is a shot that ended inside another player's body
   bounds -- an estimate.
 - **Death heatmap** -- where players died (blue = few, red = many) over a top-down picture of the map and a grey
-  "where players walk" layer, with everyone's live position. Deaths for this match or all matches on that map (kept in
-  `~/Library/Application Support/ReclaimerMac/heatmaps/`). The map pictures are made once from the game's own `.map`
+  "where players walk" layer, with everyone's live position and the vehicles. Deaths for this match or all matches on
+  that map (always collected, kept in `~/Library/Application Support/ReclaimerMac/heatmaps/`; the **heatmap** checkbox
+  only shows or hides them). Click the map (or "full window") to fill the browser window; X or Esc closes it. The map pictures are made once from the game's own `.map`
   files (`bash shim/tools/maptop.sh`; `play.sh` runs it in the background when they are missing; needs python3 with
   numpy and Pillow).
 - **Player details** (click a player in the table) -- under the heatmap: a big Mute / Unmute button, **Teleport next to
@@ -266,8 +270,9 @@ Machine-readable endpoints:
   `feed_seq` is the newest event's number. `PELOAD_FEED_LOG=1` also prints each event to the log
 - `/heat.json` -- the heatmap data (visited cells, deaths); `/maptop/<map>.png|json` -- the map picture and its world
   bounds
-- `POST /control?do=<hitboxes|tracers|info|items|visible|teams|textup|textdown|teleport|capture|mute|unmute|muteall|
-  unmuteall>[&voice=<id>]` with an `X-Reclaimer-Control: 1` header (other web pages can't send it);
+- `POST /control?do=<hitboxes|tracers|info|items|vehicles|visible|zones|zonetype&t=|weaktype&t=|teams|textup|textdown|
+  teleport|tpnext&slot=|tpto&x=&y=&z=|capture|mic&on=|speed&v=|mute|unmute|muteall|unmuteall>[&voice=<id>]` with an
+  `X-Reclaimer-Control: 1` header (other web pages can't send it);
   `PELOAD_STATS_READONLY=1` turns the controls off
 
 It reads the game's own memory (object and player tables, the network session, the game variant) -- the information
@@ -309,7 +314,7 @@ resized, and can go full screen (green button or Ctrl-Cmd-F). Developer and diag
 | `shim/src/xaudio.c` | XAudio2 / X3DAudio on CoreAudio |
 | `shim/src/wininput.c` | keyboard/mouse → Raw Input and window messages |
 | `shim/src/wasapi.c` | WASAPI render endpoint (the client's menu music and voice chat) on AudioQueue |
-| `shim/src/hitbox.c` / `shim/src/stats.c` | overlay (hitboxes, tracers, labels, visible only, F8 capture) / live stats over HTTP |
+| `shim/src/hitbox.c` / `shim/src/stats.c` | overlay (hitboxes, tracers, labels, visible only, zones, frame capture) / live stats over HTTP |
 | `shim/src/stats_page.html` | the stats page (embedded at build time; served from the file in a source checkout) |
 | `shim/play.sh` / `shim/build.sh` | launcher / build script |
 | `shim/target.sh` / `shim/dedicated.sh` | windowless second player / local dedicated server |

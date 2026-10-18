@@ -219,8 +219,10 @@ void hb_spar_tick(void){
         t->handle,sqrtf(bd),g_spar_err,yaw_err*57.2958f,pitch_err*57.2958f,g_spar_rx,g_spar_ry); (void)!write(2,m,kk); } } }
 int hb_spar_stick(float*rx,float*ry){ if(!hb_spar_enabled() || !g_spar_ok) return 0; *rx=g_spar_rx; *ry=g_spar_ry; return 1; }
 
-static HbMap g_hbm[6]; static int g_hbm_n;
-static char g_hb_mappaths[8][1024]; static int g_hb_nmappaths; static pthread_mutex_t g_hb_mapmx=PTHREAD_MUTEX_INITIALIZER;
+#define HB_NMAPS 48   // map files opened for tag data (never closed: callers keep the pointer); a long session plays many maps
+static HbMap g_hbm[HB_NMAPS]; static int g_hbm_n; static pthread_mutex_t g_hbm_mx=PTHREAD_MUTEX_INITIALIZER;
+#define HB_NPATHS 32   // recently opened scenario maps: around a map change the client also opens maps it borrows skins / tags from
+static char g_hb_mappaths[HB_NPATHS][1024]; static int g_hb_nmappaths; static pthread_mutex_t g_hb_mapmx=PTHREAD_MUTEX_INITIALIZER;
 static void hb_note_map(const char*p){     // CreateFileW: remember the scenario maps the game opens (newest first)
     if(!p) return; size_t n=strlen(p); if(n<5 || strcasecmp(p+n-4,".map")) return;   // always: F2 can enable the overlay later
     const char*b=strrchr(p,'/'); b=b?b+1:p; if(!strcasecmp(b,"shared.map") || !strcasecmp(b,"campaign.map")) return;
@@ -229,20 +231,49 @@ static void hb_note_map(const char*p){     // CreateFileW: remember the scenario
     // out of this list -- the stats page then named the map after an autosave and found no picture for it
     { int fd=open(p,O_RDONLY); uint8_t h[8]; int ok=fd>=0 && pread(fd,h,8,0)==8 && !memcmp(h,"daeh",4) && *(uint32_t*)(h+4)==13; if(fd>=0) close(fd); if(!ok) return; }
     pthread_mutex_lock(&g_hb_mapmx); int k=0; for(; k<g_hb_nmappaths; k++) if(!strcmp(g_hb_mappaths[k],p)) break;
-    if(k==g_hb_nmappaths && k<8) g_hb_nmappaths++; if(k>=8) k=7;
+    if(k==g_hb_nmappaths && k<HB_NPATHS) g_hb_nmappaths++; if(k>=HB_NPATHS) k=HB_NPATHS-1;
     for(; k>0; k--) memcpy(g_hb_mappaths[k],g_hb_mappaths[k-1],1024); snprintf(g_hb_mappaths[0],1024,"%s",p);
     pthread_mutex_unlock(&g_hb_mapmx); }
-// The map being played: the newest scenario map the game opened from halo3/maps or a Workshop mod's folder (the menu
-// opens campaign maps for its backgrounds first; a mod's map lives in steamapps/workshop/content/976730/<id>/maps).
-static int hb_current_map(char*out,size_t n){ out[0]=0; pthread_mutex_lock(&g_hb_mapmx);
-    for(int k=0;k<g_hb_nmappaths && !out[0];k++) if(strstr(g_hb_mappaths[k],"/halo3/maps/") || strstr(g_hb_mappaths[k],"/workshop/content/")) snprintf(out,n,"%s",g_hb_mappaths[k]);
-    if(!out[0] && g_hb_nmappaths) snprintf(out,n,"%s",g_hb_mappaths[0]);
-    pthread_mutex_unlock(&g_hb_mapmx); return out[0]!=0; }
+// The map being played. Around a map change the client opens other maps too (it borrows skins and tags from them --
+// "<map> gained N objects and tags from other maps"; Workshop maps such as Forge's desert_sandbox), so "the newest map
+// file opened" named the wrong one (2026-10-18: heatmap, walker, hitbox geometry and tag names all followed
+// desert_sandbox while Sandtrap was played). Now: the candidate (halo3/maps or a Workshop folder) whose tag table
+// matches the most live objects' definition datums (index -> salt); the newest wins ties and is the answer before
+// any object exists (menu). Rechecked every 2 s; g_hb_mapgen counts changes (caches keyed by definition reset on it).
+static HbMap* hbm_get(const char*path);
+static volatile unsigned g_hb_mapgen;
+static int hb_live_defs(uint32_t*defs,int max){   // distinct definition datums of live objects (the object table)
+    uint64_t arr=hb_object_array(); if(!arr) return 0; uint8_t hdr[0x60];
+    if(!hb_read(arr,hdr,sizeof hdr) || *(uint32_t*)(hdr+0x2c)!=0x64407440) return 0;
+    int32_t maxc=*(int32_t*)(hdr+0x20), esz=*(int32_t*)(hdr+0x24), hi=*(int32_t*)(hdr+0x3c); uint64_t data=*(uint64_t*)(hdr+0x48);
+    if(esz!=0x18 || hi<=0 || hi>maxc || hi>8192) return 0;
+    static uint8_t tab[8192*0x18]; static pthread_mutex_t mx=PTHREAD_MUTEX_INITIALIZER; int n=0; pthread_mutex_lock(&mx);
+    if(hb_read(data,tab,(size_t)hi*0x18)) for(int i=0;i<hi && n<max;i++){ const uint8_t*e=tab+i*0x18; if(!*(const uint16_t*)e) continue;
+        uint64_t p=*(const uint64_t*)(e+0x10); uint32_t d=0; if(!p || !hb_read(p,&d,4) || d==0xFFFFFFFFu || !(d>>16)) continue;
+        int dup=0; for(int k=0;k<n;k++) if(defs[k]==d){ dup=1; break; } if(!dup) defs[n++]=d; }
+    pthread_mutex_unlock(&mx); return n; }
+static int hb_current_map(char*out,size_t n){
+    static pthread_mutex_t mx=PTHREAD_MUTEX_INITIALIZER; static char cur[1024]; static double tchk; static int last_np=-1;
+    pthread_mutex_lock(&mx); double now=mono_s();
+    char paths[HB_NPATHS][1024]; int np; pthread_mutex_lock(&g_hb_mapmx); np=g_hb_nmappaths; memcpy(paths,g_hb_mappaths,sizeof(paths[0])*(size_t)np); pthread_mutex_unlock(&g_hb_mapmx);
+    if(!cur[0] || now-tchk>2.0 || np!=last_np){ tchk=now; last_np=np;
+        uint32_t defs[48]; int nd=hb_live_defs(defs,48); int best=-1, bs=-1;
+        for(int k=0;k<np;k++){ if(!strstr(paths[k],"/halo3/maps/") && !strstr(paths[k],"/workshop/content/")) continue;
+            int sc=0; if(nd){ HbMap*m=hbm_get(paths[k]); if(!m) continue;
+                for(int i=0;i<nd;i++){ int ti=defs[i]&0xFFFF; if(ti<m->ntags && m->salt[ti]==(defs[i]>>16) && m->grp[ti]) sc++; } }
+            if(sc>bs){ bs=sc; best=k; } }   // (paths are newest first: ties keep the newer)
+        if(best<0 && np) best=0;
+        if(best>=0 && strcmp(cur,paths[best])){
+            if(cur[0]){ char m[2200]; int kk=snprintf(m,sizeof m,"  [hitbox] map being played: %s (%d of %d live definitions match)\n",paths[best],bs,nd); (void)!write(2,m,kk); }
+            snprintf(cur,sizeof cur,"%s",paths[best]); __atomic_add_fetch(&g_hb_mapgen,1,__ATOMIC_ACQ_REL); } }
+    snprintf(out,n,"%s",cur); pthread_mutex_unlock(&mx); return out[0]!=0; }
 static int hbm_read(HbMap*m,uint64_t va,void*dst,size_t n){ if(va<m->vbase) return 0; uint64_t off=m->tagoff+(va-m->vbase); if(off+n>m->fsize) return 0;
     return pread(m->fd,dst,n,(off_t)off)==(ssize_t)n; }
-static HbMap* hbm_get(const char*path){
+static HbMap* hbm_get_l(const char*path);
+static HbMap* hbm_get(const char*path){ pthread_mutex_lock(&g_hbm_mx); HbMap*m=hbm_get_l(path); pthread_mutex_unlock(&g_hbm_mx); return m; }
+static HbMap* hbm_get_l(const char*path){
     for(int i=0;i<g_hbm_n;i++) if(!strcmp(g_hbm[i].path,path)) return g_hbm[i].fd>=0?&g_hbm[i]:0;
-    if(g_hbm_n>=6) return 0; HbMap*m=&g_hbm[g_hbm_n++]; memset(m,0,sizeof *m); snprintf(m->path,sizeof m->path,"%s",path); m->fd=open(path,O_RDONLY);
+    if(g_hbm_n>=HB_NMAPS) return 0; HbMap*m=&g_hbm[g_hbm_n++]; memset(m,0,sizeof *m); snprintf(m->path,sizeof m->path,"%s",path); m->fd=open(path,O_RDONLY);
     uint8_t h[0x500]; struct stat st;
     if(m->fd<0 || fstat(m->fd,&st) || pread(m->fd,h,sizeof h,0)!=(ssize_t)sizeof h || memcmp(h,"daeh",4) || *(uint32_t*)(h+4)!=13) goto bad;
     m->fsize=(uint64_t)st.st_size; m->vbase=*(uint64_t*)(h+0x2E0); m->tagoff=(uint32_t)(*(uint32_t*)(h+0x4DC+16)+*(uint32_t*)(h+0x4CC+8));
@@ -325,10 +356,15 @@ static void hbg_build(HbGeom*g,HbMap*m,int ti){
     free(hr); g->ok=g->nseg>0; }
 static const char* hb_tag_name_early(uint32_t def,HbMap*m,int ti){ (void)def; if(!m->names||ti>=m->ntags) return "?"; const char*f=m->names+m->noff[ti]; const char*b=strrchr(f,'\\'); return b?b+1:f; }
 // The collision geometry of an object definition (datum index), from whichever recently opened map holds that tag.
+// Definition datums are only unique within one map: the cache starts over when the map being played changes, and a
+// definition is looked up in that map (only if it isn't found there, in the other recent ones).
+static unsigned g_hbg_gen;
 static HbGeom* hb_geom(uint32_t def){
+    if(g_hbg_gen!=g_hb_mapgen){ g_hbg_gen=g_hb_mapgen; for(int i=0;i<g_hbg_n;i++){ free(g_hbg[i].node); free(g_hbg[i].reg); free(g_hbg[i].perm); free(g_hbg[i].wk); free(g_hbg[i].pts); } g_hbg_n=0; }
     for(int i=0;i<g_hbg_n;i++) if(g_hbg[i].def==def) return g_hbg[i].ok?&g_hbg[i]:0;
     if(g_hbg_n>=96) return 0; HbGeom*g=&g_hbg[g_hbg_n++]; memset(g,0,sizeof *g); g->def=def;
-    char paths[8][1024]; int np; pthread_mutex_lock(&g_hb_mapmx); np=g_hb_nmappaths; memcpy(paths,g_hb_mappaths,sizeof paths); pthread_mutex_unlock(&g_hb_mapmx);
+    char paths[HB_NPATHS+1][1024]; int np=0; hb_current_map(paths[0],1024); if(paths[0][0]) np=1;
+    { pthread_mutex_lock(&g_hb_mapmx); for(int k=0;k<g_hb_nmappaths;k++) if(strcmp(g_hb_mappaths[k],paths[0])) memcpy(paths[np++],g_hb_mappaths[k],1024); pthread_mutex_unlock(&g_hb_mapmx); }
     for(int k=0;k<np && !g->ok;k++){ HbMap*m=hbm_get(paths[k]); int ti=def&0xFFFF; if(!m || ti>=m->ntags || m->salt[ti]!=(def>>16)) continue;
         if(m->grp[ti]!='bipd' && m->grp[ti]!='vehi' && m->grp[ti]!='gint') continue; hbg_build(g,m,ti);
         int nw[3]={0}; for(int q=0;q<g->nseg;q++) nw[g->wk[q]<3?g->wk[q]:0]++;
@@ -383,9 +419,11 @@ static const char* hb_tag_name_l(uint32_t def);
 static const char* hb_tag_name(uint32_t def){   // also called by the stats thread (stats.c)
     static pthread_mutex_t mx=PTHREAD_MUTEX_INITIALIZER; pthread_mutex_lock(&mx); const char*r=hb_tag_name_l(def); pthread_mutex_unlock(&mx); return r; }
 static const char* hb_tag_name_l(uint32_t def){
-    static struct { uint32_t def; char nm[32]; } cache[256]; static int nc;
+    static struct { uint32_t def; char nm[32]; } cache[256]; static int nc; static unsigned gen;
+    if(gen!=g_hb_mapgen){ gen=g_hb_mapgen; nc=0; }   // (definition datums are per map: names start over with the map)
     for(int i=0;i<nc;i++) if(cache[i].def==def) return cache[i].nm;
-    char out[32]="?"; char paths[8][1024]; int np; pthread_mutex_lock(&g_hb_mapmx); np=g_hb_nmappaths; memcpy(paths,g_hb_mappaths,sizeof paths); pthread_mutex_unlock(&g_hb_mapmx);
+    char out[32]="?"; char paths[HB_NPATHS+1][1024]; int np=0; hb_current_map(paths[0],1024); if(paths[0][0]) np=1;   // the map being played first
+    { pthread_mutex_lock(&g_hb_mapmx); for(int k=0;k<g_hb_nmappaths;k++) if(strcmp(g_hb_mappaths[k],paths[0])) memcpy(paths[np++],g_hb_mappaths[k],1024); pthread_mutex_unlock(&g_hb_mapmx); }
     for(int k=0;k<np;k++){ HbMap*m=hbm_get(paths[k]); int ti=def&0xFFFF; if(!m || !m->names || ti>=m->ntags || m->salt[ti]!=(def>>16)) continue;
         const char*full=m->names+m->noff[ti]; const char*b=strrchr(full,'\\'); b=b?b+1:full; int j=0;
         for(; b[j] && j<31; j++) out[j]=(char)(b[j]=='_'?' ':(b[j]>='a'&&b[j]<='z'?b[j]-32:b[j])); out[j]=0; break; }
@@ -525,8 +563,9 @@ typedef struct { double t; uint32_t def, handle; float pos[3], vel[3]; uint8_t r
 // Moves the local player to the point reflection of its position through the map centre (the mean position of the
 // weapons and equipment lying on the map; Halo multiplayer maps are mostly symmetric), turned to face the other way.
 // Uses halo3's own teleport (halo3+0x259410: object, position*, forward*, up*, bool -- what the object_teleport script
-// functions call), which has to run on the simulation thread: the request is queued here and executed by
-// hb_engine_jobs() from QueryPerformanceCounter on that thread (identified as the thread that runs object_delete).
+// functions call), which has to run on the engine main thread between ticks: the request is queued here and executed by
+// hb_engine_jobs() from the entry hook on main_loop_body (halo3+0xb2250, peload.c hb_frame_hook) inside halo3's
+// game-state lock (shim/docs/teleport.md; the old QueryPerformanceCounter path ran mid-tick and crashed).
 // Meant for matches this client hosts; on someone else's server the host would correct the position anyway.
 static pthread_t g_hb_simthread; static volatile int g_hb_simthread_ok;
 volatile int g_hb_job_pending;
@@ -922,7 +961,7 @@ static void hb_draw_overlay(void){
         if(self || !hb_team_shown(o)) continue;
         if(unit && fh && !g_hb_spheres){ int a=hb_emit_hitbox(o,vp,verts,nv,HB_CAP); if(a>0) nv+=a; if(a!=0) goto info; }
         if(fh && (unit || g_hb_all)){
-            static const float pal[6][3]={{1,0.5f,0.5f},{1,0.85f,0.1f},{1,0.4f,0},{0.2f,1,0.3f},{0.2f,0.9f,1},{1,0.3f,1}};   // biped fallback sphere is pink, not hitbox red
+            static const float pal[6][3]={{1,0.5f,0.5f},{0.55f,0.6f,0.65f},{1,0.4f,0},{0.2f,1,0.3f},{0.2f,0.9f,1},{1,0.3f,1}};   // fallback spheres (no collision model found): bipeds pink, vehicles grey (yellow = weak spots)
             const float*col = pal[o->type==0?0 : o->type==1?1 : o->type==12?2 : o->type==2?3 : o->type==3?4 : 5];
             for(int axis=0;axis<3;axis++){ float prev[3]; int pv=0;
                 for(int sgi=0;sgi<=24;sgi++){ float an=(float)sgi*(6.2831853f/24.f), ca=cosf(an)*o->r, sa=sinf(an)*o->r; float w[3]={o->c[0],o->c[1],o->c[2]};

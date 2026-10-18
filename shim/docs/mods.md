@@ -66,6 +66,9 @@ DepotDownloader into the client's Workshop folder and shows its progress; then t
   the saved login expires the screen says so, and you sign in again in a terminal);
 - your Steam account name in `~/Library/Application Support/ReclaimerMac/steam_user` (one line), or `STEAM_USER` set.
 Log: `$TMPDIR/reclaimer_workshop_<id>.log`. `PELOAD_NO_WORKSHOP_HELPER=1` = the client's own helper (Steam only).
+Verified end to end 2026-10-17 (HugeGrass Rebalance fetched from the screen, then the join). After a download the
+helper also makes the stats page's top-down pictures of the item's maps in the background (`shim/tools/maptop.sh`;
+`PELOAD_NO_MAPTOP=1` skips it). How it works: shim/docs/workshop-helper.md.
 The steps below do the same by hand.
 
 ### By hand
@@ -124,11 +127,12 @@ Steam account instead. Your account needs Halo: The Master Chief Collection.
    ```
 
    Leave out `-filelist` to fetch the whole item (every map it has). The client looks for Workshop content in
-   `steamapps\workshop\content\976730\<id>\` (with a `ModInfo.json` in it); `Program Files (x86)\Steam\steamapps` in
-   the prefix is a link to the same folder.
+   `steamapps\workshop\content\976730\<id>\` (with a `ModInfo.json` in it; it goes by the id in `ModInfo.json`, so
+   the folder name doesn't matter); `Program Files (x86)\Steam\steamapps` in the prefix is a link to the same folder.
+   For the map pictures on the stats page: `bash shim/tools/maptop.sh "$W"/2933266434/maps/*.map`.
 
 5. **Join** with `RECLAIMER_JOIN=<address> bash shim/play.sh`. If a file is missing or differs from the server's
-   copy, the client names it; download that file too.
+   copy, the client names it (a verify error: it does not download it); download that file too.
 
 ## Notes
 

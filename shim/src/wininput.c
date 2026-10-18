@@ -136,9 +136,10 @@ static void wi_key(unsigned short kc,int down,int repeat){
     wi_post(h,msg,g,lp);
     if(getenv("PELOAD_TRACE_INPUT")){ char m[96]; int q=snprintf(m,sizeof m,"  [kbm] key kc=0x%x vk=0x%x sc=0x%x %s\n",kc,g,k.sc,down?"down":"up"); (void)!write(2,m,q); } }
 
-// F2-F5, F9, F10 toggle the overlay features (hitbox.c: hitboxes, projectile tracers, player info, items, visible only,
-// kill/safe zones); not forwarded to the game.
-static volatile int g_hb_toggle, g_hb_teamcycle;   // F6 cycles the team filter (all -> enemies -> friends)
+// The overlay switches (hitbox.c: hitboxes, projectile tracers, player info, items, visible only, zones, vehicles) are
+// bits of g_hb_toggle, flipped by the stats page (POST /control). The old F2-F10 keys only with PELOAD_HB_FKEYS=1 (then
+// they are not forwarded to the game); otherwise the keys reach the game (the client answers votes with F5).
+static volatile int g_hb_toggle, g_hb_teamcycle;   // the page's Show button cycles the team filter (all -> enemies -> friends)
 // ---- NSEvent translation (main thread, from cocoa_pump). Returns 1 = consumed (don't forward to AppKit). ----
 static int wi_translate(id ev){
     static int off=-1; if(off<0) off=getenv("PELOAD_NO_KBM")?1:0;

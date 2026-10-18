@@ -126,8 +126,8 @@ alive -> dead. Shots: the object_delete hook (hb_on_delete, sim thread) logs eve
 biped whose bounding sphere holds its end point (estimated hit) into g_hbshot (8192 ring). Voice: set_muted(id,bool)
 (found by signature, run from the halo3 frame hook via st_voice_jobs) = the client's own mute list; talking = an entry
 hook on the client's voice_recv (installed at exe load, st_voice_install) stamping each sender. Controls: POST
-/control?do=... + header X-Reclaimer-Control (CSRF guard; PELOAD_STATS_READONLY=1 disables) flip the same switches as
-the F-keys (g_hb_toggle bits; F9 = visible only). F8 / do=capture (hb_capture_tick, render-thread Present):
+/control?do=... + header X-Reclaimer-Control (CSRF guard; PELOAD_STATS_READONLY=1 disables) flip the overlay switches
+(g_hb_toggle bits). do=capture (the page's Capture frame; hb_capture_tick, render-thread Present):
 ~/reclaimer_cap_<pid>_<n>.bmp (the game backbuffer -- the overlay is drawn later, at the window blit, so it is NOT in
 it), _depth.bmp/.f32 (the camera draw's DSV, rows top-first), .txt (camera, view-proj, depth stats).
 Event feed + chat (2026-10-17, stats.c st_event ring, GET /feed.json?since=<seq>, snapshot feed_seq; PELOAD_FEED_LOG=1
@@ -158,9 +158,14 @@ Overlay keys F2-F10 are OFF since 2026-10-17 (PELOAD_HB_FKEYS=1 brings them back
 drawn by hbz_gpu (translucent surfaces + edges, static VBO per map, per-pixel occlusion against the hb_vis depth readback as a
 texture; kinds g_hbz_show bits 1 kill, 2 safe, 4 acceleration, 8 soft kill, 16 slip -- page chips, do=zonetype&t=). Helper-mode
 present: a frame that doesn't come within 50 ms re-presents the last IOSurface (no in-process fallback; PELOAD_GLH_PQ_FALLBACK=1 old).
-Zones overlay (F10 / PELOAD_HB_ZONES, hitbox.c hbz_*): kill/safe trigger volumes (scnr +0x258/+0x484/+0x490) and soft
-ceilings (sddt) read from the map being played (hb_current_map: halo3/maps or a Workshop folder), drawn with
-hb_seg_clip. Host speed control: stats do=speed&v=<tl_speed index> writes the variant's base player speed trait.
+Zones overlay (page button / PELOAD_HB_ZONES, hitbox.c hbz_*): kill/safe trigger volumes (scnr +0x258/+0x484/+0x490) and soft
+ceilings (sddt) read from the map being played (hb_current_map: halo3/maps or a Workshop folder). Pixels outside the
+depth readback's view (2 frames old: the strip turning into view, behind its camera) are hidden, not drawn through walls
+(2026-10-18). PELOAD_HB_ZONES_XRAY=1 = the old lines through walls (hbz_draw, hb_seg_clip). Host speed control: stats do=speed&v=<tl_speed index> writes the variant's base player speed trait.
+The map being played (2026-10-18, backlog 44): hb_current_map (hitbox.c) = the recently opened map (halo3/maps or a Workshop folder)
+whose tag table matches the most live objects' definition datums (index -> salt), rechecked every 2 s -- NOT the newest .map
+opened (the client opens maps it borrows skins / tags from around a change). Heatmap, map picture, walker graph, zones, tag
+names and hitbox geometry all follow it; g_hb_mapgen resets the per-definition caches. 32 recent paths, 48 open map files.
 Layered windows (2026-10-17): UpdateLayeredWindow stores each window's bitmap/position/alpha and ShowWindow its
 visibility; lay_draw draws them over the frame at the window blit. The client falls back to layered windows whenever
 the game stops presenting for >1 s ("Client screens now shown as layered windows"); before this its loading screen
@@ -183,7 +188,7 @@ drawn over a top-down picture of the map: re-tools/h3bsp.py decodes the collisio
 h3-map-geometry.md) into maptop/<map>.png + .json (world bounds); shim/tools/maptop.sh makes all 27 (needs python3 +
 numpy + Pillow); served as /maptop/<map>.png|json. (re-tools/h3map.py's string-id decoding is wrong for these builds;
 h3bsp.sid_name is right.)
-Overlay "visible only" (F9 / PELOAD_HB_VISIBLE): hb_vis_tick blits the camera draw's depth (D32F_S8) down to 480x270
+Overlay "visible only" (page button / PELOAD_HB_VISIBLE): hb_vis_tick blits the camera draw's depth (D32F_S8) down to 480x270
 and reads it back through a 3-PBO ring (2 frames late, no stall); hb_vis keeps an object when the scene at its centre /
 top / bottom is not nearer than its front (centre moved toward the camera by radius + 0.3). Label text is
 PELOAD_HB_TEXT_PX window pixels tall (default 7; the page's Text -/+).
@@ -218,7 +223,8 @@ Forge 2.0 (2933266434) ships its own halo3/maps/shared.map + campaign.map beside
 Rock-wall seams (tabled by the user, display-only): `PELOAD_D3DGL_DFCENSUS` (draws per depth func), `PELOAD_D3DGL_INVARIANT`
 (invariant gl_Position, opt-in); the main depth buffer is DXGI 19 (D32F_S8, reverse-Z) and keeps full float precision.
 play.sh's stdin feeder is `sleep 86400.<pid>` (killed when the game exits; it used to hold a caller's `| tail` for 24 h).
-Native GL helper (2026-10-17, PELOAD_GL_HELPER=1, opt-in; shim/src/glh_client.c + glhelper.c + glh_shm.h, generated glh_gen.inc /
+Native GL helper (2026-10-17, PELOAD_GL_HELPER=1: play.sh's default, the code's default without the env is off; spawned with
+only stdio + its pipe; shim/src/glh_client.c + glhelper.c + glh_shm.h, generated glh_gen.inc /
 glh_dec.inc from shim/tools/glh_gen.py, which build.sh reruns): peload.c redefines dlsym (after the D3DGL globals) so every GL name
 resolves to a router that encodes the call into a shared-memory ring while the render context (g_d3dgl_cgl, a dummy in helper mode) is
 current, else calls the real function. The helper (native arm64, its own GL context) replays them. Names come from pools it keeps filled;
@@ -226,9 +232,20 @@ Get*/link-time calls are synchronous round trips; GetError -> 0 and CheckFramebu
 (PELOAD_GLH_SYNCERR/_SYNCFBO); occlusion queries come back through a result table; pq_publish -> GLH_X_PQ_BLIT into 3 global IOSurfaces,
 the present thread samples them as rectangle textures. Every pointer argument needs a size rule in glh_gen.py (it refuses to generate
 otherwise: an unencoded pointer crashed the helper). Debug: PELOAD_GLH_TRACE=<n> (first n commands), PELOAD_GLH_STATS=1, crash reports
-in /Library/Logs/DiagnosticReports/glhelper-*. hb_vis (F9) is off in helper mode. The helper's write end of the wake pipe sits at fd >= 4000
+in /Library/Logs/DiagnosticReports/glhelper-*. The depth readback (visible only, zones) goes through glh_rb_request (one ticket in flight). The helper's write end of the wake pipe sits at fd >= 4000
 (the game's CloseHandle once closed a low one).
-D3D object lifetime (2026-10-17, backlog 27): refcounted D3DObjs, freed via d3dobj_stage/d3dobj_reap -- OFF by default since 21:15 (PELOAD_D3D_FREE=1 on) after map-change corruption in a public BTB; copy-on-write (PELOAD_MEMCPY_COW=1) off too. Map-change test server: DED_CONFIG=mapchange.toml bash shim/dedicated.sh (3 x 1-minute games).
+D3D object lifetime (2026-10-17, backlog 27): refcounted D3DObjs, freed via d3dobj_stage/d3dobj_reap -- ON by default again since 2026-10-18 00:35 (PELOAD_D3D_FREE=0 / PELOAD_D3D_NOFREE=1 = never free; it was off 2026-10-17 21:15 after map-change corruption in a public BTB, before two use-after-free fixes); copy-on-write (PELOAD_MEMCPY_COW, =0 off) on again too: a 40-minute BTB soak with both (85 players, 3 maps, 21.8 GB freed) was clean. Map-change test server: DED_CONFIG=mapchange.toml bash shim/dedicated.sh (3 x 1-minute games).
+Big games (2026-10-18, PERF-PLAN "80-100 player games"): the limit is halo3's MAIN thread (guest-0x18000a120, 99% under
+Rosetta: halo3 code 55-60%, client hooks 8-10%, host memmove ~20% = its ~14 MB game-state copies ~5 a frame, malloc), not the
+GL helper (0 ms waited in the slowest stretches). BTB: Valhalla median 63 fps / p10 39, Highground 50 / 28. COW in-match A/B
++4%. PELOAD_PAR_MEMCPY=<helpers> copies big (>= 2 MB) non-overlapping guest copies in 1 MB chunks on helper threads
+(shim-copy; Rosetta bench 5 x 14 MB 4.0 -> 2.0 ms; PELOAD_PAR_CHECK=1 verifies: 6,145 copies, 0 mismatches; PELOAD_AB=parcopy).
+GetSystemInfo said ONE processor + allocation granularity 0 (the client sizes ~10 thread pools from the count; halo3's
+locks at halo3+0x620170.. spin before blocking only when it is > 1 and wake at most that many waiters):
+PELOAD_SYSINFO=real reports Windows' values (hw.logicalcpu or PELOAD_NCPU). Both opt-in until a big-game A/B.
+Diagnostics: PELOAD_GETENV_STATS (real environment lookups per site: every PELOAD_* is cached by peload_cgetenv, the rest is
+~20-260/s), PELOAD_HEAP_STATS=<thread> (HeapAlloc sizes), PELOAD_CALLCOUNT=guest-0x18000a120 (Win32 calls of the main thread:
+~3.5 M/s in a BTB: GetCurrentThreadId (now cached per thread), GetProcessHeap, memset, HeapAlloc/Free, memcpy).
 Walking with the map (2026-10-17, backlog 32): PELOAD_NAV=roam|enemy|x,y,z drives pad 0 along A* paths of a floor graph
 (re-tools/h3nav.py -> maptop/<map>.nav, made in the background on first play; shim/src/nav.c, own thread shim-nav;
 PELOAD_NAV_LOG). Use it for unattended test movement instead of PELOAD_INPUT_SCRIPT (needs QR_PAD=1). With the sparring partner
@@ -259,10 +276,11 @@ Glitch hunting: `PELOAD_D3DGL_COVQ` (+`_COVQ_FRAC`, `_HUGEPROBE=<t>`) per-draw s
 `_FRAMESTAT`, `_CBSCAN`, `_PSCLAMP=<c>`, `_SKIPVSH=<hash,..>`, `_DUMPHASH=<hash,..>` (GLSL+DXBC to ~).
 
 Overlay (2026-10-16, shim/src/hitbox.c; field layout in shim/docs/halo3-objects.md). Features, each a launch
-variable + function key (wininput.c flips bits of g_hb_toggle; keys are consumed, not sent to the game):
-F2 `PELOAD_HITBOXES=1|all|spheres` hitboxes, F3 `PELOAD_HB_TRACERS` projectile trails + bullet lines, F4
-`PELOAD_HB_INFO` shield/health/weapon/grenades/camo/vehicle labels, F5 `PELOAD_HB_ITEMS` weapon/equipment labels,
-F6 / `PELOAD_HB_TEAMS=all|enemies|friends` team filter (enemies red/yellow head, teammates blue). Objects come from the
+variable + a stats page button (bits of g_hb_toggle; the old F2-F10 keys only with PELOAD_HB_FKEYS=1):
+`PELOAD_HITBOXES=1|all|spheres` hitboxes, `PELOAD_HB_TRACERS` projectile trails + bullet lines,
+`PELOAD_HB_INFO` shield/health/"<weapon in hand> / <other weapon>"/grenades/camo/vehicle labels, `PELOAD_HB_ITEMS` weapon/equipment
+labels, `PELOAD_HB_TEAMS=all|enemies|friends` team filter (enemies red/yellow head, teammates blue), `PELOAD_HB_VEHICLES`
+(default on; weak spots yellow/orange, chips do=weaktype). Objects come from the
 "object" data array (TLS index halo3+0xa39f9c -> TLS block +0x38). Real hitboxes = the object's COLLISION MODEL read
 from the .map file the game opened (hb_note_map in CreateFileW; bipd/vehi +0x34 model -> hlmt +0x10 coll ->
 regions/permutations/bsps; all permutations cached, each object picks its own via its region permutation bytes at
@@ -323,7 +341,7 @@ decide what it gathers). Map boundaries tested live: host with PELOAD_PATCH=halo
 point POST /control?do=tpto&x=&y=&z=[&slot=] (shim/docs/map-boundaries.md); stats page buttons "Boundaries on/off"
 (do=bounds, patches written at run time at the frame safe point) and per-map spots (do=explore&spot=, g_st_spots: Valhalla east cliff). Speed-step test: the host adopts client
 positions within 2.5 units with no speed check (shim/docs/net-authority.md).
-Teleport (PELOAD_ALLOW_TELEPORT; stats page "Teleport next to them" = POST /control?do=tpnext&slot=N, F7 = opposite
+Teleport (PELOAD_ALLOW_TELEPORT; stats page "Teleport next to them" = POST /control?do=tpnext&slot=N, the Teleport button = opposite
 side): shim/docs/teleport.md. halo3+0x259410 (object, pos*, fwd*, up*, 1) run from hb_engine_jobs in an entry hook on
 main_loop_body (halo3+0xb2250, engine main thread, before the frame's ticks -- where the Reclaimer client teleports)
 inside the game-state lock (halo3+0x12c948 / 0x12c9a0), host only (game_globals+0x11 == 5, or 1 local; a client's body
