@@ -25,7 +25,7 @@ canvas{width:100%;height:auto;display:block;background:#0b0b0b;border-radius:4px
 .ramp{height:8px;width:140px;border-radius:2px;background:linear-gradient(90deg,#1840ff,#18d0ff,#30e060,#f0e040,#ff3020)}
 .col{display:flex;flex-direction:column;gap:16px;min-width:0}
 #det{min-width:0}
-#zchips .zc{background:#222;color:var(--dim);border:1px solid var(--line);border-radius:12px;padding:2px 9px;font:inherit;font-size:12px;cursor:pointer;margin-left:2px}#zchips .zc i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:5px;vertical-align:middle;opacity:.35}#zchips .zc.on{color:#fff;border-color:#666}#zchips .zc.on i{opacity:1}
+#zchips .zc,#wchips .zc{background:#222;color:var(--dim);border:1px solid var(--line);border-radius:12px;padding:2px 9px;font:inherit;font-size:12px;cursor:pointer;margin-left:2px}#zchips .zc i,#wchips .zc i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:5px;vertical-align:middle;opacity:.35}#zchips .zc.on,#wchips .zc.on{color:#fff;border-color:#666}#zchips .zc.on i,#wchips .zc.on i{opacity:1}
 body.stale .panel,body.stale #ov{opacity:.45}body.stale #hd{color:#f0a040}
 th .srt{display:inline-block;margin-left:2px;padding:0 2px;cursor:pointer;color:#555;font-size:10px;user-select:none}th .srt:hover{color:#ccc}th .srt.on{color:var(--accent)}
 .sortmode{display:flex;gap:12px;align-items:center;margin:0 0 6px;color:var(--dim)}.sortmode label{cursor:pointer}
@@ -88,7 +88,10 @@ th .srt{display:inline-block;margin-left:2px;padding:0 2px;cursor:pointer;color:
  <button data-a="info" title="Shield, health, weapon, grenades, camo and vehicle labels over players">Player info</button>
  <button data-a="items" title="Weapons and equipment lying on the map">Items</button>
  <button data-a="vehicles" title="Vehicles in the overlay: their hitboxes and info labels (on by default). With Hitboxes on, weak spots are colored: yellow = damage there kills the vehicle on its own (Wraith back hatch: 75 of its 750), orange = breaking it exposes the shielded driver to full hits (Wraith cockpit, Scorpion driver hatch); the rest cyan">Vehicles</button>
- <span id="vlegend" class="lbl" style="display:none" title="From each vehicle's damage data in the map file (re-tools/h3dmg.py prints it)">weak spots: <i style="display:inline-block;width:9px;height:9px;border-radius:2px;background:#fff21a;vertical-align:middle"></i> kills it &nbsp;<i style="display:inline-block;width:9px;height:9px;border-radius:2px;background:#ff8c1a;vertical-align:middle"></i> exposes the driver</span>
+ <span id="wchips" style="display:none" title="Vehicle weak spots, from each vehicle's damage data in the map file (re-tools/h3dmg.py). Only some vehicles have them: the Wraith (back hatch kills it: 75 of 750; cockpit opens the driver) and the Scorpion (driver hatch); the rest stay cyan">
+  <button class="zc" data-w="1" title="Lethal section: damage there alone kills the vehicle (Wraith back hatch / rear engine: 75 of its 750)"><i style="background:#fff21a"></i>Weak: kills it</button>
+  <button class="zc" data-w="2" title="Opens the driver: break it and the shielded driver takes full hits (Wraith cockpit, Scorpion driver hatch: 113)"><i style="background:#ff8c1a"></i>Weak: exposes driver</button>
+ </span>
  <button data-a="textdown" title="Smaller label text">Text −</button><span id="tpx" class="lbl"></span><button data-a="textup" title="Larger label text">Text +</button>
  <button data-a="teams" title="Which players the overlay shows">Show: all</button>
  <button data-a="visible" title="Hitboxes and labels only for objects you can actually see (not behind walls)">Visible only</button>
@@ -135,6 +138,7 @@ th .srt{display:inline-block;margin-left:2px;padding:0 2px;cursor:pointer;color:
  <div class="panel"><h2 id="mt">Death heatmap</h2><canvas id="cv" width="560" height="560"></canvas>
   <div class="ctl">
    <label>Deaths <select id="scope"><option value="match">this match</option><option value="all">all matches</option></select></label>
+   <label title="Deaths per spot (collected for every map all the time, this switch only shows or hides it)"><input type="checkbox" id="hmv" checked> heatmap</label>
    <label><input type="checkbox" id="fp" checked> where players go</label>
    <label><input type="checkbox" id="pd" checked> players now</label>
    <label><input type="checkbox" id="pl"> names on map</label>
@@ -364,7 +368,7 @@ function drawMap(){
   if(!view){cx.fillStyle='#777';cx.font='14px system-ui';cx.textAlign='center';cx.fillText('the map fills in as players move and die',cv.width/2,cv.height/2);return}
   if(mapTop){ const j=mapTop.j, [ax,ay]=toScreen(j.x0,j.y1), [bx,by]=toScreen(j.x1,j.y0); cx.globalAlpha=0.85; cx.drawImage(mapTop.im,ax,ay,bx-ax,by-ay); cx.globalAlpha=1; }
   if(document.getElementById('fp').checked&&base){ if(mapTop) cx.globalAlpha=0.35; cx.drawImage(base,0,0); cx.globalAlpha=1; }
-  if(heatImg) cx.drawImage(heatImg,0,0);
+  if(heatImg && document.getElementById('hmv').checked) cx.drawImage(heatImg,0,0);
   const sp=sel!=null&&snap?snap.players.find(q=>q.slot===sel):null;
   if(sp&&heat){cx.strokeStyle='#fff';cx.lineWidth=1.5;for(const d of heat.deaths){if(d[7]!==sel||d[4]!==sp.name||(scope()!=='all'&&d[5]!==heat.match))continue;const [x,y]=toScreen(d[0],d[1]);cx.beginPath();cx.arc(x,y,6,0,7);cx.stroke()}}
   if(document.getElementById('vh').checked&&snap&&snap.vehicles) for(const v of snap.vehicles){ if(!v.pos) continue; const [x,y]=toScreen(v.pos[0],v.pos[1]);
@@ -382,7 +386,7 @@ function drawMap(){
      cx.font='11px system-ui'; cx.textAlign='left'; cx.lineWidth=3; cx.strokeStyle='#000c'; cx.strokeText(t,x+7,y-6); cx.fillStyle=p.slot===sel?'#ff0':'#fff'; cx.fillText(t,x+7,y-6); } }
 }
 async function pollHeat(){ try{ heat=await (await fetch('/heat.json')).json(); loadMapTop(heat.map); buildLayers(); drawMap(); }catch(e){} setTimeout(pollHeat,4000) }
-for(const id of ['scope','fp','pd','pl','vh']) document.getElementById(id).addEventListener('change',()=>{buildLayers();drawMap();renderDet()});
+for(const id of ['scope','fp','pd','pl','vh','hmv']) document.getElementById(id).addEventListener('change',()=>{buildLayers();drawMap();renderDet()});
 // ---- the map in the whole browser window: click the map (or "full window"); the X or Esc puts it back ----
 const mapfs=document.createElement('div'); mapfs.id='mapfs'; mapfs.innerHTML='<button class="fsx" title="Close (Esc)">×</button>'; document.body.appendChild(mapfs);
 let fsHome=null;
@@ -414,10 +418,13 @@ cv.addEventListener('pointerdown',async e=>{ if(!document.getElementById('tph').
     hov.textContent=j.ok?`teleported to ${x.toFixed(1)}, ${y.toFixed(1)}, ${z.toFixed(1)}`:'refused'; }catch(err){ hov.textContent='not connected'; } });
 // ---- overlay controls (the function keys' switches; POST so other sites can't flip them) ----
 const ovNames={all:'all',enemies:'enemies',friends:'friends'};
+document.getElementById('wchips').addEventListener('pointerdown',async e=>{ const b=e.target.closest('.zc'); if(!b||e.button) return; e.preventDefault();
+  try{ await fetch('/control?do=weaktype&t='+b.dataset.w,{method:'POST',headers:{'X-Reclaimer-Control':'1'}}); }catch(err){} });
 document.getElementById('zchips').addEventListener('pointerdown',async e=>{ const b=e.target.closest('.zc'); if(!b||e.button) return; e.preventDefault();
   try{ await fetch('/control?do=zonetype&t='+b.dataset.z,{method:'POST',headers:{'X-Reclaimer-Control':'1'}}); }catch(err){} });
 function renderOverlay(){ const o=snap&&snap.overlay; if(!o) return;
-  document.getElementById('vlegend').style.display=o.hitboxes&&o.vehicles?'':'none';
+  { const wc=document.getElementById('wchips'); wc.style.display=o.hitboxes&&o.vehicles?'':'none'; const ws=snap.weak_show??3;
+    for(const b of wc.querySelectorAll('.zc')){ b.classList.toggle('on',!!(ws&+b.dataset.w)); b.disabled=!o.controls; } }
   { const zc=document.getElementById('zchips'); zc.style.display=o.zones?'':'none'; const zs=snap.zone_show??31;
     for(const b of zc.querySelectorAll('.zc')){ b.classList.toggle('on',!!(zs&+b.dataset.z)); b.disabled=!o.controls; } }
   for(const b of document.querySelectorAll('#ov button')){ const a=b.dataset.a; if(b.closest('#expl')) continue;   // (set below)

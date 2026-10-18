@@ -343,6 +343,9 @@ static void hbx_why(const HbObj*o,int why){ g_hbx_stat[why]++; static uint32_t s
     static const char*const nm[4]={"","no collision geometry","node block missing","node matrices not set up"};
     char m[200]; int k=snprintf(m,sizeof m,"  [hitbox] type %d definition %08x drawn as a sphere: %s (nodes %u B at +0x%x)\n",o->type,o->def,nm[why],o->nmsz,o->nmoff); (void)!write(2,m,k); }
 static const char* hb_tag_name(uint32_t def);
+// which weak-spot kinds the hitboxes color (the stats page's chips): bit 1 lethal (yellow), bit 2 opens the driver (orange)
+volatile int g_hb_wkshow=-1;
+int hb_wkshow(void){ if(g_hb_wkshow<0){ const char*e=getenv("PELOAD_HB_WEAK_SHOW"); g_hb_wkshow=e?(int)strtol(e,0,0):3; } return g_hb_wkshow; }
 static int hb_emit_hitbox(const HbObj*o,const float*vp,float*verts,int nv,int cap){
     HbGeom*g=hb_geom(o->def); if(!g){ hbx_why(o,1); return 0; }
     int nn=o->nmsz/52; if(o->nmsz%52 || nn<=g->maxnode || nn>128 || o->nmoff<0x100){ hbx_why(o,2); return 0; }
@@ -363,9 +366,10 @@ static int hb_emit_hitbox(const HbObj*o,const float*vp,float*verts,int nv,int ca
     static const float cbody[3]={1,0.15f,0.15f}, chead[3]={1,0.95f,0.1f}, fbody[3]={0.25f,0.5f,1}, fhead[3]={0.6f,0.95f,1}, cveh[3]={0.3f,0.75f,1},
         cwk[3][3]={{0.3f,0.75f,1},{1,0.55f,0.1f},{1,0.95f,0.1f}};
     int friend_=hb_is_friend(o); const float*cb=friend_?fbody:cbody, *ch=friend_?fhead:chead;
-    int added=0;
+    int added=0, wkshow=hb_wkshow();
     for(int s=0;s<g->nseg && nv+added+2<=cap;s++){ if(g->perm[s]!=sel[g->reg[s]]) continue;
-        const float*M=mt+g->node[s]*13, *P=g->pts+s*6; const float*col=o->type==0?(g->reg[s]==head?ch:cb):(g->wk[s]<3?cwk[g->wk[s]]:cveh);
+        const float*M=mt+g->node[s]*13, *P=g->pts+s*6; int wk=g->wk[s]; if(wk && !(wkshow&(wk==2?1:2))) wk=0;
+        const float*col=o->type==0?(g->reg[s]==head?ch:cb):(wk<3?cwk[wk]:cveh);
         float q[2][2]; int okk=1;
         for(int e=0;e<2;e++){ const float*v=P+e*3; float w[3];
             for(int a=0;a<3;a++) w[a]=M[10+a]+M[0]*(v[0]*M[1+a]+v[1]*M[4+a]+v[2]*M[7+a]);   // pos + scale*(x*fwd + y*left + z*up)
@@ -803,9 +807,11 @@ static void hbz_gpu(const float*vp){
         const char*vs="#version 410 core\nlayout(location=0) in vec3 w; layout(location=1) in vec4 c; uniform vec4 r0,r1,r3; out vec3 vw; out vec4 vc;\n"
             "void main(){ vw=w; vc=c; vec4 p=vec4(w,1.0); gl_Position=vec4(dot(r0,p),dot(r1,p),0.0,dot(r3,p)); }\n";
         const char*fs="#version 410 core\nin vec3 vw; in vec4 vc; out vec4 o; uniform sampler2D dep; uniform int hasdep, flipy; uniform vec4 q0,q1,q2,q3; uniform vec4 fwd;\n"
-            "void main(){ if(hasdep!=0){ vec4 p=vec4(vw,1.0); float cw=dot(q3,p); if(cw>0.05){ vec2 n=vec2(dot(q0,p),dot(q1,p))/cw;\n"
-            "  if(abs(n.x)<=1.0 && abs(n.y)<=1.0){ vec4 q=vec4(vw-fwd.xyz*0.3,1.0); float qw=dot(q3,q); if(qw>0.05){ float qd=dot(q2,q)/qw;\n"
-            "    vec2 uv=vec2(n.x*0.5+0.5, flipy!=0 ? 0.5-n.y*0.5 : n.y*0.5+0.5); if(texture(dep,uv).r>qd) discard; } } } }\n"
+            // (where the depth frame -- 2 frames old -- did not look: the strip that turns into view, or behind its camera, the
+            // scene is unknown: hidden, not drawn through walls; turning the camera does not change what occludes what)
+            "void main(){ if(hasdep!=0){ vec4 p=vec4(vw,1.0); float cw=dot(q3,p); if(cw<=0.05) discard; vec2 n=vec2(dot(q0,p),dot(q1,p))/cw;\n"
+            "  if(abs(n.x)>1.0 || abs(n.y)>1.0) discard; vec4 q=vec4(vw-fwd.xyz*0.3,1.0); float qw=dot(q3,q); if(qw>0.05){ float qd=dot(q2,q)/qw;\n"
+            "    vec2 uv=vec2(n.x*0.5+0.5, flipy!=0 ? 0.5-n.y*0.5 : n.y*0.5+0.5); if(texture(dep,uv).r>qd) discard; } }\n"
             "  o=vc; }\n";
         unsigned v=G.CreateShader(GLE_VS),f=G.CreateShader(GLE_FS); G.ShaderSource(v,1,&vs,0); G.CompileShader(v); G.ShaderSource(f,1,&fs,0); G.CompileShader(f);
         g_hbz_prog=G.CreateProgram(); G.AttachShader(g_hbz_prog,v); G.AttachShader(g_hbz_prog,f); G.LinkProgram(g_hbz_prog); G.DeleteShader(v); G.DeleteShader(f);
@@ -926,11 +932,13 @@ static void hb_draw_overlay(void){
         if(fi && o->type==0){   // player info above the head: shield/health %, held weapon, grenades, camo, vehicle
             float top[3]={o->c[0],o->c[1],o->c[2]+o->r+0.12f}, tx,ty; if(!hb_proj(vp,top,&tx,&ty)) continue;
             const float*tc = o->team>=0&&o->team<8 ? g_hb_teamcol[o->team] : cwhite;
-            char l1[48], l2[48], l3[48]; l3[0]=0;
+            char l1[48], l2[80], l3[48]; l3[0]=0;
             if(o->dead) snprintf(l1,sizeof l1,"DEAD");
             else snprintf(l1,sizeof l1,"S%d H%d",(int)(o->shield*100.f+0.5f),(int)(o->health*100.f+0.5f));
             uint32_t wh=(o->wslot>=0&&o->wslot<4)?o->weapons[o->wslot]:0xFFFFFFFFu; uint64_t wd=hb_handle_datum(wh); uint32_t wdef=0; if(wd) hb_read(wd,&wdef,4);
-            snprintf(l2,sizeof l2,"%s",wd?hb_tag_name(wdef):"-");
+            { int k2=snprintf(l2,sizeof l2,"%s",wd?hb_tag_name(wdef):"-");   // + the other weapon carried (unit +0x268 slots)
+              for(int q=0;q<4;q++){ if(q==o->wslot) continue; uint64_t od=hb_handle_datum(o->weapons[q]); uint32_t odef=0; if(!od || !hb_read(od,&odef,4)) continue;
+                  snprintf(l2+k2,sizeof l2-k2," / %s",hb_tag_name(odef)); break; } }
             int g=o->gren[0]+o->gren[1]+o->gren[2]+o->gren[3]; int k3=0;
             if(g>0) k3+=snprintf(l3+k3,sizeof l3-k3,"G%d ",g);
             if(o->camo>0.05f) k3+=snprintf(l3+k3,sizeof l3-k3,"CAMO %d ",(int)(o->camo*100.f+0.5f));

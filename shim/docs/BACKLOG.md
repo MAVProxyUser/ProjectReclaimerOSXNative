@@ -43,6 +43,15 @@ Closed by the user 2026-10-16: teleporter audio desync (not seen since the XAudi
 (fine; only scripted tests lacked input), controller in menu-joined matches (caused by a second window), v0.9.13 checks
 (old client no longer supported).
 
+| 36 | **Weak-spot classes as toggles; "all blue"** (user, 2026-10-18) | Chips DONE (stats page "Weak: kills it" / "Weak: exposes driver", do=weaktype, PELOAD_HB_WEAK_SHOW). Only the Wraith and the Scorpion have weak spots; every other vehicle is correctly all cyan. Live picture of a Wraith pending. |
+| 37 | **Player info: secondary weapon** (user, 2026-10-18) | DONE: the label reads "<in hand> / <other weapon>". |
+| 38 | **Zones hover at the screen edges while turning** (user, 2026-10-18) | FIXED (needs the user's check): the per-pixel occlusion uses a depth readback 2 frames old; zone pixels outside that frame's view (the strip turning into view, or behind its camera) were drawn; now hidden. |
+| 39 | **Off means off** (user, 2026-10-18) | AUDITED: overlay draw, depth readback (visible-only / zones), zones geometry, sparring, walker, frame capture all return at once when off. Always on with the stats server (needed for the stats / heatmap, all trivial): one 128-byte camera copy per frame, a once-per-frame engine hook that checks a flag, the object_delete hook (shot stats), event / chat hooks; collection runs on the stats thread. |
+| 40 | **Heatmap: always collect, toggle to view** (user, 2026-10-18) | DONE: collection per map is always on; the stats page's "heatmap" checkbox only shows / hides it. |
+| 41 | **Use the free cores** (user, 2026-10-18: "absolutely parallelize ... free rein on unused cores") | IN PROGRESS: parallel big copies (PELOAD_PAR_MEMCPY, verified correct), real CPU count to the client / halo3 (PELOAD_SYSINFO=real); BTB A/B next, then default on. |
+
+| 42 | **Record clips (mp4) / audio from the stats page** (user, 2026-10-18) | OPEN (asked about feasibility): frames from the helper's IOSurfaces -> VideoToolbox hardware H.264/HEVC (zero copy), audio from the XAudio2 mix + the client's WASAPI streams -> AAC, AVAssetWriter mp4 / m4a; a length set on the page, optional instant replay (last N s in memory). Off = no cost. |
+
 ## Done (2026-10-16)
 
 - Every game option, exact (2026-10-17): shim/docs/option-map.json from the client's option table (639 keys, offsets,
