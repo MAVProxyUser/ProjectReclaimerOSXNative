@@ -770,49 +770,6 @@ static void hb_invwalls_set(uint8_t*h3,int off){ if(!g_inv_ready) return; uint8_
     if(memcmp(p,off?g_inv_orig:g_inv_patch,15)){ (void)!write(2,"  [invwalls] halo3+21b759 holds unexpected bytes: not changed\n",62); return; }
     uintptr_t pg=(uintptr_t)p & ~0xFFFull; mprotect((void*)pg,0x2000,PROT_READ|PROT_WRITE|PROT_EXEC); memcpy(p,want,15); sys_icache_invalidate(p,15);
     (void)!write(2,off?"  [invwalls] invisible walls OFF (player clip no longer collides)\n":"  [invwalls] invisible walls back ON\n",off?65:37); }
-// ---- Movement assist on OUR local dedicated server (2026-10-19; user: "a button ... for my local server"; FIXES.md
-// section 18) -- the speed-step test of the host's trust in client positions (shim/docs/net-authority.md: the host adopts
-// what a client reports within 2.5 units per update) as a stats-page switch. Each engine frame (the main_loop_body hook,
-// before the frame's ticks) adds (k-1) x the local player's own horizontal movement since the previous frame to its
-// position through halo3's object teleport (the tpby path), at most HB_ASSIST_CAP units per frame: far below the 2.5-unit
-// limit. Not in a vehicle (the biped belongs to its seat), not after a respawn / teleport (more than 1.5 units in one frame
-// only resets the baseline), horizontal only (no super-jumps). Gate (stats.c st_assist_tick): only while this client is in
-// a game on THIS Mac's dedicated server -- PELOAD_TELEPORT_HOST on loopback, that server's stats page says "dedicated" and
-// lists our player -- rechecked every 2 s; anything else turns it off.
-volatile float g_hb_assist_k; volatile int g_hb_assist_ok;
-#define HB_ASSIST_CAP 0.5f
-static void hb_assist_frame(void){
-    static uint32_t last_u=0xFFFFFFFFu; static float lp[3];
-    uint8_t*h3=hb_halo3_base(); if(!h3) return; uint32_t idx=*(volatile uint32_t*)(h3+0xa39f9c); if(idx>=128) return;
-    void**tarr; __asm__ volatile("movq %%gs:0x58,%0":"=r"(tarr)); if(!tarr || !tarr[idx]) return;
-    uint8_t*tls=(uint8_t*)tarr[idx]; uint8_t*arr=*(uint8_t**)(tls+0x38);
-    if(!arr || *(uint32_t*)(arr+0x2c)!=0x64407440 || memcmp(arr,"object",7)) return;
-    static const uint8_t pro[16]={0x48,0x89,0x5C,0x24,0x08,0x48,0x89,0x6C,0x24,0x10,0x48,0x89,0x74,0x24,0x18,0x57};
-    static int funcs_ok=-1; if(funcs_ok<0) funcs_ok=!memcmp(h3+0x259410,pro,16); if(!funcs_ok) return;
-    if(!*(uint64_t*)(h3+0x8f4028) || *(int32_t*)(tls+0x18)<0 || *(int32_t*)(tls+0x18)>=32) return;
-    uint8_t*data=*(uint8_t**)(arr+0x48); int hi=*(int32_t*)(arr+0x3c); if(!data || hi<=0 || hi>8192) return;
-    // the local player's unit: player mapping (TLS +0x110: output user 0 -> player +0xB8 -> unit +0x28), as the teleport jobs
-    uint8_t*pm=*(uint8_t**)(tls+0x110), *parr=*(uint8_t**)(tls+0x10); uint32_t lu=0xFFFFFFFFu;
-    if(pm && parr && *(uint32_t*)(parr+0x2c)==0x64407440){ int32_t ph=*(int32_t*)(pm+0xB8), es=*(int32_t*)(parr+0x24), pn=*(int32_t*)(parr+0x3c); uint8_t*pd=*(uint8_t**)(parr+0x48);
-        if(ph!=-1 && pd && es>=0x30 && (ph&0xFFFF)<pn) lu=*(uint32_t*)(pd+(size_t)(ph&0xFFFF)*es+0x28); }
-    int li=lu&0xFFFF; if(lu==0xFFFFFFFFu || li>=hi){ last_u=0xFFFFFFFFu; return; }
-    uint8_t*e=data+(size_t)li*0x18; uint8_t*p=*(uint8_t**)(e+0x10);
-    if(e[3]!=0 || *(uint16_t*)e!=(uint16_t)(lu>>16) || !p){ last_u=0xFFFFFFFFu; return; }
-    if(*(uint32_t*)(p+0x10)!=0xFFFFFFFFu){ last_u=0xFFFFFFFFu; return; }   // seated: the parent is a vehicle
-    const float*o=(const float*)(p+0x50);
-    if(lu!=last_u){ last_u=lu; memcpy(lp,o,12); return; }
-    float dx=o[0]-lp[0], dy=o[1]-lp[1], d=sqrtf(dx*dx+dy*dy);
-    if(!(d>1e-4f) || d>1.5f){ memcpy(lp,o,12); return; }   // standing still, or a respawn / teleport / man cannon
-    float k=g_hb_assist_k, ex=(k-1.0f)*dx, ey=(k-1.0f)*dy, el=sqrtf(ex*ex+ey*ey); if(el>HB_ASSIST_CAP){ ex*=HB_ASSIST_CAP/el; ey*=HB_ASSIST_CAP/el; }
-    float pos[3]={o[0]+ex,o[1]+ey,o[2]};
-    uint16_t loc=0xFFFF; float p1[3]={pos[0],pos[1],pos[2]+0.3f}; ((void(__attribute__((ms_abi))*)(uint16_t*,const float*))(h3+0x9bc78))(&loc,p1);
-    if(loc==0xFFFF){ memcpy(lp,o,12); return; }   // outside the map structure
-    const float*f=(const float*)(p+0x5c); float fwd[3]={f[0],f[1],0}, fl=sqrtf(fwd[0]*fwd[0]+fwd[1]*fwd[1]); if(fl>1e-4f){ fwd[0]/=fl; fwd[1]/=fl; } else { fwd[0]=1; fwd[1]=0; }
-    float up[3]={0,0,1};
-    int tok=((HbLockFn)(h3+0x12c948))();
-    ((void(__attribute__((ms_abi))*)(uint32_t,const float*,const float*,const float*,uint8_t))(h3+0x259410))(lu,pos,fwd,up,1);
-    ((HbUnlockFn)(h3+0x12c9a0))(&tok);
-    memcpy(lp,pos,12); }
 static void hb_engine_jobs(void){
     // the simulation thread: its own TLS block holds the live object table (worker threads have no game state there)
     static int why_logged; uint8_t*h3=hb_halo3_base(); if(!h3) return; uint32_t idx=*(volatile uint32_t*)(h3+0xa39f9c); if(idx>=128) return;

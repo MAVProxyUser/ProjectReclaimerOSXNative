@@ -1143,15 +1143,8 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
 
 ## 18. Overlay, stats, forensics, walker, recording (the loader's own tooling)
 
-- **"Run 2.4x" on our local dedicated server** (2026-10-19) — hitbox.c `hb_assist_frame` (from peload.c `hb_frame_hook`),
-  stats.c `st_assist_tick` / `do=assist&k=` / snapshot `overlay.assist`, the page's Run 2.4x button. Why (user: "a button
-  ... for my local server", the 2-unit stepping of shim/docs/net-authority.md as a switch): the speed-step test of the
-  host's trust in client positions, driven by the stick. How: every engine frame, (k-1) x the local player's own
-  horizontal movement since the previous frame is added through halo3's object teleport (the tpby path), at most 0.5
-  units per frame (the host adopts up to 2.5 per update); not in a vehicle, not across a respawn / teleport (> 1.5 units
-  in one frame resets the baseline), horizontal only, not outside the map structure. Gate: the switch exists only with
-  PELOAD_TELEPORT_HOST on loopback, and every 2 s that server's own stats page must say "dedicated" and list our player
-  by name -- on any other server it stays off ("waiting for the local server" on the button). Not live-tested yet. (10-19)
+- **"Run 2.4x" removed** (2026-10-19, revert 606a38c) — it crashed the client as soon as it was used; the user asked for it
+  to be deleted. The page's Speed 2x / speed menu (the host's movement-speed trait) is unchanged. (10-19)
 - **Stats server: headers only, Host, Origin; no open CORS** (security review 2026-10-19) — stats.c `st_conn`, `st_hdr`,
   `st_host_ok`, `st_origin_ok`. Why: (1) the CSRF guard `X-Reclaimer-Control` was searched for anywhere in the request, body
   included, so ANY website could POST a text/plain body holding "\r\nX-Reclaimer-Control: 1" (no preflight) and run every
@@ -1539,10 +1532,7 @@ Numbers are from the commit messages; PERF-PLAN.md has the measurements. Compare
   never report reparse points (the dedicated installer's "contains a filesystem link" check never fires; remove_dir_all
   follows directory symlinks). Not reachable through server mod file names (the client whitelists them), but a symlink in
   a Workshop item or our own links (usb-install's workshop folder, dedicated.sh's game/halo3) matter. BCryptVerifySignature
-  always succeeds: traced 2026-10-19, halo3 uses it only for .map cache-file signatures (one call, halo3+0xa4cb6 in
-  0xa4b78, from the map-header validator 0x1714e0 -- "does not have a valid header signature", "failed actual validation" --
-  and map loading 0xa6538); mod maps are unsigned and accepted through the client's custom-cache path anyway, so a real
-  check would stop no crafted Workshop map and could break stock ones: left as is. Fixing needs care: the client canonicalizes both sides of
+  always succeeds (what halo3 verifies with it is not traced). Fixing needs care: the client canonicalizes both sides of
   some checks, and our "Program Files (x86)/Steam/steamapps" link must keep working.
 - **First join right after a dedicated server starts** can fail its handshake ("Public join timed out"; 10 of ~38 in the
   10-19 spot checks); a retry works.
