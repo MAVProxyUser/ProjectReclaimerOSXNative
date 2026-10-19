@@ -604,6 +604,16 @@ static void st_maptop_ensure(const char*mp,const char*name){
               posix_spawnattr_t at; posix_spawnattr_init(&at); posix_spawnattr_setflags(&at,POSIX_SPAWN_SETPGROUP|POSIX_SPAWN_CLOEXEC_DEFAULT); posix_spawnattr_setpgroup(&at,0);
               pid_t pid=0; if(!posix_spawn(&pid,"/usr/bin/arch",&fa,&at,av,environ)){ pthread_t th; if(!pthread_create(&th,0,st_reap_child,(void*)(intptr_t)pid)) pthread_detach(th); }
               posix_spawn_file_actions_destroy(&fa); posix_spawnattr_destroy(&at); } } }
+    // spots past the boundaries (re-tools/h3spots.py -> <map>.spots.json, ~1-4 s; the page's Teleport list picks it up)
+    { char sp[1100]; snprintf(sp,sizeof sp,"%s/%s.spots.json",dir,name);
+      if(access(sp,R_OK) && !getenv("PELOAD_NO_MAPTOP")){ char exe[1024], it[1100]; uint32_t es=sizeof exe; it[0]=0;
+          if(!_NSGetExecutablePath(exe,&es)){ char*sl=strrchr(exe,'/'); if(sl){ *sl=0; snprintf(it,sizeof it,"%s/../../re-tools/h3spots.py",exe); } }
+          if(it[0] && !access(it,R_OK)){ mkdir(dir,0755); char*av[]={(char*)"/usr/bin/arch",(char*)"-arm64",(char*)"python3",it,(char*)mp,sp,(char*)"--quiet",0}; extern char**environ;
+              posix_spawn_file_actions_t fa; posix_spawn_file_actions_init(&fa); posix_spawn_file_actions_addopen(&fa,0,"/dev/null",O_RDONLY,0);
+              posix_spawn_file_actions_addopen(&fa,1,"/dev/null",O_WRONLY,0); posix_spawn_file_actions_adddup2(&fa,1,2);
+              posix_spawnattr_t at; posix_spawnattr_init(&at); posix_spawnattr_setflags(&at,POSIX_SPAWN_SETPGROUP|POSIX_SPAWN_CLOEXEC_DEFAULT); posix_spawnattr_setpgroup(&at,0);
+              pid_t pid=0; if(!posix_spawn(&pid,"/usr/bin/arch",&fa,&at,av,environ)){ pthread_t th; if(!pthread_create(&th,0,st_reap_child,(void*)(intptr_t)pid)) pthread_detach(th); }
+              posix_spawn_file_actions_destroy(&fa); posix_spawnattr_destroy(&at); } } }
     if(!access(png,R_OK) && !access(js,R_OK)){ g_mt_state=1; return; }
     if(getenv("PELOAD_NO_MAPTOP")){ g_mt_state=4; return; }
     char tool[1100]; const char*e=getenv("PELOAD_MAPTOP_TOOL");
@@ -664,6 +674,34 @@ static const StSpot g_st_spots[]={
                                                                                      //   terrain, walkable only with the slip patch (boundaries off)
     {"riverworld","valhalla_north","Valhalla: north ridge",44.0f,-24.0f,10.0f},    // past the north end (y > -31.9); ground 9.4, no soft ceiling
 };
+// Spots past the boundaries of EVERY map (re-tools/h3spots.py -> maptop/<map>.spots.json: flat, roomy floors in a kill
+// volume or outside every safe zone; made in the background the first time a map is played, st_maptop_ensure), loaded for
+// the map being played and listed after the hand-picked g_st_spots (ids s1..s8).
+typedef struct { char id[16], label[64]; float x,y,z; } StDynSpot;
+static StDynSpot g_st_dyn[24]; static int g_st_ndyn; static char g_st_dynmap[96]; static double g_st_dyntry;
+static const char* st_jfield(const char*p,const char*end,const char*key){ char k[32]; snprintf(k,sizeof k,"\"%s\":",key); const char*q=strstr(p,k); return (q && q<end)?q+strlen(k):0; }
+static void st_dyn_load(const char*map){   // (snapshot thread) on a map change, and every 10 s while the file is missing
+    if(!strcmp(map,g_st_dynmap) && (g_st_ndyn || mono_s()-g_st_dyntry<10)) return;
+    snprintf(g_st_dynmap,sizeof g_st_dynmap,"%s",map); g_st_dyntry=mono_s(); g_st_ndyn=0;
+    const char*home=getenv("HOME"); char fp[1024]; snprintf(fp,sizeof fp,"%s/Library/Application Support/ReclaimerMac/maptop/%s.spots.json",home?home:"/tmp",map);
+    FILE*f=fopen(fp,"r"); if(!f) return; static char buf[16384]; size_t n=fread(buf,1,sizeof buf-1,f); fclose(f); buf[n]=0;
+    const char*p=strstr(buf,"\"spots\""); if(!p) return;
+    while(g_st_ndyn<(int)(sizeof g_st_dyn/sizeof g_st_dyn[0]) && (p=strchr(p,'{'))){ const char*end=strchr(p,'}'); if(!end) break;
+        StDynSpot*d=&g_st_dyn[g_st_ndyn]; const char*v; memset(d,0,sizeof *d); int ok=1;
+        if((v=st_jfield(p,end,"id"))){ v=strchr(v,'"'); if(v) sscanf(v+1,"%15[^\"]",d->id); } else ok=0;
+        if((v=st_jfield(p,end,"label"))){ v=strchr(v,'"'); if(v) sscanf(v+1,"%63[^\"]",d->label); } else ok=0;
+        if((v=st_jfield(p,end,"x"))) d->x=strtof(v,0); else ok=0;
+        if((v=st_jfield(p,end,"y"))) d->y=strtof(v,0); else ok=0;
+        if((v=st_jfield(p,end,"z"))) d->z=strtof(v,0); else ok=0;
+        if(ok && d->id[0]) g_st_ndyn++; p=end+1; } }
+// an explore spot by id on the current map: the hand-picked ones, then the generated ones
+static int st_spot_find(const char*qs,float*xyz,const char**label){
+    const char*v=strstr(qs,"spot="); if(!v) return 0; char id[48]; int k=0; for(v+=5; *v && *v!='&' && k<47; v++) id[k++]=*v; id[k]=0;
+    for(int i=0;i<(int)(sizeof g_st_spots/sizeof g_st_spots[0]);i++) if(!strcmp(id,g_st_spots[i].id) && !strcmp(g_st_curmap,g_st_spots[i].map)){
+        xyz[0]=g_st_spots[i].x; xyz[1]=g_st_spots[i].y; xyz[2]=g_st_spots[i].z; *label=g_st_spots[i].label; return 1; }
+    if(!strcmp(g_st_dynmap,g_st_curmap)) for(int i=0;i<g_st_ndyn;i++) if(!strcmp(id,g_st_dyn[i].id)){
+        xyz[0]=g_st_dyn[i].x; xyz[1]=g_st_dyn[i].y; xyz[2]=g_st_dyn[i].z; *label=g_st_dyn[i].label; return 1; }
+    return 0; }
 int hb_bounds_off(void); int hb_spar_available(void); int hb_invwalls_off(void);
 // ---- clip recording (rec.m; shim/docs/recording.md): POST /control?do=rec&secs=<n>&mode=av|audio, do=recstop; GET
 // /recordings.json, /recordings/<file>; the snapshot's "rec". The picture is the window's (its size now); no window
@@ -741,14 +779,22 @@ static int st_control(const char*act,const char*qs){
             g_hb_inv_req=off; g_hb_bnd_only=1; g_hb_bnd_client=1; __atomic_store_n(&g_hb_job_pending,1,__ATOMIC_RELEASE); return 1; }
         if(!getenv("PELOAD_ALLOW_TELEPORT")) return 0;
         g_hb_inv_req=off; g_hb_bnd_only=1; __atomic_store_n(&g_hb_job_pending,1,__ATOMIC_RELEASE); return 1; }
+    // a client of OUR host (PELOAD_TELEPORT_HOST): an explore spot = boundaries off on the host (and our own movement patched,
+    // as the Boundaries button does) + the host moves us there by slot
+    if(!strcmp(act,"explore") && !st_is_host()){ const char*hp=getenv("PELOAD_TELEPORT_HOST"); float sx[3]; const char*slab=0; if(!hp || g_hb_local_slot<0) return 0;
+        if(!st_spot_find(qs,sx,&slab)) return 0;   // (an unknown id, or a spot of another map)
+        if(!st_forward(hp,"do=bounds&off=1")) return 0;
+        extern volatile int g_hb_bnd_req, g_hb_bnd_only, g_hb_bnd_client; g_hb_bnd_req=1; g_hb_bnd_only=1; g_hb_bnd_client=1; __atomic_store_n(&g_hb_job_pending,1,__ATOMIC_RELEASE);
+        usleep(300000);   // let the host run its boundaries job first: an older host's "boundaries only" job swallowed a teleport sent right behind it
+        char q[160]; snprintf(q,sizeof q,"do=tpto&x=%.2f&y=%.2f&z=%.2f&slot=%d",sx[0],sx[1],sx[2],g_hb_local_slot);
+        char m[160]; int k=snprintf(m,sizeof m,"  [explore] page: boundaries off, to %s (asked the host)\n",slab); (void)!write(2,m,k); return st_forward(hp,q); }
     if(!strcmp(act,"explore") || !strcmp(act,"bounds")){
         if(!getenv("PELOAD_ALLOW_TELEPORT") || !st_is_host()) return 0; extern volatile int g_hb_bnd_req;
         if(!strcmp(act,"bounds")){ const char*v=strstr(qs,"off="); if(!v) return 0; extern volatile int g_hb_bnd_only; g_hb_bnd_req=atoi(v+4)?1:0; g_hb_bnd_only=1;
             __atomic_store_n(&g_hb_job_pending,1,__ATOMIC_RELEASE); return 1; }
-        const char*v=strstr(qs,"spot="); if(!v) return 0; const StSpot*sp=0; for(int i=0;i<(int)(sizeof g_st_spots/sizeof g_st_spots[0]);i++) if(!strncmp(v+5,g_st_spots[i].id,strlen(g_st_spots[i].id))) sp=&g_st_spots[i];
-        if(!sp || strcmp(g_st_curmap,sp->map)) return 0;   // that spot is on another map
-        extern volatile int g_hb_tp_to, g_hb_tp_to_who; extern float g_hb_tp_dest[3]; g_hb_bnd_req=1; g_hb_tp_dest[0]=sp->x; g_hb_tp_dest[1]=sp->y; g_hb_tp_dest[2]=sp->z; g_hb_tp_to_who=-1; g_hb_tp_to=1;
-        __atomic_store_n(&g_hb_job_pending,1,__ATOMIC_RELEASE); char m[120]; int k=snprintf(m,sizeof m,"  [explore] page: boundaries off, to %s\n",sp->label); (void)!write(2,m,k); return 1; }
+        float sx[3]; const char*slab=0; if(!st_spot_find(qs,sx,&slab)) return 0;   // (an unknown id, or a spot of another map)
+        extern volatile int g_hb_tp_to, g_hb_tp_to_who; extern float g_hb_tp_dest[3]; g_hb_bnd_req=1; g_hb_tp_dest[0]=sx[0]; g_hb_tp_dest[1]=sx[1]; g_hb_tp_dest[2]=sx[2]; g_hb_tp_to_who=-1; g_hb_tp_to=1;
+        __atomic_store_n(&g_hb_job_pending,1,__ATOMIC_RELEASE); char m[160]; int k=snprintf(m,sizeof m,"  [explore] page: boundaries off, to %s\n",slab); (void)!write(2,m,k); return 1; }
     if(!strcmp(act,"tpto")){   // move a player (slot=, default us) to x,y,z -- host only (exploring, boundary tests)
         if(!st_is_host()){ const char*hp=getenv("PELOAD_TELEPORT_HOST"); if(!hp || strstr(qs,"slot=") || g_hb_local_slot<0) return 0;   // a client of our host: the host moves us
             const char*v; float d[3]; int got=0; if((v=strstr(qs,"x="))){ d[0]=(float)atof(v+2); got++; } if((v=strstr(qs,"y="))){ d[1]=(float)atof(v+2); got++; } if((v=strstr(qs,"z="))){ d[2]=(float)atof(v+2); got++; }
@@ -757,6 +803,7 @@ static int st_control(const char*act,const char*qs){
         if((v=strstr(qs,"x="))){ d[0]=(float)atof(v+2); got++; } if((v=strstr(qs,"y="))){ d[1]=(float)atof(v+2); got++; } if((v=strstr(qs,"z="))){ d[2]=(float)atof(v+2); got++; }
         if(got!=3) return 0; for(int i=0;i<3;i++) if(!(d[i]>-30000 && d[i]<30000)) return 0;
         const char*w=strstr(qs,"slot="); int who=w?atoi(w+5):-1; if(who>255) return 0;
+        extern volatile int g_hb_bnd_only; g_hb_bnd_only=0;   // this job carries a teleport (a boundaries request just before it must not swallow it)
         extern volatile int g_hb_tp_to, g_hb_tp_to_who; extern float g_hb_tp_dest[3]; memcpy(g_hb_tp_dest,d,12); g_hb_tp_to_who=who; g_hb_tp_to=1;
         __atomic_store_n(&g_hb_job_pending,1,__ATOMIC_RELEASE); return 1; }
     if(!strcmp(act,"tpnext")){ if(!getenv("PELOAD_ALLOW_TELEPORT")) return 0; const char*v=strstr(qs,"slot="); int sl=v?atoi(v+5):-1; if(sl<0 || sl>255) return 0;
@@ -764,9 +811,14 @@ static int st_control(const char*act,const char*qs){
         // a client can't move itself (the host snaps it back): forward to the host's loader (PELOAD_TELEPORT_HOST =
         // its stats address, in private games where both ends run this loader); the host moves our player
         if(!st_is_host()){ const char*hp=getenv("PELOAD_TELEPORT_HOST"); if(!hp || who>=0 || g_hb_local_slot<0) return 0; return st_forward_tp(hp,sl,g_hb_local_slot); }
-        extern volatile int g_hb_tp_slot, g_hb_tp_who; g_hb_tp_who=who; g_hb_tp_slot=sl; __atomic_store_n(&g_hb_job_pending,1,__ATOMIC_RELEASE);
+        extern volatile int g_hb_tp_slot, g_hb_tp_who, g_hb_bnd_only; g_hb_bnd_only=0; g_hb_tp_who=who; g_hb_tp_slot=sl; __atomic_store_n(&g_hb_job_pending,1,__ATOMIC_RELEASE);
         char m[100]; int k=snprintf(m,sizeof m,"  [teleport] page: %s next to player slot %d requested\n",who>=0?"move a client":"move us",sl); (void)!write(2,m,k); return 1; }
-    if(!strcmp(act,"teleport")){ extern volatile int g_hb_tp_slot; g_hb_tp_slot=-1; if(!getenv("PELOAD_ALLOW_TELEPORT")) return 0; __atomic_store_n(&g_hb_job_pending,1,__ATOMIC_RELEASE); (void)!write(2,"  [teleport] page: requested\n",29); return 1; }
+    if(!strcmp(act,"teleport")){ extern volatile int g_hb_tp_slot, g_hb_tp_who; g_hb_tp_slot=-1;
+        // a client of OUR host: the host moves us (by slot) to the far side; on the host, who= is that forwarded requester
+        if(!st_is_host()){ const char*hp=getenv("PELOAD_TELEPORT_HOST"); if(!hp || g_hb_local_slot<0) return 0; char q[48]; snprintf(q,sizeof q,"do=teleport&who=%d",g_hb_local_slot); return st_forward(hp,q); }
+        if(!getenv("PELOAD_ALLOW_TELEPORT")) return 0; const char*w=strstr(qs,"who="); int who=w?atoi(w+4):-1; if(who>255) return 0; g_hb_tp_who=who;
+        { extern volatile int g_hb_bnd_only; g_hb_bnd_only=0; }
+        __atomic_store_n(&g_hb_job_pending,1,__ATOMIC_RELEASE); (void)!write(2,"  [teleport] page: requested\n",29); return 1; }
     if(!strcmp(act,"muteall") || !strcmp(act,"unmuteall")){ static StSess ss[128]; int n=st_session(ss,128,0), ok=0;
         for(int i=0;i<n;i++) if(ss[i].muted!=!strcmp(act,"muteall")) ok+=st_voice_request(ss[i].voice,!strcmp(act,"muteall"));
         char m[80]; int k=snprintf(m,sizeof m,"  [stats] page: %s (%d players)\n",act,ok); (void)!write(2,m,k); return n>0; }
@@ -1124,6 +1176,8 @@ static void st_snapshot(StBuf*s){
       st_overlay_features(s);   // the overlay panel's per-feature settings (the keys above stay for older pages)
       sb_put(s,",\"spots\":["); int ns=0; for(int i=0;i<(int)(sizeof g_st_spots/sizeof g_st_spots[0]);i++) if(!strcmp(g_st_spots[i].map,m)){
           sb_put(s,"%s{\"id\":\"%s\",\"label\":\"%s\",\"x\":%.1f,\"y\":%.1f,\"z\":%.1f}",ns++?",":"",g_st_spots[i].id,g_st_spots[i].label,g_st_spots[i].x,g_st_spots[i].y,g_st_spots[i].z); }
+      st_dyn_load(m); for(int i=0;i<g_st_ndyn;i++)
+          sb_put(s,"%s{\"id\":\"%s\",\"label\":\"%s\",\"x\":%.1f,\"y\":%.1f,\"z\":%.1f}",ns++?",":"",g_st_dyn[i].id,g_st_dyn[i].label,g_st_dyn[i].x,g_st_dyn[i].y,g_st_dyn[i].z);
       sb_put(s,"]}"); snprintf(g_st_curmap,sizeof g_st_curmap,"%s",m); }
     if(strcmp(m,g_trk_map)){ memset(g_lasthit,0,sizeof g_lasthit); snprintf(g_trk_map,sizeof g_trk_map,"%s",m); g_ntrk=0; g_nbip=0; memset(g_proj,0,sizeof g_proj); g_hb_local_slot=-1; st_kills_reset(); }   // new map: new match stats
     pthread_mutex_lock(&g_hm_mx); snprintf(g_hm_cur,sizeof g_hm_cur,"%s",m); if(g_hm.dirty && now-g_hm.saved>30){ hm_save(); g_hm.saved=now; } pthread_mutex_unlock(&g_hm_mx);

@@ -147,7 +147,8 @@ th .srt{display:inline-block;margin-left:2px;padding:0 2px;cursor:pointer;color:
   <span class="hint" id="ovhint"></span></div>
  <div id="ovrows"></div></div>
 <div id="ov"><span class="lbl">Tools</span>
- <button data-a="teleport" title="Teleport to the far side of the map (needs PELOAD_ALLOW_TELEPORT; matches you host)">Teleport</button>
+ <button data-a="teleport" title="Teleport to the place picked in the list beside it: the far side of the map, or a spot past the map's boundaries (those switch the boundaries off first). Games you host with PELOAD_ALLOW_TELEPORT=1, or our local server: the host moves you">Teleport</button>
+ <select id="tpsel" title="Where Teleport takes you: the far side of the map, or one of this map's spots past the boundaries (flat, roomy floors found in the map file; the boundaries are switched off first)"><option value="">far side of the map</option></select>
  <button data-a="mic" title="Your microphone for the game's voice chat. The client only sends voice while its talk key is held or toggled; Muted sends silence even then. PELOAD_MIC=0 at launch removes the microphone entirely.">Mic</button>
  <button data-a="capture" title="Save the next frame, its depth buffer and the camera position to your home folder">Capture frame</button>
  <span id="expl"></span>
@@ -611,10 +612,11 @@ window.addEventListener('resize',()=>{ if(mapfs.classList.contains('open')) fsSi
 cv.addEventListener('mousemove',e=>{ if(!view) return; const r=cv.getBoundingClientRect(), sx=(e.clientX-r.left)*cv.width/r.width, sy=(e.clientY-r.top)*cv.height/r.height;
   const x=view.wx0+(sx-view.ox)/view.sc, y=view.wy0+view.wh-(sy-view.oy)/view.sc; document.getElementById('hov').textContent=`x ${x.toFixed(1)}, y ${y.toFixed(1)}`; });
 cv.addEventListener('mouseleave',()=>{ document.getElementById('hov').textContent=''; });
-// "click to teleport": host + PELOAD_ALLOW_TELEPORT; lands 0.6 above the highest surface in the clicked cell and its neighbours
+// "click to teleport": host + PELOAD_ALLOW_TELEPORT, or a client of our host (tpto is forwarded: the host moves us); lands 0.6 above the
+// highest surface in the clicked cell and its neighbours
 cv.addEventListener('pointerdown',async e=>{ if(!document.getElementById('tph').checked || !view || e.button) return;
   const o=snap&&snap.overlay, hov=document.getElementById('hov');
-  if(!o||!o.teleport||!o.host){ hov.textContent=!o||!o.teleport?'start the game with PELOAD_ALLOW_TELEPORT=1':'only the host can teleport'; return; }
+  if(!o||!o.teleport||!(o.host||o.tp_forward)){ hov.textContent=!o||!o.teleport?'start the game with PELOAD_ALLOW_TELEPORT=1':'only the host can teleport (or a player on our local server, where the host moves you)'; return; }
   const r=cv.getBoundingClientRect(), sx=(e.clientX-r.left)*cv.width/r.width, sy=(e.clientY-r.top)*cv.height/r.height;
   const x=view.wx0+(sx-view.ox)/view.sc, y=view.wy0+view.wh-(sy-view.oy)/view.sc, gz=groundZ(x,y);
   if(gz===null){ hov.textContent='no ground there (or no height data: run shim/tools/maptop.sh with FORCE=1)'; return; }
@@ -734,13 +736,13 @@ document.getElementById('bpx').addEventListener('change',e=>{ const v=+e.target.
 function renderOverlay(){ const o=snap&&snap.overlay; if(!o) return; renderPanel();
   for(const b of document.querySelectorAll('#ov button')){ const a=b.dataset.a; if(b.closest('#expl')) continue;   // (set below)
     if(a in o && typeof o[a]==='boolean' && a!=='teleport') b.classList.toggle('on',o[a]);
-    b.disabled=!o.controls||(a==='teleport'&&!o.teleport); }
+    b.disabled=!o.controls||(a==='teleport'&&!(o.teleport&&(o.host||o.tp_forward))); }
   { const mb=document.querySelector('#ov button[data-a="mic"]'); if(mb){ mb.style.display=o.mic&&o.mic!=='off'?'':'none';
       mb.textContent=o.mic==='muted'?'Mic: muted':o.mic==='tone'?'Mic: test tone':'Mic: live'; mb.classList.toggle('on',o.mic==='live'||o.mic==='tone'); } }
   document.getElementById('spr').textContent=o.spar?(o.spar_aim>=0?'aim off by '+o.spar_aim.toFixed(1)+'°':'no enemy'):'';
   { const sb=document.querySelector('#ov button[data-a="spar"]'); if(sb) sb.style.display=o.spar_available?'':'none'; }   // the bot's page only
   // exploring past the map's edges (games you host with PELOAD_ALLOW_TELEPORT=1): boundaries switch + this map's spots
-  { const ex=document.getElementById('expl'), can=o.controls&&o.teleport&&o.host, fwd=o.controls&&!o.host&&o.tp_forward, spots=can?(o.spots||[]):[];
+  { const ex=document.getElementById('expl'), can=o.controls&&o.teleport&&o.host, fwd=o.controls&&!o.host&&o.tp_forward, spots=(can||fwd)?(o.spots||[]):[];
     const sp2=o.speed_idx===9, cansp=o.controls&&(o.host||fwd)&&('speed_idx' in o);   // ('speed_idx': a loader that forwards speed)
     const key=JSON.stringify([spots.map(p=>p.id),o.bounds_off,o.invwalls_off,can,fwd,sp2,cansp]);
     if(ex.dataset.k!==key){ ex.dataset.k=key; ex.textContent='';
@@ -753,8 +755,11 @@ function renderOverlay(){ const o=snap&&snap.overlay; if(!o) return; renderPanel
       if(o.invwalls_off!==null && o.invwalls_off!==undefined){ const b=document.createElement('button'); b.dataset.a='invwalls'; b.classList.toggle('on',!!o.invwalls_off);
         b.textContent=o.invwalls_off?'Invisible walls off':'Invisible walls on'; b.disabled=!(can||fwd);
         b.title=(can||fwd)?(o.invwalls_off?'Player clip (the invisible walls) no longer stops anyone. Click to put it back.':'Click to switch off the invisible walls (player clip) for everyone -- careful, many guard drops. Games you host / our local server.'):'only in a game you host (PELOAD_ALLOW_TELEPORT=1) or on our local server'; ex.appendChild(b); }
-      for(const p of spots){ const b=document.createElement('button'); b.dataset.a='explore'; b.dataset.spot=p.id; b.textContent=p.label; b.disabled=!can;
-        b.title=can?`Boundaries off, then teleport yourself to ${p.x}, ${p.y}, ${p.z} (past the map's edge)`:'host the game with PELOAD_ALLOW_TELEPORT=1'; ex.appendChild(b); } } }
+      const sel=document.getElementById('tpsel'), keep=sel.value; sel.textContent='';   // the Teleport list: far side + this map's spots
+      const o0=document.createElement('option'); o0.value=''; o0.textContent='far side of the map'; sel.appendChild(o0);
+      for(const p of spots){ const op=document.createElement('option'); op.value=p.id; op.textContent=p.label; op.title=`${p.x}, ${p.y}, ${p.z} -- boundaries off first`; sel.appendChild(op); }
+      if([...sel.options].some(x=>x.value===keep)) sel.value=keep; } }
+  { const sel=document.getElementById('tpsel'); sel.disabled=!(o.controls&&o.teleport&&(o.host||o.tp_forward)); }
   { const sl=document.getElementById('spdl'), sel=document.getElementById('spd'), can=o.controls&&(o.host&&snap&&snap.variant || !o.host&&o.tp_forward&&('speed_idx' in o));
     sl.style.display=can?'':'none';
     if(can && document.activeElement!==sel && o.speed_idx!=null && o.speed_idx>=0) sel.value=String(o.speed_idx); }
@@ -767,7 +772,8 @@ function renderOverlay(){ const o=snap&&snap.overlay; if(!o) return; renderPanel
 document.getElementById('ov').addEventListener('click',async e=>{ const b=e.target.closest('button[data-a]'); if(!b||b.disabled) return;   // (the zone chips post their own)
   const msg=document.getElementById('ovmsg');
   const ov=snap&&snap.overlay, extra=b.dataset.a==='spar'?'&on='+(ov&&ov.spar?0:1):b.dataset.a==='bounds'?'&off='+(ov&&ov.bounds_off?0:1):b.dataset.a==='invwalls'?'&off='+(ov&&ov.invwalls_off?0:1):b.dataset.a==='explore'?'&spot='+encodeURIComponent(b.dataset.spot):b.dataset.a==='mic'?'&on='+(ov&&ov.mic==='muted'?1:0):'';
-  const q=b.dataset.a==='speed2x'?'speed&v='+(ov&&ov.speed_idx===9?0:9):b.dataset.a+extra;
+  const tps=document.getElementById('tpsel').value;   // Teleport goes where the list beside it says
+  const q=b.dataset.a==='speed2x'?'speed&v='+(ov&&ov.speed_idx===9?0:9):(b.dataset.a==='teleport'&&tps)?'explore&spot='+encodeURIComponent(tps):b.dataset.a+extra;
   try{ const r=await fetch('/control?do='+q,{method:'POST',headers:{'X-Reclaimer-Control':'1'}}); const j=await r.json();
     msg.textContent=j.ok?(b.dataset.a==='capture'?'captured: ~/reclaimer_cap_*.bmp/.txt':''):(j.error||'failed'); }
   catch(err){ msg.textContent='not connected'; } });

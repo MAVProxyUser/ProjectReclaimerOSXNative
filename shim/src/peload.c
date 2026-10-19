@@ -1345,15 +1345,33 @@ static int      MSABI child_SetPDI(void*s,GUID_*g,const void*d){ D3DObj*o=s; if(
     if(p->n<(int)(sizeof p->e/sizeof p->e[0])){ PDEnt*e=&p->e[p->n++]; e->g=*g; e->sz=8; memcpy(e->buf,&d,8); }
     return HR_OK; }
 // ---- ID3D11Resource (7-10) ----
-static void     MSABI res_GetType(void*s,uint32_t*pd){ D3DObj*o=s; if(pd)*pd=o?o->kind:1; }
+// ID3D11Resource::GetType -> D3D11_RESOURCE_DIMENSION (1 buffer, 2 TEXTURE1D, 3 TEXTURE2D, 4 TEXTURE3D). Our kinds are 1 buffer,
+// 2 Texture2D, 3 Texture1D, 4 Texture3D: it returned the kind itself, so every 2D texture said TEXTURE1D -- halo3's readback of
+// the frame's average luminance (halo3+0x2a0d00, called by the auto-exposure update 0x287288) accepts only 2D / 3D and quietly
+// gave up every frame: exposure never adapted and dark interiors stayed dark (Hugegrass, backlog 61). PELOAD_GETTYPE_OLD=1 = old.
+static void     MSABI res_GetType(void*s,uint32_t*pd){ D3DObj*o=s; if(!pd) return; uint32_t k=o?o->kind:1;
+    static int old=-1; if(old<0) old=getenv("PELOAD_GETTYPE_OLD")?1:0;
+    *pd = old ? k : (k==2?3u : k==3?2u : k); }
 static void     MSABI res_SetEvict(void*s,uint32_t p){ (void)s;(void)p; }
 static unsigned MSABI res_GetEvict(void*s){ (void)s; return 0; }
+// GetDesc: the resource's real description. It reported Format 28 (RGBA8), one mip, one slice and no usage / bind / CPU flags
+// for EVERY texture: halo3 makes its auto-exposure readback copies from the GetDesc of the 1x1 R16G16B16A16_FLOAT luminance
+// target (halo3+0x2a1486) and got RGBA8 staging textures, so the float result never arrived (backlog 61: exposure never
+// adapted, dark interiors stayed dark). PELOAD_GETDESC_OLD=1 = the old fixed answer.
 static void     MSABI res_GetDesc(void*s,void*pd){ D3DObj*o=s; if(!pd||!o) return; uint32_t*u=pd;
     // write ONLY the caller's desc size (overwriting more corrupts its stack/heap)
-    if(o->kind==1){ memset(pd,0,24); u[0]=(uint32_t)o->size; }                 // D3D11_BUFFER_DESC (24B): ByteWidth
-    else if(o->kind==3){ memset(pd,0,32); u[0]=o->w; u[1]=1; u[2]=1; u[3]=28; } // TEXTURE1D_DESC (32B): Width,Mip,Array,Format
-    else if(o->kind==4){ memset(pd,0,36); u[0]=o->w; u[1]=o->h; u[2]=1; u[3]=1; u[4]=28; } // TEXTURE3D_DESC (36B): W,H,Depth,Mip,Format
-    else { memset(pd,0,44); u[0]=o->w; u[1]=o->h; u[2]=1; u[3]=1; u[4]=28; u[5]=1; } } // TEXTURE2D_DESC (44B)
+    static int old=-1; if(old<0) old=getenv("PELOAD_GETDESC_OLD")?1:0;
+    if(old){
+        if(o->kind==1){ memset(pd,0,24); u[0]=(uint32_t)o->size; }
+        else if(o->kind==3){ memset(pd,0,32); u[0]=o->w; u[1]=1; u[2]=1; u[3]=28; }
+        else if(o->kind==4){ memset(pd,0,36); u[0]=o->w; u[1]=o->h; u[2]=1; u[3]=1; u[4]=28; }
+        else { memset(pd,0,44); u[0]=o->w; u[1]=o->h; u[2]=1; u[3]=1; u[4]=28; u[5]=1; }
+        return; }
+    uint32_t usage=o->usage, cpu=(uint32_t)o->cpuacc<<16, mips=o->mips?o->mips:1, arr=o->arr?o->arr:1;
+    if(o->kind==1){ memset(pd,0,24); u[0]=(uint32_t)o->size; u[1]=usage; u[2]=o->bindf; u[3]=cpu; u[4]=o->misc; u[5]=o->depth; }   // D3D11_BUFFER_DESC (24B)
+    else if(o->kind==3){ memset(pd,0,32); u[0]=o->w; u[1]=mips; u[2]=arr; u[3]=o->fmt; u[4]=usage; u[5]=o->bindf; u[6]=cpu; u[7]=o->misc; }   // TEXTURE1D_DESC (32B)
+    else if(o->kind==4){ memset(pd,0,36); u[0]=o->w; u[1]=o->h; u[2]=o->depth?o->depth:1; u[3]=mips; u[4]=o->fmt; u[5]=usage; u[6]=o->bindf; u[7]=cpu; u[8]=o->misc; }   // TEXTURE3D_DESC (36B)
+    else { memset(pd,0,44); u[0]=o->w; u[1]=o->h; u[2]=mips; u[3]=arr; u[4]=o->fmt; u[5]=1; u[6]=0; u[7]=usage; u[8]=o->bindf; u[9]=cpu; u[10]=o->misc; } }   // TEXTURE2D_DESC (44B)
 // ---- ID3D11View (7-8). o->data holds the resource the view was created over, so
 // GetResource returns a valid (never-null) resource the engine then dereferences.
 static D3DObj* d3dobj(void** vt, uint32_t kind, uint64_t size); // fwd
@@ -1370,7 +1388,8 @@ static int MSABI dev_CreateBuffer(void*t,const void*desc,const void*init,void**p
     uint64_t sz = desc? (uint64_t)(*(const uint32_t*)desc) : 16; if(sz<16) sz=16;
     uint32_t bind = desc? *(const uint32_t*)((const char*)desc+8) : 0;
     D3DObj* o=d3dobj(g_d3dres_vtbl,1/*BUFFER*/,sz); o->rowpitch=(uint32_t)sz; o->w=(uint32_t)sz; o->h=1; o->keep=0;
-    if(desc){ o->bindf=bind; o->misc=*(const uint32_t*)((const char*)desc+16); o->depth=*(const uint32_t*)((const char*)desc+20); }  // depth = StructureByteStride for buffers
+    if(desc){ o->bindf=bind; o->misc=*(const uint32_t*)((const char*)desc+16); o->depth=*(const uint32_t*)((const char*)desc+20);   // depth = StructureByteStride for buffers
+        o->usage=(uint8_t)*(const uint32_t*)((const char*)desc+4); o->cpuacc=(uint8_t)(*(const uint32_t*)((const char*)desc+12)>>16); }   // (for GetDesc)
     if(desc && getenv("PELOAD_CSCENSUS") && ((o->misc&0x60)||(bind&0x80))){ char m[160]; int k=snprintf(m,sizeof m,"  [cscensus] CreateBuffer %lluB bind=0x%x misc=0x%x stride=%u init=%p\n",(unsigned long long)sz,bind,o->misc,o->depth,init); (void)!write(2,m,k); }
     if(init && o->data){ const void*src=*(void*const*)init; if(src) memcpy(o->data,src,sz); }
     if((bind&0x4) && o){ o->is_cb=1; if(g_ncbreg<(int)(sizeof g_cbreg/sizeof*g_cbreg)) g_cbreg[g_ncbreg++]=o; }
@@ -1719,6 +1738,13 @@ static void smallrb_trace(const char*what,D3DObj*dst,D3DObj*src,uint32_t type); 
 static int  MSABI ctxi_Map(void*t,void*res,uint32_t sub,uint32_t type,uint32_t fl,void*pM){ (void)t;(void)sub;(void)type;(void)fl; if(res && ((D3DObj*)res)->cs_gpu) cs_gpu_readback((D3DObj*)res,"Map");
     g_fs.maps++; if(type==1||type==3) g_fs.mapread++;
     cs_wait_res((D3DObj*)res);
+    // PELOAD_TRACE_MAPREAD=1: every READ / READ_WRITE map (buffers too): kind, size, format, the first values, the caller
+    if((type==1||type==3) && res && GENV1("PELOAD_TRACE_MAPREAD")){ D3DObj*q=res; static unsigned long nm; nm++; if(nm<=300 || !(nm%500)){
+        extern uint64_t g_map_guest_ra; uint64_t ra=g_map_guest_ra; const uint8_t*b=(const uint8_t*)q->data; char m[400];
+        const char*mod=(ra>=0x180000000ull&&ra<0x187000000ull)?"halo3":(ra>=0x140000000ull&&ra<0x146000000ull)?"exe":"?"; uint64_t rv=!strcmp(mod,"halo3")?ra-0x180000000ull:!strcmp(mod,"exe")?ra-0x140000000ull:ra;
+        int k=snprintf(m,sizeof m,"  [mapread] #%lu kind %d size %llu %ux%u f%u flags 0x%x caller %s+0x%llx glfbo %u gltex %u",nm,q->kind,(unsigned long long)q->size,q->w,q->h,q->fmt,fl,mod,(unsigned long long)rv,q->glfbo,q->gltex);
+        if(b && q->size>=64){ k+=snprintf(m+k,sizeof m-k," bytes"); for(int i=0;i<64;i++) k+=snprintf(m+k,sizeof m-k,"%s%02x",(i%4)?"":" ",b[i]); }
+        m[k++]='\n'; (void)!write(2,m,k); } }
     if(getenv("PELOAD_TRACE_TEXUPD") && res && ((D3DObj*)res)->kind>=2 && ((D3DObj*)res)->w){ D3DObj*q=res; extern double g_gameplay_t0; uint64_t ra=(uint64_t)__builtin_return_address(0);
         char m[200]; int k=snprintf(m,sizeof m,"  [texupd] t=%.2f Map %p %ux%u f%u sub=%u type=%u ra=0x%llx\n",g_gameplay_t0?mono_s()-g_gameplay_t0:-1.0,(void*)q,q->w,q->h,q->fmt,sub,type,(unsigned long long)(ra>=0x180000000ULL&&ra<0x187000000ULL?ra-0x180000000ULL:ra)); (void)!write(2,m,k); }
     D3DObj*o=res; if(o){ d3d_dirty_sub(o,sub); o->rvalid=0; o->ver++; if(o->is_cb) o->cb_upd=g_cb_tick; }   // mapped for write -> re-upload + mark CB fresh
@@ -1971,6 +1997,14 @@ static int rtgrade_dispatch(D3DObj*cs,uint32_t a,uint32_t b);   // fwd (the clie
 static void MSABI ctxi_Dispatch(void*t,uint32_t a,uint32_t b,uint32_t c){ (void)t; d3dtrace(7,"Dispatch"); g_fs.disp++; cscensus("Dispatch",a,b,c);
     D3DObj*cs=g_cs.cs; if(!cs||!cs->bc||getenv("PELOAD_NOCSCPU")) return;
     if(cs->bclen==76 && !memcmp(cs->bc+36,"RCLG",4)){ rtgrade_dispatch(cs,a,b); return; }
+    // PELOAD_CS_GPUINPUT_LOG=1: a CPU kernel reading a texture the GPU rendered (glfbo: a render target) sees its CPU copy,
+    // which nothing updates -- say so once per kernel and slot (none found on Hugegrass, 2026-10-18)
+    static int gpuin=-1; if(gpuin<0) gpuin=getenv("PELOAD_CS_GPUINPUT_LOG")?1:0;   // (opt-in: a loop over the SRVs every dispatch)
+    if(gpuin){ static struct { void*cs; int slot; } seen[64]; static int ns;
+      for(int i=0;i<32;i++){ D3DObj*r=cs_resof(g_cs.srv[i]); if(!r || r->kind!=2 || !r->glfbo) continue; int f=0;
+          for(int j=0;j<ns;j++) if(seen[j].cs==cs && seen[j].slot==i){ f=1; break; } if(f || ns>=64) continue;
+          seen[ns].cs=cs; seen[ns].slot=i; ns++;
+          char m[200]; int k=snprintf(m,sizeof m,"  [cs-gpuinput] kernel %p (%u B) reads t%d = %ux%u f%u, a GPU render target: its CPU copy is stale\n",(void*)cs,cs->bclen,i,r->w,r->h,r->fmt); (void)!write(2,m,k); } }
     // the program lives on the canon (the first object with this bytecode, never freed): duplicates -- every map load
     // creates the same kernels again -- run it instead of compiling their own (and they are freed when released)
     { D3DObj*cn=(D3DObj*)cs->canon; if(!cs->csprog && cn && cn->csprog) cs->csprog=cn->csprog; }
@@ -4794,7 +4828,7 @@ static int MSABI ctxi_GetData(void*t,void*a,void*data,uint32_t size,uint32_t fla
             if(G.GetQueryObjectui64v) G.GetQueryObjectui64v(o->glq,0x8866/*RESULT*/,&r); else { int ri=0; G.GetQueryObjectiv(o->glq,0x8866,&ri); r=(uint32_t)ri; }
             GLUNLOCK(); }
         if(ty==1) memcpy(buf,&r,8); else *(uint32_t*)buf=r?1:0;
-        if(getenv("PELOAD_TRACE_QUERY")){ static int nq; if(nq++<60){ char m[96]; int k=snprintf(m,sizeof m,"  [query] %p type %u -> %llu\n",(void*)o,ty,(unsigned long long)r); (void)!write(2,m,k); } }
+        if(getenv("PELOAD_TRACE_QUERY")){ static int nq, lim; if(!lim){ lim=atoi(getenv("PELOAD_TRACE_QUERY")); if(lim<=1) lim=60; } /* =<n>: the first n results */ if(nq++<lim){ char m[96]; int k=snprintf(m,sizeof m,"  [query] %p type %u -> %llu\n",(void*)o,ty,(unsigned long long)r); (void)!write(2,m,k); } }
         break; }
     case 2: { uint64_t v=o->qval?o->qval:(uint64_t)(mono_s()*1e9); memcpy(buf,&v,8); break; }
     case 3: { uint64_t f=1000000000ull; memcpy(buf,&f,8); break; }        // TIMESTAMP_DISJOINT {Frequency, Disjoint=FALSE}

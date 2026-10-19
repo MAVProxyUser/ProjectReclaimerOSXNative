@@ -649,6 +649,21 @@ patch variants by signature (section 16; shim/docs/patch-addresses.md).
 - **Input layouts freed** — plain data, programs key on VS/PS only; ~25 a load were kept. Old: `PELOAD_D3D_KEEPIL=1`.
   (10-18 df329f9)
 
+- **GetType / GetDesc lied about every texture: halo3's auto-exposure never ran (dark interiors, backlog 61)** — `res_GetType`,
+  `res_GetDesc`, `dev_CreateBuffer`. Why: Hugegrass's vehicle bay (and every dark interior) rendered almost black at a fixed
+  exposure of ~0.17. halo3's auto-exposure (update halo3+0x287288) reads the frame's 1x1 average-luminance target back on the
+  CPU: halo3+0x2a0d00 asks the resource's type and accepts only TEXTURE2D / TEXTURE3D, and the staging copies it reads come
+  from the luminance target's GetDesc (halo3+0x2a1486). GetType returned our internal kind (2 = Texture2D), which is D3D's
+  TEXTURE1D, so the readback quietly gave up every frame; and GetDesc reported Format 28 (RGBA8), one mip, one slice and no
+  usage / bind / CPU flags for EVERY texture, so the staging copies were RGBA8 and the half-float result (decoded by
+  halo3+0x1dc05c) never arrived. How: GetType maps kinds to D3D11_RESOURCE_DIMENSION; GetDesc reports the stored
+  description (format, mips, array size / depth, usage, bind, CPU access, misc; buffers too, whose usage and CPU access
+  CreateBuffer now keeps). Checked: the readback carries the log luminance (half 0xC52F = -5.2 in the menu); the bay's
+  exposure 0.17 -> 7.4 (the room, the Shadow, the structures visible); Guardian's interior at 2.4, nothing blown out; the
+  client's menu grading (which checks the back buffer's format) still runs. `PELOAD_GETTYPE_OLD=1` / `PELOAD_GETDESC_OLD=1`
+  = old. Found with `PELOAD_TRACE_MAPREAD=1` (every READ map with its guest caller and first bytes) and
+  `PELOAD_CS_GPUINPUT_LOG=1` (a CPU compute kernel reading a GPU render target: none). (10-18)
+
 ## 11. D3D11->GL: shaders and the DXBC->GLSL translator
 
 The translator: shim/src/dxbc2glsl.c (in-process, `dg_*`), with re-tools/dxbc2glsl.py kept byte-identical as the test
@@ -1181,6 +1196,32 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
 
 - **Stats control query length** — Why: `qs[128]` cut longer requests (a do=uisteps step list stopped after ~120 bytes, so the
   last steps never ran). How: path 1024, query 768. (10-18)
+
+- **Teleport for a player on our local server (a guest of the host)** — stats.c `do=teleport` / `do=explore`, hitbox.c
+  `hb_engine_jobs_locked`, the page. Why (user, 2026-10-18: "I'm not host so I can't teleport!"): a client of our dedicated
+  server got the Boundaries button (forwarded) but the Teleport button ran locally (the game refuses a guest), the explore
+  spots were host-only, and the map's click-to-teleport said "only the host can teleport". How: a guest's Teleport is
+  forwarded as `do=teleport&who=<slot>`, an explore spot as boundaries off (forwarded + its own movement patched) + `tpto&slot=`;
+  the host moves a forwarded requester for the far side too (not only "next to them"), without a host camera (a dedicated
+  server has none: the player's own facing); the page enables Teleport, the spot list and click-to-teleport for guests
+  (`tp_forward`). Two bugs on the way: a boundaries request marks the next engine job "boundaries only", which swallowed a
+  teleport sent right behind it (the host clears the mark for teleport requests; a guest's explore also waits 300 ms between
+  the two); and the client's map detection (hb_current_map) only weighs the 32 most recently opened map files -- the client
+  opens many after a match starts, Valhalla fell out and Standoff won the definition vote (88 of 88 match both), so the page
+  had no Valhalla spots: with the engine's scenario name known and no recent file matching, halo3/maps/<scenario>.map
+  itself is used. Checked live as a guest of our dedicated server: Teleport (far side), the east-cliff spot (boundaries off,
+  standing on the cliff, walking around), click-to-teleport. (10-18)
+- **Spots past the boundaries for every map, in a Teleport list** — re-tools/h3spots.py, stats.c `st_dyn_load` /
+  `st_spot_find`, the page's `#tpsel`. Why (user: "several known good locations for standing on the other side of what used
+  to be boundaries ... for all maps", "a drop down list next to the teleport button"): only two hand-picked Valhalla spots
+  existed. How: h3spots.py builds h3nav's floor field (all collision: structure, instances, player clip, placed scenery;
+  slip terrain counts as floor) and keeps the floors in a kill volume or outside every safe zone with 1.0 of headroom,
+  groups them into flat regions (neighbours within 0.5), and gives each region of >= 12 square units its most interior cell
+  (>= 1 unit from any edge), up to 8 per map, 18 apart, named by compass direction from the play area's centre + high /
+  low ground. maptop/<map>.spots.json, made for all 40 multiplayer + Workshop maps here (0 on enclosed maps: Chill Out,
+  Fortress, Midship, Flood Sandbox) and in the background the first time a new map is played. The page lists them after the
+  hand-picked spots; Teleport goes to the picked entry ("far side of the map" = the old button). NOT yet verified in game
+  spot by spot. (10-18)
 
 ## 19. Performance
 

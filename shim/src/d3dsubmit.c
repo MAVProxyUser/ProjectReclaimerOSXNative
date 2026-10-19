@@ -106,8 +106,9 @@ static void sub_note_drain(const char*why,D3DObj*o,uint32_t type,uint32_t fl){  
     if(!prof_on()) return; static int n; if(n++>=40) return; char m[220];
     int k=snprintf(m,sizeof m,"  [submit] drain #%d: %s, map type %u flags 0x%x, res %p kind %d size %llu %ux%u fmt %u stkind %d\n",n,why,type,fl,(void*)o,o?o->kind:-1,
         (unsigned long long)(o?o->size:0),o?o->w:0,o?o->h:0,o?o->fmt:0,o?o->stkind:-1); (void)!write(2,m,k); }
+uint64_t g_map_guest_ra;   // the guest code that called Map (PELOAD_TRACE_MAPREAD)
 static int MSABI ctx_Map(void*t,void*res,uint32_t sub,uint32_t type,uint32_t fl,void*pM){
-    D3DObj*o=res;
+    D3DObj*o=res; g_map_guest_ra=(uint64_t)__builtin_return_address(0);
     // READ map with DO_NOT_WAIT (D3D11_MAP_FLAG_DO_NOT_WAIT, a staging readback polled every frame): no drain -- "still
     // drawing" while a queued copy into it hasn't run, else map it now (PELOAD_D3DGL_SUBMIT_DRAINREAD = always drain)
     if(sub_on() && g_sq && o && o->data && o->size && type==1 && (fl&0x100000) && !GENV1("PELOAD_D3DGL_SUBMIT_DRAINREAD")){

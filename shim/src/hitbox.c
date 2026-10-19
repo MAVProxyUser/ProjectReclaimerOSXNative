@@ -342,10 +342,17 @@ static int hb_current_map(char*out,size_t n){
             if(sc>bs){ bs=sc; best=k; } }   // (paths are newest first: ties keep the newer...)
         if(bs>=0 && cs>=bs){ for(int k=0;k<np;k++) if(!strcmp(paths[k],cur)){ best=k; break; } }   // (...but never over the current one)
         if(best<0 && np) best=0;
-        if(best>=0 && strcmp(cur,paths[best])){
-            if(cur[0]){ char m[2200]; int kk=bs==-2?snprintf(m,sizeof m,"  [hitbox] map being played: %s (the engine's scenario %s)\n",paths[best],sn)
-                    :snprintf(m,sizeof m,"  [hitbox] map being played: %s (%d of %d live definitions match)\n",paths[best],bs,nd); (void)!write(2,m,kk); }
-            snprintf(cur,sizeof cur,"%s",paths[best]); __atomic_add_fetch(&g_hb_mapgen,1,__ATOMIC_ACQ_REL); } }
+        // the engine names its scenario but no recent file is it: the client opens many maps after a match starts (skin /
+        // helmet catalogs, maps it borrows from), so the played map can fall out of the 32 recent paths -- a Valhalla
+        // game was then voted to Standoff (88 of 88 definitions match both). Use halo3/maps/<scenario>.map itself.
+        static char forced[1024]; const char*pick=best>=0?paths[best]:0;
+        if(hs && bs!=-2){ for(int k=0;k<np;k++){ const char*mp=strstr(paths[k],"/halo3/maps/"); if(!mp) continue;
+                snprintf(forced,sizeof forced,"%.*s/halo3/maps/%s.map",(int)(mp-paths[k]),paths[k],sn);
+                if(!access(forced,R_OK)){ pick=forced; bs=-2; } break; } }
+        if(pick && strcmp(cur,pick)){
+            if(cur[0]){ char m[2200]; int kk=bs==-2?snprintf(m,sizeof m,"  [hitbox] map being played: %s (the engine's scenario %s)\n",pick,sn)
+                    :snprintf(m,sizeof m,"  [hitbox] map being played: %s (%d of %d live definitions match)\n",pick,bs,nd); (void)!write(2,m,kk); }
+            snprintf(cur,sizeof cur,"%s",pick); __atomic_add_fetch(&g_hb_mapgen,1,__ATOMIC_ACQ_REL); } }
     snprintf(out,n,"%s",cur); pthread_mutex_unlock(&mx); return out[0]!=0; }
 static int hbm_read(HbMap*m,uint64_t va,void*dst,size_t n){ if(va<m->vbase) return 0; uint64_t off=m->tagoff+(va-m->vbase); if(off+n>m->fsize) return 0;
     return pread(m->fd,dst,n,(off_t)off)==(ssize_t)n; }
@@ -783,7 +790,7 @@ static void hb_engine_jobs(void){
     ((HbUnlockFn)(h3+0x12c9a0))(&tok); }
 static void hb_engine_jobs_locked(uint8_t*h3,void**tarr,uint32_t idx,uint8_t*arr){
     // a dedicated server has no camera: moving a player given by slot (tpto&slot=) doesn't need one, "us" does
-    int byslot=g_hb_tp_to && g_hb_tp_to_who>=0;
+    int byslot=(g_hb_tp_to && g_hb_tp_to_who>=0) || g_hb_tp_who>=0;   // (+ a forwarded far-side / next-to request: the requester by slot)
     float vp[32]; unsigned s0=g_hb_vpseq; memcpy(vp,g_hb_vp,sizeof vp); int nocam=(s0&1) || g_hb_vpseq!=s0 || (!vp[28]&&!vp[29]&&!vp[30]);
     if(nocam && !byslot){ (void)!write(2,"  [teleport] no camera yet\n",27); return; }
     if(nocam){ vp[28]=vp[29]=vp[30]=1e30f; }   // (no body is "at the camera")
@@ -826,11 +833,12 @@ static void hb_engine_jobs_locked(uint8_t*h3,void**tarr,uint32_t idx,uint8_t*arr
         k=snprintf(m,sizeof m,"  [teleport] %08x to (%.2f %.2f %.2f)\n",u,pos[0],pos[1],pos[2]); (void)!write(2,m,k);
         ((void(__attribute__((ms_abi))*)(uint32_t,const float*,const float*,const float*,uint8_t))(h3+0x259410))(u,pos,fwd,upv,1); return; }
     int tps=g_hb_tp_slot, who=g_hb_tp_who; g_hb_tp_slot=-1; g_hb_tp_who=-1;
-    if(tps>=0 && who>=0){   // a forwarded request: move that player, not us
+    if(who>=0){   // a forwarded request (next to someone, or the far side): move that player, not us
         uint8_t*parr=*(uint8_t**)((uint8_t*)tarr[idx]+0x10); if(!parr || *(uint32_t*)(parr+0x2c)!=0x64407440) return;
         int32_t es=*(int32_t*)(parr+0x24), pn=*(int32_t*)(parr+0x3c); uint8_t*pd=*(uint8_t**)(parr+0x48); if(!pd || who>=pn || es<0x30) return;
         uint8_t*rec=pd+(size_t)who*es; if(!*(uint16_t*)rec) return; me=*(uint32_t*)(rec+0x28);
-        if(me==0xFFFFFFFFu || (int)(me&0xFFFF)>=hi){ (void)!write(2,"  [teleport] the requesting player has no body\n",47); return; } }
+        if(me==0xFFFFFFFFu || (int)(me&0xFFFF)>=hi){ (void)!write(2,"  [teleport] the requesting player has no body\n",47); return; }
+        { uint8_t*mp=*(uint8_t**)(data+(size_t)(me&0xFFFF)*0x18+0x10); if(mp) memcpy(mo,mp+0x50,12); } }   // (its position: the far side reflects it)
     if(tps>=0){ hb_tp_next(h3,(uint8_t*)tarr[idx],data,hi,me,tps); return; }
     if(ni<4){ (void)!write(2,"  [teleport] too few map items to find the centre\n",50); return; }
     cx/=ni; cy/=ni; float rx=(float)(2*cx-mo[0]), ry=(float)(2*cy-mo[1]);
@@ -839,7 +847,9 @@ static void hb_engine_jobs_locked(uint8_t*h3,void**tarr,uint32_t idx,uint8_t*arr
     float bd=1e30f, pos[3]={0}; uint32_t bdef=0;
     for(int i=0;i<hi;i++){ uint8_t*e=data+(size_t)i*0x18; if(!*(uint16_t*)e || !(e[3]==2||e[3]==3)) continue; uint8_t*p=*(uint8_t**)(e+0x10); if(!p || *(uint32_t*)(p+0x10)!=0xFFFFFFFFu) continue;
         const float*o=(const float*)(p+0x50); float dx=o[0]-rx, dy=o[1]-ry, d=dx*dx+dy*dy; if(d<bd){ bd=d; pos[0]=o[0]; pos[1]=o[1]; pos[2]=o[2]+0.5f; bdef=*(uint32_t*)p; } }
-    float fwd[3]={-vp[12],-vp[13],0}, fl=sqrtf(fwd[0]*fwd[0]+fwd[1]*fwd[1]); if(fl>1e-4f){ fwd[0]/=fl; fwd[1]/=fl; } else { fwd[0]=1; fwd[1]=0; }
+    float fwd[3]={-vp[12],-vp[13],0};
+    if(nocam || who>=0){ uint8_t*mp=*(uint8_t**)(data+(size_t)(me&0xFFFF)*0x18+0x10); if(mp){ const float*f=(const float*)(mp+0x5c); fwd[0]=f[0]; fwd[1]=f[1]; } }   // no host camera: the player's own facing
+    float fl=sqrtf(fwd[0]*fwd[0]+fwd[1]*fwd[1]); if(fl>1e-4f){ fwd[0]/=fl; fwd[1]/=fl; } else { fwd[0]=1; fwd[1]=0; }
     float up[3]={0,0,1};
     char m[300]; int k=snprintf(m,sizeof m,"  [teleport] map centre (%.2f %.2f) from %d items; from (%.2f %.2f %.2f), reflected (%.2f %.2f) -> on %s at (%.2f %.2f %.2f)\n",cx,cy,ni,mo[0],mo[1],mo[2],rx,ry,hb_tag_name(bdef),pos[0],pos[1],pos[2]); (void)!write(2,m,k);
     ((void(__attribute__((ms_abi))*)(uint32_t,const float*,const float*,const float*,uint8_t))(h3+0x259410))(me,pos,fwd,up,1);
