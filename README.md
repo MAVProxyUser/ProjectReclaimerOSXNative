@@ -64,10 +64,11 @@ No game files are included in this repository or its releases.
      ```bash
      tar xzf ProjectReclaimerOSXNative-*-macos.tar.gz
      ```
-     Then clear the download quarantine so macOS lets the unsigned binary run:
+     Then clear the download quarantine so macOS lets the loader and **Reclaimer.app** (in the bundle's top folder) run:
      ```bash
      xattr -dr com.apple.quarantine ProjectReclaimerOSXNative-*-macos
      ```
+     (Without this, macOS refuses to open the app: it is signed ad hoc, not by an Apple Developer ID.)
    - or build from source (needs the Xcode command-line tools): `bash shim/build.sh`. This also needs
      the three VC++ runtime DLLs (`ucrtbase.dll`, `vcruntime140.dll`, `msvcp140.dll`) in `shim/crt/`;
      the release bundle contains them.
@@ -142,16 +143,27 @@ own Macs; don't share the stick.
 
 ## Launch
 
-Double-click **Reclaimer** in Applications (or Launchpad / Spotlight). `install.sh` makes the app; in a checkout, make it
-once with:
+Double-click **Reclaimer.app**. It is in the release bundle's top folder; `shim/build.sh` makes it in a checkout and
+`install.sh` (USB stick) makes it in the install folder. To have it in Applications (Launchpad / Spotlight / the Dock):
 
 ```bash
 bash shim/tools/make-app.sh --applications
 ```
 
 The app starts `shim/play.sh` without a Terminal window, logging to `/tmp/reclaimer_launcher.log` (the game's log is still
-`/tmp/reclaimer_play.log`). While the game runs, clicking it again only shows a notification. If you move the install
-folder, run `make-app.sh` again there. From Terminal it is the same as:
+`/tmp/reclaimer_play.log`). While the game runs, clicking it again only shows a notification. It runs the folder it sits in;
+the copy in Applications remembers the folder it was made from (run `make-app.sh --applications` again after moving it).
+On a Desktop / Documents / Downloads folder macOS asks once whether Reclaimer may access it: allow it.
+
+The app is a tiny signed launcher (`shim/src/launcher.c`) plus the script `Contents/Resources/launch.sh`; `make-app.sh`
+signs it ad hoc and verifies the signature. To sign with one of your own identities instead
+(`security find-identity -v -p codesigning` lists them):
+
+```bash
+RECLAIMER_SIGN_IDENTITY="Apple Development: <you>" bash shim/tools/make-app.sh --applications
+```
+
+From Terminal it is the same as:
 
 ```bash
 bash shim/play.sh

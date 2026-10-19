@@ -29,6 +29,10 @@ and hooks · 17 halo3.dll patches and detours · 18 Overlay, stats, forensics, w
 
 ## 0. Install, setup and usage
 
+- **Play by double-click: Reclaimer.app** (2026-10-19) — in the release bundle's top folder, made by shim/build.sh in a
+  checkout and by install.sh on a USB install; `bash shim/tools/make-app.sh --applications` puts one in ~/Applications.
+  A downloaded bundle needs `xattr -dr com.apple.quarantine <bundle folder>` first (the app is signed ad hoc). Details:
+  section 20 "Reclaimer.app".
 The short version (README.md has the full guide: requirements, USB copy, controls, the stats page).
 
 ### Install
@@ -1409,6 +1413,12 @@ Numbers are from the commit messages; PERF-PLAN.md has the measurements. Compare
   launch.sh, the bundle is signed ad hoc, and Info.plist carries the Desktop / Documents / Downloads / removable-volume
   usage strings, so macOS can ask once instead. Checked: double-click (open) starts the menu from the Desktop checkout; a
   second click while it runs only notifies (game processes 2 -> 2).
+  Then (user: "create the .app and sign it", "a new release including the .app"): shim/build.sh makes the app after every
+  build (NO_APP=1 skips); make-app.sh --portable writes no folder path (launch.sh uses the folder the app sits in whenever
+  it holds shim/play.sh, else the folder written in), RECLAIMER_SIGN_IDENTITY signs with a real identity (ad hoc otherwise,
+  and if that identity fails), the signature is verified; make-release.sh puts a portable signed app at the top of the
+  bundle, adds the launcher, the icon, machine.sh / workshop-helper.sh / client-update.sh / make-app.sh and the map tools
+  the loader runs (h3nav, h3inv, h3spots, h3dmg), and refuses to package uncommitted shim/ or re-tools/ changes.
 - **Megalo lab** (backlog 72; shim/tools/megalo-lab/megalo_fuzz.py, shim/docs/megalo.md) — Why (user, 2026-10-19: "isolate
   it for us to test the things it supports ... make it crash, corrupt memory"): the client's Megalo compiler is reachable
   without MCC through its own `megalo-check` / `mode-compile` / `mode-check` subcommands (~0.07 s each under the loader).

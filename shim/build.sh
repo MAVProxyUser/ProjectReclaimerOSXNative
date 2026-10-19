@@ -17,3 +17,5 @@ clang -arch arm64 $MIN -O2 -Wno-deprecated-declarations -framework OpenGL -frame
 # Reclaimer.app's program (shim/tools/make-app.sh): a tiny native launcher; built here so Macs without a compiler get it
 clang -arch arm64 -arch x86_64 $MIN -O2 -o build/reclaimer-launcher.new src/launcher.c && mv -f build/reclaimer-launcher.new build/reclaimer-launcher
 echo "built: build/peload  (run under: arch -x86_64 build/peload <pe> [args])"
+# Reclaimer.app next to shim/ (double-click to play; tools/make-app.sh --applications also puts it in ~/Applications)
+[ -n "${NO_APP:-}" ] || echo "built: $(bash tools/make-app.sh | sed 's#^made .*/Reclaimer.app#Reclaimer.app#')"

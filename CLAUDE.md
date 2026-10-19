@@ -269,6 +269,11 @@ symlink to "Program Files/Steam/steamapps") and checks each file against the ser
 Forge 2.0 (2933266434) ships its own halo3/maps/shared.map + campaign.map besides the Forge-world maps.
 Rock-wall seams (tabled by the user, display-only): `PELOAD_D3DGL_DFCENSUS` (draws per depth func), `PELOAD_D3DGL_INVARIANT`
 (invariant gl_Position, opt-in); the main depth buffer is DXGI 19 (D32F_S8, reverse-Z) and keeps full float precision.
+Reclaimer.app (2026-10-19): shim/tools/make-app.sh (build.sh runs it; --applications copies to ~/Applications, --portable =
+no baked folder, RECLAIMER_SIGN_IDENTITY = a real signing identity, ad hoc otherwise); its program is shim/src/launcher.c (a
+signed Mach-O: a SCRIPT as the bundle program was silently refused Desktop access by TCC, "Operation not permitted") running
+Contents/Resources/launch.sh. Releases: shim/tools/make-release.sh <client version> (refuses uncommitted shim/ changes: build
+from a clean worktree, with shim/crt copied in -- it is not in git).
 play.sh's stdin feeder is `sleep 86400.<pid>` (killed when the game exits; it used to hold a caller's `| tail` for 24 h).
 Native GL helper (2026-10-17, PELOAD_GL_HELPER=1: play.sh's default, the code's default without the env is off; spawned with
 only stdio + its pipe; shim/src/glh_client.c + glhelper.c + glh_shm.h, generated glh_gen.inc /
