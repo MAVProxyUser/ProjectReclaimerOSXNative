@@ -1385,6 +1385,14 @@ Numbers are from the commit messages; PERF-PLAN.md has the measurements. Compare
 
 ## 20. Scripts and RE tools
 
+- **Megalo lab** (backlog 72; shim/tools/megalo-lab/megalo_fuzz.py, shim/docs/megalo.md) — Why (user, 2026-10-19: "isolate
+  it for us to test the things it supports ... make it crash, corrupt memory"): the client's Megalo compiler is reachable
+  without MCC through its own `megalo-check` / `mode-compile` / `mode-check` subcommands (~0.07 s each under the loader).
+  How: `corpus` extracts the example scripts / presets the client carries (to Application Support, not git), `run` runs one
+  with a verdict (OK / ERR / PANIC / CRASH / HANG), `fuzz` / `json` mutate sources / presets (numbers to extremes, kind
+  swaps, API swaps, wrong arity, deep nesting, long expressions, strings, capacity) and keep anything that panics,
+  crashes, hangs or is refused in a new way. First 3,000 mutants: nothing but clean refusals. (10-19)
+
 - **play.sh: the local dedicated server is asked for up to 15 s** — Why (user, 2026-10-19: "I can't use teleport or boundary
   disable"; the Speed 2x toggle was gone too): a client started 20 s after its server came up asked once, with a 1 s
   timeout, before the server answered "dedicated", so PELOAD_TELEPORT_HOST was never set and every host control on its
