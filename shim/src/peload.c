@@ -2011,6 +2011,7 @@ static void MSABI ctxi_Dispatch(void*t,uint32_t a,uint32_t b,uint32_t c){ (void)
     if(!cs->csprog){ D3DObj*own=cs->canon?(D3DObj*)cs->canon:cs; CsProg*p=cs_compile(own->bc,own->bclen); own->csprog=p; cs->csprog=p;
         char m[200]; int k=snprintf(m,sizeof m,"  [cs-cpu] compiled cs %p (%u B): %s, %d instrs, temps %d, numthreads(%u,%u,%u)\n",(void*)cs,cs->bclen,p&&p->ok?"ok":(p?p->why:"oom"),p?p->nins:0,p?p->ntemps:0,p?p->tg[0]:0,p?p->tg[1]:0,p?p->tg[2]:0); (void)!write(2,m,k); }
     CsProg*p=cs->csprog; if(!p||!p->ok) return;
+    if(!a||!b||!c) return;   // D3D runs no group for a zero dimension (cs_dispatch used to run one)
     if((uint64_t)a*b*c*p->tg[0]*p->tg[1]*p->tg[2] > (1u<<20)) return;   // runaway guard
     if(cs_gpu_on()){   // GPU particles: the kernel on the GPU, or a spawn kernel's elements sent; else the CPU needs every buffer it touches
         if(cstf_dispatch(cs,p,a,b,c)) return;
@@ -5986,7 +5987,7 @@ static void d3dgl_bind_ubo(unsigned binding,D3DObj*cb,uint32_t first,int nvec){
             long ro;
             g_cbring_bytes+=n; g_cbring_puts++;
             if(n==cb->size) ro=d3dgl_ring_put(cb->data,n);
-            else { void*tmp=calloc(1,(size_t)n); memcpy(tmp,cb->data,cb->size); ro=d3dgl_ring_put(tmp,n); free(tmp); }
+            else { void*tmp=calloc(1,(size_t)n); if(tmp){ memcpy(tmp,cb->data,cb->size); ro=d3dgl_ring_put(tmp,n); free(tmp); } else ro=-1; }
             if(ro>=0){ cb->uboglver=cb->ver; cb->ubosz=g_ring_gen; cb->glubo=(unsigned)(ro+1); } }   // glubo = ring offset+1 here
         if(cb->glubo && cb->ubosz==g_ring_gen){ buf=g_ring; off=(long)cb->glubo-1+sub; goto bind; }
         cb=0; }                                                         // ring copy failed: zero buffer below
@@ -6052,7 +6053,7 @@ static void cstf_analyze(CsTf*t,CsProg*p,const uint8_t*bc,uint32_t bclen){
             if(of->type!=T_IMM32 || (of->imm[0]&3) || of->imm[0]>=t->stride) TFNO("u0 offset not constant");
             if(op==167) t->hasu0ld=1; } }
     if(A<0) TFNO("no own-index definition");
-    g_dg_tf_dw=(int)t->dw; char*src=dg_translate(bc,bclen); g_dg_tf_dw=0;
+    char*src=dg_translate_tf(bc,bclen,(int)t->dw);
     if(!src) TFNO("translation failed");
     if(strstr(src,"UNTRANSLATED")){ free(src); TFNO("untranslated instruction"); }
     unsigned sh=G.CreateShader(GLE_VS); const char*ss=src; G.ShaderSource(sh,1,&ss,0); G.CompileShader(sh);
@@ -6547,7 +6548,7 @@ static MonoProg* d3dgl_monoprog(D3DObj*vs,D3DObj*ps){
             for(int st=0;st<2;st++){ snprintf(nm,sizeof nm,"%cXcb%d_blk",st?'p':'v',b); unsigned bi=(unsigned)lvals[96+2*b+st];
                 if(bi==0xFFFFFFFFu) continue; G.UniformBlockBinding(prog,bi,(unsigned)(st?16+b:b));
                 const char*src=st?m_psrc_keep:m_vsrc_keep; int n=0; char pat[40]; snprintf(pat,sizeof pat,"uniform %cXcb%d_blk { vec4 %cXcb%d[",st?'p':'v',b,st?'p':'v',b);
-                const char*q=src?strstr(src,pat):0; if(q) n=atoi(q+strlen(pat)); if(n<=0) n=4096;
+                const char*q=src?strstr(src,pat):0; if(q) n=atoi(q+strlen(pat)); if(n<=0||n>4096) n=4096;   // (D3D11: 4096 vec4 per CB)
                 if(st) m->pblk[b]=n; else m->vblk[b]=n; } }
         m->relcb = ((m_vsrc_keep&&strstr(m_vsrc_keep,"[floatBitsToInt(")) || (m_vsrc_keep&&strstr(m_vsrc_keep," + floatBitsToInt(r")&&strstr(m_vsrc_keep,"Xcb")))?1:0;
         if(m_psrc_keep && (strstr(m_psrc_keep,"Xcb3[1 + floatBitsToInt") || strstr(m_psrc_keep,"Xcb3[floatBitsToInt"))) m->relcb|=2;

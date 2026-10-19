@@ -678,6 +678,24 @@ patch variants by signature (section 16; shim/docs/patch-addresses.md).
 
 ## 11. D3D11->GL: shaders and the DXBC->GLSL translator
 
+- **The translator trusted shader bytecode from map files** (security review 2026-10-19; harnesses with AddressSanitizer
+  proved 1-3) — dxbc2glsl.c, dxbc_cpu.c, peload.c. Why: halo3 hands every shader of every map (Workshop and server maps too)
+  to `dg_translate` at map load; on Windows the D3D11 runtime validates and checksums DXBC first, here nothing did. Found and
+  fixed: (1) HEAP OVERFLOW writing an immediate constant buffer as text (a row prints up to 122 chars, the buffer allowed
+  80: four integer rows sufficed) -> sized 128/row, stops at the end; (2) a signature register >= 2^31 became a NEGATIVE
+  index (`sscanf %d`) and `has_v[d]=1` wrote below a stack array -> `d>=0` checks, signature registers >= 64 dropped, names
+  only identifier characters; (3) control flow nested past 64 overflowed `cf[64]` -> refused; (4) relative indices nested
+  without limit (stack exhaustion) -> one level, operands read only within their instruction; (5) compute numthreads
+  unchecked (a 1024x1024 group ran for an hour, 65536x65536 divided by 0) -> D3D11's limits, Dispatch with a zero
+  dimension runs nothing; (6) a temp index from the bytecode sized the declarations (r2147483646 = 2^31 lines) -> r0..r4095;
+  (7) the translator's shared tables (ICB, signatures, sysin, tf mode) raced between the creating thread, the dispatcher and
+  the GL thread -> one mutex (`dg_translate_tf` for the transform-feedback form); (8) a CB block size parsed from text
+  trusted (32 GB calloc per draw) -> <= 4096, calloc checked; (9) chunk counts up to 2^32 looped -> <= 64; (10) indexable
+  temps capped at D3D's 4096. Checked: all 7,600 dumped stock shaders (~/reclaimer_shaders) translate to byte-identical GLSL
+  (the same 7 fail before and after). Open: GPU-side relative indices are not clamped (undefined reads in GLSL; D3D reads
+  0); the text passes over big shaders are quadratic; texel offsets (aoffimmi) are decoded and then dropped (line 142 resets
+  has_aoff) -- a rendering bug, to be fixed with a visual check. (10-19)
+
 The translator: shim/src/dxbc2glsl.c (in-process, `dg_*`), with re-tools/dxbc2glsl.py kept byte-identical as the test
 oracle. Fixes below apply to both unless noted.
 

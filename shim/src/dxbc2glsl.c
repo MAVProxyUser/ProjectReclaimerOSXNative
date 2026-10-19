@@ -58,7 +58,12 @@ static int g_dg_nocmp = 0;     // A/B: old manual compare for sample_c   // A/B:
 static uint32_t g_icb[4096*4]; static int g_icbn;
 
 // decode one operand starting at byte offset o; fill *out (may be NULL to just advance). Returns new o, or -1.
-static long dg_decode_operand(const uint8_t*d,size_t len,size_t o,DgOp*out){
+// (2026-10-19, security review: bytecode from a .map is untrusted -- on Windows the D3D11 runtime validates it, here
+// nothing did) a relative index's register operand has only immediate indices: one level of nesting at most.
+static long dg_decode_operand_d(const uint8_t*d,size_t len,size_t o,DgOp*out,int depth);
+static long dg_decode_operand(const uint8_t*d,size_t len,size_t o,DgOp*out){ return dg_decode_operand_d(d,len,o,out,0); }
+static long dg_decode_operand_d(const uint8_t*d,size_t len,size_t o,DgOp*out,int depth){
+    if(depth>1) return -1;
     if(o+4>len) return -1;
     uint32_t tok=dg_u32(d,len,o); o+=4;
     DgOp tmp; if(!out) out=&tmp; memset(out,0,sizeof *out);
@@ -82,7 +87,7 @@ static long dg_decode_operand(const uint8_t*d,size_t len,size_t o,DgOp*out){
         else if(r>=2&&r<=4){ out->idx[k].kind=1; out->idx[k].val=0;
             if(r==3){ out->idx[k].val=dg_u32(d,len,o); o+=4; } else if(r==4){ out->idx[k].val=dg_u32(d,len,o); o+=8; }
             // relative part: a register component (r#.c / x#[i].c / v#.c) holding an int
-            DgOp rel; long no=dg_decode_operand(d,len,o,&rel); if(no<0)return -1; o=(size_t)no;
+            DgOp rel; long no=dg_decode_operand_d(d,len,o,&rel,depth+1); if(no<0)return -1; o=(size_t)no;
             out->idx[k].rtype=rel.type; out->idx[k].rreg=rel.nidx?rel.idx[0].val:0;
             out->idx[k].rcomp = rel.selmode==2?rel.sel : (rel.has_swz?rel.swz[0]:0);
             if(rel.type==T_INDEXABLE_TEMP && rel.nidx>1) out->idx[k].rreg |= (rel.idx[1].val<<16); }
@@ -143,7 +148,8 @@ static int dg_decode_program(const uint8_t*d,size_t len,size_t base,size_t size,
         for(int k=0;k<4;k++) ins[n].raw[k]=dg_u32(d,len,i+4+4*k);   // raw operand dwords (dcl_indexable_temp)
         size_t stop=i+(size_t)ln*4;
         if(!dg_noperand_op(op)){
-            while(o<stop && ins[n].nop<8){ long no=dg_decode_operand(d,len,o,&ins[n].ops[ins[n].nop]); if(no<0) break; o=(size_t)no; ins[n].nop++; }
+            size_t lim=stop<len?stop:len;   // operands never read past their instruction
+            while(o<stop && ins[n].nop<8){ long no=dg_decode_operand(d,lim,o,&ins[n].ops[ins[n].nop]); if(no<0) break; o=(size_t)no; ins[n].nop++; }
         }
         n++; i+=(size_t)ln*4;
     }
@@ -159,7 +165,9 @@ static int dg_parse_sig(const uint8_t*d,size_t len,size_t base,DgSig*out,int cap
         uint32_t noff=dg_u32(d,len,e), idx=dg_u32(d,len,e+4), sysval=dg_u32(d,len,e+8);
         uint32_t reg=dg_u32(d,len,e+16); uint8_t mask=(e+20<len)?d[e+20]:0;
         size_t np=base+noff; out[m].name[0]=0;
-        if(np<len){ size_t k=0; while(np+k<len && d[np+k] && k<63){ out[m].name[k]=(char)d[np+k]; k++; } out[m].name[k]=0; }
+        if(np<len){ size_t k=0; while(np+k<len && d[np+k] && k<63){ char c=(char)d[np+k];   // into GLSL text: identifier characters only
+                out[m].name[k]=((c>='A'&&c<='Z')||(c>='a'&&c<='z')||(c>='0'&&c<='9')||c=='_')?c:'_'; k++; } out[m].name[k]=0; }
+        if(reg>=64) continue;   // no such register (D3D11 has 32): the element is dropped
         out[m].idx=idx; out[m].sysval=sysval; out[m].reg=reg; out[m].mask=mask; out[m].ctype=dg_u32(d,len,e+12); m++;
     }
     return m;
@@ -313,7 +321,7 @@ char* dg_emit(const char*stage,const DgSig*isgn,int ni,const DgSig*osgn,int no,D
     dg_lprintf(&L,"#version 410 core");
     dg_lprintf(&L,"// stage=%s",stage);
     // declaration scan
-    int maxt=-1; int cbs[64]; for(int i=0;i<64;i++) cbs[i]=0; int cbused[64]={0};
+    int maxt=-1, tbad=0; int cbs[64]; for(int i=0;i<64;i++) cbs[i]=0; int cbused[64]={0};
     int res_[256]={0};
     // dcl_resource dimension per t# (D3D10_SB_RESOURCE_DIMENSION at opcode bits 11..15): 3=2D 5=3D 6=CUBE
     // 7=1DARRAY 8=2DARRAY 9=2DMSARRAY 10=CUBEARRAY. Declaring everything sampler2D and sampling .xy made cube
@@ -331,12 +339,13 @@ char* dg_emit(const char*stage,const DgSig*isgn,int ni,const DgSig*osgn,int no,D
     for(int x=0;x<nins;x++) if((ins[x].op==162||ins[x].op==161) && ins[x].nop && ins[x].ops[0].type==T_RESOURCE && ins[x].ops[0].nidx){ uint32_t r=ins[x].ops[0].idx[0].val;
         if(r<256){ rdim[r]=ins[x].op==162?100:101; rstride[r]=ins[x].op==162?(int)ins[x].raw[2]:4; res_[r]=1; } }
     for(int x=0;x<nins;x++){ for(int k=0;k<ins[x].nop;k++){ DgOp*op=&ins[x].ops[k];
-        if(op->type==T_TEMP && op->nidx){ if((int)op->idx[0].val>maxt) maxt=(int)op->idx[0].val; }
+        if(op->type==T_TEMP && op->nidx){ if(op->idx[0].val>=4096) tbad=1; else if((int)op->idx[0].val>maxt) maxt=(int)op->idx[0].val; }   // (D3D11: r0..r4095)
         if(op->type==T_CB && op->nidx){ int b=op->idx[0].val; if(b>=0&&b<64){ int need=64;
             if(op->nidx>1){ DgIdx*ri=&op->idx[1]; if(ri->kind==0) need=ri->val+1; else { need=ri->val+4096; if(need<4096) need=4096; } }
             if(need<64) need=64; if(need>cbs[b]) cbs[b]=need; cbused[b]=1; } }
         if(op->type==T_RESOURCE && op->nidx){ uint32_t r=op->idx[0].val; if(r<256) res_[r]=1; }
     } }
+    if(tbad){ for(int i=0;i<L.n;i++) free(L.v[i]); free(L.v); return NULL; }   // a temp register past r4095: not a valid shader
     int ntemps=maxt+1;
     // _SYSIN + inputs
     for(int i=0;i<64;i++) g_sysin[i]=NULL;
@@ -381,11 +390,12 @@ char* dg_emit(const char*stage,const DgSig*isgn,int ni,const DgSig*osgn,int no,D
     // D3D's top-down layout, like uploaded textures; present flips once), and D3D's z in [0,w] maps onto
     // GL's [-w,w] (D3D near-plane clipping; window depth = z/w as in D3D).
     if(isvs) dg_lprintf(&L,"void dx_posfix(){\n#ifndef DX_NOYFLIP\n  gl_Position.y=-gl_Position.y;\n#endif\n  gl_Position.z=2.0*gl_Position.z-gl_Position.w;\n}");
-    if(g_icbn>=4){ int nv=g_icbn/4; size_t cap=(size_t)nv*80+64; char*b=malloc(cap); size_t bl=0;
+    if(g_icbn>=4){ int nv=g_icbn/4; size_t cap=(size_t)nv*128+64; char*b=malloc(cap); size_t bl=0;   // (a row prints up to 122 chars: uintBitsToFloat(4294967295u) x4; it was sized 80 -> heap overflow, 10-19)
         bl+=snprintf(b+bl,cap-bl,"const vec4 dx_icb[%d] = vec4[%d](",nv,nv);
-        for(int v=0;v<nv;v++){ char f[4][48]; for(int c=0;c<4;c++) dg_fmtf(g_icb[v*4+c],f[c],sizeof f[c]);
-            bl+=snprintf(b+bl,cap-bl,"%svec4(%s,%s,%s,%s)",v?",":"",f[0],f[1],f[2],f[3]); }
-        snprintf(b+bl,cap-bl,");"); dg_lpush(&L,b); }
+        for(int v=0;v<nv && bl<cap;v++){ char f[4][48]; for(int c=0;c<4;c++) dg_fmtf(g_icb[v*4+c],f[c],sizeof f[c]);
+            int k=snprintf(b+bl,cap-bl,"%svec4(%s,%s,%s,%s)",v?",":"",f[0],f[1],f[2],f[3]); if(k<0 || (size_t)k>=cap-bl){ bl=cap; break; } bl+=(size_t)k; }
+        if(bl+3<=cap) snprintf(b+bl,cap-bl,");"); else { free(b); for(int i=0;i<L.n;i++) free(L.v[i]); free(L.v); return NULL; }
+        dg_lpush(&L,b); }
     int tfdw = (!strcmp(stage,"cs") && g_dg_tf_dw>0 && g_dg_tf_dw<=64) ? g_dg_tf_dw : 0;
     if(tfdw){ int tgx=1; for(int x=0;x<nins;x++) if(ins[x].op==155) tgx=(int)ins[x].raw[0];
         dg_lprintf(&L,"const int dx_tgx=%d;",tgx>0?tgx:1);
@@ -402,6 +412,7 @@ char* dg_emit(const char*stage,const DgSig*isgn,int ni,const DgSig*osgn,int no,D
     // control-flow stack
     typedef struct { int kind; char sv[16]; int first; } CF; // kind 0 if,1 else,2 loop,3 switch
     CF cf[64]; int cfn=0;
+    #define CF_FULL() (cfn>=64)   // D3D11 nests 64 deep at most; deeper = not a valid shader (it overflowed cf[], 10-19)
     #define S(k) ( (k)<ins[x].nop ? dg_src(&ins[x].ops[k]) : "vec4(0.0)" )
     for(int x=0;x<nins;x++){
         const char*n=ins[x].name; int nopn=ins[x].nop; DgOp*o=ins[x].ops;
@@ -417,6 +428,7 @@ char* dg_emit(const char*stage,const DgSig*isgn,int ni,const DgSig*osgn,int no,D
         // conditions test the register's BITS (D3D: any nonzero 32-bit value is true; masks are 0xFFFFFFFF)
         if(!strcmp(n,"ret")){ dg_lprintf(&L,isvs?"  { dx_posfix(); return; }":"  return;"); continue; }
         if(!strcmp(n,"retc")){ dg_lprintf(&L,isvs?"  if(floatBitsToInt((%s).x) %s 0){ dx_posfix(); return; }":"  if(floatBitsToInt((%s).x) %s 0) return;",S(0),cmp); continue; }
+        if((!strcmp(n,"if")||!strcmp(n,"loop")||!strcmp(n,"switch")) && CF_FULL()){ for(int i=0;i<L.n;i++) free(L.v[i]); free(L.v); return NULL; }
         if(!strcmp(n,"if")){ dg_lprintf(&L,"  if(floatBitsToInt((%s).x) %s 0){",S(0),cmp); cf[cfn].kind=0; cf[cfn].first=0; cfn++; continue; }
         if(!strcmp(n,"else")){ if(cfn && cf[cfn-1].kind==0){ cf[cfn-1].kind=1; dg_lprintf(&L,"  }else{"); } continue; }
         if(!strcmp(n,"endif")){ if(cfn && (cf[cfn-1].kind==0||cf[cfn-1].kind==1)){ cfn--; dg_lprintf(&L,"  }"); } continue; }
@@ -574,11 +586,11 @@ char* dg_emit(const char*stage,const DgSig*isgn,int ni,const DgSig*osgn,int no,D
     { // declared samplers "uniform sampler2D t%d", cbs "uniform vec4 cb%d", in v%d, out o%d, temps "vec4 r%d=vec4"
       for(int i=0;i<L.n;i++){ int d; const char*s=L.v[i];
         if(!strncmp(s,"uniform sampler",15)||!strncmp(s,"uniform usampler",16)){ const char*q=strrchr(s,' '); if(q && sscanf(q," t%d;",&d)==1 && d>=0 && d<256) has_t[d]=1; }
-        if(sscanf(s,"uniform vec4 cb%d[",&d)==1 && d<256) has_cb[d]=1;
-        if(sscanf(s,"layout(std140) uniform cb%d_blk",&d)==1 && d<256) has_cb[d]=1;
-        if(sscanf(s,"in vec4 v%d;",&d)==1 && d<256) has_v[d]=1;
-        if(sscanf(s,"out vec4 o%d;",&d)==1 && d<256) has_o[d]=1;
-        if(sscanf(s,"  vec4 r%d=vec4",&d)==1 && d<256) has_r[d]=1;
+        if(sscanf(s,"uniform vec4 cb%d[",&d)==1 && d>=0 && d<256) has_cb[d]=1;
+        if(sscanf(s,"layout(std140) uniform cb%d_blk",&d)==1 && d>=0 && d<256) has_cb[d]=1;
+        if(sscanf(s,"in vec4 v%d;",&d)==1 && d>=0 && d<256) has_v[d]=1;
+        if(sscanf(s,"out vec4 o%d;",&d)==1 && d>=0 && d<256) has_o[d]=1;
+        if(sscanf(s,"  vec4 r%d=vec4",&d)==1 && d>=0 && d<256) has_r[d]=1;
       }
     }
     int ref_t[256]={0},ref_cb[256]={0},ref_v[256]={0},ref_o[256]={0},ref_r[256]={0};
@@ -631,9 +643,15 @@ char* dg_emit(const char*stage,const DgSig*isgn,int ni,const DgSig*osgn,int no,D
 }
 
 // top-level: bytes -> GLSL (malloc'd) or NULL
-char* dg_translate(const uint8_t*d,size_t len){
+// one translation or compute decode at a time: g_icb / g_icbn, the signature tables, g_sysin, g_dg_tf_dw and the line
+// pools are shared (dev_crShader, the compute dispatcher and the GL thread's transform-feedback path call in parallel)
+static pthread_mutex_t g_dg_mx=PTHREAD_MUTEX_INITIALIZER;
+static char* dg_translate_l(const uint8_t*d,size_t len);
+char* dg_translate_tf(const uint8_t*d,size_t len,int tfdw){ pthread_mutex_lock(&g_dg_mx); g_dg_tf_dw=tfdw; char*r=dg_translate_l(d,len); g_dg_tf_dw=0; pthread_mutex_unlock(&g_dg_mx); return r; }
+char* dg_translate(const uint8_t*d,size_t len){ pthread_mutex_lock(&g_dg_mx); char*r=dg_translate_l(d,len); pthread_mutex_unlock(&g_dg_mx); return r; }
+static char* dg_translate_l(const uint8_t*d,size_t len){
     if(!d || len<32 || memcmp(d,"DXBC",4)) return NULL;
-    uint32_t nch=dg_u32(d,len,28);
+    uint32_t nch=dg_u32(d,len,28); if(nch>64 || 32+4ull*nch>len) return NULL;   // (a header with 2^32 chunks looped for seconds)
     size_t isgn=0,osgn=0,shex=0,shex_sz=0; int have_shex=0,have_isgn=0,have_osgn=0;
     for(uint32_t i=0;i<nch;i++){ size_t o=dg_u32(d,len,32+4*i); if(o+8>len) continue;
         char fc[5]={0}; memcpy(fc,d+o,4); uint32_t sz=dg_u32(d,len,o+4); size_t data=o+8;

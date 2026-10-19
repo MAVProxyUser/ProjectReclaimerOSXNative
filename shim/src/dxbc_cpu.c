@@ -35,7 +35,7 @@ static void cs_free(CsProg* p){ if(!p) return; free(p->ins); free(p->jump); free
 static CsProg* cs_compile(const uint8_t* d, size_t len){
     CsProg* p=calloc(1,sizeof *p); if(!p) return 0;
     if(len<32||memcmp(d,"DXBC",4)){ p->why="not DXBC"; return p; }
-    uint32_t nch=dg_u32(d,len,28); size_t shex=0,sz=0;
+    uint32_t nch=dg_u32(d,len,28); size_t shex=0,sz=0; if(nch>64 || 32+4ull*nch>len){ p->why="bad chunk count"; return p; }
     for(uint32_t i=0;i<nch;i++){ size_t o=dg_u32(d,len,32+4*i); if(o+8>len) continue; if(!memcmp(d+o,"SHEX",4)||!memcmp(d+o,"SHDR",4)){ shex=o+8; sz=dg_u32(d,len,o+4); } }
     if(!shex){ p->why="no SHEX";   // keep the blob for a look (~/reclaimer_cs_nocode_<n>.dxbc) + its chunk names in the log
         static int nd; if(nd<4){ const char*h=getenv("HOME"); char pth[300]; snprintf(pth,sizeof pth,"%s/reclaimer_cs_nocode_%d.dxbc",h?h:"/tmp",nd++); FILE*f=fopen(pth,"wb"); if(f){ fwrite(d,1,len,f); fclose(f); }
@@ -44,8 +44,10 @@ static CsProg* cs_compile(const uint8_t* d, size_t len){
             k+=snprintf(m+k,sizeof m-k,")\n"); (void)!write(2,m,(size_t)k); }
         return p; }
     p->ins=calloc(8192,sizeof(DgIns)); if(!p->ins){ p->why="oom"; return p; }
+    pthread_mutex_lock(&g_dg_mx);   // (g_icb is shared with the translator)
     g_icbn=0; dg_decode_program(d,len,shex,sz,p->ins,&p->nins,8192);
     if(g_icbn>0){ p->icb=malloc((size_t)g_icbn*4); if(p->icb){ memcpy(p->icb,g_icb,(size_t)g_icbn*4); p->icbn=g_icbn; } }
+    pthread_mutex_unlock(&g_dg_mx);
     p->jump=calloc(p->nins+1,sizeof(int));
     int st[256], sp=0;           // control-flow stack of instruction indices
     int lst[64], lsp=0;          // loop stack
@@ -53,7 +55,7 @@ static CsProg* cs_compile(const uint8_t* d, size_t len){
     for(int i=0;i<p->nins;i++){ DgIns* in=&p->ins[i]; int op=in->op;
         // register counts come from the bytecode (a map file's): refused before they can go negative or wrap (2026-10-19)
         if(op==104){ if(in->raw[0]>4096){ p->why="too many registers"; return p; } p->ntemps=(int)in->raw[0]; }
-        else if(op==105 && p->nx<8){ if(in->raw[1]>65536 || (uint32_t)p->xtotal+in->raw[1]>65536){ p->why="too many registers"; return p; }
+        else if(op==105 && p->nx<8){ if(in->raw[1]>4096 || (uint32_t)p->xtotal+in->raw[1]>4096){ p->why="too many registers"; return p; }   // (D3D11: 4096 indexable temps in all)
             p->xreg[p->nx]=in->raw[0]; p->xbase[p->nx]=(uint32_t)p->xtotal; p->xcount[p->nx]=in->raw[1]; p->xtotal+=(int)in->raw[1]; p->nx++; }
         else if(op==155){ p->tg[0]=in->raw[0]; p->tg[1]=in->raw[1]; p->tg[2]=in->raw[2]; }
         else if(op==158 && in->nop && in->ops[0].nidx){ uint32_t r=in->ops[0].idx[0].val; if(r<8) p->uavstride[r]=in->raw[2]; }
@@ -67,7 +69,10 @@ static CsProg* cs_compile(const uint8_t* d, size_t len){
         else if(op==76/*switch*/||op==6||op==10||op==23){ p->why="switch unsupported"; return p; }
         if(op==72||op==69||op==74||op==45) p->usestex=1;
     }
-    if(p->ntemps>4096||p->xtotal>65536){ p->why="too many registers"; return p; }
+    if(p->ntemps>4096||p->xtotal>4096){ p->why="too many registers"; return p; }
+    // numthreads from the bytecode: D3D11 cs_5_0 allows x,y <= 1024, z <= 64, x*y*z <= 1024 (a 1024x1024 group ran for an hour,
+    // 65536x65536 wrapped the lane count to 0 and divided by it)
+    if(!p->tg[0]||!p->tg[1]||!p->tg[2]||p->tg[0]>1024||p->tg[1]>1024||p->tg[2]>64||(uint64_t)p->tg[0]*p->tg[1]*p->tg[2]>1024){ p->why="bad numthreads"; return p; }
     // A 4-component immediate l(a,b,c,d) has no component selection (mask mode, empty mask), which dg_swz reads as .xxxx:
     // its lanes are taken as they are. (Until 2026-10-17 every such immediate was broadcast from lane x -- e.g.
     // "and r2.yz, r2.zzwz, l(0,65535,65535,0)" gave 0 -- and halo3's particle kernels unpacked their packed half-float
@@ -304,7 +309,7 @@ static int cs_exec_thread_i(CsThread* T,long*budgetp){
             if(op==53||op==58||op>=143) break; // customdata, nop, SM5 dcls
             *budgetp=budget; return -op;       // unsupported instruction
         }
-        if(T->c->trace && T->tid[0]==0 && I->nop && o[0].type==0/*temp*/ && o[0].nidx){ uint32_t rg=o[0].idx[0].val; const CsV4*v=&T->r[rg]; char m[200];
+        if(T->c->trace && T->tid[0]==0 && I->nop && o[0].type==0/*temp*/ && o[0].nidx){ uint32_t rg=o[0].idx[0].val; if(rg>=(uint32_t)T->p->ntemps) rg=0; const CsV4*v=&T->r[rg]; char m[200];
             int k=snprintf(m,sizeof m,"  [cs-trace] %4d op%-3d r%u = %08x %08x %08x %08x  (%g %g %g %g)\n",pc,op,rg,v->u[0],v->u[1],v->u[2],v->u[3],v->f[0],v->f[1],v->f[2],v->f[3]); (void)!write(2,m,k); }
         #undef F
         #undef U
