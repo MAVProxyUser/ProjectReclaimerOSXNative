@@ -3,17 +3,21 @@
 Teleport list; user, 2026-10-18: "several known good locations for standing on the other side of what used to be
 boundaries ... for all maps").
 
-    python3 re-tools/h3spots.py <file.map> <out.spots.json> [--cell 0.5] [--max 8] [--quiet]
+    python3 re-tools/h3spots.py <file.map> <out.spots.json> [--cell 0.5] [--max 8] [--quiet] [--keep]
 
 Built like re-tools/h3nav.py's floor field (same collision geometry: structure BSPs, instanced geometry, invisible
 player clip, placed scenery and crates), but it keeps exactly the floors h3nav leaves out: a floor (upward surface, slip
 terrain included -- walkable with the boundary patches) counts as BEYOND THE BOUNDARIES when it lies in a kill trigger
 volume or outside every safe zone (maps without safe zones: kill volumes only). A spot needs STAND_H of free space above
 it. Neighbouring beyond-the-boundary floors within STEP of each other form flat regions; a region of at least MIN_AREA
-square units gives one spot: its most interior cell (farthest from the region's edge -- walls, drops, the way back in),
-so a teleport lands on solid, roomy ground. Up to --max spots, best interior first, at least MIN_SPACING apart.
+square units gives spots: its most interior cell (farthest from the region's edge -- walls, drops, the way back in),
+so a teleport lands on solid, roomy ground, then (big regions) cells spread over the region (farthest-point, at least
+a quarter as far from the edge as the first). Up to --max
+spots, every region's best first, at least MIN_SPACING apart. --keep (after shim/tools/spots-verify.sh checked the file in
+game): the verified spots stay, rejected places are never proposed again, new spots fill up to --max (unchecked again).
 
 out.spots.json: {"map", "version": 1, "centre": [x, y], "spots": [{"id", "label", "x", "y", "z", "area", "room"}]}
+  (spots-verify.sh adds "verified" / "check" per spot, "rejected" [spots with "why"] and "checked" <date>)
   z = the floor + 0.35 (where a teleport puts the feet); area = the region's floor in square units; room = the distance
   from the spot to the region's edge. Labels: compass direction from the play area's centre + "high ground" / "low
   ground" (8 units above / below the in-bounds floors' median height) or "edge".
@@ -45,6 +49,7 @@ def main():
     ap.add_argument('--cell', type=float, default=0.5)
     ap.add_argument('--max', type=int, default=8)
     ap.add_argument('--quiet', action='store_true')
+    ap.add_argument('--keep', action='store_true', help='keep the verified spots of an existing out file, skip its rejected ones')
     o = ap.parse_args()
     log = (lambda *a: None) if o.quiet else (lambda *a: print(*a, file=sys.stderr))
     t0 = time.time()
@@ -155,32 +160,64 @@ def main():
                 n = (y + dy) * w + (x + dx)
                 if n in cs and n not in dist:
                     dist[n] = dist[c] + 1; q.append(n)
-        best = max(cells, key=lambda c: (dist.get(c, 0), -abs(top[c] - np.mean([top[k] for k in cells[:64]]))))
-        room = dist.get(best, 0) * cell
-        if room < 1.0:                                           # nowhere a metre from an edge: a ridge or a ledge strip
+        # its most interior cell first; a big region gives more spots, spread over it (farthest-point picks among its cells
+        # at least a quarter as roomy, MIN_SPACING apart): one large floor past the boundaries -- a Forge world's
+        # outskirts -- used to give one spot only
+        zm = float(np.mean([top[k] for k in cells[:64]]))
+        best = max(cells, key=lambda c: (dist.get(c, 0), -abs(top[c] - zm)))
+        broom = dist.get(best, 0) * cell
+        if broom < 1.0:                                          # nowhere a metre from an edge: a ridge or a ledge strip
             continue
-        x, y = x0 + (best % w + 0.5) * cell, y0 + (best // w + 0.5) * cell
-        picks.append({'x': x, 'y': y, 'z': top[best] + 0.35, 'area': ar, 'room': room})
-    picks.sort(key=lambda p: (-min(p['room'], 6.0), -p['area']))
-    chosen = []
+        cand = [c for c in cells if dist.get(c, 0) * cell >= max(1.0, 0.25 * broom)]
+        X = np.array([[x0 + (c % w + 0.5) * cell, y0 + (c // w + 0.5) * cell] for c in cand])
+        bx, by = x0 + (best % w + 0.5) * cell, y0 + (best // w + 0.5) * cell
+        sel = [best]; md = np.hypot(X[:, 0] - bx, X[:, 1] - by)
+        while len(sel) < o.max:
+            i = int(np.argmax(md))
+            if md[i] < MIN_SPACING:
+                break
+            sel.append(cand[i]); md = np.minimum(md, np.hypot(X[:, 0] - X[i, 0], X[:, 1] - X[i, 1]))
+        mine = [{'x': x0 + (c % w + 0.5) * cell, 'y': y0 + (c // w + 0.5) * cell, 'z': top[c] + 0.35, 'area': ar,
+                 'room': dist.get(c, 0) * cell, 'rank': r} for r, c in enumerate(sel)]
+        picks += mine
+    picks.sort(key=lambda p: (p['rank'], -min(p['room'], 6.0), -p['area']))   # every region's best spot before seconds
+    # --keep: a file checked in game (shim/tools/spots-verify.sh) keeps its verified spots; its rejected ones never come back
+    prev_ok, prev_bad, prev = [], [], {}
+    if o.keep and os.path.exists(o.out):
+        prev = json.load(open(o.out))
+        prev_ok = [q for q in prev.get('spots', []) if q.get('verified')]; prev_bad = prev.get('rejected', [])
+    chosen = list(prev_ok)
     for p in picks:
-        if all(math.hypot(p['x'] - q['x'], p['y'] - q['y']) >= MIN_SPACING for q in chosen):
-            chosen.append(p)
         if len(chosen) >= o.max:
             break
-    used = collections.Counter()
-    for i, p in enumerate(chosen):
+        if any(math.hypot(p['x'] - r['x'], p['y'] - r['y']) < 4 and abs(p['z'] - r['z']) < 4 for r in prev_bad):
+            continue
+        if all(math.hypot(p['x'] - q['x'], p['y'] - q['y']) >= MIN_SPACING for q in chosen):
+            chosen.append(p)
+    used = collections.Counter(q['label'].rstrip('0123456789 ') for q in prev_ok)
+    ids = {q['id'] for q in prev_ok}; nid = 1; added = 0
+    for p in chosen:
+        if 'id' in p:
+            continue
         ang = math.atan2(p['y'] - centre[1], p['x'] - centre[0])
         d8 = COMPASS[int(round(ang / (math.pi / 4))) % 8]
         kind = 'high ground' if p['z'] > zmed + 8 else 'low ground' if p['z'] < zmed - 8 else 'edge'
         lab = '%s %s' % (d8, kind); used[lab] += 1
         if used[lab] > 1:
             lab += ' %d' % used[lab]
-        p.update(id='s%d' % (i + 1), label=lab)
+        while 's%d' % nid in ids:
+            nid += 1
+        ids.add('s%d' % nid); added += 1
+        p.update(id='s%d' % nid, label=lab)
         for k in ('x', 'y', 'z', 'area', 'room'):
             p[k] = round(p[k], 2)
+    keys = ('id', 'label', 'x', 'y', 'z', 'area', 'room', 'verified', 'check')
     out = {'map': name, 'version': 1, 'centre': [round(float(centre[0]), 2), round(float(centre[1]), 2)],
-           'spots': [{k: p[k] for k in ('id', 'label', 'x', 'y', 'z', 'area', 'room')} for p in chosen]}
+           'spots': [{k: p[k] for k in keys if k in p} for p in chosen]}
+    if prev_bad:
+        out['rejected'] = prev_bad
+    if prev.get('checked') and not added:
+        out['checked'] = prev['checked']                         # nothing new: still fully checked
     with open(o.out, 'w') as fo:
         json.dump(out, fo, indent=1)
     log('%s: %d regions beyond the boundaries, %d spots (%.1f s)' % (name, len(regions), len(chosen), time.time() - t0))

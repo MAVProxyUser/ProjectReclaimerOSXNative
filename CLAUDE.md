@@ -450,7 +450,11 @@ stats page "Sparring aim" toggle (do=spar&on=). hb_collect has a units-only mode
 decide what it gathers). Map boundaries tested live: host with PELOAD_PATCH=halo3+37b816:E95501000090,halo3+37b734:EB
 (the entry patch of halo3+1b8e00 is refused: the client checks that function's entry bytes), host-only teleport to a
 point POST /control?do=tpto&x=&y=&z=[&slot=] (shim/docs/map-boundaries.md); stats page buttons "Boundaries on/off"
-(do=bounds, patches written at run time at the frame safe point) and per-map spots (do=explore&spot=, g_st_spots: Valhalla east cliff). "Invisible walls on/off" (do=invwalls&off=, 2026-10-18): an exit patch on halo3's
+(do=bounds, patches written at run time at the frame safe point) and per-map spots (do=explore&spot=, g_st_spots: Valhalla east cliff). Generated spots for every map (re-tools/h3spots.py -> maptop/<map>.spots.json, the page's Teleport list) are checked in
+game by shim/tools/spots-verify.sh (local dedicated server + one minimized input-less client per map; ~5 min a map; marks
+"verified" / "rejected"; never while the user plays). Input-less clients (quiet-run, target) press Enter on the client's
+REQUIRED MODS screen themselves (PELOAD_AUTO_MODS=1 -> workshop-helper.sh). Our dedicated server keeps ITS OWN Workshop copies
+(ReclaimerTestServer/content/Mods/Workshop/<id>, updated by itself): a client copy older than it = "Another version". "Invisible walls on/off" (do=invwalls&off=, 2026-10-18): an exit patch on halo3's
 Havok polygon-shape builder 0x21b4d8 moves player-clip surfaces to z = -20000 (map-boundaries.md 2c; found with PELOAD_BSPWATCH). Speed-step test: the host adopts client
 positions within 2.5 units with no speed check (shim/docs/net-authority.md).
 Teleport (PELOAD_ALLOW_TELEPORT; stats page "Teleport next to them" = POST /control?do=tpnext&slot=N, the Teleport button = opposite

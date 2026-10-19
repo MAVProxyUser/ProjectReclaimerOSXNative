@@ -274,7 +274,9 @@ beside the death heatmap with the player details under it (right); Connected; th
 
   ![In-game overlay panel: a row per feature with its own Show, Walls and Text settings](shim/docs/img/stats-overlay.png)
 - **Tools**: **Teleport** with a list beside it -- the far side of the map, or one of the map's spots past its boundaries
-  (flat, roomy floors found in the map file for every map, `re-tools/h3spots.py`; the boundaries are switched off first).
+  (flat, roomy floors found in the map file for every map, `re-tools/h3spots.py`, each one checked in game -- you land on it
+  and stay alive there, `shim/tools/spots-verify.sh`; a map new to this Mac lists its spots as "(not checked yet)"; the
+  boundaries are switched off first).
   In a game you host with `PELOAD_ALLOW_TELEPORT=1`, or as a player on our local server (the server moves you; so does the
   map's click-to-teleport). **Capture frame** (saves the frame,
   its depth buffer and the camera position to `~/reclaimer_cap_*` for reporting a rendering glitch at a spot; the overlay

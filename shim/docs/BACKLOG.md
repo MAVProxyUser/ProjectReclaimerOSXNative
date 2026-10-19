@@ -4,7 +4,7 @@ Kept current as work lands. Open items are ranked (the order they are worked); f
 
 ## Open
 
-Ranked (2026-10-18 20:40): open -- verify the generated explore spots in game. Watching: the one "2D is unloadable" texture. 61 fixed, 70 closed.
+Ranked (2026-10-19 00:30): open -- more spots on maps with few (big floors gave one; re-check them in game). Watching: the one "2D is unloadable" texture. Spots verified in game (146 on 41 maps), 61 fixed, 70 closed.
 
 | # | Item | Status / notes |
 |---|---|---|

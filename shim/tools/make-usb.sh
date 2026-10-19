@@ -6,8 +6,8 @@
 #
 #   bash shim/tools/make-usb.sh /Volumes/<stick> [--update] [--with-profile] [--minimal] [--no-workshop] [--no-game]
 #
-#   --update        ONLY the loader, GL helper, scripts, docs, newest client exe and install.sh (seconds; no MCC files, no
-#                   Workshop mods, no caches / map pictures). Then on the other Mac: install.sh --update
+#   --update        ONLY the loader, GL helper, scripts, docs, newest client exe, install.sh and the teleport spots (seconds;
+#                   no MCC files, no Workshop mods, no caches / map pictures). Then on the other Mac: install.sh --update
 #
 #   --with-profile  also copy your Reclaimer profile (nickname, identity key). Don't play on both Macs at once with it.
 #   --minimal       only the MCC files Project Reclaimer reads (~25 GB: halo3/, Data/, MCC/Content/Paks, top-level files)
@@ -72,7 +72,7 @@ ln shim/build/peload shim/build/glhelper "$APPST/shim/build/" 2>/dev/null || cp 
 cp -pR shim/crt "$APPST/shim/"
 cp -p shim/play.sh shim/target.sh shim/dedicated.sh shim/build.sh "$APPST/shim/"
 cp -p shim/tools/quiet-run.sh shim/tools/servers.sh shim/tools/maptop.sh shim/tools/workshop-helper.sh shim/tools/client-update.sh shim/tools/machine.sh "$APPST/shim/tools/"
-for f in h3map h3bsp h3nav h3inv h3dmg; do [ -f re-tools/$f.py ] && cp -p re-tools/$f.py "$APPST/re-tools/"; done   # map pictures, walking graphs, invisible walls
+for f in h3map h3bsp h3nav h3inv h3dmg h3spots; do [ -f re-tools/$f.py ] && cp -p re-tools/$f.py "$APPST/re-tools/"; done   # map pictures, walking graphs, invisible walls, teleport spots
 for f in mods.md game-options.md FIXES.md; do [ -f shim/docs/$f ] && cp -p shim/docs/$f "$APPST/shim/docs/"; done
 cp -p README.md "$APPST/"; cp -p "$EXE" "$APPST/client/"
 cp -p shim/tools/usb-install.sh "$APPST/install.sh.new"
@@ -91,6 +91,10 @@ mkdir -p "$OUT/support"
 for d in maptop heatmaps; do [ -d "$SUP/$d" ] && part "$d" --delete "$SUP/$d" "$OUT/support/"; done
 [ -f "$SUP/glpairs_v1.txt" ] && part "glpairs_v1.txt" "$SUP/glpairs_v1.txt" "$OUT/support/"
 fi
+# the teleport spots past the boundaries (maptop/<map>.spots.json, checked in game by shim/tools/spots-verify.sh; a few KB in
+# all) go with an update too: making them needs numpy (re-tools/h3spots.py), which the other Mac may not have
+if [ $UPDATE = 1 ] && ls "$SUP"/maptop/*.spots.json >/dev/null 2>&1; then echo "== teleport spots past the boundaries"
+  mkdir -p "$OUT/support/maptop"; part "spots" "$SUP"/maptop/*.spots.json "$OUT/support/maptop/"; fi
 
 if [ $WORKSHOP = 1 ]; then
   echo "== Workshop mods ($(ls "$WS/content/976730" 2>/dev/null | wc -l | tr -d ' ') downloaded) -- only new or changed files"

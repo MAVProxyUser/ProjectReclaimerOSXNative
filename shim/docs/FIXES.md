@@ -1220,8 +1220,33 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   (>= 1 unit from any edge), up to 8 per map, 18 apart, named by compass direction from the play area's centre + high /
   low ground. maptop/<map>.spots.json, made for all 40 multiplayer + Workshop maps here (0 on enclosed maps: Chill Out,
   Fortress, Midship, Flood Sandbox) and in the background the first time a new map is played. The page lists them after the
-  hand-picked spots; Teleport goes to the picked entry ("far side of the map" = the old button). NOT yet verified in game
-  spot by spot. (10-18)
+  hand-picked spots; Teleport goes to the picked entry ("far side of the map" = the old button). (10-18)
+- **Every spot checked in game** — shim/tools/spots-verify.sh, stats.c `st_dyn_load`. Why: a spot from the map file alone can
+  be outside the map's structure (the host refuses the teleport), in a place that kills (Sandtrap's and Sandbox's Guardians
+  zap players in the dunes) or on a surface you slide off. How: per map our local dedicated server plays it (Slayer), one
+  minimized input-less client joins, boundaries go off (server + the client's own movement), and the server teleports the
+  player to each spot; 5 s and 10 s later it must be alive, within 3 units of the spot, no more than 2 lower, and still.
+  Passing spots get `"verified": true`, the rest move to `"rejected"` with the reason, the file gets `"checked"`. The loader
+  lists only the spots array (a checked file's rejected entries come after it) and labels an unchecked spot "(not checked
+  yet)" (a map first played after this, whose spots were just made in the background). Result 2026-10-18/19, 41 maps: 146
+  spots verified, 18 rejected (8 refused outside the structure: Construct 3, Avalanche 3, Edge 1, Sandtrap 1; 10 died:
+  Sandbox 5, Sandtrap 2, Forge Halo 2, Snowbound 1); Chill Out, Citadel, Heretic and Flood Sandbox have none (enclosed). The
+  script's server names: the client's own map table (Highground is "High Ground"); a server that doesn't start is skipped at
+  once. A first join right after a server start timed out 10 times in ~38 (the second always worked: section 22). (10-19)
+- **Several spots on one big floor; checked spots kept** — re-tools/h3spots.py. Why (user: "several known good locations"
+  per map): a region gave one spot, so the Forge worlds' single huge floor past the boundaries gave 1, and 18 maps had
+  under 4. How: after a region's most interior cell, farthest-point picks among its cells at least a quarter as far from
+  the edge, MIN_SPACING apart (every region's best first); `--keep` keeps a checked file's verified spots, never proposes
+  its rejected places again and drops "checked" when it added spots (spots-verify.sh then checks the map again). (10-19)
+- **Input-less clients answer the REQUIRED MODS screen** — stats.c `st_am_required` / `st_am_tick`, `PELOAD_AUTO_MODS=1`
+  (quiet-run.sh, target.sh). Why (user, 2026-10-19, a test client stuck on "HugeGrass Rebalance: Another version -- update
+  it from Steam Workshop": "that screen should be hooked to use depot downloader on its own"): the screen IS hooked (its
+  Update & join / Download & join starts `workshop-download`, which the loader runs as workshop-helper.sh, section 16), but
+  a window without input can't press it. How: 1.5 s after the client's "Joining server failed: Required mod ..." line, Enter
+  is posted to the game window (wi_steps_async, as auto-vote's keys); 3 presses at most per 10 minutes. The client's own
+  `auto_download_mods` covers only mods a server hands out itself, not Workshop ones. Off: unset / `PELOAD_AUTO_MODS=0`.
+  Not yet seen live (the stale HugeGrass copy was updated by hand: the server's own copy had updated itself to 1.0.75, the
+  client's was 1.0.3; DepotDownloader fetched 36 MB). (10-19)
 
 ## 19. Performance
 
@@ -1343,7 +1368,8 @@ Numbers are from the commit messages; PERF-PLAN.md has the measurements. Compare
 
 - **make-usb.sh / install.sh `--update`** — only the loader, GL helper, scripts, docs and client exe (no MCC files, Workshop
   mods, caches or map pictures; install.sh skips its space check). Why (user, 2026-10-18): "a --update flag that only copies
-  the binaries and not the maps". (10-18)
+  the binaries and not the maps". Since 10-19 also the teleport spots (maptop/*.spots.json, ~30 KB, checked in game here;
+  making them needs numpy, which the M1 lacks) and re-tools/h3spots.py. (10-18, 10-19)
 - **Machine profile: decisions per Mac** (`shim/tools/machine.sh`, sourced by play.sh) — Why (user, 2026-10-18: "detect m1 vs m4
   and make code decisions accordingly"; M1 menu 78 fps vs ~390 on the M4 Max): chip, performance / efficiency cores, GPU
   cores (ioreg gpu-core-count; tier base <= 10, pro <= 20, max), memory. Decisions: particle workers = performance cores - 2
@@ -1399,8 +1425,6 @@ Numbers are from the commit messages; PERF-PLAN.md has the measurements. Compare
   nothing plays them -- Halo 3 ships no .bik files (MCC's .bk2 movies belong to MCC's own shell) and the client refuses mod
   movies ("Bink import slots differ"). The 5th runtime shader (the client's menu grading) runs since 10-18 (section 11).
   `PELOAD_REFUSE_EMPTY_SHADER=1` refuses code-less blobs with E_INVALIDARG as D3D11 would.
-- **First join right after a dedicated server starts** can fail its handshake; a retry works.
-- 61 (Hugegrass
-  renders nearly black wherever its own lighting matters -- emissive surfaces, the sky and the HUD are fine; not a regression:
-  dark with client 0.9.18 too and with every 10-17/18 change reverted; stock maps such as Valhalla render normally with
-  0.9.20), 56 (Forge World ground black, probably the same), rock-wall seams (tabled by the user).
+- **First join right after a dedicated server starts** can fail its handshake ("Public join timed out"; 10 of ~38 in the
+  10-19 spot checks); a retry works.
+- Rock-wall seams (tabled by the user, display-only). (61 Hugegrass dark and 56 Forge World black are fixed: sections 10, 12.)

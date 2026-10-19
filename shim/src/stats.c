@@ -142,8 +142,19 @@ static void st_bv_tick(double now){   // stats thread: a new open ballot -> queu
     pthread_mutex_lock(&g_bv_mx); memcpy(g_bv_round,rd,16); g_bv_choice=(uint64_t)ch; g_bv_req=1; pthread_cond_signal(&g_bv_cv); pthread_mutex_unlock(&g_bv_mx);
     tries++; tsent=now; }
 static void st_av_lobby(void){}   // (the ballot is voted through cast_vote now, st_bv_tick)
+// REQUIRED MODS screen in an input-less client (2026-10-19; PELOAD_AUTO_MODS=1, set by quiet-run.sh / target.sh): joining a
+// server whose Workshop mod we lack, or have in another version, stops at the client's "REQUIRED MODS" dialog until ENTER
+// (Download & join / Update & join), which starts its workshop-download helper -- workshop-helper.sh, DepotDownloader. Nobody
+// can press it in a window without input, so ENTER is pressed 1.5 s after the client's "Joining server failed: Required mod"
+// line (3 presses at most per 10 minutes; the client's own "auto_download_mods" covers only mods the server hands out itself).
+static volatile double g_am_due; static double g_am_win; static int g_am_n;
+static void st_am_required(void){ static int on=-1; if(on<0){ const char*e=getenv("PELOAD_AUTO_MODS"); on=e&&*e&&strcmp(e,"0"); } if(!on) return;
+    double now=mono_s(); if(now-g_am_win>600){ g_am_win=now; g_am_n=0; } if(g_am_n>=3) return; g_am_n++; g_am_due=now+1.5; }
+static void st_am_tick(double now){ double due=g_am_due; if(!due || now<due) return; g_am_due=0;
+    wi_steps_async("k:24");   // Return
+    char m[96]; int k=snprintf(m,sizeof m,"  [automods] REQUIRED MODS screen: pressing Enter (download / update & join, %d of 3)\n",g_am_n); (void)!write(2,m,k); }
 static void st_av_tick(double now){   // stats thread, every snapshot (100 ms)
-    st_bv_tick(now);
+    st_bv_tick(now); st_am_tick(now);
     double due=g_av_due; if(!due || now<due) return;
     if(!g_av_calls || g_av_tries>=3){ g_av_due=0; return; }
     g_av_tries++; g_av_due=now+1.5; wi_steps_async(g_av_calls==1?"k:60":"k:61");   // macOS key codes: F5 0x60, F6 0x61
@@ -166,6 +177,7 @@ static void st_feed_line(const char*ln){
         if(!strncmp(p,"Voted ",6)) g_av_due=0; else if(strstr(p," called a vote to ")) st_av_called();
         st_event("vote",0,0,0,-1,-1,0,"%s",p); return; }
     if(!strncmp(p,"Menu page: Lobby",16)){ st_av_lobby(); return; }
+    if(!strncmp(p,"Joining server failed: Required mod",35)) st_am_required();
     static const char*const srv[]={"Team shuffle:","Teams have been shuffled","Teams shuffled","You were kicked","Host roster lost","A player still joining",
         "Moderation:","The kick-vote target"};
     for(size_t i=0;i<sizeof srv/sizeof*srv;i++) if(!strncmp(p,srv[i],strlen(srv[i]))){ st_event("server",0,0,0,-1,-1,0,"%s",p); return; }
@@ -686,13 +698,16 @@ static void st_dyn_load(const char*map){   // (snapshot thread) on a map change,
     const char*home=getenv("HOME"); char fp[1024]; snprintf(fp,sizeof fp,"%s/Library/Application Support/ReclaimerMac/maptop/%s.spots.json",home?home:"/tmp",map);
     FILE*f=fopen(fp,"r"); if(!f) return; static char buf[16384]; size_t n=fread(buf,1,sizeof buf-1,f); fclose(f); buf[n]=0;
     const char*p=strstr(buf,"\"spots\""); if(!p) return;
-    while(g_st_ndyn<(int)(sizeof g_st_dyn/sizeof g_st_dyn[0]) && (p=strchr(p,'{'))){ const char*end=strchr(p,'}'); if(!end) break;
+    const char*arr_end=strchr(p,']'); if(!arr_end) return;   // only the spots array (a checked file keeps its failures in "rejected" after it)
+    while(g_st_ndyn<(int)(sizeof g_st_dyn/sizeof g_st_dyn[0]) && (p=strchr(p,'{')) && p<arr_end){ const char*end=strchr(p,'}'); if(!end) break;
         StDynSpot*d=&g_st_dyn[g_st_ndyn]; const char*v; memset(d,0,sizeof *d); int ok=1;
         if((v=st_jfield(p,end,"id"))){ v=strchr(v,'"'); if(v) sscanf(v+1,"%15[^\"]",d->id); } else ok=0;
         if((v=st_jfield(p,end,"label"))){ v=strchr(v,'"'); if(v) sscanf(v+1,"%63[^\"]",d->label); } else ok=0;
         if((v=st_jfield(p,end,"x"))) d->x=strtof(v,0); else ok=0;
         if((v=st_jfield(p,end,"y"))) d->y=strtof(v,0); else ok=0;
         if((v=st_jfield(p,end,"z"))) d->z=strtof(v,0); else ok=0;
+        { const char*vf=st_jfield(p,end,"verified"); if(!(vf && !strncmp(vf+(*vf==' '),"true",4))){ size_t L=strlen(d->label);   // shim/tools/spots-verify.sh not run on it yet
+              snprintf(d->label+L,sizeof d->label-L," (not checked yet)"); } }
         if(ok && d->id[0]) g_st_ndyn++; p=end+1; } }
 // an explore spot by id on the current map: the hand-picked ones, then the generated ones
 static int st_spot_find(const char*qs,float*xyz,const char**label){

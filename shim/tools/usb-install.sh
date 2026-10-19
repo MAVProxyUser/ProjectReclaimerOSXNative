@@ -13,8 +13,8 @@
 #   cd ~/ReclaimerMac && bash shim/play.sh
 #
 #   bash /Volumes/<stick>/ReclaimerMac/install.sh [--update | --keep-on-stick | --minimal | --no-movies | --no-workshop] [--dry-run] [--skip-space-check] [install-folder]
-#   --update   ONLY the loader, GL helper, scripts and client exe (seconds): after make-usb.sh --update, on a Mac that has
-#              the game already. No MCC files, Workshop mods, caches or map pictures are copied.
+#   --update   ONLY the loader, GL helper, scripts, client exe and teleport spots (seconds): after make-usb.sh --update, on a
+#              Mac that has the game already. No MCC files, Workshop mods, caches or map pictures are copied.
 set -e
 SRC="$(cd "$(dirname "$0")" && pwd)"
 SKIPSPACE=0; NOMOVIES=0; WORKSHOP=1; ONSTICK=0; DRYRUN=0; UPDATE=0
@@ -73,7 +73,10 @@ app_part(){ echo "== loader -> $APP"
 if [ $UPDATE = 1 ]; then
   [ $DRYRUN = 1 ] && { echo "(dry run: --update copies only $SRC/app -> $APP)"; exit 0; }
   [ -d "$STEAM/common/Halo The Master Chief Collection/halo3" ] || echo "note: no MCC files on this Mac yet -- run install.sh without --update once"
-  app_part; echo; echo "Updated. Play with:"; echo "   cd \"$APP\" && bash shim/play.sh"; exit 0; fi
+  app_part
+  if ls "$SRC"/support/maptop/*.spots.json >/dev/null 2>&1; then echo "== teleport spots -> $SUP/maptop"; mkdir -p "$SUP/maptop"
+    part "spots" "$SRC"/support/maptop/*.spots.json "$SUP/maptop/"; fi
+  echo; echo "Updated. Play with:"; echo "   cd \"$APP\" && bash shim/play.sh"; exit 0; fi
 # space: only what this Mac doesn't have yet counts (per part: the stick's size minus the installed size)
 kb(){ local t=0 x; for x in "$@"; do [ -e "$x" ] && t=$((t + $(du -sk "$x" | cut -f1))); done; echo $t; }
 delta(){ local a=$1 b=$2; [ $a -gt $b ] && echo $((a-b)) || echo 0; }
