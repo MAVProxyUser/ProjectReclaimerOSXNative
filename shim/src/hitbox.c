@@ -374,7 +374,7 @@ static HbMap* hbm_get_l(const char*path){
       int32_t cnt=*(int32_t*)(h+0x20), sz=*(int32_t*)(h+0x28); uint32_t dm=*(uint32_t*)(h+0x4CC), no=(uint32_t)(*(uint32_t*)(h+0x24)+dm), io=(uint32_t)(*(uint32_t*)(h+0x2C)+dm);
       if(cnt==m->ntags && sz>0 && sz<(64<<20)){ m->names=malloc((size_t)sz+1); m->noff=malloc((size_t)cnt*4);
           if(!m->names||!m->noff || pread(m->fd,m->names,(size_t)sz,(off_t)no)!=sz || pread(m->fd,m->noff,(size_t)cnt*4,(off_t)io)!=cnt*4){ free(m->names); free(m->noff); m->names=0; m->noff=0; }
-          else m->names[sz]=0; } }
+          else { m->names[sz]=0; for(int i=0;i<cnt;i++) if(m->noff[i]<0 || m->noff[i]>=sz) m->noff[i]=sz; } } }   // (offsets from the file: outside the names = "")
     { char msg[1200]; int k=snprintf(msg,sizeof msg,"  [hitbox] map %s: %d tags%s\n",path,m->ntags,m->names?" (with names)":""); (void)!write(2,msg,k); }
     return m;
   bad: { char msg[1200]; int k=snprintf(msg,sizeof msg,"  [hitbox] could not read map %s\n",path); (void)!write(2,msg,k); }
@@ -385,6 +385,7 @@ static HbMap* hbm_get_l(const char*path){
 // Objects keep one byte per hlmt collision region (the chosen permutation): block reference at datum+0x13A
 // {s16 size, s16 offset}, count = (size - (datum+4 bit 11 ? 0x20 : 0)) / 10, bytes at datum + offset + count*8
 // (found in halo3 object_set_permutation, halo3+0x3457d8 / +0x345d38). Elite helmets are permutations of "head".
+#define HB_MAXSEG (1<<18)    // collision edges kept per object definition (stock models: < 20k; a crafted map can alias blocks into billions)
 typedef struct { uint32_t def; int ok, nseg, nreg, maxnode; int16_t*node; uint8_t*reg, *perm, *wk; float*pts;
     int nhreg; int8_t hcreg[32], hnperm[32], hcperm[32][64]; } HbGeom;
 static HbGeom g_hbg[96]; static int g_hbg_n;
@@ -431,8 +432,11 @@ static void hbg_build(HbGeom*g,HbMap*m,int ti){
         for(int pi=0;pi<np;pi++){ uint8_t*bsps; int nb=hbm_block(m,perms+pi*0x28,4,0x64,&bsps,256);
             for(int b=0;b<nb;b++){ const uint8_t*bp=bsps+b*0x64; int16_t node=*(const int16_t*)bp; uint8_t*ed,*vx,*sf;
                 int ne=hbm_block(m,bp,0x4C,0xC,&ed,4096), nvx=hbm_block(m,bp,0x58,0x10,&vx,4096), nsf=hbm_block(m,bp,0x40,0xC,&sf,4096);
-                for(int e=0;e<ne;e++){ int16_t a=*(int16_t*)(ed+e*12), z=*(int16_t*)(ed+e*12+2); if(a<0||z<0||a>=nvx||z>=nvx) continue;
-                    if(g->nseg>=cap){ cap=cap?cap*2:256; g->node=realloc(g->node,cap*2); g->reg=realloc(g->reg,cap); g->perm=realloc(g->perm,cap); g->wk=realloc(g->wk,cap); g->pts=realloc(g->pts,cap*6*4); }
+                if(node<0 || node>=128) ne=0;   // a node index outside the pose matrices (mt[128*13]): a damaged / crafted model
+                for(int e=0;e<ne && g->nseg<HB_MAXSEG;e++){ int16_t a=*(int16_t*)(ed+e*12), z=*(int16_t*)(ed+e*12+2); if(a<0||z<0||a>=nvx||z>=nvx) continue;
+                    if(g->nseg>=cap){ int nc=cap?cap*2:256; int16_t*n1=realloc(g->node,(size_t)nc*2); if(n1) g->node=n1; uint8_t*n2=realloc(g->reg,(size_t)nc); if(n2) g->reg=n2;
+                        uint8_t*n3=realloc(g->perm,(size_t)nc); if(n3) g->perm=n3; uint8_t*n4=realloc(g->wk,(size_t)nc); if(n4) g->wk=n4; float*n5=realloc(g->pts,(size_t)nc*6*4); if(n5) g->pts=n5;
+                        if(!n1||!n2||!n3||!n4||!n5) break; cap=nc; }
                     uint8_t wk=0; for(int sd=0;sd<2;sd++){ int16_t si=*(int16_t*)(ed+e*12+8+sd*2); if(si<0||si>=nsf) continue;   // left / right surface
                         int16_t mi=*(int16_t*)(sf+si*12+4); if(mi>=0 && mi<64 && matcls[mi]>wk) wk=matcls[mi]; }
                     g->node[g->nseg]=node; g->reg[g->nseg]=(uint8_t)r; g->perm[g->nseg]=(uint8_t)pi; g->wk[g->nseg]=wk; memcpy(g->pts+g->nseg*6,vx+a*16,12); memcpy(g->pts+g->nseg*6+3,vx+z*16,12); g->nseg++;
@@ -571,6 +575,7 @@ static int hb_seg_clip(float*verts,int nv,int cap,const float*vp,const float*a,c
 // left = up x forward; soft ceilings from each structure BSP's structure_design (scnr +0x18 -> sddt +0x10, triangles
 // 0x44 with vertices at +0x20/+0x2C/+0x38): soft kill pink, acceleration orange, slip surface yellow.
 typedef struct { float c[8][3]; int kind; } HbZBox;      // kind 0 kill, 1 safe
+#define HBZ_MAXTRI (1<<20)   // soft-ceiling triangles kept per map (stock maps: a few thousand)
 typedef struct { float v[3][3]; int type, group; } HbZTri;   // type 0 acceleration, 1 soft kill, 2 slip surface
 typedef struct { float a[3], b[3]; int type; } HbZSeg;
 // a soft ceiling's outline: the edges only one of its triangles has (its full mesh is thousands of lines -- Valhalla
@@ -609,7 +614,7 @@ static void hbz_load(const char*path){
         uint8_t sm[0x40]; if(!hbm_read(m,(uint64_t)m->tp[sd&0xFFFF]<<2,sm,sizeof sm)) continue;
         uint8_t*sc=0; int nsc=hbm_block(m,sm,0x10,0x14,&sc,256);
         for(int c=0;c<nsc;c++){ int ty=*(int16_t*)(sc+c*0x14+4); uint8_t*tr=0; int ntr=hbm_block(m,sc+c*0x14,8,0x44,&tr,65536); static int grp; grp++;
-            for(int t=0;t<ntr;t++){ if(g_hbz.ntri>=cap){ cap=cap?cap*2:1024; HbZTri*nt2=realloc(g_hbz.tri,(size_t)cap*sizeof(HbZTri)); if(!nt2) break; g_hbz.tri=nt2; }
+            for(int t=0;t<ntr && g_hbz.ntri<HBZ_MAXTRI;t++){ if(g_hbz.ntri>=cap){ int nc=cap?cap*2:1024; HbZTri*nt2=realloc(g_hbz.tri,(size_t)nc*sizeof(HbZTri)); if(!nt2) break; g_hbz.tri=nt2; cap=nc; }
                 HbZTri*z=&g_hbz.tri[g_hbz.ntri++]; z->type=ty; z->group=grp; memcpy(z->v,tr+t*0x44+0x20,36); }
             free(tr); }
         free(sc); }

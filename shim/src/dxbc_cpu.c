@@ -51,8 +51,10 @@ static CsProg* cs_compile(const uint8_t* d, size_t len){
     int lst[64], lsp=0;          // loop stack
     p->tg[0]=p->tg[1]=p->tg[2]=1;
     for(int i=0;i<p->nins;i++){ DgIns* in=&p->ins[i]; int op=in->op;
-        if(op==104) p->ntemps=(int)in->raw[0];
-        else if(op==105 && p->nx<8){ p->xreg[p->nx]=in->raw[0]; p->xbase[p->nx]=(uint32_t)p->xtotal; p->xcount[p->nx]=in->raw[1]; p->xtotal+=(int)in->raw[1]; p->nx++; }
+        // register counts come from the bytecode (a map file's): refused before they can go negative or wrap (2026-10-19)
+        if(op==104){ if(in->raw[0]>4096){ p->why="too many registers"; return p; } p->ntemps=(int)in->raw[0]; }
+        else if(op==105 && p->nx<8){ if(in->raw[1]>65536 || (uint32_t)p->xtotal+in->raw[1]>65536){ p->why="too many registers"; return p; }
+            p->xreg[p->nx]=in->raw[0]; p->xbase[p->nx]=(uint32_t)p->xtotal; p->xcount[p->nx]=in->raw[1]; p->xtotal+=(int)in->raw[1]; p->nx++; }
         else if(op==155){ p->tg[0]=in->raw[0]; p->tg[1]=in->raw[1]; p->tg[2]=in->raw[2]; }
         else if(op==158 && in->nop && in->ops[0].nidx){ uint32_t r=in->ops[0].idx[0].val; if(r<8) p->uavstride[r]=in->raw[2]; }
         else if(op==162 && in->nop && in->ops[0].nidx){ uint32_t r=in->ops[0].idx[0].val; if(r<32) p->srvstride[r]=in->raw[2]; }
@@ -134,7 +136,7 @@ typedef struct { const CsProg* p; CsCtx* c; CsV4* r; CsV4* x; uint32_t tid[3], g
 static int32_t cs_relidx(CsThread* T,const DgIdx* ix){
     int32_t v=(int32_t)ix->val;
     if(ix->kind==1){ uint32_t comp=(uint32_t)(ix->rcomp&3);
-        if(ix->rtype==T_TEMP && (int)ix->rreg<T->p->ntemps) v+=T->r[ix->rreg].i[comp];
+        if(ix->rtype==T_TEMP && ix->rreg<(uint32_t)T->p->ntemps) v+=T->r[ix->rreg].i[comp];
         else if(ix->rtype==T_INDEXABLE_TEMP){ uint32_t xr=ix->rreg&0xffff, xi=ix->rreg>>16;
             for(int k=0;k<T->p->nx;k++) if(T->p->xreg[k]==xr && xi<T->p->xcount[k]) v+=T->x[T->p->xbase[k]+xi].i[comp]; } }
     return v; }
@@ -146,11 +148,11 @@ static CsV4* cs_xref(CsThread* T,const DgOp* o){
 static CsV4 cs_src(CsThread* T,const DgOp* o,int isint){
     CsV4 v; memset(&v,0,sizeof v);
     switch(o->type){
-        case T_TEMP: if(o->nidx && (int)o->idx[0].val<T->p->ntemps) v=T->r[o->idx[0].val]; break;
+        case T_TEMP: if(o->nidx && o->idx[0].val<(uint32_t)T->p->ntemps) v=T->r[o->idx[0].val]; break;
         case T_IMM32: if(o->immn==1) v.u[0]=v.u[1]=v.u[2]=v.u[3]=o->imm[0]; else for(int k=0;k<4;k++) v.u[k]=o->imm[k]; break;
         case T_CB: { uint32_t b=o->nidx?o->idx[0].val:0; int32_t i=o->nidx>1?cs_relidx(T,&o->idx[1]):0;
-            if(b<16 && T->c->cb[b] && i>=0 && (uint64_t)(i+1)*16<=T->c->cbsz[b]) memcpy(&v,T->c->cb[b]+(size_t)i*16,16); } break;
-        case T_ICB: { int32_t i=o->nidx?cs_relidx(T,&o->idx[0]):0; if(i>=0 && i*4+4<=T->p->icbn) memcpy(&v,&T->p->icb[i*4],16); } break;
+            if(b<16 && T->c->cb[b] && i>=0 && ((uint64_t)i+1)*16<=T->c->cbsz[b]) memcpy(&v,T->c->cb[b]+(size_t)i*16,16); } break;
+        case T_ICB: { int32_t i=o->nidx?cs_relidx(T,&o->idx[0]):0; if(i>=0 && (int64_t)i*4+4<=(int64_t)T->p->icbn) memcpy(&v,&T->p->icb[i*4],16); } break;
         case T_INDEXABLE_TEMP: { CsV4* p=cs_xref(T,o); if(p) v=*p; } break;
         case 32: v.u[0]=T->tid[0]; v.u[1]=T->tid[1]; v.u[2]=T->tid[2]; break;     // vThreadID
         case 33: v.u[0]=T->gid[0]; v.u[1]=T->gid[1]; v.u[2]=T->gid[2]; break;     // vThreadGroupID
@@ -167,7 +169,7 @@ static void cs_dst(CsThread* T,const DgOp* o,CsV4 v,int sat){
     if(o->type==T_NULL) return;
     if(sat) for(int k=0;k<4;k++){ float f=v.f[k]; v.f[k]= (f>0.0f)? (f<1.0f?f:1.0f) : 0.0f; }   // NaN -> 0
     CsV4* d=0;
-    if(o->type==T_TEMP){ if(o->nidx && (int)o->idx[0].val<T->p->ntemps) d=&T->r[o->idx[0].val]; }
+    if(o->type==T_TEMP){ if(o->nidx && o->idx[0].val<(uint32_t)T->p->ntemps) d=&T->r[o->idx[0].val]; }
     else if(o->type==T_INDEXABLE_TEMP) d=cs_xref(T,o);
     if(!d) return;
     int m=o->mask?o->mask:0xf; for(int k=0;k<4;k++) if(m&(1<<k)) d->u[k]=v.u[k]; }
@@ -324,7 +326,7 @@ typedef struct { int kind; uint64_t saved, other, brk, cont; int pc; } CsCf;   /
 static inline int32_t csg_relidx(const CsGrp* G,const DgIdx* ix,int l){
     int32_t v=(int32_t)ix->val;
     if(ix->kind==1){ uint32_t comp=(uint32_t)(ix->rcomp&3);
-        if(ix->rtype==T_TEMP && (int)ix->rreg<G->p->ntemps) v+=G->r[(size_t)ix->rreg*CSL+l].i[comp];
+        if(ix->rtype==T_TEMP && ix->rreg<(uint32_t)G->p->ntemps) v+=G->r[(size_t)ix->rreg*CSL+l].i[comp];
         else if(ix->rtype==T_INDEXABLE_TEMP){ uint32_t xr=ix->rreg&0xffff, xi=ix->rreg>>16;
             for(int k=0;k<G->p->nx;k++) if(G->p->xreg[k]==xr && xi<G->p->xcount[k]) v+=G->x[(size_t)(G->p->xbase[k]+xi)*CSL+l].i[comp]; } }
     return v; }
@@ -336,14 +338,14 @@ static CsV4* csg_xref(const CsGrp* G,const DgOp* o,int l){
 static void csg_src(const CsGrp* G,const DgOp* o,int isint,CsV4* out){
     int n=G->n;
     switch(o->type){
-    case T_TEMP: if(o->nidx && (int)o->idx[0].val<G->p->ntemps){ const CsV4* src=&G->r[(size_t)o->idx[0].val*CSL]; if(G->na==n) memcpy(out,src,(size_t)n*sizeof(CsV4)); else FORL out[l]=src[l]; } else FORL memset(&out[l],0,16); break;
+    case T_TEMP: if(o->nidx && o->idx[0].val<(uint32_t)G->p->ntemps){ const CsV4* src=&G->r[(size_t)o->idx[0].val*CSL]; if(G->na==n) memcpy(out,src,(size_t)n*sizeof(CsV4)); else FORL out[l]=src[l]; } else FORL memset(&out[l],0,16); break;
     case T_IMM32: { CsV4 v; if(o->immn==1) v.u[0]=v.u[1]=v.u[2]=v.u[3]=o->imm[0]; else for(int k=0;k<4;k++) v.u[k]=o->imm[k]; FORL out[l]=v; } break;
     case T_CB: { uint32_t b=o->nidx?o->idx[0].val:0; const uint8_t* cb=b<16?G->c->cb[b]:0; uint32_t sz=b<16?G->c->cbsz[b]:0;
         if(o->nidx>1 && o->idx[1].kind==1){ FORL { int32_t i=csg_relidx(G,&o->idx[1],l);
-                if(cb && i>=0 && (uint64_t)(i+1)*16<=sz) memcpy(&out[l],cb+(size_t)i*16,16); else memset(&out[l],0,16); } }
-        else { int32_t i=o->nidx>1?(int32_t)o->idx[1].val:0; CsV4 v; memset(&v,0,sizeof v); if(cb && i>=0 && (uint64_t)(i+1)*16<=sz) memcpy(&v,cb+(size_t)i*16,16); FORL out[l]=v; } } break;
-    case T_ICB: if(o->nidx && o->idx[0].kind==1){ FORL { int32_t i=csg_relidx(G,&o->idx[0],l); if(i>=0 && i*4+4<=G->p->icbn) memcpy(&out[l],&G->p->icb[i*4],16); else memset(&out[l],0,16); } }
-        else { int32_t i=o->nidx?(int32_t)o->idx[0].val:0; CsV4 v; memset(&v,0,sizeof v); if(i>=0 && i*4+4<=G->p->icbn) memcpy(&v,&G->p->icb[i*4],16); FORL out[l]=v; } break;
+                if(cb && i>=0 && ((uint64_t)i+1)*16<=sz) memcpy(&out[l],cb+(size_t)i*16,16); else memset(&out[l],0,16); } }
+        else { int32_t i=o->nidx>1?(int32_t)o->idx[1].val:0; CsV4 v; memset(&v,0,sizeof v); if(cb && i>=0 && ((uint64_t)i+1)*16<=sz) memcpy(&v,cb+(size_t)i*16,16); FORL out[l]=v; } } break;
+    case T_ICB: if(o->nidx && o->idx[0].kind==1){ FORL { int32_t i=csg_relidx(G,&o->idx[0],l); if(i>=0 && (int64_t)i*4+4<=(int64_t)G->p->icbn) memcpy(&out[l],&G->p->icb[i*4],16); else memset(&out[l],0,16); } }
+        else { int32_t i=o->nidx?(int32_t)o->idx[0].val:0; CsV4 v; memset(&v,0,sizeof v); if(i>=0 && (int64_t)i*4+4<=(int64_t)G->p->icbn) memcpy(&v,&G->p->icb[i*4],16); FORL out[l]=v; } break;
     case T_INDEXABLE_TEMP: FORL { CsV4* p=csg_xref(G,o,l); if(p) out[l]=*p; else memset(&out[l],0,16); } break;
     case 32: FORL { out[l].u[0]=G->tid[0][l]; out[l].u[1]=G->tid[1][l]; out[l].u[2]=G->tid[2][l]; out[l].u[3]=0; } break;
     case 33: FORL { out[l].u[0]=G->gid[0][l]; out[l].u[1]=G->gid[1][l]; out[l].u[2]=G->gid[2][l]; out[l].u[3]=0; } break;
@@ -357,7 +359,7 @@ static void csg_src(const CsGrp* G,const DgOp* o,int isint,CsV4* out){
 static void csg_dst(CsGrp* G,const DgOp* o,CsV4* v,int sat,uint64_t m){
     (void)m; if(o->type==T_NULL) return; int n=G->n; int wm=o->mask?o->mask:0xf;
     if(sat) FORL for(int k=0;k<4;k++){ float f=v[l].f[k]; v[l].f[k]=(f>0.0f)?(f<1.0f?f:1.0f):0.0f; }   // NaN -> 0
-    if(o->type==T_TEMP){ if(!o->nidx || (int)o->idx[0].val>=G->p->ntemps) return; CsV4* d=&G->r[(size_t)o->idx[0].val*CSL];
+    if(o->type==T_TEMP){ if(!o->nidx || o->idx[0].val>=(uint32_t)G->p->ntemps) return; CsV4* d=&G->r[(size_t)o->idx[0].val*CSL];
         if(G->na==n && wm==0xf){ memcpy(d,v,(size_t)n*sizeof(CsV4)); return; }
         if(wm==0xf) FORL d[l]=v[l]; else FORL for(int k=0;k<4;k++) if(wm&(1<<k)) d[l].u[k]=v[l].u[k]; }
     else if(o->type==T_INDEXABLE_TEMP){ FORL { CsV4* d=csg_xref(G,o,l); if(d) for(int k=0;k<4;k++) if(wm&(1<<k)) d->u[k]=v[l].u[k]; } } }

@@ -28,6 +28,13 @@ signin_err(){ grep -qiE 'password|expired|rejected|logon|log on|login|steam guar
 TOTAL=$(grep -h 'Total bytes on disk' "$T"/manifest_*.txt 2>/dev/null | head -1 | sed 's/.*: *//; s/[^0-9]//g')
 if [ -z "$TOTAL" ]; then signin_err; err "DepotDownloader could not read Workshop item $ID: $(tail -1 "$LOG")"; fi
 [ "$TOTAL" -gt 0 ] || TOTAL=1
+# a size cap (2026-10-19, security review): a server only has to NAME a Workshop item for the client to ask for it
+# (and an input-less test client presses Download itself). RECLAIMER_WORKSHOP_MAX_GB (default 32; Ultimate Forge 2.0 is 9.6)
+MAXGB="${RECLAIMER_WORKSHOP_MAX_GB:-32}"; [[ "$MAXGB" =~ ^[0-9]+$ ]] || MAXGB=32
+[ "$TOTAL" -le $((MAXGB * 1073741824)) ] || err "Workshop item $ID is $((TOTAL / 1073741824)) GB, more than RECLAIMER_WORKSHOP_MAX_GB ($MAXGB GB): not downloaded"
+HAVEKB=$(du -sk "$DIR" 2>/dev/null | cut -f1); NEED=$((TOTAL - ${HAVEKB:-0} * 1024)); [ "$NEED" -gt 0 ] || NEED=0   # an update: only what is missing
+FREEKB=$(df -k "$(dirname "$DIR")" 2>/dev/null | awk 'NR==2{print $4}'); [ -z "$FREEKB" ] || [ $((FREEKB * 1024)) -gt $((NEED + 1073741824)) ] ||
+  err "Not enough disk space for Workshop item $ID: it needs $((NEED / 1048576)) MB more, $((FREEKB / 1024)) MB is free"
 printf '{"Progress":{"done":0,"total":%s}}\n' "$TOTAL"
 
 # 2. the download into the client's Workshop folder. DepotDownloader prints " 12.34% <file>" (of the whole item) only when a

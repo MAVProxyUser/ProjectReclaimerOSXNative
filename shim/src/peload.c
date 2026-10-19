@@ -8614,8 +8614,13 @@ static uint32_t MSABI i_GetDriveTypeA(const char*root){ (void)root; return 3; }
 static int MSABI i_GetVolumeInformationW(const uint16_t*root,uint16_t*vn,uint32_t vnsz,uint32_t*serial,uint32_t*maxcomp,uint32_t*flags,uint16_t*fsn,uint32_t fsnsz){
     (void)root; if(vn&&vnsz){vn[0]='O';vn[1]='S';vn[2]=0;} if(serial)*serial=0x1337c0de; if(maxcomp)*maxcomp=255; if(flags)*flags=0x03;
     if(fsn&&fsnsz){ const char*f="NTFS"; uint32_t i=0; for(; f[i]&&i<fsnsz-1;i++) fsn[i]=(uint8_t)f[i]; fsn[i]=0; } return 1; }
+// Free space of the Mac volume holding <dir> (2026-10-19; it reported 200 GB everywhere, which defeated the client's
+// "Not enough disk space" check before a mod download). PELOAD_DISKFREE_FAKE=1 = old.
 static int MSABI i_GetDiskFreeSpaceExW(const uint16_t*dir,uint64_t*avail,uint64_t*total,uint64_t*tfree){
-    (void)dir; uint64_t big=(uint64_t)200*1024*1024*1024; if(avail)*avail=big; if(total)*total=big*2; if(tfree)*tfree=big; return 1; }
+    if(getenv("PELOAD_DISKFREE_FAKE")){ uint64_t big=(uint64_t)200*1024*1024*1024; if(avail)*avail=big; if(total)*total=big*2; if(tfree)*tfree=big; return 1; }
+    char p[2048]; if(dir && dir[0]) win2unix(dir,p,sizeof p); else snprintf(p,sizeof p,".");
+    struct statfs sf; while(statfs(p,&sf)){ char*sl=strrchr(p,'/'); if(!sl || sl==p){ snprintf(p,sizeof p,"/"); if(statfs(p,&sf)){ g_lasterr=3; return 0; } break; } *sl=0; }   // (a folder not made yet: its parent's volume)
+    uint64_t bs=(uint64_t)sf.f_bsize; if(avail)*avail=(uint64_t)sf.f_bavail*bs; if(total)*total=(uint64_t)sf.f_blocks*bs; if(tfree)*tfree=(uint64_t)sf.f_bfree*bs; return 1; }
 static int MSABI i_GetVolumePathNameW(const uint16_t*fn,uint16_t*buf,uint32_t len){ (void)fn; if(len>=4&&buf){buf[0]='C';buf[1]=':';buf[2]='\\';buf[3]=0;} return 1; }
 static uint32_t MSABI i_RtlNtStatusToDosError(uint32_t s){ switch(s){ case 0:return 0;
     case 0xC0000034: case 0xC000000F: return 2; case 0xC0000022: return 5;
@@ -9118,7 +9123,15 @@ static int MSABI i_RemoveDirectoryW(const uint16_t*w); // fwd
 static int MSABI i_RemoveDirectoryA(const char*a){ uint16_t w[2048]; int i=0; for(; a&&a[i]&&i<2047;i++) w[i]=(uint8_t)a[i]; w[i]=0; return i_RemoveDirectoryW(w); }
 static int MSABI i_RemoveDirectoryW(const uint16_t*w){ char p[2048]; win2unix(w,p,sizeof p);
     if(getenv("PELOAD_TRACE_DEL")){ static int n; if(n++<40){ char m[2200]; int k=snprintf(m,sizeof m,"  [RemoveDirectoryW] %s\n",p); (void)!write(2,m,k); } }
-    if(rmdir(p)==0) return 1; rmrf(p); return 1; }
+    // Windows' semantics (2026-10-19): only an EMPTY folder goes; a folder with files fails with ERROR_DIR_NOT_EMPTY. It used
+    // to delete the whole tree and always succeed (a workaround from the 10-11 bring-up, when folder listing was broken and
+    // Rust's remove_dir_all couldn't empty folders itself); with symlinks in a mod tree that could delete outside it.
+    // PELOAD_RMDIR_RECURSIVE=1 = old.
+    if(rmdir(p)==0) return 1;
+    int e=errno; if(getenv("PELOAD_RMDIR_RECURSIVE")){ rmrf(p); return 1; }
+    if(e==ENOTEMPTY||e==EEXIST){ static int n; if(n++<20){ char m[2200]; int k=snprintf(m,sizeof m,"  [RemoveDirectoryW] not empty, kept: %s\n",p); (void)!write(2,m,k); } g_lasterr=145; }
+    else g_lasterr=e==ENOENT?2:e==ENOTDIR?267:5;
+    return 0; }
 // SetFileInformationByHandle: honor FileDispositionInfo(4)/Ex(21) = delete
 static int MSABI i_SetFileInformationByHandle(void*h,int cls,void*info,uint32_t sz){
     (void)sz; intptr_t hv=(intptr_t)h; if(hv<0x1000) return 1; int fd=(int)(hv-0x1000); if(fd>=MAXFD) return 1;
@@ -9312,8 +9325,35 @@ static int  MSABI i_DeleteFileW(const uint16_t*w){ char p[2048]; win2unix(w,p,si
     // removes <uuid>.json almost immediately). Opt-in; off for the canonical sim path.
     if(getenv("PELOAD_KEEP_ADV") && strstr(p,"local-servers") && strstr(p,".json")){
         if(getenv("PELOAD_TRACE_FS")){ws("  [keep-adv] skip delete ");ws(p);ws("\n");} return 1; }
-    { int rc=unlink(p); if(getenv("PELOAD_TRACE_DEL")){ static int n; if(n++<40){ char m[2200]; int k=snprintf(m,sizeof m,"  [DeleteFileW] %s -> %s\n",p,rc==0?"ok":strerror(errno)); (void)!write(2,m,k); } } }
+    { int rc=unlink(p), e=errno; if(getenv("PELOAD_TRACE_DEL")){ static int n; if(n++<40){ char m[2200]; int k=snprintf(m,sizeof m,"  [DeleteFileW] %s -> %s\n",p,rc==0?"ok":strerror(e)); (void)!write(2,m,k); } }
+      // a failure is reported as Windows does (2026-10-19; it always claimed success). PELOAD_DELETE_LAX=1 = old.
+      if(rc && !getenv("PELOAD_DELETE_LAX")){ g_lasterr=e==ENOENT?2:e==ENOTDIR?3:5; return 0; } }
     return 1; }
+// SHFileOperationW (2026-10-19): the client deletes mods (Settings > Mods, "replace with the server's version") with
+// FO_DELETE + FOF_ALLOWUNDO, i.e. to the Recycle Bin. It was an unknown-import stub returning 0 (success): nothing was
+// deleted while the client said it was. Now FO_DELETE moves every path to the macOS Trash (NSFileManager
+// trashItemAtURL, which also knows other volumes' .Trashes) -- never a permanent delete, with or without ALLOWUNDO; a
+// path that can't be trashed fails the call (fAnyOperationsAborted). Other operations: not implemented (logged, error
+// 120). PELOAD_SHFILEOP_STUB=1 = old.
+typedef struct { void*hwnd; uint32_t wFunc; uint32_t pad; const uint16_t*pFrom, *pTo; uint16_t fFlags; uint16_t pad2; int32_t fAnyOperationsAborted; void*hNameMappings; const uint16_t*lpszProgressTitle; } ShFileOpW;
+static int sh_trash(const char*p){ void*pool=objc_autoreleasePoolPush();
+    id fm=((id(*)(id,SEL))objc_msgSend)((id)objc_getClass("NSFileManager"),sel_registerName("defaultManager"));
+    id str=((id(*)(id,SEL,const char*))objc_msgSend)((id)objc_getClass("NSString"),sel_registerName("stringWithUTF8String:"),p);
+    id url=str?((id(*)(id,SEL,id))objc_msgSend)((id)objc_getClass("NSURL"),sel_registerName("fileURLWithPath:"),str):0; id err=0;
+    signed char ok=url&&fm?((signed char(*)(id,SEL,id,id*,id*))objc_msgSend)(fm,sel_registerName("trashItemAtURL:resultingItemURL:error:"),url,(id*)0,&err):0;
+    objc_autoreleasePoolPop(pool); return ok!=0; }
+static int MSABI i_SHFileOperationW(ShFileOpW*op){
+    if(!op) return 0x57;
+    if(getenv("PELOAD_SHFILEOP_STUB")) return 0;
+    op->fAnyOperationsAborted=0;
+    if(op->wFunc!=3){ char m[120]; int k=snprintf(m,sizeof m,"  [SHFileOperationW] operation %u not implemented\n",op->wFunc); (void)!write(2,m,k); return 120; }
+    int rc=0; for(const uint16_t*w=op->pFrom; w && *w; ){ size_t L=0; while(w[L]) L++;
+        char p[2048]; win2unix(w,p,sizeof p); struct stat st;
+        if(lstat(p,&st)){ rc=0x7C; }   // DE_INVALIDFILES: not there
+        else if(!sh_trash(p)){ rc=0x78; op->fAnyOperationsAborted=1; }
+        { char m[2200]; int k=snprintf(m,sizeof m,"  [SHFileOperationW] delete %s -> %s\n",p,rc==0?"moved to the Trash":rc==0x7C?"not found":"could not be moved to the Trash (kept)"); (void)!write(2,m,k); }
+        w+=L+1; }
+    return rc; }
 static int  MSABI i_CopyFileExW(const uint16_t*src,const uint16_t*dst,void*prog,void*data,int*cancel,uint32_t fl){
     (void)prog;(void)data;(void)cancel;(void)fl; char s[2048],d[2048]; win2unix(src,s,sizeof s); win2unix(dst,d,sizeof d);
     int in=open(s,O_RDONLY); if(in<0){ g_lasterr=win_err(); return 0; }
@@ -10568,6 +10608,7 @@ static void *resolve_impl(const char *fn){
         {"GetFileInformationByHandleEx",(void*)i_GetFileInformationByHandleEx},
         {"GetFinalPathNameByHandleW",(void*)i_GetFinalPathNameByHandleW},
         {"RemoveDirectoryW",(void*)i_RemoveDirectoryW},
+        {"SHFileOperationW",(void*)i_SHFileOperationW},
         {"SetFileInformationByHandle",(void*)i_SetFileInformationByHandle},
         {"NtCreateFile",(void*)i_NtCreateFile},
         {"NtDeviceIoControlFile",(void*)i_NtDeviceIoControlFile},

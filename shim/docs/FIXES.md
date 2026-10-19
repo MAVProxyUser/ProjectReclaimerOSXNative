@@ -302,6 +302,18 @@ patch variants by signature (section 16; shim/docs/patch-addresses.md).
 
 ## 4. Files, pipes, console
 
+- **File APIs that defeated the client's own checks** (security review 2026-10-19) — peload.c `i_RemoveDirectoryW`,
+  `i_DeleteFileW`, `i_GetDiskFreeSpaceExW`, `i_SHFileOperationW` (new). Why: RemoveDirectoryW deleted a NON-empty folder's
+  whole tree and always succeeded (a 10-11 bring-up workaround from when folder listing was broken); DeleteFileW always
+  succeeded; GetDiskFreeSpaceExW said 200 GB free everywhere (the client's "Not enough disk space" check before a mod
+  download never fired); SHFileOperationW was an unknown-import stub returning success, so deleting a mod in Settings > Mods
+  (FO_DELETE + FOF_ALLOWUNDO: to the Recycle Bin) said done and deleted nothing. How: rmdir only, ERROR_DIR_NOT_EMPTY (145) /
+  2 / 267 / 5 as Windows ("[RemoveDirectoryW] not empty, kept" logged); unlink errors as 2 / 3 / 5; statfs of the folder's
+  volume (or its nearest existing parent); FO_DELETE moves each path to the macOS Trash (NSFileManager trashItemAtURL, never
+  a permanent delete), other operations error 120. Checked: clients and the dedicated server on the new build join and
+  play with no refused delete. Old: `PELOAD_RMDIR_RECURSIVE=1`, `PELOAD_DELETE_LAX=1`, `PELOAD_DISKFREE_FAKE=1`,
+  `PELOAD_SHFILEOP_STUB=1`. Still open (section 22): symlinks are never reported as reparse points, GetFinalPathNameByHandleW
+  returns the unresolved path, `..` / other drive letters are not confined to the prefix. (10-19)
 - **FindNextFileW end of enumeration** — Why: no ERROR_NO_MORE_FILES -> spurious fatal "System error 0". (10-11 090e7ce)
 - **Delete-on-close semantics** — Why: a recursive directory walk looped. How: refcounted last-handle-wins
   delete-on-close for files and directories, FileDispositionInfoEx CLEAR honoured. (10-11 090e7ce, c04b6a2)
@@ -950,6 +962,12 @@ oracle. Fixes below apply to both unless noted.
 
 ## 15. CPU particle compute (dxbc_cpu.c)
 
+- **Register indices from the bytecode checked unsigned** (security review 2026-10-19) — dxbc_cpu.c `cs_src` / `cs_dst` /
+  `cs_relidx` / `csg_src` / `csg_dst` / `csg_relidx`, program setup. Why: `(int)idx < ntemps` let an index >= 2^31 through, and
+  `r[idx]` then read or WROTE 32 GB+ past the register file; dcl_temps / dcl_indexable_temp counts could go negative or wrap.
+  Shader bytecode comes from the .map files -- a Workshop or server-shared map's too -- and unlike Windows (the D3D11 runtime
+  checksums and validates DXBC) nothing checked it. How: unsigned compares, `dcl_temps` <= 4096 and indexable temps <= 65536
+  refused when parsed, constant-buffer / immediate-constant-buffer index math in 64 bits. Valid shaders run as before. (10-19)
 - **Compute on the CPU** — Why: macOS GL 4.1 has no compute shaders/SSBOs; halo3's particle kernels never ran (no muzzle
   flashes, explosions). How: an SM5 compute interpreter over CPU copies of the RWStructuredBuffers; written UAVs bump
   their version; ClearUnorderedAccessView{Uint,Float}, CSSetSamplers, CSSetConstantBuffers1 hooked. Off:
@@ -1100,6 +1118,31 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
 
 ## 18. Overlay, stats, forensics, walker, recording (the loader's own tooling)
 
+- **Stats server: headers only, Host, Origin; no open CORS** (security review 2026-10-19) — stats.c `st_conn`, `st_hdr`,
+  `st_host_ok`, `st_origin_ok`. Why: (1) the CSRF guard `X-Reclaimer-Control` was searched for anywhere in the request, body
+  included, so ANY website could POST a text/plain body holding "\r\nX-Reclaimer-Control: 1" (no preflight) and run every
+  control (mic on, recording, forensic delete / voice archive, captures filling the disk, teleport / speed when hosting);
+  (2) no Host check, so a DNS-rebinding page could read /feed.json, /stats.json (player IPs while hosting), forensic voice
+  .ogg and recordings and POST controls; (3) `Access-Control-Allow-Origin: *` on /stats.json, /heat.json, /events let every
+  site read the live data. How: the request is read up to the empty line and headers are matched only there, at a line
+  start; Host must be an IP literal or localhost with our port (421 otherwise; PELOAD_STATS_HOSTS=<names> adds names, e.g.
+  this Mac's .local name for LAN use); a POST with an Origin must come from http://<Host>; ACAO only with PELOAD_STATS_CORS=1;
+  5 s receive timeout, 128 connections at most, 431 for headers past 4 KB. Checked live: the page, curl and the loader's
+  own forwarding work; a foreign Host, a body-borne guard and a foreign Origin are refused. Old: `PELOAD_STATS_ANYHOST=1`
+  (Host), `PELOAD_STATS_CORS=1` (ACAO). (10-19)
+- **Map-file and saved-file reads bounded** (security review 2026-10-19) — hitbox.c tag names (`noff` offsets from the .map
+  outside the names table -> ""), collision models (node index outside the 128 pose matrices skipped; HB_MAXSEG 262144 edges
+  per definition, checked reallocs in size_t), soft ceilings (HBZ_MAXTRI 1M), stats.c (NaN / inf positions -> `null`: they
+  made /stats.json unparseable; spot ids / labels escaped; a held object's index checked before the read; heatmap death
+  names NUL-terminated), forensic.c `fx_jstr` (a trailing `\` or short `\u` no longer reads past the end). A crafted
+  Workshop / server map could crash the game through the stats thread or leak heap bytes into the page. (10-19)
+- **Map tools: resource limits** (security review 2026-10-19) — stats.c `st_tool_wait` (h3bsp / h3inv / h3spots spawns),
+  re-tools/h3map.py (`_cstr`, count checks, BLOCK_MAX_BYTES), h3bsp.py (PAGE_MAX, inflate capped at the page's size). Why:
+  they run by themselves on every map played (Workshop and server-shared maps too) with no limits: a deflate bomb or crafted
+  counts could take all memory (an 8 GB M1 swaps). How: nice 10, killed past PELOAD_TOOL_MB (default PELOAD_NAV_TOOL_MB, else
+  3072) resident or PELOAD_TOOL_SECS (600); names at most 256 bytes; implausible tag / name / string-id counts refused; one
+  block read <= 256 MB; a page inflates to exactly its declared size (<= 256 MB). Outputs on stock + Workshop maps unchanged
+  (picture, height grid, invisible walls, walking graph byte-identical). (10-19)
 - **No memory sweeps** — `PELOAD_OBJSCAN` (removed). Why: walking every VM region of the ~6 GB process with
   mach_vm_read_overwrite to find halo3's object array kernel-panicked the Mac. How: removed entirely; engine structures
   are found through halo3.dll's own code/data only (rule in hitbox.c / CLAUDE.md). (10-16 0ff8ddf)
@@ -1322,6 +1365,11 @@ Numbers are from the commit messages; PERF-PLAN.md has the measurements. Compare
 
 ## 20. Scripts and RE tools
 
+- **workshop-helper.sh size / disk checks; servers.sh strips control characters** (security review 2026-10-19). Why: a
+  server only has to name a Workshop item for the client to ask for it (an input-less test client even presses Download:
+  PELOAD_AUTO_MODS); servers.sh printed server names / mod titles raw, so a JSON "\u001b" became a real escape sequence in
+  the terminal (title / clipboard OSC). How: refuse items over RECLAIMER_WORKSHOP_MAX_GB (default 32) or when the volume
+  lacks the missing bytes + 1 GB; strip C0/C1 controls and bidi overrides from every printed field. (10-19)
 - **build.sh builds to a temp file and renames** — safe while a game is running. (10-16 fe9e948)
 - **play.sh** — checks the client exe's SHA-256 (patches were offsets into one build) (10-16 15e3edd); matches only the
   loader binary itself when killing leftovers (an unanchored pattern also matched shells mentioning build/peload)
@@ -1436,6 +1484,14 @@ Numbers are from the commit messages; PERF-PLAN.md has the measurements. Compare
   nothing plays them -- Halo 3 ships no .bik files (MCC's .bk2 movies belong to MCC's own shell) and the client refuses mod
   movies ("Bink import slots differ"). The 5th runtime shader (the client's menu grading) runs since 10-18 (section 11).
   `PELOAD_REFUSE_EMPTY_SHADER=1` refuses code-less blobs with E_INVALIDARG as D3D11 would.
+- **Loader path handling is not a sandbox** (security review 2026-10-19): `win2unix` does not confine `..` to the drive,
+  maps Z:\ to / and other letters to drive_x; GetFinalPathNameByHandleW returns the unresolved path (Rust canonicalize is
+  not canonical, so the client's "escapes its package" checks pass for symlinks); FindFirstFile / GetFileInformationByHandleEx
+  never report reparse points (the dedicated installer's "contains a filesystem link" check never fires; remove_dir_all
+  follows directory symlinks). Not reachable through server mod file names (the client whitelists them), but a symlink in
+  a Workshop item or our own links (usb-install's workshop folder, dedicated.sh's game/halo3) matter. BCryptVerifySignature
+  always succeeds (what halo3 verifies with it is not traced). Fixing needs care: the client canonicalizes both sides of
+  some checks, and our "Program Files (x86)/Steam/steamapps" link must keep working.
 - **First join right after a dedicated server starts** can fail its handshake ("Public join timed out"; 10 of ~38 in the
   10-19 spot checks); a retry works.
 - Rock-wall seams (tabled by the user, display-only). (61 Hugegrass dark and 56 Forge World black are fixed: sections 10, 12.)

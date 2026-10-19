@@ -16,6 +16,10 @@ OUT="$(mktemp -t reclaimer_servers)"
 arch -x86_64 shim/build/peload "$EXE" discover < /dev/null 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' > "$OUT"
 python3 - "$OUT" "$N" <<'EOF'
 import json, sys
+import re as _re
+_CTL = _re.compile('[\x00-\x1f\x7f-\x9f\u200e\u200f\u202a-\u202e\u2066-\u2069]')
+def C(v):   # server-supplied text: no terminal control / escape / bidi characters (an ESC in a server name could rewrite the terminal)
+    return _CTL.sub('', str(v))
 try: servers = json.load(open(sys.argv[1], errors='replace'))
 except Exception as e: sys.exit(f"could not read the server list ({e})")
 live = [s for s in servers if 'players' in s]
@@ -23,10 +27,10 @@ live.sort(key=lambda s: -s.get('players', 0))
 print(f"{len(live)} servers answered ({len(servers) - len(live)} did not)\n")
 for s in live[:int(sys.argv[2])]:
     mods = s.get('mods') or []
-    print(f"{s.get('players',0):>3}/{s.get('capacity','?'):<3} {s['address']:<22} {s.get('name','')[:44]:<44} {s.get('map','')[:22]:<22} {s.get('mode','')}"
+    print(f"{s.get('players',0):>3}/{s.get('capacity','?'):<3} {s['address']:<22} {C(s.get('name',''))[:44]:<44} {C(s.get('map',''))[:22]:<22} {C(s.get('mode',''))}"
           + ("  [password]" if s.get('password_required') else ""))
     for m in mods:
         stems = ", ".join(x.get('stem', '') for x in m.get('maps', []))
-        print(f"{'':8}mod: {m.get('title','?')} ({'shared' if m.get('shared') else 'workshop'}, {m.get('size',0)/1e9:.1f} GB; maps: {stems})")
+        print(f"{'':8}mod: {C(m.get('title','?'))} ({'shared' if m.get('shared') else 'workshop'}, {m.get('size',0)/1e9:.1f} GB; maps: {C(stems)})")
 EOF
 rm -f "$OUT"

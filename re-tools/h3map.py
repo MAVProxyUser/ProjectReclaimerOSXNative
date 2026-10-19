@@ -8,6 +8,17 @@ Layouts follow Assembly (github.com/XboxChaos/Assembly, Blamite/Formats/Halo3MCC
 tag pointers are 32-bit, expanded as (p << 2); file offset = tag section start + (expanded - virtual base)."""
 import struct, sys
 
+BLOCK_MAX_BYTES = 256 << 20   # one tag block read at most (stock maps: < 20 MB); counts in a downloaded map are untrusted
+
+
+def _cstr(blob, o, cap=256):
+    """NUL-terminated string at blob[o] (at most cap bytes; '' for an offset outside the blob)"""
+    if not 0 <= o < len(blob):
+        return ''
+    e = blob.find(b'\0', o, o + cap)
+    return blob[o:e if e >= 0 else min(len(blob), o + cap)].decode('latin1')
+
+
 class H3Map:
     def __init__(self, path):
         self.f = open(path, 'rb'); h = self.f.read(0x4000); self.h = h
@@ -20,6 +31,9 @@ class H3Map:
         ix = self.read_va(self.index_addr, 0x48)
         ngroups, = struct.unpack_from('<i', ix, 0); gaddr, = struct.unpack_from('<Q', ix, 8)
         ntags, = struct.unpack_from('<i', ix, 0x10); taddr, = struct.unpack_from('<Q', ix, 0x18)
+        # counts from the file (a downloaded mod map: untrusted) -- tag indices are 16-bit, groups a few hundred
+        if not (0 <= ngroups <= 4096 and 0 <= ntags <= 65536):
+            raise ValueError('implausible tag table (%d groups, %d tags)' % (ngroups, ntags))
         g = self.read_va(gaddr, ngroups * 16)
         self.groups = [g[i*16:i*16+4][::-1].decode('latin1') for i in range(ngroups)]
         t = self.read_va(taddr, ntags * 8)
@@ -30,12 +44,16 @@ class H3Map:
         # tag names: debug-section file table
         cnt, off, size, idx = struct.unpack_from('<4i', h, 0x20)
         dbg = self.masks[0]
+        if not (0 <= cnt <= 65536 and 0 <= size <= 64 << 20):
+            raise ValueError('implausible tag name table (%d names, %d bytes)' % (cnt, size))
         self.f.seek((idx + dbg) & 0xFFFFFFFF); offs = struct.unpack('<%di' % cnt, self.f.read(cnt * 4))
         self.f.seek((off + dbg) & 0xFFFFFFFF); blob = self.f.read(size)
-        self.names = [blob[o:blob.index(b'\0', o)].decode('latin1') if o >= 0 else '' for o in offs]
+        self.names = [_cstr(blob, o) for o in offs]
         # string ids: index = sid & 0x7FFFF, namespace = (sid >> 19) & 0xFF; namespace sizes in the header (+0x40 count,
         # +0x44 offset); strings: +0x30 count, +0x34 data offset, +0x38 size, +0x3C index table (debug-section offsets)
         scount, sdata, ssize, sidx = struct.unpack_from('<4i', h, 0x30); nscount, nsoff = struct.unpack_from('<2i', h, 0x40)
+        if not (0 <= scount <= 1 << 20 and 0 <= ssize <= 64 << 20 and 0 <= nscount <= 256):
+            raise ValueError('implausible string id table (%d strings, %d bytes, %d namespaces)' % (scount, ssize, nscount))
         self.f.seek((nsoff + dbg) & 0xFFFFFFFF); ns = struct.unpack('<%dI' % nscount, self.f.read(nscount * 4))
         self.ns_start = [0]; [self.ns_start.append(self.ns_start[-1] + c) for c in ns]
         self.f.seek((sidx + dbg) & 0xFFFFFFFF); self.soffs = struct.unpack('<%di' % scount, self.f.read(scount * 4))
@@ -46,7 +64,7 @@ class H3Map:
         g = (self.ns_start[n] + idx) if n < len(self.ns_start) - 1 and n > 0 else idx
         if n == 0 and len(self.ns_start) > 1 and idx >= self.ns_start[1]: g = idx
         if not (0 <= g < len(self.soffs)) or self.soffs[g] < 0: return '<%x>' % v
-        o = self.soffs[g]; return self.sblob[o:self.sblob.index(b'\0', o)].decode('latin1')
+        return _cstr(self.sblob, self.soffs[g])
     def va_to_off(self, va): return self.tag_off + (va - self.vbase)
     def read_va(self, va, n): self.f.seek(self.va_to_off(va)); return self.f.read(n)
     def p(self, p32): return p32 << 2                      # expand a 32-bit tag pointer
@@ -55,6 +73,7 @@ class H3Map:
     def block(self, data, off, esize):                     # tag block at data+off -> list of element bytes
         cnt, ptr = struct.unpack_from('<iI', data, off)
         if cnt <= 0 or not ptr: return []
+        cnt = min(cnt, (BLOCK_MAX_BYTES // max(esize, 1)))   # a crafted count: never more than BLOCK_MAX_BYTES of reads
         raw = self.read_p(ptr, cnt * esize); return [raw[i*esize:(i+1)*esize] for i in range(cnt)]
     def tagref(self, data, off):                           # -> tag index or -1
         grp, = struct.unpack_from('<I', data, off); di, = struct.unpack_from('<I', data, off + 12)

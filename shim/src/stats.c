@@ -20,7 +20,7 @@ static void sb_put(StBuf*s,const char*fmt,...){ va_list ap; for(;;){ size_t room
         if(k<0) return; if((size_t)k<room){ s->n+=(size_t)k; return; } size_t nc=(s->cap?s->cap*2:16384); while(nc<s->n+(size_t)k+1) nc*=2; char*nb=realloc(s->b,nc); if(!nb) return; s->b=nb; s->cap=nc; } }
 static void sb_str(StBuf*s,const char*v){ sb_put(s,"\""); for(const unsigned char*p=(const unsigned char*)v; p&&*p; p++){
         if(*p=='"'||*p=='\\') sb_put(s,"\\%c",*p); else if(*p<0x20) sb_put(s,"\\u%04x",*p); else sb_put(s,"%c",*p); } sb_put(s,"\""); }
-static void sb_f3(StBuf*s,const float*v){ sb_put(s,"[%.2f,%.2f,%.2f]",v[0],v[1],v[2]); }
+static void sb_f3(StBuf*s,const float*v){ if(isfinite(v[0])&&isfinite(v[1])&&isfinite(v[2])) sb_put(s,"[%.2f,%.2f,%.2f]",v[0],v[1],v[2]); else sb_put(s,"null"); }   // (nan / inf is not JSON)
 
 // ---- event feed (GET /feed.json?since=<seq>; the snapshot carries "feed_seq"): what the game tells its players --
 // joins and leaves, kills, votes, server notices, match start and end. Sources: the client's own log lines
@@ -574,7 +574,8 @@ static void hm_switch(const char*map){   // (g_hm_mx held)
     char p[1024]; hm_path(map,p,sizeof p); FILE*f=fopen(p,"rb"); uint32_t nc=0,nd=0;
     if(f){ char mg[4]; float cell=0; if(fread(mg,1,4,f)==4 && !memcmp(mg,"RHM2",4) && fread(&cell,4,1,f)==1 && cell==HM_CELL && fread(&nc,4,1,f)==1 && fread(&nd,4,1,f)==1 && fread(&g_hm.maxmatch,4,1,f)==1 && nc<(1u<<24) && nd<(1u<<22)){
             for(uint32_t i=0;i<nc;i++){ HmCell c; if(fread(&c,sizeof c,1,f)!=1) break; hm_cell_add(c.x,c.y,c.n); }
-            g_hm.d=malloc((nd?nd:1)*sizeof(HmDeath)); g_hm.dcap=nd?nd:1; g_hm.nd=g_hm.d?(uint32_t)fread(g_hm.d,sizeof(HmDeath),nd,f):0; }
+            g_hm.d=malloc((nd?nd:1)*sizeof(HmDeath)); g_hm.dcap=nd?nd:1; g_hm.nd=g_hm.d?(uint32_t)fread(g_hm.d,sizeof(HmDeath),nd,f):0;
+            for(uint32_t i=0;i<g_hm.nd;i++) g_hm.d[i].name[sizeof g_hm.d[i].name-1]=0; }   // (a damaged file: never read past a name)
         fclose(f); }
     g_hm.match=++g_hm.maxmatch; g_hm.match_t0=mono_s(); g_hm.saved=mono_s(); g_hm.dirty=0;
     char m[1200]; int k=snprintf(m,sizeof m,"  [stats] heatmap %s: %u cells, %u deaths from earlier matches\n",map,g_hm.used,g_hm.nd); (void)!write(2,m,k); }
@@ -592,10 +593,24 @@ static void hm_death(const float*pos,int team,int slot,const char*name){   // (g
 // re-tools/ next to shim/build/, as in a checkout and in the release bundle); PELOAD_NO_MAPTOP=1 off. Log: <map>.log.
 static volatile int g_mt_state;   // 0 none/unknown, 1 ready, 2 making, 3 failed, 4 no tool
 static char g_mt_name[96], g_mt_png[1100], g_mt_js[1100];
-static void* st_maptop_wait(void*a){ pid_t pid=(pid_t)(intptr_t)a; int st=0; while(waitpid(pid,&st,0)<0 && errno==EINTR){}
+// The map tools (re-tools/h3bsp.py, h3inv.py, h3spots.py) run on every map played, Workshop and server-shared maps
+// included: a crafted map must not take the Mac's memory (2026-10-19, security review). Each runs at nice 10 and is
+// killed past PELOAD_TOOL_MB of resident memory (default PELOAD_NAV_TOOL_MB, else 3072; stock maps peak < 1.5 GB) or
+// after PELOAD_TOOL_SECS (default 600) -- as nav.c does for the walking-graph builder.
+static int st_tool_wait(pid_t pid,const char*what){ int st=0, killed=0; setpriority(PRIO_PROCESS,pid,10);
+    const char*e=getenv("PELOAD_TOOL_MB"); if(!e||!*e) e=getenv("PELOAD_NAV_TOOL_MB"); uint64_t lim=(uint64_t)(e&&*e?atoi(e):3072)<<20;
+    const char*ts=getenv("PELOAD_TOOL_SECS"); double tmax=ts&&*ts?atof(ts):600.0, t0=mono_s();
+    for(;;){ pid_t r=waitpid(pid,&st,WNOHANG); if(r==pid || (r<0 && errno!=EINTR)) break;
+        struct proc_taskinfo ti; int over=proc_pidinfo(pid,PROC_PIDTASKINFO,0,&ti,sizeof ti)==(int)sizeof ti && ti.pti_resident_size>lim;
+        if(!killed && (over || mono_s()-t0>tmax)){ kill(-pid,SIGKILL); kill(pid,SIGKILL); killed=1;
+            char m[300]; int k=snprintf(m,sizeof m,"  [stats] %s passed %s: stopped\n",what,over?"its memory limit":"its time limit"); (void)!write(2,m,k); }
+        usleep(250000); }
+    return killed; }
+static void* st_maptop_wait(void*a){ pid_t pid=(pid_t)(intptr_t)a; char w[160]; snprintf(w,sizeof w,"the map picture tool for %s",g_mt_name);
+    st_tool_wait(pid,w);   // (h3bsp.py writes its files only at the end: a stopped tool leaves the old picture, if any)
     g_mt_state=(!access(g_mt_png,R_OK) && !access(g_mt_js,R_OK))?1:3;   // judged by the files (another waiter may reap the child)
     char m[200]; int k=snprintf(m,sizeof m,"  [stats] map picture for %s: %s\n",g_mt_name,g_mt_state==1?"made":"FAILED (see its .log in maptop/)"); (void)!write(2,m,k); return 0; }
-static void* st_reap_child(void*a){ int st=0; waitpid((pid_t)(intptr_t)a,&st,0); return 0; }   // (no zombie)
+static void* st_reap_child(void*a){ st_tool_wait((pid_t)(intptr_t)a,"a map tool"); return 0; }   // (no zombie; memory / time limits)
 #define ST_MAPTOP_VER 2   // = re-tools/h3bsp.py TOOL_VERSION: older pictures are made again (2026-10-19: Forge canvases cropped to a speck)
 static void st_maptop_ensure(const char*mp,const char*name){
     static char last[96]; if(!name[0] || !mp[0] || !strcmp(last,name)) return; snprintf(last,sizeof last,"%s",name);
@@ -1138,7 +1153,7 @@ static void st_spawns(const uint8_t*tab,int hi,const StPlayer*pl,int np,const ch
         if(g_wt[i].st==1 && g_wt[i].kind==0 && par!=0xFFFFFFFFu){   // a weapon picked up (the first time)
             g_wt[i].st=2; uint32_t holder=par; const char*who=0; int team=-1;
             for(int pass=0;pass<2 && !who;pass++){
-                for(int k=0;k<np;k++) if(pl[k].unit==holder){ who=pl[k].name; uint64_t ud=0; uint16_t hs=*(const uint16_t*)(tab+(holder&0xFFFF)*0x18);
+                for(int k=0;k<np;k++) if(pl[k].unit==holder){ who=pl[k].name; uint64_t ud=0; uint16_t hs=(holder&0xFFFF)<(uint32_t)hi?*(const uint16_t*)(tab+(holder&0xFFFF)*0x18):0;   // (index checked before the read)
                         if((holder&0xFFFF)<(uint32_t)hi && hs==(uint16_t)(holder>>16)) ud=*(const uint64_t*)(tab+(holder&0xFFFF)*0x18+0x10); if(ud) hb_read(ud+0x174,&team,4); break; }
                 if(!who && (holder&0xFFFF)<(uint32_t)hi){ uint64_t hd=*(const uint64_t*)(tab+(holder&0xFFFF)*0x18+0x10); uint32_t up=0xFFFFFFFFu; if(hd && hb_read(hd+0x10,&up,4)) holder=up; else break; } }
             const char*nm=st_wclass(def,t)->nm; if(who) st_event_verb(0,"weapon",who,0,nm,"picked up",team,-1,0,"%s picked up %s",who,nm); }
@@ -1198,7 +1213,8 @@ static void st_snapshot(StBuf*s){
       sb_put(s,",\"spots\":["); int ns=0; for(int i=0;i<(int)(sizeof g_st_spots/sizeof g_st_spots[0]);i++) if(!strcmp(g_st_spots[i].map,m)){
           sb_put(s,"%s{\"id\":\"%s\",\"label\":\"%s\",\"x\":%.1f,\"y\":%.1f,\"z\":%.1f}",ns++?",":"",g_st_spots[i].id,g_st_spots[i].label,g_st_spots[i].x,g_st_spots[i].y,g_st_spots[i].z); }
       st_dyn_load(m); for(int i=0;i<g_st_ndyn;i++)
-          sb_put(s,"%s{\"id\":\"%s\",\"label\":\"%s\",\"x\":%.1f,\"y\":%.1f,\"z\":%.1f}",ns++?",":"",g_st_dyn[i].id,g_st_dyn[i].label,g_st_dyn[i].x,g_st_dyn[i].y,g_st_dyn[i].z);
+          { sb_put(s,"%s{\"id\":",ns++?",":""); sb_str(s,g_st_dyn[i].id); sb_put(s,",\"label\":"); sb_str(s,g_st_dyn[i].label);
+            sb_put(s,",\"x\":%.1f,\"y\":%.1f,\"z\":%.1f}",isfinite(g_st_dyn[i].x)?g_st_dyn[i].x:0.f,isfinite(g_st_dyn[i].y)?g_st_dyn[i].y:0.f,isfinite(g_st_dyn[i].z)?g_st_dyn[i].z:0.f); }
       sb_put(s,"]}"); snprintf(g_st_curmap,sizeof g_st_curmap,"%s",m); }
     if(strcmp(m,g_trk_map)){ memset(g_lasthit,0,sizeof g_lasthit); snprintf(g_trk_map,sizeof g_trk_map,"%s",m); g_ntrk=0; g_nbip=0; memset(g_proj,0,sizeof g_proj); g_hb_local_slot=-1; st_kills_reset(); }   // new map: new match stats
     pthread_mutex_lock(&g_hm_mx); snprintf(g_hm_cur,sizeof g_hm_cur,"%s",m); if(g_hm.dirty && now-g_hm.saved>30){ hm_save(); g_hm.saved=now; } pthread_mutex_unlock(&g_hm_mx);
@@ -1355,15 +1371,52 @@ static void st_rec_file(int fd,const char*req,const char*name){
         while(buf && left>0){ ssize_t n=pread(f,buf,left<(1<<18)?(size_t)left:(size_t)(1<<18),off); if(n<=0 || !st_send(fd,buf,(size_t)n)) break; off+=n; left-=n; }
         free(buf); }
     close(f); }
-static void* st_conn(void*a){ int fd=(int)(intptr_t)a; pthread_setname_np("shim-stats-http");
+// Request checks (2026-10-19, security review; FIXES.md section 18 "Stats server: headers only, Host, Origin"):
+//  - headers are looked up only in the header block (up to the first empty line): the CSRF guard used to be found
+//    anywhere in the request, so a cross-site text/plain POST carrying "\r\nX-Reclaimer-Control: 1" in its BODY (no
+//    preflight) passed it;
+//  - the Host header must name this server by IP literal or "localhost" with our port (a DNS-rebinding page arrives
+//    with its own host name); PELOAD_STATS_HOSTS=<name,...> adds names (e.g. this Mac's .local name for LAN access),
+//    PELOAD_STATS_ANYHOST=1 = the old behaviour;
+//  - a POST carrying an Origin must come from the page itself (http://<Host>).
+static const char* st_hdr(const char*hdrs,const char*name,char*out,size_t on){   // value of header <name> (case-insensitive) or 0
+    size_t nl=strlen(name); for(const char*p=strstr(hdrs,"\r\n"); p; p=strstr(p+2,"\r\n")){ const char*l=p+2;
+        if(!strncasecmp(l,name,nl) && l[nl]==':'){ l+=nl+1; while(*l==' '||*l=='\t') l++; size_t k=0; while(l[k] && l[k]!='\r' && k+1<on){ out[k]=l[k]; k++; }
+            while(k && (out[k-1]==' '||out[k-1]=='\t')) k--; out[k]=0; return out; } }
+    return 0; }
+static int st_host_ok(const char*hdrs){
+    if(getenv("PELOAD_STATS_ANYHOST")) return 1;
+    char v[256]; if(!st_hdr(hdrs,"Host",v,sizeof v)) return 0;
+    char*port=0; if(v[0]=='['){ char*rb=strchr(v,']'); if(!rb) return 0; if(rb[1]==':') port=rb+2; else if(rb[1]) return 0; rb[1]=0; }
+    else { port=strrchr(v,':'); if(port) *port++=0; }
+    if(port ? atoi(port)!=g_st_port : g_st_port!=80) return 0;
+    if(!strcasecmp(v,"localhost") || v[0]=='[') return 1;   // localhost, an IPv6 literal
+    struct in_addr ia; if(inet_pton(AF_INET,v,&ia)==1) return 1;   // an IPv4 literal: nobody else's page can carry it
+    const char*ex=getenv("PELOAD_STATS_HOSTS"); if(ex && *ex){ char w[512]; snprintf(w,sizeof w,"%s",ex); char*sv=0;
+        for(char*t=strtok_r(w,",",&sv); t; t=strtok_r(0,",",&sv)) if(!strcasecmp(t,v)) return 1; }
+    return 0; }
+static int st_origin_ok(const char*hdrs){   // no Origin (curl, the loader's own forwarding) or the page's own
+    char o[300], hv[256]; if(!st_hdr(hdrs,"Origin",o,sizeof o)) return 1; if(!st_hdr(hdrs,"Host",hv,sizeof hv)) return 0;
+    char want[300]; snprintf(want,sizeof want,"http://%s",hv); return !strcasecmp(o,want); }
+static volatile int g_st_conns;   // connections being served (a cap: one thread each)
+static void* st_conn_serve(void*a){ int fd=(int)(intptr_t)a; pthread_setname_np("shim-stats-http");
     int one=1; setsockopt(fd,SOL_SOCKET,SO_NOSIGPIPE,&one,sizeof one); setsockopt(fd,IPPROTO_TCP,TCP_NODELAY,&one,sizeof one);
-    char req[2048]; ssize_t n=recv(fd,req,sizeof req-1,0); if(n<=0){ close(fd); return 0; } req[n]=0;
+    struct timeval rtv={5,0}; setsockopt(fd,SOL_SOCKET,SO_RCVTIMEO,&rtv,sizeof rtv);   // a client that never sends its request
+    // the request line + headers, up to the first empty line (several reads if they come in pieces); a body is never read
+    char req[4096]; size_t n=0; char*he=0;
+    while(n<sizeof req-1){ ssize_t r=recv(fd,req+n,sizeof req-1-n,0); if(r<=0) break; n+=(size_t)r; req[n]=0; if((he=strstr(req,"\r\n\r\n"))) break; }
+    if(!he){ if(n){ const char*bad="HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"; st_send(fd,bad,strlen(bad)); } close(fd); return 0; }
+    he[2]=0;   // req = request line + headers, each header line preceded by "\r\n"
+    if(!st_host_ok(req)){ const char*fb="HTTP/1.1 421 Misdirected Request\r\nContent-Type: text/plain\r\nContent-Length: 63\r\nConnection: close\r\n\r\nThis server answers only to 127.0.0.1, localhost or its own IP.";
+        st_send(fd,fb,strlen(fb)); close(fd); return 0; }
+    const char*cors=getenv("PELOAD_STATS_CORS"); cors=(cors && *cors && strcmp(cors,"0"))?"Access-Control-Allow-Origin: *\r\n":"";   // (opt-in: lets every website read the live data)
     char meth[8]="", path[1024]="/", qs[768]=""; sscanf(req,"%7s %1023s",meth,path); char*q=strchr(path,'?'); if(q){ snprintf(qs,sizeof qs,"%s",q+1); *q=0; }
     char h[512];
     if(!strcmp(path,"/control")){
         // POST + X-Reclaimer-Control header (see st_controls_ok); ?do=<action>
         char act[32]=""; const char*d=strstr(qs,"do="); if(d) sscanf(d+3,"%31[a-z]",act);
-        int hdr=strcasestr(req,"\r\nX-Reclaimer-Control:")!=0, code=!strcmp(meth,"POST")&&hdr?(st_controls_ok()?(st_control(act,qs)?200:400):403):403;
+        char hv[64]; int hdr=st_hdr(req,"X-Reclaimer-Control",hv,sizeof hv)!=0 && st_origin_ok(req),
+            code=!strcmp(meth,"POST")&&hdr?(st_controls_ok()?(st_control(act,qs)?200:400):403):403;
         const char*body=code==200?"{\"ok\":true}":code==400?"{\"ok\":false,\"error\":\"unknown or disabled action\"}":!st_controls_ok()?"{\"ok\":false,\"error\":\"controls are off\"}":"{\"ok\":false,\"error\":\"needs POST with an X-Reclaimer-Control header\"}";
         int k=snprintf(h,sizeof h,"HTTP/1.1 %d %s\r\nContent-Type: application/json\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n%s",code,code==200?"OK":code==400?"Bad Request":"Forbidden",strlen(body),body);
         st_send(fd,h,(size_t)k); }
@@ -1383,7 +1436,7 @@ static void* st_conn(void*a){ int fd=(int)(intptr_t)a; pthread_setname_np("shim-
     else if(strcmp(meth,"GET")){ const char*na="HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"; st_send(fd,na,strlen(na)); }
     else if(!strncmp(path,"/forensics",10) && (!path[10] || path[10]=='/')) fx_http(fd,path,qs,req);   // the forensic archive viewer (forensic.c)
     else if(!strcmp(path,"/events")){ g_st_hits++;
-        int k=snprintf(h,sizeof h,"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\nAccess-Control-Allow-Origin: *\r\n\r\n");
+        int k=snprintf(h,sizeof h,"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n%s\r\n",cors);
         if(st_send(fd,h,(size_t)k)) for(unsigned long seen=0;;){ pthread_mutex_lock(&g_st_mx); while(g_st_seq==seen) pthread_cond_wait(&g_st_cv,&g_st_mx);
                 seen=g_st_seq; size_t len=g_st_len; char*j=malloc(len+16); if(j){ memcpy(j,"data: ",6); memcpy(j+6,g_st_json,len); memcpy(j+6+len,"\n\n",2); } pthread_mutex_unlock(&g_st_mx);
                 int ok=j && st_send(fd,j,len+8); free(j); if(!ok) break; } }
@@ -1398,11 +1451,11 @@ static void* st_conn(void*a){ int fd=(int)(intptr_t)a; pthread_setname_np("shim-
     else if(!strncmp(path,"/recordings/",12)) st_rec_file(fd,req,path+12);
     else if(!strcmp(path,"/heat.json")){
         StBuf b={0}; hm_json(&b);
-        int k=snprintf(h,sizeof h,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %zu\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n",b.n);
+        int k=snprintf(h,sizeof h,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %zu\r\n%sConnection: close\r\n\r\n",b.n,cors);
         if(st_send(fd,h,(size_t)k) && b.n) st_send(fd,b.b,b.n); free(b.b); }
     else if(!strcmp(path,"/stats.json")){ g_st_hits++;
         pthread_mutex_lock(&g_st_mx); size_t len=g_st_len; char*j=malloc(len+1); if(j && g_st_json) memcpy(j,g_st_json,len); else len=0; pthread_mutex_unlock(&g_st_mx);
-        int k=snprintf(h,sizeof h,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %zu\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n",len);
+        int k=snprintf(h,sizeof h,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %zu\r\n%sConnection: close\r\n\r\n",len,cors);
         if(st_send(fd,h,(size_t)k) && len) st_send(fd,j,len); free(j); }
     else if(!strcmp(path,"/")){
         // PELOAD_STATS_PAGE=<file>: serve the page from disk on every request (play.sh sets it in a source checkout, so
@@ -1414,6 +1467,7 @@ static void* st_conn(void*a){ int fd=(int)(intptr_t)a; pthread_setname_np("shim-
         if(st_send(fd,h,(size_t)k)) st_send(fd,pg,pn); free(disk); }
     else { const char*nf="HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"; st_send(fd,nf,strlen(nf)); }
     close(fd); return 0; }
+static void* st_conn(void*a){ __sync_fetch_and_add(&g_st_conns,1); void*r=st_conn_serve(a); __sync_fetch_and_sub(&g_st_conns,1); return r; }
 // PELOAD_STATS_OPEN=1 (play.sh, quiet-run.sh): show the page when the game starts. A tab that is already open reconnects on
 // its own (EventSource retries every few seconds) and reloads itself for the new game (the snapshot's "inst"), so the
 // browser is only asked to open the page (macOS `open <url>`: a new tab, or the browser started) when no page request
@@ -1457,7 +1511,9 @@ static void* st_listen_thread(void*a){ (void)a; pthread_setname_np("shim-stats-l
     g_st_port=port;
     k=snprintf(m,sizeof m,"  [stats] live game stats on http://%s:%d/ (also /stats.json, /events, /forensics)\n",ad,port); (void)!write(2,m,k);
     { const char*o=getenv("PELOAD_STATS_OPEN"); if(o && atoi(o)){ pthread_t ot; pthread_create(&ot,0,st_open_thread,0); pthread_detach(ot); } }
-    for(;;){ int fd=accept(ls,0,0); if(fd<0){ if(errno==EINTR) continue; usleep(100000); continue; } fcntl(fd,F_SETFD,FD_CLOEXEC); pthread_t c; if(pthread_create(&c,0,st_conn,(void*)(intptr_t)fd)) close(fd); else pthread_detach(c); }
+    for(;;){ int fd=accept(ls,0,0); if(fd<0){ if(errno==EINTR) continue; usleep(100000); continue; } fcntl(fd,F_SETFD,FD_CLOEXEC);
+        if(g_st_conns>=128){ close(fd); continue; }   // (a page holds 2-3; a flood of connections gets no more threads)
+        pthread_t c; if(pthread_create(&c,0,st_conn,(void*)(intptr_t)fd)) close(fd); else pthread_detach(c); }
     return 0; }
 static void stats_start(void){ if(!stats_on()) return; pthread_t t; pthread_create(&t,0,st_listen_thread,0); pthread_detach(t); }
 

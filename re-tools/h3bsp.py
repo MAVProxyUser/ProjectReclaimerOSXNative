@@ -21,7 +21,7 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from h3map import H3Map  # noqa: E402
+from h3map import H3Map, _cstr  # noqa: E402
 
 # ----------------------------------------------------------------------------------------------- resources
 ADDR_DEFINITION, ADDR_PRIMARY, ADDR_SECONDARY = 1, 2, 3   # resource address = (type << 29) | offset
@@ -63,7 +63,14 @@ class Resources:
                 idx, self.ext[shared][:0x100].split(b'\0')[0]))
         self.m.f.seek(self.raw_off + off)
         raw = self.m.f.read(csz)
-        data = zlib.decompress(raw, -15) if codec != -1 else raw   # codec 0 = raw deflate
+        if codec != -1:   # codec 0 = raw deflate; never past the page's own size (a deflate bomb in a downloaded map)
+            if not 0 < usz <= PAGE_MAX:
+                raise ValueError('resource page %d: implausible size %d' % (idx, usz))
+            d = zlib.decompressobj(-15); data = d.decompress(raw, usz)
+            if d.unconsumed_tail or len(data) != usz:
+                raise ValueError('resource page %d: does not inflate to its size %d' % (idx, usz))
+        else:
+            data = raw
         self._pages[idx] = data
         return data
 
@@ -91,6 +98,7 @@ class Resources:
 
 
 
+PAGE_MAX = 256 << 20   # one resource page inflated at most (stock maps: a few MB)
 TOOL_VERSION = 2   # 2 = Forge canvases framed by their geometry (2026-10-18 03:25); 1 = no tool_version field
 
 def sid_name(m, v):
@@ -104,8 +112,7 @@ def sid_name(m, v):
         g = m.ns_start[ns] + idx if ns < len(m.ns_start) else -1
     if not (0 <= g < len(m.soffs)) or m.soffs[g] < 0:
         return '<%x>' % v
-    o = m.soffs[g]
-    return m.sblob[o:m.sblob.index(b'\0', o)].decode('latin1')
+    return _cstr(m.sblob, m.soffs[g])
 
 
 def rblock(bufs, buf, off):

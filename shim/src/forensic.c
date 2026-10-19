@@ -375,7 +375,7 @@ static int fx_load(const char*name){
 static int fx_jstr(const char*p,char*o,size_t on){   // a JSON string at p (p at the opening quote) -> UTF-8; returns chars consumed
     const char*s=p; size_t j=0; if(*p!='"'){ o[0]=0; return 0; } p++;
     while(*p && *p!='"'){ unsigned c=(unsigned char)*p++;
-        if(c=='\\'){ char e=*p++; if(e=='u'){ unsigned u=(unsigned)strtoul((char[5]){p[0],p[1],p[2],p[3],0},0,16); p+=4; c=u; if(c>=0x80){
+        if(c=='\\'){ if(!*p) break; char e=*p++; if(e=='u'){ if(!p[0]||!p[1]||!p[2]||!p[3]) break; unsigned u=(unsigned)strtoul((char[5]){p[0],p[1],p[2],p[3],0},0,16); p+=4; c=u; if(c>=0x80){
                     if(c<0x800){ if(j+2<on){ o[j++]=(char)(0xC0|(c>>6)); o[j++]=(char)(0x80|(c&63)); } } else if(j+3<on){ o[j++]=(char)(0xE0|(c>>12)); o[j++]=(char)(0x80|((c>>6)&63)); o[j++]=(char)(0x80|(c&63)); } continue; } }
             else c=e=='n'?'\n':e=='t'?'\t':e=='r'?'\r':e=='b'?'\b':e=='f'?'\f':(unsigned char)e; }
         if(j+1<on) o[j++]=(char)c; }
