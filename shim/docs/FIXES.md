@@ -1402,6 +1402,13 @@ Numbers are from the commit messages; PERF-PLAN.md has the measurements. Compare
   Rosetta, output to /tmp/reclaimer_launcher.log; LSUIElement (no Dock icon of its own) and PELOAD_APP_ICON gives the game
   window's Dock icon the app's icon. install.sh (full and --update) makes it in the install folder and ~/Applications;
   make-usb.sh carries the script and the icon. Not committed: the app itself (.gitignore; it holds a machine's path). (10-19)
+  Fixed the same day (user: "the app did not seem to launch"): /tmp/reclaimer_launcher.log said "/bin/bash: shim/play.sh:
+  Operation not permitted" -- macOS privacy protection (TCC) silently refuses an app whose PROGRAM is a shell script access to
+  a protected folder (this checkout is on the Desktop; Documents / Downloads / USB volumes are protected too). Now the
+  program is a tiny native launcher (shim/src/launcher.c, universal, built by build.sh) that runs Contents/Resources/
+  launch.sh, the bundle is signed ad hoc, and Info.plist carries the Desktop / Documents / Downloads / removable-volume
+  usage strings, so macOS can ask once instead. Checked: double-click (open) starts the menu from the Desktop checkout; a
+  second click while it runs only notifies (game processes 2 -> 2).
 - **Megalo lab** (backlog 72; shim/tools/megalo-lab/megalo_fuzz.py, shim/docs/megalo.md) — Why (user, 2026-10-19: "isolate
   it for us to test the things it supports ... make it crash, corrupt memory"): the client's Megalo compiler is reachable
   without MCC through its own `megalo-check` / `mode-compile` / `mode-check` subcommands (~0.07 s each under the loader).

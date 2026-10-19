@@ -69,6 +69,7 @@ echo "== loader, GL helper, scripts, newest client exe"
 APPST=$(mktemp -d); trap 'rm -rf "$APPST"' EXIT; chmod 755 "$APPST"   # mktemp makes it 0700, which rsync -a would give the stick's app/
 mkdir -p "$APPST/shim/build" "$APPST/shim/tools" "$APPST/shim/docs" "$APPST/shim/assets" "$APPST/re-tools" "$APPST/client"
 ln shim/build/peload shim/build/glhelper "$APPST/shim/build/" 2>/dev/null || cp -p shim/build/peload shim/build/glhelper "$APPST/shim/build/"
+[ -x shim/build/reclaimer-launcher ] && cp -p shim/build/reclaimer-launcher "$APPST/shim/build/"   # Reclaimer.app's program
 cp -pR shim/crt "$APPST/shim/"
 cp -p shim/play.sh shim/target.sh shim/dedicated.sh shim/build.sh "$APPST/shim/"
 cp -p shim/tools/quiet-run.sh shim/tools/servers.sh shim/tools/maptop.sh shim/tools/workshop-helper.sh shim/tools/client-update.sh shim/tools/machine.sh shim/tools/make-app.sh "$APPST/shim/tools/"

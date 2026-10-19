@@ -14,4 +14,6 @@ clang -arch x86_64 $MIN -O1 -framework OpenGL -framework Cocoa -framework CoreTe
 mv -f build/peload.new build/peload
 # the native GL helper (PELOAD_GL_HELPER=1): a native arm64 process that runs the render context's GL calls
 clang -arch arm64 $MIN -O2 -Wno-deprecated-declarations -framework OpenGL -framework IOSurface -framework CoreFoundation -o build/glhelper.new src/glhelper.c && mv -f build/glhelper.new build/glhelper
+# Reclaimer.app's program (shim/tools/make-app.sh): a tiny native launcher; built here so Macs without a compiler get it
+clang -arch arm64 -arch x86_64 $MIN -O2 -o build/reclaimer-launcher.new src/launcher.c && mv -f build/reclaimer-launcher.new build/reclaimer-launcher
 echo "built: build/peload  (run under: arch -x86_64 build/peload <pe> [args])"

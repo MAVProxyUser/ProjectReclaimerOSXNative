@@ -4,7 +4,11 @@
 #   bash shim/tools/make-app.sh                  # -> <this folder>/Reclaimer.app
 #   bash shim/tools/make-app.sh --applications   # ... and a copy in ~/Applications (Launchpad / Spotlight find it there)
 #
-# The app is a small bundle whose program is a shell script with THIS folder's path written into it: it starts
+# The app's program is a tiny signed native launcher (shim/src/launcher.c, built by shim/build.sh) that runs the bundle's
+# Contents/Resources/launch.sh -- a shell script with THIS folder's path written into it. (A script as the bundle's program
+# was silently refused by macOS privacy protection -- "/bin/bash: shim/play.sh: Operation not permitted" -- when the folder
+# is on the Desktop / in Documents / Downloads; a signed Mach-O app gets macOS's one-time "would like to access files in your
+# Desktop folder" prompt instead, and the game inherits the permission.) launch.sh starts
 # shim/play.sh (the menu; RECLAIMER_JOIN etc. still work from a Terminal launch) and writes its output to
 # /tmp/reclaimer_launcher.log (the game's own log stays /tmp/reclaimer_play.log). It
 #   - adds Homebrew's folders to PATH (an app started from Finder has only /usr/bin:/bin:..., so DepotDownloader -- Workshop
@@ -12,8 +16,8 @@
 #   - does nothing but a notification while the game already runs (play.sh would close the running game's leftovers),
 #   - says so in a dialog when Rosetta is missing or this folder has moved (run this script again in the new folder),
 #   - gives the game's Dock icon the app's icon (PELOAD_APP_ICON; the loader itself is a bare executable).
-# It has no Dock icon of its own (LSUIElement): the game window's icon is the one you see. Not signed; made on this Mac, so
-# Gatekeeper does not quarantine it (install.sh also clears the quarantine flag of everything it copies).
+# It has no Dock icon of its own (LSUIElement): the game window's icon is the one you see. Signed ad hoc (codesign -s -), made
+# on this Mac, so Gatekeeper does not quarantine it (install.sh also clears the quarantine flag of everything it copies).
 set -e
 cd "$(dirname "$0")/../.."
 ROOT="$PWD"
@@ -28,7 +32,7 @@ cat > "$APP/Contents/Info.plist" <<EOF
   <key>CFBundleName</key><string>Reclaimer</string>
   <key>CFBundleDisplayName</key><string>Reclaimer</string>
   <key>CFBundleIdentifier</key><string>local.reclaimermac.launcher</string>
-  <key>CFBundleExecutable</key><string>reclaimer</string>
+  <key>CFBundleExecutable</key><string>Reclaimer</string>
   <key>CFBundleIconFile</key><string>Reclaimer</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>$VER</string>
@@ -36,16 +40,21 @@ cat > "$APP/Contents/Info.plist" <<EOF
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>LSUIElement</key><true/>
   <key>NSHighResolutionCapable</key><true/>
+  <key>NSDesktopFolderUsageDescription</key><string>Reclaimer runs the game from its install folder.</string>
+  <key>NSDocumentsFolderUsageDescription</key><string>Reclaimer runs the game from its install folder.</string>
+  <key>NSDownloadsFolderUsageDescription</key><string>Reclaimer runs the game from its install folder.</string>
+  <key>NSRemovableVolumesUsageDescription</key><string>Reclaimer can run the game from a USB stick.</string>
 </dict></plist>
 EOF
 # the folder path, quoted for a single-quoted shell string
 QROOT=$(printf "%s" "$ROOT" | sed "s/'/'\\\\''/g")
-cat > "$APP/Contents/MacOS/reclaimer" <<EOF
+L="$APP/Contents/Resources/launch.sh"
+cat > "$L" <<EOF
 #!/bin/bash
 # Reclaimer.app (made by shim/tools/make-app.sh): starts shim/play.sh in the folder below. Output: /tmp/reclaimer_launcher.log
 ROOT='$QROOT'
 EOF
-cat >> "$APP/Contents/MacOS/reclaimer" <<'EOF'
+cat >> "$L" <<'EOF'
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 alert(){ /usr/bin/osascript -e "display alert \"Reclaimer\" message \"$1\"" >/dev/null 2>&1; }
 note(){ /usr/bin/osascript -e "display notification \"$1\" with title \"Reclaimer\"" >/dev/null 2>&1; }
@@ -62,9 +71,14 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 export PELOAD_APP_ICON="$HERE/Resources/Reclaimer.icns"
 cd "$ROOT" && exec /bin/bash shim/play.sh > /tmp/reclaimer_launcher.log 2>&1 < /dev/null
 EOF
-chmod +x "$APP/Contents/MacOS/reclaimer"
+chmod +x "$L"
+if [ -x shim/build/reclaimer-launcher ]; then cp shim/build/reclaimer-launcher "$APP/Contents/MacOS/Reclaimer"
+else   # (no launcher built: the script itself as the program -- works unless the folder is privacy-protected)
+  printf '#!/bin/bash\nexec /bin/bash "$(dirname "$0")/../Resources/launch.sh"\n' > "$APP/Contents/MacOS/Reclaimer"; fi
+chmod +x "$APP/Contents/MacOS/Reclaimer"
 [ -f shim/assets/Reclaimer.icns ] && cp shim/assets/Reclaimer.icns "$APP/Contents/Resources/"
+/usr/bin/codesign --force --sign - "$APP" >/dev/null 2>&1 || echo "note: could not sign the app (codesign); it may be refused access to a protected folder"
 /usr/bin/touch "$APP"   # Finder / LaunchServices pick up the icon
 echo "made $APP"
-if [ "${1:-}" = --applications ]; then mkdir -p "$HOME/Applications"; rm -rf "$HOME/Applications/Reclaimer.app"; cp -R "$APP" "$HOME/Applications/"
+if [ "${1:-}" = --applications ]; then mkdir -p "$HOME/Applications"; rm -rf "$HOME/Applications/Reclaimer.app"; /usr/bin/ditto "$APP" "$HOME/Applications/Reclaimer.app"
   echo "copied to ~/Applications/Reclaimer.app"; fi

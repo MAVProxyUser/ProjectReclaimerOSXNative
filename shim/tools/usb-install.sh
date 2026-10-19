@@ -71,7 +71,7 @@ app_part(){ echo "== loader -> $APP"
   for d in client shim/build shim/tools shim/crt re-tools; do [ -d "$SRC/app/$d" ] && mkdir -p "$APP/$d" && part "$d" --delete "$SRC/app/$d/" "$APP/$d/"; done
   part "scripts and docs" --exclude=client --exclude=shim/build --exclude=shim/tools --exclude=shim/crt --exclude=re-tools "$SRC/app/" "$APP/"
   xattr -dr com.apple.quarantine "$APP" 2>/dev/null || true
-  chmod +x "$APP/shim/build/peload" "$APP/shim/build/glhelper" "$APP"/shim/*.sh "$APP"/shim/tools/*.sh 2>/dev/null || true; }
+  chmod +x "$APP/shim/build/peload" "$APP/shim/build/glhelper" "$APP/shim/build/reclaimer-launcher" "$APP"/shim/*.sh "$APP"/shim/tools/*.sh 2>/dev/null || true; }
 if [ $UPDATE = 1 ]; then
   [ $DRYRUN = 1 ] && { echo "(dry run: --update copies only $SRC/app -> $APP)"; exit 0; }
   [ -d "$STEAM/common/Halo The Master Chief Collection/halo3" ] || echo "note: no MCC files on this Mac yet -- run install.sh without --update once"
