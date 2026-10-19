@@ -4326,12 +4326,18 @@ static void win_initial_size(double*w,double*h){
 // renders offscreen as usual and the present thread idles (an unshown window is never visible); scripted input
 // (PELOAD_AUTOCLICK) goes to the guest's window procedure, not the NSWindow, so it still works.
 static int win_hidden(void){ static int h=-1; if(h<0){ const char*e=getenv("PELOAD_HIDE_WINDOW"); h=(e&&atoi(e))?1:0; } return h; }
+// PELOAD_APP_ICON=<.icns / .png> (2026-10-19): the Dock icon. The loader is a bare executable, so the Dock shows a generic one;
+// Reclaimer.app (shim/tools/make-app.sh) sets this to its own icon.
+static void cocoa_app_icon(id app){ const char*p=getenv("PELOAD_APP_ICON"); if(!p || !*p || !app) return;
+    id s=((id(*)(id,SEL,const char*))objc_msgSend)((id)ocls("NSString"),osel("stringWithUTF8String:"),p);
+    id img=s?((id(*)(id,SEL,id))objc_msgSend)(om0((id)ocls("NSImage"),"alloc"),osel("initWithContentsOfFile:"),s):0;
+    if(img) ((void(*)(id,SEL,id))objc_msgSend)(app,osel("setApplicationIconImage:"),img); }
 static CGLContextObj cocoa_make_gl_window(int w,int h){
     if(g_nsctx){ return (CGLContextObj)((void*(*)(id,SEL))objc_msgSend)(g_nsctx,osel("CGLContextObj")); }
     objc_autoreleasePoolPush(); // AppKit object creation needs a pool (we never run the runloop); leak it so objects live
     g_nsapp = om0(ocls("NSApplication"),"sharedApplication");
     ((void(*)(id,SEL,long))objc_msgSend)(g_nsapp,osel("setActivationPolicy:"),win_hidden()?1:0); // Regular (Accessory = no Dock icon)
-    om0(g_nsapp,"finishLaunching");
+    om0(g_nsapp,"finishLaunching"); cocoa_app_icon(g_nsapp);
     uint32_t attrs[]={5/*DoubleBuffer*/,99/*Profile*/,0x4100/*4.1 Core*/,8/*ColorSize*/,24,11/*AlphaSize*/,8,12/*DepthSize*/,24,13/*Stencil*/,8,73/*Accelerated*/,72/*NoRecovery*/,0};
     id pf = ((id(*)(id,SEL,const uint32_t*))objc_msgSend)(om0(ocls("NSOpenGLPixelFormat"),"alloc"),osel("initWithAttributes:"),attrs); g_nspf=pf;
     id ctx = ((id(*)(id,SEL,id,id))objc_msgSend)(om0(ocls("NSOpenGLContext"),"alloc"),osel("initWithFormat:shareContext:"),pf,(id)0);
@@ -4738,7 +4744,7 @@ static int d3dgl_make_window(void){
     objc_autoreleasePoolPush();
     id app = om0(ocls("NSApplication"),"sharedApplication");
     ((void(*)(id,SEL,long))objc_msgSend)(app,osel("setActivationPolicy:"),win_hidden()?1:0);
-    om0(app,"finishLaunching");
+    om0(app,"finishLaunching"); cocoa_app_icon(app);
     uint32_t attrs[]={5,99,0x4100,8,24,11,8,12,24,13,8,73,72,0};
     id pf = ((id(*)(id,SEL,const uint32_t*))objc_msgSend)(om0(ocls("NSOpenGLPixelFormat"),"alloc"),osel("initWithAttributes:"),attrs);
     if(!pf){ ws("  [d3dgl] pixel format failed\n"); return 0; }

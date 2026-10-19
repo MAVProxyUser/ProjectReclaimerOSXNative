@@ -62,6 +62,8 @@ part(){ local name="$1"; shift; local log; log=$(mktemp)
   local n; n=$(grep -c '^[>c]f' "$log" || true); rm -f "$log"
   [ "$rc" = 0 ] || { echo "   $name: rsync failed (exit $rc)"; exit 1; }
   echo "   $name: $n file(s) copied"; }
+# Reclaimer.app: a double-clickable launcher for shim/play.sh, in the install folder and ~/Applications (shim/tools/make-app.sh)
+make_app(){ [ -f "$APP/shim/tools/make-app.sh" ] || return 0; echo "== Reclaimer.app"; bash "$APP/shim/tools/make-app.sh" --applications 2>&1 | sed 's/^/   /' || true; }
 app_part(){ echo "== loader -> $APP"
   # --delete only inside the folders the stick owns (an old client exe, binary or script goes); anything else you keep in
   # the install folder stays
@@ -73,10 +75,10 @@ app_part(){ echo "== loader -> $APP"
 if [ $UPDATE = 1 ]; then
   [ $DRYRUN = 1 ] && { echo "(dry run: --update copies only $SRC/app -> $APP)"; exit 0; }
   [ -d "$STEAM/common/Halo The Master Chief Collection/halo3" ] || echo "note: no MCC files on this Mac yet -- run install.sh without --update once"
-  app_part
+  app_part; make_app
   if ls "$SRC"/support/maptop/*.spots.json >/dev/null 2>&1; then echo "== teleport spots -> $SUP/maptop"; mkdir -p "$SUP/maptop"
     part "spots" "$SRC"/support/maptop/*.spots.json "$SUP/maptop/"; fi
-  echo; echo "Updated. Play with:"; echo "   cd \"$APP\" && bash shim/play.sh"; exit 0; fi
+  echo; echo "Updated. Play: double-click Reclaimer in Applications (or Launchpad), or"; echo "   cd \"$APP\" && bash shim/play.sh"; exit 0; fi
 # space: only what this Mac doesn't have yet counts (per part: the stick's size minus the installed size)
 kb(){ local t=0 x; for x in "$@"; do [ -e "$x" ] && t=$((t + $(du -sk "$x" | cut -f1))); done; echo $t; }
 delta(){ local a=$1 b=$2; [ $a -gt $b ] && echo $((a-b)) || echo 0; }
@@ -97,7 +99,7 @@ if [ "$HAVE" -le "$NEED" ]; then
   else echo "not enough free space (free some, or run again with --skip-space-check)"; exit 1; fi
 fi
 
-app_part
+app_part; make_app
 echo "== Reclaimer caches/fonts -> $PFX"
 mkdir -p "$PFX"; part "caches/fonts" "$SRC/drive_c/" "$PFX/"
 if [ -d "$SRC/support" ]; then echo "== map pictures, walking graphs, heatmaps, shader list -> $SUP"; mkdir -p "$SUP"; part "support" "$SRC/support/" "$SUP/"; fi
@@ -118,6 +120,6 @@ if [ -d "$SRC/game" ]; then echo "== MCC files -> $STEAM/common (only new or cha
 xattr -dr com.apple.quarantine "$APP" 2>/dev/null || true
 chmod +x "$APP/shim/build/peload" "$APP/shim/build/glhelper" "$APP"/shim/*.sh "$APP"/shim/tools/*.sh 2>/dev/null || true
 echo
-echo "Installed. Play with:"
+echo "Installed. Play: double-click Reclaimer in Applications (or Launchpad), or"
 echo "   cd \"$APP\" && bash shim/play.sh"
 echo "(first launch: about 20 s to the menu; click the window to use keyboard and mouse, F1 releases it)"

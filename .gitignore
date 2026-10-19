@@ -8,3 +8,6 @@ shim/build/
 shim/crt/
 dist/
 .claude/worktrees/
+
+# made per machine by shim/tools/make-app.sh (holds this folder's path)
+Reclaimer.app/

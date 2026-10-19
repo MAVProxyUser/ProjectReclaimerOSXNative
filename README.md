@@ -142,6 +142,17 @@ own Macs; don't share the stick.
 
 ## Launch
 
+Double-click **Reclaimer** in Applications (or Launchpad / Spotlight). `install.sh` makes the app; in a checkout, make it
+once with:
+
+```bash
+bash shim/tools/make-app.sh --applications
+```
+
+The app starts `shim/play.sh` without a Terminal window, logging to `/tmp/reclaimer_launcher.log` (the game's log is still
+`/tmp/reclaimer_play.log`). While the game runs, clicking it again only shows a notification. If you move the install
+folder, run `make-app.sh` again there. From Terminal it is the same as:
+
 ```bash
 bash shim/play.sh
 ```

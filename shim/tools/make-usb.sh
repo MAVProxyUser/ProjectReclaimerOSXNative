@@ -67,11 +67,12 @@ part(){ local name="$1"; shift; local log; log=$(mktemp)
 echo "== loader, GL helper, scripts, newest client exe"
 # the app folder is staged exactly (--delete): the stick never keeps an old exe, binary or script next to the new ones
 APPST=$(mktemp -d); trap 'rm -rf "$APPST"' EXIT; chmod 755 "$APPST"   # mktemp makes it 0700, which rsync -a would give the stick's app/
-mkdir -p "$APPST/shim/build" "$APPST/shim/tools" "$APPST/shim/docs" "$APPST/re-tools" "$APPST/client"
+mkdir -p "$APPST/shim/build" "$APPST/shim/tools" "$APPST/shim/docs" "$APPST/shim/assets" "$APPST/re-tools" "$APPST/client"
 ln shim/build/peload shim/build/glhelper "$APPST/shim/build/" 2>/dev/null || cp -p shim/build/peload shim/build/glhelper "$APPST/shim/build/"
 cp -pR shim/crt "$APPST/shim/"
 cp -p shim/play.sh shim/target.sh shim/dedicated.sh shim/build.sh "$APPST/shim/"
-cp -p shim/tools/quiet-run.sh shim/tools/servers.sh shim/tools/maptop.sh shim/tools/workshop-helper.sh shim/tools/client-update.sh shim/tools/machine.sh "$APPST/shim/tools/"
+cp -p shim/tools/quiet-run.sh shim/tools/servers.sh shim/tools/maptop.sh shim/tools/workshop-helper.sh shim/tools/client-update.sh shim/tools/machine.sh shim/tools/make-app.sh "$APPST/shim/tools/"
+[ -f shim/assets/Reclaimer.icns ] && cp -p shim/assets/Reclaimer.icns "$APPST/shim/assets/"   # Reclaimer.app's icon (install.sh makes the app)
 for f in h3map h3bsp h3nav h3inv h3dmg h3spots; do [ -f re-tools/$f.py ] && cp -p re-tools/$f.py "$APPST/re-tools/"; done   # map pictures, walking graphs, invisible walls, teleport spots
 for f in mods.md game-options.md FIXES.md; do [ -f shim/docs/$f ] && cp -p shim/docs/$f "$APPST/shim/docs/"; done
 cp -p README.md "$APPST/"; cp -p "$EXE" "$APPST/client/"

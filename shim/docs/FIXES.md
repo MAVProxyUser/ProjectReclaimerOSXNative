@@ -1394,6 +1394,14 @@ Numbers are from the commit messages; PERF-PLAN.md has the measurements. Compare
 
 ## 20. Scripts and RE tools
 
+- **Reclaimer.app: double-click to play** (2026-10-19; user: "a .app I can click ... feels more macish than launching
+  scripts") — shim/tools/make-app.sh, shim/tools/make-icon.py (shim/assets/Reclaimer.icns, an original icon), peload.c
+  `cocoa_app_icon`, install.sh `make_app`. How: a bundle whose program is a shell script holding the install folder's path:
+  Homebrew on PATH (Finder-started apps have only /usr/bin:/bin..., DepotDownloader would be missing), a notification instead
+  of a second launch while the game runs (play.sh would close the running game), dialogs for a moved folder / missing
+  Rosetta, output to /tmp/reclaimer_launcher.log; LSUIElement (no Dock icon of its own) and PELOAD_APP_ICON gives the game
+  window's Dock icon the app's icon. install.sh (full and --update) makes it in the install folder and ~/Applications;
+  make-usb.sh carries the script and the icon. Not committed: the app itself (.gitignore; it holds a machine's path). (10-19)
 - **Megalo lab** (backlog 72; shim/tools/megalo-lab/megalo_fuzz.py, shim/docs/megalo.md) — Why (user, 2026-10-19: "isolate
   it for us to test the things it supports ... make it crash, corrupt memory"): the client's Megalo compiler is reachable
   without MCC through its own `megalo-check` / `mode-compile` / `mode-check` subcommands (~0.07 s each under the loader).
