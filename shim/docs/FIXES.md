@@ -1211,6 +1211,17 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   had no Valhalla spots: with the engine's scenario name known and no recent file matching, halo3/maps/<scenario>.map
   itself is used. Checked live as a guest of our dedicated server: Teleport (far side), the east-cliff spot (boundaries off,
   standing on the cliff, walking around), click-to-teleport. (10-18)
+- **Forge canvases' map pictures were a speck; stale pictures are remade** — re-tools/h3bsp.py `TOOL_VERSION`, stats.c
+  `st_maptop_ensure` (`ST_MAPTOP_VER`), the `/maptop/` server, the page's `pollHeat` / `loadMapTop`. Why (user, 2026-10-19:
+  "alpine heatbox sandbox does not render"; the heatmap showed a grey speck, the player clamped to a corner): Ultimate
+  Forge's sandboxes (Alpine, Desert, Jungle, Savannah, Tundra, Island, Mombasa, Flood) are flat canvases whose 4-9 placed
+  objects sit at the origin, so the picture framed ~36 x 36 units of a 1155 x 1155 canvas. The Forge-canvas framing rule
+  (10-18 03:25) fixed h3bsp.py, but the loader only makes a picture that is MISSING, so these 8, made at 02:41, stayed. How:
+  h3bsp.py writes `"tool_version"` (2); the loader makes a picture with an older or no version again in the background
+  (keeping the old one if it can't: no numpy / no tool; `PELOAD_MAPTOP_KEEP=1` = never remake), and the page fetches the
+  picture again (cache-busted) when the state goes making -> ready. The 8 were remade here, the 39 current ones stamped 2.
+  Also: `/maptop/` served only lower-case names, so HugeGrass Rebalance (`fixedHugeGrassTrapasRemix`) never had a picture
+  on the page (now A-Z and `-` too; `..` still refused). (10-19)
 - **Spots past the boundaries for every map, in a Teleport list** — re-tools/h3spots.py, stats.c `st_dyn_load` /
   `st_spot_find`, the page's `#tpsel`. Why (user: "several known good locations for standing on the other side of what used
   to be boundaries ... for all maps", "a drop down list next to the teleport button"): only two hand-picked Valhalla spots

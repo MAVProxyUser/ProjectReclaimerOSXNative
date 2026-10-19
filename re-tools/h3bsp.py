@@ -90,6 +90,9 @@ class Resources:
         return bufs[ADDR_DEFINITION], base & 0x1FFFFFFF, bufs
 
 
+
+TOOL_VERSION = 2   # 2 = Forge canvases framed by their geometry (2026-10-18 03:25); 1 = no tool_version field
+
 def sid_name(m, v):
     """string id -> text for these builds: 19-bit index, 8-bit namespace at bit 19 (Assembly's MCC stringid layout).
     Namespace 0 indices past namespace 0's count continue after all namespaced strings (h3map.H3Map.sid gets that part
@@ -556,6 +559,9 @@ def main():
         zi.tofile(zpath)
         meta['zgrid'] = {'file': os.path.basename(zpath), 'x0': round(gx0, 4), 'y1': round(gy1, 4), 'cell': 1.0, 'w': gw, 'h': gh,
                          'format': 'int16 LE z*10, -32768 none; row 0 = y1 (north), col 0 = x0; top surface, no z cut'}
+    # bump TOOL_VERSION when the picture's framing or content changes: the loader (stats.c st_maptop_ensure) makes a picture
+    # with an older (or no) tool_version again the next time the map is played
+    meta['tool_version'] = TOOL_VERSION
     jpath = os.path.splitext(opts.out)[0] + '.json'
     with open(jpath, 'w') as f:
         json.dump(meta, f, indent=1)

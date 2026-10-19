@@ -596,6 +596,7 @@ static void* st_maptop_wait(void*a){ pid_t pid=(pid_t)(intptr_t)a; int st=0; whi
     g_mt_state=(!access(g_mt_png,R_OK) && !access(g_mt_js,R_OK))?1:3;   // judged by the files (another waiter may reap the child)
     char m[200]; int k=snprintf(m,sizeof m,"  [stats] map picture for %s: %s\n",g_mt_name,g_mt_state==1?"made":"FAILED (see its .log in maptop/)"); (void)!write(2,m,k); return 0; }
 static void* st_reap_child(void*a){ int st=0; waitpid((pid_t)(intptr_t)a,&st,0); return 0; }   // (no zombie)
+#define ST_MAPTOP_VER 2   // = re-tools/h3bsp.py TOOL_VERSION: older pictures are made again (2026-10-19: Forge canvases cropped to a speck)
 static void st_maptop_ensure(const char*mp,const char*name){
     static char last[96]; if(!name[0] || !mp[0] || !strcmp(last,name)) return; snprintf(last,sizeof last,"%s",name);
     snprintf(g_mt_name,sizeof g_mt_name,"%s",name);
@@ -626,12 +627,17 @@ static void st_maptop_ensure(const char*mp,const char*name){
               posix_spawnattr_t at; posix_spawnattr_init(&at); posix_spawnattr_setflags(&at,POSIX_SPAWN_SETPGROUP|POSIX_SPAWN_CLOEXEC_DEFAULT); posix_spawnattr_setpgroup(&at,0);
               pid_t pid=0; if(!posix_spawn(&pid,"/usr/bin/arch",&fa,&at,av,environ)){ pthread_t th; if(!pthread_create(&th,0,st_reap_child,(void*)(intptr_t)pid)) pthread_detach(th); }
               posix_spawn_file_actions_destroy(&fa); posix_spawnattr_destroy(&at); } } }
-    if(!access(png,R_OK) && !access(js,R_OK)){ g_mt_state=1; return; }
+    int have=!access(png,R_OK) && !access(js,R_OK);
+    if(have){   // made by an older re-tools/h3bsp.py (its "tool_version" below ST_MAPTOP_VER, or none): made again in the background
+        int v=0; FILE*jf=fopen(js,"r"); if(jf){ char jb[4096]; size_t jn=fread(jb,1,sizeof jb-1,jf); jb[jn]=0; fclose(jf);
+            const char*tv=strstr(jb,"\"tool_version\":"); if(tv) v=atoi(tv+15); }
+        if(v>=ST_MAPTOP_VER || getenv("PELOAD_NO_MAPTOP") || getenv("PELOAD_MAPTOP_KEEP")){ g_mt_state=1; return; }
+        char m[300]; int k=snprintf(m,sizeof m,"  [stats] map picture for %s is from an older re-tools/h3bsp.py (version %d < %d): making it again\n",name,v,ST_MAPTOP_VER); (void)!write(2,m,k); }
     if(getenv("PELOAD_NO_MAPTOP")){ g_mt_state=4; return; }
     char tool[1100]; const char*e=getenv("PELOAD_MAPTOP_TOOL");
     if(e&&*e) snprintf(tool,sizeof tool,"%s",e);
     else { char exe[1024]; uint32_t es=sizeof exe; tool[0]=0; if(!_NSGetExecutablePath(exe,&es)){ char*sl=strrchr(exe,'/'); if(sl){ *sl=0; snprintf(tool,sizeof tool,"%s/../../re-tools/h3bsp.py",exe); } } }
-    if(!tool[0] || access(tool,R_OK)){ g_mt_state=4; char m[1200]; int k=snprintf(m,sizeof m,"  [stats] no map picture for %s: %s not found\n",name,tool[0]?tool:"h3bsp.py"); (void)!write(2,m,k); return; }
+    if(!tool[0] || access(tool,R_OK)){ if(have){ g_mt_state=1; return; } g_mt_state=4; char m[1200]; int k=snprintf(m,sizeof m,"  [stats] no map picture for %s: %s not found\n",name,tool[0]?tool:"h3bsp.py"); (void)!write(2,m,k); return; }
     mkdir(dir,0755);
     // native python3 (the loader runs under Rosetta: a plain spawn would pick python's x86_64 slice, without numpy)
     char*argv[]={(char*)"/usr/bin/arch",(char*)"-arm64",(char*)"python3",tool,(char*)mp,png,(char*)"--size",(char*)"1024",0}; extern char**environ;
@@ -639,7 +645,7 @@ static void st_maptop_ensure(const char*mp,const char*name){
     posix_spawn_file_actions_addopen(&fa,1,lg,O_WRONLY|O_CREAT|O_TRUNC,0644); posix_spawn_file_actions_adddup2(&fa,1,2);
     posix_spawnattr_t at; posix_spawnattr_init(&at); posix_spawnattr_setflags(&at,POSIX_SPAWN_SETPGROUP|POSIX_SPAWN_CLOEXEC_DEFAULT); posix_spawnattr_setpgroup(&at,0);   // only its stdio
     pid_t pid=0; int r=posix_spawn(&pid,"/usr/bin/arch",&fa,&at,argv,environ); posix_spawn_file_actions_destroy(&fa); posix_spawnattr_destroy(&at);
-    if(r){ g_mt_state=3; return; }
+    if(r){ g_mt_state=have?1:3; return; }
     g_mt_state=2; { char m[1200]; int k=snprintf(m,sizeof m,"  [stats] making the map picture for %s (%s)\n",name,mp); (void)!write(2,m,k); }
     pthread_t th; pthread_create(&th,0,st_maptop_wait,(void*)(intptr_t)pid); pthread_detach(th); }
 static void hm_json(StBuf*s){ pthread_mutex_lock(&g_hm_mx);
@@ -1367,7 +1373,7 @@ static void* st_conn(void*a){ int fd=(int)(intptr_t)a; pthread_setname_np("shim-
     else if(!strncmp(path,"/maptop/",8)){
         // top-down map pictures made from the .map files (shim/tools/maptop.sh -> re-tools/h3bsp.py):
         // ~/Library/Application Support/ReclaimerMac/maptop/<map>.png + <map>.json (world bounds)
-        const char*nm=path+8; size_t L=strlen(nm); int ok=L>4 && L<64; for(size_t i=0;ok && i<L;i++){ char c=nm[i]; ok=(c>='a'&&c<='z')||(c>='0'&&c<='9')||c=='_'||c=='.'; }
+        const char*nm=path+8; size_t L=strlen(nm); int ok=L>4 && L<64; for(size_t i=0;ok && i<L;i++){ char c=nm[i]; ok=(c>='a'&&c<='z')||(c>='A'&&c<='Z')||(c>='0'&&c<='9')||c=='_'||c=='-'||c=='.'; }   // (upper case: Workshop stems such as fixedHugeGrassTrapasRemix)
         const char*ct=ok&&L>4&&!strcmp(nm+L-4,".png")?"image/png":ok&&L>5&&!strcmp(nm+L-5,".json")?"application/json":ok&&L>6&&!strcmp(nm+L-6,".z.bin")?"application/octet-stream":0;   // .z.bin: ground heights (teleport here)
         char fp[1024]; const char*home=getenv("HOME"); FILE*f=0; if(ct && !strstr(nm,"..")){ snprintf(fp,sizeof fp,"%s/Library/Application Support/ReclaimerMac/maptop/%s",home?home:"",nm); f=fopen(fp,"rb"); }
         char*buf=0; long n=0; if(f){ fseek(f,0,SEEK_END); n=ftell(f); fseek(f,0,SEEK_SET); if(n>0 && n<(32<<20) && (buf=malloc((size_t)n)) && fread(buf,1,(size_t)n,f)==(size_t)n){} else { free(buf); buf=0; } fclose(f); }
