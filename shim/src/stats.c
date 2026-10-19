@@ -699,6 +699,31 @@ static int st_forward(const char*hostport,const char*qs){
         if(k>0 && k<(int)sizeof rq && send(fd,rq,(size_t)k,0)==k){ char rs[256]; ssize_t n=recv(fd,rs,sizeof rs-1,0); if(n>0){ rs[n]=0; ok=strstr(rs,"\"ok\":true")!=0; } } }
     close(fd); char m[300]; int k=snprintf(m,sizeof m,"  [host] forwarded to the host %s: %s -> %s\n",hostport,qs,ok?"done":"refused / unreachable"); (void)!write(2,m,(size_t)k); return ok; }
 static int st_forward_tp(const char*hostport,int slot,int who){ char q[96]; snprintf(q,sizeof q,"do=tpnext&slot=%d&who=%d",slot,who); return st_forward(hostport,q); }
+// ---- Movement assist gate (hitbox.c hb_assist_frame; FIXES.md section 18): only on THIS Mac's dedicated server. The
+// switch exists only with PELOAD_TELEPORT_HOST on loopback (play.sh sets it when joining our dedicated.sh server); while
+// it is on, every 2 s that server's own stats page must say "dedicated" and list our player by name, else it stays off.
+extern volatile float g_hb_assist_k; extern volatile int g_hb_assist_ok;
+static char g_st_local_name[64];
+static int st_assist_allowed(void){ const char*hp=getenv("PELOAD_TELEPORT_HOST"); return hp && (!strncmp(hp,"127.",4) || !strncmp(hp,"localhost:",10)); }
+static char* st_http_get(const char*hostport,const char*path){   // the body of a GET to a local loader (<= 8 MB), malloc'd
+    char host[64]; int port=8765; if(sscanf(hostport,"%63[^:]:%d",host,&port)<1) return 0; if(!strcmp(host,"localhost")) snprintf(host,sizeof host,"127.0.0.1");
+    int fd=socket(AF_INET,SOCK_STREAM,0); if(fd<0) return 0; struct sockaddr_in a; memset(&a,0,sizeof a); a.sin_family=AF_INET; a.sin_port=htons((uint16_t)port); a.sin_addr.s_addr=inet_addr(host);
+    struct timeval tv={2,0}; setsockopt(fd,SOL_SOCKET,SO_RCVTIMEO,&tv,sizeof tv); setsockopt(fd,SOL_SOCKET,SO_SNDTIMEO,&tv,sizeof tv);
+    if(connect(fd,(struct sockaddr*)&a,sizeof a)){ close(fd); return 0; }
+    char rq[300]; int k=snprintf(rq,sizeof rq,"GET %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n",path,hostport);
+    if(k<=0 || k>=(int)sizeof rq || send(fd,rq,(size_t)k,0)!=k){ close(fd); return 0; }
+    size_t cap=1<<16, n=0; char*b=malloc(cap); if(!b){ close(fd); return 0; }
+    for(;;){ if(n+1>=cap){ if(cap>=(8u<<20)) break; char*nb=realloc(b,cap*2); if(!nb) break; b=nb; cap*=2; } ssize_t r=recv(fd,b+n,cap-1-n,0); if(r<=0) break; n+=(size_t)r; }
+    close(fd); b[n]=0; char*body=strstr(b,"\r\n\r\n"); if(!body){ free(b); return 0; } memmove(b,body+4,strlen(body+4)+1); return b; }
+static void st_assist_tick(double now){
+    static double next; if(now<next) return; next=now+2.0;
+    int ok=0;
+    if(g_hb_assist_k>1.0f && st_assist_allowed() && g_st_local_name[0]){
+        char*j=st_http_get(getenv("PELOAD_TELEPORT_HOST"),"/stats.json");
+        if(j){ StBuf nb={0}; sb_put(&nb,"\"name\":"); sb_str(&nb,g_st_local_name);   // our player, as that server's JSON writes it
+            ok=strstr(j,"\"dedicated\":true")!=0 && nb.b && strstr(j,nb.b)!=0; free(nb.b); free(j); } }
+    if(ok!=g_hb_assist_ok){ g_hb_assist_ok=ok; char m[160]; int k=snprintf(m,sizeof m,"  [assist] movement x%.1f %s\n",(double)g_hb_assist_k,
+            ok?"ON (in a game on this Mac's dedicated server)":"off"); (void)!write(2,m,(size_t)k); } }
 static int g_st_fwd_speed=-1;   // the speed index last set on our host through it (-1: not since we started)
 // Spots past the map's edges, tested alive with the boundaries off (shim/docs/map-boundaries.md)
 typedef struct { const char*map, *id, *label; float x,y,z; } StSpot;
@@ -876,6 +901,11 @@ static int st_control(const char*act,const char*qs){
     // Movement speed for everyone, in a game you host: the game variant's base player traits (game_globals +0x1608
     // +0x134, speed byte +0x10: tl_speed's index, 0 = unchanged, 5 = 100%). The host recomputes every player's traits
     // from the variant each tick and sends them to the clients (halo3-variant-traits.md), so joined players move at it.
+    // Movement assist (hitbox.c hb_assist_frame): k in (1, 2.4], 0 = off; only where st_assist_allowed (our local server)
+    if(!strcmp(act,"assist")){ if(!st_assist_allowed()) return 0; const char*v=strstr(qs,"k="); float k=v?strtof(v+2,0):0.0f;
+        if(!(k>1.0f)) k=0.0f; if(k>2.4f) k=2.4f;
+        g_hb_assist_k=k; if(!(k>1.0f)) g_hb_assist_ok=0;
+        char m[96]; int n=snprintf(m,sizeof m,"  [assist] page: movement x%.1f requested\n",(double)k); (void)!write(2,m,(size_t)n); return 1; }
     if(!strcmp(act,"speed")){ const char*v=strstr(qs,"v="); int sp=v?atoi(v+2):-1; if(sp<0 || sp>=(int)(sizeof tl_speed/sizeof*tl_speed)) return 0;
         if(!st_is_host()){ const char*hp=getenv("PELOAD_TELEPORT_HOST"); if(!hp) return 0; char q[32]; snprintf(q,sizeof q,"do=speed&v=%d",sp); int ok=st_forward(hp,q); if(ok) g_st_fwd_speed=sp; return ok; }
         uint64_t gg=0; uint8_t mode=0; if(!g_st_tls || !hb_read(g_st_tls+0x48,&gg,8) || !gg || !hb_read(gg+0x10,&mode,1) || mode!=2) return 0;
@@ -1208,6 +1238,8 @@ static void st_snapshot(StBuf*s){
           !wa_mic_mode()||wa_mic_mode()==3?"off":wa_mic_muted()?"muted":wa_mic_mode()==2?"tone":"live",g_mic_streams>0?"true":"false");
       { int si=-1; uint64_t gg=0; uint8_t b=0; if(st_is_host()){ if(g_st_tls && hb_read(g_st_tls+0x48,&gg,8) && gg && hb_read(gg+0x1608+0x134+0x10,&b,1)) si=b; } else si=g_st_fwd_speed;
         sb_put(s,",\"speed_idx\":%d",si); }
+      st_assist_tick(now);
+      sb_put(s,",\"assist\":{\"available\":%s,\"k\":%.2f,\"active\":%s}",st_assist_allowed()?"true":"false",(double)g_hb_assist_k,g_hb_assist_ok?"true":"false");
       sb_put(s,",\"quality\":"); sb_str(s,g_st_qual); sb_put(s,",\"quality_pending\":"); sb_str(s,g_st_qual_want);   // the movement speed index (tl_speed; 0 = the variant's own, 9 = 200%%), -1 unknown
       st_overlay_features(s);   // the overlay panel's per-feature settings (the keys above stay for older pages)
       sb_put(s,",\"spots\":["); int ns=0; for(int i=0;i<(int)(sizeof g_st_spots/sizeof g_st_spots[0]);i++) if(!strcmp(g_st_spots[i].map,m)){
@@ -1246,7 +1278,7 @@ static void st_snapshot(StBuf*s){
             if(d2<(r+0.3f)*(r+0.3f)){ best=h; inside=1; break; }
             float a=v[0]*fwd[0]+v[1]*fwd[1]+v[2]*fwd[2], perp2=d2-a*a; if(a>0.3f && a<6.0f && perp2<(r+0.4f)*(r+0.4f) && a<bd){ bd=a; best=h; } }
         (void)inside; if(best!=0xFFFFFFFFu) for(int k=0;k<np;k++) if(pl[k].unit==best){ g_hb_local_slot=pl[k].slot; break; } }
-    g_hb_local_unit=0xFFFFFFFFu; for(int k=0;k<np;k++) if(pl[k].slot==g_hb_local_slot){ g_hb_local_unit=pl[k].unit; break; }
+    g_hb_local_unit=0xFFFFFFFFu; for(int k=0;k<np;k++) if(pl[k].slot==g_hb_local_slot){ g_hb_local_unit=pl[k].unit; snprintf(g_st_local_name,sizeof g_st_local_name,"%s",pl[k].name); break; }
     // shots: every projectile that ended since the last snapshot (hitbox.c's object_delete hook), with the biped it
     // hit if any; without the hook, count the projectiles seen in flight (misses most bullets)
     if(g_hb_delhook){ static unsigned seen; unsigned n=__atomic_load_n(&g_hbshot_n,__ATOMIC_ACQUIRE); if(n-seen>8192) seen=n-8192;

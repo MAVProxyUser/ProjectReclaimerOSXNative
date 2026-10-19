@@ -11510,7 +11510,8 @@ void __attribute__((ms_abi)) hb_on_delete(uint32_t handle);
 // ticks -- the safe point for engine jobs (teleport, stats page voice mutes).
 static void __attribute__((ms_abi)) hb_frame_hook(void){
     if(__builtin_expect(g_st_voice_pending,0)) st_voice_jobs();   // stats page voice mutes (stats.c)
-    if(__builtin_expect(g_hb_job_pending,0)) hb_engine_jobs(); }
+    if(__builtin_expect(g_hb_job_pending,0)) hb_engine_jobs();
+    if(__builtin_expect(g_hb_assist_ok && g_hb_assist_k>1.0f,0)) hb_assist_frame(); }   // movement assist (our local server only)
 static void hbdel_install(uint8_t*base){
     // main_loop_body (halo3+0xb2250): the engine main thread, once per frame, before the frame's ticks -- where the
     // Reclaimer client itself runs teleports (shim/docs/teleport.md). (The old hook, halo3+0x9d22c, is a ms timer

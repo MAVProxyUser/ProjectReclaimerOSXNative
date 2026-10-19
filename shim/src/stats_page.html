@@ -747,11 +747,17 @@ function renderOverlay(){ const o=snap&&snap.overlay; if(!o) return; renderPanel
   // exploring past the map's edges (games you host with PELOAD_ALLOW_TELEPORT=1): boundaries switch + this map's spots
   { const ex=document.getElementById('expl'), can=o.controls&&o.teleport&&o.host, fwd=o.controls&&!o.host&&o.tp_forward, spots=(can||fwd)?(o.spots||[]):[];
     const sp2=o.speed_idx===9, cansp=o.controls&&(o.host||fwd)&&('speed_idx' in o);   // ('speed_idx': a loader that forwards speed)
-    const key=JSON.stringify([spots.map(p=>p.id),o.bounds_off,o.invwalls_off,can,fwd,sp2,cansp]);
+    const asv=o.assist||{}, asOn=asv.k>1;   // movement assist: this client, on our local dedicated server only
+    const key=JSON.stringify([spots.map(p=>p.id),o.bounds_off,o.invwalls_off,can,fwd,sp2,cansp,asv.available,asOn,asv.active]);
     if(ex.dataset.k!==key){ ex.dataset.k=key; ex.textContent='';
       // 2x speed for everyone (the host's variant trait): games you host, or a client of our local server (forwarded)
       if(cansp){ const b=document.createElement('button'); b.dataset.a='speed2x'; b.classList.toggle('on',sp2); b.textContent=sp2?'Speed 2x (on)':'Speed 2x';
         b.disabled=!cansp; b.title=cansp?(sp2?'Everyone moves at 200%. Click for the game\'s own speed.':'Everyone (you and anyone who joined) moves at 200% -- for exploring big maps.'):'only in a game you host, or on our local server (dedicated.sh)'; ex.appendChild(b); }
+      // your own movement x2.4 through small client-side steps (the host adopts positions within 2.5 units): our local server only
+      if(o.controls && asv.available){ const b=document.createElement('button'); b.dataset.a='assist'; b.classList.toggle('on',asOn);
+        b.textContent=asOn?(asv.active?'Run 2.4x (on)':'Run 2.4x (waiting for the local server)'):'Run 2.4x';
+        b.title=asOn?'Your stick movement is multiplied by small position steps the local server adopts. Click to stop.':'Only on this Mac\'s own dedicated server: your movement x2.4 through small position steps (a test of the server\'s trust in client positions).';
+        ex.appendChild(b); }
       if(o.bounds_off!==null && o.bounds_off!==undefined){ const b=document.createElement('button'); b.dataset.a='bounds'; b.classList.toggle('on',!!o.bounds_off);
         b.textContent=o.bounds_off?'Boundaries off':'Boundaries on'; b.disabled=!(can||fwd);
         b.title=can?(o.bounds_off?'Kill zones, safe zones and soft ceilings are skipped for players. Click to turn them back on.':'Click to switch off the kill zones, safe zones and soft ceilings for players (games you host).'):'host the game with PELOAD_ALLOW_TELEPORT=1'; ex.appendChild(b); }
@@ -776,7 +782,7 @@ document.getElementById('ov').addEventListener('click',async e=>{ const b=e.targ
   const msg=document.getElementById('ovmsg');
   const ov=snap&&snap.overlay, extra=b.dataset.a==='spar'?'&on='+(ov&&ov.spar?0:1):b.dataset.a==='bounds'?'&off='+(ov&&ov.bounds_off?0:1):b.dataset.a==='invwalls'?'&off='+(ov&&ov.invwalls_off?0:1):b.dataset.a==='explore'?'&spot='+encodeURIComponent(b.dataset.spot):b.dataset.a==='mic'?'&on='+(ov&&ov.mic==='muted'?1:0):'';
   const tps=document.getElementById('tpsel').value;   // Teleport goes where the list beside it says
-  const q=b.dataset.a==='speed2x'?'speed&v='+(ov&&ov.speed_idx===9?0:9):(b.dataset.a==='teleport'&&tps)?'explore&spot='+encodeURIComponent(tps):b.dataset.a+extra;
+  const q=b.dataset.a==='speed2x'?'speed&v='+(ov&&ov.speed_idx===9?0:9):b.dataset.a==='assist'?'assist&k='+(ov&&ov.assist&&ov.assist.k>1?0:2.4):(b.dataset.a==='teleport'&&tps)?'explore&spot='+encodeURIComponent(tps):b.dataset.a+extra;
   try{ const r=await fetch('/control?do='+q,{method:'POST',headers:{'X-Reclaimer-Control':'1'}}); const j=await r.json();
     msg.textContent=j.ok?(b.dataset.a==='capture'?'captured: ~/reclaimer_cap_*.bmp/.txt':''):(j.error||'failed'); }
   catch(err){ msg.textContent='not connected'; } });
