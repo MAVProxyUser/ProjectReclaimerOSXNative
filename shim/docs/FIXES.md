@@ -1482,6 +1482,10 @@ Numbers are from the commit messages; PERF-PLAN.md has the measurements. Compare
   /tmp/reclaimer_play.log. The display scale is the loader's (section 14), read live. Checked: this M4 Max -> 8 workers,
   no change; a stand-in M1 (fake sysctl / ioreg) on a profile copy -> 2 workers, Medium written once, kept on the next run;
   the client reads it ("Graphics quality: one view Medium"). (10-18)
+  Added 10-19: a base-tier GPU gets a 60 fps frame cap by default (PELOAD_MAX_FPS=60 unless set; =0 uncaps) -- frames past the
+  panel's 60 Hz are never shown and only heat a fanless MacBook Air into throttling; and PELOAD_MONITOR=<w>x<h> (peload.c
+  mon_wh, any Mac, opt-in) sets the monitor size the loader reports (1920x1080 otherwise), which the client uses as its
+  "native" render resolution -- 1600x900 or 1280x720 lowers the internal render resolution on a weak GPU.
 
 ## 21. Superseded workarounds (kept for history; most switches still exist)
 

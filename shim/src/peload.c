@@ -3673,9 +3673,16 @@ static int64_t MSABI i_DispatchMessageW(const void*m){ if(!m) return 0; const ui
     if(w&&w->magic==WWIN_MAGIC&&w->wndproc){ if(getenv("PELOAD_TRACE_MSG")){ char b[64]; int k=snprintf(b,sizeof b,"  [msg] dispatch 0x%x -> wndproc\n",msg); ws(b);} return w->wndproc(w,msg,wp,lp); } return 0; }
 static int    MSABI i_TranslateMessage(const void*m){ (void)m; return 0; }
 static void*  MSABI i_DefRawHandle(void){ return (void*)0x4857; }
-// display/monitor: report a single 1920x1080 primary monitor
-#define MON_W 1920
-#define MON_H 1080
+// display/monitor: report a single primary monitor, 1920x1080 unless PELOAD_MONITOR=<w>x<h> (2026-10-19). The client's
+// "native" render resolution IS this size ("Configured native render resolution: 1920x1080"), so a smaller one lowers the
+// internal render resolution -- a knob for a base-tier GPU (M1); the window keeps its own size.
+static void mon_wh(int*w,int*h){ static int W, H; if(!W){ int a=0,b=0; const char*e=getenv("PELOAD_MONITOR");
+        if(e && sscanf(e,"%dx%d",&a,&b)==2 && a>=640 && b>=360 && a<=7680 && b<=4320){ W=a; H=b; } else { W=1920; H=1080; } }
+    *w=W; *h=H; }
+static int mon_w(void){ int w,h; mon_wh(&w,&h); return w; }
+static int mon_h(void){ int w,h; mon_wh(&w,&h); return h; }
+#define MON_W mon_w()
+#define MON_H mon_h()
 static void*  MSABI i_MonitorFromWindow(void*h,uint32_t f){ (void)h;(void)f; return (void*)0x4D01; }
 static void*  MSABI i_MonitorFromPoint(uint64_t pt,uint32_t f){ (void)pt;(void)f; return (void*)0x4D01; }
 static void*  MSABI i_MonitorFromRect(const void*r,uint32_t f){ (void)r;(void)f; return (void*)0x4D01; }

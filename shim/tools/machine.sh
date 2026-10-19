@@ -59,4 +59,11 @@ fi
 # 8 GB: the background walking-graph tool (re-tools/h3nav.py, made once per new map) may take up to 4 GB -- capped at 1 GB here
 if [ "$MACH_MEMGB" -gt 0 ] && [ "$MACH_MEMGB" -le 8 ]; then export PELOAD_NAV_TOOL_MB="${PELOAD_NAV_TOOL_MB:-1024}"
   MACH_DO="$MACH_DO, map-tool memory cap 1 GB; note: 8 GB is tight for big matches (~13 GB in use) -- close other apps, prefer smaller games"; fi
+# base-tier GPU: cap the frame rate at the panel's 60 Hz (2026-10-19). Frames past 60 are never shown on these Macs' screens,
+# and on a fanless MacBook Air they only heat it into throttling (sustained fps drops). PELOAD_MAX_FPS=0 = uncapped; a value
+# you set wins. A lower internal render resolution is a separate, opt-in knob: PELOAD_MONITOR=1600x900 (or 1280x720) --
+# the client's "native" render resolution is the monitor size the loader reports (1920x1080 otherwise).
+if [ "$MACH_TIER" = base ] && [ -z "${PELOAD_MAX_FPS+x}" ]; then export PELOAD_MAX_FPS=60
+  MACH_DO="$MACH_DO, frame cap 60 fps (the panel's rate; PELOAD_MAX_FPS=0 uncaps)"; fi
+[ -n "${PELOAD_MONITOR:-}" ] && MACH_DO="$MACH_DO, render resolution $PELOAD_MONITOR (PELOAD_MONITOR)"
 MACH_LINE="[machine] $MACH_CHIP: $MACH_PCORES performance + $MACH_ECORES efficiency cores, $MACH_GPU GPU cores ($MACH_TIER), ${MACH_MEMGB} GB -> $MACH_DO"
