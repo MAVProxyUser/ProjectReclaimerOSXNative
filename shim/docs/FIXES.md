@@ -693,8 +693,15 @@ patch variants by signature (section 16; shim/docs/patch-addresses.md).
   trusted (32 GB calloc per draw) -> <= 4096, calloc checked; (9) chunk counts up to 2^32 looped -> <= 64; (10) indexable
   temps capped at D3D's 4096. Checked: all 7,600 dumped stock shaders (~/reclaimer_shaders) translate to byte-identical GLSL
   (the same 7 fail before and after). Open: GPU-side relative indices are not clamped (undefined reads in GLSL; D3D reads
-  0); the text passes over big shaders are quadratic; texel offsets (aoffimmi) are decoded and then dropped (line 142 resets
-  has_aoff) -- a rendering bug, to be fixed with a visual check. (10-19)
+  0); the text passes over big shaders are quadratic. (10-19)
+- **Texel offsets (aoffimmi) reach the GLSL** (2026-10-19) — dxbc2glsl.c `dg_decode_program`. Why: since the first translator
+  (10-16) the flag was set while decoding the extended opcode tokens and RESET on the next line, so every `sample` /
+  `sample_l` / `sample_b` / `sample_d` / `ld` with an immediate offset sampled its centre texel: the final composite
+  (scene + bloom + colour grading, 4 pixel shaders) and 4 post-process shaders take 16 bloom / blur taps at offsets
+  (-2..1, -2..1) that all collapsed to one -- bloom and blur blockier than Halo 3 draws them. (The 10-16 "translator
+  correctness sweep" entry below lists aoffimmi offsets as fixed; they never were.) How: the flag is cleared before the
+  extended tokens. 8 of the 7,600 dumped stock shaders change (90 textureOffset taps); all 8 compile in a GL 4.1 core
+  context. Visual check pending. Old: `PELOAD_D3DGL_NOAOFF=1`. (10-19)
 
 The translator: shim/src/dxbc2glsl.c (in-process, `dg_*`), with re-tools/dxbc2glsl.py kept byte-identical as the test
 oracle. Fixes below apply to both unless noted.

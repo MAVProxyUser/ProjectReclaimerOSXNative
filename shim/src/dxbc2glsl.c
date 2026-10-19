@@ -141,10 +141,13 @@ static int dg_decode_program(const uint8_t*d,size_t len,size_t base,size_t size,
         size_t o=i+4;
         // extended opcode tokens: type 1 = SAMPLE_CONTROLS -> immediate texel offsets (aoffimmi(u,v,w), 4-bit
         // two's complement at bits 9/13/17). FXAA/bloom/blur taps use them; dropping them collapses the taps.
+        ins[n].has_aoff=0;   // (before the extended tokens: it was reset AFTER them, so no offset ever reached the GLSL until
+                             // 2026-10-19; PELOAD_D3DGL_NOAOFF=1 = that old behaviour)
         if(ext){ for(;;){ uint32_t et=dg_u32(d,len,o); o+=4;
                 if((et&0x3f)==1){ ins[n].has_aoff=1; for(int c=0;c<3;c++){ int v=(int)((et>>(9+4*c))&0xf); if(v&8) v-=16; ins[n].aoff[c]=v; } }
                 if(!(et>>31) || o>=i+(size_t)ln*4) break; } }
-        ins[n].op=op; ins[n].name=nm; ins[n].test=test; ins[n].nop=0; ins[n].tok=tok; ins[n].has_aoff=0;
+        { static int noaoff=-1; if(noaoff<0) noaoff=getenv("PELOAD_D3DGL_NOAOFF")!=0; if(noaoff) ins[n].has_aoff=0; }
+        ins[n].op=op; ins[n].name=nm; ins[n].test=test; ins[n].nop=0; ins[n].tok=tok;
         for(int k=0;k<4;k++) ins[n].raw[k]=dg_u32(d,len,i+4+4*k);   // raw operand dwords (dcl_indexable_temp)
         size_t stop=i+(size_t)ln*4;
         if(!dg_noperand_op(op)){
