@@ -4,7 +4,7 @@ Kept current as work lands. Open items are ranked (the order they are worked); f
 
 ## Open
 
-Ranked (2026-10-19 01:40): open -- 73 spot testing (72 and 74 closed by the user), then 73 spot testing (moved to the END by the user). Watching: the one "2D is unloadable" texture. Spots: 243 verified on 40 maps. Mod / stats-server security review done (shim/docs/mod-files-security.md).
+Ranked (2026-10-19 01:40): open -- nothing (72 and 74 closed by the user, 73 done), then 73 spot testing (moved to the END by the user). Watching: the one "2D is unloadable" texture. Spots: 243 verified on 40 maps. Mod / stats-server security review done (shim/docs/mod-files-security.md).
 
 | # | Item | Status / notes |
 |---|---|---|
@@ -72,7 +72,7 @@ Ranked (2026-10-19 01:40): open -- 73 spot testing (72 and 74 closed by the user
 | 57 | **Death heatmap: separate map labels** (user, 2026-10-18: "names on map, and X/Y should be separate check boxes, so should health / shield ... the names should stack") | DONE (offline-tested): checkboxes names / x/y / health / shield (remembered); each player's label lines stack (name, x/y, health + shield), placed to avoid other labels, dots and vehicle markers; leftovers counted. |
 | 72 | **Megalo VM robustness** (user, 2026-10-19: "isolate it for us to test the things it supports, and IF any hidden Megalo functions are baked in, or if we can type confuse it, make it crash, corrupt memory in a controllable way") | CLOSED by the user 2026-10-19 (static + compile side done: shim/docs/megalo.md; the runtime cases there are documented, not run) |
 | 74 | **Security follow-ups** (review 2026-10-19, shim/docs/mod-files-security.md) | CLOSED by the user 2026-10-19. Done: the review and its fixes (FIXES 4, 11, 15, 18, 20), texel offsets, BCrypt traced, a write-up for the developers. Not done (documented in shim/docs/mod-files-security.md): the loader path sandbox, per-map caches keyed by stem, GPU-side relative index clamps, the map-variant tail |
-| 73 | **Spot testing (moved to the end by the user 2026-10-19: "I want to test em myself")** | 243 spots verified on 40 maps; the user tests them in game. Left: Ghost Town (2 new), Orbital (2 new), Foundry (3 new) regenerated with `--spacing 9 --min-area 6`, not checked yet ("(not checked yet)" in the list) |
+| 73 | **Spot testing (moved to the end by the user 2026-10-19: "I want to test em myself")** | DONE 2026-10-19: 249 spots verified on 40 maps in game; the small maps regenerated with `--spacing 9 --min-area 6`: Ghost Town 5, Orbital 4, Foundry 2 (2 refused outside the map structure) |
 
 Released 2026-10-17: reclaimer-0.9.18-v2 (GitHub release; known issue = backlog 22).
 Patch points across all 34 client releases (v0.8.1 .. v0.9.18): shim/docs/patch-addresses.md -- no fixed RVA survives a release; halo3 constants in the exe and log strings are the stable anchors; set_muted's signature hits a Forge setter in 0.8.16 .. 0.9.1, now refused unless an is_muted function takes the same lock.
