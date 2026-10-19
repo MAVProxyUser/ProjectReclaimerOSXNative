@@ -1385,6 +1385,11 @@ Numbers are from the commit messages; PERF-PLAN.md has the measurements. Compare
 
 ## 20. Scripts and RE tools
 
+- **play.sh: the local dedicated server is asked for up to 15 s** — Why (user, 2026-10-19: "I can't use teleport or boundary
+  disable"; the Speed 2x toggle was gone too): a client started 20 s after its server came up asked once, with a 1 s
+  timeout, before the server answered "dedicated", so PELOAD_TELEPORT_HOST was never set and every host control on its
+  page stayed off for the whole game. How: up to 15 tries a second apart. (10-19)
+
 - **workshop-helper.sh size / disk checks; servers.sh strips control characters** (security review 2026-10-19). Why: a
   server only has to name a Workshop item for the client to ask for it (an input-less test client even presses Download:
   PELOAD_AUTO_MODS); servers.sh printed server names / mod titles raw, so a JSON "\u001b" became a real escape sequence in

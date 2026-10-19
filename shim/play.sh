@@ -77,7 +77,11 @@ ARGS=(game-client --mcc-path "$MCC")
 # hand it the host controls (2x speed, boundaries off, map-click teleport). Public servers have no such page.
 case "${RECLAIMER_JOIN:-}" in
   127.0.0.1:*|localhost:*)
-    if [ -z "${PELOAD_TELEPORT_HOST:-}" ] && curl -s -m 1 "http://127.0.0.1:${DED_STATS_HTTP:-8767}/stats.json" 2>/dev/null | grep -q '"dedicated":true'; then
+    # (asked up to 15 times a second apart: a server started moments ago may not answer "dedicated" yet -- 2026-10-19 a
+    # Last Resort client started 20 s after its server came up without the forwarding)
+    dedok=0; [ -z "${PELOAD_TELEPORT_HOST:-}" ] && for _i in $(seq 1 15); do
+      curl -s -m 1 "http://127.0.0.1:${DED_STATS_HTTP:-8767}/stats.json" 2>/dev/null | grep -q '"dedicated":true' && { dedok=1; break; }; sleep 1; done
+    if [ "$dedok" = 1 ]; then
       export PELOAD_TELEPORT_HOST="127.0.0.1:${DED_STATS_HTTP:-8767}" PELOAD_ALLOW_TELEPORT="${PELOAD_ALLOW_TELEPORT:-1}"
       echo "local dedicated server found: host controls on this client's stats page go to its loader ($PELOAD_TELEPORT_HOST)"
     fi;;
