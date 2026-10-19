@@ -3,7 +3,7 @@
 Teleport list; user, 2026-10-18: "several known good locations for standing on the other side of what used to be
 boundaries ... for all maps").
 
-    python3 re-tools/h3spots.py <file.map> <out.spots.json> [--cell 0.5] [--max 8] [--quiet] [--keep]
+    python3 re-tools/h3spots.py <file.map> <out.spots.json> [--cell 0.5] [--max 8] [--quiet] [--keep] [--spacing 18] [--min-area 12]
 
 Built like re-tools/h3nav.py's floor field (same collision geometry: structure BSPs, instanced geometry, invisible
 player clip, placed scenery and crates), but it keeps exactly the floors h3nav leaves out: a floor (upward surface, slip
@@ -50,6 +50,8 @@ def main():
     ap.add_argument('--max', type=int, default=8)
     ap.add_argument('--quiet', action='store_true')
     ap.add_argument('--keep', action='store_true', help='keep the verified spots of an existing out file, skip its rejected ones')
+    ap.add_argument('--spacing', type=float, default=MIN_SPACING, help='spots at least this far apart (small maps: 8-12)')
+    ap.add_argument('--min-area', type=float, default=MIN_AREA, help='square units of floor a region needs')
     o = ap.parse_args()
     log = (lambda *a: None) if o.quiet else (lambda *a: print(*a, file=sys.stderr))
     t0 = time.time()
@@ -143,7 +145,7 @@ def main():
     picks = []
     for rid, cells in enumerate(regions):
         ar = len(cells) * cell * cell
-        if ar < MIN_AREA:
+        if ar < o.min_area:
             continue
         cs = set(cells)
         # distance (in cells) to the region's edge: BFS from cells with a missing / off-height neighbour
@@ -174,7 +176,7 @@ def main():
         sel = [best]; md = np.hypot(X[:, 0] - bx, X[:, 1] - by)
         while len(sel) < o.max:
             i = int(np.argmax(md))
-            if md[i] < MIN_SPACING:
+            if md[i] < o.spacing:
                 break
             sel.append(cand[i]); md = np.minimum(md, np.hypot(X[:, 0] - X[i, 0], X[:, 1] - X[i, 1]))
         mine = [{'x': x0 + (c % w + 0.5) * cell, 'y': y0 + (c // w + 0.5) * cell, 'z': top[c] + 0.35, 'area': ar,
@@ -192,7 +194,7 @@ def main():
             break
         if any(math.hypot(p['x'] - r['x'], p['y'] - r['y']) < 4 and abs(p['z'] - r['z']) < 4 for r in prev_bad):
             continue
-        if all(math.hypot(p['x'] - q['x'], p['y'] - q['y']) >= MIN_SPACING for q in chosen):
+        if all(math.hypot(p['x'] - q['x'], p['y'] - q['y']) >= o.spacing for q in chosen):
             chosen.append(p)
     used = collections.Counter(q['label'].rstrip('0123456789 ') for q in prev_ok)
     ids = {q['id'] for q in prev_ok}; nid = 1; added = 0

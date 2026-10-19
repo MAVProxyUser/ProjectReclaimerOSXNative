@@ -1309,7 +1309,9 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   per map): a region gave one spot, so the Forge worlds' single huge floor past the boundaries gave 1, and 18 maps had
   under 4. How: after a region's most interior cell, farthest-point picks among its cells at least a quarter as far from
   the edge, MIN_SPACING apart (every region's best first); `--keep` keeps a checked file's verified spots, never proposes
-  its rejected places again and drops "checked" when it added spots (spots-verify.sh then checks the map again). (10-19)
+  its rejected places again and drops "checked" when it added spots (spots-verify.sh then checks the map again). Result after
+  the re-check: 243 spots verified on 40 maps (25 rejected); `--spacing` / `--min-area` (2026-10-19 later) for small maps
+  (Ghost Town, Orbital, Foundry regenerated with 9 / 6: their new spots are not checked yet). (10-19)
 - **Input-less clients answer the REQUIRED MODS screen** — stats.c `st_am_required` / `st_am_tick`, `PELOAD_AUTO_MODS=1`
   (quiet-run.sh, target.sh). Why (user, 2026-10-19, a test client stuck on "HugeGrass Rebalance: Another version -- update
   it from Steam Workshop": "that screen should be hooked to use depot downloader on its own"): the screen IS hooked (its

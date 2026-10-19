@@ -254,10 +254,35 @@ symlinks), BCryptVerifySignature always succeeds. Also open: per-map caches keye
    chosen by CRC, so only packet data is attacker-controlled.
 3. **Havok 4.5.0.3 collision / MOPP bytecode and halo3's 2008 tag code in a downloaded `.map`**: MOPP jump offsets, shape
    keys, BSP node / plane / triangle indices -- the resource pages reach them intact (the page decoder looked bounded).
-4. **Map variants and Forge state handed to halo3.dll / written into its memory by the client** (`map.data`, `packed_map`,
-   `packed_game`, `frozen`, borrowed objects, sky donors -- also sent by a server to every joining client): under study.
+4. **What halo3.dll does with the pre-validated map variant** -- the only residue of the custom-game pipeline (section 9):
+   unused palette datum entries and the trailing fields of the 0xE0A0-byte struct are copied into halo3 without being
+   resolved. PLAUSIBLE, low likelihood (halo3's tag handles are salt-checked); follow-up = halo3's variant -> object spawn.
 5. **zune-jpeg's unsafe AVX2 code** for mod / server JPEGs (no known CVE), and memory exhaustion from mod pictures (no
    dimension cap).
 
 Not leads: Expat 1.0.x and libpng 1.2.5 (unreachable), zlib (1.1.4, not on the .map path), the `.fsb.info` over-read
 (bounded within its own frame), PSD / GIF / WebP / TIFF (no decoder), XXE (no external entities anywhere).
+
+## 9. Custom games, map variants, Megalo scripts, frozen objects (CONFIRMED by static RE)
+
+The whole pipeline is parsed, bounds-checked and tag-resolved by Rust in the client before anything reaches halo3.dll, and
+a SERVER's variant (join ticket: exe+0x82a440 -> 0x5f3310 -> variant builder 0x625390) runs the same validators as a local file.
+
+- **`script`** = Reclaimer's own Megalo (the Halo: Reach game-type language, written as ReachVariantTool source), compiled by
+  the client (`mode-compile` / `megalo-check`; at most 16 variables, 32 actions per event, two index levels) and run by a
+  Rust VM (`custom_modes/megalo/vm.rs`). It acts on the game through an adapter (action dispatcher exe+0x1698610) that checks
+  generational entity handles ("Stale Megalo entity reference") and HUD / placement limits and calls engine functions with
+  validated handles -- no raw object-table writes.
+- **`frozen` ("FRZ1")**: decoder exe+0x186ee80: magic, count <= 5000, second count <= count, length-prefixed UTF-8 names
+  (exe+0x186f910, overflow-checked), fixed 0x41-byte records range-checked, reference tag 0/1 with index < count; applied
+  through the same adapter calls. "The map's frozen objects are damaged" otherwise.
+- **`map.data`** = the retail s_map_variant struct, exactly 0xE0A0 bytes (nv_validate exe+0x18e0160): version 0x0E, placements
+  < 641 and >= the scenario-object count, palette <= 256, every placement's object handles -1, quota index -1 or < palette
+  count, finite transforms, the 14 scenario-slot words in range. Every USED palette slot is resolved by name against the
+  installed maps (exe+0x1c46f70, "This map uses objects that are not installed"). The struct is then copied into halo3's
+  variant memory (Rust; halo3's own BLF / bitstream variant decoder is not used on this path).
+- **`objects`** (borrowed palette: code <= 639, name <= 32 bytes UTF-8, resolved by name), **`sky`** (resolved by name),
+  **`gravity`** 10-300, **`atmosphere`**, **`world`**, **`boundaries`**: scalar or name-resolved -- no index into native arrays.
+- **`packed_map` / `packed_game`**: checked against the base map / mode and handled as Rust structs; no halo3 decode seen.
+- Residue: unused palette datum entries and the struct's trailing fields (0xD34C..0xE0A0) are not resolved by Rust; whether
+  halo3 reads them at map load is not traced (section 8, lead 4).
