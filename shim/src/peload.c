@@ -4332,6 +4332,115 @@ static void cocoa_app_icon(id app){ const char*p=getenv("PELOAD_APP_ICON"); if(!
     id s=((id(*)(id,SEL,const char*))objc_msgSend)((id)ocls("NSString"),osel("stringWithUTF8String:"),p);
     id img=s?((id(*)(id,SEL,id))objc_msgSend)(om0((id)ocls("NSImage"),"alloc"),osel("initWithContentsOfFile:"),s):0;
     if(img) ((void(*)(id,SEL,id))objc_msgSend)(app,osel("setApplicationIconImage:"),img); }
+// ---- Clipboard (2026-10-20) ----
+// The client's COPY buttons (Settings > player ID, server addresses) and its text boxes' paste use Win32's clipboard:
+// OpenClipboard, EmptyClipboard, GlobalAlloc + GlobalLock (the data block), SetClipboardData(CF_UNICODETEXT), CloseClipboard;
+// pasting IsClipboardFormatAvailable / GetClipboardData. None of it existed: OpenClipboard was a logging stub returning 0, so
+// every copy failed ("Could not copy to clipboard: OSError(203)", the menu's "The clipboard is unavailable"). Now it is the
+// Mac's general pasteboard (plain text): text set between EmptyClipboard and CloseClipboard goes to the pasteboard at
+// CloseClipboard (CRLF -> LF); GetClipboardData(CF_UNICODETEXT / CF_TEXT / CF_OEMTEXT) reads it as a fresh block (UTF-16 /
+// UTF-8), freed at the next GetClipboardData of that format or EmptyClipboard (Windows: the system owns it). Other formats
+// stay in this process until the next EmptyClipboard. Global* blocks = a 16-byte header {magic, lock count, size} + the
+// data; the "handle" is the data pointer (GMEM_MOVEABLE handles are opaque to callers, so fixed memory serves both).
+// PELOAD_NO_CLIPBOARD=1 = the old failing OpenClipboard; PELOAD_TRACE_CLIPBOARD=1 logs every call; PELOAD_PASTEBOARD=<name> uses a
+// private named pasteboard (quiet-run / target.sh / the offline test shim/tools/clipboard-test.sh).
+#define GM_MAGIC 0x6D656D47u
+typedef struct { uint32_t magic, locks; uint64_t size; } GmHdr;
+static GmHdr* gm_hdr(void*h){ if(!h || ((uintptr_t)h&15)) return 0; GmHdr*g=(GmHdr*)h-1; return g->magic==GM_MAGIC?g:0; }
+static void* gm_alloc(uint64_t n,int zero){ GmHdr*g=malloc(sizeof(GmHdr)+(n?n:1)); if(!g) return 0; g->magic=GM_MAGIC; g->locks=0; g->size=n;
+    if(zero) memset(g+1,0,n?n:1); return g+1; }
+static void  gm_free(void*h){ GmHdr*g=gm_hdr(h); if(g){ g->magic=0; free(g); } }
+static void* MSABI i_GlobalAlloc(uint32_t fl,uint64_t n){ void*h=gm_alloc(n,(fl&0x40)!=0); if(!h) i_SetLastError(8); return h; }   // 0x40 GMEM_ZEROINIT
+static void* MSABI i_GlobalLock(void*h){ GmHdr*g=gm_hdr(h); if(!g){ i_SetLastError(6); return 0; } g->locks++; return h; }
+static int   MSABI i_GlobalUnlock(void*h){ GmHdr*g=gm_hdr(h); if(!g){ i_SetLastError(6); return 0; } if(g->locks) g->locks--; if(!g->locks) i_SetLastError(0); return (int)g->locks; }
+static uint64_t MSABI i_GlobalSize(void*h){ GmHdr*g=gm_hdr(h); if(!g){ i_SetLastError(6); return 0; } return g->size; }
+static void* MSABI i_GlobalFree(void*h){ if(!h) return 0; if(!gm_hdr(h)){ i_SetLastError(6); return h; } gm_free(h); return 0; }
+static void* MSABI i_GlobalHandle(void*p){ return gm_hdr(p)?p:0; }
+static uint32_t MSABI i_GlobalFlags(void*h){ GmHdr*g=gm_hdr(h); return g?(g->locks&0xff):0x8000/*GMEM_INVALID_HANDLE*/; }
+static pthread_mutex_t g_cb_mx=PTHREAD_MUTEX_INITIALIZER;
+static uint32_t g_cb_owner;                                // thread that has the clipboard open (0 = closed)
+static int g_cb_dirty;                                     // EmptyClipboard / SetClipboardData since the last close
+static struct { uint32_t fmt; void*h; } g_cb_set[16]; static int g_cb_nset;
+static void* g_cb_got[3];                                  // blocks handed out by GetClipboardData: CF_TEXT, CF_OEMTEXT, CF_UNICODETEXT
+static int cb_trace(void){ static int t=-1; if(t<0){ const char*e=getenv("PELOAD_TRACE_CLIPBOARD"); t=e&&*e&&strcmp(e,"0"); } return t; }
+static int cb_text(uint32_t f){ return f==1||f==7||f==13; }
+static int cb_gi(uint32_t f){ return f==13?2:f==7?1:0; }
+static id cb_pb(void){   // PELOAD_PASTEBOARD=<name>: a private named pasteboard (tests and input-less clients leave the user's clipboard alone)
+    const char*n=getenv("PELOAD_PASTEBOARD");
+    if(n && *n) return ((id(*)(id,SEL,id))objc_msgSend)((id)ocls("NSPasteboard"),osel("pasteboardWithName:"),
+        ((id(*)(id,SEL,const char*))objc_msgSend)((id)ocls("NSString"),osel("stringWithUTF8String:"),n));
+    return om0((id)ocls("NSPasteboard"),"generalPasteboard"); }
+static id cb_pbtype(void){ return ((id(*)(id,SEL,const char*))objc_msgSend)((id)ocls("NSString"),osel("stringWithUTF8String:"),"public.utf8-plain-text"); }
+static void cb_pb_put(id s){   // (inside an autorelease pool) s = NULL: just empty the pasteboard
+    id pb=cb_pb(); if(!pb) return;
+    ((long(*)(id,SEL))objc_msgSend)(pb,osel("clearContents"));
+    if(s) ((signed char(*)(id,SEL,id,id))objc_msgSend)(pb,osel("setString:forType:"),s,cb_pbtype()); }
+static id cb_pb_get(void){ id pb=cb_pb(); return pb?((id(*)(id,SEL,id))objc_msgSend)(pb,osel("stringForType:"),cb_pbtype()):0; }
+static int cb_has_text_l(void){   // (g_cb_mx held) between EmptyClipboard and CloseClipboard the pending set is the clipboard
+    if(g_cb_dirty){ for(int i=0;i<g_cb_nset;i++) if(cb_text(g_cb_set[i].fmt)) return 1; return 0; }
+    void*pool=objc_autoreleasePoolPush(); int r=cb_pb_get()!=0; objc_autoreleasePoolPop(pool); return r; }
+static void cb_flush(void){   // CloseClipboard after a change: the text format (UTF-16 preferred) -> the pasteboard
+    int best=-1; for(int i=0;i<g_cb_nset;i++) if(cb_text(g_cb_set[i].fmt) && gm_hdr(g_cb_set[i].h) && (best<0 || g_cb_set[i].fmt==13)) best=i;
+    void*pool=objc_autoreleasePoolPush(); id s=0;
+    if(best>=0){ GmHdr*g=gm_hdr(g_cb_set[best].h); const uint8_t*d=(const uint8_t*)g_cb_set[best].h;
+        if(g_cb_set[best].fmt==13){ uint64_t n=g->size/2, k=0; uint16_t*w=malloc((n?n:1)*2); const uint16_t*src=(const uint16_t*)d;
+            for(uint64_t i=0;i<n && src[i];i++){ if(src[i]=='\r' && i+1<n && src[i+1]=='\n') continue; w[k++]=src[i]; }
+            s=((id(*)(id,SEL,const uint16_t*,unsigned long))objc_msgSend)((id)ocls("NSString"),osel("stringWithCharacters:length:"),w,(unsigned long)k); free(w); }
+        else { uint64_t n=0; while(n<g->size && d[n]) n++; char*a=malloc(n+1); uint64_t k=0;
+            for(uint64_t i=0;i<n;i++){ if(d[i]=='\r' && i+1<n && d[i+1]=='\n') continue; a[k++]=(char)d[i]; } a[k]=0;
+            s=((id(*)(id,SEL,const char*,unsigned long))objc_msgSend)((id)ocls("NSString"),osel("stringWithCString:encoding:"),a,12ul/*Windows-1252*/); free(a); } }
+    cb_pb_put(s);
+    if(cb_trace()){ long len=s?((long(*)(id,SEL))objc_msgSend)(s,osel("length")):-1; fprintf(stderr,"  [clipboard] pasteboard set: %ld characters\n",len); }
+    objc_autoreleasePoolPop(pool); }
+static int MSABI i_OpenClipboard(void*hwnd){ (void)hwnd; static int off=-1; if(off<0){ const char*e=getenv("PELOAD_NO_CLIPBOARD"); off=e&&*e&&strcmp(e,"0"); }
+    if(off) return 0;
+    uint32_t me=i_GetCurrentThreadId(); pthread_mutex_lock(&g_cb_mx); int ok=!g_cb_owner || g_cb_owner==me; if(ok) g_cb_owner=me; pthread_mutex_unlock(&g_cb_mx);
+    if(!ok) i_SetLastError(5); if(cb_trace()) fprintf(stderr,"  [clipboard] OpenClipboard -> %d\n",ok); return ok; }
+static int MSABI i_CloseClipboard(void){ uint32_t me=i_GetCurrentThreadId(); pthread_mutex_lock(&g_cb_mx);
+    if(g_cb_owner!=me){ pthread_mutex_unlock(&g_cb_mx); i_SetLastError(1418); return 0; }   // ERROR_CLIPBOARD_NOT_OPEN
+    if(g_cb_dirty) cb_flush(); g_cb_dirty=0; g_cb_owner=0; pthread_mutex_unlock(&g_cb_mx); return 1; }
+static int MSABI i_EmptyClipboard(void){ uint32_t me=i_GetCurrentThreadId(); pthread_mutex_lock(&g_cb_mx);
+    if(g_cb_owner!=me){ pthread_mutex_unlock(&g_cb_mx); i_SetLastError(1418); return 0; }
+    for(int i=0;i<g_cb_nset;i++) gm_free(g_cb_set[i].h); g_cb_nset=0; for(int i=0;i<3;i++){ gm_free(g_cb_got[i]); g_cb_got[i]=0; }
+    g_cb_dirty=1; pthread_mutex_unlock(&g_cb_mx); return 1; }
+static void* MSABI i_SetClipboardData(uint32_t fmt,void*h){ uint32_t me=i_GetCurrentThreadId(); pthread_mutex_lock(&g_cb_mx);
+    if(g_cb_owner!=me){ pthread_mutex_unlock(&g_cb_mx); i_SetLastError(1418); return 0; }
+    int i=0; while(i<g_cb_nset && g_cb_set[i].fmt!=fmt) i++;
+    if(i<g_cb_nset){ if(g_cb_set[i].h!=h) gm_free(g_cb_set[i].h); } else if(g_cb_nset<16) g_cb_nset++; else { pthread_mutex_unlock(&g_cb_mx); i_SetLastError(8); return 0; }
+    g_cb_set[i].fmt=fmt; g_cb_set[i].h=h; g_cb_dirty=1; pthread_mutex_unlock(&g_cb_mx);
+    if(cb_trace()) fprintf(stderr,"  [clipboard] SetClipboardData(%u, %llu bytes)\n",fmt,(unsigned long long)(gm_hdr(h)?gm_hdr(h)->size:0));
+    return h; }
+static void* MSABI i_GetClipboardData(uint32_t fmt){ uint32_t me=i_GetCurrentThreadId(); void*r=0; pthread_mutex_lock(&g_cb_mx);
+    if(g_cb_owner!=me){ pthread_mutex_unlock(&g_cb_mx); i_SetLastError(1418); return 0; }
+    if(cb_text(fmt) && g_cb_dirty){ for(int i=0;i<g_cb_nset;i++) if(g_cb_set[i].fmt==fmt){ r=g_cb_set[i].h; break; } }   // set by us, not closed yet
+    else if(cb_text(fmt)){ void*pool=objc_autoreleasePoolPush(); id s=cb_pb_get();
+        if(s){ int gi=cb_gi(fmt); gm_free(g_cb_got[gi]); g_cb_got[gi]=0;
+            if(fmt==13){ unsigned long n=((unsigned long(*)(id,SEL))objc_msgSend)(s,osel("length")); struct { unsigned long loc,len; } rg={0,n};
+                r=gm_alloc((uint64_t)(n+1)*2,0); if(r){ ((void(*)(id,SEL,void*,typeof(rg)))objc_msgSend)(s,osel("getCharacters:range:"),r,rg); ((uint16_t*)r)[n]=0; } }
+            else { const char*u=((const char*(*)(id,SEL))objc_msgSend)(s,osel("UTF8String")); size_t n=u?strlen(u):0; r=gm_alloc(n+1,0); if(r){ memcpy(r,u?u:"",n); ((char*)r)[n]=0; } }
+            g_cb_got[gi]=r; }
+        objc_autoreleasePoolPop(pool); }
+    else for(int i=0;i<g_cb_nset;i++) if(g_cb_set[i].fmt==fmt){ r=g_cb_set[i].h; break; }
+    pthread_mutex_unlock(&g_cb_mx);
+    if(!r) i_SetLastError(0); if(cb_trace()) fprintf(stderr,"  [clipboard] GetClipboardData(%u) -> %llu bytes\n",fmt,(unsigned long long)(gm_hdr(r)?gm_hdr(r)->size:0));
+    return r; }
+static int MSABI i_IsClipboardFormatAvailable(uint32_t fmt){ int r=0; pthread_mutex_lock(&g_cb_mx);
+    if(cb_text(fmt)) r=cb_has_text_l(); else for(int i=0;i<g_cb_nset;i++) if(g_cb_set[i].fmt==fmt) r=1;
+    pthread_mutex_unlock(&g_cb_mx);
+    if(!r) i_SetLastError(0); return r; }
+static int MSABI i_CountClipboardFormats(void){ pthread_mutex_lock(&g_cb_mx); int n=cb_has_text_l()?3:0;
+    for(int i=0;i<g_cb_nset;i++) if(!cb_text(g_cb_set[i].fmt)) n++; pthread_mutex_unlock(&g_cb_mx); return n; }
+static uint32_t MSABI i_EnumClipboardFormats(uint32_t f){   // text first (13, 1, 7) when the pasteboard has text, then this process's others
+    static const uint32_t tf[3]={13,1,7}; uint32_t list[19]; int n=0;
+    pthread_mutex_lock(&g_cb_mx); if(cb_has_text_l()) for(int i=0;i<3;i++) list[n++]=tf[i];
+    for(int i=0;i<g_cb_nset;i++) if(!cb_text(g_cb_set[i].fmt)) list[n++]=g_cb_set[i].fmt; pthread_mutex_unlock(&g_cb_mx);
+    i_SetLastError(0); if(!f) return n?list[0]:0; for(int i=0;i+1<n;i++) if(list[i]==f) return list[i+1]; return 0; }
+static uint32_t MSABI i_GetClipboardSequenceNumber(void){ void*pool=objc_autoreleasePoolPush(); id pb=cb_pb();
+    long c=pb?((long(*)(id,SEL))objc_msgSend)(pb,osel("changeCount")):0; objc_autoreleasePoolPop(pool); return (uint32_t)c; }
+static void* MSABI i_GetClipboardOwner(void){ return 0; }
+static uint32_t MSABI i_RegisterClipboardFormatW(const uint16_t*name){   // registered formats are 0xC000..0xFFFF: one per name (FNV-1a)
+    if(!name || !*name){ i_SetLastError(87); return 0; } uint32_t h=2166136261u; for(const uint16_t*p=name;*p;p++){ h^=(*p<128?(uint16_t)tolower(*p):*p); h*=16777619u; }
+    return 0xC000u+(h%0x3FFFu); }
 static CGLContextObj cocoa_make_gl_window(int w,int h){
     if(g_nsctx){ return (CGLContextObj)((void*(*)(id,SEL))objc_msgSend)(g_nsctx,osel("CGLContextObj")); }
     objc_autoreleasePoolPush(); // AppKit object creation needs a pool (we never run the runloop); leak it so objects live
@@ -8717,6 +8826,20 @@ static int MSABI i_LCMapStringEx(const uint16_t*loc,uint32_t fl,const uint16_t*s
     for(int i=0;i<n;i++){ uint16_t c=src[i]; if(f&0x100) c=(uint16_t)towlower(c); else if(f&0x200) c=(uint16_t)towupper(c); dst[i]=c; }
     return n; }
 static int MSABI i_RoGetActivationFactory(void*cls,const void*iid,void**f){ (void)cls;(void)iid; if(f) *f=0; return (int)0x80040154; }   // REGDB_E_CLASSNOTREG: no WinRT here
+// Film export (client 0.9.22: Theater's EXPORT MP4, R while watching a film; 2026-10-20) writes through Media Foundation's sink
+// writer and records its sound by process-loopback capture (ActivateAudioInterfaceAsync). Not available here: every one fails
+// with E_NOTIMPL and clears its out-pointer, so the client reports the failure. As logging stubs they returned 0 = S_OK with no
+// object behind it (a call through a null pointer as soon as an export started). MFStartup fails first, so nothing else runs.
+#define MF_NOTIMPL ((int)0x80004001)
+static int MSABI i_MFStartup(uint32_t v,uint32_t fl){ (void)v;(void)fl; return MF_NOTIMPL; }
+static int MSABI i_MFShutdown(void){ return 0; }
+static int MSABI i_MFCreateAttributes(void**pp,uint32_t n){ (void)n; if(pp) *pp=0; return MF_NOTIMPL; }
+static int MSABI i_MFCreateMediaType(void**pp){ if(pp) *pp=0; return MF_NOTIMPL; }
+static int MSABI i_MFCreateSample(void**pp){ if(pp) *pp=0; return MF_NOTIMPL; }
+static int MSABI i_MFCreateMemoryBuffer(uint32_t n,void**pp){ (void)n; if(pp) *pp=0; return MF_NOTIMPL; }
+static int MSABI i_MFCreateSinkWriterFromURL(const uint16_t*url,void*bs,void*at,void**pp){ (void)url;(void)bs;(void)at; if(pp) *pp=0; return MF_NOTIMPL; }
+static int MSABI i_ActivateAudioInterfaceAsync(const uint16_t*path,const void*iid,void*pv,void*handler,void**op){ (void)path;(void)iid;(void)pv;(void)handler; if(op) *op=0; return MF_NOTIMPL; }
+static int MSABI i_CoCreateFreeThreadedMarshaler(void*outer,void**pp){ (void)outer; if(pp) *pp=0; return MF_NOTIMPL; }
 static int MSABI i_RoInitialize(int t){ (void)t; return 0; }
 static void MSABI i_RoUninitialize(void){}
 static int MSABI i_VirtualUnlock(void*a,size_t n){ (void)a;(void)n; return 1; }
@@ -10551,6 +10674,13 @@ static void *resolve_impl(const char *fn){
         {"InvalidateRect",(void*)i_InvalidateRect},
         {"SetWindowTextW",(void*)i_SetWindowTextW},
         {"GetForegroundWindow",(void*)i_GetForegroundWindow},
+        {"OpenClipboard",(void*)i_OpenClipboard},{"CloseClipboard",(void*)i_CloseClipboard},{"EmptyClipboard",(void*)i_EmptyClipboard},
+        {"SetClipboardData",(void*)i_SetClipboardData},{"GetClipboardData",(void*)i_GetClipboardData},
+        {"IsClipboardFormatAvailable",(void*)i_IsClipboardFormatAvailable},{"CountClipboardFormats",(void*)i_CountClipboardFormats},
+        {"EnumClipboardFormats",(void*)i_EnumClipboardFormats},{"GetClipboardSequenceNumber",(void*)i_GetClipboardSequenceNumber},
+        {"GetClipboardOwner",(void*)i_GetClipboardOwner},{"RegisterClipboardFormatW",(void*)i_RegisterClipboardFormatW},
+        {"GlobalAlloc",(void*)i_GlobalAlloc},{"GlobalLock",(void*)i_GlobalLock},{"GlobalUnlock",(void*)i_GlobalUnlock},
+        {"GlobalSize",(void*)i_GlobalSize},{"GlobalFree",(void*)i_GlobalFree},{"GlobalHandle",(void*)i_GlobalHandle},{"GlobalFlags",(void*)i_GlobalFlags},
         {"XInputGetState",(void*)i_XInputGetState},{"XInputSetState",(void*)i_XInputSetState},
         {"XInputGetCapabilities",(void*)i_XInputGetCapabilities},{"XInputEnable",(void*)i_XInputEnable},
         {"SetForegroundWindow",(void*)i_SetForegroundWindow},
@@ -10602,6 +10732,10 @@ static void *resolve_impl(const char *fn){
         {"WaitForMultipleObjectsEx",(void*)i_WaitForMultipleObjectsEx},
         {"Sleep",(void*)i_Sleep},
         {"LCMapStringEx",(void*)i_LCMapStringEx}, {"RoGetActivationFactory",(void*)i_RoGetActivationFactory},
+        {"MFStartup",(void*)i_MFStartup},{"MFShutdown",(void*)i_MFShutdown},{"MFCreateAttributes",(void*)i_MFCreateAttributes},
+        {"MFCreateMediaType",(void*)i_MFCreateMediaType},{"MFCreateSample",(void*)i_MFCreateSample},{"MFCreateMemoryBuffer",(void*)i_MFCreateMemoryBuffer},
+        {"MFCreateSinkWriterFromURL",(void*)i_MFCreateSinkWriterFromURL},{"ActivateAudioInterfaceAsync",(void*)i_ActivateAudioInterfaceAsync},
+        {"CoCreateFreeThreadedMarshaler",(void*)i_CoCreateFreeThreadedMarshaler},
         {"RoInitialize",(void*)i_RoInitialize}, {"RoUninitialize",(void*)i_RoUninitialize}, {"VirtualUnlock",(void*)i_VirtualUnlock},
         {"NtDelayExecution",(void*)i_NtDelayExecution},
         {"SleepEx",(void*)i_SleepEx},

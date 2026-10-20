@@ -183,6 +183,29 @@ Ported the day it came out (servers refuse older clients). SHA-256 `0850d10888d9
 | moderation table lock / players Vec len | 29f50b8 / 29f5160 | **no fixed RVA any more** (it was 27cf790 in v0.9.18): the first `lock cmpxchg byte [rip+d]` before the code that formats "You are banned from this server. Reason: "; the Vec ends at lock+0xa8 (same layout: the lock's neighbours +0x8 / +0x28 / +0x30 / +0x70 / +0x78 are read the same way in both builds) |
 | expanded-session flag | not ported | the fixed-RVA shortcut only applies to v0.9.18; other builds pick the session layout from which one holds valid records |
 
+### Client exe, v0.9.22 (2026-10-20; v0.9.21 skipped -- current for a day)
+
+SHA-256 `517ee179292ca60ffade7f31f6baffef95981467b522981613250f3dff55f6c9` (46,391,296 bytes). Found by the loader itself at
+exe load (`--version` run: `[sigpatch]` / `[stats]` lines), then checked by meaning (below) and in game against our
+dedicated server on 0.9.22.
+
+| point | v0.9.22 | how it is found now |
+|---|---|---|
+| ui-reentrancy jne (sig+8) | 72960f | same signature |
+| xaudio slots 1-4 | 6015e0 / 60160f / 601646 / 60167b | same (v0.9.20) signatures |
+| watchdog je (sig+0xa) | 8713e4 | same (v0.9.20) signature |
+| set_muted / voice_recv / push_history | found, is_muted pairing holds | same signatures; the chat hook checked live (a typed line reached the feed) |
+| cast_vote / ballot cache | a03ce0 / 2ae85b8 (**0x3f8 bytes**; was 0x3b0) | same signatures. The cache's drop code (exe+0xa0436e) now loops over three 0x140-byte choices from +0x18 (v0.9.20: three 0x128-byte choices at +0x18 / +0x140 / +0x268), so the vote fields (round, counts, seconds) are still the last 0x20 bytes, where `st_bv_tick` reads them |
+| max_players getter / hosted-session slot | slot 2af4718, byte at Arc+0x233 | same (second) signature; checked live (16 slots) |
+| moderation table lock / players Vec len | 2ae5d18 / 2ae5e88 = **lock+0x170** (was lock+0xa8) | lock as before. 0.9.22 inserted 0xc8 bytes of fields after the table's +0x90 (references to lock+0x00..+0x90 follow v0.9.20's pattern -- the lock byte, its poison byte +1, the Option tag +8, +0x70 / +0x78 with 11 / 13 references in both; the v0.9.20 pattern of lock+0xa0 / +0xa8 / +0xd0 / +0xd8 -- 42 / 44 / 36 / 37 references -- reappears at lock+0x168 / +0x170 / +0x198 / +0x1a0). The Vec's len is now found by its code: the 7 `imul r64,[rip+d],0x68` (len x entry size) that read it, v0.9.20 0x29f5160 = lock+0xa8 likewise. Option tag lock+8 (47 references, the same as v0.9.20's 44 + new code) |
+| halo3 hooks the client might share | none | none of our halo3 hook prologues (section 8.1) appear in the client's data, as in v0.9.18 / v0.9.20 |
+
+New imports (diff of the import tables, 451 -> 462): Media Foundation `MFStartup`, `MFShutdown`, `MFCreateAttributes`,
+`MFCreateMediaType`, `MFCreateMemoryBuffer`, `MFCreateSample`, `MFCreateSinkWriterFromURL` (Theater's EXPORT MP4),
+mmdevapi `ActivateAudioInterfaceAsync` (its sound by process loopback), combase `CoCreateFreeThreadedMarshaler`,
+kernel32 `CreateEventW`, CRT `atan2`. The loader answers the first nine with E_NOTIMPL (FIXES.md section 1); the last two
+were already resolved. The client still has the `dedicated` subcommand (`dedicated.sh` unchanged).
+
 ### Dedicated exe (not loaded by our scripts), v0.8.14 .. v0.9.7
 
 | point | v0.8.14 | v0.8.15 | v0.8.16 | v0.9.0 | v0.9.1 | v0.9.2 | v0.9.3 | v0.9.4 | v0.9.5 | v0.9.6 | v0.9.7 |

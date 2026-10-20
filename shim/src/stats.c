@@ -410,16 +410,19 @@ static void st_chat_install(void){
 // server's worker -- keeps Mutex<Option<ModerationState>> for its kick / banip / RCON "players" commands: players Vec at L-8
 // (ptr) / L (len) of 0x68-byte entries {+0 player ID String (64 hex), +0x18 nickname String, +0x48 u64 session peer id (=
 // StSess.voice), +0x50 u32 join number, +0x54 IpAddr tag (0 V4, 1 V6), +0x55 octets (network order)}, kicked Vec at L+0x28 /
-// L+0x30 of 0x30-byte entries (+0x28 peer id), Option None = 0x8000000000000000 at L-0xa0, the futex lock byte at L-0xa8.
+// L+0x30 of 0x30-byte entries (+0x28 peer id), Option None = 0x8000000000000000 at lock+8 (the futex lock byte; L-0xa0 / L-0xa8 in 0.9.18 - 0.9.20).
 // 0.9.18: L = exe+0x27cf790, accepted only when some `lock cmpxchg byte [rip+L-0xa8]` exists (other builds: off; the
 // layout moved in 0.9.16 and before 0.9.2 there is no such table). Read without the lock: len/ptr, the entries, len/ptr
 // again; kept only when unchanged and every entry looks right. A CLIENT knows no other player's address (the roster has
 // none, voice is relayed): only the server's (= the host player's in a player-hosted game). Shown only while the stats page
 // is on this Mac (PELOAD_STATS_ADDR loopback or unset) unless PELOAD_STATS_IPS=1; PELOAD_STATS_IPS=0 hides them always.
-static uint8_t*g_st_modlen;
+static uint8_t*g_st_modlen, *g_st_modopt;
 // the client's moderation table (bans + the players Vec with their addresses): its lock is the first `lock cmpxchg byte
-// [rip+d]` before the code that formats "You are banned from this server. Reason: "; the players Vec {cap, ptr, len}
-// ends at lock+0xa8 (L = its len). Same layout in v0.9.18 (lock exe+0x27cf6e8) and v0.9.20 (exe+0x29f50b8).
+// [rip+d]` before the code that formats "You are banned from this server. Reason: "; the Option tag follows the lock (+8).
+// The players Vec {cap, ptr, len} is found by its code: the len every `imul r64, [rip+L], 0x68` (len x entry size) reads,
+// the most common such L within 0x400 bytes after the lock. v0.9.18 / v0.9.20: L = lock+0xa8 (lock exe+0x27cf6e8 /
+// 0x29f50b8); v0.9.22 added 0xc8 bytes of fields before it (the VPN block lists?): lock exe+0x2ae5d18, L = lock+0x170.
+// (Until 2026-10-20 L was taken as lock+0xa8 and the tag as L-0xa0: in 0.9.22 that is another field.)
 static void st_addr_install(void){
     if(!g_base) return; DOS*dh=(DOS*)g_base; OPT64*oh=(OPT64*)(g_base+dh->e_lfanew+sizeof(COFF)); uint32_t isz=oh->ImageSize;
     uint32_t pe=*(uint32_t*)(g_base+0x3c); uint16_t ns=*(uint16_t*)(g_base+pe+6), so=*(uint16_t*)(g_base+pe+20); uint8_t*st=g_base+pe+24+so;
@@ -431,9 +434,16 @@ static void st_addr_install(void){
         uint8_t*p=g_base+va; for(uint32_t k=0;k+7<=vs && !lock;k++){ if((p[k]!=0x48 && p[k]!=0x4C) || p[k+1]!=0x8D || (p[k+2]&0xC7)!=0x05) continue;
             uint8_t*t=p+k+7+*(int32_t*)(p+k+3); if(t<str-8 || t>str) continue;   // (the literal may start a byte or two earlier: Rust concatenates them)
             for(uint8_t*q=p+k; q>p+k-0x800 && q>p; q--) if(q[0]==0xF0 && q[1]==0x0F && q[2]==0xB0 && q[3]==0x0D && q[8]==0x75){ lock=q+8+*(int32_t*)(q+4); break; } } }
-    if(lock && lock>g_base && lock+0xb0<g_base+isz) g_st_modlen=lock+0xa8;
+    uint8_t*best=0; int bestn=0;
+    if(lock && lock>g_base && lock+0x400<g_base+isz){ uint8_t*cand[16]; int cn[16], nc=0;
+        for(int i=0;i<ns;i++){ uint8_t*sh=st+i*40; uint32_t vs=*(uint32_t*)(sh+8), va=*(uint32_t*)(sh+12), ch=*(uint32_t*)(sh+36); if(!(ch&0x20000000)) continue;
+            uint8_t*p=g_base+va; for(uint32_t k=0;k+8<=vs;k++){ if((p[k]!=0x48 && p[k]!=0x4C) || p[k+1]!=0x6B || (p[k+2]&0xC7)!=0x05 || p[k+7]!=0x68) continue;
+                uint8_t*t=p+k+8+*(int32_t*)(p+k+3); if(t<=lock+8 || t>lock+0x400) continue;
+                int c=0; while(c<nc && cand[c]!=t) c++; if(c==nc){ if(nc==16) continue; cand[nc]=t; cn[nc++]=0; } cn[c]++; } }
+        for(int c=0;c<nc;c++) if(cn[c]>bestn){ bestn=cn[c]; best=cand[c]; } }
+    if(best){ g_st_modlen=best; g_st_modopt=lock+8; }
     char m[160]; int k=snprintf(m,sizeof m,"  [stats] player addresses: %s\n",g_st_modlen?"host table found (shown while hosting)":"host table not found (another client build?): off"); (void)!write(2,m,k);
-    if(g_st_modlen){ k=snprintf(m,sizeof m,"  [stats] player addresses: table lock exe+0x%llx\n",(unsigned long long)(lock-g_base)); (void)!write(2,m,k); } }
+    if(g_st_modlen){ k=snprintf(m,sizeof m,"  [stats] player addresses: table lock exe+0x%llx, players at lock+0x%llx\n",(unsigned long long)(lock-g_base),(unsigned long long)(g_st_modlen-lock)); (void)!write(2,m,k); } }
 static int st_ips_ok(void){ static int v=-1; if(v<0){ const char*e=getenv("PELOAD_STATS_IPS"), *ad=getenv("PELOAD_STATS_ADDR");
         int local=!ad || !*ad || !strncmp(ad,"127.",4) || !strcmp(ad,"::1") || !strcmp(ad,"localhost"); v=e?atoi(e)!=0:local; } return v; }
 typedef struct { uint64_t peer; char ip[48]; } StAddr;
@@ -441,7 +451,7 @@ static StAddr g_st_addr[256]; static int g_st_naddr, g_st_hosting;
 static void st_addr_refresh(void){   // snapshot thread, once per snapshot
     g_st_hosting=0; if(!g_st_modlen || !st_ips_ok()) { g_st_naddr=0; return; }
     uint64_t opt=0, len=0, ptr=0, len2=0, ptr2=0, klen=0, kptr=0; uint8_t*L=g_st_modlen;
-    if(!hb_read((uint64_t)(uintptr_t)(L-0xa0),&opt,8) || opt==0x8000000000000000ull){ g_st_naddr=0; return; }   // not hosting
+    if(!hb_read((uint64_t)(uintptr_t)g_st_modopt,&opt,8) || opt==0x8000000000000000ull){ g_st_naddr=0; return; }   // not hosting
     if(!hb_read((uint64_t)(uintptr_t)L,&len,8) || !hb_read((uint64_t)(uintptr_t)(L-8),&ptr,8) || len>256 || (len && !ptr)) return;
     hb_read((uint64_t)(uintptr_t)(L+0x30),&klen,8); hb_read((uint64_t)(uintptr_t)(L+0x28),&kptr,8); if(klen>256) klen=0;
     static uint8_t e[256*0x68], kk[256*0x30];

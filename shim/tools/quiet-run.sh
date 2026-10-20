@@ -34,7 +34,7 @@ set -m
 env PELOAD_SKINGUARD=1 PELOAD_VTGUARD=1 PELOAD_ALLOC_GUARD=1 PELOAD_RECLAIMER_PATCHES=all PELOAD_WORKER_INHERIT_STDIO=1 \
   PELOAD_PRESENT=1 PELOAD_HOLD_WINDOW=1 PELOAD_PRESENT_HIDDEN=1 PELOAD_D3DGL=1 PELOAD_FPS_LOG=1 \
   $PADENV PELOAD_NO_KBM=1 PELOAD_NO_SYS_CURSOR=1 PELOAD_NO_FOCUS=1 PELOAD_AUDIO=0 $MINENV \
-  PELOAD_STATS_HTTP="${QR_STATS:-8765}" PELOAD_STATS_OPEN="${QR_STATS_OPEN:-1}" PELOAD_MIC="${QR_MIC:-0}" PELOAD_TITLE_PREFIX="TEST (no input)" PELOAD_AUTO_MODS=1 RECLAIMER_PROFILE_DIR='C:\ReclaimerProfileTest' $EXTRA \
+  PELOAD_STATS_HTTP="${QR_STATS:-8765}" PELOAD_STATS_OPEN="${QR_STATS_OPEN:-1}" PELOAD_MIC="${QR_MIC:-0}" PELOAD_TITLE_PREFIX="TEST (no input)" PELOAD_AUTO_MODS=1 PELOAD_PASTEBOARD=reclaimer-test RECLAIMER_PROFILE_DIR='C:\ReclaimerProfileTest' $EXTRA \
   arch -x86_64 shim/build/peload "$EXE" "${ARGS[@]}" < /dev/null > /tmp/quiet-run.log 2>&1 &
 PG=$!; sleep "$SECS"; kill -9 -- -$PG 2>/dev/null; sleep 1
 if [ -n "$(others)" ]; then echo "WARNING: a game process is still running after cleanup"; ps -axo pid,pgid,command | grep -E '[0-9] [^ ]*build/peload' | cut -c1-120; fi

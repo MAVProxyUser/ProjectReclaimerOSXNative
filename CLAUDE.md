@@ -274,6 +274,11 @@ no baked folder, RECLAIMER_SIGN_IDENTITY = a real signing identity, ad hoc other
 signed Mach-O: a SCRIPT as the bundle program was silently refused Desktop access by TCC, "Operation not permitted") running
 Contents/Resources/launch.sh. Releases: shim/tools/make-release.sh <client version> (refuses uncommitted shim/ changes: build
 from a clean worktree, with shim/crt copied in -- it is not in git).
+Client 0.9.22 (2026-10-20): all signatures unchanged; the moderation table grew (players Vec now found by its `imul ..,0x68`
+code, lock+0x170; patch-addresses.md v0.9.22 table). New imports = Media Foundation + ActivateAudioInterfaceAsync for Theater's
+EXPORT MP4: answered E_NOTIMPL (logging stubs return 0 = S_OK -> null call). Clipboard (same day): Win32 clipboard + GlobalAlloc
+on NSPasteboard (PELOAD_NO_CLIPBOARD = old stub, PELOAD_PASTEBOARD=<name> private pasteboard -- quiet-run / target.sh use one;
+offline test shim/tools/clipboard-test.sh). quiet-run.sh ignores RECLAIMER_JOIN: pass "reclaimer://join?server=host:port" as its args.
 play.sh's stdin feeder is `sleep 86400.<pid>` (killed when the game exits; it used to hold a caller's `| tail` for 24 h).
 Native GL helper (2026-10-17, PELOAD_GL_HELPER=1: play.sh's default, the code's default without the env is off; spawned with
 only stdio + its pipe; shim/src/glh_client.c + glhelper.c + glh_shm.h, generated glh_gen.inc /

@@ -88,6 +88,14 @@ patch variants by signature (section 16; shim/docs/patch-addresses.md).
 
 ## 1. PE loading and the API surface
 
+- **Media Foundation and loopback capture fail cleanly** (client 0.9.22) — `i_MFStartup`, `i_MFCreateSinkWriterFromURL`,
+  `i_MFCreateMediaType` / `Attributes` / `Sample` / `MemoryBuffer`, `i_ActivateAudioInterfaceAsync`,
+  `i_CoCreateFreeThreadedMarshaler`. Why: 0.9.22's Theater EXPORT MP4 / RECORD VIDEO import them (an import-table diff
+  0.9.20 -> 0.9.22 found these 9 plus CreateEventW and atan2, both already resolved); as logging stubs they returned 0 =
+  S_OK with no object behind it, a call through a null pointer as soon as an export started. How: E_NOTIMPL with the
+  out-pointer cleared (MFShutdown S_OK); MFStartup fails first. Film export is not available under the loader (README
+  "Known gaps"; the stats page's Record row records clips). No old-behaviour switch (the stubs could only crash). (10-20)
+
 - **Static TLS block** — peload.c TLS setup (TEB+0x58, gs:0x58 overlay). Why: the dedicated exe faulted (rcx = 0) at its
   first `__declspec(thread)` access. How: build the static TLS block from the image's TLS template, TLS index 0, publish
   the array at TEB+0x58 and the gs:0x58 overlay. (10-10 adeb8cb)
@@ -469,6 +477,22 @@ patch variants by signature (section 16; shim/docs/patch-addresses.md).
   (role-asymmetric private-port remap, 45b0c85). (10-12..14)
 
 ## 7. Windows, input, focus (Cocoa, Raw Input, XInput)
+
+- **Clipboard on the Mac pasteboard** — `i_OpenClipboard` / `i_EmptyClipboard` / `i_SetClipboardData` / `i_CloseClipboard`
+  / `i_GetClipboardData` / `i_IsClipboardFormatAvailable` (+ Count / Enum / sequence number / RegisterClipboardFormatW) and
+  `i_GlobalAlloc` / `Lock` / `Unlock` / `Size` / `Free`. Why: Settings > Online services > Player ID > COPY (and every
+  other copy / paste in the client's menus) failed: "Could not copy to clipboard: OSError(203)", the menu's "The clipboard
+  is unavailable"; OpenClipboard was a logging stub returning 0 and no Global* function existed. How: the general
+  NSPasteboard as plain text. Text set between EmptyClipboard and CloseClipboard (CF_UNICODETEXT preferred, CF_TEXT /
+  CF_OEMTEXT as Windows-1252) is written at CloseClipboard with CRLF -> LF; GetClipboardData of a text format reads the
+  pasteboard into a fresh block (UTF-16 / UTF-8) that the "system" frees at the next read or EmptyClipboard; while the
+  clipboard is open and changed, the pending set answers the format queries; other formats stay in-process until the
+  next EmptyClipboard; the opening thread owns it (another thread gets ERROR_ACCESS_DENIED, a non-owner
+  ERROR_CLIPBOARD_NOT_OPEN). Global* blocks: 16-byte header {magic, lock count, size} before the data, the handle = the
+  data pointer. halo3.dll imports the same functions. Old: `PELOAD_NO_CLIPBOARD=1`. `PELOAD_PASTEBOARD=<name>` = a private
+  named pasteboard (quiet-run.sh, target.sh and the offline test shim/tools/clipboard-test.sh use one, so test clients
+  never overwrite your clipboard); `PELOAD_TRACE_CLIPBOARD=1` logs the calls. Checked in game (0.9.22): COPY shows
+  "Player ID copied" and the 64-character ID is on the pasteboard. (10-20)
 
 - **Window-creation protocol** — RegisterClassExW keeps the WndProc; CreateWindowExW makes a real per-window object and
   sends WM_NCCREATE/WM_CREATE with a CREATESTRUCTW; per-HWND SetWindowLongPtrW/GetWindowLongPtrW; RegisterWindowMessage
@@ -1015,7 +1039,8 @@ oracle. Fixes below apply to both unless noted.
 
 ## 16. Client exe patches and hooks
 
-Where every point is in every release, with signatures: patch-addresses.md (sections 2-3, 6, 8.6; v0.9.20 table in 3).
+Where every point is in every release, with signatures: patch-addresses.md (sections 2-3, 6, 8.6; v0.9.20 and v0.9.22
+tables in 3).
 No fixed exe RVA survives a release; the loader finds patch sites by signature (`g_sigpatches`, `sig_find`: a unique
 match in the executable sections, original bytes checked) and reports what it can't find as `[sigpatch]`.
 
@@ -1065,6 +1090,18 @@ match in the executable sections, original bytes checked) and reports what it ca
   release. How: the first `lock cmpxchg byte [rip+d]` before the code that formats "You are banned from this server.
   Reason: "; the table is accepted only with its lock-cmpxchg partner, read without the lock and validated twice.
   (10-18 f4720fc, 6113b66)
+- **Moderation table: players Vec found by its code** (client 0.9.22) — `st_addr_install` / `st_addr_refresh`. Why: 0.9.22
+  added 0xc8 bytes of fields to the table before the players Vec (the new VPN / ASN block lists, GUESSED), so lock+0xa8 --
+  taken as the Vec's len since 0.9.18 -- was another field and the stats page's player addresses (shown while hosting)
+  would have been read from the wrong place; the Option tag was read at len-0xa0, also moved. How: the lock is found as
+  before; the Vec's len is the most common target of `imul r64,[rip+d],0x68` (len x the 0x68-byte entry) within 0x400
+  bytes after the lock, the Option tag lock+8. Same result for 0.9.18 / 0.9.20 (lock+0xa8), 0.9.22 lock+0x170; the launch
+  line names it ("players at lock+0x..."). Checked live: our 0.9.22 dedicated server's stats listed a joined client's
+  address. No old-behaviour switch (the old offsets are wrong for 0.9.22 and identical for older builds). (10-20)
+- **Port to client v0.9.22** (v0.9.21 skipped: current for a day) — every signature and hook found unchanged (sites in
+  patch-addresses.md section 3); the Ballot cache grew to 0x3f8 (three 0x140-byte choices, were 0x128): the vote fields
+  are still its last 0x20 bytes, where st_bv_tick reads them; the moderation table moved (entry above). Checked in game
+  against our dedicated server on 0.9.22: menu, join, match, chat hook, spawns, slots, Quality control. (10-20)
 - **Workshop-download helper replaced** — `i_CreateProcessW`. Why: the client's `workshop-download --subscribe|--update
   <id>` helper needs Steam ("Steam Workshop is unavailable"), and with `PELOAD_WORKER_INHERIT_STDIO=1` its JSON went to the
   loader's log so the parent read EOF. How: run shim/tools/workshop-helper.sh (DepotDownloader) on the client's pipes in
@@ -1419,6 +1456,10 @@ Numbers are from the commit messages; PERF-PLAN.md has the measurements. Compare
   and if that identity fails), the signature is verified; make-release.sh puts a portable signed app at the top of the
   bundle, adds the launcher, the icon, machine.sh / workshop-helper.sh / client-update.sh / make-app.sh and the map tools
   the loader runs (h3nav, h3inv, h3spots, h3dmg), and refuses to package uncommitted shim/ or re-tools/ changes.
+- **clipboard-test.sh** (shim/tools) — the loader's clipboard + GlobalAlloc code extracted from peload.c by marker, built for
+  x86_64 and run under Rosetta against a private named pasteboard (your clipboard is never touched): Global* blocks,
+  owner / not-open rules, copy with CRLF and non-ASCII, paste as UTF-16 and UTF-8, registered formats, the format list
+  after EmptyClipboard, the sequence number, PELOAD_NO_CLIPBOARD. (10-20)
 - **Megalo lab** (backlog 72; shim/tools/megalo-lab/megalo_fuzz.py, shim/docs/megalo.md) — Why (user, 2026-10-19: "isolate
   it for us to test the things it supports ... make it crash, corrupt memory"): the client's Megalo compiler is reachable
   without MCC through its own `megalo-check` / `mode-compile` / `mode-check` subcommands (~0.07 s each under the loader).
