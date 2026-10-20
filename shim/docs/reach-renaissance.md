@@ -7,12 +7,19 @@ Steam build of Halo: Reach (`haloreach.dll` SHA-256 `738dd2d2...0894`, the one b
 
 ## Status (2026-10-20)
 
-- **A local match renders and runs.** Tested: Slayer on Sword Base, first person with HUD, through the D3D11 -> GL path and
-  the native GL helper. It ran ~2,500 draws a frame at the engine's 60 fps cap and lasted full 60 s / 150 s sessions.
+- **A local match renders and runs.** Tested: Slayer on Sword Base and Spire, first person with HUD, through the D3D11 -> GL
+  path and the native GL helper. It ran ~2,500 draws a frame at the engine's 60 fps cap and lasted full 60 s / 150 s
+  sessions.
+- **Input works.**
+  - Controller (XInput on GameController) moves, turns and picks the loadout.
+  - Keyboard: host-probe reads it with GetAsyncKeyState.
+  - Mouse look: host-probe re-centres the cursor. Click the window to capture the pointer; F1 releases it.
 - Sound: XAudio2 on CoreAudio, FMOD banks from MCC, and the Waves DLLs as guests (the same path as Halo 3).
-- Not yet: the menus (WebView2), the public server list and updates (HTTPS through Windows' Schannel), the launcher
-  (`Reach Renaissance.exe`), keyboard / mouse / controller in a match (untested), and host-probe's own HLSL (D3DCompile:
-  gamma pass, emblems, loading dots).
+- Not yet:
+  - the menus (WebView2);
+  - the public server list and updates (HTTPS through Windows' Schannel);
+  - the launcher (`Reach Renaissance.exe`);
+  - host-probe's own HLSL (D3DCompile: gamma pass, emblems, loading dots).
 
 ## Setup
 
@@ -61,7 +68,7 @@ and the rest are logging stubs it does not call in a match. The Halo 3 patches a
 
 ## Next
 
-1. Input in a match: our Raw Input / XInput go to host-probe's window.
+1. Online play between Macs: host-probe's --net-lan / --server / --join paths (rr-master, rr-browser) under the loader.
 2. A real `D3DCompile`, either Microsoft's `d3dcompiler_47.dll` from MCC as a guest (115 msvcrt imports, 14 not in ucrtbase,
    plus CryptoAPI hashes) or the few host-probe shaders by hand.
 3. The menus: WebView2 on WKWebView. The page side is only `chrome.webview.postMessage`, `message` events and shared buffers.

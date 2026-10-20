@@ -556,6 +556,13 @@ patch variants by signature (section 16; shim/docs/patch-addresses.md).
   window (and the present thread) was only made in MsgWaitForMultipleObjectsEx, the Reclaimer worker's wait; Reach
   Renaissance's host-probe pumps its window with PeekMessageW, so its frames rendered offscreen and nothing showed. How: the
   first PeekMessageW / GetMessageW on the main thread makes the window too (idempotent). (10-20, reach-port)
+- **Mouse look by re-centring the cursor** — wininput.c `wi_SetCursorPos`, `wi_cursor_captured_move`, `wi_raw_mouse`. Why:
+  Reach Renaissance's host-probe looks around with GetCursorPos (distance from the centre) + SetCursorPos (back to the
+  centre) every frame while ClipCursor holds the pointer; the captured pointer never moved here (motion went to Raw Input
+  only), so the look delta was always 0. How: once a guest calls SetCursorPos while the pointer is captured, captured motion
+  moves the virtual cursor too, clamped to the ClipCursor rectangle; a guest that never does (the Reclaimer client, Raw
+  Input) is unchanged. Checked with `PELOAD_KBM_TEST=1 PELOAD_KBM_TEST_DELAY=16`: the view turns with the sweep and W walks.
+  Old: `PELOAD_CURSOR_FROZEN=1`. (10-20, reach-port)
 - **CallWindowProcW** — `i_CallWindowProcW`. Why: a subclassed window procedure (host-probe hooks its game window for the UI
   cursor) forwards what it doesn't handle to the previous one; the logging stub returned 0, so every forwarded message was
   swallowed. How: calls the previous procedure (a guest function or our DefWindowProcW, both ms_abi). (10-20, reach-port)
@@ -1564,6 +1571,12 @@ Numbers are from the commit messages; PERF-PLAN.md has the measurements. Compare
   panel's 60 Hz are never shown and only heat a fanless MacBook Air into throttling; and PELOAD_MONITOR=<w>x<h> (peload.c
   mon_wh, any Mac, opt-in) sets the monitor size the loader reports (1920x1080 otherwise), which the client uses as its
   "native" render resolution -- 1600x900 or 1280x720 lowers the internal render resolution on a weak GPU.
+- **shim/reach.sh; gameplay start for Reach Renaissance** — Why: a way to run a Reach match without Reach Renaissance's menus,
+  and the loader's test tools (`PELOAD_INPUT_SCRIPT`, `PELOAD_KBM_TEST`, `PELOAD_D3DGL_SHOTWIN_FROM/_TO`, the walker) wait for
+  gameplay start, which was read only from the Reclaimer client's "gameplay presentation ready" log line. How: reach.sh runs
+  host-probe with the launcher's match template (shim/docs/reach-renaissance.md); `GAMEPLAY_MARK` also takes host-probe's
+  "load fraction 1.000"; `PELOAD_KBM_TEST_DELAY=<s>` (default 3) starts the keyboard/mouse self-test later (Reach shows
+  its loadout picker first). (10-20, reach-port)
 
 ## 21. Superseded workarounds (kept for history; most switches still exist)
 

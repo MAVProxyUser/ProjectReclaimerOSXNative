@@ -869,9 +869,12 @@ static void pipeio_log(const char*who,int fd,uint32_t n,long k,const void*buf){ 
     struct stat st; if(fstat(fd,&st) || !(S_ISSOCK(st.st_mode)||S_ISFIFO(st.st_mode))) return;
     char m[200]; int q=snprintf(m,sizeof m,"  [pipeio] %s fd %d n %u -> %ld '",who,fd,n,k); for(long i=0;i<k && i<48 && q<190;i++){ char c=((const char*)buf)[i]; m[q++]=(c>=32&&c<127)?c:'.'; }
     m[q++]='\''; m[q++]='\n'; (void)!write(2,m,(size_t)q); }
+// Gameplay start (g_gameplay_t0: scripted input, capture windows, the walker ...) is read from the guest's own log: the Reclaimer
+// client's "gameplay presentation ready", or Reach Renaissance host-probe's "load fraction 1.000" (2026-10-20: its map finished loading).
+#define GAMEPLAY_MARK(b,n) (memmem((b),(n),"gameplay presentation ready",27) || memmem((b),(n),"load fraction 1.000",19))
 static int    MSABI i_WriteFile(void *h, const void *buf, uint32_t n, uint32_t *wr, void *ov){
     (void)ov; intptr_t hv=(intptr_t)h;
-    if(!g_gameplay_t0 && buf && n>20 && memmem(buf,n,"gameplay presentation ready",27)) g_gameplay_t0=mono_s();
+    if(!g_gameplay_t0 && buf && n>20 && GAMEPLAY_MARK(buf,n)) g_gameplay_t0=mono_s();
     if(!g_menu_ready_t0 && buf && n>20 && memmem(buf,n,"Menu loading screen finished",28)) g_menu_ready_t0=mono_s();
     if(buf && n>20 && memmem(buf,n,"Carnage report opened",21)) __atomic_add_fetch(&g_games_ended,1,__ATOMIC_SEQ_CST);
     if(pipe_is(hv)) return pipe_write(h,buf,n,wr);
@@ -914,7 +917,7 @@ static int    MSABI i_WriteFile(void *h, const void *buf, uint32_t n, uint32_t *
     return (fd>=0 || hv==1||hv==2||hv==3) ? 1 : 0; }
 static int    MSABI i_WriteConsoleW(void *h, const uint16_t *s, uint32_t n, uint32_t *wr, void *rsv){
     (void)rsv; int fd=(h==(void*)3)?2:1;
-    if(!g_gameplay_t0 && s && n>20){ char a[512]; uint32_t m=n<511?n:511; for(uint32_t i=0;i<m;i++) a[i]=(s[i]<128)?(char)s[i]:'?'; if(memmem(a,m,"gameplay presentation ready",27)) g_gameplay_t0=mono_s(); }
+    if(!g_gameplay_t0 && s && n>20){ char a[512]; uint32_t m=n<511?n:511; for(uint32_t i=0;i<m;i++) a[i]=(s[i]<128)?(char)s[i]:'?'; if(GAMEPLAY_MARK(a,m)) g_gameplay_t0=mono_s(); }
     if(!g_menu_ready_t0 && s && n>20){ char a[512]; uint32_t m=n<511?n:511; for(uint32_t i=0;i<m;i++) a[i]=(s[i]<128)?(char)s[i]:'?'; if(memmem(a,m,"Menu loading screen finished",28)) g_menu_ready_t0=mono_s(); }
     // UTF-16 -> UTF-8, written in one go and passed to the live event feed (PELOAD_CONSOLE_ASCII: the old copy, one
     // write per character with '?' for anything non-ASCII)
@@ -3460,7 +3463,7 @@ static uint32_t MSABI i_GetTickCount(void){ return (uint32_t)(mach_absolute_time
 // NtWriteFile: route writes to our stdin/out/err pseudo-handles (1/2/3)
 static int MSABI i_NtWriteFile(void*h,void*ev,void*apc,void*apcctx,void*iosb,const void*buf,uint32_t len,void*off,void*key){
     (void)ev;(void)apc;(void)apcctx;(void)key; intptr_t hv=(intptr_t)h;
-    if(!g_gameplay_t0 && buf && len>20 && memmem(buf,len,"gameplay presentation ready",27)) g_gameplay_t0=mono_s();
+    if(!g_gameplay_t0 && buf && len>20 && GAMEPLAY_MARK(buf,len)) g_gameplay_t0=mono_s();
     { extern double g_menu_ready_t0; if(!g_menu_ready_t0 && buf && len>20 && memmem(buf,len,"Menu loading screen finished",28)) g_menu_ready_t0=mono_s(); }
     if(buf && len>20 && memmem(buf,len,"Carnage report opened",21)) __atomic_add_fetch(&g_games_ended,1,__ATOMIC_SEQ_CST);
     int fd = (hv==2)?1 : (hv==3)?2 : (hv>=0x1000)?(int)(hv-0x1000) : -1;

@@ -35,7 +35,9 @@ typedef struct { uint8_t data[48]; uint32_t size; } WiRaw;
 static WiRaw g_riq[1024]; static uint32_t g_riq_n;    // records referenced by HRAWINPUT = 0x52490000 + slot
 static int64_t wi_raw_alloc(const uint8_t*d,uint32_t sz){ uint32_t slot=g_riq_n++ % 1024; memcpy(g_riq[slot].data,d,sz); g_riq[slot].size=sz; return (int64_t)(0x52490000u+slot); }
 static void* wi_target(void*reg){ return reg?reg:fg_hwnd_ext(); }
+static void wi_cursor_captured_move(int dx,int dy);   // (cursor section: a re-centring guest's captured cursor follows the mouse)
 static void wi_raw_mouse(int dx,int dy,uint16_t bflags,int16_t bdata){
+    if(dx||dy) wi_cursor_captured_move(dx,dy);
     if(!g_ri_mouse) return;
     uint8_t r[48]; memset(r,0,sizeof r); uint32_t type=0/*RIM_TYPEMOUSE*/, size=48;
     memcpy(r,&type,4); memcpy(r+4,&size,4); void*dev=(void*)0x4D53; memcpy(r+8,&dev,8);    // RAWINPUTHEADER (24 B)
@@ -91,8 +93,9 @@ static int32_t g_wi_cx=WIN_W/2, g_wi_cy=WIN_H/2;   // last client-space pointer 
 // Unattended input self-tests (PELOAD_KBM_TEST) and PELOAD_NO_SYS_CURSOR never capture or hide the real
 // macOS cursor: the guest still sees its pointer captured, but whoever is using the Mac keeps their mouse.
 static int wi_syscursor(void){ static int ok=-1; if(ok<0) ok=!(getenv("PELOAD_KBM_TEST")||getenv("PELOAD_NO_SYS_CURSOR")); return ok; }
+static int g_wi_clip_on_x; static int32_t g_wi_clip_x[4];   // (ClipCursor's rectangle, for the re-centring cursor below)
 static int MSABI wi_ClipCursor(const int32_t*r){
-    int want = r!=0;
+    int want = r!=0; g_wi_clip_on_x=want && r[2]>r[0] && r[3]>r[1]; if(g_wi_clip_on_x) for(int i=0;i<4;i++) g_wi_clip_x[i]=r[i];
     if(want!=g_wi_captured){ g_wi_captured=want; if(wi_syscursor()) CGAssociateMouseAndMouseCursorPosition(want?0:1);
         if(getenv("PELOAD_TRACE_INPUT")){ char m[64]; int k=snprintf(m,sizeof m,"  [kbm] pointer %s\n",want?"captured":"released"); (void)!write(2,m,k); } }
     return 1; }
@@ -103,7 +106,20 @@ static int MSABI wi_ShowCursor(int show){
     else if(before<0 && g_wi_cursor_count>=0) CGDisplayShowCursor(kCGDirectMainDisplay);
     return g_wi_cursor_count; }
 static int MSABI wi_GetCursorPos(int32_t*p){ if(p){ p[0]=g_wi_cx; p[1]=g_wi_cy; } return 1; }
-static int MSABI wi_SetCursorPos(int x,int y){ g_wi_cx=x; g_wi_cy=y; return 1; }   // (pointer stays put while captured)
+// Mouse look by re-centring (2026-10-20): Reach Renaissance's host-probe reads GetCursorPos, takes the distance from the centre
+// as the look delta and puts the cursor back with SetCursorPos, every frame, while ClipCursor holds it in the window. The
+// captured pointer never moved here (motion went to Raw Input only), so the look delta was always 0. Once a guest calls
+// SetCursorPos while the pointer is captured, captured motion moves the virtual cursor too (clamped to the ClipCursor
+// rectangle); a guest that never does (the Reclaimer client: Raw Input) sees no change. PELOAD_CURSOR_FROZEN=1 = old.
+static int g_wi_recenter;
+static int MSABI wi_SetCursorPos(int x,int y){ g_wi_cx=x; g_wi_cy=y;
+    if(g_wi_captured && !g_wi_recenter){ static int old=-1; if(old<0) old=getenv("PELOAD_CURSOR_FROZEN")?1:0; if(!old){ g_wi_recenter=1;
+            if(getenv("PELOAD_TRACE_INPUT")) (void)!write(2,"  [kbm] guest re-centres the captured cursor: captured motion moves it\n",71); } }
+    return 1; }
+static void wi_cursor_captured_move(int dx,int dy){ if(!g_wi_recenter || !g_wi_captured) return;
+    int32_t x=g_wi_cx+dx, y=g_wi_cy+dy;
+    if(g_wi_clip_on_x){ if(x<g_wi_clip_x[0]) x=g_wi_clip_x[0]; if(x>g_wi_clip_x[2]-1) x=g_wi_clip_x[2]-1; if(y<g_wi_clip_x[1]) y=g_wi_clip_x[1]; if(y>g_wi_clip_x[3]-1) y=g_wi_clip_x[3]-1; }
+    g_wi_cx=x; g_wi_cy=y; }
 
 // ---- macOS keyCode -> Windows VK + set-1 scan code (+E0) ----
 typedef struct { uint8_t vk, sc, e0; } WiKey;
@@ -259,7 +275,7 @@ static void* wi_test_thread(void*a){ (void)a; pthread_setname_np("shim-kbmtest")
     // a match, or Reclaimer's frontend menu (PELOAD_KBM_TEST_GAMEPLAY=1: only a match, e.g. one joined from the menu)
     int wait_match=getenv("PELOAD_KBM_TEST_GAMEPLAY")!=0;
     while(!g_gameplay_t0 && (wait_match || !g_menu_ready_t0)) usleep(100000);
-    usleep(3000000);
+    { const char*d=getenv("PELOAD_KBM_TEST_DELAY"); usleep(d?(useconds_t)(atof(d)*1e6):3000000); }   // (Reach: its loadout picker is up first)
     void*h=fg_hwnd_ext(); char m[64]; int k;
     g_keydown[1]=1; wi_raw_mouse(0,0,0x1,0); wi_post(h,0x0201,1,(int64_t)((WIN_H/2)<<16|(WIN_W/2)));
     usleep(80000);
