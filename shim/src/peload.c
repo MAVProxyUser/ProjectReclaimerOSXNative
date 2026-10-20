@@ -768,7 +768,12 @@ static void*  MSABI i_VirtualAlloc(void *addr, uint64_t sz, uint32_t type, uint3
     // within 2GB of halo3" scan depends on — padding those fragments the window and the scan fails.
     uint64_t hint=(uint64_t)addr;
     uint64_t guard = (getenv("PELOAD_ALLOC_GUARD") && (hint==0 || hint>=0x200000000ULL)) ? 4096 : 0;
-    void *p=mmap(addr, want+guard, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANON, -1,0);
+    // PAGE_EXECUTE* (0x10/0x20/0x40/0x80) maps executable (2026-10-20): Reach Renaissance's host-probe allocates its jump stubs
+    // right after haloreach.dll with PAGE_EXECUTE_READWRITE and runs them; Rosetta refuses to execute a page without PROT_EXEC
+    // (SIGBUS at the stub's first byte). Every page stays readable + writable as before. PELOAD_VA_NOEXEC=1 = old (always RW).
+    static int noexec=-1; if(noexec<0) noexec=getenv("PELOAD_VA_NOEXEC")?1:0;
+    int pr=PROT_READ|PROT_WRITE; if((prot&0xf0) && !noexec) pr|=PROT_EXEC;
+    void *p=mmap(addr, want+guard, pr, MAP_PRIVATE|MAP_ANON, -1,0);
     if(getenv("PELOAD_TRACE_VA")){ char t[144]; snprintf(t,sizeof t,"  [VirtualAlloc] want=%p size=0x%llx type=0x%x -> %p (+0x%llx)\n",addr,(unsigned long long)sz,type,p==MAP_FAILED?0:p,(unsigned long long)guard); ws(t); }
     if(p!=MAP_FAILED){ va_add(p,want+guard); __atomic_add_fetch(&g_va_live,(int64_t)(want+guard),__ATOMIC_RELAXED); }
     return p==MAP_FAILED?0:p;
@@ -809,6 +814,12 @@ static int    MSABI i_GlobalMemoryStatusEx(uint8_t *ms){ if(!ms) return 0; *(uin
 
 static uint16_t* MSABI i_GetCommandLineW(void){ return g_cmdlineW; }
 #define WS2_HANDLE ((void*)0x7732000ULL)
+// LoadLibrary("xaudio2_9redist.dll" / "xaudio2_9.dll" ...) (2026-10-20): haloreach.dll's audio start loads XAudio2 by name and
+// takes its exports with GetProcAddress (halo3 only reached it through its delay imports). The genuine redist DLL sat in MCC's
+// MCC\Binaries\Win64 and loaded as a guest: it recursed into the engine until the stack ran out. Now an XAudio2 load returns
+// this handle and GetProcAddress on it gives the same functions the import binder does (xa_resolve: our CoreAudio XAudio2).
+// PELOAD_XA_REALDLL=1 = old (load the genuine DLL).
+#define XA_HANDLE ((void*)0x7733000ULL)
 static int name_is_ws2(const char*s); static int name_is_ws2_w(const uint16_t*w); // fwd
 // Loaded guest DLL by file name (case-insensitive, with or without a directory / ".dll").
 static uint8_t* guest_mod_by_name_w(const uint16_t*n){ if(!n) return 0; char a[512]; int i=0; for(; n[i]&&i<511;i++) a[i]=(char)(n[i]<128?n[i]:'?'); a[i]=0;
@@ -2157,6 +2168,14 @@ static void MSABI ctx_OMSetRenderTargets(void*t,uint32_t num,void*const*rtvs,voi
     for(uint32_t i=num;i<8;i++){ g_rst.rtvs[i]=0; g_rst.rtvv[i]=0; }
     g_rst.rtv=g_rst.rtvs[0];
     { D3DObj*d=(D3DObj*)dsv; g_rst.dsv=(d&&d->data)?(D3DObj*)d->data:d; } }
+// OMSetRenderTargetsAndUnorderedAccessViews (vtable 34; 2026-10-20): haloreach.dll binds some passes' targets with it. It was the
+// do-nothing default, so those draws went to whatever the previous OMSetRenderTargets left bound. Render targets + depth are
+// set as by OMSetRenderTargets (NumRTVs = D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL keeps them); pixel-shader UAVs are not
+// bound here (noted once with PELOAD_TRACE_D3DGL). PELOAD_OM_UAV_OLD=1 = old (ignored).
+static void MSABI ctx_OMSetRenderTargetsAndUAVs(void*t,uint32_t nrtv,void*const*rtvs,void*dsv,uint32_t uavstart,uint32_t nuav,void*const*uavs,const uint32_t*cnt){ (void)uavstart;(void)uavs;(void)cnt;
+    static int old=-1; if(old<0) old=getenv("PELOAD_OM_UAV_OLD")?1:0; if(old) return;
+    if(nrtv!=0xFFFFFFFFu) ctx_OMSetRenderTargets(t,nrtv,rtvs,dsv);
+    if(nuav && nuav!=0xFFFFFFFFu && getenv("PELOAD_TRACE_D3DGL")){ static int n; if(!n++) ws("  [d3dgl] OMSetRenderTargetsAndUnorderedAccessViews: pixel-shader UAVs not bound\n"); } }
 static void MSABI ctx_RSSetViewports(void*t,uint32_t num,const void*vps){ (void)t; if(num&&vps){ const float*f=vps; g_rst.vp_x=(int)f[0]; g_rst.vp_y=(int)f[1]; g_rst.vp_w=(int)f[2]; g_rst.vp_h=(int)f[3];
     g_rst.vp_zn=f[4]; g_rst.vp_zf=f[5]; g_rst.vp_set=1; } }
 static void MSABI ctx_OMSetBlendState(void*t,void*bs,const float*bf,uint32_t mask){ (void)t;(void)mask; g_rst.blend=bs;
@@ -2361,7 +2380,7 @@ static void d3d_init(void){
     x[7]=(void*)ctx_VSSetConstantBuffers; x[9]=(void*)ctx_PSSetShader; x[11]=(void*)ctx_VSSetShader; x[16]=(void*)ctx_PSSetConstantBuffers;
     x[8]=(void*)ctx_PSSetShaderResources; x[17]=(void*)ctx_IASetInputLayout; x[18]=(void*)ctx_IASetVertexBuffers;
     x[25]=(void*)ctx_VSSetShaderResources;   // VS-stage SRVs (vertex-pulling geometry source)
-    x[19]=(void*)ctx_IASetIndexBuffer; x[24]=(void*)ctx_IASetPrimitiveTopology; x[33]=(void*)ctx_OMSetRenderTargets; x[44]=(void*)ctx_RSSetViewports;
+    x[19]=(void*)ctx_IASetIndexBuffer; x[24]=(void*)ctx_IASetPrimitiveTopology; x[33]=(void*)ctx_OMSetRenderTargets; x[34]=(void*)ctx_OMSetRenderTargetsAndUAVs; x[44]=(void*)ctx_RSSetViewports;
     x[35]=(void*)ctx_OMSetBlendState; x[36]=(void*)ctx_OMSetDepthStencilState; x[43]=(void*)ctx_RSSetState; x[45]=(void*)ctx_RSSetScissorRects;
     x[10]=(void*)ctx_PSSetSamplers; x[26]=(void*)ctx_VSSetSamplers;
     x[27]=(void*)ctx_Begin; x[28]=(void*)ctx_End; x[29]=(void*)ctx_GetData;   // ID3D11Asynchronous (queries)
@@ -3660,12 +3679,16 @@ static void msg_fill(void*m,void*h,uint32_t msg,uint64_t wp,int64_t lp){ if(!m)r
 typedef struct { void* hwnd; uint32_t msg; uint64_t wp; int64_t lp; } WiMsgFwd;
 static int wi_peek_fwd(WiMsgFwd*out,int remove);   // wininput.c (keyboard/mouse queue)
 static void cocoa_pump(void);
-static int    MSABI i_PeekMessageW(void*m,void*h,uint32_t f1,uint32_t f2,uint32_t r){ (void)h;(void)f1;(void)f2; inject_activation_once();
+// The window under PELOAD_PRESENT used to be made only in MsgWaitForMultipleObjectsEx (the Reclaimer worker's wait); a program
+// whose main thread pumps with PeekMessageW / GetMessageW (Reach Renaissance's host-probe, 2026-10-20) never got one, so its frames
+// rendered offscreen and nothing showed. Now the first pump on the main thread makes it too (idempotent, as there).
+static void present_window_from_pump(void){ static int done; if(done || !pthread_main_np() || !getenv("PELOAD_PRESENT")) return; done=1; cocoa_make_gl_window_i(1280,720); }
+static int    MSABI i_PeekMessageW(void*m,void*h,uint32_t f1,uint32_t f2,uint32_t r){ (void)h;(void)f1;(void)f2; inject_activation_once(); present_window_from_pump();
     if(g_inji<g_injn){ msg_fill(m,g_injmsg[g_inji].hwnd,g_injmsg[g_inji].msg,g_injmsg[g_inji].wp,g_injmsg[g_inji].lp); if(r&1/*PM_REMOVE*/) g_inji++; return 1; }
     WiMsgFwd e; if(wi_peek_fwd(&e,r&1)){ msg_fill(m,e.hwnd,e.msg,e.wp,e.lp); return 1; }
     if(pthread_main_np()){ static double last; double now=mono_s(); if(now-last>0.002){ last=now; cocoa_pump(); if(wi_peek_fwd(&e,r&1)){ msg_fill(m,e.hwnd,e.msg,e.wp,e.lp); return 1; } } }
     return 0; }
-static int    MSABI i_GetMessageW(void*m,void*h,uint32_t f1,uint32_t f2){ (void)h;(void)f1;(void)f2; inject_activation_once();
+static int    MSABI i_GetMessageW(void*m,void*h,uint32_t f1,uint32_t f2){ (void)h;(void)f1;(void)f2; inject_activation_once(); present_window_from_pump();
     if(g_inji<g_injn){ msg_fill(m,g_injmsg[g_inji].hwnd,g_injmsg[g_inji].msg,g_injmsg[g_inji].wp,g_injmsg[g_inji].lp); g_inji++; return 1; }
     WiMsgFwd e; if(wi_peek_fwd(&e,1)){ msg_fill(m,e.hwnd,e.msg,e.wp,e.lp); return 1; }
     return 0; }
@@ -3722,6 +3745,11 @@ static int64_t MSABI i_GetWindowLongPtrW(void*h,int idx){ WWin*w=h; if(w&&w->mag
 static int64_t MSABI i_SetWindowLongPtrW(void*h,int idx,int64_t v){ WWin*w=h; if(w&&w->magic==WWIN_MAGIC){ int64_t o=0; if(idx==-21){o=w->userdata;w->userdata=v;} else if(idx==-4){o=(int64_t)(intptr_t)w->wndproc;w->wndproc=(WNDPROC_t)(intptr_t)v;} else if(idx>=0&&idx<128){o=w->extra[idx/8];w->extra[idx/8]=v;} return o; } if(idx>=-8&&idx<0){ int64_t o=g_winlong[-idx-1]; g_winlong[-idx-1]=v; return o;} return 0; }
 static int32_t MSABI i_GetWindowLongW(void*h,int idx){ return (int32_t)i_GetWindowLongPtrW(h,idx); }
 static int32_t MSABI i_SetWindowLongW(void*h,int idx,int32_t v){ return (int32_t)i_SetWindowLongPtrW(h,idx,v); }
+// CallWindowProcW (2026-10-20): a subclassed window procedure (SetWindowLongPtrW(GWLP_WNDPROC); Reach Renaissance's host-probe
+// hooks its game window for the UI cursor) forwards everything it doesn't handle to the previous one. It was a logging stub
+// returning 0, so every forwarded message was swallowed (WM_NCCREATE / WM_SETCURSOR / input answered 0). The previous procedure
+// is a guest function or our DefWindowProcW, both ms_abi.
+static int64_t MSABI i_CallWindowProcW(WNDPROC_t prev,void*h,uint32_t m,uint64_t wp,int64_t lp){ return prev ? prev(h,m,wp,lp) : 0; }
 static int    MSABI i_AdjustWindowRectEx(int32_t*r,uint32_t s,int m,uint32_t ex){ (void)r;(void)s;(void)m;(void)ex; return 1; }
 // DPI queries: unimplemented they fell through to the 0-returning stub, so Reclaimer's egui UI (its
 // frontend menu and in-game overlays) computed pixels_per_point = 0/96 and painted every widget at zero
@@ -8871,6 +8899,14 @@ static void thr_reap(int all){   // g_tlsm held
         for(int m=0;m<g_ntlsmods;m++){ int ix=g_tlsmods[m].index; if(ix>=0 && ix<128){ free(d->tarr[ix]); d->tarr[ix]=0; } }
         free(d->tarr); free(d->teb); g_thr_freed++; }
     g_thr_ndead=j; }
+// ExitThread / FreeLibraryAndExitThread (2026-10-20): haloreach.dll ends a worker thread with FreeLibraryAndExitThread at the end
+// of a session. Neither existed (a logging stub returned, and the thread ran on into the int3 padding after the noreturn call:
+// SIGTRAP). Now the thread jumps back into thread_tramp, which finishes it as if its start function had returned that code
+// (handle signaled, TEB / TLS reaped later). Like Windows, nothing on the guest stack is unwound. A thread we did not start
+// (the main thread) leaves through pthread_exit. FreeLibrary itself is a no-op here.
+static __thread jmp_buf *t_exit_jb; static __thread uint32_t t_exit_code;
+static void MSABI i_ExitThread(uint32_t code){ if(t_exit_jb){ t_exit_code=code; _longjmp(*t_exit_jb,1); } pthread_exit(0); }
+static void MSABI i_FreeLibraryAndExitThread(void*h,uint32_t code){ (void)h; i_ExitThread(code); }
 static void *thread_tramp(void *a){
     TArg *t=a;
     uint8_t *teb=calloc(1,0x2000);
@@ -8897,7 +8933,8 @@ static void *thread_tramp(void *a){
     __asm__ volatile("movq %0,%%gs:0x58"::"r"((uint64_t)tarr));
     g_guest_thr=1; t_self_thread=t->done;
     if(getenv("PELOAD_TRACE_THREAD")){ char tb[96]; int nn=snprintf(tb,sizeof tb,"  [TT] enter tid=0x%x gs58=0x%llx fn=%p\n",pthread_mach_thread_np(pthread_self()),(unsigned long long)(uint64_t)tarr,(void*)t->fn); (void)!write(2,tb,nn); }
-    uint32_t r = t->fn ? t->fn(t->param) : 0;
+    uint32_t r;
+    { jmp_buf jb; if(!_setjmp(jb)){ t_exit_jb=&jb; r = t->fn ? t->fn(t->param) : 0; } else r=t_exit_code; t_exit_jb=0; }   // ExitThread lands here
     __atomic_add_fetch(&g_gthr_exited,1,__ATOMIC_RELAXED);
     // The Windows TEB fields live in macOS TSD slots 0x30/0x58/0x60. On this
     // macOS, slot 12 (gs:0x60) has a pthread destructor that FREES the slot value
@@ -8923,6 +8960,7 @@ static void *thread_tramp(void *a){
         __asm__ volatile("movq $0,%%gs:0x30\n\tmovq $0,%%gs:0x58":::"memory"); }
     return (void*)(uintptr_t)r;
 }
+static uint64_t g_stack_reserve;   // the exe's SizeOfStackReserve (main)
 static void* MSABI i_CreateThread(void*attr,uint64_t stack,WinThreadProc start,void*param,uint32_t fl,uint32_t*tid){
     (void)attr;(void)stack;(void)fl;
     if(getenv("PELOAD_TRACE_THREAD")){ uint64_t s=(uint64_t)start; char t[96];
@@ -8933,7 +8971,19 @@ static void* MSABI i_CreateThread(void*attr,uint64_t stack,WinThreadProc start,v
     if(getenv("PELOAD_NO_THREADS")){ if(tid)*tid=0x7333; return (void*)0x7333; } // diagnostic: don't spawn
     SyncObj* done=sync_new(K_THREAD); done->manual=1;              // thread handle = waitable, manual-reset
     TArg *t=malloc(sizeof *t); t->fn=start; t->param=param; t->done=done;
-    pthread_t th; int pcrc=pthread_create(&th,0,thread_tramp,t); if(!pcrc) __atomic_add_fetch(&g_gthr_made,1,__ATOMIC_RELAXED);
+    // Stack size (2026-10-20): every guest thread got macOS's 512 KB default whatever it asked for. Windows gives the requested
+    // size (dwStackSize; commit or, with STACK_SIZE_PARAM_IS_A_RESERVATION, reserve) and at least the exe's SizeOfStackReserve
+    // (Reclaimer 1 MB, Reach Renaissance 2 MB; Rust asks 2 MB for every std thread). An overflow is not caught the Windows way
+    // either: MSVC's __chkstk probes pages only below TEB.StackLimit (gs:0x10), and gs:0x10 is a macOS TSD slot under the loader,
+    // so a big frame steps over pthread's one guard page into whatever lies below -- in Reach that was another thread's stack
+    // (the loader's shim-sweep thread aborted with haloreach frames on it). Now: max(requested, exe reserve, 1 MB), rounded to
+    // 64 KB, with a 256 KB guard. PELOAD_THREAD_STACK=<bytes> raises the minimum; PELOAD_THREAD_STACK_OLD=1 = old (pthread default).
+    pthread_attr_t at; pthread_attr_init(&at);
+    if(!getenv("PELOAD_THREAD_STACK_OLD")){ uint64_t ss=stack, mn=g_stack_reserve>(1u<<20)?g_stack_reserve:(1u<<20);
+        const char*e=getenv("PELOAD_THREAD_STACK"); if(e){ uint64_t v=strtoull(e,0,0); if(v>mn) mn=v; }
+        if(ss<mn) ss=mn; if(ss>(1ull<<30)) ss=1ull<<30; ss=(ss+0xffff)&~0xffffull;
+        pthread_attr_setstacksize(&at,(size_t)ss); pthread_attr_setguardsize(&at,256u<<10); }
+    pthread_t th; int pcrc=pthread_create(&th,&at,thread_tramp,t); pthread_attr_destroy(&at); if(!pcrc) __atomic_add_fetch(&g_gthr_made,1,__ATOMIC_RELAXED);
     if(pcrc){ if(getenv("PELOAD_TRACE_THREAD")){ char eb[96]; int k=snprintf(eb,sizeof eb,"  [CreateThread] pthread_create FAILED rc=%d (start=%p param=%p)\n",pcrc,(void*)start,param); (void)!write(2,eb,k); } free(t); done->exitcode=0; done->signaled=1; return 0; }
     done->owner=th; done->tid=getenv("PELOAD_TID_CONST")?(uint32_t)(uintptr_t)th:(uint32_t)pthread_mach_thread_np(th);   // = its GetCurrentThreadId()
     if(!thr_keep()) pthread_detach(th);   // (after reading its id: a detached thread that already ended is gone)
@@ -9410,6 +9460,11 @@ static void* MSABI i_LoadLibraryExW(const uint16_t *name, void *h, uint32_t fl);
 static int no_waves_dll(const uint16_t*n){ static int on=-1; if(on<0) on=getenv("PELOAD_NO_WAVES")?1:0; if(!on||!n) return 0;
     char a[1024]; int i=0; for(; n[i]&&i<1023;i++) a[i]=(char)(n[i]<128?n[i]:'?'); a[i]=0; for(char*q=a;*q;q++) if(*q=='/') *q='\\';
     return strcasestr(a,"\\waves\\")!=0; }
+// SetDllDirectoryW (2026-10-20, Reach Renaissance's host-probe: MCC's haloreach folder, then LoadLibraryW("haloreach.dll")):
+// remembered as a Unix path; LoadLibraryExW looks a bare DLL name up there when it is no file in the current folder.
+static char g_dlldir[2048];
+static char* win2unix(const uint16_t *w, char *out, int outsz); // fwd (defined in FS block)
+static int MSABI i_SetDllDirectoryW(const uint16_t*d){ if(!d||!d[0]) g_dlldir[0]=0; else win2unix(d,g_dlldir,sizeof g_dlldir); return 1; }
 static void* MSABI i_LoadLibraryExW(const uint16_t *name, void *h, uint32_t fl){
     if(no_waves_dll(name)){ g_lasterr=126; ws("  [no-waves] refused a Waves DLL\n"); return 0; }
     (void)h;(void)fl; char w[2048]; int i=0; for(; name && name[i] && i<2047; i++) w[i]=(char)(name[i]<128?name[i]:'?'); w[i]=0;
@@ -9418,9 +9473,13 @@ static void* MSABI i_LoadLibraryExW(const uint16_t *name, void *h, uint32_t fl){
     snprintf(g_lastlib,sizeof g_lastlib,"%s",bn);
     ws("  [LoadLibraryExW] "); ws(w); ws("\n");
     if(name_is_ws2(bn)) return WS2_HANDLE; // Winsock: distinct handle, resolved by ordinal/name
+    if(name_has(bn,"xaudio2_") && !getenv("PELOAD_XA_REALDLL")) return XA_HANDLE;   // XAudio2: ours, see XA_HANDLE
     for(int m=0;m<g_nmods;m++) if(!strcasecmp(g_mods[m].name,bn)) return g_mods[m].base; // already loaded
     char p[2048]; win2unix(name,p,sizeof p);
     if(access(p,R_OK)==0){ g_prefer_base=1; uint8_t *b=load_guest(p, strdup(bn)); g_prefer_base=0; if(b) return b; }
+    // a bare name that is no file here: the SetDllDirectoryW folder (Reach Renaissance points it at MCC's haloreach folder)
+    if(g_dlldir[0] && bn==w){ char q[2300]; snprintf(q,sizeof q,"%s/%s",g_dlldir,w);
+        if(access(q,R_OK)==0){ g_prefer_base=1; uint8_t *b=load_guest(q, strdup(bn)); g_prefer_base=0; if(b) return b; } }
     return g_base; // feature-probe DLLs (api-ms-*) that aren't real files: placeholder
 }
 
@@ -10008,6 +10067,7 @@ static void* MSABI i_GetProcAddress(void *mod, char *name){
     // Winsock: resolve through the shared ws2_32 table so the IAT entry and this
     // result are the SAME pointer (the --native-udp gate compares them).
     if(mod==WS2_HANDLE) return ((uint64_t)name<0x10000)? ws2_by_ordinal((uint32_t)(uintptr_t)name) : ws2_resolve_name(name);
+    if(mod==XA_HANDLE){ void*x=((uint64_t)name<0x10000)? xa_resolve((uint32_t)(uintptr_t)name,0) : xa_resolve(0,name); if(x) return x; }
     if((uint64_t)name < 0x10000){ // imported by ordinal
         if(imp_count<8192){ imp_dll[imp_count]="(dynamic)"; imp_fn[imp_count]="#ordinal";
             return make_stub(imp_count++); }
@@ -10054,6 +10114,7 @@ static uint32_t MSABI i_GetFileAttributesA(const char*a){ uint16_t w[2048]; int 
 static int MSABI i_GetFileAttributesExA(const char*a,int lvl,void*info){ uint16_t w[2048]; int i=0; for(; a&&a[i]&&i<2047;i++) w[i]=(uint8_t)a[i]; w[i]=0; return i_GetFileAttributesExW(w,lvl,info); }
 static void* MSABI i_LoadLibraryExA(const char*a,void*h,uint32_t fl){ uint16_t w[2048]; int i=0; for(; a&&a[i]&&i<2047;i++) w[i]=(uint8_t)a[i]; w[i]=0; return i_LoadLibraryExW(w,h,fl); }
 static void* MSABI i_LoadLibraryA(const char*a){ return i_LoadLibraryExA(a,0,0); }
+static void* MSABI i_LoadLibraryW(const uint16_t*a){ return i_LoadLibraryExW(a,0,0); }   // (windows-gnu Rust imports it; MSVC builds took the Ex form)
 static uint32_t MSABI i_SetFilePointer(void*h,int32_t dist,int32_t*high,uint32_t method){
     int64_t d = high? (((int64_t)(*high)<<32)|(uint32_t)dist) : (int64_t)dist; int64_t np=0;
     if(!i_SetFilePointerEx(h,d,&np,method)){ g_lasterr=win_err(); return 0xFFFFFFFFu; }
@@ -10403,7 +10464,7 @@ static void *resolve_impl(const char *fn){
         {"FreeEnvironmentStringsA",(void*)i_FreeEnvironmentStringsA},
         {"GetTickCount",(void*)i_GetTickCount},
         {"GetTickCount64",(void*)i_GetTickCount64},
-        {"LoadLibraryExW",(void*)i_LoadLibraryExW},
+        {"LoadLibraryExW",(void*)i_LoadLibraryExW},{"LoadLibraryW",(void*)i_LoadLibraryW},{"SetDllDirectoryW",(void*)i_SetDllDirectoryW},
         {"NtWriteFile",(void*)i_NtWriteFile},
         {"NtReadFile",(void*)i_NtReadFile},
         {"BCryptGenRandom",(void*)i_BCryptGenRandom},
@@ -10480,7 +10541,7 @@ static void *resolve_impl(const char *fn){
         {"GetWindowRect",(void*)i_GetWindowRect},
         {"SetWindowPos",(void*)i_SetWindowPos},
         {"GetWindowLongPtrW",(void*)i_GetWindowLongPtrW},
-        {"SetWindowLongPtrW",(void*)i_SetWindowLongPtrW},
+        {"SetWindowLongPtrW",(void*)i_SetWindowLongPtrW},{"CallWindowProcW",(void*)i_CallWindowProcW},
         {"GetWindowLongW",(void*)i_GetWindowLongW},
         {"SetWindowLongW",(void*)i_SetWindowLongW},
         {"AdjustWindowRectEx",(void*)i_AdjustWindowRectEx},
@@ -10630,7 +10691,7 @@ static void *resolve_impl(const char *fn){
         {"NtOpenFile",(void*)i_NtOpenFile},
         {"NtCreateNamedPipeFile",(void*)i_NtCreateNamedPipeFile},
         {"SetThreadStackGuarantee",(void*)i_SetThreadStackGuarantee},
-        {"FreeLibrary",(void*)i_FreeLibrary},
+        {"FreeLibrary",(void*)i_FreeLibrary},{"ExitThread",(void*)i_ExitThread},{"FreeLibraryAndExitThread",(void*)i_FreeLibraryAndExitThread},
         {"GetModuleFileNameA",(void*)i_GetModuleFileNameA},
         {0,0}
     };
@@ -10783,9 +10844,48 @@ static void* crt_fast_stub(const char*fn,void*guest){
     p[o++]=0x48;p[o++]=0xB8; memcpy(p+o,&host,8); o+=8; p[o++]=0xFF;p[o++]=0xE0;     // mov rax,host ; jmp rax
     sys_icache_invalidate(p,o); return p; }
 
+// ---- msvcrt.dll: the C runtime of Rust's x86_64-pc-windows-gnu target (2026-10-20, Reach Renaissance) ----
+// Reach Renaissance's programs are built for windows-gnu, so their CRT is msvcrt.dll, not ucrtbase / vcruntime140. Most of
+// what mingw's startup code and Rust's std take from it exist under the same name in the genuine ucrtbase we load (malloc,
+// memcpy, _initterm, exit, signal ...) and bind there. The msvcrt-only names are built on ucrtbase here: __getmainargs
+// (ucrtbase's own argv / environ), __set_app_type, _amsg_exit, _onexit (_crt_atexit), the data imports __initenv / _commode /
+// _fmode, and the FILE* calls: msvcrt's FILE is not ucrt's, so __iob_func hands out a 3-entry _iobuf array (stdin, stdout,
+// stderr) that fwrite / fprintf / vfprintf translate to ucrtbase's streams (__acrt_iob_func). PELOAD_NO_MSVCRT=1 = old
+// (msvcrt imports bind by name to native functions or logging stubs).
+static int mv_on(void){ static int on=-1; if(on<0) on=!getenv("PELOAD_NO_MSVCRT"); return on; }
+static void* crt_export(const char*n){ for(int m=0;m<g_nmods;m++) if(g_mods[m].name && is_crt_dll(g_mods[m].name)){ void*e=export_lookup(g_mods[m].base,n); if(e) return e; } return 0; }
+static char **g_mv_initenv; static int g_mv_commode, g_mv_fmode;
+static uint8_t g_mv_iob[3][48] __attribute__((aligned(16)));   // msvcrt's x64 _iobuf is 48 bytes; only the addresses matter
+static void* mv_file(void*f){ for(int i=0;i<3;i++) if(f==(void*)g_mv_iob[i]){ void*(MSABI*iob)(unsigned)=crt_export("__acrt_iob_func"); return iob?iob((unsigned)i):f; } return f; }
+static void* MSABI mv_iob_func(void){ return g_mv_iob; }
+static int MSABI mv_getmainargs(int*argc,char***argv,char***env,int glob,void*si){ (void)glob;(void)si;
+    int(MSABI*cfg)(int)=crt_export("_configure_narrow_argv"); int(MSABI*ienv)(int)=crt_export("_initialize_narrow_environment");
+    int*(MSABI*pc)(void)=crt_export("__p___argc"); char***(MSABI*pv)(void)=crt_export("__p___argv"); char***(MSABI*pe)(void)=crt_export("__p__environ");
+    if(cfg) cfg(1);   // _crt_argv_unexpanded_arguments (msvcrt expands wildcards only when asked; Rust never asks)
+    if(ienv) ienv(0);
+    if(argc) *argc=pc?*pc():0; if(argv) *argv=pv?*pv():0; if(pe){ g_mv_initenv=*pe(); if(env) *env=g_mv_initenv; } else if(env) *env=0;
+    return 0; }
+static void MSABI mv_set_app_type(int t){ void(MSABI*f)(int)=crt_export("_set_app_type"); if(f) f(t); }
+static void MSABI mv_amsg_exit(int code){ char m[64]; int k=snprintf(m,sizeof m,"\nruntime error R60%02d\n",code); (void)!write(2,m,k);
+    void(MSABI*ex)(int)=crt_export("_exit"); if(ex) ex(255); _exit(255); }
+static void* MSABI mv_onexit(void*fn){ int(MSABI*a)(void*)=crt_export("_crt_atexit"); return a && fn && !a(fn) ? fn : 0; }
+static uint64_t MSABI mv_fwrite(const void*b,uint64_t s,uint64_t n,void*f){ uint64_t(MSABI*w)(const void*,uint64_t,uint64_t,void*)=crt_export("fwrite"); return w?w(b,s,n,mv_file(f)):0; }
+static int MSABI mv_vfprintf(void*f,const char*fmt,__builtin_ms_va_list ap){
+    int(MSABI*v)(uint64_t,void*,const char*,void*,__builtin_ms_va_list)=crt_export("__stdio_common_vfprintf"); return v?v(0,mv_file(f),fmt,0,ap):-1; }
+static int MSABI mv_fprintf(void*f,const char*fmt,...){ __builtin_ms_va_list ap; __builtin_ms_va_start(ap,fmt); int r=mv_vfprintf(f,fmt,ap); __builtin_ms_va_end(ap); return r; }
+static void* mv_resolve(const char*fn){
+    static const struct { const char*n; void*f; } T[]={
+        {"__getmainargs",(void*)mv_getmainargs},{"__set_app_type",(void*)mv_set_app_type},{"_amsg_exit",(void*)mv_amsg_exit},
+        {"_onexit",(void*)mv_onexit},{"__iob_func",(void*)mv_iob_func},{"fwrite",(void*)mv_fwrite},{"fprintf",(void*)mv_fprintf},
+        {"vfprintf",(void*)mv_vfprintf},{"__initenv",(void*)&g_mv_initenv},{"_commode",(void*)&g_mv_commode},{"_fmode",(void*)&g_mv_fmode},{0,0}};
+    for(int i=0;T[i].n;i++) if(!strcmp(T[i].n,fn)) return T[i].f;
+    return 0; }
+
 // unified resolver: CRT names -> guest exports; else native impl; else NULL
 static void *uni_resolve(const char *dll, const char *fn){
-    if(is_crt_dll(dll)){
+    int msvcrt = mv_on() && !strcasecmp(dll,"msvcrt.dll");
+    if(msvcrt){ void*r=mv_resolve(fn); if(r) return r; }
+    if(is_crt_dll(dll) || msvcrt){
         for(int m=0;m<g_nmods;m++){ void *r=export_lookup(g_mods[m].base, fn); if(r){
                 if(fn[0]=='m' && (!strcmp(fn,"memcpy")||!strcmp(fn,"memmove")||!strcmp(fn,"memset"))){ static void*cache[3][2];
                     int k=fn[3]=='c'?0:fn[3]=='m'?1:2; if(cache[k][0]!=r){ cache[k][0]=r; cache[k][1]=crt_fast_stub(fn,r); } return cache[k][1]; }
@@ -10798,6 +10898,8 @@ static void *uni_resolve(const char *dll, const char *fn){
     void *r=resolve_impl(fn); if(r) return r;
     // opengl32!gl* -> macOS OpenGL.framework (our wgl* are handled by resolve_impl)
     if(!strcasecmp(dll,"opengl32.dll") && (fn[0]=='g'&&fn[1]=='l')) return gl_or_missing(fn);
+    // windows-gnu binaries import the SEH handler from kernel32 (Windows forwards it to ntdll): vcruntime140's is the same routine
+    if(mv_on() && !strcmp(fn,"__C_specific_handler")) return crt_export(fn);
     return 0;
 }
 
@@ -12109,6 +12211,7 @@ int main(int argc, char **argv){ mt_start();
     g_prefer_base=0; for(int i=0;i<3;i++){ char crt[1300]; snprintf(crt,sizeof crt,"%s/%s",crtdir,names[i]); load_guest(crt, names[i]); }
 
     // ---- bind the target's imports (CRT -> guest exports, else native/stub) ----
+    g_stack_reserve=opt->StackRes;   // the default stack of threads the guest creates (i_CreateThread)
     bind_imports(g_base, opt);
     ws("  bound imps (exe+unresolved stubs) "); whex((uint64_t)imp_count);
 

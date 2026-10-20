@@ -274,6 +274,12 @@ no baked folder, RECLAIMER_SIGN_IDENTITY = a real signing identity, ad hoc other
 signed Mach-O: a SCRIPT as the bundle program was silently refused Desktop access by TCC, "Operation not permitted") running
 Contents/Resources/launch.sh. Releases: shim/tools/make-release.sh <client version> (refuses uncommitted shim/ changes: build
 from a clean worktree, with shim/crt copied in -- it is not in git).
+Reach Renaissance (2026-10-20, shim/docs/reach-renaissance.md): Halo: Reach on MCC's haloreach.dll, same design as Reclaimer
+(bin/host-probe.exe = the game: LoadLibraryW(haloreach.dll), its own D3D11 device, ~85 in-memory engine patches). `bash shim/reach.sh
+[map] [variant] [min]` runs host-probe directly (run folder first argument, --launch-block C:\ReachRenaissance\data\launch_block_1.bin,
+--mode = a game_variants file name like slayer_054): Sword Base renders. Its exes are windows-gnu Rust (msvcrt.dll layer). Halo 3
+hooks are keyed on a module named "halo3" (haloreach.dll loads at the same 0x180000000). Menus (WebView2), Schannel HTTPS and the
+launcher are not done. Reach depots: 1064225 (Campaign + Firefight) + 1064226 (MP).
 play.sh's stdin feeder is `sleep 86400.<pid>` (killed when the game exits; it used to hold a caller's `| tail` for 24 h).
 Native GL helper (2026-10-17, PELOAD_GL_HELPER=1: play.sh's default, the code's default without the env is off; spawned with
 only stdio + its pipe; shim/src/glh_client.c + glhelper.c + glh_shm.h, generated glh_gen.inc /
