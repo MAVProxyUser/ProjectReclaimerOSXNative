@@ -607,7 +607,10 @@ patch variants by signature (section 16; shim/docs/patch-addresses.md).
   addEventListener("message") ...) is a document-start script on WKScriptMessageHandler. The page gets AppKit's events directly
   (keys, mouse, Gamepad API). Shared buffers are refused (QueryInterface for Environment12 / ICoreWebView2_17): the menus fall
   back. Unimplemented methods log "[wv2] <interface> slot N". `PELOAD_WV2_TRACE=1` logs calls, `PELOAD_WV2_SNAPSHOT=<s>` saves
-  the page as PNGs, `PELOAD_WV2_INSPECT=1` enables Safari's inspector. Old: `PELOAD_NO_WV2=1`. (10-20, reach-port)
+  the page as PNGs, `PELOAD_WV2_INSPECT=1` enables Safari's inspector. Old: `PELOAD_NO_WV2=1`. (10-20, reach-port) Follow-up (the
+  user: the menus stayed on top of every other app): the window floats only while one of our processes is frontmost (the menus,
+  or a game whose window is published, xwin.c) and is put away while another app is; showing it never takes activation from
+  another app, and SetForegroundWindow on it activates the menus only from our own processes.
 - **Windows of other loader processes** — xwin.c. Why: menu-overlay follows the game's window (another process: --follow "host
   probe") by title and keeps itself over its client area; every loader process only knew its own windows. How: a process with a
   game window publishes title, client rect (Win32 screen coordinates), shown and minimised to ~/Library/Application Support/

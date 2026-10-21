@@ -4395,7 +4395,7 @@ static uint32_t MSABI i_XInputGetCapabilities(uint32_t idx,uint32_t fl,void*cap)
     if(cap){ memset(cap,0,20); uint8_t*c=cap; c[0]=1/*GAMEPAD*/; c[1]=1/*SUBTYPE_GAMEPAD*/; *(uint16_t*)(c+4)=0xF3FF; c[6]=c[7]=255; *(int16_t*)(c+8)=*(int16_t*)(c+10)=*(int16_t*)(c+12)=*(int16_t*)(c+14)=(int16_t)0xFFC0; } return 0; }
 static void MSABI i_XInputEnable(int en){ (void)en; }
 static void*  MSABI i_GetForegroundWindow(void){ return fg_hwnd(); }
-static int    MSABI i_SetForegroundWindow(void*h){ if(xwin_is(h)){ int fp=0; if(xwin_rect(h,0,0,0,0,0,0,&fp)) xwin_activate(fp); return 1; } if(fg_can_activate(h)) g_shown_hwnd=h; return 1; }
+static int    MSABI i_SetForegroundWindow(void*h){ if(xwin_is(h)){ int fp=0; if(xwin_rect(h,0,0,0,0,0,0,&fp)) xwin_activate(fp); return 1; } if(wv2_owns(h)) wv2_activate(h); if(fg_can_activate(h)) g_shown_hwnd=h; return 1; }
 static int    MSABI i_IsWindow(void*h){ if(xwin_is(h)) return xwin_rect(h,0,0,0,0,0,0,0); return h?1:0; }
 static int    MSABI i_IsWindowVisible(void*h){ if(xwin_is(h)){ int v=0,m=0; return xwin_rect(h,0,0,0,0,&v,&m,0) && v && !m; } return 1; }
 static void*  MSABI i_GetActiveWindow(void){ return fg_hwnd(); }

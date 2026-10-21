@@ -64,7 +64,7 @@ static NSString* wv_url_from(const uint16_t*uri);
 struct WvCtx {
     WvCom ctl, web, set;
     void* hwnd; NSWindow* win; WKWebView* view; WvDelegate* del;
-    int bx, by, bw, bh, ctl_visible;
+    int bx, by, bw, bh, ctl_visible, want;   // want: the guest has the window shown (ShowWindow)
     WvHandler ev[EV_N][16];
     uint64_t navid; NSString* source;
 };
@@ -183,7 +183,16 @@ static void ctx_place(WvCtx*c){ int x=0,y=0,w=640,h=360; if(!pl_hwnd_geom(c->hwn
     if(c->bw>0 && c->bh>0) [c->view setFrame:NSMakeRect(c->bx, h-(c->by+c->bh), c->bw, c->bh)];
     else [c->view setFrame:NSMakeRect(0,0,w,h)];
     TR("  [wv2] window %p at %d,%d %dx%d\n",c->hwnd,x,y,w,h); }
-static void ctx_show(WvCtx*c,int on){ if(on){ [c->win orderFrontRegardless]; [c->win makeKeyWindow]; [NSApp activateIgnoringOtherApps:YES]; } else [c->win orderOut:nil]; }
+// Over the game, not over everything (2026-10-20, the user: the menus stayed on top of every other app): the window is floating
+// only while one of OUR processes is frontmost -- this one (the menus) or a game whose window is published (xwin.c's
+// ~/Library/Application Support/ReclaimerMac/windows/<pid>.win) -- and out of the way otherwise (wv2_pump re-checks every 200 ms).
+// Showing it never takes activation from another app; SetForegroundWindow on it takes it only from our own processes.
+static int ours_frontmost(void){ NSRunningApplication*f=[[NSWorkspace sharedWorkspace] frontmostApplication]; if(!f) return 0; pid_t pid=[f processIdentifier];
+    if(pid==getpid()) return 1; char p[1200]; const char*h=getenv("HOME"); snprintf(p,sizeof p,"%s/Library/Application Support/ReclaimerMac/windows/%d.win",h?h:"/tmp",(int)pid); return access(p,F_OK)==0; }
+static void ctx_show(WvCtx*c,int on){ c->want=on; if(on){ if(ours_frontmost()){ [c->win orderFrontRegardless]; [c->win makeKeyWindow]; } } else [c->win orderOut:nil]; }
+static void ctx_frontmost_tick(void){ static double last; double now=[NSDate timeIntervalSinceReferenceDate]; if(now-last<0.2) return; last=now; int ours=-1;
+    for(int i=0;i<16;i++){ WvCtx*c=g_wins[i].c; if(!c||!c->want) continue; if(ours<0) ours=ours_frontmost();
+        if(ours && ![c->win isVisible]) [c->win orderFrontRegardless]; else if(!ours && [c->win isVisible]) [c->win orderOut:nil]; } }
 static void app_init(void){ static int done; if(done) return; done=1;
     [NSApplication sharedApplication]; [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular]; [NSApp finishLaunching];
     const char*ic=getenv("PELOAD_APP_ICON"); if(ic){ NSImage*im=[[[NSImage alloc] initWithContentsOfFile:[NSString stringWithUTF8String:ic]] autorelease]; if(im) [NSApp setApplicationIconImage:im]; } }
@@ -372,8 +381,10 @@ int wv2_active(void){ return g_active; }
 int wv2_owns(void*h){ WvWin*r=win_rec(h,0); return r && r->c; }
 void wv2_pump(void){ @autoreleasepool {
     for(;;){ NSEvent*ev=[NSApp nextEventMatchingMask:NSEventMaskAny untilDate:nil inMode:NSDefaultRunLoopMode dequeue:YES]; if(!ev) break; [NSApp sendEvent:ev]; }
-    CFRunLoopRunInMode(kCFRunLoopDefaultMode,0,true); [NSApp updateWindows]; wv_snapshot_tick(); } }
+    CFRunLoopRunInMode(kCFRunLoopDefaultMode,0,true); [NSApp updateWindows]; ctx_frontmost_tick(); wv_snapshot_tick(); } }
 void wv2_hwnd_changed(void*h,int show){ WvWin*r=win_rec(h,show>=0); if(!r) return; if(show>=0) r->shown=show;
     if(r->c){ @autoreleasepool { ctx_place(r->c); if(show>=0) ctx_show(r->c,show); } } }
 // GWL_EXSTYLE: WS_EX_TRANSPARENT (0x20) lets the mouse through to the window below (the game), as on Windows
 void wv2_hwnd_style(void*h,uint32_t ex){ WvWin*r=win_rec(h,0); if(!r||!r->c) return; @autoreleasepool { [r->c->win setIgnoresMouseEvents:(ex&0x20)?YES:NO]; } TR("  [wv2] window %p click-through %d\n",h,(ex&0x20)?1:0); }
+// SetForegroundWindow on a WebView2 window: activate the menus -- only when one of our processes is frontmost (never from another app)
+void wv2_activate(void*h){ WvWin*r=win_rec(h,0); if(!r||!r->c) return; @autoreleasepool { if(!ours_frontmost()) return; [NSApp activateIgnoringOtherApps:YES]; [r->c->win makeKeyWindow]; [r->c->win makeFirstResponder:r->c->view]; } }
