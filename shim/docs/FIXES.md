@@ -91,6 +91,14 @@ patch variants by signature (section 16; shim/docs/patch-addresses.md).
 
 ## 1. PE loading and the API surface
 
+- **Game profiles: one game's work can't change another's** (2026-10-21) — shim/src/games.c, shim/docs/games.md. Why: three fan clients
+  (Reclaimer / halo3, Reach Renaissance / haloreach, Gravemind / halo2) share the loader; Reclaimer's exe signature patches and
+  stats hooks were searched for in EVERY exe (a chance byte match would patch another game), halo3.dll's hooks were keyed on the
+  DLL name only. How: `g_game` from the exe name (else the first engine DLL; `PELOAD_GAME=h3|reach|h2|other`), printed as
+  `[game] ...`; Reclaimer-only: `reentrancy_fix` (g_sigpatches), `st_voice_install` (stats exe hooks), the halo3.dll hooks
+  (h3 or an unplaced exe), the menu grading shader case; Halo 2 defaults: the real HLSL compiler (`PELOAD_REAL_D3DCOMPILE` on), one
+  waveOut device (h3 / reach keep 0). Windows-behaviour fixes stay shared (games.md "The rule"). `shim/tools/game-matrix.sh` runs
+  all installed games (h3 local-server join + chat hook, reach Sword Base frames, h2 offline Lockout frame) for a PASS / FAIL each.
 - **Project Gravemind (Halo 2 on MCC's halo2.dll) groundwork, 2026-10-20, branch h2-gravemind.** Gravemind (h2gravemind.exe,
   a Zig/C build that loads MCC's halo2.dll like Reclaimer loads halo3.dll) needed the functions below. Each was a logging stub
   (return 0 = "success" with nothing written, or a NULL handle); the old behaviour is the stub unless a switch is named.
@@ -1643,6 +1651,11 @@ Numbers are from the commit messages; PERF-PLAN.md has the measurements. Compare
 
 ## 20. Scripts and RE tools
 
+- **shim/gravemind.sh** (2026-10-21) — Project Gravemind on the loader: installs the newest `client/h2gravemind*.zip` into C:\Gravemind,
+  refuses beside a running game, passes Gravemind's own options through (`--map-id 44` offline Lockout, `--host`, `--connect`);
+  `GM_TEST=1` = an input-less test run with its own profile (C:\ReclaimerProfileGMTest: test runs never use the player's profile or
+  name). Logs `[xinput] XInputGetState called` (`PELOAD_TRACE_XINPUT`) to tell whether Gravemind polls controllers. Guide: shim/docs/gravemind.md.
+- **shim/tools/game-matrix.sh** (2026-10-21) — see the game-profiles entry in section 1.
 - **Reclaimer.app: double-click to play** (2026-10-19; user: "a .app I can click ... feels more macish than launching
   scripts") — shim/tools/make-app.sh, shim/tools/make-icon.py (shim/assets/Reclaimer.icns, an original icon), peload.c
   `cocoa_app_icon`, install.sh `make_app`. How: a bundle whose program is a shell script holding the install folder's path:

@@ -105,6 +105,7 @@ static char* peload_cgetenv(const char*name){
 #include <mach-o/dyld.h>
 #include "rec.h"   // clip recording (rec.m, compiled beside this file): the present paths' and audio callbacks' hooks
 #include "wv2.h"   // WebView2 on WKWebView (webview2.m, compiled beside this file): Reach Renaissance's menus
+#include "games.c" // which game runs (h3 / reach / h2): game-specific behaviour is gated on it
 
 // ---- SEH register capture/restore (CONTEXT at rcx; Win64/ms_abi) ------------
 // seh_capture fills a CONTEXT from the caller's registers (Rip = return address,
@@ -2594,7 +2595,7 @@ static int MSABI i_D3DCompile(const void*src,uint64_t srcsz,const char*name,cons
     // the client's menu-scene grading compute shader (src/menu_scene.rs: luminance of the menu's back buffer -> blue tones,
     // Halo 3's own menu look): recognised by its source; its constants go in a marker chunk "RCLG" that ctxi_Dispatch runs
     // as one GL draw (rtgrade_dispatch). PELOAD_NO_RTGRADE=1 = the old code-less placeholder (no grading).
-    { float gk[8]; if(src && srcsz && target && !strncmp(target,"cs_",3) && !getenv("PELOAD_NO_RTGRADE") && rtgrade_parse((const char*)src,srcsz,gk)){
+    { float gk[8]; if(src && srcsz && target && !strncmp(target,"cs_",3) && game_is(GAME_H3) && !getenv("PELOAD_NO_RTGRADE") && rtgrade_parse((const char*)src,srcsz,gk)){
         uint8_t b[36+8+32]; memset(b,0,sizeof b); memcpy(b,"DXBC",4); *(uint32_t*)(b+20)=1; *(uint32_t*)(b+24)=sizeof b; *(uint32_t*)(b+28)=1; *(uint32_t*)(b+32)=36;
         memcpy(b+36,"RCLG",4); *(uint32_t*)(b+40)=32; memcpy(b+44,gk,32);
         if(ppCode)*ppCode=make_blob(b,sizeof b); if(ppErr)*ppErr=0;
@@ -2604,7 +2605,7 @@ static int MSABI i_D3DCompile(const void*src,uint64_t srcsz,const char*name,cons
     // D3DCompiler_47.dll (in MCC's folder; it runs as a guest DLL since its msvcrt imports exist, win32x.c) compiles the source
     // to real DXBC, which the translator turns into GLSL like any engine shader. Off by default: Reclaimer's video shaders are
     // only ever looked at as blobs, and its grading shader is the case above.
-    if(getenv("PELOAD_REAL_D3DCOMPILE")){ static void*real; static int tried;
+    if(game_default_on("PELOAD_REAL_D3DCOMPILE",GAME_H2)){ static void*real; static int tried;   // (on by default for Halo 2)
         if(!tried){ tried=1; static const uint16_t dn[]={'D','3','D','C','o','m','p','i','l','e','r','_','4','7','.','d','l','l',0};
             uint8_t*b=i_LoadLibraryExW(dn,0,0); if(b && b!=g_base) real=export_lookup(b,"D3DCompile");
             char m[120]; int k=snprintf(m,sizeof m,"  [D3DCompile] real compiler %s\n",real?"loaded (MCC's D3DCompiler_47.dll)":"NOT found: placeholder blobs"); (void)!write(2,m,k); }
@@ -4420,6 +4421,7 @@ static int input_script(XPad*p){
     return 0; }
 static uint32_t MSABI i_XInputGetState(uint32_t idx,void*st){
     if(idx>3||!st) return 160; /*ERROR_BAD_ARGUMENTS*/
+    { static int seen; if(!seen && getenv("PELOAD_TRACE_XINPUT")){ seen=1; char m[80]; int k=snprintf(m,sizeof m,"  [xinput] XInputGetState called (pad %u)\n",idx); (void)!write(2,m,k); } }
     // PELOAD_NO_PAD: this instance sees no controllers (e.g. a second client used as a test target, so it
     // doesn't share the player's pad: GameController delivers pad input to every process, focused or not)
     // sparring partner (hitbox.c hb_spar_tick): pad 0 = a right stick toward the nearest enemy's head, nothing else
@@ -10466,7 +10468,9 @@ static int MSABI i_GetLocaleInfoEx(const uint16_t*loc,uint32_t lctype,uint16_t*d
     if(cch==0) return n; if(cch<n) return 0; if(data) for(int i=0;i<n;i++) data[i]=out[i]; return n; }
 static uint32_t MSABI i_GetTimeZoneInformation(void*tzi){ if(tzi) memset(tzi,0,172); return 0; /*TIME_ZONE_ID_UNKNOWN, Bias=0 (UTC)*/ }
 static int32_t MSABI i_GetErrorInfo(uint32_t res,void**ei){ (void)res; if(ei)*ei=0; return 1; /*S_FALSE: no error object*/ }
-static uint32_t MSABI i_waveOutGetNumDevs(void){ return 0; } // no audio-out devices
+// no waveOut devices for Halo 3 / Reach (they ask before opening and so keep XAudio2 only); Halo 2 (games.c) gets winmm.c's one --
+// Project Gravemind plays voice through it
+static uint32_t MSABI i_waveOutGetNumDevs(void){ return game_is(GAME_H2)?1:0; }
 // VERSION info: report the client's own version so engine queries succeed.
 static uint32_t MSABI i_GetFileVersionInfoSizeW(const uint16_t*f,uint32_t*h){ (void)f; if(h)*h=0; return 64; }
 static int MSABI i_GetFileVersionInfoW(const uint16_t*f,uint32_t h,uint32_t len,void*data){ (void)f;(void)h;
@@ -11371,6 +11375,7 @@ static void waves_prefill(uint8_t* halo3_base){
 }
 // load a guest DLL end-to-end: map, bind, protect, register exports, DllMain
 static uint8_t *load_guest(const char *path, const char *name){
+    game_note_dll(name);   // (games.c) an exe its name didn't place is settled by its engine DLL
     OPT64 *opt; COFF *coff; uint8_t *base=map_image(path,&opt,&coff);
     if(!base){ ws("  guest load FAILED: "); ws(name); ws("\n"); return 0; }
     // Dependencies first (2026-10-20, halo2.dll -> mss64.dll / MOPP.dll): an import from a DLL that is a file in this DLL's own
@@ -11396,7 +11401,7 @@ static uint8_t *load_guest(const char *path, const char *name){
     // BEFORE its DllMain/TLS callbacks run, so its __declspec(thread) globals resolve
     // to its own data instead of aliasing the exe's TLS block (index 0).
     if(opt->Dir[DIR_TLS].VA) register_tls((void*)(base+opt->Dir[DIR_TLS].VA), base, -1);
-    if(strcasestr(name,"halo3")){ waves_prefill(base); patch_install(); hook_install(); skinguard_install(base); vtguard_install(base); originguard_install(base); invwalls_prepare(base); bspwatch_install(base); hbdel_install(base); st_events_install(base); capcb1_install(base); h3set_install(base); } // patches can target halo3 now it's mapped
+    if(strcasestr(name,"halo3") && (game_is(GAME_H3)||game_is(GAME_OTHER))){ waves_prefill(base); patch_install(); hook_install(); skinguard_install(base); vtguard_install(base); originguard_install(base); invwalls_prepare(base); bspwatch_install(base); hbdel_install(base); st_events_install(base); capcb1_install(base); h3set_install(base); } // patches can target halo3 now it's mapped
     ws("  guest "); ws(name); ws(" @ "); whex((uint64_t)base);
     uint64_t ep=opt->EntryRVA;
     if(ep){ int (MSABI *dm)(void*,uint32_t,void*)=(void*)(base+ep); int r=dm(base,1,0);
@@ -12644,8 +12649,12 @@ int main(int argc, char **argv){ mt_start();
         int fd=open("/tmp/peload.pid",O_WRONLY|O_CREAT|O_TRUNC,0644); if(fd>=0){(void)!write(fd,pb,pn); close(fd);}
         ws("  PELOAD_WAIT: pid "); whex(getpid()); sleep(atoi(getenv("PELOAD_WAIT"))); }
     bp_install();   // PELOAD_BP software breakpoints (diagnostic)
-    reentrancy_fix(); // built-in: neutralise the ui_composition RefCell re-entrancy
-    st_voice_install(); // stats page: voice mute + talking indicator (stats.c)
+    if(g_game<0) game_detect_exe(path);
+    // Project Reclaimer's exe only (games.c): its signature patches and the stats page's exe hooks are searched for by byte
+    // pattern, and a chance match in another game's exe would patch it
+    if(game_is(GAME_H3)){
+        reentrancy_fix(); // built-in: neutralise the ui_composition RefCell re-entrancy
+        st_voice_install(); } // stats page: voice mute + talking indicator (stats.c)
     patch_install(); hook_install(); // PELOAD_PATCH overwrites + PELOAD_HOOK trace detours
     peb_fill(g_peb_ptr);  // PEB image base / OS version / ProcessParameters (stdio, cwd, image path, command line, environment)
     ws("peload: calling entry (expect stub logs, then a fault at the first\n"
