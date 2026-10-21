@@ -8,10 +8,9 @@ start when the beta is closed.
 
 - **An offline match runs and renders**: `bash shim/gravemind.sh --map-id 44` (Lockout) -- the map, the first-person weapon, the
   HUD and motion tracker, ~60 fps. Gravemind's own patches to halo2.dll all apply; Miles sound plays through waveOut.
-- **Launcher and menus**: they are Direct2D / DirectWrite / WIC, which the loader now has (shim/src/d2d.c, dwrite.c, wic.c; checked
-  offline by `bash shim/tools/d2d-test.sh`). Not yet seen running Gravemind's own launcher: its first run will show which
-  Direct2D calls it makes that aren't implemented (`[d2d] ... not implemented` in the log). Its back buffer is now its swap chain's
-  1280x720 (it was 1920x1080 with the game in a corner).
+- **Launcher and menus** draw (Direct2D / DirectWrite / WIC: shim/src/d2d.c, dwrite.c, wic.c): the Bink background video, the logo
+  in its embedded Michroma font, the menus, ~7 ms a frame. It needed the back buffer's IDXGISurface to be a real interface (FIXES.md
+  section 10). The back buffer is the swap chain's 1280x720.
 - **Input**: keyboard, mouse and pads work once the window is active (2026-10-21: halo2.dll's hidden window had kept the
   foreground; FIXES.md section 7). F1 releases the mouse, a click in the window captures it again.
 - **Sound**: works since 2026-10-21 (FindFirstFileA could not find Miles' DSP plugin, so halo2 never started a sound; FIXES.md

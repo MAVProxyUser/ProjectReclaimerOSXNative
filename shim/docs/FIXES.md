@@ -778,7 +778,12 @@ patch variants by signature (section 16; shim/docs/patch-addresses.md).
   memory / file streams; ON FOR h2 ONLY -- halo3.dll references CLSID_WICImagingFactory2 and has only ever been told "not
   registered" (`PELOAD_WIC=1` any game, `=0` off). Old: `PELOAD_NO_D2D=1` (the failing factories). `PELOAD_TRACE_D2D` logs
   creations, composites and operations per EndDraw; `PELOAD_DWRITE_FONT=<family>` forces one font. Offline test:
-  `bash shim/tools/d2d-test.sh`. IDWriteTextLayout1 (Gravemind's in-game text asks for it): pair kerning, character spacing (as
+  `bash shim/tools/d2d-test.sh`. Speed (2026-10-21, Gravemind's launcher 15 -> 7 ms a frame): a CPU bitmap of 256x256 pixels or more
+  is drawn on the GPU like a texture bitmap, from a GL copy refreshed only when its pixels changed (its 2560x1280 menu video was
+  scaled by CoreGraphics every frame; `PELOAD_D2D_CPU_BITMAPS=1` = the canvas as before); the canvas survives SetTarget (Gravemind
+  sets NULL and the back buffer every frame). Diagnostics: with PELOAD_TRACE_D2D the first EndDraws print the dirty box, clips,
+  target and canvas; `PELOAD_D2D_DUMP=<n>` writes the canvas of the first frame with >= n operations to ~/d2d_canvas_<pid>.bmp;
+  `PELOAD_TRACE_D2D_OPS=1` logs the first operations' bounds / transform / clip and SetTransform's callers. IDWriteTextLayout1 (Gravemind's in-game text asks for it): pair kerning, character spacing (as
   extra advance; the minimum advance width is not applied). Not done (logged when called): effects, command lists, glyph runs, custom text renderers
   (IDWriteTextLayout::Draw), HWND / DC / WIC render targets, compatible render targets, opacity masks, gradient meshes.
 
@@ -903,6 +908,15 @@ patch variants by signature (section 16; shim/docs/patch-addresses.md).
   handle, which is no image (a fault reading 0x773303c in a windowless test host).
 
 ## 10. D3D11 / DXGI objects
+
+- **A 2D texture's IDXGISurface is a real interface** (2026-10-21) — `obj_QI` -> `dxsurf_qi`, `DxSurf` / `g_dxsurf_vtbl` (peload.c),
+  `swap_GetBuffer`, D3DObj `dxsurf`. Why: QueryInterface answered every IID with the texture itself, so IDXGISurface::GetDesc
+  (slot 8) ran ID3D11Resource::SetEvictionPriority and the caller read its own uninitialised memory as the size. Project
+  Gravemind lays its launcher out from the back buffer's DXGI_SURFACE_DESC: it drew everything at 1/1080 scale, 40 million pixels
+  to the side (an empty launcher). How: for IDXGISurface / 1 / 2 a second vtable of the same object (one per texture, freed with
+  it; AddRef / Release are the texture's): GetDesc (size, format, 1 sample), GetDevice, Get/SetPrivateData (none), Map / Unmap
+  (the CPU copy), IDXGISurface2::GetResource; QueryInterface from it for anything else gives the texture. GetBuffer with a surface
+  IID returns it too; Direct2D accepts either. Old: `PELOAD_DXGI_SURFACE_OLD=1`.
 
 - **Halo 2's back buffer has its swap chain's size** (2026-10-21) — `dxgi_CreateSwapChain`, `swap_size`. Why: every back buffer was
   1920x1080 (Reclaimer's UI is laid out for it); Gravemind asks for 1280x720 and lays its Direct2D screens out for the target's

@@ -72,11 +72,14 @@ static CGAffineTransform d2_cgm(const D2Mat*m){ return CGAffineTransformMake(m->
 static D2Cls C_d2fac, C_d2dev, C_d2ctx, C_d2bmp, C_d2solid, C_d2lin, C_d2rad, C_d2bbrush, C_d2stops, C_d2stroke, C_d2layer, C_d2block,
     C_d2grect, C_d2grrect, C_d2gell, C_d2gpath, C_d2gtf, C_d2ggroup, C_d2sink;
 // ---- bitmaps: a D3D texture (CreateBitmapFromDxgiSurface) or CPU pixels (premultiplied BGRA, a CGBitmapContext when a target)
-typedef struct { D2Hdr h; uint32_t w,hh,fmt,alpha,opts; float dpix,dpiy; D3DObj*tex; uint8_t*px; uint32_t stride; CGContextRef cg; CGImageRef img; uint32_t ver,imgver; int mapped; } D2Bmp;
+typedef struct { D2Hdr h; uint32_t w,hh,fmt,alpha,opts; float dpix,dpiy; D3DObj*tex; uint8_t*px; uint32_t stride; CGContextRef cg; CGImageRef img; uint32_t ver,imgver; int mapped;
+    unsigned gltex; uint32_t glver, gltw, glth; } D2Bmp;   // gltex: a big CPU bitmap's GL copy (drawn on the GPU), current while glver == ver+1
 static int d2_is_bmp(void*p){ return p && ((D2Hdr*)p)->cls==&C_d2bmp; }
 static CGColorSpaceRef d2_srgb(void){ static CGColorSpaceRef cs; if(!cs) cs=CGColorSpaceCreateWithName(kCGColorSpaceSRGB); return cs; }
-static D3DObj* d2_as_tex(void*p){ D3DObj*o=p; return (o && o->vtbl==g_d3dres_vtbl && o->kind==2)?o:0; }
-static void d2_bmp_dtor(void*p){ D2Bmp*b=p; if(b->tex) obj_Release(b->tex); if(b->cg) CGContextRelease(b->cg); if(b->img) CGImageRelease(b->img); free(b->px); }
+static D3DObj* d2_as_tex(void*p){ D3DObj*o=p; if(o && o->vtbl==(void**)g_dxsurf_vtbl) o=((DxSurf*)p)->tex;   // (its IDXGISurface, or the texture itself)
+    return (o && o->vtbl==g_d3dres_vtbl && o->kind==2)?o:0; }
+static void d2_bmp_dtor(void*p){ D2Bmp*b=p; if(b->tex) obj_Release(b->tex); if(b->cg) CGContextRelease(b->cg); if(b->img) CGImageRelease(b->img); free(b->px);
+    if(b->gltex){ static void(*del)(int,const unsigned*); if(sub_on()) sub_drain(); GLLOCK(); if(d3dgl_ensure()){ if(!del) del=dlsym(RTLD_DEFAULT,"glDeleteTextures"); if(del) del(1,&b->gltex); } GLUNLOCK(); } }
 static void d2_bmp_cpu(D2Bmp*b,uint32_t w,uint32_t h,int target){ b->w=w; b->hh=h; b->stride=w*4; b->px=calloc(1,(size_t)w*h*4+16);
     if(target){ b->cg=CGBitmapContextCreate(b->px,w,h,8,b->stride,d2_srgb(),kCGImageAlphaPremultipliedFirst|kCGBitmapByteOrder32Little);
         if(b->cg){ CGContextTranslateCTM(b->cg,0,h); CGContextScaleCTM(b->cg,1,-1); } } }   // (y down, like Direct2D)
@@ -322,7 +325,10 @@ static CGContextRef d2_surface(D2Ctx*c){ D2Bmp*t=c->target; if(!t) return 0; if(
 static CGAffineTransform d2_ctm(D2Ctx*c){ CGAffineTransform m=d2_cgm(&c->tf); if(c->unit==0) m=CGAffineTransformConcat(m,CGAffineTransformMakeScale(c->dpix/96.0f,c->dpiy/96.0f)); return m; }
 static CGRect d2_clipbox(D2Ctx*c){ return c->nclip?c->clip[c->nclip-1].dev:CGRectMake(0,0,c->target?(c->target->tex?c->target->tex->w:c->target->w):0,c->target?(c->target->tex?c->target->tex->h:c->target->hh):0); }
 // mark the device-space box `r` (user space, transformed) as drawn on the canvas
-static void d2_dirty(D2Ctx*c,CGRect local,double pad){ if(!c->canvas) return; CGRect r=CGRectApplyAffineTransform(local,d2_ctm(c)); r=CGRectInset(r,-pad-1,-pad-1);
+static void d2_dirty(D2Ctx*c,CGRect local,double pad){
+    if(getenv("PELOAD_TRACE_D2D_OPS")){ static int nl; if(nl++<60){ CGAffineTransform m=d2_ctm(c); CGRect cb=d2_clipbox(c); char t[300]; int k=snprintf(t,sizeof t,"  [d2d-op] local %.1f,%.1f %.1fx%.1f ctm [%.3g %.3g %.3g %.3g %.1f %.1f] clip %.0f,%.0f %.0fx%.0f canvas %p\n",
+            local.origin.x,local.origin.y,local.size.width,local.size.height,m.a,m.b,m.c,m.d,m.tx,m.ty,cb.origin.x,cb.origin.y,cb.size.width,cb.size.height,(void*)c->canvas); (void)!write(2,t,k); } }
+    if(!c->canvas) return; CGRect r=CGRectApplyAffineTransform(local,d2_ctm(c)); r=CGRectInset(r,-pad-1,-pad-1);
     r=CGRectIntersection(r,d2_clipbox(c)); if(CGRectIsNull(r)||CGRectIsEmpty(r)) return;
     if(!c->dirty){ c->dx0=CGRectGetMinX(r); c->dy0=CGRectGetMinY(r); c->dx1=CGRectGetMaxX(r); c->dy1=CGRectGetMaxY(r); c->dirty=1; return; }
     if(CGRectGetMinX(r)<c->dx0) c->dx0=CGRectGetMinX(r); if(CGRectGetMinY(r)<c->dy0) c->dy0=CGRectGetMinY(r); if(CGRectGetMaxX(r)>c->dx1) c->dx1=CGRectGetMaxX(r); if(CGRectGetMaxY(r)>c->dy1) c->dy1=CGRectGetMaxY(r); }
@@ -481,14 +487,25 @@ static void MSABI d2c_FillGeometry(void*s,void*geo,void*br,void*opbr){ (void)opb
 static void d2_drawbitmap(D2Ctx*c,void*bm,const D2Rect*dst,float opacity,uint32_t interp,const D2Rect*src){
     if(!d2_is_bmp(bm) || !c->target) return; D2Bmp*b=bm; double bw=b->w*96.0/b->dpix, bh=b->hh*96.0/b->dpiy;
     CGRect d=dst?d2_cgrect(dst):CGRectMake(0,0,bw,bh), sr=src?d2_cgrect(src):CGRectMake(0,0,bw,bh); if(d.size.width<=0||d.size.height<=0||sr.size.width<=0||sr.size.height<=0) return;
-    if(b->tex && b->tex!=c->target->tex && d2_gpu_ok(c)){
+    // a big CPU bitmap (Gravemind's 2560x1280 menu video, rewritten every video frame) goes the same way: CoreGraphics scaling it
+    // onto the canvas every frame took most of a 15 ms frame; its GL copy is refreshed only when the pixels changed
+    int bigcpu = !b->tex && b->px && (uint64_t)b->w*b->hh>=65536 && !getenv("PELOAD_D2D_CPU_BITMAPS");
+    if((b->tex ? b->tex!=c->target->tex : bigcpu) && d2_gpu_ok(c)){
         d2_flush(c); D3DObj*rt=c->target->tex, *tx=b->tex; CGAffineTransform m=d2_ctm(c); c->nops++;
         CGPoint q[4]={CGPointApplyAffineTransform(CGPointMake(CGRectGetMinX(d),CGRectGetMinY(d)),m),CGPointApplyAffineTransform(CGPointMake(CGRectGetMaxX(d),CGRectGetMinY(d)),m),
             CGPointApplyAffineTransform(CGPointMake(CGRectGetMinX(d),CGRectGetMaxY(d)),m),CGPointApplyAffineTransform(CGPointMake(CGRectGetMaxX(d),CGRectGetMaxY(d)),m)};
         double u0=sr.origin.x/bw, v0=sr.origin.y/bh, u1=CGRectGetMaxX(sr)/bw, v1=CGRectGetMaxY(sr)/bh; CGPoint uv[4]={{u0,v0},{u1,v0},{u0,v1},{u1,v1}};
         if(sub_on()) sub_drain(); GLLOCK();
-        if(d3dgl_ensure()){ d3dgl_ensure_tex(tx); d2gl_begin(rt); G.BindTexture(GLE_TEX2D,tx->gltex); if(G.BindSampler) G.BindSampler(0,g_d2_samp[interp==0?0:1]);
-            d2gl_scissor(rt,d2_clipbox(c)); d2gl_quad(rt,q,uv,opacity,(b->alpha==3||tx->fmt==88||tx->fmt==93)?2:b->alpha==2?1:0); d2gl_end(); if(rt==g_d3d_backbuf) d3dgl_latch_present(rt,(int)rt->w,(int)rt->h,0); }
+        if(d3dgl_ensure()){ unsigned gt=0; int mode;
+            if(tx){ d3dgl_ensure_tex(tx); gt=tx->gltex; mode=(b->alpha==3||tx->fmt==88||tx->fmt==93)?2:b->alpha==2?1:0; }
+            else { static void(*texsub)(unsigned,int,int,int,int,int,unsigned,unsigned,const void*); if(!texsub) texsub=dlsym(RTLD_DEFAULT,"glTexSubImage2D");
+                TEXCACHE_INVALIDATE(); if(!b->gltex){ G.GenTextures(1,&b->gltex); b->glver=0; }
+                G.BindTexture(GLE_TEX2D,b->gltex);
+                if(b->gltw!=b->w || b->glth!=b->hh){ G.TexImage2D(GLE_TEX2D,0,GLE_RGBA8,(int)b->w,(int)b->hh,0,GLE_BGRA,GLE_UI8REV,b->px); G.TexParameteri(GLE_TEX2D,0x813D,0); b->gltw=b->w; b->glth=b->hh; b->glver=b->ver+1; }
+                else if(b->glver!=b->ver+1 && texsub){ texsub(GLE_TEX2D,0,0,0,(int)b->w,(int)b->hh,GLE_BGRA,GLE_UI8REV,b->px); b->glver=b->ver+1; }
+                gt=b->gltex; mode=b->alpha==3?2:0; }   // (CPU bitmaps hold premultiplied BGRA)
+            d2gl_begin(rt); G.BindTexture(GLE_TEX2D,gt); if(G.BindSampler) G.BindSampler(0,g_d2_samp[interp==0?0:1]);
+            d2gl_scissor(rt,d2_clipbox(c)); d2gl_quad(rt,q,uv,opacity,mode); d2gl_end(); if(rt==g_d3d_backbuf) d3dgl_latch_present(rt,(int)rt->w,(int)rt->h,0); }
         GLUNLOCK(); return; }
     CGContextRef cg=d2_op(c); if(!cg) return; CGImageRef im=d2_bmp_image(b);
     if(im){ CGImageRef sub=im; CGRect px=CGRectMake(sr.origin.x*b->dpix/96.0,sr.origin.y*b->dpiy/96.0,sr.size.width*b->dpix/96.0,sr.size.height*b->dpiy/96.0);
@@ -516,7 +533,11 @@ static void MSABI d2c_DrawTextLayout(void*s,D2Pt o,void*layout,void*br,uint32_t 
 static void MSABI d2c_DrawText(void*s,const uint16_t*str,uint32_t len,void*fmt,const D2Rect*r,void*br,uint32_t opts,uint32_t mm){ (void)mm;
     if(!dw_is_fmt(fmt)||!r) return; void*L=0; if(dwfac_CreateTextLayout(0,str,len,fmt,r->r-r->l,r->b-r->t,&L)<0||!L) return;
     d2_drawlayout(s,L,r->l,r->t,br,opts); d2_Release(L); }
-static void MSABI d2c_SetTransform(void*s,const D2Mat*m){ if(m) ((D2Ctx*)s)->tf=*m; }
+static void MSABI d2c_SetTransform(void*s,const D2Mat*m){
+    if(getenv("PELOAD_TRACE_D2D_OPS")){ static int nl; if(nl++<12){ char at[80]="      ?\n"; dump_attr((uint64_t)__builtin_return_address(0),at,sizeof at); char*q=at; while(*q==' ') q++; char*nl2=strchr(q,'\n'); if(nl2) *nl2=0;
+            const uint32_t*u=(const uint32_t*)m; char t[300]; int k=snprintf(t,sizeof t,"  [d2d-op] SetTransform from %s: %p -> %g %g %g %g %g %g (raw %08x %08x %08x %08x %08x %08x)\n",q,(void*)m,m?m->m11:0,m?m->m12:0,m?m->m21:0,m?m->m22:0,m?m->dx:0,m?m->dy:0,
+            m?u[0]:0,m?u[1]:0,m?u[2]:0,m?u[3]:0,m?u[4]:0,m?u[5]:0); (void)!write(2,t,k); } }
+    if(m) ((D2Ctx*)s)->tf=*m; }
 static void MSABI d2c_GetTransform(void*s,D2Mat*m){ if(m) *m=((D2Ctx*)s)->tf; }
 static void MSABI d2c_SetAA(void*s,uint32_t v){ ((D2Ctx*)s)->aa=v; }
 static uint32_t MSABI d2c_GetAA(void*s){ return ((D2Ctx*)s)->aa; }
@@ -567,7 +588,13 @@ static void MSABI d2c_Clear(void*s,const D2Col*col){ D2Ctx*c=s; if(!c->target) r
         else { if(box.origin.x<c->dx0) c->dx0=box.origin.x; if(box.origin.y<c->dy0) c->dy0=box.origin.y; if(CGRectGetMaxX(box)>c->dx1) c->dx1=CGRectGetMaxX(box); if(CGRectGetMaxY(box)>c->dy1) c->dy1=CGRectGetMaxY(box); } }
     else if(c->target) c->target->ver++; }
 static void MSABI d2c_BeginDraw(void*s){ D2Ctx*c=s; c->drawing=1; c->nops=0; }
-static int MSABI d2c_EndDraw(void*s,uint64_t*t1,uint64_t*t2){ D2Ctx*c=s; while(c->nclip) d2_pop(c,1); d2_flush(c); if(t1)*t1=c->tag1; if(t2)*t2=c->tag2;
+static int MSABI d2c_EndDraw(void*s,uint64_t*t1,uint64_t*t2){ D2Ctx*c=s;
+    if(d2_trace()){ static int nl; if(nl++<6){ char m[220]; int k=snprintf(m,sizeof m,"  [d2d] EndDraw: %lu ops, dirty %d box %.0f,%.0f-%.0f,%.0f, clips %d, target %p tex %p canvas %p %ux%u, dpi %.0f unit %u\n",
+            c->nops,c->dirty,c->dx0,c->dy0,c->dx1,c->dy1,c->nclip,(void*)c->target,c->target?(void*)c->target->tex:0,(void*)c->canvas,c->cw,c->ch,c->dpix,c->unit); (void)!write(2,m,k); }
+      const char*dn=getenv("PELOAD_D2D_DUMP"); static int dumped; if(dn && c->canvas && !dumped && (unsigned long)atol(dn)<=c->nops){ dumped=1; char p[256]; snprintf(p,sizeof p,"%s/d2d_canvas_%d.bmp",getenv("HOME"),(int)getpid());
+          uint8_t*rgba=malloc((size_t)c->cw*c->ch*4); for(uint32_t y=0;y<c->ch;y++) for(uint32_t x=0;x<c->cw;x++){ const uint8_t*q=c->canvas+((size_t)(c->ch-1-y)*c->cw+x)*4; uint8_t*d=rgba+((size_t)y*c->cw+x)*4; d[0]=q[2]; d[1]=q[1]; d[2]=q[0]; d[3]=255; }
+          bmp_write_rgba(p,(int)c->cw,(int)c->ch,rgba); free(rgba); char m[300]; int k=snprintf(m,sizeof m,"  [d2d] canvas -> %s\n",p); (void)!write(2,m,k); } }
+    while(c->nclip) d2_pop(c,1); d2_flush(c); if(t1)*t1=c->tag1; if(t2)*t2=c->tag2;
     if(d2_trace()){ static unsigned long n; if(n++<5 || n%600==0){ char m[120]; int k=snprintf(m,sizeof m,"  [d2d] EndDraw #%lu: %lu operations\n",n,c->nops); (void)!write(2,m,k); } }
     c->drawing=0; return 0; }
 static int MSABI d2c_Flush(void*s,uint64_t*t1,uint64_t*t2){ D2Ctx*c=s; d2_flush(c); if(t1)*t1=c->tag1; if(t2)*t2=c->tag2; return 0; }
@@ -587,7 +614,8 @@ static int MSABI d2c_GetImageWorldBounds(void*s,void*img,D2Rect*o){ D2Ctx*c=s; i
     CGRect r=CGRectApplyAffineTransform(CGRectMake(o->l,o->t,o->r-o->l,o->b-o->t),d2_cgm(&c->tf)); d2_rect_out(o,r); return 0; }
 static void MSABI d2c_GetDevice(void*s,void**pp){ D2Ctx*c=s; if(pp){ *pp=c->dev; if(c->dev) d2_AddRef(c->dev); } }
 static void MSABI d2c_SetTarget(void*s,void*img){ D2Ctx*c=s; if(img && !d2_is_bmp(img)){ d2_unimpl(s,74); return; }
-    if(img==c->target) return; d2_flush(c); if(img) d2_AddRef(img); if(c->target) d2_release(c->target); c->target=img; d2_ctx_drop_canvas(c); c->nclip=0; }
+    if(img==c->target) return; while(c->nclip) d2_pop(c,1); d2_flush(c); if(img) d2_AddRef(img); if(c->target) d2_release(c->target); c->target=img; }
+    // (the canvas stays: Gravemind sets NULL and the back buffer again every frame; d2_surface remakes it only for another size)
 static void MSABI d2c_GetTarget(void*s,void**pp){ D2Ctx*c=s; if(pp){ *pp=c->target; if(c->target) d2_AddRef(c->target); } }
 static void MSABI d2c_SetRenderingControls(void*s,const void*p){ (void)s;(void)p; }
 static void MSABI d2c_GetRenderingControls(void*s,uint32_t*p){ (void)s; if(p){ p[0]=0; p[1]=4096; p[2]=4096; } }
@@ -774,7 +802,10 @@ static int d2d_selftest(const char*out){
     if(d3dgl_enabled()){ d3d_init(); D3DObj*rt=mktex(640,360,1,28,2), *vid=mktex(64,64,1,87,2); rt->bindf=0x28; vid->bindf=0x8; g_d3d_backbuf=rt;
         for(int i=0;i<64*64;i++){ uint8_t*q=(uint8_t*)vid->data+i*4; int on=((i%64)/8+(i/64)/8)&1; q[0]=on?0:255; q[1]=on?128:64; q[2]=on?255:0; q[3]=255; } vid->gl_dirty=1;
         void*c2=0,*tb=0,*vb=0,*half=0; ((int(MSABI*)(void*,uint32_t,void**))VT(dev,4))(dev,0,&c2);
-        D2BmpProps1 tp={{0,1},96,96,1|2,0}; ((int(MSABI*)(void*,void*,const D2BmpProps1*,void**))VT(c2,62))(c2,rt,&tp,&tb);
+        void*surf=0; uint32_t sd[5]={0}; ((int(MSABI*)(void*,const GUID_*,void**))VT(rt,0))(rt,&IID_IDXGISurface,&surf);   // (what Gravemind does: the target via IDXGISurface)
+        if(surf) ((int(MSABI*)(void*,uint32_t*))VT(surf,8))(surf,sd); int okd=surf && surf!=(void*)rt && sd[0]==640 && sd[1]==360 && sd[2]==28; if(!okd) g_d2t_fail++;
+        printf("%s IDXGISurface::GetDesc of the target: %ux%u format %u\n",okd?"PASS":"FAIL",sd[0],sd[1],sd[2]);
+        D2BmpProps1 tp={{0,1},96,96,1|2,0}; ((int(MSABI*)(void*,void*,const D2BmpProps1*,void**))VT(c2,62))(c2,surf?surf:(void*)rt,&tp,&tb); if(surf) d2_release(surf);
         D2BmpProps1 vp={{0,3},96,96,0,0}; ((int(MSABI*)(void*,void*,const D2BmpProps1*,void**))VT(c2,62))(c2,vid,&vp,&vb);
         D2Col ch={1,1,1,0.5f}; ((mkbrush)VT(c2,8))(c2,&ch,0,&half);
         ((void(MSABI*)(void*,void*))VT(c2,74))(c2,tb); ((void(MSABI*)(void*))VT(c2,48))(c2); ((void(MSABI*)(void*,const D2Col*))VT(c2,47))(c2,&bg);

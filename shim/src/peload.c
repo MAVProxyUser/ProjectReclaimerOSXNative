@@ -1127,6 +1127,7 @@ typedef struct { void** vtbl; uint32_t kind; uint32_t rowpitch; uint64_t size; v
     // it once nothing bound or queued can still use it. keep: never freed (shaders, layouts, the back buffer...).
     volatile int refs; uint8_t keep, dead, pstage; uint32_t pframe; void* pnext;   // pstage 1 released, 2 seen unbound at frame pframe
     uint64_t pqpos;               // GL submission queue position when it was seen unbound: freed only after the GL thread passed it
+    void* dxsurf;                 // 2D texture: its IDXGISurface interface (DxSurf), made by the first QueryInterface for it
 } D3DObj;
 // ID3D11DeviceChild private data: halo3 stashes the VS bytecode-blob pointer on the shader object
 // (SetPrivateData with GUID g_180801e00) and reads it back for CreateInputLayout. Our old no-op
@@ -1329,7 +1330,44 @@ static unsigned MSABI obj_Release(void*s){ if(!live_has(s)) return 0; D3DObj*o=s
     if(r==0 && o->keep){ __atomic_add_fetch(o->bc?&g_d3d_keptdead:&g_d3d_keptdead_il,1,__ATOMIC_RELAXED); __atomic_add_fetch(&g_d3d_keptdead_b,(uint64_t)o->bclen,__ATOMIC_RELAXED); }   // audit
     return (unsigned)r; }
 static void qi_trace(const char*who,GUID_*r);
-static int MSABI obj_QI(void*s,GUID_*r,void**pp){ qi_trace("obj",r); if(pp){ *pp=s; obj_AddRef(s); } return HR_OK; }   // QueryInterface hands out a reference
+static int dxsurf_qi(void*s,GUID_*r,void**pp); // fwd (IDXGISurface of a 2D texture, below)
+static int MSABI obj_QI(void*s,GUID_*r,void**pp){ qi_trace("obj",r); if(dxsurf_qi(s,r,pp)) return HR_OK;
+    if(pp){ *pp=s; obj_AddRef(s); } return HR_OK; }   // QueryInterface hands out a reference
+// IDXGISurface(1/2) of a 2D texture (2026-10-21): QueryInterface used to answer every IID with the texture itself, so a caller of
+// IDXGISurface::GetDesc (slot 8) ran ID3D11Resource::SetEvictionPriority and read its own uninitialised memory as the size --
+// Project Gravemind lays its Direct2D screens out from the back buffer's DXGI_SURFACE_DESC and drew everything at 1/1080 scale,
+// 40 million pixels to the side. Now the surface interface is a second vtable of the same object (one per texture, its reference
+// count the texture's): GetDesc, GetDevice, Map / Unmap (the CPU copy), IDXGISurface2::GetResource; QueryInterface from it gives
+// the texture back for anything else. swap_GetBuffer hands it out for a surface IID too. PELOAD_DXGI_SURFACE_OLD=1 = old.
+static const GUID_ IID_IDXGISurface ={0xcafcb56c,0x6ac3,0x4889,{0xbf,0x47,0x9e,0x23,0xbb,0xd2,0x60,0xec}};
+static const GUID_ IID_IDXGISurface1={0x4ae63092,0x6327,0x4c1b,{0x80,0xae,0xbf,0xe1,0x2e,0xa3,0x2b,0x86}};
+static const GUID_ IID_IDXGISurface2={0xaba496dd,0xb617,0x4cb8,{0xa8,0x66,0xbc,0x44,0xd7,0xeb,0x1f,0xa2}};
+static const GUID_ IID_IDXGIDeviceSubObject={0x3d3e0379,0xf9de,0x4d58,{0xbb,0x6c,0x18,0xd6,0x29,0x92,0xf1,0xa6}};
+typedef struct { void**vtbl; D3DObj*tex; } DxSurf;
+static void* g_dxsurf_vtbl[14];
+static int dxsurf_iid(GUID_*r){ return r && (guid_eq(r,&IID_IDXGISurface)||guid_eq(r,&IID_IDXGISurface1)||guid_eq(r,&IID_IDXGISurface2)); }
+static int MSABI dxs_QI(void*s,GUID_*r,void**pp){ DxSurf*d=s; if(!pp) return (int)HR_INVALIDARG;
+    if(dxsurf_iid(r)||guid_eq(r,&IID_IDXGIObject)||guid_eq(r,&IID_IDXGIDeviceSubObject)){ *pp=s; obj_AddRef(d->tex); return HR_OK; }
+    *pp=d->tex; obj_AddRef(d->tex); return HR_OK; }
+static unsigned MSABI dxs_AddRef(void*s){ return obj_AddRef(((DxSurf*)s)->tex); }
+static unsigned MSABI dxs_Release(void*s){ return obj_Release(((DxSurf*)s)->tex); }
+static int MSABI dxs_ok(void*s){ (void)s; return HR_OK; }
+static int MSABI dxs_GetPrivateData(void*s,GUID_*g,uint32_t*sz,void*d){ (void)s;(void)g;(void)d; if(sz)*sz=0; return (int)HR_DXGI_NOT_FOUND; }
+static int MSABI dxs_GetParent(void*s,GUID_*r,void**pp){ (void)s;(void)r; if(pp)*pp=0; return (int)0x80004002; }
+static int MSABI dxs_GetDevice(void*s,GUID_*r,void**pp){ (void)s;(void)r; if(!pp) return (int)HR_INVALIDARG; *pp=&g_d3ddevice; return HR_OK; }
+static int MSABI dxs_GetDesc(void*s,uint32_t*d){ D3DObj*t=((DxSurf*)s)->tex; if(!d) return (int)HR_INVALIDARG; d[0]=t->w; d[1]=t->h; d[2]=t->fmt; d[3]=1; d[4]=0; return HR_OK; }
+static int MSABI dxs_Map(void*s,uint8_t*mr,uint32_t fl){ (void)fl; D3DObj*t=((DxSurf*)s)->tex; if(!mr||!t->data) return (int)0x887A0001;   // DXGI_ERROR_INVALID_CALL
+    *(int32_t*)mr=(int32_t)t->rowpitch; *(void**)(mr+8)=t->data; return HR_OK; }   // DXGI_MAPPED_RECT {INT Pitch; BYTE*pBits}
+static int MSABI dxs_Unmap(void*s){ D3DObj*t=((DxSurf*)s)->tex; t->gl_dirty=1; t->ver++; return HR_OK; }
+static int MSABI dxs_GetDC(void*s,int discard,void**hdc){ (void)s;(void)discard; if(hdc)*hdc=0; return (int)HR_E_NOTIMPL; }
+static int MSABI dxs_GetResource(void*s,GUID_*r,void**pp,uint32_t*sub){ (void)r; if(sub)*sub=0; if(!pp) return (int)HR_INVALIDARG; *pp=((DxSurf*)s)->tex; obj_AddRef(*pp); return HR_OK; }
+static DxSurf* dxsurf_of(D3DObj*o){ if(!g_dxsurf_vtbl[0]){ void**v=g_dxsurf_vtbl; v[0]=(void*)dxs_QI; v[1]=(void*)dxs_AddRef; v[2]=(void*)dxs_Release; v[3]=(void*)dxs_ok; v[4]=(void*)dxs_ok;
+        v[5]=(void*)dxs_GetPrivateData; v[6]=(void*)dxs_GetParent; v[7]=(void*)dxs_GetDevice; v[8]=(void*)dxs_GetDesc; v[9]=(void*)dxs_Map; v[10]=(void*)dxs_Unmap;
+        v[11]=(void*)dxs_GetDC; v[12]=(void*)dxs_ok; v[13]=(void*)dxs_GetResource; }
+    if(!o->dxsurf){ DxSurf*d=calloc(1,sizeof *d); d->vtbl=g_dxsurf_vtbl; d->tex=o; o->dxsurf=d; } return o->dxsurf; }
+static int dxsurf_qi(void*s,GUID_*r,void**pp){ D3DObj*o=s; static int old=-1; if(old<0) old=getenv("PELOAD_DXGI_SURFACE_OLD")?1:0;
+    if(old || !pp || !o || o->vtbl!=g_d3dres_vtbl || o->kind!=2 || !dxsurf_iid(r)) return 0;
+    *pp=dxsurf_of(o); obj_AddRef(o); return 1; }
 static void     MSABI d3d_GetDevice(void*s,void**pp){ (void)s; if(pp)*pp=&g_d3ddevice; }
 static int      MSABI d3d_GetPD(void*s,GUID_*g,uint32_t*ps,void*pd){ (void)s;(void)g;(void)pd; if(ps)*ps=0; return HR_NOTFOUND; }
 static int      MSABI d3d_SetPD(void*s,GUID_*g,uint32_t sz,const void*d){ (void)s;(void)g;(void)sz;(void)d; return HR_OK; }
@@ -2293,8 +2331,9 @@ static void swap_size(uint32_t*w,uint32_t*h){ static uint32_t W,H; if(!W && g_sw
     if(!W){ W=1920; H=1080; const char*e=getenv("PELOAD_SWAP_SIZE");
         if(e){ unsigned a=0,b=0; if(sscanf(e,"%ux%u",&a,&b)==2 && a>=320 && b>=200 && a<=4096 && b<=4096){ W=a; H=b; } } } *w=W; *h=H; }
 static D3DObj* swap_backbuf(void){ if(!g_d3d_backbuf){ uint32_t w,h; swap_size(&w,&h); g_d3d_backbuf=mktex(w,h,1,28,2); } return g_d3d_backbuf; }
-static int MSABI swap_GetBuffer(void*t,uint32_t buf,GUID_*r,void**pp){ (void)t;(void)buf;(void)r;
+static int MSABI swap_GetBuffer(void*t,uint32_t buf,GUID_*r,void**pp){ (void)t;(void)buf;
     swap_backbuf(); flog("GetBuffer swapchain=%p -> BB %p",t,(void*)g_d3d_backbuf);
+    if(dxsurf_qi(g_d3d_backbuf,r,pp)) return HR_OK;   // (asked for its IDXGISurface: that interface, see dxsurf_qi)
     if(pp){ *pp=g_d3d_backbuf; obj_AddRef(g_d3d_backbuf); } return HR_OK; }   // GetBuffer hands out a reference (the game Releases it)
 // IDXGIDeviceSubObject::GetDevice (vtable slot 7): MUST populate *pp with the
 // device, else callers (e.g. ui_composition's IDXGISwapChain::GetDevice(ID3D11Device))
@@ -9427,7 +9466,7 @@ static void d3dobj_destroy(D3DObj*o,int gl){
         static void(*del_sh)(unsigned), (*del_prog)(unsigned); if(gl && !del_sh){ del_sh=dlsym(RTLD_DEFAULT,"glDeleteShader"); del_prog=dlsym(RTLD_DEFAULT,"glDeleteProgram"); }
         if(gl){ for(int i=0;i<o->shc_n && i<4;i++) if(o->shc_id[i] && del_sh) del_sh(o->shc_id[i]); if(o->glprog && del_prog) del_prog(o->glprog); }
         o->shc_n=0; o->glprog=0; if(!o->bcshared){ free(o->bc); free(o->glsl); } o->bc=0; o->glsl=0; o->bclen=0; }
-    free(o->pdata); o->pdata=0; free(o->isg); o->isg=0;
+    free(o->pdata); o->pdata=0; free(o->isg); o->isg=0; free(o->dxsurf); o->dxsurf=0;
     __atomic_add_fetch(&g_d3do_nfree[o->kind&7],1,__ATOMIC_RELAXED); __atomic_add_fetch(&g_d3do_bfree[o->kind&7],o->size,__ATOMIC_RELAXED);
     live_del(o); o->dead=1;
     D3DObj*old=g_quar[g_quar_i]; g_quar[g_quar_i]=o; g_quar_i=(g_quar_i+1)&4095; free(old); }
