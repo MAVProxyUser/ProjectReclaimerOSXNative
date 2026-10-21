@@ -778,7 +778,8 @@ patch variants by signature (section 16; shim/docs/patch-addresses.md).
   memory / file streams; ON FOR h2 ONLY -- halo3.dll references CLSID_WICImagingFactory2 and has only ever been told "not
   registered" (`PELOAD_WIC=1` any game, `=0` off). Old: `PELOAD_NO_D2D=1` (the failing factories). `PELOAD_TRACE_D2D` logs
   creations, composites and operations per EndDraw; `PELOAD_DWRITE_FONT=<family>` forces one font. Offline test:
-  `bash shim/tools/d2d-test.sh`. Not done (logged when called): effects, command lists, glyph runs, custom text renderers
+  `bash shim/tools/d2d-test.sh`. IDWriteTextLayout1 (Gravemind's in-game text asks for it): pair kerning, character spacing (as
+  extra advance; the minimum advance width is not applied). Not done (logged when called): effects, command lists, glyph runs, custom text renderers
   (IDWriteTextLayout::Draw), HWND / DC / WIC render targets, compatible render targets, opacity masks, gradient meshes.
 
 - **GDI DIB surfaces** — CreateDIBSection/CreateCompatibleDC/SelectObject/GetObjectW/BitBlt. Why: "Cannot allocate menu
@@ -822,6 +823,17 @@ patch variants by signature (section 16; shim/docs/patch-addresses.md).
 
 ## 9. Audio (XAudio2, WASAPI)
 
+- **DirectSound 8 on CoreAudio, for Halo 2** (2026-10-21) — shim/src/dsound.c (`DS_HANDLE`: LoadLibrary("dsound.dll") / GetProcAddress
+  in peload.c). Why: Project Gravemind's sound ran ~0.2 s behind the picture. MCC's Miles Sound System uses DirectSound when it can
+  load it and waveOut otherwise; on waveOut it keeps five 50 ms buffers, four always queued (the `[winmm] ... 4 queued` lines), so
+  a sound was heard ~200 ms after it was mixed. How: DirectSoundCreate(8) / DirectSoundEnumerateA/W (no capture devices);
+  IDirectSound8 (secondary + primary buffers, software-mixing caps, stereo speaker config) and IDirectSoundBuffer8 (a ring:
+  Lock hands out pointers into it; Play / Stop / cursors / status / format / volume and pan as AudioQueue parameters). A playing
+  buffer has an AudioQueue pulling 10 ms at a time from its ring at the play cursor (3 in flight); the write cursor is one step
+  ahead. Miles now mixes into a looping 49152-byte buffer a short way ahead of the play cursor. PELOAD_AUDIO=0: a silent device
+  moving the cursors by the clock. Per game: on for h2 only -- halo3.dll and haloreach.dll also look for DirectSound and have
+  only ever been told there is none (`PELOAD_DSOUND=1` any game, `=0` off: Miles goes back to waveOut). `PELOAD_TRACE_DSOUND`:
+  buffers created / started + a 2 s line per buffer (bytes played, peak). Offline test: `bash shim/tools/dsound-test.sh`.
 - **waveOut diagnostics** (2026-10-21) — winmm.c: `PELOAD_TRACE_WINMM=1` logs every waveOut call (open, prepare, write, reset,
   close, WOM_DONE dispatch), `=stats` a line per stream every 2 s (writes, bytes, peak sample, headers played, queued; shim/gravemind.sh
   sets it), `PELOAD_WINMM_DUMP=<file>` appends the PCM written. Told "Miles writes nothing" apart from "CoreAudio plays nothing"

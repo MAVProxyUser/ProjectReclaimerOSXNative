@@ -3,7 +3,8 @@
 //   values; a layout is broken into lines with a CTTypesetter (word / character wrapping, hard line breaks), aligned (leading /
 //   trailing / centre, near / far / centre paragraphs), trimmed (character / word granularity, with the ellipsis sign) and measured
 //   (GetMetrics, GetLineMetrics, GetClusterMetrics, DetermineMinWidth, the three HitTests). Per-range font family / collection /
-//   weight / style / size / underline / strikethrough / drawing effect (a solid brush colours its range).
+//   weight / style / size / underline / strikethrough / drawing effect (a solid brush colours its range); IDWriteTextLayout1's pair
+//   kerning and character spacing (as extra advance).
 //   Fonts: in-memory font files (IDWriteInMemoryFontFileLoader -> IDWriteFontSetBuilder1 -> CreateFontCollectionFromFontSet: how
 //   Project Gravemind ships Michroma, Halo 2 Handel and Halo 2 Conduit) become CGFonts, matched by family name (+ nearest weight /
 //   italic) in their collection; the system collection = the font files staged in C:\ReclaimerFonts (matched by their own family
@@ -115,8 +116,8 @@ static CTFontRef dw_font(DwColl*coll,const uint16_t*wfam,int weight,int style,fl
     cache[slot].coll=coll; snprintf(cache[slot].fam,64,"%s",fam); cache[slot].w=weight; cache[slot].it=italic; cache[slot].sz=size; cache[slot].f=f; pthread_mutex_unlock(&g_dw_mx);
     return f; }
 // ---- text formats and layouts -----------------------------------------------------------------------------------------------
-typedef struct { uint32_t start, len; int kind; int i; float f; void*p; uint16_t*w; } DwRun;   // a per-range property of a layout
-enum { DR_COLL=1, DR_FAM, DR_WEIGHT, DR_STYLE, DR_STRETCH, DR_SIZE, DR_UNDER, DR_STRIKE, DR_EFFECT, DR_INLINE, DR_TYPO, DR_LOCALE };
+typedef struct { uint32_t start, len; int kind; int i; float f, f2, f3; void*p; uint16_t*w; } DwRun;   // a per-range property of a layout
+enum { DR_COLL=1, DR_FAM, DR_WEIGHT, DR_STYLE, DR_STRETCH, DR_SIZE, DR_UNDER, DR_STRIKE, DR_EFFECT, DR_INLINE, DR_TYPO, DR_LOCALE, DR_KERN, DR_SPACING };
 typedef struct { CTLineRef line; CFIndex start, len, nl; double asc, desc, lead, h, w, wtrail, x, top, base; int trimmed; } DwLine;
 typedef struct DwFmt { D2Hdr h; uint16_t fam[100]; DwColl*coll; int weight, style, stretch; float size; uint16_t locale[86];
     int talign, palign, wrap, rdir, fdir; float tab; uint32_t trim[3]; void*trimsign; int lsm; float lsp, lsb;
@@ -177,15 +178,17 @@ static int MSABI dwl_SetLocaleName(void*s,const uint16_t*n,DwRng r){ (void)s;(vo
 static float MSABI dwl_GetMaxWidth(void*s){ return ((DwLayout*)s)->maxw; }
 static float MSABI dwl_GetMaxHeight(void*s){ return ((DwLayout*)s)->maxh; }
 // the value of property `kind` at text position pos (the format's when no range sets it) + the range it holds over
-typedef struct { DwColl*coll; const uint16_t*fam; int weight, style, stretch, under, strike; float size; void*effect; } DwProps;
+typedef struct { DwColl*coll; const uint16_t*fam; int weight, style, stretch, under, strike, nokern; float size, lead, trail, minadv; void*effect; } DwProps;
 static void dw_props_at(DwLayout*L,uint32_t pos,DwProps*p,uint32_t*rs,uint32_t*re){
     p->coll=L->coll; p->fam=L->fam; p->weight=L->weight; p->style=L->style; p->stretch=L->stretch; p->size=L->size; p->under=p->strike=0; p->effect=0;
+    p->nokern=0; p->lead=p->trail=p->minadv=0;
     uint32_t a=0, b=L->len>0?L->len:1; if(b<=pos) b=pos+1;
     for(int i=0;i<L->nruns;i++){ DwRun*x=&L->runs[i]; uint32_t xs=x->start, xe=x->start+x->len; if(xe<xs) xe=0xFFFFFFFFu;
         if(pos>=xs && pos<xe){ if(xs>a) a=xs; if(xe<b) b=xe;
             switch(x->kind){ case DR_COLL: p->coll=x->p; break; case DR_FAM: p->fam=x->w; break; case DR_WEIGHT: p->weight=x->i; break; case DR_STYLE: p->style=x->i; break;
                 case DR_STRETCH: p->stretch=x->i; break; case DR_SIZE: p->size=x->f; break; case DR_UNDER: p->under=x->i; break; case DR_STRIKE: p->strike=x->i; break;
-                case DR_EFFECT: p->effect=x->p; break; } }
+                case DR_EFFECT: p->effect=x->p; break; case DR_KERN: p->nokern=!x->i; break;
+                case DR_SPACING: p->lead=x->f; p->trail=x->f2; p->minadv=x->f3; break; } }
         else if(xs>pos && xs<b) b=xs; else if(xe<=pos && xe>a) a=xe; }
     if(rs)*rs=a; if(re)*re=b; }
 static void dw_rng_out(DwRng*out,uint32_t a,uint32_t b){ if(out){ out->start=a; out->len=b-a; } }
@@ -201,6 +204,13 @@ static int MSABI dwl_GetUnderlineAt(void*s,uint32_t pos,int*v,DwRng*r){ DwProps 
 static int MSABI dwl_GetStrikethroughAt(void*s,uint32_t pos,int*v,DwRng*r){ DwProps p; uint32_t a,b; dw_props_at(s,pos,&p,&a,&b); dw_rng_out(r,a,b); if(v)*v=p.strike; return 0; }
 static int MSABI dwl_GetDrawingEffectAt(void*s,uint32_t pos,void**v,DwRng*r){ DwProps p; uint32_t a,b; dw_props_at(s,pos,&p,&a,&b); dw_rng_out(r,a,b);
     *v=p.effect; if(p.effect) ((uint32_t(MSABI*)(void*))(*(void***)p.effect)[1])(p.effect); return 0; }
+// IDWriteTextLayout1 67 SetPairKerning, 68 GetPairKerning, 69 SetCharacterSpacing, 70 GetCharacterSpacing
+static int MSABI dwl_SetPairKerning(void*s,int on,DwRng r){ DwRun*x=dw_addrun(s,DR_KERN,r); if(x) x->i=on; return 0; }
+static int MSABI dwl_GetPairKerning(void*s,uint32_t pos,int*on,DwRng*r){ DwProps p; uint32_t a,b; dw_props_at(s,pos,&p,&a,&b); dw_rng_out(r,a,b); if(on)*on=!p.nokern; return 0; }
+static int MSABI dwl_SetCharacterSpacing(void*s,float lead,float trail,float minadv,DwRng r){ if(minadv<0) return (int)HR_INVALIDARG;
+    DwRun*x=dw_addrun(s,DR_SPACING,r); if(x){ x->f=lead; x->f2=trail; x->f3=minadv; } return 0; }
+static int MSABI dwl_GetCharacterSpacing(void*s,uint32_t pos,float*lead,float*trail,float*minadv,DwRng*r){ DwProps p; uint32_t a,b; dw_props_at(s,pos,&p,&a,&b); dw_rng_out(r,a,b);
+    if(lead)*lead=p.lead; if(trail)*trail=p.trail; if(minadv)*minadv=p.minadv; return 0; }
 static int MSABI dwl_GetNullAt(void*s,uint32_t pos,void**v,DwRng*r){ (void)pos; DwLayout*L=s; if(v)*v=0; dw_rng_out(r,0,L->len); return 0; }
 static int MSABI dwl_GetLocaleNameLengthAt(void*s,uint32_t pos,uint32_t*n,DwRng*r){ (void)pos; DwLayout*L=s; if(n)*n=(uint32_t)dw_wlen(L->locale); dw_rng_out(r,0,L->len); return 0; }
 static int MSABI dwl_GetLocaleNameAt(void*s,uint32_t pos,uint16_t*buf,uint32_t n,DwRng*r){ (void)pos; DwLayout*L=s; dw_rng_out(r,0,L->len);
@@ -220,7 +230,11 @@ static CFAttributedStringRef dw_attr(DwLayout*L,CTFontRef*first){
         if(L->len){ CFRange r=CFRangeMake(pos,(CFIndex)(b>L->len?L->len:b)-pos); CFAttributedStringSetAttribute(as,r,kCTFontAttributeName,f);
             float c[4]; if(p.effect && d2_brush_solid_color(p.effect,c)){ CGColorSpaceRef cs=CGColorSpaceCreateWithName(kCGColorSpaceSRGB); CGFloat cc[4]={c[0],c[1],c[2],c[3]};
                 CGColorRef col=CGColorCreate(cs,cc); CFAttributedStringSetAttribute(as,r,kCTForegroundColorAttributeName,col); CGColorRelease(col); CGColorSpaceRelease(cs); }
-            else CFAttributedStringSetAttribute(as,r,kCTForegroundColorFromContextAttributeName,kCFBooleanTrue); }
+            else CFAttributedStringSetAttribute(as,r,kCTForegroundColorFromContextAttributeName,kCFBooleanTrue);
+            // IDWriteTextLayout1: pair kerning off = no kerning; character spacing = extra advance after each character (leading +
+            // trailing; the minimum advance width is not applied)
+            if(p.nokern || p.lead!=0 || p.trail!=0){ double kv=p.lead+p.trail; CFNumberRef kn=CFNumberCreate(0,kCFNumberDoubleType,&kv);
+                CFAttributedStringSetAttribute(as,r,kCTKernAttributeName,kn); CFRelease(kn); } }
         pos=b; }
     CFAttributedStringEndEditing(as); return as; }
 static void dw_line_metrics(DwLine*ln,CTFontRef f){ CGFloat a=0,d=0,l=0; ln->w=ln->line?CTLineGetTypographicBounds(ln->line,&a,&d,&l):0;
@@ -401,7 +415,8 @@ static void dw_setup_layout(void**v){ dw_setup_fmt(v); v[28]=dwl_SetMaxWidth; v[
     v[45]=dwl_GetFontFamilyNameLengthAt; v[46]=dwl_GetFontFamilyNameAt; v[47]=dwl_GetFontWeightAt; v[48]=dwl_GetFontStyleAt; v[49]=dwl_GetFontStretchAt; v[50]=dwl_GetFontSizeAt;
     v[51]=dwl_GetUnderlineAt; v[52]=dwl_GetStrikethroughAt; v[53]=dwl_GetDrawingEffectAt; v[54]=dwl_GetNullAt; v[55]=dwl_GetNullAt; v[56]=dwl_GetLocaleNameLengthAt;
     v[57]=dwl_GetLocaleNameAt; v[59]=dwl_GetLineMetrics; v[60]=dwl_GetMetrics; v[61]=dwl_GetOverhangMetrics; v[62]=dwl_GetClusterMetrics; v[63]=dwl_DetermineMinWidth;
-    v[64]=dwl_HitTestPoint; v[65]=dwl_HitTestTextPosition; v[66]=dwl_HitTestTextRange; }
+    v[64]=dwl_HitTestPoint; v[65]=dwl_HitTestTextPosition; v[66]=dwl_HitTestTextRange;
+    v[67]=dwl_SetPairKerning; v[68]=dwl_GetPairKerning; v[69]=dwl_SetCharacterSpacing; v[70]=dwl_GetCharacterSpacing; }
 static void dw_setup_fac(void**v){ v[3]=dwfac_GetSystemFontCollection; v[5]=dwfac_ok; v[6]=dwfac_ok; v[7]=dwfac_CreateFontFileReference; v[10]=dwfac_CreateRenderingParams;
     v[11]=dwfac_CreateMonitorRenderingParams; v[12]=dwfac_CreateCustomRenderingParams; v[13]=dwfac_ok; v[14]=dwfac_ok; v[15]=dwfac_CreateTextFormat; v[16]=dwfac_CreateTypography;
     v[18]=dwfac_CreateTextLayout; v[19]=dwfac_CreateGdiCompatibleTextLayout; v[20]=dwfac_CreateEllipsisTrimmingSign; v[36]=dwfac_CreateFontSetBuilder;
@@ -421,7 +436,7 @@ static D2Cls C_dwset={"IDWriteFontSet",SLOTS_IDWriteFontSet,NSLOT_IDWriteFontSet
 static D2Cls C_dwbuilder={"IDWriteFontSetBuilder1",SLOTS_IDWriteFontSetBuilder1,NSLOT_IDWriteFontSetBuilder1,{&IID_IUnknown,&IID_IDWriteFontSetBuilder,&IID_IDWriteFontSetBuilder1},dw_set_dtor,dw_setup_builder};
 static D2Cls C_dwmemloader={"IDWriteInMemoryFontFileLoader",SLOTS_IDWriteInMemoryFontFileLoader,NSLOT_IDWriteInMemoryFontFileLoader,{&IID_IUnknown,&IID_IDWriteFontFileLoader,&IID_IDWriteInMemoryFontFileLoader},0,dw_setup_memloader};
 static D2Cls C_dwfmt={"IDWriteTextFormat",SLOTS_IDWriteTextFormat,NSLOT_IDWriteTextFormat,{&IID_IUnknown,&IID_IDWriteTextFormat},dw_fmt_dtor,dw_setup_fmt};
-static D2Cls C_dwlayout={"IDWriteTextLayout",SLOTS_IDWriteTextLayout,NSLOT_IDWriteTextLayout,{&IID_IUnknown,&IID_IDWriteTextFormat,&IID_IDWriteTextLayout},dw_fmt_dtor,dw_setup_layout};
+static D2Cls C_dwlayout={"IDWriteTextLayout1",SLOTS_IDWriteTextLayout1,NSLOT_IDWriteTextLayout1,{&IID_IUnknown,&IID_IDWriteTextFormat,&IID_IDWriteTextLayout,&IID_IDWriteTextLayout1},dw_fmt_dtor,dw_setup_layout};
 static D2Cls C_dwparams={"IDWriteRenderingParams",SLOTS_IDWriteRenderingParams,NSLOT_IDWriteRenderingParams,{&IID_IUnknown,&IID_IDWriteRenderingParams},0,dw_setup_params};
 static D2Cls C_dwtypo={"IDWriteTypography",SLOTS_IDWriteTypography,NSLOT_IDWriteTypography,{&IID_IUnknown,&IID_IDWriteTypography},0,dw_setup_typo};
 static D2Cls C_dwinline={"IDWriteInlineObject",SLOTS_IDWriteInlineObject,NSLOT_IDWriteInlineObject,{&IID_IUnknown,&IID_IDWriteInlineObject},0,dw_setup_inline};

@@ -14,8 +14,9 @@ start when the beta is closed.
   1280x720 (it was 1920x1080 with the game in a corner).
 - **Input**: keyboard, mouse and pads work once the window is active (2026-10-21: halo2.dll's hidden window had kept the
   foreground; FIXES.md section 7). F1 releases the mouse, a click in the window captures it again.
-- **Sound**: Miles plays through waveOut since 2026-10-21 (FindFirstFileA could not find its DSP plugin, so halo2 never started a
-  sound; FIXES.md section 4). `[winmm] ... 2 s:` lines in the log show the stream (peak > 0 = sound).
+- **Sound**: works since 2026-10-21 (FindFirstFileA could not find Miles' DSP plugin, so halo2 never started a sound; FIXES.md
+  section 4). Miles plays through the loader's DirectSound (dsound.c) like on Windows -- on waveOut it ran ~0.2 s behind the picture.
+  `PELOAD_TRACE_DSOUND=1` logs the stream (peak > 0 = sound); `PELOAD_DSOUND=0` = waveOut.
 - **Loading screen**: the screen is black while a map loads; halo2 asks for `loading_dx11.bin`, which isn't in MCC's files (MCC
   draws its own loading screens). Gravemind's own loading screen is Direct2D (to be checked with the launcher).
 - Not yet: the LAN game list (GetAdaptersAddresses), campaign (needs the 31 GB campaign depot).

@@ -31,6 +31,7 @@ overrides) and prints `[game] ...` at start.
 | MCC's real HLSL compiler for D3DCompile | h2 by default (`PELOAD_REAL_D3DCOMPILE=1` anywhere, `=0` off) | peload.c `i_D3DCompile` |
 | waveOutGetNumDevs reports one device | h2 (h3 / reach: 0, so they keep XAudio2 only) | peload.c `i_waveOutGetNumDevs` |
 | the back buffer takes the swap chain's size (else 1920x1080) | h2 (`PELOAD_SWAP_DESC_SIZE`) | peload.c `dxgi_CreateSwapChain` |
+| DirectSound (`dsound.dll`) | h2 (`PELOAD_DSOUND`): halo3.dll and haloreach.dll look for it too and have only ever been told there is none | dsound.c `ds_on` |
 | WIC (CoCreateInstance of the WIC imaging factory) | h2 (`PELOAD_WIC`): halo3.dll references it too and has only ever got "not registered" | wic.c `wic_create` |
 
 Reach Renaissance's additions (WebView2 on WKWebView, windows across loader processes, Schannel on LibreSSL) and Gravemind's

@@ -9336,6 +9336,7 @@ static uintptr_t MSABI i_beginthread(WinThreadProc start,unsigned stack,void*arg
 #include "win32x.c"     // CommandLineToArgvW, GetPrivateProfile*, CreateFile2, GetStringTypeW (first needed by Gravemind)
 #include "winmm.c"      // waveOut on CoreAudio (MCC's Miles Sound System for Halo 2)
 #include "d2d.c"        // Direct2D 1.1 + DirectWrite + WIC on CoreGraphics / CoreText / ImageIO (Project Gravemind's screens)
+#include "dsound.c"     // DirectSound 8 on CoreAudio (MCC's Miles for Halo 2: low-latency output instead of waveOut)
 // every guest thread's TLS block of one module (index idx), copied under g_tlsm: a returned thread's array is freed 30 s
 // later (thr_reap), so callers must not keep the arrays themselves past the lock
 static int tls_blocks(uint32_t idx,void**out,int max){ int n=0; if(idx>=128) return 0; pthread_mutex_lock(&g_tlsm);
@@ -9814,7 +9815,8 @@ static void* MSABI i_LoadLibraryExW(const uint16_t *name, void *h, uint32_t fl){
     // DirectSound isn't provided (2026-10-20): "not found" instead of the placeholder module, whose GetProcAddress handed out
     // logging stubs -- MCC's Miles Sound System got S_OK from DirectSoundCreate with no object and crashed (mss64+0x2a780); with
     // no dsound.dll it uses waveOut (winmm.c). PELOAD_DSOUND_PLACEHOLDER=1 = old.
-    if(!strcasecmp(bn,"dsound.dll") || !strcasecmp(bn,"dsound")){ if(!getenv("PELOAD_DSOUND_PLACEHOLDER")){ g_lasterr=126; return 0; } }
+    if(!strcasecmp(bn,"dsound.dll") || !strcasecmp(bn,"dsound")){ if(ds_on()) return DS_HANDLE;   // (dsound.c: h2; PELOAD_DSOUND)
+        if(!getenv("PELOAD_DSOUND_PLACEHOLDER")){ g_lasterr=126; return 0; } }
     for(int m=0;m<g_nmods;m++) if(!strcasecmp(g_mods[m].name,bn)) return g_mods[m].base; // already loaded
     char p[2048]; win2unix(name,p,sizeof p);
     if(access(p,R_OK)==0){ g_prefer_base=1; uint8_t *b=load_guest(p, strdup(bn)); g_prefer_base=0; if(b) return b; }
@@ -10423,6 +10425,7 @@ static void* MSABI i_GetProcAddress(void *mod, char *name){
     if(mod==XA_HANDLE){ void*x=((uint64_t)name<0x10000)? xa_resolve((uint32_t)(uintptr_t)name,0) : xa_resolve(0,name); if(x) return x;
         mod=0; }   // (not an image: never export_lookup it -- PELOAD_AUDIO=0 leaves X3DAudio unresolved, below it gets a logging stub)
     if(mod==WV2_HANDLE){ void*x=((uint64_t)name>=0x10000)?wv2_resolve(name):0; if(x) return x; mod=0; }
+    if(mod==DS_HANDLE){ void*x=((uint64_t)name>=0x10000)?ds_resolve(name):0; if(x) return x; mod=0; }   // (dsound.c)
     if((uint64_t)name < 0x10000){ // imported by ordinal
         if(imp_count<8192){ imp_dll[imp_count]="(dynamic)"; imp_fn[imp_count]="#ordinal";
             return make_stub(imp_count++); }
@@ -12562,6 +12565,7 @@ int main(int argc, char **argv){ mt_start();
     { const char* nt=getenv("PELOAD_NETTEST"); if(nt){ net_selftest(nt); } }
     if(getenv("PELOAD_GLTEST")){ gl_selftest(); return 0; }  // direct GL render test; no game loaded
     if(getenv("PELOAD_D2D_SELFTEST")) return d2d_selftest(getenv("PELOAD_D2D_SELFTEST"));   // Direct2D / DirectWrite / WIC test card (d2d.c)
+    if(getenv("PELOAD_DSOUND_SELFTEST")) return ds_selftest();   // DirectSound through the real output path, silently (dsound.c)
     const char *path = argc>1 ? argv[1] : "halo3.dll";
     { static char selfabs[4096]; if(realpath(argv[0],selfabs)) g_self=selfabs; else g_self=argv[0]; } // absolute (child chdir's)
     ws("peload: loading "); ws(path); ws("\n");
