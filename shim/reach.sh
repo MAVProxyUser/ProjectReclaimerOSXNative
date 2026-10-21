@@ -1,9 +1,10 @@
 #!/bin/bash
 # Reach Renaissance (Halo: Reach on MCC's haloreach.dll) on the loader, without its menus. Guide: shim/docs/reach-renaissance.md.
-#     bash shim/reach.sh                                   # a local match: Slayer on Sword Base, 10-minute rounds
-#     bash shim/reach.sh 30_settlement ctf_054 15          # <map> <game variant> <minutes>
+#     bash shim/reach.sh                                   # Reach Renaissance with its menus (its own launcher)
+#     bash shim/reach.sh match                             # no menus: a local match, Slayer on Sword Base, 10-minute rounds
+#     bash shim/reach.sh match 30_settlement ctf_054 15    # <map> <game variant> <minutes>
 #     bash shim/reach.sh servers                           # the public server list (every master Reach Renaissance knows)
-#     bash shim/reach.sh join <address>                    # join one: <address> from `servers` (keyXXXX or ip:port)
+#     bash shim/reach.sh join <address>                    # join one without the menus: <address> from `servers`
 # Maps: haloreach/maps/*.map in MCC (20_sword_slayer, 30_settlement, 35_island, 45_aftship, 50_panopticon,
 # 52_ivory_tower, 70_boneyard, forge_halo, cex_* ...). Game variants: haloreach/game_variants/*.bin without ".bin"
 # (slayer_054, ctf_054, koth_054, oddball_054, infection_054, headhunter_054, juggernaut_054 ...).
@@ -25,6 +26,13 @@ LOADER_ENV=(PELOAD_PRESENT=1 PELOAD_HOLD_WINDOW=1 PELOAD_D3DGL=1 PELOAD_GL_HELPE
 peload(){ arch -x86_64 "$ROOT/shim/build/peload" "$@"; }
 
 case "${1:-}" in
+""|menus)
+    # the launcher writes its per-game args files, then starts bin/menu-overlay.exe (the menus, WebView2 on WKWebView), which
+    # starts the game (host-probe) and the server browser itself; every child inherits the loader settings. It finds MCC
+    # through mcc_folder.txt (no registry here).
+    [ -s "$UD/mcc_folder.txt" ] || printf '%s' "$MCC" > "$UD/mcc_folder.txt"
+    cd "$RR" && exec env "${LOADER_ENV[@]}" arch -x86_64 "$ROOT/shim/build/peload" "$RR/Reach Renaissance.exe" > /tmp/reach_play.log 2>&1 ;;
+match) shift ;;
 servers)
     cd "$RUN" && peload "$RR/bin/rr-browser.exe" list 2>&1 | grep -v -E '^peload:|DllMain|^  \[|^  (\(at|image|subsystem|mapped|TEB|guest|bound|static|block|TLS|entry)|^        unimpl|^\s*$'
     exit 0 ;;

@@ -23,8 +23,9 @@ Steam build of Halo: Reach (`haloreach.dll` SHA-256 `738dd2d2...0894`, the one b
     players) and against a local `rr-master` with a windowless host: the guest loads the host's match with both players on the
     scoreboard.
 - Sound: XAudio2 on CoreAudio, FMOD banks from MCC, and the Waves DLLs as guests (the same path as Halo 3).
+- **The menus run** (`bash shim/reach.sh`: Reach Renaissance's own launcher): WebView2 on WKWebView, over the game's window.
 - Not yet:
-  - the menus (WebView2; the launcher starts them and they stop at "CreateCoreWebView2EnvironmentWithOptions 80070002");
+  - the menus' shared buffers (the armory's live Spartan picture) and cross-process shared memory (`OpenFileMappingW`);
   - host-probe's own HLSL (D3DCompile: gamma pass, emblems, loading dots);
   - a Workshop mod a server needs (Steam download).
 - Known: the loadout picker's right column runs past the window's right edge.
@@ -37,7 +38,8 @@ Steam build of Halo: Reach (`haloreach.dll` SHA-256 `738dd2d2...0894`, the one b
 2. Reach Renaissance: unzip `ReachRenaissance-v<version>.zip` into
    `~/Library/Application Support/ReclaimerMac/prefix/drive_c`, which makes `C:\ReachRenaissance`.
 3. `bash shim/build.sh`, then one of:
-   - `bash shim/reach.sh` (Slayer on Sword Base), or `bash shim/reach.sh <map> <game variant> <minutes>`;
+   - `bash shim/reach.sh`: Reach Renaissance with its menus (its launcher, menu-overlay, the game behind);
+   - `bash shim/reach.sh match` (Slayer on Sword Base, no menus), or `bash shim/reach.sh match <map> <game variant> <minutes>`;
    - `bash shim/reach.sh servers`, then `bash shim/reach.sh join <address>` (`RR_NAME=<name>` for your in-game name).
 
    The game's log goes to `/tmp/reach_play.log`; its run folders go to `C:\ReclaimerCache\ReachRenaissance\runs\mac`.

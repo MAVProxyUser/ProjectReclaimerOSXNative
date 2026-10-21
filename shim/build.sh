@@ -10,7 +10,7 @@ MIN="-mmacosx-version-min=${MACOS_MIN:-13.0}"
 command -v python3 >/dev/null && python3 tools/glh_gen.py >/dev/null
 # src/rec.m: clip recording (stats page Record; AVFoundation, which Cocoa loads at startup anyway, so linking it costs nothing)
 clang -arch x86_64 $MIN -O1 -framework OpenGL -framework Cocoa -framework CoreText -framework CoreGraphics -framework CoreFoundation -framework AudioToolbox -framework IOSurface \
-  -framework AVFoundation -framework CoreMedia -framework CoreVideo -o build/peload.new src/peload.c src/rec.m
+  -framework AVFoundation -framework CoreMedia -framework CoreVideo -framework WebKit -o build/peload.new src/peload.c src/rec.m src/webview2.m
 mv -f build/peload.new build/peload
 # the native GL helper (PELOAD_GL_HELPER=1): a native arm64 process that runs the render context's GL calls
 clang -arch arm64 $MIN -O2 -Wno-deprecated-declarations -framework OpenGL -framework IOSurface -framework CoreFoundation -o build/glhelper.new src/glhelper.c && mv -f build/glhelper.new build/glhelper

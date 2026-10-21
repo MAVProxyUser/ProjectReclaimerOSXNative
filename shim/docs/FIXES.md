@@ -589,6 +589,39 @@ patch variants by signature (section 16; shim/docs/patch-addresses.md).
   (`g_wi_recenter`; the Reclaimer client keeps its own F1) F1 gives the Mac its pointer back -- shown, moving freely; the
   guest still thinks it holds it and gets no look motion -- until a click inside the window captures it again (that click
   does not reach the game); the guest letting go itself clears it. Old: `PELOAD_NO_F1_RELEASE=1`. (10-20, reach-port)
+- **A message queue for GetMessageW loops** — `i_GetMessageW`, `i_PeekMessageW`, `i_SetTimer`, `i_PostMessageW` .... Why: Reach
+  Renaissance's menu-overlay sits in GetMessageW (its window, WebView2 callbacks and its worker threads' results arrive as
+  messages); GetMessageW returned 0 (= WM_QUIT) whenever nothing was queued, SetTimer never fired, PostMessageW /
+  PostThreadMessageW / PostQuitMessage / SendMessageW were logging stubs. How: posted messages share the input queue (any
+  thread); due timers come out of PeekMessageW as WM_TIMER and DispatchMessageW calls a TIMERPROC; SendMessageW calls the window
+  procedure; GetMessageW waits (the main thread keeps pumping macOS events) and returns 0 for WM_QUIT. Old: `PELOAD_MSGQ_OLD=1`.
+  (10-20, reach-port)
+- **WebView2 on WKWebView** — webview2.m (`wv2_*`), peload.c `WV2_HANDLE`. Why: Reach Renaissance's menus are HTML / JS pages in
+  Microsoft Edge WebView2; there is no Edge runtime here (the genuine WebView2Loader.dll returned 0x80070002 and the menus quit).
+  How: LoadLibrary("WebView2Loader.dll") returns a pseudo-module whose CreateCoreWebView2EnvironmentWithOptions builds our
+  environment -> controller -> ICoreWebView2 (+ settings, event args) on a WKWebView in a borderless, transparent, floating
+  NSWindow that stands for the guest's window (its rect from SetWindowPos / MoveWindow, shown / hidden with ShowWindow,
+  click-through with WS_EX_TRANSPARENT). Navigate (a `file://///%3F/C:/...` URL becomes the prefix path, read access to all of
+  C:), ExecuteScript, AddScriptToExecuteOnDocumentCreated, PostWebMessageAsString / Json, add_WebMessageReceived,
+  NavigationStarting / Completed / ContentLoading / DOMContentLoaded; the page's `window.chrome.webview` (postMessage,
+  addEventListener("message") ...) is a document-start script on WKScriptMessageHandler. The page gets AppKit's events directly
+  (keys, mouse, Gamepad API). Shared buffers are refused (QueryInterface for Environment12 / ICoreWebView2_17): the menus fall
+  back. Unimplemented methods log "[wv2] <interface> slot N". `PELOAD_WV2_TRACE=1` logs calls, `PELOAD_WV2_SNAPSHOT=<s>` saves
+  the page as PNGs, `PELOAD_WV2_INSPECT=1` enables Safari's inspector. Old: `PELOAD_NO_WV2=1`. (10-20, reach-port)
+- **Windows of other loader processes** — xwin.c. Why: menu-overlay follows the game's window (another process: --follow "host
+  probe") by title and keeps itself over its client area; every loader process only knew its own windows. How: a process with a
+  game window publishes title, client rect (Win32 screen coordinates), shown and minimised to ~/Library/Application Support/
+  ReclaimerMac/windows/<pid>.win when they change; other processes see it as a pseudo-handle (0x7F000000 | pid) in EnumWindows,
+  FindWindowW, GetWindowTextW, GetWindowRect / GetClientRect / ClientToScreen, IsWindow / IsWindowVisible / IsIconic,
+  GetWindowThreadProcessId and SetForegroundWindow (activates that app); SetWinEventHook callbacks fire for its location
+  changes, show / hide, minimise and destroy (polled every 50 ms). Windows keep their titles (GetWindowTextW, SetWindowTextW).
+  `PELOAD_TRACE_XWIN=1` logs hooks and events; old: `PELOAD_NO_XWIN=1`. (10-20, reach-port)
+- **WM_MOVE / WM_SIZE for WebView2 windows; their real rect** — `win_sized`, `i_GetWindowRect`, `i_GetClientRect`. Why: the menus
+  moved and resized their window over the game but the page stayed 640x360 in its corner (the user's screenshot): menu-overlay
+  sizes its WebView2 controller on WM_SIZE, which SetWindowPos never sent; GetWindowRect / GetClientRect also reported the fixed
+  1280x720. How: SetWindowPos / MoveWindow track the window's rect and send WM_MOVE / WM_SIZE when it changed; GetWindowRect /
+  GetClientRect report it -- both only for windows hosting a WebView2 (the Reclaimer client's windows are unchanged); GWL_STYLE /
+  GWL_EXSTYLE are stored. Old: `PELOAD_NO_WMSIZE=1`. (10-20, reach-port)
 
 ## 8. GDI and layered windows
 
