@@ -35,7 +35,9 @@ typedef struct { uint8_t data[48]; uint32_t size; } WiRaw;
 static WiRaw g_riq[1024]; static uint32_t g_riq_n;    // records referenced by HRAWINPUT = 0x52490000 + slot
 static int64_t wi_raw_alloc(const uint8_t*d,uint32_t sz){ uint32_t slot=g_riq_n++ % 1024; memcpy(g_riq[slot].data,d,sz); g_riq[slot].size=sz; return (int64_t)(0x52490000u+slot); }
 static void* wi_target(void*reg){ return reg?reg:fg_hwnd_ext(); }
+static void wi_cursor_captured_move(int dx,int dy);   // (cursor section: a re-centring guest's captured cursor follows the mouse)
 static void wi_raw_mouse(int dx,int dy,uint16_t bflags,int16_t bdata){
+    if(dx||dy) wi_cursor_captured_move(dx,dy);
     if(!g_ri_mouse) return;
     uint8_t r[48]; memset(r,0,sizeof r); uint32_t type=0/*RIM_TYPEMOUSE*/, size=48;
     memcpy(r,&type,4); memcpy(r+4,&size,4); void*dev=(void*)0x4D53; memcpy(r+8,&dev,8);    // RAWINPUTHEADER (24 B)
@@ -91,19 +93,43 @@ static int32_t g_wi_cx=WIN_W/2, g_wi_cy=WIN_H/2;   // last client-space pointer 
 // Unattended input self-tests (PELOAD_KBM_TEST) and PELOAD_NO_SYS_CURSOR never capture or hide the real
 // macOS cursor: the guest still sees its pointer captured, but whoever is using the Mac keeps their mouse.
 static int wi_syscursor(void){ static int ok=-1; if(ok<0) ok=!(getenv("PELOAD_KBM_TEST")||getenv("PELOAD_NO_SYS_CURSOR")); return ok; }
+static int g_wi_clip_on_x; static int32_t g_wi_clip_x[4];   // (ClipCursor's rectangle, for the re-centring cursor below)
+// F1 releases the pointer from a game that has no release key of its own (2026-10-20): Reach Renaissance's host-probe holds the
+// mouse with ClipCursor in a match and re-clips it every frame, and only the Reclaimer client knew F1. For a re-centring guest
+// (g_wi_recenter, below; the Reclaimer client keeps its own F1) F1 gives the Mac its pointer back -- shown and moving freely, while
+// the guest still thinks it holds it and gets no look motion -- until a click in the window, which captures again and does not
+// reach the game. PELOAD_NO_F1_RELEASE=1 = old.
+static int g_wi_user_released;
+static void wi_sys_hold(int hold){ if(!wi_syscursor()) return; CGAssociateMouseAndMouseCursorPosition(hold?0:1);
+    if(g_wi_cursor_count<0){ if(hold) CGDisplayHideCursor(kCGDirectMainDisplay); else CGDisplayShowCursor(kCGDirectMainDisplay); } }
 static int MSABI wi_ClipCursor(const int32_t*r){
-    int want = r!=0;
-    if(want!=g_wi_captured){ g_wi_captured=want; if(wi_syscursor()) CGAssociateMouseAndMouseCursorPosition(want?0:1);
+    int want = r!=0; g_wi_clip_on_x=want && r[2]>r[0] && r[3]>r[1]; if(g_wi_clip_on_x) for(int i=0;i<4;i++) g_wi_clip_x[i]=r[i];
+    if(want!=g_wi_captured){ g_wi_captured=want;
+        if(!want && g_wi_user_released){ g_wi_user_released=0; if(wi_syscursor() && g_wi_cursor_count<0) CGDisplayHideCursor(kCGDirectMainDisplay); }   // (the game let go itself)
+        else if(!g_wi_user_released && wi_syscursor()) CGAssociateMouseAndMouseCursorPosition(want?0:1);
         if(getenv("PELOAD_TRACE_INPUT")){ char m[64]; int k=snprintf(m,sizeof m,"  [kbm] pointer %s\n",want?"captured":"released"); (void)!write(2,m,k); } }
     return 1; }
 static int MSABI wi_ShowCursor(int show){
     int before=g_wi_cursor_count; g_wi_cursor_count += show?1:-1;
-    if(!wi_syscursor()) return g_wi_cursor_count;
+    if(!wi_syscursor() || g_wi_user_released) return g_wi_cursor_count;   // (released by F1: the Mac's pointer stays visible)
     if(before>=0 && g_wi_cursor_count<0) CGDisplayHideCursor(kCGDirectMainDisplay);
     else if(before<0 && g_wi_cursor_count>=0) CGDisplayShowCursor(kCGDirectMainDisplay);
     return g_wi_cursor_count; }
 static int MSABI wi_GetCursorPos(int32_t*p){ if(p){ p[0]=g_wi_cx; p[1]=g_wi_cy; } return 1; }
-static int MSABI wi_SetCursorPos(int x,int y){ g_wi_cx=x; g_wi_cy=y; return 1; }   // (pointer stays put while captured)
+// Mouse look by re-centring (2026-10-20): Reach Renaissance's host-probe reads GetCursorPos, takes the distance from the centre
+// as the look delta and puts the cursor back with SetCursorPos, every frame, while ClipCursor holds it in the window. The
+// captured pointer never moved here (motion went to Raw Input only), so the look delta was always 0. Once a guest calls
+// SetCursorPos while the pointer is captured, captured motion moves the virtual cursor too (clamped to the ClipCursor
+// rectangle); a guest that never does (the Reclaimer client: Raw Input) sees no change. PELOAD_CURSOR_FROZEN=1 = old.
+static int g_wi_recenter;
+static int MSABI wi_SetCursorPos(int x,int y){ g_wi_cx=x; g_wi_cy=y;
+    if(g_wi_captured && !g_wi_recenter){ static int old=-1; if(old<0) old=getenv("PELOAD_CURSOR_FROZEN")?1:0; if(!old){ g_wi_recenter=1;
+            if(getenv("PELOAD_TRACE_INPUT")) (void)!write(2,"  [kbm] guest re-centres the captured cursor: captured motion moves it\n",71); } }
+    return 1; }
+static void wi_cursor_captured_move(int dx,int dy){ if(!g_wi_recenter || !g_wi_captured || g_wi_user_released) return;
+    int32_t x=g_wi_cx+dx, y=g_wi_cy+dy;
+    if(g_wi_clip_on_x){ if(x<g_wi_clip_x[0]) x=g_wi_clip_x[0]; if(x>g_wi_clip_x[2]-1) x=g_wi_clip_x[2]-1; if(y<g_wi_clip_x[1]) y=g_wi_clip_x[1]; if(y>g_wi_clip_x[3]-1) y=g_wi_clip_x[3]-1; }
+    g_wi_cx=x; g_wi_cy=y; }
 
 // ---- macOS keyCode -> Windows VK + set-1 scan code (+E0) ----
 typedef struct { uint8_t vk, sc, e0; } WiKey;
@@ -177,6 +203,10 @@ static int wi_translate(id ev){
         if(mods&(1ul<<20)) return 0;                       // Command shortcuts go to AppKit (Cmd+Q, Cmd+Tab ...)
         unsigned short kc=((unsigned short(*)(id,SEL))objc_msgSend)(ev,sel_registerName("keyCode"));
         signed char rep=type==10?((signed char(*)(id,SEL))objc_msgSend)(ev,sel_registerName("isARepeat")):0;
+        if(kc==0x7A && g_wi_recenter && (g_wi_captured||g_wi_user_released)){ static int off=-1; if(off<0) off=getenv("PELOAD_NO_F1_RELEASE")?1:0;   // F1: see g_wi_user_released
+            if(!off){ if(type==10 && !rep && !g_wi_user_released){ g_wi_user_released=1; wi_sys_hold(0);
+                    (void)!write(2,"  [kbm] F1: pointer released (click the window to capture it again)\n",68); }
+                return 1; } }
         // F2-F10 overlay keys: retired 2026-10-17 (every one is a button on the stats page) -- the keys go to the game now
         // (the client answers votes with F5). PELOAD_HB_FKEYS=1 brings them back. F1 (release the mouse) is unaffected.
         static int fk=-1; if(fk<0){ const char*e=getenv("PELOAD_HB_FKEYS"); fk=e&&atoi(e)?1:0; }
@@ -224,6 +254,13 @@ static int wi_translate(id ev){
         { static uint8_t swallowed[8]; static int old=-1; if(old<0) old=getenv("PELOAD_TITLEBAR_CLICKS")?1:0; int bi=(int)(btn&7);
           if(!down && swallowed[bi]){ swallowed[bi]=0; return 0; }
           if(down) swallowed[bi]=0;   // (AppKit's title-bar drag loop eats the release itself: never carry the flag past a press)
+          if(down && g_wi_user_released){ id win=((id(*)(id,SEL))objc_msgSend)(ev,sel_registerName("window"));   // F1-released: a click in the window captures again
+            id view=win?((id(*)(id,SEL))objc_msgSend)(win,sel_registerName("contentView")):0;
+            if(view){ typedef struct { double x,y; } P; typedef struct { double x,y,w,h; } R;
+                P p=((P(*)(id,SEL))objc_msgSend)(ev,sel_registerName("locationInWindow")); R b={0,0,0,0};
+                ((void(*)(R*,id,SEL))objc_msgSend_stret)(&b,view,sel_registerName("frame"));
+                if(b.w>0 && b.h>0 && p.x>=b.x && p.y>=b.y && p.x<b.x+b.w && p.y<b.y+b.h){ g_wi_user_released=0; if(g_wi_captured) wi_sys_hold(1); swallowed[bi]=1;
+                    (void)!write(2,"  [kbm] pointer captured again\n",31); return 0; } } }
           if(down && !old && !g_wi_captured){ id win=((id(*)(id,SEL))objc_msgSend)(ev,sel_registerName("window"));
             id view=win?((id(*)(id,SEL))objc_msgSend)(win,sel_registerName("contentView")):0;
             if(view){ typedef struct { double x,y; } P; typedef struct { double x,y,w,h; } R;
@@ -259,7 +296,7 @@ static void* wi_test_thread(void*a){ (void)a; pthread_setname_np("shim-kbmtest")
     // a match, or Reclaimer's frontend menu (PELOAD_KBM_TEST_GAMEPLAY=1: only a match, e.g. one joined from the menu)
     int wait_match=getenv("PELOAD_KBM_TEST_GAMEPLAY")!=0;
     while(!g_gameplay_t0 && (wait_match || !g_menu_ready_t0)) usleep(100000);
-    usleep(3000000);
+    { const char*d=getenv("PELOAD_KBM_TEST_DELAY"); usleep(d?(useconds_t)(atof(d)*1e6):3000000); }   // (Reach: its loadout picker is up first)
     void*h=fg_hwnd_ext(); char m[64]; int k;
     g_keydown[1]=1; wi_raw_mouse(0,0,0x1,0); wi_post(h,0x0201,1,(int64_t)((WIN_H/2)<<16|(WIN_W/2)));
     usleep(80000);

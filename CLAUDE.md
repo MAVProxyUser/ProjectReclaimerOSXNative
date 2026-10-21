@@ -279,6 +279,14 @@ code, lock+0x170; patch-addresses.md v0.9.22 table). New imports = Media Foundat
 EXPORT MP4: answered E_NOTIMPL (logging stubs return 0 = S_OK -> null call). Clipboard (same day): Win32 clipboard + GlobalAlloc
 on NSPasteboard (PELOAD_NO_CLIPBOARD = old stub, PELOAD_PASTEBOARD=<name> private pasteboard -- quiet-run / target.sh use one;
 offline test shim/tools/clipboard-test.sh). quiet-run.sh ignores RECLAIMER_JOIN: pass "reclaimer://join?server=host:port" as its args.
+Reach Renaissance (2026-10-20, shim/docs/reach-renaissance.md): Halo: Reach on MCC's haloreach.dll, same design as Reclaimer
+(bin/host-probe.exe = the game: LoadLibraryW(haloreach.dll), its own D3D11 device, ~85 in-memory engine patches). `bash shim/reach.sh
+[map] [variant] [min]` runs host-probe directly (run folder first argument, --launch-block C:\ReachRenaissance\data\launch_block_1.bin,
+--mode = a game_variants file name like slayer_054): Sword Base renders. Its exes are windows-gnu Rust (msvcrt.dll layer). Halo 3
+hooks are keyed on a module named "halo3" (haloreach.dll loads at the same 0x180000000). Since the same day: the menus (WebView2 on
+WKWebView, shim/src/webview2.m), Schannel HTTPS on LibreSSL (shim/src/schannel.c), online and relayed joins (`reach.sh servers` /
+`join`); not yet: shared buffers / OpenFileMappingW, host-probe's own HLSL (reach-renaissance.md Status). Reach depots: 1064225
+(Campaign + Firefight) + 1064226 (MP).
 play.sh's stdin feeder is `sleep 86400.<pid>` (killed when the game exits; it used to hold a caller's `| tail` for 24 h).
 Native GL helper (2026-10-17, PELOAD_GL_HELPER=1: play.sh's default, the code's default without the env is off; spawned with
 only stdio + its pipe; shim/src/glh_client.c + glhelper.c + glh_shm.h, generated glh_gen.inc /

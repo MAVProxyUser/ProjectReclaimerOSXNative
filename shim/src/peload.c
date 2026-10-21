@@ -104,6 +104,7 @@ static char* peload_cgetenv(const char*name){
 #include <mach-o/getsect.h>
 #include <mach-o/dyld.h>
 #include "rec.h"   // clip recording (rec.m, compiled beside this file): the present paths' and audio callbacks' hooks
+#include "wv2.h"   // WebView2 on WKWebView (webview2.m, compiled beside this file): Reach Renaissance's menus
 
 // ---- SEH register capture/restore (CONTEXT at rcx; Win64/ms_abi) ------------
 // seh_capture fills a CONTEXT from the caller's registers (Rip = return address,
@@ -768,7 +769,12 @@ static void*  MSABI i_VirtualAlloc(void *addr, uint64_t sz, uint32_t type, uint3
     // within 2GB of halo3" scan depends on — padding those fragments the window and the scan fails.
     uint64_t hint=(uint64_t)addr;
     uint64_t guard = (getenv("PELOAD_ALLOC_GUARD") && (hint==0 || hint>=0x200000000ULL)) ? 4096 : 0;
-    void *p=mmap(addr, want+guard, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANON, -1,0);
+    // PAGE_EXECUTE* (0x10/0x20/0x40/0x80) maps executable (2026-10-20): Reach Renaissance's host-probe allocates its jump stubs
+    // right after haloreach.dll with PAGE_EXECUTE_READWRITE and runs them; Rosetta refuses to execute a page without PROT_EXEC
+    // (SIGBUS at the stub's first byte). Every page stays readable + writable as before. PELOAD_VA_NOEXEC=1 = old (always RW).
+    static int noexec=-1; if(noexec<0) noexec=getenv("PELOAD_VA_NOEXEC")?1:0;
+    int pr=PROT_READ|PROT_WRITE; if((prot&0xf0) && !noexec) pr|=PROT_EXEC;
+    void *p=mmap(addr, want+guard, pr, MAP_PRIVATE|MAP_ANON, -1,0);
     if(getenv("PELOAD_TRACE_VA")){ char t[144]; snprintf(t,sizeof t,"  [VirtualAlloc] want=%p size=0x%llx type=0x%x -> %p (+0x%llx)\n",addr,(unsigned long long)sz,type,p==MAP_FAILED?0:p,(unsigned long long)guard); ws(t); }
     if(p!=MAP_FAILED){ va_add(p,want+guard); __atomic_add_fetch(&g_va_live,(int64_t)(want+guard),__ATOMIC_RELAXED); }
     return p==MAP_FAILED?0:p;
@@ -809,6 +815,13 @@ static int    MSABI i_GlobalMemoryStatusEx(uint8_t *ms){ if(!ms) return 0; *(uin
 
 static uint16_t* MSABI i_GetCommandLineW(void){ return g_cmdlineW; }
 #define WS2_HANDLE ((void*)0x7732000ULL)
+// LoadLibrary("xaudio2_9redist.dll" / "xaudio2_9.dll" ...) (2026-10-20): haloreach.dll's audio start loads XAudio2 by name and
+// takes its exports with GetProcAddress (halo3 only reached it through its delay imports). The genuine redist DLL sat in MCC's
+// MCC\Binaries\Win64 and loaded as a guest: it recursed into the engine until the stack ran out. Now an XAudio2 load returns
+// this handle and GetProcAddress on it gives the same functions the import binder does (xa_resolve: our CoreAudio XAudio2).
+// PELOAD_XA_REALDLL=1 = old (load the genuine DLL).
+#define XA_HANDLE ((void*)0x7733000ULL)
+#define WV2_HANDLE ((void*)0x7734000ULL)   // LoadLibrary("WebView2Loader.dll"): our WebView2 on WKWebView (webview2.m)
 static int name_is_ws2(const char*s); static int name_is_ws2_w(const uint16_t*w); // fwd
 // Loaded guest DLL by file name (case-insensitive, with or without a directory / ".dll").
 static uint8_t* guest_mod_by_name_w(const uint16_t*n){ if(!n) return 0; char a[512]; int i=0; for(; n[i]&&i<511;i++) a[i]=(char)(n[i]<128?n[i]:'?'); a[i]=0;
@@ -858,9 +871,12 @@ static void pipeio_log(const char*who,int fd,uint32_t n,long k,const void*buf){ 
     struct stat st; if(fstat(fd,&st) || !(S_ISSOCK(st.st_mode)||S_ISFIFO(st.st_mode))) return;
     char m[200]; int q=snprintf(m,sizeof m,"  [pipeio] %s fd %d n %u -> %ld '",who,fd,n,k); for(long i=0;i<k && i<48 && q<190;i++){ char c=((const char*)buf)[i]; m[q++]=(c>=32&&c<127)?c:'.'; }
     m[q++]='\''; m[q++]='\n'; (void)!write(2,m,(size_t)q); }
+// Gameplay start (g_gameplay_t0: scripted input, capture windows, the walker ...) is read from the guest's own log: the Reclaimer
+// client's "gameplay presentation ready", or Reach Renaissance host-probe's "load fraction 1.000" (2026-10-20: its map finished loading).
+#define GAMEPLAY_MARK(b,n) (memmem((b),(n),"gameplay presentation ready",27) || memmem((b),(n),"load fraction 1.000",19))
 static int    MSABI i_WriteFile(void *h, const void *buf, uint32_t n, uint32_t *wr, void *ov){
     (void)ov; intptr_t hv=(intptr_t)h;
-    if(!g_gameplay_t0 && buf && n>20 && memmem(buf,n,"gameplay presentation ready",27)) g_gameplay_t0=mono_s();
+    if(!g_gameplay_t0 && buf && n>20 && GAMEPLAY_MARK(buf,n)) g_gameplay_t0=mono_s();
     if(!g_menu_ready_t0 && buf && n>20 && memmem(buf,n,"Menu loading screen finished",28)) g_menu_ready_t0=mono_s();
     if(buf && n>20 && memmem(buf,n,"Carnage report opened",21)) __atomic_add_fetch(&g_games_ended,1,__ATOMIC_SEQ_CST);
     if(pipe_is(hv)) return pipe_write(h,buf,n,wr);
@@ -903,7 +919,7 @@ static int    MSABI i_WriteFile(void *h, const void *buf, uint32_t n, uint32_t *
     return (fd>=0 || hv==1||hv==2||hv==3) ? 1 : 0; }
 static int    MSABI i_WriteConsoleW(void *h, const uint16_t *s, uint32_t n, uint32_t *wr, void *rsv){
     (void)rsv; int fd=(h==(void*)3)?2:1;
-    if(!g_gameplay_t0 && s && n>20){ char a[512]; uint32_t m=n<511?n:511; for(uint32_t i=0;i<m;i++) a[i]=(s[i]<128)?(char)s[i]:'?'; if(memmem(a,m,"gameplay presentation ready",27)) g_gameplay_t0=mono_s(); }
+    if(!g_gameplay_t0 && s && n>20){ char a[512]; uint32_t m=n<511?n:511; for(uint32_t i=0;i<m;i++) a[i]=(s[i]<128)?(char)s[i]:'?'; if(GAMEPLAY_MARK(a,m)) g_gameplay_t0=mono_s(); }
     if(!g_menu_ready_t0 && s && n>20){ char a[512]; uint32_t m=n<511?n:511; for(uint32_t i=0;i<m;i++) a[i]=(s[i]<128)?(char)s[i]:'?'; if(memmem(a,m,"Menu loading screen finished",28)) g_menu_ready_t0=mono_s(); }
     // UTF-16 -> UTF-8, written in one go and passed to the live event feed (PELOAD_CONSOLE_ASCII: the old copy, one
     // write per character with '?' for anything non-ASCII)
@@ -2157,6 +2173,14 @@ static void MSABI ctx_OMSetRenderTargets(void*t,uint32_t num,void*const*rtvs,voi
     for(uint32_t i=num;i<8;i++){ g_rst.rtvs[i]=0; g_rst.rtvv[i]=0; }
     g_rst.rtv=g_rst.rtvs[0];
     { D3DObj*d=(D3DObj*)dsv; g_rst.dsv=(d&&d->data)?(D3DObj*)d->data:d; } }
+// OMSetRenderTargetsAndUnorderedAccessViews (vtable 34; 2026-10-20): haloreach.dll binds some passes' targets with it. It was the
+// do-nothing default, so those draws went to whatever the previous OMSetRenderTargets left bound. Render targets + depth are
+// set as by OMSetRenderTargets (NumRTVs = D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL keeps them); pixel-shader UAVs are not
+// bound here (noted once with PELOAD_TRACE_D3DGL). PELOAD_OM_UAV_OLD=1 = old (ignored).
+static void MSABI ctx_OMSetRenderTargetsAndUAVs(void*t,uint32_t nrtv,void*const*rtvs,void*dsv,uint32_t uavstart,uint32_t nuav,void*const*uavs,const uint32_t*cnt){ (void)uavstart;(void)uavs;(void)cnt;
+    static int old=-1; if(old<0) old=getenv("PELOAD_OM_UAV_OLD")?1:0; if(old) return;
+    if(nrtv!=0xFFFFFFFFu) ctx_OMSetRenderTargets(t,nrtv,rtvs,dsv);
+    if(nuav && nuav!=0xFFFFFFFFu && getenv("PELOAD_TRACE_D3DGL")){ static int n; if(!n++) ws("  [d3dgl] OMSetRenderTargetsAndUnorderedAccessViews: pixel-shader UAVs not bound\n"); } }
 static void MSABI ctx_RSSetViewports(void*t,uint32_t num,const void*vps){ (void)t; if(num&&vps){ const float*f=vps; g_rst.vp_x=(int)f[0]; g_rst.vp_y=(int)f[1]; g_rst.vp_w=(int)f[2]; g_rst.vp_h=(int)f[3];
     g_rst.vp_zn=f[4]; g_rst.vp_zf=f[5]; g_rst.vp_set=1; } }
 static void MSABI ctx_OMSetBlendState(void*t,void*bs,const float*bf,uint32_t mask){ (void)t;(void)mask; g_rst.blend=bs;
@@ -2361,7 +2385,7 @@ static void d3d_init(void){
     x[7]=(void*)ctx_VSSetConstantBuffers; x[9]=(void*)ctx_PSSetShader; x[11]=(void*)ctx_VSSetShader; x[16]=(void*)ctx_PSSetConstantBuffers;
     x[8]=(void*)ctx_PSSetShaderResources; x[17]=(void*)ctx_IASetInputLayout; x[18]=(void*)ctx_IASetVertexBuffers;
     x[25]=(void*)ctx_VSSetShaderResources;   // VS-stage SRVs (vertex-pulling geometry source)
-    x[19]=(void*)ctx_IASetIndexBuffer; x[24]=(void*)ctx_IASetPrimitiveTopology; x[33]=(void*)ctx_OMSetRenderTargets; x[44]=(void*)ctx_RSSetViewports;
+    x[19]=(void*)ctx_IASetIndexBuffer; x[24]=(void*)ctx_IASetPrimitiveTopology; x[33]=(void*)ctx_OMSetRenderTargets; x[34]=(void*)ctx_OMSetRenderTargetsAndUAVs; x[44]=(void*)ctx_RSSetViewports;
     x[35]=(void*)ctx_OMSetBlendState; x[36]=(void*)ctx_OMSetDepthStencilState; x[43]=(void*)ctx_RSSetState; x[45]=(void*)ctx_RSSetScissorRects;
     x[10]=(void*)ctx_PSSetSamplers; x[26]=(void*)ctx_VSSetSamplers;
     x[27]=(void*)ctx_Begin; x[28]=(void*)ctx_End; x[29]=(void*)ctx_GetData;   // ID3D11Asynchronous (queries)
@@ -2899,13 +2923,23 @@ static int MSABI i_ws2_connect(WSASOCK s,const void*name,int nl){ struct sockadd
         return -1; }
     net_tracef("[net] connect(fd=%d,%s:%d) -> OK\n",(int)s,ips,port);
     return 0; }
-static void udp_tracef(const char*dir,WSASOCK s,const struct sockaddr_storage*ss,int len){ if(!getenv("PELOAD_TRACE_UDP")) return;
+static void udp_tracef(const char*dir,WSASOCK s,const struct sockaddr_storage*ss,const char*buf,int len){ if(!getenv("PELOAD_TRACE_UDP")) return;
     char ip[64]="?"; int port=0; if(ss->ss_family==AF_INET){ const struct sockaddr_in*si=(const void*)ss; inet_ntop(AF_INET,&si->sin_addr,ip,sizeof ip); port=ntohs(si->sin_port);}
     int lp=0; { struct sockaddr_in me; socklen_t ml=sizeof me; if(getsockname((int)s,(struct sockaddr*)&me,&ml)==0) lp=ntohs(me.sin_port);}
-    char b[160]; int k=snprintf(b,sizeof b,"  [udp] %s fd=%d local:%d %s %s:%d len=%d\n",dir,(int)s,lp,strcmp(dir,"TX")?"<-":"->",ip,port,len); (void)!write(2,b,k); }
-static int MSABI i_ws2_sendto(WSASOCK s,const char*buf,int len,int fl,const void*to,int tl){ struct sockaddr_storage ss; if(to)peer_gip_rec((int)s,to,tl); t_sa_send=1; int bl=to?sa_w2b(to,tl,&ss):0; t_sa_send=0; ssize_t r=sendto((int)s,buf,len,fl,bl?(struct sockaddr*)&ss:0,bl); if(r<0){ws2_err(errno);if(getenv("PELOAD_TRACE_UDP")){char b[96];int k=snprintf(b,sizeof b,"  [udp] TX fd=%d FAIL errno=%d\n",(int)s,errno);(void)!write(2,b,k);}return -1;} if(bl)udp_tracef("TX",s,&ss,(int)r); return (int)r; }
+    char hd[40]; int hn=0; for(int i=0;buf&&i<len&&i<16;i++){ unsigned char c=(unsigned char)buf[i]; hd[hn++]=(c>=32&&c<127)?(char)c:'.'; } hd[hn]=0;   // the first bytes: RR-RDV1 / RR-RLY1 tags
+    char b[200]; int k=snprintf(b,sizeof b,"  [udp] %s fd=%d local:%d %s %s:%d len=%d |%s|\n",dir,(int)s,lp,dir[0]=='T'?"->":"<-",ip,port,len,hd); (void)!write(2,b,k); }
+// PELOAD_UDP_BLOCK=<port>[,<port>..] (test aid): datagrams to and from those remote ports are dropped (a send reports success),
+// as if the NATs between this process and that peer never opened while the master stays reachable -- forces Reach
+// Renaissance's guest onto the master's relay against a local host (shim/docs/reach-renaissance.md).
+static int udp_blocked(const struct sockaddr_storage*ss){ static int nb=-1; static uint16_t bp[8];
+    if(nb<0){ int n=0; const char*e=getenv("PELOAD_UDP_BLOCK"); while(e&&*e&&n<8){ int p=atoi(e); if(p>0&&p<65536) bp[n++]=(uint16_t)p; e=strchr(e,','); if(e) e++; } nb=n; }
+    if(!nb||ss->ss_family!=AF_INET) return 0; uint16_t p=ntohs(((const struct sockaddr_in*)ss)->sin_port); for(int i=0;i<nb;i++) if(bp[i]==p) return 1; return 0; }
+static int MSABI i_ws2_sendto(WSASOCK s,const char*buf,int len,int fl,const void*to,int tl){ struct sockaddr_storage ss; if(to)peer_gip_rec((int)s,to,tl); t_sa_send=1; int bl=to?sa_w2b(to,tl,&ss):0; t_sa_send=0; if(bl && udp_blocked(&ss)){ udp_tracef("TX-BLOCKED",s,&ss,buf,len); return len; }
+    ssize_t r=sendto((int)s,buf,len,fl,bl?(struct sockaddr*)&ss:0,bl); if(r<0){ws2_err(errno);if(getenv("PELOAD_TRACE_UDP")){char b[96];int k=snprintf(b,sizeof b,"  [udp] TX fd=%d FAIL errno=%d\n",(int)s,errno);(void)!write(2,b,k);}return -1;} if(bl)udp_tracef("TX",s,&ss,buf,(int)r); return (int)r; }
 static __thread uint32_t t_rx_ip; static __thread uint16_t t_rx_port;   // the last datagram's source on this thread (stats.c voice source tally)
-static int MSABI i_ws2_recvfrom(WSASOCK s,char*buf,int len,int fl,void*from,int*fl2){ struct sockaddr_storage ss; socklen_t sl=sizeof ss; ssize_t r=recvfrom((int)s,buf,len,fl,(struct sockaddr*)&ss,&sl); if(r<0){ws2_err(errno);return -1;} if(r>=0)udp_tracef("RX",s,&ss,(int)r);
+static int MSABI i_ws2_recvfrom(WSASOCK s,char*buf,int len,int fl,void*from,int*fl2){ struct sockaddr_storage ss; socklen_t sl; ssize_t r;
+    for(;;){ sl=sizeof ss; r=recvfrom((int)s,buf,len,fl,(struct sockaddr*)&ss,&sl); if(r<0){ws2_err(errno);return -1;} if(!udp_blocked(&ss)) break; udp_tracef("RX-BLOCKED",s,&ss,buf,(int)r); }
+    udp_tracef("RX",s,&ss,buf,(int)r);
     if(ss.ss_family==AF_INET){ t_rx_ip=((struct sockaddr_in*)&ss)->sin_addr.s_addr; t_rx_port=ntohs(((struct sockaddr_in*)&ss)->sin_port); }
     { extern void st_voice_wiretally(const char*buf,long n,uint32_t ip,uint16_t port); if(r>=8 && ss.ss_family==AF_INET && (buf[0]=='M'||buf[0]=='L') && buf[1]=='C' && buf[3]=='1')
         st_voice_wiretally(buf,(long)r,((struct sockaddr_in*)&ss)->sin_addr.s_addr,ntohs(((struct sockaddr_in*)&ss)->sin_port)); }
@@ -3080,7 +3114,7 @@ static int MSABI i_ws2_WSASendMsg(WSASOCK s,uint8_t*msg,uint32_t flags,uint32_t*
     struct sockaddr_storage ss; t_sa_send=1; int bl=name?sa_w2b(name,namelen,&ss):0; t_sa_send=0;
     ssize_t r=sendto((int)s,gbuf,tot,0,bl?(struct sockaddr*)&ss:0,bl);
     if(r<0){ ws2_err(errno); if(ov){*(uint64_t*)(ov+0)=0;*(uint64_t*)(ov+8)=0;} return -1; }
-    if(sent)*sent=(uint32_t)r; if(bl)udp_tracef("TX",s,&ss,(int)r);
+    if(sent)*sent=(uint32_t)r; if(bl)udp_tracef("TX",s,&ss,gbuf,(int)r);
     if(ov){ *(uint64_t*)(ov+0)=0; *(uint64_t*)(ov+8)=(uint64_t)r; iocp_post_fd((int)s,(uint64_t)r,ov); }
     return 0; }
 static int MSABI i_ws2_WSARecvMsg(WSASOCK s,uint8_t*msg,uint32_t*recvd,uint8_t*ov,void*cr){
@@ -3100,7 +3134,7 @@ static int MSABI i_ws2_WSARecvMsg(WSASOCK s,uint8_t*msg,uint32_t*recvd,uint8_t*o
     if(recvd)*recvd=(uint32_t)r;
     if(name&&namelenp){ int wl=*namelenp; sa_b2w((struct sockaddr*)&ss,name,&wl); *namelenp=wl; peer_gip_restore((int)s,name); }
     *(uint32_t*)(msg+48)=0; /* dwFlags out */ *(uint32_t*)(msg+32)=0; /* Control.len out (no cmsg) */
-    udp_tracef("RX",s,&ss,(int)r);
+    udp_tracef("RX",s,&ss,rbuf,(int)r);
     if(ov){ *(uint64_t*)(ov+0)=0; *(uint64_t*)(ov+8)=(uint64_t)r; iocp_post_fd((int)s,(uint64_t)r,ov); }
     return 0; }
 static void* ws2_real_name(const char*n){
@@ -3441,7 +3475,7 @@ static uint32_t MSABI i_GetTickCount(void){ return (uint32_t)(mach_absolute_time
 // NtWriteFile: route writes to our stdin/out/err pseudo-handles (1/2/3)
 static int MSABI i_NtWriteFile(void*h,void*ev,void*apc,void*apcctx,void*iosb,const void*buf,uint32_t len,void*off,void*key){
     (void)ev;(void)apc;(void)apcctx;(void)key; intptr_t hv=(intptr_t)h;
-    if(!g_gameplay_t0 && buf && len>20 && memmem(buf,len,"gameplay presentation ready",27)) g_gameplay_t0=mono_s();
+    if(!g_gameplay_t0 && buf && len>20 && GAMEPLAY_MARK(buf,len)) g_gameplay_t0=mono_s();
     { extern double g_menu_ready_t0; if(!g_menu_ready_t0 && buf && len>20 && memmem(buf,len,"Menu loading screen finished",28)) g_menu_ready_t0=mono_s(); }
     if(buf && len>20 && memmem(buf,len,"Carnage report opened",21)) __atomic_add_fetch(&g_games_ended,1,__ATOMIC_SEQ_CST);
     int fd = (hv==2)?1 : (hv==3)?2 : (hv>=0x1000)?(int)(hv-0x1000) : -1;
@@ -3497,7 +3531,10 @@ static int    MSABI i_AreFileApisANSI(void){ return 1; }
 // lpszClassName at +64.
 typedef int64_t (MSABI *WNDPROC_t)(void*,uint32_t,uint64_t,int64_t);
 static struct { int used; uint16_t atom; char name[64]; WNDPROC_t wndproc; } g_wcls[64]; static int g_nwcls; static uint16_t g_atomseq=0xC000;
-typedef struct { uint32_t magic; WNDPROC_t wndproc; int64_t userdata; int64_t extra[16]; int x,y,w,h; uint32_t style, exstyle; } WWin;
+typedef struct { uint32_t magic; WNDPROC_t wndproc; int64_t userdata; int64_t extra[16]; int x,y,w,h; uint32_t style, exstyle; uint16_t title[128]; } WWin;
+// xwin.c (windows of other loader processes; included further down)
+static int xwin_is(void*h); static int xwin_rect(void*h,int*x,int*y,int*w,int*hh,int*vis,int*mini,int*pid); static void xwin_poll(void); static void xwin_publish(void);
+static void xwin_activate(int pid); static int xwin_enum(int(MSABI*cb)(void*,int64_t),int64_t lp);
 #define WWIN_MAGIC 0x57494E44u
 static WNDPROC_t wcls_find(const void*cls){ uintptr_t v=(uintptr_t)cls;
     if(v>0xffff){ char nm[64]; const uint16_t*w=cls; int i=0; for(; w[i]&&i<63;i++) nm[i]=(char)(w[i]&0xff); nm[i]=0;
@@ -3539,6 +3576,7 @@ static void*  MSABI i_CreateWindowExW(uint32_t ex,const void*cls,const void*name
     WWin* win=calloc(1,sizeof *win); if(!win) return (void*)0x4857;
     win->magic=WWIN_MAGIC; win->wndproc=wcls_find(cls); win->x=x; win->y=y; win->w=w>0?w:1280; win->h=h>0?h:720;
     win->style=style; win->exstyle=ex; g_last_hwnd=win;
+    { const uint16_t*wn=name; for(int i=0;wn&&wn[i]&&i<127;i++) win->title[i]=wn[i]; }   // (GetWindowTextW; published to other processes, xwin.c)
     if((style&0x10000000/*WS_VISIBLE*/) && fg_can_activate(win)) g_shown_hwnd=win;
     { char t[96]={0}; const uint16_t*wn=name; for(int i=0;wn&&wn[i]&&i<95;i++) t[i]=(char)(wn[i]&0x7f);
       char c[96]={0}; if((uintptr_t)cls>0x10000){ const uint16_t*wc=cls; for(int i=0;wc[i]&&i<95;i++) c[i]=(char)(wc[i]&0x7f); } else snprintf(c,sizeof c,"#atom%u",(unsigned)(uintptr_t)cls);
@@ -3553,14 +3591,14 @@ static void*  MSABI i_CreateWindowExW(uint32_t ex,const void*cls,const void*name
     }
     ws("  [CreateWindowExW] real HWND\n"); return win; }
 static void lay_show(void*h,int shown);   // layered windows (below)
-static int    MSABI i_DestroyWindow(void*h){ lay_show(h,-1); return 1; }
+static int    MSABI i_DestroyWindow(void*h){ lay_show(h,-1); wv2_hwnd_changed(h,0); return 1; }
 static int64_t MSABI i_DefWindowProcW(void*h,uint32_t m,uint64_t wp,int64_t lp){ (void)h;(void)wp;(void)lp; if(m==0x0081/*WM_NCCREATE*/) return 1; return 0; }
 static int    MSABI i_ShowWindow(void*h,int c){ int act=(c==1||c==2||c==3||c==5||c==9||c==10)||(getenv("PELOAD_FG_LASTSHOWN")&&c);
     lay_show(h,c!=0);
     if(act && fg_can_activate(h)) g_shown_hwnd=h;
     // log state changes per window (the menu runtime re-hides two overlay windows every frame)
     { static void*lh[16]; static int lc[16], n; int i; for(i=0;i<n && lh[i]!=h;i++){} if(i==n && n<16){ lh[n]=h; lc[n++]=-1; }
-      if(i<16 && lc[i]!=c){ lc[i]=c; char m[80]; int k=snprintf(m,sizeof m,"  [ShowWindow] hwnd=%p cmd=%d\n",h,c); (void)!write(2,m,k); } } return 1; }
+      if(i<16 && lc[i]!=c){ lc[i]=c; char m[80]; int k=snprintf(m,sizeof m,"  [ShowWindow] hwnd=%p cmd=%d\n",h,c); (void)!write(2,m,k); } } wv2_hwnd_changed(h,c!=0); return 1; }
 static int    MSABI i_UpdateWindow(void*h){ (void)h; return 1; }
 // The engine's present loop calls MsgWaitForMultipleObjectsEx and only keeps
 // looping (rendering + presenting each frame) when it returns WAIT_TIMEOUT
@@ -3660,16 +3698,55 @@ static void msg_fill(void*m,void*h,uint32_t msg,uint64_t wp,int64_t lp){ if(!m)r
 typedef struct { void* hwnd; uint32_t msg; uint64_t wp; int64_t lp; } WiMsgFwd;
 static int wi_peek_fwd(WiMsgFwd*out,int remove);   // wininput.c (keyboard/mouse queue)
 static void cocoa_pump(void);
-static int    MSABI i_PeekMessageW(void*m,void*h,uint32_t f1,uint32_t f2,uint32_t r){ (void)h;(void)f1;(void)f2; inject_activation_once();
+// The window under PELOAD_PRESENT used to be made only in MsgWaitForMultipleObjectsEx (the Reclaimer worker's wait); a program
+// whose main thread pumps with PeekMessageW / GetMessageW (Reach Renaissance's host-probe, 2026-10-20) never got one, so its frames
+// rendered offscreen and nothing showed. Now the first pump on the main thread makes it too (idempotent, as there).
+static void present_window_from_pump(void){ static int done; if(done || !pthread_main_np() || !getenv("PELOAD_PRESENT")) return; done=1; cocoa_make_gl_window_i(1280,720); }
+// ---- the message queue a GetMessageW loop needs (2026-10-20, Reach Renaissance's menu-overlay) ----
+// SetTimer never fired, PostMessageW / PostThreadMessageW / PostQuitMessage / SendMessageW were logging stubs, and GetMessageW
+// returned 0 (= WM_QUIT) whenever nothing was queued, so a program whose UI thread sits in GetMessageW (menu-overlay: its window,
+// WebView2 callbacks and worker threads' results all arrive as messages) left its loop at once. Now: posted messages share the
+// input queue (wi_post, any thread); timers (SetTimer / KillTimer, window or thread timers) come out of PeekMessageW as WM_TIMER
+// when due, and DispatchMessageW calls a timer's TIMERPROC; SendMessageW calls the window procedure; GetMessageW waits for a
+// message (the main thread keeps pumping macOS events meanwhile) and returns 0 for WM_QUIT. PELOAD_MSGQ_OLD=1 = old.
+static void wi_post(void*h,uint32_t m,uint64_t wp,int64_t lp);   // fwd (wininput.c: the message queue)
+static int msgq_on(void){ static int on=-1; if(on<0) on=!getenv("PELOAD_MSGQ_OLD"); return on; }
+typedef struct { void*h; uintptr_t id; double every, due; void*fn; int on; } WTimer;
+static WTimer g_wtm[64]; static pthread_mutex_t g_wtm_mx=PTHREAD_MUTEX_INITIALIZER; static uintptr_t g_wtm_next=0x7F00;
+static void*  MSABI i_SetTimer(void*h,uintptr_t id,uint32_t el,void*fn){ if(!msgq_on()) return (void*)id;
+    pthread_mutex_lock(&g_wtm_mx); if(!h) id=id?id:g_wtm_next++;   // (a thread timer gets its id from us)
+    int k=-1; for(int i=0;i<64;i++) if(g_wtm[i].on && g_wtm[i].h==h && g_wtm[i].id==id){ k=i; break; }
+    if(k<0) for(int i=0;i<64;i++) if(!g_wtm[i].on){ k=i; break; }
+    if(k>=0){ double e=(el<10?10:el)/1000.0; g_wtm[k]=(WTimer){h,id,e,mono_s()+e,fn,1}; }
+    pthread_mutex_unlock(&g_wtm_mx); return k>=0?(void*)(id?id:1):0; }
+static int    MSABI i_KillTimer(void*h,uintptr_t id){ if(!msgq_on()) return 1; int ok=0; pthread_mutex_lock(&g_wtm_mx);
+    for(int i=0;i<64;i++) if(g_wtm[i].on && g_wtm[i].h==h && g_wtm[i].id==id){ g_wtm[i].on=0; ok=1; } pthread_mutex_unlock(&g_wtm_mx); return ok; }
+static int timer_take(void*m,int remove){ if(!msgq_on()) return 0; double now=mono_s(); int k=-1; pthread_mutex_lock(&g_wtm_mx);
+    for(int i=0;i<64;i++) if(g_wtm[i].on && g_wtm[i].due<=now && (k<0||g_wtm[i].due<g_wtm[k].due)) k=i;
+    if(k>=0){ msg_fill(m,g_wtm[k].h,0x0113/*WM_TIMER*/,g_wtm[k].id,(int64_t)(intptr_t)g_wtm[k].fn); if(remove) g_wtm[k].due=now+g_wtm[k].every; }
+    pthread_mutex_unlock(&g_wtm_mx); return k>=0; }
+static double timer_wait(void){ double now=mono_s(), d=0.005; pthread_mutex_lock(&g_wtm_mx);
+    for(int i=0;i<64;i++) if(g_wtm[i].on && g_wtm[i].due-now<d) d=g_wtm[i].due-now; pthread_mutex_unlock(&g_wtm_mx); return d<0?0:d; }
+static int    MSABI i_PostMessageW(void*h,uint32_t msg,uint64_t wp,int64_t lp){ if(msgq_on()) wi_post(h,msg,wp,lp); return 1; }
+static int    MSABI i_PostThreadMessageW(uint32_t tid,uint32_t msg,uint64_t wp,int64_t lp){ (void)tid; if(msgq_on()) wi_post(0,msg,wp,lp); return 1; }
+static void   MSABI i_PostQuitMessage(int code){ if(msgq_on()) wi_post(0,0x0012/*WM_QUIT*/,(uint64_t)(int64_t)code,0); }
+static int64_t MSABI i_SendMessageW(void*h,uint32_t msg,uint64_t wp,int64_t lp){ WWin*w=h; if(msgq_on() && w && w->magic==WWIN_MAGIC && w->wndproc) return w->wndproc(w,msg,wp,lp); return 0; }
+static int wv2_active_x(void){ return wv2_active(); }   // (webview2.m: a WebView2 window exists in this process)
+static void wv2_pump_x(void){ wv2_pump(); }    // (its event pump: AppKit gets every event -- the page handles keys and the mouse)
+static int    MSABI i_PeekMessageW(void*m,void*h,uint32_t f1,uint32_t f2,uint32_t r){ (void)h;(void)f1;(void)f2; inject_activation_once(); present_window_from_pump();
     if(g_inji<g_injn){ msg_fill(m,g_injmsg[g_inji].hwnd,g_injmsg[g_inji].msg,g_injmsg[g_inji].wp,g_injmsg[g_inji].lp); if(r&1/*PM_REMOVE*/) g_inji++; return 1; }
     WiMsgFwd e; if(wi_peek_fwd(&e,r&1)){ msg_fill(m,e.hwnd,e.msg,e.wp,e.lp); return 1; }
-    if(pthread_main_np()){ static double last; double now=mono_s(); if(now-last>0.002){ last=now; cocoa_pump(); if(wi_peek_fwd(&e,r&1)){ msg_fill(m,e.hwnd,e.msg,e.wp,e.lp); return 1; } } }
+    if(timer_take(m,r&1)) return 1;
+    if(pthread_main_np()){ static double last; double now=mono_s(); if(now-last>0.002){ last=now; if(wv2_active_x()) wv2_pump_x(); else cocoa_pump(); xwin_poll(); if(wi_peek_fwd(&e,r&1)){ msg_fill(m,e.hwnd,e.msg,e.wp,e.lp); return 1; } } }
     return 0; }
-static int    MSABI i_GetMessageW(void*m,void*h,uint32_t f1,uint32_t f2){ (void)h;(void)f1;(void)f2; inject_activation_once();
+static int    MSABI i_GetMessageW(void*m,void*h,uint32_t f1,uint32_t f2){ (void)h;(void)f1;(void)f2; inject_activation_once(); present_window_from_pump();
+    if(msgq_on()){ for(;;){ if(i_PeekMessageW(m,h,f1,f2,1)) return *(uint32_t*)((uint8_t*)m+8)==0x0012?0:1;
+            double w=timer_wait(); if(w>0) usleep((useconds_t)(w*1e6)); } }
     if(g_inji<g_injn){ msg_fill(m,g_injmsg[g_inji].hwnd,g_injmsg[g_inji].msg,g_injmsg[g_inji].wp,g_injmsg[g_inji].lp); g_inji++; return 1; }
     WiMsgFwd e; if(wi_peek_fwd(&e,1)){ msg_fill(m,e.hwnd,e.msg,e.wp,e.lp); return 1; }
     return 0; }
 static int64_t MSABI i_DispatchMessageW(const void*m){ if(!m) return 0; const uint8_t*p=m; WWin* w=*(WWin**)(p+0); uint32_t msg=*(uint32_t*)(p+8); uint64_t wp=*(uint64_t*)(p+16); int64_t lp=*(int64_t*)(p+24);
+    if(msg==0x0113 && lp && msgq_on()){ ((void(MSABI*)(void*,uint32_t,uint64_t,uint32_t))(intptr_t)lp)(w,msg,wp,(uint32_t)i_GetTickCount()); return 0; }   // TIMERPROC
     if(w&&w->magic==WWIN_MAGIC&&w->wndproc){ if(getenv("PELOAD_TRACE_MSG")){ char b[64]; int k=snprintf(b,sizeof b,"  [msg] dispatch 0x%x -> wndproc\n",msg); ws(b);} return w->wndproc(w,msg,wp,lp); } return 0; }
 static int    MSABI i_TranslateMessage(const void*m){ (void)m; return 0; }
 static void*  MSABI i_DefRawHandle(void){ return (void*)0x4857; }
@@ -3707,21 +3784,36 @@ static int    MSABI i_EnumDisplayMonitors(void*dc,const void*clip,void*cb,int64_
     int (__attribute__((ms_abi)) *fn)(void*,void*,int32_t*,int64_t)=cb;
     void*mon=(void*)0x4D01;   // the handle MonitorFromWindow/Point/Rect return
     fn(mon,dc,rc,data); return 1; }
-static int    MSABI i_GetClientRect(void*h,int32_t*r){ (void)h; if(r){r[0]=0;r[1]=0;r[2]=WIN_W;r[3]=WIN_H;} return 1; }
-static int    MSABI i_GetWindowRect(void*h,int32_t*r){ (void)h; if(r){r[0]=0;r[1]=0;r[2]=WIN_W;r[3]=WIN_H;} return 1; }
+// (a window hosting a WebView2 reports its tracked rect -- SetWindowPos / MoveWindow keep it; every other window the old fixed one)
+static int    MSABI i_GetClientRect(void*h,int32_t*r){ WWin*w=h; if(r&&xwin_is(h)){ int ww=0,hh=0; if(!xwin_rect(h,0,0,&ww,&hh,0,0,0)) return 0; r[0]=0;r[1]=0;r[2]=ww;r[3]=hh; return 1; } if(r&&w&&w->magic==WWIN_MAGIC&&wv2_owns(h)){ r[0]=0;r[1]=0;r[2]=w->w;r[3]=w->h; return 1; } if(r){r[0]=0;r[1]=0;r[2]=WIN_W;r[3]=WIN_H;} return 1; }
+static int    MSABI i_GetWindowRect(void*h,int32_t*r){ WWin*w=h; if(r&&xwin_is(h)){ int x=0,y=0,ww=0,hh=0; if(!xwin_rect(h,&x,&y,&ww,&hh,0,0,0)) return 0; r[0]=x;r[1]=y;r[2]=x+ww;r[3]=y+hh; return 1; } if(r&&w&&w->magic==WWIN_MAGIC&&wv2_owns(h)){ r[0]=w->x;r[1]=w->y;r[2]=w->x+w->w;r[3]=w->y+w->h; return 1; } if(r){r[0]=0;r[1]=0;r[2]=WIN_W;r[3]=WIN_H;} return 1; }
 static void lay_pos(void*h,int x,int y,int setpos,int alpha); static void lay_zorder(void*h,void*after);   // layered windows (below)
 // SetWindowPos: only its show/hide flags and the move matter here (the client hides and moves its layered screens with it)
+// WM_MOVE / WM_SIZE after a window hosting a WebView2 moved or changed size (2026-10-20): Windows sends them (WM_WINDOWPOSCHANGED -> DefWindowProc);
+// menu-overlay resizes its WebView2 to its client area on WM_SIZE -- without it the page stayed 640x360 in the corner of the game.
+// Only for WebView2 windows (the Reclaimer client never got them). PELOAD_NO_WMSIZE=1 = old.
+static void win_sized(WWin*ww,int ox,int oy,int ow,int oh){ if(!ww->wndproc || !wv2_owns(ww) || getenv("PELOAD_NO_WMSIZE")) return;
+    if(ww->x!=ox || ww->y!=oy) ww->wndproc(ww,0x0003/*WM_MOVE*/,0,(int64_t)(((uint32_t)(uint16_t)ww->y<<16)|(uint16_t)ww->x));
+    if(ww->w!=ow || ww->h!=oh) ww->wndproc(ww,0x0005/*WM_SIZE*/,0/*SIZE_RESTORED*/,(int64_t)(((uint32_t)(uint16_t)ww->h<<16)|(uint16_t)ww->w)); }
 static int    MSABI i_SetWindowPos(void*h,void*after,int x,int y,int w,int ht,uint32_t f){ (void)w;(void)ht;
     if(getenv("PELOAD_TRACE_LAYERED")){ char m[160]; int k=snprintf(m,sizeof m,"  [layered] SetWindowPos %p after %p %d,%d %dx%d flags 0x%x\n",h,after,x,y,w,ht,f); (void)!write(2,m,k); }
     if(!getenv("PELOAD_LAYERED_NOSWP")){ if(f&0x80/*SWP_HIDEWINDOW*/) lay_show(h,0); else if(f&0x40/*SWP_SHOWWINDOW*/) lay_show(h,1);
         if(!(f&0x2/*SWP_NOMOVE*/)) lay_pos(h,x,y,1,-1);
         if(!(f&0x4/*SWP_NOZORDER*/) && !getenv("PELOAD_LAYERED_NOZ")) lay_zorder(h,after); }
+    { WWin*ww=h; int ow=0,oh=0,ox=0,oy=0; if(ww&&ww->magic==WWIN_MAGIC){ ox=ww->x; oy=ww->y; ow=ww->w; oh=ww->h; if(!(f&0x2)){ ww->x=x; ww->y=y; } if(!(f&0x1/*SWP_NOSIZE*/) && w>0 && ht>0){ ww->w=w; ww->h=ht; } }   // (the rect a WebView2 window follows)
+      wv2_hwnd_changed(h,(f&0x40)?1:(f&0x80)?0:-1);
+      if(ww&&ww->magic==WWIN_MAGIC) win_sized(ww,ox,oy,ow,oh); }
     return 1; }
 static int64_t g_winlong[8];
-static int64_t MSABI i_GetWindowLongPtrW(void*h,int idx){ WWin*w=h; if(w&&w->magic==WWIN_MAGIC){ if(idx==-21)return w->userdata; if(idx==-4)return (int64_t)(intptr_t)w->wndproc; if(idx>=0&&idx<128)return w->extra[idx/8]; return 0; } return (idx>=-8&&idx<0)? g_winlong[-idx-1]:0; }
-static int64_t MSABI i_SetWindowLongPtrW(void*h,int idx,int64_t v){ WWin*w=h; if(w&&w->magic==WWIN_MAGIC){ int64_t o=0; if(idx==-21){o=w->userdata;w->userdata=v;} else if(idx==-4){o=(int64_t)(intptr_t)w->wndproc;w->wndproc=(WNDPROC_t)(intptr_t)v;} else if(idx>=0&&idx<128){o=w->extra[idx/8];w->extra[idx/8]=v;} return o; } if(idx>=-8&&idx<0){ int64_t o=g_winlong[-idx-1]; g_winlong[-idx-1]=v; return o;} return 0; }
+static int64_t MSABI i_GetWindowLongPtrW(void*h,int idx){ WWin*w=h; if(w&&w->magic==WWIN_MAGIC){ if(idx==-20) return w->exstyle; if(idx==-16) return w->style; if(idx==-21)return w->userdata; if(idx==-4)return (int64_t)(intptr_t)w->wndproc; if(idx>=0&&idx<128)return w->extra[idx/8]; return 0; } return (idx>=-8&&idx<0)? g_winlong[-idx-1]:0; }
+static int64_t MSABI i_SetWindowLongPtrW(void*h,int idx,int64_t v){ WWin*w=h; if(w&&w->magic==WWIN_MAGIC){ int64_t o=0; if(idx==-20){ o=w->exstyle; w->exstyle=(uint32_t)v; wv2_hwnd_style(h,(uint32_t)v); return o; } if(idx==-16){ o=w->style; w->style=(uint32_t)v; return o; } if(idx==-21){o=w->userdata;w->userdata=v;} else if(idx==-4){o=(int64_t)(intptr_t)w->wndproc;w->wndproc=(WNDPROC_t)(intptr_t)v;} else if(idx>=0&&idx<128){o=w->extra[idx/8];w->extra[idx/8]=v;} return o; } if(idx>=-8&&idx<0){ int64_t o=g_winlong[-idx-1]; g_winlong[-idx-1]=v; return o;} return 0; }
 static int32_t MSABI i_GetWindowLongW(void*h,int idx){ return (int32_t)i_GetWindowLongPtrW(h,idx); }
 static int32_t MSABI i_SetWindowLongW(void*h,int idx,int32_t v){ return (int32_t)i_SetWindowLongPtrW(h,idx,v); }
+// CallWindowProcW (2026-10-20): a subclassed window procedure (SetWindowLongPtrW(GWLP_WNDPROC); Reach Renaissance's host-probe
+// hooks its game window for the UI cursor) forwards everything it doesn't handle to the previous one. It was a logging stub
+// returning 0, so every forwarded message was swallowed (WM_NCCREATE / WM_SETCURSOR / input answered 0). The previous procedure
+// is a guest function or our DefWindowProcW, both ms_abi.
+static int64_t MSABI i_CallWindowProcW(WNDPROC_t prev,void*h,uint32_t m,uint64_t wp,int64_t lp){ return prev ? prev(h,m,wp,lp) : 0; }
 static int    MSABI i_AdjustWindowRectEx(int32_t*r,uint32_t s,int m,uint32_t ex){ (void)r;(void)s;(void)m;(void)ex; return 1; }
 // DPI queries: unimplemented they fell through to the 0-returning stub, so Reclaimer's egui UI (its
 // frontend menu and in-game overlays) computed pixels_per_point = 0/96 and painted every widget at zero
@@ -3746,17 +3838,16 @@ static int    MSABI i_GetDeviceCaps(void*hdc,int index){ (void)hdc;
         case 24: return -1;                              // NUMCOLORS (true colour)
         case 2: return 1;                                // TECHNOLOGY: DT_RASDISPLAY
         default: return 0; } }
-static int    MSABI i_MoveWindow(void*h,int x,int y,int w,int ht,int rp){ (void)h;(void)x;(void)y;(void)w;(void)ht;(void)rp; return 1; }
+static int    MSABI i_MoveWindow(void*h,int x,int y,int w,int ht,int rp){ (void)rp; WWin*ww=h; if(ww&&ww->magic==WWIN_MAGIC){ int ox=ww->x, oy=ww->y, ow=ww->w, oh=ww->h; ww->x=x; ww->y=y; if(w>0&&ht>0){ ww->w=w; ww->h=ht; } wv2_hwnd_changed(h,-1); win_sized(ww,ox,oy,ow,oh); } return 1; }
 static void*  MSABI i_SetFocus(void*h){ return h; }
 static void*  MSABI i_SetCapture(void*h){ return h; }
 static int    MSABI i_ReleaseCapture(void){ return 1; }
-static int    MSABI i_ClientToScreen(void*h,int32_t*p){ (void)h;(void)p; return 1; }
+static int    MSABI i_ClientToScreen(void*h,int32_t*p){ int x=0,y=0; if(p && xwin_is(h)){ if(!xwin_rect(h,&x,&y,0,0,0,0,0)) return 0; p[0]+=x; p[1]+=y; return 1; }
+    WWin*w=h; if(p && w && w->magic==WWIN_MAGIC && wv2_owns(h)){ p[0]+=w->x; p[1]+=w->y; } return 1; }
 static int    MSABI i_ScreenToClient(void*h,int32_t*p){ (void)h;(void)p; return 1; }
 static int    MSABI i_RegisterRawInputDevices(const void*d,uint32_t n,uint32_t cb){ (void)d;(void)n;(void)cb; return 1; }
 static uint32_t MSABI i_GetRawInputData(void*h,uint32_t cmd,void*data,uint32_t*sz,uint32_t hdr){ (void)h;(void)cmd;(void)data;(void)sz;(void)hdr; return 0; }
 static uint32_t MSABI i_GetRegisteredRawInputDevices(void*d,uint32_t*n,uint32_t cb){ (void)d;(void)cb; if(n)*n=0; return 0; }
-static void*  MSABI i_SetTimer(void*h,uintptr_t id,uint32_t el,void*fn){ (void)h;(void)el;(void)fn; return (void*)id; }
-static int    MSABI i_KillTimer(void*h,uintptr_t id){ (void)h;(void)id; return 1; }
 static int16_t MSABI i_GetAsyncKeyState(int k){ (void)k; return 0; }
 static int16_t MSABI i_GetKeyState(int k){ (void)k; return 0; }
 static int    MSABI i_ShowCursor(int s){ (void)s; return s?0:-1; }
@@ -4130,6 +4221,37 @@ static int    MSABI i_DrawTextW(void*dc,const uint16_t*s,int count,int32_t*rc,ui
 static int    MSABI i_GetTextMetricsW(void*dc,void*tm){ GdiDC*d=dc; int ph=(d&&d->magic==GDIDC_MAGIC&&d->font_h)?d->font_h:16; if(!tm) return 0;
     CTFontRef f=ct_font_for(ph); int asc=(int)(CTFontGetAscent(f)+0.5), desc=(int)(CTFontGetDescent(f)+0.5); int32_t*t=tm; memset(t,0,60);
     t[0]=asc+desc; t[1]=asc; t[2]=desc; t[5]=ph/2; t[6]=ph; t[7]=400; return 1; } // tmHeight,Ascent,Descent,AveCharWidth,MaxCharWidth,Weight
+// GetGlyphOutlineW (2026-10-20): Reach Renaissance's host-probe draws the engine's UI text itself -- CreateFontW + GetTextMetricsW +
+// GetGlyphOutlineW(GGO_GRAY8_BITMAP) per character into a glyph atlas -- and the logging stub returned 0 for every glyph, so menus
+// and screens (the loadout picker, scoreboards) showed no text. Now from CoreText with the font GetTextMetricsW reports
+// (ct_font_for: the DC's size and face slot): GGO_METRICS, GGO_BITMAP (1 bpp) and GGO_GRAY2/4/8_BITMAP (0..4 / 16 / 64 levels),
+// rows DWORD-aligned, GGO_GLYPH_INDEX honoured; GLYPHMETRICS = black box, origin (left, top above the baseline), advance. An
+// empty glyph (space) is 1x1 with no bitmap, as on Windows. The MAT2 transform is ignored (identity). PELOAD_GLYPH_STUB=1 = old.
+static uint32_t MSABI i_GetGlyphOutlineW(void*dc,uint32_t ch,uint32_t fmt,void*gm,uint32_t cb,void*buf,const void*mat){ (void)mat;
+    static int old=-1; if(old<0) old=getenv("PELOAD_GLYPH_STUB")?1:0; if(old) return 0;
+    GdiDC*d=dc; int ph=(d&&d->magic==GDIDC_MAGIC&&d->font_h)?d->font_h:16; CTFontRef f=ct_font_for(ph);
+    uint32_t kind=fmt&0x7f; if(kind!=0&&kind!=1&&kind!=4&&kind!=5&&kind!=6) return 0xFFFFFFFFu;   // GDI_ERROR: outlines (NATIVE/BEZIER) not done
+    CGGlyph gl=0;
+    if(fmt&0x80) gl=(CGGlyph)ch;
+    else { UniChar u[2]; int n=1; if(ch>0xFFFF){ uint32_t c=ch-0x10000; u[0]=(UniChar)(0xD800+(c>>10)); u[1]=(UniChar)(0xDC00+(c&0x3FF)); n=2; } else u[0]=(UniChar)ch;
+        CGGlyph g2[2]={0,0}; if(!CTFontGetGlyphsForCharacters(f,u,g2,n)) g2[0]=0; gl=g2[0]; }
+    CGRect bb=CTFontGetBoundingRectsForGlyphs(f,kCTFontOrientationHorizontal,&gl,0,1); CGSize adv={0,0}; CTFontGetAdvancesForGlyphs(f,kCTFontOrientationHorizontal,&gl,&adv,1);
+    int x0=(int)floor(bb.origin.x), y0=(int)floor(bb.origin.y), x1=(int)ceil(bb.origin.x+bb.size.width), y1=(int)ceil(bb.origin.y+bb.size.height);
+    int bw=x1-x0, bh=y1-y0, empty=(bb.size.width<=0||bb.size.height<=0||bw<=0||bh<=0||bw>1024||bh>1024);
+    if(gm){ uint8_t*m=gm; memset(m,0,20); uint32_t w=empty?1:(uint32_t)bw, h=empty?1:(uint32_t)bh; int32_t ox=empty?0:x0, oy=empty?0:y1; int16_t incx=(int16_t)lround(adv.width);
+        memcpy(m,&w,4); memcpy(m+4,&h,4); memcpy(m+8,&ox,4); memcpy(m+12,&oy,4); memcpy(m+16,&incx,2); }
+    if(kind==0) return 1;                                     // GGO_METRICS: success, no bitmap
+    if(empty) return 0;
+    uint32_t pitch = kind==1 ? (uint32_t)(((bw+31)/32)*4) : (uint32_t)((bw+3)&~3); uint32_t need=pitch*(uint32_t)bh;
+    if(!buf||!cb) return need; if(cb<need) return 0xFFFFFFFFu;
+    uint8_t*cov=calloc((size_t)bw*bh,1); if(!cov) return 0xFFFFFFFFu;
+    CGColorSpaceRef cs=CGColorSpaceCreateDeviceGray(); CGContextRef cg=CGBitmapContextCreate(cov,(size_t)bw,(size_t)bh,8,(size_t)bw,cs,kCGImageAlphaNone); CGColorSpaceRelease(cs);
+    if(cg){ CGContextSetGrayFillColor(cg,1.0,1.0); CGContextSetShouldAntialias(cg,true); CGPoint p={-(CGFloat)x0,-(CGFloat)y0}; CTFontDrawGlyphs(f,&gl,&p,1,cg); CGContextRelease(cg); }
+    int levels = kind==4?4 : kind==5?16 : 64; memset(buf,0,need); uint8_t*o=buf;   // (CG rows run top-down in memory)
+    for(int y=0;y<bh;y++) for(int x=0;x<bw;x++){ unsigned v=cov[(size_t)y*bw+x];
+        if(kind==1){ if(v>=128) o[(size_t)y*pitch+(x>>3)]|=(uint8_t)(0x80>>(x&7)); }
+        else o[(size_t)y*pitch+x]=(uint8_t)((v*levels+127)/255); }
+    free(cov); return need; }
 static int    MSABI i_GetTextFaceW(void*dc,int c,uint16_t*face){ (void)dc; static const uint16_t nm[]={'H','e','l','v','e','t','i','c','a',0}; int n=0; while(nm[n])n++; if(face&&c>0){ int k=n<c-1?n:c-1; for(int i=0;i<k;i++)face[i]=nm[i]; face[k]=0; } return n+1; }
 static uint32_t MSABI i_SetTextCharacterExtra(void*dc,int extra){ (void)dc;(void)extra; return 0; }
 // Window DC: a real on-screen surface (WIN_WxWIN_H BGRA, top-down). Blits to it are
@@ -4186,7 +4308,7 @@ static void gdi_present_main(void){
     GdiObj*g=g_gdi_mainsurf; if(g&&g->magic==GDI_MAGIC&&g->bits) gdi_present_surface(g->bits,g->w,g->h,g->topdown); }
 static int gdi_has_main(void){ return g_gdi_mainsurf && g_gdi_mainsurf->magic==GDI_MAGIC && g_gdi_mainsurf->bits ? 1:0; }
 static int    MSABI i_InvalidateRect(void*h,const void*r,int e){ (void)h;(void)r;(void)e; return 1; }
-static int    MSABI i_SetWindowTextW(void*h,const uint16_t*t){ (void)h;(void)t; return 1; }
+static int    MSABI i_SetWindowTextW(void*h,const uint16_t*t){ WWin*w=h; if(w&&w->magic==WWIN_MAGIC){ int i=0; for(; t&&t[i]&&i<127;i++) w->title[i]=t[i]; w->title[i]=0; } return 1; }
 // ---- XInput (xinput1_4.dll) -> macOS GameController.framework + scripted sticks -----------------
 // The client polls XInputGetState (exe sub_1406108a0) only while GetForegroundWindow()==its game window.
 // Pad state comes from the real controller (GCController.extendedGamepad; needs the main run loop, which
@@ -4283,9 +4405,9 @@ static uint32_t MSABI i_XInputGetCapabilities(uint32_t idx,uint32_t fl,void*cap)
     if(cap){ memset(cap,0,20); uint8_t*c=cap; c[0]=1/*GAMEPAD*/; c[1]=1/*SUBTYPE_GAMEPAD*/; *(uint16_t*)(c+4)=0xF3FF; c[6]=c[7]=255; *(int16_t*)(c+8)=*(int16_t*)(c+10)=*(int16_t*)(c+12)=*(int16_t*)(c+14)=(int16_t)0xFFC0; } return 0; }
 static void MSABI i_XInputEnable(int en){ (void)en; }
 static void*  MSABI i_GetForegroundWindow(void){ return fg_hwnd(); }
-static int    MSABI i_SetForegroundWindow(void*h){ if(fg_can_activate(h)) g_shown_hwnd=h; return 1; }
-static int    MSABI i_IsWindow(void*h){ return h?1:0; }
-static int    MSABI i_IsWindowVisible(void*h){ (void)h; return 1; }
+static int    MSABI i_SetForegroundWindow(void*h){ if(xwin_is(h)){ int fp=0; if(xwin_rect(h,0,0,0,0,0,0,&fp)) xwin_activate(fp); return 1; } if(wv2_owns(h)) wv2_activate(h); if(fg_can_activate(h)) g_shown_hwnd=h; return 1; }
+static int    MSABI i_IsWindow(void*h){ if(xwin_is(h)) return xwin_rect(h,0,0,0,0,0,0,0); return h?1:0; }
+static int    MSABI i_IsWindowVisible(void*h){ if(xwin_is(h)){ int v=0,m=0; return xwin_rect(h,0,0,0,0,&v,&m,0) && v && !m; } return 1; }
 static void*  MSABI i_GetActiveWindow(void){ return fg_hwnd(); }
 // ---- OpenGL bridge: wgl -> CGL, and opengl32!gl* -> macOS OpenGL.framework.
 // The engine's menu renders via OpenGL; macOS has native GL 4.1 (CGL).
@@ -4304,6 +4426,7 @@ static volatile int g_win_pw, g_win_ph;   // current window drawable size in PIX
 static volatile float g_win_scale=1.0f;    // pixels per point of the window's screen (2 on a Retina display, 1 on most external ones)
 id g_nswin_ext(void){ return g_nswin; }
 extern void* objc_autoreleasePoolPush(void);
+#include "xwin.c"   // windows of other loader processes (Reach Renaissance's menus follow the game's window)
 static id ocls(const char*n){ return (id)objc_getClass(n); }
 static SEL osel(const char*n){ return sel_registerName(n); }
 static id om0(id o,const char*s){ return ((id(*)(id,SEL))objc_msgSend)(o,osel(s)); }
@@ -8161,6 +8284,7 @@ static void* cocoa_make_gl_window_i(int w,int h){ CGLContextObj c=cocoa_make_gl_
 volatile int g_win_visible_x=1;
 #define g_win_visible g_win_visible_x   // NSWindow occlusionState & Visible, sampled in cocoa_pump
 static void cocoa_pump(void){ if(!g_nsapp) return;
+    xwin_publish();   // (our game window for other processes, xwin.c)
     for(;;){ id ev=((id(*)(id,SEL,unsigned long,id,id,signed char))objc_msgSend)(g_nsapp,osel("nextEventMatchingMask:untilDate:inMode:dequeue:"),~0UL,(id)0,NSDefaultRunLoopMode,1);
         if(!ev) break; if(wi_translate(ev)) continue; ((void(*)(id,SEL,id))objc_msgSend)(g_nsapp,osel("sendEvent:"),ev); }
     { const char*tr=getenv("PELOAD_TEST_RESIZE"); static int done; extern double g_gameplay_t0; if(tr && !done && g_gameplay_t0 && mono_s()-g_gameplay_t0>5 && g_nswin){ done=1; int tw=0,th=0; sscanf(tr,"%dx%d",&tw,&th);
@@ -8994,6 +9118,14 @@ static void thr_reap(int all){   // g_tlsm held
         for(int m=0;m<g_ntlsmods;m++){ int ix=g_tlsmods[m].index; if(ix>=0 && ix<128){ free(d->tarr[ix]); d->tarr[ix]=0; } }
         free(d->tarr); free(d->teb); g_thr_freed++; }
     g_thr_ndead=j; }
+// ExitThread / FreeLibraryAndExitThread (2026-10-20): haloreach.dll ends a worker thread with FreeLibraryAndExitThread at the end
+// of a session. Neither existed (a logging stub returned, and the thread ran on into the int3 padding after the noreturn call:
+// SIGTRAP). Now the thread jumps back into thread_tramp, which finishes it as if its start function had returned that code
+// (handle signaled, TEB / TLS reaped later). Like Windows, nothing on the guest stack is unwound. A thread we did not start
+// (the main thread) leaves through pthread_exit. FreeLibrary itself is a no-op here.
+static __thread jmp_buf *t_exit_jb; static __thread uint32_t t_exit_code;
+static void MSABI i_ExitThread(uint32_t code){ if(t_exit_jb){ t_exit_code=code; _longjmp(*t_exit_jb,1); } pthread_exit(0); }
+static void MSABI i_FreeLibraryAndExitThread(void*h,uint32_t code){ (void)h; i_ExitThread(code); }
 static void *thread_tramp(void *a){
     TArg *t=a;
     uint8_t *teb=calloc(1,0x2000);
@@ -9020,7 +9152,8 @@ static void *thread_tramp(void *a){
     __asm__ volatile("movq %0,%%gs:0x58"::"r"((uint64_t)tarr));
     g_guest_thr=1; t_self_thread=t->done;
     if(getenv("PELOAD_TRACE_THREAD")){ char tb[96]; int nn=snprintf(tb,sizeof tb,"  [TT] enter tid=0x%x gs58=0x%llx fn=%p\n",pthread_mach_thread_np(pthread_self()),(unsigned long long)(uint64_t)tarr,(void*)t->fn); (void)!write(2,tb,nn); }
-    uint32_t r = t->fn ? t->fn(t->param) : 0;
+    uint32_t r;
+    { jmp_buf jb; if(!_setjmp(jb)){ t_exit_jb=&jb; r = t->fn ? t->fn(t->param) : 0; } else r=t_exit_code; t_exit_jb=0; }   // ExitThread lands here
     __atomic_add_fetch(&g_gthr_exited,1,__ATOMIC_RELAXED);
     // The Windows TEB fields live in macOS TSD slots 0x30/0x58/0x60. On this
     // macOS, slot 12 (gs:0x60) has a pthread destructor that FREES the slot value
@@ -9046,6 +9179,7 @@ static void *thread_tramp(void *a){
         __asm__ volatile("movq $0,%%gs:0x30\n\tmovq $0,%%gs:0x58":::"memory"); }
     return (void*)(uintptr_t)r;
 }
+static uint64_t g_stack_reserve;   // the exe's SizeOfStackReserve (main)
 static void* MSABI i_CreateThread(void*attr,uint64_t stack,WinThreadProc start,void*param,uint32_t fl,uint32_t*tid){
     (void)attr;(void)stack;(void)fl;
     if(getenv("PELOAD_TRACE_THREAD")){ uint64_t s=(uint64_t)start; char t[96];
@@ -9056,7 +9190,19 @@ static void* MSABI i_CreateThread(void*attr,uint64_t stack,WinThreadProc start,v
     if(getenv("PELOAD_NO_THREADS")){ if(tid)*tid=0x7333; return (void*)0x7333; } // diagnostic: don't spawn
     SyncObj* done=sync_new(K_THREAD); done->manual=1;              // thread handle = waitable, manual-reset
     TArg *t=malloc(sizeof *t); t->fn=start; t->param=param; t->done=done;
-    pthread_t th; int pcrc=pthread_create(&th,0,thread_tramp,t); if(!pcrc) __atomic_add_fetch(&g_gthr_made,1,__ATOMIC_RELAXED);
+    // Stack size (2026-10-20): every guest thread got macOS's 512 KB default whatever it asked for. Windows gives the requested
+    // size (dwStackSize; commit or, with STACK_SIZE_PARAM_IS_A_RESERVATION, reserve) and at least the exe's SizeOfStackReserve
+    // (Reclaimer 1 MB, Reach Renaissance 2 MB; Rust asks 2 MB for every std thread). An overflow is not caught the Windows way
+    // either: MSVC's __chkstk probes pages only below TEB.StackLimit (gs:0x10), and gs:0x10 is a macOS TSD slot under the loader,
+    // so a big frame steps over pthread's one guard page into whatever lies below -- in Reach that was another thread's stack
+    // (the loader's shim-sweep thread aborted with haloreach frames on it). Now: max(requested, exe reserve, 1 MB), rounded to
+    // 64 KB, with a 256 KB guard. PELOAD_THREAD_STACK=<bytes> raises the minimum; PELOAD_THREAD_STACK_OLD=1 = old (pthread default).
+    pthread_attr_t at; pthread_attr_init(&at);
+    if(!getenv("PELOAD_THREAD_STACK_OLD")){ uint64_t ss=stack, mn=g_stack_reserve>(1u<<20)?g_stack_reserve:(1u<<20);
+        const char*e=getenv("PELOAD_THREAD_STACK"); if(e){ uint64_t v=strtoull(e,0,0); if(v>mn) mn=v; }
+        if(ss<mn) ss=mn; if(ss>(1ull<<30)) ss=1ull<<30; ss=(ss+0xffff)&~0xffffull;
+        pthread_attr_setstacksize(&at,(size_t)ss); pthread_attr_setguardsize(&at,256u<<10); }
+    pthread_t th; int pcrc=pthread_create(&th,&at,thread_tramp,t); pthread_attr_destroy(&at); if(!pcrc) __atomic_add_fetch(&g_gthr_made,1,__ATOMIC_RELAXED);
     if(pcrc){ if(getenv("PELOAD_TRACE_THREAD")){ char eb[96]; int k=snprintf(eb,sizeof eb,"  [CreateThread] pthread_create FAILED rc=%d (start=%p param=%p)\n",pcrc,(void*)start,param); (void)!write(2,eb,k); } free(t); done->exitcode=0; done->signaled=1; return 0; }
     done->owner=th; done->tid=getenv("PELOAD_TID_CONST")?(uint32_t)(uintptr_t)th:(uint32_t)pthread_mach_thread_np(th);   // = its GetCurrentThreadId()
     if(!thr_keep()) pthread_detach(th);   // (after reading its id: a detached thread that already ended is gone)
@@ -9073,6 +9219,7 @@ static uintptr_t MSABI i_beginthread(WinThreadProc start,unsigned stack,void*arg
 #include "d3dsubmit.c"
 #include "xaudio.c"
 #include "wasapi.c"
+#include "schannel.c"   // secur32 Schannel + crypt32 chain checks on macOS LibreSSL (Reach Renaissance HTTPS)
 // every guest thread's TLS block of one module (index idx), copied under g_tlsm: a returned thread's array is freed 30 s
 // later (thr_reap), so callers must not keep the arrays themselves past the lock
 static int tls_blocks(uint32_t idx,void**out,int max){ int n=0; if(idx>=128) return 0; pthread_mutex_lock(&g_tlsm);
@@ -9533,6 +9680,11 @@ static void* MSABI i_LoadLibraryExW(const uint16_t *name, void *h, uint32_t fl);
 static int no_waves_dll(const uint16_t*n){ static int on=-1; if(on<0) on=getenv("PELOAD_NO_WAVES")?1:0; if(!on||!n) return 0;
     char a[1024]; int i=0; for(; n[i]&&i<1023;i++) a[i]=(char)(n[i]<128?n[i]:'?'); a[i]=0; for(char*q=a;*q;q++) if(*q=='/') *q='\\';
     return strcasestr(a,"\\waves\\")!=0; }
+// SetDllDirectoryW (2026-10-20, Reach Renaissance's host-probe: MCC's haloreach folder, then LoadLibraryW("haloreach.dll")):
+// remembered as a Unix path; LoadLibraryExW looks a bare DLL name up there when it is no file in the current folder.
+static char g_dlldir[2048];
+static char* win2unix(const uint16_t *w, char *out, int outsz); // fwd (defined in FS block)
+static int MSABI i_SetDllDirectoryW(const uint16_t*d){ if(!d||!d[0]) g_dlldir[0]=0; else win2unix(d,g_dlldir,sizeof g_dlldir); return 1; }
 static void* MSABI i_LoadLibraryExW(const uint16_t *name, void *h, uint32_t fl){
     if(no_waves_dll(name)){ g_lasterr=126; ws("  [no-waves] refused a Waves DLL\n"); return 0; }
     (void)h;(void)fl; char w[2048]; int i=0; for(; name && name[i] && i<2047; i++) w[i]=(char)(name[i]<128?name[i]:'?'); w[i]=0;
@@ -9541,9 +9693,14 @@ static void* MSABI i_LoadLibraryExW(const uint16_t *name, void *h, uint32_t fl){
     snprintf(g_lastlib,sizeof g_lastlib,"%s",bn);
     ws("  [LoadLibraryExW] "); ws(w); ws("\n");
     if(name_is_ws2(bn)) return WS2_HANDLE; // Winsock: distinct handle, resolved by ordinal/name
+    if(name_has(bn,"xaudio2_") && !getenv("PELOAD_XA_REALDLL")) return XA_HANDLE;   // XAudio2: ours, see XA_HANDLE
+    if(name_has(bn,"webview2loader") && !getenv("PELOAD_NO_WV2")) return WV2_HANDLE;   // WebView2: ours (webview2.m)
     for(int m=0;m<g_nmods;m++) if(!strcasecmp(g_mods[m].name,bn)) return g_mods[m].base; // already loaded
     char p[2048]; win2unix(name,p,sizeof p);
     if(access(p,R_OK)==0){ g_prefer_base=1; uint8_t *b=load_guest(p, strdup(bn)); g_prefer_base=0; if(b) return b; }
+    // a bare name that is no file here: the SetDllDirectoryW folder (Reach Renaissance points it at MCC's haloreach folder)
+    if(g_dlldir[0] && bn==w){ char q[2300]; snprintf(q,sizeof q,"%s/%s",g_dlldir,w);
+        if(access(q,R_OK)==0){ g_prefer_base=1; uint8_t *b=load_guest(q, strdup(bn)); g_prefer_base=0; if(b) return b; } }
     return g_base; // feature-probe DLLs (api-ms-*) that aren't real files: placeholder
 }
 
@@ -10131,6 +10288,9 @@ static void* MSABI i_GetProcAddress(void *mod, char *name){
     // Winsock: resolve through the shared ws2_32 table so the IAT entry and this
     // result are the SAME pointer (the --native-udp gate compares them).
     if(mod==WS2_HANDLE) return ((uint64_t)name<0x10000)? ws2_by_ordinal((uint32_t)(uintptr_t)name) : ws2_resolve_name(name);
+    if(mod==XA_HANDLE){ void*x=((uint64_t)name<0x10000)? xa_resolve((uint32_t)(uintptr_t)name,0) : xa_resolve(0,name); if(x) return x;
+        mod=0; }   // (not an image: never export_lookup it -- PELOAD_AUDIO=0 leaves X3DAudio unresolved, below it gets a logging stub)
+    if(mod==WV2_HANDLE){ void*x=((uint64_t)name>=0x10000)?wv2_resolve(name):0; if(x) return x; mod=0; }
     if((uint64_t)name < 0x10000){ // imported by ordinal
         if(imp_count<8192){ imp_dll[imp_count]="(dynamic)"; imp_fn[imp_count]="#ordinal";
             return make_stub(imp_count++); }
@@ -10177,6 +10337,7 @@ static uint32_t MSABI i_GetFileAttributesA(const char*a){ uint16_t w[2048]; int 
 static int MSABI i_GetFileAttributesExA(const char*a,int lvl,void*info){ uint16_t w[2048]; int i=0; for(; a&&a[i]&&i<2047;i++) w[i]=(uint8_t)a[i]; w[i]=0; return i_GetFileAttributesExW(w,lvl,info); }
 static void* MSABI i_LoadLibraryExA(const char*a,void*h,uint32_t fl){ uint16_t w[2048]; int i=0; for(; a&&a[i]&&i<2047;i++) w[i]=(uint8_t)a[i]; w[i]=0; return i_LoadLibraryExW(w,h,fl); }
 static void* MSABI i_LoadLibraryA(const char*a){ return i_LoadLibraryExA(a,0,0); }
+static void* MSABI i_LoadLibraryW(const uint16_t*a){ return i_LoadLibraryExW(a,0,0); }   // (windows-gnu Rust imports it; MSVC builds took the Ex form)
 static uint32_t MSABI i_SetFilePointer(void*h,int32_t dist,int32_t*high,uint32_t method){
     int64_t d = high? (((int64_t)(*high)<<32)|(uint32_t)dist) : (int64_t)dist; int64_t np=0;
     if(!i_SetFilePointerEx(h,d,&np,method)){ g_lasterr=win_err(); return 0xFFFFFFFFu; }
@@ -10192,7 +10353,7 @@ static int MSABI i_SetFileTime(void*h,const uint64_t*cre,const uint64_t*acc,cons
 static void* MSABI i_GetParent(void*h){ (void)h; return 0; }           // our windows are top-level
 static void* MSABI i_GetFocus(void){ return fg_hwnd(); }   // the one logical window
 static int MSABI i_RedrawWindow(void*h,const void*rc,void*rgn,uint32_t fl){ (void)h;(void)rc;(void)rgn;(void)fl; return 1; } // we present on our own thread
-static int MSABI i_EnumWindows(void*proc,int64_t lparam){ extern void* g_last_hwnd; if(!proc) return 0; int(__attribute__((ms_abi))*cb)(void*,int64_t)=proc; cb(g_last_hwnd?g_last_hwnd:(void*)0x4857,lparam); return 1; }
+static int MSABI i_EnumWindows(void*proc,int64_t lparam){ extern void* g_last_hwnd; if(!proc) return 0; int(__attribute__((ms_abi))*cb)(void*,int64_t)=proc; if(!cb(g_last_hwnd?g_last_hwnd:(void*)0x4857,lparam)) return 1; return xwin_enum(cb,lparam); }
 // EnumDisplaySettingsW: the one display mode of the monitor GetMonitorInfoW / EnumDisplayMonitors describe (1920x1080, 32 bpp,
 // 60 Hz). DEVMODEW offsets (wide strings: dmDeviceName 32 WCHAR, dmFormName 32 WCHAR): dmSize@68, dmFields@72, dmPosition@76,
 // dmBitsPerPel@168, dmPelsWidth@172, dmPelsHeight@176, dmDisplayFlags@180, dmDisplayFrequency@184. It used to write
@@ -10239,8 +10400,9 @@ static int MSABI i_VerQueryValueW(void*blk,const uint16_t*sub,void**out,uint32_t
 static int MSABI i_CompareFileTime(const uint64_t*a,const uint64_t*b){ uint64_t x=a?*a:0,y=b?*b:0; return x<y?-1:(x>y?1:0); }
 static int MSABI i_CreateDirectoryA(const char*a,void*sec){ (void)sec; uint16_t w[2048]; int i=0; for(; a&&a[i]&&i<2047;i++) w[i]=(uint8_t)a[i]; w[i]=0; char p[2048]; win2unix(w,p,sizeof p); if(mkdir(p,0755)==0||errno==EEXIST) return 1; g_lasterr=win_err(); return 0; }
 static int MSABI i_SetInformationJobObject(void*job,int cls,void*info,uint32_t len){ (void)job;(void)cls;(void)info;(void)len; return 1; }
-static uint32_t MSABI i_GetWindowThreadProcessId(void*hwnd,uint32_t*pid){ (void)hwnd; if(pid)*pid=(uint32_t)getpid(); return (uint32_t)getpid(); }
-static int MSABI i_IsIconic(void*hwnd){ (void)hwnd; return 0; } // never minimized
+static uint32_t MSABI i_GetWindowThreadProcessId(void*hwnd,uint32_t*pid){ int fp=0; if(xwin_is(hwnd) && xwin_rect(hwnd,0,0,0,0,0,0,&fp)){ if(pid)*pid=(uint32_t)fp; return (uint32_t)fp; }
+    if(pid)*pid=(uint32_t)getpid(); return (uint32_t)getpid(); }
+static int MSABI i_IsIconic(void*hwnd){ if(xwin_is(hwnd)){ int m=0; return xwin_rect(hwnd,0,0,0,0,0,&m,0) && m; } return 0; } // ours: never minimized
 static int32_t MSABI i_WavesFX_Initialize(void){ return 0; } // audio FX: report ok, no-op
 // Fibers: the engine converts its main thread to a fiber. Hand back a non-NULL fiber so the
 // conversion succeeds; our single-thread model needs no real fiber switching here.
@@ -10526,7 +10688,7 @@ static void *resolve_impl(const char *fn){
         {"FreeEnvironmentStringsA",(void*)i_FreeEnvironmentStringsA},
         {"GetTickCount",(void*)i_GetTickCount},
         {"GetTickCount64",(void*)i_GetTickCount64},
-        {"LoadLibraryExW",(void*)i_LoadLibraryExW},
+        {"LoadLibraryExW",(void*)i_LoadLibraryExW},{"LoadLibraryW",(void*)i_LoadLibraryW},{"SetDllDirectoryW",(void*)i_SetDllDirectoryW},
         {"NtWriteFile",(void*)i_NtWriteFile},
         {"NtReadFile",(void*)i_NtReadFile},
         {"BCryptGenRandom",(void*)i_BCryptGenRandom},
@@ -10603,7 +10765,7 @@ static void *resolve_impl(const char *fn){
         {"GetWindowRect",(void*)i_GetWindowRect},
         {"SetWindowPos",(void*)i_SetWindowPos},
         {"GetWindowLongPtrW",(void*)i_GetWindowLongPtrW},
-        {"SetWindowLongPtrW",(void*)i_SetWindowLongPtrW},
+        {"SetWindowLongPtrW",(void*)i_SetWindowLongPtrW},{"CallWindowProcW",(void*)i_CallWindowProcW},
         {"GetWindowLongW",(void*)i_GetWindowLongW},
         {"SetWindowLongW",(void*)i_SetWindowLongW},
         {"AdjustWindowRectEx",(void*)i_AdjustWindowRectEx},
@@ -10625,7 +10787,7 @@ static void *resolve_impl(const char *fn){
         {"RegisterRawInputDevices",(void*)wi_RegisterRawInputDevices},
         {"GetRawInputData",(void*)wi_GetRawInputData},{"GetRawInputDeviceInfoW",(void*)wi_GetRawInputDeviceInfoW},{"GetKeyboardState",(void*)wi_GetKeyboardState},{"GetCursorPos",(void*)wi_GetCursorPos},
         {"GetRegisteredRawInputDevices",(void*)i_GetRegisteredRawInputDevices},
-        {"SetTimer",(void*)i_SetTimer},
+        {"SetTimer",(void*)i_SetTimer},{"GetWindowTextW",(void*)i_GetWindowTextW},{"GetWindowTextLengthW",(void*)i_GetWindowTextLengthW},{"FindWindowW",(void*)i_FindWindowW},{"SetWinEventHook",(void*)i_SetWinEventHook},{"UnhookWinEvent",(void*)i_UnhookWinEvent},{"PostMessageW",(void*)i_PostMessageW},{"PostThreadMessageW",(void*)i_PostThreadMessageW},{"PostQuitMessage",(void*)i_PostQuitMessage},{"SendMessageW",(void*)i_SendMessageW},
         {"KillTimer",(void*)i_KillTimer},
         {"GetAsyncKeyState",(void*)wi_GetAsyncKeyState},
         {"MapVirtualKeyExW",(void*)wi_MapVirtualKeyExW}, {"MapVirtualKeyExA",(void*)wi_MapVirtualKeyExW},
@@ -10662,7 +10824,7 @@ static void *resolve_impl(const char *fn){
         {"TextOutW",(void*)i_TextOutW},
         {"ExtTextOutW",(void*)i_ExtTextOutW},
         {"DrawTextW",(void*)i_DrawTextW},
-        {"GetTextMetricsW",(void*)i_GetTextMetricsW},
+        {"GetTextMetricsW",(void*)i_GetTextMetricsW},{"GetGlyphOutlineW",(void*)i_GetGlyphOutlineW},
         {"GetTextFaceW",(void*)i_GetTextFaceW},
         {"SetTextCharacterExtra",(void*)i_SetTextCharacterExtra},
         {"StretchDIBits",(void*)i_StretchDIBits},
@@ -10764,11 +10926,12 @@ static void *resolve_impl(const char *fn){
         {"NtOpenFile",(void*)i_NtOpenFile},
         {"NtCreateNamedPipeFile",(void*)i_NtCreateNamedPipeFile},
         {"SetThreadStackGuarantee",(void*)i_SetThreadStackGuarantee},
-        {"FreeLibrary",(void*)i_FreeLibrary},
+        {"FreeLibrary",(void*)i_FreeLibrary},{"ExitThread",(void*)i_ExitThread},{"FreeLibraryAndExitThread",(void*)i_FreeLibraryAndExitThread},
         {"GetModuleFileNameA",(void*)i_GetModuleFileNameA},
         {0,0}
     };
     for(int i=0; T[i].n; i++) if(!strcmp(T[i].n, fn)) return fc_bind(T[i].f);   // (fc_bind: the original unless PELOAD_FASTCALL / PELOAD_AB=fastcall)
+    { void*s=sch_resolve(fn); if(s) return s; }   // secur32 / crypt32 TLS (schannel.c)
     return 0;
 }
 
@@ -10917,9 +11080,48 @@ static void* crt_fast_stub(const char*fn,void*guest){
     p[o++]=0x48;p[o++]=0xB8; memcpy(p+o,&host,8); o+=8; p[o++]=0xFF;p[o++]=0xE0;     // mov rax,host ; jmp rax
     sys_icache_invalidate(p,o); return p; }
 
+// ---- msvcrt.dll: the C runtime of Rust's x86_64-pc-windows-gnu target (2026-10-20, Reach Renaissance) ----
+// Reach Renaissance's programs are built for windows-gnu, so their CRT is msvcrt.dll, not ucrtbase / vcruntime140. Most of
+// what mingw's startup code and Rust's std take from it exist under the same name in the genuine ucrtbase we load (malloc,
+// memcpy, _initterm, exit, signal ...) and bind there. The msvcrt-only names are built on ucrtbase here: __getmainargs
+// (ucrtbase's own argv / environ), __set_app_type, _amsg_exit, _onexit (_crt_atexit), the data imports __initenv / _commode /
+// _fmode, and the FILE* calls: msvcrt's FILE is not ucrt's, so __iob_func hands out a 3-entry _iobuf array (stdin, stdout,
+// stderr) that fwrite / fprintf / vfprintf translate to ucrtbase's streams (__acrt_iob_func). PELOAD_NO_MSVCRT=1 = old
+// (msvcrt imports bind by name to native functions or logging stubs).
+static int mv_on(void){ static int on=-1; if(on<0) on=!getenv("PELOAD_NO_MSVCRT"); return on; }
+static void* crt_export(const char*n){ for(int m=0;m<g_nmods;m++) if(g_mods[m].name && is_crt_dll(g_mods[m].name)){ void*e=export_lookup(g_mods[m].base,n); if(e) return e; } return 0; }
+static char **g_mv_initenv; static int g_mv_commode, g_mv_fmode;
+static uint8_t g_mv_iob[3][48] __attribute__((aligned(16)));   // msvcrt's x64 _iobuf is 48 bytes; only the addresses matter
+static void* mv_file(void*f){ for(int i=0;i<3;i++) if(f==(void*)g_mv_iob[i]){ void*(MSABI*iob)(unsigned)=crt_export("__acrt_iob_func"); return iob?iob((unsigned)i):f; } return f; }
+static void* MSABI mv_iob_func(void){ return g_mv_iob; }
+static int MSABI mv_getmainargs(int*argc,char***argv,char***env,int glob,void*si){ (void)glob;(void)si;
+    int(MSABI*cfg)(int)=crt_export("_configure_narrow_argv"); int(MSABI*ienv)(int)=crt_export("_initialize_narrow_environment");
+    int*(MSABI*pc)(void)=crt_export("__p___argc"); char***(MSABI*pv)(void)=crt_export("__p___argv"); char***(MSABI*pe)(void)=crt_export("__p__environ");
+    if(cfg) cfg(1);   // _crt_argv_unexpanded_arguments (msvcrt expands wildcards only when asked; Rust never asks)
+    if(ienv) ienv(0);
+    if(argc) *argc=pc?*pc():0; if(argv) *argv=pv?*pv():0; if(pe){ g_mv_initenv=*pe(); if(env) *env=g_mv_initenv; } else if(env) *env=0;
+    return 0; }
+static void MSABI mv_set_app_type(int t){ void(MSABI*f)(int)=crt_export("_set_app_type"); if(f) f(t); }
+static void MSABI mv_amsg_exit(int code){ char m[64]; int k=snprintf(m,sizeof m,"\nruntime error R60%02d\n",code); (void)!write(2,m,k);
+    void(MSABI*ex)(int)=crt_export("_exit"); if(ex) ex(255); _exit(255); }
+static void* MSABI mv_onexit(void*fn){ int(MSABI*a)(void*)=crt_export("_crt_atexit"); return a && fn && !a(fn) ? fn : 0; }
+static uint64_t MSABI mv_fwrite(const void*b,uint64_t s,uint64_t n,void*f){ uint64_t(MSABI*w)(const void*,uint64_t,uint64_t,void*)=crt_export("fwrite"); return w?w(b,s,n,mv_file(f)):0; }
+static int MSABI mv_vfprintf(void*f,const char*fmt,__builtin_ms_va_list ap){
+    int(MSABI*v)(uint64_t,void*,const char*,void*,__builtin_ms_va_list)=crt_export("__stdio_common_vfprintf"); return v?v(0,mv_file(f),fmt,0,ap):-1; }
+static int MSABI mv_fprintf(void*f,const char*fmt,...){ __builtin_ms_va_list ap; __builtin_ms_va_start(ap,fmt); int r=mv_vfprintf(f,fmt,ap); __builtin_ms_va_end(ap); return r; }
+static void* mv_resolve(const char*fn){
+    static const struct { const char*n; void*f; } T[]={
+        {"__getmainargs",(void*)mv_getmainargs},{"__set_app_type",(void*)mv_set_app_type},{"_amsg_exit",(void*)mv_amsg_exit},
+        {"_onexit",(void*)mv_onexit},{"__iob_func",(void*)mv_iob_func},{"fwrite",(void*)mv_fwrite},{"fprintf",(void*)mv_fprintf},
+        {"vfprintf",(void*)mv_vfprintf},{"__initenv",(void*)&g_mv_initenv},{"_commode",(void*)&g_mv_commode},{"_fmode",(void*)&g_mv_fmode},{0,0}};
+    for(int i=0;T[i].n;i++) if(!strcmp(T[i].n,fn)) return T[i].f;
+    return 0; }
+
 // unified resolver: CRT names -> guest exports; else native impl; else NULL
 static void *uni_resolve(const char *dll, const char *fn){
-    if(is_crt_dll(dll)){
+    int msvcrt = mv_on() && !strcasecmp(dll,"msvcrt.dll");
+    if(msvcrt){ void*r=mv_resolve(fn); if(r) return r; }
+    if(is_crt_dll(dll) || msvcrt){
         for(int m=0;m<g_nmods;m++){ void *r=export_lookup(g_mods[m].base, fn); if(r){
                 if(fn[0]=='m' && (!strcmp(fn,"memcpy")||!strcmp(fn,"memmove")||!strcmp(fn,"memset"))){ static void*cache[3][2];
                     int k=fn[3]=='c'?0:fn[3]=='m'?1:2; if(cache[k][0]!=r){ cache[k][0]=r; cache[k][1]=crt_fast_stub(fn,r); } return cache[k][1]; }
@@ -10932,6 +11134,8 @@ static void *uni_resolve(const char *dll, const char *fn){
     void *r=resolve_impl(fn); if(r) return r;
     // opengl32!gl* -> macOS OpenGL.framework (our wgl* are handled by resolve_impl)
     if(!strcasecmp(dll,"opengl32.dll") && (fn[0]=='g'&&fn[1]=='l')) return gl_or_missing(fn);
+    // windows-gnu binaries import the SEH handler from kernel32 (Windows forwards it to ntdll): vcruntime140's is the same routine
+    if(mv_on() && !strcmp(fn,"__C_specific_handler")) return crt_export(fn);
     return 0;
 }
 
@@ -12243,6 +12447,7 @@ int main(int argc, char **argv){ mt_start();
     g_prefer_base=0; for(int i=0;i<3;i++){ char crt[1300]; snprintf(crt,sizeof crt,"%s/%s",crtdir,names[i]); load_guest(crt, names[i]); }
 
     // ---- bind the target's imports (CRT -> guest exports, else native/stub) ----
+    g_stack_reserve=opt->StackRes;   // the default stack of threads the guest creates (i_CreateThread)
     bind_imports(g_base, opt);
     ws("  bound imps (exe+unresolved stubs) "); whex((uint64_t)imp_count);
 
@@ -12292,3 +12497,9 @@ int main(int argc, char **argv){ mt_start();
     if(getenv("PELOAD_HOLD_WINDOW") && g_present_started){ ws("  [hold-window] main done; keeping window up\n"); for(;;){ struct timespec ts={1,0}; nanosleep(&ts,0); } }
     return 0;
 }
+
+// ---- for webview2.m (wv2.h): one of our windows' Win32 screen rect, and Windows paths -> the prefix's Unix paths ----
+int pl_hwnd_geom(void*hwnd,int*x,int*y,int*w,int*h){ WWin*ww=hwnd; if(!ww || ww->magic!=WWIN_MAGIC) return 0;
+    int X=ww->x, Y=ww->y, W=ww->w, H=ww->h; if(X==(int)0x80000000) X=0; if(Y==(int)0x80000000) Y=0;
+    if(x)*x=X; if(y)*y=Y; if(w)*w=W; if(h)*h=H; return 1; }
+void pl_win2unix(const uint16_t*w,char*out,int n){ win2unix(w,out,n); }

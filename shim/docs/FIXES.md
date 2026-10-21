@@ -76,6 +76,9 @@ bash shim/tools/quiet-run.sh "PELOAD_D3DOBJ_LOG=1" 600 "reclaimer://join?server=
 
 bash shim/tools/make-usb.sh /Volumes/<stick>              # copy everything to a USB stick; run again to UPDATE it (only changes)
 bash /Volumes/<stick>/ReclaimerMac/install.sh             # on the other Mac (again after each update: only changes)
+
+DEPOTS="1064225 1064226" ./reclaimer-mac.sh download      # Halo: Reach files for Reach Renaissance (13 GB)
+bash shim/reach.sh 20_sword_slayer slayer_054 10          # Reach Renaissance: a local Reach match, no menus (shim/docs/reach-renaissance.md)
 ```
 Requirements: an Apple Silicon Mac (M1 or newer) with Rosetta 2 and macOS 13 or newer (the binaries are built for 13.0;
 tested on macOS 26).
@@ -174,6 +177,20 @@ patch variants by signature (section 16; shim/docs/patch-addresses.md).
   1920x1080 60 Hz monitor GetMonitorInfoW / EnumDisplayMonitors describe (MON_W / MON_H, one definition now); mode 0,
   ENUM_CURRENT and ENUM_REGISTRY only. Checked: the page reads "Your display: 1920 x 1080"; a Borderless-fullscreen profile
   still renders at 1920x1080 (scene and back buffer). `PELOAD_DEVMODE_OLD=1` = the old fill. (10-18)
+- **msvcrt.dll for windows-gnu programs** — `mv_resolve`, `uni_resolve`. Why: Reach Renaissance's five programs are Rust built
+  for x86_64-pc-windows-gnu, whose C runtime is msvcrt.dll (34 imports), not ucrtbase / vcruntime140; those imports bound by
+  name to native functions or logging stubs, so mingw's startup (`__getmainargs`, `__set_app_type`, `_initterm` ...) could
+  not run. How: msvcrt imports bind to the genuine ucrtbase / vcruntime140 exports of the same name (24 of 34); the 10
+  msvcrt-only names are built on ucrtbase: `__getmainargs` (`_configure_narrow_argv` + `__p___argc` / `__p___argv` /
+  `__p__environ`), `__set_app_type` (`_set_app_type`), `_amsg_exit`, `_onexit` (`_crt_atexit`), the data imports `__initenv` /
+  `_commode` / `_fmode`, and the FILE* calls (`__iob_func` hands out a 3-entry _iobuf array; `fwrite` / `fprintf` / `vfprintf`
+  translate it to ucrtbase's streams via `__acrt_iob_func` / `__stdio_common_vfprintf`). kernel32's `__C_specific_handler`
+  (windows-gnu imports it there; Windows forwards it to ntdll) binds to vcruntime140's. Checked: rr-master.exe and
+  host-probe.exe run to their own argument / build checks. `PELOAD_NO_MSVCRT=1` = old. (10-20, reach-port)
+- **LoadLibraryW, SetDllDirectoryW** — `i_LoadLibraryW`, `i_SetDllDirectoryW`, `i_LoadLibraryExW`. Why: Reach Renaissance's
+  host-probe loads the engine with SetDllDirectoryW(<MCC>\haloreach) + LoadLibraryW("haloreach.dll"); both were logging stubs
+  (MSVC builds only ever imported LoadLibraryExW). How: LoadLibraryW = LoadLibraryExW(name, 0, 0); SetDllDirectoryW remembers the
+  folder, and a bare DLL name that is no file in the current folder is loaded from there. (10-20, reach-port)
 
 ## 2. Processes, threads, exceptions
 
@@ -224,6 +241,19 @@ patch variants by signature (section 16; shim/docs/patch-addresses.md).
   map load; they were joinable and never joined (each kept its stack), and their TEB / TLS array / TLS blocks were
   never freed; the 1024-entry TLS-array table filled after ~25 map loads. How: detached; a returned thread's TEB, TLS
   array and blocks are freed 30 s later and its array leaves `g_tarrs`. Old: `PELOAD_THREAD_KEEP=1`. (10-18 fdf5717)
+- **Guest thread stacks of the requested size** — `i_CreateThread`, `g_stack_reserve`. Why: every guest thread got macOS's
+  512 KB default whatever it asked for (Windows: the requested dwStackSize, at least the exe's SizeOfStackReserve -- Reclaimer
+  1 MB, Reach Renaissance 2 MB; Rust asks 2 MB for each std thread). An overflow wasn't caught the Windows way either: MSVC's
+  `__chkstk` probes pages only below TEB.StackLimit (gs:0x10), which is a macOS TSD slot under the loader, so a big frame
+  stepped over pthread's one guard page into the memory below. In Reach Renaissance's host-probe that was the loader's
+  shim-sweep thread: it aborted (libsystem_c `__abort`) ~20 s into every match with haloreach frames on its stack. How:
+  max(requested, exe reserve, 1 MB) rounded to 64 KB, guard 256 KB. Checked: Sword Base Slayer runs its full 60 / 150 s.
+  `PELOAD_THREAD_STACK=<bytes>` raises the minimum; old: `PELOAD_THREAD_STACK_OLD=1`. (10-20, reach-port)
+- **ExitThread, FreeLibraryAndExitThread** — `i_ExitThread`, `thread_tramp`. Why: neither existed; haloreach.dll ends a worker
+  with FreeLibraryAndExitThread when a session ends, the logging stub returned and the thread ran into the int3 padding after
+  the noreturn call (SIGTRAP at exit). How: thread_tramp `_setjmp`s before the start function; ExitThread `_longjmp`s back
+  with the code, so the thread finishes as if it had returned (handle signaled, TEB / TLS reaped later); nothing on the guest
+  stack is unwound (as on Windows). A thread we did not start leaves through pthread_exit. (10-20, reach-port)
 - **GetSystemInfo reports the real machine** — `i_GetSystemInfo`. Why: it said ONE processor and allocation granularity
   0; the client sizes ~10 thread pools from the count, and halo3's spin-then-block locks (halo3+0x620170, count s16 at
   halo3+0xa3a48c) spin only when it is > 1 and wake one waiter at a time. How: hw.logicalcpu (or `PELOAD_NCPU`) and
@@ -309,6 +339,11 @@ patch variants by signature (section 16; shim/docs/patch-addresses.md).
   records base -> size; MEM_RELEASE unmaps the recorded region, MEM_DECOMMIT with size 0 the whole region; strips the
   file-view marker. Old: `PELOAD_VA_OLDFREE=1`. (10-18 ddfcab0, fc77ce6)
 - **UnmapViewOfFile unmaps** — Why: a no-op (views leaked). Old: `PELOAD_KEEP_VIEWS=1`. (10-18 fc77ce6)
+- **VirtualAlloc honours PAGE_EXECUTE_\*** — `i_VirtualAlloc`. Why: every allocation was mapped read/write only; Reach
+  Renaissance's host-probe allocates its jump stubs right after haloreach.dll with PAGE_EXECUTE_READWRITE and runs them, and
+  Rosetta refuses to execute a page without PROT_EXEC (SIGBUS at the stub's first byte, haloreach.dll+0x4ee0350). halo3 /
+  the Reclaimer client only ever made code executable with VirtualProtect, which already did. How: protections 0x10 / 0x20 /
+  0x40 / 0x80 add PROT_EXEC (pages stay readable + writable as before). Old: `PELOAD_VA_NOEXEC=1`. (10-20, reach-port)
 - **HEAP_GUARD realloc over-read** (diagnostic allocator `PELOAD_HEAP_GUARD`) — copied the new size instead of
   min(old, new). (10-11 3da9e9c)
 
@@ -475,6 +510,30 @@ patch variants by signature (section 16; shim/docs/patch-addresses.md).
   `PELOAD_ADVERTISE` (write an advertisement; emits a valid RFC-4122 v4 UUID since 10-14 e3a6f59 -- the first form had
   version nibble 'c'), `PELOAD_LOOPBACK_ONLY` (refuse non-127 connects, bf8aece), `PELOAD_UDP_ROLE=host|client`
   (role-asymmetric private-port remap, 45b0c85). (10-12..14)
+- **TLS: Schannel and certificate checks on macOS's LibreSSL** — schannel.c (`sch_*`). Why: Reach Renaissance's programs
+  speak HTTPS to their master server (server list, join leases, rendezvous) through Rust's native-tls -> schannel crate, i.e.
+  secur32's SSPI (AcquireCredentialsHandleA, InitializeSecurityContextW, QueryContextAttributesW, EncryptMessage /
+  DecryptMessage, ApplyControlToken, DeleteSecurityContext, FreeContextBuffer) and crypt32's CertGetCertificateChain +
+  CertVerifyCertificateChainPolicy(CERT_CHAIN_POLICY_SSL); all were logging stubs, every connection failed ("0 of 2 masters
+  responded"). How: LibreSSL 3.3 from /usr/lib (libssl.48 / libcrypto.46, in every macOS's shared cache, TLS 1.3) on memory
+  BIOs, which is SSPI's model: records go in one at a time, so a partial record is SEC_E_INCOMPLETE_MESSAGE (MISSING) and the
+  bytes after the handshake's last record or the decrypted record are SECBUFFER_EXTRA; EncryptMessage lays one record over
+  header | data | trailer (StreamSizes 5 / 64 / 16384; AEAD suites only); the first ISC call's EMPTY output buffer becomes
+  the TOKEN (the crate relies on that); SNI + ALPN from the request; DecryptMessage hands back HEADER | DATA | TRAILER | EXTRA
+  in place, close_notify = SEC_I_CONTEXT_EXPIRED. The certificate is checked by LibreSSL (/etc/ssl/cert.pem, or
+  `PELOAD_TLS_CAFILE`; the SNI name as the expected host) and that verdict is what the chain / policy calls report
+  (CERT_E_UNTRUSTEDROOT / _CN_NO_MATCH / _EXPIRED), so the crate's own check accepts or refuses as on Windows. Also
+  CertDuplicate/FreeCertificateContext, CertDuplicate/FreeCertificateChain, CertOpen/Close/DuplicateStore (native-tls clones
+  its empty extra-roots store), CertAddCertificateContextToStore, CertEnumCertificatesInStore. Checked: `rr-browser list` and
+  `serve` reach the public master over TLS 1.3 with the certificate verified; leases and joins work. `PELOAD_TLS_TRACE=1` logs
+  handshakes; old: `PELOAD_NO_SCHANNEL=1`. (10-20, reach-port)
+- **(diagnostic) UDP trace shows each datagram's first bytes; `PELOAD_UDP_BLOCK`** — `udp_tracef`, `udp_blocked`
+  (`i_ws2_sendto` / `i_ws2_recvfrom`). Why: a Reach Renaissance join through the master's relay stalled at JOINING 9%. Telling
+  the loader apart from the host needed a relayed join on demand and readable traces. How: `PELOAD_TRACE_UDP` lines end with
+  the first 16 bytes as text (`|RR-RDV1.{"t":"he|`, `|RR-RLY1...|`). `PELOAD_UDP_BLOCK=<port>[,<port>..]` drops datagrams to
+  and from those remote ports (a send still reports success; traced as TX-BLOCKED / RX-BLOCKED), as if the NATs between two
+  peers never opened. Result: the relay works under the loader, and the failed public join was a host that answered neither
+  path (reach-renaissance.md "Joining"). Off unless set; nothing else changes. (10-20, reach-port)
 
 ## 7. Windows, input, focus (Cocoa, Raw Input, XInput)
 
@@ -541,6 +600,62 @@ patch variants by signature (section 16; shim/docs/patch-addresses.md).
   (chat commands didn't send). How: key down, WM_CHAR, key up. (10-18 309e2fb)
 - **Per-window ShowWindow logging** — Why: the menu runtime re-hides two overlay windows every frame: 50k log lines in
   40 s. (10-16 6ec488d)
+- **Game window from a PeekMessageW / GetMessageW pump** — `present_window_from_pump`. Why: under `PELOAD_PRESENT` the macOS
+  window (and the present thread) was only made in MsgWaitForMultipleObjectsEx, the Reclaimer worker's wait; Reach
+  Renaissance's host-probe pumps its window with PeekMessageW, so its frames rendered offscreen and nothing showed. How: the
+  first PeekMessageW / GetMessageW on the main thread makes the window too (idempotent). (10-20, reach-port)
+- **Mouse look by re-centring the cursor** — wininput.c `wi_SetCursorPos`, `wi_cursor_captured_move`, `wi_raw_mouse`. Why:
+  Reach Renaissance's host-probe looks around with GetCursorPos (distance from the centre) + SetCursorPos (back to the
+  centre) every frame while ClipCursor holds the pointer; the captured pointer never moved here (motion went to Raw Input
+  only), so the look delta was always 0. How: once a guest calls SetCursorPos while the pointer is captured, captured motion
+  moves the virtual cursor too, clamped to the ClipCursor rectangle; a guest that never does (the Reclaimer client, Raw
+  Input) is unchanged. Checked with `PELOAD_KBM_TEST=1 PELOAD_KBM_TEST_DELAY=16`: the view turns with the sweep and W walks.
+  Old: `PELOAD_CURSOR_FROZEN=1`. (10-20, reach-port)
+- **CallWindowProcW** — `i_CallWindowProcW`. Why: a subclassed window procedure (host-probe hooks its game window for the UI
+  cursor) forwards what it doesn't handle to the previous one; the logging stub returned 0, so every forwarded message was
+  swallowed. How: calls the previous procedure (a guest function or our DefWindowProcW, both ms_abi). (10-20, reach-port)
+- **F1 releases the pointer from a game without a release key** — wininput.c `g_wi_user_released`, `wi_sys_hold`. Why: in a
+  Reach Renaissance match the pointer could not be freed (the user reported F1 did nothing): F1 was only ever the Reclaimer
+  client's own key, and host-probe holds the mouse with ClipCursor, re-clipping it every frame. How: for a re-centring guest
+  (`g_wi_recenter`; the Reclaimer client keeps its own F1) F1 gives the Mac its pointer back -- shown, moving freely; the
+  guest still thinks it holds it and gets no look motion -- until a click inside the window captures it again (that click
+  does not reach the game); the guest letting go itself clears it. Old: `PELOAD_NO_F1_RELEASE=1`. (10-20, reach-port)
+- **A message queue for GetMessageW loops** — `i_GetMessageW`, `i_PeekMessageW`, `i_SetTimer`, `i_PostMessageW` .... Why: Reach
+  Renaissance's menu-overlay sits in GetMessageW (its window, WebView2 callbacks and its worker threads' results arrive as
+  messages); GetMessageW returned 0 (= WM_QUIT) whenever nothing was queued, SetTimer never fired, PostMessageW /
+  PostThreadMessageW / PostQuitMessage / SendMessageW were logging stubs. How: posted messages share the input queue (any
+  thread); due timers come out of PeekMessageW as WM_TIMER and DispatchMessageW calls a TIMERPROC; SendMessageW calls the window
+  procedure; GetMessageW waits (the main thread keeps pumping macOS events) and returns 0 for WM_QUIT. Old: `PELOAD_MSGQ_OLD=1`.
+  (10-20, reach-port)
+- **WebView2 on WKWebView** — webview2.m (`wv2_*`), peload.c `WV2_HANDLE`. Why: Reach Renaissance's menus are HTML / JS pages in
+  Microsoft Edge WebView2; there is no Edge runtime here (the genuine WebView2Loader.dll returned 0x80070002 and the menus quit).
+  How: LoadLibrary("WebView2Loader.dll") returns a pseudo-module whose CreateCoreWebView2EnvironmentWithOptions builds our
+  environment -> controller -> ICoreWebView2 (+ settings, event args) on a WKWebView in a borderless, transparent, floating
+  NSWindow that stands for the guest's window (its rect from SetWindowPos / MoveWindow, shown / hidden with ShowWindow,
+  click-through with WS_EX_TRANSPARENT). Navigate (a `file://///%3F/C:/...` URL becomes the prefix path, read access to all of
+  C:), ExecuteScript, AddScriptToExecuteOnDocumentCreated, PostWebMessageAsString / Json, add_WebMessageReceived,
+  NavigationStarting / Completed / ContentLoading / DOMContentLoaded; the page's `window.chrome.webview` (postMessage,
+  addEventListener("message") ...) is a document-start script on WKScriptMessageHandler. The page gets AppKit's events directly
+  (keys, mouse, Gamepad API). Shared buffers are refused (QueryInterface for Environment12 / ICoreWebView2_17): the menus fall
+  back. Unimplemented methods log "[wv2] <interface> slot N". `PELOAD_WV2_TRACE=1` logs calls, `PELOAD_WV2_SNAPSHOT=<s>` saves
+  the page as PNGs, `PELOAD_WV2_INSPECT=1` enables Safari's inspector. Old: `PELOAD_NO_WV2=1`. (10-20, reach-port) Follow-up (the
+  user: the menus stayed on top of every other app): the window floats only while one of our processes is frontmost (the menus,
+  or a game whose window is published, xwin.c) and is put away while another app is; showing it never takes activation from
+  another app, and SetForegroundWindow on it activates the menus only from our own processes.
+- **Windows of other loader processes** — xwin.c. Why: menu-overlay follows the game's window (another process: --follow "host
+  probe") by title and keeps itself over its client area; every loader process only knew its own windows. How: a process with a
+  game window publishes title, client rect (Win32 screen coordinates), shown and minimised to ~/Library/Application Support/
+  ReclaimerMac/windows/<pid>.win when they change; other processes see it as a pseudo-handle (0x7F000000 | pid) in EnumWindows,
+  FindWindowW, GetWindowTextW, GetWindowRect / GetClientRect / ClientToScreen, IsWindow / IsWindowVisible / IsIconic,
+  GetWindowThreadProcessId and SetForegroundWindow (activates that app); SetWinEventHook callbacks fire for its location
+  changes, show / hide, minimise and destroy (polled every 50 ms). Windows keep their titles (GetWindowTextW, SetWindowTextW).
+  `PELOAD_TRACE_XWIN=1` logs hooks and events; old: `PELOAD_NO_XWIN=1`. (10-20, reach-port)
+- **WM_MOVE / WM_SIZE for WebView2 windows; their real rect** — `win_sized`, `i_GetWindowRect`, `i_GetClientRect`. Why: the menus
+  moved and resized their window over the game but the page stayed 640x360 in its corner (the user's screenshot): menu-overlay
+  sizes its WebView2 controller on WM_SIZE, which SetWindowPos never sent; GetWindowRect / GetClientRect also reported the fixed
+  1280x720. How: SetWindowPos / MoveWindow track the window's rect and send WM_MOVE / WM_SIZE when it changed; GetWindowRect /
+  GetClientRect report it -- both only for windows hosting a WebView2 (the Reclaimer client's windows are unchanged); GWL_STYLE /
+  GWL_EXSTYLE are stored. Old: `PELOAD_NO_WMSIZE=1`. (10-20, reach-port)
 
 ## 8. GDI and layered windows
 
@@ -575,6 +690,13 @@ patch variants by signature (section 16; shim/docs/patch-addresses.md).
 - **Layered-window z order** — Why: drawn in slot order, a loading splash could cover the lobby and its map vote. How:
   new windows on top; SetWindowPos HWND_TOP/BOTTOM/insert-after (without SWP_NOZORDER) reorder; drawn bottom to top.
   Old: `PELOAD_LAYERED_NOZ=1`. (10-18 7c3278c)
+- **GetGlyphOutlineW** — `i_GetGlyphOutlineW`. Why: Reach Renaissance's host-probe draws the engine's UI text itself
+  (CreateFontW + GetTextMetricsW + GetGlyphOutlineW per character into a glyph atlas); the logging stub returned 0, the atlas
+  never got a view, and screens such as the loadout picker showed no text (the user's report). How: CoreText with the font
+  GetTextMetricsW reports (`ct_font_for`): GGO_METRICS, GGO_BITMAP and GGO_GRAY2/4/8_BITMAP (DWORD rows; 4 / 16 / 64 levels),
+  GGO_GLYPH_INDEX, surrogate pairs; GLYPHMETRICS = black box, origin (left, top above the baseline), advance; an empty glyph
+  is 1x1 with no bitmap, as on Windows; MAT2 ignored (identity); outlines (GGO_NATIVE / BEZIER) = GDI_ERROR. Checked: the
+  loadout picker shows "Select Loadout", the loadout names and the game type text. Old: `PELOAD_GLYPH_STUB=1`. (10-20, reach-port)
 
 ## 9. Audio (XAudio2, WASAPI)
 
@@ -624,6 +746,13 @@ patch variants by signature (section 16; shim/docs/patch-addresses.md).
   reference held; each kept its tone thread / input queue (18 after 18 loads). How: closed when idle like playback
   streams, reopened on Start. (10-18 8090714) Reopen tries the real microphone again; the idle close checks its flag
   under the lock. (10-18 410a6ee)
+- **LoadLibrary of XAudio2 returns our XAudio2** — `XA_HANDLE`, `i_LoadLibraryExW`, `i_GetProcAddress`. Why: haloreach.dll
+  loads XAudio2 by name and takes its exports with GetProcAddress (halo3 only reached it through delay imports, which bind to
+  our CoreAudio XAudio2). The genuine xaudio2_9redist.dll in MCC\Binaries\Win64 loaded as a guest and recursed into the
+  engine until the stack ran out. How: a LoadLibrary of any `xaudio2_*` name returns a distinct handle, and GetProcAddress
+  on it resolves through `xa_resolve` (the import binder's table). Old: `PELOAD_XA_REALDLL=1`. (10-20, reach-port) Follow-up:
+  a name `xa_resolve` doesn't know (X3DAudio with `PELOAD_AUDIO=0`) gets a logging stub; it fell through to export_lookup on the
+  handle, which is no image (a fault reading 0x773303c in a windowless test host).
 
 ## 10. D3D11 / DXGI objects
 
@@ -703,6 +832,12 @@ patch variants by signature (section 16; shim/docs/patch-addresses.md).
   client's menu grading (which checks the back buffer's format) still runs. `PELOAD_GETTYPE_OLD=1` / `PELOAD_GETDESC_OLD=1`
   = old. Found with `PELOAD_TRACE_MAPREAD=1` (every READ map with its guest caller and first bytes) and
   `PELOAD_CS_GPUINPUT_LOG=1` (a CPU compute kernel reading a GPU render target: none). (10-18)
+- **OMSetRenderTargetsAndUnorderedAccessViews** — `ctx_OMSetRenderTargetsAndUAVs` (context vtable 34). Why: the do-nothing
+  default; haloreach.dll binds many of its passes' targets with it (halo3 never did), so ~500 draws a frame went to the
+  previous targets or none and the frame never reached the back buffer (window black, `[presentsrc] tex=0`). How: render
+  targets + depth as OMSetRenderTargets (NumRTVs 0xFFFFFFFF keeps them); pixel-shader UAVs are not bound (noted once with
+  `PELOAD_TRACE_D3DGL`). Checked: Sword Base renders with HUD and first-person weapon, ~2,500 draws a frame, none skipped.
+  Old: `PELOAD_OM_UAV_OLD=1`. (10-20, reach-port)
 
 ## 11. D3D11->GL: shaders and the DXBC->GLSL translator
 
@@ -1552,6 +1687,20 @@ Numbers are from the commit messages; PERF-PLAN.md has the measurements. Compare
   panel's 60 Hz are never shown and only heat a fanless MacBook Air into throttling; and PELOAD_MONITOR=<w>x<h> (peload.c
   mon_wh, any Mac, opt-in) sets the monitor size the loader reports (1920x1080 otherwise), which the client uses as its
   "native" render resolution -- 1600x900 or 1280x720 lowers the internal render resolution on a weak GPU.
+- **shim/reach.sh; gameplay start for Reach Renaissance** — Why: a way to run a Reach match without Reach Renaissance's menus,
+  and the loader's test tools (`PELOAD_INPUT_SCRIPT`, `PELOAD_KBM_TEST`, `PELOAD_D3DGL_SHOTWIN_FROM/_TO`, the walker) wait for
+  gameplay start, which was read only from the Reclaimer client's "gameplay presentation ready" log line. How: reach.sh runs
+  host-probe with the launcher's match template (shim/docs/reach-renaissance.md); `GAMEPLAY_MARK` also takes host-probe's
+  "load fraction 1.000"; `PELOAD_KBM_TEST_DELAY=<s>` (default 3) starts the keyboard/mouse self-test later (Reach shows
+  its loadout picker first). (10-20, reach-port)
+- **reach.sh servers / join** — Why: joining a game without the menus. How: `servers` runs `rr-browser list`; `join <address>`
+  starts `rr-browser serve` on a free local port, takes a lease (`/api/lease?address=`, what the menus do), and runs host-probe
+  as a guest with the launcher's join-args.txt arguments (0.1.17) -- exactly those forms: the `\\?\C:\...` paths for
+  `--strings` / `--extra-maps` (in plain `C:\` form host-probe skipped the Elite armor pack the host has, and the join stalled)
+  and the player id from player_id.txt WITHOUT its CRLF (with a CR the host never got the guest's state:
+  "external_launch_individual_state_timeout"). Checked against a local `rr-master` + a windowless host: the guest loads the
+  host's Slayer match with both players on the scoreboard; then a public Firefight game on Beachhead (joined through the public
+  master's rendezvous, played with its players). `RR_NAME=<name>` sets the in-game name. (10-20, reach-port)
 
 ## 21. Superseded workarounds (kept for history; most switches still exist)
 
