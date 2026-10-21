@@ -294,9 +294,15 @@ runs and renders (~60 fps; the black frame was case-sensitive SV_POSITION matchi
 game-specific patches / hooks / defaults ask game_is(); `shim/tools/game-matrix.sh` runs all three games. Launcher / menus = Direct2D 1.1
 + DirectWrite + WIC (2026-10-21, d2d.c / dwrite.c / wic.c, slot tables from Wine's IDL via tools/com_slots.py): a CPU canvas
 (CoreGraphics / CoreText) composited onto the D3D texture at EndDraw; Clear and texture DrawBitmap go straight to GL; offline test
-`bash shim/tools/d2d-test.sh` (PELOAD_D2D_SELFTEST); WIC is h2-only (halo3.dll references it). Gravemind's beta gate fetches beta.txt
-(WinHTTP); its GRAVEMIND LIVE client claims the player's name as a gamertag -- test runs use GM_TEST=1 (own profile).
-New loader files: winhttp.c, win32x.c, winmm.c, games.c, d2d.c, dwrite.c, wic.c (FIXES.md 2026-10-20/21 entries).
+`bash shim/tools/d2d-test.sh` (PELOAD_D2D_SELFTEST); WIC is h2-only (halo3.dll references it). The launcher draws since a 2D
+texture's IDXGISurface became a real interface (GetDesc read garbage; FIXES section 10). Input: halo2.dll SetForegroundWindow's
+its own hidden window and Gravemind reads keys / mouse / pads only while ITS window is foreground -- a click or the Mac window
+becoming key gives the foreground back (fg_user_activate; PELOAD_FG_TEST_ACTIVATE=<s> does it in input-less test runs, which
+otherwise stay "in the background": no pad poll, no sound resume). Sound: FindFirstFileA didn't translate C:\ paths, so Miles found
+no DSP plugin, halo2's voices (AIL_find_filter x4) failed and it never played a sound; Miles now uses the loader's DirectSound
+(dsound.c, h2-only; waveOut ran ~0.2 s late). PELOAD_BP=<dll>+<rva> breakpoints inside guest DLLs found it. Gravemind's beta gate
+fetches beta.txt (WinHTTP); its GRAVEMIND LIVE client claims the player's name as a gamertag -- test runs use GM_TEST=1 (own profile).
+New loader files: winhttp.c, win32x.c, winmm.c, games.c, d2d.c, dwrite.c, wic.c, dsound.c (FIXES.md 2026-10-20/21 entries).
 play.sh's stdin feeder is `sleep 86400.<pid>` (killed when the game exits; it used to hold a caller's `| tail` for 24 h).
 Native GL helper (2026-10-17, PELOAD_GL_HELPER=1: play.sh's default, the code's default without the env is off; spawned with
 only stdio + its pipe; shim/src/glh_client.c + glhelper.c + glh_shm.h, generated glh_gen.inc /
