@@ -1615,7 +1615,8 @@ Numbers are from the commit messages; PERF-PLAN.md has the measurements. Compare
   `--strings` / `--extra-maps` (in plain `C:\` form host-probe skipped the Elite armor pack the host has, and the join stalled)
   and the player id from player_id.txt WITHOUT its CRLF (with a CR the host never got the guest's state:
   "external_launch_individual_state_timeout"). Checked against a local `rr-master` + a windowless host: the guest loads the
-  host's Slayer match with both players on the scoreboard. `RR_NAME=<name>` sets the in-game name. (10-20, reach-port)
+  host's Slayer match with both players on the scoreboard; then a public Firefight game on Beachhead (joined through the public
+  master's rendezvous, played with its players). `RR_NAME=<name>` sets the in-game name. (10-20, reach-port)
 
 ## 21. Superseded workarounds (kept for history; most switches still exist)
 

@@ -19,7 +19,8 @@ Steam build of Halo: Reach (`haloreach.dll` SHA-256 `738dd2d2...0894`, the one b
   - HTTPS to Reach Renaissance's master runs through our Schannel on macOS's LibreSSL: TLS 1.3, certificate verified.
   - `bash shim/reach.sh servers` lists the public games; `bash shim/reach.sh join <address>` joins one the way the menus do
     (lease from `rr-browser serve`, then host-probe as a guest).
-  - Checked against a local `rr-master` and a windowless host: the guest loads the host's match with both players on the
+  - Checked in a public game (Firefight on Beachhead, 2026-10-20: joined through the public master, played alongside the other
+    players) and against a local `rr-master` with a windowless host: the guest loads the host's match with both players on the
     scoreboard.
 - Sound: XAudio2 on CoreAudio, FMOD banks from MCC, and the Waves DLLs as guests (the same path as Halo 3).
 - Not yet:
