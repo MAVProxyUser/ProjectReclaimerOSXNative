@@ -94,14 +94,24 @@ static int32_t g_wi_cx=WIN_W/2, g_wi_cy=WIN_H/2;   // last client-space pointer 
 // macOS cursor: the guest still sees its pointer captured, but whoever is using the Mac keeps their mouse.
 static int wi_syscursor(void){ static int ok=-1; if(ok<0) ok=!(getenv("PELOAD_KBM_TEST")||getenv("PELOAD_NO_SYS_CURSOR")); return ok; }
 static int g_wi_clip_on_x; static int32_t g_wi_clip_x[4];   // (ClipCursor's rectangle, for the re-centring cursor below)
+// F1 releases the pointer from a game that has no release key of its own (2026-10-20): Reach Renaissance's host-probe holds the
+// mouse with ClipCursor in a match and re-clips it every frame, and only the Reclaimer client knew F1. For a re-centring guest
+// (g_wi_recenter, below; the Reclaimer client keeps its own F1) F1 gives the Mac its pointer back -- shown and moving freely, while
+// the guest still thinks it holds it and gets no look motion -- until a click in the window, which captures again and does not
+// reach the game. PELOAD_NO_F1_RELEASE=1 = old.
+static int g_wi_user_released;
+static void wi_sys_hold(int hold){ if(!wi_syscursor()) return; CGAssociateMouseAndMouseCursorPosition(hold?0:1);
+    if(g_wi_cursor_count<0){ if(hold) CGDisplayHideCursor(kCGDirectMainDisplay); else CGDisplayShowCursor(kCGDirectMainDisplay); } }
 static int MSABI wi_ClipCursor(const int32_t*r){
     int want = r!=0; g_wi_clip_on_x=want && r[2]>r[0] && r[3]>r[1]; if(g_wi_clip_on_x) for(int i=0;i<4;i++) g_wi_clip_x[i]=r[i];
-    if(want!=g_wi_captured){ g_wi_captured=want; if(wi_syscursor()) CGAssociateMouseAndMouseCursorPosition(want?0:1);
+    if(want!=g_wi_captured){ g_wi_captured=want;
+        if(!want && g_wi_user_released){ g_wi_user_released=0; if(wi_syscursor() && g_wi_cursor_count<0) CGDisplayHideCursor(kCGDirectMainDisplay); }   // (the game let go itself)
+        else if(!g_wi_user_released && wi_syscursor()) CGAssociateMouseAndMouseCursorPosition(want?0:1);
         if(getenv("PELOAD_TRACE_INPUT")){ char m[64]; int k=snprintf(m,sizeof m,"  [kbm] pointer %s\n",want?"captured":"released"); (void)!write(2,m,k); } }
     return 1; }
 static int MSABI wi_ShowCursor(int show){
     int before=g_wi_cursor_count; g_wi_cursor_count += show?1:-1;
-    if(!wi_syscursor()) return g_wi_cursor_count;
+    if(!wi_syscursor() || g_wi_user_released) return g_wi_cursor_count;   // (released by F1: the Mac's pointer stays visible)
     if(before>=0 && g_wi_cursor_count<0) CGDisplayHideCursor(kCGDirectMainDisplay);
     else if(before<0 && g_wi_cursor_count>=0) CGDisplayShowCursor(kCGDirectMainDisplay);
     return g_wi_cursor_count; }
@@ -116,7 +126,7 @@ static int MSABI wi_SetCursorPos(int x,int y){ g_wi_cx=x; g_wi_cy=y;
     if(g_wi_captured && !g_wi_recenter){ static int old=-1; if(old<0) old=getenv("PELOAD_CURSOR_FROZEN")?1:0; if(!old){ g_wi_recenter=1;
             if(getenv("PELOAD_TRACE_INPUT")) (void)!write(2,"  [kbm] guest re-centres the captured cursor: captured motion moves it\n",71); } }
     return 1; }
-static void wi_cursor_captured_move(int dx,int dy){ if(!g_wi_recenter || !g_wi_captured) return;
+static void wi_cursor_captured_move(int dx,int dy){ if(!g_wi_recenter || !g_wi_captured || g_wi_user_released) return;
     int32_t x=g_wi_cx+dx, y=g_wi_cy+dy;
     if(g_wi_clip_on_x){ if(x<g_wi_clip_x[0]) x=g_wi_clip_x[0]; if(x>g_wi_clip_x[2]-1) x=g_wi_clip_x[2]-1; if(y<g_wi_clip_x[1]) y=g_wi_clip_x[1]; if(y>g_wi_clip_x[3]-1) y=g_wi_clip_x[3]-1; }
     g_wi_cx=x; g_wi_cy=y; }
@@ -193,6 +203,10 @@ static int wi_translate(id ev){
         if(mods&(1ul<<20)) return 0;                       // Command shortcuts go to AppKit (Cmd+Q, Cmd+Tab ...)
         unsigned short kc=((unsigned short(*)(id,SEL))objc_msgSend)(ev,sel_registerName("keyCode"));
         signed char rep=type==10?((signed char(*)(id,SEL))objc_msgSend)(ev,sel_registerName("isARepeat")):0;
+        if(kc==0x7A && g_wi_recenter && (g_wi_captured||g_wi_user_released)){ static int off=-1; if(off<0) off=getenv("PELOAD_NO_F1_RELEASE")?1:0;   // F1: see g_wi_user_released
+            if(!off){ if(type==10 && !rep && !g_wi_user_released){ g_wi_user_released=1; wi_sys_hold(0);
+                    (void)!write(2,"  [kbm] F1: pointer released (click the window to capture it again)\n",68); }
+                return 1; } }
         // F2-F10 overlay keys: retired 2026-10-17 (every one is a button on the stats page) -- the keys go to the game now
         // (the client answers votes with F5). PELOAD_HB_FKEYS=1 brings them back. F1 (release the mouse) is unaffected.
         static int fk=-1; if(fk<0){ const char*e=getenv("PELOAD_HB_FKEYS"); fk=e&&atoi(e)?1:0; }
@@ -240,6 +254,13 @@ static int wi_translate(id ev){
         { static uint8_t swallowed[8]; static int old=-1; if(old<0) old=getenv("PELOAD_TITLEBAR_CLICKS")?1:0; int bi=(int)(btn&7);
           if(!down && swallowed[bi]){ swallowed[bi]=0; return 0; }
           if(down) swallowed[bi]=0;   // (AppKit's title-bar drag loop eats the release itself: never carry the flag past a press)
+          if(down && g_wi_user_released){ id win=((id(*)(id,SEL))objc_msgSend)(ev,sel_registerName("window"));   // F1-released: a click in the window captures again
+            id view=win?((id(*)(id,SEL))objc_msgSend)(win,sel_registerName("contentView")):0;
+            if(view){ typedef struct { double x,y; } P; typedef struct { double x,y,w,h; } R;
+                P p=((P(*)(id,SEL))objc_msgSend)(ev,sel_registerName("locationInWindow")); R b={0,0,0,0};
+                ((void(*)(R*,id,SEL))objc_msgSend_stret)(&b,view,sel_registerName("frame"));
+                if(b.w>0 && b.h>0 && p.x>=b.x && p.y>=b.y && p.x<b.x+b.w && p.y<b.y+b.h){ g_wi_user_released=0; if(g_wi_captured) wi_sys_hold(1); swallowed[bi]=1;
+                    (void)!write(2,"  [kbm] pointer captured again\n",31); return 0; } } }
           if(down && !old && !g_wi_captured){ id win=((id(*)(id,SEL))objc_msgSend)(ev,sel_registerName("window"));
             id view=win?((id(*)(id,SEL))objc_msgSend)(win,sel_registerName("contentView")):0;
             if(view){ typedef struct { double x,y; } P; typedef struct { double x,y,w,h; } R;

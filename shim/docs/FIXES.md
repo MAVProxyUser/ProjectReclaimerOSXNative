@@ -502,6 +502,23 @@ patch variants by signature (section 16; shim/docs/patch-addresses.md).
   `PELOAD_ADVERTISE` (write an advertisement; emits a valid RFC-4122 v4 UUID since 10-14 e3a6f59 -- the first form had
   version nibble 'c'), `PELOAD_LOOPBACK_ONLY` (refuse non-127 connects, bf8aece), `PELOAD_UDP_ROLE=host|client`
   (role-asymmetric private-port remap, 45b0c85). (10-12..14)
+- **TLS: Schannel and certificate checks on macOS's LibreSSL** — schannel.c (`sch_*`). Why: Reach Renaissance's programs
+  speak HTTPS to their master server (server list, join leases, rendezvous) through Rust's native-tls -> schannel crate, i.e.
+  secur32's SSPI (AcquireCredentialsHandleA, InitializeSecurityContextW, QueryContextAttributesW, EncryptMessage /
+  DecryptMessage, ApplyControlToken, DeleteSecurityContext, FreeContextBuffer) and crypt32's CertGetCertificateChain +
+  CertVerifyCertificateChainPolicy(CERT_CHAIN_POLICY_SSL); all were logging stubs, every connection failed ("0 of 2 masters
+  responded"). How: LibreSSL 3.3 from /usr/lib (libssl.48 / libcrypto.46, in every macOS's shared cache, TLS 1.3) on memory
+  BIOs, which is SSPI's model: records go in one at a time, so a partial record is SEC_E_INCOMPLETE_MESSAGE (MISSING) and the
+  bytes after the handshake's last record or the decrypted record are SECBUFFER_EXTRA; EncryptMessage lays one record over
+  header | data | trailer (StreamSizes 5 / 64 / 16384; AEAD suites only); the first ISC call's EMPTY output buffer becomes
+  the TOKEN (the crate relies on that); SNI + ALPN from the request; DecryptMessage hands back HEADER | DATA | TRAILER | EXTRA
+  in place, close_notify = SEC_I_CONTEXT_EXPIRED. The certificate is checked by LibreSSL (/etc/ssl/cert.pem, or
+  `PELOAD_TLS_CAFILE`; the SNI name as the expected host) and that verdict is what the chain / policy calls report
+  (CERT_E_UNTRUSTEDROOT / _CN_NO_MATCH / _EXPIRED), so the crate's own check accepts or refuses as on Windows. Also
+  CertDuplicate/FreeCertificateContext, CertDuplicate/FreeCertificateChain, CertOpen/Close/DuplicateStore (native-tls clones
+  its empty extra-roots store), CertAddCertificateContextToStore, CertEnumCertificatesInStore. Checked: `rr-browser list` and
+  `serve` reach the public master over TLS 1.3 with the certificate verified; leases and joins work. `PELOAD_TLS_TRACE=1` logs
+  handshakes; old: `PELOAD_NO_SCHANNEL=1`. (10-20, reach-port)
 
 ## 7. Windows, input, focus (Cocoa, Raw Input, XInput)
 
@@ -566,6 +583,12 @@ patch variants by signature (section 16; shim/docs/patch-addresses.md).
 - **CallWindowProcW** — `i_CallWindowProcW`. Why: a subclassed window procedure (host-probe hooks its game window for the UI
   cursor) forwards what it doesn't handle to the previous one; the logging stub returned 0, so every forwarded message was
   swallowed. How: calls the previous procedure (a guest function or our DefWindowProcW, both ms_abi). (10-20, reach-port)
+- **F1 releases the pointer from a game without a release key** — wininput.c `g_wi_user_released`, `wi_sys_hold`. Why: in a
+  Reach Renaissance match the pointer could not be freed (the user reported F1 did nothing): F1 was only ever the Reclaimer
+  client's own key, and host-probe holds the mouse with ClipCursor, re-clipping it every frame. How: for a re-centring guest
+  (`g_wi_recenter`; the Reclaimer client keeps its own F1) F1 gives the Mac its pointer back -- shown, moving freely; the
+  guest still thinks it holds it and gets no look motion -- until a click inside the window captures it again (that click
+  does not reach the game); the guest letting go itself clears it. Old: `PELOAD_NO_F1_RELEASE=1`. (10-20, reach-port)
 
 ## 8. GDI and layered windows
 
@@ -600,6 +623,13 @@ patch variants by signature (section 16; shim/docs/patch-addresses.md).
 - **Layered-window z order** — Why: drawn in slot order, a loading splash could cover the lobby and its map vote. How:
   new windows on top; SetWindowPos HWND_TOP/BOTTOM/insert-after (without SWP_NOZORDER) reorder; drawn bottom to top.
   Old: `PELOAD_LAYERED_NOZ=1`. (10-18 7c3278c)
+- **GetGlyphOutlineW** — `i_GetGlyphOutlineW`. Why: Reach Renaissance's host-probe draws the engine's UI text itself
+  (CreateFontW + GetTextMetricsW + GetGlyphOutlineW per character into a glyph atlas); the logging stub returned 0, the atlas
+  never got a view, and screens such as the loadout picker showed no text (the user's report). How: CoreText with the font
+  GetTextMetricsW reports (`ct_font_for`): GGO_METRICS, GGO_BITMAP and GGO_GRAY2/4/8_BITMAP (DWORD rows; 4 / 16 / 64 levels),
+  GGO_GLYPH_INDEX, surrogate pairs; GLYPHMETRICS = black box, origin (left, top above the baseline), advance; an empty glyph
+  is 1x1 with no bitmap, as on Windows; MAT2 ignored (identity); outlines (GGO_NATIVE / BEZIER) = GDI_ERROR. Checked: the
+  loadout picker shows "Select Loadout", the loadout names and the game type text. Old: `PELOAD_GLYPH_STUB=1`. (10-20, reach-port)
 
 ## 9. Audio (XAudio2, WASAPI)
 
@@ -653,7 +683,9 @@ patch variants by signature (section 16; shim/docs/patch-addresses.md).
   loads XAudio2 by name and takes its exports with GetProcAddress (halo3 only reached it through delay imports, which bind to
   our CoreAudio XAudio2). The genuine xaudio2_9redist.dll in MCC\Binaries\Win64 loaded as a guest and recursed into the
   engine until the stack ran out. How: a LoadLibrary of any `xaudio2_*` name returns a distinct handle, and GetProcAddress
-  on it resolves through `xa_resolve` (the import binder's table). Old: `PELOAD_XA_REALDLL=1`. (10-20, reach-port)
+  on it resolves through `xa_resolve` (the import binder's table). Old: `PELOAD_XA_REALDLL=1`. (10-20, reach-port) Follow-up:
+  a name `xa_resolve` doesn't know (X3DAudio with `PELOAD_AUDIO=0`) gets a logging stub; it fell through to export_lookup on the
+  handle, which is no image (a fault reading 0x773303c in a windowless test host).
 
 ## 10. D3D11 / DXGI objects
 
@@ -1577,6 +1609,13 @@ Numbers are from the commit messages; PERF-PLAN.md has the measurements. Compare
   host-probe with the launcher's match template (shim/docs/reach-renaissance.md); `GAMEPLAY_MARK` also takes host-probe's
   "load fraction 1.000"; `PELOAD_KBM_TEST_DELAY=<s>` (default 3) starts the keyboard/mouse self-test later (Reach shows
   its loadout picker first). (10-20, reach-port)
+- **reach.sh servers / join** — Why: joining a game without the menus. How: `servers` runs `rr-browser list`; `join <address>`
+  starts `rr-browser serve` on a free local port, takes a lease (`/api/lease?address=`, what the menus do), and runs host-probe
+  as a guest with the launcher's join-args.txt arguments (0.1.17) -- exactly those forms: the `\\?\C:\...` paths for
+  `--strings` / `--extra-maps` (in plain `C:\` form host-probe skipped the Elite armor pack the host has, and the join stalled)
+  and the player id from player_id.txt WITHOUT its CRLF (with a CR the host never got the guest's state:
+  "external_launch_individual_state_timeout"). Checked against a local `rr-master` + a windowless host: the guest loads the
+  host's Slayer match with both players on the scoreboard. `RR_NAME=<name>` sets the in-game name. (10-20, reach-port)
 
 ## 21. Superseded workarounds (kept for history; most switches still exist)
 

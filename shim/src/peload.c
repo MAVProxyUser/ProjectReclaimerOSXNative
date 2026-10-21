@@ -4161,6 +4161,37 @@ static int    MSABI i_DrawTextW(void*dc,const uint16_t*s,int count,int32_t*rc,ui
 static int    MSABI i_GetTextMetricsW(void*dc,void*tm){ GdiDC*d=dc; int ph=(d&&d->magic==GDIDC_MAGIC&&d->font_h)?d->font_h:16; if(!tm) return 0;
     CTFontRef f=ct_font_for(ph); int asc=(int)(CTFontGetAscent(f)+0.5), desc=(int)(CTFontGetDescent(f)+0.5); int32_t*t=tm; memset(t,0,60);
     t[0]=asc+desc; t[1]=asc; t[2]=desc; t[5]=ph/2; t[6]=ph; t[7]=400; return 1; } // tmHeight,Ascent,Descent,AveCharWidth,MaxCharWidth,Weight
+// GetGlyphOutlineW (2026-10-20): Reach Renaissance's host-probe draws the engine's UI text itself -- CreateFontW + GetTextMetricsW +
+// GetGlyphOutlineW(GGO_GRAY8_BITMAP) per character into a glyph atlas -- and the logging stub returned 0 for every glyph, so menus
+// and screens (the loadout picker, scoreboards) showed no text. Now from CoreText with the font GetTextMetricsW reports
+// (ct_font_for: the DC's size and face slot): GGO_METRICS, GGO_BITMAP (1 bpp) and GGO_GRAY2/4/8_BITMAP (0..4 / 16 / 64 levels),
+// rows DWORD-aligned, GGO_GLYPH_INDEX honoured; GLYPHMETRICS = black box, origin (left, top above the baseline), advance. An
+// empty glyph (space) is 1x1 with no bitmap, as on Windows. The MAT2 transform is ignored (identity). PELOAD_GLYPH_STUB=1 = old.
+static uint32_t MSABI i_GetGlyphOutlineW(void*dc,uint32_t ch,uint32_t fmt,void*gm,uint32_t cb,void*buf,const void*mat){ (void)mat;
+    static int old=-1; if(old<0) old=getenv("PELOAD_GLYPH_STUB")?1:0; if(old) return 0;
+    GdiDC*d=dc; int ph=(d&&d->magic==GDIDC_MAGIC&&d->font_h)?d->font_h:16; CTFontRef f=ct_font_for(ph);
+    uint32_t kind=fmt&0x7f; if(kind!=0&&kind!=1&&kind!=4&&kind!=5&&kind!=6) return 0xFFFFFFFFu;   // GDI_ERROR: outlines (NATIVE/BEZIER) not done
+    CGGlyph gl=0;
+    if(fmt&0x80) gl=(CGGlyph)ch;
+    else { UniChar u[2]; int n=1; if(ch>0xFFFF){ uint32_t c=ch-0x10000; u[0]=(UniChar)(0xD800+(c>>10)); u[1]=(UniChar)(0xDC00+(c&0x3FF)); n=2; } else u[0]=(UniChar)ch;
+        CGGlyph g2[2]={0,0}; if(!CTFontGetGlyphsForCharacters(f,u,g2,n)) g2[0]=0; gl=g2[0]; }
+    CGRect bb=CTFontGetBoundingRectsForGlyphs(f,kCTFontOrientationHorizontal,&gl,0,1); CGSize adv={0,0}; CTFontGetAdvancesForGlyphs(f,kCTFontOrientationHorizontal,&gl,&adv,1);
+    int x0=(int)floor(bb.origin.x), y0=(int)floor(bb.origin.y), x1=(int)ceil(bb.origin.x+bb.size.width), y1=(int)ceil(bb.origin.y+bb.size.height);
+    int bw=x1-x0, bh=y1-y0, empty=(bb.size.width<=0||bb.size.height<=0||bw<=0||bh<=0||bw>1024||bh>1024);
+    if(gm){ uint8_t*m=gm; memset(m,0,20); uint32_t w=empty?1:(uint32_t)bw, h=empty?1:(uint32_t)bh; int32_t ox=empty?0:x0, oy=empty?0:y1; int16_t incx=(int16_t)lround(adv.width);
+        memcpy(m,&w,4); memcpy(m+4,&h,4); memcpy(m+8,&ox,4); memcpy(m+12,&oy,4); memcpy(m+16,&incx,2); }
+    if(kind==0) return 1;                                     // GGO_METRICS: success, no bitmap
+    if(empty) return 0;
+    uint32_t pitch = kind==1 ? (uint32_t)(((bw+31)/32)*4) : (uint32_t)((bw+3)&~3); uint32_t need=pitch*(uint32_t)bh;
+    if(!buf||!cb) return need; if(cb<need) return 0xFFFFFFFFu;
+    uint8_t*cov=calloc((size_t)bw*bh,1); if(!cov) return 0xFFFFFFFFu;
+    CGColorSpaceRef cs=CGColorSpaceCreateDeviceGray(); CGContextRef cg=CGBitmapContextCreate(cov,(size_t)bw,(size_t)bh,8,(size_t)bw,cs,kCGImageAlphaNone); CGColorSpaceRelease(cs);
+    if(cg){ CGContextSetGrayFillColor(cg,1.0,1.0); CGContextSetShouldAntialias(cg,true); CGPoint p={-(CGFloat)x0,-(CGFloat)y0}; CTFontDrawGlyphs(f,&gl,&p,1,cg); CGContextRelease(cg); }
+    int levels = kind==4?4 : kind==5?16 : 64; memset(buf,0,need); uint8_t*o=buf;   // (CG rows run top-down in memory)
+    for(int y=0;y<bh;y++) for(int x=0;x<bw;x++){ unsigned v=cov[(size_t)y*bw+x];
+        if(kind==1){ if(v>=128) o[(size_t)y*pitch+(x>>3)]|=(uint8_t)(0x80>>(x&7)); }
+        else o[(size_t)y*pitch+x]=(uint8_t)((v*levels+127)/255); }
+    free(cov); return need; }
 static int    MSABI i_GetTextFaceW(void*dc,int c,uint16_t*face){ (void)dc; static const uint16_t nm[]={'H','e','l','v','e','t','i','c','a',0}; int n=0; while(nm[n])n++; if(face&&c>0){ int k=n<c-1?n:c-1; for(int i=0;i<k;i++)face[i]=nm[i]; face[k]=0; } return n+1; }
 static uint32_t MSABI i_SetTextCharacterExtra(void*dc,int extra){ (void)dc;(void)extra; return 0; }
 // Window DC: a real on-screen surface (WIN_WxWIN_H BGRA, top-down). Blits to it are
@@ -9003,6 +9034,7 @@ static uintptr_t MSABI i_beginthread(WinThreadProc start,unsigned stack,void*arg
 #include "d3dsubmit.c"
 #include "xaudio.c"
 #include "wasapi.c"
+#include "schannel.c"   // secur32 Schannel + crypt32 chain checks on macOS LibreSSL (Reach Renaissance HTTPS)
 // every guest thread's TLS block of one module (index idx), copied under g_tlsm: a returned thread's array is freed 30 s
 // later (thr_reap), so callers must not keep the arrays themselves past the lock
 static int tls_blocks(uint32_t idx,void**out,int max){ int n=0; if(idx>=128) return 0; pthread_mutex_lock(&g_tlsm);
@@ -10070,7 +10102,8 @@ static void* MSABI i_GetProcAddress(void *mod, char *name){
     // Winsock: resolve through the shared ws2_32 table so the IAT entry and this
     // result are the SAME pointer (the --native-udp gate compares them).
     if(mod==WS2_HANDLE) return ((uint64_t)name<0x10000)? ws2_by_ordinal((uint32_t)(uintptr_t)name) : ws2_resolve_name(name);
-    if(mod==XA_HANDLE){ void*x=((uint64_t)name<0x10000)? xa_resolve((uint32_t)(uintptr_t)name,0) : xa_resolve(0,name); if(x) return x; }
+    if(mod==XA_HANDLE){ void*x=((uint64_t)name<0x10000)? xa_resolve((uint32_t)(uintptr_t)name,0) : xa_resolve(0,name); if(x) return x;
+        mod=0; }   // (not an image: never export_lookup it -- PELOAD_AUDIO=0 leaves X3DAudio unresolved, below it gets a logging stub)
     if((uint64_t)name < 0x10000){ // imported by ordinal
         if(imp_count<8192){ imp_dll[imp_count]="(dynamic)"; imp_fn[imp_count]="#ordinal";
             return make_stub(imp_count++); }
@@ -10603,7 +10636,7 @@ static void *resolve_impl(const char *fn){
         {"TextOutW",(void*)i_TextOutW},
         {"ExtTextOutW",(void*)i_ExtTextOutW},
         {"DrawTextW",(void*)i_DrawTextW},
-        {"GetTextMetricsW",(void*)i_GetTextMetricsW},
+        {"GetTextMetricsW",(void*)i_GetTextMetricsW},{"GetGlyphOutlineW",(void*)i_GetGlyphOutlineW},
         {"GetTextFaceW",(void*)i_GetTextFaceW},
         {"SetTextCharacterExtra",(void*)i_SetTextCharacterExtra},
         {"StretchDIBits",(void*)i_StretchDIBits},
@@ -10699,6 +10732,7 @@ static void *resolve_impl(const char *fn){
         {0,0}
     };
     for(int i=0; T[i].n; i++) if(!strcmp(T[i].n, fn)) return fc_bind(T[i].f);   // (fc_bind: the original unless PELOAD_FASTCALL / PELOAD_AB=fastcall)
+    { void*s=sch_resolve(fn); if(s) return s; }   // secur32 / crypt32 TLS (schannel.c)
     return 0;
 }
 
