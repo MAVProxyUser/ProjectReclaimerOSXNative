@@ -519,6 +519,13 @@ patch variants by signature (section 16; shim/docs/patch-addresses.md).
   its empty extra-roots store), CertAddCertificateContextToStore, CertEnumCertificatesInStore. Checked: `rr-browser list` and
   `serve` reach the public master over TLS 1.3 with the certificate verified; leases and joins work. `PELOAD_TLS_TRACE=1` logs
   handshakes; old: `PELOAD_NO_SCHANNEL=1`. (10-20, reach-port)
+- **(diagnostic) UDP trace shows each datagram's first bytes; `PELOAD_UDP_BLOCK`** — `udp_tracef`, `udp_blocked`
+  (`i_ws2_sendto` / `i_ws2_recvfrom`). Why: a Reach Renaissance join through the master's relay stalled at JOINING 9%. Telling
+  the loader apart from the host needed a relayed join on demand and readable traces. How: `PELOAD_TRACE_UDP` lines end with
+  the first 16 bytes as text (`|RR-RDV1.{"t":"he|`, `|RR-RLY1...|`). `PELOAD_UDP_BLOCK=<port>[,<port>..]` drops datagrams to
+  and from those remote ports (a send still reports success; traced as TX-BLOCKED / RX-BLOCKED), as if the NATs between two
+  peers never opened. Result: the relay works under the loader, and the failed public join was a host that answered neither
+  path (reach-renaissance.md "Joining"). Off unless set; nothing else changes. (10-20, reach-port)
 
 ## 7. Windows, input, focus (Cocoa, Raw Input, XInput)
 

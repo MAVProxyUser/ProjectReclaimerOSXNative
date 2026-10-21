@@ -22,6 +22,7 @@ Steam build of Halo: Reach (`haloreach.dll` SHA-256 `738dd2d2...0894`, the one b
   - Checked in a public game (Firefight on Beachhead, 2026-10-20: joined through the public master, played alongside the other
     players) and against a local `rr-master` with a windowless host: the guest loads the host's match with both players on the
     scoreboard.
+  - Joins through the master's relay (when the host can't be reached directly) work too: see "Joining" below.
 - Sound: XAudio2 on CoreAudio, FMOD banks from MCC, and the Waves DLLs as guests (the same path as Halo 3).
 - **The menus run** (`bash shim/reach.sh`: Reach Renaissance's own launcher): WebView2 on WKWebView, over the game's window.
 - Not yet:
@@ -69,6 +70,45 @@ Steam build of Halo: Reach (`haloreach.dll` SHA-256 `738dd2d2...0894`, the one b
 - The menu runtime uses `--launch-block lb_m_c_1.bin --menu-scene all ...`.
 - The launcher finds MCC through `reg query` (no registry here) or `%LOCALAPPDATA%\ReachRenaissance\mcc_folder.txt`, which
   is `C:\ReclaimerCache\ReachRenaissance\mcc_folder.txt` under the loader.
+
+## Joining: direct, or through the master's relay
+
+How a guest reaches a host (host-probe `announce::prepare` and `reach_directory::rendezvous`):
+
+1. The lease comes over HTTPS from the master that lists the server.
+2. Rendezvous messages are `RR-RDV1\n` + JSON over UDP. The guest sends its `join` to every UDP port the master has (the
+   public master has 3478 and 11700, a local `rr-master` only 11700). The first port to answer is used: the log line
+   "X answered over UDP before Y" names it.
+3. The master answers with `punch` (the host's address) and tells the host about the guest.
+4. Both sides send `hello`s for 3 s, about 13 of them. So "direct path failed ... (3026 ms after starting)" is that window,
+   not a slow master.
+5. If no hello comes back, the guest sends `relay_request` and gets a `relay_offer` with a 16-byte token. Every game packet
+   then goes to the master as `RR-RLY1\n` + token + payload. The log shows `Route { addr: <master>, relay: Some(..) }`.
+
+The relay works under the loader. Checked 2026-10-20 against a local `rr-master --port 11700 --allow-insecure-http` and a
+windowless host (the launcher's host-args.txt with `{master}` = `http://127.0.0.1:11700`). The guest ran as
+`PELOAD_UDP_BLOCK=40011 bash shim/reach.sh join 127.0.0.1:40011`: the switch drops every datagram between the guest and the
+host's port, as if the NATs never opened.
+
+- The guest gave up on the direct path after 3,026 ms.
+- It took the relay and loaded the host's match to 100% through it: 3,013 relayed datagrams, both ways.
+
+`PELOAD_TRACE_UDP=1` prints each datagram with its first 16 bytes, which show the `RR-RDV1` / `RR-RLY1` tags.
+
+The failed join to "LONG LIVE EXTERRA" (2026-10-20, Forge World Slayer) was the host, not the loader:
+
+- The menus showed JOINING 9%, then "No answer from that game's host".
+- The public master answered on 3478, and the guest's direct hellos to the host went unanswered.
+- So the guest took the relay. Its join packet went out through the relay 8 times with no reply.
+- The menus gave up after about 60 s.
+- The server was off the list 4 minutes later.
+
+A host that answers neither path is not reachable from any client. Successful public joins so far took the direct path
+(relay None).
+
+Under the loader, local logs show the host as `127.0.0.1:11`. That is the loader's old Reclaimer remap of privileged
+loopback ports (`sa_b2w`: 40001-41023 show as 1-1023 to the guest; section 6 of FIXES.md). It is harmless: the remap is
+reversed on send.
 
 ## Loader fixes it needed (all in FIXES.md, "reach-port")
 

@@ -2923,13 +2923,23 @@ static int MSABI i_ws2_connect(WSASOCK s,const void*name,int nl){ struct sockadd
         return -1; }
     net_tracef("[net] connect(fd=%d,%s:%d) -> OK\n",(int)s,ips,port);
     return 0; }
-static void udp_tracef(const char*dir,WSASOCK s,const struct sockaddr_storage*ss,int len){ if(!getenv("PELOAD_TRACE_UDP")) return;
+static void udp_tracef(const char*dir,WSASOCK s,const struct sockaddr_storage*ss,const char*buf,int len){ if(!getenv("PELOAD_TRACE_UDP")) return;
     char ip[64]="?"; int port=0; if(ss->ss_family==AF_INET){ const struct sockaddr_in*si=(const void*)ss; inet_ntop(AF_INET,&si->sin_addr,ip,sizeof ip); port=ntohs(si->sin_port);}
     int lp=0; { struct sockaddr_in me; socklen_t ml=sizeof me; if(getsockname((int)s,(struct sockaddr*)&me,&ml)==0) lp=ntohs(me.sin_port);}
-    char b[160]; int k=snprintf(b,sizeof b,"  [udp] %s fd=%d local:%d %s %s:%d len=%d\n",dir,(int)s,lp,strcmp(dir,"TX")?"<-":"->",ip,port,len); (void)!write(2,b,k); }
-static int MSABI i_ws2_sendto(WSASOCK s,const char*buf,int len,int fl,const void*to,int tl){ struct sockaddr_storage ss; if(to)peer_gip_rec((int)s,to,tl); t_sa_send=1; int bl=to?sa_w2b(to,tl,&ss):0; t_sa_send=0; ssize_t r=sendto((int)s,buf,len,fl,bl?(struct sockaddr*)&ss:0,bl); if(r<0){ws2_err(errno);if(getenv("PELOAD_TRACE_UDP")){char b[96];int k=snprintf(b,sizeof b,"  [udp] TX fd=%d FAIL errno=%d\n",(int)s,errno);(void)!write(2,b,k);}return -1;} if(bl)udp_tracef("TX",s,&ss,(int)r); return (int)r; }
+    char hd[40]; int hn=0; for(int i=0;buf&&i<len&&i<16;i++){ unsigned char c=(unsigned char)buf[i]; hd[hn++]=(c>=32&&c<127)?(char)c:'.'; } hd[hn]=0;   // the first bytes: RR-RDV1 / RR-RLY1 tags
+    char b[200]; int k=snprintf(b,sizeof b,"  [udp] %s fd=%d local:%d %s %s:%d len=%d |%s|\n",dir,(int)s,lp,dir[0]=='T'?"->":"<-",ip,port,len,hd); (void)!write(2,b,k); }
+// PELOAD_UDP_BLOCK=<port>[,<port>..] (test aid): datagrams to and from those remote ports are dropped (a send reports success),
+// as if the NATs between this process and that peer never opened while the master stays reachable -- forces Reach
+// Renaissance's guest onto the master's relay against a local host (shim/docs/reach-renaissance.md).
+static int udp_blocked(const struct sockaddr_storage*ss){ static int nb=-1; static uint16_t bp[8];
+    if(nb<0){ int n=0; const char*e=getenv("PELOAD_UDP_BLOCK"); while(e&&*e&&n<8){ int p=atoi(e); if(p>0&&p<65536) bp[n++]=(uint16_t)p; e=strchr(e,','); if(e) e++; } nb=n; }
+    if(!nb||ss->ss_family!=AF_INET) return 0; uint16_t p=ntohs(((const struct sockaddr_in*)ss)->sin_port); for(int i=0;i<nb;i++) if(bp[i]==p) return 1; return 0; }
+static int MSABI i_ws2_sendto(WSASOCK s,const char*buf,int len,int fl,const void*to,int tl){ struct sockaddr_storage ss; if(to)peer_gip_rec((int)s,to,tl); t_sa_send=1; int bl=to?sa_w2b(to,tl,&ss):0; t_sa_send=0; if(bl && udp_blocked(&ss)){ udp_tracef("TX-BLOCKED",s,&ss,buf,len); return len; }
+    ssize_t r=sendto((int)s,buf,len,fl,bl?(struct sockaddr*)&ss:0,bl); if(r<0){ws2_err(errno);if(getenv("PELOAD_TRACE_UDP")){char b[96];int k=snprintf(b,sizeof b,"  [udp] TX fd=%d FAIL errno=%d\n",(int)s,errno);(void)!write(2,b,k);}return -1;} if(bl)udp_tracef("TX",s,&ss,buf,(int)r); return (int)r; }
 static __thread uint32_t t_rx_ip; static __thread uint16_t t_rx_port;   // the last datagram's source on this thread (stats.c voice source tally)
-static int MSABI i_ws2_recvfrom(WSASOCK s,char*buf,int len,int fl,void*from,int*fl2){ struct sockaddr_storage ss; socklen_t sl=sizeof ss; ssize_t r=recvfrom((int)s,buf,len,fl,(struct sockaddr*)&ss,&sl); if(r<0){ws2_err(errno);return -1;} if(r>=0)udp_tracef("RX",s,&ss,(int)r);
+static int MSABI i_ws2_recvfrom(WSASOCK s,char*buf,int len,int fl,void*from,int*fl2){ struct sockaddr_storage ss; socklen_t sl; ssize_t r;
+    for(;;){ sl=sizeof ss; r=recvfrom((int)s,buf,len,fl,(struct sockaddr*)&ss,&sl); if(r<0){ws2_err(errno);return -1;} if(!udp_blocked(&ss)) break; udp_tracef("RX-BLOCKED",s,&ss,buf,(int)r); }
+    udp_tracef("RX",s,&ss,buf,(int)r);
     if(ss.ss_family==AF_INET){ t_rx_ip=((struct sockaddr_in*)&ss)->sin_addr.s_addr; t_rx_port=ntohs(((struct sockaddr_in*)&ss)->sin_port); }
     { extern void st_voice_wiretally(const char*buf,long n,uint32_t ip,uint16_t port); if(r>=8 && ss.ss_family==AF_INET && (buf[0]=='M'||buf[0]=='L') && buf[1]=='C' && buf[3]=='1')
         st_voice_wiretally(buf,(long)r,((struct sockaddr_in*)&ss)->sin_addr.s_addr,ntohs(((struct sockaddr_in*)&ss)->sin_port)); }
@@ -3104,7 +3114,7 @@ static int MSABI i_ws2_WSASendMsg(WSASOCK s,uint8_t*msg,uint32_t flags,uint32_t*
     struct sockaddr_storage ss; t_sa_send=1; int bl=name?sa_w2b(name,namelen,&ss):0; t_sa_send=0;
     ssize_t r=sendto((int)s,gbuf,tot,0,bl?(struct sockaddr*)&ss:0,bl);
     if(r<0){ ws2_err(errno); if(ov){*(uint64_t*)(ov+0)=0;*(uint64_t*)(ov+8)=0;} return -1; }
-    if(sent)*sent=(uint32_t)r; if(bl)udp_tracef("TX",s,&ss,(int)r);
+    if(sent)*sent=(uint32_t)r; if(bl)udp_tracef("TX",s,&ss,gbuf,(int)r);
     if(ov){ *(uint64_t*)(ov+0)=0; *(uint64_t*)(ov+8)=(uint64_t)r; iocp_post_fd((int)s,(uint64_t)r,ov); }
     return 0; }
 static int MSABI i_ws2_WSARecvMsg(WSASOCK s,uint8_t*msg,uint32_t*recvd,uint8_t*ov,void*cr){
@@ -3124,7 +3134,7 @@ static int MSABI i_ws2_WSARecvMsg(WSASOCK s,uint8_t*msg,uint32_t*recvd,uint8_t*o
     if(recvd)*recvd=(uint32_t)r;
     if(name&&namelenp){ int wl=*namelenp; sa_b2w((struct sockaddr*)&ss,name,&wl); *namelenp=wl; peer_gip_restore((int)s,name); }
     *(uint32_t*)(msg+48)=0; /* dwFlags out */ *(uint32_t*)(msg+32)=0; /* Control.len out (no cmsg) */
-    udp_tracef("RX",s,&ss,(int)r);
+    udp_tracef("RX",s,&ss,rbuf,(int)r);
     if(ov){ *(uint64_t*)(ov+0)=0; *(uint64_t*)(ov+8)=(uint64_t)r; iocp_post_fd((int)s,(uint64_t)r,ov); }
     return 0; }
 static void* ws2_real_name(const char*n){
