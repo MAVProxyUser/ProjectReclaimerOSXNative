@@ -902,6 +902,15 @@ patch variants by signature (section 16; shim/docs/patch-addresses.md).
 
 ## 11. D3D11->GL: shaders and the DXBC->GLSL translator
 
+- **System-value semantics case-insensitive** (2026-10-21) — dxbc2glsl.c `dg_out_is_pos` and the input / output signature loops. Why:
+  halo2.dll's shaders name the position "SV_POSITION" (halo3's say "SV_Position"); with strcmp the vertex shader wrote its position
+  into a plain varying and never set gl_Position, so nothing rasterized -- Project Gravemind's black frame (every render target
+  empty, 0 samples passed even with PELOAD_D3DGL_SOLIDPS). How: strcasecmp / strncasecmp for SV_Position and SV_Depth (as
+  SV_VertexID / SV_InstanceID already were). Halo 3 and Reach unaffected (same names, other case).
+- **Diagnostics by present count** (2026-10-21) — `PELOAD_D3DGL_DUMPFRAME_N=<present #>` (the frame draw list) and `PELOAD_RTDUMP_N=<present #>`
+  (every render target of a frame, the stats page's rtdump) for games without Reclaimer's "gameplay presentation ready" line or a
+  stats page; `PELOAD_TRACE_HASH` also prints slot 0's first four vertices; `PELOAD_TRACE_SWAP` logs CreateSwapChain;
+  `PELOAD_FRAMELOG` now records clears, render-target binds and GetBuffer.
 - **Real HLSL compiler, opt-in** (2026-10-20) — `i_D3DCompile`, `PELOAD_REAL_D3DCOMPILE=1`: MCC's own D3DCompiler_47.dll (loaded as a guest
   DLL now that its msvcrt imports exist) compiles the source to real DXBC for the translator. Off by default (Reclaimer's video
   shaders are only looked at as blobs; its menu grading shader keeps its own path).

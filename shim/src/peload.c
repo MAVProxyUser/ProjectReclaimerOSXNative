@@ -1814,7 +1814,10 @@ static void d3dgl_present(void); // fwd (blit the D3DGL backbuffer to the window
 static int cb_looks_viewproj(const float*m,uint64_t bytes); static int hb_enabled(void); static int hb_is_world_camera(const float*rows); static void hb_capture_view(const float*rows); static void hb_draw_overlay(void); static void hb_note_map(const char*p); extern volatile int g_hb_taken; static void hb_note_dsv(void*ds); static void hb_capture_tick(void); static void hb_vis_tick(void); // hitbox.c
 static void d3dgl_clear_rtv(void* rtvview,const float* col); // fwd (ClearRenderTargetView -> GL clear)
 static void d3dgl_clear_dsv(void*dsvview,uint32_t flags,float depth,uint8_t stencil); // fwd (ClearDepthStencilView -> GL depth/stencil clear)
-static void MSABI ctxi_ClearRTV(void*t,void*rtv,const float*col){ (void)t; if(d3dgl_enabled()) d3dgl_clear_rtv(rtv,col); }
+static void flog(const char*fmt,...); static D3DObj* g_d3d_backbuf;   // (below)
+static void MSABI ctxi_ClearRTV(void*t,void*rtv,const float*col){ (void)t;
+    { D3DObj*v=rtv; D3DObj*r=(v&&v->data&&v->vkind)?(D3DObj*)v->data:v; flog("ClearRTV %p%s %ux%u f%u (%.2f %.2f %.2f %.2f)",(void*)r,r==g_d3d_backbuf?"(BB)":"",r?r->w:0,r?r->h:0,r?r->fmt:0,col?col[0]:0,col?col[1]:0,col?col[2]:0,col?col[3]:0); }
+    if(d3dgl_enabled()) d3dgl_clear_rtv(rtv,col); }
 static void MSABI ctxi_ClearDSV(void*t,void*dsv,uint32_t fl,float d,uint8_t s){ (void)t; if(d3dgl_enabled()) d3dgl_clear_dsv(dsv,fl,d,s); }
 // PELOAD_DRAW_CALLER: log the first few distinct halo3 return addresses that call each draw type,
 // so we can decompile the actual geometry-submit function and find why it binds no input layout.
@@ -2170,6 +2173,7 @@ static void MSABI ctx_PSSetShaderResources(void*t,uint32_t start,uint32_t num,vo
 static void MSABI ctx_OMSetRenderTargets(void*t,uint32_t num,void*const*rtvs,void*dsv){ (void)t;
     g_rst.num_rt=0;
     for(uint32_t i=0;i<num&&i<8;i++){ D3DObj*v=rtvs?(D3DObj*)rtvs[i]:0; D3DObj*res=(v&&v->data)?(D3DObj*)v->data:v; g_rst.rtvs[i]=res; g_rst.rtvv[i]=(v&&v->vkind)?v:0; if(res)g_rst.num_rt=i+1; }
+    if(num && rtvs && rtvs[0]){ D3DObj*r=g_rst.rtvs[0]; flog("OMSetRT %p%s %ux%u f%u",(void*)r,r==g_d3d_backbuf?"(BB)":"",r?r->w:0,r?r->h:0,r?r->fmt:0); }
     for(uint32_t i=num;i<8;i++){ g_rst.rtvs[i]=0; g_rst.rtvv[i]=0; }
     g_rst.rtv=g_rst.rtvs[0];
     { D3DObj*d=(D3DObj*)dsv; g_rst.dsv=(d&&d->data)?(D3DObj*)d->data:d; } }
@@ -2284,14 +2288,16 @@ static void swap_size(uint32_t*w,uint32_t*h){ static uint32_t W,H; if(!W){ W=192
         if(e){ unsigned a=0,b=0; if(sscanf(e,"%ux%u",&a,&b)==2 && a>=320 && b>=200 && a<=4096 && b<=4096){ W=a; H=b; } } } *w=W; *h=H; }
 static D3DObj* swap_backbuf(void){ if(!g_d3d_backbuf){ uint32_t w,h; swap_size(&w,&h); g_d3d_backbuf=mktex(w,h,1,28,2); } return g_d3d_backbuf; }
 static int MSABI swap_GetBuffer(void*t,uint32_t buf,GUID_*r,void**pp){ (void)t;(void)buf;(void)r;
-    swap_backbuf();
+    swap_backbuf(); flog("GetBuffer swapchain=%p -> BB %p",t,(void*)g_d3d_backbuf);
     if(pp){ *pp=g_d3d_backbuf; obj_AddRef(g_d3d_backbuf); } return HR_OK; }   // GetBuffer hands out a reference (the game Releases it)
 // IDXGIDeviceSubObject::GetDevice (vtable slot 7): MUST populate *pp with the
 // device, else callers (e.g. ui_composition's IDXGISwapChain::GetDevice(ID3D11Device))
 // get a null device, take their error path, and LEAK a RefCell borrow -> the
 // frontend's "RefCell already borrowed" re-entrancy panic on the next UI draw.
 static int MSABI swap_GetDevice(void*t,GUID_*riid,void**pp){ (void)t;(void)riid; if(pp)*pp=&g_d3ddevice; return HR_OK; }
-static int MSABI dxgi_CreateSwapChain(void*t,void*dev,void*desc,void**pp){ (void)t;(void)dev;(void)desc; if(pp)*pp=d3dobj(g_dxgiswap_vtbl,0,0); return HR_OK; }
+static int MSABI dxgi_CreateSwapChain(void*t,void*dev,void*desc,void**pp){ (void)t;(void)dev; if(pp)*pp=d3dobj(g_dxgiswap_vtbl,0,0);
+    if(getenv("PELOAD_TRACE_SWAP") && desc){ const uint8_t*d=desc; char m[160]; int k=snprintf(m,sizeof m,"  [swapchain] CreateSwapChain -> %p: %ux%u fmt %u buffers %u window %p\n",pp?*pp:0,*(const uint32_t*)d,*(const uint32_t*)(d+4),*(const uint32_t*)(d+16),*(const uint32_t*)(d+40),*(void*const*)(d+48)); (void)!write(2,m,k); }
+    return HR_OK; }
 // DXGI_SWAP_CHAIN_DESC: BufferDesc{W@0,H@4,RR num@8/den@12,Format@16,...} SampleDesc{Count@28,Q@32}
 // BufferUsage@36 BufferCount@40 OutputWindow@48 Windowed@56 SwapEffect@60 Flags@64. A zeroed
 // desc (our old no-op) made the engine see buffers=0/format=0 and never count a "ready present".
@@ -4811,6 +4817,8 @@ static void rtd_forget(const D3DObj*o){ for(int i=0;i<g_rtd_n;i++) if(g_rtd_list
 static int rtd_fcmp(const void*a,const void*b){ float x=*(const float*)a, y=*(const float*)b; return x<y?-1:x>y; }
 static unsigned d3dgl_fbo_for(D3DObj*const*rts,int n,D3DObj*ds);
 static void rtd_tick(void){
+    { static int done; const char*e=getenv("PELOAD_RTDUMP_N"); extern unsigned long g_eng_present_no_x;   // (2026-10-21) by present count, no stats page
+      if(e && !done && g_eng_present_no_x>=strtoul(e,0,10)){ done=1; g_rtd_req=1; } }
     if(g_rtd_state==0){ if(__atomic_exchange_n(&g_rtd_req,0,__ATOMIC_ACQ_REL)){ g_rtd_state=1; g_rtd_n=0; } return; }
     g_rtd_state=0; if(!G.ReadPixels) return; unsigned no=g_rtd_no++; const char*home=getenv("HOME"); if(!home) home="/tmp";
     for(int i=0;i<g_rtd_n;i++){ D3DObj*rt=g_rtd_list[i]; if(!rt) continue; D3DObj*rr=(rt->data&&rt->vkind)?(D3DObj*)rt->data:rt;
@@ -7043,6 +7051,7 @@ static void d3dgl_draw(uint32_t vcount,int indexed,uint32_t instcount,uint32_t s
                 k+=snprintf(m+k,sizeof m-k," | vb:"); for(int i=0;i<3;i++) k+=snprintf(m+k,sizeof m-k," s%d=%p/%u+%u(%lluB)",i,(void*)g_d3dst.vb[i],g_d3dst.vstride[i],g_d3dst.voff[i],g_d3dst.vb[i]?(unsigned long long)g_d3dst.vb[i]->size:0ull);
                 k+=snprintf(m+k,sizeof m-k," ib=%p f%u+%u sinst=%u base=%d start=%u",(void*)g_d3dst.ib,g_d3dst.ibfmt,g_d3dst.iboff,sinst,base,start); m[k++]='\n'; (void)!write(2,m,k);
                 { D3DObj*vsx=g_d3dst.vs; k=snprintf(m,sizeof m,"     locs:"); for(int i=0;i<il->nelem;i++) k+=snprintf(m+k,sizeof m-k," %s%u->%d",il->elem[i].sem,il->elem[i].semidx,d3dgl_vs_inreg(vsx,il->elem[i].sem,il->elem[i].semidx));
+                  D3DObj*s0=g_d3dst.vb[0]; if(s0&&s0->data && g_d3dst.vstride[0]>=16){ k+=snprintf(m+k,sizeof m-k," | s0@start:"); for(int v=0;v<4;v++){ uint64_t o=(uint64_t)g_d3dst.voff[0]+(uint64_t)(start+(uint32_t)v)*g_d3dst.vstride[0]; if(o+16>s0->size) break; const float*f=(const float*)((uint8_t*)s0->data+o); k+=snprintf(m+k,sizeof m-k," (%.3g %.3g %.3g %.3g)",f[0],f[1],f[2],f[3]); } }
                   D3DObj*s2=g_d3dst.vb[2]; if(s2&&s2->data){ k+=snprintf(m+k,sizeof m-k," | s2:"); for(int v=0;v<4;v++){ const float*f=(const float*)((uint8_t*)s2->data+g_d3dst.voff[2]+v*g_d3dst.vstride[2]); k+=snprintf(m+k,sizeof m-k," (%.2f %.2f %.2f)",f[0],f[1],f[2]); } }
                   D3DObj*ibx=g_d3dst.ib; if(ibx&&ibx->data){ k+=snprintf(m+k,sizeof m-k," | idx:"); const uint16_t*ix=(const uint16_t*)((uint8_t*)ibx->data+g_d3dst.iboff+start*2); for(int v=0;v<9;v++) k+=snprintf(m+k,sizeof m-k," %u",ix[v]); }
                   m[k++]='\n'; (void)!write(2,m,k); }
@@ -7103,7 +7112,7 @@ typedef struct { uint64_t vsh,psh; void*rt; uint32_t n,inst,w,h,fmt; void*blend;
 #define FREC_N 8192
 static FRec g_fr[2][FREC_N]; static int g_frn[2], g_frc; static unsigned long g_fr_frame[2];
 static int g_wd_dump; static float g_wd_last=-10;
-static int wd_on(void){ static int on=-1; if(on<0) on=(getenv("PELOAD_D3DGL_WHITEDUMP")||getenv("PELOAD_D3DGL_DUMPFRAME_AT"))?1:0; return on; }
+static int wd_on(void){ static int on=-1; if(on<0) on=(getenv("PELOAD_D3DGL_WHITEDUMP")||getenv("PELOAD_D3DGL_DUMPFRAME_AT")||getenv("PELOAD_D3DGL_DUMPFRAME_N"))?1:0; return on; }
 static float cb_maxabs(D3DObj*c,uint32_t first,int nvec,uint32_t*cs){ if(!c||!c->data||nvec<=0) return 0; uint64_t o0=(uint64_t)first*16,o1=o0+(uint64_t)nvec*16; if(o1>c->size)o1=c->size; float m=0;
     for(uint64_t q=o0;q+4<=o1;q+=4){ float f; uint32_t u; memcpy(&f,(const uint8_t*)c->data+q,4); memcpy(&u,&f,4); if(cs)*cs=*cs*31+u; if(((u>>23)&0xff)==0xff){ m=1e30f; continue; } if(fabsf(f)>m)m=fabsf(f); } return m; }
 static void wd_rec(D3DObj*vs,D3DObj*ps,uint32_t n,uint32_t inst,void*mpv){ if(!wd_on()) return;
@@ -7116,7 +7125,11 @@ static void wd_rec(D3DObj*vs,D3DObj*ps,uint32_t n,uint32_t inst,void*mpv){ if(!w
     for(int k=0;k<4;k++){ float a=cb_maxabs(g_d3dst.pscb[k],g_d3dst.pscb_1st[k],64,&r->pscs); if(a>r->psmax) r->psmax=a; float v=cb_maxabs(g_d3dst.vscb[k],g_d3dst.vscb_1st[k],64,0); if(v>r->vsmax) r->vsmax=v; } }
 static void wd_present(void){ if(!wd_on()) return;
     { static int done; const char*at=getenv("PELOAD_D3DGL_DUMPFRAME_AT"); extern double g_gameplay_t0;
-      if(at && !done && g_gameplay_t0 && mono_s()-g_gameplay_t0>=atof(at)){ done=1; g_wd_dump=1; } }
+      if(at && !done && g_gameplay_t0 && mono_s()-g_gameplay_t0>=atof(at)){ done=1; g_wd_dump=1; }
+      // PELOAD_D3DGL_DUMPFRAME_N=<present #> (2026-10-21): the same dump by engine present count -- for games without Reclaimer's
+      // "gameplay presentation ready" line (Project Gravemind)
+      static int done_n; const char*an=getenv("PELOAD_D3DGL_DUMPFRAME_N"); extern unsigned long g_eng_present_no_x;
+      if(an && !done_n && g_eng_present_no_x>=strtoul(an,0,10)){ done_n=1; g_wd_dump=1; } }
     if(g_wd_dump){ g_wd_dump=0; extern unsigned long g_eng_present_no_x; const char*h=getenv("HOME"); char p[300]; snprintf(p,sizeof p,"%s/reclaimer_whitedump_%lu.txt",h?h:"/tmp",g_eng_present_no_x);
         FILE*f=fopen(p,"w"); if(f){ for(int pass=0;pass<2;pass++){ int b=pass==0?(g_frc^1):g_frc; fprintf(f,"== frame %lu (%s) %d draws\n",g_fr_frame[b],pass==0?"prev":"WHITE",g_frn[b]);
                 for(int i=0;i<g_frn[b];i++){ FRec*r=&g_fr[b][i]; fprintf(f,"%d vsh=%016llx psh=%016llx rt=%p %ux%u f%u n=%u inst=%u blend=%p psmax=%g vsmax=%g pscs=%08x t0=%p %ux%u f%u t1=%p %ux%u f%u t2=%p %ux%u f%u\n",i,(unsigned long long)r->vsh,(unsigned long long)r->psh,r->rt,r->w,r->h,r->fmt,r->n,r->inst,r->blend,r->psmax,r->vsmax,r->pscs,

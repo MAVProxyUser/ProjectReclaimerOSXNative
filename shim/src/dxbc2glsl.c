@@ -246,7 +246,10 @@ static const char* dg_src(const DgOp*op){
 
 // ---- helpers for body emit that need the osgn (SV_Position) ----
 typedef struct { const DgSig*osgn; int no; } DgCtx;
-static int dg_out_is_pos(DgCtx*c,uint32_t reg){ for(int i=0;i<c->no;i++) if(c->osgn[i].reg==reg && !strcmp(c->osgn[i].name,"SV_Position")) return 1; return 0; }
+// System-value semantics are case-insensitive in HLSL (2026-10-21): halo2.dll's shaders say "SV_POSITION", halo3's "SV_Position".
+// With strcmp a halo2 vertex shader wrote its position into a plain varying and never set gl_Position -- nothing rasterized
+// (Project Gravemind's black frame, every render target empty).
+static int dg_out_is_pos(DgCtx*c,uint32_t reg){ for(int i=0;i<c->no;i++) if(c->osgn[i].reg==reg && !strcasecmp(c->osgn[i].name,"SV_Position")) return 1; return 0; }
 static const char* dg_dst(DgCtx*c,const DgOp*op){ char*o=dg_pool(); uint32_t ix=op->nidx?op->idx[0].val:0;
     if(op->type==T_OUTPUT){ if(ix>=0xffffffffu){ snprintf(o,256,"gl_FragDepth"); return o; } if(dg_out_is_pos(c,ix)){ snprintf(o,256,"gl_Position"); return o; } snprintf(o,256,"o%u",ix); return o; }
     if(op->type==T_OUTPUT_DEPTH){ snprintf(o,256,"gl_FragDepth"); return o; }
@@ -358,7 +361,7 @@ char* dg_emit(const char*stage,const DgSig*isgn,int ni,const DgSig*osgn,int no,D
         // PS SV_Position = pixel-center coords in render-target space (top-left origin), z = depth, w = clip w.
         // The pipeline renders D3D row y into GL row y (VS y-flip, dx_posfix), so gl_FragCoord.xy IS that;
         // GL's .w is 1/w. (Was: skipped -> read back as an unbound varying in 1841/2426 pixel shaders.)
-        if(!strcmp(stage,"ps") && !strcmp(s->name,"SV_Position")){ if(s->reg<64) g_sysin[s->reg]="vec4(gl_FragCoord.xy,gl_FragCoord.z,1.0/gl_FragCoord.w)"; continue; }
+        if(!strcmp(stage,"ps") && !strcasecmp(s->name,"SV_Position")){ if(s->reg<64) g_sysin[s->reg]="vec4(gl_FragCoord.xy,gl_FragCoord.z,1.0/gl_FragCoord.w)"; continue; }
         // SV_VertexID / SV_InstanceID are UINT registers: expose the integer BITS (shaders and/shift/ld with them).
         // float(gl_VertexID) made "id & 1" / "id >> 1" zero -> every SV_VertexID fullscreen triangle (loading
         // screen, post passes) degenerated, and particle VS indexed their state with garbage instance ids.
@@ -377,8 +380,8 @@ char* dg_emit(const char*stage,const DgSig*isgn,int ni,const DgSig*osgn,int no,D
     }
     int seen_out[256]={0};
     for(int i=0;i<no;i++){ const DgSig*s=&osgn[i];
-        if(!strcmp(s->name,"SV_Position")) continue;
-        if(!strncmp(s->name,"SV_Depth",8) || s->reg>=0xffffffffu) continue;
+        if(!strcasecmp(s->name,"SV_Position")) continue;
+        if(!strncasecmp(s->name,"SV_Depth",8) || s->reg>=0xffffffffu) continue;
         if(s->reg<256){ if(seen_out[s->reg]) continue; seen_out[s->reg]=1; }
         dg_lprintf(&L,"out vec4 o%u; // %s%u",s->reg,s->name,s->idx);
     }
