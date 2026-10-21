@@ -306,8 +306,11 @@ Written by the client itself (Low preset):
 ```
 
 - `one` = the one-player preset the menu shows; `detail` = the levels actually used (the menu's Shadows, Dynamic lights,
-  Effects, Draw distance, Level of detail, Decals, Water). A file with `one` but no `detail` is refused ("one setting this
-  build cannot use kept its default (quality.one)") -- the client then uses High.
+  Effects, Draw distance, Level of detail, Decals, Water). Up to 0.9.20 a file with `one` but no `detail` was refused
+  ("one setting this build cannot use kept its default (quality.one)") and the client used High. **0.9.22 no longer reads
+  `one`** (checked 2026-10-20, four start-ups with low/medium/high files): it prints that warning on every start, works the
+  preset out from `detail` (a file with `one: "low"` and Medium detail starts as Medium) and never rewrites `one`, so the
+  value left in the file can be stale. Only `detail` matters; Low / Medium / High all apply live and survive a restart.
 - Levels: `auto`, `off`, `low`, `medium`, `high`, `ultra` (serde names in the client; "off" only where the menu offers it,
   e.g. Shadows). High is what Halo 3 drew before these settings, Medium the Xbox 360's own detail, Ultra goes past it.
 - Other keys (defaults when absent): `split` (the split-screen preset, `auto`), `texture_filtering` (`original`, `4x`,
