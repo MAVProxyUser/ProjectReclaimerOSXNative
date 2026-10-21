@@ -26,7 +26,8 @@ MCC="C:\\Program Files\\Steam\\steamapps\\common\\Halo The Master Chief Collecti
 MCC_DIR="$PFX/Program Files/Steam/steamapps/common/Halo The Master Chief Collection"
 # The loader finds its client patches by byte signature (PELOAD_RECLAIMER_PATCHES), so it works across
 # client builds; these are the builds it has been tested with (SHA-256 of the release exe).
-KNOWN="0850d10888d984aa270e0fd5bfa833505010e9e646d789ca657a49b6e45a8a0d 0.9.20
+KNOWN="517ee179292ca60ffade7f31f6baffef95981467b522981613250f3dff55f6c9 0.9.22
+0850d10888d984aa270e0fd5bfa833505010e9e646d789ca657a49b6e45a8a0d 0.9.20
 a8d3a37ad27e31abc09d009a94210470976ecefb34908a9fb8e1a245f4924910 0.9.18
 a393504dc32a8fd35dabb5b26ea1427fbaedabdac76b00133d49ebc44fb8efd1 0.9.13"
 

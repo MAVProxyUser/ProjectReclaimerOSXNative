@@ -1415,6 +1415,8 @@ match in the executable sections, original bytes checked) and reports what it ca
   bytes after the lock, the Option tag lock+8. Same result for 0.9.18 / 0.9.20 (lock+0xa8), 0.9.22 lock+0x170; the launch
   line names it ("players at lock+0x..."). Checked live: our 0.9.22 dedicated server's stats listed a joined client's
   address. No old-behaviour switch (the old offsets are wrong for 0.9.22 and identical for older builds). (10-20)
+- **play.sh knows client 0.9.22** — `KNOWN` list (SHA-256 517ee179...). Why: the 0.9.22 port didn't add it, so every launch
+  warned "not a client build this loader was tested with". (10-21)
 - **Port to client v0.9.22** (v0.9.21 skipped: current for a day) — every signature and hook found unchanged (sites in
   patch-addresses.md section 3); the Ballot cache grew to 0x3f8 (three 0x140-byte choices, were 0x128): the vote fields
   are still its last 0x20 bytes, where st_bv_tick reads them; the moderation table moved (entry above). Checked in game
