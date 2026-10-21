@@ -287,6 +287,13 @@ hooks are keyed on a module named "halo3" (haloreach.dll loads at the same 0x180
 WKWebView, shim/src/webview2.m), Schannel HTTPS on LibreSSL (shim/src/schannel.c), online and relayed joins (`reach.sh servers` /
 `join`); not yet: shared buffers / OpenFileMappingW, host-probe's own HLSL (reach-renaissance.md Status). Reach depots: 1064225
 (Campaign + Firefight) + 1064226 (MP).
+Project Gravemind (2026-10-20, branch h2-gravemind, WIP): Halo 2 on MCC's halo2.dll (h2gravemind.exe from a user-supplied zip,
+staged at C:\Gravemind\). MCC's Halo 2 MP files came by DepotDownloader: depot 976736 (MP: halo2.dll, maps, .dat) without
+preload/ and terminals/ (~4.5 GB of 21 GB; 976735 = campaign, 1064229 = CJK voice). `h2gravemind.exe --map-id 44` (offline Lockout)
+runs: Gravemind's halo2 patches, engine, map load, Miles audio on waveOut, 60 fps presents -- but the frame is BLACK (64-120 draws/frame:
+the D3D11->GL side for halo2 is next) and the launcher needs Direct2D (not implemented). Gravemind's beta gate fetches beta.txt
+(WinHTTP); its GRAVEMIND LIVE client claims the player's name as a gamertag -- test runs keep the default "Player" (refused).
+New loader files: winhttp.c, win32x.c, winmm.c (FIXES.md 2026-10-20 entries).
 play.sh's stdin feeder is `sleep 86400.<pid>` (killed when the game exits; it used to hold a caller's `| tail` for 24 h).
 Native GL helper (2026-10-17, PELOAD_GL_HELPER=1: play.sh's default, the code's default without the env is off; spawned with
 only stdio + its pipe; shim/src/glh_client.c + glhelper.c + glh_shm.h, generated glh_gen.inc /

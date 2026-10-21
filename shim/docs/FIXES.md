@@ -91,6 +91,38 @@ patch variants by signature (section 16; shim/docs/patch-addresses.md).
 
 ## 1. PE loading and the API surface
 
+- **Project Gravemind (Halo 2 on MCC's halo2.dll) groundwork, 2026-10-20, branch h2-gravemind.** Gravemind (h2gravemind.exe,
+  a Zig/C build that loads MCC's halo2.dll like Reclaimer loads halo3.dll) needed the functions below. Each was a logging stub
+  (return 0 = "success" with nothing written, or a NULL handle); the old behaviour is the stub unless a switch is named.
+  - **PEB contents** — `peb_fill` (peload.c, before the entry point). Why: PEB->ProcessParameters was NULL; Gravemind's runtime
+    read ProcessParameters->Flags at start (exe+0x42da54) and faulted. How: a real RTL_USER_PROCESS_PARAMETERS (std handles 1/2/3 =
+    GetStdHandle's, current directory, image path, command line, environment snapshot) + PEB ImageBaseAddress, processor count,
+    OS version 10.0.19045. Old: `PELOAD_PEB_EMPTY=1`.
+  - **Guest DLL dependencies first** — `load_guest`. Why: halo2.dll delay-imports mss64.dll (Miles) from its own folder; the
+    imports were bound while mss64 wasn't loaded yet, so every AIL_* call was a stub. How: before binding, every normal and delay
+    import that is a file in the DLL's folder is loaded (recursively), as Windows does. Old: `PELOAD_NO_DEPLOAD=1`.
+  - **Ordinal-only imports** — `ord_name` in uni_resolve: d2d1 #1, oleaut32 #2/#4/#6/#7 (BSTR), xinput1_4 #2-#5 get their names.
+  - **Resources** — FindResourceW / FindResourceExW / LoadResource / LockResource / SizeofResource / FreeResource over the PE
+    resource tree (win32x.c `rsrc_find`; Gravemind keeps fonts / pictures in RCDATA).
+  - **Known folders** — SHGetKnownFolderPath (Documents, AppData, Saved Games ... on USERPROFILE / LOCALAPPDATA / APPDATA, CoTaskMem
+    string, KF_FLAG_CREATE; old `PELOAD_KNOWNFOLDER_STUB=1`) and SHGetFolderPathW/A on top of it (CSIDL ids).
+  - **CommandLineToArgvW** (Windows' quoting / backslash rules), **GetPrivateProfile\*** / WritePrivateProfileStringW (INI files,
+    encoding kept), **CreateFile2**, **GetStringTypeW**, **K32GetModuleInformation** (Gravemind finds halo2.dll's base this way:
+    with the stub it read RVA 0x6a8f30 as an address), GetFileSize, GetFullPathNameA, GetEnvironmentVariableA,
+    EnumDisplaySettingsA (DEVMODEA layout), LoadIconA / LoadCursorA, GetDesktopWindow (+ its GetWindowRect = the monitor),
+    LocaleNameToLCID, HeapDestroy, AppPolicyGetThreadInitializationType, SysAllocString & co., FlsGetValue2 (= FlsGetValue),
+    AdjustWindowRect, D3D11CreateDeviceAndSwapChain (= CreateDevice + CreateSwapChain), GetConsoleWindow / AttachConsole,
+    CoInitialize, SetThreadAffinityMask, shlwapi PathAppendW, CreateSemaphoreExW. Old for win32x.c's: `PELOAD_WIN32X_STUB=1`.
+  - **Registry, ANSI side** — RegOpenKeyExA / RegQueryValueExA / RegGetValueA through the W versions; RegEnumKey(Ex)A/W and
+    RegEnumValueA/W answer ERROR_NO_MORE_ITEMS. Why: the stubs said ERROR_SUCCESS forever and MCC's D3DCompiler_47.dll enumerated
+    keys in an endless loop on halo2's engine thread.
+  - **msvcrt legacy names** for MCC's real D3DCompiler_47.dll (a guest DLL; 14 of its 115 msvcrt imports aren't in the guest UCRT):
+    _vsnprintf / _vsnwprintf / sprintf_s / swprintf_s / _snwprintf_s / sscanf_s through the guest ucrtbase's __stdio_common_*
+    (legacy option bits; variadic ones via __builtin_ms_va_list), _lock / _unlock (recursive mutexes), __dllonexit / _onexit,
+    _XcptFilter, _amsg_exit, std::terminate, type_info's destructor.
+  - **Clean failures instead of S_OK with nothing** — D2D1CreateFactory, DWriteCreateFactory (Gravemind: "ui: Direct2D init failed
+    0x80004001": its launcher / menus are not drawn yet), MFTEnumEx, MFCreateWaveFormatExFromMFMediaType,
+    MFInitMediaTypeFromWaveFormatEx, GetAdaptersAddresses (ERROR_NO_DATA: its LAN game list stays empty), waveIn (no devices).
 - **Media Foundation and loopback capture fail cleanly** (client 0.9.22) — `i_MFStartup`, `i_MFCreateSinkWriterFromURL`,
   `i_MFCreateMediaType` / `Attributes` / `Sample` / `MemoryBuffer`, `i_ActivateAudioInterfaceAsync`,
   `i_CoCreateFreeThreadedMarshaler`. Why: 0.9.22's Theater EXPORT MP4 / RECORD VIDEO import them (an import-table diff
@@ -194,6 +226,13 @@ patch variants by signature (section 16; shim/docs/patch-addresses.md).
 
 ## 2. Processes, threads, exceptions
 
+- **CREATE_SUSPENDED / ResumeThread** (2026-10-20) — `i_CreateThread`, `thread_tramp`, win32x.c `i_ResumeThread`. Why: the flag was
+  ignored (the thread ran at once) and ResumeThread was a stub; a creator that fills in a thread's data before resuming it raced
+  it. How: the thread object's count is the suspend count; the trampoline waits until it is 0; ResumeThread returns the previous
+  count. SuspendThread of a running thread fails (-1). GetThreadPriority 0, GetLogicalProcessorInformation (one core entry per
+  logical CPU + a package). Old: `PELOAD_IGNORE_SUSPENDED=1`.
+- **SIGUSR1 dump names every guest DLL** (2026-10-20) — `dump_attr`. It named everything at 0x180000000 "halo3" (halo2.dll and
+  haloreach.dll load there too) and left other DLLs unnamed; now exe / <dll>+0x<off> from each module's SizeOfImage.
 - **NUL device** — path translation. Why: the client opened `\\.\NUL` for the worker's stdio; the open failed (the
   real trigger of a directory-enumeration loop). How: mapped to /dev/null. (10-11 c04b6a2)
 - **Worker spawn under the loader** — `i_CreateProcessW`. Why: the engine worker could not start. How: posix_spawn of
@@ -349,6 +388,9 @@ patch variants by signature (section 16; shim/docs/patch-addresses.md).
 
 ## 4. Files, pipes, console
 
+- **FindFirstFileW's find data** (2026-10-20) — `i_FindFirstFileW`. Why: FindFirstFileW was mapped to FindFirstFileExW itself, whose
+  WIN32_FIND_DATAW is the THIRD argument; a FindFirstFileW caller passes it second, so 592 bytes went wherever r8 pointed (halo2.dll:
+  a memset to 0xfffffffe70b0c4ba). Rust's read_dir uses FindFirstFileExW, so Reclaimer never hit it. How: a two-argument wrapper.
 - **File APIs that defeated the client's own checks** (security review 2026-10-19) — peload.c `i_RemoveDirectoryW`,
   `i_DeleteFileW`, `i_GetDiskFreeSpaceExW`, `i_SHFileOperationW` (new). Why: RemoveDirectoryW deleted a NON-empty folder's
   whole tree and always succeeded (a 10-11 bring-up workaround from when folder listing was broken); DeleteFileW always
@@ -437,6 +479,10 @@ patch variants by signature (section 16; shim/docs/patch-addresses.md).
 
 ## 5. Sync objects and timers
 
+- **Recursive mutexes** (2026-10-20) — `sync_wait`, `i_CreateMutexW`, `i_ReleaseMutex`. Why: a Windows mutex may be taken again by its
+  owner; the loader's was a plain lock, and MCC's Miles Sound System (halo2's mss64.dll) takes its mutex in AIL_open_digital_driver
+  and again in AIL_set_preference -- halo2's engine thread blocked on itself. How: depth in the object's maxc, ReleaseMutex frees
+  it at depth 0 and only for the owner (ERROR_NOT_OWNER otherwise). Old: `PELOAD_MUTEX_OLD=1`.
 - **Real synchronisation primitives** — CRITICAL_SECTION (recursive mutex), SRWLOCK (rwlock), CONDITION_VARIABLE,
   events/mutexes/semaphores (SyncObj), WaitForSingle/MultipleObjects. Why: no-ops -> multi-threaded nondeterminism.
   (10-11 7af88c1)
@@ -464,6 +510,12 @@ patch variants by signature (section 16; shim/docs/patch-addresses.md).
 
 ## 6. Networking (WinSock, AFD, loopback)
 
+- **WinHTTP on libcurl** (2026-10-20) — shim/src/winhttp.c (build.sh links -lcurl, the system library). Why: every WinHttp* was a stub;
+  Project Gravemind's beta check (raw.githubusercontent.com/BriRoz1/h2gravemind-beta/main/beta.txt) failed and it refused to start
+  ("beta: status file not reachable; not allowed to start"). How: synchronous WinHTTP -- Open / SetTimeouts / Connect /
+  OpenRequest / AddRequestHeaders / SendRequest keep the request, ReceiveResponse runs curl_easy_perform (redirects followed),
+  QueryHeaders (status, standard and custom headers, numbers), QueryDataAvailable / ReadData, CrackUrl. Checked: the status file
+  arrives (200, "status=open"). Old: `PELOAD_WINHTTP_STUB=1`; trace `PELOAD_TRACE_WINHTTP=1`.
 - **Real Winsock over BSD sockets** — socket/bind/sendto/recvfrom/select (via poll)/setsockopt/ioctlsocket/WSAStartup/
   WSAGetLastError, sockaddr and AF_INET6 Win<->BSD conversion (`sa_w2b`/`sa_b2w`). Why: no-op stubs; the native
   loopback UDP transport had no I/O. (10-11 04aabf4)
@@ -700,6 +752,15 @@ patch variants by signature (section 16; shim/docs/patch-addresses.md).
 
 ## 9. Audio (XAudio2, WASAPI)
 
+- **waveOut on CoreAudio** (2026-10-20) — shim/src/winmm.c. Why: MCC's Miles Sound System for Halo 2 plays through winmm waveOut; every
+  wave function was a stub. How: one AudioQueue per waveOut (PCM 8-32 bit, float, EXTENSIBLE), WAVEHDRs copied into queue buffers
+  and returned with WHDR_DONE; callbacks NULL / EVENT / FUNCTION (WOM_DONE on a dispatcher thread made with our CreateThread);
+  Reset / Pause / Restart / GetPosition / GetDevCaps / GetID. PELOAD_AUDIO=0 (test runs) or a queue that won't open = a silent
+  device that returns headers at the real playback rate. waveOutGetNumDevs stays 0 (halo3.dll / haloreach.dll ask it first and so
+  keep XAudio2 only); Miles opens WAVE_MAPPER directly. Old: `PELOAD_WINMM_STUB=1`; trace `PELOAD_TRACE_WINMM=1`.
+- **No DirectSound** (2026-10-20) — `i_LoadLibraryExW`: dsound.dll is "not found" (126) instead of the placeholder module, whose
+  GetProcAddress gave Miles a DirectSoundCreate stub (S_OK, no object -> crash at mss64+0x2a780); Miles then uses waveOut.
+  Old: `PELOAD_DSOUND_PLACEHOLDER=1`.
 - **WASAPI enumerator** — CoCreateInstance(MMDeviceEnumerator). Why: a no-op stub; cpal's `get_enumerator().unwrap()`
   panicked (device.rs:851). How: a real but empty IMMDeviceEnumerator + CoInitializeEx/CoTaskMem*/PropVariantClear.
   (10-11 9a68be7)
@@ -841,6 +902,9 @@ patch variants by signature (section 16; shim/docs/patch-addresses.md).
 
 ## 11. D3D11->GL: shaders and the DXBC->GLSL translator
 
+- **Real HLSL compiler, opt-in** (2026-10-20) — `i_D3DCompile`, `PELOAD_REAL_D3DCOMPILE=1`: MCC's own D3DCompiler_47.dll (loaded as a guest
+  DLL now that its msvcrt imports exist) compiles the source to real DXBC for the translator. Off by default (Reclaimer's video
+  shaders are only looked at as blobs; its menu grading shader keeps its own path).
 - **The translator trusted shader bytecode from map files** (security review 2026-10-19; harnesses with AddressSanitizer
   proved 1-3) — dxbc2glsl.c, dxbc_cpu.c, peload.c. Why: halo3 hands every shader of every map (Workshop and server maps too)
   to `dg_translate` at map load; on Windows the D3D11 runtime validates and checksums DXBC first, here nothing did. Found and

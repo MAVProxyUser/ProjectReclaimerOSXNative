@@ -2577,6 +2577,8 @@ static int rtgrade_parse(const char*src,uint64_t n,float*k){ const char*e=src+n;
     p=rtg_after(p,e,") + "); if(!p || !rtg_nums(&p,e,k+6,1)) return 0; if(!rtg_after(p,e,"* y * y * y * y")) return 0;
     p=rtg_after(p,e,"float4(color * "); if(!p || !rtg_nums(&p,e,k+7,1)) return 0;
     return 1; }
+static void* MSABI i_LoadLibraryExW(const uint16_t *name, void *h, uint32_t fl);   // (below)
+static void *export_lookup(uint8_t *base, const char *want);
 static int MSABI i_D3DCompile(const void*src,uint64_t srcsz,const char*name,const void*defs,void*inc,
         const char*entry,const char*target,uint32_t f1,uint32_t f2,void**ppCode,void**ppErr){
     (void)src;(void)srcsz;(void)name;(void)defs;(void)inc;(void)entry;(void)target;(void)f1;(void)f2;
@@ -2592,6 +2594,18 @@ static int MSABI i_D3DCompile(const void*src,uint64_t srcsz,const char*name,cons
         if(ppCode)*ppCode=make_blob(b,sizeof b); if(ppErr)*ppErr=0;
         char m[200]; int k=snprintf(m,sizeof m,"  [rtgrade] menu-scene grading shader recognised: y=dot(rgb,(%g,%g,%g)), y*(%g,%g,%g)+%g*y^4, x%g\n",gk[0],gk[1],gk[2],gk[3],gk[4],gk[5],gk[6],gk[7]); (void)!write(2,m,k);
         return HR_OK; } }
+    // PELOAD_REAL_D3DCOMPILE=1 (2026-10-20, Project Gravemind: its present / post-processing / model-view HLSL): MCC's own
+    // D3DCompiler_47.dll (in MCC's folder; it runs as a guest DLL since its msvcrt imports exist, win32x.c) compiles the source
+    // to real DXBC, which the translator turns into GLSL like any engine shader. Off by default: Reclaimer's video shaders are
+    // only ever looked at as blobs, and its grading shader is the case above.
+    if(getenv("PELOAD_REAL_D3DCOMPILE")){ static void*real; static int tried;
+        if(!tried){ tried=1; static const uint16_t dn[]={'D','3','D','C','o','m','p','i','l','e','r','_','4','7','.','d','l','l',0};
+            uint8_t*b=i_LoadLibraryExW(dn,0,0); if(b && b!=g_base) real=export_lookup(b,"D3DCompile");
+            char m[120]; int k=snprintf(m,sizeof m,"  [D3DCompile] real compiler %s\n",real?"loaded (MCC's D3DCompiler_47.dll)":"NOT found: placeholder blobs"); (void)!write(2,m,k); }
+        if(real){ typedef int (MSABI *D3DC)(const void*,uint64_t,const char*,const void*,void*,const char*,const char*,uint32_t,uint32_t,void**,void**);
+            int hr=((D3DC)real)(src,srcsz,name,defs,inc,entry,target,f1,f2,ppCode,ppErr);
+            if(hr<0){ char m[160]; int k=snprintf(m,sizeof m,"  [D3DCompile] %s %s failed 0x%08x\n",entry?entry:"?",target?target:"?",(unsigned)hr); (void)!write(2,m,k); }
+            return hr; } }
     // placeholder DXBC container (magic + zeroed header); real bytecode isn't
     // needed because there's no D3D device to consume it — the engine only reads
     // the blob's pointer/size here.
@@ -2685,6 +2699,28 @@ static int   MSABI i_CoInitializeEx(void*p,uint32_t m){ (void)p;(void)m; return 
 static void  MSABI i_CoUninitialize(void){ }
 static void* MSABI i_CoTaskMemAlloc(uint64_t n){ return malloc(n?n:1); }
 static void  MSABI i_CoTaskMemFree(void*p){ free_or_fch(p); }
+// SHGetKnownFolderPath (2026-10-20, Gravemind: Documents\My Games\Project Gravemind, %LOCALAPPDATA%\Project Gravemind): the known
+// folders on the loader's Windows-style home (USERPROFILE / LOCALAPPDATA / APPDATA, set at start), as a CoTaskMem string;
+// KF_FLAG_CREATE (0x8000) makes the folder. Unknown folders: E_FAIL with the out-pointer cleared. It was a logging stub returning
+// 0 = S_OK without a path, and Gravemind read the NULL at once (exe+0x3fd1a4). PELOAD_KNOWNFOLDER_STUB=1 = old.
+static int MSABI i_SHGetKnownFolderPath(const GUID_*id,uint32_t fl,void*tok,uint16_t**out){ (void)tok;
+    if(out) *out=0; if(!id || !out) return (int)0x80070057;   // E_INVALIDARG
+    if(getenv("PELOAD_KNOWNFOLDER_STUB")) return 0;
+    static const struct { uint32_t d1; const char*env; const char*sub; } kf[]={
+        {0xFDD39AD0,"USERPROFILE","Documents"}, {0xF1B32785,"LOCALAPPDATA",0}, {0x3EB685DB,"APPDATA",0}, {0x5E6C858F,"USERPROFILE",0},
+        {0xB4BFCC3A,"USERPROFILE","Desktop"}, {0x18989B1D,"USERPROFILE","Videos"}, {0x4C5C32FF,"USERPROFILE","Saved Games"},
+        {0x33E28130,"USERPROFILE","Pictures"}, {0x4BD8D571,"USERPROFILE","Music"}, {0x374DE290,"USERPROFILE","Downloads"},
+        {0xA520A1A4,"USERPROFILE","AppData\\LocalLow"}, {0x7C5A40EF,0,"C:\\Program Files (x86)"}, {0x905E63B6,0,"C:\\Program Files"},
+        {0x62AB5D82,0,"C:\\ProgramData"} };
+    int k=-1; for(int i=0;i<(int)(sizeof kf/sizeof kf[0]);i++) if(kf[i].d1==id->D1){ k=i; break; }
+    if(k<0){ char m[120]; int n=snprintf(m,sizeof m,"  [knownfolder] unknown folder {%08X-%04X-%04X-...}\n",id->D1,id->D2,id->D3); (void)!write(2,m,n); return (int)0x80004005; }
+    char p[600];
+    if(!kf[k].env) snprintf(p,sizeof p,"%s",kf[k].sub);
+    else { const char*e=getenv(kf[k].env); snprintf(p,sizeof p,"%s",e?e:"C:\\ReclaimerProfile");
+        if(kf[k].sub){ size_t l=strlen(p); snprintf(p+l,sizeof p-l,"\\%s",kf[k].sub); } }
+    size_t n=strlen(p); uint16_t*w=malloc((n+1)*2); for(size_t i=0;i<=n;i++) w[i]=(uint8_t)p[i];
+    if(fl&0x8000){ char u[1400]; if(win2unix(w,u,sizeof u)){ size_t l=strlen(u); if(l+1<sizeof u){ u[l]='/'; u[l+1]=0; mkparents(u); } } }
+    *out=w; return 0; }
 static int   MSABI i_PropVariantClear(void*p){ if(p){ uint16_t vt=*(uint16_t*)p; if(vt==31||vt==30) free_or_fch(*(void**)((uint8_t*)p+8)); memset(p,0,24); } return HR_OK; }   // VT_LPWSTR/LPSTR own CoTaskMem strings
 static void* wasapi_enumerator(void); // wasapi.c
 static int   MSABI i_CoCreateInstance(GUID_*clsid, void*outer, uint32_t ctx, GUID_*iid, void**ppv){
@@ -3786,7 +3822,9 @@ static int    MSABI i_EnumDisplayMonitors(void*dc,const void*clip,void*cb,int64_
     fn(mon,dc,rc,data); return 1; }
 // (a window hosting a WebView2 reports its tracked rect -- SetWindowPos / MoveWindow keep it; every other window the old fixed one)
 static int    MSABI i_GetClientRect(void*h,int32_t*r){ WWin*w=h; if(r&&xwin_is(h)){ int ww=0,hh=0; if(!xwin_rect(h,0,0,&ww,&hh,0,0,0)) return 0; r[0]=0;r[1]=0;r[2]=ww;r[3]=hh; return 1; } if(r&&w&&w->magic==WWIN_MAGIC&&wv2_owns(h)){ r[0]=0;r[1]=0;r[2]=w->w;r[3]=w->h; return 1; } if(r){r[0]=0;r[1]=0;r[2]=WIN_W;r[3]=WIN_H;} return 1; }
-static int    MSABI i_GetWindowRect(void*h,int32_t*r){ WWin*w=h; if(r&&xwin_is(h)){ int x=0,y=0,ww=0,hh=0; if(!xwin_rect(h,&x,&y,&ww,&hh,0,0,0)) return 0; r[0]=x;r[1]=y;r[2]=x+ww;r[3]=y+hh; return 1; } if(r&&w&&w->magic==WWIN_MAGIC&&wv2_owns(h)){ r[0]=w->x;r[1]=w->y;r[2]=w->x+w->w;r[3]=w->y+w->h; return 1; } if(r){r[0]=0;r[1]=0;r[2]=WIN_W;r[3]=WIN_H;} return 1; }
+static int    MSABI i_GetWindowRect(void*h,int32_t*r){ WWin*w=h;
+    if(h==(void*)0xD35C70){ if(r){ r[0]=0; r[1]=0; r[2]=MON_W; r[3]=MON_H; } return 1; }   /* GetDesktopWindow's handle (win32x.c): the monitor */
+    if(r&&xwin_is(h)){ int x=0,y=0,ww=0,hh=0; if(!xwin_rect(h,&x,&y,&ww,&hh,0,0,0)) return 0; r[0]=x;r[1]=y;r[2]=x+ww;r[3]=y+hh; return 1; } if(r&&w&&w->magic==WWIN_MAGIC&&wv2_owns(h)){ r[0]=w->x;r[1]=w->y;r[2]=w->x+w->w;r[3]=w->y+w->h; return 1; } if(r){r[0]=0;r[1]=0;r[2]=WIN_W;r[3]=WIN_H;} return 1; }
 static void lay_pos(void*h,int x,int y,int setpos,int alpha); static void lay_zorder(void*h,void*after);   // layered windows (below)
 // SetWindowPos: only its show/hide flags and the move matter here (the client hides and moves its layered screens with it)
 // WM_MOVE / WM_SIZE after a window hosting a WebView2 moved or changed size (2026-10-20): Windows sends them (WM_WINDOWPOSCHANGED -> DefWindowProc);
@@ -8902,9 +8940,17 @@ static int   MSABI i_ResetEvent(void*h){ SyncObj*s=h; if(!is_sync((intptr_t)h))r
 static void* MSABI i_CreateSemaphoreW(void*sec,long init,long max,const uint16_t*nm){ (void)sec;(void)nm; SyncObj*s=sync_new(K_SEMA); s->count=init; s->maxc=max; return s; }
 static void* MSABI i_CreateSemaphoreA(void*sec,long init,long max,const char*nm){ return i_CreateSemaphoreW(sec,init,max,0); }
 static int   MSABI i_ReleaseSemaphore(void*h,long c,long*prev){ SyncObj*s=h; if(!is_sync((intptr_t)h))return 1; pthread_mutex_lock(&s->m); if(prev)*prev=s->count; s->count+=c; pthread_cond_broadcast(&s->c); pthread_mutex_unlock(&s->m); return 1; }
-static void* MSABI i_CreateMutexW(void*sec,int owned,const uint16_t*nm){ (void)sec;(void)nm; SyncObj*s=sync_new(K_MUTEX); s->count=owned?0:1; if(owned)s->owner=pthread_self(); return s; }
+// Mutexes are recursive, as on Windows (2026-10-20): the owner may wait on its mutex again (depth in maxc) and ReleaseMutex frees
+// it at depth 0; only the owner may release it (ERROR_NOT_OWNER). It was a plain lock: MCC's Miles Sound System takes its mutex
+// in AIL_open_digital_driver and again in AIL_set_preference, and halo2's engine thread blocked on itself. PELOAD_MUTEX_OLD=1 = old.
+static int mutex_recursive(void){ static int r=-1; if(r<0) r=getenv("PELOAD_MUTEX_OLD")?0:1; return r; }
+static void* MSABI i_CreateMutexW(void*sec,int owned,const uint16_t*nm){ (void)sec;(void)nm; SyncObj*s=sync_new(K_MUTEX); s->count=owned?0:1; if(owned){ s->owner=pthread_self(); s->maxc=1; } return s; }
 static void* MSABI i_CreateMutexA(void*sec,int owned,const char*nm){ return i_CreateMutexW(sec,owned,0); }
-static int   MSABI i_ReleaseMutex(void*h){ SyncObj*s=h; if(!is_sync((intptr_t)h))return 1; pthread_mutex_lock(&s->m); s->count=1; pthread_cond_signal(&s->c); pthread_mutex_unlock(&s->m); return 1; }
+static int   MSABI i_ReleaseMutex(void*h){ SyncObj*s=h; if(!is_sync((intptr_t)h))return 1; pthread_mutex_lock(&s->m);
+    if(mutex_recursive() && s->kind==K_MUTEX){
+        if(s->count>0 || !pthread_equal(s->owner,pthread_self())){ pthread_mutex_unlock(&s->m); g_lasterr=288; return 0; }   // ERROR_NOT_OWNER
+        if(--s->maxc>0){ pthread_mutex_unlock(&s->m); return 1; } }
+    s->count=1; s->maxc=0; memset(&s->owner,0,sizeof s->owner); pthread_cond_signal(&s->c); pthread_mutex_unlock(&s->m); return 1; }
 // wait one object with a deadline; returns 0 signaled, 0x102 timeout.
 // Waitable timers fire by wall clock (SetWaitableTimer arms timer_due_us).
 static uint32_t sync_wait(SyncObj*s,uint32_t ms){
@@ -8914,8 +8960,9 @@ static uint32_t sync_wait(SyncObj*s,uint32_t ms){
     for(;;){
         struct timeval now; gettimeofday(&now,0); uint64_t nus=(uint64_t)now.tv_sec*1000000+now.tv_usec;
         if(s->is_timer && s->timer_armed && nus>=s->timer_due_us){ s->signaled=1; if(s->timer_period_ms>0) s->timer_due_us+=(uint64_t)s->timer_period_ms*1000; else s->timer_armed=0; }
-        int avail = (s->kind==K_SEMA)? (s->count>0) : (s->kind==K_MUTEX)? (s->count>0) : s->signaled;
-        if(avail){ if(s->kind==K_SEMA) s->count--; else if(s->kind==K_MUTEX){ s->count=0; s->owner=pthread_self(); } else if(!s->manual) s->signaled=0; rc=0; break; }
+        int mine = s->kind==K_MUTEX && s->count==0 && mutex_recursive() && pthread_equal(s->owner,pthread_self());   // re-acquire by the owner
+        int avail = (s->kind==K_SEMA)? (s->count>0) : (s->kind==K_MUTEX)? (s->count>0 || mine) : s->signaled;
+        if(avail){ if(s->kind==K_SEMA) s->count--; else if(s->kind==K_MUTEX){ if(mine) s->maxc++; else { s->count=0; s->owner=pthread_self(); s->maxc=1; } } else if(!s->manual) s->signaled=0; rc=0; break; }
         if(ms==0 || nus>=caller_us){ rc=0x102; break; }
         uint64_t dl=caller_us; if(s->is_timer && s->timer_armed && s->timer_due_us<dl) dl=s->timer_due_us;
         if(dl==(uint64_t)-1){ pthread_cond_wait(&s->c,&s->m); }
@@ -9153,6 +9200,8 @@ static void *thread_tramp(void *a){
     g_guest_thr=1; t_self_thread=t->done;
     if(getenv("PELOAD_TRACE_THREAD")){ char tb[96]; int nn=snprintf(tb,sizeof tb,"  [TT] enter tid=0x%x gs58=0x%llx fn=%p\n",pthread_mach_thread_np(pthread_self()),(unsigned long long)(uint64_t)tarr,(void*)t->fn); (void)!write(2,tb,nn); }
     uint32_t r;
+    // CREATE_SUSPENDED (2026-10-20): wait here until ResumeThread brings the suspend count (the thread object's count) to 0
+    if(t->done){ pthread_mutex_lock(&t->done->m); while(t->done->count>0) pthread_cond_wait(&t->done->c,&t->done->m); pthread_mutex_unlock(&t->done->m); }
     { jmp_buf jb; if(!_setjmp(jb)){ t_exit_jb=&jb; r = t->fn ? t->fn(t->param) : 0; } else r=t_exit_code; t_exit_jb=0; }   // ExitThread lands here
     __atomic_add_fetch(&g_gthr_exited,1,__ATOMIC_RELAXED);
     // The Windows TEB fields live in macOS TSD slots 0x30/0x58/0x60. On this
@@ -9190,6 +9239,10 @@ static void* MSABI i_CreateThread(void*attr,uint64_t stack,WinThreadProc start,v
     if(getenv("PELOAD_NO_THREADS")){ if(tid)*tid=0x7333; return (void*)0x7333; } // diagnostic: don't spawn
     SyncObj* done=sync_new(K_THREAD); done->manual=1;              // thread handle = waitable, manual-reset
     TArg *t=malloc(sizeof *t); t->fn=start; t->param=param; t->done=done;
+    // CREATE_SUSPENDED (0x4): the thread starts only when ResumeThread brings its suspend count to 0 (it started at once until
+    // 2026-10-20, so a creator that fills in the thread's data before ResumeThread raced it; Miles' mixer thread under halo2).
+    // PELOAD_IGNORE_SUSPENDED=1 = old.
+    done->count=((fl&4) && !getenv("PELOAD_IGNORE_SUSPENDED"))?1:0;
     // Stack size (2026-10-20): every guest thread got macOS's 512 KB default whatever it asked for. Windows gives the requested
     // size (dwStackSize; commit or, with STACK_SIZE_PARAM_IS_A_RESERVATION, reserve) and at least the exe's SizeOfStackReserve
     // (Reclaimer 1 MB, Reach Renaissance 2 MB; Rust asks 2 MB for every std thread). An overflow is not caught the Windows way
@@ -9220,6 +9273,9 @@ static uintptr_t MSABI i_beginthread(WinThreadProc start,unsigned stack,void*arg
 #include "xaudio.c"
 #include "wasapi.c"
 #include "schannel.c"   // secur32 Schannel + crypt32 chain checks on macOS LibreSSL (Reach Renaissance HTTPS)
+#include "winhttp.c"    // WinHTTP on macOS's libcurl (Project Gravemind's beta status / update checks)
+#include "win32x.c"     // CommandLineToArgvW, GetPrivateProfile*, CreateFile2, GetStringTypeW (first needed by Gravemind)
+#include "winmm.c"      // waveOut on CoreAudio (MCC's Miles Sound System for Halo 2)
 // every guest thread's TLS block of one module (index idx), copied under g_tlsm: a returned thread's array is freed 30 s
 // later (thr_reap), so callers must not keep the arrays themselves past the lock
 static int tls_blocks(uint32_t idx,void**out,int max){ int n=0; if(idx>=128) return 0; pthread_mutex_lock(&g_tlsm);
@@ -9695,6 +9751,10 @@ static void* MSABI i_LoadLibraryExW(const uint16_t *name, void *h, uint32_t fl){
     if(name_is_ws2(bn)) return WS2_HANDLE; // Winsock: distinct handle, resolved by ordinal/name
     if(name_has(bn,"xaudio2_") && !getenv("PELOAD_XA_REALDLL")) return XA_HANDLE;   // XAudio2: ours, see XA_HANDLE
     if(name_has(bn,"webview2loader") && !getenv("PELOAD_NO_WV2")) return WV2_HANDLE;   // WebView2: ours (webview2.m)
+    // DirectSound isn't provided (2026-10-20): "not found" instead of the placeholder module, whose GetProcAddress handed out
+    // logging stubs -- MCC's Miles Sound System got S_OK from DirectSoundCreate with no object and crashed (mss64+0x2a780); with
+    // no dsound.dll it uses waveOut (winmm.c). PELOAD_DSOUND_PLACEHOLDER=1 = old.
+    if(!strcasecmp(bn,"dsound.dll") || !strcasecmp(bn,"dsound")){ if(!getenv("PELOAD_DSOUND_PLACEHOLDER")){ g_lasterr=126; return 0; } }
     for(int m=0;m<g_nmods;m++) if(!strcasecmp(g_mods[m].name,bn)) return g_mods[m].base; // already loaded
     char p[2048]; win2unix(name,p,sizeof p);
     if(access(p,R_OK)==0){ g_prefer_base=1; uint8_t *b=load_guest(p, strdup(bn)); g_prefer_base=0; if(b) return b; }
@@ -10238,6 +10298,10 @@ static void* MSABI i_FindFirstFileExW(const uint16_t*w,int lvl,void*fd,int op,vo
         fill_find(f,de,fd); return (void*)(intptr_t)(0x2000+idx); } }
     closedir(d); g_lasterr=2; if(getenv("PELOAD_TRACE_FS")){ws("  [FindFirst] EMPTY ");ws(dir);ws("\n");} return (void*)-1; // ERROR_FILE_NOT_FOUND
 }
+// FindFirstFileW(name, fd) (2026-10-20): it was mapped to FindFirstFileExW itself, whose find data is the THIRD argument -- a
+// FindFirstFileW caller's fd sits in the second, so the 592-byte WIN32_FIND_DATAW went wherever r8 pointed (halo2.dll lists
+// folders this way: memset to 0xfffffffe70b0c4ba). Rust's read_dir uses FindFirstFileExW, which is why it never showed.
+static void* MSABI i_FindFirstFileW(const uint16_t*w,void*fd){ return i_FindFirstFileExW(w,0,fd,0,0,0); }
 static int MSABI i_FindNextFileW(void*h,void*fd){ intptr_t hv=(intptr_t)h; int idx=(int)(hv-0x2000); if(idx<0||idx>=g_nfinds||!g_finds[idx].d) return 0;
     Find*f=&g_finds[idx]; struct dirent*de; while((de=readdir(f->d))){ if(!strcmp(de->d_name,".")||!strcmp(de->d_name,"..")) continue; if(pat_match(f->pat,de->d_name)){ fill_find(f,de,fd); return 1; } } g_lasterr=18; return 0; } // ERROR_NO_MORE_FILES
 static int MSABI i_FindClose(void*h){ intptr_t hv=(intptr_t)h; int idx=(int)(hv-0x2000); pthread_mutex_lock(&g_find_m); if(idx>=0&&idx<g_nfinds&&g_finds[idx].d){ closedir(g_finds[idx].d); g_finds[idx].d=0; } pthread_mutex_unlock(&g_find_m); return 1; }
@@ -10604,7 +10668,7 @@ static void *resolve_impl(const char *fn){
         {"RegQueryValueExW",(void*)i_RegQueryValueExW},
         {"RegCloseKey",(void*)i_RegCloseKey},
         {"FindFirstFileExW",(void*)i_FindFirstFileExW},
-        {"FindFirstFileW",(void*)i_FindFirstFileExW},
+        {"FindFirstFileW",(void*)i_FindFirstFileW},
         {"FindNextFileW",(void*)i_FindNextFileW},
         {"FindFirstFileA",(void*)i_FindFirstFileA},
         {"FindNextFileA",(void*)i_FindNextFileA},
@@ -10657,7 +10721,50 @@ static void *resolve_impl(const char *fn){
         {"InitOnceBeginInitialize",(void*)i_InitOnceBeginInitialize},
         {"InitOnceComplete",(void*)i_InitOnceComplete},
         {"FlsAlloc",(void*)i_FlsAlloc},
-        {"FlsGetValue",(void*)i_FlsGetValue},
+        {"FlsGetValue",(void*)i_FlsGetValue}, {"FlsGetValue2",(void*)i_FlsGetValue},
+        {"SHGetKnownFolderPath",(void*)i_SHGetKnownFolderPath},
+        {"WinHttpOpen",(void*)i_WinHttpOpen},{"WinHttpSetTimeouts",(void*)i_WinHttpSetTimeouts},{"WinHttpConnect",(void*)i_WinHttpConnect},
+        {"WinHttpOpenRequest",(void*)i_WinHttpOpenRequest},{"WinHttpAddRequestHeaders",(void*)i_WinHttpAddRequestHeaders},
+        {"WinHttpSendRequest",(void*)i_WinHttpSendRequest},{"WinHttpReceiveResponse",(void*)i_WinHttpReceiveResponse},
+        {"WinHttpQueryHeaders",(void*)i_WinHttpQueryHeaders},{"WinHttpQueryDataAvailable",(void*)i_WinHttpQueryDataAvailable},
+        {"WinHttpReadData",(void*)i_WinHttpReadData},{"WinHttpCloseHandle",(void*)i_WinHttpCloseHandle},{"WinHttpCrackUrl",(void*)i_WinHttpCrackUrl},
+        {"CommandLineToArgvW",(void*)i_CommandLineToArgvW},{"CreateFile2",(void*)i_CreateFile2},{"GetStringTypeW",(void*)i_GetStringTypeW},
+        {"GetPrivateProfileStringW",(void*)i_GetPrivateProfileStringW},{"GetPrivateProfileIntW",(void*)i_GetPrivateProfileIntW},
+        {"GetPrivateProfileSectionW",(void*)i_GetPrivateProfileSectionW},{"GetPrivateProfileSectionNamesW",(void*)i_GetPrivateProfileSectionNamesW},
+        {"WritePrivateProfileStringW",(void*)i_WritePrivateProfileStringW},
+        {"D3D11CreateDeviceAndSwapChain",(void*)i_D3D11CreateDeviceAndSwapChain},{"AdjustWindowRect",(void*)i_AdjustWindowRect},
+        {"AppPolicyGetThreadInitializationType",(void*)i_AppPolicyGetThreadInitializationType},
+        {"SysAllocString",(void*)i_SysAllocString},{"SysAllocStringLen",(void*)i_SysAllocStringLen},{"SysFreeString",(void*)i_SysFreeString},{"SysStringLen",(void*)i_SysStringLen},
+        {"D2D1CreateFactory",(void*)i_D2D1CreateFactory},{"DWriteCreateFactory",(void*)i_DWriteCreateFactory},{"MFTEnumEx",(void*)i_MFTEnumEx},
+        {"MFCreateWaveFormatExFromMFMediaType",(void*)i_MFCreateWaveFormatExFromMFMediaType},{"MFInitMediaTypeFromWaveFormatEx",(void*)i_MFInitMediaTypeFromWaveFormatEx},
+        {"waveInGetNumDevs",(void*)i_waveGetNumDevs},{"waveInOpen",(void*)i_waveOpen},
+        {"waveOutOpen",(void*)i_waveOutOpen},{"waveOutPrepareHeader",(void*)i_waveOutPrepareHeader},
+        {"waveOutUnprepareHeader",(void*)i_waveOutUnprepareHeader},{"waveOutWrite",(void*)i_waveOutWrite},{"waveOutReset",(void*)i_waveOutReset},
+        {"waveOutClose",(void*)i_waveOutClose},{"waveOutPause",(void*)i_waveOutPause},{"waveOutRestart",(void*)i_waveOutRestart},
+        {"waveOutGetPosition",(void*)i_waveOutGetPosition},{"waveOutGetID",(void*)i_waveOutGetID},{"waveOutGetDevCapsA",(void*)i_waveOutGetDevCapsA},
+        {"waveOutGetDevCapsW",(void*)i_waveOutGetDevCapsW},{"waveOutGetVolume",(void*)i_waveOutGetVolume},{"waveOutSetVolume",(void*)i_waveOutSetVolume},
+        {"waveInGetDevCapsW",(void*)i_waveNoDevice},{"waveInAddBuffer",(void*)i_waveNoDevice},{"waveInClose",(void*)i_waveNoDevice},{"waveInPrepareHeader",(void*)i_waveNoDevice},
+        {"waveInReset",(void*)i_waveNoDevice},{"waveInStart",(void*)i_waveNoDevice},{"waveInStop",(void*)i_waveNoDevice},{"waveInUnprepareHeader",(void*)i_waveNoDevice},
+
+        {"K32GetModuleInformation",(void*)i_K32GetModuleInformation},{"GetModuleInformation",(void*)i_K32GetModuleInformation},
+        {"GetConsoleWindow",(void*)i_GetConsoleWindow},{"AttachConsole",(void*)i_AttachConsole},
+        {"CreateSemaphoreExW",(void*)i_CreateSemaphoreExW},{"CoInitialize",(void*)i_CoInitialize},{"SetThreadAffinityMask",(void*)i_SetThreadAffinityMask},
+        {"PathAppendW",(void*)i_PathAppendW},
+        {"RegOpenKeyExA",(void*)i_RegOpenKeyExA},{"RegGetValueA",(void*)i_RegGetValueA},{"RegQueryValueExA",(void*)i_RegQueryValueExA},
+        {"RegEnumKeyExA",(void*)i_RegEnumNone},{"RegEnumKeyExW",(void*)i_RegEnumNone},{"RegEnumValueA",(void*)i_RegEnumNone},{"RegEnumValueW",(void*)i_RegEnumNone},
+        {"RegEnumKeyA",(void*)i_RegEnumNone},{"RegEnumKeyW",(void*)i_RegEnumNone},
+        {"_vsnprintf",(void*)i_ms_vsnprintf},{"_vsnwprintf",(void*)i_ms_vsnwprintf},{"sprintf_s",(void*)i_ms_sprintf_s},{"swprintf_s",(void*)i_ms_swprintf_s},
+        {"_snwprintf_s",(void*)i_ms_snwprintf_s},{"sscanf_s",(void*)i_ms_sscanf_s},{"_lock",(void*)i_ms_lock},{"_unlock",(void*)i_ms_unlock},
+        {"__dllonexit",(void*)i_ms_dllonexit},{"_onexit",(void*)i_ms_onexit},{"_XcptFilter",(void*)i_ms_XcptFilter},{"_amsg_exit",(void*)i_ms_amsg_exit},
+        {"?terminate@@YAXXZ",(void*)i_ms_terminate},{"??1type_info@@UEAA@XZ",(void*)i_ms_typeinfo_dtor},
+        {"SHGetFolderPathW",(void*)i_SHGetFolderPathW},{"SHGetFolderPathA",(void*)i_SHGetFolderPathA},{"GetFileSize",(void*)i_GetFileSize},
+        {"GetFullPathNameA",(void*)i_GetFullPathNameA},{"GetEnvironmentVariableA",(void*)i_GetEnvironmentVariableA},{"EnumDisplaySettingsA",(void*)i_EnumDisplaySettingsA},
+        {"GetDesktopWindow",(void*)i_GetDesktopWindow},{"LoadIconA",(void*)i_LoadIconA},{"LoadCursorA",(void*)i_LoadCursorA},
+        {"LocaleNameToLCID",(void*)i_LocaleNameToLCID},{"HeapDestroy",(void*)i_HeapDestroy},{"GetAdaptersAddresses",(void*)i_GetAdaptersAddresses},
+        {"ResumeThread",(void*)i_ResumeThread},{"SuspendThread",(void*)i_SuspendThread},{"GetThreadPriority",(void*)i_GetThreadPriority},
+        {"GetLogicalProcessorInformation",(void*)i_GetLogicalProcessorInformation},
+        {"FindResourceW",(void*)i_FindResourceW},{"FindResourceExW",(void*)i_FindResourceExW},{"LoadResource",(void*)i_LoadResource},
+        {"LockResource",(void*)i_LockResource},{"SizeofResource",(void*)i_SizeofResource},{"FreeResource",(void*)i_FreeResource},
         {"FlsSetValue",(void*)i_FlsSetValue},
         {"FlsFree",(void*)i_FlsFree},
         {"IsProcessorFeaturePresent",(void*)i_IsProcessorFeaturePresent},
@@ -11118,7 +11225,9 @@ static void* mv_resolve(const char*fn){
     return 0; }
 
 // unified resolver: CRT names -> guest exports; else native impl; else NULL
+static const char* ord_name(const char*dll,unsigned ord);   // (win32x.c)
 static void *uni_resolve(const char *dll, const char *fn){
+    if(fn && fn[0]=='#'){ const char*on=ord_name(dll,(unsigned)atoi(fn+1)); if(on) fn=on; }   // ordinal-only import with a known name
     int msvcrt = mv_on() && !strcasecmp(dll,"msvcrt.dll");
     if(msvcrt){ void*r=mv_resolve(fn); if(r) return r; }
     if(is_crt_dll(dll) || msvcrt){
@@ -11251,6 +11360,21 @@ static void waves_prefill(uint8_t* halo3_base){
 static uint8_t *load_guest(const char *path, const char *name){
     OPT64 *opt; COFF *coff; uint8_t *base=map_image(path,&opt,&coff);
     if(!base){ ws("  guest load FAILED: "); ws(name); ws("\n"); return 0; }
+    // Dependencies first (2026-10-20, halo2.dll -> mss64.dll / MOPP.dll): an import from a DLL that is a file in this DLL's own
+    // folder and not loaded yet is loaded (recursively) before the imports are bound, as Windows' loader does. Before, such
+    // imports became logging stubs whenever the dependency was loaded later (halo2's AIL_* Miles calls all returned 0).
+    // PELOAD_NO_DEPLOAD=1 = old.
+    if((opt->Dir[DIR_IMPORT].VA || opt->Dir[DIR_DELAY].VA) && !getenv("PELOAD_NO_DEPLOAD")){
+        char dir[2048]; snprintf(dir,sizeof dir,"%s",path); char*sl=strrchr(dir,'/'); if(sl) sl[1]=0; else dir[0]=0;
+        const char*deps[256]; int nd=0;   // normal and delay imports (halo2.dll delay-loads mss64.dll)
+        if(opt->Dir[DIR_IMPORT].VA) for(IMPDESC*d=(IMPDESC*)(base+opt->Dir[DIR_IMPORT].VA); d->Name && nd<256; d++) deps[nd++]=(const char*)(base+d->Name);
+        if(opt->Dir[DIR_DELAY].VA) for(DELAYDESC*d=(DELAYDESC*)(base+opt->Dir[DIR_DELAY].VA); d->Name && nd<256; d++) deps[nd++]=(const char*)(base+d->Name);
+        for(int di=0;di<nd;di++){ const char*dn=deps[di]; int have=0;
+            for(int m=0;m<g_nmods;m++) if(g_mods[m].name && !strcasecmp(g_mods[m].name,dn)) have=1;
+            if(have || !dir[0] || is_crt_dll(dn) || name_is_ws2(dn)) continue;
+            char dp[2300]; snprintf(dp,sizeof dp,"%s%s",dir,dn);
+            if(access(dp,R_OK)!=0){ DIR*dd=opendir(dir); struct dirent*de; if(dd){ while((de=readdir(dd))) if(!strcasecmp(de->d_name,dn)){ snprintf(dp,sizeof dp,"%s%s",dir,de->d_name); break; } closedir(dd); } }
+            if(access(dp,R_OK)==0){ ws("  [deps] "); ws(name); ws(" needs "); ws(dn); ws(": loading it first\n"); load_guest(dp,strdup(dn)); } } }
     bind_imports(base,opt);
     bind_delay_imports(base,opt);   // halo3.dll delay-loads dxgi/d3d11/etc.
     set_protections(base,coff,opt);
@@ -11951,6 +12075,16 @@ static void bp_install(void){ const char*s=getenv("PELOAD_BP"); if(!s||!g_base) 
 // exe/halo3 return addresses. Rosetta exposes x86_THREAD_STATE64, so this shows exactly where
 // each thread is blocked/spinning (unlike `sample`, which shows the ARM/JIT translation).
 volatile mach_port_t g_tee_ports[2];   // PELOAD_*_TEE copy threads: never suspended (the dump writes through them)
+// SIGUSR1 dump: name an address by the exe or the guest DLL holding it ("      <dll>+0x<off>\n"; 2026-10-20: any loaded DLL --
+// it named everything at 0x180000000 "halo3" and left other DLLs unnamed)
+static int dump_attr(uint64_t v,char*out,size_t cap){
+    if(g_base && v>=(uint64_t)g_base){ DOS*dh=(DOS*)g_base; OPT64*oh=(OPT64*)(g_base+dh->e_lfanew+sizeof(COFF));
+        if(v<(uint64_t)g_base+oh->ImageSize){ snprintf(out,cap,"      exe+0x%llx\n",(unsigned long long)(v-(uint64_t)g_base)); return 1; } }
+    for(int m=0;m<g_nmods;m++){ uint8_t*b=g_mods[m].base; if(!b || v<(uint64_t)b) continue; DOS*dh=(DOS*)b; if(dh->e_magic!=0x5A4D) continue;
+        OPT64*oh=(OPT64*)(b+dh->e_lfanew+sizeof(COFF)); if(v<(uint64_t)b+oh->ImageSize){ const char*nm=g_mods[m].name?g_mods[m].name:"dll";
+            char sh[48]; snprintf(sh,sizeof sh,"%s",nm); char*dot=strrchr(sh,'.'); if(dot) *dot=0;
+            snprintf(out,cap,"      %s+0x%llx\n",sh,(unsigned long long)(v-(uint64_t)b)); return 1; } }
+    return 0; }
 static void dump_all_guest_stacks(void){
     thread_act_array_t th; mach_msg_type_number_t n=0;
     if(task_threads(mach_task_self(),&th,&n)!=KERN_SUCCESS) return;
@@ -11963,13 +12097,11 @@ static void dump_all_guest_stacks(void){
         x86_thread_state64_t st; mach_msg_type_number_t sc=x86_THREAD_STATE64_COUNT;
         if(thread_get_state(th[i],x86_THREAD_STATE64,(thread_state_t)&st,&sc)==KERN_SUCCESS){
             uint64_t rip=st.__rip,rsp=st.__rsp;
-            const char* mn=(rip>=0x140000000ULL&&rip<0x14c000000ULL)?"exe+0x":(rip>=0x180000000ULL&&rip<0x187000000ULL)?"halo3+0x":"jit:0x";
-            uint64_t ro=(rip>=0x180000000ULL&&rip<0x187000000ULL)?rip-0x180000000ULL:(rip>=0x140000000ULL&&rip<0x14c000000ULL)?rip-0x140000000ULL:rip;
-            char b[240]; int k=snprintf(b,sizeof b,"-- thr%u '%s' rip=%s%llx rsp=0x%llx\n",i,tn,mn,(unsigned long long)ro,(unsigned long long)rsp); (void)!write(2,b,k);
+            char rn[96]; if(!dump_attr(rip,rn,sizeof rn)) snprintf(rn,sizeof rn,"jit:0x%llx",(unsigned long long)rip); else { size_t l=strlen(rn); if(l) rn[l-1]=0; }
+            char b[240]; int k=snprintf(b,sizeof b,"-- thr%u '%s' rip=%s rsp=0x%llx\n",i,tn,rn[0]==' '?rn+6:rn,(unsigned long long)rsp); (void)!write(2,b,k);
             static int depth=-1, words=700; if(depth<0){ const char*e=getenv("PELOAD_DUMP_DEPTH"); depth=e?atoi(e):16; if(depth<1) depth=16; if(depth>16) words=depth*60; }   // frames shown per thread
             int shown=0; for(int w=0;w<words && shown<depth;w++){ uint64_t sa=rsp+(uint64_t)w*8; if(!hook_safe(sa)) break; uint64_t v=*(uint64_t*)sa;
-                if(v>=0x180000000ULL&&v<0x187000000ULL){ char c[48]; int kk=snprintf(c,sizeof c,"      halo3+0x%llx\n",(unsigned long long)(v-0x180000000ULL)); (void)!write(2,c,kk); shown++; }
-                else if(v>=0x140000000ULL&&v<0x14c000000ULL){ char c[48]; int kk=snprintf(c,sizeof c,"      exe+0x%llx\n",(unsigned long long)(v-0x140000000ULL)); (void)!write(2,c,kk); shown++; } }
+                char c[96]; if(dump_attr(v,c,sizeof c)){ int kk=(int)strlen(c); (void)!write(2,c,kk); shown++; } }
         }
         thread_resume(th[i]);
     }
@@ -12307,6 +12439,30 @@ static void* scratch_sweep(void*a){ (void)a; pthread_setname_np("shim-sweep"); s
     if(removed){ char m[200]; int k=snprintf(m,sizeof m,"  [sweep] removed %d stale ReclaimerCache\\Temp\\mcc-startup-* folder%s (%d kept: in use or new)\n",removed,removed==1?"":"s",kept); (void)!write(2,m,(size_t)k); }
     return 0; }
 static void scratch_sweep_start(void){ if(getenv("PELOAD_NO_SCRATCH_SWEEP") || !g_drivec[0]) return; pthread_t t; if(!pthread_create(&t,0,scratch_sweep,0)) pthread_detach(t); }
+// PEB contents (2026-10-20, Project Gravemind): until now the PEB held nothing but what the %gs overlay needs, so
+// PEB->ProcessParameters (+0x20) was NULL and Gravemind's runtime faulted at once reading ProcessParameters->Flags
+// (exe+0x42da54: gs:[0x30] -> +0x60 -> +0x20 -> [+8]). Runtimes that read the process's parameters from the PEB instead of
+// calling GetStdHandle / GetCommandLineW / GetEnvironmentStringsW (Zig's std, some MinGW code) get a real
+// RTL_USER_PROCESS_PARAMETERS: standard handles = GetStdHandle's (1/2/3), current directory (Windows form, trailing
+// backslash), image path, command line, the environment block (a snapshot at start). PEB: ImageBaseAddress (+0x10),
+// NumberOfProcessors (+0xB8), OS version 10.0.19045 (+0x118/+0x11C/+0x120, platform 2). PELOAD_PEB_EMPTY=1 = old.
+static void peb_fill(uint8_t*peb){
+    if(!peb || getenv("PELOAD_PEB_EMPTY")) return;
+    *(uint64_t*)(peb+0x10)=(uint64_t)g_base;
+    { int lc=8; size_t sz=sizeof lc; sysctlbyname("hw.logicalcpu",&lc,&sz,0,0); *(uint32_t*)(peb+0xB8)=(uint32_t)lc; }
+    *(uint32_t*)(peb+0x118)=10; *(uint32_t*)(peb+0x11C)=0; *(uint16_t*)(peb+0x120)=19045; *(uint32_t*)(peb+0x124)=2;
+    uint8_t*pp=calloc(1,0x500); if(!pp) return;
+    *(uint32_t*)(pp+0x00)=0x500; *(uint32_t*)(pp+0x04)=0x500; *(uint32_t*)(pp+0x08)=1;   // RTL_USER_PROC_PARAMS_NORMALIZED
+    *(uint64_t*)(pp+0x20)=1; *(uint64_t*)(pp+0x28)=2; *(uint64_t*)(pp+0x30)=3;          // = i_GetStdHandle's values
+    #define US(off,buf,n) do{ *(uint16_t*)(pp+(off))=(uint16_t)((n)*2); *(uint16_t*)(pp+(off)+2)=(uint16_t)((n)*2+2); *(uint64_t*)(pp+(off)+8)=(uint64_t)(buf); }while(0)
+    { char cwd[2048]; static uint16_t wc[2050]; if(getcwd(cwd,sizeof cwd)){ unix2win(cwd,wc,2048); size_t n=0; while(wc[n]) n++;
+        if(n && wc[n-1]!='\\' && n<2048){ wc[n++]='\\'; wc[n]=0; } US(0x38,wc,n); } }
+    { size_t n=0; while(g_exewin[n]) n++; US(0x60,g_exewin,n); }
+    { size_t n=0; while(g_cmdlineW[n]) n++; US(0x70,g_cmdlineW,n); }
+    { static uint16_t empty[1]; US(0x50,empty,0); US(0xB0,g_exewin,0); US(0xC0,empty,0); US(0xD0,empty,0); US(0xE0,empty,0); }
+    #undef US
+    { uint16_t*env=build_env_block_w(); if(env){ size_t n=0; while(env[n] || env[n+1]) n++; *(uint64_t*)(pp+0x80)=(uint64_t)env; *(uint64_t*)(pp+0x3F0)=(n+2)*2; } }
+    *(uint64_t*)(peb+0x20)=(uint64_t)pp; }
 int main(int argc, char **argv){ mt_start();
     std_tee_start(2,"PELOAD_STDERR_TEE"); std_tee_start(1,"PELOAD_STDOUT_TEE");
     if(getenv("PELOAD_SAMPLE")){ pthread_t st; pthread_create(&st,0,sampler_thread,0); }
@@ -12478,6 +12634,7 @@ int main(int argc, char **argv){ mt_start();
     reentrancy_fix(); // built-in: neutralise the ui_composition RefCell re-entrancy
     st_voice_install(); // stats page: voice mute + talking indicator (stats.c)
     patch_install(); hook_install(); // PELOAD_PATCH overwrites + PELOAD_HOOK trace detours
+    peb_fill(g_peb_ptr);  // PEB image base / OS version / ProcessParameters (stdio, cwd, image path, command line, environment)
     ws("peload: calling entry (expect stub logs, then a fault at the first\n"
        "        unimplemented behavior — that is the signal we want)\n");
     // (window is created lazily in wglCreateContext on the engine's GL thread)

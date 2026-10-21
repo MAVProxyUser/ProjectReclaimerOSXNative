@@ -11,3 +11,5 @@ dist/
 
 # made per machine by shim/tools/make-app.sh (holds this folder's path)
 Reclaimer.app/
+# third-party downloads dropped into client/ (Gravemind and other fan clients ship as zips)
+client/*.zip
