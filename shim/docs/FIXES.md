@@ -596,6 +596,11 @@ patch variants by signature (section 16; shim/docs/patch-addresses.md).
 
 ## 7. Windows, input, focus (Cocoa, Raw Input, XInput)
 
+- **PELOAD_TRACE_FG** (2026-10-21, diagnostic) — `i_GetForegroundWindow` logs each code site that asks (module+RVA, once) and the
+  window it got, beside the last shown / last created windows. Why: Project Gravemind reads its pads only while
+  GetForegroundWindow() is its own window (exe+0x6d620, then XInputGetState at exe+0x6d63f), and no XInputGetState call showed up in
+  its runs; shim/gravemind.sh turns it on with PELOAD_TRACE_XINPUT and PELOAD_TRACE_D2D (all in /tmp/gravemind_play.log).
+
 - **Clipboard on the Mac pasteboard** — `i_OpenClipboard` / `i_EmptyClipboard` / `i_SetClipboardData` / `i_CloseClipboard`
   / `i_GetClipboardData` / `i_IsClipboardFormatAvailable` (+ Count / Enum / sequence number / RegisterClipboardFormatW) and
   `i_GlobalAlloc` / `Lock` / `Unlock` / `Size` / `Free`. Why: Settings > Online services > Player ID > COPY (and every

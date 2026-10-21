@@ -4459,7 +4459,15 @@ static uint32_t MSABI i_XInputGetCapabilities(uint32_t idx,uint32_t fl,void*cap)
     if(!gc_read(idx,&p) && !(idx==0&&(getenv("PELOAD_INPUT_SCRIPT")||getenv("PELOAD_NAV")))) return 1167;
     if(cap){ memset(cap,0,20); uint8_t*c=cap; c[0]=1/*GAMEPAD*/; c[1]=1/*SUBTYPE_GAMEPAD*/; *(uint16_t*)(c+4)=0xF3FF; c[6]=c[7]=255; *(int16_t*)(c+8)=*(int16_t*)(c+10)=*(int16_t*)(c+12)=*(int16_t*)(c+14)=(int16_t)0xFFC0; } return 0; }
 static void MSABI i_XInputEnable(int en){ (void)en; }
-static void*  MSABI i_GetForegroundWindow(void){ return fg_hwnd(); }
+static int dump_attr(uint64_t v,char*out,size_t cap); // fwd
+// PELOAD_TRACE_FG: each code site that asks for the foreground window, once, with the answer -- games that read pads / keys only
+// while their own window is in front (Project Gravemind: exe+0x6d620 compares it with its window before XInputGetState)
+static void*  MSABI i_GetForegroundWindow(void){ void*h=fg_hwnd();
+    static int tr=-1; if(tr<0) tr=getenv("PELOAD_TRACE_FG")?1:0;
+    if(tr){ static uint64_t seen[24]; static int n; uint64_t ra=(uint64_t)__builtin_return_address(0); int i; for(i=0;i<n && seen[i]!=ra;i++){}
+        if(i==n && n<24){ seen[n++]=ra; char a[80]="      ?\n"; dump_attr(ra,a,sizeof a); char*q=a; while(*q==' ') q++; char*nl=strchr(q,'\n'); if(nl) *nl=0;
+            char m[200]; int k=snprintf(m,sizeof m,"  [fg] GetForegroundWindow from %s -> %p (last shown %p, last created %p)\n",q,h,g_shown_hwnd,g_last_hwnd); (void)!write(2,m,k); } }
+    return h; }
 static int    MSABI i_SetForegroundWindow(void*h){ if(xwin_is(h)){ int fp=0; if(xwin_rect(h,0,0,0,0,0,0,&fp)) xwin_activate(fp); return 1; } if(wv2_owns(h)) wv2_activate(h); if(fg_can_activate(h)) g_shown_hwnd=h; return 1; }
 static int    MSABI i_IsWindow(void*h){ if(xwin_is(h)) return xwin_rect(h,0,0,0,0,0,0,0); return h?1:0; }
 static int    MSABI i_IsWindowVisible(void*h){ if(xwin_is(h)){ int v=0,m=0; return xwin_rect(h,0,0,0,0,&v,&m,0) && v && !m; } return 1; }

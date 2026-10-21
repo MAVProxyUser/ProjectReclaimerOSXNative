@@ -27,7 +27,7 @@ for p in $(pgrep -f '^[^ ]*build/peload'); do
   c="$(ps -o command= -p "$p" 2>/dev/null)"; case "$c" in *" dedicated "*|*" local-server "*|*"probe-engine-worker C:\\Rec"*) continue;; esac
   echo "a game is already running (pid $p) - not starting"; exit 3
 done
-ENV=(PELOAD_PRESENT=1 PELOAD_HOLD_WINDOW=1 PELOAD_D3DGL=1 PELOAD_TRACE_XINPUT=1 PELOAD_GL_HELPER="${PELOAD_GL_HELPER:-1}" PELOAD_STATS_HTTP="${PELOAD_STATS_HTTP:-0}")
+ENV=(PELOAD_PRESENT=1 PELOAD_HOLD_WINDOW=1 PELOAD_D3DGL=1 PELOAD_TRACE_XINPUT=1 PELOAD_TRACE_FG=1 PELOAD_TRACE_D2D=1 PELOAD_GL_HELPER="${PELOAD_GL_HELPER:-1}" PELOAD_STATS_HTTP="${PELOAD_STATS_HTTP:-0}")
 [ -n "${GM_TEST:-}" ] && ENV+=(PELOAD_NO_FOCUS=1 PELOAD_NO_KBM=1 PELOAD_NO_SYS_CURSOR=1 PELOAD_NO_PAD=1 PELOAD_AUDIO=0
   PELOAD_PASTEBOARD=reclaimer-test 'USERPROFILE=C:\ReclaimerProfileGMTest') && mkdir -p "$PFX/ReclaimerProfileGMTest"
 LOG="${GM_LOG:-/tmp/gravemind_play.log}"
