@@ -8,7 +8,10 @@ start when the beta is closed.
 
 - **An offline match runs and renders**: `bash shim/gravemind.sh --map-id 44` (Lockout) -- the map, the first-person weapon, the
   HUD and motion tracker, ~60 fps. Gravemind's own patches to halo2.dll all apply; Miles sound plays through waveOut.
-- **The launcher and menus don't draw yet**: they use Direct2D / DirectWrite, which the loader doesn't have yet (in progress).
+- **Launcher and menus**: they are Direct2D / DirectWrite / WIC, which the loader now has (shim/src/d2d.c, dwrite.c, wic.c; checked
+  offline by `bash shim/tools/d2d-test.sh`). Not yet seen running Gravemind's own launcher: its first run will show which
+  Direct2D calls it makes that aren't implemented (`[d2d] ... not implemented` in the log). Its back buffer is now its swap chain's
+  1280x720 (it was 1920x1080 with the game in a corner).
 - **Controller**: Gravemind reads pads with XInputGetState; whether it polls them under the loader is being checked
   (`[xinput] XInputGetState called` in the log when it does).
 - Not yet: the LAN game list (GetAdaptersAddresses), campaign (needs the 31 GB campaign depot).

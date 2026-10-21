@@ -200,10 +200,8 @@ static uint16_t* MSABI i_SysAllocString(const uint16_t*s){ if(!s) return 0; uint
 static void MSABI i_SysFreeString(uint16_t*s){ if(s) free((uint8_t*)s-4); }
 static uint32_t MSABI i_SysStringLen(const uint16_t*s){ return s?*(const uint32_t*)((const uint8_t*)s-4)/2:0; }
 // ---- Not available here; they now fail cleanly instead of S_OK with nothing behind it:
-//   Direct2D / DirectWrite (Gravemind's menus: "ui: Direct2D init failed 0x80004001"), Media Foundation's audio-format helpers
-//   and MFTEnumEx (MFStartup already fails), winmm wave in / out (voice chat: no devices).
-static int MSABI i_D2D1CreateFactory(int type,const void*iid,const void*opt,void**pp){ (void)type;(void)iid;(void)opt; if(pp) *pp=0; return (int)0x80004001; }
-static int MSABI i_DWriteCreateFactory(int type,const void*iid,void**pp){ (void)type;(void)iid; if(pp) *pp=0; return (int)0x80004001; }
+//   Media Foundation's audio-format helpers and MFTEnumEx (MFStartup already fails), winmm wave in (voice chat: no devices).
+//   (Direct2D / DirectWrite: d2d.c.)
 static int MSABI i_MFTEnumEx(const void*cat,uint32_t fl,const void*in,const void*out,void***act,uint32_t*n){ (void)cat;(void)fl;(void)in;(void)out; if(act) *act=0; if(n) *n=0; return (int)0x80004001; }
 static int MSABI i_MFCreateWaveFormatExFromMFMediaType(void*mt,void**wf,uint32_t*sz,uint32_t fl){ (void)mt;(void)fl; if(wf) *wf=0; if(sz) *sz=0; return (int)0x80004001; }
 static int MSABI i_MFInitMediaTypeFromWaveFormatEx(void*mt,const void*wf,uint32_t sz){ (void)mt;(void)wf;(void)sz; return (int)0x80004001; }

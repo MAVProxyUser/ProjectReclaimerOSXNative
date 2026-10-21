@@ -30,9 +30,12 @@ overrides) and prints `[game] ...` at start.
 | menu grading shader recognised in D3DCompile | h3 | peload.c `i_D3DCompile` (rtgrade) |
 | MCC's real HLSL compiler for D3DCompile | h2 by default (`PELOAD_REAL_D3DCOMPILE=1` anywhere, `=0` off) | peload.c `i_D3DCompile` |
 | waveOutGetNumDevs reports one device | h2 (h3 / reach: 0, so they keep XAudio2 only) | peload.c `i_waveOutGetNumDevs` |
+| the back buffer takes the swap chain's size (else 1920x1080) | h2 (`PELOAD_SWAP_DESC_SIZE`) | peload.c `dxgi_CreateSwapChain` |
+| WIC (CoCreateInstance of the WIC imaging factory) | h2 (`PELOAD_WIC`): halo3.dll references it too and has only ever got "not registered" | wic.c `wic_create` |
 
-Reach Renaissance's additions (WebView2 on WKWebView, windows across loader processes, Schannel on LibreSSL) are Windows
-components implemented in full, used only when a game asks for them -- shared by the rule above.
+Reach Renaissance's additions (WebView2 on WKWebView, windows across loader processes, Schannel on LibreSSL) and Gravemind's
+(Direct2D, DirectWrite) are Windows components, used only when a game asks for them -- shared by the rule above (no other game
+imports d2d1 / dwrite). WIC is the exception in the table: a game that already asks for it gets it only after a test.
 
 ## Checking that no game broke another
 

@@ -1811,6 +1811,7 @@ static volatile const char* g_d3dgl_phase="(none)"; // last d3dgl step reached (
 static volatile unsigned long g_d3dgl_phase_draw;    // which draw # we were on
 static int d3dgl_enabled(void){ if(g_d3dgl_en<0) g_d3dgl_en=getenv("PELOAD_D3DGL")?1:0; return g_d3dgl_en; }
 static void d3dgl_draw(uint32_t vcount,int indexed,uint32_t instcount,uint32_t start,int32_t base,uint32_t sinst); // fwd
+static void d3dgl_latch_present(D3DObj*rt,int vw,int vh,int nattr); // fwd (the draw path's present latch; d2d.c too)
 static void d3dgl_present(void); // fwd (blit the D3DGL backbuffer to the window at Present)
 static int cb_looks_viewproj(const float*m,uint64_t bytes); static int hb_enabled(void); static int hb_is_world_camera(const float*rows); static void hb_capture_view(const float*rows); static void hb_draw_overlay(void); static void hb_note_map(const char*p); extern volatile int g_hb_taken; static void hb_note_dsv(void*ds); static void hb_capture_tick(void); static void hb_vis_tick(void); // hitbox.c
 static void d3dgl_clear_rtv(void* rtvview,const float* col); // fwd (ClearRenderTargetView -> GL clear)
@@ -2285,7 +2286,11 @@ static D3DObj* g_d3d_backbuf;
 // Reclaimer's own UI (the frontend menu and in-game overlays, composited into the back buffer with a
 // viewport of the back buffer's size) laid out for a 4096^2 screen. PELOAD_SWAP_SIZE=<w>x<h> overrides;
 // PELOAD_SWAP_SIZE=4096x4096 restores the old placeholder.
-static void swap_size(uint32_t*w,uint32_t*h){ static uint32_t W,H; if(!W){ W=1920; H=1080; const char*e=getenv("PELOAD_SWAP_SIZE");
+// Halo 2 (Project Gravemind): the size its CreateSwapChain asked for (it lays out its Direct2D screens for that size and renders with
+// that viewport); PELOAD_SWAP_DESC_SIZE=0 = the old 1920x1080 for it too, =1 for any game (games.c).
+static uint32_t g_swap_desc_w, g_swap_desc_h;
+static void swap_size(uint32_t*w,uint32_t*h){ static uint32_t W,H; if(!W && g_swap_desc_w && !getenv("PELOAD_SWAP_SIZE")){ W=g_swap_desc_w; H=g_swap_desc_h; }
+    if(!W){ W=1920; H=1080; const char*e=getenv("PELOAD_SWAP_SIZE");
         if(e){ unsigned a=0,b=0; if(sscanf(e,"%ux%u",&a,&b)==2 && a>=320 && b>=200 && a<=4096 && b<=4096){ W=a; H=b; } } } *w=W; *h=H; }
 static D3DObj* swap_backbuf(void){ if(!g_d3d_backbuf){ uint32_t w,h; swap_size(&w,&h); g_d3d_backbuf=mktex(w,h,1,28,2); } return g_d3d_backbuf; }
 static int MSABI swap_GetBuffer(void*t,uint32_t buf,GUID_*r,void**pp){ (void)t;(void)buf;(void)r;
@@ -2297,6 +2302,8 @@ static int MSABI swap_GetBuffer(void*t,uint32_t buf,GUID_*r,void**pp){ (void)t;(
 // frontend's "RefCell already borrowed" re-entrancy panic on the next UI draw.
 static int MSABI swap_GetDevice(void*t,GUID_*riid,void**pp){ (void)t;(void)riid; if(pp)*pp=&g_d3ddevice; return HR_OK; }
 static int MSABI dxgi_CreateSwapChain(void*t,void*dev,void*desc,void**pp){ (void)t;(void)dev; if(pp)*pp=d3dobj(g_dxgiswap_vtbl,0,0);
+    if(desc && !g_d3d_backbuf && game_default_on("PELOAD_SWAP_DESC_SIZE",GAME_H2)){ uint32_t w=*(const uint32_t*)desc, h=*(const uint32_t*)((const uint8_t*)desc+4);
+        if(w>=320 && h>=200 && w<=4096 && h<=4096){ g_swap_desc_w=w; g_swap_desc_h=h; } }
     if(getenv("PELOAD_TRACE_SWAP") && desc){ const uint8_t*d=desc; char m[160]; int k=snprintf(m,sizeof m,"  [swapchain] CreateSwapChain -> %p: %ux%u fmt %u buffers %u window %p\n",pp?*pp:0,*(const uint32_t*)d,*(const uint32_t*)(d+4),*(const uint32_t*)(d+16),*(const uint32_t*)(d+40),*(void*const*)(d+48)); (void)!write(2,m,k); }
     return HR_OK; }
 // DXGI_SWAP_CHAIN_DESC: BufferDesc{W@0,H@4,RR num@8/den@12,Format@16,...} SampleDesc{Count@28,Q@32}
@@ -2730,11 +2737,13 @@ static int MSABI i_SHGetKnownFolderPath(const GUID_*id,uint32_t fl,void*tok,uint
     *out=w; return 0; }
 static int   MSABI i_PropVariantClear(void*p){ if(p){ uint16_t vt=*(uint16_t*)p; if(vt==31||vt==30) free_or_fch(*(void**)((uint8_t*)p+8)); memset(p,0,24); } return HR_OK; }   // VT_LPWSTR/LPSTR own CoTaskMem strings
 static void* wasapi_enumerator(void); // wasapi.c
+static int wic_create(const GUID_*clsid,const GUID_*iid,void**ppv); // fwd (wic.c)
 static int   MSABI i_CoCreateInstance(GUID_*clsid, void*outer, uint32_t ctx, GUID_*iid, void**ppv){
     (void)outer;(void)ctx;(void)iid;
     // CLSID_MMDeviceEnumerator = BCDE0395-E52F-467C-8E3D-C4579291692E
     if(clsid && clsid->D1==0xBCDE0395u && clsid->D2==0xE52F && clsid->D3==0x467C){   // MMDeviceEnumerator (wasapi.c)
         if(ppv)*ppv = getenv("PELOAD_NO_WASAPI") ? (void*)&g_mmde : wasapi_enumerator(); return HR_OK; }
+    { int r=wic_create(clsid,iid,ppv); if(r) return r<0?r:HR_OK; }   // WICImagingFactory(2) (wic.c)
     if(getenv("PELOAD_TRACE_VA")&&clsid){ char t[96]; snprintf(t,sizeof t,"  [CoCreateInstance] clsid=%08x-%04x-%04x unhandled\n",clsid->D1,clsid->D2,clsid->D3); ws(t);}
     if(ppv)*ppv=0; return HR_CLASSNOTREG; }
 // ---- ws2_32 (Winsock) consistent resolution --------------------------------
@@ -7688,6 +7697,10 @@ static void d3dgl_draw_impl(uint32_t vcount,int indexed,uint32_t instcount,uint3
                 if(GENV1("PELOAD_TRACE_D3DGL")){ char m[160]; int k=snprintf(m,sizeof m,"  [present-geom] latch tex=%u %dx%d verts=%.0f\n",gtbl[mi].tex,gtbl[mi].w,gtbl[mi].h,mx); (void)!write(2,m,k);} } }
         return;
     }
+    d3dgl_latch_present(rt,vw,vh,nattr);
+}
+// latch the present source after a draw into rt (viewport vw x vh; nattr: it had vertex inputs) -- also Direct2D's composites (d2d.c)
+static void d3dgl_latch_present(D3DObj*rt,int vw,int vh,int nattr){
     int scene_mode = GENV1("PELOAD_D3DGL_PRESENT_SCENE")!=0;
     if(vw>=512 && vh>=288){ long a=(long)vw*vh; static long best;
         int isbb=(rt==g_d3d_backbuf);
@@ -9291,6 +9304,7 @@ static uintptr_t MSABI i_beginthread(WinThreadProc start,unsigned stack,void*arg
 #include "winhttp.c"    // WinHTTP on macOS's libcurl (Project Gravemind's beta status / update checks)
 #include "win32x.c"     // CommandLineToArgvW, GetPrivateProfile*, CreateFile2, GetStringTypeW (first needed by Gravemind)
 #include "winmm.c"      // waveOut on CoreAudio (MCC's Miles Sound System for Halo 2)
+#include "d2d.c"        // Direct2D 1.1 + DirectWrite + WIC on CoreGraphics / CoreText / ImageIO (Project Gravemind's screens)
 // every guest thread's TLS block of one module (index idx), copied under g_tlsm: a returned thread's array is freed 30 s
 // later (thr_reap), so callers must not keep the arrays themselves past the lock
 static int tls_blocks(uint32_t idx,void**out,int max){ int n=0; if(idx>=128) return 0; pthread_mutex_lock(&g_tlsm);
@@ -10752,7 +10766,10 @@ static void *resolve_impl(const char *fn){
         {"D3D11CreateDeviceAndSwapChain",(void*)i_D3D11CreateDeviceAndSwapChain},{"AdjustWindowRect",(void*)i_AdjustWindowRect},
         {"AppPolicyGetThreadInitializationType",(void*)i_AppPolicyGetThreadInitializationType},
         {"SysAllocString",(void*)i_SysAllocString},{"SysAllocStringLen",(void*)i_SysAllocStringLen},{"SysFreeString",(void*)i_SysFreeString},{"SysStringLen",(void*)i_SysStringLen},
-        {"D2D1CreateFactory",(void*)i_D2D1CreateFactory},{"DWriteCreateFactory",(void*)i_DWriteCreateFactory},{"MFTEnumEx",(void*)i_MFTEnumEx},
+        {"D2D1CreateFactory",(void*)i_D2D1CreateFactory},{"DWriteCreateFactory",(void*)i_DWriteCreateFactory},
+        {"D2D1MakeRotateMatrix",(void*)i_D2D1MakeRotateMatrix},{"D2D1MakeSkewMatrix",(void*)i_D2D1MakeSkewMatrix},{"D2D1IsMatrixInvertible",(void*)i_D2D1IsMatrixInvertible},
+        {"D2D1InvertMatrix",(void*)i_D2D1InvertMatrix},{"D2D1SinCos",(void*)i_D2D1SinCos},{"D2D1Tan",(void*)i_D2D1Tan},{"D2D1Vec3Length",(void*)i_D2D1Vec3Length},
+        {"D2D1CreateDevice",(void*)i_D2D1CreateDevice},{"D2D1CreateDeviceContext",(void*)i_D2D1CreateDeviceContext},{"MFTEnumEx",(void*)i_MFTEnumEx},
         {"MFCreateWaveFormatExFromMFMediaType",(void*)i_MFCreateWaveFormatExFromMFMediaType},{"MFInitMediaTypeFromWaveFormatEx",(void*)i_MFInitMediaTypeFromWaveFormatEx},
         {"waveInGetNumDevs",(void*)i_waveGetNumDevs},{"waveInOpen",(void*)i_waveOpen},
         {"waveOutOpen",(void*)i_waveOutOpen},{"waveOutPrepareHeader",(void*)i_waveOutPrepareHeader},
@@ -12493,6 +12510,7 @@ int main(int argc, char **argv){ mt_start();
     { struct sigaction su; memset(&su,0,sizeof su); su.sa_handler=usr1sig; sigaction(SIGUSR1,&su,0); }  // SIGUSR1 -> guest thread dump
     { const char* nt=getenv("PELOAD_NETTEST"); if(nt){ net_selftest(nt); } }
     if(getenv("PELOAD_GLTEST")){ gl_selftest(); return 0; }  // direct GL render test; no game loaded
+    if(getenv("PELOAD_D2D_SELFTEST")) return d2d_selftest(getenv("PELOAD_D2D_SELFTEST"));   // Direct2D / DirectWrite / WIC test card (d2d.c)
     const char *path = argc>1 ? argv[1] : "halo3.dll";
     { static char selfabs[4096]; if(realpath(argv[0],selfabs)) g_self=selfabs; else g_self=argv[0]; } // absolute (child chdir's)
     ws("peload: loading "); ws(path); ws("\n");
