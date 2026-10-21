@@ -30,9 +30,15 @@ h3)
   EXE=$(ls client/project-reclaimer-client-v*.exe 2>/dev/null | sort -V | tail -1)
   [ -n "$EXE" ] && [ -f "$MCC/halo3/halo3.dll" ] || { result "h3     SKIP (no client exe in client/ or no Halo 3 in MCC)"; continue; }
   bash shim/dedicated.sh >/dev/null 2>&1; sleep 5
-  QR_STATS_OPEN=0 bash shim/tools/quiet-run.sh "PELOAD_STATS_UISTEPS=1 PELOAD_FEED_LOG=1" 180 "reclaimer://join?server=127.0.0.1:49190" >/dev/null 2>&1 &
-  sleep 6; ok=0
-  for i in $(seq 1 60); do grep -a -q -E 'Loading screen complete|Joining server failed|\[CRASH\]' /tmp/quiet-run.log 2>/dev/null && break; sleep 3; done
+  # the first join right after a server start can be refused ("Public join timed out", CLAUDE.md): one retry
+  for try in 1 2; do
+    QR_STATS_OPEN=0 bash shim/tools/quiet-run.sh "PELOAD_STATS_UISTEPS=1 PELOAD_FEED_LOG=1" 180 "reclaimer://join?server=127.0.0.1:49190" >/dev/null 2>&1 &
+    sleep 6; ok=0
+    for i in $(seq 1 60); do grep -a -q -E 'Loading screen complete|Joining server failed|\[CRASH\]' /tmp/quiet-run.log 2>/dev/null && break; sleep 3; done
+    grep -a -q 'Joining server failed' /tmp/quiet-run.log && [ $try = 1 ] || break
+    for p in $(pgrep -f '^[^ ]*build/peload'); do pg=$(ps -o pgid= -p "$p" | tr -d ' '); [ "$pg" = "$(cat "$HOME/Library/Application Support/ReclaimerMac/dedicated.pgid" 2>/dev/null)" ] || stop_pgid "$pg"; done
+    echo "h3: first join refused (known right after a server start) - retrying"; sleep 5
+  done
   if grep -a -q 'Loading screen complete' /tmp/quiet-run.log; then
     sleep 8; curl -s -X POST -H 'X-Reclaimer-Control: 1' 'http://127.0.0.1:8765/control?do=uisteps&s=k:11;s:1;t:matrix%20check;s:0.5;k:24' >/dev/null
     for i in $(seq 1 20); do grep -a -q 'chat: matrix check' /tmp/quiet-run.log && break; sleep 1; done
