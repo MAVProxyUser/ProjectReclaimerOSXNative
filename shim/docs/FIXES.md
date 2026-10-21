@@ -596,6 +596,17 @@ patch variants by signature (section 16; shim/docs/patch-addresses.md).
 
 ## 7. Windows, input, focus (Cocoa, Raw Input, XInput)
 
+- **A click (or switching to the window) takes the foreground back from a hidden window** (2026-10-21) — `fg_user_activate`
+  (peload.c; called from wininput.c's mouse-down and cocoa_pump's key-window check), WWin `vis` (CreateWindowExW WS_VISIBLE,
+  ShowWindow, SetWindowPos SWP_SHOW/HIDEWINDOW), `g_user_hwnd` (the last activatable top-level window shown). Why: Project
+  Gravemind had no keyboard, mouse or pad at all, clicking included -- halo2.dll creates a hidden 1920x1080 window and calls
+  SetForegroundWindow on it, the loader kept that as the foreground window for good, and Gravemind reads input only while
+  GetForegroundWindow() is its main window (exe+0x9b350 against the window it registers for raw input at exe+0x9cb20; the pad poll
+  exe+0x6d620 likewise; seen with PELOAD_TRACE_FG). On Windows the user's click activates the window clicked. How: a click in the
+  Mac window's content, or the Mac window becoming the key window, makes the last shown activatable window the foreground window
+  when the current one is hidden; a shown foreground window is never replaced (Reclaimer and Reach show their main window and
+  never have a hidden one in front). Logged as `[fg] ... is hidden -> ... takes it`. Old: `PELOAD_FG_NO_USERACT=1`.
+
 - **PELOAD_TRACE_FG** (2026-10-21, diagnostic) — `i_GetForegroundWindow` logs each code site that asks (module+RVA, once) and the
   window it got, beside the last shown / last created windows. Why: Project Gravemind reads its pads only while
   GetForegroundWindow() is its own window (exe+0x6d620, then XInputGetState at exe+0x6d63f), and no XInputGetState call showed up in

@@ -269,6 +269,7 @@ static int wi_translate(id ev){
                 if(b.w>0 && b.h>0 && (p.x<b.x || p.y<b.y || p.x>=b.x+b.w || p.y>=b.y+b.h)){ swallowed[bi]=1;
                     if(getenv("PELOAD_TRACE_INPUT")) (void)!write(2,"  [kbm] click outside the content area: left to the window\n",59);
                     return 0; } } } }
+        { extern int fg_user_activate(const char*); if(down && fg_user_activate("a click in the window")) h=fg_hwnd_ext(); }   // (Windows: a click activates)
         uint8_t vk = btn==0?1 : btn==1?2 : btn==2?4 : btn==3?5 : 6;
         g_keydown[vk]=(uint8_t)down;
         uint16_t bf = btn==0?(down?0x1:0x2) : btn==1?(down?0x4:0x8) : btn==2?(down?0x10:0x20) : btn==3?(down?0x40:0x80) : (down?0x100:0x200);

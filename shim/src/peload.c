@@ -3583,7 +3583,8 @@ static int    MSABI i_AreFileApisANSI(void){ return 1; }
 // lpszClassName at +64.
 typedef int64_t (MSABI *WNDPROC_t)(void*,uint32_t,uint64_t,int64_t);
 static struct { int used; uint16_t atom; char name[64]; WNDPROC_t wndproc; } g_wcls[64]; static int g_nwcls; static uint16_t g_atomseq=0xC000;
-typedef struct { uint32_t magic; WNDPROC_t wndproc; int64_t userdata; int64_t extra[16]; int x,y,w,h; uint32_t style, exstyle; uint16_t title[128]; } WWin;
+typedef struct { uint32_t magic; WNDPROC_t wndproc; int64_t userdata; int64_t extra[16]; int x,y,w,h; uint32_t style, exstyle; uint16_t title[128];
+    int vis; } WWin;   // vis: shown (WS_VISIBLE at creation, ShowWindow, SetWindowPos SWP_SHOW/HIDEWINDOW)
 // xwin.c (windows of other loader processes; included further down)
 static int xwin_is(void*h); static int xwin_rect(void*h,int*x,int*y,int*w,int*hh,int*vis,int*mini,int*pid); static void xwin_poll(void); static void xwin_publish(void);
 static void xwin_activate(int pid); static int xwin_enum(int(MSABI*cb)(void*,int64_t),int64_t lp);
@@ -3624,12 +3625,27 @@ static int fg_can_activate(void*h){ if(!h || ((WWin*)h)->magic!=WWIN_MAGIC) retu
     if(old) return 1; const WWin*w=h; return !(w->style&0x40000000/*WS_CHILD*/) && !(w->exstyle&0x08000000/*WS_EX_NOACTIVATE*/); }
 static void* fg_hwnd(void){ return g_shown_hwnd?g_shown_hwnd:(g_last_hwnd?g_last_hwnd:(void*)0x4857); }
 void* fg_hwnd_ext(void){ return fg_hwnd(); }
+// The user's activation (2026-10-21): Windows gives the foreground to the window the user clicks or switches to. A window activated
+// by the program while HIDDEN keeps it only until then -- halo2.dll calls SetForegroundWindow on the 1920x1080 window it creates
+// hidden, and Project Gravemind reads its keyboard, mouse and pads only while GetForegroundWindow() is its own (shown) window, so
+// nothing reached it, clicks included. A click in the Mac window's content, or the Mac window becoming the active window, now
+// hands a hidden foreground window's place to the last activatable window shown (what the Mac window displays); a shown foreground
+// window is left alone (Reclaimer / Reach never have a hidden one in front). PELOAD_FG_NO_USERACT=1 = old.
+static void* g_user_hwnd;   // the last activatable top-level window made visible
+static int fg_vis(void*h){ return h && ((WWin*)h)->magic==WWIN_MAGIC && ((WWin*)h)->vis; }
+int fg_user_activate(const char*why){
+    static int old=-1; if(old<0) old=getenv("PELOAD_FG_NO_USERACT")?1:0; if(old) return 0;
+    void*cur=fg_hwnd(); if(!cur || cur==(void*)0x4857 || ((WWin*)cur)->magic!=WWIN_MAGIC) return 0;   // (no window yet)
+    if(cur==g_user_hwnd || fg_vis(cur) || !fg_vis(g_user_hwnd) || !fg_can_activate(g_user_hwnd)) return 0;
+    g_shown_hwnd=g_user_hwnd;
+    char m[200]; int k=snprintf(m,sizeof m,"  [fg] %s: the foreground window %p is hidden -> %p (shown) takes it\n",why,cur,g_user_hwnd); (void)!write(2,m,k);
+    return 1; }
 static void*  MSABI i_CreateWindowExW(uint32_t ex,const void*cls,const void*name,uint32_t style,int x,int y,int w,int h,void*parent,void*menu,void*inst,void*param){
     WWin* win=calloc(1,sizeof *win); if(!win) return (void*)0x4857;
     win->magic=WWIN_MAGIC; win->wndproc=wcls_find(cls); win->x=x; win->y=y; win->w=w>0?w:1280; win->h=h>0?h:720;
-    win->style=style; win->exstyle=ex; g_last_hwnd=win;
+    win->style=style; win->exstyle=ex; g_last_hwnd=win; win->vis=(style&0x10000000/*WS_VISIBLE*/)!=0;
     { const uint16_t*wn=name; for(int i=0;wn&&wn[i]&&i<127;i++) win->title[i]=wn[i]; }   // (GetWindowTextW; published to other processes, xwin.c)
-    if((style&0x10000000/*WS_VISIBLE*/) && fg_can_activate(win)) g_shown_hwnd=win;
+    if((style&0x10000000/*WS_VISIBLE*/) && fg_can_activate(win)){ g_shown_hwnd=win; g_user_hwnd=win; }
     { char t[96]={0}; const uint16_t*wn=name; for(int i=0;wn&&wn[i]&&i<95;i++) t[i]=(char)(wn[i]&0x7f);
       char c[96]={0}; if((uintptr_t)cls>0x10000){ const uint16_t*wc=cls; for(int i=0;wc[i]&&i<95;i++) c[i]=(char)(wc[i]&0x7f); } else snprintf(c,sizeof c,"#atom%u",(unsigned)(uintptr_t)cls);
       char m[300]; int k=snprintf(m,sizeof m,"  [CreateWindowExW] hwnd=%p class=%s title=\"%s\" style=0x%x ex=0x%x parent=%p %dx%d\n",(void*)win,c,t,style,ex,parent,w,h); (void)!write(2,m,k); }
@@ -3647,7 +3663,8 @@ static int    MSABI i_DestroyWindow(void*h){ lay_show(h,-1); wv2_hwnd_changed(h,
 static int64_t MSABI i_DefWindowProcW(void*h,uint32_t m,uint64_t wp,int64_t lp){ (void)h;(void)wp;(void)lp; if(m==0x0081/*WM_NCCREATE*/) return 1; return 0; }
 static int    MSABI i_ShowWindow(void*h,int c){ int act=(c==1||c==2||c==3||c==5||c==9||c==10)||(getenv("PELOAD_FG_LASTSHOWN")&&c);
     lay_show(h,c!=0);
-    if(act && fg_can_activate(h)) g_shown_hwnd=h;
+    if(h && ((WWin*)h)->magic==WWIN_MAGIC) ((WWin*)h)->vis=(c!=0);
+    if(act && fg_can_activate(h)){ g_shown_hwnd=h; g_user_hwnd=h; }
     // log state changes per window (the menu runtime re-hides two overlay windows every frame)
     { static void*lh[16]; static int lc[16], n; int i; for(i=0;i<n && lh[i]!=h;i++){} if(i==n && n<16){ lh[n]=h; lc[n++]=-1; }
       if(i<16 && lc[i]!=c){ lc[i]=c; char m[80]; int k=snprintf(m,sizeof m,"  [ShowWindow] hwnd=%p cmd=%d\n",h,c); (void)!write(2,m,k); } } wv2_hwnd_changed(h,c!=0); return 1; }
@@ -3851,6 +3868,7 @@ static void win_sized(WWin*ww,int ox,int oy,int ow,int oh){ if(!ww->wndproc || !
     if(ww->w!=ow || ww->h!=oh) ww->wndproc(ww,0x0005/*WM_SIZE*/,0/*SIZE_RESTORED*/,(int64_t)(((uint32_t)(uint16_t)ww->h<<16)|(uint16_t)ww->w)); }
 static int    MSABI i_SetWindowPos(void*h,void*after,int x,int y,int w,int ht,uint32_t f){ (void)w;(void)ht;
     if(getenv("PELOAD_TRACE_LAYERED")){ char m[160]; int k=snprintf(m,sizeof m,"  [layered] SetWindowPos %p after %p %d,%d %dx%d flags 0x%x\n",h,after,x,y,w,ht,f); (void)!write(2,m,k); }
+    if(h && !xwin_is(h) && ((WWin*)h)->magic==WWIN_MAGIC){ if(f&0x80) ((WWin*)h)->vis=0; else if(f&0x40) ((WWin*)h)->vis=1; }
     if(!getenv("PELOAD_LAYERED_NOSWP")){ if(f&0x80/*SWP_HIDEWINDOW*/) lay_show(h,0); else if(f&0x40/*SWP_SHOWWINDOW*/) lay_show(h,1);
         if(!(f&0x2/*SWP_NOMOVE*/)) lay_pos(h,x,y,1,-1);
         if(!(f&0x4/*SWP_NOZORDER*/) && !getenv("PELOAD_LAYERED_NOZ")) lay_zorder(h,after); }
@@ -8366,6 +8384,8 @@ static void cocoa_pump(void){ if(!g_nsapp) return;
     // window visibility (main thread): occluded windows / a sleeping display get no vblank, so a vsynced
     // flush could block the present thread indefinitely -- it skips presenting while not visible.
     if(g_nswin){ unsigned long os=((unsigned long(*)(id,SEL))objc_msgSend)(g_nswin,osel("occlusionState")); g_win_visible=(os&2UL)?1:0; }
+    // the Mac window becoming the active window = the user switching to the game's window (fg_user_activate)
+    if(g_nswin){ static int waskey; int k=((signed char(*)(id,SEL))objc_msgSend)(g_nswin,osel("isKeyWindow"))?1:0; if(k && !waskey) fg_user_activate("the window became active"); waskey=k; }
     // window resized / full screen: resize the GL drawable (main thread) and record the new size for present
     if(g_nswin && g_nsctx){ id view=om0(g_nswin,"contentView"); NSRect_ b={0,0,0,0}; if(view) ((void(*)(NSRect_*,id,SEL))objc_msgSend_stret)(&b,view,osel("bounds"));   // x86_64: >16-byte struct returns need _stret
         // the drawable in pixels: the bounds converted to the backing store (Retina 2x; follows the window to another screen)
