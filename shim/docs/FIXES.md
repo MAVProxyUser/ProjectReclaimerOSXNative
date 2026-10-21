@@ -395,6 +395,16 @@ patch variants by signature (section 16; shim/docs/patch-addresses.md).
 
 ## 4. Files, pipes, console
 
+- **FindFirstFileA translates Windows paths** (2026-10-21) — `i_FindFirstFileA`. Why: Project Gravemind had no game sound at all.
+  FindFirstFileA only turned backslashes into slashes, so an absolute `C:\...\halo2\*.flt` searched a folder named "C:" and found
+  nothing. MCC's Miles Sound System finds its DSP plugin (halo2\mss64dsp.flt) this way: no plugin, so its filters never
+  registered, halo2.dll's voice setup (`halo2+0x779000`: AIL_allocate_sample_handle, then AIL_find_filter for "Parametric EQ",
+  "BandPass", "Gain Block" and "LowPass") failed, and halo2 never started a sound -- Miles opened waveOut, prepared its buffers and
+  wrote nothing. How: paths with a drive letter or `\\` go through win2unix like FindFirstFileW's (relative ones -- halo3's `maps\*`
+  -- stay byte for byte, non-ASCII kept). Found with PELOAD_BP in mss64 (section 20). Old: `PELOAD_FINDA_RAW=1`.
+- **win.ini answers its defaults** (2026-10-21) — win32x.c `i_GetProfileStringA/W`, `i_GetProfileIntA/W`. Why: the stub returned 0
+  and left the buffer untouched (Miles reads `[MSS] Reset` and compared stack garbage). How: no win.ini, so the default.
+
 - **FindFirstFileW's find data** (2026-10-20) — `i_FindFirstFileW`. Why: FindFirstFileW was mapped to FindFirstFileExW itself, whose
   WIN32_FIND_DATAW is the THIRD argument; a FindFirstFileW caller passes it second, so 592 bytes went wherever r8 pointed (halo2.dll:
   a memset to 0xfffffffe70b0c4ba). Rust's read_dir uses FindFirstFileExW, so Reclaimer never hit it. How: a two-argument wrapper.
@@ -595,6 +605,15 @@ patch variants by signature (section 16; shim/docs/patch-addresses.md).
   path (reach-renaissance.md "Joining"). Off unless set; nothing else changes. (10-20, reach-port)
 
 ## 7. Windows, input, focus (Cocoa, Raw Input, XInput)
+
+- **F1 releases the mouse in every game but Reclaimer** (2026-10-21) — wininput.c `wi_translate` (F1), `wi_raw_mouse`. Why: F1 only
+  worked for re-centring games (Reach Renaissance); Project Gravemind holds the mouse with ClipCursor and reads Raw Input, so F1
+  went to the game and the pointer could not be got back. How: F1 applies whenever the pointer is captured and the game is not h3
+  (Reclaimer has its own F1, games.c); while released, Raw Input mouse motion is not sent (the game would keep turning). A click in
+  the window captures again. Old: `PELOAD_NO_F1_RELEASE=1` (no F1 release at all).
+- **PELOAD_FG_TEST_ACTIVATE=<secs>** (2026-10-21, tests) — cocoa_pump: an input-less test run gets the user's activation
+  (fg_user_activate) <secs> after start, without focus -- so a test client behaves like a played one (Gravemind's sound resume and
+  pad poll both require its window in front).
 
 - **A click (or switching to the window) takes the foreground back from a hidden window** (2026-10-21) — `fg_user_activate`
   (peload.c; called from wininput.c's mouse-down and cocoa_pump's key-window check), WWin `vis` (CreateWindowExW WS_VISIBLE,
@@ -802,6 +821,11 @@ patch variants by signature (section 16; shim/docs/patch-addresses.md).
   loadout picker shows "Select Loadout", the loadout names and the game type text. Old: `PELOAD_GLYPH_STUB=1`. (10-20, reach-port)
 
 ## 9. Audio (XAudio2, WASAPI)
+
+- **waveOut diagnostics** (2026-10-21) — winmm.c: `PELOAD_TRACE_WINMM=1` logs every waveOut call (open, prepare, write, reset,
+  close, WOM_DONE dispatch), `=stats` a line per stream every 2 s (writes, bytes, peak sample, headers played, queued; shim/gravemind.sh
+  sets it), `PELOAD_WINMM_DUMP=<file>` appends the PCM written. Told "Miles writes nothing" apart from "CoreAudio plays nothing"
+  (it was the former: section 4, FindFirstFileA).
 
 - **waveOut on CoreAudio** (2026-10-20) — shim/src/winmm.c. Why: MCC's Miles Sound System for Halo 2 plays through winmm waveOut; every
   wave function was a stub. How: one AudioQueue per waveOut (PCM 8-32 bit, float, EXTENSIBLE), WAVEHDRs copied into queue buffers
@@ -1702,6 +1726,9 @@ Numbers are from the commit messages; PERF-PLAN.md has the measurements. Compare
 
 ## 20. Scripts and RE tools
 
+- **PELOAD_BP=<dll>+<rva>** (2026-10-21) — `bp_install_mod` (load_guest, before the DLL's DllMain), `bp_plant`: the software
+  breakpoints also inside guest DLLs (`mss64+e700`, the DLL's name without extension, exact), up to 8 in all; a hit names its module
+  (`[bp] HIT mss64+0xe700 #1 ... rcx= rdx=`). Exe RVAs as before. Found the missing Miles plugin (section 4).
 - **shim/tools/d2d-test.sh** (2026-10-21) — the loader's Direct2D / DirectWrite / WIC through their COM vtables, as a game calls
   them (`PELOAD_D2D_SELFTEST=<out.bmp>`, d2d.c `d2d_selftest`): a CPU target (shapes, dashes, gradients, an arc path, clip, opacity
   layer, text, a wrapped layout's metrics, an in-memory font collection, a WIC-decoded PNG) and a texture target (GL clear, canvas

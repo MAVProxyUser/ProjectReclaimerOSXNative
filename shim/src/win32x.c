@@ -86,6 +86,14 @@ static uint32_t ini_put_list(const char*lst,size_t ln,uint16_t*out,uint32_t sz){
         if(k+w+2>sz){ size_t room=sz>=2+k?sz-2-k:0; memcpy(out+k,tmp,room*2); k+=room; out[k]=0; out[k+1]=0; return sz-2; }
         memcpy(out+k,tmp,w*2); k+=w; out[k++]=0; i+=sl+1; }
     out[k]=0; return (uint32_t)k; }
+// win.ini (GetProfileString* / GetProfileInt*): there is none here, so every key answers its default -- the stub returned 0 and
+// left the buffer as it was (MCC's Miles reads [MSS] Reset this way and compared stack garbage)
+static uint32_t MSABI i_GetProfileStringA(const char*app,const char*key,const char*def,char*out,uint32_t sz){ (void)app;(void)key;
+    if(!out || !sz) return 0; const char*d=def?def:""; uint32_t n=(uint32_t)strlen(d); if(n>sz-1) n=sz-1; memcpy(out,d,n); out[n]=0; i_SetLastError(2); return n; }
+static uint32_t MSABI i_GetProfileStringW(const uint16_t*app,const uint16_t*key,const uint16_t*def,uint16_t*out,uint32_t sz){ (void)app;(void)key;
+    if(!out || !sz) return 0; uint32_t n=0; while(def && def[n] && n<sz-1){ out[n]=def[n]; n++; } out[n]=0; i_SetLastError(2); return n; }
+static uint32_t MSABI i_GetProfileIntA(const char*app,const char*key,int def){ (void)app;(void)key; return (uint32_t)def; }
+static uint32_t MSABI i_GetProfileIntW(const uint16_t*app,const uint16_t*key,int def){ (void)app;(void)key; return (uint32_t)def; }
 static uint32_t MSABI i_GetPrivateProfileStringW(const uint16_t*app,const uint16_t*key,const uint16_t*def,uint16_t*out,uint32_t sz,const uint16_t*file){
     if(w32x_off()) return 0; if(!out || !sz) return 0;
     int enc; char*t=ini_load(file,&enc); char sa[512]="", sk[512]=""; if(app) wh_w2u(app,-1,sa,sizeof sa); if(key) wh_w2u(key,-1,sk,sizeof sk);

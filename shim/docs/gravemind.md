@@ -12,8 +12,12 @@ start when the beta is closed.
   offline by `bash shim/tools/d2d-test.sh`). Not yet seen running Gravemind's own launcher: its first run will show which
   Direct2D calls it makes that aren't implemented (`[d2d] ... not implemented` in the log). Its back buffer is now its swap chain's
   1280x720 (it was 1920x1080 with the game in a corner).
-- **Controller**: Gravemind reads pads with XInputGetState; whether it polls them under the loader is being checked
-  (`[xinput] XInputGetState called` in the log when it does).
+- **Input**: keyboard, mouse and pads work once the window is active (2026-10-21: halo2.dll's hidden window had kept the
+  foreground; FIXES.md section 7). F1 releases the mouse, a click in the window captures it again.
+- **Sound**: Miles plays through waveOut since 2026-10-21 (FindFirstFileA could not find its DSP plugin, so halo2 never started a
+  sound; FIXES.md section 4). `[winmm] ... 2 s:` lines in the log show the stream (peak > 0 = sound).
+- **Loading screen**: the screen is black while a map loads; halo2 asks for `loading_dx11.bin`, which isn't in MCC's files (MCC
+  draws its own loading screens). Gravemind's own loading screen is Direct2D (to be checked with the launcher).
 - Not yet: the LAN game list (GetAdaptersAddresses), campaign (needs the 31 GB campaign depot).
 - GRAVEMIND LIVE (its online service) claims the player's name as a gamertag when it starts: choose your own name.
 

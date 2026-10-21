@@ -4478,6 +4478,7 @@ static uint32_t MSABI i_XInputGetCapabilities(uint32_t idx,uint32_t fl,void*cap)
     if(cap){ memset(cap,0,20); uint8_t*c=cap; c[0]=1/*GAMEPAD*/; c[1]=1/*SUBTYPE_GAMEPAD*/; *(uint16_t*)(c+4)=0xF3FF; c[6]=c[7]=255; *(int16_t*)(c+8)=*(int16_t*)(c+10)=*(int16_t*)(c+12)=*(int16_t*)(c+14)=(int16_t)0xFFC0; } return 0; }
 static void MSABI i_XInputEnable(int en){ (void)en; }
 static int dump_attr(uint64_t v,char*out,size_t cap); // fwd
+static void bp_install_mod(const char*name,uint8_t*base); // fwd (PELOAD_BP inside guest DLLs)
 // PELOAD_TRACE_FG: each code site that asks for the foreground window, once, with the answer -- games that read pads / keys only
 // while their own window is in front (Project Gravemind: exe+0x6d620 compares it with its window before XInputGetState)
 static void*  MSABI i_GetForegroundWindow(void){ void*h=fg_hwnd();
@@ -8386,6 +8387,8 @@ static void cocoa_pump(void){ if(!g_nsapp) return;
     if(g_nswin){ unsigned long os=((unsigned long(*)(id,SEL))objc_msgSend)(g_nswin,osel("occlusionState")); g_win_visible=(os&2UL)?1:0; }
     // the Mac window becoming the active window = the user switching to the game's window (fg_user_activate)
     if(g_nswin){ static int waskey; int k=((signed char(*)(id,SEL))objc_msgSend)(g_nswin,osel("isKeyWindow"))?1:0; if(k && !waskey) fg_user_activate("the window became active"); waskey=k; }
+    // PELOAD_FG_TEST_ACTIVATE=<secs>: an input-less test run gets the same activation <secs> after start, without taking focus
+    { static double t0; static int done; const char*e=GENV1("PELOAD_FG_TEST_ACTIVATE"); if(e && !done){ if(!t0) t0=mono_s(); if(mono_s()-t0>=atof(e) && fg_user_activate("test activation")) done=1; } }
     // window resized / full screen: resize the GL drawable (main thread) and record the new size for present
     if(g_nswin && g_nsctx){ id view=om0(g_nswin,"contentView"); NSRect_ b={0,0,0,0}; if(view) ((void(*)(NSRect_*,id,SEL))objc_msgSend_stret)(&b,view,osel("bounds"));   // x86_64: >16-byte struct returns need _stret
         // the drawable in pixels: the bounds converted to the backing store (Retina 2x; follows the window to another screen)
@@ -10370,8 +10373,16 @@ static void fill_find_a(Find*f,struct dirent*de,void*fd){ if(getenv("PELOAD_TRAC
     snprintf(full,sizeof full,"%s/%s",f->dir,de->d_name);
     uint32_t attr=0x80; if(stat(full,&st)==0){ attr=S_ISDIR(st.st_mode)?0x10:0x80; *(uint32_t*)(d+28)=(uint32_t)(st.st_size>>32); *(uint32_t*)(d+32)=(uint32_t)st.st_size; }
     *(uint32_t*)d=attr; char*nm=(char*)(d+44); int i=0; for(; de->d_name[i]&&i<259;i++) nm[i]=de->d_name[i]; nm[i]=0; }
+// FindFirstFileA translates the path like FindFirstFileW (2026-10-21): it only turned backslashes into slashes, so an absolute
+// "C:\...\halo2\*.flt" looked for a folder named "C:" -- MCC's Miles Sound System finds its DSP filter plugins this way, found
+// none, and halo2.dll's voices (which need four of those filters) never started: no game sound at all. Relative paths (halo3's
+// maps\*) translate as before. PELOAD_FINDA_RAW=1 = old.
 static void* MSABI i_FindFirstFileA(const char*p0,void*fd){
-    char p[2048]; { int i=0; for(; p0&&p0[i]&&i<2047;i++) p[i]=(p0[i]=='\\')?'/':p0[i]; p[i]=0; }
+    char p[2048];
+    int drive = p0 && ((p0[0] && p0[1]==':') || !strncmp(p0,"\\\\",2));   // (relative paths: bytes as before, non-ASCII kept)
+    if(getenv("PELOAD_FINDA_RAW") || !drive){ int i=0; for(; p0&&p0[i]&&i<2047;i++) p[i]=(p0[i]=='\\')?'/':p0[i]; p[i]=0; }
+    else { uint16_t w[2048]; int i=0; for(; p0&&p0[i]&&i<2047;i++) w[i]=(uint8_t)p0[i]; w[i]=0; win2unix(w,p,sizeof p); }
+    if(getenv("PELOAD_TRACE_FS")){ ws("  [FindFirstA] "); ws(p0?p0:"(null)"); ws(" -> "); ws(p); ws("\n"); }
     char *slash=strrchr(p,'/'); char dir[1536],pat[260];
     if(slash){ int dl=slash-p; if(dl>1535)dl=1535; memcpy(dir,p,dl); dir[dl]=0; snprintf(pat,sizeof pat,"%s",slash+1); }
     else { snprintf(dir,sizeof dir,"."); snprintf(pat,sizeof pat,"%s",p); }
@@ -10788,6 +10799,7 @@ static void *resolve_impl(const char *fn){
         {"WinHttpQueryHeaders",(void*)i_WinHttpQueryHeaders},{"WinHttpQueryDataAvailable",(void*)i_WinHttpQueryDataAvailable},
         {"WinHttpReadData",(void*)i_WinHttpReadData},{"WinHttpCloseHandle",(void*)i_WinHttpCloseHandle},{"WinHttpCrackUrl",(void*)i_WinHttpCrackUrl},
         {"CommandLineToArgvW",(void*)i_CommandLineToArgvW},{"CreateFile2",(void*)i_CreateFile2},{"GetStringTypeW",(void*)i_GetStringTypeW},
+        {"GetProfileStringA",(void*)i_GetProfileStringA},{"GetProfileStringW",(void*)i_GetProfileStringW},{"GetProfileIntA",(void*)i_GetProfileIntA},{"GetProfileIntW",(void*)i_GetProfileIntW},
         {"GetPrivateProfileStringW",(void*)i_GetPrivateProfileStringW},{"GetPrivateProfileIntW",(void*)i_GetPrivateProfileIntW},
         {"GetPrivateProfileSectionW",(void*)i_GetPrivateProfileSectionW},{"GetPrivateProfileSectionNamesW",(void*)i_GetPrivateProfileSectionNamesW},
         {"WritePrivateProfileStringW",(void*)i_WritePrivateProfileStringW},
@@ -11446,6 +11458,7 @@ static uint8_t *load_guest(const char *path, const char *name){
     // BEFORE its DllMain/TLS callbacks run, so its __declspec(thread) globals resolve
     // to its own data instead of aliasing the exe's TLS block (index 0).
     if(opt->Dir[DIR_TLS].VA) register_tls((void*)(base+opt->Dir[DIR_TLS].VA), base, -1);
+    bp_install_mod(name,base);   // PELOAD_BP=<dll>+<rva> (diagnostic)
     if(strcasestr(name,"halo3") && (game_is(GAME_H3)||game_is(GAME_OTHER))){ waves_prefill(base); patch_install(); hook_install(); skinguard_install(base); vtguard_install(base); originguard_install(base); invwalls_prepare(base); bspwatch_install(base); hbdel_install(base); st_events_install(base); capcb1_install(base); h3set_install(base); } // patches can target halo3 now it's mapped
     ws("  guest "); ws(name); ws(" @ "); whex((uint64_t)base);
     uint64_t ep=opt->EntryRVA;
@@ -12128,11 +12141,18 @@ static void bspwatch_install(uint8_t*base){ if(!getenv("PELOAD_BSPWATCH")) retur
     g_bw_bporig=*p; g_bw_bp=(uint64_t)p; *p=0xCC; sys_icache_invalidate(p,1);
     pthread_t t; if(!pthread_create(&t,0,bw_thread,0)) pthread_detach(t);
     (void)!write(2,"  [bspwatch] armed on collision_bsp_test_vector (small BSP)\n",60); }
-static void bp_install(void){ const char*s=getenv("PELOAD_BP"); if(!s||!g_base) return;
-    while(*s && g_bp_n<8){ uint64_t rva=strtoull(s,0,16); if(rva){ uint8_t*p=g_base+rva;
-            uintptr_t pg=(uintptr_t)p & ~0xFFFull; mprotect((void*)pg,0x2000,PROT_READ|PROT_WRITE|PROT_EXEC);
-            g_bp_orig[g_bp_n]=*p; g_bp_addr[g_bp_n]=(uint64_t)p; *p=0xCC; sys_icache_invalidate(p,1); g_bp_n++; }
-        const char*c=strchr(s,','); if(!c) break; s=c+1; } }
+static void bp_plant(uint8_t*p){ if(g_bp_n>=8) return; uintptr_t pg=(uintptr_t)p & ~0xFFFull; mprotect((void*)pg,0x2000,PROT_READ|PROT_WRITE|PROT_EXEC);
+    g_bp_orig[g_bp_n]=*p; g_bp_addr[g_bp_n]=(uint64_t)p; *p=0xCC; sys_icache_invalidate(p,1); g_bp_n++; }
+// PELOAD_BP entries <dll>+<rva> (2026-10-21: inside guest DLLs, e.g. mss64+1c900): planted when that DLL is mapped, before its DllMain
+static void bp_install_mod(const char*name,uint8_t*base){ const char*s=getenv("PELOAD_BP"); if(!s||!name||!base) return;
+    for(const char*t=s; *t; ){ const char*c=strchr(t,','); size_t n=c?(size_t)(c-t):strlen(t); const char*pl=memchr(t,'+',n);
+        if(pl && pl>t){ char mod[64]; size_t ml=(size_t)(pl-t)<63?(size_t)(pl-t):63; memcpy(mod,t,ml); mod[ml]=0;
+            size_t L=strlen(mod); if(!strncasecmp(name,mod,L) && (name[L]==0 || name[L]=='.')){ uint64_t rva=strtoull(pl+1,0,16); if(rva){ bp_plant(base+rva); char m[120]; int k=snprintf(m,sizeof m,"  [bp] planted %s+0x%llx\n",mod,(unsigned long long)rva); (void)!write(2,m,k); } } }
+        if(!c) break; t=c+1; } }
+static void bp_install(void){ const char*s=getenv("PELOAD_BP"); if(!s||!g_base) return;   // exe RVAs (entries without "<dll>+")
+    for(const char*t=s; *t; ){ const char*c=strchr(t,','); size_t n=c?(size_t)(c-t):strlen(t);
+        if(!memchr(t,'+',n)){ uint64_t rva=strtoull(t,0,16); if(rva) bp_plant(g_base+rva); }
+        if(!c) break; t=c+1; } }
 #include <mach/thread_act.h>
 // On SIGUSR1, suspend every thread and print its guest x86 rip + a scan of its stack for
 // exe/halo3 return addresses. Rosetta exposes x86_THREAD_STATE64, so this shows exactly where
@@ -12211,7 +12231,10 @@ static void crashsig(int sig, siginfo_t *info, void *ucv){
                 if(getenv("PELOAD_BP_CORR")) k=snprintf(b,sizeof b,"[bp] HIT exe+0x%llx #%llu thr=0x%x rax=0x%llx r10(pktID)=0x%llx [rax+0x200](expID)=0x%llx r9=0x%llx r14=0x%llx\n",
                     (unsigned long long)(hit-(uint64_t)g_base),(unsigned long long)g_bp_cnt[i],pthread_mach_thread_np(pthread_self()),
                     (unsigned long long)rax,(unsigned long long)r10,(unsigned long long)exp200,(unsigned long long)r9,(unsigned long long)r14);
-                else k=snprintf(b,sizeof b,"[bp] HIT exe+0x%llx #%llu thr=0x%x rbx=0x%llx [rbx]=0x%llx rsi=0x%llx rdi=0x%llx r15=0x%llx\n",
+                else { char at[80]="      ?\n"; dump_attr(hit,at,sizeof at); char*q=at; while(*q==' ') q++; char*nl=strchr(q,'\n'); if(nl) *nl=0;
+                    k=snprintf(b,sizeof b,"[bp] HIT %s #%llu thr=0x%x rcx=0x%llx rdx=0x%llx rbx=0x%llx rsi=0x%llx rdi=0x%llx\n",q,(unsigned long long)g_bp_cnt[i],pthread_mach_thread_np(pthread_self()),
+                    (unsigned long long)uc->uc_mcontext->__ss.__rcx,(unsigned long long)uc->uc_mcontext->__ss.__rdx,(unsigned long long)rbx,(unsigned long long)rsi,(unsigned long long)rdi); }
+                if(0) k=snprintf(b,sizeof b,"[bp] HIT exe+0x%llx #%llu thr=0x%x rbx=0x%llx [rbx]=0x%llx rsi=0x%llx rdi=0x%llx r15=0x%llx\n",
                     (unsigned long long)(hit-(uint64_t)g_base),(unsigned long long)g_bp_cnt[i],pthread_mach_thread_np(pthread_self()),
                     (unsigned long long)rbx,(unsigned long long)vbx,(unsigned long long)rsi,(unsigned long long)rdi,(unsigned long long)r15); (void)!write(2,b,k);} return; } }
     // Decompressor fault dump: on a fault in halo3's bitstream reader, print the fiber ctx

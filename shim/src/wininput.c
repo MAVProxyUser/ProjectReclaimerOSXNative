@@ -36,9 +36,10 @@ static WiRaw g_riq[1024]; static uint32_t g_riq_n;    // records referenced by H
 static int64_t wi_raw_alloc(const uint8_t*d,uint32_t sz){ uint32_t slot=g_riq_n++ % 1024; memcpy(g_riq[slot].data,d,sz); g_riq[slot].size=sz; return (int64_t)(0x52490000u+slot); }
 static void* wi_target(void*reg){ return reg?reg:fg_hwnd_ext(); }
 static void wi_cursor_captured_move(int dx,int dy);   // (cursor section: a re-centring guest's captured cursor follows the mouse)
+static int g_wi_user_released;   // (F1, below)
 static void wi_raw_mouse(int dx,int dy,uint16_t bflags,int16_t bdata){
     if(dx||dy) wi_cursor_captured_move(dx,dy);
-    if(!g_ri_mouse) return;
+    if(!g_ri_mouse || g_wi_user_released) return;   // (released by F1: the Mac has the pointer, the game gets no look motion)
     uint8_t r[48]; memset(r,0,sizeof r); uint32_t type=0/*RIM_TYPEMOUSE*/, size=48;
     memcpy(r,&type,4); memcpy(r+4,&size,4); void*dev=(void*)0x4D53; memcpy(r+8,&dev,8);    // RAWINPUTHEADER (24 B)
     uint16_t usflags=0/*MOUSE_MOVE_RELATIVE*/; memcpy(r+24,&usflags,2); memcpy(r+28,&bflags,2); memcpy(r+30,&bdata,2);
@@ -98,8 +99,9 @@ static int g_wi_clip_on_x; static int32_t g_wi_clip_x[4];   // (ClipCursor's rec
 // mouse with ClipCursor in a match and re-clips it every frame, and only the Reclaimer client knew F1. For a re-centring guest
 // (g_wi_recenter, below; the Reclaimer client keeps its own F1) F1 gives the Mac its pointer back -- shown and moving freely, while
 // the guest still thinks it holds it and gets no look motion -- until a click in the window, which captures again and does not
-// reach the game. PELOAD_NO_F1_RELEASE=1 = old.
-static int g_wi_user_released;
+// reach the game. PELOAD_NO_F1_RELEASE=1 = old. Since 2026-10-21 any game but Reclaimer (games.c: it has its own F1), so also
+// Raw Input games that hold the mouse with ClipCursor (Project Gravemind); their Raw Input mouse motion stops while released.
+// (g_wi_user_released is declared with the Raw Input code above.)
 static void wi_sys_hold(int hold){ if(!wi_syscursor()) return; CGAssociateMouseAndMouseCursorPosition(hold?0:1);
     if(g_wi_cursor_count<0){ if(hold) CGDisplayHideCursor(kCGDirectMainDisplay); else CGDisplayShowCursor(kCGDirectMainDisplay); } }
 static int MSABI wi_ClipCursor(const int32_t*r){
@@ -203,7 +205,7 @@ static int wi_translate(id ev){
         if(mods&(1ul<<20)) return 0;                       // Command shortcuts go to AppKit (Cmd+Q, Cmd+Tab ...)
         unsigned short kc=((unsigned short(*)(id,SEL))objc_msgSend)(ev,sel_registerName("keyCode"));
         signed char rep=type==10?((signed char(*)(id,SEL))objc_msgSend)(ev,sel_registerName("isARepeat")):0;
-        if(kc==0x7A && g_wi_recenter && (g_wi_captured||g_wi_user_released)){ static int off=-1; if(off<0) off=getenv("PELOAD_NO_F1_RELEASE")?1:0;   // F1: see g_wi_user_released
+        if(kc==0x7A && (g_wi_recenter || !game_is(GAME_H3)) && (g_wi_captured||g_wi_user_released)){ static int off=-1; if(off<0) off=getenv("PELOAD_NO_F1_RELEASE")?1:0;   // F1: see g_wi_user_released
             if(!off){ if(type==10 && !rep && !g_wi_user_released){ g_wi_user_released=1; wi_sys_hold(0);
                     (void)!write(2,"  [kbm] F1: pointer released (click the window to capture it again)\n",68); }
                 return 1; } }
