@@ -1644,8 +1644,9 @@ static char* d3dgl_load_glsl(const void*bc,uint64_t len){
     // (older C/Python translator output) is never reused. v2 = lane-correct write masks + resource swizzle + sincos.
     // ALWAYS translate (cheap, in-process): a stale cache silently ran an older translator's output (seen:
     // VS without the y-flip under a flipping present -> upside-down frame; old compare semantics -> GPU
-    // hang). Files are still written for inspection; PELOAD_D3DGL_GLSLCACHE=1 reads them back instead
-    // (hand-edited GLSL experiments).
+    // hang). PELOAD_D3DGL_GLSLDUMP=1 writes each translation to ~/reclaimer_glsl_<ver>/<hash>.glsl for inspection (always
+    // on until 2026-10-21: ~11,000 files / 127 MB in the user's home folder that nothing read); PELOAD_D3DGL_GLSLCACHE=1 reads
+    // them back instead (hand-edited GLSL experiments) and keeps writing new ones.
     #define D3DGL_XLAT_VER "v5"
     snprintf(path,sizeof path,"%s/reclaimer_glsl_" D3DGL_XLAT_VER "/%016llx.glsl",home?home:"/tmp",(unsigned long long)hash);
     FILE*f=getenv("PELOAD_D3DGL_GLSLCACHE")?fopen(path,"rb"):0;
@@ -1660,8 +1661,9 @@ static char* d3dgl_load_glsl(const void*bc,uint64_t len){
     g_dg_nocmp = getenv("PELOAD_D3DGL_NOCMP")?1:0;
     char*g=dg_translate((const uint8_t*)bc,(size_t)len);
     if(!g) return 0;
-    char gdir[400]; snprintf(gdir,sizeof gdir,"%s/reclaimer_glsl_" D3DGL_XLAT_VER,home?home:"/tmp"); mkdir(gdir,0755);
-    FILE*o=fopen(path,"wb"); if(o){ fwrite(g,1,strlen(g),o); fclose(o); }
+    static int dump=-1; if(dump<0) dump=getenv("PELOAD_D3DGL_GLSLDUMP")||getenv("PELOAD_D3DGL_GLSLCACHE");
+    if(dump){ char gdir[400]; snprintf(gdir,sizeof gdir,"%s/reclaimer_glsl_" D3DGL_XLAT_VER,home?home:"/tmp"); mkdir(gdir,0755);
+        FILE*o=fopen(path,"wb"); if(o){ fwrite(g,1,strlen(g),o); fclose(o); } }
     if(getenv("PELOAD_TRACE_D3DGL")){ char m[96]; int k=snprintf(m,sizeof m,"  [d3dgl] translated %016llx in-process (%zuB)\n",(unsigned long long)hash,strlen(g)); (void)!write(2,m,k); }
     return g;
 }

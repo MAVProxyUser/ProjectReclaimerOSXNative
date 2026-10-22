@@ -49,7 +49,8 @@ Diagnostics: `PELOAD_FPS_LOG`, `PELOAD_D3DGL_PROF`, `PELOAD_SAMPLE=<us>`, `PELOA
 `PELOAD_D3DGL_SHOTWIN=<n>` (+`_FROM/_TO` seconds after gameplay start; capture names carry the engine
 frame `_f<N>`; `PELOAD_D3DGL_ALT5` phase-tagged A/B), `PELOAD_INPUT_SCRIPT=walk|fire|<segments>`,
 `PELOAD_KBM_TEST`, `PELOAD_AUDIO_DUMP=<raw>`. The GLSL translator runs in-process every launch;
-`~/reclaimer_glsl_v5/` is written for inspection only (`PELOAD_D3DGL_GLSLCACHE=1` reads it back).
+`~/reclaimer_glsl_v5/` is written only with `PELOAD_D3DGL_GLSLDUMP=1` (since 2026-10-21; it was every launch, 127 MB in ~), for
+inspection (`PELOAD_D3DGL_GLSLCACHE=1` reads it back and keeps writing).
 Hang debugging: `kill -USR1 <worker pid>` dumps every guest thread (rip + stack-scanned return addrs);
 `PELOAD_PEEK=<hexaddr>:<hexlen>[,...]` adds hex dumps of guest memory to it; `PELOAD_DUMP_DEPTH=<n>` shows n frames
 per thread (default 16). `PELOAD_TRACE_LE=<code>`

@@ -1098,7 +1098,13 @@ oracle. Fixes below apply to both unless noted.
   (light loops, bone palettes), indexable temps, immediate constant buffer; SM5 derivatives, rcp, f16<->f32, bitfield
   ops, gather4. Old switches: `PELOAD_D3DGL_NOYFLIP`. (10-16 a6b7628)
 - **GLSL cache write-only by default** — Why: a stale ~/reclaimer_glsl cache hid translator changes. How: translate every
-  launch; the cache is written for inspection (`PELOAD_D3DGL_GLSLCACHE=1` reads it). (10-16 a6b7628; now v5)
+  launch; the cache is written for inspection (`PELOAD_D3DGL_GLSLCACHE=1` reads it). (10-16 a6b7628; now v5) The writing is
+  opt-in since 10-21 (next entry).
+- **GLSL files only on request** — `d3dgl_load_glsl`. Why: every launch wrote each translated shader to
+  ~/reclaimer_glsl_v5/<hash>.glsl "for inspection" -- 11,018 files, 127 MB in the user's home folder (Halo 3 + Reach + Halo 2
+  + mods), read by nothing unless `PELOAD_D3DGL_GLSLCACHE=1`; the user asked for it to be off. How: written only with
+  `PELOAD_D3DGL_GLSLDUMP=1` (= the old behaviour) or `PELOAD_D3DGL_GLSLCACHE=1` (which reads them back and keeps adding new
+  ones); translation itself is unchanged. (10-21)
 - **Constant buffers at their declared size** — Why: register-indexed palettes were declared 4096 vec4 and hit GL's
   4096-component limit, so every skinned mesh (first-person arms/weapon, bipeds) and light-loop materials failed to link
   (27% of draws skipped). How: declared at dcl_constantbuffer size. Old: `PELOAD_D3DGL_NODCLSZ=1`. (10-16 338a146)
