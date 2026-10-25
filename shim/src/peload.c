@@ -2039,6 +2039,7 @@ static void MSABI ctxi_Begin(void*t,void*a); static void MSABI ctxi_End(void*t,v
 // structured buffers are snapshotted at Dispatch time (the game rewrites them for the next dispatch).
 // PELOAD_CS_SYNC runs every dispatch inline (old behaviour).
 typedef struct CsQJob { CsProg*p; CsCtx cx; uint32_t a,b,c; void*own[64]; int nown; D3DObj* uavres[8]; D3DObj* rdres[32]; int nrd, running; struct CsSnap* snaps[48]; int nsnap; struct CsQJob*next;
+    uint64_t plo, phi;   // predicted byte range of uavres[0] (phi 0: the whole resource) -- csq_range_*
     int ndeps, ndep, capdep; struct CsQJob**dependents; struct CsQJob*rnext; } CsQJob;   // (ready-list queue: unfinished earlier jobs it waits for, the later ones waiting for it)
 // A read-only compute input (constant buffer or SRV buffer) copied once per resource version and shared by every job
 // that reads that version (halo3 issues ~100 particle dispatches a frame against the same buffers: copying them per
@@ -2060,9 +2061,49 @@ static CsQJob *g_csq_head,*g_csq_tail; static volatile int g_csq_n; static int g
 // read-only buffers were snapshotted at Dispatch and don't count). Halo 3 issues many small independent particle
 // dispatches per frame; one worker made the GL thread wait ~10 ms a frame in 100-player games.
 static int g_csq_nrun, g_csq_maxrun;
+// Element ranges (2026-10-25): halo3's particle update kernel runs once per particle system, one 64-thread group each, and every
+// dispatch writes the same 2.2 MB pool buffer -- so each waited for all earlier ones (a chain of ~200 dispatches of ~80 us a
+// frame; the GL submission thread waited 43% of its time for the chain's end in a 128-player HugeGrass fight, while the compute
+// workers idled 80%). Each dispatch actually touches only its system's slice: elements [cb3.x, cb3.y) for the update kernel.
+// Per program the rule is LEARNED: its first 64 dispatches run as before with their u0 accesses tracked (dxbc_cpu.c track), and
+// a constant-buffer dword pair {first, end} (first 16 bytes of each CB) survives if every observed access starts exactly at
+// element `first` and stays below `end` (the tightest survivor is taken; a first version that only asked "within" picked a
+// coincidental loose pair on Valhalla, which a later dispatch broke); then two
+// dispatches of such programs conflict on u0 only if their slices overlap. Every dispatch stays tracked and is checked after it
+// ran: an access outside its predicted slice turns the rule off for that program for good ([cs-range] line). Programs that
+// touch other UAVs, or have no surviving pair, keep the whole-resource rule. PELOAD_CS_RANGE=0 = off; PELOAD_AB=csrange.
+static volatile int g_csr_on=-1;
+int ab_csrange(int set){ if(set>=0) g_csr_on=set; return g_csr_on==1; }
+static int csr_on(void){ if(g_csr_on<0){ const char*e=getenv("PELOAD_CS_RANGE"); g_csr_on=!(e && !atoi(e)); } return g_csr_on==1; }
+static void csq_range_predict(CsQJob*j){   // (enqueue) a rule-on program with only u0 written: its slice from the constant buffer
+    j->plo=j->phi=0; CsProg*p=j->p; if(!csr_on() || p->rr_state!=1 || !j->uavres[0]) return;
+    for(int i=1;i<8;i++) if(j->uavres[i]) return;
+    const uint8_t*cb=j->cx.cb[p->rr_b]; if(!cb || j->cx.cbsz[p->rr_b]<(uint32_t)(p->rr_q*4+8)) return;
+    uint32_t f=((const uint32_t*)cb)[p->rr_q], e=((const uint32_t*)cb)[p->rr_q+1], st=p->uavstride[0]; if(!st || f>=e) return;
+    j->plo=(uint64_t)f*st; j->phi=(uint64_t)e*st; }
+static void csq_range_after(CsQJob*j){   // (worker, after the dispatch) learn / verify
+    CsProg*p=j->p; if(p->rr_state<0) return; const CsCtx*c=&j->cx;
+    uint64_t lo=c->wlo[0]<c->rlo[0]?c->wlo[0]:c->rlo[0], hi=c->whi[0]>c->rhi[0]?c->whi[0]:c->rhi[0];
+    for(int i=1;i<8;i++) if(j->uavres[i] || c->whi[i] || c->rhi[i]){ if(p->rr_state==0){ p->rr_state=-1; } return; }   // other UAVs: never
+    if(!hi) return;   // touched nothing
+    if(p->rr_state==1){ if(j->phi && (lo<j->plo || hi>j->phi)){ p->rr_state=-1;
+            char m[220]; int k=snprintf(m,sizeof m,"  [cs-range] program %p touched bytes %llu..%llu outside its predicted %llu..%llu: element ranges off for it\n",(void*)p,
+                (unsigned long long)lo,(unsigned long long)hi,(unsigned long long)j->plo,(unsigned long long)j->phi); (void)!write(2,m,(size_t)k); }
+        return; }
+    // learning: keep the candidate pairs {cb b dword q, q+1} that bound [lo, hi)
+    uint32_t st=p->uavstride[0]; if(!st){ p->rr_state=-1; return; }
+    if(!p->rr_obs) p->rr_cand=~0ull;
+    for(int b=0;b<16;b++) for(int q=0;q<3;q++){ int bit=b*3+q; if(!(p->rr_cand>>bit&1)) continue; const uint8_t*cb=c->cb[b];
+        int ok=cb && c->cbsz[b]>=(uint32_t)(q*4+8); if(ok){ uint32_t f=((const uint32_t*)cb)[q], e=((const uint32_t*)cb)[q+1]; ok=f<e && lo==(uint64_t)f*st && hi<=(uint64_t)e*st; }   // (starts exactly at the first element: a coincidental loose pair rarely does)
+        if(!ok) p->rr_cand&=~(1ull<<bit); }
+    if(!p->rr_cand){ p->rr_state=-1; return; }
+    if(++p->rr_obs>=64){ int bit=-1; uint64_t best=~0ull;   // the tightest surviving pair on this dispatch
+        for(int b2=0;b2<48;b2++){ if(!(p->rr_cand>>b2&1)) continue; const uint32_t*w=(const uint32_t*)c->cb[b2/3]; uint64_t wd=(uint64_t)(w[b2%3+1]-w[b2%3]); if(wd<best){ best=wd; bit=b2; } }
+        if(bit<0){ p->rr_state=-1; return; } p->rr_b=bit/3; p->rr_q=bit%3; p->rr_state=1;
+        char m[160]; int k=snprintf(m,sizeof m,"  [cs-range] program %p: u0 elements [cb%d dword %d, dword %d) -> its dispatches run side by side\n",(void*)p,p->rr_b,p->rr_q,p->rr_q+1); (void)!write(2,m,(size_t)k); } }
 static int csq_conflict(const CsQJob*a,const CsQJob*b){   // a queued before b
     for(int i=0;i<8;i++){ const D3DObj*w=b->uavres[i]; if(!w) continue;
-        for(int k=0;k<8;k++) if(a->uavres[k]==w) return 1;
+        for(int k=0;k<8;k++) if(a->uavres[k]==w){ if(i==0 && k==0 && a->phi && b->phi && (b->phi<=a->plo || a->phi<=b->plo)) continue; return 1; }   // (disjoint slices of u0)
         for(int k=0;k<a->nrd;k++) if(a->rdres[k]==w) return 1; }
     for(int k=0;k<b->nrd;k++){ const D3DObj*r=b->rdres[k]; for(int i=0;i<8;i++) if(a->uavres[i]==r) return 1; }
     return 0; }
@@ -2080,6 +2121,12 @@ static CsQJob* csq_pick(void){   // (g_csq_mx held) the oldest job that doesn't 
 // one worker is woken per job made ready. PELOAD_CS_OLDQUEUE=1 = csq_pick and broadcasts, as before.
 static CsQJob *g_csq_rhead, *g_csq_rtail; static int g_csq_oldq=-1; static volatile int g_csq_want=-1;
 int ab_csq(int set){ if(set>=0) g_csq_want=!set; return g_csq_oldq==0; }   // PELOAD_AB=csq: "on" = the ready list; switched while the queue is empty
+// A completion that makes ONE job ready (2026-10-25): the worker that finished runs it next itself instead of waking another
+// (halo3's particle dispatches form long chains over the same buffers -- in a 128-player HugeGrass match the 8 workers were 80%
+// idle while the GL submission thread waited 42% of its time for a chain's end: every hop paid a thread wake-up).
+// PELOAD_CS_WAKEALL=1 = wake a worker for every ready job, as before; PELOAD_AB=csnext switches it.
+static volatile int g_csq_wakeall=-1;
+int ab_csnext(int set){ if(set>=0) g_csq_wakeall=!set; return g_csq_wakeall==0; }
 static void csq_ready_push(CsQJob*j){ j->rnext=0; if(g_csq_rtail) g_csq_rtail->rnext=j; else g_csq_rhead=j; g_csq_rtail=j; }
 static CsQJob* csq_ready_pop(void){ CsQJob*j=g_csq_rhead; if(j){ g_csq_rhead=j->rnext; if(!g_csq_rhead) g_csq_rtail=0; } return j; }
 static void csq_adddep(CsQJob*e,CsQJob*j){ if(e->ndep==e->capdep){ int nc=e->capdep?e->capdep*2:8; CsQJob**nd=realloc(e->dependents,(size_t)nc*sizeof *nd); if(!nd) return; e->dependents=nd; e->capdep=nc; }
@@ -2092,7 +2139,25 @@ static void* csq_worker(void*arg){ (void)arg; pthread_setname_np("shim-compute")
         for(;;){ j=g_csq_oldq>0?csq_pick():csq_ready_pop(); if(j) break; pthread_cond_wait(&g_csq_cv,&g_csq_mx); }
         j->running=1; if(++g_csq_nrun>g_csq_maxrun) g_csq_maxrun=g_csq_nrun; pthread_mutex_unlock(&g_csq_mx);
         uint64_t t0=prof_on()?prof_now():0;
+        { static int dl=-1; if(dl<0) dl=getenv("PELOAD_CS_DEPLOG")?1:0; if(dl || (csr_on() && j->p->rr_state>=0)){ j->cx.track=1; for(int i=0;i<8;i++){ j->cx.wlo[i]=j->cx.rlo[i]=~0ull; j->cx.whi[i]=j->cx.rhi[i]=0; } } }
         long rc=cs_dispatch(j->p,&j->cx,j->a,j->b,j->c);
+        if(j->cx.track && rc>=0) csq_range_after(j);
+        if(j->cx.track){ static int left=-1; if(left<0){ const char*e=getenv("PELOAD_CS_DEPLOG"); left=e?atoi(e):0; } extern double g_gameplay_t0;
+            if(left>0 && g_gameplay_t0 && mono_s()-g_gameplay_t0>20){ left--; char m[600]; int k=snprintf(m,sizeof m,"  [csrange] prog %p:",(void*)j->p);
+                for(int i=0;i<8;i++){ if(j->cx.whi[i]) k+=snprintf(m+k,sizeof m-k," u%d writes %llu..%llu",i,(unsigned long long)j->cx.wlo[i],(unsigned long long)j->cx.whi[i]);
+                    if(j->cx.rhi[i]) k+=snprintf(m+k,sizeof m-k," u%d reads %llu..%llu",i,(unsigned long long)j->cx.rlo[i],(unsigned long long)j->cx.rhi[i]); }
+                k+=snprintf(m+k,sizeof m-k," | stride %u | dispatch %ux%ux%u\n",j->p->uavstride[0],j->a,j->b,j->c); (void)!write(2,m,(size_t)k);
+                // every constant buffer (sizes and where the first element index of the written range appears, as u32 or float)
+                { uint32_t first=j->cx.whi[0]&&j->p->uavstride[0]?(uint32_t)(j->cx.wlo[0]/j->p->uavstride[0]):~0u, last=j->cx.whi[0]&&j->p->uavstride[0]?(uint32_t)(j->cx.whi[0]/j->p->uavstride[0]):~0u;
+                  char mm[700]; int kk=snprintf(mm,sizeof mm,"  [csrange]   first element %u, end %u; found:",first,last);
+                  for(int b=0;b<16;b++){ if(!j->cx.cb[b]) continue; const uint32_t*w=(const uint32_t*)j->cx.cb[b]; uint32_t n=j->cx.cbsz[b]/4; if(n>1024) n=1024;
+                      kk+=snprintf(mm+kk,sizeof mm-kk," cb%d(%u B)",b,j->cx.cbsz[b]);
+                      for(uint32_t q=0;q<n && kk<640;q++){ float f; memcpy(&f,&w[q],4); if(w[q]==first || (first && f==(float)first)) kk+=snprintf(mm+kk,sizeof mm-kk," [cb%d+%u=%s first]",b,q*4,w[q]==first?"u32":"f32");
+                          if(w[q]==last-first || (last>first && f==(float)(last-first))) kk+=snprintf(mm+kk,sizeof mm-kk," [cb%d+%u=%s count]",b,q*4,w[q]==last-first?"u32":"f32"); } }
+                  for(int i=0;i<32;i++) if(j->cx.srv[i]){ D3DObj*v=j->cx.srv[i]; D3DObj*r=(v->vkind&&v->data)?(D3DObj*)v->data:v; kk+=snprintf(mm+kk,sizeof mm-kk," t%d(%lluB)",i,(unsigned long long)(r?r->size:0)); }
+                  if(j->cx.cb[3] && j->cx.cbsz[3]>=16){ const uint32_t*w=(const uint32_t*)j->cx.cb[3]; kk+=snprintf(mm+kk,sizeof mm-kk," | cb3 = %u %u %u %u",w[0],w[1],w[2],w[3]); }
+                  kk+=snprintf(mm+kk,sizeof mm-kk," | numthreads %ux%ux%u",j->p->tg[0],j->p->tg[1],j->p->tg[2]);
+                  mm[kk++]='\n'; (void)!write(2,mm,(size_t)kk); } } }
         if(t0){ static uint64_t acc,nn,lacc,lins; acc+=prof_now()-t0; if((++nn%200)==0){ char m[200]; long ins=g_cs_instrs; int k=snprintf(m,sizeof m,"  [cs-cpu] %llu dispatches (async, up to %d at once), last 200: %.1f us/dispatch, %.0f instrs/dispatch\n",(unsigned long long)nn,g_csq_maxrun,(acc-lacc)/1e3/200,(ins-lins)/200.0); (void)!write(2,m,k); lacc=acc; lins=ins; g_csq_maxrun=0; } }
         if(rc<0){ static int warned; if(warned++<8){ char m[120]; int k=snprintf(m,sizeof m,"  [cs-cpu] unsupported opcode %ld\n",-rc); (void)!write(2,m,k); } }
         pthread_mutex_lock(&g_csq_mx);
@@ -2102,7 +2167,9 @@ static void* csq_worker(void*arg){ (void)arg; pthread_setname_np("shim-compute")
         for(int k=0;k<j->nrd;k++) j->rdres[k]->cs_readers--;
         int woke=0; if(g_csq_oldq<=0) for(int k=0;k<j->ndep;k++){ CsQJob*d=j->dependents[k]; if(--d->ndeps==0){ csq_ready_push(d); woke++; } }
         pthread_cond_broadcast(&g_csq_done);
-        if(g_csq_oldq>0) pthread_cond_broadcast(&g_csq_cv); else if(woke>1) pthread_cond_broadcast(&g_csq_cv); else if(woke) pthread_cond_signal(&g_csq_cv);
+        if(g_csq_wakeall<0) g_csq_wakeall=getenv("PELOAD_CS_WAKEALL")?1:0;
+        if(g_csq_oldq>0) pthread_cond_broadcast(&g_csq_cv); else if(woke>1) pthread_cond_broadcast(&g_csq_cv); else if(woke && g_csq_wakeall) pthread_cond_signal(&g_csq_cv);
+        // (woke == 1 without a signal: this worker's next loop takes it from the ready list -- or an awake one does first)
         pthread_mutex_unlock(&g_csq_mx);
         free(j->dependents); for(int i=0;i<j->nown;i++) free(j->own[i]); for(int i=0;i<j->nsnap;i++) cs_snap_put(j->snaps[i]); free(j); }
     return 0; }
@@ -2182,9 +2249,16 @@ static void MSABI ctxi_Dispatch(void*t,uint32_t a,uint32_t b,uint32_t c){ (void)
             if(r){ r->cs_pending++; j->uavres[i]=r; r->ver++; r->gl_dirty=1; r->dpart=0; r->rvalid=0; } }
         if(g_csq_oldq<0) g_csq_oldq=getenv("PELOAD_CS_OLDQUEUE")?1:0;
         if(g_csq_want>=0 && g_csq_want!=g_csq_oldq && !g_csq_n){ g_csq_oldq=g_csq_want; }   // (A/B: only between batches)
+        csq_range_predict(j);
         if(g_csq_oldq<=0) for(CsQJob*e=g_csq_head;e;e=e->next) if(csq_conflict(e,j)) csq_adddep(e,j);   // (before j joins the queue)
         if(g_csq_tail) g_csq_tail->next=j; else g_csq_head=j; g_csq_tail=j; g_csq_n++;
         if(g_csq_oldq<=0 && !j->ndeps) csq_ready_push(j);
+        // PELOAD_CS_DEPLOG=<n>: the dependency structure of n dispatches, once gameplay has run 20 s -- which resources they write
+        // and read live, and how many queued jobs each waits for (are halo3's particle dispatches one chain?)
+        { static int dl=-1, left; if(dl<0){ const char*e=getenv("PELOAD_CS_DEPLOG"); dl=e?1:0; left=e?atoi(e):0; }
+          extern double g_gameplay_t0; extern unsigned long g_eng_present_no_x; if(dl && left>0 && g_gameplay_t0 && mono_s()-g_gameplay_t0>20){ left--; char m[400]; int k=snprintf(m,sizeof m,"  [csdep] f%lu prog %p (%ux%ux%u) waits for %d of %d queued | writes",g_eng_present_no_x,(void*)p,a,b,c,j->ndeps,g_csq_n-1);
+              for(int i=0;i<8;i++) if(j->uavres[i]) k+=snprintf(m+k,sizeof m-k," %p(%lluB)",(void*)j->uavres[i],(unsigned long long)j->uavres[i]->size);
+              k+=snprintf(m+k,sizeof m-k," | reads live"); for(int i=0;i<j->nrd && k<380;i++) k+=snprintf(m+k,sizeof m-k," %p",(void*)j->rdres[i]); m[k++]='\n'; (void)!write(2,m,(size_t)k); } }
         if(!g_csq_started){ g_csq_started=1; const char*e=getenv("PELOAD_CS_WORKERS"); int nw=e?atoi(e):4; if(nw<1) nw=1; if(nw>16) nw=16;
             for(int w=0;w<nw;w++){ pthread_t th; pthread_attr_t at; pthread_attr_init(&at); pthread_attr_set_qos_class_np(&at,QOS_CLASS_USER_INTERACTIVE,0); pthread_create(&th,&at,csq_worker,0); } }
         if(g_csq_oldq>0 || !j->ndeps) pthread_cond_signal(&g_csq_cv); pthread_mutex_unlock(&g_csq_mx);
@@ -4068,7 +4142,7 @@ static void*  MSABI i_SetCursor(void*c){ return c; }
 void* fg_hwnd_ext(void);
 #include <CoreGraphics/CoreGraphics.h>
 // latency.c (included after stats.c): input -> screen latency stages and the per-second performance log
-void lat_cam(const float*vp); void lat_present(double t); void lat_gpu(uint64_t fno,double t); void lat_win(uint64_t fno,double t); void lat_input(int src); void perf_tick(void);
+void lat_cam(const float*vp); void lat_present(double t); void lat_enc(uint64_t fno,double t); void lat_gpu(uint64_t fno,double t); void lat_win(uint64_t fno,double t); void lat_input(int src); void perf_tick(void);
 #include "wininput.c"
 static int    MSABI i_SetLayeredWindowAttributes(void*h,uint32_t key,uint8_t a,uint32_t f){ (void)key;
     if(getenv("PELOAD_TRACE_LAYERED")){ char m[120]; int k=snprintf(m,sizeof m,"  [layered] SetLayeredWindowAttributes %p alpha %u flags 0x%x\n",h,a,f); (void)!write(2,m,k); }

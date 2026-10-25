@@ -31,7 +31,7 @@
 #include <CoreVideo/CoreVideo.h>
 #include <sys/resource.h>
 #define LT_N 512
-typedef struct { volatile uint64_t fno; float fwd[3]; volatile int camok; double t_present, t_gpu, t_win; } LtFrame;
+typedef struct { volatile uint64_t fno; float fwd[3]; volatile int camok; double t_present, t_gpu, t_win, t_enc; } LtFrame;   // t_enc: the GL submission thread reached its present (all its GL calls sent)
 static LtFrame g_lt[LT_N];
 static int g_lt_on=-1;
 static int lt_on(void){ if(g_lt_on<0){ const char*e=getenv("PELOAD_LATENCY"); g_lt_on=!(e && !atoi(e)); } return g_lt_on; }
@@ -64,6 +64,7 @@ void lat_cam(const float*vp){   // (draw thread) the frame under construction is
 // halo3's render thread presented frame fno at t (d3dsubmit.c: SQ_PRESENT moves its time to g_lag_t; read here at gpu time)
 static double g_perf_pt[256]; static volatile unsigned g_perf_pn;   // present times for the per-second frame-time stats
 void lat_present(double t){ unsigned n=__atomic_fetch_add(&g_perf_pn,1,__ATOMIC_RELAXED); g_perf_pt[n&255]=t; }
+void lat_enc(uint64_t fno,double t){ if(!lt_on()) return; lt_at(fno)->t_enc=t; }   // (d3dsubmit.c SQ_PRESENT, GL submission thread on)
 void lat_gpu(uint64_t fno,double t){ if(!lt_on()) return; extern double g_lag_t[256]; LtFrame*f=lt_at(fno); f->t_gpu=t; f->t_present=g_lag_t[fno&255]; }
 static volatile unsigned g_perf_wn;   // frames flushed into the window
 void lat_win(uint64_t fno,double t){ __atomic_fetch_add(&g_perf_wn,1,__ATOMIC_RELAXED); if(!lt_on()) return; LtFrame*f=lt_get(fno); if(f) f->t_win=t; lt_vs_start(); }
@@ -85,7 +86,7 @@ void lat_input(int src){   // src 0 mouse, 1 pad, 2 probe
     pthread_mutex_unlock(&g_lo_mx); }
 
 // results
-typedef struct { double in_present, in_gpu, in_win, in_screen; int frames, src, haswin; } LtRes;
+typedef struct { double in_present, in_gpu, in_win, in_screen, in_enc; int frames, src, haswin; } LtRes;
 static LtRes g_lr[64]; static unsigned g_lr_n; static LtRes g_lr_last; static pthread_mutex_t g_lr_mx=PTHREAD_MUTEX_INITIALIZER;
 static void lt_check(void){   // (present thread / GL thread / stats thread) finish a pending onset when its frame is known
     if(!g_lo.pending) return; pthread_mutex_lock(&g_lo_mx); if(!g_lo.pending){ pthread_mutex_unlock(&g_lo_mx); return; }
@@ -95,19 +96,21 @@ static void lt_check(void){   // (present thread / GL thread / stats thread) fin
     for(uint64_t k=g_lo.fno0+1;k<=c+1;k++) if(lt_fwd_of(k,f) && lt_angle(f,g_lo.fwd0)>0.03f){ turn=k; break; }
     if(!turn){ pthread_mutex_unlock(&g_lo_mx); return; }
     // the first frame at or after it that reached each stage (the window may skip frames: a newer one shows the turn too)
-    double tp=0, tg=0, tw=0;
+    double tp=0, tg=0, tw=0, te=0;
     for(uint64_t k=turn;k<=c+1 && k<turn+64;k++){ LtFrame*e=lt_get(k); if(!e) continue;
+        if(!te && e->t_enc>0) te=e->t_enc;
         if(!tp && e->t_present>0) tp=e->t_present; if(!tg && e->t_gpu>0) tg=e->t_gpu; if(!tw && e->t_win>0) tw=e->t_win; }
     if(haswin ? !tw : !tg){ pthread_mutex_unlock(&g_lo_mx); return; }   // not there yet (no helper: no GPU-done times)
     LtRes r={0}; r.src=g_lo.src; r.frames=(int)(turn-g_lo.fno0); r.haswin=haswin && tw>0;
-    r.in_present=tp>0?(tp-g_lo.t0)*1e3:-1; r.in_gpu=tg>0?(tg-g_lo.t0)*1e3:-1;
+    r.in_present=tp>0?(tp-g_lo.t0)*1e3:-1; r.in_gpu=tg>0?(tg-g_lo.t0)*1e3:-1; r.in_enc=te>0?(te-g_lo.t0)*1e3:-1;
     if(r.haswin){ r.in_win=(tw-g_lo.t0)*1e3; r.in_screen=(lt_screen_time(tw)-g_lo.t0)*1e3; }
     g_lo.pending=0; pthread_mutex_unlock(&g_lo_mx);
     pthread_mutex_lock(&g_lr_mx); g_lr[g_lr_n++%64]=r; g_lr_last=r; pthread_mutex_unlock(&g_lr_mx);
     static const char*const sn[3]={"mouse","stick","probe (mouse)"};
     char m[300]; int k;
-    if(r.haswin) k=snprintf(m,sizeof m,"  [latency] %s -> halo3 presents the turned frame %.0f ms -> GPU done %.0f -> in the window %.0f -> on screen ~%.0f ms (display %.0f Hz; frame +%d after the input)\n",
-        sn[r.src<3?r.src:0],r.in_present,r.in_gpu,r.in_win,r.in_screen,1.0/lt_period(),r.frames);
+    char enc[48]=""; if(r.in_enc>0) snprintf(enc,sizeof enc,"; GL submission thread done %.0f ms",r.in_enc);
+    if(r.haswin) k=snprintf(m,sizeof m,"  [latency] %s -> halo3 presents the turned frame %.0f ms -> GPU done %.0f -> in the window %.0f -> on screen ~%.0f ms (display %.0f Hz; frame +%d after the input%s)\n",
+        sn[r.src<3?r.src:0],r.in_present,r.in_gpu,r.in_win,r.in_screen,1.0/lt_period(),r.frames,enc);
     else k=snprintf(m,sizeof m,"  [latency] %s -> halo3 presents the turned frame %.0f ms -> GPU done %.0f ms (no window: hidden client; frame +%d after the input)\n",sn[r.src<3?r.src:0],r.in_present,r.in_gpu,r.frames);
     (void)!write(2,m,(size_t)k); }
 static int lt_cmpd(const void*a,const void*b){ double x=*(const double*)a, y=*(const double*)b; return x<y?-1:x>y; }

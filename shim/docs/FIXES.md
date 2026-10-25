@@ -1422,6 +1422,23 @@ oracle. Fixes below apply to both unless noted.
   for the readers too, and each time it happens a `[cs-cpu] <write> of a resource ... that N queued kernel(s) still read` line
   counts it. Not the artifact's cause as far as measured: 0 such writes in a 180 s HugeGrass match.
   PELOAD_CS_READWAIT=0 = wait for writers only, as before (still counted).
+- **Particle dispatches on disjoint slices of the shared pool run side by side** (2026-10-25; user: "start with cutting queued
+  frames and the particle-chain wait") — peload.c `csq_range_predict` / `csq_range_after` / `csq_conflict` (CsQJob plo/phi),
+  dxbc_cpu.c CsCtx `track` (u0 byte ranges a dispatch read / wrote) and CsProg `rr_*`; PELOAD_CS_DEPLOG=<n> prints `[csdep]` /
+  `[csrange]` lines (dependencies, actual ranges, constant buffers). Why: halo3's particle update kernel runs once per particle
+  system (one 64-thread group) and every dispatch writes the same 2.2 MB pool buffer, so the whole-resource rule chained
+  ~200 dispatches of ~80 us a frame; in a 100-player HugeGrass fight the GL submission thread waited ~40% of its time for the
+  chain's end while the compute workers idled 80%. Each dispatch touches only elements [cb3.x, cb3.y) of the pool. How: per
+  program the rule is learned from its first 64 dispatches (tracked accesses; a constant-buffer dword pair {first, end} in the
+  first 16 bytes of a CB survives if every access starts exactly at `first` and stays below `end`; the tightest survivor
+  wins), then u0 conflicts compare slices; every dispatch stays tracked and an access outside its slice turns the rule off
+  for that program for good (`[cs-range] ... outside its predicted ...`; the first, looser learning picked a coincidental pair
+  that a later dispatch broke -- caught). In-match A/B (PELOAD_AB=csrange:20, Tour Guide's HugeGrass, ~98 players, ~8,000
+  draws, tools/ab-phases.py): particle-heavy phases 24.2 -> 32.5, 27.9 -> 33.8, 31.3 -> 34.2 fps with the GL thread's compute
+  waits 804 -> 68, 571 -> 112, 353 -> 124 ms per [submit] line; light phases unchanged. PELOAD_CS_RANGE=0 = whole-resource
+  ordering, as before.
+- **A finished job that makes one job ready runs it on the same worker** (`ab_csnext`, PELOAD_CS_WAKEALL=1 = wake a worker as
+  before): saves a thread wake per hop of a dependency chain; A/B neutral in a 128-player match (167 vs 170 ms, same fps).
 - Performance work (async workers, SIMT, input snapshots): section 19.
 
 ## 16. Client exe patches and hooks
