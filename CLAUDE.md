@@ -307,7 +307,9 @@ PELOAD_FRAMECAP=<n> logs the frames before compaction. README "Who sees your IP 
 Big-game render stall (2026-10-25, +42% HugeGrass): the client Map(READ)s a ring of 1x1 luminance staging textures every frame;
 a read map now waits only for that resource's queued writes, and small GPU->staging copies read back via pixel buffer + helper
 mailbox ticket (rb_async/rb_complete; PELOAD_D3DGL_SYNCRB / _SUBMIT_DRAINREAD = old). Find such stalls with `sample <pid> 5`
-on a big-game client: render thread in sub_drain, GL thread in glh_end_sync. A/B in public matches: PELOAD_AB=rb|cow|new|burn|qos.
+on a big-game client: render thread in sub_drain, GL thread in glh_end_sync; then shim/tools/sample-threads.py <file> per thread.
+Compute jobs (particles) run from a dependency-counted ready list (PELOAD_CS_OLDQUEUE=1 = old picker; +47% HugeGrass).
+A/B in public matches: PELOAD_AB=rb|csq|cow|new|burn|qos (shim/tools/quiet-run.sh test clients are silent).
 Server list + status query (2026-10-25, shim/docs/server-status.md): discovery masters (HTTP :49175; built in 148.251.153.44 /
 23.159.176.140, cache ReclaimerCache/discovery/peers.json); every start the client opens one QUIC connection per listed server
 (SNI "reclaimer", self-signed rcgen cert, no client cert) and sends 4-byte length + `{"status":2}`, gets name/map/mode/players...

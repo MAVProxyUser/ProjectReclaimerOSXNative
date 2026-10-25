@@ -2035,7 +2035,8 @@ static void MSABI ctxi_Begin(void*t,void*a); static void MSABI ctxi_End(void*t,v
 // (texture-buffer upload for the particle draws, Map/Update/Copy/Clear). Constant buffers and read-only
 // structured buffers are snapshotted at Dispatch time (the game rewrites them for the next dispatch).
 // PELOAD_CS_SYNC runs every dispatch inline (old behaviour).
-typedef struct CsQJob { CsProg*p; CsCtx cx; uint32_t a,b,c; void*own[64]; int nown; D3DObj* uavres[8]; D3DObj* rdres[32]; int nrd, running; struct CsSnap* snaps[48]; int nsnap; struct CsQJob*next; } CsQJob;
+typedef struct CsQJob { CsProg*p; CsCtx cx; uint32_t a,b,c; void*own[64]; int nown; D3DObj* uavres[8]; D3DObj* rdres[32]; int nrd, running; struct CsSnap* snaps[48]; int nsnap; struct CsQJob*next;
+    int ndeps, ndep, capdep; struct CsQJob**dependents; struct CsQJob*rnext; } CsQJob;   // (ready-list queue: unfinished earlier jobs it waits for, the later ones waiting for it)
 // A read-only compute input (constant buffer or SRV buffer) copied once per resource version and shared by every job
 // that reads that version (halo3 issues ~100 particle dispatches a frame against the same buffers: copying them per
 // dispatch was ~0.5 GB/s on the GL thread). refs: one for the resource's cache slot + one per job.
@@ -2068,8 +2069,24 @@ static CsQJob* csq_pick(void){   // (g_csq_mx held) the oldest job that doesn't 
         for(CsQJob*e=g_csq_head;e!=j;e=e->next) if(csq_conflict(e,j)){ ok=0; break; }
         if(ok) return j; }
     return 0; }
+// The ready list (2026-10-25): a HugeGrass sample had the 8 workers ~15-20% computing and ~35-40% waiting for g_csq_mx, the GL
+// thread 25% on it in Dispatch and ~50% for results -- every completion broadcast to all idle workers, and each then ran
+// csq_pick under the lock (every queued job against every earlier one: O(n^2) over ~100 dispatches a frame). Now a job's
+// dependencies are counted once, when it is queued (the same conflict rule, against every unfinished earlier job); a
+// completion counts its dependents down and moves those at zero to a FIFO ready list, a worker takes the head (O(1)), and
+// one worker is woken per job made ready. PELOAD_CS_OLDQUEUE=1 = csq_pick and broadcasts, as before.
+static CsQJob *g_csq_rhead, *g_csq_rtail; static int g_csq_oldq=-1; static volatile int g_csq_want=-1;
+int ab_csq(int set){ if(set>=0) g_csq_want=!set; return g_csq_oldq==0; }   // PELOAD_AB=csq: "on" = the ready list; switched while the queue is empty
+static void csq_ready_push(CsQJob*j){ j->rnext=0; if(g_csq_rtail) g_csq_rtail->rnext=j; else g_csq_rhead=j; g_csq_rtail=j; }
+static CsQJob* csq_ready_pop(void){ CsQJob*j=g_csq_rhead; if(j){ g_csq_rhead=j->rnext; if(!g_csq_rhead) g_csq_rtail=0; } return j; }
+static void csq_adddep(CsQJob*e,CsQJob*j){ if(e->ndep==e->capdep){ int nc=e->capdep?e->capdep*2:8; CsQJob**nd=realloc(e->dependents,(size_t)nc*sizeof *nd); if(!nd) return; e->dependents=nd; e->capdep=nc; }
+    e->dependents[e->ndep++]=j; j->ndeps++; }
 static void* csq_worker(void*arg){ (void)arg; pthread_setname_np("shim-compute");
-    for(;;){ pthread_mutex_lock(&g_csq_mx); CsQJob*j; while(!(j=csq_pick())) pthread_cond_wait(&g_csq_cv,&g_csq_mx);
+    for(;;){ pthread_mutex_lock(&g_csq_mx); CsQJob*j;
+        // the mode is read again after every wake-up: PELOAD_AB=csq switches it (between batches), and a worker that went to
+        // sleep in one mode must not keep waiting for the other's work (the first version did: every worker asleep on the
+        // ready list after a switch to the old picker -> no compute ran, the render thread waited for it forever)
+        for(;;){ j=g_csq_oldq>0?csq_pick():csq_ready_pop(); if(j) break; pthread_cond_wait(&g_csq_cv,&g_csq_mx); }
         j->running=1; if(++g_csq_nrun>g_csq_maxrun) g_csq_maxrun=g_csq_nrun; pthread_mutex_unlock(&g_csq_mx);
         uint64_t t0=prof_on()?prof_now():0;
         long rc=cs_dispatch(j->p,&j->cx,j->a,j->b,j->c);
@@ -2079,8 +2096,11 @@ static void* csq_worker(void*arg){ (void)arg; pthread_setname_np("shim-compute")
         { CsQJob**pp=&g_csq_head, *prev=0; while(*pp && *pp!=j){ prev=*pp; pp=&(*pp)->next; } if(*pp){ *pp=j->next; if(g_csq_tail==j) g_csq_tail=prev; } }
         g_csq_n--; g_csq_nrun--;
         for(int i=0;i<8;i++) if(j->uavres[i]) j->uavres[i]->cs_pending--;
-        pthread_cond_broadcast(&g_csq_done); pthread_cond_broadcast(&g_csq_cv); pthread_mutex_unlock(&g_csq_mx);
-        for(int i=0;i<j->nown;i++) free(j->own[i]); for(int i=0;i<j->nsnap;i++) cs_snap_put(j->snaps[i]); free(j); }
+        int woke=0; if(g_csq_oldq<=0) for(int k=0;k<j->ndep;k++){ CsQJob*d=j->dependents[k]; if(--d->ndeps==0){ csq_ready_push(d); woke++; } }
+        pthread_cond_broadcast(&g_csq_done);
+        if(g_csq_oldq>0) pthread_cond_broadcast(&g_csq_cv); else if(woke>1) pthread_cond_broadcast(&g_csq_cv); else if(woke) pthread_cond_signal(&g_csq_cv);
+        pthread_mutex_unlock(&g_csq_mx);
+        free(j->dependents); for(int i=0;i<j->nown;i++) free(j->own[i]); for(int i=0;i<j->nsnap;i++) cs_snap_put(j->snaps[i]); free(j); }
     return 0; }
 double g_cswait_s;   // time the renderer spent waiting for compute results ([submit] stats)
 uint64_t g_cs_snapbytes;   // bytes copied for compute job inputs (constant + read-only buffers)
@@ -2141,10 +2161,14 @@ static void MSABI ctxi_Dispatch(void*t,uint32_t a,uint32_t b,uint32_t c){ (void)
         pthread_mutex_lock(&g_csq_mx);
         for(int i=0;i<8;i++){ D3DObj*v=g_cs.uav[i]; j->cx.uav[i]=v; D3DObj*r=(v&&v->data&&v->vkind)?(D3DObj*)v->data:v;
             if(r){ r->cs_pending++; j->uavres[i]=r; r->ver++; r->gl_dirty=1; r->dpart=0; r->rvalid=0; } }
+        if(g_csq_oldq<0) g_csq_oldq=getenv("PELOAD_CS_OLDQUEUE")?1:0;
+        if(g_csq_want>=0 && g_csq_want!=g_csq_oldq && !g_csq_n){ g_csq_oldq=g_csq_want; }   // (A/B: only between batches)
+        if(g_csq_oldq<=0) for(CsQJob*e=g_csq_head;e;e=e->next) if(csq_conflict(e,j)) csq_adddep(e,j);   // (before j joins the queue)
         if(g_csq_tail) g_csq_tail->next=j; else g_csq_head=j; g_csq_tail=j; g_csq_n++;
+        if(g_csq_oldq<=0 && !j->ndeps) csq_ready_push(j);
         if(!g_csq_started){ g_csq_started=1; const char*e=getenv("PELOAD_CS_WORKERS"); int nw=e?atoi(e):4; if(nw<1) nw=1; if(nw>16) nw=16;
             for(int w=0;w<nw;w++){ pthread_t th; pthread_attr_t at; pthread_attr_init(&at); pthread_attr_set_qos_class_np(&at,QOS_CLASS_USER_INTERACTIVE,0); pthread_create(&th,&at,csq_worker,0); } }
-        pthread_cond_signal(&g_csq_cv); pthread_mutex_unlock(&g_csq_mx);
+        if(g_csq_oldq>0 || !j->ndeps) pthread_cond_signal(&g_csq_cv); pthread_mutex_unlock(&g_csq_mx);
         return; }
     CsCtx cx; memset(&cx,0,sizeof cx);
     for(int i=0;i<16;i++){ D3DObj*cb=g_cs.cb[i]; if(cb&&cb->data&&cb->size){ uint64_t off=(uint64_t)g_cs.cbfirst[i]*16; if(off>=cb->size) off=0; cx.cb[i]=(const uint8_t*)cb->data+off; cx.cbsz[i]=(uint32_t)(cb->size-off); } }

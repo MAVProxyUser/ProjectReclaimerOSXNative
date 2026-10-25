@@ -1956,6 +1956,19 @@ Numbers are from the commit messages; PERF-PLAN.md has the measurements. Compare
   handle on the same file, fstat / GetFileInformationByHandle stay live; the kept descriptor is reopened after 1 s
   (PELOAD_FS_METACACHE=0 = always open). Measured in a local match: 23.4 -> 12.5 (1) -> 1.1 us (2) per query, path
   translation included; the game unchanged (spawns, items, match time = wall time). Both ON by default.
+- **HugeGrass +47% more: particle compute jobs from a ready list instead of a picker under one lock** (2026-10-25) — peload.c
+  `csq_worker`, `csq_adddep` / `csq_ready_push` / `csq_ready_pop`, `ctxi_Dispatch`, `ab_csq`. Why: with the readback stall
+  gone, `sample` of a HugeGrass client (shim/tools/sample-threads.py) showed the GL thread ~25% waiting for g_csq_mx in
+  Dispatch and ~50% for compute results, and the 8 compute workers ~15-20% computing, ~35-40% waiting for that mutex: every
+  finished job broadcast to all idle workers, and each ran csq_pick under the lock -- every queued job checked against every
+  earlier one (O(n^2), ~100 particle dispatches a frame). How: a job's dependencies (the same conflict rule, against every
+  unfinished earlier job) are counted once when it is queued; a finished job counts its dependents down and moves those at
+  zero to a FIFO ready list; a worker takes the head; one wake-up per job made ready. Workers re-read the mode after every
+  wake-up (PELOAD_AB=csq switches it between batches -- the first build let workers sleep on the wrong list after a switch:
+  no compute ran and the client never left its loading screen). Measured: HugeGrass in-match A/B (PELOAD_AB=csq:20, 93-95
+  players, ~240 vehicles; the readback fix on in both): 52.9 vs 35.9 fps over 8 / 9 phases, 7 of 8 pairs ahead.
+  PELOAD_CS_OLDQUEUE=1 = csq_pick and broadcasts, as before. Tool: shim/tools/sample-threads.py (per-thread waits from a
+  macOS `sample` file).
 - **HugeGrass +42%: the client's per-frame luminance readback no longer stalls the render pipeline** (2026-10-25; user: "can
   we do anything about pulling 11 fps or less on Big team games like HugeGrass?") — d3dsubmit.c `ctx_Map` (a blocking READ
   map waits for the queued writes into that resource only), peload.c `rb_async` / `rb_complete` (called from
