@@ -10223,18 +10223,51 @@ static int pipe_close(void*h){ PipeObj*o=h; if(o->refs>0){ o->refs--; return 1; 
 // hook records it), counted per path and printed every 10 s -- the client opened files there in a 123-player match (~2% of
 // that thread's samples), so the paths say what to cache. g_engine_thr: set by hb_frame_hook.
 static pthread_t g_engine_thr; static int g_mainfs=-1;
-static struct { char p[160]; uint32_t n; } g_mfs[64]; static int g_nmfs; static pthread_mutex_t g_mfs_mx=PTHREAD_MUTEX_INITIALIZER;
-static void mainfs_note(const char*p){
-    pthread_mutex_lock(&g_mfs_mx); int k=0; for(;k<g_nmfs;k++) if(!strncmp(g_mfs[k].p,p,sizeof g_mfs[k].p-1)) break;
-    if(k==g_nmfs && g_nmfs<64){ snprintf(g_mfs[k].p,sizeof g_mfs[k].p,"%s",p); g_mfs[k].n=0; g_nmfs++; } if(k<g_nmfs) g_mfs[k].n++;
+static struct { char p[600]; uint32_t n, acc, disp, fl; uint64_t ra; double us; } g_mfs[64]; static int g_nmfs; static pthread_mutex_t g_mfs_mx=PTHREAD_MUTEX_INITIALIZER;
+static void mainfs_note(const char*p,uint32_t acc,uint32_t disp,uint32_t fl,uint64_t ra,double us){
+    pthread_mutex_lock(&g_mfs_mx); int k=0; for(;k<g_nmfs;k++) if(g_mfs[k].ra==ra && !strncmp(g_mfs[k].p,p,sizeof g_mfs[k].p-1)) break;
+    if(k==g_nmfs && g_nmfs<64){ snprintf(g_mfs[k].p,sizeof g_mfs[k].p,"%s",p); g_mfs[k].n=0; g_mfs[k].us=0; g_mfs[k].ra=ra; g_nmfs++; }
+    if(k<g_nmfs){ g_mfs[k].n++; g_mfs[k].us+=us; g_mfs[k].acc=acc; g_mfs[k].disp=disp; g_mfs[k].fl=fl; }
     static double last; double now=mono_s(); if(!last) last=now;
-    if(now-last>=10.0){ char m[300]; int q=snprintf(m,sizeof m,"  [mainfs] files opened on the engine thread in %.0f s:\n",now-last); (void)!write(2,m,(size_t)q);
-        for(int i=0;i<g_nmfs;i++) if(g_mfs[i].n){ q=snprintf(m,sizeof m,"  [mainfs]   %6u x %s\n",g_mfs[i].n,g_mfs[i].p); (void)!write(2,m,(size_t)q); g_mfs[i].n=0; }
+    if(now-last>=10.0){ char m[900]; int q=snprintf(m,sizeof m,"  [mainfs] files opened on the engine thread in %.0f s:\n",now-last); (void)!write(2,m,(size_t)q);
+        for(int i=0;i<g_nmfs;i++) if(g_mfs[i].n){ uint64_t r=g_mfs[i].ra; const char*mod=r>=(uint64_t)(uintptr_t)g_base && r<(uint64_t)(uintptr_t)g_base+0x10000000?"exe":"?";
+                q=snprintf(m,sizeof m,"  [mainfs]   %6u x %.1f us (path translation included), access %#x disposition %u flags %#x, from %s+0x%llx: %s\n",g_mfs[i].n,g_mfs[i].us/g_mfs[i].n,g_mfs[i].acc,g_mfs[i].disp,g_mfs[i].fl,
+                    mod,(unsigned long long)(*mod=='e'?r-(uint64_t)(uintptr_t)g_base:r),g_mfs[i].p); (void)!write(2,m,(size_t)q); g_mfs[i].n=0; g_mfs[i].us=0; }
         last=now; }
     pthread_mutex_unlock(&g_mfs_mx); }
+static void* i_CreateFileW_body(const uint16_t *w,char*p,uint32_t acc,uint32_t share,void*sec,uint32_t disp,uint32_t fl,void*tmpl);   // (p: the caller's 2048-byte path buffer)
+// Metadata opens (2026-10-25): OPEN_EXISTING asking for no data (access 0 or attributes / security / synchronize only: Rust's
+// std::fs::metadata) -- the client asks for halo3/maps/005_intro.map's metadata thousands of times a second on the engine
+// thread, and open()+close() of that path costs ~8.5 us under Rosetta. A path asked for again within 1 s gets a dup() of
+// one descriptor kept per path (~0.7 us with the fstat): still a real handle on the same file, so fstat / GetFileInformation-
+// ByHandle report its live size and times; the kept descriptor is reopened after 1 s (a file replaced or deleted is seen
+// within 1 s). 16 paths. PELOAD_FS_METACACHE=0 = always open, as before.
+static struct { char p[512]; int fd; double t; } g_mc[16]; static int g_mc_n, g_mc_next; static volatile int g_mc_on=-1; static pthread_mutex_t g_mc_mx=PTHREAD_MUTEX_INITIALIZER;
+static volatile int g_notemap_all=-1;   // PELOAD_NOTEMAP_ALL (below, in the body)
+static int metaopen_fd(const char*p,uint32_t acc,uint32_t disp,uint32_t fl){
+    if(g_mc_on<0){ const char*e=getenv("PELOAD_FS_METACACHE"); g_mc_on=!(e && !atoi(e)); }
+    if(!g_mc_on || disp!=3 || (acc&~(0x80u|0x08u|0x20000u|0x100000u)) || (fl&0x04000000) || strlen(p)>=sizeof g_mc[0].p) return -1;
+    double now=mono_s(); int fd=-1; pthread_mutex_lock(&g_mc_mx);
+    for(int i=0;i<g_mc_n;i++) if(g_mc[i].fd>=0 && !strcmp(g_mc[i].p,p)){
+        if(now-g_mc[i].t<1.0) fd=dup(g_mc[i].fd);
+        if(fd<0){ close(g_mc[i].fd); g_mc[i].fd=-1; }   // expired (or dup failed): reopen below
+        break; }
+    pthread_mutex_unlock(&g_mc_mx); return fd; }
+static void metaopen_keep(const char*p,int fd){   // a fresh metadata open: keep a dup of it for the next ones
+    if(!g_mc_on || fd<0 || strlen(p)>=sizeof g_mc[0].p) return; int k=dup(fd); if(k<0) return;
+    pthread_mutex_lock(&g_mc_mx); int i=0; for(;i<g_mc_n;i++) if(!strcmp(g_mc[i].p,p)) break;
+    if(i==g_mc_n){ if(g_mc_n<16) i=g_mc_n++; else { i=g_mc_next; g_mc_next=(g_mc_next+1)%16; } }
+    if(g_mc[i].fd>0) close(g_mc[i].fd);   // (the path's old descriptor, or the one of the path it replaces; unused slots hold 0, released ones -1)
+    snprintf(g_mc[i].p,sizeof g_mc[i].p,"%s",p); g_mc[i].fd=k; g_mc[i].t=mono_s(); pthread_mutex_unlock(&g_mc_mx); }
 static void*  MSABI i_CreateFileW(const uint16_t *w,uint32_t acc,uint32_t share,void*sec,uint32_t disp,uint32_t fl,void*tmpl){
-    (void)share;(void)sec;(void)fl;(void)tmpl; char p[2048]; win2unix(w,p,sizeof p);
-    if(__builtin_expect(g_mainfs!=0,0)){ if(g_mainfs<0) g_mainfs=getenv("PELOAD_MAINFS_LOG")?1:0; if(g_mainfs && g_engine_thr && pthread_equal(pthread_self(),g_engine_thr)) mainfs_note(p); }
+    char p[2048];
+    if(__builtin_expect(g_mainfs!=0,0)){ if(g_mainfs<0) g_mainfs=getenv("PELOAD_MAINFS_LOG")?1:0;
+        if(g_mainfs && g_engine_thr && pthread_equal(pthread_self(),g_engine_thr)){ double t0=mono_s(); win2unix(w,p,sizeof p); void*h=i_CreateFileW_body(w,p,acc,share,sec,disp,fl,tmpl);
+            mainfs_note(p,acc,disp,fl,(uint64_t)(uintptr_t)__builtin_return_address(0),(mono_s()-t0)*1e6); return h; } }
+    win2unix(w,p,sizeof p);
+    return i_CreateFileW_body(w,p,acc,share,sec,disp,fl,tmpl); }
+static void* i_CreateFileW_body(const uint16_t *w,char*p,uint32_t acc,uint32_t share,void*sec,uint32_t disp,uint32_t fl,void*tmpl){
+    (void)share;(void)sec;(void)fl;(void)tmpl;
     { char nn[1024]; int i=0; for(; w&&w[i]&&i<1023;i++) nn[i]=(char)(w[i]<128?w[i]:'?'); nn[i]=0;
       if(pipe_name_is(nn)) return pipe_client_open(nn); }
     if((!w||!w[0])){
@@ -10243,9 +10276,9 @@ static void*  MSABI i_CreateFileW(const uint16_t *w,uint32_t acc,uint32_t share,
         // The engine clones an uninitialized global path -> File::open("") (the
         // playlist path, unset for this experiment). Redirect to a staged valid
         // playlist so the Guardian rotation parses; else an empty file.
-        if(!getenv("PELOAD_NO_EMPTY_FIX")){ if(g_playlist[0]&&access(g_playlist,R_OK)==0) snprintf(p,sizeof p,"%s",g_playlist); else snprintf(p,sizeof p,"/dev/null"); }
+        if(!getenv("PELOAD_NO_EMPTY_FIX")){ if(g_playlist[0]&&access(g_playlist,R_OK)==0) snprintf(p,2048,"%s",g_playlist); else snprintf(p,2048,"/dev/null"); }
     }
-    if(acc&0x80000000) font_subst(p,sizeof p);    // read opens only
+    if(acc&0x80000000) font_subst(p,2048);    // read opens only
     // write access: GENERIC_WRITE, GENERIC_ALL, FILE_WRITE_DATA or FILE_APPEND_DATA. Rust's OpenOptions::append(true)
     // asks for FILE_GENERIC_WRITE & ~FILE_WRITE_DATA (0x120114): append-only = O_APPEND. Only GENERIC_WRITE used to
     // count, so every append-mode file (client.log, the dedicated server's server.log) opened read-only and its
@@ -10261,9 +10294,11 @@ static void*  MSABI i_CreateFileW(const uint16_t *w,uint32_t acc,uint32_t share,
         case 5: flags|=O_TRUNC;         break;      // TRUNCATE_EXISTING
         default: break;                              // 3 OPEN_EXISTING
     }
+    { int mfd=metaopen_fd(p,acc,disp,fl); if(mfd>=0){ fd_record(mfd,p); g_lasterr=0; return (void*)(intptr_t)(0x1000+mfd); } }
     // directories: open O_RDONLY (BACKUP_SEMANTICS 0x02000000 or trailing slash)
     struct stat pst; if((fl&0x02000000) || (stat(p,&pst)==0 && S_ISDIR(pst.st_mode))) flags=O_RDONLY;
     int fd=open(p, flags, 0644);
+    if(fd>=0 && disp==3 && !(acc&~(0x80u|0x08u|0x20000u|0x100000u)) && !(fl&0x04000000)) metaopen_keep(p,fd);
     if(fd<0 && (flags&O_CREAT) && errno==ENOENT){ mkparents(p); fd=open(p, flags, 0644); } // scratch mirror
     if(getenv("PELOAD_TRACE_FS")){ char hd[48]; snprintf(hd,sizeof hd,"  [CFW pid=%d disp=%u acc=0x%x] ",getpid(),disp,acc); ws(hd); ws(p); ws(fd<0?"  FAIL\n":"  ok\n"); }
     if(fd<0){ g_lasterr=win_err(); snprintf(t_lastfail,sizeof t_lastfail,"CFW:%s",p[0]?p:"<empty>");
@@ -10272,7 +10307,12 @@ static void*  MSABI i_CreateFileW(const uint16_t *w,uint32_t acc,uint32_t share,
             for(int i=0;i<800 && shown<8;i++){ uint64_t v=sp[i]; if(v>=0x140001000ULL&&v<0x141aae000ULL){ char t[32]; snprintf(t,sizeof t," +0x%llx",(unsigned long long)(v-0x140000000ULL)); ws(t); shown++; } }
             ws("\n"); }
         return (void*)-1; } g_lasterr=0; // INVALID_HANDLE_VALUE
-    fd_record(fd,p); hb_note_map(p);   // hitbox.c: remembers opened .map files (collision models for PELOAD_HITBOXES)
+    // hitbox.c: remembers opened .map files (collision models for PELOAD_HITBOXES, the map being played) -- opens that can
+    // read data only: the client asks for 005_intro.map's metadata (access 0, std::fs::metadata) thousands of times a
+    // second on the engine thread, and hb_note_map re-opened the file and shifted its 32-path list each time (~23 us per
+    // CreateFileW). PELOAD_NOTEMAP_ALL=1 = every open, as before.
+    if(g_notemap_all<0) g_notemap_all=getenv("PELOAD_NOTEMAP_ALL")?1:0;
+    fd_record(fd,p); if(g_notemap_all>0 || (acc&(0x80000000u|0x10000000u|0x1u))) hb_note_map(p);
     if(fl&0x04000000) g_fddel[fd<MAXFD?fd:0]=1; // FILE_FLAG_DELETE_ON_CLOSE
     return (void*)(intptr_t)(0x1000+fd);
 }
@@ -12225,6 +12265,12 @@ static void bink_selftest(void){
 // frame hook, which runs on that thread (a thread can only set its own class); 0 = back to QOS_CLASS_DEFAULT.
 volatile int g_guest_qos=-1;
 int ab_qos(int set){ if(set>=0) g_guest_qos=set; return g_guest_qos>0; }
+// PELOAD_AB=new:<secs> -- every engine-thread change of 2026-10-25 at once, "on" = all of them, "off" = the old behaviour of
+// each: the metadata-open cache (g_mc_on), map bookkeeping for data opens only (g_notemap_all), the QueryPerformanceCounter
+// leaf (fastcall.c FC_CLOCK; needs PELOAD_FASTCALL with clock), the unchanged-matrix skip (xaudio.c g_xa_matskip) and the
+// engine thread's QoS. Starts "on".
+extern volatile int g_xa_matskip; extern volatile int g_fastcall; int ab_fastcall_clock(int set);
+int ab_new(int set){ if(set<0) return g_mc_on>0; g_mc_on=set; g_notemap_all=!set; g_xa_matskip=set; ab_fastcall_clock(set); ab_qos(set); return set; }
 static void guest_qos_tick(void){ static int applied=-1;
     if(g_guest_qos<0){ const char*e=getenv("PELOAD_GUEST_QOS"); g_guest_qos=e&&atoi(e)?1:0; }
     int want=g_guest_qos>0; if(want==applied) return;

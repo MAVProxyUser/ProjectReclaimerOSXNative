@@ -83,14 +83,17 @@ static int MSABI xv_SetVolume(XAVoice*v,float vol,uint32_t op){ (void)op; v->vol
 static void MSABI xv_GetVolume(XAVoice*v,float*p){ if(p)*p=v->vol; }
 static int MSABI xv_SetChannelVolumes(XAVoice*v,uint32_t n,const float*c,uint32_t op){ (void)op; if(c) for(uint32_t i=0;i<n&&i<XA_MAXCH;i++) v->chvol[i]=c[i]; return 0; }
 static void MSABI xv_GetChannelVolumes(XAVoice*v,uint32_t n,float*c){ if(c) for(uint32_t i=0;i<n;i++) c[i]=i<XA_MAXCH?v->chvol[i]:0.0f; }
+volatile int g_xa_matskip=-1;
 static int MSABI xv_SetOutputMatrix(XAVoice*v,XAVoice*dst,uint32_t sc,uint32_t dc,const float*m,uint32_t op){ (void)op;
     if(!m||sc>XA_MAXCH||dc>XA_MAXCH) return 0;
     // the same matrix as already set: nothing to do, and no wait for the lock the mixer holds while it mixes (halo3 calls
     // this from its main thread, which sampled waiting on that lock in a 123-player game; PELOAD_XA_MATSKIP=1 turns the check on:
     // opt-in until it has run in a match). The mixer only reads matrices; a SetOutputVoices racing this check at worst delays the matrix by a call.
-    static int lk=-1; if(lk<0){ const char*e=getenv("PELOAD_XA_MATSKIP"); lk=!(e && atoi(e)); }   // opt-in until an in-match test
-    if(!lk){ int k=-1; for(int i=0;i<v->ndst && i<4;i++) if(!dst||v->dst[i]==dst){ k=i; break; }
-        if(k>=0 && v->matset[k]){ const float*o=v->mat[k]; uint32_t n=sc*dc, i=0; for(;i<n && o[i]==m[i];i++); if(i==n){ for(;i<XA_MAXCH*XA_MAXCH && o[i]==0.0f;i++); if(i==XA_MAXCH*XA_MAXCH) return 0; } } }
+    if(g_xa_matskip<0){ const char*e=getenv("PELOAD_XA_MATSKIP"); g_xa_matskip=e && atoi(e)?1:0; }   // opt-in until an in-match test (PELOAD_AB=new flips it)
+    if(g_xa_matskip>0){ static uint64_t calls, skipped; static double last; calls++;   // (every 30 s: how often the check saves the lock)
+        { double now=mono_s(); if(!last) last=now; if(now-last>=30.0){ char t[120]; int q=snprintf(t,sizeof t,"  [xaudio] SetOutputMatrix: %llu calls in %.0f s, %llu unchanged (no lock)\n",(unsigned long long)calls,now-last,(unsigned long long)skipped); (void)!write(2,t,q); calls=skipped=0; last=now; } }
+        int k=-1; for(int i=0;i<v->ndst && i<4;i++) if(!dst||v->dst[i]==dst){ k=i; break; }
+        if(k>=0 && v->matset[k]){ const float*o=v->mat[k]; uint32_t n=sc*dc, i=0; for(;i<n && o[i]==m[i];i++); if(i==n){ for(;i<XA_MAXCH*XA_MAXCH && o[i]==0.0f;i++); if(i==XA_MAXCH*XA_MAXCH){ skipped++; return 0; } } } }
     pthread_mutex_lock(&g_xamx);
     int k=-1; for(int i=0;i<v->ndst;i++) if(!dst||v->dst[i]==dst){ k=i; break; }
     if(k>=0){ memset(v->mat[k],0,sizeof v->mat[k]); for(uint32_t d=0;d<dc;d++) for(uint32_t s=0;s<sc;s++) v->mat[k][d*sc+s]=m[d*sc+s]; v->matset[k]=1; }

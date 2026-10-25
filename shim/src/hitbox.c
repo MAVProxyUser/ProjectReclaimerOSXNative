@@ -300,6 +300,8 @@ static char g_hb_mappaths[HB_NPATHS][1024]; static int g_hb_nmappaths; static pt
 static void hb_note_map(const char*p){     // CreateFileW: remember the scenario maps the game opens (newest first)
     if(!p) return; size_t n=strlen(p); if(n<5 || strcasecmp(p+n-4,".map")) return;   // always: F2 can enable the overlay later
     const char*b=strrchr(p,'/'); b=b?b+1:p; if(!strcasecmp(b,"shared.map") || !strcasecmp(b,"campaign.map")) return;
+    // already the newest: nothing to do (no header read, no list shift -- a map the game keeps opening)
+    { pthread_mutex_lock(&g_hb_mapmx); int top=g_hb_nmappaths>0 && !strcmp(g_hb_mappaths[0],p); pthread_mutex_unlock(&g_hb_mapmx); if(top) return; }
     // only real Halo 3 cache maps (header "daeh", version 13): the engine also writes its autosaves as .map files
     // (ReclaimerCache/Temp/.../native-data/autosave/asq<hex>.map), and enough of those used to push the map being played
     // out of this list -- the stats page then named the map after an autosave and found no picture for it

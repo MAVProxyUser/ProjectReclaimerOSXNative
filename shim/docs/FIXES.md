@@ -1944,6 +1944,23 @@ Numbers are from the commit messages; PERF-PLAN.md has the measurements. Compare
   where there is a switch: qos, cow, fastcall) before any becomes a default. shim/tools/callcost.sh does not build any more
   (the heap block it cuts out of peload.c now needs the heap tracker): xcallbench.c measures the call costs on its own.
 
+- **The client's metadata queries on the engine thread: 23 -> 1.1 us each** (2026-10-25; found with PELOAD_MAINFS_LOG) —
+  peload.c `i_CreateFileW` / `i_CreateFileW_body` (split so the log can time it), `metaopen_fd` / `metaopen_keep`, hitbox.c
+  `hb_note_map`. Why: the client calls std::fs::metadata on halo3/maps/005_intro.map 3,100-9,500 times a second on halo3's
+  engine thread (exe+0x1fe7916; CreateFileW access 0, OPEN_EXISTING, BACKUP_SEMANTICS), and each cost ~23 us: open()+close()
+  of that path ~8.5 us under Rosetta, and hb_note_map re-opened the file to check its header and shifted its 32 x 1 KB path
+  list on every call -- 7-22% of the engine thread. How: (1) hb_note_map only for opens that can read data (an access-0 query
+  can't load a map; it also kept a campaign map at the top of "maps the game opened"), and returns at once for the newest
+  path (PELOAD_NOTEMAP_ALL=1 = every open, as before); (2) metadata opens (OPEN_EXISTING, no data access, not
+  delete-on-close) of a path asked for within the last second get a dup() of one descriptor kept per path (16 paths): a real
+  handle on the same file, fstat / GetFileInformationByHandle stay live; the kept descriptor is reopened after 1 s
+  (PELOAD_FS_METACACHE=0 = always open). Measured in a local match: 23.4 -> 12.5 (1) -> 1.1 us (2) per query, path
+  translation included; the game unchanged (spawns, items, match time = wall time). Both ON by default.
+- **PELOAD_AB=new** (2026-10-25; user: "benchmarks must be vs something meaningful: join the largest game you can, then
+  back down to smaller ones") — peload.c `ab_new`, d3dsubmit.c sub_switch feature 13: flips every engine-thread change of the
+  day together (metadata cache, data-opens-only map notes, the QPC leaf, the matrix skip, the engine thread's QoS) so one
+  public match measures before vs after phase by phase.
+
 ## 20. Scripts and RE tools
 
 - **PELOAD_BP=<dll>+<rva>** (2026-10-21) — `bp_install_mod` (load_guest, before the DLL's DllMain), `bp_plant`: the software

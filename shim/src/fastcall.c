@@ -204,3 +204,5 @@ static void* fc_bind(void*f){
     return f; }
 // PELOAD_AB=fastcall (d3dsubmit.c sub_switch): -1 = is it on; 0/1 = every configured fast path off / on
 int ab_fastcall(int set){ if(set<0) return g_fastcall!=0; g_fastcall=set&&g_fc_mask>0?g_fc_mask:0; return g_fastcall!=0; }
+// PELOAD_AB=new (peload.c ab_new): the clock part alone
+int ab_fastcall_clock(int set){ if(g_fc_mask>0 && (g_fc_mask&FC_CLOCK)){ if(set) g_fastcall|=FC_CLOCK; else g_fastcall&=~FC_CLOCK; } return (g_fastcall&FC_CLOCK)!=0; }
