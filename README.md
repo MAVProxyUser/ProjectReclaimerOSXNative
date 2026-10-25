@@ -544,6 +544,28 @@ shadow caster draws again into the shadow maps), Level of detail, Draw distance,
 draws per frame next to the frame rate. A 60 Hz display caps what reaches the screen; the title shows the engine's own
 rate beside it. Details and every measurement: `shim/docs/PERF-PLAN.md`.
 
+### Responsiveness: input to screen, and the per-second log
+
+How long a mouse or stick turn takes to show on the screen is measured live (2026-10-25, 60 Hz display, medians):
+
+| game | frame rate | input -> halo3 presents the frame | -> GPU done | -> in the window | -> on screen |
+|---|---|---|---|---|---|
+| Valhalla, alone | ~207 fps | 18 ms | 23 ms | 24 ms | **48 ms** |
+| The Pit, 41 players | ~104 fps | | | | **54 ms** |
+| HugeGrass hangar, ~6,000 draws | ~36 fps | 46 ms | 79 ms | 79 ms | **~104 ms** |
+
+The last step is a model: the display shows a window's new frame at its next refresh plus one refresh for macOS's window
+compositing (~25 ms at 60 Hz). Three fixes from the same day are in these numbers: the window got at most ~27 new frames a
+second whatever the title said (now every frame), the GL helper waited for the GPU at every frame's luminance readback
+(HugeGrass +45%), and one frame instead of two may wait for the GPU (~35 ms less).
+
+- The stats page's header shows it live: engine fps and the new frames the window got, frame time (median / 95th
+  percentile), draws, objects in view, input -> screen.
+- Every second also goes to `~/Library/Application Support/ReclaimerMac/perf/<date>_<time>_<pid>.csv` (fps, window fps,
+  frame times, draws, objects by type and in view, players, map, quality, each stage's delay, input -> screen; the 30
+  newest are kept) -- open it in Numbers or Excel to see what slowed a game down.
+- `python3 shim/tools/latency-summary.py /tmp/reclaimer_play.log` prints the stage medians of a game's log.
+
 The window opens at the largest 16:9 size that fits your screen (`PELOAD_WIN_SIZE=1280x720` picks a size), can be
 resized, and can go full screen (green button or Ctrl-Cmd-F). Developer and diagnostic switches are documented in
 `CLAUDE.md` and in the source.
