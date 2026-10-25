@@ -269,7 +269,7 @@ sockets; `game`: halo3's own message types, only when the stats page's "halo3 me
 by). A `{"t":..,"lost":n}` line = records overwritten in the ring before they were summed (a very busy second).
 ```json
 {"layer":"wire","dir":"tx","type":"quic-1rtt","n":78,"bytes":5074,"t0":1792890001.004,"t1":1792890001.990,"peer":"127.0.0.1:49190"}
-{"layer":"game","dir":"rx","type":"membership-update","n":1,"bytes":0,"t0":1792890001.512,"t1":1792890001.512}
+{"layer":"game","dir":"rx","type":"membership-update","n":1,"bytes":0,"t0":1792890001.512,"t1":1792890001.512,"peer":"host","peer_id":"8f3c0e5a1d6b7290","via":"channel","peer_no":0}
 ```
 Wire types, read from the datagram's first bytes without decrypting anything: `quic-initial` / `quic-0-rtt` /
 `quic-handshake` / `quic-retry` (a QUIC long header, RFC 9000 17.2; another version adds `v<hex>`, QUIC v2 is `quic2-*`),
@@ -279,7 +279,11 @@ plaintext four-character tag: hole punching, relays), `tcp-connect` / `tcp-close
 it sets it at random, RFC 9000 17.4) and `greased` (the fixed bit is 0: both ends offered grease_quic_bit, RFC 9287, as
 the client's QUIC library does). Game types are halo3's message names (46: ping, connect-request, join-request,
 membership-update, player-add, time-synchronize, view-establishment, ...), counted as halo3 encodes one to send it
-(`tx`) or decodes one it received (`rx`), without a peer: halo3 knows the peer only deeper down.
+(`tx`) or decodes one it received (`rx`), per session peer: `peer` = the player's name (`host` = a host without a player,
+such as a dedicated server; `peer N` = a peer without a player yet; `peer <id>` = an id the session no longer had when the
+line was written), `peer_id` = halo3's session peer id (the same id as the roster's and the voice packets'), `peer_no` =
+its session peer index, `via` = `gateway` (connectionless messages: connect, join, ping) or `channel` (a connected
+peer's). How the peer is found: pktlog.c "the peer of a halo3 message".
 
 ### session.json
 

@@ -1680,6 +1680,26 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   `[class][message id 4][fragment index][fragment count]` + the whole 36-byte internal header (kind tag 4, session value 16,
   sender / recipient endpoint ids 8 + 8) = 43 bytes per datagram; 0.9.23 sends `[kind code | flags][class]` and adds the ids
   (16) or the fragment fields (6) only when needed. Measured with the packet log: ~31 / ~36 bytes less per datagram on average.
+- **Packet log: each halo3 message's peer** (2026-10-24; user: "proper" -- the per-peer answer over "the type only") —
+  pktlog.c `pkc_install` / `pkc_hook` / `pk_ctx` / `pkc_peer`, `pk_game_ev` (now takes the entry rsp), `pkn_refresh` /
+  `pkn_name` / `pk_peer_json`. Why: the message table's encode / decode functions get only (bitstream, size, data), so game
+  rows had a direction but no peer. How: encode_message (halo3+0x5cd84) and decode_message (+0x5ce3c) have exactly five
+  callers -- the gateway's connectionless send / receive (halo3+0x249dc / +0x24900; rdx -> the address, whose first 8 bytes
+  are the session peer id) and a channel's send / receive / reply (+0x5f0b0 / +0x5f2f0 / +0x5efa8; rcx = the channel,
+  +0x110 = the remote peer's id, found by searching the live channel object for the session's peer ids on both a client and
+  our server). Entry hooks on the five (14-byte `jmp [rip+0]`, prologues checked, the dispatcher calls checked) note (rcx, rdx,
+  entry rsp) per kind and thread; a message takes the note of the call whose dispatcher call is on its stack (the table
+  function's entry rsp + 0x30 = the dispatcher's return address: both keep 0x28 bytes) when that call is still running (its
+  entry rsp above that slot -- a note left by a returned call, nested ones included, is ignored). The record stores the
+  id (fam PK_FAM_PEER); the readers name it from the session (player name, "host", "you", "peer N"; ids stay named after
+  the session ends). JSON: peer, peer_id, peer_no, via (gateway / channel). The five hooks stay in once the game layer was
+  on (each call notes three values). Old behaviour: `PELOAD_PKTLOG_NOPEER=1`. Debug: `PELOAD_PKTLOG_CALLERS=1` prints each
+  type's first callers and peers.
+- **Packet log window empty with 1-RTT hidden** (2026-10-24) — pktlog.c `pk_json` (skip1rtt=1, wire=0, game=0), stats page
+  `pollPk`. Why: the page asked for the newest 600 records and filtered them itself; on a connected client those are all
+  1-RTT datagrams (~160 a second), so with "1-RTT in the log" off the log stayed empty. How: the filters run in pk_json,
+  which walks back from the newest record and returns the newest 600 that pass. Old behaviour: none (the page's filter
+  still runs too).
 - **Privacy: who sees your IP address** (2026-10-24) — README "Who sees your IP address": a joined client has one QUIC peer,
   the server (voice relayed); other players never get your address; the server, its admins, every server the browser queries
   and the community services do; hosting publishes it.

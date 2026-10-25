@@ -374,8 +374,10 @@ beside the death heatmap with the player details under it (right); Connected; th
   connects and closes. A table sums the last 10 s per type and peer (packets and bytes a second); the log beside it lists
   them newest first, repeats folded into one line (connected 1-RTT traffic only with its checkbox: it is dozens a second).
   **halo3 message types** (off by default) adds halo3's own network messages by name -- connect-request, join-request,
-  membership-update, player-add, time-synchronize ... -- as halo3 sends and receives them, counted in a second table (it
-  wraps halo3's message table: data, no code; switching it off restores the table). Cost: about 26 ns per datagram
+  membership-update, player-add, time-synchronize ... -- as halo3 sends and receives them, with the session peer each one
+  goes to or came from (the player's name; "host" for a host without a player, such as a dedicated server), counted in a
+  second table (it wraps halo3's message table, and five small hooks on halo3's message senders / receivers note the peer;
+  switching it off restores the table). Cost: about 26 ns per datagram
   (`PELOAD_PKTLOG_BENCH=1` measures it); `PELOAD_PKTLOG=0` turns it off. The forensic archive keeps per-second sums
   (`packets.jsonl`, shim/docs/forensics.md).
 

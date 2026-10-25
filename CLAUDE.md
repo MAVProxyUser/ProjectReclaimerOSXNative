@@ -293,7 +293,11 @@ signatures are per-point lists g_sig_<point> (first that matches once AND passes
 Packet log (2026-10-24, shim/src/pktlog.c): the TYPE of every UDP datagram / TCP connection (never content; QUIC long/short
 header types + flags from the unencrypted bits) in a 16384-record ring -> GET /packets.json, the stats page's Packets window,
 forensic packets.jsonl (per-second sums); opt-in game layer = halo3's message types by name (its message table halo3+0x46b6e98:
-46 x 0x40 entries, +0x20 encode / +0x28 decode pointers wrapped by thunks; data only). 26 ns per datagram. PELOAD_PKTLOG=0 off.
+46 x 0x40 entries, +0x20 encode / +0x28 decode pointers wrapped by thunks) with each message's session peer: entry hooks on the
+dispatchers' five callers (gateway send/recv halo3+0x249dc/0x24900: rdx -> address, +0 = peer id; channel send/recv/reply
+0x5f0b0/0x5f2f0/0x5efa8: rcx = channel, +0x110 = remote peer id), matched by the dispatcher's return address at the table
+function's entry rsp+0x30 (PELOAD_PKTLOG_NOPEER=1 = no peers). 26 ns per datagram. PELOAD_PKTLOG=0 off. ?skip1rtt=1&wire=0&game=0
+filter the list server-side.
 Bink (same day): halo3's bink2w64.dll delay slots are left to halo3's own delay loader (the client checks they still hold their
 thunks before installing its mod-movie path; PELOAD_BINK_EAGER=1 = old), and halo3's 4 video shaders are compiled by MCC's
 real D3DCompiler_47.dll from the MCC root (PELOAD_REAL_D3DCOMPILE=0 = old placeholders). XAudio2's 4 delay slots are left lazy too

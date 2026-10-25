@@ -169,8 +169,16 @@ if(new URLSearchParams(location.search).get('demo')==='1'){
     const s=j.session||{}; s.host_id=id(s.host_id); s.self_id=id(s.self_id); fakeSpawns(j); return j; };
   const T=[[/^\/forensics\/sessions\.json$/,j=>(j.dir='~/Library/Application Support/ReclaimerMac/forensics',j)],[/^\/forensics\/[^/]+\/index\.json$/,index],
    [/^\/forensics\/[^/]+\/utt\/\d+\.json$/,j=>((j.packets||[]).forEach(q=>{ q.id=id(q.id); }),j)]];
+  // packets.jsonl (text, one JSON object a line): a game line's peer is a player name (generic labels such as "host" / "peer 3"
+  // stay), its session peer id fake hex; a wire line's address is moved to a documentation range unless it is a loopback one
+  const GEN=/^(host|you|peer [0-9a-f]+)$/, ipf=new Map(), ipT=v=>{ let f=ipf.get(v); if(!f){ f='203.0.113.'+(10+ipf.size); ipf.set(v,f); } return f; };
+  const pkT=x=>{ if(x.peer_id){ if(!GEN.test(x.peer)) x.peer=nm(x.peer); x.peer_id=id(x.peer_id); }
+    else if(x.peer){ const m=String(x.peer).match(/^\[?([0-9a-fA-F.:]+?)\]?:(\d+)$/); if(m && !/^(127\.|::1$)/.test(m[1])) x.peer=ipT(m[1])+':'+m[2]; } return x; };
   const of=window.fetch.bind(window);
-  window.fetch=async(u,o)=>{ const r=await of(u,o), p=new URL(String(u),location.href).pathname, f=(T.find(([rx])=>rx.test(p))||[])[1]; if(!f||!r.ok) return r;
+  window.fetch=async(u,o)=>{ const r=await of(u,o), p=new URL(String(u),location.href).pathname;
+    if(/\/packets\.jsonl$/.test(p) && r.ok){ const t=(await r.text()).split('\n').map(l=>{ if(!l) return l; try{ return JSON.stringify(pkT(JSON.parse(l))); }catch(e){ return l; } }).join('\n');
+      return new Response(t,{status:r.status,headers:{'Content-Type':'text/plain'}}); }
+    const f=(T.find(([rx])=>rx.test(p))||[])[1]; if(!f||!r.ok) return r;
     return new Response(JSON.stringify(f(await r.json())),{status:r.status,headers:{'Content-Type':'application/json'}}); };
 }
 // ==== end of demo mode ====
@@ -279,12 +287,12 @@ function renderPackets(){
   const w=$('#pk_w').checked, g=$('#pk_g').checked, rows=PK.filter(x=>x.type&&(x.layer==='game'?g:w)), lost=PK.reduce((n,x)=>n+(x.lost||0),0);
   if(!PK.length){ $('#pkt').innerHTML='<span class="note">no packet records in this session (older sessions have none; menu time is not archived)</span>'; const c=$('#pkc'); c.getContext('2d').clearRect(0,0,c.width,c.height); return; }
   const tot=new Map(); for(const x of rows){ const k=[x.layer,x.dir,x.type,x.peer||''].join('|'); let a=tot.get(k);
-    if(!a) tot.set(k,a={layer:x.layer,dir:x.dir,type:x.type,peer:x.peer||'',host:x.host||'',n:0,bytes:0,t0:x.t0,t1:x.t1});
+    if(!a) tot.set(k,a={layer:x.layer,dir:x.dir,type:x.type,peer:x.peer||'',host:x.host||'',pid:x.peer_id||'',n:0,bytes:0,t0:x.t0,t1:x.t1});
     a.n+=x.n; a.bytes+=x.bytes; a.t0=Math.min(a.t0,x.t0); a.t1=Math.max(a.t1,x.t1); }
   const fb=n=>n>=1048576?(n/1048576).toFixed(1)+' MB':n>=1024?(n/1024).toFixed(1)+' KB':n+' B';
   const list=[...tot.values()].sort((a,b)=>b.n-a.n);
   $('#pkt').innerHTML=`<table class="pkt"><thead><tr><th>layer</th><th>dir</th><th>type</th><th>peer</th><th style="text-align:right">count</th><th style="text-align:right">bytes</th><th>first</th><th>last</th></tr></thead><tbody>${
-    list.map(a=>`<tr><td>${esc(a.layer)}</td><td>${a.dir==='rx'?'&larr; rx':'tx &rarr;'}</td><td class="mono">${esc(a.type)}</td><td class="mono">${esc(a.peer||'-')}${a.host?' <span class="note" style="margin:0">'+esc(a.host)+'</span>':''}</td><td style="text-align:right">${a.n}</td><td style="text-align:right">${a.layer==='game'?'':fb(a.bytes)}</td><td>${esc(fT(a.t0))}</td><td>${esc(fT(a.t1))}</td></tr>`).join('')
+    list.map(a=>`<tr><td>${esc(a.layer)}</td><td>${a.dir==='rx'?'&larr; rx':'tx &rarr;'}</td><td class="mono">${esc(a.type)}</td><td class="mono"${a.pid?` title="halo3 session peer id ${esc(a.pid)}"`:''}>${esc(a.peer||'-')}${a.host?' <span class="note" style="margin:0">'+esc(a.host)+'</span>':''}</td><td style="text-align:right">${a.n}</td><td style="text-align:right">${a.layer==='game'?'':fb(a.bytes)}</td><td>${esc(fT(a.t0))}</td><td>${esc(fT(a.t1))}</td></tr>`).join('')
   }</tbody></table>${lost?`<div class="note err">${lost} records were overwritten before they were summed (a very busy second)</div>`:''}`;
   // per second: datagrams sent (orange, up) and received (green, down) on the wire, halo3 messages as blue ticks
   const c=$('#pkc'), W=c.clientWidth||600; c.width=W; const H=c.height, x2=c.getContext('2d'); x2.clearRect(0,0,W,H);
