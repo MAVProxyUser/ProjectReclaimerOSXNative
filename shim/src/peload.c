@@ -1128,6 +1128,9 @@ typedef struct { void** vtbl; uint32_t kind; uint32_t rowpitch; uint64_t size; v
     volatile int refs; uint8_t keep, dead, pstage; uint32_t pframe; void* pnext;   // pstage 1 released, 2 seen unbound at frame pframe
     uint64_t pqpos;               // GL submission queue position when it was seen unbound: freed only after the GL thread passed it
     void* dxsurf;                 // 2D texture: its IDXGISurface interface (DxSurf), made by the first QueryInterface for it
+    // small GPU->staging copies read back asynchronously (GL helper; rb_*): pixel buffer, mailbox slot (+1; 0 none), the
+    // newest readback's ticket and where its rows go; rbpend = data not in the CPU copy yet
+    unsigned rbpbo; uint32_t rbpbosz; int16_t rbslot1; volatile int rbpend; uint64_t rbticket; uint32_t rb_dx, rb_dy, rb_sw, rb_sh, rb_bpp;
 } D3DObj;
 // ID3D11DeviceChild private data: halo3 stashes the VS bytecode-blob pointer on the shader object
 // (SetPrivateData with GUID g_180801e00) and reads it back for CreateInputLayout. Our old no-op
@@ -1823,9 +1826,10 @@ static void d3d_dirty_sub(D3DObj*o,uint32_t sub){ uint8_t s8=sub>255?255:(uint8_
     if(!o->gl_dirty){ o->dpart=1; o->dmin=s8; } else if(o->dpart && s8<o->dmin) o->dmin=s8;
     o->gl_dirty=1; }
 static void smallrb_trace(const char*what,D3DObj*dst,D3DObj*src,uint32_t type);   // (PELOAD_TRACE_SMALLRB, by the copies)
+static void rb_complete(D3DObj*o);   // fwd (asynchronous staging readbacks, by d3dgl_gpu_copy_impl)
 static int  MSABI ctxi_Map(void*t,void*res,uint32_t sub,uint32_t type,uint32_t fl,void*pM){ (void)t;(void)sub;(void)type;(void)fl; if(res && ((D3DObj*)res)->cs_gpu) cs_gpu_readback((D3DObj*)res,"Map");
     g_fs.maps++; if(type==1||type==3) g_fs.mapread++;
-    cs_wait_res((D3DObj*)res);
+    cs_wait_res((D3DObj*)res); rb_complete((D3DObj*)res);   // (a staging texture read back asynchronously: its pixels in now)
     // PELOAD_TRACE_MAPREAD=1: every READ / READ_WRITE map (buffers too): kind, size, format, the first values, the caller
     if((type==1||type==3) && res && GENV1("PELOAD_TRACE_MAPREAD")){ D3DObj*q=res; static unsigned long nm; nm++; if(nm<=300 || !(nm%500)){
         extern uint64_t g_map_guest_ra; uint64_t ra=g_map_guest_ra; const uint8_t*b=(const uint8_t*)q->data; char m[400];
@@ -1955,13 +1959,13 @@ static void smallrb_trace(const char*what,D3DObj*dst,D3DObj*src,uint32_t type){ 
     m[k++]='\n'; (void)!write(2,m,k); }
 static int d3dgl_gpu_copy(D3DObj*dst,D3DObj*src,uint32_t sx,uint32_t sy,uint32_t sw,uint32_t sh,uint32_t dx,uint32_t dy); // fwd (impl after the GL table)
 static int gpu_copy_src_ok(D3DObj*src);   // fwd
-static void MSABI ctxi_CopyResource(void*t,void*dst,void*src){ (void)t; D3DObj*a=dst,*b=src; g_fs.copies++; smallrb_trace("CopyResource",a,b,0); cs_wait_res(a); cs_wait_res(b); if(a&&a->cs_gpu) cs_gpu_readback(a,"CopyResource"); if(b&&b->cs_gpu) cs_gpu_readback(b,"CopyResource"); copy_trace("CopyResource",a,b); if(a) a->ver++;
+static void MSABI ctxi_CopyResource(void*t,void*dst,void*src){ (void)t; D3DObj*a=dst,*b=src; g_fs.copies++; smallrb_trace("CopyResource",a,b,0); cs_wait_res(a); cs_wait_res(b); rb_complete(b); if(a&&a->cs_gpu) cs_gpu_readback(a,"CopyResource"); if(b&&b->cs_gpu) cs_gpu_readback(b,"CopyResource"); copy_trace("CopyResource",a,b); if(a) a->ver++;
     if(a&&b&&d3dgl_gpu_copy(a,b,0,0,b->w>4096?4096:b->w,b->h>4096?4096:b->h,0,0)) return; if(a&&b&&a->data&&b->data){ uint64_t n=a->size<b->size?a->size:b->size; memcpy(a->data,b->data,n); if(a){ a->gl_dirty=1; a->dpart=0; }
     if(getenv("PELOAD_TRACE_TEXPATH") && a->w>=512 && ((a->fmt>=70&&a->fmt<=84)||(a->fmt>=94&&a->fmt<=99))){ char m[128]; int k=snprintf(m,sizeof m,"  [texpath] COPYRES dst%ux%u f%u <- src%ux%u (%lluB)\n",a->w,a->h,a->fmt,b->w,b->h,(unsigned long long)n); (void)!write(2,m,k);} } }
 // CopySubresourceRegion(dst,dstSub,dstX,dstY,dstZ,src,srcSub,pSrcBox). Was a no-op -> 12k/frame copies
 // (texture staging / composite steps) were dropped. Implement the CPU copy (full or box region).
 static void MSABI ctxi_CopySubresourceRegion(void*t,void*dstR,uint32_t dstSub,uint32_t dstX,uint32_t dstY,uint32_t dstZ,void*srcR,uint32_t srcSub,const void*srcBox){
-    (void)t; D3DObj*dst=dstR,*src=srcR; cs_wait_res(dst); cs_wait_res(src); smallrb_trace("CopySubresourceRegion",dst,src,0);
+    (void)t; D3DObj*dst=dstR,*src=srcR; cs_wait_res(dst); cs_wait_res(src); rb_complete(src); smallrb_trace("CopySubresourceRegion",dst,src,0);
     // GPU particles: halo3 uploads new particles by copying a CPU-written staging buffer into a range of the particle buffer
     // the GPU owns -- write that range straight into its GL storage (and the CPU copy); the GPU keeps the buffer.
     if(dst && src && dst->cs_gpu && !src->cs_gpu && dst->kind==1 && src->kind==1 && !dstSub && !srcSub && dst->gltbobuf && src->data && dst->data){
@@ -5891,6 +5895,39 @@ static int d3dgl_gpu_copy(D3DObj*dst,D3DObj*src,uint32_t sx,uint32_t sy,uint32_t
     if(!d3dgl_enabled()||!gpu_copy_src_ok(src)) return 0; GLLOCK();
     if(!src->glfbo){ D3DObj*one=src; d3dgl_fbo_for(&one,1,0); }   // (its own FBO, made now)
     int r=d3dgl_gpu_copy_impl(dst,src,sx,sy,sw,sh,dx,dy); GLUNLOCK(); return r; }
+// Small GPU -> staging copies, read back asynchronously (2026-10-25). The client copies the scene's 1x1 average-luminance
+// texture into one of a ring of staging textures every frame and Map(READ)s one copied frames earlier (exe+0xbbbc6a); the
+// copy read the pixels back synchronously (glReadPixels: the GL thread waited for the helper to run everything queued and
+// the GPU to draw it) -- 34% of the GL thread in a 120-player HugeGrass match. With the GL helper the pixels now go into a
+// pixel buffer (asynchronous on the GPU), the helper copies them into the mailbox when they are ready (GLH_X_READBACK, a
+// ticket), and the CPU copy is filled when someone reads it (rb_complete: Map READ, a CPU-side copy from it) -- by then the
+// ticket is normally long done. Up to 64 staging textures of <= 16 KB, mailbox bytes from 4 MB (0..4 MB: the overlay's depth
+// readback). PELOAD_D3DGL_SYNCRB=1 = the synchronous read, as before.
+#define RB_BASE (4ull<<20)
+#define RB_SLOT (16u<<10)
+static int g_rb_nslots; volatile int g_rb_sync=-1, g_sub_drainread=-1;   // (PELOAD_AB=rb flips both: ab_rb)
+int ab_rb(int set){ if(set>=0){ g_rb_sync=!set; g_sub_drainread=!set; } return g_rb_sync==0; }
+static int rb_async(D3DObj*dst,uint32_t sx,int sy0,uint32_t sw,uint32_t sh,uint32_t dx,uint32_t dy,unsigned rf,unsigned rt,unsigned bpp){
+    if(g_rb_sync<0) g_rb_sync=getenv("PELOAD_D3DGL_SYNCRB")?1:0;
+    uint64_t nb=(uint64_t)sw*sh*bpp;
+    if(g_rb_sync || !g_glh_on || nb>RB_SLOT || !G.BindBuffer || !G.BufferData || !G.GenBuffers) return 0;
+    if(!dst->rbslot1){ if(g_rb_nslots>=64) return 0; dst->rbslot1=(int16_t)(++g_rb_nslots); }
+    if(!dst->rbpbo) G.GenBuffers(1,&dst->rbpbo); if(!dst->rbpbo) return 0;
+    G.BindBuffer(0x88EB/*PIXEL_PACK*/,dst->rbpbo);
+    if(dst->rbpbosz!=(uint32_t)nb){ G.BufferData(0x88EB,(long)nb,0,0x88E1/*STREAM_READ*/); dst->rbpbosz=(uint32_t)nb; }
+    G.ReadPixels((int)sx,sy0,(int)sw,(int)sh,rf,rt,0); G.BindBuffer(0x88EB,0);
+    dst->rb_dx=dx; dst->rb_dy=dy; dst->rb_sw=sw; dst->rb_sh=sh; dst->rb_bpp=bpp;
+    uint64_t tk=glh_rb_request_at(dst->rbpbo,nb,RB_BASE+(uint64_t)(dst->rbslot1-1)*RB_SLOT); if(!tk) return 0;
+    __atomic_store_n(&dst->rbticket,tk,__ATOMIC_RELEASE); __atomic_store_n(&dst->rbpend,1,__ATOMIC_RELEASE); return 1; }
+// the CPU copy of an asynchronously read staging texture, filled once its ticket is in (wait: until it is)
+static void rb_complete(D3DObj*o){
+    if(!o || !__atomic_load_n(&o->rbpend,__ATOMIC_ACQUIRE)) return;
+    uint64_t tk=__atomic_load_n(&o->rbticket,__ATOMIC_ACQUIRE); const uint8_t*m=0; int spins=0; double t0=0;
+    while(!(m=glh_rb_ready_at(tk,RB_BASE+(uint64_t)(o->rbslot1-1)*RB_SLOT))){ if(glh_failed()) break; if(++spins<200) sched_yield(); else { if(!t0) t0=mono_s(); usleep(20); if(mono_s()-t0>2.0) break; } }
+    if(m){ uint32_t sw=o->rb_sw, sh=o->rb_sh, bpp=o->rb_bpp; uint64_t pitch=o->rowpitch?o->rowpitch:(uint64_t)o->w*bpp;
+        for(uint32_t r=0;r<sh;r++){ uint32_t srow=g_d3dgl_flipy?r:(sh-1-r); uint64_t off=(uint64_t)(o->rb_dy+r)*pitch+(uint64_t)o->rb_dx*bpp;
+            if(off+(uint64_t)sw*bpp>o->size) break; memcpy((uint8_t*)o->data+off,m+(uint64_t)srow*sw*bpp,(size_t)sw*bpp); } }
+    if(__atomic_load_n(&o->rbticket,__ATOMIC_ACQUIRE)==tk) __atomic_store_n(&o->rbpend,0,__ATOMIC_RELEASE); }
 static int d3dgl_gpu_copy_impl(D3DObj*dst,D3DObj*src,uint32_t sx,uint32_t sy,uint32_t sw,uint32_t sh,uint32_t dx,uint32_t dy){
     if(!d3dgl_enabled()||!src||!dst||src==dst||!src->glfbo||!src->gltex||src->kind==1||dst->kind==1) return 0;
     if(!G.BlitFramebuffer||!d3dgl_ensure()) return 0;
@@ -5913,7 +5950,8 @@ static int d3dgl_gpu_copy_impl(D3DObj*dst,D3DObj*src,uint32_t sx,uint32_t sy,uin
             snprintf(pth,sizeof pth,"%s/reclaimer_bbcopy_%d.bmp",home?home:"/tmp",nd2++); bmp_write_rgba(pth,1920,1080,cb3);
             char m[200]; int k=snprintf(m,sizeof m,"  [copydump] backbuffer after GPU copy -> %s\n",pth); (void)!write(2,m,k); } } }
     unsigned rf,rt,bpp;
-    if((uint64_t)sw*sh<=65536 && dst->data && d3dgl_rt_readfmt(dst->fmt,&rf,&rt,&bpp)){
+    if((uint64_t)sw*sh<=65536 && dst->data && d3dgl_rt_readfmt(dst->fmt,&rf,&rt,&bpp) && rb_async(dst,sx,sy0,sw,sh,dx,dy,rf,rt,bpp)) { /* queued */ }
+    else if((uint64_t)sw*sh<=65536 && dst->data && d3dgl_rt_readfmt(dst->fmt,&rf,&rt,&bpp)){
         static uint8_t tmp[65536*16]; G.ReadPixels((int)sx,sy0,(int)sw,(int)sh,rf,rt,tmp);
         uint64_t pitch=dst->rowpitch?dst->rowpitch:(uint64_t)dst->w*bpp;
         for(uint32_t r=0;r<sh;r++){ uint32_t srow=g_d3dgl_flipy?r:(sh-1-r);   // GL rows come bottom-up
@@ -12291,8 +12329,13 @@ static void guest_qos_tick(void){ static int applied=-1;
     if(applied<0 && !want){ applied=0; return; }   // never set: nothing to undo
     int rc=pthread_set_qos_class_self_np(want?QOS_CLASS_USER_INTERACTIVE:QOS_CLASS_DEFAULT,0); applied=want;
     static int logged; if(logged++<4){ char m[120]; int k=snprintf(m,sizeof m,"  [qos] engine main thread -> %s%s\n",want?"user-interactive":"default",rc?" (refused)":""); (void)!write(2,m,k); } }
+// PELOAD_AB=burn:<secs> (diagnostic): while "on", the engine thread spins PELOAD_BURN_US (default 10000) at the top of every
+// frame -- does adding work to it lower the frame rate in proportion (it is the limit) or not (the limit is elsewhere)?
+volatile int g_burn_on; static double g_burn_s=-1;
+int ab_burn(int set){ if(set>=0) g_burn_on=set; return g_burn_on; }
 static void __attribute__((ms_abi)) hb_frame_hook(void){
     guest_qos_tick(); if(__builtin_expect(!g_engine_thr,0)) g_engine_thr=pthread_self();
+    if(__builtin_expect(g_burn_on,0)){ if(g_burn_s<0){ const char*e=getenv("PELOAD_BURN_US"); g_burn_s=(e?atof(e):10000)/1e6; } double t=mono_s()+g_burn_s; while(mono_s()<t) __asm__ volatile("pause"); }
     if(__builtin_expect(g_st_voice_pending,0)) st_voice_jobs();   // stats page voice mutes (stats.c)
     if(__builtin_expect(g_hb_job_pending,0)) hb_engine_jobs();
     static int bst=-1; if(__builtin_expect(bst!=0,0)){ if(bst<0) bst=getenv("PELOAD_BINK_SELFTEST")?1:0; if(bst) bink_selftest(); }

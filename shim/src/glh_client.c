@@ -212,6 +212,13 @@ static uint64_t g_glh_rb_ticket;
 static uint64_t glh_rb_request(unsigned buf,uint64_t bytes,int slot){ if(bytes>(4u<<20)) return 0;
     uint8_t*c=glh_begin(GLH_X_READBACK,40); if(!c) return 0; uint64_t*s=(uint64_t*)(c+8); uint64_t t=++g_glh_rb_ticket;
     s[0]=buf; s[1]=bytes; s[2]=(uint64_t)slot*(4u<<20); s[3]=t; glh_end(c); return t; }
+// the same at an arbitrary mailbox offset (small staging readbacks, peload.c rb_async)
+static uint64_t glh_rb_request_at(unsigned buf,uint64_t bytes,uint64_t off){ if(!glh_active() || off+bytes>GLH_REPLY-GLH_MAILBOX) return 0;
+    uint8_t*c=glh_begin(GLH_X_READBACK,40); if(!c) return 0; uint64_t*s=(uint64_t*)(c+8); uint64_t t=++g_glh_rb_ticket;
+    s[0]=buf; s[1]=bytes; s[2]=off; s[3]=t; glh_end(c); return t; }
+static const uint8_t* glh_rb_ready_at(uint64_t ticket,uint64_t off){ if(!g_glh||!ticket||atomic_load_explicit(&g_glh->rb_done,memory_order_acquire)<ticket) return 0;
+    return glh_reply(g_glh)+GLH_MAILBOX+off; }
+static int glh_failed(void){ return !g_glh || atomic_load(&g_glh->failed); }
 static const uint8_t* glh_rb_ready(uint64_t ticket,int slot){ if(!g_glh||!ticket||atomic_load_explicit(&g_glh->rb_done,memory_order_acquire)<ticket) return 0;
     return glh_reply(g_glh)+GLH_MAILBOX+(uint64_t)slot*(4u<<20); }
 // ---- start-up ----------------------------------------------------------------------------------------------------------

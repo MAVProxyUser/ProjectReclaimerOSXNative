@@ -1956,6 +1956,21 @@ Numbers are from the commit messages; PERF-PLAN.md has the measurements. Compare
   handle on the same file, fstat / GetFileInformationByHandle stay live; the kept descriptor is reopened after 1 s
   (PELOAD_FS_METACACHE=0 = always open). Measured in a local match: 23.4 -> 12.5 (1) -> 1.1 us (2) per query, path
   translation included; the game unchanged (spawns, items, match time = wall time). Both ON by default.
+- **HugeGrass +42%: the client's per-frame luminance readback no longer stalls the render pipeline** (2026-10-25; user: "can
+  we do anything about pulling 11 fps or less on Big team games like HugeGrass?") — d3dsubmit.c `ctx_Map` (a blocking READ
+  map waits for the queued writes into that resource only), peload.c `rb_async` / `rb_complete` (called from
+  `d3dgl_gpu_copy_impl`, `ctxi_Map`, the CPU-side copies), glh_client.c `glh_rb_request_at` / `glh_rb_ready_at`. Why:
+  `sample` of a 120-player HugeGrass client: halo3's render thread 76% waiting in sub_drain <- ctx_Map, the GL submission
+  thread 34% asleep in a synchronous glReadPixels. Every frame the client (exe+0xbbbc6a) copies the scene's 1x1 RGBA16F
+  average-luminance texture into one of a ring of staging textures and Map(READ)s one copied frames earlier -- built not to
+  wait -- but the read map drained the whole queue and the copy read the pixels back synchronously (the GL thread waited for
+  the helper to run everything and the GPU to draw it): CPU and GPU took turns once a frame. How: the read map waits only
+  until that resource's queued writes ran (normally long ago), and with the GL helper the copy reads into a pixel buffer and
+  requests a mailbox readback (a ticket, 64 staging textures of <= 16 KB at 4 MB + 16 KB x n) -- the CPU copy is filled when
+  it is read. Compute-owned buffers still drain. Measured: HugeGrass in-match A/B (PELOAD_AB=rb:20, 75 players, 263
+  vehicles): 31.6 vs 22.2 fps over five comparable pairs (+42%); a 7,000-8,000-draw view 16.7 vs 16.0 (GL-bound there);
+  local match: no drains left, luminance values change as before (auto exposure intact). PELOAD_D3DGL_SYNCRB=1 = synchronous
+  readback, PELOAD_D3DGL_SUBMIT_DRAINREAD=1 = full drain (old behaviour: both).
 - **Copy-on-write game-state copies were declined after the first ~10** (2026-10-25; found in a 118-player HugeGrass match:
   plain memmove of halo3+0x13f23f's 16.4 MB game state, 7 GB/s, 14% of the engine thread) — peload.c `cow_private_range`,
   `crt_big_memmove` (PELOAD_MEMCPY_LOG now says why a big copy isn't copy-on-write). Why: the safety check declines

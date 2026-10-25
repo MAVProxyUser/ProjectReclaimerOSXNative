@@ -304,6 +304,10 @@ real D3DCompiler_47.dll from the MCC root (PELOAD_REAL_D3DCOMPILE=0 = old placeh
 (same check), so the xaudio signature patches are OFF by default (PELOAD_XA_EAGER=1 = old binding + patches); A/B audio identical.
 Client datagrams (0.9.22: 7 + 36-byte frame header = 43 B; 0.9.23: 2 B [kind code|flags][class]): shim/docs/client-transport.md,
 PELOAD_FRAMECAP=<n> logs the frames before compaction. README "Who sees your IP address".
+Big-game render stall (2026-10-25, +42% HugeGrass): the client Map(READ)s a ring of 1x1 luminance staging textures every frame;
+a read map now waits only for that resource's queued writes, and small GPU->staging copies read back via pixel buffer + helper
+mailbox ticket (rb_async/rb_complete; PELOAD_D3DGL_SYNCRB / _SUBMIT_DRAINREAD = old). Find such stalls with `sample <pid> 5`
+on a big-game client: render thread in sub_drain, GL thread in glh_end_sync. A/B in public matches: PELOAD_AB=rb|cow|new|burn|qos.
 Server list + status query (2026-10-25, shim/docs/server-status.md): discovery masters (HTTP :49175; built in 148.251.153.44 /
 23.159.176.140, cache ReclaimerCache/discovery/peers.json); every start the client opens one QUIC connection per listed server
 (SNI "reclaimer", self-signed rcgen cert, no client cert) and sends 4-byte length + `{"status":2}`, gets name/map/mode/players...

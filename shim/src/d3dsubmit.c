@@ -114,6 +114,14 @@ static int MSABI ctx_Map(void*t,void*res,uint32_t sub,uint32_t type,uint32_t fl,
     if(sub_on() && g_sq && o && o->data && o->size && type==1 && (fl&0x100000) && !GENV1("PELOAD_D3DGL_SUBMIT_DRAINREAD")){
         if(__atomic_load_n(&g_sq_tail,__ATOMIC_ACQUIRE)<o->sq_wpend) return (int)0x887A000A;   // DXGI_ERROR_WAS_STILL_DRAWING
         return ctxi_Map(t,res,sub,type,fl,pM); }
+    // a blocking READ map of a resource with a CPU copy: wait for the queued writes into IT, not the whole queue (the client's
+    // luminance ring is read frames after its copy; the full drain stalled halo3's render thread 76% of the time in a
+    // 120-player HugeGrass match). Compute-owned resources still drain. PELOAD_D3DGL_SUBMIT_DRAINREAD = always drain.
+    extern volatile int g_sub_drainread; if(g_sub_drainread<0) g_sub_drainread=GENV1("PELOAD_D3DGL_SUBMIT_DRAINREAD")?1:0;
+    if(sub_on() && g_sq && o && o->data && o->size && type==1 && !o->cs_gpu && !o->cs_pending && !g_sub_drainread){
+        int spins=0; double t0=0;
+        while(__atomic_load_n(&g_sq_tail,__ATOMIC_ACQUIRE)<o->sq_wpend){ if(++spins<200) sched_yield(); else { if(!t0) t0=mono_s(); usleep(20); if(mono_s()-t0>1.0){ sub_drain(); break; } } }
+        return ctxi_Map(t,res,sub,type,fl,pM); }
     if(sub_on() && g_sq && (!o || !o->data || !o->size)) sub_note_drain("no CPU data",o,type,fl);
     if(!sub_on() || !o || !o->data || !o->size) { if(sub_on() && g_sq) sub_drain(); return ctxi_Map(t,res,sub,type,fl,pM); }
     sub_start(); g_fs.maps++;
@@ -189,16 +197,16 @@ static void sub_switch(void){   // game thread, at a Present
     // engine-thread change of 2026-10-25 at once, peload.c ab_new).
     static int feat; extern uint64_t g_memcpy_min; static uint64_t mc_on;
     if(ab_s<0){ const char*e=getenv("PELOAD_D3DGL_SUBMIT_AB"); ab_s=e?atof(e):0; feat=0;
-        const char*a=getenv("PELOAD_AB"); if(a){ const char*c=strchr(a,':'); ab_s=c?atof(c+1):20; feat=!strncmp(a,"memcpy",6)?1:!strncmp(a,"glcache",7)?2:!strncmp(a,"cbbatch",7)?3:!strncmp(a,"cow",3)?4:!strncmp(a,"hidewin",7)?5:!strncmp(a,"csgpu",5)?6:!strncmp(a,"parcopy",7)?7:!strncmp(a,"ncpu",4)?8:!strncmp(a,"fastcall",8)?9:!strncmp(a,"ntdelay",7)?10:!strncmp(a,"bcdec",5)?11:!strncmp(a,"qos",3)?12:!strncmp(a,"new",3)?13:0; if(!ab_s) ab_s=20; }
+        const char*a=getenv("PELOAD_AB"); if(a){ const char*c=strchr(a,':'); ab_s=c?atof(c+1):20; feat=!strncmp(a,"memcpy",6)?1:!strncmp(a,"glcache",7)?2:!strncmp(a,"cbbatch",7)?3:!strncmp(a,"cow",3)?4:!strncmp(a,"hidewin",7)?5:!strncmp(a,"csgpu",5)?6:!strncmp(a,"parcopy",7)?7:!strncmp(a,"ncpu",4)?8:!strncmp(a,"fastcall",8)?9:!strncmp(a,"ntdelay",7)?10:!strncmp(a,"bcdec",5)?11:!strncmp(a,"qos",3)?12:!strncmp(a,"new",3)?13:!strncmp(a,"burn",4)?14:!strncmp(a,"rb",2)?15:0; if(!ab_s) ab_s=20; }
         mc_on=g_memcpy_min; t0=mono_s(); f0=g_ct_frame; d0=g_sub_ndraw; }
     if(ab_s>0){ double now=mono_s(); if(now-t0>=ab_s && g_sub_want<0){
-            extern volatile int g_glc_on; extern volatile unsigned g_glc_gen; extern volatile int g_cbbatch_on; extern volatile int g_memcpy_cow; extern volatile int g_pc_on; extern int ab_ncpu(int set); extern int ab_fastcall(int set); extern volatile int g_ntdelay_stub; extern int ab_bcdec(int set); extern int ab_qos(int set); extern int ab_new(int set);
+            extern volatile int g_glc_on; extern volatile unsigned g_glc_gen; extern volatile int g_cbbatch_on; extern volatile int g_memcpy_cow; extern volatile int g_pc_on; extern int ab_ncpu(int set); extern int ab_fastcall(int set); extern volatile int g_ntdelay_stub; extern int ab_bcdec(int set); extern int ab_qos(int set); extern int ab_new(int set); extern int ab_burn(int set); extern int ab_rb(int set);
             extern volatile int g_ab_winhidden; extern void win_ab_hide(int); extern volatile int g_cs_gpu;
-            int ph=feat==1?(g_memcpy_min!=~0ull):feat==2?g_glc_on:feat==3?(g_cbbatch_on!=0):feat==4?(g_memcpy_cow>0):feat==5?g_ab_winhidden:feat==6?(g_cs_gpu>0):feat==7?(g_pc_on>0):feat==8?ab_ncpu(-1):feat==9?ab_fastcall(-1):feat==10?(g_ntdelay_stub!=1):feat==11?ab_bcdec(-1):feat==12?ab_qos(-1):feat==13?ab_new(-1):sub_on(); unsigned long fn=g_ct_frame-f0, dn=g_sub_ndraw-d0; double dt=now-t0;
+            int ph=feat==1?(g_memcpy_min!=~0ull):feat==2?g_glc_on:feat==3?(g_cbbatch_on!=0):feat==4?(g_memcpy_cow>0):feat==5?g_ab_winhidden:feat==6?(g_cs_gpu>0):feat==7?(g_pc_on>0):feat==8?ab_ncpu(-1):feat==9?ab_fastcall(-1):feat==10?(g_ntdelay_stub!=1):feat==11?ab_bcdec(-1):feat==12?ab_qos(-1):feat==13?ab_new(-1):feat==14?ab_burn(-1):feat==15?ab_rb(-1):sub_on(); unsigned long fn=g_ct_frame-f0, dn=g_sub_ndraw-d0; double dt=now-t0;
             sum[ph]+=dt; fr[ph]+=fn; dr[ph]+=dn; nph[ph]++;
             char m[300]; int k=snprintf(m,sizeof m,"  [ab] %s %s: %.1f fps, %lu draws/frame (%.0f s) | totals: on %.1f fps (%d), off %.1f fps (%d)\n",
-                feat==1?"memcpy":feat==2?"glcache":feat==3?"cbbatch":feat==4?"cow":feat==5?"hidewin":feat==6?"csgpu":feat==7?"parcopy":feat==8?"ncpu":feat==9?"fastcall":feat==10?"ntdelay":feat==11?"bcdec":feat==12?"qos":feat==13?"new":"submit",ph?"on ":"off",fn/dt,fn?dn/fn:0,dt,sum[1]>0?fr[1]/sum[1]:0,nph[1],sum[0]>0?fr[0]/sum[0]:0,nph[0]); (void)!write(2,m,k);
-            if(feat==1) g_memcpy_min=ph?~0ull:mc_on; else if(feat==2){ if(!ph) g_glc_gen++; g_glc_on=!ph; } else if(feat==3) g_cbbatch_on=!ph; else if(feat==4) g_memcpy_cow=!ph; else if(feat==5) win_ab_hide(!ph); else if(feat==6) g_cs_gpu=!ph; else if(feat==7) g_pc_on=!ph; else if(feat==8) ab_ncpu(!ph); else if(feat==9) ab_fastcall(!ph); else if(feat==10) g_ntdelay_stub=ph; else if(feat==11) ab_bcdec(!ph); else if(feat==12) ab_qos(!ph); else if(feat==13) ab_new(!ph); else g_sub_want=!ph;
+                feat==1?"memcpy":feat==2?"glcache":feat==3?"cbbatch":feat==4?"cow":feat==5?"hidewin":feat==6?"csgpu":feat==7?"parcopy":feat==8?"ncpu":feat==9?"fastcall":feat==10?"ntdelay":feat==11?"bcdec":feat==12?"qos":feat==13?"new":feat==14?"burn":feat==15?"rb":"submit",ph?"on ":"off",fn/dt,fn?dn/fn:0,dt,sum[1]>0?fr[1]/sum[1]:0,nph[1],sum[0]>0?fr[0]/sum[0]:0,nph[0]); (void)!write(2,m,k);
+            if(feat==1) g_memcpy_min=ph?~0ull:mc_on; else if(feat==2){ if(!ph) g_glc_gen++; g_glc_on=!ph; } else if(feat==3) g_cbbatch_on=!ph; else if(feat==4) g_memcpy_cow=!ph; else if(feat==5) win_ab_hide(!ph); else if(feat==6) g_cs_gpu=!ph; else if(feat==7) g_pc_on=!ph; else if(feat==8) ab_ncpu(!ph); else if(feat==9) ab_fastcall(!ph); else if(feat==10) g_ntdelay_stub=ph; else if(feat==11) ab_bcdec(!ph); else if(feat==12) ab_qos(!ph); else if(feat==13) ab_new(!ph); else if(feat==14) ab_burn(!ph); else if(feat==15) ab_rb(!ph); else g_sub_want=!ph;
             t0=now; f0=g_ct_frame; d0=g_sub_ndraw; } }
     if(g_sub_auto>0 && g_sub_want<0){ static double ta; double now=mono_s(); if(now-ta>=5.0){ ta=now; extern int st_player_count(void);
             static int min=-1; if(min<0){ const char*e=getenv("PELOAD_D3DGL_SUBMIT_AUTO_MIN"); min=e?atoi(e):40; }
