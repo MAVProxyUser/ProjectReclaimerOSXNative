@@ -2078,6 +2078,18 @@ Numbers are from the commit messages; PERF-PLAN.md has the measurements. Compare
   -- engine 18.4-22.2 -> 24.2-26.0 fps in comparable phases (+25-35%: the helper's frames were consumed late), input -> screen
   147 -> 131 ms, GPU done -> window +21 -> +1 ms. PELOAD_PRESENT_SLEEP=1 = the old sleep. PELOAD_PRESENT_PROF=1 prints
   `[presentprof]` every 5 s: new frames / presents per second, time waiting for a frame / drawing / flushing.
+- **Match loads 22% faster and the first minutes after joining stop stuttering: halo3's file hashing runs on its own thread**
+  (2026-10-25; found with shim/tools/hitch-sample.sh -- `sample` taken during a 0-fps second after joining a ~100-player
+  HugeGrass game: halo3's engine thread ~24% in CC_SHA1_Update) — peload.c `bha_queue` / `bha_worker` (thread shim-hash) /
+  `bha_drain` (BCryptFinishHash and BCryptDestroyHash wait for it), BHash `pend`; PELOAD_BCRYPT_LOG=1 `[bcrypt]` (bytes per 5 s,
+  time in the calls, top callers), PELOAD_BCRYPT_CHECK=1 (each digest also computed synchronously and compared). Why: halo3's
+  streaming file reader (halo3+0x205ebc) feeds every chunk it reads into a running SHA-1 while its flag (+0xb2) is set -- the
+  whole of a file it streams, the HugeGrass mod's 2.1 GB map included: 400-1000 MB every 5 s during loading and the first
+  minutes of a match, 0.25-0.95 s of the calling thread's time per 5 s at Rosetta's ~770 MB/s (natively 3.4 GB/s, but Rosetta
+  exposes no x86 SHA instructions: SSE4.2, AES and PCLMULQDQ only). How: a chunk >= 4 KB is copied into a queue that the worker
+  hashes in order and the call returns (at most 64 MB queued). Check: 9,800 digests matched, 0 differed. Measured on the
+  127-slot HugeGrass server: time in the hash calls 250-945 -> 27-42 ms per 5 s, match loaded in 62.3 -> 48.8 s, seconds with
+  a frame over 100 ms in the first / second minute 24 / 30 -> 1 / 0. PELOAD_BCRYPT_SYNC=1 = hash in the call, as before.
 - **Late camera update: the newest mouse movement applied to each frame's camera at its upload** (2026-10-25; user: "is there
   anything novel we can do to improve hugegrass? 239ms of input lag is huge") — new shim/src/latch.c (`latch_src` called by
   d3dgl_bind_ubo / d3dgl_ubo_batch, `latch_overlay_vp` at the overlay's camera capture, `latch_received` in wi_raw_mouse; D3DObj

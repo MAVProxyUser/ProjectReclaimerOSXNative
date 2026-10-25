@@ -9968,7 +9968,7 @@ static long MSABI i_BCryptGenRandom(void*alg,uint8_t*buf,uint32_t n,uint32_t fl)
 // through a junk pointer and crashed. Implement SHA1/256/384/512/MD5 for real.
 enum { BALG_SHA1=1,BALG_SHA256,BALG_SHA384,BALG_SHA512,BALG_MD5 };
 typedef struct { uint32_t magic; int alg; } BAlg;
-typedef struct { uint32_t magic; int alg; union { CC_SHA1_CTX s1; CC_SHA256_CTX s256; CC_SHA512_CTX s512; CC_MD5_CTX md5; } c; } BHash;
+typedef struct { uint32_t magic; int alg; union { CC_SHA1_CTX s1; CC_SHA256_CTX s256; CC_SHA512_CTX s512; CC_MD5_CTX md5; } c; volatile int pend; void*shadow; } BHash;   // pend: chunks queued (bha_*); shadow: PELOAD_BCRYPT_CHECK's synchronous twin
 #define BMAGIC 0x42435254u
 static int balg_from_w(const uint16_t*w){ char a[32]; int i=0; for(; w&&w[i]&&i<31;i++) a[i]=(char)(w[i]&0xff); a[i]=0;
     if(!strcmp(a,"SHA256"))return BALG_SHA256; if(!strcmp(a,"SHA1"))return BALG_SHA1; if(!strcmp(a,"SHA384"))return BALG_SHA384;
@@ -9981,14 +9981,64 @@ static void bhash_init(BHash*h){ switch(h->alg){case BALG_SHA1:CC_SHA1_Init(&h->
     case BALG_SHA384:CC_SHA384_Init(&h->c.s512);break;case BALG_SHA512:CC_SHA512_Init(&h->c.s512);break;case BALG_MD5:CC_MD5_Init(&h->c.md5);break;} }
 static long MSABI i_BCryptCreateHash(void*hAlg,void**phHash,uint8_t*obj,uint32_t cbobj,uint8_t*sec,uint32_t cbsec,uint32_t fl){
     (void)obj;(void)cbobj;(void)sec;(void)cbsec;(void)fl; BAlg*a=hAlg; BHash*h=malloc(sizeof *h); if(!h) return 0xC0000017;
-    h->magic=BMAGIC; h->alg=(a&&a->magic==BMAGIC)?a->alg:BALG_SHA256; bhash_init(h); if(phHash)*phHash=h; return 0; }
+    h->magic=BMAGIC; h->alg=(a&&a->magic==BMAGIC)?a->alg:BALG_SHA256; h->pend=0; h->shadow=0; bhash_init(h); if(phHash)*phHash=h; return 0; }
+// PELOAD_BCRYPT_LOG=1 (2026-10-25; a 0-fps second after joining a 100-player HugeGrass game had halo3's engine thread ~24% in
+// CC_SHA1_Update): every 5 s the bytes hashed per algorithm, the time spent and the top guest callers. SHA-1 runs at ~770 MB/s
+// under Rosetta (3.4 GB/s natively).
+static pthread_mutex_t g_bh_mx=PTHREAD_MUTEX_INITIALIZER; static struct { uint64_t ra, bytes, calls; double s; } g_bh_top[16]; static uint64_t g_bh_bytes[8], g_bh_calls; static double g_bh_s, g_bh_t;
+static void bh_note(int alg,uint64_t ra,uint32_t n,double dt){ pthread_mutex_lock(&g_bh_mx); g_bh_bytes[alg&7]+=n; g_bh_calls++; g_bh_s+=dt;
+    int k=-1; for(int i=0;i<16;i++) if(g_bh_top[i].ra==ra){ k=i; break; } if(k<0) for(int i=0;i<16;i++) if(!g_bh_top[i].ra){ k=i; g_bh_top[i].ra=ra; break; }
+    if(k>=0){ g_bh_top[k].bytes+=n; g_bh_top[k].calls++; g_bh_top[k].s+=dt; }
+    double t=mono_s(); if(!g_bh_t) g_bh_t=t; if(t-g_bh_t>=5.0){ char m[600]; int q=snprintf(m,sizeof m,"  [bcrypt] %.0f s: %llu calls, %.1f MB hashed (SHA-1 %.1f MB, SHA-256 %.1f MB), %.0f ms in it |",t-g_bh_t,(unsigned long long)g_bh_calls,
+            (g_bh_bytes[0]+g_bh_bytes[1]+g_bh_bytes[2]+g_bh_bytes[3]+g_bh_bytes[4]+g_bh_bytes[5])/1e6,g_bh_bytes[BALG_SHA1]/1e6,g_bh_bytes[BALG_SHA256]/1e6,g_bh_s*1e3);
+        for(int r=0;r<4;r++){ int b=-1; for(int i=0;i<16;i++) if(g_bh_top[i].ra && g_bh_top[i].bytes && (b<0 || g_bh_top[i].bytes>g_bh_top[b].bytes)) b=i; if(b<0) break;
+            uint64_t a=g_bh_top[b].ra; q+=snprintf(m+q,sizeof m-q," %s+0x%llx %.1f MB (%llu calls)",a>=0x180000000ull&&a<0x190000000ull?"halo3":a>=0x140000000ull&&a<0x150000000ull?"exe":"?",
+                (unsigned long long)(a>=0x180000000ull&&a<0x190000000ull?a-0x180000000ull:a>=0x140000000ull&&a<0x150000000ull?a-0x140000000ull:a),g_bh_top[b].bytes/1e6,(unsigned long long)g_bh_top[b].calls); g_bh_top[b].bytes=0; }
+        m[q++]='\n'; (void)!write(2,m,(size_t)q); memset(g_bh_top,0,sizeof g_bh_top); memset(g_bh_bytes,0,sizeof g_bh_bytes); g_bh_calls=0; g_bh_s=0; g_bh_t=t; }
+    pthread_mutex_unlock(&g_bh_mx); }
+static void bhash_update(BHash*h,const uint8_t*in,uint32_t n){ switch(h->alg){case BALG_SHA1:CC_SHA1_Update(&h->c.s1,in,n);break;case BALG_SHA256:CC_SHA256_Update(&h->c.s256,in,n);break;
+    case BALG_SHA384:CC_SHA384_Update(&h->c.s512,in,n);break;case BALG_SHA512:CC_SHA512_Update(&h->c.s512,in,n);break;case BALG_MD5:CC_MD5_Update(&h->c.md5,in,n);break;} }
+// Asynchronous hashing (2026-10-25): halo3's streaming file reader (halo3+0x205ebc) feeds every chunk it reads into a running
+// SHA-1 when its hash flag (+0xb2) is set -- the whole of a file it streams, the HugeGrass mod's 2.1 GB map included: 400-870 MB
+// every 5 s during loading and the first minutes of a match, 0.7-1.1 s of the engine thread's time per 5 s at Rosetta's ~770
+// MB/s (natively 3.4 GB/s, but Rosetta offers x86 code no SHA instructions). Now a chunk >= 4 KB is copied (~8 us for 80 KB)
+// into a queue that a worker thread (shim-hash) hashes in order, and the call returns; BCryptFinishHash / BCryptDestroyHash wait
+// for that hash's queued chunks first, so every digest is the same. At most 64 MB queued (then the caller waits).
+// PELOAD_BCRYPT_SYNC=1 = hash in the call, as before.
+typedef struct BHChunk { struct BHChunk*next; BHash*h; uint32_t n; uint8_t d[]; } BHChunk;
+static pthread_mutex_t g_bha_mx=PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_bha_cv=PTHREAD_COND_INITIALIZER, g_bha_done=PTHREAD_COND_INITIALIZER;
+static BHChunk *g_bha_head, *g_bha_tail; static uint64_t g_bha_bytes; static int g_bha_on=-1;
+static void* bha_worker(void*a){ (void)a; pthread_setname_np("shim-hash");
+    for(;;){ pthread_mutex_lock(&g_bha_mx); while(!g_bha_head) pthread_cond_wait(&g_bha_cv,&g_bha_mx); BHChunk*c=g_bha_head; g_bha_head=c->next; if(!g_bha_head) g_bha_tail=0; pthread_mutex_unlock(&g_bha_mx);
+        bhash_update(c->h,c->d,c->n);
+        pthread_mutex_lock(&g_bha_mx); c->h->pend--; g_bha_bytes-=c->n; pthread_cond_broadcast(&g_bha_done); pthread_mutex_unlock(&g_bha_mx); free(c); }
+    return 0; }
+static void bha_drain(BHash*h){ if(!h->pend) return; pthread_mutex_lock(&g_bha_mx); while(h->pend) pthread_cond_wait(&g_bha_done,&g_bha_mx); pthread_mutex_unlock(&g_bha_mx); }
+static int bha_queue(BHash*h,const uint8_t*in,uint32_t n){
+    if(g_bha_on<0) g_bha_on=getenv("PELOAD_BCRYPT_SYNC")?0:1; if(!g_bha_on || n<4096) return 0;
+    BHChunk*c=malloc(sizeof *c+n); if(!c) return 0; c->next=0; c->h=h; c->n=n; memcpy(c->d,in,n);
+    static int started; pthread_mutex_lock(&g_bha_mx);
+    if(!started){ started=1; pthread_t t; pthread_attr_t at; pthread_attr_init(&at); pthread_attr_set_qos_class_np(&at,QOS_CLASS_USER_INITIATED,0); pthread_create(&t,&at,bha_worker,0); pthread_detach(t); }
+    while(g_bha_bytes>(64u<<20)) pthread_cond_wait(&g_bha_done,&g_bha_mx);
+    if(g_bha_tail) g_bha_tail->next=c; else g_bha_head=c; g_bha_tail=c; h->pend++; g_bha_bytes+=n; pthread_cond_signal(&g_bha_cv); pthread_mutex_unlock(&g_bha_mx); return 1; }
 static long MSABI i_BCryptHashData(void*hHash,uint8_t*in,uint32_t n,uint32_t fl){ (void)fl; BHash*h=hHash; if(!h||h->magic!=BMAGIC) return 0xC0000008;
+    static int lg=-1; if(lg<0) lg=getenv("PELOAD_BCRYPT_LOG")?1:0; double t0=lg?mono_s():0;
+    static int chk=-1; if(chk<0) chk=getenv("PELOAD_BCRYPT_CHECK")?1:0;   // (every digest computed both ways and compared at the finish)
+    if(chk){ if(!h->shadow){ BHash*t=calloc(1,sizeof *t); if(t){ t->magic=BMAGIC; t->alg=h->alg; bhash_init(t); h->shadow=t; } } if(h->shadow) bhash_update((BHash*)h->shadow,in,n); }
+    if(bha_queue(h,in,n)){ if(lg) bh_note(h->alg,(uint64_t)__builtin_return_address(0),n,mono_s()-t0); return 0; }
+    bha_drain(h);   // (a small chunk after queued ones: keep the order)
     switch(h->alg){case BALG_SHA1:CC_SHA1_Update(&h->c.s1,in,n);break;case BALG_SHA256:CC_SHA256_Update(&h->c.s256,in,n);break;
-    case BALG_SHA384:CC_SHA384_Update(&h->c.s512,in,n);break;case BALG_SHA512:CC_SHA512_Update(&h->c.s512,in,n);break;case BALG_MD5:CC_MD5_Update(&h->c.md5,in,n);break;} return 0; }
-static long MSABI i_BCryptFinishHash(void*hHash,uint8_t*out,uint32_t n,uint32_t fl){ (void)n;(void)fl; BHash*h=hHash; if(!h||h->magic!=BMAGIC) return 0xC0000008;
+    case BALG_SHA384:CC_SHA384_Update(&h->c.s512,in,n);break;case BALG_SHA512:CC_SHA512_Update(&h->c.s512,in,n);break;case BALG_MD5:CC_MD5_Update(&h->c.md5,in,n);break;}
+    if(lg) bh_note(h->alg,(uint64_t)__builtin_return_address(0),n,mono_s()-t0); return 0; }
+static long MSABI i_BCryptFinishHash(void*hHash,uint8_t*out,uint32_t n,uint32_t fl){ (void)n;(void)fl; BHash*h=hHash; if(!h||h->magic!=BMAGIC) return 0xC0000008; bha_drain(h);
+    if(h->shadow){ BHash*t=h->shadow; uint8_t a[64]={0}, b[64]={0}; BHash cp=*h; cp.shadow=0;   // finish copies of both, compare
+        switch(h->alg){case BALG_SHA1:CC_SHA1_Final(a,&cp.c.s1);CC_SHA1_Final(b,&t->c.s1);break;case BALG_SHA256:CC_SHA256_Final(a,&cp.c.s256);CC_SHA256_Final(b,&t->c.s256);break;default:break;}
+        static unsigned long ok, bad; if(memcmp(a,b,64)) bad++; else ok++;
+        if(memcmp(a,b,64) || (ok+bad)%200==0){ char m[120]; int k=snprintf(m,sizeof m,"  [bcrypt-check] %s: %lu digests matched, %lu differed\n",memcmp(a,b,64)?"MISMATCH":"ok",ok,bad); (void)!write(2,m,(size_t)k); }
+        free(t); h->shadow=0; }
     switch(h->alg){case BALG_SHA1:CC_SHA1_Final(out,&h->c.s1);break;case BALG_SHA256:CC_SHA256_Final(out,&h->c.s256);break;
     case BALG_SHA384:CC_SHA384_Final(out,&h->c.s512);break;case BALG_SHA512:CC_SHA512_Final(out,&h->c.s512);break;case BALG_MD5:CC_MD5_Final(out,&h->c.md5);break;} return 0; }
-static long MSABI i_BCryptDestroyHash(void*hHash){ if(hHash)free(hHash); return 0; }
+static long MSABI i_BCryptDestroyHash(void*hHash){ if(hHash){ BHash*h=hHash; if(h->magic==BMAGIC){ bha_drain(h); free(h->shadow); } free(hHash); } return 0; }
 static long MSABI i_BCryptGetProperty(void*h,const uint16_t*prop,uint8_t*out,uint32_t cb,uint32_t*cbres,uint32_t fl){ (void)fl;
     char p[48]; int i=0; for(; prop&&prop[i]&&i<47;i++) p[i]=(char)(prop[i]&0xff); p[i]=0; int alg=BALG_SHA256;
     if(h){ BAlg*a=h; if(a->magic==BMAGIC) alg=a->alg; }
