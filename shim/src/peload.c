@@ -4067,6 +4067,8 @@ static int    MSABI i_SetCursorPos(int x,int y){ (void)x;(void)y; return 1; }
 static void*  MSABI i_SetCursor(void*c){ return c; }
 void* fg_hwnd_ext(void);
 #include <CoreGraphics/CoreGraphics.h>
+// latency.c (included after stats.c): input -> screen latency stages and the per-second performance log
+void lat_cam(const float*vp); void lat_present(double t); void lat_gpu(uint64_t fno,double t); void lat_win(uint64_t fno,double t); void lat_input(int src); void perf_tick(void);
 #include "wininput.c"
 static int    MSABI i_SetLayeredWindowAttributes(void*h,uint32_t key,uint8_t a,uint32_t f){ (void)key;
     if(getenv("PELOAD_TRACE_LAYERED")){ char m[120]; int k=snprintf(m,sizeof m,"  [layered] SetLayeredWindowAttributes %p alpha %u flags 0x%x\n",h,a,f); (void)!write(2,m,k); }
@@ -4610,6 +4612,8 @@ static uint32_t MSABI i_XInputGetState(uint32_t idx,void*st){
         if(getenv("PELOAD_TRACE_INPUT")){ char m[160]; int k=snprintf(m,sizeof m,"  [input] pad%u pkt=%u b=%04x lt=%u rt=%u L=(%d,%d) R=(%d,%d)\n",idx,pkt[idx],p.buttons,p.lt,p.rt,p.lx,p.ly,p.rx,p.ry); (void)!write(2,m,k); } }
     uint8_t*o=st; *(uint32_t*)o=pkt[idx]; memcpy(o+4,&p.buttons,2); o[6]=p.lt; o[7]=p.rt;
     memcpy(o+8,&p.lx,2); memcpy(o+10,&p.ly,2); memcpy(o+12,&p.rx,2); memcpy(o+14,&p.ry,2);
+    { static int was[4]; int r2=(int)p.rx*p.rx+(int)p.ry*p.ry, out=r2>8689*8689;   // right stick past the XInput dead zone: a look input (latency.c)
+      if(out && !was[idx]) lat_input(1); if(out) lat_input(-1); was[idx]=out; }
     return 0; }
 static uint32_t MSABI i_XInputSetState(uint32_t idx,void*vib){ (void)vib; XPad p; return (idx<4 && (gc_read(idx,&p)||idx==0))?0:1167; }
 static uint32_t MSABI i_XInputGetCapabilities(uint32_t idx,uint32_t fl,void*cap){ (void)fl; XPad p; if(idx>3) return 160; if(getenv("PELOAD_NO_PAD")) return 1167;
@@ -7106,8 +7110,11 @@ static void d3dgl_clear_dsv(void*dsvview,uint32_t flags,float depth,uint8_t sten
     if((flags&2) && ds->gldsatt==0x821A){ if(G.StencilMask) G.StencilMask(0xff); if(G.ClearStencil) G.ClearStencil(stencil); bits|=0x400; } // _STENCIL
     if(bits) G.Clear(bits);
     gl_bindfbo_any(GLE_FBO,0); GLUNLOCK(); }
-// DXGI vertex-attribute format -> GL (components, type, normalized) for glVertexAttribPointer.
-static void d3dgl_attrib_fmt(uint32_t f,unsigned*comps,unsigned*gt,unsigned char*norm){ *norm=0;
+// DXGI vertex-attribute format -> GL (components, type, normalized) for glVertexAttribPointer. Returns 0, or 1 for an integer
+// format (read as its values: float(n), the GL rule for a non-normalized integer type -- the caller switches to
+// glVertexAttribIPointer when the VS declares the input as integer), or 2 for a format it doesn't know (4 floats).
+static int d3dgl_attrib_ifmt(uint32_t f,unsigned*comps,unsigned*gt);
+static int d3dgl_attrib_fmt(uint32_t f,unsigned*comps,unsigned*gt,unsigned char*norm){ *norm=0;
     switch(f){
         case 2: *comps=4;*gt=0x1406;break;                       // R32G32B32A32_FLOAT
         case 6: *comps=3;*gt=0x1406;break;                       // R32G32B32_FLOAT
@@ -7126,10 +7133,15 @@ static void d3dgl_attrib_fmt(uint32_t f,unsigned*comps,unsigned*gt,unsigned char
         case 49:*comps=2;*gt=0x1401;*norm=1;break;               // R8G8_UNORM
         case 61:*comps=1;*gt=0x1401;*norm=1;break;               // R8_UNORM
         case 24:*comps=4;*gt=0x8368;*norm=1;break;               // R10G10B10A2_UNORM -> UINT_2_10_10_10_REV
-        default:*comps=4;*gt=0x1406;
+        default:
+            // integer formats (2026-10-25): they fell through to "4 floats" -- the wrong size, and garbage values -- and logged
+            // "format N not translated" even when the VS takes the input as an integer and the IPointer path below re-reads
+            // it correctly (R16G16B16A16_UINT, in every HugeGrass run). PELOAD_D3DGL_INTFMT_FLOAT4=1 = 4 floats, as before.
+            if(f!=2 && f!=6 && f!=16 && f!=41 && d3dgl_attrib_ifmt(f,comps,gt) && !GENV1("PELOAD_D3DGL_INTFMT_FLOAT4")) return 1;
+            *comps=4;*gt=0x1406;
             { static uint8_t seen[256]; if(f<256 && !seen[f]){ seen[f]=1; char m[120]; int k=snprintf(m,sizeof m,"  [d3dgl] vertex attribute format %u not translated (read as 4 floats)\n",f); (void)!write(2,m,k); } }
-            break;
-    } }
+            return 2;
+    } return 0; }
 // DXGI format -> (components, GL integer type) for glVertexAttribIPointer, used when the VS declares the input as
 // uvec4/ivec4 (DXBC signature component type uint/sint). 32-bit float formats pass their raw bits (D3D puts
 // the float's bits in the register; the shader reinterprets them).
@@ -7627,7 +7639,7 @@ static void d3dgl_draw_impl(uint32_t vcount,int indexed,uint32_t instcount,uint3
             else if(need_scan<0){ lo=0; hi=sb->size; }
             else { lo=vo+vmin*stride; hi=vo+(vmax+1)*stride; }
             if(!stride){ lo=vo; hi=vo+64; }
-            unsigned comps,gt; unsigned char norm; d3dgl_attrib_fmt(il->elem[i].fmt,&comps,&gt,&norm);
+            unsigned comps,gt; unsigned char norm; int fkind=d3dgl_attrib_fmt(il->elem[i].fmt,&comps,&gt,&norm);
             uint64_t aoff=vo+il->elem[i].off+(inst?(uint64_t)sinst*stride:0);
             int ringed=0;
             if(use_ring && !inst && stride){
@@ -7641,6 +7653,11 @@ static void d3dgl_draw_impl(uint32_t vcount,int indexed,uint32_t instcount,uint3
             // attribute state of the shared VAO is cached: only changed pointers/divisors/enables are sent
             { unsigned cb=ringed?g_ring:sb->glbuf; unsigned dv=inst?step:0; int nc=g_va_nocache<0?(g_va_nocache=GENV1("PELOAD_D3DGL_NOSTATECACHE")?1:0):g_va_nocache;
               int ipt=0; if((d3dgl_vs_intin(vs)>>loc)&1u && G.VertexAttribIPointer){ unsigned ic,ig; if(d3dgl_attrib_ifmt(il->elem[i].fmt,&ic,&ig)){ comps=ic; gt=ig; norm=0; ipt=1; } }
+              if(fkind==1 && !ipt){   // an integer format into a FLOAT shader input (D3D would hand the shader the integer's bits): say which, once
+                  static struct { uint64_t h; uint32_t f; } seen[32]; static int ns; uint64_t h=vs?vs->bchash:0; int f=0;
+                  for(int q=0;q<ns;q++) if(seen[q].h==h && seen[q].f==il->elem[i].fmt) f=1;
+                  if(!f && ns<32){ seen[ns].h=h; seen[ns].f=il->elem[i].fmt; ns++; char m[200]; int k=snprintf(m,sizeof m,"  [d3dgl] vertex input %s%u (format %u, integer) feeds a float input of VS %016llx: read as its values\n",
+                      il->elem[i].sem,il->elem[i].semidx,il->elem[i].fmt,(unsigned long long)h); (void)!write(2,m,k); } }
               if(nc || g_va[loc].buf!=cb||g_va[loc].comps!=comps||g_va[loc].type!=gt||g_va[loc].norm!=norm||g_va[loc].stride!=(uint32_t)stride||g_va[loc].off!=aoff||g_va[loc].ipt!=ipt){
                   if(ipt) G.VertexAttribIPointer((unsigned)loc,(int)comps,gt,(int)stride,(const void*)(size_t)aoff);
                   else G.VertexAttribPointer((unsigned)loc,(int)comps,gt,norm,(int)stride,(const void*)(size_t)aoff);
@@ -8052,8 +8069,10 @@ static void rec_pic_rect(int r[4]){ int dw=g_win_pw>0?g_win_pw:g_d3dgl_W, dh=g_w
 static unsigned g_pq_prog, g_pq_vao; static int g_pq_sloc=-1;
 // native GL helper: the frame is an IOSurface the helper rendered (rectangle texture in this, the window's, context)
 static unsigned g_pq_rprog; static int g_pq_rsloc=-1, g_pq_rzloc=-1; static unsigned long g_glh_pq_seen;
+static unsigned long g_pq_new_fno;   // the engine frame a NEW frame shown by the present wait holds (0: a re-present); latency.c lat_win
 static int pq_present_wait_glh(unsigned long*seen,int ms){
     unsigned tex; int tw,th; (void)seen; int slot=glh_pq_acquire(&g_glh_pq_seen,ms,&tex,&tw,&th,!getenv("PELOAD_GLH_PQ_FALLBACK")); if(slot<0) return 0;
+    g_pq_new_fno=g_glh_pq_seen!=*seen?(unsigned long)g_glh->pq_frameno[slot]:0;
     // PELOAD_LAG_LOG=1: how long after halo3's render thread presented a frame it is ready for the window (a new frame only)
     { static int ll=-1; if(ll<0) ll=getenv("PELOAD_LAG_LOG")?1:0;
       if(ll && g_glh_pq_seen!=*seen){ extern double g_lag_t[256]; static double sum, mx, tl; static unsigned long n; double now=mono_s();
@@ -8091,7 +8110,7 @@ static int pq_present_wait(unsigned long*seen,int ms){
     if(g_pq_seq==*seen){ struct timespec ts; clock_gettime(CLOCK_REALTIME,&ts); ts.tv_nsec+=(long)ms*1000000L; ts.tv_sec+=ts.tv_nsec/1000000000L; ts.tv_nsec%=1000000000L;
         pthread_cond_timedwait(&g_pq_cv,&g_pq_mx,&ts); }
     if(g_pq_seq==*seen || g_pq_latest<0){ pthread_mutex_unlock(&g_pq_mx); return 0; }
-    int slot=g_pq_latest; g_pq_reading=slot; *seen=g_pq_seq; void*f=g_pq_fence[slot];
+    int slot=g_pq_latest; g_pq_reading=slot; *seen=g_pq_seq; void*f=g_pq_fence[slot]; g_pq_new_fno=g_pq_frameno[slot];
     pthread_mutex_unlock(&g_pq_mx);
     if(f) pq_waitsync(f,0,0xFFFFFFFFFFFFFFFFull/*TIMEOUT_IGNORED*/);
     if(!g_pq_prog){ const char*vs="#version 410 core\nout vec2 uv;void main(){vec2 p=vec2((gl_VertexID==1)?3.0:-1.0,(gl_VertexID==2)?3.0:-1.0);uv=p*0.5+0.5;gl_Position=vec4(p,0.0,1.0);}\n";
@@ -8536,7 +8555,8 @@ static void* present_thread_fn(void*a){ (void)a; pthread_setname_np("shim-presen
         static unsigned long pq_seen; int pq_shown=0;
         { extern volatile int g_win_visible_x; if(use_d3dgl && (win_hidden() || (!g_win_visible_x && !getenv("PELOAD_PRESENT_HIDDEN")))){ usleep(20000); continue; } }
         if(use_d3dgl && pq_on()){
-            if(pq_present_wait(&pq_seen,50)){ pq_shown=1; if(cglflush&&g_present_glctx){ CGLLockContext((CGLContextObj)g_present_glctx); cglflush(g_present_glctx); CGLUnlockContext((CGLContextObj)g_present_glctx); } }
+            if(pq_present_wait(&pq_seen,50)){ pq_shown=1; if(cglflush&&g_present_glctx){ CGLLockContext((CGLContextObj)g_present_glctx); cglflush(g_present_glctx); CGLUnlockContext((CGLContextObj)g_present_glctx); }
+                if(g_pq_new_fno){ lat_win(g_pq_new_fno,mono_s()); g_pq_new_fno=0; } }
             else if(!g_pq_seq){ d3dgl_blit_present(); if(cglflush&&g_present_glctx) cglflush(g_present_glctx); }   // nothing queued yet
         } else if(use_d3dgl){
             d3dgl_blit_present(); if(cglflush&&g_present_glctx) cglflush(g_present_glctx);
@@ -9540,6 +9560,7 @@ static int tls_blocks(uint32_t idx,void**out,int max){ int n=0; if(idx>=128) ret
 #include "forensic.c"   // forensic archive of voice / chat / events + its viewer (/forensics); uses stats.c
 #include "pktlog.c"     // packet log: the type of every datagram / connection (/packets.json, packets.jsonl); uses both
 #include "nav.c"
+#include "latency.c"    // input -> screen latency, per-second performance log (perf/*.csv)
 // ---- D3D object lifetime (backlog 27) ----------------------------------------------------------------------------------
 // D3D11 keeps an object alive while the pipeline has it bound, and the GL side (the submission thread, compute jobs) may
 // still use it for a frame or two after the game's last Release. So a released object goes through two stages:

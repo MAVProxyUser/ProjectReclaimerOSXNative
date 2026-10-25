@@ -2039,6 +2039,31 @@ Numbers are from the commit messages; PERF-PLAN.md has the measurements. Compare
   timestamps are keyed by d3dgl_present's frame number: the first version keyed them by the submission thread's own present
   count, which only starts when that thread switches on, and paired frames ~110 apart (it read "2.8 s"). HugeGrass, 17 players,
   hidden: 70-95 ms at 26-40 fps -- about 2.5-3 frames queued between the game and the GPU.
+- **Input -> screen latency measured end to end, and a per-second performance log** (2026-10-25; user: "the window adds its own
+  display delay on top of these numbers -- THIS is what I need you to calculate, cuz that feel is all that will matter to the
+  player"; "make sure you have a running log of the FPS ... compared to objects on the screen") — new shim/src/latency.c
+  (hooks lat_cam in hitbox.c hb_capture_view, lat_present in d3dsubmit.c sub_present, lat_gpu in glh_pq_publish, lat_win in
+  present_thread_fn after the window flush, lat_input in wininput.c wi_raw_mouse and XInputGetState; perf_tick on the stats
+  thread). How: every engine frame gets its camera's forward vector and the times halo3 presented it, the GPU finished it and
+  the window got it; a look input (mouse delta, or the right stick leaving its dead zone) after 250 ms of none, with the camera
+  still, is followed to the first frame whose camera turned, and each stage is timed from the input. The display step is a
+  model: the next refresh after the window flush (CVDisplayLink) + one refresh for the window server's composite.
+  PELOAD_LATPROBE=<secs> (test clients) sends a mouse delta through the raw-input path every <secs>. Output: `[latency]` per
+  input, `[perf]` every 10 s, the snapshot's "perf", and ~/Library/Application Support/ReclaimerMac/perf/<date>_<time>_<pid>.csv
+  every second (engine and window fps, frame-time median / 95% / worst, draws, objects by type and in the camera's view,
+  players, map, quality, stage lags, input -> screen; 30 newest kept). shim/tools/latency-summary.py <log> = the stage medians;
+  shim/tools/titleshot.sh = a picture of the client's window with its title bar (fps / draws / frame time), via
+  shim/tools/winid.c + `screencapture -l`. First numbers, HugeGrass hangar view, 22 fps, 6,400 draws, 60 Hz display, 76
+  probed inputs: input -> halo3 presents the turned frame 53 ms, -> GPU done 124 (+71), -> window 129, -> screen ~154 ms
+  (10% 128, 90% 189). PELOAD_LATENCY=0 / PELOAD_PERF_LOG=0 = off.
+- **Integer vertex formats read as their values, not as 4 floats; the false "format 12 not translated" warning** (2026-10-25;
+  user: "seems like something to fix") — peload.c `d3dgl_attrib_fmt` (returns 1 for an integer format, using
+  `d3dgl_attrib_ifmt`'s size and type, read as float(n)), the attribute loop (warns once per VS / format only when an integer
+  format really feeds a FLOAT shader input: `vertex input <sem> ... feeds a float input of VS <hash>`). Why: integer formats
+  fell through to "4 floats" (16 bytes, garbage values) and logged "vertex attribute format 12 not translated" before the
+  loop switched integer VS inputs to glVertexAttribIPointer -- which is what every R16G16B16A16_UINT input in HugeGrass is
+  (no mismatch line in a match), so it was a false alarm there; a float input fed an integer format now gets the values.
+  PELOAD_D3DGL_INTFMT_FLOAT4=1 = 4 floats, as before.
 - **One frame on the GPU instead of two: ~35 ms less latency** (2026-10-25; user: "the graphic UI feels sluggish and floaty")
   — glh_client.c `glh_pq_publish` (`g_gpu_frames`, `ab_gpuf`; d3dsubmit.c A/B feature 17). Why: the GL thread could run 2
   presented frames ahead of the frames the GPU had finished, on top of the render thread's 1 frame of lead over the GL thread:

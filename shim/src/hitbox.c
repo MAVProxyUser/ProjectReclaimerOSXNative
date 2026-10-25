@@ -119,7 +119,7 @@ static int hb_is_world_camera(const float*m){
         float v=r[0]*cam[0]+r[1]*cam[1]+r[2]*cam[2]+r[3]; if(fabsf(v) > 0.02f*sc*(1.0f+sqrtf(c2))) return 0; }
     return 1; }
 static float g_hb_vp[32]; static volatile unsigned g_hb_vpseq; volatile int g_hb_taken;
-static void hb_capture_view(const float*rows){ g_hb_vpseq++; __atomic_thread_fence(__ATOMIC_SEQ_CST); memcpy(g_hb_vp,rows,sizeof g_hb_vp); __atomic_thread_fence(__ATOMIC_SEQ_CST); g_hb_vpseq++; }
+static void hb_capture_view(const float*rows){ lat_cam(rows); g_hb_vpseq++; __atomic_thread_fence(__ATOMIC_SEQ_CST); memcpy(g_hb_vp,rows,sizeof g_hb_vp); __atomic_thread_fence(__ATOMIC_SEQ_CST); g_hb_vpseq++; }
 // Object datum fields (MCC halo3, from the evaluate functions of its HaloScript getters -- shim/docs/halo3-objects.md):
 //   +0x00 definition tag datum   +0x10 parent object (the vehicle when seated)   +0x1c bounding centre, +0x28 radius
 //   +0x50 origin   +0x5c forward   +0x68 up   +0x74 velocity   +0x80 angular velocity

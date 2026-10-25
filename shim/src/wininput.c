@@ -40,11 +40,13 @@ static int g_wi_user_released;   // (F1, below)
 static void wi_raw_mouse(int dx,int dy,uint16_t bflags,int16_t bdata){
     if(dx||dy) wi_cursor_captured_move(dx,dy);
     if(!g_ri_mouse || g_wi_user_released) return;   // (released by F1: the Mac has the pointer, the game gets no look motion)
+    if(dx||dy) lat_input(0);   // a look input (latency.c: input -> screen)
     uint8_t r[48]; memset(r,0,sizeof r); uint32_t type=0/*RIM_TYPEMOUSE*/, size=48;
     memcpy(r,&type,4); memcpy(r+4,&size,4); void*dev=(void*)0x4D53; memcpy(r+8,&dev,8);    // RAWINPUTHEADER (24 B)
     uint16_t usflags=0/*MOUSE_MOVE_RELATIVE*/; memcpy(r+24,&usflags,2); memcpy(r+28,&bflags,2); memcpy(r+30,&bdata,2);
     int32_t lx=dx, ly=dy; memcpy(r+36,&lx,4); memcpy(r+40,&ly,4);
     wi_post(wi_target(g_ri_mouse_hwnd),0x00FF/*WM_INPUT*/,0,wi_raw_alloc(r,48)); }
+void wi_probe_mouse(int dx){ wi_raw_mouse(dx,0,0,0); }   // (latency.c PELOAD_LATPROBE: a mouse move the game gets as from a mouse)
 static void wi_raw_key(uint16_t make,int e0,int brk,uint16_t vk,uint32_t msg){
     if(!g_ri_kbd) return;
     uint8_t r[48]; memset(r,0,sizeof r); uint32_t type=1/*RIM_TYPEKEYBOARD*/, size=40;

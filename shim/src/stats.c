@@ -1329,12 +1329,14 @@ static void st_spawns(const uint8_t*tab,int hi,const StPlayer*pl,int np,const ch
         if(g_wlog && !g_wpg[g].taken){ int k=snprintf(lm,sizeof lm,"  [spawn] power-up gone without a pickup tick: %s at (%.1f, %.1f, %.1f)\n",st_wclass(g_wpg[g].def,3)->nm,g_wpg[g].pos[0],g_wpg[g].pos[1],g_wpg[g].pos[2]); (void)!write(2,lm,(size_t)k); }
         memmove(g_wpg+g,g_wpg+g+1,(size_t)(g_nwpg-g-1)*sizeof *g_wpg); g_nwpg--; }
     if(g_wlog) for(int q=0;q<nconf;q++){ int i=conf[q]; int k=snprintf(lm,sizeof lm,"  [spawn] %s spawned: %s at (%.2f, %.2f, %.2f)\n",g_wkind[g_wt[i].kind],st_wclass(g_wt[i].def,g_wt[i].type)->nm,g_wt[i].pos[0],g_wt[i].pos[1],g_wt[i].pos[2]); (void)!write(2,lm,(size_t)k); } }
+static char g_perf_json[1024];   // the last second of latency.c's performance log (snapshot "perf")
 static void st_snapshot(StBuf*s){
     static const char* teams[8]={"red","blue","green","orange","purple","gold","brown","pink"};
     extern double g_gameplay_t0; double now=mono_s();
     sb_put(s,"{\"time\":%.2f,\"in_match\":%s,\"inst\":%d",g_gameplay_t0?now-g_gameplay_t0:0.0,g_gameplay_t0?"true":"false",(int)getpid());   // inst: a new game -> open pages reload
     { pthread_mutex_lock(&g_ev_mx); uint32_t fs=g_ev_seq; pthread_mutex_unlock(&g_ev_mx); sb_put(s,",\"feed_seq\":%u",fs); }
     { char rj[1024]; rec_status_json(rj,sizeof rj,!win_hidden()); sb_put(s,",\"rec\":%s",rj); }   // clip recording (rec.m)
+    sb_put(s,",\"perf\":%s",g_perf_json[0]?g_perf_json:"null");   // latency.c: fps, frame times, objects in view, input -> screen
     { st_av_init(); st_av_tick(now); static const char*const mn[5]={"off","1","2","3","none"};
       sb_put(s,",\"autovote\":{\"calls\":\"%s\",\"map\":\"%s\"}",g_av_calls==1?"yes":g_av_calls==2?"no":"off",mn[g_av_map+1]); }
     char m[64]="";
@@ -1491,7 +1493,7 @@ static void st_snapshot(StBuf*s){
     #undef ST_TYPE
 }
 static void* st_snap_thread(void*a){ (void)a; pthread_setname_np("shim-stats-snap");
-    for(;;){ StBuf s={0}; st_snapshot(&s); if(s.b){ pthread_mutex_lock(&g_st_mx); free(g_st_json); g_st_json=s.b; g_st_len=s.n; g_st_seq++; pthread_cond_broadcast(&g_st_cv); pthread_mutex_unlock(&g_st_mx); }
+    for(;;){ perf_tick(); StBuf s={0}; st_snapshot(&s); if(s.b){ pthread_mutex_lock(&g_st_mx); free(g_st_json); g_st_json=s.b; g_st_len=s.n; g_st_seq++; pthread_cond_broadcast(&g_st_cv); pthread_mutex_unlock(&g_st_mx); }
         usleep(100000); }
     return 0; }
 

@@ -222,8 +222,8 @@ double g_lag_t[256];   // (PELOAD_LAG_LOG) when halo3's render thread presented 
 static double g_lag_req[256];   // the same by this thread's present count (g_sq_pres_req): the GL thread moves it to g_lag_t at SQ_PRESENT
 static void sub_present(void){
     sub_switch();
-    if(!sub_on()){ extern unsigned long g_eng_present_no_x; g_lag_t[(g_eng_present_no_x+1)&255]=mono_s(); d3dgl_present(); return; } sub_start();
-    g_lag_req[(g_sq_pres_req+1)&255]=mono_s(); (void)sub_alloc(SQ_PRESENT,0); sub_push(); uint64_t want=++g_sq_pres_req;
+    if(!sub_on()){ extern unsigned long g_eng_present_no_x; double t=mono_s(); g_lag_t[(g_eng_present_no_x+1)&255]=t; lat_present(t); d3dgl_present(); return; } sub_start();
+    { double t=mono_s(); g_lag_req[(g_sq_pres_req+1)&255]=t; lat_present(t); } (void)sub_alloc(SQ_PRESENT,0); sub_push(); uint64_t want=++g_sq_pres_req;
     static int ahead=-1; if(ahead<0){ const char*e=getenv("PELOAD_D3DGL_SUBMIT_FRAMES"); ahead=e?atoi(e):1; if(ahead<1) ahead=1; if(ahead>4) ahead=4; }
     if(want>(uint64_t)ahead && __atomic_load_n(&g_sq_pres_done,__ATOMIC_ACQUIRE)<want-(uint64_t)ahead){ double t0=mono_s(); g_sq_waitframe++;
         pthread_mutex_lock(&g_sq_mx); __atomic_store_n(&g_sq_psleep,1,__ATOMIC_SEQ_CST); while(__atomic_load_n(&g_sq_pres_done,__ATOMIC_ACQUIRE)<want-(uint64_t)ahead) sub_wait(&g_sq_pcv); g_sq_psleep=0; pthread_mutex_unlock(&g_sq_mx);
