@@ -452,6 +452,20 @@ enqueue. Overlaps the engine's ~22% with the loader and driver, but the driver s
   fps. Off means off (backlog 39): with every overlay switch off only a 128-byte camera copy per frame, a once-per-frame
   engine hook checking a flag, and the object_delete / event / chat hooks remain.
 
+- Rosetta's run-time (JIT) translation of halo3 / the client, against ahead-of-time translation (2026-10-25; user: "make
+  some small standalone tests to prove the theory then decide if it is worth doing in game tests"). The idea was to hand
+  halo3.dll's code to Rosetta as a Mach-O image (a dylib), which oahd translates ahead of time, instead of copying it into
+  memory where Rosetta translates it while it runs. `bash shim/tools/aotbench/run.sh` times the same x86-64 bytes three
+  ways -- in the executable's text (AOT), copied into a MAP_JIT page (how the loader runs guest code), in a dylib built from
+  the same bytes: integer mixing, 4x4 float matrices, a branchy state machine, pointer chasing, small indirect calls. Result:
+  equal within run-to-run noise (totals 942 / 959 / 908 ms and 887 / 946 / 934 ms; the one workload that moved, the branchy
+  one, swapped places between runs: code alignment). A dylib built with `-image_base 0x180000000` (and
+  `-no_fixup_chains`) is still slid by dyld, and writing a 14-byte detour into its text works (only the detoured function
+  changes speed). In the game (`shim/tools/sample-binaries.py`, 128-player HugeGrass): halo3's engine thread spends 87.7% of
+  its own time in the translated guest code, 6.3% in Rosetta's runtime helpers -- the most an ahead-of-time image could save,
+  and indirect-branch lookups stay with it -- and 5.9% in the loader. **Not worth an in-game attempt**: the engine thread's
+  cost is the translated code itself, which is as good translated at run time as ahead of time.
+
 ## Advanced graphics settings (2026-10-18, client v0.9.20)
 
 Measured in ONE session (the client applies quality changes live), at a fixed vista on Hugegrass (local dedicated server,

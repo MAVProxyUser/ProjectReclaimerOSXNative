@@ -2279,6 +2279,12 @@ Numbers are from the commit messages; PERF-PLAN.md has the measurements. Compare
 - **shim/tools/cowtest.c** (2026-10-25) — is the loader's copy-on-write guest copy (mach_vm_copy) a real copy under Rosetta
   when used like halo3's game-state copies (16 MB, the source written after each copy, the copy read on another thread,
   copies of copies in a ring)? 1,500 + 900 rounds: 0 mismatches.
+- **shim/tools/aotbench/** (2026-10-25) — Rosetta ahead-of-time vs run-time translation of the same x86-64 code, plus the
+  dylib route and a detour patch into it (PERF-PLAN.md "Not the bottleneck": equal within noise; not pursued).
+  **shim/tools/sample-binaries.py** — a thread's samples by the image they end in (translated guest code "Rosetta JIT",
+  "Rosetta Runtime Routines", the loader, system libraries). **shim/tools/ab-phases.py** — fps and [submit] waits per
+  PELOAD_AB phase. **shim/tools/hitch-sample.sh** — `sample` a client when a second drops below N fps.
+
 ## 21. Superseded workarounds (kept for history; most switches still exist)
 
 - **Separable GL programs** -> monolithic programs (da262fb). `PELOAD_D3DGL_SEP=1`.
