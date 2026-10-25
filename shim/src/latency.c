@@ -153,7 +153,7 @@ static void perf_objects(int*cnt,int*inview,int*total){   // object table: count
 static double perf_cpu(void){ static double lu, lt; struct rusage ru; getrusage(RUSAGE_SELF,&ru); double u=ru.ru_utime.tv_sec+ru.ru_utime.tv_usec*1e-6+ru.ru_stime.tv_sec+ru.ru_stime.tv_usec*1e-6, t=mono_s();
     double pct=lt>0&&t>lt?(u-lu)/(t-lt)*100:0; lu=u; lt=t; return pct; }
 void perf_tick(void){   // (stats thread, every ~100 ms)
-    lt_check(); lt_probe_start(); lt_vs_start();
+    lt_check(); lt_probe_start(); lt_vs_start(); latch_tick();
     static double tl; double now=mono_s(); if(!tl){ tl=now; return; } if(now-tl<1.0) return; double dt=now-tl; tl=now;
     extern double g_gameplay_t0, g_menu_ready_t0; if(!g_gameplay_t0 && !g_menu_ready_t0) return;
     perf_open();

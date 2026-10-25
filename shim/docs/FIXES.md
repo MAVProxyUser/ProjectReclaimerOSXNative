@@ -2078,6 +2078,22 @@ Numbers are from the commit messages; PERF-PLAN.md has the measurements. Compare
   -- engine 18.4-22.2 -> 24.2-26.0 fps in comparable phases (+25-35%: the helper's frames were consumed late), input -> screen
   147 -> 131 ms, GPU done -> window +21 -> +1 ms. PELOAD_PRESENT_SLEEP=1 = the old sleep. PELOAD_PRESENT_PROF=1 prints
   `[presentprof]` every 5 s: new frames / presents per second, time waiting for a frame / drawing / flushing.
+- **Late camera update: the newest mouse movement applied to each frame's camera at its upload** (2026-10-25; user: "is there
+  anything novel we can do to improve hugegrass? 239ms of input lag is huge") — new shim/src/latch.c (`latch_src` called by
+  d3dgl_bind_ubo / d3dgl_ubo_batch, `latch_overlay_vp` at the overlay's camera capture, `latch_received` in wi_raw_mouse; D3DObj
+  `latch_f`; d3dsubmit.c A/B feature 22 `latch`); play.sh sets PELOAD_LATCH=1. Why: in big games 40-110 ms pass between halo3
+  building a frame and its constant buffers going to the GPU; the turn the player made meanwhile shows a frame or more later.
+  How: the idea of VR late latching / Reflex 2's Frame Warp on the camera matrix (so HUD and first-person weapon stay): a
+  learner fits degrees per mouse count and how old a frame's input is at upload (HugeGrass: -0.0217 deg/count, 50-60 ms,
+  R^2 0.82-0.87), a predictive angle follows the mouse with an offset pulled toward the engine's camera, and every constant
+  buffer holding the world camera (hb_is_world_camera at its bound offset) is rotated about the camera position in its GPU
+  copy only; none in a vehicle or without a live local player; clamped to 12 degrees. Two first designs failed and are
+  described in the file (snapshots of the counts the game read: R^2 0.25-0.6; a fixed-window correction: the view reversed
+  direction 11.7 times a second); a third bug -- the overlay's capture took the frame's camera before the patched upload, so
+  the probe never saw the patch -- was found by an A/B that showed nothing. In-match A/B (PELOAD_AB=latch:20, ~97-player
+  HugeGrass, ~42 fps): input -> screen 120 -> 84 ms; yaw direction reversals 0.8 -> 1.2-1.3 a second (a little extra
+  wobble). Valhalla ~230 fps: 52-62 -> 42-49 ms. Unpatched matrices facing the camera's way (PELOAD_LATCH_SKYCHECK=1) were
+  none camera matrices: the sky shares the world camera. Mouse only. PELOAD_LATCH=0 = off (no learning either).
 - **Input -> screen latency measured end to end, and a per-second performance log** (2026-10-25; user: "the window adds its own
   display delay on top of these numbers -- THIS is what I need you to calculate, cuz that feel is all that will matter to the
   player"; "make sure you have a running log of the FPS ... compared to objects on the screen") — new shim/src/latency.c

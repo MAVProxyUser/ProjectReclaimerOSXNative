@@ -1117,6 +1117,7 @@ typedef struct { void** vtbl; uint32_t kind; uint32_t rowpitch; uint64_t size; v
     int cs_gpu;                   // buffer: its GL copy is the current contents (written by GPU compute); the CPU copy is stale
     char* monosrc;                // shader: mono-path GLSL (injected + renamed), built once and shared by every pair
     uint64_t bchash;              // shader: FNV-1a of the bytecode (identifies it across runs for the pair pre-link list)
+    uint64_t latch_f;             // (latch.c) a camera constant buffer: the frame its GPU copy was patched for (copied again each frame)
     unsigned shc_id[4]; uint64_t shc_mask[4]; int shc_n; // shader: compiled GL shaders per interface-padding mask
     void* canon;                  // shader: first-created object with identical bytecode (programs are keyed by it)
     uint8_t bcshared;             // shader: bc / glsl are the canon's (a duplicate: freed when released, its data not)
@@ -4142,6 +4143,8 @@ static void*  MSABI i_SetCursor(void*c){ return c; }
 void* fg_hwnd_ext(void);
 #include <CoreGraphics/CoreGraphics.h>
 // latency.c (included after stats.c): input -> screen latency stages and the per-second performance log
+const uint8_t* latch_src(D3DObj*cb,uint64_t sub,uint64_t n,uint8_t*tmp,size_t cap); void latch_received(int dx,int dy);
+const float* latch_overlay_vp(const float*engine); void latch_tick(void);   // (latch.c)
 void lat_cam(const float*vp); void lat_present(double t); void lat_enc(uint64_t fno,double t); void lat_gpu(uint64_t fno,double t); void lat_win(uint64_t fno,double t); void lat_input(int src); void perf_tick(void);
 #include "wininput.c"
 static int    MSABI i_SetLayeredWindowAttributes(void*h,uint32_t key,uint8_t a,uint32_t f){ (void)key;
@@ -6554,7 +6557,8 @@ static void d3dgl_ubo_batch(D3DObj*const*cbs,const uint32_t*firsts,const int*nve
     if(count<2 || !g_ring || !G.MapBufferRange || !g_cbbatch_on || GENV1("PELOAD_D3DGL_NORING") || GENV1("PELOAD_D3DGL_NORING_CB")) return;
     D3DObj* u[32]; uint64_t un[32]; int nu=0; uint64_t total=0;
     for(int i=0;i<count;i++){ D3DObj*cb=cbs[i]; if(!cb||!cb->data||!cb->size) continue;
-        if(!(cb->uboglver!=cb->ver || cb->ubosz!=g_ring_gen || cb->glubo==0)) continue;   // its ring copy is current
+        extern unsigned long g_eng_present_no_x;
+        if(!(cb->uboglver!=cb->ver || cb->ubosz!=g_ring_gen || cb->glubo==0 || (cb->latch_f && cb->latch_f!=g_eng_present_no_x+1))) continue;   // its ring copy is current
         long sub=(long)firsts[i]*16; if((uint64_t)sub>=cb->size) sub=0;
         uint64_t n=cb->size; if(n<(uint64_t)(sub+(long)nvecs[i]*16)) n=(uint64_t)(sub+(long)nvecs[i]*16);
         int k; for(k=0;k<nu;k++) if(u[k]==cb) break;
@@ -6565,7 +6569,9 @@ static void d3dgl_ubo_batch(D3DObj*const*cbs,const uint32_t*firsts,const int*nve
     uint8_t*p=G.MapBufferRange(GLE_ARRAY,(long)g_ring_off,(long)total,0x0002/*WRITE*/|0x0004/*INVALIDATE_RANGE*/|0x0020/*UNSYNCHRONIZED*/);
     if(!p) return;
     uint64_t o=0;
-    for(int k=0;k<nu;k++){ D3DObj*cb=u[k]; memcpy(p+o,cb->data,(size_t)cb->size); if(un[k]>cb->size) memset(p+o+cb->size,0,(size_t)(un[k]-cb->size));
+    static __thread uint8_t*ltmp; if(!ltmp) ltmp=malloc(65536);
+    for(int k=0;k<nu;k++){ D3DObj*cb=u[k]; uint64_t sub0=0; for(int i=0;i<count;i++) if(cbs[i]==cb){ sub0=(uint64_t)firsts[i]*16; if(sub0>=cb->size) sub0=0; break; }
+        memcpy(p+o,latch_src(cb,sub0,cb->size,ltmp,ltmp?65536:0),(size_t)cb->size); if(un[k]>cb->size) memset(p+o+cb->size,0,(size_t)(un[k]-cb->size));
         cb->uboglver=cb->ver; cb->ubosz=g_ring_gen; cb->glubo=(unsigned)(g_ring_off+o+1); g_cbring_bytes+=un[k]; o+=(un[k]+255)&~255ull; }
     G.UnmapBuffer(GLE_ARRAY); g_ring_off+=total; g_cbbatch_n++; g_cbbatch_cbs+=nu; }
 static void d3dgl_bind_ubo(unsigned binding,D3DObj*cb,uint32_t first,int nvec){
@@ -6573,12 +6579,14 @@ static void d3dgl_bind_ubo(unsigned binding,D3DObj*cb,uint32_t first,int nvec){
     if(cb && cb->data && cb->size && !GENV1("PELOAD_D3DGL_NORING") && !GENV1("PELOAD_D3DGL_NORING_CB")){
         // stream the CB through the ring: one unsynchronized copy per CPU write (ver) per ring generation
         long sub=(long)first*16; if((uint64_t)sub>=cb->size) sub=0;
-        if(cb->uboglver!=cb->ver || cb->ubosz!=g_ring_gen || cb->glubo==0){
+        extern unsigned long g_eng_present_no_x;
+        if(cb->uboglver!=cb->ver || cb->ubosz!=g_ring_gen || cb->glubo==0 || (cb->latch_f && cb->latch_f!=g_eng_present_no_x+1)){
             uint64_t n=cb->size; if(n<(uint64_t)(sub+need)) n=(uint64_t)(sub+need);
-            long ro;
+            long ro; static __thread uint8_t*ltmp; if(!ltmp) ltmp=malloc(65536);
+            const uint8_t*src=latch_src(cb,(uint64_t)sub,cb->size,ltmp,ltmp?65536:0);   // (latch.c: a camera buffer's patched copy)
             g_cbring_bytes+=n; g_cbring_puts++;
-            if(n==cb->size) ro=d3dgl_ring_put(cb->data,n);
-            else { void*tmp=calloc(1,(size_t)n); if(tmp){ memcpy(tmp,cb->data,cb->size); ro=d3dgl_ring_put(tmp,n); free(tmp); } else ro=-1; }
+            if(n==cb->size) ro=d3dgl_ring_put(src,n);
+            else { void*tmp=calloc(1,(size_t)n); if(tmp){ memcpy(tmp,src,cb->size); ro=d3dgl_ring_put(tmp,n); free(tmp); } else ro=-1; }
             if(ro>=0){ cb->uboglver=cb->ver; cb->ubosz=g_ring_gen; cb->glubo=(unsigned)(ro+1); } }   // glubo = ring offset+1 here
         if(cb->glubo && cb->ubosz==g_ring_gen){ buf=g_ring; off=(long)cb->glubo-1+sub; goto bind; }
         cb=0; }                                                         // ring copy failed: zero buffer below
@@ -7543,7 +7551,7 @@ static void d3dgl_draw_impl(uint32_t vcount,int indexed,uint32_t instcount,uint3
     // full-size scene draw of the frame (before first-person weapon draws, which use their own projection).
     if(!g_hb_taken && hb_enabled() && g_d3dst.rtv && vw>=640 && vh>=360){ D3DObj*c=g_d3dst.vscb[0];
         if(c && c->data){ uint64_t off=(uint64_t)g_d3dst.vscb_1st[0]*16; if(c->size>=off+128){ const float*f=(const float*)((uint8_t*)c->data+off);
-            if(hb_is_world_camera(f)){ hb_capture_view(f); hb_note_dsv(dsv); g_hb_taken=1; } } } }
+            if(hb_is_world_camera(f)){ hb_capture_view(latch_overlay_vp(f)); hb_note_dsv(dsv); g_hb_taken=1; } } } }
     if(GENV1("PELOAD_TRACE_VP") && rt->w>=2048){ static uint64_t seen[256]; static int ns; uint64_t key=((uint64_t)(uintptr_t)rt*31+(uint64_t)vw*7919+(uint64_t)vh)^ps->bchash; int f=0; for(int q=0;q<ns;q++) if(seen[q]==key){ f=1; break; } if(!f && ns<256){ seen[ns++]=key; char m[160]; int k=snprintf(m,sizeof m,"  [vp] rt=%p %ux%u f%u vp=%dx%d at %d,%d n=%u psh=%016llx\n",(void*)rt,rt->w,rt->h,rt->fmt,vw,vh,g_d3dst.vp_x,g_d3dst.vp_y,vcount,(unsigned long long)ps->bchash); (void)!write(2,m,k); } }
     if(g_nullps_color){ g_nullps_color=0; if(G.ColorMask) gs_colormask(0,0,0,0); }   // NULL PS: no colour writes
     // pipeline
@@ -9646,6 +9654,7 @@ static int tls_blocks(uint32_t idx,void**out,int max){ int n=0; if(idx>=128) ret
 #include "pktlog.c"     // packet log: the type of every datagram / connection (/packets.json, packets.jsonl); uses both
 #include "nav.c"
 #include "latency.c"    // input -> screen latency, per-second performance log (perf/*.csv)
+#include "latch.c"      // late camera update: the newest mouse movement applied to a frame's camera at its upload
 // ---- D3D object lifetime (backlog 27) ----------------------------------------------------------------------------------
 // D3D11 keeps an object alive while the pipeline has it bound, and the GL side (the submission thread, compute jobs) may
 // still use it for a frame or two after the game's last Release. So a released object goes through two stages:

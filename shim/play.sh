@@ -8,6 +8,8 @@
 #   PELOAD_INPUT_SCRIPT=walk   scripted turn/walk test (PELOAD_INPUT_LOOP=1 repeats it)
 #   PELOAD_AUDIO=0             silence (game audio plays through CoreAudio by default)
 #   PELOAD_VSYNC=1             vsync the window (off by default: frames are never held back)
+#   PELOAD_LATCH=0             no late camera update (on by default: the newest mouse movement is applied to each frame's
+#                              camera just before it goes to the GPU -- HugeGrass 120 -> 84 ms input -> screen; mouse only)
 #   RECLAIMER_EXE=<path>       the Project Reclaimer client exe (default: the newest supported one in client/)
 #   RECLAIMER_JOIN=host:port   start in the menu and join that server (the client's reclaimer://join link)
 #   PELOAD_H3="name=value,..." set Halo 3 engine settings (shim/docs/halo3-engine-globals.md)
@@ -118,7 +120,7 @@ else PC="$(sysctl -n hw.perflevel0.physicalcpu 2>/dev/null || echo 6)"; CSW=$((P
 [ -f shim/src/stats_page.html ] && [ -z "${PELOAD_STATS_PAGE:-}" ] && export PELOAD_STATS_PAGE="$PWD/shim/src/stats_page.html"
 env PELOAD_SKINGUARD=1 PELOAD_VTGUARD=1 PELOAD_ALLOC_GUARD=1 "${RUNTIME[@]}" PELOAD_STATS_HTTP="${PELOAD_STATS_HTTP:-8765}" PELOAD_STATS_OPEN="${PELOAD_STATS_OPEN:-1}" \
     PELOAD_D3DGL_SUBMIT="${PELOAD_D3DGL_SUBMIT:-auto}" PELOAD_GL_HELPER="${PELOAD_GL_HELPER:-1}" PELOAD_CS_WORKERS="${PELOAD_CS_WORKERS:-$CSW}" \
-    PELOAD_FASTCALL="${PELOAD_FASTCALL:-all}" \
+    PELOAD_FASTCALL="${PELOAD_FASTCALL:-all}" PELOAD_LATCH="${PELOAD_LATCH:-1}" \
     PELOAD_RECLAIMER_PATCHES=all PELOAD_WORKER_INHERIT_STDIO=1 PELOAD_PRESENT=1 PELOAD_HOLD_WINDOW=1 PELOAD_D3DGL=1 \
     arch -x86_64 shim/build/peload "$EXE" "${ARGS[@]}" < <(exec sleep 86400.$$ 2>/dev/null) > >( { [ -n "$MACH_LINE" ] && echo "$MACH_LINE"; exec cat; } > /tmp/reclaimer_play.log) 2>&1
 # the stdin feeder above (an open pipe that never sends anything) must not outlive the game: it used to hold the

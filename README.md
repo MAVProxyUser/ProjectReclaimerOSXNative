@@ -559,6 +559,10 @@ compositing (~25 ms at 60 Hz). Three fixes from the same day are in these number
 second whatever the title said (now every frame), the GL helper waited for the GPU at every frame's luminance readback
 (HugeGrass +45%), and one frame instead of two may wait for the GPU (~35 ms less).
 
+- **Late camera update** (on by default; `PELOAD_LATCH=0 bash shim/play.sh` turns it off): the mouse movement you made
+  after the game built a frame is applied to that frame's camera just before the GPU draws it -- HugeGrass with ~97
+  players: 120 -> 84 ms from mouse to screen. It learns your sensitivity within seconds of play, steps aside in vehicles
+  and while dead, and turns the world only (HUD and weapon stay put). Mouse only.
 - The stats page's header shows it live: engine fps and the new frames the window got, frame time (median / 95th
   percentile), draws, objects in view, input -> screen.
 - Every second also goes to `~/Library/Application Support/ReclaimerMac/perf/<date>_<time>_<pid>.csv` (fps, window fps,
