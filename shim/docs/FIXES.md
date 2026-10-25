@@ -1956,6 +1956,12 @@ Numbers are from the commit messages; PERF-PLAN.md has the measurements. Compare
   handle on the same file, fstat / GetFileInformationByHandle stay live; the kept descriptor is reopened after 1 s
   (PELOAD_FS_METACACHE=0 = always open). Measured in a local match: 23.4 -> 12.5 (1) -> 1.1 us (2) per query, path
   translation included; the game unchanged (spawns, items, match time = wall time). Both ON by default.
+- **Test runs are silent: PELOAD_WASAPI_MUTE** (2026-10-25; user: "can you mute the game audio while you test?") — wasapi.c
+  `wa_aq_cb`, shim/tools/quiet-run.sh, shim/dedicated.sh. Why: test clients muted the game's XAudio2 sound
+  (PELOAD_AUDIO=0, or PELOAD_AUDIO_MUTE=1 when a test needs the mixer), but the client's own WASAPI sound -- menu music,
+  other players' voice chat on a public server -- still played on the Mac. How: PELOAD_WASAPI_MUTE=1 plays every WASAPI
+  stream as silence (consumed as usual; a clip recording still gets it); quiet-run.sh always sets it and PELOAD_AUDIO_MUTE=1,
+  dedicated.sh sets it for its workers. Unset (play.sh) = sound as before.
 - **PELOAD_AB=new** (2026-10-25; user: "benchmarks must be vs something meaningful: join the largest game you can, then
   back down to smaller ones") — peload.c `ab_new`, d3dsubmit.c sub_switch feature 13: flips every engine-thread change of the
   day together (metadata cache, data-opens-only map notes, the QPC leaf, the matrix skip, the engine thread's QoS) so one

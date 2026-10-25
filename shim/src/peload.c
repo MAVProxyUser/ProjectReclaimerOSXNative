@@ -11392,6 +11392,11 @@ static void* __attribute__((ms_abi,noinline)) crt_big_memmove(void*d,const void*
     if(lg) mcl_note((uint64_t)__builtin_return_address(0),d,s,n);
     if(g_memcpy_cow<0){ const char*e=getenv("PELOAD_MEMCPY_COW"); g_memcpy_cow=e?atoi(e)!=0:1; }   // default ON again since 2026-10-18 (BTB A/B +4%, clean across map changes; was off 2026-10-17 21:15 as a corruption suspect)
     uintptr_t D=(uintptr_t)d, S=(uintptr_t)s;
+    if(lg && n>=(1u<<20)){   // (PELOAD_MEMCPY_LOG) why a big copy is not done copy-on-write, every 5 s
+        static uint64_t why[6]; static double tw; int r=!g_memcpy_cow?0:((D-S)&16383)?1:!(D+n<=S || S+n<=D)?2:4;
+        if(r==4){ size_t h=(16384-(D&16383))&16383, md=(n-h)&~(size_t)16383; r=md<(256u<<10)?3:!cow_ok(D+h,S+h,md)?4:5; } why[r]++;
+        double now=mono_s(); if(now-tw>5.0){ tw=now; char m[220]; int k=snprintf(m,sizeof m,"  [memcpy] big copies: %llu copy-on-write, declined: off %llu, not 16 KB-congruent %llu, overlap %llu, too small %llu, not private %llu\n",
+            (unsigned long long)why[5],(unsigned long long)why[0],(unsigned long long)why[1],(unsigned long long)why[2],(unsigned long long)why[3],(unsigned long long)why[4]); (void)!write(2,m,(size_t)k); memset(why,0,sizeof why); } }
     if(g_memcpy_cow && n>=(1u<<20) && !((D-S)&16383) && (D+n<=S || S+n<=D)){
         size_t head=(16384-(D&16383))&16383, mid=(n-head)&~(size_t)16383;
         if(mid>=(256u<<10) && cow_ok(D+head,S+head,mid)){

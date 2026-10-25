@@ -5,7 +5,9 @@
 #   e.g. bash shim/tools/quiet-run.sh "PELOAD_LOCAL_RUNTIME=__unset__" 60      # direct Guardian match
 # QR_PAD=1 lets the pad path run (needed for PELOAD_INPUT_SCRIPT scripted input).
 # QR_HIDE=1 runs with no window at all (PELOAD_HIDE_WINDOW; log-only tests -- window captures need the window).
-# No microphone (PELOAD_MIC=0) unless QR_MIC=tone (a test tone) -- test runs never open the real one.
+# No microphone (PELOAD_MIC=0) unless QR_MIC=tone (a test tone) -- test runs never open the real one. Silent: the game's
+# sound off (PELOAD_AUDIO=0; a run that turns it on for a test is still muted, PELOAD_AUDIO_MUTE=1) and the client's own sound
+# -- menu music, other players' voice -- played as silence (PELOAD_WASAPI_MUTE=1).
 # A server needing a Workshop mod we lack (or have in another version): its REQUIRED MODS screen gets Enter by itself
 # (PELOAD_AUTO_MODS=1: Download / Update & join -> workshop-helper.sh, DepotDownloader).
 # Live stats on http://127.0.0.1:8765/ (QR_STATS=<port>, 0 = off), opened in the browser unless a tab reconnects (QR_STATS_OPEN=0).
@@ -35,7 +37,7 @@ MINENV=""; [ -n "${QR_MINIMIZE:-}" ] && MINENV="PELOAD_MINIMIZE=1"; [ -n "${QR_H
 set -m
 env PELOAD_SKINGUARD=1 PELOAD_VTGUARD=1 PELOAD_ALLOC_GUARD=1 PELOAD_RECLAIMER_PATCHES=all PELOAD_WORKER_INHERIT_STDIO=1 \
   PELOAD_PRESENT=1 PELOAD_HOLD_WINDOW=1 PELOAD_PRESENT_HIDDEN=1 PELOAD_D3DGL=1 PELOAD_FPS_LOG=1 \
-  $PADENV PELOAD_NO_KBM=1 PELOAD_NO_SYS_CURSOR=1 PELOAD_NO_FOCUS=1 PELOAD_AUDIO=0 $MINENV \
+  $PADENV PELOAD_NO_KBM=1 PELOAD_NO_SYS_CURSOR=1 PELOAD_NO_FOCUS=1 PELOAD_AUDIO=0 PELOAD_AUDIO_MUTE=1 PELOAD_WASAPI_MUTE=1 $MINENV \
   PELOAD_STATS_HTTP="${QR_STATS:-8765}" PELOAD_STATS_OPEN="${QR_STATS_OPEN:-1}" PELOAD_MIC="${QR_MIC:-0}" PELOAD_TITLE_PREFIX="TEST (no input)" PELOAD_AUTO_MODS=1 PELOAD_PASTEBOARD=reclaimer-test RECLAIMER_PROFILE_DIR='C:\ReclaimerProfileTest' $EXTRA \
   arch -x86_64 shim/build/peload "$EXE" "${ARGS[@]}" < /dev/null > /tmp/quiet-run.log 2>&1 &
 PG=$!; echo "$PG" > "${QR_PGID_FILE:-/tmp/quiet-run.pgid}"; sleep "$SECS"; kill -9 -- -$PG 2>/dev/null; sleep 1; rm -f "${QR_PGID_FILE:-/tmp/quiet-run.pgid}"

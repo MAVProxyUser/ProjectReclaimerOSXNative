@@ -64,6 +64,9 @@ static void wa_aq_cb(void*ud,AudioQueueRef q,AudioQueueBufferRef b){
     if(n<frames) memset((uint8_t*)b->mAudioData+(size_t)n*s->blk,0,(size_t)(frames-n)*s->blk);   // underrun: silence
     if(g_rec_audio) rec_audio_push(s,b->mAudioData,frames,(int)s->ch,(int)s->rate,(int)s->bits,(int)s->blk,(int)s->isfloat);   // clip recording (rec.m): menu music, voices
     s->rd+=n; s->played+=frames; void*ev=s->event;
+    // PELOAD_WASAPI_MUTE=1 (test runs): the client's own sound -- menu music, other players' voice -- consumed as usual and
+    // played as silence (PELOAD_AUDIO_MUTE does the same for the game's XAudio2 sound); a clip recording still gets it
+    { static int mute=-1; if(mute<0) mute=getenv("PELOAD_WASAPI_MUTE")?1:0; if(mute) memset(b->mAudioData,0,(size_t)frames*s->blk); }
     b->mAudioDataByteSize=frames*s->blk; AudioQueueEnqueueBuffer(q,b,0,0);
     pthread_mutex_unlock(&s->m); pthread_mutex_unlock(&g_wa_cbmx);
     if(ev) i_SetEvent(ev); }                                  // room in the buffer: let the client refill
