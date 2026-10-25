@@ -2039,6 +2039,16 @@ Numbers are from the commit messages; PERF-PLAN.md has the measurements. Compare
   timestamps are keyed by d3dgl_present's frame number: the first version keyed them by the submission thread's own present
   count, which only starts when that thread switches on, and paired frames ~110 apart (it read "2.8 s"). HugeGrass, 17 players,
   hidden: 70-95 ms at 26-40 fps -- about 2.5-3 frames queued between the game and the GPU.
+- **HugeGrass +45%: the GL helper no longer waits for the GPU at every readback** (2026-10-25; found with `sample` of the
+  helper during a latency run: 88.6% of its main thread in iokit_user_client_trap <- GLDBufferRec::restoreData <-
+  gleSynchronizeBufferOnCurrentDevices <- glMapBufferRange) — glhelper.c `rb_poll` / `rb_finish` (GLH_X_READBACK), glh_shm.h
+  `rb_sync` (GLH_VERSION 7), glh_client.c `ab_rbdefer` (d3dsubmit.c A/B feature 19). Why: the helper mapped a readback's pixel
+  buffer as soon as the command arrived -- right after the ReadPixels into it -- and the map waits for the GPU to finish
+  everything queued before it. The overlay's depth readback asked two frames late, so it never mattered; the client's
+  per-frame luminance readback (this morning's rb_async) asks at once, so every frame the helper idled until the GPU caught
+  up (its "busy 101%" was mostly that wait). How: a fence after the ReadPixels; the buffer is mapped once the fence has
+  signalled (polled beside the frame and query fences, in ticket order). In-match A/B (PELOAD_AB=rbdefer:20, HugeGrass, 12
+  phases): 32.9-35.6 vs 23.1-24.3 fps, input -> screen 108 vs 146 ms (GPU done 82 vs 118). PELOAD_GLH_RB_SYNC=1 = map at once.
 - **The window showed at most ~27 new frames a second with the GL helper (the default since 2026-10-17)** (2026-10-25; user: "the
   graphic UI feels sluggish and floaty"; found with the new window-fps column of the per-second log and PELOAD_PRESENT_PROF=1)
   — peload.c `pq_started` (used by present_thread_fn), `ab_presleep` (d3dsubmit.c A/B feature 18). Why: the present thread

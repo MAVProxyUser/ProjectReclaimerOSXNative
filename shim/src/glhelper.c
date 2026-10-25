@@ -132,6 +132,23 @@ static void pq_poll(int wait){
         atomic_store(&H->pq_latest,s); atomic_fetch_add(&H->pq_seq,1); atomic_store(&H->frames_done,atomic_load(&H->frames_done)+1);
         pq_pend[i]=pq_pend[--npq]; i--; } }
 
+// ---- asynchronous readbacks (GLH_X_READBACK) ----------------------------------------------------------------------------------
+// The command comes right after the ReadPixels into the pixel buffer. Mapping that buffer then waits for the GPU to finish
+// everything queued before it (gleSynchronizeBufferOnCurrentDevices -> GLDBufferRec::restoreData): with the client's luminance
+// readback every frame, that was 89% of the helper's time in a HugeGrass sample (2026-10-25) -- the helper idled while the GPU
+// caught up, once a frame. Now a fence goes in after the ReadPixels and the buffer is mapped when the fence has signalled
+// (rb_poll, beside the frame and query polls; in order: rb_done is the newest ticket finished). PELOAD_GLH_RB_SYNC=1 = map at once.
+typedef struct { GLuint buf; uint64_t n, off, ticket; GLsync f; } RbPend; static RbPend rb_pend[256]; static unsigned rb_h, rb_t; static int g_rb_sync=-1;
+static void rb_finish(GLuint buf,uint64_t n,uint64_t off,uint64_t ticket){
+    GLint prev=0; glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING,&prev); glBindBuffer(GL_PIXEL_PACK_BUFFER,buf);
+    if(off+n<=GLH_REPLY-GLH_MAILBOX){ const void*p=glMapBufferRange(GL_PIXEL_PACK_BUFFER,0,(GLsizeiptr)n,GL_MAP_READ_BIT);
+        if(p){ memcpy(glh_reply(H)+GLH_MAILBOX+off,p,(size_t)n); glUnmapBuffer(GL_PIXEL_PACK_BUFFER); } }
+    glBindBuffer(GL_PIXEL_PACK_BUFFER,(GLuint)prev); atomic_store_explicit(&H->rb_done,ticket,memory_order_release); }
+static void rb_poll(int wait){
+    while(rb_t!=rb_h){ RbPend*r=&rb_pend[rb_t%256]; GLenum st=glClientWaitSync(r->f,0,wait?2000000000ull:0);
+        if(st!=GL_ALREADY_SIGNALED && st!=GL_CONDITION_SATISFIED){ if(wait && st==GL_TIMEOUT_EXPIRED) continue; break; }
+        glDeleteSync(r->f); rb_finish(r->buf,r->n,r->off,r->ticket); rb_t++; wait=0; } }
+
 // ---- one command -----------------------------------------------------------------------------------------------------------
 static uint64_t syncs_done;
 static void sync_finish(uint64_t rv,uint64_t len){ H->sync_rv=rv; H->sync_len=len; atomic_store_explicit(&H->sync_done,++syncs_done,memory_order_release); }
@@ -240,10 +257,12 @@ static int run_one(const uint8_t*c){
     case GLH_X_LOCS: { GLuint prog=(GLuint)s[0]; int n=(int)s[1], fb=(int)s[2]; const char*nm=(const char*)(s+3); int*out=(int*)reply;
         for(int i=0;i<n && (uint64_t)i*4<GLH_REPLY;i++){ out[i]=i<fb?glGetUniformLocation(prog,nm):(int)glGetUniformBlockIndex(prog,nm); nm+=strlen(nm)+1; }
         sync_finish(0,(uint64_t)n*4); return 1; }
-    case GLH_X_READBACK: { GLint prev=0; glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING,&prev); glBindBuffer(GL_PIXEL_PACK_BUFFER,(GLuint)s[0]);
-        uint64_t n=s[1], off=s[2]; if(off+n<=GLH_REPLY-GLH_MAILBOX){ const void*p=glMapBufferRange(GL_PIXEL_PACK_BUFFER,0,(GLsizeiptr)n,GL_MAP_READ_BIT);
-            if(p){ memcpy(glh_reply(H)+GLH_MAILBOX+off,p,(size_t)n); glUnmapBuffer(GL_PIXEL_PACK_BUFFER); } }
-        glBindBuffer(GL_PIXEL_PACK_BUFFER,(GLuint)prev); atomic_store_explicit(&H->rb_done,s[3],memory_order_release); return 0; }
+    case GLH_X_READBACK: {
+        if(g_rb_sync<0){ g_rb_sync=getenv("PELOAD_GLH_RB_SYNC")?1:0; if(g_rb_sync) atomic_store(&H->rb_sync,1); }
+        if(atomic_load(&H->rb_sync)){ rb_poll(1); rb_finish((GLuint)s[0],s[1],s[2],s[3]); return 0; }   // (earlier tickets first: rb_done only grows)
+        if(rb_h-rb_t>=256) rb_poll(1);   // (full: wait for the oldest)
+        RbPend*r=&rb_pend[rb_h%256]; r->buf=(GLuint)s[0]; r->n=s[1]; r->off=s[2]; r->ticket=s[3]; r->f=glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE,0); glFlush(); rb_h++;
+        return 0; }
     case GLH_X_PQ_BLIT: pq_blit(s); return 0;
     default: { char e[80]; snprintf(e,sizeof e,"unknown command %u",op); fail(e); } }
     return 0; }
@@ -276,13 +295,13 @@ int main(int argc,char**argv){
     for(;;){
         uint64_t head=atomic_load_explicit(&H->head,memory_order_acquire);
         if(head==tail){
-            pq_poll(0); gp_poll(); queries_poll(); pools_fill();
+            pq_poll(0); rb_poll(0); gp_poll(); queries_poll(); pools_fill();
             atomic_store_explicit(&H->tail,tail,memory_order_release);
             H->st_busy_s+=now_s()-busy0;
             uint32_t seq=atomic_load(&H->wake_seq);
             atomic_store(&H->helper_sleeping,1);   // seq_cst, then a seq_cst load of head: pairs with the loader's store head / load sleeping
             if(atomic_load(&H->head)==tail){
-                int t=npq||qp_head!=qp_tail?1:20;   // ms: sooner while a frame or a query result is pending
+                int t=npq||qp_head!=qp_tail||rb_t!=rb_h?1:20;   // ms: sooner while a frame, a query result or a readback is pending
                 glh_addr_wait_ms(&H->wake_seq,seq,t,tb_num,tb_den);
                 { static double lk; double tn=now_s(); if(tn-lk>0.25){ lk=tn; if(kill(loader,0) && errno==ESRCH) _exit(0); } } }   // the loader is gone
             atomic_store(&H->helper_sleeping,0); busy0=now_s(); continue; }
@@ -291,7 +310,7 @@ int main(int argc,char**argv){
             if(op==GLH_X_WRAP){ tail+=GLH_RING-tail%GLH_RING; continue; }
             if(!len) fail("corrupt ring (zero-length command)");
             run_one(c); tail+=len; ncmd++; H->st_cmds=ncmd;
-            if((ncmd&255)==0){ atomic_store_explicit(&H->tail,tail,memory_order_release); double t=now_s(); H->st_busy_s+=t-busy0; busy0=t; if(t-lastpoll>0.002){ lastpoll=t; pq_poll(0); gp_poll(); queries_poll(); } }
+            if((ncmd&255)==0){ atomic_store_explicit(&H->tail,tail,memory_order_release); double t=now_s(); H->st_busy_s+=t-busy0; busy0=t; if(t-lastpoll>0.002){ lastpoll=t; pq_poll(0); rb_poll(0); gp_poll(); queries_poll(); } }
             if((ncmd&4095)==0) pools_fill(); }
         atomic_store_explicit(&H->tail,tail,memory_order_release); }
 }

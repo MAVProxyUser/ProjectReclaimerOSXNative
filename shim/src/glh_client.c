@@ -264,6 +264,7 @@ static void* glh_dlsym(void*h,const char*n){
 // render side (pq_publish): ask the helper to copy the backbuffer's frame region into its next free IOSurface
 volatile int g_gpu_frames=-1;   // PELOAD_GPU_FRAMES (below); PELOAD_AB=gpuf switches 2 ("off") and 1 ("on") at run time
 int ab_gpuf(int set){ if(set>=0) g_gpu_frames=set?1:2; return g_gpu_frames==1; }
+int ab_rbdefer(int set){ if(!g_glh) return 0; if(set>=0) atomic_store(&g_glh->rb_sync,set?0:1); return atomic_load(&g_glh->rb_sync)==0; }   // (glhelper.c rb_poll)
 static void glh_pq_publish(unsigned srcfbo,int vw,int vh,int W,int H,unsigned long frameno){
     uint64_t sent=atomic_load(&g_glh->frames_sent)+1;
     uint8_t*c=glh_begin(GLH_X_PQ_BLIT,8+6*8); if(!c) return; uint64_t*s=(uint64_t*)(c+8);
