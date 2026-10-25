@@ -10219,8 +10219,22 @@ static int pipe_read(void*h,void*buf,uint32_t n,uint32_t*rd){ PipeObj*o=h; int f
     ssize_t k=(f>=0&&buf)?recv(f,buf,n,0):-1; if(rd)*rd=(uint32_t)(k<0?0:k); if(k<0)g_lasterr=win_err(); return k>0 || (k==0); }
 static void pipe_addref(void*h){ ((PipeObj*)h)->refs++; }
 static int pipe_close(void*h){ PipeObj*o=h; if(o->refs>0){ o->refs--; return 1; } if(o->connfd>=0)close(o->connfd); if(o->listenfd>=0){ close(o->listenfd); if(o->is_server)unlink(o->sp);} o->magic=0; free(o); return 1; }
+// PELOAD_MAINFS_LOG=1 (diagnostic): files opened ON halo3's engine main thread (the one big games are limited by; the frame
+// hook records it), counted per path and printed every 10 s -- the client opened files there in a 123-player match (~2% of
+// that thread's samples), so the paths say what to cache. g_engine_thr: set by hb_frame_hook.
+static pthread_t g_engine_thr; static int g_mainfs=-1;
+static struct { char p[160]; uint32_t n; } g_mfs[64]; static int g_nmfs; static pthread_mutex_t g_mfs_mx=PTHREAD_MUTEX_INITIALIZER;
+static void mainfs_note(const char*p){
+    pthread_mutex_lock(&g_mfs_mx); int k=0; for(;k<g_nmfs;k++) if(!strncmp(g_mfs[k].p,p,sizeof g_mfs[k].p-1)) break;
+    if(k==g_nmfs && g_nmfs<64){ snprintf(g_mfs[k].p,sizeof g_mfs[k].p,"%s",p); g_mfs[k].n=0; g_nmfs++; } if(k<g_nmfs) g_mfs[k].n++;
+    static double last; double now=mono_s(); if(!last) last=now;
+    if(now-last>=10.0){ char m[300]; int q=snprintf(m,sizeof m,"  [mainfs] files opened on the engine thread in %.0f s:\n",now-last); (void)!write(2,m,(size_t)q);
+        for(int i=0;i<g_nmfs;i++) if(g_mfs[i].n){ q=snprintf(m,sizeof m,"  [mainfs]   %6u x %s\n",g_mfs[i].n,g_mfs[i].p); (void)!write(2,m,(size_t)q); g_mfs[i].n=0; }
+        last=now; }
+    pthread_mutex_unlock(&g_mfs_mx); }
 static void*  MSABI i_CreateFileW(const uint16_t *w,uint32_t acc,uint32_t share,void*sec,uint32_t disp,uint32_t fl,void*tmpl){
     (void)share;(void)sec;(void)fl;(void)tmpl; char p[2048]; win2unix(w,p,sizeof p);
+    if(__builtin_expect(g_mainfs!=0,0)){ if(g_mainfs<0) g_mainfs=getenv("PELOAD_MAINFS_LOG")?1:0; if(g_mainfs && g_engine_thr && pthread_equal(pthread_self(),g_engine_thr)) mainfs_note(p); }
     { char nn[1024]; int i=0; for(; w&&w[i]&&i<1023;i++) nn[i]=(char)(w[i]<128?w[i]:'?'); nn[i]=0;
       if(pipe_name_is(nn)) return pipe_client_open(nn); }
     if((!w||!w[0])){
@@ -12205,7 +12219,20 @@ static void bink_selftest(void){
         int inexe=c>=g_base && c<g_base+oh->ImageSize;
         k=snprintf(m,sizeof m,"  [bink] BinkClose slot -> %s+0x%llx: %s\n",inexe?"exe":"?",(unsigned long long)(inexe?c-g_base:(uint64_t)(uintptr_t)c),
             inexe?"the client's wrapper (its mod-movie install ran)":"not the client's (its install did not run)"); (void)!write(2,m,k); } }
+// PELOAD_GUEST_QOS=1 (opt-in until an in-match A/B says so; PELOAD_AB=qos:<secs> flips it): halo3's engine main thread -- the
+// one big games are limited by -- asks macOS for QOS_CLASS_USER_INTERACTIVE, the class the loader's own GL submission and
+// particle threads run at (guest threads otherwise run at the default class: priority 31 against their 46). Set from the
+// frame hook, which runs on that thread (a thread can only set its own class); 0 = back to QOS_CLASS_DEFAULT.
+volatile int g_guest_qos=-1;
+int ab_qos(int set){ if(set>=0) g_guest_qos=set; return g_guest_qos>0; }
+static void guest_qos_tick(void){ static int applied=-1;
+    if(g_guest_qos<0){ const char*e=getenv("PELOAD_GUEST_QOS"); g_guest_qos=e&&atoi(e)?1:0; }
+    int want=g_guest_qos>0; if(want==applied) return;
+    if(applied<0 && !want){ applied=0; return; }   // never set: nothing to undo
+    int rc=pthread_set_qos_class_self_np(want?QOS_CLASS_USER_INTERACTIVE:QOS_CLASS_DEFAULT,0); applied=want;
+    static int logged; if(logged++<4){ char m[120]; int k=snprintf(m,sizeof m,"  [qos] engine main thread -> %s%s\n",want?"user-interactive":"default",rc?" (refused)":""); (void)!write(2,m,k); } }
 static void __attribute__((ms_abi)) hb_frame_hook(void){
+    guest_qos_tick(); if(__builtin_expect(!g_engine_thr,0)) g_engine_thr=pthread_self();
     if(__builtin_expect(g_st_voice_pending,0)) st_voice_jobs();   // stats page voice mutes (stats.c)
     if(__builtin_expect(g_hb_job_pending,0)) hb_engine_jobs();
     static int bst=-1; if(__builtin_expect(bst!=0,0)){ if(bst<0) bst=getenv("PELOAD_BINK_SELFTEST")?1:0; if(bst) bink_selftest(); }

@@ -85,6 +85,12 @@ static int MSABI xv_SetChannelVolumes(XAVoice*v,uint32_t n,const float*c,uint32_
 static void MSABI xv_GetChannelVolumes(XAVoice*v,uint32_t n,float*c){ if(c) for(uint32_t i=0;i<n;i++) c[i]=i<XA_MAXCH?v->chvol[i]:0.0f; }
 static int MSABI xv_SetOutputMatrix(XAVoice*v,XAVoice*dst,uint32_t sc,uint32_t dc,const float*m,uint32_t op){ (void)op;
     if(!m||sc>XA_MAXCH||dc>XA_MAXCH) return 0;
+    // the same matrix as already set: nothing to do, and no wait for the lock the mixer holds while it mixes (halo3 calls
+    // this from its main thread, which sampled waiting on that lock in a 123-player game; PELOAD_XA_MATSKIP=1 turns the check on:
+    // opt-in until it has run in a match). The mixer only reads matrices; a SetOutputVoices racing this check at worst delays the matrix by a call.
+    static int lk=-1; if(lk<0){ const char*e=getenv("PELOAD_XA_MATSKIP"); lk=!(e && atoi(e)); }   // opt-in until an in-match test
+    if(!lk){ int k=-1; for(int i=0;i<v->ndst && i<4;i++) if(!dst||v->dst[i]==dst){ k=i; break; }
+        if(k>=0 && v->matset[k]){ const float*o=v->mat[k]; uint32_t n=sc*dc, i=0; for(;i<n && o[i]==m[i];i++); if(i==n){ for(;i<XA_MAXCH*XA_MAXCH && o[i]==0.0f;i++); if(i==XA_MAXCH*XA_MAXCH) return 0; } } }
     pthread_mutex_lock(&g_xamx);
     int k=-1; for(int i=0;i<v->ndst;i++) if(!dst||v->dst[i]==dst){ k=i; break; }
     if(k>=0){ memset(v->mat[k],0,sizeof v->mat[k]); for(uint32_t d=0;d<dc;d++) for(uint32_t s=0;s<sc;s++) v->mat[k][d*sc+s]=m[d*sc+s]; v->matset[k]=1; }

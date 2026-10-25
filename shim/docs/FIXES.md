@@ -1915,6 +1915,23 @@ Numbers are from the commit messages; PERF-PLAN.md has the measurements. Compare
   damper `PELOAD_POLL_DAMP=1` (it slept inside the key poll exe+0x7385e0, which holds a lock the main thread takes:
   sluggish sticks; default off since 10-17 37be8a7, obsolete since NtDelayExecution).
 
+- **Engine-thread levers for 120-player games, opt-in until measured in a match** (2026-10-25; user: "can we do anything about
+  pulling 11 fps or less on Big team games like HugeGrass?", "don't compromise quality", "fix as many of those [boundary
+  crossings] as possible") — Measured first (123 players, 315 vehicles, M4 Max): halo3's engine thread 98% busy, everything
+  else idle-ish; the simulation keeps real time, so frames get what is left; `sample` of that thread: halo3 65%, the client
+  8%, game-state copies 8%, Rosetta runtime routines ~9% (lookups at call returns: halo3's own polymorphic calls), the
+  client's file opens ~2%, QueryPerformanceCounter ~1%, XAudio2 lock waits ~1%. shim/tools/xcallbench.c: a call from
+  JIT-translated code costs the same into loader text as into generated code (1.2 ns: crossing into the loader is free);
+  the ms_abi -> SysV switch adds ~3 ns (fastcall.c already covers the hot imports); rdtsc under Rosetta = 1 tick per ns,
+  6.5 ns, a constant offset from mach_absolute_time (10.9 ns). Added, each OFF by default:
+  `PELOAD_FASTCALL=...,clock` (fastcall.c fc_QueryPerformanceCounter: rdtsc minus the start-up offset, a leaf; checked rate,
+  else off; not in "all" yet), `PELOAD_XA_MATSKIP=1` (xaudio.c xv_SetOutputMatrix: an unchanged matrix returns before the
+  mixer's lock), `PELOAD_GUEST_QOS=1` / `PELOAD_AB=qos:<secs>` (peload.c guest_qos_tick from hb_frame_hook: the engine
+  thread at QOS_CLASS_USER_INTERACTIVE like the loader's own threads; it ran at the default class), `PELOAD_MAINFS_LOG=1`
+  (files opened on the engine thread, counted per path every 10 s: what to cache). Next: run them in a big match (A/B
+  where there is a switch: qos, cow, fastcall) before any becomes a default. shim/tools/callcost.sh does not build any more
+  (the heap block it cuts out of peload.c now needs the heap tracker): xcallbench.c measures the call costs on its own.
+
 ## 20. Scripts and RE tools
 
 - **PELOAD_BP=<dll>+<rva>** (2026-10-21) — `bp_install_mod` (load_guest, before the DLL's DllMain), `bp_plant`: the software

@@ -1,6 +1,7 @@
 // fastcall.c -- fast paths for the hottest Win32 imports of halo3's main thread (backlog 11 / 41). Included by peload.c
 // after the implementations it shortcuts (and by tools/callcost.c, which measures it). OPT-IN:
-//   PELOAD_FASTCALL=all | <list of: tid, heap, keys>           bound at load, on from the start
+//   PELOAD_FASTCALL=all | <list of: tid, heap, keys, clock>    bound at load, on from the start ("all" = tid, heap, keys;
+//                                                               clock only by name until it has run in a match)
 //   PELOAD_AB=fastcall:<secs>                                   the in-match A/B: flips them (all, or PELOAD_FASTCALL's list)
 //                                                               between on and off every <secs> (starts off)
 // Unset: the original functions are bound -- the same code as before. Off at run time (the A/B), every call goes to the
@@ -19,11 +20,13 @@
 //   keys   GetAsyncKeyState: a table lookup leaf (stays off with PELOAD_POLL_DAMP, which sleeps there)  ~4.5 -> 1.3 ns
 //   heap   HeapAlloc/HeapFree/HeapReAlloc/HeapSize: a per-thread cache of small blocks (1..1024 bytes, 16-byte classes)
 //          carved from one reserved arena                                       alloc+free 27-76 -> 4.5-6 ns
+//   clock  QueryPerformanceCounter: rdtsc minus a start-up offset (under Rosetta rdtsc counts nanoseconds, the same
+//          rate as mach_absolute_time, which the original calls) -- a leaf          ~15 -> ~7.5 ns (tools/xcallbench.c)
 // Not done (measured, not worth it): GetProcessHeap and TlsGetValue (leaves already: ~1 and ~2.6 ns); towlower (guest
 // ucrtbase code already, 2.2 ns); memset/memcpy below 2 KB (guest vcruntime code already; `rep stosb` / `rep movsb`
 // routines are many times SLOWER under Rosetta, ~0.27 ns a byte).
 #include <os/lock.h>
-enum { FC_TID=1, FC_HEAP=2, FC_KEYS=4, FC_ALL=7 };
+enum { FC_TID=1, FC_HEAP=2, FC_KEYS=4, FC_CLOCK=8, FC_ALL=7 };   // (clock not in "all" until an in-match test: name it)
 volatile int g_fastcall;            // the fast paths in use now (PELOAD_AB=fastcall flips it between 0 and g_fc_mask)
 static int g_fc_mask=-1;            // the configured ones (-1 = not read yet, 0 = none: the originals are bound)
 // Per-thread state lives past the end of the Windows TEB layout (and of the loader's 256 TLS slots at +0x1480..+0x1C80) in
@@ -49,6 +52,25 @@ static uint32_t FC_FN fc_GetCurrentThreadId(void){
 static int16_t FC_FN fc_GetAsyncKeyState(int k){
     if(__builtin_expect(g_fastcall&FC_KEYS,1)) return (k>=0&&k<256&&g_keydown[k])?(int16_t)0x8000:0;
     return wi_GetAsyncKeyState(k); }
+
+// ---- QueryPerformanceCounter ----
+// Under Rosetta rdtsc counts nanoseconds (1 tick per ns, mach_absolute_time's rate; tools/xcallbench.c) and costs ~6.5 ns,
+// where the original pays mach_absolute_time (~11 ns) plus the ms_abi -> SysV switch (~3 ns). The two clocks differ by a
+// constant (the time the Mac has slept: mach_absolute_time stops then): fcc_init takes it, so the values are the ones the
+// original returns -- after a sleep this one runs ahead of mach_absolute_time by the time asleep, never backwards (which is
+// what Windows' own QPC does across a sleep). Off when rdtsc doesn't tick at exactly that rate (not under Rosetta).
+static uint64_t g_fc_tscoff;
+static inline uint64_t fc_rdtsc(void){ uint32_t lo,hi; __asm__ volatile("rdtsc":"=a"(lo),"=d"(hi)); return ((uint64_t)hi<<32)|lo; }
+static int FC_FN fc_QueryPerformanceCounter(uint64_t*c){
+    if(__builtin_expect(g_fastcall&FC_CLOCK,1)){ if(c) *c=fc_rdtsc()-g_fc_tscoff; return 1; }
+    return i_QueryPerformanceCounter(c); }
+static int fcc_init(void){
+    mach_timebase_info_data_t tb; mach_timebase_info(&tb);
+    uint64_t m0=mach_absolute_time(), r0=fc_rdtsc(); usleep(20000); uint64_t m1=mach_absolute_time(), r1=fc_rdtsc();
+    double rate=m1>m0?(double)(r1-r0)/(double)(m1-m0):0;
+    if(tb.numer!=1 || tb.denom!=1 || rate<0.9995 || rate>1.0005){ char m[140]; int k=snprintf(m,sizeof m,"  [fastcall] clock: rdtsc runs at %.4f per ns (timebase %u/%u), not mach_absolute_time's: clock part off\n",rate,tb.numer,tb.denom); (void)!write(2,m,k); return 0; }
+    uint64_t best=~0ull, off=0; for(int i=0;i<32;i++){ uint64_t a=mach_absolute_time(), r=fc_rdtsc(), b=mach_absolute_time(); if(b-a<best){ best=b-a; off=r-(a+(b-a)/2); } }
+    g_fc_tscoff=off; return 1; }
 
 // ---- the small-block heap ----
 // Blocks of 1..1024 bytes come from 64 KB slabs of ONE reserved arena (2 GB of address space, PELOAD_FASTCALL_ARENA_MB;
@@ -161,20 +183,22 @@ static void fc_init(void){
     if(on){ if(!strcmp(e,"1")) m=FC_ALL;
         else for(const char*p=e; *p; ){ const char*q=strchr(p,','); size_t l=q?(size_t)(q-p):strlen(p);
             if(l==3 && !strncmp(p,"tid",3)) m|=FC_TID; else if(l==4 && !strncmp(p,"heap",4)) m|=FC_HEAP; else if(l==4 && !strncmp(p,"keys",4)) m|=FC_KEYS;
-            else if(l==3 && !strncmp(p,"all",3)) m|=FC_ALL;
+            else if(l==5 && !strncmp(p,"clock",5)) m|=FC_CLOCK; else if(l==3 && !strncmp(p,"all",3)) m|=FC_ALL;
             if(!q) break; p=q+1; } }
     else if(abf) m=FC_ALL;
     if((m&FC_HEAP) && (heapdbg() || heapguard() || getenv("PELOAD_HEAP_STATS") || getenv("PELOAD_TRACE_ALLOC"))){ m&=~FC_HEAP; ws("  [fastcall] heap part off (a heap diagnostic is on)\n"); }
     if((m&FC_HEAP) && !fch_init()) m&=~FC_HEAP;
     { const char*d=getenv("PELOAD_POLL_DAMP"); if((m&FC_KEYS) && d && *d && strcmp(d,"0")) m&=~FC_KEYS; }   // the damper sleeps inside GetAsyncKeyState
+    if((m&FC_CLOCK) && !fcc_init()) m&=~FC_CLOCK;
     g_fc_mask=m; g_fastcall=on && !abf ? m : 0;
-    if(m){ char t[160]; int k=snprintf(t,sizeof t,"  [fastcall]%s%s%s: %s\n",m&FC_TID?" tid":"",m&FC_HEAP?" heap":"",m&FC_KEYS?" keys":"",
+    if(m){ char t[160]; int k=snprintf(t,sizeof t,"  [fastcall]%s%s%s%s: %s\n",m&FC_TID?" tid":"",m&FC_HEAP?" heap":"",m&FC_KEYS?" keys":"",m&FC_CLOCK?" clock":"",
         abf?"PELOAD_AB flips them (starts off)":"on"); (void)!write(2,t,k); } }
 // resolve_impl's result for an import -> that fast path's dispatcher when it is configured
 static void* fc_bind(void*f){
     fc_init(); int m=g_fc_mask; if(!m || !f) return f;
     if((m&FC_TID) && f==(void*)i_GetCurrentThreadId) return (void*)fc_GetCurrentThreadId;
     if((m&FC_KEYS) && f==(void*)wi_GetAsyncKeyState) return (void*)fc_GetAsyncKeyState;
+    if((m&FC_CLOCK) && f==(void*)i_QueryPerformanceCounter) return (void*)fc_QueryPerformanceCounter;
     if(m&FC_HEAP){ if(f==(void*)i_HeapAlloc) return (void*)fc_HeapAlloc; if(f==(void*)i_HeapFree) return (void*)fc_HeapFree;
         if(f==(void*)i_HeapReAlloc) return (void*)fc_HeapReAlloc; if(f==(void*)i_HeapSize) return (void*)fc_HeapSize; }
     return f; }
