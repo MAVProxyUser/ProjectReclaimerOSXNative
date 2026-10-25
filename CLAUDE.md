@@ -340,6 +340,11 @@ no DSP plugin, halo2's voices (AIL_find_filter x4) failed and it never played a 
 fetches beta.txt (WinHTTP); its GRAVEMIND LIVE client claims the player's name as a gamertag -- test runs use GM_TEST=1 (own profile).
 New loader files: winhttp.c, win32x.c, winmm.c, games.c, d2d.c, dwrite.c, wic.c, dsound.c (FIXES.md 2026-10-20/21 entries).
 play.sh's stdin feeder is `sleep 86400.<pid>` (killed when the game exits; it used to hold a caller's `| tail` for 24 h).
+Window frame rate (2026-10-25): until then the present thread slept 33 ms after every frame in helper mode (it checked the
+in-process queue's counter only), so the window showed <= ~27 new frames/s whatever the title said; pq_started() fixed it
+(PELOAD_PRESENT_SLEEP=1 = old). The per-second log's window_fps column (latency.c) is what the player sees; [presentprof]
+(PELOAD_PRESENT_PROF=1) splits the present thread's time. Input -> screen latency: latency.c ([latency] lines, PELOAD_LATPROBE=<s>
+in test clients, shim/tools/latency-summary.py), title-bar screenshots: shim/tools/titleshot.sh.
 Native GL helper (2026-10-17, PELOAD_GL_HELPER=1: play.sh's default, the code's default without the env is off; spawned with
 only stdio + its pipe; shim/src/glh_client.c + glhelper.c + glh_shm.h, generated glh_gen.inc /
 glh_dec.inc from shim/tools/glh_gen.py, which build.sh reruns): peload.c redefines dlsym (after the D3DGL globals) so every GL name

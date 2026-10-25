@@ -8070,8 +8070,9 @@ static unsigned g_pq_prog, g_pq_vao; static int g_pq_sloc=-1;
 // native GL helper: the frame is an IOSurface the helper rendered (rectangle texture in this, the window's, context)
 static unsigned g_pq_rprog; static int g_pq_rsloc=-1, g_pq_rzloc=-1; static unsigned long g_glh_pq_seen;
 static unsigned long g_pq_new_fno;   // the engine frame a NEW frame shown by the present wait holds (0: a re-present); latency.c lat_win
+static double g_pp_acq, g_pp_draw, g_pp_t1;   // (PELOAD_PRESENT_PROF) present thread: time waiting for a frame, drawing it; t1 = draw start
 static int pq_present_wait_glh(unsigned long*seen,int ms){
-    unsigned tex; int tw,th; (void)seen; int slot=glh_pq_acquire(&g_glh_pq_seen,ms,&tex,&tw,&th,!getenv("PELOAD_GLH_PQ_FALLBACK")); if(slot<0) return 0;
+    unsigned tex; int tw,th; (void)seen; double pa0=mono_s(); int slot=glh_pq_acquire(&g_glh_pq_seen,ms,&tex,&tw,&th,!getenv("PELOAD_GLH_PQ_FALLBACK")); g_pp_t1=mono_s(); g_pp_acq+=g_pp_t1-pa0; if(slot<0) return 0;
     g_pq_new_fno=g_glh_pq_seen!=*seen?(unsigned long)g_glh->pq_frameno[slot]:0;
     // PELOAD_LAG_LOG=1: how long after halo3's render thread presented a frame it is ready for the window (a new frame only)
     { static int ll=-1; if(ll<0) ll=getenv("PELOAD_LAG_LOG")?1:0;
@@ -8100,9 +8101,16 @@ static int pq_present_wait_glh(unsigned long*seen,int ms){
     G.BindVertexArray(g_pq_vao); G.DrawArrays(4,0,3);
     lay_draw(); hb_draw_overlay(); REC_FRAME();
     G.Flush(); if(pc) CGLUnlockContext(pc);
-    glh_pq_release();
+    glh_pq_release(); g_pp_draw+=mono_s()-g_pp_t1;
     pq_shotwin((unsigned long)g_glh->pq_frameno[slot]);   // PELOAD_D3DGL_SHOTWIN window captures, as in-process
     return 1; }
+// frames are coming through the present queue: the in-process one (g_pq_seq) or, with the GL helper, the helper's (2026-10-25:
+// the present thread only looked at g_pq_seq, which never moves in helper mode -- so it slept 33 ms after EVERY frame and the
+// window showed at most ~26 new frames a second whatever the engine drew; PELOAD_PRESENT_SLEEP=1 = that old sleep)
+static volatile int g_pq_oldsleep=-1;   // PELOAD_AB=presleep switches it at run time ("on" = the old sleep)
+int ab_presleep(int set){ if(set>=0) g_pq_oldsleep=set; return g_pq_oldsleep==1; }
+static int pq_started(void){ if(g_pq_oldsleep<0) g_pq_oldsleep=getenv("PELOAD_PRESENT_SLEEP")?1:0;
+    if(g_glh_on && g_pq_oldsleep!=1) return g_glh && atomic_load(&g_glh->pq_seq)>0; return g_pq_seq>0; }
 static int pq_present_wait(unsigned long*seen,int ms){
     if(!pq_on()) return 0;
     if(g_glh_on) return pq_present_wait_glh(seen,ms);
@@ -8555,9 +8563,12 @@ static void* present_thread_fn(void*a){ (void)a; pthread_setname_np("shim-presen
         static unsigned long pq_seen; int pq_shown=0;
         { extern volatile int g_win_visible_x; if(use_d3dgl && (win_hidden() || (!g_win_visible_x && !getenv("PELOAD_PRESENT_HIDDEN")))){ usleep(20000); continue; } }
         if(use_d3dgl && pq_on()){
-            if(pq_present_wait(&pq_seen,50)){ pq_shown=1; if(cglflush&&g_present_glctx){ CGLLockContext((CGLContextObj)g_present_glctx); cglflush(g_present_glctx); CGLUnlockContext((CGLContextObj)g_present_glctx); }
-                if(g_pq_new_fno){ lat_win(g_pq_new_fno,mono_s()); g_pq_new_fno=0; } }
-            else if(!g_pq_seq){ d3dgl_blit_present(); if(cglflush&&g_present_glctx) cglflush(g_present_glctx); }   // nothing queued yet
+            if(pq_present_wait(&pq_seen,50)){ pq_shown=1; double pf0=mono_s(); if(cglflush&&g_present_glctx){ CGLLockContext((CGLContextObj)g_present_glctx); cglflush(g_present_glctx); CGLUnlockContext((CGLContextObj)g_present_glctx); }
+                double pf1=mono_s(); static double pfs, tl; static unsigned long nnew, nall; pfs+=pf1-pf0; nall++; if(g_pq_new_fno){ nnew++; lat_win(g_pq_new_fno,pf1); g_pq_new_fno=0; }
+                { static int pp=-1; if(pp<0) pp=getenv("PELOAD_PRESENT_PROF")?1:0;   // where the present thread's time goes, every 5 s
+                  if(pp){ if(!tl) tl=pf1; if(pf1-tl>=5.0){ double dt=pf1-tl; char m[260]; int k=snprintf(m,sizeof m,"  [presentprof] %.1f new frames/s (%.1f presents/s): waiting for a frame %.0f%%, drawing %.0f%%, flush %.0f%% (%.1f ms per flush)\n",
+                      nnew/dt,nall/dt,g_pp_acq/dt*100,g_pp_draw/dt*100,pfs/dt*100,nall?pfs/nall*1e3:0); (void)!write(2,m,(size_t)k); tl=pf1; nnew=nall=0; pfs=0; g_pp_acq=g_pp_draw=0; } } } }
+            else if(!pq_started()){ d3dgl_blit_present(); if(cglflush&&g_present_glctx) cglflush(g_present_glctx); }   // nothing queued yet
         } else if(use_d3dgl){
             d3dgl_blit_present(); if(cglflush&&g_present_glctx) cglflush(g_present_glctx);
         } else gdi_present_main();
@@ -8580,7 +8591,7 @@ static void* present_thread_fn(void*a){ (void)a; pthread_setname_np("shim-presen
         // (e.g. a halo3 GPU-frame-ready flag at 0x1821b0a74 + 24*i) each present cycle.
         const char* pk32=getenv("PELOAD_POKE32");
         if(pk32){ char buf[256]; snprintf(buf,sizeof buf,"%s",pk32); for(char*tok=strtok(buf,",");tok;tok=strtok(0,",")){ char*c=strchr(tok,':'); if(!c)continue; *c=0; uint64_t a=strtoull(tok,0,16); uint32_t v=(uint32_t)strtoull(c+1,0,16); if(a>0x100000000ULL) *(volatile uint32_t*)a=v; } }
-        if(!(use_d3dgl && pq_on() && g_pq_seq)){ struct timespec ts={0,33*1000000L}; nanosleep(&ts,0); }   // frame-driven once the queue runs
+        if(!(use_d3dgl && pq_on() && pq_started())){ struct timespec ts={0,33*1000000L}; nanosleep(&ts,0); }   // frame-driven once the queue runs
         (void)pq_shown; } return 0; }
 static void* cocoa_make_gl_window_i(int w,int h){ CGLContextObj c=cocoa_make_gl_window(w,h);
     if(c){ g_present_glctx=(void*)c; void(*set)(void*)=dlsym(RTLD_DEFAULT,"CGLSetCurrentContext");

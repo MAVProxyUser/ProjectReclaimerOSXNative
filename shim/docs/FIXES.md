@@ -2039,6 +2039,18 @@ Numbers are from the commit messages; PERF-PLAN.md has the measurements. Compare
   timestamps are keyed by d3dgl_present's frame number: the first version keyed them by the submission thread's own present
   count, which only starts when that thread switches on, and paired frames ~110 apart (it read "2.8 s"). HugeGrass, 17 players,
   hidden: 70-95 ms at 26-40 fps -- about 2.5-3 frames queued between the game and the GPU.
+- **The window showed at most ~27 new frames a second with the GL helper (the default since 2026-10-17)** (2026-10-25; user: "the
+  graphic UI feels sluggish and floaty"; found with the new window-fps column of the per-second log and PELOAD_PRESENT_PROF=1)
+  — peload.c `pq_started` (used by present_thread_fn), `ab_presleep` (d3dsubmit.c A/B feature 18). Why: the present thread
+  sleeps 33 ms per loop until frames flow through the present queue ("frame-driven once the queue runs"), and it looked only at
+  the in-process queue's counter g_pq_seq -- which never moves in helper mode, where frames come through the helper's
+  pq_seq. So after every frame it slept 33 ms: menu engine 320 fps, window 26 new frames/s; local Valhalla 194 fps, window 27;
+  the title showed the engine's rate, not what the player saw. How: pq_started() also reads the helper's counter.
+  Measured with the in-match A/B (PELOAD_AB=presleep:20) and the latency probe: Valhalla 194 fps -- window 27 -> 90-110 new
+  frames a second (every refresh of the 60 Hz display gets a new frame), input -> screen 66 -> 60 ms; HugeGrass (6,200 draws)
+  -- engine 18.4-22.2 -> 24.2-26.0 fps in comparable phases (+25-35%: the helper's frames were consumed late), input -> screen
+  147 -> 131 ms, GPU done -> window +21 -> +1 ms. PELOAD_PRESENT_SLEEP=1 = the old sleep. PELOAD_PRESENT_PROF=1 prints
+  `[presentprof]` every 5 s: new frames / presents per second, time waiting for a frame / drawing / flushing.
 - **Input -> screen latency measured end to end, and a per-second performance log** (2026-10-25; user: "the window adds its own
   display delay on top of these numbers -- THIS is what I need you to calculate, cuz that feel is all that will matter to the
   player"; "make sure you have a running log of the FPS ... compared to objects on the screen") — new shim/src/latency.c
