@@ -36,6 +36,7 @@ static __thread const float*t_st_evpos;   // the next event's position (st_spawn
 // g_fx_on is the hooks' one check while it is off; t_st_chat_id hands it a chat line's sender peer id (st_on_chat).
 static volatile int g_fx_on; static void fx_event(const StEvt*e); static __thread uint64_t t_st_chat_id;
 static char g_st_curmap[64];   // the map the last snapshot saw
+static volatile int g_st_match_pending; static double g_st_match_at;   // a match's loading screen ended (wall time): the next snapshot posts "Match started"
 enum { ST_NEV=1024 };
 static StEvt g_ev[ST_NEV]; static uint32_t g_ev_seq; static pthread_mutex_t g_ev_mx=PTHREAD_MUTEX_INITIALIZER;
 static double st_wall(void){ struct timeval tv; gettimeofday(&tv,0); return tv.tv_sec+tv.tv_usec*1e-6; }
@@ -98,6 +99,34 @@ static void st_av_called(void){ st_av_init(); if(!g_av_calls) return; g_av_tries
 // its send path reaches thread locals), so a worker made with our CreateThread waits for requests. Confirmed when counts[choice]
 // in the next broadcast goes up; else sent again (3 times at most; the host just overwrites a voter's choice).
 static int sig_parse(const char*s,uint8_t*b,uint8_t*m,int cap); static int64_t sig_find(uint8_t*base,const uint8_t*b,const uint8_t*m,int n);   // (peload.c)
+// Signatures of the client functions the stats page calls or hooks: one 0-terminated list per point, tried in order; the
+// first that matches exactly once in the exe's code AND passes that point's meaning check (in its install function) is
+// used. A client build that moves one gets a line appended to its list (re-tools/sigport.py --apply writes it;
+// shim/docs/porting.md), and re-tools/patchscan.py reads these lists by name: keep the names and one string per line.
+static const char*const g_sig_set_muted[]={     // set_muted(voice id, bool); its first `lock cmpxchg [rip+d],cl` locks the MUTED list
+    "55 56 57 53 48 83 EC 38 48 8D 6C 24 30 48 C7 45 00 FE FF FF FF 48 89 CE B1 01 31 C0 F0 0F B0 0D ?? ?? ?? ?? 0F 85",   // v0.9.2+
+    0 };
+static const char*const g_sig_voice_recv[]={    // entry hook: its first 19 bytes are compared and run relocated (no ?? there)
+    "55 41 57 41 56 41 55 41 54 56 57 53 48 81 EC 18 01 00 00 48 8D AC 24 80 00 00 00 0F 29 B5 80 00 00 00 48 C7 45 78 FE FF FF FF 4D 89 CE 4C 89 C7 49 89 D7 48 89 CB",   // v0.9.15+
+    0 };
+static const char*const g_sig_push_history[]={  // entry hook, as voice_recv
+    "55 41 57 41 56 41 55 41 54 56 57 53 48 81 EC A8 00 00 00 48 8D AC 24 80 00 00 00 48 C7 45 20 FE FF FF FF 80 B9 F8 00 00 00 00 0F 84",   // v0.9.11+
+    0 };
+static const char*const g_sig_max_players[]={   // the max_players() getter; its first `call` followed by test rax,rax = the Arc clone
+    "55 56 48 81 EC ?? ?? 00 00 48 8D AC 24 80 00 00 00 48 C7 85 ?? ?? 00 00 FE FF FF FF E8 ?? ?? ?? ?? 48 85 C0 74 16 31 C9 48 3B 48 10 71 ?? F0 48 FF 08 75 08 48 89 C1 E8 ?? ?? ?? ?? 48 8D 4D ?? E8 ?? ?? ?? ?? B0 10",   // v0.9.2 .. v0.9.18
+    "55 56 57 48 81 EC ?? ?? 00 00 48 8D AC 24 80 00 00 00 48 C7 85 ?? ?? 00 00 FE FF FF FF E8 ?? ?? ?? ?? 48 85 C0 74 16 31 C9 48 3B 48 10 71 ?? F0 48 FF 08 75 08 48 89 C1 E8 ?? ?? ?? ?? 48 8D 4D ?? E8 ?? ?? ?? ??",   // v0.9.20+ (also pushes rdi)
+    0 };
+static const char*const g_sig_cast_vote[]={     // cast_vote(const u128 *round, u64 choice)
+    "55 56 57 48 81 EC B0 00 00 00 48 8D AC 24 80 00 00 00 48 C7 45 28 FE FF FF FF 48 89 D6 48 89 CF B1 01 31 C0 F0 0F B0 0D ?? ?? ?? ?? 75 22",   // v0.9.15+
+    0 };
+static const char*const g_sig_ballot[]={        // code reading the ballot cache: cmp rcx,[rip+cache] (disp32 at +5), mov rdi,[rip+receiver] (disp32 at +0x14)
+    "31 C9 48 3B 0D ?? ?? ?? ?? 70 ?? 89 85 ?? ?? ?? ?? 48 8B 3D ?? ?? ?? ?? 8B 1D ?? ?? ?? ?? E8 ?? ?? ?? ?? 90 48 89 45 ?? 89 55 ?? 48 8D 4D ?? 48 89 FA 41 89 D8 E8 ?? ?? ?? ?? 90 81 FA 00 CA 9A 3B 0F 94 C1 48 83 F8 03 0F 92 C0",   // v0.9.15+
+    0 };
+// the next signature of a list (from index *k on) that matches exactly once: its rva, or -1 when none is left; the parsed
+// pattern is in b (n bytes) and *k is its index, so a caller whose meaning check fails goes on with *k+1
+static int64_t sig_next(const char*const*list,int*k,uint8_t*b,uint8_t*m,int cap,int*n){
+    for(;list[*k];(*k)++){ *n=sig_parse(list[*k],b,m,cap); int64_t r=sig_find(g_base,b,m,*n); if(r>=0) return r; }
+    return -1; }
 static void*g_bv_fn; static uint8_t*g_bv_cache; static uint64_t g_bv_size;
 static pthread_mutex_t g_bv_mx=PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_bv_cv=PTHREAD_COND_INITIALIZER;
 static uint8_t g_bv_round[16]; static uint64_t g_bv_choice; static int g_bv_req;
@@ -108,16 +137,16 @@ static uint32_t MSABI st_bv_worker(void*a){ (void)a;
         char m[80]; int k=snprintf(m,sizeof m,"  [autovote] map ballot: vote sent (choice %d)\n",(int)ch+1); (void)!write(2,m,k); }
     return 0; }
 static void st_bv_install(void){
-    uint8_t b[128],m[128]; int n=sig_parse("55 56 57 48 81 EC B0 00 00 00 48 8D AC 24 80 00 00 00 48 C7 45 28 FE FF FF FF 48 89 D6 48 89 CF B1 01 31 C0 F0 0F B0 0D ?? ?? ?? ?? 75 22",b,m,128);
-    int64_t r=sig_find(g_base,b,m,n); const char*why=0; uint8_t*fn=0;
-    if(r<0) why="cast_vote not found (0.9.15+ only)";
-    else { fn=g_base+r; int ok=0;   // meaning: it builds Message::Vote (tag 0x80000000000000xx) and calls lobby_send
-        for(uint8_t*q=fn;q<fn+0x120 && !ok;q++) if(q[0]==0x48&&q[1]==0xB8&&q[3]==0&&q[4]==0&&q[5]==0&&q[6]==0&&q[7]==0&&q[8]==0&&q[9]==0x80&&q[10]==0x48&&q[11]==0x89&&q[12]==0x45&&q[13]==0xA8) ok=1;
-        if(!ok) why="cast_vote match has no Vote message (another build?)"; }
-    if(!why){ n=sig_parse("31 C9 48 3B 0D ?? ?? ?? ?? 70 ?? 89 85 ?? ?? ?? ?? 48 8B 3D ?? ?? ?? ?? 8B 1D ?? ?? ?? ?? E8 ?? ?? ?? ?? 90 48 89 45 ?? 89 55 ?? 48 8D 4D ?? 48 89 FA 41 89 D8 E8 ?? ?? ?? ?? 90 81 FA 00 CA 9A 3B 0F 94 C1 48 83 F8 03 0F 92 C0",b,m,128);
-        int64_t h=sig_find(g_base,b,m,n); if(h<0) why="ballot cache not found";
-        else { uint8_t*hit=g_base+h; uint8_t*cache=hit+9+*(int32_t*)(hit+5), *recv=hit+0x18+*(int32_t*)(hit+0x14);
-            uint64_t sz=(uint64_t)(recv-cache); if(sz<0x100 || sz>0x1000) why="ballot cache size implausible"; else { g_bv_fn=fn; g_bv_cache=cache; g_bv_size=sz; } } }
+    uint8_t b[128],m[128]; int n; const char*why="cast_vote not found (0.9.15+ only)"; uint8_t*fn=0;
+    for(int k=0;;k++){ int64_t r=sig_next(g_sig_cast_vote,&k,b,m,128,&n); if(r<0) break;
+        int ok=0;   // meaning: it builds Message::Vote (tag 0x80000000000000xx) and calls lobby_send
+        for(uint8_t*q=g_base+r;q<g_base+r+0x120 && !ok;q++) if(q[0]==0x48&&q[1]==0xB8&&q[3]==0&&q[4]==0&&q[5]==0&&q[6]==0&&q[7]==0&&q[8]==0&&q[9]==0x80&&q[10]==0x48&&q[11]==0x89&&q[12]==0x45&&q[13]==0xA8) ok=1;
+        if(ok){ fn=g_base+r; why=0; break; } why="cast_vote match has no Vote message (another build?)"; }
+    if(!why){ why="ballot cache not found";
+        for(int k=0;;k++){ int64_t h=sig_next(g_sig_ballot,&k,b,m,128,&n); if(h<0) break;
+            uint8_t*hit=g_base+h; uint8_t*cache=hit+9+*(int32_t*)(hit+5), *recv=hit+0x18+*(int32_t*)(hit+0x14);
+            uint64_t sz=(uint64_t)(recv-cache); if(sz<0x100 || sz>0x1000){ why="ballot cache size implausible"; continue; }
+            g_bv_fn=fn; g_bv_cache=cache; g_bv_size=sz; why=0; break; } }
     char msg[200]; int k=why?snprintf(msg,sizeof msg,"  [stats] map ballot vote: %s\n",why)
         :snprintf(msg,sizeof msg,"  [stats] map ballot vote: cast_vote exe+0x%llx, ballot cache exe+0x%llx (0x%llx bytes)\n",(unsigned long long)(fn-g_base),(unsigned long long)(g_bv_cache-g_base),(unsigned long long)g_bv_size);
     (void)!write(2,msg,k);
@@ -182,7 +211,9 @@ static void st_feed_line(const char*ln){
         "Moderation:","The kick-vote target"};
     for(size_t i=0;i<sizeof srv/sizeof*srv;i++) if(!strncmp(p,srv[i],strlen(srv[i]))){ st_event("server",0,0,0,-1,-1,0,"%s",p); return; }
     if(!strncmp(p,"Carnage report opened",21)){ st_event("game",0,0,0,-1,-1,0,"Game over"); return; }
-    if(!strncmp(p,"Loading screen complete",23)){ char mp[64]; snprintf(mp,sizeof mp,"%s",g_st_curmap); st_event("game",mp,0,0,-1,-1,0,"Match started: %s",mp); return; }
+    // "Match started: <map>" goes out from the next snapshot, after a fresh hb_current_map: the name the last snapshot saw
+    // can be ~2 s old (it is rechecked every 2 s) and still be a map the client only opened (0.9.23: "130_epilogue" on Valhalla)
+    if(!strncmp(p,"Loading screen complete",23)){ g_st_match_at=st_wall(); __atomic_store_n(&g_hb_map_recheck,1,__ATOMIC_RELEASE); __atomic_store_n(&g_st_match_pending,1,__ATOMIC_RELEASE); return; }
     static char mt[512]; static int mi=-1; if(mi<0){ const char*e=getenv("PELOAD_FEED_MATCH"); snprintf(mt,sizeof mt,"%s",e?e:""); mi=1; }
     if(mt[0] && L){ char w[512]; snprintf(w,sizeof w,"%s",mt); char*sv=0; for(char*tk=strtok_r(w,",",&sv); tk; tk=strtok_r(0,",",&sv)) if(*tk && strstr(p,tk)){ st_event("log",0,0,0,-1,-1,0,"%s",p); return; } } }
 static void st_feed_log(int fd,const char*buf,size_t n){
@@ -402,9 +433,10 @@ static void __attribute__((ms_abi)) st_on_chat(void*state,const uint8_t*line,uin
             "Proximity chat is only available while alive in a game.","The host has turned text chat off.","Your message could not be delivered."};
         st_event("chat",0,0,"notice",-1,-1,fl,"%s",k<5?nt[k]:"(chat notice)"); } }
 static void st_chat_install(void){
-    uint8_t b[96],m[96]; int n=sig_parse("55 41 57 41 56 41 55 41 54 56 57 53 48 81 EC A8 00 00 00 48 8D AC 24 80 00 00 00 48 C7 45 20 FE FF FF FF 80 B9 F8 00 00 00 00 0F 84",b,m,96);
-    int64_t r=sig_find(g_base,b,m,n); int ok=r>=0 && entry_hook(g_base+r,b,19,(void*)st_on_chat);
-    char msg[120]; int k=snprintf(msg,sizeof msg,"  [stats] chat: %s\n",ok?"hooked (event feed)":"unavailable (push_history not found)"); (void)!write(2,msg,k); }
+    uint8_t b[96],m[96]; int n, ok=0; int64_t r=-1;
+    for(int k=0;!ok;k++){ r=sig_next(g_sig_push_history,&k,b,m,96,&n); if(r<0) break; ok=entry_hook(g_base+r,b,19,(void*)st_on_chat); }
+    char msg[120]; int k=ok?snprintf(msg,sizeof msg,"  [stats] chat: hooked (event feed; push_history exe+0x%llx)\n",(unsigned long long)r)
+        :snprintf(msg,sizeof msg,"  [stats] chat: unavailable (push_history not found)\n"); (void)!write(2,msg,k); }
 // Runs at exe load (single-threaded, before the entry point), only with the stats page on.
 // Player addresses (2026-10-18, backlog 49; static RE of the 0.9.18 client). A HOST -- a menu-hosted game or a dedicated
 // server's worker -- keeps Mutex<Option<ModerationState>> for its kick / banip / RCON "players" commands: players Vec at L-8
@@ -441,7 +473,9 @@ static void st_addr_install(void){
                 uint8_t*t=p+k+8+*(int32_t*)(p+k+3); if(t<=lock+8 || t>lock+0x400) continue;
                 int c=0; while(c<nc && cand[c]!=t) c++; if(c==nc){ if(nc==16) continue; cand[nc]=t; cn[nc++]=0; } cn[c]++; } }
         for(int c=0;c<nc;c++) if(cn[c]>bestn){ bestn=cn[c]; best=cand[c]; } }
-    if(best){ g_st_modlen=best; g_st_modopt=lock+8; }
+    // the real players Vec is read by 6-7 such sites (0.9.2 .. 0.9.23); a single one is something else (v0.8.9 / v0.8.11,
+    // before the table existed: re-tools/patchscan.py over every release)
+    if(best && bestn>=3){ g_st_modlen=best; g_st_modopt=lock+8; }
     char m[160]; int k=snprintf(m,sizeof m,"  [stats] player addresses: %s\n",g_st_modlen?"host table found (shown while hosting)":"host table not found (another client build?): off"); (void)!write(2,m,k);
     if(g_st_modlen){ k=snprintf(m,sizeof m,"  [stats] player addresses: table lock exe+0x%llx, players at lock+0x%llx\n",(unsigned long long)(lock-g_base),(unsigned long long)(g_st_modlen-lock)); (void)!write(2,m,k); } }
 static int st_ips_ok(void){ static int v=-1; if(v<0){ const char*e=getenv("PELOAD_STATS_IPS"), *ad=getenv("PELOAD_STATS_ADDR");
@@ -476,18 +510,15 @@ static const char* st_addr_of(uint64_t peer){ if(!peer) return 0; for(int i=0;i<
 static uint8_t*g_st_hslot; static int g_st_mpoff;
 static void st_slots_install(void){
     // the getter's prologue: v0.9.18 pushes rbp, rsi; v0.9.20 also rdi (the clone call moves one byte; max_players at
-    // Arc+0x22d in 0.9.18, +0x233 in 0.9.20 -- both read from the getter itself)
-    static const char*const sigs[2]={
-        "55 56 48 81 EC ?? ?? 00 00 48 8D AC 24 80 00 00 00 48 C7 85 ?? ?? 00 00 FE FF FF FF E8 ?? ?? ?? ?? 48 85 C0 74 16 31 C9 48 3B 48 10 71 ?? F0 48 FF 08 75 08 48 89 C1 E8 ?? ?? ?? ?? 48 8D 4D ?? E8 ?? ?? ?? ?? B0 10",
-        "55 56 57 48 81 EC ?? ?? 00 00 48 8D AC 24 80 00 00 00 48 C7 85 ?? ?? 00 00 FE FF FF FF E8 ?? ?? ?? ?? 48 85 C0 74 16 31 C9 48 3B 48 10 71 ?? F0 48 FF 08 75 08 48 89 C1 E8 ?? ?? ?? ?? 48 8D 4D ?? E8 ?? ?? ?? ??" };
-    uint8_t b[128],m[128]; int64_t r=-1; for(int v=0;v<2 && r<0;v++){ int n=sig_parse(sigs[v],b,m,128); r=sig_find(g_base,b,m,n); }
-    const char*why="getter not found (another client build?)";
-    if(r>=0){ uint8_t*G=g_base+r, *C=0; static const uint8_t pro[13]={0x56,0x48,0x83,0xEC,0x20,0xB1,0x01,0x31,0xC0,0xF0,0x0F,0xB0,0x0D};
+    // Arc+0x22d in 0.9.18, +0x233 in 0.9.20 -- both read from the getter itself; signatures: g_sig_max_players)
+    uint8_t b[128],m[128]; int n; const char*why="getter not found (another client build?)";
+    for(int k=0;why;k++){ int64_t r=sig_next(g_sig_max_players,&k,b,m,128,&n); if(r<0) break;
+        uint8_t*G=g_base+r, *C=0; static const uint8_t pro[13]={0x56,0x48,0x83,0xEC,0x20,0xB1,0x01,0x31,0xC0,0xF0,0x0F,0xB0,0x0D};
         for(uint8_t*q=G;q<G+0x30 && !C;q++) if(q[0]==0xE8 && q[5]==0x48 && q[6]==0x85 && q[7]==0xC0) C=q+5+*(int32_t*)(q+1);   // call clone; test rax,rax
-        if(!C || memcmp(C,pro,13)) why="clone function has an unexpected shape";
-        else { uint8_t*L=C+0x11+*(int32_t*)(C+0xd); int off=-1;
-            for(uint8_t*q=G;q<G+0x100;q++) if(q[0]==0x0F && q[1]==0xB6 && q[2]==0xB0 && q[7]==0xF0 && q[8]==0x48 && q[9]==0xFF && q[10]==0x08){ off=*(int32_t*)(q+3); break; }
-            if(off>0x18 && off<0x1000){ g_st_hslot=L+8; g_st_mpoff=off; why=0; } else why="max_players offset not found"; } }
+        if(!C || memcmp(C,pro,13)){ why="clone function has an unexpected shape"; continue; }
+        uint8_t*L=C+0x11+*(int32_t*)(C+0xd); int off=-1;
+        for(uint8_t*q=G;q<G+0x100;q++) if(q[0]==0x0F && q[1]==0xB6 && q[2]==0xB0 && q[7]==0xF0 && q[8]==0x48 && q[9]==0xFF && q[10]==0x08){ off=*(int32_t*)(q+3); break; }
+        if(off>0x18 && off<0x1000){ g_st_hslot=L+8; g_st_mpoff=off; why=0; } else why="max_players offset not found"; }
     char msg[160]; int k=why?snprintf(msg,sizeof msg,"  [stats] player slots: %s -- the session's limit only\n",why)
         :snprintf(msg,sizeof msg,"  [stats] player slots: server max at exe+0x%llx +0x%x\n",(unsigned long long)(g_st_hslot-g_base),g_st_mpoff); (void)!write(2,msg,k); }
 static int st_max_players(const char**src){   // the server's max players, 0 = not known
@@ -503,18 +534,25 @@ static int st_max_players(const char**src){   // the server's max players, 0 = n
     return 0; }
 static void st_voice_install(void){ if(!stats_on() || !g_base) return;
     uint8_t b[96],m[96]; int n; int64_t r; char msg[220]; int k;
-    n=sig_parse("55 56 57 53 48 83 EC 38 48 8D 6C 24 30 48 C7 45 00 FE FF FF FF 48 89 CE B1 01 31 C0 F0 0F B0 0D ?? ?? ?? ?? 0F 85",b,m,96);
-    r=sig_find(g_base,b,m,n); if(r>=0){ g_st_setmuted=g_base+r; g_st_mutedvec=(uint64_t)(g_st_setmuted+0x24+*(int32_t*)(g_st_setmuted+0x20)); }
-    // a unique match can be the wrong function: in clients 0.8.16 .. 0.9.1 this shape is a Forge Mutex<Vec> setter
-    // (shim/docs/patch-addresses.md). The real set_muted's lock byte is also taken by is_muted
-    // (56 48 83 EC 20 B2 01 31 C0 F0 0F B0 15 <disp32>): no such function -> no mute.
-    if(g_st_setmuted){ DOS*dh=(DOS*)g_base; OPT64*oh=(OPT64*)(g_base+dh->e_lfanew+sizeof(COFF)); uint8_t*lockb=g_st_setmuted+0x24+*(int32_t*)(g_st_setmuted+0x20);
-        static const uint8_t im[13]={0x56,0x48,0x83,0xEC,0x20,0xB2,0x01,0x31,0xC0,0xF0,0x0F,0xB0,0x15}; int paired=0;
-        for(uint8_t*q=g_base+0x1000; q+17<g_base+oh->ImageSize && !paired; q++) if(q[0]==0x56 && !memcmp(q,im,13) && q+17+*(int32_t*)(q+13)==lockb) paired=1;
-        if(!paired){ g_st_setmuted=0; g_st_mutedvec=0; ws("  [stats] voice: the set_muted match has no is_muted partner (another client build?): mute off\n"); } }
-    n=sig_parse("55 41 57 41 56 41 55 41 54 56 57 53 48 81 EC 18 01 00 00 48 8D AC 24 80 00 00 00 0F 29 B5 80 00 00 00 48 C7 45 78 FE FF FF FF 4D 89 CE 4C 89 C7 49 89 D7 48 89 CB",b,m,96);
-    int64_t rv=sig_find(g_base,b,m,n); int hooked=rv>=0 && entry_hook(g_base+rv,b,19,(void*)st_on_voice);
-    k=snprintf(msg,sizeof msg,"  [stats] voice: mute %s, talking indicator %s\n",g_st_setmuted?"available":"unavailable (set_muted not found)",hooked?"hooked":"unavailable (voice_recv not found)");
+    // a unique match can be the wrong function: in clients 0.8.16 .. 0.9.1 the v0.9.2+ shape is also a Forge Mutex<Vec>
+    // setter (shim/docs/patch-addresses.md). The real set_muted's lock (its first `lock cmpxchg byte [rip+d],cl`) is also
+    // taken by is_muted with dl (mov dl,1 ; xor eax,eax ; lock cmpxchg [rip+d],dl = B2 01 31 C0 F0 0F B0 15 <disp32>);
+    // the Forge setter's never is (every release 0.8.1 .. 0.9.23, re-tools/patchscan.py). No partner -> the next signature.
+    { DOS*dh=(DOS*)g_base; OPT64*oh=(OPT64*)(g_base+dh->e_lfanew+sizeof(COFF)); uint8_t*end=g_base+oh->ImageSize;
+      for(int kk=0;;kk++){ r=sig_next(g_sig_set_muted,&kk,b,m,96,&n); if(r<0) break;
+        uint8_t*fn=g_base+r, *lockb=0; int paired=0;
+        for(uint8_t*q=fn;q<fn+0x40 && !lockb;q++) if(q[0]==0xF0 && q[1]==0x0F && q[2]==0xB0 && q[3]==0x0D) lockb=q+8+*(int32_t*)(q+4);
+        if(lockb) for(uint8_t*q=g_base+0x1000; q+12<=end && !paired; q++)
+            if(q[0]==0xB2 && q[1]==0x01 && q[2]==0x31 && q[3]==0xC0 && q[4]==0xF0 && q[5]==0x0F && q[6]==0xB0 && q[7]==0x15 && q+12+*(int32_t*)(q+8)==lockb) paired=1;
+        if(paired){ g_st_setmuted=fn; g_st_mutedvec=(uint64_t)(uintptr_t)lockb; break; }
+        ws("  [stats] voice: a set_muted match has no is_muted partner (another client build?): skipped\n"); } }
+    int64_t rv=-1; int hooked=0;
+    for(int kk=0;!hooked;kk++){ rv=sig_next(g_sig_voice_recv,&kk,b,m,96,&n); if(rv<0) break; hooked=entry_hook(g_base+rv,b,19,(void*)st_on_voice); }
+    // (the addresses are for shim/tools/port-verify.sh, which compares them with re-tools/patchscan.py's)
+    char sm[48]="unavailable (set_muted not found)", vr[48]="unavailable (voice_recv not found)";
+    if(g_st_setmuted) snprintf(sm,sizeof sm,"available (set_muted exe+0x%llx)",(unsigned long long)(g_st_setmuted-g_base));
+    if(hooked) snprintf(vr,sizeof vr,"hooked (voice_recv exe+0x%llx)",(unsigned long long)rv);
+    k=snprintf(msg,sizeof msg,"  [stats] voice: mute %s, talking indicator %s\n",sm,vr);
     (void)!write(2,msg,k); st_chat_install(); st_addr_install(); st_slots_install(); st_bv_install(); }
 static void st_voice_init(void){ static int done; if(done || !g_base) return; done=1;
     // 0.9.18: set_muted at its known place -> the client's expanded-session flag is at its known place too; other
@@ -1207,8 +1245,10 @@ static void st_snapshot(StBuf*s){
     { st_av_init(); st_av_tick(now); static const char*const mn[5]={"off","1","2","3","none"};
       sb_put(s,",\"autovote\":{\"calls\":\"%s\",\"map\":\"%s\"}",g_av_calls==1?"yes":g_av_calls==2?"no":"off",mn[g_av_map+1]); }
     char m[64]="";
+    int match_pending=__atomic_exchange_n(&g_st_match_pending,0,__ATOMIC_ACQ_REL);   // (taken before the lookup: it was set after the recheck flag)
     { char mp[1024]=""; hb_current_map(mp,sizeof mp);   // the map being played (halo3/maps or a Workshop mod's folder)
       const char*b=strrchr(mp,'/'); b=b?b+1:mp; snprintf(m,sizeof m,"%s",b); char*dot=strrchr(m,'.'); if(dot)*dot=0; sb_put(s,",\"map\":"); sb_str(s,m);
+      if(match_pending) st_event_at(g_st_match_at,"game",m,0,0,-1,-1,0,"Match started: %s",m[0]?m:"?");
       if(g_gameplay_t0) st_maptop_ensure(mp,m); }   // not in the menu: its scene borrows other maps' objects
     { static int tp=-1; if(tp<0) tp=getenv("PELOAD_ALLOW_TELEPORT")?1:0; static const char*const tm[3]={"all","enemies","friends"};
       { extern int hbz_show(void), hb_wkshow(void); sb_put(s,",\"zone_show\":%d,\"weak_show\":%d",hbz_show(),hb_wkshow()); }

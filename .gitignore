@@ -13,3 +13,6 @@ dist/
 Reclaimer.app/
 # third-party downloads dropped into client/ (Gravemind and other fan clients ship as zips)
 client/*.zip
+
+# Python bytecode (re-tools)
+__pycache__/

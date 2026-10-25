@@ -10,6 +10,8 @@
 # (PELOAD_AUTO_MODS=1: Download / Update & join -> workshop-helper.sh, DepotDownloader).
 # Live stats on http://127.0.0.1:8765/ (QR_STATS=<port>, 0 = off), opened in the browser unless a tab reconnects (QR_STATS_OPEN=0).
 # Refuses to start while any other game process is running (never runs beside the user's game).
+# The game's process group id is in /tmp/quiet-run.pgid (QR_PGID_FILE) while it runs: a caller that is done early stops
+# exactly that group (shim/tools/port-verify.sh), never anything else.
 cd "$(dirname "$0")/../.."
 EXTRA="$1"; SECS="${2:-60}"; shift 2
 # (a running shim/target.sh target or shim/dedicated.sh server is allowed: input-less, own process group)
@@ -36,6 +38,6 @@ env PELOAD_SKINGUARD=1 PELOAD_VTGUARD=1 PELOAD_ALLOC_GUARD=1 PELOAD_RECLAIMER_PA
   $PADENV PELOAD_NO_KBM=1 PELOAD_NO_SYS_CURSOR=1 PELOAD_NO_FOCUS=1 PELOAD_AUDIO=0 $MINENV \
   PELOAD_STATS_HTTP="${QR_STATS:-8765}" PELOAD_STATS_OPEN="${QR_STATS_OPEN:-1}" PELOAD_MIC="${QR_MIC:-0}" PELOAD_TITLE_PREFIX="TEST (no input)" PELOAD_AUTO_MODS=1 PELOAD_PASTEBOARD=reclaimer-test RECLAIMER_PROFILE_DIR='C:\ReclaimerProfileTest' $EXTRA \
   arch -x86_64 shim/build/peload "$EXE" "${ARGS[@]}" < /dev/null > /tmp/quiet-run.log 2>&1 &
-PG=$!; sleep "$SECS"; kill -9 -- -$PG 2>/dev/null; sleep 1
+PG=$!; echo "$PG" > "${QR_PGID_FILE:-/tmp/quiet-run.pgid}"; sleep "$SECS"; kill -9 -- -$PG 2>/dev/null; sleep 1; rm -f "${QR_PGID_FILE:-/tmp/quiet-run.pgid}"
 if [ -n "$(others)" ]; then echo "WARNING: a game process is still running after cleanup"; ps -axo pid,pgid,command | grep -E '[0-9] [^ ]*build/peload' | cut -c1-120; fi
 echo DONE

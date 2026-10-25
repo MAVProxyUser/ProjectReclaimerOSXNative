@@ -206,6 +206,30 @@ mmdevapi `ActivateAudioInterfaceAsync` (its sound by process loopback), combase 
 kernel32 `CreateEventW`, CRT `atan2`. The loader answers the first nine with E_NOTIMPL (FIXES.md section 1); the last two
 were already resolved. The client still has the `dedicated` subcommand (`dedicated.sh` unchanged).
 
+### Client exe, v0.9.23 (2026-10-24)
+
+SHA-256 `ceef542ac17980d178e281ebf510b4aaaf28ef650a288f1d68e8250731ad7e70` (46,547,456 bytes). Found with
+`re-tools/patchscan.py --diff` (the signatures of the sources before the port: `--rev abce1d1`), the watchdog ported with
+`re-tools/sigport.py`, checked live with `shim/tools/port-verify.sh` (18 PASS). Walk-through: shim/docs/porting.md section 3.
+
+| point | v0.9.22 | v0.9.23 | how it is found now |
+|---|---|---|---|
+| ui-reentrancy jne (sig+8) | 72960f | 72b06e | same signature |
+| xaudio slots 1-4 | 6015e0 / 60160f / 601646 / 60167b | 600670 / 60069f / 6006d6 / 60070b | same (v0.9.20) signatures |
+| watchdog je (sig+0xa) | 8713e4 | 87ace5 | **new row**: `mov byte [rbp+0xc04],1` between the `je` and `call Instant::now`, the deadline reloaded from the frame (`mov rcx,[rbp+X] ; cmp rax,rcx`) as before v0.9.20 |
+| set_muted / MUTED list | 744580 / 2aee660 | 7456b0 / 2b13b30 | same signature + is_muted pairing |
+| voice_recv (entry) | 757cf0 | 75a950 | same signature |
+| push_history (entry) | ce5bc0 | cf5c20 | same signature |
+| cast_vote / ballot cache | a03ce0 / 2ae85b8 (0x3f8) | a0f920 / 2b0d988 (0x3f8) | same signatures |
+| max_players getter / hosted-session slot | 737c80 / 2af4718 +0x233 | 7396e0 / 2b19c78 +0x233 | same (second) signature |
+| moderation table lock / players Vec len | 2ae5d18 / lock+0x170 | 2b0b0e8 / lock+0x170 | same code search |
+
+Imports: unchanged against 0.9.22 (client-survey.sh). The `dedicated` subcommand is still there. New client behaviour that
+mattered: a constant-buffer upload filter (src/engine_constant_uploads.rs; off with RECLAIMER_SEND_ALL_UPLOADS=1) that
+attaches COM objects with SetPrivateDataInterface -- it deadlocked on the loader until private-data interfaces were
+referenced (FIXES.md section 10). "Bink import slots differ from the supported build; refused" (Workshop mods' Bink movies)
+is in the log, as in every build since at least v0.9.20.
+
 ### Dedicated exe (not loaded by our scripts), v0.8.14 .. v0.9.7
 
 | point | v0.8.14 | v0.8.15 | v0.8.16 | v0.9.0 | v0.9.1 | v0.9.2 | v0.9.3 | v0.9.4 | v0.9.5 | v0.9.6 | v0.9.7 |
@@ -408,11 +432,14 @@ every build that has the code).
 
 ## 7. Reproducing
 
-The survey scripts are not in the repo. The method: map each exe's sections at their RVAs; run each signature as a
-regex (`??` = any byte) over the executable sections, counting overlapping matches; index every `E8`/`E9` rel32 and
-every rip-relative disp32 in .text once, so string `lea`s, callers and data references are dictionary lookups; take
-function bounds from .pdata (following chained unwind info). Read the releases as data only: they are untrusted
-binaries and are kept outside the repo.
+Since 2026-10-24 the scripts are in the repo (guide: shim/docs/porting.md): `shim/tools/fetch-releases.sh` fetches every
+release (checksum-verified) into ~/Library/Application Support/ReclaimerMac/releases/<tag>/, `python3 re-tools/patchscan.py
+--md` makes the client part of the section 3 grid from the loader's own signatures (with these tables' anchor-found places
+for the documented misses), and `python3 re-tools/sigport.py --selftest` re-derives the moved places release by release.
+The method: map each exe's sections at their RVAs; run each signature as a regex (`??` = any byte) over the executable
+sections, counting overlapping matches; index every `E8` rel32 and every rip-relative disp32 in .text once, so string
+`lea`s, callers and data references are lookups; take function bounds from .pdata. Read the releases as data only: they
+are untrusted binaries and are kept outside the repo.
 
 ## 8. Everything the loader touches
 

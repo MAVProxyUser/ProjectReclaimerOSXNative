@@ -1134,7 +1134,7 @@ typedef struct { void** vtbl; uint32_t kind; uint32_t rowpitch; uint64_t size; v
 // SetPrivateData/GetPrivateData dropped it -> CreateInputLayout got a null bytecode provider ->
 // sub_1802ac24c would fault -> PELOAD_SKINGUARD made it return 0 -> NO input layout EVER -> all
 // world geometry drawn without a layout (invisible). Real per-object storage fixes it.
-typedef struct { GUID_ g; uint32_t sz; uint8_t buf[64]; } PDEnt;
+typedef struct { GUID_ g; uint32_t sz; uint8_t iface, buf[64]; } PDEnt;   // iface: buf holds an interface we hold a reference on
 typedef struct { int n; PDEnt e[12]; } PDStore;
 // Bound pipeline state we track to interpret/translate draws.
 // The bound pipeline state. g_d3dst is what the GL executor draws with (the GL thread under PELOAD_D3DGL_SUBMIT);
@@ -1369,9 +1369,32 @@ static int dxsurf_qi(void*s,GUID_*r,void**pp){ D3DObj*o=s; static int old=-1; if
     if(old || !pp || !o || o->vtbl!=g_d3dres_vtbl || o->kind!=2 || !dxsurf_iid(r)) return 0;
     *pp=dxsurf_of(o); obj_AddRef(o); return 1; }
 static void     MSABI d3d_GetDevice(void*s,void**pp){ (void)s; if(pp)*pp=&g_d3ddevice; }
-static int      MSABI d3d_GetPD(void*s,GUID_*g,uint32_t*ps,void*pd){ (void)s;(void)g;(void)pd; if(ps)*ps=0; return HR_NOTFOUND; }
+static int      MSABI d3d_GetPD(void*s,GUID_*g,uint32_t*ps,void*pd);   // (with the singletons' SetPrivateDataInterface table, below)
 static int      MSABI d3d_SetPD(void*s,GUID_*g,uint32_t sz,const void*d){ (void)s;(void)g;(void)sz;(void)d; return HR_OK; }
-static int      MSABI d3d_SetPDI(void*s,GUID_*g,const void*d){ (void)s;(void)g;(void)d; return HR_OK; }
+// SetPrivateDataInterface holds a REFERENCE on the interface (D3D11: AddRef when set, Release when replaced, cleared or when
+// the object is destroyed). It used to store the bare pointer: client 0.9.23's constant-buffer upload filter attaches a
+// "resource watcher" COM object to each buffer it maps and then releases its own reference, trusting D3D to hold one --
+// with none held, the watcher's count reached 0 at once, its "buffer destroyed" cleanup took the filter's lock, which the
+// filter (inside its Map wrapper) still held: a self-deadlock on halo3's render job thread, the menu at 1 draw per frame
+// (2026-10-24). COM calls into guest objects go through their vtables (MS ABI); releases at object death run in obj_Release
+// on the guest thread that dropped the last reference (guest code needs its TEB). PELOAD_PDI_NOREF=1 = the old bare pointer.
+static int pdi_noref(void){ static int v=-1; if(v<0) v=getenv("PELOAD_PDI_NOREF")?1:0; return v; }
+static void com_addref(void*p){ if(p) ((uint32_t(MSABI*)(void*))((*(void***)p)[1]))(p); }
+static void com_release(void*p){ if(p) ((uint32_t(MSABI*)(void*))((*(void***)p)[2]))(p); }
+static void pd_drop_iface(PDEnt*e){ if(e->iface){ void*q; memcpy(&q,e->buf,8); e->iface=0; com_release(q); } }
+// the singletons (device, context, factory, swap chain) never die: only replacement releases
+static struct { void*obj; GUID_ g; void*ifc; } g_spdi[64]; static int g_nspdi; static pthread_mutex_t g_spdi_mx=PTHREAD_MUTEX_INITIALIZER;
+static int      MSABI d3d_SetPDI(void*s,GUID_*g,const void*d){ if(pdi_noref() || !g) return HR_OK;
+    void*old=0; int i; com_addref((void*)d); pthread_mutex_lock(&g_spdi_mx);
+    for(i=0;i<g_nspdi;i++) if(g_spdi[i].obj==s && guid_eq(&g_spdi[i].g,g)) break;
+    if(i<g_nspdi){ old=g_spdi[i].ifc; g_spdi[i].ifc=(void*)d; }
+    else if(d && g_nspdi<64){ g_spdi[g_nspdi].obj=s; g_spdi[g_nspdi].g=*g; g_spdi[g_nspdi].ifc=(void*)d; g_nspdi++; }
+    else if(d){ pthread_mutex_unlock(&g_spdi_mx); com_release((void*)d); return (int)0x8007000E; }   // E_OUTOFMEMORY
+    pthread_mutex_unlock(&g_spdi_mx); com_release(old); return HR_OK; }
+static int      MSABI d3d_GetPD(void*s,GUID_*g,uint32_t*ps,void*pd){ void*q=0; int i; if(!g){ if(ps)*ps=0; return HR_NOTFOUND; }
+    pthread_mutex_lock(&g_spdi_mx); for(i=0;i<g_nspdi;i++) if(g_spdi[i].obj==s && guid_eq(&g_spdi[i].g,g)){ q=g_spdi[i].ifc; break; }
+    if(q && pd && (!ps || *ps>=8)){ memcpy(pd,&q,8); com_addref(q); } pthread_mutex_unlock(&g_spdi_mx);
+    if(!q){ if(ps)*ps=0; return HR_NOTFOUND; } if(ps)*ps=8; return HR_OK; }
 // Real private-data storage for D3DObj-backed children (shaders etc.). halo3 round-trips the VS
 // bytecode-blob pointer through here to build input layouts (see PDStore note on D3DObj).
 static void pd_trace(const char*tag,void*s,GUID_*g,uint32_t sz,int found){ if(!getenv("PELOAD_TRACE_PD")) return;
@@ -1381,12 +1404,15 @@ static int      MSABI child_SetPD(void*s,GUID_*g,uint32_t sz,const void*d){ D3DO
     pd_trace("SetPD",s,g,sz,0);
     PDStore*p=o->pdata; if(!p){ p=calloc(1,sizeof *p); o->pdata=p; if(!p) return HR_OK; }
     uint32_t n=sz>sizeof p->e[0].buf?(uint32_t)sizeof p->e[0].buf:sz;
-    for(int i=0;i<p->n;i++) if(guid_eq(&p->e[i].g,g)){ p->e[i].sz=sz; if(d&&n)memcpy(p->e[i].buf,d,n); return HR_OK; }
-    if(p->n<(int)(sizeof p->e/sizeof p->e[0])){ PDEnt*e=&p->e[p->n++]; e->g=*g; e->sz=sz; if(d&&n)memcpy(e->buf,d,n); }
+    for(int i=0;i<p->n;i++) if(guid_eq(&p->e[i].g,g)){
+        if(!pdi_noref()){ pd_drop_iface(&p->e[i]); if(!sz || !d){ p->e[i]=p->e[--p->n]; return HR_OK; } }   // data replaces an interface; size 0 removes
+        p->e[i].sz=sz; if(d&&n)memcpy(p->e[i].buf,d,n); return HR_OK; }
+    if(p->n<(int)(sizeof p->e/sizeof p->e[0])){ PDEnt*e=&p->e[p->n++]; e->g=*g; e->sz=sz; e->iface=0; if(d&&n)memcpy(e->buf,d,n); }
     return HR_OK; }
 static int      MSABI child_GetPD(void*s,GUID_*g,uint32_t*ps,void*pd){ D3DObj*o=s; PDStore*p=o?o->pdata:0;
     if(p&&g) for(int i=0;i<p->n;i++) if(guid_eq(&p->e[i].g,g)){ uint32_t sz=p->e[i].sz;
-        if(pd){ uint32_t cap=ps?*ps:sz; uint32_t n=sz<cap?sz:cap; if(n>sizeof p->e[0].buf)n=(uint32_t)sizeof p->e[0].buf; memcpy(pd,p->e[i].buf,n); }
+        if(pd){ uint32_t cap=ps?*ps:sz; uint32_t n=sz<cap?sz:cap; if(n>sizeof p->e[0].buf)n=(uint32_t)sizeof p->e[0].buf; memcpy(pd,p->e[i].buf,n);
+            if(p->e[i].iface && n>=8){ void*q; memcpy(&q,p->e[i].buf,8); com_addref(q); } }   // D3D11: an interface comes back with a reference (halo3+0x2a2258 Releases it)
         if(ps)*ps=sz; pd_trace("GetPD",s,g,sz,1); return HR_OK; }
     pd_trace("GetPD",s,g,ps?*ps:0,0);
     if(ps)*ps=0; return HR_NOTFOUND; }
@@ -1396,8 +1422,13 @@ static int      MSABI child_GetPD(void*s,GUID_*g,uint32_t*ps,void*pd){ D3DObj*o=
 static int      MSABI child_SetPDI(void*s,GUID_*g,const void*d){ D3DObj*o=s; if(!o||!g) return HR_OK;
     pd_trace("SetPDI",s,g,8,0);
     PDStore*p=o->pdata; if(!p){ p=calloc(1,sizeof *p); o->pdata=p; if(!p) return HR_OK; }
-    for(int i=0;i<p->n;i++) if(guid_eq(&p->e[i].g,g)){ p->e[i].sz=8; memcpy(p->e[i].buf,&d,8); return HR_OK; }
-    if(p->n<(int)(sizeof p->e/sizeof p->e[0])){ PDEnt*e=&p->e[p->n++]; e->g=*g; e->sz=8; memcpy(e->buf,&d,8); }
+    int ref=!pdi_noref(); if(ref) com_addref((void*)d);   // before dropping an old one: it may be the same interface
+    for(int i=0;i<p->n;i++) if(guid_eq(&p->e[i].g,g)){
+        if(ref){ pd_drop_iface(&p->e[i]); if(!d){ p->e[i]=p->e[--p->n]; return HR_OK; } }   // NULL clears
+        p->e[i].sz=8; memcpy(p->e[i].buf,&d,8); p->e[i].iface=(uint8_t)(ref && d); return HR_OK; }
+    if(!d) return HR_OK;
+    if(p->n<(int)(sizeof p->e/sizeof p->e[0])){ PDEnt*e=&p->e[p->n++]; e->g=*g; e->sz=8; memcpy(e->buf,&d,8); e->iface=(uint8_t)ref; }
+    else if(ref){ com_release((void*)d); return (int)0x8007000E; }   // E_OUTOFMEMORY
     return HR_OK; }
 // ---- ID3D11Resource (7-10) ----
 // ID3D11Resource::GetType -> D3D11_RESOURCE_DIMENSION (1 buffer, 2 TEXTURE1D, 3 TEXTURE2D, 4 TEXTURE3D). Our kinds are 1 buffer,
@@ -9415,14 +9446,21 @@ static int d3d_in_cs(const CsState*c,const D3DObj*o){
     for(int i=0;i<16;i++) if(c->cb[i]==o||c->samp[i]==o) return 1;
     return 0; }
 // game thread, at Present (before the frame is handed to the GL side)
+// The interfaces an object holds through SetPrivateDataInterface are released when it is staged for freeing: no reference
+// left and bound nowhere -- truly dead (releasing them at the first count of 0 crashed halo3 at halo3+0x2A2293: our counts
+// can reach 0 while halo3 still uses a shader) -- here on the game thread that presents (a Release runs guest code, which
+// needs its TEB; the GL thread that frees has none), after the queue lock is dropped (a Release may call back into D3D).
 static void d3dobj_stage(void){ uint32_t f=++g_pf_game; if(!g_d3dpend) return;
+    void* rel[256]; int nrel=0;
     pthread_mutex_lock(&g_pend_mx);
     D3DObj**pp=&g_d3dpend;
     while(*pp){ D3DObj*o=*pp;
         if(o->refs>0){ *pp=o->pnext; o->pstage=0; o->pnext=0; g_d3d_pending--; continue; }   // AddRef'd again: alive
-        if(o->pstage==1 && !d3d_in_state(&g_rst,o) && !d3d_in_cs(&g_rcs,o)){ o->pstage=2; o->pframe=f; o->pqpos=__atomic_load_n(&g_sq_head,__ATOMIC_ACQUIRE); }
+        if(o->pstage==1 && !d3d_in_state(&g_rst,o) && !d3d_in_cs(&g_rcs,o)){ o->pstage=2; o->pframe=f; o->pqpos=__atomic_load_n(&g_sq_head,__ATOMIC_ACQUIRE);
+            PDStore*pd=o->pdata; if(pd && !pdi_noref()) for(int i=0;i<pd->n;i++) if(pd->e[i].iface && nrel<256){ memcpy(&rel[nrel++],pd->e[i].buf,8); pd->e[i].iface=0; } }
         pp=(D3DObj**)&o->pnext; }
-    pthread_mutex_unlock(&g_pend_mx); }
+    pthread_mutex_unlock(&g_pend_mx);
+    for(int i=0;i<nrel;i++) com_release(rel[i]); }
 // queued / running CPU particle jobs still using o: as a resource they write or read live, OR as one of the views and samplers
 // they were dispatched with (cx.srv / cx.uav / cx.samp -- until 2026-10-17 only resources were checked, so a view the game
 // released right after a dispatch could be freed under its job: garbage particles after map changes in big games)
@@ -11645,6 +11683,9 @@ static const SigPatch g_sigpatches[]={
   // v0.9.20: the deadline is in rbx now
   {"watchdog","watchdog",0,"81 BD ?? ?? ?? ?? 00 CA 9A 3B 74 ?? E8 ?? ?? ?? ?? 90 48 39 D8 75 ?? 3B 95 ?? ?? ?? ?? 72 ??",
      1,{0x0a},{"74"},{"EB"}},
+  // v0.9.23: a flag byte is set before the clock read and the deadline is reloaded from the frame (exe+0x87acdb)
+  {"watchdog","watchdog",0,"81 BD ?? ?? ?? ?? 00 CA 9A 3B 74 ?? C6 85 ?? ?? ?? ?? 01 E8 ?? ?? ?? ?? 90 48 8B 8D ?? ?? ?? ?? 48 39 C8 75 ?? 3B 95 ?? ?? ?? ?? 72 ??",
+     1,{0x0a},{"74"},{"EB"}},
 };
 static int sig_parse(const char*s,uint8_t*b,uint8_t*m,int cap){ int n=0; while(*s && n<cap){ while(*s==' ')s++; if(!*s)break;
     if(s[0]=='?'){ b[n]=0; m[n]=0; } else { char h[3]={s[0],s[1],0}; b[n]=(uint8_t)strtoul(h,0,16); m[n]=1; } n++; s+=2; } return n; }
@@ -12212,6 +12253,13 @@ static int dump_attr(uint64_t v,char*out,size_t cap){
             char sh[48]; snprintf(sh,sizeof sh,"%s",nm); char*dot=strrchr(sh,'.'); if(dot) *dot=0;
             snprintf(out,cap,"      %s+0x%llx\n",sh,(unsigned long long)(v-(uint64_t)b)); return 1; } }
     return 0; }
+// The stack scan reads words above each thread's rsp. hook_safe() only checks the address RANGE, so a thread near the top of
+// its stack (or on a fiber) sent the scan into unmapped memory: the fault went to the game's exception handler and closed
+// the worker -- a SIGUSR1 meant to diagnose a hang killed the game (2026-10-24, PELOAD_DUMP_DEPTH=24 = 1440 words). Now the
+// scan stops at the thread's pthread stack top when rsp is inside that stack, and a fault during the scan is caught here
+// (crashsig checks t_dump_jb first) and ends that thread's scan with a note instead.
+#include <setjmp.h>
+static __thread sigjmp_buf* t_dump_jb;
 static void dump_all_guest_stacks(void){
     thread_act_array_t th; mach_msg_type_number_t n=0;
     if(task_threads(mach_task_self(),&th,&n)!=KERN_SUCCESS) return;
@@ -12219,7 +12267,9 @@ static void dump_all_guest_stacks(void){
     char hdr[64]; int hk=snprintf(hdr,sizeof hdr,"\n==== GUEST THREAD DUMP (%u threads) ====\n",n); (void)!write(2,hdr,hk);
     for(unsigned i=0;i<n;i++){
         if(th[i]==me || th[i]==g_tee_ports[0] || th[i]==g_tee_ports[1]) continue;
-        char tn[64]={0}; { pthread_t pt=pthread_from_mach_thread_np(th[i]); if(pt) pthread_getname_np(pt,tn,sizeof tn); }   // before suspending: it can take libpthread's list lock
+        char tn[64]={0}; uint64_t stop=0, sbot=0;
+        { pthread_t pt=pthread_from_mach_thread_np(th[i]); if(pt){ pthread_getname_np(pt,tn,sizeof tn);   // before suspending: it can take libpthread's list lock
+            stop=(uint64_t)pthread_get_stackaddr_np(pt); sbot=stop-(uint64_t)pthread_get_stacksize_np(pt); } }
         thread_suspend(th[i]);
         x86_thread_state64_t st; mach_msg_type_number_t sc=x86_THREAD_STATE64_COUNT;
         if(thread_get_state(th[i],x86_THREAD_STATE64,(thread_state_t)&st,&sc)==KERN_SUCCESS){
@@ -12227,8 +12277,13 @@ static void dump_all_guest_stacks(void){
             char rn[96]; if(!dump_attr(rip,rn,sizeof rn)) snprintf(rn,sizeof rn,"jit:0x%llx",(unsigned long long)rip); else { size_t l=strlen(rn); if(l) rn[l-1]=0; }
             char b[240]; int k=snprintf(b,sizeof b,"-- thr%u '%s' rip=%s rsp=0x%llx\n",i,tn,rn[0]==' '?rn+6:rn,(unsigned long long)rsp); (void)!write(2,b,k);
             static int depth=-1, words=700; if(depth<0){ const char*e=getenv("PELOAD_DUMP_DEPTH"); depth=e?atoi(e):16; if(depth<1) depth=16; if(depth>16) words=depth*60; }   // frames shown per thread
-            int shown=0; for(int w=0;w<words && shown<depth;w++){ uint64_t sa=rsp+(uint64_t)w*8; if(!hook_safe(sa)) break; uint64_t v=*(uint64_t*)sa;
-                char c[96]; if(dump_attr(v,c,sizeof c)){ int kk=(int)strlen(c); (void)!write(2,c,kk); shown++; } }
+            int nw=words; if(stop && rsp>=sbot && rsp<stop){ uint64_t left=(stop-rsp)/8; if(left<(uint64_t)nw) nw=(int)left; }   // not past the stack top
+            sigjmp_buf jb; volatile int shown=0;
+            if(sigsetjmp(jb,1)==0){ t_dump_jb=&jb;
+                for(int w=0;w<nw && shown<depth;w++){ uint64_t sa=rsp+(uint64_t)w*8; if(!hook_safe(sa)) break; uint64_t v=*(volatile uint64_t*)sa;
+                    char c[96]; if(dump_attr(v,c,sizeof c)){ int kk=(int)strlen(c); (void)!write(2,c,kk); shown++; } } }
+            else (void)!write(2,"      (stack scan stopped: unreadable memory)\n",47);
+            t_dump_jb=0;
         }
         thread_resume(th[i]);
     }
@@ -12244,6 +12299,7 @@ static void dump_all_guest_stacks(void){
 }
 static void usr1sig(int s){ (void)s; dump_all_guest_stacks(); }
 static void crashsig(int sig, siginfo_t *info, void *ucv){
+    if(t_dump_jb && (sig==SIGSEGV||sig==SIGBUS)){ sigjmp_buf*j=t_dump_jb; t_dump_jb=0; siglongjmp(*j,1); }   // a SIGUSR1 dump's stack scan hit unmapped memory
     ucontext_t *uc=ucv; uint64_t rip = uc? (uint64_t)uc->uc_mcontext->__ss.__rip : 0;
     if(g_bw_bp && uc){ if(sig==SIGTRAP && bw_trap(uc,rip-1)) return; if((sig==SIGSEGV||sig==SIGBUS) && info && bw_fault((uint64_t)info->si_addr,rip,uc->uc_mcontext->__ss.__rsp)) return; }
     if(sig==SIGTRAP && uc){

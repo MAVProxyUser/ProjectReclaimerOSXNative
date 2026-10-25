@@ -240,6 +240,10 @@ patch variants by signature (section 16; shim/docs/patch-addresses.md).
   logical CPU + a package). Old: `PELOAD_IGNORE_SUSPENDED=1`.
 - **SIGUSR1 dump names every guest DLL** (2026-10-20) — `dump_attr`. It named everything at 0x180000000 "halo3" (halo2.dll and
   haloreach.dll load there too) and left other DLLs unnamed; now exe / <dll>+0x<off> from each module's SizeOfImage.
+- **SIGUSR1 dump survives unreadable stacks** (2026-10-24) — `dump_all_guest_stacks`, `crashsig`. Why: `kill -USR1` on a
+  0.9.23 worker killed it: the stack scan read past a thread's stack into unmapped memory (`hook_safe` only checks the address
+  range). How: the scan stops at the thread's own stack top (`pthread_get_stackaddr_np`), and each thread's scan runs under a
+  `sigsetjmp`: a SIGSEGV / SIGBUS during it jumps back ("stack scan stopped: unreadable memory") instead of crashing the game.
 - **NUL device** — path translation. Why: the client opened `\\.\NUL` for the worker's stdio; the open failed (the
   real trigger of a directory-enumeration loop). How: mapped to /dev/null. (10-11 c04b6a2)
 - **Worker spawn under the loader** — `i_CreateProcessW`. Why: the engine worker could not start. How: posix_spawn of
@@ -954,6 +958,21 @@ patch variants by signature (section 16; shim/docs/patch-addresses.md).
   blob on the shader with SetPrivateDataInterface and reads it back for CreateInputLayout; the no-op stubs made the
   input-layout builder (halo3+0x2ac24c) get a NULL blob, so NO input layout was ever created and all world geometry was
   invisible ("geometry=0" was this, not a gate). How: real per-object private data. (10-12..14 da262fb)
+- **Private-data interfaces are referenced like Windows does** (client 0.9.23, 2026-10-24) — `d3d_SetPDI` / `d3d_GetPD`
+  (device, swap chain: the `g_spdi` table), `child_SetPDI` / `child_SetPD` / `child_GetPD` (PDStore entries now flag interface
+  data), `d3dobj_stage` (releases them). Why: 0.9.23's menu drew 1 draw a frame (its render job thread was stuck). Its new constant-buffer
+  upload filter (src/engine_constant_uploads.rs: it patches the context's Map / Unmap and keeps shadow copies of DISCARD-mapped
+  dynamic constant buffers <= 64 KB) attaches a "resource watcher" COM object to each buffer with SetPrivateDataInterface
+  ({9FCF6ACD-C385-4940-...}) and then Releases its own reference. Our SetPrivateDataInterface didn't AddRef, so that Release
+  freed the watcher, whose cleanup took the filter's mutex -- which the filter's Map wrapper was holding: the render job
+  thread deadlocked on itself (WaitOnAddress, every other thread waiting on it). How: SetPrivateDataInterface AddRefs the
+  new interface and releases the one it replaces (NULL clears), SetPrivateData over interface data releases it, GetPrivateData
+  of interface data returns an AddRef'd pointer (halo3 Releases what it gets: without that AddRef, halo3+0x2A2293 crashed),
+  and an object's interfaces are released when it is destroyed (collected under the pending-free lock, released after it).
+  The first try (releasing in obj_Release at refcount 0) crashed in halo3; the missing GetPrivateData reference was the
+  cause. With it: menu ~620 draws a frame, loaded in ~20 s; 0.9.22 unchanged (620 draws). The filter itself stays on (it is the client's
+  own optimisation; `RECLAIMER_SEND_ALL_UPLOADS=1` is its off switch). Old: `PELOAD_PDI_NOREF=1` (no references: the
+  deadlock again).
 - **D3D11_APPEND_ALIGNED_ELEMENT** — `dev_crIL`. Why: 0xFFFFFFFF offsets were taken literally. How: resolved from the
   previous element's size (`dxgi_vtx_bytes`). (10-12..14 da262fb)
 - **UpdateSubresource honours pDstBox; CopySubresourceRegion implemented** — Why: the game crashed every run ~2 s after
@@ -1427,6 +1446,28 @@ match in the executable sections, original bytes checked) and reports what it ca
   patch-addresses.md section 3); the Ballot cache grew to 0x3f8 (three 0x140-byte choices, were 0x128): the vote fields
   are still its last 0x20 bytes, where st_bv_tick reads them; the moderation table moved (entry above). Checked in game
   against our dedicated server on 0.9.22: menu, join, match, chat hook, spawns, slots, Quality control. (10-20)
+- **Port to client v0.9.23** (2026-10-24) — the watchdog needed a new row: 0.9.23 sets a flag byte (`mov byte [rbp+X],1`)
+  between the deadline test's `je` and the `Instant::now` call and reloads the deadline from the frame again (`mov rcx,[rbp+X] ;
+  cmp rax,rcx`), so neither older row matched; new `g_sigpatches` row (exe+0x87ace5, `74` -> `EB`). Every other point moved
+  with its signature (patch-addresses.md section 3 v0.9.23 table; shim/docs/porting.md section 3 walks through it). The live
+  check found the private-data deadlock (section 10). Checked in game against our dedicated server on 0.9.23: menu, join,
+  match, chat hook (an RCON `say` line in the feed), server-side player addresses, slots (port-verify.sh: 18 PASS).
+- **stats.c signatures are per-point lists** (2026-10-24) — `g_sig_set_muted`, `g_sig_voice_recv`, `g_sig_push_history`,
+  `g_sig_max_players`, `g_sig_cast_vote`, `g_sig_ballot`, `sig_next`. Why: porting a stats hook meant editing C inside its
+  install function (one string each, fixed offsets after it), and nothing could add one mechanically. How: one 0-terminated
+  list per point, tried in order; the first signature that matches once AND passes the point's meaning check is used, else
+  the next. re-tools/patchscan.py reads the lists by name; re-tools/sigport.py --apply appends to them. set_muted's lock is
+  now its first `lock cmpxchg byte [rip+d],cl` within 0x40 bytes (was: the disp32 at +0x20, right only for the v0.9.2+
+  prologue), and the is_muted pairing accepts any `mov dl,1 ; xor eax,eax ; lock cmpxchg [rip+d],dl` on that lock (was: one
+  13-byte is_muted prologue, so the pre-0.9.2 `56 57 48 83 EC 28` is_muted never paired). Checked on every release 0.8.1 ..
+  0.9.23: each real set_muted pairs, the 0.8.16 .. 0.9.1 Forge lookalikes (only ever locked with cl) don't. Same results on
+  0.9.22 / 0.9.23 as before.
+- **Moderation table: at least 3 reading sites** (2026-10-24) — `st_addr_install`. Why: re-tools/patchscan.py over every
+  release found a "players Vec" in 0.8.9 and 0.8.11, before the table existed: a single stray `imul r64,[rip+d],0x68`
+  after the first lock. How: the most common target is accepted only with >= 3 sites (the real Vec: 6-7 in 0.9.2 .. 0.9.23).
+- **The loader logs where it hooked** (2026-10-24) — `st_voice_install` / `st_chat_install` print the set_muted, voice_recv
+  and push_history addresses on their `[stats]` lines, so shim/tools/port-verify.sh compares every point's address between
+  the loader (C, at load) and re-tools/patchscan.py (Python, on the file).
 - **Workshop-download helper replaced** — `i_CreateProcessW`. Why: the client's `workshop-download --subscribe|--update
   <id>` helper needs Steam ("Steam Workshop is unavailable"), and with `PELOAD_WORKER_INHERIT_STDIO=1` its JSON went to the
   loader's log so the parent read EOF. How: run shim/tools/workshop-helper.sh (DepotDownloader) on the client's pipes in
@@ -1573,6 +1614,13 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   tag table matches the most live objects' definition datums, rechecked every 2 s; per-definition caches reset when it
   changes; 32 recent paths (was 8), 48 open map files (was 6) (10-18 cef684c); then the engine's own scenario path
   (game_options +0x44) picks the file, 256 live definitions sampled, ties keep the current map (10-18 ab7f719).
+- **"Match started" names the map being played** (2026-10-24) — stats.c `st_feed_line` / `st_snapshot`, hitbox.c
+  `g_hb_map_recheck`. Why: the feed's "Match started: <map>" (on the client's "Loading screen complete" line) copied the map
+  the last snapshot saw, and hb_current_map decides that only every 2 s: right after a load it was still a map the client
+  merely opened (0.9.23 on Valhalla: "Match started: 130_epilogue"). How: that line sets a recheck flag (the next
+  hb_current_map call decides again) and a pending flag; the next snapshot (<= 100 ms) takes the pending flag before its map
+  lookup, so the lookup it posts with is the fresh one; the event keeps the loading screen's time. Checked live (0.9.23,
+  Valhalla): "Match started: riverworld" = the snapshot's map; port-verify.sh checks it ("feed map").
 - **Zones never drawn without occlusion** — `hbz_gpu`. Why: a frame that met the depth readback mid-update drew every zone
   surface unoccluded (push-back ceilings flashed over the view). How: always the last complete depth copy and its
   camera; none = no zones. (10-18 3eb0680)
@@ -1825,6 +1873,19 @@ Numbers are from the commit messages; PERF-PLAN.md has the measurements. Compare
   old client within hours of a release) (10-18 37c15de).
 - **quiet-run.sh** — no longer minimizes by default (`QR_MINIMIZE=1`), anchored process match (10-16 f73252e); frees the
   port (0faafe7); serves the source pages (d157084).
+- **quiet-run.sh writes its process group** (2026-10-24) — /tmp/quiet-run.pgid (`QR_PGID_FILE`) while the game runs, so a
+  caller done early (port-verify.sh) stops exactly that group, never another game.
+- **Porting toolkit** (2026-10-24; guide: shim/docs/porting.md) — the scripts that port the loader to a new client release
+  and check the result, all in the repo (they were in a scratch folder once and got lost). shim/tools/fetch-releases.sh (the
+  corpus: every release exe + SHA256SUMS.txt, verified), shim/tools/client-survey.sh (the loader's `--version` lines on
+  two builds, import diff, `dedicated` subcommand), re-tools/patchscan.py (every point in any number of builds with the
+  loader's own checks, the signatures read from the C sources; `--diff`, `--md`, `--json`, `--rev <commit>`; documented old
+  misses shown with their anchor-found places from patch-addresses.md section 3), re-tools/sigport.py (ports a point to a
+  new build: anchors -> candidates -> instruction-shape alignment -> wildcarded signature -> the meaning check; `--corpus`,
+  `--apply`, `--selftest` replays every historical change), shim/tools/port-verify.sh (static + loader + live PASS / FAIL /
+  SKIP per point against our dedicated server with one hidden client; the chat check sends an RCON `say`), re-tools/pelib.py
+  (the shared PE reader: mapped like the loader, .pdata functions, call index, batched string references, file offsets),
+  re-tools/fanchors.py / sigscan.py / ripref.py / callers.py / fcalls.py / imulscan.py / peimps.py, shim/tools/winshot.sh.
 - **target.sh** — waits after typing the map name (55811fa) and 30 s (was 12) after a match before Start Game (the click
   came before the lobby was ready) (10-16 4621a04); no WASAPI for the target while the caulk crash was open (10-17 b02529c).
 - **workshop-helper.sh progress** — Why: DepotDownloader prints a percentage only when a file finishes and verifies

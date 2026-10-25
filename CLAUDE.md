@@ -280,6 +280,16 @@ code, lock+0x170; patch-addresses.md v0.9.22 table). New imports = Media Foundat
 EXPORT MP4: answered E_NOTIMPL (logging stubs return 0 = S_OK -> null call). Clipboard (same day): Win32 clipboard + GlobalAlloc
 on NSPasteboard (PELOAD_NO_CLIPBOARD = old stub, PELOAD_PASTEBOARD=<name> private pasteboard -- quiet-run / target.sh use one;
 offline test shim/tools/clipboard-test.sh). quiet-run.sh ignores RECLAIMER_JOIN: pass "reclaimer://join?server=host:port" as its args.
+Client 0.9.23 (2026-10-24): the watchdog got a new g_sigpatches row (a flag byte between its `je` and the clock call); the rest
+moved with their signatures. Its new constant-buffer upload filter (RECLAIMER_SEND_ALL_UPLOADS=1 = off) attaches COM objects with
+SetPrivateDataInterface and releases its own reference: our SetPDI didn't AddRef -> the watcher was freed under the filter's lock ->
+the render job thread deadlocked (menu at 1 draw a frame). Private-data interfaces are now referenced like Windows (SetPDI AddRef,
+GetPrivateData AddRef -- halo3 Releases what it gets --, released on replace / destroy; PELOAD_PDI_NOREF=1 = old).
+PORTING A RELEASE: shim/docs/porting.md -- fetch-releases.sh (corpus), client-survey.sh, `re-tools/patchscan.py --diff old new`
+(signatures read from the C; `--rev <commit>`; exit 0 over all 39 releases), `re-tools/sigport.py --point P --old --new [--corpus]
+[--apply]` (anchors incl. callers' texts -> shape alignment -> wildcarded signature -> meaning check; `--selftest` replays history),
+then `shim/tools/port-verify.sh` (PASS/FAIL per point; live: hidden client + our dedicated server, chat via RCON `say`). stats.c
+signatures are per-point lists g_sig_<point> (first that matches once AND passes the meaning check). Helpers go in the repo.
 Reach Renaissance (2026-10-20, shim/docs/reach-renaissance.md): Halo: Reach on MCC's haloreach.dll, same design as Reclaimer
 (bin/host-probe.exe = the game: LoadLibraryW(haloreach.dll), its own D3D11 device, ~85 in-memory engine patches). `bash shim/reach.sh
 [map] [variant] [min]` runs host-probe directly (run folder first argument, --launch-block C:\ReachRenaissance\data\launch_block_1.bin,

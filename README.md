@@ -32,7 +32,7 @@ loading screens, its own rate is shown beside it).
 
 Known gaps:
 - **No MCC pause menu** (by design in standalone mode); F1 releases the mouse.
-- **Theater's EXPORT MP4 / RECORD VIDEO (client 0.9.22) don't work**: they need Windows' Media Foundation, which the loader
+- **Theater's EXPORT MP4 / RECORD VIDEO (client 0.9.22+) don't work**: they need Windows' Media Foundation, which the loader
   doesn't have (every Media Foundation call fails with "not implemented"). The stats page's Record row saves clips (mp4)
   instead.
 - **Frame-rate ceiling.** Performance is bound by OpenGL-on-Metal's per-draw-call cost.
@@ -43,12 +43,12 @@ Known gaps:
   **macOS 13 or newer** (the binaries are built for 13.0). Developed and tested on an M4 running macOS 26; 16 GB of memory
   or more is recommended (a 100-player game on a big Workshop map uses ~10 GB for the game and 1-8 GB for the GL helper).
 - Your own copy of **Halo: The Master Chief Collection** on Steam, with the Halo 3 Multiplayer files.
-- **Project Reclaimer client v0.9.22** — `project-reclaimer-client-v0.9.22.exe` from
+- **Project Reclaimer client v0.9.23** — `project-reclaimer-client-v0.9.23.exe` from
   https://github.com/ProjectReclaimer/project-reclaimer-releases/releases (SHA-256
-  `517ee179292ca60ffade7f31f6baffef95981467b522981613250f3dff55f6c9`; `bash shim/tools/client-update.sh` fetches the
+  `ceef542ac17980d178e281ebf510b4aaaf28ef650a288f1d68e8250731ad7e70`; `bash shim/tools/client-update.sh` fetches the
   newest and checks it). The loader finds the few client code paths it patches by byte signature (with a variant per
-  compiled shape: shim/docs/patch-addresses.md), so other builds usually work too; v0.9.20, v0.9.18 and v0.9.13 are also
-  tested. Servers admit only their own client version, so update when a new one comes out.
+  compiled shape: shim/docs/patch-addresses.md), so other builds usually work too; v0.9.22, v0.9.20, v0.9.18 and v0.9.13
+  are also tested. A new release that moves one of them is ported with the scripts in shim/docs/porting.md. Servers admit only their own client version, so update when a new one comes out.
   Servers and players move to each new release within hours (they refuse older clients: "This server runs Project
   Reclaimer 0.9.19 and you have 0.9.18"). The launchers use the newest `client/project-reclaimer-client-v*.exe`, so dropping
   a new release in `client/` is enough to try it; a client code path whose signature changed only switches its feature

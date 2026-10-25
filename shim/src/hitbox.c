@@ -326,11 +326,13 @@ static int hb_live_defs(uint32_t*defs,int max){   // distinct definition datums 
         uint64_t p=*(const uint64_t*)(e+0x10); uint32_t d=0; if(!p || !hb_read(p,&d,4) || d==0xFFFFFFFFu || !(d>>16)) continue;
         int dup=0; for(int k=0;k<n;k++) if(defs[k]==d){ dup=1; break; } if(!dup) defs[n++]=d; }
     pthread_mutex_unlock(&mx); return n; }
+static volatile int g_hb_map_recheck;   // set: the next call decides again now (stats.c, when a match's loading screen ends)
 static int hb_current_map(char*out,size_t n){
     static pthread_mutex_t mx=PTHREAD_MUTEX_INITIALIZER; static char cur[1024]; static double tchk; static int last_np=-1;
     pthread_mutex_lock(&mx); double now=mono_s();
     char paths[HB_NPATHS][1024]; int np; pthread_mutex_lock(&g_hb_mapmx); np=g_hb_nmappaths; memcpy(paths,g_hb_mappaths,sizeof(paths[0])*(size_t)np); pthread_mutex_unlock(&g_hb_mapmx);
-    if(!cur[0] || now-tchk>2.0 || np!=last_np){ tchk=now; last_np=np;
+    int force=__atomic_exchange_n(&g_hb_map_recheck,0,__ATOMIC_ACQ_REL);
+    if(!cur[0] || now-tchk>2.0 || np!=last_np || force){ tchk=now; last_np=np;
         // the engine's own scenario name decides when one candidate file carries it (the definition match is a vote:
         // Workshop maps built on the same tag base can tie on it, and the newer of two tied files used to win)
         static uint32_t defs[256]; int nd=hb_live_defs(defs,256); int best=-1, bs=-1, cs=-1; char sn[128]; int hs=hb_scenario_name(sn,sizeof sn);
