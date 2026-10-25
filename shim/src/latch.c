@@ -171,6 +171,11 @@ const uint8_t* latch_src(D3DObj*cb,uint64_t sub,uint64_t n,uint8_t*tmp,size_t ca
     lat_cam(pm); memcpy(g_latch_vp,pm,sizeof g_latch_vp); g_latch_vp_f=f; g_latch_vp_ok=1;
     return tmp; }
 int latch_applying(void){ return lc_mode()==2; }
+int latch_off(void){ return lc_mode()==0; }
+// the stats snapshot's "latch": mode (off / learning / on), whether it is correcting now, what it learned, the last correction
+void latch_json(char*o,size_t n){ int m=lc_mode();
+    snprintf(o,n,"{\"mode\":\"%s\",\"applying\":%s,\"deg_per_count\":%.5f,\"r2\":%.2f,\"input_age_ms\":%.0f,\"moving_frames\":%llu,\"last_deg\":%.2f,\"in_vehicle_or_dead\":%s}",
+        m==0?"off":m==1?"learning":"on",(m==2 && g_lc_on)?"true":"false",g_lc_k[0],g_lc_r2[0],g_lc_tau*1e3,(unsigned long long)g_lc_nmov,g_lc_dyaw,lc_in_vehicle()?"true":"false"); }
 int ab_latch(int set){ lc_mode(); if(set>=0) g_lc_mode=set?2:1; return g_lc_mode==2; }   // PELOAD_AB=latch: applied vs learning only
 // the overlay's camera for this frame: the patched one when the latch moved it
 const float* latch_overlay_vp(const float*engine){   // (the draw that captures the world camera: often before its buffer upload)

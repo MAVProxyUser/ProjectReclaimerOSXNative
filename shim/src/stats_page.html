@@ -138,7 +138,8 @@ th .srt{display:inline-block;margin-left:2px;padding:0 2px;cursor:pointer;color:
 #fl.h-weapons .k-weapon,#fl.h-vehicles .k-vehicle,#fl.h-powerups .k-powerup{display:none}
 </style></head>
 <body>
-<h1>Reclaimer live stats <a href="/forensics" title="voice, chat and events archive + viewer" style="font-size:12px;font-weight:400;color:var(--accent);margin-left:10px;text-decoration:none">forensic archive</a></h1><div id="hd">connecting...</div><div id="pf" class="note" title="latency.c, every second: the engine's frame rate and the new frames the window got (what the screen can show), frame time median / 95th percentile, draws per frame, objects in the camera's view, and input -> screen: a mouse or stick turn followed to the frame on the screen (median of the last measured ones; the display step is modelled from its refresh). The same numbers go to ~/Library/Application Support/ReclaimerMac/perf/*.csv every second."></div>
+<h1>Reclaimer live stats <a href="/forensics" title="voice, chat and events archive + viewer" style="font-size:12px;font-weight:400;color:var(--accent);margin-left:10px;text-decoration:none">forensic archive</a></h1><div id="hd">connecting...</div><div><span id="pf" class="note" title="latency.c, every second: the engine's frame rate and the new frames the window got (what the screen can show), frame time median / 95th percentile, draws per frame, objects in the camera's view, and input -> screen: a mouse or stick turn followed to the frame on the screen (median of the last measured ones; the display step is modelled from its refresh). The same numbers go to ~/Library/Application Support/ReclaimerMac/perf/*.csv every second."></span>
+ <label class="lbl" id="lcl" style="display:none;margin-left:10px" title="Late camera update: the mouse movement you made after the game built a frame is applied to that frame's camera just before the GPU draws it (HUD and weapon stay put). Off = learning only, as the game draws it. It steps aside in vehicles and while dead. PELOAD_LATCH=0 at launch turns it off entirely."><input type="checkbox" id="lcb"> late camera <span id="lcs" class="note"></span></label></div>
 <!-- top (user, 2026-10-18): game rules first, then the overlay controls beside the death heatmap -->
 <div id="rules" class="panel"><h2><span id="rt">Game rules</span> <span id="slots" class="slots"></span></h2><div id="rb" class="note">not in a match</div></div>
 <div class="grid top">
@@ -960,6 +961,8 @@ async function pollFeed(){ if(feedBusy) return; feedBusy=true;
     cb.addEventListener('change',()=>{ fl.classList.toggle('h-'+cb.dataset.f,!cb.checked);
       try{ localStorage.setItem('feedHide',JSON.stringify([...document.querySelectorAll('#feed input[data-f]')].filter(c=>!c.checked).map(c=>c.dataset.f))); }catch(err){} }); } }
 pollFeed();
+document.getElementById('lcb').addEventListener('change',async e=>{
+  try{ await fetch('/control?do=latch&on='+(e.target.checked?1:0),{method:'POST',headers:{'X-Reclaimer-Control':'1'}}); } catch(err){} });
 document.getElementById('qus').addEventListener('change',async e=>{ const msg=document.getElementById('ovmsg');
   try{ const j=await (await fetch('/control?do=quality&v='+e.target.value,{method:'POST',headers:{'X-Reclaimer-Control':'1'}})).json(); msg.textContent=j.ok?'':(j.error||'refused'); }
   catch(err){ msg.textContent='not connected'; } });
@@ -1007,6 +1010,9 @@ es.onmessage=m=>{snap=JSON.parse(m.data);
   if(snap.inst!==undefined){ if(gameInst===null) gameInst=snap.inst; else if(snap.inst!==gameInst){ location.reload(); return; } }
   if(snap.feed_seq!==undefined && snap.feed_seq!==feedSeq) pollFeed();
   document.getElementById('hd').textContent=`${snap.map||'-'}  |  ${snap.in_match?'match time '+fmtT(snap.time):'not in a match'}  |  ${snap.players.length} players, ${snap.vehicles.length} vehicles, ${snap.projectiles.length} projectiles in flight`;
+  { const L=snap.latch, l=document.getElementById('lcl'); l.style.display=L&&L.mode!=='off'?'':'none';
+    if(L&&L.mode!=='off'){ const b=document.getElementById('lcb'); if(document.activeElement!==b) b.checked=L.mode==='on';
+      document.getElementById('lcs').textContent=L.mode!=='on'?'':L.moving_frames<200?'(learning your mouse...)':L.in_vehicle_or_dead?'(paused: vehicle / dead)':`(input ${Math.round(L.input_age_ms)} ms old at upload, ${L.deg_per_count.toFixed(4)}°/count)`; } }
   { const p=snap.perf, e=document.getElementById('pf'); if(!p){ e.textContent=''; } else { const ms=v=>v>=0?Math.round(v)+' ms':'-';
       e.textContent=`${p.fps.toFixed(1)} fps (window ${p.window_fps.toFixed(1)})  |  frame ${p.frame_ms[0].toFixed(1)} / ${p.frame_ms[1].toFixed(1)} ms (median / 95%)  |  ${Math.round(p.draws)} draws  |  ${p.in_view} of ${p.objects} objects in view  |  input -> screen ${ms(p.input_to_screen_ms)}${p.inputs?' ('+p.inputs+' measured)':''}  |  ${Math.round(p.refresh_hz)} Hz display`; } }
   renderTable(); renderDet(); renderOverlay(); renderRules(); renderSlots(); renderConn(); renderRec(); drawMap()};

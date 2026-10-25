@@ -2105,7 +2105,9 @@ Numbers are from the commit messages; PERF-PLAN.md has the measurements. Compare
   the probe never saw the patch -- was found by an A/B that showed nothing. In-match A/B (PELOAD_AB=latch:20, ~97-player
   HugeGrass, ~42 fps): input -> screen 120 -> 84 ms; yaw direction reversals 0.8 -> 1.2-1.3 a second (a little extra
   wobble). Valhalla ~230 fps: 52-62 -> 42-49 ms. Unpatched matrices facing the camera's way (PELOAD_LATCH_SKYCHECK=1) were
-  none camera matrices: the sky shares the world camera. Mouse only. PELOAD_LATCH=0 = off (no learning either).
+  none camera matrices: the sky shares the world camera. Mouse only. PELOAD_LATCH=0 = off (no learning either). Stats page:
+  a "late camera" checkbox beside the frame-rate line (POST do=latch&on=0|1: applied vs learning only, to feel the difference in
+  a running game) with what it learned; snapshot "latch" (latch_json).
 - **Input -> screen latency measured end to end, and a per-second performance log** (2026-10-25; user: "the window adds its own
   display delay on top of these numbers -- THIS is what I need you to calculate, cuz that feel is all that will matter to the
   player"; "make sure you have a running log of the FPS ... compared to objects on the screen") — new shim/src/latency.c

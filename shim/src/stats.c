@@ -1012,6 +1012,9 @@ static int st_control(const char*act,const char*qs){
         n+=snprintf(st+n,sizeof st-n,";s:0.5;139,669;s:2.5;1046,66%s",g_gameplay_t0?";s:1.8;132,467":"");
         snprintf(g_st_qual_want,sizeof g_st_qual_want,"%s",lv[to]); wi_steps_async(st);
         char m[160]; int k=snprintf(m,sizeof m,"  [stats] page: graphics quality %s -> %s (through the client's Settings menu)\n",from>=0?lv[from]:"?",lv[to]); (void)!write(2,m,k); return 1; }
+    // do=latch&on=0|1: the late camera update (latch.c) applied or only learning -- to feel the difference in a running game
+    if(!strcmp(act,"latch")){ extern int ab_latch(int set); extern int latch_off(void); const char*v=strstr(qs,"on="); if(!v || latch_off()) return 0; ab_latch(atoi(v+3)?1:0);
+        char m[80]; int k=snprintf(m,sizeof m,"  [stats] page: late camera update %s\n",atoi(v+3)?"on":"off (learning only)"); (void)!write(2,m,k); return 1; }
     if(!strcmp(act,"mic")){ const char*v=strstr(qs,"on="); if(!v || !wa_mic_mode() || wa_mic_mode()==3) return 0; g_mic_muted=atoi(v+3)?0:1;   // the microphone (wasapi.c)
         char m[64]; int k=snprintf(m,sizeof m,"  [stats] page: microphone %s\n",g_mic_muted?"muted":"live"); (void)!write(2,m,k); return 1; }
     if(!strcmp(act,"submit")){ const char*v=strstr(qs,"on="); if(!v) return 0; g_sub_want=atoi(v+3)?1:0; return 1; }   // GL submission thread (d3dsubmit.c)
@@ -1336,7 +1339,8 @@ static void st_snapshot(StBuf*s){
     sb_put(s,"{\"time\":%.2f,\"in_match\":%s,\"inst\":%d",g_gameplay_t0?now-g_gameplay_t0:0.0,g_gameplay_t0?"true":"false",(int)getpid());   // inst: a new game -> open pages reload
     { pthread_mutex_lock(&g_ev_mx); uint32_t fs=g_ev_seq; pthread_mutex_unlock(&g_ev_mx); sb_put(s,",\"feed_seq\":%u",fs); }
     { char rj[1024]; rec_status_json(rj,sizeof rj,!win_hidden()); sb_put(s,",\"rec\":%s",rj); }   // clip recording (rec.m)
-    sb_put(s,",\"perf\":%s",g_perf_json[0]?g_perf_json:"null");   // latency.c: fps, frame times, objects in view, input -> screen
+    sb_put(s,",\"perf\":%s",g_perf_json[0]?g_perf_json:"null");
+    { extern void latch_json(char*o,size_t n); char lj[300]; latch_json(lj,sizeof lj); sb_put(s,",\"latch\":%s",lj); }   // latch.c   // latency.c: fps, frame times, objects in view, input -> screen
     { st_av_init(); st_av_tick(now); static const char*const mn[5]={"off","1","2","3","none"};
       sb_put(s,",\"autovote\":{\"calls\":\"%s\",\"map\":\"%s\"}",g_av_calls==1?"yes":g_av_calls==2?"no":"off",mn[g_av_map+1]); }
     char m[64]="";
