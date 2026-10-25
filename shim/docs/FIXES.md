@@ -175,6 +175,18 @@ patch variants by signature (section 16; shim/docs/patch-addresses.md).
   points into bink2w64.dll (PASS); the BinkClose slot holds the client's wrapper. No mod movie was available to watch one play
   (no .bik on disk; MCC's own movies aren't in the depots we have). The same check shape exists for XAudio2 (its four slots
   hold halo3+0x60c416 .. thunks on disk), which is why the `xaudio` signature patches exist. Old: `PELOAD_BINK_EAGER=1`.
+- **halo3's XAudio2 delay imports left lazy too: the xaudio patches retired** (2026-10-24) — `bind_delay_imports`, `sig_enabled`.
+  Why: the client's XAudio2 check (exe+0x600600 in 0.9.23) is the Bink check's twin -- halo3's four XAudio2_9Redist.dll delay
+  slots (halo3+0xa39e10..+0xa39e28, ordinals #5 #2 #6 #1) must still hold their delay thunks (halo3+0x60c416 / 0x60c422 /
+  0x60c40a / 0x60c385); the loader bound them up front, the client refused, and four signature patches NOP'd its mismatch
+  branches -- four points to port in every release (they moved in 0.9.20). How: the slots stay lazy; the check passes, the
+  client installs its wrappers as on Windows; a thunk that runs before that resolves through halo3's delay helper ->
+  LoadLibraryExA("XAudio2_9Redist.dll") -> XA_HANDLE -> GetProcAddress(ordinal) -> xa_resolve (our CoreAudio XAudio2). The
+  xaudio patches apply only with `PELOAD_XA_EAGER=1` (or named in PELOAD_RECLAIMER_PATCHES); patchscan / port-verify report
+  them as optional. Checked (0.9.23, A/B in the same local match, audio mixed but muted, PELOAD_AUDIO_MUTE + AUDIO_DUMP): old
+  (eager + patches) vs new (lazy, no xaudio patches): the client's audio setup lines identical ("voice settings wrapped ...",
+  "repeated voice settings are skipped"), no refusal, 53 s of 81 non-silent in both, RMS 0.0194 vs 0.0192, no NaN; the
+  headless dedicated server takes its "audio off" path. Old: `PELOAD_XA_EAGER=1`.
 - **Guest-to-guest imports** — Why: imports of one guest DLL from another (l360/q10 -> WavesLibDLL) bound to stubs.
   How: they bind to the real exports. (10-16 a574219)
 - **GetModuleFileNameW/A, GetModuleHandleExW, GetModuleHandleW for guest DLLs** — Why: WaveShell-Xbox.dll looked for
@@ -1661,6 +1673,16 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   datagrams a second, the server the mirror image with the client's port; the game layer logged the join (connect-request
   rx, connect-establish, join-request tx, peer-establish, time-synchronize, view-establishment, membership-update /
   parameters-update rx ...). Off: `PELOAD_PKTLOG=0`; the game layer starts with `PELOAD_PKTLOG_GAME=1` or the page switch.
+- **PELOAD_FRAMECAP and the client's datagram format** (2026-10-24; user: "pin them down" -- the 43 bytes 0.9.23 removed) —
+  pktlog.c `pk_framecap_install` / `pk_on_frame` (debug only): an entry hook on the client's frame sender (0.9.23 exe+0x8bb5a0, by
+  signature; the hook compares the image's own first 19 bytes since the frame size differs between builds) logs the first n
+  frames of each kind before the client compacts and encrypts them. Result (shim/docs/client-transport.md): 0.9.22 sent
+  `[class][message id 4][fragment index][fragment count]` + the whole 36-byte internal header (kind tag 4, session value 16,
+  sender / recipient endpoint ids 8 + 8) = 43 bytes per datagram; 0.9.23 sends `[kind code | flags][class]` and adds the ids
+  (16) or the fragment fields (6) only when needed. Measured with the packet log: ~31 / ~36 bytes less per datagram on average.
+- **Privacy: who sees your IP address** (2026-10-24) — README "Who sees your IP address": a joined client has one QUIC peer,
+  the server (voice relayed); other players never get your address; the server, its admins, every server the browser queries
+  and the community services do; hosting publishes it.
 - **Zones never drawn without occlusion** — `hbz_gpu`. Why: a frame that met the depth readback mid-update drew every zone
   surface unoccluded (push-back ceilings flashed over the view). How: always the last complete depth copy and its
   camera; none = no zones. (10-18 3eb0680)

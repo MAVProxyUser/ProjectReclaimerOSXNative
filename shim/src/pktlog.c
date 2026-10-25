@@ -104,8 +104,69 @@ static void* g_pkg_orig[PKG_MAX][2]; static uint8_t* g_pkg_thunk[PKG_MAX][2]; st
 static char g_pkg_name[PKG_MAX][32]; static uint32_t g_pkg_flags[PKG_MAX];
 static uint64_t g_pkg_count[PKG_MAX][2];
 static uint8_t* g_pkg_pool; static size_t g_pkg_off;
-static void __attribute__((ms_abi)) pk_game_ev(uint32_t id,int64_t size){
+// ---- the peer of a halo3 message: who halo3's sender / receiver is talking to ----
+// encode_message (halo3+0x5cd84) and decode_message (halo3+0x5ce3c) -- where the table's encode / decode run -- don't know the
+// peer; their five callers do. Entry hooks on those (installed with the game layer; code hooks, prologues checked) put their
+// peer argument in a thread-local the message thunk reads (each call encodes / decodes inside itself, on the same thread):
+//   1 halo3+0x249dc  a session-channel send: rdx -> the destination (32 bytes)
+//   2 halo3+0x24900  a session-channel receive: rdx -> the source context
+//   3 halo3+0x5f0b0  the gateway's (connectionless) send: the 5th argument -> the destination address
+//   4 halo3+0x5f2f0  the gateway's receive
+//   5 halo3+0x5efa8  a gateway reply (connect-establish)
+typedef struct { int kind; uint64_t rcx, rdx, a5; } PkCtx;
+static __thread PkCtx t_pkc;
+static uint64_t g_pkc_dump[6];   // (PELOAD_PKTLOG_CALLERS) raw dumps done per kind
+static void __attribute__((ms_abi)) pk_ctx(uint64_t kind,uint64_t rdx,uint64_t rcx,uint64_t a5){
+    t_pkc.kind=(int)kind; t_pkc.rcx=rcx; t_pkc.rdx=rdx; t_pkc.a5=a5;
+    static int cl=-1; if(cl<0) cl=getenv("PELOAD_PKTLOG_CALLERS")?1:0;
+    if(cl && kind<6 && g_pkc_dump[kind]<6){ g_pkc_dump[kind]++; uint64_t p=kind==3?a5:rdx; uint8_t b[48]; char hx[100]="(unreadable)";
+        if(p && hb_read(p,b,48)){ for(int i=0;i<48;i++) snprintf(hx+2*i,3,"%02x",b[i]); }
+        char m[260]; int n=snprintf(m,sizeof m,"  [pktlog] ctx %llu rcx %llx rdx %llx a5 %llx -> %s\n",(unsigned long long)kind,(unsigned long long)rcx,(unsigned long long)rdx,(unsigned long long)a5,hx); (void)!write(2,m,(size_t)n);
+        // (debug) where the address's first 8 bytes occur in halo3's session peer records (both layouts)
+        uint8_t*h3=hb_halo3_base(); uint64_t sess=0, id=0;
+        if((kind==1||kind==2) && p && hb_read(p,&id,8) && h3 && hb_read((uint64_t)(uintptr_t)(h3+0x1e250d0),&sess,8) && sess){
+            for(int lay=0;lay<2;lay++){ uint64_t base=sess+(lay?0x1381c0:0x58); int np=lay?128:17;
+                for(int i=0;i<np;i++){ uint8_t r[0x110]; if(!hb_read(base+(uint64_t)i*0x110,r,sizeof r)) continue;
+                    for(int o=0;o+8<=0x110;o+=4) if(!memcmp(r+o,&id,8)){ n=snprintf(m,sizeof m,"  [pktlog]   id %016llx = %s peer %d +0x%x (record starts %016llx)\n",(unsigned long long)id,lay?"extended":"normal",i,o,(unsigned long long)*(uint64_t*)r); (void)!write(2,m,(size_t)n); } } } }
+        if(kind==3){ uint8_t ob[0x40]; if(hb_read(rcx,ob,0x40)){ char h2[140]; for(int i=0;i<0x40;i++) snprintf(h2+2*i,3,"%02x",ob[i]); n=snprintf(m,sizeof m,"  [pktlog]   ctx 3 object head %s\n",h2); (void)!write(2,m,(size_t)n); } } } }
+// a code entry hook that also passes the 5th argument: site -> jmp [rip+0] tramp (14 bytes, no register touched); tramp saves
+// rcx rdx r8 r9 rax r10 r11 + xmm0-5, calls pk_ctx(kind, rdx, rcx, [orig rsp+0x28]), restores, runs the relocated prologue
+// (len bytes, position-independent: checked against pro) and jumps back to site+len
+static int pkc_hook(uint8_t*site,const uint8_t*pro,int len,uint32_t kind){
+    if(len<14 || memcmp(site,pro,(size_t)len)) return 0;
+    if(!g_pkg_pool){ g_pkg_pool=mmap(0,1<<16,PROT_READ|PROT_WRITE|PROT_EXEC,MAP_PRIVATE|MAP_ANON,-1,0); if(g_pkg_pool==MAP_FAILED){ g_pkg_pool=0; return 0; } }
+    if(g_pkg_off+256>(1u<<16)) return 0; uint8_t*t=g_pkg_pool+g_pkg_off, *w=t;
+    static const uint8_t save[]={0x51,0x52,0x41,0x50,0x41,0x51,0x50,0x41,0x52,0x41,0x53, 0x48,0x81,0xEC,0x80,0,0,0,
+        0xF3,0x0F,0x7F,0x44,0x24,0x20, 0xF3,0x0F,0x7F,0x4C,0x24,0x30, 0xF3,0x0F,0x7F,0x54,0x24,0x40, 0xF3,0x0F,0x7F,0x5C,0x24,0x50, 0xF3,0x0F,0x7F,0x64,0x24,0x60, 0xF3,0x0F,0x7F,0x6C,0x24,0x70};
+    static const uint8_t rest[]={0xF3,0x0F,0x6F,0x44,0x24,0x20, 0xF3,0x0F,0x6F,0x4C,0x24,0x30, 0xF3,0x0F,0x6F,0x54,0x24,0x40, 0xF3,0x0F,0x6F,0x5C,0x24,0x50, 0xF3,0x0F,0x6F,0x64,0x24,0x60, 0xF3,0x0F,0x6F,0x6C,0x24,0x70,
+        0x48,0x81,0xC4,0x80,0,0,0, 0x41,0x5B,0x41,0x5A,0x58,0x41,0x59,0x41,0x58,0x5A,0x59};
+    memcpy(w,save,sizeof save); w+=sizeof save;
+    *w++=0xB9; memcpy(w,&kind,4); w+=4;                                                                  // mov ecx, kind
+    static const uint8_t args[]={0x48,0x8B,0x94,0x24,0xA8,0,0,0, 0x4C,0x8B,0x84,0x24,0xB0,0,0,0, 0x4C,0x8B,0x8C,0x24,0xE0,0,0,0};
+    memcpy(w,args,sizeof args); w+=sizeof args;                                                          // rdx=[rsp+0xa8] r8=[rsp+0xb0] r9=[rsp+0xe0] (orig rsp+0x28)
+    *w++=0x48; *w++=0xB8; uint64_t fn=(uint64_t)(uintptr_t)pk_ctx; memcpy(w,&fn,8); w+=8; *w++=0xFF; *w++=0xD0;   // mov rax, pk_ctx; call rax
+    memcpy(w,rest,sizeof rest); w+=sizeof rest;
+    memcpy(w,pro,(size_t)len); w+=len;                                                                   // the relocated prologue
+    *w++=0xFF; *w++=0x25; *w++=0; *w++=0; *w++=0; *w++=0; uint64_t back=(uint64_t)(uintptr_t)(site+len); memcpy(w,&back,8); w+=8;   // jmp [rip+0] site+len
+    sys_icache_invalidate(t,(size_t)(w-t)); g_pkg_off+=((size_t)(w-t)+15)&~(size_t)15;
+    uintptr_t pg=(uintptr_t)site & ~0xFFFull; mprotect((void*)pg,0x2000,PROT_READ|PROT_WRITE|PROT_EXEC);
+    uint8_t jp[14]={0xFF,0x25,0,0,0,0}; uint64_t tv=(uint64_t)(uintptr_t)t; memcpy(jp+6,&tv,8);
+    memcpy(site,jp,14); for(int k=14;k<len;k++) site[k]=0x90; sys_icache_invalidate(site,(size_t)len); return 1; }
+static int g_pkc_installed;
+static void pkc_install(void){ if(g_pkc_installed) return; g_pkc_installed=1; uint8_t*h3=hb_halo3_base(); if(!h3) return;
+    static const uint8_t p1[16]={0x48,0x89,0x5c,0x24,0x08,0x48,0x89,0x74,0x24,0x10,0x44,0x89,0x44,0x24,0x18,0x57};
+    static const uint8_t p2[16]={0x48,0x89,0x5c,0x24,0x08,0x48,0x89,0x6c,0x24,0x10,0x48,0x89,0x74,0x24,0x18,0x57};
+    static const uint8_t p3[19]={0x48,0x8b,0xc4,0x48,0x89,0x58,0x08,0x48,0x89,0x70,0x18,0x48,0x89,0x78,0x20,0x89,0x50,0x10,0x55};
+    static const uint8_t p4[16]={0x4c,0x89,0x44,0x24,0x18,0x48,0x89,0x54,0x24,0x10,0x55,0x53,0x56,0x57,0x41,0x54};
+    static const uint8_t p5[18]={0x48,0x89,0x5c,0x24,0x08,0x48,0x89,0x74,0x24,0x10,0x57,0x48,0x81,0xec,0x00,0x01,0x00,0x00};
+    int n=pkc_hook(h3+0x249dc,p1,16,1)+pkc_hook(h3+0x24900,p2,16,2)+pkc_hook(h3+0x5f0b0,p3,19,3)+pkc_hook(h3+0x5f2f0,p4,16,4)+pkc_hook(h3+0x5efa8,p5,18,5);
+    char m[120]; int k=snprintf(m,sizeof m,"  [pktlog] game layer: %d of 5 peer hooks on halo3's message senders / receivers\n",n); (void)!write(2,m,(size_t)k); }
+static void __attribute__((ms_abi)) pk_game_ev(uint32_t id,int64_t size,uint64_t ret){
     int ty=(int)(id>>1), dir=(int)(id&1); if(ty>=PKG_MAX) return; __atomic_fetch_add(&g_pkg_count[ty][dir],1,__ATOMIC_RELAXED);
+    { static int cl=-1; if(cl<0) cl=getenv("PELOAD_PKTLOG_CALLERS")?1:0;   // (debug) who calls each encode / decode: halo3's dispatchers
+      static uint64_t seen[PKG_MAX][2][4]; if(cl){ uint8_t*h3=hb_halo3_base(); int k=0; for(;k<4 && seen[ty][dir][k] && seen[ty][dir][k]!=ret;k++);
+        if(k<4 && !seen[ty][dir][k]){ seen[ty][dir][k]=ret; char m[160]; int n=snprintf(m,sizeof m,"  [pktlog] %s %s called from %s+0x%llx\n",g_pkg_name[ty],dir?"decode":"encode",
+                h3&&ret>(uint64_t)(uintptr_t)h3?"halo3":"?",(unsigned long long)(h3&&ret>(uint64_t)(uintptr_t)h3?ret-(uint64_t)(uintptr_t)h3:ret)); (void)!write(2,m,(size_t)n); } } }
     uint32_t s; PkEv*e=pk_new(&s);
     e->layer=PK_GAME; e->dir=(uint8_t)dir; e->len=(uint32_t)(size>0?size:0); e->t=st_wall(); e->lport=0; e->fam=0; e->rport=0; memset(e->addr,0,16);
     e->flags=(uint8_t)g_pkg_flags[ty]; pk_cpy(e->type,g_pkg_name[ty]); pk_done(e,s); }
@@ -122,6 +183,7 @@ static uint8_t* pkg_thunk(uint32_t id,void*orig,uint64_t**tgt){
     memcpy(w,save,sizeof save); w+=sizeof save;
     *w++=0xB9; memcpy(w,&id,4); w+=4;                                                                   // mov ecx, id
     static const uint8_t ldrdx[8]={0x48,0x8B,0x94,0x24,0xA8,0,0,0}; memcpy(w,ldrdx,8); w+=8;            // mov rdx, [rsp+0xa8] (saved rdx)
+    static const uint8_t ldr8[8]={0x4C,0x8B,0x84,0x24,0xB8,0,0,0}; memcpy(w,ldr8,8); w+=8;              // mov r8, [rsp+0xb8] (the caller's return address)
     *w++=0x48; *w++=0xB8; uint64_t fn=(uint64_t)(uintptr_t)pk_game_ev; memcpy(w,&fn,8); w+=8; *w++=0xFF; *w++=0xD0;   // mov rax, pk_game_ev; call rax
     memcpy(w,rest,sizeof rest); w+=sizeof rest;
     *w++=0xFF; *w++=0x25; *w++=0; *w++=0; *w++=0; *w++=0; uint64_t o=(uint64_t)(uintptr_t)orig; *tgt=(uint64_t*)w; memcpy(w,&o,8); w+=8;   // jmp [rip+0] orig
@@ -145,7 +207,7 @@ static void pkg_install(void){
             else if(g_pkg_orig[i][d]!=cur) __atomic_store_n(g_pkg_tgt[i][d],(uint64_t)(uintptr_t)cur,__ATOMIC_RELEASE);
             g_pkg_orig[i][d]=cur;
             if(g_pkg_thunk[i][d]){ __atomic_store_n(slot,(void*)g_pkg_thunk[i][d],__ATOMIC_RELEASE); w++; } } }
-    g_pkg_n=n; g_pkg_installed=1;
+    g_pkg_n=n; g_pkg_installed=1; pkc_install();
     char m[160]; int k=snprintf(m,sizeof m,"  [pktlog] game layer on: %d of halo3's message encode / decode functions wrapped (%d types)\n",w,n); (void)!write(2,m,(size_t)k); }
 static void pkg_uninstall(void){ if(!g_pkg_installed) return; uint8_t*tb;
     if(pkg_table(&tb) && tb==g_pkg_tbl) for(int i=0;i<g_pkg_n;i++) for(int d=0;d<2;d++){ void**slot=(void**)(tb+(size_t)i*0x40+0x20+8*d);
@@ -219,3 +281,27 @@ static void pk_forensic_tick(void){
     static PkAgg a[1024]; int na=0; PkEv e; for(uint32_t q=lo;q<=top;q++) if(pk_get(q,&e)) na=pk_agg_add(a,na,1024,&e); else lost++;
     for(int i=0;i<na;i++){ StBuf b={0}; pk_agg_json(&b,&a[i],1,0); if(b.b) fx_push(FXI_PACKETS,b.b,b.n,0,0); free(b.b); }
     if(lost){ char l[80]; int k=snprintf(l,sizeof l,"{\"t\":%.3f,\"lost\":%u}",st_wall(),lost); fx_push(FXI_PACKETS,l,(size_t)k,0,0); } }
+
+// ---- PELOAD_FRAMECAP=<n> (debug): the frames the client hands its network sender, before it compacts and encrypts them ----
+// The client's sender (0.9.23: exe+0x8bb5a0, found by signature; (rcx, class, frame, length)) gets every game / voice / control
+// frame in the client's internal format: kind tag (4: "MCL2" game, "MCV1" voice, ...), a 16-byte session value, the sender's
+// and recipient's 64-bit endpoint ids, then the payload -- 36 bytes that 0.9.22 put on every datagram (+ 7: class, message id,
+// fragment index / count) and 0.9.23 replaces with 2 (kind + flags, class) whenever the endpoints are the connection's own.
+// Logs the first n frames of each kind. Debug only: nothing runs without the variable.
+static int g_fc_max; static struct { char tag[5]; int n; } g_fc[24]; static int g_fc_nt; static pthread_mutex_t g_fc_mx=PTHREAD_MUTEX_INITIALIZER;
+static void __attribute__((ms_abi)) pk_on_frame(void*conn,uint64_t cls,const uint8_t*f,uint64_t len){ (void)conn;
+    if(!f || len<0x24 || len>(1u<<20)) return; char tag[5]; memcpy(tag,f,4); tag[4]=0; for(int i=0;i<4;i++) if(tag[i]<32||tag[i]>126) tag[i]='?';
+    pthread_mutex_lock(&g_fc_mx); int k=0; for(;k<g_fc_nt;k++) if(!strcmp(g_fc[k].tag,tag)) break;
+    if(k==g_fc_nt){ if(g_fc_nt<24){ snprintf(g_fc[k].tag,5,"%s",tag); g_fc[k].n=0; g_fc_nt++; } else k=-1; }
+    int go=k>=0 && g_fc[k].n++<g_fc_max; pthread_mutex_unlock(&g_fc_mx); if(!go) return;
+    uint64_t a, b; memcpy(&a,f+0x14,8); memcpy(&b,f+0x1c,8); char sess[40]; for(int i=0;i<16;i++) snprintf(sess+2*i,3,"%02x",f[4+i]);
+    char m[300]; int n=snprintf(m,sizeof m,"  [framecap] %s class %llu len %llu (payload %llu) session %s ids %016llx -> %016llx\n",tag,(unsigned long long)cls,
+        (unsigned long long)len,(unsigned long long)(len-0x24),sess,(unsigned long long)a,(unsigned long long)b); (void)!write(2,m,(size_t)n); }
+static void pk_framecap_install(void){ const char*e=getenv("PELOAD_FRAMECAP"); if(!e || !g_base) return; g_fc_max=atoi(e)>0?atoi(e):8;
+    static const char sig[]="55 41 57 41 56 41 55 41 54 56 57 53 48 81 EC ?? ?? 00 00 48 8D AC 24 80 00 00 00 0F 29 BD ?? ?? 00 00 0F 29 B5 ?? ?? 00 00 48 83 E4 80 48 89 E3 48 89 AB ?? ?? 00 00 48 C7 85 ?? ?? 00 00 FE FF FF FF 4D 89 CC 4D 89 C6 48 89 93 ?? ?? 00 00 B2 01 31 C0 F0 0F B0 15";
+    uint8_t b[128], m[128]; int n=sig_parse(sig,b,m,128); int64_t r=sig_find(g_base,b,m,n);
+    // the frame size (sub rsp, imm32) differs between builds: the hook compares and relocates the image's own first 19 bytes
+    uint8_t pro[19]; if(r>=0) memcpy(pro,g_base+r,19);
+    int ok=r>=0 && entry_hook(g_base+r,pro,19,(void*)pk_on_frame);
+    char msg[160]; int k=ok?snprintf(msg,sizeof msg,"  [framecap] hooked the client's frame sender exe+0x%llx (first %d frames per kind)\n",(unsigned long long)r,g_fc_max)
+        :snprintf(msg,sizeof msg,"  [framecap] the client's frame sender not found (0.9.23+ shape)\n"); (void)!write(2,msg,(size_t)k); }

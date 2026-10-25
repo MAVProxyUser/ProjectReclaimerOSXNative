@@ -98,6 +98,9 @@ def load_sources(rev=None):
 # section 3: the parenthesised cells are places our signatures miss). A build at or after it that lacks the point is a MISS
 # (a false negative to port); an unknown build (no version in its path) is assumed to have every point.
 STATS_POINTS = ('set_muted', 'voice_recv', 'push_history', 'max_players', 'cast_vote', 'ballot')
+# points the loader no longer needs by default (still reported, never a failure): the xaudio patches, since halo3's XAudio2
+# delay slots are left lazy (2026-10-24) and the client's check passes by itself; they apply only with PELOAD_XA_EAGER=1
+OPTIONAL = {'xaudio1', 'xaudio2', 'xaudio3', 'xaudio4'}
 FIRST = {'ui-reentrancy': (0, 9, 2), 'xaudio': (0, 8, 1), 'watchdog': (0, 8, 1), 'set_muted': (0, 8, 1), 'voice_recv': (0, 8, 1),
          'push_history': (0, 8, 1), 'moderation': (0, 9, 2), 'max_players': (0, 9, 2), 'cast_vote': (0, 9, 15)}
 DL_LOCK = bytes([0xB2, 0x01, 0x31, 0xC0, 0xF0, 0x0F, 0xB0, 0x15])   # mov dl,1 ; xor eax,eax ; lock cmpxchg [rip+d],dl (is_muted's lock)
@@ -337,13 +340,13 @@ def main():
         print(json.dumps([{'build': t, **{k: v for k, v in r.items()}} for t, r in rows], indent=1, default=str)); return
     # bad: a point that should be there (its FIRST release or later) and isn't, unless documented; a build before FIRST
     # rejecting a lookalike is right ("(absent)")
-    bad = any(v.get('anchor') and v['status'] not in ('ok', 'MISS(known)') for _, r in rows for v in r.values())
+    bad = any(v.get('anchor') and v['status'] not in ('ok', 'MISS(known)') and k not in OPTIONAL for _, r in rows for k, v in r.items())
     if diff and len(rows) == 2:
         (ta, ra), (tb, rb) = rows
         print(f'| point | {ta} | {tb} | how |\n|---|---|---|---|')
         for c in cols:
             x, y = cell(ra[c]), cell(rb[c])
-            if rb[c]['status'] != 'ok': how = '**BROKEN**: port it (re-tools/sigport.py)'
+            if rb[c]['status'] != 'ok': how = 'not found (optional: not needed by default)' if c in OPTIONAL else '**BROKEN**: port it (re-tools/sigport.py)'
             elif ra[c]['status'] != 'ok': how = 'found again'
             elif ra[c].get('variant') != rb[c].get('variant'): how = f"another variant (v{rb[c].get('variant')})"
             elif x == y: how = 'same place'

@@ -296,7 +296,10 @@ forensic packets.jsonl (per-second sums); opt-in game layer = halo3's message ty
 46 x 0x40 entries, +0x20 encode / +0x28 decode pointers wrapped by thunks; data only). 26 ns per datagram. PELOAD_PKTLOG=0 off.
 Bink (same day): halo3's bink2w64.dll delay slots are left to halo3's own delay loader (the client checks they still hold their
 thunks before installing its mod-movie path; PELOAD_BINK_EAGER=1 = old), and halo3's 4 video shaders are compiled by MCC's
-real D3DCompiler_47.dll from the MCC root (PELOAD_REAL_D3DCOMPILE=0 = old placeholders). The XAudio2 check has the same shape.
+real D3DCompiler_47.dll from the MCC root (PELOAD_REAL_D3DCOMPILE=0 = old placeholders). XAudio2's 4 delay slots are left lazy too
+(same check), so the xaudio signature patches are OFF by default (PELOAD_XA_EAGER=1 = old binding + patches); A/B audio identical.
+Client datagrams (0.9.22: 7 + 36-byte frame header = 43 B; 0.9.23: 2 B [kind code|flags][class]): shim/docs/client-transport.md,
+PELOAD_FRAMECAP=<n> logs the frames before compaction. README "Who sees your IP address".
 Reach Renaissance (2026-10-20, shim/docs/reach-renaissance.md): Halo: Reach on MCC's haloreach.dll, same design as Reclaimer
 (bin/host-probe.exe = the game: LoadLibraryW(haloreach.dll), its own D3D11 device, ~85 in-memory engine patches). `bash shim/reach.sh
 [map] [variant] [min]` runs host-probe directly (run folder first argument, --launch-block C:\ReachRenaissance\data\launch_block_1.bin,

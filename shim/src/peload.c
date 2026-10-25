@@ -11498,6 +11498,15 @@ static void bind_delay_imports(uint8_t *base, OPT64 *opt, const char *modname){
         uint64_t *iat=(uint64_t*)(base+dd->IAT);
         uint64_t *intb=(uint64_t*)(base+dd->INT);
         int is_ws2 = name_is_ws2(dll); int is_xa = name_has(dll,"xaudio");
+        // XAudio2 (2026-10-24): the same check, of its four slots (halo3+0xa39e10.. -> its thunks halo3+0x60c416 ..), before the
+        // client installs its own XAudio2 wrappers; bound up front, the client refused ("XAudio2 import slots differ") unless
+        // the `xaudio` signature patches NOP'd its check. Left lazy, the check passes as on Windows; a thunk that runs anyway
+        // resolves through LoadLibraryExA("XAudio2_9Redist.dll") -> XA_HANDLE -> GetProcAddress(ordinal) -> xa_resolve.
+        // PELOAD_XA_EAGER=1 = old (bound up front; then the xaudio patches are needed again).
+        if(h3 && name_has(dll,"xaudio2_9redist") && dd->Attrs==1 && !getenv("PELOAD_XA_EAGER")){
+            int n=0; for(int i=0; intb[i]; i++) n++;
+            char m[120]; int k=snprintf(m,sizeof m,"  [xaudio] %s: %d XAudio2 delay slots left to its own delay loader\n",modname,n); (void)!write(2,m,k);
+            continue; }
         if(h3 && !strcasecmp(dll,"bink2w64.dll") && dd->Attrs==1 && !getenv("PELOAD_BINK_EAGER")){   // (RVA-based descriptor)
             int n=0; for(int i=0; intb[i]; i++){ n++; if(intb[i]>>63) continue; const char*fn=(char*)(base+(uint32_t)intb[i]+2);
                 if(!strcmp(fn,"BinkOpen")) g_bink_open_slot=&iat[i]; if(!strcmp(fn,"BinkClose")) g_bink_close_slot=&iat[i]; }
@@ -11728,6 +11737,9 @@ static int64_t sig_find(uint8_t*base,const uint8_t*b,const uint8_t*m,int n){
     return hit; }
 static int sig_enabled(const SigPatch*sp){ const char*e=getenv("PELOAD_RECLAIMER_PATCHES");
     if(!strcmp(sp->name,"ui-reentrancy") && getenv("PELOAD_NO_REENTRANCY_FIX")) return 0;
+    // xaudio: not needed since 2026-10-24 -- halo3's XAudio2 delay slots stay lazy (bind_delay_imports), so the client's check
+    // passes by itself. Applied only with PELOAD_XA_EAGER=1 (the old up-front binding) or when named (PELOAD_RECLAIMER_PATCHES=..xaudio..)
+    if(!strcmp(sp->name,"xaudio") && !getenv("PELOAD_XA_EAGER") && !(e && strstr(e,"xaudio"))) return 0;
     if(e && (!strcmp(e,"all") || strstr(e,sp->name))) return 1; return sp->dflt; }
 static void reentrancy_fix(void){ if(!g_base) return;   // (name kept: applies every enabled signature patch)
     enum { NSP=sizeof g_sigpatches/sizeof g_sigpatches[0] }; int done[NSP]; memset(done,0,sizeof done);   // per entry: 1 applied
@@ -12872,7 +12884,7 @@ int main(int argc, char **argv){ mt_start();
     // pattern, and a chance match in another game's exe would patch it
     if(game_is(GAME_H3)){
         reentrancy_fix(); // built-in: neutralise the ui_composition RefCell re-entrancy
-        st_voice_install(); } // stats page: voice mute + talking indicator (stats.c)
+        st_voice_install(); pk_framecap_install(); } // stats page: voice mute + talking indicator (stats.c); PELOAD_FRAMECAP (pktlog.c)
     patch_install(); hook_install(); // PELOAD_PATCH overwrites + PELOAD_HOOK trace detours
     peb_fill(g_peb_ptr);  // PEB image base / OS version / ProcessParameters (stdio, cwd, image path, command line, environment)
     ws("peload: calling entry (expect stub logs, then a fault at the first\n"

@@ -17,7 +17,7 @@ The client exe is a Rust program; the loader changes it **in memory** at load, n
 | point | kind | where in the sources | what it does | without it |
 |---|---|---|---|---|
 | ui-reentrancy | patch (2 NOPs) | peload.c `g_sigpatches` | the menu's once-a-second cache cleanup panics ("RefCell already borrowed") on our first-call path | the client's menu never draws |
-| xaudio1..4 | patch (NOP 4 `jne`) | `g_sigpatches` | the client checks halo3's four XAudio2 callback slots against the retail DLL before installing its own audio hooks | "XAudio2 import slots differ from the supported build; refused" |
+| xaudio1..4 | patch (NOP 4 `jne`) -- **not needed since 2026-10-24** | `g_sigpatches` | the client checks halo3's four XAudio2 delay slots still hold their delay thunks before installing its own audio wrappers; the loader now leaves those slots lazy, so the check passes by itself and these patches apply only with `PELOAD_XA_EAGER=1` | (with `PELOAD_XA_EAGER=1` and no patch) "XAudio2 import slots differ from the supported build; refused" |
 | watchdog | patch (`je` -> `jmp`) | `g_sigpatches` | the worker's engine hang watchdog ("still running after N seconds") | only RECLAIMER_DIRECT=1 runs (the menu path never arms it) |
 | set_muted | call | stats.c `g_sig_set_muted` | the stats page's mute buttons call the client's own set_muted | no mute from the page |
 | voice_recv | entry hook (19 bytes) | `g_sig_voice_recv` | talking indicator, forensic voice archive | none of those |
@@ -45,7 +45,8 @@ python3 re-tools/patchscan.py --diff client/project-reclaimer-client-v<old>.exe 
 ```
 
 `patchscan --diff` prints one row per point. "moved, same signature" or "another variant" = nothing to do.
-**BROKEN** = that point's signatures don't find it in the new build. For each BROKEN row:
+**BROKEN** = that point's signatures don't find it in the new build. The xaudio rows are informational since 2026-10-24
+("not found (optional ...)" is no failure): what matters is port-verify's live check that the client doesn't refuse XAudio2. For each BROKEN row:
 
 ```bash
 python3 re-tools/sigport.py --point <row> --old client/...v<old>.exe --new client/...v<new>.exe --corpus

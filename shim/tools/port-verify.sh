@@ -11,7 +11,8 @@
 #  3 live    the local dedicated server (shim/dedicated.sh, started on this exe if it isn't running on it) + ONE hidden,
 #            input-less client (shim/tools/quiet-run.sh, QR_HIDE) joining it:
 #            ui-reentrancy  the menu is reached and draws (the client's own menu, > 50 draws a frame)
-#            xaudio1-4      no "XAudio2 import slots differ ... refused" (the client's own check, which our patches bypass)
+#            xaudio         no "XAudio2 import slots differ ... refused" (the client's own check of halo3's XAudio2 slots: it passes
+#                           by itself since 2026-10-24, halo3's delay slots being left lazy; the xaudio patches are no longer applied)
 #            watchdog       static + loader only (it matters for RECLAIMER_DIRECT runs; PV_DIRECT=1 also runs one: no
 #                           "still running after" exit within PV_DIRECT_SECS)
 #            join           "match loaded in" (the whole path: menu, join, map load)
@@ -53,6 +54,8 @@ bad = re.findall(r'\[sigpatch\] (\S+) \((\S+)\): ([^\n]*NOT applied)', log)
 def st(k): return r[k]['status'] == 'ok'
 for k, name in (('ui-reentrancy', 'ui-reentrancy'), ('xaudio1', 'xaudio'), ('xaudio2', 'xaudio'), ('xaudio3', 'xaudio'), ('xaudio4', 'xaudio'), ('watchdog', 'watchdog')):
     lr = k in [b[1] for b in bad]
+    if name == 'xaudio' and not sp.get('xaudio'):   # not applied by default since 2026-10-24 (halo3's XAudio2 slots stay lazy)
+        out('note', k, (f"exe+0x{r[k]['rva']:x} found, not applied (not needed; PELOAD_XA_EAGER=1 applies it)" if st(k) else f"patchscan: {r[k]['status']} (not needed by default)")); continue
     if st(k) and r[k]['rva'] in sp.get(name, ()): out('PASS', k, f"exe+0x{r[k]['rva']:x} (patchscan and loader agree)")
     elif st(k): out('FAIL', k, f"patchscan exe+0x{r[k]['rva']:x}, loader: " + (', '.join(hex(x) for x in sorted(sp.get(name, ()))) or 'not applied'))
     else: out('FAIL', k, f"patchscan: {r[k]['status']}" + ('; loader: NOT applied' if lr else ''))

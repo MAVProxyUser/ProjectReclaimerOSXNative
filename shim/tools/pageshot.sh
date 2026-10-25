@@ -44,7 +44,7 @@ st.textContent=".grid{grid-template-columns:minmax(0,1fr)!important}#players .wr
 document.head.appendChild(st); await new Promise(r=>setTimeout(r,800));'
 "$BIN" -w 1440 -t 8 ${TX[@]+"${TX[@]}"} -j "$STATS_JS" "$BASE/?demo=1" "$OUT" \
     stats-overlay='#ovp' stats-record='#rec' stats-connected='#conn' stats-feed='#feed' stats-chat='#chat' \
-    stats-rules='#rules' stats-heatmap@1.5='#heat' stats-player='#det' \
+    stats-rules='#rules' stats-heatmap@1.5='#heat' stats-player='#det' stats-packets='#pkts' \
     -- -w 1880 -j "$WIDE_JS" stats-players='#players'
 
 # forensic viewer: the largest finished session (or FX_SESSION), every lane shown, the list cut at 600 px and scrolled to
@@ -60,4 +60,4 @@ if(k>3) ls.scrollTop=rows[k-3].offsetTop-ls.querySelector("thead").offsetHeight;
 return "session "+pick+": "+X.utterances.length+" utterances, "+X.events.length+" events, list from row "+Math.max(0,k-3);'
 "$BIN" -w 1440 -t 4 ${TX[@]+"${TX[@]}"} -j "$FX_JS" "$BASE/forensics?demo=1" "$OUT" \
     forensics-recording='h1, #hd, #settings' forensics-session='.grid > .panel:first-child, #sum' \
-    forensics-timeline='.col > .panel:nth-child(2)' forensics-events='.col > .panel:nth-child(3)'
+    forensics-timeline='.col > .panel:nth-child(2)' forensics-packets='#pkp' forensics-events='.col > .panel:nth-child(4)'

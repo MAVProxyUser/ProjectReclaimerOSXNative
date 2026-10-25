@@ -203,6 +203,27 @@ pkill -9 -f build/peload
 The first launch builds and caches the game's shaders as effects first appear (brief hitches). Later
 launches pre-build them during the loading screen.
 
+### Who sees your IP address
+
+Project Reclaimer is client-server: when you **join** a server, all your game traffic, voice included, is one encrypted
+QUIC connection to that server, which relays it (the stats page's Packets window shows it: in a match the client has a
+single UDP peer, the server). So:
+
+- **Other players do not get your address.** Nothing you send reaches them directly, and the client is never told another
+  player's address either; the stats page's player details show addresses only in a game *you* host.
+- **The server you join does** -- its operator, and its admins through RCON (`players` lists name, player ID and address;
+  `banip` bans one). That is inherent to connecting to it.
+- **Every server in the Server Browser does, while you browse it:** the browser asks each listed server for its status
+  directly from your connection (a few hundred of them; the Packets window shows the burst), and `discover` /
+  `servers.sh` do the same.
+- **The community services** the client talks to (the server lists, the unlock lookup, Workshop / Steam downloads).
+- **Hosting** (Host Game → Online) is different: your address and port are published in the server list and every player
+  connects to you; your own stats page then lists their addresses.
+
+Another internet connection changes what all of the above see. A commercial VPN may be refused: servers can refuse VPN and
+datacenter addresses (`block_vpn`, on in the server configuration `dedicated init` writes, with lists of VPN providers and
+datacenters; an admin can let one player ID through); a different home or mobile connection is not affected.
+
 ### A second player to shoot at (testing)
 
 `shim/target.sh` starts a second copy of the client as a stationary target: it hosts a hidden Online game
