@@ -137,8 +137,43 @@ static uint64_t syncs_done;
 static void sync_finish(uint64_t rv,uint64_t len){ H->sync_rv=rv; H->sync_len=len; atomic_store_explicit(&H->sync_done,++syncs_done,memory_order_release); }
 static volatile int g_lastop=-1; static volatile uint64_t g_ncmd_dbg; static int g_trace=-1;
 static void on_crash(int sig){ char m[160]; int k=snprintf(m,sizeof m,"  [glhelper] CRASH signal %d in command #%llu (op %d)\n",sig,(unsigned long long)g_ncmd_dbg,g_lastop); (void)!write(2,m,k); _exit(3); }
+// PELOAD_GLH_GPUPROF=1 (diagnostic, 2026-10-25): GPU time per render target. Every switch of the draw framebuffer (and the
+// present copy, an async readback) ends one GL_TIME_ELAPSED query and begins the next, tagged with the framebuffer and the
+// largest viewport drawn in it; results are collected as they become available and printed every 5 s as GPU ms per frame
+// (frames = present copies). Answers "what is the GPU busy with" when a game is GPU-bound (2026-10-25: ~90% in a 128-player
+// HugeGrass match, Low barely faster than Ultra). Splitting the GPU work into many timed pieces costs some speed itself.
+#define GP_N 4096
+static int g_gp=-1; static GLuint g_gpq[GP_N]; static uint32_t g_gptag[GP_N]; static int g_gpvw[GP_N], g_gpvh[GP_N]; static unsigned g_gph, g_gpt; static int g_gpon;
+static uint32_t g_gpcur; static int g_gpcurw, g_gpcurh; static uint64_t g_gpframes;
+typedef struct { uint32_t tag; int w, h; double ms; uint64_t n; } GpAcc; static GpAcc g_gpa[256]; static int g_gpna;
+static void gp_close(void){ if(!g_gpon) return; glEndQuery(GL_TIME_ELAPSED); unsigned k=(g_gph-1)%GP_N; g_gpvw[k]=g_gpcurw; g_gpvh[k]=g_gpcurh; g_gpon=0; }
+static void gp_switch(uint32_t tag){
+    if(g_gp<0){ g_gp=getenv("PELOAD_GLH_GPUPROF")?1:0; if(g_gp){ glGenQueries(GP_N,g_gpq); fprintf(stderr,"  [gpuprof] on: GPU time per render target, every 5 s\n"); } }
+    if(!g_gp) return; gp_close();
+    if(g_gph-g_gpt>=GP_N-1) return;   // (results not collected yet: skip timing this piece)
+    unsigned k=g_gph%GP_N; g_gptag[k]=tag; glBeginQuery(GL_TIME_ELAPSED,g_gpq[k]); g_gph++; g_gpon=1; g_gpcur=tag; g_gpcurw=0; g_gpcurh=0; }
+static void gp_poll(void){
+    if(g_gp<=0) return;
+    while(g_gpt!=g_gph && (g_gph-g_gpt>1 || !g_gpon)){ unsigned k=g_gpt%GP_N; GLint av=0; glGetQueryObjectiv(g_gpq[k],GL_QUERY_RESULT_AVAILABLE,&av); if(!av) break;
+        GLuint64 ns=0; glGetQueryObjectui64v(g_gpq[k],GL_QUERY_RESULT,&ns); int i=0; for(;i<g_gpna;i++) if(g_gpa[i].tag==g_gptag[k]) break;
+        if(i==g_gpna && g_gpna<256){ g_gpa[i].tag=g_gptag[k]; g_gpa[i].ms=0; g_gpa[i].n=0; g_gpa[i].w=0; g_gpa[i].h=0; g_gpna++; }
+        if(i<g_gpna){ g_gpa[i].ms+=ns/1e6; g_gpa[i].n++; if(g_gpvw[k]*g_gpvh[k]>g_gpa[i].w*g_gpa[i].h){ g_gpa[i].w=g_gpvw[k]; g_gpa[i].h=g_gpvh[k]; } }
+        g_gpt++; }
+    static double tl; double t=now_s(); if(!tl) tl=t; if(t-tl<5.0) return;
+    double tot=0; for(int i=0;i<g_gpna;i++) tot+=g_gpa[i].ms; double fr=g_gpframes?(double)g_gpframes:1;
+    fprintf(stderr,"  [gpuprof] %.1f s: %llu frames, GPU %.1f ms per frame (%.0f%% of the time)\n",t-tl,(unsigned long long)g_gpframes,tot/fr,100.0*tot/1000.0/(t-tl));
+    for(int pass=0;pass<12;pass++){ int b=-1; for(int i=0;i<g_gpna;i++) if(g_gpa[i].n && (b<0 || g_gpa[i].ms>g_gpa[b].ms)) b=i; if(b<0) break;
+        const char*nm=g_gpa[b].tag==0xFFFFFFF0u?"present copy":g_gpa[b].tag==0xFFFFFFF1u?"readback":g_gpa[b].tag==0?"framebuffer 0":"framebuffer";
+        fprintf(stderr,"  [gpuprof]   %6.2f ms/frame %4.1f pieces/frame  %s %u, largest viewport %dx%d\n",g_gpa[b].ms/fr,g_gpa[b].n/fr,nm,g_gpa[b].tag<0xFFFFFFF0u?g_gpa[b].tag:0,g_gpa[b].w,g_gpa[b].h); g_gpa[b].n=0; }
+    g_gpna=0; g_gpframes=0; tl=t; }
 static int run_one(const uint8_t*c){
     uint16_t op=((const uint16_t*)c)[0], m=((const uint16_t*)c)[1]; const uint64_t*s=(const uint64_t*)(c+8);
+    if(__builtin_expect(g_gp!=0,0)){
+        if(op==GLH_OP_glBindFramebuffer && ((GLenum)s[0]==GL_FRAMEBUFFER || (GLenum)s[0]==GL_DRAW_FRAMEBUFFER) && ((uint32_t)s[1]!=g_gpcur || !g_gpon)) gp_switch((uint32_t)s[1]);
+        else if(op==GLH_OP_glViewport){ int w=(int)(int64_t)s[2], h=(int)(int64_t)s[3]; if(w*h>g_gpcurw*g_gpcurh){ g_gpcurw=w; g_gpcurh=h; } }
+        else if(op==GLH_X_PQ_BLIT){ gp_switch(0xFFFFFFF0u); g_gpframes++; }
+        else if(op==GLH_X_READBACK) gp_switch(0xFFFFFFF1u);
+        else if(g_gp<0) gp_switch(0); }
     g_lastop=op; g_ncmd_dbg++;
     if(g_trace<0) g_trace=getenv("PELOAD_GLH_TRACE")?atoi(getenv("PELOAD_GLH_TRACE")):0;
     if(g_trace && g_ncmd_dbg<=(uint64_t)g_trace){ fprintf(stderr,"  [glhelper] #%llu op %u mask 0x%x len %u s0 0x%llx s1 0x%llx s2 0x%llx\n",(unsigned long long)g_ncmd_dbg,op,m,((const uint32_t*)c)[1],
@@ -241,7 +276,7 @@ int main(int argc,char**argv){
     for(;;){
         uint64_t head=atomic_load_explicit(&H->head,memory_order_acquire);
         if(head==tail){
-            pq_poll(0); queries_poll(); pools_fill();
+            pq_poll(0); gp_poll(); queries_poll(); pools_fill();
             atomic_store_explicit(&H->tail,tail,memory_order_release);
             H->st_busy_s+=now_s()-busy0;
             uint32_t seq=atomic_load(&H->wake_seq);
@@ -256,7 +291,7 @@ int main(int argc,char**argv){
             if(op==GLH_X_WRAP){ tail+=GLH_RING-tail%GLH_RING; continue; }
             if(!len) fail("corrupt ring (zero-length command)");
             run_one(c); tail+=len; ncmd++; H->st_cmds=ncmd;
-            if((ncmd&255)==0){ atomic_store_explicit(&H->tail,tail,memory_order_release); double t=now_s(); H->st_busy_s+=t-busy0; busy0=t; if(t-lastpoll>0.002){ lastpoll=t; pq_poll(0); queries_poll(); } }
+            if((ncmd&255)==0){ atomic_store_explicit(&H->tail,tail,memory_order_release); double t=now_s(); H->st_busy_s+=t-busy0; busy0=t; if(t-lastpoll>0.002){ lastpoll=t; pq_poll(0); gp_poll(); queries_poll(); } }
             if((ncmd&4095)==0) pools_fill(); }
         atomic_store_explicit(&H->tail,tail,memory_order_release); }
 }

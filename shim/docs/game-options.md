@@ -321,5 +321,24 @@ Written by the client itself (Low preset):
 - The log line "Graphics quality: one view High; split screen Auto; textures Original, motion blur on, antialiasing on."
   confirms what was read at start.
 
+### How the client applies it (client 0.9.23; found 2026-10-25: re-tools/ripref.py <exe> 2b19e5c 2b19e98 lists the globals' users)
+
+- `apply_settings(const Settings*)` (exe+0x91bb70; called by the Settings menu's Apply after saving settings.json, exe+0x5491c0,
+  and once at start, exe+0x729cdb) borrows the struct and packs the levels into globals with `xchg`:
+  Settings +0x1d3..+0x1d9 = one view, +0x1da..+0x1e0 = split screen, each byte one level in the order shadows, dynamic lights,
+  effects, draw distance, level of detail, decals, water (0 auto, 1 off, 2 low, 3 medium, 4 high, 5 ultra; >= 5 -> 5)
+  -> u64 at exe+0x2b19e90 (one view) and exe+0x2b19e60 (split); +0x1e1..+0x1e3 (texture filtering, motion blur, antialiasing)
+  -> exe+0x2b19e88; then 1 -> exe+0x2b19e5c ("applied"). It logs "Graphics quality: ..." when any of them changed.
+- halo3 gets its detail values from the client: the client writes `jmp [rip+0]` -> exe+0x8662d0 over a halo3 function (checked
+  against its 14 prologue bytes first) that reads those globals every time halo3 asks (before any apply: the High preset) and
+  logs "Graphics detail for N view(s): ..." when the result changes.
+- The menu's presets come from exe+0x181a0d0 (preset in cl -> the packed 7 levels; registers only):
+  Low 2,2,2,2,2,2,2 · Medium 3,3,3,3,3,4,3 (decals high) · High 4 x 7 · Ultra 5,5,5,4,5,4,4 (draw distance, decals, water high) ·
+  preset 1 1,1,2,2,2,1,2 (off / low; the menu has no such preset) · 0 = all auto.
+- The stats page's Quality (POST /control?do=quality&v=auto|low|medium|high|ultra) calls that preset function and swaps its result
+  into the one-view global, as apply_settings does -- live in a match within frames, no menu. Not saved to settings.json and not
+  shown in the client's own menu (its next Apply sets its values again). `PELOAD_QUALITY_MENU=1` = the old way, clicking through
+  the client's Settings menu (it opens for a few seconds; the client saves the file).
+
 Frame rate effect (fixed vista on Hugegrass, local server, same spot and view each run): see shim/docs/PERF-PLAN.md
 "Advanced graphics settings".

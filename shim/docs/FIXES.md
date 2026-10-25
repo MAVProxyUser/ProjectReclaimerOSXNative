@@ -1412,6 +1412,16 @@ oracle. Fixes below apply to both unless noted.
   and every map load recompiled byte-identical kernels (+18-27 MB a minute over map changes). How: trimmed to the
   program, compiled once per bytecode on the canon; duplicates run it and are freed when released. (10-18 80381f4) No
   duplicate freeing under `PELOAD_AB=csgpu` (10-18 410a6ee).
+- **CPU writes wait for queued kernels that read the resource live** (2026-10-25; found by review while hunting the
+  HugeGrass "giant garbage triangle") — peload.c `cs_wait_write`, D3DObj `cs_readers` (counted up when a job is queued, down
+  when it finishes), used by `ctxi_Map` (write maps), `ctxi_UpdateSubresource`, the copies' destinations, ClearUAV and
+  d3dsubmit.c SQ_COMMIT. Why: before the CPU side writes a resource it waited (`cs_wait_res`) for queued kernels that WRITE it,
+  not for those that READ it live (a buffer a pending kernel writes, textures, inputs past the 48 snapshots / 8 MB): Unmap's new
+  block swapped in by SQ_COMMIT -- the old block recycled for the next Map --, an update, a copy or a clear could land while a
+  reading kernel was still queued or running, which then read the next frame's data or a recycled block. How: such writes wait
+  for the readers too, and each time it happens a `[cs-cpu] <write> of a resource ... that N queued kernel(s) still read` line
+  counts it. Not the artifact's cause as far as measured: 0 such writes in a 180 s HugeGrass match.
+  PELOAD_CS_READWAIT=0 = wait for writers only, as before (still counted).
 - Performance work (async workers, SIMT, input snapshots): section 19.
 
 ## 16. Client exe patches and hooks
@@ -1866,6 +1876,19 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   Not yet seen live (the stale HugeGrass copy was updated by hand: the server's own copy had updated itself to 1.0.75, the
   client's was 1.0.3; DepotDownloader fetched 36 MB). (10-19)
 
+- **Graphics quality set directly, not through the client's menu** (2026-10-25; user: "instead of navigating the menu system to
+  apply the graphic setting it should just call the function directly in the http status") — stats.c `st_qual_install`
+  (signature lists g_sig_quality_preset / g_sig_quality_apply; re-tools/patchscan.py point "quality"), `st_qual_now`, do=quality,
+  the snapshot's overlay.quality; stats_page.html Quality (+ Auto). Why: the page clicked through Esc > Settings > Advanced
+  graphics > preset arrows > Apply > Back > Resume (several seconds, the menu over the game, fragile). How: the client's
+  apply-settings function (0.9.23 exe+0x91bb70) packs the one-view levels (Settings +0x1d3..+0x1d9) into a u64 it swaps into a
+  global (exe+0x2b19e90) that its detour on halo3's detail function (exe+0x8662d0) reads whenever halo3 asks; the page now calls
+  the client's own preset table (exe+0x181a0d0, preset -> the 7 levels; registers only, matched whole, identical 0.9.17-0.9.23)
+  and swaps the result into that global (game-options.md "How the client applies it"). Refused before the client applied its
+  settings once. Live HugeGrass match: low / ultra / medium / high / ultra each changed halo3's "Graphics detail for 1 view(s)"
+  within 0.5 s. Live only: not saved to settings.json, the client's menu still shows its last Apply. PELOAD_QUALITY_MENU=1 = the
+  menu clicks (also used when the globals aren't found).
+
 ## 19. Performance
 
 Numbers are from the commit messages; PERF-PLAN.md has the measurements. Compare only inside one match
@@ -2000,11 +2023,31 @@ Numbers are from the commit messages; PERF-PLAN.md has the measurements. Compare
   other players' voice chat on a public server -- still played on the Mac. How: PELOAD_WASAPI_MUTE=1 plays every WASAPI
   stream as silence (consumed as usual; a clip recording still gets it); quiet-run.sh always sets it and PELOAD_AUDIO_MUTE=1,
   dedicated.sh sets it for its workers. Unset (play.sh) = sound as before.
+- **PELOAD_RB_CHECK=1: the asynchronous luminance readback checked byte for byte** (2026-10-25; hunting the HugeGrass "washed
+  out" report) — peload.c `rb_async` / `rb_complete` (D3DObj `rbchk`). Each asynchronous readback is also read synchronously at
+  the copy and the two are compared when the CPU copy is filled (`[rbcheck]` lines). HugeGrass, 100 s: 6,000 matched, 0 differed
+  (log luminance -3.6 .. -12.9): the client's auto exposure gets what it got before the change.
 - **PELOAD_AB=new** (2026-10-25; user: "benchmarks must be vs something meaningful: join the largest game you can, then
   back down to smaller ones") — peload.c `ab_new`, d3dsubmit.c sub_switch feature 13: flips every engine-thread change of the
   day together (metadata cache, data-opens-only map notes, the QPC leaf, the matrix skip, the engine thread's QoS) so one
   public match measures before vs after phase by phase.
 
+- **Frame latency measured: PELOAD_LAG_LOG=1** (2026-10-25; user: "the graphic UI feels sluggish and floaty") — d3dsubmit.c
+  `sub_present` / SQ_PRESENT (`g_lag_req` -> `g_lag_t`), glh_client.c `glh_pq_publish`, peload.c `pq_present_wait_glh`. Every
+  5 s: `[lag] present -> GPU done` (halo3's render thread presenting a frame -> the helper's fence for that frame's blit; hidden
+  windows too) and `[lag] present -> window` (-> the present thread showing it; frames in flight render->GL and GL->GPU). The
+  timestamps are keyed by d3dgl_present's frame number: the first version keyed them by the submission thread's own present
+  count, which only starts when that thread switches on, and paired frames ~110 apart (it read "2.8 s"). HugeGrass, 17 players,
+  hidden: 70-95 ms at 26-40 fps -- about 2.5-3 frames queued between the game and the GPU.
+- **One frame on the GPU instead of two: ~35 ms less latency** (2026-10-25; user: "the graphic UI feels sluggish and floaty")
+  — glh_client.c `glh_pq_publish` (`g_gpu_frames`, `ab_gpuf`; d3dsubmit.c A/B feature 17). Why: the GL thread could run 2
+  presented frames ahead of the frames the GPU had finished, on top of the render thread's 1 frame of lead over the GL thread:
+  ~2.5-3 frames between the game presenting a frame and the GPU finishing it (70-90 ms at 26-40 fps on HugeGrass). How: 1 frame
+  (the GPU draws one while the next is encoded). In-match A/B, HugeGrass, 18 players, phases of 20 s (PELOAD_AB=gpuf:20):
+  present -> GPU done 70-90 ms with 2, 36-50 ms with 1; fps in adjacent comparable phases 36.1 / 38.2 (2) vs 37.9 (1).
+  PELOAD_GPU_FRAMES=2 = as before (1..4).
+- **PELOAD_GLH_GPUPROF=1** — glhelper.c `gp_switch` / `gp_poll`: GPU time (GL_TIME_ELAPSED queries) per framebuffer the helper
+  draws into, the present copy and readbacks, reported every 5 s: where the GPU's time goes when a game is GPU-bound.
 ## 20. Scripts and RE tools
 
 - **PELOAD_BP=<dll>+<rva>** (2026-10-21) — `bp_install_mod` (load_guest, before the DLL's DllMain), `bp_plant`: the software
@@ -2165,6 +2208,9 @@ Numbers are from the commit messages; PERF-PLAN.md has the measurements. Compare
   host's Slayer match with both players on the scoreboard; then a public Firefight game on Beachhead (joined through the public
   master's rendezvous, played with its players). `RR_NAME=<name>` sets the in-game name. (10-20, reach-port)
 
+- **shim/tools/cowtest.c** (2026-10-25) — is the loader's copy-on-write guest copy (mach_vm_copy) a real copy under Rosetta
+  when used like halo3's game-state copies (16 MB, the source written after each copy, the copy read on another thread,
+  copies of copies in a ring)? 1,500 + 900 rounds: 0 mismatches.
 ## 21. Superseded workarounds (kept for history; most switches still exist)
 
 - **Separable GL programs** -> monolithic programs (da262fb). `PELOAD_D3DGL_SEP=1`.

@@ -436,9 +436,14 @@ DED_STATS_HTTP). A client applying "Boundaries off" also patches its own predict
 player trait: the host gives it to every player (a friend on another Mac too).
 Graphics quality (game-options.md): settings.json quality.one + quality.detail{shadows,lighting,effects,draw_distance,
 level_of_detail,decals,water}, levels auto/off/low/medium/high/ultra; written on the menu's Apply changes, applied live.
-Quality control (stats do=quality&v=low|medium|high|ultra, page "Quality"): stats.c clicks the client's Settings > Advanced graphics
-preset arrows + Apply (in a match: Esc 110,503 ... Resume 132,467; menu: 110,587) by the step count from the current preset, read
-from the client's log line "Graphics quality: one view X" (g_st_qual; snapshot overlay.quality / quality_pending).
+Quality control (stats do=quality&v=auto|low|medium|high|ultra, page "Quality"; since 2026-10-25 DIRECT, st_qual_install): the
+client's apply-settings function (0.9.23 exe+0x91bb70) packs Settings +0x1d3..0x1d9 (one view: shadows, lighting, effects, draw
+distance, LOD, decals, water; 0 auto 1 off 2 low 3 medium 4 high 5 ultra) into a u64 it xchg's into a global (exe+0x2b19e90; split
++0x1da.. -> e60, filtering/blur/AA e88, "applied" e5c); its detour on halo3's detail function (exe+0x8662d0, installed as jmp [rip]
+over halo3 code) reads them whenever halo3 asks. do=quality calls the client's own preset table exe+0x181a0d0 (register-only leaf,
+matched whole, identical 0.9.17-0.9.23) and swaps the result in. Live only (not saved, client menu not updated). Signatures
+g_sig_quality_preset / g_sig_quality_apply (patchscan "quality"). PELOAD_QUALITY_MENU=1 = the old clicks through the client's
+Settings > Advanced graphics (Esc 110,503 ... Resume 132,467; menu 110,587), driven by its log line "Graphics quality: one view X".
 UI automation of a test client: PELOAD_STATS_UISTEPS=1 + POST do=uisteps&s=<steps> (1280x720 client coords) and a frame of the
 window from a 1.5 s clip (do=rec, then ffmpeg -ss 0.8 -frames:v 1) -- the menu is not in do=capture; never screenshot the desktop.
 Retina (2026-10-18): the window's GL surface is in PIXELS (2x on a Retina screen); g_win_pw/ph are pixels (convertRectToBacking in

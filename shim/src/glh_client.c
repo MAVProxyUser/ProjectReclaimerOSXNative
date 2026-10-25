@@ -262,13 +262,25 @@ static void* glh_dlsym(void*h,const char*n){
 
 // ---- presentation (frames come back as IOSurfaces) ------------------------------------------------------------------------
 // render side (pq_publish): ask the helper to copy the backbuffer's frame region into its next free IOSurface
+volatile int g_gpu_frames=-1;   // PELOAD_GPU_FRAMES (below); PELOAD_AB=gpuf switches 2 ("off") and 1 ("on") at run time
+int ab_gpuf(int set){ if(set>=0) g_gpu_frames=set?1:2; return g_gpu_frames==1; }
 static void glh_pq_publish(unsigned srcfbo,int vw,int vh,int W,int H,unsigned long frameno){
     uint64_t sent=atomic_load(&g_glh->frames_sent)+1;
     uint8_t*c=glh_begin(GLH_X_PQ_BLIT,8+6*8); if(!c) return; uint64_t*s=(uint64_t*)(c+8);
     s[0]=srcfbo; s[1]=(uint64_t)vw; s[2]=(uint64_t)vh; s[3]=(uint64_t)W; s[4]=(uint64_t)H; s[5]=frameno; glh_end(c);
     atomic_store(&g_glh->frames_sent,sent);
-    // stay at most 2 frames ahead of the helper (latency, and the frames in flight)
-    double t0=mono_s(); while(sent>atomic_load(&g_glh->frames_done)+2 && !atomic_load(&g_glh->failed) && mono_s()-t0<1.0){ glh_kick(); glh_check_alive(); usleep(100); }
+    // stay at most PELOAD_GPU_FRAMES frames ahead of what the GPU has finished (the helper's frames_done counts a frame when its
+    // blit's fence signals): latency against overlap. 1 (default since 2026-10-25) = one frame on the GPU while the next is
+    // prepared; 2 = as before: in-match A/B on HugeGrass (PELOAD_AB=gpuf), present -> GPU done 70-90 ms -> 36-50 ms, fps unchanged
+    if(g_gpu_frames<0){ const char*e=getenv("PELOAD_GPU_FRAMES"); int v=e?atoi(e):1; g_gpu_frames=v<1?1:v>4?4:v; } int gf=g_gpu_frames;
+    double t0=mono_s(); while(sent>atomic_load(&g_glh->frames_done)+(uint64_t)gf && !atomic_load(&g_glh->failed) && mono_s()-t0<1.0){ glh_kick(); glh_check_alive(); usleep(100); }
+    // PELOAD_LAG_LOG=1, seen from here (hidden windows too): render-thread present -> its frame finished on the GPU
+    { static int ll=-1; if(ll<0) ll=getenv("PELOAD_LAG_LOG")?1:0;
+      if(ll){ static unsigned long fnos[256]; static uint64_t seen; static double sum, mx, tl; static unsigned long n; extern double g_lag_t[256];
+          fnos[sent&255]=frameno; uint64_t done=atomic_load(&g_glh->frames_done); double now=mono_s();
+          for(;seen<done;seen++){ if(sent-seen>200) continue; double t=g_lag_t[fnos[(seen+1)&255]&255]; if(t>0 && now-t<5.0){ sum+=now-t; if(now-t>mx) mx=now-t; n++; } }
+          if(!tl) tl=now; if(now-tl>=5.0 && n){ char m[200]; int k=snprintf(m,sizeof m,"  [lag] present -> GPU done: %.0f ms average, %.0f ms worst (%lu frames, %.1f fps), %d frames allowed on the GPU\n",sum/n*1e3,mx*1e3,n,n/(now-tl),gf);
+              (void)!write(2,m,(size_t)k); sum=0; mx=0; n=0; tl=now; } } }
     g_glh_pqwait_s+=mono_s()-t0; }
 // present side (window context current): wait (up to ms) for a frame newer than *seen; bind it as a rectangle texture
 static unsigned g_glh_ptex[3]; static uint32_t g_glh_pios[3]; static int g_glh_pw, g_glh_ph;

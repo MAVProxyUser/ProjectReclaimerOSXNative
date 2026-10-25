@@ -122,6 +122,12 @@ static const char*const g_sig_cast_vote[]={     // cast_vote(const u128 *round, 
 static const char*const g_sig_ballot[]={        // code reading the ballot cache: cmp rcx,[rip+cache] (disp32 at +5), mov rdi,[rip+receiver] (disp32 at +0x14)
     "31 C9 48 3B 0D ?? ?? ?? ?? 70 ?? 89 85 ?? ?? ?? ?? 48 8B 3D ?? ?? ?? ?? 8B 1D ?? ?? ?? ?? E8 ?? ?? ?? ?? 90 48 89 45 ?? 89 55 ?? 48 8D 4D ?? 48 89 FA 41 89 D8 E8 ?? ?? ?? ?? 90 81 FA 00 CA 9A 3B 0F 94 C1 48 83 F8 03 0F 92 C0",   // v0.9.15+
     0 };
+static const char*const g_sig_quality_preset[]={   // the preset table: preset (cl) -> its 7 packed levels; the WHOLE function (registers only, no ??)
+    "84 C9 74 46 44 8D 51 FE 41 B0 01 41 B1 02 41 80 FA 03 77 44 42 8D 04 D5 00 00 00 00 BA 02 03 04 04 49 89 C8 89 C1 D3 EA 4C 89 C0 45 84 D2 41 0F 95 C0 45 00 C0 41 80 C0 02 3C 02 74 26 0F B6 C8 83 F9 03 75 1B 41 B1 03 EB 19 31 D2 31 C0 45 31 C0 31 C9 45 31 C9 EB 0D B2 02 B0 02 B1 01 EB 05 41 B1 04 89 C1 45 0F B6 C9 49 C1 E1 30 45 0F B6 C0 49 C1 E0 28 44 0F B6 D0 4D 89 D3 49 C1 E3 20 0F B6 D2 C1 E2 18 41 C1 E2 10 0F B6 C9 89 C8 C1 E0 08 48 09 C8 4C 09 D0 48 09 D0 4C 09 D8 4C 09 C0 4C 09 C8 C3",   // v0.9.17+
+    0 };
+static const char*const g_sig_quality_apply[]={    // apply-settings' swaps: one view, split screen, filtering/blur/AA, "applied" (disp32 at +6, +0x10, +0x1a, +0x27)
+    "49 89 C9 4C 87 0D ?? ?? ?? ?? 49 89 D0 4C 87 05 ?? ?? ?? ?? 41 89 C2 44 87 15 ?? ?? ?? ?? 41 BB 01 00 00 00 44 87 1D ?? ?? ?? ??",   // v0.9.5+
+    0 };
 // the next signature of a list (from index *k on) that matches exactly once: its rva, or -1 when none is left; the parsed
 // pattern is in b (n bytes) and *k is its index, so a caller whose meaning check fails goes on with *k+1
 static int64_t sig_next(const char*const*list,int*k,uint8_t*b,uint8_t*m,int cap,int*n){
@@ -151,6 +157,33 @@ static void st_bv_install(void){
         :snprintf(msg,sizeof msg,"  [stats] map ballot vote: cast_vote exe+0x%llx, ballot cache exe+0x%llx (0x%llx bytes)\n",(unsigned long long)(fn-g_base),(unsigned long long)(g_bv_cache-g_base),(unsigned long long)g_bv_size);
     (void)!write(2,msg,k);
     if(g_bv_fn){ uint32_t tid=0; i_CreateThread(0,0,(WinThreadProc)st_bv_worker,0,0,&tid); } }
+// Graphics quality, set directly (2026-10-25). The client's apply-settings function (0.9.23 exe+0x91bb70; its Settings menu's
+// Apply and its start-up call it with the Settings struct) packs Settings +0x1d3..+0x1d9 -- the one-view levels of shadows,
+// dynamic lights, effects, draw distance, level of detail, decals, water; 0 auto, 1 off, 2 low, 3 medium, 4 high, 5 ultra --
+// into a u64 it swaps into a global (then split screen +0x1da..+0x1e0, filtering / motion blur / AA, and an "applied" flag).
+// Halo 3 gets its detail values from the client's detour on its detail function (exe+0x8662d0), which reads those globals each
+// time halo3 asks, so a new value shows within frames ("Graphics detail for 1 view(s)" in the log). do=quality calls the client's
+// own preset table (exe+0x181a0d0, preset -> the 7 levels its menu sets: Medium has decals high, Ultra draw distance / decals /
+// water high) and swaps the result into the one-view global, as the apply function does. Live only: not saved to settings.json,
+// not shown in the client's menu (an Apply there sets its own values again). PELOAD_QUALITY_MENU=1 = the old menu clicks.
+static uint64_t (MSABI*g_qp_fn)(uint64_t); static uint64_t*g_qp_one; static uint32_t*g_qp_set;
+static void st_qual_install(void){
+    uint8_t b[192],m[192]; int n; const char*why="preset table not found (0.9.17+ only)"; uint8_t*fn=0;
+    for(int k=0;;k++){ int64_t r=sig_next(g_sig_quality_preset,&k,b,m,192,&n); if(r<0) break; fn=g_base+r; why=0; break; }
+    if(!why){ why="apply-settings swaps not found";
+        for(int k=0;;k++){ int64_t h=sig_next(g_sig_quality_apply,&k,b,m,192,&n); if(h<0) break;
+            uint8_t*hit=g_base+h; uint8_t*one=hit+10+*(int32_t*)(hit+6), *split=hit+0x14+*(int32_t*)(hit+0x10), *flags=hit+30+*(int32_t*)(hit+0x1a), *set=hit+0x2b+*(int32_t*)(hit+0x27);
+            // meaning: four distinct small globals next to each other (0.9.23: set e5c, split e60, flags e88, one view e90), u64s 8-aligned
+            uint8_t*lo=one, *hi=one; uint8_t*a4[4]={one,split,flags,set}; for(int i=0;i<4;i++){ if(a4[i]<lo) lo=a4[i]; if(a4[i]>hi) hi=a4[i]; }
+            if(hi-lo>0x80 || one==split || flags==set || ((uintptr_t)one&7) || ((uintptr_t)split&7) || ((uintptr_t)set&3)){ why="apply-settings swaps don't look like the quality globals"; continue; }
+            g_qp_fn=(uint64_t(MSABI*)(uint64_t))(void*)fn; g_qp_one=(uint64_t*)one; g_qp_set=(uint32_t*)set; why=0; break; } }
+    char msg[200]; int k=why?snprintf(msg,sizeof msg,"  [stats] graphics quality: %s (the page uses the client's Settings menu)\n",why)
+        :snprintf(msg,sizeof msg,"  [stats] graphics quality: preset table exe+0x%llx, one-view levels exe+0x%llx\n",(unsigned long long)(fn-g_base),(unsigned long long)((uint8_t*)g_qp_one-g_base));
+    (void)!write(2,msg,k); }
+static const char*const g_qp_names[6]={"auto","off","low","medium","high","ultra"};
+// one-view preset now in effect: the levels the global holds, matched against the client's table (-1 = none: custom)
+static int st_qual_now(void){ if(!g_qp_fn || !__atomic_load_n(g_qp_set,__ATOMIC_ACQUIRE)) return -1;
+    uint64_t v=__atomic_load_n(g_qp_one,__ATOMIC_ACQUIRE)&0xffffffffffffffull; for(int p=0;p<6;p++) if((g_qp_fn((uint64_t)p)&0xffffffffffffffull)==v) return p; return -1; }
 static void st_bv_tick(double now){   // stats thread: a new open ballot -> queue our vote; confirm by its counts
     if(!g_bv_cache || g_av_map<0) return;
     static uint8_t voted[16]; static int tries; static double tsent; static uint8_t cnt0;
@@ -555,7 +588,7 @@ static void st_voice_install(void){ if(!stats_on() || !g_base) return;
     if(g_st_setmuted) snprintf(sm,sizeof sm,"available (set_muted exe+0x%llx)",(unsigned long long)(g_st_setmuted-g_base));
     if(hooked) snprintf(vr,sizeof vr,"hooked (voice_recv exe+0x%llx)",(unsigned long long)rv);
     k=snprintf(msg,sizeof msg,"  [stats] voice: mute %s, talking indicator %s\n",sm,vr);
-    (void)!write(2,msg,k); st_chat_install(); st_addr_install(); st_slots_install(); st_bv_install(); }
+    (void)!write(2,msg,k); st_chat_install(); st_addr_install(); st_slots_install(); st_bv_install(); st_qual_install(); }
 static void st_voice_init(void){ static int done; if(done || !g_base) return; done=1;
     // 0.9.18: set_muted at its known place -> the client's expanded-session flag is at its known place too; other
     // builds pick the layout by which one holds valid records
@@ -955,11 +988,21 @@ static int st_control(const char*act,const char*qs){
         uint64_t gg=0; uint8_t mode=0; if(!g_st_tls || !hb_read(g_st_tls+0x48,&gg,8) || !gg || !hb_read(gg+0x10,&mode,1) || mode!=2) return 0;
         *(volatile uint8_t*)(uintptr_t)(gg+0x1608+0x134+0x10)=(uint8_t)sp;
         char m[80]; int k=snprintf(m,sizeof m,"  [stats] page: movement speed %s (everyone)\n",tl_speed[sp]); (void)!write(2,m,k); return 1; }
-    // do=quality&v=low|medium|high|ultra: the client's Settings > Advanced graphics > One player > Preset, changed through its
+    // do=quality&v=low|medium|high|ultra (direct path above: also auto). PELOAD_QUALITY_MENU=1 / no globals found: the client's
+    // Settings > Advanced graphics > One player > Preset, changed through its
     // own menu (the client then saves settings.json and applies it at once -- it never rereads the file by itself). Clicks
     // in its 1280x720 UI: in a match Esc > SETTINGS (110,503), else the main menu's SETTINGS (110,587); ADVANCED GRAPHICS
     // (185,208); the preset row's arrows (605,312 / 825,312), one step per preset; APPLY CHANGES (139,669); BACK (1046,66);
     // in a match RESUME GAME (132,467). The page shows the result from the client's next "Graphics quality" line.
+    // Direct (default when st_qual_install found the client's globals): the preset's levels from the client's own table, swapped
+    // into its one-view global like its apply function does; refused before the client applied its settings once (start-up).
+    if(!strcmp(act,"quality") && g_qp_fn && !getenv("PELOAD_QUALITY_MENU")){ const char*v=strstr(qs,"v="); if(!v) return 0; int to=-1;
+        for(int i=0;i<6;i++) if(!strncmp(v+2,g_qp_names[i],strlen(g_qp_names[i])) && (v[2+strlen(g_qp_names[i])]==0 || v[2+strlen(g_qp_names[i])]=='&')) to=i;
+        if(to<0 || to==1 || !__atomic_load_n(g_qp_set,__ATOMIC_ACQUIRE)) return 0;   // ("off": no menu preset)
+        int from=st_qual_now(); uint64_t lv=g_qp_fn((uint64_t)to)&0xffffffffffffffull, old=__atomic_exchange_n(g_qp_one,lv,__ATOMIC_SEQ_CST);
+        snprintf(g_st_qual,sizeof g_st_qual,"%s",g_qp_names[to]); g_st_qual_want[0]=0; g_st_qual_t=st_wall();
+        char m[200]; int k=snprintf(m,sizeof m,"  [stats] page: graphics quality %s -> %s (levels %014llx -> %014llx, set directly)\n",from>=0?g_qp_names[from]:"custom",g_qp_names[to],(unsigned long long)old,(unsigned long long)lv);
+        (void)!write(2,m,k); return 1; }
     if(!strcmp(act,"quality")){ const char*v=strstr(qs,"v="); if(!v) return 0; static const char*const lv[4]={"low","medium","high","ultra"};
         int to=-1, from=-1; for(int i=0;i<4;i++){ if(!strncmp(v+2,lv[i],strlen(lv[i]))) to=i; if(!strcmp(g_st_qual,lv[i])) from=i; }
         if(to<0) return 0; if(from<0) from=2;   // unknown / custom: the client's default is High
@@ -1308,7 +1351,7 @@ static void st_snapshot(StBuf*s){
           !wa_mic_mode()||wa_mic_mode()==3?"off":wa_mic_muted()?"muted":wa_mic_mode()==2?"tone":"live",g_mic_streams>0?"true":"false");
       { int si=-1; uint64_t gg=0; uint8_t b=0; if(st_is_host()){ if(g_st_tls && hb_read(g_st_tls+0x48,&gg,8) && gg && hb_read(gg+0x1608+0x134+0x10,&b,1)) si=b; } else si=g_st_fwd_speed;
         sb_put(s,",\"speed_idx\":%d",si); }
-      sb_put(s,",\"quality\":"); sb_str(s,g_st_qual); sb_put(s,",\"quality_pending\":"); sb_str(s,g_st_qual_want);   // the movement speed index (tl_speed; 0 = the variant's own, 9 = 200%%), -1 unknown
+      sb_put(s,",\"quality\":"); { int qn=st_qual_now(); sb_str(s,qn>=0?g_qp_names[qn]:(g_qp_fn && __atomic_load_n(g_qp_set,__ATOMIC_ACQUIRE))?"custom":g_st_qual); }   // (the levels in effect when the globals are known) sb_put(s,",\"quality_pending\":"); sb_str(s,g_st_qual_want);   // the movement speed index (tl_speed; 0 = the variant's own, 9 = 200%%), -1 unknown
       st_overlay_features(s);   // the overlay panel's per-feature settings (the keys above stay for older pages)
       sb_put(s,",\"spots\":["); int ns=0; for(int i=0;i<(int)(sizeof g_st_spots/sizeof g_st_spots[0]);i++) if(!strcmp(g_st_spots[i].map,m)){
           sb_put(s,"%s{\"id\":\"%s\",\"label\":\"%s\",\"x\":%.1f,\"y\":%.1f,\"z\":%.1f}",ns++?",":"",g_st_spots[i].id,g_st_spots[i].label,g_st_spots[i].x,g_st_spots[i].y,g_st_spots[i].z); }

@@ -197,16 +197,16 @@ static void sub_switch(void){   // game thread, at a Present
     // engine-thread change of 2026-10-25 at once, peload.c ab_new).
     static int feat; extern uint64_t g_memcpy_min; static uint64_t mc_on;
     if(ab_s<0){ const char*e=getenv("PELOAD_D3DGL_SUBMIT_AB"); ab_s=e?atof(e):0; feat=0;
-        const char*a=getenv("PELOAD_AB"); if(a){ const char*c=strchr(a,':'); ab_s=c?atof(c+1):20; feat=!strncmp(a,"memcpy",6)?1:!strncmp(a,"glcache",7)?2:!strncmp(a,"cbbatch",7)?3:!strncmp(a,"cow",3)?4:!strncmp(a,"hidewin",7)?5:!strncmp(a,"csgpu",5)?6:!strncmp(a,"parcopy",7)?7:!strncmp(a,"ncpu",4)?8:!strncmp(a,"fastcall",8)?9:!strncmp(a,"ntdelay",7)?10:!strncmp(a,"bcdec",5)?11:!strncmp(a,"qos",3)?12:!strncmp(a,"new",3)?13:!strncmp(a,"burn",4)?14:!strncmp(a,"rb",2)?15:!strncmp(a,"csq",3)?16:0; if(!ab_s) ab_s=20; }
+        const char*a=getenv("PELOAD_AB"); if(a){ const char*c=strchr(a,':'); ab_s=c?atof(c+1):20; feat=!strncmp(a,"memcpy",6)?1:!strncmp(a,"glcache",7)?2:!strncmp(a,"cbbatch",7)?3:!strncmp(a,"cow",3)?4:!strncmp(a,"hidewin",7)?5:!strncmp(a,"csgpu",5)?6:!strncmp(a,"parcopy",7)?7:!strncmp(a,"ncpu",4)?8:!strncmp(a,"fastcall",8)?9:!strncmp(a,"ntdelay",7)?10:!strncmp(a,"bcdec",5)?11:!strncmp(a,"qos",3)?12:!strncmp(a,"new",3)?13:!strncmp(a,"burn",4)?14:!strncmp(a,"rb",2)?15:!strncmp(a,"csq",3)?16:!strncmp(a,"gpuf",4)?17:0; if(!ab_s) ab_s=20; }
         mc_on=g_memcpy_min; t0=mono_s(); f0=g_ct_frame; d0=g_sub_ndraw; }
     if(ab_s>0){ double now=mono_s(); if(now-t0>=ab_s && g_sub_want<0){
-            extern volatile int g_glc_on; extern volatile unsigned g_glc_gen; extern volatile int g_cbbatch_on; extern volatile int g_memcpy_cow; extern volatile int g_pc_on; extern int ab_ncpu(int set); extern int ab_fastcall(int set); extern volatile int g_ntdelay_stub; extern int ab_bcdec(int set); extern int ab_qos(int set); extern int ab_new(int set); extern int ab_burn(int set); extern int ab_rb(int set); extern int ab_csq(int set);
+            extern volatile int g_glc_on; extern volatile unsigned g_glc_gen; extern volatile int g_cbbatch_on; extern volatile int g_memcpy_cow; extern volatile int g_pc_on; extern int ab_ncpu(int set); extern int ab_fastcall(int set); extern volatile int g_ntdelay_stub; extern int ab_bcdec(int set); extern int ab_qos(int set); extern int ab_new(int set); extern int ab_burn(int set); extern int ab_rb(int set); extern int ab_csq(int set); extern int ab_gpuf(int set);
             extern volatile int g_ab_winhidden; extern void win_ab_hide(int); extern volatile int g_cs_gpu;
-            int ph=feat==1?(g_memcpy_min!=~0ull):feat==2?g_glc_on:feat==3?(g_cbbatch_on!=0):feat==4?(g_memcpy_cow>0):feat==5?g_ab_winhidden:feat==6?(g_cs_gpu>0):feat==7?(g_pc_on>0):feat==8?ab_ncpu(-1):feat==9?ab_fastcall(-1):feat==10?(g_ntdelay_stub!=1):feat==11?ab_bcdec(-1):feat==12?ab_qos(-1):feat==13?ab_new(-1):feat==14?ab_burn(-1):feat==15?ab_rb(-1):feat==16?ab_csq(-1):sub_on(); unsigned long fn=g_ct_frame-f0, dn=g_sub_ndraw-d0; double dt=now-t0;
+            int ph=feat==1?(g_memcpy_min!=~0ull):feat==2?g_glc_on:feat==3?(g_cbbatch_on!=0):feat==4?(g_memcpy_cow>0):feat==5?g_ab_winhidden:feat==6?(g_cs_gpu>0):feat==7?(g_pc_on>0):feat==8?ab_ncpu(-1):feat==9?ab_fastcall(-1):feat==10?(g_ntdelay_stub!=1):feat==11?ab_bcdec(-1):feat==12?ab_qos(-1):feat==13?ab_new(-1):feat==14?ab_burn(-1):feat==15?ab_rb(-1):feat==16?ab_csq(-1):feat==17?ab_gpuf(-1):sub_on(); unsigned long fn=g_ct_frame-f0, dn=g_sub_ndraw-d0; double dt=now-t0;
             sum[ph]+=dt; fr[ph]+=fn; dr[ph]+=dn; nph[ph]++;
             char m[300]; int k=snprintf(m,sizeof m,"  [ab] %s %s: %.1f fps, %lu draws/frame (%.0f s) | totals: on %.1f fps (%d), off %.1f fps (%d)\n",
-                feat==1?"memcpy":feat==2?"glcache":feat==3?"cbbatch":feat==4?"cow":feat==5?"hidewin":feat==6?"csgpu":feat==7?"parcopy":feat==8?"ncpu":feat==9?"fastcall":feat==10?"ntdelay":feat==11?"bcdec":feat==12?"qos":feat==13?"new":feat==14?"burn":feat==15?"rb":feat==16?"csq":"submit",ph?"on ":"off",fn/dt,fn?dn/fn:0,dt,sum[1]>0?fr[1]/sum[1]:0,nph[1],sum[0]>0?fr[0]/sum[0]:0,nph[0]); (void)!write(2,m,k);
-            if(feat==1) g_memcpy_min=ph?~0ull:mc_on; else if(feat==2){ if(!ph) g_glc_gen++; g_glc_on=!ph; } else if(feat==3) g_cbbatch_on=!ph; else if(feat==4) g_memcpy_cow=!ph; else if(feat==5) win_ab_hide(!ph); else if(feat==6) g_cs_gpu=!ph; else if(feat==7) g_pc_on=!ph; else if(feat==8) ab_ncpu(!ph); else if(feat==9) ab_fastcall(!ph); else if(feat==10) g_ntdelay_stub=ph; else if(feat==11) ab_bcdec(!ph); else if(feat==12) ab_qos(!ph); else if(feat==13) ab_new(!ph); else if(feat==14) ab_burn(!ph); else if(feat==15) ab_rb(!ph); else if(feat==16) ab_csq(!ph); else g_sub_want=!ph;
+                feat==1?"memcpy":feat==2?"glcache":feat==3?"cbbatch":feat==4?"cow":feat==5?"hidewin":feat==6?"csgpu":feat==7?"parcopy":feat==8?"ncpu":feat==9?"fastcall":feat==10?"ntdelay":feat==11?"bcdec":feat==12?"qos":feat==13?"new":feat==14?"burn":feat==15?"rb":feat==16?"csq":feat==17?"gpuf":"submit",ph?"on ":"off",fn/dt,fn?dn/fn:0,dt,sum[1]>0?fr[1]/sum[1]:0,nph[1],sum[0]>0?fr[0]/sum[0]:0,nph[0]); (void)!write(2,m,k);
+            if(feat==1) g_memcpy_min=ph?~0ull:mc_on; else if(feat==2){ if(!ph) g_glc_gen++; g_glc_on=!ph; } else if(feat==3) g_cbbatch_on=!ph; else if(feat==4) g_memcpy_cow=!ph; else if(feat==5) win_ab_hide(!ph); else if(feat==6) g_cs_gpu=!ph; else if(feat==7) g_pc_on=!ph; else if(feat==8) ab_ncpu(!ph); else if(feat==9) ab_fastcall(!ph); else if(feat==10) g_ntdelay_stub=ph; else if(feat==11) ab_bcdec(!ph); else if(feat==12) ab_qos(!ph); else if(feat==13) ab_new(!ph); else if(feat==14) ab_burn(!ph); else if(feat==15) ab_rb(!ph); else if(feat==16) ab_csq(!ph); else if(feat==17) ab_gpuf(!ph); else g_sub_want=!ph;
             t0=now; f0=g_ct_frame; d0=g_sub_ndraw; } }
     if(g_sub_auto>0 && g_sub_want<0){ static double ta; double now=mono_s(); if(now-ta>=5.0){ ta=now; extern int st_player_count(void);
             static int min=-1; if(min<0){ const char*e=getenv("PELOAD_D3DGL_SUBMIT_AUTO_MIN"); min=e?atoi(e):40; }
@@ -217,10 +217,13 @@ static void sub_switch(void){   // game thread, at a Present
     else { g_sq_sent_ok=0; g_sq_cssent_ok=0; }        // on: send full state with the first draw / dispatch
     g_sub_gen++; g_sub_cur=w; g_sub_want=-1;
     if(!getenv("PELOAD_D3DGL_SUBMIT_AB") && !getenv("PELOAD_AB")){ char m[80]; int k=snprintf(m,sizeof m,"  [submit] GL submission thread switched %s\n",w?"on":"off"); (void)!write(2,m,k); } }
+uint64_t sub_lag_inflight(void){ return g_sq_pres_req-__atomic_load_n(&g_sq_pres_done,__ATOMIC_ACQUIRE); }   // (PELOAD_LAG_LOG)
+double g_lag_t[256];   // (PELOAD_LAG_LOG) when halo3's render thread presented frame n (index n & 255; n = d3dgl_present's count, g_eng_present_no)
+static double g_lag_req[256];   // the same by this thread's present count (g_sq_pres_req): the GL thread moves it to g_lag_t at SQ_PRESENT
 static void sub_present(void){
     sub_switch();
-    if(!sub_on()){ d3dgl_present(); return; } sub_start();
-    (void)sub_alloc(SQ_PRESENT,0); sub_push(); uint64_t want=++g_sq_pres_req;
+    if(!sub_on()){ extern unsigned long g_eng_present_no_x; g_lag_t[(g_eng_present_no_x+1)&255]=mono_s(); d3dgl_present(); return; } sub_start();
+    g_lag_req[(g_sq_pres_req+1)&255]=mono_s(); (void)sub_alloc(SQ_PRESENT,0); sub_push(); uint64_t want=++g_sq_pres_req;
     static int ahead=-1; if(ahead<0){ const char*e=getenv("PELOAD_D3DGL_SUBMIT_FRAMES"); ahead=e?atoi(e):1; if(ahead<1) ahead=1; if(ahead>4) ahead=4; }
     if(want>(uint64_t)ahead && __atomic_load_n(&g_sq_pres_done,__ATOMIC_ACQUIRE)<want-(uint64_t)ahead){ double t0=mono_s(); g_sq_waitframe++;
         pthread_mutex_lock(&g_sq_mx); __atomic_store_n(&g_sq_psleep,1,__ATOMIC_SEQ_CST); while(__atomic_load_n(&g_sq_pres_done,__ATOMIC_ACQUIRE)<want-(uint64_t)ahead) sub_wait(&g_sq_pcv); g_sq_psleep=0; pthread_mutex_unlock(&g_sq_mx);
@@ -251,7 +254,7 @@ static void sub_exec(uint32_t type,uint8_t*p){
     case SQ_UPDSUB: { SqUpd*u=(SqUpd*)p; ctxi_UpdateSubresource(0,u->res,u->sub,u->hasbox?u->box:0,u->data,u->srp,u->sdp); free(u->data); break; }
     case SQ_COPYRES: { SqCopy*c=(SqCopy*)p; ctxi_CopyResource(0,c->dst,c->src); break; }
     case SQ_COPYSUB: { SqCopySub*c=(SqCopySub*)p; ctxi_CopySubresourceRegion(0,c->dst,c->dsub,c->x,c->y,c->z,c->src,c->ssub,c->hasbox?c->box:0); break; }
-    case SQ_COMMIT: { SqCommit*c=(SqCommit*)p; D3DObj*o=c->res; cs_wait_res(o); void*old=o->data; o->data=c->block; if(old && old!=c->block) sub_block_put(o,old);
+    case SQ_COMMIT: { SqCommit*c=(SqCommit*)p; D3DObj*o=c->res; cs_wait_write(o,"Unmap (a new block swapped in)"); void*old=o->data; o->data=c->block; if(old && old!=c->block) sub_block_put(o,old);
         d3d_dirty_sub(o,c->sub); o->rvalid=0; o->ver++; if(o->is_cb) o->cb_upd=g_cb_tick; break; }
     case SQ_DIRTY: { SqCommit*c=(SqCommit*)p; D3DObj*o=c->res; d3d_dirty_sub(o,c->sub); o->rvalid=0; o->ver++; if(o->is_cb) o->cb_upd=g_cb_tick; break; }
     case SQ_DISPATCH: { SqDispatch*d=(SqDispatch*)p; ctxi_Dispatch(0,d->a,d->b,d->c); break; }
@@ -259,7 +262,8 @@ static void sub_exec(uint32_t type,uint8_t*p){
     case SQ_BEGIN: { D3DObj*o=*(D3DObj**)p; uint32_t keep=o->qstate; ctxi_Begin(0,o); o->qstate=keep; break; }
     case SQ_END: { D3DObj*o=*(D3DObj**)p; uint32_t keep=o->qstate; uint64_t qv=o->qval; ctxi_End(0,o); o->qstate=keep;
         if(o->sd[0]==1||o->sd[0]==5){ o->qval=qv; if(g_sq_nqpend<256) g_sq_qpend[g_sq_nqpend++]=o; else __atomic_store_n(&o->rvalid,1,__ATOMIC_RELEASE); } break; }
-    case SQ_PRESENT: d3dgl_present(); g_hb_taken=0; sub_harvest_queries(); __atomic_add_fetch(&g_sq_pres_done,1,__ATOMIC_ACQ_REL); break;
+    case SQ_PRESENT: { extern unsigned long g_eng_present_no_x; g_lag_t[(g_eng_present_no_x+1)&255]=g_lag_req[(g_sq_pres_done+1)&255]; }
+        d3dgl_present(); g_hb_taken=0; sub_harvest_queries(); __atomic_add_fetch(&g_sq_pres_done,1,__ATOMIC_ACQ_REL); break;
     case SQ_FENCE: __atomic_store_n(&g_sq_fence_done,*(uint64_t*)p,__ATOMIC_RELEASE); break;
     } }
 static void* sub_thread(void*a){ (void)a; pthread_setname_np("shim-gl-submit");
