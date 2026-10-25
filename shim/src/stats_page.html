@@ -180,7 +180,7 @@ th .srt{display:inline-block;margin-left:2px;padding:0 2px;cursor:pointer;color:
  <div class="col">
  <div class="panel" id="heat"><h2 id="mt">Death heatmap</h2><canvas id="cv" width="560" height="560"></canvas>
   <div class="ctl">
-   <label>Deaths <select id="scope"><option value="match">this match</option><option value="all">all matches</option></select></label>
+   <label title="For the deaths and the spawn points">Show <select id="scope"><option value="match">this match</option><option value="all">all matches</option></select></label>
    <label title="Deaths per spot (collected for every map all the time, this switch only shows or hides it)"><input type="checkbox" id="hmv" checked> heatmap</label>
    <label><input type="checkbox" id="fp" checked> where players go</label>
    <label><input type="checkbox" id="pd" checked> players now</label>
@@ -191,6 +191,10 @@ th .srt{display:inline-block;margin-left:2px;padding:0 2px;cursor:pointer;color:
     <label title="The weapon in their hands"><input type="checkbox" id="pw1"> primary weapon</label>
     <label title="The other weapon they carry"><input type="checkbox" id="pw2"> secondary weapon</label></span>
    <label title="Vehicles: a square with the vehicle's name, dimmed when destroyed"><input type="checkbox" id="vh" checked> vehicles</label>
+   <span class="ctlg" title="Where things spawn on this map, collected from every spawn the game showed (this match or all matches, like the deaths); hover a marker for its name and how often it spawned there. After joining a game in progress, the first spawns seen are left out: they are whatever lay around, not spawn points.">spawn points
+    <label title="Vehicle spawns: an orange outlined square"><input type="checkbox" id="spv"> vehicles</label>
+    <label title="Weapon spawns: a gold diamond"><input type="checkbox" id="spw"> weapons</label>
+    <label title="Equipment (cyan triangle) and power-up (magenta ring) spawns"><input type="checkbox" id="spi"> items</label></span>
    <button id="fsb" title="Show the map in the whole browser window (or click the map); Esc or the X closes it" style="background:#222;color:var(--fg);border:1px solid var(--line);border-radius:4px;padding:2px 8px;cursor:pointer;font:inherit">⤢ full window</button>
    <label title="In a game you host with PELOAD_ALLOW_TELEPORT=1: click a spot on the map to teleport yourself there (onto the highest surface at that point, roofs and cliff tops included). For exploring past the map's edges with the boundary patches (shim/docs/map-boundaries.md)."><input type="checkbox" id="tph"> click to teleport</label>
    <span id="hov" class="note" style="margin:0"></span>
@@ -541,6 +545,7 @@ function drawMap(){
   if(heatImg && document.getElementById('hmv').checked) cx.drawImage(heatImg,0,0);
   const sp=sel!=null&&snap?snap.players.find(q=>q.slot===sel):null;
   if(sp&&heat){cx.strokeStyle='#fff';cx.lineWidth=1.5;for(const d of heat.deaths){if(d[7]!==sel||d[4]!==sp.name||(scope()!=='all'&&d[5]!==heat.match))continue;const [x,y]=toScreen(d[0],d[1]);cx.beginPath();cx.arc(x,y,6,0,7);cx.stroke()}}
+  drawSpawns();
   const vobs=[];   // the vehicles' squares + names: player labels keep off them when there is room
   if(document.getElementById('vh').checked&&snap&&snap.vehicles) for(const v of snap.vehicles){ if(!v.pos) continue; const [x,y]=toScreen(v.pos[0],v.pos[1]);
    const dead=!(v.health>0); cx.globalAlpha=dead?0.35:1; cx.fillStyle='#e8e8e8'; cx.strokeStyle='#000'; cx.lineWidth=1; cx.fillRect(x-4,y-4,8,8); cx.strokeRect(x-4,y-4,8,8);
@@ -557,6 +562,28 @@ function drawMap(){
     if(p.slot===sel||p.you){cx.strokeStyle=p.you?'#fff':'#ff0';cx.lineWidth=2;cx.stroke()} }
    drawLabels(on,vobs); }   // after every dot: no dot is drawn over a label
 }
+// ---- spawn points (user, 2026-10-25: "add vehicle, weapon, and item spawn points to the death heatmap as checkboxes"): heat.spawns
+// = [x, y, z, kind, name, times, last match] (stats.c hm_spawn; kind 0 weapon, 1 vehicle, 2 equipment, 3 power-up), drawn as
+// markers; spawnHits keeps where each went for the hover text. The switches are remembered in localStorage.
+const SPS={v:'spv',w:'spw',i:'spi'};
+try{ const j=JSON.parse(localStorage.getItem('mapSpawns')||'null'); if(j) for(const k in SPS) if(typeof j[k]==='boolean') document.getElementById(SPS[k]).checked=j[k]; }catch(err){}
+for(const id of Object.values(SPS)) document.getElementById(id).addEventListener('change',()=>{
+  try{ const o={}; for(const k in SPS) o[k]=document.getElementById(SPS[k]).checked; localStorage.setItem('mapSpawns',JSON.stringify(o)); }catch(err){} drawMap(); });
+const SPKIND=['weapon','vehicle','equipment','power-up'];
+let spawnHits=[];
+function spawnShown(){ if(!heat||!heat.spawns) return []; const on=id=>document.getElementById(id).checked, v=on('spv'), w=on('spw'), it=on('spi'), all=scope()==='all';
+  return heat.spawns.filter(q=>(q[3]===1?v:q[3]===0?w:it)&&(all||q[6]===heat.match)); }
+function drawSpawns(){ spawnHits=[]; const sh=spawnShown(); if(!view) return;
+  cx.lineJoin='round';
+  for(const q of sh){ const [x,y]=toScreen(q[0],q[1]), k=q[3]; cx.lineWidth=1; cx.strokeStyle='#000';
+    if(k===1){ cx.lineWidth=3; cx.strokeStyle='#000'; cx.strokeRect(x-5,y-5,10,10); cx.lineWidth=1.8; cx.strokeStyle='#ff9f43'; cx.strokeRect(x-5,y-5,10,10); }
+    else if(k===0){ cx.fillStyle='#e8c46a'; cx.beginPath(); cx.moveTo(x,y-5); cx.lineTo(x+4,y); cx.lineTo(x,y+5); cx.lineTo(x-4,y); cx.closePath(); cx.fill(); cx.stroke(); }
+    else if(k===2){ cx.fillStyle='#5ad1e8'; cx.beginPath(); cx.moveTo(x,y-5); cx.lineTo(x+4.5,y+4); cx.lineTo(x-4.5,y+4); cx.closePath(); cx.fill(); cx.stroke(); }
+    else { cx.lineWidth=3; cx.strokeStyle='#000'; cx.beginPath(); cx.arc(x,y,5,0,7); cx.stroke(); cx.lineWidth=1.8; cx.strokeStyle='#e06cf0'; cx.stroke(); }
+    spawnHits.push([x,y,q]); }
+  const n=[0,0,0]; for(const q of sh) n[q[3]===1?0:q[3]===0?1:2]++;
+  const dc=document.getElementById('dc'), base=dc.textContent.replace(/ · .*$/,'');
+  dc.textContent=base+(sh.length?` · spawn points: ${[n[0]&&n[0]+' vehicle',n[1]&&n[1]+' weapon',n[2]&&n[2]+' item'].filter(Boolean).join(', ')}`:''); }
 // ---- player labels on the map (user, 2026-10-18): "names", "x/y" and "health / shield" are separate switches, remembered in
 // localStorage; a label's lines stack (name, x/y, health / shield), a line whose switch is off is left out. You and the selected
 // player always show the name. Each stack gets a dark box edged in its team colour; labels are placed one by one (selected, you,
@@ -643,7 +670,10 @@ document.addEventListener('keydown',e=>{ if(e.key==='Escape') closeMapFs(); });
 window.addEventListener('resize',()=>{ if(mapfs.classList.contains('open')) fsSize(); });
 // world coordinates under the mouse
 cv.addEventListener('mousemove',e=>{ if(!view) return; const r=cv.getBoundingClientRect(), sx=(e.clientX-r.left)*cv.width/r.width, sy=(e.clientY-r.top)*cv.height/r.height;
-  const x=view.wx0+(sx-view.ox)/view.sc, y=view.wy0+view.wh-(sy-view.oy)/view.sc; document.getElementById('hov').textContent=`x ${x.toFixed(1)}, y ${y.toFixed(1)}`; });
+  const x=view.wx0+(sx-view.ox)/view.sc, y=view.wy0+view.wh-(sy-view.oy)/view.sc; let t=`x ${x.toFixed(1)}, y ${y.toFixed(1)}`;
+  let best=null, bd=64; for(const h of spawnHits){ const d=(h[0]-sx)**2+(h[1]-sy)**2; if(d<bd){ bd=d; best=h[2]; } }
+  if(best) t=`${best[4]} (${SPKIND[best[3]]} spawn) at ${best[0].toFixed(1)}, ${best[1].toFixed(1)}, height ${best[2].toFixed(1)} -- spawned ${best[5]}x`+(scope()==='all'?'':' (all matches)');
+  document.getElementById('hov').textContent=t; });
 cv.addEventListener('mouseleave',()=>{ document.getElementById('hov').textContent=''; });
 // "click to teleport": host + PELOAD_ALLOW_TELEPORT, or a client of our host (tpto is forwarded: the host moves us); lands 0.6 above the
 // highest surface in the clicked cell and its neighbours

@@ -413,7 +413,12 @@ beside the death heatmap with the player details under it (right); Connected; th
   player's dot, one line each, stacked (name on top); each adds or removes its own line and is remembered by the browser. Your own label and the
   selected player's always show the name. Labels of players standing close together are moved apart with a thin line back to
   their dot; when there is no room left the rest are left out (the map's corner says how many; the full window has more
-  room). Click the map (or "full window") to fill the browser window; X or Esc closes it. The map pictures are made once from the game's own `.map`
+  room). The **spawn points** checkboxes -- **vehicles** (orange outlined squares), **weapons** (gold diamonds) and **items**
+  (equipment: cyan triangles; power-ups: magenta rings) -- mark where things spawn on the map, collected from every spawn the
+  game shows and kept per map beside the deaths (`heatmaps/<map>.spawns`; this match or all matches like the deaths); hover
+  a marker for its name and how often it spawned there. After joining a game in progress the first spawns seen are left
+  out (they are whatever lies around, not spawn points); what respawns later is recorded.
+  Click the map (or "full window") to fill the browser window; X or Esc closes it. The map pictures are made once from the game's own `.map`
   files (`bash shim/tools/maptop.sh`; `play.sh` runs it in the background when they are missing; needs python3 with
   numpy and Pillow).
 

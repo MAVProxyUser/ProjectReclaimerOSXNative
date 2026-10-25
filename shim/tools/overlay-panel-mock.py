@@ -200,7 +200,14 @@ class H(BaseHTTPRequestHandler):
         if p == '/feed.json':
             return self.send(200, '{"seq":0,"events":[]}')
         if p == '/heat.json':
-            return self.send(200, json.dumps({'map': 'riverworld', 'match': 1, 'cell': 0.5, 'cells': [], 'deaths': [], 'maptop': ''}))
+            # a footprint square, a few deaths and spawn points of every kind (stats.c hm_json: [x, y, z, kind, name, times, last
+            # match]; kind 0 weapon, 1 vehicle, 2 equipment, 3 power-up) -- one only from an earlier match ("this match" hides it)
+            cells = [v for x in range(-80, 81, 4) for y in range(-60, 61, 4) for v in (x, y, 1 + (x * x + y * y) % 7)]
+            deaths = [[-20.0, 8.0, 1.0, 0, 'Target', 1, 30, 1], [12.0, -14.0, 1.0, 1, 'You', 1, 60, 0]]
+            spawns = [[-30.0, 20.0, 2.0, 1, 'Warthog', 4, 1], [30.0, -22.0, 2.0, 1, 'Mongoose', 2, 1], [0.0, 0.0, 1.0, 0, 'Sniper rifle', 3, 1],
+                      [-12.0, -8.0, 1.0, 0, 'Battle rifle', 6, 1], [15.0, 10.0, 1.0, 2, 'Bubble shield', 2, 1], [5.0, 25.0, 3.0, 3, 'Overshield', 1, 1],
+                      [-35.0, -20.0, 1.0, 0, 'Rocket launcher', 1, 0]]
+            return self.send(200, json.dumps({'map': 'riverworld', 'match': 1, 'cell': 0.5, 'cells': cells, 'deaths': deaths, 'spawns': spawns, 'maptop': ''}))
         if p == '/option-map.json':
             return self.send(200, '[]')
         if p == '/events':

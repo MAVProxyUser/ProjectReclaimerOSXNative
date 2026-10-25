@@ -193,9 +193,11 @@ static void st_av_tick(double now){   // stats thread, every snapshot (100 ms)
 // Graphics quality (backlog 68; game-options.md "Graphics quality"): the client's one-view preset, from its own log line
 // "Graphics quality: one view <Preset>; split screen ..." (printed at start and on every Apply in its Settings menu)
 static char g_st_qual[24]; static double g_st_qual_t; static char g_st_qual_want[16];
+static volatile int g_sp_join;   // "Joining the game in progress" seen: the next map's first spawn burst is not spawn points (hm_spawn)
 static void st_feed_line(const char*ln){
     if(!(ln[0]>='0'&&ln[0]<='9' && ln[2]==':' && ln[5]==':' && ln[8]=='.' && ln[12]==' ')) return;   // client log lines only
     const char*p=ln+13; size_t L=strlen(p);
+    if(!strncmp(p,"Joining the game in progress",28)) g_sp_join=1;
     if(!strncmp(p,"Graphics quality: one view ",27)){ const char*q=p+27; size_t k=0; while(q[k] && q[k]!=';' && k+1<sizeof g_st_qual){ g_st_qual[k]=(char)tolower((unsigned char)q[k]); k++; } g_st_qual[k]=0; g_st_qual_t=st_wall(); g_st_qual_want[0]=0; }
     if(!strncmp(p,"Community roster: ",18)){ const char*r=p+18; size_t rl=strlen(r); char nm[64];
         if(rl>18 && !strcmp(r+rl-18," joined the server")){ snprintf(nm,sizeof nm,"%.*s",(int)(rl-18),r); st_event("join",nm,0,0,-1,-1,0,"%s joined the server",nm); }
@@ -602,7 +604,14 @@ static int st_voice_request(uint64_t id,int on){ if(!g_st_setmuted || !id) retur
 #define HM_CELL 0.5f
 typedef struct { int32_t x,y; uint32_t n; } HmCell;
 typedef struct { float x,y,z; int32_t team, slot; char name[48]; uint32_t match; float t; } HmDeath;
-static struct { char map[64]; HmCell*cells; uint32_t cap, used; HmDeath*d; uint32_t nd, dcap, match, maxmatch; int dirty; double saved, match_t0; } g_hm;
+// spawn points (user, 2026-10-25: "add vehicle, weapon, and item spawn points to the death heatmap as checkboxes"): every
+// spawn st_spawns confirms, merged per map -- the same kind and name within 1.5 units across (3 up / down) is one point, n =
+// how often it spawned there, match = the last match it did. kind 0 weapon, 1 vehicle, 2 equipment, 3 power-up.
+// heatmaps/<map>.spawns ("RSP1", count, records), saved with the heatmap.
+typedef struct { float x,y,z; uint32_t n, match; uint8_t kind; char name[43]; } HmSpawn;
+_Static_assert(sizeof(HmSpawn)==64,"spawn record");
+static struct { char map[64]; HmCell*cells; uint32_t cap, used; HmDeath*d; uint32_t nd, dcap, match, maxmatch; int dirty; double saved, match_t0;
+    HmSpawn*sp; uint32_t nsp, spcap; } g_hm;
 static pthread_mutex_t g_hm_mx=PTHREAD_MUTEX_INITIALIZER;
 static void hm_path(const char*map,char*out,size_t n){ const char*h=getenv("HOME"); snprintf(out,n,"%s/Library/Application Support/ReclaimerMac/heatmaps/%s.bin",h?h:"/tmp",map); }
 static void hm_cell_add(int32_t x,int32_t y,uint32_t n){
@@ -615,18 +624,24 @@ static void hm_save(void){ if(!g_hm.map[0] || !g_hm.dirty) return; char p[1024];
     char tmp[1100]; snprintf(tmp,sizeof tmp,"%s.tmp",p); FILE*f=fopen(tmp,"wb"); if(!f) return;
     float cell=HM_CELL; fwrite("RHM2",1,4,f); fwrite(&cell,4,1,f); fwrite(&g_hm.used,4,1,f); fwrite(&g_hm.nd,4,1,f); fwrite(&g_hm.maxmatch,4,1,f);
     for(uint32_t i=0;i<g_hm.cap;i++) if(g_hm.cells[i].n) fwrite(&g_hm.cells[i],sizeof(HmCell),1,f);
-    fwrite(g_hm.d,sizeof(HmDeath),g_hm.nd,f); int ok=!ferror(f); fclose(f); if(ok) rename(tmp,p); else unlink(tmp); g_hm.dirty=0; }
+    fwrite(g_hm.d,sizeof(HmDeath),g_hm.nd,f); int ok=!ferror(f); fclose(f); if(ok) rename(tmp,p); else unlink(tmp); g_hm.dirty=0;
+    if(g_hm.nsp){ char sp[1100], st[1200]; snprintf(sp,sizeof sp,"%.*s.spawns",(int)(strlen(p)-4),p); snprintf(st,sizeof st,"%s.tmp",sp); FILE*g=fopen(st,"wb");
+        if(g){ fwrite("RSP1",1,4,g); fwrite(&g_hm.nsp,4,1,g); fwrite(g_hm.sp,sizeof(HmSpawn),g_hm.nsp,g); int ok2=!ferror(g); fclose(g); if(ok2) rename(st,sp); else unlink(st); } } }
 static void hm_switch(const char*map){   // (g_hm_mx held)
     if(!strcmp(map,g_hm.map)) return; hm_save();
-    free(g_hm.cells); free(g_hm.d); memset(&g_hm,0,sizeof g_hm); snprintf(g_hm.map,sizeof g_hm.map,"%s",map); if(!map[0]) return;
+    free(g_hm.cells); free(g_hm.d); free(g_hm.sp); memset(&g_hm,0,sizeof g_hm); snprintf(g_hm.map,sizeof g_hm.map,"%s",map); if(!map[0]) return;
     char p[1024]; hm_path(map,p,sizeof p); FILE*f=fopen(p,"rb"); uint32_t nc=0,nd=0;
     if(f){ char mg[4]; float cell=0; if(fread(mg,1,4,f)==4 && !memcmp(mg,"RHM2",4) && fread(&cell,4,1,f)==1 && cell==HM_CELL && fread(&nc,4,1,f)==1 && fread(&nd,4,1,f)==1 && fread(&g_hm.maxmatch,4,1,f)==1 && nc<(1u<<24) && nd<(1u<<22)){
             for(uint32_t i=0;i<nc;i++){ HmCell c; if(fread(&c,sizeof c,1,f)!=1) break; hm_cell_add(c.x,c.y,c.n); }
             g_hm.d=malloc((nd?nd:1)*sizeof(HmDeath)); g_hm.dcap=nd?nd:1; g_hm.nd=g_hm.d?(uint32_t)fread(g_hm.d,sizeof(HmDeath),nd,f):0;
             for(uint32_t i=0;i<g_hm.nd;i++) g_hm.d[i].name[sizeof g_hm.d[i].name-1]=0; }   // (a damaged file: never read past a name)
         fclose(f); }
+    { char sp[1100]; snprintf(sp,sizeof sp,"%.*s.spawns",(int)(strlen(p)-4),p); FILE*g=fopen(sp,"rb"); uint32_t n=0; char mg[4];
+      if(g){ if(fread(mg,1,4,g)==4 && !memcmp(mg,"RSP1",4) && fread(&n,4,1,g)==1 && n<(1u<<20) && (g_hm.sp=malloc((n?n:1)*sizeof(HmSpawn)))){
+              g_hm.spcap=n?n:1; g_hm.nsp=(uint32_t)fread(g_hm.sp,sizeof(HmSpawn),n,g); for(uint32_t i=0;i<g_hm.nsp;i++) g_hm.sp[i].name[sizeof g_hm.sp[i].name-1]=0; }
+          fclose(g); } }
     g_hm.match=++g_hm.maxmatch; g_hm.match_t0=mono_s(); g_hm.saved=mono_s(); g_hm.dirty=0;
-    char m[1200]; int k=snprintf(m,sizeof m,"  [stats] heatmap %s: %u cells, %u deaths from earlier matches\n",map,g_hm.used,g_hm.nd); (void)!write(2,m,k); }
+    char m[1200]; int k=snprintf(m,sizeof m,"  [stats] heatmap %s: %u cells, %u deaths, %u spawn points from earlier matches\n",map,g_hm.used,g_hm.nd,g_hm.nsp); (void)!write(2,m,k); }
 // the map being played: switched to when there is something to record (menus open campaign maps for scenery)
 static char g_hm_cur[64];
 static void hm_death(const float*pos,int team,int slot,const char*name){   // (g_hm_mx held)
@@ -634,6 +649,13 @@ static void hm_death(const float*pos,int team,int slot,const char*name){   // (g
     if(g_hm.nd>=g_hm.dcap){ uint32_t nc=g_hm.dcap?g_hm.dcap*2:256; HmDeath*nd=realloc(g_hm.d,nc*sizeof *nd); if(!nd) return; g_hm.d=nd; g_hm.dcap=nc; }
     HmDeath*d=&g_hm.d[g_hm.nd++]; memset(d,0,sizeof *d); d->x=pos[0]; d->y=pos[1]; d->z=pos[2]; d->team=team; d->slot=slot; snprintf(d->name,sizeof d->name,"%s",name?name:"");
     d->match=g_hm.match; d->t=(float)(mono_s()-g_hm.match_t0); g_hm.dirty=1; }
+static void hm_spawn(int kind,const char*name,const float*pos){   // (g_hm_mx held)
+    hm_switch(g_hm_cur); if(!g_hm.map[0] || !isfinite(pos[0]) || !isfinite(pos[1]) || !isfinite(pos[2])) return;
+    for(uint32_t i=0;i<g_hm.nsp;i++){ HmSpawn*q=&g_hm.sp[i]; float dx=q->x-pos[0], dy=q->y-pos[1], dz=q->z-pos[2];
+        if(q->kind==kind && dx*dx+dy*dy<2.25f && fabsf(dz)<3.0f && !strncmp(q->name,name,sizeof q->name-1)){ q->n++; q->match=g_hm.match; g_hm.dirty=1; return; } }
+    if(g_hm.nsp>=g_hm.spcap){ uint32_t nc=g_hm.spcap?g_hm.spcap*2:256; HmSpawn*ns=realloc(g_hm.sp,nc*sizeof *ns); if(!ns) return; g_hm.sp=ns; g_hm.spcap=nc; }
+    HmSpawn*q=&g_hm.sp[g_hm.nsp++]; memset(q,0,sizeof *q); q->x=pos[0]; q->y=pos[1]; q->z=pos[2]; q->n=1; q->match=g_hm.match; q->kind=(uint8_t)kind;
+    snprintf(q->name,sizeof q->name,"%s",name); g_hm.dirty=1; }
 // ---- the top-down map picture behind the heatmap: made automatically for every map played (stock or Workshop) --------
 // The first time a map without a picture is played, re-tools/h3bsp.py runs in the background (native python3 with numpy
 // and Pillow) on the very .map file the game opened and writes ~/Library/Application Support/ReclaimerMac/maptop/<map>.png
@@ -716,6 +738,7 @@ static void hm_json(StBuf*s){ pthread_mutex_lock(&g_hm_mx);
     sb_put(s,"\"map\":"); sb_str(s,g_hm.map); sb_put(s,",\"cell\":%.2f,\"match\":%u,\"cells\":[",HM_CELL,g_hm.match);
     int first=1; for(uint32_t i=0;i<g_hm.cap;i++) if(g_hm.cells[i].n){ sb_put(s,"%s%d,%d,%u",first?"":",",g_hm.cells[i].x,g_hm.cells[i].y,g_hm.cells[i].n); first=0; }
     sb_put(s,"],\"deaths\":["); for(uint32_t i=0;i<g_hm.nd;i++){ HmDeath*d=&g_hm.d[i]; sb_put(s,"%s[%.2f,%.2f,%.2f,%d,",i?",":"",d->x,d->y,d->z,d->team); sb_str(s,d->name); sb_put(s,",%u,%.0f,%d]",d->match,d->t,d->slot); }
+    sb_put(s,"],\"spawns\":["); for(uint32_t i=0;i<g_hm.nsp;i++){ HmSpawn*q=&g_hm.sp[i]; sb_put(s,"%s[%.2f,%.2f,%.2f,%d,",i?",":"",q->x,q->y,q->z,q->kind); sb_str(s,q->name); sb_put(s,",%u,%u]",q->n,q->match); }
     sb_put(s,"]}"); pthread_mutex_unlock(&g_hm_mx); }
 
 // ---- per-player tracking: deaths, lives, distance, top speed, projectiles fired ----------------------------------
@@ -1217,6 +1240,15 @@ static void st_spawns(const uint8_t*tab,int hi,const StPlayer*pl,int np,const ch
         st_event_verb(0,"weapon",0,0,"","spawned",-1,-1,0,"%s",txt); }
     for(int q=0;q<nconf;q++){ int i=conf[q], kd=g_wt[i].kind; if(kd==0 && nwc>8) continue; const char*nm=st_wclass(g_wt[i].def,g_wt[i].type)->nm; const float*ps=g_wt[i].pos;
         t_st_evpos=ps; st_event_verb(0,g_wkind[kd],0,0,nm,"spawned",-1,-1,0,"%s spawned at (%.1f, %.1f)",nm,ps[0],ps[1]); t_st_evpos=0; }
+    // spawn points for the heatmap (hm_spawn), burst weapons included. After joining a game in progress, the first spawns seen
+    // (the first 5 s of them) are whatever lies around -- dropped weapons, parked vehicles --, not spawn points: left out;
+    // what respawns later is recorded. A match we see start records its first spawns (the map's real layout).
+    if(nconf){ static double skip_until; if(g_sp_join){ g_sp_join=0; skip_until=now+5.0;
+            if(g_wlog){ int k=snprintf(lm,sizeof lm,"  [spawn] joined in progress: the first 5 s of spawns are not spawn points\n"); (void)!write(2,lm,(size_t)k); } }
+        if(now>=skip_until){ pthread_mutex_lock(&g_hm_mx);
+            for(int q=0;q<nconf;q++){ int i=conf[q], kd=g_wt[i].kind; const char*nm=st_wclass(g_wt[i].def,g_wt[i].type)->nm;
+                hm_spawn(kd==1?1:kd==2?3:g_wt[i].type==3?2:0,nm,g_wt[i].pos); }
+            pthread_mutex_unlock(&g_hm_mx); } }
     // power-ups taken: a player's pickup tick for a colour moved (the first sight of a player only remembers it)
     for(int k=0;k<np;k++){ int32_t tk[3]; if(!pl[k].rec || !hb_read(pl[k].rec+0x218,tk,12)) continue; int s=pl[k].slot&255;
         if(strcmp(g_wpp[s].name,pl[k].name)){ snprintf(g_wpp[s].name,sizeof g_wpp[s].name,"%s",pl[k].name); memcpy(g_wpp[s].tk,tk,12); continue; }

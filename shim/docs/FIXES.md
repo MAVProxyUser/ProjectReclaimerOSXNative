@@ -1680,6 +1680,16 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   `[class][message id 4][fragment index][fragment count]` + the whole 36-byte internal header (kind tag 4, session value 16,
   sender / recipient endpoint ids 8 + 8) = 43 bytes per datagram; 0.9.23 sends `[kind code | flags][class]` and adds the ids
   (16) or the fragment fields (6) only when needed. Measured with the packet log: ~31 / ~36 bytes less per datagram on average.
+- **Spawn points on the death heatmap** (2026-10-25; user: "add vehicle, weapon, and item spawn points to the death heatmap
+  as checkboxes") — stats.c `hm_spawn` (HmSpawn, g_hm.sp; `heatmaps/<map>.spawns`, "RSP1"; loaded in `hm_switch`, saved in
+  `hm_save`, `/heat.json` "spawns": [x, y, z, kind, name, times, last match]), `st_spawns` (records every spawn it confirms,
+  burst weapons included), `st_feed_line` (g_sp_join), stats_page.html `drawSpawns` / `spawnShown` (checkboxes spv / spw / spi,
+  localStorage mapSpawns, hover text), shim/tools/overlay-panel-mock.py (spawns + deaths in its /heat.json). How: the same kind
+  and name within 1.5 units (3 up / down) is one point counted per spawn; kinds weapon / vehicle / equipment / power-up (the
+  page's "items" = equipment + power-ups). After the client's "Joining the game in progress" line, the next 5 s of confirmed
+  spawns are not recorded: they are the objects already lying around. Checked on the mock (markers, counts, scope, hover,
+  remembered switches); live collection starts with the next launch. Old behaviour: leave the boxes unticked (the file is
+  written either way; delete it to forget a map's points).
 - **Packet log: each halo3 message's peer** (2026-10-24; user: "proper" -- the per-peer answer over "the type only") —
   pktlog.c `pkc_install` / `pkc_hook` / `pk_ctx` / `pkc_peer`, `pk_game_ev` (now takes the entry rsp), `pkn_refresh` /
   `pkn_name` / `pk_peer_json`. Why: the message table's encode / decode functions get only (bitstream, size, data), so game
