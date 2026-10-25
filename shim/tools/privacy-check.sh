@@ -1,7 +1,7 @@
 #!/bin/bash
 # Who does the client talk to when it joins a server? (README "Who sees your IP address".) Starts ONE hidden, input-less
 # client (shim/tools/quiet-run.sh, its own test profile, no microphone) with a join link, records every datagram and TCP
-# connection its sockets see (the packet log, GET /packets.json every 5 s; halo3's messages with their peers), the stats
+# connection its sockets see (the packet log, GET /packets.json every second; halo3's messages with their peers), the stats
 # snapshots (session list: does anything carry an address?) and lsof of the client's processes, stays SECS in the match,
 # then stops its own process group and prints: UDP peers before / during the match, TCP connections, halo3 message peers,
 # talkers seen, addresses in the session list, sockets per process.
@@ -17,8 +17,10 @@ rm -f "$D"/*.json "$D"/*.jsonl "$D"/*.txt "$D"/loaded
 QR_HIDE=1 QR_STATS_OPEN=0 bash shim/tools/quiet-run.sh "PELOAD_PKTLOG_GAME=1" 900 "reclaimer://join?server=$SRV" > /dev/null 2>&1 &
 sleep 3; LOG=/tmp/quiet-run.log
 seq=0; t0=$(date +%s); loaded=0
+# every second: the start-up status burst writes ~2,000 records a second, and /packets.json returns only the newest max
+# (4000) after since -- a 5 s poll lost part of it
 while :; do
-  sleep 5; now=$(date +%s)
+  sleep 1; now=$(date +%s)
   if curl -s -m 4 "http://127.0.0.1:8765/packets.json?max=4000&since=$seq" > "$D/last.json" 2>/dev/null && [ -s "$D/last.json" ]; then
     seq=$(python3 - "$D/last.json" "$D/events.jsonl" "$seq" <<'PY'
 import json,sys
@@ -30,6 +32,7 @@ print(j.get('seq',sys.argv[3]))
 PY
 )
   fi
+  tick=$((${tick:-0}+1)); [ $((tick%5)) = 0 ] || continue   # the rest every ~5 s
   curl -s -m 4 http://127.0.0.1:8765/stats.json > "$D/stats_$now.json" 2>/dev/null
   if [ -f /tmp/quiet-run.pgid ]; then pg=$(cat /tmp/quiet-run.pgid)
     for p in $(pgrep -g "$pg"); do echo "== $now pid $p"; lsof -nP -a -p "$p" -i 2>/dev/null | tail -n +2; done >> "$D/lsof.txt"; fi

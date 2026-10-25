@@ -217,19 +217,23 @@ single UDP peer, the server). So:
   from your connection -- also when it starts straight into a join link, before joining (a few hundred servers in a few
   seconds; the Packets window shows the burst), and again while you browse the Server Browser; `discover` /
   `servers.sh` do the same.
-- **The community services** the client talks to: the master server (the server lists), a few more hosts on the same
-  service port, GitHub (`api.github.com`, presumably the update check), and Workshop / Steam downloads.
+- **The community services** the client talks to: the discovery masters (the server lists: two built into the client,
+  more from its cache and settings), the community stats service (ranks), GitHub (`api.github.com`, presumably the
+  update check), and Workshop / Steam downloads. What the status query sends and receives, field by field:
+  `shim/docs/server-status.md` -- `{"status":2}` out, the server's name / map / mode / player count back; no player ID
+  or name is sent.
 - **Hosting** (Host Game → Online) is different: your address and port are published in the server list and every player
   connects to you; your own stats page then lists their addresses.
 
 Checked on the wire (2026-10-25, the packet log on a hidden client joining a public 60-player Big Team Battle server
-through a join link, ~3.5 minutes in the match): before the match, TCP to GitHub and to the master server, the master
-and two more hosts on port 49175 (QUIC, and TCP ~105 KB each; what they serve was not traced), and QUIC status exchanges
-with 343 game servers (136 machines, 317 answered) in ~3 s; in the match, UDP with the joined server only -- not one
-datagram from another address while six players talked (voice relayed), and all of halo3's 542 session messages went to
-or came from the server. The session list held up to 64 players and no address. All of the client's internet sockets
-were in the one process the packet log watches (lsof). `bash shim/tools/privacy-check.sh <host:port>` repeats the check
-(it joins that server with a hidden test client).
+through a join link, ~3.5 minutes in the match): before the match, TCP to GitHub, to the community stats service (port
+8790: ranks; what the client asks it was not traced) and to three discovery masters on port 49175 (the server lists,
+~105 KB each), and a QUIC status query to every listed game server in ~3 s (343 servers on 136 machines in the
+recording, 317 answering; the recorder dropped part of that burst, and `discover` listed 383 servers at the time); in
+the match, UDP with the joined server only -- not one datagram from another address while six players talked (voice
+relayed), and all of halo3's 542 session messages went to or came from the server. The session list held up to 64
+players and no address. All of the client's internet sockets were in the one process the packet log watches (lsof).
+`bash shim/tools/privacy-check.sh <host:port>` repeats the check (it joins that server with a hidden test client).
 
 Another internet connection changes what all of the above see. A commercial VPN may be refused: servers can refuse VPN and
 datacenter addresses (`block_vpn`, on in the server configuration `dedicated init` writes, with lists of VPN providers and

@@ -3068,7 +3068,10 @@ static void udp_tracef(const char*dir,WSASOCK s,const struct sockaddr_storage*ss
     char ip[64]="?"; int port=0; if(ss->ss_family==AF_INET){ const struct sockaddr_in*si=(const void*)ss; inet_ntop(AF_INET,&si->sin_addr,ip,sizeof ip); port=ntohs(si->sin_port);}
     int lp=0; { struct sockaddr_in me; socklen_t ml=sizeof me; if(getsockname((int)s,(struct sockaddr*)&me,&ml)==0) lp=ntohs(me.sin_port);}
     char hd[40]; int hn=0; for(int i=0;buf&&i<len&&i<16;i++){ unsigned char c=(unsigned char)buf[i]; hd[hn++]=(c>=32&&c<127)?(char)c:'.'; } hd[hn]=0;   // the first bytes: RR-RDV1 / RR-RLY1 tags
-    char b[200]; int k=snprintf(b,sizeof b,"  [udp] %s fd=%d local:%d %s %s:%d len=%d |%s|\n",dir,(int)s,lp,dir[0]=='T'?"->":"<-",ip,port,len,hd); (void)!write(2,b,k); }
+    char b[200]; int k=snprintf(b,sizeof b,"  [udp] %s fd=%d local:%d %s %s:%d len=%d |%s|\n",dir,(int)s,lp,dir[0]=='T'?"->":"<-",ip,port,len,hd); (void)!write(2,b,k);
+    // PELOAD_TRACE_UDP_HEX=<n> (debug): also the first n bytes in hex, 32 a line (what a datagram carries, for protocol RE)
+    static int hx=-1; if(hx<0){ const char*e=getenv("PELOAD_TRACE_UDP_HEX"); hx=e?atoi(e):0; }
+    for(int o=0;buf && o<len && o<hx;o+=32){ char l[120]; int n=snprintf(l,sizeof l,"  [udp]   %04x ",o); for(int i=o;i<len && i<o+32 && i<hx;i++) n+=snprintf(l+n,sizeof l-(size_t)n,"%02x",(unsigned char)buf[i]); l[n++]='\n'; (void)!write(2,l,(size_t)n); } }
 // PELOAD_UDP_BLOCK=<port>[,<port>..] (test aid): datagrams to and from those remote ports are dropped (a send reports success),
 // as if the NATs between this process and that peer never opened while the master stays reachable -- forces Reach
 // Renaissance's guest onto the master's relay against a local host (shim/docs/reach-renaissance.md).
@@ -12884,7 +12887,7 @@ int main(int argc, char **argv){ mt_start();
     // pattern, and a chance match in another game's exe would patch it
     if(game_is(GAME_H3)){
         reentrancy_fix(); // built-in: neutralise the ui_composition RefCell re-entrancy
-        st_voice_install(); pk_framecap_install(); } // stats page: voice mute + talking indicator (stats.c); PELOAD_FRAMECAP (pktlog.c)
+        st_voice_install(); pk_framecap_install(); pk_keylog_install(); } // stats page: voice mute + talking indicator (stats.c); PELOAD_FRAMECAP (pktlog.c)
     patch_install(); hook_install(); // PELOAD_PATCH overwrites + PELOAD_HOOK trace detours
     peb_fill(g_peb_ptr);  // PEB image base / OS version / ProcessParameters (stdio, cwd, image path, command line, environment)
     ws("peload: calling entry (expect stub logs, then a fault at the first\n"

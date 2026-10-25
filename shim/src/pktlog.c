@@ -325,6 +325,47 @@ static void pk_forensic_tick(void){
     for(int i=0;i<na;i++){ StBuf b={0}; pk_agg_json(&b,&a[i],1,0); if(b.b) fx_push(FXI_PACKETS,b.b,b.n,0,0); free(b.b); }
     if(lost){ char l[80]; int k=snprintf(l,sizeof l,"{\"t\":%.3f,\"lost\":%u}",st_wall(),lost); fx_push(FXI_PACKETS,l,(size_t)k,0,0); } }
 
+// ---- PELOAD_KEYLOG=<file> (debug): the client's TLS secrets in the NSS key log format (what SSLKEYLOGFILE gives elsewhere) ----
+// The client's QUIC (quinn 0.11 / rustls / ring) never logs keys: rustls asks its config's KeyLog -- the default NoKeyLog,
+// whose will_log() is `xor eax,eax; ret` and log() a bare `ret`. NoKeyLog's dyn KeyLog vtable {drop, size 0, align 1,
+// Debug::fmt, log, will_log} is found by meaning: its fmt writes "NoKeyLog" (mov rcx,[rdx]; mov rax,[rdx+8]; mov rax,
+// [rax+0x18]; lea rdx,"NoKeyLog"; mov r8d,8; jmp rax -- REX.W or not), and its two methods must be exactly those stubs. The two slots then
+// point here (a data write; no code changes): will_log -> true, log -> "LABEL <client random> <secret>" lines appended to
+// the file. With it re-tools/quicparse.py decrypts a captured exchange (PELOAD_TRACE_UDP_HEX) packet by packet.
+// Every TLS connection of this process is affected (status queries, master / stats HTTPS, the game's own QUIC); anyone with
+// the file can read those sessions: debug runs only.
+static int g_kl_fd=-1;
+static uint8_t __attribute__((ms_abi)) pk_kl_will(void*self,const char*l,uint64_t n){ (void)self; (void)l; (void)n; return 1; }
+static void __attribute__((ms_abi)) pk_kl_log(void*self,const char*l,uint64_t ln,const uint8_t*cr,uint64_t crn,const uint8_t*sec,uint64_t sn){ (void)self;
+    if(g_kl_fd<0 || !l || ln>64 || !cr || crn!=32 || !sec || sn>64) return;
+    char o[64+1+64+1+128+2]; size_t k=0; memcpy(o,l,ln); k=ln; o[k++]=' ';
+    for(uint64_t i=0;i<crn;i++){ snprintf(o+k,3,"%02x",cr[i]); k+=2; } o[k++]=' ';
+    for(uint64_t i=0;i<sn;i++){ snprintf(o+k,3,"%02x",sec[i]); k+=2; } o[k++]='\n'; (void)!write(g_kl_fd,o,k); }
+static void pk_keylog_install(void){ const char*e=getenv("PELOAD_KEYLOG"); if(!e || !*e || !g_base) return;
+    DOS*dh=(DOS*)g_base; OPT64*oh=(OPT64*)(g_base+dh->e_lfanew+sizeof(COFF)); uint32_t isz=oh->ImageSize; uint64_t ib=(uint64_t)(uintptr_t)g_base;
+    uint32_t pe=*(uint32_t*)(g_base+0x3c); uint16_t ns=*(uint16_t*)(g_base+pe+6), so=*(uint16_t*)(g_base+pe+20); uint8_t*st=g_base+pe+24+so;
+    uint8_t*fmt=0; uint64_t*vt=0; const char*why="NoKeyLog's Debug function not found";
+    for(int i=0;i<ns && !fmt;i++){ uint8_t*sh=st+i*40; uint32_t vs=*(uint32_t*)(sh+8), va=*(uint32_t*)(sh+12), ch=*(uint32_t*)(sh+36); if(!(ch&0x20000000)) continue;
+        static const uint8_t pre[11]={0x48,0x8B,0x0A,0x48,0x8B,0x42,0x08,0x48,0x8B,0x40,0x18};
+        for(uint32_t k=0;k+27<=vs && va+k+27<=isz;k++){ uint8_t*p=g_base+va+k; if(p[0]!=0x48 || memcmp(p,pre,11) || p[11]!=0x48 || p[12]!=0x8D || p[13]!=0x15
+                || p[18]!=0x41 || p[19]!=0xB8 || *(uint32_t*)(p+20)!=8 || ((p[24]!=0xFF || p[25]!=0xE0) && (p[24]!=0x48 || p[25]!=0xFF || p[26]!=0xE0))) continue;
+            uint8_t*t=p+18+*(int32_t*)(p+14); if(t>g_base && t+8<g_base+isz && !memcmp(t,"NoKeyLog",8)){ fmt=p; break; } } }
+    if(fmt){ why="its vtable not found";
+        for(int i=0;i<ns && !vt;i++){ uint8_t*sh=st+i*40; uint32_t vs=*(uint32_t*)(sh+8), va=*(uint32_t*)(sh+12), ch=*(uint32_t*)(sh+36); if(ch&0x20000000) continue;
+            for(uint32_t k=24;k+24<=vs && va+k+24<=isz;k+=8){ uint64_t*q=(uint64_t*)(g_base+va+k); if(q[0]!=(uint64_t)(uintptr_t)fmt) continue;
+                if(q[-3]!=0 || q[-2]!=0 || q[-1]!=1) continue;
+                uint8_t*lg=(uint8_t*)(uintptr_t)q[1], *wl=(uint8_t*)(uintptr_t)q[2];
+                if((uint64_t)(uintptr_t)lg<ib || (uint64_t)(uintptr_t)wl<ib || lg>=g_base+isz || wl>=g_base+isz){ why="vtable methods outside the image"; continue; }
+                if(lg[0]!=0xC3 || wl[0]!=0x31 || wl[1]!=0xC0 || wl[2]!=0xC3){ why="vtable methods are not NoKeyLog's stubs"; continue; }
+                vt=q; } } }
+    char m[200]; int k;
+    if(vt){ g_kl_fd=open(e,O_WRONLY|O_CREAT|O_APPEND,0600);
+        uintptr_t pg=(uintptr_t)vt & ~0xFFFull; mprotect((void*)pg,0x2000,PROT_READ|PROT_WRITE);
+        vt[1]=(uint64_t)(uintptr_t)pk_kl_log; vt[2]=(uint64_t)(uintptr_t)pk_kl_will;
+        k=snprintf(m,sizeof m,"  [keylog] TLS secrets -> %s (NoKeyLog vtable exe+0x%llx; debug only)\n",e,(unsigned long long)((uint8_t*)(vt-3)-g_base)); }
+    else k=snprintf(m,sizeof m,"  [keylog] off: %s\n",why);
+    (void)!write(2,m,(size_t)k); }
+
 // ---- PELOAD_FRAMECAP=<n> (debug): the frames the client hands its network sender, before it compacts and encrypts them ----
 // The client's sender (0.9.23: exe+0x8bb5a0, found by signature; (rcx, class, frame, length)) gets every game / voice / control
 // frame in the client's internal format: kind tag (4: "MCL2" game, "MCV1" voice, ...), a 16-byte session value, the sender's
@@ -339,7 +380,11 @@ static void __attribute__((ms_abi)) pk_on_frame(void*conn,uint64_t cls,const uin
     int go=k>=0 && g_fc[k].n++<g_fc_max; pthread_mutex_unlock(&g_fc_mx); if(!go) return;
     uint64_t a, b; memcpy(&a,f+0x14,8); memcpy(&b,f+0x1c,8); char sess[40]; for(int i=0;i<16;i++) snprintf(sess+2*i,3,"%02x",f[4+i]);
     char m[300]; int n=snprintf(m,sizeof m,"  [framecap] %s class %llu len %llu (payload %llu) session %s ids %016llx -> %016llx\n",tag,(unsigned long long)cls,
-        (unsigned long long)len,(unsigned long long)(len-0x24),sess,(unsigned long long)a,(unsigned long long)b); (void)!write(2,m,(size_t)n); }
+        (unsigned long long)len,(unsigned long long)(len-0x24),sess,(unsigned long long)a,(unsigned long long)b); (void)!write(2,m,(size_t)n);
+    // PELOAD_FRAMECAP_HEX=<n>: also the payload's first n bytes in hex (protocol RE; debug only)
+    static int hx=-1; if(hx<0){ const char*e=getenv("PELOAD_FRAMECAP_HEX"); hx=e?atoi(e):0; }
+    for(uint64_t o=0x24;o<len && o-0x24<(uint64_t)hx;o+=32){ char l[120]; int q=snprintf(l,sizeof l,"  [framecap]   %04llx ",(unsigned long long)(o-0x24));
+        for(uint64_t i=o;i<len && i<o+32 && i-0x24<(uint64_t)hx;i++) q+=snprintf(l+q,sizeof l-(size_t)q,"%02x",f[i]); l[q++]='\n'; (void)!write(2,l,(size_t)q); } }
 static void pk_framecap_install(void){ const char*e=getenv("PELOAD_FRAMECAP"); if(!e || !g_base) return; g_fc_max=atoi(e)>0?atoi(e):8;
     static const char sig[]="55 41 57 41 56 41 55 41 54 56 57 53 48 81 EC ?? ?? 00 00 48 8D AC 24 80 00 00 00 0F 29 BD ?? ?? 00 00 0F 29 B5 ?? ?? 00 00 48 83 E4 80 48 89 E3 48 89 AB ?? ?? 00 00 48 C7 85 ?? ?? 00 00 FE FF FF FF 4D 89 CC 4D 89 C6 48 89 93 ?? ?? 00 00 B2 01 31 C0 F0 0F B0 15";
     uint8_t b[128], m[128]; int n=sig_parse(sig,b,m,128); int64_t r=sig_find(g_base,b,m,n);

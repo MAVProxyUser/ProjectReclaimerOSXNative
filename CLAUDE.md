@@ -304,6 +304,11 @@ real D3DCompiler_47.dll from the MCC root (PELOAD_REAL_D3DCOMPILE=0 = old placeh
 (same check), so the xaudio signature patches are OFF by default (PELOAD_XA_EAGER=1 = old binding + patches); A/B audio identical.
 Client datagrams (0.9.22: 7 + 36-byte frame header = 43 B; 0.9.23: 2 B [kind code|flags][class]): shim/docs/client-transport.md,
 PELOAD_FRAMECAP=<n> logs the frames before compaction. README "Who sees your IP address".
+Server list + status query (2026-10-25, shim/docs/server-status.md): discovery masters (HTTP :49175; built in 148.251.153.44 /
+23.159.176.140, cache ReclaimerCache/discovery/peers.json); every start the client opens one QUIC connection per listed server
+(SNI "reclaimer", self-signed rcgen cert, no client cert) and sends 4-byte length + `{"status":2}`, gets name/map/mode/players...
+JSON. Decrypting the client's TLS: PELOAD_KEYLOG=<file> (NoKeyLog vtable slots -> NSS key log; debug only) + PELOAD_TRACE_UDP_HEX=<n>
++ re-tools/quicparse.py <trace> <keylog>. shim/tools/privacy-check.sh <host:port> = the public-join wire check.
 Reach Renaissance (2026-10-20, shim/docs/reach-renaissance.md): Halo: Reach on MCC's haloreach.dll, same design as Reclaimer
 (bin/host-probe.exe = the game: LoadLibraryW(haloreach.dll), its own D3D11 device, ~85 in-memory engine patches). `bash shim/reach.sh
 [map] [variant] [min]` runs host-probe directly (run folder first argument, --launch-block C:\ReachRenaissance\data\launch_block_1.bin,

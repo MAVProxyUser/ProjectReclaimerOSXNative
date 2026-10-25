@@ -1706,6 +1706,20 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   hidden client joining a public 60-player BTB server by a join link): in the match UDP with the server only while six
   players talked; before it, status exchanges with 343 game servers in ~3 s even on a straight join link (the README said
   "while you browse": corrected), the master server, two more port-49175 hosts and api.github.com.
+- **The status query decrypted: PELOAD_KEYLOG, PELOAD_TRACE_UDP_HEX, re-tools/quicparse.py** (2026-10-25; user: "what did it
+  send, and what did it receive? ... fully parse, and label the fields") — pktlog.c `pk_keylog_install` / `pk_kl_log` /
+  `pk_kl_will`, peload.c `udp_tracef`, pktlog.c `pk_on_frame` (PELOAD_FRAMECAP_HEX), shim/docs/server-status.md. Why: the
+  status exchange is QUIC (quinn + rustls), so the packet log shows only packet types, and the client logs no keys (no
+  SSLKEYLOGFILE). How: rustls asks its config's KeyLog -- the client's is rustls' NoKeyLog, a ZST whose vtable {drop, 0, 1,
+  Debug::fmt, log = `ret`, will_log = `xor eax,eax; ret`} is found by its fmt (writes "NoKeyLog"; 0.9.23 exe+0x25ee408);
+  PELOAD_KEYLOG=<file> points log / will_log at ms_abi functions of ours (data only) that write NSS key-log lines;
+  PELOAD_TRACE_UDP_HEX=<n> hex-dumps datagrams; quicparse.py decrypts Initial (public salt), Handshake and 1-RTT packets and
+  labels every header field, frame, TLS message (extensions, transport parameters, certificate) and stream. Result: the
+  client sends `{"status":2}` (4-byte length + JSON) on a new connection per server, server name "reclaimer", no client
+  certificate; the server answers name / host_name / map / mode / players / capacity / ready / password_required /
+  version / variant / blocks_vpn with a self-signed rcgen certificate. Debug only, off without the variables.
+  privacy-check.sh polls every second (a 5 s poll of /packets.json?max=4000 lost part of the start-up burst, which had made
+  its handshakes look missing); README numbers corrected (343 servers in that recording is a lower bound; 383 listed).
 - **Zones never drawn without occlusion** — `hbz_gpu`. Why: a frame that met the depth readback mid-update drew every zone
   surface unoccluded (push-back ceilings flashed over the view). How: always the last complete depth copy and its
   camera; none = no zones. (10-18 3eb0680)
