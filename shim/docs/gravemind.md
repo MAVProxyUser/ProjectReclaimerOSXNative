@@ -16,8 +16,10 @@ start when the beta is closed.
 - **Sound**: works since 2026-10-21 (FindFirstFileA could not find Miles' DSP plugin, so halo2 never started a sound; FIXES.md
   section 4). Miles plays through the loader's DirectSound (dsound.c) like on Windows -- on waveOut it ran ~0.2 s behind the picture.
   `PELOAD_TRACE_DSOUND=1` logs the stream (peak > 0 = sound); `PELOAD_DSOUND=0` = waveOut.
-- **Loading screen**: the screen is black while a map loads; halo2 asks for `loading_dx11.bin`, which isn't in MCC's files (MCC
-  draws its own loading screens). Gravemind's own loading screen is Direct2D (to be checked with the launcher).
+- **Loading screen**: the screen is black while a map loads. halo2's built-in loading screen (halo2+0x958450) reads
+  `loading_dx11.bin` (4 shaders, then 5 textures), which is in no MCC depot. Under MCC the loading screen is
+  `halo2/prebuild/swf/loading_screen.gfx`, a Scaleform movie played by MCC's own UI layer -- the layer Gravemind replaces --
+  so neither draws here. A loading screen needs either a stand-in `loading_dx11.bin` or our own drawing during a load.
 - Not yet: the LAN game list (GetAdaptersAddresses), campaign (needs the 31 GB campaign depot).
 - GRAVEMIND LIVE (its online service) claims the player's name as a gamertag when it starts: choose your own name.
 

@@ -323,7 +323,7 @@ hooks are keyed on a module named "halo3" (haloreach.dll loads at the same 0x180
 WKWebView, shim/src/webview2.m), Schannel HTTPS on LibreSSL (shim/src/schannel.c), online and relayed joins (`reach.sh servers` /
 `join`); not yet: shared buffers / OpenFileMappingW, host-probe's own HLSL (reach-renaissance.md Status). Reach depots: 1064225
 (Campaign + Firefight) + 1064226 (MP).
-Project Gravemind (2026-10-20, branch h2-gravemind, WIP): Halo 2 on MCC's halo2.dll (h2gravemind.exe from a user-supplied zip,
+Project Gravemind (2026-10-20; on main since 2026-10-21, `bash shim/gravemind.sh`, status + setup in shim/docs/gravemind.md): Halo 2 on MCC's halo2.dll (h2gravemind.exe from a user-supplied zip,
 staged at C:\Gravemind\). MCC's Halo 2 MP files came by DepotDownloader: depot 976736 (MP: halo2.dll, maps, .dat) without
 preload/ and terminals/ (~4.5 GB of 21 GB; 976735 = campaign, 1064229 = CJK voice). `h2gravemind.exe --map-id 44` (offline Lockout)
 runs and renders (~60 fps; the black frame was case-sensitive SV_POSITION matching, d891060). Game profiles (games.c, docs/games.md):
@@ -593,6 +593,11 @@ python re-tools/decomp.py analysis/project-reclaimer-v0.9.13.exe 0x14054ae30 0x1
 python re-tools/refs.py analysis/project-reclaimer-v0.9.13.exe func   0x553132
 python re-tools/refs.py analysis/project-reclaimer-v0.9.13.exe strref "presentation callback stalled"
 python re-tools/refs.py analysis/project-reclaimer-v0.9.13.exe globref 0x228b490
+# COM-heavy code (D2D / DWrite / DirectSound callers): "slot N" on every call [reg+off]; vtable slots per object field;
+# every instruction touching [reg+off] (struct field hunting)
+python3 re-tools/slotdis.py <pe> <rva_from> <rva_to>
+python3 re-tools/ctxcalls.py <pe> <rva_lo> <rva_hi>
+python3 re-tools/memwrites.py <pe> <hexoff>...
 ```
 angr loads the 37 MB PE in ~3 s and decompiles one function in a few seconds when CFGFast is
 region-limited (pass [rstart,rend] around the target). Standard angr gives C-like pseudocode
