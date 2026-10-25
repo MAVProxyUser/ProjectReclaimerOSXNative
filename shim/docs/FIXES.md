@@ -2077,7 +2077,11 @@ Numbers are from the commit messages; PERF-PLAN.md has the measurements. Compare
   shim/tools/titleshot.sh = a picture of the client's window with its title bar (fps / draws / frame time), via
   shim/tools/winid.c + `screencapture -l`. First numbers, HugeGrass hangar view, 22 fps, 6,400 draws, 60 Hz display, 76
   probed inputs: input -> halo3 presents the turned frame 53 ms, -> GPU done 124 (+71), -> window 129, -> screen ~154 ms
-  (10% 128, 90% 189). PELOAD_LATENCY=0 / PELOAD_PERF_LOG=0 = off.
+  (10% 128, 90% 189). PELOAD_LATENCY=0 / PELOAD_PERF_LOG=0 = off. GPU-done times are the helper's own (glhelper.c pq_poll writes
+  each frame's number and fence time into glh_shm.h done_fno / done_t, GLH_VERSION 8; at first the loader stamped them when it
+  next looked, up to a frame late, which made the window step negative). The stats page's header has a second line with the
+  same numbers (snapshot "perf"). After the day's fixes: local Valhalla 207 fps 48 ms (input -> present 18, GPU +5, window +1,
+  screen +24); The Pit FFA, 41 players, ~104 fps: 54 ms; HugeGrass hangar ~36 fps: ~104 ms.
 - **Integer vertex formats read as their values, not as 4 floats; the false "format 12 not translated" warning** (2026-10-25;
   user: "seems like something to fix") — peload.c `d3dgl_attrib_fmt` (returns 1 for an integer format, using
   `d3dgl_attrib_ifmt`'s size and type, read as float(n)), the attribute loop (warns once per VS / format only when an integer

@@ -128,7 +128,8 @@ static void pq_blit(const uint64_t*s){
     pq_pend[npq].slot=slot; pq_pend[npq].f=f; pq_pend[npq].frameno=fno; pq_pend[npq].t=now_s(); npq++; mp_tick(); }
 static void pq_poll(int wait){
     for(int i=0;i<npq;i++){ GLenum r=glClientWaitSync(pq_pend[i].f,0,wait?2000000ull:0); if(r!=GL_ALREADY_SIGNALED && r!=GL_CONDITION_SATISFIED) continue;
-        int s=pq_pend[i].slot; H->pq_frameno[s]=pq_pend[i].frameno; glDeleteSync(pq_pend[i].f); H->st_gpu_s+=now_s()-pq_pend[i].t; H->st_gpu_n++;
+        int s=pq_pend[i].slot; H->pq_frameno[s]=pq_pend[i].frameno; glDeleteSync(pq_pend[i].f); double tn=now_s(); H->st_gpu_s+=tn-pq_pend[i].t; H->st_gpu_n++;
+        { uint64_t k=atomic_load(&H->frames_done)%16; H->done_fno[k]=pq_pend[i].frameno; H->done_t[k]=tn; }   // (the loader's latency stages: latency.c lat_gpu)
         atomic_store(&H->pq_latest,s); atomic_fetch_add(&H->pq_seq,1); atomic_store(&H->frames_done,atomic_load(&H->frames_done)+1);
         pq_pend[i]=pq_pend[--npq]; i--; } }
 

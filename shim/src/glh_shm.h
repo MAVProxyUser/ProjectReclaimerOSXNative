@@ -6,7 +6,7 @@
 #include <stdatomic.h>
 
 #define GLH_MAGIC   0x31484C47u        // "GLH1"
-#define GLH_VERSION 7
+#define GLH_VERSION 8
 #define GLH_RING    (256ull<<20)       // command ring
 #define GLH_REPLY   (64ull<<20)        // results of synchronous calls (one in flight at a time)
 #define GLH_POOLN   4096               // pre-generated GL names per kind
@@ -62,6 +62,7 @@ typedef struct {
     _Atomic uint64_t rb_done;
     _Atomic int32_t rb_sync;                     // 1: map readbacks at once (the old way; PELOAD_GLH_RB_SYNC, PELOAD_AB=rbdefer from the loader)
     int32_t pad3;
+    uint64_t done_fno[16]; double done_t[16];    // frame k (frames_done before it counted it, % 16): its engine frame number and when its fence signalled (CLOCK_MONOTONIC)
     // occlusion queries: written by the helper once a result is available
     struct { _Atomic uint32_t gen; _Atomic uint32_t avail; uint64_t value; } q[GLH_QMAX];
     // statistics (helper)

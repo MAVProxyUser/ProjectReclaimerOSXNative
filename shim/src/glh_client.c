@@ -276,12 +276,14 @@ static void glh_pq_publish(unsigned srcfbo,int vw,int vh,int W,int H,unsigned lo
     if(g_gpu_frames<0){ const char*e=getenv("PELOAD_GPU_FRAMES"); int v=e?atoi(e):1; g_gpu_frames=v<1?1:v>4?4:v; } int gf=g_gpu_frames;
     double t0=mono_s(); while(sent>atomic_load(&g_glh->frames_done)+(uint64_t)gf && !atomic_load(&g_glh->failed) && mono_s()-t0<1.0){ glh_kick(); glh_check_alive(); usleep(100); }
     // PELOAD_LAG_LOG=1, seen from here (hidden windows too): render-thread present -> its frame finished on the GPU
-    // every frame the helper finished since the last publish: its GPU-done time (latency.c; seen here, so up to one frame late)
+    // every frame the helper finished since the last publish: its GPU-done time (latency.c), as the helper recorded it
     { static int ll=-1; if(ll<0) ll=getenv("PELOAD_LAG_LOG")?1:0;
       { static unsigned long fnos[256]; static uint64_t seen; static double sum, mx, tl; static unsigned long n; extern double g_lag_t[256];
           fnos[sent&255]=frameno; uint64_t done=atomic_load(&g_glh->frames_done); double now=mono_s();
-          for(;seen<done;seen++){ if(sent-seen>200) continue; unsigned long fn=fnos[(seen+1)&255]; lat_gpu(fn,now); if(!ll) continue;
-              double t=g_lag_t[fn&255]; if(t>0 && now-t<5.0){ sum+=now-t; if(now-t>mx) mx=now-t; n++; } }
+          for(;seen<done;seen++){ if(sent-seen>200) continue; unsigned long fn=fnos[(seen+1)&255];
+              double td=g_glh->done_fno[seen%16]==fn && g_glh->done_t[seen%16]>0?g_glh->done_t[seen%16]:now;   // (when its fence signalled, recorded by the helper)
+              lat_gpu(fn,td); if(!ll) continue;
+              double t=g_lag_t[fn&255]; if(t>0 && td-t<5.0){ sum+=td-t; if(td-t>mx) mx=td-t; n++; } }
           if(!tl) tl=now; if(now-tl>=5.0 && n){ char m[200]; int k=snprintf(m,sizeof m,"  [lag] present -> GPU done: %.0f ms average, %.0f ms worst (%lu frames, %.1f fps), %d frames allowed on the GPU\n",sum/n*1e3,mx*1e3,n,n/(now-tl),gf);
               (void)!write(2,m,(size_t)k); sum=0; mx=0; n=0; tl=now; } } }
     g_glh_pqwait_s+=mono_s()-t0; }
