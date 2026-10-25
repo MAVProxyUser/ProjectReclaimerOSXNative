@@ -1702,7 +1702,10 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   still runs too).
 - **Privacy: who sees your IP address** (2026-10-24) — README "Who sees your IP address": a joined client has one QUIC peer,
   the server (voice relayed); other players never get your address; the server, its admins, every server the browser queries
-  and the community services do; hosting publishes it.
+  and the community services do; hosting publishes it. Verified on the wire 2026-10-25 (shim/tools/privacy-check.sh, a
+  hidden client joining a public 60-player BTB server by a join link): in the match UDP with the server only while six
+  players talked; before it, status exchanges with 343 game servers in ~3 s even on a straight join link (the README said
+  "while you browse": corrected), the master server, two more port-49175 hosts and api.github.com.
 - **Zones never drawn without occlusion** — `hbz_gpu`. Why: a frame that met the depth readback mid-update drew every zone
   surface unoccluded (push-back ceilings flashed over the view). How: always the last complete depth copy and its
   camera; none = no zones. (10-18 3eb0680)
