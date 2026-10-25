@@ -1956,6 +1956,16 @@ Numbers are from the commit messages; PERF-PLAN.md has the measurements. Compare
   handle on the same file, fstat / GetFileInformationByHandle stay live; the kept descriptor is reopened after 1 s
   (PELOAD_FS_METACACHE=0 = always open). Measured in a local match: 23.4 -> 12.5 (1) -> 1.1 us (2) per query, path
   translation included; the game unchanged (spawns, items, match time = wall time). Both ON by default.
+- **Copy-on-write game-state copies were declined after the first ~10** (2026-10-25; found in a 118-player HugeGrass match:
+  plain memmove of halo3+0x13f23f's 16.4 MB game state, 7 GB/s, 14% of the engine thread) — peload.c `cow_private_range`,
+  `crt_big_memmove` (PELOAD_MEMCPY_LOG now says why a big copy isn't copy-on-write). Why: the safety check declines
+  shared memory (a copy-on-write of a shared file view would cut the sharing with the client's worker) by the kernel's
+  share mode, and anonymous memory that a copy-on-write copy has touched reports SM_TRUESHARED: from then on every copy
+  was "not private" and done by memmove -- the default-on copy-on-write (2026-10-18, +4% BTB A/B, which saw it work through
+  the 8-entry result cache) had not been happening. How: only FILE-backed shared mappings (external pager: MapViewOfFile
+  views) are declined; PELOAD_COW_STRICT=1 = any sharing declines, as before. Local match: 0 -> ~4,900 copies per 5 s done
+  copy-on-write. HugeGrass in-match A/B (PELOAD_AB=cow:20, 118 players): 14.8 vs 15.0 fps, neutral -- the copies' cost
+  moves into page faults when the game rewrites the state.
 - **Test runs are silent: PELOAD_WASAPI_MUTE** (2026-10-25; user: "can you mute the game audio while you test?") — wasapi.c
   `wa_aq_cb`, shim/tools/quiet-run.sh, shim/dedicated.sh. Why: test clients muted the game's XAudio2 sound
   (PELOAD_AUDIO=0, or PELOAD_AUDIO_MUTE=1 when a test needs the mixer), but the client's own WASAPI sound -- menu music,

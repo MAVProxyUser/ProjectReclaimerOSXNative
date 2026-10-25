@@ -11337,9 +11337,18 @@ volatile int g_memcpy_cow=-1; uint64_t g_cow_n, g_cow_bytes;
 // shared memory) would cut the sharing. Checked once per (dst, src, size) and remembered.
 static int cow_private_range(mach_vm_address_t a,mach_vm_size_t n){
     while(n){ mach_vm_address_t ra=a; mach_vm_size_t rs=0; vm_region_extended_info_data_t ei; mach_msg_type_number_t cnt=VM_REGION_EXTENDED_INFO_COUNT; mach_port_t obj=MACH_PORT_NULL;
-        if(mach_vm_region(mach_task_self(),&ra,&rs,VM_REGION_EXTENDED_INFO,(vm_region_info_t)&ei,&cnt,&obj)!=KERN_SUCCESS || ra>a) return 0;
-        if(ei.share_mode!=SM_PRIVATE && ei.share_mode!=SM_COW && ei.share_mode!=SM_EMPTY) return 0;
-        if(!(ei.protection&VM_PROT_WRITE)) return 0;
+        int kr=mach_vm_region(mach_task_self(),&ra,&rs,VM_REGION_EXTENDED_INFO,(vm_region_info_t)&ei,&cnt,&obj);
+        // shared = a FILE-backed shared mapping (external pager: the client's MapViewOfFile views). Anonymous memory a previous
+        // copy-on-write copy touched reports SM_TRUESHARED too (2026-10-25: after the first ~10 copies every game-state copy
+        // was declined as "not private" -- copy-on-write had not been happening at all); PELOAD_COW_STRICT=1 = any sharing
+        // declines, as before
+        static int strict=-1; if(strict<0) strict=getenv("PELOAD_COW_STRICT")?1:0;
+        int shmode=ei.share_mode!=SM_PRIVATE && ei.share_mode!=SM_COW && ei.share_mode!=SM_EMPTY;
+        int bad=kr!=KERN_SUCCESS || ra>a || (shmode && (strict || ei.external_pager)) || !(ei.protection&VM_PROT_WRITE);
+        if(bad){ static int lg=-1, shown; if(lg<0) lg=getenv("PELOAD_MEMCPY_LOG")?1:0;   // (PELOAD_MEMCPY_LOG: what the kernel says about a declined range)
+            if(lg && shown++<8){ char m[200]; int k=snprintf(m,sizeof m,"  [memcpy] not private: %#llx: region %#llx +%#llx kr %d share_mode %u prot %#x user_tag %u external pager %u\n",
+                (unsigned long long)a,(unsigned long long)ra,(unsigned long long)rs,kr,(unsigned)ei.share_mode,(unsigned)ei.protection,(unsigned)ei.user_tag,(unsigned)ei.external_pager); (void)!write(2,m,(size_t)k); }
+            return 0; }
         mach_vm_size_t take=ra+rs-a; if(take>=n) return 1; a+=take; n-=take; }
     return 1; }
 static int cow_ok(uintptr_t D,uintptr_t S,size_t mid){ static struct { uintptr_t d,s; size_t n; int ok; } c[8]; static int ci; static pthread_mutex_t mx=PTHREAD_MUTEX_INITIALIZER;
