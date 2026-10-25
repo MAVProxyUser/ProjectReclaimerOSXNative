@@ -347,6 +347,16 @@ beside the death heatmap with the player details under it (right); Connected; th
   up each spawned weapon, and who takes each power-up (the game's own pickup time for that colour on the player).
   Vehicles are listed one by one, respawns included; turrets mounted on a vehicle, deployed equipment (a thrown bubble
   shield, trip mine, auto turret), grenades and weapons dropped by players are left out.
+- **Packets** -- the type of everything the game sends and receives, never what is in it: each UDP datagram and TCP
+  connection with direction, peer (and the host name it was looked up by), size and what its first bytes show without
+  decrypting anything -- the game's QUIC traffic as handshake / initial / 1-RTT (connected) packets, plaintext tags, TCP
+  connects and closes. A table sums the last 10 s per type and peer (packets and bytes a second); the log beside it lists
+  them newest first, repeats folded into one line (connected 1-RTT traffic only with its checkbox: it is dozens a second).
+  **halo3 message types** (off by default) adds halo3's own network messages by name -- connect-request, join-request,
+  membership-update, player-add, time-synchronize ... -- as halo3 sends and receives them, counted in a second table (it
+  wraps halo3's message table: data, no code; switching it off restores the table). Cost: about 26 ns per datagram
+  (`PELOAD_PKTLOG_BENCH=1` measures it); `PELOAD_PKTLOG=0` turns it off. The forensic archive keeps per-second sums
+  (`packets.jsonl`, shim/docs/forensics.md).
 
   <img src="shim/docs/img/stats-feed.png" width="49%" alt="Event feed: kills with weapon, estimated kills marked"> <img src="shim/docs/img/stats-chat.png" width="49%" alt="Chat: players' lines and the server's messages">
 - **Players** -- living players first, then players waiting to respawn, then those who quit (still in the game's

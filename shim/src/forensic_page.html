@@ -53,6 +53,7 @@ code{font:11px ui-monospace,Menlo,monospace;color:#bbb;overflow-wrap:anywhere}
 .fh label{color:var(--dim);font-size:12px;cursor:pointer}
 #ls{max-height:60vh;overflow-y:auto}
 table{border-collapse:collapse;width:100%}
+.pkt td,.pkt th{font-size:12px;padding:2px 6px;border-bottom:1px solid #222;white-space:nowrap}#pkt{max-height:260px;overflow:auto;margin-top:6px}
 th,td{text-align:left;padding:3px 8px;border-bottom:1px solid var(--line);vertical-align:top}
 th{color:var(--dim);font-weight:500;position:sticky;top:0;background:var(--panel)}
 td.t{white-space:nowrap;color:#777;font-variant-numeric:tabular-nums}
@@ -96,6 +97,10 @@ tr.hl{background:#2a2a14}
         <label>zoom <select id="zoom"><option value="0">fit</option><option value="0.5">0.5 px/s</option><option value="2">2 px/s</option><option value="5">5 px/s</option><option value="10">10 px/s</option><option value="25">25 px/s</option><option value="60">60 px/s</option></select></label>
         <span class="note" style="margin:0"><span class="sw" style="background:var(--c1)"></span> global <span class="sw" style="background:var(--c2)"></span> team <span class="sw" style="background:var(--c3)"></span> proximity &nbsp; striped = no audio kept</span></div>
       <div id="tlw"><div id="tl"></div></div></div>
+    <div class="panel" id="pkp"><div class="fh"><h2 title="packets.jsonl: the packet log's per-second sums -- the type of every datagram and connection, never the content">Packets</h2>
+        <label><input type="checkbox" id="pk_w" checked> wire</label><label><input type="checkbox" id="pk_g" checked> game (halo3 message types)</label></div>
+      <canvas id="pkc" height="70" style="width:100%;height:70px;display:block"></canvas>
+      <div id="pkt"><span class="note">Pick a session.</span></div></div>
     <div class="panel"><div class="fh"><h2>Everything, in order</h2>
         <label>player <select id="f_pl"><option value="">everyone</option></select></label>
         <label>channel <select id="f_ch"><option value="">all</option><option value="1">global / all chat</option><option value="2">team</option><option value="3">proximity / nearby</option></select></label>
@@ -262,8 +267,37 @@ async function select(name){
   renderSessions();
   try{ X=await (await fetch(sp()+'/index.json',{cache:'no-store'})).json(); }catch(e){ $('#sum').innerHTML='<span class="err">cannot read this session</span>'; return; }
   if(X && X.ok===false){ $('#sum').innerHTML='<span class="err">cannot read this session: '+esc(X.error||'')+'</span>'; X=null; $('#tl').innerHTML=''; $('#ls').innerHTML=''; return; }
-  build(); render();
+  build(); render(); loadPackets();
 }
+// ---- packets.jsonl: one line per second and (layer, direction, type, peer): n, bytes, t0, t1 (pktlog.c) ----
+let PK=[];
+async function loadPackets(){ PK=[]; const nm=cur;
+  try{ const r=await fetch(sp()+'/packets.jsonl',{cache:'no-store'}); if(r.ok){ const t=await r.text(); if(nm!==cur) return;
+      for(const ln of t.split('\n')){ if(!ln) continue; try{ PK.push(JSON.parse(ln)); }catch(e){} } } }catch(e){}
+  renderPackets(); }
+function renderPackets(){
+  const w=$('#pk_w').checked, g=$('#pk_g').checked, rows=PK.filter(x=>x.type&&(x.layer==='game'?g:w)), lost=PK.reduce((n,x)=>n+(x.lost||0),0);
+  if(!PK.length){ $('#pkt').innerHTML='<span class="note">no packet records in this session (older sessions have none; menu time is not archived)</span>'; const c=$('#pkc'); c.getContext('2d').clearRect(0,0,c.width,c.height); return; }
+  const tot=new Map(); for(const x of rows){ const k=[x.layer,x.dir,x.type,x.peer||''].join('|'); let a=tot.get(k);
+    if(!a) tot.set(k,a={layer:x.layer,dir:x.dir,type:x.type,peer:x.peer||'',host:x.host||'',n:0,bytes:0,t0:x.t0,t1:x.t1});
+    a.n+=x.n; a.bytes+=x.bytes; a.t0=Math.min(a.t0,x.t0); a.t1=Math.max(a.t1,x.t1); }
+  const fb=n=>n>=1048576?(n/1048576).toFixed(1)+' MB':n>=1024?(n/1024).toFixed(1)+' KB':n+' B';
+  const list=[...tot.values()].sort((a,b)=>b.n-a.n);
+  $('#pkt').innerHTML=`<table class="pkt"><thead><tr><th>layer</th><th>dir</th><th>type</th><th>peer</th><th style="text-align:right">count</th><th style="text-align:right">bytes</th><th>first</th><th>last</th></tr></thead><tbody>${
+    list.map(a=>`<tr><td>${esc(a.layer)}</td><td>${a.dir==='rx'?'&larr; rx':'tx &rarr;'}</td><td class="mono">${esc(a.type)}</td><td class="mono">${esc(a.peer||'-')}${a.host?' <span class="note" style="margin:0">'+esc(a.host)+'</span>':''}</td><td style="text-align:right">${a.n}</td><td style="text-align:right">${a.layer==='game'?'':fb(a.bytes)}</td><td>${esc(fT(a.t0))}</td><td>${esc(fT(a.t1))}</td></tr>`).join('')
+  }</tbody></table>${lost?`<div class="note err">${lost} records were overwritten before they were summed (a very busy second)</div>`:''}`;
+  // per second: datagrams sent (orange, up) and received (green, down) on the wire, halo3 messages as blue ticks
+  const c=$('#pkc'), W=c.clientWidth||600; c.width=W; const H=c.height, x2=c.getContext('2d'); x2.clearRect(0,0,W,H);
+  if(!rows.length) return; let t0=Infinity,t1=-Infinity; for(const x of rows){ t0=Math.min(t0,x.t0); t1=Math.max(t1,x.t1); }
+  const secs=Math.max(1,Math.ceil(t1-t0)+1), bins={tx:new Float32Array(secs),rx:new Float32Array(secs),g:new Float32Array(secs)};
+  for(const x of rows){ const i=Math.min(secs-1,Math.max(0,Math.floor(x.t0-t0))); if(x.layer==='game') bins.g[i]+=x.n; else bins[x.dir==='rx'?'rx':'tx'][i]+=x.n; }
+  const mx=Math.max(1,...bins.tx,...bins.rx), mid=H/2, sx=W/secs;
+  for(let i=0;i<secs;i++){ const x=i*sx;
+    x2.fillStyle='#ffb35a'; x2.fillRect(x,mid-(bins.tx[i]/mx)*(mid-2),Math.max(1,sx),(bins.tx[i]/mx)*(mid-2));
+    x2.fillStyle='#7ddf6a'; x2.fillRect(x,mid,Math.max(1,sx),(bins.rx[i]/mx)*(mid-2));
+    if(bins.g[i]){ x2.fillStyle='#58b8ff'; x2.fillRect(x,0,Math.max(1,sx),3); } }
+  x2.fillStyle='#888'; x2.font='10px sans-serif'; x2.fillText(`max ${Math.round(mx)}/s`,4,10); }
+for(const id of ['#pk_w','#pk_g']) $(id).addEventListener('change',renderPackets);
 function build(){
   items=[];
   for(const u of X.utterances) items.push({t:u.start,end:u.end,kind:'voice',u});
@@ -305,7 +339,7 @@ function render(){
     <dt>audio kept</dt><dd>${ss.voice_audio?'yes, one-party consent confirmed '+esc(fD(ss.consent_confirmed_unix)):'no (only who talked when) when the session started'}</dd>
     <dt>events</dt><dd>${nk('chat')} chat, ${nk('kill')} kills, ${nk('death')} deaths, ${nk('join')} joins, ${nk('leave')} leaves, ${nk('vote')} votes, ${nk('server')} server lines</dd>
     <dt>spawns</dt><dd>${sk('weapon')} weapons and equipment (${pk('weapon')} picked up), ${sk('vehicle')} vehicles, ${sk('powerup')} power-ups (${pk('powerup')} taken)</dd></dl>
-    <div class="dls"><a class="dl" href="${sp()}/index.json">index.json</a><a class="dl" href="${sp()}/events.jsonl?dl=1">events.jsonl</a><a class="dl" href="${sp()}/roster.jsonl?dl=1">roster.jsonl</a><a class="dl" href="${sp()}/voice.bin">voice.bin</a><a class="dl" href="${sp()}/session.json?dl=1">session.json</a><button class="dl" id="delsess" title="Delete this session's files from this computer (voice, chat, events, roster). Cannot be undone." style="margin-left:12px;color:#ff8a80;border-color:#7a3b3b;background:#2a1414;cursor:pointer">Delete session</button></div>
+    <div class="dls"><a class="dl" href="${sp()}/index.json">index.json</a><a class="dl" href="${sp()}/events.jsonl?dl=1">events.jsonl</a><a class="dl" href="${sp()}/roster.jsonl?dl=1">roster.jsonl</a><a class="dl" href="${sp()}/packets.jsonl?dl=1">packets.jsonl</a><a class="dl" href="${sp()}/voice.bin">voice.bin</a><a class="dl" href="${sp()}/session.json?dl=1">session.json</a><button class="dl" id="delsess" title="Delete this session's files from this computer (voice, chat, events, roster). Cannot be undone." style="margin-left:12px;color:#ff8a80;border-color:#7a3b3b;background:#2a1414;cursor:pointer">Delete session</button></div>
     <h2 style="margin-top:12px">Speakers</h2><div id="spk">${X.speakers.map(s=>`<span class="pc"><span class="sw" style="background:${TEAM[s.team_name]||'#777'}"></span><span title="peer id ${esc(s.id)}${s.names.length>1?' &middot; also called '+esc(s.names.join(', ')):''}">${esc(s.name)}</span><span class="note" style="margin:0">${s.utterances}&times;, ${fDur(s.seconds)}</span>${s.audio_packets?`<a class="dl" href="${sp()}/speaker/${s.id}.ogg?dl=1" title="all of this speaker's audio, gaps shortened to at most 1 s">.ogg</a>`:''}</span>`).join('')||'<span class="note">nobody talked</span>'}</div>`;
   { const db=$('#delsess'); if(db) db.onclick=async()=>{ const nm=cur; if(!nm || !confirm('Delete session '+nm+'?\n\nEvery local file of it (voice, chat, events, roster) is removed from this computer. This cannot be undone.')) return;
       db.disabled=true; db.textContent='deleting...'; const ok=await ctl('delete='+encodeURIComponent(nm));

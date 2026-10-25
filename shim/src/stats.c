@@ -825,8 +825,10 @@ static void st_overlay_features(StBuf*s){
         sb_put(s,"%s\"%s\":{\"on\":%s,\"team\":%s,\"vis\":%s,\"px\":%s}",i?",":"",g_st_featname[f],hb_feat(f)?"true":"false",
             h.team>=0&&h.team<3?tm[h.team]:"null",h.vis<0?"null":h.vis?"true":"false",h.px>0?px:"null"); }
     sb_put(s,"}"); }
+static void pk_json(StBuf*s,const char*qs); static int pk_control(const char*qs);   // (pktlog.c)
 static int st_control(const char*act,const char*qs){
     char m[96]; int k=0;
+    if(!strcmp(act,"pktgame")) return pk_control(qs);   // the packet log's game layer (halo3 message types) on / off
     static const char*const feat[HBF_N]={"hitboxes","tracers","info","items","visible","zones","vehicles"};
     for(int f=0;f<HBF_N;f++) if(!strcmp(act,feat[f])){ __atomic_fetch_xor(&g_hb_toggle,1<<f,__ATOMIC_ACQ_REL); hbs_sync();   // (visible: applies to all)
         k=snprintf(m,sizeof m,"  [stats] page: %s %s\n",feat[f],hb_feat(f)?"on":"off"); (void)!write(2,m,k); return 1; }
@@ -1492,6 +1494,10 @@ static void* st_conn_serve(void*a){ int fd=(int)(intptr_t)a; pthread_setname_np(
                 int ok=j && st_send(fd,j,len+8); free(j); if(!ok) break; } }
     else if(!strcmp(path,"/feed.json")){   // events after ?since=<seq> (the last 1024 at most)
         const char*v=strstr(qs,"since="); uint32_t since=v?(uint32_t)strtoul(v+6,0,10):0; StBuf b={0}; st_feed_json(&b,since);
+        int k=snprintf(h,sizeof h,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %zu\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n",b.n);
+        if(st_send(fd,h,(size_t)k) && b.n) st_send(fd,b.b,b.n); free(b.b); }
+    else if(!strcmp(path,"/packets.json")){   // the packet log (pktlog.c): records after ?since=<seq>, the last 10 s summed
+        StBuf b={0}; pk_json(&b,qs);
         int k=snprintf(h,sizeof h,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %zu\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n",b.n);
         if(st_send(fd,h,(size_t)k) && b.n) st_send(fd,b.b,b.n); free(b.b); }
     else if(!strcmp(path,"/recordings.json")){   // clip recording (rec.m): ~/Movies/Reclaimer's clips, newest first

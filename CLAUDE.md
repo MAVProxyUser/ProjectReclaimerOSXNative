@@ -290,6 +290,13 @@ PORTING A RELEASE: shim/docs/porting.md -- fetch-releases.sh (corpus), client-su
 [--apply]` (anchors incl. callers' texts -> shape alignment -> wildcarded signature -> meaning check; `--selftest` replays history),
 then `shim/tools/port-verify.sh` (PASS/FAIL per point; live: hidden client + our dedicated server, chat via RCON `say`). stats.c
 signatures are per-point lists g_sig_<point> (first that matches once AND passes the meaning check). Helpers go in the repo.
+Packet log (2026-10-24, shim/src/pktlog.c): the TYPE of every UDP datagram / TCP connection (never content; QUIC long/short
+header types + flags from the unencrypted bits) in a 16384-record ring -> GET /packets.json, the stats page's Packets window,
+forensic packets.jsonl (per-second sums); opt-in game layer = halo3's message types by name (its message table halo3+0x46b6e98:
+46 x 0x40 entries, +0x20 encode / +0x28 decode pointers wrapped by thunks; data only). 26 ns per datagram. PELOAD_PKTLOG=0 off.
+Bink (same day): halo3's bink2w64.dll delay slots are left to halo3's own delay loader (the client checks they still hold their
+thunks before installing its mod-movie path; PELOAD_BINK_EAGER=1 = old), and halo3's 4 video shaders are compiled by MCC's
+real D3DCompiler_47.dll from the MCC root (PELOAD_REAL_D3DCOMPILE=0 = old placeholders). The XAudio2 check has the same shape.
 Reach Renaissance (2026-10-20, shim/docs/reach-renaissance.md): Halo: Reach on MCC's haloreach.dll, same design as Reclaimer
 (bin/host-probe.exe = the game: LoadLibraryW(haloreach.dll), its own D3D11 device, ~85 in-memory engine patches). `bash shim/reach.sh
 [map] [variant] [min]` runs host-probe directly (run folder first argument, --launch-block C:\ReachRenaissance\data\launch_block_1.bin,

@@ -227,8 +227,9 @@ SHA-256 `ceef542ac17980d178e281ebf510b4aaaf28ef650a288f1d68e8250731ad7e70` (46,5
 Imports: unchanged against 0.9.22 (client-survey.sh). The `dedicated` subcommand is still there. New client behaviour that
 mattered: a constant-buffer upload filter (src/engine_constant_uploads.rs; off with RECLAIMER_SEND_ALL_UPLOADS=1) that
 attaches COM objects with SetPrivateDataInterface -- it deadlocked on the loader until private-data interfaces were
-referenced (FIXES.md section 10). "Bink import slots differ from the supported build; refused" (Workshop mods' Bink movies)
-is in the log, as in every build since at least v0.9.20.
+referenced (FIXES.md section 10). "Bink import slots differ from the supported build; refused" (Workshop mods' Bink movies),
+in every build since at least v0.9.20, was the loader binding halo3's Bink delay imports itself (fixed 2026-10-24, FIXES.md
+section 1); the client's Bink slot table is at exe+0x2296938 (12 x {halo3 slot, expected delay thunk}).
 
 ### Dedicated exe (not loaded by our scripts), v0.8.14 .. v0.9.7
 

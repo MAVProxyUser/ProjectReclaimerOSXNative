@@ -20,8 +20,9 @@ other people; no exploit files were built. Fixes in the loader: FIXES.md section
 - **The native attack surface is the map and its side files**, parsed by 2008-era C++ in halo3.dll and by FMOD 1.10.x:
   `.map` (tags, counts, Havok 4.5 MOPP bytecode; resource pages go through halo3's own bounded DEFLATE decoder, not
   zlib), `.fsb` sound banks (FMOD sniffs the codec from content: tracker / MIDI / FLAC / Ogg / MP3 decoders reachable),
-  BLF `.halo3_mapinfo` / `.mvar` (BLF `_cmp` chunks inflate through zlib 1.1.4, output bounded), and `.bik` (Bink 2.7n;
-  refused under this loader).
+  BLF `.halo3_mapinfo` / `.mvar` (BLF `_cmp` chunks inflate through zlib 1.1.4, output bounded), and `.bik` (Bink 2.7n,
+  2019: reachable since 2026-10-24, as on Windows -- the client's own mod-movie path; before, the loader's binding of
+  halo3's Bink imports made the client refuse it).
 - **Under this loader** exploitation would be easier than on Windows (halo3.dll at a fixed base, some patched pages and the
   hook pools RWX), and the loader itself parsed several untrusted inputs without checks -- now fixed (section 7).
 
@@ -202,7 +203,7 @@ Not compiled in (TIFF / quick-xml / roxmltree / SQLite appear in the client's li
 | zlib (static) | halo3.dll | 1.1.4 (CHECKED: inflate_blocks frees `blens` after inflate_codes_new, halo3+0x3e5763/0x3e577d, and only on Z_DATA_ERROR at 0x3e5834 -- the CVE-2002-0059 fix) | BLF `_cmp` chunks (output bounded, halo3+0x600337), game-state blobs, file-share downloads; NOT .map resource pages (own DEFLATE decoder halo3+0x5fd898..0x5ff56c: counts, Kraft sum and window checked) | no known inflate-side memory corruption in 1.1.4 |
 | Havok | halo3.dll | 4.5.0.3 | collision + MOPP bytecode in .map | trusts the bytecode it interprets |
 | OpenSSL (static) | halo3.dll | 1.1.1-series | no mod path found | EOL |
-| Bink | MCC bink2w64.dll | 2.7n (2019) | mod `bink/*.bik` | refused under this loader ("Bink import slots differ") |
+| Bink | MCC bink2w64.dll | 2.7n (2019) | mod `bink/*.bik` | reachable since 2026-10-24 (the client's mod-movie path, as on Windows); a 2019 video decoder fed by downloaded files: not audited. `PELOAD_BINK_EAGER=1` makes the client refuse mods' movies again |
 | Expat (+ libpng 1.2.5, zlib 1.1.4) | MCC halo3/waves (WavesLibDLL.dll, WaveShell-Xbox.dll) | Expat 1.0.x (1998: 9 handler slots, no error table, 32-bit buffer math) | none: four hard-coded preset names, resolved only in the installed MCC folder | unreachable (section 6); libpng dead (no PNG in any Waves DLL, no UI) |
 | Windows image / XML APIs (WIC, GDI+, MSXML, XmlLite, D3DX) | -- | -- | -- | imported by neither binary; this loader serves no image decoder to the game |
 

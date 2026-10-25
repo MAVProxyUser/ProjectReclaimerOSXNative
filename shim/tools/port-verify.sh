@@ -160,7 +160,7 @@ else:
 EOF
     # anything the client refused or the loader did not apply, and crashes
     LC_ALL=C grep -a -o -E '[A-Za-z0-9 ]+ (import slots differ|mismatch)[^;]*; refused' /tmp/quiet-run.log | sort -u | while read -r l; do
-      case "$l" in *Bink*) res note refused "$l (known, every build since 0.9.20 at least: Workshop mods' Bink movies)";; *XAudio2*) ;; *) res FAIL refused "$l";; esac; done
+      case "$l" in *XAudio2*) ;; *) res FAIL refused "$l";; esac; done   # (Bink: fixed 2026-10-24, halo3's Bink delay slots stay lazy)
     LC_ALL=C grep -a -m3 '\[CRASH\]' /tmp/quiet-run.log | while read -r l; do res FAIL log "$l"; done
     LC_ALL=C grep -a -m3 'NOT applied' /tmp/quiet-run.log | while read -r l; do res note log "$l (stage 2 judges it)"; done
   fi

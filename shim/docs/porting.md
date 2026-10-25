@@ -254,9 +254,9 @@ standard the history tables use ("CONFIRMED").
 | cast_vote | PELOAD_AUTOVOTE_MAP never confirms its vote; a wrong function crashes on the vote |
 | watchdog | RECLAIMER_DIRECT=1 matches end after 15 / 45 / 240 s ("still running after"): PV_DIRECT=1 port-verify.sh checks it |
 
-**Known non-failures** in port-verify: "Bink import slots differ from the supported build; refused" (every build since at
-least 0.9.20: Workshop mods' Bink movies; not a port issue), the server browser's "query ... timed out" lines (other
-servers on the internet).
+**Known non-failures** in port-verify: the server browser's "query ... timed out" lines (other servers on the internet).
+"Bink import slots differ from the supported build; refused" was one until 2026-10-24 (the loader bound halo3's Bink delay
+imports itself; fixed, FIXES.md section 1): it is a FAIL now.
 
 ## 6. Coverage of every release
 

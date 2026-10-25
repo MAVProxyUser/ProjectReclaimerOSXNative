@@ -120,6 +120,14 @@ th .srt{display:inline-block;margin-left:2px;padding:0 2px;cursor:pointer;color:
 #fl .est{color:#777;margin-left:4px;cursor:help}
 #fl .k-join .tx{color:#7ddf6a}#fl .k-leave .tx{color:#c9a46a}#fl .k-server .tx,#fl .k-vote .tx,#fl .k-log .tx{color:#ffd75a}
 #fl .k-game .tx{color:var(--accent);font-weight:600}#fl .k-death .tx{color:#aaa}
+/* ---- packets (pktlog.c): the type of every datagram / connection, never the content ---- */
+#pkts{margin-bottom:16px}#pkts .fh{display:flex;align-items:center;gap:6px 12px;flex-wrap:wrap;margin-bottom:8px}#pkts .fh h2{margin:0 auto 0 0}
+#pkts .fh label{color:var(--dim);font-size:12px;cursor:pointer}#pkts button{background:#222;color:var(--fg);border:1px solid var(--line);border-radius:4px;padding:2px 9px;font:inherit;font-size:12px;cursor:pointer}
+#pkts .cols{display:grid;grid-template-columns:minmax(0,3fr) minmax(0,2fr);gap:16px}@media (max-width:1000px){#pkts .cols{grid-template-columns:minmax(0,1fr)}}
+#pks td,#pkg2 td{font-size:12px;padding:2px 8px}#pks td.n,#pkg2 td.n{text-align:right;font-variant-numeric:tabular-nums}#pkg2{margin-top:10px}
+#pkl{height:240px;overflow-y:auto;font-size:12px;line-height:1.5;resize:vertical;font-variant-numeric:tabular-nums}
+#pkl .ev{padding:1px 0;border-bottom:1px solid #1f1f1f;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}#pkl time{color:#777;margin-right:8px}
+.pk-tx{color:#ffb35a}.pk-rx{color:#7ddf6a}.pk-g{color:var(--accent)}.pk-x{color:#777}.pk-ty{display:inline-block;min-width:118px}
 /* spawns and pickups (backlog 47): weapons violet, vehicles teal, power-ups pink; the item's name in a chip */
 #fl .k-weapon .tx{color:#b48cff}#fl .k-vehicle .tx{color:#6fd3c2}#fl .k-powerup .tx{color:#ff8fd0}
 #fl .k-weapon .w,#fl .k-vehicle .w,#fl .k-powerup .w{margin:1px 0}
@@ -208,6 +216,22 @@ th .srt{display:inline-block;margin-left:2px;padding:0 2px;cursor:pointer;color:
  <div id="cm" class="note">no chat yet</div>
  <div class="note">Newest first: what players type in the game's text chat (TEAM and NEARBY mark those channels), the server's messages, and the client's own chat notices.</div></div>
 </div>
+<div id="pkts" class="panel"><div class="fh"><h2 title="pktlog.c: the type of every datagram and connection this game sends and receives -- never what is in it">Packets</h2>
+ <label title="UDP datagrams and TCP connections on this game's sockets"><input type="checkbox" id="pkw" checked> wire</label>
+ <label title="halo3's own network messages (needs the switch on the right)"><input type="checkbox" id="pkg" checked> game</label>
+ <label title="Connected QUIC traffic (most of it: dozens a second); off shows only handshakes, tags, TCP and game messages in the log"><input type="checkbox" id="pk1"> 1-RTT in the log</label>
+ <label title="Wraps halo3's message table so its message types (ping, join-request, membership-update ...) are logged as halo3 sends and receives them. Data only, no code is changed; switch off to restore the table."><input type="checkbox" id="pkgon"> halo3 message types</label>
+ <button id="pkp">Pause</button></div>
+ <div class="cols"><div><table id="pks"><thead><tr><th>layer</th><th>dir</th><th>type</th><th>peer</th><th>per s</th><th>bytes/s</th></tr></thead><tbody><tr><td colspan="6" class="note">-</td></tr></tbody></table>
+  <div class="note" id="pkst">the last 10 s</div>
+  <table id="pkg2"><thead><tr><th>halo3 message</th><th>sent</th><th>received</th></tr></thead><tbody></tbody></table></div>
+  <div><div id="pkl" class="note">waiting for packets...</div></div></div>
+ <div class="note">Only metadata: direction, peer, size and the type the first bytes show without decrypting anything. QUIC (the game's
+ encrypted traffic): a long header's type (initial, handshake, 0-rtt, retry) and version, or a short header ("1-rtt", connected; the spin
+ bit is the one flag its header protection leaves visible; "greased" = the fixed bit is unused, RFC 9287). TCP: connects and closes with
+ the bytes in between, named by the host they were looked up as. halo3 message types: as halo3 encodes one to send it or decodes one it
+ received, by halo3's own names, without the peer (halo3 knows it only deeper down). The forensic archive keeps per-second sums of all of
+ this (packets.jsonl).</div></div>
 <div class="grid one">
  <div class="panel" id="players"><div class="sortmode" title="With a column's sort (the arrows by each heading): team sort keeps each team together and sorts inside it; full sort orders everyone together">
   Sort: <label><input type="radio" name="smode" value="team" checked> team sort</label><label><input type="radio" name="smode" value="full"> full sort</label>
@@ -884,6 +908,37 @@ document.getElementById('spd').addEventListener('change',async e=>{ const msg=do
   catch(err){ msg.textContent='not connected'; } });
 for(const [id,key] of [['avm','map'],['avc','calls']]) document.getElementById(id).addEventListener('change',async e=>{ const msg=document.getElementById('ovmsg');
   const j=await ovPost('do=autovote&'+key+'='+encodeURIComponent(e.target.value)); msg.textContent=j.ok?'':(j.error||'refused'); });
+// ---- packets: /packets.json?since=<seq> once a second (pktlog.c) ----
+let pkSeq=0, pkBusy=false, pkPause=false, pkLast=null, pkN=0; const pkl=document.getElementById('pkl');
+const pkFmtB=n=>n>=1048576?(n/1048576).toFixed(1)+' MB':n>=1024?(n/1024).toFixed(1)+' KB':Math.round(n)+' B';
+const pkPeer=e=>e.peer?`${E(e.peer)}${e.host?` <span class="pk-x">${E(e.host)}</span>`:''}`:'<span class="pk-x">-</span>';
+const pkFl=e=>e.flags?` <span class="pk-x" title="spin: the short header's spin bit; greased: the fixed bit is unused (RFC 9287). Either may be random">${e.flags&1?'spin':''}${e.flags===3?' ':''}${e.flags&2?'greased':''}</span>`:'';
+function pkRow(e,n){ const d=e.dir==='rx'?'<span class="pk-rx">&larr; rx</span>':'<span class="pk-tx">tx &rarr;</span>';
+  const ty=e.layer==='game'?`<span class="pk-g pk-ty">${E(e.type)}</span>`:`<span class="pk-ty">${E(e.type)}</span>${pkFl(e)}`;
+  const len=e.layer==='game'?'':` <span class="pk-x">${e.type.startsWith('tcp-close')?pkFmtB(e.len)+' total':e.len+' B'}</span>`;
+  return `<div class="ev"><time>${clock(e.t)}</time>${d} ${ty} ${pkPeer(e)}${len}${n>1?` <span class="pk-x">&times;${n}</span>`:''}</div>`; }
+async function pollPk(){ if(pkBusy || pkPause || document.hidden) return; pkBusy=true;
+  try{ const j=await (await fetch('/packets.json?max=600&since='+pkSeq)).json();
+    if(j.seq<pkSeq){ pkSeq=0; pkLast=null; pkl.textContent=''; pkN=0; }
+    document.getElementById('pkgon').checked=!!(j.game&&j.game.want);
+    const w=document.getElementById('pkw').checked, g=document.getElementById('pkg').checked, o1=document.getElementById('pk1').checked;
+    const sum=(j.summary||[]).filter(x=>(x.layer==='wire'?w:g)).sort((a,b)=>b.per_s-a.per_s);
+    document.querySelector('#pks tbody').innerHTML=sum.length?sum.map(x=>`<tr><td>${E(x.layer)}</td><td>${x.dir==='rx'?'<span class="pk-rx">rx</span>':'<span class="pk-tx">tx</span>'}</td><td>${E(x.type)}</td><td>${pkPeer(x)}</td><td class="n">${x.per_s.toFixed(1)}</td><td class="n">${pkFmtB(x.bytes_per_s)}</td></tr>`).join(''):'<tr><td colspan="6" class="note">nothing in the last 10 s</td></tr>';
+    document.getElementById('pkst').textContent=`the last ${j.summary_s} s`+(j.on?'':' (the packet log is off: PELOAD_PKTLOG=0)');
+    const gc=j.game_counts||[]; document.querySelector('#pkg2 tbody').innerHTML=gc.length?gc.map(x=>`<tr><td class="pk-g">${E(x.type)}</td><td class="n">${x.tx}</td><td class="n">${x.rx}</td></tr>`).join(''):`<tr><td colspan="3" class="note">${j.game&&j.game.on?'no halo3 messages yet':'halo3 message types: off'}</td></tr>`;
+    // the log, newest first; repeats of the same (layer, direction, type, peer) in a row become one line with a count
+    const evs=(j.events||[]).filter(e=>(e.layer==='wire'?w:g) && (o1 || e.type!=='quic-1rtt'));
+    if(!pkN && !evs.length && (j.events||[]).length) pkl.textContent='only connected QUIC (1-RTT) traffic so far: tick "1-RTT in the log" to list it';
+    for(const e of evs){ const k=e.layer+e.dir+e.type+(e.peer||'');
+      if(pkLast && pkLast.k===k && pkl.firstElementChild){ pkLast.n++; pkLast.e=e; pkl.firstElementChild.outerHTML=pkRow(e,pkLast.n); continue; }
+      if(!pkN) pkl.textContent=''; pkLast={k,e,n:1}; pkl.insertAdjacentHTML('afterbegin',pkRow(e,1)); pkN++; }
+    while(pkl.childElementCount>500){ pkl.lastElementChild.remove(); pkN--; }
+    pkSeq=j.seq; }catch(err){}
+  pkBusy=false; }
+document.getElementById('pkp').addEventListener('click',e=>{ pkPause=!pkPause; e.target.textContent=pkPause?'Resume':'Pause'; });
+document.getElementById('pkgon').addEventListener('change',async e=>{ const j=await ovPost('do=pktgame&on='+(e.target.checked?1:0)); if(!j.ok) e.target.checked=!e.target.checked; });
+for(const id of ['pkw','pkg','pk1']) document.getElementById(id).addEventListener('change',()=>{ pkl.textContent=''; pkN=0; pkLast=null; pkSeq=Math.max(0,pkSeq-600); pollPk(); });
+setInterval(pollPk,1000); pollPk();
 // ---- live snapshots ----
 const es=new EventSource('/events');
 let gameInst=null;   // the game process this page shows; a new one (the game was restarted) -> reload the page for it

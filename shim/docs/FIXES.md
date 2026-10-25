@@ -158,7 +158,23 @@ patch variants by signature (section 16; shim/docs/patch-addresses.md).
   CreateFileA import is not kernel32's". How: CreateFileA, ReadFileEx, CreateIoCompletionPort added to resolve_impl,
   so both paths return one pointer. (10-12 e6e2b02)
 - **Delay imports bound** — import binder. Why: no `__delayLoadHelper2`, so halo3's dxgi/d3d11 delay slots were NULL.
-  How: delay-import tables are bound up front like normal imports. (10-11 2a8f65e)
+  How: delay-import tables are bound up front like normal imports. (10-11 2a8f65e) Except halo3's bink2w64.dll since
+  2026-10-24 (next entry).
+- **halo3's Bink delay imports left to its own delay loader: mods' movies** (2026-10-24) — `bind_delay_imports` (now given the
+  module's name), `PELOAD_BINK_SELFTEST`. Why: every launch logged "Mods' movies are unavailable: Bink import slots differ from
+  the supported build; refused" (client 0.9.20 .. 0.9.23, client and dedicated server). The client checks that halo3's 12
+  bink2w64.dll delay slots (halo3+0xa39e38 .. +0xa39e90) still hold their own delay thunks (the table at exe+0x2296938 in
+  0.9.23, slot -> expected thunk, e.g. BinkClose halo3+0xa39e88 -> halo3+0x620c2a) -- the state of an untouched DLL on
+  Windows -- before it wraps BinkClose (exe+0x71c850) and patches halo3's movie code (15 bytes at halo3+0x18cf04) to play a
+  mod's `bink/*.bik`; a headless server checks them before pointing every slot at `xor eax,eax; ret` ("Movies are skipped:
+  Bink is never loaded"). Our up-front binding had replaced the thunks, and since the client loads MCC's bink2w64.dll only
+  later (LoadLibraryExW of MCC\Binaries\Win64\bink2w64.dll), with logging stubs that return 0. How: for halo3.dll (Halo 3
+  profile) the bink2w64.dll delay descriptor is skipped: the thunks call halo3's own __delayLoadHelper2 -> our LoadLibraryExA
+  (which returns the already loaded guest bink2w64.dll by name) + GetProcAddress (its export). Checked (0.9.23): no refusal;
+  `PELOAD_BINK_SELFTEST=1` calls BinkOpen on a missing file through halo3's slot on the engine thread -> NULL, and the slot then
+  points into bink2w64.dll (PASS); the BinkClose slot holds the client's wrapper. No mod movie was available to watch one play
+  (no .bik on disk; MCC's own movies aren't in the depots we have). The same check shape exists for XAudio2 (its four slots
+  hold halo3+0x60c416 .. thunks on disk), which is why the `xaudio` signature patches exist. Old: `PELOAD_BINK_EAGER=1`.
 - **Guest-to-guest imports** — Why: imports of one guest DLL from another (l360/q10 -> WavesLibDLL) bound to stubs.
   How: they bind to the real exports. (10-16 a574219)
 - **GetModuleFileNameW/A, GetModuleHandleExW, GetModuleHandleW for guest DLLs** — Why: WaveShell-Xbox.dll looked for
@@ -1042,6 +1058,13 @@ patch variants by signature (section 16; shim/docs/patch-addresses.md).
 - **Real HLSL compiler, opt-in** (2026-10-20) — `i_D3DCompile`, `PELOAD_REAL_D3DCOMPILE=1`: MCC's own D3DCompiler_47.dll (loaded as a guest
   DLL now that its msvcrt imports exist) compiles the source to real DXBC for the translator. Off by default (Reclaimer's video
   shaders are only looked at as blobs; its menu grading shader keeps its own path).
+- **halo3's video shaders compiled for real** (2026-10-24) — `i_D3DCompile`. Why: halo3 compiles four HLSL shaders at start
+  (two CopyToScreen PS, YUVToRGB PS, the quad VS: what its Bink movies are drawn with) and got 256-byte code-less placeholders,
+  so a movie would have drawn nothing; and its D3DReflect / CreateInputLayout calls on them had nothing to read. How: for
+  Halo 3's vs_ / ps_ targets MCC's own D3DCompiler_47.dll compiles them (as for Halo 2); MCC keeps it in its root folder, which
+  no bare-name LoadLibrary finds for halo3, so it is looked for beside halo3.dll and one folder up. The menu grading compute
+  shader keeps its own recognised path. Checked: all four compile and translate (350-640 bytes of GLSL), ~90 ms at start with
+  the DLL load, menu unchanged (619 draws, 18.6 s). Old: `PELOAD_REAL_D3DCOMPILE=0`.
 - **The translator trusted shader bytecode from map files** (security review 2026-10-19; harnesses with AddressSanitizer
   proved 1-3) — dxbc2glsl.c, dxbc_cpu.c, peload.c. Why: halo3 hands every shader of every map (Workshop and server maps too)
   to `dg_translate` at map load; on Windows the D3D11 runtime validates and checksums DXBC first, here nothing did. Found and
@@ -1621,6 +1644,23 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   hb_current_map call decides again) and a pending flag; the next snapshot (<= 100 ms) takes the pending flag before its map
   lookup, so the lookup it posts with is the fresh one; the event keeps the loading screen's time. Checked live (0.9.23,
   Valhalla): "Match started: riverworld" = the snapshot's map; port-verify.sh checks it ("feed map").
+- **Packet log: the type of every datagram and connection** (2026-10-24; user: "shim the QUIC datagrams and add a packet
+  type log, not content, just type to and from and any flags ... to the forensic viewer and as a log window in the http
+  screen; if it bogs stuff down, then don't") — shim/src/pktlog.c (new; included after forensic.c), call sites in peload.c
+  `i_ws2_sendto` / `recvfrom` / `WSASendMsg` / `WSARecvMsg` (datagrams), `connect` / `send` / `recv` / `WSASend` /
+  `closesocket` (TCP), `getaddrinfo` / `GetAddrInfoW` (host names), `hb_frame_hook` (`pk_game_tick`); stats.c GET
+  /packets.json + POST do=pktgame; forensic.c FXI_PACKETS -> packets.jsonl; the stats page's Packets window and the
+  forensic viewer's Packets panel. How: the wire layer reads only what the first bytes show without decryption (QUIC long
+  header type and version, short header = 1-RTT with the spin / greased flags; plaintext tags; TCP connect / close with
+  the bytes between) into a 16384-record ring (64-byte records, one atomic sequence number, readers check it before and
+  after copying); the game layer (opt-in) swaps halo3's message-table encode / decode pointers (halo3+0x46b6e98, 46
+  types; +0x20 encode = send, +0x28 decode = receive, checked on ping) for thunks that log the type and jump on (data
+  only; installed / removed / re-wrapped at the frame safe point; the client patches code inside some encoders -- its
+  table at exe+0x269625c, bit widths -- never the pointers). Cost measured: 26 ns per datagram record
+  (`PELOAD_PKTLOG_BENCH=1`). Checked live (0.9.23 client joined to our dedicated server): client ~85 rx / 78 tx 1-RTT
+  datagrams a second, the server the mirror image with the client's port; the game layer logged the join (connect-request
+  rx, connect-establish, join-request tx, peer-establish, time-synchronize, view-establishment, membership-update /
+  parameters-update rx ...). Off: `PELOAD_PKTLOG=0`; the game layer starts with `PELOAD_PKTLOG_GAME=1` or the page switch.
 - **Zones never drawn without occlusion** — `hbz_gpu`. Why: a frame that met the depth readback mid-update drew every zone
   surface unoccluded (push-back ceilings flashed over the view). How: always the last complete depth copy and its
   camera; none = no zones. (10-18 3eb0680)
@@ -2005,9 +2045,8 @@ Numbers are from the commit messages; PERF-PLAN.md has the measurements. Compare
   restarted servers in a loop) -- don't use it there; `PELOAD_STDERR_TEE` instead.
 - **CreateProcessW applies the child's environment with setenv() in the loader itself** (SteamAppId stays set after the
   first Workshop helper; GUESSED harmless; workshop-helper.md section 6).
-- **halo3's 4 Bink video shaders stay no-ops** (CopyToScreen / YUVToRGB PS + their VS, compiled from HLSL at start):
-  nothing plays them -- Halo 3 ships no .bik files (MCC's .bk2 movies belong to MCC's own shell) and the client refuses mod
-  movies ("Bink import slots differ"). The 5th runtime shader (the client's menu grading) runs since 10-18 (section 11).
+- ~~**halo3's 4 Bink video shaders stay no-ops**~~ -- superseded 2026-10-24: the client's mod-movie path works (section 1,
+  "halo3's Bink delay imports") and the four shaders are compiled for real (section 11, "Real HLSL compiler").
   `PELOAD_REFUSE_EMPTY_SHADER=1` refuses code-less blobs with E_INVALIDARG as D3D11 would.
 - **Loader path handling is not a sandbox** (security review 2026-10-19): `win2unix` does not confine `..` to the drive,
   maps Z:\ to / and other letters to drive_x; GetFinalPathNameByHandleW returns the unresolved path (Rust canonicalize is

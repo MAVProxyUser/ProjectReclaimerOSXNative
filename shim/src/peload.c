@@ -2665,6 +2665,7 @@ static int rtgrade_parse(const char*src,uint64_t n,float*k){ const char*e=src+n;
     return 1; }
 static void* MSABI i_LoadLibraryExW(const uint16_t *name, void *h, uint32_t fl);   // (below)
 static void *export_lookup(uint8_t *base, const char *want);
+static uint8_t *load_guest(const char *path, const char *name); // fwd (defined near main)
 static int MSABI i_D3DCompile(const void*src,uint64_t srcsz,const char*name,const void*defs,void*inc,
         const char*entry,const char*target,uint32_t f1,uint32_t f2,void**ppCode,void**ppErr){
     (void)src;(void)srcsz;(void)name;(void)defs;(void)inc;(void)entry;(void)target;(void)f1;(void)f2;
@@ -2684,14 +2685,25 @@ static int MSABI i_D3DCompile(const void*src,uint64_t srcsz,const char*name,cons
     // D3DCompiler_47.dll (in MCC's folder; it runs as a guest DLL since its msvcrt imports exist, win32x.c) compiles the source
     // to real DXBC, which the translator turns into GLSL like any engine shader. Off by default: Reclaimer's video shaders are
     // only ever looked at as blobs, and its grading shader is the case above.
-    if(game_default_on("PELOAD_REAL_D3DCOMPILE",GAME_H2)){ static void*real; static int tried;   // (on by default for Halo 2)
+    // Halo 3 (2026-10-24): its four video-display shaders (CopyToScreen x2, YUVToRGB, the quad VS -- what Bink movies are
+    // drawn with) are compiled for real too, so a mod's movie is drawn instead of placeholders; the grading compute shader
+    // keeps its own path above. MCC keeps the compiler in its root folder, which no bare-name load finds for halo3: it is
+    // looked for beside halo3.dll and one folder up. PELOAD_REAL_D3DCOMPILE=0 = the old placeholders.
+    { const char*e=getenv("PELOAD_REAL_D3DCOMPILE"); int on=e&&*e ? strcmp(e,"0")!=0 : (game_is(GAME_H2) || (game_is(GAME_H3) && target && strncmp(target,"cs_",3)));
+      if(on){ static void*real; static int tried;   // (on by default for Halo 2, and for Halo 3's vs / ps)
         if(!tried){ tried=1; static const uint16_t dn[]={'D','3','D','C','o','m','p','i','l','e','r','_','4','7','.','d','l','l',0};
-            uint8_t*b=i_LoadLibraryExW(dn,0,0); if(b && b!=g_base) real=export_lookup(b,"D3DCompile");
+            uint8_t*b=i_LoadLibraryExW(dn,0,0);
+            for(int m=0;m<g_nmods && (!b || b==g_base);m++) if(g_mods[m].name && !strcasecmp(g_mods[m].name,"halo3.dll") && g_mods[m].path){
+                for(int up=0;up<2 && (!b || b==g_base);up++){ char d[2048]; snprintf(d,sizeof d,"%s",g_mods[m].path);
+                    for(int u=0;u<=up;u++){ char*sl=strrchr(d,'/'); if(sl) *sl=0; }
+                    char f[2300]; snprintf(f,sizeof f,"%s/d3dcompiler_47.dll",d); if(access(f,R_OK)) continue;
+                    g_prefer_base=1; b=load_guest(f,strdup("d3dcompiler_47.dll")); g_prefer_base=0; } }
+            if(b && b!=g_base) real=export_lookup(b,"D3DCompile");
             char m[120]; int k=snprintf(m,sizeof m,"  [D3DCompile] real compiler %s\n",real?"loaded (MCC's D3DCompiler_47.dll)":"NOT found: placeholder blobs"); (void)!write(2,m,k); }
         if(real){ typedef int (MSABI *D3DC)(const void*,uint64_t,const char*,const void*,void*,const char*,const char*,uint32_t,uint32_t,void**,void**);
             int hr=((D3DC)real)(src,srcsz,name,defs,inc,entry,target,f1,f2,ppCode,ppErr);
             if(hr<0){ char m[160]; int k=snprintf(m,sizeof m,"  [D3DCompile] %s %s failed 0x%08x\n",entry?entry:"?",target?target:"?",(unsigned)hr); (void)!write(2,m,k); }
-            return hr; } }
+            return hr; } } }
     // placeholder DXBC container (magic + zeroed header); real bytecode isn't
     // needed because there's no D3D device to consume it — the engine only reads
     // the blob's pointer/size here.
@@ -2934,7 +2946,11 @@ static int MSABI i_ws2_WSACleanup(void){ return 0; }
 static int MSABI i_ws2_WSAGetLastError(void){ return t_wsa_err; }
 static void MSABI i_ws2_WSASetLastError(int e){ t_wsa_err=e; }
 static void net_tracef(const char*fmt,...);
-static WSASOCK MSABI i_ws2_socket(int af,int type,int proto){ int fd=socket(af==23?AF_INET6:af,type,proto); if(fd<0){ws2_err(errno);return WSA_INVALID;} net_tracef("[net] socket(af=%d,type=%d,proto=%d) -> fd=%d\n",af,type,proto,fd); return (WSASOCK)(unsigned)fd; }
+// packet log (pktlog.c, included after forensic.c): the type of every datagram / connection, never the content
+enum { PK_TX=0, PK_RX=1 };
+static void pk_wire(int dir,int fd,const void*ss,const void*buf,long n); static void pk_tcp_connect(int fd,const void*ss); static void pk_tcp_bytes(int fd,int dir,long n);
+static void pk_close(int fd); static void pk_sock_new(int fd); static void pk_dns(const char*name,const struct addrinfo*ai);
+static WSASOCK MSABI i_ws2_socket(int af,int type,int proto){ int fd=socket(af==23?AF_INET6:af,type,proto); if(fd<0){ws2_err(errno);return WSA_INVALID;} net_tracef("[net] socket(af=%d,type=%d,proto=%d) -> fd=%d\n",af,type,proto,fd); pk_sock_new(fd); return (WSASOCK)(unsigned)fd; }
 // WSADuplicateSocketW + WSASocketW(FROM_PROTOCOL_INFO): Rust's socket try_clone() duplicates a socket
 // this way (the dedicated server clones its sockets). WSAPROTOCOL_INFOW (628 B): iAddressFamily @76,
 // iSocketType @88, iProtocol @92; we mark dwCatalogEntryId @36 and keep the source fd in
@@ -2957,7 +2973,7 @@ static WSASOCK MSABI i_ws2_WSASocketW(int af,int type,int proto,void*pi,unsigned
             net_tracef("[net] WSASocketW(dup of fd=%d) -> fd=%d\n",(int)src,nfd); return (WSASOCK)(unsigned)nfd; }
         memcpy(&af,(uint8_t*)pi+76,4); memcpy(&type,(uint8_t*)pi+88,4); memcpy(&proto,(uint8_t*)pi+92,4); }
     return i_ws2_socket(af,type,proto); }
-static int MSABI i_ws2_closesocket(WSASOCK s){ net_tracef("[net] closesocket(fd=%d)\n",(int)s); return close((int)s)==0?0:(ws2_err(errno),-1); }
+static int MSABI i_ws2_closesocket(WSASOCK s){ net_tracef("[net] closesocket(fd=%d)\n",(int)s); pk_close((int)s); return close((int)s)==0?0:(ws2_err(errno),-1); }
 static int MSABI i_ws2_bind(WSASOCK s,const void*name,int nl){ struct sockaddr_storage ss; int bl=sa_w2b(name,nl,&ss); if(!bl){ws2_err(EINVAL);return -1;}
     // Windows bind defaults to exclusive-but-reusable for the loopback browser port; without
     // SO_REUSEADDR a quick worker restart hits EADDRINUSE on the TIME_WAIT'd port and the local
@@ -3027,6 +3043,7 @@ static int MSABI i_ws2_connect(WSASOCK s,const void*name,int nl){ struct sockadd
     // locally (no internet master registration). Keeps all traffic on loopback.
     if(getenv("PELOAD_LOOPBACK_ONLY") && ss.ss_family==AF_INET){ struct sockaddr_in*si=(void*)&ss;
         if((ntohl(si->sin_addr.s_addr)>>24)!=127){ net_tracef("[net] connect(fd=%d,%s:%d) -> BLOCKED(loopback-only)\n",(int)s,ips,port); ws2_err(ECONNREFUSED); return -1; } }
+    { int ty=0; socklen_t tl=sizeof ty; if(!getsockopt((int)s,SOL_SOCKET,SO_TYPE,&ty,&tl) && ty==SOCK_STREAM) pk_tcp_connect((int)s,&ss); }
     if(connect((int)s,(struct sockaddr*)&ss,bl)<0){ int e=errno;
         // On a non-blocking socket connect() returns EINPROGRESS (first call) or
         // EALREADY (subsequent). Windows reports BOTH as WSAEWOULDBLOCK (10035);
@@ -3059,11 +3076,11 @@ static int udp_blocked(const struct sockaddr_storage*ss){ static int nb=-1; stat
     if(nb<0){ int n=0; const char*e=getenv("PELOAD_UDP_BLOCK"); while(e&&*e&&n<8){ int p=atoi(e); if(p>0&&p<65536) bp[n++]=(uint16_t)p; e=strchr(e,','); if(e) e++; } nb=n; }
     if(!nb||ss->ss_family!=AF_INET) return 0; uint16_t p=ntohs(((const struct sockaddr_in*)ss)->sin_port); for(int i=0;i<nb;i++) if(bp[i]==p) return 1; return 0; }
 static int MSABI i_ws2_sendto(WSASOCK s,const char*buf,int len,int fl,const void*to,int tl){ struct sockaddr_storage ss; if(to)peer_gip_rec((int)s,to,tl); t_sa_send=1; int bl=to?sa_w2b(to,tl,&ss):0; t_sa_send=0; if(bl && udp_blocked(&ss)){ udp_tracef("TX-BLOCKED",s,&ss,buf,len); return len; }
-    ssize_t r=sendto((int)s,buf,len,fl,bl?(struct sockaddr*)&ss:0,bl); if(r<0){ws2_err(errno);if(getenv("PELOAD_TRACE_UDP")){char b[96];int k=snprintf(b,sizeof b,"  [udp] TX fd=%d FAIL errno=%d\n",(int)s,errno);(void)!write(2,b,k);}return -1;} if(bl)udp_tracef("TX",s,&ss,buf,(int)r); return (int)r; }
+    ssize_t r=sendto((int)s,buf,len,fl,bl?(struct sockaddr*)&ss:0,bl); if(r<0){ws2_err(errno);if(getenv("PELOAD_TRACE_UDP")){char b[96];int k=snprintf(b,sizeof b,"  [udp] TX fd=%d FAIL errno=%d\n",(int)s,errno);(void)!write(2,b,k);}return -1;} if(bl)udp_tracef("TX",s,&ss,buf,(int)r); pk_wire(PK_TX,(int)s,bl?&ss:0,buf,(long)r); return (int)r; }
 static __thread uint32_t t_rx_ip; static __thread uint16_t t_rx_port;   // the last datagram's source on this thread (stats.c voice source tally)
 static int MSABI i_ws2_recvfrom(WSASOCK s,char*buf,int len,int fl,void*from,int*fl2){ struct sockaddr_storage ss; socklen_t sl; ssize_t r;
     for(;;){ sl=sizeof ss; r=recvfrom((int)s,buf,len,fl,(struct sockaddr*)&ss,&sl); if(r<0){ws2_err(errno);return -1;} if(!udp_blocked(&ss)) break; udp_tracef("RX-BLOCKED",s,&ss,buf,(int)r); }
-    udp_tracef("RX",s,&ss,buf,(int)r);
+    udp_tracef("RX",s,&ss,buf,(int)r); pk_wire(PK_RX,(int)s,&ss,buf,(long)r);
     if(ss.ss_family==AF_INET){ t_rx_ip=((struct sockaddr_in*)&ss)->sin_addr.s_addr; t_rx_port=ntohs(((struct sockaddr_in*)&ss)->sin_port); }
     { extern void st_voice_wiretally(const char*buf,long n,uint32_t ip,uint16_t port); if(r>=8 && ss.ss_family==AF_INET && (buf[0]=='M'||buf[0]=='L') && buf[1]=='C' && buf[3]=='1')
         st_voice_wiretally(buf,(long)r,((struct sockaddr_in*)&ss)->sin_addr.s_addr,ntohs(((struct sockaddr_in*)&ss)->sin_port)); }
@@ -3075,11 +3092,11 @@ static void wire_dump(const char*dir,int fd,const char*buf,int n){ if(!getenv("P
     for(int i=0;i<m&&k<1200;i++) k+=snprintf(o+k,sizeof o-k,"%02x",(unsigned char)buf[i]);
     k+=snprintf(o+k,sizeof o-k," | "); for(int i=0;i<m&&k<2300;i++){ unsigned char c=buf[i]; o[k++]=(c>=32&&c<127)?c:'.'; }
     o[k++]='\n'; (void)!write(2,o,k); }
-static int MSABI i_ws2_send(WSASOCK s,const char*buf,int len,int fl){ ssize_t r=send((int)s,buf,len,fl); if(r<0){ws2_err(errno);net_tracef("[net] send(fd=%d,len=%d) -> errno=%d wsa=%d\n",(int)s,len,errno,t_wsa_err);return -1;} net_tracef("[net] send(fd=%d,len=%d) -> %d\n",(int)s,len,(int)r); wire_dump("TX",(int)s,buf,(int)r); return (int)r; }
+static int MSABI i_ws2_send(WSASOCK s,const char*buf,int len,int fl){ ssize_t r=send((int)s,buf,len,fl); if(r<0){ws2_err(errno);net_tracef("[net] send(fd=%d,len=%d) -> errno=%d wsa=%d\n",(int)s,len,errno,t_wsa_err);return -1;} net_tracef("[net] send(fd=%d,len=%d) -> %d\n",(int)s,len,(int)r); wire_dump("TX",(int)s,buf,(int)r); pk_tcp_bytes((int)s,PK_TX,(long)r); return (int)r; }
 static int MSABI i_ws2_recv(WSASOCK s,char*buf,int len,int fl){ ssize_t r=recv((int)s,buf,len,fl);
     { static int vs=-1; if(vs<0) vs=getenv("PELOAD_VOICE_SRCSTAT")?1:0;   // (diagnostic) a connected socket's peer = this datagram's source
       if(vs && r>0){ struct sockaddr_in pa; socklen_t pl=sizeof pa; if(!getpeername((int)s,(struct sockaddr*)&pa,&pl) && pa.sin_family==AF_INET){ t_rx_ip=pa.sin_addr.s_addr; t_rx_port=ntohs(pa.sin_port); } } }
-    if(r<0){ws2_err(errno);net_tracef("[net] recv(fd=%d,len=%d) -> errno=%d wsa=%d\n",(int)s,len,errno,t_wsa_err);return -1;} net_tracef("[net] recv(fd=%d,len=%d) -> %d\n",(int)s,len,(int)r); wire_dump("RX",(int)s,buf,(int)r); return (int)r; }
+    if(r<0){ws2_err(errno);net_tracef("[net] recv(fd=%d,len=%d) -> errno=%d wsa=%d\n",(int)s,len,errno,t_wsa_err);return -1;} net_tracef("[net] recv(fd=%d,len=%d) -> %d\n",(int)s,len,(int)r); wire_dump("RX",(int)s,buf,(int)r); pk_tcp_bytes((int)s,PK_RX,(long)r); return (int)r; }
 static int MSABI i_ws2_shutdown(WSASOCK s,int how){ return shutdown((int)s,how)==0?0:(ws2_err(errno),-1); }
 static int MSABI i_ws2_getsockname(WSASOCK s,void*name,int*nl){ struct sockaddr_storage ss; socklen_t sl=sizeof ss; if(getsockname((int)s,(struct sockaddr*)&ss,&sl)<0){ws2_err(errno);return -1;} sa_b2w((struct sockaddr*)&ss,name,nl); return 0; }
 static int MSABI i_ws2_getpeername(WSASOCK s,void*name,int*nl){ struct sockaddr_storage ss; socklen_t sl=sizeof ss; if(getpeername((int)s,(struct sockaddr*)&ss,&sl)<0){ws2_err(errno);return -1;} sa_b2w((struct sockaddr*)&ss,name,nl); return 0; }
@@ -3191,7 +3208,7 @@ static int MSABI i_ws2_getaddrinfo(const char* node,const char* service,const Wi
     if(g_ai_trace<0) g_ai_trace=getenv("PELOAD_TRACE_NET")?1:0;
     if(g_ai_trace){ char m[256]; snprintf(m,sizeof m,"[net] getaddrinfo(%s,%s) rc=%d%s\n",node?node:"(null)",service?service:"(null)",rc,rc?" FAIL":""); ws(m); }
     if(rc!=0||!br){ if(br)freeaddrinfo(br); return 11001; /*WSAHOST_NOT_FOUND*/ }
-    WinAI* head=ai_build(br,0); freeaddrinfo(br);
+    pk_dns(node,br); WinAI* head=ai_build(br,0); freeaddrinfo(br);
     if(!head) return 11001; if(resW)*resW=head; return 0; }
 static void MSABI i_ws2_freeaddrinfo(WinAI* w){ ai_free(w); }
 // GetAddrInfoW: node/service are UTF-16; canonname out is wide.
@@ -3206,7 +3223,7 @@ static int MSABI i_ws2_GetAddrInfoW(const uint16_t* node,const uint16_t* service
     if(g_ai_trace<0) g_ai_trace=getenv("PELOAD_TRACE_NET")?1:0;
     if(g_ai_trace){ char m[256]; snprintf(m,sizeof m,"[net] GetAddrInfoW(%s,%s) rc=%d%s\n",node?nb:"(null)",service?sb:"(null)",rc,rc?" FAIL":""); ws(m); }
     if(rc!=0||!br){ if(br)freeaddrinfo(br); return 11001; }
-    WinAI* head=ai_build(br,1); freeaddrinfo(br);
+    if(node) pk_dns(nb,br); WinAI* head=ai_build(br,1); freeaddrinfo(br);
     if(!head) return 11001; if(resW)*resW=head; return 0; }
 static void MSABI i_ws2_FreeAddrInfoW(WinAI* w){ ai_free(w); }
 // WSASend: gathered send over a connected socket. WSABUF{ULONG len@0; char* buf@8} = 16B.
@@ -3217,7 +3234,7 @@ static int MSABI i_ws2_WSASend(WSASOCK s,uint8_t*bufs,uint32_t cnt,uint32_t*sent
         uint32_t off=0; while(off<len){ ssize_t k=send((int)s,p+off,len-off,0); if(k<0){ ws2_err(errno); err=1; break; } off+=(uint32_t)k; }
         total+=off; if(err) break; }
     net_tracef("[net] WSASend(fd=%d,bufs=%u) -> %u%s\n",(int)s,cnt,total,err?" ERR":"");
-    if(sent)*sent=total;
+    if(sent)*sent=total; pk_tcp_bytes((int)s,PK_TX,(long)total);
     if(ov){ *(uint64_t*)(ov+0)=0; *(uint64_t*)(ov+8)=total; iocp_post_fd((int)s,total,ov); return err&&total==0?-1:0; }
     if(err&&total==0) return -1; return 0; }
 // WSASendMsg / WSARecvMsg: the native-UDP private-bridge transport uses these (both IMPORTED), NOT
@@ -3238,7 +3255,7 @@ static int MSABI i_ws2_WSASendMsg(WSASOCK s,uint8_t*msg,uint32_t flags,uint32_t*
     struct sockaddr_storage ss; t_sa_send=1; int bl=name?sa_w2b(name,namelen,&ss):0; t_sa_send=0;
     ssize_t r=sendto((int)s,gbuf,tot,0,bl?(struct sockaddr*)&ss:0,bl);
     if(r<0){ ws2_err(errno); if(ov){*(uint64_t*)(ov+0)=0;*(uint64_t*)(ov+8)=0;} return -1; }
-    if(sent)*sent=(uint32_t)r; if(bl)udp_tracef("TX",s,&ss,gbuf,(int)r);
+    if(sent)*sent=(uint32_t)r; if(bl)udp_tracef("TX",s,&ss,gbuf,(int)r); pk_wire(PK_TX,(int)s,bl?&ss:0,gbuf,(long)r);
     if(ov){ *(uint64_t*)(ov+0)=0; *(uint64_t*)(ov+8)=(uint64_t)r; iocp_post_fd((int)s,(uint64_t)r,ov); }
     return 0; }
 static int MSABI i_ws2_WSARecvMsg(WSASOCK s,uint8_t*msg,uint32_t*recvd,uint8_t*ov,void*cr){
@@ -3258,7 +3275,7 @@ static int MSABI i_ws2_WSARecvMsg(WSASOCK s,uint8_t*msg,uint32_t*recvd,uint8_t*o
     if(recvd)*recvd=(uint32_t)r;
     if(name&&namelenp){ int wl=*namelenp; sa_b2w((struct sockaddr*)&ss,name,&wl); *namelenp=wl; peer_gip_restore((int)s,name); }
     *(uint32_t*)(msg+48)=0; /* dwFlags out */ *(uint32_t*)(msg+32)=0; /* Control.len out (no cmsg) */
-    udp_tracef("RX",s,&ss,rbuf,(int)r);
+    udp_tracef("RX",s,&ss,rbuf,(int)r); pk_wire(PK_RX,(int)s,&ss,rbuf,(long)r);
     if(ov){ *(uint64_t*)(ov+0)=0; *(uint64_t*)(ov+8)=(uint64_t)r; iocp_post_fd((int)s,(uint64_t)r,ov); }
     return 0; }
 static void* ws2_real_name(const char*n){
@@ -9417,6 +9434,7 @@ static int tls_blocks(uint32_t idx,void**out,int max){ int n=0; if(idx>=128) ret
 #include "hitbox.c"
 #include "stats.c"
 #include "forensic.c"   // forensic archive of voice / chat / events + its viewer (/forensics); uses stats.c
+#include "pktlog.c"     // packet log: the type of every datagram / connection (/packets.json, packets.jsonl); uses both
 #include "nav.c"
 // ---- D3D object lifetime (backlog 27) ----------------------------------------------------------------------------------
 // D3D11 keeps an object alive while the pipeline has it bound, and the GL side (the submission thread, compute jobs) may
@@ -11462,18 +11480,29 @@ static void bind_imports(uint8_t *base, OPT64 *opt){
     }
 }
 
-// Bind DELAY imports too. We don't implement __delayLoadHelper2, so an unbound
-// delay slot stays a delay-thunk that resolves to NULL -> `call [slot]` to NULL
-// crashes (e.g. the engine's dxgi.dll!CreateDXGIFactory1 probe). Resolve each
-// delay import up front, same as normal imports.
-static void bind_delay_imports(uint8_t *base, OPT64 *opt){
+// Bind DELAY imports too. An unbound delay slot holds the DLL's own delay thunk, which calls its __delayLoadHelper2 ->
+// LoadLibraryExA + GetProcAddress on the first call; for the DLLs that exist here only as the loader's own code (dxgi,
+// d3d11, ...) that resolved to NULL -> `call [slot]` to NULL crashed (the engine's dxgi.dll!CreateDXGIFactory1 probe).
+// So each delay import is resolved up front, same as normal imports -- except halo3's bink2w64.dll ones (2026-10-24):
+// the Reclaimer client checks that those slots still hold their delay thunks ("Bink import slots differ from the
+// supported build; refused" otherwise), then wraps BinkClose and patches halo3's movie code for mods' movies; it loads
+// MCC's real bink2w64.dll itself (LoadLibraryExW, a guest DLL here), so halo3's thunks resolve to it on first use. Bound
+// up front (before the client had loaded it) they were logging stubs returning 0. PELOAD_BINK_EAGER=1 = old.
+static void* g_bink_open_slot, *g_bink_close_slot;   // halo3's BinkOpen / BinkClose delay slots (PELOAD_BINK_SELFTEST)
+static void bind_delay_imports(uint8_t *base, OPT64 *opt, const char *modname){
     uint32_t drva=opt->Dir[DIR_DELAY].VA; if(!drva) return;
     DELAYDESC *dd=(DELAYDESC*)(base+drva);
+    int h3=modname && !strcasecmp(modname,"halo3.dll") && (game_is(GAME_H3)||game_is(GAME_OTHER));
     for(; dd->Name; dd++){
         const char *dll=(char*)(base+dd->Name);
         uint64_t *iat=(uint64_t*)(base+dd->IAT);
         uint64_t *intb=(uint64_t*)(base+dd->INT);
         int is_ws2 = name_is_ws2(dll); int is_xa = name_has(dll,"xaudio");
+        if(h3 && !strcasecmp(dll,"bink2w64.dll") && dd->Attrs==1 && !getenv("PELOAD_BINK_EAGER")){   // (RVA-based descriptor)
+            int n=0; for(int i=0; intb[i]; i++){ n++; if(intb[i]>>63) continue; const char*fn=(char*)(base+(uint32_t)intb[i]+2);
+                if(!strcmp(fn,"BinkOpen")) g_bink_open_slot=&iat[i]; if(!strcmp(fn,"BinkClose")) g_bink_close_slot=&iat[i]; }
+            char m[120]; int k=snprintf(m,sizeof m,"  [bink] %s: %d bink2w64.dll delay slots left to its own delay loader\n",modname,n); (void)!write(2,m,k);
+            continue; }
         for(int i=0; intb[i]; i++){
             const char *fn = (intb[i]>>63)? 0 : (char*)(base+(uint32_t)intb[i]+2);
             if(!fn){ char ob[24]; snprintf(ob,sizeof ob,"#%u",(unsigned)(intb[i]&0xffff)); fn=strdup(ob); }
@@ -11533,7 +11562,7 @@ static uint8_t *load_guest(const char *path, const char *name){
             if(access(dp,R_OK)!=0){ DIR*dd=opendir(dir); struct dirent*de; if(dd){ while((de=readdir(dd))) if(!strcasecmp(de->d_name,dn)){ snprintf(dp,sizeof dp,"%s%s",dir,de->d_name); break; } closedir(dd); } }
             if(access(dp,R_OK)==0){ ws("  [deps] "); ws(name); ws(" needs "); ws(dn); ws(": loading it first\n"); load_guest(dp,strdup(dn)); } } }
     bind_imports(base,opt);
-    bind_delay_imports(base,opt);   // halo3.dll delay-loads dxgi/d3d11/etc.
+    bind_delay_imports(base,opt,name);   // halo3.dll delay-loads dxgi/d3d11/etc.
     set_protections(base,coff,opt);
     if(g_nmods<(int)(sizeof g_mods/sizeof g_mods[0])){ g_mods[g_nmods].name=name; g_mods[g_nmods].base=base; g_mods[g_nmods].path=strdup(path); g_nmods++; }
     // Static TLS for this DLL (halo3, CRT): give it its own index + per-thread block
@@ -12144,9 +12173,28 @@ static int entry_hook_tail(uint8_t*site,const uint8_t*pro,int len,void*fn,const 
 void __attribute__((ms_abi)) hb_on_delete(uint32_t handle);
 // Entry hook on halo3's main_loop_body (halo3+0xb2250): once per frame on the engine main thread, before the frame's
 // ticks -- the safe point for engine jobs (teleport, stats page voice mutes).
+// PELOAD_BINK_SELFTEST=1: once, on the engine thread, call BinkOpen on a missing file through halo3's own delay slot
+// and check the slot then points into the guest bink2w64.dll (the lazy path of bind_delay_imports, end to end).
+static void bink_selftest(void){
+    static int done; if(done || !g_bink_open_slot) return;
+    uint8_t*bk=0; uint32_t bsz=0; for(int m=0;m<g_nmods;m++) if(g_mods[m].name && !strcasecmp(g_mods[m].name,"bink2w64.dll")){ bk=g_mods[m].base;
+        DOS*dh=(DOS*)bk; OPT64*oh=(OPT64*)(bk+dh->e_lfanew+sizeof(COFF)); bsz=oh->ImageSize; }
+    if(!bk) return;   // the client hasn't loaded it (yet)
+    done=1; void*before=*(void**)g_bink_open_slot;
+    void*h=((void*(MSABI*)(const char*,uint32_t))before)("C:\\peload-bink-selftest-missing.bik",0);
+    void*after=*(void**)g_bink_open_slot; int ok=(uint8_t*)after>=bk && (uint8_t*)after<bk+bsz && !h;
+    char m[240]; int k=snprintf(m,sizeof m,"  [bink] self-test: BinkOpen(missing file) through halo3's slot -> %p; slot %p -> %p%s: %s\n",h,before,after,
+        ((uint8_t*)after>=bk && (uint8_t*)after<bk+bsz)?" (in bink2w64.dll)":"",ok?"PASS":"FAIL"); (void)!write(2,m,k);
+    // the client's own install: its BinkClose wrapper in halo3's slot (exe+0x71c850 in 0.9.23)
+    if(g_bink_close_slot){ uint8_t*c=*(uint8_t**)g_bink_close_slot; DOS*dh=(DOS*)g_base; OPT64*oh=(OPT64*)(g_base+dh->e_lfanew+sizeof(COFF));
+        int inexe=c>=g_base && c<g_base+oh->ImageSize;
+        k=snprintf(m,sizeof m,"  [bink] BinkClose slot -> %s+0x%llx: %s\n",inexe?"exe":"?",(unsigned long long)(inexe?c-g_base:(uint64_t)(uintptr_t)c),
+            inexe?"the client's wrapper (its mod-movie install ran)":"not the client's (its install did not run)"); (void)!write(2,m,k); } }
 static void __attribute__((ms_abi)) hb_frame_hook(void){
     if(__builtin_expect(g_st_voice_pending,0)) st_voice_jobs();   // stats page voice mutes (stats.c)
-    if(__builtin_expect(g_hb_job_pending,0)) hb_engine_jobs(); }
+    if(__builtin_expect(g_hb_job_pending,0)) hb_engine_jobs();
+    static int bst=-1; if(__builtin_expect(bst!=0,0)){ if(bst<0) bst=getenv("PELOAD_BINK_SELFTEST")?1:0; if(bst) bink_selftest(); }
+    pk_game_tick(); }   // (pktlog.c) the game layer's install / removal / re-wrap
 static void hbdel_install(uint8_t*base){
     // main_loop_body (halo3+0xb2250): the engine main thread, once per frame, before the frame's ticks -- where the
     // Reclaimer client itself runs teleports (shim/docs/teleport.md). (The old hook, halo3+0x9d22c, is a ms timer
@@ -12796,7 +12844,7 @@ int main(int argc, char **argv){ mt_start();
     ws("  bound imps (exe+unresolved stubs) "); whex((uint64_t)imp_count);
 
     // delay imports: bind them (the graphical client DOES call them, e.g. dxgi)
-    bind_delay_imports(g_base, opt);
+    bind_delay_imports(g_base, opt, 0);
 
     set_protections(g_base, coff, opt);
 

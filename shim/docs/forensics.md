@@ -258,6 +258,29 @@ messages, `sender_id` (Line +0x30, the sender's peer id). Spawn lines, e.g.:
 Sessions archived before the spawn events existed (2026-10-18) have none; the first weapon-only version (that day) wrote
 upper-case names ("SNIPER RIFLE") and "spawned at x, y, z" without `pos` -- the viewer reads both.
 
+### packets.jsonl
+
+The packet log's per-second sums (shim/src/pktlog.c; the live view is the stats page's Packets window). Once a second,
+while the archive is on and the client is in a server's session (menu time is not archived): one line per (layer,
+direction, type, peer) that had records in that second -- `layer` (`wire`: UDP datagrams and TCP connections on the game's
+sockets; `game`: halo3's own message types, only when the stats page's "halo3 message types" switch is on), `dir` (`tx` /
+`rx`), `type`, `n` (records), `bytes` (wire only: datagram sizes; for `tcp-close` the bytes the connection carried),
+`t0` / `t1` (the first / last record's time), and when known `peer` (`ip:port`) and `host` (the name it was looked up
+by). A `{"t":..,"lost":n}` line = records overwritten in the ring before they were summed (a very busy second).
+```json
+{"layer":"wire","dir":"tx","type":"quic-1rtt","n":78,"bytes":5074,"t0":1792890001.004,"t1":1792890001.990,"peer":"127.0.0.1:49190"}
+{"layer":"game","dir":"rx","type":"membership-update","n":1,"bytes":0,"t0":1792890001.512,"t1":1792890001.512}
+```
+Wire types, read from the datagram's first bytes without decrypting anything: `quic-initial` / `quic-0-rtt` /
+`quic-handshake` / `quic-retry` (a QUIC long header, RFC 9000 17.2; another version adds `v<hex>`, QUIC v2 is `quic2-*`),
+`quic-version-neg`, `quic-1rtt` (a short header: the connected state, where nearly all game traffic is), `tag XXXX` (a
+plaintext four-character tag: hole punching, relays), `tcp-connect` / `tcp-close`. Flags (the live window shows them):
+`spin` (a short header's spin bit -- the only bit header protection leaves visible; an endpoint that doesn't measure with
+it sets it at random, RFC 9000 17.4) and `greased` (the fixed bit is 0: both ends offered grease_quic_bit, RFC 9287, as
+the client's QUIC library does). Game types are halo3's message names (46: ping, connect-request, join-request,
+membership-update, player-add, time-synchronize, view-establishment, ...), counted as halo3 encodes one to send it
+(`tx`) or decodes one it received (`rx`), without a peer: halo3 knows the peer only deeper down.
+
 ### session.json
 
 Name, label, map, server, host / self peer ids, start (unix + local ISO time), end (null while open or after a crash),
@@ -273,7 +296,7 @@ pid, and the voice-audio / consent state when the session started.
 | `/forensics/<s>/utt/<n>.ogg` | utterance n as Ogg Opus (404 when it has no audio) |
 | `/forensics/<s>/utt/<n>.json` | its packets: time, sequence, length, stored, TOC decoded (mode, bandwidth, frame ms, stereo, code, duration) |
 | `/forensics/<s>/speaker/<peer id>.ogg` | all of one sender's audio in the session (`.json`: their packets) |
-| `/forensics/<s>/events.jsonl`, `roster.jsonl`, `voice.bin`, `session.json` | the raw files |
+| `/forensics/<s>/events.jsonl`, `roster.jsonl`, `voice.bin`, `session.json`, `packets.jsonl` | the raw files |
 
 `?dl=1` adds `Content-Disposition: attachment`. Ogg replies honour `Range: bytes=` (206 / 416) and are byte-identical
 on every request (Safari's player asks for ranges). A session being written is flushed before it is read, and its
@@ -295,7 +318,9 @@ so it plays as one recording of everything that person said; the index has the r
 The page: the session list (LIVE = being written), a summary with downloads, speakers with team colours and their
 `.ogg`, a timeline with one lane per speaker (blue global, green team, orange proximity, striped = no audio kept) plus
 chat / kill / weapon / vehicle / power-up / event lanes, and everything in one list in time order with filters (player
-by peer id, channel, voice / chat / kills / weapons / vehicles / power-ups / other events). Click a voice block or "play" to listen; "packets" shows the decoded packets. The live
+by peer id, channel, voice / chat / kills / weapons / vehicles / power-ups / other events), and a Packets panel:
+packets.jsonl summed per type and peer for the whole session, under a per-second strip (orange datagrams sent, green
+received, blue ticks = seconds with halo3 messages). Click a voice block or "play" to listen; "packets" shows the decoded packets. The live
 session refreshes every 5 s. Each session row has a checkbox (kept across the refresh): "Delete selected (n)" removes the
 checked sessions, "Clear all" every session, "Delete session" (summary) the open one -- each asks for confirmation first.
 

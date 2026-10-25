@@ -140,7 +140,7 @@ static void fx_init(void){ pthread_once(&g_fx_once,fx_init_once); }
 
 // ---- the queue: hooks -> writer ---------------------------------------------------------------------------------------
 // items: u8 kind, 3 pad, u32 length, then the bytes. FXI_SWITCH carries an FxSw (the next session; none = left it).
-enum { FXI_VOICE=1, FXI_EVENT=2, FXI_ROSTER=3, FXI_SWITCH=4 };
+enum { FXI_VOICE=1, FXI_EVENT=2, FXI_ROSTER=3, FXI_SWITCH=4, FXI_PACKETS=5 };   // PACKETS: pktlog.c's per-second sums
 typedef struct { char label[64], map[64], server[96]; uint64_t host, self; int none; } FxSw;
 typedef struct { uint8_t*b; size_t n, cap; } FxQ;
 static FxQ g_fxq, g_fxq_spare; static pthread_mutex_t g_fxq_mx=PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_fxq_cv=PTHREAD_COND_INITIALIZER;
@@ -240,7 +240,7 @@ static void fx_roster_members(double now,const char*map,const FxMem*m,int n,uint
     sb_put(&s,"]}"); if(s.b) fx_push(FXI_ROSTER,s.b,s.n,0,0); free(s.b); }
 
 // ---- the writer thread ----------------------------------------------------------------------------------------------
-static struct { int open; char name[128], dir[1100]; FILE*voice,*roster,*events; FxSw meta; double t0; } g_fxw;
+static struct { int open; char name[128], dir[1100]; FILE*voice,*roster,*events,*packets; FxSw meta; double t0; } g_fxw;
 static FxSw g_fxw_pend={"menu","","",0,0,0};   // what the next lazily opened session is (the last switch)
 static pthread_mutex_t g_fxw_mx=PTHREAD_MUTEX_INITIALIZER;
 static void fx_sanitize(const char*s,char*o,size_t on){ size_t j=0; int us=0;
@@ -256,11 +256,11 @@ static void fx_sess_json(double ended){   // (g_fxw_mx held)
     if(ended>0) sb_put(&s,"%.3f",ended); else sb_put(&s,"null");
     pthread_mutex_lock(&g_fx_setmx); sb_put(&s,",\"pid\":%d,\"voice_audio\":%s,\"one_party_consent\":%s,\"consent_confirmed_unix\":%.3f",(int)getpid(),g_fx_audio?"true":"false",
         g_fx_set.consent?"true":"false",g_fx_set.consent?g_fx_set.consent_t:0.0); pthread_mutex_unlock(&g_fx_setmx);
-    sb_put(&s,",\"formats\":{\"voice\":\"voice.bin v1 (shim/docs/forensics.md)\",\"roster\":\"roster.jsonl\",\"events\":\"events.jsonl\"},\"recorder\":\"Reclaimer Mac loader (shim/src/forensic.c)\"}\n");
+    sb_put(&s,",\"formats\":{\"voice\":\"voice.bin v1 (shim/docs/forensics.md)\",\"roster\":\"roster.jsonl\",\"events\":\"events.jsonl\",\"packets\":\"packets.jsonl\"},\"recorder\":\"Reclaimer Mac loader (shim/src/forensic.c)\"}\n");
     if(s.b) fwrite(s.b,1,s.n,f); free(s.b); fclose(f); }
 static void fx_sess_close(void){ if(!g_fxw.open) return;
-    if(g_fxw.voice) fclose(g_fxw.voice); if(g_fxw.roster) fclose(g_fxw.roster); if(g_fxw.events) fclose(g_fxw.events);
-    g_fxw.voice=g_fxw.roster=g_fxw.events=0; fx_sess_json(st_wall()); g_fxw.open=0;
+    if(g_fxw.voice) fclose(g_fxw.voice); if(g_fxw.roster) fclose(g_fxw.roster); if(g_fxw.events) fclose(g_fxw.events); if(g_fxw.packets) fclose(g_fxw.packets);
+    g_fxw.voice=g_fxw.roster=g_fxw.events=g_fxw.packets=0; fx_sess_json(st_wall()); g_fxw.open=0;
     char m[300]; int k=snprintf(m,sizeof m,"  [forensic] session %s closed\n",g_fxw.name); (void)!write(2,m,(size_t)k); }
 static int fx_sess_open(void){ if(g_fxw.open) return 1;
     double now=st_wall(); time_t ts=(time_t)now; struct tm lt; localtime_r(&ts,&lt); char tsb[32]; strftime(tsb,sizeof tsb,"%Y%m%d-%H%M%S",&lt);
@@ -273,23 +273,31 @@ static int fx_sess_open(void){ if(g_fxw.open) return 1;
         h.rsize=sizeof(FxVRec); h.flags=g_fx_audio?1:0; fwrite(&h,1,sizeof h,g_fxw.voice); }
     snprintf(p,sizeof p,"%s/roster.jsonl",g_fxw.dir); g_fxw.roster=fopen(p,"ab");
     snprintf(p,sizeof p,"%s/events.jsonl",g_fxw.dir); g_fxw.events=fopen(p,"ab");
+    snprintf(p,sizeof p,"%s/packets.jsonl",g_fxw.dir); g_fxw.packets=fopen(p,"ab");
     g_fxw.open=1; fx_sess_json(0);
     char m[1300]; int k=snprintf(m,sizeof m,"  [forensic] session %s\n",g_fxw.dir); (void)!write(2,m,(size_t)k); return 1; }
 static void fx_process(const uint8_t*b,size_t n){   // (g_fxw_mx held)
     for(size_t o=0;o+8<=n;){ int kind=b[o]; uint32_t len; memcpy(&len,b+o+4,4); const uint8_t*p=b+o+8; o+=8+(size_t)len; if(o>n) break;
         if(kind==FXI_SWITCH && len==sizeof(FxSw)){ FxSw s; memcpy(&s,p,sizeof s); fx_sess_close(); g_fxw_pend=s; if(s.none) snprintf(g_fxw_pend.label,sizeof g_fxw_pend.label,"menu"); continue; }
         if(!fx_sess_open()) continue;
-        FILE*f=kind==FXI_VOICE?g_fxw.voice:kind==FXI_ROSTER?g_fxw.roster:kind==FXI_EVENT?g_fxw.events:0; if(!f) continue;
+        FILE*f=kind==FXI_VOICE?g_fxw.voice:kind==FXI_ROSTER?g_fxw.roster:kind==FXI_EVENT?g_fxw.events:kind==FXI_PACKETS?g_fxw.packets:0; if(!f) continue;
         fwrite(p,1,len,f); if(kind!=FXI_VOICE) fputc('\n',f); } }
 static void fx_flush(void){   // write out everything queued so far (the writer thread; HTTP readers before reading a live session)
     pthread_mutex_lock(&g_fxw_mx);
     pthread_mutex_lock(&g_fxq_mx); FxQ q=g_fxq; g_fxq=g_fxq_spare; g_fxq.n=0; pthread_mutex_unlock(&g_fxq_mx);
     if(q.n) fx_process(q.b,q.n); q.n=0; g_fxq_spare=q;
-    if(g_fxw.voice) fflush(g_fxw.voice); if(g_fxw.roster) fflush(g_fxw.roster); if(g_fxw.events) fflush(g_fxw.events);
+    if(g_fxw.voice) fflush(g_fxw.voice); if(g_fxw.roster) fflush(g_fxw.roster); if(g_fxw.events) fflush(g_fxw.events); if(g_fxw.packets) fflush(g_fxw.packets);
     pthread_mutex_unlock(&g_fxw_mx); }
+#if !FX_TEST
+static void pk_forensic_tick(void);   // (pktlog.c) the last second's packet records, summed
+#endif
 static void* fx_writer(void*a){ (void)a; pthread_setname_np("shim-forensic");
     for(;;){ pthread_mutex_lock(&g_fxq_mx); struct timespec ts; clock_gettime(CLOCK_REALTIME,&ts); ts.tv_sec+=1;
-        if(g_fxq.n<(4u<<20)) pthread_cond_timedwait(&g_fxq_cv,&g_fxq_mx,&ts); pthread_mutex_unlock(&g_fxq_mx); fx_flush(); }
+        if(g_fxq.n<(4u<<20)) pthread_cond_timedwait(&g_fxq_cv,&g_fxq_mx,&ts); pthread_mutex_unlock(&g_fxq_mx);
+#if !FX_TEST
+        pk_forensic_tick();
+#endif
+        fx_flush(); }
     return 0; }
 
 // ---- page controls: POST /control?do=forensic&archive=0|1&voice=0|1&consent=0|1 ---------------------------------------
@@ -538,10 +546,10 @@ static void fx_sessions_json(StBuf*s){
             if(nn>=cap){ int nc=cap?cap*2:64; void*np=realloc(names,(size_t)nc*128); if(!np) break; names=np; cap=nc; } snprintf(names[nn++],128,"%s",de->d_name); }
         closedir(dr); }
     if(nn>1) qsort(names,(size_t)nn,128,fx_name_cmp);
-    for(int i=nn-1,f=0;i>=0;i--){ char p[1200]; char*meta; struct stat st; off_t sz[3]={0,0,0}; double last=0; static const char*const fn[3]={"voice.bin","events.jsonl","roster.jsonl"};
-        for(int q=0;q<3;q++){ snprintf(p,sizeof p,"%s/%s/%s",g_fx_base,names[i],fn[q]); if(!stat(p,&st)){ sz[q]=st.st_size; double mt=st.st_mtimespec.tv_sec+st.st_mtimespec.tv_nsec*1e-9; if(mt>last) last=mt; } }
+    for(int i=nn-1,f=0;i>=0;i--){ char p[1200]; char*meta; struct stat st; off_t sz[4]={0,0,0,0}; double last=0; static const char*const fn[4]={"voice.bin","events.jsonl","roster.jsonl","packets.jsonl"};
+        for(int q=0;q<4;q++){ snprintf(p,sizeof p,"%s/%s/%s",g_fx_base,names[i],fn[q]); if(!stat(p,&st)){ sz[q]=st.st_size; double mt=st.st_mtimespec.tv_sec+st.st_mtimespec.tv_nsec*1e-9; if(mt>last) last=mt; } }
         snprintf(p,sizeof p,"%s/%s/session.json",g_fx_base,names[i]); meta=fx_slurp(p,0,1<<20); while(meta && *meta && (meta[strlen(meta)-1]=='\n')) meta[strlen(meta)-1]=0;
-        sb_put(s,"%s{\"name\":",f++?",":""); sb_str(s,names[i]); sb_put(s,",\"voice_bytes\":%lld,\"events_bytes\":%lld,\"roster_bytes\":%lld,\"last_write\":%.3f,\"session\":%s}",(long long)sz[0],(long long)sz[1],(long long)sz[2],last,meta&&meta[0]=='{'?meta:"null");
+        sb_put(s,"%s{\"name\":",f++?",":""); sb_str(s,names[i]); sb_put(s,",\"voice_bytes\":%lld,\"events_bytes\":%lld,\"roster_bytes\":%lld,\"packets_bytes\":%lld,\"last_write\":%.3f,\"session\":%s}",(long long)sz[0],(long long)sz[1],(long long)sz[2],(long long)sz[3],last,meta&&meta[0]=='{'?meta:"null");
         free(meta); }
     free(names); sb_put(s,"]}"); }
 static void fx_http(int fd,const char*path,const char*qs,const char*req){
@@ -558,8 +566,8 @@ static void fx_http(int fd,const char*path,const char*qs,const char*req){
     char name[128]; snprintf(name,sizeof name,"%.*s",(int)(sl-sn),sn); const char*what=sl+1; int dl=strstr(qs,"dl=1")!=0;
     char p[1200]; snprintf(p,sizeof p,"%s/%s/session.json",g_fx_base,name); struct stat st; if(stat(p,&st)){ fx_reply_json_err(fd,404,"no such session"); return; }
     pthread_mutex_lock(&g_fxw_mx); int live=g_fxw.open && !strcmp(g_fxw.name,name); pthread_mutex_unlock(&g_fxw_mx); if(live) fx_flush();   // the session being written: everything so far
-    static const char*const raw[4]={"events.jsonl","roster.jsonl","voice.bin","session.json"};
-    for(int i=0;i<4;i++) if(!strcmp(what,raw[i])){ snprintf(p,sizeof p,"%s/%s/%s",g_fx_base,name,raw[i]); size_t n=0; char*b=fx_slurp(p,&n,(size_t)2<<30);
+    static const char*const raw[5]={"events.jsonl","roster.jsonl","voice.bin","session.json","packets.jsonl"};
+    for(int i=0;i<5;i++) if(!strcmp(what,raw[i])){ snprintf(p,sizeof p,"%s/%s/%s",g_fx_base,name,raw[i]); size_t n=0; char*b=fx_slurp(p,&n,(size_t)2<<30);
         char dn[200]; snprintf(dn,sizeof dn,"%s_%s",name,raw[i]);
         if(!b) fx_reply_json_err(fd,404,"no such file"); else fx_reply(fd,200,i==2?"application/octet-stream":i==3?"application/json":"application/x-ndjson",b,n,req,dl||i==2?dn:0); free(b); return; }
     pthread_mutex_lock(&g_fxc_mx);
