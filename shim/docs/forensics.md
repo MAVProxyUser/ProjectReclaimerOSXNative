@@ -30,6 +30,14 @@ the player and where (x, y and height).
 
 ![Timeline](img/forensics-timeline.png)
 
+**Packets**: the session's `packets.jsonl` summed per type and peer, under a per-second strip (orange datagrams sent, green
+received, blue ticks = seconds with halo3 messages). This picture is from a test client joining our local server: the
+connected 1-RTT traffic with the server, the join's halo3 messages with their peer ("host" = the dedicated server), and
+QUIC Initials the client sent to ~15 public servers in the session's first second (which client feature sends them was not
+traced -- the server browser's status queries are the likely one; demo mode shows those addresses as 203.0.113.x).
+
+![Packets](img/forensics-packets.png)
+
 **Everything, in order**: voice, chat, kills, spawns and events in one list with filters (player, channel, kinds:
 voice, chat, kills, weapons, vehicles, power-ups, other events); each voice row has play, its `.ogg` and its decoded
 packets; a spawn row says what, where ("Wraith spawned at (-38.5, -25.2)") and, for a pickup, who.

@@ -368,6 +368,7 @@ beside the death heatmap with the player details under it (right); Connected; th
   up each spawned weapon, and who takes each power-up (the game's own pickup time for that colour on the player).
   Vehicles are listed one by one, respawns included; turrets mounted on a vehicle, deployed equipment (a thrown bubble
   shield, trip mine, auto turret), grenades and weapons dropped by players are left out.
+  <img src="shim/docs/img/stats-feed.png" width="49%" alt="Event feed: kills with weapon, estimated kills marked"> <img src="shim/docs/img/stats-chat.png" width="49%" alt="Chat: players' lines and the server's messages">
 - **Packets** -- the type of everything the game sends and receives, never what is in it: each UDP datagram and TCP
   connection with direction, peer (and the host name it was looked up by), size and what its first bytes show without
   decrypting anything -- the game's QUIC traffic as handshake / initial / 1-RTT (connected) packets, plaintext tags, TCP
@@ -381,7 +382,7 @@ beside the death heatmap with the player details under it (right); Connected; th
   (`PELOAD_PKTLOG_BENCH=1` measures it); `PELOAD_PKTLOG=0` turns it off. The forensic archive keeps per-second sums
   (`packets.jsonl`, shim/docs/forensics.md).
 
-  <img src="shim/docs/img/stats-feed.png" width="49%" alt="Event feed: kills with weapon, estimated kills marked"> <img src="shim/docs/img/stats-chat.png" width="49%" alt="Chat: players' lines and the server's messages">
+  ![Packets: the last 10 s per type and peer, halo3 messages counted, the log with each message's peer](shim/docs/img/stats-packets.png)
 - **Players** -- living players first, then players waiting to respawn, then those who quit (still in the game's
   player list but gone from its network session); click a column title to sort (by team, or the whole list). Team, shield and health, weapon, kills, deaths, K/D, shots and accuracy, grenades, vehicle, speed and active
   traits (where they differ from the defaults, with powerup and respawn-trait countdowns). 🔊 marks a talker, 🔇 a
