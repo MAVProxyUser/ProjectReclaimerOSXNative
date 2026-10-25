@@ -19,7 +19,7 @@ shim/src/stats.c + hitbox.c do for the overlay:
 PELOAD_STATS_READONLY=1, --old sends a snapshot without overlay.features (an older loader), --refuse answers every
 do=feat with 400 (the page must fall back to the real state). Never use port 8765: that is the live game's.
 """
-import argparse, json, os, sys, threading, time
+import argparse, json, math, os, sys, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 
@@ -143,9 +143,19 @@ def snapshot():
                   'bounds_off': state['bounds_off'], 'invwalls_off': state['invwalls_off'], 'mic': 'live', 'mic_in_use': False, 'spots': []})
         if not ARGS.old:
             o['features'] = feats
+        # live items (stats.c st_spawns -> "items": [spawn point, kind, state 0 at its point / 1 elsewhere / 2 carried, x, y, z,
+        # carrier slot, name if no point]): the Warthog from point 0 drives a circle, Target carries the sniper from point 2,
+        # the battle rifle (point 3) sits on its point, the bubble shield (point 4) lies elsewhere, "You" has the Overshield
+        t = time.time()
+        me, target = player(0, 'You', 0, 10, 20, True), player(1, 'Target', 1, -30 + 8 * math.sin(t / 3), 5)
+        me['effects'] = [{'what': 'red powerup', 'left': 30 - (t % 30)}]
+        items = [[0, 1, 1, -30 + 20 * math.cos(t / 4), 20 + 20 * math.sin(t / 4), 2.0, -1, None],
+                 [2, 0, 2, target['pos'][0], target['pos'][1], 2.0, 1, None], [3, 0, 0, -12.0, -8.0, 1.0, -1, None],
+                 [4, 2, 1, 22.0, 18.0, 1.0, -1, None], [-1, 0, 1, 40.0, 40.0, 1.0, -1, 'Shotgun']]
+        items = [i[:7] + ([i[7]] if i[7] else []) for i in items]
         return {'time': time.time() % 600, 'in_match': True, 'inst': 4242, 'feed_seq': 0, 'map': 'riverworld',
                 'zone_show': state['zone_show'], 'weak_show': state['weak_show'], 'overlay': o,
-                'players': [player(0, 'You', 0, 10, 20, True), player(1, 'Target', 1, -30, 5)],
+                'players': [me, target], 'items': items,
                 'vehicles': [], 'projectiles': [], 'session': [], 'variant': None, 'mute': False}
 
 
@@ -202,7 +212,7 @@ class H(BaseHTTPRequestHandler):
         if p == '/heat.json':
             # a footprint square, a few deaths and spawn points of every kind (stats.c hm_json: [x, y, z, kind, name, times, last
             # match]; kind 0 weapon, 1 vehicle, 2 equipment, 3 power-up) -- one only from an earlier match ("this match" hides it)
-            cells = [v for x in range(-80, 81, 4) for y in range(-60, 61, 4) for v in (x, y, 1 + (x * x + y * y) % 7)]
+            cells = [v for x in range(-160, 161, 8) for y in range(-120, 121, 8) for v in (x, y, 1 + (x * x + y * y) % 7)]   # (cell units: 0.5 world units)
             deaths = [[-20.0, 8.0, 1.0, 0, 'Target', 1, 30, 1], [12.0, -14.0, 1.0, 1, 'You', 1, 60, 0]]
             spawns = [[-30.0, 20.0, 2.0, 1, 'Warthog', 4, 1], [30.0, -22.0, 2.0, 1, 'Mongoose', 2, 1], [0.0, 0.0, 1.0, 0, 'Sniper rifle', 3, 1],
                       [-12.0, -8.0, 1.0, 0, 'Battle rifle', 6, 1], [15.0, 10.0, 1.0, 2, 'Bubble shield', 2, 1], [5.0, 25.0, 3.0, 3, 'Overshield', 1, 1],

@@ -649,13 +649,14 @@ static void hm_death(const float*pos,int team,int slot,const char*name){   // (g
     if(g_hm.nd>=g_hm.dcap){ uint32_t nc=g_hm.dcap?g_hm.dcap*2:256; HmDeath*nd=realloc(g_hm.d,nc*sizeof *nd); if(!nd) return; g_hm.d=nd; g_hm.dcap=nc; }
     HmDeath*d=&g_hm.d[g_hm.nd++]; memset(d,0,sizeof *d); d->x=pos[0]; d->y=pos[1]; d->z=pos[2]; d->team=team; d->slot=slot; snprintf(d->name,sizeof d->name,"%s",name?name:"");
     d->match=g_hm.match; d->t=(float)(mono_s()-g_hm.match_t0); g_hm.dirty=1; }
-static void hm_spawn(int kind,const char*name,const float*pos){   // (g_hm_mx held)
-    hm_switch(g_hm_cur); if(!g_hm.map[0] || !isfinite(pos[0]) || !isfinite(pos[1]) || !isfinite(pos[2])) return;
+static int hm_spawn(int kind,const char*name,const float*pos){   // (g_hm_mx held) -> the point's index, -1 none
+    hm_switch(g_hm_cur); if(!g_hm.map[0] || !isfinite(pos[0]) || !isfinite(pos[1]) || !isfinite(pos[2])) return -1;
     for(uint32_t i=0;i<g_hm.nsp;i++){ HmSpawn*q=&g_hm.sp[i]; float dx=q->x-pos[0], dy=q->y-pos[1], dz=q->z-pos[2];
-        if(q->kind==kind && dx*dx+dy*dy<2.25f && fabsf(dz)<3.0f && !strncmp(q->name,name,sizeof q->name-1)){ q->n++; q->match=g_hm.match; g_hm.dirty=1; return; } }
-    if(g_hm.nsp>=g_hm.spcap){ uint32_t nc=g_hm.spcap?g_hm.spcap*2:256; HmSpawn*ns=realloc(g_hm.sp,nc*sizeof *ns); if(!ns) return; g_hm.sp=ns; g_hm.spcap=nc; }
+        if(q->kind==kind && dx*dx+dy*dy<2.25f && fabsf(dz)<3.0f && !strncmp(q->name,name,sizeof q->name-1)){ q->n++; q->match=g_hm.match; g_hm.dirty=1; return (int)i; } }
+    if(g_hm.nsp>=32000) return -1;
+    if(g_hm.nsp>=g_hm.spcap){ uint32_t nc=g_hm.spcap?g_hm.spcap*2:256; HmSpawn*ns=realloc(g_hm.sp,nc*sizeof *ns); if(!ns) return -1; g_hm.sp=ns; g_hm.spcap=nc; }
     HmSpawn*q=&g_hm.sp[g_hm.nsp++]; memset(q,0,sizeof *q); q->x=pos[0]; q->y=pos[1]; q->z=pos[2]; q->n=1; q->match=g_hm.match; q->kind=(uint8_t)kind;
-    snprintf(q->name,sizeof q->name,"%s",name); g_hm.dirty=1; }
+    snprintf(q->name,sizeof q->name,"%s",name); g_hm.dirty=1; return (int)(g_hm.nsp-1); }
 // ---- the top-down map picture behind the heatmap: made automatically for every map played (stock or Workshop) --------
 // The first time a map without a picture is played, re-tools/h3bsp.py runs in the background (native python3 with numpy
 // and Pillow) on the very .map file the game opened and writes ~/Library/Application Support/ReclaimerMac/maptop/<map>.png
@@ -1164,7 +1165,10 @@ static void nav_json(StBuf*s);   // nav.c (PELOAD_NAV: the walker's goal and pat
 //    +0x218 / +0x21C / +0x220, halo3-variant-traits.md section 4): "<player> picked up <name>", the power-up = the
 //    nearest one of that colour within 5 units (still there, or gone within 1.5 s). Nothing is guessed when no tick moves.
 // PELOAD_SPAWN_LOG=1 prints each spawn candidate's fate (spawned, attached, left out, power-up gone without a pickup tick).
-static struct { uint16_t salt; uint8_t live, st, type; int8_t kind, color; uint32_t def, parent; float pos[3]; } g_wt[8192];   // st: 1 spawned, 2 taken, 3 pending
+// (sp: the heatmap spawn point it came from, -1 none; sp0: where it spawned; cur: where it is now -- its holder's place while
+// carried; state: 0 at its spawn point, 1 elsewhere on the ground, 2 carried (a player, or a vehicle); holder: the carrying
+// player's slot, -1 none -- the snapshot's "items", user 2026-10-25: "follow it accordingly with the icon")
+static struct { uint16_t salt; uint8_t live, st, type; int8_t kind, color, state; int16_t sp, holder; uint32_t def, parent; float pos[3], sp0[3], cur[3]; } g_wt[8192];   // st: 1 spawned, 2 taken, 3 pending
 static char g_wt_map[64];
 static struct { char name[64]; int32_t tk[3]; } g_wpp[256];   // per player slot: the power-up pickup ticks last seen
 static struct { int8_t color, taken; float pos[3]; double t; uint32_t def; } g_wpg[16]; static int g_nwpg;   // power-ups gone, not yet taken
@@ -1212,7 +1216,7 @@ static void st_spawns(const uint8_t*tab,int hi,const StPlayer*pl,int np,const ch
         uint64_t p=*(const uint64_t*)(e+0x10); uint8_t d[0x5c]; if(!p || !hb_read(p,d,sizeof d)) continue;
         uint32_t def=*(const uint32_t*)d, par=*(const uint32_t*)(d+0x10);
         if(!g_wt[i].live){   // a new object: a spawn candidate when nothing holds it
-            memset(&g_wt[i],0,sizeof g_wt[i]); g_wt[i].live=1; g_wt[i].salt=salt; g_wt[i].type=(uint8_t)t; g_wt[i].def=def; g_wt[i].parent=par; g_wt[i].kind=-1; g_wt[i].color=-1;
+            memset(&g_wt[i],0,sizeof g_wt[i]); g_wt[i].live=1; g_wt[i].salt=salt; g_wt[i].type=(uint8_t)t; g_wt[i].def=def; g_wt[i].parent=par; g_wt[i].kind=-1; g_wt[i].color=-1; g_wt[i].sp=-1; g_wt[i].holder=-1;
             if(par==0xFFFFFFFFu){ const StWcls*c=st_wclass(def,t);
                 if(c->kind>=0){ g_wt[i].st=3; g_wt[i].kind=c->kind; g_wt[i].color=c->color; }
                 else if(g_wlog && !strstr(c->nm,"renade")){ int k=snprintf(lm,sizeof lm,"  [spawn] left out: %s (object type %d, deployed equipment)\n",c->nm,t); (void)!write(2,lm,(size_t)k); } }
@@ -1221,7 +1225,8 @@ static void st_spawns(const uint8_t*tab,int hi,const StPlayer*pl,int np,const ch
             if(par!=0xFFFFFFFFu){ g_wt[i].st=0; g_wt[i].parent=par;
                 if(g_wlog){ int k=snprintf(lm,sizeof lm,"  [spawn] attached right after creation, not a spawn: %s (parent %08x)\n",st_wclass(def,t)->nm,par); (void)!write(2,lm,(size_t)k); }
                 continue; }
-            g_wt[i].st=1; memcpy(g_wt[i].pos,d+0x50,12); g_wt[i].parent=par; if(nconf<1024){ conf[nconf++]=i; if(g_wt[i].kind==0) nwc++; } continue; }
+            g_wt[i].st=1; memcpy(g_wt[i].pos,d+0x50,12); memcpy(g_wt[i].sp0,d+0x50,12); memcpy(g_wt[i].cur,d+0x50,12); g_wt[i].state=1; g_wt[i].parent=par;
+            if(nconf<1024){ conf[nconf++]=i; if(g_wt[i].kind==0) nwc++; } continue; }
         if(g_wt[i].st==1 && par==0xFFFFFFFFu) memcpy(g_wt[i].pos,d+0x50,12);   // where it lies now (a power-up: where it is taken)
         if(g_wt[i].st==1 && g_wt[i].kind==0 && par!=0xFFFFFFFFu){   // a weapon picked up (the first time)
             g_wt[i].st=2; uint32_t holder=par; const char*who=0; int team=-1;
@@ -1230,6 +1235,17 @@ static void st_spawns(const uint8_t*tab,int hi,const StPlayer*pl,int np,const ch
                         if((holder&0xFFFF)<(uint32_t)hi && hs==(uint16_t)(holder>>16)) ud=*(const uint64_t*)(tab+(holder&0xFFFF)*0x18+0x10); if(ud) hb_read(ud+0x174,&team,4); break; }
                 if(!who && (holder&0xFFFF)<(uint32_t)hi){ uint64_t hd=*(const uint64_t*)(tab+(holder&0xFFFF)*0x18+0x10); uint32_t up=0xFFFFFFFFu; if(hd && hb_read(hd+0x10,&up,4)) holder=up; else break; } }
             const char*nm=st_wclass(def,t)->nm; if(who) st_event_verb(0,"weapon",who,0,nm,"picked up",team,-1,0,"%s picked up %s",who,nm); }
+        if(g_wt[i].st==1 || g_wt[i].st==2){   // where it is now: on the ground, or with its outermost holder (a player's unit, a vehicle)
+            if(par==0xFFFFFFFFu){ memcpy(g_wt[i].cur,d+0x50,12); g_wt[i].holder=-1; g_wt[i].state=1; }
+            else { uint32_t h=par; int hold=-1; float rp[3]; int got=0;
+                for(int depth=0;depth<4 && h!=0xFFFFFFFFu;depth++){
+                    for(int k=0;k<np && hold<0;k++) if(pl[k].unit==h) hold=pl[k].slot;
+                    int hx=(int)(h&0xFFFF); if(hx>=hi || *(const uint16_t*)(tab+hx*0x18)!=(uint16_t)(h>>16)) break;
+                    uint64_t hp=*(const uint64_t*)(tab+hx*0x18+0x10); uint8_t hd[0x5c]; if(!hp || !hb_read(hp,hd,sizeof hd)) break;
+                    uint32_t up=*(const uint32_t*)(hd+0x10); if(up==0xFFFFFFFFu){ memcpy(rp,hd+0x50,12); got=1; break; } h=up; }
+                if(got && isfinite(rp[0]) && isfinite(rp[1])) memcpy(g_wt[i].cur,rp,12); g_wt[i].holder=(int16_t)hold; g_wt[i].state=2; }
+            if(g_wt[i].state==1 && g_wt[i].sp>=0){ float dx=g_wt[i].cur[0]-g_wt[i].sp0[0], dy=g_wt[i].cur[1]-g_wt[i].sp0[1], dz=g_wt[i].cur[2]-g_wt[i].sp0[2];
+                if(dx*dx+dy*dy<2.25f && fabsf(dz)<3.0f) g_wt[i].state=0; } }
         g_wt[i].parent=par; }
     // spawns confirmed in this snapshot: weapons in a burst = one line; vehicles and power-ups one by one
     if(nwc>8){ struct { char nm[40]; int n; } sum[24]; int ns=0;
@@ -1247,7 +1263,7 @@ static void st_spawns(const uint8_t*tab,int hi,const StPlayer*pl,int np,const ch
             if(g_wlog){ int k=snprintf(lm,sizeof lm,"  [spawn] joined in progress: the first 5 s of spawns are not spawn points\n"); (void)!write(2,lm,(size_t)k); } }
         if(now>=skip_until){ pthread_mutex_lock(&g_hm_mx);
             for(int q=0;q<nconf;q++){ int i=conf[q], kd=g_wt[i].kind; const char*nm=st_wclass(g_wt[i].def,g_wt[i].type)->nm;
-                hm_spawn(kd==1?1:kd==2?3:g_wt[i].type==3?2:0,nm,g_wt[i].pos); }
+                g_wt[i].sp=(int16_t)hm_spawn(kd==1?1:kd==2?3:g_wt[i].type==3?2:0,nm,g_wt[i].pos); if(g_wt[i].sp>=0) g_wt[i].state=0; }
             pthread_mutex_unlock(&g_hm_mx); } }
     // power-ups taken: a player's pickup tick for a colour moved (the first sight of a player only remembers it)
     for(int k=0;k<np;k++){ int32_t tk[3]; if(!pl[k].rec || !hb_read(pl[k].rec+0x218,tk,12)) continue; int s=pl[k].slot&255;
@@ -1417,6 +1433,16 @@ static void st_snapshot(StBuf*s){
         uint32_t own=*(const uint32_t*)(d+0xC0); const char*on=0; for(int k=0;k<np;k++) if(pl[k].unit==own){ on=pl[k].name; break; }
         const float*v=(const float*)(d+0x74); sb_put(s,"%s{\"type\":",first?"":","); first=0; st_tag(s,*(const uint32_t*)d);
         sb_put(s,",\"owner\":"); sb_str(s,on?on:""); sb_put(s,",\"pos\":"); sb_f3(s,(const float*)(d+0x50)); sb_put(s,",\"speed\":%.1f}",sqrtf(v[0]*v[0]+v[1]*v[1]+v[2]*v[2])); }
+    // spawned weapons / equipment / vehicles / power-ups as they are now (st_spawns): [spawn point (-1 none), kind (0 weapon,
+    // 1 vehicle, 2 equipment, 3 power-up), state (0 at its spawn point, 1 elsewhere on the ground, 2 carried), x, y, z,
+    // carrier's player slot (-1 none), + its name when it has no spawn point] -- the page dims empty spawn points and draws the
+    // rest where they are
+    sb_put(s,"],\"items\":["); first=1;
+    for(int i=0;i<hi && i<8192;i++){ if(!g_wt[i].live || (g_wt[i].st!=1 && g_wt[i].st!=2) || g_wt[i].kind<0) continue; int kd=g_wt[i].kind;
+        const float*c=g_wt[i].cur; if(!isfinite(c[0]) || !isfinite(c[1]) || !isfinite(c[2])) continue;
+        sb_put(s,"%s[%d,%d,%d,%.2f,%.2f,%.2f,%d",first?"":",",g_wt[i].sp,kd==1?1:kd==2?3:g_wt[i].type==3?2:0,g_wt[i].state,c[0],c[1],c[2],g_wt[i].holder); first=0;
+        if(g_wt[i].sp<0){ sb_put(s,","); sb_str(s,st_wclass(g_wt[i].def,g_wt[i].type)->nm); }   // (no spawn point to take the name from)
+        sb_put(s,"]"); }
     sb_put(s,"]"); nav_json(s); sb_put(s,"}");
     #undef ST_DATUM
     #undef ST_TYPE

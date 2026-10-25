@@ -1690,6 +1690,18 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   spawns are not recorded: they are the objects already lying around. Checked on the mock (markers, counts, scope, hover,
   remembered switches); live collection starts with the next launch. Old behaviour: leave the boxes unticked (the file is
   written either way; delete it to forget a map's points).
+- **Spawn points live: dim when empty, items followed where they go** (2026-10-25; user: "make weapon vehicle and item spawns
+  dim when not spawned, or taken, and IF the item is movable ... follow it accordingly with the icon ... IF a player got the
+  overshield I want to know the x/y coordinates while it is active, or a vehicle if it is moving, where it is") — stats.c
+  `st_spawns` (g_wt sp / sp0 / cur / state / holder), `hm_spawn` (returns the point), the snapshot's "items" ([spawn point,
+  kind, state, x, y, z, carrier slot, name if no point]), stats_page.html `drawSpawns` / `spMark`, overlay-panel-mock.py
+  (moving items, an Overshield holder). How: every snapshot each spawned / taken object's position is its own (on the
+  ground) or its outermost holder's (parent chain: a player's unit, a vehicle; the carrier = the player whose unit is in
+  it); state 0 = within 1.5 units of where it spawned. The page lights a spawn point only while an item of it is there
+  (an older loader without "items": all lit), draws the others where they are (dashed line back to the point, not for
+  vehicles), carried ones beside the carrier, and power-up holders (the players' "effects": red = Overshield, blue = Active
+  camo, yellow = Custom, as st_wclass names them) with a ring and "<name> <s left> · x, y". Checked on the mock; live
+  with the next launch. Old behaviour: none needed (untick the boxes).
 - **Packet log: each halo3 message's peer** (2026-10-24; user: "proper" -- the per-peer answer over "the type only") —
   pktlog.c `pkc_install` / `pkc_hook` / `pk_ctx` / `pkc_peer`, `pk_game_ev` (now takes the entry rsp), `pkn_refresh` /
   `pkn_name` / `pk_peer_json`. Why: the message table's encode / decode functions get only (bitstream, size, data), so game

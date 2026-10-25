@@ -416,7 +416,11 @@ beside the death heatmap with the player details under it (right); Connected; th
   room). The **spawn points** checkboxes -- **vehicles** (orange outlined squares), **weapons** (gold diamonds) and **items**
   (equipment: cyan triangles; power-ups: magenta rings) -- mark where things spawn on the map, collected from every spawn the
   game shows and kept per map beside the deaths (`heatmaps/<map>.spawns`; this match or all matches like the deaths); hover
-  a marker for its name and how often it spawned there. After joining a game in progress the first spawns seen are left
+  a marker for its name and how often it spawned there. A spawn point is bright while its item sits on it and dim once it
+  is taken or not back yet; an item away from its spawn point is drawn where it is now, live (a sniper rifle lying where
+  its carrier died, a vehicle being driven), with a dashed line back to its spawn point (not for vehicles), one being
+  carried beside its carrier's dot with a white outline (hover: who carries it); a player with a power-up active gets a
+  magenta ring with "Overshield 12 s · x, y". After joining a game in progress the first spawns seen are left
   out (they are whatever lies around, not spawn points); what respawns later is recorded.
   Click the map (or "full window") to fill the browser window; X or Esc closes it. The map pictures are made once from the game's own `.map`
   files (`bash shim/tools/maptop.sh`; `play.sh` runs it in the background when they are missing; needs python3 with

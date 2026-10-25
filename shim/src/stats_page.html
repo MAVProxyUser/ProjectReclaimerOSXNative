@@ -191,7 +191,7 @@ th .srt{display:inline-block;margin-left:2px;padding:0 2px;cursor:pointer;color:
     <label title="The weapon in their hands"><input type="checkbox" id="pw1"> primary weapon</label>
     <label title="The other weapon they carry"><input type="checkbox" id="pw2"> secondary weapon</label></span>
    <label title="Vehicles: a square with the vehicle's name, dimmed when destroyed"><input type="checkbox" id="vh" checked> vehicles</label>
-   <span class="ctlg" title="Where things spawn on this map, collected from every spawn the game showed (this match or all matches, like the deaths); hover a marker for its name and how often it spawned there. After joining a game in progress, the first spawns seen are left out: they are whatever lay around, not spawn points.">spawn points
+   <span class="ctlg" title="Where things spawn on this map, collected from every spawn the game showed (this match or all matches, like the deaths). A spawn point is bright while its item sits there and dim when it is taken or not back yet; an item away from its spawn point is drawn where it is now (a dashed line back to its spawn point), one being carried beside its carrier, outlined in white; a player with a power-up active gets a ring with its time left and x, y. Hover a marker for its name, where it is and how often it spawned there. After joining a game in progress, the first spawns seen are left out: they are whatever lay around, not spawn points.">spawn points
     <label title="Vehicle spawns: an orange outlined square"><input type="checkbox" id="spv"> vehicles</label>
     <label title="Weapon spawns: a gold diamond"><input type="checkbox" id="spw"> weapons</label>
     <label title="Equipment (cyan triangle) and power-up (magenta ring) spawns"><input type="checkbox" id="spi"> items</label></span>
@@ -570,18 +570,42 @@ try{ const j=JSON.parse(localStorage.getItem('mapSpawns')||'null'); if(j) for(co
 for(const id of Object.values(SPS)) document.getElementById(id).addEventListener('change',()=>{
   try{ const o={}; for(const k in SPS) o[k]=document.getElementById(SPS[k]).checked; localStorage.setItem('mapSpawns',JSON.stringify(o)); }catch(err){} drawMap(); });
 const SPKIND=['weapon','vehicle','equipment','power-up'];
+// live state (user, 2026-10-25: "dim when not spawned, or taken ... follow it accordingly with the icon"): snap.items = [spawn point
+// (-1 none), kind, state (0 at its spawn point, 1 elsewhere on the ground, 2 carried), x, y, z, carrier's slot (-1), name if no
+// point] (stats.c st_spawns). A spawn point is bright while its item sits on it, dim otherwise; an item away from its point is
+// drawn where it is now (a faint dashed line back to its point; vehicles without, there can be hundreds), a carried one beside
+// its carrier's dot with a white outline; a player with a power-up active gets a ring and "<power-up> <s left> · x, y".
+// An older loader sends no items: every point stays bright.
 let spawnHits=[];
-function spawnShown(){ if(!heat||!heat.spawns) return []; const on=id=>document.getElementById(id).checked, v=on('spv'), w=on('spw'), it=on('spi'), all=scope()==='all';
-  return heat.spawns.filter(q=>(q[3]===1?v:q[3]===0?w:it)&&(all||q[6]===heat.match)); }
-function drawSpawns(){ spawnHits=[]; const sh=spawnShown(); if(!view) return;
-  cx.lineJoin='round';
-  for(const q of sh){ const [x,y]=toScreen(q[0],q[1]), k=q[3]; cx.lineWidth=1; cx.strokeStyle='#000';
-    if(k===1){ cx.lineWidth=3; cx.strokeStyle='#000'; cx.strokeRect(x-5,y-5,10,10); cx.lineWidth=1.8; cx.strokeStyle='#ff9f43'; cx.strokeRect(x-5,y-5,10,10); }
-    else if(k===0){ cx.fillStyle='#e8c46a'; cx.beginPath(); cx.moveTo(x,y-5); cx.lineTo(x+4,y); cx.lineTo(x,y+5); cx.lineTo(x-4,y); cx.closePath(); cx.fill(); cx.stroke(); }
-    else if(k===2){ cx.fillStyle='#5ad1e8'; cx.beginPath(); cx.moveTo(x,y-5); cx.lineTo(x+4.5,y+4); cx.lineTo(x-4.5,y+4); cx.closePath(); cx.fill(); cx.stroke(); }
-    else { cx.lineWidth=3; cx.strokeStyle='#000'; cx.beginPath(); cx.arc(x,y,5,0,7); cx.stroke(); cx.lineWidth=1.8; cx.strokeStyle='#e06cf0'; cx.stroke(); }
-    spawnHits.push([x,y,q]); }
-  const n=[0,0,0]; for(const q of sh) n[q[3]===1?0:q[3]===0?1:2]++;
+const spOn=k=>document.getElementById(k===1?'spv':k===0?'spw':'spi').checked;
+function spawnShown(){ if(!heat||!heat.spawns) return []; const all=scope()==='all';
+  return heat.spawns.map((q,i)=>[q,i]).filter(([q])=>spOn(q[3])&&(all||q[6]===heat.match)); }
+function spMark(k,x,y,live){ cx.lineJoin='round';
+  if(k===1){ cx.lineWidth=3; cx.strokeStyle='#000'; cx.strokeRect(x-5,y-5,10,10); cx.lineWidth=1.8; cx.strokeStyle='#ff9f43'; cx.strokeRect(x-5,y-5,10,10); }
+  else if(k===0){ cx.fillStyle='#e8c46a'; cx.beginPath(); cx.moveTo(x,y-5); cx.lineTo(x+4,y); cx.lineTo(x,y+5); cx.lineTo(x-4,y); cx.closePath(); cx.fill(); cx.lineWidth=1; cx.strokeStyle=live?'#fff':'#000'; cx.stroke(); }
+  else if(k===2){ cx.fillStyle='#5ad1e8'; cx.beginPath(); cx.moveTo(x,y-5); cx.lineTo(x+4.5,y+4); cx.lineTo(x-4.5,y+4); cx.closePath(); cx.fill(); cx.lineWidth=1; cx.strokeStyle=live?'#fff':'#000'; cx.stroke(); }
+  else { cx.lineWidth=3; cx.strokeStyle='#000'; cx.beginPath(); cx.arc(x,y,5,0,7); cx.stroke(); cx.lineWidth=1.8; cx.strokeStyle='#e06cf0'; cx.stroke(); }
+  if(live && (k===1||k===3)){ cx.lineWidth=1; cx.strokeStyle='#fff'; if(k===1) cx.strokeRect(x-7,y-7,14,14); else { cx.beginPath(); cx.arc(x,y,7.5,0,7); cx.stroke(); } } }
+const PUP={'red powerup':'Overshield','blue powerup':'Active camo','yellow powerup':'Custom power-up'};
+function drawSpawns(){ spawnHits=[]; if(!view) return;
+  const items=snap&&Array.isArray(snap.items)?snap.items:null, here=new Set();
+  if(items) for(const it of items) if(it[2]===0&&it[0]>=0) here.add(it[0]);
+  const sh=spawnShown();
+  for(const [q,i] of sh){ const [x,y]=toScreen(q[0],q[1]), lit=!items||here.has(i); cx.globalAlpha=lit?1:0.3; spMark(q[3],x,y,false); cx.globalAlpha=1;
+    spawnHits.push([x,y,`${q[4]} (${SPKIND[q[3]]} spawn) at ${q[0].toFixed(1)}, ${q[1].toFixed(1)}, height ${q[2].toFixed(1)} -- ${lit?(items?'there now':'spawned'):'not there now'}; spawned ${q[5]}x`+(scope()==='all'?'':' (all matches)')]); }
+  if(items){ const bySlot=new Map(((snap&&snap.players)||[]).map(p=>[p.slot,p]));
+    for(const it of items){ const k=it[1]; if(it[2]===0||!spOn(k)) continue;
+      const pt=it[0]>=0&&heat&&heat.spawns?heat.spawns[it[0]]:null, nm=pt?pt[4]:(it[7]||SPKIND[k]); let [x,y]=toScreen(it[3],it[4]);
+      if(pt&&k!==1){ const [sx,sy]=toScreen(pt[0],pt[1]); cx.save(); cx.setLineDash([3,3]); cx.globalAlpha=0.45; cx.strokeStyle=k===0?'#e8c46a':k===2?'#5ad1e8':'#e06cf0'; cx.lineWidth=1; cx.beginPath(); cx.moveTo(sx,sy); cx.lineTo(x,y); cx.stroke(); cx.restore(); }
+      const who=it[2]===2&&it[6]>=0?bySlot.get(it[6]):null; if(it[2]===2){ x+=7; y-=7; }
+      spMark(k,x,y,true);
+      spawnHits.push([x,y,`${nm} (${SPKIND[k]}) ${it[2]===2?(who?'carried by '+who.name:'in a vehicle / carried'):'on the ground'} at ${it[3].toFixed(1)}, ${it[4].toFixed(1)}, height ${it[5].toFixed(1)}`+(pt?` -- spawned at ${pt[0].toFixed(1)}, ${pt[1].toFixed(1)}`:'')]); } }
+  if(document.getElementById('spi').checked&&snap) for(const p of snap.players){ if(!p.alive||!p.pos) continue;
+    const e=(p.effects||[]).find(e=>PUP[e.what]); if(!e) continue; const [x,y]=toScreen(p.pos[0],p.pos[1]), t=`${PUP[e.what]} ${Math.ceil(e.left)} s · ${p.pos[0].toFixed(1)}, ${p.pos[1].toFixed(1)}`;
+    cx.lineWidth=2.5; cx.strokeStyle='#e06cf0'; cx.beginPath(); cx.arc(x,y,10,0,7); cx.stroke();
+    cx.font='10px system-ui'; cx.textAlign='left'; cx.lineWidth=3; cx.strokeStyle='#000c'; cx.strokeText(t,x+12,y+14); cx.fillStyle='#f0a8f8'; cx.fillText(t,x+12,y+14);
+    spawnHits.push([x,y,`${p.name}: ${PUP[e.what]}, ${e.left.toFixed(1)} s left, at ${p.pos[0].toFixed(1)}, ${p.pos[1].toFixed(1)}, height ${p.pos[2].toFixed(1)}`]); }
+  const n=[0,0,0]; for(const [q] of sh) n[q[3]===1?0:q[3]===0?1:2]++;
   const dc=document.getElementById('dc'), base=dc.textContent.replace(/ · .*$/,'');
   dc.textContent=base+(sh.length?` · spawn points: ${[n[0]&&n[0]+' vehicle',n[1]&&n[1]+' weapon',n[2]&&n[2]+' item'].filter(Boolean).join(', ')}`:''); }
 // ---- player labels on the map (user, 2026-10-18): "names", "x/y" and "health / shield" are separate switches, remembered in
@@ -671,8 +695,8 @@ window.addEventListener('resize',()=>{ if(mapfs.classList.contains('open')) fsSi
 // world coordinates under the mouse
 cv.addEventListener('mousemove',e=>{ if(!view) return; const r=cv.getBoundingClientRect(), sx=(e.clientX-r.left)*cv.width/r.width, sy=(e.clientY-r.top)*cv.height/r.height;
   const x=view.wx0+(sx-view.ox)/view.sc, y=view.wy0+view.wh-(sy-view.oy)/view.sc; let t=`x ${x.toFixed(1)}, y ${y.toFixed(1)}`;
-  let best=null, bd=64; for(const h of spawnHits){ const d=(h[0]-sx)**2+(h[1]-sy)**2; if(d<bd){ bd=d; best=h[2]; } }
-  if(best) t=`${best[4]} (${SPKIND[best[3]]} spawn) at ${best[0].toFixed(1)}, ${best[1].toFixed(1)}, height ${best[2].toFixed(1)} -- spawned ${best[5]}x`+(scope()==='all'?'':' (all matches)');
+  let best=null, bd=64; for(const h of spawnHits){ const d=(h[0]-sx)**2+(h[1]-sy)**2; if(d<=bd){ bd=d; best=h[2]; } }   // (later = drawn on top: live items over points)
+  if(best) t=best;
   document.getElementById('hov').textContent=t; });
 cv.addEventListener('mouseleave',()=>{ document.getElementById('hov').textContent=''; });
 // "click to teleport": host + PELOAD_ALLOW_TELEPORT, or a client of our host (tpto is forwarded: the host moves us); lands 0.6 above the
