@@ -573,15 +573,16 @@ function drawMap(){
 // from its spawn point, and they need to be tracked independently. we DO want to see when players are in the vehicles"): each live
 // vehicle (snap.vehicles: id, def, yaw, pos; only vehicles without a parent -- a Warthog's turret is part of it) is drawn as its
 // own top-down outline, made by the loader from the vehicle's collision model in the map file (GET /vshapes.json: per definition,
-// convex parts in the vehicle's frame, x forward, y left), turned to its heading, at its real size or at least 22 px long, with a
+// convex parts in the vehicle's frame, x forward, y left), turned to its heading, at its real size or at least 22 px long (14 in the small panel), with a
 // white chevron at its front. Empty = light grey; manned = its occupants' team colour, each occupant a small dot on their seat;
 // destroyed = dark and faded. Its label: the name, then the occupants (you / the selected player highlighted). A vehicle spawn
 // point is a dashed orange bay instead (drawSpawns), so a vehicle parked on its spawn shows both.
 let vshapes={}, vshGen=null, vshAt=0;
+const vMinPx=()=>cv.width>700?22:14;   // a vehicle's least length on screen: 22 px in the full window, 14 in the panel
 async function pollVShapes(){ vshAt=Date.now(); try{ const j=await (await fetch('/vshapes.json')).json(); if(j.gen!==vshGen){ vshapes={}; vshGen=j.gen; } Object.assign(vshapes,j.shapes||{}); drawMap(); }catch(e){} }
 function needVShapes(){ if(snap&&Array.isArray(snap.vehicles)&&Date.now()-vshAt>3000&&snap.vehicles.some(v=>v.def&&!vshapes[v.def])) pollVShapes(); }
 const vName=t=>{ const n=String(t||'').split(/[\\/]/).pop().replace(/_/g,' ').toLowerCase(); return n.charAt(0).toUpperCase()+n.slice(1); };
-function vehicleFrame(v,sh){ const [px,py]=toScreen(v.pos[0],v.pos[1]), a=(v.yaw||0)*Math.PI/180, c=Math.cos(a), s=Math.sin(a), len=sh?Math.max(0.5,sh.len):3, k=Math.max(view.sc,22/len);
+function vehicleFrame(v,sh){ const [px,py]=toScreen(v.pos[0],v.pos[1]), a=(v.yaw||0)*Math.PI/180, c=Math.cos(a), s=Math.sin(a), len=sh?Math.max(0.5,sh.len):3, k=Math.max(view.sc,vMinPx()/len);
   return {px,py,k,P:(lx,ly)=>[px+(lx*c-ly*s)*k, py-(lx*s+ly*c)*k]}; }
 function drawVehicle(v,occ,vobs,tags){
   const sh=vshapes[v.def], dead=!!v.dead||!(v.health>0), f=vehicleFrame(v,sh), P=f.P;
@@ -657,7 +658,7 @@ function drawSpawns(tags){ spawnHits=[]; if(!view) return;
   if(snap&&Array.isArray(snap.vehicles)) for(const v of snap.vehicles){ const s2=vshapes[v.def]; if(s2) vlen[vName(v.type).toLowerCase()]=s2; }
   for(const [q,i] of sh){ const [x,y]=toScreen(q[0],q[1]), lit=!items||here.has(i), k=q[3];
     cx.globalAlpha=lit?1:0.35;
-    if(k===1){ const s2=vlen[String(q[4]).toLowerCase()], kk=s2?Math.max(view.sc,22/Math.max(0.5,s2.len)):0, w=s2?Math.max(12,s2.len*kk+6):14, h=s2?Math.max(9,s2.wid*kk+6):10; spBay(x,y,Math.max(w,h),Math.max(w,h)*0.7); }
+    if(k===1){ const s2=vlen[String(q[4]).toLowerCase()], kk=s2?Math.max(view.sc,vMinPx()/Math.max(0.5,s2.len)):0, w=s2?Math.max(12,s2.len*kk+6):14, h=s2?Math.max(9,s2.wid*kk+6):10; spBay(x,y,Math.max(w,h),Math.max(w,h)*0.7); }
     else spMark(k,x,y,false);
     cx.globalAlpha=1;
     // the name: a vehicle parked on its bay is named by its own label; an empty bay says what spawns there
