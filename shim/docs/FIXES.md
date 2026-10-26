@@ -369,6 +369,12 @@ patch variants by signature (section 16; shim/docs/patch-addresses.md).
   `__CxxFrameHandler3` and catch_unwind. (10-11 90f2361)
 - **RtlUnwindEx bounded** — Why: a lost unwind target walked into garbage and faulted inside the loop. How: RSP bounded
   to a sane window, stop once the establisher frame reaches/passes the target. (10-11 00d8c68)
+- **Chained unwind info unwinds the parent's whole prologue** (2026-10-25) — `i_RtlVirtualUnwind`. Why: a function fragment
+  with UNW_FLAG_CHAININFO (MSVC splits functions this way: 3,703 of halo3's 21,768 .pdata entries) recursed into its parent
+  with the parent's START as pc, so the prologue offset was 0 and none of the parent's pushes / stack allocation were undone:
+  wrong rsp and return address for an exception unwinding through such a frame (found while writing the sampler's stack
+  walker; no crash was traced to it). How: the parent is unwound with the same pc (past its prologue), as Windows / Wine do.
+  Old: `PELOAD_UNWIND_CHAIN_OLD=1`.
 - **Unwind across the guest stack switch** — `RtlUnwindEx`. Why: `__CxxFrameHandler3` runs on the host stack, so the
   context it passes has a host RSP that cannot unwind to the guest-stack target. How: unwind from the guest-stack
   exception context stashed by i_RaiseException. (10-11 ce8de8f)
@@ -2148,6 +2154,24 @@ Numbers are from the commit messages; PERF-PLAN.md has the measurements. Compare
 - **PELOAD_GLH_GPUPROF=1** — glhelper.c `gp_switch` / `gp_poll`: GPU time (GL_TIME_ELAPSED queries) per framebuffer the helper
   draws into, the present copy and readbacks, reported every 5 s: where the GPU's time goes when a game is GPU-bound.
 ## 20. Scripts and RE tools
+
+- **Sampler call stacks, a dump with every function, no lost threads** (2026-10-25) — peload.c `sampler_thread`, `smp_walk`,
+  `smp_epilog`, `smp_chain_root`; shim/tools/sample-dump.py. Why: (1) the in-process sampler (`PELOAD_SAMPLE=<us>`) only saw
+  the instruction pointer, so halo3's flat profile (top 45 functions ~26% of the engine thread) said nothing about which
+  engine systems cost the time; (2) `PELOAD_SAMPLE_DUMP` was written after the 10 s report, which clears each thread's top 8
+  entries as it prints them -- the dump lacked exactly the hottest functions; (3) its thread table had 96 records and never
+  freed one: a menu-runtime client fills it with short-lived threads before halo3's match threads start, and those were then
+  never sampled; (4) a fragment with chained unwind info was keyed by its own start (halo3+0x449693 instead of 0x449650).
+  How: `PELOAD_SAMPLE_STACK=<thread name part>` (1 = halo3's engine thread guest-0x18000a120) walks that thread's stack at each
+  sample while it is suspended: guest frames by their .pdata unwind codes (chained -> parent; an epilogue on the top frame
+  decoded like Windows does), host code on top by the rbp chain to the first guest return address (its frames are kept: a
+  loader function under halo3 shows by name; a frameless leaf's caller from [rsp] when a call instruction ends there); reads
+  only between the sample's rsp and the thread's pthread stack top, a fault ends the walk (`t_dump_jb`), no dladdr while
+  suspended. Distinct stacks are counted (16,384 per 10 s) and dumped as `S<tab>thread<tab>samples<tab>outer;...;inner`;
+  `sample-dump.py <dump> [--dll halo3.dll] [--tree] [--focus halo3+0x..]` prints self, inclusive and the call tree (--dll names
+  leaf functions without .pdata by their start). The dump is written before the report; records of threads not listed for 200
+  passes are reused (256 records); names and stack ranges are re-read every 10 s. Each interval starts with a `T` line (seconds
+  up, seconds since gameplay started or -1): `--match [SECS]` keeps gameplay only. Old keys: `PELOAD_SAMPLE_NOCHAIN=1`.
 
 - **PELOAD_BP=<dll>+<rva>** (2026-10-21) — `bp_install_mod` (load_guest, before the DLL's DllMain), `bp_plant`: the software
   breakpoints also inside guest DLLs (`mss64+e700`, the DLL's name without extension, exact), up to 8 in all; a hit names its module

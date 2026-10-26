@@ -9080,7 +9080,12 @@ static PEXHANDLER MSABI i_RtlVirtualUnwind(uint32_t htype, uint64_t base, uint64
         }
         i+=slots;
     }
-    if(flags&4){ /*CHAININFO*/ RUNFN* chain=(RUNFN*)(codes + ((ncodes+1)&~1)); return i_RtlVirtualUnwind(htype,base,base+chain->Begin,chain,ctx,hdata,establisher,0); }
+    // CHAININFO: the fragment's codes are done; the parent's prologue has run in full (pc is past it), so unwind the parent with
+    // the same pc. Until 2026-10-25 it passed the parent's start as pc: prolog offset 0 = none of the parent's pushes / stack
+    // allocation undone -> wrong rsp and return address for any exception unwinding through such a frame (MSVC splits halo3
+    // functions this way: 3,703 of its 21,768 entries are chained). PELOAD_UNWIND_CHAIN_OLD=1 = old.
+    if(flags&4){ /*CHAININFO*/ RUNFN* chain=(RUNFN*)(codes + ((ncodes+1)&~1)); static int old=-1; if(old<0) old=getenv("PELOAD_UNWIND_CHAIN_OLD")!=0;
+        return i_RtlVirtualUnwind(htype,base,old?base+chain->Begin:pc,chain,ctx,hdata,establisher,0); }
     if(prolog_off >= prolog){ /* in body: pop return address */ CTX_RIP(ctx)=*(uint64_t*)CTX_RSP(ctx); CTX_RSP(ctx)+=8; }
     else { CTX_RIP(ctx)=*(uint64_t*)CTX_RSP(ctx); CTX_RSP(ctx)+=8; } // simplified: treat prolog like body
     if((flags&3) && (htype&3)){ uint32_t* hrva=(uint32_t*)(codes + ((ncodes+1)&~1));
@@ -12924,10 +12929,13 @@ static void net_selftest(const char* spec){
 typedef struct { uint64_t key; uint32_t cnt; uint32_t th; uint64_t ret; } SmpEnt;   // ret: [rsp] when first seen (unknown code)
 enum { SMP_HALO3, SMP_EXE, SMP_SHIM, SMP_GL, SMP_METAL, SMP_SYS, SMP_NCLS };
 static const char*const g_smp_cls[SMP_NCLS]={"halo3","exe","loader","GL","Metal","system"};
-// the function a sample is in: guest code -> its .pdata entry (start), native code -> the dladdr symbol
+// the function a sample is in: guest code -> its .pdata entry (start; a fragment with chained unwind info -> its parent's,
+// PELOAD_SAMPLE_NOCHAIN=1 = the fragment's own start as before 2026-10-25), native code -> the dladdr symbol
+static RUNFN* smp_chain_root(uint64_t b,RUNFN*f);
+static int g_smp_nochain;
 static uint64_t smp_func(uint64_t rip,int*cls){
     if(rip>=0x140000000ULL&&rip<0x190000000ULL){ uint64_t b=0; RUNFN*f=i_RtlLookupFunctionEntry(rip,&b,0);
-        *cls=rip>=0x180000000ULL?SMP_HALO3:SMP_EXE; return f?b+f->Begin:rip; }
+        *cls=rip>=0x180000000ULL?SMP_HALO3:SMP_EXE; if(f && !g_smp_nochain) f=smp_chain_root(b,f); return f?b+f->Begin:rip; }
     Dl_info di; if(dladdr((void*)rip,&di)){ const char*fn=di.dli_fname?di.dli_fname:"";
         static uint64_t self_base; if(!self_base){ Dl_info me; if(dladdr((void*)smp_func,&me)) self_base=(uint64_t)me.dli_fbase; }
         if((uint64_t)di.dli_fbase==self_base) *cls=SMP_SHIM;
@@ -12936,6 +12944,66 @@ static uint64_t smp_func(uint64_t rip,int*cls){
         else *cls=SMP_SYS;
         return di.dli_saddr?(uint64_t)di.dli_saddr:rip; }
     *cls=SMP_SYS; return rip; }
+// PELOAD_SAMPLE_STACK=<thread name part> (1 = halo3's engine thread, guest-0x18000a120): the sampler also walks that thread's
+// call stack at each sample and PELOAD_SAMPLE_DUMP gets every distinct stack with its count ("S" lines, outermost first), for
+// inclusive times per function (shim/tools/sample-dump.py --tree). Guest frames unwind by their .pdata unwind codes (a fragment
+// with chained unwind info -> its parent function; the top frame may sit in an epilogue: decoded like Windows does); host code
+// on top (loader, system, Rosetta runtime) by a leaf's [rsp] or the rbp chain back to the first guest return address. The walk
+// runs while the thread is suspended, so it only reads: memory between the sample's rsp and the thread's stack top, and the
+// images' unwind data (no dladdr: dyld's lock may be held); a fault ends the walk (t_dump_jb, crashsig).
+enum { SMP_STK_MAX=48, SMP_STK_TAB=16384 };
+typedef struct { uint64_t h; uint32_t cnt, th, n; uint64_t f[SMP_STK_MAX]; } SmpStk;
+#define SMP_GUEST(a) ((a)>=0x140000000ULL && (a)<0x190000000ULL)
+#define SMP_CAND (1ull<<63)   // a raw frame that may not be a return address
+#define SMP_RD(a) ({ uint64_t _a=(a); if(_a<lo || _a+8>hi) return n; *(volatile uint64_t*)_a; })
+// the function a .pdata entry belongs to: follow chained unwind info (UNW_FLAG_CHAININFO) to the parent entry
+static RUNFN* smp_chain_root(uint64_t b,RUNFN*f){ for(int i=0;i<8 && f;i++){ uint8_t*info=(uint8_t*)b+f->Unwind; if(!((info[0]>>3)&4)) break;
+        f=(RUNFN*)((uint16_t*)(info+4)+((info[2]+1)&~1)); } return f; }
+// the top frame in an epilogue ([add rsp,n | lea rsp,[fp+d]] pop... ret/jmp): emulate it, as Windows' unwinder does
+static int smp_epilog(uint64_t*r,uint64_t*rip,uint64_t lo,uint64_t hi){ const uint8_t*p=(const uint8_t*)*rip; uint64_t sp=r[4]; int adj=0, reg[16], np=0;
+    if(p[0]==0x48 && p[1]==0x83 && p[2]==0xC4){ sp+=(uint64_t)(int64_t)(int8_t)p[3]; p+=4; adj=1; }
+    else if(p[0]==0x48 && p[1]==0x81 && p[2]==0xC4){ sp+=(uint64_t)(int64_t)*(const int32_t*)(p+3); p+=7; adj=1; }
+    else if((p[0]&0xFE)==0x48 && p[1]==0x8D && ((p[2]>>3)&7)==4 && (p[2]&7)!=4 && ((p[2]>>6)==1 || (p[2]>>6)==2)){ int b=(p[2]&7)|((p[0]&1)<<3);
+        int64_t d=(p[2]>>6)==1?(int8_t)p[3]:*(const int32_t*)(p+3); p+=(p[2]>>6)==1?4:7; sp=r[b]+(uint64_t)d; adj=1; }
+    while(np<16){ if(p[0]>=0x58 && p[0]<=0x5F){ reg[np++]=p[0]-0x58; p++; } else if(p[0]==0x41 && p[1]>=0x58 && p[1]<=0x5F){ reg[np++]=8+p[1]-0x58; p+=2; } else break; }
+    int ret=p[0]==0xC3 || p[0]==0xC2 || (p[0]==0xF3 && p[1]==0xC3), jmp=p[0]==0xE9 || p[0]==0xEB || (p[0]==0xFF && p[1]==0x25) || (p[0]==0x48 && p[1]==0xFF && p[2]==0x25);
+    if(!ret && !(jmp && (adj || np))) return 0;
+    for(int i=0;i<np;i++){ if(sp<lo || sp+8>hi) return 0; r[reg[i]]=*(volatile uint64_t*)sp; sp+=8; }
+    if(sp<lo || sp+8>hi) return 0; *rip=*(volatile uint64_t*)sp; r[4]=sp+8; return 1; }
+// raw addresses of the call stack at a sample, innermost first: [0] = rip, then guest return addresses
+static int smp_walk(const x86_thread_state64_t*st,uint64_t lo,uint64_t hi,uint64_t*out,int max){
+    uint64_t r[16]={st->__rax,st->__rcx,st->__rdx,st->__rbx,st->__rsp,st->__rbp,st->__rsi,st->__rdi,st->__r8,st->__r9,st->__r10,st->__r11,st->__r12,st->__r13,st->__r14,st->__r15};
+    uint64_t rip=st->__rip; int n=0, top=1; out[n++]=rip;
+    if(!SMP_GUEST(rip)){ uint64_t a=SMP_RD(r[4]);   // host code on top
+        if(SMP_GUEST(a)){ rip=a; r[4]+=8; }
+        else { if(a) out[n++]=a|SMP_CAND;   // [rsp]: a frameless leaf's caller -- or a local (checked after the resume)
+            uint64_t fp=r[5]; for(int k=0;;k++){ if(k>=64 || fp<r[4] || (fp&7)) return n; uint64_t ret=SMP_RD(fp+8), nfp=SMP_RD(fp);
+                r[4]=fp+16; r[5]=nfp; if(SMP_GUEST(ret)){ rip=ret; break; } if(n<max-1) out[n++]=ret; if(nfp<=fp) return n; fp=nfp; } }
+        out[n++]=rip; top=0; }
+    while(n<max){ uint64_t b=0, osp=r[4]; RUNFN*fn=i_RtlLookupFunctionEntry(rip,&b,0);
+        if(!fn){ rip=SMP_RD(r[4]); r[4]+=8; }   // a leaf: no unwind data, [rsp] is the return address
+        else if(top && smp_epilog(r,&rip,lo,hi)){}
+        else { uint64_t poff=rip-(b+fn->Begin);
+            for(int c=0;c<8 && fn;c++){ uint8_t*info=(uint8_t*)b+fn->Unwind; uint8_t flags=info[0]>>3, nc=info[2], fr=info[3]&0xf, fro=info[3]>>4;
+                uint16_t*cd=(uint16_t*)(info+4); uint64_t fb=fr?r[fr]-(uint64_t)fro*16:r[4];
+                for(int i=0;i<nc;){ uint8_t coff=cd[i]&0xff, op=(cd[i]>>8)&0xf, oi=(cd[i]>>12)&0xf; int act=coff<=poff, sl=1;
+                    switch(op){ case 0: if(act){ r[oi]=SMP_RD(r[4]); r[4]+=8; } break;
+                        case 1: if(oi==0){ if(act) r[4]+=(uint64_t)cd[i+1]*8; sl=2; } else { if(act) r[4]+=*(uint32_t*)&cd[i+1]; sl=3; } break;
+                        case 2: if(act) r[4]+=(uint64_t)oi*8+8; break;
+                        case 3: if(act) r[4]=r[fr]-(uint64_t)fro*16; break;
+                        case 4: if(act) r[oi]=SMP_RD(fb+(uint64_t)cd[i+1]*8); sl=2; break;
+                        case 5: if(act) r[oi]=SMP_RD(fb+*(uint32_t*)&cd[i+1]); sl=3; break;
+                        case 8: sl=2; break; case 9: sl=3; break;
+                        case 10: return n;   // machine frame (interrupt / exception entry): not on a sampled engine stack
+                        default: break; }
+                    i+=sl; }
+                if(flags&4){ fn=(RUNFN*)(cd+((nc+1)&~1)); poff=~0ull; continue; }   // chained: the parent's whole prologue has run
+                break; }
+            rip=SMP_RD(r[4]); r[4]+=8; }
+        top=0;
+        if(r[4]<=osp || !SMP_GUEST(rip)) break;   // no progress, or back in host code (the thread's start / a loader callback)
+        out[n++]=rip; }
+    return n; }
 static void smp_name(uint64_t key,char*w,size_t n){ Dl_info di;
     if(key>=0x140000000ULL&&key<0x150000000ULL) snprintf(w,n,"exe+0x%llx",(unsigned long long)(key-0x140000000ULL));
     else if(key>=0x180000000ULL&&key<0x190000000ULL) snprintf(w,n,"halo3+0x%llx",(unsigned long long)(key-0x180000000ULL));
@@ -12953,25 +13021,50 @@ static SmpEnt g_smp_mc[256];   // who calls memmove/memcpy/memset/memcmp: [rsp] 
 static void* sampler_thread(void*a){ (void)a; pthread_setname_np("shim-sampler");
     int us=atoi(getenv("PELOAD_SAMPLE")); if(us<200) us=1000;
     static SmpEnt tab[65536]; double tlast=mono_s();
-    static struct { thread_t t; uint64_t n, busy, cls[SMP_NCLS]; char name[64]; } thr[96]; int nthr=0;
+    // one record per thread; a thread not listed for 200 passes has exited and its record is reused (the table had 96 records and
+    // never freed one: a menu-runtime client fills it with short-lived threads before halo3's match threads start, and those were
+    // then never sampled at all, 2026-10-25)
+    enum { SMP_NTHR=256 };
+    static struct { thread_t t; uint64_t n, busy, cls[SMP_NCLS], slo, shi, last; int stk; char name[64]; } thr[SMP_NTHR]; int nthr=0; uint64_t pass=0;
     mach_port_t self=mach_thread_self();
+    g_smp_nochain=getenv("PELOAD_SAMPLE_NOCHAIN")!=0;
+    const char*stkw=getenv("PELOAD_SAMPLE_STACK"); if(stkw && (!*stkw || !strcmp(stkw,"1"))) stkw="guest-0x18000a120"; if(stkw && !strcmp(stkw,"0")) stkw=0;
+    static SmpStk stab[SMP_STK_TAB]; uint64_t raw[SMP_STK_MAX]; uint32_t stk_lost=0;
     for(;;){
         thread_act_array_t th; mach_msg_type_number_t n=0;
-        if(task_threads(mach_task_self(),&th,&n)==KERN_SUCCESS){
+        if(task_threads(mach_task_self(),&th,&n)==KERN_SUCCESS){ pass++;
             for(mach_msg_type_number_t i=0;i<n;i++){ thread_t t=th[i];
+                // the thread's record (name, stack range) before suspending it: libpthread may take its list lock
+                int ti=-1; if(t!=self){ for(int k=0;k<nthr;k++) if(thr[k].t==t){ ti=k; break; }
+                    if(ti<0){ if(nthr<SMP_NTHR) ti=nthr++; else for(int k=0;k<nthr;k++) if(thr[k].last+200<pass){ ti=k; break; } }
+                    if(ti>=0 && thr[ti].t!=t){ memset(&thr[ti],0,sizeof thr[ti]); thr[ti].t=t;
+                        pthread_t pt=pthread_from_mach_thread_np(t); if(pt){ pthread_getname_np(pt,thr[ti].name,sizeof thr[ti].name);
+                            thr[ti].shi=(uint64_t)pthread_get_stackaddr_np(pt); thr[ti].slo=thr[ti].shi-(uint64_t)pthread_get_stacksize_np(pt); }
+                        if(!thr[ti].name[0]) snprintf(thr[ti].name,sizeof thr[ti].name,"port%u",(unsigned)t);
+                        thr[ti].stk=stkw && strstr(thr[ti].name,stkw); }
+                    if(ti>=0) thr[ti].last=pass; }
                 if(t!=self && thread_suspend(t)==KERN_SUCCESS){
                     x86_thread_state64_t st; mach_msg_type_number_t c=x86_THREAD_STATE64_COUNT;
                     int ok=thread_get_state(t,x86_THREAD_STATE64,(thread_state_t)&st,&c)==KERN_SUCCESS;
                     // nothing that can take a lock while the thread is stopped (it may hold dyld's or malloc's): one stack read
                     uint64_t rtop=0; if(ok && st.__rsp && !(st.__rsp&7)) rtop=*(volatile uint64_t*)st.__rsp;
+                    int nraw=0; if(ok && ti>=0 && thr[ti].stk && st.__rsp>=thr[ti].slo && st.__rsp<thr[ti].shi){
+                        sigjmp_buf jb; volatile int got=0; if(sigsetjmp(jb,1)==0){ t_dump_jb=&jb; got=smp_walk(&st,st.__rsp&~0xfffull,thr[ti].shi,raw,SMP_STK_MAX); } t_dump_jb=0; nraw=got; }
                     thread_resume(t);
-                    if(ok){ uint64_t rip=st.__rip; int ti=-1; for(int k=0;k<nthr;k++) if(thr[k].t==t){ ti=k; break; }
-                        if(ti<0 && nthr<96){ ti=nthr++; memset(&thr[ti],0,sizeof thr[ti]); thr[ti].t=t;
-                            pthread_t pt=pthread_from_mach_thread_np(t); if(pt) pthread_getname_np(pt,thr[ti].name,sizeof thr[ti].name);
-                            if(!thr[ti].name[0]) snprintf(thr[ti].name,sizeof thr[ti].name,"port%u",(unsigned)t); }
+                    if(ok){ uint64_t rip=st.__rip;
                         Dl_info di={0}; int idle=0; if(dladdr((void*)rip,&di) && di.dli_sname && (strstr(di.dli_sname,"mach_msg")||strstr(di.dli_sname,"__psynch")||strstr(di.dli_sname,"__semwait")||strstr(di.dli_sname,"nanosleep")||strstr(di.dli_sname,"__select")||strstr(di.dli_sname,"__workq")||strstr(di.dli_sname,"kevent")||strstr(di.dli_sname,"__ulock")||strstr(di.dli_sname,"__wait4")||strstr(di.dli_sname,"__recvfrom")||strstr(di.dli_sname,"__read_nocancel")||strstr(di.dli_sname,"__accept")||strstr(di.dli_sname,"__sigsuspend")||strstr(di.dli_sname,"poll")||strstr(di.dli_sname,"semaphore_"))) idle=1;
                         if(ti>=0 && !idle && rtop && di.dli_sname && (strstr(di.dli_sname,"memmove")||strstr(di.dli_sname,"memcpy")||strstr(di.dli_sname,"memset")||strstr(di.dli_sname,"memcmp")||strstr(di.dli_sname,"strncmp")||strstr(di.dli_sname,"strcmp")||strstr(di.dli_sname,"mutex"))){
                             int cc=0; uint64_t ck=smp_func(rtop,&cc); for(int q=0;q<256;q++){ if(g_smp_mc[q].key==ck && g_smp_mc[q].th==(uint32_t)ti){ g_smp_mc[q].cnt++; break; } if(!g_smp_mc[q].key){ g_smp_mc[q].key=ck; g_smp_mc[q].th=(uint32_t)ti; g_smp_mc[q].cnt=1; break; } } }
+                        if(ti>=0 && !idle && nraw>0){ SmpStk q; q.n=0; q.h=0x9E3779B97F4A7C15ull^(uint64_t)ti;   // the stack: function keys, outermost first
+                            for(int k=nraw-1;k>=0;k--){ uint64_t a=raw[k];
+                                if(a&SMP_CAND){ a&=~SMP_CAND; Dl_info di;   // keep it only if a call instruction ends just before it
+                                    if(!dladdr((void*)a,&di) || !di.dli_saddr || a-5<(uint64_t)di.dli_fbase || *(const uint8_t*)(a-5)!=0xE8) continue; }
+                                int cc=0; uint64_t fk=smp_func(a,&cc); q.f[q.n++]=fk; q.h=(q.h^fk)*0x100000001B3ull; }
+                            uint32_t h=(uint32_t)(q.h^(q.h>>29))&(SMP_STK_TAB-1); int put=0;
+                            for(int pr=0;pr<64 && !put;pr++){ SmpStk*e=&stab[(h+pr)&(SMP_STK_TAB-1)];
+                                if(!e->cnt){ *e=q; e->cnt=1; e->th=(uint32_t)ti; put=1; }
+                                else if(e->h==q.h && e->th==(uint32_t)ti && e->n==q.n && !memcmp(e->f,q.f,q.n*8)){ e->cnt++; put=1; } }
+                            if(!put) stk_lost++; }
                         if(ti>=0){ thr[ti].n++; if(!idle){ thr[ti].busy++; int cls=SMP_SYS; uint64_t key=smp_func(rip,&cls); thr[ti].cls[cls]++;
                             uint32_t h=(uint32_t)((key>>2)*2654435761u ^ (uint32_t)ti*0x9E37u)&65535;
                             for(int pr=0;pr<64;pr++){ SmpEnt*e=&tab[(h+pr)&65535]; if(e->key==0){ e->key=key; e->cnt=1; e->th=(uint32_t)ti; e->ret=(cls==SMP_SYS && key==rip)?rtop:0; break; } if(e->key==key && e->th==(uint32_t)ti){ e->cnt++; break; } } } } } }
@@ -12979,6 +13072,20 @@ static void* sampler_thread(void*a){ (void)a; pthread_setname_np("shim-sampler")
             vm_deallocate(mach_task_self(),(vm_address_t)th,n*sizeof(thread_t)); }
         usleep(us);
         if(mono_s()-tlast>=10.0){ tlast=mono_s(); char m[1400]; int k;
+            // PELOAD_SAMPLE_DUMP=<file>: every function's count per busy thread too (tab-separated: thread, function, samples, busy
+            // samples of that thread), for offline totals over a whole game -- shim/tools/sample-dump.py. Written before the report
+            // below, which clears each thread's top entries as it prints them (until 2026-10-25 the dump missed exactly those).
+            // With PELOAD_SAMPLE_STACK also "S<tab>thread<tab>samples<tab>outer;...;inner" per distinct stack. Each interval starts with
+            // "T<tab>seconds up<tab>seconds since gameplay started (-1 = not yet)" (sample-dump.py --match keeps gameplay only).
+            { static FILE*df; static int tried; if(!tried){ tried=1; const char*e=getenv("PELOAD_SAMPLE_DUMP"); if(e) df=fopen(e,"a"); }
+              if(df){ fprintf(df,"T\t%.0f\t%.0f\n",mono_s()-g_launch_mono,g_gameplay_t0?mono_s()-g_gameplay_t0:-1.0);   // interval end: up s, s in gameplay (-1 = none yet)
+                  for(int i=0;i<65536;i++) if(tab[i].cnt && tab[i].th<(uint32_t)nthr && thr[tab[i].th].busy*20>=thr[tab[i].th].n){ char w[120]; smp_name(tab[i].key,w,sizeof w);
+                      fprintf(df,"%s\t%s\t%u\t%llu\n",thr[tab[i].th].name,w,tab[i].cnt,(unsigned long long)thr[tab[i].th].busy); }
+                  for(int i=0;i<SMP_STK_TAB;i++) if(stab[i].cnt && stab[i].th<(uint32_t)nthr){ fprintf(df,"S\t%s\t%u\t",thr[stab[i].th].name,stab[i].cnt);
+                      for(uint32_t k2=0;k2<stab[i].n;k2++){ char w[120]; smp_name(stab[i].f[k2],w,sizeof w); fprintf(df,"%s%s",k2?";":"",w); } fputc('\n',df); }
+                  if(stk_lost) fprintf(df,"S-lost\t%u\n",stk_lost);
+                  fflush(df); } }
+            memset(stab,0,sizeof stab); stk_lost=0;
             for(int ti=0;ti<nthr;ti++){ if(!thr[ti].n || thr[ti].busy*20<thr[ti].n) continue;   // threads busy >= 5% of the time
                 k=snprintf(m,sizeof m,"  [sample] %-26s busy %3.0f%% |",thr[ti].name,100.0*thr[ti].busy/thr[ti].n);
                 for(int c=0;c<SMP_NCLS;c++) if(thr[ti].cls[c]*50>=thr[ti].busy) k+=snprintf(m+k,sizeof m-k," %s %.0f%%",g_smp_cls[c],100.0*thr[ti].cls[c]/thr[ti].busy);
@@ -12995,7 +13102,11 @@ static void* sampler_thread(void*a){ (void)a; pthread_setname_np("shim-sampler")
                   for(int top=0;top<5;top++){ int bi=-1; uint32_t bc=0; for(int q=0;q<256;q++) if(g_smp_mc[q].th==(uint32_t)ti && g_smp_mc[q].cnt>bc){ bc=g_smp_mc[q].cnt; bi=q; }
                       if(bi<0 || bc*100<thr[ti].busy) break; char w[120]; smp_name(g_smp_mc[bi].key,w,sizeof w); kk+=snprintf(m+kk,sizeof m-kk," %s %.1f%%,",w,100.0*bc/thr[ti].busy); g_smp_mc[bi].cnt=0; any=1; }
                   if(any){ m[kk-1]='\n'; (void)!write(2,m,kk); } } }
-            memset(tab,0,sizeof tab); memset(g_smp_mc,0,sizeof g_smp_mc); for(int i=0;i<nthr;i++){ thr[i].n=thr[i].busy=0; memset(thr[i].cls,0,sizeof thr[i].cls); } } }
+            memset(tab,0,sizeof tab); memset(g_smp_mc,0,sizeof g_smp_mc); for(int i=0;i<nthr;i++){ thr[i].n=thr[i].busy=0; memset(thr[i].cls,0,sizeof thr[i].cls); }
+            for(int i=0;i<nthr;i++) if(thr[i].last==pass){ pthread_t pt=pthread_from_mach_thread_np(thr[i].t);   // named after we first saw it, or a
+                if(pt){ char nm[64]={0}; pthread_getname_np(pt,nm,sizeof nm);                                     // new thread with a reused port name
+                    if(nm[0]){ memcpy(thr[i].name,nm,sizeof nm); thr[i].stk=stkw && strstr(nm,stkw); }
+                    thr[i].shi=(uint64_t)pthread_get_stackaddr_np(pt); thr[i].slo=thr[i].shi-(uint64_t)pthread_get_stacksize_np(pt); } } } }
     return 0; }
 // PELOAD_STDERR_TEE=<file> / PELOAD_STDOUT_TEE=<file> (%p = pid): copy everything this process writes to stderr /
 // stdout into that file as well. For processes whose stdio another process owns, e.g. the dedicated server's
