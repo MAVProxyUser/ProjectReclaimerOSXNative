@@ -379,6 +379,20 @@ static void st_player_traits(StBuf*s,uint64_t rec){
     sb_put(s,"]"); }
 
 static void st_tag(StBuf*s,uint32_t def){ sb_str(s,hb_tag_name(def)); }
+// ---- vehicle outlines (the map's vehicle icons): per definition of the map being played, made once from the first live
+// instance (hitbox.c hb_vshape; 0 = none, not retried until 30 s later), served as GET /vshapes.json {"gen":n,"shapes":{def:{...}}}
+char* hb_vshape(uint32_t def,uint64_t datum);
+static struct { uint32_t def; char*json; double tried; } g_vsh[96]; static int g_nvsh; static unsigned g_vsh_gen; static pthread_mutex_t g_vsh_mx=PTHREAD_MUTEX_INITIALIZER;
+static int st_vshape_want(uint32_t def){ int want=1; double now=mono_s(); pthread_mutex_lock(&g_vsh_mx);
+    if(g_vsh_gen!=g_hb_mapgen){ for(int i=0;i<g_nvsh;i++) free(g_vsh[i].json); g_nvsh=0; g_vsh_gen=g_hb_mapgen; }
+    for(int i=0;i<g_nvsh;i++) if(g_vsh[i].def==def){ want=!g_vsh[i].json && now-g_vsh[i].tried>30; break; }
+    if(g_nvsh>=96) want=0; pthread_mutex_unlock(&g_vsh_mx); return want; }
+static void st_vshape_add(uint32_t def,char*json){ pthread_mutex_lock(&g_vsh_mx); int i=0; for(; i<g_nvsh; i++) if(g_vsh[i].def==def) break;
+    if(i==g_nvsh){ if(g_nvsh>=96){ pthread_mutex_unlock(&g_vsh_mx); free(json); return; } g_nvsh++; g_vsh[i].def=def; g_vsh[i].json=0; }
+    free(g_vsh[i].json); g_vsh[i].json=json; g_vsh[i].tried=mono_s(); pthread_mutex_unlock(&g_vsh_mx); }
+static void st_vshapes_json(StBuf*s){ pthread_mutex_lock(&g_vsh_mx); sb_put(s,"{\"gen\":%u,\"shapes\":{",g_vsh_gen); int f=1;
+    for(int i=0;i<g_nvsh;i++) if(g_vsh[i].json){ sb_put(s,"%s\"%08x\":",f?"":",",g_vsh[i].def); f=0; sb_put(s,"%s",g_vsh[i].json); }
+    sb_put(s,"}}"); pthread_mutex_unlock(&g_vsh_mx); }
 
 // ---- the network session: everyone connected (also in the lobby, where the players table is empty) + voice mute -----
 // (shim/docs/reclaimer-voice-mute.md) Halo 3's session membership: sess = *(u64*)(halo3+0x1e250d0). Reclaimer patches
@@ -1218,7 +1232,7 @@ static struct { uint16_t salt; uint8_t live, st, type; int8_t kind, color, state
 static char g_wt_map[64];
 static struct { char name[64]; int32_t tk[3]; } g_wpp[256];   // per player slot: the power-up pickup ticks last seen
 static struct { int8_t color, taken; float pos[3]; double t; uint32_t def; } g_wpg[16]; static int g_nwpg;   // power-ups gone, not yet taken
-typedef struct { uint32_t def; int8_t kind, color; char nm[40]; } StWcls;   // kind -1 left out, 0 weapon, 1 vehicle, 2 powerup
+typedef struct { uint32_t def; int8_t kind, color, dep; char nm[40]; } StWcls;   // kind -1 left out, 0 weapon, 1 vehicle, 2 powerup; dep: deployed equipment
 static StWcls g_stwc[256]; static int g_nstwc; static unsigned g_stwc_gen;
 static const char*const g_wkind[3]={"weapon","vehicle","powerup"};
 static const char*const g_wpup[3]={"Overshield","Active camo","Custom power-up"};
@@ -1238,7 +1252,7 @@ static const StWcls* st_wclass(uint32_t def,int type){
     if(type==1) c.kind=(eq || strstr(b,"camera"))?-1:1;   // not the deployed auto turret, nor security cameras (vehicle objects too: The Pit)
     else if(strstr(p,"grenade")) c.kind=-1;
     else if(strstr(p,"\\multi\\powerups\\") || !strncmp(b,"powerup",7)){ c.kind=2; c.color=strstr(b,"red")?0:strstr(b,"blue")?1:strstr(b,"yellow")?2:-1; }
-    else if(type==3 && eq && !held) c.kind=-1;
+    else if(type==3 && eq && !held){ c.kind=-1; c.dep=1; }   // (the map shows deployed equipment on its own: the snapshot's "deployed")
     else c.kind=0;
     if(c.kind==2 && c.color>=0) snprintf(c.nm,sizeof c.nm,"%s",g_wpup[c.color]);
     else if(known){ char t[64]; snprintf(t,sizeof t,"%.*s",(int)(held?bl-10:bl),b); st_sentence(c.nm,sizeof c.nm,t); }
@@ -1457,7 +1471,10 @@ static void st_snapshot(StBuf*s){
         if(have && !dead){ int ws=*(const int8_t*)(d+0x262); const uint32_t*wp=(const uint32_t*)(d+0x268); uint64_t wd=(ws>=0&&ws<4)?ST_DATUM(wp[ws]):0; uint32_t def=0; if(wd && hb_read(wd,&def,4)) st_tag(s,def); else sb_put(s,"null");
             sb_put(s,",\"weapons\":["); for(int w=0,fw=1;w<4;w++){ uint64_t wd2=ST_DATUM(wp[w]); uint32_t df=0; if(!wd2 || !hb_read(wd2,&df,4)) continue; sb_put(s,"%s",fw?"":","); fw=0; st_tag(s,df); } sb_put(s,"]");
             const int8_t*gr=(const int8_t*)(d+0x294); sb_put(s,",\"grenades\":{\"frag\":%d,\"plasma\":%d,\"spike\":%d,\"firebomb\":%d}",gr[0],gr[1],gr[2],gr[3]);
-            uint32_t parent=*(const uint32_t*)(d+0x10); sb_put(s,",\"vehicle\":"); { uint64_t vd=parent!=0xFFFFFFFFu?ST_DATUM(parent):0; uint32_t df=0; if(vd && hb_read(vd,&df,4)){ st_tag(s,df); sb_put(s,",\"seat\":%d",*(const int16_t*)(d+0x24E)); } else sb_put(s,"null"); }
+            uint32_t parent=*(const uint32_t*)(d+0x10); sb_put(s,",\"vehicle\":"); { uint64_t vd=parent!=0xFFFFFFFFu?ST_DATUM(parent):0; uint32_t df=0; if(vd && hb_read(vd,&df,4)){ st_tag(s,df); sb_put(s,",\"seat\":%d",*(const int16_t*)(d+0x24E));
+                  // "in": the outermost vehicle (a gunner's turret sits on its vehicle) -- the page draws the occupants with it
+                  uint32_t rh=parent; for(int dep=0;dep<4;dep++){ uint64_t rd=ST_DATUM(rh); uint32_t up=0xFFFFFFFFu; if(!rd || !hb_read(rd+0x10,&up,4) || up==0xFFFFFFFFu || !ST_DATUM(up)) break; rh=up; }
+                  sb_put(s,",\"in\":\"%08x\"",rh); } else sb_put(s,"null"); }
             const float*fw=(const float*)(d+0x5c); sb_put(s,",\"facing\":%.0f",atan2f(fw[1],fw[0])*57.2958f); }
         else sb_put(s,"null,\"weapons\":[],\"grenades\":{\"frag\":0,\"plasma\":0,\"spike\":0,\"firebomb\":0},\"vehicle\":null");
         sb_put(s,",\"pos\":"); sb_f3(s,o); sb_put(s,",\"speed\":%.2f",spd);
@@ -1473,10 +1490,16 @@ static void st_snapshot(StBuf*s){
     sb_put(s,"]");
     fx_roster_tick(m,ss,nss,pl,np);   // forensic archive: roster changes + session boundaries (forensic.c)
     // vehicles and projectiles in flight
-    sb_put(s,",\"vehicles\":["); first=1;
+    // (only vehicles without a parent: a turret on a Warthog is a vehicle object too, at a position relative to it; its gunner's
+    // "in" names the Warthog. id = the object handle, def = its definition (the outline in /vshapes.json), yaw = heading in degrees.)
+    sb_put(s,",\"vehicles\":["); first=1; int vbuilt=0;
     for(int i=0;i<hi;i++){ const uint8_t*e=tab+i*0x18; if(!*(const uint16_t*)e || e[3]!=1) continue; uint64_t p=*(const uint64_t*)(e+0x10); uint8_t d[0x120]; if(!p || !hb_read(p,d,sizeof d)) continue;
-        int dead=(*(const uint32_t*)(d+0x110)>>2)&1; sb_put(s,"%s{\"type\":",first?"":","); first=0; st_tag(s,*(const uint32_t*)d);
-        sb_put(s,",\"health\":%.3f,\"shield\":%.3f,\"pos\":",dead?0:*(const float*)(d+0xF4),dead?0:*(const float*)(d+0xF8)); sb_f3(s,(const float*)(d+0x50)); sb_put(s,"}"); }
+        if(*(const uint32_t*)(d+0x10)!=0xFFFFFFFFu) continue;
+        uint32_t def=*(const uint32_t*)d; int dead=(*(const uint32_t*)(d+0x110)>>2)&1; const float*fw=(const float*)(d+0x5c);
+        sb_put(s,"%s{\"type\":",first?"":","); first=0; st_tag(s,def);
+        sb_put(s,",\"id\":\"%08x\",\"def\":\"%08x\",\"yaw\":%.0f,\"dead\":%s",((uint32_t)*(const uint16_t*)e<<16)|(uint32_t)i,def,atan2f(fw[1],fw[0])*57.2958f,dead?"true":"false");
+        sb_put(s,",\"health\":%.3f,\"shield\":%.3f,\"pos\":",dead?0:*(const float*)(d+0xF4),dead?0:*(const float*)(d+0xF8)); sb_f3(s,(const float*)(d+0x50)); sb_put(s,"}");
+        if(!dead && vbuilt<2 && st_vshape_want(def)){ vbuilt++; st_vshape_add(def,hb_vshape(def,p)); } }
     sb_put(s,"],\"projectiles\":["); first=1;
     for(int i=0;i<hi;i++){ const uint8_t*e=tab+i*0x18; if(!*(const uint16_t*)e || e[3]!=5) continue; uint64_t p=*(const uint64_t*)(e+0x10); uint8_t d[0xC8]; if(!p || !hb_read(p,d,sizeof d)) continue;
         uint32_t own=*(const uint32_t*)(d+0xC0); const char*on=0; for(int k=0;k<np;k++) if(pl[k].unit==own){ on=pl[k].name; break; }
@@ -1492,6 +1515,14 @@ static void st_snapshot(StBuf*s){
         sb_put(s,"%s[%d,%d,%d,%.2f,%.2f,%.2f,%d",first?"":",",g_wt[i].sp,kd==1?1:kd==2?3:g_wt[i].type==3?2:0,g_wt[i].state,c[0],c[1],c[2],g_wt[i].holder); first=0;
         if(g_wt[i].sp<0){ sb_put(s,","); sb_str(s,st_wclass(g_wt[i].def,g_wt[i].type)->nm); }   // (no spawn point to take the name from)
         sb_put(s,"]"); }
+    sb_put(s,"]");
+    // deployed equipment lying in the world (bubble shield, regenerator, trip mine, ...: what a used *_equipment item becomes):
+    // [x, y, z, name] -- the map draws it with its name (user, 2026-10-26: "we DO want to see when players are ... impacted by items")
+    sb_put(s,",\"deployed\":["); first=1;
+    if(g_gameplay_t0) for(int i=0;i<hi && i<8192;i++){ const uint8_t*e=tab+i*0x18; if(!*(const uint16_t*)e || e[3]!=3) continue; uint64_t p=*(const uint64_t*)(e+0x10); uint8_t d[0x5c];
+        if(!p || !hb_read(p,d,sizeof d) || *(const uint32_t*)(d+0x10)!=0xFFFFFFFFu) continue;
+        const StWcls*c=st_wclass(*(const uint32_t*)d,3); if(!c->dep) continue; const float*o=(const float*)(d+0x50); if(!isfinite(o[0]) || !isfinite(o[1])) continue;
+        sb_put(s,"%s[%.2f,%.2f,%.2f,",first?"":",",o[0],o[1],o[2]); first=0; sb_str(s,c->nm); sb_put(s,"]"); }
     sb_put(s,"]"); nav_json(s); sb_put(s,"}");
     #undef ST_DATUM
     #undef ST_TYPE
@@ -1612,6 +1643,10 @@ static void* st_conn_serve(void*a){ int fd=(int)(intptr_t)a; pthread_setname_np(
         int k=snprintf(h,sizeof h,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %zu\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n",j?n:0);
         if(st_send(fd,h,(size_t)k) && j) st_send(fd,j,n); free(j); }
     else if(!strncmp(path,"/recordings/",12)) st_rec_file(fd,req,path+12);
+    else if(!strcmp(path,"/vshapes.json")){   // vehicle outlines for the map (st_vshapes_json)
+        StBuf b={0}; st_vshapes_json(&b);
+        int k=snprintf(h,sizeof h,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %zu\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n",b.n);
+        if(st_send(fd,h,(size_t)k) && b.n) st_send(fd,b.b,b.n); free(b.b); }
     else if(!strcmp(path,"/heat.json")){
         StBuf b={0}; hm_json(&b);
         int k=snprintf(h,sizeof h,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %zu\r\n%sConnection: close\r\n\r\n",b.n,cors);

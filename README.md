@@ -407,20 +407,25 @@ beside the death heatmap with the player details under it (right); Connected; th
 
   ![Players table sorted by kills, the selected player highlighted](shim/docs/img/stats-players.png)
 - **Death heatmap** -- where players died (blue = few, red = many) over a top-down picture of the map and a grey
-  "where players walk" layer, with everyone's live position and the vehicles. Deaths for this match or all matches on
+  "where players walk" layer, with everyone's live position and the vehicles. Each **vehicle** is drawn as its own top-down
+  outline -- made from the vehicle's collision model in the map file, so a Warthog, Banshee or Wraith looks like one --
+  turned the way it faces (a white chevron at its front), at its real size or at least 22 px long (14 in the small panel): grey when empty, its
+  occupants' team colour when manned (a small dot on each occupied seat, their names under the vehicle's name), dark
+  and faded when destroyed; you inside it get a white box. Deaths for this match or all matches on
   that map (always collected, kept in `~/Library/Application Support/ReclaimerMac/heatmaps/`; the **heatmap** checkbox
   only shows or hides them). The "on map" checkboxes **names**, **x/y**, **health / shield**, **primary weapon** and **secondary weapon** label every living
   player's dot, one line each, stacked (name on top); each adds or removes its own line and is remembered by the browser. Your own label and the
   selected player's always show the name. Labels of players standing close together are moved apart with a thin line back to
   their dot; when there is no room left the rest are left out (the map's corner says how many; the full window has more
-  room). The **spawn points** checkboxes -- **vehicles** (orange outlined squares), **weapons** (gold diamonds) and **items**
-  (equipment: cyan triangles; power-ups: magenta rings) -- mark where things spawn on the map, collected from every spawn the
-  game shows and kept per map beside the deaths (`heatmaps/<map>.spawns`; this match or all matches like the deaths); hover
-  a marker for its name and how often it spawned there. A spawn point is bright while its item sits on it and dim once it
-  is taken or not back yet; an item away from its spawn point is drawn where it is now, live (a sniper rifle lying where
-  its carrier died, a vehicle being driven), with a dashed line back to its spawn point (not for vehicles), one being
-  carried beside its carrier's dot with a white outline (hover: who carries it); a player with a power-up active gets a
-  magenta ring with "Overshield 12 s · x, y". After joining a game in progress the first spawns seen are left
+  room). The **spawn points** checkboxes -- **vehicles** (a dashed orange bay, never filled, so a vehicle parked on its
+  spawn shows both), **weapons** (gold diamonds) and **items** (equipment: cyan triangles; power-ups: magenta rings) -- mark
+  where things spawn on the map, collected from every spawn the game shows and kept per map beside the deaths
+  (`heatmaps/<map>.spawns`; this match or all matches like the deaths), each with its name beside it where there is room;
+  hover a marker for how often it spawned there. A spawn point is bright while its item sits on it and dim once it is taken
+  or not back yet; a weapon or item lying away from its spawn point is drawn where it is now, outlined in white (a sniper
+  rifle lying where its carrier died), with a dashed line back to its spawn point. Items being carried are not drawn (no
+  weapons on players). With **items** on, deployed equipment (bubble shield, regenerator, trip mine, ...) is a dashed cyan
+  ring with its name, and a player with a power-up active gets a magenta ring with "Overshield 12 s". After joining a game in progress the first spawns seen are left
   out (they are whatever lies around, not spawn points); what respawns later is recorded.
   Click the map (or "full window") to fill the browser window; X or Esc closes it. The map pictures are made once from the game's own `.map`
   files (`bash shim/tools/maptop.sh`; `play.sh` runs it in the background when they are missing; needs python3 with
@@ -452,7 +457,10 @@ Machine-readable endpoints:
   grenades, vehicle, seat, pos, speed, facing, deaths, life, longest_life, distance, top_speed, shots, hits, accuracy,
   traits, effects, voice, muted, talking), `session` (the connected list), `variant` (options and trait sets),
   `overlay` (the switches; `overlay.features` = each overlay feature's `on`, `team`, `vis`, `px`, null where a setting
-  doesn't apply), `vehicles`, `projectiles` in flight, `map`, `in_match`, match `time`
+  doesn't apply), `vehicles` (`id`, `def`, `yaw`, `dead`; only vehicles without a parent -- a player's `in` names the one they
+  sit in, a turret's gunner included), `items`, `deployed` equipment, `projectiles` in flight, `map`, `in_match`, match `time`
+- `/vshapes.json` -- the vehicles' top-down outlines per definition (`len`, `wid`, `parts`: convex polygons in the
+  vehicle's frame, x forward, y left), made once per map from the first live instance's collision model
 - `/events` -- the same JSON as a stream (Server-Sent Events): `curl -N http://127.0.0.1:8765/events`
 - `/feed.json?since=<seq>` -- the event feed after event `seq` (the last 1,024 kept): `kind` (join, leave, kill, death,
   vote, server, game, chat, weapon, vehicle, powerup), `text`, `t` (Unix time), `a`/`b` (players; chat: the sender), `how`

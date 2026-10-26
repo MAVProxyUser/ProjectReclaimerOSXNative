@@ -469,6 +469,63 @@ static HbGeom* hb_geom(uint32_t def){
         int nw[4]={0}; for(int q=0;q<g->nseg;q++) nw[g->wk[q]<4?g->wk[q]:0]++;
         char msg[300]; int kk=snprintf(msg,sizeof msg,"  [hitbox] definition %08x (%s): %d collision edges in %d regions (%d model regions), nodes 0-%d; weak-spot edges: %d lethal, %d driver, %d disabling\n",def,hb_tag_name_early(def,m,ti),g->nseg,g->nreg,g->nhreg,g->maxnode,nw[2],nw[1],nw[3]); (void)!write(2,msg,kk); }
     return g->ok?g:0; }
+// ---- vehicle outlines for the stats page map (user, 2026-10-26: "mini icon assets ... that represent the real vehicle") ----
+// A vehicle definition's top-down outline in its own frame (x forward, y left, units), from its collision model posed by one
+// live instance's node matrices: for each (collision region, node) group of edges, the convex hull of the edge end points.
+// Returns malloc'd JSON {"len":L,"wid":W,"parts":[[z,x0,y0,x1,y1,...],...]} (parts by height, lowest first, z their mean
+// height) or 0 (no collision model, pose unreadable). Built privately (the render thread owns the g_hbg cache).
+static int hbv_cmp(const void*a,const void*b){ const float*p=a,*q=b; return p[0]<q[0]?-1:p[0]>q[0]?1:p[1]<q[1]?-1:p[1]>q[1]?1:p[2]<q[2]?-1:p[2]>q[2]; }
+static float hbv_cross(const float*o,const float*a,const float*b){ return (a[1]-o[1])*(b[2]-o[2])-(a[2]-o[2])*(b[1]-o[1]); }
+char* hb_vshape(uint32_t def,uint64_t datum){
+    HbGeom g; memset(&g,0,sizeof g); g.def=def;
+    char paths[HB_NPATHS+1][1024]; int np=0; hb_current_map(paths[0],1024); if(paths[0][0]) np=1;
+    { pthread_mutex_lock(&g_hb_mapmx); for(int k=0;k<g_hb_nmappaths;k++) if(strcmp(g_hb_mappaths[k],paths[0])) memcpy(paths[np++],g_hb_mappaths[k],1024); pthread_mutex_unlock(&g_hb_mapmx); }
+    for(int k=0;k<np && !g.ok;k++){ HbMap*m=hbm_get(paths[k]); int ti=def&0xFFFF; if(!m || ti>=m->ntags || m->salt[ti]!=(def>>16) || m->grp[ti]!='vehi') continue; hbg_build(&g,m,ti); }
+    char*out=0; float*pt=0;
+    if(!g.ok) goto done;
+    uint8_t dh[0x140]; if(!hb_read(datum,dh,sizeof dh)) goto done;
+    int nmsz=*(const uint16_t*)(dh+0x136), nmoff=*(const uint16_t*)(dh+0x138); int nn=nmsz/52;
+    if(nmsz%52 || nn<=g.maxnode || nn>128 || nmoff<0x100) goto done;
+    float mt[128*13]; if(!hb_read(datum+(uint64_t)nmoff,mt,(size_t)nn*52) || fabsf(mt[0]-1.0f)>0.1f) goto done;
+    uint8_t sel[256]; memset(sel,0,sizeof sel);   // the instance's collision permutation per region (as hb_emit_hitbox)
+    { int16_t rs=*(const int16_t*)(dh+0x13a); if((*(const uint32_t*)(dh+4)>>11)&1) rs-=0x20; int rc=rs>0?rs/10:0, ro=*(const uint16_t*)(dh+0x13c); uint8_t pb[32];
+      if(g.nhreg>0 && rc>0 && rc<=32 && hb_read(datum+(uint64_t)ro+(uint64_t)rc*8,pb,(size_t)rc))
+        for(int i=0;i<g.nhreg && i<rc;i++){ int pi=pb[i]; if(pi>=g.hnperm[i]) pi=0; int cr=g.hcreg[i], cp=g.hnperm[i]?g.hcperm[i][pi]:0; if(cr>=0 && cr<256 && cp>=0) sel[cr]=(uint8_t)cp; } }
+    const float*P=(const float*)(dh+0x50), *F=(const float*)(dh+0x5c), *U=(const float*)(dh+0x68);
+    float L[3]={U[1]*F[2]-U[2]*F[1], U[2]*F[0]-U[0]*F[2], U[0]*F[1]-U[1]*F[0]};   // left = up x forward
+    pt=malloc((size_t)g.nseg*2*4*sizeof(float)); if(!pt) goto done; int n=0;   // [group, x, y, z]
+    for(int s2=0;s2<g.nseg;s2++){ if(g.perm[s2]!=sel[g.reg[s2]]) continue; const float*M=mt+g.node[s2]*13;
+        for(int e=0;e<2;e++){ const float*v=g.pts+s2*6+e*3; float w[3];
+            for(int a=0;a<3;a++) w[a]=M[10+a]+M[0]*(v[0]*M[1+a]+v[1]*M[4+a]+v[2]*M[7+a]);
+            float d[3]={w[0]-P[0],w[1]-P[1],w[2]-P[2]}; float*q=pt+n*4;
+            q[0]=(float)(g.reg[s2]*128+g.node[s2]); q[1]=d[0]*F[0]+d[1]*F[1]+d[2]*F[2]; q[2]=d[0]*L[0]+d[1]*L[1]+d[2]*L[2]; q[3]=d[0]*U[0]+d[1]*U[1]+d[2]*U[2];
+            if(isfinite(q[1]) && isfinite(q[2]) && fabsf(q[1])<60 && fabsf(q[2])<60) n++; } }
+    if(n<3) goto done;
+    qsort(pt,(size_t)n,4*sizeof(float),hbv_cmp);   // by group, then x, then y: each group's points in hull order
+    typedef struct { float z; int a, k; } Part; Part parts[256]; int npart=0; float*hull=malloc((size_t)n*2*4*sizeof(float)); int nh=0; if(!hull) goto done;
+    float x0=1e9f,x1=-1e9f,y0=1e9f,y1=-1e9f;
+    for(int i=0;i<n && npart<256;){ int j=i; float zs=0; while(j<n && pt[j*4]==pt[i*4]){ zs+=pt[j*4+3]; j++; }
+        int start=nh;   // Andrew's monotone chain over pt[i..j)
+        for(int pass=0;pass<2;pass++){ int base=nh;
+            for(int q=pass?j-1:i; pass?q>=i:q<j; q+=pass?-1:1){ const float*c=pt+q*4;
+                while(nh-base>=2 && hbv_cross(hull+(nh-2)*4,hull+(nh-1)*4,c)<=0) nh--;
+                memcpy(hull+nh*4,c,4*sizeof(float)); nh++; }
+            nh--; }   // (the last point of each half is the first of the other)
+        if(nh-start>=3){ parts[npart].z=zs/(float)(j-i); parts[npart].a=start; parts[npart].k=nh-start; npart++;
+            for(int q=start;q<nh;q++){ float x=hull[q*4+1], y=hull[q*4+2]; if(x<x0)x0=x; if(x>x1)x1=x; if(y<y0)y0=y; if(y>y1)y1=y; } }
+        else nh=start;
+        i=j; }
+    if(!npart){ free(hull); goto done; }
+    for(int a=1;a<npart;a++){ Part t=parts[a]; int b=a-1; while(b>=0 && parts[b].z>t.z){ parts[b+1]=parts[b]; b--; } parts[b+1]=t; }   // lowest first
+    size_t cap=64+(size_t)nh*24+(size_t)npart*16; out=malloc(cap);
+    if(out){ size_t o=(size_t)snprintf(out,cap,"{\"len\":%.2f,\"wid\":%.2f,\"x0\":%.2f,\"x1\":%.2f,\"y0\":%.2f,\"y1\":%.2f,\"parts\":[",x1-x0,y1-y0,x0,x1,y0,y1);
+        for(int a=0;a<npart && o+64<cap;a++){ o+=(size_t)snprintf(out+o,cap-o,"%s[%.2f",a?",":"",parts[a].z);
+            for(int q=0;q<parts[a].k && o+32<cap;q++){ const float*c=hull+(parts[a].a+q)*4; o+=(size_t)snprintf(out+o,cap-o,",%.2f,%.2f",c[1],c[2]); }
+            o+=(size_t)snprintf(out+o,cap-o,"]"); }
+        snprintf(out+o,cap-o,"]}"); }
+    free(hull);
+  done:
+    free(pt); free(g.node); free(g.reg); free(g.perm); free(g.wk); free(g.pts); return out; }
 // Append one object's posed collision edges as clip-space line vertices; returns vertices added (0 = no geometry).
 // Why objects get no hitboxes: [0] drawn as hitboxes, [1] no collision geometry for the definition, [2] node
 // block missing/too small, [3] node matrices unreadable or not set up (scale != 1). Logged with PELOAD_HITBOXES_LOG.

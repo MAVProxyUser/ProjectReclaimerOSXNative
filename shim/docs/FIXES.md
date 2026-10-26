@@ -1911,6 +1911,23 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   settings once. Live HugeGrass match: low / ultra / medium / high / ultra each changed halo3's "Graphics detail for 1 view(s)"
   within 0.5 s. Live only: not saved to settings.json, the client's menu still shows its last Apply. PELOAD_QUALITY_MENU=1 = the
   menu clicks (also used when the globals aren't found).
+- **Map: vehicles as their own outlines, spawn bays, names, no weapons on players** (2026-10-26; user: "vehicles, and
+  vehicle spawn points weapons items don't have good visualizations ... the vehicle itself needs to look different from its
+  spawn point, and they need to be tracked independently. we DO want to see when players are in the vehicles ... do NOT
+  try to visualize weapons on players") — hitbox.c `hb_vshape`; stats.c vehicles snapshot, `st_vshape_*`, `/vshapes.json`,
+  `deployed`; stats_page.html `drawVehicle`, `placeTags`, `drawSpawns`. Why: a live vehicle was a white square; one away
+  from its spawn was drawn with the same orange square as a spawn point; turrets on a Warthog were listed as vehicles at
+  their parent-relative position (near the map's origin); spawn and item markers had no names on the map; carried items
+  were drawn beside their carrier. How: the snapshot lists only vehicles without a parent, with `id` (object handle), `def`,
+  `yaw`, `dead`, and each seated player's `in` = the outermost vehicle (a gunner's turret -> its Warthog); per definition the
+  loader makes a top-down outline from the collision model posed by the first live instance's node matrices (per region and
+  node the convex hull, in the vehicle's frame) once per map, served as /vshapes.json. The page draws each vehicle as that
+  outline, turned to its heading, at true size or at least 22 px long (14 in the 560 px panel), a white chevron at its front: grey when empty, the
+  occupants' team colour when manned (seat dots, names in its label), dark and faded when destroyed; vehicle spawn points
+  are dashed orange bays named "<vehicle> spawn" while empty; every weapon / item marker gets its name (a greedy placer:
+  8 spots per tag, highest priority first, left out when there is no room); carried items are not drawn; deployed
+  equipment (left out of the spawn tracker) is listed and drawn as a dashed cyan ring with its name. Checked on local
+  Valhalla: Warthog, Mongoose, Banshee, Wraith and the machine-gun turret outlines are recognisable.
 
 ## 19. Performance
 

@@ -190,11 +190,11 @@ th .srt{display:inline-block;margin-left:2px;padding:0 2px;cursor:pointer;color:
     <label><input type="checkbox" id="phs"> health / shield</label>
     <label title="The weapon in their hands"><input type="checkbox" id="pw1"> primary weapon</label>
     <label title="The other weapon they carry"><input type="checkbox" id="pw2"> secondary weapon</label></span>
-   <label title="Vehicles: a square with the vehicle's name, dimmed when destroyed"><input type="checkbox" id="vh" checked> vehicles</label>
-   <span class="ctlg" title="Where things spawn on this map, collected from every spawn the game showed (this match or all matches, like the deaths). A spawn point is bright while its item sits there and dim when it is taken or not back yet; an item away from its spawn point is drawn where it is now (a dashed line back to its spawn point), one being carried beside its carrier, outlined in white; a player with a power-up active gets a ring with its time left and x, y. Hover a marker for its name, where it is and how often it spawned there. After joining a game in progress, the first spawns seen are left out: they are whatever lay around, not spawn points.">spawn points
-    <label title="Vehicle spawns: an orange outlined square"><input type="checkbox" id="spv"> vehicles</label>
+   <label title="Vehicles as they are now: each one's own top-down outline (from its collision model in the map file), turned the way it faces, a white chevron at its front. Grey when empty, its occupants' team colour when manned (a small dot on each occupied seat; their names in its label), dark and faded when destroyed."><input type="checkbox" id="vh" checked> vehicles</label>
+   <span class="ctlg" title="Where things spawn on this map, collected from every spawn the game showed (this match or all matches, like the deaths). A spawn point is bright while its item sits there and dim when it is taken or not back yet; an item lying away from its spawn point is drawn where it is now, outlined in white (a dashed line back to its spawn point); items being carried are not drawn. Every marker has its name beside it where there is room (a name with no room is left out). Hover a marker for its name, where it is and how often it spawned there. After joining a game in progress, the first spawns seen are left out: they are whatever lay around, not spawn points.">spawn points
+    <label title="Vehicle spawns: a dashed orange bay with the vehicle's name; bright while its vehicle stands on it"><input type="checkbox" id="spv"> vehicles</label>
     <label title="Weapon spawns: a gold diamond"><input type="checkbox" id="spw"> weapons</label>
-    <label title="Equipment (cyan triangle) and power-up (magenta ring) spawns"><input type="checkbox" id="spi"> items</label></span>
+    <label title="Equipment (cyan triangle) and power-up (magenta ring) spawns; deployed equipment (a dashed cyan ring); players with a power-up active (a magenta ring with the seconds left)"><input type="checkbox" id="spi"> items</label></span>
    <button id="fsb" title="Show the map in the whole browser window (or click the map); Esc or the X closes it" style="background:#222;color:var(--fg);border:1px solid var(--line);border-radius:4px;padding:2px 8px;cursor:pointer;font:inherit">⤢ full window</button>
    <label title="In a game you host with PELOAD_ALLOW_TELEPORT=1: click a spot on the map to teleport yourself there (onto the highest surface at that point, roofs and cliff tops included). For exploring past the map's edges with the boundary patches (shim/docs/map-boundaries.md)."><input type="checkbox" id="tph"> click to teleport</label>
    <span id="hov" class="note" style="margin:0"></span>
@@ -545,23 +545,80 @@ function drawMap(){
   if(heatImg && document.getElementById('hmv').checked) cx.drawImage(heatImg,0,0);
   const sp=sel!=null&&snap?snap.players.find(q=>q.slot===sel):null;
   if(sp&&heat){cx.strokeStyle='#fff';cx.lineWidth=1.5;for(const d of heat.deaths){if(d[7]!==sel||d[4]!==sp.name||(scope()!=='all'&&d[5]!==heat.match))continue;const [x,y]=toScreen(d[0],d[1]);cx.beginPath();cx.arc(x,y,6,0,7);cx.stroke()}}
-  drawSpawns();
-  const vobs=[];   // the vehicles' squares + names: player labels keep off them when there is room
-  if(document.getElementById('vh').checked&&snap&&snap.vehicles) for(const v of snap.vehicles){ if(!v.pos) continue; const [x,y]=toScreen(v.pos[0],v.pos[1]);
-   const dead=!(v.health>0); cx.globalAlpha=dead?0.35:1; cx.fillStyle='#e8e8e8'; cx.strokeStyle='#000'; cx.lineWidth=1; cx.fillRect(x-4,y-4,8,8); cx.strokeRect(x-4,y-4,8,8);
-   const nm=String(v.type||'').split(/[\\/]/).pop().replace(/_/g,' '); cx.font='10px system-ui'; cx.textAlign='left'; cx.lineWidth=3; cx.strokeStyle='#000c'; cx.strokeText(nm,x+6,y+3); cx.fillStyle='#cfd8e0'; cx.fillText(nm,x+6,y+3); cx.globalAlpha=1;
-   vobs.push([x-5,y-5,x+8+cx.measureText(nm).width,y+5]); }
+  const tags=[]; drawSpawns(tags);
+  const vobs=[], occ=new Map(), vids=new Set();   // vobs: the vehicles' bodies and labels (player labels keep off them when there is room)
+  const vOn=document.getElementById('vh').checked&&snap&&snap.vehicles;
+  if(vOn){ for(const v of snap.vehicles) vids.add(v.id);
+    for(const p of snap.players) if(p.alive&&p.in&&vids.has(p.in)){ if(!occ.has(p.in)) occ.set(p.in,[]); occ.get(p.in).push(p); }
+    for(const v of snap.vehicles) if(v.pos) drawVehicle(v,occ.get(v.id)||[],vobs,tags); }
   if(snap&&snap.nav&&snap.nav.path&&snap.nav.path.length>1){   // PELOAD_NAV: where the test walker is heading
    cx.save(); cx.setLineDash([5,4]); cx.strokeStyle='#7df9ff'; cx.lineWidth=2; cx.beginPath();
    snap.nav.path.forEach((q,i)=>{ const [x,y]=toScreen(q[0],q[1]); i?cx.lineTo(x,y):cx.moveTo(x,y); }); cx.stroke(); cx.restore();
    if(snap.nav.goal){ const [x,y]=toScreen(snap.nav.goal[0],snap.nav.goal[1]); cx.strokeStyle='#7df9ff'; cx.lineWidth=2; cx.beginPath(); cx.arc(x,y,7,0,7); cx.stroke();
      cx.font='10px system-ui'; cx.textAlign='left'; cx.lineWidth=3; cx.strokeStyle='#000c'; cx.strokeText('walker goal ('+snap.nav.mode+')',x+9,y+3); cx.fillStyle='#7df9ff'; cx.fillText('walker goal ('+snap.nav.mode+')',x+9,y+3); } }
+  // the vehicles' labels first (they carry their occupants' names), then the players', then the item names where room is left
+  const vt=placeTags(tags.filter(t=>t.veh),vobs); vobs.push(...vt);
+  let taken=vobs.slice();
   if(document.getElementById('pd').checked&&snap){ const on=[];
-   for(const p of snap.players){ if(!p.alive||!p.pos)continue; const [x,y]=toScreen(p.pos[0],p.pos[1]); on.push({p,x,y});
+   for(const p of snap.players){ if(!p.alive||!p.pos)continue; const [x,y]=toScreen(p.pos[0],p.pos[1]);
+    if(vOn&&p.in&&vids.has(p.in)){   // in a vehicle: a small seat dot on it; the name is in the vehicle's label
+      cx.fillStyle=C[p.team_name]||'#888'; cx.beginPath(); cx.arc(x,y,p.slot===sel||p.you?3:2.2,0,7); cx.fill(); cx.lineWidth=p.slot===sel||p.you?1.5:0.8; cx.strokeStyle=p.slot===sel?'#ff0':p.you?'#fff':'#000'; cx.stroke(); continue; }
+    on.push({p,x,y});
     cx.fillStyle=C[p.team_name]||'#888'; cx.beginPath(); cx.arc(x,y,p.slot===sel?6:3.5,0,7); cx.fill();
     if(p.slot===sel||p.you){cx.strokeStyle=p.you?'#fff':'#ff0';cx.lineWidth=2;cx.stroke()} }
-   drawLabels(on,vobs); }   // after every dot: no dot is drawn over a label
+   taken=taken.concat(drawLabels(on,vobs)||[], on.map(q=>[q.x-4,q.y-4,q.x+4,q.y+4])); }   // after every dot: no dot is drawn over a label
+  placeTags(tags.filter(t=>!t.veh),taken);
 }
+// ---- vehicles (user, 2026-10-26: "mini icon assets ... that represent the real vehicle ... the vehicle itself needs to look different
+// from its spawn point, and they need to be tracked independently. we DO want to see when players are in the vehicles"): each live
+// vehicle (snap.vehicles: id, def, yaw, pos; only vehicles without a parent -- a Warthog's turret is part of it) is drawn as its
+// own top-down outline, made by the loader from the vehicle's collision model in the map file (GET /vshapes.json: per definition,
+// convex parts in the vehicle's frame, x forward, y left), turned to its heading, at its real size or at least 22 px long, with a
+// white chevron at its front. Empty = light grey; manned = its occupants' team colour, each occupant a small dot on their seat;
+// destroyed = dark and faded. Its label: the name, then the occupants (you / the selected player highlighted). A vehicle spawn
+// point is a dashed orange bay instead (drawSpawns), so a vehicle parked on its spawn shows both.
+let vshapes={}, vshGen=null, vshAt=0;
+async function pollVShapes(){ vshAt=Date.now(); try{ const j=await (await fetch('/vshapes.json')).json(); if(j.gen!==vshGen){ vshapes={}; vshGen=j.gen; } Object.assign(vshapes,j.shapes||{}); drawMap(); }catch(e){} }
+function needVShapes(){ if(snap&&Array.isArray(snap.vehicles)&&Date.now()-vshAt>3000&&snap.vehicles.some(v=>v.def&&!vshapes[v.def])) pollVShapes(); }
+const vName=t=>{ const n=String(t||'').split(/[\\/]/).pop().replace(/_/g,' ').toLowerCase(); return n.charAt(0).toUpperCase()+n.slice(1); };
+function vehicleFrame(v,sh){ const [px,py]=toScreen(v.pos[0],v.pos[1]), a=(v.yaw||0)*Math.PI/180, c=Math.cos(a), s=Math.sin(a), len=sh?Math.max(0.5,sh.len):3, k=Math.max(view.sc,22/len);
+  return {px,py,k,P:(lx,ly)=>[px+(lx*c-ly*s)*k, py-(lx*s+ly*c)*k]}; }
+function drawVehicle(v,occ,vobs,tags){
+  const sh=vshapes[v.def], dead=!!v.dead||!(v.health>0), f=vehicleFrame(v,sh), P=f.P;
+  const team=occ.length?(C[occ[0].team_name]||'#888'):null, you=occ.some(p=>p.you), selIn=occ.some(p=>p.slot===sel);
+  cx.save(); cx.globalAlpha=dead?0.4:1; cx.lineJoin='round';
+  const fill=dead?'#4a4d50':team||'#cfd6dc';
+  const parts=sh?sh.parts:[[0,-1.5,-0.75,1.5,-0.75,1.5,0.75,-1.5,0.75]];
+  let bx0=1e9,by0=1e9,bx1=-1e9,by1=-1e9;
+  for(const q of parts){ cx.beginPath(); for(let i=1;i+1<q.length;i+=2){ const [x,y]=P(q[i],q[i+1]); i===1?cx.moveTo(x,y):cx.lineTo(x,y); if(x<bx0)bx0=x; if(x>bx1)bx1=x; if(y<by0)by0=y; if(y>by1)by1=y; } cx.closePath();
+    cx.fillStyle=fill; cx.fill(); cx.lineWidth=1; cx.strokeStyle='#000b'; cx.stroke(); }
+  if(you||selIn){ cx.lineWidth=2; cx.strokeStyle=selIn?'#ff0':'#fff'; cx.strokeRect(bx0-2,by0-2,bx1-bx0+4,by1-by0+4); }
+  { const x1=sh?sh.x1:1.5, my=sh?(sh.y0+sh.y1)/2:0, w=sh?Math.max(0.3,sh.wid):1.5, l=sh?sh.len:3, d=Math.max(Math.min(l*0.1,w*0.16),3/f.k);   // the front (at least 3 px)
+    const t=P(x1-d*0.3,my), a=P(x1-d*1.9,my+d), b=P(x1-d*1.9,my-d); cx.fillStyle=dead?'#888':'#fff'; cx.globalAlpha*=0.9; cx.beginPath(); cx.moveTo(...t); cx.lineTo(...a); cx.lineTo(...b); cx.closePath(); cx.fill(); }
+  cx.restore();
+  vobs.push([bx0,by0,bx1,by1]);
+  const L=[[[vName(v.type)+(dead?' (destroyed)':v.health<0.995?` ${Math.round(v.health*100)}%`:''),dead?'#9aa0a6':'#e8edf2']]];
+  if(occ.length){ const ln=[]; occ.forEach((p,i)=>{ if(i) ln.push([', ','#aaa']); ln.push([p.name+(p.you?' (you)':''),p.slot===sel?'#ff0':p.you?'#fff':(C[p.team_name]||'#bbb')]); }); L.push(ln); }
+  tags.push({veh:1,x:(bx0+bx1)/2,y:(by0+by1)/2,gap:Math.max(6,(bx1-bx0)/2+3),lines:L,pri:selIn?0:you?1:occ.length?2:3,box:true,edge:team||'#6b7680',must:selIn||you});
+  spawnHits.push([f.px,f.py,`${vName(v.type)}${dead?' (destroyed)':` -- health ${Math.round((v.health||0)*100)}%, shield ${Math.round((v.shield||0)*100)}%`} -- ${occ.length?occ.map(p=>`${p.name} (seat ${p.seat})`).join(', '):'empty'} -- at ${v.pos[0].toFixed(1)}, ${v.pos[1].toFixed(1)}, height ${v.pos[2].toFixed(1)}`]); }
+// Labels for the map's things (vehicles, items, spawn points): each tag tries 8 spots around its point (right, left, above, below,
+// then the corners) and takes the first that is on the canvas and clear of what is placed already and of the obstacles; a tag
+// with no room is left out (the hover text still names it) unless it must show. Highest priority (lowest pri) first.
+function placeTags(tags,obs){ const W=cv.width,H=cv.height, placed=[];
+  const hitAny=(r,rs)=>rs.some(q=>r[0]<q[2]&&r[2]>q[0]&&r[1]<q[3]&&r[3]>q[1]);
+  tags.sort((a,b)=>a.pri-b.pri);
+  for(const t of tags){ cx.font=t.font||'10px system-ui'; const lh=t.lh||12, px=t.box?3:1;
+    const w=Math.ceil(Math.max(...t.lines.map(l=>l.reduce((s2,[tx])=>s2+cx.measureText(tx).width,0))))+2*px, h=t.lines.length*lh+(t.box?3:1), g=t.gap||6;
+    const S=[[t.x+g,t.y-h/2],[t.x-g-w,t.y-h/2],[t.x-w/2,t.y-g-h],[t.x-w/2,t.y+g],[t.x+g-2,t.y-g-h+2],[t.x+g-2,t.y+g-2],[t.x-g-w+2,t.y-g-h+2],[t.x-g-w+2,t.y+g-2]];
+    let r=null; for(const [sx,sy] of S){ const q=[sx,sy,sx+w,sy+h]; if(q[0]<0||q[1]<0||q[2]>W||q[3]>H||hitAny(q,placed)||hitAny(q,obs)) continue; r=q; break; }
+    if(!r){ if(!t.must) continue; r=[S[0][0],S[0][1],S[0][0]+w,S[0][1]+h]; }
+    placed.push(r); cx.save(); if(t.alpha) cx.globalAlpha=t.alpha;
+    if(t.box){ cx.fillStyle='rgba(0,0,0,0.6)'; cx.beginPath(); if(cx.roundRect) cx.roundRect(r[0],r[1],w,h,3); else cx.rect(r[0],r[1],w,h); cx.fill(); cx.globalAlpha*=0.85; cx.strokeStyle=t.edge||'#777'; cx.lineWidth=1; cx.stroke(); if(t.alpha) cx.globalAlpha=t.alpha; else cx.globalAlpha=1; }
+    cx.textAlign='left'; cx.textBaseline='alphabetic';
+    t.lines.forEach((line,k)=>{ const by=r[1]+(t.box?2:0)+k*lh+lh-3; let tx=r[0]+px; const at=line.map(([tt])=>{ const a=tx; tx+=cx.measureText(tt).width; return a; });
+      cx.lineWidth=3; cx.strokeStyle='#000c'; line.forEach(([tt],j)=>cx.strokeText(tt,at[j],by)); line.forEach(([tt,c],j)=>{ cx.fillStyle=c; cx.fillText(tt,at[j],by); }); });
+    cx.restore(); }
+  return placed; }
 // ---- spawn points (user, 2026-10-25: "add vehicle, weapon, and item spawn points to the death heatmap as checkboxes"): heat.spawns
 // = [x, y, z, kind, name, times, last match] (stats.c hm_spawn; kind 0 weapon, 1 vehicle, 2 equipment, 3 power-up), drawn as
 // markers; spawnHits keeps where each went for the hover text. The switches are remembered in localStorage.
@@ -572,39 +629,60 @@ for(const id of Object.values(SPS)) document.getElementById(id).addEventListener
 const SPKIND=['weapon','vehicle','equipment','power-up'];
 // live state (user, 2026-10-25: "dim when not spawned, or taken ... follow it accordingly with the icon"): snap.items = [spawn point
 // (-1 none), kind, state (0 at its spawn point, 1 elsewhere on the ground, 2 carried), x, y, z, carrier's slot (-1), name if no
-// point] (stats.c st_spawns). A spawn point is bright while its item sits on it, dim otherwise; an item away from its point is
-// drawn where it is now (a faint dashed line back to its point; vehicles without, there can be hundreds), a carried one beside
-// its carrier's dot with a white outline; a player with a power-up active gets a ring and "<power-up> <s left> · x, y".
+// point] (stats.c st_spawns). A spawn point is bright while its item sits on it, dim otherwise; an item lying away from its point
+// is drawn where it is now (a faint dashed line back to its point); a carried one is not drawn (2026-10-26: no weapons on
+// players), vehicles are drawVehicle's; a player with a power-up active gets a ring and "<power-up> <s left>".
 // An older loader sends no items: every point stays bright.
 let spawnHits=[];
 const spOn=k=>document.getElementById(k===1?'spv':k===0?'spw':'spi').checked;
 function spawnShown(){ if(!heat||!heat.spawns) return []; const all=scope()==='all';
   return heat.spawns.map((q,i)=>[q,i]).filter(([q])=>spOn(q[3])&&(all||q[6]===heat.match)); }
 function spMark(k,x,y,live){ cx.lineJoin='round';
-  if(k===1){ cx.lineWidth=3; cx.strokeStyle='#000'; cx.strokeRect(x-5,y-5,10,10); cx.lineWidth=1.8; cx.strokeStyle='#ff9f43'; cx.strokeRect(x-5,y-5,10,10); }
-  else if(k===0){ cx.fillStyle='#e8c46a'; cx.beginPath(); cx.moveTo(x,y-5); cx.lineTo(x+4,y); cx.lineTo(x,y+5); cx.lineTo(x-4,y); cx.closePath(); cx.fill(); cx.lineWidth=1; cx.strokeStyle=live?'#fff':'#000'; cx.stroke(); }
-  else if(k===2){ cx.fillStyle='#5ad1e8'; cx.beginPath(); cx.moveTo(x,y-5); cx.lineTo(x+4.5,y+4); cx.lineTo(x-4.5,y+4); cx.closePath(); cx.fill(); cx.lineWidth=1; cx.strokeStyle=live?'#fff':'#000'; cx.stroke(); }
-  else { cx.lineWidth=3; cx.strokeStyle='#000'; cx.beginPath(); cx.arc(x,y,5,0,7); cx.stroke(); cx.lineWidth=1.8; cx.strokeStyle='#e06cf0'; cx.stroke(); }
-  if(live && (k===1||k===3)){ cx.lineWidth=1; cx.strokeStyle='#fff'; if(k===1) cx.strokeRect(x-7,y-7,14,14); else { cx.beginPath(); cx.arc(x,y,7.5,0,7); cx.stroke(); } } }
+  if(k===0){ cx.fillStyle='#e8c46a'; cx.beginPath(); cx.moveTo(x,y-5); cx.lineTo(x+4,y); cx.lineTo(x,y+5); cx.lineTo(x-4,y); cx.closePath(); cx.fill(); cx.lineWidth=live?1.5:1; cx.strokeStyle=live?'#fff':'#000'; cx.stroke(); }
+  else if(k===2){ cx.fillStyle='#5ad1e8'; cx.beginPath(); cx.moveTo(x,y-5); cx.lineTo(x+4.5,y+4); cx.lineTo(x-4.5,y+4); cx.closePath(); cx.fill(); cx.lineWidth=live?1.5:1; cx.strokeStyle=live?'#fff':'#000'; cx.stroke(); }
+  else { cx.lineWidth=3; cx.strokeStyle='#000'; cx.beginPath(); cx.arc(x,y,5,0,7); cx.stroke(); cx.lineWidth=1.8; cx.strokeStyle='#e06cf0'; cx.stroke();
+    if(live){ cx.lineWidth=1; cx.strokeStyle='#fff'; cx.beginPath(); cx.arc(x,y,7.5,0,7); cx.stroke(); } } }
+// a vehicle spawn point: a dashed orange bay (never filled: a live vehicle is a filled outline, drawVehicle), sized like that vehicle
+function spBay(x,y,w,h){ cx.save(); cx.lineJoin='round'; cx.setLineDash([3,2]); cx.lineWidth=3; cx.strokeStyle='#000a'; cx.strokeRect(x-w/2,y-h/2,w,h);
+  cx.lineWidth=1.6; cx.strokeStyle='#ff9f43'; cx.strokeRect(x-w/2,y-h/2,w,h); cx.setLineDash([]); cx.fillStyle='#ff9f43'; cx.fillRect(x-1,y-1,2,2); cx.restore(); }
 const PUP={'red powerup':'Overshield','blue powerup':'Active camo','yellow powerup':'Custom power-up'};
-function drawSpawns(){ spawnHits=[]; if(!view) return;
+const SPCOL=['#e8c46a','#ff9f43','#5ad1e8','#e06cf0'];
+// (user, 2026-10-26: "at least the items / vehicle / weapon name should be next to the visual representation ... do NOT try to
+// visualize weapons on players"): every marker gets its name as a tag (placed where there is room, drawMap); items being carried
+// are not drawn at all (the hover over the carrier says nothing about them either), only what lies in the world.
+function drawSpawns(tags){ spawnHits=[]; if(!view) return;
   const items=snap&&Array.isArray(snap.items)?snap.items:null, here=new Set();
   if(items) for(const it of items) if(it[2]===0&&it[0]>=0) here.add(it[0]);
-  const sh=spawnShown();
-  for(const [q,i] of sh){ const [x,y]=toScreen(q[0],q[1]), lit=!items||here.has(i); cx.globalAlpha=lit?1:0.3; spMark(q[3],x,y,false); cx.globalAlpha=1;
-    spawnHits.push([x,y,`${q[4]} (${SPKIND[q[3]]} spawn) at ${q[0].toFixed(1)}, ${q[1].toFixed(1)}, height ${q[2].toFixed(1)} -- ${lit?(items?'there now':'spawned'):'not there now'}; spawned ${q[5]}x`+(scope()==='all'?'':' (all matches)')]); }
-  if(items){ const bySlot=new Map(((snap&&snap.players)||[]).map(p=>[p.slot,p]));
-    for(const it of items){ const k=it[1]; if(it[2]===0||!spOn(k)) continue;
-      const pt=it[0]>=0&&heat&&heat.spawns?heat.spawns[it[0]]:null, nm=pt?pt[4]:(it[7]||SPKIND[k]); let [x,y]=toScreen(it[3],it[4]);
-      if(pt&&k!==1){ const [sx,sy]=toScreen(pt[0],pt[1]); cx.save(); cx.setLineDash([3,3]); cx.globalAlpha=0.45; cx.strokeStyle=k===0?'#e8c46a':k===2?'#5ad1e8':'#e06cf0'; cx.lineWidth=1; cx.beginPath(); cx.moveTo(sx,sy); cx.lineTo(x,y); cx.stroke(); cx.restore(); }
-      const who=it[2]===2&&it[6]>=0?bySlot.get(it[6]):null; if(it[2]===2){ x+=7; y-=7; }
-      spMark(k,x,y,true);
-      spawnHits.push([x,y,`${nm} (${SPKIND[k]}) ${it[2]===2?(who?'carried by '+who.name:'in a vehicle / carried'):'on the ground'} at ${it[3].toFixed(1)}, ${it[4].toFixed(1)}, height ${it[5].toFixed(1)}`+(pt?` -- spawned at ${pt[0].toFixed(1)}, ${pt[1].toFixed(1)}`:'')]); } }
-  if(document.getElementById('spi').checked&&snap) for(const p of snap.players){ if(!p.alive||!p.pos) continue;
-    const e=(p.effects||[]).find(e=>PUP[e.what]); if(!e) continue; const [x,y]=toScreen(p.pos[0],p.pos[1]), t=`${PUP[e.what]} ${Math.ceil(e.left)} s · ${p.pos[0].toFixed(1)}, ${p.pos[1].toFixed(1)}`;
-    cx.lineWidth=2.5; cx.strokeStyle='#e06cf0'; cx.beginPath(); cx.arc(x,y,10,0,7); cx.stroke();
-    cx.font='10px system-ui'; cx.textAlign='left'; cx.lineWidth=3; cx.strokeStyle='#000c'; cx.strokeText(t,x+12,y+14); cx.fillStyle='#f0a8f8'; cx.fillText(t,x+12,y+14);
-    spawnHits.push([x,y,`${p.name}: ${PUP[e.what]}, ${e.left.toFixed(1)} s left, at ${p.pos[0].toFixed(1)}, ${p.pos[1].toFixed(1)}, height ${p.pos[2].toFixed(1)}`]); }
+  const sh=spawnShown(), vlen={};   // a vehicle spawn's bay takes the size of a live vehicle of that name
+  if(snap&&Array.isArray(snap.vehicles)) for(const v of snap.vehicles){ const s2=vshapes[v.def]; if(s2) vlen[vName(v.type).toLowerCase()]=s2; }
+  for(const [q,i] of sh){ const [x,y]=toScreen(q[0],q[1]), lit=!items||here.has(i), k=q[3];
+    cx.globalAlpha=lit?1:0.35;
+    if(k===1){ const s2=vlen[String(q[4]).toLowerCase()], kk=s2?Math.max(view.sc,22/Math.max(0.5,s2.len)):0, w=s2?Math.max(12,s2.len*kk+6):14, h=s2?Math.max(9,s2.wid*kk+6):10; spBay(x,y,Math.max(w,h),Math.max(w,h)*0.7); }
+    else spMark(k,x,y,false);
+    cx.globalAlpha=1;
+    // the name: a vehicle parked on its bay is named by its own label; an empty bay says what spawns there
+    if(!(k===1&&lit&&items)) tags.push({x,y,gap:k===1?10:7,lines:[[[q[4]+(k===1?' spawn':''),SPCOL[k]]]],pri:lit?20:30,alpha:lit?0.95:0.5,font:'10px system-ui'});
+    spawnHits.push([x,y,`${q[4]} (${SPKIND[k]} spawn) at ${q[0].toFixed(1)}, ${q[1].toFixed(1)}, height ${q[2].toFixed(1)} -- ${lit?(items?'there now':'spawned'):'not there now'}; spawned ${q[5]}x`+(scope()==='all'?'':' (all matches)')]); }
+  // items on the ground away from their spawn point (weapons, equipment, power-ups; vehicles are drawVehicle's): where they lie,
+  // outlined in white, a faint dashed line back to where they spawned
+  if(items) for(const it of items){ const k=it[1]; if(k===1||it[2]!==1||!spOn(k)) continue;
+    const pt=it[0]>=0&&heat&&heat.spawns?heat.spawns[it[0]]:null, nm=pt?pt[4]:(it[7]||SPKIND[k]); const [x,y]=toScreen(it[3],it[4]);
+    if(pt){ const [sx,sy]=toScreen(pt[0],pt[1]); cx.save(); cx.setLineDash([3,3]); cx.globalAlpha=0.45; cx.strokeStyle=SPCOL[k]; cx.lineWidth=1; cx.beginPath(); cx.moveTo(sx,sy); cx.lineTo(x,y); cx.stroke(); cx.restore(); }
+    spMark(k,x,y,true);
+    tags.push({x,y,gap:7,lines:[[[nm,SPCOL[k]]]],pri:12,font:'10px system-ui'});
+    spawnHits.push([x,y,`${nm} (${SPKIND[k]}) on the ground at ${it[3].toFixed(1)}, ${it[4].toFixed(1)}, height ${it[5].toFixed(1)}`+(pt?` -- spawned at ${pt[0].toFixed(1)}, ${pt[1].toFixed(1)}`:'')]); }
+  if(document.getElementById('spi').checked&&snap){
+    // deployed equipment (bubble shield, regenerator, trip mine, ...): a cyan dashed ring with its name
+    for(const d of (snap.deployed||[])){ const [x,y]=toScreen(d[0],d[1]); cx.save(); cx.setLineDash([2,2]); cx.lineWidth=3; cx.strokeStyle='#000a'; cx.beginPath(); cx.arc(x,y,8,0,7); cx.stroke();
+      cx.lineWidth=1.6; cx.strokeStyle='#5ad1e8'; cx.stroke(); cx.setLineDash([]); cx.fillStyle='#5ad1e8'; cx.beginPath(); cx.arc(x,y,2,0,7); cx.fill(); cx.restore();
+      tags.push({x,y,gap:10,lines:[[[d[3]+' (deployed)','#8fe4f2']]],pri:10,font:'10px system-ui'});
+      spawnHits.push([x,y,`${d[3]} (deployed equipment) at ${d[0].toFixed(1)}, ${d[1].toFixed(1)}, height ${d[2].toFixed(1)}`]); }
+    // a player with a power-up active: a ring and "<power-up> <s left>"
+    for(const p of snap.players){ if(!p.alive||!p.pos) continue;
+      const e=(p.effects||[]).find(e=>PUP[e.what]); if(!e) continue; const [x,y]=toScreen(p.pos[0],p.pos[1]), t=`${PUP[e.what]} ${Math.ceil(e.left)} s`;
+      cx.lineWidth=2.5; cx.strokeStyle='#e06cf0'; cx.beginPath(); cx.arc(x,y,10,0,7); cx.stroke();
+      tags.push({x,y,gap:12,lines:[[[t,'#f0a8f8']]],pri:4,font:'10px system-ui',must:true});
+      spawnHits.push([x,y,`${p.name}: ${PUP[e.what]}, ${e.left.toFixed(1)} s left, at ${p.pos[0].toFixed(1)}, ${p.pos[1].toFixed(1)}, height ${p.pos[2].toFixed(1)}`]); } }
   const n=[0,0,0]; for(const [q] of sh) n[q[3]===1?0:q[3]===0?1:2]++;
   const dc=document.getElementById('dc'), base=dc.textContent.replace(/ · .*$/,'');
   dc.textContent=base+(sh.length?` · spawn points: ${[n[0]&&n[0]+' vehicle',n[1]&&n[1]+' weapon',n[2]&&n[2]+' item'].filter(Boolean).join(', ')}`:''); }
@@ -636,7 +714,7 @@ function drawLabels(ps,vobs){
   ps.forEach((q,i)=>{ const L=labLines(q.p); if(!L.length) return;
     const w=Math.max(...L.map(l=>l.reduce((s,[t])=>s+cx.measureText(t).width,0)));
     labs.push(Object.assign({i,L,w:Math.ceil(w)+2*PX,h:L.length*LH+2*PY},q)); });
-  if(!labs.length) return;
+  if(!labs.length) return [];
   const pri=l=>l.p.slot===sel?0:l.p.you?1:2;
   labs.sort((a,b)=>pri(a)-pri(b)||a.p.slot-b.p.slot);
   const dots=ps.map(q=>[q.x-5,q.y-5,q.x+5,q.y+5]), cores=ps.map(q=>[q.x-2,q.y-2,q.x+2,q.y+2]), placed=[]; let hidden=0;
@@ -671,6 +749,7 @@ function drawLabels(ps,vobs){
       line.forEach(([t,c],j)=>{ cx.fillStyle=c; cx.fillText(t,at[j],by); }); }); }   // then the letters
   if(hidden){ const t=`${hidden} label${hidden>1?'s':''} left out: no room${mapfs.classList.contains('open')?'':' (full window has more)'}`;
     cx.font='11px system-ui'; cx.textAlign='left'; cx.lineWidth=3; cx.strokeStyle='#000c'; cx.strokeText(t,6,H-7); cx.fillStyle='#f0c060'; cx.fillText(t,6,H-7); }
+  return placed;
 }
 let mapTopWas='', mapTopBust='';
 async function pollHeat(){ try{ heat=await (await fetch('/heat.json')).json();
@@ -1009,7 +1088,7 @@ es.onmessage=m=>{snap=JSON.parse(m.data);
   document.getElementById('hd').textContent=`${snap.map||'-'}  |  ${snap.in_match?'match time '+fmtT(snap.time):'not in a match'}  |  ${snap.players.length} players, ${snap.vehicles.length} vehicles, ${snap.projectiles.length} projectiles in flight`;
   { const p=snap.perf, e=document.getElementById('pf'); if(!p){ e.textContent=''; } else { const ms=v=>v>=0?Math.round(v)+' ms':'-';
       e.textContent=`${p.fps.toFixed(1)} fps (window ${p.window_fps.toFixed(1)})  |  frame ${p.frame_ms[0].toFixed(1)} / ${p.frame_ms[1].toFixed(1)} ms (median / 95%)  |  ${Math.round(p.draws)} draws  |  ${p.in_view} of ${p.objects} objects in view  |  input -> screen ${ms(p.input_to_screen_ms)}${p.inputs?' ('+p.inputs+' measured)':''}  |  ${Math.round(p.refresh_hz)} Hz display`; } }
-  renderTable(); renderDet(); renderOverlay(); renderRules(); renderSlots(); renderConn(); renderRec(); drawMap()};
+  needVShapes(); renderTable(); renderDet(); renderOverlay(); renderRules(); renderSlots(); renderConn(); renderRec(); drawMap()};
 // no game serving this port (it ended, or a test client is between runs): keep the last data but grey it out and say so;
 // EventSource keeps retrying, and the first snapshot of a new game reloads the page (inst)
 let lastSnapAt=0;
