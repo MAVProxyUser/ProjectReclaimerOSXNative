@@ -6841,12 +6841,20 @@ static char* d3dgl_rename_cb(const char*src,int isvs){
 // varying -- declaration AND body uses -- to a shared canonical "xfer<L>", where L is the semantic
 // location the injector already assigned via layout(location=L). VS output oN and PS input vM for the
 // same semantic then share both name and location, and the monolithic link matches them.
+// needle within one line [p, p+ln) of a GLSL source. The varying scanners below searched with strstr from each line's
+// start to the END OF THE SOURCE (O(lines x length): a 60 KB shader took ~1,500 whole-source scans per pass, ~10% of
+// halo3's engine thread while the pre-linker builds pairs at a loading screen, and part of every first-use link in a
+// match); the match was then only used when it fell inside the line. PELOAD_D3DGL_SCAN_OLD=1 = the old whole-source search.
+static const char* d3dgl_line_find(const char*p,size_t ln,const char*needle){
+    static int old=-1; if(old<0) old=getenv("PELOAD_D3DGL_SCAN_OLD")!=0;
+    if(old) return strstr(p,needle);
+    return memmem(p,ln,needle,strlen(needle)); }
 static char* d3dgl_rename_varyings(const char*src,int isvs){
     int map[64]; for(int i=0;i<64;i++) map[i]=-1;          // register name N (oN for VS / vN for PS) -> L
     const char*key=isvs?"out vec4 o":"in vec4 v"; int koff=isvs?10:9;
     const char*p=src;
     while(*p){ const char*nl=strchr(p,'\n'); size_t ln=nl?(size_t)(nl-p+1):strlen(p);
-        const char*lo=strstr(p,"layout(location="); const char*k=strstr(p,key);
+        const char*lo=d3dgl_line_find(p,ln,"layout(location="); const char*k=d3dgl_line_find(p,ln,key);
         if(lo&&k&&lo<p+ln&&k<p+ln){ long L=atol(lo+16); long N=atol(k+koff); if(N>=0&&N<64&&L>=0&&L<64) map[N]=(int)L; }
         p+=ln; if(!nl)break; }
     size_t cap=strlen(src)+1024,len=0; char*out=malloc(cap); if(!out) return 0;
@@ -6877,7 +6885,7 @@ static char* d3dgl_dedup_varyings(char*src){
     while(*p){ const char*nl=strchr(p,'\n'); size_t ln=nl?(size_t)(nl-p+1):strlen(p);
         const char*q=p; while(*q==' '||*q=='\t')q++; int skip=0;
         if(!strncmp(q,"layout(location=",16)){
-            const char*in_x=strstr(q," in vec4 xfer"), *out_x=strstr(q," out vec4 xfer");
+            const char*in_x=d3dgl_line_find(q,ln-(size_t)(q-p)," in vec4 xfer"), *out_x=d3dgl_line_find(q,ln-(size_t)(q-p)," out vec4 xfer");
             int isin=(in_x&&in_x<p+ln), isout=(out_x&&out_x<p+ln);
             if(isin||isout){ int L=atoi(q+16); if(L>=0&&L<64){ uint64_t bit=1ULL<<L;
                 if(isout){ if(seen_out&bit)skip=1; else seen_out|=bit; } else { if(seen_in&bit)skip=1; else seen_in|=bit; } } }
@@ -6982,7 +6990,7 @@ static uint64_t d3dgl_iface_mask(const char*src,int want_out){
     // after d3dgl_rename_varyings, every inter-stage varying is named "xfer<L>" (VS out / PS in).
     uint64_t m=0; const char*p=src; const char*key=want_out?"out vec4 xfer":"in vec4 xfer";
     while(*p){ const char*nl=strchr(p,'\n'); size_t ln=nl?(size_t)(nl-p+1):strlen(p);
-        const char*lo=strstr(p,"layout(location="); const char*kk=strstr(p,key);
+        const char*lo=d3dgl_line_find(p,ln,"layout(location="); const char*kk=d3dgl_line_find(p,ln,key);
         if(lo&&kk&&lo<p+ln&&kk<p+ln){ long L=atol(lo+16); if(L>=0&&L<64) m|=(1ULL<<L); }
         p+=ln; if(!nl)break; }
     return m;
@@ -7019,8 +7027,8 @@ static int d3dgl_varying_slots(void){ static int n=-1; if(n<0){ const char*e=get
 static char* d3dgl_relocate(const char*src,uint64_t U){
     size_t n=strlen(src); char*out=malloc(n+64*4+1); if(!out) return 0; size_t o=0; const char*p=src;
     while(*p){ const char*nl=strchr(p,'\n'); size_t ln=nl?(size_t)(nl-p+1):strlen(p);
-        const char*lo=strstr(p,"layout(location="); const char*kk=strstr(p," vec4 xfer");
-        if(lo&&kk&&lo<p+ln&&kk<p+ln&&(strstr(p,"out vec4 xfer")==kk-3||strstr(p,"in vec4 xfer")==kk-2)){
+        const char*lo=d3dgl_line_find(p,ln,"layout(location="); const char*kk=d3dgl_line_find(p,ln," vec4 xfer");
+        if(lo&&kk&&lo<p+ln&&kk<p+ln&&(d3dgl_line_find(p,ln,"out vec4 xfer")==kk-3||d3dgl_line_find(p,ln,"in vec4 xfer")==kk-2)){
             char*end; long L=strtol(lo+16,&end,10);
             if(L>=0&&L<64){ int nl2=__builtin_popcountll(U&((1ULL<<L)-1)); size_t pre=(size_t)(lo+16-p); memcpy(out+o,p,pre); o+=pre;
                 o+=(size_t)sprintf(out+o,"%d",nl2); size_t rest=ln-(size_t)(end-p); memcpy(out+o,end,rest); o+=rest; p+=ln; if(!nl) break; continue; } }
@@ -10494,6 +10502,11 @@ static int pipe_close(void*h){ PipeObj*o=h; if(o->refs>0){ o->refs--; return 1; 
 // hook records it), counted per path and printed every 10 s -- the client opened files there in a 123-player match (~2% of
 // that thread's samples), so the paths say what to cache. g_engine_thr: set by hb_frame_hook.
 static pthread_t g_engine_thr; static int g_mainfs=-1;
+// CPU seconds halo3's engine thread has used so far (user + system; 0 before the frame hook has run): the A/B log's "engine
+// ms/frame" -- the thread's own work per frame, which a GL- or GPU-bound scene hides from the frame rate.
+double eng_cpu_s(void){ if(!g_engine_thr) return 0; thread_basic_info_data_t bi; mach_msg_type_number_t c=THREAD_BASIC_INFO_COUNT;
+    if(thread_info(pthread_mach_thread_np(g_engine_thr),THREAD_BASIC_INFO,(thread_info_t)&bi,&c)!=KERN_SUCCESS) return 0;
+    return bi.user_time.seconds+bi.system_time.seconds+(bi.user_time.microseconds+bi.system_time.microseconds)*1e-6; }
 static struct { char p[600]; uint32_t n, acc, disp, fl; uint64_t ra; double us; } g_mfs[64]; static int g_nmfs; static pthread_mutex_t g_mfs_mx=PTHREAD_MUTEX_INITIALIZER;
 static void mainfs_note(const char*p,uint32_t acc,uint32_t disp,uint32_t fl,uint64_t ra,double us){
     pthread_mutex_lock(&g_mfs_mx); int k=0; for(;k<g_nmfs;k++) if(g_mfs[k].ra==ra && !strncmp(g_mfs[k].p,p,sizeof g_mfs[k].p-1)) break;
@@ -12566,8 +12579,85 @@ static void guest_qos_tick(void){ static int applied=-1;
 // frame -- does adding work to it lower the frame rate in proportion (it is the limit) or not (the limit is elsewhere)?
 volatile int g_burn_on; static double g_burn_s=-1;
 int ab_burn(int set){ if(set>=0) g_burn_on=set; return g_burn_on; }
+// ---- halo3's local-user lookups, once per frame ---------------------------------------------------------------------------
+// For EVERY player, twice a frame (0xff054 -> 0xfbda8: the player's status, from the frame's render preparation and the
+// players update), halo3 asks two questions whose answers are the same for all of them:
+//  * halo3+0xfbb94 "how many local users": for each user slot i it calls halo3+0x10e0b4(i), which builds the whole user list
+//    again per call. The Reclaimer client raises the slot count from 8 to 64 after load (its `mov edi,8` at +0x1a becomes 64)
+//    and replaces 0x10e0b4 with its own version (exe+0xb11380 in 0.9.23) that also fills and frees two heap vectors per call:
+//    ~16,000 list builds a frame in a 126-player game, 9.3% of the engine thread (public Hugegrass, shim/tools/sample-dump.py).
+//  * halo3+0xfbc04 "which player is local": it walks the player list asking halo3+0x10e060(player) -- client-hooked
+//    (exe+0xb0e340) -- until the local player answers. Its cost depends on where OUR player sits in the server's list: early,
+//    a few calls; late (a client that joined a full server), ~126 calls x 126 players x 2 = 32,000 hook calls a frame: 9.3% of
+//    the engine thread in a match whose frames took 76-97 ms, against ~27 ms in a match where the player came early.
+// Each function's entry now jumps to a stub that returns the answer computed earlier in the same engine frame (hb_frame_hook
+// advances the frame number) and runs the original otherwise. Registers: the hit path writes only eax and the flags, the miss
+// path also ecx; each original writes both on every path (halo3 is whole-program optimised: a caller may keep values in
+// registers its callee is known not to write -- FIXES.md section 17). Each function's bytes are checked at load (another halo3
+// build is left alone; the client patches the bodies later, which the stubs run as they are then); installed only with the
+// frame hook. PELOAD_NO_LUCACHE=1 = off; PELOAD_AB=lucache:<secs> flips both in a match. PELOAD_LUCACHE_CHECK=1: at each frame
+// start every original runs once more and is compared with the answer cached during the frame before ("[lucache]" lines).
+typedef struct { const char*name; uint8_t*site; volatile uint32_t*d; int (__attribute__((ms_abi))*orig)(void); unsigned long n, diff; } LuMemo;
+static LuMemo g_lu[4]; static int g_nlu; static volatile uint32_t*g_lu_frame;   // d: [0] cached frame, [1] answer, [2] on
+int ab_lucache(int set){ if(!g_nlu) return 0; if(set>=0) for(int i=0;i<g_nlu;i++){ g_lu[i].d[2]=set?1:0; g_lu[i].d[0]=*g_lu_frame-1; } return g_lu[0].d[2]!=0; }
+static void lucache_check(void){ static int on=-1; if(on<0) on=getenv("PELOAD_LUCACHE_CHECK")!=0; if(!on) return;
+    for(int i=0;i<g_nlu;i++){ LuMemo*m=&g_lu[i]; uint32_t f=*g_lu_frame, cf=m->d[0], c=m->d[1]; if(cf!=f) continue;   // nothing cached last frame
+        int v=m->orig(); m->n++;
+        if((uint32_t)v!=c){ m->diff++; char t[120]; int k=snprintf(t,sizeof t,"  [lucache] %s frame %u: cached %d, now %d\n",m->name,f,(int)c,v); (void)!write(2,t,k); }
+        if(m->n==1 || m->n%600==0){ char t[140]; int k=snprintf(t,sizeof t,"  [lucache] check %s: %lu frames, %lu differed (answer %d)\n",m->name,m->n,m->diff,(int)c); (void)!write(2,t,k); } } }
+// a stub at `rva` (its `len` bytes must equal `fn`; the first `pro` bytes are position-independent and relocated)
+static void lu_memo(uint8_t*base,uint64_t rva,const uint8_t*fn,int len,int pro,const char*name){
+    uint8_t*site=base+rva; char t[120]; int k;
+    if(g_nlu>=4 || memcmp(site,fn,(size_t)len)){ k=snprintf(t,sizeof t,"  [lucache] %s (halo3+0x%llx) holds other bytes: not cached\n",name,(unsigned long long)rva); (void)!write(2,t,k); return; }
+    if(!g_hookpool){ g_hookpool=mmap(0,1<<20,PROT_READ|PROT_WRITE|PROT_EXEC,MAP_PRIVATE|MAP_ANON,-1,0); if(g_hookpool==MAP_FAILED){g_hookpool=0;return;} }
+    uint8_t*t0=g_hookpool+g_hookoff, *w=t0;
+    if(!g_lu_frame){ g_lu_frame=(uint32_t*)w; *(uint32_t*)w=1; w+=16; }   // the shared frame number (rip-reachable from every stub)
+    uint32_t*dat=(uint32_t*)w; dat[0]=0; dat[1]=0; dat[2]=1; dat[3]=0; w+=16;
+    uint8_t*fr=(uint8_t*)g_lu_frame;
+    #define LU_RIP(tgt) do{ int32_t dd=(int32_t)((tgt)-(w+4)); memcpy(w,&dd,4); w+=4; }while(0)   // rip-relative (the insn ends after the disp)
+    uint8_t*stub=w;
+    *w++=0x83; *w++=0x3D; { int32_t dd=(int32_t)((uint8_t*)dat+8-(w+5)); memcpy(w,&dd,4); w+=4; } *w++=0x00;   // cmp dword [on],0
+    *w++=0x74; uint8_t*j1=w++;                                                    // je miss
+    *w++=0x8B; *w++=0x05; LU_RIP(fr);                                             // mov eax,[frame]
+    *w++=0x3B; *w++=0x05; LU_RIP((uint8_t*)dat);                                  // cmp eax,[cached frame]
+    *w++=0x75; uint8_t*j2=w++;                                                    // jne miss
+    *w++=0x8B; *w++=0x05; LU_RIP((uint8_t*)dat+4);                                // mov eax,[answer]
+    *w++=0xC3;                                                                    // ret
+    uint8_t*miss=w; *j1=(uint8_t)(miss-(j1+1)); *j2=(uint8_t)(miss-(j2+1));
+    *w++=0x48; *w++=0x83; *w++=0xEC; *w++=0x28;                                   // sub rsp,0x28 (shadow space + alignment)
+    *w++=0xE8; uint8_t*cl=w; w+=4;                                                // call the original
+    *w++=0x48; *w++=0x83; *w++=0xC4; *w++=0x28;                                   // add rsp,0x28
+    *w++=0x89; *w++=0x05; LU_RIP((uint8_t*)dat+4);                                // mov [answer],eax
+    *w++=0x8B; *w++=0x0D; LU_RIP(fr);                                             // mov ecx,[frame]
+    *w++=0x89; *w++=0x0D; LU_RIP((uint8_t*)dat);                                  // mov [cached frame],ecx
+    *w++=0xC3;                                                                    // ret
+    #undef LU_RIP
+    uint8_t*orig=w; { int32_t dd=(int32_t)(orig-(cl+4)); memcpy(cl,&dd,4); }
+    memcpy(w,site,(size_t)pro); w+=pro; w=jmp_abs_noreg(w,site+pro);             // the relocated prologue, then back
+    sys_icache_invalidate(t0,(size_t)(w-t0)); g_hookoff+=(uint64_t)((w-t0+15)&~15);
+    uintptr_t pg=(uintptr_t)site & ~0xFFFull; mprotect((void*)pg,0x2000,PROT_READ|PROT_WRITE|PROT_EXEC);
+    uint8_t*q=jmp_abs_noreg(site,stub); while(q<site+pro) *q++=0x90;
+    sys_icache_invalidate(site,(size_t)pro);
+    LuMemo*m=&g_lu[g_nlu]; m->name=name; m->site=site; m->d=dat; m->orig=(int(__attribute__((ms_abi))*)(void))orig; g_nlu++;
+    k=snprintf(t,sizeof t,"  [lucache] %s (halo3+0x%llx) answered once per frame\n",name,(unsigned long long)rva); (void)!write(2,t,k); }
+static void lucache_install(uint8_t*base){
+    if(getenv("PELOAD_NO_LUCACHE")) return;
+    static const uint8_t users[110]={0x48,0x89,0x5c,0x24,0x08,0x48,0x89,0x6c,0x24,0x10,0x48,0x89,0x74,0x24,0x18,0x57,0x48,0x83,0xec,0x20,0x8b,0x0d,0xee,0xe3,0x93,0x00,
+        0xbf,0x08,0x00,0x00,0x00,0x65,0x48,0x8b,0x04,0x25,0x58,0x00,0x00,0x00,0x33,0xdb,0xbd,0x48,0x00,0x00,0x00,0x48,0x8b,0x34,0xc8,0x48,0x8b,0x04,0x2e,0x33,0xd2,
+        0x8b,0xcb,0x38,0x90,0x78,0xfb,0x00,0x00,0x0f,0x95,0xc2,0xe8,0xd7,0x24,0x01,0x00,0x85,0xc0,0x74,0x08,0xff,0xc3,0x3b,0xdf,0x7c,0xe0,0xeb,0x02,0x8b,0xfb,0x48,
+        0x8b,0x5c,0x24,0x30,0x8b,0xc7,0x48,0x8b,0x6c,0x24,0x38,0x48,0x8b,0x74,0x24,0x40,0x48,0x83,0xc4,0x20,0x5f,0xc3};
+    static const uint8_t local[143]={0x4c,0x8b,0xdc,0x49,0x89,0x5b,0x08,0x49,0x89,0x73,0x10,0x57,0x48,0x83,0xec,0x40,0x8b,0x0d,0x82,0xe3,0x93,0x00,0x83,0xcb,0xff,
+        0x65,0x48,0x8b,0x04,0x25,0x58,0x00,0x00,0x00,0x48,0x8b,0x3c,0xc8,0x49,0x8d,0x4b,0xd8,0xb8,0x10,0x00,0x00,0x00,0x48,0x8b,0x04,0x38,0x49,0x89,0x43,0xe0,
+        0x89,0x5c,0x24,0x34,0x89,0x5c,0x24,0x30,0xe8,0x68,0xb6,0xfe,0xff,0x84,0xc0,0x74,0x35,0xbe,0x48,0x00,0x00,0x00,0x48,0x8b,0x04,0x3e,0x33,0xd2,0x8b,0x4c,0x24,
+        0x30,0x38,0x90,0x78,0xfb,0x00,0x00,0x0f,0x95,0xc2,0xe8,0xf7,0x23,0x01,0x00,0x85,0xc0,0x74,0x10,0x48,0x8d,0x4c,0x24,0x20,0xe8,0x39,0xb6,0xfe,0xff,0x84,0xc0,
+        0x75,0xd6,0xeb,0x04,0x8b,0x5c,0x24,0x30,0x48,0x8b,0x74,0x24,0x58,0x8b,0xc3,0x48,0x8b,0x5c,0x24,0x50,0x48,0x83,0xc4,0x40,0x5f,0xc3};
+    lu_memo(base,0xfbb94,users,sizeof users,16,"local-user count");
+    lu_memo(base,0xfbc04,local,sizeof local,16,"local player"); }
 static void __attribute__((ms_abi)) hb_frame_hook(void){
     guest_qos_tick(); if(__builtin_expect(!g_engine_thr,0)) g_engine_thr=pthread_self();
+    if(g_lu_frame){ lucache_check(); (*g_lu_frame)++;
+        if(g_nlu>=2 && !(*g_lu_frame&255)){ static int last=-2; int h=(int)g_lu[1].d[1], slot=h==-1?-1:(h&0xffff);   // our player's slot (the walk's length)
+            if(g_lu[1].d[0]+1>=*g_lu_frame && slot!=last){ last=slot; char t[96]; int k=snprintf(t,sizeof t,"  [lucache] local player slot %d\n",slot); (void)!write(2,t,k); } } }
     if(__builtin_expect(g_burn_on,0)){ if(g_burn_s<0){ const char*e=getenv("PELOAD_BURN_US"); g_burn_s=(e?atof(e):10000)/1e6; } double t=mono_s()+g_burn_s; while(mono_s()<t) __asm__ volatile("pause"); }
     if(__builtin_expect(g_st_voice_pending,0)) st_voice_jobs();   // stats page voice mutes (stats.c)
     if(__builtin_expect(g_hb_job_pending,0)) hb_engine_jobs();
@@ -12579,6 +12669,7 @@ static void hbdel_install(uint8_t*base){
     // called from 421 places, many mid-tick: a teleport from there crashed in the physics update.)
     static const uint8_t main_pro[20]={0x48,0x8B,0xC4,0x57,0x48,0x81,0xEC,0x60,0x02,0x00,0x00,0x48,0xC7,0x44,0x24,0x30,0xFE,0xFF,0xFF,0xFF};
     if(!entry_hook(base+0xb2250,main_pro,20,(void*)hb_frame_hook)) (void)!write(2,"  [hook] main_loop_body prologue differs: engine jobs (teleport, voice mute) disabled\n",86);
+    else lucache_install(base);   // its cache is renewed by the frame hook
     if(getenv("PELOAD_NO_DELHOOK")) return;
     static const uint8_t pro[14]={0x48,0x89,0x5C,0x24,0x10,0x48,0x89,0x6C,0x24,0x18,0x56,0x57,0x41,0x54};
     if(entry_hook(base+0x342ed8,pro,14,(void*)hb_on_delete)){ extern volatile int g_hb_delhook; g_hb_delhook=1; (void)!write(2,"  [hbdel] object_delete hooked (projectile impacts for the tracer overlay)\n",74); }

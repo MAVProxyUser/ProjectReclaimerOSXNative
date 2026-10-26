@@ -2152,7 +2152,37 @@ Numbers are from the commit messages; PERF-PLAN.md has the measurements. Compare
   present -> GPU done 70-90 ms with 2, 36-50 ms with 1; fps in adjacent comparable phases 36.1 / 38.2 (2) vs 37.9 (1).
   PELOAD_GPU_FRAMES=2 = as before (1..4).
 - **PELOAD_GLH_GPUPROF=1** — glhelper.c `gp_switch` / `gp_poll`: GPU time (GL_TIME_ELAPSED queries) per framebuffer the helper
-  draws into, the present copy and readbacks, reported every 5 s: where the GPU's time goes when a game is GPU-bound.
+  draws into, the present copy and readbacks, reported every 5 s: where the GPU's time goes when a game is GPU-bound.- **halo3's local-user lookups answered once per frame** (2026-10-25) — peload.c `lu_memo` / `lucache_install` (stubs at
+  halo3+0xfbb94 and 0xfbc04), `hb_frame_hook`, `ab_lucache` (d3dsubmit.c A/B feature 23). Why: the engine thread's call stacks
+  (`PELOAD_SAMPLE_STACK`, public Hugegrass, ~126 players) put ~9% of it under each of two questions halo3 asks for EVERY player,
+  twice a frame (0xff054 -> 0xfbda8, a player's status, from the render preparation and the players update), with answers that
+  are the same for all of them: (1) 0xfbb94 "how many local users": it calls 0x10e0b4(i) per user slot and 0x10e0b4 builds the
+  whole user list again per call; the Reclaimer client raises the slot count from 8 to 64 after load (`mov edi,8` -> 64) and
+  replaces 0x10e0b4 with a version that also fills and frees two heap vectors: ~16,000 list builds a frame. (2) 0xfbc04 "which
+  player is local": it walks the player list asking 0x10e060(player) (client-hooked) until the local player answers, so its
+  cost depends on where our player sits in the server's list -- late (a client that joined a full server) = ~32,000 hook calls
+  a frame; that is why the same 126-player server ran at ~27 ms a frame in one match and 76-97 ms in others. How: each entry
+  jumps (`jmp [rip+0]`, no register) to a stub that returns the answer computed earlier in the same engine frame (the main-loop
+  frame hook advances one shared frame number) and otherwise runs the original -- the client-patched body as it is in memory --
+  and caches it. Hit path writes only eax and flags, miss path also ecx (each original writes both; halo3 is whole-program
+  optimised, section 17); the functions' bytes are checked at load; installed only with the frame hook. `PELOAD_LUCACHE_CHECK=1`
+  reruns each original at every frame start and compares: local Valhalla 1,200 frames, 0 differences (answers 64 and the local
+  player's handle). Result so far: the profile's ~9% under 0xfbb94 drops to 0.0% (stacks), but four visible in-match A/Bs on
+  public Hugegrass (20 s phases, engine thread CPU ms per frame) showed no measurable difference (e.g. 32-39 ms on and off with
+  our player in slot 53) -- the lookups' cost varies with the match; kept on since it is verified correct. Old:
+  `PELOAD_NO_LUCACHE=1`; in-match A/B `PELOAD_AB=lucache:<secs>`.
+- **A/B log: the engine thread's CPU time per frame** (2026-10-25) — d3dsubmit.c `sub_switch`, peload.c `eng_cpu_s`. Why: big
+  Hugegrass scenes are often limited by the GL / GPU side (5,000-9,000 draws), which hides an engine-thread saving from the
+  frame rate. How: each `[ab]` phase also prints halo3's engine thread's user + system CPU time divided by the frames
+  presented ("engine X ms/frame", totals per side).
+- **GLSL varying scanners search one line, not the rest of the shader** (2026-10-25) — peload.c `d3dgl_line_find` (used by
+  `d3dgl_rename_varyings`, `d3dgl_dedup_varyings`, `d3dgl_iface_mask`, `d3dgl_relocate`). Why: each line's `strstr` ran to the
+  END of the source and the hit was then only used if it fell inside the line: O(lines x length) per pass, several passes per
+  shader pair; it was most of the pre-linker's loader-side time (`[sample]` stacks: d3dgl_prelink_tick -> d3dgl_monoprog ->
+  d3dgl_iface_mask -> strstr, ~10% of halo3's engine thread at the menu) and part of every first-use link in a match. How:
+  memmem within the line (same results: every caller only used matches inside the line). Menu, 730 pairs prelinked, GL helper:
+  18.2 -> 15.2 ms per pair (in-process GL 30.7 -> 22.9). Old: `PELOAD_D3DGL_SCAN_OLD=1`.
+
 ## 20. Scripts and RE tools
 
 - **Sampler call stacks, a dump with every function, no lost threads** (2026-10-25) — peload.c `sampler_thread`, `smp_walk`,
