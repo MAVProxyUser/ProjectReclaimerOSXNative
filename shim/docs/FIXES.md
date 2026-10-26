@@ -2107,7 +2107,8 @@ Numbers are from the commit messages; PERF-PLAN.md has the measurements. Compare
   wobble). Valhalla ~230 fps: 52-62 -> 42-49 ms. Unpatched matrices facing the camera's way (PELOAD_LATCH_SKYCHECK=1) were
   none camera matrices: the sky shares the world camera. Mouse only. PELOAD_LATCH=0 = off (no learning either). Stats page:
   a "late camera" checkbox beside the frame-rate line (POST do=latch&on=0|1: applied vs learning only, to feel the difference in
-  a running game) with what it learned; snapshot "latch" (latch_json).
+  a running game) with what it learned; snapshot "latch" (latch_json). TURNED OFF the same day (play.sh no longer sets it, the
+  page toggle removed, no learning unless PELOAD_LATCH=1): it is mouse only, and the user plays with a controller.
 - **Input -> screen latency measured end to end, and a per-second performance log** (2026-10-25; user: "the window adds its own
   display delay on top of these numbers -- THIS is what I need you to calculate, cuz that feel is all that will matter to the
   player"; "make sure you have a running log of the FPS ... compared to objects on the screen") — new shim/src/latency.c

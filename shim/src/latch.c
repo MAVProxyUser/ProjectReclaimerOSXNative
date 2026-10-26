@@ -31,7 +31,7 @@
 // a rate the engine integrates with acceleration.
 static volatile int64_t g_lc_rx, g_lc_ry;
 static int g_lc_mode=-1;   // 0 off, 1 learn only (the default: cheap), 2 apply
-static int lc_mode(void){ if(g_lc_mode<0){ const char*e=getenv("PELOAD_LATCH"); g_lc_mode=e?(atoi(e)?2:0):1; } return g_lc_mode; }
+static int lc_mode(void){ if(g_lc_mode<0){ const char*e=getenv("PELOAD_LATCH"); g_lc_mode=e&&atoi(e)?2:0; } return g_lc_mode; }   // off unless PELOAD_LATCH=1 (2026-10-25: mouse only, and the user plays with a controller)
 static void lc_event(int dx,int dy);
 void latch_received(int dx,int dy){ __atomic_add_fetch(&g_lc_rx,dx,__ATOMIC_RELAXED); __atomic_add_fetch(&g_lc_ry,dy,__ATOMIC_RELAXED); if(lc_mode()) lc_event(dx,dy); }
 

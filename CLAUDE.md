@@ -340,7 +340,7 @@ no DSP plugin, halo2's voices (AIL_find_filter x4) failed and it never played a 
 fetches beta.txt (WinHTTP); its GRAVEMIND LIVE client claims the player's name as a gamertag -- test runs use GM_TEST=1 (own profile).
 New loader files: winhttp.c, win32x.c, winmm.c, games.c, d2d.c, dwrite.c, wic.c, dsound.c (FIXES.md 2026-10-20/21 entries).
 play.sh's stdin feeder is `sleep 86400.<pid>` (killed when the game exits; it used to hold a caller's `| tail` for 24 h).
-Late camera update (2026-10-25, shim/src/latch.c, play.sh PELOAD_LATCH=1): the newest mouse movement rotates each frame's
+Late camera update (2026-10-25, shim/src/latch.c, OFF -- opt-in PELOAD_LATCH=1; mouse only, the user plays with a controller): the newest mouse movement rotates each frame's
 world-camera constant buffer (GPU copy only) at upload; learned deg/count + input age, predictive offset, none in vehicles /
 without a live local unit (needs the stats snapshot), 12 deg clamp; [latch] lines; PELOAD_AB=latch. HugeGrass 120 -> 84 ms.
 Window frame rate (2026-10-25): until then the present thread slept 33 ms after every frame in helper mode (it checked the
