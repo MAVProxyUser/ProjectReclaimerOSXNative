@@ -499,6 +499,7 @@ static void st_snapshot(StBuf* s) {
 
 // ---- HTTP (stats.c's server, the read-only part) --------------------------------------------------------------------
 static int g_st_port = 8765;
+static volatile unsigned long g_st_hits;                   // page requests (/events, /stats.json)
 static pthread_mutex_t g_st_mx = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_st_cv = PTHREAD_COND_INITIALIZER;
 static char* g_st_json; static size_t g_st_len; static unsigned long g_st_seq;
 static void* st_snap_thread(void* a) {
@@ -556,7 +557,7 @@ static void* st_conn(void* a) {
         int k = snprintf(h, sizeof h, "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n%s", strlen(body), body); st_send(fd, h, (size_t)k);
     } else if (strcmp(meth, "GET")) { const char* na = "HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"; st_send(fd, na, strlen(na)); }
     else if (!strcmp(path, "/events")) {
-        char h[256]; int k = snprintf(h, sizeof h, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n\r\n");
+        g_st_hits++; char h[256]; int k = snprintf(h, sizeof h, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n\r\n");
         if (st_send(fd, h, (size_t)k))
             for (unsigned long seen = 0;;) {
                 pthread_mutex_lock(&g_st_mx); while (g_st_seq == seen) pthread_cond_wait(&g_st_cv, &g_st_mx);
@@ -565,7 +566,7 @@ static void* st_conn(void* a) {
                 int ok = j && st_send(fd, j, len + 8); free(j); if (!ok) break;
             }
     } else if (!strcmp(path, "/stats.json")) {
-        pthread_mutex_lock(&g_st_mx); size_t len = g_st_len; char* j = malloc(len + 1); if (j && g_st_json) memcpy(j, g_st_json, len); else len = 0; pthread_mutex_unlock(&g_st_mx);
+        g_st_hits++; pthread_mutex_lock(&g_st_mx); size_t len = g_st_len; char* j = malloc(len + 1); if (j && g_st_json) memcpy(j, g_st_json, len); else len = 0; pthread_mutex_unlock(&g_st_mx);
         st_reply(fd, "application/json", j, len, 0); free(j);
     } else if (!strcmp(path, "/feed.json")) {
         const char* v = strstr(qs, "since="); StBuf b = {0}; st_feed_json(&b, v ? (uint32_t)strtoul(v + 6, 0, 10) : 0); st_reply(fd, "application/json", b.b, b.n, 0); free(b.b);
@@ -591,6 +592,15 @@ static void* st_conn(void* a) {
     } else { const char* nf = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"; st_send(fd, nf, strlen(nf)); }
     close(fd); return 0;
 }
+// NHOOK_STATS_OPEN=1: open the page in the browser unless a tab asked for it within 5 s (an open tab reconnects by itself
+// and reloads for a new game through the snapshot's "inst")
+static void* st_open_thread(void* a) {
+    (void)a; sleep(5); if (g_st_hits) return 0;
+    char url[64]; snprintf(url, sizeof url, "http://127.0.0.1:%d/", g_st_port);
+    char* argv[] = {(char*)"/usr/bin/open", url, 0}; extern char** environ; pid_t pid;
+    if (!posix_spawn(&pid, "/usr/bin/open", 0, 0, argv, environ)) { int st; waitpid(pid, &st, 0); nlog("[nhook] opened %s in the browser", url); }
+    return 0;
+}
 static void* st_listen_thread(void* a) {
     (void)a; pthread_setname_np("nhook-stats-listen");
     { pthread_t t; pthread_create(&t, 0, st_snap_thread, 0); pthread_detach(t); }
@@ -602,6 +612,7 @@ static void* st_listen_thread(void* a) {
             if (tr == 0) nlog("[nhook] cannot listen on 127.0.0.1:%d (%s), retrying every second", g_st_port, strerror(e)); sleep(1); }
     }
     nlog("[nhook] live game stats on http://127.0.0.1:%d/", g_st_port);
+    if (getenv("NHOOK_STATS_OPEN") && atoi(getenv("NHOOK_STATS_OPEN"))) { pthread_t ot; pthread_create(&ot, 0, st_open_thread, 0); pthread_detach(ot); }
     for (;;) {
         int fd = accept(ls, 0, 0); if (fd < 0) { if (errno == EINTR) continue; usleep(100000); continue; }
         fcntl(fd, F_SETFD, FD_CLOEXEC);

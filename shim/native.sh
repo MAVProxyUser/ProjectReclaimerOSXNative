@@ -10,6 +10,7 @@ APP="${NATIVE_APP:-/Applications/Project Reclaimer.app}/Contents/MacOS/project-r
 SUP="$HOME/Library/Application Support/ReclaimerMac"
 [ -f shim/build/nhook.dylib ] || bash shim/native/build.sh
 if [ "${NATIVE_REAL:-0}" = 1 ]; then PROF="$HOME/Library/Application Support/ProjectReclaimer"; unset RECLAIMER_PROFILE_DIR
+     export NHOOK_STATS_OPEN="${NHOOK_STATS_OPEN:-1}"   # the stats page opens in the browser (unless a tab is already open)
 else PROF="${NATIVE_PROFILE:-$SUP/native/test-v2}"; export RECLAIMER_PROFILE_DIR="$PROF" RECLAIMER_CACHE_DIR="${RECLAIMER_CACHE_DIR:-$SUP/native/test-cache}"
      export RECLAIMER_TEST_SILENT="${RECLAIMER_TEST_SILENT:-1}"; fi
 MCC="$(cat "$PROF/mcc-folder.txt" 2>/dev/null)"
