@@ -452,11 +452,11 @@ static int st_statborg(int slot, int16_t out[8]) {
 // are one kill; a victim whose suicides went up too killed themselves. The pairing is inferred (several kills in one
 // 100 ms snapshot pair in slot order) and the weapon is the killer's weapon in hand (or vehicle) at that moment:
 // these events are marked estimated. The counts themselves are the game's own.
-typedef struct { int slot, team, kind; double t; char name[64], how[96]; } SbKiller;   // kind 0 kill, 1 betrayal
+typedef struct { int slot, team, kind, haspos; double t; float pos[3]; char name[64], how[96]; } SbKiller;   // kind 0 kill, 1 betrayal
 typedef struct { int slot, team, suicide, haspos; double t; float pos[3]; char name[64]; } SbVictim;
 static SbKiller g_sbk[64]; static int g_nsbk; static SbVictim g_sbv[64]; static int g_nsbv;
 static struct { int16_t s[8]; int ok; char name[64]; } g_sbprev[128];
-typedef struct { char name[64], how[96]; int team, have, dead; float pos[3]; double died; } SbNow;   // this snapshot's view of a slot
+typedef struct { char name[64], how[96]; int team, have, dead; float pos[3], cur[3]; double died; } SbNow;   // this snapshot's view of a slot (cur: where it is now)
 static SbNow g_sbnow[128];
 static void sb_reset(void) { memset(g_sbprev, 0, sizeof g_sbprev); g_nsbk = g_nsbv = 0; }
 static void sb_tick(const StPlayer* pl, int np, double now) {
@@ -465,30 +465,34 @@ static void sb_tick(const StPlayer* pl, int np, double now) {
         if (!g_sbprev[sl].ok || strcmp(g_sbprev[sl].name, pl[k].name) || s[SB_DEATHS] < g_sbprev[sl].s[SB_DEATHS] || s[SB_KILLS] < g_sbprev[sl].s[SB_KILLS]) {
             memcpy(g_sbprev[sl].s, s, sizeof s); g_sbprev[sl].ok = 1; snprintf(g_sbprev[sl].name, sizeof g_sbprev[sl].name, "%s", pl[k].name); continue; }
         const int16_t* o = g_sbprev[sl].s; const SbNow* w = &g_sbnow[sl];
-        for (int d = 0; d < s[SB_KILLS] - o[SB_KILLS] && g_nsbk < 64; d++) { SbKiller* x = &g_sbk[g_nsbk++]; x->slot = sl; x->team = w->team; x->kind = 0; x->t = now; snprintf(x->name, sizeof x->name, "%s", pl[k].name); snprintf(x->how, sizeof x->how, "%s", w->how); }
-        for (int d = 0; d < s[SB_BETRAYALS] - o[SB_BETRAYALS] && g_nsbk < 64; d++) { SbKiller* x = &g_sbk[g_nsbk++]; x->slot = sl; x->team = w->team; x->kind = 1; x->t = now; snprintf(x->name, sizeof x->name, "%s", pl[k].name); snprintf(x->how, sizeof x->how, "%s", w->how); }
+        for (int d = 0; d < s[SB_KILLS] - o[SB_KILLS] && g_nsbk < 64; d++) { SbKiller* x = &g_sbk[g_nsbk++]; x->slot = sl; x->team = w->team; x->kind = 0; x->t = now; snprintf(x->name, sizeof x->name, "%s", pl[k].name); snprintf(x->how, sizeof x->how, "%s", w->how); x->haspos = w->have; memcpy(x->pos, w->cur, 12); }
+        for (int d = 0; d < s[SB_BETRAYALS] - o[SB_BETRAYALS] && g_nsbk < 64; d++) { SbKiller* x = &g_sbk[g_nsbk++]; x->slot = sl; x->team = w->team; x->kind = 1; x->t = now; snprintf(x->name, sizeof x->name, "%s", pl[k].name); snprintf(x->how, sizeof x->how, "%s", w->how); x->haspos = w->have; memcpy(x->pos, w->cur, 12); }
         int sui = s[SB_SUICIDES] - o[SB_SUICIDES];
         for (int d = 0; d < s[SB_DEATHS] - o[SB_DEATHS] && g_nsbv < 64; d++) { SbVictim* v = &g_sbv[g_nsbv++]; v->slot = sl; v->team = w->team; v->suicide = d < sui; v->t = now;
             snprintf(v->name, sizeof v->name, "%s", pl[k].name); v->haspos = w->died > 0 && now - w->died < 3; memcpy(v->pos, w->pos, 12); }
         memcpy(g_sbprev[sl].s, s, sizeof s);
     }
-    // pair: victims oldest first; a victim waits up to 1.5 s for its killer's count (they replicate separately)
+    // pair: victims oldest first; a victim waits up to 4 s for its killer's count (they replicate separately: in a 70-player
+    // game they came more than 1.5 s apart -- 57 of 68 deaths in one Infection game had no killer), and takes the nearest
+    // waiting killer (a betrayal by a teammate first)
     for (int i = 0; i < g_nsbv; i++) {
         SbVictim* v = &g_sbv[i]; const float* pos = v->haspos ? v->pos : 0; int done = 0;
         if (v->suicide) { st_event_pos(pos, "death", 0, v->name, 0, -1, v->team, 0, "%s killed themselves", v->name); done = 1; }
         else {
-            int best = -1;
-            for (int j = 0; j < g_nsbk; j++) { if (g_sbk[j].slot == v->slot) continue; if (best < 0) best = j;
-                if (g_sbk[j].kind == 1 && g_sbk[j].team == v->team && v->team >= 0) { best = j; break; } }
+            int best = -1; float bd = 1e30f;
+            for (int j = 0; j < g_nsbk; j++) { if (g_sbk[j].slot == v->slot) continue;
+                if (g_sbk[j].kind == 1 && g_sbk[j].team == v->team && v->team >= 0) { best = j; break; }
+                float d = 1e20f; if (pos && g_sbk[j].haspos) { float dx = g_sbk[j].pos[0] - pos[0], dy = g_sbk[j].pos[1] - pos[1], dz = g_sbk[j].pos[2] - pos[2]; d = dx * dx + dy * dy + dz * dz; }
+                if (best < 0 || d < bd) { best = j; bd = d; } }
             if (best >= 0) { SbKiller x = g_sbk[best]; memmove(&g_sbk[best], &g_sbk[best + 1], (size_t)(g_nsbk - best - 1) * sizeof x); g_nsbk--;
                 char hw[110] = ""; if (x.how[0]) snprintf(hw, sizeof hw, " (%s)", x.how);
                 const char* verb = x.kind ? "betrayed" : "killed";
                 st_event_verb(pos, "kill", x.name, v->name, x.how, verb, x.team, v->team, 1 | (x.kind ? 4 : 0), "%s %s %s%s", x.name, verb, v->name, hw); done = 1; }
-            else if (now - v->t > 1.5) { st_event_pos(pos, "death", 0, v->name, 0, -1, v->team, 0, "%s was killed", v->name); done = 1; }
+            else if (now - v->t > 4.0) { st_event_pos(pos, "death", 0, v->name, 0, -1, v->team, 0, "%s was killed", v->name); done = 1; }
         }
         if (done) { memmove(&g_sbv[i], &g_sbv[i + 1], (size_t)(g_nsbv - i - 1) * sizeof *v); g_nsbv--; i--; }
     }
-    for (int j = 0; j < g_nsbk; j++) if (now - g_sbk[j].t > 2.0) { memmove(&g_sbk[j], &g_sbk[j + 1], (size_t)(g_nsbk - j - 1) * sizeof g_sbk[0]); g_nsbk--; j--; }
+    for (int j = 0; j < g_nsbk; j++) if (now - g_sbk[j].t > 5.0) { memmove(&g_sbk[j], &g_sbk[j + 1], (size_t)(g_nsbk - j - 1) * sizeof g_sbk[0]); g_nsbk--; j--; }
 }
 
 // the page's controls: on unless NHOOK_STATS_READONLY=1 (POST + an X-Reclaimer-Control header + no foreign Origin)
@@ -634,7 +638,7 @@ static void st_snapshot(StBuf* s) {
             } else if (t->alive && !have) t->alive = 0;
             t->unit = h; if (team >= 0) t->team = team;
         }
-        if (pl[k].slot >= 0 && pl[k].slot < 128) { SbNow* w = &g_sbnow[pl[k].slot]; snprintf(w->name, sizeof w->name, "%s", pl[k].name); w->team = team; w->have = have; w->dead = dead; w->how[0] = 0;
+        if (pl[k].slot >= 0 && pl[k].slot < 128) { SbNow* w = &g_sbnow[pl[k].slot]; snprintf(w->name, sizeof w->name, "%s", pl[k].name); w->team = team; w->have = have && !dead; w->dead = dead; w->how[0] = 0; if (have) memcpy(w->cur, o, 12);
             if (have && !dead) { uint32_t parent = *(const uint32_t*)(d + 0x10); uint64_t vd = parent != 0xFFFFFFFFu ? ST_DATUM(parent) : 0; uint32_t df = 0;
                 if (vd && hb_read(vd, &df, 4) && *(const int16_t*)(d + 0x24E) == 0) snprintf(w->how, sizeof w->how, "%s", hb_tag_name(df));   // the driver: a splatter is possible
                 else { int ws = *(const int8_t*)(d + 0x262); const uint32_t* wp = (const uint32_t*)(d + 0x268); uint64_t wd = (ws >= 0 && ws < 4) ? ST_DATUM(wp[ws]) : 0;
