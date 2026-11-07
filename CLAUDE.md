@@ -299,7 +299,7 @@ profile.json made by shim/tools/profile-native.py from the loader profile: same 
 backups in ReclaimerMac/backups are untouched -- NEVER let a launch make a new identity). mcc-folder.txt = the MCC folder's
 macOS path. Test runs: RECLAIMER_PROFILE_DIR=ReclaimerMac/native/test-v2 (a test profile: services left alone) +
 RECLAIMER_CACHE_DIR + RECLAIMER_TEST_SILENT=1; don't kill it before "[menus] open" (it counts unfinished starts). Dylibs inject
-with DYLD_INSERT_LIBRARIES (tested). RE: re-tools/machoref.py (strref/dis/func/calls on arm64 Mach-O).
+with DYLD_INSERT_LIBRARIES (tested). RE: re-tools/machoref.py (strref/dis/func/calls/dataref on arm64 Mach-O).
 shim/native/ = nhook.dylib (bash shim/native.sh [--map guardian --seconds 60 --background]): log tap, code-table entry hooks on lifted
 halo3 functions (x0 = guest context, +0x2d8 = TLS pointer), NHOOK_CENSUS=1; reads the players table. main_loop_body / sim tick /
 display_event / object_delete etc. are the app's own code now (census): docs native-client.md "Inside the app".
@@ -323,7 +323,7 @@ drives its menus (`wait 12`, `press SERVER BROWSER`; a wrong row name prints the
 `--request-at <s> '{"campaign":{"hold_trigger":{"seconds":6}}}'` fires in a local test match (shim/tools/native-fire-test.sh:
 live tracer / shots check, PASS); the test profile refuses public servers by itself.
 Forensic voice audio: text hook on the app's Opus decode (0x1003f1e7c, caller = voice mixer 0x102152578, id at x26-0x278;
-stub.S _nh_opus_shim; NHOOK_NO_VOICEHOOK=1 off; [perf] "voice packets" -- unverified with real talkers). Not yet: packet log
+stub.S _nh_opus_shim; NHOOK_NO_VOICEHOOK=1 off; [perf] "voice packets" -- live-checked 2026-11-07: real talkers archived and decoded). Chat = the app's own `[chat] line` log, on since nhook sets its chat_log byte (nstats.c chat_log_tick). Not yet: packet log
 game layer. Test runs: NATIVE_LOG=<scratch file> (the default log is the user's). Offline test:
 shim/tools/nhook-selftest.sh. hitbox.c's .map code lives in shim/src/h3maps.c (shared).
 PORTING A RELEASE: shim/docs/porting.md -- fetch-releases.sh (corpus), client-survey.sh, `re-tools/patchscan.py --diff old new`

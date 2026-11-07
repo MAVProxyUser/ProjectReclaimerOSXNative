@@ -144,7 +144,7 @@ Since the same night (2026-11-07): the overlay uses the frame's own view constan
 hook on halo3+0x2af478) and the scene's depth texture: zones are hidden behind the world and every other feature has
 "visible only" again. Hooks on the app's OWN code work (text_hook: the app is ad hoc signed, no hardened runtime); 917 halo3
 functions are the app's own code (NHOOK_LIST_BRANCH_ENTRIES=1). Bullets come from a text hook on the app's object_delete
-(needs a real game to show).
+(seen live 2026-11-07 in a 50-player public game: tracers and hitboxes drawn, 200-260 fps).
 
 Since the same day also: weapon / vehicle / power-up spawns and pickups (nspawns.c), shots / hits / accuracy (the object_delete
 text hook), page **mutes** (the app's own set_muted and mute list, nnet.c voice_init), **who talks** (the page's dot and the
@@ -167,7 +167,12 @@ the team-less target), `place_bipeds` {tag, at [x,y,z], spacing, side}. An unkno
 The 0.10 server list: shim/tools/servers10.py (server-status.md "Client 0.10+": one UDP datagram per server, no QUIC).
 
 Voice packets (forensic audio): a text hook on the app's Opus decode (opus-rs, 0.10.0 0x1003f1e7c) called by the voice mixer
-(0x102152578; sender id at x26 - 0x278); installed and checked in test matches, the packets need a real game (FIXES.md).
+(0x102152578; sender id at x26 - 0x278). Live 2026-11-07 in a 50-player public game: 88 utterances with audio archived, one
+decoded by ffmpeg to clear speech (FIXES.md). Mute was checked there too (the app's list took and dropped a player).
+
+Chat: the app prints its chat lines only with its chat_log byte set (a dedicated-server option); nhook sets it
+(nstats.c chat_log_tick), so chat / [SERVER] / notice lines reach the feed and the archive (FIXES.md, 2026-11-07).
+The kill feed ignores the history a client receives after joining a game in progress (FIXES.md "history is not a kill").
 
 Not yet: the packet log's game layer (halo3 message names; 0.10's wire protocol is the app's own).
 

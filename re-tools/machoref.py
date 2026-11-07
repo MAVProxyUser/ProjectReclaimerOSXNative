@@ -8,7 +8,9 @@ for PE files. Needs numpy (scan) and capstone (dis: re-tools/angrenv/bin/python 
     machoref.py dis <binary> <vmaddr> [<end>]     disassemble a function (from its start to the next one) or a range, adrp+add
                                                   targets annotated with the text found there
     machoref.py func <binary> <vmaddr>            the function containing <vmaddr>
-    machoref.py calls <binary> <vmaddr>           every bl to <vmaddr> (callers)"""
+    machoref.py calls <binary> <vmaddr>           every bl to <vmaddr> (callers)
+    machoref.py dataref <binary> <vmaddr> [<len>]  every adrp + load / store (any size, unsigned offset) or add whose address
+                                                  falls in [vmaddr, vmaddr+len) (default len 1): who reads / writes a global"""
 import sys, struct, bisect
 
 def load(path):
@@ -103,6 +105,27 @@ def main():
                 if a - win <= tgt < b:
                     fs, fe = func_of(fstarts, code)
                     print(f'  {code:#x} -> {tgt:#x} (text {tgt - a:+d})  in function {fs:#x}' + (f'..{fe:#x}' if fe else ''))
+    elif cmd == 'dataref':
+        import numpy as np
+        lo = int(sys.argv[3], 16); hi = lo + (int(sys.argv[4], 0) if len(sys.argv) > 4 else 1); ta, tz, to = text_sec(secs)
+        w = np.frombuffer(d, dtype='<u4', count=tz // 4, offset=to)
+        for i in np.nonzero((w & 0x9F000000) == 0x90000000)[0].tolist():
+            ins = int(w[i]); rd = ins & 31; imm = ((ins >> 29) & 3) | (((ins >> 5) & 0x7FFFF) << 2)
+            if imm & (1 << 20): imm -= 1 << 21
+            pc = ta + i * 4; page = (pc & ~0xFFF) + (imm << 12)
+            if not (page <= hi and lo < page + 0x1000 + 0x8000): continue
+            for j in range(i + 1, min(i + 12, len(w))):
+                n = int(w[j])
+                if ((n >> 5) & 31) != rd: continue
+                if (n & 0x3B000000) == 0x39000000:                                 # ldr/str (unsigned offset), any size, GPR or SIMD
+                    sz = n >> 30; v = (n >> 26) & 1; opc = (n >> 22) & 3
+                    if v and opc >= 2: sz = 4                                     # q register
+                    t = page + ((n >> 10) & 0xFFF) * (1 << sz); kind = 'store' if opc == 0 else 'load'
+                elif (n & 0xFF800000) == 0x91000000: t = page + ((n >> 10) & 0xFFF); kind = 'address'
+                else: continue
+                if lo <= t < hi:
+                    fs, _ = func_of(fstarts, ta + j * 4); print(f'  {ta + j * 4:#x}  {kind:7s} {t:#x}  in function {fs:#x}')
+                break
     elif cmd == 'func':
         fs, fe = func_of(fstarts, int(sys.argv[3], 16)); print(f'{fs:#x}..{fe:#x} ({fe - fs} bytes)')
     elif cmd == 'calls':

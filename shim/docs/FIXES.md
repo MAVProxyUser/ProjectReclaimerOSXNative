@@ -1903,6 +1903,52 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   exact "killed themselves" each time; pairs offline: `bash shim/tools/results-feed-test.sh` (the real code, extracted: kill,
   either matrix orientation, double kill, a trade in one snapshot, betrayal, suicide, headshot, pending-entry handling, new
   match) -- kills between two players still need a real game (NHOOK_RESULTS_LOG=1 logs every change and decision).
+- **nhook kill feed: history is not a kill (joining a game in progress)** (2026-11-07; nstats.c rs_tick, rs_cand,
+  rs_confirm, sb_tick) — WHY: joining a 52-player public game in progress, the feed replayed ~200 of the match's old kills in
+  its first seconds and showed some live kills twice; a later mid-game join replayed ~60 more through the scoreboard path. A
+  client gets halo3's game results and the statborg in pieces after a join: results rows went 0 -> N over minutes (a slot's
+  statistics long after its versus row, so the mirror half of a versus entry still found that killer's kills going up and
+  printed the kill again), and the statborg came in one burst 0.8 s after loading in. HOW: (a) results: only the LOW half of
+  each versus entry is read ([a][b] low = a killed b; [b][a] high is the same kill -- checked live on one kill: [12][49] low +1,
+  [49][12] high +1), so each kill counts once; the kills / deaths deltas still decide the orientation where they tell. A
+  change becomes a candidate (rs_cand) that is reported only once the scoreboard shows that victim's death (a pending
+  SbVictim; rs_confirm, up to RS_WAIT 3 s either way) -- else it is history and dropped; a pair or a slot's suicides up by more
+  than 1 in one snapshot, or more than RS_FLOOD (16) changes in one snapshot, is history outright. (b) the scoreboard (sb_tick):
+  a slot's deaths up by more than 1 (kills by more than 6) in one snapshot, or more than SB_BURST (8) players dying in one
+  snapshot, is the statborg filling in (taken as it is, no events); a single death waits up to 3 s for the death tracker to see
+  that player's body die (or no live body) -- the statborg can come 0.1 s before the body (8 of ~250 deaths in one game) -- and
+  a player who stays alive is history. g_rs_live stays set once the results have counted a death, so the next match's first
+  deaths wait for them too. Checked live on a 35-50 player public server (Guardian, The Pit, Valhalla): mid-game joins -> first
+  kill 2 s after loading in, ~250 kills and none replayed, every repeated kill line >= 11 s apart; a match joined at its start:
+  249 kill lines for 249 scoreboard deaths. Offline: `bash shim/tools/results-feed-test.sh` (now with results before the
+  scoreboard, a change the scoreboard never backs, a table filling in, a pair up by 2, scoreboard bursts, a player alive all
+  along, the count before the body dies). NHOOK_RESULTS_LOG=1 logs every decision; NHOOK_NO_RESULTS_FEED=1 = the scoreboard
+  pairing only.
+- **nhook: chat in the feed and the forensic archive** (2026-11-07; nstats.c chat_log_tick + the "[chat] line" parser) — WHY:
+  "Chat ... aren't showing on the timeline": a busy public game archived 0 chat lines. The app prints its chat lines
+  (`[chat] line [GLOBAL|TEAM|NEARBY] <name> (0x<id>): <text>`, `[SERVER #rrggbb]`, `[SERVER]`, `[NOTICE]`) only while the byte
+  at 0x103efcc9b is set: the dedicated server's `chat_log` option, a field of the chat state at 0x103efcc58 that a client never
+  sets (`re-tools/machoref.py dataref`, new: it is read in two places, both this gate in the chat function 0x100d23d78). HOW:
+  chat_log_tick (every snapshot) checks the gate's instructions (adrp x8 / ldrb w8, [x8, #0xc9b] at 0x100d2a6fc and
+  0x100d2a720: another build is left alone with a log line) and sets the byte, again whenever it reads 0; lines that came while
+  it was off are printed when it turns on (the app logs from its own last-logged index). The parser now records chat the way
+  the loader's stats.c does: kind "chat", a = the sender, how = "" (everyone) / team / nearby / server / notice, text = the
+  message, the sender id for the archive's sender_id ([SERVER] lines were kind "server" before, outside the Chat lane).
+  NHOOK_NO_CHAT_LOG=1 = off. Checked live: the [SERVER] welcome and GLOBAL lines in /feed.json and events.jsonl (channel "all",
+  sender ids).
+- **Forensic page: the native voice blocks show, and a usable player** (2026-11-07; forensic_page.html) — WHY: "it leaves a
+  play button in the bottom left but it isn't super useful ... the audio packets ... aren't showing on the timeline": native
+  voice records carry channel 255 (not known) and the page coloured only channels 1-3, so every native utterance block was
+  drawn without a background (33 invisible blocks in one session). HOW: a colour and a legend entry for "channel not known";
+  the player bar is hidden until something plays, then has previous / next (in time, among what the filters show), "play on"
+  (the next utterance when one ends: listening through a session), who / channel / time / "n of N" and a close button; a play
+  head line runs across the timeline and the playing block is scrolled into view; each speaker gets a play button (their
+  whole .ogg). Checked on a live session: the blocks show, a click plays, play on went 12 -> 18 of 33, close stops it.
+- **nhook archive: sessions not named after the loading screen** (2026-11-07; nstats.c, the fx_roster_tick call) — WHY: every
+  mid-game join made a session "..._130_epilogue": the session opens 2 s after the host is known, while the loading screen's
+  scenery (130_epilogue) is still the map hb_current_map reports (it rechecks every 2 s). HOW: the archive gets no map while
+  joining, in a match's first 8 s, or when the map is 130_epilogue outside a match: such a session is named after the server;
+  the roster lines carry the real map.
   NHOOK_NO_RESULTS_FEED=1 = the old estimate only. Also from the results: "Game over: <winners> won" (or "a tie") when
   games-completed (stat 1) goes up, winners = games-won (3) -- the loader's feed had it from the client's "Carnage report
   opened" line, the native feed had no end at all; checked live with the app's {"gameplay":"end_game"} request.
