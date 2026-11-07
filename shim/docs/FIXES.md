@@ -33,6 +33,16 @@ and hooks · 17 halo3.dll patches and detours · 18 Overlay, stats, forensics, w
   checkout and by install.sh on a USB install; `bash shim/tools/make-app.sh --applications` puts one in ~/Applications.
   A downloaded bundle needs `xattr -dr com.apple.quarantine <bundle folder>` first (the app is signed ad hoc). Details:
   section 20 "Reclaimer.app".
+- **Client 0.10+ is a native Mac app** (2026-11-06; shim/docs/native-client.md) — `Project Reclaimer.app` from the release's
+  macOS zip goes to /Applications; it needs no loader. Player folder `~/Library/Application Support/ProjectReclaimer` (copy
+  the loader's `prefix/drive_c/ReclaimerProfile` there by hand: the app only migrates `~/Documents/My Games`), with
+  `mcc-folder.txt` = the macOS path of the MCC folder. The identity: a loader profile's DPAPI-labelled key is the raw seed
+  (our CryptProtectData is a passthrough) and the app calls it "locked here: not made by Wine" -- WHY it needs converting;
+  `python3 shim/tools/profile-native.py convert <old profile.json> <new profile.json>` checks the seed derives the profile's
+  public key and writes the app's version-2 format (plain `seed`; `--wine <user>` = a Wine CryptProtectData blob instead,
+  both verified: same community id). It refuses to overwrite. The old profile is left as it is (the switch back = keep
+  using the loader with it). Our hooks / stats page don't run in the native app yet (a dylib loads with
+  DYLD_INSERT_LIBRARIES: no hardened runtime).
 The short version (README.md has the full guide: requirements, USB copy, controls, the stats page).
 
 ### Install

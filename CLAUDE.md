@@ -293,6 +293,13 @@ tables itself), IDXGIFactory4-7 slots, PropVariantToStringAlloc, Windows' fiber 
 fields, GetRawInputDeviceList / window props, foreign WASAPI event handles refused (FIXES.md, 2026-11-06 entries): menu (628 draws)
 and a match on our local 0.10.0 dedicated server. Its `server-status` relaunches itself and the child never exits (dedicated.sh
 status / servers.sh / test runners' status checks print nothing and leave orphans: kill them).
+NATIVE MAC CLIENT (2026-11-06, shim/docs/native-client.md): 0.10+ ships `Project Reclaimer.app` (arm64, Metal, recompiles halo3
+itself, no loader). Installed in /Applications; player folder ~/Library/Application Support/ProjectReclaimer (version-2
+profile.json made by shim/tools/profile-native.py from the loader profile: same community id; the loader profile and the uchg
+backups in ReclaimerMac/backups are untouched -- NEVER let a launch make a new identity). mcc-folder.txt = the MCC folder's
+macOS path. Test runs: RECLAIMER_PROFILE_DIR=ReclaimerMac/native/test-v2 (a test profile: services left alone) +
+RECLAIMER_CACHE_DIR + RECLAIMER_TEST_SILENT=1; don't kill it before "[menus] open" (it counts unfinished starts). Dylibs inject
+with DYLD_INSERT_LIBRARIES (tested). RE: re-tools/machoref.py (strref/dis/func/calls on arm64 Mach-O).
 PORTING A RELEASE: shim/docs/porting.md -- fetch-releases.sh (corpus), client-survey.sh, `re-tools/patchscan.py --diff old new`
 (signatures read from the C; `--rev <commit>`; exit 0 over all 39 releases), `re-tools/sigport.py --point P --old --new [--corpus]
 [--apply]` (anchors incl. callers' texts -> shape alignment -> wildcarded signature -> meaning check; `--selftest` replays history),
