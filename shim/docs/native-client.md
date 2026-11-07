@@ -155,7 +155,12 @@ Test runs can drive the app: `--ui-script <file>` (menu automation: `wait 12`, `
 requests: top level `gameplay` / `networking` / `appearance` / `forge` / `campaign` / `hud` / `theater` / `capacity` / `maps` /
 `editor` / `at_tick`; a wrong name lists the variants, a missing field is named -- e.g. `{"campaign":{"hold_trigger":{"seconds":6}}}`
 fires the local player's weapon in a multiplayer test match too, `{"campaign":{"fire_pulses":{"count":N,...}}}`). The test
-profile refuses public servers itself ("[net] test profile: game connection at ... left alone"). Live bullet check:
+profile refuses public servers itself ("[net] test profile: game connection at ... left alone"). More requests:
+`{"campaign":"kill_player"}` (the feed showed "<name> killed themselves" from the statborg), `{"campaign":{"target_practice":
+{"tag":"objects\\characters\\masterchief\\mp_masterchief\\mp_masterchief","player":0,"distance":5,"span":0,"speed":0,
+"seconds":15}}}` (a biped 5 units ahead; fields tag player distance bearing span speed seconds weapon dual team clear lift;
+the overlay drew its hitboxes, our estimated hits counted 2 of 10 shots while the app's own counter said 0 hits / 0 damage for
+the team-less target), `place_bipeds` {tag, at [x,y,z], spacing, side}. An unknown field makes serde list all of them. Live bullet check:
 `bash shim/tools/native-fire-test.sh` (object_delete bullets, shots, tracer pixels in overlay captures: PASS 2026-11-07).
 
 The 0.10 server list: shim/tools/servers10.py (server-status.md "Client 0.10+": one UDP datagram per server, no QUIC).
