@@ -192,7 +192,22 @@ static int pk_kind(int fd) {
     if (getsockname(fd, (struct sockaddr*)&me, &ml) || (me.ss_family != AF_INET && me.ss_family != AF_INET6)) { g_pk_udp[fd] = 3; return 3; }
     g_pk_udp[fd] = t == SOCK_DGRAM ? 1 : t == SOCK_STREAM ? 2 : 3; return g_pk_udp[fd];
 }
+// NHOOK_UDP_HEX=<n> (debug: protocol RE, never on a normal run): the first n bytes of the first 3 datagrams each way per peer
+// address (256 peers) go to the log in hex
+static void pk_hex(int dir, const struct sockaddr* sa, const uint8_t* b, long n) {
+    static int want = -1; if (want < 0) { const char* v = getenv("NHOOK_UDP_HEX"); want = v ? atoi(v) : 0; } if (want <= 0 || !sa) return;
+    char a[64] = "?"; int port = 0;
+    if (sa->sa_family == AF_INET) { inet_ntop(AF_INET, &((const struct sockaddr_in*)sa)->sin_addr, a, sizeof a); port = ntohs(((const struct sockaddr_in*)sa)->sin_port); }
+    else if (sa->sa_family == AF_INET6) { inet_ntop(AF_INET6, &((const struct sockaddr_in6*)sa)->sin6_addr, a, sizeof a); port = ntohs(((const struct sockaddr_in6*)sa)->sin6_port); }
+    static struct { char a[64]; int port; uint8_t c[2]; } seen[256]; static int ns; static pthread_mutex_t mx = PTHREAD_MUTEX_INITIALIZER;
+    pthread_mutex_lock(&mx); int k = -1; for (int i = 0; i < ns; i++) if (seen[i].port == port && !strcmp(seen[i].a, a)) { k = i; break; }
+    if (k < 0 && ns < 256) { k = ns++; snprintf(seen[k].a, sizeof seen[k].a, "%s", a); seen[k].port = port; seen[k].c[0] = seen[k].c[1] = 0; }
+    int go = k >= 0 && seen[k].c[dir == PK_RX] < 3; if (go) seen[k].c[dir == PK_RX]++; pthread_mutex_unlock(&mx); if (!go) return;
+    char h[2 * 512 + 1]; int m = (int)(n < want ? n : want); if (m > 512) m = 512; for (int i = 0; i < m; i++) snprintf(h + 2 * i, 3, "%02x", b[i]); h[2 * m] = 0;
+    nlog("[nhook] udp %s %s:%d %ld bytes: %s", dir == PK_RX ? "rx" : "tx", a, port, n, h);
+}
 static void pk_wire(int dir, int fd, const struct sockaddr* sa, const void* buf, long n) {
+    if (n > 0 && pk_kind(fd) == 1) pk_hex(dir, sa, (const uint8_t*)buf, n);
     if (!g_pk_on || n < 0 || pk_kind(fd) != 1) return;
     uint32_t s; PkEv* e = pk_new(&s);
     e->layer = PK_WIRE; e->dir = (uint8_t)dir; e->len = (uint32_t)n; e->t = st_wall(); e->lport = pk_lport(fd); pk_fill_addr(e, sa);

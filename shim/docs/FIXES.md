@@ -1857,6 +1857,14 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   packets are not seen. NHOOK_VOICE_LOG=1 logs every parsed sender. Offline: nhook-selftest.sh (parser) and
   forensic-oggtest.sh (two reports in a row = one 3.2 s utterance). The log tap's line buffer for nst_on_line grew 600 -> 4096
   (a report names every sender).
+- **0.10 server list: shim/tools/servers10.py** (2026-11-07) — WHY: "there is no reason we should be making a .9 query": the
+  0.9 client's `discover` (shim/tools/servers.sh) lists no 0.10 server, the 0.10 Windows exe's `discover` prints nothing under
+  the loader, and the Mac app has no list command. HOW: 0.10 asks `/v3/discovery` on its masters and queries each server with
+  ONE plain UDP datagram (a6 01 00 + 8-byte nonce, padded to 1229 bytes; reply a7 + nonce + JSON) -- no QUIC any more
+  (server-status.md "Client 0.10+"); servers10.py does both with the Python standard library (one local port, answers read
+  while sending so pings are real, a second try for silent servers). Found with NHOOK_UDP_HEX=<n> (nnet.c pk_hex: the first
+  n bytes of the first 3 datagrams each way per peer, debug only) and the app's `--ui-script` pressing SERVER BROWSER in a
+  test-profile run. A Network.framework QUIC prober (the 0.9 protocol) was tried first: 0.10 servers don't speak it.
 
 - **"Run 2.4x" removed** (2026-10-19, revert 606a38c) — it crashed the client as soon as it was used; the user asked for it
   to be deleted. The page's Speed 2x / speed menu (the host's movement-speed trait) is unchanged. (10-19)

@@ -1,5 +1,6 @@
 #!/bin/bash
-# List the busiest Project Reclaimer servers: players, address, name, map/mode and the mods each one needs.
+# List the busiest Project Reclaimer 0.9 servers: players, address, name, map/mode and the mods each one needs.
+# Client 0.10+ servers (a different query): python3 shim/tools/servers10.py
 #     bash shim/tools/servers.sh [count]          # default 25
 # Join one with:  RECLAIMER_JOIN=<address> bash shim/play.sh
 # Uses the client's own `discover` command (asks the master servers, then queries every server; ~20 s). It is a

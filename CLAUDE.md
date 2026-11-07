@@ -315,8 +315,10 @@ lines only (`[menus] open` is also the in-game menu). Hooks: the engine context 
 (tracers, shots / accuracy), the view constants (overlay camera; scene depth from the swizzled depth attachment = zones /
 visible only). Mutes = the app's set_muted (0.10.0 0x102154ef0, prologue-checked, nnet.c voice_init); who talks = its
 `[voice] active ... heard 0x<id>: N frames ... rms` log every ~2 s (page dot + forensic FXF_REPORT records, timing only).
-Not yet: forensic voice AUDIO (native voice receive not found), a 0.10 server list (the 0.10 exe's `discover` prints nothing
-under the loader; the Mac app has no list command: --list-servers just starts the game), packet log game layer. Test runs: NATIVE_LOG=<scratch file> (the default log is the user's). Offline test:
+0.10 server list: `python3 shim/tools/servers10.py [count|--json|--names]` (masters' /v3/discovery + ONE UDP datagram per
+server: a6 01 00 <nonce8> padded to 1229 -> a7 <nonce8> JSON; server-status.md "Client 0.10+"). The app's `--ui-script <file>`
+drives its menus (`wait 12`, `press SERVER BROWSER`; a wrong row name prints the rows); NHOOK_UDP_HEX=<n> dumps datagrams.
+Not yet: forensic voice AUDIO (native voice receive not found), packet log game layer. Test runs: NATIVE_LOG=<scratch file> (the default log is the user's). Offline test:
 shim/tools/nhook-selftest.sh. hitbox.c's .map code lives in shim/src/h3maps.c (shared).
 PORTING A RELEASE: shim/docs/porting.md -- fetch-releases.sh (corpus), client-survey.sh, `re-tools/patchscan.py --diff old new`
 (signatures read from the C; `--rev <commit>`; exit 0 over all 39 releases), `re-tools/sigport.py --point P --old --new [--corpus]

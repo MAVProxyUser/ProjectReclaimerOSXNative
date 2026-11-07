@@ -150,8 +150,10 @@ text hook), page **mutes** (the app's own set_muted and mute list, nnet.c voice_
 forensic archive's "who talked when", from the app's `[voice] active ... heard 0x<id>: N frames ... rms` report every ~2 s;
 timing only), /forensics (forensic.c unchanged otherwise).
 
+The 0.10 server list: shim/tools/servers10.py (server-status.md "Client 0.10+": one UDP datagram per server, no QUIC).
+
 Not yet: voice AUDIO in the forensic archive (the native voice packets are not seen: their receive function is the app's own
-Rust, not found yet), a 0.10 server list, the packet log's game layer (halo3 message names).
+Rust, not found yet), the packet log's game layer (halo3 message names).
 
 ### Kills (static RE of halo3.dll)
 
