@@ -37,6 +37,10 @@ static void nlog(const char* fmt, ...) {
     if (g_logfd >= 0) write(g_logfd, b, n);
 }
 
+void nh_log(const char* fmt, ...) {                 // (nrender.m's logger)
+    char b[1024]; va_list ap; va_start(ap, fmt); vsnprintf(b, sizeof b, fmt, ap); va_end(ap); nlog("%s", b);
+}
+
 // a safe read of our own memory: 0 = ok
 static int rd(uint64_t a, void* out, size_t n) {
     mach_vm_size_t got = 0;
@@ -221,6 +225,7 @@ static void hooks_start(void) {
         if (!getenv("NHOOK_NO_EVHOOK")) hook_install("display_event", 0x11b0ec, on_display_event); }
     if (getenv("NHOOK_PLAYERS_LOG")) { pthread_t t; pthread_create(&t, 0, engine_thread, 0); pthread_detach(t); }
     nstats_start();
+    { extern void nr_install(void); nr_install(); }      // nrender.m: the overlay, recording and captures in the app's frames
 }
 
 static void* probe_thread(void* arg) {
@@ -397,6 +402,40 @@ static int my_close(int fd) { pk_close(fd); return close(fd); }
 static int my_getaddrinfo(const char* h, const char* sv, const struct addrinfo* hi, struct addrinfo** res) {
     int r = getaddrinfo(h, sv, hi, res); if (!r && res) pk_dns(h, *res); return r; }
 
+// recording's sound (shim/src/rec.m rec_audio_push): every render callback an output AudioUnit gets (the app's cpal
+// streams: halo3's sound, the menus, voice) is wrapped; what it wrote goes into the recording while one runs
+#include <AudioToolbox/AudioToolbox.h>
+#include "../src/rec.h"
+typedef struct { AudioUnit au; AURenderCallback cb; void* ref; AudioStreamBasicDescription fmt; int have; } AuWrap;
+static AuWrap g_auw[32]; static int g_nauw; static pthread_mutex_t g_au_mx = PTHREAD_MUTEX_INITIALIZER;
+static AuWrap* au_slot(AudioUnit au) { for (int i = 0; i < g_nauw; i++) if (g_auw[i].au == au) return &g_auw[i]; if (g_nauw >= 32) return 0; AuWrap* w = &g_auw[g_nauw++]; memset(w, 0, sizeof *w); w->au = au; return w; }
+static OSStatus au_tap(void* ref, AudioUnitRenderActionFlags* fl, const AudioTimeStamp* ts, UInt32 bus, UInt32 frames, AudioBufferList* io) {
+    AuWrap* w = ref; OSStatus r = w->cb(w->ref, fl, ts, bus, frames, io);
+    if (r || !g_rec_audio || !io || !w->have || !io->mNumberBuffers || (fl && (*fl & kAudioUnitRenderAction_OutputIsSilence))) return r;
+    const AudioStreamBasicDescription* f = &w->fmt; int fl2 = (int)f->mFormatFlags, isf = (fl2 & kAudioFormatFlagIsFloat) != 0, bits = (int)f->mBitsPerChannel;
+    if (!(fl2 & kAudioFormatFlagIsNonInterleaved)) {
+        int ch = (int)f->mChannelsPerFrame; if (ch < 1) return r;
+        rec_audio_push(w, io->mBuffers[0].mData, frames, ch, (int)f->mSampleRate, bits, (int)f->mBytesPerFrame, isf);
+    } else if (isf && bits == 32 && frames <= 8192) {   // one buffer per channel: the first two interleaved
+        static __thread float tmp[8192 * 2]; int ch = io->mNumberBuffers >= 2 ? 2 : 1;
+        for (UInt32 i = 0; i < frames; i++) for (int c = 0; c < ch; c++) tmp[i * ch + c] = ((const float*)io->mBuffers[c].mData)[i];
+        rec_audio_push(w, tmp, frames, ch, (int)f->mSampleRate, 32, ch * 4, 1);
+    }
+    return r;
+}
+static OSStatus my_AudioUnitSetProperty(AudioUnit au, AudioUnitPropertyID id, AudioUnitScope sc, AudioUnitElement el, const void* data, UInt32 sz) {
+    if (id == kAudioUnitProperty_SetRenderCallback && data && sz >= sizeof(AURenderCallbackStruct) && !getenv("NHOOK_NO_AUDIO_TAP")) {
+        const AURenderCallbackStruct* cs = data;
+        if (cs->inputProc && cs->inputProc != au_tap) { pthread_mutex_lock(&g_au_mx); AuWrap* w = au_slot(au);
+            if (w) { w->cb = cs->inputProc; w->ref = cs->inputProcRefCon; } pthread_mutex_unlock(&g_au_mx);
+            if (w) { AURenderCallbackStruct n = {au_tap, w}; return AudioUnitSetProperty(au, id, sc, el, &n, sizeof n); } }
+    }
+    if (id == kAudioUnitProperty_StreamFormat && sc == kAudioUnitScope_Input && data && sz >= sizeof(AudioStreamBasicDescription)) {
+        pthread_mutex_lock(&g_au_mx); AuWrap* w = au_slot(au); if (w) { memcpy(&w->fmt, data, sizeof w->fmt); w->have = 1; } pthread_mutex_unlock(&g_au_mx);
+    }
+    return AudioUnitSetProperty(au, id, sc, el, data, sz);
+}
+
 #define INTERPOSE(rep, orig) __attribute__((used)) static struct { const void* r; const void* o; } \
     _ip_##orig __attribute__((section("__DATA,__interpose"))) = { (const void*)(rep), (const void*)(orig) }
 INTERPOSE(my_write, write);
@@ -412,6 +451,7 @@ INTERPOSE(my_recv, recv);
 INTERPOSE(my_connect, connect);
 INTERPOSE(my_close, close);
 INTERPOSE(my_getaddrinfo, getaddrinfo);
+INTERPOSE(my_AudioUnitSetProperty, AudioUnitSetProperty);
 
 __attribute__((constructor)) static void nhook_init(void) {
     const char* lf = getenv("NHOOK_LOG");

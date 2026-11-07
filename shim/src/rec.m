@@ -14,10 +14,13 @@
 // per source); a 20 ms timer on the writer queue takes what is older than 200 ms (every source has written it by then)
 // and appends it as AAC input. Silence where nothing played, so the sound track always spans the whole clip.
 // Every AVAssetWriter call runs on one serial queue (g_rq). Manual retain/release (this file shares peload.c's flags).
+// REC_NO_GL (the native app's dylib, shim/native/build.sh): no GL frame path; video comes through rec_video_begin / _end
+#ifndef REC_NO_GL
 #define GL_SILENCE_DEPRECATION 1
 #define GL_DO_NOT_WARN_IF_MULTI_GL_VERSION_HEADERS_INCLUDED 1
 #include <OpenGL/OpenGL.h>
 #include <OpenGL/gl3.h>
+#endif
 #import <Foundation/Foundation.h>
 #import <AVFoundation/AVFoundation.h>
 #import <CoreMedia/CoreMedia.h>
@@ -258,7 +261,12 @@ static int rec_start_q(int ao,double secs,const char*name,int vw,int vh,char*err
         vin=[[AVAssetWriterInput alloc] initWithMediaType:AVMediaTypeVideo outputSettings:vs]; vin.expectsMediaDataInRealTime=YES;
         vin.mediaTimeScale=REC_VTS;   // (the default track time scale, 600, rounded two frames presented within 1.7 ms onto one timestamp)
         NSDictionary*pa=@{ (id)kCVPixelBufferPixelFormatTypeKey:@(kCVPixelFormatType_32BGRA), (id)kCVPixelBufferWidthKey:@(w), (id)kCVPixelBufferHeightKey:@(h),
-            (id)kCVPixelBufferIOSurfacePropertiesKey:@{}, (id)kCVPixelBufferOpenGLCompatibilityKey:@YES };
+            (id)kCVPixelBufferIOSurfacePropertiesKey:@{},
+#ifdef REC_NO_GL
+            (id)kCVPixelBufferMetalCompatibilityKey:@YES };
+#else
+            (id)kCVPixelBufferOpenGLCompatibilityKey:@YES };
+#endif
         ad=[[AVAssetWriterInputPixelBufferAdaptor alloc] initWithAssetWriterInput:vin sourcePixelBufferAttributes:pa];
         if(![wr canAddInput:vin]) FAIL("the video encoder refused %dx%d",w,h);
         [wr addInput:vin];
@@ -303,11 +311,40 @@ int rec_start(int audio_only,double secs,const char*name,int vw,int vh,char*err,
     return ok; }
 void rec_stop(void){ dispatch_async(rq(),^{ if(R.state==RS_REC){ rec_begin_stop_q(1e9); rec_log("  [rec] stop requested at %.1f s\n",R.stop_t); } }); }
 
+// ---- video from another renderer (shim/native/nrender.m: the native app's Metal frames) -----------------------------
+// rec_video_begin: the same checks as rec_video_frame (stopped -> tell the writer, frame-rate cap, GPU / encoder behind);
+// 1 = fill *pb (w x h, 32BGRA, IOSurface-backed) on the GPU, then rec_video_end(pb, pts, sess, ok) once that work is done.
+static volatile int g_vgpu, g_vinflight, g_vext_sess; static double g_vext_next;
+int rec_video_begin(void**pbo,int64_t*pts,int*sess,int*ow,int*oh){
+    *pbo=NULL; pthread_mutex_lock(&g_vmx); int accept=V.accept, s=V.sess, w=V.w, h=V.h; double t0=V.t0, per=V.per; CVPixelBufferPoolRef pool=accept&&V.pool?CVPixelBufferPoolRetain(V.pool):NULL; pthread_mutex_unlock(&g_vmx);
+    if(!accept){ if(g_vgpu) return 0;   // (frames still on the GPU: tell the writer once they are in)
+        pthread_mutex_lock(&g_vmx); int told=0; if(!V.accept){ told=g_rec_vstop; g_rec_vstop=0; g_rec_video=0; } int s2=V.sess; pthread_mutex_unlock(&g_vmx);
+        if(told) dispatch_async(rq(),^{ if(R.sess==s2) R.video_done=1; });
+        return 0; }
+    int ok=0; double now=rec_now();
+    if(s!=g_vext_sess){ g_vext_sess=s; g_vext_next=0; }
+    if(now<g_vext_next-0.004) goto out;
+    g_vext_next=(now-g_vext_next>per)?now+per:g_vext_next+per;
+    if(g_vgpu>=3){ rec_vdrop(2); goto out; }
+    if(g_vinflight>=6 || !pool){ rec_vdrop(3); goto out; }
+    { static CFDictionaryRef aux; if(!aux) aux=(CFDictionaryRef)[@{ (id)kCVPixelBufferPoolAllocationThresholdKey:@8 } retain];
+      CVPixelBufferRef pb=NULL; if(CVPixelBufferPoolCreatePixelBufferWithAuxAttributes(kCFAllocatorDefault,pool,aux,&pb) || !pb){ rec_vdrop(5); goto out; }
+      __sync_fetch_and_add(&g_vgpu,1); *pbo=pb; *pts=(int64_t)llround((now-t0)*REC_VTS); *sess=s; *ow=w; *oh=h; ok=1; }
+out:
+    if(pool) CVPixelBufferPoolRelease(pool);
+    return ok; }
+void rec_video_end(void*pbv,int64_t pts,int sess,int ok){
+    CVPixelBufferRef pb=(CVPixelBufferRef)pbv; __sync_fetch_and_sub(&g_vgpu,1); if(!pb) return;
+    if(!ok){ CVPixelBufferRelease(pb); rec_vdrop(0); return; }
+    __sync_fetch_and_add(&g_vinflight,1);
+    dispatch_async(rq(),^{ @autoreleasepool { REC_GUARD(rec_vappend_q(pb,pts,sess)); } CVPixelBufferRelease(pb); __sync_fetch_and_sub(&g_vinflight,1); }); }
+
+#ifndef REC_NO_GL
 // ---- video: the present thread ------------------------------------------------------------------------------------
 typedef struct { CVPixelBufferRef pb; CVOpenGLTextureRef tex; GLsync fence; int64_t pts; int sess; } RecPend;
 static RecPend g_vq[4]; static int g_vqn;                       // blits whose fence hasn't been seen yet, oldest first
 static CGLContextObj g_vctx; static GLuint g_vfbo; static CVOpenGLTextureCacheRef g_vcache;
-static double g_vnext; static int g_vsess; static volatile int g_vinflight;
+static double g_vnext; static int g_vsess;
 static void rec_vsend(RecPend*p,int append){   // the blit is done (or given up): the buffer goes to the writer queue
     if(p->fence) glDeleteSync(p->fence); if(p->tex) CFRelease(p->tex);
     CVPixelBufferRef pb=p->pb; int64_t pts=p->pts; int sess=p->sess; p->pb=NULL; p->tex=NULL; p->fence=NULL;
@@ -358,6 +395,7 @@ void rec_video_frame(unsigned srcfbo,int x,int y,int w,int h){
       RecPend p={ pb, tex, f, (int64_t)llround((now-t0)*REC_VTS), sess }; g_vq[g_vqn++]=p; }
 out:
     if(pool) CVPixelBufferPoolRelease(pool); }
+#endif
 
 // ---- status, the folder's list, file lookup (stats server threads) ----------------------------------------------------
 static void rec_jstr(char*o,size_t n,const char*s){ size_t j=0; for(;*s && j+7<n;s++){ unsigned char c=(unsigned char)*s;

@@ -457,6 +457,15 @@ static void sb_tick(const StPlayer* pl, int np, double now) {
     for (int j = 0; j < g_nsbk; j++) if (now - g_sbk[j].t > 2.0) { memmove(&g_sbk[j], &g_sbk[j + 1], (size_t)(g_nsbk - j - 1) * sizeof g_sbk[0]); g_nsbk--; j--; }
 }
 
+// the page's controls: on unless NHOOK_STATS_READONLY=1 (POST + an X-Reclaimer-Control header + no foreign Origin)
+static char g_st_curmap[64];                               // the map being played (recordings are named after it)
+int nr_perf(double* fps, double* p50, double* p95, double* mx);   // nrender.m
+static int np_for_perf;                                    // players in the last snapshot (the [perf] log line)
+static int st_controls_ok(void) { static int v = -1; if (v < 0) { const char* e = getenv("NHOOK_STATS_READONLY"); v = !(e && *e && strcmp(e, "0")); } return v; }
+#include "noverlay.c"   // the overlay's lines (drawn by nrender.m)
+#include "../src/rec.h"
+extern volatile int g_nr_cap_req, g_nr_w, g_nr_h; extern volatile double g_nr_last; extern volatile unsigned long g_nr_frames;
+
 // ---- halo3's game engine events (display_event, halo3+0x11b0ec: kills, joins, flag / bomb / hill lines) -------------
 // The loader read the 0x2c-byte event (type +0, index +4, cause / effect player +0x10 / +0x18 ...); the app enlarges it
 // ([capacity] event.outgoing: 0x2c -> 0x40, event.bytes 0x40 -> 0x60) and its new layout is not known yet: each event's
@@ -487,18 +496,25 @@ static void st_snapshot(StBuf* s) {
     double now = mono_s(), t0 = g_gameplay_t0;
     sb_put(s, "{\"time\":%.2f,\"in_match\":%s,\"inst\":%d,\"native\":true", t0 ? now - t0 : 0.0, t0 ? "true" : "false", (int)getpid());
     { pthread_mutex_lock(&g_ev_mx); uint32_t fs = g_ev_seq; pthread_mutex_unlock(&g_ev_mx); sb_put(s, ",\"feed_seq\":%u", fs); }
-    sb_put(s, ",\"rec\":{\"state\":\"idle\",\"mode\":\"av\",\"secs\":0,\"elapsed\":0,\"left\":0,\"file\":\"\",\"width\":0,\"height\":0,\"frames\":0,\"dropped\":0,\"video_ok\":false,\"dir\":\"~/Movies/Reclaimer\",\"last_file\":\"\",\"last_error\":\"not in the native app yet\"}");
-    sb_put(s, ",\"perf\":null,\"latch\":{\"mode\":\"off\",\"applying\":false,\"deg_per_count\":0,\"r2\":0,\"input_age_ms\":0,\"moving_frames\":0,\"last_deg\":0,\"in_vehicle_or_dead\":false}");
+    { char rb[1200]; int video_ok = g_nr_last > 0 && now - g_nr_last < 2.0; if (rec_status_json(rb, sizeof rb, video_ok) > 0) sb_put(s, ",\"rec\":%s", rb); }
+    { double fps, p50, p95, mx; int nobj = 0; uint64_t oa = hb_object_array(); uint8_t oh[0x60]; if (oa && hb_read(oa, oh, sizeof oh)) nobj = *(int32_t*)(oh + 0x40);   // (data array: +0x40 count in use)
+      if (nr_perf(&fps, &p50, &p95, &mx)) {
+          sb_put(s, ",\"perf\":{\"fps\":%.1f,\"window_fps\":%.1f,\"frame_ms\":[%.1f,%.1f,%.1f],\"draws\":0,\"objects\":%d,\"in_view\":%d,\"bipeds\":0,\"vehicles\":0,\"projectiles\":0,"
+                    "\"present_to_gpu_ms\":-1,\"present_to_window_ms\":-1,\"input_to_screen_ms\":-1,\"input_to_window_ms\":-1,\"input_to_present_ms\":-1,\"inputs\":0,\"refresh_hz\":0,\"cpu_pct\":0,\"native\":true}",
+                 fps, fps, p50, p95, mx, nobj, nobj);
+          static double tl; if (now - tl >= 10) { tl = now; nlog("[nhook] [perf] %.0f fps, frame %.1f / %.1f / %.1f ms (median / 95%% / max), %d players, %d objects, map %s%s", fps, p50, p95, mx, np_for_perf, nobj, g_st_curmap, t0 ? "" : " (not in a match)"); } }
+      else sb_put(s, ",\"perf\":null"); }
+    sb_put(s, ",\"latch\":{\"mode\":\"off\",\"applying\":false,\"deg_per_count\":0,\"r2\":0,\"input_age_ms\":0,\"moving_frames\":0,\"last_deg\":0,\"in_vehicle_or_dead\":false}");
     sb_put(s, ",\"autovote\":{\"calls\":\"off\",\"map\":\"off\"}");
     char m[64] = "";
     { char mp[1024] = ""; hb_current_map(mp, sizeof mp);
       const char* b = strrchr(mp, '/'); b = b ? b + 1 : mp; snprintf(m, sizeof m, "%s", b); char* dot = strrchr(m, '.'); if (dot) *dot = 0;
-      sb_put(s, ",\"map\":"); sb_str(s, m);
+      sb_put(s, ",\"map\":"); sb_str(s, m); snprintf(g_st_curmap, sizeof g_st_curmap, "%s", m);
       if (__atomic_exchange_n(&g_match_pending, 0, __ATOMIC_ACQ_REL)) st_event_pos(0, "game", m, 0, 0, -1, -1, 0, "Match started: %s", g_loading[0] ? g_loading : m[0] ? m : "?");
       if (t0) st_maptop_ensure(mp, m); }
-    sb_put(s, ",\"zone_show\":0,\"weak_show\":7,\"overlay\":{\"vehicles\":false,\"zones\":false,\"hitboxes\":false,\"tracers\":false,\"info\":false,\"items\":false,\"visible\":false,"
-              "\"teams\":\"all\",\"teleport\":false,\"host\":false,\"tp_forward\":false,\"controls\":false,\"text_px\":7,\"spar\":false,\"spar_aim\":-1.0,\"spar_available\":false,"
-              "\"bounds_off\":null,\"invwalls_off\":null,\"mic\":\"off\",\"mic_in_use\":false,\"speed_idx\":-1,\"quality\":\"\",\"features\":{}");
+    sb_put(s, ",\"zone_show\":0,\"weak_show\":%d,\"overlay\":{", g_nov_wk); nov_json(s);
+    sb_put(s, ",\"teleport\":false,\"host\":false,\"tp_forward\":false,\"controls\":%s,\"spar\":false,\"spar_aim\":-1.0,\"spar_available\":false,"
+              "\"bounds_off\":null,\"invwalls_off\":null,\"mic\":\"off\",\"mic_in_use\":false,\"speed_idx\":-1,\"quality\":\"\"", st_controls_ok() ? "true" : "false");
     sb_put(s, ",\"spots\":[]}");
     if (strcmp(m, g_trk_map)) { snprintf(g_trk_map, sizeof g_trk_map, "%s", m); g_ntrk = 0; g_nbip = 0; sb_reset(); }   // a new map: new match stats
     pthread_mutex_lock(&g_hm_mx); snprintf(g_hm_cur, sizeof g_hm_cur, "%s", m); if (g_hm.dirty && now - g_hm.saved > 30) { hm_save(); g_hm.saved = now; } pthread_mutex_unlock(&g_hm_mx);
@@ -509,7 +525,7 @@ static void st_snapshot(StBuf* s) {
     }
     #define ST_DATUM(h) ((((h) & 0xFFFF) < (uint32_t)hi && (h) != 0xFFFFFFFFu && *(uint16_t*)(tab + ((h) & 0xFFFF) * 0x18) == (uint16_t)((h) >> 16)) ? *(uint64_t*)(tab + ((h) & 0xFFFF) * 0x18 + 0x10) : 0)
     #define ST_TYPE(h) (tab[((h) & 0xFFFF) * 0x18 + 3])
-    StPlayer pl[256]; int np = st_players(pl, 256);
+    StPlayer pl[256]; int np = st_players(pl, 256); np_for_perf = np;
     // deaths: every biped, alive -> dead (stats.c); the killer is not known here yet
     { StBip nb[2048]; int nn = 0;
       for (int i = 0; i < hi && nn < 2048; i++) {
@@ -593,6 +609,11 @@ static void st_snapshot(StBuf* s) {
         sb_put(s, "}");
     }
     if (t0) sb_tick(pl, np, now);
+    if (getenv("NHOOK_CAM_LOG")) { static double tl; uint64_t blk = tls_block(), ob = 0; float r[40];   // the observer camera (local user 0)
+        if (now - tl > 2 && blk && hb_read(blk + 0x578, &ob, 8) && ob && hb_read(ob + 0x11c, r, sizeof r)) { tl = now; char b[700]; int k = 0;
+            for (int i = 0; i < 40; i++) k += snprintf(b + k, sizeof b - (size_t)k, " %d:%.3f", i * 4, r[i]);
+            nlog("[nhook] [cam] observer 0x%llx result%s", (unsigned long long)ob, b);
+            for (int q = 0; q < np; q++) { uint64_t p = ST_DATUM(pl[q].unit); float c[4]; if (p && hb_read(p + 0x1c, c, 16)) nlog("[nhook] [cam]   %s centre %.3f %.3f %.3f r %.3f", pl[q].name, c[0], c[1], c[2], c[3]); } } }
     st_engine_events(pl, np);
     sb_put(s, "],\"vehicles\":["); first = 1;
     for (int i = 0; i < hi; i++) {
@@ -662,6 +683,33 @@ static void st_reply(int fd, const char* ctype, const char* body, size_t n, cons
     char h[512]; int k = snprintf(h, sizeof h, "HTTP/1.1 200 OK\r\nContent-Type: %s\r\nContent-Length: %zu\r\nCache-Control: no-cache\r\n%sConnection: close\r\n\r\n", ctype, n, extra ? extra : "");
     if (st_send(fd, h, (size_t)k) && n) st_send(fd, body, n);
 }
+static int st_origin_ok(const char* hdrs) {               // no Origin (curl) or the page's own
+    char o[300], hv[256]; if (!st_hdr(hdrs, "Origin", o, sizeof o)) return 1; if (!st_hdr(hdrs, "Host", hv, sizeof hv)) return 0;
+    char want[300]; snprintf(want, sizeof want, "http://%s", hv); return !strcasecmp(o, want); }
+static int st_control(const char* act, const char* qs) {
+    if (nov_control(act, qs)) return 1;                       // the overlay's buttons and panel
+    if (!strcmp(act, "capture")) { __atomic_store_n(&g_nr_cap_req, strstr(qs, "overlay=1") ? 2 : 1, __ATOMIC_RELEASE); nlog("[nhook] page: capturing the next frame"); return 1; }
+    if (!strcmp(act, "rec")) {                                // secs=<n>&mode=av|audio (rec.m; the picture = the app's frame, scaled)
+        const char* v = strstr(qs, "secs="); double secs = v ? atof(v + 5) : 30; const char* m = strstr(qs, "mode="); int ao = m && !strncmp(m + 5, "audio", 5);
+        int live = g_nr_last > 0 && mono_s() - g_nr_last < 2.0; char err[200];
+        return rec_start(ao, secs, g_st_curmap[0] ? g_st_curmap : "game", ao || !live ? 0 : g_nr_w, ao || !live ? 0 : g_nr_h, err, sizeof err); }
+    if (!strcmp(act, "recstop")) { rec_stop(); return 1; }
+    return 0;
+}
+// GET /recordings/<file>: a clip from ~/Movies/Reclaimer (stats.c st_rec_file: Range requests answered)
+static void st_rec_file(int fd, const char* req, const char* name) {
+    char fp[1100], h[512]; struct stat st; int f = rec_file_path(name, fp, sizeof fp) ? open(fp, O_RDONLY) : -1;
+    if (f < 0 || fstat(f, &st)) { const char* nf = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"; st_send(fd, nf, strlen(nf)); if (f >= 0) close(f); return; }
+    long long a = 0, b = (long long)st.st_size - 1; int part = 0; const char* rg = strcasestr(req, "\r\nRange: bytes=");
+    if (rg && st.st_size > 0) { long long x = -1, y = -1; int c = sscanf(rg + 15, "%lld-%lld", &x, &y); if (c >= 1 && x >= 0 && x < st.st_size) { a = x; if (c == 2 && y >= a && y < st.st_size) b = y; part = 1; } }
+    int k = snprintf(h, sizeof h, "HTTP/1.1 %s\r\nContent-Type: %s\r\nContent-Length: %lld\r\nAccept-Ranges: bytes\r\n", part ? "206 Partial Content" : "200 OK", strstr(name, ".m4a") ? "audio/mp4" : "video/mp4", st.st_size ? b - a + 1 : 0);
+    if (part) k += snprintf(h + k, sizeof h - (size_t)k, "Content-Range: bytes %lld-%lld/%lld\r\n", a, b, (long long)st.st_size);
+    k += snprintf(h + k, sizeof h - (size_t)k, "Content-Disposition: inline; filename=\"%s\"\r\nConnection: close\r\n\r\n", name);
+    if (st_send(fd, h, (size_t)k) && st.st_size) { char* buf = malloc(1 << 18); long long left = b - a + 1, off = a;
+        while (buf && left > 0) { ssize_t n = pread(f, buf, left < (1 << 18) ? (size_t)left : (size_t)(1 << 18), off); if (n <= 0 || !st_send(fd, buf, (size_t)n)) break; off += n; left -= n; }
+        free(buf); }
+    close(f);
+}
 static void* st_conn(void* a) {
     int fd = (int)(intptr_t)a; pthread_setname_np("nhook-stats-http");
     int one = 1; setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one); setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
@@ -672,9 +720,13 @@ static void* st_conn(void* a) {
     he[2] = 0;
     if (!st_host_ok(req)) { const char* fb = "HTTP/1.1 421 Misdirected Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"; st_send(fd, fb, strlen(fb)); close(fd); return 0; }
     char meth[8] = "", path[1024] = "/", qs[768] = ""; sscanf(req, "%7s %1023s", meth, path); char* q = strchr(path, '?'); if (q) { snprintf(qs, sizeof qs, "%s", q + 1); *q = 0; }
-    if (!strcmp(path, "/control")) {                        // no controls in the native app yet
-        const char* body = "{\"ok\":false,\"error\":\"controls are not in the native app yet\"}"; char h[300];
-        int k = snprintf(h, sizeof h, "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n%s", strlen(body), body); st_send(fd, h, (size_t)k);
+    if (!strcmp(path, "/control")) {                        // POST /control?do=<action> (stats.c's guard: header + Origin)
+        char act[32] = "", hv[64]; const char* dd = strstr(qs, "do="); if (dd) sscanf(dd + 3, "%31[a-z]", act);
+        int hdr = st_hdr(req, "X-Reclaimer-Control", hv, sizeof hv) != 0 && st_origin_ok(req);
+        int code = !strcmp(meth, "POST") && hdr ? (st_controls_ok() ? (st_control(act, qs) ? 200 : 400) : 403) : 403;
+        const char* body = code == 200 ? "{\"ok\":true}" : code == 400 ? "{\"ok\":false,\"error\":\"unknown, disabled or not in the native app yet\"}" : !st_controls_ok() ? "{\"ok\":false,\"error\":\"controls are off\"}" : "{\"ok\":false,\"error\":\"needs POST with an X-Reclaimer-Control header\"}";
+        char h[400]; int k = snprintf(h, sizeof h, "HTTP/1.1 %d %s\r\nContent-Type: application/json\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n%s", code, code == 200 ? "OK" : code == 400 ? "Bad Request" : "Forbidden", strlen(body), body);
+        st_send(fd, h, (size_t)k);
     } else if (strcmp(meth, "GET")) { const char* na = "HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"; st_send(fd, na, strlen(na)); }
     else if (!strcmp(path, "/events")) {
         g_st_hits++; char h[256]; int k = snprintf(h, sizeof h, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n\r\n");
@@ -692,7 +744,8 @@ static void* st_conn(void* a) {
         const char* v = strstr(qs, "since="); StBuf b = {0}; st_feed_json(&b, v ? (uint32_t)strtoul(v + 6, 0, 10) : 0); st_reply(fd, "application/json", b.b, b.n, 0); free(b.b);
     } else if (!strcmp(path, "/heat.json")) { StBuf b = {0}; hm_json(&b); st_reply(fd, "application/json", b.b, b.n, 0); free(b.b); }
     else if (!strcmp(path, "/vshapes.json")) st_reply(fd, "application/json", "{\"gen\":0,\"shapes\":{}}", 21, 0);
-    else if (!strcmp(path, "/recordings.json")) st_reply(fd, "application/json", "[]", 2, 0);
+    else if (!strcmp(path, "/recordings.json")) { size_t ln = 0; char* j = rec_list_json(&ln); st_reply(fd, "application/json", j ? j : "[]", j ? ln : 2, 0); free(j); }
+    else if (!strncmp(path, "/recordings/", 12)) st_rec_file(fd, req, path + 12);
     else if (!strcmp(path, "/packets.json")) { static pthread_mutex_t pmx = PTHREAD_MUTEX_INITIALIZER; StBuf b = {0};
         pthread_mutex_lock(&pmx); pk_json(&b, qs); pthread_mutex_unlock(&pmx); st_reply(fd, "application/json", b.b, b.n, 0); free(b.b); }
     else if (!strcmp(path, "/option-map.json")) st_reply(fd, "application/json", g_st_optmap, sizeof g_st_optmap - 1, 0);

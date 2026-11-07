@@ -129,7 +129,12 @@ state, slots = the session's maximum), the **Packets window** (wire layer: every
 game layer of halo3 message names is not in yet). display_event is hooked and logs its first 200 events raw
 (`[nhook] [event]`) to learn the app's enlarged event layout.
 
-Not yet: the overlay (the app draws with Metal), recording, controls (POST /control answers 403), voice / mute / forensics,
+Since 2026-11-07 also (shim/native/nrender.m: the app's presentDrawable: swizzled): the **overlay** (hitboxes, vehicles,
+info, items, tracers; the page's buttons and panel; halo3's observer camera; no visible-only, no zones), **recording**
+(the page's Record row, rec.m), **Capture frame**, page **controls** (overlay, rec, recstop, capture; NHOOK_STATS_READONLY=1
+off), the **fps line** (perf). Recording / capture / overlay checked in background Guardian matches.
+
+Not yet: voice / mute / forensics,
 weapon / vehicle spawn tracking (items), shots / accuracy (the loader counted projectiles at object_delete, whose entry
 is not a wrapper in the app).
 

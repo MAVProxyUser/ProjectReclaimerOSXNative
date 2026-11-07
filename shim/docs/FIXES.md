@@ -1711,6 +1711,21 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   (halo3+0x11b0ec) is hooked and its first 200 events are logged raw (`[nhook] [event]`): the app enlarged the event struct
   (0x2c -> 0x40 bytes), its layout is to be read from a real match. Switches: NHOOK_PKTLOG=0, NHOOK_NO_EVHOOK=1,
   NHOOK_EVENT_LOG=<n>.
+- **nhook: overlay, recording, captures, fps in the native app** (2026-11-07; shim/native/nrender.m, noverlay.c, shim/src/rec.m)
+  — WHY: the native app draws with Metal (its own D3D11 in Rust); the loader drew all of these in its GL present path.
+  -[MTLCommandBuffer presentDrawable:] is swizzled on the GPU's command buffer class; on the app's own command buffer
+  (before the original runs, so after the frame's drawing) we add: a capture (do=capture, &overlay=1 after the overlay ->
+  ~/reclaimer_cap_<pid>_<n>.bmp), the overlay's lines in one render pass, the recording's frame (the drawable scaled into
+  the recorder's IOSurface buffer). The overlay is hitbox.c's line builder ported (noverlay.c: hitboxes, vehicles + weak
+  spots, info labels, items, tracers; no visible-only, no zones) with halo3's observer camera (TLS +0x578, result +0x11c:
+  position, +0x28 forward, +0x34 up, +0x40 horizontal fov) and the frame's aspect -- checked against Halo 3's lowered
+  reticle: the camera looks 4.9 deg above the level aim, which projects 77 px below centre at 720p, where the reticle is.
+  rec.m: the GL frame path is #ifndef REC_NO_GL, and rec_video_begin / rec_video_end let another renderer fill the pixel
+  buffers (the loader is unchanged). Sound: AudioUnitSetProperty interposed, every output render callback wrapped
+  (rec_audio_push). The CAMetalLayer becomes readable (framebufferOnly NO) only once a capture / recording asks.
+  fps: the presents' times -> snapshot "perf" (fps, frame-interval median / 95% / max) and a [nhook] [perf] line every
+  10 s. Switches: NHOOK_NO_RENDER=1 (no swizzle), NHOOK_NO_AUDIO_TAP=1, NHOOK_OV_DEBUG=1 (calibration crosses on
+  scenery / machines / crates).
 
 - **"Run 2.4x" removed** (2026-10-19, revert 606a38c) — it crashed the client as soon as it was used; the user asked for it
   to be deleted. The page's Speed 2x / speed menu (the host's movement-speed trait) is unchanged. (10-19)

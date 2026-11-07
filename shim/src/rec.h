@@ -19,6 +19,11 @@ void rec_video_frame(unsigned srcfbo, int x, int y, int w, int h);
 // An audio output callback: frames of interleaved PCM (bits 8/16/24/32 int, or 32 float; blk = bytes per frame) at
 // rate Hz from source key (one key per stream). Mixed into the recording's 48 kHz stereo sound; never blocks long.
 void rec_audio_push(const void* key, const void* data, uint32_t frames, int ch, int rate, int bits, int blk, int isfloat);
+// Another renderer's frames (the native app's Metal hook): begin = 1 when this present should be recorded, with a
+// CVPixelBufferRef *pb (w x h, 32BGRA, IOSurface) to fill on the GPU and its timestamp / session; end hands it to the
+// writer once the GPU work is done (ok = 0: dropped). At most 3 in flight; begin also does the stop handshake.
+int  rec_video_begin(void** pb, int64_t* pts, int* sess, int* w, int* h);
+void rec_video_end(void* pb, int64_t pts, int sess, int ok);
 // {"state":"idle|recording|finishing", ...} for the stats snapshot (video_ok: a window to record exists)
 int  rec_status_json(char* buf, size_t n, int video_ok);
 char* rec_list_json(size_t* len);          // GET /recordings.json: the folder's clips, newest first (malloc'd)
