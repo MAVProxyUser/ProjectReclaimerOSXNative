@@ -165,8 +165,10 @@ the team-less target), `place_bipeds` {tag, at [x,y,z], spacing, side}. An unkno
 
 The 0.10 server list: shim/tools/servers10.py (server-status.md "Client 0.10+": one UDP datagram per server, no QUIC).
 
-Not yet: voice AUDIO in the forensic archive (the native voice packets are not seen: their receive function is the app's own
-Rust, not found yet), the packet log's game layer (halo3 message names).
+Voice packets (forensic audio): a text hook on the app's Opus decode (opus-rs, 0.10.0 0x1003f1e7c) called by the voice mixer
+(0x102152578; sender id at x26 - 0x278); installed and checked in test matches, the packets need a real game (FIXES.md).
+
+Not yet: the packet log's game layer (halo3 message names; 0.10's wire protocol is the app's own).
 
 ### Kills (static RE of halo3.dll)
 

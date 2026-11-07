@@ -163,6 +163,20 @@ static int text_hook_t(const char* name, uint64_t f, nh_handler h, int filt, uin
     return 0;
 }
 static int text_hook(const char* name, uint64_t f, nh_handler h) { return text_hook_t(name, f, h, 0, 0); }
+// the app's Opus decode (nstats.c nh_on_opus: forensic voice audio) -- 0.10.0 addresses, every word checked first
+extern char nh_opus_shim[];
+static uint64_t g_opus_ret;   // (nstats.c)
+static void voice_hook_install(void) {
+    static const struct { uint64_t a; uint32_t w[4]; int n; } chk[] = {
+        {0x1003f1e7cull, {0x6db923e9, 0xa9016ffc, 0xa90267fa, 0xa9035ff8}, 4},   // decode: stp d9,d8 / x28,x27 / x26,x25 / x24,x23
+        {0x102152444ull, {0xd109e348, 0xf9400113}, 2},                           // the mixer: sub x8, x26, #0x278 ; ldr x19, [x8] (the id)
+        {0x10215256cull, {0xaa1903e1, 0xaa1803e2, 0x52807803, 0x978a7e41}, 4} }; // mov x1, x25 ; mov x2, x24 ; mov w3, #0x3c0 ; bl decode
+    uint64_t sl = g_img - APP_IMAGE;
+    for (size_t i = 0; i < sizeof chk / sizeof chk[0]; i++) { uint32_t w[4]; if (rd(chk[i].a + sl, w, 4u * (unsigned)chk[i].n) || memcmp(w, chk[i].w, 4u * (unsigned)chk[i].n)) {
+        nlog("[nhook] voice packets: not hooked (0x%llx is not the 0.10.0 code)", (unsigned long long)chk[i].a); return; } }
+    g_opus_ret = 0x102152578ull + 4 + sl;   // (nstats.c nh_on_opus: other callers are ignored)
+    text_hook("opus decode (voice)", 0x1003f1e7cull + sl, (nh_handler)(void*)nh_opus_shim);
+}
 // The target of an entry that is one `b` (the code table's entry for a function the app replaced)
 static uint64_t branch_target_of(uint32_t rva) {
     uint64_t e = host_of(rva); uint32_t w0; if (!e || rd(e, &w0, 4) || (w0 & 0xfc000000u) != 0x14000000u) return 0;
@@ -371,7 +385,8 @@ static void hooks_start(void) {
                 g_tht_rva[i] = rva; nlog("[nhook] text hook test: halo3+0x%x's entry -> 0x%llx", rva, (unsigned long long)t); if (t) text_hook(nm, t, g_tht_h[i]);
                 w = strchr(w, ','); if (w) w++; } }
         // object_delete: the app's own native function (its code-table entry is a `b` into the app's __TEXT): a text hook
-        if (!getenv("NHOOK_NO_DELHOOK")) { uint64_t t = branch_target_of(0x342ed8); if (t) text_hook("object_delete", t, on_object_delete); else hook_install("object_delete", 0x342ed8, on_object_delete); } }
+        if (!getenv("NHOOK_NO_DELHOOK")) { uint64_t t = branch_target_of(0x342ed8); if (t) text_hook("object_delete", t, on_object_delete); else hook_install("object_delete", 0x342ed8, on_object_delete); }
+        if (!getenv("NHOOK_NO_VOICEHOOK")) voice_hook_install(); }
     if (getenv("NHOOK_PLAYERS_LOG")) { pthread_t t; pthread_create(&t, 0, engine_thread, 0); pthread_detach(t); }
     nstats_start();
     { extern void nr_install(void); nr_install(); }      // nrender.m: the overlay, recording and captures in the app's frames

@@ -179,3 +179,14 @@ _nh_tpf_want:
     .word 0
     .word 0
 _nh_tpf_end:
+
+// The voice hook's handler entry (nhook.c, the text hook on the app's Opus decode): the decoder's caller keeps the sender's
+// voice entry in x26 (callee-saved, untouched at decode's entry); hand it to the C handler as its fourth argument.
+// x0-x2 (decoder, packet, length) are the decode call's own arguments, still in place (the stub saved and restores x0-x17);
+// x4 = the caller's return address from the stub's save area.
+    .p2align 2
+    .globl _nh_opus_shim
+_nh_opus_shim:
+    mov  x3, x26
+    ldr  x4, [sp, #0x98]     // decode's own return address (the stub saved x30 there): only the mixer's call counts
+    b    _nh_on_opus

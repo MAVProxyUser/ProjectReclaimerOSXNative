@@ -1860,6 +1860,21 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   packets are not seen. NHOOK_VOICE_LOG=1 logs every parsed sender. Offline: nhook-selftest.sh (parser) and
   forensic-oggtest.sh (two reports in a row = one 3.2 s utterance). The log tap's line buffer for nst_on_line grew 600 -> 4096
   (a report names every sender).
+- **nhook: forensic voice AUDIO from the app's Opus decode** (2026-11-07; nhook.c voice_hook_install, stub.S _nh_opus_shim,
+  nstats.c nh_on_opus) — WHY: the native archive had only "who talked when" (the voice report above); the loader keeps every
+  voice packet (voice_recv hook) and builds utterance / speaker .ogg files from them. HOW: the app decodes voice with opus-rs
+  (pure Rust, statically linked; its packet parser is the function using "Input packet empty", 0.10.0 app 0x1003f1e7c:
+  x0 decoder, x1 packet, x2 length, 0 = a lost frame). Its one caller (0x102152578) is the voice mixer, which walks a hash map
+  of senders once per 20 ms: x26 = the sender entry's end, the peer id at x26 - 0x278 (read there for the volume table); the
+  packet is [kind: 1 Opus, 0 raw 16-bit PCM][data] and decode gets the part after the kind. A text hook on decode's entry runs
+  a 3-instruction shim (x3 = x26, x4 = the caller's return address from the stub's save area) -> nh_on_opus, which ignores
+  calls from anywhere else, reads the id with rd and hands forensic.c a record in the loader's layout ([channel 0xFF = not
+  known][sequence = our per-sender count][0x01][Opus]) so voice.bin, the viewer and its .ogg files work unchanged (audio only
+  with the archive's voice audio + one-party consent setting, as in the loader). While packets come, the voice reports write
+  no FXF_REPORT records. Every patched / relied-on word is checked first (decode's 4-instruction prologue, the mixer's id load
+  and its argument moves + bl): another app build gets "[nhook] voice packets: not hooked". NHOOK_NO_VOICEHOOK=1 = off.
+  The [perf] line counts "voice packets". Installed and checked in local test matches (no remote talkers there: the packets
+  themselves still need a real game).
 - **0.10 server list: shim/tools/servers10.py** (2026-11-07) — WHY: "there is no reason we should be making a .9 query": the
   0.9 client's `discover` (shim/tools/servers.sh) lists no 0.10 server, the 0.10 Windows exe's `discover` prints nothing under
   the loader, and the Mac app has no list command. HOW: 0.10 asks `/v3/discovery` on its masters and queries each server with

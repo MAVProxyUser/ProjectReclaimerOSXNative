@@ -320,7 +320,9 @@ server: a6 01 00 <nonce8> padded to 1229 -> a7 <nonce8> JSON; server-status.md "
 drives its menus (`wait 12`, `press SERVER BROWSER`; a wrong row name prints the rows); NHOOK_UDP_HEX=<n> dumps datagrams.
 `--request-at <s> '{"campaign":{"hold_trigger":{"seconds":6}}}'` fires in a local test match (shim/tools/native-fire-test.sh:
 live tracer / shots check, PASS); the test profile refuses public servers by itself.
-Not yet: forensic voice AUDIO (native voice receive not found), packet log game layer. Test runs: NATIVE_LOG=<scratch file> (the default log is the user's). Offline test:
+Forensic voice audio: text hook on the app's Opus decode (0x1003f1e7c, caller = voice mixer 0x102152578, id at x26-0x278;
+stub.S _nh_opus_shim; NHOOK_NO_VOICEHOOK=1 off; [perf] "voice packets" -- unverified with real talkers). Not yet: packet log
+game layer. Test runs: NATIVE_LOG=<scratch file> (the default log is the user's). Offline test:
 shim/tools/nhook-selftest.sh. hitbox.c's .map code lives in shim/src/h3maps.c (shared).
 PORTING A RELEASE: shim/docs/porting.md -- fetch-releases.sh (corpus), client-survey.sh, `re-tools/patchscan.py --diff old new`
 (signatures read from the C; `--rev <commit>`; exit 0 over all 39 releases), `re-tools/sigport.py --point P --old --new [--corpus]

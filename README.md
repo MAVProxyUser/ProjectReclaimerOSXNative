@@ -35,8 +35,8 @@ NHOOK_HITBOXES=1 NHOOK_HB_TRACERS=1 NATIVE_REAL=1 bash shim/native.sh --join-ser
 python3 shim/tools/servers10.py                                        # the busiest 0.10 servers, with their addresses
 ```
 
-Not in the native app yet: voice AUDIO in the forensic archive (it records who talked when, from the app's own voice
-report). Measured: 120-200 fps in 52-72 player games at 3440x1440 on an M4. The rest of this README is the loader (0.9.x
+New and not yet checked with real talkers: voice audio in the native forensic archive (a hook on the app's Opus decoder).
+Measured: 120-200 fps in 52-72 player games at 3440x1440 on an M4. The rest of this README is the loader (0.9.x
 clients).
 
 ## Status

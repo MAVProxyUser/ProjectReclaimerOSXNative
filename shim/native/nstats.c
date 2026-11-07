@@ -547,6 +547,26 @@ static struct { uint64_t id; double t; } g_talk[128]; static pthread_mutex_t g_t
 static double st_talk_age(uint64_t id) { double now = mono_s(), a = 1e9; pthread_mutex_lock(&g_talk_mx);
     for (int i = 0; i < 128; i++) if (g_talk[i].id == id) { a = now - g_talk[i].t; break; } pthread_mutex_unlock(&g_talk_mx); return a; }
 static uint64_t fx_now_ns(void); static void fx_voice_report(uint64_t t_start_ns, uint64_t sender, int frames);   // (forensic.c, below)
+static volatile int g_fx_on; static void fx_voice(uint64_t sender, const uint8_t* payload, uint64_t len);
+// The voice packets themselves (forensic audio, like the loader's voice_recv hook): a text hook on the app's Opus decode (opus-rs,
+// 0.10.0 app 0x1003f1e7c: x0 decoder, x1 packet, x2 length; 0 = a lost frame being concealed). Its one caller (0x102152578, the
+// voice mixer, once per sender per 20 ms) walks a hash map of senders: x26 = the entry's end, the peer id at x26 - 0x278 (the
+// mixer reads it there for the volume table). The packet arrives as [kind 1 = Opus][Opus]; decode gets the Opus part. The
+// archive's records are built in the loader's layout ([channel][sequence u64][0x01][Opus]: channel 0xFF = not known, sequence =
+// our per-sender count) so voice.bin, the viewer and its .ogg files work unchanged. Checked before hooking: decode's first four
+// instructions, the caller's bl / argument moves and its id load (another app build: no hook, "voice packets: not hooked").
+static volatile double g_opus_last;   // the last packet (mono): the voice reports stop writing FXF_REPORT records while packets come
+static volatile unsigned long g_opus_n;
+static uint64_t g_opus_ret;   // the mixer's return address after its decode call (nhook.c voice_hook_install sets it)
+__attribute__((used)) void nh_on_opus(uint64_t dec, const uint8_t* pkt, uint64_t len, uint64_t ent, uint64_t ret) {
+    (void)dec; if (ret != g_opus_ret || !len || len > 4000 || !pkt) return; uint64_t id = 0; if (rd(ent - 0x278, &id, 8) || !id) return;
+    g_opus_n++; g_opus_last = mono_s(); if (!g_fx_on) return;
+    static struct { uint64_t id, seq; } sq[256]; static pthread_mutex_t mx = PTHREAD_MUTEX_INITIALIZER; uint64_t seq = 0;
+    pthread_mutex_lock(&mx); int k = -1, fr = -1; for (int i = 0; i < 256; i++) { if (sq[i].id == id) { k = i; break; } if (fr < 0 && !sq[i].id) fr = i; }
+    if (k < 0) { k = fr >= 0 ? fr : (int)(id & 255); sq[k].id = id; sq[k].seq = 0; } seq = ++sq[k].seq; pthread_mutex_unlock(&mx);
+    uint8_t b[10 + 4000]; b[0] = 0xFF; memcpy(b + 1, &seq, 8); b[9] = 1; if (rd((uint64_t)(uintptr_t)pkt, b + 10, (size_t)len)) return;
+    fx_voice(id, b, len + 10);
+}
 static void st_voice_report(const char* l) {
     const char* h = strstr(l, "; heard "); if (!h) return; h += 8; double now = mono_s(); uint64_t tns = fx_now_ns();
     while ((h = strstr(h, "0x"))) { char* e; uint64_t id = strtoull(h + 2, &e, 16); if (e == h + 2 || *e != ':') { h += 2; continue; }
@@ -559,7 +579,7 @@ static void st_voice_report(const char* l) {
         double gap = k >= 0 ? now - g_talk[k].t : 1e9;   // talked in the report before (~2 s ago): these frames continue that talk
         if (k < 0) { k = old; g_talk[k].id = id; } g_talk[k].t = now; pthread_mutex_unlock(&g_talk_mx);
         uint64_t dur = (uint64_t)fr * 20000000ull, back = gap < 3.0 ? (uint64_t)(gap * 1e9) : dur; if (back < dur) back = dur;
-        fx_voice_report(tns - back, id, fr); }
+        if (mono_s() - g_opus_last > 5.0) fx_voice_report(tns - back, id, fr); }   // (packets coming: the archive has them already)
 }
 
 // ---- the forensic archive and its viewer (/forensics): the loader's shim/src/forensic.c, unchanged, with what it takes
@@ -593,7 +613,7 @@ static void st_snapshot(StBuf* s) {
           sb_put(s, ",\"perf\":{\"fps\":%.1f,\"window_fps\":%.1f,\"frame_ms\":[%.1f,%.1f,%.1f],\"draws\":0,\"objects\":%d,\"in_view\":%d,\"bipeds\":0,\"vehicles\":0,\"projectiles\":0,"
                     "\"present_to_gpu_ms\":-1,\"present_to_window_ms\":-1,\"input_to_screen_ms\":-1,\"input_to_window_ms\":-1,\"input_to_present_ms\":-1,\"inputs\":0,\"refresh_hz\":0,\"cpu_pct\":0,\"native\":true}",
                  fps, fps, p50, p95, mx, nobj, nobj);
-          static double tl; if (now - tl >= 10) { tl = now; nlog("[nhook] [perf] %.0f fps, frame %.1f / %.1f / %.1f ms (median / 95%% / max), %d players, %d objects, map %s%s; object_delete %lu, bullets %u, camera %s%s", fps, p50, p95, mx, np_for_perf, nobj, g_st_curmap, t0 ? "" : " (not in a match)", g_nov_del_calls, g_nov_imp_n,
+          static double tl; if (now - tl >= 10) { tl = now; nlog("[nhook] [perf] %.0f fps, frame %.1f / %.1f / %.1f ms (median / 95%% / max), %d players, %d objects, map %s%s; object_delete %lu, bullets %u, voice packets %lu, camera %s%s", fps, p50, p95, mx, np_for_perf, nobj, g_st_curmap, t0 ? "" : " (not in a match)", g_nov_del_calls, g_nov_imp_n, g_opus_n,
                       g_nov_cam_src == 1 ? "view constants" : g_nov_cam_src == 2 ? "observer" : "-",
                       getenv("NHOOK_TEXTHOOK_TEST") ? ({ static char tb[300]; extern volatile unsigned long g_tht_n[8]; extern uint32_t g_tht_rva[8]; int q = snprintf(tb, sizeof tb, ", text hooks");
                           for (int i = 0; i < 8; i++) if (g_tht_rva[i]) q += snprintf(tb + q, sizeof tb - (size_t)q, " %x:%lu", g_tht_rva[i], g_tht_n[i]); tb; }) : ""); } }
