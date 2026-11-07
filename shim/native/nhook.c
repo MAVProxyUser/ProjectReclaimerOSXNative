@@ -310,7 +310,12 @@ static void on_view_param_body(uint64_t* ctx) {      // (only parameter 0x27 get
         g_cam_seq++; __atomic_thread_fence(__ATOMIC_SEQ_CST); g_cam = g_cam_pend; __atomic_thread_fence(__ATOMIC_SEQ_CST); g_cam_seq++;
         struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); g_cam_t = ts.tv_sec + ts.tv_nsec * 1e-9; }
 }
-static void on_view_param(uint64_t* ctx) { if (g_hc_off[HC_VIEW]) return; uint64_t t0 = hc_now(); on_view_param_body(ctx); hc_add(HC_VIEW, t0); }
+static volatile int g_view_wanted;              // the overlay is on (noverlay.c nov_build sets it every frame it runs, clears when off)
+static void on_view_param(uint64_t* ctx) { if (g_hc_off[HC_VIEW] || !g_view_wanted) return; uint64_t t0 = hc_now(); on_view_param_body(ctx); hc_add(HC_VIEW, t0); }
+static uint64_t g_view_hook_at; static int g_view_hooked;
+static void nov_view_hook_want(void) {        // (render thread) install the camera hook once, now that the overlay wants a view
+    if (g_view_hooked || !g_view_hook_at) return; g_view_hooked = 1;
+    if (!text_hook_t("view constants", g_view_hook_at, on_view_param, 1, 0x27)) nlog("[nhook] camera hook installed (the overlay was turned on)"); }
 int nh_camera(float* rows16, float* pos3) {     // the latest player view (1 = fresh: < 0.25 s)
     NhCam c; unsigned s1, s2; int tries = 0;
     do { s1 = g_cam_seq; memcpy(&c, (const void*)&g_cam, sizeof c); s2 = g_cam_seq; } while ((s1 != s2 || (s1 & 1)) && ++tries < 8);
@@ -412,7 +417,9 @@ static void hooks_start(void) {
                 n++; k += snprintf(line + k, sizeof line - (size_t)k, " %llx", (unsigned long long)(tb[2 * i] - 0x180000000ull));
                 if (k > 900) { nlog("[nhook] branch entries:%s", line); k = 0; } }
             if (k) nlog("[nhook] branch entries:%s", line); nlog("[nhook] %d of %llu code-table entries are one `b` (functions the app replaced)", n, (unsigned long long)g_ntab); free(tb); }
-        if (!getenv("NHOOK_NO_VIEWHOOK") && !getenv("NHOOK_CBPROBE")) { uint64_t t = branch_target_of(0x2af478); if (t) text_hook_t("view constants", t, on_view_param, 1, 0x27); }
+        // the camera hook (the overlay's view): installed by the render thread the first time an overlay feature is on
+        // (nov_view_hook_want), not here -- a session that never turns the overlay on never pays its ~700k filter passes a second
+        if (!getenv("NHOOK_NO_VIEWHOOK") && !getenv("NHOOK_CBPROBE")) g_view_hook_at = branch_target_of(0x2af478);
         if (getenv("NHOOK_CBPROBE")) { uint64_t t = branch_target_of(0x2af478); if (t && !text_hook("set_param", t, on_set_param)) { pthread_t th; pthread_create(&th, 0, cbprobe_dump, 0); pthread_detach(th); } }
         if (getenv("NHOOK_TEXTHOOK_TEST")) {   // test: counting text hooks on functions the app replaced (NHOOK_TEXTHOOK_TEST=<rva>,<rva>...)
             const char* w = getenv("NHOOK_TEXTHOOK_TEST");

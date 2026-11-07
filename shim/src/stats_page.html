@@ -522,9 +522,9 @@ function renderDet(){
    ['Voice',p.voice?(p.muted?'muted (only for you)':'audible'):'no voice connection'],
    ['Address',p.ip?E(p.ip):snap.addr_role==='client'?`not known to a client (it only talks to the server${snap.server_addr?': '+E(snap.server_addr):''})`:
      snap.addr_role==='hidden'?'hidden (this page is reachable from other computers; PELOAD_STATS_IPS=1 shows it)':p.you?'this computer':snap.addr_role==='host'?'not in the host table':'not known'],
-   ['Aimbot?',botDetail(p)],['Aim',aimDetail(p)],['Shots fired',p.shots??0],['Hits',`${p.hits??0}`+(p.shots?` (${Math.round(p.accuracy*100)}% accuracy)`:'')],['Facing',p.facing!=null?p.facing+'°':''],['Position',p.pos.map(v=>v.toFixed(1)).join(', ')],['Object',p.handle]];
+   ['Medals',p.medals?Object.entries(p.medals).sort((a,b)=>b[1]-a[1]).map(([n,c])=>`${E(n)}${c>1?' ×'+c:''}`).join(', '):'none this match'],['Aimbot?',botDetail(p)],['Aim',aimDetail(p)],['Shots fired',p.shots??0],['Hits',`${p.hits??0}`+(p.shots?` (${Math.round(p.accuracy*100)}% accuracy)`:'')],['Facing',p.facing!=null?p.facing+'°':''],['Position',p.pos.map(v=>v.toFixed(1)).join(', ')],['Object',p.handle]];
   el.innerHTML=`<button class="x" onclick="closeDet()" aria-label="Close">×</button><b>${E(p.name)}${p.you?' (you)':''}</b><div class="detbtns">${p.voice&&!p.you?bigMute(p.voice,p.muted):''}${p.you?'':tpBtn(p)}</div><dl>${rows.map(r=>`<dt>${r[0]}</dt><dd>${r[1]}</dd>`).join('')}</dl>
-   <div class="note">Shots counts every projectile (each shotgun pellet is one). A hit is a shot that ended inside another player's body bounds -- an estimate; turret shots count for the vehicle, not the gunner.</div>`;
+   <div class="note">Shots counts every projectile (each shotgun pellet is one). A hit is a shot whose path went through an enemy's hitboxes, as this client saw that enemy (the native app; the loader: a shot that ended inside another player's body bounds, an estimate); turret shots count for the vehicle, not the gunner.</div>`;
   el.style.display='block';
 }
 function closeDet(){sel=null;renderTable();renderDet();drawMap()}
@@ -1143,13 +1143,13 @@ function renderHooks(){ const H=snap&&snap.hooks, el=document.getElementById('hc
   document.getElementById('hcsum').textContent=`${f(H.fps,0)} fps, median frame ${f(H.frame_ms,1)} ms`+(m?` · measuring ${m.id}: ${m.on?'on':'off'} phase, ${Math.max(0,Math.round(m.left))} s left`:'');
   const rows=H.list.map(h=>{ const a=h.ab; const meas=a?`<span title="${E(`${a.pairs} on/off pairs, ${Math.round(a.age)} s ago; spread ${a.lo.toFixed(2)} .. ${a.hi.toFixed(2)} fps; slowest frames (95th percentile / max) ${a.p95_on} / ${a.max_on} ms on, ${a.p95_off} / ${a.max_off} ms off`)}">${a.on_fps.toFixed(1)} → ${a.off_fps.toFixed(1)} fps: <b style="color:${a.loss>0.5?'#e93':a.loss>0.1?'#cc4':'#5c5'}">${a.loss>=0?'−':'+'}${Math.abs(a.loss).toFixed(2)}</b>${a.lo<=0&&a.hi>=0?' <span class="note" style="margin:0">within noise</span>':''}</span>`:'';
     const busy=m&&m.id===h.id;
-    return `<tr${h.on?'':' style="opacity:.55"'}><td title="${E(h.name)}">${E(h.name)}${h.reads!=null?` <span class="note" style="margin:0" title="system calls (memory reads) per snapshot">(${h.reads} reads)</span>`:''}</td><td>${E(h.thread)}</td><td>${h.on?'on':'off'}</td><td>${h.calls_s>=10?Math.round(h.calls_s):f(h.calls_s,1)}</td><td>${h.calls_s>0?f(h.us_call,2):'-'}</td>`+
+    return `<tr${h.on?'':' style="opacity:.55"'}><td title="${E(h.name)}">${E(h.name)}${h.reads!=null?` <span class="note" style="margin:0" title="system calls (memory reads) per snapshot">(${h.reads} reads)</span>`:''}</td><td>${E(h.thread)}</td><td>${h.switch?`<button class="hcs" data-h="${E(h.id)}" data-on="${h.on?0:1}"${m?' disabled':''} title="${h.on?'switch this hook off (its handler returns at once)':'switch it back on'}">${h.on?'on':'off'}</button>`:h.on?'on':'off'}</td><td>${h.calls_s>=10?Math.round(h.calls_s):f(h.calls_s,1)}</td><td>${h.calls_s>0?f(h.us_call,2):'-'}</td>`+
       `<td>${f(h.ms_frame,3)}</td><td>${f(h.pct,2)}%</td><td>${h.crit&&h.fps_cost>=0?f(h.fps_cost,2):'-'}</td><td>${meas}</td>`+
       `<td><button class="btn hcm" data-h="${E(h.id)}"${m?' disabled':''} title="switch only this off and on in turns for 36 s and count the frames">${busy?'measuring…':'measure'}</button></td></tr>`; });
   document.getElementById('hcb').innerHTML=rows.join('')+(m?`<tr><td colspan="10"><button class="btn" id="hcstop">stop the measurement</button></td></tr>`:''); }
-document.getElementById('hcost').addEventListener('click',async e=>{ const b=e.target.closest('.hcm,#hcstop'); if(!b) return; b.disabled=true;
-  const q=b.id==='hcstop'?'stop=1':'h='+encodeURIComponent(b.dataset.h);
-  try{ await fetch('/control?do=hookab&'+q,{method:'POST',headers:{'X-Reclaimer-Control':'1'}}); }catch(err){} });
+document.getElementById('hcost').addEventListener('click',async e=>{ const b=e.target.closest('.hcm,.hcs,#hcstop'); if(!b) return; b.disabled=true;
+  const q=b.classList.contains('hcs')?'hookset&h='+encodeURIComponent(b.dataset.h)+'&on='+b.dataset.on:'hookab&'+(b.id==='hcstop'?'stop=1':'h='+encodeURIComponent(b.dataset.h));
+  try{ await fetch('/control?do='+q,{method:'POST',headers:{'X-Reclaimer-Control':'1'}}); }catch(err){} });
 // no game serving this port (it ended, or a test client is between runs): keep the last data but grey it out and say so;
 // EventSource keeps retrying, and the first snapshot of a new game reloads the page (inst)
 let lastSnapAt=0;

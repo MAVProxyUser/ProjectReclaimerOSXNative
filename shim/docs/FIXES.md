@@ -2012,6 +2012,40 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   user: "'-' in aimbot field was unclear ... some say 100% next to them and I don't know why". HOW: Aim reads "1.2° off" and,
   under it, "N% of M hits counted" (of the shots through a hitbox, the share the server confirmed); Aimbot? reads "normal"
   once judged, "k/40 shots" before, "⚠ suspect" with reasons.
+- **nhook: off means off** (2026-11-07; nhook.c on_view_param / nov_view_hook_want, noverlay.c nov_build_body / nov_idle /
+  on_object_delete_body / nov_collect, nstats.c hc_set, stats_page.html Hook cost switches) — WHY: the user: "a disabled
+  hook should not cost anything". HOW: the camera hook is no longer installed at launch: the render thread installs it the
+  first time an overlay feature is on, and its handler returns at once while the overlay is off (its assembly filter stays
+  once installed: a few instructions per call); the bullet hook's body-sphere pass runs only without the aim meter (hits come
+  from the aim meter now, so one pass over the objects) and its tracer record only while tracers are on; the overlay reads
+  players only for a feature that draws or filters by them (hitboxes, info, a vehicles / tracers team filter); the Hook cost
+  panel switches any hook's handler off and on (POST do=hookset&h=<id>&on=0|1; overlay features keep their own buttons, the
+  snapshot is not switchable). Checked: native-fire-test.sh PASS with the overlay on from the launch (the camera hook installs
+  at the first frame).
+- **nhook kill feed: a fresh launch's first kills wait for the exact results** (2026-11-07; nstats.c rs_tick g_rs_live,
+  st_nice_case) — WHY: the first kills after a launch came from the scoreboard path (estimated, the weapon in capitals: "ASSAULT
+  RIFLE") because it only waited for the results once they had counted a death. HOW: it waits whenever the results can be
+  read; the scoreboard path's weapon names are in normal case ("Assault rifle").
+- **nhook: hits = shots through an enemy's hitboxes** (2026-11-07; nstats.c st_aim_tick / StTrack.hits, stats_page.html) — WHY:
+  a hit was "the bullet ended inside a body's bounding sphere", an estimate a practice target's own counter disagreed with
+  (2 of 10). HOW: hits come from the aim meter's hitbox test (the path through an enemy's posed hitboxes, as this client saw
+  it); NHOOK_NO_AIM=1 = the old estimate. Checked: shim/tools/native-aim-test.sh (new: a target 5 units ahead, the trigger held
+  at it) -> 10 shots, 8 hits, all 10 measured.
+- **nhook: medals in the feed and the player details** (2026-11-07; nstats.c rs_medals / g_medal, stats_page.html) — WHY: the
+  native feed had no medals. HOW: the game results count each player's medals at statistic 63 + i for medal i in the order of
+  the app's own medal table (0.10.0 0x103ed23c8: 112 entries of id, name, description, 48 bytes each; found from the app's
+  stats names with re-tools/machoref.py dataref). Checked against live counts: melee kills -> 106 Beat Down, a first-kill sniper
+  headshot -> 104 Sniper Kill, 140 First Strike, 147 Snapshot, a player's 149 Assist = their 17 assists. The feed says
+  "<player>: <medal>" (kind "medal") for every medal except Kill / Assist (one per kill / assist) and Unused; a kill medal
+  needs that player's kill on the scoreboard within 3 s (g_sb_kill_t), a player whose medal counts rose by more than 3 in one
+  snapshot is the table filling in (both: history after a join). The player details list this match's medals. Offline:
+  results-feed-test.sh (a backed Double Kill, an unbacked Sniper Kill dropped, an objective medal, 5 at once, Kill / Assist).
+- **nhook overlay: no hitboxes on dead bodies** (2026-11-07; noverlay.c nov_build_body / nov_hitbox) — WHY: a body lying on
+  the ground drew as red hitboxes: clutter. HOW: dead bipeds get no hitboxes; NHOOK_HB_DEAD=1 draws them grey.
+- **nhook Packets: the dedicated server says "server"** (2026-11-07; nnet.c st_session g_st_host_id, pk_player) — WHY: the
+  user wants the DNS name and the player's name by an address where they apply; on a dedicated server the one address is the
+  server, which is no player, so it had nothing. HOW: the session's host peer id is kept; its address, when no player owns it,
+  is labelled "server".
 - **nhook-selftest.sh: its own forensic / heatmap folders** (2026-11-07; shim/tools/nhook-selftest.sh) — WHY: the offline
   selftest starts nhook's stats server, whose archive opened an empty "menu" session in the player's real forensic archive on
   every run. HOW: PELOAD_FORENSIC_DIR and NHOOK_HEATMAP_DIR point into the test's temporary folder.

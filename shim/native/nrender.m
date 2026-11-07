@@ -24,6 +24,7 @@ void nh_log(const char* fmt, ...) __attribute__((format(printf, 1, 2)));   // nh
 int nov_build(float* verts, int cap, int w, int h, float scale);           // noverlay.c
 void nov_aim_tick(void);                                                   // noverlay.c: aim vs hits, measured against the hitboxes
 void hc_frame(double now);                                                 // nstats.c: the hook cost meter's on/off measurement
+void nov_idle(void);                                                       // noverlay.c: no overlay this frame
 int nov_wanted(void);
 volatile int g_nr_cap_req;                                                  // the stats page's Capture frame (do=capture)
 volatile int g_nr_cap_depth;                                                // ... &depth=1: also every full-size depth texture of the frame (.f32)
@@ -174,6 +175,7 @@ static void nr_frame(id<MTLCommandBuffer> cb, id<CAMetalDrawable> drawable) {
     if (g_nr_cap_req == 1 && readable) nr_capture(cb, tex);
     nov_aim_tick();   // (every frame, overlay on or off)
     // 2. the overlay
+    if (!nov_wanted()) nov_idle();
     if (nov_wanted()) {
         enum { CAP = 400000 }; static float* verts; if (!verts) verts = malloc(CAP * 6 * sizeof(float));
         float scale = layer ? (float)layer.contentsScale : 1.0f;

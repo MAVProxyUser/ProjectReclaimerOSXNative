@@ -324,7 +324,7 @@ static int st_players(StPlayer* out, int max) {
     }
     return n;
 }
-typedef struct { char name[64]; int slot, team, deaths, alive, shots, hits; uint32_t unit; double life_start, longest, dist; float pos[3], top_speed;
+typedef struct { char name[64]; int slot, team, deaths, alive, shots, hits, hits_sphere; uint32_t unit; double life_start, longest, dist; float pos[3], top_speed;
                  int aim_n, aim_on, aim_head, aim_on_judged, aim_on_reg, aim_off_judged, aim_off_reg, aim_ei; float aim_err[64];
                  int aim_open_n, aim_open_on, aim_far_n, aim_far_on; double aim_last; } StTrack;   // aim: st_aim_tick
 static StTrack g_trk[256]; static int g_ntrk; static char g_trk_map[64];
@@ -504,6 +504,10 @@ static SbKiller g_sbk[64]; static int g_nsbk; static SbVictim g_sbv[64]; static 
 static struct { int16_t s[8]; int ok; char name[64]; } g_sbprev[128];
 typedef struct { char name[64], how[96]; int team, have, dead; float pos[3], cur[3]; double died; } SbNow;   // this snapshot's view of a slot (cur: where it is now)
 static SbNow g_sbnow[128];
+static double g_sb_kill_t[128];                       // when the scoreboard last showed this slot's kill (sb_tick; rs_medals)
+static void st_nice_case(char* s) {   // "ASSAULT RIFLE" -> "Assault rifle" (a name in capitals only; mixed case stays)
+    for (const char* q = s; *q; q++) if (*q >= 'a' && *q <= 'z') return;
+    for (char* q = s + 1; *q; q++) if (*q >= 'A' && *q <= 'Z') *q = (char)(*q - 'A' + 'a'); }
 static void sb_reset(void) { memset(g_sbprev, 0, sizeof g_sbprev); g_nsbk = g_nsbv = 0; }
 static volatile int g_rs_live;                             // the game results count deaths in this match (rs_tick)
 static struct { int slot; double t; } g_sbe[64]; static int g_nsbe;   // deaths sb_tick reported (an exact report then comes too late)
@@ -530,6 +534,7 @@ static void sb_tick(const StPlayer* pl, int np, double now) {
               if (lg && (dd > 0 || dk > 0) && nd <= SB_BURST) nlog("[nhook] [results] scoreboard: %s deaths +%d kills +%d at once: history, not reported", pl[k].name, dd, dk);
               memcpy(g_sbprev[sl].s, s, sizeof s); continue; } }
         int body = (w->died > 0 && now - w->died < 4) || !w->have;   // (a death: its body died, or there is no live body)
+        if (s[SB_KILLS] > o[SB_KILLS] && sl >= 0 && sl < 128) g_sb_kill_t[sl] = now;   // (rs_medals: a kill medal needs this)
         for (int d = 0; d < s[SB_KILLS] - o[SB_KILLS] && g_nsbk < 64; d++) { SbKiller* x = &g_sbk[g_nsbk++]; x->slot = sl; x->team = w->team; x->kind = 0; x->t = now; snprintf(x->name, sizeof x->name, "%s", pl[k].name); snprintf(x->how, sizeof x->how, "%s", w->how); x->haspos = w->have; memcpy(x->pos, w->cur, 12); }
         for (int d = 0; d < s[SB_BETRAYALS] - o[SB_BETRAYALS] && g_nsbk < 64; d++) { SbKiller* x = &g_sbk[g_nsbk++]; x->slot = sl; x->team = w->team; x->kind = 1; x->t = now; snprintf(x->name, sizeof x->name, "%s", pl[k].name); snprintf(x->how, sizeof x->how, "%s", w->how); x->haspos = w->have; memcpy(x->pos, w->cur, 12); }
         int sui = s[SB_SUICIDES] - o[SB_SUICIDES];
@@ -631,6 +636,32 @@ static void rs_confirm(double now) {   // report the candidates the scoreboard b
         memmove(&g_rsq[i], &g_rsq[i + 1], (size_t)(g_nrsq - i - 1) * sizeof g_rsq[0]); g_nrsq--; i--;
     }
 }
+// ---- medals (2026-11-07): the game results count each player's medals at statistic 63 + i for medal i, in the order of the
+// app's own medal table (0.10.0 0x103ed23c8: 112 entries of id / name / description, 48 bytes each -- Extermination ...
+// Guardians). Checked against live counts: a melee kill -> 106 Beat Down (43), a first-kill sniper headshot -> 104 Sniper
+// Kill (41), 140 First Strike (77), 147 Snapshot (84); a player's 149 Assist (86) equal to their 17 assists. The feed gets
+// each medal except Kill / Assist (one per kill / assist: the kill feed has them) and Unused; like the kills, a medal is
+// history unless backed: a kill medal waits up to 3 s for that player's kill on the scoreboard (g_sb_kill_t), and a player
+// whose medal counts rose by more than 3 in one snapshot is the table filling in.
+#define RS_MEDAL 63
+static const char* const g_medal[112] = {"Extermination", "Perfection", "Double Kill", "Triple Kill", "Overkill", "Killtacular", "Killtrocity", "Killimanjaro", "Killtastrophe", "Killpocalypse", "Killionaire", "Killing Spree", "Killing Frenzy", "Running Riot", "Rampage", "Untouchable", "Invincible", "Sniper Spree", "Sharpshooter", "Shotgun Spree", "Open Season", "Splatter Spree", "Vehicular Manslaughter", "Sword Spree", "Slice 'n Dice", "Juggernaut Spree", "Unstoppable Force", "Infection Spree", "Mmm... Brains", "Zombie Killing Spree", "Hell's Janitor", "Zombie Exterminator", "Hail to the King", "Bulltrue", "Splatter", "Hijack", "Skyjack", "Kill from the Grave", "Killjoy", "Laser Kill", "Grenade Stick", "Sniper Kill", "Assassin", "Beat Down", "Incineration", "Wheelman", "Bomb Planted", "Killed Bomb Carrier", "Killed VIP", "Killed Juggernaut", "Oddball Kill", "Flag Score", "Killed Flag Carrier", "Flag Kill", "Last Man Standing", "Unused", "Unused", "Unused", "Triple Double", "Steaktacular", "Unfrigginbelievable", "Unfrigginbelievable II", "Brute Shot Kill", "Fuel Rod Kill", "Grenade Kill", "Hammer Kill", "Plasma Grenade Kill", "Rocket Kill", "Needler Kill", "Sentinel Beam Kill", "Sword Kill", "Turret Kill", "Comeback Kill", "Headshot", "Kill", "Vehicle Kill", "Environmental Kill", "First Strike", "Last Strike", "Protector", "Avenger", "Close Call", "Reload This", "Revenge", "Snapshot", "Vehicle Destroyed", "Assist", "Vehicle Destroy Assist", "Ball Holder", "Ball Keeper", "Ball Master", "Ball Hog", "Magic Hands", "Smooth Moves", "Ball Carrier Kill", "First Touch", "First Point", "Hill Defense", "Hill Offense", "Hill Dominance", "Flag Taken", "Flag Returned", "Flag Runner", "Flag Champion", "Bomb Defense", "Bomb Defused", "Disarmed", "Saboteur", "Territory Captured", "Territorial", "Triumvirate", "Guardians"};
+static const uint8_t g_medal_obj[112] = {1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1};   // 1 = no kill behind it (objectives, game end): reported without the scoreboard's kill
+typedef struct { int slot, m; double t; char name[64]; } RsMedal;
+static RsMedal g_rsm[64]; static int g_nrsm;
+static void rs_medals(const int* idx, const StPlayer* pl, double now, int flood) {
+    int lg = getenv("NHOOK_RESULTS_LOG") != 0;
+    for (int sl = 0; sl < 128 && !flood; sl++) { int tot = 0;
+        for (int m = 0; m < 112; m++) { int i = RS_MEDAL + m, d = (g_rs_cur[sl][i] & 0x7fff) - (g_rs_prev[sl][i] & 0x7fff); if (d > 0) tot += d; }
+        if (!tot) continue;
+        if (tot > 3) { if (lg) nlog("[nhook] [results] slot %d: %d medals at once: history, not reported", sl, tot); continue; }
+        for (int m = 0; m < 112; m++) { int i = RS_MEDAL + m, d = (g_rs_cur[sl][i] & 0x7fff) - (g_rs_prev[sl][i] & 0x7fff);
+            if (d <= 0 || m == 74 || m == 86 || (m >= 55 && m <= 57)) continue;
+            for (int q = 0; q < d && g_nrsm < 64; q++) { RsMedal* r = &g_rsm[g_nrsm++]; r->slot = sl; r->m = m; r->t = now; snprintf(r->name, sizeof r->name, "%s", idx[sl] >= 0 ? pl[idx[sl]].name : "?"); } } }
+    for (int i = 0; i < g_nrsm; i++) { RsMedal* r = &g_rsm[i]; int ok = g_medal_obj[r->m] || (g_sb_kill_t[r->slot] > 0 && fabs(g_sb_kill_t[r->slot] - r->t) < 5);
+        if (!ok && now - r->t < 3) continue;
+        if (ok) st_event_pos(0, "medal", r->name, 0, g_medal[r->m], -1, g_sbnow[r->slot].team, 0, "%s: %s", r->name, g_medal[r->m]);
+        else if (lg) nlog("[nhook] [results] %s: %s with no kill on the scoreboard: history, not reported", r->name, g_medal[r->m]);
+        g_rsm[i] = g_rsm[--g_nrsm]; i--; } }
 static void rs_tick(const StPlayer* pl, int np, double now) {
     static int off = -1; if (off < 0) off = getenv("NHOOK_NO_RESULTS_FEED") != 0;
     if (off || !g_res_base || g_res_vslog <= 0 || g_res_vslog > 7) return;
@@ -642,7 +673,8 @@ static void rs_tick(const StPlayer* pl, int np, double now) {
     for (int sl = 0; sl < 128 && !fresh; sl++) for (int c = 0; c < 4; c++) if ((g_rs_cur[sl][counted[c]] & 0x7fff) < (g_rs_prev[sl][counted[c]] & 0x7fff)) { fresh = 1; break; }   // a new match / a new player in the slot
     for (size_t i = 0; i < vn && !fresh; i++) if ((g_rs_vcur[i] & 0xffff) < (g_rs_vprev[i] & 0xffff) || (g_rs_vcur[i] >> 16) < (g_rs_vprev[i] >> 16)) fresh = 1;
     for (int sl = 0; sl < 128; sl++) dead |= g_rs_cur[sl][RS_DEATHS] & 0x7fff;
-    static int seen; if (dead) seen = 1; g_rs_live = seen;   // (kept for the next match: its first deaths wait for the results too)
+    g_rs_live = 1; (void)dead;   // (the results can be read: every death waits up to 1.5 s for them -- a fresh launch's first kills too, which
+                                 //  came out estimated while this waited for the first death the results counted; 2026-11-07)
     if (fresh) { memcpy(g_rs_prev, g_rs_cur, sizeof g_rs_prev); memcpy(g_rs_vprev, g_rs_vcur, vn * 4); g_rs_have = 1; rs_confirm(now); return; }
     int kd[128], bd[128], dd[128]; for (int sl = 0; sl < 128; sl++) { kd[sl] = (g_rs_cur[sl][RS_KILLS] & 0x7fff) - (g_rs_prev[sl][RS_KILLS] & 0x7fff); bd[sl] = (g_rs_cur[sl][RS_BETRAYALS] & 0x7fff) - (g_rs_prev[sl][RS_BETRAYALS] & 0x7fff);
         dd[sl] = (g_rs_cur[sl][RS_DEATHS] & 0x7fff) - (g_rs_prev[sl][RS_DEATHS] & 0x7fff) - ((g_rs_cur[sl][RS_SUICIDES] & 0x7fff) - (g_rs_prev[sl][RS_SUICIDES] & 0x7fff)); }   // (deaths by someone else)
@@ -685,6 +717,7 @@ static void rs_tick(const StPlayer* pl, int np, double now) {
         int t = rs_take(killer, betray ? 2 : 0), hs = rs_take(killer, 4) >= 0; rs_take(victim, 1);
         char how[96] = ""; if (t > 0 && t < 63) snprintf(how, sizeof how, "%s%s", g_dmg_name[t], hs ? ", headshot" : ""); else if (hs) snprintf(how, sizeof how, "headshot");
         rs_cand(killer, victim, betray, how, idx, pl, now); }
+    rs_medals(idx, pl, now, nch < 0);
     rs_confirm(now);
     memcpy(g_rs_prev, g_rs_cur, sizeof g_rs_prev); memcpy(g_rs_vprev, g_rs_vcur, vn * 4);
 }
@@ -799,6 +832,11 @@ void hc_frame(double now) {   // nrender.m nr_frame: every presented frame
             if (now - g_hcab.t0 >= g_hcab.secs && !(g_hcab.nph & 1)) hc_finish(now);
             else { hc_apply(!g_hcab.on); g_hcab.ph_t0 = now; g_hcab.frames = 0; g_hcab.ph_tc = 0; } } }
     g_hcab.last = now; pthread_mutex_unlock(&g_hcab_mx); }
+static int hc_set(const char* qs) {   // do=hookset&h=<id>&on=0|1: switch a hook's handler off / on (not the overlay's features: their own buttons)
+    const char* h = strstr(qs, "h="); char id[32] = ""; if (h) { h += 2; size_t i = 0; while (*h && *h != '&' && i + 1 < sizeof id) id[i++] = *h++; id[i] = 0; }
+    int k = hc_find(id); if (k < 0 || hc_bits(k) || k == HC_OV || k == HC_SNAP) return 0; int on = !strstr(qs, "on=0");
+    pthread_mutex_lock(&g_hcab_mx); int busy = g_hcab.state != 0; if (!busy) g_hc_off[k] = (uint8_t)!on; pthread_mutex_unlock(&g_hcab_mx);
+    if (!busy) nlog("[nhook] hook %s switched %s from the page", id, on ? "on" : "off"); return !busy; }
 static int hc_control(const char* qs) {   // do=hookab
     pthread_mutex_lock(&g_hcab_mx); int ok = 0;
     if (strstr(qs, "stop=1")) { if (g_hcab.state) { if (g_hcab.state == 2) hc_restore(); g_hcab.state = 0; } ok = 1; }
@@ -827,6 +865,7 @@ static void hc_json(StBuf* s, double now) {
         const HcRes* r = &g_hcres[k];
         sb_put(s, "%s{\"id\":\"%s\",\"name\":", k ? "," : "", g_hc[k].id); sb_str(s, g_hc[k].name);
         if (k == HC_SNAP) sb_put(s, ",\"reads\":%lu,\"read_bytes\":%lu,\"cached_reads\":%lu,\"copy_mb\":%.2f", g_snap_rd_n, g_snap_rd_b, g_snap_oc_hits, g_snap_oc_mb100 / 100.0);
+        sb_put(s, ",\"switch\":%s", hc_bits(k) || k == HC_OV || k == HC_SNAP ? "false" : "true");
         sb_put(s, ",\"thread\":\"%s\",\"crit\":%s,\"on\":%s,\"calls_s\":%.1f,\"us_call\":%.2f,\"ms_s\":%.3f,\"ms_frame\":%.3f,\"pct\":%.2f,\"fps_cost\":%.2f,\"total\":%llu",
                g_hc[k].thread, g_hc[k].crit ? "true" : "false", on ? "true" : "false", rc[k], rc[k] > 0 ? ms * 1e3 / rc[k] : 0, ms, msf, p50 > 0 ? 100 * msf / p50 : 0, cost, (unsigned long long)g_hc[k].calls);
         if (r->have) sb_put(s, ",\"ab\":{\"on_fps\":%.2f,\"off_fps\":%.2f,\"loss\":%.2f,\"lo\":%.2f,\"hi\":%.2f,\"pairs\":%d,\"age\":%.0f,\"p95_on\":%.1f,\"p95_off\":%.1f,\"max_on\":%.1f,\"max_off\":%.1f}",
@@ -846,7 +885,7 @@ static void st_aim_tick(const StPlayer* pl, int np, double now, const uint8_t* t
     static unsigned seen; unsigned n = __atomic_load_n(&g_nov_aimr_w, __ATOMIC_ACQUIRE); if (n - seen > NOV_AIMR_N) seen = n - NOV_AIMR_N;
     for (; seen != n; seen++) { const NovAimRes* q = &g_nov_aimr[seen % NOV_AIMR_N];
         for (int k = 0; k < np; k++) if (pl[k].unit == q->owner) { StTrack* tr = st_track(&pl[k]); if (!tr) break;
-            tr->aim_err[tr->aim_ei++ & 63] = q->err; tr->aim_n++; if (q->on) { tr->aim_on++; if (q->head) tr->aim_head++; }
+            tr->aim_err[tr->aim_ei++ & 63] = q->err; tr->aim_n++; if (q->on) { tr->aim_on++; tr->hits++; if (q->head) tr->aim_head++; }   // (a hit = through an enemy's hitbox)
             // the outlier signals (the page's Aimbot? column): the OPENING shot of an engagement (no aimed shot for 1 s before
             // it) on target -- a person usually needs a correction, a lock-on doesn't -- and shots at 12+ world units (~36 m)
             if (q->t - tr->aim_last > 1.0) { tr->aim_open_n++; tr->aim_open_on += q->on; } tr->aim_last = q->t;
@@ -1042,9 +1081,9 @@ static void st_snapshot(StBuf* s) {
         }
         if (pl[k].slot >= 0 && pl[k].slot < 128) { SbNow* w = &g_sbnow[pl[k].slot]; snprintf(w->name, sizeof w->name, "%s", pl[k].name); w->team = team; w->have = have && !dead; w->dead = dead; w->how[0] = 0; if (have) memcpy(w->cur, o, 12);
             if (have && !dead) { uint32_t parent = *(const uint32_t*)(d + 0x10); uint64_t vd = parent != 0xFFFFFFFFu ? ST_DATUM(parent) : 0; uint32_t df = 0;
-                if (vd && hb_read(vd, &df, 4) && *(const int16_t*)(d + 0x24E) == 0) snprintf(w->how, sizeof w->how, "%s", hb_tag_name(df));   // the driver: a splatter is possible
+                if (vd && hb_read(vd, &df, 4) && *(const int16_t*)(d + 0x24E) == 0) { snprintf(w->how, sizeof w->how, "%s", hb_tag_name(df)); st_nice_case(w->how); }   // the driver: a splatter is possible
                 else { int ws = *(const int8_t*)(d + 0x262); const uint32_t* wp = (const uint32_t*)(d + 0x268); uint64_t wd = (ws >= 0 && ws < 4) ? ST_DATUM(wp[ws]) : 0;
-                       if (wd && hb_read(wd, &df, 4)) snprintf(w->how, sizeof w->how, "%s", hb_tag_name(df)); } } }
+                       if (wd && hb_read(wd, &df, 4)) { snprintf(w->how, sizeof w->how, "%s", hb_tag_name(df)); st_nice_case(w->how); } } } }
         int you = g_nick[0] && !strcmp(pl[k].name, g_nick);
         char pip[64] = "", prd[128] = ""; for (int q = 0; q < nss; q++) if (!strcmp(ss[q].name, pl[k].name)) { if (pk_addr_of(ss[q].voice, pip, sizeof pip)) pk_rdns_str(pip, prd, sizeof prd); break; }
         sb_put(s, "%s{\"name\":", first ? "" : ","); first = 0; sb_str(s, pl[k].name); sb_put(s, ",\"slot\":%d", pl[k].slot);
@@ -1073,7 +1112,13 @@ static void st_snapshot(StBuf* s) {
         sb_put(s, ",\"pos\":"); sb_f3(s, o); sb_put(s, ",\"speed\":%.2f,\"kills\":%d", spd, sbok ? sbs[SB_KILLS] : 0);
         if (sbok) sb_put(s, ",\"score\":%d,\"assists\":%d,\"betrayals\":%d,\"suicides\":%d", sbs[SB_SCORE], sbs[SB_ASSISTS], sbs[SB_BETRAYALS], sbs[SB_SUICIDES]);
         st_aim_json(s, t);
-        if (t) sb_put(s, ",\"deaths\":%d,\"hits\":%d,\"accuracy\":%.3f,\"shots\":%d,\"life\":%.1f,\"longest_life\":%.1f,\"distance\":%.1f,\"top_speed\":%.2f", sbok ? sbs[SB_DEATHS] : t->deaths, t->hits, t->shots ? (double)t->hits / t->shots : 0.0, t->shots, t->alive ? now - t->life_start : 0.0,
+        if (pl[k].slot >= 0 && pl[k].slot < 128 && g_rs_have) { int any = 0;   // this match's medals (the game results' counts)
+            for (int m = 0; m < 112; m++) { int c = g_rs_cur[pl[k].slot][RS_MEDAL + m] & 0x7fff; if (!c || m == 74 || m == 86 || (m >= 55 && m <= 57)) continue;
+                sb_put(s, "%s", any ? "," : ",\"medals\":{"); any = 1; sb_str(s, g_medal[m]); sb_put(s, ":%d", c); }
+            if (any) sb_put(s, "}"); }
+        static int noaim = -1; if (noaim < 0) noaim = getenv("NHOOK_NO_AIM") != 0;   // hits: shots through an enemy's hitbox (the aim meter); without it the old estimate
+        int hits = t ? (noaim ? t->hits_sphere : t->hits) : 0;
+        if (t) sb_put(s, ",\"deaths\":%d,\"hits\":%d,\"accuracy\":%.3f,\"shots\":%d,\"life\":%.1f,\"longest_life\":%.1f,\"distance\":%.1f,\"top_speed\":%.2f", sbok ? sbs[SB_DEATHS] : t->deaths, hits, t->shots ? (double)hits / t->shots : 0.0, t->shots, t->alive ? now - t->life_start : 0.0,
                       t->longest > (t->alive ? now - t->life_start : 0) ? t->longest : (t->alive ? now - t->life_start : 0), t->dist, t->top_speed);
         if (g_st_var_ok) st_player_traits(s, pl[k].rec);
         sb_put(s, "}");
@@ -1094,7 +1139,7 @@ static void st_snapshot(StBuf* s) {
             memcpy(vprev, vcur, vn * 4); vhave = 1; } } }
     { static unsigned seen; unsigned n = __atomic_load_n(&g_nov_shot_n, __ATOMIC_ACQUIRE); if (n - seen > 8192) seen = n - 8192;   // shots / hits per player (object_delete)
       for (; seen != n; seen++) { const NovShot* q = &g_nov_shot[seen & 8191];
-          for (int k = 0; k < np; k++) if (pl[k].unit == q->owner) { StTrack* tr = st_track(&pl[k]); if (tr) { tr->shots++; if (q->victim != 0xFFFFFFFFu) tr->hits++; } break; } } }
+          for (int k = 0; k < np; k++) if (pl[k].unit == q->owner) { StTrack* tr = st_track(&pl[k]); if (tr) { tr->shots++; if (q->victim != 0xFFFFFFFFu) tr->hits_sphere++; } break; } } }
     st_aim_tick(pl, np, now, tab, hi);                                  // aim vs hits (noverlay.c nov_aim_shot / nov_aim_tick)
     st_spawns(tab, hi, pl, np, m, now);                        // spawns / pickups -> the feed, the heatmap's spawn points, "items"
     // the forensic archive: roster changes, session boundaries. Its map: not the loading screen's scenery (130_epilogue, while
@@ -1210,6 +1255,7 @@ static int st_control(const char* act, const char* qs) {
     if (!strcmp(act, "recstop")) { rec_stop(); return 1; }
     if (!strcmp(act, "forensic")) return fx_control(qs);       // archive / voice audio / consent (forensic.c)
     if (!strcmp(act, "hookab")) return hc_control(qs);           // the hook cost meter's on/off measurement
+    if (!strcmp(act, "hookset")) return hc_set(qs);               // ... and its per-hook switches
     if (!strcmp(act, "mute") || !strcmp(act, "unmute")) { voice_init(); const char* v = strstr(qs, "voice="); unsigned long long id = v ? strtoull(v + 6, 0, 16) : 0;
         if (!g_set_muted || !id) return 0; g_set_muted(id, !strcmp(act, "mute")); uint64_t mu[64];
         nlog("[nhook] page: %s %016llx (the app's mute list now holds %d)", act, id, muted_list(mu, 64)); return 1; }

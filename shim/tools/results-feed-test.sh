@@ -20,6 +20,7 @@ cat <<'EOF'
 #include <string.h>
 #include <stdint.h>
 #include <stdarg.h>
+#include <math.h>
 static volatile uint64_t g_res_base; static volatile int64_t g_res_stats = 0x6c98, g_res_vs = 0x2cf98, g_res_vslog = 7;
 static int rd(uint64_t a, void* out, size_t n) { memcpy(out, (const void*)(uintptr_t)a, n); return 0; }
 static void nlog(const char* f, ...) { va_list ap; va_start(ap, f); vprintf(f, ap); va_end(ap); printf("\n"); }
@@ -74,6 +75,12 @@ int main(void) {
     { for (int i = 0; i < 9; i++) { kill_r(0, 1, 11, 1, 0, 0); kill_r(1, 3, 11, 1, 0, 0); } kill_r(2, 3, 11, 1, 0, 0); sbv(3, 0);
       tick("a game in progress filling in (19 changes at once)", 0, 0, 0); g_nsbv = 0; }
     { *VS(0, 3) += 2; *VS(3, 0) += 0x20000; (*ST(0, 9)) += 2; (*ST(3, 11)) += 2; sbv(3, 0); tick("a pair up by 2 at once (history)", 0, 0, 0); g_nsbv = 0; }
+    // medals (statistic 63 + i): a kill medal needs the player's kill on the scoreboard (g_sb_kill_t), else it is history
+    { g_sb_kill_t[0] = g_now + 0.1; (*ST(0, 63 + 2))++; const char* w[] = {"Alice: Double Kill"}; tick("a medal with a kill on the scoreboard", 1, w, 0); }
+    { (*ST(1, 63 + 41))++; tick("a kill medal without one: waits", 0, 0, 0); g_now += 3.5; tick("... then dropped as history", 0, 0, 0); }
+    { (*ST(2, 63 + 51))++; const char* w[] = {"Carol: Flag Score"}; tick("an objective medal (no kill behind it)", 1, w, 0); }
+    { g_sb_kill_t[3] = g_now + 0.1; for (int m = 0; m < 5; m++) (*ST(3, 63 + 11 + m))++; tick("5 medals at once (the table filling in)", 0, 0, 0); }
+    { g_sb_kill_t[0] = g_now + 0.1; (*ST(0, 63 + 74))++; (*ST(0, 63 + 86))++; tick("Kill and Assist are not reported", 0, 0, 0); }
     { for (int i = 0; i < 4; i++) (*ST(i, 1))++; (*ST(0, 3))++; (*ST(2, 3))++; const char* w[] = {"Game over: Alice, Carol won"}; tick("game over (games-completed, games-won)", 1, w, 0); }
     memset(g_mem, 0, 0x4a940); tick("new match (counts back to 0)", 0, 0, 0);
     { kill(2, 3, 0, 1, 0, 0); const char* w[] = {"Carol killed Dave"}; tick("an unnamed weapon (type 0, a modded map's)", 1, w, 0); }

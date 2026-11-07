@@ -76,7 +76,7 @@ static int nov_collect(NovObj* out, int max) {
     int32_t maxc = *(int32_t*)(hdr + 0x20), esz = *(int32_t*)(hdr + 0x24), hi = *(int32_t*)(hdr + 0x3c); uint64_t data = *(uint64_t*)(hdr + 0x48);
     if (esz != 0x18 || hi <= 0 || hi > maxc || hi > HB_MAXOBJ || !hb_read(data, g_nov_tab, (size_t)hi * 0x18)) return 0; g_nov_hi = hi;
     int fh = nov_feat(NOV_HIT), ft = nov_feat(NOV_TRC), fi = nov_feat(NOV_INF), fw = nov_feat(NOV_ITM), fveh = nov_feat(NOV_VEH);
-    int fb = fh || fi || (fveh && g_nov_team[NOV_VEH] > 0) || (ft && g_nov_team[NOV_TRC] > 0) || 1;   // (bipeds always: our own team)
+    int fb = fh || fi || (fveh && g_nov_team[NOV_VEH] > 0) || (ft && g_nov_team[NOV_TRC] > 0);   // (players only for a feature that draws or filters by them)
     int n = 0;
     for (int i = 0; i < hi && n < max; i++) {
         const uint8_t* e = g_nov_tab + i * 0x18; if (!*(const uint16_t*)e) continue; int t = e[3], unit = t == 0 || t == 1 || t == 12;
@@ -176,7 +176,8 @@ static int nov_hitbox(const NovObj* o, const float* vp, float* verts, int nv, in
         float best = -1e30f; for (int r = 0; r < g->nreg; r++) if (zc[r] && zs[r] / zc[r] > best) { best = zs[r] / zc[r]; head = r; } }
     static const float cbody[3] = {1, 0.15f, 0.15f}, chead[3] = {1, 0.95f, 0.1f}, fbody[3] = {0.25f, 0.5f, 1}, fhead[3] = {0.6f, 0.95f, 1}, cveh[3] = {0.3f, 0.75f, 1},
         cwk[4][3] = {{0.3f, 0.75f, 1}, {1, 0.55f, 0.1f}, {1, 0.95f, 0.1f}, {1, 0.3f, 0.85f}};
-    int fr = nov_friend(o); const float* cb = fr ? fbody : cbody, * ch = fr ? fhead : chead; int wkshow = g_nov_wk;
+    static const float cdead[3] = {0.45f, 0.45f, 0.45f};
+    int fr = nov_friend(o); const float* cb = o->dead ? cdead : fr ? fbody : cbody, * ch = o->dead ? cdead : fr ? fhead : chead; int wkshow = g_nov_wk;
     for (int s = 0; s < g->nseg && nv + 2 <= cap; s++) { if (g->perm[s] != sel[g->reg[s]]) continue;
         const float* M = mt + g->node[s] * 13, * P = g->pts + s * 6; int wk = g->wk[s]; if (wk && !(wkshow & (wk == 2 ? 1 : wk == 1 ? 2 : 4))) wk = 0;
         const float* col = o->type == 0 ? (g->reg[s] == head ? ch : cb) : (wk < 4 ? cwk[wk] : cveh);
@@ -262,13 +263,15 @@ static void on_object_delete_body(uint64_t* ctx) {   // (x0: the guest context t
     uint8_t* e = data + (size_t)i * 0x18; if (e[3] != 5 || *(uint16_t*)e != (uint16_t)(h >> 16)) return;   // projectiles only
     uint8_t* p = *(uint8_t**)(e + 0x10); if (!p) return;
     { uint32_t own = *(uint32_t*)(p + 0xC0), vic = 0xFFFFFFFFu; const float* ip = (const float*)(p + 0x1c); int hi = *(int32_t*)(arr + 0x3c);
-      if (own != 0xFFFFFFFFu && hi > 0 && hi <= 65536) for (int j = 0; j < hi; j++) { uint8_t* b = data + (size_t)j * 0x18; if (b[3] != 0 || !*(uint16_t*)b) continue;
+      static int noaim = -1; if (noaim < 0) noaim = getenv("NHOOK_NO_AIM") != 0;   // (hits come from the aim meter's hitbox test; this pass only without it)
+      if (noaim && own != 0xFFFFFFFFu && hi > 0 && hi <= 65536) for (int j = 0; j < hi; j++) { uint8_t* b = data + (size_t)j * 0x18; if (b[3] != 0 || !*(uint16_t*)b) continue;
           uint32_t bh = ((uint32_t)*(uint16_t*)b << 16) | (uint32_t)j; if (bh == own) continue; uint8_t* bp = *(uint8_t**)(b + 0x10); if (!bp) continue;
           const float* c = (const float*)(bp + 0x1c); float r2 = c[3] + 0.1f, dx = ip[0] - c[0], dy = ip[1] - c[1], dz = ip[2] - c[2];
           if (r2 > 0 && r2 < 5 && dx * dx + dy * dy + dz * dz <= r2 * r2) { vic = bh; break; } }
       unsigned q = __atomic_load_n(&g_nov_shot_n, __ATOMIC_RELAXED) & 8191; g_nov_shot[q].owner = own; g_nov_shot[q].victim = vic; g_nov_shot[q].def = *(uint32_t*)p;
       __atomic_store_n(&g_nov_shot_n, g_nov_shot_n + 1, __ATOMIC_RELEASE); }   // (one writer: the engine thread)
     if (!g_hc_off[HC_AIM]) { uint64_t t1 = hc_now(); nov_aim_shot(arr, data, p); hc_add(HC_AIM, t1); }
+    if (!nov_feat(NOV_TRC)) return;   // (the tracer record: only while tracers are on)
     unsigned k = __atomic_fetch_add(&g_nov_imp_n, 1, __ATOMIC_RELAXED) & 255; NovImp* r = &g_nov_imp[k];
     r->def = *(uint32_t*)p; r->owner = *(uint32_t*)(p + 0xC0); memcpy(r->pos, p + 0x1c, 12); memcpy(r->vel, p + 0x74, 12); memcpy(r->st, p + 0x1e8, 12); memcpy(&r->trav, p + 0x1b0, 4);
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); double tv = ts.tv_sec + ts.tv_nsec * 1e-9; __atomic_store(&r->t, &tv, __ATOMIC_RELEASE);
@@ -400,7 +403,8 @@ static pthread_mutex_t g_nov_mx = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t g_hc_part[HC_N];   // this frame's ticks per overlay feature (nov_build_body)
 #define HC_PART(k, stmt) do { uint64_t t_ = hc_now(); stmt; g_hc_part[k] += hc_now() - t_; } while (0)
 static int nov_build_body(float* verts, int cap, int w, int h, float scale) {
-    if (!nov_wanted() || !g_gameplay_t0 || w < 16 || h < 16) return 0;
+    int want = nov_wanted(); g_view_wanted = want; if (want) nov_view_hook_want();   // (the camera hook: installed on first use, idle while off)
+    if (!want || !g_gameplay_t0 || w < 16 || h < 16) return 0;
     float vp[32]; if (!nov_camera(vp, (float)w / (float)h)) return 0;
     pthread_mutex_lock(&g_nov_mx);
     g_nov_scale = scale > 0 ? scale : 1; g_nov_W = w / g_nov_scale; g_nov_H = h / g_nov_scale;
@@ -426,7 +430,10 @@ static int nov_build_body(float* verts, int cap, int w, int h, float scale) {
         if (veh) { g_nov_occ = g_nov_vis[NOV_VEH]; if (fveh && (g_nov_team[NOV_VEH] <= 0 || nov_team_ok(g_nov_team[NOV_VEH], nov_occ_cls(o->handle, objs, n)))) HC_PART(HC_OV_VEH, nv = nov_hitbox(o, vp, verts, nv, cap)); continue; }
         if (o->type != 0) continue;
         int cls = nov_bip_cls(o);
-        g_nov_occ = g_nov_vis[NOV_HIT]; if (fh && nov_team_ok(g_nov_team[NOV_HIT], cls)) HC_PART(HC_OV_HIT, nv = nov_hitbox(o, vp, verts, nv, cap));
+        g_nov_occ = g_nov_vis[NOV_HIT];
+        // dead bodies: no hitboxes (a body lying on the ground drew as red boxes: clutter; 2026-11-07), NHOOK_HB_DEAD=1 = grey
+        static int deadon = -1; if (deadon < 0) deadon = getenv("NHOOK_HB_DEAD") && atoi(getenv("NHOOK_HB_DEAD"));
+        if (fh && nov_team_ok(g_nov_team[NOV_HIT], cls) && (!o->dead || deadon)) HC_PART(HC_OV_HIT, nv = nov_hitbox(o, vp, verts, nv, cap));
         if (fi && nov_team_ok(g_nov_team[NOV_INF], cls)) { uint64_t tf_ = hc_now();
             g_nov_occ = g_nov_vis[NOV_INF]; float top[3] = {o->c[0], o->c[1], o->c[2] + o->r + 0.12f}, tx, ty; if (!nov_proj(vp, top, &tx, &ty)) continue;
             nov_text_size(g_nov_px[NOV_INF]);
@@ -467,6 +474,7 @@ static int nov_build_body(float* verts, int cap, int w, int h, float scale) {
     pthread_mutex_unlock(&g_nov_mx);
     return nv;
 }
+void nov_idle(void) { g_view_wanted = 0; }   // nrender.m: a frame without the overlay (the camera hook's handler stays idle)
 int nov_build(float* verts, int cap, int w, int h, float scale) {   // (timed: nhcost.h; a feature's own parts apart)
     uint64_t t0 = hc_now(); memset(g_hc_part, 0, sizeof g_hc_part); int nv = nov_build_body(verts, cap, w, h, scale); uint64_t all = hc_now() - t0, parts = 0;
     static const int fk[6] = {HC_OV_HIT, HC_OV_VEH, HC_OV_TRC, HC_OV_INF, HC_OV_ITM, HC_OV_ZON}, fb[6] = {NOV_HIT, NOV_VEH, NOV_TRC, NOV_INF, NOV_ITM, NOV_ZON};

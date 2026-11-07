@@ -14,7 +14,7 @@
 typedef struct { char name[64]; int idx, peer; uint64_t voice; int muted, host; } StSess;
 static volatile uint64_t g_ses_store;                       // "[c1] network sessions moved to 0x..." (0 = not seen)
 static volatile int64_t g_ses_peers_shift = 0x138168, g_ses_players_shift = 0x148150;
-static int g_st_hostpeer = -1, g_st_localpeer = -1;
+static int g_st_hostpeer = -1, g_st_localpeer = -1; static volatile uint64_t g_st_host_id;   // (host_id: the host peer's id -- a dedicated server's, which is no player)
 static uint64_t st_sess_ptr(void) {
     uint64_t sess = 0; if (!g_img || !hb_read(g_img + 0x1e250d0, &sess, 8) || sess < 0x10000) return 0;
     return sess;
@@ -29,6 +29,7 @@ static int st_session(StSess* out, int max, uint32_t* state) {
       else { g_st_hostpeer = -1; g_st_localpeer = -1; } }
     uint8_t pm[16] = {0}, qm[16] = {0};
     if (!hb_read(sess + 0x126c, pm, 16) || !hb_read(sess + 0x54, qm, 16)) return 0;
+    { uint64_t hid = 0; if (g_st_hostpeer >= 0 && ((qm[g_st_hostpeer >> 3] >> (g_st_hostpeer & 7)) & 1) && hb_read(sess + 0x58 + (uint64_t)g_ses_peers_shift + (uint64_t)g_st_hostpeer * 0x110, &hid, 8)) g_st_host_id = hid; }
     uint64_t pbase = sess + 0x1270 + (uint64_t)g_ses_players_shift, qbase = sess + 0x58 + (uint64_t)g_ses_peers_shift; int n = 0;
     for (int i = 0; i < 128 && n < max; i++) {
         if (!((pm[i >> 3] >> (i & 7)) & 1)) continue;
@@ -112,6 +113,7 @@ static int pk_player(const char* addr, char* out, size_t on) {   // the player a
     if (!id) return 0; int ok = 0; pthread_mutex_lock(&g_pkn_mx);
     if (st_wall() - g_pkn_t > 1.0) { g_npkn = st_session(g_pkn, 128, 0); g_pkn_t = st_wall(); }
     for (int i = 0; i < g_npkn; i++) if (g_pkn[i].voice == id) { snprintf(out, on, "%s", g_pkn[i].name); ok = 1; break; }
+    if (!ok && id == g_st_host_id) { snprintf(out, on, "server"); ok = 1; }   // (the host peer without a player: a dedicated server)
     pthread_mutex_unlock(&g_pkn_mx); return ok; }
 // ---- reverse DNS (the Packets window's "look up names", ?rdns=1): each address's PTR name, once, on a resolver thread
 typedef struct { uint8_t fam, a[16]; int st; char name[128]; } PkRd;   // st 0 queued, 1 named, 2 no name

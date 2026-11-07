@@ -11,15 +11,15 @@ done / fixed / closed; #47's pending live check passed in the native app 2026-11
 |---|---|---|
 | N1 | **Hook cost meter** (user, 2026-11-07: "when a hook is enabled it should calculate any performance loss that occurs as a factor of it being enabled") | DONE 2026-11-07: every hook / overlay part times itself (nhcost.h); the page's Hook cost panel shows calls/s, time per frame, an fps estimate and a measure button (the real on/off run). Live (51-player Hugegrass, 22 fps, sim-bound): overlay, hitboxes, vehicles, bullets, stats all within noise; vehicles 1.3 ms a frame self-timed |
 | N2 | **Aimbot? column** (user, 2026-11-07) | BUILT, live-checked 2026-11-07 (51-player Hugegrass): outliers against the lobby -- through-hitbox share, opening shots on target, head share (2 of 3); long range dropped from the vote (on a big map it repeats the first); "head" is the topmost hitbox region, wrong on modded characters (the lobby comparison cancels it) |
-| N3 | **Off means off, native** (user, 2026-11-07: "a disabled hook should not cost anything") | OPEN: the camera hook stays installed with the overlay off (its filter runs ~700k times a second); the bullet hook writes tracer records with tracers off; with any overlay feature on every player is read; every overlay read is a system call. N1 measures it first |
+| N3 | **Off means off, native** (user, 2026-11-07: "a disabled hook should not cost anything") | DONE 2026-11-07: the camera hook installs on first overlay use and idles while it is off; one bullet pass; tracer records only with tracers on; players read only when a feature needs them; a switch per hook in the Hook cost panel (FIXES.md "off means off") |
 | N4 | **Merge client-v0.10 into main + a release** | WAITING for the user's OK (the reclaimer-0.10.0 release predates the native hooks) |
 | N5 | **After an in-session map change** | PARTLY CHECKED: the kill feed kept working Valhalla -> Guardian in one run (2026-11-07); heatmap, overlay, zones and the aim meter after a change not checked |
 | N6 | **Forensic voice: channel and open mics** | OPEN: the native records carry no channel (global / team / proximity: "not known"); a player with an always-open mic is one long utterance (no silence split) |
-| N7 | **Kill feed: the first kills after a launch are estimated** | OPEN (minor): until the game results have counted a death the scoreboard path answers (its weapon = the tag name in capitals) |
-| N8 | **Hits / accuracy are an estimate** | OPEN: a hit = the bullet ended inside a body's bounding sphere (a practice target's own counter disagreed); the aim meter's hitbox test could replace it |
+| N7 | **Kill feed: the first kills after a launch are estimated** | DONE 2026-11-07: the scoreboard path always waits for the results; normal-case weapon names |
+| N8 | **Hits / accuracy are an estimate** | DONE 2026-11-07: hits = shots through an enemy's hitboxes (aim meter); native-aim-test.sh 8 of 10 on a practice target |
 | N9 | **Packets window: game messages** | OPEN: 0.10's wire protocol is the app's own (the 0.9 halo3 message table does not apply) |
-| N10 | **Medals in the feed** | OPEN (not ported) |
-| N11 | **Hitboxes on dead bodies** | OPEN (offered 2026-11-07) |
+| N10 | **Medals in the feed** | DONE 2026-11-07: medals (statistic 63 + i, the app's 112-medal table) in the feed and the player details; live check left |
+| N11 | **Hitboxes on dead bodies** | DONE 2026-11-07: dead bodies get no hitboxes (NHOOK_HB_DEAD=1 = grey) |
 | N12 | **A native dedicated server test** | OPEN: needs a local-only configuration first (a public listing must not happen) |
 
 Not ported from the loader (wanted? the user decides): auto-vote (#50); graphics quality from the page (#68; the app's own
