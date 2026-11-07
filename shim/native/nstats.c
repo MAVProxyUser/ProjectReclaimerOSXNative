@@ -920,6 +920,7 @@ static struct { uint64_t id; double t; } g_talk[128]; static pthread_mutex_t g_t
 static double st_talk_age(uint64_t id) { double now = mono_s(), a = 1e9; pthread_mutex_lock(&g_talk_mx);
     for (int i = 0; i < 128; i++) if (g_talk[i].id == id) { a = now - g_talk[i].t; break; } pthread_mutex_unlock(&g_talk_mx); return a; }
 static uint64_t fx_now_ns(void); static void fx_voice_report(uint64_t t_start_ns, uint64_t sender, int frames);   // (forensic.c, below)
+static void fx_voice_level(uint64_t t_start_ns, uint32_t window_ms, uint64_t sender, int frames, double db);
 static volatile int g_fx_on; static void fx_voice(uint64_t sender, const uint8_t* payload, uint64_t len);
 // The voice packets themselves (forensic audio, like the loader's voice_recv hook): a text hook on the app's Opus decode (opus-rs,
 // 0.10.0 app 0x1003f1e7c: x0 decoder, x1 packet, x2 length; 0 = a lost frame being concealed). Its one caller (0x102152578, the
@@ -945,11 +946,13 @@ static void nh_on_opus_body(uint64_t dec, const uint8_t* pkt, uint64_t len, uint
 }
 static void st_voice_report(const char* l) {
     const char* h = strstr(l, "; heard "); if (!h) return; h += 8; double now = mono_s(); uint64_t tns = fx_now_ns();
+    static double prev; double win = prev > 0 ? now - prev : 2.0; prev = now; if (win < 0.5 || win > 5) win = 2.0;   // (the report's window, for FXF_LEVEL)
     while ((h = strstr(h, "0x"))) { char* e; uint64_t id = strtoull(h + 2, &e, 16); if (e == h + 2 || *e != ':') { h += 2; continue; }
         int fr = (int)strtol(e + 1, &e, 10); const char* r = strstr(e, " rms "); const char* nx = strstr(e, ", 0x");
         if (!r || (nx && r > nx)) { h = e; continue; } double db = strtod(r + 5, 0); h = nx ? nx + 2 : e;
         static int vl = -1; if (vl < 0) vl = getenv("NHOOK_VOICE_LOG") != 0;   // NHOOK_VOICE_LOG=1: every sender of every report
         if (vl) nlog("[nhook] voice report: %016llx %d frames rms %.1f dBFS%s", (unsigned long long)id, fr, db, id && fr > 0 && db > TALK_DBFS ? " -> talking" : "");
+        if (id && fr > 0) fx_voice_level(tns - (uint64_t)(win * 1e9), (uint32_t)(win * 1000), id, fr, db);   // (the archive splits open microphones on these)
         if (!id || fr <= 0 || db <= TALK_DBFS) continue;
         pthread_mutex_lock(&g_talk_mx); int k = -1, old = 0; for (int i = 0; i < 128; i++) { if (g_talk[i].id == id) { k = i; break; } if (g_talk[i].t < g_talk[old].t) old = i; }
         double gap = k >= 0 ? now - g_talk[k].t : 1e9;   // talked in the report before (~2 s ago): these frames continue that talk

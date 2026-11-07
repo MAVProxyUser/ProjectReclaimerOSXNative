@@ -14,7 +14,7 @@ done / fixed / closed; #47's pending live check passed in the native app 2026-11
 | N3 | **Off means off, native** (user, 2026-11-07: "a disabled hook should not cost anything") | DONE 2026-11-07: the camera hook installs on first overlay use and idles while it is off; one bullet pass; tracer records only with tracers on; players read only when a feature needs them; a switch per hook in the Hook cost panel (FIXES.md "off means off") |
 | N4 | **Merge client-v0.10 into main + a release** | WAITING for the user's OK (the reclaimer-0.10.0 release predates the native hooks) |
 | N5 | **After an in-session map change** | PARTLY CHECKED: the kill feed kept working Valhalla -> Guardian in one run (2026-11-07); heatmap, overlay, zones and the aim meter after a change not checked |
-| N6 | **Forensic voice: channel and open mics** | OPEN: the native records carry no channel (global / team / proximity: "not known"); a player with an always-open mic is one long utterance (no silence split) |
+| N6 | **Forensic voice: channel and open mics** | PARTLY DONE 2026-11-07: open microphones are split on the app's quiet windows (FXF_LEVEL); the channel stays "not known" natively: the voice mixer keeps no channel per packet, it would need a hook on the app's network receive path |
 | N7 | **Kill feed: the first kills after a launch are estimated** | DONE 2026-11-07: the scoreboard path always waits for the results; normal-case weapon names |
 | N8 | **Hits / accuracy are an estimate** | DONE 2026-11-07: hits = shots through an enemy's hitboxes (aim meter); native-aim-test.sh 8 of 10 on a practice target |
 | N9 | **Packets window: game messages** | OPEN: 0.10's wire protocol is the app's own (the 0.9 halo3 message table does not apply) |

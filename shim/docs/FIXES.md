@@ -2046,6 +2046,15 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   user wants the DNS name and the player's name by an address where they apply; on a dedicated server the one address is the
   server, which is no player, so it had nothing. HOW: the session's host peer id is kept; its address, when no player owns it,
   is labelled "server".
+- **Forensic archive: an always-open microphone is split into what was said** (2026-11-07; forensic.c FXF_LEVEL /
+  fx_voice_level / fx_segment, nstats.c st_voice_report) — WHY: a player whose microphone never closes sent packets of
+  background noise the whole game: one 3.5-minute utterance on the timeline. Packet sizes could not tell (that noise came in
+  normal-sized Opus packets, median 40 bytes vs 45-55 for speech). HOW: every app voice report ("heard 0x<id>: N frames ...
+  rms X dBFS", ~2 s) is archived per sender as a FXF_LEVEL record (window start, length, rms x 100); the segmenter leaves a
+  sender's packets inside windows quieter than -60 dBFS (the talking threshold) out of every utterance. Offline:
+  forensic-oggtest.sh (6 s of packets with a quiet 2 s in the middle -> two utterances of 100 packets). The voice CHANNEL
+  (global / team / proximity) is still not known natively: the app's voice mixer keeps per sender only a sequence-keyed queue
+  of raw packets ([kind][data]; 0x10214dcbc pops it), so the channel would have to come from its network receive path.
 - **nhook-selftest.sh: its own forensic / heatmap folders** (2026-11-07; shim/tools/nhook-selftest.sh) — WHY: the offline
   selftest starts nhook's stats server, whose archive opened an empty "menu" session in the player's real forensic archive on
   every run. HOW: PELOAD_FORENSIC_DIR and NHOOK_HEATMAP_DIR point into the test's temporary folder.
