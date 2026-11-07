@@ -28,7 +28,7 @@ cp shim/assets/Reclaimer.icns "$D/shim/assets/"
 for f in h3map h3bsp h3bounds h3nav h3inv h3spots h3dmg; do [ -f re-tools/$f.py ] && cp re-tools/$f.py "$D/re-tools/"; done
 cp shim/tools/quiet-run.sh shim/tools/servers.sh shim/tools/maptop.sh shim/tools/make-usb.sh shim/tools/usb-install.sh \
    shim/tools/machine.sh shim/tools/workshop-helper.sh shim/tools/client-update.sh shim/tools/make-app.sh \
-   shim/tools/profile-native.py "$D/shim/tools/"
+   shim/tools/profile-native.py shim/tools/native-dedicated.sh "$D/shim/tools/"
 cp reclaimer-mac.sh README.md "$D/"; touch "$D/client/.gitkeep"
 chmod +x "$D/shim/build/peload" "$D/shim/build/glhelper" "$D/shim/build/reclaimer-launcher" "$D"/shim/*.sh "$D"/shim/tools/*.sh "$D/shim/tools/profile-native.py" "$D/reclaimer-mac.sh"
 # Reclaimer.app at the top of the bundle: portable (uses the folder it sits in), signed ad hoc

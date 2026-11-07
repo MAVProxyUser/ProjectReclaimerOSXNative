@@ -25,17 +25,21 @@ recompiles MCC's `halo3.dll` itself, so it needs neither this loader nor Rosetta
   `bash shim/native.sh` (it starts `/Applications/Project Reclaimer.app` with the dylib; your real player folder with
   `NATIVE_REAL=1`, else a test profile). The page is on http://127.0.0.1:8765/ (it opens in the browser): players, kills /
   deaths / assists, the kill feed, Connected list with each player's address, packets (with reverse-DNS names), the heatmap,
-  game rules, the fps line; the overlay (hitboxes, vehicles and weak spots, info labels, items, tracers of slow projectiles,
-  kill / safe zones -- all drawn through walls for now), clip recording, frame captures and /forensics.
+  game rules, the fps line, shots / accuracy, aim (how far each player's shots miss the hitboxes, and how many on-target
+  shots the server registers) with an Aimbot? outlier flag, a Hook cost panel (what each of our hooks costs, with an on/off
+  measure button), weapon and vehicle spawns, page mutes, who is talking, chat; the overlay (hitboxes,
+  vehicles and weak spots, info labels, items, bullet tracers, kill / safe zones; "visible only" and zones hidden behind the
+  world), clip recording, frame captures and /forensics.
 
 ```bash
 NATIVE_REAL=1 bash shim/native.sh                                      # the app with the stats page
 NHOOK_HITBOXES=1 NHOOK_HB_TRACERS=1 NATIVE_REAL=1 bash shim/native.sh --join-server <host:port>   # straight into a server
+python3 shim/tools/servers10.py                                        # the busiest 0.10 servers, with their addresses
 ```
 
-Not in the native app yet: voice / mute, bullet tracers (the app replaced halo3's object_delete with its own code),
-"visible only" (the scene's depth), a server list on the command line. Measured: 120-200 fps in 52-72 player games at
-3440x1440 on an M4. The rest of this README is the loader (0.9.x clients).
+New and not yet checked with real talkers: voice audio in the native forensic archive (a hook on the app's Opus decoder).
+Measured: 120-200 fps in 52-72 player games at 3440x1440 on an M4. The rest of this README is the loader (0.9.x
+clients).
 
 ## Status
 
@@ -213,7 +217,7 @@ Startup sequence:
 
 To jump straight into a server, give its address: `RECLAIMER_JOIN=host:port bash shim/play.sh`.
 `bash shim/tools/servers.sh` lists the busiest servers (64-127 players) with their addresses and the mods
-each one needs; [shim/docs/mods.md](shim/docs/mods.md) explains mods, including downloading Workshop-only
+each one needs (0.9 servers; 0.10+ servers: `python3 shim/tools/servers10.py`); [shim/docs/mods.md](shim/docs/mods.md) explains mods, including downloading Workshop-only
 ones with DepotDownloader.
 
 `RECLAIMER_DIRECT=1 bash shim/play.sh` skips the menu and goes straight into a local Guardian match
@@ -424,7 +428,7 @@ beside the death heatmap with the player details under it (right); Connected; th
 
   ![Packets: the last 10 s per type and peer, halo3 messages counted, the log with each message's peer](shim/docs/img/stats-packets.png)
 - **Players** -- living players first, then players waiting to respawn, then those who quit (still in the game's
-  player list but gone from its network session); click a column title to sort (by team, or the whole list). Team, shield and health, weapon, kills, deaths, K/D, shots and accuracy, grenades, vehicle, speed and active
+  player list but gone from its network session); click a column title to sort (by team, or the whole list). Team, shield and health, weapon, kills, deaths, K/D, shots and accuracy, aim (the native app: the median angle by which a player's straight shots missed the hitboxes of the enemy they passed nearest, as this client saw that enemy, and the share of shots through a hitbox the server registered -- a small miss with a low registered share means the server saw the target elsewhere: lag), grenades, vehicle, speed and active
   traits (where they differ from the defaults, with powerup and respawn-trait countdowns). 🔊 marks a talker, 🔇 a
   muted player, "(you)" the local player (from Halo 3's own player mapping, so also right in third person and vehicles).
   Shots count every projectile (each shotgun pellet is one); a hit is a shot that ended inside another player's body
@@ -619,6 +623,6 @@ resized, and can go full screen (green button or Ctrl-Cmd-F). Developer and diag
 | `shim/src/fastcall.c` / `shim/tools/callcost.sh` | opt-in fast paths for the game's hottest Win32 calls (`PELOAD_FASTCALL`) / their per-call costs under Rosetta and checks |
 | `shim/play.sh` / `shim/build.sh` | launcher / build script |
 | `shim/target.sh` / `shim/dedicated.sh` | windowless second player / local dedicated server |
-| `shim/tools/servers.sh` / `shim/tools/maptop.sh` | busiest public servers and their mods / top-down map pictures for the heatmap |
+| `shim/tools/servers.sh` / `shim/tools/servers10.py` / `shim/tools/maptop.sh` | busiest public servers and their mods (0.9 / 0.10+) / top-down map pictures for the heatmap |
 | `re-tools/` | reverse-engineering helpers (angr decompile, xrefs, `.map` reader `h3map.py`, map geometry `h3bsp.py`) |
 | `shim/docs/` | research notes (index in `CLAUDE.md`); user guides: `mods.md`, `game-options.md` |

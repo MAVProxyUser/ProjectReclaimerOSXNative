@@ -124,7 +124,8 @@ the feed: match start, joins / leaves (the players table), chat / server / notic
 `[chat] line [...]` / `[playlist]` log lines). Verified in a background Guardian match (page with no console errors).
 
 Since 2026-11-07 also: **kills, deaths, assists, betrayals, suicides, score** from halo3's statborg (see "Kills" below), a
-kill feed paired from its counts (estimated weapon), the **Connected list** (halo3's network session; host badge, session
+kill feed paired from its counts (estimated weapon; since the same night EXACT from halo3's game results when the app keeps
+them: killer x victim matrix + per-damage-type kills, FIXES.md "exact kills"), the **Connected list** (halo3's network session; host badge, session
 state, slots = the session's maximum), the **Packets window** (wire layer: every datagram's type, TCP connections; the
 game layer of halo3 message names is not in yet). display_event is hooked and logs its first 200 events raw
 (`[nhook] [event]`) to learn the app's enlarged event layout.
@@ -139,9 +140,54 @@ with 72 connected, kills from the statborg (57 players with kills), overlay hitb
 3440x1440 (frames 5-7 ms median). Fixed on the way: empty snapshots (wrong engine thread), the in-game menu ending the
 match, stub pages not found in some launches, the projection on ultrawide screens (Hor+).
 
-Not yet: voice / mute / forensics,
-weapon / vehicle spawn tracking (items), shots / accuracy (the loader counted projectiles at object_delete, whose entry
-is not a wrapper in the app).
+Since the same night (2026-11-07): the overlay uses the frame's own view constants (shader parameter 0x27 via a filtered text
+hook on halo3+0x2af478) and the scene's depth texture: zones are hidden behind the world and every other feature has
+"visible only" again. Hooks on the app's OWN code work (text_hook: the app is ad hoc signed, no hardened runtime); 917 halo3
+functions are the app's own code (NHOOK_LIST_BRANCH_ENTRIES=1). Bullets come from a text hook on the app's object_delete
+(seen live 2026-11-07 in a 50-player public game: tracers and hitboxes drawn, 200-260 fps).
+
+Since the same day also: weapon / vehicle / power-up spawns and pickups (nspawns.c), shots / hits / accuracy (the object_delete
+text hook), page **mutes** (the app's own set_muted and mute list, nnet.c voice_init), **who talks** (the page's dot and the
+forensic archive's "who talked when", from the app's `[voice] active ... heard 0x<id>: N frames ... rms` report every ~2 s;
+timing only), /forensics (forensic.c unchanged otherwise).
+
+Test runs can drive the app: `--ui-script <file>` (menu automation: `wait 12`, `press SERVER BROWSER`, `trigger right 1`
+(menus only), `stick`, `burst`, ...; a wrong row name prints the rows) and `--request-at SECONDS JSON` (the engine's test
+requests: top level `gameplay` / `networking` / `appearance` / `forge` / `campaign` / `hud` / `theater` / `capacity` / `maps` /
+`editor` / `at_tick`; a wrong name lists the variants, a missing field is named -- e.g. `{"campaign":{"hold_trigger":{"seconds":6}}}`
+fires the local player's weapon in a multiplayer test match too, `{"campaign":{"fire_pulses":{"count":N,...}}}`). The test
+profile refuses public servers itself ("[net] test profile: game connection at ... left alone"). More requests:
+`{"campaign":"kill_player"}` (the feed showed "<name> killed themselves" from the statborg), `{"campaign":{"target_practice":
+{"tag":"objects\\characters\\masterchief\\mp_masterchief\\mp_masterchief","player":0,"distance":5,"span":0,"speed":0,
+"seconds":15}}}` (a biped 5 units ahead; fields tag player distance bearing span speed seconds weapon dual team clear lift;
+the overlay drew its hitboxes, our estimated hits counted 2 of 10 shots while the app's own counter said 0 hits / 0 damage for
+the team-less target), `place_bipeds` {tag, at [x,y,z], spacing, side}. An unknown field makes serde list all of them. Live bullet check:
+`bash shim/tools/native-fire-test.sh` (object_delete bullets, shots, tracer pixels in overlay captures: PASS 2026-11-07).
+
+The 0.10 server list: shim/tools/servers10.py (server-status.md "Client 0.10+": one UDP datagram per server, no QUIC).
+
+Voice packets (forensic audio): a text hook on the app's Opus decode (opus-rs, 0.10.0 0x1003f1e7c) called by the voice mixer
+(0x102152578; sender id at x26 - 0x278). Live 2026-11-07 in a 50-player public game: 88 utterances with audio archived, one
+decoded by ffmpeg to clear speech (FIXES.md). Mute was checked there too (the app's list took and dropped a player).
+
+Chat: the app prints its chat lines only with its chat_log byte set (a dedicated-server option); nhook sets it
+(nstats.c chat_log_tick), so chat / [SERVER] / notice lines reach the feed and the archive (FIXES.md, 2026-11-07).
+The kill feed ignores the history a client receives after joining a game in progress (FIXES.md "history is not a kill").
+Aim vs hits: the page's Aim column (FIXES.md "aim vs hits"): each straight shot's miss against the nearest enemy's posed
+hitboxes and whether the server then registered damage; the Aimbot? column flags lobby outliers from it.
+Hook cost: the page's Hook cost panel (nhcost.h; FIXES.md "the hook cost meter"): every hook and overlay part times itself,
+and "measure" switches one off and on in turns to give its real fps cost.
+
+Host tools (2026-11-07, shim/native/nhost.c; FIXES.md "the host tools on the native app"): teleport (next to a player, to a
+clicked point, by a delta, to the map's spots), boundaries off, invisible walls off, speed 200%, on the game's host or our
+native dedicated server (requests take &slot=<player> there). halo3's own network layer does not exist natively: halo3 code
+that marks objects for a network update (0x1ec3c) faults on its NULL table unless halo3 is told it runs a local game for
+the call. Lifted code calls lifted code directly at the BODY its wrapper calls (x2 = context, x3 = guest rsp, x4..x7 = rcx,
+rdx, r8, r9, result x2): body_hook_after hooks there; code-table entry hooks see only calls through the table. The app's
+per-frame function runs from halo3's render loop (0xb19bc, a client only); a dedicated server runs halo3's main loop 0xb2538
+-> game tick runner 0xeefa8 -> 0xef120. Crash frames: NHOOK_CODETAB_DUMP + shim/tools/native-frames.py.
+
+Not yet: the packet log's game layer (halo3 message names; 0.10's wire protocol is the app's own).
 
 ### Kills (static RE of halo3.dll)
 
@@ -154,9 +200,11 @@ is not a wrapper in the app).
   0x1db58f deaths = 3 (11), 0x1db5ca suicides = 4 (13), 0x1db635 betrayals = 5 (12), 0x1db171 assists = 6 (10),
   0xfc76f rounds won = 7 (6), 0xfca27 score = 0 (7). Team blocks: +0x400 + team*0x18 (12 i16) in halo3.dll.
 - Game results (halo3+0x2190e40 in halo3.dll; the app moves it: `[c1] game results: 128 slots, ... at`): statistics at
-  +0x1358 (`results.statistics`), 0x263 u16 per player (low 15 bits), the first 0x34 named by the table at
-  halo3+0x792c80 (24-byte rows, name pointer first: re-tools/h3results.py), then medals, then 63 damage types x 6 at
-  index 0xea (halo3+0x124064). Not read by the page (the statborg is the live, replicated one).
+  +0x1358 (`results.statistics`; app +0x6c98), 0x263 u16 per player (low 15 bits; 0x4c6 bytes a player), the first 0x34 named
+  by the table at halo3+0x792c80 (24-byte rows, name pointer first: re-tools/h3results.py), then medals, then 63 damage types
+  x 6 from index 0xea = 234 (damage-kills, -deaths, -betrayals, -suicides, -headshots, ...: halo3+0x793160); then the versus
+  matrix (`results.versus`, app +0x2cf98, rows of 1 << versus_row_log2 = 128 entries of two u16). Live in the app on the host
+  (a suicide moved 11 / 13 / 235 / 237 and versus[0][0]); read since 2026-11-07 for exact kills (rs_tick).
 
 Online use: the hooks only read (one entry hook on halo3+0x9d22c records the engine thread's context; nothing in the game
 changes). The app's anti-cheat is server-side and behavioural ("sent game data that a normal game never sends", unusual

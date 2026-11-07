@@ -136,6 +136,8 @@ th .srt{display:inline-block;margin-left:2px;padding:0 2px;cursor:pointer;color:
 #fl.h-kills .k-kill,#fl.h-kills .k-death,#fl.h-players .k-join,#fl.h-players .k-leave,
 #fl.h-server .k-server,#fl.h-server .k-vote,#fl.h-server .k-log,#fl.h-game .k-game,
 #fl.h-weapons .k-weapon,#fl.h-vehicles .k-vehicle,#fl.h-powerups .k-powerup{display:none}
+#hcost button{background:#222;color:var(--fg);border:1px solid var(--line);border-radius:4px;padding:2px 8px;font:inherit;font-size:12px;cursor:pointer}#hcost button:disabled{opacity:.35;cursor:default}
+.hct{border-collapse:collapse;font-size:12px;width:100%}.hct th,.hct td{padding:2px 6px;border-bottom:1px solid #2a2a2a;text-align:left;white-space:nowrap}.hct td:first-child{white-space:normal;min-width:220px}
 </style></head>
 <body>
 <h1>Reclaimer live stats <a href="/forensics" title="voice, chat and events archive + viewer" style="font-size:12px;font-weight:400;color:var(--accent);margin-left:10px;text-decoration:none">forensic archive</a></h1><div id="hd">connecting...</div><div><span id="pf" class="note" title="latency.c, every second: the engine's frame rate and the new frames the window got (what the screen can show), frame time median / 95th percentile, draws per frame, objects in the camera's view, and input -> screen: a mouse or stick turn followed to the frame on the screen (median of the last measured ones; the display step is modelled from its refresh). The same numbers go to ~/Library/Application Support/ReclaimerMac/perf/*.csv every second."></span></div>
@@ -225,10 +227,14 @@ th .srt{display:inline-block;margin-left:2px;padding:0 2px;cursor:pointer;color:
   Sort: <label><input type="radio" name="smode" value="team" checked> team sort</label><label><input type="radio" name="smode" value="full"> full sort</label>
   <span id="sortlbl"></span><button id="sortclr" style="display:none;background:none;border:0;color:var(--accent);cursor:pointer;font:inherit">reset</button></div>
  <div class="wrap"><table><thead><tr id="thr">
-  <th data-k="name">Player</th><th data-k="ip" title="The player's address: the game session's peer it plays from (the native app; with the Packets window's 'look up names', its reverse-DNS name)">IP</th><th data-k="shield">Shield</th><th data-k="health">Health</th><th data-k="weapon">Weapon</th><th data-k="kills">Kills</th><th data-k="deaths">Deaths</th><th data-k="kd">K/D</th><th data-k="shots">Shots</th><th data-k="accuracy">Accuracy</th><th data-k="grenades">Grenades</th><th data-k="vehicle">Vehicle</th><th data-k="pos">X, Y, Z</th><th data-k="speed">Speed</th><th data-k="traits">Traits</th></tr></thead>
+  <th data-k="name">Player</th><th data-k="ip" title="The player's address: the game session's peer it plays from (the native app; with the Packets window's 'look up names', its reverse-DNS name). Known only for players this game talks to directly: when you host, or in a player-hosted game. On a dedicated server a client talks only to the server, so players have no address here (the server's is in the Packets window).">IP</th><th data-k="shield">Shield</th><th data-k="health">Health</th><th data-k="weapon">Weapon</th><th data-k="kills">Kills</th><th data-k="deaths">Deaths</th><th data-k="kd">K/D</th><th data-k="shots">Shots</th><th data-k="accuracy">Accuracy</th><th data-k="aimbot" title="Aimbot? (the native app): players whose aim is a statistical outlier in THIS game, as this client saw it -- at least two of: shots through a hitbox, opening shots of an engagement on target, long-range shots on target, head share -- above both a floor and 90% of the lobby, over 40+ aimed shots. Unusual, not proof: a very good player, an AI or a modded character can trip it.">Aimbot?</th><th data-k="aim" title="Aim (the native app), from the last 64 straight shots that passed near an enemy: '1.2° off' = how far the typical (median) shot missed that enemy's hitboxes, as THIS client saw the enemy -- 0.0° means more than half of them went through a hitbox. 'N% of M hits counted' = of the shots that went through a hitbox, the share the server confirmed (the enemy's shield or health went down within 0.6 s): 100% = every one did. Few degrees off with a low counted share = the server saw the enemy elsewhere: lag.">Aim</th><th data-k="grenades">Grenades</th><th data-k="vehicle">Vehicle</th><th data-k="pos">X, Y, Z</th><th data-k="speed">Speed</th><th data-k="traits">Traits</th></tr></thead>
   <tbody id="tb"></tbody></table></div>
   <div class="note">Click a player for details. Their deaths are ringed on the heatmap.</div></div>
 </div>
+<div id="hcost" class="panel" style="display:none"><div class="fh"><h2 title="nhook's hooks and overlay parts (the native app): what each costs the game. Self-timed: every part measures its own time with the CPU counter -- 'per frame' is that time divided by the frames, the fps figure what it would give back IF its thread sets the frame rate (an estimate). Measure: the real thing -- that one hook or overlay feature switched off and on in turns of 3 s for 36 s while the window's frames are counted; the result is the median of the on/off pairs and their spread. Compare only inside one match.">Hook cost</h2>
+ <span class="note" id="hcsum"></span></div>
+ <div style="overflow-x:auto"><table class="hct"><thead><tr><th>Hook / overlay part</th><th>thread</th><th>on</th><th title="calls (or frames) a second">calls/s</th><th title="time per call">µs/call</th><th title="its time per presented frame">ms/frame</th><th title="share of the median frame time">% frame</th><th title="estimated fps given back without it, IF its thread sets the frame rate">est. fps</th><th title="the on/off measurement: fps with it on -> off, the cost (median of the pairs) and the spread">measured</th><th></th></tr></thead><tbody id="hcb"></tbody></table></div>
+ <div class="note">Self-timed figures are estimates; "measure" switches only that part off and on in turns (overlay features: on in the "on" phases even if you had them off) and puts it back as it was. The camera hook's assembly filter (about 700k calls a second, a few instructions each) is not timed and stays while its handler is off.</div></div>
 <div id="pkts" class="panel"><div class="fh"><h2 title="pktlog.c: the type of every datagram and connection this game sends and receives -- never what is in it">Packets</h2>
  <label title="UDP datagrams and TCP connections on this game's sockets"><input type="checkbox" id="pkw" checked> wire</label>
  <label title="halo3's own network messages (needs the switch on the right)"><input type="checkbox" id="pkg" checked> game</label>
@@ -331,8 +337,43 @@ function pState(p){ const k=p.slot+'|'+p.name, now=performance.now()/1000;
 const PRANK={alive:0,respawning:1,quit:2};
 // ---- sorting: a column's arrows (ascending / descending); team sort keeps each team together ----
 function kdOf(p){ return (p.kills||0)/Math.max(1,p.deaths||0); }
+// aim vs hits (nhook: noverlay.c nov_aim_shot / nov_aim_tick, nstats.c st_aim_tick): err = median miss angle (degrees) of the
+// last 64 straight shots that passed near an enemy, as this client saw the target; on = share through a hitbox; reg = share
+// of those the server registered (shield / health went down within 0.6 s); miss_reg = damage after a shot that visibly missed
+function aimCell(p){ const a=p.aim; if(!a||a.n<5) return a?`<span style="color:var(--dim);font-size:11px" title="the aim figures start at 5 aimed shots">${a.n} shot${a.n>1?'s':''}</span>`:'';
+  const c=a.err<0.6?'#5c5':a.err<1.5?'#cc4':a.err<3?'#e93':'#e55', w=Math.max(4,Math.min(40,40-a.err*8));
+  const reg=a.reg>=0&&a.reg_n>=3?`<div style="font-size:11px;color:var(--dim)">${Math.round(a.reg*100)}% of ${a.reg_n} hits counted</div>`:'';
+  return `<span title="${E(aimTip(a))}"><span style="display:inline-block;width:${w}px;height:6px;border-radius:3px;background:${c};vertical-align:middle;margin-right:4px"></span>${a.err.toFixed(1)}° off${reg}</span>`; }
+function aimTip(a){ return `${a.n} aimed shots: median miss ${a.err.toFixed(2)}° (75% within ${a.err75.toFixed(2)}°), ${Math.round(a.on*100)}% through a hitbox`+
+  (a.on>0?` (${Math.round(a.head*100)}% of them the topmost hitbox: the head on Spartans and Elites)`:'')+(a.reg>=0?`; the server registered ${Math.round(a.reg*100)}% of ${a.reg_n} on-target shots`:'')+
+  (a.miss_reg>=0?`, and ${Math.round(a.miss_reg*100)}% of ${a.miss_n} visible misses`:'')+'. Measured on this client: a remote player\'s target is where this client draws it, and in a crowd other players\' damage on the same target counts as registered too.'; }
+// Aimbot? -- outliers against this game's lobby (snap.players with 20+ aimed shots): signal = [value, the count it rests on]
+// three signals (2 needed): long-range accuracy is not a fourth -- on a big map nearly every shot is long range, so it only
+// repeated the first (Hugegrass, 2026-11-07); it shows in the tooltip. "head" = the topmost hitbox region: on modded
+// characters (Grunts) that is not the head, and the lobby comparison then cancels it (everyone is high)
+const AIMSIG=[['on','shots through a hitbox',a=>[a.on,a.n],0.5,20],['open','opening shots on target',a=>[a.open_n?a.open_on/a.open_n:0,a.open_n],0.6,8],
+  ['head','head share of hits',a=>[a.head,Math.round(a.on*a.n)],0.6,10]];
+let aimLobbyAt=0, aimLobby=null;
+function aimLobbyStats(){ if(aimLobby&&aimLobbyAt===snap) return aimLobby; aimLobbyAt=snap; aimLobby={};
+  const ps=(snap&&snap.players||[]).filter(p=>p.aim&&p.aim.n>=20);
+  for(const [k,,g,,min] of AIMSIG){ const v=ps.map(p=>g(p.aim)).filter(x=>x[1]>=min).map(x=>x[0]).sort((a,b)=>a-b);
+    aimLobby[k]={n:v.length,med:v.length?v[v.length>>1]:0,p90:v.length?v[Math.min(v.length-1,Math.floor(v.length*0.9))]:0}; }
+  return aimLobby; }
+function aimFlags(p){ const a=p.aim; if(!a||a.n<40) return null; const L=aimLobbyStats(), why=[]; let score=0;
+  for(const [k,label,g,floor,min] of AIMSIG){ const [v,c]=g(a), l=L[k]; if(c<min||v<floor) continue;
+    if(l.n>=5&&v<=l.p90) continue;   // (with 5+ comparable players: only above 90% of them)
+    why.push(`${label} ${Math.round(v*100)}% of ${c}`+(l.n>=5?` (lobby median ${Math.round(l.med*100)}%)`:'')); score+=v-(l.n>=5?l.med:0); }
+  if(why.length>=2&&a.far_n>=8) why.push(`long range ${Math.round(a.far_on/a.far_n*100)}% of ${a.far_n} on target`);
+  return why.length>=2?{why,score}:null; }
+function botCell(p){ const f=aimFlags(p); if(f) return `<span style="color:#f66;font-weight:600" title="${E('Unusual aim, as this client saw it: '+f.why.join('; ')+'. Not proof: a very good player, an AI or a modded character can trip it.')}">⚠ suspect</span>`;
+  const a=p.aim; if(!a) return '';
+  return a.n>=40?'<span style="color:var(--dim)" title="checked: nothing unusual against this lobby">normal</span>':`<span style="color:var(--dim);font-size:11px" title="judged from 40 aimed shots on">${a.n}/40 shots</span>`; }
+function botDetail(p){ const f=aimFlags(p); if(f) return E('suspect: '+f.why.join('; ')+' (unusual as this client saw it; not proof)');
+  return p.aim&&p.aim.n>=40?'nothing unusual so far':'not enough aimed shots yet (40)'; }
+function aimDetail(p){ const a=p.aim; if(!a) return 'no straight shot near an enemy yet'; return E(aimTip(a)); }
+
 const SORTV={name:p=>p.name.toLowerCase(),ip:p=>p.ip||'',shield:p=>p.shield,health:p=>p.health,weapon:p=>(p.weapon||'').toLowerCase(),kills:p=>p.kills||0,deaths:p=>p.deaths||0,
- kd:kdOf,shots:p=>p.shots||0,accuracy:p=>p.shots?p.accuracy:-1,grenades:p=>p.grenades?p.grenades.frag+p.grenades.plasma+p.grenades.spike+p.grenades.firebomb:0,
+ kd:kdOf,shots:p=>p.shots||0,accuracy:p=>p.shots?p.accuracy:-1,aim:p=>p.aim&&p.aim.n>=5?p.aim.err:999,aimbot:p=>{ const f=aimFlags(p); return f?-f.score:p.aim&&p.aim.n>=40?0:1; },grenades:p=>p.grenades?p.grenades.frag+p.grenades.plasma+p.grenades.spike+p.grenades.firebomb:0,
  vehicle:p=>(p.vehicle||'').toLowerCase(),pos:p=>p.alive?p.pos[0]:-1e9,speed:p=>p.speed||0,traits:p=>Object.keys(p.traits||{}).length};
 let sortK=null, sortD=1, sortMode='team';
 try{ const j=JSON.parse(localStorage.getItem('statsSort')||'null'); if(j){ sortK=j.k in SORTV?j.k:null; sortD=j.d===-1?-1:1; sortMode=j.m==='full'?'full':'team'; } }catch(err){}
@@ -356,7 +397,7 @@ function renderTable(){
    <td><span class="sw" style="background:${C[p.team_name]||'#888'}"></span>${E(p.name)}${p.you?' (you)':''}${p.host?'<span class="hostb" title="hosts this game">★ HOST</span>':''}${p.talking?'<span class="talkic" title="talking">🔊</span>':''}${p.muted?' 🔇':''}</td>
    <td class="ipc">${p.ip?E(p.ip.replace(/:\d+$/,'')):''}${p.rdns?`<div class="pk-x">${E(p.rdns)}</div>`:''}</td>
    <td>${B(p.shield,'#58b8ff')}</td><td>${B(p.health,'#7ddf6a')}</td><td>${E(p.weapon||(p.alive?'':st.get(p)))}</td>
-   <td>${p.kills??''}</td><td>${p.deaths??''}</td><td>${kdOf(p).toFixed(2)}</td><td>${p.shots??''}</td><td>${p.shots?Math.round(p.accuracy*100)+'%':''}</td><td>${p.grenades.frag}f ${p.grenades.plasma}p ${p.grenades.spike}s ${p.grenades.firebomb}b</td>
+   <td>${p.kills??''}</td><td>${p.deaths??''}</td><td>${kdOf(p).toFixed(2)}</td><td>${p.shots??''}</td><td>${p.shots?Math.round(p.accuracy*100)+'%':''}</td><td>${botCell(p)}</td><td>${aimCell(p)}</td><td>${p.grenades.frag}f ${p.grenades.plasma}p ${p.grenades.spike}s ${p.grenades.firebomb}b</td>
    <td>${E(p.vehicle||'')}</td><td>${p.alive?p.pos.map(v=>v.toFixed(1)).join(', '):''}</td><td>${p.speed.toFixed(1)}</td><td>${traitBadges(p,3)}</td></tr>`).join('');
 }
 // ---- traits: labels for the trait keys (playlist option names) ----
@@ -481,9 +522,9 @@ function renderDet(){
    ['Voice',p.voice?(p.muted?'muted (only for you)':'audible'):'no voice connection'],
    ['Address',p.ip?E(p.ip):snap.addr_role==='client'?`not known to a client (it only talks to the server${snap.server_addr?': '+E(snap.server_addr):''})`:
      snap.addr_role==='hidden'?'hidden (this page is reachable from other computers; PELOAD_STATS_IPS=1 shows it)':p.you?'this computer':snap.addr_role==='host'?'not in the host table':'not known'],
-   ['Shots fired',p.shots??0],['Hits',`${p.hits??0}`+(p.shots?` (${Math.round(p.accuracy*100)}% accuracy)`:'')],['Facing',p.facing!=null?p.facing+'°':''],['Position',p.pos.map(v=>v.toFixed(1)).join(', ')],['Object',p.handle]];
+   ['Medals',p.medals?Object.entries(p.medals).sort((a,b)=>b[1]-a[1]).map(([n,c])=>`${E(n)}${c>1?' ×'+c:''}`).join(', '):'none this match'],['Aimbot?',botDetail(p)],['Aim',aimDetail(p)],['Shots fired',p.shots??0],['Hits',`${p.hits??0}`+(p.shots?` (${Math.round(p.accuracy*100)}% accuracy)`:'')],['Facing',p.facing!=null?p.facing+'°':''],['Position',p.pos.map(v=>v.toFixed(1)).join(', ')],['Object',p.handle]];
   el.innerHTML=`<button class="x" onclick="closeDet()" aria-label="Close">×</button><b>${E(p.name)}${p.you?' (you)':''}</b><div class="detbtns">${p.voice&&!p.you?bigMute(p.voice,p.muted):''}${p.you?'':tpBtn(p)}</div><dl>${rows.map(r=>`<dt>${r[0]}</dt><dd>${r[1]}</dd>`).join('')}</dl>
-   <div class="note">Shots counts every projectile (each shotgun pellet is one). A hit is a shot that ended inside another player's body bounds -- an estimate; turret shots count for the vehicle, not the gunner.</div>`;
+   <div class="note">Shots counts every projectile (each shotgun pellet is one). A hit is a shot whose path went through an enemy's hitboxes, as this client saw that enemy (the native app; the loader: a shot that ended inside another player's body bounds, an estimate); turret shots count for the vehicle, not the gunner.</div>`;
   el.style.display='block';
 }
 function closeDet(){sel=null;renderTable();renderDet();drawMap()}
@@ -938,7 +979,10 @@ function renderOverlay(){ const o=snap&&snap.overlay; if(!o) return; renderPanel
     if(q && document.activeElement!==qs && ['auto','low','medium','high','ultra'].includes(q)) qs.value=q;
     const pend=snap.overlay.quality_pending; qm.textContent=pend?('applying '+pend+'...'):(q&&!['auto','low','medium','high','ultra'].includes(q)?'('+q+')':''); }
   { const av=snap&&snap.autovote; if(av){ for(const [id,v] of [['avm',av.map],['avc',av.calls]]){ const e=document.getElementById(id); e.disabled=!o.controls; if(document.activeElement!==e && v!=null) e.value=String(v); } } }
-  document.getElementById('ovmsg').textContent=o.controls?'':'controls are off (PELOAD_STATS_READONLY)'; }
+  // the native 0.10 app (nhook): no teleport / boundary patches, auto-vote or halo3 message types there -- hide what can't work
+  if(snap&&snap.native) for(const el of [document.getElementById('avm'), document.getElementById('avc')]){   // (the native app: no auto-vote; its host tools are back: nhost.c)
+    const w=el&&(el.tagName==='SELECT'&&el.closest('label.lbl')||el.tagName==='INPUT'&&el.closest('label')||el); if(w) w.style.display='none'; }
+  document.getElementById('ovmsg').textContent=o.controls?(o.host_msg||''):'controls are off (PELOAD_STATS_READONLY)'; }   // (host_msg: the native host tools' last result)
 document.getElementById('ov').addEventListener('click',async e=>{ const b=e.target.closest('button[data-a]'); if(!b||b.disabled) return;   // (the zone chips post their own)
   const msg=document.getElementById('ovmsg');
   const ov=snap&&snap.overlay, extra=b.dataset.a==='spar'?'&on='+(ov&&ov.spar?0:1):b.dataset.a==='bounds'?'&off='+(ov&&ov.bounds_off?0:1):b.dataset.a==='invwalls'?'&off='+(ov&&ov.invwalls_off?0:1):b.dataset.a==='explore'?'&spot='+encodeURIComponent(b.dataset.spot):b.dataset.a==='mic'?'&on='+(ov&&ov.mic==='muted'?1:0):'';
@@ -1055,7 +1099,7 @@ for(const [id,key] of [['avm','map'],['avc','calls']]) document.getElementById(i
 let pkSeq=0, pkBusy=false, pkPause=false, pkLast=null, pkN=0; const pkl=document.getElementById('pkl');
 const pkFmtB=n=>n>=1048576?(n/1048576).toFixed(1)+' MB':n>=1024?(n/1024).toFixed(1)+' KB':Math.round(n)+' B';
 const pkPeer=e=>e.peer_id?`<span title="halo3 session peer ${e.peer_no!==undefined?e.peer_no+', ':''}id ${E(e.peer_id)}, through its ${E(e.via||'')}">${E(e.peer)}</span>`
-  :e.peer?`${e.player?`<b title="the player at this address (the session's peer)">${E(e.player)}</b> `:''}${E(e.peer)}${e.host?` <span class="pk-x">${E(e.host)}</span>`:''}${e.rdns?` <span class="pk-x" title="reverse DNS">${E(e.rdns)}</span>`:''}`:'<span class="pk-x">-</span>';
+  :e.peer?`${e.player?`<b title="the player at this address (the session's peer)">${E(e.player)}</b> `:''}${E(e.peer)}${e.host?` <span class="pk-x">${E(e.host)}</span>`:''}${e.rdns?` <span class="pk-x" title="reverse DNS">${E(e.rdns)}</span>`:e.rdns_none?` <span class="pk-x" title="this address has no reverse-DNS (PTR) name">no DNS name</span>`:''}`:'<span class="pk-x">-</span>';
 const pkFl=e=>e.flags?` <span class="pk-x" title="spin: the short header's spin bit; greased: the fixed bit is unused (RFC 9287). Either may be random">${e.flags&1?'spin':''}${e.flags===3?' ':''}${e.flags&2?'greased':''}</span>`:'';
 function pkRow(e,n){ const d=e.dir==='rx'?'<span class="pk-rx">&larr; rx</span>':'<span class="pk-tx">tx &rarr;</span>';
   const ty=e.layer==='game'?`<span class="pk-g pk-ty">${E(e.type)}</span>`:`<span class="pk-ty">${E(e.type)}</span>${pkFl(e)}`;
@@ -1092,7 +1136,20 @@ es.onmessage=m=>{snap=JSON.parse(m.data);
   document.getElementById('hd').textContent=`${snap.map||'-'}  |  ${snap.in_match?'match time '+fmtT(snap.time):'not in a match'}  |  ${snap.players.length} players, ${snap.vehicles.length} vehicles, ${snap.projectiles.length} projectiles in flight`;
   { const p=snap.perf, e=document.getElementById('pf'); if(!p){ e.textContent=''; } else { const ms=v=>v>=0?Math.round(v)+' ms':'-';
       e.textContent=p.native?`${p.fps.toFixed(0)} fps  |  frame ${p.frame_ms[0].toFixed(1)} / ${p.frame_ms[1].toFixed(1)} / ${p.frame_ms[2].toFixed(1)} ms (median / 95% / max)  |  ${p.objects} objects`:`${p.fps.toFixed(1)} fps (window ${p.window_fps.toFixed(1)})  |  frame ${p.frame_ms[0].toFixed(1)} / ${p.frame_ms[1].toFixed(1)} ms (median / 95%)  |  ${Math.round(p.draws)} draws  |  ${p.in_view} of ${p.objects} objects in view  |  input -> screen ${ms(p.input_to_screen_ms)}${p.inputs?' ('+p.inputs+' measured)':''}  |  ${Math.round(p.refresh_hz)} Hz display`; } }
-  needVShapes(); renderTable(); renderDet(); renderOverlay(); renderRules(); renderSlots(); renderConn(); renderRec(); drawMap()};
+  needVShapes(); renderTable(); renderDet(); renderOverlay(); renderRules(); renderSlots(); renderConn(); renderRec(); renderHooks(); drawMap()};
+// ---- hook cost (nhook: nhcost.h + nstats.c hc_json): self-timed figures per hook / overlay part, and the on/off measurement ----
+function renderHooks(){ const H=snap&&snap.hooks, el=document.getElementById('hcost'); if(!H){ el.style.display='none'; return; } el.style.display='';
+  const m=H.measuring, f=(v,d)=>v>=0?v.toFixed(d):'-';
+  document.getElementById('hcsum').textContent=`${f(H.fps,0)} fps, median frame ${f(H.frame_ms,1)} ms`+(m?` · measuring ${m.id}: ${m.on?'on':'off'} phase, ${Math.max(0,Math.round(m.left))} s left`:'');
+  const rows=H.list.map(h=>{ const a=h.ab; const meas=a?`<span title="${E(`${a.pairs} on/off pairs, ${Math.round(a.age)} s ago; spread ${a.lo.toFixed(2)} .. ${a.hi.toFixed(2)} fps; slowest frames (95th percentile / max) ${a.p95_on} / ${a.max_on} ms on, ${a.p95_off} / ${a.max_off} ms off`)}">${a.on_fps.toFixed(1)} → ${a.off_fps.toFixed(1)} fps: <b style="color:${a.loss>0.5?'#e93':a.loss>0.1?'#cc4':'#5c5'}">${a.loss>=0?'−':'+'}${Math.abs(a.loss).toFixed(2)}</b>${a.lo<=0&&a.hi>=0?' <span class="note" style="margin:0">within noise</span>':''}</span>`:'';
+    const busy=m&&m.id===h.id;
+    return `<tr${h.on?'':' style="opacity:.55"'}><td title="${E(h.name)}">${E(h.name)}${h.reads!=null?` <span class="note" style="margin:0" title="system calls (memory reads) per snapshot">(${h.reads} reads)</span>`:''}</td><td>${E(h.thread)}</td><td>${h.switch?`<button class="hcs" data-h="${E(h.id)}" data-on="${h.on?0:1}"${m?' disabled':''} title="${h.on?'switch this hook off (its handler returns at once)':'switch it back on'}">${h.on?'on':'off'}</button>`:h.on?'on':'off'}</td><td>${h.calls_s>=10?Math.round(h.calls_s):f(h.calls_s,1)}</td><td>${h.calls_s>0?f(h.us_call,2):'-'}</td>`+
+      `<td>${f(h.ms_frame,3)}</td><td>${f(h.pct,2)}%</td><td>${h.crit&&h.fps_cost>=0?f(h.fps_cost,2):'-'}</td><td>${meas}</td>`+
+      `<td><button class="btn hcm" data-h="${E(h.id)}"${m?' disabled':''} title="switch only this off and on in turns for 36 s and count the frames">${busy?'measuring…':'measure'}</button></td></tr>`; });
+  document.getElementById('hcb').innerHTML=rows.join('')+(m?`<tr><td colspan="10"><button class="btn" id="hcstop">stop the measurement</button></td></tr>`:''); }
+document.getElementById('hcost').addEventListener('click',async e=>{ const b=e.target.closest('.hcm,.hcs,#hcstop'); if(!b) return; b.disabled=true;
+  const q=b.classList.contains('hcs')?'hookset&h='+encodeURIComponent(b.dataset.h)+'&on='+b.dataset.on:'hookab&'+(b.id==='hcstop'?'stop=1':'h='+encodeURIComponent(b.dataset.h));
+  try{ await fetch('/control?do='+q,{method:'POST',headers:{'X-Reclaimer-Control':'1'}}); }catch(err){} });
 // no game serving this port (it ended, or a test client is between runs): keep the last data but grey it out and say so;
 // EventSource keeps retrying, and the first snapshot of a new game reloads the page (inst)
 let lastSnapAt=0;

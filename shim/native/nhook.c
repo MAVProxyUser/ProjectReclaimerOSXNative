@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <math.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <pthread.h>
@@ -24,6 +25,7 @@
 #include <libkern/OSCacheControl.h>
 
 static volatile uint64_t g_img;                 // the recompiled engine's image (guest halo3) as the app logs it
+#include "nhcost.h"                            // the hook cost meter: every hook times itself
 static int g_logfd = -1;                         // NHOOK_LOG=<file>: our lines go there too
 
 static void nlog(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
@@ -37,15 +39,44 @@ static void nlog(const char* fmt, ...) {
     if (g_logfd >= 0) write(g_logfd, b, n);
 }
 
+// our background threads (stats snapshot, HTTP, forensic writer, reverse DNS, ...) run at QOS_CLASS_UTILITY: on Apple silicon
+// that keeps them on the efficiency cores while the game's threads want the performance cores, so they never take a core
+// the game needs (user, 2026-11-07: "does the stats snapshot lag our view? we don't want it to ever do that")
+#include <pthread/qos.h>
+static int nh_thread(pthread_t* t, void* (*fn)(void*), void* arg, qos_class_t q) {
+    pthread_attr_t at; pthread_attr_init(&at); pthread_attr_set_qos_class_np(&at, q, 0); pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
+    int r = pthread_create(t, &at, fn, arg); pthread_attr_destroy(&at); return r; }
 void nh_log(const char* fmt, ...) {                 // (nrender.m's logger)
     char b[1024]; va_list ap; va_start(ap, fmt); vsnprintf(b, sizeof b, fmt, ap); va_end(ap); nlog("%s", b);
 }
 
-// a safe read of our own memory: 0 = ok
+// a safe read of our own memory: 0 = ok. Every call is a system call (~1-2 us): t_rd_n / t_rd_b count them per thread;
+// NHOOK_RD_PROF=1 also counts them per call site on the threads that ask (t_rd_prof: the stats snapshot) -- nstats.c prints them.
+static __thread unsigned long t_rd_n, t_rd_b; static __thread int t_rd_prof;
+static struct { uintptr_t site; unsigned long n, b; } g_rd_site[256]; static int g_rd_nsite;
+__attribute__((noinline)) static void rd_prof(uintptr_t site, size_t n) {
+    for (int i = 0; i < g_rd_nsite; i++) if (g_rd_site[i].site == site) { g_rd_site[i].n++; g_rd_site[i].b += n; return; }
+    if (g_rd_nsite < 256) { g_rd_site[g_rd_nsite].site = site; g_rd_site[g_rd_nsite].n = 1; g_rd_site[g_rd_nsite].b = n; g_rd_nsite++; } }
+// The stats snapshot copies the engine's object memory once per run (st_ocache_fill) and its thread's reads inside that copy
+// are answered from it (t_oc_*: no system call). A read is never more than RD_CHUNK bytes per system call: above ~32 KB the
+// kernel copies by marking the SOURCE pages copy-on-write -- the game's own pages -- and the game's next write to each one
+// then faults on the game's thread (a stall caused by a reader; the old snapshot read the 156 KB results table that way).
+#define RD_CHUNK 16384
+typedef struct { const uint8_t* buf, * ok; uint64_t lo, hi; } RdCopy;   // (ok: per 16 KB chunk)
+enum { RD_NCOPY = 4 };
+static __thread RdCopy t_oc[RD_NCOPY]; static __thread int t_noc;     // the snapshot thread's copies (st_ocache_fill)
+static __thread unsigned long t_oc_hits;
+static int rd_sys(uint64_t a, void* out, size_t n) {
+    for (size_t o = 0; o < n; ) { size_t c = n - o < RD_CHUNK ? n - o : RD_CHUNK; mach_vm_size_t got = 0;
+        kern_return_t kr = mach_vm_read_overwrite(mach_task_self(), a + o, c, (mach_vm_address_t)((uint8_t*)out + o), &got);
+        if (kr != KERN_SUCCESS || got != c) return -1; o += c; }
+    return 0; }
 static int rd(uint64_t a, void* out, size_t n) {
-    mach_vm_size_t got = 0;
-    kern_return_t kr = mach_vm_read_overwrite(mach_task_self(), a, n, (mach_vm_address_t)out, &got);
-    return (kr == KERN_SUCCESS && got == n) ? 0 : -1;
+    for (int r = 0; r < t_noc && n; r++) { const RdCopy* q = &t_oc[r]; if (a < q->lo || a + n > q->hi) continue;   // (the snapshot's copies)
+        uint64_t c0 = (a - q->lo) / RD_CHUNK, c1 = (a + n - 1 - q->lo) / RD_CHUNK; int ok = 1; for (uint64_t c = c0; c <= c1; c++) if (!q->ok[c]) { ok = 0; break; }
+        if (ok) { memcpy(out, q->buf + (a - q->lo), n); t_oc_hits++; return 0; } break; }
+    t_rd_n++; t_rd_b += n; if (t_rd_prof) rd_prof((uintptr_t)__builtin_return_address(0), n);
+    return rd_sys(a, out, n);
 }
 
 
@@ -94,7 +125,64 @@ static uint8_t* near_page(uint64_t code, size_t size) {   // a fresh RW range wi
     return 0;
 }
 
-static int hook_install(const char* name, uint32_t rva, nh_handler h) {
+// NHOOK_PKG_PROBE=1 (2026-11-07, backlog N9): halo3's network message table (halo3+0x46b6e98 -> 46 x 0x40 {valid, name,
+// flags, size, max size, encode +0x20, decode +0x28}; the loader's pktlog.c) in the native app: each message's encode /
+// decode function and how the app runs it (a lifted wrapper we could hook, the app's own code, or not lifted), and the five
+// message senders / receivers the loader hooked -- whether a "game layer" of message names can be done natively.
+enum { PKC_N = 16 }; static volatile unsigned long g_pkc[PKC_N];
+#define PKC(i) static void pkc##i(uint64_t* c) { (void)c; g_pkc[i]++; }
+PKC(0) PKC(1) PKC(2) PKC(3) PKC(4) PKC(5) PKC(6) PKC(7) PKC(8) PKC(9) PKC(10) PKC(11) PKC(12) PKC(13) PKC(14) PKC(15)
+static int hook_install(const char* name, uint32_t rva, nh_handler h);
+static const char* rva_kind(uint32_t rva) {
+    uint64_t e = host_of(rva); uint32_t w[4]; if (!e || rd(e, w, 16)) return "not lifted";
+    if ((w[0] & 0xfc000000u) == 0x14000000u) return "the app's own code";
+    return w[0] == 0xa9bf7bfd && w[1] == 0x910003fd ? "lifted" : "other"; }
+static void* pkg_probe(void* a) {
+    (void)a; for (int tries = 0; tries < 80; tries++) { sleep(3); uint64_t tb = 0; if (!g_img || rd(g_img + 0x46b6e98, &tb, 8) || !tb) continue;
+        uint8_t e[0x40]; char nm[32]; uint64_t np = 0; if (rd(tb, e, 0x40) || e[0] != 1) continue; memcpy(&np, e + 8, 8); memset(nm, 0, sizeof nm); if (!np || rd(np, nm, 5) || memcmp(nm, "ping", 5)) continue;
+        nlog("[nhook] [pkg] halo3's message table at 0x%llx (guest image 0x%llx)", (unsigned long long)tb, (unsigned long long)g_img);
+        for (int i = 0; i < 46; i++) { if (rd(tb + (uint64_t)i * 0x40, e, 0x40) || e[0] != 1) continue; memcpy(&np, e + 8, 8); memset(nm, 0, sizeof nm); if (np) rd(np, nm, 31);
+            uint64_t en = 0, de = 0; memcpy(&en, e + 0x20, 8); memcpy(&de, e + 0x28, 8);
+            uint32_t er = en > g_img ? (uint32_t)(en - g_img) : 0, dr = de > g_img ? (uint32_t)(de - g_img) : 0;
+            nlog("[nhook] [pkg] %2d %-28s encode halo3+0x%x (%s), decode halo3+0x%x (%s)", i, nm, er, er ? rva_kind(er) : "-", dr, dr ? rva_kind(dr) : "-"); }
+        static const uint32_t disp[5] = {0x249dc, 0x24900, 0x5f0b0, 0x5f2f0, 0x5efa8};
+        for (int i = 0; i < 5; i++) nlog("[nhook] [pkg] dispatcher halo3+0x%x: %s", disp[i], rva_kind(disp[i]));
+        if (atoi(getenv("NHOOK_PKG_PROBE")) >= 2) {   // =2: counting hooks on the dispatchers and the busiest messages, counts every 10 s
+            static const char* const nm[PKC_N] = {"gateway send", "gateway receive", "channel send", "channel receive", "channel reply", "ping encode", "ping decode",
+                "membership-update encode", "membership-update decode", "synchronous-update encode", "synchronous-update decode", "synchronous-actions encode",
+                "synchronous-actions decode", "synchronous-gamestate decode", "game-results decode", "player-properties decode"};
+            static const uint32_t rv[PKC_N] = {0x249dc, 0x24900, 0x5f0b0, 0x5f2f0, 0x5efa8, 0x73ab8, 0x73b80, 0x75e78, 0x76f50, 0x78e90, 0x78f78, 0x7921c, 0x79328, 0x79650, 0x7999c, 0x77b98};
+            static nh_handler const hh[PKC_N] = {pkc0, pkc1, pkc2, pkc3, pkc4, pkc5, pkc6, pkc7, pkc8, pkc9, pkc10, pkc11, pkc12, pkc13, pkc14, pkc15};
+            for (int i = 0; i < PKC_N; i++) nlog("[nhook] [pkg] counting %s (halo3+0x%x): %s", nm[i], rv[i], hook_install(nm[i], rv[i], hh[i]) ? "NOT hooked" : "hooked");
+            for (int r = 0; r < 30; r++) { sleep(10); char b[600]; int k = 0; for (int i = 0; i < PKC_N; i++) k += snprintf(b + k, sizeof b - (size_t)k, " %s %lu,", nm[i], g_pkc[i]); nlog("[nhook] [pkg] calls:%s", b); } }
+        return 0; }
+    nlog("[nhook] [pkg] halo3's message table never appeared"); return 0; }
+// Call a lifted halo3 function from a handler that holds the engine thread's guest context (2026-11-07, the host tools:
+// nhost.c). A lifted wrapper (e.g. halo3+0x259410's) takes x0 = the context, reads rcx / rdx / r8 / r9 at +0x08 / +0x10 /
+// +0x40 / +0x48 and the guest stack at +0x20, runs, stores rax at +0x00 and pops the return address (rsp += 8). So: save
+// the context's registers (the first 0x280 bytes: the general registers, then the vector ones -- everything below the event
+// word at +0x290), set the arguments, a fresh guest stack frame 1 KB below the current one (an entry handler's guest stack
+// below rsp is free) with a return-address slot and arguments 5.. at +0x28, call, read rax, restore. Pointer arguments are
+// plain host addresses (guest memory is this process's memory).
+static uint64_t nh_call(uint64_t* ctx, uint32_t rva, int n, const uint64_t* a) {
+    uint64_t e = host_of(rva); if (!e || !ctx) return ~0ull;
+    static int lg = -1; if (lg < 0) lg = getenv("NHOOK_HOST_LOG") != 0;
+    if (lg) nlog("[nhook] [call] halo3+0x%x (host 0x%llx): %d args %llx %llx %llx %llx %llx; ctx rsp 0x%llx tls 0x%llx", rva, (unsigned long long)e, n,
+                 (unsigned long long)(n > 0 ? a[0] : 0), (unsigned long long)(n > 1 ? a[1] : 0), (unsigned long long)(n > 2 ? a[2] : 0), (unsigned long long)(n > 3 ? a[3] : 0), (unsigned long long)(n > 4 ? a[4] : 0),
+                 (unsigned long long)ctx[4], (unsigned long long)ctx[0x2d8 / 8]);
+    static __thread uint64_t save[0x280 / 8]; memcpy(save, ctx, sizeof save);
+    uint64_t rsp = ((ctx[4] - 0x400) & ~0xfull) - 8;                              // (as after a call: rsp % 16 == 8)
+    *(volatile uint64_t*)(uintptr_t)rsp = 0;                                     // the return-address slot
+    for (int i = 4; i < n; i++) *(volatile uint64_t*)(uintptr_t)(rsp + 0x28 + 8 * (uint64_t)(i - 4)) = a[i];
+    if (n > 0) ctx[1] = a[0]; if (n > 1) ctx[2] = a[1]; if (n > 2) ctx[8] = a[2]; if (n > 3) ctx[9] = a[3];
+    ctx[4] = rsp;
+    ((void (*)(uint64_t*))(uintptr_t)e)(ctx);
+    uint64_t r = ctx[0]; if (lg) nlog("[nhook] [call] halo3+0x%x returned 0x%llx", rva, (unsigned long long)r); memcpy(ctx, save, sizeof save); return r;
+}
+extern char nh_tpls_start[], nh_tpls_displaced[], nh_tpls_handler[], nh_tpls_return[], nh_tpls_end[];
+static int hook_install_x(const char* name, uint32_t rva, void* h, int skip, uint64_t* stub_out) {   // skip: stub.S _nh_tpls (the handler may do the function's work)
+    char* T0 = skip ? nh_tpls_start : nh_tpl_start; char* TE = skip ? nh_tpls_end : nh_tpl_end; char* TD = skip ? nh_tpls_displaced : nh_tpl_displaced;
+    char* TH = skip ? nh_tpls_handler : nh_tpl_handler; char* TR = skip ? nh_tpls_return : nh_tpl_return;
     uint64_t e = host_of(rva); uint32_t w[4];
     if (!e || rd(e, w, 16)) { nlog("[nhook] hook %s: halo3+0x%x not lifted", name, rva); return -1; }
     // An entry that is one `b` (object_delete, halo3+0x342ed8: the app replaced the function with its own code, the lifted
@@ -106,14 +194,14 @@ static int hook_install(const char* name, uint32_t rva, nh_handler h) {
         nlog("[nhook] hook %s: halo3+0x%x is a branch to 0x%llx: hooking the branch", name, rva, (unsigned long long)ret); }
     else if (w[0] != 0xa9bf7bfd || w[1] != 0x910003fd || w[2] != 0xa9bf53f3 || (w[3] & 0xffffffe0) != 0xb9429000) {   // ldr w<n>,[x0,#0x290]
         nlog("[nhook] hook %s: halo3+0x%x entry %08x %08x %08x %08x is not a lifted wrapper: refused", name, rva, w[0], w[1], w[2], w[3]); return -1; }
-    size_t tl = nh_tpl_end - nh_tpl_start;
+    size_t tl = TE - T0;
     uint8_t* st = near_page(e, 0x4000);              // its own page: a page that holds a live stub is never made writable again
     if (!st) { nlog("[nhook] hook %s: no stub page near 0x%llx", name, (unsigned long long)e); return -1; }
     int64_t d = (int64_t)((uint64_t)st - e);
-    memcpy(st, nh_tpl_start, tl);
-    memcpy(st + (nh_tpl_displaced - nh_tpl_start), &displaced, 4);            // the displaced stp x29,x30,[sp,#-16]! (or a nop for a branch)
+    memcpy(st, T0, tl);
+    memcpy(st + (TD - T0), &displaced, 4);            // the displaced stp x29,x30,[sp,#-16]! (or a nop for a branch)
     uint64_t hv = (uint64_t)h, rv = ret;
-    memcpy(st + (nh_tpl_handler - nh_tpl_start), &hv, 8); memcpy(st + (nh_tpl_return - nh_tpl_start), &rv, 8);
+    memcpy(st + (TH - T0), &hv, 8); memcpy(st + (TR - T0), &rv, 8);
     mach_vm_protect(mach_task_self(), (mach_vm_address_t)st, 0x4000, 0, VM_PROT_READ | VM_PROT_EXECUTE);
     sys_icache_invalidate(st, tl);
     uint32_t b = 0x14000000u | ((uint32_t)(d >> 2) & 0x03ffffffu);
@@ -122,7 +210,126 @@ static int hook_install(const char* name, uint32_t rva, nh_handler h) {
     pthread_jit_write_protect_np(1);
     sys_icache_invalidate((void*)e, 4);
     nlog("[nhook] hook %s: halo3+0x%x (host 0x%llx) -> stub 0x%llx", name, rva, (unsigned long long)e, (unsigned long long)st);
+    if (stub_out) *stub_out = (uint64_t)st + (uint64_t)(TD - T0);   // (the stub's tail: runs the original)
     return 0;
+}
+static int hook_install(const char* name, uint32_t rva, nh_handler h) { return hook_install_x(name, rva, (void*)h, 0, 0); }
+
+// ---- hooks on a lifted function's BODY (2026-11-07) ------------------------------------------------------------------
+// Entry hooks see only calls through the code table; lifted code calls lifted code DIRECTLY, at the body its wrapper `bl`s
+// (wrapper: stp/mov/stp, ldr w,[x0,#0x290], ..., x2 = context, x3 = guest rsp, x4..x7 = rcx, rdx, r8, r9, `bl body`,
+// str x2 -> guest rax). body_hook_after puts one `b <stub>` over the body's first instruction (it must be `stp x29, x30,
+// [sp, #-16]!`; one atomic word on the MAP_JIT code, like hook_install_x), so every caller is seen; stub.S _nh_ba runs the
+// original first, then h(a) (a[0..5] = x2..x7, a[6..9] = stack arguments 5-8, a[10] = the result).
+extern char nh_ba_start[], nh_ba_displaced[], nh_ba_handler[], nh_ba_return[], nh_ba_end[];
+static uint64_t body_of(uint32_t rva) {   // the body a lifted wrapper calls (0 = not that shape)
+    uint64_t e = host_of(rva); uint32_t w[24]; if (!e || rd(e, w, sizeof w) || w[0] != 0xa9bf7bfd || w[1] != 0x910003fd) return 0;
+    for (int i = 4; i < 24; i++) if ((w[i] & 0xfc000000u) == 0x94000000u) {
+        uint64_t b = e + 4u * (unsigned)i + (uint64_t)((int64_t)((int32_t)(w[i] << 6) >> 6) * 4); uint32_t b0 = 0;
+        return rd(b, &b0, 4) || b0 != 0xa9bf7bfd ? 0 : b; }
+    return 0; }
+static int body_hook_after(const char* name, uint32_t rva, void (*h)(uint64_t*)) {
+    uint64_t b = body_of(rva); if (!b) { nlog("[nhook] body hook %s: halo3+0x%x has no lifted body of the known shape: refused", name, rva); return -1; }
+    size_t tl = (size_t)(nh_ba_end - nh_ba_start); uint8_t* st = near_page(b, 0x4000);
+    if (!st) { nlog("[nhook] body hook %s: no stub page near 0x%llx", name, (unsigned long long)b); return -1; }
+    int64_t d = (int64_t)((uint64_t)st - b); if (d >= (1ll << 27) || d < -(1ll << 27)) { nlog("[nhook] body hook %s: stub out of branch range", name); return -1; }
+    memcpy(st, nh_ba_start, tl); uint32_t disp = 0xa9bf7bfd; memcpy(st + (nh_ba_displaced - nh_ba_start), &disp, 4);
+    uint64_t hv = (uint64_t)(uintptr_t)h, rv = b + 4; memcpy(st + (nh_ba_handler - nh_ba_start), &hv, 8); memcpy(st + (nh_ba_return - nh_ba_start), &rv, 8);
+    mach_vm_protect(mach_task_self(), (mach_vm_address_t)(uintptr_t)st, 0x4000, 0, VM_PROT_READ | VM_PROT_EXECUTE); sys_icache_invalidate(st, tl);
+    uint32_t br = 0x14000000u | ((uint32_t)(d >> 2) & 0x03ffffffu);
+    pthread_jit_write_protect_np(0); __atomic_store_n((uint32_t*)(uintptr_t)b, br, __ATOMIC_RELEASE); pthread_jit_write_protect_np(1);
+    sys_icache_invalidate((void*)(uintptr_t)b, 4);
+    nlog("[nhook] body hook %s: halo3+0x%x body 0x%llx -> stub 0x%llx", name, rva, (unsigned long long)b, (unsigned long long)(uintptr_t)st);
+    return 0; }
+
+// ---- hooks on the app's OWN code (its signed __TEXT: functions the app replaced, e.g. object_delete) --------------------
+// The app is signed ad hoc with no hardened runtime (codesign flags 0x2): its text pages are made writable as private copies
+// (VM_PROT_COPY), the function's first four instructions become `ldr x16, #8; br x16; .quad stub` and go to the stub
+// (stub.S _nh_tp4: handler(x0), then those four instructions, then back). Refused when one of them is PC-relative.
+// Installed at startup or later, while the game runs (the camera hook, host tools): the page is not executable while it is
+// patched, so every other thread is suspended for that moment (nh_world_stop: a thread running in the page would fault --
+// signal 10 at a frame-function address, 2026-11-07), and a thread stopped inside the four patched instructions makes it try
+// again (up to 50 times, 1 ms apart). Nothing between stop and resume may take a lock (no log, no malloc). NHOOK_NO_TEXT_HOOKS=1 = none.
+extern char nh_tp4_start[], nh_tp4_displaced[], nh_tp4_handler[], nh_tp4_return[], nh_tp4_end[];
+static int insn_pcrel(uint32_t w) {
+    return (w & 0x1f000000u) == 0x10000000u            // adr / adrp
+        || (w & 0x7c000000u) == 0x14000000u            // b / bl
+        || (w & 0x7e000000u) == 0x34000000u            // cbz / cbnz
+        || (w & 0x7e000000u) == 0x36000000u            // tbz / tbnz
+        || (w & 0xff000010u) == 0x54000000u            // b.cond
+        || (w & 0x3b000000u) == 0x18000000u;           // ldr (literal)
+}
+// Suspend every thread but this one (0 = done); *busy = some thread's pc lies in [lo, hi) (then they are resumed again).
+static int nh_world_stop(thread_act_array_t* th, mach_msg_type_number_t* n, uint64_t lo, uint64_t hi, int* busy) {
+    *busy = 0; if (task_threads(mach_task_self(), th, n) != KERN_SUCCESS) return -1;
+    thread_t me = mach_thread_self();
+    for (mach_msg_type_number_t i = 0; i < *n; i++) if ((*th)[i] != me) thread_suspend((*th)[i]);
+    for (mach_msg_type_number_t i = 0; i < *n && !*busy; i++) { if ((*th)[i] == me) continue;
+        arm_thread_state64_t s; mach_msg_type_number_t c = ARM_THREAD_STATE64_COUNT;
+        if (thread_get_state((*th)[i], ARM_THREAD_STATE64, (thread_state_t)&s, &c) != KERN_SUCCESS) continue;
+        uint64_t pc = (uint64_t)arm_thread_state64_get_pc(s); if (pc >= lo && pc < hi) *busy = 1; }
+    mach_port_deallocate(mach_task_self(), me); return 0;
+}
+static void nh_world_go(thread_act_array_t th, mach_msg_type_number_t n) {
+    thread_t me = mach_thread_self();
+    for (mach_msg_type_number_t i = 0; i < n; i++) { if (th[i] != me) thread_resume(th[i]); mach_port_deallocate(mach_task_self(), th[i]); }
+    mach_port_deallocate(mach_task_self(), me);
+    mach_vm_deallocate(mach_task_self(), (mach_vm_address_t)(uintptr_t)th, (mach_vm_size_t)n * sizeof(thread_act_t));
+}
+extern char nh_tpf_start[], nh_tpf_want[], nh_tpf_displaced[], nh_tpf_handler[], nh_tpf_return[], nh_tpf_end[];
+extern char nh_tps_start[], nh_tps_displaced[], nh_tps_handler[], nh_tps_return[], nh_tps_end[];
+static int text_hook_x(const char* name, uint64_t f, void* h, int filt, uint32_t want, int skip, uint64_t* stub_out) {   // skip: stub.S _nh_tps   // filt: _nh_tpf, the handler only for parameter id `want`
+    if (getenv("NHOOK_NO_TEXT_HOOKS")) return -1;
+    uint32_t w[4]; if (rd(f, w, 16)) { nlog("[nhook] text hook %s: 0x%llx unreadable", name, (unsigned long long)f); return -1; }
+    for (int i = 0; i < 4; i++) if (insn_pcrel(w[i])) { nlog("[nhook] text hook %s: instruction %d (%08x) is PC-relative: refused", name, i, w[i]); return -1; }
+    char* ts = filt ? nh_tpf_start : skip ? nh_tps_start : nh_tp4_start; char* te = filt ? nh_tpf_end : skip ? nh_tps_end : nh_tp4_end;
+    char* td = filt ? nh_tpf_displaced : skip ? nh_tps_displaced : nh_tp4_displaced, * th = filt ? nh_tpf_handler : skip ? nh_tps_handler : nh_tp4_handler, * tr = filt ? nh_tpf_return : skip ? nh_tps_return : nh_tp4_return;
+    size_t tl = te - ts; mach_vm_address_t st = 0;
+    if (mach_vm_allocate(mach_task_self(), &st, 0x4000, VM_FLAGS_ANYWHERE) != KERN_SUCCESS) return -1;
+    memcpy((void*)st, ts, tl); memcpy((uint8_t*)st + (td - ts), w, 16);
+    uint64_t hv = (uint64_t)h, rv = f + 16; memcpy((uint8_t*)st + (th - ts), &hv, 8); memcpy((uint8_t*)st + (tr - ts), &rv, 8);
+    if (filt) memcpy((uint8_t*)st + (nh_tpf_want - ts), &want, 4);
+    mach_vm_protect(mach_task_self(), st, 0x4000, 0, VM_PROT_READ | VM_PROT_EXECUTE); sys_icache_invalidate((void*)st, tl);
+    uint64_t pg = f & ~0x3fffull, end = (f + 16 + 0x3fff) & ~0x3fffull;
+    uint32_t patch[4] = {0x58000050u, 0xd61f0200u, (uint32_t)st, (uint32_t)((uint64_t)st >> 32)};   // ldr x16, #8 ; br x16 ; .quad stub
+    kern_return_t kr = KERN_FAILURE, kr2 = KERN_FAILURE; int tries = 0, stopped = !getenv("NHOOK_TEXT_NOSTOP");
+    for (;; tries++) {
+        thread_act_array_t th = 0; mach_msg_type_number_t n = 0; int busy = 0;
+        if (stopped && nh_world_stop(&th, &n, f + 1, f + 16, &busy)) stopped = 0;
+        if (busy && tries < 50) { nh_world_go(th, n); usleep(1000); continue; }
+        kr = mach_vm_protect(mach_task_self(), pg, end - pg, 0, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+        if (kr == KERN_SUCCESS) {
+            memcpy((void*)(uintptr_t)(f + 8), &patch[2], 8); __atomic_thread_fence(__ATOMIC_SEQ_CST); memcpy((void*)(uintptr_t)f, patch, 8);
+            kr2 = mach_vm_protect(mach_task_self(), pg, end - pg, 0, VM_PROT_READ | VM_PROT_EXECUTE);
+            sys_icache_invalidate((void*)(uintptr_t)f, 16); }
+        if (stopped) nh_world_go(th, n);
+        break; }
+    if (kr != KERN_SUCCESS) { nlog("[nhook] text hook %s: the page stays read-only (kr %d)", name, kr); return -1; }
+    nlog("[nhook] text hook %s: 0x%llx -> stub 0x%llx (back to executable: kr %d; other threads %s%s)", name, (unsigned long long)f, (unsigned long long)st, kr2,
+         stopped ? "stopped" : "NOT stopped", tries ? ", retried" : "");
+    if (stub_out) *stub_out = (uint64_t)st + (uint64_t)(td - ts);
+    return 0;
+}
+static int text_hook_t(const char* name, uint64_t f, nh_handler h, int filt, uint32_t want) { return text_hook_x(name, f, (void*)h, filt, want, 0, 0); }
+static int text_hook(const char* name, uint64_t f, nh_handler h) { return text_hook_t(name, f, h, 0, 0); }
+// the app's Opus decode (nstats.c nh_on_opus: forensic voice audio) -- 0.10.0 addresses, every word checked first
+extern char nh_opus_shim[];
+static uint64_t g_opus_ret;   // (nstats.c)
+static void voice_hook_install(void) {
+    static const struct { uint64_t a; uint32_t w[4]; int n; } chk[] = {
+        {0x1003f1e7cull, {0x6db923e9, 0xa9016ffc, 0xa90267fa, 0xa9035ff8}, 4},   // decode: stp d9,d8 / x28,x27 / x26,x25 / x24,x23
+        {0x102152444ull, {0xd109e348, 0xf9400113}, 2},                           // the mixer: sub x8, x26, #0x278 ; ldr x19, [x8] (the id)
+        {0x10215256cull, {0xaa1903e1, 0xaa1803e2, 0x52807803, 0x978a7e41}, 4} }; // mov x1, x25 ; mov x2, x24 ; mov w3, #0x3c0 ; bl decode
+    uint64_t sl = g_img - APP_IMAGE;
+    for (size_t i = 0; i < sizeof chk / sizeof chk[0]; i++) { uint32_t w[4]; if (rd(chk[i].a + sl, w, 4u * (unsigned)chk[i].n) || memcmp(w, chk[i].w, 4u * (unsigned)chk[i].n)) {
+        nlog("[nhook] voice packets: not hooked (0x%llx is not the 0.10.0 code)", (unsigned long long)chk[i].a); return; } }
+    g_opus_ret = 0x102152578ull + 4 + sl;   // (nstats.c nh_on_opus: other callers are ignored)
+    text_hook("opus decode (voice)", 0x1003f1e7cull + sl, (nh_handler)(void*)nh_opus_shim);
+}
+// The target of an entry that is one `b` (the code table's entry for a function the app replaced)
+static uint64_t branch_target_of(uint32_t rva) {
+    uint64_t e = host_of(rva); uint32_t w0; if (!e || rd(e, &w0, 4) || (w0 & 0xfc000000u) != 0x14000000u) return 0;
+    return e + (uint64_t)((int64_t)((int32_t)(w0 << 6) >> 6) * 4);
 }
 
 // ---- census (NHOOK_CENSUS=1): which lifted functions run at all ---------------------------------------------------
@@ -181,7 +388,7 @@ static void census_install(void) {
 static volatile uint64_t g_main_ctx;               // the engine main thread's guest context (a hooked engine function's caller)
 static volatile uint64_t g_frames;
 // NHOOK_COUNT=1: entry hooks that only count calls (which engine functions run in the menus / in a match)
-static const struct { const char* name; uint32_t rva; } g_cnt_fns[] = {
+static struct { const char* name; uint32_t rva; } g_cnt_fns[] = {   // (NHOOK_COUNT_RVAS=<rva>,... replaces the list: any 8 functions)
     {"main_loop_body", 0xb2250}, {"sim_tick", 0xef120}, {"local_user_count", 0xfbb94}, {"local_player", 0xfbc04},
     {"display_event", 0x11b0ec}, {"object_delete", 0x342ed8}, {"render_prep", 0x2d1390}, {"objects_update", 0x34067c},
 };
@@ -195,6 +402,68 @@ static nh_handler g_cnt_h[NCNT] = { cnt_0, cnt_1, cnt_2, cnt_3, cnt_4, cnt_5, cn
 // context made ~1 snapshot in 7 empty in a 72-player game (2026-11-07). A thread that stops validating for 2 s (a new
 // engine thread) is given up and the next good one learned.
 static volatile uint64_t g_good_tlsp;
+// ---- the frame's camera: halo3's view constants (shader parameter 0x27, set through halo3+0x2af478 -- the app's own code):
+// element 0 = the view-projection rows 0-3 (count 64 bytes), 4 / 5 / 6 forward / left / up, 7 the camera position. Halo 3's
+// projection is reverse-Z with no far plane: row 2 = (0, 0, 0, 1/128) -> scene depth = (1/128) / distance along the view.
+// Several views set it each frame (the main view, shadow / reflection views): a "world camera" is one whose rows 0, 1 and 3
+// vanish at its position (the loader's hb_is_world_camera test); the overlay takes the latest one that sits within 1 unit of
+// the observer camera (the player's view). Captured on the render thread; read with a sequence lock.
+typedef struct { float rows[16], pos[3]; } NhCam;
+static NhCam g_cam_pend; static volatile uint32_t g_cam_have_rows;
+static NhCam g_cam; static volatile unsigned g_cam_seq; static volatile double g_cam_t;
+static int cam_is_world(const float* m, const float* c) {
+    float c2 = c[0] * c[0] + c[1] * c[1] + c[2] * c[2]; if (c2 < 0.25f || c2 > 1e8f) return 0;
+    static const int rows[3] = {0, 1, 3};
+    for (int i = 0; i < 3; i++) { const float* r = m + rows[i] * 4; float sc = fabsf(r[0]) + fabsf(r[1]) + fabsf(r[2]); if (sc < 1e-4f) return 0;
+        float v = r[0] * c[0] + r[1] * c[1] + r[2] * c[2] + r[3]; if (fabsf(v) > 0.02f * sc * (1.0f + sqrtf(c2))) return 0; }
+    return 1;
+}
+static void on_view_param_body(uint64_t* ctx) {      // (only parameter 0x27 gets here: the stub filters)
+    uint32_t ecx = (uint32_t)ctx[1], el = ecx & 0xffff, cnt = (uint32_t)ctx[8]; uint64_t data = ctx[2];
+    if (data < 0x100000000ull || data >= 0x800000000000ull) return;
+    if (el == 0 && cnt >= 64) { memcpy(g_cam_pend.rows, (const void*)(uintptr_t)data, 64); g_cam_have_rows = 1; return; }
+    if (el == 7 && cnt >= 12 && g_cam_have_rows) { memcpy(g_cam_pend.pos, (const void*)(uintptr_t)data, 12); g_cam_have_rows = 0;
+        if (!cam_is_world(g_cam_pend.rows, g_cam_pend.pos)) return;
+        extern int nov_cam_is_player(const float* pos);
+        if (!nov_cam_is_player(g_cam_pend.pos)) return;
+        g_cam_seq++; __atomic_thread_fence(__ATOMIC_SEQ_CST); g_cam = g_cam_pend; __atomic_thread_fence(__ATOMIC_SEQ_CST); g_cam_seq++;
+        struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); g_cam_t = ts.tv_sec + ts.tv_nsec * 1e-9; }
+}
+static volatile int g_view_wanted;              // the overlay is on (noverlay.c nov_build sets it every frame it runs, clears when off)
+static void on_view_param(uint64_t* ctx) { if (g_hc_off[HC_VIEW] || !g_view_wanted) return; uint64_t t0 = hc_now(); on_view_param_body(ctx); hc_add(HC_VIEW, t0); }
+static uint64_t g_view_hook_at; static int g_view_hooked;
+static void nov_view_hook_want(void) {        // (render thread) install the camera hook once, now that the overlay wants a view
+    if (g_view_hooked || !g_view_hook_at) return; g_view_hooked = 1;
+    if (!text_hook_t("view constants", g_view_hook_at, on_view_param, 1, 0x27)) nlog("[nhook] camera hook installed (the overlay was turned on)"); }
+int nh_camera(float* rows16, float* pos3) {     // the latest player view (1 = fresh: < 0.25 s)
+    NhCam c; unsigned s1, s2; int tries = 0;
+    do { s1 = g_cam_seq; memcpy(&c, (const void*)&g_cam, sizeof c); s2 = g_cam_seq; } while ((s1 != s2 || (s1 & 1)) && ++tries < 8);
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); double now = ts.tv_sec + ts.tv_nsec * 1e-9;
+    if (!s1 || s1 != s2 || now - g_cam_t > 0.25) return 0;
+    memcpy(rows16, c.rows, 64); memcpy(pos3, c.pos, 12); return 1;
+}
+
+// NHOOK_CBPROBE=1: halo3+0x2af478 (set a shader parameter: ecx bits 16-26 = parameter id, low 16 bits = element, rdx = data,
+// r8d = count -- the app's own code) records each parameter id's latest call; dumped to the log every 10 s
+typedef struct { volatile uint32_t ecx, count; volatile unsigned long n; float d[32]; } CbSeen;
+static CbSeen g_cbs[4096];   // by (parameter id, element): ids 0x37 / 0x43 / 0x27 / 0x15 / 0x2c keep every element (the view constants)
+static void on_set_param(uint64_t* ctx) {
+    uint32_t ecx = (uint32_t)ctx[1], id = (ecx >> 16) & 0x7ff, el = ecx & 0xffff; uint64_t data = ctx[2]; uint32_t cnt = (uint32_t)ctx[8];
+    int view = id == 0x37 || id == 0x43 || id == 0x27 || id == 0x15 || id == 0x2c;
+    CbSeen* c = &g_cbs[view ? (2048 + ((id & 0x3f) << 5) + (el & 31)) % 4096 : id]; c->n++; c->ecx = ecx; c->count = cnt;
+    if (data >= 0x100000000ull && data < 0x800000000000ull && (view || (c->n & 1023) == 1)) memcpy((void*)c->d, (const void*)(uintptr_t)data, cnt > 128 ? 128 : cnt);
+}
+static void* cbprobe_dump(void* a) {
+    (void)a; for (int r = 0; r < 6; r++) { sleep(10);
+        for (int i = 0; i < 4096; i++) { CbSeen* c = &g_cbs[i]; if (!c->n) continue;
+            char b[900]; int k = 0; for (int q = 0; q < 32 && q * 4 < (int)c->count; q++) k += snprintf(b + k, sizeof b - (size_t)k, "%s%.4f", q && !(q & 3) ? " | " : " ", c->d[q]);
+            nlog("[nhook] [cb] ecx 0x%08x count %u calls %lu:%s", c->ecx, c->count, c->n, b); } }
+    return 0;
+}
+volatile unsigned long g_texthook_test_n, g_tht_n[8]; uint32_t g_tht_rva[8];
+#define THT(i) static void tht_##i(uint64_t* ctx) { (void)ctx; g_tht_n[i]++; g_texthook_test_n++; }
+THT(0) THT(1) THT(2) THT(3) THT(4) THT(5) THT(6) THT(7)
+static nh_handler g_tht_h[8] = { tht_0, tht_1, tht_2, tht_3, tht_4, tht_5, tht_6, tht_7 };
 static void on_main_loop(uint64_t* ctx) {           // the engine thread's context (hook_install "engine_clock")
     uint64_t t = ctx[0x2d8 / 8]; if (!t) return;
     uint64_t good = g_good_tlsp; if (good && t != good) return;
@@ -205,7 +474,10 @@ static int tls_holds_players(uint64_t blk) {        // the block's +0x10 is halo
     uint64_t parr = 0; uint8_t hdr[0x30];
     return blk && !rd(blk + 0x10, &parr, 8) && parr && !rd(parr, hdr, sizeof hdr) && *(uint32_t*)(hdr + 0x2c) == 0x64407440 && !memcmp(hdr, "players", 8);
 }
-static uint64_t tls_block(void) {                   // halo3's TLS block of the engine main thread (index 0 here)
+static __thread int t_tls_memo; static __thread uint64_t t_tls_val;   // (the snapshot thread: one lookup per run, st_snap_thread)
+static uint64_t tls_block_now(void);
+static uint64_t tls_block(void) { if (t_tls_memo) { if (t_tls_memo == 1) { t_tls_val = tls_block_now(); t_tls_memo = 2; } return t_tls_val; } return tls_block_now(); }
+static uint64_t tls_block_now(void) {                   // halo3's TLS block of the engine main thread (index 0 here)
     static volatile uint64_t last_good; static double bad_since;
     uint64_t c = g_main_ctx, arr = 0, blk = 0; uint32_t idx = 0;
     if (c && !rd(c + 0x2d8, &arr, 8) && arr && !rd(g_img + 0xa39f9c, &idx, 4) && idx <= 64 && !rd(arr + idx * 8, &blk, 8) && tls_holds_players(blk)) {
@@ -252,22 +524,59 @@ static void hooks_start(void) {
     uint64_t tab[2]; if (rd(APP_CODETAB + g_slide, tab, 16) || !tab[0] || tab[1] < 1000 || tab[1] > 1000000) { nlog("[nhook] no code table: hooks off"); return; }
     g_tab = tab[0]; g_ntab = tab[1];
     if (getenv("NHOOK_CENSUS")) census_install();
-    else if (getenv("NHOOK_COUNT")) for (size_t k = 0; k < NCNT; k++) hook_install(g_cnt_fns[k].name, g_cnt_fns[k].rva, g_cnt_h[k]);
+    else if (getenv("NHOOK_COUNT")) {
+        if (getenv("NHOOK_COUNT_RVAS")) { const char* w = getenv("NHOOK_COUNT_RVAS"); static char nm[NCNT][16];
+            for (size_t k = 0; k < NCNT; k++) { if (w && *w) { g_cnt_fns[k].rva = (uint32_t)strtoul(w, 0, 16); snprintf(nm[k], 16, "%x", g_cnt_fns[k].rva); g_cnt_fns[k].name = nm[k]; w = strchr(w, ','); if (w) w++; } else g_cnt_fns[k].rva = 0; } }
+        for (size_t k = 0; k < NCNT; k++) if (g_cnt_fns[k].rva) hook_install(g_cnt_fns[k].name, g_cnt_fns[k].rva, g_cnt_h[k]); }
     // the engine thread's context: halo3+0x9d22c (a millisecond clock read from ~420 places) runs lifted on the engine
     // thread ~7000 times a second in a match -- main_loop_body (0xb2250) and the sim tick are the app's own code now
     else if (!getenv("NHOOK_NO_HOOKS")) { hook_install("engine_clock", 0x9d22c, on_main_loop);
-        if (!getenv("NHOOK_NO_EVHOOK")) hook_install("display_event", 0x11b0ec, on_display_event);
-        if (!getenv("NHOOK_NO_DELHOOK")) hook_install("object_delete", 0x342ed8, on_object_delete); }
+        // display_event: the app's own native code too (its entry is a `b` into the app's __TEXT; the lifted entry never ran)
+        if (!getenv("NHOOK_NO_EVHOOK")) { uint64_t t = branch_target_of(0x11b0ec); if (!t || text_hook("display_event", t, on_display_event)) hook_install("display_event", 0x11b0ec, on_display_event); }
+        if (getenv("NHOOK_LIST_BRANCH_ENTRIES")) {   // which halo3 functions the app replaced with its own code (entry = one `b`)
+            uint64_t* tb = malloc(g_ntab * 16); int n = 0; char line[1024]; int k = 0;
+            if (tb && !rd(g_tab, tb, g_ntab * 16)) for (uint64_t i = 0; i < g_ntab; i++) { uint32_t w0; if (rd(tb[2 * i + 1], &w0, 4) || (w0 & 0xfc000000u) != 0x14000000u) continue;
+                n++; k += snprintf(line + k, sizeof line - (size_t)k, " %llx", (unsigned long long)(tb[2 * i] - 0x180000000ull));
+                if (k > 900) { nlog("[nhook] branch entries:%s", line); k = 0; } }
+            if (k) nlog("[nhook] branch entries:%s", line); nlog("[nhook] %d of %llu code-table entries are one `b` (functions the app replaced)", n, (unsigned long long)g_ntab); free(tb); }
+        // the camera hook (the overlay's view): installed by the render thread the first time an overlay feature is on
+        // (nov_view_hook_want), not here -- a session that never turns the overlay on never pays its ~700k filter passes a second
+        if (!getenv("NHOOK_NO_VIEWHOOK") && !getenv("NHOOK_CBPROBE")) g_view_hook_at = branch_target_of(0x2af478);
+        if (getenv("NHOOK_CBPROBE")) { uint64_t t = branch_target_of(0x2af478); if (t && !text_hook("set_param", t, on_set_param)) { pthread_t th; pthread_create(&th, 0, cbprobe_dump, 0); pthread_detach(th); } }
+        if (getenv("NHOOK_TEXTHOOK_TEST")) {   // test: counting text hooks on functions the app replaced (NHOOK_TEXTHOOK_TEST=<rva>,<rva>...)
+            const char* w = getenv("NHOOK_TEXTHOOK_TEST");
+            for (int i = 0; i < 8 && w && *w; i++) { uint32_t rva = (uint32_t)strtoul(w, 0, 16); uint64_t t = branch_target_of(rva); char nm[32]; snprintf(nm, sizeof nm, "test halo3+0x%x", rva);
+                g_tht_rva[i] = rva; nlog("[nhook] text hook test: halo3+0x%x's entry -> 0x%llx", rva, (unsigned long long)t); if (t) text_hook(nm, t, g_tht_h[i]);
+                w = strchr(w, ','); if (w) w++; } }
+        // object_delete: the app's own native function (its code-table entry is a `b` into the app's __TEXT): a text hook
+        if (!getenv("NHOOK_NO_DELHOOK")) { uint64_t t = branch_target_of(0x342ed8); if (t) text_hook("object_delete", t, on_object_delete); else hook_install("object_delete", 0x342ed8, on_object_delete); }
+        if (!getenv("NHOOK_NO_VOICEHOOK")) voice_hook_install(); }
     if (getenv("NHOOK_PLAYERS_LOG")) { pthread_t t; pthread_create(&t, 0, engine_thread, 0); pthread_detach(t); }
+    if (getenv("NHOOK_PKG_PROBE")) { pthread_t t; pthread_create(&t, 0, pkg_probe, 0); pthread_detach(t); }
+    if (getenv("NHOOK_CODETAB_DUMP")) { FILE* f = fopen(getenv("NHOOK_CODETAB_DUMP"), "w");   // the code table as "halo3 rva, host entry" lines:
+        if (f) { for (uint64_t i = 0; i < g_ntab; i++) { uint64_t e[2]; if (rd(g_tab + i * 16, e, 16)) break;   // shim/tools/native-frames.py maps a
+                     fprintf(f, "%llx %llx\n", (unsigned long long)(e[0] - 0x180000000ull), (unsigned long long)e[1]); }      // crash's host frames to halo3 functions
+                 fclose(f); nlog("[nhook] code table (%llu entries) -> %s", (unsigned long long)g_ntab, getenv("NHOOK_CODETAB_DUMP")); } }
+    if (getenv("NHOOK_DUMP_ENTRY")) { const char* w = getenv("NHOOK_DUMP_ENTRY");   // NHOOK_DUMP_ENTRY=<rva>[:<words>],...: a lifted function's first words (arm64; RE)
+        while (w && *w) { uint32_t r = (uint32_t)strtoul(w, 0, 16); const char* c = strchr(w, ':'), * cm = strchr(w, ','); int n = c && (!cm || c < cm) ? atoi(c + 1) : 48;
+            if (n > 512) n = 512; uint64_t e = host_of(r); uint32_t buf[512];
+            if (e && !rd(e, buf, 4u * (unsigned)n)) { char line[64 * 9 + 64]; for (int i = 0; i < n; i += 64) { int k = 0; for (int j = i; j < n && j < i + 64; j++) k += snprintf(line + k, sizeof line - (size_t)k, "%08x ", buf[j]);
+                nlog("[nhook] [entry] halo3+0x%x at 0x%llx +%d: %s", r, (unsigned long long)e, i * 4, line); } }
+            w = cm; if (w) w++; } }
+    if (getenv("NHOOK_RVA_KIND")) { const char* w = getenv("NHOOK_RVA_KIND");   // NHOOK_RVA_KIND=<rva>,<rva>...: how the app runs each halo3 function
+        while (w && *w) { uint32_t r = (uint32_t)strtoul(w, 0, 16); uint64_t e = host_of(r), t = branch_target_of(r);
+            nlog("[nhook] halo3+0x%x: %s (entry 0x%llx%s0x%llx)", r, rva_kind(r), (unsigned long long)e, t ? ", the app's code at " : "", (unsigned long long)t);
+            w = strchr(w, ','); if (w) w++; } }
     nstats_start();
     { extern void nr_install(void); nr_install(); }      // nrender.m: the overlay, recording and captures in the app's frames
 }
 
+static void hooks_start(void);
 static void* probe_thread(void* arg) {
     (void)arg;
     sleep(2);
     const char* path = getenv("NHOOK_HALO3");
-    if (!path) { nlog("[nhook] NHOOK_HALO3 not set: no image check"); return 0; }
+    if (!path) { nlog("[nhook] NHOOK_HALO3 not set: no image check"); hooks_start(); return 0; }   // (the hooks start anyway: shim/tools/native-dedicated.sh once lost them all)
     int fd = open(path, O_RDONLY); struct stat st;
     if (fd < 0 || fstat(fd, &st)) { nlog("[nhook] cannot open %s", path); return 0; }
     uint8_t* f = mmap(0, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0); close(fd);

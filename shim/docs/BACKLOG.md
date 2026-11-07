@@ -2,7 +2,32 @@
 
 Kept current as work lands. Open items are ranked (the order they are worked); finished ones move to "Done".
 
-## Open
+## Open — the native app (0.10+: /Applications/Project Reclaimer.app with nhook.dylib injected)
+
+Since 2026-11-06 the user plays the native app, so this is the live list. The loader-era list below is closed (every item
+done / fixed / closed; #47's pending live check passed in the native app 2026-11-07). Ranked 2026-11-07:
+
+| # | Item | Status / notes |
+|---|---|---|
+| N1 | **Hook cost meter** (user, 2026-11-07: "when a hook is enabled it should calculate any performance loss that occurs as a factor of it being enabled") | DONE 2026-11-07: every hook / overlay part times itself (nhcost.h); the page's Hook cost panel shows calls/s, time per frame, an fps estimate and a measure button (the real on/off run). Live (51-player Hugegrass, 22 fps, sim-bound): overlay, hitboxes, vehicles, bullets, stats all within noise; vehicles 1.3 ms a frame self-timed |
+| N2 | **Aimbot? column** (user, 2026-11-07) | BUILT, live-checked 2026-11-07 (51-player Hugegrass): outliers against the lobby -- through-hitbox share, opening shots on target, head share (2 of 3); long range dropped from the vote (on a big map it repeats the first); "head" is the topmost hitbox region, wrong on modded characters (the lobby comparison cancels it) |
+| N3 | **Off means off, native** (user, 2026-11-07: "a disabled hook should not cost anything") | DONE 2026-11-07: the camera hook installs on first overlay use and idles while it is off; one bullet pass; tracer records only with tracers on; players read only when a feature needs them; a switch per hook in the Hook cost panel (FIXES.md "off means off") |
+| N4 | **Merge client-v0.10 into main + a release** | WAITING for the user's OK (the reclaimer-0.10.0 release predates the native hooks) |
+| N5 | **After an in-session map change** | DONE 2026-11-07: an in-session map change on our local server (RCON load): feed, map, heatmap and zones followed; the aim meter is map-independent (its hitbox cache resets with the map) |
+| N6 | **Forensic voice: channel and open mics** | PARTLY DONE 2026-11-07: open microphones are split on the app's quiet windows (FXF_LEVEL); the channel stays "not known" natively: the voice mixer keeps no channel per packet, it would need a hook on the app's network receive path |
+| N7 | **Kill feed: the first kills after a launch are estimated** | DONE 2026-11-07: the scoreboard path always waits for the results; normal-case weapon names |
+| N8 | **Hits / accuracy are an estimate** | DONE 2026-11-07: hits = shots through an enemy's hitboxes (aim meter); native-aim-test.sh 8 of 10 on a practice target |
+| N9 | **Packets window: game messages** | DONE 2026-11-07 (what the app still runs): the "game" switch names halo3's session messages (membership, parameters, peer properties, joins ...) as the app's halo3 encodes / decodes them; in-game traffic is the app's own protocol, and no peer (FIXES.md "the game layer") |
+| N10 | **Medals in the feed** | DONE 2026-11-07: medals (statistic 63 + i, the app's 112-medal table) in the feed and the player details; live check left |
+| N11 | **Hitboxes on dead bodies** | DONE 2026-11-07: dead bodies get no hitboxes (NHOOK_HB_DEAD=1 = grey) |
+| N12 | **A native dedicated server test** | DONE 2026-11-07: shim/tools/native-dedicated.sh (local-only config) with nhook; a test client joined it; both pages right |
+| N13 | **Host tools on the native app** (user, 2026-11-07: "port the host tools too") | DONE 2026-11-07: teleport (next to / point / delta / spots), boundaries off, invisible walls off, speed; checked in a hosted match and on our native dedicated server with a joined client (FIXES.md "the host tools on the native app"); tpnext not run live (needs two players) |
+
+Not ported from the loader (wanted? the user decides): auto-vote (#50); graphics quality from the page (#68; the app's own
+Settings menu has it); the sparring aim (#17) and the walker (#32); the page's mic switch (#22: the app runs its own microphone); the late camera
+update (mouse only). The page hides every control the native app does not serve. The host tools (#18, #26, #73) came over 2026-11-07: N13.
+
+## Closed — the loader era (the 0.9 Windows client under shim/src/peload.c)
 
 Ranked (2026-10-19 01:40): open -- nothing (72 and 74 closed by the user, 73 done), then 73 spot testing (moved to the END by the user). Watching: the one "2D is unloadable" texture. Spots: 243 verified on 40 maps. Mod / stats-server security review done (shim/docs/mod-files-security.md).
 

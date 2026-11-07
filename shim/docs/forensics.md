@@ -193,7 +193,7 @@ Then one record per packet, append-only: a 40-byte header followed by `stored` b
 |---|---|---|
 | 0 | u16 | sync `0xA55A` |
 | 2 | u8 | channel = payload[0]: 1 global, 2 team, 3 proximity, 0 control (below); 0xFF unreadable |
-| 3 | u8 | flags: 1 audio stored, 2 control packet, 4 truncated (stored < length; never in practice), 8 shorter than the 9-byte header (raw bytes stored with audio on), 16 from this client's own peer id (echo), 32 payload unreadable |
+| 3 | u8 | flags: 1 audio stored, 2 control packet, 4 truncated (stored < length; never in practice), 8 shorter than the 9-byte header (raw bytes stored with audio on), 16 from this client's own peer; 64 a native voice report (timing only), 128 a native level window (no packet: t = window start, length = 20 ms frames heard, sequence = (window ms << 32) | (u32)(rms dBFS x 100); the viewer leaves a sender's packets in windows below -60 dBFS out of its utterances) id (echo), 32 payload unreadable |
 | 4 | u16 | length of the Opus data (payload length - 9) |
 | 6 | u16 | stored bytes that follow (= the length with audio on; 0 without; control packets: their bytes) |
 | 8 | u64 | arrival time, unix ns (CLOCK_REALTIME, taken in the hook) |

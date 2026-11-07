@@ -22,8 +22,12 @@
 
 void nh_log(const char* fmt, ...) __attribute__((format(printf, 1, 2)));   // nhook.c
 int nov_build(float* verts, int cap, int w, int h, float scale);           // noverlay.c
+void nov_aim_tick(void);                                                   // noverlay.c: aim vs hits, measured against the hitboxes
+void hc_frame(double now);                                                 // nstats.c: the hook cost meter's on/off measurement
+void nov_idle(void);                                                       // noverlay.c: no overlay this frame
 int nov_wanted(void);
 volatile int g_nr_cap_req;                                                  // the stats page's Capture frame (do=capture)
+volatile int g_nr_cap_depth;                                                // ... &depth=1: also every full-size depth texture of the frame (.f32)
 volatile int g_nr_w, g_nr_h; volatile double g_nr_last;                    // the last presented frame: size (pixels), when (mono s)
 volatile unsigned long g_nr_frames;
 static IMP g_orig_present, g_orig_fbo;
@@ -47,11 +51,16 @@ static volatile int g_nr_readback;                                          // a
 static double nr_now(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec + t.tv_nsec * 1e-9; }
 static NSString* const kShaders = @
     "#include <metal_stdlib>\n using namespace metal;\n"
-    "struct VO { float4 p [[position]]; float3 c; };\n"
+    "struct VO { float4 p [[position]]; float3 c; float d; };\n"
     "vertex VO nv_vs(uint vid [[vertex_id]], const device float* v [[buffer(0)]], constant uint& srgb [[buffer(1)]]) {\n"
-    "  VO o; const device float* q = v + vid * 5; o.p = float4(q[0], q[1], 0, 1); float3 c = float3(q[2], q[3], q[4]);\n"
-    "  o.c = srgb ? pow(c, 2.2) : c; return o; }\n"
-    "fragment float4 nv_fs(VO i [[stage_in]]) { return float4(i.c, 1); }\n"
+    "  VO o; const device float* q = v + vid * 6; o.p = float4(q[0], q[1], 0, 1); float3 c = float3(q[2], q[3], q[4]);\n"
+    "  o.c = srgb ? pow(c, 2.2) : c; o.d = q[5]; return o; }\n"
+    // the scene's depth (reverse-Z, near 1/128): a pixel whose own depth, moved 0.3 units toward the camera, is farther than the scene there is hidden
+    "fragment float4 nv_fs(VO i [[stage_in]], depth2d<float> dt [[texture(0)]], constant float4& u [[buffer(0)]]) {\n"
+    "  if (i.d > 0 && u.x > 0) { constexpr sampler sm(coord::normalized, filter::nearest, address::clamp_to_edge);\n"
+    "    float sc = dt.sample(sm, i.p.xy / u.yz); float w = 0.0078125 / i.d - 0.3; float dd = 0.0078125 / max(w, 0.02);\n"
+    "    if (sc > dd) discard_fragment(); }\n"
+    "  return float4(i.c, 1); }\n"
     "struct BO { float4 p [[position]]; float2 uv; };\n"
     "vertex BO nb_vs(uint vid [[vertex_id]]) { float2 p = float2((vid << 1) & 2, vid & 2); BO o; o.p = float4(p * 2 - 1, 0, 1); o.uv = float2(p.x, 1 - p.y); return o; }\n"
     "fragment float4 nb_fs(BO i [[stage_in]], texture2d<float> t [[texture(0)]]) { constexpr sampler s(filter::linear, address::clamp_to_edge); return float4(t.sample(s, i.uv).rgb, 1); }\n";
@@ -86,6 +95,29 @@ static void nr_bmp(const char* path, const uint8_t* bgra, int w, int h, size_t b
     fwrite(hd, 1, 54, f); for (int y = 0; y < h; y++) fwrite(bgra + (size_t)y * bpr, 1, (size_t)w * 4, f); fclose(f);
 }
 
+// ---- the scene's depth (for hiding the overlay behind the world): every depth texture the app attaches to a render pass
+// is seen here (-[MTLRenderPassDepthAttachmentDescriptor setTexture:] swizzled); NHOOK_DEPTH_PROBE=1 logs each new one
+static IMP g_orig_dtex; static NSMutableSet* g_dseen; static id<MTLTexture> g_dlast; static volatile unsigned long g_dpasses;
+// full-size depth textures (the biggest seen): the scene's is among them; frame = the present count when last attached,
+// order = how many full-size attachments came before it in that frame
+typedef struct { __unsafe_unretained id<MTLTexture> t; unsigned long frame, first_frame; int order, n_in_frame; } NrDepth;
+static NrDepth g_dfull[8]; static int g_ndfull; static unsigned long g_dfull_frame; static int g_dfull_order; static NSUInteger g_dbig;
+static void my_set_dtex(id self, SEL cmd, id<MTLTexture> t) {
+    ((void (*)(id, SEL, id))g_orig_dtex)(self, cmd, t);
+    if (!t) return; g_dpasses++;
+    @synchronized (g_dseen) {
+        NSUInteger area = t.width * t.height; if (area > g_dbig) { g_dbig = area; g_ndfull = 0; }
+        if (area == g_dbig) { unsigned long fr = g_nr_frames; if (fr != g_dfull_frame) { g_dfull_frame = fr; g_dfull_order = 0; }
+            int k = 0; for (; k < g_ndfull; k++) if (g_dfull[k].t == t) break;
+            if (k == g_ndfull && g_ndfull < 8) { g_dfull[k].t = t; g_dfull[k].first_frame = fr; g_ndfull++; }
+            if (k < 8) { if (g_dfull[k].frame != fr) g_dfull[k].n_in_frame = 0; g_dfull[k].frame = fr; g_dfull[k].order = g_dfull_order; g_dfull[k].n_in_frame++; }
+            g_dfull_order++; } }
+    @synchronized (g_dseen) {
+        if (![g_dseen containsObject:t]) { [g_dseen addObject:t];
+            if (getenv("NHOOK_DEPTH_PROBE")) nh_log("[nhook] [depth] new depth texture %p %lux%lu format %lu usage 0x%lx storage %lu samples %lu (frame %lu)", (__bridge void*)t,
+                (unsigned long)t.width, (unsigned long)t.height, (unsigned long)t.pixelFormat, (unsigned long)t.usage, (unsigned long)t.storageMode, (unsigned long)t.sampleCount, g_nr_frames); }
+        g_dlast = t; }
+}
 static void nr_capture(id<MTLCommandBuffer> cb, id<MTLTexture> tex) {
     g_nr_cap_req = 0; int w = (int)tex.width, h = (int)tex.height;
     MTLTextureDescriptor* td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:nr_srgb(tex.pixelFormat) ? MTLPixelFormatBGRA8Unorm_sRGB : MTLPixelFormatBGRA8Unorm width:w height:h mipmapped:NO];
@@ -98,10 +130,40 @@ static void nr_capture(id<MTLCommandBuffer> cb, id<MTLTexture> tex) {
         nr_bmp(p, px, w, h, bpr); free(px); nh_log("[capture] %s (%dx%d)", p, w, h); }];
 }
 
+// The scene's depth for this frame: the full-size depth texture attached most often in the frame being presented (or the last
+// one) -- 0 when none was seen this frame or its shape is not the drawable's (split screen, a different render aspect)
+static id<MTLTexture> nr_scene_depth(void) {
+    if (!g_dseen || getenv("NHOOK_NO_OCCLUSION")) return nil; id<MTLTexture> best = nil; int bn = -1; unsigned long fr = g_nr_frames;
+    @synchronized (g_dseen) { for (int k = 0; k < g_ndfull; k++) if (g_dfull[k].t && g_dfull[k].frame + 1 >= fr && g_dfull[k].n_in_frame > bn) { bn = g_dfull[k].n_in_frame; best = g_dfull[k].t; } }
+    if (best && g_nr_w > 0 && g_nr_h > 0 && fabs((double)best.width / best.height - (double)g_nr_w / g_nr_h) > 0.02) return nil;
+    return best;
+}
+static id<MTLTexture> nr_dummy_depth(void) {   // (a depth texture must be bound even when unused)
+    static id<MTLTexture> t; if (!t) { MTLTextureDescriptor* d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float width:1 height:1 mipmapped:NO];
+        d.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget; d.storageMode = MTLStorageModePrivate; t = [g_dev newTextureWithDescriptor:d]; }
+    return t;
+}
+static void nr_depth_dump(id<MTLCommandBuffer> cb) {   // every full-size depth texture attached in this frame -> ~/reclaimer_dep_<pid>_<k>.f32 + stats
+    g_nr_cap_depth = 0; unsigned long fr = g_nr_frames; int pid = getpid();
+    @synchronized (g_dseen) { for (int k = 0; k < g_ndfull; k++) { id<MTLTexture> t = g_dfull[k].t; if (!t || g_dfull[k].frame + 1 < fr) continue;
+        NSUInteger w = t.width, h = t.height; id<MTLBuffer> b = [g_dev newBufferWithLength:w * h * 4 options:MTLResourceStorageModeShared]; if (!b) continue;
+        id<MTLBlitCommandEncoder> be = [cb blitCommandEncoder]; if (!be) continue;
+        [be copyFromTexture:t sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(w, h, 1) toBuffer:b destinationOffset:0
+            destinationBytesPerRow:w * 4 destinationBytesPerImage:w * h * 4 options:MTLBlitOptionDepthFromDepthStencil];
+        [be endEncoding]; int order = g_dfull[k].order, nin = g_dfull[k].n_in_frame; void* tp = (__bridge void*)t;
+        [cb addCompletedHandler:^(id<MTLCommandBuffer> c) { (void)c; const float* d = b.contents; double sum = 0; float mn = 1e30f, mx = -1e30f; size_t nz = 0;
+            for (size_t i = 0; i < w * h; i++) { float v = d[i]; if (v < mn) mn = v; if (v > mx) mx = v; if (v != 0) { nz++; sum += v; } }
+            const char* home = getenv("HOME"); char p[1100]; snprintf(p, sizeof p, "%s/reclaimer_dep_%d_%d.f32", home ? home : "/tmp", pid, k);
+            FILE* f = fopen(p, "wb"); if (f) { fwrite(d, 4, w * h, f); fclose(f); }
+            nh_log("[capture] depth %d (%p %lux%lu, attached as full-size #%d of the frame, %d times): centre %.6f, min %.6f max %.6f, %.1f%% non-zero, mean %.6f -> %s",
+                k, tp, (unsigned long)w, (unsigned long)h, order, nin, d[(h / 2) * w + w / 2], mn, mx, 100.0 * nz / (w * h), nz ? sum / nz : 0.0, p); }]; } }
+}
+
 static void nr_frame(id<MTLCommandBuffer> cb, id<CAMetalDrawable> drawable) {
     id<MTLTexture> tex = drawable.texture; if (!tex) return;
     int w = (int)tex.width, h = (int)tex.height; g_nr_w = w; g_nr_h = h; g_nr_last = nr_now(); g_nr_frames++;
     { unsigned i = g_nr_pn; g_nr_pt[i & 511] = g_nr_last; __atomic_store_n(&g_nr_pn, i + 1, __ATOMIC_RELEASE); }
+    hc_frame(g_nr_last);
     if (!g_dev) g_dev = tex.device;
     CAMetalLayer* layer = [(id)drawable respondsToSelector:@selector(layer)] ? (CAMetalLayer*)drawable.layer : nil;
     if ((g_nr_cap_req || g_rec_video) && !g_nr_readback) g_nr_readback = 1;
@@ -109,19 +171,25 @@ static void nr_frame(id<MTLCommandBuffer> cb, id<CAMetalDrawable> drawable) {
         ((void (*)(id, SEL, BOOL))g_orig_fbo)(layer, @selector(setFramebufferOnly:), NO); }
     BOOL readable = !tex.framebufferOnly;
     // 1. capture (the game's picture, no overlay: as the loader's; do=capture&overlay=1 = after the overlay)
+    if (g_nr_cap_depth && g_dseen) nr_depth_dump(cb);
     if (g_nr_cap_req == 1 && readable) nr_capture(cb, tex);
+    nov_aim_tick();   // (every frame, overlay on or off)
     // 2. the overlay
+    if (!nov_wanted()) nov_idle();
     if (nov_wanted()) {
-        enum { CAP = 400000 }; static float* verts; if (!verts) verts = malloc(CAP * 5 * sizeof(float));
+        enum { CAP = 400000 }; static float* verts; if (!verts) verts = malloc(CAP * 6 * sizeof(float));
         float scale = layer ? (float)layer.contentsScale : 1.0f;
         int nv = verts ? nov_build(verts, CAP, w, h, scale) : 0;
         id<MTLRenderPipelineState> p = nv ? nr_pso(g_pso_lines, @"nv_vs", @"nv_fs", tex.pixelFormat, NO) : nil;
         if (p) {
-            id<MTLBuffer> vb = [g_dev newBufferWithBytes:verts length:(NSUInteger)nv * 20 options:MTLResourceStorageModeShared];
+            id<MTLBuffer> vb = [g_dev newBufferWithBytes:verts length:(NSUInteger)nv * 24 options:MTLResourceStorageModeShared];
             MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
             rp.colorAttachments[0].texture = tex; rp.colorAttachments[0].loadAction = MTLLoadActionLoad; rp.colorAttachments[0].storeAction = MTLStoreActionStore;
             id<MTLRenderCommandEncoder> en = vb ? [cb renderCommandEncoderWithDescriptor:rp] : nil;
             if (en) { uint32_t srgb = nr_srgb(tex.pixelFormat); [en setRenderPipelineState:p]; [en setVertexBuffer:vb offset:0 atIndex:0]; [en setVertexBytes:&srgb length:4 atIndex:1];
+                id<MTLTexture> dtex = nr_scene_depth(); float u[4] = {dtex ? 1.0f : 0.0f, (float)w, (float)h, 0};   // (the scene's depth: hides what is behind the world)
+                if (dtex) [en setFragmentTexture:dtex atIndex:0]; else [en setFragmentTexture:nr_dummy_depth() atIndex:0];
+                [en setFragmentBytes:u length:sizeof u atIndex:0];
                 [en drawPrimitives:MTLPrimitiveTypeLine vertexStart:0 vertexCount:(NSUInteger)nv]; [en endEncoding];
                 [cb addCompletedHandler:^(id<MTLCommandBuffer> c) { (void)c; (void)vb; }]; }   // (kept until the GPU is done: the app may not retain references)
         }
@@ -145,18 +213,6 @@ static void my_present(id self, SEL cmd, id drawable) {
         @catch (NSException* ex) { static int told; if (!told++) nh_log("[nhook] render: exception %s (%s)", ex.name.UTF8String, ex.reason.UTF8String); } }
     ((void (*)(id, SEL, id))g_orig_present)(self, cmd, drawable);
 }
-// ---- the scene's depth (for hiding the overlay behind the world): every depth texture the app attaches to a render pass
-// is seen here (-[MTLRenderPassDepthAttachmentDescriptor setTexture:] swizzled); NHOOK_DEPTH_PROBE=1 logs each new one
-static IMP g_orig_dtex; static NSMutableSet* g_dseen; static id<MTLTexture> g_dlast; static volatile unsigned long g_dpasses;
-static void my_set_dtex(id self, SEL cmd, id<MTLTexture> t) {
-    ((void (*)(id, SEL, id))g_orig_dtex)(self, cmd, t);
-    if (!t) return; g_dpasses++;
-    @synchronized (g_dseen) {
-        if (![g_dseen containsObject:t]) { [g_dseen addObject:t];
-            if (getenv("NHOOK_DEPTH_PROBE")) nh_log("[nhook] [depth] new depth texture %p %lux%lu format %lu usage 0x%lx storage %lu samples %lu (frame %lu)", (__bridge void*)t,
-                (unsigned long)t.width, (unsigned long)t.height, (unsigned long)t.pixelFormat, (unsigned long)t.usage, (unsigned long)t.storageMode, (unsigned long)t.sampleCount, g_nr_frames); }
-        g_dlast = t; }
-}
 static void my_set_fbo(id self, SEL cmd, BOOL v) { ((void (*)(id, SEL, BOOL))g_orig_fbo)(self, cmd, g_nr_readback ? NO : v); }
 
 void nr_install(void) {
@@ -169,10 +225,10 @@ void nr_install(void) {
         if (!m || !fm) { nh_log("[nhook] render: presentDrawable: / setFramebufferOnly: not found"); return; }
         g_dev = dev; g_pso_lines = [NSMutableDictionary new]; g_pso_blit = [NSMutableDictionary new];
         g_orig_fbo = method_setImplementation(fm, (IMP)my_set_fbo);
-        if (getenv("NHOOK_DEPTH_PROBE")) { MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
-            Method dm = class_getInstanceMethod(object_getClass(rp.depthAttachment), @selector(setTexture:));
-            if (dm) { g_dseen = [NSMutableSet new]; g_orig_dtex = method_setImplementation(dm, (IMP)my_set_dtex);
-                nh_log("[nhook] [depth] watching -[%s setTexture:]", class_getName(object_getClass(rp.depthAttachment))); } }
+        { MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];   // the scene's depth (overlay hiding)
+          Method dm = class_getInstanceMethod(object_getClass(rp.depthAttachment), @selector(setTexture:));
+          if (dm && !getenv("NHOOK_NO_DEPTH")) { g_dseen = [NSMutableSet new]; g_orig_dtex = method_setImplementation(dm, (IMP)my_set_dtex);
+              nh_log("[nhook] [depth] watching -[%s setTexture:]", class_getName(object_getClass(rp.depthAttachment))); } }
         g_orig_present = method_setImplementation(m, (IMP)my_present);
         nh_log("[nhook] render: hooked -[%s presentDrawable:] (overlay, recording, captures)", class_getName(c));
     }

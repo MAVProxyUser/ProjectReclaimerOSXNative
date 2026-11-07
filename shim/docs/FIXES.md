@@ -1794,6 +1794,347 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   function, so neither the entry nor its target can be patched the JIT way (signed code; no free page near the image
   either) -- bullets are still not drawn. hook_install now hooks an entry that is a `b` in place (displaced = nop, return =
   the branch target) for JIT-region branches; near_page collects up to 4096 gaps and logs when none works.
+  SOLVED by the text hook below; VERIFIED in a live engine 2026-11-07 (local Guardian test match, the app's own test request
+  {"campaign":{"hold_trigger":{"seconds":6}}}): 10-20 bullets at object_delete, the player's shots counted, tracer lines
+  and impact marks in overlay captures. Repeatable: `bash shim/tools/native-fire-test.sh` (PASS/FAIL).
+- **nhook: hooks on the app's OWN code** (2026-11-07; nhook.c text_hook, stub.S _nh_tp4) — WHY: object_delete (and 916 more
+  halo3 functions: NHOOK_LIST_BRANCH_ENTRIES=1 lists them) is the app's own native code in its signed __TEXT; the lifted
+  entry is one `b` there. The app is signed ad hoc with no hardened runtime (codesign flags 0x2), and patching its text works:
+  the page is made a writable private copy (mach_vm_protect VM_PROT_COPY), the function's first four instructions (refused if
+  any is PC-relative) become `ldr x16, #8; br x16; .quad stub`, the page goes back to r-x; the stub (anywhere: absolute jumps)
+  saves the caller-saved registers, calls the handler with x0, runs the four instructions and jumps back. Proven in a test
+  game: halo3+0x2af478 ran ~700k calls/s through it, 0xfbe58 ~60/s, 120 fps held, no crash (NHOOK_TEXTHOOK_TEST=<rva,...>
+  counts calls in the [perf] line). object_delete is now hooked this way (its handler reads x0's guest context through
+  rd()); bullets need a real game to show (no deletes in an idle offline match; --keys scripted input did nothing in test
+  windows). NHOOK_NO_TEXT_HOOKS=1 = none.
+- **nhook overlay: the frame's own camera, and hidden behind the world** (2026-11-07; nhook.c on_view_param + stub.S _nh_tpf,
+  nrender.m nr_scene_depth / nv_fs, noverlay.c) — WHY: "the zones kinda follow you weirdly, especially kill zones below you,
+  and the safe zone scales weird as you walk": they were drawn through the ground (no depth) with the observer camera.
+  (1) halo3+0x2af478 (set a shader parameter; the app's own code, ~700k calls/s) gets a text hook whose stub filters in
+  assembly for parameter 0x27 = the view constants (the loader's VS cb0): element 0 = view-projection rows 0-3, 4/5/6
+  forward/left/up, 7 the camera position (found with NHOOK_CBPROBE=1). The overlay takes the latest "world camera" (rows 0, 1,
+  3 vanish at its position) within 1 unit of the observer -- the player's view, exact and interpolated (the observer's 70.0
+  deg vs the frame's 70.8 deg); the observer stays the fallback (NHOOK_OBSERVER_CAMERA=1 forces it; NHOOK_NO_VIEWHOOK=1 = no
+  hook). (2) Row 2 of the view constants is (0, 0, 0, 1/128): Halo 3 is reverse-Z with no far plane, scene depth =
+  (1/128) / distance. The app's depth textures are seen at -[MTLRenderPassDepthAttachmentDescriptor setTexture:]
+  (swizzled); the frame's scene depth = the full-size one attached most in the frame (Depth32Float_Stencil8, shader-readable;
+  do=capture&depth=1 dumps them: centre 12.5 units, the gun at 1.6 cm, the sky 558 units). Each overlay vertex carries its own
+  depth (1/128 / w), the fragment shader hides a pixel whose depth, moved 0.3 units toward the camera, is behind the scene
+  there. Zones are always hidden behind the world (as in the loader); the other features by their "visible only" setting
+  (page panel vis=, do=visible = all; NHOOK_HB_VISIBLE=1 starts them on). NHOOK_NO_OCCLUSION=1 / NHOOK_NO_DEPTH=1 = off.
+- **nhook: weapon / vehicle / power-up spawns and pickups** (2026-11-07; shim/native/nspawns.c) — the loader's stats.c
+  st_spawns + hm_spawn + st_sentence copied (events through the native st_event_verb, 16384 object slots, NHOOK_SPAWN_LOG, "joined
+  in progress" from the app's `[menus] joining the game in progress`): the feed's spawn / pickup lines, the snapshot's "items" /
+  "deployed", the heatmap's spawn points (heatmaps/<map>.spawns, shared with the loader). Checked offline: Guardian's 22 weapons,
+  the Overshield and Active camo. shim/native.sh test runs keep their heatmaps in ReclaimerMac/native/test-heatmaps
+  (NHOOK_HEATMAP_DIR); they used to add their idle footprints and spawn points to the real files.
+- **nhook kill feed: the nearest killer, a longer wait** (2026-11-07; nstats.c sb_tick) — WHY: in a 70-player Infection game
+  57 of 68 deaths came out as "X was killed" with no killer: big games replicate a killer's kill count and the victim's death
+  count more than 1.5 s apart, and the old pairing took the first waiting killer. HOW: a victim waits up to 4 s (was 1.5 s) for
+  a killer's count, a killer's count waits up to 5 s (was 2 s), and a victim takes the waiting killer NEAREST to where it
+  died (SbKiller.pos = the killer's position at its count, SbNow.cur = each slot's current position); a teammate's betrayal
+  still goes first. Old behaviour: none kept (the pairing is an estimate either way; events are marked estimated).
+- **nhook: shots / hits / accuracy** (2026-11-07; noverlay.c on_object_delete, nstats.c st_snapshot) — WHY: the players
+  table's Shots / Hits / Accuracy columns stayed 0 in the native app (the loader counts them in its object_delete hook,
+  hitbox.c g_hbshot). HOW: the app's object_delete text hook (above) records every deleted projectile's owner (+0xC0) and the
+  biped whose bounding sphere (+0x1c centre, +0x28 radius, + 0.1) holds its end point (an ESTIMATED hit, like the loader's) in an
+  8192-entry ring (one writer: the engine thread); the stats snapshot counts them per player by unit handle. Only while the
+  hook is placed (NHOOK_NO_TEXTHOOK off).
+- **nhook: page mutes = the app's own mute list** (2026-11-07; nnet.c voice_init / muted_list, nstats.c st_control) — WHY: the
+  Connected list's mute buttons and Mute all / Unmute all did nothing in the native app (snapshot "mute": false). HOW: the
+  app's scoreboard MUTE VOICE button calls set_muted(peer id, bool) (0.10.0 app 0x102154ef0; is_muted 0x10214db98), which
+  pushes / removes the id in a static Mutex<Vec<u64>> (0x103f0a1e0: lock box, poison, cap +0x10, ptr +0x18, len +0x20; found
+  from the button's strings with re-tools/machoref.py). do=mute / unmute&voice=<hex> and muteall / unmuteall call it from the
+  stats thread (it takes the list's own lock); the session's "muted" flags are read from the Vec. Checked before use: the
+  function's adrp / add must reach the list (another app build: "set_muted not where 0.10.0 has it", page mutes off). Checked
+  in a test match: mute, mute, unmute, unmute -> the app's list held 1, 2, 1, 0.
+- **nhook: who talks (page + forensic archive) from the app's voice report** (2026-11-07; nstats.c st_voice_report,
+  forensic.c fx_voice_report / FXF_REPORT) — WHY: the talking dot never lit and the forensic "who talked when" lane stayed
+  empty in the native app (the loader stamps them in a hook on the client's voice_recv; the native voice code is the app's own
+  Rust). HOW: the app logs "[voice] active ... ; heard 0x<peer id>: N frames (C concealed) rms X dBFS peak Y dBFS, ..." every
+  ~2 s; each sender heard above -60 dBFS (TALK_DBFS: open microphones send -120 dBFS silence or -90..-112 dBFS hiss) counts as
+  talking for that report (the page's dot: 2.5 s, was 0.5 s per packet) and becomes one voice.bin record with the new flag
+  FXF_REPORT = 64 (olen = frames, no bytes, channel 0xFF "not known"): placed at the start of the ~2 s interval when the
+  sender also talked in the report before (continuous talk = one utterance), else at its end. The viewer's utterances carry
+  "reported" and read "(timing from the app's voice report)", no play / packets buttons. No audio: the native app's voice
+  packets are not seen. NHOOK_VOICE_LOG=1 logs every parsed sender. Offline: nhook-selftest.sh (parser) and
+  forensic-oggtest.sh (two reports in a row = one 3.2 s utterance). The log tap's line buffer for nst_on_line grew 600 -> 4096
+  (a report names every sender).
+- **nhook: forensic voice AUDIO from the app's Opus decode** (2026-11-07; nhook.c voice_hook_install, stub.S _nh_opus_shim,
+  nstats.c nh_on_opus) — WHY: the native archive had only "who talked when" (the voice report above); the loader keeps every
+  voice packet (voice_recv hook) and builds utterance / speaker .ogg files from them. HOW: the app decodes voice with opus-rs
+  (pure Rust, statically linked; its packet parser is the function using "Input packet empty", 0.10.0 app 0x1003f1e7c:
+  x0 decoder, x1 packet, x2 length, 0 = a lost frame). Its one caller (0x102152578) is the voice mixer, which walks a hash map
+  of senders once per 20 ms: x26 = the sender entry's end, the peer id at x26 - 0x278 (read there for the volume table); the
+  packet is [kind: 1 Opus, 0 raw 16-bit PCM][data] and decode gets the part after the kind. A text hook on decode's entry runs
+  a 3-instruction shim (x3 = x26, x4 = the caller's return address from the stub's save area) -> nh_on_opus, which ignores
+  calls from anywhere else, reads the id with rd and hands forensic.c a record in the loader's layout ([channel 0xFF = not
+  known][sequence = our per-sender count][0x01][Opus]) so voice.bin, the viewer and its .ogg files work unchanged (audio only
+  with the archive's voice audio + one-party consent setting, as in the loader). While packets come, the voice reports write
+  no FXF_REPORT records. Every patched / relied-on word is checked first (decode's 4-instruction prologue, the mixer's id load
+  and its argument moves + bl): another app build gets "[nhook] voice packets: not hooked". NHOOK_NO_VOICEHOOK=1 = off.
+  The [perf] line counts "voice packets". Installed and checked in local test matches (no remote talkers there: the packets
+  themselves still need a real game).
+- **Stats page: no dead controls in the native app** (2026-11-07; stats_page.html, the overlay-state update) — WHY: in the
+  native app the Tools row still showed Teleport + its spot list, Map vote / Called votes, the map's "click to teleport" box
+  and the Packets window's "halo3 message types": each answered {"ok":false} (nhook has no teleport / boundary patches,
+  auto-vote or halo3 message table). HOW: when the snapshot says "native": true those are hidden; the loader's page is
+  unchanged (it never sends "native"). Checked against a native test match: the five hidden, Capture frame / Mute all still
+  there, no console errors.
+- **nhook: the address role is real** (2026-11-07; nstats.c st_snapshot, nst_on_line) — WHY: the native snapshot always said
+  addr_role "hidden", so a player's detail panel without an IP read "hidden (this page is reachable from other computers;
+  PELOAD_STATS_IPS=1 shows it)" -- the native page listens on 127.0.0.1 only and has no such switch. HOW: "host" when the local
+  session peer is the host, else "client" (in a session, or after a join), else "none"; "server_addr" = the address in the
+  app's `[online] joining <ip>:<port>` line. Checked: a local test match says "host".
+- **nhook: exact kills from halo3's game results** (2026-11-07; nstats.c rs_tick, sb_consume, results layout from the [c1] /
+  [capacity] results.* lines) — WHY: the native kill feed was estimated (killer paired with victim from the scoreboard's
+  counts, weapon = the killer's weapon in hand): display_event and chud_messaging_post never run in the app (a census across a
+  death: halo3+0xfd418, the event handler that calls display_event, and 0x2d3f2c ran 0 times -- the app handles events in its
+  own code; the old "display_event" entry hook is on a lifted function nothing calls; display_event is now text-hooked when
+  its entry is a `b`, which it is not in 0.10.0). HOW: halo3's game results, which the app keeps live: per player 0x263 u16
+  statistics at results + 0x6c98 + slot * 0x4c6 (9 kills, 11 deaths, 12 betrayals, 13 suicides; per damage type t from 234 +
+  6t: damage-kills, -deaths, -betrayals, -suicides, -headshots -- names from halo3+0x792c80 / 0x793160, re-tools/h3results.py)
+  and a killer x victim matrix at + 0x2cf98 (128 x 128 x 4 bytes, two u16 counts). Each snapshot: a matrix entry that went up
+  names the pair; which side killed = whose kills / betrayals went up while the other's deaths did (else the orientation the
+  matrix showed before), the killer's damage-kills that went up = the weapon, damage-headshots = a headshot; suicides from 13 +
+  damage-suicides. Exact events carry no "estimated" flag; the scoreboard's pending entries they explain are dropped (it waits
+  1.5 s while results count deaths), a death the scoreboard already reported is not repeated. A client that never gets the
+  results keeps the scoreboard pairing. Checked live: a suicide (11, 13, 235, 237 and versus[0][0] 0 -> 0x00010001) -> one
+  exact "killed themselves" each time; pairs offline: `bash shim/tools/results-feed-test.sh` (the real code, extracted: kill,
+  either matrix orientation, double kill, a trade in one snapshot, betrayal, suicide, headshot, pending-entry handling, new
+  match) -- kills between two players still need a real game (NHOOK_RESULTS_LOG=1 logs every change and decision).
+- **nhook kill feed: history is not a kill (joining a game in progress)** (2026-11-07; nstats.c rs_tick, rs_cand,
+  rs_confirm, sb_tick) — WHY: joining a 52-player public game in progress, the feed replayed ~200 of the match's old kills in
+  its first seconds and showed some live kills twice; a later mid-game join replayed ~60 more through the scoreboard path. A
+  client gets halo3's game results and the statborg in pieces after a join: results rows went 0 -> N over minutes (a slot's
+  statistics long after its versus row, so the mirror half of a versus entry still found that killer's kills going up and
+  printed the kill again), and the statborg came in one burst 0.8 s after loading in. HOW: (a) results: only the LOW half of
+  each versus entry is read ([a][b] low = a killed b; [b][a] high is the same kill -- checked live on one kill: [12][49] low +1,
+  [49][12] high +1), so each kill counts once; the kills / deaths deltas still decide the orientation where they tell. A
+  change becomes a candidate (rs_cand) that is reported only once the scoreboard shows that victim's death (a pending
+  SbVictim; rs_confirm, up to RS_WAIT 3 s either way) -- else it is history and dropped; a pair or a slot's suicides up by more
+  than 1 in one snapshot, or more than RS_FLOOD (16) changes in one snapshot, is history outright. (b) the scoreboard (sb_tick):
+  a slot's deaths up by more than 1 (kills by more than 6) in one snapshot, or more than SB_BURST (8) players dying in one
+  snapshot, is the statborg filling in (taken as it is, no events); a single death waits up to 3 s for the death tracker to see
+  that player's body die (or no live body) -- the statborg can come 0.1 s before the body (8 of ~250 deaths in one game) -- and
+  a player who stays alive is history. g_rs_live stays set once the results have counted a death, so the next match's first
+  deaths wait for them too. Checked live on a 35-50 player public server (Guardian, The Pit, Valhalla): mid-game joins -> first
+  kill 2 s after loading in, ~250 kills and none replayed, every repeated kill line >= 11 s apart; a match joined at its start:
+  249 kill lines for 249 scoreboard deaths. Offline: `bash shim/tools/results-feed-test.sh` (now with results before the
+  scoreboard, a change the scoreboard never backs, a table filling in, a pair up by 2, scoreboard bursts, a player alive all
+  along, the count before the body dies). NHOOK_RESULTS_LOG=1 logs every decision; NHOOK_NO_RESULTS_FEED=1 = the scoreboard
+  pairing only.
+- **nhook: chat in the feed and the forensic archive** (2026-11-07; nstats.c chat_log_tick + the "[chat] line" parser) — WHY:
+  "Chat ... aren't showing on the timeline": a busy public game archived 0 chat lines. The app prints its chat lines
+  (`[chat] line [GLOBAL|TEAM|NEARBY] <name> (0x<id>): <text>`, `[SERVER #rrggbb]`, `[SERVER]`, `[NOTICE]`) only while the byte
+  at 0x103efcc9b is set: the dedicated server's `chat_log` option, a field of the chat state at 0x103efcc58 that a client never
+  sets (`re-tools/machoref.py dataref`, new: it is read in two places, both this gate in the chat function 0x100d23d78). HOW:
+  chat_log_tick (every snapshot) checks the gate's instructions (adrp x8 / ldrb w8, [x8, #0xc9b] at 0x100d2a6fc and
+  0x100d2a720: another build is left alone with a log line) and sets the byte, again whenever it reads 0; lines that came while
+  it was off are printed when it turns on (the app logs from its own last-logged index). The parser now records chat the way
+  the loader's stats.c does: kind "chat", a = the sender, how = "" (everyone) / team / nearby / server / notice, text = the
+  message, the sender id for the archive's sender_id ([SERVER] lines were kind "server" before, outside the Chat lane).
+  NHOOK_NO_CHAT_LOG=1 = off. Checked live: the [SERVER] welcome and GLOBAL lines in /feed.json and events.jsonl (channel "all",
+  sender ids).
+- **Forensic page: the native voice blocks show, and a usable player** (2026-11-07; forensic_page.html) — WHY: "it leaves a
+  play button in the bottom left but it isn't super useful ... the audio packets ... aren't showing on the timeline": native
+  voice records carry channel 255 (not known) and the page coloured only channels 1-3, so every native utterance block was
+  drawn without a background (33 invisible blocks in one session). HOW: a colour and a legend entry for "channel not known";
+  the player bar is hidden until something plays, then has previous / next (in time, among what the filters show), "play on"
+  (the next utterance when one ends: listening through a session), who / channel / time / "n of N" and a close button; a play
+  head line runs across the timeline and the playing block is scrolled into view; each speaker gets a play button (their
+  whole .ogg). Checked on a live session: the blocks show, a click plays, play on went 12 -> 18 of 33, close stops it.
+- **nhook: aim vs hits, per player** (2026-11-07; noverlay.c nov_aim_shot / nov_aim_tick, nstats.c st_aim_tick / st_aim_json,
+  stats_page.html "Aim" column, nrender.m calls nov_aim_tick every frame) — WHY: the user: "is there a way to determine if
+  where the player is aiming is in sync with what is getting hit? ... a meter that tells how close to an accurate shot in a
+  hitbox is being made ... a high deviation would indicate a trash player, or that lag was too high between players to land
+  hits". HOW: (1) at each bullet's deletion (the object_delete text hook, engine thread) a straight shot (travelled <= 1.05 x
+  its start-to-impact line + 0.3: no grenades or bounces) from a biped picks the enemy whose bounding-sphere centre lies
+  nearest its path (within 12 degrees, in front of where it stopped, alive, on foot; teams / Infection sides as the overlay's
+  filters), and copies that biped's pose (node matrices, region permutations) and shield + health into a 64-record seqlock
+  ring. (2) the render thread (it owns h3maps.c's hitbox cache) poses the target's collision edges as the overlay does and,
+  per (region, node), takes the centre and mean radius of the end points: the miss = the path's distance to the nearest such
+  piece minus its radius, 0 = through a hitbox; the error = atan(miss / distance) in degrees. (3) the stats snapshot keeps the
+  last 64 errors per player (median and 75th percentile shown), the share through a hitbox, and REGISTERED = the target's
+  shield + health went down (or it died) within 0.6 s -- separately for on-target shots and visible misses. Measured as THIS
+  client saw the target: a remote shooter's target sits where this client draws it; in a crowd other players' damage on the
+  same target counts too (the page says so). The [perf] line counts "aimed / measured". NHOOK_NO_AIM=1 = off. Checked live on
+  an 80-player Hugegrass server: 1,258 shots measured in 2 minutes; one player's 196 on-target shots were all registered and
+  none of their 360 misses, others 33-76% of on-target shots registered.
+- **nhook: the hook cost meter** (2026-11-07; shim/native/nhcost.h, nstats.c hc_json / hc_frame / hc_control, every hook's
+  wrapper, nrender.m, stats_page.html "Hook cost" panel) — WHY: the user: "a *hook cost* meter for FPS when a hook is enabled
+  it should calculate any performance loss that occurs as a factor of it being enabled"; and "a disabled hook should not cost
+  anything". HOW: (1) self-timing: each hook's handler (bullets / object_delete, the aim meter's part of it, the camera hook's
+  C handler, the voice decode hook, the socket hook, the stats snapshot) and each overlay part (objects + camera, hitboxes,
+  vehicles, tracers, info, items, zones; the aim meter's render-thread measurement) adds its time from the CPU counter
+  CNTVCT_EL0 (24 MHz, ~1 ns to read) and its calls to a slot; the snapshot gives per hook calls/s, us per call, ms per frame,
+  share of the median frame and the fps it would give back IF its thread sets the frame rate (1000/(frame - its ms) -
+  1000/frame). (2) the real cost: POST /control?do=hookab&h=<id>[&secs=36][&per=3] switches only that hook's handler
+  (g_hc_off) or overlay feature (its g_nov_on bit; "overlay" = all of yours) off and on in turns, starting on; hc_frame,
+  called from every presented frame, counts frames per phase after a 0.5 s settle; the result is the median of the on/off
+  pair differences with their spread, and the state is put back (do=hookab&stop=1 ends a run; a run without frames is
+  dropped after its length + 10 s). The camera hook's assembly filter (~700k calls a second) is neither timed nor switched
+  off. Checked live on a 51-player Hugegrass server (22 fps, limited by the game's simulation): self-timed hitboxes 0.22 ms
+  a frame, vehicles 1.3 ms, bullets 0.04 ms, the snapshot 2.3 ms per run on its own thread; measured on/off: overlay,
+  hitboxes, vehicles, bullets and stats all within noise (spreads of 1-3 fps from the scene itself).
+- **Stats page: an "Aimbot?" column** (2026-11-07; nstats.c st_aim_tick / st_aim_json open_* far_*, stats_page.html aimFlags)
+  — WHY: the user asked for a column flagging possible aimbots (first idea: unregistered misses -- but a miss that does not
+  register is a normal miss, so that number is not the signal). HOW: per player, from the aim meter's shots: the share
+  through a hitbox, OPENING shots on target (the first aimed shot after 1 s without one: a person usually needs a correction),
+  long-range shots (12+ units) and the head share (the topmost hitbox region). The page flags a player with 40+ aimed shots
+  when at least two of {through-hitbox share, opening shots, head share} are above a floor (50 / 60 / 60%) and, with 5+
+  comparable players, above 90% of the lobby; long range only shows in the reasons (on a big map nearly every shot is long
+  range: it repeated the first signal). "⚠ suspect" with the reasons; "–" = nothing unusual. Not proof: one client's view,
+  modded characters' "head" is their topmost hitbox (the lobby comparison cancels it when everyone is high). Checked: no
+  flag in a live 51-player lobby; a made-up lock-on profile against that lobby is flagged, a normal one is not.
+- **nhook: the stats snapshot can no longer slow the game** (2026-11-07; nhook.c rd / rd_sys / nh_thread / tls_block memo,
+  nstats.c st_ocache_fill / oc_add / st_statborg memo, nnet.c, forensic.c) — WHY: the user: "does the stats snapshot lag our
+  view? we don't want it to ever do that". Three ways it could: (1) it ran at normal priority, competing for the performance
+  cores; (2) every read of game memory is a system call (mach_vm_read_overwrite) and a snapshot made 4,032 of them (profiled
+  with NHOOK_RD_PROF=1: one per object in the biped / spawn loops, every object's type in the map check, tls_block's 5 reads
+  per player, the scoreboard per player, the session per member); (3) a read above ~32 KB (the 156 KB game-results table)
+  makes the kernel copy by marking the SOURCE pages copy-on-write -- the game's own pages -- so the game's next write to each
+  one faults on the game's thread. HOW: (1) our background threads start at QOS_CLASS_UTILITY (snapshot, HTTP) or
+  BACKGROUND (forensic writer, reverse DNS, reaper): the efficiency cores on Apple silicon. (2) before each run the snapshot
+  copies, in 16 KB pieces, the engine's object memory (every object's data: one 3-6 MB block), the players array and the
+  network session's player / peer tables; rd answers the snapshot thread's reads inside those copies from memory, and the
+  engine TLS block and the scoreboard are looked up once per run: 4,032 system calls a run -> 348, 2.3 -> 1.4 ms. (3) rd
+  never reads more than 16 KB per system call (rd_sys). The hook cost measurement now also reports the slowest frames (95th
+  percentile and max frame time per phase). Checked live: two 60 s on/off runs of the snapshot in a 36-player Guardian game
+  (~190 fps): p95 frame 13.5 / 13.2 and 12.0 / 11.8 ms, max 35.1 / 35.1 and 74.8 / 69.5 ms (on / off) -- no difference
+  beyond noise. NHOOK_NO_OCACHE=1 = the old per-object reads.
+- **Stats page: say why an address has no name** (2026-11-07; nnet.c pk_rdns / pk_peer_json, stats_page.html) — WHY: the user
+  saw no reverse-DNS names on the main page in one game while the forensic page showed names: that game's server
+  (207.102.103.168) simply has no PTR record, and the forensic sessions shown were from a server that has one; a client of a
+  dedicated server never knows a player's address (it talks only to the server). HOW: a finished lookup without a name now
+  says "no DNS name" in the Packets window (rdns_none); the IP column's title explains when players have an address.
+- **Stats page: the Aim and Aimbot? cells say what they mean** (2026-11-07; stats_page.html aimCell / botCell) — WHY: the
+  user: "'-' in aimbot field was unclear ... some say 100% next to them and I don't know why". HOW: Aim reads "1.2° off" and,
+  under it, "N% of M hits counted" (of the shots through a hitbox, the share the server confirmed); Aimbot? reads "normal"
+  once judged, "k/40 shots" before, "⚠ suspect" with reasons.
+- **nhook: off means off** (2026-11-07; nhook.c on_view_param / nov_view_hook_want, noverlay.c nov_build_body / nov_idle /
+  on_object_delete_body / nov_collect, nstats.c hc_set, stats_page.html Hook cost switches) — WHY: the user: "a disabled
+  hook should not cost anything". HOW: the camera hook is no longer installed at launch: the render thread installs it the
+  first time an overlay feature is on, and its handler returns at once while the overlay is off (its assembly filter stays
+  once installed: a few instructions per call); the bullet hook's body-sphere pass runs only without the aim meter (hits come
+  from the aim meter now, so one pass over the objects) and its tracer record only while tracers are on; the overlay reads
+  players only for a feature that draws or filters by them (hitboxes, info, a vehicles / tracers team filter); the Hook cost
+  panel switches any hook's handler off and on (POST do=hookset&h=<id>&on=0|1; overlay features keep their own buttons, the
+  snapshot is not switchable). Checked: native-fire-test.sh PASS with the overlay on from the launch (the camera hook installs
+  at the first frame).
+- **nhook kill feed: a fresh launch's first kills wait for the exact results** (2026-11-07; nstats.c rs_tick g_rs_live,
+  st_nice_case) — WHY: the first kills after a launch came from the scoreboard path (estimated, the weapon in capitals: "ASSAULT
+  RIFLE") because it only waited for the results once they had counted a death. HOW: it waits whenever the results can be
+  read; the scoreboard path's weapon names are in normal case ("Assault rifle").
+- **nhook: hits = shots through an enemy's hitboxes** (2026-11-07; nstats.c st_aim_tick / StTrack.hits, stats_page.html) — WHY:
+  a hit was "the bullet ended inside a body's bounding sphere", an estimate a practice target's own counter disagreed with
+  (2 of 10). HOW: hits come from the aim meter's hitbox test (the path through an enemy's posed hitboxes, as this client saw
+  it); NHOOK_NO_AIM=1 = the old estimate. Checked: shim/tools/native-aim-test.sh (new: a target 5 units ahead, the trigger held
+  at it) -> 10 shots, 8 hits, all 10 measured.
+- **nhook: medals in the feed and the player details** (2026-11-07; nstats.c rs_medals / g_medal, stats_page.html) — WHY: the
+  native feed had no medals. HOW: the game results count each player's medals at statistic 63 + i for medal i in the order of
+  the app's own medal table (0.10.0 0x103ed23c8: 112 entries of id, name, description, 48 bytes each; found from the app's
+  stats names with re-tools/machoref.py dataref). Checked against live counts: melee kills -> 106 Beat Down, a first-kill sniper
+  headshot -> 104 Sniper Kill, 140 First Strike, 147 Snapshot, a player's 149 Assist = their 17 assists. The feed says
+  "<player>: <medal>" (kind "medal") for every medal except Kill / Assist (one per kill / assist) and Unused; a kill medal
+  needs that player's kill on the scoreboard within 3 s (g_sb_kill_t), a player whose medal counts rose by more than 3 in one
+  snapshot is the table filling in (both: history after a join). The player details list this match's medals. Offline:
+  results-feed-test.sh (a backed Double Kill, an unbacked Sniper Kill dropped, an objective medal, 5 at once, Kill / Assist).
+- **nhook overlay: no hitboxes on dead bodies** (2026-11-07; noverlay.c nov_build_body / nov_hitbox) — WHY: a body lying on
+  the ground drew as red hitboxes: clutter. HOW: dead bipeds get no hitboxes; NHOOK_HB_DEAD=1 draws them grey.
+- **nhook: the host tools on the native app** (2026-11-07; new shim/native/nhost.c, nstats.c st_control / snapshot overlay,
+  stats_page.html) — WHY: the user asked to port the loader's host tools (teleport next to a player / to a point / by a
+  delta / to the map's spots, boundaries off, invisible walls off, speed). HOW: the page's controls (do=tpnext, tpto, tpby,
+  explore, bounds, invwalls, speed; host only: halo3's game_globals +0x11 is 5 or 1) queue one request; it runs on the
+  engine thread after halo3's game tick runner (halo3+0xeefa8, a body hook; a dedicated server runs only that) or, as a
+  fallback, at the entry of the app's per-frame function (0.10.0 0x1029ed000, a text hook; first words checked), inside
+  halo3's game-state lock (0x12c948 / 0x12c9a0, recursion-aware). Teleport = halo3's own (0x259410(object, pos, forward, up,
+  1); unit_exit_vehicle 0x3a3c4c first, scenario_location_from_point 0x9bc78 for "inside the structure" at +0.3 / +1.2, as
+  the loader). halo3's network layer is not there natively (its simulation entity table, TLS block +0x240, is NULL; the
+  app has its own netcode) but game_globals +0x11 still says host, so halo3's "mark for a network update" (0x1ec3c, called
+  by teleport and disconnect-from-map) read that NULL table: signal 11 at 0x48. For the call halo3 is told it runs a local
+  game (1), host (5) comes back right after (nhost.c ht_call; NHOOK_HOST_KEEPMODE=1 = no switch = the crash). Boundaries =
+  text hooks on the app's own kill-volume test (the code-table branch of 0x1b8e00: answered "not in a kill volume, in a safe
+  zone") and player soft-ceiling test (0x1bac00: none); invisible walls = a body hook after halo3's Havok polygon-shape
+  builder (0x21b4d8) moving player-clip surfaces' vertices to z = -20000 (the loader's way); speed = the variant's base
+  player speed trait (game_globals +0x1608 +0x134 +0x10). Requests take &slot=<player> (a dedicated server has no player
+  of its own; without one it says so). Checked live: a hosted Guardian match (teleport by 2 units stays; boundaries off ->
+  fell through the kill volume alive, back on -> dead; speed 200% walks 4.95 units/s vs 2.58 at 100% with the app's
+  walk_to test request; 45 shapes built while walking, no invisible surfaces near Guardian's spawn) and our native
+  dedicated server with a joined test client (the server moved the player 3 units, the client saw itself there; kill
+  volume alive with boundaries off, dead once on). tpnext (next to another player) needs two players: not run live.
+- **nhook: hooks on a lifted function's body** (2026-11-07; nhook.c body_of / body_hook_after, stub.S _nh_ba) — WHY: entry
+  hooks on the code table see only calls through the table; lifted halo3 code calls lifted halo3 code DIRECTLY at the
+  body its wrapper calls, so the shape-builder hook saw 0 calls in a live test. HOW: the wrapper (stp / mov / stp, ldr
+  w,[x0,#0x290], ...) passes x2 = the guest context, x3 = guest rsp, x4..x7 = rcx, rdx, r8, r9 to `bl body` and stores x2
+  as rax; body_of finds that `bl`, checks the body starts with `stp x29, x30, [sp, #-16]!`, and one atomic `b <stub>`
+  replaces it (MAP_JIT, pthread_jit_write_protect_np); the stub runs the original first, then the handler with the
+  incoming registers, stack arguments 5-8 and the result, and returns every caller-saved register as the original left it.
+- **nhook: text hooks stop the other threads while a page is patched** (2026-11-07; nhook.c text_hook_x, nh_world_stop /
+  nh_world_go) — WHY: text hooks used to go in only at startup; the camera hook and the host tools now install while the
+  game runs, and a 16 KB code page is not executable while it is written: a thread running anywhere in it faulted (signal
+  10 at an address of the app's frame function). HOW: every other thread is suspended for those microseconds (task_threads
+  + thread_suspend; no lock taken in between); a thread stopped inside the four patched instructions makes it resume and
+  try again (up to 50 times). NHOOK_TEXT_NOSTOP=1 = old.
+- **nhook: crash frames to halo3 functions** (2026-11-07; nhook.c NHOOK_CODETAB_DUMP / NHOOK_DUMP_ENTRY, new
+  shim/tools/native-frames.py) — WHY: the app's crash report gives host addresses in its JIT region only. HOW:
+  NHOOK_CODETAB_DUMP=<file> writes the code table ("halo3 rva, host entry"); native-frames.py <file> <log|addresses> names
+  each frame halo3+<rva> + offset. The JIT layout is the same in every launch, only shifted: another process's addresses map
+  with one known anchor (e.g. its [nhook] hook line). NHOOK_DUMP_ENTRY=<rva>[:<words>] logs a lifted function's first words.
+- **nhook Packets: the dedicated server says "server"** (2026-11-07; nnet.c st_session g_st_host_id, pk_player) — WHY: the
+  user wants the DNS name and the player's name by an address where they apply; on a dedicated server the one address is the
+  server, which is no player, so it had nothing. HOW: the session's host peer id is kept; its address, when no player owns it,
+  is labelled "server".
+- **Forensic archive: an always-open microphone is split into what was said** (2026-11-07; forensic.c FXF_LEVEL /
+  fx_voice_level / fx_segment, nstats.c st_voice_report) — WHY: a player whose microphone never closes sent packets of
+  background noise the whole game: one 3.5-minute utterance on the timeline. Packet sizes could not tell (that noise came in
+  normal-sized Opus packets, median 40 bytes vs 45-55 for speech). HOW: every app voice report ("heard 0x<id>: N frames ...
+  rms X dBFS", ~2 s) is archived per sender as a FXF_LEVEL record (window start, length, rms x 100); the segmenter leaves a
+  sender's packets inside windows quieter than -60 dBFS (the talking threshold) out of every utterance. Offline:
+  forensic-oggtest.sh (6 s of packets with a quiet 2 s in the middle -> two utterances of 100 packets). The voice CHANNEL
+  (global / team / proximity) is still not known natively: the app's voice mixer keeps per sender only a sequence-keyed queue
+  of raw packets ([kind][data]; 0x10214dcbc pops it), so the channel would have to come from its network receive path.
+- **nhook Packets: the game layer (halo3's message names), session messages** (2026-11-07; nnet.c pkg_install / pkg_hit /
+  pk_control, nhook.c pkg_probe, stats_page.html) — WHY: backlog N9; the page hid the "game" switch for the native app.
+  HOW: NHOOK_PKG_PROBE=1 showed halo3's message table (halo3+0x46b6e98) in the native app with every encode / decode a lifted
+  function (player-acknowledge's are the app's own code; synchronous-client-ready has none) and the loader's five message
+  senders / receivers lifted too; =2 counted them in a 59-player game: membership-update decoded ~150 times in 2 minutes, the
+  gateway's receive twice, the channel send / receive / reply, the synchronous-* messages and game-results never -- the app
+  carries in-game traffic in its own protocol. So the switch (POST do=pktgame&on=1) hooks each distinct encode / decode
+  function on first use (code-table entry hooks, permanent; handlers idle while off: 75 of 77 hooked) and logs the SESSION
+  messages by name (a function several types share is named by the first, "+", and listed in full in the counts), with no
+  peer. Checked live: membership-update x64 received, parameters-update x10, peer-properties x5 sent in 70 s.
+- **nhook on a native dedicated server** (2026-11-07; shim/tools/native-dedicated.sh, nhook.c probe_thread, nstats.c
+  st_listen_thread) — WHY: backlog N12; and the host tools need a native host. HOW: native-dedicated.sh runs the app's own
+  `--server FILE.toml` mode from an isolated folder (ReclaimerMac/native/test-dedicated: its own profile, cache, data) with a
+  LOCAL-ONLY config made on first use (bind 127.0.0.1, hidden, no master, stats off, no UPnP, no auto-update; Guardian Slayer
+  on UDP 49190, an RCON password in rcon-password.txt) and nhook injected; `rcon <command>` drives it. Two fixes on the way:
+  nhook never installed its hooks when NHOOK_HALO3 was unset (probe_thread returned before hooks_start: native.sh always set
+  it), and the stats page now binds only in the process that runs the engine (the server's supervisor and its re-exec carry
+  the injection too and would have taken the port). Launched without nohup (a system binary strips DYLD_INSERT_LIBRARIES).
+  Checked live: a test client joined 127.0.0.1:49190 (NATIVE_ALLOW_SECOND=1: the server is no client); the server's page
+  (8767) says host with the player, the client's (8765) client + the server's address; an RCON `say` reached the client's
+  feed as a server line; RCON `load construct Slayer` changed the map in the session: "Game over", "Match started:
+  Construct", the client's map / heatmap (Construct's spawns) / zones followed (backlog N5).
+- **nhook-selftest.sh: its own forensic / heatmap folders** (2026-11-07; shim/tools/nhook-selftest.sh) — WHY: the offline
+  selftest starts nhook's stats server, whose archive opened an empty "menu" session in the player's real forensic archive on
+  every run. HOW: PELOAD_FORENSIC_DIR and NHOOK_HEATMAP_DIR point into the test's temporary folder.
+- **nhook archive: sessions not named after the loading screen** (2026-11-07; nstats.c, the fx_roster_tick call) — WHY: every
+  mid-game join made a session "..._130_epilogue": the session opens 2 s after the host is known, while the loading screen's
+  scenery (130_epilogue) is still the map hb_current_map reports (it rechecks every 2 s). HOW: the archive gets no map while
+  joining, in a match's first 8 s, or when the map is 130_epilogue outside a match: such a session is named after the server;
+  the roster lines carry the real map.
+  NHOOK_NO_RESULTS_FEED=1 = the old estimate only. Also from the results: "Game over: <winners> won" (or "a tie") when
+  games-completed (stat 1) goes up, winners = games-won (3) -- the loader's feed had it from the client's "Carnage report
+  opened" line, the native feed had no end at all; checked live with the app's {"gameplay":"end_game"} request.
+- **0.10 server list: shim/tools/servers10.py** (2026-11-07) — WHY: "there is no reason we should be making a .9 query": the
+  0.9 client's `discover` (shim/tools/servers.sh) lists no 0.10 server, the 0.10 Windows exe's `discover` prints nothing under
+  the loader, and the Mac app has no list command. HOW: 0.10 asks `/v3/discovery` on its masters and queries each server with
+  ONE plain UDP datagram (a6 01 00 + 8-byte nonce, padded to 1229 bytes; reply a7 + nonce + JSON) -- no QUIC any more
+  (server-status.md "Client 0.10+"); servers10.py does both with the Python standard library (one local port, answers read
+  while sending so pings are real, a second try for silent servers). Found with NHOOK_UDP_HEX=<n> (nnet.c pk_hex: the first
+  n bytes of the first 3 datagrams each way per peer, debug only) and the app's `--ui-script` pressing SERVER BROWSER in a
+  test-profile run. A Network.framework QUIC prober (the 0.9 protocol) was tried first: 0.10 servers don't speak it.
 
 - **"Run 2.4x" removed** (2026-10-19, revert 606a38c) — it crashed the client as soon as it was used; the user asked for it
   to be deleted. The page's Speed 2x / speed menu (the host's movement-speed trait) is unchanged. (10-19)

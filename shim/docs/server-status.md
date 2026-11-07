@@ -5,6 +5,27 @@ Decrypted and labelled field by field (2026-10-25, client 0.9.23) from a status 
 the client's own TLS secrets (`PELOAD_KEYLOG`) and `re-tools/quicparse.py`. Public servers run the same server code. Why it
 matters: README "Who sees your IP address".
 
+## Client 0.10+: one plain UDP datagram (2026-11-07)
+
+0.10 changed both halves; `shim/tools/servers10.py` does what its server browser does (stdlib Python, no game needed). Traced
+with nhook's `NHOOK_UDP_HEX=<n>` (the native app's datagrams in hex) and the app's own `--ui-script` (a file of lines like
+`wait 12` / `press SERVER BROWSER`; a wrong row name prints the rows) -- the test profile leaves the masters alone ("[net]
+test profile: master at ... left alone"), but it still probes 127.0.0.1, which shows the request.
+
+- **The list**: `GET http://<master>/v3/discovery` -> `{"version":3, "listings":[{"listing":{"key", "address", "rendezvous",
+  "origin"?, "issued", "expires"}, "signature"}], "masters", "seen", "rendezvous_port"}`: 256 signed addresses (key = the
+  server's public key, 64 hex; expires 3 minutes after issued), no names. Masters: 148.251.153.44:44340 and
+  23.159.176.138:49175 first in the app's cache (`ProjectReclaimer/discovery/h3list/peers.json`, same {origin, seen, ip,
+  failures} rows as 0.9), plus the remembered ones.
+- **The status query**: no QUIC any more. One datagram: `a6 01 00` + an 8-byte nonce, zero-padded to 1229 bytes (a reply
+  can never be larger than the request: no amplification). Reply: `a7` + the same nonce + JSON
+  `{"info":{"name", "map", "mode", "players", "max_players", "password", "fingerprint" (the server's engine limits),
+  "dedicated", "host_name", "variant", "map_variant", "version", "player_names":[...], "mods":[{"id", "title", "size",
+  "available", "maps", "campaign"}], "campaign", "joins_closed", "max_ping", "queue_room", "vip_queue_room"}, "protocol":1,
+  "key", "address"}`. The app's log line: `[browser] <ip>:<port> answered: key <key>, <n> players, rendezvous none`.
+  Still nothing about the player in the request. A 0.9 client's `discover` lists none of these servers.
+- 2026-11-07 ~04:30 local: 232 of 256 listed servers answered, from 11 masters, in ~12 s.
+
 ## Where the list lives
 
 - **Discovery masters**: small HTTP services, normally on port 49175. Two are built into the client

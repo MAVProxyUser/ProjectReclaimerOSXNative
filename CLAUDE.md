@@ -299,20 +299,37 @@ profile.json made by shim/tools/profile-native.py from the loader profile: same 
 backups in ReclaimerMac/backups are untouched -- NEVER let a launch make a new identity). mcc-folder.txt = the MCC folder's
 macOS path. Test runs: RECLAIMER_PROFILE_DIR=ReclaimerMac/native/test-v2 (a test profile: services left alone) +
 RECLAIMER_CACHE_DIR + RECLAIMER_TEST_SILENT=1; don't kill it before "[menus] open" (it counts unfinished starts). Dylibs inject
-with DYLD_INSERT_LIBRARIES (tested). RE: re-tools/machoref.py (strref/dis/func/calls on arm64 Mach-O).
+with DYLD_INSERT_LIBRARIES (tested). RE: re-tools/machoref.py (strref/dis/func/calls/dataref on arm64 Mach-O).
 shim/native/ = nhook.dylib (bash shim/native.sh [--map guardian --seconds 60 --background]): log tap, code-table entry hooks on lifted
 halo3 functions (x0 = guest context, +0x2d8 = TLS pointer), NHOOK_CENSUS=1; reads the players table. main_loop_body / sim tick /
 display_event / object_delete etc. are the app's own code now (census): docs native-client.md "Inside the app".
 Native stats page (nstats.c): http://127.0.0.1:8765/ while shim/native.sh runs (page served from the checkout: edits = refresh).
 Works (live-checked in a 72-player game, 2026-11-07): players, variant, heatmap, feed, kills / deaths / assists from halo3's
-statborg (game engine globals TLS +0x20 + the app's `[capacity] game_globals.statborg`; kill feed paired from its counts),
+statborg (game engine globals TLS +0x20 + the app's `[capacity] game_globals.statborg`; kill feed EXACT from halo3's game results
+-- versus matrix + per-damage-type kills, nstats.c rs_tick, offline test shim/tools/results-feed-test.sh -- else paired from the
+statborg's counts; display_event / chud_messaging_post never run in the app),
 Connected list (halo3 session, same layout as 0.9), Packets (interposed sockets; player names from `[online] peer` lines,
 "look up names" = reverse DNS), fps line (presents), overlay / recording / Capture frame (nrender.m: presentDrawable:
 swizzled; camera = halo3 observer TLS +0x578 result +0x11c, Hor+ fov), page controls. Match state = `[switch] game ...`
 lines only (`[menus] open` is also the in-game menu). Hooks: the engine context is pinned to the thread whose TLS block holds
-"players"; stub pages go in real VM gaps near the 28 MB JIT region (near_page). Not yet: voice / mute / forensics, zones,
-visible-only, a 0.10 server list (the 0.10 exe's `discover` prints nothing under the loader; the Mac app has no list command:
---list-servers just starts the game). Test runs: NATIVE_LOG=<scratch file> (the default log is the user's). Offline test:
+"players"; stub pages go in real VM gaps near the 28 MB JIT region (near_page). Text hooks on the app's OWN signed code work
+(text_hook: ad hoc signed, no hardened runtime; 917 halo3 functions are app code, NHOOK_LIST_BRANCH_ENTRIES=1): object_delete
+(tracers, shots / accuracy), the view constants (overlay camera; scene depth from the swizzled depth attachment = zones /
+visible only). Mutes = the app's set_muted (0.10.0 0x102154ef0, prologue-checked, nnet.c voice_init); who talks = its
+`[voice] active ... heard 0x<id>: N frames ... rms` log every ~2 s (page dot + forensic FXF_REPORT records, timing only).
+0.10 server list: `python3 shim/tools/servers10.py [count|--json|--names]` (masters' /v3/discovery + ONE UDP datagram per
+server: a6 01 00 <nonce8> padded to 1229 -> a7 <nonce8> JSON; server-status.md "Client 0.10+"). The app's `--ui-script <file>`
+drives its menus (`wait 12`, `press SERVER BROWSER`; a wrong row name prints the rows); NHOOK_UDP_HEX=<n> dumps datagrams.
+`--request-at <s> '{"campaign":{"hold_trigger":{"seconds":6}}}'` fires in a local test match (shim/tools/native-fire-test.sh:
+live tracer / shots check, PASS); the test profile refuses public servers by itself.
+Host tools natively (nhost.c, 2026-11-07): teleport / boundaries / invisible walls / speed from the page, host or our native dedicated
+server (&slot=); halo3 calls that mark network updates (0x1ec3c) need game_globals+0x11 = 1 for the call (no sim-entity table natively).
+Lifted code calls lifted code at the BODY (x2 ctx, x3 guest rsp, x4-x7 args): body_hook_after; entry hooks see table calls only. Text
+hooks installed at run time stop the other threads (a 16 KB page is not executable while written). Crash frames -> halo3 functions:
+NHOOK_CODETAB_DUMP=<file> + shim/tools/native-frames.py (the JIT layout is fixed, only shifted between launches).
+Forensic voice audio: text hook on the app's Opus decode (0x1003f1e7c, caller = voice mixer 0x102152578, id at x26-0x278;
+stub.S _nh_opus_shim; NHOOK_NO_VOICEHOOK=1 off; [perf] "voice packets" -- live-checked 2026-11-07: real talkers archived and decoded). Chat = the app's own `[chat] line` log, on since nhook sets its chat_log byte (nstats.c chat_log_tick). Not yet: packet log
+game layer. Test runs: NATIVE_LOG=<scratch file> (the default log is the user's). Offline test:
 shim/tools/nhook-selftest.sh. hitbox.c's .map code lives in shim/src/h3maps.c (shared).
 PORTING A RELEASE: shim/docs/porting.md -- fetch-releases.sh (corpus), client-survey.sh, `re-tools/patchscan.py --diff old new`
 (signatures read from the C; `--rev <commit>`; exit 0 over all 39 releases), `re-tools/sigport.py --point P --old --new [--corpus]

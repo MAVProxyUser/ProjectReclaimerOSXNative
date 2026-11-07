@@ -14,6 +14,7 @@ static const char* const g_nov_name[NOV_N] = {"hitboxes", "tracers", "info", "it
 static volatile unsigned g_nov_on;                          // bit f = feature f on
 static volatile int g_nov_team[NOV_N], g_nov_px[NOV_N];      // team filter (0 all, 1 enemies, 2 friends), label px
 static volatile int g_nov_wk = 7;                            // weak-spot kinds shown: 1 lethal, 2 opens the driver, 4 disables
+static volatile int g_nov_vis[NOV_N];                        // "visible only" per feature (hidden behind the world: needs the scene's depth)
 static void nov_init(void) {
     static int done; if (done) return; done = 1;
     static const char* const env[NOV_N] = {"NHOOK_HITBOXES", "NHOOK_HB_TRACERS", "NHOOK_HB_INFO", "NHOOK_HB_ITEMS", 0, "NHOOK_HB_ZONES", "NHOOK_HB_VEHICLES"};
@@ -22,6 +23,7 @@ static void nov_init(void) {
     const char* p = getenv("NHOOK_HB_TEXT_PX"); int px = p ? atoi(p) : 7; if (px < 4) px = 4; if (px > 60) px = 60;
     for (int f = 0; f < NOV_N; f++) { g_nov_team[f] = (f == NOV_ITM || f == NOV_VIS || f == NOV_ZON) ? -1 : tm; g_nov_px[f] = (f == NOV_INF || f == NOV_ITM || f == NOV_ZON) ? px : -1; }
     const char* w = getenv("NHOOK_HB_WEAK_SHOW"); if (w) g_nov_wk = (int)strtol(w, 0, 0);
+    { const char* v = getenv("NHOOK_HB_VISIBLE"); int vb = v && *v && strcmp(v, "0"); for (int f = 0; f < NOV_N; f++) g_nov_vis[f] = vb; }
     g_nov_on = on;
 }
 static int nov_feat(int f) { nov_init(); return (g_nov_on >> f) & 1; }
@@ -30,7 +32,22 @@ int nov_wanted(void) { nov_init(); return (g_nov_on & ~(1u << NOV_VIS)) != 0; } 
 // ---- the camera ---------------------------------------------------------------------------------------------------
 // vp: 16 floats, rows 0 (clip x), 1 (clip y), 3 (clip w) used as the loader's view-projection rows; vp[12..14] the forward,
 // vp[28..30] the camera position (hitbox.c's cb0 layout).
+int nh_camera(float* rows16, float* pos3);   // nhook.c: the frame's own view-projection (shader parameter 0x27)
+static int g_nov_cam_src;                    // 1 = the frame's own view constants, 2 = the observer camera (fallback)
+static int nov_observer(float* pos, float* fwd) {   // local user 0's observer camera position / forward
+    uint64_t blk = tls_block(), ob = 0; float r[0x34 / 4];
+    if (!blk || !hb_read(blk + 0x578, &ob, 8) || !ob || !hb_read(ob + 0x11c, r, sizeof r)) return 0;
+    memcpy(pos, r, 12); if (fwd) memcpy(fwd, r + 0x28 / 4, 12); return isfinite(pos[0]);
+}
+int nov_cam_is_player(const float* pos) {   // a captured world camera that sits at the player's view (not a shadow / reflection view)
+    static float op[3]; static double t; double now = mono_s();
+    if (now - t > 0.1) { float p2[3]; if (nov_observer(p2, 0)) memcpy(op, p2, 12); t = now; }
+    float dx = pos[0] - op[0], dy = pos[1] - op[1], dz = pos[2] - op[2]; return dx * dx + dy * dy + dz * dz < 1.0f;
+}
 static int nov_camera(float* vp, float aspect) {
+    { float rows[16], pos[3];   // the frame's own view-projection (exact, interpolated, Hor+ / FOV settings included)
+      if (!getenv("NHOOK_OBSERVER_CAMERA") && nh_camera(rows, pos)) { memset(vp, 0, 32 * sizeof(float)); memcpy(vp, rows, 64); memcpy(vp + 28, pos, 12); g_nov_cam_src = 1; return 1; } }
+    g_nov_cam_src = 2;
     uint64_t blk = tls_block(), ob = 0; float r[0x48 / 4];
     if (!blk || !hb_read(blk + 0x578, &ob, 8) || !ob || !hb_read(ob + 0x11c, r, sizeof r)) return 0;
     const float* pos = r, * fwd = r + 0x28 / 4, * up = r + 0x34 / 4; float hfov = r[0x40 / 4];
@@ -59,7 +76,7 @@ static int nov_collect(NovObj* out, int max) {
     int32_t maxc = *(int32_t*)(hdr + 0x20), esz = *(int32_t*)(hdr + 0x24), hi = *(int32_t*)(hdr + 0x3c); uint64_t data = *(uint64_t*)(hdr + 0x48);
     if (esz != 0x18 || hi <= 0 || hi > maxc || hi > HB_MAXOBJ || !hb_read(data, g_nov_tab, (size_t)hi * 0x18)) return 0; g_nov_hi = hi;
     int fh = nov_feat(NOV_HIT), ft = nov_feat(NOV_TRC), fi = nov_feat(NOV_INF), fw = nov_feat(NOV_ITM), fveh = nov_feat(NOV_VEH);
-    int fb = fh || fi || (fveh && g_nov_team[NOV_VEH] > 0) || (ft && g_nov_team[NOV_TRC] > 0) || 1;   // (bipeds always: our own team)
+    int fb = fh || fi || (fveh && g_nov_team[NOV_VEH] > 0) || (ft && g_nov_team[NOV_TRC] > 0);   // (players only for a feature that draws or filters by them)
     int n = 0;
     for (int i = 0; i < hi && n < max; i++) {
         const uint8_t* e = g_nov_tab + i * 0x18; if (!*(const uint16_t*)e) continue; int t = e[3], unit = t == 0 || t == 1 || t == 12;
@@ -79,12 +96,20 @@ static int nov_collect(NovObj* out, int max) {
     }
     return n;
 }
+// aim vs hits: the rings (nov_aim_shot / nov_aim_tick below, nstats.c st_aim_tick)
+typedef struct { volatile unsigned seq; double t; uint32_t owner, target, def; float s[3], dn[3], len, along, pre; uint16_t nmsz; uint8_t rcount, pad; uint8_t perm[32]; float mt[128 * 13]; } NovAimRec;
+enum { NOV_AIM_N = 64, NOV_AIMR_N = 4096 };
+static NovAimRec g_nov_aim[NOV_AIM_N]; static volatile unsigned g_nov_aim_w;     // the engine thread writes (one writer)
+typedef struct { double t; uint32_t owner, target; float err, along, pre; uint8_t on, head; } NovAimRes;
+static NovAimRes g_nov_aimr[NOV_AIMR_N]; static volatile unsigned g_nov_aimr_w;  // the render thread writes
+static volatile unsigned long g_nov_aim_n, g_nov_aim_done;
+static volatile int g_nov_sides_on;   // (Infection sides: nov_side_of below)
 // Friend or enemy (every team filter: hitboxes, vehicles by their occupants, tracers by their shooter, info). Team games:
 // the same team index. Infection: halo3 gives every player a team of their own (teams off), so the sides are zombie /
 // human: g_nov_side, filled by the stats snapshot from each player's active traits (st_snapshot nov_sides). Free-for-all:
 // everyone is an enemy. (Infection used to show "friends" = nobody, "enemies" = everyone; user, 2026-11-07.)
 static int g_nov_myteam = -1, g_nov_myside = -1;
-static struct { uint32_t unit; int8_t side; } g_nov_side[256]; static volatile int g_nov_nside, g_nov_sides_on;   // side 1 zombie, 0 human
+static struct { uint32_t unit; int8_t side; } g_nov_side[256]; static volatile int g_nov_nside;   // side 1 zombie, 0 human (g_nov_sides_on: above)
 static int nov_side_of(uint32_t unit) { int n = g_nov_nside; for (int i = 0; i < n && i < 256; i++) if (g_nov_side[i].unit == unit) return g_nov_side[i].side; return -1; }
 static int nov_friend(const NovObj* o) {
     if (o->type != 0) return 0;
@@ -97,13 +122,23 @@ static int nov_owner_cls(uint32_t h, const NovObj* objs, int n) { if (h == 0xFFF
     for (int i = 0; i < n; i++) if (objs[i].handle == h) return objs[i].type == 0 ? nov_bip_cls(&objs[i]) : nov_occ_cls(h, objs, n);
     return nov_occ_cls(h, objs, n); }
 
-// ---- lines (hitbox.c: hb_emit_hitbox, the stroke font, hb_proj / hb_seg) -- vertices x, y (NDC), r, g, b ------------
-static int nov_proj(const float* vp, const float* w, float* nx, float* ny) {
+// ---- lines (hitbox.c: hb_emit_hitbox, the stroke font, hb_proj / hb_seg) -- vertices x, y (NDC), r, g, b, depth ------------
+// depth = what the scene's depth buffer holds for this point if nothing is in front of it: Halo 3 is reverse-Z with no far
+// plane and near 1/128 (view constants row 2), so depth = (1/128) / w; it is linear in screen space along a line. The shader
+// (nrender.m) hides a pixel when the scene there is nearer (0.3 units of slack). 0 = always drawn (g_nov_occ off).
+#define NOV_NEAR 0.0078125f
+enum { NOV_VSTRIDE = 6 };
+static int g_nov_occ;                         // the feature being drawn hides behind the world (its "visible only", zones always)
+static float g_nov_label_d;                   // a label's depth (its anchor's), 0 = always drawn
+static float nov_dep(float cw) { return g_nov_occ && cw > 0.01f ? NOV_NEAR / cw : 0.0f; }
+static int nov_proj_w(const float* vp, const float* w, float* nx, float* ny, float* ow) {
     float cx = w[0] * vp[0] + w[1] * vp[1] + w[2] * vp[2] + vp[3], cy = w[0] * vp[4] + w[1] * vp[5] + w[2] * vp[6] + vp[7], cw = w[0] * vp[12] + w[1] * vp[13] + w[2] * vp[14] + vp[15];
-    if (cw < 0.05f) return 0; *nx = cx / cw; *ny = cy / cw; return 1; }
+    if (cw < 0.05f) return 0; *nx = cx / cw; *ny = cy / cw; if (ow) *ow = cw; return 1; }
+static int nov_proj(const float* vp, const float* w, float* nx, float* ny) { float cw; int r = nov_proj_w(vp, w, nx, ny, &cw); if (r) g_nov_label_d = nov_dep(cw); return r; }
+static void nov_vtx(float* d, float x, float y, const float* col, float dep) { d[0] = x; d[1] = y; d[2] = col[0]; d[3] = col[1]; d[4] = col[2]; d[5] = dep; }
 static int nov_seg(float* v, int nv, int cap, const float* vp, const float* a, const float* b, const float* col) {
-    float ax, ay, bx, by; if (nv + 2 > cap || !nov_proj(vp, a, &ax, &ay) || !nov_proj(vp, b, &bx, &by)) return nv; float* d = v + nv * 5;
-    d[0] = ax; d[1] = ay; d[2] = col[0]; d[3] = col[1]; d[4] = col[2]; d[5] = bx; d[6] = by; d[7] = col[0]; d[8] = col[1]; d[9] = col[2]; return nv + 2; }
+    float ax, ay, bx, by, aw, bw; if (nv + 2 > cap || !nov_proj_w(vp, a, &ax, &ay, &aw) || !nov_proj_w(vp, b, &bx, &by, &bw)) return nv; float* d = v + nv * NOV_VSTRIDE;
+    nov_vtx(d, ax, ay, col, nov_dep(aw)); nov_vtx(d + NOV_VSTRIDE, bx, by, col, nov_dep(bw)); return nv + 2; }
 static const char* nov_glyph(char c) {   // hitbox.c hb_glyph: segments "x1y1x2y2" on a 4x6 grid
     switch (c) {
     case '0': return "0040404646060600";  case '1': return "202626151030";  case '2': return "06464643430303000040";
@@ -125,9 +160,9 @@ static float g_nov_gx, g_nov_gy, g_nov_W = 1920, g_nov_H = 1080, g_nov_scale = 1
 static void nov_text_size(int px) { if (px < 4) px = 4; if (px > 60) px = 60; float u = px / 6.0f; g_nov_gx = 2.0f * u / g_nov_W; g_nov_gy = 2.0f * u / g_nov_H; }
 static int nov_text(float* v, int nv, int cap, float x, float y, const char* s, const float* col) {
     for (; *s; s++, x += 5 * g_nov_gx) { char ch = *s; if (ch >= 'a' && ch <= 'z') ch -= 32; const char* g = nov_glyph(ch);
-        for (; g[0] && g[1] && g[2] && g[3] && nv + 2 <= cap; g += 4) { float* d = v + nv * 5;
-            d[0] = x + (g[0] - '0') * g_nov_gx; d[1] = y - (6 - (g[1] - '0')) * g_nov_gy; d[2] = col[0]; d[3] = col[1]; d[4] = col[2];
-            d[5] = x + (g[2] - '0') * g_nov_gx; d[6] = y - (6 - (g[3] - '0')) * g_nov_gy; d[7] = col[0]; d[8] = col[1]; d[9] = col[2]; nv += 2; } }
+        for (; g[0] && g[1] && g[2] && g[3] && nv + 2 <= cap; g += 4) { float* d = v + nv * NOV_VSTRIDE;   // (depth: the label's anchor, nov_proj)
+            nov_vtx(d, x + (g[0] - '0') * g_nov_gx, y - (6 - (g[1] - '0')) * g_nov_gy, col, g_nov_label_d);
+            nov_vtx(d + NOV_VSTRIDE, x + (g[2] - '0') * g_nov_gx, y - (6 - (g[3] - '0')) * g_nov_gy, col, g_nov_label_d); nv += 2; } }
     return nv; }
 static int nov_hitbox(const NovObj* o, const float* vp, float* verts, int nv, int cap) {   // hitbox.c hb_emit_hitbox
     HbGeom* g = hb_geom(o->def); if (!g) return nv;
@@ -141,16 +176,17 @@ static int nov_hitbox(const NovObj* o, const float* vp, float* verts, int nv, in
         float best = -1e30f; for (int r = 0; r < g->nreg; r++) if (zc[r] && zs[r] / zc[r] > best) { best = zs[r] / zc[r]; head = r; } }
     static const float cbody[3] = {1, 0.15f, 0.15f}, chead[3] = {1, 0.95f, 0.1f}, fbody[3] = {0.25f, 0.5f, 1}, fhead[3] = {0.6f, 0.95f, 1}, cveh[3] = {0.3f, 0.75f, 1},
         cwk[4][3] = {{0.3f, 0.75f, 1}, {1, 0.55f, 0.1f}, {1, 0.95f, 0.1f}, {1, 0.3f, 0.85f}};
-    int fr = nov_friend(o); const float* cb = fr ? fbody : cbody, * ch = fr ? fhead : chead; int wkshow = g_nov_wk;
+    static const float cdead[3] = {0.45f, 0.45f, 0.45f};
+    int fr = nov_friend(o); const float* cb = o->dead ? cdead : fr ? fbody : cbody, * ch = o->dead ? cdead : fr ? fhead : chead; int wkshow = g_nov_wk;
     for (int s = 0; s < g->nseg && nv + 2 <= cap; s++) { if (g->perm[s] != sel[g->reg[s]]) continue;
         const float* M = mt + g->node[s] * 13, * P = g->pts + s * 6; int wk = g->wk[s]; if (wk && !(wkshow & (wk == 2 ? 1 : wk == 1 ? 2 : 4))) wk = 0;
         const float* col = o->type == 0 ? (g->reg[s] == head ? ch : cb) : (wk < 4 ? cwk[wk] : cveh);
-        float q[2][2]; int ok = 1;
+        float q[2][3]; int ok = 1;
         for (int e = 0; e < 2; e++) { const float* v = P + e * 3; float w[3];
             for (int a = 0; a < 3; a++) w[a] = M[10 + a] + M[0] * (v[0] * M[1 + a] + v[1] * M[4 + a] + v[2] * M[7 + a]);
-            if (!nov_proj(vp, w, &q[e][0], &q[e][1])) { ok = 0; break; } }
-        if (!ok) continue; float* d = verts + nv * 5;
-        d[0] = q[0][0]; d[1] = q[0][1]; d[2] = col[0]; d[3] = col[1]; d[4] = col[2]; d[5] = q[1][0]; d[6] = q[1][1]; d[7] = col[0]; d[8] = col[1]; d[9] = col[2]; nv += 2; }
+            if (!nov_proj_w(vp, w, &q[e][0], &q[e][1], &q[e][2])) { ok = 0; break; } }
+        if (!ok) continue; float* d = verts + nv * NOV_VSTRIDE;
+        nov_vtx(d, q[0][0], q[0][1], col, nov_dep(q[0][2])); nov_vtx(d + NOV_VSTRIDE, q[1][0], q[1][1], col, nov_dep(q[1][2])); nv += 2; }
     return nv;
 }
 typedef struct { uint32_t h; int n; float p[32][3]; double seen; } NovTrail;
@@ -165,20 +201,120 @@ static void nov_trail_add(uint32_t h, const float* pos, double now) {
 // one at deletion: +0x1c the impact point, +0x74 velocity, +0x1e8 the start, +0x1b0 distance travelled, +0xC0 the owner.
 // The hook runs on the engine thread inside the lifted call: it reads that thread's own TLS directly (pointers checked).
 typedef struct { volatile double t; uint32_t def, owner; float pos[3], vel[3], st[3], trav; } NovImp;
+// shots and estimated hits (hitbox.c g_hbshot): every deleted projectile with its owner, and the biped whose bounding sphere
+// holds its end point (the victim, -1 none) -- the stats snapshot counts them per player (shots, hits, accuracy)
+typedef struct { uint32_t owner, victim, def; } NovShot;
+static NovShot g_nov_shot[8192]; static volatile unsigned g_nov_shot_n;
 static NovImp g_nov_imp[256]; static volatile unsigned g_nov_imp_n;
-static void on_object_delete(uint64_t* ctx) {
-    uint32_t h = (uint32_t)ctx[1]; uint64_t tls = ctx[0x2d8 / 8]; static uint32_t idx = 0xFFFFFFFFu;
+static volatile unsigned long g_nov_del_calls;
+// ---- aim vs hits (2026-11-07; user: "a meter that tells how close to an accurate shot in a hitbox is being made ... a high
+// deviation would indicate a trash player, or that lag was too high between players to land hits"). For every deleted bullet
+// that flew straight (it travelled no more than its start-to-impact line: no grenades, no bounces) the enemy biped whose
+// centre lies nearest its path -- within 12 degrees, in front of where it stopped, on foot, alive -- is its target; that
+// biped's pose at this moment (node matrices, region permutations) and its shield + health go into a ring (nov_aim_shot, the
+// engine thread). The render thread, which owns the hitbox geometry cache (h3maps.c hb_geom), measures how far the path
+// passed from the target's real hitboxes (nov_aim_tick: per collision region and node, the centre and mean radius of its
+// posed edges; 0 = through one), and the stats snapshot checks whether the server then took the target's shield / health
+// down (st_aim_tick). Everything is as THIS client saw it: a remote player's target sits where this client draws it.
+// NHOOK_NO_AIM=1 = off.
+static void nov_aim_shot(const uint8_t* arr, const uint8_t* data, const uint8_t* p) {
+    static int on = -1; if (on < 0) on = !getenv("NHOOK_NO_AIM"); if (!on) return;
+    uint32_t own = *(const uint32_t*)(p + 0xC0); int hi = *(const int32_t*)(arr + 0x3c);
+    if (own == 0xFFFFFFFFu || hi <= 0 || hi > 65536) return;
+    int oi = own & 0xFFFF; if (oi >= hi) return; const uint8_t* oe = data + (size_t)oi * 0x18;
+    if (oe[3] != 0 || *(const uint16_t*)oe != (uint16_t)(own >> 16)) return;   // a biped's shot (not a turret's)
+    const uint8_t* op = *(uint8_t* const*)(oe + 0x10); if (!op) return;
+    int oteam = *(const int32_t*)(op + 0x174), oside = g_nov_sides_on ? nov_side_of(own) : -1;
+    const float* S = (const float*)(p + 0x1e8), * I = (const float*)(p + 0x1c); float d[3] = {I[0] - S[0], I[1] - S[1], I[2] - S[2]};
+    float len = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]), trav = *(const float*)(p + 0x1b0);
+    if (!(len > 0.5f && len < 2000.f) || trav > len * 1.05f + 0.3f) return;
+    float dn[3] = {d[0] / len, d[1] / len, d[2] / len}, best = 0.2126f, bal = 0; const uint8_t* tp = 0; uint32_t th = 0;   // (tan 12 degrees)
+    for (int j = 0; j < hi; j++) { const uint8_t* b = data + (size_t)j * 0x18; if (b[3] != 0 || !*(const uint16_t*)b) continue;
+        uint32_t bh = ((uint32_t)*(const uint16_t*)b << 16) | (uint32_t)j; if (bh == own) continue; const uint8_t* bp = *(uint8_t* const*)(b + 0x10); if (!bp) continue;
+        if ((*(const uint32_t*)(bp + 0x110) >> 2) & 1) continue;                 // dead
+        if (*(const uint32_t*)(bp + 0x10) != 0xFFFFFFFFu) continue;              // in a vehicle: the shot meets the vehicle
+        if (oside >= 0) { int s2 = nov_side_of(bh); if (s2 >= 0 && s2 == oside) continue; }   // Infection: zombie / human
+        else { int t2 = *(const int32_t*)(bp + 0x174); if (oteam >= 0 && t2 == oteam) continue; }
+        const float* c = (const float*)(bp + 0x1c); float r = c[3]; if (!(r > 0.05f && r < 5)) continue;
+        float v[3] = {c[0] - S[0], c[1] - S[1], c[2] - S[2]}, al = v[0] * dn[0] + v[1] * dn[1] + v[2] * dn[2]; if (al < 0.3f || al > len + r + 0.5f) continue;
+        float px = v[0] - dn[0] * al, py = v[1] - dn[1] * al, pz = v[2] - dn[2] * al, q = sqrtf(px * px + py * py + pz * pz) / al;
+        if (q < best) { best = q; tp = bp; th = bh; bal = al; } }
+    if (!tp) return;
+    uint16_t nmsz = *(const uint16_t*)(tp + 0x136), nmoff = *(const uint16_t*)(tp + 0x138); int nn = nmsz / 52; if (nmsz % 52 || nn < 1 || nn > 128 || nmoff < 0x100) return;
+    unsigned w = g_nov_aim_w; NovAimRec* a = &g_nov_aim[w % NOV_AIM_N];
+    __atomic_store_n(&a->seq, 0, __ATOMIC_RELEASE);                               // (being written: a reader skips it)
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); a->t = ts.tv_sec + ts.tv_nsec * 1e-9;
+    a->owner = own; a->target = th; a->def = *(const uint32_t*)tp; memcpy(a->s, S, 12); memcpy(a->dn, dn, 12); a->len = len; a->along = bal;
+    a->pre = *(const float*)(tp + 0xF4) + *(const float*)(tp + 0xF8); a->nmsz = nmsz; memcpy(a->mt, tp + nmoff, (size_t)nn * 52);
+    { int16_t rs = *(const int16_t*)(tp + 0x13a); if ((*(const uint32_t*)(tp + 4) >> 11) & 1) rs -= 0x20; int rc = rs > 0 ? rs / 10 : 0; uint16_t roff = *(const uint16_t*)(tp + 0x13c);
+      a->rcount = (uint8_t)(rc > 32 ? 0 : rc); if (a->rcount) memcpy(a->perm, tp + roff + (size_t)a->rcount * 8, a->rcount); }
+    __atomic_store_n(&a->seq, w + 1, __ATOMIC_RELEASE); __atomic_store_n(&g_nov_aim_w, w + 1, __ATOMIC_RELEASE); g_nov_aim_n++;
+}
+static void on_object_delete_body(uint64_t* ctx) {   // (x0: the guest context the app's own object_delete gets -- read through rd: checked)
+    g_nov_del_calls++;
+    uint64_t c2[2], tls = 0; static uint32_t idx = 0xFFFFFFFFu;
+    if (!ctx || rd((uint64_t)(uintptr_t)ctx, c2, 16) || rd((uint64_t)(uintptr_t)ctx + 0x2d8, &tls, 8)) return;
+    uint32_t h = (uint32_t)c2[1];
     if (h == 0xFFFFFFFFu || !tls || !g_img) return;
-    if (idx == 0xFFFFFFFFu) idx = *(volatile uint32_t*)(uintptr_t)(g_img + 0xa39f9c); if (idx >= 64) return;
-    uint8_t* blk = ((uint8_t**)(uintptr_t)tls)[idx]; if (!blk) return;
+    if (idx == 0xFFFFFFFFu && rd(g_img + 0xa39f9c, &idx, 4)) return; if (idx >= 64) return;
+    uint64_t blkv = 0; if (rd(tls + (uint64_t)idx * 8, &blkv, 8) || !blkv) return; uint8_t* blk = (uint8_t*)(uintptr_t)blkv;
     uint8_t* arr = *(uint8_t**)(blk + 0x38); if (!arr || *(uint32_t*)(arr + 0x2c) != 0x64407440 || memcmp(arr, "object", 7)) return;
     uint8_t* data = *(uint8_t**)(arr + 0x48); int i = h & 0xFFFF; if (!data || i >= *(int32_t*)(arr + 0x20)) return;
     uint8_t* e = data + (size_t)i * 0x18; if (e[3] != 5 || *(uint16_t*)e != (uint16_t)(h >> 16)) return;   // projectiles only
     uint8_t* p = *(uint8_t**)(e + 0x10); if (!p) return;
+    { uint32_t own = *(uint32_t*)(p + 0xC0), vic = 0xFFFFFFFFu; const float* ip = (const float*)(p + 0x1c); int hi = *(int32_t*)(arr + 0x3c);
+      static int noaim = -1; if (noaim < 0) noaim = getenv("NHOOK_NO_AIM") != 0;   // (hits come from the aim meter's hitbox test; this pass only without it)
+      if (noaim && own != 0xFFFFFFFFu && hi > 0 && hi <= 65536) for (int j = 0; j < hi; j++) { uint8_t* b = data + (size_t)j * 0x18; if (b[3] != 0 || !*(uint16_t*)b) continue;
+          uint32_t bh = ((uint32_t)*(uint16_t*)b << 16) | (uint32_t)j; if (bh == own) continue; uint8_t* bp = *(uint8_t**)(b + 0x10); if (!bp) continue;
+          const float* c = (const float*)(bp + 0x1c); float r2 = c[3] + 0.1f, dx = ip[0] - c[0], dy = ip[1] - c[1], dz = ip[2] - c[2];
+          if (r2 > 0 && r2 < 5 && dx * dx + dy * dy + dz * dz <= r2 * r2) { vic = bh; break; } }
+      unsigned q = __atomic_load_n(&g_nov_shot_n, __ATOMIC_RELAXED) & 8191; g_nov_shot[q].owner = own; g_nov_shot[q].victim = vic; g_nov_shot[q].def = *(uint32_t*)p;
+      __atomic_store_n(&g_nov_shot_n, g_nov_shot_n + 1, __ATOMIC_RELEASE); }   // (one writer: the engine thread)
+    if (!g_hc_off[HC_AIM]) { uint64_t t1 = hc_now(); nov_aim_shot(arr, data, p); hc_add(HC_AIM, t1); }
+    if (!nov_feat(NOV_TRC)) return;   // (the tracer record: only while tracers are on)
     unsigned k = __atomic_fetch_add(&g_nov_imp_n, 1, __ATOMIC_RELAXED) & 255; NovImp* r = &g_nov_imp[k];
     r->def = *(uint32_t*)p; r->owner = *(uint32_t*)(p + 0xC0); memcpy(r->pos, p + 0x1c, 12); memcpy(r->vel, p + 0x74, 12); memcpy(r->st, p + 0x1e8, 12); memcpy(&r->trav, p + 0x1b0, 4);
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); double tv = ts.tv_sec + ts.tv_nsec * 1e-9; __atomic_store(&r->t, &tv, __ATOMIC_RELEASE);
 }
+static void nov_aim_tick_body(void) {   // nrender.m, every frame (the render thread owns hb_geom's cache)
+    static unsigned r; static NovAimRec a; unsigned w = __atomic_load_n(&g_nov_aim_w, __ATOMIC_ACQUIRE); if (w - r > NOV_AIM_N) r = w - NOV_AIM_N;
+    for (; r != w; r++) {
+        NovAimRec* src = &g_nov_aim[r % NOV_AIM_N]; if (__atomic_load_n(&src->seq, __ATOMIC_ACQUIRE) != r + 1) continue;
+        memcpy(&a, src, sizeof a); if (__atomic_load_n(&src->seq, __ATOMIC_ACQUIRE) != r + 1 || a.seq != r + 1) continue;   // (overwritten meanwhile)
+        HbGeom* g = hb_geom(a.def); int nn = a.nmsz / 52; if (!g || nn <= g->maxnode || fabsf(a.mt[0] - 1.0f) > 0.1f) continue;
+        uint8_t sel[256]; memset(sel, 0, sizeof sel);
+        if (g->nhreg > 0 && a.rcount > 0) for (int i = 0; i < g->nhreg && i < a.rcount; i++) { int pi = a.perm[i]; if (pi >= g->hnperm[i]) pi = 0;
+            int cr = g->hcreg[i], cp = g->hnperm[i] ? g->hcperm[i][pi] : 0; if (cr >= 0 && cr < 256 && cp >= 0) sel[cr] = (uint8_t)cp; }
+        // per (region, node): the centre and the mean radius of its posed edge end points
+        enum { NG = 64 }; int gk[NG], gn[NG], ng = 0; float gc[NG][3], gp[NG * 0 + 1][1]; (void)gp; static float pts[4096][3]; static int pg[4096]; int np2 = 0;
+        float zs[256] = {0}; int zc[256] = {0};
+        for (int s = 0; s < g->nseg && np2 + 2 <= 4096; s++) { if (g->perm[s] != sel[g->reg[s]]) continue;
+            const float* M = a.mt + g->node[s] * 13, * P = g->pts + s * 6; int key = g->reg[s] * 256 + g->node[s], gi = -1;
+            for (int q = 0; q < ng; q++) if (gk[q] == key) { gi = q; break; }
+            if (gi < 0) { if (ng >= NG) continue; gi = ng++; gk[gi] = key; gn[gi] = 0; gc[gi][0] = gc[gi][1] = gc[gi][2] = 0; }
+            for (int e = 0; e < 2; e++) { const float* v = P + e * 3; float* o = pts[np2];
+                for (int k = 0; k < 3; k++) o[k] = M[10 + k] + M[0] * (v[0] * M[1 + k] + v[1] * M[4 + k] + v[2] * M[7 + k]);
+                pg[np2++] = gi; gc[gi][0] += o[0]; gc[gi][1] += o[1]; gc[gi][2] += o[2]; gn[gi]++; }
+            zs[g->reg[s]] += M[12]; zc[g->reg[s]]++; }
+        if (!ng) continue;
+        int head = -1; { float hb = -1e30f; for (int q = 0; q < g->nreg && q < 256; q++) if (zc[q] && zs[q] / zc[q] > hb) { hb = zs[q] / zc[q]; head = q; } }
+        float rad[NG] = {0};
+        for (int q = 0; q < ng; q++) { gc[q][0] /= gn[q]; gc[q][1] /= gn[q]; gc[q][2] /= gn[q]; }
+        for (int i = 0; i < np2; i++) { const float* o = pts[i], * c = gc[pg[i]]; rad[pg[i]] += sqrtf((o[0] - c[0]) * (o[0] - c[0]) + (o[1] - c[1]) * (o[1] - c[1]) + (o[2] - c[2]) * (o[2] - c[2])); }
+        float miss = 1e30f; int mg = -1;
+        for (int q = 0; q < ng; q++) { rad[q] /= gn[q]; float v[3] = {gc[q][0] - a.s[0], gc[q][1] - a.s[1], gc[q][2] - a.s[2]}, t = v[0] * a.dn[0] + v[1] * a.dn[1] + v[2] * a.dn[2];
+            if (t < 0) t = 0; if (t > a.len + 0.3f) t = a.len + 0.3f;
+            float px = v[0] - a.dn[0] * t, py = v[1] - a.dn[1] * t, pz = v[2] - a.dn[2] * t, sf = sqrtf(px * px + py * py + pz * pz) - rad[q];
+            if (sf < miss) { miss = sf; mg = q; } }
+        if (mg < 0) continue;
+        unsigned k = g_nov_aimr_w; NovAimRes* o = &g_nov_aimr[k % NOV_AIMR_N];
+        o->t = a.t; o->owner = a.owner; o->target = a.target; o->along = a.along; o->pre = a.pre; o->on = miss <= 0; o->head = gk[mg] / 256 == head;
+        o->err = miss <= 0 ? 0 : atan2f(miss, a.along > 0.3f ? a.along : 0.3f) * 57.29578f;
+        __atomic_store_n(&g_nov_aimr_w, k + 1, __ATOMIC_RELEASE); g_nov_aim_done++;
+    }
+}
+void nov_aim_tick(void) { if (g_hc_off[HC_AIMT]) return; uint64_t t0 = hc_now(); nov_aim_tick_body(); hc_add(HC_AIMT, t0); }
+static void on_object_delete(uint64_t* ctx) { if (g_hc_off[HC_DEL]) return; uint64_t t0 = hc_now(); on_object_delete_body(ctx); hc_add(HC_DEL, t0); }   // (timed: nhcost.h)
 static const float g_nov_teamcol[8][3] = {{1, 0.3f, 0.25f}, {0.35f, 0.6f, 1}, {0.35f, 1, 0.35f}, {1, 0.6f, 0.15f}, {0.75f, 0.4f, 1}, {1, 0.9f, 0.2f}, {0.75f, 0.55f, 0.35f}, {1, 0.55f, 0.8f}};
 
 // ---- zones (hitbox.c hbz_load / hbz_outline / hbz_draw, the loader's line mode): kill volumes (red) and safe zones (green)
@@ -246,7 +382,7 @@ static int nov_seg_clip(float* v, int nv, int cap, const float* vp, const float*
     const float E = 0.05f; if (nv + 2 > cap || (ca[2] < E && cb[2] < E)) return nv;
     if (ca[2] < E) { float t = (E - ca[2]) / (cb[2] - ca[2]); for (int r = 0; r < 3; r++) ca[r] += t * (cb[r] - ca[r]); }
     else if (cb[2] < E) { float t = (E - cb[2]) / (ca[2] - cb[2]); for (int r = 0; r < 3; r++) cb[r] += t * (ca[r] - cb[r]); }
-    float* d = v + nv * 5; d[0] = ca[0] / ca[2]; d[1] = ca[1] / ca[2]; d[2] = col[0]; d[3] = col[1]; d[4] = col[2]; d[5] = cb[0] / cb[2]; d[6] = cb[1] / cb[2]; d[7] = col[0]; d[8] = col[1]; d[9] = col[2]; return nv + 2;
+    float* d = v + nv * NOV_VSTRIDE; nov_vtx(d, ca[0] / ca[2], ca[1] / ca[2], col, nov_dep(ca[2])); nov_vtx(d + NOV_VSTRIDE, cb[0] / cb[2], cb[1] / cb[2], col, nov_dep(cb[2])); return nv + 2;
 }
 static int nz_draw(float* v, int nv, int cap, const float* vp) {
     char mp[1024]; if (!hb_current_map(mp, sizeof mp)) return nv; nz_load(mp);
@@ -264,8 +400,11 @@ static int nz_draw(float* v, int nv, int cap, const float* vp) {
 // The frame's overlay lines (nrender.m, the app's render thread, once per presented frame): w x h = the frame in pixels,
 // scale = pixels per point. Returns the vertex count (pairs = lines), 0 = nothing to draw.
 static pthread_mutex_t g_nov_mx = PTHREAD_MUTEX_INITIALIZER;
-int nov_build(float* verts, int cap, int w, int h, float scale) {
-    if (!nov_wanted() || !g_gameplay_t0 || w < 16 || h < 16) return 0;
+static uint64_t g_hc_part[HC_N];   // this frame's ticks per overlay feature (nov_build_body)
+#define HC_PART(k, stmt) do { uint64_t t_ = hc_now(); stmt; g_hc_part[k] += hc_now() - t_; } while (0)
+static int nov_build_body(float* verts, int cap, int w, int h, float scale) {
+    int want = nov_wanted(); g_view_wanted = want; if (want) nov_view_hook_want();   // (the camera hook: installed on first use, idle while off)
+    if (!want || !g_gameplay_t0 || w < 16 || h < 16) return 0;
     float vp[32]; if (!nov_camera(vp, (float)w / (float)h)) return 0;
     pthread_mutex_lock(&g_nov_mx);
     g_nov_scale = scale > 0 ? scale : 1; g_nov_W = w / g_nov_scale; g_nov_H = h / g_nov_scale;
@@ -277,22 +416,26 @@ int nov_build(float* verts, int cap, int w, int h, float scale) {
     for (int i = 0; i < n; i++) { const NovObj* o = &objs[i]; int veh = o->type == 1 || o->type == 12;
         float dx = o->c[0] - cam[0], dy = o->c[1] - cam[1], dz = o->c[2] - cam[2]; int self = dx * dx + dy * dy + dz * dz < (o->r + 0.3f) * (o->r + 0.3f);
         if (o->type == 5) { if (!ft || (g_nov_team[NOV_TRC] > 0 && !nov_team_ok(g_nov_team[NOV_TRC], nov_owner_cls(o->owner, objs, n)))) continue; nov_trail_add(o->handle, o->c, now); continue; }
-        if (o->type == 2 || o->type == 3) {
+        if (o->type == 2 || o->type == 3) { uint64_t ti_ = hc_now();
             if (fw && o->parent == 0xFFFFFFFFu) { float a[3] = {o->c[0] - 0.15f, o->c[1], o->c[2]}, b[3] = {o->c[0] + 0.15f, o->c[1], o->c[2]}, c2[3] = {o->c[0], o->c[1] - 0.15f, o->c[2]}, d2[3] = {o->c[0], o->c[1] + 0.15f, o->c[2]};
-                const float* col = o->type == 2 ? citem : cequip; nv = nov_seg(verts, nv, cap, vp, a, b, col); nv = nov_seg(verts, nv, cap, vp, c2, d2, col);
+                g_nov_occ = g_nov_vis[NOV_ITM]; const float* col = o->type == 2 ? citem : cequip; nv = nov_seg(verts, nv, cap, vp, a, b, col); nv = nov_seg(verts, nv, cap, vp, c2, d2, col);
                 float tx, ty; if (nov_proj(vp, o->c, &tx, &ty)) { nov_text_size(g_nov_px[NOV_ITM]); const char* nm = hb_tag_name(o->def); nv = nov_text(verts, nv, cap, tx - strlen(nm) * 2.5f * g_nov_gx, ty + 8 * g_nov_gy, nm, col); } }
-            continue; }
+            g_hc_part[HC_OV_ITM] += hc_now() - ti_; continue; }
         if (o->type >= 6 && o->type <= 10) {   // NHOOK_OV_DEBUG: an axis cross through the bounding centre, one radius each way
             static const float cdbg[3] = {1, 0.2f, 1};
+            g_nov_occ = getenv("NHOOK_OV_DEBUG_OCC") != 0;
             for (int a = 0; a < 3; a++) { float p0[3] = {o->c[0], o->c[1], o->c[2]}, p1[3] = {o->c[0], o->c[1], o->c[2]}; p0[a] -= o->r; p1[a] += o->r; nv = nov_seg(verts, nv, cap, vp, p0, p1, cdbg); }
             continue; }
         if (self) continue;
-        if (veh) { if (fveh && (g_nov_team[NOV_VEH] <= 0 || nov_team_ok(g_nov_team[NOV_VEH], nov_occ_cls(o->handle, objs, n)))) nv = nov_hitbox(o, vp, verts, nv, cap); continue; }
+        if (veh) { g_nov_occ = g_nov_vis[NOV_VEH]; if (fveh && (g_nov_team[NOV_VEH] <= 0 || nov_team_ok(g_nov_team[NOV_VEH], nov_occ_cls(o->handle, objs, n)))) HC_PART(HC_OV_VEH, nv = nov_hitbox(o, vp, verts, nv, cap)); continue; }
         if (o->type != 0) continue;
         int cls = nov_bip_cls(o);
-        if (fh && nov_team_ok(g_nov_team[NOV_HIT], cls)) nv = nov_hitbox(o, vp, verts, nv, cap);
-        if (fi && nov_team_ok(g_nov_team[NOV_INF], cls)) {
-            float top[3] = {o->c[0], o->c[1], o->c[2] + o->r + 0.12f}, tx, ty; if (!nov_proj(vp, top, &tx, &ty)) continue;
+        g_nov_occ = g_nov_vis[NOV_HIT];
+        // dead bodies: no hitboxes (a body lying on the ground drew as red boxes: clutter; 2026-11-07), NHOOK_HB_DEAD=1 = grey
+        static int deadon = -1; if (deadon < 0) deadon = getenv("NHOOK_HB_DEAD") && atoi(getenv("NHOOK_HB_DEAD"));
+        if (fh && nov_team_ok(g_nov_team[NOV_HIT], cls) && (!o->dead || deadon)) HC_PART(HC_OV_HIT, nv = nov_hitbox(o, vp, verts, nv, cap));
+        if (fi && nov_team_ok(g_nov_team[NOV_INF], cls)) { uint64_t tf_ = hc_now();
+            g_nov_occ = g_nov_vis[NOV_INF]; float top[3] = {o->c[0], o->c[1], o->c[2] + o->r + 0.12f}, tx, ty; if (!nov_proj(vp, top, &tx, &ty)) continue;
             nov_text_size(g_nov_px[NOV_INF]);
             const float* tc = o->team >= 0 && o->team < 8 ? g_nov_teamcol[o->team] : cwhite;
             char l1[48], l2[80], l3[48]; l3[0] = 0;
@@ -308,9 +451,9 @@ int nov_build(float* verts, int cap, int w, int h, float scale) {
             float lh = 8 * g_nov_gy, y = ty + 3 * lh;
             nv = nov_text(verts, nv, cap, tx - strlen(l1) * 2.5f * g_nov_gx, y, l1, tc); y -= lh;
             nv = nov_text(verts, nv, cap, tx - strlen(l2) * 2.5f * g_nov_gx, y, l2, cwhite); y -= lh;
-            if (l3[0]) nv = nov_text(verts, nv, cap, tx - strlen(l3) * 2.5f * g_nov_gx, y, l3, o->camo > 0.05f ? cequip : cgrey); }
+            if (l3[0]) nv = nov_text(verts, nv, cap, tx - strlen(l3) * 2.5f * g_nov_gx, y, l3, o->camo > 0.05f ? cequip : cgrey); g_hc_part[HC_OV_INF] += hc_now() - tf_; }
     }
-    if (ft) {
+    uint64_t tt_ = hc_now(); if (ft) { g_nov_occ = g_nov_vis[NOV_TRC];
         for (int t = 0; t < 256; t++) { NovTrail* tr = &g_nov_trails[t]; if (!tr->n) continue; if (now - tr->seen > 0.6) { tr->n = 0; continue; }
             int cnt = tr->n < 32 ? tr->n : 32; for (int k = 1; k < cnt; k++) nv = nov_seg(verts, nv, cap, vp, tr->p[(tr->n - 1 - k) & 31], tr->p[(tr->n - k) & 31], ctrace); }
         for (int i = 0; i < n; i++) { const NovObj* o = &objs[i]; if (o->type != 5) continue; float sp = sqrtf(o->vel[0] * o->vel[0] + o->vel[1] * o->vel[1] + o->vel[2] * o->vel[2]); if (sp < 1e-4f) continue;
@@ -325,14 +468,25 @@ int nov_build(float* verts, int cap, int w, int h, float scale) {
             nv = nov_seg_clip(verts, nv, cap, vp, a, r->pos, ctrace);
             float x0[3] = {r->pos[0] - 0.05f, r->pos[1], r->pos[2]}, x1[3] = {r->pos[0] + 0.05f, r->pos[1], r->pos[2]}; nv = nov_seg_clip(verts, nv, cap, vp, x0, x1, cvel); }
     }
-    if (nov_feat(NOV_ZON)) nv = nz_draw(verts, nv, cap, vp);
+    g_hc_part[HC_OV_TRC] += hc_now() - tt_;
+    if (nov_feat(NOV_ZON)) { g_nov_occ = 1; HC_PART(HC_OV_ZON, nv = nz_draw(verts, nv, cap, vp)); }   // zones: always hidden behind the world (the loader's)
+    g_nov_occ = 0;
     pthread_mutex_unlock(&g_nov_mx);
+    return nv;
+}
+void nov_idle(void) { g_view_wanted = 0; }   // nrender.m: a frame without the overlay (the camera hook's handler stays idle)
+int nov_build(float* verts, int cap, int w, int h, float scale) {   // (timed: nhcost.h; a feature's own parts apart)
+    uint64_t t0 = hc_now(); memset(g_hc_part, 0, sizeof g_hc_part); int nv = nov_build_body(verts, cap, w, h, scale); uint64_t all = hc_now() - t0, parts = 0;
+    static const int fk[6] = {HC_OV_HIT, HC_OV_VEH, HC_OV_TRC, HC_OV_INF, HC_OV_ITM, HC_OV_ZON}, fb[6] = {NOV_HIT, NOV_VEH, NOV_TRC, NOV_INF, NOV_ITM, NOV_ZON};
+    for (int i = 0; i < 6; i++) if (nov_feat(fb[i])) { hc_add_ticks(fk[i], g_hc_part[fk[i]]); __atomic_fetch_add(&g_hc[fk[i]].calls, 1, __ATOMIC_RELAXED); parts += g_hc_part[fk[i]]; }
+    hc_add_ticks(HC_OV, all > parts ? all - parts : 0); __atomic_fetch_add(&g_hc[HC_OV].calls, 1, __ATOMIC_RELAXED);
     return nv;
 }
 
 // ---- the page's controls and the snapshot's overlay state (stats.c st_control / st_feat / st_overlay_features) -------
 static int nov_control(const char* act, const char* qs) {
     nov_init();
+    if (!strcmp(act, "visible")) { int v = !g_nov_vis[NOV_HIT]; for (int f = 0; f < NOV_N; f++) g_nov_vis[f] = v; nlog("[nhook] page: visible only %s (all)", v ? "on" : "off"); return 1; }
     for (int f = 0; f < NOV_N; f++) if (!strcmp(act, g_nov_name[f])) { if (f == NOV_VIS) return 0;
         __atomic_fetch_xor(&g_nov_on, 1u << f, __ATOMIC_ACQ_REL); nlog("[nhook] page: %s %s", g_nov_name[f], nov_feat(f) ? "on" : "off"); return 1; }
     if (!strcmp(act, "teams")) { int m = -1; for (int f = 0; f < NOV_N; f++) if (g_nov_team[f] >= 0) { if (m < 0) m = (g_nov_team[f] + 1) % 3; g_nov_team[f] = m; }
@@ -342,32 +496,32 @@ static int nov_control(const char* act, const char* qs) {
         nz_show(); __atomic_fetch_xor(&g_hbz_show, b, __ATOMIC_ACQ_REL); return 1; }
     if (!strcmp(act, "weaktype")) { const char* v = strstr(qs, "t="); int b = v ? atoi(v + 2) : 0; if (b != 1 && b != 2 && b != 4) return 0; __atomic_fetch_xor(&g_nov_wk, b, __ATOMIC_ACQ_REL); return 1; }
     if (!strcmp(act, "feat")) {   // f=<a,b|all>[&on=][&team=][&px=] (vis: not in the native app)
-        char b[160]; snprintf(b, sizeof b, "%s", qs); unsigned mask = 0; int on = -1, team = -1, px = -1;
+        char b[160]; snprintf(b, sizeof b, "%s", qs); unsigned mask = 0; int on = -1, team = -1, px = -1, vis = -1;
         for (char* p = b; (p = strcasestr(p, "%2c")); ) { *p = ','; memmove(p + 1, p + 3, strlen(p + 3) + 1); }
         for (char* sv = 0, * t = strtok_r(b, "&", &sv); t; t = strtok_r(0, "&", &sv)) { char* v = strchr(t, '='); if (!v) continue; *v++ = 0;
             if (!strcmp(t, "f")) { for (char* s2 = 0, * w = strtok_r(v, ",", &s2); w; w = strtok_r(0, ",", &s2)) { int f = -1;
                     for (int q = 0; q < NOV_N; q++) if (!strcmp(w, g_nov_name[q])) f = q;
                     if (!strcmp(w, "all")) mask |= ((1u << NOV_N) - 1) & ~(1u << NOV_VIS); else if (f < 0 || f == NOV_VIS) return 0; else mask |= 1u << f; } }
             else if (!strcmp(t, "on")) { if (strcmp(v, "0") && strcmp(v, "1")) return 0; on = v[0] - '0'; }
-            else if (!strcmp(t, "vis")) { if (strcmp(v, "0") && strcmp(v, "1")) return 0; }   // (accepted, no effect: no depth buffer here)
+            else if (!strcmp(t, "vis")) { if (strcmp(v, "0") && strcmp(v, "1")) return 0; vis = v[0] - '0'; }
             else if (!strcmp(t, "team")) { team = !strcmp(v, "all") ? 0 : !strcmp(v, "enemies") ? 1 : !strcmp(v, "friends") ? 2 : -2; if (team < 0) return 0; }
             else if (!strcmp(t, "px")) { char* e; long x = strtol(v, &e, 10); if (*e || x < 4 || x > 60) return 0; px = (int)x; } }
         if (!mask) return 0;
         for (int f = 0; f < NOV_N; f++) { if (!((mask >> f) & 1)) continue;
             if (on >= 0 && nov_feat(f) != on) __atomic_fetch_xor(&g_nov_on, 1u << f, __ATOMIC_ACQ_REL);
-            if (team >= 0 && g_nov_team[f] >= 0) g_nov_team[f] = team; if (px > 0 && g_nov_px[f] > 0) g_nov_px[f] = px; }
+            if (team >= 0 && g_nov_team[f] >= 0) g_nov_team[f] = team; if (px > 0 && g_nov_px[f] > 0) g_nov_px[f] = px; if (vis >= 0 && f != NOV_ZON) g_nov_vis[f] = vis; }
         return 1; }
     return 0;
 }
 static void nov_json(StBuf* s) {   // the snapshot's overlay keys (the stats page's buttons)
     nov_init(); static const char* const tm[3] = {"all", "enemies", "friends"}; int t0 = g_nov_team[NOV_HIT];
-    sb_put(s, "\"vehicles\":%s,\"zones\":%s,\"hitboxes\":%s,\"tracers\":%s,\"info\":%s,\"items\":%s,\"visible\":false,\"teams\":\"%s\",\"text_px\":%d",
+    sb_put(s, "\"vehicles\":%s,\"zones\":%s,\"hitboxes\":%s,\"tracers\":%s,\"info\":%s,\"items\":%s,\"visible\":%s,\"teams\":\"%s\",\"text_px\":%d",
         nov_feat(NOV_VEH) ? "true" : "false", nov_feat(NOV_ZON) ? "true" : "false", nov_feat(NOV_HIT) ? "true" : "false", nov_feat(NOV_TRC) ? "true" : "false", nov_feat(NOV_INF) ? "true" : "false",
-        nov_feat(NOV_ITM) ? "true" : "false", tm[t0 >= 0 && t0 < 3 ? t0 : 0], g_nov_px[NOV_INF] > 0 ? g_nov_px[NOV_INF] : 7);
+        nov_feat(NOV_ITM) ? "true" : "false", g_nov_vis[NOV_HIT] ? "true" : "false", tm[t0 >= 0 && t0 < 3 ? t0 : 0], g_nov_px[NOV_INF] > 0 ? g_nov_px[NOV_INF] : 7);
     static const int ord[6] = {NOV_HIT, NOV_VEH, NOV_TRC, NOV_INF, NOV_ITM, NOV_ZON};
     sb_put(s, ",\"features\":{");
     for (int i = 0; i < 6; i++) { int f = ord[i]; char px[16]; snprintf(px, sizeof px, "%d", g_nov_px[f]);
-        sb_put(s, "%s\"%s\":{\"on\":%s,\"team\":%s%s%s,\"vis\":null,\"px\":%s}", i ? "," : "", g_nov_name[f], nov_feat(f) ? "true" : "false",
-            g_nov_team[f] >= 0 ? "\"" : "", g_nov_team[f] >= 0 ? tm[g_nov_team[f] % 3] : "null", g_nov_team[f] >= 0 ? "\"" : "", g_nov_px[f] > 0 ? px : "null"); }
+        sb_put(s, "%s\"%s\":{\"on\":%s,\"team\":%s%s%s,\"vis\":%s,\"px\":%s}", i ? "," : "", g_nov_name[f], nov_feat(f) ? "true" : "false",
+            g_nov_team[f] >= 0 ? "\"" : "", g_nov_team[f] >= 0 ? tm[g_nov_team[f] % 3] : "null", g_nov_team[f] >= 0 ? "\"" : "", f == NOV_ZON ? "null" : g_nov_vis[f] ? "true" : "false", g_nov_px[f] > 0 ? px : "null"); }
     sb_put(s, "}");
 }

@@ -111,7 +111,13 @@ static void fx_settings_save(void){   // (g_fx_setmx held)
 static void fx_apply(void){ g_fx_audio=g_fx_set.voice && g_fx_set.consent; if(g_fx_env_off || !g_fx_set.archive) g_fx_on=0; }   // the roster tick turns it on
 static void* fx_writer(void*a);
 static pthread_once_t g_fx_wonce=PTHREAD_ONCE_INIT;
-static void fx_writer_once(void){ fx_mkdirs(g_fx_base); pthread_t t; pthread_create(&t,0,fx_writer,0); pthread_detach(t); }
+static void fx_writer_once(void){ fx_mkdirs(g_fx_base); pthread_t t;
+#ifdef NHOOK_NATIVE
+    nh_thread(&t,fx_writer,0,QOS_CLASS_BACKGROUND);   // (the native app: efficiency cores)
+#else
+    pthread_create(&t,0,fx_writer,0); pthread_detach(t);
+#endif
+}
 static void fx_writer_start(void){ pthread_once(&g_fx_wonce,fx_writer_once); }   // the first time the archive is on
 static void fx_init_once(void){
     const char*e=getenv("PELOAD_FORENSIC"); g_fx_env_off=e && !strcmp(e,"0");
@@ -161,7 +167,17 @@ static int fx_push(int kind,const void*a,size_t an,const void*b,size_t bn){
 // it accepted from that sender: exe+0xb2ca4d), [9..] Opus.
 #define FX_SYNC 0xA55Au
 #define FX_VMAX 4096
-enum { FXF_AUDIO=1, FXF_CONTROL=2, FXF_TRUNC=4, FXF_SHORT=8, FXF_SELF=16, FXF_UNREAD=32 };
+enum { FXF_AUDIO=1, FXF_CONTROL=2, FXF_TRUNC=4, FXF_SHORT=8, FXF_SELF=16, FXF_UNREAD=32, FXF_REPORT=64, FXF_LEVEL=128 };
+// FXF_LEVEL (the native app, 2026-11-07): no packet -- the app's voice report measured this sender over a window: t = the
+// window's start, olen = 20 ms frames heard, seq = (window ms << 32) | (u32)(rms dBFS x 100). fx_segment leaves out a
+// sender's packets inside windows quieter than FX_QUIET_DB (the talking threshold): an always-open microphone sends
+// packets of background noise the whole time (one 3.5-minute "utterance" in a live game, 2026-11-07), split now into what
+// was said. Packet sizes could not tell: that noise came in normal-sized packets (median 40 bytes vs 45-55 for speech).
+#define FX_QUIET_DB (-60.0)
+// FXF_REPORT (the native 0.10 app, shim/native/nstats.c): no packet -- the app's own voice report ("[voice] active ... heard
+// 0x<id>: N frames ... rms X dBFS", every ~2 s) said this sender was heard for olen 20 ms frames, placed from t on (the report
+// doesn't say where in its interval: nstats.c puts them at its start when the sender talked in the report before, else at its end).
+// Timing only: no bytes, no channel (0xFF), no sequence.
 typedef struct { uint16_t sync; uint8_t ch, fl; uint16_t olen, slen; uint64_t t, id, seq; uint8_t toc, toc2; uint16_t rsv; uint32_t rsv2; } FxVRec;
 typedef struct { char magic[8]; uint32_t ver, hsize; uint64_t created, self; uint32_t rsize, flags; uint8_t rsv[24]; } FxVHdr;
 _Static_assert(sizeof(FxVRec)==40,"voice.bin record header is 40 bytes"); _Static_assert(sizeof(FxVHdr)==64,"voice.bin header is 64 bytes");
@@ -186,6 +202,14 @@ static void fx_voice_at(uint64_t tns,uint64_t sender,const uint8_t*payload,uint6
     r.slen=(uint16_t)stored; fx_push(FXI_VOICE,&r,sizeof r,sp,stored);
     __atomic_fetch_add(&g_fx_nvoice,1,__ATOMIC_RELAXED); if(r.fl&FXF_AUDIO) __atomic_fetch_add(&g_fx_naudio,1,__ATOMIC_RELAXED); }
 static void fx_voice(uint64_t sender,const uint8_t*payload,uint64_t len){ fx_voice_at(fx_now_ns(),sender,payload,len); }
+static void fx_voice_level(uint64_t t_start_ns,uint32_t window_ms,uint64_t sender,int frames,double db){   // a FXF_LEVEL record (above)
+    if(!g_fx_on || frames<=0) return; FxVRec r; memset(&r,0,sizeof r); r.sync=FX_SYNC; r.id=sender; r.ch=0xFF; r.fl=FXF_LEVEL; r.t=t_start_ns;
+    if(frames>65535) frames=65535; r.olen=(uint16_t)frames; int32_t cdb=(int32_t)(db*100+(db<0?-0.5:0.5)); r.seq=((uint64_t)window_ms<<32)|(uint32_t)cdb;
+    if(sender && sender==g_fx_self_id) r.fl|=FXF_SELF; fx_push(FXI_VOICE,&r,sizeof r,0,0); }
+static void fx_voice_report(uint64_t t_start_ns,uint64_t sender,int frames){   // a FXF_REPORT record (see above): frames from t_start_ns on
+    if(!g_fx_on || frames<=0) return; FxVRec r; memset(&r,0,sizeof r); r.sync=FX_SYNC; r.id=sender; r.ch=0xFF; r.fl=FXF_REPORT;
+    if(frames>65535) frames=65535; r.olen=(uint16_t)frames; r.t=t_start_ns; if(sender && sender==g_fx_self_id) r.fl|=FXF_SELF;
+    fx_push(FXI_VOICE,&r,sizeof r,0,0); __atomic_fetch_add(&g_fx_nvoice,1,__ATOMIC_RELAXED); }
 
 // ---- events.jsonl ---------------------------------------------------------------------------------------------------
 static __thread const float*t_fx_pos;   // fx_event: the event's position (stats.c spawns / power-up pickups), else 0
@@ -323,7 +347,7 @@ static int fx_control(const char*qs){ fx_init(); if(g_fx_env_off) return 0;
 
 // ---- reading a session back ---------------------------------------------------------------------------------------------
 typedef struct { uint64_t t, id, seq; uint8_t ch, fl, toc, toc2; uint16_t olen, slen; size_t off; int utt; } FxPk;
-typedef struct { uint64_t id, t0, t1, seq0, seq1; int ch, npk, naud, ntrunc, minlen, maxlen; long samples, bytes, step, lost; uint8_t toc; } FxUtt;
+typedef struct { uint64_t id, t0, t1, seq0, seq1; int ch, npk, naud, ntrunc, minlen, maxlen, nrep; long samples, bytes, step, lost; uint8_t toc; } FxUtt;
 typedef struct { double t; char name[64]; int team, slot, host, self; } FxIdAt;
 typedef struct { uint64_t id; FxIdAt*h; int n, cap; } FxIdHist;
 typedef struct { char name[160]; uint8_t*buf; size_t n, poff; FxVHdr h; int hok; FxPk*pk; int np, pcap, bad; FxUtt*u; int nu; } FxSess;
@@ -331,24 +355,36 @@ static FxSess g_fxc; static pthread_mutex_t g_fxc_mx=PTHREAD_MUTEX_INITIALIZER; 
 static int fx_name_ok(const char*s,size_t n){ if(!n || n>=128 || s[0]=='.') return 0; for(size_t i=0;i<n;i++){ char c=s[i];
         if(!((c>='a'&&c<='z')||(c>='A'&&c<='Z')||(c>='0'&&c<='9')||c=='_'||c=='-'||c=='.')) return 0; } return !strstr(s,".."); }
 static int fx_pk_samples(const FxPk*k,const uint8_t*buf){   // from the stored bytes, else from the TOC bytes kept in the record
+    if(k->fl&FXF_LEVEL) return 0;
+    if(k->fl&FXF_REPORT) return k->olen*960;   // a voice report's 20 ms frames
     if((k->fl&FXF_AUDIO) && k->slen && !(k->fl&FXF_SHORT)) return opus_packet_samples(buf+k->off,k->slen);
     if(!k->olen) return -1; uint8_t t2[2]={k->toc,k->toc2}; return opus_packet_samples(t2,k->olen); }
 // Utterances: per sender, a run of packets on one channel whose arrival gaps stay under 0.6 s.
 static void fx_segment(FxSess*s){
     free(s->u); s->u=0; s->nu=0; int cap=0; struct { uint64_t id; int u; uint64_t last; } open[256]; int no=0;
-    for(int i=0;i<s->np;i++){ FxPk*k=&s->pk[i]; k->utt=-1; if(k->fl&(FXF_CONTROL|FXF_SHORT|FXF_UNREAD)) continue;
+    // the quiet windows (FXF_LEVEL below FX_QUIET_DB): a sender's packets inside one belong to no utterance
+    typedef struct { uint64_t id, t0, t1; } FxQuiet; FxQuiet*qw=0; int nq=0, qcap=0;
+    for(int i=0;i<s->np;i++){ const FxPk*k=&s->pk[i]; if(!(k->fl&FXF_LEVEL)) continue; int32_t cdb=(int32_t)(uint32_t)k->seq; uint32_t ms=(uint32_t)(k->seq>>32);
+        if(cdb/100.0>=FX_QUIET_DB || !ms || ms>10000) continue;
+        if(nq>=qcap){ int nc=qcap?qcap*2:256; FxQuiet*n2=realloc(qw,(size_t)nc*sizeof *n2); if(!n2) break; qw=n2; qcap=nc; }
+        qw[nq].id=k->id; qw[nq].t0=k->t; qw[nq].t1=k->t+(uint64_t)ms*1000000ull; nq++; }
+    for(int i=0;i<s->np;i++){ FxPk*k=&s->pk[i]; k->utt=-1; if(k->fl&(FXF_CONTROL|FXF_SHORT|FXF_UNREAD|FXF_LEVEL)) continue;
+        { int quiet=0; for(int q=nq-1;q>=0 && !quiet;q--) if(qw[q].id==k->id && k->t>=qw[q].t0 && k->t<qw[q].t1) quiet=1; if(quiet) continue; }
         int oi=-1; for(int j=0;j<no;j++) if(open[j].id==k->id){ oi=j; break; }
         FxUtt*u=oi>=0?&s->u[open[oi].u]:0;
         if(!u || u->ch!=k->ch || k->t<open[oi].last || k->t-open[oi].last>=600000000ull){
             if(s->nu>=cap){ int nc=cap?cap*2:256; FxUtt*nu=realloc(s->u,(size_t)nc*sizeof *nu); if(!nu) return; s->u=nu; cap=nc; }
             u=&s->u[s->nu]; memset(u,0,sizeof *u); u->id=k->id; u->ch=k->ch; u->t0=k->t; u->seq0=k->seq; u->minlen=1<<30; u->toc=k->toc;
             if(oi<0){ if(no<256) oi=no++; else oi=0; } open[oi].id=k->id; open[oi].u=s->nu++; }
-        open[oi].last=k->t; k->utt=open[oi].u;
         int sm=fx_pk_samples(k,s->buf); if(sm<0) sm=0;
+        if(k->fl&FXF_REPORT){   // a report covers its frames: the next one continues the utterance when it starts within 0.6 s of their end
+            open[oi].last=k->t+(uint64_t)sm*1000000ull/48; k->utt=open[oi].u; u->npk++; u->nrep++; u->t1=open[oi].last; u->samples+=sm; continue; }
+        open[oi].last=k->t; k->utt=open[oi].u;
         if(u->npk){ uint64_t d=k->seq-u->seq1; if(d>1 && d<=1000) u->lost+=(long)(d-1); if(!u->step || d<(uint64_t)u->step) u->step=(long)d; }   // lost: GUESSED (a packet counter)
         u->npk++; u->seq1=k->seq; u->t1=k->t+(uint64_t)sm*1000000ull/48; u->samples+=sm; u->bytes+=k->olen;
         if(k->olen<u->minlen) u->minlen=k->olen; if(k->olen>u->maxlen) u->maxlen=k->olen;
-        if(k->fl&FXF_AUDIO) u->naud++; if(k->fl&FXF_TRUNC) u->ntrunc++; } }
+        if(k->fl&FXF_AUDIO) u->naud++; if(k->fl&FXF_TRUNC) u->ntrunc++; }  free(qw); }
+
 // (g_fxc_mx held) <session>/voice.bin -> g_fxc. The file only grows (append-only), so a session read before is
 // brought up to date by reading and parsing just its new tail (the live session is asked for every few seconds).
 static void fx_parse(FxSess*s){
@@ -426,6 +462,7 @@ static void fx_index_json(StBuf*s,const char*name){
     for(int i=0;i<d->nu;i++){ const FxUtt*u=&d->u[i]; double st=u->t0/1e9; const FxIdAt*w=fx_who(hs,nh,u->id,st);
         sb_put(s,"%s{\"n\":%d,\"id\":\"%016llx\",\"start\":%.3f,\"end\":%.3f,\"channel\":%d,\"channel_name\":\"%s\",\"packets\":%d,\"audio_packets\":%d,\"audio_s\":%.3f,\"bytes\":%ld",
             i?",":"",i,(unsigned long long)u->id,st,u->t1/1e9,u->ch,fx_chname(u->ch),u->npk,u->naud,u->samples/48000.0,u->bytes);
+        if(u->nrep) sb_put(s,",\"reported\":%d",u->nrep);   // timing from the app's voice reports (FXF_REPORT), not packets
         sb_put(s,",\"seq\":[%llu,%llu],\"seq_step\":%ld,\"seq_gaps\":%ld,\"truncated\":%d,\"len\":[%d,%d]",(unsigned long long)u->seq0,(unsigned long long)u->seq1,u->step,u->step==1?u->lost:0,u->ntrunc,u->minlen==(1<<30)?0:u->minlen,u->maxlen);
         sb_put(s,",\"opus\":{\"toc\":%u,\"mode\":\"%s\",\"bandwidth\":\"%s\",\"frame_ms\":%.1f,\"stereo\":%s}",u->toc,opus_mode(u->toc),opus_bw(u->toc),opus_frame_samples(u->toc)/48.0,(u->toc>>2)&1?"true":"false");
         fx_who_json(s,w,u->id); sb_put(s,"}"); }
