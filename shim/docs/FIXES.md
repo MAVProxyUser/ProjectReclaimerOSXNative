@@ -1875,6 +1875,12 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   and its argument moves + bl): another app build gets "[nhook] voice packets: not hooked". NHOOK_NO_VOICEHOOK=1 = off.
   The [perf] line counts "voice packets". Installed and checked in local test matches (no remote talkers there: the packets
   themselves still need a real game).
+- **Stats page: no dead controls in the native app** (2026-11-07; stats_page.html, the overlay-state update) — WHY: in the
+  native app the Tools row still showed Teleport + its spot list, Map vote / Called votes, the map's "click to teleport" box
+  and the Packets window's "halo3 message types": each answered {"ok":false} (nhook has no teleport / boundary patches,
+  auto-vote or halo3 message table). HOW: when the snapshot says "native": true those are hidden; the loader's page is
+  unchanged (it never sends "native"). Checked against a native test match: the five hidden, Capture frame / Mute all still
+  there, no console errors.
 - **0.10 server list: shim/tools/servers10.py** (2026-11-07) — WHY: "there is no reason we should be making a .9 query": the
   0.9 client's `discover` (shim/tools/servers.sh) lists no 0.10 server, the 0.10 Windows exe's `discover` prints nothing under
   the loader, and the Mac app has no list command. HOW: 0.10 asks `/v3/discovery` on its masters and queries each server with
