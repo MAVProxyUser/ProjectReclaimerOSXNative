@@ -117,6 +117,7 @@ static volatile int g_match_pending; static char g_loading[96];
 // the session to its next map ("[loading] map ..." with no new "game Playing" line): that map's match starts once its
 // players table fills (st_snapshot). The page used to sit at "not in a match", overlay off, for the whole next map (2026-11-07).
 static volatile int g_app_playing;
+static volatile int g_sp_join;                             // joined a game in progress: its first spawn burst is not spawn points (nspawns.c)
 // where the app moved halo3's tables: it logs each move ("[capacity] <what>: <old> -> <new>", "[c1] ...")
 static volatile int64_t g_sb_off = 0x159c0;                // game engine globals (TLS +0x20) -> statborg (halo3: +0xfeb8)
 static uint64_t cap_new(const char* l, const char* what) { // "[capacity] <what>: 0x.. -> 0x..": the new value, 0 = not this line
@@ -133,6 +134,7 @@ static void nst_layout_line(const char* l) {
 static void nst_on_line(const char* p, size_t n) {
     char l[600]; if (n >= sizeof l) n = sizeof l - 1; memcpy(l, p, n); l[n] = 0;
     if (!strncmp(l, "[capacity] ", 11) || !strncmp(l, "[c1] ", 5)) { nst_layout_line(l); return; }
+    if (!strncmp(l, "[menus] joining the game in progress", 36)) { g_sp_join = 1; return; }
     if (!strncmp(l, "[switch] game Playing", 21)) { g_app_playing = 1; if (!g_gameplay_t0) { g_gameplay_t0 = mono_s(); g_match_pending = 1; } return; }
     if (!strncmp(l, "[loading] map ", 14)) {               // "[loading] map 320: Guardian, MCC's art of Guardian"
         const char* c = strchr(l, ':'); if (c) { c++; while (*c == ' ') c++; size_t k = 0; while (c[k] && c[k] != ',' && k + 1 < sizeof g_loading) { g_loading[k] = c[k]; k++; } g_loading[k] = 0; }
@@ -166,7 +168,9 @@ static struct { char map[64]; HmCell* cells; uint32_t cap, used; HmDeath* d; uin
                 HmSpawn* sp; uint32_t nsp, spcap; } g_hm;
 static pthread_mutex_t g_hm_mx = PTHREAD_MUTEX_INITIALIZER;
 static char g_hm_cur[64];
-static void hm_path(const char* map, char* out, size_t n) { const char* h = getenv("HOME"); snprintf(out, n, "%s/Library/Application Support/ReclaimerMac/heatmaps/%s.bin", h ? h : "/tmp", map); }
+static void hm_path(const char* map, char* out, size_t n) {   // NHOOK_HEATMAP_DIR: another folder (shim/native.sh test runs: native/test-heatmaps)
+    const char* dd = getenv("NHOOK_HEATMAP_DIR"); if (dd && *dd) { snprintf(out, n, "%s/%s.bin", dd, map); return; }
+    const char* h = getenv("HOME"); snprintf(out, n, "%s/Library/Application Support/ReclaimerMac/heatmaps/%s.bin", h ? h : "/tmp", map); }
 static void hm_cell_add(int32_t x, int32_t y, uint32_t n) {
     if (g_hm.used * 10 >= g_hm.cap * 7) {
         uint32_t oc = g_hm.cap, nc = oc ? oc * 2 : 65536; HmCell* nt = calloc(nc, sizeof *nt), *ot = g_hm.cells; if (!nt) return;
@@ -528,6 +532,8 @@ static void st_engine_events(const StPlayer* pl, int np) {
     }
 }
 
+#include "nspawns.c"   // weapon / vehicle / power-up spawns and pickups (the loader's st_spawns)
+
 // ---- the forensic archive and its viewer (/forensics): the loader's shim/src/forensic.c, unchanged, with what it takes
 // from stats.c / peload.c defined for the native app. Voice is not recorded yet (no voice hook in the native app): the
 // archive keeps events, the roster and per-second packet sums. Docs: shim/docs/forensics.md.
@@ -677,6 +683,7 @@ static void st_snapshot(StBuf* s) {
         sb_put(s, "}");
     }
     if (t0) sb_tick(pl, np, now);
+    st_spawns(tab, hi, pl, np, m, now);                        // spawns / pickups -> the feed, the heatmap's spawn points, "items"
     fx_roster_tick(m, ss, nss, pl, np);                        // the forensic archive: roster changes, session boundaries
     if (getenv("NHOOK_CAM_LOG")) { static double tl; uint64_t blk = tls_block(), ob = 0; float r[40];   // the observer camera (local user 0)
         if (now - tl > 2 && blk && hb_read(blk + 0x578, &ob, 8) && ob && hb_read(ob + 0x11c, r, sizeof r)) { tl = now; char b[700]; int k = 0;
@@ -702,7 +709,19 @@ static void st_snapshot(StBuf* s) {
         const float* v = (const float*)(d + 0x74); sb_put(s, "%s{\"type\":", first ? "" : ","); first = 0; st_tag(s, *(const uint32_t*)d);
         sb_put(s, ",\"owner\":"); sb_str(s, on ? on : ""); sb_put(s, ",\"pos\":"); sb_f3(s, (const float*)(d + 0x50)); sb_put(s, ",\"speed\":%.1f}", sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]));
     }
-    sb_put(s, "],\"items\":[],\"deployed\":[]}");
+    // spawned weapons / equipment / vehicles / power-ups as they are now (stats.c's "items" and "deployed")
+    sb_put(s, "],\"items\":["); first = 1;
+    for (int i = 0; i < hi && i < HB_MAXOBJ; i++) { if (!g_wt[i].live || (g_wt[i].st != 1 && g_wt[i].st != 2) || g_wt[i].kind < 0) continue; int kd = g_wt[i].kind;
+        const float* c = g_wt[i].cur; if (!isfinite(c[0]) || !isfinite(c[1]) || !isfinite(c[2])) continue;
+        sb_put(s, "%s[%d,%d,%d,%.2f,%.2f,%.2f,%d", first ? "" : ",", g_wt[i].sp, kd == 1 ? 1 : kd == 2 ? 3 : g_wt[i].type == 3 ? 2 : 0, g_wt[i].state, c[0], c[1], c[2], g_wt[i].holder); first = 0;
+        if (g_wt[i].sp < 0) { sb_put(s, ","); sb_str(s, st_wclass(g_wt[i].def, g_wt[i].type)->nm); }
+        sb_put(s, "]"); }
+    sb_put(s, "],\"deployed\":["); first = 1;
+    if (g_gameplay_t0) for (int i = 0; i < hi && i < HB_MAXOBJ; i++) { const uint8_t* e = tab + i * 0x18; if (!*(const uint16_t*)e || e[3] != 3) continue; uint64_t p = *(const uint64_t*)(e + 0x10); uint8_t d[0x5c];
+        if (!p || !hb_read(p, d, sizeof d) || *(const uint32_t*)(d + 0x10) != 0xFFFFFFFFu) continue;
+        const StWcls* c = st_wclass(*(const uint32_t*)d, 3); if (!c->dep) continue; const float* o = (const float*)(d + 0x50); if (!isfinite(o[0]) || !isfinite(o[1])) continue;
+        sb_put(s, "%s[%.2f,%.2f,%.2f,", first ? "" : ",", o[0], o[1], o[2]); first = 0; sb_str(s, c->nm); sb_put(s, "]"); }
+    sb_put(s, "]}");
     #undef ST_DATUM
     #undef ST_TYPE
 }

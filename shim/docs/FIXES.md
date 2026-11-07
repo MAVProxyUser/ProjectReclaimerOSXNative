@@ -1819,6 +1819,12 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   depth (1/128 / w), the fragment shader hides a pixel whose depth, moved 0.3 units toward the camera, is behind the scene
   there. Zones are always hidden behind the world (as in the loader); the other features by their "visible only" setting
   (page panel vis=, do=visible = all; NHOOK_HB_VISIBLE=1 starts them on). NHOOK_NO_OCCLUSION=1 / NHOOK_NO_DEPTH=1 = off.
+- **nhook: weapon / vehicle / power-up spawns and pickups** (2026-11-07; shim/native/nspawns.c) — the loader's stats.c
+  st_spawns + hm_spawn + st_sentence copied (events through the native st_event_verb, 16384 object slots, NHOOK_SPAWN_LOG, "joined
+  in progress" from the app's `[menus] joining the game in progress`): the feed's spawn / pickup lines, the snapshot's "items" /
+  "deployed", the heatmap's spawn points (heatmaps/<map>.spawns, shared with the loader). Checked offline: Guardian's 22 weapons,
+  the Overshield and Active camo. shim/native.sh test runs keep their heatmaps in ReclaimerMac/native/test-heatmaps
+  (NHOOK_HEATMAP_DIR); they used to add their idle footprints and spawn points to the real files.
 
 - **"Run 2.4x" removed** (2026-10-19, revert 606a38c) — it crashed the client as soon as it was used; the user asked for it
   to be deleted. The page's Speed 2x / speed menu (the host's movement-speed trait) is unchanged. (10-19)
