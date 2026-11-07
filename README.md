@@ -12,6 +12,31 @@ client and MCC's `halo3.dll` directly and implements the Windows APIs they use, 
   menu music and voice chat.
 - **Input:** XInput on GameController.framework, and Raw Input from macOS keyboard/mouse events.
 
+## Project Reclaimer 0.10+: the native Mac app (our tooling inside it)
+
+Since 0.10.0 Project Reclaimer ships its own **native macOS app** (`Project Reclaimer.app`, Apple Silicon, Metal): it
+recompiles MCC's `halo3.dll` itself, so it needs neither this loader nor Rosetta. What this repository adds for it
+(details: [shim/docs/native-client.md](shim/docs/native-client.md)):
+
+- **Keep your player ID** when you move from the loader to the app: `shim/tools/profile-native.py convert <loader
+  profile.json> <app profile.json>` writes the app's profile format from the same key (same community id); it checks the key
+  and never prints it.
+- **The live stats page, overlay, recording and forensic archive inside the app**: `shim/build/nhook.dylib`, loaded with
+  `bash shim/native.sh` (it starts `/Applications/Project Reclaimer.app` with the dylib; your real player folder with
+  `NATIVE_REAL=1`, else a test profile). The page is on http://127.0.0.1:8765/ (it opens in the browser): players, kills /
+  deaths / assists, the kill feed, Connected list with each player's address, packets (with reverse-DNS names), the heatmap,
+  game rules, the fps line; the overlay (hitboxes, vehicles and weak spots, info labels, items, tracers of slow projectiles,
+  kill / safe zones -- all drawn through walls for now), clip recording, frame captures and /forensics.
+
+```bash
+NATIVE_REAL=1 bash shim/native.sh                                      # the app with the stats page
+NHOOK_HITBOXES=1 NHOOK_HB_TRACERS=1 NATIVE_REAL=1 bash shim/native.sh --join-server <host:port>   # straight into a server
+```
+
+Not in the native app yet: voice / mute, bullet tracers (the app replaced halo3's object_delete with its own code),
+"visible only" (the scene's depth), a server list on the command line. Measured: 120-200 fps in 52-72 player games at
+3440x1440 on an M4. The rest of this README is the loader (0.9.x clients).
+
 ## Status
 
 **Playable**, starting from Reclaimer's own menu (Halo 3 menu scene with Server Browser, Campaign, Host
