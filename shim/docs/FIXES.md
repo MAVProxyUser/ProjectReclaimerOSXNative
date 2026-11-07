@@ -2100,7 +2100,12 @@ Numbers are from the commit messages; PERF-PLAN.md has the measurements. Compare
   frames a second (every refresh of the 60 Hz display gets a new frame), input -> screen 66 -> 60 ms; HugeGrass (6,200 draws)
   -- engine 18.4-22.2 -> 24.2-26.0 fps in comparable phases (+25-35%: the helper's frames were consumed late), input -> screen
   147 -> 131 ms, GPU done -> window +21 -> +1 ms. PELOAD_PRESENT_SLEEP=1 = the old sleep. PELOAD_PRESENT_PROF=1 prints
-  `[presentprof]` every 5 s: new frames / presents per second, time waiting for a frame / drawing / flushing.
+  `[presentprof]` every 5 s: new frames / presents per second, time waiting for a frame / drawing / flushing. The same bug
+  was found and fixed independently in PR #2 (willfell/present-sleep-glh, merged into main 2026-11-06: `g_glh_on` counted as
+  the queue running); on merging main the present thread kept `pq_started()` (it waits for the helper's first frame and has
+  the switch). That PR's measurement (M4 Pro, 5120x1440 at 120 Hz, client v0.9.23, PELOAD_MAX_FPS=60, Guardian): before,
+  engine 60.0 / shown 27.0 fps, every gap between shown frames 25-42 ms, `sample` had shim-present in that nanosleep 86 of 90
+  times; after, engine 60.0 / shown 59.6 fps, 93% of gaps 12-21 ms. Menu after: engine 58-60, shown 58.7-60.1.
 - **Match loads 22% faster and the first minutes after joining stop stuttering: halo3's file hashing runs on its own thread**
   (2026-10-25; found with shim/tools/hitch-sample.sh -- `sample` taken during a 0-fps second after joining a ~100-player
   HugeGrass game: halo3's engine thread ~24% in CC_SHA1_Update) — peload.c `bha_queue` / `bha_worker` (thread shim-hash) /
