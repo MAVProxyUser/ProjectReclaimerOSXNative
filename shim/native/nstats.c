@@ -119,6 +119,7 @@ static volatile int g_match_pending; static char g_loading[96];
 // the session to its next map ("[loading] map ..." with no new "game Playing" line): that map's match starts once its
 // players table fills (st_snapshot). The page used to sit at "not in a match", overlay off, for the whole next map (2026-11-07).
 static volatile int g_app_playing;
+static char g_srv_addr[96];                                // the server this app joined ("[online] joining <ip>:<port>")
 static volatile int g_sp_join;                             // joined a game in progress: its first spawn burst is not spawn points (nspawns.c)
 // where the app moved halo3's tables: it logs each move ("[capacity] <what>: <old> -> <new>", "[c1] ...")
 static volatile int64_t g_sb_off = 0x159c0;                // game engine globals (TLS +0x20) -> statborg (halo3: +0xfeb8)
@@ -138,6 +139,7 @@ static void nst_on_line(const char* p, size_t n) {
     if (!strncmp(l, "[voice] active ", 15)) { st_voice_report(l); return; }
     if (!strncmp(l, "[capacity] ", 11) || !strncmp(l, "[c1] ", 5)) { nst_layout_line(l); return; }
     if (!strncmp(l, "[menus] joining the game in progress", 36)) { g_sp_join = 1; return; }
+    if (!strncmp(l, "[online] joining ", 17)) { size_t k = 0; const char* q = l + 17; char a[96]; while (*q && *q != ' ' && k + 1 < sizeof a) a[k++] = *q++; a[k] = 0; if (k) memcpy(g_srv_addr, a, k + 1); return; }
     if (!strncmp(l, "[switch] game Playing", 21)) { g_app_playing = 1; if (!g_gameplay_t0) { g_gameplay_t0 = mono_s(); g_match_pending = 1; } return; }
     if (!strncmp(l, "[loading] map ", 14)) {               // "[loading] map 320: Guardian, MCC's art of Guardian"
         const char* c = strchr(l, ':'); if (c) { c++; while (*c == ' ') c++; size_t k = 0; while (c[k] && c[k] != ',' && k + 1 < sizeof g_loading) { g_loading[k] = c[k]; k++; } g_loading[k] = 0; }
@@ -678,7 +680,9 @@ static void st_snapshot(StBuf* s) {
       sb_put(s, "],\"session_state\":%u,\"host_peer\":%d,\"local_peer\":%d,\"dedicated\":%s,\"mute\":%s", sst, g_st_hostpeer, g_st_localpeer, g_st_hostpeer >= 0 && nss && !hostplayer ? "true" : "false",
              g_set_muted && st_controls_ok() ? "true" : "false");
       int mx = st_max_players(); sb_put(s, ",\"slots\":{\"used\":%d", nss ? nss : np); if (mx) sb_put(s, ",\"max\":%d,\"src\":\"session\"}", mx); else sb_put(s, ",\"max\":null}");
-      sb_put(s, ",\"addr_role\":\"hidden\""); }
+      // addresses: the page is on 127.0.0.1 only (nothing to hide); "host" = this app hosts, "client" = it joined g_srv_addr
+      { int host = g_st_localpeer >= 0 && g_st_hostpeer == g_st_localpeer; sb_put(s, ",\"addr_role\":\"%s\"", host ? "host" : nss || g_srv_addr[0] ? "client" : "none");
+        if (!host && g_srv_addr[0]) { sb_put(s, ",\"server_addr\":"); sb_str(s, g_srv_addr); } } }
     sb_put(s, ",\"players\":["); int first = 1;
     for (int k = 0; k < np; k++) {
         StTrack* t = st_track(&pl[k]); uint32_t h = pl[k].unit; uint64_t p = ST_DATUM(h); static uint8_t d[0x380];

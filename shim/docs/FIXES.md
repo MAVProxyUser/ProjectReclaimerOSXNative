@@ -1881,6 +1881,11 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   auto-vote or halo3 message table). HOW: when the snapshot says "native": true those are hidden; the loader's page is
   unchanged (it never sends "native"). Checked against a native test match: the five hidden, Capture frame / Mute all still
   there, no console errors.
+- **nhook: the address role is real** (2026-11-07; nstats.c st_snapshot, nst_on_line) — WHY: the native snapshot always said
+  addr_role "hidden", so a player's detail panel without an IP read "hidden (this page is reachable from other computers;
+  PELOAD_STATS_IPS=1 shows it)" -- the native page listens on 127.0.0.1 only and has no such switch. HOW: "host" when the local
+  session peer is the host, else "client" (in a session, or after a join), else "none"; "server_addr" = the address in the
+  app's `[online] joining <ip>:<port>` line. Checked: a local test match says "host".
 - **0.10 server list: shim/tools/servers10.py** (2026-11-07) — WHY: "there is no reason we should be making a .9 query": the
   0.9 client's `discover` (shim/tools/servers.sh) lists no 0.10 server, the 0.10 Windows exe's `discover` prints nothing under
   the loader, and the Mac app has no list command. HOW: 0.10 asks `/v3/discovery` on its masters and queries each server with
