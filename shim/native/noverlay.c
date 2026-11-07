@@ -192,6 +192,10 @@ static void nov_trail_add(uint32_t h, const float* pos, double now) {
 // one at deletion: +0x1c the impact point, +0x74 velocity, +0x1e8 the start, +0x1b0 distance travelled, +0xC0 the owner.
 // The hook runs on the engine thread inside the lifted call: it reads that thread's own TLS directly (pointers checked).
 typedef struct { volatile double t; uint32_t def, owner; float pos[3], vel[3], st[3], trav; } NovImp;
+// shots and estimated hits (hitbox.c g_hbshot): every deleted projectile with its owner, and the biped whose bounding sphere
+// holds its end point (the victim, -1 none) -- the stats snapshot counts them per player (shots, hits, accuracy)
+typedef struct { uint32_t owner, victim, def; } NovShot;
+static NovShot g_nov_shot[8192]; static volatile unsigned g_nov_shot_n;
 static NovImp g_nov_imp[256]; static volatile unsigned g_nov_imp_n;
 static volatile unsigned long g_nov_del_calls;
 static void on_object_delete(uint64_t* ctx) {   // (x0: the guest context the app's own object_delete gets -- read through rd: checked)
@@ -206,6 +210,13 @@ static void on_object_delete(uint64_t* ctx) {   // (x0: the guest context the ap
     uint8_t* data = *(uint8_t**)(arr + 0x48); int i = h & 0xFFFF; if (!data || i >= *(int32_t*)(arr + 0x20)) return;
     uint8_t* e = data + (size_t)i * 0x18; if (e[3] != 5 || *(uint16_t*)e != (uint16_t)(h >> 16)) return;   // projectiles only
     uint8_t* p = *(uint8_t**)(e + 0x10); if (!p) return;
+    { uint32_t own = *(uint32_t*)(p + 0xC0), vic = 0xFFFFFFFFu; const float* ip = (const float*)(p + 0x1c); int hi = *(int32_t*)(arr + 0x3c);
+      if (own != 0xFFFFFFFFu && hi > 0 && hi <= 65536) for (int j = 0; j < hi; j++) { uint8_t* b = data + (size_t)j * 0x18; if (b[3] != 0 || !*(uint16_t*)b) continue;
+          uint32_t bh = ((uint32_t)*(uint16_t*)b << 16) | (uint32_t)j; if (bh == own) continue; uint8_t* bp = *(uint8_t**)(b + 0x10); if (!bp) continue;
+          const float* c = (const float*)(bp + 0x1c); float r2 = c[3] + 0.1f, dx = ip[0] - c[0], dy = ip[1] - c[1], dz = ip[2] - c[2];
+          if (r2 > 0 && r2 < 5 && dx * dx + dy * dy + dz * dz <= r2 * r2) { vic = bh; break; } }
+      unsigned q = __atomic_load_n(&g_nov_shot_n, __ATOMIC_RELAXED) & 8191; g_nov_shot[q].owner = own; g_nov_shot[q].victim = vic; g_nov_shot[q].def = *(uint32_t*)p;
+      __atomic_store_n(&g_nov_shot_n, g_nov_shot_n + 1, __ATOMIC_RELEASE); }   // (one writer: the engine thread)
     unsigned k = __atomic_fetch_add(&g_nov_imp_n, 1, __ATOMIC_RELAXED) & 255; NovImp* r = &g_nov_imp[k];
     r->def = *(uint32_t*)p; r->owner = *(uint32_t*)(p + 0xC0); memcpy(r->pos, p + 0x1c, 12); memcpy(r->vel, p + 0x74, 12); memcpy(r->st, p + 0x1e8, 12); memcpy(&r->trav, p + 0x1b0, 4);
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); double tv = ts.tv_sec + ts.tv_nsec * 1e-9; __atomic_store(&r->t, &tv, __ATOMIC_RELEASE);

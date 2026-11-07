@@ -288,7 +288,7 @@ static int st_players(StPlayer* out, int max) {
     }
     return n;
 }
-typedef struct { char name[64]; int slot, team, deaths, alive; uint32_t unit; double life_start, longest, dist; float pos[3], top_speed; } StTrack;
+typedef struct { char name[64]; int slot, team, deaths, alive, shots, hits; uint32_t unit; double life_start, longest, dist; float pos[3], top_speed; } StTrack;
 static StTrack g_trk[256]; static int g_ntrk; static char g_trk_map[64];
 static StTrack* st_track(const StPlayer* p) {
     for (int i = 0; i < g_ntrk; i++) if (g_trk[i].slot == p->slot && !strcmp(g_trk[i].name, p->name)) return &g_trk[i];
@@ -677,12 +677,15 @@ static void st_snapshot(StBuf* s) {
         int16_t sbs[8]; int sbok = st_statborg(pl[k].slot, sbs);
         sb_put(s, ",\"pos\":"); sb_f3(s, o); sb_put(s, ",\"speed\":%.2f,\"kills\":%d", spd, sbok ? sbs[SB_KILLS] : 0);
         if (sbok) sb_put(s, ",\"score\":%d,\"assists\":%d,\"betrayals\":%d,\"suicides\":%d", sbs[SB_SCORE], sbs[SB_ASSISTS], sbs[SB_BETRAYALS], sbs[SB_SUICIDES]);
-        if (t) sb_put(s, ",\"deaths\":%d,\"hits\":0,\"accuracy\":0,\"shots\":0,\"life\":%.1f,\"longest_life\":%.1f,\"distance\":%.1f,\"top_speed\":%.2f", sbok ? sbs[SB_DEATHS] : t->deaths, t->alive ? now - t->life_start : 0.0,
+        if (t) sb_put(s, ",\"deaths\":%d,\"hits\":%d,\"accuracy\":%.3f,\"shots\":%d,\"life\":%.1f,\"longest_life\":%.1f,\"distance\":%.1f,\"top_speed\":%.2f", sbok ? sbs[SB_DEATHS] : t->deaths, t->hits, t->shots ? (double)t->hits / t->shots : 0.0, t->shots, t->alive ? now - t->life_start : 0.0,
                       t->longest > (t->alive ? now - t->life_start : 0) ? t->longest : (t->alive ? now - t->life_start : 0), t->dist, t->top_speed);
         if (g_st_var_ok) st_player_traits(s, pl[k].rec);
         sb_put(s, "}");
     }
     if (t0) sb_tick(pl, np, now);
+    { static unsigned seen; unsigned n = __atomic_load_n(&g_nov_shot_n, __ATOMIC_ACQUIRE); if (n - seen > 8192) seen = n - 8192;   // shots / hits per player (object_delete)
+      for (; seen != n; seen++) { const NovShot* q = &g_nov_shot[seen & 8191];
+          for (int k = 0; k < np; k++) if (pl[k].unit == q->owner) { StTrack* tr = st_track(&pl[k]); if (tr) { tr->shots++; if (q->victim != 0xFFFFFFFFu) tr->hits++; } break; } } }
     st_spawns(tab, hi, pl, np, m, now);                        // spawns / pickups -> the feed, the heatmap's spawn points, "items"
     fx_roster_tick(m, ss, nss, pl, np);                        // the forensic archive: roster changes, session boundaries
     if (getenv("NHOOK_CAM_LOG")) { static double tl; uint64_t blk = tls_block(), ob = 0; float r[40];   // the observer camera (local user 0)
