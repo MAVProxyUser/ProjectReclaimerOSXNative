@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """String references and disassembly for an arm64 Mach-O (the native macOS Reclaimer 0.10 app), the counterpart of refs.py
 for PE files. Needs numpy (scan) and capstone (dis: re-tools/angrenv/bin/python has it).
-    machoref.py strref <binary> <text>            every adrp+add / adrp+ldr pair whose target lies inside an occurrence of <text>
-                                                  (Rust concatenates literals: the target may be anywhere inside it), with the
-                                                  function that holds the reference (LC_FUNCTION_STARTS)
+    machoref.py strref <binary> <text> [--window N]  every adrp+add / adrp+ldr pair whose target lies inside an occurrence of
+                                                  <text> or up to N bytes before it (default 64: Rust concatenates literals and
+                                                  format templates start before their text), with the function that holds the
+                                                  reference (LC_FUNCTION_STARTS)
     machoref.py dis <binary> <vmaddr> [<end>]     disassemble a function (from its start to the next one) or a range, adrp+add
                                                   targets annotated with the text found there
     machoref.py func <binary> <vmaddr>            the function containing <vmaddr>
@@ -90,6 +91,7 @@ def main():
     d, segs, secs, fstarts = load(path)
     if cmd == 'strref':
         needle = sys.argv[3].encode(); hits = []; p = d.find(needle)
+        win = int(sys.argv[sys.argv.index('--window') + 1]) if '--window' in sys.argv else 64
         while p >= 0:
             vm = off2vm(segs, p)
             if vm is not None: hits.append((vm, vm + len(needle)))
@@ -98,7 +100,7 @@ def main():
         # a reference can point at the start of the concatenated literal that holds the text: take a window before it
         for code, tgt in adrp_targets(d, secs):
             for a, b in hits:
-                if a - 512 <= tgt < b:
+                if a - win <= tgt < b:
                     fs, fe = func_of(fstarts, code)
                     print(f'  {code:#x} -> {tgt:#x} (text {tgt - a:+d})  in function {fs:#x}' + (f'..{fe:#x}' if fe else ''))
     elif cmd == 'func':

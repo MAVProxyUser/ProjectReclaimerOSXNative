@@ -69,10 +69,50 @@ concatenated literals), `dis` (a function by LC_FUNCTION_STARTS, string targets 
 numpy (system python3), `dis` capstone (`re-tools/angrenv/bin/python`). Rust compares short field names and enum strings as
 mov/movk immediates: grep the disassembly's immediates, not `strings`.
 
+## Command line (0.10.0 `--help`)
+
+`project-reclaimer [ENGINE.dll] [MCC_FOLDER] [OPTIONS]`; `dedicated COMMAND | --server FILE.toml`; `--rcon ADDRESS:PORT PASSWORD
+COMMAND...`; `--rcon-app`. Options: `--map NAME` (a multiplayer game straight away, e.g. `--map guardian`), `--forge`,
+`--campaign ID`, `--seconds N` (end after N s), `--background` (tests: a small window below the others that never takes the
+focus -- use it for every unattended run), `--headless` (no window, null renderer), `--local-players N`, `--data-dir`,
+`--settings FILE.json`, `--renderer vulkan`, `--verify-map FILE`, `--kit` / `--kit-tool` (the Reclaimer Kit).
+
+## Inside the app (0.10.0; for our hooks)
+
+- **Guest image**: halo3.dll is mapped at its RVAs (headers too) in a range reserved INSIDE the app binary: app vmaddr
+  0x103f94000 + the app's slide (the log line "[host] linked recompiled engine, image at 0x..." prints it). Relocated, so
+  guest pointers are host pointers. .text is unchanged; TLS index (halo3+0xa39f9c) = 0. Import slots point at stand-in
+  addresses just past the image (calls there trap into the runtime).
+- **Code table**: `{ptr, count}` at app 0x103f44418 (+slide): sorted 16-byte `{preferred-base guest address, host code}` pairs,
+  22894 of them (the lookup at app 0x103296384; a 4096-entry cache at 0x103f6c188). A host pointer into the app's own text
+  = a function the app replaced with native code (a "stand-in").
+- **Lifted function entry** (its guest-ABI wrapper; lifted code calls lifted code through these): `stp x29,x30,[sp,#-16]!`,
+  `mov x29,sp`, `stp x19,x20,[sp,#-16]!`, `ldr w<n>,[x0,#0x290]`, with **x0 = the guest thread's context**: rax +0, rcx +8,
+  rdx +0x10, rbx +0x18, rsp +0x20, rbp +0x28, rsi +0x30, rdi +0x38, r8..r15 +0x40..+0x78; +0x290 bit 31 = a pending-event
+  flag; **+0x2d8 = the thread's TLS pointer (gs:[0x58])**, cached by the runtime helper (app 0x1033f6d7c) once read. The
+  wrapper calls the body with (x2 = ctx, x3 = rsp, x4.. = the function's live-in guest registers) -- per-function signatures,
+  so hooks go on wrappers.
+- **The code is MAP_JIT** (reported RWX): a thread writes it after `pthread_jit_write_protect_np(0)`. A hook = the first
+  instruction replaced by one `b` to a stub within +-128 MB (fixed-address allocations next to the code region; the region's
+  own neighbourhood is reserved, VM_FLAGS_ANYWHERE lands ~1 GB away).
+- **What still runs as halo3 code** (`NHOOK_CENSUS=1`, a 60 s solo Guardian match): 1007 of 21977 lifted functions. The app
+  replaced main_loop_body (0xb2250), the sim tick (0xef120), object updates, render prep, local-user lookups (0xfbb94 /
+  0xfbc04), display_event (0x11b0ec: no kills in that run, unknown), object_delete (0x342ed8: its entry is a branch, not a
+  wrapper), chud_messaging_post (0x2d3f2c) and the teleport / vehicle functions: the loader's halo3 hooks don't carry over
+  one-to-one. Still lifted and running: the game-state lock pair 0x12c948 / 0x12c9a0, the millisecond clock 0x9d22c
+  (~7000 calls/s on the engine thread), ... (the census file lists them).
+- **Engine thread TLS**: hook 0x9d22c, keep its ctx; TLS block = `[[ctx+0x2d8] + 0]`. The players table (TLS +0x10, data
+  array "players", element 0x2f8, names at +0x58) reads exactly as under the loader (verified: name and unit handle).
+- **Capacities**: the app enlarges halo3's tables and moves fields; it logs each change as `[capacity] <what>: old -> new`
+  (players.count 0x10 -> 0x80, objects.count 0x800 -> 0x3fc0, game_globals.bytes 0x159c0 -> 0xed900 with statborg /
+  player_state / ... moved, mapping.output_users 0xd8 -> 0x4e8, ...). Readers of moved fields must apply them.
+
 ## Our features on the native app (status)
 
-The loader's stats page, overlay, forensics, chat/voice/kill feed and recording all hook halo3.dll or the 0.9 exe inside
-the loader. With the native app none of that runs. The way back: the app has no hardened runtime, so a dylib can be loaded
-with `DYLD_INSERT_LIBRARIES` (arm64, our own process: reading engine memory at known addresses, never sweeping), plus the
-app's own interfaces (`RECLAIMER_STATS_SERVER`, its join-link socket). Engine data lives in the recompiled image; halo3's
-TLS is the app runtime's emulation.
+The loader's stats page, overlay, forensics, chat/voice/kill feed and recording hooked halo3.dll or the 0.9 exe inside the
+loader; none of that runs in the native app. `shim/native/` is the way back: `nhook.dylib` (DYLD_INSERT_LIBRARIES; build
+`bash shim/native/build.sh`, run `bash shim/native.sh [--map guardian --seconds 60 --background]`, test profile unless
+NATIVE_REAL=1, log /tmp/reclaimer_native.log). Done: the log tap, the image check, the code table, entry hooks, the census,
+the engine thread's TLS and the players table. Next: the stats HTTP server and page on top of these readers (stats.c's
+readers with the capacity remaps), then events (the app's own log lines, or hooks on what still runs lifted), then the
+overlay (drawn by the app's Metal renderer: needs its own path).

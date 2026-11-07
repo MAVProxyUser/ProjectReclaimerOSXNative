@@ -1681,6 +1681,16 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
 
 ## 18. Overlay, stats, forensics, walker, recording (the loader's own tooling)
 
+- **nhook: our tooling in the native 0.10 app** (2026-11-06; shim/native/nhook.c + stub.S, shim/native.sh, docs
+  shim/docs/native-client.md "Inside the app") — WHY: the native app runs no loader, so none of the loader's halo3 hooks or
+  readers exist there. A DYLD_INSERT_LIBRARIES dylib: interposed write()/writev() assemble the app's log lines (it writes a
+  line in pieces) and catch the engine image address; the runtime's guest -> host code table gives each lifted halo3
+  function's entry; an entry hook replaces its first instruction by a `b` to a stub (MAP_JIT: pthread_jit_write_protect_np)
+  that calls handler(guest context); the engine thread's context (hook on halo3+0x9d22c) gives halo3's TLS block
+  (ctx+0x2d8), and the players table reads as under the loader. NHOOK_CENSUS=1 counts every lifted function's calls (which
+  halo3 code the app still runs). Switches: NHOOK_NO_HOOKS=1 (log tap and probe only), no DYLD_INSERT_LIBRARIES = the app
+  untouched.
+
 - **"Run 2.4x" removed** (2026-10-19, revert 606a38c) — it crashed the client as soon as it was used; the user asked for it
   to be deleted. The page's Speed 2x / speed menu (the host's movement-speed trait) is unchanged. (10-19)
 - **Stats server: headers only, Host, Origin; no open CORS** (security review 2026-10-19) — stats.c `st_conn`, `st_hdr`,

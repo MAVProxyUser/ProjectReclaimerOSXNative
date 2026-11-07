@@ -300,6 +300,9 @@ backups in ReclaimerMac/backups are untouched -- NEVER let a launch make a new i
 macOS path. Test runs: RECLAIMER_PROFILE_DIR=ReclaimerMac/native/test-v2 (a test profile: services left alone) +
 RECLAIMER_CACHE_DIR + RECLAIMER_TEST_SILENT=1; don't kill it before "[menus] open" (it counts unfinished starts). Dylibs inject
 with DYLD_INSERT_LIBRARIES (tested). RE: re-tools/machoref.py (strref/dis/func/calls on arm64 Mach-O).
+shim/native/ = nhook.dylib (bash shim/native.sh [--map guardian --seconds 60 --background]): log tap, code-table entry hooks on lifted
+halo3 functions (x0 = guest context, +0x2d8 = TLS pointer), NHOOK_CENSUS=1; reads the players table. main_loop_body / sim tick /
+display_event / object_delete etc. are the app's own code now (census): docs native-client.md "Inside the app".
 PORTING A RELEASE: shim/docs/porting.md -- fetch-releases.sh (corpus), client-survey.sh, `re-tools/patchscan.py --diff old new`
 (signatures read from the C; `--rev <commit>`; exit 0 over all 39 releases), `re-tools/sigport.py --point P --old --new [--corpus]
 [--apply]` (anchors incl. callers' texts -> shape alignment -> wildcarded signature -> meaning check; `--selftest` replays history),
