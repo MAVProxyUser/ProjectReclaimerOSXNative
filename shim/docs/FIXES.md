@@ -1749,6 +1749,11 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   thread whose block holds halo3's "players" data array (its TLS pointer, re-learned after 2 s of failures), and joins /
   leaves are debounced (left = missing 3 s, joined = not seen for 30 s, none in a map's first 5 s, an empty read ignored).
   The fps line shows only what the native app measures. shim/native.sh serves the page from the checkout.
+- **nhook overlay off on an ultrawide screen** (2026-11-07; noverlay.c nov_camera) — WHY: the user's hitboxes were "quite a
+  bit off and run parallel with the player" at 3440x1440. The observer's field of view (70 deg) is the width of a 16:9 view
+  and wider screens see more at the sides (Hor+); the projection spread it over the whole width, so its vertical field was
+  0.74x the game's and everything off-centre was drawn 1.34x too far out (measured 1.37x against the game's own name markers
+  in a live capture). Now tan(v/2) = tan(fov/2) / (16/9), tan(h/2) = tan(v/2) * aspect; identical at 16:9 (the reticle check).
 
 - **"Run 2.4x" removed** (2026-10-19, revert 606a38c) — it crashed the client as soon as it was used; the user asked for it
   to be deleted. The page's Speed 2x / speed menu (the host's movement-speed trait) is unchanged. (10-19)

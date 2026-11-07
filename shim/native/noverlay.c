@@ -4,7 +4,7 @@
 // hb_emit_hitbox, hb_draw_overlay, the stroke font), with two differences:
 //   * the camera is halo3's own observer camera (local user 0): observer globals = TLS +0x578 (halo3+0x17e274 allocates
 //     0xf50 bytes), 0x3d0 bytes per local user, the camera result at +0x11c (halo3+0x17eb55 returns it): +0x00 position,
-//     +0x28 forward, +0x34 up, +0x40 horizontal field of view (radians); the projection uses the frame's own aspect.
+//     +0x28 forward, +0x34 up, +0x40 field of view (radians; the width of a 16:9 view: Hor+), and the frame's own aspect.
 //     The loader took the frame's view-projection from halo3's first world draw (VS cb0) instead.
 //   * no "visible only" (it needs the frame's depth buffer, which the app keeps inside its Metal renderer) and no zones yet.
 // Switches: NHOOK_HITBOXES / NHOOK_HB_TRACERS / NHOOK_HB_INFO / NHOOK_HB_ITEMS / NHOOK_HB_VEHICLES = 1 start a feature on
@@ -36,7 +36,10 @@ static int nov_camera(float* vp, float aspect) {
     const float* pos = r, * fwd = r + 0x28 / 4, * up = r + 0x34 / 4; float hfov = r[0x40 / 4];
     if (!(hfov > 0.1f && hfov < 3.0f) || !isfinite(pos[0]) || fabsf(fwd[0] * fwd[0] + fwd[1] * fwd[1] + fwd[2] * fwd[2] - 1) > 0.05f) return 0;
     float left[3] = {up[1] * fwd[2] - up[2] * fwd[1], up[2] * fwd[0] - up[0] * fwd[2], up[0] * fwd[1] - up[1] * fwd[0]};   // up x forward
-    float th = tanf(hfov * 0.5f), tv = th / (aspect > 0.1f ? aspect : 1.7778f);
+    // Hor+: the field of view is the width of a 16:9 view; other aspects keep its height (a 3440x1440 screen sees more at
+    // the sides). Spreading it over the whole width put everything off-centre 1.34x too far out on a 21:9 screen (user,
+    // 2026-11-07: "quite a bit off and runs parallel with the player"; measured 1.37x against the game's name markers).
+    float tv = tanf(hfov * 0.5f) / (16.0f / 9.0f), th = tv * (aspect > 0.1f ? aspect : 1.7778f);
     memset(vp, 0, 32 * sizeof(float));
     for (int a = 0; a < 3; a++) { vp[0 + a] = -left[a] / th; vp[4 + a] = up[a] / tv; vp[12 + a] = fwd[a]; }
     vp[3] = -(vp[0] * pos[0] + vp[1] * pos[1] + vp[2] * pos[2]); vp[7] = -(vp[4] * pos[0] + vp[5] * pos[1] + vp[6] * pos[2]);
