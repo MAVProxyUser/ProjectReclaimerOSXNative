@@ -224,6 +224,7 @@ th .srt{display:inline-block;margin-left:2px;padding:0 2px;cursor:pointer;color:
  <label title="UDP datagrams and TCP connections on this game's sockets"><input type="checkbox" id="pkw" checked> wire</label>
  <label title="halo3's own network messages (needs the switch on the right)"><input type="checkbox" id="pkg" checked> game</label>
  <label title="Connected QUIC traffic (most of it: dozens a second); off shows only handshakes, tags, TCP and game messages in the log"><input type="checkbox" id="pk1"> 1-RTT in the log</label>
+ <label title="Reverse DNS: each peer address's PTR name (an ISP / host name), asked of this Mac's resolver once per address. Names appear as they come in; an address without one stays bare. (The native app only for now.)"><input type="checkbox" id="pkr"> look up names</label>
  <label title="Wraps halo3's message table so its message types (ping, join-request, membership-update ...) are logged as halo3 sends and receives them, each with its session peer (five small hooks on halo3's message senders / receivers note it; they stay in once used). Switch off to restore the table."><input type="checkbox" id="pkgon"> halo3 message types</label>
  <button id="pkp">Pause</button></div>
  <div class="cols"><div><table id="pks"><thead><tr><th>layer</th><th>dir</th><th>type</th><th>peer</th><th>per s</th><th>bytes/s</th></tr></thead><tbody><tr><td colspan="6" class="note">-</td></tr></tbody></table>
@@ -1052,15 +1053,15 @@ for(const [id,key] of [['avm','map'],['avc','calls']]) document.getElementById(i
 let pkSeq=0, pkBusy=false, pkPause=false, pkLast=null, pkN=0; const pkl=document.getElementById('pkl');
 const pkFmtB=n=>n>=1048576?(n/1048576).toFixed(1)+' MB':n>=1024?(n/1024).toFixed(1)+' KB':Math.round(n)+' B';
 const pkPeer=e=>e.peer_id?`<span title="halo3 session peer ${e.peer_no!==undefined?e.peer_no+', ':''}id ${E(e.peer_id)}, through its ${E(e.via||'')}">${E(e.peer)}</span>`
-  :e.peer?`${E(e.peer)}${e.host?` <span class="pk-x">${E(e.host)}</span>`:''}`:'<span class="pk-x">-</span>';
+  :e.peer?`${e.player?`<b title="the player at this address (the session's peer)">${E(e.player)}</b> `:''}${E(e.peer)}${e.host?` <span class="pk-x">${E(e.host)}</span>`:''}${e.rdns?` <span class="pk-x" title="reverse DNS">${E(e.rdns)}</span>`:''}`:'<span class="pk-x">-</span>';
 const pkFl=e=>e.flags?` <span class="pk-x" title="spin: the short header's spin bit; greased: the fixed bit is unused (RFC 9287). Either may be random">${e.flags&1?'spin':''}${e.flags===3?' ':''}${e.flags&2?'greased':''}</span>`:'';
 function pkRow(e,n){ const d=e.dir==='rx'?'<span class="pk-rx">&larr; rx</span>':'<span class="pk-tx">tx &rarr;</span>';
   const ty=e.layer==='game'?`<span class="pk-g pk-ty">${E(e.type)}</span>`:`<span class="pk-ty">${E(e.type)}</span>${pkFl(e)}`;
   const len=e.layer==='game'?'':` <span class="pk-x">${e.type.startsWith('tcp-close')?pkFmtB(e.len)+' total':e.len+' B'}</span>`;
   return `<div class="ev"><time>${clock(e.t)}</time>${d} ${ty} ${pkPeer(e)}${len}${n>1?` <span class="pk-x">&times;${n}</span>`:''}</div>`; }
 async function pollPk(){ if(pkBusy || pkPause || document.hidden) return; pkBusy=true;
-  const w=document.getElementById('pkw').checked, g=document.getElementById('pkg').checked, o1=document.getElementById('pk1').checked;
-  try{ const j=await (await fetch('/packets.json?max=600&since='+pkSeq+(o1?'':'&skip1rtt=1')+(w?'':'&wire=0')+(g?'':'&game=0'))).json();
+  const w=document.getElementById('pkw').checked, g=document.getElementById('pkg').checked, o1=document.getElementById('pk1').checked, rd=document.getElementById('pkr').checked;
+  try{ const j=await (await fetch('/packets.json?max=600&since='+pkSeq+(o1?'':'&skip1rtt=1')+(w?'':'&wire=0')+(g?'':'&game=0')+(rd?'&rdns=1':''))).json();
     if(j.seq<pkSeq){ pkSeq=0; pkLast=null; pkl.textContent=''; pkN=0; }
     document.getElementById('pkgon').checked=!!(j.game&&j.game.want);
     const sum=(j.summary||[]).filter(x=>(x.layer==='wire'?w:g)).sort((a,b)=>b.per_s-a.per_s);

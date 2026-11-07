@@ -1726,6 +1726,16 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   fps: the presents' times -> snapshot "perf" (fps, frame-interval median / 95% / max) and a [nhook] [perf] line every
   10 s. Switches: NHOOK_NO_RENDER=1 (no swizzle), NHOOK_NO_AUDIO_TAP=1, NHOOK_OV_DEBUG=1 (calibration crosses on
   scenery / machines / crates).
+- **nhook: "not in a match" mid-game, overlay buttons dead** (2026-11-07; nstats.c nst_on_line) — WHY: in a 52-player
+  online game the page fell to "not in a match" and the overlay stopped drawing the first time the user opened the in-game
+  menu: `[menus] open` (logged for the scoreboard / settings menu too) cleared the match state, and the overlay draws only
+  in a match. Now only the app's game state ends a match: `[switch] game <anything but Playing>`, `[switch] leaving the
+  game`, `[host] stopping`.
+- **Packets window: player names and reverse DNS** (2026-11-07; nnet.c, stats_page.html) — the 0.10 app talks to every
+  player directly (55 peers in that game) and logs each one's address every few seconds (`[online] peer 0x<id> at
+  <ip>:<port>`); the session's peer records hold the same ids, so a wire record gets "player". The page's "look up names"
+  box adds ?rdns=1: each address's PTR name, asked once per address on a resolver thread (getnameinfo NI_NAMEREQD; 2048
+  cached). Test: shim/tools/nhook-selftest.sh (127.0.0.1 -> localhost). The loader ignores rdns=1 (not ported there).
 
 - **"Run 2.4x" removed** (2026-10-19, revert 606a38c) — it crashed the client as soon as it was used; the user asked for it
   to be deleted. The page's Speed 2x / speed menu (the host's movement-speed trait) is unchanged. (10-19)

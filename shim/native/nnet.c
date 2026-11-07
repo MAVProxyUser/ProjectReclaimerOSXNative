@@ -72,11 +72,52 @@ static void pk_dns(const char* name, const struct addrinfo* ai) {
 static void pk_host(const PkEv* e, char* o, size_t on) { o[0] = 0; if (!e->fam) return; pthread_mutex_lock(&g_pk_dnsmx);
     for (int k = 0; k < g_pk_ndns; k++) if (g_pk_dns[k].fam == e->fam && !memcmp(g_pk_dns[k].a, e->addr, 16)) { snprintf(o, on, "%s", g_pk_dns[k].name); break; }
     pthread_mutex_unlock(&g_pk_dnsmx); }
+// ---- who a peer is: the app logs each session peer's address ("[online] peer 0x<id> at <ip>:<port>", nst_on_line); the
+// network session's peer records hold the same id (st_session .voice) -> the player's name
+static struct { uint64_t id; char addr[64]; } g_pkp[512]; static int g_npkp; static pthread_mutex_t g_pkp_mx = PTHREAD_MUTEX_INITIALIZER;
+static void pk_peer_note(uint64_t id, const char* addr) {
+    pthread_mutex_lock(&g_pkp_mx); int k = 0; for (; k < g_npkp; k++) if (!strcmp(g_pkp[k].addr, addr)) break;
+    if (k == g_npkp) { if (g_npkp < 512) g_npkp++; else k = (int)(id % 512); }
+    g_pkp[k].id = id; snprintf(g_pkp[k].addr, sizeof g_pkp[k].addr, "%s", addr); pthread_mutex_unlock(&g_pkp_mx); }
+static StSess g_pkn[128]; static int g_npkn; static double g_pkn_t; static pthread_mutex_t g_pkn_mx = PTHREAD_MUTEX_INITIALIZER;
+static int pk_player(const char* addr, char* out, size_t on) {   // the player at an address, from the session (refreshed once a second)
+    uint64_t id = 0; pthread_mutex_lock(&g_pkp_mx); for (int k = 0; k < g_npkp; k++) if (!strcmp(g_pkp[k].addr, addr)) { id = g_pkp[k].id; break; } pthread_mutex_unlock(&g_pkp_mx);
+    if (!id) return 0; int ok = 0; pthread_mutex_lock(&g_pkn_mx);
+    if (st_wall() - g_pkn_t > 1.0) { g_npkn = st_session(g_pkn, 128, 0); g_pkn_t = st_wall(); }
+    for (int i = 0; i < g_npkn; i++) if (g_pkn[i].voice == id) { snprintf(out, on, "%s", g_pkn[i].name); ok = 1; break; }
+    pthread_mutex_unlock(&g_pkn_mx); return ok; }
+// ---- reverse DNS (the Packets window's "look up names", ?rdns=1): each address's PTR name, once, on a resolver thread
+typedef struct { uint8_t fam, a[16]; int st; char name[128]; } PkRd;   // st 0 queued, 1 named, 2 no name
+static PkRd g_pkrd[2048]; static int g_npkrd; static pthread_mutex_t g_pkrd_mx = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_pkrd_cv = PTHREAD_COND_INITIALIZER;
+static void* pk_rdns_thread(void* a) {
+    (void)a; pthread_setname_np("nhook-rdns");
+    for (;;) {
+        pthread_mutex_lock(&g_pkrd_mx); int k = -1;
+        while (k < 0) { for (int i = 0; i < g_npkrd; i++) if (!g_pkrd[i].st) { k = i; break; } if (k < 0) pthread_cond_wait(&g_pkrd_cv, &g_pkrd_mx); }
+        PkRd q = g_pkrd[k]; pthread_mutex_unlock(&g_pkrd_mx);
+        struct sockaddr_storage ss; memset(&ss, 0, sizeof ss); socklen_t sl;
+        if (q.fam == 6) { struct sockaddr_in6* s6 = (void*)&ss; s6->sin6_family = AF_INET6; s6->sin6_len = sizeof *s6; memcpy(&s6->sin6_addr, q.a, 16); sl = sizeof *s6; }
+        else { struct sockaddr_in* s4 = (void*)&ss; s4->sin_family = AF_INET; s4->sin_len = sizeof *s4; memcpy(&s4->sin_addr, q.a, 4); sl = sizeof *s4; }
+        char host[NI_MAXHOST]; int r = getnameinfo((struct sockaddr*)&ss, sl, host, sizeof host, 0, 0, NI_NAMEREQD);
+        pthread_mutex_lock(&g_pkrd_mx); g_pkrd[k].st = r ? 2 : 1; if (!r) snprintf(g_pkrd[k].name, sizeof g_pkrd[k].name, "%s", host); pthread_mutex_unlock(&g_pkrd_mx);
+    }
+    return 0;
+}
+static int pk_rdns(const PkEv* e, char* out, size_t on) {      // 1 = named; unknown addresses are queued
+    static int started; if (!started) { started = 1; pthread_t t; pthread_create(&t, 0, pk_rdns_thread, 0); pthread_detach(t); }
+    int got = 0; pthread_mutex_lock(&g_pkrd_mx); int k = 0;
+    for (; k < g_npkrd; k++) if (g_pkrd[k].fam == e->fam && !memcmp(g_pkrd[k].a, e->addr, 16)) break;
+    if (k == g_npkrd) { if (g_npkrd < 2048) { g_pkrd[k].fam = e->fam; memcpy(g_pkrd[k].a, e->addr, 16); g_pkrd[k].st = 0; g_npkrd++; pthread_cond_signal(&g_pkrd_cv); } }
+    else if (g_pkrd[k].st == 1) { snprintf(out, on, "%s", g_pkrd[k].name); got = 1; }
+    pthread_mutex_unlock(&g_pkrd_mx); return got; }
+static int g_pk_want_rdns;                                   // (this /packets.json request asked for names; under pk_json's lock)
 static void pk_peer_json(StBuf* s, const PkEv* e) {
-    char peer[80] = "", host[48], ip[64];
+    char peer[80] = "", host[48], ip[64], who[64], rn[128];
     if (e->fam) { inet_ntop(e->fam == 6 ? AF_INET6 : AF_INET, e->addr, ip, sizeof ip); snprintf(peer, sizeof peer, e->fam == 6 ? "[%s]:%u" : "%s:%u", ip, e->rport); }
     pk_host(e, host, sizeof host);
-    if (peer[0]) { sb_put(s, ",\"peer\":"); sb_str(s, peer); } if (host[0]) { sb_put(s, ",\"host\":"); sb_str(s, host); } }
+    if (peer[0]) { sb_put(s, ",\"peer\":"); sb_str(s, peer); } if (host[0]) { sb_put(s, ",\"host\":"); sb_str(s, host); }
+    if (peer[0] && pk_player(peer, who, sizeof who)) { sb_put(s, ",\"player\":"); sb_str(s, who); }
+    if (e->fam && g_pk_want_rdns && pk_rdns(e, rn, sizeof rn)) { sb_put(s, ",\"rdns\":"); sb_str(s, rn); } }
 enum { PKF_SPIN = 1, PKF_GREASED = 2 };
 static void pk_cpy(char* type, const char* s) { size_t n = strlen(s); if (n > 23) n = 23; memcpy(type, s, n); type[n] = 0; }
 static void pk_classify(const uint8_t* b, long n, char* type, uint8_t* fl) {
@@ -152,7 +193,7 @@ static void pk_agg_json(StBuf* s, const PkAgg* x, int first, double secs) { PkEv
 // GET /packets.json?since=<seq>&max=<n>[&skip1rtt=1][&wire=0][&game=0] (pktlog.c's; the game layer is not in the native app)
 static void pk_json(StBuf* s, const char* qs) {
     const char* v = strstr(qs, "since="); uint32_t since = v ? (uint32_t)strtoul(v + 6, 0, 10) : 0; v = strstr(qs, "max="); int mx = v ? atoi(v + 4) : 400; if (mx < 1) mx = 1; if (mx > 4000) mx = 4000;
-    int s1 = strstr(qs, "skip1rtt=1") != 0, nw = strstr(qs, "wire=0") != 0;
+    int s1 = strstr(qs, "skip1rtt=1") != 0, nw = strstr(qs, "wire=0") != 0; g_pk_want_rdns = strstr(qs, "rdns=1") != 0;
     uint32_t top = __atomic_load_n(&g_pk_seq, __ATOMIC_ACQUIRE); uint32_t lo = top > PK_N - 64 ? top - (PK_N - 64) : 1; if (since + 1 > lo) lo = since + 1;
     sb_put(s, "{\"seq\":%u,\"on\":%s,\"game\":{\"want\":false,\"on\":false,\"types\":0,\"native\":\"not in the native app yet\"},\"events\":[", top, g_pk_on ? "true" : "false");
     static uint32_t pick[4000]; int np = 0; PkEv e;

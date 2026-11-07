@@ -132,7 +132,12 @@ static void nst_on_line(const char* p, size_t n) {
         const char* c = strchr(l, ':'); if (c) { c++; while (*c == ' ') c++; size_t k = 0; while (c[k] && c[k] != ',' && k + 1 < sizeof g_loading) { g_loading[k] = c[k]; k++; } g_loading[k] = 0; }
         g_gameplay_t0 = 0; g_hb_map_recheck = 1; return;
     }
-    if (!strncmp(l, "[host] stopping", 15) || !strncmp(l, "[menus] open", 12)) { g_gameplay_t0 = 0; return; }
+    // out of a match: the app's own game state ("[switch] game Idle / Loading", "leaving the game"). NOT "[menus] open":
+    // the in-game menu (scoreboard, settings) logs that too, and the page used to drop out of the match there (2026-11-07)
+    if (!strncmp(l, "[host] stopping", 15) || !strncmp(l, "[switch] leaving the game", 25) || (!strncmp(l, "[switch] game ", 14) && strncmp(l + 14, "Playing", 7))) { g_gameplay_t0 = 0; return; }
+    // "[online] peer 0x<id> at <ip>:<port>: rtt ..." (every few seconds per peer): which session peer an address is
+    if (!strncmp(l, "[online] peer 0x", 16)) { char* at = strstr(l, " at "); if (at) { uint64_t id = strtoull(l + 16, 0, 16); char ip[64]; size_t k = 0; const char* q = at + 4;
+            while (*q && *q != ' ' && k + 1 < sizeof ip) ip[k++] = *q++; ip[k] = 0; if (k && ip[k - 1] == ':') ip[k - 1] = 0; pk_peer_note(id, ip); } return; }
     // chat: "[chat] line [<channel>] <name> (<id>): <text>", "[chat] line [SERVER #...] <text>", "[chat] line [NOTICE] <text>"
     if (!strncmp(l, "[chat] line [", 13)) {
         char* ch = l + 13; char* cb = strchr(ch, ']'); if (!cb) return; *cb = 0; char* rest = cb + 1; while (*rest == ' ') rest++;

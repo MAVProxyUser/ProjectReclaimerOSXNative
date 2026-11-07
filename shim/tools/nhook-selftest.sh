@@ -2,7 +2,7 @@
 # Offline test of the native hook's packet log (shim/native/nnet.c): a small program sends UDP datagrams (a QUIC-looking
 # long header, a short header, a plaintext tag) and opens a TCP connection with nhook.dylib injected
 # (NHOOK_SELFTEST=1 starts the stats server without the app, on NHOOK_STATS_HTTP, default 8799 here), then reads
-# /packets.json and checks the records. No game, no network beyond 127.0.0.1.
+# /packets.json (with ?rdns=1: 127.0.0.1 must come back as localhost) and checks the records. No game, no network beyond 127.0.0.1.
 set -e
 cd "$(dirname "$0")/../.."
 bash shim/native/build.sh >/dev/null
@@ -34,14 +34,16 @@ clang -O1 -o "$T/t" "$T/t.c"
 PORT=${NHOOK_STATS_HTTP:-8799}
 NHOOK_SELFTEST=1 NHOOK_STATS_HTTP=$PORT DYLD_INSERT_LIBRARIES="$PWD/shim/build/nhook.dylib" "$T/t" 2>"$T/err" &
 P=$!; sleep 1.5
-curl -s -m 3 "http://127.0.0.1:$PORT/packets.json?max=50" > "$T/pk.json" || true
+curl -s -m 3 "http://127.0.0.1:$PORT/packets.json?max=50&rdns=1" > /dev/null || true   # (queues the reverse lookups)
+sleep 0.5; curl -s -m 3 "http://127.0.0.1:$PORT/packets.json?max=50&rdns=1" > "$T/pk.json" || true
 wait $P || true
 python3 - "$T/pk.json" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1])); ev = d['events']; types = [(e['dir'], e['type']) for e in ev]
 want = [('tx', 'quic-initial'), ('tx', 'quic-1rtt'), ('tx', 'tag MCH1'), ('rx', 'quic-initial'), ('rx', 'quic-1rtt'), ('rx', 'tag MCH1'), ('tx', 'tcp-connect'), ('tx', 'tcp-close')]
 bad = [w for w in want if w not in types]
-for e in ev: print(' ', e['dir'], e['type'], e['len'], e.get('peer', ''))
+for e in ev: print(' ', e['dir'], e['type'], e['len'], e.get('peer', ''), e.get('rdns', ''))
+if not any(e.get('rdns') == 'localhost' for e in ev): bad.append(('reverse DNS of 127.0.0.1', 'missing'))
 tc = [e for e in ev if e['type'] == 'tcp-close']
 if tc and tc[0]['len'] != 5: bad.append(('tcp bytes', tc[0]['len']))
 print('PASS' if not bad else 'FAIL: missing %s' % bad); sys.exit(1 if bad else 0)
