@@ -190,3 +190,169 @@ _nh_opus_shim:
     mov  x3, x26
     ldr  x4, [sp, #0x98]     // decode's own return address (the stub saved x30 there): only the mixer's call counts
     b    _nh_on_opus
+
+// Skip-capable variants (2026-11-07, the host tools: shim/native/nhost.c). The handler returns int: 0 = run the function
+// as usual (the displaced instruction(s), then the rest); nonzero = the handler did the function's work itself (its result
+// in the guest context, the guest return address popped) and the stub RETURNS to the function's caller at once. The stub's
+// own tail (from _displaced) is also callable as a function: it runs the ORIGINAL (nhost.c's around-hook on the shape
+// builder calls it, then post-processes). x16 / x17 (intra-procedure scratch) are not preserved.
+// _nh_tps: on the app's own code (text hook: FOUR displaced instructions, not PC-relative).
+    .p2align 4
+    .globl _nh_tps_start, _nh_tps_displaced, _nh_tps_handler, _nh_tps_return, _nh_tps_end
+_nh_tps_start:
+    sub  sp, sp, #0x120
+    stp  x0, x1, [sp, #0x00]
+    stp  x2, x3, [sp, #0x10]
+    stp  x4, x5, [sp, #0x20]
+    stp  x6, x7, [sp, #0x30]
+    stp  x8, x9, [sp, #0x40]
+    stp  x10, x11, [sp, #0x50]
+    stp  x12, x13, [sp, #0x60]
+    stp  x14, x15, [sp, #0x70]
+    stp  x29, x30, [sp, #0x90]
+    stp  q0, q1, [sp, #0xa0]
+    stp  q2, q3, [sp, #0xc0]
+    stp  q4, q5, [sp, #0xe0]
+    stp  q6, q7, [sp, #0x100]
+    ldr  x16, _nh_tps_handler
+    blr  x16
+    mov  x17, x0
+    ldp  q6, q7, [sp, #0x100]
+    ldp  q4, q5, [sp, #0xe0]
+    ldp  q2, q3, [sp, #0xc0]
+    ldp  q0, q1, [sp, #0xa0]
+    ldp  x29, x30, [sp, #0x90]
+    ldp  x14, x15, [sp, #0x70]
+    ldp  x12, x13, [sp, #0x60]
+    ldp  x10, x11, [sp, #0x50]
+    ldp  x8, x9, [sp, #0x40]
+    ldp  x6, x7, [sp, #0x30]
+    ldp  x4, x5, [sp, #0x20]
+    ldp  x2, x3, [sp, #0x10]
+    ldp  x0, x1, [sp, #0x00]
+    add  sp, sp, #0x120
+    cbnz x17, 1f
+_nh_tps_displaced:
+    nop
+    nop
+    nop
+    nop
+    ldr  x16, _nh_tps_return
+    br   x16
+1:  ret
+    .p2align 3
+_nh_tps_handler:
+    .quad 0
+_nh_tps_return:
+    .quad 0
+_nh_tps_end:
+
+// _nh_tpls: on a lifted halo3 function's code-table entry (ONE displaced instruction: its `stp x29, x30, [sp, #-16]!`).
+    .p2align 4
+    .globl _nh_tpls_start, _nh_tpls_displaced, _nh_tpls_handler, _nh_tpls_return, _nh_tpls_end
+_nh_tpls_start:
+    sub  sp, sp, #0x120
+    stp  x0, x1, [sp, #0x00]
+    stp  x2, x3, [sp, #0x10]
+    stp  x4, x5, [sp, #0x20]
+    stp  x6, x7, [sp, #0x30]
+    stp  x8, x9, [sp, #0x40]
+    stp  x10, x11, [sp, #0x50]
+    stp  x12, x13, [sp, #0x60]
+    stp  x14, x15, [sp, #0x70]
+    stp  x29, x30, [sp, #0x90]
+    stp  q0, q1, [sp, #0xa0]
+    stp  q2, q3, [sp, #0xc0]
+    stp  q4, q5, [sp, #0xe0]
+    stp  q6, q7, [sp, #0x100]
+    ldr  x16, _nh_tpls_handler
+    blr  x16
+    mov  x17, x0
+    ldp  q6, q7, [sp, #0x100]
+    ldp  q4, q5, [sp, #0xe0]
+    ldp  q2, q3, [sp, #0xc0]
+    ldp  q0, q1, [sp, #0xa0]
+    ldp  x29, x30, [sp, #0x90]
+    ldp  x14, x15, [sp, #0x70]
+    ldp  x12, x13, [sp, #0x60]
+    ldp  x10, x11, [sp, #0x50]
+    ldp  x8, x9, [sp, #0x40]
+    ldp  x6, x7, [sp, #0x30]
+    ldp  x4, x5, [sp, #0x20]
+    ldp  x2, x3, [sp, #0x10]
+    ldp  x0, x1, [sp, #0x00]
+    add  sp, sp, #0x120
+    cbnz x17, 1f
+_nh_tpls_displaced:
+    nop
+    ldr  x16, _nh_tpls_return
+    br   x16
+1:  ret
+    .p2align 3
+_nh_tpls_handler:
+    .quad 0
+_nh_tpls_return:
+    .quad 0
+_nh_tpls_end:
+
+// _nh_ba: AFTER a lifted halo3 function's BODY (the code its wrapper `bl`s and other lifted code calls directly: x2 = guest
+// context, x3 = guest rsp, x4..x7 = rcx, rdx, r8, r9, result in x2). The body's first instruction (`stp x29, x30, [sp,
+// #-16]!`) becomes `b <this stub>`; the stub runs the original (that instruction, then body+4), then handler(a) with
+// a[0..5] = the incoming x2..x7, a[6..9] = guest stack arguments 5-8 (rsp+0x28..0x40, read before the call), a[10] = the
+// result; every caller-saved register comes back as the original left it. (nhook.c body_hook_after)
+    .p2align 4
+    .globl _nh_ba_start, _nh_ba_displaced, _nh_ba_handler, _nh_ba_return, _nh_ba_end
+_nh_ba_start:
+    stp  x29, x30, [sp, #-16]!
+    mov  x29, sp
+    sub  sp, sp, #0x180
+    stp  x2, x3, [sp, #0x00]
+    stp  x4, x5, [sp, #0x10]
+    stp  x6, x7, [sp, #0x20]
+    ldp  x16, x17, [x3, #0x28]
+    stp  x16, x17, [sp, #0x30]
+    ldp  x16, x17, [x3, #0x38]
+    stp  x16, x17, [sp, #0x40]
+    bl   1f
+    str  x2, [sp, #0x50]
+    stp  x0, x1, [sp, #0x60]
+    stp  x2, x3, [sp, #0x70]
+    stp  x4, x5, [sp, #0x80]
+    stp  x6, x7, [sp, #0x90]
+    stp  x8, x9, [sp, #0xa0]
+    stp  x10, x11, [sp, #0xb0]
+    stp  x12, x13, [sp, #0xc0]
+    stp  x14, x15, [sp, #0xd0]
+    stp  q0, q1, [sp, #0xe0]
+    stp  q2, q3, [sp, #0x100]
+    stp  q4, q5, [sp, #0x120]
+    stp  q6, q7, [sp, #0x140]
+    mov  x0, sp
+    ldr  x16, _nh_ba_handler
+    blr  x16
+    ldp  q6, q7, [sp, #0x140]
+    ldp  q4, q5, [sp, #0x120]
+    ldp  q2, q3, [sp, #0x100]
+    ldp  q0, q1, [sp, #0xe0]
+    ldp  x14, x15, [sp, #0xd0]
+    ldp  x12, x13, [sp, #0xc0]
+    ldp  x10, x11, [sp, #0xb0]
+    ldp  x8, x9, [sp, #0xa0]
+    ldp  x6, x7, [sp, #0x90]
+    ldp  x4, x5, [sp, #0x80]
+    ldp  x2, x3, [sp, #0x70]
+    ldp  x0, x1, [sp, #0x60]
+    add  sp, sp, #0x180
+    ldp  x29, x30, [sp], #16
+    ret
+1:
+_nh_ba_displaced:
+    nop
+    ldr  x16, _nh_ba_return
+    br   x16
+    .p2align 3
+_nh_ba_handler:
+    .quad 0
+_nh_ba_return:
+    .quad 0
+_nh_ba_end:

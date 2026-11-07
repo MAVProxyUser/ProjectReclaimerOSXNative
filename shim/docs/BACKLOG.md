@@ -21,11 +21,11 @@ done / fixed / closed; #47's pending live check passed in the native app 2026-11
 | N10 | **Medals in the feed** | DONE 2026-11-07: medals (statistic 63 + i, the app's 112-medal table) in the feed and the player details; live check left |
 | N11 | **Hitboxes on dead bodies** | DONE 2026-11-07: dead bodies get no hitboxes (NHOOK_HB_DEAD=1 = grey) |
 | N12 | **A native dedicated server test** | DONE 2026-11-07: shim/tools/native-dedicated.sh (local-only config) with nhook; a test client joined it; both pages right |
+| N13 | **Host tools on the native app** (user, 2026-11-07: "port the host tools too") | DONE 2026-11-07: teleport (next to / point / delta / spots), boundaries off, invisible walls off, speed; checked in a hosted match and on our native dedicated server with a joined client (FIXES.md "the host tools on the native app"); tpnext not run live (needs two players) |
 
 Not ported from the loader (wanted? the user decides): auto-vote (#50); graphics quality from the page (#68; the app's own
-Settings menu has it); the host tools -- boundaries / invisible walls off (#18), speed (#26), teleport and the map spots (#73);
-the sparring aim (#17) and the walker (#32); the page's mic switch (#22: the app runs its own microphone); the late camera
-update (mouse only). The page hides every control the native app does not serve.
+Settings menu has it); the sparring aim (#17) and the walker (#32); the page's mic switch (#22: the app runs its own microphone); the late camera
+update (mouse only). The page hides every control the native app does not serve. The host tools (#18, #26, #73) came over 2026-11-07: N13.
 
 ## Closed — the loader era (the 0.9 Windows client under shim/src/peload.c)
 

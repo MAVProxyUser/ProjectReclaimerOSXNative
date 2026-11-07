@@ -756,6 +756,7 @@ static void st_engine_events(const StPlayer* pl, int np) {
 }
 
 #include "nspawns.c"   // weapon / vehicle / power-up spawns and pickups (the loader's st_spawns)
+#include "nhost.c"     // the host tools: teleport, boundaries / invisible walls off, speed
 // ---- the hook cost meter: rates per second, the fps estimate, and the real on/off measurement (nhcost.h) ------------------
 // A measurement (POST /control?do=hookab&h=<id>[&secs=36][&per=3]; do=hookab&stop=1 ends it) switches ONE hook (g_hc_off) or
 // overlay feature (its g_nov_on bit; "overlay" = every feature you had on) on and off in turns of `per` seconds, starting
@@ -1009,9 +1010,9 @@ static void st_snapshot(StBuf* s) {
       if (__atomic_exchange_n(&g_match_pending, 0, __ATOMIC_ACQ_REL)) st_event_pos(0, "game", m, 0, 0, -1, -1, 0, "Match started: %s", g_loading[0] ? g_loading : m[0] ? m : "?");
       if (t0) st_maptop_ensure(mp, m); }
     sb_put(s, ",\"zone_show\":%d,\"weak_show\":%d,\"overlay\":{", nz_show(), g_nov_wk); nov_json(s);
-    sb_put(s, ",\"teleport\":false,\"host\":false,\"tp_forward\":false,\"controls\":%s,\"spar\":false,\"spar_aim\":-1.0,\"spar_available\":false,"
-              "\"bounds_off\":null,\"invwalls_off\":null,\"mic\":\"off\",\"mic_in_use\":false,\"speed_idx\":-1,\"quality\":\"\"", st_controls_ok() ? "true" : "false");
-    sb_put(s, ",\"spots\":[]}");
+    sb_put(s, ",\"controls\":%s,\"spar\":false,\"spar_aim\":-1.0,\"spar_available\":false,\"mic\":\"off\",\"mic_in_use\":false,\"quality\":\"\"", st_controls_ok() ? "true" : "false");
+    ht_overlay_json(s, m);   // teleport / host / bounds_off / invwalls_off / speed_idx / spots (nhost.c)
+    sb_put(s, "}");
     if (strcmp(m, g_trk_map)) { snprintf(g_trk_map, sizeof g_trk_map, "%s", m); g_ntrk = 0; g_nbip = 0; sb_reset(); }   // a new map: new match stats
     pthread_mutex_lock(&g_hm_mx); snprintf(g_hm_cur, sizeof g_hm_cur, "%s", m); if (g_hm.dirty && now - g_hm.saved > 30) { hm_save(); g_hm.saved = now; } pthread_mutex_unlock(&g_hm_mx);
     static uint8_t tab[HB_MAXOBJ * 0x18]; int hi = 0; uint64_t arr = hb_object_array(); uint8_t hdr[0x60];
@@ -1087,7 +1088,7 @@ static void st_snapshot(StBuf* s) {
                 if (vd && hb_read(vd, &df, 4) && *(const int16_t*)(d + 0x24E) == 0) { snprintf(w->how, sizeof w->how, "%s", hb_tag_name(df)); st_nice_case(w->how); }   // the driver: a splatter is possible
                 else { int ws = *(const int8_t*)(d + 0x262); const uint32_t* wp = (const uint32_t*)(d + 0x268); uint64_t wd = (ws >= 0 && ws < 4) ? ST_DATUM(wp[ws]) : 0;
                        if (wd && hb_read(wd, &df, 4)) { snprintf(w->how, sizeof w->how, "%s", hb_tag_name(df)); st_nice_case(w->how); } } } }
-        int you = g_nick[0] && !strcmp(pl[k].name, g_nick);
+        int you = g_nick[0] && !strcmp(pl[k].name, g_nick); if (you) g_ht_my_slot = pl[k].slot;
         char pip[64] = "", prd[128] = ""; for (int q = 0; q < nss; q++) if (!strcmp(ss[q].name, pl[k].name)) { if (pk_addr_of(ss[q].voice, pip, sizeof pip)) pk_rdns_str(pip, prd, sizeof prd); break; }
         sb_put(s, "%s{\"name\":", first ? "" : ","); first = 0; sb_str(s, pl[k].name); sb_put(s, ",\"slot\":%d", pl[k].slot);
         if (pip[0]) { sb_put(s, ",\"ip\":"); sb_str(s, pip); } if (prd[0]) { sb_put(s, ",\"rdns\":"); sb_str(s, prd); }
@@ -1259,6 +1260,7 @@ static int st_control(const char* act, const char* qs) {
     if (!strcmp(act, "forensic")) return fx_control(qs);       // archive / voice audio / consent (forensic.c)
     if (!strcmp(act, "hookab")) return hc_control(qs);           // the hook cost meter's on/off measurement
     if (!strcmp(act, "pktgame")) return pk_control(qs);           // the Packets window's game layer (nnet.c)
+    { int r = ht_control(act, qs); if (r >= 0) return r; }         // the host tools (nhost.c)
     if (!strcmp(act, "hookset")) return hc_set(qs);               // ... and its per-hook switches
     if (!strcmp(act, "mute") || !strcmp(act, "unmute")) { voice_init(); const char* v = strstr(qs, "voice="); unsigned long long id = v ? strtoull(v + 6, 0, 16) : 0;
         if (!g_set_muted || !id) return 0; g_set_muted(id, !strcmp(act, "mute")); uint64_t mu[64];

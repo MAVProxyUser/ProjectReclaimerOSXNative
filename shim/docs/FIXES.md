@@ -2042,6 +2042,45 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   results-feed-test.sh (a backed Double Kill, an unbacked Sniper Kill dropped, an objective medal, 5 at once, Kill / Assist).
 - **nhook overlay: no hitboxes on dead bodies** (2026-11-07; noverlay.c nov_build_body / nov_hitbox) — WHY: a body lying on
   the ground drew as red hitboxes: clutter. HOW: dead bipeds get no hitboxes; NHOOK_HB_DEAD=1 draws them grey.
+- **nhook: the host tools on the native app** (2026-11-07; new shim/native/nhost.c, nstats.c st_control / snapshot overlay,
+  stats_page.html) — WHY: the user asked to port the loader's host tools (teleport next to a player / to a point / by a
+  delta / to the map's spots, boundaries off, invisible walls off, speed). HOW: the page's controls (do=tpnext, tpto, tpby,
+  explore, bounds, invwalls, speed; host only: halo3's game_globals +0x11 is 5 or 1) queue one request; it runs on the
+  engine thread after halo3's game tick runner (halo3+0xeefa8, a body hook; a dedicated server runs only that) or, as a
+  fallback, at the entry of the app's per-frame function (0.10.0 0x1029ed000, a text hook; first words checked), inside
+  halo3's game-state lock (0x12c948 / 0x12c9a0, recursion-aware). Teleport = halo3's own (0x259410(object, pos, forward, up,
+  1); unit_exit_vehicle 0x3a3c4c first, scenario_location_from_point 0x9bc78 for "inside the structure" at +0.3 / +1.2, as
+  the loader). halo3's network layer is not there natively (its simulation entity table, TLS block +0x240, is NULL; the
+  app has its own netcode) but game_globals +0x11 still says host, so halo3's "mark for a network update" (0x1ec3c, called
+  by teleport and disconnect-from-map) read that NULL table: signal 11 at 0x48. For the call halo3 is told it runs a local
+  game (1), host (5) comes back right after (nhost.c ht_call; NHOOK_HOST_KEEPMODE=1 = no switch = the crash). Boundaries =
+  text hooks on the app's own kill-volume test (the code-table branch of 0x1b8e00: answered "not in a kill volume, in a safe
+  zone") and player soft-ceiling test (0x1bac00: none); invisible walls = a body hook after halo3's Havok polygon-shape
+  builder (0x21b4d8) moving player-clip surfaces' vertices to z = -20000 (the loader's way); speed = the variant's base
+  player speed trait (game_globals +0x1608 +0x134 +0x10). Requests take &slot=<player> (a dedicated server has no player
+  of its own; without one it says so). Checked live: a hosted Guardian match (teleport by 2 units stays; boundaries off ->
+  fell through the kill volume alive, back on -> dead; speed 200% walks 4.95 units/s vs 2.58 at 100% with the app's
+  walk_to test request; 45 shapes built while walking, no invisible surfaces near Guardian's spawn) and our native
+  dedicated server with a joined test client (the server moved the player 3 units, the client saw itself there; kill
+  volume alive with boundaries off, dead once on). tpnext (next to another player) needs two players: not run live.
+- **nhook: hooks on a lifted function's body** (2026-11-07; nhook.c body_of / body_hook_after, stub.S _nh_ba) — WHY: entry
+  hooks on the code table see only calls through the table; lifted halo3 code calls lifted halo3 code DIRECTLY at the
+  body its wrapper calls, so the shape-builder hook saw 0 calls in a live test. HOW: the wrapper (stp / mov / stp, ldr
+  w,[x0,#0x290], ...) passes x2 = the guest context, x3 = guest rsp, x4..x7 = rcx, rdx, r8, r9 to `bl body` and stores x2
+  as rax; body_of finds that `bl`, checks the body starts with `stp x29, x30, [sp, #-16]!`, and one atomic `b <stub>`
+  replaces it (MAP_JIT, pthread_jit_write_protect_np); the stub runs the original first, then the handler with the
+  incoming registers, stack arguments 5-8 and the result, and returns every caller-saved register as the original left it.
+- **nhook: text hooks stop the other threads while a page is patched** (2026-11-07; nhook.c text_hook_x, nh_world_stop /
+  nh_world_go) — WHY: text hooks used to go in only at startup; the camera hook and the host tools now install while the
+  game runs, and a 16 KB code page is not executable while it is written: a thread running anywhere in it faulted (signal
+  10 at an address of the app's frame function). HOW: every other thread is suspended for those microseconds (task_threads
+  + thread_suspend; no lock taken in between); a thread stopped inside the four patched instructions makes it resume and
+  try again (up to 50 times). NHOOK_TEXT_NOSTOP=1 = old.
+- **nhook: crash frames to halo3 functions** (2026-11-07; nhook.c NHOOK_CODETAB_DUMP / NHOOK_DUMP_ENTRY, new
+  shim/tools/native-frames.py) — WHY: the app's crash report gives host addresses in its JIT region only. HOW:
+  NHOOK_CODETAB_DUMP=<file> writes the code table ("halo3 rva, host entry"); native-frames.py <file> <log|addresses> names
+  each frame halo3+<rva> + offset. The JIT layout is the same in every launch, only shifted: another process's addresses map
+  with one known anchor (e.g. its [nhook] hook line). NHOOK_DUMP_ENTRY=<rva>[:<words>] logs a lifted function's first words.
 - **nhook Packets: the dedicated server says "server"** (2026-11-07; nnet.c st_session g_st_host_id, pk_player) — WHY: the
   user wants the DNS name and the player's name by an address where they apply; on a dedicated server the one address is the
   server, which is no player, so it had nothing. HOW: the session's host peer id is kept; its address, when no player owns it,

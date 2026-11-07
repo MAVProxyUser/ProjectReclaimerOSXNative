@@ -178,6 +178,15 @@ hitboxes and whether the server then registered damage; the Aimbot? column flags
 Hook cost: the page's Hook cost panel (nhcost.h; FIXES.md "the hook cost meter"): every hook and overlay part times itself,
 and "measure" switches one off and on in turns to give its real fps cost.
 
+Host tools (2026-11-07, shim/native/nhost.c; FIXES.md "the host tools on the native app"): teleport (next to a player, to a
+clicked point, by a delta, to the map's spots), boundaries off, invisible walls off, speed 200%, on the game's host or our
+native dedicated server (requests take &slot=<player> there). halo3's own network layer does not exist natively: halo3 code
+that marks objects for a network update (0x1ec3c) faults on its NULL table unless halo3 is told it runs a local game for
+the call. Lifted code calls lifted code directly at the BODY its wrapper calls (x2 = context, x3 = guest rsp, x4..x7 = rcx,
+rdx, r8, r9, result x2): body_hook_after hooks there; code-table entry hooks see only calls through the table. The app's
+per-frame function runs from halo3's render loop (0xb19bc, a client only); a dedicated server runs halo3's main loop 0xb2538
+-> game tick runner 0xeefa8 -> 0xef120. Crash frames: NHOOK_CODETAB_DUMP + shim/tools/native-frames.py.
+
 Not yet: the packet log's game layer (halo3 message names; 0.10's wire protocol is the app's own).
 
 ### Kills (static RE of halo3.dll)

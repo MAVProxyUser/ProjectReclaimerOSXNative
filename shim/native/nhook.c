@@ -157,7 +157,32 @@ static void* pkg_probe(void* a) {
             for (int r = 0; r < 30; r++) { sleep(10); char b[600]; int k = 0; for (int i = 0; i < PKC_N; i++) k += snprintf(b + k, sizeof b - (size_t)k, " %s %lu,", nm[i], g_pkc[i]); nlog("[nhook] [pkg] calls:%s", b); } }
         return 0; }
     nlog("[nhook] [pkg] halo3's message table never appeared"); return 0; }
-static int hook_install(const char* name, uint32_t rva, nh_handler h) {
+// Call a lifted halo3 function from a handler that holds the engine thread's guest context (2026-11-07, the host tools:
+// nhost.c). A lifted wrapper (e.g. halo3+0x259410's) takes x0 = the context, reads rcx / rdx / r8 / r9 at +0x08 / +0x10 /
+// +0x40 / +0x48 and the guest stack at +0x20, runs, stores rax at +0x00 and pops the return address (rsp += 8). So: save
+// the context's registers (the first 0x280 bytes: the general registers, then the vector ones -- everything below the event
+// word at +0x290), set the arguments, a fresh guest stack frame 1 KB below the current one (an entry handler's guest stack
+// below rsp is free) with a return-address slot and arguments 5.. at +0x28, call, read rax, restore. Pointer arguments are
+// plain host addresses (guest memory is this process's memory).
+static uint64_t nh_call(uint64_t* ctx, uint32_t rva, int n, const uint64_t* a) {
+    uint64_t e = host_of(rva); if (!e || !ctx) return ~0ull;
+    static int lg = -1; if (lg < 0) lg = getenv("NHOOK_HOST_LOG") != 0;
+    if (lg) nlog("[nhook] [call] halo3+0x%x (host 0x%llx): %d args %llx %llx %llx %llx %llx; ctx rsp 0x%llx tls 0x%llx", rva, (unsigned long long)e, n,
+                 (unsigned long long)(n > 0 ? a[0] : 0), (unsigned long long)(n > 1 ? a[1] : 0), (unsigned long long)(n > 2 ? a[2] : 0), (unsigned long long)(n > 3 ? a[3] : 0), (unsigned long long)(n > 4 ? a[4] : 0),
+                 (unsigned long long)ctx[4], (unsigned long long)ctx[0x2d8 / 8]);
+    static __thread uint64_t save[0x280 / 8]; memcpy(save, ctx, sizeof save);
+    uint64_t rsp = ((ctx[4] - 0x400) & ~0xfull) - 8;                              // (as after a call: rsp % 16 == 8)
+    *(volatile uint64_t*)(uintptr_t)rsp = 0;                                     // the return-address slot
+    for (int i = 4; i < n; i++) *(volatile uint64_t*)(uintptr_t)(rsp + 0x28 + 8 * (uint64_t)(i - 4)) = a[i];
+    if (n > 0) ctx[1] = a[0]; if (n > 1) ctx[2] = a[1]; if (n > 2) ctx[8] = a[2]; if (n > 3) ctx[9] = a[3];
+    ctx[4] = rsp;
+    ((void (*)(uint64_t*))(uintptr_t)e)(ctx);
+    uint64_t r = ctx[0]; if (lg) nlog("[nhook] [call] halo3+0x%x returned 0x%llx", rva, (unsigned long long)r); memcpy(ctx, save, sizeof save); return r;
+}
+extern char nh_tpls_start[], nh_tpls_displaced[], nh_tpls_handler[], nh_tpls_return[], nh_tpls_end[];
+static int hook_install_x(const char* name, uint32_t rva, void* h, int skip, uint64_t* stub_out) {   // skip: stub.S _nh_tpls (the handler may do the function's work)
+    char* T0 = skip ? nh_tpls_start : nh_tpl_start; char* TE = skip ? nh_tpls_end : nh_tpl_end; char* TD = skip ? nh_tpls_displaced : nh_tpl_displaced;
+    char* TH = skip ? nh_tpls_handler : nh_tpl_handler; char* TR = skip ? nh_tpls_return : nh_tpl_return;
     uint64_t e = host_of(rva); uint32_t w[4];
     if (!e || rd(e, w, 16)) { nlog("[nhook] hook %s: halo3+0x%x not lifted", name, rva); return -1; }
     // An entry that is one `b` (object_delete, halo3+0x342ed8: the app replaced the function with its own code, the lifted
@@ -169,14 +194,14 @@ static int hook_install(const char* name, uint32_t rva, nh_handler h) {
         nlog("[nhook] hook %s: halo3+0x%x is a branch to 0x%llx: hooking the branch", name, rva, (unsigned long long)ret); }
     else if (w[0] != 0xa9bf7bfd || w[1] != 0x910003fd || w[2] != 0xa9bf53f3 || (w[3] & 0xffffffe0) != 0xb9429000) {   // ldr w<n>,[x0,#0x290]
         nlog("[nhook] hook %s: halo3+0x%x entry %08x %08x %08x %08x is not a lifted wrapper: refused", name, rva, w[0], w[1], w[2], w[3]); return -1; }
-    size_t tl = nh_tpl_end - nh_tpl_start;
+    size_t tl = TE - T0;
     uint8_t* st = near_page(e, 0x4000);              // its own page: a page that holds a live stub is never made writable again
     if (!st) { nlog("[nhook] hook %s: no stub page near 0x%llx", name, (unsigned long long)e); return -1; }
     int64_t d = (int64_t)((uint64_t)st - e);
-    memcpy(st, nh_tpl_start, tl);
-    memcpy(st + (nh_tpl_displaced - nh_tpl_start), &displaced, 4);            // the displaced stp x29,x30,[sp,#-16]! (or a nop for a branch)
+    memcpy(st, T0, tl);
+    memcpy(st + (TD - T0), &displaced, 4);            // the displaced stp x29,x30,[sp,#-16]! (or a nop for a branch)
     uint64_t hv = (uint64_t)h, rv = ret;
-    memcpy(st + (nh_tpl_handler - nh_tpl_start), &hv, 8); memcpy(st + (nh_tpl_return - nh_tpl_start), &rv, 8);
+    memcpy(st + (TH - T0), &hv, 8); memcpy(st + (TR - T0), &rv, 8);
     mach_vm_protect(mach_task_self(), (mach_vm_address_t)st, 0x4000, 0, VM_PROT_READ | VM_PROT_EXECUTE);
     sys_icache_invalidate(st, tl);
     uint32_t b = 0x14000000u | ((uint32_t)(d >> 2) & 0x03ffffffu);
@@ -185,14 +210,46 @@ static int hook_install(const char* name, uint32_t rva, nh_handler h) {
     pthread_jit_write_protect_np(1);
     sys_icache_invalidate((void*)e, 4);
     nlog("[nhook] hook %s: halo3+0x%x (host 0x%llx) -> stub 0x%llx", name, rva, (unsigned long long)e, (unsigned long long)st);
+    if (stub_out) *stub_out = (uint64_t)st + (uint64_t)(TD - T0);   // (the stub's tail: runs the original)
     return 0;
 }
+static int hook_install(const char* name, uint32_t rva, nh_handler h) { return hook_install_x(name, rva, (void*)h, 0, 0); }
+
+// ---- hooks on a lifted function's BODY (2026-11-07) ------------------------------------------------------------------
+// Entry hooks see only calls through the code table; lifted code calls lifted code DIRECTLY, at the body its wrapper `bl`s
+// (wrapper: stp/mov/stp, ldr w,[x0,#0x290], ..., x2 = context, x3 = guest rsp, x4..x7 = rcx, rdx, r8, r9, `bl body`,
+// str x2 -> guest rax). body_hook_after puts one `b <stub>` over the body's first instruction (it must be `stp x29, x30,
+// [sp, #-16]!`; one atomic word on the MAP_JIT code, like hook_install_x), so every caller is seen; stub.S _nh_ba runs the
+// original first, then h(a) (a[0..5] = x2..x7, a[6..9] = stack arguments 5-8, a[10] = the result).
+extern char nh_ba_start[], nh_ba_displaced[], nh_ba_handler[], nh_ba_return[], nh_ba_end[];
+static uint64_t body_of(uint32_t rva) {   // the body a lifted wrapper calls (0 = not that shape)
+    uint64_t e = host_of(rva); uint32_t w[24]; if (!e || rd(e, w, sizeof w) || w[0] != 0xa9bf7bfd || w[1] != 0x910003fd) return 0;
+    for (int i = 4; i < 24; i++) if ((w[i] & 0xfc000000u) == 0x94000000u) {
+        uint64_t b = e + 4u * (unsigned)i + (uint64_t)((int64_t)((int32_t)(w[i] << 6) >> 6) * 4); uint32_t b0 = 0;
+        return rd(b, &b0, 4) || b0 != 0xa9bf7bfd ? 0 : b; }
+    return 0; }
+static int body_hook_after(const char* name, uint32_t rva, void (*h)(uint64_t*)) {
+    uint64_t b = body_of(rva); if (!b) { nlog("[nhook] body hook %s: halo3+0x%x has no lifted body of the known shape: refused", name, rva); return -1; }
+    size_t tl = (size_t)(nh_ba_end - nh_ba_start); uint8_t* st = near_page(b, 0x4000);
+    if (!st) { nlog("[nhook] body hook %s: no stub page near 0x%llx", name, (unsigned long long)b); return -1; }
+    int64_t d = (int64_t)((uint64_t)st - b); if (d >= (1ll << 27) || d < -(1ll << 27)) { nlog("[nhook] body hook %s: stub out of branch range", name); return -1; }
+    memcpy(st, nh_ba_start, tl); uint32_t disp = 0xa9bf7bfd; memcpy(st + (nh_ba_displaced - nh_ba_start), &disp, 4);
+    uint64_t hv = (uint64_t)(uintptr_t)h, rv = b + 4; memcpy(st + (nh_ba_handler - nh_ba_start), &hv, 8); memcpy(st + (nh_ba_return - nh_ba_start), &rv, 8);
+    mach_vm_protect(mach_task_self(), (mach_vm_address_t)(uintptr_t)st, 0x4000, 0, VM_PROT_READ | VM_PROT_EXECUTE); sys_icache_invalidate(st, tl);
+    uint32_t br = 0x14000000u | ((uint32_t)(d >> 2) & 0x03ffffffu);
+    pthread_jit_write_protect_np(0); __atomic_store_n((uint32_t*)(uintptr_t)b, br, __ATOMIC_RELEASE); pthread_jit_write_protect_np(1);
+    sys_icache_invalidate((void*)(uintptr_t)b, 4);
+    nlog("[nhook] body hook %s: halo3+0x%x body 0x%llx -> stub 0x%llx", name, rva, (unsigned long long)b, (unsigned long long)(uintptr_t)st);
+    return 0; }
 
 // ---- hooks on the app's OWN code (its signed __TEXT: functions the app replaced, e.g. object_delete) --------------------
 // The app is signed ad hoc with no hardened runtime (codesign flags 0x2): its text pages are made writable as private copies
 // (VM_PROT_COPY), the function's first four instructions become `ldr x16, #8; br x16; .quad stub` and go to the stub
 // (stub.S _nh_tp4: handler(x0), then those four instructions, then back). Refused when one of them is PC-relative.
-// Installed once at startup. NHOOK_NO_TEXT_HOOKS=1 = none.
+// Installed at startup or later, while the game runs (the camera hook, host tools): the page is not executable while it is
+// patched, so every other thread is suspended for that moment (nh_world_stop: a thread running in the page would fault --
+// signal 10 at a frame-function address, 2026-11-07), and a thread stopped inside the four patched instructions makes it try
+// again (up to 50 times, 1 ms apart). Nothing between stop and resume may take a lock (no log, no malloc). NHOOK_NO_TEXT_HOOKS=1 = none.
 extern char nh_tp4_start[], nh_tp4_displaced[], nh_tp4_handler[], nh_tp4_return[], nh_tp4_end[];
 static int insn_pcrel(uint32_t w) {
     return (w & 0x1f000000u) == 0x10000000u            // adr / adrp
@@ -202,28 +259,58 @@ static int insn_pcrel(uint32_t w) {
         || (w & 0xff000010u) == 0x54000000u            // b.cond
         || (w & 0x3b000000u) == 0x18000000u;           // ldr (literal)
 }
+// Suspend every thread but this one (0 = done); *busy = some thread's pc lies in [lo, hi) (then they are resumed again).
+static int nh_world_stop(thread_act_array_t* th, mach_msg_type_number_t* n, uint64_t lo, uint64_t hi, int* busy) {
+    *busy = 0; if (task_threads(mach_task_self(), th, n) != KERN_SUCCESS) return -1;
+    thread_t me = mach_thread_self();
+    for (mach_msg_type_number_t i = 0; i < *n; i++) if ((*th)[i] != me) thread_suspend((*th)[i]);
+    for (mach_msg_type_number_t i = 0; i < *n && !*busy; i++) { if ((*th)[i] == me) continue;
+        arm_thread_state64_t s; mach_msg_type_number_t c = ARM_THREAD_STATE64_COUNT;
+        if (thread_get_state((*th)[i], ARM_THREAD_STATE64, (thread_state_t)&s, &c) != KERN_SUCCESS) continue;
+        uint64_t pc = (uint64_t)arm_thread_state64_get_pc(s); if (pc >= lo && pc < hi) *busy = 1; }
+    mach_port_deallocate(mach_task_self(), me); return 0;
+}
+static void nh_world_go(thread_act_array_t th, mach_msg_type_number_t n) {
+    thread_t me = mach_thread_self();
+    for (mach_msg_type_number_t i = 0; i < n; i++) { if (th[i] != me) thread_resume(th[i]); mach_port_deallocate(mach_task_self(), th[i]); }
+    mach_port_deallocate(mach_task_self(), me);
+    mach_vm_deallocate(mach_task_self(), (mach_vm_address_t)(uintptr_t)th, (mach_vm_size_t)n * sizeof(thread_act_t));
+}
 extern char nh_tpf_start[], nh_tpf_want[], nh_tpf_displaced[], nh_tpf_handler[], nh_tpf_return[], nh_tpf_end[];
-static int text_hook_t(const char* name, uint64_t f, nh_handler h, int filt, uint32_t want) {   // filt: _nh_tpf, the handler only for parameter id `want`
+extern char nh_tps_start[], nh_tps_displaced[], nh_tps_handler[], nh_tps_return[], nh_tps_end[];
+static int text_hook_x(const char* name, uint64_t f, void* h, int filt, uint32_t want, int skip, uint64_t* stub_out) {   // skip: stub.S _nh_tps   // filt: _nh_tpf, the handler only for parameter id `want`
     if (getenv("NHOOK_NO_TEXT_HOOKS")) return -1;
     uint32_t w[4]; if (rd(f, w, 16)) { nlog("[nhook] text hook %s: 0x%llx unreadable", name, (unsigned long long)f); return -1; }
     for (int i = 0; i < 4; i++) if (insn_pcrel(w[i])) { nlog("[nhook] text hook %s: instruction %d (%08x) is PC-relative: refused", name, i, w[i]); return -1; }
-    char* ts = filt ? nh_tpf_start : nh_tp4_start; char* te = filt ? nh_tpf_end : nh_tp4_end;
+    char* ts = filt ? nh_tpf_start : skip ? nh_tps_start : nh_tp4_start; char* te = filt ? nh_tpf_end : skip ? nh_tps_end : nh_tp4_end;
+    char* td = filt ? nh_tpf_displaced : skip ? nh_tps_displaced : nh_tp4_displaced, * th = filt ? nh_tpf_handler : skip ? nh_tps_handler : nh_tp4_handler, * tr = filt ? nh_tpf_return : skip ? nh_tps_return : nh_tp4_return;
     size_t tl = te - ts; mach_vm_address_t st = 0;
     if (mach_vm_allocate(mach_task_self(), &st, 0x4000, VM_FLAGS_ANYWHERE) != KERN_SUCCESS) return -1;
-    memcpy((void*)st, ts, tl); memcpy((uint8_t*)st + ((filt ? nh_tpf_displaced : nh_tp4_displaced) - ts), w, 16);
-    uint64_t hv = (uint64_t)h, rv = f + 16; memcpy((uint8_t*)st + ((filt ? nh_tpf_handler : nh_tp4_handler) - ts), &hv, 8); memcpy((uint8_t*)st + ((filt ? nh_tpf_return : nh_tp4_return) - ts), &rv, 8);
+    memcpy((void*)st, ts, tl); memcpy((uint8_t*)st + (td - ts), w, 16);
+    uint64_t hv = (uint64_t)h, rv = f + 16; memcpy((uint8_t*)st + (th - ts), &hv, 8); memcpy((uint8_t*)st + (tr - ts), &rv, 8);
     if (filt) memcpy((uint8_t*)st + (nh_tpf_want - ts), &want, 4);
     mach_vm_protect(mach_task_self(), st, 0x4000, 0, VM_PROT_READ | VM_PROT_EXECUTE); sys_icache_invalidate((void*)st, tl);
     uint64_t pg = f & ~0x3fffull, end = (f + 16 + 0x3fff) & ~0x3fffull;
-    kern_return_t kr = mach_vm_protect(mach_task_self(), pg, end - pg, 0, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
-    if (kr != KERN_SUCCESS) { nlog("[nhook] text hook %s: the page stays read-only (kr %d)", name, kr); return -1; }
     uint32_t patch[4] = {0x58000050u, 0xd61f0200u, (uint32_t)st, (uint32_t)((uint64_t)st >> 32)};   // ldr x16, #8 ; br x16 ; .quad stub
-    memcpy((void*)(uintptr_t)(f + 8), &patch[2], 8); __atomic_thread_fence(__ATOMIC_SEQ_CST); memcpy((void*)(uintptr_t)f, patch, 8);
-    kr = mach_vm_protect(mach_task_self(), pg, end - pg, 0, VM_PROT_READ | VM_PROT_EXECUTE);
-    sys_icache_invalidate((void*)(uintptr_t)f, 16);
-    nlog("[nhook] text hook %s: 0x%llx -> stub 0x%llx (back to executable: kr %d)", name, (unsigned long long)f, (unsigned long long)st, kr);
+    kern_return_t kr = KERN_FAILURE, kr2 = KERN_FAILURE; int tries = 0, stopped = !getenv("NHOOK_TEXT_NOSTOP");
+    for (;; tries++) {
+        thread_act_array_t th = 0; mach_msg_type_number_t n = 0; int busy = 0;
+        if (stopped && nh_world_stop(&th, &n, f + 1, f + 16, &busy)) stopped = 0;
+        if (busy && tries < 50) { nh_world_go(th, n); usleep(1000); continue; }
+        kr = mach_vm_protect(mach_task_self(), pg, end - pg, 0, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+        if (kr == KERN_SUCCESS) {
+            memcpy((void*)(uintptr_t)(f + 8), &patch[2], 8); __atomic_thread_fence(__ATOMIC_SEQ_CST); memcpy((void*)(uintptr_t)f, patch, 8);
+            kr2 = mach_vm_protect(mach_task_self(), pg, end - pg, 0, VM_PROT_READ | VM_PROT_EXECUTE);
+            sys_icache_invalidate((void*)(uintptr_t)f, 16); }
+        if (stopped) nh_world_go(th, n);
+        break; }
+    if (kr != KERN_SUCCESS) { nlog("[nhook] text hook %s: the page stays read-only (kr %d)", name, kr); return -1; }
+    nlog("[nhook] text hook %s: 0x%llx -> stub 0x%llx (back to executable: kr %d; other threads %s%s)", name, (unsigned long long)f, (unsigned long long)st, kr2,
+         stopped ? "stopped" : "NOT stopped", tries ? ", retried" : "");
+    if (stub_out) *stub_out = (uint64_t)st + (uint64_t)(td - ts);
     return 0;
 }
+static int text_hook_t(const char* name, uint64_t f, nh_handler h, int filt, uint32_t want) { return text_hook_x(name, f, (void*)h, filt, want, 0, 0); }
 static int text_hook(const char* name, uint64_t f, nh_handler h) { return text_hook_t(name, f, h, 0, 0); }
 // the app's Opus decode (nstats.c nh_on_opus: forensic voice audio) -- 0.10.0 addresses, every word checked first
 extern char nh_opus_shim[];
@@ -301,7 +388,7 @@ static void census_install(void) {
 static volatile uint64_t g_main_ctx;               // the engine main thread's guest context (a hooked engine function's caller)
 static volatile uint64_t g_frames;
 // NHOOK_COUNT=1: entry hooks that only count calls (which engine functions run in the menus / in a match)
-static const struct { const char* name; uint32_t rva; } g_cnt_fns[] = {
+static struct { const char* name; uint32_t rva; } g_cnt_fns[] = {   // (NHOOK_COUNT_RVAS=<rva>,... replaces the list: any 8 functions)
     {"main_loop_body", 0xb2250}, {"sim_tick", 0xef120}, {"local_user_count", 0xfbb94}, {"local_player", 0xfbc04},
     {"display_event", 0x11b0ec}, {"object_delete", 0x342ed8}, {"render_prep", 0x2d1390}, {"objects_update", 0x34067c},
 };
@@ -437,7 +524,10 @@ static void hooks_start(void) {
     uint64_t tab[2]; if (rd(APP_CODETAB + g_slide, tab, 16) || !tab[0] || tab[1] < 1000 || tab[1] > 1000000) { nlog("[nhook] no code table: hooks off"); return; }
     g_tab = tab[0]; g_ntab = tab[1];
     if (getenv("NHOOK_CENSUS")) census_install();
-    else if (getenv("NHOOK_COUNT")) for (size_t k = 0; k < NCNT; k++) hook_install(g_cnt_fns[k].name, g_cnt_fns[k].rva, g_cnt_h[k]);
+    else if (getenv("NHOOK_COUNT")) {
+        if (getenv("NHOOK_COUNT_RVAS")) { const char* w = getenv("NHOOK_COUNT_RVAS"); static char nm[NCNT][16];
+            for (size_t k = 0; k < NCNT; k++) { if (w && *w) { g_cnt_fns[k].rva = (uint32_t)strtoul(w, 0, 16); snprintf(nm[k], 16, "%x", g_cnt_fns[k].rva); g_cnt_fns[k].name = nm[k]; w = strchr(w, ','); if (w) w++; } else g_cnt_fns[k].rva = 0; } }
+        for (size_t k = 0; k < NCNT; k++) if (g_cnt_fns[k].rva) hook_install(g_cnt_fns[k].name, g_cnt_fns[k].rva, g_cnt_h[k]); }
     // the engine thread's context: halo3+0x9d22c (a millisecond clock read from ~420 places) runs lifted on the engine
     // thread ~7000 times a second in a match -- main_loop_body (0xb2250) and the sim tick are the app's own code now
     else if (!getenv("NHOOK_NO_HOOKS")) { hook_install("engine_clock", 0x9d22c, on_main_loop);
@@ -463,6 +553,20 @@ static void hooks_start(void) {
         if (!getenv("NHOOK_NO_VOICEHOOK")) voice_hook_install(); }
     if (getenv("NHOOK_PLAYERS_LOG")) { pthread_t t; pthread_create(&t, 0, engine_thread, 0); pthread_detach(t); }
     if (getenv("NHOOK_PKG_PROBE")) { pthread_t t; pthread_create(&t, 0, pkg_probe, 0); pthread_detach(t); }
+    if (getenv("NHOOK_CODETAB_DUMP")) { FILE* f = fopen(getenv("NHOOK_CODETAB_DUMP"), "w");   // the code table as "halo3 rva, host entry" lines:
+        if (f) { for (uint64_t i = 0; i < g_ntab; i++) { uint64_t e[2]; if (rd(g_tab + i * 16, e, 16)) break;   // shim/tools/native-frames.py maps a
+                     fprintf(f, "%llx %llx\n", (unsigned long long)(e[0] - 0x180000000ull), (unsigned long long)e[1]); }      // crash's host frames to halo3 functions
+                 fclose(f); nlog("[nhook] code table (%llu entries) -> %s", (unsigned long long)g_ntab, getenv("NHOOK_CODETAB_DUMP")); } }
+    if (getenv("NHOOK_DUMP_ENTRY")) { const char* w = getenv("NHOOK_DUMP_ENTRY");   // NHOOK_DUMP_ENTRY=<rva>[:<words>],...: a lifted function's first words (arm64; RE)
+        while (w && *w) { uint32_t r = (uint32_t)strtoul(w, 0, 16); const char* c = strchr(w, ':'), * cm = strchr(w, ','); int n = c && (!cm || c < cm) ? atoi(c + 1) : 48;
+            if (n > 512) n = 512; uint64_t e = host_of(r); uint32_t buf[512];
+            if (e && !rd(e, buf, 4u * (unsigned)n)) { char line[64 * 9 + 64]; for (int i = 0; i < n; i += 64) { int k = 0; for (int j = i; j < n && j < i + 64; j++) k += snprintf(line + k, sizeof line - (size_t)k, "%08x ", buf[j]);
+                nlog("[nhook] [entry] halo3+0x%x at 0x%llx +%d: %s", r, (unsigned long long)e, i * 4, line); } }
+            w = cm; if (w) w++; } }
+    if (getenv("NHOOK_RVA_KIND")) { const char* w = getenv("NHOOK_RVA_KIND");   // NHOOK_RVA_KIND=<rva>,<rva>...: how the app runs each halo3 function
+        while (w && *w) { uint32_t r = (uint32_t)strtoul(w, 0, 16); uint64_t e = host_of(r), t = branch_target_of(r);
+            nlog("[nhook] halo3+0x%x: %s (entry 0x%llx%s0x%llx)", r, rva_kind(r), (unsigned long long)e, t ? ", the app's code at " : "", (unsigned long long)t);
+            w = strchr(w, ','); if (w) w++; } }
     nstats_start();
     { extern void nr_install(void); nr_install(); }      // nrender.m: the overlay, recording and captures in the app's frames
 }

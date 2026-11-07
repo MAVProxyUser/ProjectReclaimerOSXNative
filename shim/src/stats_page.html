@@ -980,9 +980,9 @@ function renderOverlay(){ const o=snap&&snap.overlay; if(!o) return; renderPanel
     const pend=snap.overlay.quality_pending; qm.textContent=pend?('applying '+pend+'...'):(q&&!['auto','low','medium','high','ultra'].includes(q)?'('+q+')':''); }
   { const av=snap&&snap.autovote; if(av){ for(const [id,v] of [['avm',av.map],['avc',av.calls]]){ const e=document.getElementById(id); e.disabled=!o.controls; if(document.activeElement!==e && v!=null) e.value=String(v); } } }
   // the native 0.10 app (nhook): no teleport / boundary patches, auto-vote or halo3 message types there -- hide what can't work
-  if(snap&&snap.native) for(const el of [document.querySelector('#ov button[data-a="teleport"]'), document.getElementById('tpsel'), document.getElementById('avm'), document.getElementById('avc'), document.getElementById('tph')]){
+  if(snap&&snap.native) for(const el of [document.getElementById('avm'), document.getElementById('avc')]){   // (the native app: no auto-vote; its host tools are back: nhost.c)
     const w=el&&(el.tagName==='SELECT'&&el.closest('label.lbl')||el.tagName==='INPUT'&&el.closest('label')||el); if(w) w.style.display='none'; }
-  document.getElementById('ovmsg').textContent=o.controls?'':'controls are off (PELOAD_STATS_READONLY)'; }
+  document.getElementById('ovmsg').textContent=o.controls?(o.host_msg||''):'controls are off (PELOAD_STATS_READONLY)'; }   // (host_msg: the native host tools' last result)
 document.getElementById('ov').addEventListener('click',async e=>{ const b=e.target.closest('button[data-a]'); if(!b||b.disabled) return;   // (the zone chips post their own)
   const msg=document.getElementById('ovmsg');
   const ov=snap&&snap.overlay, extra=b.dataset.a==='spar'?'&on='+(ov&&ov.spar?0:1):b.dataset.a==='bounds'?'&off='+(ov&&ov.bounds_off?0:1):b.dataset.a==='invwalls'?'&off='+(ov&&ov.invwalls_off?0:1):b.dataset.a==='explore'?'&spot='+encodeURIComponent(b.dataset.spot):b.dataset.a==='mic'?'&on='+(ov&&ov.mic==='muted'?1:0):'';

@@ -322,6 +322,11 @@ server: a6 01 00 <nonce8> padded to 1229 -> a7 <nonce8> JSON; server-status.md "
 drives its menus (`wait 12`, `press SERVER BROWSER`; a wrong row name prints the rows); NHOOK_UDP_HEX=<n> dumps datagrams.
 `--request-at <s> '{"campaign":{"hold_trigger":{"seconds":6}}}'` fires in a local test match (shim/tools/native-fire-test.sh:
 live tracer / shots check, PASS); the test profile refuses public servers by itself.
+Host tools natively (nhost.c, 2026-11-07): teleport / boundaries / invisible walls / speed from the page, host or our native dedicated
+server (&slot=); halo3 calls that mark network updates (0x1ec3c) need game_globals+0x11 = 1 for the call (no sim-entity table natively).
+Lifted code calls lifted code at the BODY (x2 ctx, x3 guest rsp, x4-x7 args): body_hook_after; entry hooks see table calls only. Text
+hooks installed at run time stop the other threads (a 16 KB page is not executable while written). Crash frames -> halo3 functions:
+NHOOK_CODETAB_DUMP=<file> + shim/tools/native-frames.py (the JIT layout is fixed, only shifted between launches).
 Forensic voice audio: text hook on the app's Opus decode (0x1003f1e7c, caller = voice mixer 0x102152578, id at x26-0x278;
 stub.S _nh_opus_shim; NHOOK_NO_VOICEHOOK=1 off; [perf] "voice packets" -- live-checked 2026-11-07: real talkers archived and decoded). Chat = the app's own `[chat] line` log, on since nhook sets its chat_log byte (nstats.c chat_log_tick). Not yet: packet log
 game layer. Test runs: NATIVE_LOG=<scratch file> (the default log is the user's). Offline test:
