@@ -110,9 +110,25 @@ focus -- use it for every unattended run), `--headless` (no window, null rendere
 ## Our features on the native app (status)
 
 The loader's stats page, overlay, forensics, chat/voice/kill feed and recording hooked halo3.dll or the 0.9 exe inside the
-loader; none of that runs in the native app. `shim/native/` is the way back: `nhook.dylib` (DYLD_INSERT_LIBRARIES; build
-`bash shim/native/build.sh`, run `bash shim/native.sh [--map guardian --seconds 60 --background]`, test profile unless
-NATIVE_REAL=1, log /tmp/reclaimer_native.log). Done: the log tap, the image check, the code table, entry hooks, the census,
-the engine thread's TLS and the players table. Next: the stats HTTP server and page on top of these readers (stats.c's
-readers with the capacity remaps), then events (the app's own log lines, or hooks on what still runs lifted), then the
-overlay (drawn by the app's Metal renderer: needs its own path).
+loader; none of that runs in the native app by itself. `shim/native/` brings them back: `nhook.dylib` (DYLD_INSERT_LIBRARIES;
+build `bash shim/native/build.sh`, run `bash shim/native.sh [--map guardian --seconds 60 --background]`, test profile unless
+NATIVE_REAL=1, log /tmp/reclaimer_native.log; it refuses to start while the app already runs).
+
+**The stats page** (2026-11-06, shim/native/nstats.c): the loader's page (shim/src/stats_page.html, unchanged) on
+http://127.0.0.1:8765/ (`NHOOK_STATS_HTTP=<port>`, 0 off; `NHOOK_STATS_PAGE=<file>` serves it from disk). Works: the map
+(.map files the app opens: interposed open/openat -> shim/src/h3maps.c, now shared with the loader's hitbox.c), players
+(name, team, health, shield, camo, weapons by tag name, grenades, vehicle and seat, position, speed, facing; "you" = the
+profile's nickname), deaths (alive -> dead) with the heatmap (the loader's heatmap files: both clients add to them), map
+pictures (made with re-tools/h3bsp.py when missing), the game variant and traits ("Game rules"), vehicles, projectiles,
+the feed: match start, joins / leaves (the players table), chat / server / notice lines and ballots (the app's own
+`[chat] line [...]` / `[playlist]` log lines). Verified in a background Guardian match (page with no console errors).
+
+Not yet: kills (halo3's display_event, 0x11b0ec, is lifted but its run is unproven: no kills happened in the offline
+tests; the statborg moved to game_globals +0x159c0 -- `[capacity] game_globals.statborg` -- and holds the scoreboard,
+layout to be found), the network session / Connected list and mute (sessions moved: `[c1] network sessions moved to`),
+weapon / vehicle spawn tracking (items), the overlay (the app draws with Metal), recording, controls (POST /control answers
+403), voice / forensics.
+
+Online use: the hooks only read (one entry hook on halo3+0x9d22c records the engine thread's context; nothing in the game
+changes). The app's anti-cheat is server-side and behavioural ("sent game data that a normal game never sends", unusual
+physics); no client-memory integrity check was found in the binary's strings. Still the user's call before a real match.

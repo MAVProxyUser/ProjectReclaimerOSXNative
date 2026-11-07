@@ -207,6 +207,8 @@ static void* engine_thread(void* arg) {
     return 0;
 }
 
+#include "nstats.c"   // the stats page (h3maps.c's map files, the players / objects readers, the HTTP server)
+
 static void hooks_start(void) {
     g_slide = g_img - APP_IMAGE;
     uint64_t tab[2]; if (rd(APP_CODETAB + g_slide, tab, 16) || !tab[0] || tab[1] < 1000 || tab[1] > 1000000) { nlog("[nhook] no code table: hooks off"); return; }
@@ -216,7 +218,8 @@ static void hooks_start(void) {
     // the engine thread's context: halo3+0x9d22c (a millisecond clock read from ~420 places) runs lifted on the engine
     // thread ~7000 times a second in a match -- main_loop_body (0xb2250) and the sim tick are the app's own code now
     else if (!getenv("NHOOK_NO_HOOKS")) hook_install("engine_clock", 0x9d22c, on_main_loop);
-    pthread_t t; pthread_create(&t, 0, engine_thread, 0); pthread_detach(t);
+    if (getenv("NHOOK_PLAYERS_LOG")) { pthread_t t; pthread_create(&t, 0, engine_thread, 0); pthread_detach(t); }
+    nstats_start();
 }
 
 static void* probe_thread(void* arg) {
@@ -326,6 +329,7 @@ static void on_line(const char* p, size_t n) {
                 if (v) { g_img = v; pthread_t t; pthread_create(&t, 0, probe_thread, 0); pthread_detach(t); }
                 break;
             }
+    nst_on_line(p, n);                                // match state and events (nstats.c)
 }
 
 // The app writes a line in pieces ("[host] ", "Project Reclaimer", ...; Rust's unbuffered stderr, the pieces of one line
@@ -360,10 +364,23 @@ static ssize_t my_writev(int fd, const struct iovec* iov, int cnt) {
     return writev(fd, iov, cnt);
 }
 
+// the .map files the app opens (h3maps.c hb_note_map: the map being played, tag names)
+static void note_open(const char* p) { size_t L = p ? strlen(p) : 0; if (L > 4 && !strcasecmp(p + L - 4, ".map")) hb_note_map(p); }
+static int my_open(const char* p, int fl, ...) {
+    int mode = 0; if (fl & O_CREAT) { va_list ap; va_start(ap, fl); mode = va_arg(ap, int); va_end(ap); }
+    int fd = open(p, fl, mode); if (fd >= 0) note_open(p); return fd;
+}
+static int my_openat(int dfd, const char* p, int fl, ...) {
+    int mode = 0; if (fl & O_CREAT) { va_list ap; va_start(ap, fl); mode = va_arg(ap, int); va_end(ap); }
+    int fd = openat(dfd, p, fl, mode); if (fd >= 0 && p && p[0] == '/') note_open(p); return fd;
+}
+
 #define INTERPOSE(rep, orig) __attribute__((used)) static struct { const void* r; const void* o; } \
     _ip_##orig __attribute__((section("__DATA,__interpose"))) = { (const void*)(rep), (const void*)(orig) }
 INTERPOSE(my_write, write);
 INTERPOSE(my_writev, writev);
+INTERPOSE(my_open, open);
+INTERPOSE(my_openat, openat);
 
 __attribute__((constructor)) static void nhook_init(void) {
     const char* lf = getenv("NHOOK_LOG");

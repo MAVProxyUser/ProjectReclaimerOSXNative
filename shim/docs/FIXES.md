@@ -1690,6 +1690,12 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   (ctx+0x2d8), and the players table reads as under the loader. NHOOK_CENSUS=1 counts every lifted function's calls (which
   halo3 code the app still runs). Switches: NHOOK_NO_HOOKS=1 (log tap and probe only), no DYLD_INSERT_LIBRARIES = the app
   untouched.
+- **nhook stats page** (2026-11-06; shim/native/nstats.c, shim/src/h3maps.c) — WHY: the stats page is the feature used most,
+  and the native app has none. The loader's page and JSON shape on 127.0.0.1:8765 from the native app's memory: players and
+  objects through the engine thread's TLS block, map / tag names from the .map files the app opens (interposed open/openat),
+  variant + traits (stats.c's code verbatim), heatmap (the loader's files), feed from the app's log lines and the players
+  table. hitbox.c's .map-file code moved into shim/src/h3maps.c unchanged (HB_MAXOBJ: the loader's 8192 object slots, the
+  native app's 16384) so both use it. Off: NHOOK_STATS_HTTP=0. shim/native.sh refuses a second instance of the app.
 
 - **"Run 2.4x" removed** (2026-10-19, revert 606a38c) — it crashed the client as soon as it was used; the user asked for it
   to be deleted. The page's Speed 2x / speed menu (the host's movement-speed trait) is unchanged. (10-19)
