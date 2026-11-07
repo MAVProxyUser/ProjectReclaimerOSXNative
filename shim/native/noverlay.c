@@ -96,12 +96,20 @@ static int nov_collect(NovObj* out, int max) {
     }
     return n;
 }
+// aim vs hits: the rings (nov_aim_shot / nov_aim_tick below, nstats.c st_aim_tick)
+typedef struct { volatile unsigned seq; double t; uint32_t owner, target, def; float s[3], dn[3], len, along, pre; uint16_t nmsz; uint8_t rcount, pad; uint8_t perm[32]; float mt[128 * 13]; } NovAimRec;
+enum { NOV_AIM_N = 64, NOV_AIMR_N = 4096 };
+static NovAimRec g_nov_aim[NOV_AIM_N]; static volatile unsigned g_nov_aim_w;     // the engine thread writes (one writer)
+typedef struct { double t; uint32_t owner, target; float err, along, pre; uint8_t on, head; } NovAimRes;
+static NovAimRes g_nov_aimr[NOV_AIMR_N]; static volatile unsigned g_nov_aimr_w;  // the render thread writes
+static volatile unsigned long g_nov_aim_n, g_nov_aim_done;
+static volatile int g_nov_sides_on;   // (Infection sides: nov_side_of below)
 // Friend or enemy (every team filter: hitboxes, vehicles by their occupants, tracers by their shooter, info). Team games:
 // the same team index. Infection: halo3 gives every player a team of their own (teams off), so the sides are zombie /
 // human: g_nov_side, filled by the stats snapshot from each player's active traits (st_snapshot nov_sides). Free-for-all:
 // everyone is an enemy. (Infection used to show "friends" = nobody, "enemies" = everyone; user, 2026-11-07.)
 static int g_nov_myteam = -1, g_nov_myside = -1;
-static struct { uint32_t unit; int8_t side; } g_nov_side[256]; static volatile int g_nov_nside, g_nov_sides_on;   // side 1 zombie, 0 human
+static struct { uint32_t unit; int8_t side; } g_nov_side[256]; static volatile int g_nov_nside;   // side 1 zombie, 0 human (g_nov_sides_on: above)
 static int nov_side_of(uint32_t unit) { int n = g_nov_nside; for (int i = 0; i < n && i < 256; i++) if (g_nov_side[i].unit == unit) return g_nov_side[i].side; return -1; }
 static int nov_friend(const NovObj* o) {
     if (o->type != 0) return 0;
@@ -198,6 +206,49 @@ typedef struct { uint32_t owner, victim, def; } NovShot;
 static NovShot g_nov_shot[8192]; static volatile unsigned g_nov_shot_n;
 static NovImp g_nov_imp[256]; static volatile unsigned g_nov_imp_n;
 static volatile unsigned long g_nov_del_calls;
+// ---- aim vs hits (2026-11-07; user: "a meter that tells how close to an accurate shot in a hitbox is being made ... a high
+// deviation would indicate a trash player, or that lag was too high between players to land hits"). For every deleted bullet
+// that flew straight (it travelled no more than its start-to-impact line: no grenades, no bounces) the enemy biped whose
+// centre lies nearest its path -- within 12 degrees, in front of where it stopped, on foot, alive -- is its target; that
+// biped's pose at this moment (node matrices, region permutations) and its shield + health go into a ring (nov_aim_shot, the
+// engine thread). The render thread, which owns the hitbox geometry cache (h3maps.c hb_geom), measures how far the path
+// passed from the target's real hitboxes (nov_aim_tick: per collision region and node, the centre and mean radius of its
+// posed edges; 0 = through one), and the stats snapshot checks whether the server then took the target's shield / health
+// down (st_aim_tick). Everything is as THIS client saw it: a remote player's target sits where this client draws it.
+// NHOOK_NO_AIM=1 = off.
+static void nov_aim_shot(const uint8_t* arr, const uint8_t* data, const uint8_t* p) {
+    static int on = -1; if (on < 0) on = !getenv("NHOOK_NO_AIM"); if (!on) return;
+    uint32_t own = *(const uint32_t*)(p + 0xC0); int hi = *(const int32_t*)(arr + 0x3c);
+    if (own == 0xFFFFFFFFu || hi <= 0 || hi > 65536) return;
+    int oi = own & 0xFFFF; if (oi >= hi) return; const uint8_t* oe = data + (size_t)oi * 0x18;
+    if (oe[3] != 0 || *(const uint16_t*)oe != (uint16_t)(own >> 16)) return;   // a biped's shot (not a turret's)
+    const uint8_t* op = *(uint8_t* const*)(oe + 0x10); if (!op) return;
+    int oteam = *(const int32_t*)(op + 0x174), oside = g_nov_sides_on ? nov_side_of(own) : -1;
+    const float* S = (const float*)(p + 0x1e8), * I = (const float*)(p + 0x1c); float d[3] = {I[0] - S[0], I[1] - S[1], I[2] - S[2]};
+    float len = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]), trav = *(const float*)(p + 0x1b0);
+    if (!(len > 0.5f && len < 2000.f) || trav > len * 1.05f + 0.3f) return;
+    float dn[3] = {d[0] / len, d[1] / len, d[2] / len}, best = 0.2126f, bal = 0; const uint8_t* tp = 0; uint32_t th = 0;   // (tan 12 degrees)
+    for (int j = 0; j < hi; j++) { const uint8_t* b = data + (size_t)j * 0x18; if (b[3] != 0 || !*(const uint16_t*)b) continue;
+        uint32_t bh = ((uint32_t)*(const uint16_t*)b << 16) | (uint32_t)j; if (bh == own) continue; const uint8_t* bp = *(uint8_t* const*)(b + 0x10); if (!bp) continue;
+        if ((*(const uint32_t*)(bp + 0x110) >> 2) & 1) continue;                 // dead
+        if (*(const uint32_t*)(bp + 0x10) != 0xFFFFFFFFu) continue;              // in a vehicle: the shot meets the vehicle
+        if (oside >= 0) { int s2 = nov_side_of(bh); if (s2 >= 0 && s2 == oside) continue; }   // Infection: zombie / human
+        else { int t2 = *(const int32_t*)(bp + 0x174); if (oteam >= 0 && t2 == oteam) continue; }
+        const float* c = (const float*)(bp + 0x1c); float r = c[3]; if (!(r > 0.05f && r < 5)) continue;
+        float v[3] = {c[0] - S[0], c[1] - S[1], c[2] - S[2]}, al = v[0] * dn[0] + v[1] * dn[1] + v[2] * dn[2]; if (al < 0.3f || al > len + r + 0.5f) continue;
+        float px = v[0] - dn[0] * al, py = v[1] - dn[1] * al, pz = v[2] - dn[2] * al, q = sqrtf(px * px + py * py + pz * pz) / al;
+        if (q < best) { best = q; tp = bp; th = bh; bal = al; } }
+    if (!tp) return;
+    uint16_t nmsz = *(const uint16_t*)(tp + 0x136), nmoff = *(const uint16_t*)(tp + 0x138); int nn = nmsz / 52; if (nmsz % 52 || nn < 1 || nn > 128 || nmoff < 0x100) return;
+    unsigned w = g_nov_aim_w; NovAimRec* a = &g_nov_aim[w % NOV_AIM_N];
+    __atomic_store_n(&a->seq, 0, __ATOMIC_RELEASE);                               // (being written: a reader skips it)
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); a->t = ts.tv_sec + ts.tv_nsec * 1e-9;
+    a->owner = own; a->target = th; a->def = *(const uint32_t*)tp; memcpy(a->s, S, 12); memcpy(a->dn, dn, 12); a->len = len; a->along = bal;
+    a->pre = *(const float*)(tp + 0xF4) + *(const float*)(tp + 0xF8); a->nmsz = nmsz; memcpy(a->mt, tp + nmoff, (size_t)nn * 52);
+    { int16_t rs = *(const int16_t*)(tp + 0x13a); if ((*(const uint32_t*)(tp + 4) >> 11) & 1) rs -= 0x20; int rc = rs > 0 ? rs / 10 : 0; uint16_t roff = *(const uint16_t*)(tp + 0x13c);
+      a->rcount = (uint8_t)(rc > 32 ? 0 : rc); if (a->rcount) memcpy(a->perm, tp + roff + (size_t)a->rcount * 8, a->rcount); }
+    __atomic_store_n(&a->seq, w + 1, __ATOMIC_RELEASE); __atomic_store_n(&g_nov_aim_w, w + 1, __ATOMIC_RELEASE); g_nov_aim_n++;
+}
 static void on_object_delete(uint64_t* ctx) {   // (x0: the guest context the app's own object_delete gets -- read through rd: checked)
     g_nov_del_calls++;
     uint64_t c2[2], tls = 0; static uint32_t idx = 0xFFFFFFFFu;
@@ -217,9 +268,47 @@ static void on_object_delete(uint64_t* ctx) {   // (x0: the guest context the ap
           if (r2 > 0 && r2 < 5 && dx * dx + dy * dy + dz * dz <= r2 * r2) { vic = bh; break; } }
       unsigned q = __atomic_load_n(&g_nov_shot_n, __ATOMIC_RELAXED) & 8191; g_nov_shot[q].owner = own; g_nov_shot[q].victim = vic; g_nov_shot[q].def = *(uint32_t*)p;
       __atomic_store_n(&g_nov_shot_n, g_nov_shot_n + 1, __ATOMIC_RELEASE); }   // (one writer: the engine thread)
+    nov_aim_shot(arr, data, p);
     unsigned k = __atomic_fetch_add(&g_nov_imp_n, 1, __ATOMIC_RELAXED) & 255; NovImp* r = &g_nov_imp[k];
     r->def = *(uint32_t*)p; r->owner = *(uint32_t*)(p + 0xC0); memcpy(r->pos, p + 0x1c, 12); memcpy(r->vel, p + 0x74, 12); memcpy(r->st, p + 0x1e8, 12); memcpy(&r->trav, p + 0x1b0, 4);
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); double tv = ts.tv_sec + ts.tv_nsec * 1e-9; __atomic_store(&r->t, &tv, __ATOMIC_RELEASE);
+}
+void nov_aim_tick(void) {   // nrender.m, every frame (the render thread owns hb_geom's cache)
+    static unsigned r; static NovAimRec a; unsigned w = __atomic_load_n(&g_nov_aim_w, __ATOMIC_ACQUIRE); if (w - r > NOV_AIM_N) r = w - NOV_AIM_N;
+    for (; r != w; r++) {
+        NovAimRec* src = &g_nov_aim[r % NOV_AIM_N]; if (__atomic_load_n(&src->seq, __ATOMIC_ACQUIRE) != r + 1) continue;
+        memcpy(&a, src, sizeof a); if (__atomic_load_n(&src->seq, __ATOMIC_ACQUIRE) != r + 1 || a.seq != r + 1) continue;   // (overwritten meanwhile)
+        HbGeom* g = hb_geom(a.def); int nn = a.nmsz / 52; if (!g || nn <= g->maxnode || fabsf(a.mt[0] - 1.0f) > 0.1f) continue;
+        uint8_t sel[256]; memset(sel, 0, sizeof sel);
+        if (g->nhreg > 0 && a.rcount > 0) for (int i = 0; i < g->nhreg && i < a.rcount; i++) { int pi = a.perm[i]; if (pi >= g->hnperm[i]) pi = 0;
+            int cr = g->hcreg[i], cp = g->hnperm[i] ? g->hcperm[i][pi] : 0; if (cr >= 0 && cr < 256 && cp >= 0) sel[cr] = (uint8_t)cp; }
+        // per (region, node): the centre and the mean radius of its posed edge end points
+        enum { NG = 64 }; int gk[NG], gn[NG], ng = 0; float gc[NG][3], gp[NG * 0 + 1][1]; (void)gp; static float pts[4096][3]; static int pg[4096]; int np2 = 0;
+        float zs[256] = {0}; int zc[256] = {0};
+        for (int s = 0; s < g->nseg && np2 + 2 <= 4096; s++) { if (g->perm[s] != sel[g->reg[s]]) continue;
+            const float* M = a.mt + g->node[s] * 13, * P = g->pts + s * 6; int key = g->reg[s] * 256 + g->node[s], gi = -1;
+            for (int q = 0; q < ng; q++) if (gk[q] == key) { gi = q; break; }
+            if (gi < 0) { if (ng >= NG) continue; gi = ng++; gk[gi] = key; gn[gi] = 0; gc[gi][0] = gc[gi][1] = gc[gi][2] = 0; }
+            for (int e = 0; e < 2; e++) { const float* v = P + e * 3; float* o = pts[np2];
+                for (int k = 0; k < 3; k++) o[k] = M[10 + k] + M[0] * (v[0] * M[1 + k] + v[1] * M[4 + k] + v[2] * M[7 + k]);
+                pg[np2++] = gi; gc[gi][0] += o[0]; gc[gi][1] += o[1]; gc[gi][2] += o[2]; gn[gi]++; }
+            zs[g->reg[s]] += M[12]; zc[g->reg[s]]++; }
+        if (!ng) continue;
+        int head = -1; { float hb = -1e30f; for (int q = 0; q < g->nreg && q < 256; q++) if (zc[q] && zs[q] / zc[q] > hb) { hb = zs[q] / zc[q]; head = q; } }
+        float rad[NG] = {0};
+        for (int q = 0; q < ng; q++) { gc[q][0] /= gn[q]; gc[q][1] /= gn[q]; gc[q][2] /= gn[q]; }
+        for (int i = 0; i < np2; i++) { const float* o = pts[i], * c = gc[pg[i]]; rad[pg[i]] += sqrtf((o[0] - c[0]) * (o[0] - c[0]) + (o[1] - c[1]) * (o[1] - c[1]) + (o[2] - c[2]) * (o[2] - c[2])); }
+        float miss = 1e30f; int mg = -1;
+        for (int q = 0; q < ng; q++) { rad[q] /= gn[q]; float v[3] = {gc[q][0] - a.s[0], gc[q][1] - a.s[1], gc[q][2] - a.s[2]}, t = v[0] * a.dn[0] + v[1] * a.dn[1] + v[2] * a.dn[2];
+            if (t < 0) t = 0; if (t > a.len + 0.3f) t = a.len + 0.3f;
+            float px = v[0] - a.dn[0] * t, py = v[1] - a.dn[1] * t, pz = v[2] - a.dn[2] * t, sf = sqrtf(px * px + py * py + pz * pz) - rad[q];
+            if (sf < miss) { miss = sf; mg = q; } }
+        if (mg < 0) continue;
+        unsigned k = g_nov_aimr_w; NovAimRes* o = &g_nov_aimr[k % NOV_AIMR_N];
+        o->t = a.t; o->owner = a.owner; o->target = a.target; o->along = a.along; o->pre = a.pre; o->on = miss <= 0; o->head = gk[mg] / 256 == head;
+        o->err = miss <= 0 ? 0 : atan2f(miss, a.along > 0.3f ? a.along : 0.3f) * 57.29578f;
+        __atomic_store_n(&g_nov_aimr_w, k + 1, __ATOMIC_RELEASE); g_nov_aim_done++;
+    }
 }
 static const float g_nov_teamcol[8][3] = {{1, 0.3f, 0.25f}, {0.35f, 0.6f, 1}, {0.35f, 1, 0.35f}, {1, 0.6f, 0.15f}, {0.75f, 0.4f, 1}, {1, 0.9f, 0.2f}, {0.75f, 0.55f, 0.35f}, {1, 0.55f, 0.8f}};
 

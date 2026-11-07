@@ -324,7 +324,8 @@ static int st_players(StPlayer* out, int max) {
     }
     return n;
 }
-typedef struct { char name[64]; int slot, team, deaths, alive, shots, hits; uint32_t unit; double life_start, longest, dist; float pos[3], top_speed; } StTrack;
+typedef struct { char name[64]; int slot, team, deaths, alive, shots, hits; uint32_t unit; double life_start, longest, dist; float pos[3], top_speed;
+                 int aim_n, aim_on, aim_head, aim_on_judged, aim_on_reg, aim_off_judged, aim_off_reg, aim_ei; float aim_err[64]; } StTrack;   // aim: st_aim_tick
 static StTrack g_trk[256]; static int g_ntrk; static char g_trk_map[64];
 static StTrack* st_track(const StPlayer* p) {
     for (int i = 0; i < g_ntrk; i++) if (g_trk[i].slot == p->slot && !strcmp(g_trk[i].name, p->name)) return &g_trk[i];
@@ -717,6 +718,34 @@ static void st_engine_events(const StPlayer* pl, int np) {
 }
 
 #include "nspawns.c"   // weapon / vehicle / power-up spawns and pickups (the loader's st_spawns)
+// ---- aim vs hits, per player (noverlay.c measures each shot): the last 64 errors (median shown), how many went through the
+// target's hitboxes, and REGISTERED = the target's shield + health went down within 0.6 s (the server's decision, as it
+// reaches this client) -- for shots through the hitboxes and, separately, for misses (damage after a visible miss: the
+// server saw it differently). A burst at one target overlaps: a later bullet can be credited with an earlier one's damage.
+static struct { uint32_t target; float pre; double t; int tr, on; } g_aimp[256]; static int g_naimp;
+static void st_aim_tick(const StPlayer* pl, int np, double now, const uint8_t* tab, int hi) {   // (tab / hi: the snapshot's object table)
+    static unsigned seen; unsigned n = __atomic_load_n(&g_nov_aimr_w, __ATOMIC_ACQUIRE); if (n - seen > NOV_AIMR_N) seen = n - NOV_AIMR_N;
+    for (; seen != n; seen++) { const NovAimRes* q = &g_nov_aimr[seen % NOV_AIMR_N];
+        for (int k = 0; k < np; k++) if (pl[k].unit == q->owner) { StTrack* tr = st_track(&pl[k]); if (!tr) break;
+            tr->aim_err[tr->aim_ei++ & 63] = q->err; tr->aim_n++; if (q->on) { tr->aim_on++; if (q->head) tr->aim_head++; }
+            if (g_naimp < 256) { g_aimp[g_naimp].target = q->target; g_aimp[g_naimp].pre = q->pre; g_aimp[g_naimp].t = q->t; g_aimp[g_naimp].tr = (int)(tr - g_trk); g_aimp[g_naimp].on = q->on; g_naimp++; }
+            break; } }
+    for (int i = 0; i < g_naimp; i++) {
+        uint32_t h = g_aimp[i].target; int ix = (int)(h & 0xFFFF); uint64_t d = ix < hi && *(const uint16_t*)(tab + ix * 0x18) == (uint16_t)(h >> 16) ? *(const uint64_t*)(tab + ix * 0x18 + 0x10) : 0; float hs[2] = {0, 0}; uint32_t fl = 0; int reg = -1;
+        if (!d || !hb_read(d + 0xF4, hs, 8) || !hb_read(d + 0x110, &fl, 4)) { g_aimp[i] = g_aimp[--g_naimp]; i--; continue; }   // (gone: not judged)
+        if (((fl >> 2) & 1) || hs[0] + hs[1] < g_aimp[i].pre - 0.005f) reg = 1;   // (dead / hurt since the shot)
+        else if (now - g_aimp[i].t > 0.6) reg = 0;
+        if (reg < 0) continue;
+        int ti = g_aimp[i].tr; if (ti >= 0 && ti < g_ntrk) { StTrack* tr = &g_trk[ti]; if (g_aimp[i].on) { tr->aim_on_judged++; tr->aim_on_reg += reg; } else { tr->aim_off_judged++; tr->aim_off_reg += reg; } }
+        g_aimp[i] = g_aimp[--g_naimp]; i--; }
+}
+static int st_aim_fcmp(const void* x, const void* y) { float a = *(const float*)x, b = *(const float*)y; return a < b ? -1 : a > b; }
+static void st_aim_json(StBuf* s, const StTrack* t) {
+    if (!t || !t->aim_n) return; int m = t->aim_n < 64 ? t->aim_n : 64; float e[64]; memcpy(e, t->aim_err, (size_t)m * 4); qsort(e, (size_t)m, 4, st_aim_fcmp);
+    sb_put(s, ",\"aim\":{\"n\":%d,\"err\":%.2f,\"err75\":%.2f,\"on\":%.3f,\"head\":%.3f,\"reg\":%.3f,\"reg_n\":%d,\"miss_reg\":%.3f,\"miss_n\":%d}",
+           t->aim_n, e[m / 2], e[(m * 3) / 4], (double)t->aim_on / t->aim_n, t->aim_on ? (double)t->aim_head / t->aim_on : 0.0,
+           t->aim_on_judged ? (double)t->aim_on_reg / t->aim_on_judged : -1.0, t->aim_on_judged, t->aim_off_judged ? (double)t->aim_off_reg / t->aim_off_judged : -1.0, t->aim_off_judged);
+}
 
 // Who talks: the app's own voice report, every ~2 s (100 frames of 20 ms): "[voice] active true sending standard members 65 sent 0
 // (0 bytes) received 60645 relayed 0 mixed 201 frames rms -24.8 dBFS; heard 0x<peer id>: 100 frames (0 concealed) rms -30.5 dBFS
@@ -795,7 +824,7 @@ static void st_snapshot(StBuf* s) {
           sb_put(s, ",\"perf\":{\"fps\":%.1f,\"window_fps\":%.1f,\"frame_ms\":[%.1f,%.1f,%.1f],\"draws\":0,\"objects\":%d,\"in_view\":%d,\"bipeds\":0,\"vehicles\":0,\"projectiles\":0,"
                     "\"present_to_gpu_ms\":-1,\"present_to_window_ms\":-1,\"input_to_screen_ms\":-1,\"input_to_window_ms\":-1,\"input_to_present_ms\":-1,\"inputs\":0,\"refresh_hz\":0,\"cpu_pct\":0,\"native\":true}",
                  fps, fps, p50, p95, mx, nobj, nobj);
-          static double tl; if (now - tl >= 10) { tl = now; nlog("[nhook] [perf] %.0f fps, frame %.1f / %.1f / %.1f ms (median / 95%% / max), %d players, %d objects, map %s%s; object_delete %lu, bullets %u, voice packets %lu, camera %s%s", fps, p50, p95, mx, np_for_perf, nobj, g_st_curmap, t0 ? "" : " (not in a match)", g_nov_del_calls, g_nov_imp_n, g_opus_n,
+          static double tl; if (now - tl >= 10) { tl = now; nlog("[nhook] [perf] %.0f fps, frame %.1f / %.1f / %.1f ms (median / 95%% / max), %d players, %d objects, map %s%s; object_delete %lu, bullets %u, aimed %lu / measured %lu, voice packets %lu, camera %s%s", fps, p50, p95, mx, np_for_perf, nobj, g_st_curmap, t0 ? "" : " (not in a match)", g_nov_del_calls, g_nov_imp_n, g_nov_aim_n, g_nov_aim_done, g_opus_n,
                       g_nov_cam_src == 1 ? "view constants" : g_nov_cam_src == 2 ? "observer" : "-",
                       getenv("NHOOK_TEXTHOOK_TEST") ? ({ static char tb[300]; extern volatile unsigned long g_tht_n[8]; extern uint32_t g_tht_rva[8]; int q = snprintf(tb, sizeof tb, ", text hooks");
                           for (int i = 0; i < 8; i++) if (g_tht_rva[i]) q += snprintf(tb + q, sizeof tb - (size_t)q, " %x:%lu", g_tht_rva[i], g_tht_n[i]); tb; }) : ""); } }
@@ -911,6 +940,7 @@ static void st_snapshot(StBuf* s) {
         int16_t sbs[8]; int sbok = st_statborg(pl[k].slot, sbs);
         sb_put(s, ",\"pos\":"); sb_f3(s, o); sb_put(s, ",\"speed\":%.2f,\"kills\":%d", spd, sbok ? sbs[SB_KILLS] : 0);
         if (sbok) sb_put(s, ",\"score\":%d,\"assists\":%d,\"betrayals\":%d,\"suicides\":%d", sbs[SB_SCORE], sbs[SB_ASSISTS], sbs[SB_BETRAYALS], sbs[SB_SUICIDES]);
+        st_aim_json(s, t);
         if (t) sb_put(s, ",\"deaths\":%d,\"hits\":%d,\"accuracy\":%.3f,\"shots\":%d,\"life\":%.1f,\"longest_life\":%.1f,\"distance\":%.1f,\"top_speed\":%.2f", sbok ? sbs[SB_DEATHS] : t->deaths, t->hits, t->shots ? (double)t->hits / t->shots : 0.0, t->shots, t->alive ? now - t->life_start : 0.0,
                       t->longest > (t->alive ? now - t->life_start : 0) ? t->longest : (t->alive ? now - t->life_start : 0), t->dist, t->top_speed);
         if (g_st_var_ok) st_player_traits(s, pl[k].rec);
@@ -933,6 +963,7 @@ static void st_snapshot(StBuf* s) {
     { static unsigned seen; unsigned n = __atomic_load_n(&g_nov_shot_n, __ATOMIC_ACQUIRE); if (n - seen > 8192) seen = n - 8192;   // shots / hits per player (object_delete)
       for (; seen != n; seen++) { const NovShot* q = &g_nov_shot[seen & 8191];
           for (int k = 0; k < np; k++) if (pl[k].unit == q->owner) { StTrack* tr = st_track(&pl[k]); if (tr) { tr->shots++; if (q->victim != 0xFFFFFFFFu) tr->hits++; } break; } } }
+    st_aim_tick(pl, np, now, tab, hi);                                  // aim vs hits (noverlay.c nov_aim_shot / nov_aim_tick)
     st_spawns(tab, hi, pl, np, m, now);                        // spawns / pickups -> the feed, the heatmap's spawn points, "items"
     // the forensic archive: roster changes, session boundaries. Its map: not the loading screen's scenery (130_epilogue, while
     // joining and for the first seconds of a match until hb_current_map's 2 s recheck): a session that starts then is named

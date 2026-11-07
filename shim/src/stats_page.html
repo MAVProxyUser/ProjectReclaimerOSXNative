@@ -225,7 +225,7 @@ th .srt{display:inline-block;margin-left:2px;padding:0 2px;cursor:pointer;color:
   Sort: <label><input type="radio" name="smode" value="team" checked> team sort</label><label><input type="radio" name="smode" value="full"> full sort</label>
   <span id="sortlbl"></span><button id="sortclr" style="display:none;background:none;border:0;color:var(--accent);cursor:pointer;font:inherit">reset</button></div>
  <div class="wrap"><table><thead><tr id="thr">
-  <th data-k="name">Player</th><th data-k="ip" title="The player's address: the game session's peer it plays from (the native app; with the Packets window's 'look up names', its reverse-DNS name)">IP</th><th data-k="shield">Shield</th><th data-k="health">Health</th><th data-k="weapon">Weapon</th><th data-k="kills">Kills</th><th data-k="deaths">Deaths</th><th data-k="kd">K/D</th><th data-k="shots">Shots</th><th data-k="accuracy">Accuracy</th><th data-k="grenades">Grenades</th><th data-k="vehicle">Vehicle</th><th data-k="pos">X, Y, Z</th><th data-k="speed">Speed</th><th data-k="traits">Traits</th></tr></thead>
+  <th data-k="name">Player</th><th data-k="ip" title="The player's address: the game session's peer it plays from (the native app; with the Packets window's 'look up names', its reverse-DNS name)">IP</th><th data-k="shield">Shield</th><th data-k="health">Health</th><th data-k="weapon">Weapon</th><th data-k="kills">Kills</th><th data-k="deaths">Deaths</th><th data-k="kd">K/D</th><th data-k="shots">Shots</th><th data-k="accuracy">Accuracy</th><th data-k="aim" title="Aim (the native app): the median angle by which this player's straight shots missed the hitboxes of the enemy they passed nearest (0 = through a hitbox), as THIS client saw the target; then the share of shots through a hitbox the server registered (shield / health went down). Low aim error with a low registered share = the server saw the target elsewhere: lag.">Aim</th><th data-k="grenades">Grenades</th><th data-k="vehicle">Vehicle</th><th data-k="pos">X, Y, Z</th><th data-k="speed">Speed</th><th data-k="traits">Traits</th></tr></thead>
   <tbody id="tb"></tbody></table></div>
   <div class="note">Click a player for details. Their deaths are ringed on the heatmap.</div></div>
 </div>
@@ -331,8 +331,20 @@ function pState(p){ const k=p.slot+'|'+p.name, now=performance.now()/1000;
 const PRANK={alive:0,respawning:1,quit:2};
 // ---- sorting: a column's arrows (ascending / descending); team sort keeps each team together ----
 function kdOf(p){ return (p.kills||0)/Math.max(1,p.deaths||0); }
+// aim vs hits (nhook: noverlay.c nov_aim_shot / nov_aim_tick, nstats.c st_aim_tick): err = median miss angle (degrees) of the
+// last 64 straight shots that passed near an enemy, as this client saw the target; on = share through a hitbox; reg = share
+// of those the server registered (shield / health went down within 0.6 s); miss_reg = damage after a shot that visibly missed
+function aimCell(p){ const a=p.aim; if(!a||a.n<5) return a?`<span class="dim" title="${a.n} aimed shots so far">…</span>`:'';
+  const c=a.err<0.6?'#5c5':a.err<1.5?'#cc4':a.err<3?'#e93':'#e55', w=Math.max(4,Math.min(40,40-a.err*8));
+  const reg=a.reg>=0&&a.reg_n>=3?` · ${Math.round(a.reg*100)}%`:'';
+  return `<span title="${E(aimTip(a))}"><span style="display:inline-block;width:${w}px;height:6px;border-radius:3px;background:${c};vertical-align:middle;margin-right:4px"></span>${a.err.toFixed(1)}°${reg}</span>`; }
+function aimTip(a){ return `${a.n} aimed shots: median miss ${a.err.toFixed(2)}° (75% within ${a.err75.toFixed(2)}°), ${Math.round(a.on*100)}% through a hitbox`+
+  (a.on>0?` (${Math.round(a.head*100)}% of them the topmost hitbox: the head on Spartans and Elites)`:'')+(a.reg>=0?`; the server registered ${Math.round(a.reg*100)}% of ${a.reg_n} on-target shots`:'')+
+  (a.miss_reg>=0?`, and ${Math.round(a.miss_reg*100)}% of ${a.miss_n} visible misses`:'')+'. Measured on this client: a remote player\'s target is where this client draws it, and in a crowd other players\' damage on the same target counts as registered too.'; }
+function aimDetail(p){ const a=p.aim; if(!a) return 'no straight shot near an enemy yet'; return E(aimTip(a)); }
+
 const SORTV={name:p=>p.name.toLowerCase(),ip:p=>p.ip||'',shield:p=>p.shield,health:p=>p.health,weapon:p=>(p.weapon||'').toLowerCase(),kills:p=>p.kills||0,deaths:p=>p.deaths||0,
- kd:kdOf,shots:p=>p.shots||0,accuracy:p=>p.shots?p.accuracy:-1,grenades:p=>p.grenades?p.grenades.frag+p.grenades.plasma+p.grenades.spike+p.grenades.firebomb:0,
+ kd:kdOf,shots:p=>p.shots||0,accuracy:p=>p.shots?p.accuracy:-1,aim:p=>p.aim&&p.aim.n>=5?p.aim.err:999,grenades:p=>p.grenades?p.grenades.frag+p.grenades.plasma+p.grenades.spike+p.grenades.firebomb:0,
  vehicle:p=>(p.vehicle||'').toLowerCase(),pos:p=>p.alive?p.pos[0]:-1e9,speed:p=>p.speed||0,traits:p=>Object.keys(p.traits||{}).length};
 let sortK=null, sortD=1, sortMode='team';
 try{ const j=JSON.parse(localStorage.getItem('statsSort')||'null'); if(j){ sortK=j.k in SORTV?j.k:null; sortD=j.d===-1?-1:1; sortMode=j.m==='full'?'full':'team'; } }catch(err){}
@@ -356,7 +368,7 @@ function renderTable(){
    <td><span class="sw" style="background:${C[p.team_name]||'#888'}"></span>${E(p.name)}${p.you?' (you)':''}${p.host?'<span class="hostb" title="hosts this game">★ HOST</span>':''}${p.talking?'<span class="talkic" title="talking">🔊</span>':''}${p.muted?' 🔇':''}</td>
    <td class="ipc">${p.ip?E(p.ip.replace(/:\d+$/,'')):''}${p.rdns?`<div class="pk-x">${E(p.rdns)}</div>`:''}</td>
    <td>${B(p.shield,'#58b8ff')}</td><td>${B(p.health,'#7ddf6a')}</td><td>${E(p.weapon||(p.alive?'':st.get(p)))}</td>
-   <td>${p.kills??''}</td><td>${p.deaths??''}</td><td>${kdOf(p).toFixed(2)}</td><td>${p.shots??''}</td><td>${p.shots?Math.round(p.accuracy*100)+'%':''}</td><td>${p.grenades.frag}f ${p.grenades.plasma}p ${p.grenades.spike}s ${p.grenades.firebomb}b</td>
+   <td>${p.kills??''}</td><td>${p.deaths??''}</td><td>${kdOf(p).toFixed(2)}</td><td>${p.shots??''}</td><td>${p.shots?Math.round(p.accuracy*100)+'%':''}</td><td>${aimCell(p)}</td><td>${p.grenades.frag}f ${p.grenades.plasma}p ${p.grenades.spike}s ${p.grenades.firebomb}b</td>
    <td>${E(p.vehicle||'')}</td><td>${p.alive?p.pos.map(v=>v.toFixed(1)).join(', '):''}</td><td>${p.speed.toFixed(1)}</td><td>${traitBadges(p,3)}</td></tr>`).join('');
 }
 // ---- traits: labels for the trait keys (playlist option names) ----
@@ -481,7 +493,7 @@ function renderDet(){
    ['Voice',p.voice?(p.muted?'muted (only for you)':'audible'):'no voice connection'],
    ['Address',p.ip?E(p.ip):snap.addr_role==='client'?`not known to a client (it only talks to the server${snap.server_addr?': '+E(snap.server_addr):''})`:
      snap.addr_role==='hidden'?'hidden (this page is reachable from other computers; PELOAD_STATS_IPS=1 shows it)':p.you?'this computer':snap.addr_role==='host'?'not in the host table':'not known'],
-   ['Shots fired',p.shots??0],['Hits',`${p.hits??0}`+(p.shots?` (${Math.round(p.accuracy*100)}% accuracy)`:'')],['Facing',p.facing!=null?p.facing+'°':''],['Position',p.pos.map(v=>v.toFixed(1)).join(', ')],['Object',p.handle]];
+   ['Aim',aimDetail(p)],['Shots fired',p.shots??0],['Hits',`${p.hits??0}`+(p.shots?` (${Math.round(p.accuracy*100)}% accuracy)`:'')],['Facing',p.facing!=null?p.facing+'°':''],['Position',p.pos.map(v=>v.toFixed(1)).join(', ')],['Object',p.handle]];
   el.innerHTML=`<button class="x" onclick="closeDet()" aria-label="Close">×</button><b>${E(p.name)}${p.you?' (you)':''}</b><div class="detbtns">${p.voice&&!p.you?bigMute(p.voice,p.muted):''}${p.you?'':tpBtn(p)}</div><dl>${rows.map(r=>`<dt>${r[0]}</dt><dd>${r[1]}</dd>`).join('')}</dl>
    <div class="note">Shots counts every projectile (each shotgun pellet is one). A hit is a shot that ended inside another player's body bounds -- an estimate; turret shots count for the vehicle, not the gunner.</div>`;
   el.style.display='block';

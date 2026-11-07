@@ -173,6 +173,8 @@ decoded by ffmpeg to clear speech (FIXES.md). Mute was checked there too (the ap
 Chat: the app prints its chat lines only with its chat_log byte set (a dedicated-server option); nhook sets it
 (nstats.c chat_log_tick), so chat / [SERVER] / notice lines reach the feed and the archive (FIXES.md, 2026-11-07).
 The kill feed ignores the history a client receives after joining a game in progress (FIXES.md "history is not a kill").
+Aim vs hits: the page's Aim column (FIXES.md "aim vs hits"): each straight shot's miss against the nearest enemy's posed
+hitboxes and whether the server then registered damage.
 
 Not yet: the packet log's game layer (halo3 message names; 0.10's wire protocol is the app's own).
 

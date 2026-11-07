@@ -1944,6 +1944,23 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   (the next utterance when one ends: listening through a session), who / channel / time / "n of N" and a close button; a play
   head line runs across the timeline and the playing block is scrolled into view; each speaker gets a play button (their
   whole .ogg). Checked on a live session: the blocks show, a click plays, play on went 12 -> 18 of 33, close stops it.
+- **nhook: aim vs hits, per player** (2026-11-07; noverlay.c nov_aim_shot / nov_aim_tick, nstats.c st_aim_tick / st_aim_json,
+  stats_page.html "Aim" column, nrender.m calls nov_aim_tick every frame) — WHY: the user: "is there a way to determine if
+  where the player is aiming is in sync with what is getting hit? ... a meter that tells how close to an accurate shot in a
+  hitbox is being made ... a high deviation would indicate a trash player, or that lag was too high between players to land
+  hits". HOW: (1) at each bullet's deletion (the object_delete text hook, engine thread) a straight shot (travelled <= 1.05 x
+  its start-to-impact line + 0.3: no grenades or bounces) from a biped picks the enemy whose bounding-sphere centre lies
+  nearest its path (within 12 degrees, in front of where it stopped, alive, on foot; teams / Infection sides as the overlay's
+  filters), and copies that biped's pose (node matrices, region permutations) and shield + health into a 64-record seqlock
+  ring. (2) the render thread (it owns h3maps.c's hitbox cache) poses the target's collision edges as the overlay does and,
+  per (region, node), takes the centre and mean radius of the end points: the miss = the path's distance to the nearest such
+  piece minus its radius, 0 = through a hitbox; the error = atan(miss / distance) in degrees. (3) the stats snapshot keeps the
+  last 64 errors per player (median and 75th percentile shown), the share through a hitbox, and REGISTERED = the target's
+  shield + health went down (or it died) within 0.6 s -- separately for on-target shots and visible misses. Measured as THIS
+  client saw the target: a remote shooter's target sits where this client draws it; in a crowd other players' damage on the
+  same target counts too (the page says so). The [perf] line counts "aimed / measured". NHOOK_NO_AIM=1 = off. Checked live on
+  an 80-player Hugegrass server: 1,258 shots measured in 2 minutes; one player's 196 on-target shots were all registered and
+  none of their 360 misses, others 33-76% of on-target shots registered.
 - **nhook archive: sessions not named after the loading screen** (2026-11-07; nstats.c, the fx_roster_tick call) — WHY: every
   mid-game join made a session "..._130_epilogue": the session opens 2 s after the host is known, while the loading screen's
   scenery (130_epilogue) is still the map hb_current_map reports (it rechecks every 2 s). HOW: the archive gets no map while
