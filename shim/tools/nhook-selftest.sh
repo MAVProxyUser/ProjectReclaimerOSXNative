@@ -38,7 +38,7 @@ int main(void) {
 C
 clang -O1 -o "$T/t" "$T/t.c"
 PORT=${NHOOK_STATS_HTTP:-8799}
-NHOOK_SELFTEST=1 NHOOK_VOICE_LOG=1 NHOOK_STATS_HTTP=$PORT DYLD_INSERT_LIBRARIES="$PWD/shim/build/nhook.dylib" "$T/t" 2>"$T/err" &
+PELOAD_FORENSIC_DIR="$T/forensics" NHOOK_HEATMAP_DIR="$T/heatmaps" NHOOK_SELFTEST=1 NHOOK_VOICE_LOG=1 NHOOK_STATS_HTTP=$PORT DYLD_INSERT_LIBRARIES="$PWD/shim/build/nhook.dylib" "$T/t" 2>"$T/err" &
 P=$!; sleep 1.5
 curl -s -m 3 "http://127.0.0.1:$PORT/packets.json?max=50&rdns=1" > /dev/null || true   # (queues the reverse lookups)
 sleep 0.5; curl -s -m 3 "http://127.0.0.1:$PORT/packets.json?max=50&rdns=1" > "$T/pk.json" || true

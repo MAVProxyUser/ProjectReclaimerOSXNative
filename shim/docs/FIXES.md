@@ -1961,6 +1961,9 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   same target counts too (the page says so). The [perf] line counts "aimed / measured". NHOOK_NO_AIM=1 = off. Checked live on
   an 80-player Hugegrass server: 1,258 shots measured in 2 minutes; one player's 196 on-target shots were all registered and
   none of their 360 misses, others 33-76% of on-target shots registered.
+- **nhook-selftest.sh: its own forensic / heatmap folders** (2026-11-07; shim/tools/nhook-selftest.sh) — WHY: the offline
+  selftest starts nhook's stats server, whose archive opened an empty "menu" session in the player's real forensic archive on
+  every run. HOW: PELOAD_FORENSIC_DIR and NHOOK_HEATMAP_DIR point into the test's temporary folder.
 - **nhook archive: sessions not named after the loading screen** (2026-11-07; nstats.c, the fx_roster_tick call) — WHY: every
   mid-game join made a session "..._130_epilogue": the session opens 2 s after the host is known, while the loading screen's
   scenery (130_epilogue) is still the map hb_current_map reports (it rechecks every 2 s). HOW: the archive gets no map while
