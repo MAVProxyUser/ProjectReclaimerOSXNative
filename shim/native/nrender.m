@@ -145,6 +145,18 @@ static void my_present(id self, SEL cmd, id drawable) {
         @catch (NSException* ex) { static int told; if (!told++) nh_log("[nhook] render: exception %s (%s)", ex.name.UTF8String, ex.reason.UTF8String); } }
     ((void (*)(id, SEL, id))g_orig_present)(self, cmd, drawable);
 }
+// ---- the scene's depth (for hiding the overlay behind the world): every depth texture the app attaches to a render pass
+// is seen here (-[MTLRenderPassDepthAttachmentDescriptor setTexture:] swizzled); NHOOK_DEPTH_PROBE=1 logs each new one
+static IMP g_orig_dtex; static NSMutableSet* g_dseen; static id<MTLTexture> g_dlast; static volatile unsigned long g_dpasses;
+static void my_set_dtex(id self, SEL cmd, id<MTLTexture> t) {
+    ((void (*)(id, SEL, id))g_orig_dtex)(self, cmd, t);
+    if (!t) return; g_dpasses++;
+    @synchronized (g_dseen) {
+        if (![g_dseen containsObject:t]) { [g_dseen addObject:t];
+            if (getenv("NHOOK_DEPTH_PROBE")) nh_log("[nhook] [depth] new depth texture %p %lux%lu format %lu usage 0x%lx storage %lu samples %lu (frame %lu)", (__bridge void*)t,
+                (unsigned long)t.width, (unsigned long)t.height, (unsigned long)t.pixelFormat, (unsigned long)t.usage, (unsigned long)t.storageMode, (unsigned long)t.sampleCount, g_nr_frames); }
+        g_dlast = t; }
+}
 static void my_set_fbo(id self, SEL cmd, BOOL v) { ((void (*)(id, SEL, BOOL))g_orig_fbo)(self, cmd, g_nr_readback ? NO : v); }
 
 void nr_install(void) {
@@ -157,6 +169,10 @@ void nr_install(void) {
         if (!m || !fm) { nh_log("[nhook] render: presentDrawable: / setFramebufferOnly: not found"); return; }
         g_dev = dev; g_pso_lines = [NSMutableDictionary new]; g_pso_blit = [NSMutableDictionary new];
         g_orig_fbo = method_setImplementation(fm, (IMP)my_set_fbo);
+        if (getenv("NHOOK_DEPTH_PROBE")) { MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
+            Method dm = class_getInstanceMethod(object_getClass(rp.depthAttachment), @selector(setTexture:));
+            if (dm) { g_dseen = [NSMutableSet new]; g_orig_dtex = method_setImplementation(dm, (IMP)my_set_dtex);
+                nh_log("[nhook] [depth] watching -[%s setTexture:]", class_getName(object_getClass(rp.depthAttachment))); } }
         g_orig_present = method_setImplementation(m, (IMP)my_present);
         nh_log("[nhook] render: hooked -[%s presentDrawable:] (overlay, recording, captures)", class_getName(c));
     }
