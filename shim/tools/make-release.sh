@@ -19,6 +19,8 @@ bash shim/native/build.sh >/dev/null   # nhook.dylib: our tooling inside the nat
 D="dist/$NAME"
 rm -rf "$D"; mkdir -p "$D/shim/build" "$D/shim/crt" "$D/shim/tools" "$D/shim/docs" "$D/shim/assets" "$D/re-tools" "$D/client"
 cp shim/build/peload shim/build/glhelper shim/build/reclaimer-launcher shim/build/nhook.dylib "$D/shim/build/"; cp shim/crt/*.dll "$D/shim/crt/"
+# nhook.dylib is built with -g: its symbol table names the build folder (the builder's home path) -- stripped, re-signed ad hoc
+strip -S -x "$D/shim/build/nhook.dylib" && /usr/bin/codesign -s - -f "$D/shim/build/nhook.dylib" 2>/dev/null
 cp shim/play.sh shim/target.sh shim/dedicated.sh shim/build.sh shim/native.sh "$D/shim/"
 cp shim/docs/mods.md shim/docs/game-options.md shim/docs/FIXES.md shim/docs/native-client.md shim/docs/forensics.md "$D/shim/docs/"
 cp shim/assets/Reclaimer.icns "$D/shim/assets/"
@@ -32,5 +34,7 @@ chmod +x "$D/shim/build/peload" "$D/shim/build/glhelper" "$D/shim/build/reclaime
 # Reclaimer.app at the top of the bundle: portable (uses the folder it sits in), signed ad hoc
 RECLAIMER_APP_VERSION="$VER${SUF:+-$SUF}" bash "$D/shim/tools/make-app.sh" --portable | sed "s#^made .*/Reclaimer.app#Reclaimer.app#"
 /usr/bin/codesign --verify --strict "$D/Reclaimer.app" && echo "Reclaimer.app signature verified"
+# no home paths in what is published (the builder's user name)
+if grep -r -l -a "$HOME" "$D" >/dev/null 2>&1; then echo "refusing: these files contain $HOME:"; grep -r -l -a "$HOME" "$D"; exit 1; fi
 ( cd dist && COPYFILE_DISABLE=1 tar czf "$NAME.tar.gz" "$NAME" && shasum -a 256 "$NAME.tar.gz" > "$NAME.tar.gz.sha256" )
 ls -la "dist/$NAME.tar.gz"; cat "dist/$NAME.tar.gz.sha256"
