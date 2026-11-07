@@ -1784,7 +1784,11 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   from an object_delete hook, which the native port skipped because that entry is a single `b`. hook_install now follows
   an entry branch to the lifted wrapper it leads to; the handler (engine thread, its own TLS read directly, checked)
   records each deleted projectile's start / impact / owner, drawn start -> impact for 0.5 s as in hitbox.c.
-  NHOOK_NO_DELHOOK=1 = off. Not yet verified live when committed.
+  NHOOK_NO_DELHOOK=1 = off. LIVE RESULT (same day): object_delete's code-table entry is not in the JIT region but in the
+  app's own signed __TEXT (0x104faeb88, a `b` to the app's native object_delete at 0x104c2e0ac): the app replaced the
+  function, so neither the entry nor its target can be patched the JIT way (signed code; no free page near the image
+  either) -- bullets are still not drawn. hook_install now hooks an entry that is a `b` in place (displaced = nop, return =
+  the branch target) for JIT-region branches; near_page collects up to 4096 gaps and logs when none works.
 
 - **"Run 2.4x" removed** (2026-10-19, revert 606a38c) — it crashed the client as soon as it was used; the user asked for it
   to be deleted. The page's Speed 2x / speed menu (the host's movement-speed trait) is unchanged. (10-19)

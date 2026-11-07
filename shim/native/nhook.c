@@ -75,12 +75,12 @@ static uint8_t* near_page(uint64_t code, size_t size) {   // a fresh RW range wi
     // nearest first; each gap's end nearest the code. The old 1 MB steps out from the code region's edges found nothing
     // in some launches: the gaps there are 16-352 KB and scattered (2026-11-07, "no stub page near ...").
     const uint64_t R = 0x7800000; uint64_t lo = code > R + 0x100000000ull ? code - R : 0x100000000ull, hi = code + R;
-    uint64_t cand[256]; int nc = 0; mach_vm_address_t a = lo; uint64_t prev = lo;
+    static uint64_t cand[4096]; int nc = 0; mach_vm_address_t a = lo; uint64_t prev = lo;   // (hooks are installed from one thread)
     for (int guard = 0; guard < 100000 && prev < hi; guard++) {
         mach_vm_size_t rs = 0; vm_region_basic_info_data_64_t bi; mach_msg_type_number_t bc = VM_REGION_BASIC_INFO_COUNT_64; mach_port_t on;
         kern_return_t kr = mach_vm_region(mach_task_self(), &a, &rs, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&bi, &bc, &on);
         uint64_t gs = prev, ge = kr == KERN_SUCCESS ? (a < hi ? a : hi) : hi;   // the gap [gs, ge) before this region
-        if (ge > gs && ge - gs >= size && nc < 256) cand[nc++] = ge <= code ? ge - size : gs;   // (the end nearest the code)
+        if (ge > gs && ge - gs >= size && nc < 4096) cand[nc++] = ge <= code ? ge - size : gs;   // (the end nearest the code)
         if (kr != KERN_SUCCESS) break;
         prev = a + rs; a = prev;
     }
@@ -90,25 +90,29 @@ static uint8_t* near_page(uint64_t code, size_t size) {   // a fresh RW range wi
         int64_t d = (int64_t)(cand[i] - code); if (d >= (int64_t)R || d <= -(int64_t)R || d + (int64_t)size >= (int64_t)R) continue;
         mach_vm_address_t t = cand[i]; if (mach_vm_allocate(mach_task_self(), &t, size, VM_FLAGS_FIXED) == KERN_SUCCESS) return (uint8_t*)t;
     }
+    nlog("[nhook] near_page: %d free gaps of %zu bytes within 120 MB of 0x%llx, none could be allocated (nearest 0x%llx)", nc, size, (unsigned long long)code, nc ? (unsigned long long)cand[0] : 0ull);
     return 0;
 }
 
 static int hook_install(const char* name, uint32_t rva, nh_handler h) {
     uint64_t e = host_of(rva); uint32_t w[4];
     if (!e || rd(e, w, 16)) { nlog("[nhook] hook %s: halo3+0x%x not lifted", name, rva); return -1; }
-    // an entry that is one `b` (object_delete, halo3+0x342ed8): the lifted wrapper it jumps to is hooked instead
-    if ((w[0] & 0xfc000000u) == 0x14000000u) { int64_t off = (int64_t)((int32_t)(w[0] << 6) >> 6) * 4; uint64_t t = e + (uint64_t)off;
-        if (rd(t, w, 16)) { nlog("[nhook] hook %s: its entry branch leads nowhere readable", name); return -1; }
-        nlog("[nhook] hook %s: halo3+0x%x is a branch to 0x%llx: hooking that", name, rva, (unsigned long long)t); e = t; }
-    if (w[0] != 0xa9bf7bfd || w[1] != 0x910003fd || w[2] != 0xa9bf53f3 || (w[3] & 0xffffffe0) != 0xb9429000) {   // ldr w<n>,[x0,#0x290]
+    // An entry that is one `b` (object_delete, halo3+0x342ed8: the app replaced the function with its own code, the lifted
+    // entry jumps there): that branch becomes `b stub`, and the stub runs the handler, executes nothing in its place and
+    // continues at the branch's target -- whatever is there (the guest registers are untouched either way).
+    uint32_t displaced = w[0]; uint64_t ret = e + 4;
+    if ((w[0] & 0xfc000000u) == 0x14000000u) { int64_t off = (int64_t)((int32_t)(w[0] << 6) >> 6) * 4;
+        ret = e + (uint64_t)off; displaced = 0xd503201fu;   // nop
+        nlog("[nhook] hook %s: halo3+0x%x is a branch to 0x%llx: hooking the branch", name, rva, (unsigned long long)ret); }
+    else if (w[0] != 0xa9bf7bfd || w[1] != 0x910003fd || w[2] != 0xa9bf53f3 || (w[3] & 0xffffffe0) != 0xb9429000) {   // ldr w<n>,[x0,#0x290]
         nlog("[nhook] hook %s: halo3+0x%x entry %08x %08x %08x %08x is not a lifted wrapper: refused", name, rva, w[0], w[1], w[2], w[3]); return -1; }
     size_t tl = nh_tpl_end - nh_tpl_start;
     uint8_t* st = near_page(e, 0x4000);              // its own page: a page that holds a live stub is never made writable again
     if (!st) { nlog("[nhook] hook %s: no stub page near 0x%llx", name, (unsigned long long)e); return -1; }
     int64_t d = (int64_t)((uint64_t)st - e);
     memcpy(st, nh_tpl_start, tl);
-    memcpy(st + (nh_tpl_displaced - nh_tpl_start), &w[0], 4);                 // the displaced stp x29,x30,[sp,#-16]!
-    uint64_t hv = (uint64_t)h, rv = e + 4;
+    memcpy(st + (nh_tpl_displaced - nh_tpl_start), &displaced, 4);            // the displaced stp x29,x30,[sp,#-16]! (or a nop for a branch)
+    uint64_t hv = (uint64_t)h, rv = ret;
     memcpy(st + (nh_tpl_handler - nh_tpl_start), &hv, 8); memcpy(st + (nh_tpl_return - nh_tpl_start), &rv, 8);
     mach_vm_protect(mach_task_self(), (mach_vm_address_t)st, 0x4000, 0, VM_PROT_READ | VM_PROT_EXECUTE);
     sys_icache_invalidate(st, tl);
