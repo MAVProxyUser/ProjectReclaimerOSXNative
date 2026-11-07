@@ -835,8 +835,63 @@ static uint8_t* guest_mod_by_addr(uint64_t p){
     if(g_base){ OPT64*o=(OPT64*)((uint8_t*)g_base+((DOS*)g_base)->e_lfanew+sizeof(COFF)); if(p>=(uint64_t)g_base && p<(uint64_t)g_base+o->ImageSize) return g_base; }
     for(int k=0;k<g_nmods;k++){ uint8_t*bs=g_mods[k].base; OPT64*o=(OPT64*)(bs+((DOS*)bs)->e_lfanew+sizeof(COFF)); if(p>=(uint64_t)bs && p<(uint64_t)bs+o->ImageSize) return bs; }
     return 0; }
-static void*  MSABI i_GetModuleHandleW(uint16_t *n){ if(name_is_ws2_w(n)) return WS2_HANDLE; { uint8_t*m=guest_mod_by_name_w(n); if(m) return m; } return g_base; } // ws2_32 / guest DLLs by name; else image base
-static void*  MSABI i_GetModuleHandleA(char *n){ if(name_is_ws2(n)) return WS2_HANDLE; return g_base; }
+// ---- synthetic system DLL images (client 0.10.0, 2026-11-06) ------------------------------------------------------------
+// The 0.10.0 client ("rcl-engine") recompiles halo3.dll and runs halo3's own delay-load helper with LoadLibraryExA /
+// GetProcAddress bound to the client's code: for dxgi.dll it asks GetModuleHandleW("dxgi.dll") (the exe imports dxgi, so on
+// Windows it is loaded) and then reads that image's EXPORT TABLE itself. The loader answered every unknown name with the exe's
+// own image, which exports no CreateDXGIFactory1: "fatal: unhandled exception 0xc06d007f ... the delay-loaded dxgi.dll is
+// missing" right after the engine was linked. Now dxgi.dll, d3d11.dll and d3dcompiler_47.dll (halo3's delay imports the loader
+// implements) get a small PE image of their own (headers, a sorted
+// export directory, and per export a 16-byte `jmp [rip+0]` thunk to the loader's implementation), returned by
+// GetModuleHandle* and LoadLibrary*; GetProcAddress on it finds the thunk like on any guest DLL. PELOAD_NO_SYNTH_DLL=1 = old
+// (the exe image). PELOAD_TRACE_GMH=1 logs the GetModuleHandle* names.
+static void *resolve_impl(const char *fn); // fwd
+static const struct { const char*dll; const char*fns[6]; } g_synth_def[]={
+    {"dxgi.dll",{"CreateDXGIFactory","CreateDXGIFactory1","CreateDXGIFactory2",0}},
+    {"d3d11.dll",{"D3D11CreateDevice","D3D11CreateDeviceAndSwapChain",0}},
+    {"d3dcompiler_47.dll",{"D3DCompile","D3DReflect","D3DGetInputSignatureBlob",0}} };   // (ours: i_D3DCompile finds MCC's real one itself)
+static uint8_t* g_synth_img[sizeof g_synth_def/sizeof g_synth_def[0]];
+static int synth_is(const void*b){ if(!b) return 0; for(size_t d=0;d<sizeof g_synth_def/sizeof g_synth_def[0];d++) if(g_synth_img[d]==b) return 1; return 0; }
+static int synth_cmp(const void*a,const void*b){ return strcmp(*(const char*const*)a,*(const char*const*)b); }
+static uint8_t* synth_dll(const char*name){   // name: a bare or full DLL name, any case, ".dll" optional; 0 = not one of ours
+    static int off=-1; if(off<0) off=getenv("PELOAD_NO_SYNTH_DLL")!=0; if(off || !name) return 0;
+    const char*b=name; for(const char*p=name;*p;p++) if(*p=='\\'||*p=='/') b=p+1;
+    for(size_t d=0;d<sizeof g_synth_def/sizeof g_synth_def[0];d++){ const char*dn=g_synth_def[d].dll; size_t bl=strlen(b), dl=strlen(dn);
+        if(!(bl==dl && !strcasecmp(b,dn)) && !(bl==dl-4 && !strncasecmp(b,dn,bl))) continue;
+        if(g_synth_img[d]) return g_synth_img[d];
+        static pthread_mutex_t mx=PTHREAD_MUTEX_INITIALIZER; pthread_mutex_lock(&mx);
+        if(!g_synth_img[d]){
+            const char*fn[8]; void*impl[8]; int n=0;
+            for(int i=0;i<6 && g_synth_def[d].fns[i];i++){ void*f=resolve_impl(g_synth_def[d].fns[i]); if(f){ fn[n]=g_synth_def[d].fns[i]; n++; } }
+            qsort(fn,(size_t)n,sizeof fn[0],synth_cmp); for(int i=0;i<n;i++) impl[i]=resolve_impl(fn[i]);
+            uint8_t*m=mmap(0,0x2000,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANON,-1,0);
+            if(m!=MAP_FAILED){ memset(m,0,0x2000);
+                m[0]='M'; m[1]='Z'; *(uint32_t*)(m+0x3c)=0x40;
+                uint8_t*nt=m+0x40; memcpy(nt,"PE\0\0",4); *(uint16_t*)(nt+4)=0x8664; *(uint16_t*)(nt+20)=0xF0; *(uint16_t*)(nt+22)=0x2022;   // DLL
+                uint8_t*op=nt+24; *(uint16_t*)op=0x20B; *(uint32_t*)(op+32)=0x1000; *(uint32_t*)(op+36)=0x200;   // section / file alignment
+                *(uint32_t*)(op+56)=0x2000; *(uint32_t*)(op+60)=0x200; *(uint16_t*)(op+68)=2; *(uint32_t*)(op+108)=16;   // SizeOfImage, headers, subsystem, dirs
+                *(uint64_t*)(op+24)=(uint64_t)(uintptr_t)m;   // ImageBase = where it is
+                uint32_t ed=0x200, fa=ed+40, na=fa+4*(uint32_t)n, oa=na+4*(uint32_t)n, str=oa+2*(uint32_t)n;
+                *(uint32_t*)(op+112)=ed;   // DataDirectory[0] = the export directory
+                uint8_t*e=m+ed; *(uint32_t*)(e+16)=1; *(uint32_t*)(e+20)=(uint32_t)n; *(uint32_t*)(e+24)=(uint32_t)n;
+                *(uint32_t*)(e+28)=fa; *(uint32_t*)(e+32)=na; *(uint32_t*)(e+36)=oa;
+                *(uint32_t*)(e+12)=str; strcpy((char*)m+str,g_synth_def[d].dll); str+=(uint32_t)strlen(g_synth_def[d].dll)+1;
+                for(int i=0;i<n;i++){ *(uint32_t*)(m+na+4*i)=str; strcpy((char*)m+str,fn[i]); str+=(uint32_t)strlen(fn[i])+1; *(uint16_t*)(m+oa+2*i)=(uint16_t)i;
+                    uint32_t th=0x1000+16*(uint32_t)i; *(uint32_t*)(m+fa+4*i)=th;
+                    uint8_t*t=m+th; t[0]=0xFF; t[1]=0x25; *(uint64_t*)(t+6)=(uint64_t)(uintptr_t)impl[i]; }   // jmp [rip+0]; dq impl
+                *(uint32_t*)(op+112+4)=str-ed;   // export directory size (its strings included: thunks lie outside it, no forwarders)
+                mprotect(m,0x1000,PROT_READ); mprotect(m+0x1000,0x1000,PROT_READ|PROT_EXEC);
+                g_synth_img[d]=m;
+                char t[160]; int k=snprintf(t,sizeof t,"  [synth-dll] %s: %d exports at %p\n",g_synth_def[d].dll,n,(void*)m); (void)!write(2,t,(size_t)k); } }
+        pthread_mutex_unlock(&mx); return g_synth_img[d]; }
+    return 0; }
+static uint8_t* synth_dll_w(const uint16_t*w){ if(!w) return 0; char a[260]; int i=0; for(; w[i] && i<259; i++) a[i]=(char)(w[i]<128?w[i]:'?'); a[i]=0; return synth_dll(a); }
+static void gmh_trace(const char*k,const char*a,const uint16_t*w){ static int on=-1; if(on<0) on=getenv("PELOAD_TRACE_GMH")!=0; if(!on) return;   // PELOAD_TRACE_GMH=1
+    char m[300]; int n=snprintf(m,sizeof m,"  [%s] ",k); if(a) n+=snprintf(m+n,sizeof m-n,"%s",a); else if(w) for(int i=0;w[i]&&n<280;i++) m[n++]=(char)(w[i]<128?w[i]:'?'); else n+=snprintf(m+n,sizeof m-n,"(null)");
+    m[n++]='\n'; (void)!write(2,m,(size_t)n); }
+static void*  MSABI i_GetModuleHandleW(uint16_t *n){ gmh_trace("GetModuleHandleW",0,n); if(name_is_ws2_w(n)) return WS2_HANDLE; { uint8_t*m=guest_mod_by_name_w(n); if(m) return m; }
+    { uint8_t*sy=synth_dll_w(n); if(sy) return sy; } return g_base; } // ws2_32 / guest DLLs / synthetic system DLLs by name; else image base
+static void*  MSABI i_GetModuleHandleA(char *n){ gmh_trace("GetModuleHandleA",n,0); if(name_is_ws2(n)) return WS2_HANDLE; { uint8_t*sy=synth_dll(n); if(sy) return sy; } return g_base; }
 
 // TLS: Windows TLS slots are PER-THREAD. A shared global table would let threads
 // clobber each other's thread-local state -> timing-dependent corruption. Store
@@ -1040,7 +1095,18 @@ static ComObj g_dxgiadapter; // real adapter object (vtbl populated in d3d_init)
 static int MSABI dxgi_EnumAdapters(void*self,unsigned i,void**pp){ (void)self;
     if(getenv("PELOAD_DXGI_ADAPTER") && i==0){ if(pp)*pp=&g_dxgiadapter; return HR_OK; }
     if(pp)*pp=0; return HR_DXGI_NOT_FOUND; }
-// IDXGIFactory(1/2) vtable: IUnknown(0-2) + IDXGIObject(3-6) + IDXGIFactory(7+)
+// IDXGIFactory4..7 (client 0.10.0, 2026-11-06): it QueryInterfaces the factory for IDXGIFactory6 (com_QI says yes to
+// everything) and asks EnumAdapterByGpuPreference(0, HIGH_PERFORMANCE, IDXGIAdapter1) -- slot 29, past the end of the old
+// 22-slot table: it read the next global (NULL) and the client crashed at RIP 0 right after "[mods] ...". Now the table runs
+// to IDXGIFactory7's last slot; the new enumerations give the same answer as EnumAdapters1, the rest honest "none" / "no".
+static int MSABI dxgi_EnumAdapterByGpuPreference(void*self,unsigned i,int pref,GUID_*riid,void**pp){ (void)pref;(void)riid; return dxgi_EnumAdapters(self,i,pp); }
+static int MSABI dxgi_EnumAdapterByLuid(void*self,uint64_t luid,GUID_*riid,void**pp){ (void)self;(void)luid;(void)riid; if(pp)*pp=0; return HR_DXGI_NOT_FOUND; }
+static int MSABI dxgi_EnumWarpAdapter(void*self,GUID_*riid,void**pp){ (void)self;(void)riid; if(pp)*pp=0; return HR_DXGI_NOT_FOUND; }
+static int MSABI dxgi_CheckFeatureSupport(void*self,int feature,void*data,uint32_t size){ (void)self;   // PRESENT_ALLOW_TEARING (0): no
+    if(feature==0 && data && size>=4){ *(int32_t*)data=0; return HR_OK; } return HR_INVALIDARG; }
+static unsigned MSABI com_zero(void*self){ (void)self; return 0; }   // BOOL / UINT getters: FALSE / no flags
+// IDXGIFactory vtable through IDXGIFactory7: IUnknown(0-2) + IDXGIObject(3-6) + IDXGIFactory(7-11) + Factory1(12-13) +
+// Factory2(14-24) + Factory3(25) + Factory4(26-27) + Factory5(28) + Factory6(29) + Factory7(30-31)
 static void* g_dxgifactory_vtbl[] = {
     (void*)com_QI,(void*)com_AddRef,(void*)com_Release,          // 0-2 IUnknown
     (void*)com_fail,(void*)com_fail,(void*)com_fail,(void*)com_fail, // 3-6 SetPrivateData.. GetParent
@@ -1048,7 +1114,14 @@ static void* g_dxgifactory_vtbl[] = {
     (void*)com_fail,(void*)com_fail,(void*)com_fail,(void*)com_fail, // 8-11 MakeWindowAssoc..CreateSoftwareAdapter
     (void*)dxgi_EnumAdapters,                                    // 12 EnumAdapters1 (Factory1)
     (void*)com_fail,                                             // 13 IsCurrent (Factory1)
-    (void*)com_fail,(void*)com_fail,(void*)com_fail,(void*)com_fail,(void*)com_fail,(void*)com_fail,(void*)com_fail,(void*)com_fail }; // 14+ Factory2 slack
+    (void*)com_zero,                                             // 14 IsWindowedStereoEnabled (Factory2)
+    (void*)com_fail,(void*)com_fail,(void*)com_fail,(void*)com_fail,(void*)com_fail,(void*)com_fail,(void*)com_fail,(void*)com_fail,(void*)com_fail,
+    (void*)com_fail,                                             // 15-24 CreateSwapChainForHwnd .. CreateSwapChainForComposition
+    (void*)com_zero,                                             // 25 GetCreationFlags (Factory3)
+    (void*)dxgi_EnumAdapterByLuid,(void*)dxgi_EnumWarpAdapter,   // 26-27 (Factory4)
+    (void*)dxgi_CheckFeatureSupport,                             // 28 (Factory5)
+    (void*)dxgi_EnumAdapterByGpuPreference,                      // 29 (Factory6)
+    (void*)com_fail,(void*)com_fail };                           // 30-31 Register / UnregisterAdaptersChangedEvent (Factory7)
 static ComObj g_dxgifactory = { g_dxgifactory_vtbl };
 static void d3d_init(void); // fwd: also patches g_dxgifactory_vtbl[10]=CreateSwapChain
 static int MSABI i_CreateDXGIFactory(GUID_*riid,void**pp){ (void)riid; d3d_init(); if(pp)*pp=&g_dxgifactory; return HR_OK; }
@@ -1117,11 +1190,13 @@ typedef struct { void** vtbl; uint32_t kind; uint32_t rowpitch; uint64_t size; v
     int cs_gpu;                   // buffer: its GL copy is the current contents (written by GPU compute); the CPU copy is stale
     char* monosrc;                // shader: mono-path GLSL (injected + renamed), built once and shared by every pair
     uint64_t bchash;              // shader: FNV-1a of the bytecode (identifies it across runs for the pair pre-link list)
+    uint64_t latch_f;             // (latch.c) a camera constant buffer: the frame its GPU copy was patched for (copied again each frame)
     unsigned shc_id[4]; uint64_t shc_mask[4]; int shc_n; // shader: compiled GL shaders per interface-padding mask
     void* canon;                  // shader: first-created object with identical bytecode (programs are keyed by it)
     uint8_t bcshared;             // shader: bc / glsl are the canon's (a duplicate: freed when released, its data not)
     uint32_t intin; int intin_ok; // VS: input registers declared uvec4/ivec4 (integer vertex attributes)
     volatile int cs_pending;      // buffer: queued async compute jobs that write it (wait before reading its CPU copy)
+    volatile int cs_readers;      // queued async compute jobs that read it LIVE (not a snapshot): wait before writing it (cs_wait_write)
     unsigned glq; int qstate; uint64_t qval; // query: GL query object, 0 idle / 1 begun / 2 ended, cached result (timestamps)
     // lifetime (backlog 27): COM reference count; Release to 0 queues the object for d3dobj_stage/d3dobj_reap, which free
     // it once nothing bound or queued can still use it. keep: never freed (shaders, layouts, the back buffer...).
@@ -1131,6 +1206,7 @@ typedef struct { void** vtbl; uint32_t kind; uint32_t rowpitch; uint64_t size; v
     // small GPU->staging copies read back asynchronously (GL helper; rb_*): pixel buffer, mailbox slot (+1; 0 none), the
     // newest readback's ticket and where its rows go; rbpend = data not in the CPU copy yet
     unsigned rbpbo; uint32_t rbpbosz; int16_t rbslot1; volatile int rbpend; uint64_t rbticket; uint32_t rb_dx, rb_dy, rb_sw, rb_sh, rb_bpp;
+    uint8_t*rbchk;   // (PELOAD_RB_CHECK) the same pixels read synchronously, compared when the asynchronous copy is used
 } D3DObj;
 // ID3D11DeviceChild private data: halo3 stashes the VS bytecode-blob pointer on the shader object
 // (SetPrivateData with GUID g_180801e00) and reads it back for CreateInputLayout. Our old no-op
@@ -1818,7 +1894,7 @@ static uint32_t MSABI dev_GetExceptionMode(void*t){ (void)t; return 0; }
 // ---- ID3D11DeviceContext: Map returns a real buffer; everything else no-op/0 ----
 static int  MSABI ctx_ret0(void){ return 0; }                            // safe for void + HRESULT + UINT returns
 static uint64_t g_cb_tick;           // advances each present; marks CB freshness for view-proj auto-detect
-static void cs_wait_res(D3DObj*r); static void cs_wait_view(void*v); // fwd (async compute)
+static void cs_wait_res(D3DObj*r); static void cs_wait_view(void*v); static void cs_wait_write(D3DObj*r,const char*why); // fwd (async compute)
 // PELOAD_D3DGL_FRAMESTAT: per-frame counters, one log line per engine Present (diagnosing one-frame glitches)
 static struct { unsigned exec, novsps, noglsl, noprog, ringfail, wraps, disp, copies, maps, mapread, upd, clears, fbochg, rtclears, dsclears; } g_fs;
 // A write to one subresource: keep "partial" if every change since the last upload named its subresource
@@ -1829,7 +1905,8 @@ static void smallrb_trace(const char*what,D3DObj*dst,D3DObj*src,uint32_t type); 
 static void rb_complete(D3DObj*o);   // fwd (asynchronous staging readbacks, by d3dgl_gpu_copy_impl)
 static int  MSABI ctxi_Map(void*t,void*res,uint32_t sub,uint32_t type,uint32_t fl,void*pM){ (void)t;(void)sub;(void)type;(void)fl; if(res && ((D3DObj*)res)->cs_gpu) cs_gpu_readback((D3DObj*)res,"Map");
     g_fs.maps++; if(type==1||type==3) g_fs.mapread++;
-    cs_wait_res((D3DObj*)res); rb_complete((D3DObj*)res);   // (a staging texture read back asynchronously: its pixels in now)
+    if(type==1) cs_wait_res((D3DObj*)res); else cs_wait_write((D3DObj*)res,"Map for writing");
+    rb_complete((D3DObj*)res);   // (a staging texture read back asynchronously: its pixels in now)
     // PELOAD_TRACE_MAPREAD=1: every READ / READ_WRITE map (buffers too): kind, size, format, the first values, the caller
     if((type==1||type==3) && res && GENV1("PELOAD_TRACE_MAPREAD")){ D3DObj*q=res; static unsigned long nm; nm++; if(nm<=300 || !(nm%500)){
         extern uint64_t g_map_guest_ra; uint64_t ra=g_map_guest_ra; const uint8_t*b=(const uint8_t*)q->data; char m[400];
@@ -1909,7 +1986,7 @@ static void MSABI ctx_DrawIndexed(void*t,uint32_t n,uint32_t s,int b){ (void)t;(
 static void MSABI ctx_Draw(void*t,uint32_t n,uint32_t s){ (void)t;(void)s; d3dtrace(0,"Draw"); stg_note_draw(n); draw_caller("Draw",__builtin_return_address(0),n); draw_log("draw",n); d3d_capture_frame(n); if(d3dgl_enabled()) sub_draw(n,0,1,s,0,0); }
 static void MSABI ctxi_UpdateSubresource(void*t,void*res,uint32_t sub,const void*box,const void*src,uint32_t srp,uint32_t sdp){
     (void)t; D3DObj*o=res; if(!o||!o->data||!src) return;
-    cs_wait_res(o); if(o->cs_gpu) cs_gpu_readback(o,"UpdateSubresource");
+    cs_wait_write(o,"UpdateSubresource"); if(o->cs_gpu) cs_gpu_readback(o,"UpdateSubresource");
     if(getenv("PELOAD_TRACE_TEXUPD") && o->kind>=2 && o->w==1280 && o->h==720 && !box){ static int n; if((n++%300)==0){ uint64_t nz=0; const uint8_t*sp=src; for(uint32_t y=0;y<720;y+=4) for(uint32_t x=0;x<1280*4;x+=4) if(sp[(size_t)y*srp+x+3]) nz++;
         uint64_t nzr=0; for(uint32_t y=0;y<720;y+=4) for(uint32_t x=0;x<1280*4;x+=4) if(sp[(size_t)y*srp+x]|sp[(size_t)y*srp+x+1]|sp[(size_t)y*srp+x+2]) nzr++;
         char m[200]; int k=snprintf(m,sizeof m,"  [texupd-px] #%d %p src=%p pitch=%u nonzero-alpha=%llu nonzero-rgb=%llu /230400\n",n,(void*)o,src,srp,(unsigned long long)nz,(unsigned long long)nzr); (void)!write(2,m,k); } }
@@ -1959,13 +2036,13 @@ static void smallrb_trace(const char*what,D3DObj*dst,D3DObj*src,uint32_t type){ 
     m[k++]='\n'; (void)!write(2,m,k); }
 static int d3dgl_gpu_copy(D3DObj*dst,D3DObj*src,uint32_t sx,uint32_t sy,uint32_t sw,uint32_t sh,uint32_t dx,uint32_t dy); // fwd (impl after the GL table)
 static int gpu_copy_src_ok(D3DObj*src);   // fwd
-static void MSABI ctxi_CopyResource(void*t,void*dst,void*src){ (void)t; D3DObj*a=dst,*b=src; g_fs.copies++; smallrb_trace("CopyResource",a,b,0); cs_wait_res(a); cs_wait_res(b); rb_complete(b); if(a&&a->cs_gpu) cs_gpu_readback(a,"CopyResource"); if(b&&b->cs_gpu) cs_gpu_readback(b,"CopyResource"); copy_trace("CopyResource",a,b); if(a) a->ver++;
+static void MSABI ctxi_CopyResource(void*t,void*dst,void*src){ (void)t; D3DObj*a=dst,*b=src; g_fs.copies++; smallrb_trace("CopyResource",a,b,0); cs_wait_write(a,"CopyResource"); cs_wait_res(b); rb_complete(b); if(a&&a->cs_gpu) cs_gpu_readback(a,"CopyResource"); if(b&&b->cs_gpu) cs_gpu_readback(b,"CopyResource"); copy_trace("CopyResource",a,b); if(a) a->ver++;
     if(a&&b&&d3dgl_gpu_copy(a,b,0,0,b->w>4096?4096:b->w,b->h>4096?4096:b->h,0,0)) return; if(a&&b&&a->data&&b->data){ uint64_t n=a->size<b->size?a->size:b->size; memcpy(a->data,b->data,n); if(a){ a->gl_dirty=1; a->dpart=0; }
     if(getenv("PELOAD_TRACE_TEXPATH") && a->w>=512 && ((a->fmt>=70&&a->fmt<=84)||(a->fmt>=94&&a->fmt<=99))){ char m[128]; int k=snprintf(m,sizeof m,"  [texpath] COPYRES dst%ux%u f%u <- src%ux%u (%lluB)\n",a->w,a->h,a->fmt,b->w,b->h,(unsigned long long)n); (void)!write(2,m,k);} } }
 // CopySubresourceRegion(dst,dstSub,dstX,dstY,dstZ,src,srcSub,pSrcBox). Was a no-op -> 12k/frame copies
 // (texture staging / composite steps) were dropped. Implement the CPU copy (full or box region).
 static void MSABI ctxi_CopySubresourceRegion(void*t,void*dstR,uint32_t dstSub,uint32_t dstX,uint32_t dstY,uint32_t dstZ,void*srcR,uint32_t srcSub,const void*srcBox){
-    (void)t; D3DObj*dst=dstR,*src=srcR; cs_wait_res(dst); cs_wait_res(src); rb_complete(src); smallrb_trace("CopySubresourceRegion",dst,src,0);
+    (void)t; D3DObj*dst=dstR,*src=srcR; cs_wait_write(dst,"CopySubresourceRegion"); cs_wait_res(src); rb_complete(src); smallrb_trace("CopySubresourceRegion",dst,src,0);
     // GPU particles: halo3 uploads new particles by copying a CPU-written staging buffer into a range of the particle buffer
     // the GPU owns -- write that range straight into its GL storage (and the CPU copy); the GPU keeps the buffer.
     if(dst && src && dst->cs_gpu && !src->cs_gpu && dst->kind==1 && src->kind==1 && !dstSub && !srcSub && dst->gltbobuf && src->data && dst->data){
@@ -2036,6 +2113,7 @@ static void MSABI ctxi_Begin(void*t,void*a); static void MSABI ctxi_End(void*t,v
 // structured buffers are snapshotted at Dispatch time (the game rewrites them for the next dispatch).
 // PELOAD_CS_SYNC runs every dispatch inline (old behaviour).
 typedef struct CsQJob { CsProg*p; CsCtx cx; uint32_t a,b,c; void*own[64]; int nown; D3DObj* uavres[8]; D3DObj* rdres[32]; int nrd, running; struct CsSnap* snaps[48]; int nsnap; struct CsQJob*next;
+    uint64_t plo, phi;   // predicted byte range of uavres[0] (phi 0: the whole resource) -- csq_range_*
     int ndeps, ndep, capdep; struct CsQJob**dependents; struct CsQJob*rnext; } CsQJob;   // (ready-list queue: unfinished earlier jobs it waits for, the later ones waiting for it)
 // A read-only compute input (constant buffer or SRV buffer) copied once per resource version and shared by every job
 // that reads that version (halo3 issues ~100 particle dispatches a frame against the same buffers: copying them per
@@ -2057,9 +2135,49 @@ static CsQJob *g_csq_head,*g_csq_tail; static volatile int g_csq_n; static int g
 // read-only buffers were snapshotted at Dispatch and don't count). Halo 3 issues many small independent particle
 // dispatches per frame; one worker made the GL thread wait ~10 ms a frame in 100-player games.
 static int g_csq_nrun, g_csq_maxrun;
+// Element ranges (2026-10-25): halo3's particle update kernel runs once per particle system, one 64-thread group each, and every
+// dispatch writes the same 2.2 MB pool buffer -- so each waited for all earlier ones (a chain of ~200 dispatches of ~80 us a
+// frame; the GL submission thread waited 43% of its time for the chain's end in a 128-player HugeGrass fight, while the compute
+// workers idled 80%). Each dispatch actually touches only its system's slice: elements [cb3.x, cb3.y) for the update kernel.
+// Per program the rule is LEARNED: its first 64 dispatches run as before with their u0 accesses tracked (dxbc_cpu.c track), and
+// a constant-buffer dword pair {first, end} (first 16 bytes of each CB) survives if every observed access starts exactly at
+// element `first` and stays below `end` (the tightest survivor is taken; a first version that only asked "within" picked a
+// coincidental loose pair on Valhalla, which a later dispatch broke); then two
+// dispatches of such programs conflict on u0 only if their slices overlap. Every dispatch stays tracked and is checked after it
+// ran: an access outside its predicted slice turns the rule off for that program for good ([cs-range] line). Programs that
+// touch other UAVs, or have no surviving pair, keep the whole-resource rule. PELOAD_CS_RANGE=0 = off; PELOAD_AB=csrange.
+static volatile int g_csr_on=-1;
+int ab_csrange(int set){ if(set>=0) g_csr_on=set; return g_csr_on==1; }
+static int csr_on(void){ if(g_csr_on<0){ const char*e=getenv("PELOAD_CS_RANGE"); g_csr_on=!(e && !atoi(e)); } return g_csr_on==1; }
+static void csq_range_predict(CsQJob*j){   // (enqueue) a rule-on program with only u0 written: its slice from the constant buffer
+    j->plo=j->phi=0; CsProg*p=j->p; if(!csr_on() || p->rr_state!=1 || !j->uavres[0]) return;
+    for(int i=1;i<8;i++) if(j->uavres[i]) return;
+    const uint8_t*cb=j->cx.cb[p->rr_b]; if(!cb || j->cx.cbsz[p->rr_b]<(uint32_t)(p->rr_q*4+8)) return;
+    uint32_t f=((const uint32_t*)cb)[p->rr_q], e=((const uint32_t*)cb)[p->rr_q+1], st=p->uavstride[0]; if(!st || f>=e) return;
+    j->plo=(uint64_t)f*st; j->phi=(uint64_t)e*st; }
+static void csq_range_after(CsQJob*j){   // (worker, after the dispatch) learn / verify
+    CsProg*p=j->p; if(p->rr_state<0) return; const CsCtx*c=&j->cx;
+    uint64_t lo=c->wlo[0]<c->rlo[0]?c->wlo[0]:c->rlo[0], hi=c->whi[0]>c->rhi[0]?c->whi[0]:c->rhi[0];
+    for(int i=1;i<8;i++) if(j->uavres[i] || c->whi[i] || c->rhi[i]){ if(p->rr_state==0){ p->rr_state=-1; } return; }   // other UAVs: never
+    if(!hi) return;   // touched nothing
+    if(p->rr_state==1){ if(j->phi && (lo<j->plo || hi>j->phi)){ p->rr_state=-1;
+            char m[220]; int k=snprintf(m,sizeof m,"  [cs-range] program %p touched bytes %llu..%llu outside its predicted %llu..%llu: element ranges off for it\n",(void*)p,
+                (unsigned long long)lo,(unsigned long long)hi,(unsigned long long)j->plo,(unsigned long long)j->phi); (void)!write(2,m,(size_t)k); }
+        return; }
+    // learning: keep the candidate pairs {cb b dword q, q+1} that bound [lo, hi)
+    uint32_t st=p->uavstride[0]; if(!st){ p->rr_state=-1; return; }
+    if(!p->rr_obs) p->rr_cand=~0ull;
+    for(int b=0;b<16;b++) for(int q=0;q<3;q++){ int bit=b*3+q; if(!(p->rr_cand>>bit&1)) continue; const uint8_t*cb=c->cb[b];
+        int ok=cb && c->cbsz[b]>=(uint32_t)(q*4+8); if(ok){ uint32_t f=((const uint32_t*)cb)[q], e=((const uint32_t*)cb)[q+1]; ok=f<e && lo==(uint64_t)f*st && hi<=(uint64_t)e*st; }   // (starts exactly at the first element: a coincidental loose pair rarely does)
+        if(!ok) p->rr_cand&=~(1ull<<bit); }
+    if(!p->rr_cand){ p->rr_state=-1; return; }
+    if(++p->rr_obs>=64){ int bit=-1; uint64_t best=~0ull;   // the tightest surviving pair on this dispatch
+        for(int b2=0;b2<48;b2++){ if(!(p->rr_cand>>b2&1)) continue; const uint32_t*w=(const uint32_t*)c->cb[b2/3]; uint64_t wd=(uint64_t)(w[b2%3+1]-w[b2%3]); if(wd<best){ best=wd; bit=b2; } }
+        if(bit<0){ p->rr_state=-1; return; } p->rr_b=bit/3; p->rr_q=bit%3; p->rr_state=1;
+        char m[160]; int k=snprintf(m,sizeof m,"  [cs-range] program %p: u0 elements [cb%d dword %d, dword %d) -> its dispatches run side by side\n",(void*)p,p->rr_b,p->rr_q,p->rr_q+1); (void)!write(2,m,(size_t)k); } }
 static int csq_conflict(const CsQJob*a,const CsQJob*b){   // a queued before b
     for(int i=0;i<8;i++){ const D3DObj*w=b->uavres[i]; if(!w) continue;
-        for(int k=0;k<8;k++) if(a->uavres[k]==w) return 1;
+        for(int k=0;k<8;k++) if(a->uavres[k]==w){ if(i==0 && k==0 && a->phi && b->phi && (b->phi<=a->plo || a->phi<=b->plo)) continue; return 1; }   // (disjoint slices of u0)
         for(int k=0;k<a->nrd;k++) if(a->rdres[k]==w) return 1; }
     for(int k=0;k<b->nrd;k++){ const D3DObj*r=b->rdres[k]; for(int i=0;i<8;i++) if(a->uavres[i]==r) return 1; }
     return 0; }
@@ -2077,6 +2195,12 @@ static CsQJob* csq_pick(void){   // (g_csq_mx held) the oldest job that doesn't 
 // one worker is woken per job made ready. PELOAD_CS_OLDQUEUE=1 = csq_pick and broadcasts, as before.
 static CsQJob *g_csq_rhead, *g_csq_rtail; static int g_csq_oldq=-1; static volatile int g_csq_want=-1;
 int ab_csq(int set){ if(set>=0) g_csq_want=!set; return g_csq_oldq==0; }   // PELOAD_AB=csq: "on" = the ready list; switched while the queue is empty
+// A completion that makes ONE job ready (2026-10-25): the worker that finished runs it next itself instead of waking another
+// (halo3's particle dispatches form long chains over the same buffers -- in a 128-player HugeGrass match the 8 workers were 80%
+// idle while the GL submission thread waited 42% of its time for a chain's end: every hop paid a thread wake-up).
+// PELOAD_CS_WAKEALL=1 = wake a worker for every ready job, as before; PELOAD_AB=csnext switches it.
+static volatile int g_csq_wakeall=-1;
+int ab_csnext(int set){ if(set>=0) g_csq_wakeall=!set; return g_csq_wakeall==0; }
 static void csq_ready_push(CsQJob*j){ j->rnext=0; if(g_csq_rtail) g_csq_rtail->rnext=j; else g_csq_rhead=j; g_csq_rtail=j; }
 static CsQJob* csq_ready_pop(void){ CsQJob*j=g_csq_rhead; if(j){ g_csq_rhead=j->rnext; if(!g_csq_rhead) g_csq_rtail=0; } return j; }
 static void csq_adddep(CsQJob*e,CsQJob*j){ if(e->ndep==e->capdep){ int nc=e->capdep?e->capdep*2:8; CsQJob**nd=realloc(e->dependents,(size_t)nc*sizeof *nd); if(!nd) return; e->dependents=nd; e->capdep=nc; }
@@ -2089,16 +2213,37 @@ static void* csq_worker(void*arg){ (void)arg; pthread_setname_np("shim-compute")
         for(;;){ j=g_csq_oldq>0?csq_pick():csq_ready_pop(); if(j) break; pthread_cond_wait(&g_csq_cv,&g_csq_mx); }
         j->running=1; if(++g_csq_nrun>g_csq_maxrun) g_csq_maxrun=g_csq_nrun; pthread_mutex_unlock(&g_csq_mx);
         uint64_t t0=prof_on()?prof_now():0;
+        { static int dl=-1; if(dl<0) dl=getenv("PELOAD_CS_DEPLOG")?1:0; if(dl || (csr_on() && j->p->rr_state>=0)){ j->cx.track=1; for(int i=0;i<8;i++){ j->cx.wlo[i]=j->cx.rlo[i]=~0ull; j->cx.whi[i]=j->cx.rhi[i]=0; } } }
         long rc=cs_dispatch(j->p,&j->cx,j->a,j->b,j->c);
+        if(j->cx.track && rc>=0) csq_range_after(j);
+        if(j->cx.track){ static int left=-1; if(left<0){ const char*e=getenv("PELOAD_CS_DEPLOG"); left=e?atoi(e):0; } extern double g_gameplay_t0;
+            if(left>0 && g_gameplay_t0 && mono_s()-g_gameplay_t0>20){ left--; char m[600]; int k=snprintf(m,sizeof m,"  [csrange] prog %p:",(void*)j->p);
+                for(int i=0;i<8;i++){ if(j->cx.whi[i]) k+=snprintf(m+k,sizeof m-k," u%d writes %llu..%llu",i,(unsigned long long)j->cx.wlo[i],(unsigned long long)j->cx.whi[i]);
+                    if(j->cx.rhi[i]) k+=snprintf(m+k,sizeof m-k," u%d reads %llu..%llu",i,(unsigned long long)j->cx.rlo[i],(unsigned long long)j->cx.rhi[i]); }
+                k+=snprintf(m+k,sizeof m-k," | stride %u | dispatch %ux%ux%u\n",j->p->uavstride[0],j->a,j->b,j->c); (void)!write(2,m,(size_t)k);
+                // every constant buffer (sizes and where the first element index of the written range appears, as u32 or float)
+                { uint32_t first=j->cx.whi[0]&&j->p->uavstride[0]?(uint32_t)(j->cx.wlo[0]/j->p->uavstride[0]):~0u, last=j->cx.whi[0]&&j->p->uavstride[0]?(uint32_t)(j->cx.whi[0]/j->p->uavstride[0]):~0u;
+                  char mm[700]; int kk=snprintf(mm,sizeof mm,"  [csrange]   first element %u, end %u; found:",first,last);
+                  for(int b=0;b<16;b++){ if(!j->cx.cb[b]) continue; const uint32_t*w=(const uint32_t*)j->cx.cb[b]; uint32_t n=j->cx.cbsz[b]/4; if(n>1024) n=1024;
+                      kk+=snprintf(mm+kk,sizeof mm-kk," cb%d(%u B)",b,j->cx.cbsz[b]);
+                      for(uint32_t q=0;q<n && kk<640;q++){ float f; memcpy(&f,&w[q],4); if(w[q]==first || (first && f==(float)first)) kk+=snprintf(mm+kk,sizeof mm-kk," [cb%d+%u=%s first]",b,q*4,w[q]==first?"u32":"f32");
+                          if(w[q]==last-first || (last>first && f==(float)(last-first))) kk+=snprintf(mm+kk,sizeof mm-kk," [cb%d+%u=%s count]",b,q*4,w[q]==last-first?"u32":"f32"); } }
+                  for(int i=0;i<32;i++) if(j->cx.srv[i]){ D3DObj*v=j->cx.srv[i]; D3DObj*r=(v->vkind&&v->data)?(D3DObj*)v->data:v; kk+=snprintf(mm+kk,sizeof mm-kk," t%d(%lluB)",i,(unsigned long long)(r?r->size:0)); }
+                  if(j->cx.cb[3] && j->cx.cbsz[3]>=16){ const uint32_t*w=(const uint32_t*)j->cx.cb[3]; kk+=snprintf(mm+kk,sizeof mm-kk," | cb3 = %u %u %u %u",w[0],w[1],w[2],w[3]); }
+                  kk+=snprintf(mm+kk,sizeof mm-kk," | numthreads %ux%ux%u",j->p->tg[0],j->p->tg[1],j->p->tg[2]);
+                  mm[kk++]='\n'; (void)!write(2,mm,(size_t)kk); } } }
         if(t0){ static uint64_t acc,nn,lacc,lins; acc+=prof_now()-t0; if((++nn%200)==0){ char m[200]; long ins=g_cs_instrs; int k=snprintf(m,sizeof m,"  [cs-cpu] %llu dispatches (async, up to %d at once), last 200: %.1f us/dispatch, %.0f instrs/dispatch\n",(unsigned long long)nn,g_csq_maxrun,(acc-lacc)/1e3/200,(ins-lins)/200.0); (void)!write(2,m,k); lacc=acc; lins=ins; g_csq_maxrun=0; } }
         if(rc<0){ static int warned; if(warned++<8){ char m[120]; int k=snprintf(m,sizeof m,"  [cs-cpu] unsupported opcode %ld\n",-rc); (void)!write(2,m,k); } }
         pthread_mutex_lock(&g_csq_mx);
         { CsQJob**pp=&g_csq_head, *prev=0; while(*pp && *pp!=j){ prev=*pp; pp=&(*pp)->next; } if(*pp){ *pp=j->next; if(g_csq_tail==j) g_csq_tail=prev; } }
         g_csq_n--; g_csq_nrun--;
         for(int i=0;i<8;i++) if(j->uavres[i]) j->uavres[i]->cs_pending--;
+        for(int k=0;k<j->nrd;k++) j->rdres[k]->cs_readers--;
         int woke=0; if(g_csq_oldq<=0) for(int k=0;k<j->ndep;k++){ CsQJob*d=j->dependents[k]; if(--d->ndeps==0){ csq_ready_push(d); woke++; } }
         pthread_cond_broadcast(&g_csq_done);
-        if(g_csq_oldq>0) pthread_cond_broadcast(&g_csq_cv); else if(woke>1) pthread_cond_broadcast(&g_csq_cv); else if(woke) pthread_cond_signal(&g_csq_cv);
+        if(g_csq_wakeall<0) g_csq_wakeall=getenv("PELOAD_CS_WAKEALL")?1:0;
+        if(g_csq_oldq>0) pthread_cond_broadcast(&g_csq_cv); else if(woke>1) pthread_cond_broadcast(&g_csq_cv); else if(woke && g_csq_wakeall) pthread_cond_signal(&g_csq_cv);
+        // (woke == 1 without a signal: this worker's next loop takes it from the ready list -- or an awake one does first)
         pthread_mutex_unlock(&g_csq_mx);
         free(j->dependents); for(int i=0;i<j->nown;i++) free(j->own[i]); for(int i=0;i<j->nsnap;i++) cs_snap_put(j->snaps[i]); free(j); }
     return 0; }
@@ -2108,6 +2253,20 @@ static void cs_wait_res(D3DObj*r){ if(!r||!r->cs_pending) return; uint64_t t0=pr
     pthread_mutex_lock(&g_csq_mx); while(r->cs_pending) pthread_cond_wait(&g_csq_done,&g_csq_mx); pthread_mutex_unlock(&g_csq_mx); g_cswait_s+=mono_s()-w0;
     if(t0){ static uint64_t acc,nn; acc+=prof_now()-t0; if((++nn%500)==0){ char m[100]; int k=snprintf(m,sizeof m,"  [cs-cpu] render thread waited %.0f us avg (%llu waits)\n",acc/1e3/nn,(unsigned long long)nn); (void)!write(2,m,k); } } }
 static void cs_wait_view(void*v){ D3DObj*o=v; if(!o) return; cs_wait_res(o); if(o->vkind&&o->data) cs_wait_res((D3DObj*)o->data); }
+// Before the CPU side WRITES a resource (2026-10-25): wait for the queued jobs that write it AND for those that read it live
+// (cs_readers: a buffer a pending kernel writes, textures, inputs past the snapshot limits). cs_wait_res waited for writers only,
+// so a later write -- Unmap's new block swapped in by SQ_COMMIT and the old one recycled for the next Map, UpdateSubresource, a
+// copy into it, ClearUAV, a write Map -- could land while a reading kernel was still queued or running: it read the next frame's
+// data or a recycled block (garbage particle positions: giant streaked triangles beside an explosion, HugeGrass 2026-10-25).
+// PELOAD_CS_READWAIT=0 = wait for writers only, as before (the hazards are still counted). [cs-cpu] lines count them.
+static volatile int g_cs_readwait=-1; static unsigned long g_cs_rdhaz;
+static void cs_wait_write(D3DObj*r,const char*why){ if(!r || (!r->cs_pending && !r->cs_readers)) return;
+    if(g_cs_readwait<0){ const char*e=getenv("PELOAD_CS_READWAIT"); g_cs_readwait=!(e && !atoi(e)); }
+    if(r->cs_readers){ unsigned long n=__atomic_add_fetch(&g_cs_rdhaz,1,__ATOMIC_RELAXED);
+        if(n<=5 || !(n%1000)){ char m[220]; int k=snprintf(m,sizeof m,"  [cs-cpu] %s of a resource (kind %d, %llu bytes) that %d queued kernel(s) still read: %s (%lu so far)\n",
+            why,r->kind,(unsigned long long)r->size,r->cs_readers,g_cs_readwait?"waited for them":"NOT waited (PELOAD_CS_READWAIT=0)",n); (void)!write(2,m,k); } }
+    if(!g_cs_readwait){ cs_wait_res(r); return; }
+    double w0=mono_s(); pthread_mutex_lock(&g_csq_mx); while(r->cs_pending || r->cs_readers) pthread_cond_wait(&g_csq_done,&g_csq_mx); pthread_mutex_unlock(&g_csq_mx); g_cswait_s+=mono_s()-w0; }
 static int cs_async(void){ static int a=-1; if(a<0) a=getenv("PELOAD_CS_SYNC")?0:1; return a; }
 static int rtgrade_dispatch(D3DObj*cs,uint32_t a,uint32_t b);   // fwd (the client's menu-scene grading: one GL draw)
 static void MSABI ctxi_Dispatch(void*t,uint32_t a,uint32_t b,uint32_t c){ (void)t; d3dtrace(7,"Dispatch"); g_fs.disp++; cscensus("Dispatch",a,b,c);
@@ -2159,13 +2318,21 @@ static void MSABI ctxi_Dispatch(void*t,uint32_t a,uint32_t b,uint32_t c){ (void)
             else if(r) j->rdres[j->nrd++]=r; }   // read live: ordered after earlier writers
         for(int i=0;i<16;i++) j->cx.samp[i]=g_cs.samp[i];
         pthread_mutex_lock(&g_csq_mx);
+        for(int k=0;k<j->nrd;k++) j->rdres[k]->cs_readers++;
         for(int i=0;i<8;i++){ D3DObj*v=g_cs.uav[i]; j->cx.uav[i]=v; D3DObj*r=(v&&v->data&&v->vkind)?(D3DObj*)v->data:v;
             if(r){ r->cs_pending++; j->uavres[i]=r; r->ver++; r->gl_dirty=1; r->dpart=0; r->rvalid=0; } }
         if(g_csq_oldq<0) g_csq_oldq=getenv("PELOAD_CS_OLDQUEUE")?1:0;
         if(g_csq_want>=0 && g_csq_want!=g_csq_oldq && !g_csq_n){ g_csq_oldq=g_csq_want; }   // (A/B: only between batches)
+        csq_range_predict(j);
         if(g_csq_oldq<=0) for(CsQJob*e=g_csq_head;e;e=e->next) if(csq_conflict(e,j)) csq_adddep(e,j);   // (before j joins the queue)
         if(g_csq_tail) g_csq_tail->next=j; else g_csq_head=j; g_csq_tail=j; g_csq_n++;
         if(g_csq_oldq<=0 && !j->ndeps) csq_ready_push(j);
+        // PELOAD_CS_DEPLOG=<n>: the dependency structure of n dispatches, once gameplay has run 20 s -- which resources they write
+        // and read live, and how many queued jobs each waits for (are halo3's particle dispatches one chain?)
+        { static int dl=-1, left; if(dl<0){ const char*e=getenv("PELOAD_CS_DEPLOG"); dl=e?1:0; left=e?atoi(e):0; }
+          extern double g_gameplay_t0; extern unsigned long g_eng_present_no_x; if(dl && left>0 && g_gameplay_t0 && mono_s()-g_gameplay_t0>20){ left--; char m[400]; int k=snprintf(m,sizeof m,"  [csdep] f%lu prog %p (%ux%ux%u) waits for %d of %d queued | writes",g_eng_present_no_x,(void*)p,a,b,c,j->ndeps,g_csq_n-1);
+              for(int i=0;i<8;i++) if(j->uavres[i]) k+=snprintf(m+k,sizeof m-k," %p(%lluB)",(void*)j->uavres[i],(unsigned long long)j->uavres[i]->size);
+              k+=snprintf(m+k,sizeof m-k," | reads live"); for(int i=0;i<j->nrd && k<380;i++) k+=snprintf(m+k,sizeof m-k," %p",(void*)j->rdres[i]); m[k++]='\n'; (void)!write(2,m,(size_t)k); } }
         if(!g_csq_started){ g_csq_started=1; const char*e=getenv("PELOAD_CS_WORKERS"); int nw=e?atoi(e):4; if(nw<1) nw=1; if(nw>16) nw=16;
             for(int w=0;w<nw;w++){ pthread_t th; pthread_attr_t at; pthread_attr_init(&at); pthread_attr_set_qos_class_np(&at,QOS_CLASS_USER_INTERACTIVE,0); pthread_create(&th,&at,csq_worker,0); } }
         if(g_csq_oldq>0 || !j->ndeps) pthread_cond_signal(&g_csq_cv); pthread_mutex_unlock(&g_csq_mx);
@@ -2213,7 +2380,7 @@ static void MSABI ctx_CSSetConstantBuffers1(void*t,uint32_t st,uint32_t n,void*c
     for(uint32_t i=0;i<n&&st+i<16;i++){ g_rcs.cb[st+i]=v?(D3DObj*)v[i]:0; g_rcs.cbfirst[st+i]=first?first[i]:0; } }
 // ClearUnorderedAccessView{Uint,Float} on buffers (particle pools are reset this way)
 static void cs_clear_uav(void*view,uint32_t v0){ D3DObj*v=view; D3DObj*r=(v&&v->data&&v->vkind)?(D3DObj*)v->data:v; if(!r||!r->data||r->kind!=1) return;
-    cs_wait_res(r); if(r->cs_gpu){ r->cs_gpu=0; { static int nl; if(nl++<4) (void)!write(2,"  [cs-gpu] ClearUnorderedAccessView on a GPU particle buffer (re-sent whole)\n",77); } }   // all overwritten: the CPU copy is current again
+    cs_wait_write(r,"ClearUnorderedAccessView"); if(r->cs_gpu){ r->cs_gpu=0; { static int nl; if(nl++<4) (void)!write(2,"  [cs-gpu] ClearUnorderedAccessView on a GPU particle buffer (re-sent whole)\n",77); } }   // all overwritten: the CPU copy is current again
     uint32_t*d=(uint32_t*)r->data; for(uint64_t i=0;i<r->size/4;i++) d[i]=v0; r->ver++; r->gl_dirty=1; r->dpart=0; r->rvalid=0; }
 static void MSABI ctxi_ClearUAVUint(void*t,void*uav,const uint32_t*vals){ (void)t; cs_clear_uav(uav,vals?vals[0]:0); }
 static void MSABI ctxi_ClearUAVFloat(void*t,void*uav,const float*vals){ (void)t; uint32_t b=0; if(vals) memcpy(&b,vals,4); cs_clear_uav(uav,b); }
@@ -2720,12 +2887,15 @@ static int MSABI i_D3DCompile(const void*src,uint64_t srcsz,const char*name,cons
     { const char*e=getenv("PELOAD_REAL_D3DCOMPILE"); int on=e&&*e ? strcmp(e,"0")!=0 : (game_is(GAME_H2) || (game_is(GAME_H3) && target && strncmp(target,"cs_",3)));
       if(on){ static void*real; static int tried;   // (on by default for Halo 2, and for Halo 3's vs / ps)
         if(!tried){ tried=1; static const uint16_t dn[]={'D','3','D','C','o','m','p','i','l','e','r','_','4','7','.','d','l','l',0};
-            uint8_t*b=i_LoadLibraryExW(dn,0,0);
+            uint8_t*b=i_LoadLibraryExW(dn,0,0); if(synth_is(b)) b=0;   // (our own synthetic image: its D3DCompile is this function)
             for(int m=0;m<g_nmods && (!b || b==g_base);m++) if(g_mods[m].name && !strcasecmp(g_mods[m].name,"halo3.dll") && g_mods[m].path){
                 for(int up=0;up<2 && (!b || b==g_base);up++){ char d[2048]; snprintf(d,sizeof d,"%s",g_mods[m].path);
                     for(int u=0;u<=up;u++){ char*sl=strrchr(d,'/'); if(sl) *sl=0; }
                     char f[2300]; snprintf(f,sizeof f,"%s/d3dcompiler_47.dll",d); if(access(f,R_OK)) continue;
                     g_prefer_base=1; b=load_guest(f,strdup("d3dcompiler_47.dll")); g_prefer_base=0; } }
+            if(!b || b==g_base){   // client 0.10.0 recompiles halo3: no halo3.dll module to look beside -- MCC's root in the prefix
+                static const uint16_t mr[]=u"C:\\Program Files\\Steam\\steamapps\\common\\Halo The Master Chief Collection\\d3dcompiler_47.dll";
+                char f[2300]; win2unix(mr,f,sizeof f); if(!access(f,R_OK)){ g_prefer_base=1; b=load_guest(f,strdup("d3dcompiler_47.dll")); g_prefer_base=0; } }
             if(b && b!=g_base) real=export_lookup(b,"D3DCompile");
             char m[120]; int k=snprintf(m,sizeof m,"  [D3DCompile] real compiler %s\n",real?"loaded (MCC's D3DCompiler_47.dll)":"NOT found: placeholder blobs"); (void)!write(2,m,k); }
         if(real){ typedef int (MSABI *D3DC)(const void*,uint64_t,const char*,const void*,void*,const char*,const char*,uint32_t,uint32_t,void**,void**);
@@ -2847,6 +3017,18 @@ static int MSABI i_SHGetKnownFolderPath(const GUID_*id,uint32_t fl,void*tok,uint
     size_t n=strlen(p); uint16_t*w=malloc((n+1)*2); for(size_t i=0;i<=n;i++) w[i]=(uint8_t)p[i];
     if(fl&0x8000){ char u[1400]; if(win2unix(w,u,sizeof u)){ size_t l=strlen(u); if(l+1<sizeof u){ u[l]='/'; u[l+1]=0; mkparents(u); } } }
     *out=w; return 0; }
+// propsys PropVariantToStringAlloc (client 0.10.0, 2026-11-06: the audio device's friendly name from IPropertyStore; it was a
+// logging stub returning S_OK with *out unset, and the client's wcslen of that crashed in ucrtbase right after the engine
+// linked): a CoTaskMem copy of a VT_LPWSTR / VT_BSTR (31 / 8) or a VT_LPSTR (30) widened, "" for VT_EMPTY; other types
+// TYPE_E_TYPEMISMATCH like propsys.
+static int   MSABI i_PropVariantToStringAlloc(const void*pv,uint16_t**out){ if(!out) return HR_INVALIDARG; *out=0; if(!pv) return HR_INVALIDARG;
+    uint16_t vt=*(const uint16_t*)pv; const void*v=*(void*const*)((const uint8_t*)pv+8); size_t n=0; uint16_t*w;
+    if(vt==31 || vt==8){ const uint16_t*src=v?(const uint16_t*)v:(const uint16_t*)u"";
+        while(src[n]) n++; w=i_CoTaskMemAlloc((n+1)*2); if(!w) return 0x8007000E; memcpy(w,src,(n+1)*2); *out=w; return HR_OK; }
+    if(vt==30){ const char*src=v?(const char*)v:""; n=strlen(src); w=i_CoTaskMemAlloc((n+1)*2); if(!w) return 0x8007000E;
+        for(size_t i=0;i<=n;i++) w[i]=(uint8_t)src[i]; *out=w; return HR_OK; }
+    if(vt==0){ w=i_CoTaskMemAlloc(2); if(!w) return 0x8007000E; w[0]=0; *out=w; return HR_OK; }
+    return (int)0x80028CA0; }   // TYPE_E_TYPEMISMATCH
 static int   MSABI i_PropVariantClear(void*p){ if(p){ uint16_t vt=*(uint16_t*)p; if(vt==31||vt==30) free_or_fch(*(void**)((uint8_t*)p+8)); memset(p,0,24); } return HR_OK; }   // VT_LPWSTR/LPSTR own CoTaskMem strings
 static void* wasapi_enumerator(void); // wasapi.c
 static int wic_create(const GUID_*clsid,const GUID_*iid,void**ppv); // fwd (wic.c)
@@ -3366,7 +3548,7 @@ static uint32_t MSABI i_GetACP(void){ return 65001; }
 // GetModuleHandleExW: FROM_ADDRESS (0x4) -> the image containing the address (Waves' WaveShell-Xbox.dll finds its own
 // folder this way to load L360.dll/q10.dll next to it; always answering "the exe" sent it to client\waves\);
 // a name -> GetModuleHandleW; NULL -> the exe.
-static int    MSABI i_GetModuleHandleExW(uint32_t fl, void *name, void **out){
+static int    MSABI i_GetModuleHandleExW(uint32_t fl, void *name, void **out){ if(!(fl&0x4)) gmh_trace("GetModuleHandleExW",0,name);
     if(fl&0x4){ uint8_t*m=guest_mod_by_addr((uint64_t)name); if(out)*out=m; if(!m){ g_lasterr=126; return 0; } return 1; }
     void*m= name? i_GetModuleHandleW((uint16_t*)name) : g_base; if(out)*out=m; return m!=0; }
 static int    MSABI i_MultiByteToWideChar(uint32_t cp,uint32_t fl,const char*s,int sl,uint16_t*w,int wl){
@@ -4048,6 +4230,10 @@ static int    MSABI i_SetCursorPos(int x,int y){ (void)x;(void)y; return 1; }
 static void*  MSABI i_SetCursor(void*c){ return c; }
 void* fg_hwnd_ext(void);
 #include <CoreGraphics/CoreGraphics.h>
+// latency.c (included after stats.c): input -> screen latency stages and the per-second performance log
+const uint8_t* latch_src(D3DObj*cb,uint64_t sub,uint64_t n,uint8_t*tmp,size_t cap); void latch_received(int dx,int dy);
+const float* latch_overlay_vp(const float*engine); void latch_tick(void);   // (latch.c)
+void lat_cam(const float*vp); void lat_present(double t); void lat_enc(uint64_t fno,double t); void lat_gpu(uint64_t fno,double t); void lat_win(uint64_t fno,double t); void lat_input(int src); void perf_tick(void);
 #include "wininput.c"
 static int    MSABI i_SetLayeredWindowAttributes(void*h,uint32_t key,uint8_t a,uint32_t f){ (void)key;
     if(getenv("PELOAD_TRACE_LAYERED")){ char m[120]; int k=snprintf(m,sizeof m,"  [layered] SetLayeredWindowAttributes %p alpha %u flags 0x%x\n",h,a,f); (void)!write(2,m,k); }
@@ -4591,6 +4777,8 @@ static uint32_t MSABI i_XInputGetState(uint32_t idx,void*st){
         if(getenv("PELOAD_TRACE_INPUT")){ char m[160]; int k=snprintf(m,sizeof m,"  [input] pad%u pkt=%u b=%04x lt=%u rt=%u L=(%d,%d) R=(%d,%d)\n",idx,pkt[idx],p.buttons,p.lt,p.rt,p.lx,p.ly,p.rx,p.ry); (void)!write(2,m,k); } }
     uint8_t*o=st; *(uint32_t*)o=pkt[idx]; memcpy(o+4,&p.buttons,2); o[6]=p.lt; o[7]=p.rt;
     memcpy(o+8,&p.lx,2); memcpy(o+10,&p.ly,2); memcpy(o+12,&p.rx,2); memcpy(o+14,&p.ry,2);
+    { static int was[4]; int r2=(int)p.rx*p.rx+(int)p.ry*p.ry, out=r2>8689*8689;   // right stick past the XInput dead zone: a look input (latency.c)
+      if(out && !was[idx]) lat_input(1); if(out) lat_input(-1); was[idx]=out; }
     return 0; }
 static uint32_t MSABI i_XInputSetState(uint32_t idx,void*vib){ (void)vib; XPad p; return (idx<4 && (gc_read(idx,&p)||idx==0))?0:1167; }
 static uint32_t MSABI i_XInputGetCapabilities(uint32_t idx,uint32_t fl,void*cap){ (void)fl; XPad p; if(idx>3) return 160; if(getenv("PELOAD_NO_PAD")) return 1167;
@@ -5930,6 +6118,10 @@ static int d3dgl_gpu_copy(D3DObj*dst,D3DObj*src,uint32_t sx,uint32_t sy,uint32_t
 #define RB_BASE (4ull<<20)
 #define RB_SLOT (16u<<10)
 static int g_rb_nslots; volatile int g_rb_sync=-1, g_sub_drainread=-1;   // (PELOAD_AB=rb flips both: ab_rb)
+// PELOAD_RB_CHECK=1: every asynchronous readback is also read synchronously at the copy and the two compared when the CPU copy
+// is filled ([rbcheck] lines: matches, mismatches with the first 8 bytes of each) -- does the client's auto exposure get the
+// luminance it would have got before?
+static int g_rb_check=-1; static unsigned long g_rbc_ok, g_rbc_bad;
 int ab_rb(int set){ if(set>=0){ g_rb_sync=!set; g_sub_drainread=!set; } return g_rb_sync==0; }
 static int rb_async(D3DObj*dst,uint32_t sx,int sy0,uint32_t sw,uint32_t sh,uint32_t dx,uint32_t dy,unsigned rf,unsigned rt,unsigned bpp){
     if(g_rb_sync<0) g_rb_sync=getenv("PELOAD_D3DGL_SYNCRB")?1:0;
@@ -5940,6 +6132,8 @@ static int rb_async(D3DObj*dst,uint32_t sx,int sy0,uint32_t sw,uint32_t sh,uint3
     G.BindBuffer(0x88EB/*PIXEL_PACK*/,dst->rbpbo);
     if(dst->rbpbosz!=(uint32_t)nb){ G.BufferData(0x88EB,(long)nb,0,0x88E1/*STREAM_READ*/); dst->rbpbosz=(uint32_t)nb; }
     G.ReadPixels((int)sx,sy0,(int)sw,(int)sh,rf,rt,0); G.BindBuffer(0x88EB,0);
+    if(g_rb_check<0) g_rb_check=getenv("PELOAD_RB_CHECK")?1:0;
+    if(g_rb_check){ if(!dst->rbchk) dst->rbchk=malloc(RB_SLOT); if(dst->rbchk) G.ReadPixels((int)sx,sy0,(int)sw,(int)sh,rf,rt,dst->rbchk); }   // (synchronous: a check only)
     dst->rb_dx=dx; dst->rb_dy=dy; dst->rb_sw=sw; dst->rb_sh=sh; dst->rb_bpp=bpp;
     uint64_t tk=glh_rb_request_at(dst->rbpbo,nb,RB_BASE+(uint64_t)(dst->rbslot1-1)*RB_SLOT); if(!tk) return 0;
     __atomic_store_n(&dst->rbticket,tk,__ATOMIC_RELEASE); __atomic_store_n(&dst->rbpend,1,__ATOMIC_RELEASE); return 1; }
@@ -5948,6 +6142,11 @@ static void rb_complete(D3DObj*o){
     if(!o || !__atomic_load_n(&o->rbpend,__ATOMIC_ACQUIRE)) return;
     uint64_t tk=__atomic_load_n(&o->rbticket,__ATOMIC_ACQUIRE); const uint8_t*m=0; int spins=0; double t0=0;
     while(!(m=glh_rb_ready_at(tk,RB_BASE+(uint64_t)(o->rbslot1-1)*RB_SLOT))){ if(glh_failed()) break; if(++spins<200) sched_yield(); else { if(!t0) t0=mono_s(); usleep(20); if(mono_s()-t0>2.0) break; } }
+    if(m && g_rb_check>0 && o->rbchk){ size_t nb=(size_t)o->rb_sw*o->rb_sh*o->rb_bpp; int same=!memcmp(m,o->rbchk,nb);
+        if(same) g_rbc_ok++; else g_rbc_bad++;
+        if(!same || ((g_rbc_ok+g_rbc_bad)%2000)==0){ static int shown; if(same || shown++<20){ const uint8_t*a=m,*b=o->rbchk; char t[260];
+            int k=snprintf(t,sizeof t,"  [rbcheck] %s: %ux%u fmt %u, async %02x%02x %02x%02x %02x%02x %02x%02x vs sync %02x%02x %02x%02x %02x%02x %02x%02x (%lu matched, %lu differed)\n",
+                same?"match":"MISMATCH",o->rb_sw,o->rb_sh,o->fmt,a[0],a[1],a[2],a[3],a[4],a[5],a[6],a[7],b[0],b[1],b[2],b[3],b[4],b[5],b[6],b[7],g_rbc_ok,g_rbc_bad); (void)!write(2,t,k); } } }
     if(m){ uint32_t sw=o->rb_sw, sh=o->rb_sh, bpp=o->rb_bpp; uint64_t pitch=o->rowpitch?o->rowpitch:(uint64_t)o->w*bpp;
         for(uint32_t r=0;r<sh;r++){ uint32_t srow=g_d3dgl_flipy?r:(sh-1-r); uint64_t off=(uint64_t)(o->rb_dy+r)*pitch+(uint64_t)o->rb_dx*bpp;
             if(off+(uint64_t)sw*bpp>o->size) break; memcpy((uint8_t*)o->data+off,m+(uint64_t)srow*sw*bpp,(size_t)sw*bpp); } }
@@ -6446,7 +6645,8 @@ static void d3dgl_ubo_batch(D3DObj*const*cbs,const uint32_t*firsts,const int*nve
     if(count<2 || !g_ring || !G.MapBufferRange || !g_cbbatch_on || GENV1("PELOAD_D3DGL_NORING") || GENV1("PELOAD_D3DGL_NORING_CB")) return;
     D3DObj* u[32]; uint64_t un[32]; int nu=0; uint64_t total=0;
     for(int i=0;i<count;i++){ D3DObj*cb=cbs[i]; if(!cb||!cb->data||!cb->size) continue;
-        if(!(cb->uboglver!=cb->ver || cb->ubosz!=g_ring_gen || cb->glubo==0)) continue;   // its ring copy is current
+        extern unsigned long g_eng_present_no_x;
+        if(!(cb->uboglver!=cb->ver || cb->ubosz!=g_ring_gen || cb->glubo==0 || (cb->latch_f && cb->latch_f!=g_eng_present_no_x+1))) continue;   // its ring copy is current
         long sub=(long)firsts[i]*16; if((uint64_t)sub>=cb->size) sub=0;
         uint64_t n=cb->size; if(n<(uint64_t)(sub+(long)nvecs[i]*16)) n=(uint64_t)(sub+(long)nvecs[i]*16);
         int k; for(k=0;k<nu;k++) if(u[k]==cb) break;
@@ -6457,7 +6657,9 @@ static void d3dgl_ubo_batch(D3DObj*const*cbs,const uint32_t*firsts,const int*nve
     uint8_t*p=G.MapBufferRange(GLE_ARRAY,(long)g_ring_off,(long)total,0x0002/*WRITE*/|0x0004/*INVALIDATE_RANGE*/|0x0020/*UNSYNCHRONIZED*/);
     if(!p) return;
     uint64_t o=0;
-    for(int k=0;k<nu;k++){ D3DObj*cb=u[k]; memcpy(p+o,cb->data,(size_t)cb->size); if(un[k]>cb->size) memset(p+o+cb->size,0,(size_t)(un[k]-cb->size));
+    static __thread uint8_t*ltmp; if(!ltmp) ltmp=malloc(65536);
+    for(int k=0;k<nu;k++){ D3DObj*cb=u[k]; uint64_t sub0=0; for(int i=0;i<count;i++) if(cbs[i]==cb){ sub0=(uint64_t)firsts[i]*16; if(sub0>=cb->size) sub0=0; break; }
+        memcpy(p+o,latch_src(cb,sub0,cb->size,ltmp,ltmp?65536:0),(size_t)cb->size); if(un[k]>cb->size) memset(p+o+cb->size,0,(size_t)(un[k]-cb->size));
         cb->uboglver=cb->ver; cb->ubosz=g_ring_gen; cb->glubo=(unsigned)(g_ring_off+o+1); g_cbring_bytes+=un[k]; o+=(un[k]+255)&~255ull; }
     G.UnmapBuffer(GLE_ARRAY); g_ring_off+=total; g_cbbatch_n++; g_cbbatch_cbs+=nu; }
 static void d3dgl_bind_ubo(unsigned binding,D3DObj*cb,uint32_t first,int nvec){
@@ -6465,12 +6667,14 @@ static void d3dgl_bind_ubo(unsigned binding,D3DObj*cb,uint32_t first,int nvec){
     if(cb && cb->data && cb->size && !GENV1("PELOAD_D3DGL_NORING") && !GENV1("PELOAD_D3DGL_NORING_CB")){
         // stream the CB through the ring: one unsynchronized copy per CPU write (ver) per ring generation
         long sub=(long)first*16; if((uint64_t)sub>=cb->size) sub=0;
-        if(cb->uboglver!=cb->ver || cb->ubosz!=g_ring_gen || cb->glubo==0){
+        extern unsigned long g_eng_present_no_x;
+        if(cb->uboglver!=cb->ver || cb->ubosz!=g_ring_gen || cb->glubo==0 || (cb->latch_f && cb->latch_f!=g_eng_present_no_x+1)){
             uint64_t n=cb->size; if(n<(uint64_t)(sub+need)) n=(uint64_t)(sub+need);
-            long ro;
+            long ro; static __thread uint8_t*ltmp; if(!ltmp) ltmp=malloc(65536);
+            const uint8_t*src=latch_src(cb,(uint64_t)sub,cb->size,ltmp,ltmp?65536:0);   // (latch.c: a camera buffer's patched copy)
             g_cbring_bytes+=n; g_cbring_puts++;
-            if(n==cb->size) ro=d3dgl_ring_put(cb->data,n);
-            else { void*tmp=calloc(1,(size_t)n); if(tmp){ memcpy(tmp,cb->data,cb->size); ro=d3dgl_ring_put(tmp,n); free(tmp); } else ro=-1; }
+            if(n==cb->size) ro=d3dgl_ring_put(src,n);
+            else { void*tmp=calloc(1,(size_t)n); if(tmp){ memcpy(tmp,src,cb->size); ro=d3dgl_ring_put(tmp,n); free(tmp); } else ro=-1; }
             if(ro>=0){ cb->uboglver=cb->ver; cb->ubosz=g_ring_gen; cb->glubo=(unsigned)(ro+1); } }   // glubo = ring offset+1 here
         if(cb->glubo && cb->ubosz==g_ring_gen){ buf=g_ring; off=(long)cb->glubo-1+sub; goto bind; }
         cb=0; }                                                         // ring copy failed: zero buffer below
@@ -6725,12 +6929,20 @@ static char* d3dgl_rename_cb(const char*src,int isvs){
 // varying -- declaration AND body uses -- to a shared canonical "xfer<L>", where L is the semantic
 // location the injector already assigned via layout(location=L). VS output oN and PS input vM for the
 // same semantic then share both name and location, and the monolithic link matches them.
+// needle within one line [p, p+ln) of a GLSL source. The varying scanners below searched with strstr from each line's
+// start to the END OF THE SOURCE (O(lines x length): a 60 KB shader took ~1,500 whole-source scans per pass, ~10% of
+// halo3's engine thread while the pre-linker builds pairs at a loading screen, and part of every first-use link in a
+// match); the match was then only used when it fell inside the line. PELOAD_D3DGL_SCAN_OLD=1 = the old whole-source search.
+static const char* d3dgl_line_find(const char*p,size_t ln,const char*needle){
+    static int old=-1; if(old<0) old=getenv("PELOAD_D3DGL_SCAN_OLD")!=0;
+    if(old) return strstr(p,needle);
+    return memmem(p,ln,needle,strlen(needle)); }
 static char* d3dgl_rename_varyings(const char*src,int isvs){
     int map[64]; for(int i=0;i<64;i++) map[i]=-1;          // register name N (oN for VS / vN for PS) -> L
     const char*key=isvs?"out vec4 o":"in vec4 v"; int koff=isvs?10:9;
     const char*p=src;
     while(*p){ const char*nl=strchr(p,'\n'); size_t ln=nl?(size_t)(nl-p+1):strlen(p);
-        const char*lo=strstr(p,"layout(location="); const char*k=strstr(p,key);
+        const char*lo=d3dgl_line_find(p,ln,"layout(location="); const char*k=d3dgl_line_find(p,ln,key);
         if(lo&&k&&lo<p+ln&&k<p+ln){ long L=atol(lo+16); long N=atol(k+koff); if(N>=0&&N<64&&L>=0&&L<64) map[N]=(int)L; }
         p+=ln; if(!nl)break; }
     size_t cap=strlen(src)+1024,len=0; char*out=malloc(cap); if(!out) return 0;
@@ -6761,7 +6973,7 @@ static char* d3dgl_dedup_varyings(char*src){
     while(*p){ const char*nl=strchr(p,'\n'); size_t ln=nl?(size_t)(nl-p+1):strlen(p);
         const char*q=p; while(*q==' '||*q=='\t')q++; int skip=0;
         if(!strncmp(q,"layout(location=",16)){
-            const char*in_x=strstr(q," in vec4 xfer"), *out_x=strstr(q," out vec4 xfer");
+            const char*in_x=d3dgl_line_find(q,ln-(size_t)(q-p)," in vec4 xfer"), *out_x=d3dgl_line_find(q,ln-(size_t)(q-p)," out vec4 xfer");
             int isin=(in_x&&in_x<p+ln), isout=(out_x&&out_x<p+ln);
             if(isin||isout){ int L=atoi(q+16); if(L>=0&&L<64){ uint64_t bit=1ULL<<L;
                 if(isout){ if(seen_out&bit)skip=1; else seen_out|=bit; } else { if(seen_in&bit)skip=1; else seen_in|=bit; } } }
@@ -6866,7 +7078,7 @@ static uint64_t d3dgl_iface_mask(const char*src,int want_out){
     // after d3dgl_rename_varyings, every inter-stage varying is named "xfer<L>" (VS out / PS in).
     uint64_t m=0; const char*p=src; const char*key=want_out?"out vec4 xfer":"in vec4 xfer";
     while(*p){ const char*nl=strchr(p,'\n'); size_t ln=nl?(size_t)(nl-p+1):strlen(p);
-        const char*lo=strstr(p,"layout(location="); const char*kk=strstr(p,key);
+        const char*lo=d3dgl_line_find(p,ln,"layout(location="); const char*kk=d3dgl_line_find(p,ln,key);
         if(lo&&kk&&lo<p+ln&&kk<p+ln){ long L=atol(lo+16); if(L>=0&&L<64) m|=(1ULL<<L); }
         p+=ln; if(!nl)break; }
     return m;
@@ -6903,8 +7115,8 @@ static int d3dgl_varying_slots(void){ static int n=-1; if(n<0){ const char*e=get
 static char* d3dgl_relocate(const char*src,uint64_t U){
     size_t n=strlen(src); char*out=malloc(n+64*4+1); if(!out) return 0; size_t o=0; const char*p=src;
     while(*p){ const char*nl=strchr(p,'\n'); size_t ln=nl?(size_t)(nl-p+1):strlen(p);
-        const char*lo=strstr(p,"layout(location="); const char*kk=strstr(p," vec4 xfer");
-        if(lo&&kk&&lo<p+ln&&kk<p+ln&&(strstr(p,"out vec4 xfer")==kk-3||strstr(p,"in vec4 xfer")==kk-2)){
+        const char*lo=d3dgl_line_find(p,ln,"layout(location="); const char*kk=d3dgl_line_find(p,ln," vec4 xfer");
+        if(lo&&kk&&lo<p+ln&&kk<p+ln&&(d3dgl_line_find(p,ln,"out vec4 xfer")==kk-3||d3dgl_line_find(p,ln,"in vec4 xfer")==kk-2)){
             char*end; long L=strtol(lo+16,&end,10);
             if(L>=0&&L<64){ int nl2=__builtin_popcountll(U&((1ULL<<L)-1)); size_t pre=(size_t)(lo+16-p); memcpy(out+o,p,pre); o+=pre;
                 o+=(size_t)sprintf(out+o,"%d",nl2); size_t rest=ln-(size_t)(end-p); memcpy(out+o,end,rest); o+=rest; p+=ln; if(!nl) break; continue; } }
@@ -7076,8 +7288,11 @@ static void d3dgl_clear_dsv(void*dsvview,uint32_t flags,float depth,uint8_t sten
     if((flags&2) && ds->gldsatt==0x821A){ if(G.StencilMask) G.StencilMask(0xff); if(G.ClearStencil) G.ClearStencil(stencil); bits|=0x400; } // _STENCIL
     if(bits) G.Clear(bits);
     gl_bindfbo_any(GLE_FBO,0); GLUNLOCK(); }
-// DXGI vertex-attribute format -> GL (components, type, normalized) for glVertexAttribPointer.
-static void d3dgl_attrib_fmt(uint32_t f,unsigned*comps,unsigned*gt,unsigned char*norm){ *norm=0;
+// DXGI vertex-attribute format -> GL (components, type, normalized) for glVertexAttribPointer. Returns 0, or 1 for an integer
+// format (read as its values: float(n), the GL rule for a non-normalized integer type -- the caller switches to
+// glVertexAttribIPointer when the VS declares the input as integer), or 2 for a format it doesn't know (4 floats).
+static int d3dgl_attrib_ifmt(uint32_t f,unsigned*comps,unsigned*gt);
+static int d3dgl_attrib_fmt(uint32_t f,unsigned*comps,unsigned*gt,unsigned char*norm){ *norm=0;
     switch(f){
         case 2: *comps=4;*gt=0x1406;break;                       // R32G32B32A32_FLOAT
         case 6: *comps=3;*gt=0x1406;break;                       // R32G32B32_FLOAT
@@ -7096,10 +7311,15 @@ static void d3dgl_attrib_fmt(uint32_t f,unsigned*comps,unsigned*gt,unsigned char
         case 49:*comps=2;*gt=0x1401;*norm=1;break;               // R8G8_UNORM
         case 61:*comps=1;*gt=0x1401;*norm=1;break;               // R8_UNORM
         case 24:*comps=4;*gt=0x8368;*norm=1;break;               // R10G10B10A2_UNORM -> UINT_2_10_10_10_REV
-        default:*comps=4;*gt=0x1406;
+        default:
+            // integer formats (2026-10-25): they fell through to "4 floats" -- the wrong size, and garbage values -- and logged
+            // "format N not translated" even when the VS takes the input as an integer and the IPointer path below re-reads
+            // it correctly (R16G16B16A16_UINT, in every HugeGrass run). PELOAD_D3DGL_INTFMT_FLOAT4=1 = 4 floats, as before.
+            if(f!=2 && f!=6 && f!=16 && f!=41 && d3dgl_attrib_ifmt(f,comps,gt) && !GENV1("PELOAD_D3DGL_INTFMT_FLOAT4")) return 1;
+            *comps=4;*gt=0x1406;
             { static uint8_t seen[256]; if(f<256 && !seen[f]){ seen[f]=1; char m[120]; int k=snprintf(m,sizeof m,"  [d3dgl] vertex attribute format %u not translated (read as 4 floats)\n",f); (void)!write(2,m,k); } }
-            break;
-    } }
+            return 2;
+    } return 0; }
 // DXGI format -> (components, GL integer type) for glVertexAttribIPointer, used when the VS declares the input as
 // uvec4/ivec4 (DXBC signature component type uint/sint). 32-bit float formats pass their raw bits (D3D puts
 // the float's bits in the register; the shader reinterprets them).
@@ -7427,7 +7647,7 @@ static void d3dgl_draw_impl(uint32_t vcount,int indexed,uint32_t instcount,uint3
     // full-size scene draw of the frame (before first-person weapon draws, which use their own projection).
     if(!g_hb_taken && hb_enabled() && g_d3dst.rtv && vw>=640 && vh>=360){ D3DObj*c=g_d3dst.vscb[0];
         if(c && c->data){ uint64_t off=(uint64_t)g_d3dst.vscb_1st[0]*16; if(c->size>=off+128){ const float*f=(const float*)((uint8_t*)c->data+off);
-            if(hb_is_world_camera(f)){ hb_capture_view(f); hb_note_dsv(dsv); g_hb_taken=1; } } } }
+            if(hb_is_world_camera(f)){ hb_capture_view(latch_overlay_vp(f)); hb_note_dsv(dsv); g_hb_taken=1; } } } }
     if(GENV1("PELOAD_TRACE_VP") && rt->w>=2048){ static uint64_t seen[256]; static int ns; uint64_t key=((uint64_t)(uintptr_t)rt*31+(uint64_t)vw*7919+(uint64_t)vh)^ps->bchash; int f=0; for(int q=0;q<ns;q++) if(seen[q]==key){ f=1; break; } if(!f && ns<256){ seen[ns++]=key; char m[160]; int k=snprintf(m,sizeof m,"  [vp] rt=%p %ux%u f%u vp=%dx%d at %d,%d n=%u psh=%016llx\n",(void*)rt,rt->w,rt->h,rt->fmt,vw,vh,g_d3dst.vp_x,g_d3dst.vp_y,vcount,(unsigned long long)ps->bchash); (void)!write(2,m,k); } }
     if(g_nullps_color){ g_nullps_color=0; if(G.ColorMask) gs_colormask(0,0,0,0); }   // NULL PS: no colour writes
     // pipeline
@@ -7597,7 +7817,7 @@ static void d3dgl_draw_impl(uint32_t vcount,int indexed,uint32_t instcount,uint3
             else if(need_scan<0){ lo=0; hi=sb->size; }
             else { lo=vo+vmin*stride; hi=vo+(vmax+1)*stride; }
             if(!stride){ lo=vo; hi=vo+64; }
-            unsigned comps,gt; unsigned char norm; d3dgl_attrib_fmt(il->elem[i].fmt,&comps,&gt,&norm);
+            unsigned comps,gt; unsigned char norm; int fkind=d3dgl_attrib_fmt(il->elem[i].fmt,&comps,&gt,&norm);
             uint64_t aoff=vo+il->elem[i].off+(inst?(uint64_t)sinst*stride:0);
             int ringed=0;
             if(use_ring && !inst && stride){
@@ -7611,6 +7831,11 @@ static void d3dgl_draw_impl(uint32_t vcount,int indexed,uint32_t instcount,uint3
             // attribute state of the shared VAO is cached: only changed pointers/divisors/enables are sent
             { unsigned cb=ringed?g_ring:sb->glbuf; unsigned dv=inst?step:0; int nc=g_va_nocache<0?(g_va_nocache=GENV1("PELOAD_D3DGL_NOSTATECACHE")?1:0):g_va_nocache;
               int ipt=0; if((d3dgl_vs_intin(vs)>>loc)&1u && G.VertexAttribIPointer){ unsigned ic,ig; if(d3dgl_attrib_ifmt(il->elem[i].fmt,&ic,&ig)){ comps=ic; gt=ig; norm=0; ipt=1; } }
+              if(fkind==1 && !ipt){   // an integer format into a FLOAT shader input (D3D would hand the shader the integer's bits): say which, once
+                  static struct { uint64_t h; uint32_t f; } seen[32]; static int ns; uint64_t h=vs?vs->bchash:0; int f=0;
+                  for(int q=0;q<ns;q++) if(seen[q].h==h && seen[q].f==il->elem[i].fmt) f=1;
+                  if(!f && ns<32){ seen[ns].h=h; seen[ns].f=il->elem[i].fmt; ns++; char m[200]; int k=snprintf(m,sizeof m,"  [d3dgl] vertex input %s%u (format %u, integer) feeds a float input of VS %016llx: read as its values\n",
+                      il->elem[i].sem,il->elem[i].semidx,il->elem[i].fmt,(unsigned long long)h); (void)!write(2,m,k); } }
               if(nc || g_va[loc].buf!=cb||g_va[loc].comps!=comps||g_va[loc].type!=gt||g_va[loc].norm!=norm||g_va[loc].stride!=(uint32_t)stride||g_va[loc].off!=aoff||g_va[loc].ipt!=ipt){
                   if(ipt) G.VertexAttribIPointer((unsigned)loc,(int)comps,gt,(int)stride,(const void*)(size_t)aoff);
                   else G.VertexAttribPointer((unsigned)loc,(int)comps,gt,norm,(int)stride,(const void*)(size_t)aoff);
@@ -8022,8 +8247,20 @@ static void rec_pic_rect(int r[4]){ int dw=g_win_pw>0?g_win_pw:g_d3dgl_W, dh=g_w
 static unsigned g_pq_prog, g_pq_vao; static int g_pq_sloc=-1;
 // native GL helper: the frame is an IOSurface the helper rendered (rectangle texture in this, the window's, context)
 static unsigned g_pq_rprog; static int g_pq_rsloc=-1, g_pq_rzloc=-1; static unsigned long g_glh_pq_seen;
+static unsigned long g_pq_new_fno;   // the engine frame a NEW frame shown by the present wait holds (0: a re-present); latency.c lat_win
+static double g_pp_acq, g_pp_draw, g_pp_t1;   // (PELOAD_PRESENT_PROF) present thread: time waiting for a frame, drawing it; t1 = draw start
 static int pq_present_wait_glh(unsigned long*seen,int ms){
-    unsigned tex; int tw,th; (void)seen; int slot=glh_pq_acquire(&g_glh_pq_seen,ms,&tex,&tw,&th,!getenv("PELOAD_GLH_PQ_FALLBACK")); if(slot<0) return 0; *seen=g_glh_pq_seen;
+    unsigned tex; int tw,th; (void)seen; double pa0=mono_s(); int slot=glh_pq_acquire(&g_glh_pq_seen,ms,&tex,&tw,&th,!getenv("PELOAD_GLH_PQ_FALLBACK")); g_pp_t1=mono_s(); g_pp_acq+=g_pp_t1-pa0; if(slot<0) return 0;
+    g_pq_new_fno=g_glh_pq_seen!=*seen?(unsigned long)g_glh->pq_frameno[slot]:0;
+    // PELOAD_LAG_LOG=1: how long after halo3's render thread presented a frame it is ready for the window (a new frame only)
+    { static int ll=-1; if(ll<0) ll=getenv("PELOAD_LAG_LOG")?1:0;
+      if(ll && g_glh_pq_seen!=*seen){ extern double g_lag_t[256]; static double sum, mx, tl; static unsigned long n; double now=mono_s();
+          unsigned long fno=g_glh->pq_frameno[slot]; double t=g_lag_t[fno&255]; if(t>0 && now-t<5.0){ sum+=now-t; if(now-t>mx) mx=now-t; n++; }
+          if(!tl) tl=now; if(now-tl>=5.0 && n){ uint64_t sub_lag_inflight(void);
+              char m[220]; int k=snprintf(m,sizeof m,"  [lag] present -> window: %.0f ms average, %.0f ms worst (%lu frames, %.1f fps) | in flight: render->GL %llu, GL->GPU done %llu\n",
+                  sum/n*1e3,mx*1e3,n,n/(now-tl),(unsigned long long)sub_lag_inflight(),(unsigned long long)(atomic_load(&g_glh->frames_sent)-atomic_load(&g_glh->frames_done)));
+              (void)!write(2,m,(size_t)k); sum=0; mx=0; n=0; tl=now; } } }
+    *seen=g_glh_pq_seen;
     if(!g_pq_rprog){ const char*vs="#version 410 core\nout vec2 uv;void main(){vec2 p=vec2((gl_VertexID==1)?3.0:-1.0,(gl_VertexID==2)?3.0:-1.0);uv=p*0.5+0.5;gl_Position=vec4(p,0.0,1.0);}\n";
         const char*fs="#version 410 core\nin vec2 uv;out vec4 c;uniform sampler2DRect s;uniform vec2 sz;void main(){c=vec4(texture(s,uv*sz).rgb,1.0);}\n";
         unsigned v=G.CreateShader(GLE_VS),fr=G.CreateShader(GLE_FS); G.ShaderSource(v,1,&vs,0); G.CompileShader(v); G.ShaderSource(fr,1,&fs,0); G.CompileShader(fr);
@@ -8042,9 +8279,16 @@ static int pq_present_wait_glh(unsigned long*seen,int ms){
     G.BindVertexArray(g_pq_vao); G.DrawArrays(4,0,3);
     lay_draw(); hb_draw_overlay(); REC_FRAME();
     G.Flush(); if(pc) CGLUnlockContext(pc);
-    glh_pq_release();
+    glh_pq_release(); g_pp_draw+=mono_s()-g_pp_t1;
     pq_shotwin((unsigned long)g_glh->pq_frameno[slot]);   // PELOAD_D3DGL_SHOTWIN window captures, as in-process
     return 1; }
+// frames are coming through the present queue: the in-process one (g_pq_seq) or, with the GL helper, the helper's (2026-10-25:
+// the present thread only looked at g_pq_seq, which never moves in helper mode -- so it slept 33 ms after EVERY frame and the
+// window showed at most ~26 new frames a second whatever the engine drew; PELOAD_PRESENT_SLEEP=1 = that old sleep)
+static volatile int g_pq_oldsleep=-1;   // PELOAD_AB=presleep switches it at run time ("on" = the old sleep)
+int ab_presleep(int set){ if(set>=0) g_pq_oldsleep=set; return g_pq_oldsleep==1; }
+static int pq_started(void){ if(g_pq_oldsleep<0) g_pq_oldsleep=getenv("PELOAD_PRESENT_SLEEP")?1:0;
+    if(g_glh_on && g_pq_oldsleep!=1) return g_glh && atomic_load(&g_glh->pq_seq)>0; return g_pq_seq>0; }
 static int pq_present_wait(unsigned long*seen,int ms){
     if(!pq_on()) return 0;
     if(g_glh_on) return pq_present_wait_glh(seen,ms);
@@ -8052,7 +8296,7 @@ static int pq_present_wait(unsigned long*seen,int ms){
     if(g_pq_seq==*seen){ struct timespec ts; clock_gettime(CLOCK_REALTIME,&ts); ts.tv_nsec+=(long)ms*1000000L; ts.tv_sec+=ts.tv_nsec/1000000000L; ts.tv_nsec%=1000000000L;
         pthread_cond_timedwait(&g_pq_cv,&g_pq_mx,&ts); }
     if(g_pq_seq==*seen || g_pq_latest<0){ pthread_mutex_unlock(&g_pq_mx); return 0; }
-    int slot=g_pq_latest; g_pq_reading=slot; *seen=g_pq_seq; void*f=g_pq_fence[slot];
+    int slot=g_pq_latest; g_pq_reading=slot; *seen=g_pq_seq; void*f=g_pq_fence[slot]; g_pq_new_fno=g_pq_frameno[slot];
     pthread_mutex_unlock(&g_pq_mx);
     if(f) pq_waitsync(f,0,0xFFFFFFFFFFFFFFFFull/*TIMEOUT_IGNORED*/);
     if(!g_pq_prog){ const char*vs="#version 410 core\nout vec2 uv;void main(){vec2 p=vec2((gl_VertexID==1)?3.0:-1.0,(gl_VertexID==2)?3.0:-1.0);uv=p*0.5+0.5;gl_Position=vec4(p,0.0,1.0);}\n";
@@ -8497,8 +8741,12 @@ static void* present_thread_fn(void*a){ (void)a; pthread_setname_np("shim-presen
         static unsigned long pq_seen; int pq_shown=0;
         { extern volatile int g_win_visible_x; if(use_d3dgl && (win_hidden() || (!g_win_visible_x && !getenv("PELOAD_PRESENT_HIDDEN")))){ usleep(20000); continue; } }
         if(use_d3dgl && pq_on()){
-            if(pq_present_wait(&pq_seen,50)){ pq_shown=1; if(cglflush&&g_present_glctx){ CGLLockContext((CGLContextObj)g_present_glctx); cglflush(g_present_glctx); CGLUnlockContext((CGLContextObj)g_present_glctx); } }
-            else if(!g_pq_seq){ d3dgl_blit_present(); if(cglflush&&g_present_glctx) cglflush(g_present_glctx); }   // nothing queued yet
+            if(pq_present_wait(&pq_seen,50)){ pq_shown=1; double pf0=mono_s(); if(cglflush&&g_present_glctx){ CGLLockContext((CGLContextObj)g_present_glctx); cglflush(g_present_glctx); CGLUnlockContext((CGLContextObj)g_present_glctx); }
+                double pf1=mono_s(); static double pfs, tl; static unsigned long nnew, nall; pfs+=pf1-pf0; nall++; if(g_pq_new_fno){ nnew++; lat_win(g_pq_new_fno,pf1); g_pq_new_fno=0; }
+                { static int pp=-1; if(pp<0) pp=getenv("PELOAD_PRESENT_PROF")?1:0;   // where the present thread's time goes, every 5 s
+                  if(pp){ if(!tl) tl=pf1; if(pf1-tl>=5.0){ double dt=pf1-tl; char m[260]; int k=snprintf(m,sizeof m,"  [presentprof] %.1f new frames/s (%.1f presents/s): waiting for a frame %.0f%%, drawing %.0f%%, flush %.0f%% (%.1f ms per flush)\n",
+                      nnew/dt,nall/dt,g_pp_acq/dt*100,g_pp_draw/dt*100,pfs/dt*100,nall?pfs/nall*1e3:0); (void)!write(2,m,(size_t)k); tl=pf1; nnew=nall=0; pfs=0; g_pp_acq=g_pp_draw=0; } } } }
+            else if(!pq_started()){ d3dgl_blit_present(); if(cglflush&&g_present_glctx) cglflush(g_present_glctx); }   // nothing queued yet
         } else if(use_d3dgl){
             d3dgl_blit_present(); if(cglflush&&g_present_glctx) cglflush(g_present_glctx);
         } else gdi_present_main();
@@ -8521,7 +8769,7 @@ static void* present_thread_fn(void*a){ (void)a; pthread_setname_np("shim-presen
         // (e.g. a halo3 GPU-frame-ready flag at 0x1821b0a74 + 24*i) each present cycle.
         const char* pk32=getenv("PELOAD_POKE32");
         if(pk32){ char buf[256]; snprintf(buf,sizeof buf,"%s",pk32); for(char*tok=strtok(buf,",");tok;tok=strtok(0,",")){ char*c=strchr(tok,':'); if(!c)continue; *c=0; uint64_t a=strtoull(tok,0,16); uint32_t v=(uint32_t)strtoull(c+1,0,16); if(a>0x100000000ULL) *(volatile uint32_t*)a=v; } }
-        if(!(use_d3dgl && pq_on() && (g_pq_seq || g_glh_on))){ struct timespec ts={0,33*1000000L}; nanosleep(&ts,0); }   // frame-driven once the queue runs (the helper's frames never bump g_pq_seq; glh_pq_acquire already waits)
+        if(!(use_d3dgl && pq_on() && pq_started())){ struct timespec ts={0,33*1000000L}; nanosleep(&ts,0); }   // frame-driven once the queue runs
         (void)pq_shown; } return 0; }
 static void* cocoa_make_gl_window_i(int w,int h){ CGLContextObj c=cocoa_make_gl_window(w,h);
     if(c){ g_present_glctx=(void*)c; void(*set)(void*)=dlsym(RTLD_DEFAULT,"CGLSetCurrentContext");
@@ -8928,7 +9176,12 @@ static PEXHANDLER MSABI i_RtlVirtualUnwind(uint32_t htype, uint64_t base, uint64
         }
         i+=slots;
     }
-    if(flags&4){ /*CHAININFO*/ RUNFN* chain=(RUNFN*)(codes + ((ncodes+1)&~1)); return i_RtlVirtualUnwind(htype,base,base+chain->Begin,chain,ctx,hdata,establisher,0); }
+    // CHAININFO: the fragment's codes are done; the parent's prologue has run in full (pc is past it), so unwind the parent with
+    // the same pc. Until 2026-10-25 it passed the parent's start as pc: prolog offset 0 = none of the parent's pushes / stack
+    // allocation undone -> wrong rsp and return address for any exception unwinding through such a frame (MSVC splits halo3
+    // functions this way: 3,703 of its 21,768 entries are chained). PELOAD_UNWIND_CHAIN_OLD=1 = old.
+    if(flags&4){ /*CHAININFO*/ RUNFN* chain=(RUNFN*)(codes + ((ncodes+1)&~1)); static int old=-1; if(old<0) old=getenv("PELOAD_UNWIND_CHAIN_OLD")!=0;
+        return i_RtlVirtualUnwind(htype,base,old?base+chain->Begin:pc,chain,ctx,hdata,establisher,0); }
     if(prolog_off >= prolog){ /* in body: pop return address */ CTX_RIP(ctx)=*(uint64_t*)CTX_RSP(ctx); CTX_RSP(ctx)+=8; }
     else { CTX_RIP(ctx)=*(uint64_t*)CTX_RSP(ctx); CTX_RSP(ctx)+=8; } // simplified: treat prolog like body
     if((flags&3) && (htype&3)){ uint32_t* hrva=(uint32_t*)(codes + ((ncodes+1)&~1));
@@ -9139,7 +9392,12 @@ typedef struct { uint32_t magic; int kind; pthread_mutex_t m; pthread_cond_t c; 
     int is_timer, timer_armed; uint64_t timer_due_us; long timer_period_ms; } SyncObj;
 static SyncObj* sync_new(int kind){ SyncObj*s=calloc(1,sizeof *s); s->magic=SYNC_MAGIC; s->kind=kind;
     pthread_mutex_init(&s->m,0); pthread_cond_init(&s->c,0); return s; }
-static int is_sync(intptr_t hv){ if(hv<0x100000) return 0; SyncObj*s=(SyncObj*)hv; return s && s->magic==SYNC_MAGIC; }
+// (2026-11-06) only a live heap block is read: a foreign handle value >= 0x100000 (client 0.10.0's runtime hands out handles
+// like 0x400000c0) made this read unmapped memory. PELOAD_SYNC_UNCHECKED=1 = old (read whatever the value points at).
+static int is_sync(intptr_t hv){ if(hv<0x100000) return 0; SyncObj*s=(SyncObj*)hv; if(!s) return 0;
+    static int unchecked=-1; if(unchecked<0) unchecked=getenv("PELOAD_SYNC_UNCHECKED")!=0;
+    if(!unchecked && malloc_size(s)<sizeof(uint32_t)) return 0;
+    return s->magic==SYNC_MAGIC; }
 static void name_log(const char*api,const uint16_t*nm); // fwd
 static void* cur_thread_handle(void){ if(t_self_thread) return t_self_thread;   // (DuplicateHandle of GetCurrentThread())
     SyncObj*s=sync_new(K_THREAD); if(!s) return (void*)-2; s->manual=1; s->owner=pthread_self(); s->tid=(uint32_t)pthread_mach_thread_np(pthread_self());
@@ -9400,6 +9658,11 @@ static void *thread_tramp(void *a){
     if(g_ntarrs<(int)(sizeof g_tarrs/sizeof g_tarrs[0])) g_tarrs[g_ntarrs++]=tarr;
     pthread_mutex_unlock(&g_tlsm);
     *(uint64_t*)(teb+0x30)=(uint64_t)teb; *(uint64_t*)(teb+0x60)=(uint64_t)g_peb_ptr; *(uint64_t*)(teb+0x58)=(uint64_t)tarr;
+    // NtTib.StackBase / StackLimit (+0x8 / +0x10): the thread's real stack (they were 0 until 2026-11-06; client 0.10.0's
+    // runtime copies at most 256 bytes from a saved stack pointer up to StackBase, and with 0 there it copied the full 256 past
+    // the top of a thread's stack: "exception 0xc0000005 ... ucrtbase memcpy" after the menu scene loaded). PELOAD_TEB_NOSTACK=1 = old.
+    if(!getenv("PELOAD_TEB_NOSTACK")){ pthread_t me=pthread_self(); uint64_t hi=(uint64_t)(uintptr_t)pthread_get_stackaddr_np(me);
+        *(uint64_t*)(teb+8)=hi; *(uint64_t*)(teb+0x10)=hi-(uint64_t)pthread_get_stacksize_np(me); }
     // macOS x86_64 uses %gs as the live pthread TSD base: key K lives at %gs:[K*8].
     // Windows wants TEB at gs:0x30, TLS-array at gs:0x58, PEB at gs:0x60 — which
     // collide with macOS TSD keys 6/11/12. Overwriting them is fine while the
@@ -9501,6 +9764,8 @@ static int tls_blocks(uint32_t idx,void**out,int max){ int n=0; if(idx>=128) ret
 #include "forensic.c"   // forensic archive of voice / chat / events + its viewer (/forensics); uses stats.c
 #include "pktlog.c"     // packet log: the type of every datagram / connection (/packets.json, packets.jsonl); uses both
 #include "nav.c"
+#include "latency.c"    // input -> screen latency, per-second performance log (perf/*.csv)
+#include "latch.c"      // late camera update: the newest mouse movement applied to a frame's camera at its upload
 // ---- D3D object lifetime (backlog 27) ----------------------------------------------------------------------------------
 // D3D11 keeps an object alive while the pipeline has it bound, and the GL side (the submission thread, compute jobs) may
 // still use it for a frame or two after the game's last Release. So a released object goes through two stages:
@@ -9589,7 +9854,7 @@ static void d3dobj_destroy(D3DObj*o,int gl){
         static void(*del_sh)(unsigned), (*del_prog)(unsigned); if(gl && !del_sh){ del_sh=dlsym(RTLD_DEFAULT,"glDeleteShader"); del_prog=dlsym(RTLD_DEFAULT,"glDeleteProgram"); }
         if(gl){ for(int i=0;i<o->shc_n && i<4;i++) if(o->shc_id[i] && del_sh) del_sh(o->shc_id[i]); if(o->glprog && del_prog) del_prog(o->glprog); }
         o->shc_n=0; o->glprog=0; if(!o->bcshared){ free(o->bc); free(o->glsl); } o->bc=0; o->glsl=0; o->bclen=0; }
-    free(o->pdata); o->pdata=0; free(o->isg); o->isg=0; free(o->dxsurf); o->dxsurf=0;
+    free(o->pdata); o->pdata=0; free(o->isg); o->isg=0; free(o->dxsurf); o->dxsurf=0; free(o->rbchk); o->rbchk=0;
     __atomic_add_fetch(&g_d3do_nfree[o->kind&7],1,__ATOMIC_RELAXED); __atomic_add_fetch(&g_d3do_bfree[o->kind&7],o->size,__ATOMIC_RELAXED);
     live_del(o); o->dead=1;
     D3DObj*old=g_quar[g_quar_i]; g_quar[g_quar_i]=o; g_quar_i=(g_quar_i+1)&4095; free(old); }
@@ -9814,7 +10079,7 @@ static long MSABI i_BCryptGenRandom(void*alg,uint8_t*buf,uint32_t n,uint32_t fl)
 // through a junk pointer and crashed. Implement SHA1/256/384/512/MD5 for real.
 enum { BALG_SHA1=1,BALG_SHA256,BALG_SHA384,BALG_SHA512,BALG_MD5 };
 typedef struct { uint32_t magic; int alg; } BAlg;
-typedef struct { uint32_t magic; int alg; union { CC_SHA1_CTX s1; CC_SHA256_CTX s256; CC_SHA512_CTX s512; CC_MD5_CTX md5; } c; } BHash;
+typedef struct { uint32_t magic; int alg; union { CC_SHA1_CTX s1; CC_SHA256_CTX s256; CC_SHA512_CTX s512; CC_MD5_CTX md5; } c; volatile int pend; void*shadow; } BHash;   // pend: chunks queued (bha_*); shadow: PELOAD_BCRYPT_CHECK's synchronous twin
 #define BMAGIC 0x42435254u
 static int balg_from_w(const uint16_t*w){ char a[32]; int i=0; for(; w&&w[i]&&i<31;i++) a[i]=(char)(w[i]&0xff); a[i]=0;
     if(!strcmp(a,"SHA256"))return BALG_SHA256; if(!strcmp(a,"SHA1"))return BALG_SHA1; if(!strcmp(a,"SHA384"))return BALG_SHA384;
@@ -9827,14 +10092,64 @@ static void bhash_init(BHash*h){ switch(h->alg){case BALG_SHA1:CC_SHA1_Init(&h->
     case BALG_SHA384:CC_SHA384_Init(&h->c.s512);break;case BALG_SHA512:CC_SHA512_Init(&h->c.s512);break;case BALG_MD5:CC_MD5_Init(&h->c.md5);break;} }
 static long MSABI i_BCryptCreateHash(void*hAlg,void**phHash,uint8_t*obj,uint32_t cbobj,uint8_t*sec,uint32_t cbsec,uint32_t fl){
     (void)obj;(void)cbobj;(void)sec;(void)cbsec;(void)fl; BAlg*a=hAlg; BHash*h=malloc(sizeof *h); if(!h) return 0xC0000017;
-    h->magic=BMAGIC; h->alg=(a&&a->magic==BMAGIC)?a->alg:BALG_SHA256; bhash_init(h); if(phHash)*phHash=h; return 0; }
+    h->magic=BMAGIC; h->alg=(a&&a->magic==BMAGIC)?a->alg:BALG_SHA256; h->pend=0; h->shadow=0; bhash_init(h); if(phHash)*phHash=h; return 0; }
+// PELOAD_BCRYPT_LOG=1 (2026-10-25; a 0-fps second after joining a 100-player HugeGrass game had halo3's engine thread ~24% in
+// CC_SHA1_Update): every 5 s the bytes hashed per algorithm, the time spent and the top guest callers. SHA-1 runs at ~770 MB/s
+// under Rosetta (3.4 GB/s natively).
+static pthread_mutex_t g_bh_mx=PTHREAD_MUTEX_INITIALIZER; static struct { uint64_t ra, bytes, calls; double s; } g_bh_top[16]; static uint64_t g_bh_bytes[8], g_bh_calls; static double g_bh_s, g_bh_t;
+static void bh_note(int alg,uint64_t ra,uint32_t n,double dt){ pthread_mutex_lock(&g_bh_mx); g_bh_bytes[alg&7]+=n; g_bh_calls++; g_bh_s+=dt;
+    int k=-1; for(int i=0;i<16;i++) if(g_bh_top[i].ra==ra){ k=i; break; } if(k<0) for(int i=0;i<16;i++) if(!g_bh_top[i].ra){ k=i; g_bh_top[i].ra=ra; break; }
+    if(k>=0){ g_bh_top[k].bytes+=n; g_bh_top[k].calls++; g_bh_top[k].s+=dt; }
+    double t=mono_s(); if(!g_bh_t) g_bh_t=t; if(t-g_bh_t>=5.0){ char m[600]; int q=snprintf(m,sizeof m,"  [bcrypt] %.0f s: %llu calls, %.1f MB hashed (SHA-1 %.1f MB, SHA-256 %.1f MB), %.0f ms in it |",t-g_bh_t,(unsigned long long)g_bh_calls,
+            (g_bh_bytes[0]+g_bh_bytes[1]+g_bh_bytes[2]+g_bh_bytes[3]+g_bh_bytes[4]+g_bh_bytes[5])/1e6,g_bh_bytes[BALG_SHA1]/1e6,g_bh_bytes[BALG_SHA256]/1e6,g_bh_s*1e3);
+        for(int r=0;r<4;r++){ int b=-1; for(int i=0;i<16;i++) if(g_bh_top[i].ra && g_bh_top[i].bytes && (b<0 || g_bh_top[i].bytes>g_bh_top[b].bytes)) b=i; if(b<0) break;
+            uint64_t a=g_bh_top[b].ra; q+=snprintf(m+q,sizeof m-q," %s+0x%llx %.1f MB (%llu calls)",a>=0x180000000ull&&a<0x190000000ull?"halo3":a>=0x140000000ull&&a<0x150000000ull?"exe":"?",
+                (unsigned long long)(a>=0x180000000ull&&a<0x190000000ull?a-0x180000000ull:a>=0x140000000ull&&a<0x150000000ull?a-0x140000000ull:a),g_bh_top[b].bytes/1e6,(unsigned long long)g_bh_top[b].calls); g_bh_top[b].bytes=0; }
+        m[q++]='\n'; (void)!write(2,m,(size_t)q); memset(g_bh_top,0,sizeof g_bh_top); memset(g_bh_bytes,0,sizeof g_bh_bytes); g_bh_calls=0; g_bh_s=0; g_bh_t=t; }
+    pthread_mutex_unlock(&g_bh_mx); }
+static void bhash_update(BHash*h,const uint8_t*in,uint32_t n){ switch(h->alg){case BALG_SHA1:CC_SHA1_Update(&h->c.s1,in,n);break;case BALG_SHA256:CC_SHA256_Update(&h->c.s256,in,n);break;
+    case BALG_SHA384:CC_SHA384_Update(&h->c.s512,in,n);break;case BALG_SHA512:CC_SHA512_Update(&h->c.s512,in,n);break;case BALG_MD5:CC_MD5_Update(&h->c.md5,in,n);break;} }
+// Asynchronous hashing (2026-10-25): halo3's streaming file reader (halo3+0x205ebc) feeds every chunk it reads into a running
+// SHA-1 when its hash flag (+0xb2) is set -- the whole of a file it streams, the HugeGrass mod's 2.1 GB map included: 400-870 MB
+// every 5 s during loading and the first minutes of a match, 0.7-1.1 s of the engine thread's time per 5 s at Rosetta's ~770
+// MB/s (natively 3.4 GB/s, but Rosetta offers x86 code no SHA instructions). Now a chunk >= 4 KB is copied (~8 us for 80 KB)
+// into a queue that a worker thread (shim-hash) hashes in order, and the call returns; BCryptFinishHash / BCryptDestroyHash wait
+// for that hash's queued chunks first, so every digest is the same. At most 64 MB queued (then the caller waits).
+// PELOAD_BCRYPT_SYNC=1 = hash in the call, as before.
+typedef struct BHChunk { struct BHChunk*next; BHash*h; uint32_t n; uint8_t d[]; } BHChunk;
+static pthread_mutex_t g_bha_mx=PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_bha_cv=PTHREAD_COND_INITIALIZER, g_bha_done=PTHREAD_COND_INITIALIZER;
+static BHChunk *g_bha_head, *g_bha_tail; static uint64_t g_bha_bytes; static int g_bha_on=-1;
+static void* bha_worker(void*a){ (void)a; pthread_setname_np("shim-hash");
+    for(;;){ pthread_mutex_lock(&g_bha_mx); while(!g_bha_head) pthread_cond_wait(&g_bha_cv,&g_bha_mx); BHChunk*c=g_bha_head; g_bha_head=c->next; if(!g_bha_head) g_bha_tail=0; pthread_mutex_unlock(&g_bha_mx);
+        bhash_update(c->h,c->d,c->n);
+        pthread_mutex_lock(&g_bha_mx); c->h->pend--; g_bha_bytes-=c->n; pthread_cond_broadcast(&g_bha_done); pthread_mutex_unlock(&g_bha_mx); free(c); }
+    return 0; }
+static void bha_drain(BHash*h){ if(!h->pend) return; pthread_mutex_lock(&g_bha_mx); while(h->pend) pthread_cond_wait(&g_bha_done,&g_bha_mx); pthread_mutex_unlock(&g_bha_mx); }
+static int bha_queue(BHash*h,const uint8_t*in,uint32_t n){
+    if(g_bha_on<0) g_bha_on=getenv("PELOAD_BCRYPT_SYNC")?0:1; if(!g_bha_on || n<4096) return 0;
+    BHChunk*c=malloc(sizeof *c+n); if(!c) return 0; c->next=0; c->h=h; c->n=n; memcpy(c->d,in,n);
+    static int started; pthread_mutex_lock(&g_bha_mx);
+    if(!started){ started=1; pthread_t t; pthread_attr_t at; pthread_attr_init(&at); pthread_attr_set_qos_class_np(&at,QOS_CLASS_USER_INITIATED,0); pthread_create(&t,&at,bha_worker,0); pthread_detach(t); }
+    while(g_bha_bytes>(64u<<20)) pthread_cond_wait(&g_bha_done,&g_bha_mx);
+    if(g_bha_tail) g_bha_tail->next=c; else g_bha_head=c; g_bha_tail=c; h->pend++; g_bha_bytes+=n; pthread_cond_signal(&g_bha_cv); pthread_mutex_unlock(&g_bha_mx); return 1; }
 static long MSABI i_BCryptHashData(void*hHash,uint8_t*in,uint32_t n,uint32_t fl){ (void)fl; BHash*h=hHash; if(!h||h->magic!=BMAGIC) return 0xC0000008;
+    static int lg=-1; if(lg<0) lg=getenv("PELOAD_BCRYPT_LOG")?1:0; double t0=lg?mono_s():0;
+    static int chk=-1; if(chk<0) chk=getenv("PELOAD_BCRYPT_CHECK")?1:0;   // (every digest computed both ways and compared at the finish)
+    if(chk){ if(!h->shadow){ BHash*t=calloc(1,sizeof *t); if(t){ t->magic=BMAGIC; t->alg=h->alg; bhash_init(t); h->shadow=t; } } if(h->shadow) bhash_update((BHash*)h->shadow,in,n); }
+    if(bha_queue(h,in,n)){ if(lg) bh_note(h->alg,(uint64_t)__builtin_return_address(0),n,mono_s()-t0); return 0; }
+    bha_drain(h);   // (a small chunk after queued ones: keep the order)
     switch(h->alg){case BALG_SHA1:CC_SHA1_Update(&h->c.s1,in,n);break;case BALG_SHA256:CC_SHA256_Update(&h->c.s256,in,n);break;
-    case BALG_SHA384:CC_SHA384_Update(&h->c.s512,in,n);break;case BALG_SHA512:CC_SHA512_Update(&h->c.s512,in,n);break;case BALG_MD5:CC_MD5_Update(&h->c.md5,in,n);break;} return 0; }
-static long MSABI i_BCryptFinishHash(void*hHash,uint8_t*out,uint32_t n,uint32_t fl){ (void)n;(void)fl; BHash*h=hHash; if(!h||h->magic!=BMAGIC) return 0xC0000008;
+    case BALG_SHA384:CC_SHA384_Update(&h->c.s512,in,n);break;case BALG_SHA512:CC_SHA512_Update(&h->c.s512,in,n);break;case BALG_MD5:CC_MD5_Update(&h->c.md5,in,n);break;}
+    if(lg) bh_note(h->alg,(uint64_t)__builtin_return_address(0),n,mono_s()-t0); return 0; }
+static long MSABI i_BCryptFinishHash(void*hHash,uint8_t*out,uint32_t n,uint32_t fl){ (void)n;(void)fl; BHash*h=hHash; if(!h||h->magic!=BMAGIC) return 0xC0000008; bha_drain(h);
+    if(h->shadow){ BHash*t=h->shadow; uint8_t a[64]={0}, b[64]={0}; BHash cp=*h; cp.shadow=0;   // finish copies of both, compare
+        switch(h->alg){case BALG_SHA1:CC_SHA1_Final(a,&cp.c.s1);CC_SHA1_Final(b,&t->c.s1);break;case BALG_SHA256:CC_SHA256_Final(a,&cp.c.s256);CC_SHA256_Final(b,&t->c.s256);break;default:break;}
+        static unsigned long ok, bad; if(memcmp(a,b,64)) bad++; else ok++;
+        if(memcmp(a,b,64) || (ok+bad)%200==0){ char m[120]; int k=snprintf(m,sizeof m,"  [bcrypt-check] %s: %lu digests matched, %lu differed\n",memcmp(a,b,64)?"MISMATCH":"ok",ok,bad); (void)!write(2,m,(size_t)k); }
+        free(t); h->shadow=0; }
     switch(h->alg){case BALG_SHA1:CC_SHA1_Final(out,&h->c.s1);break;case BALG_SHA256:CC_SHA256_Final(out,&h->c.s256);break;
     case BALG_SHA384:CC_SHA384_Final(out,&h->c.s512);break;case BALG_SHA512:CC_SHA512_Final(out,&h->c.s512);break;case BALG_MD5:CC_MD5_Final(out,&h->c.md5);break;} return 0; }
-static long MSABI i_BCryptDestroyHash(void*hHash){ if(hHash)free(hHash); return 0; }
+static long MSABI i_BCryptDestroyHash(void*hHash){ if(hHash){ BHash*h=hHash; if(h->magic==BMAGIC){ bha_drain(h); free(h->shadow); } free(hHash); } return 0; }
 static long MSABI i_BCryptGetProperty(void*h,const uint16_t*prop,uint8_t*out,uint32_t cb,uint32_t*cbres,uint32_t fl){ (void)fl;
     char p[48]; int i=0; for(; prop&&prop[i]&&i<47;i++) p[i]=(char)(prop[i]&0xff); p[i]=0; int alg=BALG_SHA256;
     if(h){ BAlg*a=h; if(a->magic==BMAGIC) alg=a->alg; }
@@ -9985,6 +10300,7 @@ static void* MSABI i_LoadLibraryExW(const uint16_t *name, void *h, uint32_t fl){
     // a bare name that is no file here: the SetDllDirectoryW folder (Reach Renaissance points it at MCC's haloreach folder)
     if(g_dlldir[0] && bn==w){ char q[2300]; snprintf(q,sizeof q,"%s/%s",g_dlldir,w);
         if(access(q,R_OK)==0){ g_prefer_base=1; uint8_t *b=load_guest(q, strdup(bn)); g_prefer_base=0; if(b) return b; } }
+    { uint8_t*sy=synth_dll(bn); if(sy) return sy; }   // dxgi.dll / d3d11.dll: an image with a real export table (synth_dll)
     return g_base; // feature-probe DLLs (api-ms-*) that aren't real files: placeholder
 }
 
@@ -10285,6 +10601,11 @@ static int pipe_close(void*h){ PipeObj*o=h; if(o->refs>0){ o->refs--; return 1; 
 // hook records it), counted per path and printed every 10 s -- the client opened files there in a 123-player match (~2% of
 // that thread's samples), so the paths say what to cache. g_engine_thr: set by hb_frame_hook.
 static pthread_t g_engine_thr; static int g_mainfs=-1;
+// CPU seconds halo3's engine thread has used so far (user + system; 0 before the frame hook has run): the A/B log's "engine
+// ms/frame" -- the thread's own work per frame, which a GL- or GPU-bound scene hides from the frame rate.
+double eng_cpu_s(void){ if(!g_engine_thr) return 0; thread_basic_info_data_t bi; mach_msg_type_number_t c=THREAD_BASIC_INFO_COUNT;
+    if(thread_info(pthread_mach_thread_np(g_engine_thr),THREAD_BASIC_INFO,(thread_info_t)&bi,&c)!=KERN_SUCCESS) return 0;
+    return bi.user_time.seconds+bi.system_time.seconds+(bi.user_time.microseconds+bi.system_time.microseconds)*1e-6; }
 static struct { char p[600]; uint32_t n, acc, disp, fl; uint64_t ra; double us; } g_mfs[64]; static int g_nmfs; static pthread_mutex_t g_mfs_mx=PTHREAD_MUTEX_INITIALIZER;
 static void mainfs_note(const char*p,uint32_t acc,uint32_t disp,uint32_t fl,uint64_t ra,double us){
     pthread_mutex_lock(&g_mfs_mx); int k=0; for(;k<g_nmfs;k++) if(g_mfs[k].ra==ra && !strncmp(g_mfs[k].p,p,sizeof g_mfs[k].p-1)) break;
@@ -10763,18 +11084,31 @@ static int32_t MSABI i_WavesFX_Initialize(void){ return 0; } // audio FX: report
 // a worker fiber does the work and SwitchToFiber()s back to yield; the caller loops until
 // it signals done. Stubbing SwitchToFiber as a no-op meant the worker never ran -> the load
 // spun forever at 15%. Implement proper cooperative context switching. ----
-typedef struct Fiber { uint32_t magic; ucontext_t ctx; void* stack; size_t ssize; void* start; void* param; int is_thread; } Fiber;
+// Windows' layout (2026-11-06): TEB->NtTib.FiberData (TEB+0x20) holds the current FIBER OBJECT -- GetCurrentFiber() is that
+// slot and GetFiberData() its first field, both read inline. The fiber's parameter is therefore the object's first member.
+// Until then the slot held the parameter itself: halo3 reads it as the current fiber (halo3+0x5ff97d: below 0x10000 ->
+// ConvertThreadToFiber, else kept as the fiber to switch back to) and only got away with it because its main thread's
+// parameter is 0; client 0.10.0's runtime matches the slot against the fibers it created and stopped with "[runtime] fatal:
+// unknown guest fiber started" once the menu scene loaded. PELOAD_FIBER_TEB_PARAM=1 = old (the parameter in the slot).
+typedef struct Fiber { void* param; uint32_t magic; ucontext_t ctx; void* stack; size_t ssize; void* start; int is_thread; uint64_t stk_lo, stk_hi; } Fiber;   // param FIRST
 #define FIBER_MAGIC 0x46494252u   // 'FIBR'
 static __thread Fiber* g_cur_fiber;
-// TEB->NtTib.FiberData (TEB+0x20): GetFiberData()/GetCurrentFiber() read this inline via gs.
 static inline uint64_t fiber_teb(void){ uint64_t t; __asm__ volatile("movq %%gs:0x30, %0":"=r"(t)); return t; }
-static void fiber_set_data(void* p){ uint64_t t=fiber_teb(); if(t>0x1000) *(void**)(t+0x20)=p; }
-static void fiber_entry(void){ Fiber* f=g_cur_fiber; if(f) fiber_set_data(f->param);
+// TEB->NtTib.StackBase / StackLimit (TEB+0x8 / +0x10) follow the running fiber's stack, as SwitchToFiber does on Windows (every
+// thread's own range is set at its start: thread_tramp, main). PELOAD_TEB_NOSTACK=1 = old (left 0).
+static void teb_set_stack(uint64_t lo,uint64_t hi){ static int off=-1; if(off<0) off=getenv("PELOAD_TEB_NOSTACK")!=0; if(off) return;
+    uint64_t t=fiber_teb(); if(t>0x1000){ *(uint64_t*)(t+8)=hi; *(uint64_t*)(t+0x10)=lo; } }
+static void fiber_set_cur(Fiber*f){ static int old=-1; if(old<0) old=getenv("PELOAD_FIBER_TEB_PARAM")!=0;
+    uint64_t t=fiber_teb(); if(t>0x1000) *(void**)(t+0x20)=old?(f?f->param:0):(void*)f;
+    if(f && f->stk_hi) teb_set_stack(f->stk_lo,f->stk_hi); }
+static void fiber_entry(void){ Fiber* f=g_cur_fiber; if(f) fiber_set_cur(f);
     if(f&&f->start){ ((void(__attribute__((ms_abi))*)(void*))f->start)(f->param); }
     // A fiber routine must not fall off the end (Windows exits the thread). Park it.
     for(;;){ struct timespec ts={1,0}; nanosleep(&ts,0); } }
 static void* MSABI i_ConvertThreadToFiber(void*param){ Fiber* f=g_cur_fiber; if(f&&f->magic==FIBER_MAGIC) return f;
-    f=calloc(1,sizeof *f); if(!f) return 0; f->magic=FIBER_MAGIC; f->is_thread=1; f->param=param; getcontext(&f->ctx); g_cur_fiber=f; fiber_set_data(param); return f; }
+    f=calloc(1,sizeof *f); if(!f) return 0; f->magic=FIBER_MAGIC; f->is_thread=1; f->param=param; getcontext(&f->ctx);
+    { uint64_t t=fiber_teb(); if(t>0x1000){ f->stk_hi=*(uint64_t*)(t+8); f->stk_lo=*(uint64_t*)(t+0x10); } }   // the thread's own stack
+    g_cur_fiber=f; fiber_set_cur(f); return f; }
 static void* MSABI i_ConvertThreadToFiberEx(void*param,uint32_t fl){ (void)fl; return i_ConvertThreadToFiber(param); }
 static void* MSABI i_CreateFiberEx(size_t commit,size_t reserve,uint32_t fl,void*start,void*param){ (void)commit;(void)fl;
     size_t ss=reserve?reserve:(2u<<20); if(ss<(1u<<20)) ss=1u<<20;   // >=1MB like Windows fiber default
@@ -10784,6 +11118,7 @@ static void* MSABI i_CreateFiberEx(size_t commit,size_t reserve,uint32_t fl,void
     uint8_t* m=mmap(0,ss+0x4000,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANON,-1,0);
     if(m==MAP_FAILED){ free(f); return 0; } mprotect(m,0x4000,PROT_NONE); f->stack=m; f->ssize=ss+0x4000;
     getcontext(&f->ctx); f->ctx.uc_stack.ss_sp=m+0x4000; f->ctx.uc_stack.ss_size=ss; f->ctx.uc_link=0;
+    f->stk_lo=(uint64_t)(uintptr_t)(m+0x4000); f->stk_hi=f->stk_lo+ss;
     makecontext(&f->ctx,fiber_entry,0);
     if(getenv("PELOAD_TRACE_FIBER")){ char b[96]; int k=snprintf(b,sizeof b,"[fiber] Create f=%p start=%p param=%p t=%x\n",(void*)f,start,param,pthread_mach_thread_np(pthread_self())); (void)!write(2,b,k); }
     return f; }
@@ -10791,13 +11126,27 @@ static void* MSABI i_CreateFiber(size_t ss,void*start,void*param){ return i_Crea
 static void MSABI i_SwitchToFiber(void*fiber){ Fiber* t=fiber;
     if(getenv("PELOAD_TRACE_FIBER")){ static int sc; if(sc<120){ sc++; char b[120]; int k=snprintf(b,sizeof b,"[fiber] Switch from=%p to=%p valid=%d to.param=%p t=%x\n",(void*)g_cur_fiber,fiber,(t&&t->magic==FIBER_MAGIC),t&&t->magic==FIBER_MAGIC?t->param:0,pthread_mach_thread_np(pthread_self())); (void)!write(2,b,k);} }
     if(!t||t->magic!=FIBER_MAGIC) return; Fiber* cur=g_cur_fiber; if(cur==t) return;
-    g_cur_fiber=t; fiber_set_data(t->param); if(cur) swapcontext(&cur->ctx,&t->ctx); else setcontext(&t->ctx); }
-static int MSABI i_ConvertFiberToThread(void){ Fiber* f=g_cur_fiber; if(f&&f->magic==FIBER_MAGIC&&f->is_thread){ g_cur_fiber=0; free(f); } return 1; }
+    g_cur_fiber=t; fiber_set_cur(t); if(cur) swapcontext(&cur->ctx,&t->ctx); else setcontext(&t->ctx); }
+static int MSABI i_ConvertFiberToThread(void){ Fiber* f=g_cur_fiber; if(f&&f->magic==FIBER_MAGIC&&f->is_thread){ g_cur_fiber=0; fiber_set_cur(0); free(f); } return 1; }
 static void MSABI i_DeleteFiber(void*fiber){ Fiber* f=fiber; if(f&&f->magic==FIBER_MAGIC&&f!=g_cur_fiber){ f->magic=0; if(f->stack&&!f->is_thread)munmap(f->stack,f->ssize); free(f); } }
 static void* MSABI i_GetCurrentFiber(void){ return g_cur_fiber; }
 static void* MSABI i_GetFiberData(void){ return g_cur_fiber? g_cur_fiber->param : 0; }
 static int MSABI i_IsThreadAFiber(void){ return g_cur_fiber?1:0; }
 static void* MSABI i_GetWindow(void*h,uint32_t cmd){ (void)cmd; return h; } // no related windows; return self
+// Window properties (client 0.10.0, 2026-11-06; SetPropW / GetPropW / RemovePropW were logging stubs: Set "failed", Get always
+// NULL): a small table of (window, name) -> handle; a name is a string or an atom (an integer below 0x10000).
+static struct { void*hwnd; uint16_t name[64]; uintptr_t atom; void*val; } g_wprop[256]; static int g_nwprop; static pthread_mutex_t g_wprop_mx=PTHREAD_MUTEX_INITIALIZER;
+static int wprop_find(void*h,const uint16_t*n){ for(int i=0;i<g_nwprop;i++){ if(g_wprop[i].hwnd!=h) continue;
+        if((uintptr_t)n<0x10000){ if(g_wprop[i].atom==(uintptr_t)n) return i; continue; }
+        if(g_wprop[i].atom) continue; int j=0; while(j<63 && n[j] && n[j]==g_wprop[i].name[j]) j++; if(j<63 ? n[j]==g_wprop[i].name[j] : 1) return i; }
+    return -1; }
+static int MSABI i_SetPropW(void*h,const uint16_t*n,void*v){ if(!n) return 0; pthread_mutex_lock(&g_wprop_mx); int i=wprop_find(h,n);
+    if(i<0 && g_nwprop<256){ i=g_nwprop++; memset(&g_wprop[i],0,sizeof g_wprop[i]); g_wprop[i].hwnd=h;
+        if((uintptr_t)n<0x10000) g_wprop[i].atom=(uintptr_t)n; else { int j=0; for(; j<63 && n[j]; j++) g_wprop[i].name[j]=n[j]; } }
+    if(i>=0) g_wprop[i].val=v; pthread_mutex_unlock(&g_wprop_mx); return i>=0; }
+static void* MSABI i_GetPropW(void*h,const uint16_t*n){ if(!n) return 0; pthread_mutex_lock(&g_wprop_mx); int i=wprop_find(h,n); void*v=i>=0?g_wprop[i].val:0; pthread_mutex_unlock(&g_wprop_mx); return v; }
+static void* MSABI i_RemovePropW(void*h,const uint16_t*n){ if(!n) return 0; pthread_mutex_lock(&g_wprop_mx); int i=wprop_find(h,n); void*v=0;
+    if(i>=0){ v=g_wprop[i].val; g_wprop[i]=g_wprop[--g_nwprop]; } pthread_mutex_unlock(&g_wprop_mx); return v; }
 // MessageBoxW: the engine shows error/assert dialogs here. We can't pop a dialog, but the TEXT
 // is the actual error — LOG it (don't swallow it) and return IDOK(1) so startup continues.
 static int MSABI i_MessageBoxW(void*h,const uint16_t*text,const uint16_t*cap,uint32_t type){ (void)h;(void)type;
@@ -10978,7 +11327,7 @@ static void *resolve_impl(const char *fn){
         {"D3DGetInputSignatureBlob",(void*)i_D3DGetInputSignatureBlob},
         {"CoTaskMemAlloc",(void*)i_CoTaskMemAlloc},
         {"CoTaskMemFree",(void*)i_CoTaskMemFree},
-        {"PropVariantClear",(void*)i_PropVariantClear},
+        {"PropVariantClear",(void*)i_PropVariantClear},{"PropVariantToStringAlloc",(void*)i_PropVariantToStringAlloc},
         {"GetCurrentProcess",(void*)i_GetCurrentProcess},
         {"ReadProcessMemory",(void*)i_ReadProcessMemory},
         {"WriteProcessMemory",(void*)i_WriteProcessMemory},
@@ -11185,7 +11534,7 @@ static void *resolve_impl(const char *fn){
         {"ClientToScreen",(void*)i_ClientToScreen},
         {"ScreenToClient",(void*)i_ScreenToClient},
         {"RegisterRawInputDevices",(void*)wi_RegisterRawInputDevices},
-        {"GetRawInputData",(void*)wi_GetRawInputData},{"GetRawInputDeviceInfoW",(void*)wi_GetRawInputDeviceInfoW},{"GetKeyboardState",(void*)wi_GetKeyboardState},{"GetCursorPos",(void*)wi_GetCursorPos},
+        {"GetRawInputData",(void*)wi_GetRawInputData},{"GetRawInputDeviceInfoW",(void*)wi_GetRawInputDeviceInfoW},{"GetRawInputDeviceList",(void*)wi_GetRawInputDeviceList},{"SetPropW",(void*)i_SetPropW},{"GetPropW",(void*)i_GetPropW},{"RemovePropW",(void*)i_RemovePropW},{"GetKeyboardState",(void*)wi_GetKeyboardState},{"GetCursorPos",(void*)wi_GetCursorPos},
         {"GetRegisteredRawInputDevices",(void*)i_GetRegisteredRawInputDevices},
         {"SetTimer",(void*)i_SetTimer},{"GetWindowTextW",(void*)i_GetWindowTextW},{"GetWindowTextLengthW",(void*)i_GetWindowTextLengthW},{"FindWindowW",(void*)i_FindWindowW},{"SetWinEventHook",(void*)i_SetWinEventHook},{"UnhookWinEvent",(void*)i_UnhookWinEvent},{"PostMessageW",(void*)i_PostMessageW},{"PostThreadMessageW",(void*)i_PostThreadMessageW},{"PostQuitMessage",(void*)i_PostQuitMessage},{"SendMessageW",(void*)i_SendMessageW},
         {"KillTimer",(void*)i_KillTimer},
@@ -12357,8 +12706,85 @@ static void guest_qos_tick(void){ static int applied=-1;
 // frame -- does adding work to it lower the frame rate in proportion (it is the limit) or not (the limit is elsewhere)?
 volatile int g_burn_on; static double g_burn_s=-1;
 int ab_burn(int set){ if(set>=0) g_burn_on=set; return g_burn_on; }
+// ---- halo3's local-user lookups, once per frame ---------------------------------------------------------------------------
+// For EVERY player, twice a frame (0xff054 -> 0xfbda8: the player's status, from the frame's render preparation and the
+// players update), halo3 asks two questions whose answers are the same for all of them:
+//  * halo3+0xfbb94 "how many local users": for each user slot i it calls halo3+0x10e0b4(i), which builds the whole user list
+//    again per call. The Reclaimer client raises the slot count from 8 to 64 after load (its `mov edi,8` at +0x1a becomes 64)
+//    and replaces 0x10e0b4 with its own version (exe+0xb11380 in 0.9.23) that also fills and frees two heap vectors per call:
+//    ~16,000 list builds a frame in a 126-player game, 9.3% of the engine thread (public Hugegrass, shim/tools/sample-dump.py).
+//  * halo3+0xfbc04 "which player is local": it walks the player list asking halo3+0x10e060(player) -- client-hooked
+//    (exe+0xb0e340) -- until the local player answers. Its cost depends on where OUR player sits in the server's list: early,
+//    a few calls; late (a client that joined a full server), ~126 calls x 126 players x 2 = 32,000 hook calls a frame: 9.3% of
+//    the engine thread in a match whose frames took 76-97 ms, against ~27 ms in a match where the player came early.
+// Each function's entry now jumps to a stub that returns the answer computed earlier in the same engine frame (hb_frame_hook
+// advances the frame number) and runs the original otherwise. Registers: the hit path writes only eax and the flags, the miss
+// path also ecx; each original writes both on every path (halo3 is whole-program optimised: a caller may keep values in
+// registers its callee is known not to write -- FIXES.md section 17). Each function's bytes are checked at load (another halo3
+// build is left alone; the client patches the bodies later, which the stubs run as they are then); installed only with the
+// frame hook. PELOAD_NO_LUCACHE=1 = off; PELOAD_AB=lucache:<secs> flips both in a match. PELOAD_LUCACHE_CHECK=1: at each frame
+// start every original runs once more and is compared with the answer cached during the frame before ("[lucache]" lines).
+typedef struct { const char*name; uint8_t*site; volatile uint32_t*d; int (__attribute__((ms_abi))*orig)(void); unsigned long n, diff; } LuMemo;
+static LuMemo g_lu[4]; static int g_nlu; static volatile uint32_t*g_lu_frame;   // d: [0] cached frame, [1] answer, [2] on
+int ab_lucache(int set){ if(!g_nlu) return 0; if(set>=0) for(int i=0;i<g_nlu;i++){ g_lu[i].d[2]=set?1:0; g_lu[i].d[0]=*g_lu_frame-1; } return g_lu[0].d[2]!=0; }
+static void lucache_check(void){ static int on=-1; if(on<0) on=getenv("PELOAD_LUCACHE_CHECK")!=0; if(!on) return;
+    for(int i=0;i<g_nlu;i++){ LuMemo*m=&g_lu[i]; uint32_t f=*g_lu_frame, cf=m->d[0], c=m->d[1]; if(cf!=f) continue;   // nothing cached last frame
+        int v=m->orig(); m->n++;
+        if((uint32_t)v!=c){ m->diff++; char t[120]; int k=snprintf(t,sizeof t,"  [lucache] %s frame %u: cached %d, now %d\n",m->name,f,(int)c,v); (void)!write(2,t,k); }
+        if(m->n==1 || m->n%600==0){ char t[140]; int k=snprintf(t,sizeof t,"  [lucache] check %s: %lu frames, %lu differed (answer %d)\n",m->name,m->n,m->diff,(int)c); (void)!write(2,t,k); } } }
+// a stub at `rva` (its `len` bytes must equal `fn`; the first `pro` bytes are position-independent and relocated)
+static void lu_memo(uint8_t*base,uint64_t rva,const uint8_t*fn,int len,int pro,const char*name){
+    uint8_t*site=base+rva; char t[120]; int k;
+    if(g_nlu>=4 || memcmp(site,fn,(size_t)len)){ k=snprintf(t,sizeof t,"  [lucache] %s (halo3+0x%llx) holds other bytes: not cached\n",name,(unsigned long long)rva); (void)!write(2,t,k); return; }
+    if(!g_hookpool){ g_hookpool=mmap(0,1<<20,PROT_READ|PROT_WRITE|PROT_EXEC,MAP_PRIVATE|MAP_ANON,-1,0); if(g_hookpool==MAP_FAILED){g_hookpool=0;return;} }
+    uint8_t*t0=g_hookpool+g_hookoff, *w=t0;
+    if(!g_lu_frame){ g_lu_frame=(uint32_t*)w; *(uint32_t*)w=1; w+=16; }   // the shared frame number (rip-reachable from every stub)
+    uint32_t*dat=(uint32_t*)w; dat[0]=0; dat[1]=0; dat[2]=1; dat[3]=0; w+=16;
+    uint8_t*fr=(uint8_t*)g_lu_frame;
+    #define LU_RIP(tgt) do{ int32_t dd=(int32_t)((tgt)-(w+4)); memcpy(w,&dd,4); w+=4; }while(0)   // rip-relative (the insn ends after the disp)
+    uint8_t*stub=w;
+    *w++=0x83; *w++=0x3D; { int32_t dd=(int32_t)((uint8_t*)dat+8-(w+5)); memcpy(w,&dd,4); w+=4; } *w++=0x00;   // cmp dword [on],0
+    *w++=0x74; uint8_t*j1=w++;                                                    // je miss
+    *w++=0x8B; *w++=0x05; LU_RIP(fr);                                             // mov eax,[frame]
+    *w++=0x3B; *w++=0x05; LU_RIP((uint8_t*)dat);                                  // cmp eax,[cached frame]
+    *w++=0x75; uint8_t*j2=w++;                                                    // jne miss
+    *w++=0x8B; *w++=0x05; LU_RIP((uint8_t*)dat+4);                                // mov eax,[answer]
+    *w++=0xC3;                                                                    // ret
+    uint8_t*miss=w; *j1=(uint8_t)(miss-(j1+1)); *j2=(uint8_t)(miss-(j2+1));
+    *w++=0x48; *w++=0x83; *w++=0xEC; *w++=0x28;                                   // sub rsp,0x28 (shadow space + alignment)
+    *w++=0xE8; uint8_t*cl=w; w+=4;                                                // call the original
+    *w++=0x48; *w++=0x83; *w++=0xC4; *w++=0x28;                                   // add rsp,0x28
+    *w++=0x89; *w++=0x05; LU_RIP((uint8_t*)dat+4);                                // mov [answer],eax
+    *w++=0x8B; *w++=0x0D; LU_RIP(fr);                                             // mov ecx,[frame]
+    *w++=0x89; *w++=0x0D; LU_RIP((uint8_t*)dat);                                  // mov [cached frame],ecx
+    *w++=0xC3;                                                                    // ret
+    #undef LU_RIP
+    uint8_t*orig=w; { int32_t dd=(int32_t)(orig-(cl+4)); memcpy(cl,&dd,4); }
+    memcpy(w,site,(size_t)pro); w+=pro; w=jmp_abs_noreg(w,site+pro);             // the relocated prologue, then back
+    sys_icache_invalidate(t0,(size_t)(w-t0)); g_hookoff+=(uint64_t)((w-t0+15)&~15);
+    uintptr_t pg=(uintptr_t)site & ~0xFFFull; mprotect((void*)pg,0x2000,PROT_READ|PROT_WRITE|PROT_EXEC);
+    uint8_t*q=jmp_abs_noreg(site,stub); while(q<site+pro) *q++=0x90;
+    sys_icache_invalidate(site,(size_t)pro);
+    LuMemo*m=&g_lu[g_nlu]; m->name=name; m->site=site; m->d=dat; m->orig=(int(__attribute__((ms_abi))*)(void))orig; g_nlu++;
+    k=snprintf(t,sizeof t,"  [lucache] %s (halo3+0x%llx) answered once per frame\n",name,(unsigned long long)rva); (void)!write(2,t,k); }
+static void lucache_install(uint8_t*base){
+    if(getenv("PELOAD_NO_LUCACHE")) return;
+    static const uint8_t users[110]={0x48,0x89,0x5c,0x24,0x08,0x48,0x89,0x6c,0x24,0x10,0x48,0x89,0x74,0x24,0x18,0x57,0x48,0x83,0xec,0x20,0x8b,0x0d,0xee,0xe3,0x93,0x00,
+        0xbf,0x08,0x00,0x00,0x00,0x65,0x48,0x8b,0x04,0x25,0x58,0x00,0x00,0x00,0x33,0xdb,0xbd,0x48,0x00,0x00,0x00,0x48,0x8b,0x34,0xc8,0x48,0x8b,0x04,0x2e,0x33,0xd2,
+        0x8b,0xcb,0x38,0x90,0x78,0xfb,0x00,0x00,0x0f,0x95,0xc2,0xe8,0xd7,0x24,0x01,0x00,0x85,0xc0,0x74,0x08,0xff,0xc3,0x3b,0xdf,0x7c,0xe0,0xeb,0x02,0x8b,0xfb,0x48,
+        0x8b,0x5c,0x24,0x30,0x8b,0xc7,0x48,0x8b,0x6c,0x24,0x38,0x48,0x8b,0x74,0x24,0x40,0x48,0x83,0xc4,0x20,0x5f,0xc3};
+    static const uint8_t local[143]={0x4c,0x8b,0xdc,0x49,0x89,0x5b,0x08,0x49,0x89,0x73,0x10,0x57,0x48,0x83,0xec,0x40,0x8b,0x0d,0x82,0xe3,0x93,0x00,0x83,0xcb,0xff,
+        0x65,0x48,0x8b,0x04,0x25,0x58,0x00,0x00,0x00,0x48,0x8b,0x3c,0xc8,0x49,0x8d,0x4b,0xd8,0xb8,0x10,0x00,0x00,0x00,0x48,0x8b,0x04,0x38,0x49,0x89,0x43,0xe0,
+        0x89,0x5c,0x24,0x34,0x89,0x5c,0x24,0x30,0xe8,0x68,0xb6,0xfe,0xff,0x84,0xc0,0x74,0x35,0xbe,0x48,0x00,0x00,0x00,0x48,0x8b,0x04,0x3e,0x33,0xd2,0x8b,0x4c,0x24,
+        0x30,0x38,0x90,0x78,0xfb,0x00,0x00,0x0f,0x95,0xc2,0xe8,0xf7,0x23,0x01,0x00,0x85,0xc0,0x74,0x10,0x48,0x8d,0x4c,0x24,0x20,0xe8,0x39,0xb6,0xfe,0xff,0x84,0xc0,
+        0x75,0xd6,0xeb,0x04,0x8b,0x5c,0x24,0x30,0x48,0x8b,0x74,0x24,0x58,0x8b,0xc3,0x48,0x8b,0x5c,0x24,0x50,0x48,0x83,0xc4,0x40,0x5f,0xc3};
+    lu_memo(base,0xfbb94,users,sizeof users,16,"local-user count");
+    lu_memo(base,0xfbc04,local,sizeof local,16,"local player"); }
 static void __attribute__((ms_abi)) hb_frame_hook(void){
     guest_qos_tick(); if(__builtin_expect(!g_engine_thr,0)) g_engine_thr=pthread_self();
+    if(g_lu_frame){ lucache_check(); (*g_lu_frame)++;
+        if(g_nlu>=2 && !(*g_lu_frame&255)){ static int last=-2; int h=(int)g_lu[1].d[1], slot=h==-1?-1:(h&0xffff);   // our player's slot (the walk's length)
+            if(g_lu[1].d[0]+1>=*g_lu_frame && slot!=last){ last=slot; char t[96]; int k=snprintf(t,sizeof t,"  [lucache] local player slot %d\n",slot); (void)!write(2,t,k); } } }
     if(__builtin_expect(g_burn_on,0)){ if(g_burn_s<0){ const char*e=getenv("PELOAD_BURN_US"); g_burn_s=(e?atof(e):10000)/1e6; } double t=mono_s()+g_burn_s; while(mono_s()<t) __asm__ volatile("pause"); }
     if(__builtin_expect(g_st_voice_pending,0)) st_voice_jobs();   // stats page voice mutes (stats.c)
     if(__builtin_expect(g_hb_job_pending,0)) hb_engine_jobs();
@@ -12370,6 +12796,7 @@ static void hbdel_install(uint8_t*base){
     // called from 421 places, many mid-tick: a teleport from there crashed in the physics update.)
     static const uint8_t main_pro[20]={0x48,0x8B,0xC4,0x57,0x48,0x81,0xEC,0x60,0x02,0x00,0x00,0x48,0xC7,0x44,0x24,0x30,0xFE,0xFF,0xFF,0xFF};
     if(!entry_hook(base+0xb2250,main_pro,20,(void*)hb_frame_hook)) (void)!write(2,"  [hook] main_loop_body prologue differs: engine jobs (teleport, voice mute) disabled\n",86);
+    else lucache_install(base);   // its cache is renewed by the frame hook
     if(getenv("PELOAD_NO_DELHOOK")) return;
     static const uint8_t pro[14]={0x48,0x89,0x5C,0x24,0x10,0x48,0x89,0x6C,0x24,0x18,0x56,0x57,0x41,0x54};
     if(entry_hook(base+0x342ed8,pro,14,(void*)hb_on_delete)){ extern volatile int g_hb_delhook; g_hb_delhook=1; (void)!write(2,"  [hbdel] object_delete hooked (projectile impacts for the tracer overlay)\n",74); }
@@ -12720,10 +13147,13 @@ static void net_selftest(const char* spec){
 typedef struct { uint64_t key; uint32_t cnt; uint32_t th; uint64_t ret; } SmpEnt;   // ret: [rsp] when first seen (unknown code)
 enum { SMP_HALO3, SMP_EXE, SMP_SHIM, SMP_GL, SMP_METAL, SMP_SYS, SMP_NCLS };
 static const char*const g_smp_cls[SMP_NCLS]={"halo3","exe","loader","GL","Metal","system"};
-// the function a sample is in: guest code -> its .pdata entry (start), native code -> the dladdr symbol
+// the function a sample is in: guest code -> its .pdata entry (start; a fragment with chained unwind info -> its parent's,
+// PELOAD_SAMPLE_NOCHAIN=1 = the fragment's own start as before 2026-10-25), native code -> the dladdr symbol
+static RUNFN* smp_chain_root(uint64_t b,RUNFN*f);
+static int g_smp_nochain;
 static uint64_t smp_func(uint64_t rip,int*cls){
     if(rip>=0x140000000ULL&&rip<0x190000000ULL){ uint64_t b=0; RUNFN*f=i_RtlLookupFunctionEntry(rip,&b,0);
-        *cls=rip>=0x180000000ULL?SMP_HALO3:SMP_EXE; return f?b+f->Begin:rip; }
+        *cls=rip>=0x180000000ULL?SMP_HALO3:SMP_EXE; if(f && !g_smp_nochain) f=smp_chain_root(b,f); return f?b+f->Begin:rip; }
     Dl_info di; if(dladdr((void*)rip,&di)){ const char*fn=di.dli_fname?di.dli_fname:"";
         static uint64_t self_base; if(!self_base){ Dl_info me; if(dladdr((void*)smp_func,&me)) self_base=(uint64_t)me.dli_fbase; }
         if((uint64_t)di.dli_fbase==self_base) *cls=SMP_SHIM;
@@ -12732,6 +13162,66 @@ static uint64_t smp_func(uint64_t rip,int*cls){
         else *cls=SMP_SYS;
         return di.dli_saddr?(uint64_t)di.dli_saddr:rip; }
     *cls=SMP_SYS; return rip; }
+// PELOAD_SAMPLE_STACK=<thread name part> (1 = halo3's engine thread, guest-0x18000a120): the sampler also walks that thread's
+// call stack at each sample and PELOAD_SAMPLE_DUMP gets every distinct stack with its count ("S" lines, outermost first), for
+// inclusive times per function (shim/tools/sample-dump.py --tree). Guest frames unwind by their .pdata unwind codes (a fragment
+// with chained unwind info -> its parent function; the top frame may sit in an epilogue: decoded like Windows does); host code
+// on top (loader, system, Rosetta runtime) by a leaf's [rsp] or the rbp chain back to the first guest return address. The walk
+// runs while the thread is suspended, so it only reads: memory between the sample's rsp and the thread's stack top, and the
+// images' unwind data (no dladdr: dyld's lock may be held); a fault ends the walk (t_dump_jb, crashsig).
+enum { SMP_STK_MAX=48, SMP_STK_TAB=16384 };
+typedef struct { uint64_t h; uint32_t cnt, th, n; uint64_t f[SMP_STK_MAX]; } SmpStk;
+#define SMP_GUEST(a) ((a)>=0x140000000ULL && (a)<0x190000000ULL)
+#define SMP_CAND (1ull<<63)   // a raw frame that may not be a return address
+#define SMP_RD(a) ({ uint64_t _a=(a); if(_a<lo || _a+8>hi) return n; *(volatile uint64_t*)_a; })
+// the function a .pdata entry belongs to: follow chained unwind info (UNW_FLAG_CHAININFO) to the parent entry
+static RUNFN* smp_chain_root(uint64_t b,RUNFN*f){ for(int i=0;i<8 && f;i++){ uint8_t*info=(uint8_t*)b+f->Unwind; if(!((info[0]>>3)&4)) break;
+        f=(RUNFN*)((uint16_t*)(info+4)+((info[2]+1)&~1)); } return f; }
+// the top frame in an epilogue ([add rsp,n | lea rsp,[fp+d]] pop... ret/jmp): emulate it, as Windows' unwinder does
+static int smp_epilog(uint64_t*r,uint64_t*rip,uint64_t lo,uint64_t hi){ const uint8_t*p=(const uint8_t*)*rip; uint64_t sp=r[4]; int adj=0, reg[16], np=0;
+    if(p[0]==0x48 && p[1]==0x83 && p[2]==0xC4){ sp+=(uint64_t)(int64_t)(int8_t)p[3]; p+=4; adj=1; }
+    else if(p[0]==0x48 && p[1]==0x81 && p[2]==0xC4){ sp+=(uint64_t)(int64_t)*(const int32_t*)(p+3); p+=7; adj=1; }
+    else if((p[0]&0xFE)==0x48 && p[1]==0x8D && ((p[2]>>3)&7)==4 && (p[2]&7)!=4 && ((p[2]>>6)==1 || (p[2]>>6)==2)){ int b=(p[2]&7)|((p[0]&1)<<3);
+        int64_t d=(p[2]>>6)==1?(int8_t)p[3]:*(const int32_t*)(p+3); p+=(p[2]>>6)==1?4:7; sp=r[b]+(uint64_t)d; adj=1; }
+    while(np<16){ if(p[0]>=0x58 && p[0]<=0x5F){ reg[np++]=p[0]-0x58; p++; } else if(p[0]==0x41 && p[1]>=0x58 && p[1]<=0x5F){ reg[np++]=8+p[1]-0x58; p+=2; } else break; }
+    int ret=p[0]==0xC3 || p[0]==0xC2 || (p[0]==0xF3 && p[1]==0xC3), jmp=p[0]==0xE9 || p[0]==0xEB || (p[0]==0xFF && p[1]==0x25) || (p[0]==0x48 && p[1]==0xFF && p[2]==0x25);
+    if(!ret && !(jmp && (adj || np))) return 0;
+    for(int i=0;i<np;i++){ if(sp<lo || sp+8>hi) return 0; r[reg[i]]=*(volatile uint64_t*)sp; sp+=8; }
+    if(sp<lo || sp+8>hi) return 0; *rip=*(volatile uint64_t*)sp; r[4]=sp+8; return 1; }
+// raw addresses of the call stack at a sample, innermost first: [0] = rip, then guest return addresses
+static int smp_walk(const x86_thread_state64_t*st,uint64_t lo,uint64_t hi,uint64_t*out,int max){
+    uint64_t r[16]={st->__rax,st->__rcx,st->__rdx,st->__rbx,st->__rsp,st->__rbp,st->__rsi,st->__rdi,st->__r8,st->__r9,st->__r10,st->__r11,st->__r12,st->__r13,st->__r14,st->__r15};
+    uint64_t rip=st->__rip; int n=0, top=1; out[n++]=rip;
+    if(!SMP_GUEST(rip)){ uint64_t a=SMP_RD(r[4]);   // host code on top
+        if(SMP_GUEST(a)){ rip=a; r[4]+=8; }
+        else { if(a) out[n++]=a|SMP_CAND;   // [rsp]: a frameless leaf's caller -- or a local (checked after the resume)
+            uint64_t fp=r[5]; for(int k=0;;k++){ if(k>=64 || fp<r[4] || (fp&7)) return n; uint64_t ret=SMP_RD(fp+8), nfp=SMP_RD(fp);
+                r[4]=fp+16; r[5]=nfp; if(SMP_GUEST(ret)){ rip=ret; break; } if(n<max-1) out[n++]=ret; if(nfp<=fp) return n; fp=nfp; } }
+        out[n++]=rip; top=0; }
+    while(n<max){ uint64_t b=0, osp=r[4]; RUNFN*fn=i_RtlLookupFunctionEntry(rip,&b,0);
+        if(!fn){ rip=SMP_RD(r[4]); r[4]+=8; }   // a leaf: no unwind data, [rsp] is the return address
+        else if(top && smp_epilog(r,&rip,lo,hi)){}
+        else { uint64_t poff=rip-(b+fn->Begin);
+            for(int c=0;c<8 && fn;c++){ uint8_t*info=(uint8_t*)b+fn->Unwind; uint8_t flags=info[0]>>3, nc=info[2], fr=info[3]&0xf, fro=info[3]>>4;
+                uint16_t*cd=(uint16_t*)(info+4); uint64_t fb=fr?r[fr]-(uint64_t)fro*16:r[4];
+                for(int i=0;i<nc;){ uint8_t coff=cd[i]&0xff, op=(cd[i]>>8)&0xf, oi=(cd[i]>>12)&0xf; int act=coff<=poff, sl=1;
+                    switch(op){ case 0: if(act){ r[oi]=SMP_RD(r[4]); r[4]+=8; } break;
+                        case 1: if(oi==0){ if(act) r[4]+=(uint64_t)cd[i+1]*8; sl=2; } else { if(act) r[4]+=*(uint32_t*)&cd[i+1]; sl=3; } break;
+                        case 2: if(act) r[4]+=(uint64_t)oi*8+8; break;
+                        case 3: if(act) r[4]=r[fr]-(uint64_t)fro*16; break;
+                        case 4: if(act) r[oi]=SMP_RD(fb+(uint64_t)cd[i+1]*8); sl=2; break;
+                        case 5: if(act) r[oi]=SMP_RD(fb+*(uint32_t*)&cd[i+1]); sl=3; break;
+                        case 8: sl=2; break; case 9: sl=3; break;
+                        case 10: return n;   // machine frame (interrupt / exception entry): not on a sampled engine stack
+                        default: break; }
+                    i+=sl; }
+                if(flags&4){ fn=(RUNFN*)(cd+((nc+1)&~1)); poff=~0ull; continue; }   // chained: the parent's whole prologue has run
+                break; }
+            rip=SMP_RD(r[4]); r[4]+=8; }
+        top=0;
+        if(r[4]<=osp || !SMP_GUEST(rip)) break;   // no progress, or back in host code (the thread's start / a loader callback)
+        out[n++]=rip; }
+    return n; }
 static void smp_name(uint64_t key,char*w,size_t n){ Dl_info di;
     if(key>=0x140000000ULL&&key<0x150000000ULL) snprintf(w,n,"exe+0x%llx",(unsigned long long)(key-0x140000000ULL));
     else if(key>=0x180000000ULL&&key<0x190000000ULL) snprintf(w,n,"halo3+0x%llx",(unsigned long long)(key-0x180000000ULL));
@@ -12749,25 +13239,50 @@ static SmpEnt g_smp_mc[256];   // who calls memmove/memcpy/memset/memcmp: [rsp] 
 static void* sampler_thread(void*a){ (void)a; pthread_setname_np("shim-sampler");
     int us=atoi(getenv("PELOAD_SAMPLE")); if(us<200) us=1000;
     static SmpEnt tab[65536]; double tlast=mono_s();
-    static struct { thread_t t; uint64_t n, busy, cls[SMP_NCLS]; char name[64]; } thr[96]; int nthr=0;
+    // one record per thread; a thread not listed for 200 passes has exited and its record is reused (the table had 96 records and
+    // never freed one: a menu-runtime client fills it with short-lived threads before halo3's match threads start, and those were
+    // then never sampled at all, 2026-10-25)
+    enum { SMP_NTHR=256 };
+    static struct { thread_t t; uint64_t n, busy, cls[SMP_NCLS], slo, shi, last; int stk; char name[64]; } thr[SMP_NTHR]; int nthr=0; uint64_t pass=0;
     mach_port_t self=mach_thread_self();
+    g_smp_nochain=getenv("PELOAD_SAMPLE_NOCHAIN")!=0;
+    const char*stkw=getenv("PELOAD_SAMPLE_STACK"); if(stkw && (!*stkw || !strcmp(stkw,"1"))) stkw="guest-0x18000a120"; if(stkw && !strcmp(stkw,"0")) stkw=0;
+    static SmpStk stab[SMP_STK_TAB]; uint64_t raw[SMP_STK_MAX]; uint32_t stk_lost=0;
     for(;;){
         thread_act_array_t th; mach_msg_type_number_t n=0;
-        if(task_threads(mach_task_self(),&th,&n)==KERN_SUCCESS){
+        if(task_threads(mach_task_self(),&th,&n)==KERN_SUCCESS){ pass++;
             for(mach_msg_type_number_t i=0;i<n;i++){ thread_t t=th[i];
+                // the thread's record (name, stack range) before suspending it: libpthread may take its list lock
+                int ti=-1; if(t!=self){ for(int k=0;k<nthr;k++) if(thr[k].t==t){ ti=k; break; }
+                    if(ti<0){ if(nthr<SMP_NTHR) ti=nthr++; else for(int k=0;k<nthr;k++) if(thr[k].last+200<pass){ ti=k; break; } }
+                    if(ti>=0 && thr[ti].t!=t){ memset(&thr[ti],0,sizeof thr[ti]); thr[ti].t=t;
+                        pthread_t pt=pthread_from_mach_thread_np(t); if(pt){ pthread_getname_np(pt,thr[ti].name,sizeof thr[ti].name);
+                            thr[ti].shi=(uint64_t)pthread_get_stackaddr_np(pt); thr[ti].slo=thr[ti].shi-(uint64_t)pthread_get_stacksize_np(pt); }
+                        if(!thr[ti].name[0]) snprintf(thr[ti].name,sizeof thr[ti].name,"port%u",(unsigned)t);
+                        thr[ti].stk=stkw && strstr(thr[ti].name,stkw); }
+                    if(ti>=0) thr[ti].last=pass; }
                 if(t!=self && thread_suspend(t)==KERN_SUCCESS){
                     x86_thread_state64_t st; mach_msg_type_number_t c=x86_THREAD_STATE64_COUNT;
                     int ok=thread_get_state(t,x86_THREAD_STATE64,(thread_state_t)&st,&c)==KERN_SUCCESS;
                     // nothing that can take a lock while the thread is stopped (it may hold dyld's or malloc's): one stack read
                     uint64_t rtop=0; if(ok && st.__rsp && !(st.__rsp&7)) rtop=*(volatile uint64_t*)st.__rsp;
+                    int nraw=0; if(ok && ti>=0 && thr[ti].stk && st.__rsp>=thr[ti].slo && st.__rsp<thr[ti].shi){
+                        sigjmp_buf jb; volatile int got=0; if(sigsetjmp(jb,1)==0){ t_dump_jb=&jb; got=smp_walk(&st,st.__rsp&~0xfffull,thr[ti].shi,raw,SMP_STK_MAX); } t_dump_jb=0; nraw=got; }
                     thread_resume(t);
-                    if(ok){ uint64_t rip=st.__rip; int ti=-1; for(int k=0;k<nthr;k++) if(thr[k].t==t){ ti=k; break; }
-                        if(ti<0 && nthr<96){ ti=nthr++; memset(&thr[ti],0,sizeof thr[ti]); thr[ti].t=t;
-                            pthread_t pt=pthread_from_mach_thread_np(t); if(pt) pthread_getname_np(pt,thr[ti].name,sizeof thr[ti].name);
-                            if(!thr[ti].name[0]) snprintf(thr[ti].name,sizeof thr[ti].name,"port%u",(unsigned)t); }
+                    if(ok){ uint64_t rip=st.__rip;
                         Dl_info di={0}; int idle=0; if(dladdr((void*)rip,&di) && di.dli_sname && (strstr(di.dli_sname,"mach_msg")||strstr(di.dli_sname,"__psynch")||strstr(di.dli_sname,"__semwait")||strstr(di.dli_sname,"nanosleep")||strstr(di.dli_sname,"__select")||strstr(di.dli_sname,"__workq")||strstr(di.dli_sname,"kevent")||strstr(di.dli_sname,"__ulock")||strstr(di.dli_sname,"__wait4")||strstr(di.dli_sname,"__recvfrom")||strstr(di.dli_sname,"__read_nocancel")||strstr(di.dli_sname,"__accept")||strstr(di.dli_sname,"__sigsuspend")||strstr(di.dli_sname,"poll")||strstr(di.dli_sname,"semaphore_"))) idle=1;
                         if(ti>=0 && !idle && rtop && di.dli_sname && (strstr(di.dli_sname,"memmove")||strstr(di.dli_sname,"memcpy")||strstr(di.dli_sname,"memset")||strstr(di.dli_sname,"memcmp")||strstr(di.dli_sname,"strncmp")||strstr(di.dli_sname,"strcmp")||strstr(di.dli_sname,"mutex"))){
                             int cc=0; uint64_t ck=smp_func(rtop,&cc); for(int q=0;q<256;q++){ if(g_smp_mc[q].key==ck && g_smp_mc[q].th==(uint32_t)ti){ g_smp_mc[q].cnt++; break; } if(!g_smp_mc[q].key){ g_smp_mc[q].key=ck; g_smp_mc[q].th=(uint32_t)ti; g_smp_mc[q].cnt=1; break; } } }
+                        if(ti>=0 && !idle && nraw>0){ SmpStk q; q.n=0; q.h=0x9E3779B97F4A7C15ull^(uint64_t)ti;   // the stack: function keys, outermost first
+                            for(int k=nraw-1;k>=0;k--){ uint64_t a=raw[k];
+                                if(a&SMP_CAND){ a&=~SMP_CAND; Dl_info di;   // keep it only if a call instruction ends just before it
+                                    if(!dladdr((void*)a,&di) || !di.dli_saddr || a-5<(uint64_t)di.dli_fbase || *(const uint8_t*)(a-5)!=0xE8) continue; }
+                                int cc=0; uint64_t fk=smp_func(a,&cc); q.f[q.n++]=fk; q.h=(q.h^fk)*0x100000001B3ull; }
+                            uint32_t h=(uint32_t)(q.h^(q.h>>29))&(SMP_STK_TAB-1); int put=0;
+                            for(int pr=0;pr<64 && !put;pr++){ SmpStk*e=&stab[(h+pr)&(SMP_STK_TAB-1)];
+                                if(!e->cnt){ *e=q; e->cnt=1; e->th=(uint32_t)ti; put=1; }
+                                else if(e->h==q.h && e->th==(uint32_t)ti && e->n==q.n && !memcmp(e->f,q.f,q.n*8)){ e->cnt++; put=1; } }
+                            if(!put) stk_lost++; }
                         if(ti>=0){ thr[ti].n++; if(!idle){ thr[ti].busy++; int cls=SMP_SYS; uint64_t key=smp_func(rip,&cls); thr[ti].cls[cls]++;
                             uint32_t h=(uint32_t)((key>>2)*2654435761u ^ (uint32_t)ti*0x9E37u)&65535;
                             for(int pr=0;pr<64;pr++){ SmpEnt*e=&tab[(h+pr)&65535]; if(e->key==0){ e->key=key; e->cnt=1; e->th=(uint32_t)ti; e->ret=(cls==SMP_SYS && key==rip)?rtop:0; break; } if(e->key==key && e->th==(uint32_t)ti){ e->cnt++; break; } } } } } }
@@ -12775,6 +13290,20 @@ static void* sampler_thread(void*a){ (void)a; pthread_setname_np("shim-sampler")
             vm_deallocate(mach_task_self(),(vm_address_t)th,n*sizeof(thread_t)); }
         usleep(us);
         if(mono_s()-tlast>=10.0){ tlast=mono_s(); char m[1400]; int k;
+            // PELOAD_SAMPLE_DUMP=<file>: every function's count per busy thread too (tab-separated: thread, function, samples, busy
+            // samples of that thread), for offline totals over a whole game -- shim/tools/sample-dump.py. Written before the report
+            // below, which clears each thread's top entries as it prints them (until 2026-10-25 the dump missed exactly those).
+            // With PELOAD_SAMPLE_STACK also "S<tab>thread<tab>samples<tab>outer;...;inner" per distinct stack. Each interval starts with
+            // "T<tab>seconds up<tab>seconds since gameplay started (-1 = not yet)" (sample-dump.py --match keeps gameplay only).
+            { static FILE*df; static int tried; if(!tried){ tried=1; const char*e=getenv("PELOAD_SAMPLE_DUMP"); if(e) df=fopen(e,"a"); }
+              if(df){ fprintf(df,"T\t%.0f\t%.0f\n",mono_s()-g_launch_mono,g_gameplay_t0?mono_s()-g_gameplay_t0:-1.0);   // interval end: up s, s in gameplay (-1 = none yet)
+                  for(int i=0;i<65536;i++) if(tab[i].cnt && tab[i].th<(uint32_t)nthr && thr[tab[i].th].busy*20>=thr[tab[i].th].n){ char w[120]; smp_name(tab[i].key,w,sizeof w);
+                      fprintf(df,"%s\t%s\t%u\t%llu\n",thr[tab[i].th].name,w,tab[i].cnt,(unsigned long long)thr[tab[i].th].busy); }
+                  for(int i=0;i<SMP_STK_TAB;i++) if(stab[i].cnt && stab[i].th<(uint32_t)nthr){ fprintf(df,"S\t%s\t%u\t",thr[stab[i].th].name,stab[i].cnt);
+                      for(uint32_t k2=0;k2<stab[i].n;k2++){ char w[120]; smp_name(stab[i].f[k2],w,sizeof w); fprintf(df,"%s%s",k2?";":"",w); } fputc('\n',df); }
+                  if(stk_lost) fprintf(df,"S-lost\t%u\n",stk_lost);
+                  fflush(df); } }
+            memset(stab,0,sizeof stab); stk_lost=0;
             for(int ti=0;ti<nthr;ti++){ if(!thr[ti].n || thr[ti].busy*20<thr[ti].n) continue;   // threads busy >= 5% of the time
                 k=snprintf(m,sizeof m,"  [sample] %-26s busy %3.0f%% |",thr[ti].name,100.0*thr[ti].busy/thr[ti].n);
                 for(int c=0;c<SMP_NCLS;c++) if(thr[ti].cls[c]*50>=thr[ti].busy) k+=snprintf(m+k,sizeof m-k," %s %.0f%%",g_smp_cls[c],100.0*thr[ti].cls[c]/thr[ti].busy);
@@ -12791,7 +13320,11 @@ static void* sampler_thread(void*a){ (void)a; pthread_setname_np("shim-sampler")
                   for(int top=0;top<5;top++){ int bi=-1; uint32_t bc=0; for(int q=0;q<256;q++) if(g_smp_mc[q].th==(uint32_t)ti && g_smp_mc[q].cnt>bc){ bc=g_smp_mc[q].cnt; bi=q; }
                       if(bi<0 || bc*100<thr[ti].busy) break; char w[120]; smp_name(g_smp_mc[bi].key,w,sizeof w); kk+=snprintf(m+kk,sizeof m-kk," %s %.1f%%,",w,100.0*bc/thr[ti].busy); g_smp_mc[bi].cnt=0; any=1; }
                   if(any){ m[kk-1]='\n'; (void)!write(2,m,kk); } } }
-            memset(tab,0,sizeof tab); memset(g_smp_mc,0,sizeof g_smp_mc); for(int i=0;i<nthr;i++){ thr[i].n=thr[i].busy=0; memset(thr[i].cls,0,sizeof thr[i].cls); } } }
+            memset(tab,0,sizeof tab); memset(g_smp_mc,0,sizeof g_smp_mc); for(int i=0;i<nthr;i++){ thr[i].n=thr[i].busy=0; memset(thr[i].cls,0,sizeof thr[i].cls); }
+            for(int i=0;i<nthr;i++) if(thr[i].last==pass){ pthread_t pt=pthread_from_mach_thread_np(thr[i].t);   // named after we first saw it, or a
+                if(pt){ char nm[64]={0}; pthread_getname_np(pt,nm,sizeof nm);                                     // new thread with a reused port name
+                    if(nm[0]){ memcpy(thr[i].name,nm,sizeof nm); thr[i].stk=stkw && strstr(nm,stkw); }
+                    thr[i].shi=(uint64_t)pthread_get_stackaddr_np(pt); thr[i].slo=thr[i].shi-(uint64_t)pthread_get_stacksize_np(pt); } } } }
     return 0; }
 // PELOAD_STDERR_TEE=<file> / PELOAD_STDOUT_TEE=<file> (%p = pid): copy everything this process writes to stderr /
 // stdout into that file as well. For processes whose stdio another process owns, e.g. the dedicated server's
@@ -12924,6 +13457,8 @@ int main(int argc, char **argv){ mt_start();
     *(uint64_t*)(teb+0x60) = (uint64_t)peb;   // PEB
     void **tls_array = g_tls_array;           // the global main-thread TLS array (register_tls fills it)
     *(uint64_t*)(teb+0x58) = (uint64_t)tls_array;
+    if(!getenv("PELOAD_TEB_NOSTACK")){ pthread_t me=pthread_self(); uint64_t hi=(uint64_t)(uintptr_t)pthread_get_stackaddr_np(me);   // NtTib stack range (thread_tramp)
+        *(uint64_t*)(teb+8)=hi; *(uint64_t*)(teb+0x10)=hi-(uint64_t)pthread_get_stacksize_np(me); }
     __asm__ volatile("movq %0, %%gs:0x30" :: "r"((uint64_t)teb));
     __asm__ volatile("movq %0, %%gs:0x60" :: "r"((uint64_t)peb));
     __asm__ volatile("movq %0, %%gs:0x58" :: "r"((uint64_t)tls_array));

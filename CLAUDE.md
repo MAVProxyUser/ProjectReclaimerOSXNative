@@ -285,6 +285,14 @@ moved with their signatures. Its new constant-buffer upload filter (RECLAIMER_SE
 SetPrivateDataInterface and releases its own reference: our SetPDI didn't AddRef -> the watcher was freed under the filter's lock ->
 the render job thread deadlocked (menu at 1 draw a frame). Private-data interfaces are now referenced like Windows (SetPDI AddRef,
 GetPrivateData AddRef -- halo3 Releases what it gets --, released on replace / destroy; PELOAD_PDI_NOREF=1 = old).
+Client 0.10.0 (2026-11-06, "rcl-engine"): a windows-gnu build (msvcrt.dll, .xdata/.idata/.bss, 69 MB of code) that RECOMPILES
+halo3.dll into its own image ("linked recompiled engine, image at 0x144e05000") instead of loading it: halo3 is no loaded module, so
+every halo3 hook / patch / stats reader / overlay / lucache is inactive with it, and patchscan finds none of the exe signatures.
+It runs on the loader since synthetic dxgi/d3d11/d3dcompiler_47 images (synth_dll: it reads GetModuleHandle'd images' export
+tables itself), IDXGIFactory4-7 slots, PropVariantToStringAlloc, Windows' fiber layout (TEB+0x20 = fiber object) and TEB stack
+fields, GetRawInputDeviceList / window props, foreign WASAPI event handles refused (FIXES.md, 2026-11-06 entries): menu (628 draws)
+and a match on our local 0.10.0 dedicated server. Its `server-status` relaunches itself and the child never exits (dedicated.sh
+status / servers.sh / test runners' status checks print nothing and leave orphans: kill them).
 PORTING A RELEASE: shim/docs/porting.md -- fetch-releases.sh (corpus), client-survey.sh, `re-tools/patchscan.py --diff old new`
 (signatures read from the C; `--rev <commit>`; exit 0 over all 39 releases), `re-tools/sigport.py --point P --old --new [--corpus]
 [--apply]` (anchors incl. callers' texts -> shape alignment -> wildcarded signature -> meaning check; `--selftest` replays history),
@@ -323,7 +331,7 @@ hooks are keyed on a module named "halo3" (haloreach.dll loads at the same 0x180
 WKWebView, shim/src/webview2.m), Schannel HTTPS on LibreSSL (shim/src/schannel.c), online and relayed joins (`reach.sh servers` /
 `join`); not yet: shared buffers / OpenFileMappingW, host-probe's own HLSL (reach-renaissance.md Status). Reach depots: 1064225
 (Campaign + Firefight) + 1064226 (MP).
-Project Gravemind (2026-10-20, branch h2-gravemind, WIP): Halo 2 on MCC's halo2.dll (h2gravemind.exe from a user-supplied zip,
+Project Gravemind (2026-10-20; on main since 2026-10-21, `bash shim/gravemind.sh`, status + setup in shim/docs/gravemind.md): Halo 2 on MCC's halo2.dll (h2gravemind.exe from a user-supplied zip,
 staged at C:\Gravemind\). MCC's Halo 2 MP files came by DepotDownloader: depot 976736 (MP: halo2.dll, maps, .dat) without
 preload/ and terminals/ (~4.5 GB of 21 GB; 976735 = campaign, 1064229 = CJK voice). `h2gravemind.exe --map-id 44` (offline Lockout)
 runs and renders (~60 fps; the black frame was case-sensitive SV_POSITION matching, d891060). Game profiles (games.c, docs/games.md):
@@ -340,6 +348,14 @@ no DSP plugin, halo2's voices (AIL_find_filter x4) failed and it never played a 
 fetches beta.txt (WinHTTP); its GRAVEMIND LIVE client claims the player's name as a gamertag -- test runs use GM_TEST=1 (own profile).
 New loader files: winhttp.c, win32x.c, winmm.c, games.c, d2d.c, dwrite.c, wic.c, dsound.c (FIXES.md 2026-10-20/21 entries).
 play.sh's stdin feeder is `sleep 86400.<pid>` (killed when the game exits; it used to hold a caller's `| tail` for 24 h).
+Late camera update (2026-10-25, shim/src/latch.c, OFF -- opt-in PELOAD_LATCH=1; mouse only, the user plays with a controller): the newest mouse movement rotates each frame's
+world-camera constant buffer (GPU copy only) at upload; learned deg/count + input age, predictive offset, none in vehicles /
+without a live local unit (needs the stats snapshot), 12 deg clamp; [latch] lines; PELOAD_AB=latch. HugeGrass 120 -> 84 ms.
+Window frame rate (2026-10-25): until then the present thread slept 33 ms after every frame in helper mode (it checked the
+in-process queue's counter only), so the window showed <= ~27 new frames/s whatever the title said; pq_started() fixed it
+(PELOAD_PRESENT_SLEEP=1 = old). The per-second log's window_fps column (latency.c) is what the player sees; [presentprof]
+(PELOAD_PRESENT_PROF=1) splits the present thread's time. Input -> screen latency: latency.c ([latency] lines, PELOAD_LATPROBE=<s>
+in test clients, shim/tools/latency-summary.py), title-bar screenshots: shim/tools/titleshot.sh.
 Native GL helper (2026-10-17, PELOAD_GL_HELPER=1: play.sh's default, the code's default without the env is off; spawned with
 only stdio + its pipe; shim/src/glh_client.c + glhelper.c + glh_shm.h, generated glh_gen.inc /
 glh_dec.inc from shim/tools/glh_gen.py, which build.sh reruns): peload.c redefines dlsym (after the D3DGL globals) so every GL name
@@ -354,6 +370,14 @@ in /Library/Logs/DiagnosticReports/glhelper-*. The depth readback (visible only,
 Win32 memory (2026-10-18): VirtualAlloc records base -> size; VirtualFree(MEM_RELEASE) unmaps the whole region (it unmapped 4 KB: PELOAD_VA_OLDFREE=1 = old); UnmapViewOfFile unmaps (it was a no-op: PELOAD_KEEP_VIEWS=1 = old). [d3dobj] also prints VirtualAlloc live, file views live, malloc in use. Rapid map-change test: VirtualAlloc live constant (4.3 GB: halo3 reserves up front), malloc +~60 MB/load, the process grows toward ~10 GB as that reservation's pages get touched (bounded).
 D3D object lifetime (2026-10-17, backlog 27): refcounted D3DObjs, freed via d3dobj_stage/d3dobj_reap; since 2026-10-18 05:00 also DUPLICATE VS/PS (o->canon set: bc/glsl shared with the canon, o->bcshared, keep=0; destroy deletes shc_id GL shaders + glprog; PELOAD_D3D_KEEPDUPS=1 = old) and input layouts (PELOAD_D3D_KEEPIL=1 = old; programs key on VS/PS only) -- the [d3dobj] line (PELOAD_D3DOBJ_LOG) counts what stays held (canon shaders, input layouts). Never free a canon shader (programs key on it) nor a glsl on compile failure (duplicates share it) -- ON by default again since 2026-10-18 00:35 (PELOAD_D3D_FREE=0 / PELOAD_D3D_NOFREE=1 = never free; it was off 2026-10-17 21:15 after map-change corruption in a public BTB, before two use-after-free fixes); copy-on-write (PELOAD_MEMCPY_COW, =0 off) on again too: a 40-minute BTB soak with both (85 players, 3 maps, 21.8 GB freed) was clean. Map-change test server: DED_CONFIG=mapchange.toml bash shim/dedicated.sh (3 x 1-minute games).
 NtDelayExecution (2026-10-18, backlog 51): the client believes it runs under Wine (GetProcAddress(ntdll,"wine_get_version") returns a stub) and then sleeps with ntdll NtDelayExecution -- it was missing (no-op stub), so its voice worker spun ~210k loops/s (server: a voice control flood; client: mcc-voice ate a core polling GetAsyncKeyState ~500k/s) and its frame limiter / runtime pacing (exe+0xa398e0) never slept. Implemented (PELOAD_NTDELAY_STUB=1 = old; in-match A/B PELOAD_AB=ntdelay, 128 players: +11.8% median fps). GetProcAddress hands a logging stub to ANY unknown name: grep logs for "[stub] (dynamic)!" when a client feature misbehaves. Stubs the client called (2026-10-18 sweep of all logs): NtDelayExecution, MapVirtualKeyExW (key <-> scan code <-> character; wininput.c, from the Mac key table), LCMapStringEx (case mapping), RoGetActivationFactory (now REGDB_E_CLASSNOTREG) -- implemented; FindWindowW (0 = no window, fine), XAudio2 ordinals #5/#6 (X3DAudio: only stubbed with PELOAD_AUDIO=0).
+Engine-thread call stacks (2026-10-25): PELOAD_SAMPLE=1000 PELOAD_SAMPLE_STACK=1 PELOAD_SAMPLE_DUMP=<file>, then
+`shim/tools/sample-dump.py <file> --dll <halo3.dll> --match [--tree | --focus halo3+0x..]` (inclusive times; host frames by name).
+126-player Hugegrass, gameplay only: halo3 84%, client hooks 7%, loader+system ~5%; sim tick (halo3+0xef120) 59%, objects
+(0x34067c / 0x3407d8) 35%, render prep (0x2d1390) 12%. Two per-player local-user lookups (halo3+0xfbb94 count, 0xfbc04 local
+player; ~9% each in some profiles) are cached per frame (lucache, PELOAD_NO_LUCACHE; check mode 0 mismatches) -- but in-match
+A/Bs (PELOAD_AB=lucache, "engine ms/frame" in the [ab] line) showed no measurable gain in 4 matches. Rosetta itself showed no
+slow instruction class (gs loads, calls, indirect calls, SSE math ~1.3-1.5x native). The same 126-player server ran 27 ms or
+76-97 ms frames in different matches (scene / game state): compare only inside one match.
 Big games (2026-10-18, PERF-PLAN "80-100 player games"): the limit is halo3's MAIN thread (guest-0x18000a120, 99% under
 Rosetta: halo3 code 55-60%, client hooks 8-10%, host memmove ~20% = its ~14 MB game-state copies ~5 a frame, malloc), not the
 GL helper (0 ms waited in the slowest stretches). BTB: Valhalla median 63 fps / p10 39, Highground 50 / 28. COW in-match A/B
@@ -436,9 +460,14 @@ DED_STATS_HTTP). A client applying "Boundaries off" also patches its own predict
 player trait: the host gives it to every player (a friend on another Mac too).
 Graphics quality (game-options.md): settings.json quality.one + quality.detail{shadows,lighting,effects,draw_distance,
 level_of_detail,decals,water}, levels auto/off/low/medium/high/ultra; written on the menu's Apply changes, applied live.
-Quality control (stats do=quality&v=low|medium|high|ultra, page "Quality"): stats.c clicks the client's Settings > Advanced graphics
-preset arrows + Apply (in a match: Esc 110,503 ... Resume 132,467; menu: 110,587) by the step count from the current preset, read
-from the client's log line "Graphics quality: one view X" (g_st_qual; snapshot overlay.quality / quality_pending).
+Quality control (stats do=quality&v=auto|low|medium|high|ultra, page "Quality"; since 2026-10-25 DIRECT, st_qual_install): the
+client's apply-settings function (0.9.23 exe+0x91bb70) packs Settings +0x1d3..0x1d9 (one view: shadows, lighting, effects, draw
+distance, LOD, decals, water; 0 auto 1 off 2 low 3 medium 4 high 5 ultra) into a u64 it xchg's into a global (exe+0x2b19e90; split
++0x1da.. -> e60, filtering/blur/AA e88, "applied" e5c); its detour on halo3's detail function (exe+0x8662d0, installed as jmp [rip]
+over halo3 code) reads them whenever halo3 asks. do=quality calls the client's own preset table exe+0x181a0d0 (register-only leaf,
+matched whole, identical 0.9.17-0.9.23) and swaps the result in. Live only (not saved, client menu not updated). Signatures
+g_sig_quality_preset / g_sig_quality_apply (patchscan "quality"). PELOAD_QUALITY_MENU=1 = the old clicks through the client's
+Settings > Advanced graphics (Esc 110,503 ... Resume 132,467; menu 110,587), driven by its log line "Graphics quality: one view X".
 UI automation of a test client: PELOAD_STATS_UISTEPS=1 + POST do=uisteps&s=<steps> (1280x720 client coords) and a frame of the
 window from a 1.5 s clip (do=rec, then ffmpeg -ss 0.8 -frames:v 1) -- the menu is not in do=capture; never screenshot the desktop.
 Retina (2026-10-18): the window's GL surface is in PIXELS (2x on a Retina screen); g_win_pw/ph are pixels (convertRectToBacking in
@@ -583,6 +612,11 @@ python re-tools/decomp.py analysis/project-reclaimer-v0.9.13.exe 0x14054ae30 0x1
 python re-tools/refs.py analysis/project-reclaimer-v0.9.13.exe func   0x553132
 python re-tools/refs.py analysis/project-reclaimer-v0.9.13.exe strref "presentation callback stalled"
 python re-tools/refs.py analysis/project-reclaimer-v0.9.13.exe globref 0x228b490
+# COM-heavy code (D2D / DWrite / DirectSound callers): "slot N" on every call [reg+off]; vtable slots per object field;
+# every instruction touching [reg+off] (struct field hunting)
+python3 re-tools/slotdis.py <pe> <rva_from> <rva_to>
+python3 re-tools/ctxcalls.py <pe> <rva_lo> <rva_hi>
+python3 re-tools/memwrites.py <pe> <hexoff>...
 ```
 angr loads the 37 MB PE in ~3 s and decompiles one function in a few seconds when CFGFast is
 region-limited (pass [rstart,rend] around the target). Standard angr gives C-like pseudocode

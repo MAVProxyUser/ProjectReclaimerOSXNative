@@ -233,7 +233,12 @@ static int MSABI wac_Stop(WaItf*self){ WaStream*s=self->s; if(!s->inited) return
     if(s->capture){ pthread_mutex_lock(&g_wa_lm); if(s->started) wa_cap_stop(s); s->started=0; pthread_mutex_unlock(&g_wa_lm); return HR_OK; }
     pthread_mutex_lock(&g_wa_lm); if(s->started && s->q) AudioQueuePause(s->q); s->started=0; pthread_mutex_unlock(&g_wa_lm); return HR_OK; }
 static int MSABI wac_Reset(WaItf*self){ WaStream*s=self->s; if(!s->inited) return WA_E_NOT_INIT; pthread_mutex_lock(&s->m); s->rd=s->wr; pthread_mutex_unlock(&s->m); return HR_OK; }
-static int MSABI wac_SetEventHandle(WaItf*self,void*h){ self->s->event=h; return HR_OK; }
+// (client 0.10.0, 2026-11-06) a handle that is not one of our events -- its engine's audio stream registered 0x400000c0 -- is
+// refused with E_INVALIDARG as Windows does for an invalid handle; storing it made Start / the buffer callback signal it
+// (a read of unmapped memory, the dedicated server's worker crashed 2 s in). PELOAD_TRACE_WASAPI logs the handle.
+static int MSABI wac_SetEventHandle(WaItf*self,void*h){ int ok=is_sync((intptr_t)h);
+    if(getenv("PELOAD_TRACE_WASAPI")){ char m[120]; int k=snprintf(m,sizeof m,"  [wasapi] SetEventHandle %p%s\n",h,ok?"":" (not an event of ours: E_INVALIDARG)"); (void)!write(2,m,k); }
+    if(!ok) return (int)0x80070057; self->s->event=h; return HR_OK; }
 static int MSABI wac_GetService(WaItf*self,GUID_*riid,void**ppv){ WaStream*s=self->s; if(!ppv) return WA_E_POINTER; *ppv=0;
     if(wa_guid(riid,0xF294ACFC)){ *ppv=&s->rc; wa_AddRef(&s->rc); return HR_OK; }    // IAudioRenderClient
     if(wa_guid(riid,0xCD63314F)){ *ppv=&s->clk; wa_AddRef(&s->clk); return HR_OK; }   // IAudioClock

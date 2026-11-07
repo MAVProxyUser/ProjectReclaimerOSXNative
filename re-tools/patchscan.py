@@ -97,12 +97,12 @@ def load_sources(rev=None):
 # ---- presence: the release each point first exists in (static survey of every release, shim/docs/patch-addresses.md
 # section 3: the parenthesised cells are places our signatures miss). A build at or after it that lacks the point is a MISS
 # (a false negative to port); an unknown build (no version in its path) is assumed to have every point.
-STATS_POINTS = ('set_muted', 'voice_recv', 'push_history', 'max_players', 'cast_vote', 'ballot')
+STATS_POINTS = ('set_muted', 'voice_recv', 'push_history', 'max_players', 'cast_vote', 'ballot', 'quality_preset', 'quality_apply')
 # points the loader no longer needs by default (still reported, never a failure): the xaudio patches, since halo3's XAudio2
 # delay slots are left lazy (2026-10-24) and the client's check passes by itself; they apply only with PELOAD_XA_EAGER=1
 OPTIONAL = {'xaudio1', 'xaudio2', 'xaudio3', 'xaudio4'}
 FIRST = {'ui-reentrancy': (0, 9, 2), 'xaudio': (0, 8, 1), 'watchdog': (0, 8, 1), 'set_muted': (0, 8, 1), 'voice_recv': (0, 8, 1),
-         'push_history': (0, 8, 1), 'moderation': (0, 9, 2), 'max_players': (0, 9, 2), 'cast_vote': (0, 9, 15)}
+         'push_history': (0, 8, 1), 'moderation': (0, 9, 2), 'max_players': (0, 9, 2), 'cast_vote': (0, 9, 15), 'quality': (0, 9, 17)}
 DL_LOCK = bytes([0xB2, 0x01, 0x31, 0xC0, 0xF0, 0x0F, 0xB0, 0x15])   # mov dl,1 ; xor eax,eax ; lock cmpxchg [rip+d],dl (is_muted's lock)
 
 
@@ -206,6 +206,7 @@ def scan(im, sigpatches, st, ver=None, tag=None):
     R['moderation'] = moderation(im)
     R['max_players'] = max_players(im, st['max_players'])
     R['cast_vote'] = cast_vote(im, st['cast_vote'], st['ballot'])
+    R['quality'] = quality(im, st['quality_preset'], st['quality_apply'])
     for k, v in R.items():
         p = present(ver, v.get('name', k) if k in ('xaudio1', 'xaudio2', 'xaudio3', 'xaudio4') else k)
         v['anchor'] = p
@@ -290,6 +291,29 @@ def cast_vote(im, sigs, bsigs):
         cache = h + 9 + im.i32(h + 5); recv = h + 0x18 + im.i32(h + 0x14); sz = recv - cache
         if not (0x100 <= sz <= 0x1000): res = dict(status=f'ballot size {sz:#x}', rva=fn); continue
         return dict(status='ok', rva=fn, cache=cache, size=sz, ballot=h)
+    return res
+
+
+def quality(im, psigs, asigs):
+    """stats.c st_qual_install: the preset table (matched whole) and the apply function's four swaps, whose targets must be
+    four distinct globals within 0x80 bytes, the two u64s 8-aligned and the flag 4-aligned"""
+    res = dict(status='none'); fn = None
+    for s in psigs:
+        hit, nh = im.find_unique(s)
+        if hit is not None: fn = hit; break
+        if nh > 1: res = dict(status='AMBIG')
+    if fn is None: return res
+    res = dict(status='swaps none', rva=fn)
+    for s in asigs:
+        h, nh = im.find_unique(s)
+        if h is None:
+            if nh > 1: res = dict(status='swaps AMBIG', rva=fn)
+            continue
+        one, split, flags, setf = h + 10 + im.i32(h + 6), h + 0x14 + im.i32(h + 0x10), h + 30 + im.i32(h + 0x1a), h + 0x2b + im.i32(h + 0x27)
+        a = (one, split, flags, setf)
+        if max(a) - min(a) > 0x80 or one == split or flags == setf or one & 7 or split & 7 or setf & 3:
+            res = dict(status='swaps not the quality globals', rva=fn); continue
+        return dict(status='ok', rva=fn, one=one)
     return res
 
 

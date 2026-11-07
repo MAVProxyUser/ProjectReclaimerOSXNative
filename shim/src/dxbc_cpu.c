@@ -17,6 +17,9 @@ typedef struct {
     int ok; const char* why;
     int usestex;      // has sample*/ld instructions (textures are decoded per dispatch only then)
     uint32_t* icb; int icbn;   // this program's immediate constant buffer (g_icb is shared with the GLSL translator)
+    // range rule (peload.c csq_range_*): which constant-buffer pair {first, end} bounds the u0 elements a dispatch touches;
+    // learned from the first dispatches' tracked accesses, then verified on every dispatch. state 0 learning, 1 on, -1 never
+    volatile int rr_state; int rr_obs; uint64_t rr_cand; int rr_b, rr_q;
 } CsProg;
 
 typedef struct {
@@ -25,6 +28,7 @@ typedef struct {
     const float* tpx[32]; int tw[32], th[32];   // SRV textures decoded to RGBA32F once per dispatch (lock-free in threads)
     uint32_t* wlog; int wlogn, wlogcap, wlogovf;   // optional: u0 elements store_structured wrote (GPU particles: upload just those)
     int trace;                                     // debug: print thread 0's every destination register (scalar interpreter)
+    int track; uint64_t wlo[8], whi[8], rlo[8], rhi[8];   // (PELOAD_CS_DEPLOG) byte ranges this dispatch read / wrote per UAV (SIMT path)
 } CsCtx;
 static inline void cs_wlog(CsCtx*c,uint32_t e){ if(!c->wlog) return; if(c->wlogn && c->wlog[c->wlogn-1]==e) return; if(c->wlogn<c->wlogcap) c->wlog[c->wlogn++]=e; else c->wlogovf=1; }
 
@@ -483,6 +487,7 @@ static int cs_exec_group(CsGrp* G,long* budgetp){
             else if(ro->type==T_RESOURCE){ if(reg<32){ res=cs_res(G->c->srv[reg]); stride=p->srvstride[reg]; } }
             U1; if(op==167) csg_src(G,&o[2],1,B);
             LOOPL { uint64_t addr= op==167 ? (uint64_t)A[l].u[0]*stride+B[l].u[0] : A[l].u[0]; CsV4 raw4;
+                if(G->c->track && ro->type==30 && reg<8){ if(addr<G->c->rlo[reg]) G->c->rlo[reg]=addr; if(addr+16>G->c->rhi[reg]) G->c->rhi[reg]=addr+16; }
                 for(int k=0;k<4;k++) raw4.u[k]= res? cs_rd_u32(res->data,res->size,addr+4u*k) : 0;
                 for(int k=0;k<4;k++) R[l].u[k]=raw4.u[ro->csw[k]]; }
             OUT(0); } break;
@@ -492,6 +497,7 @@ static int cs_exec_group(CsGrp* G,long* budgetp){
             int wm=o[0].mask?o[0].mask:1;
             if(reg==0 && G->c->wlog){ if(op==168){ FORL cs_wlog(G->c,A[l].u[0]); } else G->c->wlogovf=1; }
             FORL { uint64_t addr= op==168 ? (uint64_t)A[l].u[0]*p->uavstride[reg]+B[l].u[0] : A[l].u[0]; int j=0;
+                if(G->c->track){ if(addr<G->c->wlo[reg]) G->c->wlo[reg]=addr; if(addr+16>G->c->whi[reg]) G->c->whi[reg]=addr+16; }
                 for(int k=0;k<4;k++) if(wm&(1<<k)){ uint64_t off=addr+4u*(uint64_t)j++; if(off+4<=res->size) memcpy((uint8_t*)res->data+off,&C[l].u[k],4); } }
             } break;
         case 72: case 69: case 74: {   // sample_l / sample / sample_b dst, uv, t#, s#, lod  (mip 0, bilinear)

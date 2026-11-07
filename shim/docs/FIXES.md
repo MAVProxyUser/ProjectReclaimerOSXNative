@@ -91,6 +91,28 @@ patch variants by signature (section 16; shim/docs/patch-addresses.md).
 
 ## 1. PE loading and the API surface
 
+- **Client 0.10.0 ("rcl-engine") runs** (2026-11-06) — the client is now a windows-gnu (MinGW-style, msvcrt.dll) build that
+  RECOMPILES halo3.dll ("the build lifted", "the engine's code is 100% made", "linked recompiled engine, image at
+  0x144e05000") instead of loading it, and runs halo3's own delay-load helper with its own LoadLibraryExA / GetProcAddress.
+  It needed: synthetic system DLL images (below), DXGI factory slots up to IDXGIFactory7 (section 10), PropVariantToStringAlloc,
+  Windows' fiber layout and TEB stack fields (section 2), GetRawInputDeviceList and window properties (section 7), and a
+  refusal of foreign event handles in WASAPI (section 9). With them it reaches its menu scene (628 draws a frame) and joins a
+  local 0.10.0 dedicated server into a match (1,550-1,650 draws). Every exe signature (patchscan) misses in this build and
+  halo3.dll is no loaded module, so the stats page's halo3 readers, the overlay, lucache and the halo3 patches are inactive
+  with it; the old clients are unaffected (0.9.23 menu checked).
+- **Synthetic dxgi.dll / d3d11.dll / d3dcompiler_47.dll images** (2026-11-06) — peload.c `synth_dll`, `synth_is`, used by
+  `i_GetModuleHandleW/A` and `i_LoadLibraryExW`. Why: client 0.10.0 resolves halo3's delay imports by asking
+  GetModuleHandleW("dxgi.dll") (the exe imports dxgi, so on Windows it is loaded) and reading that image's EXPORT TABLE itself;
+  the loader answered every unknown name with the exe's own image, which exports none of them: "[runtime] fatal: unhandled
+  exception 0xc06d007f ... the delay-loaded dxgi.dll is missing" (then D3DCOMPILER_47.dll). How: per DLL a 0x2000-byte PE
+  image (headers, a sorted export directory, per export a 16-byte `jmp [rip+0]` thunk to the loader's implementation),
+  made on first use; GetProcAddress on it finds the thunks like on a guest DLL. i_D3DCompile's search for MCC's real compiler
+  skips our own image (it would find itself) and, with no halo3.dll module (0.10.0), looks in MCC's root in the prefix.
+  Old: `PELOAD_NO_SYNTH_DLL=1`. `PELOAD_TRACE_GMH=1` logs every GetModuleHandle* name.
+- **PropVariantToStringAlloc** (2026-11-06) — peload.c `i_PropVariantToStringAlloc`. Why: a logging stub that returned S_OK
+  with the string unset; client 0.10.0 reads the audio device's friendly name with it and crashed in ucrtbase (wcslen of
+  garbage) right after the engine was linked. How: a CoTaskMem copy of VT_LPWSTR / VT_BSTR, VT_LPSTR widened, "" for VT_EMPTY,
+  TYPE_E_TYPEMISMATCH otherwise.
 - **Game profiles: one game's work can't change another's** (2026-10-21) — shim/src/games.c, shim/docs/games.md. Why: three fan clients
   (Reclaimer / halo3, Reach Renaissance / haloreach, Gravemind / halo2) share the loader; Reclaimer's exe signature patches and
   stats hooks were searched for in EVERY exe (a chance byte match would patch another game), halo3.dll's hooks were keyed on the
@@ -261,6 +283,19 @@ patch variants by signature (section 16; shim/docs/patch-addresses.md).
 
 ## 2. Processes, threads, exceptions
 
+- **Fibers in Windows' layout: TEB+0x20 holds the fiber object, its first field the parameter** (2026-11-06) — peload.c
+  `Fiber` (param first), `fiber_set_cur`, ConvertThreadToFiber / CreateFiberEx / SwitchToFiber / ConvertFiberToThread. Why:
+  the slot held the PARAMETER; GetCurrentFiber() is the slot and GetFiberData() its first field on Windows, both read inline.
+  halo3 reads the slot as the current fiber (halo3+0x5ff97d: below 0x10000 -> ConvertThreadToFiber, else kept as the fiber to
+  switch back to) and only got away with it because its main thread's parameter is 0; client 0.10.0's runtime matches the
+  slot against the fibers it created: "[runtime] fatal: unknown guest fiber started" once the menu scene loaded. Old:
+  `PELOAD_FIBER_TEB_PARAM=1`.
+- **TEB NtTib.StackBase / StackLimit filled, and switched with fibers** (2026-11-06) — peload.c `thread_tramp`, main's TEB,
+  `teb_set_stack`. Why: both were 0; client 0.10.0's runtime copies at most 256 bytes from a saved stack pointer up to
+  StackBase (exe+0x3cf8fe5: gs:[0x30] -> +8), and with 0 it copied the full 256 past the top of a thread's stack ("exception
+  0xc0000005 ... ucrtbase memcpy"). How: the pthread stack range at thread start (and for the main thread); CreateFiberEx /
+  ConvertThreadToFiber record each fiber's range and every switch puts it in the TEB, as SwitchToFiber does. Old:
+  `PELOAD_TEB_NOSTACK=1`.
 - **CREATE_SUSPENDED / ResumeThread** (2026-10-20) — `i_CreateThread`, `thread_tramp`, win32x.c `i_ResumeThread`. Why: the flag was
   ignored (the thread ran at once) and ResumeThread was a stub; a creator that fills in a thread's data before resuming it raced
   it. How: the thread object's count is the suspend count; the trampoline waits until it is 0; ResumeThread returns the previous
@@ -369,6 +404,12 @@ patch variants by signature (section 16; shim/docs/patch-addresses.md).
   `__CxxFrameHandler3` and catch_unwind. (10-11 90f2361)
 - **RtlUnwindEx bounded** — Why: a lost unwind target walked into garbage and faulted inside the loop. How: RSP bounded
   to a sane window, stop once the establisher frame reaches/passes the target. (10-11 00d8c68)
+- **Chained unwind info unwinds the parent's whole prologue** (2026-10-25) — `i_RtlVirtualUnwind`. Why: a function fragment
+  with UNW_FLAG_CHAININFO (MSVC splits functions this way: 3,703 of halo3's 21,768 .pdata entries) recursed into its parent
+  with the parent's START as pc, so the prologue offset was 0 and none of the parent's pushes / stack allocation were undone:
+  wrong rsp and return address for an exception unwinding through such a frame (found while writing the sampler's stack
+  walker; no crash was traced to it). How: the parent is unwound with the same pc (past its prologue), as Windows / Wine do.
+  Old: `PELOAD_UNWIND_CHAIN_OLD=1`.
 - **Unwind across the guest stack switch** — `RtlUnwindEx`. Why: `__CxxFrameHandler3` runs on the host stack, so the
   context it passes has a host RSP that cannot unwind to the guest-stack target. How: unwind from the guest-stack
   exception context stashed by i_RaiseException. (10-11 ce8de8f)
@@ -528,6 +569,9 @@ patch variants by signature (section 16; shim/docs/patch-addresses.md).
 
 ## 5. Sync objects and timers
 
+- **is_sync reads only live heap blocks** (2026-11-06) — peload.c `is_sync`. Why: any handle value >= 0x100000 was read as a
+  SyncObj; client 0.10.0's runtime hands out handles like 0x400000c0, which faulted the read. How: `malloc_size` must say it
+  is a heap block first. Old: `PELOAD_SYNC_UNCHECKED=1`.
 - **Recursive mutexes** (2026-10-20) — `sync_wait`, `i_CreateMutexW`, `i_ReleaseMutex`. Why: a Windows mutex may be taken again by its
   owner; the loader's was a plain lock, and MCC's Miles Sound System (halo2's mss64.dll) takes its mutex in AIL_open_digital_driver
   and again in AIL_set_preference -- halo2's engine thread blocked on itself. How: depth in the object's maxc, ReleaseMutex frees
@@ -638,6 +682,10 @@ patch variants by signature (section 16; shim/docs/patch-addresses.md).
 
 ## 7. Windows, input, focus (Cocoa, Raw Input, XInput)
 
+- **GetRawInputDeviceList, SetPropW / GetPropW / RemovePropW** (2026-11-06) — wininput.c `wi_GetRawInputDeviceList`, peload.c
+  `i_SetPropW` / `i_GetPropW` / `i_RemovePropW`. Why: logging stubs that client 0.10.0 calls (the device list returned 0 with
+  the count unset; SetPropW "failed", GetPropW always NULL). How: the two raw devices WM_INPUT reports (mouse 0x4D53, keyboard
+  0x4B42); a 256-entry (window, name or atom) -> handle table.
 - **F1 releases the mouse in every game but Reclaimer** (2026-10-21) — wininput.c `wi_translate` (F1), `wi_raw_mouse`. Why: F1 only
   worked for re-centring games (Reach Renaissance); Project Gravemind holds the mouse with ClipCursor and reads Raw Input, so F1
   went to the game and the pointer could not be got back. How: F1 applies whenever the pointer is captured and the game is not h3
@@ -860,6 +908,11 @@ patch variants by signature (section 16; shim/docs/patch-addresses.md).
 
 ## 9. Audio (XAudio2, WASAPI)
 
+- **IAudioClient::SetEventHandle refuses handles that are not our events** (2026-11-06) — wasapi.c `wac_SetEventHandle`.
+  Why: client 0.10.0's dedicated server registered 0x400000c0 (from its runtime's own handle numbering) for its engine's audio
+  stream; Start and the buffer callback signalled it and the server's worker crashed 2 s after starting (wac_Start+0x119).
+  How: E_INVALIDARG, as Windows answers an invalid handle (the game client's streams get real events and play; the trace
+  `PELOAD_TRACE_WASAPI=1` logs every handle).
 - **DirectSound 8 on CoreAudio, for Halo 2** (2026-10-21) — shim/src/dsound.c (`DS_HANDLE`: LoadLibrary("dsound.dll") / GetProcAddress
   in peload.c). Why: Project Gravemind's sound ran ~0.2 s behind the picture. MCC's Miles Sound System uses DirectSound when it can
   load it and waveOut otherwise; on waveOut it keeps five 50 ms buffers, four always queued (the `[winmm] ... 4 queued` lines), so
@@ -941,6 +994,12 @@ patch variants by signature (section 16; shim/docs/patch-addresses.md).
 
 ## 10. D3D11 / DXGI objects
 
+- **DXGI factory through IDXGIFactory7** (2026-11-06) — peload.c `g_dxgifactory_vtbl`, `dxgi_EnumAdapterByGpuPreference`,
+  `dxgi_EnumAdapterByLuid`, `dxgi_EnumWarpAdapter`, `dxgi_CheckFeatureSupport`, `com_zero`. Why: client 0.10.0 QueryInterfaces
+  the factory for IDXGIFactory6 (com_QI says yes to everything) and calls EnumAdapterByGpuPreference (slot 29) -- past the end
+  of the 22-slot table, it called whatever pointer followed (NULL): crash at RIP 0 right after "[mods] ...". How: the table
+  runs to slot 31; the new enumerations answer like EnumAdapters1, no adapter by LUID, no WARP adapter, no tearing support,
+  creation flags 0.
 - **A 2D texture's IDXGISurface is a real interface** (2026-10-21) — `obj_QI` -> `dxsurf_qi`, `DxSurf` / `g_dxsurf_vtbl` (peload.c),
   `swap_GetBuffer`, D3DObj `dxsurf`. Why: QueryInterface answered every IID with the texture itself, so IDXGISurface::GetDesc
   (slot 8) ran ID3D11Resource::SetEvictionPriority and the caller read its own uninitialised memory as the size. Project
@@ -1382,15 +1441,6 @@ oracle. Fixes below apply to both unless noted.
   stalls while loading) the present thread fell back to the in-process blit, which has no frame of its own in helper
   mode. How: re-present the helper's last IOSurface with the layered loading screens on top (`glh_pq_acquire` stale).
   Old: `PELOAD_GLH_PQ_FALLBACK=1`. (10-17 335a1fb)
-- **GL helper: the window showed ~27 fps whatever the engine rendered** (2026-11-06) — peload.c `present_thread_fn`. Why: the
-  loop's 33 ms nanosleep is skipped only once `g_pq_seq` runs, and in helper mode `pq_publish` hands every frame to
-  `glh_pq_publish` and returns before `g_pq_seq++`, so it stayed 0 for the whole session: the present thread waited for a
-  helper frame in `glh_pq_acquire` (up to 50 ms, usleep(250) polling), showed it, then slept another 33 ms. Invisible in the
-  title, which shows the engine's Present rate (every helper-mode number in PERF-PLAN.md is engine fps, not shown fps).
-  How: `g_glh_on` also counts as the queue running; the acquire wait is the only pacing. Measured (M4 Pro, 5120x1440 at
-  120 Hz, client v0.9.23, PELOAD_MAX_FPS=60, Guardian): before, engine 60.0 / shown 27.0 fps, every gap between shown
-  frames 25-42 ms, `sample` had shim-present in that nanosleep 86 of 90 times; after, engine 60.0 / shown 59.6 fps, 93% of
-  gaps 12-21 ms, shim-present in glh_pq_acquire's usleep. Menu after: engine 58-60, shown 58.7-60.1. No switch.
 
 - **GL helper wake / wait on macOS before 14.4** — Why: `os_sync_wait_on_address` / `os_sync_wake_by_address_any` (the
   ring's cross-process sleep) exist only from macOS 14.4, and the binaries were built for macOS 26 (the build machine), so
@@ -1421,6 +1471,33 @@ oracle. Fixes below apply to both unless noted.
   and every map load recompiled byte-identical kernels (+18-27 MB a minute over map changes). How: trimmed to the
   program, compiled once per bytecode on the canon; duplicates run it and are freed when released. (10-18 80381f4) No
   duplicate freeing under `PELOAD_AB=csgpu` (10-18 410a6ee).
+- **CPU writes wait for queued kernels that read the resource live** (2026-10-25; found by review while hunting the
+  HugeGrass "giant garbage triangle") — peload.c `cs_wait_write`, D3DObj `cs_readers` (counted up when a job is queued, down
+  when it finishes), used by `ctxi_Map` (write maps), `ctxi_UpdateSubresource`, the copies' destinations, ClearUAV and
+  d3dsubmit.c SQ_COMMIT. Why: before the CPU side writes a resource it waited (`cs_wait_res`) for queued kernels that WRITE it,
+  not for those that READ it live (a buffer a pending kernel writes, textures, inputs past the 48 snapshots / 8 MB): Unmap's new
+  block swapped in by SQ_COMMIT -- the old block recycled for the next Map --, an update, a copy or a clear could land while a
+  reading kernel was still queued or running, which then read the next frame's data or a recycled block. How: such writes wait
+  for the readers too, and each time it happens a `[cs-cpu] <write> of a resource ... that N queued kernel(s) still read` line
+  counts it. Not the artifact's cause as far as measured: 0 such writes in a 180 s HugeGrass match.
+  PELOAD_CS_READWAIT=0 = wait for writers only, as before (still counted).
+- **Particle dispatches on disjoint slices of the shared pool run side by side** (2026-10-25; user: "start with cutting queued
+  frames and the particle-chain wait") — peload.c `csq_range_predict` / `csq_range_after` / `csq_conflict` (CsQJob plo/phi),
+  dxbc_cpu.c CsCtx `track` (u0 byte ranges a dispatch read / wrote) and CsProg `rr_*`; PELOAD_CS_DEPLOG=<n> prints `[csdep]` /
+  `[csrange]` lines (dependencies, actual ranges, constant buffers). Why: halo3's particle update kernel runs once per particle
+  system (one 64-thread group) and every dispatch writes the same 2.2 MB pool buffer, so the whole-resource rule chained
+  ~200 dispatches of ~80 us a frame; in a 100-player HugeGrass fight the GL submission thread waited ~40% of its time for the
+  chain's end while the compute workers idled 80%. Each dispatch touches only elements [cb3.x, cb3.y) of the pool. How: per
+  program the rule is learned from its first 64 dispatches (tracked accesses; a constant-buffer dword pair {first, end} in the
+  first 16 bytes of a CB survives if every access starts exactly at `first` and stays below `end`; the tightest survivor
+  wins), then u0 conflicts compare slices; every dispatch stays tracked and an access outside its slice turns the rule off
+  for that program for good (`[cs-range] ... outside its predicted ...`; the first, looser learning picked a coincidental pair
+  that a later dispatch broke -- caught). In-match A/B (PELOAD_AB=csrange:20, Tour Guide's HugeGrass, ~98 players, ~8,000
+  draws, tools/ab-phases.py): particle-heavy phases 24.2 -> 32.5, 27.9 -> 33.8, 31.3 -> 34.2 fps with the GL thread's compute
+  waits 804 -> 68, 571 -> 112, 353 -> 124 ms per [submit] line; light phases unchanged. PELOAD_CS_RANGE=0 = whole-resource
+  ordering, as before.
+- **A finished job that makes one job ready runs it on the same worker** (`ab_csnext`, PELOAD_CS_WAKEALL=1 = wake a worker as
+  before): saves a thread wake per hop of a dependency chain; A/B neutral in a 128-player match (167 vs 170 ms, same fps).
 - Performance work (async workers, SIMT, input snapshots): section 19.
 
 ## 16. Client exe patches and hooks
@@ -1875,6 +1952,36 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   Not yet seen live (the stale HugeGrass copy was updated by hand: the server's own copy had updated itself to 1.0.75, the
   client's was 1.0.3; DepotDownloader fetched 36 MB). (10-19)
 
+- **Graphics quality set directly, not through the client's menu** (2026-10-25; user: "instead of navigating the menu system to
+  apply the graphic setting it should just call the function directly in the http status") — stats.c `st_qual_install`
+  (signature lists g_sig_quality_preset / g_sig_quality_apply; re-tools/patchscan.py point "quality"), `st_qual_now`, do=quality,
+  the snapshot's overlay.quality; stats_page.html Quality (+ Auto). Why: the page clicked through Esc > Settings > Advanced
+  graphics > preset arrows > Apply > Back > Resume (several seconds, the menu over the game, fragile). How: the client's
+  apply-settings function (0.9.23 exe+0x91bb70) packs the one-view levels (Settings +0x1d3..+0x1d9) into a u64 it swaps into a
+  global (exe+0x2b19e90) that its detour on halo3's detail function (exe+0x8662d0) reads whenever halo3 asks; the page now calls
+  the client's own preset table (exe+0x181a0d0, preset -> the 7 levels; registers only, matched whole, identical 0.9.17-0.9.23)
+  and swaps the result into that global (game-options.md "How the client applies it"). Refused before the client applied its
+  settings once. Live HugeGrass match: low / ultra / medium / high / ultra each changed halo3's "Graphics detail for 1 view(s)"
+  within 0.5 s. Live only: not saved to settings.json, the client's menu still shows its last Apply. PELOAD_QUALITY_MENU=1 = the
+  menu clicks (also used when the globals aren't found).
+- **Map: vehicles as their own outlines, spawn bays, names, no weapons on players** (2026-10-26; user: "vehicles, and
+  vehicle spawn points weapons items don't have good visualizations ... the vehicle itself needs to look different from its
+  spawn point, and they need to be tracked independently. we DO want to see when players are in the vehicles ... do NOT
+  try to visualize weapons on players") — hitbox.c `hb_vshape`; stats.c vehicles snapshot, `st_vshape_*`, `/vshapes.json`,
+  `deployed`; stats_page.html `drawVehicle`, `placeTags`, `drawSpawns`. Why: a live vehicle was a white square; one away
+  from its spawn was drawn with the same orange square as a spawn point; turrets on a Warthog were listed as vehicles at
+  their parent-relative position (near the map's origin); spawn and item markers had no names on the map; carried items
+  were drawn beside their carrier. How: the snapshot lists only vehicles without a parent, with `id` (object handle), `def`,
+  `yaw`, `dead`, and each seated player's `in` = the outermost vehicle (a gunner's turret -> its Warthog); per definition the
+  loader makes a top-down outline from the collision model posed by the first live instance's node matrices (per region and
+  node the convex hull, in the vehicle's frame) once per map, served as /vshapes.json. The page draws each vehicle as that
+  outline, turned to its heading, at true size or at least 22 px long (14 in the 560 px panel), a white chevron at its front: grey when empty, the
+  occupants' team colour when manned (seat dots, names in its label), dark and faded when destroyed; vehicle spawn points
+  are dashed orange bays named "<vehicle> spawn" while empty; every weapon / item marker gets its name (a greedy placer:
+  8 spots per tag, highest priority first, left out when there is no room); carried items are not drawn; deployed
+  equipment (left out of the spawn tracker) is listed and drawn as a dashed cyan ring with its name. Checked on local
+  Valhalla: Warthog, Mongoose, Banshee, Wraith and the machine-gun turret outlines are recognisable.
+
 ## 19. Performance
 
 Numbers are from the commit messages; PERF-PLAN.md has the measurements. Compare only inside one match
@@ -2009,12 +2116,167 @@ Numbers are from the commit messages; PERF-PLAN.md has the measurements. Compare
   other players' voice chat on a public server -- still played on the Mac. How: PELOAD_WASAPI_MUTE=1 plays every WASAPI
   stream as silence (consumed as usual; a clip recording still gets it); quiet-run.sh always sets it and PELOAD_AUDIO_MUTE=1,
   dedicated.sh sets it for its workers. Unset (play.sh) = sound as before.
+- **PELOAD_RB_CHECK=1: the asynchronous luminance readback checked byte for byte** (2026-10-25; hunting the HugeGrass "washed
+  out" report) — peload.c `rb_async` / `rb_complete` (D3DObj `rbchk`). Each asynchronous readback is also read synchronously at
+  the copy and the two are compared when the CPU copy is filled (`[rbcheck]` lines). HugeGrass, 100 s: 6,000 matched, 0 differed
+  (log luminance -3.6 .. -12.9): the client's auto exposure gets what it got before the change.
 - **PELOAD_AB=new** (2026-10-25; user: "benchmarks must be vs something meaningful: join the largest game you can, then
   back down to smaller ones") — peload.c `ab_new`, d3dsubmit.c sub_switch feature 13: flips every engine-thread change of the
   day together (metadata cache, data-opens-only map notes, the QPC leaf, the matrix skip, the engine thread's QoS) so one
   public match measures before vs after phase by phase.
 
+- **Frame latency measured: PELOAD_LAG_LOG=1** (2026-10-25; user: "the graphic UI feels sluggish and floaty") — d3dsubmit.c
+  `sub_present` / SQ_PRESENT (`g_lag_req` -> `g_lag_t`), glh_client.c `glh_pq_publish`, peload.c `pq_present_wait_glh`. Every
+  5 s: `[lag] present -> GPU done` (halo3's render thread presenting a frame -> the helper's fence for that frame's blit; hidden
+  windows too) and `[lag] present -> window` (-> the present thread showing it; frames in flight render->GL and GL->GPU). The
+  timestamps are keyed by d3dgl_present's frame number: the first version keyed them by the submission thread's own present
+  count, which only starts when that thread switches on, and paired frames ~110 apart (it read "2.8 s"). HugeGrass, 17 players,
+  hidden: 70-95 ms at 26-40 fps -- about 2.5-3 frames queued between the game and the GPU.
+- **HugeGrass +45%: the GL helper no longer waits for the GPU at every readback** (2026-10-25; found with `sample` of the
+  helper during a latency run: 88.6% of its main thread in iokit_user_client_trap <- GLDBufferRec::restoreData <-
+  gleSynchronizeBufferOnCurrentDevices <- glMapBufferRange) — glhelper.c `rb_poll` / `rb_finish` (GLH_X_READBACK), glh_shm.h
+  `rb_sync` (GLH_VERSION 7), glh_client.c `ab_rbdefer` (d3dsubmit.c A/B feature 19). Why: the helper mapped a readback's pixel
+  buffer as soon as the command arrived -- right after the ReadPixels into it -- and the map waits for the GPU to finish
+  everything queued before it. The overlay's depth readback asked two frames late, so it never mattered; the client's
+  per-frame luminance readback (this morning's rb_async) asks at once, so every frame the helper idled until the GPU caught
+  up (its "busy 101%" was mostly that wait). How: a fence after the ReadPixels; the buffer is mapped once the fence has
+  signalled (polled beside the frame and query fences, in ticket order). In-match A/B (PELOAD_AB=rbdefer:20, HugeGrass, 12
+  phases): 32.9-35.6 vs 23.1-24.3 fps, input -> screen 108 vs 146 ms (GPU done 82 vs 118). PELOAD_GLH_RB_SYNC=1 = map at once.
+- **The window showed at most ~27 new frames a second with the GL helper (the default since 2026-10-17)** (2026-10-25; user: "the
+  graphic UI feels sluggish and floaty"; found with the new window-fps column of the per-second log and PELOAD_PRESENT_PROF=1)
+  — peload.c `pq_started` (used by present_thread_fn), `ab_presleep` (d3dsubmit.c A/B feature 18). Why: the present thread
+  sleeps 33 ms per loop until frames flow through the present queue ("frame-driven once the queue runs"), and it looked only at
+  the in-process queue's counter g_pq_seq -- which never moves in helper mode, where frames come through the helper's
+  pq_seq. So after every frame it slept 33 ms: menu engine 320 fps, window 26 new frames/s; local Valhalla 194 fps, window 27;
+  the title showed the engine's rate, not what the player saw. How: pq_started() also reads the helper's counter.
+  Measured with the in-match A/B (PELOAD_AB=presleep:20) and the latency probe: Valhalla 194 fps -- window 27 -> 90-110 new
+  frames a second (every refresh of the 60 Hz display gets a new frame), input -> screen 66 -> 60 ms; HugeGrass (6,200 draws)
+  -- engine 18.4-22.2 -> 24.2-26.0 fps in comparable phases (+25-35%: the helper's frames were consumed late), input -> screen
+  147 -> 131 ms, GPU done -> window +21 -> +1 ms. PELOAD_PRESENT_SLEEP=1 = the old sleep. PELOAD_PRESENT_PROF=1 prints
+  `[presentprof]` every 5 s: new frames / presents per second, time waiting for a frame / drawing / flushing. The same bug
+  was found and fixed independently in PR #2 (willfell/present-sleep-glh, merged into main 2026-11-06: `g_glh_on` counted as
+  the queue running); on merging main the present thread kept `pq_started()` (it waits for the helper's first frame and has
+  the switch). That PR's measurement (M4 Pro, 5120x1440 at 120 Hz, client v0.9.23, PELOAD_MAX_FPS=60, Guardian): before,
+  engine 60.0 / shown 27.0 fps, every gap between shown frames 25-42 ms, `sample` had shim-present in that nanosleep 86 of 90
+  times; after, engine 60.0 / shown 59.6 fps, 93% of gaps 12-21 ms. Menu after: engine 58-60, shown 58.7-60.1.
+- **Match loads 22% faster and the first minutes after joining stop stuttering: halo3's file hashing runs on its own thread**
+  (2026-10-25; found with shim/tools/hitch-sample.sh -- `sample` taken during a 0-fps second after joining a ~100-player
+  HugeGrass game: halo3's engine thread ~24% in CC_SHA1_Update) — peload.c `bha_queue` / `bha_worker` (thread shim-hash) /
+  `bha_drain` (BCryptFinishHash and BCryptDestroyHash wait for it), BHash `pend`; PELOAD_BCRYPT_LOG=1 `[bcrypt]` (bytes per 5 s,
+  time in the calls, top callers), PELOAD_BCRYPT_CHECK=1 (each digest also computed synchronously and compared). Why: halo3's
+  streaming file reader (halo3+0x205ebc) feeds every chunk it reads into a running SHA-1 while its flag (+0xb2) is set -- the
+  whole of a file it streams, the HugeGrass mod's 2.1 GB map included: 400-1000 MB every 5 s during loading and the first
+  minutes of a match, 0.25-0.95 s of the calling thread's time per 5 s at Rosetta's ~770 MB/s (natively 3.4 GB/s, but Rosetta
+  exposes no x86 SHA instructions: SSE4.2, AES and PCLMULQDQ only). How: a chunk >= 4 KB is copied into a queue that the worker
+  hashes in order and the call returns (at most 64 MB queued). Check: 9,800 digests matched, 0 differed. Measured on the
+  127-slot HugeGrass server: time in the hash calls 250-945 -> 27-42 ms per 5 s, match loaded in 62.3 -> 48.8 s, seconds with
+  a frame over 100 ms in the first / second minute 24 / 30 -> 1 / 0. PELOAD_BCRYPT_SYNC=1 = hash in the call, as before.
+- **Late camera update: the newest mouse movement applied to each frame's camera at its upload** (2026-10-25; user: "is there
+  anything novel we can do to improve hugegrass? 239ms of input lag is huge") — new shim/src/latch.c (`latch_src` called by
+  d3dgl_bind_ubo / d3dgl_ubo_batch, `latch_overlay_vp` at the overlay's camera capture, `latch_received` in wi_raw_mouse; D3DObj
+  `latch_f`; d3dsubmit.c A/B feature 22 `latch`); play.sh sets PELOAD_LATCH=1. Why: in big games 40-110 ms pass between halo3
+  building a frame and its constant buffers going to the GPU; the turn the player made meanwhile shows a frame or more later.
+  How: the idea of VR late latching / Reflex 2's Frame Warp on the camera matrix (so HUD and first-person weapon stay): a
+  learner fits degrees per mouse count and how old a frame's input is at upload (HugeGrass: -0.0217 deg/count, 50-60 ms,
+  R^2 0.82-0.87), a predictive angle follows the mouse with an offset pulled toward the engine's camera, and every constant
+  buffer holding the world camera (hb_is_world_camera at its bound offset) is rotated about the camera position in its GPU
+  copy only; none in a vehicle or without a live local player; clamped to 12 degrees. Two first designs failed and are
+  described in the file (snapshots of the counts the game read: R^2 0.25-0.6; a fixed-window correction: the view reversed
+  direction 11.7 times a second); a third bug -- the overlay's capture took the frame's camera before the patched upload, so
+  the probe never saw the patch -- was found by an A/B that showed nothing. In-match A/B (PELOAD_AB=latch:20, ~97-player
+  HugeGrass, ~42 fps): input -> screen 120 -> 84 ms; yaw direction reversals 0.8 -> 1.2-1.3 a second (a little extra
+  wobble). Valhalla ~230 fps: 52-62 -> 42-49 ms. Unpatched matrices facing the camera's way (PELOAD_LATCH_SKYCHECK=1) were
+  none camera matrices: the sky shares the world camera. Mouse only. PELOAD_LATCH=0 = off (no learning either). Stats page:
+  a "late camera" checkbox beside the frame-rate line (POST do=latch&on=0|1: applied vs learning only, to feel the difference in
+  a running game) with what it learned; snapshot "latch" (latch_json). TURNED OFF the same day (play.sh no longer sets it, the
+  page toggle removed, no learning unless PELOAD_LATCH=1): it is mouse only, and the user plays with a controller.
+- **Input -> screen latency measured end to end, and a per-second performance log** (2026-10-25; user: "the window adds its own
+  display delay on top of these numbers -- THIS is what I need you to calculate, cuz that feel is all that will matter to the
+  player"; "make sure you have a running log of the FPS ... compared to objects on the screen") — new shim/src/latency.c
+  (hooks lat_cam in hitbox.c hb_capture_view, lat_present in d3dsubmit.c sub_present, lat_gpu in glh_pq_publish, lat_win in
+  present_thread_fn after the window flush, lat_input in wininput.c wi_raw_mouse and XInputGetState; perf_tick on the stats
+  thread). How: every engine frame gets its camera's forward vector and the times halo3 presented it, the GPU finished it and
+  the window got it; a look input (mouse delta, or the right stick leaving its dead zone) after 250 ms of none, with the camera
+  still, is followed to the first frame whose camera turned, and each stage is timed from the input. The display step is a
+  model: the next refresh after the window flush (CVDisplayLink) + one refresh for the window server's composite.
+  PELOAD_LATPROBE=<secs> (test clients) sends a mouse delta through the raw-input path every <secs>. Output: `[latency]` per
+  input, `[perf]` every 10 s, the snapshot's "perf", and ~/Library/Application Support/ReclaimerMac/perf/<date>_<time>_<pid>.csv
+  every second (engine and window fps, frame-time median / 95% / worst, draws, objects by type and in the camera's view,
+  players, map, quality, stage lags, input -> screen; 30 newest kept). shim/tools/latency-summary.py <log> = the stage medians;
+  shim/tools/titleshot.sh = a picture of the client's window with its title bar (fps / draws / frame time), via
+  shim/tools/winid.c + `screencapture -l`. First numbers, HugeGrass hangar view, 22 fps, 6,400 draws, 60 Hz display, 76
+  probed inputs: input -> halo3 presents the turned frame 53 ms, -> GPU done 124 (+71), -> window 129, -> screen ~154 ms
+  (10% 128, 90% 189). PELOAD_LATENCY=0 / PELOAD_PERF_LOG=0 = off. GPU-done times are the helper's own (glhelper.c pq_poll writes
+  each frame's number and fence time into glh_shm.h done_fno / done_t, GLH_VERSION 8; at first the loader stamped them when it
+  next looked, up to a frame late, which made the window step negative). The stats page's header has a second line with the
+  same numbers (snapshot "perf"). After the day's fixes: local Valhalla 207 fps 48 ms (input -> present 18, GPU +5, window +1,
+  screen +24); The Pit FFA, 41 players, ~104 fps: 54 ms; HugeGrass hangar ~36 fps: ~104 ms.
+- **Integer vertex formats read as their values, not as 4 floats; the false "format 12 not translated" warning** (2026-10-25;
+  user: "seems like something to fix") — peload.c `d3dgl_attrib_fmt` (returns 1 for an integer format, using
+  `d3dgl_attrib_ifmt`'s size and type, read as float(n)), the attribute loop (warns once per VS / format only when an integer
+  format really feeds a FLOAT shader input: `vertex input <sem> ... feeds a float input of VS <hash>`). Why: integer formats
+  fell through to "4 floats" (16 bytes, garbage values) and logged "vertex attribute format 12 not translated" before the
+  loop switched integer VS inputs to glVertexAttribIPointer -- which is what every R16G16B16A16_UINT input in HugeGrass is
+  (no mismatch line in a match), so it was a false alarm there; a float input fed an integer format now gets the values.
+  PELOAD_D3DGL_INTFMT_FLOAT4=1 = 4 floats, as before.
+- **One frame on the GPU instead of two: ~35 ms less latency** (2026-10-25; user: "the graphic UI feels sluggish and floaty")
+  — glh_client.c `glh_pq_publish` (`g_gpu_frames`, `ab_gpuf`; d3dsubmit.c A/B feature 17). Why: the GL thread could run 2
+  presented frames ahead of the frames the GPU had finished, on top of the render thread's 1 frame of lead over the GL thread:
+  ~2.5-3 frames between the game presenting a frame and the GPU finishing it (70-90 ms at 26-40 fps on HugeGrass). How: 1 frame
+  (the GPU draws one while the next is encoded). In-match A/B, HugeGrass, 18 players, phases of 20 s (PELOAD_AB=gpuf:20):
+  present -> GPU done 70-90 ms with 2, 36-50 ms with 1; fps in adjacent comparable phases 36.1 / 38.2 (2) vs 37.9 (1).
+  PELOAD_GPU_FRAMES=2 = as before (1..4).
+- **PELOAD_GLH_GPUPROF=1** — glhelper.c `gp_switch` / `gp_poll`: GPU time (GL_TIME_ELAPSED queries) per framebuffer the helper
+  draws into, the present copy and readbacks, reported every 5 s: where the GPU's time goes when a game is GPU-bound.- **halo3's local-user lookups answered once per frame** (2026-10-25) — peload.c `lu_memo` / `lucache_install` (stubs at
+  halo3+0xfbb94 and 0xfbc04), `hb_frame_hook`, `ab_lucache` (d3dsubmit.c A/B feature 23). Why: the engine thread's call stacks
+  (`PELOAD_SAMPLE_STACK`, public Hugegrass, ~126 players) put ~9% of it under each of two questions halo3 asks for EVERY player,
+  twice a frame (0xff054 -> 0xfbda8, a player's status, from the render preparation and the players update), with answers that
+  are the same for all of them: (1) 0xfbb94 "how many local users": it calls 0x10e0b4(i) per user slot and 0x10e0b4 builds the
+  whole user list again per call; the Reclaimer client raises the slot count from 8 to 64 after load (`mov edi,8` -> 64) and
+  replaces 0x10e0b4 with a version that also fills and frees two heap vectors: ~16,000 list builds a frame. (2) 0xfbc04 "which
+  player is local": it walks the player list asking 0x10e060(player) (client-hooked) until the local player answers, so its
+  cost depends on where our player sits in the server's list -- late (a client that joined a full server) = ~32,000 hook calls
+  a frame; that is why the same 126-player server ran at ~27 ms a frame in one match and 76-97 ms in others. How: each entry
+  jumps (`jmp [rip+0]`, no register) to a stub that returns the answer computed earlier in the same engine frame (the main-loop
+  frame hook advances one shared frame number) and otherwise runs the original -- the client-patched body as it is in memory --
+  and caches it. Hit path writes only eax and flags, miss path also ecx (each original writes both; halo3 is whole-program
+  optimised, section 17); the functions' bytes are checked at load; installed only with the frame hook. `PELOAD_LUCACHE_CHECK=1`
+  reruns each original at every frame start and compares: local Valhalla 1,200 frames, 0 differences (answers 64 and the local
+  player's handle). Result so far: the profile's ~9% under 0xfbb94 drops to 0.0% (stacks), but four visible in-match A/Bs on
+  public Hugegrass (20 s phases, engine thread CPU ms per frame) showed no measurable difference (e.g. 32-39 ms on and off with
+  our player in slot 53) -- the lookups' cost varies with the match; kept on since it is verified correct. Old:
+  `PELOAD_NO_LUCACHE=1`; in-match A/B `PELOAD_AB=lucache:<secs>`.
+- **A/B log: the engine thread's CPU time per frame** (2026-10-25) — d3dsubmit.c `sub_switch`, peload.c `eng_cpu_s`. Why: big
+  Hugegrass scenes are often limited by the GL / GPU side (5,000-9,000 draws), which hides an engine-thread saving from the
+  frame rate. How: each `[ab]` phase also prints halo3's engine thread's user + system CPU time divided by the frames
+  presented ("engine X ms/frame", totals per side).
+- **GLSL varying scanners search one line, not the rest of the shader** (2026-10-25) — peload.c `d3dgl_line_find` (used by
+  `d3dgl_rename_varyings`, `d3dgl_dedup_varyings`, `d3dgl_iface_mask`, `d3dgl_relocate`). Why: each line's `strstr` ran to the
+  END of the source and the hit was then only used if it fell inside the line: O(lines x length) per pass, several passes per
+  shader pair; it was most of the pre-linker's loader-side time (`[sample]` stacks: d3dgl_prelink_tick -> d3dgl_monoprog ->
+  d3dgl_iface_mask -> strstr, ~10% of halo3's engine thread at the menu) and part of every first-use link in a match. How:
+  memmem within the line (same results: every caller only used matches inside the line). Menu, 730 pairs prelinked, GL helper:
+  18.2 -> 15.2 ms per pair (in-process GL 30.7 -> 22.9). Old: `PELOAD_D3DGL_SCAN_OLD=1`.
+
 ## 20. Scripts and RE tools
+
+- **Sampler call stacks, a dump with every function, no lost threads** (2026-10-25) — peload.c `sampler_thread`, `smp_walk`,
+  `smp_epilog`, `smp_chain_root`; shim/tools/sample-dump.py. Why: (1) the in-process sampler (`PELOAD_SAMPLE=<us>`) only saw
+  the instruction pointer, so halo3's flat profile (top 45 functions ~26% of the engine thread) said nothing about which
+  engine systems cost the time; (2) `PELOAD_SAMPLE_DUMP` was written after the 10 s report, which clears each thread's top 8
+  entries as it prints them -- the dump lacked exactly the hottest functions; (3) its thread table had 96 records and never
+  freed one: a menu-runtime client fills it with short-lived threads before halo3's match threads start, and those were then
+  never sampled; (4) a fragment with chained unwind info was keyed by its own start (halo3+0x449693 instead of 0x449650).
+  How: `PELOAD_SAMPLE_STACK=<thread name part>` (1 = halo3's engine thread guest-0x18000a120) walks that thread's stack at each
+  sample while it is suspended: guest frames by their .pdata unwind codes (chained -> parent; an epilogue on the top frame
+  decoded like Windows does), host code on top by the rbp chain to the first guest return address (its frames are kept: a
+  loader function under halo3 shows by name; a frameless leaf's caller from [rsp] when a call instruction ends there); reads
+  only between the sample's rsp and the thread's pthread stack top, a fault ends the walk (`t_dump_jb`), no dladdr while
+  suspended. Distinct stacks are counted (16,384 per 10 s) and dumped as `S<tab>thread<tab>samples<tab>outer;...;inner`;
+  `sample-dump.py <dump> [--dll halo3.dll] [--tree] [--focus halo3+0x..]` prints self, inclusive and the call tree (--dll names
+  leaf functions without .pdata by their start). The dump is written before the report; records of threads not listed for 200
+  passes are reused (256 records); names and stack ranges are re-read every 10 s. Each interval starts with a `T` line (seconds
+  up, seconds since gameplay started or -1): `--match [SECS]` keeps gameplay only. Old keys: `PELOAD_SAMPLE_NOCHAIN=1`.
 
 - **PELOAD_BP=<dll>+<rva>** (2026-10-21) — `bp_install_mod` (load_guest, before the DLL's DllMain), `bp_plant`: the software
   breakpoints also inside guest DLLs (`mss64+e700`, the DLL's name without extension, exact), up to 8 in all; a hit names its module
@@ -2173,6 +2435,15 @@ Numbers are from the commit messages; PERF-PLAN.md has the measurements. Compare
   "external_launch_individual_state_timeout"). Checked against a local `rr-master` + a windowless host: the guest loads the
   host's Slayer match with both players on the scoreboard; then a public Firefight game on Beachhead (joined through the public
   master's rendezvous, played with its players). `RR_NAME=<name>` sets the in-game name. (10-20, reach-port)
+
+- **shim/tools/cowtest.c** (2026-10-25) — is the loader's copy-on-write guest copy (mach_vm_copy) a real copy under Rosetta
+  when used like halo3's game-state copies (16 MB, the source written after each copy, the copy read on another thread,
+  copies of copies in a ring)? 1,500 + 900 rounds: 0 mismatches.
+- **shim/tools/aotbench/** (2026-10-25) — Rosetta ahead-of-time vs run-time translation of the same x86-64 code, plus the
+  dylib route and a detour patch into it (PERF-PLAN.md "Not the bottleneck": equal within noise; not pursued).
+  **shim/tools/sample-binaries.py** — a thread's samples by the image they end in (translated guest code "Rosetta JIT",
+  "Rosetta Runtime Routines", the loader, system libraries). **shim/tools/ab-phases.py** — fps and [submit] waits per
+  PELOAD_AB phase. **shim/tools/hitch-sample.sh** — `sample` a client when a second drops below N fps.
 
 ## 21. Superseded workarounds (kept for history; most switches still exist)
 
