@@ -150,6 +150,14 @@ text hook), page **mutes** (the app's own set_muted and mute list, nnet.c voice_
 forensic archive's "who talked when", from the app's `[voice] active ... heard 0x<id>: N frames ... rms` report every ~2 s;
 timing only), /forensics (forensic.c unchanged otherwise).
 
+Test runs can drive the app: `--ui-script <file>` (menu automation: `wait 12`, `press SERVER BROWSER`, `trigger right 1`
+(menus only), `stick`, `burst`, ...; a wrong row name prints the rows) and `--request-at SECONDS JSON` (the engine's test
+requests: top level `gameplay` / `networking` / `appearance` / `forge` / `campaign` / `hud` / `theater` / `capacity` / `maps` /
+`editor` / `at_tick`; a wrong name lists the variants, a missing field is named -- e.g. `{"campaign":{"hold_trigger":{"seconds":6}}}`
+fires the local player's weapon in a multiplayer test match too, `{"campaign":{"fire_pulses":{"count":N,...}}}`). The test
+profile refuses public servers itself ("[net] test profile: game connection at ... left alone"). Live bullet check:
+`bash shim/tools/native-fire-test.sh` (object_delete bullets, shots, tracer pixels in overlay captures: PASS 2026-11-07).
+
 The 0.10 server list: shim/tools/servers10.py (server-status.md "Client 0.10+": one UDP datagram per server, no QUIC).
 
 Not yet: voice AUDIO in the forensic archive (the native voice packets are not seen: their receive function is the app's own

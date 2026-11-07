@@ -318,6 +318,8 @@ visible only). Mutes = the app's set_muted (0.10.0 0x102154ef0, prologue-checked
 0.10 server list: `python3 shim/tools/servers10.py [count|--json|--names]` (masters' /v3/discovery + ONE UDP datagram per
 server: a6 01 00 <nonce8> padded to 1229 -> a7 <nonce8> JSON; server-status.md "Client 0.10+"). The app's `--ui-script <file>`
 drives its menus (`wait 12`, `press SERVER BROWSER`; a wrong row name prints the rows); NHOOK_UDP_HEX=<n> dumps datagrams.
+`--request-at <s> '{"campaign":{"hold_trigger":{"seconds":6}}}'` fires in a local test match (shim/tools/native-fire-test.sh:
+live tracer / shots check, PASS); the test profile refuses public servers by itself.
 Not yet: forensic voice AUDIO (native voice receive not found), packet log game layer. Test runs: NATIVE_LOG=<scratch file> (the default log is the user's). Offline test:
 shim/tools/nhook-selftest.sh. hitbox.c's .map code lives in shim/src/h3maps.c (shared).
 PORTING A RELEASE: shim/docs/porting.md -- fetch-releases.sh (corpus), client-survey.sh, `re-tools/patchscan.py --diff old new`

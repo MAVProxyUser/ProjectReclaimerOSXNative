@@ -1794,6 +1794,9 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   function, so neither the entry nor its target can be patched the JIT way (signed code; no free page near the image
   either) -- bullets are still not drawn. hook_install now hooks an entry that is a `b` in place (displaced = nop, return =
   the branch target) for JIT-region branches; near_page collects up to 4096 gaps and logs when none works.
+  SOLVED by the text hook below; VERIFIED in a live engine 2026-11-07 (local Guardian test match, the app's own test request
+  {"campaign":{"hold_trigger":{"seconds":6}}}): 10-20 bullets at object_delete, the player's shots counted, tracer lines
+  and impact marks in overlay captures. Repeatable: `bash shim/tools/native-fire-test.sh` (PASS/FAIL).
 - **nhook: hooks on the app's OWN code** (2026-11-07; nhook.c text_hook, stub.S _nh_tp4) — WHY: object_delete (and 916 more
   halo3 functions: NHOOK_LIST_BRANCH_ENTRIES=1 lists them) is the app's own native code in its signed __TEXT; the lifted
   entry is one `b` there. The app is signed ad hoc with no hardened runtime (codesign flags 0x2), and patching its text works:
