@@ -1681,6 +1681,9 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
 
 ## 18. Overlay, stats, forensics, walker, recording (the loader's own tooling)
 
+- **Release bundle: the native app's tooling** (2026-11-07; shim/tools/make-release.sh, README "Project Reclaimer 0.10+") —
+  the tarball also carries shim/build/nhook.dylib (built by shim/native/build.sh), shim/native.sh, profile-native.py and
+  the native / forensics docs; the README's new section says how to use them with the 0.10 app.
 - **nhook: our tooling in the native 0.10 app** (2026-11-06; shim/native/nhook.c + stub.S, shim/native.sh, docs
   shim/docs/native-client.md "Inside the app") — WHY: the native app runs no loader, so none of the loader's halo3 hooks or
   readers exist there. A DYLD_INSERT_LIBRARIES dylib: interposed write()/writev() assemble the app's log lines (it writes a
