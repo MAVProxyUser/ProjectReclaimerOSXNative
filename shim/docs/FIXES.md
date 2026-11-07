@@ -1886,6 +1886,24 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   PELOAD_STATS_IPS=1 shows it)" -- the native page listens on 127.0.0.1 only and has no such switch. HOW: "host" when the local
   session peer is the host, else "client" (in a session, or after a join), else "none"; "server_addr" = the address in the
   app's `[online] joining <ip>:<port>` line. Checked: a local test match says "host".
+- **nhook: exact kills from halo3's game results** (2026-11-07; nstats.c rs_tick, sb_consume, results layout from the [c1] /
+  [capacity] results.* lines) — WHY: the native kill feed was estimated (killer paired with victim from the scoreboard's
+  counts, weapon = the killer's weapon in hand): display_event and chud_messaging_post never run in the app (a census across a
+  death: halo3+0xfd418, the event handler that calls display_event, and 0x2d3f2c ran 0 times -- the app handles events in its
+  own code; the old "display_event" entry hook is on a lifted function nothing calls; display_event is now text-hooked when
+  its entry is a `b`, which it is not in 0.10.0). HOW: halo3's game results, which the app keeps live: per player 0x263 u16
+  statistics at results + 0x6c98 + slot * 0x4c6 (9 kills, 11 deaths, 12 betrayals, 13 suicides; per damage type t from 234 +
+  6t: damage-kills, -deaths, -betrayals, -suicides, -headshots -- names from halo3+0x792c80 / 0x793160, re-tools/h3results.py)
+  and a killer x victim matrix at + 0x2cf98 (128 x 128 x 4 bytes, two u16 counts). Each snapshot: a matrix entry that went up
+  names the pair; which side killed = whose kills / betrayals went up while the other's deaths did (else the orientation the
+  matrix showed before), the killer's damage-kills that went up = the weapon, damage-headshots = a headshot; suicides from 13 +
+  damage-suicides. Exact events carry no "estimated" flag; the scoreboard's pending entries they explain are dropped (it waits
+  1.5 s while results count deaths), a death the scoreboard already reported is not repeated. A client that never gets the
+  results keeps the scoreboard pairing. Checked live: a suicide (11, 13, 235, 237 and versus[0][0] 0 -> 0x00010001) -> one
+  exact "killed themselves" each time; pairs offline: `bash shim/tools/results-feed-test.sh` (the real code, extracted: kill,
+  either matrix orientation, double kill, a trade in one snapshot, betrayal, suicide, headshot, pending-entry handling, new
+  match) -- kills between two players still need a real game (NHOOK_RESULTS_LOG=1 logs every change and decision).
+  NHOOK_NO_RESULTS_FEED=1 = the old estimate only.
 - **0.10 server list: shim/tools/servers10.py** (2026-11-07) — WHY: "there is no reason we should be making a .9 query": the
   0.9 client's `discover` (shim/tools/servers.sh) lists no 0.10 server, the 0.10 Windows exe's `discover` prints nothing under
   the loader, and the Mac app has no list command. HOW: 0.10 asks `/v3/discovery` on its masters and queries each server with

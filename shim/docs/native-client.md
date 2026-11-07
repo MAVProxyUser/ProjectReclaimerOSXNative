@@ -124,7 +124,8 @@ the feed: match start, joins / leaves (the players table), chat / server / notic
 `[chat] line [...]` / `[playlist]` log lines). Verified in a background Guardian match (page with no console errors).
 
 Since 2026-11-07 also: **kills, deaths, assists, betrayals, suicides, score** from halo3's statborg (see "Kills" below), a
-kill feed paired from its counts (estimated weapon), the **Connected list** (halo3's network session; host badge, session
+kill feed paired from its counts (estimated weapon; since the same night EXACT from halo3's game results when the app keeps
+them: killer x victim matrix + per-damage-type kills, FIXES.md "exact kills"), the **Connected list** (halo3's network session; host badge, session
 state, slots = the session's maximum), the **Packets window** (wire layer: every datagram's type, TCP connections; the
 game layer of halo3 message names is not in yet). display_event is hooked and logs its first 200 events raw
 (`[nhook] [event]`) to learn the app's enlarged event layout.
@@ -181,9 +182,11 @@ Not yet: the packet log's game layer (halo3 message names; 0.10's wire protocol 
   0x1db58f deaths = 3 (11), 0x1db5ca suicides = 4 (13), 0x1db635 betrayals = 5 (12), 0x1db171 assists = 6 (10),
   0xfc76f rounds won = 7 (6), 0xfca27 score = 0 (7). Team blocks: +0x400 + team*0x18 (12 i16) in halo3.dll.
 - Game results (halo3+0x2190e40 in halo3.dll; the app moves it: `[c1] game results: 128 slots, ... at`): statistics at
-  +0x1358 (`results.statistics`), 0x263 u16 per player (low 15 bits), the first 0x34 named by the table at
-  halo3+0x792c80 (24-byte rows, name pointer first: re-tools/h3results.py), then medals, then 63 damage types x 6 at
-  index 0xea (halo3+0x124064). Not read by the page (the statborg is the live, replicated one).
+  +0x1358 (`results.statistics`; app +0x6c98), 0x263 u16 per player (low 15 bits; 0x4c6 bytes a player), the first 0x34 named
+  by the table at halo3+0x792c80 (24-byte rows, name pointer first: re-tools/h3results.py), then medals, then 63 damage types
+  x 6 from index 0xea = 234 (damage-kills, -deaths, -betrayals, -suicides, -headshots, ...: halo3+0x793160); then the versus
+  matrix (`results.versus`, app +0x2cf98, rows of 1 << versus_row_log2 = 128 entries of two u16). Live in the app on the host
+  (a suicide moved 11 / 13 / 235 / 237 and versus[0][0]); read since 2026-11-07 for exact kills (rs_tick).
 
 Online use: the hooks only read (one entry hook on halo3+0x9d22c records the engine thread's context; nothing in the game
 changes). The app's anti-cheat is server-side and behavioural ("sent game data that a normal game never sends", unusual

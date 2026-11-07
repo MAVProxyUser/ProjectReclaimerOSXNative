@@ -127,8 +127,18 @@ static uint64_t cap_new(const char* l, const char* what) { // "[capacity] <what>
     size_t wl = strlen(what); if (strncmp(l, "[capacity] ", 11) || strncmp(l + 11, what, wl) || l[11 + wl] != ':') return 0;
     const char* a = strstr(l + 11 + wl, "-> 0x"); return a ? strtoull(a + 5, 0, 16) : 0;
 }
+// halo3's game results ([c1] game results: 128 slots, 0x4a940 bytes at 0x...; [capacity] results.statistics / results.versus):
+// per player 0x263 u16 statistics (halo3+0x792c80 names them: 9 kills, 10 assists, 11 deaths, 12 betrayals, 13 suicides ...;
+// from 0xea per damage type: damage-kills / -deaths / -betrayals / -suicides / -headshots ...), then a killer x victim matrix
+// (row = 1 << versus_row_log2 entries of 4 bytes). NHOOK_RESULTS_LOG=1 logs every change (to learn whether a client gets them).
+static volatile uint64_t g_res_base; static volatile int64_t g_res_stats = 0x6c98, g_res_vs = 0x2cf98, g_res_vslog = 7;
 static void nst_layout_line(const char* l) {
     uint64_t v;
+    { const char* m = "[c1] game results: "; const char* at; if (!strncmp(l, m, strlen(m)) && (at = strstr(l, " at 0x"))) { g_res_base = strtoull(at + 6, 0, 16); return; } }
+    if ((v = cap_new(l, "results.address"))) { g_res_base = v; return; }
+    if ((v = cap_new(l, "results.statistics"))) { g_res_stats = (int64_t)v; return; }
+    if ((v = cap_new(l, "results.versus"))) { g_res_vs = (int64_t)v; return; }
+    if ((v = cap_new(l, "results.versus_row_log2"))) { g_res_vslog = (int64_t)v; return; }
     if ((v = cap_new(l, "game_globals.statborg"))) { g_sb_off = (int64_t)v; return; }
     if ((v = cap_new(l, "session.peers_shift"))) { g_ses_peers_shift = (int64_t)v; return; }
     if ((v = cap_new(l, "session.players_shift"))) { g_ses_players_shift = (int64_t)v; return; }
@@ -468,6 +478,9 @@ static struct { int16_t s[8]; int ok; char name[64]; } g_sbprev[128];
 typedef struct { char name[64], how[96]; int team, have, dead; float pos[3], cur[3]; double died; } SbNow;   // this snapshot's view of a slot (cur: where it is now)
 static SbNow g_sbnow[128];
 static void sb_reset(void) { memset(g_sbprev, 0, sizeof g_sbprev); g_nsbk = g_nsbv = 0; }
+static volatile int g_rs_live;                             // the game results count deaths in this match (rs_tick)
+static struct { int slot; double t; } g_sbe[64]; static int g_nsbe;   // deaths sb_tick reported (an exact report then comes too late)
+static void sb_emitted(int slot, double now) { if (g_nsbe < 64) { g_sbe[g_nsbe].slot = slot; g_sbe[g_nsbe].t = now; g_nsbe++; } else { memmove(g_sbe, g_sbe + 1, 63 * sizeof g_sbe[0]); g_sbe[63].slot = slot; g_sbe[63].t = now; } }
 static void sb_tick(const StPlayer* pl, int np, double now) {
     for (int k = 0; k < np; k++) {
         int sl = pl[k].slot; int16_t s[8]; if (sl < 0 || sl >= 128 || !st_statborg(sl, s)) continue;
@@ -486,6 +499,7 @@ static void sb_tick(const StPlayer* pl, int np, double now) {
     // waiting killer (a betrayal by a teammate first)
     for (int i = 0; i < g_nsbv; i++) {
         SbVictim* v = &g_sbv[i]; const float* pos = v->haspos ? v->pos : 0; int done = 0;
+        if (g_rs_live && now - v->t < 1.5) continue;   // the game results usually name this death exactly (rs_tick): wait for them
         if (v->suicide) { st_event_pos(pos, "death", 0, v->name, 0, -1, v->team, 0, "%s killed themselves", v->name); done = 1; }
         else {
             int best = -1; float bd = 1e30f;
@@ -499,9 +513,90 @@ static void sb_tick(const StPlayer* pl, int np, double now) {
                 st_event_verb(pos, "kill", x.name, v->name, x.how, verb, x.team, v->team, 1 | (x.kind ? 4 : 0), "%s %s %s%s", x.name, verb, v->name, hw); done = 1; }
             else if (now - v->t > 4.0) { st_event_pos(pos, "death", 0, v->name, 0, -1, v->team, 0, "%s was killed", v->name); done = 1; }
         }
-        if (done) { memmove(&g_sbv[i], &g_sbv[i + 1], (size_t)(g_nsbv - i - 1) * sizeof *v); g_nsbv--; i--; }
+        if (done) { sb_emitted(v->slot, now); memmove(&g_sbv[i], &g_sbv[i + 1], (size_t)(g_nsbv - i - 1) * sizeof *v); g_nsbv--; i--; }
     }
     for (int j = 0; j < g_nsbk; j++) if (now - g_sbk[j].t > 5.0) { memmove(&g_sbk[j], &g_sbk[j + 1], (size_t)(g_nsbk - j - 1) * sizeof g_sbk[0]); g_nsbk--; j--; }
+}
+
+// ---- exact kills from halo3's game results (2026-11-07) ---------------------------------------------------------------
+// The results (see g_res_base) count per player: 9 kills, 11 deaths, 12 betrayals, 13 suicides, and per damage type t
+// (0..62, g_dmg_name) from 234 + 6t: damage-kills, -deaths, -betrayals, -suicides, -headshots; and a killer x victim matrix
+// (4 bytes: two u16 counts). Checked live on a suicide: 11, 13, 235, 237 and versus[0][0] 0 -> 0x00010001. Each snapshot:
+// a versus entry that went up names the pair; which side killed is the one whose kills (or betrayals) went up -- so the
+// matrix's own orientation never has to be assumed; the killer's damage-kills (-betrayals) that went up names the weapon,
+// its damage-headshots a headshot. Suicides: 13 + damage-suicides. These events are exact (not "estimated"); the pending
+// scoreboard entries they explain are dropped (sb_tick waits 1.5 s while results are live). A client that never gets the
+// results (stats stay 0) keeps the scoreboard pairing. NHOOK_NO_RESULTS_FEED=1 = off.
+static const char* const g_dmg_name[63] = {"Guardians","Falling","Collision","Melee","Explosion","Magnum","Plasma pistol","Needler","Mauler","SMG",
+    "Plasma rifle","Battle rifle","Carbine","Shotgun","Sniper rifle","Beam rifle","Assault rifle","Spiker","Fuel rod gun","Missile pod",
+    "Rocket launcher","Spartan laser","Brute shot","Flamethrower","Sentinel beam","Energy sword","Gravity hammer","Frag grenade","Plasma grenade","Spike grenade",
+    "Firebomb","Flag","Bomb","Bomb explosion","Oddball","Machine gun turret","Plasma cannon","Plasma mortar","Plasma turret","Banshee",
+    "Ghost","Mongoose","Scorpion","Scorpion gunner","Warthog","Warthog gunner","Gauss warthog","Wraith","Wraith gunner","Scorpion cannon",
+    "Chopper","Hornet","Mantis","Prowler","Sentinel beam turret","Sentinel RPG","Teleporter","Trip mine","Elephant turret","Shade turret",
+    "Silenced SMG","Automag","Brute plasma rifle"};   // (stats.c's table: halo3's damage reporting types)
+#define RS_NSTAT 0x263
+enum { RS_KILLS = 9, RS_DEATHS = 11, RS_BETRAYALS = 12, RS_SUICIDES = 13, RS_DMG = 234 };
+static uint16_t g_rs_prev[128][RS_NSTAT], g_rs_cur[128][RS_NSTAT]; static uint32_t g_rs_vprev[128 * 128], g_rs_vcur[128 * 128]; static int g_rs_have;
+static void sb_consume(int slot, int field) {   // an exact event explains one scoreboard step: drop its pending entry, or absorb it
+    if (slot < 0 || slot >= 128) return;
+    if (field == SB_DEATHS || field == SB_SUICIDES) { for (int i = 0; i < g_nsbv; i++) if (g_sbv[i].slot == slot && g_sbv[i].suicide == (field == SB_SUICIDES)) {
+            memmove(&g_sbv[i], &g_sbv[i + 1], (size_t)(g_nsbv - i - 1) * sizeof g_sbv[0]); g_nsbv--; return; } }
+    else { int kind = field == SB_BETRAYALS; for (int i = 0; i < g_nsbk; i++) if (g_sbk[i].slot == slot && g_sbk[i].kind == kind) {
+            memmove(&g_sbk[i], &g_sbk[i + 1], (size_t)(g_nsbk - i - 1) * sizeof g_sbk[0]); g_nsbk--; return; } }
+    if (g_sbprev[slot].ok) { g_sbprev[slot].s[field]++; if (field == SB_SUICIDES) g_sbprev[slot].s[SB_DEATHS]++; }
+}
+static int rs_take(int sl, int base) {   // a damage type whose stat (base + 6t) went up for this slot: -1 none (one step used)
+    for (int t = 0; t < 63; t++) { int i = RS_DMG + base + 6 * t; if (i >= RS_NSTAT) break;
+        if ((g_rs_cur[sl][i] & 0x7fff) > (g_rs_prev[sl][i] & 0x7fff)) { g_rs_prev[sl][i]++; return t; } }
+    return -1;
+}
+static void rs_tick(const StPlayer* pl, int np, double now) {
+    static int off = -1; if (off < 0) off = getenv("NHOOK_NO_RESULTS_FEED") != 0;
+    if (off || !g_res_base || g_res_vslog <= 0 || g_res_vslog > 7) return;
+    int rowl = 1 << g_res_vslog; size_t vn = (size_t)rowl * (size_t)rowl;
+    if (rd(g_res_base + (uint64_t)g_res_stats, g_rs_cur, sizeof g_rs_cur) || rd(g_res_base + (uint64_t)g_res_vs, g_rs_vcur, vn * 4)) return;
+    int idx[128]; for (int i = 0; i < 128; i++) idx[i] = -1; for (int k = 0; k < np; k++) if (pl[k].slot >= 0 && pl[k].slot < 128) idx[pl[k].slot] = k;
+    int fresh = !g_rs_have, dead = 0;
+    static const int counted[4] = {RS_KILLS, RS_DEATHS, RS_BETRAYALS, RS_SUICIDES};   // (per-life stats like seconds-alive go back down)
+    for (int sl = 0; sl < 128 && !fresh; sl++) for (int c = 0; c < 4; c++) if ((g_rs_cur[sl][counted[c]] & 0x7fff) < (g_rs_prev[sl][counted[c]] & 0x7fff)) { fresh = 1; break; }   // a new match / a new player in the slot
+    for (size_t i = 0; i < vn && !fresh; i++) if ((g_rs_vcur[i] & 0xffff) < (g_rs_vprev[i] & 0xffff) || (g_rs_vcur[i] >> 16) < (g_rs_vprev[i] >> 16)) fresh = 1;
+    for (int sl = 0; sl < 128; sl++) dead |= g_rs_cur[sl][RS_DEATHS] & 0x7fff;
+    g_rs_live = dead != 0;
+    if (fresh) { memcpy(g_rs_prev, g_rs_cur, sizeof g_rs_prev); memcpy(g_rs_vprev, g_rs_vcur, vn * 4); g_rs_have = 1; return; }
+    int kd[128], bd[128], dd[128]; for (int sl = 0; sl < 128; sl++) { kd[sl] = (g_rs_cur[sl][RS_KILLS] & 0x7fff) - (g_rs_prev[sl][RS_KILLS] & 0x7fff); bd[sl] = (g_rs_cur[sl][RS_BETRAYALS] & 0x7fff) - (g_rs_prev[sl][RS_BETRAYALS] & 0x7fff);
+        dd[sl] = (g_rs_cur[sl][RS_DEATHS] & 0x7fff) - (g_rs_prev[sl][RS_DEATHS] & 0x7fff) - ((g_rs_cur[sl][RS_SUICIDES] & 0x7fff) - (g_rs_prev[sl][RS_SUICIDES] & 0x7fff)); }   // (deaths by someone else)
+    // suicides
+    for (int sl = 0; sl < 128; sl++) { int d = (g_rs_cur[sl][RS_SUICIDES] & 0x7fff) - (g_rs_prev[sl][RS_SUICIDES] & 0x7fff);
+        for (int q = 0; q < d; q++) { int t = rs_take(sl, 3); const char* nm = idx[sl] >= 0 ? pl[idx[sl]].name : "?"; const SbNow* w = &g_sbnow[sl];
+            int recent = 0; for (int e = 0; e < g_nsbe; e++) if (g_sbe[e].slot == sl && now - g_sbe[e].t < 6) recent = 1;
+            sb_consume(sl, SB_SUICIDES); if (recent) continue;
+            char how[96] = ""; if (t > 0 && t < 63) snprintf(how, sizeof how, "%s", g_dmg_name[t]);
+            st_event_verb(w->died > 0 && now - w->died < 3 ? w->pos : 0, "death", 0, nm, how, "killed themselves", -1, w->team, 0, "%s killed themselves%s%s%s", nm, how[0] ? " (" : "", how, how[0] ? ")" : "");
+            if (getenv("NHOOK_RESULTS_LOG")) nlog("[nhook] [results] suicide: %s, damage type %d", nm, t); } }
+    // kills: the matrix names the pairs; the kills / betrayals deltas say which side killed
+    for (int pass = 0; pass < 2; pass++) for (size_t i = 0; i < vn; i++) {
+        uint32_t c = g_rs_vcur[i], p0 = g_rs_vprev[i]; int a = (int)(i / (size_t)rowl), b = (int)(i % (size_t)rowl); if (a == b || c == p0) continue;
+        int d = pass == 0 ? (int)(c & 0xffff) - (int)(p0 & 0xffff) : (int)(c >> 16) - (int)(p0 >> 16);
+        for (int q = 0; q < d; q++) {
+            // which side killed: the one whose kills / betrayals went up while the other's deaths did; with both possible (two
+            // kills between them in one snapshot), the orientation this matrix showed before (g_rs_or: row = killer / column)
+            static int g_rs_or[2][2]; int ka = kd[a] > 0 || bd[a] > 0, kb = kd[b] > 0 || bd[b] > 0, o1 = ka && dd[b] > 0, o2 = kb && dd[a] > 0, rowk;
+            if (o1 != o2) rowk = o1; else if (ka != kb) rowk = ka; else if (ka) rowk = g_rs_or[pass][0] >= g_rs_or[pass][1]; else break;   // (no count left: the other half of a kill already shown)
+            if (o1 != o2 || ka != kb) g_rs_or[pass][rowk ? 0 : 1]++;
+            int killer = rowk ? a : b, victim = rowk ? b : a, betray;
+            { int tk = g_sbnow[killer].team, tv = g_sbnow[victim].team; betray = bd[killer] > 0 && (kd[killer] <= 0 || (tk >= 0 && tk == tv)); }
+            if (betray) bd[killer]--; else kd[killer]--; if (dd[victim] > 0) dd[victim]--;
+            int t = rs_take(killer, betray ? 2 : 0), hs = rs_take(killer, 4) >= 0; rs_take(victim, 1);
+            const char* kn = idx[killer] >= 0 ? pl[idx[killer]].name : "?"; const char* vn2 = idx[victim] >= 0 ? pl[idx[victim]].name : "?";
+            const SbNow* wv = &g_sbnow[victim]; const SbNow* wk = &g_sbnow[killer];
+            int recent = 0; for (int e = 0; e < g_nsbe; e++) if (g_sbe[e].slot == victim && now - g_sbe[e].t < 6) recent = 1;
+            sb_consume(killer, betray ? SB_BETRAYALS : SB_KILLS); sb_consume(victim, SB_DEATHS);
+            if (getenv("NHOOK_RESULTS_LOG")) nlog("[nhook] [results] %s %s %s: damage type %d%s (versus [%d][%d] %s)%s", kn, betray ? "betrayed" : "killed", vn2, t, hs ? ", headshot" : "", a, b, pass ? "high" : "low", recent ? " -- already reported" : "");
+            if (recent) continue;
+            char how[96] = ""; if (t > 0 && t < 63) snprintf(how, sizeof how, "%s%s", g_dmg_name[t], hs ? ", headshot" : ""); else if (hs) snprintf(how, sizeof how, "headshot");
+            const char* verb = betray ? "betrayed" : "killed";
+            st_event_verb(wv->died > 0 && now - wv->died < 3 ? wv->pos : 0, "kill", kn, vn2, how, verb, wk->team, wv->team, betray ? 4 : 0, "%s %s %s%s%s%s", kn, verb, vn2, how[0] ? " (" : "", how, how[0] ? ")" : ""); } }
+    memcpy(g_rs_prev, g_rs_cur, sizeof g_rs_prev); memcpy(g_rs_vprev, g_rs_vcur, vn * 4);
 }
 
 // the page's controls: on unless NHOOK_STATS_READONLY=1 (POST + an X-Reclaimer-Control header + no foreign Origin)
@@ -519,8 +614,8 @@ extern volatile int g_nr_cap_req, g_nr_w, g_nr_h; extern volatile double g_nr_la
 // 0x60 bytes are kept and the first NHOOK_EVENT_LOG (default 200) are logged as "[nhook] [event]" lines, to learn it
 // from a real match. The kill feed comes from the scoreboard meanwhile (sb_tick).
 static uint8_t g_gev[256][0x60]; static double g_gev_t[256]; static volatile unsigned g_gev_n;
-static void on_display_event(uint64_t* ctx) {             // (engine thread; rcx = the event)
-    unsigned i = g_gev_n; uint64_t ev = ctx[1];
+static void on_display_event(uint64_t* ctx) {             // (engine thread; x0 = the guest context, rcx = the event)
+    unsigned i = g_gev_n; uint64_t ev = 0; if (!ctx || rd((uint64_t)(uintptr_t)ctx + 8, &ev, 8)) return;
     if (ev >= 0x10000 && !rd(ev, g_gev[i & 255], 0x60)) { g_gev_t[i & 255] = st_wall(); __atomic_store_n(&g_gev_n, i + 1, __ATOMIC_RELEASE); }
 }
 static void st_engine_events(const StPlayer* pl, int np) {
@@ -736,7 +831,20 @@ static void st_snapshot(StBuf* s) {
         if (g_st_var_ok) st_player_traits(s, pl[k].rec);
         sb_put(s, "}");
     }
-    if (t0) sb_tick(pl, np, now);
+    if (t0) { rs_tick(pl, np, now); sb_tick(pl, np, now); }
+    { static int lg = -1; if (lg < 0) lg = getenv("NHOOK_RESULTS_LOG") != 0;   // game results: what changes (diagnostic)
+      if (lg && g_res_base && g_res_vslog > 0 && g_res_vslog <= 8) {
+        static uint16_t prev[128][0x263]; static uint8_t have[128]; uint16_t cur[0x263]; int rowl = 1 << g_res_vslog;
+        for (int k = 0; k < np; k++) { int sl = pl[k].slot; if (sl < 0 || sl >= 128 || sl >= rowl) continue;
+            if (rd(g_res_base + (uint64_t)g_res_stats + (uint64_t)sl * 0x4c6, cur, sizeof cur)) continue;
+            if (have[sl]) { char b[700]; int w = 0;
+                for (int i = 0; i < 0x263 && w < 600; i++) if ((cur[i] & 0x7fff) != (prev[sl][i] & 0x7fff)) w += snprintf(b + w, sizeof b - (size_t)w, " %d:%d->%d", i, prev[sl][i] & 0x7fff, cur[i] & 0x7fff);
+                if (w) nlog("[nhook] [results] %s (slot %d) stats%s", pl[k].name, sl, b); }
+            memcpy(prev[sl], cur, sizeof cur); have[sl] = 1; }
+        static uint32_t vprev[128 * 128]; static int vhave; static uint32_t vcur[128 * 128]; size_t vn = (size_t)rowl * (size_t)rowl;
+        if (vn <= 128 * 128 && !rd(g_res_base + (uint64_t)g_res_vs, vcur, vn * 4)) {
+            if (vhave) for (size_t i = 0; i < vn; i++) if (vcur[i] != vprev[i]) nlog("[nhook] [results] versus [%zu][%zu]: %08x -> %08x", i / (size_t)rowl, i % (size_t)rowl, vprev[i], vcur[i]);
+            memcpy(vprev, vcur, vn * 4); vhave = 1; } } }
     { static unsigned seen; unsigned n = __atomic_load_n(&g_nov_shot_n, __ATOMIC_ACQUIRE); if (n - seen > 8192) seen = n - 8192;   // shots / hits per player (object_delete)
       for (; seen != n; seen++) { const NovShot* q = &g_nov_shot[seen & 8191];
           for (int k = 0; k < np; k++) if (pl[k].unit == q->owner) { StTrack* tr = st_track(&pl[k]); if (tr) { tr->shots++; if (q->victim != 0xFFFFFFFFu) tr->hits++; } break; } } }

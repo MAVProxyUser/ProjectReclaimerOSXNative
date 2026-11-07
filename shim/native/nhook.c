@@ -370,7 +370,8 @@ static void hooks_start(void) {
     // the engine thread's context: halo3+0x9d22c (a millisecond clock read from ~420 places) runs lifted on the engine
     // thread ~7000 times a second in a match -- main_loop_body (0xb2250) and the sim tick are the app's own code now
     else if (!getenv("NHOOK_NO_HOOKS")) { hook_install("engine_clock", 0x9d22c, on_main_loop);
-        if (!getenv("NHOOK_NO_EVHOOK")) hook_install("display_event", 0x11b0ec, on_display_event);
+        // display_event: the app's own native code too (its entry is a `b` into the app's __TEXT; the lifted entry never ran)
+        if (!getenv("NHOOK_NO_EVHOOK")) { uint64_t t = branch_target_of(0x11b0ec); if (!t || text_hook("display_event", t, on_display_event)) hook_install("display_event", 0x11b0ec, on_display_event); }
         if (getenv("NHOOK_LIST_BRANCH_ENTRIES")) {   // which halo3 functions the app replaced with its own code (entry = one `b`)
             uint64_t* tb = malloc(g_ntab * 16); int n = 0; char line[1024]; int k = 0;
             if (tb && !rd(g_tab, tb, g_ntab * 16)) for (uint64_t i = 0; i < g_ntab; i++) { uint32_t w0; if (rd(tb[2 * i + 1], &w0, 4) || (w0 & 0xfc000000u) != 0x14000000u) continue;

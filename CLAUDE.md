@@ -305,7 +305,9 @@ halo3 functions (x0 = guest context, +0x2d8 = TLS pointer), NHOOK_CENSUS=1; read
 display_event / object_delete etc. are the app's own code now (census): docs native-client.md "Inside the app".
 Native stats page (nstats.c): http://127.0.0.1:8765/ while shim/native.sh runs (page served from the checkout: edits = refresh).
 Works (live-checked in a 72-player game, 2026-11-07): players, variant, heatmap, feed, kills / deaths / assists from halo3's
-statborg (game engine globals TLS +0x20 + the app's `[capacity] game_globals.statborg`; kill feed paired from its counts),
+statborg (game engine globals TLS +0x20 + the app's `[capacity] game_globals.statborg`; kill feed EXACT from halo3's game results
+-- versus matrix + per-damage-type kills, nstats.c rs_tick, offline test shim/tools/results-feed-test.sh -- else paired from the
+statborg's counts; display_event / chud_messaging_post never run in the app),
 Connected list (halo3 session, same layout as 0.9), Packets (interposed sockets; player names from `[online] peer` lines,
 "look up names" = reverse DNS), fps line (presents), overlay / recording / Capture frame (nrender.m: presentDrawable:
 swizzled; camera = halo3 observer TLS +0x578 result +0x11c, Hor+ fov), page controls. Match state = `[switch] game ...`
