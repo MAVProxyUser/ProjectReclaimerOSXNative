@@ -1734,7 +1734,7 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
 - **Packets window: player names and reverse DNS** (2026-11-07; nnet.c, stats_page.html) — the 0.10 app talks to every
   player directly (55 peers in that game) and logs each one's address every few seconds (`[online] peer 0x<id> at
   <ip>:<port>`); the session's peer records hold the same ids, so a wire record gets "player". The page's "look up names"
-  box adds ?rdns=1: each address's PTR name, asked once per address on a resolver thread (getnameinfo NI_NAMEREQD; 2048
+  box (on by default since 2026-11-07, the user's request) adds ?rdns=1: each address's PTR name, asked once per address on a resolver thread (getnameinfo NI_NAMEREQD; 2048
   cached). Test: shim/tools/nhook-selftest.sh (127.0.0.1 -> localhost). The loader ignores rdns=1 (not ported there).
 - **nhook: "no stub page near ..." -> stats page empty** (2026-11-07; nhook.c near_page) — WHY: in the user's launch both
   entry hooks failed, so the page never had the engine thread's context (0 players, 0 objects). A hook branches (`b`,
