@@ -186,7 +186,7 @@ if(new URLSearchParams(location.search).get('demo')==='1'){
 const $=s=>document.querySelector(s);
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const TEAM={red:'#e05050',blue:'#5a8cf0',green:'#40c060',orange:'#f09030',purple:'#a060e0',gold:'#e0c040',brown:'#a07050',pink:'#f080c0',none:'#777'};
-const CHN={0:'control',1:'global',2:'team',3:'proximity'};
+const CHN={0:'control',1:'global',2:'team',3:'proximity',255:'not known'};
 const CHATCH={all:1,team:2,nearby:3};
 const fT=t=>new Date(t*1000).toLocaleTimeString([],{hour12:false});
 const fD=t=>new Date(t*1000).toLocaleString([],{hour12:false});
@@ -376,7 +376,7 @@ function renderTimeline(){
   h+=lane('Events',vis.filter(i=>i.kind==='event').map(i=>mk(i,'ev',fT(i.t)+' '+i.e.kind+': '+i.e.text)).join(''));
   for(const s of X.speakers){ const us=vis.filter(i=>i.kind==='voice'&&i.u.id===s.id); if(!us.length&&$('#f_pl').value) continue;
     h+=lane(`<span class="sw" style="background:${TEAM[s.team_name]||'#777'}"></span> ${esc(s.name)}`,us.map(i=>{ const u=i.u;
-      return `<span class="blk c${u.channel}${u.audio_packets?'':' na'}${u.n===playing?' on':''}" data-u="${u.n}" style="left:${x(u.start)}px;width:${Math.max(3,(u.end-u.start)*pps)}px" title="${esc(`${u.name} - ${CHN[u.channel]} - ${fT(u.start)}, ${(u.end-u.start).toFixed(1)} s, ${u.packets} packets${u.audio_packets?'':' (no audio kept)'}`)}"></span>`; }).join(''),s.name+' - peer id '+s.id); }
+      return `<span class="blk c${u.channel}${u.audio_packets?'':' na'}${u.n===playing?' on':''}" data-u="${u.n}" style="left:${x(u.start)}px;width:${Math.max(3,(u.end-u.start)*pps)}px" title="${esc(`${u.name} - ${CHN[u.channel]} - ${fT(u.start)}, ${(u.end-u.start).toFixed(1)} s, ${u.reported===u.packets?'timing from the app\'s voice report':u.packets+' packets'+(u.audio_packets?'':' (no audio kept)')}`)}"></span>`; }).join(''),s.name+' - peer id '+s.id); }
   tl.innerHTML=h;
 }
 $('#tl').onclick=e=>{ const b=e.target.closest('.blk'); if(b){ play(+b.dataset.u); return; }
@@ -388,8 +388,9 @@ function renderList(){
     const i=items.indexOf(it);
     if(it.kind==='voice'){ const u=it.u;
       return `<tr data-i="${i}"><td class="t">${esc(fT(u.start))}</td><td><span class="k voice">voice</span></td><td><span class="sw" style="background:${TEAM[u.team_name]||'#777'}"></span> ${esc(u.name)} <span class="note mono" style="margin:0">${esc(u.id)}</span></td>`+
-        `<td class="ch${u.channel}">${CHN[u.channel]||u.channel}</td><td>${(u.end-u.start).toFixed(1)} s, ${u.packets} packets${u.seq_gaps?', '+u.seq_gaps+' missing':''}, ${esc(u.opus.mode)} ${esc(u.opus.bandwidth)} ${u.opus.frame_ms} ms${u.opus.stereo?' stereo':''}, ${(u.bytes*8/Math.max(0.02,u.audio_s)/1000).toFixed(0)} kbit/s${u.audio_packets?'':' <span class="warn">(no audio kept)</span>'}</td>`+
-        `<td style="white-space:nowrap"><button class="btn" data-play="${u.n}"${u.audio_packets?'':' disabled'}>play</button> ${u.audio_packets?`<a class="dl" href="${sp()}/utt/${u.n}.ogg?dl=1">.ogg</a> `:''}<button class="btn" data-pk="${u.n}">packets</button></td></tr>`; }
+        `<td class="ch${u.channel}">${CHN[u.channel]||u.channel}</td><td>${u.reported===u.packets?`${(u.end-u.start).toFixed(1)} s <span class="note" style="margin:0" title="the native app's own voice report (every ~2 s: who was heard for how many 20 ms frames); no packets or audio are seen">(timing from the app's voice report)</span>`:
+          `${(u.end-u.start).toFixed(1)} s, ${u.packets} packets${u.seq_gaps?', '+u.seq_gaps+' missing':''}, ${esc(u.opus.mode)} ${esc(u.opus.bandwidth)} ${u.opus.frame_ms} ms${u.opus.stereo?' stereo':''}, ${(u.bytes*8/Math.max(0.02,u.audio_s)/1000).toFixed(0)} kbit/s${u.audio_packets?'':' <span class="warn">(no audio kept)</span>'}`}</td>`+
+        `<td style="white-space:nowrap"><button class="btn" data-play="${u.n}"${u.audio_packets?'':' disabled'}>play</button> ${u.audio_packets?`<a class="dl" href="${sp()}/utt/${u.n}.ogg?dl=1">.ogg</a> `:''}${u.reported===u.packets?'':`<button class="btn" data-pk="${u.n}">packets</button>`}</td></tr>`; }
     const e=it.e, who=e.kind==='chat'?(e.a||''):[e.a,e.b].filter(Boolean).join(' / ');
     const ch=e.kind==='chat'?e.channel:''; const cc=CHATCH[ch];
     return `<tr data-i="${i}"><td class="t">${esc(fT(e.t))}</td><td><span class="k ${it.kind}">${esc(e.kind)}</span></td><td>${esc(who)}${e.sender_id?' <span class="note mono" style="margin:0">'+esc(e.sender_id)+'</span>':''}</td><td${cc?' class="ch'+cc+'"':''}>${esc(ch)}</td><td>${esc(SPAWNK[it.kind]?spawnText(e,false):e.text)}${e.estimated?' <span class="note" style="margin:0">(estimated)</span>':''}</td><td></td></tr>`;

@@ -108,6 +108,8 @@ static void st_feed_json(StBuf* s, uint32_t since) {
     sb_put(s, "]}"); pthread_mutex_unlock(&g_ev_mx);
 }
 
+static double st_talk_age(uint64_t id);   // (below: from the app's voice reports)
+static void st_voice_report(const char* l);
 #include "nnet.c"   // the network session and the packet log
 
 // ---- the app's log lines -> match state and events ------------------------------------------------------------------
@@ -132,7 +134,8 @@ static void nst_layout_line(const char* l) {
     const char* m = "[c1] network sessions moved to 0x"; if (!strncmp(l, m, strlen(m))) g_ses_store = strtoull(l + strlen(m), 0, 16);
 }
 static void nst_on_line(const char* p, size_t n) {
-    char l[600]; if (n >= sizeof l) n = sizeof l - 1; memcpy(l, p, n); l[n] = 0;
+    char l[4096]; if (n >= sizeof l) n = sizeof l - 1; memcpy(l, p, n); l[n] = 0;   // (a voice report names every sender: long)
+    if (!strncmp(l, "[voice] active ", 15)) { st_voice_report(l); return; }
     if (!strncmp(l, "[capacity] ", 11) || !strncmp(l, "[c1] ", 5)) { nst_layout_line(l); return; }
     if (!strncmp(l, "[menus] joining the game in progress", 36)) { g_sp_join = 1; return; }
     if (!strncmp(l, "[switch] game Playing", 21)) { g_app_playing = 1; if (!g_gameplay_t0) { g_gameplay_t0 = mono_s(); g_match_pending = 1; } return; }
@@ -534,6 +537,31 @@ static void st_engine_events(const StPlayer* pl, int np) {
 
 #include "nspawns.c"   // weapon / vehicle / power-up spawns and pickups (the loader's st_spawns)
 
+// Who talks: the app's own voice report, every ~2 s (100 frames of 20 ms): "[voice] active true sending standard members 65 sent 0
+// (0 bytes) received 60645 relayed 0 mixed 201 frames rms -24.8 dBFS; heard 0x<peer id>: 100 frames (0 concealed) rms -30.5 dBFS
+// peak -11.2 dBFS, 0x<id>: ...". A sender counts as talking when it was heard above TALK_DBFS (open microphones send silence:
+// -120 dBFS for whole reports, -112 / -90 dBFS hiss). The page's talking dot stays on for the report's ~2 s (it was a 0.5 s
+// stamp per packet in the loader); forensic.c gets the frames as FXF_REPORT records (timing only, no audio).
+#define TALK_DBFS (-60.0)
+static struct { uint64_t id; double t; } g_talk[128]; static pthread_mutex_t g_talk_mx = PTHREAD_MUTEX_INITIALIZER;
+static double st_talk_age(uint64_t id) { double now = mono_s(), a = 1e9; pthread_mutex_lock(&g_talk_mx);
+    for (int i = 0; i < 128; i++) if (g_talk[i].id == id) { a = now - g_talk[i].t; break; } pthread_mutex_unlock(&g_talk_mx); return a; }
+static uint64_t fx_now_ns(void); static void fx_voice_report(uint64_t t_start_ns, uint64_t sender, int frames);   // (forensic.c, below)
+static void st_voice_report(const char* l) {
+    const char* h = strstr(l, "; heard "); if (!h) return; h += 8; double now = mono_s(); uint64_t tns = fx_now_ns();
+    while ((h = strstr(h, "0x"))) { char* e; uint64_t id = strtoull(h + 2, &e, 16); if (e == h + 2 || *e != ':') { h += 2; continue; }
+        int fr = (int)strtol(e + 1, &e, 10); const char* r = strstr(e, " rms "); const char* nx = strstr(e, ", 0x");
+        if (!r || (nx && r > nx)) { h = e; continue; } double db = strtod(r + 5, 0); h = nx ? nx + 2 : e;
+        static int vl = -1; if (vl < 0) vl = getenv("NHOOK_VOICE_LOG") != 0;   // NHOOK_VOICE_LOG=1: every sender of every report
+        if (vl) nlog("[nhook] voice report: %016llx %d frames rms %.1f dBFS%s", (unsigned long long)id, fr, db, id && fr > 0 && db > TALK_DBFS ? " -> talking" : "");
+        if (!id || fr <= 0 || db <= TALK_DBFS) continue;
+        pthread_mutex_lock(&g_talk_mx); int k = -1, old = 0; for (int i = 0; i < 128; i++) { if (g_talk[i].id == id) { k = i; break; } if (g_talk[i].t < g_talk[old].t) old = i; }
+        double gap = k >= 0 ? now - g_talk[k].t : 1e9;   // talked in the report before (~2 s ago): these frames continue that talk
+        if (k < 0) { k = old; g_talk[k].id = id; } g_talk[k].t = now; pthread_mutex_unlock(&g_talk_mx);
+        uint64_t dur = (uint64_t)fr * 20000000ull, back = gap < 3.0 ? (uint64_t)(gap * 1e9) : dur; if (back < dur) back = dur;
+        fx_voice_report(tns - back, id, fr); }
+}
+
 // ---- the forensic archive and its viewer (/forensics): the loader's shim/src/forensic.c, unchanged, with what it takes
 // from stats.c / peload.c defined for the native app. Voice is not recorded yet (no voice hook in the native app): the
 // archive keeps events, the roster and per-second packet sums. Docs: shim/docs/forensics.md.
@@ -623,10 +651,12 @@ static void st_snapshot(StBuf* s) {
     static StSess ss[128]; int nss = 0;
     { uint32_t sst = 0; nss = st_session(ss, 128, &sst); int hostplayer = 0;
       sb_put(s, ",\"session\":["); for (int k = 0; k < nss; k++) { sb_put(s, "%s{\"name\":", k ? "," : ""); sb_str(s, ss[k].name);
-          sb_put(s, ",\"index\":%d,\"peer\":%d,\"host\":%s,\"voice\":\"%016llx\",\"muted\":false,\"talking\":false", ss[k].idx, ss[k].peer, ss[k].host ? "true" : "false", (unsigned long long)ss[k].voice);
+          sb_put(s, ",\"index\":%d,\"peer\":%d,\"host\":%s,\"voice\":\"%016llx\",\"muted\":%s,\"talking\":%s", ss[k].idx, ss[k].peer, ss[k].host ? "true" : "false", (unsigned long long)ss[k].voice,
+                 ss[k].muted ? "true" : "false", st_talk_age(ss[k].voice) < 2.5 ? "true" : "false");
           { char ad[64]; if (pk_addr_of(ss[k].voice, ad, sizeof ad)) { sb_put(s, ",\"ip\":"); sb_str(s, ad); } } sb_put(s, "}");
           if (ss[k].host) hostplayer = 1; }
-      sb_put(s, "],\"session_state\":%u,\"host_peer\":%d,\"local_peer\":%d,\"dedicated\":%s,\"mute\":false", sst, g_st_hostpeer, g_st_localpeer, g_st_hostpeer >= 0 && nss && !hostplayer ? "true" : "false");
+      sb_put(s, "],\"session_state\":%u,\"host_peer\":%d,\"local_peer\":%d,\"dedicated\":%s,\"mute\":%s", sst, g_st_hostpeer, g_st_localpeer, g_st_hostpeer >= 0 && nss && !hostplayer ? "true" : "false",
+             g_set_muted && st_controls_ok() ? "true" : "false");
       int mx = st_max_players(); sb_put(s, ",\"slots\":{\"used\":%d", nss ? nss : np); if (mx) sb_put(s, ",\"max\":%d,\"src\":\"session\"}", mx); else sb_put(s, ",\"max\":null}");
       sb_put(s, ",\"addr_role\":\"hidden\""); }
     sb_put(s, ",\"players\":["); int first = 1;
@@ -787,6 +817,12 @@ static int st_control(const char* act, const char* qs) {
         return rec_start(ao, secs, g_st_curmap[0] ? g_st_curmap : "game", ao || !live ? 0 : g_nr_w, ao || !live ? 0 : g_nr_h, err, sizeof err); }
     if (!strcmp(act, "recstop")) { rec_stop(); return 1; }
     if (!strcmp(act, "forensic")) return fx_control(qs);       // archive / voice audio / consent (forensic.c)
+    if (!strcmp(act, "mute") || !strcmp(act, "unmute")) { voice_init(); const char* v = strstr(qs, "voice="); unsigned long long id = v ? strtoull(v + 6, 0, 16) : 0;
+        if (!g_set_muted || !id) return 0; g_set_muted(id, !strcmp(act, "mute")); uint64_t mu[64];
+        nlog("[nhook] page: %s %016llx (the app's mute list now holds %d)", act, id, muted_list(mu, 64)); return 1; }
+    if (!strcmp(act, "muteall") || !strcmp(act, "unmuteall")) { voice_init(); if (!g_set_muted) return 0; static StSess ss2[128]; int n = st_session(ss2, 128, 0), on = !strcmp(act, "muteall"), k = 0;
+        for (int i = 0; i < n; i++) if (ss2[i].voice && ss2[i].muted != on && !(g_st_localpeer >= 0 && ss2[i].peer == g_st_localpeer)) { g_set_muted(ss2[i].voice, on); k++; }
+        nlog("[nhook] page: %s (%d players)", act, k); return 1; }
     return 0;
 }
 // GET /recordings/<file>: a clip from ~/Movies/Reclaimer (stats.c st_rec_file: Range requests answered)

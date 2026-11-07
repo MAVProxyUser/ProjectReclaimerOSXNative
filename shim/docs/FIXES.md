@@ -1825,6 +1825,38 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   "deployed", the heatmap's spawn points (heatmaps/<map>.spawns, shared with the loader). Checked offline: Guardian's 22 weapons,
   the Overshield and Active camo. shim/native.sh test runs keep their heatmaps in ReclaimerMac/native/test-heatmaps
   (NHOOK_HEATMAP_DIR); they used to add their idle footprints and spawn points to the real files.
+- **nhook kill feed: the nearest killer, a longer wait** (2026-11-07; nstats.c sb_tick) — WHY: in a 70-player Infection game
+  57 of 68 deaths came out as "X was killed" with no killer: big games replicate a killer's kill count and the victim's death
+  count more than 1.5 s apart, and the old pairing took the first waiting killer. HOW: a victim waits up to 4 s (was 1.5 s) for
+  a killer's count, a killer's count waits up to 5 s (was 2 s), and a victim takes the waiting killer NEAREST to where it
+  died (SbKiller.pos = the killer's position at its count, SbNow.cur = each slot's current position); a teammate's betrayal
+  still goes first. Old behaviour: none kept (the pairing is an estimate either way; events are marked estimated).
+- **nhook: shots / hits / accuracy** (2026-11-07; noverlay.c on_object_delete, nstats.c st_snapshot) — WHY: the players
+  table's Shots / Hits / Accuracy columns stayed 0 in the native app (the loader counts them in its object_delete hook,
+  hitbox.c g_hbshot). HOW: the app's object_delete text hook (above) records every deleted projectile's owner (+0xC0) and the
+  biped whose bounding sphere (+0x1c centre, +0x28 radius, + 0.1) holds its end point (an ESTIMATED hit, like the loader's) in an
+  8192-entry ring (one writer: the engine thread); the stats snapshot counts them per player by unit handle. Only while the
+  hook is placed (NHOOK_NO_TEXTHOOK off).
+- **nhook: page mutes = the app's own mute list** (2026-11-07; nnet.c voice_init / muted_list, nstats.c st_control) — WHY: the
+  Connected list's mute buttons and Mute all / Unmute all did nothing in the native app (snapshot "mute": false). HOW: the
+  app's scoreboard MUTE VOICE button calls set_muted(peer id, bool) (0.10.0 app 0x102154ef0; is_muted 0x10214db98), which
+  pushes / removes the id in a static Mutex<Vec<u64>> (0x103f0a1e0: lock box, poison, cap +0x10, ptr +0x18, len +0x20; found
+  from the button's strings with re-tools/machoref.py). do=mute / unmute&voice=<hex> and muteall / unmuteall call it from the
+  stats thread (it takes the list's own lock); the session's "muted" flags are read from the Vec. Checked before use: the
+  function's adrp / add must reach the list (another app build: "set_muted not where 0.10.0 has it", page mutes off). Checked
+  in a test match: mute, mute, unmute, unmute -> the app's list held 1, 2, 1, 0.
+- **nhook: who talks (page + forensic archive) from the app's voice report** (2026-11-07; nstats.c st_voice_report,
+  forensic.c fx_voice_report / FXF_REPORT) — WHY: the talking dot never lit and the forensic "who talked when" lane stayed
+  empty in the native app (the loader stamps them in a hook on the client's voice_recv; the native voice code is the app's own
+  Rust). HOW: the app logs "[voice] active ... ; heard 0x<peer id>: N frames (C concealed) rms X dBFS peak Y dBFS, ..." every
+  ~2 s; each sender heard above -60 dBFS (TALK_DBFS: open microphones send -120 dBFS silence or -90..-112 dBFS hiss) counts as
+  talking for that report (the page's dot: 2.5 s, was 0.5 s per packet) and becomes one voice.bin record with the new flag
+  FXF_REPORT = 64 (olen = frames, no bytes, channel 0xFF "not known"): placed at the start of the ~2 s interval when the
+  sender also talked in the report before (continuous talk = one utterance), else at its end. The viewer's utterances carry
+  "reported" and read "(timing from the app's voice report)", no play / packets buttons. No audio: the native app's voice
+  packets are not seen. NHOOK_VOICE_LOG=1 logs every parsed sender. Offline: nhook-selftest.sh (parser) and
+  forensic-oggtest.sh (two reports in a row = one 3.2 s utterance). The log tap's line buffer for nst_on_line grew 600 -> 4096
+  (a report names every sender).
 
 - **"Run 2.4x" removed** (2026-10-19, revert 606a38c) — it crashed the client as soon as it was used; the user asked for it
   to be deleted. The page's Speed 2x / speed menu (the host's movement-speed trait) is unchanged. (10-19)

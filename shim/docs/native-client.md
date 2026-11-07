@@ -145,9 +145,13 @@ hook on halo3+0x2af478) and the scene's depth texture: zones are hidden behind t
 functions are the app's own code (NHOOK_LIST_BRANCH_ENTRIES=1). Bullets come from a text hook on the app's object_delete
 (needs a real game to show).
 
-Not yet: voice / mute / forensics,
-weapon / vehicle spawn tracking (items), shots / accuracy (the loader counted projectiles at object_delete, whose entry
-is not a wrapper in the app).
+Since the same day also: weapon / vehicle / power-up spawns and pickups (nspawns.c), shots / hits / accuracy (the object_delete
+text hook), page **mutes** (the app's own set_muted and mute list, nnet.c voice_init), **who talks** (the page's dot and the
+forensic archive's "who talked when", from the app's `[voice] active ... heard 0x<id>: N frames ... rms` report every ~2 s;
+timing only), /forensics (forensic.c unchanged otherwise).
+
+Not yet: voice AUDIO in the forensic archive (the native voice packets are not seen: their receive function is the app's own
+Rust, not found yet), a 0.10 server list, the packet log's game layer (halo3 message names).
 
 ### Kills (static RE of halo3.dll)
 

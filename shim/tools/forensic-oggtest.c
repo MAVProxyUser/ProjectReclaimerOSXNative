@@ -172,6 +172,14 @@ static int cmd_pipeline(const char*in,const char*dir,int keep){
     fx_flush(); r=get(path,"",0); save(dir,"index2.json",&r); nu=0; for(char*q=r.body;(q=strstr(q,"{\"n\":"));q++) nu++;
     CHECK(r.code==200 && nu==6 && strstr(r.body,"\"bad_records\":1"),"incremental read: %d utterances, the damaged record skipped",nu);
     snprintf(path,sizeof path,"%s/utt/5.ogg",base); r=get(path,"",0); save(dir,"utt5.ogg",&r); CHECK(r.code==200,"utt/5.ogg after the damage"); if(ex) fprintf(ex,"utt5.ogg %ld\n",30L*ps);
+    // the native app's voice reports (FXF_REPORT: who was heard for how many 20 ms frames, no packets): Bob talks across two
+    // reports (100 frames from 30 s, 60 more from 32 s) = one 3.2 s utterance; 10 frames at 40 s = another one
+    fx_voice_report(T+30000*MS,B,100); fx_voice_report(T+32000*MS,B,60); fx_voice_report(T+40000*MS,B,10); fx_flush();
+    snprintf(path,sizeof path,"%s/index.json",base); r=get(path,"",0); save(dir,"index3.json",&r); nu=0; for(char*q=r.body;(q=strstr(q,"{\"n\":"));q++) nu++;
+    { char*u6=strstr(r.body,"{\"n\":6,"); char*u7=strstr(r.body,"{\"n\":7,");
+      CHECK(r.code==200 && nu==8 && u6 && strstr(u6,"\"packets\":2,\"audio_packets\":0,\"audio_s\":3.200") && strstr(u6,"\"reported\":2") && u7 && strstr(u7,"\"reported\":1"),
+            "voice reports: %d utterances, two reports in a row = one 3.2 s utterance, timing only",nu); }
+    snprintf(path,sizeof path,"%s/utt/6.ogg",base); r=get(path,"",0); CHECK(r.code==404,"utt/6.ogg -> 404 (a voice report has no audio)");
     // a new map on the same server: the same session (sessions follow the server's host peer id)
     fx_roster_members(now+2,"guardian",m,3,HOST,ME,0,3); fx_roster_members(now+4.5,"guardian",m,3,HOST,ME,0,3); fx_flush();
     CHECK(g_fxw.open && strstr(g_fxw.name,"_riverworld"),"map change on the same server: the session stays open");

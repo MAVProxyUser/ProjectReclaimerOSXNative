@@ -19,6 +19,7 @@ static uint64_t st_sess_ptr(void) {
     uint64_t sess = 0; if (!g_img || !hb_read(g_img + 0x1e250d0, &sess, 8) || sess < 0x10000) return 0;
     return sess;
 }
+static int muted_list(uint64_t* out, int max);
 static int st_session(StSess* out, int max, uint32_t* state) {
     uint64_t sess = st_sess_ptr(); if (!sess) return 0;
     uint32_t st = 0; hb_read(sess + 0x67b70, &st, 4); if (state) *state = st;
@@ -41,7 +42,33 @@ static int st_session(StSess* out, int max, uint32_t* state) {
             else { e->name[j++] = (char)(0xE0 | (u >> 12)); e->name[j++] = (char)(0x80 | ((u >> 6) & 63)); e->name[j++] = (char)(0x80 | (u & 63)); } }
         if (!ok || !j) continue; e->name[j] = 0; n++;
     }
+    { static uint64_t mu[256]; int nm = muted_list(mu, 256); for (int i = 0; i < n; i++) for (int k = 0; k < nm; k++) if (mu[k] == out[i].voice) { out[i].muted = 1; break; } }
     return n;
+}
+// ---- voice mute (the app's own list: static Mutex<Vec<u64 peer id>> at app 0x103f0a1e0 in 0.10.0 -- lock box +0, poison +8,
+// cap +0x10, ptr +0x18, len +0x20; set_muted(id, bool) 0x102154ef0 appends / removes under the lock, is_muted(id) 0x10214db98;
+// the scoreboard's own MUTE VOICE buttons use them (found from their strings, re-tools/machoref.py). The ids are the session's
+// peer ids (StSess.voice). Each function is checked before use: its adrp / add pair must reach the list's lock.
+#define APP_MUTED   0x103f0a1e0ull
+#define APP_SETMUTE 0x102154ef0ull
+static void (*g_set_muted)(uint64_t, int);
+static int adrp_add_target_is(uint64_t f, int lim, uint64_t want) {   // an adrp + add (same register) in the function's first lim bytes reaching want
+    uint32_t w[32]; if (lim > 128 || rd(f, w, (size_t)lim)) return 0;
+    for (int i = 0; i + 1 < lim / 4; i++) { uint32_t a = w[i], b = w[i + 1];
+        if ((a & 0x9F000000u) != 0x90000000u || (b & 0xFF800000u) != 0x91000000u || ((b >> 5) & 31) != (a & 31)) continue;
+        int64_t imm = (int64_t)(((a >> 29) & 3) | (((a >> 5) & 0x7FFFF) << 2)); if (imm & (1 << 20)) imm -= 1 << 21;
+        uint64_t pc = f + (uint64_t)i * 4, t = (pc & ~0xFFFull) + (uint64_t)(imm << 12) + ((b >> 10) & 0xFFF); if (t == want) return 1; }
+    return 0;
+}
+static void voice_init(void) {
+    static int done; if (done || !g_img) return; done = 1; uint64_t sl = g_img - 0x103f94000ull;
+    if (adrp_add_target_is(APP_SETMUTE + sl, 64, APP_MUTED + sl)) { g_set_muted = (void (*)(uint64_t, int))(uintptr_t)(APP_SETMUTE + sl); nlog("[nhook] voice: mute available (set_muted at 0x%llx)", (unsigned long long)(APP_SETMUTE + sl)); }
+    else nlog("[nhook] voice: set_muted not where 0.10.0 has it: page mutes off");
+}
+static int muted_list(uint64_t* out, int max) {   // the app's mute list (read without its lock: a racy copy is fine for showing it)
+    voice_init(); if (!g_set_muted) return 0; uint64_t sl = g_img - 0x103f94000ull, ptr = 0, len = 0;
+    if (rd(APP_MUTED + sl + 0x18, &ptr, 8) || rd(APP_MUTED + sl + 0x20, &len, 8) || !ptr || len > 4096) return 0;
+    int n = (int)(len < (uint64_t)max ? len : (uint64_t)max); if (n && rd(ptr, out, (size_t)n * 8)) return 0; return n;
 }
 static int st_max_players(void) {                          // the session's limit (host or joined), 0 = not known
     uint64_t sess = st_sess_ptr(); uint32_t st = 0, fl = 0; int32_t mx = 0;
