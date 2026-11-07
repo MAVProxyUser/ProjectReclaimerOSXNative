@@ -23,6 +23,7 @@
 void nh_log(const char* fmt, ...) __attribute__((format(printf, 1, 2)));   // nhook.c
 int nov_build(float* verts, int cap, int w, int h, float scale);           // noverlay.c
 void nov_aim_tick(void);                                                   // noverlay.c: aim vs hits, measured against the hitboxes
+void hc_frame(double now);                                                 // nstats.c: the hook cost meter's on/off measurement
 int nov_wanted(void);
 volatile int g_nr_cap_req;                                                  // the stats page's Capture frame (do=capture)
 volatile int g_nr_cap_depth;                                                // ... &depth=1: also every full-size depth texture of the frame (.f32)
@@ -161,6 +162,7 @@ static void nr_frame(id<MTLCommandBuffer> cb, id<CAMetalDrawable> drawable) {
     id<MTLTexture> tex = drawable.texture; if (!tex) return;
     int w = (int)tex.width, h = (int)tex.height; g_nr_w = w; g_nr_h = h; g_nr_last = nr_now(); g_nr_frames++;
     { unsigned i = g_nr_pn; g_nr_pt[i & 511] = g_nr_last; __atomic_store_n(&g_nr_pn, i + 1, __ATOMIC_RELEASE); }
+    hc_frame(g_nr_last);
     if (!g_dev) g_dev = tex.device;
     CAMetalLayer* layer = [(id)drawable respondsToSelector:@selector(layer)] ? (CAMetalLayer*)drawable.layer : nil;
     if ((g_nr_cap_req || g_rec_video) && !g_nr_readback) g_nr_readback = 1;

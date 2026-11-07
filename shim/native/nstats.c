@@ -325,7 +325,8 @@ static int st_players(StPlayer* out, int max) {
     return n;
 }
 typedef struct { char name[64]; int slot, team, deaths, alive, shots, hits; uint32_t unit; double life_start, longest, dist; float pos[3], top_speed;
-                 int aim_n, aim_on, aim_head, aim_on_judged, aim_on_reg, aim_off_judged, aim_off_reg, aim_ei; float aim_err[64]; } StTrack;   // aim: st_aim_tick
+                 int aim_n, aim_on, aim_head, aim_on_judged, aim_on_reg, aim_off_judged, aim_off_reg, aim_ei; float aim_err[64];
+                 int aim_open_n, aim_open_on, aim_far_n, aim_far_on; double aim_last; } StTrack;   // aim: st_aim_tick
 static StTrack g_trk[256]; static int g_ntrk; static char g_trk_map[64];
 static StTrack* st_track(const StPlayer* p) {
     for (int i = 0; i < g_ntrk; i++) if (g_trk[i].slot == p->slot && !strcmp(g_trk[i].name, p->name)) return &g_trk[i];
@@ -718,6 +719,81 @@ static void st_engine_events(const StPlayer* pl, int np) {
 }
 
 #include "nspawns.c"   // weapon / vehicle / power-up spawns and pickups (the loader's st_spawns)
+// ---- the hook cost meter: rates per second, the fps estimate, and the real on/off measurement (nhcost.h) ------------------
+// A measurement (POST /control?do=hookab&h=<id>[&secs=36][&per=3]; do=hookab&stop=1 ends it) switches ONE hook (g_hc_off) or
+// overlay feature (its g_nov_on bit; "overlay" = every feature you had on) on and off in turns of `per` seconds, starting
+// on. hc_frame (nrender.m, every presented frame) counts frames per phase after a 0.5 s settle; each on/off pair gives a
+// difference, the result is their median (spread = the lowest and highest pair). The state is put back as it was.
+typedef struct { int have, pairs; double on_fps, off_fps, loss, lo, hi, when; } HcRes;
+static HcRes g_hcres[HC_N];
+static struct { int state, k, on, nph; uint32_t bits, saved_bits; uint8_t saved_off; double secs, per, t0, ph_t0, ph_tc; unsigned frames; float fps[64]; } g_hcab;
+static pthread_mutex_t g_hcab_mx = PTHREAD_MUTEX_INITIALIZER;
+static int hc_find(const char* id) { for (int k = 0; k < HC_N; k++) if (!strcmp(g_hc[k].id, id)) return k; return -1; }
+static uint32_t hc_bits(int k) { switch (k) { case HC_OV_HIT: return 1u << NOV_HIT; case HC_OV_VEH: return 1u << NOV_VEH; case HC_OV_TRC: return 1u << NOV_TRC;
+    case HC_OV_INF: return 1u << NOV_INF; case HC_OV_ITM: return 1u << NOV_ITM; case HC_OV_ZON: return 1u << NOV_ZON; default: return 0; } }
+static void hc_apply(int on) {   // (g_hcab_mx held)
+    int k = g_hcab.k; g_hcab.on = on;
+    if (k == HC_OV) { uint32_t all = (1u << NOV_HIT) | (1u << NOV_VEH) | (1u << NOV_TRC) | (1u << NOV_INF) | (1u << NOV_ITM) | (1u << NOV_ZON);
+        uint32_t want = g_hcab.saved_bits & all ? g_hcab.saved_bits : (g_hcab.saved_bits | all); g_nov_on = on ? want : (g_hcab.saved_bits & ~all); }
+    else if (hc_bits(k)) g_nov_on = on ? (g_hcab.saved_bits | hc_bits(k)) : (g_hcab.saved_bits & ~hc_bits(k));
+    else g_hc_off[k] = (uint8_t)!on; }
+static void hc_restore(void) { if (hc_bits(g_hcab.k) || g_hcab.k == HC_OV) g_nov_on = g_hcab.saved_bits; else g_hc_off[g_hcab.k] = g_hcab.saved_off; }
+static int hc_fcmp(const void* a, const void* b) { double x = *(const double*)a, y = *(const double*)b; return x < y ? -1 : x > y; }
+static void hc_finish(double now) {   // (g_hcab_mx held)
+    HcRes* r = &g_hcres[g_hcab.k]; double on[32], off[32], d[32]; int n = 0;
+    for (int i = 0; i + 1 < g_hcab.nph && n < 32; i += 2) if (g_hcab.fps[i] > 0 && g_hcab.fps[i + 1] > 0) { on[n] = g_hcab.fps[i]; off[n] = g_hcab.fps[i + 1]; d[n] = off[n] - on[n]; n++; }
+    hc_restore(); g_hcab.state = 0;
+    if (!n) return; memset(r, 0, sizeof *r); r->have = 1; r->pairs = n; r->when = now;
+    qsort(on, (size_t)n, 8, hc_fcmp); qsort(off, (size_t)n, 8, hc_fcmp); qsort(d, (size_t)n, 8, hc_fcmp);
+    r->on_fps = on[n / 2]; r->off_fps = off[n / 2]; r->loss = d[n / 2]; r->lo = d[0]; r->hi = d[n - 1];
+    nlog("[nhook] hook cost: %s on %.1f fps, off %.1f fps -> costs %.2f fps (pairs %d, %.2f .. %.2f)", g_hc[g_hcab.k].id, r->on_fps, r->off_fps, r->loss, n, r->lo, r->hi); }
+void hc_frame(double now) {   // nrender.m nr_frame: every presented frame
+    if (!__atomic_load_n(&g_hcab.state, __ATOMIC_ACQUIRE)) return;
+    pthread_mutex_lock(&g_hcab_mx);
+    if (g_hcab.state == 1) { g_hcab.state = 2; g_hcab.t0 = now; g_hcab.nph = 0; hc_apply(1); g_hcab.ph_t0 = now; g_hcab.frames = 0; g_hcab.ph_tc = 0; }
+    else if (g_hcab.state == 2) {
+        if (now - g_hcab.ph_t0 >= 0.5) { if (!g_hcab.ph_tc) g_hcab.ph_tc = now; else g_hcab.frames++; }   // (frames after the settle)
+        if (now - g_hcab.ph_t0 >= g_hcab.per) {
+            double el = g_hcab.ph_tc ? now - g_hcab.ph_tc : 0; if (g_hcab.nph < 64) g_hcab.fps[g_hcab.nph++] = el > 0.2 ? (float)(g_hcab.frames / el) : 0;
+            if (now - g_hcab.t0 >= g_hcab.secs && !(g_hcab.nph & 1)) hc_finish(now);
+            else { hc_apply(!g_hcab.on); g_hcab.ph_t0 = now; g_hcab.frames = 0; g_hcab.ph_tc = 0; } } }
+    pthread_mutex_unlock(&g_hcab_mx); }
+static int hc_control(const char* qs) {   // do=hookab
+    pthread_mutex_lock(&g_hcab_mx); int ok = 0;
+    if (strstr(qs, "stop=1")) { if (g_hcab.state) { if (g_hcab.state == 2) hc_restore(); g_hcab.state = 0; } ok = 1; }
+    else if (!g_hcab.state) { const char* h = strstr(qs, "h="); char id[32] = "";   // (h=ov%3Ahitboxes: %XX decoded)
+        if (h) { h += 2; size_t i = 0; while (*h && *h != '&' && i + 1 < sizeof id) { if (h[0] == '%' && h[1] && h[2]) { char x[3] = {h[1], h[2], 0}; id[i++] = (char)strtol(x, 0, 16); h += 3; } else id[i++] = *h++; } id[i] = 0; }
+        int k = hc_find(id); const char* sv = strstr(qs, "secs="), * pv = strstr(qs, "per=");
+        if (k >= 0) { g_hcab.k = k; g_hcab.secs = sv ? atof(sv + 5) : 36; g_hcab.per = pv ? atof(pv + 4) : 3;
+            if (g_hcab.secs < 6) g_hcab.secs = 6; if (g_hcab.secs > 600) g_hcab.secs = 600; if (g_hcab.per < 1) g_hcab.per = 1; if (g_hcab.per > 30) g_hcab.per = 30;
+            g_hcab.saved_bits = g_nov_on; g_hcab.saved_off = g_hc_off[k]; g_hcab.t0 = mono_s(); __atomic_store_n(&g_hcab.state, 1, __ATOMIC_RELEASE); ok = 1;
+            nlog("[nhook] hook cost: measuring %s (%.0f s, %.0f s phases)", g_hc[k].id, g_hcab.secs, g_hcab.per); } }
+    pthread_mutex_unlock(&g_hcab_mx); return ok; }
+static void hc_json(StBuf* s, double now) {
+    static uint64_t pt[HC_N], pc[HC_N]; static double pnow, rc[HC_N], rms[HC_N];
+    if (now - pnow >= 1.0) { double dt = pnow ? now - pnow : 0;
+        for (int k = 0; k < HC_N; k++) { uint64_t t = g_hc[k].ticks, c = g_hc[k].calls; if (dt > 0) { rc[k] = (double)(c - pc[k]) / dt; rms[k] = (double)(t - pt[k]) / hc_freq() * 1e3 / dt; } pt[k] = t; pc[k] = c; }
+        pnow = now; }
+    // (no frames: a run that never starts or never ends is dropped after its length + 10 s)
+    pthread_mutex_lock(&g_hcab_mx); if (g_hcab.state && now - g_hcab.t0 > g_hcab.secs + 10) { if (g_hcab.state == 2) hc_restore(); g_hcab.state = 0; nlog("[nhook] hook cost: measurement dropped (no frames)"); } pthread_mutex_unlock(&g_hcab_mx);
+    double fps = 0, p50 = 0, p95, mx; nr_perf(&fps, &p50, &p95, &mx);
+    sb_put(s, ",\"hooks\":{\"fps\":%.1f,\"frame_ms\":%.2f,\"list\":[", fps, p50);
+    for (int k = 0; k < HC_N; k++) {
+        double ms = rms[k] - (k == HC_DEL ? rms[HC_AIM] : 0); if (ms < 0) ms = 0;   // (the bullet hook's figure without the aim meter inside it)
+        int on = hc_bits(k) ? nov_feat(__builtin_ctz(hc_bits(k))) : k == HC_OV ? nov_wanted() : !g_hc_off[k];
+        double msf = fps > 0 ? ms / fps : 0, cost = -1;
+        if (g_hc[k].crit && p50 > 0.5 && fps > 0) { double rest = p50 - msf; cost = rest > 0.1 ? 1000.0 / rest - 1000.0 / p50 : -1; }
+        const HcRes* r = &g_hcres[k];
+        sb_put(s, "%s{\"id\":\"%s\",\"name\":", k ? "," : "", g_hc[k].id); sb_str(s, g_hc[k].name);
+        sb_put(s, ",\"thread\":\"%s\",\"crit\":%s,\"on\":%s,\"calls_s\":%.1f,\"us_call\":%.2f,\"ms_s\":%.3f,\"ms_frame\":%.3f,\"pct\":%.2f,\"fps_cost\":%.2f,\"total\":%llu",
+               g_hc[k].thread, g_hc[k].crit ? "true" : "false", on ? "true" : "false", rc[k], rc[k] > 0 ? ms * 1e3 / rc[k] : 0, ms, msf, p50 > 0 ? 100 * msf / p50 : 0, cost, (unsigned long long)g_hc[k].calls);
+        if (r->have) sb_put(s, ",\"ab\":{\"on_fps\":%.2f,\"off_fps\":%.2f,\"loss\":%.2f,\"lo\":%.2f,\"hi\":%.2f,\"pairs\":%d,\"age\":%.0f}", r->on_fps, r->off_fps, r->loss, r->lo, r->hi, r->pairs, now - r->when);
+        sb_put(s, "}"); }
+    pthread_mutex_lock(&g_hcab_mx);
+    sb_put(s, "],\"measuring\":%s", g_hcab.state ? "{" : "null");
+    if (g_hcab.state) sb_put(s, "\"id\":\"%s\",\"on\":%s,\"left\":%.0f,\"phases\":%d}", g_hc[g_hcab.k].id, g_hcab.on ? "true" : "false", g_hcab.secs - (now - g_hcab.t0), g_hcab.nph);
+    pthread_mutex_unlock(&g_hcab_mx); sb_put(s, "}"); }
+
 // ---- aim vs hits, per player (noverlay.c measures each shot): the last 64 errors (median shown), how many went through the
 // target's hitboxes, and REGISTERED = the target's shield + health went down within 0.6 s (the server's decision, as it
 // reaches this client) -- for shots through the hitboxes and, separately, for misses (damage after a visible miss: the
@@ -728,6 +804,10 @@ static void st_aim_tick(const StPlayer* pl, int np, double now, const uint8_t* t
     for (; seen != n; seen++) { const NovAimRes* q = &g_nov_aimr[seen % NOV_AIMR_N];
         for (int k = 0; k < np; k++) if (pl[k].unit == q->owner) { StTrack* tr = st_track(&pl[k]); if (!tr) break;
             tr->aim_err[tr->aim_ei++ & 63] = q->err; tr->aim_n++; if (q->on) { tr->aim_on++; if (q->head) tr->aim_head++; }
+            // the outlier signals (the page's Aimbot? column): the OPENING shot of an engagement (no aimed shot for 1 s before
+            // it) on target -- a person usually needs a correction, a lock-on doesn't -- and shots at 12+ world units (~36 m)
+            if (q->t - tr->aim_last > 1.0) { tr->aim_open_n++; tr->aim_open_on += q->on; } tr->aim_last = q->t;
+            if (q->along >= 12.0f) { tr->aim_far_n++; tr->aim_far_on += q->on; }
             if (g_naimp < 256) { g_aimp[g_naimp].target = q->target; g_aimp[g_naimp].pre = q->pre; g_aimp[g_naimp].t = q->t; g_aimp[g_naimp].tr = (int)(tr - g_trk); g_aimp[g_naimp].on = q->on; g_naimp++; }
             break; } }
     for (int i = 0; i < g_naimp; i++) {
@@ -742,9 +822,10 @@ static void st_aim_tick(const StPlayer* pl, int np, double now, const uint8_t* t
 static int st_aim_fcmp(const void* x, const void* y) { float a = *(const float*)x, b = *(const float*)y; return a < b ? -1 : a > b; }
 static void st_aim_json(StBuf* s, const StTrack* t) {
     if (!t || !t->aim_n) return; int m = t->aim_n < 64 ? t->aim_n : 64; float e[64]; memcpy(e, t->aim_err, (size_t)m * 4); qsort(e, (size_t)m, 4, st_aim_fcmp);
-    sb_put(s, ",\"aim\":{\"n\":%d,\"err\":%.2f,\"err75\":%.2f,\"on\":%.3f,\"head\":%.3f,\"reg\":%.3f,\"reg_n\":%d,\"miss_reg\":%.3f,\"miss_n\":%d}",
+    sb_put(s, ",\"aim\":{\"n\":%d,\"err\":%.2f,\"err75\":%.2f,\"on\":%.3f,\"head\":%.3f,\"reg\":%.3f,\"reg_n\":%d,\"miss_reg\":%.3f,\"miss_n\":%d,\"open_n\":%d,\"open_on\":%d,\"far_n\":%d,\"far_on\":%d}",
            t->aim_n, e[m / 2], e[(m * 3) / 4], (double)t->aim_on / t->aim_n, t->aim_on ? (double)t->aim_head / t->aim_on : 0.0,
-           t->aim_on_judged ? (double)t->aim_on_reg / t->aim_on_judged : -1.0, t->aim_on_judged, t->aim_off_judged ? (double)t->aim_off_reg / t->aim_off_judged : -1.0, t->aim_off_judged);
+           t->aim_on_judged ? (double)t->aim_on_reg / t->aim_on_judged : -1.0, t->aim_on_judged, t->aim_off_judged ? (double)t->aim_off_reg / t->aim_off_judged : -1.0, t->aim_off_judged,
+           t->aim_open_n, t->aim_open_on, t->aim_far_n, t->aim_far_on);
 }
 
 // Who talks: the app's own voice report, every ~2 s (100 frames of 20 ms): "[voice] active true sending standard members 65 sent 0
@@ -768,7 +849,10 @@ static volatile int g_fx_on; static void fx_voice(uint64_t sender, const uint8_t
 static volatile double g_opus_last;   // the last packet (mono): the voice reports stop writing FXF_REPORT records while packets come
 static volatile unsigned long g_opus_n;
 static uint64_t g_opus_ret;   // the mixer's return address after its decode call (nhook.c voice_hook_install sets it)
-__attribute__((used)) void nh_on_opus(uint64_t dec, const uint8_t* pkt, uint64_t len, uint64_t ent, uint64_t ret) {
+static void nh_on_opus_body(uint64_t dec, const uint8_t* pkt, uint64_t len, uint64_t ent, uint64_t ret);
+__attribute__((used)) void nh_on_opus(uint64_t dec, const uint8_t* pkt, uint64_t len, uint64_t ent, uint64_t ret) {   // (timed: nhcost.h)
+    if (g_hc_off[HC_OPUS]) return; uint64_t t0 = hc_now(); nh_on_opus_body(dec, pkt, len, ent, ret); hc_add(HC_OPUS, t0); }
+static void nh_on_opus_body(uint64_t dec, const uint8_t* pkt, uint64_t len, uint64_t ent, uint64_t ret) {
     (void)dec; if (ret != g_opus_ret || !len || len > 4000 || !pkt) return; uint64_t id = 0; if (rd(ent - 0x278, &id, 8) || !id) return;
     g_opus_n++; g_opus_last = mono_s(); if (!g_fx_on) return;
     static struct { uint64_t id, seq; } sq[256]; static pthread_mutex_t mx = PTHREAD_MUTEX_INITIALIZER; uint64_t seq = 0;
@@ -829,6 +913,7 @@ static void st_snapshot(StBuf* s) {
                       getenv("NHOOK_TEXTHOOK_TEST") ? ({ static char tb[300]; extern volatile unsigned long g_tht_n[8]; extern uint32_t g_tht_rva[8]; int q = snprintf(tb, sizeof tb, ", text hooks");
                           for (int i = 0; i < 8; i++) if (g_tht_rva[i]) q += snprintf(tb + q, sizeof tb - (size_t)q, " %x:%lu", g_tht_rva[i], g_tht_n[i]); tb; }) : ""); } }
       else sb_put(s, ",\"perf\":null"); }
+    hc_json(s, now);
     sb_put(s, ",\"latch\":{\"mode\":\"off\",\"applying\":false,\"deg_per_count\":0,\"r2\":0,\"input_age_ms\":0,\"moving_frames\":0,\"last_deg\":0,\"in_vehicle_or_dead\":false}");
     sb_put(s, ",\"autovote\":{\"calls\":\"off\",\"map\":\"off\"}");
     char m[64] = "";
@@ -1018,7 +1103,8 @@ static char* g_st_json; static size_t g_st_len; static unsigned long g_st_seq;
 static void* st_snap_thread(void* a) {
     (void)a; pthread_setname_np("nhook-stats-snap");
     for (;;) {
-        StBuf s = {0}; st_snapshot(&s);
+        if (g_hc_off[HC_SNAP]) { usleep(100000); continue; }   // (the hook cost measurement: snapshots paused)
+        uint64_t t0 = hc_now(); StBuf s = {0}; st_snapshot(&s); hc_add(HC_SNAP, t0);
         if (s.b) { pthread_mutex_lock(&g_st_mx); free(g_st_json); g_st_json = s.b; g_st_len = s.n; g_st_seq++; pthread_cond_broadcast(&g_st_cv); pthread_mutex_unlock(&g_st_mx); }
         usleep(100000);
     }
@@ -1068,6 +1154,7 @@ static int st_control(const char* act, const char* qs) {
         return rec_start(ao, secs, g_st_curmap[0] ? g_st_curmap : "game", ao || !live ? 0 : g_nr_w, ao || !live ? 0 : g_nr_h, err, sizeof err); }
     if (!strcmp(act, "recstop")) { rec_stop(); return 1; }
     if (!strcmp(act, "forensic")) return fx_control(qs);       // archive / voice audio / consent (forensic.c)
+    if (!strcmp(act, "hookab")) return hc_control(qs);           // the hook cost meter's on/off measurement
     if (!strcmp(act, "mute") || !strcmp(act, "unmute")) { voice_init(); const char* v = strstr(qs, "voice="); unsigned long long id = v ? strtoull(v + 6, 0, 16) : 0;
         if (!g_set_muted || !id) return 0; g_set_muted(id, !strcmp(act, "mute")); uint64_t mu[64];
         nlog("[nhook] page: %s %016llx (the app's mute list now holds %d)", act, id, muted_list(mu, 64)); return 1; }

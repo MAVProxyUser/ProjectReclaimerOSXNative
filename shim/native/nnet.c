@@ -206,7 +206,10 @@ static void pk_hex(int dir, const struct sockaddr* sa, const uint8_t* b, long n)
     char h[2 * 512 + 1]; int m = (int)(n < want ? n : want); if (m > 512) m = 512; for (int i = 0; i < m; i++) snprintf(h + 2 * i, 3, "%02x", b[i]); h[2 * m] = 0;
     nlog("[nhook] udp %s %s:%d %ld bytes: %s", dir == PK_RX ? "rx" : "tx", a, port, n, h);
 }
-static void pk_wire(int dir, int fd, const struct sockaddr* sa, const void* buf, long n) {
+static void pk_wire_body(int dir, int fd, const struct sockaddr* sa, const void* buf, long n);
+static void pk_wire(int dir, int fd, const struct sockaddr* sa, const void* buf, long n) {   // (timed: nhcost.h)
+    if (g_hc_off[HC_SOCK]) return; uint64_t t0 = hc_now(); pk_wire_body(dir, fd, sa, buf, n); hc_add(HC_SOCK, t0); }
+static void pk_wire_body(int dir, int fd, const struct sockaddr* sa, const void* buf, long n) {
     if (n > 0 && pk_kind(fd) == 1) pk_hex(dir, sa, (const uint8_t*)buf, n);
     if (!g_pk_on || n < 0 || pk_kind(fd) != 1) return;
     uint32_t s; PkEv* e = pk_new(&s);

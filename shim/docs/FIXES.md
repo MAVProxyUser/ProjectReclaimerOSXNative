@@ -1961,6 +1961,32 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   same target counts too (the page says so). The [perf] line counts "aimed / measured". NHOOK_NO_AIM=1 = off. Checked live on
   an 80-player Hugegrass server: 1,258 shots measured in 2 minutes; one player's 196 on-target shots were all registered and
   none of their 360 misses, others 33-76% of on-target shots registered.
+- **nhook: the hook cost meter** (2026-11-07; shim/native/nhcost.h, nstats.c hc_json / hc_frame / hc_control, every hook's
+  wrapper, nrender.m, stats_page.html "Hook cost" panel) — WHY: the user: "a *hook cost* meter for FPS when a hook is enabled
+  it should calculate any performance loss that occurs as a factor of it being enabled"; and "a disabled hook should not cost
+  anything". HOW: (1) self-timing: each hook's handler (bullets / object_delete, the aim meter's part of it, the camera hook's
+  C handler, the voice decode hook, the socket hook, the stats snapshot) and each overlay part (objects + camera, hitboxes,
+  vehicles, tracers, info, items, zones; the aim meter's render-thread measurement) adds its time from the CPU counter
+  CNTVCT_EL0 (24 MHz, ~1 ns to read) and its calls to a slot; the snapshot gives per hook calls/s, us per call, ms per frame,
+  share of the median frame and the fps it would give back IF its thread sets the frame rate (1000/(frame - its ms) -
+  1000/frame). (2) the real cost: POST /control?do=hookab&h=<id>[&secs=36][&per=3] switches only that hook's handler
+  (g_hc_off) or overlay feature (its g_nov_on bit; "overlay" = all of yours) off and on in turns, starting on; hc_frame,
+  called from every presented frame, counts frames per phase after a 0.5 s settle; the result is the median of the on/off
+  pair differences with their spread, and the state is put back (do=hookab&stop=1 ends a run; a run without frames is
+  dropped after its length + 10 s). The camera hook's assembly filter (~700k calls a second) is neither timed nor switched
+  off. Checked live on a 51-player Hugegrass server (22 fps, limited by the game's simulation): self-timed hitboxes 0.22 ms
+  a frame, vehicles 1.3 ms, bullets 0.04 ms, the snapshot 2.3 ms per run on its own thread; measured on/off: overlay,
+  hitboxes, vehicles, bullets and stats all within noise (spreads of 1-3 fps from the scene itself).
+- **Stats page: an "Aimbot?" column** (2026-11-07; nstats.c st_aim_tick / st_aim_json open_* far_*, stats_page.html aimFlags)
+  — WHY: the user asked for a column flagging possible aimbots (first idea: unregistered misses -- but a miss that does not
+  register is a normal miss, so that number is not the signal). HOW: per player, from the aim meter's shots: the share
+  through a hitbox, OPENING shots on target (the first aimed shot after 1 s without one: a person usually needs a correction),
+  long-range shots (12+ units) and the head share (the topmost hitbox region). The page flags a player with 40+ aimed shots
+  when at least two of {through-hitbox share, opening shots, head share} are above a floor (50 / 60 / 60%) and, with 5+
+  comparable players, above 90% of the lobby; long range only shows in the reasons (on a big map nearly every shot is long
+  range: it repeated the first signal). "⚠ suspect" with the reasons; "–" = nothing unusual. Not proof: one client's view,
+  modded characters' "head" is their topmost hitbox (the lobby comparison cancels it when everyone is high). Checked: no
+  flag in a live 51-player lobby; a made-up lock-on profile against that lobby is flagged, a normal one is not.
 - **nhook-selftest.sh: its own forensic / heatmap folders** (2026-11-07; shim/tools/nhook-selftest.sh) — WHY: the offline
   selftest starts nhook's stats server, whose archive opened an empty "menu" session in the player's real forensic archive on
   every run. HOW: PELOAD_FORENSIC_DIR and NHOOK_HEATMAP_DIR point into the test's temporary folder.

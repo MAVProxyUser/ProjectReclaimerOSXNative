@@ -26,7 +26,8 @@ recompiles MCC's `halo3.dll` itself, so it needs neither this loader nor Rosetta
   `NATIVE_REAL=1`, else a test profile). The page is on http://127.0.0.1:8765/ (it opens in the browser): players, kills /
   deaths / assists, the kill feed, Connected list with each player's address, packets (with reverse-DNS names), the heatmap,
   game rules, the fps line, shots / accuracy, aim (how far each player's shots miss the hitboxes, and how many on-target
-  shots the server registers), weapon and vehicle spawns, page mutes, who is talking, chat; the overlay (hitboxes,
+  shots the server registers) with an Aimbot? outlier flag, a Hook cost panel (what each of our hooks costs, with an on/off
+  measure button), weapon and vehicle spawns, page mutes, who is talking, chat; the overlay (hitboxes,
   vehicles and weak spots, info labels, items, bullet tracers, kill / safe zones; "visible only" and zones hidden behind the
   world), clip recording, frame captures and /forensics.
 

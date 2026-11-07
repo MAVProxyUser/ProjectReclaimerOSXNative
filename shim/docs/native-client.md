@@ -174,7 +174,9 @@ Chat: the app prints its chat lines only with its chat_log byte set (a dedicated
 (nstats.c chat_log_tick), so chat / [SERVER] / notice lines reach the feed and the archive (FIXES.md, 2026-11-07).
 The kill feed ignores the history a client receives after joining a game in progress (FIXES.md "history is not a kill").
 Aim vs hits: the page's Aim column (FIXES.md "aim vs hits"): each straight shot's miss against the nearest enemy's posed
-hitboxes and whether the server then registered damage.
+hitboxes and whether the server then registered damage; the Aimbot? column flags lobby outliers from it.
+Hook cost: the page's Hook cost panel (nhcost.h; FIXES.md "the hook cost meter"): every hook and overlay part times itself,
+and "measure" switches one off and on in turns to give its real fps cost.
 
 Not yet: the packet log's game layer (halo3 message names; 0.10's wire protocol is the app's own).
 

@@ -25,6 +25,7 @@
 #include <libkern/OSCacheControl.h>
 
 static volatile uint64_t g_img;                 // the recompiled engine's image (guest halo3) as the app logs it
+#include "nhcost.h"                            // the hook cost meter: every hook times itself
 static int g_logfd = -1;                         // NHOOK_LOG=<file>: our lines go there too
 
 static void nlog(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
@@ -269,7 +270,7 @@ static int cam_is_world(const float* m, const float* c) {
         float v = r[0] * c[0] + r[1] * c[1] + r[2] * c[2] + r[3]; if (fabsf(v) > 0.02f * sc * (1.0f + sqrtf(c2))) return 0; }
     return 1;
 }
-static void on_view_param(uint64_t* ctx) {      // (only parameter 0x27 gets here: the stub filters)
+static void on_view_param_body(uint64_t* ctx) {      // (only parameter 0x27 gets here: the stub filters)
     uint32_t ecx = (uint32_t)ctx[1], el = ecx & 0xffff, cnt = (uint32_t)ctx[8]; uint64_t data = ctx[2];
     if (data < 0x100000000ull || data >= 0x800000000000ull) return;
     if (el == 0 && cnt >= 64) { memcpy(g_cam_pend.rows, (const void*)(uintptr_t)data, 64); g_cam_have_rows = 1; return; }
@@ -280,6 +281,7 @@ static void on_view_param(uint64_t* ctx) {      // (only parameter 0x27 gets her
         g_cam_seq++; __atomic_thread_fence(__ATOMIC_SEQ_CST); g_cam = g_cam_pend; __atomic_thread_fence(__ATOMIC_SEQ_CST); g_cam_seq++;
         struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); g_cam_t = ts.tv_sec + ts.tv_nsec * 1e-9; }
 }
+static void on_view_param(uint64_t* ctx) { if (g_hc_off[HC_VIEW]) return; uint64_t t0 = hc_now(); on_view_param_body(ctx); hc_add(HC_VIEW, t0); }
 int nh_camera(float* rows16, float* pos3) {     // the latest player view (1 = fresh: < 0.25 s)
     NhCam c; unsigned s1, s2; int tries = 0;
     do { s1 = g_cam_seq; memcpy(&c, (const void*)&g_cam, sizeof c); s2 = g_cam_seq; } while ((s1 != s2 || (s1 & 1)) && ++tries < 8);

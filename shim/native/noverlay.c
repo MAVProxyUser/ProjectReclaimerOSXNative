@@ -249,7 +249,7 @@ static void nov_aim_shot(const uint8_t* arr, const uint8_t* data, const uint8_t*
       a->rcount = (uint8_t)(rc > 32 ? 0 : rc); if (a->rcount) memcpy(a->perm, tp + roff + (size_t)a->rcount * 8, a->rcount); }
     __atomic_store_n(&a->seq, w + 1, __ATOMIC_RELEASE); __atomic_store_n(&g_nov_aim_w, w + 1, __ATOMIC_RELEASE); g_nov_aim_n++;
 }
-static void on_object_delete(uint64_t* ctx) {   // (x0: the guest context the app's own object_delete gets -- read through rd: checked)
+static void on_object_delete_body(uint64_t* ctx) {   // (x0: the guest context the app's own object_delete gets -- read through rd: checked)
     g_nov_del_calls++;
     uint64_t c2[2], tls = 0; static uint32_t idx = 0xFFFFFFFFu;
     if (!ctx || rd((uint64_t)(uintptr_t)ctx, c2, 16) || rd((uint64_t)(uintptr_t)ctx + 0x2d8, &tls, 8)) return;
@@ -268,12 +268,12 @@ static void on_object_delete(uint64_t* ctx) {   // (x0: the guest context the ap
           if (r2 > 0 && r2 < 5 && dx * dx + dy * dy + dz * dz <= r2 * r2) { vic = bh; break; } }
       unsigned q = __atomic_load_n(&g_nov_shot_n, __ATOMIC_RELAXED) & 8191; g_nov_shot[q].owner = own; g_nov_shot[q].victim = vic; g_nov_shot[q].def = *(uint32_t*)p;
       __atomic_store_n(&g_nov_shot_n, g_nov_shot_n + 1, __ATOMIC_RELEASE); }   // (one writer: the engine thread)
-    nov_aim_shot(arr, data, p);
+    if (!g_hc_off[HC_AIM]) { uint64_t t1 = hc_now(); nov_aim_shot(arr, data, p); hc_add(HC_AIM, t1); }
     unsigned k = __atomic_fetch_add(&g_nov_imp_n, 1, __ATOMIC_RELAXED) & 255; NovImp* r = &g_nov_imp[k];
     r->def = *(uint32_t*)p; r->owner = *(uint32_t*)(p + 0xC0); memcpy(r->pos, p + 0x1c, 12); memcpy(r->vel, p + 0x74, 12); memcpy(r->st, p + 0x1e8, 12); memcpy(&r->trav, p + 0x1b0, 4);
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); double tv = ts.tv_sec + ts.tv_nsec * 1e-9; __atomic_store(&r->t, &tv, __ATOMIC_RELEASE);
 }
-void nov_aim_tick(void) {   // nrender.m, every frame (the render thread owns hb_geom's cache)
+static void nov_aim_tick_body(void) {   // nrender.m, every frame (the render thread owns hb_geom's cache)
     static unsigned r; static NovAimRec a; unsigned w = __atomic_load_n(&g_nov_aim_w, __ATOMIC_ACQUIRE); if (w - r > NOV_AIM_N) r = w - NOV_AIM_N;
     for (; r != w; r++) {
         NovAimRec* src = &g_nov_aim[r % NOV_AIM_N]; if (__atomic_load_n(&src->seq, __ATOMIC_ACQUIRE) != r + 1) continue;
@@ -310,6 +310,8 @@ void nov_aim_tick(void) {   // nrender.m, every frame (the render thread owns hb
         __atomic_store_n(&g_nov_aimr_w, k + 1, __ATOMIC_RELEASE); g_nov_aim_done++;
     }
 }
+void nov_aim_tick(void) { if (g_hc_off[HC_AIMT]) return; uint64_t t0 = hc_now(); nov_aim_tick_body(); hc_add(HC_AIMT, t0); }
+static void on_object_delete(uint64_t* ctx) { if (g_hc_off[HC_DEL]) return; uint64_t t0 = hc_now(); on_object_delete_body(ctx); hc_add(HC_DEL, t0); }   // (timed: nhcost.h)
 static const float g_nov_teamcol[8][3] = {{1, 0.3f, 0.25f}, {0.35f, 0.6f, 1}, {0.35f, 1, 0.35f}, {1, 0.6f, 0.15f}, {0.75f, 0.4f, 1}, {1, 0.9f, 0.2f}, {0.75f, 0.55f, 0.35f}, {1, 0.55f, 0.8f}};
 
 // ---- zones (hitbox.c hbz_load / hbz_outline / hbz_draw, the loader's line mode): kill volumes (red) and safe zones (green)
@@ -395,7 +397,9 @@ static int nz_draw(float* v, int nv, int cap, const float* vp) {
 // The frame's overlay lines (nrender.m, the app's render thread, once per presented frame): w x h = the frame in pixels,
 // scale = pixels per point. Returns the vertex count (pairs = lines), 0 = nothing to draw.
 static pthread_mutex_t g_nov_mx = PTHREAD_MUTEX_INITIALIZER;
-int nov_build(float* verts, int cap, int w, int h, float scale) {
+static uint64_t g_hc_part[HC_N];   // this frame's ticks per overlay feature (nov_build_body)
+#define HC_PART(k, stmt) do { uint64_t t_ = hc_now(); stmt; g_hc_part[k] += hc_now() - t_; } while (0)
+static int nov_build_body(float* verts, int cap, int w, int h, float scale) {
     if (!nov_wanted() || !g_gameplay_t0 || w < 16 || h < 16) return 0;
     float vp[32]; if (!nov_camera(vp, (float)w / (float)h)) return 0;
     pthread_mutex_lock(&g_nov_mx);
@@ -408,22 +412,22 @@ int nov_build(float* verts, int cap, int w, int h, float scale) {
     for (int i = 0; i < n; i++) { const NovObj* o = &objs[i]; int veh = o->type == 1 || o->type == 12;
         float dx = o->c[0] - cam[0], dy = o->c[1] - cam[1], dz = o->c[2] - cam[2]; int self = dx * dx + dy * dy + dz * dz < (o->r + 0.3f) * (o->r + 0.3f);
         if (o->type == 5) { if (!ft || (g_nov_team[NOV_TRC] > 0 && !nov_team_ok(g_nov_team[NOV_TRC], nov_owner_cls(o->owner, objs, n)))) continue; nov_trail_add(o->handle, o->c, now); continue; }
-        if (o->type == 2 || o->type == 3) {
+        if (o->type == 2 || o->type == 3) { uint64_t ti_ = hc_now();
             if (fw && o->parent == 0xFFFFFFFFu) { float a[3] = {o->c[0] - 0.15f, o->c[1], o->c[2]}, b[3] = {o->c[0] + 0.15f, o->c[1], o->c[2]}, c2[3] = {o->c[0], o->c[1] - 0.15f, o->c[2]}, d2[3] = {o->c[0], o->c[1] + 0.15f, o->c[2]};
                 g_nov_occ = g_nov_vis[NOV_ITM]; const float* col = o->type == 2 ? citem : cequip; nv = nov_seg(verts, nv, cap, vp, a, b, col); nv = nov_seg(verts, nv, cap, vp, c2, d2, col);
                 float tx, ty; if (nov_proj(vp, o->c, &tx, &ty)) { nov_text_size(g_nov_px[NOV_ITM]); const char* nm = hb_tag_name(o->def); nv = nov_text(verts, nv, cap, tx - strlen(nm) * 2.5f * g_nov_gx, ty + 8 * g_nov_gy, nm, col); } }
-            continue; }
+            g_hc_part[HC_OV_ITM] += hc_now() - ti_; continue; }
         if (o->type >= 6 && o->type <= 10) {   // NHOOK_OV_DEBUG: an axis cross through the bounding centre, one radius each way
             static const float cdbg[3] = {1, 0.2f, 1};
             g_nov_occ = getenv("NHOOK_OV_DEBUG_OCC") != 0;
             for (int a = 0; a < 3; a++) { float p0[3] = {o->c[0], o->c[1], o->c[2]}, p1[3] = {o->c[0], o->c[1], o->c[2]}; p0[a] -= o->r; p1[a] += o->r; nv = nov_seg(verts, nv, cap, vp, p0, p1, cdbg); }
             continue; }
         if (self) continue;
-        if (veh) { g_nov_occ = g_nov_vis[NOV_VEH]; if (fveh && (g_nov_team[NOV_VEH] <= 0 || nov_team_ok(g_nov_team[NOV_VEH], nov_occ_cls(o->handle, objs, n)))) nv = nov_hitbox(o, vp, verts, nv, cap); continue; }
+        if (veh) { g_nov_occ = g_nov_vis[NOV_VEH]; if (fveh && (g_nov_team[NOV_VEH] <= 0 || nov_team_ok(g_nov_team[NOV_VEH], nov_occ_cls(o->handle, objs, n)))) HC_PART(HC_OV_VEH, nv = nov_hitbox(o, vp, verts, nv, cap)); continue; }
         if (o->type != 0) continue;
         int cls = nov_bip_cls(o);
-        g_nov_occ = g_nov_vis[NOV_HIT]; if (fh && nov_team_ok(g_nov_team[NOV_HIT], cls)) nv = nov_hitbox(o, vp, verts, nv, cap);
-        if (fi && nov_team_ok(g_nov_team[NOV_INF], cls)) {
+        g_nov_occ = g_nov_vis[NOV_HIT]; if (fh && nov_team_ok(g_nov_team[NOV_HIT], cls)) HC_PART(HC_OV_HIT, nv = nov_hitbox(o, vp, verts, nv, cap));
+        if (fi && nov_team_ok(g_nov_team[NOV_INF], cls)) { uint64_t tf_ = hc_now();
             g_nov_occ = g_nov_vis[NOV_INF]; float top[3] = {o->c[0], o->c[1], o->c[2] + o->r + 0.12f}, tx, ty; if (!nov_proj(vp, top, &tx, &ty)) continue;
             nov_text_size(g_nov_px[NOV_INF]);
             const float* tc = o->team >= 0 && o->team < 8 ? g_nov_teamcol[o->team] : cwhite;
@@ -440,9 +444,9 @@ int nov_build(float* verts, int cap, int w, int h, float scale) {
             float lh = 8 * g_nov_gy, y = ty + 3 * lh;
             nv = nov_text(verts, nv, cap, tx - strlen(l1) * 2.5f * g_nov_gx, y, l1, tc); y -= lh;
             nv = nov_text(verts, nv, cap, tx - strlen(l2) * 2.5f * g_nov_gx, y, l2, cwhite); y -= lh;
-            if (l3[0]) nv = nov_text(verts, nv, cap, tx - strlen(l3) * 2.5f * g_nov_gx, y, l3, o->camo > 0.05f ? cequip : cgrey); }
+            if (l3[0]) nv = nov_text(verts, nv, cap, tx - strlen(l3) * 2.5f * g_nov_gx, y, l3, o->camo > 0.05f ? cequip : cgrey); g_hc_part[HC_OV_INF] += hc_now() - tf_; }
     }
-    if (ft) { g_nov_occ = g_nov_vis[NOV_TRC];
+    uint64_t tt_ = hc_now(); if (ft) { g_nov_occ = g_nov_vis[NOV_TRC];
         for (int t = 0; t < 256; t++) { NovTrail* tr = &g_nov_trails[t]; if (!tr->n) continue; if (now - tr->seen > 0.6) { tr->n = 0; continue; }
             int cnt = tr->n < 32 ? tr->n : 32; for (int k = 1; k < cnt; k++) nv = nov_seg(verts, nv, cap, vp, tr->p[(tr->n - 1 - k) & 31], tr->p[(tr->n - k) & 31], ctrace); }
         for (int i = 0; i < n; i++) { const NovObj* o = &objs[i]; if (o->type != 5) continue; float sp = sqrtf(o->vel[0] * o->vel[0] + o->vel[1] * o->vel[1] + o->vel[2] * o->vel[2]); if (sp < 1e-4f) continue;
@@ -457,9 +461,17 @@ int nov_build(float* verts, int cap, int w, int h, float scale) {
             nv = nov_seg_clip(verts, nv, cap, vp, a, r->pos, ctrace);
             float x0[3] = {r->pos[0] - 0.05f, r->pos[1], r->pos[2]}, x1[3] = {r->pos[0] + 0.05f, r->pos[1], r->pos[2]}; nv = nov_seg_clip(verts, nv, cap, vp, x0, x1, cvel); }
     }
-    if (nov_feat(NOV_ZON)) { g_nov_occ = 1; nv = nz_draw(verts, nv, cap, vp); }   // zones: always hidden behind the world (the loader's)
+    g_hc_part[HC_OV_TRC] += hc_now() - tt_;
+    if (nov_feat(NOV_ZON)) { g_nov_occ = 1; HC_PART(HC_OV_ZON, nv = nz_draw(verts, nv, cap, vp)); }   // zones: always hidden behind the world (the loader's)
     g_nov_occ = 0;
     pthread_mutex_unlock(&g_nov_mx);
+    return nv;
+}
+int nov_build(float* verts, int cap, int w, int h, float scale) {   // (timed: nhcost.h; a feature's own parts apart)
+    uint64_t t0 = hc_now(); memset(g_hc_part, 0, sizeof g_hc_part); int nv = nov_build_body(verts, cap, w, h, scale); uint64_t all = hc_now() - t0, parts = 0;
+    static const int fk[6] = {HC_OV_HIT, HC_OV_VEH, HC_OV_TRC, HC_OV_INF, HC_OV_ITM, HC_OV_ZON}, fb[6] = {NOV_HIT, NOV_VEH, NOV_TRC, NOV_INF, NOV_ITM, NOV_ZON};
+    for (int i = 0; i < 6; i++) if (nov_feat(fb[i])) { hc_add_ticks(fk[i], g_hc_part[fk[i]]); __atomic_fetch_add(&g_hc[fk[i]].calls, 1, __ATOMIC_RELAXED); parts += g_hc_part[fk[i]]; }
+    hc_add_ticks(HC_OV, all > parts ? all - parts : 0); __atomic_fetch_add(&g_hc[HC_OV].calls, 1, __ATOMIC_RELAXED);
     return nv;
 }
 
