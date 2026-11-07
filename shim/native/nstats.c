@@ -519,6 +519,7 @@ static int st_send(int fd, const char* b, size_t n);
 static void pk_forensic_tick(void) {
     static uint32_t last; uint32_t top = __atomic_load_n(&g_pk_seq, __ATOMIC_ACQUIRE); if (!last) { last = top; return; }
     if (!g_pk_on || !g_fx_on || !g_fxr.key[0]) { last = top; return; }
+    g_pk_want_rdns = 1;                                        // (the writer thread's own: names into the archive)
     uint32_t lo = last + 1, lost = 0; if (top > last + PK_N - 64) { lost = top - last - (PK_N - 64); lo = top - (PK_N - 64) + 1; } last = top;
     static PkAgg a[1024]; int na = 0; PkEv e; for (uint32_t q = lo; q <= top; q++) if (pk_get(q, &e)) na = pk_agg_add(a, na, 1024, &e); else lost++;
     for (int i = 0; i < na; i++) { StBuf b = {0}; pk_agg_json(&b, &a[i], 1, 0); if (b.b) fx_push(FXI_PACKETS, b.b, b.n, 0, 0); free(b.b); }

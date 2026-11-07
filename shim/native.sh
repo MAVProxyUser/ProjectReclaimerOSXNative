@@ -18,6 +18,7 @@ MCC="$(cat "$PROF/mcc-folder.txt" 2>/dev/null)"
 export NHOOK_HALO3="${NHOOK_HALO3:-$MCC/halo3/halo3.dll}"
 # the stats page from the checkout (edits show on a browser refresh; the dylib's built-in copy otherwise)
 [ -f shim/src/stats_page.html ] && export NHOOK_STATS_PAGE="${NHOOK_STATS_PAGE:-$PWD/shim/src/stats_page.html}"
+[ -f shim/src/forensic_page.html ] && export PELOAD_FORENSIC_PAGE="${PELOAD_FORENSIC_PAGE:-$PWD/shim/src/forensic_page.html}"
 LOG="${NATIVE_LOG:-/tmp/reclaimer_native.log}"
 # one game at a time (the user's own included): wait up to 30 s for a test instance that is ending, refuse otherwise
 for i in $(seq 1 30); do pgrep -f 'Project Reclaimer.app/Contents/MacOS/project-reclaimer' >/dev/null || break; sleep 1; done

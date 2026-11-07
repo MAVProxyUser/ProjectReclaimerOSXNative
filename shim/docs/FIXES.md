@@ -1767,6 +1767,10 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   the native app yet). The players table gets an IP column (the session peer's address from the app's `[online] peer`
   lines, + reverse DNS); the Packets panel sits below the players table. shim/native.sh test runs archive into
   ReclaimerMac/native/test-forensics.
+- **/forensics Packets: the player at each address** (2026-11-07; forensic_page.html, nnet.c, nstats.c) — the archive's
+  packets.jsonl lines carry the native app's "player" (the session peer at that address) and "rdns" (reverse DNS, now
+  always asked for the archive: g_pk_want_rdns is per thread, the forensic writer's on); the page shows both beside each
+  peer (demo mode: player aliased, rdns dropped). shim/native.sh serves forensic_page.html from the checkout too.
 
 - **"Run 2.4x" removed** (2026-10-19, revert 606a38c) — it crashed the client as soon as it was used; the user asked for it
   to be deleted. The page's Speed 2x / speed menu (the host's movement-speed trait) is unchanged. (10-19)

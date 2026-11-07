@@ -119,7 +119,8 @@ static int pk_rdns_str(const char* ipport, char* out, size_t on) {   // reverse 
     PkEv e; memset(&e, 0, sizeof e);
     if (inet_pton(AF_INET, q, e.addr) == 1) e.fam = 4; else if (inet_pton(AF_INET6, q, e.addr) == 1) e.fam = 6; else return 0;
     return pk_rdns(&e, out, on); }
-static int g_pk_want_rdns;                                   // (this /packets.json request asked for names; under pk_json's lock)
+static __thread int g_pk_want_rdns;                          // this thread's records get reverse-DNS names (a /packets.json request with
+                                                             // rdns=1; the forensic writer always: its packets.jsonl lines keep them)
 static void pk_peer_json(StBuf* s, const PkEv* e) {
     char peer[80] = "", host[48], ip[64], who[64], rn[128];
     if (e->fam) { inet_ntop(e->fam == 6 ? AF_INET6 : AF_INET, e->addr, ip, sizeof ip); snprintf(peer, sizeof peer, e->fam == 6 ? "[%s]:%u" : "%s:%u", ip, e->rport); }
