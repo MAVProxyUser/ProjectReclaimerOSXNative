@@ -130,12 +130,13 @@ static void* pk_rdns_thread(void* a) {
     }
     return 0;
 }
-static int pk_rdns(const PkEv* e, char* out, size_t on) {      // 1 = named; unknown addresses are queued
-    static int started; if (!started) { started = 1; pthread_t t; pthread_create(&t, 0, pk_rdns_thread, 0); pthread_detach(t); }
+static int pk_rdns(const PkEv* e, char* out, size_t on) {      // 1 = named, 2 = looked up: no name; unknown addresses are queued
+    static int started; if (!started) { started = 1; pthread_t t; nh_thread(&t, pk_rdns_thread, 0, QOS_CLASS_BACKGROUND); }
     int got = 0; pthread_mutex_lock(&g_pkrd_mx); int k = 0;
     for (; k < g_npkrd; k++) if (g_pkrd[k].fam == e->fam && !memcmp(g_pkrd[k].a, e->addr, 16)) break;
     if (k == g_npkrd) { if (g_npkrd < 2048) { g_pkrd[k].fam = e->fam; memcpy(g_pkrd[k].a, e->addr, 16); g_pkrd[k].st = 0; g_npkrd++; pthread_cond_signal(&g_pkrd_cv); } }
     else if (g_pkrd[k].st == 1) { snprintf(out, on, "%s", g_pkrd[k].name); got = 1; }
+    else if (g_pkrd[k].st == 2) got = 2;
     pthread_mutex_unlock(&g_pkrd_mx); return got; }
 static int pk_addr_of(uint64_t id, char* out, size_t on) {   // a session peer id -> "ip:port" (the app's [online] peer lines)
     int ok = 0; pthread_mutex_lock(&g_pkp_mx); for (int k = 0; k < g_npkp; k++) if (g_pkp[k].id == id) { snprintf(out, on, "%s", g_pkp[k].addr); ok = 1; break; }
@@ -154,7 +155,8 @@ static void pk_peer_json(StBuf* s, const PkEv* e) {
     pk_host(e, host, sizeof host);
     if (peer[0]) { sb_put(s, ",\"peer\":"); sb_str(s, peer); } if (host[0]) { sb_put(s, ",\"host\":"); sb_str(s, host); }
     if (peer[0] && pk_player(peer, who, sizeof who)) { sb_put(s, ",\"player\":"); sb_str(s, who); }
-    if (e->fam && g_pk_want_rdns && pk_rdns(e, rn, sizeof rn)) { sb_put(s, ",\"rdns\":"); sb_str(s, rn); } }
+    int rr = e->fam && g_pk_want_rdns ? pk_rdns(e, rn, sizeof rn) : 0;
+    if (rr == 1) { sb_put(s, ",\"rdns\":"); sb_str(s, rn); } else if (rr == 2) sb_put(s, ",\"rdns_none\":true"); }   // (the page: "no DNS name")
 enum { PKF_SPIN = 1, PKF_GREASED = 2 };
 static void pk_cpy(char* type, const char* s) { size_t n = strlen(s); if (n > 23) n = 23; memcpy(type, s, n); type[n] = 0; }
 static void pk_classify(const uint8_t* b, long n, char* type, uint8_t* fl) {

@@ -300,7 +300,7 @@ static void st_maptop_ensure(const char* mp, const char* name) {
     posix_spawn_file_actions_destroy(&fa); posix_spawnattr_destroy(&at);
     if (r) { g_mt_state = 3; return; }
     g_mt_state = 2; nlog("[nhook] making the map picture for %s", name);
-    pthread_t th; pthread_create(&th, 0, st_reap, (void*)(intptr_t)pid); pthread_detach(th);
+    pthread_t th; nh_thread(&th, st_reap, (void*)(intptr_t)pid, QOS_CLASS_BACKGROUND);
 }
 
 // ---- players and tracking (stats.c) ---------------------------------------------------------------------------------
@@ -483,10 +483,14 @@ static void st_roster(const StPlayer* pl, int np, const char* map) {
 // (11), 4 suicides (13), 5 betrayals (12), 6 assists (10), 7 rounds won (6). The game engine replicates it to every
 // client (each change marks the player's network bit), so a joined client reads the server's scoreboard.
 enum { SB_SCORE = 0, SB_KILLS = 2, SB_DEATHS = 3, SB_SUICIDES = 4, SB_BETRAYALS = 5, SB_ASSISTS = 6 };
+static __thread int t_sb_memo; static __thread uint8_t t_sb_blk[128 * 0x40]; static __thread int t_sb_ok;   // (the snapshot: one read per run)
 static int st_statborg(int slot, int16_t out[8]) {
-    uint64_t blk = tls_block(), geg = 0;
-    if (!blk || slot < 0 || slot >= 128 || !hb_read(blk + 0x20, &geg, 8) || !geg) return 0;
-    if (!hb_read(geg + (uint64_t)g_sb_off + (uint64_t)slot * 0x40, out, 16)) return 0;
+    if (slot < 0 || slot >= 128) return 0;
+    if (t_sb_memo) { if (t_sb_memo == 1) { uint64_t blk = tls_block(), geg = 0; t_sb_ok = blk && hb_read(blk + 0x20, &geg, 8) && geg && hb_read(geg + (uint64_t)g_sb_off, t_sb_blk, sizeof t_sb_blk); t_sb_memo = 2; }
+        if (!t_sb_ok) return 0; memcpy(out, t_sb_blk + slot * 0x40, 16); }
+    else { uint64_t blk = tls_block(), geg = 0;
+        if (!blk || !hb_read(blk + 0x20, &geg, 8) || !geg) return 0;
+        if (!hb_read(geg + (uint64_t)g_sb_off + (uint64_t)slot * 0x40, out, 16)) return 0; }
     for (int i = 0; i < 7; i++) if (out[i] < -30000 || out[i] > 30000) return 0;
     return 1;
 }
@@ -724,9 +728,39 @@ static void st_engine_events(const StPlayer* pl, int np) {
 // overlay feature (its g_nov_on bit; "overlay" = every feature you had on) on and off in turns of `per` seconds, starting
 // on. hc_frame (nrender.m, every presented frame) counts frames per phase after a 0.5 s settle; each on/off pair gives a
 // difference, the result is their median (spread = the lowest and highest pair). The state is put back as it was.
-typedef struct { int have, pairs; double on_fps, off_fps, loss, lo, hi, when; } HcRes;
+static volatile unsigned long g_snap_rd_n, g_snap_rd_b, g_snap_oc_hits, g_snap_oc_mb100;   // the last snapshot: reads (system calls), bytes, reads answered from the object copy, its size (MB x 100)
+// What the snapshot reads, copied once per run (rd answers the snapshot thread's reads inside these copies): the engine's
+// object memory (every object's data: 1,162 objects in 4-6 MB on an 80-player Hugegrass, 2026-11-07, plus 4 KB for the last
+// one), the players data array and the network session's player / peer tables -- read in 16 KB pieces (a piece that fails is
+// marked: reads there go to the system again). 4,032 system calls a run became ~350. NHOOK_NO_OCACHE=1 = off.
+typedef struct { uint8_t* buf, * ok; size_t cap; } OcBuf;
+static OcBuf g_ocb[RD_NCOPY];
+static void oc_add(uint64_t lo, uint64_t hp) {   // copy [lo, hp) as the next region
+    if (t_noc >= RD_NCOPY || hp <= lo || hp - lo > (64u << 20)) return; OcBuf* b = &g_ocb[t_noc];
+    lo &= ~(uint64_t)(RD_CHUNK - 1); size_t nc = (size_t)((hp - lo + RD_CHUNK - 1) / RD_CHUNK), n = nc * RD_CHUNK;
+    if (n > b->cap) { free(b->buf); free(b->ok); b->buf = malloc(n); b->ok = malloc(nc); b->cap = b->buf && b->ok ? n : 0; if (!b->cap) return; }
+    for (size_t c = 0; c < nc; c++) { mach_vm_size_t got = 0; b->ok[c] = mach_vm_read_overwrite(mach_task_self(), lo + c * RD_CHUNK, RD_CHUNK, (mach_vm_address_t)(b->buf + c * RD_CHUNK), &got) == KERN_SUCCESS && got == RD_CHUNK; }
+    t_rd_n += nc; RdCopy* q = &t_oc[t_noc++]; q->buf = b->buf; q->ok = b->ok; q->lo = lo; q->hi = lo + n; g_snap_oc_mb100 += (unsigned long)(n / 10485.76);
+}
+static uint64_t st_sess_ptr(void);
+static void st_ocache_fill(void) {
+    static int off = -1; if (off < 0) off = getenv("NHOOK_NO_OCACHE") != 0; t_noc = 0; g_snap_oc_mb100 = 0; if (off) return;
+    uint64_t arr = hb_object_array(); uint8_t hdr[0x60]; static uint8_t tb[HB_MAXOBJ * 0x18];
+    if (arr && hb_read(arr, hdr, sizeof hdr) && *(uint32_t*)(hdr + 0x2c) == 0x64407440 && *(int32_t*)(hdr + 0x24) == 0x18) {
+        int hi = *(int32_t*)(hdr + 0x3c);
+        if (hi > 0 && hi <= HB_MAXOBJ && hb_read(*(uint64_t*)(hdr + 0x48), tb, (size_t)hi * 0x18)) {
+            uint64_t lo = ~0ull, hp = 0; for (int i = 0; i < hi; i++) { uint64_t q = *(uint64_t*)(tb + i * 0x18 + 0x10); if (!*(uint16_t*)(tb + i * 0x18) || !q) continue; if (q < lo) lo = q; if (q > hp) hp = q; }
+            if (hp) oc_add(lo, hp + 4096); } }
+    uint64_t blk = tls_block(), parr = 0;   // the players data array: count x element size from its header
+    if (blk && hb_read(blk + 0x10, &parr, 8) && parr && hb_read(parr, hdr, sizeof hdr) && *(uint32_t*)(hdr + 0x2c) == 0x64407440) {
+        int32_t es = *(int32_t*)(hdr + 0x24), hi = *(int32_t*)(hdr + 0x3c); uint64_t pd = *(uint64_t*)(hdr + 0x48);
+        if (es >= 0x98 && es <= 0x10000 && hi > 0 && hi <= 256 && pd) oc_add(pd, pd + (uint64_t)es * (uint64_t)hi); }
+    uint64_t sess = st_sess_ptr();          // the session: its player table (+0x1270, 0xc8 each) and peer table (+0x58, 0x110 each)
+    if (sess) { uint64_t pb = sess + 0x1270 + (uint64_t)g_ses_players_shift, qb = sess + 0x58 + (uint64_t)g_ses_peers_shift; oc_add(pb, pb + 128 * 0xc8); oc_add(qb, qb + 128 * 0x110); }
+}
+typedef struct { int have, pairs; double on_fps, off_fps, loss, lo, hi, when, p95_on, p95_off, max_on, max_off; } HcRes;   // (p95 / max: frame times, ms)
 static HcRes g_hcres[HC_N];
-static struct { int state, k, on, nph; uint32_t bits, saved_bits; uint8_t saved_off; double secs, per, t0, ph_t0, ph_tc; unsigned frames; float fps[64]; } g_hcab;
+static struct { int state, k, on, nph; uint32_t bits, saved_bits; uint8_t saved_off; double secs, per, t0, ph_t0, ph_tc, last; unsigned frames; float fps[64], p95[64], fmax[64]; int niv; float iv[2048]; } g_hcab;
 static pthread_mutex_t g_hcab_mx = PTHREAD_MUTEX_INITIALIZER;
 static int hc_find(const char* id) { for (int k = 0; k < HC_N; k++) if (!strcmp(g_hc[k].id, id)) return k; return -1; }
 static uint32_t hc_bits(int k) { switch (k) { case HC_OV_HIT: return 1u << NOV_HIT; case HC_OV_VEH: return 1u << NOV_VEH; case HC_OV_TRC: return 1u << NOV_TRC;
@@ -742,22 +776,29 @@ static int hc_fcmp(const void* a, const void* b) { double x = *(const double*)a,
 static void hc_finish(double now) {   // (g_hcab_mx held)
     HcRes* r = &g_hcres[g_hcab.k]; double on[32], off[32], d[32]; int n = 0;
     for (int i = 0; i + 1 < g_hcab.nph && n < 32; i += 2) if (g_hcab.fps[i] > 0 && g_hcab.fps[i + 1] > 0) { on[n] = g_hcab.fps[i]; off[n] = g_hcab.fps[i + 1]; d[n] = off[n] - on[n]; n++; }
+    double p95on[32], p95off[32], mxon[32], mxoff[32]; int m = 0;
+    for (int i = 0; i + 1 < g_hcab.nph && m < 32; i += 2) if (g_hcab.fps[i] > 0 && g_hcab.fps[i + 1] > 0) { p95on[m] = g_hcab.p95[i]; p95off[m] = g_hcab.p95[i + 1]; mxon[m] = g_hcab.fmax[i]; mxoff[m] = g_hcab.fmax[i + 1]; m++; }
     hc_restore(); g_hcab.state = 0;
     if (!n) return; memset(r, 0, sizeof *r); r->have = 1; r->pairs = n; r->when = now;
+    qsort(p95on, (size_t)m, 8, hc_fcmp); qsort(p95off, (size_t)m, 8, hc_fcmp); qsort(mxon, (size_t)m, 8, hc_fcmp); qsort(mxoff, (size_t)m, 8, hc_fcmp);
+    r->p95_on = p95on[m / 2]; r->p95_off = p95off[m / 2]; r->max_on = mxon[m / 2]; r->max_off = mxoff[m / 2];
     qsort(on, (size_t)n, 8, hc_fcmp); qsort(off, (size_t)n, 8, hc_fcmp); qsort(d, (size_t)n, 8, hc_fcmp);
     r->on_fps = on[n / 2]; r->off_fps = off[n / 2]; r->loss = d[n / 2]; r->lo = d[0]; r->hi = d[n - 1];
-    nlog("[nhook] hook cost: %s on %.1f fps, off %.1f fps -> costs %.2f fps (pairs %d, %.2f .. %.2f)", g_hc[g_hcab.k].id, r->on_fps, r->off_fps, r->loss, n, r->lo, r->hi); }
+    nlog("[nhook] hook cost: %s on %.1f fps, off %.1f fps -> costs %.2f fps (pairs %d, %.2f .. %.2f); frame p95 %.1f / %.1f ms, max %.1f / %.1f ms (on / off)", g_hc[g_hcab.k].id, r->on_fps, r->off_fps, r->loss, n, r->lo, r->hi, r->p95_on, r->p95_off, r->max_on, r->max_off); }
 void hc_frame(double now) {   // nrender.m nr_frame: every presented frame
     if (!__atomic_load_n(&g_hcab.state, __ATOMIC_ACQUIRE)) return;
     pthread_mutex_lock(&g_hcab_mx);
-    if (g_hcab.state == 1) { g_hcab.state = 2; g_hcab.t0 = now; g_hcab.nph = 0; hc_apply(1); g_hcab.ph_t0 = now; g_hcab.frames = 0; g_hcab.ph_tc = 0; }
+    if (g_hcab.state == 1) { g_hcab.state = 2; g_hcab.t0 = now; g_hcab.nph = 0; g_hcab.niv = 0; hc_apply(1); g_hcab.ph_t0 = now; g_hcab.frames = 0; g_hcab.ph_tc = 0; }
     else if (g_hcab.state == 2) {
-        if (now - g_hcab.ph_t0 >= 0.5) { if (!g_hcab.ph_tc) g_hcab.ph_tc = now; else g_hcab.frames++; }   // (frames after the settle)
+        if (now - g_hcab.ph_t0 >= 0.5) { if (!g_hcab.ph_tc) g_hcab.ph_tc = now; else { g_hcab.frames++; if (g_hcab.niv < 2048 && g_hcab.last > 0) g_hcab.iv[g_hcab.niv++] = (float)((now - g_hcab.last) * 1e3); } }   // (frames after the settle)
         if (now - g_hcab.ph_t0 >= g_hcab.per) {
-            double el = g_hcab.ph_tc ? now - g_hcab.ph_tc : 0; if (g_hcab.nph < 64) g_hcab.fps[g_hcab.nph++] = el > 0.2 ? (float)(g_hcab.frames / el) : 0;
+            double el = g_hcab.ph_tc ? now - g_hcab.ph_tc : 0;
+            if (g_hcab.nph < 64) { int ni = g_hcab.niv; float* v = g_hcab.iv; for (int i = 1; i < ni; i++) { float x = v[i]; int j = i - 1; while (j >= 0 && v[j] > x) { v[j + 1] = v[j]; j--; } v[j + 1] = x; }
+                g_hcab.p95[g_hcab.nph] = ni ? v[(ni * 95) / 100 < ni ? (ni * 95) / 100 : ni - 1] : 0; g_hcab.fmax[g_hcab.nph] = ni ? v[ni - 1] : 0;
+                g_hcab.fps[g_hcab.nph++] = el > 0.2 ? (float)(g_hcab.frames / el) : 0; } g_hcab.niv = 0;
             if (now - g_hcab.t0 >= g_hcab.secs && !(g_hcab.nph & 1)) hc_finish(now);
             else { hc_apply(!g_hcab.on); g_hcab.ph_t0 = now; g_hcab.frames = 0; g_hcab.ph_tc = 0; } } }
-    pthread_mutex_unlock(&g_hcab_mx); }
+    g_hcab.last = now; pthread_mutex_unlock(&g_hcab_mx); }
 static int hc_control(const char* qs) {   // do=hookab
     pthread_mutex_lock(&g_hcab_mx); int ok = 0;
     if (strstr(qs, "stop=1")) { if (g_hcab.state) { if (g_hcab.state == 2) hc_restore(); g_hcab.state = 0; } ok = 1; }
@@ -785,9 +826,11 @@ static void hc_json(StBuf* s, double now) {
         if (g_hc[k].crit && p50 > 0.5 && fps > 0) { double rest = p50 - msf; cost = rest > 0.1 ? 1000.0 / rest - 1000.0 / p50 : -1; }
         const HcRes* r = &g_hcres[k];
         sb_put(s, "%s{\"id\":\"%s\",\"name\":", k ? "," : "", g_hc[k].id); sb_str(s, g_hc[k].name);
+        if (k == HC_SNAP) sb_put(s, ",\"reads\":%lu,\"read_bytes\":%lu,\"cached_reads\":%lu,\"copy_mb\":%.2f", g_snap_rd_n, g_snap_rd_b, g_snap_oc_hits, g_snap_oc_mb100 / 100.0);
         sb_put(s, ",\"thread\":\"%s\",\"crit\":%s,\"on\":%s,\"calls_s\":%.1f,\"us_call\":%.2f,\"ms_s\":%.3f,\"ms_frame\":%.3f,\"pct\":%.2f,\"fps_cost\":%.2f,\"total\":%llu",
                g_hc[k].thread, g_hc[k].crit ? "true" : "false", on ? "true" : "false", rc[k], rc[k] > 0 ? ms * 1e3 / rc[k] : 0, ms, msf, p50 > 0 ? 100 * msf / p50 : 0, cost, (unsigned long long)g_hc[k].calls);
-        if (r->have) sb_put(s, ",\"ab\":{\"on_fps\":%.2f,\"off_fps\":%.2f,\"loss\":%.2f,\"lo\":%.2f,\"hi\":%.2f,\"pairs\":%d,\"age\":%.0f}", r->on_fps, r->off_fps, r->loss, r->lo, r->hi, r->pairs, now - r->when);
+        if (r->have) sb_put(s, ",\"ab\":{\"on_fps\":%.2f,\"off_fps\":%.2f,\"loss\":%.2f,\"lo\":%.2f,\"hi\":%.2f,\"pairs\":%d,\"age\":%.0f,\"p95_on\":%.1f,\"p95_off\":%.1f,\"max_on\":%.1f,\"max_off\":%.1f}",
+                           r->on_fps, r->off_fps, r->loss, r->lo, r->hi, r->pairs, now - r->when, r->p95_on, r->p95_off, r->max_on, r->max_off);
         sb_put(s, "}"); }
     pthread_mutex_lock(&g_hcab_mx);
     sb_put(s, "],\"measuring\":%s", g_hcab.state ? "{" : "null");
@@ -883,6 +926,7 @@ static int g_st_layout = 1;                                // the session's exte
 static uint8_t* hb_halo3_base(void) { return (uint8_t*)(uintptr_t)g_img; }
 static char g_cmdlineA[1100];                              // "join?server=<addr>" for a --join-server launch (forensic.c fx_join_server)
 static int st_send(int fd, const char* b, size_t n);
+#define NHOOK_NATIVE 1   // (forensic.c: the native build -- its writer thread at a low priority)
 #include "../src/forensic.c"
 // the last second's packet records summed per (direction, type, peer) -> packets.jsonl (pktlog.c pk_forensic_tick)
 static void pk_forensic_tick(void) {
@@ -931,6 +975,9 @@ static void st_snapshot(StBuf* s) {
     static uint8_t tab[HB_MAXOBJ * 0x18]; int hi = 0; uint64_t arr = hb_object_array(); uint8_t hdr[0x60];
     if (arr && hb_read(arr, hdr, sizeof hdr) && *(uint32_t*)(hdr + 0x2c) == 0x64407440 && *(int32_t*)(hdr + 0x24) == 0x18) {
         hi = *(int32_t*)(hdr + 0x3c);
+        if (t_rd_prof) { static double tl; if (now - tl > 10) { tl = now; uint64_t lo = ~0ull, hp = 0; int nn = 0; static uint8_t tb2[HB_MAXOBJ * 0x18]; int h2 = hi < HB_MAXOBJ ? hi : HB_MAXOBJ;
+            if (hb_read(*(uint64_t*)(hdr + 0x48), tb2, (size_t)h2 * 0x18)) for (int i = 0; i < h2; i++) { uint64_t q = *(uint64_t*)(tb2 + i * 0x18 + 0x10); if (!*(uint16_t*)(tb2 + i * 0x18) || !q) continue; nn++; if (q < lo) lo = q; if (q > hp) hp = q; }
+            nlog("[nhook] [rdprof] object data: %d objects between 0x%llx and 0x%llx (%.1f MB)", nn, (unsigned long long)lo, (unsigned long long)hp, nn ? (hp - lo) / 1048576.0 : 0.0); } }
         if (hi < 0 || hi > HB_MAXOBJ || hi > *(int32_t*)(hdr + 0x20) || !hb_read(*(uint64_t*)(hdr + 0x48), tab, (size_t)hi * 0x18)) hi = 0;
     }
     #define ST_DATUM(h) ((((h) & 0xFFFF) < (uint32_t)hi && (h) != 0xFFFFFFFFu && *(uint16_t*)(tab + ((h) & 0xFFFF) * 0x18) == (uint16_t)((h) >> 16)) ? *(uint64_t*)(tab + ((h) & 0xFFFF) * 0x18 + 0x10) : 0)
@@ -1104,7 +1151,15 @@ static void* st_snap_thread(void* a) {
     (void)a; pthread_setname_np("nhook-stats-snap");
     for (;;) {
         if (g_hc_off[HC_SNAP]) { usleep(100000); continue; }   // (the hook cost measurement: snapshots paused)
-        uint64_t t0 = hc_now(); StBuf s = {0}; st_snapshot(&s); hc_add(HC_SNAP, t0);
+        static int prof = -1; if (prof < 0) prof = getenv("NHOOK_RD_PROF") != 0; t_rd_prof = prof;
+        unsigned long n0 = t_rd_n, b0 = t_rd_b, h0 = t_oc_hits; uint64_t t0 = hc_now(); StBuf s = {0};
+        t_tls_memo = 1; t_sb_memo = 1; st_ocache_fill(); st_snapshot(&s); t_noc = 0; t_tls_memo = 0; t_sb_memo = 0; hc_add(HC_SNAP, t0);
+        g_snap_rd_n = t_rd_n - n0; g_snap_rd_b = t_rd_b - b0; g_snap_oc_hits = t_oc_hits - h0;
+        if (prof) { static double tl; double nw = mono_s(); if (nw - tl > 10) { tl = nw; Dl_info di; uintptr_t base = 0; if (dladdr((void*)&st_snapshot, &di)) base = (uintptr_t)di.dli_fbase;
+            nlog("[nhook] [rdprof] the snapshot: %lu system calls, %lu bytes a run (%lu reads answered from the %.1f MB object copy); sites over 10 s (nhook.dylib offsets, atos -o shim/build/nhook.dylib -l 0x0):", g_snap_rd_n, g_snap_rd_b, g_snap_oc_hits, g_snap_oc_mb100 / 100.0);
+            for (int i = 0; i < g_rd_nsite; i++) for (int j = i + 1; j < g_rd_nsite; j++) if (g_rd_site[j].n > g_rd_site[i].n) { __typeof__(g_rd_site[0]) x = g_rd_site[i]; g_rd_site[i] = g_rd_site[j]; g_rd_site[j] = x; }
+            for (int i = 0; i < g_rd_nsite && i < 14; i++) nlog("[nhook] [rdprof]   0x%lx: %lu reads, %lu bytes", (unsigned long)(g_rd_site[i].site - base), g_rd_site[i].n, g_rd_site[i].b);
+            g_rd_nsite = 0; } }
         if (s.b) { pthread_mutex_lock(&g_st_mx); free(g_st_json); g_st_json = s.b; g_st_len = s.n; g_st_seq++; pthread_cond_broadcast(&g_st_cv); pthread_mutex_unlock(&g_st_mx); }
         usleep(100000);
     }
@@ -1245,7 +1300,7 @@ static void* st_open_thread(void* a) {
 }
 static void* st_listen_thread(void* a) {
     (void)a; pthread_setname_np("nhook-stats-listen");
-    { pthread_t t; pthread_create(&t, 0, st_snap_thread, 0); pthread_detach(t); }
+    { pthread_t t; nh_thread(&t, st_snap_thread, 0, QOS_CLASS_UTILITY); }
     int ls = -1;
     for (int tr = 0; ls < 0; tr++) {
         ls = socket(AF_INET, SOCK_STREAM, 0); int one = 1; setsockopt(ls, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one); fcntl(ls, F_SETFD, FD_CLOEXEC);
@@ -1258,7 +1313,7 @@ static void* st_listen_thread(void* a) {
     for (;;) {
         int fd = accept(ls, 0, 0); if (fd < 0) { if (errno == EINTR) continue; usleep(100000); continue; }
         fcntl(fd, F_SETFD, FD_CLOEXEC);
-        pthread_t c; if (pthread_create(&c, 0, st_conn, (void*)(intptr_t)fd)) close(fd); else pthread_detach(c);
+        pthread_t c; if (nh_thread(&c, st_conn, (void*)(intptr_t)fd, QOS_CLASS_UTILITY)) close(fd);
     }
     return 0;
 }
@@ -1270,5 +1325,5 @@ static void nstats_start(void) {
     { extern char*** _NSGetArgv(void); extern int* _NSGetArgc(void); char** av = *_NSGetArgv(); int ac = *_NSGetArgc();
       for (int i = 1; i + 1 < ac; i++) if (!strcmp(av[i], "--join-server")) snprintf(g_cmdlineA, sizeof g_cmdlineA, "join?server=%s", av[i + 1]);
       for (int i = 1; i < ac; i++) if (strstr(av[i], "join?server=")) snprintf(g_cmdlineA, sizeof g_cmdlineA, "%s", av[i]); } { const char* pe = getenv("NHOOK_PKTLOG"); if (pe && *pe) g_pk_on = atoi(pe) != 0; }
-    pthread_t t; pthread_create(&t, 0, st_listen_thread, 0); pthread_detach(t);
+    pthread_t t; nh_thread(&t, st_listen_thread, 0, QOS_CLASS_UTILITY);
 }

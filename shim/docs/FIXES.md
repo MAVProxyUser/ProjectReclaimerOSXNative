@@ -1987,6 +1987,31 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   range: it repeated the first signal). "⚠ suspect" with the reasons; "–" = nothing unusual. Not proof: one client's view,
   modded characters' "head" is their topmost hitbox (the lobby comparison cancels it when everyone is high). Checked: no
   flag in a live 51-player lobby; a made-up lock-on profile against that lobby is flagged, a normal one is not.
+- **nhook: the stats snapshot can no longer slow the game** (2026-11-07; nhook.c rd / rd_sys / nh_thread / tls_block memo,
+  nstats.c st_ocache_fill / oc_add / st_statborg memo, nnet.c, forensic.c) — WHY: the user: "does the stats snapshot lag our
+  view? we don't want it to ever do that". Three ways it could: (1) it ran at normal priority, competing for the performance
+  cores; (2) every read of game memory is a system call (mach_vm_read_overwrite) and a snapshot made 4,032 of them (profiled
+  with NHOOK_RD_PROF=1: one per object in the biped / spawn loops, every object's type in the map check, tls_block's 5 reads
+  per player, the scoreboard per player, the session per member); (3) a read above ~32 KB (the 156 KB game-results table)
+  makes the kernel copy by marking the SOURCE pages copy-on-write -- the game's own pages -- so the game's next write to each
+  one faults on the game's thread. HOW: (1) our background threads start at QOS_CLASS_UTILITY (snapshot, HTTP) or
+  BACKGROUND (forensic writer, reverse DNS, reaper): the efficiency cores on Apple silicon. (2) before each run the snapshot
+  copies, in 16 KB pieces, the engine's object memory (every object's data: one 3-6 MB block), the players array and the
+  network session's player / peer tables; rd answers the snapshot thread's reads inside those copies from memory, and the
+  engine TLS block and the scoreboard are looked up once per run: 4,032 system calls a run -> 348, 2.3 -> 1.4 ms. (3) rd
+  never reads more than 16 KB per system call (rd_sys). The hook cost measurement now also reports the slowest frames (95th
+  percentile and max frame time per phase). Checked live: two 60 s on/off runs of the snapshot in a 36-player Guardian game
+  (~190 fps): p95 frame 13.5 / 13.2 and 12.0 / 11.8 ms, max 35.1 / 35.1 and 74.8 / 69.5 ms (on / off) -- no difference
+  beyond noise. NHOOK_NO_OCACHE=1 = the old per-object reads.
+- **Stats page: say why an address has no name** (2026-11-07; nnet.c pk_rdns / pk_peer_json, stats_page.html) — WHY: the user
+  saw no reverse-DNS names on the main page in one game while the forensic page showed names: that game's server
+  (207.102.103.168) simply has no PTR record, and the forensic sessions shown were from a server that has one; a client of a
+  dedicated server never knows a player's address (it talks only to the server). HOW: a finished lookup without a name now
+  says "no DNS name" in the Packets window (rdns_none); the IP column's title explains when players have an address.
+- **Stats page: the Aim and Aimbot? cells say what they mean** (2026-11-07; stats_page.html aimCell / botCell) — WHY: the
+  user: "'-' in aimbot field was unclear ... some say 100% next to them and I don't know why". HOW: Aim reads "1.2° off" and,
+  under it, "N% of M hits counted" (of the shots through a hitbox, the share the server confirmed); Aimbot? reads "normal"
+  once judged, "k/40 shots" before, "⚠ suspect" with reasons.
 - **nhook-selftest.sh: its own forensic / heatmap folders** (2026-11-07; shim/tools/nhook-selftest.sh) — WHY: the offline
   selftest starts nhook's stats server, whose archive opened an empty "menu" session in the player's real forensic archive on
   every run. HOW: PELOAD_FORENSIC_DIR and NHOOK_HEATMAP_DIR point into the test's temporary folder.

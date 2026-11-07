@@ -39,15 +39,44 @@ static void nlog(const char* fmt, ...) {
     if (g_logfd >= 0) write(g_logfd, b, n);
 }
 
+// our background threads (stats snapshot, HTTP, forensic writer, reverse DNS, ...) run at QOS_CLASS_UTILITY: on Apple silicon
+// that keeps them on the efficiency cores while the game's threads want the performance cores, so they never take a core
+// the game needs (user, 2026-11-07: "does the stats snapshot lag our view? we don't want it to ever do that")
+#include <pthread/qos.h>
+static int nh_thread(pthread_t* t, void* (*fn)(void*), void* arg, qos_class_t q) {
+    pthread_attr_t at; pthread_attr_init(&at); pthread_attr_set_qos_class_np(&at, q, 0); pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
+    int r = pthread_create(t, &at, fn, arg); pthread_attr_destroy(&at); return r; }
 void nh_log(const char* fmt, ...) {                 // (nrender.m's logger)
     char b[1024]; va_list ap; va_start(ap, fmt); vsnprintf(b, sizeof b, fmt, ap); va_end(ap); nlog("%s", b);
 }
 
-// a safe read of our own memory: 0 = ok
+// a safe read of our own memory: 0 = ok. Every call is a system call (~1-2 us): t_rd_n / t_rd_b count them per thread;
+// NHOOK_RD_PROF=1 also counts them per call site on the threads that ask (t_rd_prof: the stats snapshot) -- nstats.c prints them.
+static __thread unsigned long t_rd_n, t_rd_b; static __thread int t_rd_prof;
+static struct { uintptr_t site; unsigned long n, b; } g_rd_site[256]; static int g_rd_nsite;
+__attribute__((noinline)) static void rd_prof(uintptr_t site, size_t n) {
+    for (int i = 0; i < g_rd_nsite; i++) if (g_rd_site[i].site == site) { g_rd_site[i].n++; g_rd_site[i].b += n; return; }
+    if (g_rd_nsite < 256) { g_rd_site[g_rd_nsite].site = site; g_rd_site[g_rd_nsite].n = 1; g_rd_site[g_rd_nsite].b = n; g_rd_nsite++; } }
+// The stats snapshot copies the engine's object memory once per run (st_ocache_fill) and its thread's reads inside that copy
+// are answered from it (t_oc_*: no system call). A read is never more than RD_CHUNK bytes per system call: above ~32 KB the
+// kernel copies by marking the SOURCE pages copy-on-write -- the game's own pages -- and the game's next write to each one
+// then faults on the game's thread (a stall caused by a reader; the old snapshot read the 156 KB results table that way).
+#define RD_CHUNK 16384
+typedef struct { const uint8_t* buf, * ok; uint64_t lo, hi; } RdCopy;   // (ok: per 16 KB chunk)
+enum { RD_NCOPY = 4 };
+static __thread RdCopy t_oc[RD_NCOPY]; static __thread int t_noc;     // the snapshot thread's copies (st_ocache_fill)
+static __thread unsigned long t_oc_hits;
+static int rd_sys(uint64_t a, void* out, size_t n) {
+    for (size_t o = 0; o < n; ) { size_t c = n - o < RD_CHUNK ? n - o : RD_CHUNK; mach_vm_size_t got = 0;
+        kern_return_t kr = mach_vm_read_overwrite(mach_task_self(), a + o, c, (mach_vm_address_t)((uint8_t*)out + o), &got);
+        if (kr != KERN_SUCCESS || got != c) return -1; o += c; }
+    return 0; }
 static int rd(uint64_t a, void* out, size_t n) {
-    mach_vm_size_t got = 0;
-    kern_return_t kr = mach_vm_read_overwrite(mach_task_self(), a, n, (mach_vm_address_t)out, &got);
-    return (kr == KERN_SUCCESS && got == n) ? 0 : -1;
+    for (int r = 0; r < t_noc && n; r++) { const RdCopy* q = &t_oc[r]; if (a < q->lo || a + n > q->hi) continue;   // (the snapshot's copies)
+        uint64_t c0 = (a - q->lo) / RD_CHUNK, c1 = (a + n - 1 - q->lo) / RD_CHUNK; int ok = 1; for (uint64_t c = c0; c <= c1; c++) if (!q->ok[c]) { ok = 0; break; }
+        if (ok) { memcpy(out, q->buf + (a - q->lo), n); t_oc_hits++; return 0; } break; }
+    t_rd_n++; t_rd_b += n; if (t_rd_prof) rd_prof((uintptr_t)__builtin_return_address(0), n);
+    return rd_sys(a, out, n);
 }
 
 
@@ -321,7 +350,10 @@ static int tls_holds_players(uint64_t blk) {        // the block's +0x10 is halo
     uint64_t parr = 0; uint8_t hdr[0x30];
     return blk && !rd(blk + 0x10, &parr, 8) && parr && !rd(parr, hdr, sizeof hdr) && *(uint32_t*)(hdr + 0x2c) == 0x64407440 && !memcmp(hdr, "players", 8);
 }
-static uint64_t tls_block(void) {                   // halo3's TLS block of the engine main thread (index 0 here)
+static __thread int t_tls_memo; static __thread uint64_t t_tls_val;   // (the snapshot thread: one lookup per run, st_snap_thread)
+static uint64_t tls_block_now(void);
+static uint64_t tls_block(void) { if (t_tls_memo) { if (t_tls_memo == 1) { t_tls_val = tls_block_now(); t_tls_memo = 2; } return t_tls_val; } return tls_block_now(); }
+static uint64_t tls_block_now(void) {                   // halo3's TLS block of the engine main thread (index 0 here)
     static volatile uint64_t last_good; static double bad_since;
     uint64_t c = g_main_ctx, arr = 0, blk = 0; uint32_t idx = 0;
     if (c && !rd(c + 0x2d8, &arr, 8) && arr && !rd(g_img + 0xa39f9c, &idx, 4) && idx <= 64 && !rd(arr + idx * 8, &blk, 8) && tls_holds_players(blk)) {

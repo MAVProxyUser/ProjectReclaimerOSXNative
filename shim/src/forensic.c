@@ -111,7 +111,13 @@ static void fx_settings_save(void){   // (g_fx_setmx held)
 static void fx_apply(void){ g_fx_audio=g_fx_set.voice && g_fx_set.consent; if(g_fx_env_off || !g_fx_set.archive) g_fx_on=0; }   // the roster tick turns it on
 static void* fx_writer(void*a);
 static pthread_once_t g_fx_wonce=PTHREAD_ONCE_INIT;
-static void fx_writer_once(void){ fx_mkdirs(g_fx_base); pthread_t t; pthread_create(&t,0,fx_writer,0); pthread_detach(t); }
+static void fx_writer_once(void){ fx_mkdirs(g_fx_base); pthread_t t;
+#ifdef NHOOK_NATIVE
+    nh_thread(&t,fx_writer,0,QOS_CLASS_BACKGROUND);   // (the native app: efficiency cores)
+#else
+    pthread_create(&t,0,fx_writer,0); pthread_detach(t);
+#endif
+}
 static void fx_writer_start(void){ pthread_once(&g_fx_wonce,fx_writer_once); }   // the first time the archive is on
 static void fx_init_once(void){
     const char*e=getenv("PELOAD_FORENSIC"); g_fx_env_off=e && !strcmp(e,"0");
