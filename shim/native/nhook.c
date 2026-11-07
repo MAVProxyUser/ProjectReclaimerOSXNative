@@ -96,6 +96,10 @@ static uint8_t* near_page(uint64_t code, size_t size) {   // a fresh RW range wi
 static int hook_install(const char* name, uint32_t rva, nh_handler h) {
     uint64_t e = host_of(rva); uint32_t w[4];
     if (!e || rd(e, w, 16)) { nlog("[nhook] hook %s: halo3+0x%x not lifted", name, rva); return -1; }
+    // an entry that is one `b` (object_delete, halo3+0x342ed8): the lifted wrapper it jumps to is hooked instead
+    if ((w[0] & 0xfc000000u) == 0x14000000u) { int64_t off = (int64_t)((int32_t)(w[0] << 6) >> 6) * 4; uint64_t t = e + (uint64_t)off;
+        if (rd(t, w, 16)) { nlog("[nhook] hook %s: its entry branch leads nowhere readable", name); return -1; }
+        nlog("[nhook] hook %s: halo3+0x%x is a branch to 0x%llx: hooking that", name, rva, (unsigned long long)t); e = t; }
     if (w[0] != 0xa9bf7bfd || w[1] != 0x910003fd || w[2] != 0xa9bf53f3 || (w[3] & 0xffffffe0) != 0xb9429000) {   // ldr w<n>,[x0,#0x290]
         nlog("[nhook] hook %s: halo3+0x%x entry %08x %08x %08x %08x is not a lifted wrapper: refused", name, rva, w[0], w[1], w[2], w[3]); return -1; }
     size_t tl = nh_tpl_end - nh_tpl_start;
@@ -248,7 +252,8 @@ static void hooks_start(void) {
     // the engine thread's context: halo3+0x9d22c (a millisecond clock read from ~420 places) runs lifted on the engine
     // thread ~7000 times a second in a match -- main_loop_body (0xb2250) and the sim tick are the app's own code now
     else if (!getenv("NHOOK_NO_HOOKS")) { hook_install("engine_clock", 0x9d22c, on_main_loop);
-        if (!getenv("NHOOK_NO_EVHOOK")) hook_install("display_event", 0x11b0ec, on_display_event); }
+        if (!getenv("NHOOK_NO_EVHOOK")) hook_install("display_event", 0x11b0ec, on_display_event);
+        if (!getenv("NHOOK_NO_DELHOOK")) hook_install("object_delete", 0x342ed8, on_object_delete); }
     if (getenv("NHOOK_PLAYERS_LOG")) { pthread_t t; pthread_create(&t, 0, engine_thread, 0); pthread_detach(t); }
     nstats_start();
     { extern void nr_install(void); nr_install(); }      // nrender.m: the overlay, recording and captures in the app's frames

@@ -79,8 +79,17 @@ static int nov_collect(NovObj* out, int max) {
     }
     return n;
 }
-static int g_nov_myteam = -1;
-static int nov_friend(const NovObj* o) { return g_nov_myteam >= 0 && o->type == 0 && o->team == g_nov_myteam; }
+// Friend or enemy (every team filter: hitboxes, vehicles by their occupants, tracers by their shooter, info). Team games:
+// the same team index. Infection: halo3 gives every player a team of their own (teams off), so the sides are zombie /
+// human: g_nov_side, filled by the stats snapshot from each player's active traits (st_snapshot nov_sides). Free-for-all:
+// everyone is an enemy. (Infection used to show "friends" = nobody, "enemies" = everyone; user, 2026-11-07.)
+static int g_nov_myteam = -1, g_nov_myside = -1;
+static struct { uint32_t unit; int8_t side; } g_nov_side[256]; static volatile int g_nov_nside, g_nov_sides_on;   // side 1 zombie, 0 human
+static int nov_side_of(uint32_t unit) { int n = g_nov_nside; for (int i = 0; i < n && i < 256; i++) if (g_nov_side[i].unit == unit) return g_nov_side[i].side; return -1; }
+static int nov_friend(const NovObj* o) {
+    if (o->type != 0) return 0;
+    if (g_nov_sides_on) { int s2 = nov_side_of(o->handle); return g_nov_myside >= 0 && s2 >= 0 && s2 == g_nov_myside; }
+    return g_nov_myteam >= 0 && o->team == g_nov_myteam; }
 static int nov_bip_cls(const NovObj* o) { return nov_friend(o) ? 2 : 1; }
 static int nov_team_ok(int mode, int cls) { return mode <= 0 || (cls & mode); }
 static int nov_occ_cls(uint32_t veh, const NovObj* objs, int n) { int c = 0; for (int i = 0; i < n; i++) if (objs[i].type == 0 && objs[i].parent == veh) c |= nov_bip_cls(&objs[i]); return c; }
@@ -151,6 +160,25 @@ static void nov_trail_add(uint32_t h, const float* pos, double now) {
     if (!t) { t = old; t->h = h; t->n = 0; }
     if (t->n) { const float* l = t->p[(t->n - 1) & 31]; float dx = pos[0] - l[0], dy = pos[1] - l[1], dz = pos[2] - l[2]; if (dx * dx + dy * dy + dz * dz < 1e-6f) { t->seen = now; return; } }
     memcpy(t->p[t->n & 31], pos, 12); t->n++; t->seen = now; }
+// ---- bullets (hitbox.c hb_on_delete): halo3 resolves most bullets inside the tick that fires them, so they are never in
+// the object table between frames; object_delete (halo3+0x342ed8, hooked at the wrapper its entry branch leads to) sees each
+// one at deletion: +0x1c the impact point, +0x74 velocity, +0x1e8 the start, +0x1b0 distance travelled, +0xC0 the owner.
+// The hook runs on the engine thread inside the lifted call: it reads that thread's own TLS directly (pointers checked).
+typedef struct { volatile double t; uint32_t def, owner; float pos[3], vel[3], st[3], trav; } NovImp;
+static NovImp g_nov_imp[256]; static volatile unsigned g_nov_imp_n;
+static void on_object_delete(uint64_t* ctx) {
+    uint32_t h = (uint32_t)ctx[1]; uint64_t tls = ctx[0x2d8 / 8]; static uint32_t idx = 0xFFFFFFFFu;
+    if (h == 0xFFFFFFFFu || !tls || !g_img) return;
+    if (idx == 0xFFFFFFFFu) idx = *(volatile uint32_t*)(uintptr_t)(g_img + 0xa39f9c); if (idx >= 64) return;
+    uint8_t* blk = ((uint8_t**)(uintptr_t)tls)[idx]; if (!blk) return;
+    uint8_t* arr = *(uint8_t**)(blk + 0x38); if (!arr || *(uint32_t*)(arr + 0x2c) != 0x64407440 || memcmp(arr, "object", 7)) return;
+    uint8_t* data = *(uint8_t**)(arr + 0x48); int i = h & 0xFFFF; if (!data || i >= *(int32_t*)(arr + 0x20)) return;
+    uint8_t* e = data + (size_t)i * 0x18; if (e[3] != 5 || *(uint16_t*)e != (uint16_t)(h >> 16)) return;   // projectiles only
+    uint8_t* p = *(uint8_t**)(e + 0x10); if (!p) return;
+    unsigned k = __atomic_fetch_add(&g_nov_imp_n, 1, __ATOMIC_RELAXED) & 255; NovImp* r = &g_nov_imp[k];
+    r->def = *(uint32_t*)p; r->owner = *(uint32_t*)(p + 0xC0); memcpy(r->pos, p + 0x1c, 12); memcpy(r->vel, p + 0x74, 12); memcpy(r->st, p + 0x1e8, 12); memcpy(&r->trav, p + 0x1b0, 4);
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); double tv = ts.tv_sec + ts.tv_nsec * 1e-9; __atomic_store(&r->t, &tv, __ATOMIC_RELEASE);
+}
 static const float g_nov_teamcol[8][3] = {{1, 0.3f, 0.25f}, {0.35f, 0.6f, 1}, {0.35f, 1, 0.35f}, {1, 0.6f, 0.15f}, {0.75f, 0.4f, 1}, {1, 0.9f, 0.2f}, {0.75f, 0.55f, 0.35f}, {1, 0.55f, 0.8f}};
 
 // ---- zones (hitbox.c hbz_load / hbz_outline / hbz_draw, the loader's line mode): kill volumes (red) and safe zones (green)
@@ -244,7 +272,7 @@ int nov_build(float* verts, int cap, int w, int h, float scale) {
     int fh = nov_feat(NOV_HIT), ft = nov_feat(NOV_TRC), fi = nov_feat(NOV_INF), fw = nov_feat(NOV_ITM), fveh = nov_feat(NOV_VEH); double now = mono_s();
     static NovObj objs[2048]; int n = nov_collect(objs, 2048), nv = 0; const float* cam = vp + 28;
     for (int i = 0; i < n; i++) { const NovObj* o = &objs[i]; if (o->type) continue; float dx = o->c[0] - cam[0], dy = o->c[1] - cam[1], dz = o->c[2] - cam[2];
-        if (dx * dx + dy * dy + dz * dz < (o->r + 0.3f) * (o->r + 0.3f)) { g_nov_myteam = o->team; break; } }
+        if (dx * dx + dy * dy + dz * dz < (o->r + 0.3f) * (o->r + 0.3f)) { g_nov_myteam = o->team; g_nov_myside = nov_side_of(o->handle); break; } }
     static const float cwhite[3] = {1, 1, 1}, cgrey[3] = {0.7f, 0.7f, 0.7f}, ctrace[3] = {1, 0.95f, 0.55f}, cvel[3] = {1, 0.5f, 0.1f}, citem[3] = {0.3f, 1, 0.45f}, cequip[3] = {0.3f, 0.9f, 1};
     for (int i = 0; i < n; i++) { const NovObj* o = &objs[i]; int veh = o->type == 1 || o->type == 12;
         float dx = o->c[0] - cam[0], dy = o->c[1] - cam[1], dz = o->c[2] - cam[2]; int self = dx * dx + dy * dy + dz * dz < (o->r + 0.3f) * (o->r + 0.3f);
@@ -288,6 +316,14 @@ int nov_build(float* verts, int cap, int w, int h, float scale) {
         for (int i = 0; i < n; i++) { const NovObj* o = &objs[i]; if (o->type != 5) continue; float sp = sqrtf(o->vel[0] * o->vel[0] + o->vel[1] * o->vel[1] + o->vel[2] * o->vel[2]); if (sp < 1e-4f) continue;
             if (g_nov_team[NOV_TRC] > 0 && !nov_team_ok(g_nov_team[NOV_TRC], nov_owner_cls(o->owner, objs, n))) continue;
             float e[3] = {o->c[0] + o->vel[0] / sp * 1.5f, o->c[1] + o->vel[1] / sp * 1.5f, o->c[2] + o->vel[2] / sp * 1.5f}; nv = nov_seg(verts, nv, cap, vp, o->c, e, cvel); }
+        unsigned nimp = __atomic_load_n(&g_nov_imp_n, __ATOMIC_ACQUIRE);   // bullets seen at deletion: start -> impact, the last 0.5 s
+        for (unsigned k = 0; k < 256 && k < nimp; k++) { NovImp* r = &g_nov_imp[(nimp - 1 - k) & 255]; double t; __atomic_load(&r->t, &t, __ATOMIC_ACQUIRE); if (now - t > 0.5) continue;
+            if (g_nov_team[NOV_TRC] > 0 && !nov_team_ok(g_nov_team[NOV_TRC], nov_owner_cls(r->owner, objs, n))) continue;
+            float dx = r->pos[0] - r->st[0], dy = r->pos[1] - r->st[1], dz = r->pos[2] - r->st[2], dd = sqrtf(dx * dx + dy * dy + dz * dz), a[3] = {r->st[0], r->st[1], r->st[2]};
+            if (!(r->trav > 0.0f && fabsf(dd - r->trav) < 0.25f * r->trav + 0.5f)) {   // start not recorded: 3 units back along the velocity
+                float sp = sqrtf(r->vel[0] * r->vel[0] + r->vel[1] * r->vel[1] + r->vel[2] * r->vel[2]); memcpy(a, r->pos, 12); if (sp > 1e-5f) for (int q = 0; q < 3; q++) a[q] -= r->vel[q] / sp * 3.0f; }
+            nv = nov_seg_clip(verts, nv, cap, vp, a, r->pos, ctrace);
+            float x0[3] = {r->pos[0] - 0.05f, r->pos[1], r->pos[2]}, x1[3] = {r->pos[0] + 0.05f, r->pos[1], r->pos[2]}; nv = nov_seg_clip(verts, nv, cap, vp, x0, x1, cvel); }
     }
     if (nov_feat(NOV_ZON)) nv = nz_draw(verts, nv, cap, vp);
     pthread_mutex_unlock(&g_nov_mx);

@@ -1771,6 +1771,20 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   packets.jsonl lines carry the native app's "player" (the session peer at that address) and "rdns" (reverse DNS, now
   always asked for the archive: g_pk_want_rdns is per thread, the forensic writer's on); the page shows both beside each
   peer (demo mode: player aliased, rdns dropped). shim/native.sh serves forensic_page.html from the checkout too.
+- **Overlay team filters in Infection** (2026-11-07; noverlay.c nov_friend, nstats.c st_is_zombie) — WHY: "the hitboxes all
+  / enemies / friends flags seem wrong": in Infection with teams off halo3 gives every player a team of its own (69
+  distinct in a 69-player game), so "friends" matched nobody and "enemies" everybody. The sides are zombie / human, told
+  by the first trait field the variant's infected (or initial infected) set changes to a value a human doesn't hold (a
+  human's active value = the base set's, else Halo's default -- infected "recharge 100%" is the default and tells nothing;
+  shields None vs Normal does), read from each player's active traits (+0x1FC) by the stats snapshot. Every team filter uses
+  it (hitboxes, vehicles by their occupants, tracers by their shooter, info). Team games: the team index as before.
+  (The loader's hitbox.c has the same blind spot: not changed there.)
+- **Native tracers: bullets** (2026-11-07; nhook.c hook_install, noverlay.c on_object_delete) — WHY: "I don't think the
+  tracers work": only projectiles alive between frames were drawn; bullets live less than a tick and the loader drew them
+  from an object_delete hook, which the native port skipped because that entry is a single `b`. hook_install now follows
+  an entry branch to the lifted wrapper it leads to; the handler (engine thread, its own TLS read directly, checked)
+  records each deleted projectile's start / impact / owner, drawn start -> impact for 0.5 s as in hitbox.c.
+  NHOOK_NO_DELHOOK=1 = off. Not yet verified live when committed.
 
 - **"Run 2.4x" removed** (2026-10-19, revert 606a38c) — it crashed the client as soon as it was used; the user asked for it
   to be deleted. The page's Speed 2x / speed menu (the host's movement-speed trait) is unchanged. (10-19)

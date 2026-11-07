@@ -399,6 +399,23 @@ static void st_player_traits(StBuf*s,uint64_t rec){
         int16_t rt=*(const int16_t*)(r+0x1D4); if(rt>0 && !r[0x1D6]){ sb_put(s,"%s{\"what\":\"respawn traits\",\"left\":%.1f}",first?"":",",rt*(double)spt); first=0; } }
     sb_put(s,"]"); }
 #undef g_st_tls
+// Infection's sides from the traits: the first trait field the variant's infected set changes to a value a human doesn't
+// have (a human's active value = the base set's, or Halo's default where the base set leaves it unchanged; e.g. infected
+// "shield recharge 100%" IS the default, so it tells nothing -- shields None vs Normal does) tells a zombie -- a player whose active traits (player +0x1FC) hold that value; the initial
+// infected set (the first zombies) likewise. -1 = not an Infection variant or no telling field.
+static int nov_trait_get(const uint8_t* t, const StTraitF* f) { return f->sz == 2 ? *(const uint16_t*)(t + f->off) : f->sz == -1 ? *(const int8_t*)(t + f->off) : t[f->off]; }
+static int st_is_zombie(uint64_t rec) {
+    if (!g_st_var_ok || *(const int32_t*)g_st_var != 10) return -1;
+    uint8_t act[0x1C]; if (!rec || !hb_read(rec + 0x1FC, act, sizeof act)) return -1;
+    const uint8_t* base = g_st_var + 0x134; int told = 0;
+    for (int set = 0; set < 2; set++) { const uint8_t* z = g_st_var + (set ? 0x1DC : 0x1C0);
+        for (size_t i = 0; i < sizeof g_trait_f / sizeof *g_trait_f; i++) { const StTraitF* f = &g_trait_f[i]; if (f->sz == 0) continue;
+            int zv = nov_trait_get(z, f), bv = nov_trait_get(base, f), unch = f->sz == -1 ? -2 : 0;
+            int hv = bv != unch ? bv : f->def;                         // what a human's ACTIVE traits hold: the base set's value, else Halo's default
+            if (zv == unch || zv == hv || (f->sz == -1 && zv < 0)) continue;   // unchanged, the same as a human's, or random / map default
+            told = 1; if (nov_trait_get(act, f) == zv) return 1; break; } }
+    return told ? 0 : -1;
+}
 
 // joins and leaves: a name entering / leaving the players table (the lobby's session list is not read here). Debounced:
 // "left" once a name has been missing for 3 s, "joined" for a name not seen in the last 30 s -- a snapshot that misses the
@@ -563,6 +580,9 @@ static void st_snapshot(StBuf* s) {
     #define ST_TYPE(h) (tab[((h) & 0xFFFF) * 0x18 + 3])
     StPlayer pl[256]; int np = st_players(pl, 256); np_for_perf = np;
     if (g_app_playing && !g_gameplay_t0 && np > 0 && hi > 0) { g_gameplay_t0 = now; t0 = now; g_match_pending = 1; }   // the server's next map
+    { int ns = 0, any = 0; static struct { uint32_t unit; int8_t side; } tmp[256];   // Infection's sides for the overlay's team filters
+      for (int k = 0; k < np && ns < 256; k++) { int z = st_is_zombie(pl[k].rec); if (z >= 0) any = 1; tmp[ns].unit = pl[k].unit; tmp[ns].side = (int8_t)z; ns++; }
+      g_nov_nside = 0; memcpy(g_nov_side, tmp, sizeof tmp[0] * (size_t)ns); g_nov_nside = ns; g_nov_sides_on = any; }
     // deaths: every biped, alive -> dead (stats.c); the killer is not known here yet
     { StBip nb[2048]; int nn = 0;
       for (int i = 0; i < hi && nn < 2048; i++) {
