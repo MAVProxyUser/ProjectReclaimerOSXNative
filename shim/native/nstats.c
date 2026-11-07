@@ -565,6 +565,12 @@ static void rs_tick(const StPlayer* pl, int np, double now) {
     if (fresh) { memcpy(g_rs_prev, g_rs_cur, sizeof g_rs_prev); memcpy(g_rs_vprev, g_rs_vcur, vn * 4); g_rs_have = 1; return; }
     int kd[128], bd[128], dd[128]; for (int sl = 0; sl < 128; sl++) { kd[sl] = (g_rs_cur[sl][RS_KILLS] & 0x7fff) - (g_rs_prev[sl][RS_KILLS] & 0x7fff); bd[sl] = (g_rs_cur[sl][RS_BETRAYALS] & 0x7fff) - (g_rs_prev[sl][RS_BETRAYALS] & 0x7fff);
         dd[sl] = (g_rs_cur[sl][RS_DEATHS] & 0x7fff) - (g_rs_prev[sl][RS_DEATHS] & 0x7fff) - ((g_rs_cur[sl][RS_SUICIDES] & 0x7fff) - (g_rs_prev[sl][RS_SUICIDES] & 0x7fff)); }   // (deaths by someone else)
+    // the game's end: games-completed (1) went up; games-won (3) / games-tied (4) name the outcome
+    { char won[400] = ""; int w = 0, done = 0, tied = 0, nw = 0;
+      for (int sl = 0; sl < 128; sl++) { if ((g_rs_cur[sl][1] & 0x7fff) > (g_rs_prev[sl][1] & 0x7fff)) done = 1;
+          if ((g_rs_cur[sl][4] & 0x7fff) > (g_rs_prev[sl][4] & 0x7fff)) tied = 1;
+          if ((g_rs_cur[sl][3] & 0x7fff) > (g_rs_prev[sl][3] & 0x7fff) && idx[sl] >= 0 && w < 300) { w += snprintf(won + w, sizeof won - (size_t)w, "%s%s", nw ? ", " : "", pl[idx[sl]].name); nw++; } }
+      if (done) st_event_pos(0, "game", 0, 0, 0, -1, -1, 0, "Game over%s%s%s", nw ? ": " : tied ? ": a tie" : "", won, nw ? (nw > 1 ? " won" : " won") : ""); }
     // suicides
     for (int sl = 0; sl < 128; sl++) { int d = (g_rs_cur[sl][RS_SUICIDES] & 0x7fff) - (g_rs_prev[sl][RS_SUICIDES] & 0x7fff);
         for (int q = 0; q < d; q++) { int t = rs_take(sl, 3); const char* nm = idx[sl] >= 0 ? pl[idx[sl]].name : "?"; const SbNow* w = &g_sbnow[sl];

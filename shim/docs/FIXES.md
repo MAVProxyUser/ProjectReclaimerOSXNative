@@ -1903,7 +1903,9 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   exact "killed themselves" each time; pairs offline: `bash shim/tools/results-feed-test.sh` (the real code, extracted: kill,
   either matrix orientation, double kill, a trade in one snapshot, betrayal, suicide, headshot, pending-entry handling, new
   match) -- kills between two players still need a real game (NHOOK_RESULTS_LOG=1 logs every change and decision).
-  NHOOK_NO_RESULTS_FEED=1 = the old estimate only.
+  NHOOK_NO_RESULTS_FEED=1 = the old estimate only. Also from the results: "Game over: <winners> won" (or "a tie") when
+  games-completed (stat 1) goes up, winners = games-won (3) -- the loader's feed had it from the client's "Carnage report
+  opened" line, the native feed had no end at all; checked live with the app's {"gameplay":"end_game"} request.
 - **0.10 server list: shim/tools/servers10.py** (2026-11-07) — WHY: "there is no reason we should be making a .9 query": the
   0.9 client's `discover` (shim/tools/servers.sh) lists no 0.10 server, the 0.10 Windows exe's `discover` prints nothing under
   the loader, and the Mac app has no list command. HOW: 0.10 asks `/v3/discovery` on its masters and queries each server with

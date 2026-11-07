@@ -25,6 +25,9 @@ static char g_ev[64][200]; static int g_ev_fl[64], g_nev;
 static void st_event_verb(const float* pos, const char* kind, const char* a, const char* b, const char* how, const char* verb, int ta, int tb, int flags, const char* fmt, ...) {
     (void)pos; (void)kind; (void)a; (void)b; (void)how; (void)verb; (void)ta; (void)tb;
     va_list ap; va_start(ap, fmt); vsnprintf(g_ev[g_nev], sizeof g_ev[0], fmt, ap); va_end(ap); g_ev_fl[g_nev++] = flags; }
+static void st_event_pos(const float* pos, const char* kind, const char* a, const char* b, const char* how, int ta, int tb, int flags, const char* fmt, ...) {
+    (void)pos; (void)kind; (void)a; (void)b; (void)how; (void)ta; (void)tb;
+    va_list ap; va_start(ap, fmt); vsnprintf(g_ev[g_nev], sizeof g_ev[0], fmt, ap); va_end(ap); g_ev_fl[g_nev++] = flags; }
 EOF
 grep -m1 '^typedef struct { uint32_t unit; int slot; char name\[64\]; uint64_t rec; } StPlayer;' $N
 grep -m1 '^enum { SB_SCORE' $N
@@ -59,6 +62,7 @@ int main(void) {
       if (g_nsbv != 0) { printf("  FAIL the pending victim stayed\n"); g_fail = 1; } else printf("  ok   the pending victim is gone\n"); }
     { int16_t before = g_sbprev[0].s[SB_KILLS]; kill(0, 3, 11, 1, 0, 0); const char* w[] = {"Alice killed Dave (Battle rifle)"}; tick("absorbs the scoreboard's coming kill", 1, w, 0);
       if (g_sbprev[0].s[SB_KILLS] != before + 1) { printf("  FAIL scoreboard not told\n"); g_fail = 1; } else printf("  ok   the scoreboard expects that kill\n"); }
+    { for (int i = 0; i < 4; i++) (*ST(i, 1))++; (*ST(0, 3))++; (*ST(2, 3))++; const char* w[] = {"Game over: Alice, Carol won"}; tick("game over (games-completed, games-won)", 1, w, 0); }
     memset(g_mem, 0, 0x4a940); tick("new match (counts back to 0)", 0, 0, 0);
     { kill(2, 3, 0, 1, 0, 0); const char* w[] = {"Carol killed Dave"}; tick("an unnamed weapon (type 0, a modded map's)", 1, w, 0); }
     printf(g_fail ? "SOME CHECKS FAILED\n" : "PASS\n"); return g_fail; }
