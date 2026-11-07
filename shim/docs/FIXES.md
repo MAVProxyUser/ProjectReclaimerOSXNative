@@ -1696,6 +1696,21 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   variant + traits (stats.c's code verbatim), heatmap (the loader's files), feed from the app's log lines and the players
   table. hitbox.c's .map-file code moved into shim/src/h3maps.c unchanged (HB_MAXOBJ: the loader's 8192 object slots, the
   native app's 16384) so both use it. Off: NHOOK_STATS_HTTP=0. shim/native.sh refuses a second instance of the app.
+- **nhook: kills, Connected list, packets** (2026-11-07; shim/native/nstats.c, nnet.c, nhook.c) — WHY: the native page
+  showed kills 0 and an empty Connected list / Packets window. Kills, deaths, assists, betrayals, suicides and score are
+  halo3's statborg (game engine globals, TLS +0x20, + 0xfeb8 in halo3.dll; the app moves it and logs where:
+  `[capacity] game_globals.statborg`): 32 i16 per player at +slot*0x40, stat 2 kills, 3 deaths, 4 suicides, 5 betrayals,
+  6 assists, 0 score -- named through the game-results statistic each adjust feeds (halo3+0x1da7e0 callers; table
+  halo3+0x792c80, re-tools/h3results.py). It is replicated, so a joined client reads the server's counts. The kill feed pairs
+  a killer's +1 with a victim's deaths +1 within 1.5 s (suicides +1 = "killed themselves"), the weapon is the killer's weapon
+  in hand (or the vehicle it drives): marked estimated. The tracker's own "X died" only when the statborg can't be read.
+  Connected list = halo3's network session as under the 0.9 client (sess = *(halo3+0x1e250d0); the app moves peer / player
+  records by the same shifts it logs: `[capacity] session.peers_shift / players_shift`); slots = the session's maximum.
+  Packets = pktlog.c's wire layer on interposed sendto / recvfrom / sendmsg / recvmsg / send / recv / connect / close /
+  getaddrinfo (test: shim/tools/nhook-selftest.sh); halo3's message names (the game layer) are not in it yet. display_event
+  (halo3+0x11b0ec) is hooked and its first 200 events are logged raw (`[nhook] [event]`): the app enlarged the event struct
+  (0x2c -> 0x40 bytes), its layout is to be read from a real match. Switches: NHOOK_PKTLOG=0, NHOOK_NO_EVHOOK=1,
+  NHOOK_EVENT_LOG=<n>.
 
 - **"Run 2.4x" removed** (2026-10-19, revert 606a38c) — it crashed the client as soon as it was used; the user asked for it
   to be deleted. The page's Speed 2x / speed menu (the host's movement-speed trait) is unchanged. (10-19)

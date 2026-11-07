@@ -217,7 +217,8 @@ static void hooks_start(void) {
     else if (getenv("NHOOK_COUNT")) for (size_t k = 0; k < NCNT; k++) hook_install(g_cnt_fns[k].name, g_cnt_fns[k].rva, g_cnt_h[k]);
     // the engine thread's context: halo3+0x9d22c (a millisecond clock read from ~420 places) runs lifted on the engine
     // thread ~7000 times a second in a match -- main_loop_body (0xb2250) and the sim tick are the app's own code now
-    else if (!getenv("NHOOK_NO_HOOKS")) hook_install("engine_clock", 0x9d22c, on_main_loop);
+    else if (!getenv("NHOOK_NO_HOOKS")) { hook_install("engine_clock", 0x9d22c, on_main_loop);
+        if (!getenv("NHOOK_NO_EVHOOK")) hook_install("display_event", 0x11b0ec, on_display_event); }
     if (getenv("NHOOK_PLAYERS_LOG")) { pthread_t t; pthread_create(&t, 0, engine_thread, 0); pthread_detach(t); }
     nstats_start();
 }
@@ -357,7 +358,7 @@ static void trace_write(const char* what, int fd, const void* buf, size_t n) {
 static ssize_t my_write(int fd, const void* buf, size_t n) {
     trace_write("write", fd, buf, n);
     if (n && !(n > 7 && !memcmp(buf, "[nhook]", 7))) tap(fd, buf, n);
-    return write(fd, buf, n);
+    ssize_t r = write(fd, buf, n); if (r > 0 && fd > 2) pk_tcp_bytes(fd, PK_TX, r); return r;
 }
 static ssize_t my_writev(int fd, const struct iovec* iov, int cnt) {
     for (int i = 0; i < cnt; i++) if (iov[i].iov_len) { trace_write("writev", fd, iov[i].iov_base, iov[i].iov_len); tap(fd, iov[i].iov_base, iov[i].iov_len); }
@@ -375,16 +376,47 @@ static int my_openat(int dfd, const char* p, int fl, ...) {
     int fd = openat(dfd, p, fl, mode); if (fd >= 0 && p && p[0] == '/') note_open(p); return fd;
 }
 
+// the packet log (nnet.c): every datagram's type and size, TCP connections; host names from getaddrinfo
+static ssize_t my_sendto(int fd, const void* b, size_t n, int fl, const struct sockaddr* to, socklen_t tl) {
+    ssize_t r = sendto(fd, b, n, fl, to, tl); if (r >= 0) { pk_wire(PK_TX, fd, to, b, r); pk_tcp_bytes(fd, PK_TX, r); } return r; }
+static ssize_t my_recvfrom(int fd, void* b, size_t n, int fl, struct sockaddr* from, socklen_t* fln) {
+    ssize_t r = recvfrom(fd, b, n, fl, from, fln); if (r >= 0) { pk_wire(PK_RX, fd, from && fln && *fln ? from : 0, b, r); pk_tcp_bytes(fd, PK_RX, r); } return r; }
+static ssize_t my_sendmsg(int fd, const struct msghdr* m, int fl) {
+    ssize_t r = sendmsg(fd, m, fl);
+    if (r >= 0 && m) { pk_wire(PK_TX, fd, m->msg_namelen ? (const struct sockaddr*)m->msg_name : 0, m->msg_iovlen ? m->msg_iov[0].iov_base : 0, r); pk_tcp_bytes(fd, PK_TX, r); }
+    return r; }
+static ssize_t my_recvmsg(int fd, struct msghdr* m, int fl) {
+    ssize_t r = recvmsg(fd, m, fl);
+    if (r >= 0 && m) { pk_wire(PK_RX, fd, m->msg_namelen ? (const struct sockaddr*)m->msg_name : 0, m->msg_iovlen ? m->msg_iov[0].iov_base : 0, r); pk_tcp_bytes(fd, PK_RX, r); }
+    return r; }
+static ssize_t my_send(int fd, const void* b, size_t n, int fl) { ssize_t r = send(fd, b, n, fl); if (r >= 0) { pk_wire(PK_TX, fd, 0, b, r); pk_tcp_bytes(fd, PK_TX, r); } return r; }
+static ssize_t my_recv(int fd, void* b, size_t n, int fl) { ssize_t r = recv(fd, b, n, fl); if (r >= 0) { pk_wire(PK_RX, fd, 0, b, r); pk_tcp_bytes(fd, PK_RX, r); } return r; }
+static int my_connect(int fd, const struct sockaddr* sa, socklen_t sl) {
+    int r = connect(fd, sa, sl); if (r == 0 || errno == EINPROGRESS) { int e = errno; pk_tcp_connect(fd, sa, sl); errno = e; } return r; }
+static int my_close(int fd) { pk_close(fd); return close(fd); }
+static int my_getaddrinfo(const char* h, const char* sv, const struct addrinfo* hi, struct addrinfo** res) {
+    int r = getaddrinfo(h, sv, hi, res); if (!r && res) pk_dns(h, *res); return r; }
+
 #define INTERPOSE(rep, orig) __attribute__((used)) static struct { const void* r; const void* o; } \
     _ip_##orig __attribute__((section("__DATA,__interpose"))) = { (const void*)(rep), (const void*)(orig) }
 INTERPOSE(my_write, write);
 INTERPOSE(my_writev, writev);
 INTERPOSE(my_open, open);
 INTERPOSE(my_openat, openat);
+INTERPOSE(my_sendto, sendto);
+INTERPOSE(my_recvfrom, recvfrom);
+INTERPOSE(my_sendmsg, sendmsg);
+INTERPOSE(my_recvmsg, recvmsg);
+INTERPOSE(my_send, send);
+INTERPOSE(my_recv, recv);
+INTERPOSE(my_connect, connect);
+INTERPOSE(my_close, close);
+INTERPOSE(my_getaddrinfo, getaddrinfo);
 
 __attribute__((constructor)) static void nhook_init(void) {
     const char* lf = getenv("NHOOK_LOG");
     if (lf) g_logfd = open(lf, O_WRONLY | O_CREAT | O_APPEND, 0644);
     if (getenv("NHOOK_TRACE_WRITES")) g_trace_writes = atoi(getenv("NHOOK_TRACE_WRITES"));
     nlog("[nhook] loaded (pid %d)", getpid());
+    if (getenv("NHOOK_SELFTEST")) nstats_start();       // shim/tools/nhook-selftest.sh: the stats server without the app
 }

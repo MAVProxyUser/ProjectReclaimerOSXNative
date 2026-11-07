@@ -72,15 +72,19 @@ static void sb_f3(StBuf* s, const float* v) { if (isfinite(v[0]) && isfinite(v[1
 typedef struct { uint32_t seq; int flags, ta, tb, haspos; double t; float pos[3]; char kind[12], a[64], b[64], how[64], verb[24], text[320]; } StEvt;
 enum { ST_NEV = 1024 };
 static StEvt g_ev[ST_NEV]; static uint32_t g_ev_seq; static pthread_mutex_t g_ev_mx = PTHREAD_MUTEX_INITIALIZER;
-static void st_event_pos(const float* pos, const char* kind, const char* a, const char* b, const char* how, int ta, int tb, int flags, const char* fmt, ...) {
-    StEvt e; memset(&e, 0, sizeof e); e.t = st_wall(); e.flags = flags; e.ta = ta; e.tb = tb;
+static void st_eventv(const float* pos, const char* kind, const char* a, const char* b, const char* how, const char* verb, int ta, int tb, int flags, const char* fmt, va_list ap) {
+    StEvt e; memset(&e, 0, sizeof e); e.t = st_wall(); e.flags = flags; e.ta = ta; e.tb = tb; if (verb) snprintf(e.verb, sizeof e.verb, "%s", verb);
     if (pos) { memcpy(e.pos, pos, sizeof e.pos); e.haspos = 1; }
     snprintf(e.kind, sizeof e.kind, "%s", kind); snprintf(e.a, sizeof e.a, "%s", a ? a : ""); snprintf(e.b, sizeof e.b, "%s", b ? b : "");
     snprintf(e.how, sizeof e.how, "%s", how ? how : "");
-    va_list ap; va_start(ap, fmt); vsnprintf(e.text, sizeof e.text, fmt, ap); va_end(ap);
+    vsnprintf(e.text, sizeof e.text, fmt, ap);
     pthread_mutex_lock(&g_ev_mx); e.seq = ++g_ev_seq; g_ev[e.seq % ST_NEV] = e; pthread_mutex_unlock(&g_ev_mx);
     if (getenv("NHOOK_FEED_LOG")) nlog("[nhook] [feed] %s: %s", e.kind, e.text);
 }
+static void st_event_pos(const float* pos, const char* kind, const char* a, const char* b, const char* how, int ta, int tb, int flags, const char* fmt, ...) {
+    va_list ap; va_start(ap, fmt); st_eventv(pos, kind, a, b, how, 0, ta, tb, flags, fmt, ap); va_end(ap); }
+static void st_event_verb(const float* pos, const char* kind, const char* a, const char* b, const char* how, const char* verb, int ta, int tb, int flags, const char* fmt, ...) {
+    va_list ap; va_start(ap, fmt); st_eventv(pos, kind, a, b, how, verb, ta, tb, flags, fmt, ap); va_end(ap); }
 static void st_feed_json(StBuf* s, uint32_t since) {
     pthread_mutex_lock(&g_ev_mx);
     uint32_t hi = g_ev_seq, lo = hi >= ST_NEV ? hi - ST_NEV + 1 : 1; if (since >= lo && since <= hi) lo = since + 1;
@@ -94,17 +98,35 @@ static void st_feed_json(StBuf* s, uint32_t since) {
         if (e->ta >= 0) sb_put(s, ",\"ta\":%d", e->ta);
         if (e->tb >= 0) sb_put(s, ",\"tb\":%d", e->tb);
         if (e->flags & 1) sb_put(s, ",\"estimated\":true");
+        if (e->flags & 4) sb_put(s, ",\"betrayal\":true");
+        if (e->verb[0]) { sb_put(s, ",\"verb\":"); sb_str(s, e->verb); }
         if (e->haspos) sb_put(s, ",\"pos\":[%.2f,%.2f,%.2f]", e->pos[0], e->pos[1], e->pos[2]);
         sb_put(s, "}");
     }
     sb_put(s, "]}"); pthread_mutex_unlock(&g_ev_mx);
 }
 
+#include "nnet.c"   // the network session and the packet log
+
 // ---- the app's log lines -> match state and events ------------------------------------------------------------------
 static volatile double g_gameplay_t0;                      // "[switch] game Playing" (mono time), 0 = not in a match
 static volatile int g_match_pending; static char g_loading[96];
+// where the app moved halo3's tables: it logs each move ("[capacity] <what>: <old> -> <new>", "[c1] ...")
+static volatile int64_t g_sb_off = 0x159c0;                // game engine globals (TLS +0x20) -> statborg (halo3: +0xfeb8)
+static uint64_t cap_new(const char* l, const char* what) { // "[capacity] <what>: 0x.. -> 0x..": the new value, 0 = not this line
+    size_t wl = strlen(what); if (strncmp(l, "[capacity] ", 11) || strncmp(l + 11, what, wl) || l[11 + wl] != ':') return 0;
+    const char* a = strstr(l + 11 + wl, "-> 0x"); return a ? strtoull(a + 5, 0, 16) : 0;
+}
+static void nst_layout_line(const char* l) {
+    uint64_t v;
+    if ((v = cap_new(l, "game_globals.statborg"))) { g_sb_off = (int64_t)v; return; }
+    if ((v = cap_new(l, "session.peers_shift"))) { g_ses_peers_shift = (int64_t)v; return; }
+    if ((v = cap_new(l, "session.players_shift"))) { g_ses_players_shift = (int64_t)v; return; }
+    const char* m = "[c1] network sessions moved to 0x"; if (!strncmp(l, m, strlen(m))) g_ses_store = strtoull(l + strlen(m), 0, 16);
+}
 static void nst_on_line(const char* p, size_t n) {
     char l[600]; if (n >= sizeof l) n = sizeof l - 1; memcpy(l, p, n); l[n] = 0;
+    if (!strncmp(l, "[capacity] ", 11) || !strncmp(l, "[c1] ", 5)) { nst_layout_line(l); return; }
     if (!strncmp(l, "[switch] game Playing", 21)) { if (!g_gameplay_t0) { g_gameplay_t0 = mono_s(); g_match_pending = 1; } return; }
     if (!strncmp(l, "[loading] map ", 14)) {               // "[loading] map 320: Guardian, MCC's art of Guardian"
         const char* c = strchr(l, ':'); if (c) { c++; while (*c == ' ') c++; size_t k = 0; while (c[k] && c[k] != ',' && k + 1 < sizeof g_loading) { g_loading[k] = c[k]; k++; } g_loading[k] = 0; }
@@ -378,6 +400,87 @@ static void st_roster(const StPlayer* pl, int np, const char* map) {
     nprev = np < 256 ? np : 256; for (int k = 0; k < nprev; k++) snprintf(prev[k], sizeof prev[k], "%s", pl[k].name);
 }
 
+// ---- the scoreboard: halo3's statborg (static RE of halo3.dll, shim/docs/native-client.md "Kills") -------------------
+// c_game_statborg (halo3+0x10057c returns game engine globals (TLS +0x20) + 0xfeb8; the app moves it, see g_sb_off):
+// player p's 32 i16 stats at +p*0x40, adjusted by halo3+0x1da7e0 (statborg, player, stat, delta, results stat), which
+// also feeds the game results' named statistics -- that names them: 0 score, 2 kills (results 9 "kills"), 3 deaths
+// (11), 4 suicides (13), 5 betrayals (12), 6 assists (10), 7 rounds won (6). The game engine replicates it to every
+// client (each change marks the player's network bit), so a joined client reads the server's scoreboard.
+enum { SB_SCORE = 0, SB_KILLS = 2, SB_DEATHS = 3, SB_SUICIDES = 4, SB_BETRAYALS = 5, SB_ASSISTS = 6 };
+static int st_statborg(int slot, int16_t out[8]) {
+    uint64_t blk = tls_block(), geg = 0;
+    if (!blk || slot < 0 || slot >= 128 || !hb_read(blk + 0x20, &geg, 8) || !geg) return 0;
+    if (!hb_read(geg + (uint64_t)g_sb_off + (uint64_t)slot * 0x40, out, 16)) return 0;
+    for (int i = 0; i < 7; i++) if (out[i] < -30000 || out[i] > 30000) return 0;
+    return 1;
+}
+// The kill feed from the scoreboard: a killer's kills (or betrayals) +1 and a victim's deaths +1 in the same ~second
+// are one kill; a victim whose suicides went up too killed themselves. The pairing is inferred (several kills in one
+// 100 ms snapshot pair in slot order) and the weapon is the killer's weapon in hand (or vehicle) at that moment:
+// these events are marked estimated. The counts themselves are the game's own.
+typedef struct { int slot, team, kind; double t; char name[64], how[96]; } SbKiller;   // kind 0 kill, 1 betrayal
+typedef struct { int slot, team, suicide, haspos; double t; float pos[3]; char name[64]; } SbVictim;
+static SbKiller g_sbk[64]; static int g_nsbk; static SbVictim g_sbv[64]; static int g_nsbv;
+static struct { int16_t s[8]; int ok; char name[64]; } g_sbprev[128];
+typedef struct { char name[64], how[96]; int team, have, dead; float pos[3]; double died; } SbNow;   // this snapshot's view of a slot
+static SbNow g_sbnow[128];
+static void sb_reset(void) { memset(g_sbprev, 0, sizeof g_sbprev); g_nsbk = g_nsbv = 0; }
+static void sb_tick(const StPlayer* pl, int np, double now) {
+    for (int k = 0; k < np; k++) {
+        int sl = pl[k].slot; int16_t s[8]; if (sl < 0 || sl >= 128 || !st_statborg(sl, s)) continue;
+        if (!g_sbprev[sl].ok || strcmp(g_sbprev[sl].name, pl[k].name) || s[SB_DEATHS] < g_sbprev[sl].s[SB_DEATHS] || s[SB_KILLS] < g_sbprev[sl].s[SB_KILLS]) {
+            memcpy(g_sbprev[sl].s, s, sizeof s); g_sbprev[sl].ok = 1; snprintf(g_sbprev[sl].name, sizeof g_sbprev[sl].name, "%s", pl[k].name); continue; }
+        const int16_t* o = g_sbprev[sl].s; const SbNow* w = &g_sbnow[sl];
+        for (int d = 0; d < s[SB_KILLS] - o[SB_KILLS] && g_nsbk < 64; d++) { SbKiller* x = &g_sbk[g_nsbk++]; x->slot = sl; x->team = w->team; x->kind = 0; x->t = now; snprintf(x->name, sizeof x->name, "%s", pl[k].name); snprintf(x->how, sizeof x->how, "%s", w->how); }
+        for (int d = 0; d < s[SB_BETRAYALS] - o[SB_BETRAYALS] && g_nsbk < 64; d++) { SbKiller* x = &g_sbk[g_nsbk++]; x->slot = sl; x->team = w->team; x->kind = 1; x->t = now; snprintf(x->name, sizeof x->name, "%s", pl[k].name); snprintf(x->how, sizeof x->how, "%s", w->how); }
+        int sui = s[SB_SUICIDES] - o[SB_SUICIDES];
+        for (int d = 0; d < s[SB_DEATHS] - o[SB_DEATHS] && g_nsbv < 64; d++) { SbVictim* v = &g_sbv[g_nsbv++]; v->slot = sl; v->team = w->team; v->suicide = d < sui; v->t = now;
+            snprintf(v->name, sizeof v->name, "%s", pl[k].name); v->haspos = w->died > 0 && now - w->died < 3; memcpy(v->pos, w->pos, 12); }
+        memcpy(g_sbprev[sl].s, s, sizeof s);
+    }
+    // pair: victims oldest first; a victim waits up to 1.5 s for its killer's count (they replicate separately)
+    for (int i = 0; i < g_nsbv; i++) {
+        SbVictim* v = &g_sbv[i]; const float* pos = v->haspos ? v->pos : 0; int done = 0;
+        if (v->suicide) { st_event_pos(pos, "death", 0, v->name, 0, -1, v->team, 0, "%s killed themselves", v->name); done = 1; }
+        else {
+            int best = -1;
+            for (int j = 0; j < g_nsbk; j++) { if (g_sbk[j].slot == v->slot) continue; if (best < 0) best = j;
+                if (g_sbk[j].kind == 1 && g_sbk[j].team == v->team && v->team >= 0) { best = j; break; } }
+            if (best >= 0) { SbKiller x = g_sbk[best]; memmove(&g_sbk[best], &g_sbk[best + 1], (size_t)(g_nsbk - best - 1) * sizeof x); g_nsbk--;
+                char hw[110] = ""; if (x.how[0]) snprintf(hw, sizeof hw, " (%s)", x.how);
+                const char* verb = x.kind ? "betrayed" : "killed";
+                st_event_verb(pos, "kill", x.name, v->name, x.how, verb, x.team, v->team, 1 | (x.kind ? 4 : 0), "%s %s %s%s", x.name, verb, v->name, hw); done = 1; }
+            else if (now - v->t > 1.5) { st_event_pos(pos, "death", 0, v->name, 0, -1, v->team, 0, "%s was killed", v->name); done = 1; }
+        }
+        if (done) { memmove(&g_sbv[i], &g_sbv[i + 1], (size_t)(g_nsbv - i - 1) * sizeof *v); g_nsbv--; i--; }
+    }
+    for (int j = 0; j < g_nsbk; j++) if (now - g_sbk[j].t > 2.0) { memmove(&g_sbk[j], &g_sbk[j + 1], (size_t)(g_nsbk - j - 1) * sizeof g_sbk[0]); g_nsbk--; j--; }
+}
+
+// ---- halo3's game engine events (display_event, halo3+0x11b0ec: kills, joins, flag / bomb / hill lines) -------------
+// The loader read the 0x2c-byte event (type +0, index +4, cause / effect player +0x10 / +0x18 ...); the app enlarges it
+// ([capacity] event.outgoing: 0x2c -> 0x40, event.bytes 0x40 -> 0x60) and its new layout is not known yet: each event's
+// 0x60 bytes are kept and the first NHOOK_EVENT_LOG (default 200) are logged as "[nhook] [event]" lines, to learn it
+// from a real match. The kill feed comes from the scoreboard meanwhile (sb_tick).
+static uint8_t g_gev[256][0x60]; static double g_gev_t[256]; static volatile unsigned g_gev_n;
+static void on_display_event(uint64_t* ctx) {             // (engine thread; rcx = the event)
+    unsigned i = g_gev_n; uint64_t ev = ctx[1];
+    if (ev >= 0x10000 && !rd(ev, g_gev[i & 255], 0x60)) { g_gev_t[i & 255] = st_wall(); __atomic_store_n(&g_gev_n, i + 1, __ATOMIC_RELEASE); }
+}
+static void st_engine_events(const StPlayer* pl, int np) {
+    static unsigned seen; static int logged, lim = -1; if (lim < 0) lim = getenv("NHOOK_EVENT_LOG") ? atoi(getenv("NHOOK_EVENT_LOG")) : 200;
+    unsigned n = __atomic_load_n(&g_gev_n, __ATOMIC_ACQUIRE); if (n - seen > 256) seen = n - 256;
+    for (; seen != n; seen++) {
+        const uint8_t* e = g_gev[seen & 255]; if (logged >= lim) continue; logged++;
+        char hx[0x60 * 2 + 16]; int k = 0; for (int i = 0; i < 0x60; i++) { k += snprintf(hx + k, sizeof hx - (size_t)k, "%02x", e[i]); if ((i & 3) == 3 && i < 0x5f) hx[k++] = ' '; } hx[k] = 0;
+        char who[200] = ""; int w = 0;   // which words look like a player handle (index + salt of a live player)
+        for (int o = 0; o + 4 <= 0x60; o += 4) { uint32_t h = *(const uint32_t*)(e + o);
+            for (int q = 0; q < np; q++) if (pl[q].slot == (int)(h & 0xFFFF) && h != 0xFFFFFFFFu) { uint16_t salt = 0;
+                if (hb_read(pl[q].rec, &salt, 2) && salt == (uint16_t)(h >> 16)) w += snprintf(who + w, sizeof who - (size_t)w, " +0x%x=%s", o, pl[q].name); } }
+        nlog("[nhook] [event] %.3f %s |%s", g_gev_t[seen & 255], hx, who);
+    }
+}
+
 // ---- the snapshot (stats.c st_snapshot's shape) ---------------------------------------------------------------------
 static void st_snapshot(StBuf* s) {
     static const char* teams[8] = {"red", "blue", "green", "orange", "purple", "gold", "brown", "pink"};
@@ -397,7 +500,7 @@ static void st_snapshot(StBuf* s) {
               "\"teams\":\"all\",\"teleport\":false,\"host\":false,\"tp_forward\":false,\"controls\":false,\"text_px\":7,\"spar\":false,\"spar_aim\":-1.0,\"spar_available\":false,"
               "\"bounds_off\":null,\"invwalls_off\":null,\"mic\":\"off\",\"mic_in_use\":false,\"speed_idx\":-1,\"quality\":\"\",\"features\":{}");
     sb_put(s, ",\"spots\":[]}");
-    if (strcmp(m, g_trk_map)) { snprintf(g_trk_map, sizeof g_trk_map, "%s", m); g_ntrk = 0; g_nbip = 0; }   // a new map: new match stats
+    if (strcmp(m, g_trk_map)) { snprintf(g_trk_map, sizeof g_trk_map, "%s", m); g_ntrk = 0; g_nbip = 0; sb_reset(); }   // a new map: new match stats
     pthread_mutex_lock(&g_hm_mx); snprintf(g_hm_cur, sizeof g_hm_cur, "%s", m); if (g_hm.dirty && now - g_hm.saved > 30) { hm_save(); g_hm.saved = now; } pthread_mutex_unlock(&g_hm_mx);
     static uint8_t tab[HB_MAXOBJ * 0x18]; int hi = 0; uint64_t arr = hb_object_array(); uint8_t hdr[0x60];
     if (arr && hb_read(arr, hdr, sizeof hdr) && *(uint32_t*)(hdr + 0x2c) == 0x64407440 && *(int32_t*)(hdr + 0x24) == 0x18) {
@@ -420,7 +523,9 @@ static void st_snapshot(StBuf* s) {
               if (g_bip[prev].alive && !alive) {
                   StTrack* t = ti >= 0 ? &g_trk[ti] : 0; int team = *(const int32_t*)(d + 0x174);
                   if (t) { t->deaths++; t->alive = 0; if (now - t->life_start > t->longest) t->longest = now - t->life_start;
-                           st_event_pos((const float*)(d + 0x1c), "death", 0, t->name, 0, -1, team, 0, "%s died", t->name);
+                           int16_t sbs[8];
+                           if (t->slot >= 0 && t->slot < 128) { g_sbnow[t->slot].died = now; memcpy(g_sbnow[t->slot].pos, d + 0x1c, 12); }
+                           if (!st_statborg(t->slot, sbs)) st_event_pos((const float*)(d + 0x1c), "death", 0, t->name, 0, -1, team, 0, "%s died", t->name);
                            pthread_mutex_lock(&g_hm_mx); hm_death((const float*)(d + 0x1c), team, t->slot, t->name); pthread_mutex_unlock(&g_hm_mx); }
               }
           }
@@ -429,7 +534,13 @@ static void st_snapshot(StBuf* s) {
       memcpy(g_bip, nb, (size_t)nn * sizeof *nb); g_nbip = nn; }
     st_variant(s);   // the game's options and trait sets
     st_roster(pl, np, m);
-    sb_put(s, ",\"session\":[],\"session_state\":0,\"host_peer\":-1,\"local_peer\":-1,\"dedicated\":false,\"mute\":false,\"slots\":{\"used\":%d,\"max\":null},\"addr_role\":\"hidden\"", np);
+    { static StSess ss[128]; uint32_t sst = 0; int nss = st_session(ss, 128, &sst), hostplayer = 0;
+      sb_put(s, ",\"session\":["); for (int k = 0; k < nss; k++) { sb_put(s, "%s{\"name\":", k ? "," : ""); sb_str(s, ss[k].name);
+          sb_put(s, ",\"index\":%d,\"peer\":%d,\"host\":%s,\"voice\":\"%016llx\",\"muted\":false,\"talking\":false}", ss[k].idx, ss[k].peer, ss[k].host ? "true" : "false", (unsigned long long)ss[k].voice);
+          if (ss[k].host) hostplayer = 1; }
+      sb_put(s, "],\"session_state\":%u,\"host_peer\":%d,\"local_peer\":%d,\"dedicated\":%s,\"mute\":false", sst, g_st_hostpeer, g_st_localpeer, g_st_hostpeer >= 0 && nss && !hostplayer ? "true" : "false");
+      int mx = st_max_players(); sb_put(s, ",\"slots\":{\"used\":%d", nss ? nss : np); if (mx) sb_put(s, ",\"max\":%d,\"src\":\"session\"}", mx); else sb_put(s, ",\"max\":null}");
+      sb_put(s, ",\"addr_role\":\"hidden\""); }
     sb_put(s, ",\"players\":["); int first = 1;
     for (int k = 0; k < np; k++) {
         StTrack* t = st_track(&pl[k]); uint32_t h = pl[k].unit; uint64_t p = ST_DATUM(h); static uint8_t d[0x380];
@@ -446,6 +557,11 @@ static void st_snapshot(StBuf* s) {
             } else if (t->alive && !have) t->alive = 0;
             t->unit = h; if (team >= 0) t->team = team;
         }
+        if (pl[k].slot >= 0 && pl[k].slot < 128) { SbNow* w = &g_sbnow[pl[k].slot]; snprintf(w->name, sizeof w->name, "%s", pl[k].name); w->team = team; w->have = have; w->dead = dead; w->how[0] = 0;
+            if (have && !dead) { uint32_t parent = *(const uint32_t*)(d + 0x10); uint64_t vd = parent != 0xFFFFFFFFu ? ST_DATUM(parent) : 0; uint32_t df = 0;
+                if (vd && hb_read(vd, &df, 4) && *(const int16_t*)(d + 0x24E) == 0) snprintf(w->how, sizeof w->how, "%s", hb_tag_name(df));   // the driver: a splatter is possible
+                else { int ws = *(const int8_t*)(d + 0x262); const uint32_t* wp = (const uint32_t*)(d + 0x268); uint64_t wd = (ws >= 0 && ws < 4) ? ST_DATUM(wp[ws]) : 0;
+                       if (wd && hb_read(wd, &df, 4)) snprintf(w->how, sizeof w->how, "%s", hb_tag_name(df)); } } }
         int you = g_nick[0] && !strcmp(pl[k].name, g_nick);
         sb_put(s, "%s{\"name\":", first ? "" : ","); first = 0; sb_str(s, pl[k].name); sb_put(s, ",\"slot\":%d", pl[k].slot);
         sb_put(s, ",\"handle\":\"%08x\",\"team\":%d,\"team_name\":\"%s\",\"you\":%s,\"alive\":%s,\"health\":%.3f,\"shield\":%.3f,\"camo\":%.3f",
@@ -468,12 +584,16 @@ static void st_snapshot(StBuf* s) {
               } else sb_put(s, "null"); }
             const float* fwv = (const float*)(d + 0x5c); sb_put(s, ",\"facing\":%.0f", atan2f(fwv[1], fwv[0]) * 57.2958f);
         } else sb_put(s, "null,\"weapons\":[],\"grenades\":{\"frag\":0,\"plasma\":0,\"spike\":0,\"firebomb\":0},\"vehicle\":null");
-        sb_put(s, ",\"pos\":"); sb_f3(s, o); sb_put(s, ",\"speed\":%.2f,\"kills\":0", spd);
-        if (t) sb_put(s, ",\"deaths\":%d,\"hits\":0,\"accuracy\":0,\"shots\":0,\"life\":%.1f,\"longest_life\":%.1f,\"distance\":%.1f,\"top_speed\":%.2f", t->deaths, t->alive ? now - t->life_start : 0.0,
+        int16_t sbs[8]; int sbok = st_statborg(pl[k].slot, sbs);
+        sb_put(s, ",\"pos\":"); sb_f3(s, o); sb_put(s, ",\"speed\":%.2f,\"kills\":%d", spd, sbok ? sbs[SB_KILLS] : 0);
+        if (sbok) sb_put(s, ",\"score\":%d,\"assists\":%d,\"betrayals\":%d,\"suicides\":%d", sbs[SB_SCORE], sbs[SB_ASSISTS], sbs[SB_BETRAYALS], sbs[SB_SUICIDES]);
+        if (t) sb_put(s, ",\"deaths\":%d,\"hits\":0,\"accuracy\":0,\"shots\":0,\"life\":%.1f,\"longest_life\":%.1f,\"distance\":%.1f,\"top_speed\":%.2f", sbok ? sbs[SB_DEATHS] : t->deaths, t->alive ? now - t->life_start : 0.0,
                       t->longest > (t->alive ? now - t->life_start : 0) ? t->longest : (t->alive ? now - t->life_start : 0), t->dist, t->top_speed);
         if (g_st_var_ok) st_player_traits(s, pl[k].rec);
         sb_put(s, "}");
     }
+    if (t0) sb_tick(pl, np, now);
+    st_engine_events(pl, np);
     sb_put(s, "],\"vehicles\":["); first = 1;
     for (int i = 0; i < hi; i++) {
         const uint8_t* e = tab + i * 0x18; if (!*(const uint16_t*)e || e[3] != 1) continue;
@@ -573,7 +693,8 @@ static void* st_conn(void* a) {
     } else if (!strcmp(path, "/heat.json")) { StBuf b = {0}; hm_json(&b); st_reply(fd, "application/json", b.b, b.n, 0); free(b.b); }
     else if (!strcmp(path, "/vshapes.json")) st_reply(fd, "application/json", "{\"gen\":0,\"shapes\":{}}", 21, 0);
     else if (!strcmp(path, "/recordings.json")) st_reply(fd, "application/json", "[]", 2, 0);
-    else if (!strcmp(path, "/packets.json")) st_reply(fd, "application/json", "{\"seq\":0,\"records\":[]}", 23, 0);
+    else if (!strcmp(path, "/packets.json")) { static pthread_mutex_t pmx = PTHREAD_MUTEX_INITIALIZER; StBuf b = {0};
+        pthread_mutex_lock(&pmx); pk_json(&b, qs); pthread_mutex_unlock(&pmx); st_reply(fd, "application/json", b.b, b.n, 0); free(b.b); }
     else if (!strcmp(path, "/option-map.json")) st_reply(fd, "application/json", g_st_optmap, sizeof g_st_optmap - 1, 0);
     else if (!strncmp(path, "/maptop/", 8)) {               // the loader's map pictures: ReclaimerMac/maptop/<map>.png|json|z.bin
         const char* nm = path + 8; size_t L = strlen(nm); int ok = L > 4 && L < 64;
@@ -624,6 +745,6 @@ static void nstats_start(void) {
     const char* e = getenv("NHOOK_STATS_HTTP"); if (e) g_st_port = atoi(e); if (g_st_port <= 0 || g_st_port > 65535) return;
     Dl_info di; if (dladdr((void*)nstats_start, &di) && di.dli_fname) {   // the repo: <repo>/shim/build/nhook.dylib
         snprintf(g_repo, sizeof g_repo, "%s", di.dli_fname); for (int k = 0; k < 3; k++) { char* sl = strrchr(g_repo, '/'); if (sl) *sl = 0; } }
-    nick_load();
+    nick_load(); { const char* pe = getenv("NHOOK_PKTLOG"); if (pe && *pe) g_pk_on = atoi(pe) != 0; }
     pthread_t t; pthread_create(&t, 0, st_listen_thread, 0); pthread_detach(t);
 }

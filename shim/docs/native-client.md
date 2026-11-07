@@ -123,11 +123,30 @@ pictures (made with re-tools/h3bsp.py when missing), the game variant and traits
 the feed: match start, joins / leaves (the players table), chat / server / notice lines and ballots (the app's own
 `[chat] line [...]` / `[playlist]` log lines). Verified in a background Guardian match (page with no console errors).
 
-Not yet: kills (halo3's display_event, 0x11b0ec, is lifted but its run is unproven: no kills happened in the offline
-tests; the statborg moved to game_globals +0x159c0 -- `[capacity] game_globals.statborg` -- and holds the scoreboard,
-layout to be found), the network session / Connected list and mute (sessions moved: `[c1] network sessions moved to`),
-weapon / vehicle spawn tracking (items), the overlay (the app draws with Metal), recording, controls (POST /control answers
-403), voice / forensics.
+Since 2026-11-07 also: **kills, deaths, assists, betrayals, suicides, score** from halo3's statborg (see "Kills" below), a
+kill feed paired from its counts (estimated weapon), the **Connected list** (halo3's network session; host badge, session
+state, slots = the session's maximum), the **Packets window** (wire layer: every datagram's type, TCP connections; the
+game layer of halo3 message names is not in yet). display_event is hooked and logs its first 200 events raw
+(`[nhook] [event]`) to learn the app's enlarged event layout.
+
+Not yet: the overlay (the app draws with Metal), recording, controls (POST /control answers 403), voice / mute / forensics,
+weapon / vehicle spawn tracking (items), shots / accuracy (the loader counted projectiles at object_delete, whose entry
+is not a wrapper in the app).
+
+### Kills (static RE of halo3.dll)
+
+- halo3+0x10057c returns the statborg = game engine globals (TLS +0x20, the app's `game_globals` in its [capacity] lines)
+  + 0xfeb8; the app moves it to +0x159c0 (`[capacity] game_globals.statborg: 0xfeb8 -> 0x159c0`), the player blocks grow
+  to 128 x 0x40 (`statborg_teams_shift 0x1c00`).
+- halo3+0x1da7e0 `adjust_player_stat(statborg, player, stat, delta, results_stat, ...)`: i16 at
+  statborg + (player*32 + stat)*2, clamped to +-30000, marks the player's network bit (replicated), then sets the game
+  results statistic `results_stat`. Its callers name the stats: 0x1db33c kills = stat 2 (results 9 "kills"),
+  0x1db58f deaths = 3 (11), 0x1db5ca suicides = 4 (13), 0x1db635 betrayals = 5 (12), 0x1db171 assists = 6 (10),
+  0xfc76f rounds won = 7 (6), 0xfca27 score = 0 (7). Team blocks: +0x400 + team*0x18 (12 i16) in halo3.dll.
+- Game results (halo3+0x2190e40 in halo3.dll; the app moves it: `[c1] game results: 128 slots, ... at`): statistics at
+  +0x1358 (`results.statistics`), 0x263 u16 per player (low 15 bits), the first 0x34 named by the table at
+  halo3+0x792c80 (24-byte rows, name pointer first: re-tools/h3results.py), then medals, then 63 damage types x 6 at
+  index 0xea (halo3+0x124064). Not read by the page (the statborg is the live, replicated one).
 
 Online use: the hooks only read (one entry hook on halo3+0x9d22c records the engine thread's context; nothing in the game
 changes). The app's anti-cheat is server-side and behavioural ("sent game data that a normal game never sends", unusual
