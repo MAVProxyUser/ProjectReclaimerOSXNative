@@ -51,7 +51,8 @@ EOF
 case "${1:-status}" in
   start)
     [ -f "$PIDF" ] && kill -0 "$(cat "$PIDF")" 2>/dev/null && { echo "already running (pid $(cat "$PIDF"))"; exit 0; }
-    bash shim/native/build.sh >/dev/null || { echo "build failed"; exit 1; }; cfg
+    if [ -f shim/native/build.sh ]; then bash shim/native/build.sh >/dev/null || { echo "build failed"; exit 1; }; fi   # (a release bundle ships the dylib built)
+    [ -f shim/build/nhook.dylib ] || { echo "shim/build/nhook.dylib missing"; exit 1; }; cfg
     (cd "$D" && RECLAIMER_PROFILE_DIR="$D/profile" RECLAIMER_CACHE_DIR="$D/cache" NHOOK_STATS_HTTP="${NHOOK_STATS_HTTP:-8767}" NHOOK_STATS_OPEN=0 \
        PELOAD_FORENSIC_DIR="$D/forensics" NHOOK_HEATMAP_DIR="$D/heatmaps" NHOOK_LOG="$LOG.nhook" \
        NHOOK_HALO3="$(cat "$HOME/Library/Application Support/ProjectReclaimer/mcc-folder.txt")/halo3/halo3.dll" \
