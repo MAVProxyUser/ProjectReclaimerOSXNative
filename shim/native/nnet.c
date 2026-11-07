@@ -79,7 +79,7 @@ static int st_max_players(void) {                          // the session's limi
 
 // ---- the packet log (pktlog.c's wire layer) ---------------------------------------------------------------------------
 #include <netdb.h>
-enum { PK_TX = 0, PK_RX = 1, PK_WIRE = 0, PK_N = 16384, PK_NFD = 4096 };
+enum { PK_TX = 0, PK_RX = 1, PK_WIRE = 0, PK_GAME = 1, PK_N = 16384, PK_NFD = 4096 };
 typedef struct { volatile uint32_t seq; uint8_t layer, dir, fam, flags; uint16_t lport, rport; uint32_t len; double t; uint8_t addr[16]; char type[24]; } PkEv;
 _Static_assert(sizeof(PkEv) == 64, "one cache line per record");
 static PkEv g_pk[PK_N]; static volatile uint32_t g_pk_seq;
@@ -234,33 +234,83 @@ static void pk_close(int fd) { if (fd < 0 || fd >= PK_NFD) return;
     if (g_pk_tcp[fd].on && g_pk_on) pk_tcp_rec(fd, "tcp-close", (uint32_t)(g_pk_tcp[fd].tx + g_pk_tcp[fd].rx));
     g_pk_tcp[fd].on = 0; g_pk_lport[fd] = 0; g_pk_udp[fd] = 0; }
 static void pk_ev_json(StBuf* s, const PkEv* e, uint32_t seq, int first) {
-    sb_put(s, "%s{\"seq\":%u,\"t\":%.4f,\"layer\":\"wire\",\"dir\":\"%s\",\"type\":", first ? "" : ",", seq, e->t, e->dir == PK_RX ? "rx" : "tx"); sb_str(s, e->type);
+    sb_put(s, "%s{\"seq\":%u,\"t\":%.4f,\"layer\":\"%s\",\"dir\":\"%s\",\"type\":", first ? "" : ",", seq, e->t, e->layer == PK_GAME ? "game" : "wire", e->dir == PK_RX ? "rx" : "tx"); sb_str(s, e->type);
     sb_put(s, ",\"len\":%u,\"lport\":%u,\"flags\":%u", e->len, e->lport, e->flags); pk_peer_json(s, e); sb_put(s, "}"); }
 static int pk_get(uint32_t seq, PkEv* out) { const PkEv* e = &g_pk[seq % PK_N]; if (__atomic_load_n(&e->seq, __ATOMIC_ACQUIRE) != seq) return 0;
     memcpy(out, (const void*)e, sizeof *out); return __atomic_load_n(&e->seq, __ATOMIC_ACQUIRE) == seq; }
-typedef struct { uint8_t dir, fam; uint8_t addr[16]; uint16_t rport; char type[24]; uint64_t n, bytes; double t0, t1; } PkAgg;
+typedef struct { uint8_t dir, fam, layer; uint8_t addr[16]; uint16_t rport; char type[24]; uint64_t n, bytes; double t0, t1; } PkAgg;
 static int pk_agg_add(PkAgg* a, int na, int cap, const PkEv* e) {
-    for (int i = 0; i < na; i++) { PkAgg* x = &a[i]; if (x->dir == e->dir && x->fam == e->fam && x->rport == e->rport && !memcmp(x->addr, e->addr, 16) && !strcmp(x->type, e->type)) {
+    for (int i = 0; i < na; i++) { PkAgg* x = &a[i]; if (x->dir == e->dir && x->layer == e->layer && x->fam == e->fam && x->rport == e->rport && !memcmp(x->addr, e->addr, 16) && !strcmp(x->type, e->type)) {
             x->n++; x->bytes += e->len; if (e->t > x->t1) x->t1 = e->t; return na; } }
-    if (na >= cap) return na; PkAgg* x = &a[na]; x->dir = e->dir; x->fam = e->fam; x->rport = e->rport; memcpy(x->addr, e->addr, 16); snprintf(x->type, 24, "%s", e->type);
+    if (na >= cap) return na; PkAgg* x = &a[na]; x->dir = e->dir; x->layer = e->layer; x->fam = e->fam; x->rport = e->rport; memcpy(x->addr, e->addr, 16); snprintf(x->type, 24, "%s", e->type);
     x->n = 1; x->bytes = e->len; x->t0 = x->t1 = e->t; return na + 1; }
 static void pk_agg_json(StBuf* s, const PkAgg* x, int first, double secs) { PkEv e; memset(&e, 0, sizeof e); e.fam = x->fam; memcpy(e.addr, x->addr, 16); e.rport = x->rport;
-    sb_put(s, "%s{\"layer\":\"wire\",\"dir\":\"%s\",\"type\":", first ? "" : ",", x->dir == PK_RX ? "rx" : "tx"); sb_str(s, x->type);
+    sb_put(s, "%s{\"layer\":\"%s\",\"dir\":\"%s\",\"type\":", first ? "" : ",", x->layer == PK_GAME ? "game" : "wire", x->dir == PK_RX ? "rx" : "tx"); sb_str(s, x->type);
     sb_put(s, ",\"n\":%llu,\"bytes\":%llu", (unsigned long long)x->n, (unsigned long long)x->bytes);
     if (secs > 0) sb_put(s, ",\"per_s\":%.2f,\"bytes_per_s\":%.0f", x->n / secs, x->bytes / secs); else sb_put(s, ",\"t0\":%.3f,\"t1\":%.3f", x->t0, x->t1);
     pk_peer_json(s, &e); sb_put(s, "}"); }
-// GET /packets.json?since=<seq>&max=<n>[&skip1rtt=1][&wire=0][&game=0] (pktlog.c's; the game layer is not in the native app)
+// ---- the game layer (opt-in, the page's "game" switch: POST do=pktgame&on=1; 2026-11-07, backlog N9): halo3's network message
+// types by name as the app's halo3 encodes / decodes them. halo3's message table (halo3+0x46b6e98: 46 x 0x40 {valid, name,
+// flags, size, max size, encode +0x20, decode +0x28}) is in the native app, and every encode / decode is a lifted halo3
+// function (player-acknowledge's are the app's own code; synchronous-client-ready has none): the first switch-on hooks each
+// distinct one (code-table entry hooks, permanent; the handlers do nothing while the switch is off). Only SESSION messages
+// still run through them (2 minutes of a 59-player game: membership-update decoded ~150 times, the gateway's receive twice;
+// channel send / receive, the synchronous-* messages and game-results never ran): the app carries the in-game traffic in
+// its own protocol, so these records name session traffic only, with no peer (the channel functions that knew it don't run).
+// A function several types share (0x74e30: leave-session, leave-acknowledge, session-disband ...) is named by all of them.
+enum { PKG_NF = 96 };
+typedef struct { uint32_t rva; uint8_t dir; char name[24], full[160]; volatile unsigned long n; } PkgFn;
+static PkgFn g_pkgf[PKG_NF]; static int g_npkgf; static volatile int g_pkg_want, g_pkg_hooked; static pthread_mutex_t g_pkg_mx = PTHREAD_MUTEX_INITIALIZER;
+static void pkg_hit(int k) {
+    if (!g_pkg_want || k >= g_npkgf) return; PkgFn* f = &g_pkgf[k]; f->n++;
+    uint32_t s; PkEv* e = pk_new(&s); e->layer = PK_GAME; e->dir = f->dir; e->fam = 0; e->len = 0; e->lport = e->rport = 0; e->flags = 0; e->t = st_wall();
+    memset(e->addr, 0, 16); snprintf(e->type, sizeof e->type, "%s", f->name); pk_done(e, s); }
+#define PKGH(k) static void pkgh##k(uint64_t* c) { (void)c; pkg_hit(k); }
+#define PKGH8(b) PKGH(b##0) PKGH(b##1) PKGH(b##2) PKGH(b##3) PKGH(b##4) PKGH(b##5) PKGH(b##6) PKGH(b##7)
+PKGH(0) PKGH(1) PKGH(2) PKGH(3) PKGH(4) PKGH(5) PKGH(6) PKGH(7) PKGH(8) PKGH(9) PKGH8(1) PKGH8(2) PKGH8(3) PKGH8(4) PKGH8(5) PKGH8(6) PKGH8(7) PKGH8(8) PKGH8(9)
+PKGH(18) PKGH(19) PKGH(28) PKGH(29) PKGH(38) PKGH(39) PKGH(48) PKGH(49) PKGH(58) PKGH(59) PKGH(68) PKGH(69) PKGH(78) PKGH(79) PKGH(88) PKGH(89) PKGH(98) PKGH(99)
+static nh_handler const g_pkgh[] = {pkgh0, pkgh1, pkgh2, pkgh3, pkgh4, pkgh5, pkgh6, pkgh7, pkgh8, pkgh9,
+    pkgh10, pkgh11, pkgh12, pkgh13, pkgh14, pkgh15, pkgh16, pkgh17, pkgh18, pkgh19, pkgh20, pkgh21, pkgh22, pkgh23, pkgh24, pkgh25, pkgh26, pkgh27, pkgh28, pkgh29,
+    pkgh30, pkgh31, pkgh32, pkgh33, pkgh34, pkgh35, pkgh36, pkgh37, pkgh38, pkgh39, pkgh40, pkgh41, pkgh42, pkgh43, pkgh44, pkgh45, pkgh46, pkgh47, pkgh48, pkgh49,
+    pkgh50, pkgh51, pkgh52, pkgh53, pkgh54, pkgh55, pkgh56, pkgh57, pkgh58, pkgh59, pkgh60, pkgh61, pkgh62, pkgh63, pkgh64, pkgh65, pkgh66, pkgh67, pkgh68, pkgh69,
+    pkgh70, pkgh71, pkgh72, pkgh73, pkgh74, pkgh75, pkgh76, pkgh77, pkgh78, pkgh79, pkgh80, pkgh81, pkgh82, pkgh83, pkgh84, pkgh85, pkgh86, pkgh87, pkgh88, pkgh89,
+    pkgh90, pkgh91, pkgh92, pkgh93, pkgh94, pkgh95};
+static int pkg_install(void) {   // (g_pkg_mx held) read the table and hook every distinct encode / decode: 1 = done
+    uint64_t tb = 0; uint8_t e[0x40]; char nm[32]; uint64_t np = 0;
+    if (!g_img || rd(g_img + 0x46b6e98, &tb, 8) || !tb || rd(tb, e, 0x40) || e[0] != 1) return 0;
+    memcpy(&np, e + 8, 8); memset(nm, 0, sizeof nm); if (!np || rd(np, nm, 5) || memcmp(nm, "ping", 5)) return 0;
+    g_npkgf = 0;
+    for (int i = 0; i < 46; i++) { if (rd(tb + (uint64_t)i * 0x40, e, 0x40) || e[0] != 1) continue; memcpy(&np, e + 8, 8); memset(nm, 0, sizeof nm); if (np) rd(np, nm, 31);
+        for (int d = 0; d < 2; d++) { uint64_t fp = 0; memcpy(&fp, e + 0x20 + 8 * d, 8); if (fp <= g_img || fp - g_img > 0x8000000) continue; uint32_t rva = (uint32_t)(fp - g_img);
+            int k = -1; for (int j = 0; j < g_npkgf; j++) if (g_pkgf[j].rva == rva && g_pkgf[j].dir == (d ? PK_RX : PK_TX)) { k = j; break; }
+            if (k < 0) { if (g_npkgf >= PKG_NF) continue; k = g_npkgf++; g_pkgf[k].rva = rva; g_pkgf[k].dir = (uint8_t)(d ? PK_RX : PK_TX); g_pkgf[k].full[0] = 0; }
+            size_t fl = strlen(g_pkgf[k].full); snprintf(g_pkgf[k].full + fl, sizeof g_pkgf[k].full - fl, "%s%s", fl ? " / " : "", nm); } }
+    int ok = 0, nf = g_npkgf;
+    for (int k = 0; k < nf; k++) { PkgFn* f = &g_pkgf[k]; const char* sl = strchr(f->full, '/');
+        snprintf(f->name, sizeof f->name, "%.*s%s", sl ? (int)(sl - f->full - 1) : 23, f->full, sl ? "+" : "");   // ("+": types share it)
+        char hn[48]; snprintf(hn, sizeof hn, "message %s %s", f->name, f->dir == PK_RX ? "decode" : "encode");
+        if (!hook_install(hn, f->rva, g_pkgh[k])) ok++; }
+    nlog("[nhook] packets: game layer: %d of %d message encode / decode functions hooked (halo3's message table at 0x%llx)", ok, nf, (unsigned long long)tb);
+    return 1; }
+static int pk_control(const char* qs) {   // POST /control?do=pktgame&on=0|1
+    const char* v = strstr(qs, "on="); if (!v) return 0; int on = atoi(v + 3) ? 1 : 0;
+    pthread_mutex_lock(&g_pkg_mx); if (on && !g_pkg_hooked) g_pkg_hooked = pkg_install(); int ok = !on || g_pkg_hooked; if (ok) g_pkg_want = on; pthread_mutex_unlock(&g_pkg_mx);
+    nlog("[nhook] packets: game layer %s", on ? (ok ? "on" : "not available (halo3's message table not found)") : "off"); return ok; }
+// GET /packets.json?since=<seq>&max=<n>[&skip1rtt=1][&wire=0][&game=0] (pktlog.c's)
 static void pk_json(StBuf* s, const char* qs) {
     const char* v = strstr(qs, "since="); uint32_t since = v ? (uint32_t)strtoul(v + 6, 0, 10) : 0; v = strstr(qs, "max="); int mx = v ? atoi(v + 4) : 400; if (mx < 1) mx = 1; if (mx > 4000) mx = 4000;
-    int s1 = strstr(qs, "skip1rtt=1") != 0, nw = strstr(qs, "wire=0") != 0; g_pk_want_rdns = strstr(qs, "rdns=1") != 0;
+    int s1 = strstr(qs, "skip1rtt=1") != 0, nw = strstr(qs, "wire=0") != 0, ng = strstr(qs, "game=0") != 0; g_pk_want_rdns = strstr(qs, "rdns=1") != 0;
     uint32_t top = __atomic_load_n(&g_pk_seq, __ATOMIC_ACQUIRE); uint32_t lo = top > PK_N - 64 ? top - (PK_N - 64) : 1; if (since + 1 > lo) lo = since + 1;
-    sb_put(s, "{\"seq\":%u,\"on\":%s,\"game\":{\"want\":false,\"on\":false,\"types\":0,\"native\":\"not in the native app yet\"},\"events\":[", top, g_pk_on ? "true" : "false");
+    sb_put(s, "{\"seq\":%u,\"on\":%s,\"game\":{\"want\":%s,\"on\":%s,\"types\":%d,\"native\":\"session messages only (the app carries in-game traffic in its own protocol); no peer\"},\"events\":[",
+           top, g_pk_on ? "true" : "false", g_pkg_want ? "true" : "false", g_pkg_want && g_pkg_hooked ? "true" : "false", g_npkgf);
     static uint32_t pick[4000]; int np = 0; PkEv e;
-    for (uint32_t q = top; q >= lo && q && np < mx; q--) { if (!pk_get(q, &e)) continue; if ((s1 && !strcmp(e.type, "quic-1rtt")) || nw) continue; pick[np++] = q; }
+    for (uint32_t q = top; q >= lo && q && np < mx; q--) { if (!pk_get(q, &e)) continue; if (e.layer == PK_GAME ? ng : ((s1 && !strcmp(e.type, "quic-1rtt")) || nw)) continue; pick[np++] = q; }
     int f = 1; for (int i = np - 1; i >= 0; i--) if (pk_get(pick[i], &e)) { pk_ev_json(s, &e, pick[i], f); f = 0; }
     double now = st_wall(), oldest = now; static PkAgg a[512]; int na = 0; uint32_t lo2 = top > PK_N - 64 ? top - (PK_N - 64) : 1;
     for (uint32_t q = top; q >= lo2 && q; q--) { if (!pk_get(q, &e)) continue; if (now - e.t > 10.0) break; if (e.t < oldest) oldest = e.t; na = pk_agg_add(a, na, 512, &e); }
     double win = now - oldest; if (win < 1.0) win = 1.0; if (win > 10.0) win = 10.0;
     sb_put(s, "],\"summary_s\":%.1f,\"summary\":[", win); for (int i = 0; i < na; i++) pk_agg_json(s, &a[i], !i, win);
-    sb_put(s, "],\"game_counts\":[]}");
+    sb_put(s, "],\"game_counts\":["); for (int i = 0, ff = 1; i < g_npkgf; i++) { if (!g_pkgf[i].n) continue;   // (per hooked function: its types, sends or receives)
+        sb_put(s, "%s{\"type\":", ff ? "" : ","); ff = 0; sb_str(s, g_pkgf[i].full); sb_put(s, ",\"tx\":%lu,\"rx\":%lu,\"flags\":0}", g_pkgf[i].dir == PK_TX ? g_pkgf[i].n : 0, g_pkgf[i].dir == PK_RX ? g_pkgf[i].n : 0); }
+    sb_put(s, "]}");
 }

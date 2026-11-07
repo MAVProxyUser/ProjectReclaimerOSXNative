@@ -1258,6 +1258,7 @@ static int st_control(const char* act, const char* qs) {
     if (!strcmp(act, "recstop")) { rec_stop(); return 1; }
     if (!strcmp(act, "forensic")) return fx_control(qs);       // archive / voice audio / consent (forensic.c)
     if (!strcmp(act, "hookab")) return hc_control(qs);           // the hook cost meter's on/off measurement
+    if (!strcmp(act, "pktgame")) return pk_control(qs);           // the Packets window's game layer (nnet.c)
     if (!strcmp(act, "hookset")) return hc_set(qs);               // ... and its per-hook switches
     if (!strcmp(act, "mute") || !strcmp(act, "unmute")) { voice_init(); const char* v = strstr(qs, "voice="); unsigned long long id = v ? strtoull(v + 6, 0, 16) : 0;
         if (!g_set_muted || !id) return 0; g_set_muted(id, !strcmp(act, "mute")); uint64_t mu[64];

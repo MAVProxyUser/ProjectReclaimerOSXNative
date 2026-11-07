@@ -2055,6 +2055,16 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   forensic-oggtest.sh (6 s of packets with a quiet 2 s in the middle -> two utterances of 100 packets). The voice CHANNEL
   (global / team / proximity) is still not known natively: the app's voice mixer keeps per sender only a sequence-keyed queue
   of raw packets ([kind][data]; 0x10214dcbc pops it), so the channel would have to come from its network receive path.
+- **nhook Packets: the game layer (halo3's message names), session messages** (2026-11-07; nnet.c pkg_install / pkg_hit /
+  pk_control, nhook.c pkg_probe, stats_page.html) — WHY: backlog N9; the page hid the "game" switch for the native app.
+  HOW: NHOOK_PKG_PROBE=1 showed halo3's message table (halo3+0x46b6e98) in the native app with every encode / decode a lifted
+  function (player-acknowledge's are the app's own code; synchronous-client-ready has none) and the loader's five message
+  senders / receivers lifted too; =2 counted them in a 59-player game: membership-update decoded ~150 times in 2 minutes, the
+  gateway's receive twice, the channel send / receive / reply, the synchronous-* messages and game-results never -- the app
+  carries in-game traffic in its own protocol. So the switch (POST do=pktgame&on=1) hooks each distinct encode / decode
+  function on first use (code-table entry hooks, permanent; handlers idle while off: 75 of 77 hooked) and logs the SESSION
+  messages by name (a function several types share is named by the first, "+", and listed in full in the counts), with no
+  peer. Checked live: membership-update x64 received, parameters-update x10, peer-properties x5 sent in 70 s.
 - **nhook-selftest.sh: its own forensic / heatmap folders** (2026-11-07; shim/tools/nhook-selftest.sh) — WHY: the offline
   selftest starts nhook's stats server, whose archive opened an empty "menu" session in the player's real forensic archive on
   every run. HOW: PELOAD_FORENSIC_DIR and NHOOK_HEATMAP_DIR point into the test's temporary folder.

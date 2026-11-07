@@ -125,6 +125,38 @@ static uint8_t* near_page(uint64_t code, size_t size) {   // a fresh RW range wi
     return 0;
 }
 
+// NHOOK_PKG_PROBE=1 (2026-11-07, backlog N9): halo3's network message table (halo3+0x46b6e98 -> 46 x 0x40 {valid, name,
+// flags, size, max size, encode +0x20, decode +0x28}; the loader's pktlog.c) in the native app: each message's encode /
+// decode function and how the app runs it (a lifted wrapper we could hook, the app's own code, or not lifted), and the five
+// message senders / receivers the loader hooked -- whether a "game layer" of message names can be done natively.
+enum { PKC_N = 16 }; static volatile unsigned long g_pkc[PKC_N];
+#define PKC(i) static void pkc##i(uint64_t* c) { (void)c; g_pkc[i]++; }
+PKC(0) PKC(1) PKC(2) PKC(3) PKC(4) PKC(5) PKC(6) PKC(7) PKC(8) PKC(9) PKC(10) PKC(11) PKC(12) PKC(13) PKC(14) PKC(15)
+static int hook_install(const char* name, uint32_t rva, nh_handler h);
+static const char* rva_kind(uint32_t rva) {
+    uint64_t e = host_of(rva); uint32_t w[4]; if (!e || rd(e, w, 16)) return "not lifted";
+    if ((w[0] & 0xfc000000u) == 0x14000000u) return "the app's own code";
+    return w[0] == 0xa9bf7bfd && w[1] == 0x910003fd ? "lifted" : "other"; }
+static void* pkg_probe(void* a) {
+    (void)a; for (int tries = 0; tries < 80; tries++) { sleep(3); uint64_t tb = 0; if (!g_img || rd(g_img + 0x46b6e98, &tb, 8) || !tb) continue;
+        uint8_t e[0x40]; char nm[32]; uint64_t np = 0; if (rd(tb, e, 0x40) || e[0] != 1) continue; memcpy(&np, e + 8, 8); memset(nm, 0, sizeof nm); if (!np || rd(np, nm, 5) || memcmp(nm, "ping", 5)) continue;
+        nlog("[nhook] [pkg] halo3's message table at 0x%llx (guest image 0x%llx)", (unsigned long long)tb, (unsigned long long)g_img);
+        for (int i = 0; i < 46; i++) { if (rd(tb + (uint64_t)i * 0x40, e, 0x40) || e[0] != 1) continue; memcpy(&np, e + 8, 8); memset(nm, 0, sizeof nm); if (np) rd(np, nm, 31);
+            uint64_t en = 0, de = 0; memcpy(&en, e + 0x20, 8); memcpy(&de, e + 0x28, 8);
+            uint32_t er = en > g_img ? (uint32_t)(en - g_img) : 0, dr = de > g_img ? (uint32_t)(de - g_img) : 0;
+            nlog("[nhook] [pkg] %2d %-28s encode halo3+0x%x (%s), decode halo3+0x%x (%s)", i, nm, er, er ? rva_kind(er) : "-", dr, dr ? rva_kind(dr) : "-"); }
+        static const uint32_t disp[5] = {0x249dc, 0x24900, 0x5f0b0, 0x5f2f0, 0x5efa8};
+        for (int i = 0; i < 5; i++) nlog("[nhook] [pkg] dispatcher halo3+0x%x: %s", disp[i], rva_kind(disp[i]));
+        if (atoi(getenv("NHOOK_PKG_PROBE")) >= 2) {   // =2: counting hooks on the dispatchers and the busiest messages, counts every 10 s
+            static const char* const nm[PKC_N] = {"gateway send", "gateway receive", "channel send", "channel receive", "channel reply", "ping encode", "ping decode",
+                "membership-update encode", "membership-update decode", "synchronous-update encode", "synchronous-update decode", "synchronous-actions encode",
+                "synchronous-actions decode", "synchronous-gamestate decode", "game-results decode", "player-properties decode"};
+            static const uint32_t rv[PKC_N] = {0x249dc, 0x24900, 0x5f0b0, 0x5f2f0, 0x5efa8, 0x73ab8, 0x73b80, 0x75e78, 0x76f50, 0x78e90, 0x78f78, 0x7921c, 0x79328, 0x79650, 0x7999c, 0x77b98};
+            static nh_handler const hh[PKC_N] = {pkc0, pkc1, pkc2, pkc3, pkc4, pkc5, pkc6, pkc7, pkc8, pkc9, pkc10, pkc11, pkc12, pkc13, pkc14, pkc15};
+            for (int i = 0; i < PKC_N; i++) nlog("[nhook] [pkg] counting %s (halo3+0x%x): %s", nm[i], rv[i], hook_install(nm[i], rv[i], hh[i]) ? "NOT hooked" : "hooked");
+            for (int r = 0; r < 30; r++) { sleep(10); char b[600]; int k = 0; for (int i = 0; i < PKC_N; i++) k += snprintf(b + k, sizeof b - (size_t)k, " %s %lu,", nm[i], g_pkc[i]); nlog("[nhook] [pkg] calls:%s", b); } }
+        return 0; }
+    nlog("[nhook] [pkg] halo3's message table never appeared"); return 0; }
 static int hook_install(const char* name, uint32_t rva, nh_handler h) {
     uint64_t e = host_of(rva); uint32_t w[4];
     if (!e || rd(e, w, 16)) { nlog("[nhook] hook %s: halo3+0x%x not lifted", name, rva); return -1; }
@@ -430,6 +462,7 @@ static void hooks_start(void) {
         if (!getenv("NHOOK_NO_DELHOOK")) { uint64_t t = branch_target_of(0x342ed8); if (t) text_hook("object_delete", t, on_object_delete); else hook_install("object_delete", 0x342ed8, on_object_delete); }
         if (!getenv("NHOOK_NO_VOICEHOOK")) voice_hook_install(); }
     if (getenv("NHOOK_PLAYERS_LOG")) { pthread_t t; pthread_create(&t, 0, engine_thread, 0); pthread_detach(t); }
+    if (getenv("NHOOK_PKG_PROBE")) { pthread_t t; pthread_create(&t, 0, pkg_probe, 0); pthread_detach(t); }
     nstats_start();
     { extern void nr_install(void); nr_install(); }      // nrender.m: the overlay, recording and captures in the app's frames
 }

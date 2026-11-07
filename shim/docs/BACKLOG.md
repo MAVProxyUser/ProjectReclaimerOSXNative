@@ -17,7 +17,7 @@ done / fixed / closed; #47's pending live check passed in the native app 2026-11
 | N6 | **Forensic voice: channel and open mics** | PARTLY DONE 2026-11-07: open microphones are split on the app's quiet windows (FXF_LEVEL); the channel stays "not known" natively: the voice mixer keeps no channel per packet, it would need a hook on the app's network receive path |
 | N7 | **Kill feed: the first kills after a launch are estimated** | DONE 2026-11-07: the scoreboard path always waits for the results; normal-case weapon names |
 | N8 | **Hits / accuracy are an estimate** | DONE 2026-11-07: hits = shots through an enemy's hitboxes (aim meter); native-aim-test.sh 8 of 10 on a practice target |
-| N9 | **Packets window: game messages** | OPEN: 0.10's wire protocol is the app's own (the 0.9 halo3 message table does not apply) |
+| N9 | **Packets window: game messages** | DONE 2026-11-07 (what the app still runs): the "game" switch names halo3's session messages (membership, parameters, peer properties, joins ...) as the app's halo3 encodes / decodes them; in-game traffic is the app's own protocol, and no peer (FIXES.md "the game layer") |
 | N10 | **Medals in the feed** | DONE 2026-11-07: medals (statistic 63 + i, the app's 112-medal table) in the feed and the player details; live check left |
 | N11 | **Hitboxes on dead bodies** | DONE 2026-11-07: dead bodies get no hitboxes (NHOOK_HB_DEAD=1 = grey) |
 | N12 | **A native dedicated server test** | OPEN: needs a local-only configuration first (a public listing must not happen) |
