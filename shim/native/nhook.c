@@ -125,6 +125,45 @@ static int hook_install(const char* name, uint32_t rva, nh_handler h) {
     return 0;
 }
 
+// ---- hooks on the app's OWN code (its signed __TEXT: functions the app replaced, e.g. object_delete) --------------------
+// The app is signed ad hoc with no hardened runtime (codesign flags 0x2): its text pages are made writable as private copies
+// (VM_PROT_COPY), the function's first four instructions become `ldr x16, #8; br x16; .quad stub` and go to the stub
+// (stub.S _nh_tp4: handler(x0), then those four instructions, then back). Refused when one of them is PC-relative.
+// Installed once at startup. NHOOK_NO_TEXT_HOOKS=1 = none.
+extern char nh_tp4_start[], nh_tp4_displaced[], nh_tp4_handler[], nh_tp4_return[], nh_tp4_end[];
+static int insn_pcrel(uint32_t w) {
+    return (w & 0x1f000000u) == 0x10000000u            // adr / adrp
+        || (w & 0x7c000000u) == 0x14000000u            // b / bl
+        || (w & 0x7e000000u) == 0x34000000u            // cbz / cbnz
+        || (w & 0x7e000000u) == 0x36000000u            // tbz / tbnz
+        || (w & 0xff000010u) == 0x54000000u            // b.cond
+        || (w & 0x3b000000u) == 0x18000000u;           // ldr (literal)
+}
+static int text_hook(const char* name, uint64_t f, nh_handler h) {
+    if (getenv("NHOOK_NO_TEXT_HOOKS")) return -1;
+    uint32_t w[4]; if (rd(f, w, 16)) { nlog("[nhook] text hook %s: 0x%llx unreadable", name, (unsigned long long)f); return -1; }
+    for (int i = 0; i < 4; i++) if (insn_pcrel(w[i])) { nlog("[nhook] text hook %s: instruction %d (%08x) is PC-relative: refused", name, i, w[i]); return -1; }
+    size_t tl = nh_tp4_end - nh_tp4_start; mach_vm_address_t st = 0;
+    if (mach_vm_allocate(mach_task_self(), &st, 0x4000, VM_FLAGS_ANYWHERE) != KERN_SUCCESS) return -1;
+    memcpy((void*)st, nh_tp4_start, tl); memcpy((uint8_t*)st + (nh_tp4_displaced - nh_tp4_start), w, 16);
+    uint64_t hv = (uint64_t)h, rv = f + 16; memcpy((uint8_t*)st + (nh_tp4_handler - nh_tp4_start), &hv, 8); memcpy((uint8_t*)st + (nh_tp4_return - nh_tp4_start), &rv, 8);
+    mach_vm_protect(mach_task_self(), st, 0x4000, 0, VM_PROT_READ | VM_PROT_EXECUTE); sys_icache_invalidate((void*)st, tl);
+    uint64_t pg = f & ~0x3fffull, end = (f + 16 + 0x3fff) & ~0x3fffull;
+    kern_return_t kr = mach_vm_protect(mach_task_self(), pg, end - pg, 0, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+    if (kr != KERN_SUCCESS) { nlog("[nhook] text hook %s: the page stays read-only (kr %d)", name, kr); return -1; }
+    uint32_t patch[4] = {0x58000050u, 0xd61f0200u, (uint32_t)st, (uint32_t)((uint64_t)st >> 32)};   // ldr x16, #8 ; br x16 ; .quad stub
+    memcpy((void*)(uintptr_t)(f + 8), &patch[2], 8); __atomic_thread_fence(__ATOMIC_SEQ_CST); memcpy((void*)(uintptr_t)f, patch, 8);
+    kr = mach_vm_protect(mach_task_self(), pg, end - pg, 0, VM_PROT_READ | VM_PROT_EXECUTE);
+    sys_icache_invalidate((void*)(uintptr_t)f, 16);
+    nlog("[nhook] text hook %s: 0x%llx -> stub 0x%llx (back to executable: kr %d)", name, (unsigned long long)f, (unsigned long long)st, kr);
+    return 0;
+}
+// The target of an entry that is one `b` (the code table's entry for a function the app replaced)
+static uint64_t branch_target_of(uint32_t rva) {
+    uint64_t e = host_of(rva); uint32_t w0; if (!e || rd(e, &w0, 4) || (w0 & 0xfc000000u) != 0x14000000u) return 0;
+    return e + (uint64_t)((int64_t)((int32_t)(w0 << 6) >> 6) * 4);
+}
+
 // ---- census (NHOOK_CENSUS=1): which lifted functions run at all ---------------------------------------------------
 // Every lifted wrapper in the code table gets a 48-byte counting stub (stub.S _nh_cen_*); NHOOK_CENSUS_SECS later the
 // functions that ran are written to NHOOK_CENSUS_OUT (default /tmp/nhook_census.txt): rva, calls, last context.
@@ -195,6 +234,10 @@ static nh_handler g_cnt_h[NCNT] = { cnt_0, cnt_1, cnt_2, cnt_3, cnt_4, cnt_5, cn
 // context made ~1 snapshot in 7 empty in a 72-player game (2026-11-07). A thread that stops validating for 2 s (a new
 // engine thread) is given up and the next good one learned.
 static volatile uint64_t g_good_tlsp;
+volatile unsigned long g_texthook_test_n, g_tht_n[8]; uint32_t g_tht_rva[8];
+#define THT(i) static void tht_##i(uint64_t* ctx) { (void)ctx; g_tht_n[i]++; g_texthook_test_n++; }
+THT(0) THT(1) THT(2) THT(3) THT(4) THT(5) THT(6) THT(7)
+static nh_handler g_tht_h[8] = { tht_0, tht_1, tht_2, tht_3, tht_4, tht_5, tht_6, tht_7 };
 static void on_main_loop(uint64_t* ctx) {           // the engine thread's context (hook_install "engine_clock")
     uint64_t t = ctx[0x2d8 / 8]; if (!t) return;
     uint64_t good = g_good_tlsp; if (good && t != good) return;
@@ -257,7 +300,19 @@ static void hooks_start(void) {
     // thread ~7000 times a second in a match -- main_loop_body (0xb2250) and the sim tick are the app's own code now
     else if (!getenv("NHOOK_NO_HOOKS")) { hook_install("engine_clock", 0x9d22c, on_main_loop);
         if (!getenv("NHOOK_NO_EVHOOK")) hook_install("display_event", 0x11b0ec, on_display_event);
-        if (!getenv("NHOOK_NO_DELHOOK")) hook_install("object_delete", 0x342ed8, on_object_delete); }
+        if (getenv("NHOOK_LIST_BRANCH_ENTRIES")) {   // which halo3 functions the app replaced with its own code (entry = one `b`)
+            uint64_t* tb = malloc(g_ntab * 16); int n = 0; char line[1024]; int k = 0;
+            if (tb && !rd(g_tab, tb, g_ntab * 16)) for (uint64_t i = 0; i < g_ntab; i++) { uint32_t w0; if (rd(tb[2 * i + 1], &w0, 4) || (w0 & 0xfc000000u) != 0x14000000u) continue;
+                n++; k += snprintf(line + k, sizeof line - (size_t)k, " %llx", (unsigned long long)(tb[2 * i] - 0x180000000ull));
+                if (k > 900) { nlog("[nhook] branch entries:%s", line); k = 0; } }
+            if (k) nlog("[nhook] branch entries:%s", line); nlog("[nhook] %d of %llu code-table entries are one `b` (functions the app replaced)", n, (unsigned long long)g_ntab); free(tb); }
+        if (getenv("NHOOK_TEXTHOOK_TEST")) {   // test: counting text hooks on functions the app replaced (NHOOK_TEXTHOOK_TEST=<rva>,<rva>...)
+            const char* w = getenv("NHOOK_TEXTHOOK_TEST");
+            for (int i = 0; i < 8 && w && *w; i++) { uint32_t rva = (uint32_t)strtoul(w, 0, 16); uint64_t t = branch_target_of(rva); char nm[32]; snprintf(nm, sizeof nm, "test halo3+0x%x", rva);
+                g_tht_rva[i] = rva; nlog("[nhook] text hook test: halo3+0x%x's entry -> 0x%llx", rva, (unsigned long long)t); if (t) text_hook(nm, t, g_tht_h[i]);
+                w = strchr(w, ','); if (w) w++; } }
+        // object_delete: the app's own native function (its code-table entry is a `b` into the app's __TEXT): a text hook
+        if (!getenv("NHOOK_NO_DELHOOK")) { uint64_t t = branch_target_of(0x342ed8); if (t) text_hook("object_delete", t, on_object_delete); else hook_install("object_delete", 0x342ed8, on_object_delete); } }
     if (getenv("NHOOK_PLAYERS_LOG")) { pthread_t t; pthread_create(&t, 0, engine_thread, 0); pthread_detach(t); }
     nstats_start();
     { extern void nr_install(void); nr_install(); }      // nrender.m: the overlay, recording and captures in the app's frames

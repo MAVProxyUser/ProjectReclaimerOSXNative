@@ -166,11 +166,15 @@ static void nov_trail_add(uint32_t h, const float* pos, double now) {
 // The hook runs on the engine thread inside the lifted call: it reads that thread's own TLS directly (pointers checked).
 typedef struct { volatile double t; uint32_t def, owner; float pos[3], vel[3], st[3], trav; } NovImp;
 static NovImp g_nov_imp[256]; static volatile unsigned g_nov_imp_n;
-static void on_object_delete(uint64_t* ctx) {
-    uint32_t h = (uint32_t)ctx[1]; uint64_t tls = ctx[0x2d8 / 8]; static uint32_t idx = 0xFFFFFFFFu;
+static volatile unsigned long g_nov_del_calls;
+static void on_object_delete(uint64_t* ctx) {   // (x0: the guest context the app's own object_delete gets -- read through rd: checked)
+    g_nov_del_calls++;
+    uint64_t c2[2], tls = 0; static uint32_t idx = 0xFFFFFFFFu;
+    if (!ctx || rd((uint64_t)(uintptr_t)ctx, c2, 16) || rd((uint64_t)(uintptr_t)ctx + 0x2d8, &tls, 8)) return;
+    uint32_t h = (uint32_t)c2[1];
     if (h == 0xFFFFFFFFu || !tls || !g_img) return;
-    if (idx == 0xFFFFFFFFu) idx = *(volatile uint32_t*)(uintptr_t)(g_img + 0xa39f9c); if (idx >= 64) return;
-    uint8_t* blk = ((uint8_t**)(uintptr_t)tls)[idx]; if (!blk) return;
+    if (idx == 0xFFFFFFFFu && rd(g_img + 0xa39f9c, &idx, 4)) return; if (idx >= 64) return;
+    uint64_t blkv = 0; if (rd(tls + (uint64_t)idx * 8, &blkv, 8) || !blkv) return; uint8_t* blk = (uint8_t*)(uintptr_t)blkv;
     uint8_t* arr = *(uint8_t**)(blk + 0x38); if (!arr || *(uint32_t*)(arr + 0x2c) != 0x64407440 || memcmp(arr, "object", 7)) return;
     uint8_t* data = *(uint8_t**)(arr + 0x48); int i = h & 0xFFFF; if (!data || i >= *(int32_t*)(arr + 0x20)) return;
     uint8_t* e = data + (size_t)i * 0x18; if (e[3] != 5 || *(uint16_t*)e != (uint16_t)(h >> 16)) return;   // projectiles only

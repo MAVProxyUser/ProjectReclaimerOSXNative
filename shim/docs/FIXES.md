@@ -1794,6 +1794,16 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   function, so neither the entry nor its target can be patched the JIT way (signed code; no free page near the image
   either) -- bullets are still not drawn. hook_install now hooks an entry that is a `b` in place (displaced = nop, return =
   the branch target) for JIT-region branches; near_page collects up to 4096 gaps and logs when none works.
+- **nhook: hooks on the app's OWN code** (2026-11-07; nhook.c text_hook, stub.S _nh_tp4) — WHY: object_delete (and 916 more
+  halo3 functions: NHOOK_LIST_BRANCH_ENTRIES=1 lists them) is the app's own native code in its signed __TEXT; the lifted
+  entry is one `b` there. The app is signed ad hoc with no hardened runtime (codesign flags 0x2), and patching its text works:
+  the page is made a writable private copy (mach_vm_protect VM_PROT_COPY), the function's first four instructions (refused if
+  any is PC-relative) become `ldr x16, #8; br x16; .quad stub`, the page goes back to r-x; the stub (anywhere: absolute jumps)
+  saves the caller-saved registers, calls the handler with x0, runs the four instructions and jumps back. Proven in a test
+  game: halo3+0x2af478 ran ~700k calls/s through it, 0xfbe58 ~60/s, 120 fps held, no crash (NHOOK_TEXTHOOK_TEST=<rva,...>
+  counts calls in the [perf] line). object_delete is now hooked this way (its handler reads x0's guest context through
+  rd()); bullets need a real game to show (no deletes in an idle offline match; --keys scripted input did nothing in test
+  windows). NHOOK_NO_TEXT_HOOKS=1 = none.
 
 - **"Run 2.4x" removed** (2026-10-19, revert 606a38c) — it crashed the client as soon as it was used; the user asked for it
   to be deleted. The page's Speed 2x / speed menu (the host's movement-speed trait) is unchanged. (10-19)
