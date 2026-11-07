@@ -72,6 +72,7 @@ static void sb_f3(StBuf* s, const float* v) { if (isfinite(v[0]) && isfinite(v[1
 typedef struct { uint32_t seq; int flags, ta, tb, haspos; double t; float pos[3]; char kind[12], a[64], b[64], how[64], verb[24], text[320]; } StEvt;
 enum { ST_NEV = 1024 };
 static StEvt g_ev[ST_NEV]; static uint32_t g_ev_seq; static pthread_mutex_t g_ev_mx = PTHREAD_MUTEX_INITIALIZER;
+static volatile int g_fx_on; static void fx_event(const StEvt* e); static __thread uint64_t t_st_chat_id;   // forensic.c
 static void st_eventv(const float* pos, const char* kind, const char* a, const char* b, const char* how, const char* verb, int ta, int tb, int flags, const char* fmt, va_list ap) {
     StEvt e; memset(&e, 0, sizeof e); e.t = st_wall(); e.flags = flags; e.ta = ta; e.tb = tb; if (verb) snprintf(e.verb, sizeof e.verb, "%s", verb);
     if (pos) { memcpy(e.pos, pos, sizeof e.pos); e.haspos = 1; }
@@ -79,6 +80,7 @@ static void st_eventv(const float* pos, const char* kind, const char* a, const c
     snprintf(e.how, sizeof e.how, "%s", how ? how : "");
     vsnprintf(e.text, sizeof e.text, fmt, ap);
     pthread_mutex_lock(&g_ev_mx); e.seq = ++g_ev_seq; g_ev[e.seq % ST_NEV] = e; pthread_mutex_unlock(&g_ev_mx);
+    if (g_fx_on) fx_event(&e);                                // the forensic archive (forensic.c)
     if (getenv("NHOOK_FEED_LOG")) nlog("[nhook] [feed] %s: %s", e.kind, e.text);
 }
 static void st_event_pos(const float* pos, const char* kind, const char* a, const char* b, const char* how, int ta, int tb, int flags, const char* fmt, ...) {
@@ -111,6 +113,10 @@ static void st_feed_json(StBuf* s, uint32_t since) {
 // ---- the app's log lines -> match state and events ------------------------------------------------------------------
 static volatile double g_gameplay_t0;                      // "[switch] game Playing" (mono time), 0 = not in a match
 static volatile int g_match_pending; static char g_loading[96];
+// the app's own game state ("[switch] game Playing" .. "[switch] game Idle / Loading"): it STAYS Playing when the server moves
+// the session to its next map ("[loading] map ..." with no new "game Playing" line): that map's match starts once its
+// players table fills (st_snapshot). The page used to sit at "not in a match", overlay off, for the whole next map (2026-11-07).
+static volatile int g_app_playing;
 // where the app moved halo3's tables: it logs each move ("[capacity] <what>: <old> -> <new>", "[c1] ...")
 static volatile int64_t g_sb_off = 0x159c0;                // game engine globals (TLS +0x20) -> statborg (halo3: +0xfeb8)
 static uint64_t cap_new(const char* l, const char* what) { // "[capacity] <what>: 0x.. -> 0x..": the new value, 0 = not this line
@@ -127,14 +133,14 @@ static void nst_layout_line(const char* l) {
 static void nst_on_line(const char* p, size_t n) {
     char l[600]; if (n >= sizeof l) n = sizeof l - 1; memcpy(l, p, n); l[n] = 0;
     if (!strncmp(l, "[capacity] ", 11) || !strncmp(l, "[c1] ", 5)) { nst_layout_line(l); return; }
-    if (!strncmp(l, "[switch] game Playing", 21)) { if (!g_gameplay_t0) { g_gameplay_t0 = mono_s(); g_match_pending = 1; } return; }
+    if (!strncmp(l, "[switch] game Playing", 21)) { g_app_playing = 1; if (!g_gameplay_t0) { g_gameplay_t0 = mono_s(); g_match_pending = 1; } return; }
     if (!strncmp(l, "[loading] map ", 14)) {               // "[loading] map 320: Guardian, MCC's art of Guardian"
         const char* c = strchr(l, ':'); if (c) { c++; while (*c == ' ') c++; size_t k = 0; while (c[k] && c[k] != ',' && k + 1 < sizeof g_loading) { g_loading[k] = c[k]; k++; } g_loading[k] = 0; }
         g_gameplay_t0 = 0; g_hb_map_recheck = 1; return;
     }
     // out of a match: the app's own game state ("[switch] game Idle / Loading", "leaving the game"). NOT "[menus] open":
     // the in-game menu (scoreboard, settings) logs that too, and the page used to drop out of the match there (2026-11-07)
-    if (!strncmp(l, "[host] stopping", 15) || !strncmp(l, "[switch] leaving the game", 25) || (!strncmp(l, "[switch] game ", 14) && strncmp(l + 14, "Playing", 7))) { g_gameplay_t0 = 0; return; }
+    if (!strncmp(l, "[host] stopping", 15) || !strncmp(l, "[switch] leaving the game", 25) || (!strncmp(l, "[switch] game ", 14) && strncmp(l + 14, "Playing", 7))) { g_gameplay_t0 = 0; g_app_playing = 0; return; }
     // "[online] peer 0x<id> at <ip>:<port>: rtt ..." (every few seconds per peer): which session peer an address is
     if (!strncmp(l, "[online] peer 0x", 16)) { char* at = strstr(l, " at "); if (at) { uint64_t id = strtoull(l + 16, 0, 16); char ip[64]; size_t k = 0; const char* q = at + 4;
             while (*q && *q != ' ' && k + 1 < sizeof ip) ip[k++] = *q++; ip[k] = 0; if (k && ip[k - 1] == ':') ip[k - 1] = 0; pk_peer_note(id, ip); } return; }
@@ -501,6 +507,24 @@ static void st_engine_events(const StPlayer* pl, int np) {
     }
 }
 
+// ---- the forensic archive and its viewer (/forensics): the loader's shim/src/forensic.c, unchanged, with what it takes
+// from stats.c / peload.c defined for the native app. Voice is not recorded yet (no voice hook in the native app): the
+// archive keeps events, the roster and per-second packet sums. Docs: shim/docs/forensics.md.
+static int g_st_layout = 1;                                // the session's extended layout (forensic.c fx_peer_id; nnet.c's shifts)
+static uint8_t* hb_halo3_base(void) { return (uint8_t*)(uintptr_t)g_img; }
+static char g_cmdlineA[1100];                              // "join?server=<addr>" for a --join-server launch (forensic.c fx_join_server)
+static int st_send(int fd, const char* b, size_t n);
+#include "../src/forensic.c"
+// the last second's packet records summed per (direction, type, peer) -> packets.jsonl (pktlog.c pk_forensic_tick)
+static void pk_forensic_tick(void) {
+    static uint32_t last; uint32_t top = __atomic_load_n(&g_pk_seq, __ATOMIC_ACQUIRE); if (!last) { last = top; return; }
+    if (!g_pk_on || !g_fx_on || !g_fxr.key[0]) { last = top; return; }
+    uint32_t lo = last + 1, lost = 0; if (top > last + PK_N - 64) { lost = top - last - (PK_N - 64); lo = top - (PK_N - 64) + 1; } last = top;
+    static PkAgg a[1024]; int na = 0; PkEv e; for (uint32_t q = lo; q <= top; q++) if (pk_get(q, &e)) na = pk_agg_add(a, na, 1024, &e); else lost++;
+    for (int i = 0; i < na; i++) { StBuf b = {0}; pk_agg_json(&b, &a[i], 1, 0); if (b.b) fx_push(FXI_PACKETS, b.b, b.n, 0, 0); free(b.b); }
+    if (lost) { char l[80]; int k = snprintf(l, sizeof l, "{\"t\":%.3f,\"lost\":%u}", st_wall(), lost); fx_push(FXI_PACKETS, l, (size_t)k, 0, 0); }
+}
+
 // ---- the snapshot (stats.c st_snapshot's shape) ---------------------------------------------------------------------
 static void st_snapshot(StBuf* s) {
     static const char* teams[8] = {"red", "blue", "green", "orange", "purple", "gold", "brown", "pink"};
@@ -523,7 +547,7 @@ static void st_snapshot(StBuf* s) {
       sb_put(s, ",\"map\":"); sb_str(s, m); snprintf(g_st_curmap, sizeof g_st_curmap, "%s", m);
       if (__atomic_exchange_n(&g_match_pending, 0, __ATOMIC_ACQ_REL)) st_event_pos(0, "game", m, 0, 0, -1, -1, 0, "Match started: %s", g_loading[0] ? g_loading : m[0] ? m : "?");
       if (t0) st_maptop_ensure(mp, m); }
-    sb_put(s, ",\"zone_show\":0,\"weak_show\":%d,\"overlay\":{", g_nov_wk); nov_json(s);
+    sb_put(s, ",\"zone_show\":%d,\"weak_show\":%d,\"overlay\":{", nz_show(), g_nov_wk); nov_json(s);
     sb_put(s, ",\"teleport\":false,\"host\":false,\"tp_forward\":false,\"controls\":%s,\"spar\":false,\"spar_aim\":-1.0,\"spar_available\":false,"
               "\"bounds_off\":null,\"invwalls_off\":null,\"mic\":\"off\",\"mic_in_use\":false,\"speed_idx\":-1,\"quality\":\"\"", st_controls_ok() ? "true" : "false");
     sb_put(s, ",\"spots\":[]}");
@@ -537,6 +561,7 @@ static void st_snapshot(StBuf* s) {
     #define ST_DATUM(h) ((((h) & 0xFFFF) < (uint32_t)hi && (h) != 0xFFFFFFFFu && *(uint16_t*)(tab + ((h) & 0xFFFF) * 0x18) == (uint16_t)((h) >> 16)) ? *(uint64_t*)(tab + ((h) & 0xFFFF) * 0x18 + 0x10) : 0)
     #define ST_TYPE(h) (tab[((h) & 0xFFFF) * 0x18 + 3])
     StPlayer pl[256]; int np = st_players(pl, 256); np_for_perf = np;
+    if (g_app_playing && !g_gameplay_t0 && np > 0 && hi > 0) { g_gameplay_t0 = now; t0 = now; g_match_pending = 1; }   // the server's next map
     // deaths: every biped, alive -> dead (stats.c); the killer is not known here yet
     { StBip nb[2048]; int nn = 0;
       for (int i = 0; i < hi && nn < 2048; i++) {
@@ -561,9 +586,11 @@ static void st_snapshot(StBuf* s) {
       memcpy(g_bip, nb, (size_t)nn * sizeof *nb); g_nbip = nn; }
     st_variant(s);   // the game's options and trait sets
     st_roster(pl, np, m);
-    { static StSess ss[128]; uint32_t sst = 0; int nss = st_session(ss, 128, &sst), hostplayer = 0;
+    static StSess ss[128]; int nss = 0;
+    { uint32_t sst = 0; nss = st_session(ss, 128, &sst); int hostplayer = 0;
       sb_put(s, ",\"session\":["); for (int k = 0; k < nss; k++) { sb_put(s, "%s{\"name\":", k ? "," : ""); sb_str(s, ss[k].name);
-          sb_put(s, ",\"index\":%d,\"peer\":%d,\"host\":%s,\"voice\":\"%016llx\",\"muted\":false,\"talking\":false}", ss[k].idx, ss[k].peer, ss[k].host ? "true" : "false", (unsigned long long)ss[k].voice);
+          sb_put(s, ",\"index\":%d,\"peer\":%d,\"host\":%s,\"voice\":\"%016llx\",\"muted\":false,\"talking\":false", ss[k].idx, ss[k].peer, ss[k].host ? "true" : "false", (unsigned long long)ss[k].voice);
+          { char ad[64]; if (pk_addr_of(ss[k].voice, ad, sizeof ad)) { sb_put(s, ",\"ip\":"); sb_str(s, ad); } } sb_put(s, "}");
           if (ss[k].host) hostplayer = 1; }
       sb_put(s, "],\"session_state\":%u,\"host_peer\":%d,\"local_peer\":%d,\"dedicated\":%s,\"mute\":false", sst, g_st_hostpeer, g_st_localpeer, g_st_hostpeer >= 0 && nss && !hostplayer ? "true" : "false");
       int mx = st_max_players(); sb_put(s, ",\"slots\":{\"used\":%d", nss ? nss : np); if (mx) sb_put(s, ",\"max\":%d,\"src\":\"session\"}", mx); else sb_put(s, ",\"max\":null}");
@@ -590,7 +617,9 @@ static void st_snapshot(StBuf* s) {
                 else { int ws = *(const int8_t*)(d + 0x262); const uint32_t* wp = (const uint32_t*)(d + 0x268); uint64_t wd = (ws >= 0 && ws < 4) ? ST_DATUM(wp[ws]) : 0;
                        if (wd && hb_read(wd, &df, 4)) snprintf(w->how, sizeof w->how, "%s", hb_tag_name(df)); } } }
         int you = g_nick[0] && !strcmp(pl[k].name, g_nick);
+        char pip[64] = "", prd[128] = ""; for (int q = 0; q < nss; q++) if (!strcmp(ss[q].name, pl[k].name)) { if (pk_addr_of(ss[q].voice, pip, sizeof pip)) pk_rdns_str(pip, prd, sizeof prd); break; }
         sb_put(s, "%s{\"name\":", first ? "" : ","); first = 0; sb_str(s, pl[k].name); sb_put(s, ",\"slot\":%d", pl[k].slot);
+        if (pip[0]) { sb_put(s, ",\"ip\":"); sb_str(s, pip); } if (prd[0]) { sb_put(s, ",\"rdns\":"); sb_str(s, prd); }
         sb_put(s, ",\"handle\":\"%08x\",\"team\":%d,\"team_name\":\"%s\",\"you\":%s,\"alive\":%s,\"health\":%.3f,\"shield\":%.3f,\"camo\":%.3f",
                h, team, (team >= 0 && team < 8) ? teams[team] : "none", you ? "true" : "false", dead ? "false" : "true", dead ? 0 : *(const float*)(d + 0xF4), dead ? 0 : *(const float*)(d + 0xF8), have ? *(const float*)(d + 0x360) : 0);
         sb_put(s, ",\"weapon\":");
@@ -620,6 +649,7 @@ static void st_snapshot(StBuf* s) {
         sb_put(s, "}");
     }
     if (t0) sb_tick(pl, np, now);
+    fx_roster_tick(m, ss, nss, pl, np);                        // the forensic archive: roster changes, session boundaries
     if (getenv("NHOOK_CAM_LOG")) { static double tl; uint64_t blk = tls_block(), ob = 0; float r[40];   // the observer camera (local user 0)
         if (now - tl > 2 && blk && hb_read(blk + 0x578, &ob, 8) && ob && hb_read(ob + 0x11c, r, sizeof r)) { tl = now; char b[700]; int k = 0;
             for (int i = 0; i < 40; i++) k += snprintf(b + k, sizeof b - (size_t)k, " %d:%.3f", i * 4, r[i]);
@@ -705,6 +735,7 @@ static int st_control(const char* act, const char* qs) {
         int live = g_nr_last > 0 && mono_s() - g_nr_last < 2.0; char err[200];
         return rec_start(ao, secs, g_st_curmap[0] ? g_st_curmap : "game", ao || !live ? 0 : g_nr_w, ao || !live ? 0 : g_nr_h, err, sizeof err); }
     if (!strcmp(act, "recstop")) { rec_stop(); return 1; }
+    if (!strcmp(act, "forensic")) return fx_control(qs);       // archive / voice audio / consent (forensic.c)
     return 0;
 }
 // GET /recordings/<file>: a clip from ~/Movies/Reclaimer (stats.c st_rec_file: Range requests answered)
@@ -757,6 +788,7 @@ static void* st_conn(void* a) {
     else if (!strcmp(path, "/vshapes.json")) st_reply(fd, "application/json", "{\"gen\":0,\"shapes\":{}}", 21, 0);
     else if (!strcmp(path, "/recordings.json")) { size_t ln = 0; char* j = rec_list_json(&ln); st_reply(fd, "application/json", j ? j : "[]", j ? ln : 2, 0); free(j); }
     else if (!strncmp(path, "/recordings/", 12)) st_rec_file(fd, req, path + 12);
+    else if (!strncmp(path, "/forensics", 10) && (!path[10] || path[10] == '/')) fx_http(fd, path, qs, req);
     else if (!strcmp(path, "/packets.json")) { static pthread_mutex_t pmx = PTHREAD_MUTEX_INITIALIZER; StBuf b = {0};
         pthread_mutex_lock(&pmx); pk_json(&b, qs); pthread_mutex_unlock(&pmx); st_reply(fd, "application/json", b.b, b.n, 0); free(b.b); }
     else if (!strcmp(path, "/option-map.json")) st_reply(fd, "application/json", g_st_optmap, sizeof g_st_optmap - 1, 0);
@@ -809,6 +841,9 @@ static void nstats_start(void) {
     const char* e = getenv("NHOOK_STATS_HTTP"); if (e) g_st_port = atoi(e); if (g_st_port <= 0 || g_st_port > 65535) return;
     Dl_info di; if (dladdr((void*)nstats_start, &di) && di.dli_fname) {   // the repo: <repo>/shim/build/nhook.dylib
         snprintf(g_repo, sizeof g_repo, "%s", di.dli_fname); for (int k = 0; k < 3; k++) { char* sl = strrchr(g_repo, '/'); if (sl) *sl = 0; } }
-    nick_load(); { const char* pe = getenv("NHOOK_PKTLOG"); if (pe && *pe) g_pk_on = atoi(pe) != 0; }
+    nick_load();
+    { extern char*** _NSGetArgv(void); extern int* _NSGetArgc(void); char** av = *_NSGetArgv(); int ac = *_NSGetArgc();
+      for (int i = 1; i + 1 < ac; i++) if (!strcmp(av[i], "--join-server")) snprintf(g_cmdlineA, sizeof g_cmdlineA, "join?server=%s", av[i + 1]);
+      for (int i = 1; i < ac; i++) if (strstr(av[i], "join?server=")) snprintf(g_cmdlineA, sizeof g_cmdlineA, "%s", av[i]); } { const char* pe = getenv("NHOOK_PKTLOG"); if (pe && *pe) g_pk_on = atoi(pe) != 0; }
     pthread_t t; pthread_create(&t, 0, st_listen_thread, 0); pthread_detach(t);
 }

@@ -12,7 +12,8 @@ SUP="$HOME/Library/Application Support/ReclaimerMac"
 if [ "${NATIVE_REAL:-0}" = 1 ]; then PROF="$HOME/Library/Application Support/ProjectReclaimer"; unset RECLAIMER_PROFILE_DIR
      export NHOOK_STATS_OPEN="${NHOOK_STATS_OPEN:-1}"   # the stats page opens in the browser (unless a tab is already open)
 else PROF="${NATIVE_PROFILE:-$SUP/native/test-v2}"; export RECLAIMER_PROFILE_DIR="$PROF" RECLAIMER_CACHE_DIR="${RECLAIMER_CACHE_DIR:-$SUP/native/test-cache}"
-     export RECLAIMER_TEST_SILENT="${RECLAIMER_TEST_SILENT:-1}"; fi
+     export RECLAIMER_TEST_SILENT="${RECLAIMER_TEST_SILENT:-1}"
+     export PELOAD_FORENSIC_DIR="${PELOAD_FORENSIC_DIR:-$SUP/native/test-forensics}"; fi   # test runs keep out of the real archive
 MCC="$(cat "$PROF/mcc-folder.txt" 2>/dev/null)"
 export NHOOK_HALO3="${NHOOK_HALO3:-$MCC/halo3/halo3.dll}"
 # the stats page from the checkout (edits show on a browser refresh; the dylib's built-in copy otherwise)

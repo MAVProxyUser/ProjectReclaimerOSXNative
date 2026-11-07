@@ -1754,6 +1754,19 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   and wider screens see more at the sides (Hor+); the projection spread it over the whole width, so its vertical field was
   0.74x the game's and everything off-centre was drawn 1.34x too far out (measured 1.37x against the game's own name markers
   in a live capture). Now tan(v/2) = tan(fov/2) / (16/9), tan(h/2) = tan(v/2) * aspect; identical at 16:9 (the reticle check).
+- **nhook: overlay off and "not in a match" after the server's map change** (2026-11-07; nstats.c) — WHY: "after the rejoin
+  all the hitboxes were off ... the checkboxes weren't working": when the server moves the session to its next map the app
+  logs `[loading] map ...` but stays in its Playing state (no new `[switch] game Playing`); the loading line ended the match
+  and nothing started the next one, and the overlay draws only in a match. The app's Playing state is tracked
+  (g_app_playing) and the next map's match starts at the first snapshot whose players table is filled.
+- **nhook: zones, /forensics, player IPs** (2026-11-07; noverlay.c nz_*, nstats.c, stats_page.html) — zones are hitbox.c's
+  loader-side reader (kill / safe trigger volumes, soft ceilings, invisible walls) drawn as outlines through walls (the
+  loader's line mode: no depth buffer in the native app), with the page's per-kind chips (do=zonetype). /forensics = the
+  loader's forensic.c included unchanged, with native definitions of what it takes (session layout 1, the engine image
+  as "halo3", the command line's --join-server); it archives events, the roster and per-second packet sums (no voice in
+  the native app yet). The players table gets an IP column (the session peer's address from the app's `[online] peer`
+  lines, + reverse DNS); the Packets panel sits below the players table. shim/native.sh test runs archive into
+  ReclaimerMac/native/test-forensics.
 
 - **"Run 2.4x" removed** (2026-10-19, revert 606a38c) — it crashed the client as soon as it was used; the user asked for it
   to be deleted. The page's Speed 2x / speed menu (the host's movement-speed trait) is unchanged. (10-19)

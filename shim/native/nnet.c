@@ -110,6 +110,15 @@ static int pk_rdns(const PkEv* e, char* out, size_t on) {      // 1 = named; unk
     if (k == g_npkrd) { if (g_npkrd < 2048) { g_pkrd[k].fam = e->fam; memcpy(g_pkrd[k].a, e->addr, 16); g_pkrd[k].st = 0; g_npkrd++; pthread_cond_signal(&g_pkrd_cv); } }
     else if (g_pkrd[k].st == 1) { snprintf(out, on, "%s", g_pkrd[k].name); got = 1; }
     pthread_mutex_unlock(&g_pkrd_mx); return got; }
+static int pk_addr_of(uint64_t id, char* out, size_t on) {   // a session peer id -> "ip:port" (the app's [online] peer lines)
+    int ok = 0; pthread_mutex_lock(&g_pkp_mx); for (int k = 0; k < g_npkp; k++) if (g_pkp[k].id == id) { snprintf(out, on, "%s", g_pkp[k].addr); ok = 1; break; }
+    pthread_mutex_unlock(&g_pkp_mx); return ok; }
+static int pk_rdns(const PkEv* e, char* out, size_t on);
+static int pk_rdns_str(const char* ipport, char* out, size_t on) {   // reverse DNS of "ip:port" / "[ip6]:port" (queued if unknown)
+    char ip[64]; snprintf(ip, sizeof ip, "%s", ipport); char* c = strrchr(ip, ':'); if (c) *c = 0; char* q = ip; if (*q == '[') { q++; char* r = strchr(q, ']'); if (r) *r = 0; }
+    PkEv e; memset(&e, 0, sizeof e);
+    if (inet_pton(AF_INET, q, e.addr) == 1) e.fam = 4; else if (inet_pton(AF_INET6, q, e.addr) == 1) e.fam = 6; else return 0;
+    return pk_rdns(&e, out, on); }
 static int g_pk_want_rdns;                                   // (this /packets.json request asked for names; under pk_json's lock)
 static void pk_peer_json(StBuf* s, const PkEv* e) {
     char peer[80] = "", host[48], ip[64], who[64], rn[128];

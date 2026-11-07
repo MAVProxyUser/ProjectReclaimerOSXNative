@@ -16,16 +16,16 @@ static volatile int g_nov_team[NOV_N], g_nov_px[NOV_N];      // team filter (0 a
 static volatile int g_nov_wk = 7;                            // weak-spot kinds shown: 1 lethal, 2 opens the driver, 4 disables
 static void nov_init(void) {
     static int done; if (done) return; done = 1;
-    static const char* const env[NOV_N] = {"NHOOK_HITBOXES", "NHOOK_HB_TRACERS", "NHOOK_HB_INFO", "NHOOK_HB_ITEMS", 0, 0, "NHOOK_HB_VEHICLES"};
+    static const char* const env[NOV_N] = {"NHOOK_HITBOXES", "NHOOK_HB_TRACERS", "NHOOK_HB_INFO", "NHOOK_HB_ITEMS", 0, "NHOOK_HB_ZONES", "NHOOK_HB_VEHICLES"};
     unsigned on = 0; for (int f = 0; f < NOV_N; f++) { const char* e = env[f] ? getenv(env[f]) : 0; if (e && *e && strcmp(e, "0")) on |= 1u << f; }
     const char* t = getenv("NHOOK_HB_TEAMS"); int tm = t && !strcasecmp(t, "enemies") ? 1 : t && !strcasecmp(t, "friends") ? 2 : 0;
     const char* p = getenv("NHOOK_HB_TEXT_PX"); int px = p ? atoi(p) : 7; if (px < 4) px = 4; if (px > 60) px = 60;
-    for (int f = 0; f < NOV_N; f++) { g_nov_team[f] = (f == NOV_ITM || f == NOV_VIS || f == NOV_ZON) ? -1 : tm; g_nov_px[f] = (f == NOV_INF || f == NOV_ITM) ? px : -1; }
+    for (int f = 0; f < NOV_N; f++) { g_nov_team[f] = (f == NOV_ITM || f == NOV_VIS || f == NOV_ZON) ? -1 : tm; g_nov_px[f] = (f == NOV_INF || f == NOV_ITM || f == NOV_ZON) ? px : -1; }
     const char* w = getenv("NHOOK_HB_WEAK_SHOW"); if (w) g_nov_wk = (int)strtol(w, 0, 0);
     g_nov_on = on;
 }
 static int nov_feat(int f) { nov_init(); return (g_nov_on >> f) & 1; }
-int nov_wanted(void) { nov_init(); return (g_nov_on & ~(1u << NOV_VIS) & ~(1u << NOV_ZON)) != 0; }   // (nrender.m: draw at all?)
+int nov_wanted(void) { nov_init(); return (g_nov_on & ~(1u << NOV_VIS)) != 0; }   // (nrender.m: draw at all?)
 
 // ---- the camera ---------------------------------------------------------------------------------------------------
 // vp: 16 floats, rows 0 (clip x), 1 (clip y), 3 (clip w) used as the loader's view-projection rows; vp[12..14] the forward,
@@ -153,6 +153,86 @@ static void nov_trail_add(uint32_t h, const float* pos, double now) {
     memcpy(t->p[t->n & 31], pos, 12); t->n++; t->seen = now; }
 static const float g_nov_teamcol[8][3] = {{1, 0.3f, 0.25f}, {0.35f, 0.6f, 1}, {0.35f, 1, 0.35f}, {1, 0.6f, 0.15f}, {0.75f, 0.4f, 1}, {1, 0.9f, 0.2f}, {0.75f, 0.55f, 0.35f}, {1, 0.55f, 0.8f}};
 
+// ---- zones (hitbox.c hbz_load / hbz_outline / hbz_draw, the loader's line mode): kill volumes (red) and safe zones (green)
+// from the scenario's trigger volumes (scnr +0x258, kill list +0x484 / a kill index at +0x40, safe list +0x490), soft
+// ceilings from each structure BSP's design tag (scnr +0x18 -> sddt +0x10: acceleration orange, soft kill pink, slip yellow)
+// and invisible walls (maptop/<map>.inv.bin, re-tools/h3inv.py; light cyan) as outlines. Through walls: the per-pixel
+// hiding needs the frame's depth buffer, which the app keeps to itself. Kinds = bits of g_hbz_show (the page's chips).
+typedef struct { float c[8][3]; int kind; } NzBox;
+typedef struct { float v[3][3]; int type, group; } NzTri;
+typedef struct { float a[3], b[3]; int type; } NzSeg;
+typedef struct { int32_t k[6]; int tri, e; } NzEdge;
+static int nz_edge_cmp(const void* x, const void* y) { return memcmp(((const NzEdge*)x)->k, ((const NzEdge*)y)->k, sizeof(int32_t) * 6); }
+static struct { char path[1024]; NzBox* box; int nbox; NzTri* tri; int ntri; NzSeg* seg; int nseg; } g_nz;
+static volatile int g_hbz_show = -1;
+static int nz_show(void) { if (g_hbz_show < 0) { const char* e = getenv("NHOOK_HB_ZONES_SHOW"); g_hbz_show = e ? (int)strtol(e, 0, 0) : 63; } return g_hbz_show; }
+static void nz_outline(void) {
+    free(g_nz.seg); g_nz.seg = 0; g_nz.nseg = 0; if (!g_nz.ntri) return;
+    NzEdge* ed = malloc((size_t)g_nz.ntri * 3 * sizeof *ed); g_nz.seg = malloc((size_t)g_nz.ntri * 3 * sizeof *g_nz.seg); if (!ed || !g_nz.seg) { free(ed); return; }
+    int ne = 0; for (int t = 0; t < g_nz.ntri; t++) for (int e = 0; e < 3; e++) { const float* p = g_nz.tri[t].v[e], * q = g_nz.tri[t].v[(e + 1) % 3]; int32_t a[3], b[3];
+        for (int r = 0; r < 3; r++) { a[r] = (int32_t)lrintf(p[r] * 100); b[r] = (int32_t)lrintf(q[r] * 100); }
+        int sw = memcmp(a, b, 12) > 0; NzEdge* x = &ed[ne++]; memcpy(x->k, sw ? b : a, 12); memcpy(x->k + 3, sw ? a : b, 12); x->tri = t; x->e = e; }
+    qsort(ed, (size_t)ne, sizeof *ed, nz_edge_cmp);
+    for (int i = 0; i < ne;) { int j = i + 1; while (j < ne && !memcmp(ed[j].k, ed[i].k, sizeof(int32_t) * 6)) j++;
+        int interior = 0; for (int a2 = i; a2 < j && !interior; a2++) for (int b2 = a2 + 1; b2 < j; b2++) if (g_nz.tri[ed[a2].tri].group == g_nz.tri[ed[b2].tri].group) { interior = 1; break; }
+        if (!interior) { const NzTri* z = &g_nz.tri[ed[i].tri]; NzSeg* sg = &g_nz.seg[g_nz.nseg++]; memcpy(sg->a, z->v[ed[i].e], 12); memcpy(sg->b, z->v[(ed[i].e + 1) % 3], 12); sg->type = z->type; }
+        i = j; }
+    free(ed);
+}
+static void nz_load(const char* path) {
+    if (!strcmp(g_nz.path, path)) return; free(g_nz.box); free(g_nz.tri); free(g_nz.seg); memset(&g_nz, 0, sizeof g_nz); snprintf(g_nz.path, sizeof g_nz.path, "%s", path);
+    HbMap* m = hbm_get(path); if (!m) return; int si = -1; for (int i = 0; i < m->ntags; i++) if (m->grp[i] == 'scnr') { si = i; break; }
+    uint8_t d[0x4A0]; if (si < 0 || !hbm_read(m, (uint64_t)m->tp[si] << 2, d, sizeof d)) return;
+    uint8_t* kl = 0, * sl = 0, * tv = 0; int nk = hbm_block(m, d, 0x484, 2, &kl, 4096), ns = hbm_block(m, d, 0x490, 2, &sl, 4096), nt = hbm_block(m, d, 0x258, 0x44, &tv, 4096);
+    g_nz.box = calloc(nt > 0 ? nt : 1, sizeof(NzBox));
+    for (int i = 0; i < nt && g_nz.box; i++) { const uint8_t* e = tv + i * 0x44; int kind = -1;
+        for (int k = 0; k < nk; k++) if (*(int16_t*)(kl + k * 2) == i) kind = 0; if (kind < 0 && *(int16_t*)(e + 0x40) >= 0) kind = 0;
+        if (kind < 0) for (int k = 0; k < ns; k++) if (*(int16_t*)(sl + k * 2) == i) kind = 1;
+        if (kind < 0) continue; const float* f = (const float*)(e + 0x0C), * u = (const float*)(e + 0x18), * p = (const float*)(e + 0x24), * x = (const float*)(e + 0x30);
+        float l[3] = {u[1] * f[2] - u[2] * f[1], u[2] * f[0] - u[0] * f[2], u[0] * f[1] - u[1] * f[0]}; NzBox* b = &g_nz.box[g_nz.nbox++]; b->kind = kind;
+        for (int c = 0; c < 8; c++) for (int r = 0; r < 3; r++) b->c[c][r] = p[r] + ((c & 1) ? x[0] * f[r] : 0) + ((c & 2) ? x[1] * l[r] : 0) + ((c & 4) ? x[2] * u[r] : 0); }
+    free(kl); free(sl); free(tv);
+    uint8_t* bs = 0; int nb = hbm_block(m, d, 0x18, 0x6C, &bs, 64), cap = 0;
+    for (int b = 0; b < nb; b++) { uint32_t sd = *(uint32_t*)(bs + b * 0x6C + 0x10 + 12); if (sd == 0xFFFFFFFFu || (int)(sd & 0xFFFF) >= m->ntags) continue;
+        uint8_t sm[0x40]; if (!hbm_read(m, (uint64_t)m->tp[sd & 0xFFFF] << 2, sm, sizeof sm)) continue;
+        uint8_t* sc = 0; int nsc = hbm_block(m, sm, 0x10, 0x14, &sc, 256);
+        for (int c = 0; c < nsc; c++) { int ty = *(int16_t*)(sc + c * 0x14 + 4); uint8_t* tr = 0; int ntr = hbm_block(m, sc + c * 0x14, 8, 0x44, &tr, 65536); static int grp; grp++;
+            for (int t = 0; t < ntr && g_nz.ntri < (1 << 20); t++) { if (g_nz.ntri >= cap) { int nc = cap ? cap * 2 : 1024; NzTri* n2 = realloc(g_nz.tri, (size_t)nc * sizeof(NzTri)); if (!n2) break; g_nz.tri = n2; cap = nc; }
+                NzTri* z = &g_nz.tri[g_nz.ntri++]; z->type = ty; z->group = grp; memcpy(z->v, tr + t * 0x44 + 0x20, 36); }
+            free(tr); }
+        free(sc); }
+    free(bs);
+    { const char* h = getenv("HOME"); const char* bn = strrchr(path, '/'); char nm[256]; snprintf(nm, sizeof nm, "%s", bn ? bn + 1 : path); char* dot = strrchr(nm, '.'); if (dot) *dot = 0;
+      char ip[1400]; snprintf(ip, sizeof ip, "%s/Library/Application Support/ReclaimerMac/maptop/%s.inv.bin", h ? h : "", nm);
+      FILE* f = fopen(ip, "rb"); uint8_t hd[8]; uint32_t n = 0;
+      if (f && fread(hd, 1, 8, f) == 8 && !memcmp(hd, "RIW1", 4) && (n = *(uint32_t*)(hd + 4)) > 0 && n < 2000000) {
+          NzTri* n2 = realloc(g_nz.tri, (size_t)(g_nz.ntri + n) * sizeof(NzTri));
+          if (n2) { g_nz.tri = n2; float v[9]; for (uint32_t i = 0; i < n && fread(v, 4, 9, f) == 9; i++) { NzTri* z = &g_nz.tri[g_nz.ntri++]; z->type = 3; z->group = 1 << 30; memcpy(z->v, v, 36); } } }
+      if (f) fclose(f); }
+    nz_outline();
+    int nkb = 0; for (int i = 0; i < g_nz.nbox; i++) nkb += g_nz.box[i].kind == 0;
+    const char* bn = strrchr(path, '/'); nlog("[nhook] zones %s: %d kill volumes, %d safe zones, %d ceiling / invisible-wall triangles (%d outline edges)", bn ? bn + 1 : path, nkb, g_nz.nbox - nkb, g_nz.ntri, g_nz.nseg);
+}
+static int nov_seg_clip(float* v, int nv, int cap, const float* vp, const float* a, const float* b, const float* col) {   // hitbox.c hb_seg_clip
+    float ca[3], cb[3]; for (int r = 0; r < 3; r++) { int i = r == 2 ? 12 : r * 4; ca[r] = a[0] * vp[i] + a[1] * vp[i + 1] + a[2] * vp[i + 2] + vp[i + 3]; cb[r] = b[0] * vp[i] + b[1] * vp[i + 1] + b[2] * vp[i + 2] + vp[i + 3]; }
+    const float E = 0.05f; if (nv + 2 > cap || (ca[2] < E && cb[2] < E)) return nv;
+    if (ca[2] < E) { float t = (E - ca[2]) / (cb[2] - ca[2]); for (int r = 0; r < 3; r++) ca[r] += t * (cb[r] - ca[r]); }
+    else if (cb[2] < E) { float t = (E - cb[2]) / (ca[2] - cb[2]); for (int r = 0; r < 3; r++) cb[r] += t * (ca[r] - cb[r]); }
+    float* d = v + nv * 5; d[0] = ca[0] / ca[2]; d[1] = ca[1] / ca[2]; d[2] = col[0]; d[3] = col[1]; d[4] = col[2]; d[5] = cb[0] / cb[2]; d[6] = cb[1] / cb[2]; d[7] = col[0]; d[8] = col[1]; d[9] = col[2]; return nv + 2;
+}
+static int nz_draw(float* v, int nv, int cap, const float* vp) {
+    char mp[1024]; if (!hb_current_map(mp, sizeof mp)) return nv; nz_load(mp);
+    static const float ckill[3] = {1, 0.15f, 0.15f}, csafe[3] = {0.2f, 1, 0.35f}, csoft[4][3] = {{1, 0.6f, 0.1f}, {1, 0.25f, 0.65f}, {1, 0.92f, 0.2f}, {0.45f, 0.95f, 1}};
+    const float* cam = vp + 28; int show = nz_show(); nov_text_size(g_nov_px[NOV_ZON] > 0 ? g_nov_px[NOV_ZON] : 7);
+    for (int i = 0; i < g_nz.nbox; i++) { const NzBox* b = &g_nz.box[i]; if (!(show & (b->kind ? 2 : 1))) continue; const float* col = b->kind ? csafe : ckill;
+        for (int c = 0; c < 8; c++) for (int bit = 1; bit < 8; bit <<= 1) if (!(c & bit)) nv = nov_seg_clip(v, nv, cap, vp, b->c[c], b->c[c | bit], col);
+        float ctr[3] = {(b->c[0][0] + b->c[7][0]) / 2, (b->c[0][1] + b->c[7][1]) / 2, (b->c[0][2] + b->c[7][2]) / 2}, tx, ty, dx = ctr[0] - cam[0], dy = ctr[1] - cam[1], dz = ctr[2] - cam[2];
+        if (dx * dx + dy * dy + dz * dz < 150.f * 150.f && nov_proj(vp, ctr, &tx, &ty)) { const char* t = b->kind ? "SAFE ZONE" : "KILL ZONE"; nv = nov_text(v, nv, cap, tx - strlen(t) * 2.5f * g_nov_gx, ty, t, col); } }
+    for (int i = 0; i < g_nz.nseg; i++) { const NzSeg* z = &g_nz.seg[i]; int ty = z->type >= 0 && z->type < 4 ? z->type : 1; if (!(show & (4 << ty))) continue;
+        nv = nov_seg_clip(v, nv, cap, vp, z->a, z->b, csoft[ty]); }
+    return nv;
+}
+
 // The frame's overlay lines (nrender.m, the app's render thread, once per presented frame): w x h = the frame in pixels,
 // scale = pixels per point. Returns the vertex count (pairs = lines), 0 = nothing to draw.
 static pthread_mutex_t g_nov_mx = PTHREAD_MUTEX_INITIALIZER;
@@ -209,6 +289,7 @@ int nov_build(float* verts, int cap, int w, int h, float scale) {
             if (g_nov_team[NOV_TRC] > 0 && !nov_team_ok(g_nov_team[NOV_TRC], nov_owner_cls(o->owner, objs, n))) continue;
             float e[3] = {o->c[0] + o->vel[0] / sp * 1.5f, o->c[1] + o->vel[1] / sp * 1.5f, o->c[2] + o->vel[2] / sp * 1.5f}; nv = nov_seg(verts, nv, cap, vp, o->c, e, cvel); }
     }
+    if (nov_feat(NOV_ZON)) nv = nz_draw(verts, nv, cap, vp);
     pthread_mutex_unlock(&g_nov_mx);
     return nv;
 }
@@ -216,11 +297,13 @@ int nov_build(float* verts, int cap, int w, int h, float scale) {
 // ---- the page's controls and the snapshot's overlay state (stats.c st_control / st_feat / st_overlay_features) -------
 static int nov_control(const char* act, const char* qs) {
     nov_init();
-    for (int f = 0; f < NOV_N; f++) if (!strcmp(act, g_nov_name[f])) { if (f == NOV_VIS || f == NOV_ZON) return 0;
+    for (int f = 0; f < NOV_N; f++) if (!strcmp(act, g_nov_name[f])) { if (f == NOV_VIS) return 0;
         __atomic_fetch_xor(&g_nov_on, 1u << f, __ATOMIC_ACQ_REL); nlog("[nhook] page: %s %s", g_nov_name[f], nov_feat(f) ? "on" : "off"); return 1; }
     if (!strcmp(act, "teams")) { int m = -1; for (int f = 0; f < NOV_N; f++) if (g_nov_team[f] >= 0) { if (m < 0) m = (g_nov_team[f] + 1) % 3; g_nov_team[f] = m; }
         nlog("[nhook] page: showing %s", m == 1 ? "enemies only" : m == 2 ? "friends only" : "all"); return 1; }
     if (!strcmp(act, "textup") || !strcmp(act, "textdown")) { int d = act[4] == 'u' ? 1 : -1; for (int f = 0; f < NOV_N; f++) if (g_nov_px[f] > 0) { int v = g_nov_px[f] + d; g_nov_px[f] = v < 4 ? 4 : v > 60 ? 60 : v; } return 1; }
+    if (!strcmp(act, "zonetype")) { const char* v = strstr(qs, "t="); int b = v ? atoi(v + 2) : 0; if (b != 1 && b != 2 && b != 4 && b != 8 && b != 16 && b != 32) return 0;
+        nz_show(); __atomic_fetch_xor(&g_hbz_show, b, __ATOMIC_ACQ_REL); return 1; }
     if (!strcmp(act, "weaktype")) { const char* v = strstr(qs, "t="); int b = v ? atoi(v + 2) : 0; if (b != 1 && b != 2 && b != 4) return 0; __atomic_fetch_xor(&g_nov_wk, b, __ATOMIC_ACQ_REL); return 1; }
     if (!strcmp(act, "feat")) {   // f=<a,b|all>[&on=][&team=][&px=] (vis: not in the native app)
         char b[160]; snprintf(b, sizeof b, "%s", qs); unsigned mask = 0; int on = -1, team = -1, px = -1;
@@ -228,7 +311,7 @@ static int nov_control(const char* act, const char* qs) {
         for (char* sv = 0, * t = strtok_r(b, "&", &sv); t; t = strtok_r(0, "&", &sv)) { char* v = strchr(t, '='); if (!v) continue; *v++ = 0;
             if (!strcmp(t, "f")) { for (char* s2 = 0, * w = strtok_r(v, ",", &s2); w; w = strtok_r(0, ",", &s2)) { int f = -1;
                     for (int q = 0; q < NOV_N; q++) if (!strcmp(w, g_nov_name[q])) f = q;
-                    if (!strcmp(w, "all")) mask |= ((1u << NOV_N) - 1) & ~(1u << NOV_VIS) & ~(1u << NOV_ZON); else if (f < 0 || f == NOV_VIS) return 0; else if (f != NOV_ZON) mask |= 1u << f; } }
+                    if (!strcmp(w, "all")) mask |= ((1u << NOV_N) - 1) & ~(1u << NOV_VIS); else if (f < 0 || f == NOV_VIS) return 0; else mask |= 1u << f; } }
             else if (!strcmp(t, "on")) { if (strcmp(v, "0") && strcmp(v, "1")) return 0; on = v[0] - '0'; }
             else if (!strcmp(t, "vis")) { if (strcmp(v, "0") && strcmp(v, "1")) return 0; }   // (accepted, no effect: no depth buffer here)
             else if (!strcmp(t, "team")) { team = !strcmp(v, "all") ? 0 : !strcmp(v, "enemies") ? 1 : !strcmp(v, "friends") ? 2 : -2; if (team < 0) return 0; }
@@ -242,12 +325,12 @@ static int nov_control(const char* act, const char* qs) {
 }
 static void nov_json(StBuf* s) {   // the snapshot's overlay keys (the stats page's buttons)
     nov_init(); static const char* const tm[3] = {"all", "enemies", "friends"}; int t0 = g_nov_team[NOV_HIT];
-    sb_put(s, "\"vehicles\":%s,\"zones\":false,\"hitboxes\":%s,\"tracers\":%s,\"info\":%s,\"items\":%s,\"visible\":false,\"teams\":\"%s\",\"text_px\":%d",
-        nov_feat(NOV_VEH) ? "true" : "false", nov_feat(NOV_HIT) ? "true" : "false", nov_feat(NOV_TRC) ? "true" : "false", nov_feat(NOV_INF) ? "true" : "false",
+    sb_put(s, "\"vehicles\":%s,\"zones\":%s,\"hitboxes\":%s,\"tracers\":%s,\"info\":%s,\"items\":%s,\"visible\":false,\"teams\":\"%s\",\"text_px\":%d",
+        nov_feat(NOV_VEH) ? "true" : "false", nov_feat(NOV_ZON) ? "true" : "false", nov_feat(NOV_HIT) ? "true" : "false", nov_feat(NOV_TRC) ? "true" : "false", nov_feat(NOV_INF) ? "true" : "false",
         nov_feat(NOV_ITM) ? "true" : "false", tm[t0 >= 0 && t0 < 3 ? t0 : 0], g_nov_px[NOV_INF] > 0 ? g_nov_px[NOV_INF] : 7);
-    static const int ord[5] = {NOV_HIT, NOV_VEH, NOV_TRC, NOV_INF, NOV_ITM};
+    static const int ord[6] = {NOV_HIT, NOV_VEH, NOV_TRC, NOV_INF, NOV_ITM, NOV_ZON};
     sb_put(s, ",\"features\":{");
-    for (int i = 0; i < 5; i++) { int f = ord[i]; char px[16]; snprintf(px, sizeof px, "%d", g_nov_px[f]);
+    for (int i = 0; i < 6; i++) { int f = ord[i]; char px[16]; snprintf(px, sizeof px, "%d", g_nov_px[f]);
         sb_put(s, "%s\"%s\":{\"on\":%s,\"team\":%s%s%s,\"vis\":null,\"px\":%s}", i ? "," : "", g_nov_name[f], nov_feat(f) ? "true" : "false",
             g_nov_team[f] >= 0 ? "\"" : "", g_nov_team[f] >= 0 ? tm[g_nov_team[f] % 3] : "null", g_nov_team[f] >= 0 ? "\"" : "", g_nov_px[f] > 0 ? px : "null"); }
     sb_put(s, "}");
