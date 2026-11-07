@@ -22,7 +22,7 @@ export NHOOK_HALO3="${NHOOK_HALO3:-$MCC/halo3/halo3.dll}"
 [ -f shim/src/forensic_page.html ] && export PELOAD_FORENSIC_PAGE="${PELOAD_FORENSIC_PAGE:-$PWD/shim/src/forensic_page.html}"
 LOG="${NATIVE_LOG:-/tmp/reclaimer_native.log}"
 # one game at a time (the user's own included): wait up to 30 s for a test instance that is ending, refuse otherwise
-for i in $(seq 1 30); do pgrep -f 'Project Reclaimer.app/Contents/MacOS/project-reclaimer' >/dev/null || break; sleep 1; done
+[ "${NATIVE_ALLOW_SECOND:-0}" = 1 ] || for i in $(seq 1 30); do pgrep -f 'Project Reclaimer.app/Contents/MacOS/project-reclaimer' >/dev/null || break; sleep 1; done
 if pgrep -f 'Project Reclaimer.app/Contents/MacOS/project-reclaimer' >/dev/null && [ "${NATIVE_ALLOW_SECOND:-0}" != 1 ]; then
   echo "native.sh: Project Reclaimer is already running (pid $(pgrep -f 'Project Reclaimer.app/Contents/MacOS/project-reclaimer' | tr '\n' ' ')): not starting a second one" >&2; exit 1; fi
 DYLD_INSERT_LIBRARIES="$PWD/shim/build/nhook.dylib" "$APP" "$@" > "$LOG" 2>&1 &

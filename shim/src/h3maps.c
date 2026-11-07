@@ -63,6 +63,11 @@ static int hb_current_map(char*out,size_t n){
     pthread_mutex_lock(&mx); double now=mono_s();
     char paths[HB_NPATHS][1024]; int np; pthread_mutex_lock(&g_hb_mapmx); np=g_hb_nmappaths; memcpy(paths,g_hb_mappaths,sizeof(paths[0])*(size_t)np); pthread_mutex_unlock(&g_hb_mapmx);
     int force=__atomic_exchange_n(&g_hb_map_recheck,0,__ATOMIC_ACQ_REL);
+    // ... and at once when the engine's scenario changes (polled every 0.1 s): a match's first seconds were still the loading
+    // screen's scenery (130_epilogue, 2 s recheck), so the native app's first spawn summary named Guardian's weapons from the
+    // epilogue's tags ("Dervish head", "Flood softform break small", 2026-11-07); PELOAD_MAP_SLOWCHECK=1 = the 2 s check only
+    { static double tsn; static char lsn[128]; static int slow=-1; if(slow<0) slow=getenv("PELOAD_MAP_SLOWCHECK")!=0;
+      if(!slow && now-tsn>0.1){ tsn=now; char sn2[128]; if(hb_scenario_name(sn2,sizeof sn2) && strcmp(sn2,lsn)){ force=1; snprintf(lsn,sizeof lsn,"%s",sn2); } } }
     if(!cur[0] || now-tchk>2.0 || np!=last_np || force){ tchk=now; last_np=np;
         // the engine's own scenario name decides when one candidate file carries it (the definition match is a vote:
         // Workshop maps built on the same tag base can tie on it, and the newer of two tied files used to win)

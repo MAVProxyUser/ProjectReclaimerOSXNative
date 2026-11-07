@@ -2062,7 +2062,99 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   fell through the kill volume alive, back on -> dead; speed 200% walks 4.95 units/s vs 2.58 at 100% with the app's
   walk_to test request; 45 shapes built while walking, no invisible surfaces near Guardian's spawn) and our native
   dedicated server with a joined test client (the server moved the player 3 units, the client saw itself there; kill
-  volume alive with boundaries off, dead once on). tpnext (next to another player) needs two players: not run live.
+  volume alive with boundaries off, dead once on). tpnext (next to another player) needs two players: not run live. Since checked
+  live with two clients and invisible walls fixed (the next two entries).
+- **nhook invisible walls off: the right surface index** (2026-11-07; nhost.c ht_shape) — WHY: with the switch off the
+  player still stopped at a player-clip wall and the snapshot's walls_hidden stayed 0: the handler took the builder's 8th
+  argument as the surface index. It is the 9th (`movsxd r14, [rbp+0x70]` in the x86 = entry rsp + 0x48), which the builder
+  also stores at shape +0x28. HOW: read shape +0x28 after the original ran. Checked live with the new
+  shim/tools/native-host-test.sh walls (a local Guardian match; the loader's 2026-10-18 test wall x -13.98..-8.10, y -19.35,
+  z 21.31..32.67; the player put 1.8 units north of it, the app's walk_to test request walks south): walls on -> stopped at
+  y -19.15 (the loader: -19.16), walls off -> walked through to -21.28 and fell down the drop the wall guards (4 surfaces
+  hidden). No old-behaviour switch (the old index never found a wall).
+- **nhook host tools: teleport next to a player, checked with two clients** (2026-11-07; shim/tools/native-host-test.sh
+  tpnext, shim/native.sh) — our native dedicated server plus two test clients: the usual test profile and a second one with
+  its OWN identity (ReclaimerMac/native/test-second: the first one's settings and first-run markers, no profile.json; the
+  app made a new identity with a random name on its first start, the test renames it "Second"; services left alone like
+  every test profile). do=tpnext&slot=<B>&who=<A> on the server's page: "moved player 0 next to player 1 (right)", 1 unit
+  apart on the server, and A's own client and B's client showed A at the same place. The teleport sets the unit's facing,
+  but a remote client keeps aiming where its own input says (the app's aim_at_nearest_player test request turned it).
+  shim/native.sh: NATIVE_ALLOW_SECOND=1 no longer waits 30 s for the running instance (the server) to end first.
+- **nhook kill feed: a medal follows its kill** (2026-11-07; nstats.c rs_tick, rs_medals) — WHY: the server's feed said
+  "<player>: First Strike" just before "<player> killed <victim>", the kill it was for (same second, lower sequence).
+  HOW: the kill candidates are confirmed (rs_confirm) before the medals are looked at, and a kill medal waits while a kill
+  of that player still waits for the scoreboard's death (within its usual 3 s). Checked: results-feed-test.sh (a new case:
+  a kill and its medal before the scoreboard's death -> both wait, then the kill line and the medal after it; fails on the
+  old order) and live: the kill line, then First Strike, on the server's page and both clients'. No old-behaviour switch
+  (an order only).
+- **nhook: every game of a session is a match** (2026-11-07; nstats.c nst_on_line) — WHY: when our server started its next
+  game on the same map, the page saw nothing: "Game over" three times, "Match started" once, and the per-match state ran
+  on. The app logs no "[switch] game ..." line then, only its pregame lobby: "[shell] pregame lobby: waiting" after the game
+  over and "... left" when the countdown ends (a client that joins a game in progress logs "game Playing" first and the
+  lobby after; the server's engine logs the same lines). HOW: while the app is in a game, "waiting" ends the match and
+  "left" starts the next one ("Match started"). Checked live: client B's feed: Game over, then Match started: Guardian
+  again. Found with the new NHOOK_TAP_LOG=<file> (every line the hooks read, from every process that loads the dylib:
+  what a server's worker logs, which nobody shows). No old-behaviour switch.
+- **The map being played follows the engine's scenario at once** (2026-11-07; shim/src/h3maps.c hb_current_map: the loader
+  and nhook) — WHY: a native client's first spawn line of a Guardian match was "36 weapons and equipment spawned: Phd
+  bottompiece x3, Hard metal thin hum masterchief x3, ... Dervish head, Elite wipe" (the server's: "Gun lip garbage x3,
+  Flood softform break small ..."), the right "22 weapons" line came right after: for a match's first seconds the map being
+  played was still the loading screen's scenery (130_epilogue, a campaign cinematic) until the 2 s recheck, so the
+  tracker classified and named Guardian's objects from the epilogue's tag table, then started over when the map changed.
+  HOW: the engine's scenario name (game options, hb_scenario_name) is polled every 0.1 s and a change re-decides at once.
+  Checked live: one "22 weapons and equipment spawned" line with Guardian's names on all three pages. Old:
+  PELOAD_MAP_SLOWCHECK=1 (the 2 s check only).
+- **nhook spawns: a dead player's dropped weapon is no spawn; a client's first weapons are one line** (2026-11-07;
+  nspawns.c st_spawns) — WHY: on both test clients "Assault rifle spawned at (-3.0, -24.0)" followed every kill, at the
+  victim's spot (a client of the native app gets the host's dropped weapon as a NEW object; the host keeps its object, so
+  the server's page had no such line). And a client's match start came out as "Excavator spawned at ...", "Smg spawned at
+  ...", ... then "17 weapons and equipment spawned": the host's objects reach a client over ~1 s of snapshots. HOW: a weapon
+  appearing within 2 units of where a player died in the last 4 s is that drop: no event, no spawn point (Old:
+  NHOOK_SPAWN_DROPS=1); from a match's first weapon spawn on they are gathered until 0.5 s pass without a new one (3 s at
+  most) and go out together (Old: NHOOK_SPAWN_NOGATHER=1). shim/tools/spawn-test.sh compiles again (the loader's code had
+  gained the heatmap lock and spawn points: stubs) and now runs the same fake game against the native copy too, with a drop
+  case (fails without the rule).
+- **nhook on a dedicated server: the probe waits for the engine** (2026-11-07; nhook.c probe_thread) — WHY: one start of
+  our native server had no stats page at all: its engine process probed 2 s after the "image at" line, found the image
+  half-filled ("image+0: no MZ", part of .text as in the file) and the runtime's code table empty ("code table at 0x0") ->
+  "no code table: hooks off". HOW: after the 2 s it waits for the image's MZ header and a filled code table, up to 60 s
+  (logged when it had to wait); the probe line names its pid. No old-behaviour switch.
+- **nhook: who left, when they left** (2026-11-07; nstats.c st_roster, st_roster_notice, nst_on_line) — WHY: a player whose
+  leaving ended the game (our server: the other player won) got "<player> left the game" only 8 s into the NEXT match, after
+  "Game over", or never: halo3 keeps a player who quit in its players table until the game ends, and the roster started
+  over with every map name (between games the map passes through the loading scenery). HOW: the app's own HUD notices
+  "[engine] HUD notice: <name> joined the server" / "... left the server" (client and server, the moment it happens) report
+  joins and leaves; a name they covered is left to them (the leaver still in the table is no new join). The players-table
+  path stays for the rest, and its roster now starts over only when the app joins ANOTHER server: on the same server it goes
+  on across maps (who does not come back once a map's first 5 s are over has left). Old: NHOOK_ROSTER_NOHUD=1 (no notices),
+  NHOOK_ROSTER_PERMAP=1 (a new roster per map). A notice for "A player" (the app's word before it knows the name) is left to the table path. Checked live (two clients on
+  our server, A quits mid-game): "<A> left the game" on B's page and the server's, before "Game over: Second won" (~20 s after
+  the quit: the server's own disconnect timeout).
+- **nhook teleport next to a player: a spot with a floor** (2026-11-07; nhost.c ht_floor, ht_do; do=floorprobe) — WHY: "right
+  of" a player at a ledge was open air: a player put there by tpnext fell into Guardian's kill volume (three times in a row on
+  our server). HOW: each candidate (right, left, behind, close behind) must also have a floor: halo3's collision ray
+  (0x1fd748, called as halo3's own "put it on the ground below" 0x259c7c calls it: flags = the default at halo3+0x20ad508 |
+  0x24000, vector (0, 0, -1.8) from 0.3 above the spot, no ignored objects; result +0x08 = the hit point) hits within 1.5
+  below it; the first such spot wins, else the first open one as before. ("Solid just below" was tried first and is no test:
+  open floors and thin walkways have open space under them.) Checked live with do=floorprobe&x=&y=&z= (host only; logs the
+  ray and the open / solid test at 9 depths): no floor at the 3 known drops (the spot players fell from, the walls test's
+  far side), floors at 16.55-21.40 everywhere players stood; shim/tools/native-host-test.sh tpnext puts B at that ledge
+  and A must stand beside it 4 s later: PASS (A at z 17.44, alive). Old: NHOOK_HOST_NOFLOOR=1.
+- **nhook forensic voice: the channel** (2026-11-07; nstats.c nh_on_opus_body, st_vch, snapshot session "voice_ch",
+  stats_page.html; backlog N6) — WHY: the native archive wrote channel 0xFF ("not known") for every voice packet; the loader
+  read the channel byte of the packet itself, which the native app's packets don't carry. HOW: the voice mixer (0x102152578)
+  scales each sender by the channel's volume: a byte at the sender entry's end - 7 indexes the 3 floats at app 0x103f0a1d0,
+  which 0x10214c0b4 stores from the settings' voice_global / voice_team / voice_proximity volumes in that order -- so the byte
+  is the sender's channel, 1 global, 2 team, 3 proximity (the loader's numbering, forensic.c fx_chname). The archive's records
+  carry it; the page's Connected list says "talking (team voice)"; the log names each sender's channel once (and on a change).
+  Checked live with the new
+  shim/tools/native-voice-test.sh (two test clients; A talks from a WAV with the app's --voice-wav / --voice-talk): --voice-talk
+  all -> B: "talks on channel global"; nearby (the server put A beside B first) -> "proximity", and B's page voice_ch
+  "proximity". Old: NHOOK_VOICE_NOCHAN=1 (always 0xFF).
+- **nhook.dylib is linked to a temporary file and renamed into place** (2026-11-07; shim/native/build.sh) — WHY: a rebuild
+  while a game runs must not change the file that game mapped (a file rewritten in place under a running process can get it
+  killed for an invalid code signature when its pages are read again). HOW: link to build/nhook.dylib.new, mv over the old
+  one (a new inode; running processes keep theirs).
 - **nhook: hooks on a lifted function's body** (2026-11-07; nhook.c body_of / body_hook_after, stub.S _nh_ba) — WHY: entry
   hooks on the code table see only calls through the table; lifted halo3 code calls lifted halo3 code DIRECTLY at the
   body its wrapper calls, so the shape-builder hook saw 0 calls in a live test. HOW: the wrapper (stp / mov / stp, ldr

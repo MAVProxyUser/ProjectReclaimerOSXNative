@@ -575,6 +575,13 @@ static void hooks_start(void);
 static void* probe_thread(void* arg) {
     (void)arg;
     sleep(2);
+    // ... and until the image is mapped (its MZ header) and the runtime's code table is filled: a dedicated server's worker,
+    // starting beside its supervisor, was not ready after 2 s once ("image+0: no MZ", "code table at 0x0" -> hooks off, no
+    // stats page; 2026-11-07, its fifth start that day). Up to 60 s.
+    { int w = 0; for (; w < 240; w++) { uint8_t h[2]; uint64_t t[2];
+          if (!rd(g_img, h, 2) && h[0] == 'M' && h[1] == 'Z' && !rd(APP_CODETAB + (g_img - APP_IMAGE), t, 16) && t[0] && t[1] >= 1000 && t[1] <= 1000000) break;
+          usleep(250000); }
+      if (w) nlog("[nhook] the engine image / code table were ready %.2f s later than the usual 2 s%s", w * 0.25, w >= 240 ? " -- not at all: giving up" : ""); }
     const char* path = getenv("NHOOK_HALO3");
     if (!path) { nlog("[nhook] NHOOK_HALO3 not set: no image check"); hooks_start(); return 0; }   // (the hooks start anyway: shim/tools/native-dedicated.sh once lost them all)
     int fd = open(path, O_RDONLY); struct stat st;
@@ -585,8 +592,8 @@ static void* probe_thread(void* arg) {
     uint8_t* oh = f + pe + 24; uint64_t ibase = *(uint64_t*)(oh + 24); uint32_t isize = *(uint32_t*)(oh + 56);
     uint8_t* dd = oh + 112; uint8_t* sh = oh + opt;
     uint64_t img = g_img;
-    nlog("[nhook] halo3.dll preferred base 0x%llx size 0x%x; engine image at 0x%llx", (unsigned long long)ibase, isize,
-         (unsigned long long)img);
+    nlog("[nhook] halo3.dll preferred base 0x%llx size 0x%x; engine image at 0x%llx (pid %d)", (unsigned long long)ibase, isize,
+         (unsigned long long)img, (int)getpid());
     uint8_t hdr[2]; nlog("[nhook] image+0: %s", rd(img, hdr, 2) ? "unreadable" : (hdr[0] == 'M' && hdr[1] == 'Z' ? "MZ (headers mapped)" : "no MZ"));
     #define FOFF(rva) ({ uint32_t _r = (rva), _o = 0; for (int _i = 0; _i < nsec; _i++) { uint8_t* s = sh + _i * 40; \
         uint32_t va = *(uint32_t*)(s + 12), vs = *(uint32_t*)(s + 8), ra = *(uint32_t*)(s + 20), rs = *(uint32_t*)(s + 16); \
@@ -679,6 +686,8 @@ static void on_line(const char* p, size_t n) {
                 if (v) { g_img = v; pthread_t t; pthread_create(&t, 0, probe_thread, 0); pthread_detach(t); }
                 break;
             }
+    { static FILE* tf; static int ti; if (!ti) { ti = 1; const char* f = getenv("NHOOK_TAP_LOG"); if (f && *f) tf = fopen(f, "a"); }   // NHOOK_TAP_LOG=<file>: every
+      if (tf) { fwrite(p, 1, n, tf); fputc('\n', tf); fflush(tf); } }   //  line the hooks read (what a process logs that nobody shows: a server worker)
     nst_on_line(p, n);                                // match state and events (nstats.c)
 }
 

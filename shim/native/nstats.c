@@ -110,6 +110,7 @@ static void st_feed_json(StBuf* s, uint32_t since) {
 
 static double st_talk_age(uint64_t id);   // (below: from the app's voice reports)
 static void st_voice_report(const char* l);
+static void st_roster_notice(const char* name, int in);   // (below: the app's HUD join / leave notices)
 #include "nnet.c"   // the network session and the packet log
 
 // ---- the app's log lines -> match state and events ------------------------------------------------------------------
@@ -149,8 +150,17 @@ static void nst_on_line(const char* p, size_t n) {
     if (!strncmp(l, "[voice] active ", 15)) { st_voice_report(l); return; }
     if (!strncmp(l, "[capacity] ", 11) || !strncmp(l, "[c1] ", 5)) { nst_layout_line(l); return; }
     if (!strncmp(l, "[menus] joining the game in progress", 36)) { g_sp_join = 1; return; }
+    if (!strncmp(l, "[engine] HUD notice: ", 21)) {             // "<name> joined the server" / "<name> left the server" (st_roster_notice)
+        const char* t = l + 21; size_t L = strlen(t); static const char* const sfx[2] = {" left the server", " joined the server"};
+        for (int in = 0; in < 2; in++) { size_t k = strlen(sfx[in]); if (L > k && !strcmp(t + L - k, sfx[in])) { char nm[64]; size_t n2 = L - k; if (n2 >= sizeof nm) n2 = sizeof nm - 1;
+                memcpy(nm, t, n2); nm[n2] = 0; st_roster_notice(nm, in); return; } } }
     if (!strncmp(l, "[online] joining ", 17)) { size_t k = 0; const char* q = l + 17; char a[96]; while (*q && *q != ' ' && k + 1 < sizeof a) a[k++] = *q++; a[k] = 0; if (k) memcpy(g_srv_addr, a, k + 1); return; }
     if (!strncmp(l, "[switch] game Playing", 21)) { g_app_playing = 1; if (!g_gameplay_t0) { g_gameplay_t0 = mono_s(); g_match_pending = 1; } return; }
+    // the server's next game on the same map: no "[switch] game ..." line at all, only its pregame lobby ("[shell] pregame
+    // lobby: waiting" after the game over, "... left" when the countdown ends). The page saw ONE match for a whole session --
+    // "Match started" once, the per-match counters running on (2026-11-07, three games on our local server).
+    if (!strncmp(l, "[shell] pregame lobby: ", 23)) { if (!g_app_playing) return;
+        if (!strncmp(l + 23, "waiting", 7)) g_gameplay_t0 = 0; else if (!strncmp(l + 23, "left", 4) && !g_gameplay_t0) { g_gameplay_t0 = mono_s(); g_match_pending = 1; } return; }
     if (!strncmp(l, "[loading] map ", 14)) {               // "[loading] map 320: Guardian, MCC's art of Guardian"
         const char* c = strchr(l, ':'); if (c) { c++; while (*c == ' ') c++; size_t k = 0; while (c[k] && c[k] != ',' && k + 1 < sizeof g_loading) { g_loading[k] = c[k]; k++; } g_loading[k] = 0; }
         g_gameplay_t0 = 0; g_hb_map_recheck = 1; return;
@@ -463,17 +473,40 @@ static int st_is_zombie(uint64_t rec) {
 // "left" once a name has been missing for 3 s, "joined" for a name not seen in the last 30 s -- a snapshot that misses the
 // table (a read on the wrong engine thread before tls_block pinned the right one) once made every player leave and rejoin,
 // ~160 feed lines a second in a 72-player game (2026-11-07).
+// The roster's own source (2026-11-07): the app's HUD notices "[engine] HUD notice: <name> joined the server" / "... left the
+// server" (client and server, the moment it happens). halo3 keeps a player who quit in its players table until the game ends,
+// so the table path said "left" only at the next match, after "Game over". A name a notice covered is left to the notices
+// (hud = 1: the leaver still in the table is no new join); the table path stays for everything else. NHOOK_ROSTER_NOHUD=1 = old.
+static struct { char name[64]; double seen; int in, hud; } g_ros[512]; static int g_nros; static pthread_mutex_t g_ros_mx = PTHREAD_MUTEX_INITIALIZER;
+static int ros_find(const char* nm) {   // (g_ros_mx held) -> index, -1 full
+    for (int i = 0; i < g_nros; i++) if (!strcmp(g_ros[i].name, nm)) return i;
+    if (g_nros >= 512) return -1; int i = g_nros++; memset(&g_ros[i], 0, sizeof g_ros[i]); snprintf(g_ros[i].name, sizeof g_ros[i].name, "%s", nm); return i; }
+static void st_roster_notice(const char* name, int in) {
+    static int off = -1; if (off < 0) off = getenv("NHOOK_ROSTER_NOHUD") != 0; if (off || !name[0]) return;
+    if (!strcmp(name, "A player")) return;   // (the app's notice before it knows the name: "A player joined the server" -- the table path has them)
+    pthread_mutex_lock(&g_ros_mx); int i = ros_find(name); int ch = i >= 0 && g_ros[i].in != in;
+    if (i >= 0) { g_ros[i].in = in; g_ros[i].hud = 1; g_ros[i].seen = mono_s(); } pthread_mutex_unlock(&g_ros_mx);
+    if (ch) st_event_pos(0, in ? "join" : "leave", name, 0, 0, -1, -1, 0, in ? "%s joined the game" : "%s left the game", name); }
 static void st_roster(const StPlayer* pl, int np, const char* map) {
-    static struct { char name[64]; double seen; int in; } r[512]; static int nr; static char pmap[64]; static double t_map;
-    double now = mono_s();
-    if (strcmp(pmap, map)) { snprintf(pmap, sizeof pmap, "%s", map); nr = 0; t_map = now; }   // a new map: the table fills again
+    static char pmap[64], psrv[96]; static double t_map;
+    double now = mono_s(); pthread_mutex_lock(&g_ros_mx);
+#define r g_ros
+#define nr g_nros
+    // a new map: the table fills again. Only ANOTHER server starts a new roster: on the same server the roster goes on, and
+    // who does not come back after the change has left -- a player who left at a game's end (their leaving ended it) was
+    // forgotten with the map's roster, between games the map passes through the loading scenery (2026-11-07). NHOOK_ROSTER_PERMAP=1 = old.
+    if (strcmp(pmap, map)) { static int permap = -1; if (permap < 0) permap = getenv("NHOOK_ROSTER_PERMAP") != 0;
+        snprintf(pmap, sizeof pmap, "%s", map); t_map = now; if (permap || strcmp(psrv, g_srv_addr)) { snprintf(psrv, sizeof psrv, "%s", g_srv_addr); nr = 0; } }
     int quiet = now - t_map < 5.0;                             // the first seconds of a map: everyone "joins" -- not news
-    for (int k = 0; k < np; k++) { int i = 0; for (; i < nr; i++) if (!strcmp(r[i].name, pl[k].name)) break;
-        if (i == nr) { if (nr >= 512) continue; nr++; snprintf(r[i].name, sizeof r[i].name, "%s", pl[k].name); r[i].in = 0; r[i].seen = 0; }
+    for (int k = 0; k < np; k++) { int i = ros_find(pl[k].name); if (i < 0) continue;
+        if (r[i].hud) { if (r[i].in) r[i].seen = now; continue; }   // (the notices have this one)
         if (!r[i].in) { if (!quiet && now - r[i].seen > 30.0) st_event_pos(0, "join", pl[k].name, 0, 0, -1, -1, 0, "%s joined the game", pl[k].name); r[i].in = 1; }
         r[i].seen = now; }
-    if (!np) return;                                           // (an empty read says nothing about who left)
-    for (int i = 0; i < nr; i++) if (r[i].in && now - r[i].seen > 3.0) { r[i].in = 0; st_event_pos(0, "leave", r[i].name, 0, 0, -1, -1, 0, "%s left the game", r[i].name); }
+    if (np)                                                    // (an empty read says nothing about who left)
+        for (int i = 0; i < nr; i++) if (r[i].in && !r[i].hud && now - r[i].seen > 3.0 && !quiet) { r[i].in = 0; st_event_pos(0, "leave", r[i].name, 0, 0, -1, -1, 0, "%s left the game", r[i].name); }
+#undef r
+#undef nr
+    pthread_mutex_unlock(&g_ros_mx);
 }
 
 // ---- the scoreboard: halo3's statborg (static RE of halo3.dll, shim/docs/native-client.md "Kills") -------------------
@@ -659,6 +692,9 @@ static void rs_medals(const int* idx, const StPlayer* pl, double now, int flood)
             for (int q = 0; q < d && g_nrsm < 64; q++) { RsMedal* r = &g_rsm[g_nrsm++]; r->slot = sl; r->m = m; r->t = now; snprintf(r->name, sizeof r->name, "%s", idx[sl] >= 0 ? pl[idx[sl]].name : "?"); } } }
     for (int i = 0; i < g_nrsm; i++) { RsMedal* r = &g_rsm[i]; int ok = g_medal_obj[r->m] || (g_sb_kill_t[r->slot] > 0 && fabs(g_sb_kill_t[r->slot] - r->t) < 5);
         if (!ok && now - r->t < 3) continue;
+        // a kill medal follows its kill line: it waits while a kill of this player still waits for the scoreboard (rs_confirm runs
+        // first; the server's feed said "First Strike" just before the kill it was for, 2026-11-07)
+        if (ok && !g_medal_obj[r->m] && now - r->t < 3) { int pend = 0; for (int j = 0; j < g_nrsq && !pend; j++) pend = g_rsq[j].killer == r->slot; if (pend) continue; }
         if (ok) st_event_pos(0, "medal", r->name, 0, g_medal[r->m], -1, g_sbnow[r->slot].team, 0, "%s: %s", r->name, g_medal[r->m]);
         else if (lg) nlog("[nhook] [results] %s: %s with no kill on the scoreboard: history, not reported", r->name, g_medal[r->m]);
         g_rsm[i] = g_rsm[--g_nrsm]; i--; } }
@@ -717,8 +753,8 @@ static void rs_tick(const StPlayer* pl, int np, double now) {
         int t = rs_take(killer, betray ? 2 : 0), hs = rs_take(killer, 4) >= 0; rs_take(victim, 1);
         char how[96] = ""; if (t > 0 && t < 63) snprintf(how, sizeof how, "%s%s", g_dmg_name[t], hs ? ", headshot" : ""); else if (hs) snprintf(how, sizeof how, "headshot");
         rs_cand(killer, victim, betray, how, idx, pl, now); }
+    rs_confirm(now);                                   // (the kills first: a kill medal follows its kill line)
     rs_medals(idx, pl, now, nch < 0);
-    rs_confirm(now);
     memcpy(g_rs_prev, g_rs_cur, sizeof g_rs_prev); memcpy(g_rs_vprev, g_rs_vcur, vn * 4);
 }
 
@@ -927,22 +963,34 @@ static volatile int g_fx_on; static void fx_voice(uint64_t sender, const uint8_t
 // 0.10.0 app 0x1003f1e7c: x0 decoder, x1 packet, x2 length; 0 = a lost frame being concealed). Its one caller (0x102152578, the
 // voice mixer, once per sender per 20 ms) walks a hash map of senders: x26 = the entry's end, the peer id at x26 - 0x278 (the
 // mixer reads it there for the volume table). The packet arrives as [kind 1 = Opus][Opus]; decode gets the Opus part. The
-// archive's records are built in the loader's layout ([channel][sequence u64][0x01][Opus]: channel 0xFF = not known, sequence =
-// our per-sender count) so voice.bin, the viewer and its .ogg files work unchanged. Checked before hooking: decode's first four
+// archive's records are built in the loader's layout ([channel][sequence u64][0x01][Opus]: sequence = our per-sender count) so
+// voice.bin, the viewer and its .ogg files work unchanged. The channel (2026-11-07, backlog N6): the mixer scales each sender
+// by the channel's volume -- a byte at x26 - 7 indexes the 3 floats at app 0x103f0a1d0 (the settings' voice_global / _team /
+// _proximity volumes, stored by 0x10214c0b4 in that order) -- so that byte is the sender's channel, 1 global, 2 team,
+// 3 proximity: the loader's numbering. Anything else -> 0xFF (not known). NHOOK_VOICE_NOCHAN=1 = always 0xFF (old). Checked before hooking: decode's first four
 // instructions, the caller's bl / argument moves and its id load (another app build: no hook, "voice packets: not hooked").
 static volatile double g_opus_last;   // the last packet (mono): the voice reports stop writing FXF_REPORT records while packets come
 static volatile unsigned long g_opus_n;
 static uint64_t g_opus_ret;   // the mixer's return address after its decode call (nhook.c voice_hook_install sets it)
 static void nh_on_opus_body(uint64_t dec, const uint8_t* pkt, uint64_t len, uint64_t ent, uint64_t ret);
+static struct { uint64_t id; uint8_t ch; } g_vch[128]; static pthread_mutex_t g_vch_mx = PTHREAD_MUTEX_INITIALIZER;   // each sender's channel (last packet)
+static const char* st_vch_name(int ch) { return ch == 1 ? "global" : ch == 2 ? "team" : ch == 3 ? "proximity" : "not known"; }
+static int st_vch(uint64_t id) { int ch = 0; pthread_mutex_lock(&g_vch_mx); for (int i = 0; i < 128; i++) if (g_vch[i].id == id) { ch = g_vch[i].ch; break; } pthread_mutex_unlock(&g_vch_mx); return ch; }
 __attribute__((used)) void nh_on_opus(uint64_t dec, const uint8_t* pkt, uint64_t len, uint64_t ent, uint64_t ret) {   // (timed: nhcost.h)
     if (g_hc_off[HC_OPUS]) return; uint64_t t0 = hc_now(); nh_on_opus_body(dec, pkt, len, ent, ret); hc_add(HC_OPUS, t0); }
 static void nh_on_opus_body(uint64_t dec, const uint8_t* pkt, uint64_t len, uint64_t ent, uint64_t ret) {
     (void)dec; if (ret != g_opus_ret || !len || len > 4000 || !pkt) return; uint64_t id = 0; if (rd(ent - 0x278, &id, 8) || !id) return;
-    g_opus_n++; g_opus_last = mono_s(); if (!g_fx_on) return;
+    g_opus_n++; g_opus_last = mono_s();
+    static int nochan = -1; if (nochan < 0) nochan = getenv("NHOOK_VOICE_NOCHAN") != 0;
+    uint8_t ch = 0xFF; if (!nochan && !rd(ent - 7, &ch, 1) && (ch < 1 || ch > 3)) ch = 0xFF;
+    { pthread_mutex_lock(&g_vch_mx); int k2 = -1, fr2 = -1; for (int i = 0; i < 128; i++) { if (g_vch[i].id == id) { k2 = i; break; } if (fr2 < 0 && !g_vch[i].id) fr2 = i; }
+      int fresh = k2 < 0 || g_vch[k2].ch != ch; if (k2 < 0) k2 = fr2 >= 0 ? fr2 : (int)(id & 127); g_vch[k2].id = id; g_vch[k2].ch = ch; pthread_mutex_unlock(&g_vch_mx);
+      if (fresh) nlog("[nhook] voice: 0x%016llx talks on channel %s", (unsigned long long)id, st_vch_name(ch)); }   // (a sender's first packet, and each change)
+    if (!g_fx_on) return;
     static struct { uint64_t id, seq; } sq[256]; static pthread_mutex_t mx = PTHREAD_MUTEX_INITIALIZER; uint64_t seq = 0;
     pthread_mutex_lock(&mx); int k = -1, fr = -1; for (int i = 0; i < 256; i++) { if (sq[i].id == id) { k = i; break; } if (fr < 0 && !sq[i].id) fr = i; }
     if (k < 0) { k = fr >= 0 ? fr : (int)(id & 255); sq[k].id = id; sq[k].seq = 0; } seq = ++sq[k].seq; pthread_mutex_unlock(&mx);
-    uint8_t b[10 + 4000]; b[0] = 0xFF; memcpy(b + 1, &seq, 8); b[9] = 1; if (rd((uint64_t)(uintptr_t)pkt, b + 10, (size_t)len)) return;
+    uint8_t b[10 + 4000]; b[0] = ch; memcpy(b + 1, &seq, 8); b[9] = 1; if (rd((uint64_t)(uintptr_t)pkt, b + 10, (size_t)len)) return;
     fx_voice(id, b, len + 10);
 }
 static void st_voice_report(const char* l) {
@@ -1059,6 +1107,7 @@ static void st_snapshot(StBuf* s) {
       sb_put(s, ",\"session\":["); for (int k = 0; k < nss; k++) { sb_put(s, "%s{\"name\":", k ? "," : ""); sb_str(s, ss[k].name);
           sb_put(s, ",\"index\":%d,\"peer\":%d,\"host\":%s,\"voice\":\"%016llx\",\"muted\":%s,\"talking\":%s", ss[k].idx, ss[k].peer, ss[k].host ? "true" : "false", (unsigned long long)ss[k].voice,
                  ss[k].muted ? "true" : "false", st_talk_age(ss[k].voice) < 2.5 ? "true" : "false");
+          { int vc = st_vch(ss[k].voice); if (vc >= 1 && vc <= 3) sb_put(s, ",\"voice_ch\":\"%s\"", st_vch_name(vc)); }   // (the channel of their last voice packet)
           { char ad[64]; if (pk_addr_of(ss[k].voice, ad, sizeof ad)) { sb_put(s, ",\"ip\":"); sb_str(s, ad); } } sb_put(s, "}");
           if (ss[k].host) hostplayer = 1; }
       sb_put(s, "],\"session_state\":%u,\"host_peer\":%d,\"local_peer\":%d,\"dedicated\":%s,\"mute\":%s", sst, g_st_hostpeer, g_st_localpeer, g_st_hostpeer >= 0 && nss && !hostplayer ? "true" : "false",
