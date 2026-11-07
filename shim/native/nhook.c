@@ -70,17 +70,26 @@ static uint64_t host_of(uint32_t rva) {           // the lifted entry of halo3+r
 typedef void (*nh_handler)(uint64_t* ctx);
 extern char nh_tpl_start[], nh_tpl_displaced[], nh_tpl_handler[], nh_tpl_return[], nh_tpl_end[];
 
-static uint8_t* near_page(uint64_t code, size_t size) {   // a fresh RW page within +-120 MB of the lifted code
-    mach_vm_address_t ra = code; mach_vm_size_t rs = 0; vm_region_basic_info_data_64_t bi; mach_msg_type_number_t bc = VM_REGION_BASIC_INFO_COUNT_64; mach_port_t on;
-    if (mach_vm_region(mach_task_self(), &ra, &rs, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&bi, &bc, &on) != KERN_SUCCESS) return 0;
-    // fixed-address allocation attempts (nothing is read): just past the code region, then just below it, 1 MB steps
-    for (uint64_t step = 0; step < 120; step++)
-        for (int side = 0; side < 2; side++) {
-            mach_vm_address_t a = side ? ra - size - step * 0x100000 : ra + rs + step * 0x100000;
-            int64_t d = (int64_t)(a - code);
-            if (d >= 0x7800000 || d <= -0x7800000) continue;
-            if (mach_vm_allocate(mach_task_self(), &a, size, VM_FLAGS_FIXED) == KERN_SUCCESS) return (uint8_t*)a;
-        }
+static uint8_t* near_page(uint64_t code, size_t size) {   // a fresh RW range within +-120 MB of the lifted code
+    // The free gaps between the mapped regions in that window (region boundaries only -- mach_vm_region, nothing read),
+    // nearest first; each gap's end nearest the code. The old 1 MB steps out from the code region's edges found nothing
+    // in some launches: the gaps there are 16-352 KB and scattered (2026-11-07, "no stub page near ...").
+    const uint64_t R = 0x7800000; uint64_t lo = code > R + 0x100000000ull ? code - R : 0x100000000ull, hi = code + R;
+    uint64_t cand[256]; int nc = 0; mach_vm_address_t a = lo; uint64_t prev = lo;
+    for (int guard = 0; guard < 100000 && prev < hi; guard++) {
+        mach_vm_size_t rs = 0; vm_region_basic_info_data_64_t bi; mach_msg_type_number_t bc = VM_REGION_BASIC_INFO_COUNT_64; mach_port_t on;
+        kern_return_t kr = mach_vm_region(mach_task_self(), &a, &rs, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&bi, &bc, &on);
+        uint64_t gs = prev, ge = kr == KERN_SUCCESS ? (a < hi ? a : hi) : hi;   // the gap [gs, ge) before this region
+        if (ge > gs && ge - gs >= size && nc < 256) cand[nc++] = ge <= code ? ge - size : gs;   // (the end nearest the code)
+        if (kr != KERN_SUCCESS) break;
+        prev = a + rs; a = prev;
+    }
+    for (int i = 1; i < nc; i++) { uint64_t x = cand[i]; int64_t dx = (int64_t)(x - code); if (dx < 0) dx = -dx; int j = i - 1;
+        while (j >= 0) { int64_t dj = (int64_t)(cand[j] - code); if (dj < 0) dj = -dj; if (dj <= dx) break; cand[j + 1] = cand[j]; j--; } cand[j + 1] = x; }
+    for (int i = 0; i < nc; i++) {
+        int64_t d = (int64_t)(cand[i] - code); if (d >= (int64_t)R || d <= -(int64_t)R || d + (int64_t)size >= (int64_t)R) continue;
+        mach_vm_address_t t = cand[i]; if (mach_vm_allocate(mach_task_self(), &t, size, VM_FLAGS_FIXED) == KERN_SUCCESS) return (uint8_t*)t;
+    }
     return 0;
 }
 

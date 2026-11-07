@@ -1736,6 +1736,12 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   <ip>:<port>`); the session's peer records hold the same ids, so a wire record gets "player". The page's "look up names"
   box adds ?rdns=1: each address's PTR name, asked once per address on a resolver thread (getnameinfo NI_NAMEREQD; 2048
   cached). Test: shim/tools/nhook-selftest.sh (127.0.0.1 -> localhost). The loader ignores rdns=1 (not ported there).
+- **nhook: "no stub page near ..." -> stats page empty** (2026-11-07; nhook.c near_page) — WHY: in the user's launch both
+  entry hooks failed, so the page never had the engine thread's context (0 players, 0 objects). A hook branches (`b`,
+  +-128 MB) to a stub on a page of its own next to the app's generated code (a 28.5 MB MAP_JIT region); near_page tried
+  only 1 MB steps out from that region's edges, and the free gaps around it are 16-352 KB and scattered: some layouts
+  had none on a probe. Now it walks the region boundaries within +-120 MB (mach_vm_region; nothing is read) and
+  allocates in the free gap nearest the code.
 
 - **"Run 2.4x" removed** (2026-10-19, revert 606a38c) — it crashed the client as soon as it was used; the user asked for it
   to be deleted. The page's Speed 2x / speed menu (the host's movement-speed trait) is unchanged. (10-19)
