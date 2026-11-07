@@ -303,8 +303,17 @@ with DYLD_INSERT_LIBRARIES (tested). RE: re-tools/machoref.py (strref/dis/func/c
 shim/native/ = nhook.dylib (bash shim/native.sh [--map guardian --seconds 60 --background]): log tap, code-table entry hooks on lifted
 halo3 functions (x0 = guest context, +0x2d8 = TLS pointer), NHOOK_CENSUS=1; reads the players table. main_loop_body / sim tick /
 display_event / object_delete etc. are the app's own code now (census): docs native-client.md "Inside the app".
-Native stats page (nstats.c): http://127.0.0.1:8765/ while shim/native.sh runs; players/variant/heatmap/feed work, kills/session/
-overlay not yet. hitbox.c's .map code lives in shim/src/h3maps.c (shared).
+Native stats page (nstats.c): http://127.0.0.1:8765/ while shim/native.sh runs (page served from the checkout: edits = refresh).
+Works (live-checked in a 72-player game, 2026-11-07): players, variant, heatmap, feed, kills / deaths / assists from halo3's
+statborg (game engine globals TLS +0x20 + the app's `[capacity] game_globals.statborg`; kill feed paired from its counts),
+Connected list (halo3 session, same layout as 0.9), Packets (interposed sockets; player names from `[online] peer` lines,
+"look up names" = reverse DNS), fps line (presents), overlay / recording / Capture frame (nrender.m: presentDrawable:
+swizzled; camera = halo3 observer TLS +0x578 result +0x11c, Hor+ fov), page controls. Match state = `[switch] game ...`
+lines only (`[menus] open` is also the in-game menu). Hooks: the engine context is pinned to the thread whose TLS block holds
+"players"; stub pages go in real VM gaps near the 28 MB JIT region (near_page). Not yet: voice / mute / forensics, zones,
+visible-only, a 0.10 server list (the 0.10 exe's `discover` prints nothing under the loader; the Mac app has no list command:
+--list-servers just starts the game). Test runs: NATIVE_LOG=<scratch file> (the default log is the user's). Offline test:
+shim/tools/nhook-selftest.sh. hitbox.c's .map code lives in shim/src/h3maps.c (shared).
 PORTING A RELEASE: shim/docs/porting.md -- fetch-releases.sh (corpus), client-survey.sh, `re-tools/patchscan.py --diff old new`
 (signatures read from the C; `--rev <commit>`; exit 0 over all 39 releases), `re-tools/sigport.py --point P --old --new [--corpus]
 [--apply]` (anchors incl. callers' texts -> shape alignment -> wildcarded signature -> meaning check; `--selftest` replays history),

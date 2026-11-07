@@ -134,6 +134,11 @@ info, items, tracers; the page's buttons and panel; halo3's observer camera; no 
 (the page's Record row, rec.m), **Capture frame**, page **controls** (overlay, rec, recstop, capture; NHOOK_STATS_READONLY=1
 off), the **fps line** (perf). Recording / capture / overlay checked in background Guardian matches.
 
+Live check (2026-11-07, the user's profile, a 72-player Infection game on Sandtrap): hooks placed, the page in the match
+with 72 connected, kills from the statborg (57 players with kills), overlay hitboxes and tracers drawing, 145-179 fps at
+3440x1440 (frames 5-7 ms median). Fixed on the way: empty snapshots (wrong engine thread), the in-game menu ending the
+match, stub pages not found in some launches, the projection on ultrawide screens (Hor+).
+
 Not yet: voice / mute / forensics,
 weapon / vehicle spawn tracking (items), shots / accuracy (the loader counted projectiles at object_delete, whose entry
 is not a wrapper in the app).
