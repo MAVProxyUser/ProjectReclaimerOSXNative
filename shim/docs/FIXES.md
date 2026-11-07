@@ -2065,6 +2065,18 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   function on first use (code-table entry hooks, permanent; handlers idle while off: 75 of 77 hooked) and logs the SESSION
   messages by name (a function several types share is named by the first, "+", and listed in full in the counts), with no
   peer. Checked live: membership-update x64 received, parameters-update x10, peer-properties x5 sent in 70 s.
+- **nhook on a native dedicated server** (2026-11-07; shim/tools/native-dedicated.sh, nhook.c probe_thread, nstats.c
+  st_listen_thread) — WHY: backlog N12; and the host tools need a native host. HOW: native-dedicated.sh runs the app's own
+  `--server FILE.toml` mode from an isolated folder (ReclaimerMac/native/test-dedicated: its own profile, cache, data) with a
+  LOCAL-ONLY config made on first use (bind 127.0.0.1, hidden, no master, stats off, no UPnP, no auto-update; Guardian Slayer
+  on UDP 49190, an RCON password in rcon-password.txt) and nhook injected; `rcon <command>` drives it. Two fixes on the way:
+  nhook never installed its hooks when NHOOK_HALO3 was unset (probe_thread returned before hooks_start: native.sh always set
+  it), and the stats page now binds only in the process that runs the engine (the server's supervisor and its re-exec carry
+  the injection too and would have taken the port). Launched without nohup (a system binary strips DYLD_INSERT_LIBRARIES).
+  Checked live: a test client joined 127.0.0.1:49190 (NATIVE_ALLOW_SECOND=1: the server is no client); the server's page
+  (8767) says host with the player, the client's (8765) client + the server's address; an RCON `say` reached the client's
+  feed as a server line; RCON `load construct Slayer` changed the map in the session: "Game over", "Match started:
+  Construct", the client's map / heatmap (Construct's spawns) / zones followed (backlog N5).
 - **nhook-selftest.sh: its own forensic / heatmap folders** (2026-11-07; shim/tools/nhook-selftest.sh) — WHY: the offline
   selftest starts nhook's stats server, whose archive opened an empty "menu" session in the player's real forensic archive on
   every run. HOW: PELOAD_FORENSIC_DIR and NHOOK_HEATMAP_DIR point into the test's temporary folder.

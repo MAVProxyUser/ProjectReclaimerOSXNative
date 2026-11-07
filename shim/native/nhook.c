@@ -467,11 +467,12 @@ static void hooks_start(void) {
     { extern void nr_install(void); nr_install(); }      // nrender.m: the overlay, recording and captures in the app's frames
 }
 
+static void hooks_start(void);
 static void* probe_thread(void* arg) {
     (void)arg;
     sleep(2);
     const char* path = getenv("NHOOK_HALO3");
-    if (!path) { nlog("[nhook] NHOOK_HALO3 not set: no image check"); return 0; }
+    if (!path) { nlog("[nhook] NHOOK_HALO3 not set: no image check"); hooks_start(); return 0; }   // (the hooks start anyway: shim/tools/native-dedicated.sh once lost them all)
     int fd = open(path, O_RDONLY); struct stat st;
     if (fd < 0 || fstat(fd, &st)) { nlog("[nhook] cannot open %s", path); return 0; }
     uint8_t* f = mmap(0, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0); close(fd);

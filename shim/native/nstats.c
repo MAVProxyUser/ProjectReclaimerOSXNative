@@ -1350,6 +1350,9 @@ static void* st_open_thread(void* a) {
 }
 static void* st_listen_thread(void* a) {
     (void)a; pthread_setname_np("nhook-stats-listen");
+    // only the process that runs the engine serves the page: a dedicated server's supervisor (and its re-exec) inherit the
+    // injection too but never log the engine image (g_img), so they never bind (their engine child does; 2026-11-07)
+    while (!g_img && !getenv("NHOOK_SELFTEST")) usleep(200000);   // (the offline selftest has no engine)
     { pthread_t t; nh_thread(&t, st_snap_thread, 0, QOS_CLASS_UTILITY); }
     int ls = -1;
     for (int tr = 0; ls < 0; tr++) {
