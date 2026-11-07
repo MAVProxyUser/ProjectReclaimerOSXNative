@@ -220,10 +220,20 @@ th .srt{display:inline-block;margin-left:2px;padding:0 2px;cursor:pointer;color:
  <div id="cm" class="note">no chat yet</div>
  <div class="note">Newest first: what players type in the game's text chat (TEAM and NEARBY mark those channels), the server's messages, and the client's own chat notices.</div></div>
 </div>
+<div class="grid one">
+ <div class="panel" id="players"><div class="sortmode" title="With a column's sort (the arrows by each heading): team sort keeps each team together and sorts inside it; full sort orders everyone together">
+  Sort: <label><input type="radio" name="smode" value="team" checked> team sort</label><label><input type="radio" name="smode" value="full"> full sort</label>
+  <span id="sortlbl"></span><button id="sortclr" style="display:none;background:none;border:0;color:var(--accent);cursor:pointer;font:inherit">reset</button></div>
+ <div class="wrap"><table><thead><tr id="thr">
+  <th data-k="name">Player</th><th data-k="ip" title="The player's address: the game session's peer it plays from (the native app; with the Packets window's 'look up names', its reverse-DNS name)">IP</th><th data-k="shield">Shield</th><th data-k="health">Health</th><th data-k="weapon">Weapon</th><th data-k="kills">Kills</th><th data-k="deaths">Deaths</th><th data-k="kd">K/D</th><th data-k="shots">Shots</th><th data-k="accuracy">Accuracy</th><th data-k="grenades">Grenades</th><th data-k="vehicle">Vehicle</th><th data-k="pos">X, Y, Z</th><th data-k="speed">Speed</th><th data-k="traits">Traits</th></tr></thead>
+  <tbody id="tb"></tbody></table></div>
+  <div class="note">Click a player for details. Their deaths are ringed on the heatmap.</div></div>
+</div>
 <div id="pkts" class="panel"><div class="fh"><h2 title="pktlog.c: the type of every datagram and connection this game sends and receives -- never what is in it">Packets</h2>
  <label title="UDP datagrams and TCP connections on this game's sockets"><input type="checkbox" id="pkw" checked> wire</label>
  <label title="halo3's own network messages (needs the switch on the right)"><input type="checkbox" id="pkg" checked> game</label>
  <label title="Connected QUIC traffic (most of it: dozens a second); off shows only handshakes, tags, TCP and game messages in the log"><input type="checkbox" id="pk1"> 1-RTT in the log</label>
+ <label title="Reverse DNS: each peer address's PTR name (an ISP / host name), asked of this Mac's resolver once per address. Names appear as they come in; an address without one stays bare. (The native app only for now.)"><input type="checkbox" id="pkr" checked> look up names</label>
  <label title="Wraps halo3's message table so its message types (ping, join-request, membership-update ...) are logged as halo3 sends and receives them, each with its session peer (five small hooks on halo3's message senders / receivers note it; they stay in once used). Switch off to restore the table."><input type="checkbox" id="pkgon"> halo3 message types</label>
  <button id="pkp">Pause</button></div>
  <div class="cols"><div><table id="pks"><thead><tr><th>layer</th><th>dir</th><th>type</th><th>peer</th><th>per s</th><th>bytes/s</th></tr></thead><tbody><tr><td colspan="6" class="note">-</td></tr></tbody></table>
@@ -236,15 +246,6 @@ th .srt{display:inline-block;margin-left:2px;padding:0 2px;cursor:pointer;color:
  the bytes in between, named by the host they were looked up as. halo3 message types: as halo3 encodes one to send it or decodes one it
  received, by halo3's own names, with the session peer it goes to or came from (the player's name; "host" = a host without a player, such
  as a dedicated server). The forensic archive keeps per-second sums of all of this (packets.jsonl).</div></div>
-<div class="grid one">
- <div class="panel" id="players"><div class="sortmode" title="With a column's sort (the arrows by each heading): team sort keeps each team together and sorts inside it; full sort orders everyone together">
-  Sort: <label><input type="radio" name="smode" value="team" checked> team sort</label><label><input type="radio" name="smode" value="full"> full sort</label>
-  <span id="sortlbl"></span><button id="sortclr" style="display:none;background:none;border:0;color:var(--accent);cursor:pointer;font:inherit">reset</button></div>
- <div class="wrap"><table><thead><tr id="thr">
-  <th data-k="name">Player</th><th data-k="shield">Shield</th><th data-k="health">Health</th><th data-k="weapon">Weapon</th><th data-k="kills">Kills</th><th data-k="deaths">Deaths</th><th data-k="kd">K/D</th><th data-k="shots">Shots</th><th data-k="accuracy">Accuracy</th><th data-k="grenades">Grenades</th><th data-k="vehicle">Vehicle</th><th data-k="pos">X, Y, Z</th><th data-k="speed">Speed</th><th data-k="traits">Traits</th></tr></thead>
-  <tbody id="tb"></tbody></table></div>
-  <div class="note">Click a player for details. Their deaths are ringed on the heatmap.</div></div>
-</div>
 <script>
 // ==== demo mode: ?demo=1 only (anonymized screenshots for the docs; shim/tools/pageshot.sh). Without it nothing here runs. ====
 // It rewrites the JSON this page reads (fetch + the /events stream) before anything renders: every player name becomes
@@ -274,7 +275,7 @@ if(new URLSearchParams(location.search).get('demo')==='1'){
     for(const e of evs){ const t=named(e); if(e.kind!=='game'){ e.a=nm(e.a); e.b=nm(e.b); }
       e.text=e.kind==='chat'&&!/^(server|notice)$/.test(e.how||'')?PH[(Math.imul((e.seq|0)+11,0x9E3779B1)>>>0)%PH.length]:t??tx(e.text); } };
   const ipf=new Map(), ipT=v=>{ if(!v) return v; let f=ipf.get(v); if(!f){ f='203.0.113.'+(10+ipf.size); ipf.set(v,f); } return f; };   // documentation range
-  const snapT=s=>{ for(const p of (s.players||[]).concat(s.session||[])){ p.name=nm(p.name); p.voice=id(p.voice); if(p.handle) p.handle=id(p.handle); if(p.ip) p.ip=ipT(p.ip); }
+  const snapT=s=>{ for(const p of (s.players||[]).concat(s.session||[])){ p.name=nm(p.name); p.voice=id(p.voice); if(p.handle) p.handle=id(p.handle); if(p.ip) p.ip=ipT(p.ip); delete p.rdns; }
     if(s.server_addr) s.server_addr='198.51.100.10:49176'; return s; };
   // made-up spawns and pickups (backlog 47, stats.c st_spawns) when the first feed has none, so the pictures show the
   // kinds: a match-start weapon line, vehicles, power-ups, weapons, pickups by the demo players (their aliases, from the
@@ -298,7 +299,8 @@ if(new URLSearchParams(location.search).get('demo')==='1'){
   // a wire row's address is moved to a documentation range unless it is a loopback one (the host name it was looked up by stays)
   const GEN=/^(host|you|peer [0-9a-f]+)$/;
   const pkT=x=>{ if(x.peer_id){ if(!GEN.test(x.peer)) x.peer=nm(x.peer); x.peer_id=id(x.peer_id); }
-    else if(x.peer){ const m=String(x.peer).match(/^\[?([0-9a-fA-F.:]+?)\]?:(\d+)$/); if(m && !/^(127\.|::1$)/.test(m[1])) x.peer=ipT(m[1])+':'+m[2]; } };
+    else if(x.peer){ const m=String(x.peer).match(/^\[?([0-9a-fA-F.:]+?)\]?:(\d+)$/); if(m && !/^(127\.|::1$)/.test(m[1])) x.peer=ipT(m[1])+':'+m[2]; }
+    if(x.player) x.player=nm(x.player); delete x.rdns; };
   const T={'/feed.json':j=>(j.events=j.events||[],events(j.events),fakeSpawns(j.events),j),'/heat.json':j=>((j.deaths||[]).forEach(d=>{ d[4]=names.get(d[4])||''; }),j),
     '/packets.json':j=>((j.events||[]).forEach(pkT),(j.summary||[]).forEach(pkT),j)};
   const of=window.fetch.bind(window);
@@ -329,7 +331,7 @@ function pState(p){ const k=p.slot+'|'+p.name, now=performance.now()/1000;
 const PRANK={alive:0,respawning:1,quit:2};
 // ---- sorting: a column's arrows (ascending / descending); team sort keeps each team together ----
 function kdOf(p){ return (p.kills||0)/Math.max(1,p.deaths||0); }
-const SORTV={name:p=>p.name.toLowerCase(),shield:p=>p.shield,health:p=>p.health,weapon:p=>(p.weapon||'').toLowerCase(),kills:p=>p.kills||0,deaths:p=>p.deaths||0,
+const SORTV={name:p=>p.name.toLowerCase(),ip:p=>p.ip||'',shield:p=>p.shield,health:p=>p.health,weapon:p=>(p.weapon||'').toLowerCase(),kills:p=>p.kills||0,deaths:p=>p.deaths||0,
  kd:kdOf,shots:p=>p.shots||0,accuracy:p=>p.shots?p.accuracy:-1,grenades:p=>p.grenades?p.grenades.frag+p.grenades.plasma+p.grenades.spike+p.grenades.firebomb:0,
  vehicle:p=>(p.vehicle||'').toLowerCase(),pos:p=>p.alive?p.pos[0]:-1e9,speed:p=>p.speed||0,traits:p=>Object.keys(p.traits||{}).length};
 let sortK=null, sortD=1, sortMode='team';
@@ -352,6 +354,7 @@ function renderTable(){
     :((a,b)=>PRANK[st.get(a)]-PRANK[st.get(b)]||a.team-b.team||a.name.localeCompare(b.name)));
   document.getElementById('tb').innerHTML=ps.map(p=>`<tr data-s="${p.slot}" class="${p.alive?'':st.get(p)==='quit'?'quit':'dead'} ${p.you?'you':''} ${p.slot===sel?'sel':''}">
    <td><span class="sw" style="background:${C[p.team_name]||'#888'}"></span>${E(p.name)}${p.you?' (you)':''}${p.host?'<span class="hostb" title="hosts this game">★ HOST</span>':''}${p.talking?'<span class="talkic" title="talking">🔊</span>':''}${p.muted?' 🔇':''}</td>
+   <td class="ipc">${p.ip?E(p.ip.replace(/:\d+$/,'')):''}${p.rdns?`<div class="pk-x">${E(p.rdns)}</div>`:''}</td>
    <td>${B(p.shield,'#58b8ff')}</td><td>${B(p.health,'#7ddf6a')}</td><td>${E(p.weapon||(p.alive?'':st.get(p)))}</td>
    <td>${p.kills??''}</td><td>${p.deaths??''}</td><td>${kdOf(p).toFixed(2)}</td><td>${p.shots??''}</td><td>${p.shots?Math.round(p.accuracy*100)+'%':''}</td><td>${p.grenades.frag}f ${p.grenades.plasma}p ${p.grenades.spike}s ${p.grenades.firebomb}b</td>
    <td>${E(p.vehicle||'')}</td><td>${p.alive?p.pos.map(v=>v.toFixed(1)).join(', '):''}</td><td>${p.speed.toFixed(1)}</td><td>${traitBadges(p,3)}</td></tr>`).join('');
@@ -1052,15 +1055,15 @@ for(const [id,key] of [['avm','map'],['avc','calls']]) document.getElementById(i
 let pkSeq=0, pkBusy=false, pkPause=false, pkLast=null, pkN=0; const pkl=document.getElementById('pkl');
 const pkFmtB=n=>n>=1048576?(n/1048576).toFixed(1)+' MB':n>=1024?(n/1024).toFixed(1)+' KB':Math.round(n)+' B';
 const pkPeer=e=>e.peer_id?`<span title="halo3 session peer ${e.peer_no!==undefined?e.peer_no+', ':''}id ${E(e.peer_id)}, through its ${E(e.via||'')}">${E(e.peer)}</span>`
-  :e.peer?`${E(e.peer)}${e.host?` <span class="pk-x">${E(e.host)}</span>`:''}`:'<span class="pk-x">-</span>';
+  :e.peer?`${e.player?`<b title="the player at this address (the session's peer)">${E(e.player)}</b> `:''}${E(e.peer)}${e.host?` <span class="pk-x">${E(e.host)}</span>`:''}${e.rdns?` <span class="pk-x" title="reverse DNS">${E(e.rdns)}</span>`:''}`:'<span class="pk-x">-</span>';
 const pkFl=e=>e.flags?` <span class="pk-x" title="spin: the short header's spin bit; greased: the fixed bit is unused (RFC 9287). Either may be random">${e.flags&1?'spin':''}${e.flags===3?' ':''}${e.flags&2?'greased':''}</span>`:'';
 function pkRow(e,n){ const d=e.dir==='rx'?'<span class="pk-rx">&larr; rx</span>':'<span class="pk-tx">tx &rarr;</span>';
   const ty=e.layer==='game'?`<span class="pk-g pk-ty">${E(e.type)}</span>`:`<span class="pk-ty">${E(e.type)}</span>${pkFl(e)}`;
   const len=e.layer==='game'?'':` <span class="pk-x">${e.type.startsWith('tcp-close')?pkFmtB(e.len)+' total':e.len+' B'}</span>`;
   return `<div class="ev"><time>${clock(e.t)}</time>${d} ${ty} ${pkPeer(e)}${len}${n>1?` <span class="pk-x">&times;${n}</span>`:''}</div>`; }
 async function pollPk(){ if(pkBusy || pkPause || document.hidden) return; pkBusy=true;
-  const w=document.getElementById('pkw').checked, g=document.getElementById('pkg').checked, o1=document.getElementById('pk1').checked;
-  try{ const j=await (await fetch('/packets.json?max=600&since='+pkSeq+(o1?'':'&skip1rtt=1')+(w?'':'&wire=0')+(g?'':'&game=0'))).json();
+  const w=document.getElementById('pkw').checked, g=document.getElementById('pkg').checked, o1=document.getElementById('pk1').checked, rd=document.getElementById('pkr').checked;
+  try{ const j=await (await fetch('/packets.json?max=600&since='+pkSeq+(o1?'':'&skip1rtt=1')+(w?'':'&wire=0')+(g?'':'&game=0')+(rd?'&rdns=1':''))).json();
     if(j.seq<pkSeq){ pkSeq=0; pkLast=null; pkl.textContent=''; pkN=0; }
     document.getElementById('pkgon').checked=!!(j.game&&j.game.want);
     const sum=(j.summary||[]).filter(x=>(x.layer==='wire'?w:g)).sort((a,b)=>b.per_s-a.per_s);
@@ -1088,7 +1091,7 @@ es.onmessage=m=>{snap=JSON.parse(m.data);
   if(snap.feed_seq!==undefined && snap.feed_seq!==feedSeq) pollFeed();
   document.getElementById('hd').textContent=`${snap.map||'-'}  |  ${snap.in_match?'match time '+fmtT(snap.time):'not in a match'}  |  ${snap.players.length} players, ${snap.vehicles.length} vehicles, ${snap.projectiles.length} projectiles in flight`;
   { const p=snap.perf, e=document.getElementById('pf'); if(!p){ e.textContent=''; } else { const ms=v=>v>=0?Math.round(v)+' ms':'-';
-      e.textContent=`${p.fps.toFixed(1)} fps (window ${p.window_fps.toFixed(1)})  |  frame ${p.frame_ms[0].toFixed(1)} / ${p.frame_ms[1].toFixed(1)} ms (median / 95%)  |  ${Math.round(p.draws)} draws  |  ${p.in_view} of ${p.objects} objects in view  |  input -> screen ${ms(p.input_to_screen_ms)}${p.inputs?' ('+p.inputs+' measured)':''}  |  ${Math.round(p.refresh_hz)} Hz display`; } }
+      e.textContent=p.native?`${p.fps.toFixed(0)} fps  |  frame ${p.frame_ms[0].toFixed(1)} / ${p.frame_ms[1].toFixed(1)} / ${p.frame_ms[2].toFixed(1)} ms (median / 95% / max)  |  ${p.objects} objects`:`${p.fps.toFixed(1)} fps (window ${p.window_fps.toFixed(1)})  |  frame ${p.frame_ms[0].toFixed(1)} / ${p.frame_ms[1].toFixed(1)} ms (median / 95%)  |  ${Math.round(p.draws)} draws  |  ${p.in_view} of ${p.objects} objects in view  |  input -> screen ${ms(p.input_to_screen_ms)}${p.inputs?' ('+p.inputs+' measured)':''}  |  ${Math.round(p.refresh_hz)} Hz display`; } }
   needVShapes(); renderTable(); renderDet(); renderOverlay(); renderRules(); renderSlots(); renderConn(); renderRec(); drawMap()};
 // no game serving this port (it ended, or a test client is between runs): keep the last data but grey it out and say so;
 // EventSource keeps retrying, and the first snapshot of a new game reloads the page (inst)

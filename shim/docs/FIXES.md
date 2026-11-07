@@ -33,6 +33,16 @@ and hooks · 17 halo3.dll patches and detours · 18 Overlay, stats, forensics, w
   checkout and by install.sh on a USB install; `bash shim/tools/make-app.sh --applications` puts one in ~/Applications.
   A downloaded bundle needs `xattr -dr com.apple.quarantine <bundle folder>` first (the app is signed ad hoc). Details:
   section 20 "Reclaimer.app".
+- **Client 0.10+ is a native Mac app** (2026-11-06; shim/docs/native-client.md) — `Project Reclaimer.app` from the release's
+  macOS zip goes to /Applications; it needs no loader. Player folder `~/Library/Application Support/ProjectReclaimer` (copy
+  the loader's `prefix/drive_c/ReclaimerProfile` there by hand: the app only migrates `~/Documents/My Games`), with
+  `mcc-folder.txt` = the macOS path of the MCC folder. The identity: a loader profile's DPAPI-labelled key is the raw seed
+  (our CryptProtectData is a passthrough) and the app calls it "locked here: not made by Wine" -- WHY it needs converting;
+  `python3 shim/tools/profile-native.py convert <old profile.json> <new profile.json>` checks the seed derives the profile's
+  public key and writes the app's version-2 format (plain `seed`; `--wine <user>` = a Wine CryptProtectData blob instead,
+  both verified: same community id). It refuses to overwrite. The old profile is left as it is (the switch back = keep
+  using the loader with it). Our hooks / stats page don't run in the native app yet (a dylib loads with
+  DYLD_INSERT_LIBRARIES: no hardened runtime).
 The short version (README.md has the full guide: requirements, USB copy, controls, the stats page).
 
 ### Install
@@ -1670,6 +1680,115 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   `PELOAD_POKE` / `PELOAD_BP` debug tools (10-11 fabd4b7, a800d1b).
 
 ## 18. Overlay, stats, forensics, walker, recording (the loader's own tooling)
+
+- **nhook: our tooling in the native 0.10 app** (2026-11-06; shim/native/nhook.c + stub.S, shim/native.sh, docs
+  shim/docs/native-client.md "Inside the app") — WHY: the native app runs no loader, so none of the loader's halo3 hooks or
+  readers exist there. A DYLD_INSERT_LIBRARIES dylib: interposed write()/writev() assemble the app's log lines (it writes a
+  line in pieces) and catch the engine image address; the runtime's guest -> host code table gives each lifted halo3
+  function's entry; an entry hook replaces its first instruction by a `b` to a stub (MAP_JIT: pthread_jit_write_protect_np)
+  that calls handler(guest context); the engine thread's context (hook on halo3+0x9d22c) gives halo3's TLS block
+  (ctx+0x2d8), and the players table reads as under the loader. NHOOK_CENSUS=1 counts every lifted function's calls (which
+  halo3 code the app still runs). Switches: NHOOK_NO_HOOKS=1 (log tap and probe only), no DYLD_INSERT_LIBRARIES = the app
+  untouched.
+- **nhook stats page** (2026-11-06; shim/native/nstats.c, shim/src/h3maps.c) — WHY: the stats page is the feature used most,
+  and the native app has none. The loader's page and JSON shape on 127.0.0.1:8765 from the native app's memory: players and
+  objects through the engine thread's TLS block, map / tag names from the .map files the app opens (interposed open/openat),
+  variant + traits (stats.c's code verbatim), heatmap (the loader's files), feed from the app's log lines and the players
+  table. hitbox.c's .map-file code moved into shim/src/h3maps.c unchanged (HB_MAXOBJ: the loader's 8192 object slots, the
+  native app's 16384) so both use it. Off: NHOOK_STATS_HTTP=0. shim/native.sh refuses a second instance of the app.
+- **nhook: kills, Connected list, packets** (2026-11-07; shim/native/nstats.c, nnet.c, nhook.c) — WHY: the native page
+  showed kills 0 and an empty Connected list / Packets window. Kills, deaths, assists, betrayals, suicides and score are
+  halo3's statborg (game engine globals, TLS +0x20, + 0xfeb8 in halo3.dll; the app moves it and logs where:
+  `[capacity] game_globals.statborg`): 32 i16 per player at +slot*0x40, stat 2 kills, 3 deaths, 4 suicides, 5 betrayals,
+  6 assists, 0 score -- named through the game-results statistic each adjust feeds (halo3+0x1da7e0 callers; table
+  halo3+0x792c80, re-tools/h3results.py). It is replicated, so a joined client reads the server's counts. The kill feed pairs
+  a killer's +1 with a victim's deaths +1 within 1.5 s (suicides +1 = "killed themselves"), the weapon is the killer's weapon
+  in hand (or the vehicle it drives): marked estimated. The tracker's own "X died" only when the statborg can't be read.
+  Connected list = halo3's network session as under the 0.9 client (sess = *(halo3+0x1e250d0); the app moves peer / player
+  records by the same shifts it logs: `[capacity] session.peers_shift / players_shift`); slots = the session's maximum.
+  Packets = pktlog.c's wire layer on interposed sendto / recvfrom / sendmsg / recvmsg / send / recv / connect / close /
+  getaddrinfo (test: shim/tools/nhook-selftest.sh); halo3's message names (the game layer) are not in it yet. display_event
+  (halo3+0x11b0ec) is hooked and its first 200 events are logged raw (`[nhook] [event]`): the app enlarged the event struct
+  (0x2c -> 0x40 bytes), its layout is to be read from a real match. Switches: NHOOK_PKTLOG=0, NHOOK_NO_EVHOOK=1,
+  NHOOK_EVENT_LOG=<n>.
+- **nhook: overlay, recording, captures, fps in the native app** (2026-11-07; shim/native/nrender.m, noverlay.c, shim/src/rec.m)
+  — WHY: the native app draws with Metal (its own D3D11 in Rust); the loader drew all of these in its GL present path.
+  -[MTLCommandBuffer presentDrawable:] is swizzled on the GPU's command buffer class; on the app's own command buffer
+  (before the original runs, so after the frame's drawing) we add: a capture (do=capture, &overlay=1 after the overlay ->
+  ~/reclaimer_cap_<pid>_<n>.bmp), the overlay's lines in one render pass, the recording's frame (the drawable scaled into
+  the recorder's IOSurface buffer). The overlay is hitbox.c's line builder ported (noverlay.c: hitboxes, vehicles + weak
+  spots, info labels, items, tracers; no visible-only, no zones) with halo3's observer camera (TLS +0x578, result +0x11c:
+  position, +0x28 forward, +0x34 up, +0x40 horizontal fov) and the frame's aspect -- checked against Halo 3's lowered
+  reticle: the camera looks 4.9 deg above the level aim, which projects 77 px below centre at 720p, where the reticle is.
+  rec.m: the GL frame path is #ifndef REC_NO_GL, and rec_video_begin / rec_video_end let another renderer fill the pixel
+  buffers (the loader is unchanged). Sound: AudioUnitSetProperty interposed, every output render callback wrapped
+  (rec_audio_push). The CAMetalLayer becomes readable (framebufferOnly NO) only once a capture / recording asks.
+  fps: the presents' times -> snapshot "perf" (fps, frame-interval median / 95% / max) and a [nhook] [perf] line every
+  10 s. Switches: NHOOK_NO_RENDER=1 (no swizzle), NHOOK_NO_AUDIO_TAP=1, NHOOK_OV_DEBUG=1 (calibration crosses on
+  scenery / machines / crates).
+- **nhook: "not in a match" mid-game, overlay buttons dead** (2026-11-07; nstats.c nst_on_line) — WHY: in a 52-player
+  online game the page fell to "not in a match" and the overlay stopped drawing the first time the user opened the in-game
+  menu: `[menus] open` (logged for the scoreboard / settings menu too) cleared the match state, and the overlay draws only
+  in a match. Now only the app's game state ends a match: `[switch] game <anything but Playing>`, `[switch] leaving the
+  game`, `[host] stopping`.
+- **Packets window: player names and reverse DNS** (2026-11-07; nnet.c, stats_page.html) — the 0.10 app talks to every
+  player directly (55 peers in that game) and logs each one's address every few seconds (`[online] peer 0x<id> at
+  <ip>:<port>`); the session's peer records hold the same ids, so a wire record gets "player". The page's "look up names"
+  box (on by default since 2026-11-07, the user's request) adds ?rdns=1: each address's PTR name, asked once per address on a resolver thread (getnameinfo NI_NAMEREQD; 2048
+  cached). Test: shim/tools/nhook-selftest.sh (127.0.0.1 -> localhost). The loader ignores rdns=1 (not ported there).
+- **nhook: "no stub page near ..." -> stats page empty** (2026-11-07; nhook.c near_page) — WHY: in the user's launch both
+  entry hooks failed, so the page never had the engine thread's context (0 players, 0 objects). A hook branches (`b`,
+  +-128 MB) to a stub on a page of its own next to the app's generated code (a 28.5 MB MAP_JIT region); near_page tried
+  only 1 MB steps out from that region's edges, and the free gaps around it are 16-352 KB and scattered: some layouts
+  had none on a probe. Now it walks the region boundaries within +-120 MB (mach_vm_region; nothing is read) and
+  allocates in the free gap nearest the code.
+- **nhook: empty snapshots, join / leave flood** (2026-11-07; nhook.c on_main_loop / tls_block, nstats.c st_roster) — WHY:
+  in a 72-player game ~1 snapshot in 7 had no players: halo3+0x9d22c (the hooked clock) runs on other engine threads too,
+  and the page read whichever thread's TLS block called it last; every empty read made the whole lobby "leave" and the
+  next "rejoin" (~160 feed lines a second, real events pushed out of the ring). The context is now kept only for the
+  thread whose block holds halo3's "players" data array (its TLS pointer, re-learned after 2 s of failures), and joins /
+  leaves are debounced (left = missing 3 s, joined = not seen for 30 s, none in a map's first 5 s, an empty read ignored).
+  The fps line shows only what the native app measures. shim/native.sh serves the page from the checkout.
+- **nhook overlay off on an ultrawide screen** (2026-11-07; noverlay.c nov_camera) — WHY: the user's hitboxes were "quite a
+  bit off and run parallel with the player" at 3440x1440. The observer's field of view (70 deg) is the width of a 16:9 view
+  and wider screens see more at the sides (Hor+); the projection spread it over the whole width, so its vertical field was
+  0.74x the game's and everything off-centre was drawn 1.34x too far out (measured 1.37x against the game's own name markers
+  in a live capture). Now tan(v/2) = tan(fov/2) / (16/9), tan(h/2) = tan(v/2) * aspect; identical at 16:9 (the reticle check).
+- **nhook: overlay off and "not in a match" after the server's map change** (2026-11-07; nstats.c) — WHY: "after the rejoin
+  all the hitboxes were off ... the checkboxes weren't working": when the server moves the session to its next map the app
+  logs `[loading] map ...` but stays in its Playing state (no new `[switch] game Playing`); the loading line ended the match
+  and nothing started the next one, and the overlay draws only in a match. The app's Playing state is tracked
+  (g_app_playing) and the next map's match starts at the first snapshot whose players table is filled.
+- **nhook: zones, /forensics, player IPs** (2026-11-07; noverlay.c nz_*, nstats.c, stats_page.html) — zones are hitbox.c's
+  loader-side reader (kill / safe trigger volumes, soft ceilings, invisible walls) drawn as outlines through walls (the
+  loader's line mode: no depth buffer in the native app), with the page's per-kind chips (do=zonetype). /forensics = the
+  loader's forensic.c included unchanged, with native definitions of what it takes (session layout 1, the engine image
+  as "halo3", the command line's --join-server); it archives events, the roster and per-second packet sums (no voice in
+  the native app yet). The players table gets an IP column (the session peer's address from the app's `[online] peer`
+  lines, + reverse DNS); the Packets panel sits below the players table. shim/native.sh test runs archive into
+  ReclaimerMac/native/test-forensics.
+- **/forensics Packets: the player at each address** (2026-11-07; forensic_page.html, nnet.c, nstats.c) — the archive's
+  packets.jsonl lines carry the native app's "player" (the session peer at that address) and "rdns" (reverse DNS, now
+  always asked for the archive: g_pk_want_rdns is per thread, the forensic writer's on); the page shows both beside each
+  peer (demo mode: player aliased, rdns dropped). shim/native.sh serves forensic_page.html from the checkout too.
+- **Overlay team filters in Infection** (2026-11-07; noverlay.c nov_friend, nstats.c st_is_zombie) — WHY: "the hitboxes all
+  / enemies / friends flags seem wrong": in Infection with teams off halo3 gives every player a team of its own (69
+  distinct in a 69-player game), so "friends" matched nobody and "enemies" everybody. The sides are zombie / human, told
+  by the first trait field the variant's infected (or initial infected) set changes to a value a human doesn't hold (a
+  human's active value = the base set's, else Halo's default -- infected "recharge 100%" is the default and tells nothing;
+  shields None vs Normal does), read from each player's active traits (+0x1FC) by the stats snapshot. Every team filter uses
+  it (hitboxes, vehicles by their occupants, tracers by their shooter, info). Team games: the team index as before.
+  (The loader's hitbox.c has the same blind spot: not changed there.)
+- **Native tracers: bullets** (2026-11-07; nhook.c hook_install, noverlay.c on_object_delete) — WHY: "I don't think the
+  tracers work": only projectiles alive between frames were drawn; bullets live less than a tick and the loader drew them
+  from an object_delete hook, which the native port skipped because that entry is a single `b`. hook_install now follows
+  an entry branch to the lifted wrapper it leads to; the handler (engine thread, its own TLS read directly, checked)
+  records each deleted projectile's start / impact / owner, drawn start -> impact for 0.5 s as in hitbox.c.
+  NHOOK_NO_DELHOOK=1 = off. LIVE RESULT (same day): object_delete's code-table entry is not in the JIT region but in the
+  app's own signed __TEXT (0x104faeb88, a `b` to the app's native object_delete at 0x104c2e0ac): the app replaced the
+  function, so neither the entry nor its target can be patched the JIT way (signed code; no free page near the image
+  either) -- bullets are still not drawn. hook_install now hooks an entry that is a `b` in place (displaced = nop, return =
+  the branch target) for JIT-region branches; near_page collects up to 4096 gaps and logs when none works.
 
 - **"Run 2.4x" removed** (2026-10-19, revert 606a38c) — it crashed the client as soon as it was used; the user asked for it
   to be deleted. The page's Speed 2x / speed menu (the host's movement-speed trait) is unchanged. (10-19)
