@@ -139,6 +139,12 @@ with 72 connected, kills from the statborg (57 players with kills), overlay hitb
 3440x1440 (frames 5-7 ms median). Fixed on the way: empty snapshots (wrong engine thread), the in-game menu ending the
 match, stub pages not found in some launches, the projection on ultrawide screens (Hor+).
 
+Since the same night (2026-11-07): the overlay uses the frame's own view constants (shader parameter 0x27 via a filtered text
+hook on halo3+0x2af478) and the scene's depth texture: zones are hidden behind the world and every other feature has
+"visible only" again. Hooks on the app's OWN code work (text_hook: the app is ad hoc signed, no hardened runtime); 917 halo3
+functions are the app's own code (NHOOK_LIST_BRANCH_ENTRIES=1). Bullets come from a text hook on the app's object_delete
+(needs a real game to show).
+
 Not yet: voice / mute / forensics,
 weapon / vehicle spawn tracking (items), shots / accuracy (the loader counted projectiles at object_delete, whose entry
 is not a wrapper in the app).

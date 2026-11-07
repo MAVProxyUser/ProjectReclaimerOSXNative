@@ -559,7 +559,8 @@ static void st_snapshot(StBuf* s) {
           sb_put(s, ",\"perf\":{\"fps\":%.1f,\"window_fps\":%.1f,\"frame_ms\":[%.1f,%.1f,%.1f],\"draws\":0,\"objects\":%d,\"in_view\":%d,\"bipeds\":0,\"vehicles\":0,\"projectiles\":0,"
                     "\"present_to_gpu_ms\":-1,\"present_to_window_ms\":-1,\"input_to_screen_ms\":-1,\"input_to_window_ms\":-1,\"input_to_present_ms\":-1,\"inputs\":0,\"refresh_hz\":0,\"cpu_pct\":0,\"native\":true}",
                  fps, fps, p50, p95, mx, nobj, nobj);
-          static double tl; if (now - tl >= 10) { tl = now; nlog("[nhook] [perf] %.0f fps, frame %.1f / %.1f / %.1f ms (median / 95%% / max), %d players, %d objects, map %s%s; object_delete %lu, bullets %u%s", fps, p50, p95, mx, np_for_perf, nobj, g_st_curmap, t0 ? "" : " (not in a match)", g_nov_del_calls, g_nov_imp_n,
+          static double tl; if (now - tl >= 10) { tl = now; nlog("[nhook] [perf] %.0f fps, frame %.1f / %.1f / %.1f ms (median / 95%% / max), %d players, %d objects, map %s%s; object_delete %lu, bullets %u, camera %s%s", fps, p50, p95, mx, np_for_perf, nobj, g_st_curmap, t0 ? "" : " (not in a match)", g_nov_del_calls, g_nov_imp_n,
+                      g_nov_cam_src == 1 ? "view constants" : g_nov_cam_src == 2 ? "observer" : "-",
                       getenv("NHOOK_TEXTHOOK_TEST") ? ({ static char tb[300]; extern volatile unsigned long g_tht_n[8]; extern uint32_t g_tht_rva[8]; int q = snprintf(tb, sizeof tb, ", text hooks");
                           for (int i = 0; i < 8; i++) if (g_tht_rva[i]) q += snprintf(tb + q, sizeof tb - (size_t)q, " %x:%lu", g_tht_rva[i], g_tht_n[i]); tb; }) : ""); } }
       else sb_put(s, ",\"perf\":null"); }
@@ -756,7 +757,8 @@ static int st_origin_ok(const char* hdrs) {               // no Origin (curl) or
     char want[300]; snprintf(want, sizeof want, "http://%s", hv); return !strcasecmp(o, want); }
 static int st_control(const char* act, const char* qs) {
     if (nov_control(act, qs)) return 1;                       // the overlay's buttons and panel
-    if (!strcmp(act, "capture")) { __atomic_store_n(&g_nr_cap_req, strstr(qs, "overlay=1") ? 2 : 1, __ATOMIC_RELEASE); nlog("[nhook] page: capturing the next frame"); return 1; }
+    if (!strcmp(act, "capture")) { extern volatile int g_nr_cap_depth; if (strstr(qs, "depth=1")) g_nr_cap_depth = 1;
+        __atomic_store_n(&g_nr_cap_req, strstr(qs, "overlay=1") ? 2 : 1, __ATOMIC_RELEASE); nlog("[nhook] page: capturing the next frame"); return 1; }
     if (!strcmp(act, "rec")) {                                // secs=<n>&mode=av|audio (rec.m; the picture = the app's frame, scaled)
         const char* v = strstr(qs, "secs="); double secs = v ? atof(v + 5) : 30; const char* m = strstr(qs, "mode="); int ao = m && !strncmp(m + 5, "audio", 5);
         int live = g_nr_last > 0 && mono_s() - g_nr_last < 2.0; char err[200];

@@ -1804,6 +1804,21 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   counts calls in the [perf] line). object_delete is now hooked this way (its handler reads x0's guest context through
   rd()); bullets need a real game to show (no deletes in an idle offline match; --keys scripted input did nothing in test
   windows). NHOOK_NO_TEXT_HOOKS=1 = none.
+- **nhook overlay: the frame's own camera, and hidden behind the world** (2026-11-07; nhook.c on_view_param + stub.S _nh_tpf,
+  nrender.m nr_scene_depth / nv_fs, noverlay.c) — WHY: "the zones kinda follow you weirdly, especially kill zones below you,
+  and the safe zone scales weird as you walk": they were drawn through the ground (no depth) with the observer camera.
+  (1) halo3+0x2af478 (set a shader parameter; the app's own code, ~700k calls/s) gets a text hook whose stub filters in
+  assembly for parameter 0x27 = the view constants (the loader's VS cb0): element 0 = view-projection rows 0-3, 4/5/6
+  forward/left/up, 7 the camera position (found with NHOOK_CBPROBE=1). The overlay takes the latest "world camera" (rows 0, 1,
+  3 vanish at its position) within 1 unit of the observer -- the player's view, exact and interpolated (the observer's 70.0
+  deg vs the frame's 70.8 deg); the observer stays the fallback (NHOOK_OBSERVER_CAMERA=1 forces it; NHOOK_NO_VIEWHOOK=1 = no
+  hook). (2) Row 2 of the view constants is (0, 0, 0, 1/128): Halo 3 is reverse-Z with no far plane, scene depth =
+  (1/128) / distance. The app's depth textures are seen at -[MTLRenderPassDepthAttachmentDescriptor setTexture:]
+  (swizzled); the frame's scene depth = the full-size one attached most in the frame (Depth32Float_Stencil8, shader-readable;
+  do=capture&depth=1 dumps them: centre 12.5 units, the gun at 1.6 cm, the sky 558 units). Each overlay vertex carries its own
+  depth (1/128 / w), the fragment shader hides a pixel whose depth, moved 0.3 units toward the camera, is behind the scene
+  there. Zones are always hidden behind the world (as in the loader); the other features by their "visible only" setting
+  (page panel vis=, do=visible = all; NHOOK_HB_VISIBLE=1 starts them on). NHOOK_NO_OCCLUSION=1 / NHOOK_NO_DEPTH=1 = off.
 
 - **"Run 2.4x" removed** (2026-10-19, revert 606a38c) — it crashed the client as soon as it was used; the user asked for it
   to be deleted. The page's Speed 2x / speed menu (the host's movement-speed trait) is unchanged. (10-19)

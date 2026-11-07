@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <math.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <pthread.h>
@@ -139,14 +140,17 @@ static int insn_pcrel(uint32_t w) {
         || (w & 0xff000010u) == 0x54000000u            // b.cond
         || (w & 0x3b000000u) == 0x18000000u;           // ldr (literal)
 }
-static int text_hook(const char* name, uint64_t f, nh_handler h) {
+extern char nh_tpf_start[], nh_tpf_want[], nh_tpf_displaced[], nh_tpf_handler[], nh_tpf_return[], nh_tpf_end[];
+static int text_hook_t(const char* name, uint64_t f, nh_handler h, int filt, uint32_t want) {   // filt: _nh_tpf, the handler only for parameter id `want`
     if (getenv("NHOOK_NO_TEXT_HOOKS")) return -1;
     uint32_t w[4]; if (rd(f, w, 16)) { nlog("[nhook] text hook %s: 0x%llx unreadable", name, (unsigned long long)f); return -1; }
     for (int i = 0; i < 4; i++) if (insn_pcrel(w[i])) { nlog("[nhook] text hook %s: instruction %d (%08x) is PC-relative: refused", name, i, w[i]); return -1; }
-    size_t tl = nh_tp4_end - nh_tp4_start; mach_vm_address_t st = 0;
+    char* ts = filt ? nh_tpf_start : nh_tp4_start; char* te = filt ? nh_tpf_end : nh_tp4_end;
+    size_t tl = te - ts; mach_vm_address_t st = 0;
     if (mach_vm_allocate(mach_task_self(), &st, 0x4000, VM_FLAGS_ANYWHERE) != KERN_SUCCESS) return -1;
-    memcpy((void*)st, nh_tp4_start, tl); memcpy((uint8_t*)st + (nh_tp4_displaced - nh_tp4_start), w, 16);
-    uint64_t hv = (uint64_t)h, rv = f + 16; memcpy((uint8_t*)st + (nh_tp4_handler - nh_tp4_start), &hv, 8); memcpy((uint8_t*)st + (nh_tp4_return - nh_tp4_start), &rv, 8);
+    memcpy((void*)st, ts, tl); memcpy((uint8_t*)st + ((filt ? nh_tpf_displaced : nh_tp4_displaced) - ts), w, 16);
+    uint64_t hv = (uint64_t)h, rv = f + 16; memcpy((uint8_t*)st + ((filt ? nh_tpf_handler : nh_tp4_handler) - ts), &hv, 8); memcpy((uint8_t*)st + ((filt ? nh_tpf_return : nh_tp4_return) - ts), &rv, 8);
+    if (filt) memcpy((uint8_t*)st + (nh_tpf_want - ts), &want, 4);
     mach_vm_protect(mach_task_self(), st, 0x4000, 0, VM_PROT_READ | VM_PROT_EXECUTE); sys_icache_invalidate((void*)st, tl);
     uint64_t pg = f & ~0x3fffull, end = (f + 16 + 0x3fff) & ~0x3fffull;
     kern_return_t kr = mach_vm_protect(mach_task_self(), pg, end - pg, 0, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
@@ -158,6 +162,7 @@ static int text_hook(const char* name, uint64_t f, nh_handler h) {
     nlog("[nhook] text hook %s: 0x%llx -> stub 0x%llx (back to executable: kr %d)", name, (unsigned long long)f, (unsigned long long)st, kr);
     return 0;
 }
+static int text_hook(const char* name, uint64_t f, nh_handler h) { return text_hook_t(name, f, h, 0, 0); }
 // The target of an entry that is one `b` (the code table's entry for a function the app replaced)
 static uint64_t branch_target_of(uint32_t rva) {
     uint64_t e = host_of(rva); uint32_t w0; if (!e || rd(e, &w0, 4) || (w0 & 0xfc000000u) != 0x14000000u) return 0;
@@ -234,6 +239,58 @@ static nh_handler g_cnt_h[NCNT] = { cnt_0, cnt_1, cnt_2, cnt_3, cnt_4, cnt_5, cn
 // context made ~1 snapshot in 7 empty in a 72-player game (2026-11-07). A thread that stops validating for 2 s (a new
 // engine thread) is given up and the next good one learned.
 static volatile uint64_t g_good_tlsp;
+// ---- the frame's camera: halo3's view constants (shader parameter 0x27, set through halo3+0x2af478 -- the app's own code):
+// element 0 = the view-projection rows 0-3 (count 64 bytes), 4 / 5 / 6 forward / left / up, 7 the camera position. Halo 3's
+// projection is reverse-Z with no far plane: row 2 = (0, 0, 0, 1/128) -> scene depth = (1/128) / distance along the view.
+// Several views set it each frame (the main view, shadow / reflection views): a "world camera" is one whose rows 0, 1 and 3
+// vanish at its position (the loader's hb_is_world_camera test); the overlay takes the latest one that sits within 1 unit of
+// the observer camera (the player's view). Captured on the render thread; read with a sequence lock.
+typedef struct { float rows[16], pos[3]; } NhCam;
+static NhCam g_cam_pend; static volatile uint32_t g_cam_have_rows;
+static NhCam g_cam; static volatile unsigned g_cam_seq; static volatile double g_cam_t;
+static int cam_is_world(const float* m, const float* c) {
+    float c2 = c[0] * c[0] + c[1] * c[1] + c[2] * c[2]; if (c2 < 0.25f || c2 > 1e8f) return 0;
+    static const int rows[3] = {0, 1, 3};
+    for (int i = 0; i < 3; i++) { const float* r = m + rows[i] * 4; float sc = fabsf(r[0]) + fabsf(r[1]) + fabsf(r[2]); if (sc < 1e-4f) return 0;
+        float v = r[0] * c[0] + r[1] * c[1] + r[2] * c[2] + r[3]; if (fabsf(v) > 0.02f * sc * (1.0f + sqrtf(c2))) return 0; }
+    return 1;
+}
+static void on_view_param(uint64_t* ctx) {      // (only parameter 0x27 gets here: the stub filters)
+    uint32_t ecx = (uint32_t)ctx[1], el = ecx & 0xffff, cnt = (uint32_t)ctx[8]; uint64_t data = ctx[2];
+    if (data < 0x100000000ull || data >= 0x800000000000ull) return;
+    if (el == 0 && cnt >= 64) { memcpy(g_cam_pend.rows, (const void*)(uintptr_t)data, 64); g_cam_have_rows = 1; return; }
+    if (el == 7 && cnt >= 12 && g_cam_have_rows) { memcpy(g_cam_pend.pos, (const void*)(uintptr_t)data, 12); g_cam_have_rows = 0;
+        if (!cam_is_world(g_cam_pend.rows, g_cam_pend.pos)) return;
+        extern int nov_cam_is_player(const float* pos);
+        if (!nov_cam_is_player(g_cam_pend.pos)) return;
+        g_cam_seq++; __atomic_thread_fence(__ATOMIC_SEQ_CST); g_cam = g_cam_pend; __atomic_thread_fence(__ATOMIC_SEQ_CST); g_cam_seq++;
+        struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); g_cam_t = ts.tv_sec + ts.tv_nsec * 1e-9; }
+}
+int nh_camera(float* rows16, float* pos3) {     // the latest player view (1 = fresh: < 0.25 s)
+    NhCam c; unsigned s1, s2; int tries = 0;
+    do { s1 = g_cam_seq; memcpy(&c, (const void*)&g_cam, sizeof c); s2 = g_cam_seq; } while ((s1 != s2 || (s1 & 1)) && ++tries < 8);
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); double now = ts.tv_sec + ts.tv_nsec * 1e-9;
+    if (!s1 || s1 != s2 || now - g_cam_t > 0.25) return 0;
+    memcpy(rows16, c.rows, 64); memcpy(pos3, c.pos, 12); return 1;
+}
+
+// NHOOK_CBPROBE=1: halo3+0x2af478 (set a shader parameter: ecx bits 16-26 = parameter id, low 16 bits = element, rdx = data,
+// r8d = count -- the app's own code) records each parameter id's latest call; dumped to the log every 10 s
+typedef struct { volatile uint32_t ecx, count; volatile unsigned long n; float d[32]; } CbSeen;
+static CbSeen g_cbs[4096];   // by (parameter id, element): ids 0x37 / 0x43 / 0x27 / 0x15 / 0x2c keep every element (the view constants)
+static void on_set_param(uint64_t* ctx) {
+    uint32_t ecx = (uint32_t)ctx[1], id = (ecx >> 16) & 0x7ff, el = ecx & 0xffff; uint64_t data = ctx[2]; uint32_t cnt = (uint32_t)ctx[8];
+    int view = id == 0x37 || id == 0x43 || id == 0x27 || id == 0x15 || id == 0x2c;
+    CbSeen* c = &g_cbs[view ? (2048 + ((id & 0x3f) << 5) + (el & 31)) % 4096 : id]; c->n++; c->ecx = ecx; c->count = cnt;
+    if (data >= 0x100000000ull && data < 0x800000000000ull && (view || (c->n & 1023) == 1)) memcpy((void*)c->d, (const void*)(uintptr_t)data, cnt > 128 ? 128 : cnt);
+}
+static void* cbprobe_dump(void* a) {
+    (void)a; for (int r = 0; r < 6; r++) { sleep(10);
+        for (int i = 0; i < 4096; i++) { CbSeen* c = &g_cbs[i]; if (!c->n) continue;
+            char b[900]; int k = 0; for (int q = 0; q < 32 && q * 4 < (int)c->count; q++) k += snprintf(b + k, sizeof b - (size_t)k, "%s%.4f", q && !(q & 3) ? " | " : " ", c->d[q]);
+            nlog("[nhook] [cb] ecx 0x%08x count %u calls %lu:%s", c->ecx, c->count, c->n, b); } }
+    return 0;
+}
 volatile unsigned long g_texthook_test_n, g_tht_n[8]; uint32_t g_tht_rva[8];
 #define THT(i) static void tht_##i(uint64_t* ctx) { (void)ctx; g_tht_n[i]++; g_texthook_test_n++; }
 THT(0) THT(1) THT(2) THT(3) THT(4) THT(5) THT(6) THT(7)
@@ -306,6 +363,8 @@ static void hooks_start(void) {
                 n++; k += snprintf(line + k, sizeof line - (size_t)k, " %llx", (unsigned long long)(tb[2 * i] - 0x180000000ull));
                 if (k > 900) { nlog("[nhook] branch entries:%s", line); k = 0; } }
             if (k) nlog("[nhook] branch entries:%s", line); nlog("[nhook] %d of %llu code-table entries are one `b` (functions the app replaced)", n, (unsigned long long)g_ntab); free(tb); }
+        if (!getenv("NHOOK_NO_VIEWHOOK") && !getenv("NHOOK_CBPROBE")) { uint64_t t = branch_target_of(0x2af478); if (t) text_hook_t("view constants", t, on_view_param, 1, 0x27); }
+        if (getenv("NHOOK_CBPROBE")) { uint64_t t = branch_target_of(0x2af478); if (t && !text_hook("set_param", t, on_set_param)) { pthread_t th; pthread_create(&th, 0, cbprobe_dump, 0); pthread_detach(th); } }
         if (getenv("NHOOK_TEXTHOOK_TEST")) {   // test: counting text hooks on functions the app replaced (NHOOK_TEXTHOOK_TEST=<rva>,<rva>...)
             const char* w = getenv("NHOOK_TEXTHOOK_TEST");
             for (int i = 0; i < 8 && w && *w; i++) { uint32_t rva = (uint32_t)strtoul(w, 0, 16); uint64_t t = branch_target_of(rva); char nm[32]; snprintf(nm, sizeof nm, "test halo3+0x%x", rva);
