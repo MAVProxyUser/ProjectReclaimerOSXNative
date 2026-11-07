@@ -68,6 +68,13 @@ static uint32_t MSABI wi_GetRawInputData(void*h,uint32_t cmd,void*data,uint32_t*
     if(*sz<need) return (uint32_t)-1;
     memcpy(data,g_riq[idx].data,need);
     return need; }
+// GetRawInputDeviceList (client 0.10.0, 2026-11-06; was a logging stub that returned 0 without setting the count): the two
+// devices WM_INPUT reports (mouse 0x4D53, keyboard 0x4B42), as RAWINPUTDEVICELIST {HANDLE hDevice; DWORD dwType} (16 B).
+static uint32_t MSABI wi_GetRawInputDeviceList(void*list,uint32_t*num,uint32_t cb){
+    if(!num || cb<12){ return (uint32_t)-1; } if(!list){ *num=2; return 0; }
+    if(*num<2){ *num=2; return (uint32_t)-1; }   // (ERROR_INSUFFICIENT_BUFFER)
+    uint8_t*l=list; memset(l,0,(size_t)cb*2); void*m=(void*)0x4D53, *k=(void*)0x4B42; uint32_t tm=0/*RIM_TYPEMOUSE*/, tk=1/*RIM_TYPEKEYBOARD*/;
+    memcpy(l,&m,8); memcpy(l+8,&tm,4); memcpy(l+cb,&k,8); memcpy(l+cb+8,&tk,4); return 2; }
 static uint32_t MSABI wi_GetRawInputDeviceInfoW(void*dev,uint32_t cmd,void*data,uint32_t*sz){ (void)dev;
     if(!sz) return (uint32_t)-1;
     if(cmd==0x2000000b/*RIDI_DEVICEINFO*/){ uint32_t need=32; if(!data){ *sz=need; return 0; } if(*sz<need) return (uint32_t)-1; memset(data,0,need); uint32_t*u=data; u[0]=need; u[1]=(dev==(void*)0x4B42)?1:0; return need; }

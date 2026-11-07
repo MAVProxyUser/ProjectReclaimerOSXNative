@@ -285,6 +285,14 @@ moved with their signatures. Its new constant-buffer upload filter (RECLAIMER_SE
 SetPrivateDataInterface and releases its own reference: our SetPDI didn't AddRef -> the watcher was freed under the filter's lock ->
 the render job thread deadlocked (menu at 1 draw a frame). Private-data interfaces are now referenced like Windows (SetPDI AddRef,
 GetPrivateData AddRef -- halo3 Releases what it gets --, released on replace / destroy; PELOAD_PDI_NOREF=1 = old).
+Client 0.10.0 (2026-11-06, "rcl-engine"): a windows-gnu build (msvcrt.dll, .xdata/.idata/.bss, 69 MB of code) that RECOMPILES
+halo3.dll into its own image ("linked recompiled engine, image at 0x144e05000") instead of loading it: halo3 is no loaded module, so
+every halo3 hook / patch / stats reader / overlay / lucache is inactive with it, and patchscan finds none of the exe signatures.
+It runs on the loader since synthetic dxgi/d3d11/d3dcompiler_47 images (synth_dll: it reads GetModuleHandle'd images' export
+tables itself), IDXGIFactory4-7 slots, PropVariantToStringAlloc, Windows' fiber layout (TEB+0x20 = fiber object) and TEB stack
+fields, GetRawInputDeviceList / window props, foreign WASAPI event handles refused (FIXES.md, 2026-11-06 entries): menu (628 draws)
+and a match on our local 0.10.0 dedicated server. Its `server-status` relaunches itself and the child never exits (dedicated.sh
+status / servers.sh / test runners' status checks print nothing and leave orphans: kill them).
 PORTING A RELEASE: shim/docs/porting.md -- fetch-releases.sh (corpus), client-survey.sh, `re-tools/patchscan.py --diff old new`
 (signatures read from the C; `--rev <commit>`; exit 0 over all 39 releases), `re-tools/sigport.py --point P --old --new [--corpus]
 [--apply]` (anchors incl. callers' texts -> shape alignment -> wildcarded signature -> meaning check; `--selftest` replays history),

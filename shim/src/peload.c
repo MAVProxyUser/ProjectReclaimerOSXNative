@@ -835,8 +835,63 @@ static uint8_t* guest_mod_by_addr(uint64_t p){
     if(g_base){ OPT64*o=(OPT64*)((uint8_t*)g_base+((DOS*)g_base)->e_lfanew+sizeof(COFF)); if(p>=(uint64_t)g_base && p<(uint64_t)g_base+o->ImageSize) return g_base; }
     for(int k=0;k<g_nmods;k++){ uint8_t*bs=g_mods[k].base; OPT64*o=(OPT64*)(bs+((DOS*)bs)->e_lfanew+sizeof(COFF)); if(p>=(uint64_t)bs && p<(uint64_t)bs+o->ImageSize) return bs; }
     return 0; }
-static void*  MSABI i_GetModuleHandleW(uint16_t *n){ if(name_is_ws2_w(n)) return WS2_HANDLE; { uint8_t*m=guest_mod_by_name_w(n); if(m) return m; } return g_base; } // ws2_32 / guest DLLs by name; else image base
-static void*  MSABI i_GetModuleHandleA(char *n){ if(name_is_ws2(n)) return WS2_HANDLE; return g_base; }
+// ---- synthetic system DLL images (client 0.10.0, 2026-11-06) ------------------------------------------------------------
+// The 0.10.0 client ("rcl-engine") recompiles halo3.dll and runs halo3's own delay-load helper with LoadLibraryExA /
+// GetProcAddress bound to the client's code: for dxgi.dll it asks GetModuleHandleW("dxgi.dll") (the exe imports dxgi, so on
+// Windows it is loaded) and then reads that image's EXPORT TABLE itself. The loader answered every unknown name with the exe's
+// own image, which exports no CreateDXGIFactory1: "fatal: unhandled exception 0xc06d007f ... the delay-loaded dxgi.dll is
+// missing" right after the engine was linked. Now dxgi.dll, d3d11.dll and d3dcompiler_47.dll (halo3's delay imports the loader
+// implements) get a small PE image of their own (headers, a sorted
+// export directory, and per export a 16-byte `jmp [rip+0]` thunk to the loader's implementation), returned by
+// GetModuleHandle* and LoadLibrary*; GetProcAddress on it finds the thunk like on any guest DLL. PELOAD_NO_SYNTH_DLL=1 = old
+// (the exe image). PELOAD_TRACE_GMH=1 logs the GetModuleHandle* names.
+static void *resolve_impl(const char *fn); // fwd
+static const struct { const char*dll; const char*fns[6]; } g_synth_def[]={
+    {"dxgi.dll",{"CreateDXGIFactory","CreateDXGIFactory1","CreateDXGIFactory2",0}},
+    {"d3d11.dll",{"D3D11CreateDevice","D3D11CreateDeviceAndSwapChain",0}},
+    {"d3dcompiler_47.dll",{"D3DCompile","D3DReflect","D3DGetInputSignatureBlob",0}} };   // (ours: i_D3DCompile finds MCC's real one itself)
+static uint8_t* g_synth_img[sizeof g_synth_def/sizeof g_synth_def[0]];
+static int synth_is(const void*b){ if(!b) return 0; for(size_t d=0;d<sizeof g_synth_def/sizeof g_synth_def[0];d++) if(g_synth_img[d]==b) return 1; return 0; }
+static int synth_cmp(const void*a,const void*b){ return strcmp(*(const char*const*)a,*(const char*const*)b); }
+static uint8_t* synth_dll(const char*name){   // name: a bare or full DLL name, any case, ".dll" optional; 0 = not one of ours
+    static int off=-1; if(off<0) off=getenv("PELOAD_NO_SYNTH_DLL")!=0; if(off || !name) return 0;
+    const char*b=name; for(const char*p=name;*p;p++) if(*p=='\\'||*p=='/') b=p+1;
+    for(size_t d=0;d<sizeof g_synth_def/sizeof g_synth_def[0];d++){ const char*dn=g_synth_def[d].dll; size_t bl=strlen(b), dl=strlen(dn);
+        if(!(bl==dl && !strcasecmp(b,dn)) && !(bl==dl-4 && !strncasecmp(b,dn,bl))) continue;
+        if(g_synth_img[d]) return g_synth_img[d];
+        static pthread_mutex_t mx=PTHREAD_MUTEX_INITIALIZER; pthread_mutex_lock(&mx);
+        if(!g_synth_img[d]){
+            const char*fn[8]; void*impl[8]; int n=0;
+            for(int i=0;i<6 && g_synth_def[d].fns[i];i++){ void*f=resolve_impl(g_synth_def[d].fns[i]); if(f){ fn[n]=g_synth_def[d].fns[i]; n++; } }
+            qsort(fn,(size_t)n,sizeof fn[0],synth_cmp); for(int i=0;i<n;i++) impl[i]=resolve_impl(fn[i]);
+            uint8_t*m=mmap(0,0x2000,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANON,-1,0);
+            if(m!=MAP_FAILED){ memset(m,0,0x2000);
+                m[0]='M'; m[1]='Z'; *(uint32_t*)(m+0x3c)=0x40;
+                uint8_t*nt=m+0x40; memcpy(nt,"PE\0\0",4); *(uint16_t*)(nt+4)=0x8664; *(uint16_t*)(nt+20)=0xF0; *(uint16_t*)(nt+22)=0x2022;   // DLL
+                uint8_t*op=nt+24; *(uint16_t*)op=0x20B; *(uint32_t*)(op+32)=0x1000; *(uint32_t*)(op+36)=0x200;   // section / file alignment
+                *(uint32_t*)(op+56)=0x2000; *(uint32_t*)(op+60)=0x200; *(uint16_t*)(op+68)=2; *(uint32_t*)(op+108)=16;   // SizeOfImage, headers, subsystem, dirs
+                *(uint64_t*)(op+24)=(uint64_t)(uintptr_t)m;   // ImageBase = where it is
+                uint32_t ed=0x200, fa=ed+40, na=fa+4*(uint32_t)n, oa=na+4*(uint32_t)n, str=oa+2*(uint32_t)n;
+                *(uint32_t*)(op+112)=ed;   // DataDirectory[0] = the export directory
+                uint8_t*e=m+ed; *(uint32_t*)(e+16)=1; *(uint32_t*)(e+20)=(uint32_t)n; *(uint32_t*)(e+24)=(uint32_t)n;
+                *(uint32_t*)(e+28)=fa; *(uint32_t*)(e+32)=na; *(uint32_t*)(e+36)=oa;
+                *(uint32_t*)(e+12)=str; strcpy((char*)m+str,g_synth_def[d].dll); str+=(uint32_t)strlen(g_synth_def[d].dll)+1;
+                for(int i=0;i<n;i++){ *(uint32_t*)(m+na+4*i)=str; strcpy((char*)m+str,fn[i]); str+=(uint32_t)strlen(fn[i])+1; *(uint16_t*)(m+oa+2*i)=(uint16_t)i;
+                    uint32_t th=0x1000+16*(uint32_t)i; *(uint32_t*)(m+fa+4*i)=th;
+                    uint8_t*t=m+th; t[0]=0xFF; t[1]=0x25; *(uint64_t*)(t+6)=(uint64_t)(uintptr_t)impl[i]; }   // jmp [rip+0]; dq impl
+                *(uint32_t*)(op+112+4)=str-ed;   // export directory size (its strings included: thunks lie outside it, no forwarders)
+                mprotect(m,0x1000,PROT_READ); mprotect(m+0x1000,0x1000,PROT_READ|PROT_EXEC);
+                g_synth_img[d]=m;
+                char t[160]; int k=snprintf(t,sizeof t,"  [synth-dll] %s: %d exports at %p\n",g_synth_def[d].dll,n,(void*)m); (void)!write(2,t,(size_t)k); } }
+        pthread_mutex_unlock(&mx); return g_synth_img[d]; }
+    return 0; }
+static uint8_t* synth_dll_w(const uint16_t*w){ if(!w) return 0; char a[260]; int i=0; for(; w[i] && i<259; i++) a[i]=(char)(w[i]<128?w[i]:'?'); a[i]=0; return synth_dll(a); }
+static void gmh_trace(const char*k,const char*a,const uint16_t*w){ static int on=-1; if(on<0) on=getenv("PELOAD_TRACE_GMH")!=0; if(!on) return;   // PELOAD_TRACE_GMH=1
+    char m[300]; int n=snprintf(m,sizeof m,"  [%s] ",k); if(a) n+=snprintf(m+n,sizeof m-n,"%s",a); else if(w) for(int i=0;w[i]&&n<280;i++) m[n++]=(char)(w[i]<128?w[i]:'?'); else n+=snprintf(m+n,sizeof m-n,"(null)");
+    m[n++]='\n'; (void)!write(2,m,(size_t)n); }
+static void*  MSABI i_GetModuleHandleW(uint16_t *n){ gmh_trace("GetModuleHandleW",0,n); if(name_is_ws2_w(n)) return WS2_HANDLE; { uint8_t*m=guest_mod_by_name_w(n); if(m) return m; }
+    { uint8_t*sy=synth_dll_w(n); if(sy) return sy; } return g_base; } // ws2_32 / guest DLLs / synthetic system DLLs by name; else image base
+static void*  MSABI i_GetModuleHandleA(char *n){ gmh_trace("GetModuleHandleA",n,0); if(name_is_ws2(n)) return WS2_HANDLE; { uint8_t*sy=synth_dll(n); if(sy) return sy; } return g_base; }
 
 // TLS: Windows TLS slots are PER-THREAD. A shared global table would let threads
 // clobber each other's thread-local state -> timing-dependent corruption. Store
@@ -1040,7 +1095,18 @@ static ComObj g_dxgiadapter; // real adapter object (vtbl populated in d3d_init)
 static int MSABI dxgi_EnumAdapters(void*self,unsigned i,void**pp){ (void)self;
     if(getenv("PELOAD_DXGI_ADAPTER") && i==0){ if(pp)*pp=&g_dxgiadapter; return HR_OK; }
     if(pp)*pp=0; return HR_DXGI_NOT_FOUND; }
-// IDXGIFactory(1/2) vtable: IUnknown(0-2) + IDXGIObject(3-6) + IDXGIFactory(7+)
+// IDXGIFactory4..7 (client 0.10.0, 2026-11-06): it QueryInterfaces the factory for IDXGIFactory6 (com_QI says yes to
+// everything) and asks EnumAdapterByGpuPreference(0, HIGH_PERFORMANCE, IDXGIAdapter1) -- slot 29, past the end of the old
+// 22-slot table: it read the next global (NULL) and the client crashed at RIP 0 right after "[mods] ...". Now the table runs
+// to IDXGIFactory7's last slot; the new enumerations give the same answer as EnumAdapters1, the rest honest "none" / "no".
+static int MSABI dxgi_EnumAdapterByGpuPreference(void*self,unsigned i,int pref,GUID_*riid,void**pp){ (void)pref;(void)riid; return dxgi_EnumAdapters(self,i,pp); }
+static int MSABI dxgi_EnumAdapterByLuid(void*self,uint64_t luid,GUID_*riid,void**pp){ (void)self;(void)luid;(void)riid; if(pp)*pp=0; return HR_DXGI_NOT_FOUND; }
+static int MSABI dxgi_EnumWarpAdapter(void*self,GUID_*riid,void**pp){ (void)self;(void)riid; if(pp)*pp=0; return HR_DXGI_NOT_FOUND; }
+static int MSABI dxgi_CheckFeatureSupport(void*self,int feature,void*data,uint32_t size){ (void)self;   // PRESENT_ALLOW_TEARING (0): no
+    if(feature==0 && data && size>=4){ *(int32_t*)data=0; return HR_OK; } return HR_INVALIDARG; }
+static unsigned MSABI com_zero(void*self){ (void)self; return 0; }   // BOOL / UINT getters: FALSE / no flags
+// IDXGIFactory vtable through IDXGIFactory7: IUnknown(0-2) + IDXGIObject(3-6) + IDXGIFactory(7-11) + Factory1(12-13) +
+// Factory2(14-24) + Factory3(25) + Factory4(26-27) + Factory5(28) + Factory6(29) + Factory7(30-31)
 static void* g_dxgifactory_vtbl[] = {
     (void*)com_QI,(void*)com_AddRef,(void*)com_Release,          // 0-2 IUnknown
     (void*)com_fail,(void*)com_fail,(void*)com_fail,(void*)com_fail, // 3-6 SetPrivateData.. GetParent
@@ -1048,7 +1114,14 @@ static void* g_dxgifactory_vtbl[] = {
     (void*)com_fail,(void*)com_fail,(void*)com_fail,(void*)com_fail, // 8-11 MakeWindowAssoc..CreateSoftwareAdapter
     (void*)dxgi_EnumAdapters,                                    // 12 EnumAdapters1 (Factory1)
     (void*)com_fail,                                             // 13 IsCurrent (Factory1)
-    (void*)com_fail,(void*)com_fail,(void*)com_fail,(void*)com_fail,(void*)com_fail,(void*)com_fail,(void*)com_fail,(void*)com_fail }; // 14+ Factory2 slack
+    (void*)com_zero,                                             // 14 IsWindowedStereoEnabled (Factory2)
+    (void*)com_fail,(void*)com_fail,(void*)com_fail,(void*)com_fail,(void*)com_fail,(void*)com_fail,(void*)com_fail,(void*)com_fail,(void*)com_fail,
+    (void*)com_fail,                                             // 15-24 CreateSwapChainForHwnd .. CreateSwapChainForComposition
+    (void*)com_zero,                                             // 25 GetCreationFlags (Factory3)
+    (void*)dxgi_EnumAdapterByLuid,(void*)dxgi_EnumWarpAdapter,   // 26-27 (Factory4)
+    (void*)dxgi_CheckFeatureSupport,                             // 28 (Factory5)
+    (void*)dxgi_EnumAdapterByGpuPreference,                      // 29 (Factory6)
+    (void*)com_fail,(void*)com_fail };                           // 30-31 Register / UnregisterAdaptersChangedEvent (Factory7)
 static ComObj g_dxgifactory = { g_dxgifactory_vtbl };
 static void d3d_init(void); // fwd: also patches g_dxgifactory_vtbl[10]=CreateSwapChain
 static int MSABI i_CreateDXGIFactory(GUID_*riid,void**pp){ (void)riid; d3d_init(); if(pp)*pp=&g_dxgifactory; return HR_OK; }
@@ -2814,12 +2887,15 @@ static int MSABI i_D3DCompile(const void*src,uint64_t srcsz,const char*name,cons
     { const char*e=getenv("PELOAD_REAL_D3DCOMPILE"); int on=e&&*e ? strcmp(e,"0")!=0 : (game_is(GAME_H2) || (game_is(GAME_H3) && target && strncmp(target,"cs_",3)));
       if(on){ static void*real; static int tried;   // (on by default for Halo 2, and for Halo 3's vs / ps)
         if(!tried){ tried=1; static const uint16_t dn[]={'D','3','D','C','o','m','p','i','l','e','r','_','4','7','.','d','l','l',0};
-            uint8_t*b=i_LoadLibraryExW(dn,0,0);
+            uint8_t*b=i_LoadLibraryExW(dn,0,0); if(synth_is(b)) b=0;   // (our own synthetic image: its D3DCompile is this function)
             for(int m=0;m<g_nmods && (!b || b==g_base);m++) if(g_mods[m].name && !strcasecmp(g_mods[m].name,"halo3.dll") && g_mods[m].path){
                 for(int up=0;up<2 && (!b || b==g_base);up++){ char d[2048]; snprintf(d,sizeof d,"%s",g_mods[m].path);
                     for(int u=0;u<=up;u++){ char*sl=strrchr(d,'/'); if(sl) *sl=0; }
                     char f[2300]; snprintf(f,sizeof f,"%s/d3dcompiler_47.dll",d); if(access(f,R_OK)) continue;
                     g_prefer_base=1; b=load_guest(f,strdup("d3dcompiler_47.dll")); g_prefer_base=0; } }
+            if(!b || b==g_base){   // client 0.10.0 recompiles halo3: no halo3.dll module to look beside -- MCC's root in the prefix
+                static const uint16_t mr[]=u"C:\\Program Files\\Steam\\steamapps\\common\\Halo The Master Chief Collection\\d3dcompiler_47.dll";
+                char f[2300]; win2unix(mr,f,sizeof f); if(!access(f,R_OK)){ g_prefer_base=1; b=load_guest(f,strdup("d3dcompiler_47.dll")); g_prefer_base=0; } }
             if(b && b!=g_base) real=export_lookup(b,"D3DCompile");
             char m[120]; int k=snprintf(m,sizeof m,"  [D3DCompile] real compiler %s\n",real?"loaded (MCC's D3DCompiler_47.dll)":"NOT found: placeholder blobs"); (void)!write(2,m,k); }
         if(real){ typedef int (MSABI *D3DC)(const void*,uint64_t,const char*,const void*,void*,const char*,const char*,uint32_t,uint32_t,void**,void**);
@@ -2941,6 +3017,18 @@ static int MSABI i_SHGetKnownFolderPath(const GUID_*id,uint32_t fl,void*tok,uint
     size_t n=strlen(p); uint16_t*w=malloc((n+1)*2); for(size_t i=0;i<=n;i++) w[i]=(uint8_t)p[i];
     if(fl&0x8000){ char u[1400]; if(win2unix(w,u,sizeof u)){ size_t l=strlen(u); if(l+1<sizeof u){ u[l]='/'; u[l+1]=0; mkparents(u); } } }
     *out=w; return 0; }
+// propsys PropVariantToStringAlloc (client 0.10.0, 2026-11-06: the audio device's friendly name from IPropertyStore; it was a
+// logging stub returning S_OK with *out unset, and the client's wcslen of that crashed in ucrtbase right after the engine
+// linked): a CoTaskMem copy of a VT_LPWSTR / VT_BSTR (31 / 8) or a VT_LPSTR (30) widened, "" for VT_EMPTY; other types
+// TYPE_E_TYPEMISMATCH like propsys.
+static int   MSABI i_PropVariantToStringAlloc(const void*pv,uint16_t**out){ if(!out) return HR_INVALIDARG; *out=0; if(!pv) return HR_INVALIDARG;
+    uint16_t vt=*(const uint16_t*)pv; const void*v=*(void*const*)((const uint8_t*)pv+8); size_t n=0; uint16_t*w;
+    if(vt==31 || vt==8){ const uint16_t*src=v?(const uint16_t*)v:(const uint16_t*)u"";
+        while(src[n]) n++; w=i_CoTaskMemAlloc((n+1)*2); if(!w) return 0x8007000E; memcpy(w,src,(n+1)*2); *out=w; return HR_OK; }
+    if(vt==30){ const char*src=v?(const char*)v:""; n=strlen(src); w=i_CoTaskMemAlloc((n+1)*2); if(!w) return 0x8007000E;
+        for(size_t i=0;i<=n;i++) w[i]=(uint8_t)src[i]; *out=w; return HR_OK; }
+    if(vt==0){ w=i_CoTaskMemAlloc(2); if(!w) return 0x8007000E; w[0]=0; *out=w; return HR_OK; }
+    return (int)0x80028CA0; }   // TYPE_E_TYPEMISMATCH
 static int   MSABI i_PropVariantClear(void*p){ if(p){ uint16_t vt=*(uint16_t*)p; if(vt==31||vt==30) free_or_fch(*(void**)((uint8_t*)p+8)); memset(p,0,24); } return HR_OK; }   // VT_LPWSTR/LPSTR own CoTaskMem strings
 static void* wasapi_enumerator(void); // wasapi.c
 static int wic_create(const GUID_*clsid,const GUID_*iid,void**ppv); // fwd (wic.c)
@@ -3460,7 +3548,7 @@ static uint32_t MSABI i_GetACP(void){ return 65001; }
 // GetModuleHandleExW: FROM_ADDRESS (0x4) -> the image containing the address (Waves' WaveShell-Xbox.dll finds its own
 // folder this way to load L360.dll/q10.dll next to it; always answering "the exe" sent it to client\waves\);
 // a name -> GetModuleHandleW; NULL -> the exe.
-static int    MSABI i_GetModuleHandleExW(uint32_t fl, void *name, void **out){
+static int    MSABI i_GetModuleHandleExW(uint32_t fl, void *name, void **out){ if(!(fl&0x4)) gmh_trace("GetModuleHandleExW",0,name);
     if(fl&0x4){ uint8_t*m=guest_mod_by_addr((uint64_t)name); if(out)*out=m; if(!m){ g_lasterr=126; return 0; } return 1; }
     void*m= name? i_GetModuleHandleW((uint16_t*)name) : g_base; if(out)*out=m; return m!=0; }
 static int    MSABI i_MultiByteToWideChar(uint32_t cp,uint32_t fl,const char*s,int sl,uint16_t*w,int wl){
@@ -9304,7 +9392,12 @@ typedef struct { uint32_t magic; int kind; pthread_mutex_t m; pthread_cond_t c; 
     int is_timer, timer_armed; uint64_t timer_due_us; long timer_period_ms; } SyncObj;
 static SyncObj* sync_new(int kind){ SyncObj*s=calloc(1,sizeof *s); s->magic=SYNC_MAGIC; s->kind=kind;
     pthread_mutex_init(&s->m,0); pthread_cond_init(&s->c,0); return s; }
-static int is_sync(intptr_t hv){ if(hv<0x100000) return 0; SyncObj*s=(SyncObj*)hv; return s && s->magic==SYNC_MAGIC; }
+// (2026-11-06) only a live heap block is read: a foreign handle value >= 0x100000 (client 0.10.0's runtime hands out handles
+// like 0x400000c0) made this read unmapped memory. PELOAD_SYNC_UNCHECKED=1 = old (read whatever the value points at).
+static int is_sync(intptr_t hv){ if(hv<0x100000) return 0; SyncObj*s=(SyncObj*)hv; if(!s) return 0;
+    static int unchecked=-1; if(unchecked<0) unchecked=getenv("PELOAD_SYNC_UNCHECKED")!=0;
+    if(!unchecked && malloc_size(s)<sizeof(uint32_t)) return 0;
+    return s->magic==SYNC_MAGIC; }
 static void name_log(const char*api,const uint16_t*nm); // fwd
 static void* cur_thread_handle(void){ if(t_self_thread) return t_self_thread;   // (DuplicateHandle of GetCurrentThread())
     SyncObj*s=sync_new(K_THREAD); if(!s) return (void*)-2; s->manual=1; s->owner=pthread_self(); s->tid=(uint32_t)pthread_mach_thread_np(pthread_self());
@@ -9565,6 +9658,11 @@ static void *thread_tramp(void *a){
     if(g_ntarrs<(int)(sizeof g_tarrs/sizeof g_tarrs[0])) g_tarrs[g_ntarrs++]=tarr;
     pthread_mutex_unlock(&g_tlsm);
     *(uint64_t*)(teb+0x30)=(uint64_t)teb; *(uint64_t*)(teb+0x60)=(uint64_t)g_peb_ptr; *(uint64_t*)(teb+0x58)=(uint64_t)tarr;
+    // NtTib.StackBase / StackLimit (+0x8 / +0x10): the thread's real stack (they were 0 until 2026-11-06; client 0.10.0's
+    // runtime copies at most 256 bytes from a saved stack pointer up to StackBase, and with 0 there it copied the full 256 past
+    // the top of a thread's stack: "exception 0xc0000005 ... ucrtbase memcpy" after the menu scene loaded). PELOAD_TEB_NOSTACK=1 = old.
+    if(!getenv("PELOAD_TEB_NOSTACK")){ pthread_t me=pthread_self(); uint64_t hi=(uint64_t)(uintptr_t)pthread_get_stackaddr_np(me);
+        *(uint64_t*)(teb+8)=hi; *(uint64_t*)(teb+0x10)=hi-(uint64_t)pthread_get_stacksize_np(me); }
     // macOS x86_64 uses %gs as the live pthread TSD base: key K lives at %gs:[K*8].
     // Windows wants TEB at gs:0x30, TLS-array at gs:0x58, PEB at gs:0x60 — which
     // collide with macOS TSD keys 6/11/12. Overwriting them is fine while the
@@ -10202,6 +10300,7 @@ static void* MSABI i_LoadLibraryExW(const uint16_t *name, void *h, uint32_t fl){
     // a bare name that is no file here: the SetDllDirectoryW folder (Reach Renaissance points it at MCC's haloreach folder)
     if(g_dlldir[0] && bn==w){ char q[2300]; snprintf(q,sizeof q,"%s/%s",g_dlldir,w);
         if(access(q,R_OK)==0){ g_prefer_base=1; uint8_t *b=load_guest(q, strdup(bn)); g_prefer_base=0; if(b) return b; } }
+    { uint8_t*sy=synth_dll(bn); if(sy) return sy; }   // dxgi.dll / d3d11.dll: an image with a real export table (synth_dll)
     return g_base; // feature-probe DLLs (api-ms-*) that aren't real files: placeholder
 }
 
@@ -10985,18 +11084,31 @@ static int32_t MSABI i_WavesFX_Initialize(void){ return 0; } // audio FX: report
 // a worker fiber does the work and SwitchToFiber()s back to yield; the caller loops until
 // it signals done. Stubbing SwitchToFiber as a no-op meant the worker never ran -> the load
 // spun forever at 15%. Implement proper cooperative context switching. ----
-typedef struct Fiber { uint32_t magic; ucontext_t ctx; void* stack; size_t ssize; void* start; void* param; int is_thread; } Fiber;
+// Windows' layout (2026-11-06): TEB->NtTib.FiberData (TEB+0x20) holds the current FIBER OBJECT -- GetCurrentFiber() is that
+// slot and GetFiberData() its first field, both read inline. The fiber's parameter is therefore the object's first member.
+// Until then the slot held the parameter itself: halo3 reads it as the current fiber (halo3+0x5ff97d: below 0x10000 ->
+// ConvertThreadToFiber, else kept as the fiber to switch back to) and only got away with it because its main thread's
+// parameter is 0; client 0.10.0's runtime matches the slot against the fibers it created and stopped with "[runtime] fatal:
+// unknown guest fiber started" once the menu scene loaded. PELOAD_FIBER_TEB_PARAM=1 = old (the parameter in the slot).
+typedef struct Fiber { void* param; uint32_t magic; ucontext_t ctx; void* stack; size_t ssize; void* start; int is_thread; uint64_t stk_lo, stk_hi; } Fiber;   // param FIRST
 #define FIBER_MAGIC 0x46494252u   // 'FIBR'
 static __thread Fiber* g_cur_fiber;
-// TEB->NtTib.FiberData (TEB+0x20): GetFiberData()/GetCurrentFiber() read this inline via gs.
 static inline uint64_t fiber_teb(void){ uint64_t t; __asm__ volatile("movq %%gs:0x30, %0":"=r"(t)); return t; }
-static void fiber_set_data(void* p){ uint64_t t=fiber_teb(); if(t>0x1000) *(void**)(t+0x20)=p; }
-static void fiber_entry(void){ Fiber* f=g_cur_fiber; if(f) fiber_set_data(f->param);
+// TEB->NtTib.StackBase / StackLimit (TEB+0x8 / +0x10) follow the running fiber's stack, as SwitchToFiber does on Windows (every
+// thread's own range is set at its start: thread_tramp, main). PELOAD_TEB_NOSTACK=1 = old (left 0).
+static void teb_set_stack(uint64_t lo,uint64_t hi){ static int off=-1; if(off<0) off=getenv("PELOAD_TEB_NOSTACK")!=0; if(off) return;
+    uint64_t t=fiber_teb(); if(t>0x1000){ *(uint64_t*)(t+8)=hi; *(uint64_t*)(t+0x10)=lo; } }
+static void fiber_set_cur(Fiber*f){ static int old=-1; if(old<0) old=getenv("PELOAD_FIBER_TEB_PARAM")!=0;
+    uint64_t t=fiber_teb(); if(t>0x1000) *(void**)(t+0x20)=old?(f?f->param:0):(void*)f;
+    if(f && f->stk_hi) teb_set_stack(f->stk_lo,f->stk_hi); }
+static void fiber_entry(void){ Fiber* f=g_cur_fiber; if(f) fiber_set_cur(f);
     if(f&&f->start){ ((void(__attribute__((ms_abi))*)(void*))f->start)(f->param); }
     // A fiber routine must not fall off the end (Windows exits the thread). Park it.
     for(;;){ struct timespec ts={1,0}; nanosleep(&ts,0); } }
 static void* MSABI i_ConvertThreadToFiber(void*param){ Fiber* f=g_cur_fiber; if(f&&f->magic==FIBER_MAGIC) return f;
-    f=calloc(1,sizeof *f); if(!f) return 0; f->magic=FIBER_MAGIC; f->is_thread=1; f->param=param; getcontext(&f->ctx); g_cur_fiber=f; fiber_set_data(param); return f; }
+    f=calloc(1,sizeof *f); if(!f) return 0; f->magic=FIBER_MAGIC; f->is_thread=1; f->param=param; getcontext(&f->ctx);
+    { uint64_t t=fiber_teb(); if(t>0x1000){ f->stk_hi=*(uint64_t*)(t+8); f->stk_lo=*(uint64_t*)(t+0x10); } }   // the thread's own stack
+    g_cur_fiber=f; fiber_set_cur(f); return f; }
 static void* MSABI i_ConvertThreadToFiberEx(void*param,uint32_t fl){ (void)fl; return i_ConvertThreadToFiber(param); }
 static void* MSABI i_CreateFiberEx(size_t commit,size_t reserve,uint32_t fl,void*start,void*param){ (void)commit;(void)fl;
     size_t ss=reserve?reserve:(2u<<20); if(ss<(1u<<20)) ss=1u<<20;   // >=1MB like Windows fiber default
@@ -11006,6 +11118,7 @@ static void* MSABI i_CreateFiberEx(size_t commit,size_t reserve,uint32_t fl,void
     uint8_t* m=mmap(0,ss+0x4000,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANON,-1,0);
     if(m==MAP_FAILED){ free(f); return 0; } mprotect(m,0x4000,PROT_NONE); f->stack=m; f->ssize=ss+0x4000;
     getcontext(&f->ctx); f->ctx.uc_stack.ss_sp=m+0x4000; f->ctx.uc_stack.ss_size=ss; f->ctx.uc_link=0;
+    f->stk_lo=(uint64_t)(uintptr_t)(m+0x4000); f->stk_hi=f->stk_lo+ss;
     makecontext(&f->ctx,fiber_entry,0);
     if(getenv("PELOAD_TRACE_FIBER")){ char b[96]; int k=snprintf(b,sizeof b,"[fiber] Create f=%p start=%p param=%p t=%x\n",(void*)f,start,param,pthread_mach_thread_np(pthread_self())); (void)!write(2,b,k); }
     return f; }
@@ -11013,13 +11126,27 @@ static void* MSABI i_CreateFiber(size_t ss,void*start,void*param){ return i_Crea
 static void MSABI i_SwitchToFiber(void*fiber){ Fiber* t=fiber;
     if(getenv("PELOAD_TRACE_FIBER")){ static int sc; if(sc<120){ sc++; char b[120]; int k=snprintf(b,sizeof b,"[fiber] Switch from=%p to=%p valid=%d to.param=%p t=%x\n",(void*)g_cur_fiber,fiber,(t&&t->magic==FIBER_MAGIC),t&&t->magic==FIBER_MAGIC?t->param:0,pthread_mach_thread_np(pthread_self())); (void)!write(2,b,k);} }
     if(!t||t->magic!=FIBER_MAGIC) return; Fiber* cur=g_cur_fiber; if(cur==t) return;
-    g_cur_fiber=t; fiber_set_data(t->param); if(cur) swapcontext(&cur->ctx,&t->ctx); else setcontext(&t->ctx); }
-static int MSABI i_ConvertFiberToThread(void){ Fiber* f=g_cur_fiber; if(f&&f->magic==FIBER_MAGIC&&f->is_thread){ g_cur_fiber=0; free(f); } return 1; }
+    g_cur_fiber=t; fiber_set_cur(t); if(cur) swapcontext(&cur->ctx,&t->ctx); else setcontext(&t->ctx); }
+static int MSABI i_ConvertFiberToThread(void){ Fiber* f=g_cur_fiber; if(f&&f->magic==FIBER_MAGIC&&f->is_thread){ g_cur_fiber=0; fiber_set_cur(0); free(f); } return 1; }
 static void MSABI i_DeleteFiber(void*fiber){ Fiber* f=fiber; if(f&&f->magic==FIBER_MAGIC&&f!=g_cur_fiber){ f->magic=0; if(f->stack&&!f->is_thread)munmap(f->stack,f->ssize); free(f); } }
 static void* MSABI i_GetCurrentFiber(void){ return g_cur_fiber; }
 static void* MSABI i_GetFiberData(void){ return g_cur_fiber? g_cur_fiber->param : 0; }
 static int MSABI i_IsThreadAFiber(void){ return g_cur_fiber?1:0; }
 static void* MSABI i_GetWindow(void*h,uint32_t cmd){ (void)cmd; return h; } // no related windows; return self
+// Window properties (client 0.10.0, 2026-11-06; SetPropW / GetPropW / RemovePropW were logging stubs: Set "failed", Get always
+// NULL): a small table of (window, name) -> handle; a name is a string or an atom (an integer below 0x10000).
+static struct { void*hwnd; uint16_t name[64]; uintptr_t atom; void*val; } g_wprop[256]; static int g_nwprop; static pthread_mutex_t g_wprop_mx=PTHREAD_MUTEX_INITIALIZER;
+static int wprop_find(void*h,const uint16_t*n){ for(int i=0;i<g_nwprop;i++){ if(g_wprop[i].hwnd!=h) continue;
+        if((uintptr_t)n<0x10000){ if(g_wprop[i].atom==(uintptr_t)n) return i; continue; }
+        if(g_wprop[i].atom) continue; int j=0; while(j<63 && n[j] && n[j]==g_wprop[i].name[j]) j++; if(j<63 ? n[j]==g_wprop[i].name[j] : 1) return i; }
+    return -1; }
+static int MSABI i_SetPropW(void*h,const uint16_t*n,void*v){ if(!n) return 0; pthread_mutex_lock(&g_wprop_mx); int i=wprop_find(h,n);
+    if(i<0 && g_nwprop<256){ i=g_nwprop++; memset(&g_wprop[i],0,sizeof g_wprop[i]); g_wprop[i].hwnd=h;
+        if((uintptr_t)n<0x10000) g_wprop[i].atom=(uintptr_t)n; else { int j=0; for(; j<63 && n[j]; j++) g_wprop[i].name[j]=n[j]; } }
+    if(i>=0) g_wprop[i].val=v; pthread_mutex_unlock(&g_wprop_mx); return i>=0; }
+static void* MSABI i_GetPropW(void*h,const uint16_t*n){ if(!n) return 0; pthread_mutex_lock(&g_wprop_mx); int i=wprop_find(h,n); void*v=i>=0?g_wprop[i].val:0; pthread_mutex_unlock(&g_wprop_mx); return v; }
+static void* MSABI i_RemovePropW(void*h,const uint16_t*n){ if(!n) return 0; pthread_mutex_lock(&g_wprop_mx); int i=wprop_find(h,n); void*v=0;
+    if(i>=0){ v=g_wprop[i].val; g_wprop[i]=g_wprop[--g_nwprop]; } pthread_mutex_unlock(&g_wprop_mx); return v; }
 // MessageBoxW: the engine shows error/assert dialogs here. We can't pop a dialog, but the TEXT
 // is the actual error — LOG it (don't swallow it) and return IDOK(1) so startup continues.
 static int MSABI i_MessageBoxW(void*h,const uint16_t*text,const uint16_t*cap,uint32_t type){ (void)h;(void)type;
@@ -11200,7 +11327,7 @@ static void *resolve_impl(const char *fn){
         {"D3DGetInputSignatureBlob",(void*)i_D3DGetInputSignatureBlob},
         {"CoTaskMemAlloc",(void*)i_CoTaskMemAlloc},
         {"CoTaskMemFree",(void*)i_CoTaskMemFree},
-        {"PropVariantClear",(void*)i_PropVariantClear},
+        {"PropVariantClear",(void*)i_PropVariantClear},{"PropVariantToStringAlloc",(void*)i_PropVariantToStringAlloc},
         {"GetCurrentProcess",(void*)i_GetCurrentProcess},
         {"ReadProcessMemory",(void*)i_ReadProcessMemory},
         {"WriteProcessMemory",(void*)i_WriteProcessMemory},
@@ -11407,7 +11534,7 @@ static void *resolve_impl(const char *fn){
         {"ClientToScreen",(void*)i_ClientToScreen},
         {"ScreenToClient",(void*)i_ScreenToClient},
         {"RegisterRawInputDevices",(void*)wi_RegisterRawInputDevices},
-        {"GetRawInputData",(void*)wi_GetRawInputData},{"GetRawInputDeviceInfoW",(void*)wi_GetRawInputDeviceInfoW},{"GetKeyboardState",(void*)wi_GetKeyboardState},{"GetCursorPos",(void*)wi_GetCursorPos},
+        {"GetRawInputData",(void*)wi_GetRawInputData},{"GetRawInputDeviceInfoW",(void*)wi_GetRawInputDeviceInfoW},{"GetRawInputDeviceList",(void*)wi_GetRawInputDeviceList},{"SetPropW",(void*)i_SetPropW},{"GetPropW",(void*)i_GetPropW},{"RemovePropW",(void*)i_RemovePropW},{"GetKeyboardState",(void*)wi_GetKeyboardState},{"GetCursorPos",(void*)wi_GetCursorPos},
         {"GetRegisteredRawInputDevices",(void*)i_GetRegisteredRawInputDevices},
         {"SetTimer",(void*)i_SetTimer},{"GetWindowTextW",(void*)i_GetWindowTextW},{"GetWindowTextLengthW",(void*)i_GetWindowTextLengthW},{"FindWindowW",(void*)i_FindWindowW},{"SetWinEventHook",(void*)i_SetWinEventHook},{"UnhookWinEvent",(void*)i_UnhookWinEvent},{"PostMessageW",(void*)i_PostMessageW},{"PostThreadMessageW",(void*)i_PostThreadMessageW},{"PostQuitMessage",(void*)i_PostQuitMessage},{"SendMessageW",(void*)i_SendMessageW},
         {"KillTimer",(void*)i_KillTimer},
@@ -13330,6 +13457,8 @@ int main(int argc, char **argv){ mt_start();
     *(uint64_t*)(teb+0x60) = (uint64_t)peb;   // PEB
     void **tls_array = g_tls_array;           // the global main-thread TLS array (register_tls fills it)
     *(uint64_t*)(teb+0x58) = (uint64_t)tls_array;
+    if(!getenv("PELOAD_TEB_NOSTACK")){ pthread_t me=pthread_self(); uint64_t hi=(uint64_t)(uintptr_t)pthread_get_stackaddr_np(me);   // NtTib stack range (thread_tramp)
+        *(uint64_t*)(teb+8)=hi; *(uint64_t*)(teb+0x10)=hi-(uint64_t)pthread_get_stacksize_np(me); }
     __asm__ volatile("movq %0, %%gs:0x30" :: "r"((uint64_t)teb));
     __asm__ volatile("movq %0, %%gs:0x60" :: "r"((uint64_t)peb));
     __asm__ volatile("movq %0, %%gs:0x58" :: "r"((uint64_t)tls_array));

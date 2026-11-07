@@ -91,6 +91,28 @@ patch variants by signature (section 16; shim/docs/patch-addresses.md).
 
 ## 1. PE loading and the API surface
 
+- **Client 0.10.0 ("rcl-engine") runs** (2026-11-06) — the client is now a windows-gnu (MinGW-style, msvcrt.dll) build that
+  RECOMPILES halo3.dll ("the build lifted", "the engine's code is 100% made", "linked recompiled engine, image at
+  0x144e05000") instead of loading it, and runs halo3's own delay-load helper with its own LoadLibraryExA / GetProcAddress.
+  It needed: synthetic system DLL images (below), DXGI factory slots up to IDXGIFactory7 (section 10), PropVariantToStringAlloc,
+  Windows' fiber layout and TEB stack fields (section 2), GetRawInputDeviceList and window properties (section 7), and a
+  refusal of foreign event handles in WASAPI (section 9). With them it reaches its menu scene (628 draws a frame) and joins a
+  local 0.10.0 dedicated server into a match (1,550-1,650 draws). Every exe signature (patchscan) misses in this build and
+  halo3.dll is no loaded module, so the stats page's halo3 readers, the overlay, lucache and the halo3 patches are inactive
+  with it; the old clients are unaffected (0.9.23 menu checked).
+- **Synthetic dxgi.dll / d3d11.dll / d3dcompiler_47.dll images** (2026-11-06) — peload.c `synth_dll`, `synth_is`, used by
+  `i_GetModuleHandleW/A` and `i_LoadLibraryExW`. Why: client 0.10.0 resolves halo3's delay imports by asking
+  GetModuleHandleW("dxgi.dll") (the exe imports dxgi, so on Windows it is loaded) and reading that image's EXPORT TABLE itself;
+  the loader answered every unknown name with the exe's own image, which exports none of them: "[runtime] fatal: unhandled
+  exception 0xc06d007f ... the delay-loaded dxgi.dll is missing" (then D3DCOMPILER_47.dll). How: per DLL a 0x2000-byte PE
+  image (headers, a sorted export directory, per export a 16-byte `jmp [rip+0]` thunk to the loader's implementation),
+  made on first use; GetProcAddress on it finds the thunks like on a guest DLL. i_D3DCompile's search for MCC's real compiler
+  skips our own image (it would find itself) and, with no halo3.dll module (0.10.0), looks in MCC's root in the prefix.
+  Old: `PELOAD_NO_SYNTH_DLL=1`. `PELOAD_TRACE_GMH=1` logs every GetModuleHandle* name.
+- **PropVariantToStringAlloc** (2026-11-06) — peload.c `i_PropVariantToStringAlloc`. Why: a logging stub that returned S_OK
+  with the string unset; client 0.10.0 reads the audio device's friendly name with it and crashed in ucrtbase (wcslen of
+  garbage) right after the engine was linked. How: a CoTaskMem copy of VT_LPWSTR / VT_BSTR, VT_LPSTR widened, "" for VT_EMPTY,
+  TYPE_E_TYPEMISMATCH otherwise.
 - **Game profiles: one game's work can't change another's** (2026-10-21) — shim/src/games.c, shim/docs/games.md. Why: three fan clients
   (Reclaimer / halo3, Reach Renaissance / haloreach, Gravemind / halo2) share the loader; Reclaimer's exe signature patches and
   stats hooks were searched for in EVERY exe (a chance byte match would patch another game), halo3.dll's hooks were keyed on the
@@ -261,6 +283,19 @@ patch variants by signature (section 16; shim/docs/patch-addresses.md).
 
 ## 2. Processes, threads, exceptions
 
+- **Fibers in Windows' layout: TEB+0x20 holds the fiber object, its first field the parameter** (2026-11-06) — peload.c
+  `Fiber` (param first), `fiber_set_cur`, ConvertThreadToFiber / CreateFiberEx / SwitchToFiber / ConvertFiberToThread. Why:
+  the slot held the PARAMETER; GetCurrentFiber() is the slot and GetFiberData() its first field on Windows, both read inline.
+  halo3 reads the slot as the current fiber (halo3+0x5ff97d: below 0x10000 -> ConvertThreadToFiber, else kept as the fiber to
+  switch back to) and only got away with it because its main thread's parameter is 0; client 0.10.0's runtime matches the
+  slot against the fibers it created: "[runtime] fatal: unknown guest fiber started" once the menu scene loaded. Old:
+  `PELOAD_FIBER_TEB_PARAM=1`.
+- **TEB NtTib.StackBase / StackLimit filled, and switched with fibers** (2026-11-06) — peload.c `thread_tramp`, main's TEB,
+  `teb_set_stack`. Why: both were 0; client 0.10.0's runtime copies at most 256 bytes from a saved stack pointer up to
+  StackBase (exe+0x3cf8fe5: gs:[0x30] -> +8), and with 0 it copied the full 256 past the top of a thread's stack ("exception
+  0xc0000005 ... ucrtbase memcpy"). How: the pthread stack range at thread start (and for the main thread); CreateFiberEx /
+  ConvertThreadToFiber record each fiber's range and every switch puts it in the TEB, as SwitchToFiber does. Old:
+  `PELOAD_TEB_NOSTACK=1`.
 - **CREATE_SUSPENDED / ResumeThread** (2026-10-20) — `i_CreateThread`, `thread_tramp`, win32x.c `i_ResumeThread`. Why: the flag was
   ignored (the thread ran at once) and ResumeThread was a stub; a creator that fills in a thread's data before resuming it raced
   it. How: the thread object's count is the suspend count; the trampoline waits until it is 0; ResumeThread returns the previous
@@ -534,6 +569,9 @@ patch variants by signature (section 16; shim/docs/patch-addresses.md).
 
 ## 5. Sync objects and timers
 
+- **is_sync reads only live heap blocks** (2026-11-06) — peload.c `is_sync`. Why: any handle value >= 0x100000 was read as a
+  SyncObj; client 0.10.0's runtime hands out handles like 0x400000c0, which faulted the read. How: `malloc_size` must say it
+  is a heap block first. Old: `PELOAD_SYNC_UNCHECKED=1`.
 - **Recursive mutexes** (2026-10-20) — `sync_wait`, `i_CreateMutexW`, `i_ReleaseMutex`. Why: a Windows mutex may be taken again by its
   owner; the loader's was a plain lock, and MCC's Miles Sound System (halo2's mss64.dll) takes its mutex in AIL_open_digital_driver
   and again in AIL_set_preference -- halo2's engine thread blocked on itself. How: depth in the object's maxc, ReleaseMutex frees
@@ -644,6 +682,10 @@ patch variants by signature (section 16; shim/docs/patch-addresses.md).
 
 ## 7. Windows, input, focus (Cocoa, Raw Input, XInput)
 
+- **GetRawInputDeviceList, SetPropW / GetPropW / RemovePropW** (2026-11-06) — wininput.c `wi_GetRawInputDeviceList`, peload.c
+  `i_SetPropW` / `i_GetPropW` / `i_RemovePropW`. Why: logging stubs that client 0.10.0 calls (the device list returned 0 with
+  the count unset; SetPropW "failed", GetPropW always NULL). How: the two raw devices WM_INPUT reports (mouse 0x4D53, keyboard
+  0x4B42); a 256-entry (window, name or atom) -> handle table.
 - **F1 releases the mouse in every game but Reclaimer** (2026-10-21) — wininput.c `wi_translate` (F1), `wi_raw_mouse`. Why: F1 only
   worked for re-centring games (Reach Renaissance); Project Gravemind holds the mouse with ClipCursor and reads Raw Input, so F1
   went to the game and the pointer could not be got back. How: F1 applies whenever the pointer is captured and the game is not h3
@@ -866,6 +908,11 @@ patch variants by signature (section 16; shim/docs/patch-addresses.md).
 
 ## 9. Audio (XAudio2, WASAPI)
 
+- **IAudioClient::SetEventHandle refuses handles that are not our events** (2026-11-06) — wasapi.c `wac_SetEventHandle`.
+  Why: client 0.10.0's dedicated server registered 0x400000c0 (from its runtime's own handle numbering) for its engine's audio
+  stream; Start and the buffer callback signalled it and the server's worker crashed 2 s after starting (wac_Start+0x119).
+  How: E_INVALIDARG, as Windows answers an invalid handle (the game client's streams get real events and play; the trace
+  `PELOAD_TRACE_WASAPI=1` logs every handle).
 - **DirectSound 8 on CoreAudio, for Halo 2** (2026-10-21) — shim/src/dsound.c (`DS_HANDLE`: LoadLibrary("dsound.dll") / GetProcAddress
   in peload.c). Why: Project Gravemind's sound ran ~0.2 s behind the picture. MCC's Miles Sound System uses DirectSound when it can
   load it and waveOut otherwise; on waveOut it keeps five 50 ms buffers, four always queued (the `[winmm] ... 4 queued` lines), so
@@ -947,6 +994,12 @@ patch variants by signature (section 16; shim/docs/patch-addresses.md).
 
 ## 10. D3D11 / DXGI objects
 
+- **DXGI factory through IDXGIFactory7** (2026-11-06) — peload.c `g_dxgifactory_vtbl`, `dxgi_EnumAdapterByGpuPreference`,
+  `dxgi_EnumAdapterByLuid`, `dxgi_EnumWarpAdapter`, `dxgi_CheckFeatureSupport`, `com_zero`. Why: client 0.10.0 QueryInterfaces
+  the factory for IDXGIFactory6 (com_QI says yes to everything) and calls EnumAdapterByGpuPreference (slot 29) -- past the end
+  of the 22-slot table, it called whatever pointer followed (NULL): crash at RIP 0 right after "[mods] ...". How: the table
+  runs to slot 31; the new enumerations answer like EnumAdapters1, no adapter by LUID, no WARP adapter, no tearing support,
+  creation flags 0.
 - **A 2D texture's IDXGISurface is a real interface** (2026-10-21) — `obj_QI` -> `dxsurf_qi`, `DxSurf` / `g_dxsurf_vtbl` (peload.c),
   `swap_GetBuffer`, D3DObj `dxsurf`. Why: QueryInterface answered every IID with the texture itself, so IDXGISurface::GetDesc
   (slot 8) ran ID3D11Resource::SetEvictionPriority and the caller read its own uninitialised memory as the size. Project
