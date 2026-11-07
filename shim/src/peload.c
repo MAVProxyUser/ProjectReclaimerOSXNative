@@ -8521,7 +8521,7 @@ static void* present_thread_fn(void*a){ (void)a; pthread_setname_np("shim-presen
         // (e.g. a halo3 GPU-frame-ready flag at 0x1821b0a74 + 24*i) each present cycle.
         const char* pk32=getenv("PELOAD_POKE32");
         if(pk32){ char buf[256]; snprintf(buf,sizeof buf,"%s",pk32); for(char*tok=strtok(buf,",");tok;tok=strtok(0,",")){ char*c=strchr(tok,':'); if(!c)continue; *c=0; uint64_t a=strtoull(tok,0,16); uint32_t v=(uint32_t)strtoull(c+1,0,16); if(a>0x100000000ULL) *(volatile uint32_t*)a=v; } }
-        if(!(use_d3dgl && pq_on() && g_pq_seq)){ struct timespec ts={0,33*1000000L}; nanosleep(&ts,0); }   // frame-driven once the queue runs
+        if(!(use_d3dgl && pq_on() && (g_pq_seq || g_glh_on))){ struct timespec ts={0,33*1000000L}; nanosleep(&ts,0); }   // frame-driven once the queue runs (the helper's frames never bump g_pq_seq; glh_pq_acquire already waits)
         (void)pq_shown; } return 0; }
 static void* cocoa_make_gl_window_i(int w,int h){ CGLContextObj c=cocoa_make_gl_window(w,h);
     if(c){ g_present_glctx=(void*)c; void(*set)(void*)=dlsym(RTLD_DEFAULT,"CGLSetCurrentContext");

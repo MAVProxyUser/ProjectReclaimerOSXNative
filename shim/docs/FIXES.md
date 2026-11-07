@@ -1382,6 +1382,15 @@ oracle. Fixes below apply to both unless noted.
   stalls while loading) the present thread fell back to the in-process blit, which has no frame of its own in helper
   mode. How: re-present the helper's last IOSurface with the layered loading screens on top (`glh_pq_acquire` stale).
   Old: `PELOAD_GLH_PQ_FALLBACK=1`. (10-17 335a1fb)
+- **GL helper: the window showed ~27 fps whatever the engine rendered** (2026-11-06) — peload.c `present_thread_fn`. Why: the
+  loop's 33 ms nanosleep is skipped only once `g_pq_seq` runs, and in helper mode `pq_publish` hands every frame to
+  `glh_pq_publish` and returns before `g_pq_seq++`, so it stayed 0 for the whole session: the present thread waited for a
+  helper frame in `glh_pq_acquire` (up to 50 ms, usleep(250) polling), showed it, then slept another 33 ms. Invisible in the
+  title, which shows the engine's Present rate (every helper-mode number in PERF-PLAN.md is engine fps, not shown fps).
+  How: `g_glh_on` also counts as the queue running; the acquire wait is the only pacing. Measured (M4 Pro, 5120x1440 at
+  120 Hz, client v0.9.23, PELOAD_MAX_FPS=60, Guardian): before, engine 60.0 / shown 27.0 fps, every gap between shown
+  frames 25-42 ms, `sample` had shim-present in that nanosleep 86 of 90 times; after, engine 60.0 / shown 59.6 fps, 93% of
+  gaps 12-21 ms, shim-present in glh_pq_acquire's usleep. Menu after: engine 58-60, shown 58.7-60.1. No switch.
 
 - **GL helper wake / wait on macOS before 14.4** — Why: `os_sync_wait_on_address` / `os_sync_wake_by_address_any` (the
   ring's cross-process sleep) exist only from macOS 14.4, and the binaries were built for macOS 26 (the build machine), so
