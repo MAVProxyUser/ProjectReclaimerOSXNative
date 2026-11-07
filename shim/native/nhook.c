@@ -182,14 +182,31 @@ static volatile uint64_t g_cnt[NCNT];
 #define CNT_HANDLER(i) static void cnt_##i(uint64_t* ctx) { g_cnt[i]++; if (ctx[0x2d8 / 8]) g_main_ctx = (uint64_t)ctx; }
 CNT_HANDLER(0) CNT_HANDLER(1) CNT_HANDLER(2) CNT_HANDLER(3) CNT_HANDLER(4) CNT_HANDLER(5) CNT_HANDLER(6) CNT_HANDLER(7)
 static nh_handler g_cnt_h[NCNT] = { cnt_0, cnt_1, cnt_2, cnt_3, cnt_4, cnt_5, cnt_6, cnt_7 };
+// halo3+0x9d22c also runs on other engine threads, whose TLS blocks hold no players table: once a thread's block is
+// seen to hold it (tls_block), only that thread's context is kept (its TLS pointer, ctx+0x2d8). Taking any caller's
+// context made ~1 snapshot in 7 empty in a 72-player game (2026-11-07). A thread that stops validating for 2 s (a new
+// engine thread) is given up and the next good one learned.
+static volatile uint64_t g_good_tlsp;
 static void on_main_loop(uint64_t* ctx) {           // the engine thread's context (hook_install "engine_clock")
+    uint64_t t = ctx[0x2d8 / 8]; if (!t) return;
+    uint64_t good = g_good_tlsp; if (good && t != good) return;
     g_main_ctx = (uint64_t)ctx; g_frames++;
 }
 
+static int tls_holds_players(uint64_t blk) {        // the block's +0x10 is halo3's "players" data array
+    uint64_t parr = 0; uint8_t hdr[0x30];
+    return blk && !rd(blk + 0x10, &parr, 8) && parr && !rd(parr, hdr, sizeof hdr) && *(uint32_t*)(hdr + 0x2c) == 0x64407440 && !memcmp(hdr, "players", 8);
+}
 static uint64_t tls_block(void) {                   // halo3's TLS block of the engine main thread (index 0 here)
+    static volatile uint64_t last_good; static double bad_since;
     uint64_t c = g_main_ctx, arr = 0, blk = 0; uint32_t idx = 0;
-    if (!c || rd(c + 0x2d8, &arr, 8) || !arr || rd(g_img + 0xa39f9c, &idx, 4) || idx > 64 || rd(arr + idx * 8, &blk, 8)) return 0;
-    return blk;
+    if (c && !rd(c + 0x2d8, &arr, 8) && arr && !rd(g_img + 0xa39f9c, &idx, 4) && idx <= 64 && !rd(arr + idx * 8, &blk, 8) && tls_holds_players(blk)) {
+        if (!g_good_tlsp) g_good_tlsp = arr;
+        last_good = blk; bad_since = 0; return blk;
+    }
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); double now = ts.tv_sec + ts.tv_nsec * 1e-9;
+    if (!bad_since) bad_since = now; else if (now - bad_since > 2.0) { g_good_tlsp = 0; bad_since = 0; last_good = 0; }
+    return last_good && tls_holds_players(last_good) ? last_good : 0;
 }
 
 static void players_log(void) {

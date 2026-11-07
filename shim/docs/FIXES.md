@@ -1742,6 +1742,13 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   only 1 MB steps out from that region's edges, and the free gaps around it are 16-352 KB and scattered: some layouts
   had none on a probe. Now it walks the region boundaries within +-120 MB (mach_vm_region; nothing is read) and
   allocates in the free gap nearest the code.
+- **nhook: empty snapshots, join / leave flood** (2026-11-07; nhook.c on_main_loop / tls_block, nstats.c st_roster) — WHY:
+  in a 72-player game ~1 snapshot in 7 had no players: halo3+0x9d22c (the hooked clock) runs on other engine threads too,
+  and the page read whichever thread's TLS block called it last; every empty read made the whole lobby "leave" and the
+  next "rejoin" (~160 feed lines a second, real events pushed out of the ring). The context is now kept only for the
+  thread whose block holds halo3's "players" data array (its TLS pointer, re-learned after 2 s of failures), and joins /
+  leaves are debounced (left = missing 3 s, joined = not seen for 30 s, none in a map's first 5 s, an empty read ignored).
+  The fps line shows only what the native app measures. shim/native.sh serves the page from the checkout.
 
 - **"Run 2.4x" removed** (2026-10-19, revert 606a38c) — it crashed the client as soon as it was used; the user asked for it
   to be deleted. The page's Speed 2x / speed menu (the host's movement-speed trait) is unchanged. (10-19)

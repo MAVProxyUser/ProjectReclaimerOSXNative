@@ -394,15 +394,21 @@ static void st_player_traits(StBuf*s,uint64_t rec){
     sb_put(s,"]"); }
 #undef g_st_tls
 
-// joins and leaves: a name entering / leaving the players table (the lobby's session list is not read in the native app yet)
+// joins and leaves: a name entering / leaving the players table (the lobby's session list is not read here). Debounced:
+// "left" once a name has been missing for 3 s, "joined" for a name not seen in the last 30 s -- a snapshot that misses the
+// table (a read on the wrong engine thread before tls_block pinned the right one) once made every player leave and rejoin,
+// ~160 feed lines a second in a 72-player game (2026-11-07).
 static void st_roster(const StPlayer* pl, int np, const char* map) {
-    static char prev[256][64]; static int nprev = -1; static char pmap[64];
-    if (strcmp(pmap, map)) { snprintf(pmap, sizeof pmap, "%s", map); nprev = -1; }   // a new map: the table fills again
-    if (nprev >= 0) {
-        for (int k = 0; k < np; k++) { int seen = 0; for (int i = 0; i < nprev && !seen; i++) seen = !strcmp(prev[i], pl[k].name); if (!seen) st_event_pos(0, "join", pl[k].name, 0, 0, -1, -1, 0, "%s joined the game", pl[k].name); }
-        for (int i = 0; i < nprev; i++) { int still = 0; for (int k = 0; k < np && !still; k++) still = !strcmp(prev[i], pl[k].name); if (!still) st_event_pos(0, "leave", prev[i], 0, 0, -1, -1, 0, "%s left the game", prev[i]); }
-    }
-    nprev = np < 256 ? np : 256; for (int k = 0; k < nprev; k++) snprintf(prev[k], sizeof prev[k], "%s", pl[k].name);
+    static struct { char name[64]; double seen; int in; } r[512]; static int nr; static char pmap[64]; static double t_map;
+    double now = mono_s();
+    if (strcmp(pmap, map)) { snprintf(pmap, sizeof pmap, "%s", map); nr = 0; t_map = now; }   // a new map: the table fills again
+    int quiet = now - t_map < 5.0;                             // the first seconds of a map: everyone "joins" -- not news
+    for (int k = 0; k < np; k++) { int i = 0; for (; i < nr; i++) if (!strcmp(r[i].name, pl[k].name)) break;
+        if (i == nr) { if (nr >= 512) continue; nr++; snprintf(r[i].name, sizeof r[i].name, "%s", pl[k].name); r[i].in = 0; r[i].seen = 0; }
+        if (!r[i].in) { if (!quiet && now - r[i].seen > 30.0) st_event_pos(0, "join", pl[k].name, 0, 0, -1, -1, 0, "%s joined the game", pl[k].name); r[i].in = 1; }
+        r[i].seen = now; }
+    if (!np) return;                                           // (an empty read says nothing about who left)
+    for (int i = 0; i < nr; i++) if (r[i].in && now - r[i].seen > 3.0) { r[i].in = 0; st_event_pos(0, "leave", r[i].name, 0, 0, -1, -1, 0, "%s left the game", r[i].name); }
 }
 
 // ---- the scoreboard: halo3's statborg (static RE of halo3.dll, shim/docs/native-client.md "Kills") -------------------
