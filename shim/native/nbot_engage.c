@@ -21,7 +21,10 @@ static int rd_contact(const NovObj* me, const NovObj* t);   // (nbot_goals.c: on
 typedef struct { char grp[24]; float lat[20], rad[20]; char mine; } EgPiece;   // mine: from this map's own model
 static struct { int loaded, on, npiece, nmine; float w[8]; int has_w; struct { char cls[12]; float p25, med, p75; int n; } band[10]; int nband;
                 float p_view, p_behind, p_mid, turn_s; EgPiece* lib; int gren_ok; float gren_every, gren_d0, gren_d1;
-                float rd_turn, rd_turn_s, p_killer, p_spot, it_near, it_mid, it_far; } g_eg;   // (behaviour: radar, revenge, items)
+                float rd_turn, rd_turn_s, p_killer, p_spot, it_near, it_mid, it_far;
+                float tw_spacing, tw_within15, p_join, join_s, p_aid, aid_s; } g_eg;   // (teamwork: team games)
+static volatile uint32_t g_tw_mate; static volatile double g_tw_until;   // the teammate the walker works with right now (aid / join), until
+static volatile uint32_t g_tw_aid_mate;                                   // a teammate to go to (its attacker not known to us): nbot_goals.c   // (behaviour: radar, revenge, items)
 static const char* eg_find(const char* txt, const char* key, const char* end) {   // "key": within [txt, end)
     char k[64]; snprintf(k, sizeof k, "\"%s\":", key); const char* p = strstr(txt, k); if (!p || (end && p >= end)) return 0;
     p += strlen(k); while (*p == ' ' || *p == '\n' || *p == '\t') p++; return p; }   // (whitespace after the colon: a pretty-printed model too)
@@ -39,7 +42,8 @@ static int eg_arr(const char* p, float* out, int max) {   // [a, b, null, ...] -
 static void eg_parse(const char* txt, const char* end, int overlay, int mine) {
     static const char* const fk[8] = {"log_dist", "off_aim", "attacked_me", "vitality", "previous_target", "teammate_on_it", "just_hurt", "height"};
     if (!overlay) { g_eg.p_view = 0.33f; g_eg.p_behind = 0.07f; g_eg.turn_s = 1.75f;
-        g_eg.rd_turn = 0.28f; g_eg.rd_turn_s = 1.24f; g_eg.p_killer = 0.05f; g_eg.p_spot = 0.08f; g_eg.it_near = 0.03f; g_eg.it_mid = 0.11f; g_eg.it_far = 0.05f; }
+        g_eg.rd_turn = 0.28f; g_eg.rd_turn_s = 1.24f; g_eg.p_killer = 0.05f; g_eg.p_spot = 0.08f; g_eg.it_near = 0.03f; g_eg.it_mid = 0.11f; g_eg.it_far = 0.05f;
+        g_eg.tw_spacing = 10.0f; g_eg.tw_within15 = 0.5f; g_eg.p_join = 0.3f; g_eg.join_s = 1.5f; g_eg.p_aid = 0.3f; g_eg.aid_s = 1.5f; }
     const char* tw = eg_find(txt, "target", end);
     if (tw && *tw == '{') { const char* te = eg_close(tw); for (int i = 0; i < 8; i++) g_eg.w[i] = eg_num(tw, fk[i], te, overlay ? g_eg.w[i] : 0); g_eg.has_w = 1; }
     const char* db = eg_find(txt, "distance_by_weapon", end);
@@ -71,6 +75,13 @@ static void eg_parse(const char* txt, const char* end, int overlay, int mine) {
             float a = eg_num(it, "heading_in_2_10", ie, -1), a0 = eg_num(it, "baseline_2_10", ie, -1), b = eg_num(it, "heading_in_10_20", ie, -1), b0 = eg_num(it, "baseline_10_20", ie, -1), c = eg_num(it, "heading_in_20_40", ie, -1), c0 = eg_num(it, "baseline_20_40", ie, -1);
             // per goal draw: twice the players' extra heading-in share at that distance (a draw lasts 6-15 s; they decide all the time)
             if (a >= 0 && a0 >= 0) g_eg.it_near = fmaxf(0.03f, 2 * (a - a0)); if (b >= 0 && b0 >= 0) g_eg.it_mid = fmaxf(0.03f, 2 * (b - b0)); if (c >= 0 && c0 >= 0) g_eg.it_far = fmaxf(0.03f, 2 * (c - c0)); } }
+    // teamwork (engage-model.py behaviour.teamwork, from team games): the spacing to the nearest teammate, how often one is within
+    // 15 units, the odds and delays of joining a teammate's fight and of coming to a teammate's aid
+    const char* tm = eg_find(txt, "teamwork", end);
+    if (tm && *tm == '{') { const char* tme = eg_close(tm);
+        g_eg.tw_spacing = eg_num(tm, "near_mate_median", tme, g_eg.tw_spacing); g_eg.tw_within15 = eg_num(tm, "within15", tme, g_eg.tw_within15);
+        g_eg.p_join = eg_num(tm, "joined", tme, g_eg.p_join); g_eg.join_s = eg_num(tm, "join_s_median", tme, g_eg.join_s);
+        g_eg.p_aid = eg_num(tm, "aided", tme, g_eg.p_aid); g_eg.aid_s = eg_num(tm, "aid_s_median", tme, g_eg.aid_s); }
     const char* lb = eg_find(txt, "library", end);
     if (lb && *lb == '{') { const char* le = eg_close(lb); if (!g_eg.lib) g_eg.lib = calloc(2400, sizeof(EgPiece));
         for (const char* p = lb + 1; g_eg.lib && p < le && g_eg.npiece < 2400; ) {
@@ -109,6 +120,8 @@ static void eg_load_for(const char* map, const char* engine) {
          g_eg.gren_ok ? "from the players" : "the tactics' own", g_eg.gren_every, g_eg.gren_d0, g_eg.gren_d1);
     nlog("[nhook] [fight] behaviour: radar look %.0f%% after %.2f s; after a respawn: the killer %.0f%%, the death spot %.0f%%; power items per draw %.0f%% / %.0f%% / %.0f%% (2-10 / 10-20 / 20-40 units)",
          g_eg.rd_turn * 100, g_eg.rd_turn_s, g_eg.p_killer * 100, g_eg.p_spot * 100, g_eg.it_near * 100, g_eg.it_mid * 100, g_eg.it_far * 100);
+    nlog("[nhook] [fight] teamwork (team games): a teammate %.1f units away (median), within 15 units %.0f%% of the time; joins a teammate's fight %.0f%% after %.2f s; comes to a teammate's aid %.0f%% after %.2f s",
+         g_eg.tw_spacing, g_eg.tw_within15 * 100, g_eg.p_join * 100, g_eg.join_s, g_eg.p_aid * 100, g_eg.aid_s);
 }
 static void eg_load(void) { eg_load_for("", ""); }   // (the aggregate only: the offline test, the first fight tick before the map is known)
 static const char* eg_wcls(const char* tag) {   // the walker's weapon (a tag path) -> engage-model.py's weapon classes
@@ -150,6 +163,31 @@ static int eg_choose(const NovObj* objs, int n, int me, const float* cam, float 
         float p = off < 45 ? g_eg.p_view : off >= 90 ? g_eg.p_behind : g_eg.p_mid;
         if (bot_rand01() < p) { sw_to = t->handle; sw_at = now + g_eg.turn_s * (0.5f + bot_rand01()); if (bot_log()) nlog("[nhook] [fight] second attacker %08x (%.0f deg off): turning to it in %.1f s", t->handle, off, sw_at - now); }
         else if (bot_log()) nlog("[nhook] [fight] second attacker %08x (%.0f deg off): staying on the target", t->handle, off); }
+    // TEAMWORK (team games; the user: "cooperate with other team mates toward a common offense, or if one comes to your aid, ensure
+    // you are working together for your and his collective defense as a unit"): with no target, a teammate within 25 units under
+    // fire (hurt in the last second while an enemy aims at it) -> come to its aid with the players' odds after their delay (its
+    // attacker becomes the target when we know it, else we go to the teammate); a teammate shooting an enemy (aim within 8 deg) ->
+    // join on the same enemy with the players' odds and delay. Decided once per (teammate, enemy) per 5 s; the teammate is then
+    // the walker's unit partner for 12 s (nbot_goals.c keeps them together).
+    if (ci < 0 || now - cur_seen >= 1.0) {
+        static struct { uint32_t m, e; double t; } asked[64]; static int na;
+        for (int i = 0; i < n && !sw_to; i++) { const NovObj* m = &objs[i]; if (m->type || m->dead || i == me || bot_enemy(o, m)) continue;
+            float mx = m->c[0] - o->c[0], my = m->c[1] - o->c[1]; if (mx * mx + my * my > 625) continue;
+            EgUnit* mu = eg_unit(m->handle); int hurt = now - mu->hurt_t < 1.0;
+            for (int j = 0; j < n; j++) { const NovObj* e = &objs[j]; if (e->type || e->dead || j == me || !bot_enemy(o, e)) continue;
+                int aid = hurt && eg_aim_at(e, m->c, 12), join = !aid && eg_aim_at(m, e->c, 8); if (!aid && !join) continue;
+                int k = -1; for (int q = 0; q < na; q++) if (asked[q].m == m->handle && asked[q].e == e->handle) { k = q; break; }
+                if (k >= 0 && now - asked[k].t < 5.0) continue;
+                if (k < 0) { k = na < 64 ? na++ : (int)arc4random_uniform(64); asked[k].m = m->handle; asked[k].e = e->handle; } asked[k].t = now;
+                if (bot_rand01() >= (aid ? g_eg.p_aid : g_eg.p_join)) continue;
+                float dx = e->c[0] - cam[0], dy = e->c[1] - cam[1], off = fabsf(bot_wrap(atan2f(dy, dx) - yaw0)) * 57.2958f;
+                int known = off < EG_VIEW || rd_contact(o, e) || vis_of(e->handle, now) == 1;
+                g_tw_mate = m->handle; g_tw_until = now + 12.0;
+                if (known) { sw_to = e->handle; sw_at = now + (aid ? g_eg.aid_s : g_eg.join_s) * (0.5f + bot_rand01()); }
+                else if (aid) g_tw_aid_mate = m->handle;
+                if (bot_log()) nlog("[nhook] [team] %s teammate %08x %s %08x: %s", aid ? "aid:" : "join:", m->handle, aid ? "attacked by" : "fighting", e->handle,
+                                    known ? "taking its enemy" : aid ? "going to the teammate" : "(enemy not known: staying)");
+                break; } } }
     if (sw_to && now >= sw_at) { for (int i = 0; i < n; i++) if (objs[i].handle == sw_to && !objs[i].dead && i != me) { prev = cur; prev_t = now; cur = sw_to; cur_t0 = now; cur_seen = now; ci = i; g_eg_fast = sw_to; break; } sw_to = 0; }
     if (ci >= 0 && now - cur_seen < 1.0) return ci;   // (kept: alive and seen in the last second)
     // a new target: the players' choice rule over the KNOWN enemies within 45 units -- DRAWN from its probabilities (exp(score) /

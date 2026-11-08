@@ -203,7 +203,8 @@ every match the hook sees.
    wherever there are enough samples, reloaded on a map or game change; the map's own movement pieces come first; lanes and
    its own failed-death zones are per map. What they use: awareness (view, radar, attackers), the fitted target choice, second
    attackers with the players' odds and delay, weapon distance bands, real movement pieces, grenades, the radar look, the
-   respawn draw (killer / death spot / the item's lane), power items, the goal draw (never idle).
+   respawn draw (killer / death spot / the item's lane), power items, the goal draw (never idle); in team games teamwork from the
+   players' team games: the spacing to a teammate, joining a teammate's fight, coming to a teammate's aid, then moving as a unit.
 5. **Checking them.** `walker-battle.sh` (WB_IDS, WB_WATCH, DED_GAME / DED_MAP on the server) + `engage-compare.py`
    (fight-likeness against the players on the same map) + `walker-compare.py` (movement); `native-firefight.sh` for Firefight.
 6. **Watching it all.** `python3 shim/tools/workboard.py` (http://127.0.0.1:8790/): what runs, the direction, the task list, the

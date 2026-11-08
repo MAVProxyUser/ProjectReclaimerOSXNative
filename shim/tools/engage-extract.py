@@ -27,6 +27,14 @@ it attacks; the nearest to its aim when it attacks several) held across pauses u
   join         team games: a teammate starts attacking an enemy near this player (25 units) while this player has no target:
                did it join on the same enemy within 3 s
   skirmish     every 3 s: the groups of players linked by attacks in those 3 s (sizes per side)
+  team         TEAMWORK (the user, 2026-11-08: "noting both enemy and friendly radar blips, and how they may be cooperative working
+               together ... cooperate with other team mates toward a common offense, or if one comes to your aid ... collective
+               defense as a unit"), team games, one per recording: the nearest teammate's distance (all, and while fighting),
+               the share of time with a teammate within 8 / 15 / 25 units, and focus fire (the share of attacking players whose
+               target another teammate attacks too)
+  aid          team games: an enemy starts attacking a player with teammates within 25 units: did one of them attack that
+               enemy within 3 s (aid by fire), or come toward the player (1+ unit/s over a second), how fast, and did the player
+               die within 5 s -- helped vs not
   contact      RADAR (the user, 2026-11-08: "the walkers don't understand how the radar works, and that is critical"): an enemy
                within 15 units comes up UNSEEN (more than 75 deg off the player's view), not attacking it, while the player has
                no target: its distance, its speed (halo3's motion tracker shows movement, not a crouch-walk or standing), and
@@ -443,6 +451,48 @@ def multi(path, head, t, slots, me, inf, cls, alive, X, Y, Z, YAW, SH, HP, TEAM,
         out.append(dict(base, kind='respawn', team_game=team_game, d0=round(d0, 1), reached=reach, base_reached=base_reach if bx is not None else 'none',
                         next_target=nxt, enemies=nen, killer_alive=bool(alive[r0, kl]), app_killer=round(float(np.mean(appk)), 3) if appk else None,
                         app_other=round(float(np.mean(appo)), 3) if appo else None, respawn_s=round(float(t[r0] - kt), 1)))
+    # teamwork: cohesion, focus fire, aid (team games only)
+    if team_game:
+        near, near_eng, foc, att_n = [], [], 0, 0
+        for k in range(0, T, 5):
+            idx = np.nonzero(alive[k] & pl)[0]
+            if len(idx) < 3: continue
+            for i in idx:
+                mates = idx[(side[k, idx] == side[k, i]) & (idx != i)]
+                if not len(mates): continue
+                dmin = float(np.hypot(X[k, mates] - X[k, i], Y[k, mates] - Y[k, i]).min()); near.append(dmin)
+                if HT[k, i] >= 0:
+                    near_eng.append(dmin); att_n += 1; tg = HT[k, i]
+                    if any(HT[k, m] == tg for m in mates): foc += 1
+        if near:
+            q = lambda v, f: float(np.percentile(v, f)) if v else None
+            out.append(dict(base, kind='team', samples=len(near), near_p25=round(q(near, 25), 2), near_median=round(q(near, 50), 2), near_p75=round(q(near, 75), 2),
+                            within8=round(sum(d < 8 for d in near) / len(near), 3), within15=round(sum(d < 15 for d in near) / len(near), 3), within25=round(sum(d < 25 for d in near) / len(near), 3),
+                            near_fighting_median=round(q(near_eng, 50), 2) if near_eng else None, within15_fighting=round(sum(d < 15 for d in near_eng) / len(near_eng), 3) if near_eng else None,
+                            focus_share=round(foc / att_n, 3) if att_n else None))
+        # aid: a NEW attack on a player (no attack from that enemy in the 1.5 s before) with teammates within 25 units
+        for k in range(16, T - 50, 2):
+            onset = ATT[k] & ~R15[k - 1]
+            for e_, p_ in zip(*np.nonzero(onset)):
+                if not pl[p_] or not alive[k, p_]: continue
+                mates = [m for m in range(N) if m != p_ and pl[m] and alive[k, m] and side[k, m] == side[k, p_] and math.hypot(X[k, m] - X[k, p_], Y[k, m] - Y[k, p_]) < 25]
+                if not mates: continue
+                aid, aid_s, kind_ = False, None, None
+                for q_ in range(k, min(T, k + 30)):
+                    hit = [m for m in mates if ATT[q_, m, e_]]
+                    if hit: aid, aid_s, kind_ = True, round(float(t[q_] - t[k]), 2), 'fire'; break
+                if not aid:
+                    for m in mates:
+                        v = []
+                        for q_ in range(k, min(T, k + 30)):
+                            if np.isnan(VX[q_, m]): continue
+                            ex, ey = X[q_, p_] - X[q_, m], Y[q_, p_] - Y[q_, m]; hn = math.hypot(ex, ey)
+                            if hn > 2: v.append((VX[q_, m] * ex + VY[q_, m] * ey) / hn)
+                            if len(v) >= 10 and sum(v[-10:]) / 10 > 1.0: aid, aid_s, kind_ = True, round(float(t[q_] - t[k]), 2), 'move'; break
+                        if aid: break
+                died = bool((~alive[k:min(T, k + 50), p_]).any())
+                nm = min(math.hypot(X[k, m] - X[k, p_], Y[k, m] - Y[k, p_]) for m in mates)
+                out.append(dict(base, kind='aid', mates=len(mates), nearest_mate=round(nm, 1), aided=aid, aid_s=aid_s, aid_kind=kind_, died5=died))
     # skirmishes every 3 s: components of the attack graph over the last 3 s
     for k in range(30, T, 30):
         g = recent(k, 30); g = g | g.T; seen = set()

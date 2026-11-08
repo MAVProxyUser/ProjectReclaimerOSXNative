@@ -380,7 +380,7 @@ static void bot_step_body(void) {
             if (goal >= 0 && plen) { float gp[3]; nav_pos(goal, gp); if ((gp[0] - pos[0]) * (gp[0] - pos[0]) + (gp[1] - pos[1]) * (gp[1] - pos[1]) < 1.0f) { nav_say("  [nav] reached the goal\n"); goal = -1; need = 1; } }
             if (mode == 2 && g_bot_pick_on) { int gn = nav_node_at(g_bot_pick_pos); if (gn >= 0) goal = gn; }   // (the fighter's pickup: walk to the weapon)
             else if (mode == 2 && g_eg.on && gl_on()) {   // the goal draw (nbot_goals.c): known enemies, revenge, items, lanes -- never none
-                if (gl_tick(now, objs, n, me, los_get)) { float gp[3] = {g_gl.pos[0], g_gl.pos[1], g_gl.kind == GK_ENEMY || g_gl.kind == GK_REVENGE || g_gl.kind == GK_ITEM ? g_gl.pos[2] - 0.35f : pos[2]};
+                if (gl_tick(now, objs, n, me, los_get)) { float gp[3] = {g_gl.pos[0], g_gl.pos[1], g_gl.kind == GK_ENEMY || g_gl.kind == GK_REVENGE || g_gl.kind == GK_ITEM || g_gl.kind == GK_MATE || g_gl.kind == GK_AID ? g_gl.pos[2] - 0.35f : pos[2]};
                     int gn = nav_node_at(gp); if (gn < 0) { gl_drop(now, "no floor there"); } else if (gn != goal) { goal = gn; need = 1; } } }
             else if (mode == 2) { float bd = 1e30f; int bi = -1; for (int pass = 0; pass < 2 && bi < 0; pass++) for (int i = 0; i < n; i++) { const NovObj* t = &objs[i]; if (t->type || t->dead || i == me) continue;
                     if (!pass && !bot_enemy(o, t)) continue; float dx = t->c[0] - pos[0], dy = t->c[1] - pos[1], d = dx * dx + dy * dy; if (d < bd) { bd = d; bi = i; } }

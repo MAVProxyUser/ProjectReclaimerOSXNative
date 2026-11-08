@@ -2941,6 +2941,19 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   now writes "engine"; nhook's recorder's "mode" is it), then the variant's name, then the listing (a "CTF 30VS30" server's
   "BIGASSSLAYER" was filed as CTF). The work board shows the direction and the tome's coverage grid (maps x types, per-map model
   or aggregate, never sampled).
+- **Teamwork: measured in team games, used by the walkers** (2026-11-08 14:30; engage-extract.py "team" / "aid" records,
+  engage-model.py behaviour.teamwork, nbot_engage.c, nbot_goals.c, nbot.c) — WHY: the user: the radar learning should note "both
+  enemy and friendly radar blips, and how they may be cooperative working together in the moment, and learn to also potentially
+  cooperate with other team mates toward a common offense, or if one comes to your aid, ensure you are working together for your
+  and his collective defense as a unit". LOGIC: per team-game recording the nearest teammate's distance (all / while fighting),
+  the share of time with one within 8 / 15 / 25 units, focus fire (attackers whose target a teammate attacks too); per NEW attack
+  on a player with teammates within 25 units: aided by fire (a teammate attacks that enemy within 3 s) or by moving in (1+ u/s
+  toward the player for a second), how fast, and the 5-s death rate helped vs alone; the model's teamwork = spacing, within15,
+  focus share, aid / join odds and delays. The walker, with no target held: a teammate within 25 units under fire (hurt in the last
+  second while an enemy aims at it) -> aid with the players' odds after their delay (the attacker as target when known, else a
+  goal to the teammate); a teammate shooting an enemy -> join with their odds and delay; once per (teammate, enemy) per 5 s; that
+  teammate is the unit partner for 12 s. The goal draw adds the nearest teammate (weight 2 x within15, the unit partner 4),
+  followed as it moves, reached at the players' spacing. Free-for-all has no teammates: nothing changes there.
 
 ## 19. Performance
 

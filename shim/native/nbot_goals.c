@@ -99,8 +99,8 @@ static int gl_power_spawn_near(const float* p, float r, float* out) {
         if (!pow) continue; float dx = q->x - p[0], dy = q->y - p[1], d = dx * dx + dy * dy; if (d < bd) { bd = d; out[0] = q->x; out[1] = q->y; out[2] = q->z; got = 1; } }
     pthread_mutex_unlock(&g_hm_mx); return got; }
 static struct { int kind; float pos[3]; uint32_t who; double t0, until; char what[40]; } g_gl;
-static const char* const gl_kn[] = {"none", "enemy", "revenge", "death spot", "intercept", "item", "roam"};
-enum { GK_NONE, GK_ENEMY, GK_REVENGE, GK_SPOT, GK_ICPT, GK_ITEM, GK_ROAM };
+static const char* const gl_kn[] = {"none", "enemy", "revenge", "death spot", "intercept", "item", "roam", "teammate", "aid"};
+enum { GK_NONE, GK_ENEMY, GK_REVENGE, GK_SPOT, GK_ICPT, GK_ITEM, GK_ROAM, GK_MATE, GK_AID };
 static int gl_on(void) { static int on = -1; if (on < 0) { const char* e = getenv("NHOOK_BOT_GOALS"); on = !(e && !strcmp(e, "0")); } return on; }
 static void gl_drop(double now, const char* why) { if (g_gl.kind && bot_log()) nlog("[nhook] [goal] %s (%s) dropped: %s", gl_kn[g_gl.kind], g_gl.what, why); g_gl.kind = GK_NONE; (void)now; }
 // a lane point 10..25 units out from an item spawn, along the lanes leaving it, drawn by traffic
@@ -138,6 +138,12 @@ static void gl_pick(double now, const NovObj* objs, int n, int me) {
           if (bot_rand01() < p) { g_gl.kind = GK_ITEM; memcpy(g_gl.pos, g_wt[bi2].cur, 12); g_gl.who = 0; g_gl.t0 = now; g_gl.until = now + 8.0 + 8.0 * bot_rand01();
               snprintf(g_gl.what, sizeof g_gl.what, "%s", g_wt[bi2].kind == 2 ? "a power-up" : "a power weapon");
               if (bot_log()) nlog("[nhook] [goal] item: %s %.0f units away (%.0f%% this draw)", g_gl.what, d, p * 100); return; } } }
+    // TEAMMATES (team games): the nearest teammate, weighted by how often players keep one within 15 units -- the unit partner of an
+    // aid / join (g_tw_mate) much more, while that lasts; reached at the players' spacing (gl_tick)
+    { int mi = -1; float md = 1e30f; for (int i = 0; i < n; i++) { const NovObj* t = &objs[i]; if (t->type || t->dead || i == me || bot_enemy(o, t)) continue;
+          float dx = t->c[0] - o->c[0], dy = t->c[1] - o->c[1], d = dx * dx + dy * dy; if (t->handle == g_tw_mate && now < g_tw_until) d = -1; if (d < md) { md = d; mi = i; } }
+      if (mi >= 0) { const NovObj* t = &objs[mi]; float dd = sqrtf(fmaxf(md, 0)); int unit = t->handle == g_tw_mate && now < g_tw_until;
+          if (unit || dd > g_eg.tw_spacing) GL_ADD(GK_MATE, t->c, t->handle, unit ? 4.0f : 2.0f * g_eg.tw_within15, "teammate %08x%s", t->handle, unit ? " (our unit)" : ""); } }
     // roam: lane cells 10..40 units away, by traffic (a few draws)
     for (int k = 0; k < 4; k++) { float lp[3]; if (gl_lane_from(o->c, 10, 40, lp)) GL_ADD(GK_ROAM, lp, 0, GL_W_ROAM * 0.25f, "a lane (%.0f,%.0f)", lp[0], lp[1]); }
     if (!nc) { int cur = -1; float q[3] = {o->c[0], o->c[1], o->c[2] - 0.35f}; if (g_nav.ok) cur = nav_node_at(q); int gn = cur >= 0 ? nav_pick_roam(cur) : -1;   // (no lanes: the graph's own roam)
@@ -154,11 +160,18 @@ static int gl_tick(double now, const NovObj* objs, int n, int me, int (*vis_of)(
     rd_log(now, objs, n, me);   // (NHOOK_RADAR_LOG: the engine's tracker beside the truth)
     for (int i = 0; i < n; i++) { const NovObj* t = &objs[i]; if (t->type || t->dead || i == me || !bot_enemy(o, t)) continue;
         int rd = rd_contact(o, t), vs = vis_of(t->handle, now) == 1; if (rd || vs) gl_note(t->handle, t->c, now, !vs); }
+    if (g_tw_aid_mate) { uint32_t m = g_tw_aid_mate; g_tw_aid_mate = 0;   // (nbot_engage.c: a teammate under fire, its attacker unknown to us: go to it)
+        for (int i = 0; i < n; i++) if (objs[i].handle == m && !objs[i].dead) { g_gl.kind = GK_AID; memcpy(g_gl.pos, objs[i].c, 12); g_gl.who = m; g_gl.t0 = now; g_gl.until = now + 6.0;
+            snprintf(g_gl.what, sizeof g_gl.what, "teammate %08x under fire", m); if (bot_log()) nlog("[nhook] [goal] aid: going to teammate %08x", m); break; } }
     if (!g_gl.kind) gl_pick(now, objs, n, me);
     else {
         float dx = g_gl.pos[0] - o->c[0], dy = g_gl.pos[1] - o->c[1];
-        if (dx * dx + dy * dy < 4.0f) { gl_drop(now, "reached"); gl_pick(now, objs, n, me); }
+        float rr = (g_gl.kind == GK_MATE || g_gl.kind == GK_AID) ? fmaxf(3.0f, 0.6f * g_eg.tw_spacing) : 2.0f;   // (a teammate: at the players' spacing)
+        if (dx * dx + dy * dy < rr * rr) { gl_drop(now, "reached"); gl_pick(now, objs, n, me); }
         else if (now > g_gl.until) { gl_drop(now, "held long enough"); gl_pick(now, objs, n, me); }
+        else if (g_gl.kind == GK_MATE || g_gl.kind == GK_AID) {   // (follow the teammate; dead: drop)
+            int found = 0; for (int i = 0; i < n; i++) if (objs[i].handle == g_gl.who && !objs[i].dead) { memcpy(g_gl.pos, objs[i].c, 12); found = 1; break; }
+            if (!found) { gl_drop(now, "the teammate died"); gl_pick(now, objs, n, me); } }
         else if (g_gl.kind == GK_ENEMY || g_gl.kind == GK_REVENGE) {   // (follow the enemy's newest known position; gone or dead: drop)
             const GlSeen* s = gl_seen(g_gl.who); int alive = 0; for (int i = 0; i < n; i++) if (objs[i].handle == g_gl.who && !objs[i].dead) alive = 1;
             if (!alive) { gl_drop(now, "it died"); gl_pick(now, objs, n, me); } else if (s) memcpy(g_gl.pos, s->pos, 12); }
