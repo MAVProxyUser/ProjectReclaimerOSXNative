@@ -317,6 +317,9 @@ shim/tools/workboard.py on 127.0.0.1:8790 (jobs, direction, tasks, coverage; tab
 Self-coaching + the learn loop (2026-11-08): walker-coach.py (coach.py per walker -> knob steps -> next battle), game-review.py (one
 game vs the map vs everything), learn-loop.py (random public game observed -> review -> refit -> coached walker battle on that map);
 the walker's own inventory / power-ups (nbot.c bot_inv, NHOOK_BOT_NOINV). Recordings: column 17 camo, 18 the other weapon.
+The observer's game is playable: click its window (NHOOK_TAKEOVER: controller via shouldMonitorBackgroundEvents, window raised,
+sound on; the visit lasts until you quit). shim/tools/plan-run.sh = the unattended plan (sampling -> refit -> coached sparring ->
+Firefight -> learn loop; tracks/plan.txt). weapon-kills.py = kills by weapon per match (Learnings tab, recounted every minute).
 Works (live-checked in a 72-player game, 2026-11-07): players, variant, heatmap, feed, kills / deaths / assists from halo3's
 statborg (game engine globals TLS +0x20 + the app's `[capacity] game_globals.statborg`; kill feed EXACT from halo3's game results
 -- versus matrix + per-damage-type kills, nstats.c rs_tick, offline test shim/tools/results-feed-test.sh -- else paired from the

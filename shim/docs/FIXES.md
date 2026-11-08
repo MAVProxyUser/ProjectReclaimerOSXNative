@@ -2985,7 +2985,7 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   10). LOGIC: the recorder writes the game's match clock at a recording's start (header match_time_at_start, its log line "(match
   time N s)"); observe-whole.py counts a finished recording of 1500+ samples when it is not the visit's first or began under 90 s
   into its match (old logs without the clock: as before).
-- **The walkers coach themselves** (2026-11-08 15:40; nbot.c, nbot_goals.c, shim/tools/walker-coach.py) — WHY: the user: "the
+- **The walkers coach themselves** (2026-11-08 15:20; nbot.c, nbot_goals.c, shim/tools/walker-coach.py) — WHY: the user: "the
   walkers can use the coach on themselves eh!?". LOGIC: coach.py's report is made for every walker of a battle (its slot -> the
   test identity from the battle's samples; names never written) against the WINNERS of the same game class on the same map (40+
   player-matches), else that class on every map, else every match; each measure moves one knob half its gap in log space (x2 /
@@ -2999,7 +2999,7 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   coach -> next battle; `round <tracks> <samples>` coaches one battle (--dry: no change), `show` prints the knobs and rounds.
   Per round: K/D, duels won, shot first and the distance to the winners (coach.py's gap averaged; 0 = their numbers) per walker in
   ReclaimerMac/battles/coach/state.json. New knobs default to the old behaviour (1, 1, 0, 1).
-- **The walker knows its inventory and power-ups** (2026-11-08 16:30; nbot.c bot_inv, nbot_engage.c, nbot_goals.c, engage-model.py
+- **The walker knows its inventory and power-ups** (2026-11-08 15:30; nbot.c bot_inv, nbot_engage.c, nbot_goals.c, engage-model.py
   behaviour.powerups) — WHY: the user: "the walker should be aware of its own inventory, and power up status as well". LOGIC: every
   tick bot_inv reads the walker's own unit: the held and the other weapon (class + rank), grenades by type, an overshield (shield
   above 1.05) and active camo (+0x360 above 0.05); `[inv]` log lines on a change. The fighter: switches weapons (vpad Y, 0.15 s, 3 s
@@ -3011,18 +3011,18 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   attacks and close range still tell). Goal draw: fights weigh x2.5 with an overshield / camo (defenders with an overshield survive
   twice as often), an overshielded enemy half; no power-weapon goals with two power weapons in hand, no power-up goals with one
   running. NHOOK_BOT_NOINV=1 = blind to it (the old walker). behaviour(R, D) now gets the duels (it got none: powerups was empty).
-- **Recordings carry camo and the second weapon** (2026-11-08 16:35; match-recorder.py, ntracks.c, nstats.c) — WHY: the walker's
+- **Recordings carry camo and the second weapon** (2026-11-08 15:32; match-recorder.py, ntracks.c, nstats.c) — WHY: the walker's
   inventory logic should be learnt from players, and camo was never recorded. LOGIC: two columns more per player sample: 17 = the
   active camo amount, 18 = the other weapon carried ('' none; the stats page's weapons list minus the one in hand). Old readers
   index up to 16 and are unchanged.
-- **One game against what we assumed** (2026-11-08 16:45; shim/tools/game-review.py) — WHY: the user: "coaching yourself based on
+- **One game against what we assumed** (2026-11-08 15:35; shim/tools/game-review.py) — WHY: the user: "coaching yourself based on
   the dataset you JUST collected for that game vs the assumptions you made about the map, and the larger aggregated data". LOGIC:
   for one cut recording, the same measures over the game, over the map's earlier matches (same class) and over every earlier
   match of that class: first-shot wins, caught looking away, high / low ground, wins and distance per weapon class, radar turns,
   dying outnumbered, help, items, back to the death spot, kills a minute, the winners' K/D line, kills a held-minute per weapon and
   coach.py's fight measures; a SURPRISE vs the map = shares 2+ standard errors of a game this size, other numbers 30%+ (15+ cases).
   tracks/reviews/<recording>.json (+ team_game); the work board's Walkers tab shows the latest.
-- **The learn loop** (2026-11-08 16:50; shim/tools/learn-loop.py, observe-public.sh OBS_RANDOM, walker-coach.py --game-file /
+- **The learn loop** (2026-11-08 15:38; shim/tools/learn-loop.py, observe-public.sh OBS_RANDOM, walker-coach.py --game-file /
   --ded-map) — WHY: the user: "start randomly joining and completing games ... in order to instruct the walker how to play the game
   in question. iterate with the goal of better vs human scoring". LOGIC: a turn = observe-public.sh with OBS_MATCHES=1 OBS_RANDOM=1
   (the server DRAWN with weights exp(score / 8) instead of the best score; no Infection / mods / downloads) -> engage-extract ->
@@ -3031,9 +3031,41 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   winners (top quarter of 8+ players, weight 2) blended with the map's / class's winners (weight 1) -> tracks/learn-loop.json. The
   observer only watches: walkers stay on our own server (bot_allowed); "better vs human scoring" = the walkers' distance to the human
   winners going down. walker-coach.py --dry no longer saves its round.
-- **Work board: Walkers tab** (2026-11-08 16:55; workboard.py #walkers) — the latest game review (this game / the map / everything,
+- **Work board: Walkers tab** (2026-11-08 15:40; workboard.py #walkers) — the latest game review (this game / the map / everything,
   surprises), the learn loop's turns, each walker's knobs and its coached rounds (distance to the winners, K/D, duels won); new job
   kinds learn-loop / walker-coach / game-review / coach.
+- **You can play the observer's game** (2026-11-08 15:45; nvpad.m nh_takeover_install, nhook.c nh_takeover_fire, observe-public.sh,
+  match-recorder.py --you-plays) — WHY: the user: "can you make it so that IF I choose to pickup the controls while you sample
+  public games I can play? it seems to only capture the mouse and not the joystick right now". The observer runs the app with
+  --background (the app's test mode: a 640 x 360 window below the others, never the frontmost app; without it the real profile's
+  borderless full screen would take the display), and the GameController framework delivers a real controller's input only to
+  the frontmost app. LOGIC: NHOOK_TAKEOVER=1 (the observer sets it) arms a local mouse-down monitor; the first click in the game's
+  window turns on +[GCController shouldMonitorBackgroundEvents] (macOS 11.3+), activates the app, puts the window at the normal
+  level and makes it 1600 x 900 (90% of the screen at most) when smaller; nh_takeover_fire turns the sound back on (the mute tap
+  checks g_takeover) and writes NHOOK_TAKEOVER_FILE. observe-public.sh: with that file the visit lasts until the user quits the
+  game (no leaving after a whole match, no time limit, no 5-minute no-match leave), the recorder restarts with --you-plays (header
+  you_plays: the user's slot is a real player: coach.py's You tab). Not live-tested with a controller yet (the user's next
+  take-over is the test).
+- **The plan runs unattended** (2026-11-08 15:46; shim/tools/plan-run.sh) — sample-large (OBS_DONE from PLAN_DONE_LARGE) ->
+  sample-small -> refit -> spar-ffa (walker-coach.py, 2 coached rounds, radar log) -> spar-teams (2v2) -> firefight (one walker on
+  Courtyard; walkers together in Firefight need co-op joins, not done) -> learn (learn-loop.py); tracks/plan.txt; `plan-run.sh
+  <step>` starts at a step. The observer's dylib is a frozen copy (NATIVE_DYLIB) refreshed when no game runs.
+- **Kills by weapon** (2026-11-08 15:55; shim/tools/weapon-kills.py, workboard.py Learnings tab) — WHY: the user: "running kills
+  counts to each weapon in playertable like arrangement. add vehicle guns too ... grenades should also be accounted for. scrape the
+  history ... see the per game progression any time I go to the learnings tab". LOGIC: every public recording's kill events (the
+  game's own feed: how = weapon / vehicle / gunner seat / grenade / melee; ", headshot" = a headshot of that weapon; betrayals
+  apart; our local servers' recordings left out) summed per weapon per match -> tracks/weapon-kills.json (games oldest first, live
+  = recorded in the last 2 minutes; per weapon its kind, kills per game, headshots, betrayals); a per-file cache (size + time)
+  makes a rerun read only new / growing files, and the work board reruns it every minute (wk_loop). The table: class chips (all /
+  slayer / ctf / infection / other), kind chips (hide a kind), sortable columns (kills, share, headshots, games, kills a game, best
+  game, last game), a per-game line; a click opens the weapon's kills game by game (bars named by map, the live match amber);
+  choices kept in localStorage. First count: 26 matches with kill events, 13,632 kills, 52 weapons.
+- **Weapon switches and camo learnt from players** (2026-11-08 15:50; engage-extract.py inventory(), engage-model.py
+  behaviour.inventory, shim/tools/inventory-extract-test.sh) — from recordings with columns 17 / 18: "wswitch" records (the held
+  and the carried weapon trade places: classes, nearest enemy's distance, in a fight) and "camo" records (a stretch under camo:
+  length, share of it firing, first shot's distance, kills, died in it); the model sums switches by class pair (n, median distance,
+  in-fight share) and camo use. Offline test: a synthetic recording (one BR -> shotgun switch at 6 units in a fight, one 3 s camo
+  stretch firing at its end; an old 17-column recording gives none): all PASS.
 
 ## 19. Performance
 
