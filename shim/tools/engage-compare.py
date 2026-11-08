@@ -19,7 +19,20 @@ if not WDIR: print(__doc__); sys.exit(1)
 weng = os.path.join(tempfile.mkdtemp(), 'eng')
 subprocess.run([sys.executable, os.path.join(HERE, 'engage-extract.py'), '--tracks', WDIR, '--out', weng, '--force', '--quiet'], capture_output=True, text=True)
 subprocess.run([sys.executable, os.path.join(HERE, 'engage-extract.py'), '--quiet'], capture_output=True, text=True)   # (the players' newest recordings)
-P, W = report(os.path.join(SUP, 'tracks', 'engagements')), report(weng)
+# the players on the walkers' maps when they have 300+ duels there (--all-maps: every map): small Guardian with Assault Rifles
+# is no place to fight at Valhalla's Battle Rifle distances
+peng = os.path.join(SUP, 'tracks', 'engagements'); wmaps = set()
+for f in glob.glob(os.path.join(weng, '*.eng.jsonl.gz')):
+    for l in gzip.open(f, 'rt'): wmaps.add(json.loads(l).get('map'))
+if '--all-maps' not in sys.argv and wmaps:
+    sel = os.path.join(tempfile.mkdtemp(), 'eng'); os.makedirs(sel); n = 0
+    with gzip.open(os.path.join(sel, 'players.eng.jsonl.gz'), 'wt') as o:
+        for f in glob.glob(os.path.join(peng, '*.eng.jsonl.gz')):
+            for l in gzip.open(f, 'rt'):
+                e = json.loads(l)
+                if e.get('map') in wmaps: o.write(l); n += e.get('kind', 'duel') == 'duel'
+    if n >= 300: peng = sel; print('players on %s only (%d duels; --all-maps = every map)' % (', '.join(sorted(m for m in wmaps if m)), n))
+P, W = report(peng), report(weng)
 if not P or not W: print('missing engagements (players: %s, walkers: %s)' % (bool(P), bool(W))); sys.exit(1)
 p, w = P['all_but_infection'], W['all_but_infection']
 def g(d, *ks):
@@ -55,7 +68,7 @@ if wt:
                 if c.get('kind') != 'choice' or c['class'] == 'infection': continue
                 sc = [sum(wt[k] * x for k, x in zip(FE, fv)) for fv in c['feat']]; n += 1; hit += sc.index(max(sc)) == c['chosen']
         return hit / n if n else None, n
-    pa, pn = agree(os.path.join(SUP, 'tracks', 'engagements')); wa, wn = agree(weng)
+    pa, pn = agree(peng); wa, wn = agree(weng)
     print('%-38s %9s %9s %7s' % ("players' choice rule names the target", '%.2f' % pa if pa else '-', '%.2f' % wa if wa else '-', '%.2f' % (wa / pa) if pa and wa else '-'))
     out.append({'metric': "players' choice rule names the target", 'players': pa, 'walkers': wa})
     if pa and wa: lr.append(abs(math.log(wa / pa)))

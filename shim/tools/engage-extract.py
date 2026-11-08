@@ -312,7 +312,7 @@ def main():
     os.makedirs(OUT, exist_ok=True)
     recs = sorted(glob.glob(os.path.join(TRACKS, '*.jsonl.gz'))); done = tot = 0
     for p in recs:
-        if time.time() - os.path.getmtime(p) < 120: continue   # (still being recorded)
+        if not FORCE and time.time() - os.path.getmtime(p) < 120: continue   # (still being recorded; --force takes it: a battle's folder right after it ends)
         o = os.path.join(OUT, os.path.basename(p).replace('.jsonl.gz', '.eng.jsonl.gz'))
         if not FORCE and os.path.exists(o) and os.path.getmtime(o) >= os.path.getmtime(p): continue
         eps = cut(p); tmp = o + '.tmp'

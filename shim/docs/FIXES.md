@@ -2832,6 +2832,20 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   player's grenades carried (row index 16; a drop = a throw); duels list each side's throws (time, distance); the model's
   "grenades" = throws per minute of fighting and the throw distances (25..75%); the walker uses that band and rate once 50+
   duels carry counts (NHOOK_BOT_GREN set = its own interval), the next throw time drawn once per throw.
+- **The new fighter against the players, first battle** (2026-11-08 12:15; nbot_engage.c, nbot.c, engage-compare.py,
+  engage-extract.py, engage-model.py) — WHY: a 5-minute 4-walker battle with the engagement fighter (champion tactics, distance
+  x1) scored 62% fight-likeness against last night's 64% on the same player data. Better: closing in (+0.43 vs -0.08 u/s),
+  outnumbered deaths (42% vs 11%; players 47-57%), turn delay (1.7 vs 0.5 s). Worse: the players' choice rule named the walker's
+  target 72% of the time and the players' own 39% (argmax = too predictable); strafing 0.69 u/s / switch 1.54 s (players 0.91 /
+  0.73: the tactics' strafe scale x0.76 shrank the replayed real moves); turning to a second attacker 3% (players 14%: after a
+  switch the pre-reaction turn rate 0.73 rad/s needs ~3 s for 130 deg, the measure's window); aim 3.8 deg off (players 6.8);
+  the band's push-back below its 25% kept walkers at its near edge while players close in at 1.3 u/s. LOGIC: the new target is
+  DRAWN from the rule's probabilities (NHOOK_BOT_PICK=best = argmax); replayed moves scaled by NHOOK_BOT_LIBSCALE (1), not the
+  strafe tactic; a deliberate second-attacker switch turns at full speed (its delay was the reaction); NHOOK_BOT_NOISE (x aim
+  noise, 1); with replayed moves only a pull INTO the band. Tools: engage-compare.py compares with the players on the walkers'
+  own maps when they have 300+ duels there (--all-maps = all: small Guardian with Assault Rifles vs Valhalla's Battle Rifles was
+  no comparison); engage-extract.py --force takes a recording under 2 minutes old (a battle that just ended); engage-model.py's
+  choice fit runs batched (padded sets + mask: minutes -> seconds) and writes the model atomically.
 
 ## 19. Performance
 

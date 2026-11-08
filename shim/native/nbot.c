@@ -277,7 +277,9 @@ static void bot_step_body(void) {
     if (fight && spar && have_tg) {
         static uint32_t cur; static double tacq, tvis, tswitch, tmelee, tgren, tlos, tlast; static float ox, oy, side = 1;
         double dt = tlast ? now - tlast : 0.033; if (dt > 0.2) dt = 0.2; tlast = now;
-        if (ftg.handle != cur) { cur = ftg.handle; tacq = now; tvis = 0; ox = (bot_rand01() - 0.5f) * 0.15f; oy = (bot_rand01() - 0.5f) * 0.08f; }
+        if (ftg.handle != cur) { cur = ftg.handle; tacq = now; tvis = 0;
+            ox = (bot_rand01() - 0.5f) * 0.15f; oy = (bot_rand01() - 0.5f) * 0.08f;
+            if (g_eg_fast && g_eg_fast == cur) { tacq = now - 30; g_eg_fast = 0; } }   // (a second attacker: the decision delay was its reaction -- turn at full speed)
         { static double tput; if (g_los_t > tput && g_los_req == g_los_done) { tput = g_los_t; los_put(g_los_res_tgt, g_los_res, g_los_t); } }   // (the last answer -> the cache)
         if (now - tlos > 0.07 && g_los_req == g_los_done) { tlos = now;   // ask for the line to one enemy's chest: the target every other time, else the next of the 3 nearest
             static int rr; const NovObj* q = &ftg; rr++;
@@ -296,7 +298,10 @@ static void bot_step_body(void) {
         static float rk = -1, t0r = -1; if (rk < 0) { const char* e = getenv("NHOOK_BOT_REACT"); rk = e ? (float)atof(e) : 1.6f; e = getenv("NHOOK_BOT_TURN0"); t0r = e ? (float)atof(e) : 0.73f; }
         // (07:50: walker-model's "reaction" = 30 deg -> 5 deg of aim, so the turn rate BEFORE the reaction time decides it: 1.5 rad/s
         //  measured 0.49-0.53 s against the players' 1.08 whatever the delay; NHOOK_BOT_TURN0 = that rate, NHOOK_BOT_REACT the delay factor)
-        float react = g_bm.reaction * (1.25f - skill) * rk, noise = g_bm.aim_err * (1.25f - skill) * 1.6f / 57.2958f;
+        // NHOOK_BOT_NOISE: x the aim noise (2026-11-08 12:15: on Guardian the players' horizontal aim error while attacking is 6.8 deg,
+        // the walkers' 3.8 -- lag and moving targets the walkers do not have; engage-compare.py)
+        static float nk = -1; if (nk < 0) { const char* e = getenv("NHOOK_BOT_NOISE"); nk = e ? strtof(e, 0) : 1.0f; }
+        float react = g_bm.reaction * (1.25f - skill) * rk, noise = g_bm.aim_err * (1.25f - skill) * 1.6f * nk / 57.2958f;
         if (seen) {
             // aim: OU noise around the exact angles, turning at most 1.5 rad/s before the reaction time is up, 7 rad/s after
             float th = 0.45f, k = (float)dt / th, sg = noise * sqrtf(2.0f * (float)dt / th);
@@ -324,8 +329,11 @@ static void bot_step_body(void) {
                 if (now > tswitch) { side = -side; tswitch = now + g_bm.strafe_switch * kswitch * (0.6f + 0.8f * bot_rand01()); }
                 float lat = side * fminf(1.0f, kstrafe * (0.25f + g_bm.strafe_rms / run));
                 if (g_eg.on && eg_move(wc, tdist, now, &el, &er)) {   // a real player's moves: across as recorded, toward / away pulled into the band
-                    lat = fmaxf(-1.0f, fminf(1.0f, kstrafe * el / run));
-                    float pull = tdist > p75 * kdist ? 0.6f : tdist < p25 * kdist ? -0.5f : 0.0f; r = fmaxf(-1.0f, fminf(1.0f, er / run + pull));
+                    static float lsc = -1; if (lsc < 0) { const char* e = getenv("NHOOK_BOT_LIBSCALE"); lsc = e ? strtof(e, 0) : 1.0f; }   // (the players' own moves: not the tactics' strafe scale)
+                    lat = fmaxf(-1.0f, fminf(1.0f, lsc * el / run));
+                    // pulled in when beyond the band, never pushed back inside it: the players close in at 1.3 units/s with shields up
+                    // on Guardian (engage-compare.py; the push-back made the walkers hover at the band's near edge)
+                    float pull = tdist > p75 * kdist ? 0.6f : 0.0f; r = fmaxf(-1.0f, fminf(1.0f, er / run + pull));
                     if (o->shield < retreat && o->shield >= 0) r = -backoff; }
                 // never off the floor: test where this step leads (1 unit along the move); flip the strafe, then drop the back-off
                 float fx = cosf(yaw0), fy = sinf(yaw0), lx = -fy, ly = fx;

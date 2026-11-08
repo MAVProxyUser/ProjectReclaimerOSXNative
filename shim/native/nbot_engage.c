@@ -82,6 +82,7 @@ static int eg_band(const char* cls, float* p25, float* p75) {   // the players' 
 // per-unit memory: shield + health a moment ago (just hurt), its last drop, whether it aimed at us while we were hurt
 typedef struct { uint32_t h; float vit; double hurt_t, att_t, seen_tgt; int asked; } EgUnit;
 static EgUnit g_egu[128]; static int g_negu;
+static volatile uint32_t g_eg_fast;   // a target taken on purpose (a second attacker after the players' delay): turned to at full speed
 static EgUnit* eg_unit(uint32_t h) { for (int i = 0; i < g_negu; i++) if (g_egu[i].h == h) return &g_egu[i];
     if (g_negu < 128) { EgUnit* u = &g_egu[g_negu++]; memset(u, 0, sizeof *u); u->h = h; u->vit = -1; return u; }
     EgUnit* u = &g_egu[arc4random_uniform(128)]; memset(u, 0, sizeof *u); u->h = h; u->vit = -1; return u; }
@@ -106,10 +107,13 @@ static int eg_choose(const NovObj* objs, int n, int me, const float* cam, float 
         float p = off < 45 ? g_eg.p_view : off >= 90 ? g_eg.p_behind : g_eg.p_mid;
         if (bot_rand01() < p) { sw_to = t->handle; sw_at = now + g_eg.turn_s * (0.5f + bot_rand01()); if (bot_log()) nlog("[nhook] [fight] second attacker %08x (%.0f deg off): turning to it in %.1f s", t->handle, off, sw_at - now); }
         else if (bot_log()) nlog("[nhook] [fight] second attacker %08x (%.0f deg off): staying on the target", t->handle, off); }
-    if (sw_to && now >= sw_at) { for (int i = 0; i < n; i++) if (objs[i].handle == sw_to && !objs[i].dead && i != me) { prev = cur; prev_t = now; cur = sw_to; cur_t0 = now; cur_seen = now; ci = i; break; } sw_to = 0; }
+    if (sw_to && now >= sw_at) { for (int i = 0; i < n; i++) if (objs[i].handle == sw_to && !objs[i].dead && i != me) { prev = cur; prev_t = now; cur = sw_to; cur_t0 = now; cur_seen = now; ci = i; g_eg_fast = sw_to; break; } sw_to = 0; }
     if (ci >= 0 && now - cur_seen < 1.0) return ci;   // (kept: alive and seen in the last second)
-    // a new target: the players' choice rule over the KNOWN enemies within 45 units
-    int bi = -1; float bs = -1e30f;
+    // a new target: the players' choice rule over the KNOWN enemies within 45 units -- DRAWN from its probabilities (exp(score) /
+    // sum), not the best score: the best-score walker was more predictable than the players (the rule named its target 72% of the
+    // time, the players' own 39%: engage-compare.py, 2026-11-08 12:10). NHOOK_BOT_PICK=best = the old argmax.
+    static int pickbest = -1; if (pickbest < 0) { const char* e = getenv("NHOOK_BOT_PICK"); pickbest = e && !strcmp(e, "best"); }
+    int bi = -1; float bs = -1e30f; int ci2[64]; float cs2[64]; int nc2 = 0;
     for (int i = 0; i < n; i++) { const NovObj* t = &objs[i]; if (t->type || t->dead || i == me || !bot_enemy(o, t)) continue;
         float dx = t->c[0] - cam[0], dy = t->c[1] - cam[1], dz = t->c[2] - cam[2], d = sqrtf(dx * dx + dy * dy + dz * dz); if (d > 45) continue;
         EgUnit* u = eg_unit(t->handle); float off = fabsf(bot_wrap(atan2f(dy, dx) - yaw0)) * 57.2958f; int att = now - u->att_t < 1.5, pv = t->handle == prev && now - prev_t < 3.0;
@@ -118,7 +122,10 @@ static int eg_choose(const NovObj* objs, int n, int me, const float* cam, float 
         float f[8] = {logf(d > 0.5f ? d : 0.5f), off / 180.0f, (float)att, fminf(1.5f, (t->shield + t->health) / 2), (float)pv, (float)mate, (float)(now - u->hurt_t < 1.0), (t->c[2] - o->c[2]) / 5.0f};
         float s = 0; for (int k = 0; k < 8; k++) s += g_eg.w[k] * f[k];
         int vs = vis_of(t->handle, now); s += vs == 1 ? 1.5f : vs == 0 ? -1.5f : 0;
+        if (nc2 < 64) { ci2[nc2] = i; cs2[nc2] = s; nc2++; }
         if (s > bs) { bs = s; bi = i; } }
+    if (!pickbest && nc2 > 1) { float sum = 0; for (int k = 0; k < nc2; k++) { cs2[k] = expf(cs2[k] - bs); sum += cs2[k]; }
+        float r = bot_rand01() * sum; for (int k = 0; k < nc2; k++) { r -= cs2[k]; if (r <= 0) { bi = ci2[k]; break; } } }
     if (bi >= 0 && objs[bi].handle != cur) { if (cur) { prev = cur; prev_t = now; } cur = objs[bi].handle; cur_t0 = now; cur_seen = now;
         if (bot_log()) nlog("[nhook] [fight] new target %08x (score %.2f)", cur, bs); }
     else if (bi < 0 && ci >= 0) return ci;   // (nobody else known: stay on the hidden one -- the walker hunts it)

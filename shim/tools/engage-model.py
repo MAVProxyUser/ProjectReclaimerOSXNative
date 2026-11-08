@@ -48,12 +48,14 @@ def fit_choice(C, iters=400, l2=0.02):
     if len(C) < 30: return None
     allf = np.array([f for c in C for f in c['feat']], float); mu = allf.mean(0); sd = allf.std(0); sd[sd < 1e-6] = 1
     rnd = random.Random(5); idx = list(range(len(C))); rnd.shuffle(idx); cut = len(idx) // 5; test = [C[i] for i in idx[:cut]]; train = [C[i] for i in idx[cut:]]
-    sets = [((np.array(c['feat'], float) - mu) / sd, c['chosen']) for c in train]; w = np.zeros(len(FEATS))
+    # (batched: every choice set padded to the largest, a mask for the padding -- the per-set loop took minutes on a day's data)
+    K = max(len(c['feat']) for c in train); S = len(train); Fb = np.zeros((S, K, len(FEATS))); Mk = np.zeros((S, K), bool); ch = np.array([c['chosen'] for c in train])
+    for i, c in enumerate(train): f = (np.array(c['feat'], float) - mu) / sd; Fb[i, :len(f)] = f; Mk[i, :len(f)] = True
+    w = np.zeros(len(FEATS)); Fc = Fb[np.arange(S), ch]
     for it in range(iters):
-        g = -l2 * w
-        for F, ch in sets:
-            sc = F @ w; sc -= sc.max(); p = np.exp(sc); p /= p.sum(); g += F[ch] - p @ F
-        w += 1.0 * g / len(sets)
+        sc = np.where(Mk, Fb @ w, -np.inf); sc -= sc.max(axis=1, keepdims=True); p = np.exp(sc); p /= p.sum(axis=1, keepdims=True)
+        g = (Fc - np.einsum('sk,skf->sf', p, Fb)).sum(axis=0) - l2 * w * 1.0
+        w += 1.0 * g / S
     def top1(rule):
         return sum(1 for c in test if rule(np.array(c['feat'], float)) == c['chosen']) / max(1, len(test))
     res = {'logit': top1(lambda F: int(np.argmax(((F - mu) / sd) @ w))), 'nearest': top1(lambda F: int(np.argmin(F[:, 0]))),
@@ -146,6 +148,11 @@ def stats(D):
         S['grenades'] = {'duels': len(G), 'duels_with_a_throw': r2(sum(bool(e['out'].get('a_throws') or e['out'].get('b_throws')) for e in G) / len(G), 3),
                          'throws_per_fight_min': r2(len(th) / (fs / 60.0), 2) if fs > 0 else None, 'throw_dist_p25': r2(pct([x[1] for x in th], .25)),
                          'throw_dist_median': r2(pct([x[1] for x in th], .5)), 'throw_dist_p75': r2(pct([x[1] for x in th], .75)), 'throw_at_s_median': r2(pct([x[0] for x in th], .5))}
+    hb = defaultdict(lambda: [0, 0])   # high ground: a's height over b (dz = b - a) when the attack began
+    for e in dec:
+        dz = -e['ctx']['dz']; k = 'a 2+ below' if dz < -2 else 'a 0.5..2 below' if dz < -0.5 else 'level' if dz <= 0.5 else 'a 0.5..2 above' if dz <= 2 else 'a 2+ above'
+        hb[k][0] += e['out']['win'] == 'a'; hb[k][1] += 1
+    S['a_wins_by_height'] = {k: [r2(w / n, 3), n] for k, (w, n) in hb.items()}
     S['third_party'] = r2(sum(e['out']['win'] == 'third' for e in D) / len(D), 3)
     # distance when the attack began, by the attacker's weapon class
     byw = defaultdict(list)
@@ -237,7 +244,7 @@ def main():
              'library': library(M, random.Random(11))}
     mm = multi_stats([r for r in R if r.get('kind', 'duel') != 'duel' and r['class'] in MODEL_CLASSES])
     model['target'] = (mm.get('target_choice') or {}).get('weights'); model['multi'] = {k: v for k, v in mm.items() if k != 'target_choice'}
-    json.dump(model, open(OUT, 'w'), separators=(',', ':'))
+    tmp = OUT + '.tmp%d' % os.getpid(); json.dump(model, open(tmp, 'w'), separators=(',', ':')); os.replace(tmp, OUT)   # (atomic: a walker starting now reads the old or the new file)
     if '--json' in sys.argv: json.dump(rep, open(arg('--json', ''), 'w'), indent=1)
     print(json.dumps(rep, indent=1))
     print('model -> %s (%d library pieces in %d groups)' % (OUT, sum(len(v) for v in model['library'].values()), len(model['library'])))
