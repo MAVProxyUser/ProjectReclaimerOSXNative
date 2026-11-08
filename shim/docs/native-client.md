@@ -208,7 +208,8 @@ every match the hook sees.
 5. **Checking them.** `walker-battle.sh` (WB_IDS, WB_WATCH, DED_GAME / DED_MAP on the server) + `engage-compare.py`
    (fight-likeness against the players on the same map) + `walker-compare.py` (movement); `native-firefight.sh` for Firefight.
 6. **Watching it all.** `python3 shim/tools/workboard.py` (http://127.0.0.1:8790/): what runs, the direction, the task list, "What the
-   game is learning" (`python3 shim/tools/learnings.py`: findings with their sample sizes), the tome's coverage grid, the observer's log; `workboard.py task "..." doing|next|done` / `workboard.py direction "..."`.
+   game is learning" (`python3 shim/tools/learnings.py`: findings with their sample sizes), "You" (`python3 shim/tools/coach.py`:
+   your own public matches -- the recorder marks your slot -- against the winners, measure by measure), the tome's coverage grid, the observer's log; `workboard.py task "..." doing|next|done` / `workboard.py direction "..."`.
 
 ## Lanes (2026-11-08, nlanes.c)
 

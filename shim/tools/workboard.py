@@ -100,7 +100,9 @@ def status():
     per_map = sorted(os.path.basename(p)[:-len('.engage.json')] for p in glob.glob(os.path.join(TR, 'maps', '*.engage.json')))
     try: learn = json.load(open(os.path.join(TR, 'learnings.json')))
     except Exception: learn = None
-    return {'now': time.time(), 'jobs': jobs, 'apps': apps, 'direction': direction, 'tome': tome_load(), 'per_map_models': per_map, 'learnings': learn, 'observer_log': tail(obs[0], 8) if obs else [], 'recorder': tail(rec[0], 4) if rec else [],
+    try: coach = json.load(open(os.path.join(TR, 'coach.json')))
+    except Exception: coach = None
+    return {'now': time.time(), 'jobs': jobs, 'apps': apps, 'direction': direction, 'tome': tome_load(), 'per_map_models': per_map, 'learnings': learn, 'coach': coach, 'observer_log': tail(obs[0], 8) if obs else [], 'recorder': tail(rec[0], 4) if rec else [],
             'live': live, 'totals': totals(), 'tasks': tasks_load()}
 
 PAGE = r'''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Work board</title>
@@ -117,9 +119,10 @@ h1{font-size:20px;margin:0 0 4px}h2{font-size:13px;letter-spacing:.08em;text-tra
 .li .n{color:var(--dim);font-size:11px;margin-left:4px}.li.weak{opacity:.55}
 #tabs{display:inline-flex;gap:4px;margin-left:12px;vertical-align:middle}#tabs a{font-size:13px;font-weight:500;color:var(--dim);text-decoration:none;padding:3px 10px;border:1px solid var(--line);border-radius:4px}
 #tabs a.on{color:var(--fg);border-color:var(--acc)}#tabs a:hover{color:var(--fg)}</style></head><body>
-<h1>Work board <nav id="tabs"><a href="#" data-v="work">Work</a><a href="#learnings" data-v="learnings">Learnings</a></nav> <span class="k" id="upd"></span></h1>
+<h1>Work board <nav id="tabs"><a href="#" data-v="work">Work</a><a href="#learnings" data-v="learnings">Learnings</a><a href="#you" data-v="you">You</a></nav> <span class="k" id="upd"></span></h1>
 <div class="k">What is running on this Mac for Reclaimer, what is being worked on, and what the game is learning from real players. Refreshes every 3 s.</div><br>
 <div id="learnview" hidden><div class="p"><h2>What the game is learning <span class="k" id="lrsrc"></span></h2><div class="k" style="margin-bottom:8px">Plain-language findings from every recorded public match (Infection left out of the fighting findings), each with the number of cases it rests on; thin ones (under 30 cases) are dimmed. Rebuilt every 20 minutes while sampling runs.</div><div id="lrn" class="lgrid"></div></div></div>
+<div id="youview" hidden><div class="p"><h2>You vs the winners <span class="k" id="ysrc"></span></h2><div class="k" style="margin-bottom:8px">Your public matches (played through our launcher: the recorder marks your slot) next to the WINNERS -- the top quarter of players by K/D in non-Infection matches -- and everyone, measure by measure; the biggest gaps first, each with what the winners do differently. shim/tools/coach.py.</div><div id="you"></div></div></div>
 <div id="workview">
 <div class="p" id="dirp" style="margin-bottom:14px"><h2>Direction</h2><div id="dir"></div></div>
 <div class="grid"><div class="p"><h2>Running now</h2><div id="jobs"></div></div><div class="p"><h2>Game instances</h2><div id="apps"></div><div id="live"></div></div>
@@ -151,10 +154,15 @@ async function tick(){try{const j=await (await fetch('/status.json')).json();
    document.getElementById('lrsrc').textContent=`· ${s.recordings} matches, ${s.minutes} min, ${(s.duels||0).toLocaleString()} duels (${(s.decided||0).toLocaleString()} ending in a kill), ${s.maps} maps · refreshed ${ago(L.updated)}`;
    document.getElementById('lrn').innerHTML=L.sections.map(sc=>`<div class="lcard"><h3>${E(sc.topic)}</h3>${sc.items.map(i=>`<div class="li${i.weak?' weak':''}"><b>${E(i.title)}</b> ${E(i.text)}<span class="n">n=${(i.n||0).toLocaleString()}${i.weak?' · thin':''}</span></div>`).join('')||'<div class="none">nothing yet</div>'}</div>`).join(''); }
  else document.getElementById('lrn').innerHTML='<div class="none">no findings yet (shim/tools/learnings.py)</div>';
+ const C=j.coach; if(C&&C.rows){ document.getElementById('ysrc').textContent=`· ${C.pretend?'EXAMPLE (a recorded player stands in for you until your own matches are recorded) · ':''}${C.you.matches} match(es), K/D ${C.you.kd??'-'} · winners: ${C.winners.players} players, K/D ${C.winners.kd_from}+ · refreshed ${ago(C.updated)}`;
+   document.getElementById('you').innerHTML=`<table style="border-collapse:collapse;width:100%;font-size:13px"><tr><th style="text-align:left">measure</th><th>you</th><th>winners</th><th>everyone</th><th style="text-align:left">verdict</th></tr>`+
+    C.rows.map(r=>`<tr style="border-top:1px solid var(--line)${r.thin?';opacity:.55':''}"><td>${E(r.measure)}</td><td style="text-align:center"><b>${E(r.you)}</b></td><td style="text-align:center">${E(r.winners)}</td><td style="text-align:center" class="k">${E(r.everyone)}</td><td style="color:${r.advice?'var(--go)':'var(--ok)'}">${E(r.verdict)}${r.thin?' <span class="k">(thin)</span>':''}${r.advice?`<div class="k">-> ${E(r.advice)}</div>`:''}</td></tr>`).join('')+'</table>'; }
+ else document.getElementById('you').innerHTML=`<div class="none">${E((C&&C.note)||'no report yet (shim/tools/coach.py)')}</div>`;
  document.getElementById('obs').textContent=(j.observer_log||[]).join('\n')||'(no observer log)'; document.getElementById('rec').textContent=(j.recorder||[]).join('\n');
 }catch(e){document.getElementById('upd').textContent='· not answering'} setTimeout(tick,3000)}
-function showView(){ const l=location.hash==='#learnings'; document.getElementById('learnview').hidden=!l; document.getElementById('workview').hidden=l;
-  for(const a of document.querySelectorAll('#tabs a')) a.classList.toggle('on',(a.dataset.v==='learnings')===l); }
+function showView(){ const v=location.hash==='#learnings'?'learnings':location.hash==='#you'?'you':'work';
+  document.getElementById('learnview').hidden=v!=='learnings'; document.getElementById('youview').hidden=v!=='you'; document.getElementById('workview').hidden=v!=='work';
+  for(const a of document.querySelectorAll('#tabs a')) a.classList.toggle('on',a.dataset.v===v); }
 window.addEventListener('hashchange',showView); showView();
 tick();</script></body></html>'''
 

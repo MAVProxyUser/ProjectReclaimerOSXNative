@@ -2968,6 +2968,17 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   the tome and rewrites the findings every 20 minutes while sampling runs. The board has tabs like the stats page (the user: "make the
   results a tab on the work board page ... just like we use tabs on the stats service"): Work (direction, jobs, tasks, data,
   coverage, observer) and Learnings (#learnings).
+- **You vs the winners** (2026-11-08 15:00; ntracks.c, engage-extract.py, shim/tools/coach.py, workboard.py "You" tab) — WHY: the
+  user: "theoretically if I played a few matches you could tell me what I do wrong vs what the winning population of halo that
+  you've observed does eh?". LOGIC: nhook's recorder writes the local player's slot as "you" (its header's you_plays says it is a
+  real player: engage-extract.py keeps it in -- an observer's "you" stays out -- and names it in the meta record's local_slot);
+  engage-extract.py adds one "player" summary per player of a match (kills, deaths, time, shots, hits, team) and the player's slot
+  to the contact / pressure / respawn / aid records (aid: the helper and the teammates near). coach.py: the WINNERS = the top
+  quarter by (kills + 1) / (deaths + 1) of the player-matches of 5+ minutes outside Infection (you left out); per measure your
+  pooled number, the winners', everyone's, a verdict and the winners' way where you are behind, biggest gaps first: K/D, duels won,
+  shot first, caught looking away, turn-back time, aim error, strafing when shot / attacking, closing in, jumps and grenades a
+  fight-minute, turning to radar blips, dying outnumbered, help given / got, fight distance by weapon class. --pretend <file>
+  <slot> tries it on a recorded player. tracks/coach.json; the work board's You tab.
 
 ## 19. Performance
 

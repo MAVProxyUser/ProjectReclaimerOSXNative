@@ -102,16 +102,21 @@ def cut(path):
     t = np.array([s['t'] for s in S], dtype=np.float64)
     alive = np.zeros((T, N), bool); X = np.zeros((T, N)); Y = np.zeros((T, N)); Z = np.zeros((T, N)); YAW = np.zeros((T, N))
     SH = np.zeros((T, N)); HP = np.zeros((T, N)); SHOTS = np.zeros((T, N)); TEAM = np.full((T, N), -1, int); VEH = np.zeros((T, N), bool)
+    KILLS = np.zeros((T, N)); DEATHS = np.zeros((T, N)); HITS = np.zeros((T, N)); PRESENT = np.zeros((T, N), bool)
     WPN = np.full((T, N), '', dtype=object); VNAME = np.full((T, N), '', dtype=object); you = np.full(T, -1, int); GREN = np.full((T, N), -1.0)
     for k, s in enumerate(S):
         you[k] = s.get('you', -1)
         for r in s['p']:
             if not isinstance(r[0], int) or r[0] not in ix: continue
-            c = ix[r[0]]; alive[k, c] = bool(r[2]) and (r[3] or r[4]); X[k, c], Y[k, c], Z[k, c] = r[3], r[4], r[5]; YAW[k, c] = r[6]
+            c = ix[r[0]]; PRESENT[k, c] = True; alive[k, c] = bool(r[2]) and (r[3] or r[4]); X[k, c], Y[k, c], Z[k, c] = r[3], r[4], r[5]; YAW[k, c] = r[6]
             SH[k, c], HP[k, c], TEAM[k, c] = r[8], r[9], r[1]; WPN[k, c] = r[10] or ''; VNAME[k, c] = r[11] or ''; VEH[k, c] = bool(r[11])
             SHOTS[k, c] = r[14] if len(r) > 14 else 0
+            KILLS[k, c] = r[12] if len(r) > 12 else 0; DEATHS[k, c] = r[13] if len(r) > 13 else 0; HITS[k, c] = r[15] if len(r) > 15 else 0
             if len(r) > 16: GREN[k, c] = r[16]
-    me = np.bincount(you[you >= 0]).argmax() if (you >= 0).any() else -1   # the observer (left out: it only stands there)
+    local = int(np.bincount(you[you >= 0]).argmax()) if (you >= 0).any() else -1
+    # the observer (left out: it only stands there) -- but in a recording of the local player's own game (nhook's recorder: you_plays)
+    # "you" is a real player: kept in, and named in the meta record as local_slot (shim/tools/coach.py)
+    me = -1 if head.get('you_plays') else local
     cls = mode_class(head.get('mode'), head.get('variant'), head.get('engine') or (head.get('mode') if head.get('source') == 'nhook' else None)); inf = cls == 'infection'
     # velocities: +-2 samples, inside alive stretches, < 12 u/s on foot (a respawn / teleport otherwise)
     VX = np.full((T, N), np.nan); VY = np.full((T, N), np.nan); VZ = np.full((T, N), np.nan)
@@ -216,7 +221,17 @@ def cut(path):
     # META (the tome: shim/tools/engage-model.py tracks/tome.json): what this recording is -- map, game type, length, players
     out.append({'kind': 'meta', 'file': os.path.basename(path), 'map': head.get('map'), 'mode': head.get('mode'), 'variant': head.get('variant'), 'class': cls,
                 'start': head.get('start'), 'samples': int(T), 'seconds': round(float(t[-1] - t[0]), 1) if T > 1 else 0, 'players_max': int(alive.sum(axis=1).max()) if T else 0,
-                'source': head.get('source') or 'match-recorder', 'kills': sum(1 for e in E if e.get('ev') == 'kill')})
+                'source': head.get('source') or 'match-recorder', 'kills': sum(1 for e in E if e.get('ev') == 'kill'),
+                'local_slot': local if head.get('you_plays') else None})
+    # PLAYERS: one summary per player of the match (coach.py's winners: the top quarter by kills / deaths)
+    dtt = np.clip(np.diff(t, prepend=t[0]), 0, 0.5)
+    for c in range(N):
+        if slots[c] == me or not PRESENT[:, c].any(): continue
+        pres = float(dtt[PRESENT[:, c]].sum())
+        if pres < 60: continue
+        out.append({'kind': 'player', 'file': os.path.basename(path), 'map': head.get('map'), 'class': cls, 'slot': slots[c], 'you': bool(head.get('you_plays') and slots[c] == local),
+                    'seconds': round(pres, 1), 'kills': int(KILLS[:, c].max()), 'deaths': int(DEATHS[:, c].max()), 'shots': int(SHOTS[:, c].max()), 'hits': int(HITS[:, c].max()),
+                    'team': int(np.bincount(TEAM[PRESENT[:, c], c] + 1).argmax()) - 1 if PRESENT[:, c].any() else -1})
     return out
 
 POWER = ('rocket', 'sniper', 'beam rifle', 'spartan laser', 'shotgun', 'energy sword', 'gravity hammer', 'hammer', 'fuel rod', 'missile pod', 'flamethrower', 'plasma cannon', 'overshield', 'camo', 'power-up', 'powerup')
@@ -368,7 +383,7 @@ def multi(path, head, t, slots, me, inf, cls, alive, X, Y, Z, YAW, SH, HP, TEAM,
                     if hn > 0.1 and (VX[q, i] * cx + VY[q, i] * cy) / hn < -1.0: back += 1
                 died = bool((~alive[k1:min(T, k1 + 30), i]).any())
                 kl = sum(1 for (kt, ka, kb, kh) in kills if ka == slots[i] and t[k] <= kt <= t[k1] + 3.0)
-                out.append(dict(base, kind='pressure', team_game=team_game, attackers=int(max(NA[k:k1 + 1, i])), level=lvl, dur=round(float(t[k1] - t[k]), 2),
+                out.append(dict(base, kind='pressure', i=slots[i], team_game=team_game, attackers=int(max(NA[k:k1 + 1, i])), level=lvl, dur=round(float(t[k1] - t[k]), 2),
                                 retreat_share=round(back / max(1, k1 - k + 1), 3), died=died, kills=kl, own_vit=round(vit(k, i), 3), mates=int(((side[k] == side[k, i]) & alive[k] & pl & (np.hypot(X[k] - X[k, i], Y[k] - Y[k, i]) < 15)).sum()) - 1))
             k = k1 + 1
     # join (team games): a teammate starts on enemy c within 25 units of i, i has no target -> i on c within 3 s?
@@ -405,7 +420,7 @@ def multi(path, head, t, slots, me, inf, cls, alive, X, Y, Z, YAW, SH, HP, TEAM,
                 if ATT[q, c, i]: hit = True; break
                 ex, ey = X[q, c] - X[q, i], Y[q, c] - Y[q, i]
                 if abs((YAW[q, i] - math.degrees(math.atan2(ey, ex)) + 180) % 360 - 180) < 30: turned = round(float(t[q] - t[k]), 2); break
-            out.append(dict(base, kind='contact', dist=round(float(d[k, c]), 2), off=round(float(off[k, c]), 1), speed=round(float(SPD[k, c]), 2), own_speed=round(float(SPD[k, i]), 2),
+            out.append(dict(base, kind='contact', i=slots[i], dist=round(float(d[k, c]), 2), off=round(float(off[k, c]), 1), speed=round(float(SPD[k, c]), 2), own_speed=round(float(SPD[k, i]), 2),
                             dz=round(float(Z[k, c] - Z[k, i]), 2), turned=turned, attacked_first=hit))
     # revenge: each death with a known killer -> the next life's first 40 s
     death_spots = [(kt, kb, ka) for (kt, ka, kb, kh) in kills]
@@ -448,7 +463,7 @@ def multi(path, head, t, slots, me, inf, cls, alive, X, Y, Z, YAW, SH, HP, TEAM,
                     if m[kl]: appk.append(float(rv[kl]))
                     m[kl] = False; appo.extend(float(x) for x in rv[m])
         nen = int(sum(1 for c in range(N) if c != v and pl[c] and alive[r0, c] and side[r0, c] != side[r0, v]))
-        out.append(dict(base, kind='respawn', team_game=team_game, d0=round(d0, 1), reached=reach, base_reached=base_reach if bx is not None else 'none',
+        out.append(dict(base, kind='respawn', v=slots[v], team_game=team_game, d0=round(d0, 1), reached=reach, base_reached=base_reach if bx is not None else 'none',
                         next_target=nxt, enemies=nen, killer_alive=bool(alive[r0, kl]), app_killer=round(float(np.mean(appk)), 3) if appk else None,
                         app_other=round(float(np.mean(appo)), 3) if appo else None, respawn_s=round(float(t[r0] - kt), 1)))
     # teamwork: cohesion, focus fire, aid (team games only)
@@ -477,10 +492,10 @@ def multi(path, head, t, slots, me, inf, cls, alive, X, Y, Z, YAW, SH, HP, TEAM,
                 if not pl[p_] or not alive[k, p_]: continue
                 mates = [m for m in range(N) if m != p_ and pl[m] and alive[k, m] and side[k, m] == side[k, p_] and math.hypot(X[k, m] - X[k, p_], Y[k, m] - Y[k, p_]) < 25]
                 if not mates: continue
-                aid, aid_s, kind_ = False, None, None
+                aid, aid_s, kind_, helper = False, None, None, None
                 for q_ in range(k, min(T, k + 30)):
                     hit = [m for m in mates if ATT[q_, m, e_]]
-                    if hit: aid, aid_s, kind_ = True, round(float(t[q_] - t[k]), 2), 'fire'; break
+                    if hit: aid, aid_s, kind_, helper = True, round(float(t[q_] - t[k]), 2), 'fire', slots[hit[0]]; break
                 if not aid:
                     for m in mates:
                         v = []
@@ -488,11 +503,11 @@ def multi(path, head, t, slots, me, inf, cls, alive, X, Y, Z, YAW, SH, HP, TEAM,
                             if np.isnan(VX[q_, m]): continue
                             ex, ey = X[q_, p_] - X[q_, m], Y[q_, p_] - Y[q_, m]; hn = math.hypot(ex, ey)
                             if hn > 2: v.append((VX[q_, m] * ex + VY[q_, m] * ey) / hn)
-                            if len(v) >= 10 and sum(v[-10:]) / 10 > 1.0: aid, aid_s, kind_ = True, round(float(t[q_] - t[k]), 2), 'move'; break
+                            if len(v) >= 10 and sum(v[-10:]) / 10 > 1.0: aid, aid_s, kind_, helper = True, round(float(t[q_] - t[k]), 2), 'move', slots[m]; break
                         if aid: break
                 died = bool((~alive[k:min(T, k + 50), p_]).any())
                 nm = min(math.hypot(X[k, m] - X[k, p_], Y[k, m] - Y[k, p_]) for m in mates)
-                out.append(dict(base, kind='aid', players=int(alive[k].sum()), mates=len(mates), nearest_mate=round(nm, 1), aided=aid, aid_s=aid_s, aid_kind=kind_, died5=died))
+                out.append(dict(base, kind='aid', p=slots[p_], helper=helper, mate_slots=[slots[m] for m in mates][:12], players=int(alive[k].sum()), mates=len(mates), nearest_mate=round(nm, 1), aided=aid, aid_s=aid_s, aid_kind=kind_, died5=died))
     # skirmishes every 3 s: components of the attack graph over the last 3 s
     for k in range(30, T, 30):
         g = recent(k, 30); g = g | g.T; seen = set()

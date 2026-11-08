@@ -6,15 +6,16 @@
 // shim/tools/match-recorder.py, so engage-extract.py / walker-model.py / lanes-import.py read it as they are:
 //   header  {"start": unix, "map", "server": 8-hex tag of the address (FNV-1a), "mode": the game engine ("Slayer", "Capture the
 //            Flag", "Infection" ...), "variant": its name, "lanes_live": the game counts lanes itself, "source": "nhook",
-//            "you_plays": true (the local player is a real player here, not an observer: "you" stays -1)}
-//   sample  {"t", "you": -1, "p": [[slot, team, alive, x, y, z, yaw, pitch, shield, health, weapon, vehicle, kills, deaths, shots,
+//            "you_plays": true (the local player is a real player here, not an observer)}
+//   sample  {"t", "you": the local player's slot, "p": [[slot, team, alive, x, y, z, yaw, pitch, shield, health, weapon, vehicle, kills, deaths, shots,
 //            hits, grenades], ...], "proj": 0}
 //   event   {"t", "ev": kill / death / weapon / vehicle / powerup ..., "a", "b": slots (names are never written), "how", "est",
 //            "verb", "pos"}
 // A new file per match (a new map or a new match start); closed when the match ends or the app leaves. NO NAMES: a name only maps to
 // its slot inside this process. NHOOK_TRACKS=0 = off (shim/tools/observe-public.sh runs its own recorder), NHOOK_TRACKS_DIR=<dir>.
 #include <zlib.h>
-static char g_trk_mode[48], g_trk_var[64];   // (st_variant: this snapshot's game engine and variant name)
+static char g_trk_mode[48], g_trk_var[64];
+static volatile int g_ht_my_slot;   // (nhost.c: the local player's slot; tentative here, defined there)   // (st_variant: this snapshot's game engine and variant name)
 static struct { gzFile f; char map[64], path[1024]; double t0, start; uint32_t ev_seq; int n, nev, rowopen; StBuf row; char names[128][64]; } g_tks;
 static int trk_enabled(void) { static int on = -1; if (on < 0) { const char* e = getenv("NHOOK_TRACKS"); on = !(e && !strcmp(e, "0")); } return on; }
 static int trk_public(void) { return g_srv_addr[0] && strncmp(g_srv_addr, "127.", 4) != 0; }
@@ -39,7 +40,9 @@ static void trk_begin(double now, double t0, const char* map) {
         sb_put(&hb, ",\"variant\":"); sb_str(&hb, g_trk_var); sb_put(&hb, ",\"lanes_live\":%s,\"source\":\"nhook\",\"you_plays\":true}\n", ln_on() ? "true" : "false");
         gzwrite(g_tks.f, hb.b, (unsigned)hb.n); free(hb.b);
         nlog("[nhook] [tracks] recording %s (%s %s) -> %s", map, g_trk_mode, g_trk_var, strrchr(g_tks.path, '/') + 1); }
-    g_tks.row.n = 0; sb_put(&g_tks.row, "{\"t\":%.2f,\"you\":-1,\"p\":[", now - g_tks.start); g_tks.rowopen = 1; }
+    // "you" = the local player's slot (2026-11-08, shim/tools/coach.py: "you vs the winning population"); the header's you_plays says
+    // it is a real player here, so the analysis keeps it in (an observer's recording leaves its "you" out)
+    g_tks.row.n = 0; sb_put(&g_tks.row, "{\"t\":%.2f,\"you\":%d,\"p\":[", now - g_tks.start, g_ht_my_slot); g_tks.rowopen = 1; }
 static void trk_player(int slot, const char* name, int team, int alive, const float* p, float yaw, float pitch, float sh, float hp, const char* wpn, const char* veh,
                        int kills, int deaths, int shots, int hits, int gren) {
     if (!g_tks.rowopen || slot < 0 || slot >= 128) return;
