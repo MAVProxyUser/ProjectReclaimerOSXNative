@@ -306,7 +306,12 @@ static void bot_step_body(void) {
             float ey = bot_wrap(tyaw - yaw0), ep = tpitch - pitch0, err = sqrtf(ey * ey + ep * ep) * 57.2958f, size = atanf(0.4f / (tdist > 0.5f ? tdist : 0.5f)) * 57.2958f;
             g_bot_err = err; g_bot_fire = vis && now - tacq > react && err < (size > 1.2f ? size : 1.2f) + fextra && tdist < 40;
             if (tdist < 1.8f && now - tmelee > 0.7) { tmelee = now; fbtn |= 2; }                                            // B: melee
-            if (gren > 0 && tdist > 6 && tdist < 16 && vis && now - tgren > gren + 6 * bot_rand01() && now - tacq > react) { tgren = now; }
+            { float gd0 = 6, gd1 = 16; static int gset = -1; static double gnext; if (gset < 0) gset = getenv("NHOOK_BOT_GREN") != 0;   // (the players' band and rate unless NHOOK_BOT_GREN is set)
+              int pl = g_eg.on && g_eg.gren_ok; if (pl) { gd0 = g_eg.gren_d0; gd1 = g_eg.gren_d1; }
+              // the next throw's time is drawn ONCE per throw (it was drawn every tick, so the shortest draw won: throws came early)
+              if (!gnext) gnext = now + (pl && !gset ? g_eg.gren_every * (0.5f + bot_rand01()) : gren + 6 * bot_rand01());
+              if ((pl || gren > 0) && tdist > gd0 && tdist < gd1 && vis && now > gnext && now - tacq > react) { tgren = now;
+                  gnext = now + (pl && !gset ? g_eg.gren_every * (0.5f + bot_rand01()) : gren + 6 * bot_rand01()); } }
             if (now - tgren < 0.15) fbtn |= 0x10000;                                                                       // (left trigger: a grenade)
             if (tdist < 30) { engaged = 1;
                 // closing in: the players pressed in at ~0.8 units/s with shields up and only stopped (-0.03) on low shields; the walkers

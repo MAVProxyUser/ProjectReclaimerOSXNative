@@ -140,6 +140,12 @@ def stats(D):
     for e in dec:
         c = e['ctx']; k = max(-2, min(2, c['a_mates'] - c['b_mates'])); nb[k][0] += e['out']['win'] == 'a'; nb[k][1] += 1
     S['a_wins_by_mates_lead'] = {str(k): [r2(w / n, 3), n] for k, (w, n) in sorted(nb.items())}
+    G = [e for e in D if e['out'].get('gren_known') and not e['ctx']['a_veh']]   # (recordings with grenade counts: since 2026-11-08 12:00)
+    if G:
+        th = [x for e in G for x in e['out'].get('a_throws', []) + e['out'].get('b_throws', [])]; fs = sum((e['rows'][-1][0] - e['attack_t']) for e in G)
+        S['grenades'] = {'duels': len(G), 'duels_with_a_throw': r2(sum(bool(e['out'].get('a_throws') or e['out'].get('b_throws')) for e in G) / len(G), 3),
+                         'throws_per_fight_min': r2(len(th) / (fs / 60.0), 2) if fs > 0 else None, 'throw_dist_p25': r2(pct([x[1] for x in th], .25)),
+                         'throw_dist_median': r2(pct([x[1] for x in th], .5)), 'throw_dist_p75': r2(pct([x[1] for x in th], .75)), 'throw_at_s_median': r2(pct([x[0] for x in th], .5))}
     S['third_party'] = r2(sum(e['out']['win'] == 'third' for e in D) / len(D), 3)
     # distance when the attack began, by the attacker's weapon class
     byw = defaultdict(list)
@@ -227,6 +233,7 @@ def main():
     model = {'version': 1, 'source': {'duels': len(M), 'classes': sorted(MODEL_CLASSES)},
              'distance_by_weapon': st.get('attack_distance_by_weapon', {}), 'move': st.get('move', {}),
              'retreat': st.get('retreat_when_outshielded', {}), 'ttk': st.get('time_to_kill_by_weapon', {}),
+             'grenades': st.get('grenades', {}),
              'library': library(M, random.Random(11))}
     mm = multi_stats([r for r in R if r.get('kind', 'duel') != 'duel' and r['class'] in MODEL_CLASSES])
     model['target'] = (mm.get('target_choice') or {}).get('weights'); model['multi'] = {k: v for k, v in mm.items() if k != 'target_choice'}

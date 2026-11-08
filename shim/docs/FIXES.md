@@ -2826,6 +2826,12 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   lanes (<map>.lanes on-foot passes, real heatmaps folder; NHOOK_BOT_LANES=<dir>, =0 = heat only): a node keeps the larger of
   heat and lanes. Offline: shim/tools/engage-load-test.sh (the C loader reads what Python wrote). Live battle test: after the
   sampling block (one game at a time). SWITCHES: NHOOK_BOT_ENGAGE=0 = the night's fighter; NHOOK_BOT_LANES=0.
+- **Grenades from the players** (2026-11-08 12:00; match-recorder.py, engage-extract.py / engage-model.py, nbot.c) — WHY: the
+  recordings had no grenade data, so the walker's grenades were a tactics guess (6..16 units, every NHOOK_BOT_GREN s); and the
+  next throw's random delay was drawn EVERY tick, so the shortest draw won and throws came early. LOGIC: the recorder adds each
+  player's grenades carried (row index 16; a drop = a throw); duels list each side's throws (time, distance); the model's
+  "grenades" = throws per minute of fighting and the throw distances (25..75%); the walker uses that band and rate once 50+
+  duels carry counts (NHOOK_BOT_GREN set = its own interval), the next throw time drawn once per throw.
 
 ## 19. Performance
 

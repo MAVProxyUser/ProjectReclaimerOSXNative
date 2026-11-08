@@ -77,7 +77,7 @@ def cut(path):
     t = np.array([s['t'] for s in S], dtype=np.float64)
     alive = np.zeros((T, N), bool); X = np.zeros((T, N)); Y = np.zeros((T, N)); Z = np.zeros((T, N)); YAW = np.zeros((T, N))
     SH = np.zeros((T, N)); HP = np.zeros((T, N)); SHOTS = np.zeros((T, N)); TEAM = np.full((T, N), -1, int); VEH = np.zeros((T, N), bool)
-    WPN = np.full((T, N), '', dtype=object); VNAME = np.full((T, N), '', dtype=object); you = np.full(T, -1, int)
+    WPN = np.full((T, N), '', dtype=object); VNAME = np.full((T, N), '', dtype=object); you = np.full(T, -1, int); GREN = np.full((T, N), -1.0)
     for k, s in enumerate(S):
         you[k] = s.get('you', -1)
         for r in s['p']:
@@ -85,6 +85,7 @@ def cut(path):
             c = ix[r[0]]; alive[k, c] = bool(r[2]) and (r[3] or r[4]); X[k, c], Y[k, c], Z[k, c] = r[3], r[4], r[5]; YAW[k, c] = r[6]
             SH[k, c], HP[k, c], TEAM[k, c] = r[8], r[9], r[1]; WPN[k, c] = r[10] or ''; VNAME[k, c] = r[11] or ''; VEH[k, c] = bool(r[11])
             SHOTS[k, c] = r[14] if len(r) > 14 else 0
+            if len(r) > 16: GREN[k, c] = r[16]
     me = np.bincount(you[you >= 0]).argmax() if (you >= 0).any() else -1   # the observer (left out: it only stands there)
     cls = mode_class(head.get('mode'), head.get('variant')); inf = cls == 'infection'
     # velocities: +-2 samples, inside alive stretches, < 12 u/s on foot (a respawn / teleport otherwise)
@@ -97,6 +98,7 @@ def cut(path):
     # fired: shots counter up over the last 0.5 s; hurt: shield + health down over the last 0.3 s
     FIRE = np.zeros((T, N), bool); FIRE[5:] = (SHOTS[5:] > SHOTS[:-5]) & alive[5:] & alive[:-5]
     FIRE1 = np.zeros((T, N), bool); FIRE1[1:] = (SHOTS[1:] > SHOTS[:-1]) & alive[1:]
+    THROW = np.zeros((T, N), bool); THROW[1:] = (GREN[1:] >= 0) & (GREN[:-1] > GREN[1:]) & alive[1:] & alive[:-1]   # (grenades carried went down: a throw)
     HURT = np.zeros((T, N), bool); HURT[3:] = ((SH[3:] + HP[3:]) < (SH[:-3] + HP[:-3]) - 0.02) & alive[3:] & alive[:-3]
     ZOMB = np.isin(WPN, ZOMBIE)
     kills = [(e['t'], e.get('a', -1), e.get('b', -1), e.get('how') or '') for e in E if e.get('ev') == 'kill' and e.get('verb') == 'killed']
@@ -179,7 +181,10 @@ def cut(path):
                                     'b_err_aware': round(float(eB[k0]), 1), 'a_mates': near(A, ks, 1), 'b_mates': near(B, ks, 1), 'a_foes': near(A, ks, 0), 'b_foes': near(B, ks, 0),
                                     'a_zombie': bool(ZOMB[ks, A]) if inf else None, 'b_zombie': bool(ZOMB[ks, B]) if inf else None},
                             'rows': rows,
-                            'out': {'win': win, 'how': how, 'dur': round(float(t[s1] - t[s0]), 2), 'a_taken': taken(A), 'b_taken': taken(B)}})
+                            'out': {'win': win, 'how': how, 'dur': round(float(t[s1] - t[s0]), 2), 'a_taken': taken(A), 'b_taken': taken(B),
+                                    'gren_known': bool((GREN[k0:k1 + 1, A] >= 0).any()),
+                                    'a_throws': [[round(float(t[q] - t[k0]), 2), round(float(dist[q]), 2)] for q in range(k0, k1 + 1) if THROW[q, A]],
+                                    'b_throws': [[round(float(t[q] - t[k0]), 2), round(float(dist[q]), 2)] for q in range(k0, k1 + 1) if THROW[q, B]]}})
     out.extend(multi(path, head, t, slots, me, inf, cls, alive, X, Y, Z, YAW, SH, HP, TEAM, ZOMB, FIRE, HURT, VX, VY, kills))
     return out
 

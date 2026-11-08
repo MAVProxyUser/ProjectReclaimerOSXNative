@@ -18,7 +18,7 @@
 #define EG_VIEW 75.0f
 typedef struct { char grp[24]; float lat[20], rad[20]; } EgPiece;
 static struct { int loaded, on, npiece; float w[8]; int has_w; struct { char cls[12]; float p25, med, p75; int n; } band[10]; int nband;
-                float p_view, p_behind, p_mid, turn_s; EgPiece* lib; } g_eg;
+                float p_view, p_behind, p_mid, turn_s; EgPiece* lib; int gren_ok; float gren_every, gren_d0, gren_d1; } g_eg;
 static const char* eg_find(const char* txt, const char* key, const char* end) {   // "key": within [txt, end)
     char k[64]; snprintf(k, sizeof k, "\"%s\":", key); const char* p = strstr(txt, k); return p && (!end || p < end) ? p + strlen(k) : 0; }
 static float eg_num(const char* txt, const char* key, const char* end, float d) {
@@ -50,6 +50,11 @@ static void eg_load(void) {
     if (sa && *sa == '{') { const char* se = eg_close(sa); g_eg.p_view = eg_num(sa, "turned_if_new_one_in_view", se, g_eg.p_view); g_eg.p_behind = eg_num(sa, "turned_if_new_one_behind", se, g_eg.p_behind);
         g_eg.turn_s = eg_num(sa, "turn_s_median", se, g_eg.turn_s); }
     g_eg.p_mid = (g_eg.p_view + g_eg.p_behind) / 2;
+    // grenades (recordings since 12:00 carry the counts): the players' throws per minute of fighting and their distance band
+    const char* gr = eg_find(txt, "grenades", 0);
+    if (gr && *gr == '{') { const char* ge = eg_close(gr); float rate = eg_num(gr, "throws_per_fight_min", ge, 0); int nd = (int)eg_num(gr, "duels", ge, 0);
+        g_eg.gren_d0 = eg_num(gr, "throw_dist_p25", ge, 0); g_eg.gren_d1 = eg_num(gr, "throw_dist_p75", ge, 0);
+        if (nd >= 50 && rate > 0.05f && g_eg.gren_d1 > g_eg.gren_d0) { g_eg.gren_ok = 1; g_eg.gren_every = 60.0f / rate; } }
     const char* lb = eg_find(txt, "library", 0);
     if (lb && *lb == '{') { const char* le = eg_close(lb); g_eg.lib = calloc(1200, sizeof(EgPiece));
         for (const char* p = lb + 1; g_eg.lib && p < le && g_eg.npiece < 1200; ) {
@@ -60,8 +65,9 @@ static void eg_load(void) {
                 o = oe; }
             p = ae; } }
     free(txt); g_eg.on = g_eg.has_w;
-    nlog("[nhook] [fight] engagement model %s: target weights %s (off aim %.2f, log distance %.2f, attacked me %.2f, just hurt %.2f), %d weapon bands, second attacker %.0f%% in view / %.0f%% behind after %.2f s, %d movement pieces",
-         path, g_eg.has_w ? "loaded" : "MISSING", g_eg.w[1], g_eg.w[0], g_eg.w[2], g_eg.w[6], g_eg.nband, g_eg.p_view * 100, g_eg.p_behind * 100, g_eg.turn_s, g_eg.npiece);
+    nlog("[nhook] [fight] engagement model %s: target weights %s (off aim %.2f, log distance %.2f, attacked me %.2f, just hurt %.2f), %d weapon bands, second attacker %.0f%% in view / %.0f%% behind after %.2f s, %d movement pieces, grenades %s (every %.0f s of fighting at %.0f..%.0f units)",
+         path, g_eg.has_w ? "loaded" : "MISSING", g_eg.w[1], g_eg.w[0], g_eg.w[2], g_eg.w[6], g_eg.nband, g_eg.p_view * 100, g_eg.p_behind * 100, g_eg.turn_s, g_eg.npiece,
+         g_eg.gren_ok ? "from the players" : "the tactics' own", g_eg.gren_every, g_eg.gren_d0, g_eg.gren_d1);
 }
 static const char* eg_wcls(const char* tag) {   // the walker's weapon (a tag path) -> engage-model.py's weapon classes
     if (!tag) return "none";
