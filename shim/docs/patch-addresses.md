@@ -1,5 +1,8 @@
 # Patch and hook addresses across every Project Reclaimer release
 
+> 0.9.x Windows clients. From 0.10.0 the client recompiles halo3 into its own image (no halo3.dll module, no exe
+> signature matches): shim/docs/native-client.md.
+
 Static survey, 2026-10-17. Every release exe published at
 https://github.com/ProjectReclaimer/project-reclaimer-releases (34 tags, v0.8.1 .. v0.9.18; there is no v0.9.14) was
 downloaded to `~/Library/Application Support/ReclaimerMac/releases/<tag>/` and read as data only: pefile + capstone +

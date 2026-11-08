@@ -1,5 +1,8 @@
 # Joining big and modded servers (100+ player games, custom maps)
 
+> For the loader (0.9.x clients). The native app (0.10+) downloads a server's mods itself (shim/docs/native-client.md);
+> its busiest servers: `python3 shim/tools/servers10.py`.
+
 The largest games (64-128 players) are ordinary Reclaimer servers. Many need no mods at all; the ones on custom maps
 (Forge worlds, "Huge" maps, CHAOS-style servers) need the server's **mods**: extra map files that the client checks
 byte for byte before it lets you in.

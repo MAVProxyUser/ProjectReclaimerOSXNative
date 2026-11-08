@@ -1,5 +1,8 @@
 # Porting the loader to a new Project Reclaimer client release
 
+> For 0.9.x Windows clients and the loader. 0.10+ is the native app: there nhook is tied to the app build instead
+> (shim/docs/native-client.md, "When the app updates").
+
 Servers refuse an older client within hours of a release, so every release has to be checked and, when something
 moved, ported the same day. This is the whole procedure: what the loader changes in the client, the scripts that find
 it in a new build, how to do it by hand when they can't, and how to tell a right answer from a wrong one. Nothing here

@@ -1,4 +1,5 @@
-> **Historical log (2026-10-11, sessions 2-4), kept as written.** Current state (2026-10-18): Reclaimer's menu (its own
+> **Historical log (2026-10-11, sessions 2-4), kept as written.** Since 2026-11-06 the user plays the native 0.10+ app
+> (shim/docs/native-client.md; start at AGENT.md). The loader as of 2026-10-18: Reclaimer's menu (its own
 > GL UI), Server Browser, lobby and online joins work, and Halo 3 gameplay renders through the loader's D3D11->GL
 > renderer (play.sh; native GL helper by default). Run it with `bash shim/build.sh && bash shim/play.sh`; see
 > CLAUDE.md and shim/docs/BACKLOG.md for the current state and open work. Resolved since these notes: the "non-deterministic corruption" and the glow

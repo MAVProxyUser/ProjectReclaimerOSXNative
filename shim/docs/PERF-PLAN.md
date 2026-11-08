@@ -1,5 +1,8 @@
 # Frame-rate plan
 
+> The loader's frame rate (0.9.x clients under Rosetta). The native app (0.10+) has its own Metal renderer: 120-200 fps
+> in 52-72 player games on an M4 (README).
+
 ## Overnight 2026-10-17: where big games stand
 
 Targets (the user: at least as good as existing Mac ports; the best published one is a Wine+DXVK+MoltenVK Reclaimer

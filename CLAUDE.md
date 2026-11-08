@@ -1,5 +1,7 @@
 # HaloReclaimerMac — project notes for Claude
 
+The short version for any agent (rules, docs map, build / test / release): `AGENT.md`.
+
 **Every fix gets an entry in `shim/docs/FIXES.md` in the same commit** (function, why, the logic, the switch that restores the
 old behaviour; the user asked for one place where no fix gets lost). Section 0 there = install / setup / usage examples.
 

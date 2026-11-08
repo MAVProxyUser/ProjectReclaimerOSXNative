@@ -107,6 +107,18 @@ focus -- use it for every unattended run), `--headless` (no window, null rendere
   (players.count 0x10 -> 0x80, objects.count 0x800 -> 0x3fc0, game_globals.bytes 0x159c0 -> 0xed900 with statborg /
   player_state / ... moved, mapping.output_users 0xd8 -> 0x4e8, ...). Readers of moved fields must apply them.
 
+## When the app updates
+
+nhook is written against 0.10.0's app binary. Tied to that build: the guest image and its code table (nhook.c `APP_IMAGE`,
+`APP_CODETAB`), the app functions it hooks or calls (the Opus decode and the voice mixer, the per-frame function, set_muted /
+is_muted) and the app data it reads or writes (the mute list, the chat-log byte, the channel volumes). Each address has a comment
+saying what it is and how it was found. halo3's own functions are reached by their halo3 address through the code table, so they
+move only with MCC's halo3.dll, not with the app. On a mismatch nhook stays off rather than guessing: no code table = "hooks off",
+and where it uses a fixed app address it first compares the instructions it expects there (voice packets, the host tools' frame
+hook, the chat-log gate, set_muted). To port: find each one again in the new app with `re-tools/machoref.py` by the strings and
+call patterns its comment names, then run shim/tools/nhook-selftest.sh and the live tests (native-fire-test, native-aim-test,
+native-host-test.sh walls|tpnext, native-voice-test).
+
 ## Our features on the native app (status)
 
 The loader's stats page, overlay, forensics, chat/voice/kill feed and recording hooked halo3.dll or the 0.9 exe inside the

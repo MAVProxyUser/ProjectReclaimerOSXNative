@@ -6,7 +6,7 @@ Kept current as work lands. Open items are ranked (the order they are worked); f
 
 Since 2026-11-06 the user plays the native app, so this is the live list. The loader-era list below is closed (every item
 done / fixed / closed; #47's pending live check passed in the native app 2026-11-07). Ranked 2026-11-07; open since the
-evening of 2026-11-07: nothing (N1-N14 done; the "Not ported" items below wait for the user's call):
+evening of 2026-11-07: N15-N17, the loader features the user picked to port (N1-N14 done):
 
 | # | Item | Status / notes |
 |---|---|---|
@@ -24,10 +24,13 @@ evening of 2026-11-07: nothing (N1-N14 done; the "Not ported" items below wait f
 | N12 | **A native dedicated server test** | DONE 2026-11-07: shim/tools/native-dedicated.sh (local-only config) with nhook; a test client joined it; both pages right |
 | N13 | **Host tools on the native app** (user, 2026-11-07: "port the host tools too") | DONE 2026-11-07: teleport (next to / point / delta / spots), boundaries off, invisible walls off, speed; all checked live: a hosted match, our native dedicated server, next to a player with two clients (shim/tools/native-host-test.sh tpnext), invisible walls with the loader's test wall (native-host-test.sh walls; the surface index was wrong until then); next to a player now needs a floor (halo3's collision ray) |
 | N14 | **Found in the two-client tests** (2026-11-07) | DONE 2026-11-07 (FIXES.md, same day): the first spawn line named Guardian's weapons from the loading scenery's tags (the map being played now follows the engine's scenario at once); a dead player's dropped weapon was a "spawn" on clients; a client's opening weapons were several lines; a medal came before its kill; next to a player could be over a drop; the server's next game was no new match; a player who left was "left" only after the game's end (now from the app's HUD notices); one server start had no stats page (the probe ran before the engine was ready); shim/tools/spawn-test.sh compiles again and covers the native copy |
+| N15 | **Sparring aim, natively** (#17; user, 2026-11-07: "wrap up the rest") | OPEN: a test client that turns toward the nearest enemy's head, switchable from its page |
+| N16 | **The walker, natively** (#32; same) | OPEN: walk a test client along the map's floor graph (roam / enemy / a point), avoiding death hotspots |
+| N17 | **The page's mic switch, natively** (#22; same) | OPEN: microphone on / off from the stats page |
 
-Not ported from the loader (wanted? the user decides): auto-vote (#50); graphics quality from the page (#68; the app's own
-Settings menu has it); the sparring aim (#17) and the walker (#32); the page's mic switch (#22: the app runs its own microphone); the late camera
-update (mouse only). The page hides every control the native app does not serve. The host tools (#18, #26, #73) came over 2026-11-07: N13.
+From the loader, the user's call (2026-11-07): CLOSED, not ported -- auto-vote (#50), graphics quality from the page (#68; the app's
+own Settings menu has it), the late camera update (mouse only; the user plays with a controller). To port: the sparring aim (#17),
+the walker (#32), the page's mic switch (#22) -- N15-N17. The page hides every control the native app does not serve. The host tools (#18, #26, #73) came over 2026-11-07: N13.
 
 ## Closed — the loader era (the 0.9 Windows client under shim/src/peload.c)
 

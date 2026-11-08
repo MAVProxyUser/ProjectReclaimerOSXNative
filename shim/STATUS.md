@@ -1,7 +1,8 @@
 # Reclaimer-Mac shim — status
 
 > **Historical milestone log (2026-10-10 / 11, newest milestone first), kept as written.** For the current state
-> (2026-10-18) read CLAUDE.md and shim/docs/BACKLOG.md. In short: the full client runs -- menu, Server Browser, online
+> read AGENT.md, CLAUDE.md and shim/docs/BACKLOG.md; since 2026-11-06 the user plays the native 0.10+ app
+> (shim/docs/native-client.md). The loader as of 2026-10-18, in short: the full client runs -- menu, Server Browser, online
 > joins, Halo 3 gameplay through the loader's D3D11->GL renderer (native GL helper by default), audio, controller and
 > keyboard/mouse (`bash shim/build.sh && bash shim/play.sh`); the headless `dedicated` server works (`shim/dedicated.sh`).
 > Every "current blocker" / "next step" below was passed long ago: the native-transport gate (M11) is PASSED

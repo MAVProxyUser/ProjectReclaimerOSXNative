@@ -30,6 +30,10 @@ recompiles MCC's `halo3.dll` itself, so it needs neither this loader nor Rosetta
   measure button), weapon and vehicle spawns, page mutes, who is talking, chat; the overlay (hitboxes,
   vehicles and weak spots, info labels, items, bullet tracers, kill / safe zones; "visible only" and zones hidden behind the
   world), clip recording, frame captures and /forensics.
+- **Host tools** when you host a game or run your own server: teleport (next to a player, to a point, past the map's
+  boundaries), boundaries off, invisible walls off, speed 200% for everyone.
+- **Your own dedicated server on this Mac**, with the stats page: `bash shim/tools/native-dedicated.sh start` (this Mac only;
+  page on http://127.0.0.1:8767); join it with `bash shim/native.sh --join-server 127.0.0.1:49190`.
 
 ```bash
 NATIVE_REAL=1 bash shim/native.sh                                      # the app with the stats page
@@ -37,11 +41,11 @@ NHOOK_HITBOXES=1 NHOOK_HB_TRACERS=1 NATIVE_REAL=1 bash shim/native.sh --join-ser
 python3 shim/tools/servers10.py                                        # the busiest 0.10 servers, with their addresses
 ```
 
-New and not yet checked with real talkers: voice audio in the native forensic archive (a hook on the app's Opus decoder).
+The forensic archive keeps the app's voice audio (a hook on its Opus decoder) and each talker's channel.
 Measured: 120-200 fps in 52-72 player games at 3440x1440 on an M4. The rest of this README is the loader (0.9.x
 clients).
 
-## Status
+## Status (the loader, 0.9.x clients)
 
 **Playable**, starting from Reclaimer's own menu (Halo 3 menu scene with Server Browser, Campaign, Host
 Game, Customize, Settings, Credits):
@@ -611,6 +615,7 @@ resized, and can go full screen (green button or Ctrl-Cmd-F). Developer and diag
 
 | Path | Contents |
 |---|---|
+| `shim/native/` / `shim/native.sh` | the native app's tooling: nhook.dylib sources (stats page, overlay, hooks, host tools) / its launcher |
 | `shim/src/peload.c` | PE loader, Win32/DXGI/D3D11 implementation, GL renderer, present path |
 | `shim/src/dxbc2glsl.c` | DXBC (Shader Model 5) → GLSL 4.10 translator |
 | `shim/src/dxbc_cpu.c` | CPU interpreter for the compute shaders (particles), run on a worker thread |
@@ -625,4 +630,4 @@ resized, and can go full screen (green button or Ctrl-Cmd-F). Developer and diag
 | `shim/target.sh` / `shim/dedicated.sh` | windowless second player / local dedicated server |
 | `shim/tools/servers.sh` / `shim/tools/servers10.py` / `shim/tools/maptop.sh` | busiest public servers and their mods (0.9 / 0.10+) / top-down map pictures for the heatmap |
 | `re-tools/` | reverse-engineering helpers (angr decompile, xrefs, `.map` reader `h3map.py`, map geometry `h3bsp.py`) |
-| `shim/docs/` | research notes (index in `CLAUDE.md`); user guides: `mods.md`, `game-options.md` |
+| `shim/docs/` | research notes (start at `AGENT.md`; full notes in `CLAUDE.md`); user guides: `mods.md`, `game-options.md` |
