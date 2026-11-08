@@ -2878,6 +2878,19 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   user joins with NATIVE_REAL=1 NATIVE_ALLOW_SECOND=1 bash shim/native.sh --join-server 127.0.0.1:49190); WB_WATCH=1 opens the
   server's stats page (http://127.0.0.1:8767/) to watch. The battle-end cleanup follows the chosen identities.
 - **engage-report.py** (2026-11-08) — the "How players fight" page from engage-model.py's report and engage-compare.py's outputs.
+- **The players' behaviour drives the walker's radar look, revenge and power items** (2026-11-08 13:00; engage-extract.py "item"
+  records, engage-model.py "behaviour", nbot_engage.c / nbot_goals.c) — WHY: the goal draw's weights were guesses. LOGIC: item =
+  each power weapon / power-up spawn event: every player within 40 units -> approach speed toward it over 10 s vs a point as far
+  another way, the first to come within 1.5 units (first numbers, 3 big Slayer matches, 69 spawns: someone reaches it in 94% of
+  cases, median 4.7 s, the nearest at spawn only 25% of the time; heading in at 10-20 units 17% vs 11% baseline); behaviour =
+  radar turn rates (moving / still, in / out of the 8.2-unit range) and delay, revenge rates vs chance / baseline, item heading-in
+  shares. The walker: with no target, a new radar contact makes it look (1.5 s, walking on) with the players' odds (28%) after
+  their delay (1.24 s x 0.5..1.5); at each respawn ONE draw: the killer with the players' excess over chance (at least 5%), else the
+  death spot / the item's lane with theirs (at least 8%); a power item in range is the goal with twice the players' extra heading-
+  in share at its distance per draw (x1.5 for power-ups, which walkers can take). engage-load-test.sh checks the parse.
+- **No lanes from our local test server** (2026-11-08 13:00; nlanes.c ln_here) — WHY: the user's own client (the real profile)
+  joined the walkers once and wore 3.9 km of walker moves into Guardian's real lanes. LOGIC: lanes are not recorded in a game on
+  a 127.x server (NHOOK_LANES_LOCAL=1 = they are); guardian.lanes rebuilt from its 5 recordings (98.5 km).
 
 ## 19. Performance
 

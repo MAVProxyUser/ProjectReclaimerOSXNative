@@ -20,7 +20,8 @@ static double g_gl_kill_t;   // the last time a target died while the walker fou
 static int rd_contact(const NovObj* me, const NovObj* t);   // (nbot_goals.c: on the walker's radar)
 typedef struct { char grp[24]; float lat[20], rad[20]; } EgPiece;
 static struct { int loaded, on, npiece; float w[8]; int has_w; struct { char cls[12]; float p25, med, p75; int n; } band[10]; int nband;
-                float p_view, p_behind, p_mid, turn_s; EgPiece* lib; int gren_ok; float gren_every, gren_d0, gren_d1; } g_eg;
+                float p_view, p_behind, p_mid, turn_s; EgPiece* lib; int gren_ok; float gren_every, gren_d0, gren_d1;
+                float rd_turn, rd_turn_s, p_killer, p_spot, it_near, it_mid, it_far; } g_eg;   // (behaviour: radar, revenge, items)
 static const char* eg_find(const char* txt, const char* key, const char* end) {   // "key": within [txt, end)
     char k[64]; snprintf(k, sizeof k, "\"%s\":", key); const char* p = strstr(txt, k); return p && (!end || p < end) ? p + strlen(k) : 0; }
 static float eg_num(const char* txt, const char* key, const char* end, float d) {
@@ -57,6 +58,18 @@ static void eg_load(void) {
     if (gr && *gr == '{') { const char* ge = eg_close(gr); float rate = eg_num(gr, "throws_per_fight_min", ge, 0); int nd = (int)eg_num(gr, "duels", ge, 0);
         g_eg.gren_d0 = eg_num(gr, "throw_dist_p25", ge, 0); g_eg.gren_d1 = eg_num(gr, "throw_dist_p75", ge, 0);
         if (nd >= 50 && rate > 0.05f && g_eg.gren_d1 > g_eg.gren_d0) { g_eg.gren_ok = 1; g_eg.gren_every = 60.0f / rate; } }
+    // behaviour (engage-model.py: the players' radar turns, revenge, power items) -> the walker's radar look and goal draw
+    g_eg.rd_turn = 0.28f; g_eg.rd_turn_s = 1.24f; g_eg.p_killer = 0.05f; g_eg.p_spot = 0.08f; g_eg.it_near = 0.03f; g_eg.it_mid = 0.11f; g_eg.it_far = 0.05f;
+    const char* bh = eg_find(txt, "behaviour", 0);
+    if (bh && *bh == '{') { const char* be = eg_close(bh); const char* rd = eg_find(bh, "radar", be), * rv = eg_find(bh, "revenge", be), * it = eg_find(bh, "items", be);
+        if (rd && rd < be) { const char* re = eg_close(rd); g_eg.rd_turn = eg_num(rd, "turn_moving_in_range", re, g_eg.rd_turn); g_eg.rd_turn_s = eg_num(rd, "turn_s_median", re, g_eg.rd_turn_s); }
+        if (rv && rv < be) { const char* ve = eg_close(rv); float nk = eg_num(rv, "next_target_killer", ve, -1), ch = eg_num(rv, "chance", ve, -1), bs = eg_num(rv, "back_at_death_spot", ve, -1), bb = eg_num(rv, "baseline_spot", ve, -1);
+            // the players' EXCESS over chance / the baseline spot, at least 5% / 8% (the user saw it; FFA data shows little of it yet)
+            if (nk >= 0 && ch >= 0) g_eg.p_killer = fmaxf(0.05f, nk - ch); if (bs >= 0 && bb >= 0) g_eg.p_spot = fmaxf(0.08f, bs - bb); }
+        if (it && it < be) { const char* ie = eg_close(it);
+            float a = eg_num(it, "heading_in_2_10", ie, -1), a0 = eg_num(it, "baseline_2_10", ie, -1), b = eg_num(it, "heading_in_10_20", ie, -1), b0 = eg_num(it, "baseline_10_20", ie, -1), c = eg_num(it, "heading_in_20_40", ie, -1), c0 = eg_num(it, "baseline_20_40", ie, -1);
+            // per goal draw: twice the players' extra heading-in share at that distance (a draw lasts 6-15 s; they decide all the time)
+            if (a >= 0 && a0 >= 0) g_eg.it_near = fmaxf(0.03f, 2 * (a - a0)); if (b >= 0 && b0 >= 0) g_eg.it_mid = fmaxf(0.03f, 2 * (b - b0)); if (c >= 0 && c0 >= 0) g_eg.it_far = fmaxf(0.03f, 2 * (c - c0)); } }
     const char* lb = eg_find(txt, "library", 0);
     if (lb && *lb == '{') { const char* le = eg_close(lb); g_eg.lib = calloc(1200, sizeof(EgPiece));
         for (const char* p = lb + 1; g_eg.lib && p < le && g_eg.npiece < 1200; ) {
@@ -70,6 +83,8 @@ static void eg_load(void) {
     nlog("[nhook] [fight] engagement model %s: target weights %s (off aim %.2f, log distance %.2f, attacked me %.2f, just hurt %.2f), %d weapon bands, second attacker %.0f%% in view / %.0f%% behind after %.2f s, %d movement pieces, grenades %s (every %.0f s of fighting at %.0f..%.0f units)",
          path, g_eg.has_w ? "loaded" : "MISSING", g_eg.w[1], g_eg.w[0], g_eg.w[2], g_eg.w[6], g_eg.nband, g_eg.p_view * 100, g_eg.p_behind * 100, g_eg.turn_s, g_eg.npiece,
          g_eg.gren_ok ? "from the players" : "the tactics' own", g_eg.gren_every, g_eg.gren_d0, g_eg.gren_d1);
+    nlog("[nhook] [fight] behaviour: radar look %.0f%% after %.2f s; after a respawn: the killer %.0f%%, the death spot %.0f%%; power items per draw %.0f%% / %.0f%% / %.0f%% (2-10 / 10-20 / 20-40 units)",
+         g_eg.rd_turn * 100, g_eg.rd_turn_s, g_eg.p_killer * 100, g_eg.p_spot * 100, g_eg.it_near * 100, g_eg.it_mid * 100, g_eg.it_far * 100);
 }
 static const char* eg_wcls(const char* tag) {   // the walker's weapon (a tag path) -> engage-model.py's weapon classes
     if (!tag) return "none";

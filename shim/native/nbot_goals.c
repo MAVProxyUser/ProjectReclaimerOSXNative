@@ -90,17 +90,27 @@ static void gl_pick(double now, const NovObj* objs, int n, int me) {
     // enemies: known positions (seen in the last 6 s, on radar now)
     for (int i = 0; i < n; i++) { const NovObj* t = &objs[i]; if (t->type || t->dead || i == me || !bot_enemy(o, t)) continue; const GlSeen* s = gl_seen(t->handle); if (!s || now - s->t > 6.0) continue;
         float dx = s->pos[0] - o->c[0], dy = s->pos[1] - o->c[1], d = sqrtf(dx * dx + dy * dy); GL_ADD(GK_ENEMY, s->pos, t->handle, GL_W_ENEMY * expf(-d / 25.0f), "%08x %s", t->handle, s->radar ? "on radar" : "seen"); }
-    // revenge, the first GL_REVENGE_S after a respawn: the most recent death only
-    if (g_ngld && now - g_gl_respawn_t < GL_REVENGE_S && g_gld[g_ngld - 1].t < g_gl_respawn_t + 0.5) { const GlDeath* dd = &g_gld[g_ngld - 1]; float ip[3];
+    // REVENGE: drawn once per respawn with the players' own odds (engage-model.json behaviour: their excess over chance) -- the most
+    // recent death only; the killer's known position, else the death spot, or -- that death within 8 units of a power item's spawn
+    // point -- a point 10..25 units out along a lane leaving the item, drawn by traffic (the killer took it and left the usual way)
+    static double rev_drawn; if (g_ngld && now - g_gl_respawn_t < GL_REVENGE_S && g_gld[g_ngld - 1].t < g_gl_respawn_t + 0.5 && rev_drawn != g_gl_respawn_t) {
+        rev_drawn = g_gl_respawn_t; const GlDeath* dd = &g_gld[g_ngld - 1]; float r = bot_rand01(), ip[3];
         const GlSeen* ks = dd->killer ? gl_seen(dd->killer) : 0; int kalive = 0; for (int i = 0; i < n; i++) if (objs[i].handle == dd->killer && !objs[i].dead) kalive = 1;
-        if (ks && kalive && now - ks->t < 8.0) GL_ADD(GK_REVENGE, ks->pos, dd->killer, GL_W_REVENGE, "killer %08x", dd->killer);
-        if (gl_power_spawn_near(dd->pos, 8.0f, ip)) { float lp[3]; if (gl_lane_from(ip, 10, 25, lp)) GL_ADD(GK_ICPT, lp, dd->killer, GL_W_ICPT, "the item's lane (%.0f,%.0f)", ip[0], ip[1]); }
-        GL_ADD(GK_SPOT, dd->pos, dd->killer, GL_W_SPOT, "where it died"); }
-    // items: power-ups and power weapons lying at their spawn points (nspawns.c's live table)
-    for (int i = 0; i < HB_MAXOBJ && nc < 90; i++) { if (!g_wt[i].live || g_wt[i].state != 0) continue; int k = g_wt[i].kind; float val = 0;
-        if (k == 2) val = 2.5f; else if (k == 0) { const char* tg = hb_tag_name(g_wt[i].def); if (gl_power_tag(tg)) val = 2.0f; } if (val <= 0) continue;
-        float p[3] = {g_wt[i].cur[0], g_wt[i].cur[1], g_wt[i].cur[2]}, dx = p[0] - o->c[0], dy = p[1] - o->c[1], d = sqrtf(dx * dx + dy * dy);
-        if (d > 70) continue; GL_ADD(GK_ITEM, p, 0, val * expf(-d / 30.0f), "%s", k == 2 ? "a power-up" : "a power weapon"); }
+        int kind = 0; float gp[3]; char what[40] = "";
+        if (r < g_eg.p_killer && ks && kalive) { kind = GK_REVENGE; memcpy(gp, ks->pos, 12); snprintf(what, sizeof what, "killer %08x", dd->killer); }
+        else if (r < g_eg.p_killer + g_eg.p_spot) {
+            if (gl_power_spawn_near(dd->pos, 8.0f, ip) && gl_lane_from(ip, 10, 25, gp)) { kind = GK_ICPT; snprintf(what, sizeof what, "the item's lane (%.0f,%.0f)", ip[0], ip[1]); }
+            else { kind = GK_SPOT; memcpy(gp, dd->pos, 12); snprintf(what, sizeof what, "where it died"); } }
+        if (kind) { g_gl.kind = kind; memcpy(g_gl.pos, gp, 12); g_gl.who = dd->killer; g_gl.t0 = now; g_gl.until = now + 10.0 + 10.0 * bot_rand01(); snprintf(g_gl.what, sizeof g_gl.what, "%s", what);
+            if (bot_log()) nlog("[nhook] [goal] %s: %s (%.0f, %.0f) -- the respawn draw (killer %.0f%%, spot %.0f%%)", gl_kn[kind], what, gp[0], gp[1], g_eg.p_killer * 100, g_eg.p_spot * 100); return; } }
+    // POWER ITEMS: power-ups and power weapons lying at their spawn points (nspawns.c's live table), taken with the players' extra
+    // heading-in share at that distance (per draw)
+    { int bi2 = -1; float bd2 = 1e30f; for (int i = 0; i < HB_MAXOBJ; i++) { if (!g_wt[i].live || g_wt[i].state != 0) continue; int k = g_wt[i].kind;
+          if (!(k == 2 || (k == 0 && gl_power_tag(hb_tag_name(g_wt[i].def))))) continue; float dx = g_wt[i].cur[0] - o->c[0], dy = g_wt[i].cur[1] - o->c[1], d = dx * dx + dy * dy; if (d < bd2) { bd2 = d; bi2 = i; } }
+      if (bi2 >= 0) { float d = sqrtf(bd2), p = d < 10 ? g_eg.it_near : d < 20 ? g_eg.it_mid : d < 40 ? g_eg.it_far : 0; if (g_wt[bi2].kind == 2) p *= 1.5f;   // (power-ups: walkers can take them)
+          if (bot_rand01() < p) { g_gl.kind = GK_ITEM; memcpy(g_gl.pos, g_wt[bi2].cur, 12); g_gl.who = 0; g_gl.t0 = now; g_gl.until = now + 8.0 + 8.0 * bot_rand01();
+              snprintf(g_gl.what, sizeof g_gl.what, "%s", g_wt[bi2].kind == 2 ? "a power-up" : "a power weapon");
+              if (bot_log()) nlog("[nhook] [goal] item: %s %.0f units away (%.0f%% this draw)", g_gl.what, d, p * 100); return; } } }
     // roam: lane cells 10..40 units away, by traffic (a few draws)
     for (int k = 0; k < 4; k++) { float lp[3]; if (gl_lane_from(o->c, 10, 40, lp)) GL_ADD(GK_ROAM, lp, 0, GL_W_ROAM * 0.25f, "a lane (%.0f,%.0f)", lp[0], lp[1]); }
     if (!nc) { int cur = -1; float q[3] = {o->c[0], o->c[1], o->c[2] - 0.35f}; if (g_nav.ok) cur = nav_node_at(q); int gn = cur >= 0 ? nav_pick_roam(cur) : -1;   // (no lanes: the graph's own roam)
@@ -127,6 +137,22 @@ static int gl_tick(double now, const NovObj* objs, int n, int me, int (*vis_of)(
         else if (g_gl.kind == GK_ITEM) { int still = 0; for (int i = 0; i < HB_MAXOBJ; i++) if (g_wt[i].live && g_wt[i].state == 0) { float ex = g_wt[i].cur[0] - g_gl.pos[0], ey = g_wt[i].cur[1] - g_gl.pos[1]; if (ex * ex + ey * ey < 4) { still = 1; break; } }
             if (!still) { gl_drop(now, "taken"); gl_pick(now, objs, n, me); } } }
     return g_gl.kind != GK_NONE; }
+// RADAR LOOK: with no target, a new radar contact (an enemy moving within the range, unseen) makes the walker turn and look at it
+// with the players' odds (engage-model behaviour: turned to an unseen moving enemy within the radar's range) after their delay
+// (median x 0.5..1.5), for 1.5 s; returns 1 and the yaw to look at while it does
+static int gl_radar_look(double now, const NovObj* objs, int n, int me, int have_target, float* yaw_out) {
+    static uint32_t look_h; static double look_at, look_until; static struct { uint32_t h; double t; } asked[32]; static int na;
+    const NovObj* o = &objs[me]; if (have_target) { look_h = 0; return 0; }
+    for (int i = 0; i < n; i++) { const NovObj* t = &objs[i]; if (t->type || t->dead || i == me || !rd_contact(o, t)) continue;
+        int k = -1; for (int j = 0; j < na; j++) if (asked[j].h == t->handle) { k = j; break; }
+        if (k >= 0 && now - asked[k].t < 6.0) continue;   // (one decision per contact per 6 s)
+        if (k < 0) { k = na < 32 ? na++ : (int)arc4random_uniform(32); asked[k].h = t->handle; } asked[k].t = now;
+        if (!look_h && bot_rand01() < g_eg.rd_turn) { look_h = t->handle; look_at = now + g_eg.rd_turn_s * (0.5f + bot_rand01()); look_until = look_at + 1.5;
+            if (bot_log()) nlog("[nhook] [goal] radar: %08x moving %.1f units away -- looking in %.1f s", t->handle, sqrtf((t->c[0] - o->c[0]) * (t->c[0] - o->c[0]) + (t->c[1] - o->c[1]) * (t->c[1] - o->c[1])), look_at - now); } }
+    if (!look_h || now < look_at) return 0;
+    if (now > look_until) { look_h = 0; return 0; }
+    for (int i = 0; i < n; i++) if (objs[i].handle == look_h && !objs[i].dead) { *yaw_out = atan2f(objs[i].c[1] - o->c[1], objs[i].c[0] - o->c[0]); return 1; }
+    look_h = 0; return 0; }
 // life and death (called every tick with the walker's unit state): records deaths, respawns, kills
 static void gl_life(double now, int alive, const float* pos, uint32_t target, int target_dead_now) {
     static int was = -1; static float last[3]; static uint32_t lastk;

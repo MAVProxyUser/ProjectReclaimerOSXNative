@@ -26,6 +26,9 @@ typedef char LnSrc[64];
 static struct { char map[64]; LnGrid all, add, match; LnSrc* src; uint32_t nsrc; double since, saved, match_t0; int loaded; } g_ln;
 static pthread_mutex_t g_ln_mx = PTHREAD_MUTEX_INITIALIZER;
 static int ln_on(void) { static int on = -1; if (on < 0) { const char* e = getenv("NHOOK_LANES"); on = !(e && !strcmp(e, "0")); } return on; }
+// (2026-11-08: a game on a LOOPBACK server is our local test server -- walkers, tests; the user's own client joined the walkers
+//  once with the real profile and wore 3.9 km of walker moves into Guardian's real lanes: not recorded there; NHOOK_LANES_LOCAL=1)
+static int ln_here(void) { static int loc = -1; if (loc < 0) loc = getenv("NHOOK_LANES_LOCAL") != 0; return loc || strncmp(g_srv_addr, "127.", 4) != 0; }
 
 static void ln_free(LnGrid* g) { free(g->c); memset(g, 0, sizeof *g); }
 static void ln_add(LnGrid* g, int32_t x, int32_t y, float foot, float veh, float fx, float fy) {
@@ -101,7 +104,7 @@ static void ln_cell3(int32_t x, int32_t y, float foot, float veh, float fx, floa
     ln_add(&g_ln.all, x, y, foot, veh, fx, fy); ln_add(&g_ln.add, x, y, foot, veh, fx, fy); ln_add(&g_ln.match, x, y, foot, veh, fx, fy); }
 // one player's move a -> b (world units) dt seconds apart; veh: seated in a vehicle
 static void ln_move(const float* a, const float* b, double dt, int veh) {
-    if (!ln_on() || !(dt > 0) || dt > LN_MAXDT) return;
+    if (!ln_on() || !ln_here() || !(dt > 0) || dt > LN_MAXDT) return;
     float dx = b[0] - a[0], dy = b[1] - a[1], d = sqrtf(dx * dx + dy * dy);
     if (!(d > 0.02f) || d > 8.0f || d / (float)dt > LN_MAXSPEED || !isfinite(a[0]) || !isfinite(b[0])) return;
     pthread_mutex_lock(&g_ln_mx);

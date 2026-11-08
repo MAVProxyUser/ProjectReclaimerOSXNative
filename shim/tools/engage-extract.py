@@ -195,6 +195,45 @@ def cut(path):
                                     'a_throws': [[round(float(t[q] - t[k0]), 2), round(float(dist[q]), 2)] for q in range(k0, k1 + 1) if THROW[q, A]],
                                     'b_throws': [[round(float(t[q] - t[k0]), 2), round(float(dist[q]), 2)] for q in range(k0, k1 + 1) if THROW[q, B]]}})
     out.extend(multi(path, head, t, slots, me, inf, cls, alive, X, Y, Z, YAW, SH, HP, TEAM, ZOMB, FIRE, HURT, VX, VY, kills))
+    out.extend(items(path, head, t, slots, me, cls, alive, X, Y, Z, VX, VY, E))
+    return out
+
+POWER = ('rocket', 'sniper', 'beam rifle', 'spartan laser', 'shotgun', 'energy sword', 'gravity hammer', 'hammer', 'fuel rod', 'missile pod', 'flamethrower', 'plasma cannon', 'overshield', 'camo', 'power-up', 'powerup')
+def items(path, head, t, slots, me, cls, alive, X, Y, Z, VX, VY, E):
+    """ITEMS (the user, 2026-11-08: "players seek out spawning power weapons, and items like overshield and camo"): each power
+    weapon / power-up spawn event with a position: every player within 40 units at that moment -> its approach speed toward the
+    item over the next 10 s, against the same player's approach speed toward a point as far away in another direction (the
+    baseline: players move anyway); how soon the first player comes within 1.5 units (a pickup, roughly) and whether that was
+    the nearest one when it spawned."""
+    out = []; T, N = alive.shape; pl = np.array([s_ != me for s_ in slots]); rnd = __import__('random').Random(int(t[-1]) if len(t) else 1)
+    base = {'file': os.path.basename(path), 'map': head.get('map'), 'mode': head.get('mode'), 'class': cls}
+    for e in E:
+        if e.get('ev') not in ('weapon', 'powerup') or e.get('verb') != 'spawned' or not e.get('pos'): continue
+        how = (e.get('how') or '').lower()
+        if e['ev'] == 'weapon' and not any(k in how for k in POWER): continue
+        k0 = int(np.searchsorted(t, e['t']))
+        if k0 >= T - 50 or k0 < 1 or e['t'] - t[0] < 20: continue   # (the match start's lineup is no spawn players react to)
+        ix, iy = e['pos'][0], e['pos'][1]; near = []; first = None
+        for c in range(N):
+            if not pl[c] or not alive[k0, c]: continue
+            d0 = math.hypot(X[k0, c] - ix, Y[k0, c] - iy)
+            if d0 > 40 or d0 < 2: continue
+            a = rnd.uniform(0, 2 * math.pi); bx, by = X[k0, c] + d0 * math.cos(a), Y[k0, c] + d0 * math.sin(a)   # (a point as far, another way)
+            ri, rb = [], []
+            for q in range(k0, min(T, k0 + 100)):
+                if not alive[q, c] or np.isnan(VX[q, c]): continue
+                for (px, py, acc) in ((ix, iy, ri), (bx, by, rb)):
+                    ex, ey = px - X[q, c], py - Y[q, c]; hn = math.hypot(ex, ey)
+                    if hn > 0.5: acc.append((VX[q, c] * ex + VY[q, c] * ey) / hn)
+            near.append((d0, c, float(np.mean(ri)) if ri else None, float(np.mean(rb)) if rb else None))
+        for q in range(k0, min(T, k0 + 600)):
+            hit = [c for c in range(N) if pl[c] and alive[q, c] and math.hypot(X[q, c] - ix, Y[q, c] - iy) < 1.5]
+            if hit: first = (round(float(t[q] - t[k0]), 1), hit[0]); break
+        if not near: continue
+        near.sort(); nearest = near[0][1]
+        out.append(dict(base, kind='item', what=e.get('how'), ev=e['ev'], players=len(near),
+                        approach=[[round(d, 1), None if a is None else round(a, 3), None if b is None else round(b, 3)] for d, c, a, b in near],
+                        first_s=first[0] if first else None, first_was_nearest=(first[1] == nearest) if first else None))
     return out
 
 def multi(path, head, t, slots, me, inf, cls, alive, X, Y, Z, YAW, SH, HP, TEAM, ZOMB, FIRE, HURT, VX, VY, kills):

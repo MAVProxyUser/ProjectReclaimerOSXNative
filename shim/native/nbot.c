@@ -404,6 +404,8 @@ static void bot_step_body(void) {
                 static int look = -1; if (look < 0) { const char* e = getenv("PELOAD_NAV_LOOK"); look = e ? atoi(e) : 6; if (look < 1) look = 1; }
                 int ti = pidx + look < plen ? pidx + look : plen - 1; float tp[3]; nav_pos(path[ti], tp);
                 float way = atan2f(tp[1] - pos[1], tp[0] - pos[0]);
+                float rlook; if (!(out & 1) && g_eg.on && gl_on() && gl_radar_look(now, objs, n, me, have_tg && engaged, &rlook)) {   // (a radar contact: look at it, keep walking the path)
+                    float e = bot_wrap(rlook - yaw0), mx = 0.2f; yaw = yaw0 + (e > mx ? mx : e < -mx ? -mx : e); pitch = -0.05f; out |= 1; }
                 if (!(out & 1)) {   // no aim: turn the view along the path (at most ~360 deg/s, a little downward) and walk forward
                     float e = bot_wrap(way - yaw0), mx = 0.2f; yaw = yaw0 + (e > mx ? mx : e < -mx ? -mx : e); pitch = -0.08f; out |= 1;
                     float rel = bot_wrap(way - yaw); tx = cosf(rel); ty = sinf(rel); if (fabsf(rel) > 1.05f) { tx *= 0.25f; ty *= 0.25f; } }

@@ -25,12 +25,14 @@ static int bot_enemy(const NovObj* a, const NovObj* b) { return a->team < 0 || a
 static float bot_rand01(void) { return 0.5f; }
 static int bot_log(void) { return 0; }
 #include "nbot_engage.c"
+static int rd_contact(const NovObj* a, const NovObj* b) { (void)a; (void)b; return 0; }   // (nbot_goals.c's radar: not needed here)
 int main(void) {
     eg_load();
     printf("W"); for (int i = 0; i < 8; i++) printf(" %.4f", g_eg.w[i]); printf("\n");
     for (int i = 0; i < g_eg.nband; i++) printf("B %s %d %.3f %.3f %.3f\n", g_eg.band[i].cls, g_eg.band[i].n, g_eg.band[i].p25, g_eg.band[i].med, g_eg.band[i].p75);
     printf("S %.4f %.4f %.4f\n", g_eg.p_view, g_eg.p_behind, g_eg.turn_s);
     printf("P %d\n", g_eg.npiece);
+    printf("H %.4f %.4f %.4f %.4f %.4f %.4f %.4f\n", g_eg.rd_turn, g_eg.rd_turn_s, g_eg.p_killer, g_eg.p_spot, g_eg.it_near, g_eg.it_mid, g_eg.it_far);
     if (g_eg.npiece) { printf("Q %s", g_eg.lib[0].grp); for (int k = 0; k < 20; k++) printf(" %.3f", g_eg.lib[0].lat[k]); printf("\n"); }
     const char* tags[] = {"objects\\weapons\\rifle\\battle_rifle\\battle_rifle", "objects\\weapons\\rifle\\assault_rifle\\assault_rifle", "objects\\weapons\\melee\\energy_blade\\energy_blade",
                           "objects\\weapons\\rifle\\sniper_rifle\\sniper_rifle", "objects\\weapons\\support_high\\rocket_launcher\\rocket_launcher", "objects\\weapons\\pistol\\needler\\needler", 0};
@@ -61,6 +63,14 @@ q = next((l for l in L if l.startswith('Q ')), None)
 if q:
     g = q.split()[1]; vals = [float(x) for x in q.split()[2:]]; first = m['library'][g][0]['lat']
     check('a piece\'s 20 values', all(abs(a - (b or 0)) < 1e-3 for a, b in zip(vals, first)) and len(vals) == 20)
+bh = m.get('behaviour') or {}
+if bh:
+    h = [float(x) for x in next(l for l in L if l.startswith('H ')).split()[1:]]; rd, rv, it = bh.get('radar') or {}, bh.get('revenge') or {}, bh.get('items') or {}
+    want = [rd.get('turn_moving_in_range', 0.28), rd.get('turn_s_median', 1.24),
+            max(0.05, rv['next_target_killer'] - rv['chance']) if rv else 0.05, max(0.08, rv['back_at_death_spot'] - rv['baseline_spot']) if rv else 0.08,
+            max(0.03, 2 * (it['heading_in_2_10'] - it['baseline_2_10'])) if it else 0.03, max(0.03, 2 * (it['heading_in_10_20'] - it['baseline_10_20'])) if it else 0.11,
+            max(0.03, 2 * (it['heading_in_20_40'] - it['baseline_20_40'])) if it else 0.05]
+    check('behaviour: radar look, revenge odds, item odds', all(abs(a - b) < 2e-3 for a, b in zip(h, want)), str(h))
 C = [l.split()[1] for l in L if l.startswith('C ')]
 check('weapon classes', C == ['precision', 'auto', 'melee', 'sniper', 'rocket', 'auto'], str(C))
 E = {l.split()[1]: int(l.split()[2]) for l in L if l.startswith('E ')}

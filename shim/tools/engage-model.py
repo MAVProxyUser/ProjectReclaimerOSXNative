@@ -103,6 +103,39 @@ def multi_stats(R):
                            'sides_top': {k: r2(n / len(K), 3) for k, n in sd.most_common(8)}}
     return S
 
+def behaviour(R):
+    """radar (contact records), revenge (respawn) and power items (item): the numbers the walkers' goal draw and radar turn use"""
+    import statistics as stt
+    B = {}
+    C = [r for r in R if r['kind'] == 'contact']
+    if C:
+        def tr(sub): return r2(sum(c['turned'] is not None for c in sub) / len(sub), 3) if sub else None
+        rng = 8.2   # (25 m: the default range; the variant's own range in the walker)
+        mv_in = [c for c in C if c['dist'] < rng and c['speed'] > 1.2]; st_in = [c for c in C if c['dist'] < rng and c['speed'] < 0.5]
+        mv_out = [c for c in C if c['dist'] >= rng and c['speed'] > 1.2]; st_out = [c for c in C if c['dist'] >= rng and c['speed'] < 0.5]
+        td = [c['turned'] for c in mv_in if c['turned'] is not None]
+        B['radar'] = {'contacts': len(C), 'turn_moving_in_range': tr(mv_in), 'turn_still_in_range': tr(st_in), 'turn_moving_out_of_range': tr(mv_out), 'turn_still_out_of_range': tr(st_out),
+                      'turn_s_median': r2(stt.median(td)) if td else None, 'attacked_before_turning': r2(sum(c['attacked_first'] for c in C if c['dist'] < rng) / max(1, sum(c['dist'] < rng for c in C)), 3)}
+    P = [r for r in R if r['kind'] == 'respawn']
+    if P:
+        nt = [r for r in P if r['next_target']]; b = [r for r in P if r['base_reached'] != 'none']; rt = [r['reached'] for r in b if r['reached'] is not None]
+        ak = [r['app_killer'] for r in P if r['app_killer'] is not None]; ao = [r['app_other'] for r in P if r['app_other'] is not None]
+        B['revenge'] = {'respawns': len(P), 'next_target_killer': r2(sum(r['next_target'] == 'killer' for r in nt) / max(1, len(nt)), 3),
+                        'chance': r2(sum(1 / max(1, r['enemies']) for r in nt) / max(1, len(nt)), 3), 'back_at_death_spot': r2(sum(r['reached'] is not None for r in b) / max(1, len(b)), 3),
+                        'baseline_spot': r2(sum(r['base_reached'] is not None for r in b) / max(1, len(b)), 3), 'back_s_median': r2(stt.median(rt)) if rt else None,
+                        'approach_killer': r2(stt.mean(ak), 3) if ak else None, 'approach_others': r2(stt.mean(ao), 3) if ao else None,
+                        'respawn_s_median': r2(stt.median([r['respawn_s'] for r in P]))}
+    I = [r for r in R if r['kind'] == 'item']
+    if I:
+        def share(lo, hi, k):
+            v = [x[k] for i in I for x in i['approach'] if lo <= x[0] < hi and x[k] is not None]; return r2(sum(y > 0.8 for y in v) / len(v), 3) if v else None
+        f = [i['first_s'] for i in I if i['first_s'] is not None]
+        B['items'] = {'spawns': len(I), 'what': dict(Counter(i['what'] for i in I)), 'heading_in_10_20': share(10, 20, 1), 'baseline_10_20': share(10, 20, 2),
+                      'heading_in_20_40': share(20, 40, 1), 'baseline_20_40': share(20, 40, 2), 'heading_in_2_10': share(2, 10, 1), 'baseline_2_10': share(2, 10, 2),
+                      'reached': r2(len(f) / len(I), 3), 'reached_s_median': r2(stt.median(f)) if f else None,
+                      'first_was_nearest': r2(sum(bool(i['first_was_nearest']) for i in I if i['first_s'] is not None) / max(1, len(f)), 3)}
+    return B
+
 def load():
     out = []
     for p in sorted(glob.glob(os.path.join(ENG, '*.eng.jsonl.gz'))):
@@ -232,9 +265,10 @@ def main():
         sub = [e for e in D if e['class'] == c]
         if sub: rep['by_class'][c] = stats(sub)
         msub = [r for r in R if r.get('kind', 'duel') != 'duel' and r['class'] == c]
-        if msub: rep['by_class'].setdefault(c, {})['multi'] = multi_stats(msub)
+        if msub: rep['by_class'].setdefault(c, {})['multi'] = multi_stats(msub); rep['by_class'][c]['behaviour'] = behaviour(msub)
     rep['all_but_infection'] = stats([e for e in D if e['class'] != 'infection'])
     rep['all_but_infection']['multi'] = multi_stats([r for r in R if r.get('kind', 'duel') != 'duel' and r['class'] != 'infection'])
+    rep['all_but_infection']['behaviour'] = behaviour([r for r in R if r.get('kind', 'duel') != 'duel' and r['class'] != 'infection'])
     M = [e for e in D if e['class'] in MODEL_CLASSES]
     st = stats(M) if M else {}
     model = {'version': 1, 'source': {'duels': len(M), 'classes': sorted(MODEL_CLASSES)},
@@ -244,6 +278,7 @@ def main():
              'library': library(M, random.Random(11))}
     mm = multi_stats([r for r in R if r.get('kind', 'duel') != 'duel' and r['class'] in MODEL_CLASSES])
     model['target'] = (mm.get('target_choice') or {}).get('weights'); model['multi'] = {k: v for k, v in mm.items() if k != 'target_choice'}
+    model['behaviour'] = behaviour([r for r in R if r.get('kind', 'duel') != 'duel' and r['class'] in MODEL_CLASSES])
     tmp = OUT + '.tmp%d' % os.getpid(); json.dump(model, open(tmp, 'w'), separators=(',', ':')); os.replace(tmp, OUT)   # (atomic: a walker starting now reads the old or the new file)
     if '--json' in sys.argv: json.dump(rep, open(arg('--json', ''), 'w'), indent=1)
     print(json.dumps(rep, indent=1))
