@@ -169,6 +169,11 @@ cancel it in the app's mods window -- nhook does not touch it (backlog N23).
   The night's numbers: training run 1 55%, run 2 73%, the trained champion's showcase battles 70 -> 81% as the reaction was fixed
   (walker-model's reaction = 30 -> 5 deg of aim: NHOOK_BOT_TURN0, the turn rate before reacting, 0.73 rad/s; NHOOK_BOT_REACT the
   delay factor, 1.6). `python3 shim/tools/walker-train.py --champion` = the tactics set with the best mean over all its battles.
+- **How players fight** (2026-11-08 midday): `python3 shim/tools/engage-extract.py` (duels + multi-player records per recording ->
+  tracks/engagements), `python3 shim/tools/engage-model.py [--json report.json]` (the report by game class + tracks/engage-model.json:
+  weapon distance bands, target-choice weights, second-attacker odds, a movement library). The fighter reads it (nbot_engage.c,
+  NHOOK_BOT_ENGAGE=<file>, =0 = the old nearest-enemy fighter): awareness (in view / attacked / close), the players' choice rule,
+  turning to a second attacker with their odds and delay, the weapon's distance band, real movement pieces.
 - **Weapon pickup is not a button bit**: shim/tools/native-pickup-scan.sh held each of the control record's 64 bits (+0xC8) on a
   Mauler lying on the floor: none swapped it (FIXES.md "The pickup scan"). Walkers keep their loadout (NHOOK_BOT_PICKBIT unset).
 

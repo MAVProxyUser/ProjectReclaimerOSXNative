@@ -2784,6 +2784,33 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   wore Standoff's whole valley into one hollow -- relative depth shows its lanes. Offline: shim/tools/lanes-test.sh (the walk
   adds up, the merge keeps both writers' cells and the import list), shim/tools/lanes-page-mock.py (the page on a real map's
   data, no game). SWITCH: NHOOK_LANES=0 = no lanes recorded (the page then has none); heatmap "deaths" = the old view.
+- **The observer samples a mix of whole games** (2026-11-08 11:20; shim/tools/observe-public.sh) — WHY: the user: "sample a bunch
+  of large games (that don't require downloads) make sure it is a mix of slayer, ctf, and infection game types. and sample the
+  whole game". It left every server after a fixed SESSION (mid-match) and picked by FFA > Slayer, Infection last. LOGIC: each
+  server gets a class (slayer / ctf / infection / other; campaign, forge, firefight, races and UNSC vs Flood vs Covenant never);
+  a class's whole matches recorded this run lower its servers by OBS_CLASS_W (15) players, "other" by 25, so classes take
+  turns while the bigger game wins inside a class; it stays until OBS_WHOLE (1) whole match is recorded there (a recording after
+  the one it joined into, 1500+ samples) or MAXSESSION (2nd argument, 2700 s); OBS_MIN_PLAYERS (6), 4 if none has that many; a
+  visit without a whole match skips that server for the run. SWITCH: the old picker is in git (dfad978).
+- **match-recorder.py stops cleanly** (2026-11-08 11:20) — WHY: the observer killed it with SIGTERM mid-write, leaving gzip
+  files cut off (readers had to catch EOFError; a cut file loses its last block). LOGIC: SIGTERM / SIGINT set a flag; the loop
+  ends after the current sample and closes the file. observe-public.sh waits up to 6 s for it.
+- **The engagement library: how players actually fight** (2026-11-08 11:40; shim/tools/engage-extract.py, engage-model.py) —
+  WHY: the user: "a good dataset on how people *actually* play when engaging with someone else" and "don't just limit the logic
+  to single player engagement ... they may get shot by someone else while fighting 1:1 and change focus". walker-model.py only
+  measured "looking at an enemy within 10 deg". LOGIC: engage-extract.py cuts each recording into DUELS (two enemies within 45
+  units, one attacking the other: horizontal aim within 8 deg while its shots counter rises, or 12 deg while the other is hurt;
+  merged across 2-s pauses; from the awareness before to the outcome: kill event, death, third party or separation; 0.1-s rows
+  of distance, each one's speed across / toward the other, aim errors, shields, fire, vertical speed) and MULTI-PLAYER records
+  from every player's held target: choice (all enemies within 45 units with 8 features, which was taken), switch (a second
+  attacker while fighting: turned to it or not, how fast), pressure (2+ attackers vs 1), join (a teammate's new target near me),
+  skirmish (attack-graph components every 3 s). Infection sides from weapons (the Energy Blade). Per recording into
+  tracks/engagements/*.eng.jsonl.gz (re-cut only when the recording is newer). engage-model.py reports by class and writes
+  tracks/engage-model.json: distance bands by weapon class, movement numbers, retreats, time to kill, the target-choice rule as
+  a conditional logit (top-1 64% on held-out Slayer choices vs 36% "nearest", 52% "nearest to the aim"), second-attacker odds
+  (in view 33%, behind 7%, ~1.75 s), and a movement library (2-s pieces of the attackers' moves by weapon class / distance).
+  First numbers (Slayer, mostly FFA BR): the first attacker wins 84% of decided duels; the defender was looking away 52% of the
+  time and then won 7% (27% facing); BR fights start at 21.7 units median (14-31); outnumbered players die 41% vs 17%.
 
 ## 19. Performance
 

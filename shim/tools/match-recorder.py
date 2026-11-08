@@ -9,7 +9,7 @@ and one line per feed event (kills, deaths, spawns...): {"t": .., "ev": kind, "a
 per match: <ReclaimerMac/tracks>/<date>_<map>_<server tag>.jsonl.gz (the server tag = a hash of its address).
     python3 shim/tools/match-recorder.py [--port 8765] [--seconds N] [--server host:port] [--out DIR]
 Used by shim/tools/observe-public.sh; the model: shim/tools/walker-model.py."""
-import gzip, hashlib, json, os, sys, time, urllib.request
+import gzip, hashlib, json, os, signal, sys, time, urllib.request
 
 def arg(k, d):
     a = sys.argv; return a[a.index(k) + 1] if k in a else d
@@ -20,9 +20,13 @@ TAG = hashlib.sha1(SERVER.encode()).hexdigest()[:8] if SERVER else 'local'
 def get(path, t=2.0):
     with urllib.request.urlopen('http://127.0.0.1:%d%s' % (PORT, path), timeout=t) as r: return json.loads(r.read())
 
+STOP = [False]   # SIGTERM / SIGINT: finish the current sample and close the file properly (a killed gzip writer left a cut-off file)
+def _stop(*a): STOP[0] = True
+
 def main():
+    signal.signal(signal.SIGTERM, _stop); signal.signal(signal.SIGINT, _stop)
     t0 = time.time(); f = None; cur = None; feed = 0; names = {}; n = 0; nev = 0; last_ok = time.time(); last_feed = 0
-    while not SECS or time.time() - t0 < SECS:
+    while (not SECS or time.time() - t0 < SECS) and not STOP[0]:
         tick = time.time()
         try: s = get('/stats.json'); last_ok = tick
         except Exception:
