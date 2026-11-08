@@ -224,8 +224,8 @@ static void bot_idle(const char* why) {   // NHOOK_SPAR_LOG: why the aim / walke
     static double tl; static const char* last; double now = mono_s(); if (!bot_log() || (why == last && now - tl < 5)) return; tl = now; last = why; nlog("[nhook] [spar] idle: %s", why); }
 // weapons by preference, best first (what the recorded players carried besides the assault rifle -- the Carbine 44% of the time --
 // and the power weapons); a weapon not listed ranks below all of these
-static int bot_wpn_rank(const char* n) { static const char* const pref[] = {"rocket_launcher", "spartan_laser", "sniper_rifle", "beam_rifle", "battle_rifle", "covenant_carbine",
-    "shotgun", "energy_sword", "gravity_hammer", "brute_shot", "assault_rifle", 0}; if (!n) return 99; for (int i = 0; pref[i]; i++) if (strstr(n, pref[i])) return i; return 50; }
+static int bot_wpn_rank(const char* n0) { static const char* const pref[] = {"rocket_launcher", "spartan_laser", "sniper_rifle", "beam_rifle", "battle_rifle", "covenant_carbine",
+    "shotgun", "energy_sword", "gravity_hammer", "brute_shot", "assault_rifle", 0}; if (!n0) return 99; char nb[96]; const char* n = bot_tagkey(n0, nb, sizeof nb); for (int i = 0; pref[i]; i++) if (strstr(n, pref[i])) return i; return 50; }
 // ---- the walker's own inventory and power-ups (2026-11-08; the user: "the walker should be aware of its own inventory, and power up
 // status as well"): the held and the other weapon (class + rank), grenades by type, an overshield (shield above 1), active camo
 // (+0x360 above 0.05). The fighter switches to the other weapon when the target's distance is outside the held one's band and
@@ -251,6 +251,38 @@ static void bot_inv(const NovObj* o, BotInv* v) {
         else if (!v->has_other) { v->other = nm; v->other_c = eg_wcls(nm); v->other_rank = bot_wpn_rank(nm); v->has_other = 1; v->other_ammo = bot_ammo_of(wd, df, 0); } }
     v->frag = o->gren[0]; v->plasma = o->gren[1]; for (int k = 0; k < 4; k++) if (o->gren[k] > 0) v->gren += o->gren[k];
     v->os = o->shield > 1.05f; v->camo = o->camo > 0.05f; }
+// WEAPON ZONES (2026-11-08; the user: "walker should use its best weapon based on situation that can be derived from game
+// observations of where kills happen with certain weapons. if opponent is in a certain zone and you have a certain high kill
+// weapon for that zone and aren't using it switch to it"): tracks/maps/<map>.wzones.txt (shim/tools/weapon-kills.py, every
+// recorded match on the map, Infection left out): the players' kills by the victim's 6-unit cell and the killer's weapon class,
+// and each class's share of the weapons carried there. For a target's position the 3 x 3 cells around it give each class's
+// kill share there over its carried share (wz_eff: above 1 = it kills there more than it is carried); in a fight the walker
+// switches to its other weapon when that one's is 1.5x the held one's and above 1.2 (8+ kills around), and keeps a weapon the
+// zone favours 1.5x even when the distance band would switch away. NHOOK_BOT_NOZONES=1 = off.
+#define WZ_NC 6
+static const char* const wz_cls[WZ_NC] = {"precision", "auto", "sniper", "shotgun", "rocket", "melee"};
+typedef struct { int16_t cx, cy; uint16_t k[WZ_NC]; } WzCell;
+static struct { char map[64]; float cell, held[WZ_NC]; int n; WzCell* c; } g_wz;
+static int wz_ci(const char* cls) { for (int i = 0; cls && i < WZ_NC; i++) if (!strcmp(cls, wz_cls[i])) return i; return -1; }
+static void wz_load(const char* map) {
+    static int off = -1; if (off < 0) off = getenv("NHOOK_BOT_NOZONES") != 0; if (off || !map || !map[0] || !strcmp(map, g_wz.map)) return;
+    snprintf(g_wz.map, sizeof g_wz.map, "%s", map); free(g_wz.c); g_wz.c = 0; g_wz.n = 0; g_wz.cell = 6; memset(g_wz.held, 0, sizeof g_wz.held);
+    char p[1024]; const char* d = getenv("NHOOK_WZONES_DIR"), * h = getenv("HOME");
+    if (d && *d) snprintf(p, sizeof p, "%s/%s.wzones.txt", d, map); else snprintf(p, sizeof p, "%s/Library/Application Support/ReclaimerMac/tracks/maps/%s.wzones.txt", h ? h : "", map);
+    FILE* f = fopen(p, "r"); if (!f) { nlog("[nhook] [inv] no weapon zones for %s", map); return; }
+    char ln[2048]; int cap = 0;
+    while (fgets(ln, sizeof ln, f)) {
+        if (!strncmp(ln, "wzones", 6)) { float c = 0; if (sscanf(ln, "wzones %*d cell %f", &c) == 1 && c > 0) g_wz.cell = c; continue; }
+        int held = !strncmp(ln, "held ", 5); WzCell z; memset(&z, 0, sizeof z); char* q = ln;
+        if (!held) { int cx, cy, nn = 0; if (sscanf(ln, "%d %d%n", &cx, &cy, &nn) != 2) continue; z.cx = (int16_t)cx; z.cy = (int16_t)cy; q = ln + nn; } else q = ln + 5;
+        for (char* t = strtok(q, " \n"); t; t = strtok(0, " \n")) { char* e = strchr(t, '='); if (!e) continue; *e = 0; int ci = wz_ci(t); if (ci < 0) continue;
+            if (held) g_wz.held[ci] = strtof(e + 1, 0); else z.k[ci] = (uint16_t)atoi(e + 1); }
+        if (!held) { if (g_wz.n >= cap) { cap = cap ? cap * 2 : 256; g_wz.c = realloc(g_wz.c, cap * sizeof *g_wz.c); } g_wz.c[g_wz.n++] = z; } }
+    fclose(f); nlog("[nhook] [inv] weapon zones for %s: %d cells (cell %.0f u)", map, g_wz.n, g_wz.cell); }
+static float wz_eff(int ci, const float* p, int* tot) {   // kills there with this class / all kills there, over its carried share
+    int cx = (int)floorf(p[0] / g_wz.cell), cy = (int)floorf(p[1] / g_wz.cell); int kc = 0, kt = 0;
+    for (int i = 0; i < g_wz.n; i++) { const WzCell* z = &g_wz.c[i]; if (abs(z->cx - cx) > 1 || abs(z->cy - cy) > 1) continue; kc += z->k[ci]; for (int j = 0; j < WZ_NC; j++) kt += z->k[j]; }
+    if (tot) *tot = kt; return ((kc + 0.5f) / (kt + 0.5f * WZ_NC)) / fmaxf(0.03f, g_wz.held[ci]); }
 static float bot_band_off(const char* cls, float d, float kd) {   // 0 inside the players' band for this weapon class, else how far outside (relative); -1 no band
     float a, b; if (!eg_band(cls, &a, &b)) return -1; a *= kd; b *= kd; return d < a ? (a - d) / a : d > b ? (d - b) / b : 0; }
 static void bot_step_body(void);
@@ -318,7 +350,7 @@ static void bot_step_body(void) {
         if (fight) { bm_load(); eg_load(); nlog("[nhook] [fight] on: skill %.2f, distance x%.2f, strafe x%.2f, switch x%.2f, fire slack %.1f deg, back off below shield %.2f (%.2f), press %.2f, grenades every %.0f s",
                                      skill, kdist, kstrafe, kswitch, fextra, retreat, backoff, press, gren); } }
     int engaged = 0; float ftx = 0, fty = 0; uint32_t fbtn = 0; g_bot_fighting = fight && spar;
-    if (fight) eg_load_for(g_st_curmap, g_trk_mode);   // (the models for this map and game: reloaded when either changes)
+    if (fight) { eg_load_for(g_st_curmap, g_trk_mode); wz_load(g_st_curmap); }   // (the models for this map and game: reloaded when either changes; the weapon zones)
     if (fight && spar && have_tg) {
         static uint32_t cur; static double tacq, tvis, tswitch, tmelee, tgren, tlos, tlast; static float ox, oy, side = 1;
         double dt = tlast ? now - tlast : 0.033; if (dt > 0.2) dt = 0.2; tlast = now;
@@ -363,8 +395,12 @@ static void bot_step_body(void) {
             // 3 s between switches; not in the first 0.3 s of a target)
             { static double tsw; if (g_vpad_on && g_inv.has_other && now - tsw > 3.0 && now - tacq > 0.3) {
                   float oh = bot_band_off(g_inv.held_c, tdist, kdist), oo = bot_band_off(g_inv.other_c, tdist, kdist);
+                  int hi = wz_ci(g_inv.held_c), oi = wz_ci(g_inv.other_c), zt = 0, zsw = 0, zkeep = 0; float eh = 0, eo = 0;
+                  if (g_wz.n && hi >= 0 && oi >= 0) { eh = wz_eff(hi, ftg.c, &zt); eo = wz_eff(oi, ftg.c, 0); if (zt >= 8) { zsw = eo > 1.5f * eh && eo > 1.2f && g_inv.other_ammo != 0; zkeep = eh > 1.5f * eo; } }
                   if (g_inv.ammo == 0 && g_inv.other_ammo != 0) { tsw = now; if (bot_log()) nlog("[nhook] [inv] magazine empty: switching to %s", g_inv.other); }   // (switching beats reloading mid-fight)
-                  else if (oh > 0.3f && oo >= 0 && oo < oh * 0.5f) { tsw = now; if (bot_log()) nlog("[nhook] [inv] switching to %s (%s) for %.1f units (the %s band is %.0f%% off)", g_inv.other, g_inv.other_c, tdist, g_inv.held_c, oh * 100); } }
+                  else if (zsw) { tsw = now; if (bot_log()) nlog("[nhook] [inv] switching to %s: around the target (%.0f, %.0f) players kill with a %s %.1fx its carried share, a %s %.1fx (%d kills)",
+                                                                g_inv.other, ftg.c[0], ftg.c[1], g_inv.other_c, eo, g_inv.held_c, eh, zt); }
+                  else if (!zkeep && oh > 0.3f && oo >= 0 && oo < oh * 0.5f) { tsw = now; if (bot_log()) nlog("[nhook] [inv] switching to %s (%s) for %.1f units (the %s band is %.0f%% off)", g_inv.other, g_inv.other_c, tdist, g_inv.held_c, oh * 100); } }
               if (now - tsw < 0.15) fbtn |= 8; }
             if (tdist < 1.8f && now - tmelee > 0.7) { tmelee = now; fbtn |= 2; }                                            // B: melee
             { static float fj = -1; if (fj < 0) { const char* e = getenv("NHOOK_BOT_FJUMP"); fj = e ? strtof(e, 0) : 0.0f; }   // jumps a minute in a fight (walker-coach.py: the winners')

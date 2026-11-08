@@ -3085,6 +3085,24 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   valueChangedHandler (serial queue) to every physical controller (+controllers' original list without the virtual pad, connect
   notifications, a 2 s rescan) that copies sticks, triggers, A B X Y, bumpers, stick clicks, menu / options and the d-pad into it
   (nh_vpad_set). Log: "[takeover] your controller (<vendor>) drives the game through the virtual pad".
+- **The walker's weapon names never matched natively** (2026-11-08 16:30; nbot_engage.c bot_tagkey, eg_wcls, nbot.c bot_wpn_rank,
+  nbot_goals.c gl_power_tag) — WHY: found while adding weapon zones: natively hb_tag_name gives the tag's last path part in
+  CAPITALS with spaces ("ASSAULT RIFLE", h3maps.c hb_tag_name_l), and every walker lookup was written for "assault_rifle": every
+  weapon was class "other" (no per-class distance band from the players: the default band for everything), no pickup ranked
+  better (rank 50 for all), no lying power weapon counted for the goal draw. LOGIC: bot_tagkey lowercases and turns spaces into
+  underscores before each lookup. No switch: the old behaviour was a bug.
+- **Weapon zones: the walker picks its weapon by where the target stands** (2026-11-08 16:35; weapon-kills.py -> tracks/maps/
+  <map>.wzones.txt, nbot.c wz_load / wz_eff, shim/tools/wzones-test.sh) — WHY: the user: "walker should use its best weapon based on
+  situation that can be derived from game observations of where kills happen with certain weapons. if opponent is in a certain zone
+  and you have a certain high kill weapon for that zone and aren't using it switch to it and use it". LOGIC: weapon-kills.py counts
+  every recorded match's kills (Infection left out) by the victim's 6-unit cell and the killer's weapon class (the walker's classes:
+  precision, auto, sniper, shotgun, rocket, melee) and each class's share of the weapons carried on foot on that map (the samples),
+  and writes them per map as text. The walker loads its map's file (with the engagement models); for the target's position the 3 x 3
+  cells around it give each class's kill share there over its carried share; in a fight it switches (vpad Y) to the other weapon
+  when that ratio is 1.5x the held one's and above 1.2 with 8+ kills around, and keeps a weapon the zone favours 1.5x even when the
+  distance band would switch away (an empty magazine still switches first). Recounted every minute with the kills table.
+  NHOOK_BOT_NOZONES=1 = off, NHOOK_WZONES_DIR = another folder. Offline test (the real C cut out of nbot.c): all PASS. First
+  files: 9 maps, Valhalla from 2,470 kills.
 
 ## 19. Performance
 
