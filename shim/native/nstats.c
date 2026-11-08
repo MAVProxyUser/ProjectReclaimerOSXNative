@@ -1403,6 +1403,7 @@ static int st_control(const char* act, const char* qs) {
         int live = g_nr_last > 0 && mono_s() - g_nr_last < 2.0; char err[200];
         return rec_start(ao, secs, g_st_curmap[0] ? g_st_curmap : "game", ao || !live ? 0 : g_nr_w, ao || !live ? 0 : g_nr_h, err, sizeof err); }
     if (!strcmp(act, "recstop")) { rec_stop(); return 1; }
+    if (!strcmp(act, "takeover")) { if (!getenv("NHOOK_TAKEOVER")) return 0; void nh_takeover_now(void); nh_takeover_now(); return 1; }   // (the observer's game: the user's controls, nvpad.m)
     if (!strcmp(act, "spar") || !strcmp(act, "walk") || !strcmp(act, "botbtn")) return bot_control(act, qs);   // the sparring aim / walker / button scans (nbot.c, test clients)
     if (!strcmp(act, "mic")) { const char* v = strstr(qs, "on="); if (!v) return 0; mic_muted(); g_mic_muted = atoi(v + 3) ? 0 : 1; return 1; }
     if (!strcmp(act, "forensic")) return fx_control(qs);       // archive / voice audio / consent (forensic.c)

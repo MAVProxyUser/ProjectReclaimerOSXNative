@@ -81,9 +81,12 @@ static void tk_take(NSWindow* w) {
     if (@available(macOS 11.3, *)) [GCController setShouldMonitorBackgroundEvents:YES];
     [NSApp activateIgnoringOtherApps:YES];
     if (w) {
+        // full resolution (the user: "have full resolution available"): the window fills the screen's visible area at the normal
+        // level, resizable, and native full screen allowed (the green button / Ctrl-Cmd-F); the game renders at the window's size
         [w setLevel:NSNormalWindowLevel];
-        NSRect f = w.frame, v = (w.screen ?: [NSScreen mainScreen]).visibleFrame;
-        if (f.size.width < 900) { CGFloat ww = fmin(1600, v.size.width * 0.9), hh = ww * 9 / 16; [w setFrame:NSMakeRect(v.origin.x + (v.size.width - ww) / 2, v.origin.y + (v.size.height - hh) / 2, ww, hh) display:YES]; }
+        w.styleMask = w.styleMask | NSWindowStyleMaskResizable | NSWindowStyleMaskTitled | NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskClosable;
+        w.collectionBehavior = (w.collectionBehavior & ~(NSWindowCollectionBehaviorFullScreenAuxiliary | NSWindowCollectionBehaviorFullScreenNone)) | NSWindowCollectionBehaviorFullScreenPrimary;
+        NSRect v = (w.screen ?: [NSScreen mainScreen]).visibleFrame; [w setFrame:v display:YES animate:NO];
         [w makeKeyAndOrderFront:nil]; }
     nh_log("[nhook] [takeover] the user has the controls: controller input in the background on (%s), window %s", [GCController respondsToSelector:@selector(setShouldMonitorBackgroundEvents:)] ? "yes" : "this macOS cannot",
            w ? "raised" : "not found");
@@ -96,10 +99,13 @@ static void tk_take(NSWindow* w) {
         dispatch_source_set_timer(t, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), 2 * NSEC_PER_SEC, NSEC_PER_SEC / 4);
         dispatch_source_set_event_handler(t, ^{ tk_bridge_all(); }); dispatch_resume(t); }
     nh_takeover_fire(); }
+void nh_takeover_now(void) {   // (stats control do=takeover: the same as a click in the window, from the stats page / a test)
+    dispatch_async(dispatch_get_main_queue(), ^{ NSWindow* w = nil; for (NSWindow* x in NSApp.windows) if (x.isVisible && (!w || x.frame.size.width * x.frame.size.height > w.frame.size.width * w.frame.size.height)) w = x;
+        static int done; if (!done) { done = 1; tk_take(w); } }); }
 void nh_takeover_install(void) {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
         if (g_tk_monitor || !NSApp) { if (!NSApp) nh_takeover_install(); return; }
         g_tk_monitor = [[NSEvent addLocalMonitorForEventsMatchingMask:(NSEventMaskLeftMouseDown | NSEventMaskRightMouseDown) handler:^NSEvent* (NSEvent* e) {
-            static int done; if (!done && e.window) { done = 1; tk_take(e.window); }
+            static int done; if (!done && e.window) { done = 1; tk_take(e.window); }   // (a do=takeover first makes this a no-op: tk_take runs once)
             return e; }] retain];
         nh_log("[nhook] [takeover] armed: a click in the game's window gives you the controls (the controller too)"); }); }

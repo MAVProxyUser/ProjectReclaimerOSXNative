@@ -3103,6 +3103,12 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   distance band would switch away (an empty magazine still switches first). Recounted every minute with the kills table.
   NHOOK_BOT_NOZONES=1 = off, NHOOK_WZONES_DIR = another folder. Offline test (the real C cut out of nbot.c): all PASS. First
   files: 9 maps, Valhalla from 2,470 kills.
+- **Take-over at full resolution, and from the stats page** (2026-11-08 16:45; nvpad.m tk_take / nh_takeover_now, nstats.c
+  do=takeover, nhook.c tk_size_watch) — WHY: the user: "relaunch the next match and ensure I can have control with the joystick and
+  have full resolution available". LOGIC: the take-over window fills the screen's visible area (it was 1600 x 900 at most), stays
+  resizable and titled, and allows native full screen (collection behavior FullScreenPrimary: the green button / Ctrl-Cmd-F);
+  POST /control?do=takeover does what the click does (only with NHOOK_TAKEOVER: the observer); after a take-over the game's
+  presented frame size is logged whenever it changes ("[takeover] the game draws W x H": does the game follow the window?).
 
 ## 19. Performance
 

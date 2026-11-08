@@ -927,7 +927,11 @@ static int my_getaddrinfo(const char* h, const char* sv, const struct addrinfo* 
 #include <AudioToolbox/AudioToolbox.h>
 #include "../src/rec.h"
 static volatile int g_takeover;   // (nvpad.m nh_takeover_install: the user took the observer's controls -- sound back on)
+extern volatile int g_nr_w, g_nr_h;   // (nrender.m: the presented frame's size)
+static void* tk_size_watch(void* a) {   // after a take-over: log the game's frame size when it changes (does it follow the window?)
+    (void)a; int lw = 0, lh = 0; for (int i = 0; i < 600; i++) { if (g_nr_w != lw || g_nr_h != lh) { lw = g_nr_w; lh = g_nr_h; nlog("[nhook] [takeover] the game draws %d x %d", lw, lh); } sleep(1); } return 0; }
 void nh_takeover_fire(void) {
+    { pthread_t th; if (!pthread_create(&th, 0, tk_size_watch, 0)) pthread_detach(th); }
     g_takeover = 1; const char* f = getenv("NHOOK_TAKEOVER_FILE");   // (shim/tools/observe-public.sh: the visit lasts until the user quits)
     if (f && *f) { int fd = open(f, O_WRONLY | O_CREAT | O_TRUNC, 0644); if (fd >= 0) { char b[64]; int n = snprintf(b, sizeof b, "%ld\n", (long)time(0)); write(fd, b, n); close(fd); } } }
 typedef struct { AudioUnit au; AURenderCallback cb; void* ref; AudioStreamBasicDescription fmt; int have; } AuWrap;
