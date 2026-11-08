@@ -2897,6 +2897,20 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   halo3+0x2d349c -> its caller, the HUD draw, which passes the tracker state (S = [TLS +0xF0] + user * 0x28c8 + 0x244: range,
   10 history frames of up to 16 blips) to its draw. LOGIC: rd_blips reads user 0's newest frame; NHOOK_RADAR_LOG=1 logs it beside
   the truth to fit the sensor plane to the world; the walker keeps halo3's rules (rd_contact) until then.
+- **Every public match recorded for the walkers** (2026-11-08 13:10; shim/native/ntracks.c, nstats.c, build.sh -lz) — WHY: the
+  user: "any game played on a public server should be collecting stats for our walkers to hone themselves on in the future";
+  only the observer's match-recorder.py (HTTP polling, a separate process) recorded. LOGIC: in a match on a server that is not
+  127.x, every stats snapshot writes match-recorder.py's line format to tracks/<date>_<map>_<FNV tag>.jsonl.gz (header with the
+  game engine and variant from st_variant, "source": "nhook", "you_plays": true -- "you" -1, so the local player counts as a real
+  player), events from the feed ring with names mapped to slots (no names written), gzflush every 600 lines, closed on a new
+  match / match end / exit. SWITCHES: NHOOK_TRACKS=0 off (observe-public.sh sets it: it runs match-recorder.py), NHOOK_TRACKS_DIR.
+- **Weapon effectiveness** (2026-11-08 13:05; engage-extract.py "weapons" records, engage-model.py weapon_stats) — WHY: the user:
+  "gather some stats about the most effective weapons too". LOGIC: per recording, seconds each weapon was held by live players on
+  foot, kills credited by the game, kills by a player holding it, deaths of players holding it; the model: kills a minute held,
+  K/D, duel win rate as attacker / defender, median time to kill (weapons held 3+ minutes). First table (non-Infection, 34
+  matches): Mauler 5.9 kills/min, SMG 5.4, Energy Sword 5.0, Shotgun 4.4; best K/D Spartan Laser 2.80, Sniper 2.36, Carbine 1.90;
+  sniper attackers win 92% of their duels; Assault Rifle / Battle Rifle ~1.0 K/D (the defaults); melee is the game's top kill
+  credit (777), then the Assault Rifle (750) and Battle Rifle headshots (591).
 
 ## 19. Performance
 

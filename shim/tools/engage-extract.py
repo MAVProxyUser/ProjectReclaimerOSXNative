@@ -196,9 +196,34 @@ def cut(path):
                                     'b_throws': [[round(float(t[q] - t[k0]), 2), round(float(dist[q]), 2)] for q in range(k0, k1 + 1) if THROW[q, B]]}})
     out.extend(multi(path, head, t, slots, me, inf, cls, alive, X, Y, Z, YAW, SH, HP, TEAM, ZOMB, FIRE, HURT, VX, VY, kills))
     out.extend(items(path, head, t, slots, me, cls, alive, X, Y, Z, VX, VY, E))
+    out.append(weapons(path, head, t, slots, me, cls, alive, WPN, VEH, E))
     return out
 
 POWER = ('rocket', 'sniper', 'beam rifle', 'spartan laser', 'shotgun', 'energy sword', 'gravity hammer', 'hammer', 'fuel rod', 'missile pod', 'flamethrower', 'plasma cannon', 'overshield', 'camo', 'power-up', 'powerup')
+def weapons(path, head, t, slots, me, cls, alive, WPN, VEH, E):
+    """WEAPONS (the user, 2026-11-08: "gather some stats about the most effective weapons"): per weapon (lower case) the seconds
+    it was held in hand by live players on foot (the observer left out), the kills credited to it by the game (the kill event's
+    weapon), the kills by a player holding it, and the deaths of players holding it."""
+    T, N = alive.shape; held, kh, dh, kev = {}, {}, {}, {}
+    dt = np.diff(t, prepend=t[0]); dt = np.clip(dt, 0, 0.5)
+    for c in range(N):
+        if slots[c] == me: continue
+        m = alive[:, c] & ~VEH[:, c]
+        for w in set(WPN[m, c]):
+            if w: held[w.lower()] = held.get(w.lower(), 0.0) + float(dt[m & (WPN[:, c] == w)].sum())
+    for e in E:
+        if e.get('ev') != 'kill' or e.get('verb') != 'killed': continue
+        how = (e.get('how') or '').lower(); kev[how] = kev.get(how, 0) + 1
+        k = int(np.searchsorted(t, e['t'])) - 1
+        for slot, acc in ((e.get('a'), kh), (e.get('b'), dh)):
+            if slot not in slots or slot == me: continue
+            c = slots.index(slot); q = k
+            while q > 0 and q > k - 30 and not (alive[q, c] and WPN[q, c]): q -= 1   # (the weapon in hand just before)
+            w = (WPN[q, c] or '').lower() if q >= 0 else ''
+            if w and not VEH[q, c]: acc[w] = acc.get(w, 0) + 1
+    return {'kind': 'weapons', 'file': os.path.basename(path), 'map': head.get('map'), 'mode': head.get('mode'), 'class': cls,
+            'held_s': {k: round(v, 1) for k, v in held.items()}, 'kills_holding': kh, 'deaths_holding': dh, 'kills_by_event': kev}
+
 def items(path, head, t, slots, me, cls, alive, X, Y, Z, VX, VY, E):
     """ITEMS (the user, 2026-11-08: "players seek out spawning power weapons, and items like overshield and camo"): each power
     weapon / power-up spawn event with a position: every player within 40 units at that moment -> its approach speed toward the

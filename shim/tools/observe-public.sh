@@ -13,7 +13,8 @@
 # recorded OBS_WHOLE whole matches there (a recording that started after the one it joined into, at least 1500 samples = 2.5
 # min), or MAXSESSION seconds, then picks again; at least OBS_MIN_PLAYERS (6) players, 4 when no server has that many.
 #   bash shim/tools/observe-public.sh [TOTAL seconds, default 3600] [MAXSESSION seconds, default 2700]
-# Its game is muted (OBS_MUTE=0 = with sound); NATIVE_DYLIB=<copy> keeps one dylib for the whole run while shim/build is rebuilt.
+# Its game is muted (OBS_MUTE=0 = with sound); it records with match-recorder.py, so nhook's own recorder (ntracks.c) is off
+# (OBS_NATIVE_TRACKS=1 + NHOOK_TRACKS_DIR=<other folder> = both, to compare); NATIVE_DYLIB=<copy> keeps one dylib for the whole run while shim/build is rebuilt.
 # Refuses to start beside a running Project Reclaimer (the user's game included); stops at once if one appears that is not its own.
 set -u
 cd "$(dirname "$0")/../.."
@@ -52,7 +53,7 @@ while [ $(( $(date +%s) - t0 )) -lt "$TOTAL" ]; do
   if [ -z "$addr" ]; then echo "$(date +%H:%M) no suitable server: waiting 5 minutes"; sleep 300; continue; fi
   cls=${line##*| }; echo "$(date +%H:%M) joining $line"
   L="$TR/logs/$(date +%Y%m%d-%H%M%S).log"; RL="$L.rec"
-  NATIVE_REAL=1 NHOOK_STATS_OPEN=0 NHOOK_MUTE_OUTPUT="${OBS_MUTE:-1}" NATIVE_LOG="$L" bash shim/native.sh --join-server "$addr" --background > "$L.out" 2>&1 &
+  NATIVE_REAL=1 NHOOK_STATS_OPEN=0 NHOOK_MUTE_OUTPUT="${OBS_MUTE:-1}" NHOOK_TRACKS="${OBS_NATIVE_TRACKS:-0}" NATIVE_LOG="$L" bash shim/native.sh --join-server "$addr" --background > "$L.out" 2>&1 &
   for i in $(seq 1 30); do P=$(sed -n 's/^native app pid \([0-9]*\).*/\1/p' "$L.out" 2>/dev/null); [ -n "$P" ] && break; sleep 1; done
   [ -z "${P:-}" ] && { echo "the app did not start"; sleep 30; continue; }
   left=$(( TOTAL - ($(date +%s) - t0) )); secs=$(( MAXS < left ? MAXS : left ))

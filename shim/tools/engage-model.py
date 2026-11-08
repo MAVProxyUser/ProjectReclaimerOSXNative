@@ -136,6 +136,30 @@ def behaviour(R):
                       'first_was_nearest': r2(sum(bool(i['first_was_nearest']) for i in I if i['first_s'] is not None) / max(1, len(f)), 3)}
     return B
 
+def weapon_stats(R, D):
+    """the most effective weapons: per weapon held 3+ minutes in all -- kills a minute held (by a player holding it), its K/D
+    (kills by players holding it / deaths of players holding it), the game's own kill credits, and in duels: how often the
+    attacker holding it won, how often a defender holding it survived or won, the median time to kill"""
+    W = [r for r in R if r.get('kind') == 'weapons']; held, kh, dh, kev = Counter(), Counter(), Counter(), Counter()
+    for r in W:
+        held.update(r['held_s']); kh.update(r['kills_holding']); dh.update(r['deaths_holding']); kev.update(r['kills_by_event'])
+    att = defaultdict(lambda: [0, 0]); dfn = defaultdict(lambda: [0, 0]); ttk = defaultdict(list)
+    for e in D:
+        if e['out']['win'] not in ('a', 'b') or e['ctx']['a_veh'] or e['ctx']['b_veh']: continue
+        aw, bw = (e['ctx']['a_wpn'] or '').lower(), (e['ctx']['b_wpn'] or '').lower()
+        if aw: att[aw][0] += e['out']['win'] == 'a'; att[aw][1] += 1
+        if bw: dfn[bw][0] += e['out']['win'] == 'b'; dfn[bw][1] += 1
+        ww = aw if e['out']['win'] == 'a' else bw
+        if ww: ttk[ww].append(e['out']['dur'])
+    out = {}
+    for w, sec in held.most_common():
+        if sec < 180: continue
+        mn = sec / 60.0
+        out[w] = {'held_min': r2(mn, 1), 'kills_per_min': r2(kh[w] / mn, 3), 'kd': r2(kh[w] / max(1, dh[w]), 2), 'kills_holding': kh[w], 'deaths_holding': dh[w],
+                  'game_credits': kev.get(w, 0), 'duel_attacker_wins': [r2(att[w][0] / att[w][1], 3), att[w][1]] if att[w][1] else None,
+                  'duel_defender_wins': [r2(dfn[w][0] / dfn[w][1], 3), dfn[w][1]] if dfn[w][1] else None, 'ttk_median': r2(pct(ttk[w], .5)) if ttk[w] else None}
+    return {'by_weapon': dict(sorted(out.items(), key=lambda kv: -(kv[1]['kills_per_min'] or 0))), 'game_credits_top': dict(kev.most_common(20))}
+
 def load():
     out = []
     for p in sorted(glob.glob(os.path.join(ENG, '*.eng.jsonl.gz'))):
@@ -265,10 +289,11 @@ def main():
         sub = [e for e in D if e['class'] == c]
         if sub: rep['by_class'][c] = stats(sub)
         msub = [r for r in R if r.get('kind', 'duel') != 'duel' and r['class'] == c]
-        if msub: rep['by_class'].setdefault(c, {})['multi'] = multi_stats(msub); rep['by_class'][c]['behaviour'] = behaviour(msub)
+        if msub: rep['by_class'].setdefault(c, {})['multi'] = multi_stats(msub); rep['by_class'][c]['behaviour'] = behaviour(msub); rep['by_class'][c]['weapons'] = weapon_stats(msub, sub)
     rep['all_but_infection'] = stats([e for e in D if e['class'] != 'infection'])
     rep['all_but_infection']['multi'] = multi_stats([r for r in R if r.get('kind', 'duel') != 'duel' and r['class'] != 'infection'])
     rep['all_but_infection']['behaviour'] = behaviour([r for r in R if r.get('kind', 'duel') != 'duel' and r['class'] != 'infection'])
+    rep['all_but_infection']['weapons'] = weapon_stats([r for r in R if r.get('kind', 'duel') != 'duel' and r['class'] != 'infection'], [e for e in D if e['class'] != 'infection'])
     M = [e for e in D if e['class'] in MODEL_CLASSES]
     st = stats(M) if M else {}
     model = {'version': 1, 'source': {'duels': len(M), 'classes': sorted(MODEL_CLASSES)},
@@ -279,6 +304,7 @@ def main():
     mm = multi_stats([r for r in R if r.get('kind', 'duel') != 'duel' and r['class'] in MODEL_CLASSES])
     model['target'] = (mm.get('target_choice') or {}).get('weights'); model['multi'] = {k: v for k, v in mm.items() if k != 'target_choice'}
     model['behaviour'] = behaviour([r for r in R if r.get('kind', 'duel') != 'duel' and r['class'] in MODEL_CLASSES])
+    model['weapons'] = weapon_stats([r for r in R if r.get('kind', 'duel') != 'duel' and r['class'] in MODEL_CLASSES], M)
     tmp = OUT + '.tmp%d' % os.getpid(); json.dump(model, open(tmp, 'w'), separators=(',', ':')); os.replace(tmp, OUT)   # (atomic: a walker starting now reads the old or the new file)
     if '--json' in sys.argv: json.dump(rep, open(arg('--json', ''), 'w'), indent=1)
     print(json.dumps(rep, indent=1))

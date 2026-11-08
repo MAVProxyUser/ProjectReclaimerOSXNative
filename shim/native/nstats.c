@@ -301,6 +301,7 @@ static void hm_json(StBuf* s) {
     sb_put(s, "]}"); pthread_mutex_unlock(&g_hm_mx);
 }
 #include "nlanes.c"   // the lanes players use (the page's heatmap "Lanes"; GET /lanes.json)
+#include "ntracks.c"  // every public match recorded for the walkers (ReclaimerMac/tracks, match-recorder.py's format)
 // the map picture behind the heatmap: the loader's tools make missing ones (re-tools/h3bsp.py; the repo = two folders up
 // from this dylib, shim/build/nhook.dylib)
 static char g_repo[1024];
@@ -426,7 +427,7 @@ static void st_variant(StBuf*s){
     static const char*const en[13]={"","Capture the Flag","Slayer","Oddball","King of the Hill","Forge","VIP","Juggernaut","Territories","Assault","Infection","","Gun Game"};
     char nm[64]; int j=0; for(int c=0;c<16 && j<60;c++){ uint16_t u=*(const uint16_t*)(v+0x14+c*2); if(!u) break;
         if(u<0x80) nm[j++]=(char)u; else if(u<0x800){ nm[j++]=(char)(0xC0|(u>>6)); nm[j++]=(char)(0x80|(u&63)); } else { nm[j++]=(char)(0xE0|(u>>12)); nm[j++]=(char)(0x80|((u>>6)&63)); nm[j++]=(char)(0x80|(u&63)); } }
-    nm[j]=0;
+    nm[j]=0; snprintf(g_trk_mode,sizeof g_trk_mode,"%s",en[eng]); snprintf(g_trk_var,sizeof g_trk_var,"%s",nm);   // (ntracks.c's header)
     static const char*const tc[3]={"Disabled","Enabled","Balancing only"}; uint16_t soc=*(const uint16_t*)(v+0x12C), tch=*(const uint16_t*)(v+0x12E); uint32_t mo=*(const uint32_t*)(v+0x130);
     sb_put(s,",\"variant\":{\"engine\":%d,\"mode\":",eng); sb_str(s,en[eng]); sb_put(s,",\"name\":"); sb_str(s,nm);
     // the raw variant (0x4C4 bytes): the page decodes every option from it with the client's option table
@@ -1134,6 +1135,7 @@ static void st_snapshot(StBuf* s) {
     if (strcmp(m, g_trk_map)) { snprintf(g_trk_map, sizeof g_trk_map, "%s", m); g_ntrk = 0; g_nbip = 0; sb_reset(); }   // a new map: new match stats
     pthread_mutex_lock(&g_hm_mx); snprintf(g_hm_cur, sizeof g_hm_cur, "%s", m); if (g_hm.dirty && now - g_hm.saved > 30) { hm_save(); g_hm.saved = now; } pthread_mutex_unlock(&g_hm_mx);
     ln_tick(m, t0, now);
+    trk_begin(now, t0, m);   // (ntracks.c: a public match -> this snapshot's line)
     static uint8_t tab[HB_MAXOBJ * 0x18]; int hi = 0; uint64_t arr = hb_object_array(); uint8_t hdr[0x60];
     if (arr && hb_read(arr, hdr, sizeof hdr) && *(uint32_t*)(hdr + 0x2c) == 0x64407440 && *(int32_t*)(hdr + 0x24) == 0x18) {
         hi = *(int32_t*)(hdr + 0x3c);
@@ -1251,7 +1253,17 @@ static void st_snapshot(StBuf* s) {
                       t->longest > (t->alive ? now - t->life_start : 0) ? t->longest : (t->alive ? now - t->life_start : 0), t->dist, t->top_speed);
         if (g_st_var_ok) st_player_traits(s, pl[k].rec);
         sb_put(s, "}");
+        if (g_tks.rowopen) {   // (ntracks.c: the same player in the recording's line -- no name in the file)
+            int al = have && !dead; float yw = 0, pt = 0; char wn[64] = "", vn[64] = ""; int gr = 0;
+            if (al) { const float* av = (const float*)(d + 0x1a0); float ah = sqrtf(av[0] * av[0] + av[1] * av[1]); if (isfinite(av[0]) && ah + fabsf(av[2]) > 0.5f) { yw = atan2f(av[1], av[0]) * 57.2958f; pt = atan2f(av[2], ah) * 57.2958f; }
+                int ws = *(const int8_t*)(d + 0x262); const uint32_t* wp = (const uint32_t*)(d + 0x268); uint64_t wd = (ws >= 0 && ws < 4) ? ST_DATUM(wp[ws]) : 0; uint32_t df = 0;
+                if (wd && hb_read(wd, &df, 4)) snprintf(wn, sizeof wn, "%s", hb_tag_name(df));
+                uint32_t par = *(const uint32_t*)(d + 0x10); uint64_t vd = par != 0xFFFFFFFFu ? ST_DATUM(par) : 0; if (vd && hb_read(vd, &df, 4)) snprintf(vn, sizeof vn, "%s", hb_tag_name(df));
+                const int8_t* g = (const int8_t*)(d + 0x294); for (int q = 0; q < 4; q++) gr += g[q] > 0 ? g[q] : 0; }
+            trk_player(pl[k].slot, pl[k].name, team, al, o, yw, pt, al ? *(const float*)(d + 0xF8) : 0, al ? *(const float*)(d + 0xF4) : 0, wn, vn,
+                       sbok ? sbs[SB_KILLS] : 0, t ? (sbok ? sbs[SB_DEATHS] : t->deaths) : 0, t ? t->shots : 0, hits, gr); }
     }
+    trk_end();
     if (t0) { rs_tick(pl, np, now); sb_tick(pl, np, now); }
     { static int lg = -1; if (lg < 0) lg = getenv("NHOOK_RESULTS_LOG") != 0;   // game results: what changes (diagnostic)
       if (lg && g_res_base && g_res_vslog > 0 && g_res_vslog <= 8) {
@@ -1511,6 +1523,7 @@ static void* st_listen_thread(void* a) {
 static void nstats_start(void) {
     bot_init();   // the sparring aim / walker's launch switches (NHOOK_SPAR, NHOOK_NAV)
     atexit(ln_atexit);   // (the lanes since the last 30-s save)
+    atexit(trk_atexit);  // (the public match being recorded: closed properly)
     const char* e = getenv("NHOOK_STATS_HTTP"); if (e) g_st_port = atoi(e); if (g_st_port <= 0 || g_st_port > 65535) return;
     Dl_info di; if (dladdr((void*)nstats_start, &di) && di.dli_fname) {   // the repo: <repo>/shim/build/nhook.dylib
         snprintf(g_repo, sizeof g_repo, "%s", di.dli_fname); for (int k = 0; k < 3; k++) { char* sl = strrchr(g_repo, '/'); if (sl) *sl = 0; } }
