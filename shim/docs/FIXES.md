@@ -2918,6 +2918,10 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   and walker controls), hook cost, soundboard, hooks check, packets. Blocks moved whole (no ids changed); the map is redrawn when
   Live comes back. The observer leaves Infection out for now (observe-public.sh OBS_INFECTION=1 = back in; the user: 86 minutes
   of Infection biased the data).
+- **observe-public.sh: the server going away ends the visit** (2026-11-08 13:40) — WHY: the server shut down mid-session ("the host
+  left the game: back to the main menu"); the game sat in the main menu and the visit only ended at MAXSESSION (45 min): the 5-
+  minute "no match" rule only covers a visit that never got into one. LOGIC: "back to the main menu" or "[switch] leaving the
+  game" in the app log ends the visit and skips that server for the run.
 
 ## 19. Performance
 
