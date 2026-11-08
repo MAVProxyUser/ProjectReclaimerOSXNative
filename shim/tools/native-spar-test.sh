@@ -28,8 +28,8 @@ d=json.load(sys.stdin); ps=d.get("players",[]); b=[q for q in ps if q.get("name"
 if not b: print("none"); sys.exit()
 b=b[0]
 if not b.get("alive"): print("dead"); sys.exit()
-if not a or not b.get("aim") or not b.get("pos") or not a[0].get("pos"): print("alive"); sys.exit()
-bp,ap=b["pos"],a[0]["pos"]; want=math.degrees(math.atan2(ap[1]-bp[1],ap[0]-bp[0])); e=(b["aim"][0]-want+180)%360-180
+if not a or not b.get("look") or not b.get("pos") or not a[0].get("pos"): print("alive"); sys.exit()
+bp,ap=b["pos"],a[0]["pos"]; want=math.degrees(math.atan2(ap[1]-bp[1],ap[0]-bp[0])); e=(b["look"][0]-want+180)%360-180
 print("aim %.2f" % abs(e))' 2>/dev/null)
   case "$r" in dead) [ $was = 1 ] && deaths=$((deaths+1)); was=0;; alive) was=1;; aim*) was=1; seen=$((seen+1)); errs="$errs ${r#aim }";; esac
   [ $seen -ge 30 ] && break; done

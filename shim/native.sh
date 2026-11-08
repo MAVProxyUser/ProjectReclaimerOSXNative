@@ -40,7 +40,8 @@ LOG="${NATIVE_LOG:-/tmp/reclaimer_native.log}"
 [ "${NATIVE_ALLOW_SECOND:-0}" = 1 ] || for i in $(seq 1 30); do pgrep -f 'Project Reclaimer.app/Contents/MacOS/project-reclaimer' >/dev/null || break; sleep 1; done
 if pgrep -f 'Project Reclaimer.app/Contents/MacOS/project-reclaimer' >/dev/null && [ "${NATIVE_ALLOW_SECOND:-0}" != 1 ]; then
   echo "native.sh: Project Reclaimer is already running (pid $(pgrep -f 'Project Reclaimer.app/Contents/MacOS/project-reclaimer' | tr '\n' ' ')): not starting a second one" >&2; exit 1; fi
-DYLD_INSERT_LIBRARIES="$PWD/shim/build/nhook.dylib" "$APP" "$@" > "$LOG" 2>&1 &
+# NATIVE_DYLIB=<file>: another copy of the hook dylib (a long run keeps the one it started with while shim/build/ is rebuilt)
+DYLD_INSERT_LIBRARIES="${NATIVE_DYLIB:-$PWD/shim/build/nhook.dylib}" "$APP" "$@" > "$LOG" 2>&1 &
 PID=$!; echo "native app pid $PID, log $LOG"
 if [ -n "$NATIVE_SECS" ]; then sleep "$NATIVE_SECS"; kill $PID 2>/dev/null; sleep 1; kill -9 $PID 2>/dev/null; fi
 wait $PID 2>/dev/null

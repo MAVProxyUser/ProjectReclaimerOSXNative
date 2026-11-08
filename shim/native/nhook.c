@@ -185,7 +185,8 @@ static uint8_t* near_page(uint64_t code, size_t size) {   // a fresh RW range wi
 typedef struct { uint64_t rx; uint8_t* rw; size_t used; } StubPage;
 static StubPage g_stubp[32]; static int g_nstubp; static pthread_mutex_t g_stub_mx = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t stub_alloc(uint64_t code, size_t len, uint8_t** rw) {   // the RX address of a free slot near code; *rw = its writable alias
-    static int each = -1; if (each < 0) each = getenv("NHOOK_STUB_PAGE_EACH") != 0;
+    static int each = -1, far = -1; if (each < 0) each = getenv("NHOOK_STUB_PAGE_EACH") != 0; if (far < 0) far = getenv("NHOOK_FAR_TEST") != 0;
+    if (far) return 0;   // NHOOK_FAR_TEST=1: as if no gap were in range (tests the far hooks)
     if (each) { uint8_t* p = near_page(code, 0x4000); *rw = p; return (uint64_t)(uintptr_t)p; }   // (the caller makes it RX)
     len = (len + 63) & ~(size_t)63; const int64_t R = 0x7800000; uint64_t a = 0;
     pthread_mutex_lock(&g_stub_mx);
@@ -258,6 +259,9 @@ static uint64_t nh_call(uint64_t* ctx, uint32_t rva, int n, const uint64_t* a) {
 }
 extern char nh_tpls_start[], nh_tpls_displaced[], nh_tpls_handler[], nh_tpls_return[], nh_tpls_end[];
 static int hook_install_x0(const char* name, uint32_t rva, void* h, int skip, uint64_t* stub_out);
+static int jit_far_hook(const char* name, uint64_t e, void* h, int skip, uint64_t* stub_out);   // (below: no stub page in branch range)
+static int insn_pcrel(uint32_t w); static int nh_world_stop(thread_act_array_t* th, mach_msg_type_number_t* n, uint64_t lo, uint64_t hi, int* busy);
+static void nh_world_go(thread_act_array_t th, mach_msg_type_number_t n);
 // the hooks check around each installer: the item by the hook's name, a counting trampoline in front of the handler, the
 // outcome (ok + where, or FAILED + the installer's own last log line)
 static int hook_install_x(const char* name, uint32_t rva, void* h, int skip, uint64_t* stub_out) {
@@ -279,7 +283,8 @@ static int hook_install_x0(const char* name, uint32_t rva, void* h, int skip, ui
         nlog("[nhook] hook %s: halo3+0x%x entry %08x %08x %08x %08x is not a lifted wrapper: refused", name, rva, w[0], w[1], w[2], w[3]); return -1; }
     size_t tl = TE - T0; uint8_t* sw = 0;
     uint64_t sx = stub_alloc(e, tl, &sw);            // a slot near the code (stub_alloc: RX there, written through its RW alias)
-    if (!sx) { nlog("[nhook] hook %s: no stub page near 0x%llx", name, (unsigned long long)e); return -1; }
+    if (!sx) { nlog("[nhook] hook %s: no stub page near 0x%llx: a far hook instead", name, (unsigned long long)e);
+        return (w[0] & 0xfc000000u) == 0x14000000u ? -1 : jit_far_hook(name, e, h, skip, stub_out); }
     uint8_t* st = (uint8_t*)(uintptr_t)sx; int64_t d = (int64_t)(sx - e);
     memcpy(sw, T0, tl);
     memcpy(sw + (TD - T0), &displaced, 4);            // the displaced stp x29,x30,[sp,#-16]! (or a nop for a branch)
@@ -317,7 +322,22 @@ static int body_hook_after(const char* name, uint32_t rva, void (*h)(uint64_t*))
 static int body_hook_after0(const char* name, uint32_t rva, void (*h)(uint64_t*)) {
     uint64_t b = body_of(rva); if (!b) { nlog("[nhook] body hook %s: halo3+0x%x has no lifted body of the known shape: refused", name, rva); return -1; }
     size_t tl = (size_t)(nh_ba_end - nh_ba_start); uint8_t* sw = 0; uint64_t sx = stub_alloc(b, tl, &sw);
-    if (!sx) { nlog("[nhook] body hook %s: no stub page near 0x%llx", name, (unsigned long long)b); return -1; }
+    if (!sx) {   // no stub page in branch range: a far body hook -- the body's first four instructions move into the stub (its 4 slots)
+        uint32_t w4[4]; if (getenv("NHOOK_NO_FAR_HOOKS") || rd(b, w4, 16)) { nlog("[nhook] body hook %s: no stub page near 0x%llx", name, (unsigned long long)b); return -1; }
+        for (int i = 0; i < 4; i++) if (insn_pcrel(w4[i])) { nlog("[nhook] body hook %s: no stub page near 0x%llx and instruction %d is PC-relative", name, (unsigned long long)b, i); return -1; }
+        mach_vm_address_t st = 0; if (mach_vm_allocate(mach_task_self(), &st, 0x4000, VM_FLAGS_ANYWHERE) != KERN_SUCCESS) return -1;
+        memcpy((void*)st, nh_ba_start, tl); memcpy((uint8_t*)st + (nh_ba_displaced - nh_ba_start), w4, 16);
+        uint64_t hv = (uint64_t)(uintptr_t)h, rv = b + 16; memcpy((uint8_t*)st + (nh_ba_handler - nh_ba_start), &hv, 8); memcpy((uint8_t*)st + (nh_ba_return - nh_ba_start), &rv, 8);
+        mach_vm_protect(mach_task_self(), st, 0x4000, 0, VM_PROT_READ | VM_PROT_EXECUTE); sys_icache_invalidate((void*)st, tl);
+        uint32_t patch[4] = {0x58000050u, 0xd61f0200u, (uint32_t)st, (uint32_t)((uint64_t)st >> 32)}; int ok = 0;
+        for (int tries = 0;; tries++) { thread_act_array_t ths = 0; mach_msg_type_number_t n = 0; int busy = 0;
+            if (nh_world_stop(&ths, &n, b + 1, b + 16, &busy)) break;
+            if (busy && tries < 50) { nh_world_go(ths, n); usleep(1000); continue; }
+            if (!busy) { pthread_jit_write_protect_np(0); memcpy((void*)(uintptr_t)(b + 8), &patch[2], 8); __atomic_thread_fence(__ATOMIC_SEQ_CST);
+                         memcpy((void*)(uintptr_t)b, patch, 8); pthread_jit_write_protect_np(1); sys_icache_invalidate((void*)(uintptr_t)b, 16); ok = 1; }
+            nh_world_go(ths, n); break; }
+        if (!ok) return -1;
+        nlog("[nhook] far body hook %s: halo3+0x%x body 0x%llx -> stub 0x%llx", name, rva, (unsigned long long)b, (unsigned long long)st); return 0; }
     uint8_t* st = (uint8_t*)(uintptr_t)sx;
     int64_t d = (int64_t)(sx - b); if (d >= (1ll << 27) || d < -(1ll << 27)) { nlog("[nhook] body hook %s: stub out of branch range", name); return -1; }
     memcpy(sw, nh_ba_start, tl); uint32_t disp = 0xa9bf7bfd; memcpy(sw + (nh_ba_displaced - nh_ba_start), &disp, 4);
@@ -402,6 +422,33 @@ static int text_hook_x0(const char* name, uint64_t f, void* h, int filt, uint32_
     if (stub_out) *stub_out = (uint64_t)st + (uint64_t)(td - ts);
     return 0;
 }
+// A far hook on a lifted wrapper's entry (2026-11-08): some launches have NO free 16 KB gap within branch range of the JIT
+// code (a walker's engine_clock hook failed: "no stub page near ..." -- that client then never saw its players), so instead of one
+// `b stub` the entry's first four instructions (the wrapper prologue: stp / mov / stp / ldr w,[x0,#0x290] -- nothing PC-relative)
+// become `ldr x16, #8 ; br x16 ; .quad stub`, the stub (anywhere) runs them after the handler (stub.S _nh_tp4 / _nh_tps, as a text
+// hook) and returns to entry + 16. Written with the other threads stopped (none may be inside those 16 bytes) through
+// pthread_jit_write_protect_np (the code is MAP_JIT). NHOOK_NO_FAR_HOOKS=1 = none (the old failure).
+static int jit_far_hook(const char* name, uint64_t e, void* h, int skip, uint64_t* stub_out) {
+    if (getenv("NHOOK_NO_FAR_HOOKS")) return -1;
+    uint32_t w[4]; if (rd(e, w, 16)) return -1;
+    for (int i = 0; i < 4; i++) if (insn_pcrel(w[i])) { nlog("[nhook] far hook %s: instruction %d (%08x) is PC-relative: refused", name, i, w[i]); return -1; }
+    char* ts = skip ? nh_tps_start : nh_tp4_start; char* te = skip ? nh_tps_end : nh_tp4_end; char* td = skip ? nh_tps_displaced : nh_tp4_displaced;
+    char* th = skip ? nh_tps_handler : nh_tp4_handler; char* tr = skip ? nh_tps_return : nh_tp4_return;
+    size_t tl = te - ts; mach_vm_address_t st = 0; if (mach_vm_allocate(mach_task_self(), &st, 0x4000, VM_FLAGS_ANYWHERE) != KERN_SUCCESS) return -1;
+    memcpy((void*)st, ts, tl); memcpy((uint8_t*)st + (td - ts), w, 16);
+    uint64_t hv = (uint64_t)h, rv = e + 16; memcpy((uint8_t*)st + (th - ts), &hv, 8); memcpy((uint8_t*)st + (tr - ts), &rv, 8);
+    mach_vm_protect(mach_task_self(), st, 0x4000, 0, VM_PROT_READ | VM_PROT_EXECUTE); sys_icache_invalidate((void*)st, tl);
+    uint32_t patch[4] = {0x58000050u, 0xd61f0200u, (uint32_t)st, (uint32_t)((uint64_t)st >> 32)}; int tries = 0, ok = 0;
+    for (;; tries++) { thread_act_array_t ths = 0; mach_msg_type_number_t n = 0; int busy = 0;
+        if (nh_world_stop(&ths, &n, e + 1, e + 16, &busy)) break;
+        if (busy && tries < 50) { nh_world_go(ths, n); usleep(1000); continue; }
+        if (!busy) { pthread_jit_write_protect_np(0); memcpy((void*)(uintptr_t)(e + 8), &patch[2], 8); __atomic_thread_fence(__ATOMIC_SEQ_CST);
+                     memcpy((void*)(uintptr_t)e, patch, 8); pthread_jit_write_protect_np(1); sys_icache_invalidate((void*)(uintptr_t)e, 16); ok = 1; }
+        nh_world_go(ths, n); break; }
+    if (!ok) { nlog("[nhook] far hook %s: could not patch 0x%llx", name, (unsigned long long)e); return -1; }
+    nlog("[nhook] far hook %s: 0x%llx -> stub 0x%llx (16 bytes, %d retries)", name, (unsigned long long)e, (unsigned long long)st, tries);
+    if (stub_out) *stub_out = (uint64_t)st + (uint64_t)(td - ts);
+    return 0; }
 static int text_hook_t(const char* name, uint64_t f, nh_handler h, int filt, uint32_t want) { return text_hook_x(name, f, (void*)h, filt, want, 0, 0); }
 static int text_hook(const char* name, uint64_t f, nh_handler h) { return text_hook_t(name, f, h, 0, 0); }
 // the app's Opus decode (nstats.c nh_on_opus: forensic voice audio) -- this build's addresses (napp_builds.h), each checked
@@ -694,11 +741,13 @@ static void* probe_thread(void* arg) {
     sleep(2);
     // ... and until the image is mapped (its MZ header) and the runtime's code table is filled: a dedicated server's worker,
     // starting beside its supervisor, was not ready after 2 s once ("image+0: no MZ", "code table at 0x0" -> hooks off, no
-    // stats page; 2026-11-07, its fifth start that day). Up to 60 s.
-    { int w = 0; for (; w < 240; w++) { uint8_t h[2]; uint64_t t[2];
+    // stats page; 2026-11-07, its fifth start that day). Up to 10 minutes: once (2026-11-08, a server's engine process while
+    // four clients started) it was not ready after 60 s, the old limit, and the hooks stayed off for the process's life.
+    { int w = 0; for (; w < 2400; w++) { uint8_t h[2]; uint64_t t[2];
           if (!rd(g_img, h, 2) && h[0] == 'M' && h[1] == 'Z' && (!g_app.codetab || (!rd(APP(codetab), t, 16) && t[0] && t[1] >= 1000 && t[1] <= 1000000))) break;
+          if (w == 240) nlog("[nhook] the engine image / code table are not ready 60 s later than the usual 2 s: still waiting (up to 10 minutes)");
           usleep(250000); }
-      if (w) nlog("[nhook] the engine image / code table were ready %.2f s later than the usual 2 s%s", w * 0.25, w >= 240 ? " -- not at all: giving up" : ""); }
+      if (w) nlog("[nhook] the engine image / code table were ready %.2f s later than the usual 2 s%s", w * 0.25, w >= 2400 ? " -- not at all: giving up" : ""); }
     const char* path = getenv("NHOOK_HALO3");
     if (!path) { nlog("[nhook] NHOOK_HALO3 not set: no image check"); hooks_start(); return 0; }   // (the hooks start anyway: shim/tools/native-dedicated.sh once lost them all)
     int fd = open(path, O_RDONLY); struct stat st;
@@ -882,6 +931,8 @@ static AuWrap g_auw[32]; static int g_nauw; static pthread_mutex_t g_au_mx = PTH
 static AuWrap* au_slot(AudioUnit au) { for (int i = 0; i < g_nauw; i++) if (g_auw[i].au == au) return &g_auw[i]; if (g_nauw >= 32) return 0; AuWrap* w = &g_auw[g_nauw++]; memset(w, 0, sizeof *w); w->au = au; return w; }
 static OSStatus au_tap(void* ref, AudioUnitRenderActionFlags* fl, const AudioTimeStamp* ts, UInt32 bus, UInt32 frames, AudioBufferList* io) {
     AuWrap* w = ref; OSStatus r = w->cb(w->ref, fl, ts, bus, frames, io);
+    { static int mute = -1; if (mute < 0) mute = getenv("NHOOK_MUTE_OUTPUT") && strcmp(getenv("NHOOK_MUTE_OUTPUT"), "0");   // (nmic.c: silent test clients)
+      if (mute && !r && io) { for (UInt32 i = 0; i < io->mNumberBuffers; i++) if (io->mBuffers[i].mData) memset(io->mBuffers[i].mData, 0, io->mBuffers[i].mDataByteSize); return r; } }
     if (r || !g_rec_audio || !io || !w->have || !io->mNumberBuffers || (fl && (*fl & kAudioUnitRenderAction_OutputIsSilence))) return r;
     const AudioStreamBasicDescription* f = &w->fmt; int fl2 = (int)f->mFormatFlags, isf = (fl2 & kAudioFormatFlagIsFloat) != 0, bits = (int)f->mBitsPerChannel;
     if (!(fl2 & kAudioFormatFlagIsNonInterleaved)) {
@@ -894,7 +945,12 @@ static OSStatus au_tap(void* ref, AudioUnitRenderActionFlags* fl, const AudioTim
     }
     return r;
 }
+static int vmic_set(AudioUnit au, AudioUnitPropertyID id, AudioUnitScope sc, AudioUnitElement el, const void* data, UInt32 sz, OSStatus* r);   // (nmic.c)
+static int vmic_render(AudioUnit au, UInt32 bus, UInt32 frames, AudioBufferList* io, OSStatus* r);
+static const AudioStreamBasicDescription* mic_fmt(AudioUnit au);
+static void sb_into(AudioBufferList* io, UInt32 frames, const AudioStreamBasicDescription* f, int mix);
 static OSStatus my_AudioUnitSetProperty(AudioUnit au, AudioUnitPropertyID id, AudioUnitScope sc, AudioUnitElement el, const void* data, UInt32 sz) {
+    { OSStatus vr; if (vmic_set(au, id, sc, el, data, sz, &vr)) return vr; }   // (the soundboard microphone's units; capture formats)
     { HK_ONCE(ha, "AudioUnitSetProperty"); hk_fire(ha); }
     if (id == kAudioUnitProperty_SetRenderCallback && data && sz >= sizeof(AURenderCallbackStruct) && !getenv("NHOOK_NO_AUDIO_TAP")) {
         const AURenderCallbackStruct* cs = data;
@@ -912,10 +968,12 @@ static OSStatus my_AudioUnitSetProperty(AudioUnit au, AudioUnitPropertyID id, Au
     _ip_##orig __attribute__((section("__DATA,__interpose"))) = { (const void*)(rep), (const void*)(orig) }
 // the page's mic switch (nstats.c mic_json, g_mic_muted): the app's capture pulls its samples on the AUHAL's input bus 1
 static OSStatus my_AudioUnitRender(AudioUnit au, AudioUnitRenderActionFlags* fl, const AudioTimeStamp* ts, UInt32 bus, UInt32 frames, AudioBufferList* io) {
+    { OSStatus vr; if (vmic_render(au, bus, frames, io, &vr)) return vr; }   // (nmic.c: the virtual microphone's samples = the soundboard)
     OSStatus r = AudioUnitRender(au, fl, ts, bus, frames, io);
     if (bus == 1) { HK_ONCE(hm, "AudioUnitRender (mic)"); hk_fire(hm); }
     if (bus == 1 && !g_hc_off[HC_MIC]) { uint64_t t0 = hc_now(); g_mic_t = mono_s();
         if (mic_muted() && !r && io) for (UInt32 i = 0; i < io->mNumberBuffers; i++) if (io->mBuffers[i].mData) memset(io->mBuffers[i].mData, 0, io->mBuffers[i].mDataByteSize);
+        if (!r && io) sb_into(io, frames, mic_fmt(au), 1);   // the soundboard over a real microphone (nmic.c)
         hc_add(HC_MIC, t0); }
     return r; }
 INTERPOSE(my_write, write);
@@ -933,12 +991,17 @@ INTERPOSE(my_close, close);
 INTERPOSE(my_getaddrinfo, getaddrinfo);
 INTERPOSE(my_AudioUnitSetProperty, AudioUnitSetProperty);
 INTERPOSE(my_AudioUnitRender, AudioUnitRender);
+#include "nmic.c"   // the microphone path: NHOOK_AUDIO_TRACE, NHOOK_MUTE_OUTPUT, the soundboard microphone
 
+#include <dispatch/dispatch.h>
+static void vpad_start(void* c) { (void)c; g_vpad_on = nh_vpad_install(); }
 __attribute__((constructor)) static void nhook_init(void) {
     const char* lf = getenv("NHOOK_LOG");
     if (lf) g_logfd = open(lf, O_WRONLY | O_CREAT | O_APPEND, 0644);
     if (getenv("NHOOK_TRACE_WRITES")) g_trace_writes = atoi(getenv("NHOOK_TRACE_WRITES"));
     nlog("[nhook] loaded (pid %d)", getpid());
     hk_init(); app_build_pick();                     // the hooks check's items; this app build's addresses (napp_builds.h)
+    if (getenv("NHOOK_VPAD") && strcmp(getenv("NHOOK_VPAD"), "0") && getenv("RECLAIMER_PROFILE_DIR"))   // nvpad.m: test identities only
+        vpad_start(0);   // (at once: the app may enumerate controllers only early -- 300 ms later it never asked again)
     if (getenv("NHOOK_SELFTEST")) nstats_start();       // shim/tools/nhook-selftest.sh: the stats server without the app
 }

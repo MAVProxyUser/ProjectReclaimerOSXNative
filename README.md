@@ -34,6 +34,10 @@ recompiles MCC's `halo3.dll` itself, so it needs neither this loader nor Rosetta
   boundaries), boundaries off, invisible walls off, speed 200% for everyone.
 - **Your own dedicated server on this Mac**, with the stats page: `bash shim/tools/native-dedicated.sh start` (this Mac only;
   page on http://127.0.0.1:8767); join it with `bash shim/native.sh --join-server 127.0.0.1:49190`.
+- **A soundboard**: the stats page's Soundboard panel plays a sound file (WAV, AIFF, MP3, M4A ...; add them with its file
+  button) into the game's microphone, so the other players hear it in voice chat. A Mac without a microphone gets a virtual one
+  for it. The game sends it like your voice: set **Talk mode** (Settings, Audio) to **Sensitivity** and a clip goes out by itself
+  while it plays; with Hold / Toggle to talk only while you talk.
 - **When the app updates itself** (it does: 0.10.0 -> 0.10.1 on 2026-11-08): `shim/native.sh` notices a build it has no
   addresses for and ports them before it starts the app (`re-tools/machoport.py`: it finds each one again in the new app and
   checks it; needs `python3` with numpy). The stats page's **Hooks check** window lists everything the tooling hooks or reads

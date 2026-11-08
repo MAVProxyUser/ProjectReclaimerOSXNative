@@ -131,6 +131,121 @@ move only with MCC's halo3.dll, not with the app; the app's `[capacity]` lines g
   client-to-client connections, "Classic" networking the default) -- so a client sees only the host's address: the players table's
   IP column and the Packets window have per-player addresses only when THIS app hosts (as on a dedicated server before).
 
+## The soundboard (nmic.c)
+
+The app opens a microphone only in an online session, by asking CoreAudio for the default input device; on a Mac without one
+(this Mac Studio) it stays "[voice] no capture (no microphone): listening only". nhook then hands it a virtual device ("Reclaimer
+soundboard", 48 kHz mono float, VMIC_DEV 'RCLM'), answers that device's property queries, emulates the AUHAL unit the app points
+at it (a 10 ms clock calling the app's input callback) and fills its AudioUnitRender(bus 1) from the soundboard (silence when
+idle); with a real microphone the clip is mixed over it instead. The app's Talk mode decides when it is sent (Sensitivity: by
+itself while a clip plays; Hold / Toggle to talk: with the talk key). The page's Soundboard panel: the files in
+ReclaimerMac/soundboard (Play, Stop, volume, "add" = upload), POST /control?do=sb&play=<name>|stop=1|vol=0..2. Not the app's
+--voice-wav: it reads its file to the end at launch (a named pipe too) and transmits all the time (shim/tools/voice-fifo-probe.sh).
+Test: shim/tools/native-soundboard-test.sh. Diagnostics: NHOOK_AUDIO_TRACE=1, NHOOK_MUTE_OUTPUT=1; NHOOK_VMIC=0 = off.
+
+0.10.1's server browser downloads the selected server's mods by itself (and goes on "out of sight" when you join another one);
+cancel it in the app's mods window -- nhook does not touch it (backlog N23).
+
+## Walkers that fight, learned from real players (2026-11-08 night)
+
+- **How a joined client's walker reaches the server**: the controls packet "A" is built by halo3+0x50fb8 (the app's own code)
+  from a control record (+0x10 yaw, +0x14 pitch, +0x18 / +0x1c throttle, +8 button bits); a text hook before it writes the
+  walker's values (nbot.c bot_on_abuild). Fire = control record bit 19 at the reader (+0xC8): the local weapon fires and the
+  packet's trigger bytes (halo3+0x5452c, from the weapon's barrels) carry it. The app reads controllers through IOHID, not
+  GameController (nvpad.m's virtual pad is never polled).
+- **The fighter** (NHOOK_BOT_FIGHT=1, nbot.c): line of sight by halo3's collision ray 0x1fd748 from the engine thread, reaction
+  delay, aim noise, the real players' distance band / strafe timing / back-off, grenades, melee, floor-safe steps, no tracking
+  through walls; A* prefers the lanes players use (the model's heat).
+- **Battles**: `bash shim/tools/walker-battle.sh [N] [secs]` (our local server, Guardian free-for-all, test identities test-v2 /
+  test-second / test-third / test-fourth -- `init` makes the last two), `python3 shim/tools/walker-train.py [gens] [secs]`
+  (evolves the tactics), `python3 shim/tools/walker-compare.py` (walkers vs players on the same measurements).
+- **Real players**: `bash shim/tools/observe-public.sh [total] [session]` (the user's profile, background window, mod-free public
+  servers, nothing pressed) + match-recorder.py (no names) -> ReclaimerMac/tracks; `python3 shim/tools/walker-model.py` ->
+  tracks/walker-model.json (NHOOK_BOT_MODEL), merged with the stats page's footprint heatmaps. Infection recordings count as
+  lanes only (heat / flow): zombies and survivors do not fight like slayer players.
+- **How human**: `python3 shim/tools/walker-compare.py [walkers' folder]` prints players vs walkers per measure and a
+  human-likeness score = 100 x exp(-mean |log(walker / player)|); `python3 shim/tools/walker-report.py [out.html]` = the night's
+  page (no names: Walker 1-4). `WB_TRACKS=<folder>` keeps one battle's recordings apart (one set of settings measured alone).
+  The night's numbers: training run 1 55%, run 2 73%, the trained champion's showcase battles 70 -> 81% as the reaction was fixed
+  (walker-model's reaction = 30 -> 5 deg of aim: NHOOK_BOT_TURN0, the turn rate before reacting, 0.73 rad/s; NHOOK_BOT_REACT the
+  delay factor, 1.6). `python3 shim/tools/walker-train.py --champion` = the tactics set with the best mean over all its battles.
+- **How players fight** (2026-11-08 midday): `python3 shim/tools/engage-extract.py` (duels + multi-player records per recording ->
+  tracks/engagements), `python3 shim/tools/engage-model.py [--json report.json]` (the report by game class + tracks/engage-model.json:
+  weapon distance bands, target-choice weights, second-attacker odds, a movement library). The fighter reads it (nbot_engage.c,
+  NHOOK_BOT_ENGAGE=<file>, =0 = the old nearest-enemy fighter): awareness (in view / attacked / close), the players' choice rule,
+  turning to a second attacker with their odds and delay, the weapon's distance band, real movement pieces.
+- **Weapon pickup is not a button bit**: shim/tools/native-pickup-scan.sh held each of the control record's 64 bits (+0xC8) on a
+  Mauler lying on the floor: none swapped it (FIXES.md "The pickup scan"). Walkers keep their loadout (NHOOK_BOT_PICKBIT unset).
+
+## Learning from real players: the pipeline and the tome (2026-11-08)
+
+The walkers learn how real players move and fight from public matches, per map and in aggregate, and the archive grows with
+every match the hook sees.
+
+1. **Recording.** Every public match a hooked game is in is recorded by nhook itself (ntracks.c: tracks/<date>_<map>_<tag>
+   .jsonl.gz, 10 samples a second per player: position, aim, shield / health, weapon, vehicle, kills, deaths, shots, hits,
+   grenades; events: kills, deaths, medals, spawns, pickups -- slots only, never names; NHOOK_TRACKS=0 off). The observer
+   (`shim/tools/observe-public.sh`) samples on purpose: mod-free public servers, whole matches, Slayer / CTF (Infection left out
+   for now: OBS_INFECTION=1), OBS_MATCHES / OBS_MIN_PLAYERS / OBS_MAX_PLAYERS / OBS_STRICT for "10 large then 4 smaller games",
+   and it favours the map x game type the tome has least of (coverage +25 / +12 players in its pick). It runs its own
+   match-recorder.py (the same format; the header also names the game engine).
+2. **The engagement library.** `python3 shim/tools/engage-extract.py` cuts every recording into duels (who attacks first,
+   awareness, distances, movement across / toward the other, aim, fire, shields, outcome), target choices, second attackers,
+   outnumbered stretches, teammate joins, skirmish sizes, radar contacts (turning to unseen moving enemies), respawns (revenge,
+   the death spot), power-item spawns (who goes for them), weapon use (held time, kills, deaths) and one meta record per
+   recording -> tracks/engagements/*.eng.jsonl.gz. Game type: the engine first, the variant's name, the listing last.
+3. **The models.** `python3 shim/tools/engage-model.py [--json report.json]` -> tracks/engage-model.json (the AGGREGATE: every
+   Slayer / CTF / other match), tracks/maps/<map>.engage.json (PER MAP, 150+ duels, with "by_class" per game type on that map),
+   tracks/tome.json (THE TOME: per map x game type the recordings, minutes, players, duels, kills, first / last sampled, the
+   Halo 3 maps never sampled) and the report (who wins and why, distances, movement, target choice, radar, revenge, items,
+   weapon effectiveness).
+4. **The walkers** (nbot_engage.c / nbot_goals.c) load the aggregate and overlay the map's model and its game type's section
+   wherever there are enough samples, reloaded on a map or game change; the map's own movement pieces come first; lanes and
+   its own failed-death zones are per map. What they use: awareness (view, radar, attackers), the fitted target choice, second
+   attackers with the players' odds and delay, weapon distance bands, real movement pieces, grenades, the radar look, the
+   respawn draw (killer / death spot / the item's lane), power items, the goal draw (never idle); in team games teamwork from the
+   players' team games: the spacing to a teammate, joining a teammate's fight, coming to a teammate's aid, then moving as a unit.
+   Their own inventory and power-ups (nbot.c bot_inv): weapon switch for the range (vpad Y), grenades only in hand, reload after a
+   fight (vpad RB tap), pickups (RB held), camo = hold fire until close, an overshield = fights worth more; an overshielded enemy is a
+   worse target (attackers win 54% vs 77%: behaviour.powerups), a camo'd one unseen beyond 8 units. NHOOK_BOT_NOINV=1 = off.
+5. **Checking them.** `walker-battle.sh` (WB_IDS, WB_WATCH, DED_GAME / DED_MAP on the server) + `engage-compare.py`
+   (fight-likeness against the players on the same map) + `walker-compare.py` (movement); `native-firefight.sh` for Firefight.
+   **Coaching them** (`walker-coach.py`): coach.py's report per walker against the human winners -> each measure moves one knob
+   (RADSCALE closing, NOISE aim, REACT aim-back, LIBSCALE strafe, FJUMP jumps, GRENX grenades, RADARLOOK radar, DIST distance; the
+   directional ones only while behind) -> the next battle (`loop`), state in battles/coach/state.json.
+   **The learn loop** (`learn-loop.py`): a random public game observed whole (OBS_MATCHES=1 OBS_RANDOM=1) -> `game-review.py` (this
+   game vs the map before it vs everything: the surprises, tracks/reviews/) -> engage-model.py -> walker-coach.py on that map against
+   that game's winners (x2) and the map's -> tracks/learn-loop.json. Walkers never join public servers; they are measured against
+   the players.
+6. **Watching it all.** `python3 shim/tools/workboard.py` (http://127.0.0.1:8790/): what runs, the direction, the task list, "What the
+   game is learning" (`python3 shim/tools/learnings.py`: findings with their sample sizes), "You" (`python3 shim/tools/coach.py`:
+   your own public matches -- the recorder marks your slot -- against the winners, measure by measure), the tome's coverage grid, the observer's log; `workboard.py task "..." doing|next|done` / `workboard.py direction "..."`.
+
+## Lanes (2026-11-08, nlanes.c)
+
+The stats page's map: heatmap **deaths / lanes / lanes + deaths / neither**. Lanes = how many times players crossed each 0.5-unit
+cell (moves between snapshots; standing still adds nothing), on foot and in vehicles apart, carved as ruts relative to the map's
+own traffic and deeper as more is recorded; hover gives the count and the usual direction. Recorded live by nhook on every map
+(<heatmaps>/<map>.lanes, NHOOK_LANES=0 off) and added from the recordings with `python3 shim/tools/lanes-import.py`
+(`--show <map>`; safe while a game runs: both merge under a lock). Offline: `bash shim/tools/lanes-test.sh`,
+`python3 shim/tools/lanes-page-mock.py --map <map>` (the page with that map's data on http://127.0.0.1:8798/).
+
+## The motion tracker (halo3, found 2026-11-08; static RE of halo3.dll -- the app lifts the same code)
+
+- halo3+0x2d289c = the HUD's per-user draw (ecx = local user 0..3). It calls halo3+0x2d349c "is the tracker shown" (the user's
+  player, the HUD flag at [TLS block +0x220] +0x144.., the player's radar mode != 1) and then the tracker's draw halo3+0x2f3904
+  with S = [TLS block + 0xF0] + user * 0x28c8 + 0x244 (the HUD's per-user block; halo3+0x2cf7f8 packs the radar mode into its
+  +0xca8 bits).
+- S+0xcbc = the range in world units (the draw divides by 0.3281 for metres; its scale switches at 10, 75, 150 m). S+0xcb4 = the
+  newest of 10 history frames (the draw goes (cb4 + 1 + k) % 10, k = 0..9: oldest first). Frame f at S + 0xf0 + f * 0x104:
+  int32 count, then up to 16 blips x 16 bytes: float x, float y (the sensor plane), float ?, u8 type (+0xc; 7 drawn 3x larger,
+  6 its own branch), u8 size class (+0xd: x a scale table at [halo3 globals +0x80]), u8 colour (+0xe). halo3+0x2f36b8 draws one
+  frame, halo3+0x2f329c one blip. The list at S+0xb18 (16 bytes each, count S+0xcac, fades S+0xc58) is drawn on top.
+- Player traits: resolved at player +0x1FC; radar mode +0x214, range +0x216 (u16). halo3+0x202de4 is the player's network
+  update (it replicates them; not the tracker).
+- nbot_goals.c rd_blips reads user 0's newest frame; NHOOK_RADAR_LOG=1 logs it beside the true enemy positions in the walker's
+  frame every 2 s, to fit x / y to the world. The walker's radar uses halo3's rules (rd_contact) until that is done.
+
 ## The hooks check
 
 Everything nhook depends on in the app registers in `shim/native/nhchk.h`: per item its feature, its kind (address, entry /

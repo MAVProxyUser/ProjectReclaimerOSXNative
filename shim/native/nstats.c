@@ -66,6 +66,8 @@ static void sb_str(StBuf* s, const char* v) {
     }
     sb_put(s, "\"");
 }
+static void sb_json(StBuf* s); static void sb_files_json(StBuf* s); static int sb_control(const char* qs);   // (nmic.c: the soundboard)
+static void sb_upload(int fd, const char* req, const char* body0, size_t have, const char* qs);
 static void sb_f3(StBuf* s, const float* v) { if (isfinite(v[0]) && isfinite(v[1]) && isfinite(v[2])) sb_put(s, "[%.2f,%.2f,%.2f]", v[0], v[1], v[2]); else sb_put(s, "null"); }
 
 // ---- event feed (stats.c's ring and /feed.json) --------------------------------------------------------------------
@@ -298,6 +300,8 @@ static void hm_json(StBuf* s) {
     for (uint32_t i = 0; i < g_hm.nsp; i++) { HmSpawn* q = &g_hm.sp[i]; sb_put(s, "%s[%.2f,%.2f,%.2f,%d,", i ? "," : "", q->x, q->y, q->z, q->kind); sb_str(s, q->name); sb_put(s, ",%u,%u]", q->n, q->match); }
     sb_put(s, "]}"); pthread_mutex_unlock(&g_hm_mx);
 }
+#include "nlanes.c"   // the lanes players use (the page's heatmap "Lanes"; GET /lanes.json)
+#include "ntracks.c"  // every public match recorded for the walkers (ReclaimerMac/tracks, match-recorder.py's format)
 // the map picture behind the heatmap: the loader's tools make missing ones (re-tools/h3bsp.py; the repo = two folders up
 // from this dylib, shim/build/nhook.dylib)
 static char g_repo[1024];
@@ -348,7 +352,7 @@ static int st_players(StPlayer* out, int max) {
     if (n > 0) { HK_ONCE(h, "players table"); hk_fire(h); }
     return n;
 }
-typedef struct { char name[64]; int slot, team, deaths, alive, shots, hits, hits_sphere; uint32_t unit; double life_start, longest, dist; float pos[3], top_speed;
+typedef struct { char name[64]; int slot, team, deaths, alive, shots, hits, hits_sphere; uint32_t unit; double life_start, longest, dist, ln_t; float pos[3], top_speed;
                  int aim_n, aim_on, aim_head, aim_on_judged, aim_on_reg, aim_off_judged, aim_off_reg, aim_ei; float aim_err[64];
                  int aim_open_n, aim_open_on, aim_far_n, aim_far_on; double aim_last; } StTrack;   // aim: st_aim_tick
 static StTrack g_trk[256]; static int g_ntrk; static char g_trk_map[64];
@@ -423,7 +427,7 @@ static void st_variant(StBuf*s){
     static const char*const en[13]={"","Capture the Flag","Slayer","Oddball","King of the Hill","Forge","VIP","Juggernaut","Territories","Assault","Infection","","Gun Game"};
     char nm[64]; int j=0; for(int c=0;c<16 && j<60;c++){ uint16_t u=*(const uint16_t*)(v+0x14+c*2); if(!u) break;
         if(u<0x80) nm[j++]=(char)u; else if(u<0x800){ nm[j++]=(char)(0xC0|(u>>6)); nm[j++]=(char)(0x80|(u&63)); } else { nm[j++]=(char)(0xE0|(u>>12)); nm[j++]=(char)(0x80|((u>>6)&63)); nm[j++]=(char)(0x80|(u&63)); } }
-    nm[j]=0;
+    nm[j]=0; snprintf(g_trk_mode,sizeof g_trk_mode,"%s",en[eng]); snprintf(g_trk_var,sizeof g_trk_var,"%s",nm);   // (ntracks.c's header)
     static const char*const tc[3]={"Disabled","Enabled","Balancing only"}; uint16_t soc=*(const uint16_t*)(v+0x12C), tch=*(const uint16_t*)(v+0x12E); uint32_t mo=*(const uint32_t*)(v+0x130);
     sb_put(s,",\"variant\":{\"engine\":%d,\"mode\":",eng); sb_str(s,en[eng]); sb_put(s,",\"name\":"); sb_str(s,nm);
     // the raw variant (0x4C4 bytes): the page decodes every option from it with the client's option table
@@ -1048,13 +1052,56 @@ static void pk_forensic_tick(void) {
     if (lost) { char l[80]; int k = snprintf(l, sizeof l, "{\"t\":%.3f,\"lost\":%u}", st_wall(), lost); fx_push(FXI_PACKETS, l, (size_t)k, 0, 0); }
 }
 
+// ---- the slowdown watch (2026-11-08, backlog N20: the user's first 0.10.1 session slid from ~220 to ~50 fps over minutes on one
+// server and stayed there on the next map; not reproduced locally). Every [perf] line (10 s) gets a [perf+] line: this process's
+// memory footprint and CPU (cores busy), and nhook's own time -- render thread per frame (overlay + aim tick + camera hook),
+// engine thread per second (bullet hook + aim meter), the stats snapshot per run. And once per match, when the frame rate has
+// been below half of this session's best (a 10 s window, in a match) three windows in a row: a [slow] line naming the threads
+// that took the CPU in the last window (this process's own threads, by name) -- the game's, the renderer's or ours.
+// NHOOK_NO_SLOWWATCH=1 = none of it.
+#include <libproc.h>
+#include <sys/resource.h>
+typedef struct { uint64_t id; double cpu; char name[64]; } SwThr;
+static int sw_threads(SwThr* out, int max) {   // this process's threads: total CPU seconds and name (proc_pidinfo on our own pid)
+    uint64_t ids[512]; int n = proc_pidinfo(getpid(), PROC_PIDLISTTHREADS, 0, ids, sizeof ids) / (int)sizeof(uint64_t), k = 0;
+    for (int i = 0; i < n && k < max; i++) { struct proc_threadinfo ti; if (proc_pidinfo(getpid(), PROC_PIDTHREADID64INFO, ids[i], &ti, sizeof ti) != sizeof ti) continue;
+        out[k].id = ids[i]; out[k].cpu = (ti.pth_user_time + ti.pth_system_time) * 1e-9; snprintf(out[k].name, sizeof out[k].name, "%s", ti.pth_name[0] ? ti.pth_name : "(unnamed)"); k++; }
+    return k; }
+static void slow_watch(double now, double fps, int in_match) {
+    static int off = -1; if (off < 0) off = getenv("NHOOK_NO_SLOWWATCH") != 0; if (off) return;
+    static double t_last, cpu_last, best; static uint64_t hc_last[HC_N][2]; static unsigned long fr_last; static SwThr th_last[512]; static int nth_last, low, said; static double t0_seen;
+    struct rusage ru; getrusage(RUSAGE_SELF, &ru); double cpu = ru.ru_utime.tv_sec + ru.ru_utime.tv_usec * 1e-6 + ru.ru_stime.tv_sec + ru.ru_stime.tv_usec * 1e-6;
+    task_vm_info_data_t vi; mach_msg_type_number_t vc = TASK_VM_INFO_COUNT; double fp = task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vi, &vc) == KERN_SUCCESS ? vi.phys_footprint / 1048576.0 : -1;
+    extern volatile unsigned long g_nr_frames; unsigned long fr = g_nr_frames; double dt = t_last ? now - t_last : 0;
+    if (dt > 0) { double fd = fr > fr_last ? (double)(fr - fr_last) : 1, f = hc_freq();
+        #define HCD(k) ((double)(g_hc[k].ticks - hc_last[k][0]) / f)
+        double rt = HCD(HC_OV) + HCD(HC_AIMT) + HCD(HC_VIEW), et = HCD(HC_DEL) + HCD(HC_AIM), sn = HCD(HC_SNAP); unsigned long sn_n = (unsigned long)(g_hc[HC_SNAP].calls - hc_last[HC_SNAP][1]);
+        nlog("[nhook] [perf+] footprint %.0f MB, CPU %.2f cores; nhook: render thread %.0f us/frame (overlay %.0f, aim tick %.0f, camera hook %.0f), engine thread %.1f ms/s (bullets + aim), snapshot %.1f ms each",
+             fp, (cpu - cpu_last) / dt, rt * 1e6 / fd, HCD(HC_OV) * 1e6 / fd, HCD(HC_AIMT) * 1e6 / fd, HCD(HC_VIEW) * 1e6 / fd, et * 1e3 / dt, sn_n ? sn * 1e3 / sn_n : 0);
+        #undef HCD
+    }
+    // the [slow] line: in a match, fps below half the session's best for 3 windows
+    if (g_gameplay_t0 != t0_seen) { t0_seen = g_gameplay_t0; said = 0; low = 0; }
+    if (in_match && fps > best) best = fps;
+    low = in_match && best > 60 && fps < best * 0.5 ? low + 1 : 0;
+    SwThr th[512]; int nth = sw_threads(th, 512);
+    if (low >= 3 && !said && nth_last && dt > 0) { said = 1;
+        typedef struct { const char* n; double c; } Use; Use u[512]; int nu = 0;
+        for (int i = 0; i < nth; i++) { double prev = 0; for (int j = 0; j < nth_last; j++) if (th_last[j].id == th[i].id) { prev = th_last[j].cpu; break; } u[nu].n = th[i].name; u[nu].c = (th[i].cpu - prev) / dt; nu++; }
+        for (int i = 1; i < nu; i++) { Use x = u[i]; int j = i - 1; while (j >= 0 && u[j].c < x.c) { u[j + 1] = u[j]; j--; } u[j + 1] = x; }
+        char b[900]; int q = 0; for (int i = 0; i < nu && i < 10 && q < (int)sizeof b - 80; i++) q += snprintf(b + q, sizeof b - (size_t)q, "%s%s %.0f%%", i ? ", " : "", u[i].n, u[i].c * 100);
+        nlog("[nhook] [slow] %.0f fps, below half of this session's best (%.0f) for 30 s: footprint %.0f MB, CPU %.2f cores; busiest threads: %s", fps, best, fp, (cpu - cpu_last) / dt, b); }
+    memcpy(th_last, th, sizeof th[0] * (size_t)nth); nth_last = nth;
+    for (int k = 0; k < HC_N; k++) { hc_last[k][0] = g_hc[k].ticks; hc_last[k][1] = g_hc[k].calls; }
+    t_last = now; cpu_last = cpu; fr_last = fr; }
+
 // ---- the snapshot (stats.c st_snapshot's shape) ---------------------------------------------------------------------
 static void st_snapshot(StBuf* s) {
     static const char* teams[8] = {"red", "blue", "green", "orange", "purple", "gold", "brown", "pink"};
     chat_log_tick();
     double now = mono_s(), t0 = g_gameplay_t0;
     { static double last; if (last) hk_tick(now - last > 1 ? 0.1 : now - last); last = now; }
-    sb_put(s, "{\"time\":%.2f,\"in_match\":%s,\"inst\":%d,\"native\":true", t0 ? now - t0 : 0.0, t0 ? "true" : "false", (int)getpid());
+    sb_put(s, "{\"time\":%.2f,\"in_match\":%s,\"inst\":%d,\"native\":true,\"lanes_live\":%s", t0 ? now - t0 : 0.0, t0 ? "true" : "false", (int)getpid(), ln_on() ? "true" : "false");
     { pthread_mutex_lock(&g_ev_mx); uint32_t fs = g_ev_seq; pthread_mutex_unlock(&g_ev_mx); sb_put(s, ",\"feed_seq\":%u", fs); }
     { char rb[1200]; int video_ok = g_nr_last > 0 && now - g_nr_last < 2.0; if (rec_status_json(rb, sizeof rb, video_ok) > 0) sb_put(s, ",\"rec\":%s", rb); }
     { double fps, p50, p95, mx; int nobj = 0; uint64_t oa = hb_object_array(); uint8_t oh[0x60]; if (oa && hb_read(oa, oh, sizeof oh)) nobj = *(int32_t*)(oh + 0x40);   // (data array: +0x40 count in use)
@@ -1062,7 +1109,7 @@ static void st_snapshot(StBuf* s) {
           sb_put(s, ",\"perf\":{\"fps\":%.1f,\"window_fps\":%.1f,\"frame_ms\":[%.1f,%.1f,%.1f],\"draws\":0,\"objects\":%d,\"in_view\":%d,\"bipeds\":0,\"vehicles\":0,\"projectiles\":0,"
                     "\"present_to_gpu_ms\":-1,\"present_to_window_ms\":-1,\"input_to_screen_ms\":-1,\"input_to_window_ms\":-1,\"input_to_present_ms\":-1,\"inputs\":0,\"refresh_hz\":0,\"cpu_pct\":0,\"native\":true}",
                  fps, fps, p50, p95, mx, nobj, nobj);
-          static double tl; if (now - tl >= 10) { tl = now; nlog("[nhook] [perf] %.0f fps, frame %.1f / %.1f / %.1f ms (median / 95%% / max), %d players, %d objects, map %s%s; object_delete %lu, bullets %u, aimed %lu / measured %lu, voice packets %lu, camera %s%s", fps, p50, p95, mx, np_for_perf, nobj, g_st_curmap, t0 ? "" : " (not in a match)", g_nov_del_calls, g_nov_imp_n, g_nov_aim_n, g_nov_aim_done, g_opus_n,
+          static double tl; if (now - tl >= 10) { tl = now; slow_watch(now, fps, t0 != 0); nlog("[nhook] [perf] %.0f fps, frame %.1f / %.1f / %.1f ms (median / 95%% / max), %d players, %d objects, map %s%s; object_delete %lu, bullets %u, aimed %lu / measured %lu, voice packets %lu, camera %s%s", fps, p50, p95, mx, np_for_perf, nobj, g_st_curmap, t0 ? "" : " (not in a match)", g_nov_del_calls, g_nov_imp_n, g_nov_aim_n, g_nov_aim_done, g_opus_n,
                       g_nov_cam_src == 1 ? "view constants" : g_nov_cam_src == 2 ? "observer" : "-",
                       getenv("NHOOK_TEXTHOOK_TEST") ? ({ static char tb[300]; extern volatile unsigned long g_tht_n[8]; extern uint32_t g_tht_rva[8]; int q = snprintf(tb, sizeof tb, ", text hooks");
                           for (int i = 0; i < 8; i++) if (g_tht_rva[i]) q += snprintf(tb + q, sizeof tb - (size_t)q, " %x:%lu", g_tht_rva[i], g_tht_n[i]); tb; }) : ""); } }
@@ -1083,9 +1130,12 @@ static void st_snapshot(StBuf* s) {
     ht_overlay_json(s, m);   // teleport / host / bounds_off / invwalls_off / speed_idx / spots (nhost.c)
     sb_put(s, "}");
     bot_nav_json(s);         // "nav": the walker's path and goal (the page's map)
-    sb_put(s, ","); hk_snapshot_json(s);   // "hookcheck": the hooks check's counts (nhchk.c; the page's Hooks check window)
+    sb_put(s, ","); hk_snapshot_json(s);
+    sb_json(s);              // "soundboard": the microphone path and what plays (nmic.c)   // "hookcheck": the hooks check's counts (nhchk.c; the page's Hooks check window)
     if (strcmp(m, g_trk_map)) { snprintf(g_trk_map, sizeof g_trk_map, "%s", m); g_ntrk = 0; g_nbip = 0; sb_reset(); }   // a new map: new match stats
     pthread_mutex_lock(&g_hm_mx); snprintf(g_hm_cur, sizeof g_hm_cur, "%s", m); if (g_hm.dirty && now - g_hm.saved > 30) { hm_save(); g_hm.saved = now; } pthread_mutex_unlock(&g_hm_mx);
+    ln_tick(m, t0, now);
+    trk_begin(now, t0, m);   // (ntracks.c: a public match -> this snapshot's line)
     static uint8_t tab[HB_MAXOBJ * 0x18]; int hi = 0; uint64_t arr = hb_object_array(); uint8_t hdr[0x60];
     if (arr && hb_read(arr, hdr, sizeof hdr) && *(uint32_t*)(hdr + 0x2c) == 0x64407440 && *(int32_t*)(hdr + 0x24) == 0x18) {
         hi = *(int32_t*)(hdr + 0x3c);
@@ -1148,9 +1198,10 @@ static void st_snapshot(StBuf* s) {
         if (t) {
             if (have && !dead) {
                 if (!t->alive || t->unit != h) { t->alive = 1; t->life_start = now; }
-                else { float dx = o[0] - t->pos[0], dy = o[1] - t->pos[1], dz = o[2] - t->pos[2], dd = sqrtf(dx * dx + dy * dy + dz * dz); if (dd < 20) t->dist += dd; }
+                else { float dx = o[0] - t->pos[0], dy = o[1] - t->pos[1], dz = o[2] - t->pos[2], dd = sqrtf(dx * dx + dy * dy + dz * dz); if (dd < 20) t->dist += dd;
+                       if (t0) ln_move(t->pos, o, now - t->ln_t, *(const uint32_t*)(d + 0x10) != 0xFFFFFFFFu); }   // (the lanes: nlanes.c)
                 if (spd > t->top_speed && spd < 50) t->top_speed = spd;
-                memcpy(t->pos, o, 12);
+                memcpy(t->pos, o, 12); t->ln_t = now;
                 if (t0) { pthread_mutex_lock(&g_hm_mx); hm_switch(g_hm_cur); hm_cell_add((int32_t)floorf(o[0] / HM_CELL), (int32_t)floorf(o[1] / HM_CELL), 1); g_hm.dirty = 1; pthread_mutex_unlock(&g_hm_mx); }
             } else if (t->alive && !have) t->alive = 0;
             t->unit = h; if (team >= 0) t->team = team;
@@ -1161,6 +1212,8 @@ static void st_snapshot(StBuf* s) {
                 else { int ws = *(const int8_t*)(d + 0x262); const uint32_t* wp = (const uint32_t*)(d + 0x268); uint64_t wd = (ws >= 0 && ws < 4) ? ST_DATUM(wp[ws]) : 0;
                        if (wd && hb_read(wd, &df, 4)) { snprintf(w->how, sizeof w->how, "%s", hb_tag_name(df)); st_nice_case(w->how); } } } }
         int you = g_nick[0] && !strcmp(pl[k].name, g_nick); if (you) g_ht_my_slot = pl[k].slot;
+        if (g_bot_unit && pl[k].unit == g_bot_unit && pl[k].rec) { uint16_t rm = 0, rr = 0;   // (nbot_goals.c: the walker's radar, from its resolved traits)
+            if (hb_read(pl[k].rec + 0x1FC + 0x18, &rm, 2) && hb_read(pl[k].rec + 0x1FC + 0x1A, &rr, 2)) { if (rm >= 1 && rm <= 4) g_rd_mode = rm; if (rr >= 1 && rr <= 7) g_rd_range = rr; } }
         char pip[64] = "", prd[128] = ""; for (int q = 0; q < nss; q++) if (!strcmp(ss[q].name, pl[k].name)) { if (pk_addr_of(ss[q].voice, pip, sizeof pip)) pk_rdns_str(pip, prd, sizeof prd); break; }
         sb_put(s, "%s{\"name\":", first ? "" : ","); first = 0; sb_str(s, pl[k].name); sb_put(s, ",\"slot\":%d", pl[k].slot);
         if (pip[0]) { sb_put(s, ",\"ip\":"); sb_str(s, pip); } if (prd[0]) { sb_put(s, ",\"rdns\":"); sb_str(s, prd); }
@@ -1184,7 +1237,7 @@ static void st_snapshot(StBuf* s) {
               } else sb_put(s, "null"); }
             const float* fwv = (const float*)(d + 0x5c); sb_put(s, ",\"facing\":%.0f", atan2f(fwv[1], fwv[0]) * 57.2958f);
             { const float* av = (const float*)(d + 0x1a0); float ah = sqrtf(av[0] * av[0] + av[1] * av[1]);   // the unit's aim (teleport.md: +0x1a0): where it shoots
-              if (isfinite(av[0]) && ah + fabsf(av[2]) > 0.5f) sb_put(s, ",\"aim\":[%.1f,%.1f]", atan2f(av[1], av[0]) * 57.2958f, atan2f(av[2], ah) * 57.2958f); }
+              if (isfinite(av[0]) && ah + fabsf(av[2]) > 0.5f) sb_put(s, ",\"look\":[%.1f,%.1f]", atan2f(av[1], av[0]) * 57.2958f, atan2f(av[2], ah) * 57.2958f); }
         } else sb_put(s, "null,\"weapons\":[],\"grenades\":{\"frag\":0,\"plasma\":0,\"spike\":0,\"firebomb\":0},\"vehicle\":null");
         int16_t sbs[8]; int sbok = st_statborg(pl[k].slot, sbs);
         sb_put(s, ",\"pos\":"); sb_f3(s, o); sb_put(s, ",\"speed\":%.2f,\"kills\":%d", spd, sbok ? sbs[SB_KILLS] : 0);
@@ -1195,12 +1248,23 @@ static void st_snapshot(StBuf* s) {
                 sb_put(s, "%s", any ? "," : ",\"medals\":{"); any = 1; sb_str(s, g_medal[m]); sb_put(s, ":%d", c); }
             if (any) sb_put(s, "}"); }
         static int noaim = -1; if (noaim < 0) noaim = getenv("NHOOK_NO_AIM") != 0;   // hits: shots through an enemy's hitbox (the aim meter); without it the old estimate
-        int hits = t ? (noaim ? t->hits_sphere : t->hits) : 0;
+        int hits = t ? ((noaim || !g_nr_frames) ? t->hits_sphere : t->hits) : 0;   // (no frames = no aim meter: a dedicated server)
         if (t) sb_put(s, ",\"deaths\":%d,\"hits\":%d,\"accuracy\":%.3f,\"shots\":%d,\"life\":%.1f,\"longest_life\":%.1f,\"distance\":%.1f,\"top_speed\":%.2f", sbok ? sbs[SB_DEATHS] : t->deaths, hits, t->shots ? (double)hits / t->shots : 0.0, t->shots, t->alive ? now - t->life_start : 0.0,
                       t->longest > (t->alive ? now - t->life_start : 0) ? t->longest : (t->alive ? now - t->life_start : 0), t->dist, t->top_speed);
         if (g_st_var_ok) st_player_traits(s, pl[k].rec);
         sb_put(s, "}");
+        if (g_tks.rowopen) {   // (ntracks.c: the same player in the recording's line -- no name in the file)
+            int al = have && !dead; float yw = 0, pt = 0; char wn[64] = "", vn[64] = "", on[64] = ""; int gr = 0;
+            if (al) { const float* av = (const float*)(d + 0x1a0); float ah = sqrtf(av[0] * av[0] + av[1] * av[1]); if (isfinite(av[0]) && ah + fabsf(av[2]) > 0.5f) { yw = atan2f(av[1], av[0]) * 57.2958f; pt = atan2f(av[2], ah) * 57.2958f; }
+                int ws = *(const int8_t*)(d + 0x262); const uint32_t* wp = (const uint32_t*)(d + 0x268); uint64_t wd = (ws >= 0 && ws < 4) ? ST_DATUM(wp[ws]) : 0; uint32_t df = 0;
+                if (wd && hb_read(wd, &df, 4)) snprintf(wn, sizeof wn, "%s", hb_tag_name(df));
+                uint32_t par = *(const uint32_t*)(d + 0x10); uint64_t vd = par != 0xFFFFFFFFu ? ST_DATUM(par) : 0; if (vd && hb_read(vd, &df, 4)) snprintf(vn, sizeof vn, "%s", hb_tag_name(df));
+                const int8_t* g = (const int8_t*)(d + 0x294); for (int q = 0; q < 4; q++) gr += g[q] > 0 ? g[q] : 0;
+                for (int q = 0; q < 4 && !on[0]; q++) { if (q == ws) continue; uint64_t od = ST_DATUM(wp[q]); uint32_t odf = 0; if (od && hb_read(od, &odf, 4)) snprintf(on, sizeof on, "%s", hb_tag_name(odf)); } }
+            trk_player(pl[k].slot, pl[k].name, team, al, o, yw, pt, al ? *(const float*)(d + 0xF8) : 0, al ? *(const float*)(d + 0xF4) : 0, wn, vn,
+                       sbok ? sbs[SB_KILLS] : 0, t ? (sbok ? sbs[SB_DEATHS] : t->deaths) : 0, t ? t->shots : 0, hits, gr, al ? *(const float*)(d + 0x360) : 0, on); }
     }
+    trk_end();
     if (t0) { rs_tick(pl, np, now); sb_tick(pl, np, now); }
     { static int lg = -1; if (lg < 0) lg = getenv("NHOOK_RESULTS_LOG") != 0;   // game results: what changes (diagnostic)
       if (lg && g_res_base && g_res_vslog > 0 && g_res_vslog <= 8) {
@@ -1323,6 +1387,7 @@ static int st_origin_ok(const char* hdrs) {               // no Origin (curl) or
     char o[300], hv[256]; if (!st_hdr(hdrs, "Origin", o, sizeof o)) return 1; if (!st_hdr(hdrs, "Host", hv, sizeof hv)) return 0;
     char want[300]; snprintf(want, sizeof want, "http://%s", hv); return !strcasecmp(o, want); }
 static int st_control(const char* act, const char* qs) {
+    if (!strcmp(act, "sb")) return sb_control(qs);   // the soundboard (nmic.c)
     if (nov_control(act, qs)) return 1;                       // the overlay's buttons and panel
     if (!strcmp(act, "capture")) { extern volatile int g_nr_cap_depth; if (strstr(qs, "depth=1")) g_nr_cap_depth = 1;
         __atomic_store_n(&g_nr_cap_req, strstr(qs, "overlay=1") ? 2 : 1, __ATOMIC_RELEASE); nlog("[nhook] page: capturing the next frame"); return 1; }
@@ -1331,7 +1396,7 @@ static int st_control(const char* act, const char* qs) {
         int live = g_nr_last > 0 && mono_s() - g_nr_last < 2.0; char err[200];
         return rec_start(ao, secs, g_st_curmap[0] ? g_st_curmap : "game", ao || !live ? 0 : g_nr_w, ao || !live ? 0 : g_nr_h, err, sizeof err); }
     if (!strcmp(act, "recstop")) { rec_stop(); return 1; }
-    if (!strcmp(act, "spar") || !strcmp(act, "walk")) return bot_control(act, qs);   // the sparring aim / walker (nbot.c, test clients)
+    if (!strcmp(act, "spar") || !strcmp(act, "walk") || !strcmp(act, "botbtn")) return bot_control(act, qs);   // the sparring aim / walker / button scans (nbot.c, test clients)
     if (!strcmp(act, "mic")) { const char* v = strstr(qs, "on="); if (!v) return 0; mic_muted(); g_mic_muted = atoi(v + 3) ? 0 : 1; return 1; }
     if (!strcmp(act, "forensic")) return fx_control(qs);       // archive / voice audio / consent (forensic.c)
     if (!strcmp(act, "hookab")) return hc_control(qs);           // the hook cost meter's on/off measurement
@@ -1367,6 +1432,7 @@ static void* st_conn(void* a) {
     char req[4096]; size_t n = 0; char* he = 0;
     while (n < sizeof req - 1) { ssize_t r = recv(fd, req + n, sizeof req - 1 - n, 0); if (r <= 0) break; n += (size_t)r; req[n] = 0; if ((he = strstr(req, "\r\n\r\n"))) break; }
     if (!he) { close(fd); return 0; }
+    size_t body_off = (size_t)(he - req) + 4;   // (a POST body's first bytes may have come with the headers: /soundboard/upload)
     he[2] = 0;
     if (!st_host_ok(req)) { const char* fb = "HTTP/1.1 421 Misdirected Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"; st_send(fd, fb, strlen(fb)); close(fd); return 0; }
     char meth[8] = "", path[1024] = "/", qs[768] = ""; sscanf(req, "%7s %1023s", meth, path); char* q = strchr(path, '?'); if (q) { snprintf(qs, sizeof qs, "%s", q + 1); *q = 0; }
@@ -1377,6 +1443,10 @@ static void* st_conn(void* a) {
         const char* body = code == 200 ? "{\"ok\":true}" : code == 400 ? "{\"ok\":false,\"error\":\"unknown, disabled or not in the native app yet\"}" : !st_controls_ok() ? "{\"ok\":false,\"error\":\"controls are off\"}" : "{\"ok\":false,\"error\":\"needs POST with an X-Reclaimer-Control header\"}";
         char h[400]; int k = snprintf(h, sizeof h, "HTTP/1.1 %d %s\r\nContent-Type: application/json\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n%s", code, code == 200 ? "OK" : code == 400 ? "Bad Request" : "Forbidden", strlen(body), body);
         st_send(fd, h, (size_t)k);
+    } else if (!strcmp(path, "/soundboard/upload")) {   // the soundboard's "add" (nmic.c), with /control's guard
+        char hv[64]; if (strcmp(meth, "POST") || !st_hdr(req, "X-Reclaimer-Control", hv, sizeof hv) || !st_origin_ok(req) || !st_controls_ok()) {
+            const char* fb = "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"; st_send(fd, fb, strlen(fb)); }
+        else sb_upload(fd, req, req + body_off, n > body_off ? n - body_off : 0, qs);
     } else if (strcmp(meth, "GET")) { const char* na = "HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"; st_send(fd, na, strlen(na)); }
     else if (!strcmp(path, "/events")) {
         g_st_hits++; char h[256]; int k = snprintf(h, sizeof h, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n\r\n");
@@ -1393,10 +1463,12 @@ static void* st_conn(void* a) {
     } else if (!strcmp(path, "/feed.json")) {
         const char* v = strstr(qs, "since="); StBuf b = {0}; st_feed_json(&b, v ? (uint32_t)strtoul(v + 6, 0, 10) : 0); st_reply(fd, "application/json", b.b, b.n, 0); free(b.b);
     } else if (!strcmp(path, "/heat.json")) { StBuf b = {0}; hm_json(&b); st_reply(fd, "application/json", b.b, b.n, 0); free(b.b); }
+    else if (!strcmp(path, "/lanes.json")) { StBuf b = {0}; ln_json(&b, strstr(qs, "scope=match") != 0); st_reply(fd, "application/json", b.b, b.n, 0); free(b.b); }
     else if (!strcmp(path, "/vshapes.json")) st_reply(fd, "application/json", "{\"gen\":0,\"shapes\":{}}", 21, 0);
     else if (!strcmp(path, "/recordings.json")) { size_t ln = 0; char* j = rec_list_json(&ln); st_reply(fd, "application/json", j ? j : "[]", j ? ln : 2, 0); free(j); }
     else if (!strncmp(path, "/recordings/", 12)) st_rec_file(fd, req, path + 12);
     else if (!strncmp(path, "/forensics", 10) && (!path[10] || path[10] == '/')) fx_http(fd, path, qs, req);
+    else if (!strcmp(path, "/soundboard.json")) { StBuf b = {0}; sb_files_json(&b); st_reply(fd, "application/json", b.b, b.n, 0); free(b.b); }
     else if (!strcmp(path, "/hooks.json")) { StBuf b = {0}; hk_json(&b); st_reply(fd, "application/json", b.b, b.n, 0); free(b.b); }
     else if (!strcmp(path, "/packets.json")) { static pthread_mutex_t pmx = PTHREAD_MUTEX_INITIALIZER; StBuf b = {0};
         pthread_mutex_lock(&pmx); pk_json(&b, qs); pthread_mutex_unlock(&pmx); st_reply(fd, "application/json", b.b, b.n, 0); free(b.b); }
@@ -1451,6 +1523,8 @@ static void* st_listen_thread(void* a) {
 }
 static void nstats_start(void) {
     bot_init();   // the sparring aim / walker's launch switches (NHOOK_SPAR, NHOOK_NAV)
+    atexit(ln_atexit);   // (the lanes since the last 30-s save)
+    atexit(trk_atexit);  // (the public match being recorded: closed properly)
     const char* e = getenv("NHOOK_STATS_HTTP"); if (e) g_st_port = atoi(e); if (g_st_port <= 0 || g_st_port > 65535) return;
     Dl_info di; if (dladdr((void*)nstats_start, &di) && di.dli_fname) {   // the repo: <repo>/shim/build/nhook.dylib
         snprintf(g_repo, sizeof g_repo, "%s", di.dli_fname); for (int k = 0; k < 3; k++) { char* sl = strrchr(g_repo, '/'); if (sl) *sl = 0; } }

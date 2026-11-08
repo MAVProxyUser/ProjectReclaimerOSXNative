@@ -306,6 +306,17 @@ shim/native/ = nhook.dylib (bash shim/native.sh [--map guardian --seconds 60 --b
 halo3 functions (x0 = guest context, +0x2d8 = TLS pointer), NHOOK_CENSUS=1; reads the players table. main_loop_body / sim tick /
 display_event / object_delete etc. are the app's own code now (census): docs native-client.md "Inside the app".
 Native stats page (nstats.c): http://127.0.0.1:8765/ while shim/native.sh runs (page served from the checkout: edits = refresh).
+Lanes (2026-11-08, shim/native/nlanes.c): the map's heatmap can show deaths or LANES (passes per 0.5-unit cell, ruts relative to
+the map's traffic; <heatmaps>/<map>.lanes, merged under flock; shim/tools/lanes-import.py adds match-recorder.py's recordings,
+skipping ones marked lanes_live; lanes-test.sh, lanes-page-mock.py). NATIVE_DYLIB=<copy> runs a long job on a frozen dylib.
+Learning from real players (2026-11-08; native-client.md "Learning from real players"): nhook records every public match (ntracks.c);
+observe-public.sh samples on purpose (whole matches, coverage-driven by tracks/tome.json, OBS_MATCHES / _MIN_PLAYERS / _STRICT,
+Infection off); engage-extract.py -> engage-model.py = the aggregate model, per-map models (tracks/maps/<map>.engage.json, per game
+type inside) and the tome; the walkers overlay map -> game type on the aggregate (nbot_engage.c eg_load_for). Work board:
+shim/tools/workboard.py on 127.0.0.1:8790 (jobs, direction, tasks, coverage; tabs Learnings / You / Walkers).
+Self-coaching + the learn loop (2026-11-08): walker-coach.py (coach.py per walker -> knob steps -> next battle), game-review.py (one
+game vs the map vs everything), learn-loop.py (random public game observed -> review -> refit -> coached walker battle on that map);
+the walker's own inventory / power-ups (nbot.c bot_inv, NHOOK_BOT_NOINV). Recordings: column 17 camo, 18 the other weapon.
 Works (live-checked in a 72-player game, 2026-11-07): players, variant, heatmap, feed, kills / deaths / assists from halo3's
 statborg (game engine globals TLS +0x20 + the app's `[capacity] game_globals.statborg`; kill feed EXACT from halo3's game results
 -- versus matrix + per-damage-type kills, nstats.c rs_tick, offline test shim/tools/results-feed-test.sh -- else paired from the
@@ -336,6 +347,17 @@ itself for an unknown build, NATIVE_NO_AUTOPORT=1 = no). 0.10.1: all 12 points, 
 (nhchk.h / nhchk.c): every hook / interpose / swizzle / app address / log line / reader, installed? + fired? -> GET /hooks.json, the
 page's Hooks check window, [hooks] log lines; self test shim/tools/native-hooks-test.sh. Hook stubs share near pages (RX + an RW alias:
 stub_alloc; the near gaps ran out at 4 hooks; NHOOK_STUB_PAGE_EACH=1 = old). With hooks off the stats page still starts.
+Walkers that fight (2026-11-08 night, nbot.c): a JOINED walker reaches the server through a text hook before halo3+0x50fb8 (the control
+packet builder: +0x10/+0x14 yaw/pitch, +0x18/+0x1c throttle); fire = control record bit 19 (+0xC8 at the reader); the fighter
+(NHOOK_BOT_FIGHT: collision-ray line of sight, model-driven distance / strafe / aim noise) ; walker-battle.sh / walker-train.py /
+observe-public.sh + match-recorder.py + walker-model.py / walker-compare.py (native-client.md "Walkers that fight"). The app reads
+controllers via IOHID only (GameController = haptics): a virtual GCController is never polled.
+Soundboard (2026-11-08, nmic.c): no input device on this Mac -> the app was "listening only"; nhook answers the default-input query with
+a virtual device and emulates the AUHAL unit the app opens on it (10 ms clock -> the app's input callback -> AudioUnitRender = soundboard
+samples); the page's Soundboard panel (files in ReclaimerMac/soundboard, upload, play / stop / volume). NHOOK_VMIC=0 off; NHOOK_AUDIO_TRACE,
+NHOOK_MUTE_OUTPUT (silent test clients). Test shim/tools/native-soundboard-test.sh. The app's --voice-wav reads its file to the end at launch.
+N20 (fps slide in a long 0.10.1 session): not reproduced; [perf+] / [slow] lines (slow_watch) name the busy threads next time; the depth
+swizzle no longer retains every depth texture (NHOOK_DEPTH_RETAIN=1 old). native-aim-test teleports + NHOOK_BOT_FACE first (random spawns).
 Two-client tests (2026-11-07): native-dedicated.sh + the test profile + ReclaimerMac/native/test-second (its own identity):
 shim/tools/native-host-test.sh walls|tpnext, native-voice-test.sh (--voice-wav/--voice-talk); NHOOK_TAP_LOG=<file> = every app line.
 Sparring aim / walker / mic natively (2026-11-07, nbot.c): halo3's control record TLS +0xC0 (4 x 0x110: +0xD4 yaw, +0xD8 pitch, +0xDC

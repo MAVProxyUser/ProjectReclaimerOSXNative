@@ -84,7 +84,7 @@ static int nov_collect(NovObj* out, int max) {
     for (int i = 0; i < hi && n < max; i++) {
         const uint8_t* e = g_nov_tab + i * 0x18; if (!*(const uint16_t*)e) continue; int t = e[3], unit = t == 0 || t == 1 || t == 12;
         static int dbg = -1; if (dbg < 0) dbg = getenv("NHOOK_OV_DEBUG") ? 1 : 0;   // calibration: scenery / machines / crates too
-        int want = g_nov_units_only ? (g_nov_units_only == 1 ? t == 0 : (t == 1 || t == 12))
+        int want = g_nov_units_only ? (g_nov_units_only == 1 ? t == 0 : g_nov_units_only == 3 ? t == 2 : (t == 1 || t == 12))   // (3: weapons, the walker's pickups)
                  : (t == 0 && fb) || ((t == 1 || t == 12) && fveh) || (t == 5 && ft) || ((t == 2 || t == 3) && fw) || (dbg && t >= 6 && t <= 10); if (!want) continue;
         uint64_t p = *(const uint64_t*)(e + 0x10); static uint8_t dh[0x380]; size_t rn = unit ? 0x380 : 0x140; if (!p || !hb_read(p, dh, rn)) continue;
         const float* od = (const float*)(dh + 0x1c); NovObj* o = &out[n]; memset(o, 0, sizeof *o);
@@ -267,8 +267,9 @@ static void on_object_delete_body(uint64_t* ctx) {   // (x0: the guest context t
     uint8_t* e = data + (size_t)i * 0x18; if (e[3] != 5 || *(uint16_t*)e != (uint16_t)(h >> 16)) return;   // projectiles only
     uint8_t* p = *(uint8_t**)(e + 0x10); if (!p) return;
     { uint32_t own = *(uint32_t*)(p + 0xC0), vic = 0xFFFFFFFFu; const float* ip = (const float*)(p + 0x1c); int hi = *(int32_t*)(arr + 0x3c);
-      static int noaim = -1; if (noaim < 0) noaim = getenv("NHOOK_NO_AIM") != 0;   // (hits come from the aim meter's hitbox test; this pass only without it)
-      if (noaim && own != 0xFFFFFFFFu && hi > 0 && hi <= 65536) for (int j = 0; j < hi; j++) { uint8_t* b = data + (size_t)j * 0x18; if (b[3] != 0 || !*(uint16_t*)b) continue;
+      static int noaim = -1; if (noaim < 0) noaim = getenv("NHOOK_NO_AIM") != 0;   // (hits come from the aim meter's hitbox test; this pass only without it --
+      extern volatile unsigned long g_nr_frames;                                     //  or without frames: a dedicated server's aim meter never runs)
+      if ((noaim || !g_nr_frames) && own != 0xFFFFFFFFu && hi > 0 && hi <= 65536) for (int j = 0; j < hi; j++) { uint8_t* b = data + (size_t)j * 0x18; if (b[3] != 0 || !*(uint16_t*)b) continue;
           uint32_t bh = ((uint32_t)*(uint16_t*)b << 16) | (uint32_t)j; if (bh == own) continue; uint8_t* bp = *(uint8_t**)(b + 0x10); if (!bp) continue;
           const float* c = (const float*)(bp + 0x1c); float r2 = c[3] + 0.1f, dx = ip[0] - c[0], dy = ip[1] - c[1], dz = ip[2] - c[2];
           if (r2 > 0 && r2 < 5 && dx * dx + dy * dy + dz * dz <= r2 * r2) { vic = bh; break; } }
@@ -314,6 +315,12 @@ static void nov_aim_tick_body(void) {   // nrender.m, every frame (the render th
         unsigned k = g_nov_aimr_w; NovAimRes* o = &g_nov_aimr[k % NOV_AIMR_N];
         o->t = a.t; o->owner = a.owner; o->target = a.target; o->along = a.along; o->pre = a.pre; o->on = miss <= 0; o->head = gk[mg] / 256 == head;
         o->err = miss <= 0 ? 0 : atan2f(miss, a.along > 0.3f ? a.along : 0.3f) * 57.29578f;
+        { static int lg = -1; if (lg < 0) lg = getenv("NHOOK_AIM_LOG") != 0;   // NHOOK_AIM_LOG=1: each measured shot (aim test diagnostics, 2026-11-08)
+          if (lg) { const float* c = gc[mg]; float v[3] = {c[0] - a.s[0], c[1] - a.s[1], c[2] - a.s[2]}, t = v[0] * a.dn[0] + v[1] * a.dn[1] + v[2] * a.dn[2];
+              float cp[3] = {a.s[0] + a.dn[0] * t, a.s[1] + a.dn[1] * t, a.s[2] + a.dn[2] * t};
+              nlog("[nhook] [aim] shot from (%.2f %.2f %.2f) dir (%.3f %.3f %.3f) len %.2f | nearest part region %d node %d centre (%.2f %.2f %.2f) r %.2f, path passes (%.2f %.2f %.2f): miss %.2f u = %.2f deg%s | target root (%.2f %.2f %.2f), %d parts",
+                   a.s[0], a.s[1], a.s[2], a.dn[0], a.dn[1], a.dn[2], a.len, gk[mg] / 256, gk[mg] % 256, c[0], c[1], c[2], rad[mg], cp[0], cp[1], cp[2], miss, o->err, miss <= 0 ? " ON" : "",
+                   a.mt[10], a.mt[11], a.mt[12], ng); } }
         __atomic_store_n(&g_nov_aimr_w, k + 1, __ATOMIC_RELEASE); g_nov_aim_done++;
     }
 }

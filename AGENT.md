@@ -65,7 +65,7 @@ bash shim/build.sh && bash shim/play.sh                    # the loader
   clipboard-test, d2d-test, rec-test, callcost.
 - **Live tests** (local server, test profiles), native: native-hooks-test (every hook installed + firing: run it first after an
   app update), native-fire-test, native-aim-test, `native-host-test.sh walls|tpnext`, native-voice-test, native-spar-test --
-  all of them in a row: `bash shim/tools/native-test-all.sh` (~20 min).
+  native-soundboard-test -- all of them in a row: `bash shim/tools/native-test-all.sh` (~25 min).
 - **Live tests**, loader: quiet-run, port-verify, spots-verify.
 
 ## Reverse engineering

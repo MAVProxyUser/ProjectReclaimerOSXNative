@@ -52,6 +52,7 @@ static const HkCat g_hk_cat[] = {
     {"opus decode (voice)", "forensic voice audio + the sender's channel (the app's voice mixer)", "text hook", "voice"},
     {"view constants", "the overlay's camera (installed when an overlay feature is first on)", "text hook", "overlay"},
     {"player control (sparring aim / walker)", "sparring aim, walker (test clients)", "text hook", "bot"},
+    {"control packet (walker on a server)", "a joined walker's moves and buttons into the packet the server gets (halo3+0x50fb8)", "text hook", "bot"},
     {"game tick (host tools)", "teleports / host requests on a server", "body hook", "host"},
     {"frame (host tools)", "teleports / host requests on a client (the app's per-frame function)", "text hook", "host"},
     {"kill volume test", "the Boundaries switch", "text hook", "host"},
@@ -65,6 +66,7 @@ static const HkCat g_hk_cat[] = {
     {"log tap (write)", "every app log line the parsers below read", "interpose", "always"},
     {"sockets (send / receive)", "the packet log, peer addresses, the Packets window", "interpose", "online"},
     {"AudioUnitRender (mic)", "the page's mic switch (the app's capture, bus 1)", "interpose", "mic"},
+    {"soundboard microphone", "the soundboard: a virtual microphone the app opens on a Mac without one (nmic.c), its samples", "app audio", "online"},
     {"AudioUnitSetProperty", "the app's audio units (voice volume probe)", "interpose", "always"},
     // swizzled Metal / AppKit
     {"presentDrawable", "overlay drawing, fps line, recording, Capture frame", "swizzle", "engine"},

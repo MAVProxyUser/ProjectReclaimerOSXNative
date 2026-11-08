@@ -2626,6 +2626,415 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   stubs are 64-byte-aligned slots in it, so one gap holds every stub and a page with live stubs is never made non-executable
   (the reason for one page each). SWITCH: NHOOK_STUB_PAGE_EACH=1 = one page per stub (the old way).
 
+- **The soundboard: a sound file into the game's microphone** (2026-11-08; shim/native/nmic.c, the stats page's Soundboard panel,
+  GET /soundboard.json, POST /control?do=sb&play=|stop=|vol=, POST /soundboard/upload?name=) — WHY: the user: "add a soundboard in
+  which I can select a wav and play it into the mic input path into game audio". The user's Mac (a Mac Studio) has NO input
+  device: the app asks CoreAudio for the default input (kAudioHardwarePropertyDefaultInputDevice), gets 0 and stays "[voice] no
+  capture (no microphone): listening only" -- there was no microphone path to play into. (The app's own --voice-wav reads the
+  whole file at launch -- a named pipe was read to its end first -- and transmits continuously, silence too: no good for a
+  soundboard; shim/tools/voice-fifo-probe.sh.) LOGIC: with no real input device nhook answers the default-input query with a
+  VIRTUAL device ("Reclaimer soundboard", 48 kHz mono float) and answers every property query on it (name, UID, stream
+  configuration, formats, rates, buffer sizes; a device property asked through the unit -- cpal's 'fsz#' -- too); the AUHAL unit the
+  app points at it (kAudioOutputUnitProperty_CurrentDevice) is emulated (its settings kept, Initialize / Start / Stop / Dispose
+  answered, a 10 ms clock thread calls the app's input callback) and its AudioUnitRender(bus 1) gets the soundboard's samples
+  (silence when idle). The app logs "[voice] microphone Reclaimer soundboard at 48000 Hz" and treats it as its microphone, so its
+  Talk mode decides when it transmits (Sensitivity: by itself while a clip plays; Hold / Toggle: with the talk key). With a real
+  microphone the clip is mixed over it (the mic switch's AudioUnitRender interposer). Clips: ExtAudioFile decodes WAV / AIFF /
+  CAF / MP3 / M4A / AAC / FLAC to 48 kHz mono (10 minutes at most), resampled to the app's client format (float or 16 / 32-bit int,
+  any channels); files in ReclaimerMac/soundboard (NHOOK_SOUNDBOARD_DIR), added from the page (upload with /control's guard, 50 MB
+  at most). Hooks check item "soundboard microphone". Live test shim/tools/native-soundboard-test.sh: A (virtual mic) uploads and
+  plays a tone, B hears it at -24.6 dBFS, stop works. SWITCHES: NHOOK_VMIC=0 = no virtual microphone (the old "listening only"),
+  NHOOK_VMIC=force = the virtual one beside a real one; diagnostics NHOOK_AUDIO_TRACE=1 (every CoreAudio device / AudioUnit call),
+  NHOOK_MUTE_OUTPUT=1 (the app's sound zeroed: silent test clients).
+- **The depth swizzle retained every depth texture** (2026-11-08; shim/native/nrender.m my_set_dtex) — WHY: found while chasing
+  backlog N20: g_dseen was an NSMutableSet (it retains), filled with every depth texture the app ever attached, across map changes,
+  never emptied; its 8 "full-size" slots never let one go either, so after a few map changes "visible only" / zones could read a
+  dead map's depth. LOGIC: a weak NSHashTable; the 8 slots hold their texture strongly (g_dkeep, at most 8) and the stalest slot is
+  reused once its texture has not been attached for 240 frames. (Not N20's cause: 13 textures in a two-client test, flat.)
+  SWITCH: NHOOK_DEPTH_RETAIN=1 = the old set.
+- **The slowdown watch** (2026-11-08; nstats.c slow_watch, backlog N20) — WHY: the user's first 0.10.1 session slid from ~220 to
+  ~50 fps over a few minutes on one server and stayed there on the next map; not reproduced locally (not the map, not heat -- no
+  thermal events on the Mac Studio --, not the depth set, no hook failed). LOGIC: with every [perf] line (10 s) a [perf+] line:
+  this process's footprint and CPU (cores), nhook's render-thread time per frame (overlay, aim tick, camera hook), its engine-thread
+  time per second (bullet hook + aim meter) and the snapshot's time; once per match, when the frame rate has been below half of
+  the session's best for three windows, a [slow] line with the busiest threads of the last window by name (proc_pidinfo on our own
+  pid). SWITCH: NHOOK_NO_SLOWWATCH=1.
+- **native-aim-test from a fixed spot** (2026-11-08; shim/tools/native-aim-test.sh, nbot.c NHOOK_BOT_FACE, noverlay.c NHOOK_AIM_LOG;
+  backlog N21) — WHY: on 0.10.1 one run gave 8 shots, all ~2 deg off the practice target, 0 hits. NHOOK_AIM_LOG=1 (each measured
+  shot: start, direction, the nearest hitbox part, the miss) showed the meter right (shots through the target, "ON") from an open
+  spawn: Guardian's random spawns put the target 5 units ahead on a ramp, against a wall or over the drop. LOGIC: the test teleports
+  the player to the open ledge (-3.97, -23.39, 17.2; the host tools' tpto: a local game is its own host), holds the facing north
+  (NHOOK_BOT_FACE=93.3: the sparring hook writes the yaw) and fires later (40 / 44 s); the log stays when it fails. 3 of 3 runs:
+  8, 6, 10 hits of 10.
+
+- **Walkers that fight on a server** (2026-11-08 night; nbot.c bot_on_abuild / the fighter, nav.c g_nav.pop, backlog N24) — WHY: the
+  user: "make 3-4 walkers have a battle ... in a rumble pit match", "train your sparring partners well". A JOINED walker never moved
+  on the server: a client sends its controls as packet "A" (net-authority.md section 1), built by halo3+0x50fb8 (the app's own code)
+  from a control record; the app's input layer refills throttle and buttons from its devices every tick, and nbot.c wrote its values
+  at the control READER (0xf7178), which runs after the packet was built -- only the aim leaked through (the input layer only nudges
+  it). A virtual GameController pad (nvpad.m) did not help: the app reads controllers through IOHID and never polls GCController
+  (0 calls; it imports only GameController's haptics). LOGIC: (1) a text hook BEFORE 0x50fb8 writes the walker's yaw / pitch
+  (+0x10 / +0x14) and throttle (+0x18 / +0x1c) into the record it packs -- the server's path of a roaming walker 79.5 units vs the
+  client's 76.2 in 40 s (shim/tools/native-vpad-test.sh). (2) Fire = the control record's bit 19 at +0xC8 (a scan: bits 19 and 21
+  fire, 1 jumps): the local weapon fires and the packet's trigger bytes, which halo3+0x5452c reads from the local weapon's barrels,
+  carry it -- 180 shots counted by the server for 182 on the client (a packet button bit of its own does nothing). (3) The fighter
+  (NHOOK_BOT_FIGHT=1): line of sight by halo3's collision ray (0x1fd748, cast from the engine thread inside the control hook,
+  ignoring both bodies), a sight cache over the 3 nearest enemies (a visible one beats a nearer hidden one), a reaction delay, a
+  turn-rate limit and Ornstein-Uhlenbeck aim noise (NHOOK_BOT_SKILL), the real players' distance band, strafe timing and back-off
+  on low shields (the model), fire only with a clear line and the aim on, grenades (left trigger bit) and melee, never off the
+  walkable floor (a nav node within ~1 unit of every fighting step), no tracking through walls (out of sight beyond 8 units it
+  looks where it walks); the walker's old "near the enemy: strafe" rule is off while fighting (on Guardian's stacked floors it
+  strafed in place under an enemy). (4) A* prefers the lanes real players use (nav.c g_nav.pop, up to 40% cheaper) from the
+  model's heat, recordings plus the stats page's footprint heatmaps. Battle 3 (4 walkers, 4 minutes, Guardian free-for-all): 13
+  kills, each walker with a target in sight ~55% of the time. SWITCHES: NHOOK_BOT_NOPKT=1 (no packet hook: a joined walker is
+  local only again), NHOOK_BOT_FIGHT=0 (the old spar aim + walker), NHOOK_BOT_FIREBIT=<hex>, the knobs NHOOK_BOT_SKILL / _DIST /
+  _STRAFE / _SWITCH / _FIRE_EXTRA / _RETREAT / _GREN, diagnostics NHOOK_BOT_HOLDBTN / _PKTBTN / _BTNSCAN / _FACE, NHOOK_VPAD=1.
+- **Learning from real players** (2026-11-08 night; shim/tools/match-recorder.py, observe-public.sh, walker-model.py,
+  walker-compare.py, walker-train.py, walker-battle.sh, backlog N25) — WHY: the user: "join several games that don't require map
+  downloads, and watch and sample how real players move around the map, and skirmish ... build a library / model ... have 3-4
+  walkers spar while they learn to mimic actual players". LOGIC: observe-public.sh joins a busy mod-free public server with the
+  user's own profile in a background window (the 0.10 app lets only a real profile into public servers; nothing is pressed; the
+  walker code refuses public servers by itself; joins at least 3 minutes apart -- a first version rejoined each time its recorder
+  crashed: 3 joins in 2 minutes, fixed); match-recorder.py polls the stats page 10 times a second: per player slot, team, alive,
+  position, look angles, shield, health, weapon, vehicle, kills, deaths, shots, hits -- slots only, the names are dropped -- plus
+  the feed's kills; walker-model.py turns recordings into the walkers' numbers (speeds, standing share, fight distances, strafe
+  RMS and switch time, closing speed by shield, aim error, reaction, fire rate, hit share, per-map flow + heat); walker-compare.py
+  puts walkers and players side by side; walker-train.py evolves the fighter's tactics over 4-walker battles (fixed skill:
+  tactics, not aim, decide; fitness kills - 0.7 deaths + 2 x accuracy). First FFA data (Assembly, Snowbound): players run 2.1
+  units/s and stand 40% of the time, fight at 5.8-15.7 units (median 12.6), strafe 0.9 units/s switching every 1.1 s, stop closing
+  in on low shields, aim 4 deg off (median), react in ~1 s, fire 3.4 shots/s in fights, 48% of shots through a hitbox.
+
+- **Far hooks: no stub page in branch range** (2026-11-08; nhook.c jit_far_hook, body_hook_after0's far path, stub.S _nh_ba's four
+  displaced slots) — WHY: in a walker battle one client's engine_clock hook failed, "no stub page near 0x146ab4100": some launches
+  have no free 16 KB gap at all within +-128 MB of the JIT code (the shared stub pages need one gap; that launch had none), and
+  without that hook a client never finds its players -- the walker idled the whole battle, and the user's own game would lose its
+  stats page the same way. LOGIC: when stub_alloc finds no slot, the entry's (or body's) first four instructions -- a lifted wrapper's
+  prologue stp / mov / stp / ldr w,[x0,#0x290], none PC-relative -- are replaced by `ldr x16, #8 ; br x16 ; .quad stub` with the
+  other threads stopped (none inside those 16 bytes) through pthread_jit_write_protect_np; the stub (anywhere: stub.S _nh_tp4 /
+  _nh_tps for entry hooks, _nh_ba with four displaced slots for body hooks) runs them and returns to +16. Checked with
+  NHOOK_FAR_TEST=1 (as if no gap were in range): engine_clock 398,732 calls, the players read, the host tools' game tick (7,993)
+  and shape builder hooks fired. SWITCH: NHOOK_NO_FAR_HOOKS=1 = the old failure; NHOOK_FAR_TEST=1 forces the far path.
+- **Walker grenades** (2026-11-08; nbot.c) — WHY: the fighter "threw" through nvpad.m's left trigger, which the app never reads.
+  LOGIC: a 0.15 s pulse of the control record's bit 30 at the reader (the button scan: one press threw), like the trigger bit 19.
+  SWITCH: NHOOK_BOT_GRENBIT=<hex>; NHOOK_BOT_GREN=0 = no grenades.
+
+- **Walkers more like players; how human they are as a number; pickups** (2026-11-08 early morning; nbot.c, walker-compare.py,
+  walker-model.py, walker-train.py) — WHY: walker-compare.py on the first training battles (1,478 walker engagements vs 39 of
+  players so far): the walkers reacted in 0.42 s (players 1.08), aimed 2.8 deg off (4.1), barely pressed in with shields up (+0.02
+  units/s; players +0.78) and backed off hard on low shields (-0.37; players about 0), fought closer (7.7 units; 12.6) and stood
+  more (55%; 40%) -- "human-likeness" 55%. LOGIC: the fighter's reaction factor 0.7 -> 1.3 and aim noise x1.6 (skill 0.5 then
+  matches the players; 1 is still better than them); inside the distance band it presses in (NHOOK_BOT_PRESS, 0.4 throttle), on
+  low shields it mostly stops (NHOOK_BOT_BACKOFF, 0.15) -- both also training knobs. Human-likeness = 100 x exp(-mean |log(walker /
+  player)|) over the comparable measures (walker-compare.py, the report). Infection recordings give lanes only (heat, flow),
+  not fights or speeds. Pickups: out of a fight the walker walks to a better weapon (bot_wpn_rank: power weapons, BR, Carbine
+  ... above the AR) lying within 12 units and holds the pick-up bit -- NHOOK_BOT_PICKBIT, found by shim/tools/native-pickup-scan.sh
+  (a local match: on a weapon, each candidate bit held through do=botbtn&bits=&secs=, a test-identity control). SWITCHES: the
+  knobs above; NHOOK_BOT_PICKBIT unset = no pickups.
+- **The pickup scan, and what it found** (2026-11-08 06:30; shim/tools/native-pickup-scan.sh) — WHY: its first run tried every bit
+  "on -1": the snapshot's items are [spawn point, kind, state, x, y, z, holder (-1 = on the floor), name only without a spawn
+  point], so the last field was the holder, not a name, and no kind filter kept vehicles / equipment out. LOGIC: weapons only
+  (kind 0) lying free (holder -1); the name from the spawn point's entry in /heat.json (spawns[i][4]) when the item has one; the
+  player's position after the teleport is printed beside the weapon's (they matched within 0.2 units); PS_BITS / PS_SECS pick
+  the bits and the match length; bits 32-63 too. RESULT: standing on a Mauler ("Excavator": halo3's tag name for it) with the
+  assault rifle, NO bit of the control record's 64 (+0xC8; all but 1 jump, 19 / 21 fire, 30 grenade) held 1.5 s swaps it. Pickup
+  is not a plain button bit there -- most likely a separate held-action state the app's input layer keeps. NHOOK_BOT_PICKBIT
+  stays unset (walkers keep their loadout); backlog N24.
+- **A dedicated server's hits** (2026-11-08 07:30; nstats.c, the players' "hits" / "accuracy") — WHY: every battle scoreboard of
+  the night (both training runs, 17 battles) had hits 0 for every walker, so the fitness's accuracy term never counted. The
+  hits come from the aim meter (noverlay.c nov_aim_shot queues each shot; nov_aim_tick resolves it against the target's posed
+  hitboxes on the RENDER thread, every frame) and a dedicated server never presents a frame. LOGIC: a process that has
+  presented no frame (g_nr_frames 0) reports the old estimate instead (hits_sphere: the projectile's end point inside a
+  biped's bounding sphere), and noverlay.c's object_delete hook runs that sphere pass there too (it ran only with
+  NHOOK_NO_AIM: the first showcase battle after the snapshot change alone still said 0). SWITCH: NHOOK_NO_AIM=1 = the
+  estimate everywhere (as before).
+- **Walkers react like the players** (2026-11-08 07:40; nbot.c, the fighter's reaction delay) — WHY: the showcase battle with
+  the trained champion (four walkers, skill 0.6) measured a 0.49 s reaction against the recorded players' 1.08 s (walker-compare
+  .py). A first try (the delay factor 1.3 -> 2.8) changed nothing (0.53 s): walker-model's reaction is the time from a target
+  in reach within 30 deg of the view to the aim within 5 deg, and before its reaction time the fighter turned 1.5 rad/s -- the
+  25 deg in ~0.3 s whatever the delay. LOGIC: the turn rate before the reaction time = NHOOK_BOT_TURN0, the delay = the
+  model's reaction x (1.25 - skill) x NHOOK_BOT_REACT (default 1.6, was a fixed 1.3). Measured: 1.5 rad/s -> 0.51 s, 0.45 ->
+  1.79 s (measured ~ 0.79 / rate), so the default is 0.73 rad/s (the players' 1.08 s).
+  SWITCHES: NHOOK_BOT_TURN0=1.5 NHOOK_BOT_REACT=1.3 = before.
+- **The engine image wait: 10 minutes, not 60 s** (2026-11-08 07:30; nhook.c probe_thread) — WHY: one battle's server engine
+  process (while four clients started beside it) had no MZ at the engine image and code table 0 for 60 s, the old limit; the
+  probe gave up, every hook stayed off for the process's life, its stats page showed no players and a wrong map, and the
+  battle had no scoreboard (the hooks check said it: "code table FAILED", "halo3.dll image check FAILED 7173 of 65536").
+  LOGIC: keep polling every 250 ms up to 10 minutes, a "still waiting" line at 60 s. SWITCH: none (waiting longer only delays
+  hooks that would otherwise never come).
+- **walker-train.py --champion** (2026-11-08 07:30) — WHY: selection carries the best two by their LAST three battles' mean,
+  so the final best-tactics.json can name a set whose last three ended badly by luck while another had the better record
+  (run 2: two sets tied at 1.63 in the last generation; over all their battles 2.97 vs 1.63). LOGIC: `--champion [--since <t>]`
+  reads train.jsonl and writes the set with the best mean over ALL its battles (at least 3) to best-tactics.json ("by": "mean
+  over all its battles"). Training itself is unchanged.
+- **Lanes: the ways players move, carved into the map** (2026-11-08 11:00; shim/native/nlanes.c, stats_page.html, shim/tools/
+  lanes-import.py) — WHY: the user asked for "a 'lane' option for the heat map, so you can select lanes, or deaths ... carving a
+  visible rut the more they are used". The footprint heatmap counts TIME per 0.5-unit cell (a camper wears his spot most), so it
+  shows where players stand, not the routes they take. LOGIC: every stats snapshot (~10/s) each live player's move since the last
+  one (same body, <= 0.6 s, 0.02 .. 8 units, < 40 units/s -- respawns and teleporters are no lane) is walked through the grid
+  (Amanatides & Woo) adding the length inside each cell in cells = "passes"; on foot and in vehicles apart, the on-foot
+  direction summed. Per map in <heatmaps>/<map>.lanes (RLN1), saved every 30 s and at exit as a MERGE under an flock on
+  <map>.lanes.lock (read, add what came since the last save, temporary file, rename) so lanes-import.py and a second game add
+  up; this match's lanes in memory. GET /lanes.json?scope=all|match; the snapshot's lanes_live (match-recorder.py writes it into
+  each recording, lanes-import.py skips those: never counted twice). lanes-import.py walks match-recorder.py's recordings the
+  same way (the night's 25 recordings: Standoff 85 km on foot, Last Resort 66, Guardian 58 ...). The page: heatmap = deaths /
+  lanes / lanes + deaths / neither (remembered), lanes on foot / vehicles; the passes smoothed (sigma >= 0.55 units), a rut from
+  the map's typical crossed spot (median) to full shape at its busiest 0.5% (log scale), deeper overall as traffic grows (the
+  busiest cells against 400 passes), lit from the top left as a relief, worn-earth floor, a dust wash below the typical spot;
+  hover = "players crossed here about N times, mostly one way ↗ / both ways". A fixed scale (one pass a scratch, 400 a full rut)
+  wore Standoff's whole valley into one hollow -- relative depth shows its lanes. Offline: shim/tools/lanes-test.sh (the walk
+  adds up, the merge keeps both writers' cells and the import list), shim/tools/lanes-page-mock.py (the page on a real map's
+  data, no game). SWITCH: NHOOK_LANES=0 = no lanes recorded (the page then has none); heatmap "deaths" = the old view.
+- **The observer samples a mix of whole games** (2026-11-08 11:20; shim/tools/observe-public.sh) — WHY: the user: "sample a bunch
+  of large games (that don't require downloads) make sure it is a mix of slayer, ctf, and infection game types. and sample the
+  whole game". It left every server after a fixed SESSION (mid-match) and picked by FFA > Slayer, Infection last. LOGIC: each
+  server gets a class (slayer / ctf / infection / other; campaign, forge, firefight, races and UNSC vs Flood vs Covenant never);
+  a class's whole matches recorded this run lower its servers by OBS_CLASS_W (15) players, "other" by 25, so classes take
+  turns while the bigger game wins inside a class; it stays until OBS_WHOLE (1) whole match is recorded there (a recording after
+  the one it joined into, 1500+ samples) or MAXSESSION (2nd argument, 2700 s); OBS_MIN_PLAYERS (6), 4 if none has that many; a
+  visit without a whole match skips that server for the run. SWITCH: the old picker is in git (dfad978).
+- **match-recorder.py stops cleanly** (2026-11-08 11:20) — WHY: the observer killed it with SIGTERM mid-write, leaving gzip
+  files cut off (readers had to catch EOFError; a cut file loses its last block). LOGIC: SIGTERM / SIGINT set a flag; the loop
+  ends after the current sample and closes the file. observe-public.sh waits up to 6 s for it.
+- **The engagement library: how players actually fight** (2026-11-08 11:40; shim/tools/engage-extract.py, engage-model.py) —
+  WHY: the user: "a good dataset on how people *actually* play when engaging with someone else" and "don't just limit the logic
+  to single player engagement ... they may get shot by someone else while fighting 1:1 and change focus". walker-model.py only
+  measured "looking at an enemy within 10 deg". LOGIC: engage-extract.py cuts each recording into DUELS (two enemies within 45
+  units, one attacking the other: horizontal aim within 8 deg while its shots counter rises, or 12 deg while the other is hurt;
+  merged across 2-s pauses; from the awareness before to the outcome: kill event, death, third party or separation; 0.1-s rows
+  of distance, each one's speed across / toward the other, aim errors, shields, fire, vertical speed) and MULTI-PLAYER records
+  from every player's held target: choice (all enemies within 45 units with 8 features, which was taken), switch (a second
+  attacker while fighting: turned to it or not, how fast), pressure (2+ attackers vs 1), join (a teammate's new target near me),
+  skirmish (attack-graph components every 3 s). Infection sides from weapons (the Energy Blade). Per recording into
+  tracks/engagements/*.eng.jsonl.gz (re-cut only when the recording is newer). engage-model.py reports by class and writes
+  tracks/engage-model.json: distance bands by weapon class, movement numbers, retreats, time to kill, the target-choice rule as
+  a conditional logit (top-1 64% on held-out Slayer choices vs 36% "nearest", 52% "nearest to the aim"), second-attacker odds
+  (in view 33%, behind 7%, ~1.75 s), and a movement library (2-s pieces of the attackers' moves by weapon class / distance).
+  First numbers (Slayer, mostly FFA BR): the first attacker wins 84% of decided duels; the defender was looking away 52% of the
+  time and then won 7% (27% facing); BR fights start at 21.7 units median (14-31); outnumbered players die 41% vs 17%.
+  shim/tools/engage-compare.py <walkers' recordings> = the same measures for a walker battle beside the players' (fight-
+  likeness score; signed measures by their gap): last night's final battle 68% (attack distance 8 vs 14 units, outnumbered
+  deaths 11% vs 53%, second-attacker turn 0.5 vs 1.3 s).
+- **The fighter fights like the players: awareness, target choice, second attackers, weapon bands, real moves** (2026-11-08
+  12:00; shim/native/nbot_engage.c, nbot.c) — WHY: the night's fighter took the NEAREST enemy (with a seen one first), knew every
+  enemy around it, kept one distance band for every weapon and strafed side to side on a timer. LOGIC: engage-model.json
+  (NHOOK_BOT_ENGAGE=<file>): an enemy is known in view (75 deg), when it attacked us (aimed within 12 deg while we were hurt),
+  within 5 units, or our target of the last 3 s; a new target = the best w . features over the known enemies within 45 units
+  (the players' fitted rule) +-1.5 for a clear / blocked line of sight; kept while alive and seen within 1 s; a NEW attacker
+  while we fight for 1 s+ turns us with the players' odds (in view / behind) after their delay x 0.5..1.5, once per attacker;
+  the band = the players' attack distances for the held weapon's class (20+ duels); moves = 2-s pieces of the players' fights
+  (weapon class / distance band) as the throttle with a pull into the band. The A* lane preference (g_nav.pop) also takes the
+  lanes (<map>.lanes on-foot passes, real heatmaps folder; NHOOK_BOT_LANES=<dir>, =0 = heat only): a node keeps the larger of
+  heat and lanes. Offline: shim/tools/engage-load-test.sh (the C loader reads what Python wrote). Live battle test: after the
+  sampling block (one game at a time). SWITCHES: NHOOK_BOT_ENGAGE=0 = the night's fighter; NHOOK_BOT_LANES=0.
+- **Grenades from the players** (2026-11-08 12:00; match-recorder.py, engage-extract.py / engage-model.py, nbot.c) — WHY: the
+  recordings had no grenade data, so the walker's grenades were a tactics guess (6..16 units, every NHOOK_BOT_GREN s); and the
+  next throw's random delay was drawn EVERY tick, so the shortest draw won and throws came early. LOGIC: the recorder adds each
+  player's grenades carried (row index 16; a drop = a throw); duels list each side's throws (time, distance); the model's
+  "grenades" = throws per minute of fighting and the throw distances (25..75%); the walker uses that band and rate once 50+
+  duels carry counts (NHOOK_BOT_GREN set = its own interval), the next throw time drawn once per throw.
+- **The new fighter against the players, first battle** (2026-11-08 12:15; nbot_engage.c, nbot.c, engage-compare.py,
+  engage-extract.py, engage-model.py) — WHY: a 5-minute 4-walker battle with the engagement fighter (champion tactics, distance
+  x1) scored 62% fight-likeness against last night's 64% on the same player data. Better: closing in (+0.43 vs -0.08 u/s),
+  outnumbered deaths (42% vs 11%; players 47-57%), turn delay (1.7 vs 0.5 s). Worse: the players' choice rule named the walker's
+  target 72% of the time and the players' own 39% (argmax = too predictable); strafing 0.69 u/s / switch 1.54 s (players 0.91 /
+  0.73: the tactics' strafe scale x0.76 shrank the replayed real moves); turning to a second attacker 3% (players 14%: after a
+  switch the pre-reaction turn rate 0.73 rad/s needs ~3 s for 130 deg, the measure's window); aim 3.8 deg off (players 6.8);
+  the band's push-back below its 25% kept walkers at its near edge while players close in at 1.3 u/s. LOGIC: the new target is
+  DRAWN from the rule's probabilities (NHOOK_BOT_PICK=best = argmax); replayed moves scaled by NHOOK_BOT_LIBSCALE (1), not the
+  strafe tactic; a deliberate second-attacker switch turns at full speed (its delay was the reaction); NHOOK_BOT_NOISE (x aim
+  noise, 1); with replayed moves only a pull INTO the band. Tools: engage-compare.py compares with the players on the walkers'
+  own maps when they have 300+ duels there (--all-maps = all: small Guardian with Assault Rifles vs Valhalla's Battle Rifles was
+  no comparison); engage-extract.py --force takes a recording under 2 minutes old (a battle that just ended); engage-model.py's
+  choice fit runs batched (padded sets + mask: minutes -> seconds) and writes the model atomically.
+- **Radar, memory, own deaths and the goal draw** (2026-11-08 12:50; shim/native/nbot_goals.c, nbot.c, nbot_engage.c, nstats.c) —
+  WHY: the user, watching four walkers: they "don't understand how the radar works", players return "to where you were just
+  killed to seek out the person that just killed you", "seek out spawning power weapons, and items like overshield and camo" (a
+  "route selection randomizer / solidifier"), walkers should know "their own death heat map" and "sometimes walkers just stop".
+  The hunt walked to the NEAREST enemy's node, known through walls; an unreachable one kept the goal and the walker stood.
+  LOGIC: radar = halo3's motion tracker rules for the walker's own resolved traits (player +0x1FC: +0x18 mode, +0x1A range; the
+  snapshot publishes them for the walker's unit): enemies within the range (1 unit = 3.048 m) moving faster than 1.2 u/s or in a
+  vehicle, all of them with "enhanced"; a contact is a KNOWN enemy (target choice) and remembered with its position. Goals: a
+  weighted draw among known enemies (exp(-d/25)), after a respawn (25 s) the most recent killer's known position / the death spot
+  / -- when that death was within 8 units of a power item's spawn point -- a point 10..25 units out along a lane leaving the
+  item, drawn by traffic; power-ups and power weapons lying at their spawn points (nspawns.c g_wt); lane cells 10..40 units away
+  by traffic (the busier half of <map>.lanes); held 6..15 s, dropped when reached, gone, held long enough or with no floor / no
+  path -- and the next drawn at once (no more standing). Own deaths: position, killer (the last attacker within 3 s), FAILED when
+  the life had no kill (a target died while fought): +3 path cost within 5 units per failed death, goal weights x (1 - 0.6 x
+  failed deaths within 6 units, at least 0.15). The weights are first guesses until the players' numbers are in (engage-extract
+  contact / respawn records). SWITCH: NHOOK_BOT_GOALS=0 = the old nearest-enemy hunt. Live test pending.
+- **Radar and revenge in the players' data** (2026-11-08 12:50; engage-extract.py "contact" / "respawn" records) — WHY: the same
+  requests, measured first. LOGIC: contact = an enemy within 15 units comes up more than 75 deg off a player's view, not attacking,
+  while the player has no target: turned to face it within 2.5 s? (moving vs still); respawn = after each death with a known
+  killer: back within 8 units of the death spot in 40 s (vs another death spot as far from the spawn), next target = the killer
+  (vs 1 / enemies), approach speeds. Vectorized ([T, N] per player; the per-pair loop took minutes). First numbers, three big
+  free-for-all Slayer matches (20,362 contacts, 1,934 respawns): within ~8 units players turn to an unseen MOVING enemy 26-32% vs a
+  still one 20-21%; past 8.2 units 19% vs 17-18% -- the radar's effect and its 25 m range; turn 1.24 s. Revenge did NOT show
+  there: next target = the killer 6% (chance 7%), back at the death spot 13% (baseline 10%), no faster approach to the killer.
+- **Stats page: the players table above the event feed; our local server serves the page from the checkout** (2026-11-08 12:40;
+  stats_page.html, native-dedicated.sh) — WHY: the user: "move all the players in the game, their k/d spread, their current
+  weapon, kills, etc. ... above the event feed"; the dedicated server served the dylib's built-in copy, so page edits needed a
+  server restart. LOGIC: the players panel moved before the feeds; native-dedicated.sh sets NHOOK_STATS_PAGE like native.sh.
+- **walker-battle.sh: WB_IDS, WB_WATCH** (2026-11-08 12:10) — WB_IDS="1 2 3" picks the identities (leave test-v2 out when the
+  user joins with NATIVE_REAL=1 NATIVE_ALLOW_SECOND=1 bash shim/native.sh --join-server 127.0.0.1:49190); WB_WATCH=1 opens the
+  server's stats page (http://127.0.0.1:8767/) to watch. The battle-end cleanup follows the chosen identities.
+- **engage-report.py** (2026-11-08) — the "How players fight" page from engage-model.py's report and engage-compare.py's outputs.
+- **The players' behaviour drives the walker's radar look, revenge and power items** (2026-11-08 13:00; engage-extract.py "item"
+  records, engage-model.py "behaviour", nbot_engage.c / nbot_goals.c) — WHY: the goal draw's weights were guesses. LOGIC: item =
+  each power weapon / power-up spawn event: every player within 40 units -> approach speed toward it over 10 s vs a point as far
+  another way, the first to come within 1.5 units (first numbers, 3 big Slayer matches, 69 spawns: someone reaches it in 94% of
+  cases, median 4.7 s, the nearest at spawn only 25% of the time; heading in at 10-20 units 17% vs 11% baseline); behaviour =
+  radar turn rates (moving / still, in / out of the 8.2-unit range) and delay, revenge rates vs chance / baseline, item heading-in
+  shares. The walker: with no target, a new radar contact makes it look (1.5 s, walking on) with the players' odds (28%) after
+  their delay (1.24 s x 0.5..1.5); at each respawn ONE draw: the killer with the players' excess over chance (at least 5%), else the
+  death spot / the item's lane with theirs (at least 8%); a power item in range is the goal with twice the players' extra heading-
+  in share at its distance per draw (x1.5 for power-ups, which walkers can take). engage-load-test.sh checks the parse.
+- **No lanes from our local test server** (2026-11-08 13:00; nlanes.c ln_here) — WHY: the user's own client (the real profile)
+  joined the walkers once and wore 3.9 km of walker moves into Guardian's real lanes. LOGIC: lanes are not recorded in a game on
+  a 127.x server (NHOOK_LANES_LOCAL=1 = they are); guardian.lanes rebuilt from its 5 recordings (98.5 km).
+- **The engine's motion tracker found** (2026-11-08 13:05; native-client.md "The motion tracker", nbot_goals.c rd_blips /
+  rd_log) — WHY: the user: the walkers should "simply look at the radar's literal output, and check near players not every
+  player". No string names it; found from the radar traits (player +0x214 / +0x216 reads) -> the "tracker shown" check
+  halo3+0x2d349c -> its caller, the HUD draw, which passes the tracker state (S = [TLS +0xF0] + user * 0x28c8 + 0x244: range,
+  10 history frames of up to 16 blips) to its draw. LOGIC: rd_blips reads user 0's newest frame; NHOOK_RADAR_LOG=1 logs it beside
+  the truth to fit the sensor plane to the world; the walker keeps halo3's rules (rd_contact) until then.
+- **Every public match recorded for the walkers** (2026-11-08 13:10; shim/native/ntracks.c, nstats.c, build.sh -lz) — WHY: the
+  user: "any game played on a public server should be collecting stats for our walkers to hone themselves on in the future";
+  only the observer's match-recorder.py (HTTP polling, a separate process) recorded. LOGIC: in a match on a server that is not
+  127.x, every stats snapshot writes match-recorder.py's line format to tracks/<date>_<map>_<FNV tag>.jsonl.gz (header with the
+  game engine and variant from st_variant, "source": "nhook", "you_plays": true -- "you" -1, so the local player counts as a real
+  player), events from the feed ring with names mapped to slots (no names written), gzflush every 600 lines, closed on a new
+  match / match end / exit. SWITCHES: NHOOK_TRACKS=0 off (observe-public.sh sets it: it runs match-recorder.py), NHOOK_TRACKS_DIR.
+- **Weapon effectiveness** (2026-11-08 13:05; engage-extract.py "weapons" records, engage-model.py weapon_stats) — WHY: the user:
+  "gather some stats about the most effective weapons too". LOGIC: per recording, seconds each weapon was held by live players on
+  foot, kills credited by the game, kills by a player holding it, deaths of players holding it; the model: kills a minute held,
+  K/D, duel win rate as attacker / defender, median time to kill (weapons held 3+ minutes). First table (non-Infection, 34
+  matches): Mauler 5.9 kills/min, SMG 5.4, Energy Sword 5.0, Shotgun 4.4; best K/D Spartan Laser 2.80, Sniper 2.36, Carbine 1.90;
+  sniper attackers win 92% of their duels; Assault Rifle / Battle Rifle ~1.0 K/D (the defaults); melee is the game's top kill
+  credit (777), then the Assault Rifle (750) and Battle Rifle headshots (591).
+- **Stats page: Live and Tools tabs; the event feed and chat beside the map** (2026-11-08 13:20; stats_page.html) — WHY: the
+  user: "move the event and chat feed to where the tools are now. I think tools should just be its own tab like forensic is".
+  LOGIC: header tabs Live / Tools / Forensic archive (the archive stays its own page); Live = game rules, the event feed + chat in
+  the left column beside the map, Connected, the players table; Tools (#tools) = the in-game overlay panel (with recording, host
+  and walker controls), hook cost, soundboard, hooks check, packets. Blocks moved whole (no ids changed); the map is redrawn when
+  Live comes back. The observer leaves Infection out for now (observe-public.sh OBS_INFECTION=1 = back in; the user: 86 minutes
+  of Infection biased the data).
+- **observe-public.sh: the server going away ends the visit** (2026-11-08 13:40) — WHY: the server shut down mid-session ("the host
+  left the game: back to the main menu"); the game sat in the main menu and the visit only ended at MAXSESSION (45 min): the 5-
+  minute "no match" rule only covers a visit that never got into one. LOGIC: "back to the main menu" in the app log ends the visit
+  and skips that server for the run ("[switch] leaving the game" is no sign: the app logs it on every join).
+- **Medals in the event feed** (2026-11-08 13:50; stats_page.html) — WHY: the user: "can you add the medals feed to the event
+  feed?" -- the snapshot's medal events (nstats.c rs_tick: the game results' medal counts going up, with the player's team) fell
+  through to a plain "name: medal" text row, unstyled and with no switch. LOGIC: "<player in team colour> earned <medal badge>",
+  a "medals" switch beside the others (remembered with them), the same medal for the same player within 0.5 s merged (x2 ...).
+- **Per-map models, the tome, coverage-driven sampling** (2026-11-08 14:00; engage-model.py, engage-extract.py, nbot_engage.c,
+  nbot.c, observe-public.sh, workboard.py, match-recorder.py) — WHY: the user: the archive "should probably also refine itself to
+  per map stats too. both per map lanes and logic, as well as a larger aggregated everything general logic, and the walkers should
+  be able to adapt learned logic for each map ... sample each map at least once ... keep track of all the maps you've played, and
+  under what game types ... archived in our tome". LOGIC: engage-model.py builds one model per subset (make_model): the aggregate,
+  each map with 150+ duels (tracks/maps/<map>.engage.json) and inside it each game type with 150+ ("by_class"); tome.json from
+  engage-extract.py's new per-recording meta records (map, type, length, players, kills, start) -- per map x type recordings,
+  minutes, players, duels, kills, first / last, plus the Halo 3 maps never sampled. The walker: eg_load_for(map, engine) = the
+  aggregate, then the map's numbers, then its game type's, wherever present (a map's distance band from 20+ of its duels); reloaded
+  on a map / game change; the map's movement pieces first (EgPiece.mine). NHOOK_BOT_NO_MAPMODEL=1 = aggregate only. The observer's
+  pick adds +25 players for a map x type the tome has no minutes of, +12 under 10 (listing names -> maps by display name or the
+  first 5 letters); OBS_DONE carries a phase's count across a restart. Game type is classified by the engine (match-recorder.py
+  now writes "engine"; nhook's recorder's "mode" is it), then the variant's name, then the listing (a "CTF 30VS30" server's
+  "BIGASSSLAYER" was filed as CTF). The work board shows the direction and the tome's coverage grid (maps x types, per-map model
+  or aggregate, never sampled).
+- **Teamwork: measured in team games, used by the walkers** (2026-11-08 14:30; engage-extract.py "team" / "aid" records,
+  engage-model.py behaviour.teamwork, nbot_engage.c, nbot_goals.c, nbot.c) — WHY: the user: the radar learning should note "both
+  enemy and friendly radar blips, and how they may be cooperative working together in the moment, and learn to also potentially
+  cooperate with other team mates toward a common offense, or if one comes to your aid, ensure you are working together for your
+  and his collective defense as a unit". LOGIC: per team-game recording the nearest teammate's distance (all / while fighting),
+  the share of time with one within 8 / 15 / 25 units, focus fire (attackers whose target a teammate attacks too); per NEW attack
+  on a player with teammates within 25 units: aided by fire (a teammate attacks that enemy within 3 s) or by moving in (1+ u/s
+  toward the player for a second), how fast, and the 5-s death rate helped vs alone; the model's teamwork = spacing, within15,
+  focus share, aid / join odds and delays. The walker, with no target held: a teammate within 25 units under fire (hurt in the last
+  second while an enemy aims at it) -> aid with the players' odds after their delay (the attacker as target when known, else a
+  goal to the teammate); a teammate shooting an enemy -> join with their odds and delay; once per (teammate, enemy) per 5 s; that
+  teammate is the unit partner for 12 s. The goal draw adds the nearest teammate (weight 2 x within15, the unit partner 4),
+  followed as it moves, reached at the players' spacing. Free-for-all has no teammates: nothing changes there.
+- **What the game is learning** (2026-11-08 14:40; shim/tools/learnings.py, workboard.py) — WHY: the user: "add one more service that
+  tells what the game is learning about everything from these stats? best lane to not get killed on a map, best weapon overall,
+  best weapon per map, best tactics in each situation 1:1 1:3, distance shots with hitscan weapons, grenade tactics, jumping
+  tactics, strafe tactics, team cohesion, best way to survive vs specific weapons ... add one more data display to
+  http://127.0.0.1:8790". LOGIC: learnings.py reads the engagement library, lanes, deaths heatmaps and spawn points and writes
+  plain-language findings with their sample sizes (under --min 30 cases = "thin") to tracks/learnings.json: the fundamentals (first
+  shot, facing, shield lead, high ground), weapons (K/D and kills a minute held overall, the best per map), range (win rate by
+  distance per weapon class), outnumbered and teamwork, movement in a fight (strafe / jump / push terciles), grenades, surviving a
+  specific weapon (by distance, strafing, jumping, the attacker's firing pause of 1.2+ s as the reload stand-in), maps (the busy
+  4-unit squares with the fewest / most deaths per 100 crossings, named by the nearest spawn; fight distance), radar / revenge /
+  power items. The work board's "What the game is learning" panel shows it; a loop re-cuts new recordings, refits the models and
+  the tome and rewrites the findings every 20 minutes while sampling runs. The board has tabs like the stats page (the user: "make the
+  results a tab on the work board page ... just like we use tabs on the stats service"): Work (direction, jobs, tasks, data,
+  coverage, observer) and Learnings (#learnings).
+- **You vs the winners** (2026-11-08 15:00; ntracks.c, engage-extract.py, shim/tools/coach.py, workboard.py "You" tab) — WHY: the
+  user: "theoretically if I played a few matches you could tell me what I do wrong vs what the winning population of halo that
+  you've observed does eh?". LOGIC: nhook's recorder writes the local player's slot as "you" (its header's you_plays says it is a
+  real player: engage-extract.py keeps it in -- an observer's "you" stays out -- and names it in the meta record's local_slot);
+  engage-extract.py adds one "player" summary per player of a match (kills, deaths, time, shots, hits, team) and the player's slot
+  to the contact / pressure / respawn / aid records (aid: the helper and the teammates near). coach.py: the WINNERS = the top
+  quarter by (kills + 1) / (deaths + 1) of the player-matches of 5+ minutes outside Infection (you left out); per measure your
+  pooled number, the winners', everyone's, a verdict and the winners' way where you are behind, biggest gaps first: K/D, duels won,
+  shot first, caught looking away, turn-back time, aim error, strafing when shot / attacking, closing in, jumps and grenades a
+  fight-minute, turning to radar blips, dying outnumbered, help given / got, fight distance by weapon class. --pretend <file>
+  <slot> tries it on a recorded player. tracks/coach.json; the work board's You tab.
+- **Whole matches: a recording from the match's start counts** (2026-11-08 15:05; match-recorder.py, shim/tools/observe-whole.py,
+  observe-public.sh) — WHY: a visit's first recording never counted ("began when we joined, maybe mid-match"), but after a restart
+  the observer usually joins as a match begins: a 22-minute Valhalla match from its start was thrown away and phase 1 crawled (2 of
+  10). LOGIC: the recorder writes the game's match clock at a recording's start (header match_time_at_start, its log line "(match
+  time N s)"); observe-whole.py counts a finished recording of 1500+ samples when it is not the visit's first or began under 90 s
+  into its match (old logs without the clock: as before).
+- **The walkers coach themselves** (2026-11-08 15:40; nbot.c, nbot_goals.c, shim/tools/walker-coach.py) — WHY: the user: "the
+  walkers can use the coach on themselves eh!?". LOGIC: coach.py's report is made for every walker of a battle (its slot -> the
+  test identity from the battle's samples; names never written) against the WINNERS of the same game class on the same map (40+
+  player-matches), else that class on every map, else every match; each measure moves one knob half its gap in log space (x2 /
+  x0.5 at most a round, 8+ samples): closing in -> NHOOK_BOT_RADSCALE (new: x the replayed closing / backing off), aim error ->
+  NOISE, time to aim back -> REACT, strafing when shot / attacking -> LIBSCALE, jumps a fight-minute -> NHOOK_BOT_FJUMP (new: extra
+  jumps while in sight of the target, Poisson), grenades a fight-minute -> NHOOK_BOT_GRENX (new: x the time between throws),
+  turning to radar contacts -> NHOOK_BOT_RADARLOOK (new: x rd_turn), fight distance by weapon class -> DIST (same-map winners
+  only: distances belong to their map). Measures with a better direction (aim error, aim-back time, radar turns) move a knob only
+  while the walker is behind: the goal is to beat the players, not copy their misses. `walker-coach.py loop [--rounds N] [--secs S]
+  [--n 2..4] [--map M] [--game G] [--teams]` = battle (walker-battle.sh with W<k>_ENV from the knobs, its own tracks folder) ->
+  coach -> next battle; `round <tracks> <samples>` coaches one battle (--dry: no change), `show` prints the knobs and rounds.
+  Per round: K/D, duels won, shot first and the distance to the winners (coach.py's gap averaged; 0 = their numbers) per walker in
+  ReclaimerMac/battles/coach/state.json. New knobs default to the old behaviour (1, 1, 0, 1).
+- **The walker knows its inventory and power-ups** (2026-11-08 16:30; nbot.c bot_inv, nbot_engage.c, nbot_goals.c, engage-model.py
+  behaviour.powerups) — WHY: the user: "the walker should be aware of its own inventory, and power up status as well". LOGIC: every
+  tick bot_inv reads the walker's own unit: the held and the other weapon (class + rank), grenades by type, an overshield (shield
+  above 1.05) and active camo (+0x360 above 0.05); `[inv]` log lines on a change. The fighter: switches weapons (vpad Y, 0.15 s, 3 s
+  apart) when the target is 30%+ outside the held weapon's players' band and well inside the other's; throws only with a grenade in
+  hand; under camo holds fire beyond the band's near edge + 2 units unless hit in the last 2 s and walks in; reloads after a fight in
+  which it fired (vpad RB tapped 0.4-1.0 s after; no ammo count is read yet); picks up on the vpad too (RB held 0.6 s,
+  NHOOK_BOT_PICKPAD = another button). Target choice: an overshielded enemy costs half the players' logit (attackers win 54% against
+  one vs 77%, behaviour.powerups, 35 duels) unless the walker has one; a camo'd enemy is not seen in view beyond 8 units (radar,
+  attacks and close range still tell). Goal draw: fights weigh x2.5 with an overshield / camo (defenders with an overshield survive
+  twice as often), an overshielded enemy half; no power-weapon goals with two power weapons in hand, no power-up goals with one
+  running. NHOOK_BOT_NOINV=1 = blind to it (the old walker). behaviour(R, D) now gets the duels (it got none: powerups was empty).
+- **Recordings carry camo and the second weapon** (2026-11-08 16:35; match-recorder.py, ntracks.c, nstats.c) — WHY: the walker's
+  inventory logic should be learnt from players, and camo was never recorded. LOGIC: two columns more per player sample: 17 = the
+  active camo amount, 18 = the other weapon carried ('' none; the stats page's weapons list minus the one in hand). Old readers
+  index up to 16 and are unchanged.
+- **One game against what we assumed** (2026-11-08 16:45; shim/tools/game-review.py) — WHY: the user: "coaching yourself based on
+  the dataset you JUST collected for that game vs the assumptions you made about the map, and the larger aggregated data". LOGIC:
+  for one cut recording, the same measures over the game, over the map's earlier matches (same class) and over every earlier
+  match of that class: first-shot wins, caught looking away, high / low ground, wins and distance per weapon class, radar turns,
+  dying outnumbered, help, items, back to the death spot, kills a minute, the winners' K/D line, kills a held-minute per weapon and
+  coach.py's fight measures; a SURPRISE vs the map = shares 2+ standard errors of a game this size, other numbers 30%+ (15+ cases).
+  tracks/reviews/<recording>.json (+ team_game); the work board's Walkers tab shows the latest.
+- **The learn loop** (2026-11-08 16:50; shim/tools/learn-loop.py, observe-public.sh OBS_RANDOM, walker-coach.py --game-file /
+  --ded-map) — WHY: the user: "start randomly joining and completing games ... in order to instruct the walker how to play the game
+  in question. iterate with the goal of better vs human scoring". LOGIC: a turn = observe-public.sh with OBS_MATCHES=1 OBS_RANDOM=1
+  (the server DRAWN with weights exp(score / 8) instead of the best score; no Infection / mods / downloads) -> engage-extract ->
+  game-review -> engage-model (aggregate, per map, tome) -> on a stock map, walker-coach.py loop on that map (the server gets the
+  display name: riverworld -> Valhalla; team games and CTF as Team Slayer 2v2, the walkers have no flag play) against THIS game's
+  winners (top quarter of 8+ players, weight 2) blended with the map's / class's winners (weight 1) -> tracks/learn-loop.json. The
+  observer only watches: walkers stay on our own server (bot_allowed); "better vs human scoring" = the walkers' distance to the human
+  winners going down. walker-coach.py --dry no longer saves its round.
+- **Work board: Walkers tab** (2026-11-08 16:55; workboard.py #walkers) — the latest game review (this game / the map / everything,
+  surprises), the learn loop's turns, each walker's knobs and its coached rounds (distance to the winners, K/D, duels won); new job
+  kinds learn-loop / walker-coach / game-review / coach.
+
 ## 19. Performance
 
 Numbers are from the commit messages; PERF-PLAN.md has the measurements. Compare only inside one match
@@ -3102,7 +3511,9 @@ Numbers are from the commit messages; PERF-PLAN.md has the measurements. Compare
   `sigs` stores the reference build's needed functions as raw words (re-tools/machoport-sigs.json, 11 functions, 177 KB) so `port`
   needs no 0.10.0 binary (the app replaces itself on update). `selftest` reproduces 0.10.0 from the binary and from the sigs;
   porting 0.10.1 from either gives the same 12 addresses. **shim/tools/native-test-all.sh** -- every live native test in a row
-  (hooks, fire, aim, walls, tpnext, voice, spar; ~20 min), the check after an app update.
+  (hooks, fire, aim, walls, tpnext, voice, spar, soundboard; ~25 min), the check after an app update.
+  **shim/tools/native-soundboard-test.sh** -- the soundboard end to end (two test clients, our server, muted output).
+  **shim/tools/voice-fifo-probe.sh** -- whether the app's --voice-wav streams (it does not: it reads the file to its end first).
 
 ## 21. Superseded workarounds (kept for history; most switches still exist)
 
