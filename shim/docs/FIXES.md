@@ -2922,6 +2922,10 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   left the game: back to the main menu"); the game sat in the main menu and the visit only ended at MAXSESSION (45 min): the 5-
   minute "no match" rule only covers a visit that never got into one. LOGIC: "back to the main menu" in the app log ends the visit
   and skips that server for the run ("[switch] leaving the game" is no sign: the app logs it on every join).
+- **Medals in the event feed** (2026-11-08 13:50; stats_page.html) — WHY: the user: "can you add the medals feed to the event
+  feed?" -- the snapshot's medal events (nstats.c rs_tick: the game results' medal counts going up, with the player's team) fell
+  through to a plain "name: medal" text row, unstyled and with no switch. LOGIC: "<player in team colour> earned <medal badge>",
+  a "medals" switch beside the others (remembered with them), the same medal for the same player within 0.5 s merged (x2 ...).
 
 ## 19. Performance
 

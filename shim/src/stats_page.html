@@ -152,7 +152,8 @@ th .srt{display:inline-block;margin-left:2px;padding:0 2px;cursor:pointer;color:
 #fl .pos{color:#888;font-size:11px;font-variant-numeric:tabular-nums;margin-left:2px;cursor:help}
 #fl.h-kills .k-kill,#fl.h-kills .k-death,#fl.h-players .k-join,#fl.h-players .k-leave,
 #fl.h-server .k-server,#fl.h-server .k-vote,#fl.h-server .k-log,#fl.h-game .k-game,
-#fl.h-weapons .k-weapon,#fl.h-vehicles .k-vehicle,#fl.h-powerups .k-powerup{display:none}
+#fl.h-weapons .k-weapon,#fl.h-vehicles .k-vehicle,#fl.h-powerups .k-powerup,#fl.h-medals .k-medal{display:none}
+#fl .k-medal .tx{color:var(--dim)}#fl .k-medal .md{background:#3a3218;color:#ffd77a;border:1px solid #5c4d1e;border-radius:3px;padding:0 5px;font-weight:600;font-size:11px}
 #hcost button{background:#222;color:var(--fg);border:1px solid var(--line);border-radius:4px;padding:2px 8px;font:inherit;font-size:12px;cursor:pointer}#hcost button:disabled{opacity:.35;cursor:default}
 .hct{border-collapse:collapse;font-size:12px;width:100%}.hct th,.hct td{padding:2px 6px;border-bottom:1px solid #2a2a2a;text-align:left;white-space:nowrap}.hct td:first-child{white-space:normal;min-width:220px}
 </style></head>
@@ -170,7 +171,8 @@ th .srt{display:inline-block;margin-left:2px;padding:0 2px;cursor:pointer;color:
  <label><input type="checkbox" data-f="server" checked> server</label><label><input type="checkbox" data-f="game" checked> match</label>
  <label title="Weapons and equipment that appear on the map (and where), and the first player to pick each one up"><input type="checkbox" data-f="weapons" checked> weapons</label>
  <label title="Vehicles that appear on the map, at the start and each respawn (and where)"><input type="checkbox" data-f="vehicles" checked> vehicles</label>
- <label title="Power-ups (overshield, active camo, custom) that appear on the map (and where), and who takes them"><input type="checkbox" data-f="powerups" checked> power-ups</label></div>
+ <label title="Power-ups (overshield, active camo, custom) that appear on the map (and where), and who takes them"><input type="checkbox" data-f="powerups" checked> power-ups</label>
+ <label title="Medals as the game awards them (headshots, multi-kills, sprees, assists, ...): who earned which; the same medal for the same player at once is one row with a count"><input type="checkbox" data-f="medals" checked> medals</label></div>
  <div id="fl" class="note">waiting for events...</div>
  <div class="note">Newest first. Kills come from the game itself (weapon or vehicle, headshot, melee, splatter, stuck). A client is only told about kills involving its team (all of them in team games, only its own in free-for-all); the rest are estimated, marked ≈: the last player whose projectile ended inside the body, and the weapon in their hands, the vehicle or turret they sit in, or the grenade. Spawns: weapons, equipment, vehicles and power-ups as they appear on the map, with where (x, y; hover for the height), and who first picks up each weapon and who takes each power-up. The match start's weapons are one line; grenades, weapons dropped by players and turrets mounted on vehicles are left out.</div></div>
 <div id="chat" class="panel"><div class="fh"><h2>Chat</h2></div>
@@ -1194,6 +1196,7 @@ function feedRow(e){
   else if(e.kind==='death'){ const rest=e.b&&e.text.startsWith(e.b)?e.text.slice(e.b.length):' died', m=rest.match(/^(.*?) \((.*)\)$/);
     body=`${feedName(e.b,e.tb)} <span class="tx">${E((m?m[1]:rest).trim())}</span>${m?` <span class="w">(${E(m[2])})</span>`:''}`; }
   else if(e.kind==='game' && e.a) body=`<span class="tx">Match started: ${E(MAPN[e.a]||e.a)}</span>`;
+  else if(e.kind==='medal' && e.a && e.how) body=`${feedName(e.a,e.tb)} <span class="tx">earned</span> <span class="md">${E(e.how)}${e.count>1?' ×'+e.count:''}</span>`;
   else body=`<span class="tx">${E(e.text)}</span>`;
   const est=e.estimated?' <span class="est" title="estimated: the last player whose projectile ended inside the body">≈</span>':'';
   const dn=e.kind==='death'?` data-n="${E(e.b)}" data-t="${e.t}"`:'';
@@ -1211,7 +1214,10 @@ async function pollFeed(){ if(feedBusy) return; feedBusy=true;
     // a burst of joins (the roster announces everyone already in the game when we join) becomes one row
     const runs=[]; for(const e of j.events){ const r=runs[runs.length-1];
       if(e.kind==='join' && r && r[0].kind==='join' && Math.abs(e.t-r[r.length-1].t)<0.25) r.push(e); else runs.push([e]); }
-    const evs=runs.flatMap(r=>r.length>=4?[{...r[r.length-1],a:'',text:`${r.length} players in the game: ${r.map(e=>e.a).join(', ')}`}]:r);
+    const evs0=runs.flatMap(r=>r.length>=4?[{...r[r.length-1],a:'',text:`${r.length} players in the game: ${r.map(e=>e.a).join(', ')}`}]:r);
+    // medals: the same medal for the same player at once is one row with a count (the game's results hand them out in bursts)
+    const evs=[]; for(const e of evs0){ const p=evs[evs.length-1];
+      if(e.kind==='medal' && p && p.kind==='medal' && p.a===e.a && p.how===e.how && Math.abs(e.t-p.t)<0.5) p.count=(p.count||1)+1; else evs.push(e.kind==='medal'?{...e}:e); }
     // a player who leaves loses their body: no "died" line for a death within 3 s of their leave (either order)
     for(const e of evs) if(e.kind==='leave'){ lastLeave.set(e.a,e.t);
       for(const r of fl.querySelectorAll('.k-death[data-n]')) if(r.dataset.n===e.a && Math.abs(+r.dataset.t-e.t)<3) r.remove(); }
