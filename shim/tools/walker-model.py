@@ -52,9 +52,11 @@ def main():
     for path in files:
         head, S, E = load(path)
         if not head or len(S) < 50: continue
-        infection = 'infection' in (head.get('mode') or '').lower()   # (zombies rush with melee, humans camp: not the walkers' game)
-        if infection and '--all-modes' not in sys.argv: continue
-        mp = head.get('map') or '?'; n_samples += len(S)
+        # Infection (zombies rush with melee, humans camp: not the walkers' game): its lanes (heat, flow) count, its fights and
+        # speeds do not (--all-modes = everything)
+        lanes_only = 'infection' in (head.get('mode') or '').lower() and '--all-modes' not in sys.argv
+        mp = head.get('map') or '?'
+        if not lanes_only: n_samples += len(S)
         flow = maps.setdefault(mp, {'flow': defaultdict(lambda: [0.0, 0.0, 0]), 'heat': defaultdict(int)})
         # per slot series (alive, on foot, not the observer)
         ser = defaultdict(list)
@@ -64,7 +66,8 @@ def main():
                 sl, team, alive, x, y, z, yaw, pitch, sh, hp, wpn, veh = r[:12]
                 if sl == you: continue
                 ser[sl].append((s['t'], alive, x, y, z, yaw, pitch, sh, hp, wpn, veh, team, r[14] if len(r) > 15 else 0, r[15] if len(r) > 15 else 0))
-        for sl in ser: players.add((path, sl))
+        if not lanes_only:
+            for sl in ser: players.add((path, sl))
         # velocities (0.3 s central differences inside continuous alive stretches)
         vel = {}
         for sl, a in ser.items():
@@ -119,6 +122,7 @@ def main():
                     engs.append((sl, cur)); cur = None
             if cur: engs.append((sl, cur))
         # per engagement measures
+        if lanes_only: engs = []
         for (sl, c) in engs:
             rows = c['rows']
             if rows[-1]['t'] - rows[0]['t'] < MIN_ENG: continue
@@ -149,11 +153,13 @@ def main():
                 if v[i] is None: continue
                 cx, cy = round(e[2] / CELL), round(e[3] / CELL); flow['heat'][(cx, cy, round(e[4] / 1.5))] += 1   # (with a floor level: multi-storey maps)
                 if tindex[e[0]] in engaged[sl]: continue
-                sp = math.hypot(v[i][0], v[i][1]); M['speed'].append(sp); roam_secs += 0.1
-                if v[i][2] > 2.5: M['jump_samples_roam'].append(1)
+                sp = math.hypot(v[i][0], v[i][1])
+                if not lanes_only:
+                    M['speed'].append(sp); roam_secs += 0.1
+                if v[i][2] > 2.5 and not lanes_only: M['jump_samples_roam'].append(1)
                 if sp > 1.0: f = flow['flow'][(cx, cy)]; f[0] += v[i][0] / sp; f[1] += v[i][1] / sp; f[2] += 1
         for ev in E:
-            if ev.get('ev') == 'kill': kills.append(ev.get('how') or '')
+            if ev.get('ev') == 'kill' and not lanes_only: kills.append(ev.get('how') or '')
     sp = M['speed']; moving = [x for x in sp if x > 1.0]
     model = {'version': 1, 'source': {'files': len(files), 'samples': n_samples, 'players': len(players), 'engagements': eng_count,
                                       'fight_seconds': round(fight_secs, 1), 'roam_seconds': round(roam_secs, 1), 'kills': len(kills)},

@@ -18,7 +18,8 @@ def model(d):
     try: return json.load(open(out))
     except Exception: return None
 E = html.escape
-real = model(os.path.join(SUP, 'tracks')); bots = model(os.path.join(SUP, 'battles', 'tracks'))
+WDIR = os.environ.get('WB_TRACKS') or os.path.join(SUP, 'battles', 'tracks')   # (the walkers measured: WB_TRACKS = one set of settings)
+real = model(os.path.join(SUP, 'tracks')); bots = model(WDIR)
 train = [json.loads(l) for l in open(os.path.join(SUP, 'battles', 'train.jsonl'))] if os.path.exists(os.path.join(SUP, 'battles', 'train.jsonl')) else []
 battles = []
 for f in sorted(glob.glob(os.path.join(SUP, 'battles', '*-n*.jsonl'))):
@@ -71,6 +72,10 @@ cmp_rows = [('running speed (u/s)', g(real, 'move', 'speed_median'), g(bots, 'mo
             ('aim error (deg)', g(real, 'fight', 'aim_err_median'), g(bots, 'fight', 'aim_err_median')),
             ('reaction (s)', g(real, 'fight', 'reaction_s'), g(bots, 'fight', 'reaction_s')),
             ('shots a second in fights', g(real, 'fight', 'shots_per_s'), g(bots, 'fight', 'shots_per_s'))]
+import math
+_lr = [abs(math.log(b / a)) for l, a, b in cmp_rows if a and b and a > 0 and b > 0]
+human = 100 * math.exp(-sum(_lr) / len(_lr)) if _lr else None
+summary.insert(1, ('Human-likeness', '%.0f%%' % human if human is not None else '–', 'walkers vs players over %d measures' % len(_lr)))
 rows_html = ''.join('<tr><td>%s</td><td class="n">%s</td><td class="n">%s</td></tr>' % (E(l), fmt(a), fmt(b)) for l, a, b in cmp_rows)
 tact = ''
 if best:

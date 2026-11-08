@@ -42,7 +42,7 @@ for k in $(seq 0 $((N - 1))); do d="$SUP/${NAMES[$k]}"
   sleep 6; done
 echo "battle: $N walkers, $SECS s; logs $T; samples -> $OUT"
 # the server's view recorded like the real players' (match-recorder.py -> battles/tracks: walker-model.py compares them)
-mkdir -p "$BT/tracks"; python3 shim/tools/match-recorder.py --port 8767 --seconds "$SECS" --out "$BT/tracks" > "$T/rec.txt" 2>&1 & RECP=$!
+WT="${WB_TRACKS:-$BT/tracks}"; mkdir -p "$WT"; python3 shim/tools/match-recorder.py --port 8767 --seconds "$SECS" --out "$WT" > "$T/rec.txt" 2>&1 & RECP=$!   # (WB_TRACKS: another folder, e.g. one set of settings)
 t0=$(date +%s)
 while [ $(( $(date +%s) - t0 )) -lt "$SECS" ]; do sleep 10
   curl -s -m 5 http://127.0.0.1:8767/stats.json | python3 -c '

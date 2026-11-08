@@ -3,7 +3,8 @@
 match ... train your sparring partners well"). Each generation is one free-for-all on our local server (shim/tools/walker-battle.sh,
 4 test identities); every walker gets its own tactics (nbot.c's NHOOK_BOT_* knobs) and the same skill (reaction and aim noise:
 NHOOK_BOT_SKILL, fixed, so tactics -- not aim -- decide). Fitness = kills - 0.7 x deaths + 2 x accuracy (the server's own count).
-The best two are kept, two children are mutated from them (and crossed). Everything is logged to
+Every tactics set keeps its history: the best two by their MEAN over their last three battles stay (and play again: one 5-minute
+free-for-all is noisy), two children are mutated from them (and crossed). Everything is logged to
 ~/Library/Application Support/ReclaimerMac/battles/train.jsonl; the best tactics so far to battles/best-tactics.json.
     python3 shim/tools/walker-train.py [generations, default 6] [seconds per battle, default 300] [--skill 0.6] [--resume]
 """
@@ -20,6 +21,8 @@ KNOBS = {   # name: (env, low, high, start)
     'fire':    ('NHOOK_BOT_FIRE_EXTRA', 0.3, 3.0, 1.0),
     'retreat': ('NHOOK_BOT_RETREAT', 0.0, 0.7, 0.35),
     'gren':    ('NHOOK_BOT_GREN', 4.0, 30.0, 9.0),
+    'press':   ('NHOOK_BOT_PRESS', 0.0, 0.9, 0.4),
+    'backoff': ('NHOOK_BOT_BACKOFF', 0.0, 0.9, 0.15),
 }
 PROFILES = ['test-v2', 'test-second', 'test-third', 'test-fourth']
 
@@ -55,8 +58,11 @@ def main():
     names = [nick(p) for p in PROFILES]
     if None in names: print('a test identity is missing: bash shim/tools/walker-battle.sh init'); sys.exit(1)
     base = {k: v[3] for k, v in KNOBS.items()}
-    if '--resume' in sys.argv and os.path.exists(BEST): base = json.load(open(BEST))['tactics']
+    if '--resume' in sys.argv and os.path.exists(BEST): base.update({k: v for k, v in json.load(open(BEST))['tactics'].items() if k in KNOBS})   # (new knobs keep their start values)
     pop = [base, mutate(base), mutate(base), mutate(base, 0.3)]
+    hist = {}   # tactics (as a key) -> fitness list
+    key = lambda g: json.dumps(g, sort_keys=True)
+    mean3 = lambda g: (sum(hist[key(g)][-3:]) / len(hist[key(g)][-3:])) if hist.get(key(g)) else -99
     for gen in range(gens):
         print('=== generation %d: %s' % (gen, time.strftime('%H:%M')), flush=True)
         for i, g in enumerate(pop): print('  walker %d: %s' % (i, env(g, skill)), flush=True)
@@ -70,8 +76,13 @@ def main():
         for fit, i, k, d, s, h in res: print('  walker %d: fitness %.2f  kills %d  deaths %d  shots %d  hits %d' % (i, fit, k, d, s, h), flush=True)
         with open(LOG, 'a') as f: f.write(json.dumps({'t': time.time(), 'gen': gen, 'secs': secs, 'skill': skill, 'battle': src,
                                                      'walkers': [{'tactics': pop[i], 'fitness': fit, 'kills': k, 'deaths': d, 'shots': s, 'hits': h} for fit, i, k, d, s, h in res]}) + '\n')
-        a, b = pop[res[0][1]], pop[res[1][1]]
-        json.dump({'t': time.time(), 'gen': gen, 'fitness': res[0][0], 'tactics': a, 'env': env(a, skill)}, open(BEST, 'w'), indent=1)
+        for fit, i, k, d, s, h in res:
+            if s == 0 and k == 0: continue   # (a walker that never fired was not playing -- no hooks, stuck in a menu: no verdict on its tactics)
+            hist.setdefault(key(pop[i]), []).append(fit)
+        ranked = sorted({key(g): g for g in pop}.values(), key=lambda g: -mean3(g))
+        a = ranked[0]; b = ranked[1] if len(ranked) > 1 else mutate(a)
+        print('  carried: %s (mean %.2f over %d) and %s (mean %.2f over %d)' % (env(a, skill), mean3(a), len(hist.get(key(a), [])), env(b, skill), mean3(b), len(hist.get(key(b), []))), flush=True)
+        json.dump({'t': time.time(), 'gen': gen, 'fitness': mean3(a), 'battles': len(hist.get(key(a), [])), 'tactics': a, 'env': env(a, skill)}, open(BEST, 'w'), indent=1)
         pop = [a, b, mutate(a), mutate(cross(a, b))]
     print('best tactics:', json.load(open(BEST)), flush=True)
 

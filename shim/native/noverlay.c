@@ -84,7 +84,7 @@ static int nov_collect(NovObj* out, int max) {
     for (int i = 0; i < hi && n < max; i++) {
         const uint8_t* e = g_nov_tab + i * 0x18; if (!*(const uint16_t*)e) continue; int t = e[3], unit = t == 0 || t == 1 || t == 12;
         static int dbg = -1; if (dbg < 0) dbg = getenv("NHOOK_OV_DEBUG") ? 1 : 0;   // calibration: scenery / machines / crates too
-        int want = g_nov_units_only ? (g_nov_units_only == 1 ? t == 0 : (t == 1 || t == 12))
+        int want = g_nov_units_only ? (g_nov_units_only == 1 ? t == 0 : g_nov_units_only == 3 ? t == 2 : (t == 1 || t == 12))   // (3: weapons, the walker's pickups)
                  : (t == 0 && fb) || ((t == 1 || t == 12) && fveh) || (t == 5 && ft) || ((t == 2 || t == 3) && fw) || (dbg && t >= 6 && t <= 10); if (!want) continue;
         uint64_t p = *(const uint64_t*)(e + 0x10); static uint8_t dh[0x380]; size_t rn = unit ? 0x380 : 0x140; if (!p || !hb_read(p, dh, rn)) continue;
         const float* od = (const float*)(dh + 0x1c); NovObj* o = &out[n]; memset(o, 0, sizeof *o);

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """How human are the walkers? (2026-11-08) The same measurements (shim/tools/walker-model.py) over the real players' recordings
 (~/Library/Application Support/ReclaimerMac/tracks) and the walkers' battles (.../battles/tracks), side by side, with the ratio.
-    python3 shim/tools/walker-compare.py [--json out.json]"""
+    python3 shim/tools/walker-compare.py [walkers' recordings folder] [--json out.json]"""
 import json, os, subprocess, sys, tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -11,7 +11,8 @@ def model(d):
     subprocess.run([sys.executable, os.path.join(HERE, 'walker-model.py'), d, '--out', out, '--heatmaps', '/nonexistent'], capture_output=True, text=True)
     try: return json.load(open(out))
     except Exception: return None
-real, bots = model(os.path.join(SUP, 'tracks')), model(os.path.join(SUP, 'battles', 'tracks'))
+WDIR = next((a for a in sys.argv[1:] if not a.startswith('--') and os.path.isdir(a)), os.path.join(SUP, 'battles', 'tracks'))   # (the walkers' recordings: a folder argument)
+real, bots = model(os.path.join(SUP, 'tracks')), model(WDIR)
 if not real or not bots: print('missing recordings (real: %s, walkers: %s)' % (bool(real), bool(bots))); sys.exit(1)
 rows = [('move', 'speed_median', 'running speed (units/s)'), ('move', 'stand_share', 'share of time standing'),
         ('fight', 'dist_median', 'fighting distance, median'), ('fight', 'dist_p25', 'fighting distance, 25%'), ('fight', 'dist_p75', 'fighting distance, 75%'),
@@ -27,5 +28,10 @@ for sec, k, label in rows:
     r = (b / a) if (a not in (None, 0) and b is not None) else None
     print('%-34s %10s %10s %7s' % (label, '%.2f' % a if a is not None else '-', '%.2f' % b if b is not None else '-', '%.2f' % r if r is not None else '-'))
     out.append({'metric': label, 'players': a, 'walkers': b})
+import math
+SKIP = ('share of shots through a hitbox', 'jumps a minute in fights', 'closing speed, shields low')   # (not comparable / signed near zero)
+lr = [abs(math.log(r['walkers'] / r['players'])) for r in out if r['metric'] not in SKIP and r['players'] and r['walkers'] and r['players'] > 0 and r['walkers'] > 0]
+score = 100 * math.exp(-sum(lr) / len(lr)) if lr else None
+print('human-likeness: %s (100%% = the players\' numbers; mean |log ratio| over %d measures)' % ('%.0f%%' % score if score is not None else '-', len(lr)))
 print('sources: players %s; walkers %s' % (real['source'], bots['source']))
-if '--json' in sys.argv: json.dump({'rows': out, 'players_source': real['source'], 'walkers_source': bots['source']}, open(sys.argv[sys.argv.index('--json') + 1], 'w'), indent=1)
+if '--json' in sys.argv: json.dump({'rows': out, 'score': score, 'players_source': real['source'], 'walkers_source': bots['source']}, open(sys.argv[sys.argv.index('--json') + 1], 'w'), indent=1)

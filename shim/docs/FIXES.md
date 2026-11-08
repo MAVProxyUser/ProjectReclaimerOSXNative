@@ -2718,6 +2718,19 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   LOGIC: a 0.15 s pulse of the control record's bit 30 at the reader (the button scan: one press threw), like the trigger bit 19.
   SWITCH: NHOOK_BOT_GRENBIT=<hex>; NHOOK_BOT_GREN=0 = no grenades.
 
+- **Walkers more like players; how human they are as a number; pickups** (2026-11-08 early morning; nbot.c, walker-compare.py,
+  walker-model.py, walker-train.py) — WHY: walker-compare.py on the first training battles (1,478 walker engagements vs 39 of
+  players so far): the walkers reacted in 0.42 s (players 1.08), aimed 2.8 deg off (4.1), barely pressed in with shields up (+0.02
+  units/s; players +0.78) and backed off hard on low shields (-0.37; players about 0), fought closer (7.7 units; 12.6) and stood
+  more (55%; 40%) -- "human-likeness" 55%. LOGIC: the fighter's reaction factor 0.7 -> 1.3 and aim noise x1.6 (skill 0.5 then
+  matches the players; 1 is still better than them); inside the distance band it presses in (NHOOK_BOT_PRESS, 0.4 throttle), on
+  low shields it mostly stops (NHOOK_BOT_BACKOFF, 0.15) -- both also training knobs. Human-likeness = 100 x exp(-mean |log(walker /
+  player)|) over the comparable measures (walker-compare.py, the report). Infection recordings give lanes only (heat, flow),
+  not fights or speeds. Pickups: out of a fight the walker walks to a better weapon (bot_wpn_rank: power weapons, BR, Carbine
+  ... above the AR) lying within 12 units and holds the pick-up bit -- NHOOK_BOT_PICKBIT, found by shim/tools/native-pickup-scan.sh
+  (a local match: on a weapon, each candidate bit held through do=botbtn&bits=&secs=, a test-identity control). SWITCHES: the
+  knobs above; NHOOK_BOT_PICKBIT unset = no pickups.
+
 ## 19. Performance
 
 Numbers are from the commit messages; PERF-PLAN.md has the measurements. Compare only inside one match
