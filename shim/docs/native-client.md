@@ -161,7 +161,13 @@ cancel it in the app's mods window -- nhook does not touch it (backlog N23).
   (evolves the tactics), `python3 shim/tools/walker-compare.py` (walkers vs players on the same measurements).
 - **Real players**: `bash shim/tools/observe-public.sh [total] [session]` (the user's profile, background window, mod-free public
   servers, nothing pressed) + match-recorder.py (no names) -> ReclaimerMac/tracks; `python3 shim/tools/walker-model.py` ->
-  tracks/walker-model.json (NHOOK_BOT_MODEL), merged with the stats page's footprint heatmaps.
+  tracks/walker-model.json (NHOOK_BOT_MODEL), merged with the stats page's footprint heatmaps. Infection recordings count as
+  lanes only (heat / flow): zombies and survivors do not fight like slayer players.
+- **How human**: `python3 shim/tools/walker-compare.py [walkers' folder]` prints players vs walkers per measure and a
+  human-likeness score = 100 x exp(-mean |log(walker / player)|); `python3 shim/tools/walker-report.py [out.html]` = the night's
+  page (no names: Walker 1-4). `WB_TRACKS=<folder>` keeps one battle's recordings apart (one set of settings measured alone).
+- **Weapon pickup is not a button bit**: shim/tools/native-pickup-scan.sh held each of the control record's 64 bits (+0xC8) on a
+  Mauler lying on the floor: none swapped it (FIXES.md "The pickup scan"). Walkers keep their loadout (NHOOK_BOT_PICKBIT unset).
 
 ## The hooks check
 

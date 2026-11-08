@@ -2730,6 +2730,15 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   ... above the AR) lying within 12 units and holds the pick-up bit -- NHOOK_BOT_PICKBIT, found by shim/tools/native-pickup-scan.sh
   (a local match: on a weapon, each candidate bit held through do=botbtn&bits=&secs=, a test-identity control). SWITCHES: the
   knobs above; NHOOK_BOT_PICKBIT unset = no pickups.
+- **The pickup scan, and what it found** (2026-11-08 06:30; shim/tools/native-pickup-scan.sh) — WHY: its first run tried every bit
+  "on -1": the snapshot's items are [spawn point, kind, state, x, y, z, holder (-1 = on the floor), name only without a spawn
+  point], so the last field was the holder, not a name, and no kind filter kept vehicles / equipment out. LOGIC: weapons only
+  (kind 0) lying free (holder -1); the name from the spawn point's entry in /heat.json (spawns[i][4]) when the item has one; the
+  player's position after the teleport is printed beside the weapon's (they matched within 0.2 units); PS_BITS / PS_SECS pick
+  the bits and the match length; bits 32-63 too. RESULT: standing on a Mauler ("Excavator": halo3's tag name for it) with the
+  assault rifle, NO bit of the control record's 64 (+0xC8; all but 1 jump, 19 / 21 fire, 30 grenade) held 1.5 s swaps it. Pickup
+  is not a plain button bit there -- most likely a separate held-action state the app's input layer keeps. NHOOK_BOT_PICKBIT
+  stays unset (walkers keep their loadout); backlog N24.
 
 ## 19. Performance
 
