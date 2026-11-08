@@ -86,7 +86,8 @@ static void bot_nav_json(StBuf* s) { nav_json(s); }   // the snapshot's "nav" (t
 
 // Diagnostics for re-finding the record's fields after an app update (test clients): NHOOK_BOT_THROTTLE=x,y holds that throttle;
 // NHOOK_BOT_BTNSCAN=1 presses record +0xC8 bit k (k = 0..31, one a second, 0.25 s each) -- both log position, velocity and yaw
-// every 0.25 s ("[bot] test: ..."): a jump shows as an upward velocity.
+// every 0.25 s ("[bot] test: ..."): a jump shows as an upward velocity. NHOOK_BOT_FACE=<yaw deg>[,<pitch deg>] holds that facing
+// (2026-11-08: shim/tools/native-aim-test.sh faces a known open direction, so the app's practice target lands on open floor).
 static int bot_diag(float* tx, float* ty, uint64_t* btn, double now) {
     static int on = -1; static float fx, fy; static double t0; if (on < 0) { const char* e = getenv("NHOOK_BOT_THROTTLE"); on = 0;
         if (e && sscanf(e, "%f,%f", &fx, &fy) == 2) on |= 1; if (getenv("NHOOK_BOT_BTNSCAN")) on |= 2; }
@@ -94,19 +95,23 @@ static int bot_diag(float* tx, float* ty, uint64_t* btn, double now) {
     if (on & 1) { *tx = fx; *ty = fy; r |= 2; }
     if (on & 2) { double t = now - t0 - 3.0; int k = (int)t; if (t >= 0 && k < 32 && t - k < 0.25) { *btn = 1ull << k; r |= 4; } }
     return r; }
+static void bot_idle(const char* why) {   // NHOOK_SPAR_LOG: why the aim / walker did nothing (every 5 s at most; 2026-11-08, 0.10.1)
+    static double tl; static const char* last; double now = mono_s(); if (!bot_log() || (why == last && now - tl < 5)) return; tl = now; last = why; nlog("[nhook] [spar] idle: %s", why); }
 static void bot_step(void) {
     double now = mono_s(); int spar = g_bot_spar, mode = bot_walk_ok() ? nav_mode() : 0;
-    static int diag = -1; if (diag < 0) diag = getenv("NHOOK_BOT_THROTTLE") || getenv("NHOOK_BOT_BTNSCAN");
-    if ((!spar && !mode && !diag) || !bot_allowed() || !g_gameplay_t0 || now - g_gameplay_t0 < 3.0) { g_bot_out = 0; g_nav_act = 0; g_bot_err = -1; return; }
+    static int diag = -1; if (diag < 0) diag = getenv("NHOOK_BOT_THROTTLE") || getenv("NHOOK_BOT_BTNSCAN") || getenv("NHOOK_BOT_FACE");
+    if ((!spar && !mode && !diag) || !bot_allowed() || !g_gameplay_t0 || now - g_gameplay_t0 < 3.0) { g_bot_out = 0; g_nav_act = 0; g_bot_err = -1;
+        bot_idle(!spar && !mode && !diag ? "nothing on" : !bot_allowed() ? "not allowed here" : !g_gameplay_t0 ? "not in a match" : "match just started"); return; }
     if (!bot_hook_install()) { g_bot_out = 0; return; }
     if (mode) { nav_ensure(); nav_danger_update(now); }
     uint64_t blk = tls_block(), rec = 0; uint32_t meh = 0xFFFFFFFFu; float yaw0 = 0, pitch0 = 0;
-    if (!blk || !hb_read(blk + 0xC0, &rec, 8) || !rec || !hb_read(rec + 0xC0, &meh, 4) || !hb_read(rec + 0xD4, &yaw0, 4) || !hb_read(rec + 0xD8, &pitch0, 4)) { g_bot_out = 0; return; }
-    float cam[3], fwd[3]; if (!nov_observer(cam, fwd)) { g_bot_out = 0; return; }
+    if (!blk || !hb_read(blk + 0xC0, &rec, 8) || !rec || !hb_read(rec + 0xC0, &meh, 4) || !hb_read(rec + 0xD4, &yaw0, 4) || !hb_read(rec + 0xD8, &pitch0, 4)) { g_bot_out = 0; bot_idle("no control record (TLS +0xC0)"); return; }
+    float cam[3], fwd[3]; if (!nov_observer(cam, fwd)) { g_bot_out = 0; bot_idle("no observer camera"); return; }
     static NovObj objs[1024]; int n = bot_units(objs, 1024), me = -1;
     for (int i = 0; i < n; i++) if (objs[i].type == 0 && objs[i].handle == meh) { me = i; break; }
     static int32_t path[8192]; static int plen, pidx, goal = -1; static double tplan, tstat, tjump, tback, tstuck[4]; static float bstr; static float hist[64][3]; static double histt[64]; static int hh;
-    if (me < 0 || objs[me].dead || objs[me].seat >= 0) { g_bot_out = 0; g_nav_act = 0; plen = 0; g_bot_err = -1; return; }   // dead, respawning or in a vehicle
+    if (me < 0 || objs[me].dead || objs[me].seat >= 0) { g_bot_out = 0; g_nav_act = 0; plen = 0; g_bot_err = -1;   // dead, respawning or in a vehicle
+        static char w[96]; snprintf(w, sizeof w, me < 0 ? "the record's unit %08x is none of the %d units seen" : objs[me].dead ? "dead" : "in a vehicle", meh, n); bot_idle(me < 0 ? w : objs[me].dead ? "dead" : "in a vehicle"); return; }
     const NovObj* o = &objs[me]; int out = 0; float yaw = yaw0, pitch = pitch0;
     // the sparring aim: the nearest live enemy's head (the top of its bounding sphere's core, as the loader aimed), from the camera
     if (spar) {
@@ -186,6 +191,8 @@ static void bot_step(void) {
         static double tl; if (now - tl > 0.25) { tl = now; const float* v = o->vel;
             nlog("[nhook] [bot] test: pos (%.2f %.2f %.2f) vel (%.2f %.2f %.2f) yaw %.1f throttle (%.2f, %.2f) buttons 0x%llx", o->c[0], o->c[1], o->c[2], v[0], v[1], v[2],
                  yaw0 * 57.2958f, tx, ty, (d & 4) ? (unsigned long long)b : 0ull); } }
+    { static int fo = -1; static float fy, fp; static int hp; if (fo < 0) { const char* e = getenv("NHOOK_BOT_FACE"); int k = e ? sscanf(e, "%f,%f", &fy, &fp) : 0; fo = k >= 1; hp = k == 2; }
+      if (fo) { yaw = fy / 57.29578f; if (hp) pitch = fp / 57.29578f; out |= 1; } }   // NHOOK_BOT_FACE (above)
     g_bot_yaw = yaw; g_bot_pitch = pitch; g_bot_tx = tx; g_bot_ty = ty; g_bot_out = out;
 }
 static void* bot_thread(void* p) { (void)p; pthread_setname_np("shim-bot"); for (;;) { usleep(33000); bot_step(); } return 0; }
@@ -201,7 +208,7 @@ static void bot_init(void) {   // launch switches (nstats_start)
     const char* j = getenv("NHOOK_BOT_JUMP"); if (j) g_bot_jump = strtoull(j, 0, 16);
     if (getenv("NHOOK_SPAR") && strcmp(getenv("NHOOK_SPAR"), "0")) g_bot_spar = 1;
     int m = bot_parse_nav(getenv("NHOOK_NAV")); if (m > 0) g_nav_mode_rt = m; else g_nav_mode_rt = 0;
-    if (g_bot_spar || g_nav_mode_rt > 0 || getenv("NHOOK_BOT_THROTTLE") || getenv("NHOOK_BOT_BTNSCAN")) bot_start(); }
+    if (g_bot_spar || g_nav_mode_rt > 0 || getenv("NHOOK_BOT_THROTTLE") || getenv("NHOOK_BOT_BTNSCAN") || getenv("NHOOK_BOT_FACE")) bot_start(); }
 static int bot_control(const char* act, const char* qs) {   // POST do=spar&on=0|1, do=walk&mode=off|roam|enemy|x,y,z|vehicle:<name>
     if (!bot_allowed()) return 0;
     if (!strcmp(act, "walk") && !bot_walk_ok()) return 0;   // (a joined client: the server decides its moves)

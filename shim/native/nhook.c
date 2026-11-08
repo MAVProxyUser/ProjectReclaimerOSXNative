@@ -882,6 +882,8 @@ static AuWrap g_auw[32]; static int g_nauw; static pthread_mutex_t g_au_mx = PTH
 static AuWrap* au_slot(AudioUnit au) { for (int i = 0; i < g_nauw; i++) if (g_auw[i].au == au) return &g_auw[i]; if (g_nauw >= 32) return 0; AuWrap* w = &g_auw[g_nauw++]; memset(w, 0, sizeof *w); w->au = au; return w; }
 static OSStatus au_tap(void* ref, AudioUnitRenderActionFlags* fl, const AudioTimeStamp* ts, UInt32 bus, UInt32 frames, AudioBufferList* io) {
     AuWrap* w = ref; OSStatus r = w->cb(w->ref, fl, ts, bus, frames, io);
+    { static int mute = -1; if (mute < 0) mute = getenv("NHOOK_MUTE_OUTPUT") && strcmp(getenv("NHOOK_MUTE_OUTPUT"), "0");   // (nmic.c: silent test clients)
+      if (mute && !r && io) { for (UInt32 i = 0; i < io->mNumberBuffers; i++) if (io->mBuffers[i].mData) memset(io->mBuffers[i].mData, 0, io->mBuffers[i].mDataByteSize); return r; } }
     if (r || !g_rec_audio || !io || !w->have || !io->mNumberBuffers || (fl && (*fl & kAudioUnitRenderAction_OutputIsSilence))) return r;
     const AudioStreamBasicDescription* f = &w->fmt; int fl2 = (int)f->mFormatFlags, isf = (fl2 & kAudioFormatFlagIsFloat) != 0, bits = (int)f->mBitsPerChannel;
     if (!(fl2 & kAudioFormatFlagIsNonInterleaved)) {
@@ -894,7 +896,12 @@ static OSStatus au_tap(void* ref, AudioUnitRenderActionFlags* fl, const AudioTim
     }
     return r;
 }
+static int vmic_set(AudioUnit au, AudioUnitPropertyID id, AudioUnitScope sc, AudioUnitElement el, const void* data, UInt32 sz, OSStatus* r);   // (nmic.c)
+static int vmic_render(AudioUnit au, UInt32 bus, UInt32 frames, AudioBufferList* io, OSStatus* r);
+static const AudioStreamBasicDescription* mic_fmt(AudioUnit au);
+static void sb_into(AudioBufferList* io, UInt32 frames, const AudioStreamBasicDescription* f, int mix);
 static OSStatus my_AudioUnitSetProperty(AudioUnit au, AudioUnitPropertyID id, AudioUnitScope sc, AudioUnitElement el, const void* data, UInt32 sz) {
+    { OSStatus vr; if (vmic_set(au, id, sc, el, data, sz, &vr)) return vr; }   // (the soundboard microphone's units; capture formats)
     { HK_ONCE(ha, "AudioUnitSetProperty"); hk_fire(ha); }
     if (id == kAudioUnitProperty_SetRenderCallback && data && sz >= sizeof(AURenderCallbackStruct) && !getenv("NHOOK_NO_AUDIO_TAP")) {
         const AURenderCallbackStruct* cs = data;
@@ -912,10 +919,12 @@ static OSStatus my_AudioUnitSetProperty(AudioUnit au, AudioUnitPropertyID id, Au
     _ip_##orig __attribute__((section("__DATA,__interpose"))) = { (const void*)(rep), (const void*)(orig) }
 // the page's mic switch (nstats.c mic_json, g_mic_muted): the app's capture pulls its samples on the AUHAL's input bus 1
 static OSStatus my_AudioUnitRender(AudioUnit au, AudioUnitRenderActionFlags* fl, const AudioTimeStamp* ts, UInt32 bus, UInt32 frames, AudioBufferList* io) {
+    { OSStatus vr; if (vmic_render(au, bus, frames, io, &vr)) return vr; }   // (nmic.c: the virtual microphone's samples = the soundboard)
     OSStatus r = AudioUnitRender(au, fl, ts, bus, frames, io);
     if (bus == 1) { HK_ONCE(hm, "AudioUnitRender (mic)"); hk_fire(hm); }
     if (bus == 1 && !g_hc_off[HC_MIC]) { uint64_t t0 = hc_now(); g_mic_t = mono_s();
         if (mic_muted() && !r && io) for (UInt32 i = 0; i < io->mNumberBuffers; i++) if (io->mBuffers[i].mData) memset(io->mBuffers[i].mData, 0, io->mBuffers[i].mDataByteSize);
+        if (!r && io) sb_into(io, frames, mic_fmt(au), 1);   // the soundboard over a real microphone (nmic.c)
         hc_add(HC_MIC, t0); }
     return r; }
 INTERPOSE(my_write, write);
@@ -933,6 +942,7 @@ INTERPOSE(my_close, close);
 INTERPOSE(my_getaddrinfo, getaddrinfo);
 INTERPOSE(my_AudioUnitSetProperty, AudioUnitSetProperty);
 INTERPOSE(my_AudioUnitRender, AudioUnitRender);
+#include "nmic.c"   // the microphone path: NHOOK_AUDIO_TRACE, NHOOK_MUTE_OUTPUT, the soundboard microphone
 
 __attribute__((constructor)) static void nhook_init(void) {
     const char* lf = getenv("NHOOK_LOG");

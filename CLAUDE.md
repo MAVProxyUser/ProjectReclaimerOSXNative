@@ -336,6 +336,12 @@ itself for an unknown build, NATIVE_NO_AUTOPORT=1 = no). 0.10.1: all 12 points, 
 (nhchk.h / nhchk.c): every hook / interpose / swizzle / app address / log line / reader, installed? + fired? -> GET /hooks.json, the
 page's Hooks check window, [hooks] log lines; self test shim/tools/native-hooks-test.sh. Hook stubs share near pages (RX + an RW alias:
 stub_alloc; the near gaps ran out at 4 hooks; NHOOK_STUB_PAGE_EACH=1 = old). With hooks off the stats page still starts.
+Soundboard (2026-11-08, nmic.c): no input device on this Mac -> the app was "listening only"; nhook answers the default-input query with
+a virtual device and emulates the AUHAL unit the app opens on it (10 ms clock -> the app's input callback -> AudioUnitRender = soundboard
+samples); the page's Soundboard panel (files in ReclaimerMac/soundboard, upload, play / stop / volume). NHOOK_VMIC=0 off; NHOOK_AUDIO_TRACE,
+NHOOK_MUTE_OUTPUT (silent test clients). Test shim/tools/native-soundboard-test.sh. The app's --voice-wav reads its file to the end at launch.
+N20 (fps slide in a long 0.10.1 session): not reproduced; [perf+] / [slow] lines (slow_watch) name the busy threads next time; the depth
+swizzle no longer retains every depth texture (NHOOK_DEPTH_RETAIN=1 old). native-aim-test teleports + NHOOK_BOT_FACE first (random spawns).
 Two-client tests (2026-11-07): native-dedicated.sh + the test profile + ReclaimerMac/native/test-second (its own identity):
 shim/tools/native-host-test.sh walls|tpnext, native-voice-test.sh (--voice-wav/--voice-talk); NHOOK_TAP_LOG=<file> = every app line.
 Sparring aim / walker / mic natively (2026-11-07, nbot.c): halo3's control record TLS +0xC0 (4 x 0x110: +0xD4 yaw, +0xD8 pitch, +0xDC

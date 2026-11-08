@@ -131,6 +131,21 @@ move only with MCC's halo3.dll, not with the app; the app's `[capacity]` lines g
   client-to-client connections, "Classic" networking the default) -- so a client sees only the host's address: the players table's
   IP column and the Packets window have per-player addresses only when THIS app hosts (as on a dedicated server before).
 
+## The soundboard (nmic.c)
+
+The app opens a microphone only in an online session, by asking CoreAudio for the default input device; on a Mac without one
+(this Mac Studio) it stays "[voice] no capture (no microphone): listening only". nhook then hands it a virtual device ("Reclaimer
+soundboard", 48 kHz mono float, VMIC_DEV 'RCLM'), answers that device's property queries, emulates the AUHAL unit the app points
+at it (a 10 ms clock calling the app's input callback) and fills its AudioUnitRender(bus 1) from the soundboard (silence when
+idle); with a real microphone the clip is mixed over it instead. The app's Talk mode decides when it is sent (Sensitivity: by
+itself while a clip plays; Hold / Toggle to talk: with the talk key). The page's Soundboard panel: the files in
+ReclaimerMac/soundboard (Play, Stop, volume, "add" = upload), POST /control?do=sb&play=<name>|stop=1|vol=0..2. Not the app's
+--voice-wav: it reads its file to the end at launch (a named pipe too) and transmits all the time (shim/tools/voice-fifo-probe.sh).
+Test: shim/tools/native-soundboard-test.sh. Diagnostics: NHOOK_AUDIO_TRACE=1, NHOOK_MUTE_OUTPUT=1; NHOOK_VMIC=0 = off.
+
+0.10.1's server browser downloads the selected server's mods by itself (and goes on "out of sight" when you join another one);
+cancel it in the app's mods window -- nhook does not touch it (backlog N23).
+
 ## The hooks check
 
 Everything nhook depends on in the app registers in `shim/native/nhchk.h`: per item its feature, its kind (address, entry /

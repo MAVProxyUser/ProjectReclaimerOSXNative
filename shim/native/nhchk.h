@@ -65,6 +65,7 @@ static const HkCat g_hk_cat[] = {
     {"log tap (write)", "every app log line the parsers below read", "interpose", "always"},
     {"sockets (send / receive)", "the packet log, peer addresses, the Packets window", "interpose", "online"},
     {"AudioUnitRender (mic)", "the page's mic switch (the app's capture, bus 1)", "interpose", "mic"},
+    {"soundboard microphone", "the soundboard: a virtual microphone the app opens on a Mac without one (nmic.c), its samples", "app audio", "online"},
     {"AudioUnitSetProperty", "the app's audio units (voice volume probe)", "interpose", "always"},
     // swizzled Metal / AppKit
     {"presentDrawable", "overlay drawing, fps line, recording, Capture frame", "swizzle", "engine"},

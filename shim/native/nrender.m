@@ -99,7 +99,12 @@ static void nr_bmp(const char* path, const uint8_t* bgra, int w, int h, size_t b
 
 // ---- the scene's depth (for hiding the overlay behind the world): every depth texture the app attaches to a render pass
 // is seen here (-[MTLRenderPassDepthAttachmentDescriptor setTexture:] swizzled); NHOOK_DEPTH_PROBE=1 logs each new one
-static IMP g_orig_dtex; static NSMutableSet* g_dseen; static id<MTLTexture> g_dlast; static volatile unsigned long g_dpasses;
+// (2026-11-08: g_dseen was an NSMutableSet -- it RETAINED every depth texture ever attached, across map changes, and the 8 slots
+// below never let one go, so after a few maps "visible only" could read a dead map's depth. Now a weak table, the slots hold
+// their texture strongly (g_dkeep: at most 8) and the stalest slot is reused once its texture has not been attached for 240
+// frames. NHOOK_DEPTH_RETAIN=1 = the old set.)
+static IMP g_orig_dtex; static id g_dseen; static id<MTLTexture> g_dlast; static volatile unsigned long g_dpasses;
+static id<MTLTexture> g_dkeep[8];
 // full-size depth textures (the biggest seen): the scene's is among them; frame = the present count when last attached,
 // order = how many full-size attachments came before it in that frame
 typedef struct { __unsafe_unretained id<MTLTexture> t; unsigned long frame, first_frame; int order, n_in_frame; } NrDepth;
@@ -108,10 +113,12 @@ static void my_set_dtex(id self, SEL cmd, id<MTLTexture> t) {
     ((void (*)(id, SEL, id))g_orig_dtex)(self, cmd, t); nh_hk_fire(g_hk_depth);
     if (!t) return; g_dpasses++;
     @synchronized (g_dseen) {
-        NSUInteger area = t.width * t.height; if (area > g_dbig) { g_dbig = area; g_ndfull = 0; }
+        NSUInteger area = t.width * t.height; if (area > g_dbig) { g_dbig = area; g_ndfull = 0; for (int q = 0; q < 8; q++) g_dkeep[q] = nil; }
         if (area == g_dbig) { unsigned long fr = g_nr_frames; if (fr != g_dfull_frame) { g_dfull_frame = fr; g_dfull_order = 0; }
             int k = 0; for (; k < g_ndfull; k++) if (g_dfull[k].t == t) break;
-            if (k == g_ndfull && g_ndfull < 8) { g_dfull[k].t = t; g_dfull[k].first_frame = fr; g_ndfull++; }
+            if (k == g_ndfull && g_ndfull < 8) { g_dfull[k].t = t; g_dkeep[k] = t; g_dfull[k].first_frame = fr; g_dfull[k].frame = 0; g_ndfull++; }
+            else if (k == g_ndfull) { int old = 0; for (int q = 1; q < 8; q++) if (g_dfull[q].frame < g_dfull[old].frame) old = q;   // all 8 taken: the stalest, if stale
+                if (g_dfull[old].frame + 240 < fr) { k = old; g_dfull[k].t = t; g_dkeep[k] = t; g_dfull[k].first_frame = fr; g_dfull[k].frame = 0; } }
             if (k < 8) { if (g_dfull[k].frame != fr) g_dfull[k].n_in_frame = 0; g_dfull[k].frame = fr; g_dfull[k].order = g_dfull_order; g_dfull[k].n_in_frame++; }
             g_dfull_order++; } }
     @synchronized (g_dseen) {
@@ -231,7 +238,7 @@ void nr_install(void) {
         g_orig_fbo = method_setImplementation(fm, (IMP)my_set_fbo);
         { MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];   // the scene's depth (overlay hiding)
           Method dm = class_getInstanceMethod(object_getClass(rp.depthAttachment), @selector(setTexture:));
-          if (dm && !getenv("NHOOK_NO_DEPTH")) { g_dseen = [NSMutableSet new]; g_orig_dtex = method_setImplementation(dm, (IMP)my_set_dtex);
+          if (dm && !getenv("NHOOK_NO_DEPTH")) { g_dseen = getenv("NHOOK_DEPTH_RETAIN") ? (id)[NSMutableSet new] : (id)[NSHashTable weakObjectsHashTable]; g_orig_dtex = method_setImplementation(dm, (IMP)my_set_dtex);
               nh_log("[nhook] [depth] watching -[%s setTexture:]", class_getName(object_getClass(rp.depthAttachment))); nh_hk_state(g_hk_depth, 1, 0, "-[MTLRenderPassDepthAttachmentDescriptor setTexture:] swizzled"); }
           else nh_hk_state(g_hk_depth, dm ? 3 : -1, 0, dm ? "NHOOK_NO_DEPTH" : "the depth attachment's setTexture: not found"); }
         g_orig_present = method_setImplementation(m, (IMP)my_present);

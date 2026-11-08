@@ -2626,6 +2626,47 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   stubs are 64-byte-aligned slots in it, so one gap holds every stub and a page with live stubs is never made non-executable
   (the reason for one page each). SWITCH: NHOOK_STUB_PAGE_EACH=1 = one page per stub (the old way).
 
+- **The soundboard: a sound file into the game's microphone** (2026-11-08; shim/native/nmic.c, the stats page's Soundboard panel,
+  GET /soundboard.json, POST /control?do=sb&play=|stop=|vol=, POST /soundboard/upload?name=) — WHY: the user: "add a soundboard in
+  which I can select a wav and play it into the mic input path into game audio". The user's Mac (a Mac Studio) has NO input
+  device: the app asks CoreAudio for the default input (kAudioHardwarePropertyDefaultInputDevice), gets 0 and stays "[voice] no
+  capture (no microphone): listening only" -- there was no microphone path to play into. (The app's own --voice-wav reads the
+  whole file at launch -- a named pipe was read to its end first -- and transmits continuously, silence too: no good for a
+  soundboard; shim/tools/voice-fifo-probe.sh.) LOGIC: with no real input device nhook answers the default-input query with a
+  VIRTUAL device ("Reclaimer soundboard", 48 kHz mono float) and answers every property query on it (name, UID, stream
+  configuration, formats, rates, buffer sizes; a device property asked through the unit -- cpal's 'fsz#' -- too); the AUHAL unit the
+  app points at it (kAudioOutputUnitProperty_CurrentDevice) is emulated (its settings kept, Initialize / Start / Stop / Dispose
+  answered, a 10 ms clock thread calls the app's input callback) and its AudioUnitRender(bus 1) gets the soundboard's samples
+  (silence when idle). The app logs "[voice] microphone Reclaimer soundboard at 48000 Hz" and treats it as its microphone, so its
+  Talk mode decides when it transmits (Sensitivity: by itself while a clip plays; Hold / Toggle: with the talk key). With a real
+  microphone the clip is mixed over it (the mic switch's AudioUnitRender interposer). Clips: ExtAudioFile decodes WAV / AIFF /
+  CAF / MP3 / M4A / AAC / FLAC to 48 kHz mono (10 minutes at most), resampled to the app's client format (float or 16 / 32-bit int,
+  any channels); files in ReclaimerMac/soundboard (NHOOK_SOUNDBOARD_DIR), added from the page (upload with /control's guard, 50 MB
+  at most). Hooks check item "soundboard microphone". Live test shim/tools/native-soundboard-test.sh: A (virtual mic) uploads and
+  plays a tone, B hears it at -24.6 dBFS, stop works. SWITCHES: NHOOK_VMIC=0 = no virtual microphone (the old "listening only"),
+  NHOOK_VMIC=force = the virtual one beside a real one; diagnostics NHOOK_AUDIO_TRACE=1 (every CoreAudio device / AudioUnit call),
+  NHOOK_MUTE_OUTPUT=1 (the app's sound zeroed: silent test clients).
+- **The depth swizzle retained every depth texture** (2026-11-08; shim/native/nrender.m my_set_dtex) — WHY: found while chasing
+  backlog N20: g_dseen was an NSMutableSet (it retains), filled with every depth texture the app ever attached, across map changes,
+  never emptied; its 8 "full-size" slots never let one go either, so after a few map changes "visible only" / zones could read a
+  dead map's depth. LOGIC: a weak NSHashTable; the 8 slots hold their texture strongly (g_dkeep, at most 8) and the stalest slot is
+  reused once its texture has not been attached for 240 frames. (Not N20's cause: 13 textures in a two-client test, flat.)
+  SWITCH: NHOOK_DEPTH_RETAIN=1 = the old set.
+- **The slowdown watch** (2026-11-08; nstats.c slow_watch, backlog N20) — WHY: the user's first 0.10.1 session slid from ~220 to
+  ~50 fps over a few minutes on one server and stayed there on the next map; not reproduced locally (not the map, not heat -- no
+  thermal events on the Mac Studio --, not the depth set, no hook failed). LOGIC: with every [perf] line (10 s) a [perf+] line:
+  this process's footprint and CPU (cores), nhook's render-thread time per frame (overlay, aim tick, camera hook), its engine-thread
+  time per second (bullet hook + aim meter) and the snapshot's time; once per match, when the frame rate has been below half of
+  the session's best for three windows, a [slow] line with the busiest threads of the last window by name (proc_pidinfo on our own
+  pid). SWITCH: NHOOK_NO_SLOWWATCH=1.
+- **native-aim-test from a fixed spot** (2026-11-08; shim/tools/native-aim-test.sh, nbot.c NHOOK_BOT_FACE, noverlay.c NHOOK_AIM_LOG;
+  backlog N21) — WHY: on 0.10.1 one run gave 8 shots, all ~2 deg off the practice target, 0 hits. NHOOK_AIM_LOG=1 (each measured
+  shot: start, direction, the nearest hitbox part, the miss) showed the meter right (shots through the target, "ON") from an open
+  spawn: Guardian's random spawns put the target 5 units ahead on a ramp, against a wall or over the drop. LOGIC: the test teleports
+  the player to the open ledge (-3.97, -23.39, 17.2; the host tools' tpto: a local game is its own host), holds the facing north
+  (NHOOK_BOT_FACE=93.3: the sparring hook writes the yaw) and fires later (40 / 44 s); the log stays when it fails. 3 of 3 runs:
+  8, 6, 10 hits of 10.
+
 ## 19. Performance
 
 Numbers are from the commit messages; PERF-PLAN.md has the measurements. Compare only inside one match
@@ -3102,7 +3143,9 @@ Numbers are from the commit messages; PERF-PLAN.md has the measurements. Compare
   `sigs` stores the reference build's needed functions as raw words (re-tools/machoport-sigs.json, 11 functions, 177 KB) so `port`
   needs no 0.10.0 binary (the app replaces itself on update). `selftest` reproduces 0.10.0 from the binary and from the sigs;
   porting 0.10.1 from either gives the same 12 addresses. **shim/tools/native-test-all.sh** -- every live native test in a row
-  (hooks, fire, aim, walls, tpnext, voice, spar; ~20 min), the check after an app update.
+  (hooks, fire, aim, walls, tpnext, voice, spar, soundboard; ~25 min), the check after an app update.
+  **shim/tools/native-soundboard-test.sh** -- the soundboard end to end (two test clients, our server, muted output).
+  **shim/tools/voice-fifo-probe.sh** -- whether the app's --voice-wav streams (it does not: it reads the file to its end first).
 
 ## 21. Superseded workarounds (kept for history; most switches still exist)
 

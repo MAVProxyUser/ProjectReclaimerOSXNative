@@ -66,6 +66,8 @@ static void sb_str(StBuf* s, const char* v) {
     }
     sb_put(s, "\"");
 }
+static void sb_json(StBuf* s); static void sb_files_json(StBuf* s); static int sb_control(const char* qs);   // (nmic.c: the soundboard)
+static void sb_upload(int fd, const char* req, const char* body0, size_t have, const char* qs);
 static void sb_f3(StBuf* s, const float* v) { if (isfinite(v[0]) && isfinite(v[1]) && isfinite(v[2])) sb_put(s, "[%.2f,%.2f,%.2f]", v[0], v[1], v[2]); else sb_put(s, "null"); }
 
 // ---- event feed (stats.c's ring and /feed.json) --------------------------------------------------------------------
@@ -1048,6 +1050,49 @@ static void pk_forensic_tick(void) {
     if (lost) { char l[80]; int k = snprintf(l, sizeof l, "{\"t\":%.3f,\"lost\":%u}", st_wall(), lost); fx_push(FXI_PACKETS, l, (size_t)k, 0, 0); }
 }
 
+// ---- the slowdown watch (2026-11-08, backlog N20: the user's first 0.10.1 session slid from ~220 to ~50 fps over minutes on one
+// server and stayed there on the next map; not reproduced locally). Every [perf] line (10 s) gets a [perf+] line: this process's
+// memory footprint and CPU (cores busy), and nhook's own time -- render thread per frame (overlay + aim tick + camera hook),
+// engine thread per second (bullet hook + aim meter), the stats snapshot per run. And once per match, when the frame rate has
+// been below half of this session's best (a 10 s window, in a match) three windows in a row: a [slow] line naming the threads
+// that took the CPU in the last window (this process's own threads, by name) -- the game's, the renderer's or ours.
+// NHOOK_NO_SLOWWATCH=1 = none of it.
+#include <libproc.h>
+#include <sys/resource.h>
+typedef struct { uint64_t id; double cpu; char name[64]; } SwThr;
+static int sw_threads(SwThr* out, int max) {   // this process's threads: total CPU seconds and name (proc_pidinfo on our own pid)
+    uint64_t ids[512]; int n = proc_pidinfo(getpid(), PROC_PIDLISTTHREADS, 0, ids, sizeof ids) / (int)sizeof(uint64_t), k = 0;
+    for (int i = 0; i < n && k < max; i++) { struct proc_threadinfo ti; if (proc_pidinfo(getpid(), PROC_PIDTHREADID64INFO, ids[i], &ti, sizeof ti) != sizeof ti) continue;
+        out[k].id = ids[i]; out[k].cpu = (ti.pth_user_time + ti.pth_system_time) * 1e-9; snprintf(out[k].name, sizeof out[k].name, "%s", ti.pth_name[0] ? ti.pth_name : "(unnamed)"); k++; }
+    return k; }
+static void slow_watch(double now, double fps, int in_match) {
+    static int off = -1; if (off < 0) off = getenv("NHOOK_NO_SLOWWATCH") != 0; if (off) return;
+    static double t_last, cpu_last, best; static uint64_t hc_last[HC_N][2]; static unsigned long fr_last; static SwThr th_last[512]; static int nth_last, low, said; static double t0_seen;
+    struct rusage ru; getrusage(RUSAGE_SELF, &ru); double cpu = ru.ru_utime.tv_sec + ru.ru_utime.tv_usec * 1e-6 + ru.ru_stime.tv_sec + ru.ru_stime.tv_usec * 1e-6;
+    task_vm_info_data_t vi; mach_msg_type_number_t vc = TASK_VM_INFO_COUNT; double fp = task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vi, &vc) == KERN_SUCCESS ? vi.phys_footprint / 1048576.0 : -1;
+    extern volatile unsigned long g_nr_frames; unsigned long fr = g_nr_frames; double dt = t_last ? now - t_last : 0;
+    if (dt > 0) { double fd = fr > fr_last ? (double)(fr - fr_last) : 1, f = hc_freq();
+        #define HCD(k) ((double)(g_hc[k].ticks - hc_last[k][0]) / f)
+        double rt = HCD(HC_OV) + HCD(HC_AIMT) + HCD(HC_VIEW), et = HCD(HC_DEL) + HCD(HC_AIM), sn = HCD(HC_SNAP); unsigned long sn_n = (unsigned long)(g_hc[HC_SNAP].calls - hc_last[HC_SNAP][1]);
+        nlog("[nhook] [perf+] footprint %.0f MB, CPU %.2f cores; nhook: render thread %.0f us/frame (overlay %.0f, aim tick %.0f, camera hook %.0f), engine thread %.1f ms/s (bullets + aim), snapshot %.1f ms each",
+             fp, (cpu - cpu_last) / dt, rt * 1e6 / fd, HCD(HC_OV) * 1e6 / fd, HCD(HC_AIMT) * 1e6 / fd, HCD(HC_VIEW) * 1e6 / fd, et * 1e3 / dt, sn_n ? sn * 1e3 / sn_n : 0);
+        #undef HCD
+    }
+    // the [slow] line: in a match, fps below half the session's best for 3 windows
+    if (g_gameplay_t0 != t0_seen) { t0_seen = g_gameplay_t0; said = 0; low = 0; }
+    if (in_match && fps > best) best = fps;
+    low = in_match && best > 60 && fps < best * 0.5 ? low + 1 : 0;
+    SwThr th[512]; int nth = sw_threads(th, 512);
+    if (low >= 3 && !said && nth_last && dt > 0) { said = 1;
+        typedef struct { const char* n; double c; } Use; Use u[512]; int nu = 0;
+        for (int i = 0; i < nth; i++) { double prev = 0; for (int j = 0; j < nth_last; j++) if (th_last[j].id == th[i].id) { prev = th_last[j].cpu; break; } u[nu].n = th[i].name; u[nu].c = (th[i].cpu - prev) / dt; nu++; }
+        for (int i = 1; i < nu; i++) { Use x = u[i]; int j = i - 1; while (j >= 0 && u[j].c < x.c) { u[j + 1] = u[j]; j--; } u[j + 1] = x; }
+        char b[900]; int q = 0; for (int i = 0; i < nu && i < 10 && q < (int)sizeof b - 80; i++) q += snprintf(b + q, sizeof b - (size_t)q, "%s%s %.0f%%", i ? ", " : "", u[i].n, u[i].c * 100);
+        nlog("[nhook] [slow] %.0f fps, below half of this session's best (%.0f) for 30 s: footprint %.0f MB, CPU %.2f cores; busiest threads: %s", fps, best, fp, (cpu - cpu_last) / dt, b); }
+    memcpy(th_last, th, sizeof th[0] * (size_t)nth); nth_last = nth;
+    for (int k = 0; k < HC_N; k++) { hc_last[k][0] = g_hc[k].ticks; hc_last[k][1] = g_hc[k].calls; }
+    t_last = now; cpu_last = cpu; fr_last = fr; }
+
 // ---- the snapshot (stats.c st_snapshot's shape) ---------------------------------------------------------------------
 static void st_snapshot(StBuf* s) {
     static const char* teams[8] = {"red", "blue", "green", "orange", "purple", "gold", "brown", "pink"};
@@ -1062,7 +1107,7 @@ static void st_snapshot(StBuf* s) {
           sb_put(s, ",\"perf\":{\"fps\":%.1f,\"window_fps\":%.1f,\"frame_ms\":[%.1f,%.1f,%.1f],\"draws\":0,\"objects\":%d,\"in_view\":%d,\"bipeds\":0,\"vehicles\":0,\"projectiles\":0,"
                     "\"present_to_gpu_ms\":-1,\"present_to_window_ms\":-1,\"input_to_screen_ms\":-1,\"input_to_window_ms\":-1,\"input_to_present_ms\":-1,\"inputs\":0,\"refresh_hz\":0,\"cpu_pct\":0,\"native\":true}",
                  fps, fps, p50, p95, mx, nobj, nobj);
-          static double tl; if (now - tl >= 10) { tl = now; nlog("[nhook] [perf] %.0f fps, frame %.1f / %.1f / %.1f ms (median / 95%% / max), %d players, %d objects, map %s%s; object_delete %lu, bullets %u, aimed %lu / measured %lu, voice packets %lu, camera %s%s", fps, p50, p95, mx, np_for_perf, nobj, g_st_curmap, t0 ? "" : " (not in a match)", g_nov_del_calls, g_nov_imp_n, g_nov_aim_n, g_nov_aim_done, g_opus_n,
+          static double tl; if (now - tl >= 10) { tl = now; slow_watch(now, fps, t0 != 0); nlog("[nhook] [perf] %.0f fps, frame %.1f / %.1f / %.1f ms (median / 95%% / max), %d players, %d objects, map %s%s; object_delete %lu, bullets %u, aimed %lu / measured %lu, voice packets %lu, camera %s%s", fps, p50, p95, mx, np_for_perf, nobj, g_st_curmap, t0 ? "" : " (not in a match)", g_nov_del_calls, g_nov_imp_n, g_nov_aim_n, g_nov_aim_done, g_opus_n,
                       g_nov_cam_src == 1 ? "view constants" : g_nov_cam_src == 2 ? "observer" : "-",
                       getenv("NHOOK_TEXTHOOK_TEST") ? ({ static char tb[300]; extern volatile unsigned long g_tht_n[8]; extern uint32_t g_tht_rva[8]; int q = snprintf(tb, sizeof tb, ", text hooks");
                           for (int i = 0; i < 8; i++) if (g_tht_rva[i]) q += snprintf(tb + q, sizeof tb - (size_t)q, " %x:%lu", g_tht_rva[i], g_tht_n[i]); tb; }) : ""); } }
@@ -1083,7 +1128,8 @@ static void st_snapshot(StBuf* s) {
     ht_overlay_json(s, m);   // teleport / host / bounds_off / invwalls_off / speed_idx / spots (nhost.c)
     sb_put(s, "}");
     bot_nav_json(s);         // "nav": the walker's path and goal (the page's map)
-    sb_put(s, ","); hk_snapshot_json(s);   // "hookcheck": the hooks check's counts (nhchk.c; the page's Hooks check window)
+    sb_put(s, ","); hk_snapshot_json(s);
+    sb_json(s);              // "soundboard": the microphone path and what plays (nmic.c)   // "hookcheck": the hooks check's counts (nhchk.c; the page's Hooks check window)
     if (strcmp(m, g_trk_map)) { snprintf(g_trk_map, sizeof g_trk_map, "%s", m); g_ntrk = 0; g_nbip = 0; sb_reset(); }   // a new map: new match stats
     pthread_mutex_lock(&g_hm_mx); snprintf(g_hm_cur, sizeof g_hm_cur, "%s", m); if (g_hm.dirty && now - g_hm.saved > 30) { hm_save(); g_hm.saved = now; } pthread_mutex_unlock(&g_hm_mx);
     static uint8_t tab[HB_MAXOBJ * 0x18]; int hi = 0; uint64_t arr = hb_object_array(); uint8_t hdr[0x60];
@@ -1323,6 +1369,7 @@ static int st_origin_ok(const char* hdrs) {               // no Origin (curl) or
     char o[300], hv[256]; if (!st_hdr(hdrs, "Origin", o, sizeof o)) return 1; if (!st_hdr(hdrs, "Host", hv, sizeof hv)) return 0;
     char want[300]; snprintf(want, sizeof want, "http://%s", hv); return !strcasecmp(o, want); }
 static int st_control(const char* act, const char* qs) {
+    if (!strcmp(act, "sb")) return sb_control(qs);   // the soundboard (nmic.c)
     if (nov_control(act, qs)) return 1;                       // the overlay's buttons and panel
     if (!strcmp(act, "capture")) { extern volatile int g_nr_cap_depth; if (strstr(qs, "depth=1")) g_nr_cap_depth = 1;
         __atomic_store_n(&g_nr_cap_req, strstr(qs, "overlay=1") ? 2 : 1, __ATOMIC_RELEASE); nlog("[nhook] page: capturing the next frame"); return 1; }
@@ -1367,6 +1414,7 @@ static void* st_conn(void* a) {
     char req[4096]; size_t n = 0; char* he = 0;
     while (n < sizeof req - 1) { ssize_t r = recv(fd, req + n, sizeof req - 1 - n, 0); if (r <= 0) break; n += (size_t)r; req[n] = 0; if ((he = strstr(req, "\r\n\r\n"))) break; }
     if (!he) { close(fd); return 0; }
+    size_t body_off = (size_t)(he - req) + 4;   // (a POST body's first bytes may have come with the headers: /soundboard/upload)
     he[2] = 0;
     if (!st_host_ok(req)) { const char* fb = "HTTP/1.1 421 Misdirected Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"; st_send(fd, fb, strlen(fb)); close(fd); return 0; }
     char meth[8] = "", path[1024] = "/", qs[768] = ""; sscanf(req, "%7s %1023s", meth, path); char* q = strchr(path, '?'); if (q) { snprintf(qs, sizeof qs, "%s", q + 1); *q = 0; }
@@ -1377,6 +1425,10 @@ static void* st_conn(void* a) {
         const char* body = code == 200 ? "{\"ok\":true}" : code == 400 ? "{\"ok\":false,\"error\":\"unknown, disabled or not in the native app yet\"}" : !st_controls_ok() ? "{\"ok\":false,\"error\":\"controls are off\"}" : "{\"ok\":false,\"error\":\"needs POST with an X-Reclaimer-Control header\"}";
         char h[400]; int k = snprintf(h, sizeof h, "HTTP/1.1 %d %s\r\nContent-Type: application/json\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n%s", code, code == 200 ? "OK" : code == 400 ? "Bad Request" : "Forbidden", strlen(body), body);
         st_send(fd, h, (size_t)k);
+    } else if (!strcmp(path, "/soundboard/upload")) {   // the soundboard's "add" (nmic.c), with /control's guard
+        char hv[64]; if (strcmp(meth, "POST") || !st_hdr(req, "X-Reclaimer-Control", hv, sizeof hv) || !st_origin_ok(req) || !st_controls_ok()) {
+            const char* fb = "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"; st_send(fd, fb, strlen(fb)); }
+        else sb_upload(fd, req, req + body_off, n > body_off ? n - body_off : 0, qs);
     } else if (strcmp(meth, "GET")) { const char* na = "HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"; st_send(fd, na, strlen(na)); }
     else if (!strcmp(path, "/events")) {
         g_st_hits++; char h[256]; int k = snprintf(h, sizeof h, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n\r\n");
@@ -1397,6 +1449,7 @@ static void* st_conn(void* a) {
     else if (!strcmp(path, "/recordings.json")) { size_t ln = 0; char* j = rec_list_json(&ln); st_reply(fd, "application/json", j ? j : "[]", j ? ln : 2, 0); free(j); }
     else if (!strncmp(path, "/recordings/", 12)) st_rec_file(fd, req, path + 12);
     else if (!strncmp(path, "/forensics", 10) && (!path[10] || path[10] == '/')) fx_http(fd, path, qs, req);
+    else if (!strcmp(path, "/soundboard.json")) { StBuf b = {0}; sb_files_json(&b); st_reply(fd, "application/json", b.b, b.n, 0); free(b.b); }
     else if (!strcmp(path, "/hooks.json")) { StBuf b = {0}; hk_json(&b); st_reply(fd, "application/json", b.b, b.n, 0); free(b.b); }
     else if (!strcmp(path, "/packets.json")) { static pthread_mutex_t pmx = PTHREAD_MUTEX_INITIALIZER; StBuf b = {0};
         pthread_mutex_lock(&pmx); pk_json(&b, qs); pthread_mutex_unlock(&pmx); st_reply(fd, "application/json", b.b, b.n, 0); free(b.b); }

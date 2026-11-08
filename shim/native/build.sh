@@ -13,6 +13,6 @@ clang $CF -c -o $O/stub.o native/stub.S
 # linked to a temporary file and renamed into place: a running game keeps the dylib it mapped (a file rewritten in place under
 # a running process can get it killed for an invalid code signature when its pages are read again)
 clang $CF -dynamiclib -o build/nhook.dylib.new $O/nhook.o $O/stub.o $O/nrender.o $O/rec.o \
-  -framework Foundation -framework Metal -framework QuartzCore -framework CoreVideo -framework AVFoundation -framework CoreMedia -framework AudioToolbox
+  -framework Foundation -framework Metal -framework QuartzCore -framework CoreVideo -framework AVFoundation -framework CoreMedia -framework AudioToolbox -framework CoreAudio
 mv -f build/nhook.dylib.new build/nhook.dylib
 echo "built shim/build/nhook.dylib"

@@ -314,6 +314,12 @@ static void nov_aim_tick_body(void) {   // nrender.m, every frame (the render th
         unsigned k = g_nov_aimr_w; NovAimRes* o = &g_nov_aimr[k % NOV_AIMR_N];
         o->t = a.t; o->owner = a.owner; o->target = a.target; o->along = a.along; o->pre = a.pre; o->on = miss <= 0; o->head = gk[mg] / 256 == head;
         o->err = miss <= 0 ? 0 : atan2f(miss, a.along > 0.3f ? a.along : 0.3f) * 57.29578f;
+        { static int lg = -1; if (lg < 0) lg = getenv("NHOOK_AIM_LOG") != 0;   // NHOOK_AIM_LOG=1: each measured shot (aim test diagnostics, 2026-11-08)
+          if (lg) { const float* c = gc[mg]; float v[3] = {c[0] - a.s[0], c[1] - a.s[1], c[2] - a.s[2]}, t = v[0] * a.dn[0] + v[1] * a.dn[1] + v[2] * a.dn[2];
+              float cp[3] = {a.s[0] + a.dn[0] * t, a.s[1] + a.dn[1] * t, a.s[2] + a.dn[2] * t};
+              nlog("[nhook] [aim] shot from (%.2f %.2f %.2f) dir (%.3f %.3f %.3f) len %.2f | nearest part region %d node %d centre (%.2f %.2f %.2f) r %.2f, path passes (%.2f %.2f %.2f): miss %.2f u = %.2f deg%s | target root (%.2f %.2f %.2f), %d parts",
+                   a.s[0], a.s[1], a.s[2], a.dn[0], a.dn[1], a.dn[2], a.len, gk[mg] / 256, gk[mg] % 256, c[0], c[1], c[2], rad[mg], cp[0], cp[1], cp[2], miss, o->err, miss <= 0 ? " ON" : "",
+                   a.mt[10], a.mt[11], a.mt[12], ng); } }
         __atomic_store_n(&g_nov_aimr_w, k + 1, __ATOMIC_RELEASE); g_nov_aim_done++;
     }
 }
