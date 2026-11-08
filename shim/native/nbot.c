@@ -38,7 +38,11 @@ static void nbot_tool_path(char* t, size_t n) {   // re-tools/h3nav.py beside th
 static volatile int g_bot_spar, g_bot_started;           // the sparring aim on
 static float g_bot_pt[3]; static char g_bot_veh[64];    // walker targets (point / vehicle name)
 static volatile int g_bot_out;                          // what the hook writes: 1 yaw / pitch, 2 throttle, 4 buttons
-static volatile float g_bot_yaw, g_bot_pitch, g_bot_tx, g_bot_ty; static volatile uint64_t g_bot_btn;
+static volatile float g_bot_yaw, g_bot_pitch, g_bot_tx, g_bot_ty; static volatile uint64_t g_bot_btn; static volatile int g_bot_fire, g_bot_fighting;
+// line-of-sight results per enemy (the fighter checks the nearest few in turn and prefers one it can see)
+typedef struct { uint32_t h; int res; double t; } LosEnt; static LosEnt g_lost[16];
+static int los_get(uint32_t h, double now) { for (int i = 0; i < 16; i++) if (g_lost[i].h == h && now - g_lost[i].t < 0.5) return g_lost[i].res; return -1; }
+static void los_put(uint32_t h, int res, double t) { int k = 0; for (int i = 0; i < 16; i++) { if (g_lost[i].h == h) { k = i; break; } if (g_lost[i].t < g_lost[k].t) k = i; } g_lost[k].h = h; g_lost[k].res = res; g_lost[k].t = t; }
 static volatile float g_bot_err = -1;                   // the aim's error toward its target (degrees; the page's "aim off by")
 static volatile unsigned long g_bot_writes;
 static int g_bot_hook = -1;                             // the body hook: -1 not tried, 0 failed, 1 in
@@ -52,12 +56,75 @@ static int bot_private_addr(const char* a) {   // "ip:port" at a loopback / priv
         return b[0] == 127 || b[0] == 10 || (b[0] == 192 && b[1] == 168) || (b[0] == 172 && b[1] >= 16 && b[1] <= 31) || (b[0] == 169 && b[1] == 254);
     return !strncmp(a, "[::1]", 5) || !strncmp(a, "localhost", 9); }
 static int bot_allowed(void);
-static int bot_walk_ok(void) { return bot_allowed() && !g_srv_addr[0]; }   // (the walker: this client's moves count -- see above)
+// the virtual game controller (nvpad.m, NHOOK_VPAD=1, 2026-11-08): with it a JOINED client's moves reach the server too (the app
+// sends what its controllers say), so the walker may walk there; it also fires (the right trigger) with NHOOK_BOT_FIRE=1
+int nh_vpad_install(void); void nh_vpad_set(float lx, float ly, float rx, float ry, float lt, float rt, uint32_t b); int nh_vpad_reads(void); int nh_vpad_stick_reads(void);
+static volatile int g_vpad_on; static int g_pad_written;
+static void bot_pad(float lx, float ly, float rt, uint32_t b) {   // b: nvpad.m's button bits; bit 30 = the left trigger (a grenade)
+    if (!g_vpad_on) return; nh_vpad_set(lx, ly, 0, 0, (b & 0x40000000u) ? 1.0f : 0.0f, rt, b & 0xFFFFu); g_pad_written = 1; }
+static int bot_walk_ok(void) { static int nopkt = -1; if (nopkt < 0) nopkt = getenv("NHOOK_BOT_NOPKT") != 0;   // (the walker: this client's moves count:
+    return bot_allowed() && (!g_srv_addr[0] || g_vpad_on || !nopkt); }                                            //  a local game, or the control packet hook)
 static int bot_allowed(void) {
     static int t = -1; if (t < 0) { const char* p = getenv("RECLAIMER_PROFILE_DIR"); t = p && *p && !getenv("NHOOK_NO_BOT"); }
     return t && bot_private_addr(g_srv_addr); }
 
 // halo3's control record of local player 0 (engine thread)
+// ---- the fighter (2026-11-08, NHOOK_BOT_FIGHT=1; the user: "make 3-4 walkers have a battle ... learn to mimic actual players"):
+// the walker's numbers come from real players (shim/tools/walker-model.py over match-recorder.py's recordings: NHOOK_BOT_MODEL,
+// default ReclaimerMac/tracks/walker-model.json): the distances they fight at, how they strafe and switch, how they back off on
+// low shields, how fast they get on target and how far off they aim. NHOOK_BOT_SKILL=0..1 (default 0.5) scales the reaction
+// delay and the aim noise (1 = faster and steadier than the players measured).
+typedef struct { float dist_p25, dist_med, dist_p75, strafe_switch, aim_err, reaction, run_speed, strafe_rms; int loaded; } BotModel;
+static BotModel g_bm = {5.8f, 12.5f, 15.7f, 1.1f, 4.0f, 1.0f, 2.1f, 0.9f, 0};
+static float bm_num(const char* txt, const char* key, float d) { char k[64]; snprintf(k, sizeof k, "\"%s\":", key); const char* p = strstr(txt, k);
+    if (!p) return d; p += strlen(k); while (*p == ' ') p++; if (!strncmp(p, "null", 4)) return d; return strtof(p, 0); }
+static void bm_load(void) {
+    static int done; if (done) return; done = 1; char path[1024]; const char* e = getenv("NHOOK_BOT_MODEL"), * h = getenv("HOME");
+    if (e && *e) snprintf(path, sizeof path, "%s", e); else snprintf(path, sizeof path, "%s/Library/Application Support/ReclaimerMac/tracks/walker-model.json", h ? h : "");
+    FILE* f = fopen(path, "r"); if (!f) { nlog("[nhook] [fight] no model at %s: built-in numbers", path); return; }
+    static char txt[1 << 16]; size_t n = fread(txt, 1, sizeof txt - 1, f); fclose(f); txt[n] = 0;
+    g_bm.dist_p25 = bm_num(txt, "dist_p25", g_bm.dist_p25); g_bm.dist_med = bm_num(txt, "dist_median", g_bm.dist_med); g_bm.dist_p75 = bm_num(txt, "dist_p75", g_bm.dist_p75);
+    g_bm.strafe_switch = bm_num(txt, "strafe_switch_s", g_bm.strafe_switch); g_bm.aim_err = bm_num(txt, "aim_err_median", g_bm.aim_err);
+    g_bm.reaction = bm_num(txt, "reaction_s", g_bm.reaction); g_bm.run_speed = bm_num(txt, "speed_median", g_bm.run_speed); g_bm.strafe_rms = bm_num(txt, "strafe_rms", g_bm.strafe_rms);
+    g_bm.loaded = 1; nlog("[nhook] [fight] model %s: fights at %.1f..%.1f units, strafe switch %.2f s, aim error %.1f deg, reaction %.2f s",
+                          path, g_bm.dist_p25, g_bm.dist_p75, g_bm.strafe_switch, g_bm.aim_err, g_bm.reaction); }
+// line of sight: the walker thread asks (eye, target, the two units to ignore), the player-control hook (the engine thread)
+// casts halo3's collision ray (nhost.c ht_floor's call, halo3+0x1fd748) and answers; 1 = clear, 0 = blocked
+static volatile int g_los_req, g_los_done, g_los_res = -1; static float g_los_p[3], g_los_v[3]; static uint32_t g_los_ign[2], g_los_tgt, g_los_res_tgt; static volatile double g_los_t;
+static void bot_los_do(uint64_t* ctx) {
+    if (g_los_req == g_los_done) return; int q = g_los_req; static float P[3], V[3]; static uint8_t res[0x200]; uint64_t fl = 0;
+    if (!g_img || rd(g_img + 0x20ad508, &fl, 8)) { g_los_done = q; return; }
+    memcpy(P, g_los_p, 12); memcpy(V, g_los_v, 12); memset(res, 0, sizeof res); *(uint16_t*)(res + 0x28) = 0xFFFF;
+    uint64_t a[8] = {(fl & 0xFFFFFFFF00000000ull) | (uint64_t)((uint32_t)fl | 0x24000u), 0, (uint64_t)(uintptr_t)P, (uint64_t)(uintptr_t)V,
+                     g_los_ign[0], g_los_ign[1], 0xFFFFFFFFu, (uint64_t)(uintptr_t)res};
+    int hit = (int)(nh_call(ctx, 0x1fd748, 8, a) & 0xff) != 0; float L = sqrtf(V[0] * V[0] + V[1] * V[1] + V[2] * V[2]), d = L;
+    if (hit) { const float* h = (const float*)(res + 0x08); float dx = h[0] - P[0], dy = h[1] - P[1], dz = h[2] - P[2]; d = sqrtf(dx * dx + dy * dy + dz * dz); }
+    g_los_res = !hit || d > L - 0.5f; g_los_res_tgt = g_los_tgt; g_los_t = mono_s(); g_los_done = q; }
+// the model's heat for this map -> g_nav.pop (how much real players use each floor node: A* prefers their lanes); once per map
+static void bm_pop(const char* map) {
+    static char done[64]; if (!g_nav.ok || !map || !map[0] || !strcmp(done, map)) return; snprintf(done, sizeof done, "%s", map);
+    char path[1024]; const char* e = getenv("NHOOK_BOT_MODEL"), * h = getenv("HOME");
+    if (e && *e) snprintf(path, sizeof path, "%s", e); else snprintf(path, sizeof path, "%s/Library/Application Support/ReclaimerMac/tracks/walker-model.json", h ? h : "");
+    FILE* f = fopen(path, "r"); if (!f) return; fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET); if (n <= 0 || n > (64 << 20)) { fclose(f); return; }
+    char* txt = malloc((size_t)n + 1); if (!txt) { fclose(f); return; } size_t got = fread(txt, 1, (size_t)n, f); fclose(f); txt[got] = 0;
+    char key[96]; snprintf(key, sizeof key, "\"%s\":", map); char* m = strstr(txt, "\"maps\""); m = m ? strstr(m, key) : 0; char* hp = m ? strstr(m, "\"heat\":") : 0;
+    if (!hp) { free(txt); nlog("[nhook] [fight] the model has no heat for %s: shortest paths", map); return; }
+    float* pop = calloc((size_t)g_nav.n, sizeof(float)); int cells = 0; float mx = 0; char* q = strchr(hp, '[') + 1;
+    while (q && *q) { while (*q == ' ' || *q == '\n' || *q == ',') q++; if (*q != '[') break; float x, y, z, c; if (sscanf(q, "[%f,%f,%f,%f]", &x, &y, &z, &c) != 4 && sscanf(q, "[%f, %f, %f, %f]", &x, &y, &z, &c) != 4) break;
+        if (z < -9000) {   // a footprint heatmap cell (no height): every floor node under its 2 x 2 units
+            for (float ox = -0.75f; ox <= 0.8f; ox += 0.75f) for (float oy = -0.75f; oy <= 0.8f; oy += 0.75f) {
+                int cx = (int)floorf((x + ox - g_nav.x0) / g_nav.cell), cy = (int)floorf((y + oy - g_nav.y0) / g_nav.cell); if (cx < 0 || cy < 0 || cx >= g_nav.w || cy >= g_nav.h) continue;
+                int cc = cy * g_nav.w + cx; for (uint32_t i = g_nav.first[cc]; i < g_nav.first[cc + 1]; i++) { pop[i] += c / 9.0f; if (pop[i] > mx) mx = pop[i]; } } }
+        else { float pz[3] = {x, y, z + 0.5f}; int nd = nav_node_at(pz); if (nd >= 0) { pop[nd] += c; if (pop[nd] > mx) mx = pop[nd]; } }   /* (walker-model.py heat: x, y, z, samples) */
+        cells++; q = strchr(q, ']'); if (q) q++; }
+    free(txt); if (mx <= 0) { free(pop); return; }
+    for (int i = 0; i < g_nav.n; i++) pop[i] = pop[i] > 0 ? logf(1 + pop[i]) / logf(1 + mx) : 0;
+    float* old = g_nav.pop; g_nav.pop = pop; free(old); nlog("[nhook] [fight] %s: player lanes from %d heat cells (A* prefers them)", map, cells); }
+static int bot_floor_ok(const float* p) {   // a walkable floor node within ~1 unit (fighting moves leave the path: never off a ledge)
+    if (!g_nav.ok) return 1; int n = nav_node_at(p); if (n < 0) return 0; float q[3]; nav_pos(n, q);
+    return (q[0] - p[0]) * (q[0] - p[0]) + (q[1] - p[1]) * (q[1] - p[1]) < 1.44f && fabsf(q[2] - p[2]) < 1.2f; }
+static float bot_rand01(void) { return (float)arc4random_uniform(1000000) / 1000000.0f; }   // (per process: walkers differ)
+static float bot_gauss(void) { float u = bot_rand01() + 1e-6f, v = bot_rand01(); return sqrtf(-2 * logf(u)) * cosf(6.2831853f * v); }
 static void bot_write(uint32_t idx) {   // (engine thread) record 0, from what bot_step last decided
     if (idx != 0 || g_hc_off[HC_BOT]) return; int o = g_bot_out; if (!o) return;
     uint64_t t0 = hc_now(); uint64_t blk = tls_block(); if (!blk) return; uint8_t* r = *(uint8_t**)(uintptr_t)(blk + 0xC0); if (!r) return;
@@ -65,10 +132,30 @@ static void bot_write(uint32_t idx) {   // (engine thread) record 0, from what b
     if (o & 2) { *(float*)(r + 0xDC) = g_bot_tx; *(float*)(r + 0xE0) = g_bot_ty; }
     if (o & 4) *(uint64_t*)(r + 0xC8) |= g_bot_btn;
     g_bot_writes++; hc_add(HC_BOT, t0); }
-static void bot_on_reader(uint64_t* ctx) { bot_write((uint32_t)ctx[1]); }   // text hook: the app's 0xf7178(index, &control) entry
+static void bot_on_reader(uint64_t* ctx) { if ((uint32_t)ctx[1] == 0 && g_los_req != g_los_done) bot_los_do(ctx); bot_write((uint32_t)ctx[1]); }   // text hook: the app's 0xf7178(index, &control) entry
 static void bot_on_update(uint64_t* a) { bot_write((uint32_t)a[3]); }        // body hook after a lifted 0xf66ac(player, index, ...)
+// The control packet (2026-11-08): a client sends the server its controls as packet "A" (net-authority.md section 1), built by
+// halo3+0x50fb8(sim player, control record, 1, A out) -- the app's own code -- from the control record: +0x10 / +0x14 yaw / pitch,
+// +0x18 / +0x1c throttle forward / left, +8 button bits (A bits 0-2 = bits 0-2, 3 = bit 11, 4 = bit 14), +0x2c 7 more bits. The
+// app's input layer refills throttle and buttons from its devices every tick before that, and the reader hook below runs AFTER it:
+// so only the aim (which the input layer only nudges) reached the server, a joined walker's moves never did. A text hook BEFORE
+// the builder writes the walker's values into the record it is about to pack: the server gets them like a player's input.
+// NHOOK_BOT_NOPKT=1 = off (the old: moves local only). NHOOK_BOT_PKTBTN=<hex> ORs bits into record +8 (tests).
+static volatile unsigned long g_bot_pkt_n; static volatile uint32_t g_bot_pkt_btn8, g_bot_pkt_btn2c;
+static void bot_on_abuild(uint64_t* ctx) {
+    uint8_t* act = (uint8_t*)(uintptr_t)ctx[2]; if (!act || !g_bot_out || g_hc_off[HC_BOT]) return; g_bot_pkt_n++;
+    { static int told; if (!told) { told = 1; uint64_t blk = tls_block(), rec = 0; if (blk) hb_read(blk + 0xC0, &rec, 8);
+        nlog("[nhook] [bot] control packet: the builder's record %p, the reader's record 0x%llx (record +0x%llx)", (void*)act, (unsigned long long)rec, rec ? (unsigned long long)((uint64_t)(uintptr_t)act - rec) : 0ull); } }
+    int o = g_bot_out;
+    if (o & 1) { *(float*)(act + 0x10) = g_bot_yaw; *(float*)(act + 0x14) = g_bot_pitch; }
+    if (o & 2) { *(float*)(act + 0x18) = g_bot_tx; *(float*)(act + 0x1c) = g_bot_ty; }
+    static int extra = -1; static uint32_t xb; if (extra < 0) { const char* e = getenv("NHOOK_BOT_PKTBTN"); extra = e != 0; xb = e ? (uint32_t)strtoul(e, 0, 16) : 0; }
+    uint32_t b8 = g_bot_pkt_btn8 | (extra ? xb : 0); if (b8) *(uint64_t*)(act + 8) |= b8;
+    if (g_bot_pkt_btn2c) *(act + 0x2c) |= (uint8_t)g_bot_pkt_btn2c; }
 static int bot_hook_install(void) {
     if (g_bot_hook >= 0) return g_bot_hook;
+    { static int done; if (!done && !getenv("NHOOK_BOT_NOPKT")) { done = 1; uint64_t a = branch_target_of(0x50fb8);
+        if (!a || text_hook("control packet (walker on a server)", a, bot_on_abuild)) nlog("[nhook] [bot] halo3+0x50fb8 could not be hooked: a joined walker's moves stay local"); } }
     uint64_t t = branch_target_of(0xf7178);
     g_bot_hook = t ? !text_hook("player control (sparring aim / walker)", t, bot_on_reader) : !body_hook_after("player control (sparring aim / walker)", 0xf66ac, bot_on_update);
     if (!g_bot_hook) nlog("[nhook] [bot] halo3+0xf66ac could not be hooked: no sparring aim / walker"); return g_bot_hook; }
@@ -90,20 +177,24 @@ static void bot_nav_json(StBuf* s) { nav_json(s); }   // the snapshot's "nav" (t
 // (2026-11-08: shim/tools/native-aim-test.sh faces a known open direction, so the app's practice target lands on open floor).
 static int bot_diag(float* tx, float* ty, uint64_t* btn, double now) {
     static int on = -1; static float fx, fy; static double t0; if (on < 0) { const char* e = getenv("NHOOK_BOT_THROTTLE"); on = 0;
-        if (e && sscanf(e, "%f,%f", &fx, &fy) == 2) on |= 1; if (getenv("NHOOK_BOT_BTNSCAN")) on |= 2; }
+        if (e && sscanf(e, "%f,%f", &fx, &fy) == 2) on |= 1; if (getenv("NHOOK_BOT_BTNSCAN")) on |= 2; if (getenv("NHOOK_BOT_HOLDBTN")) on |= 4; }
     if (!on) return 0; if (!t0) t0 = now; int r = 0;
     if (on & 1) { *tx = fx; *ty = fy; r |= 2; }
     if (on & 2) { double t = now - t0 - 3.0; int k = (int)t; if (t >= 0 && k < 32 && t - k < 0.25) { *btn = 1ull << k; r |= 4; } }
+    { static int hold = -1; static uint64_t hb; if (hold < 0) { const char* e = getenv("NHOOK_BOT_HOLDBTN"); hold = e != 0; hb = e ? strtoull(e, 0, 16) : 0; }   // NHOOK_BOT_HOLDBTN=<hex>: held (tests)
+      if (hold && now - t0 > 3.0) { *btn |= hb; r |= 4; } }
     return r; }
 static void bot_idle(const char* why) {   // NHOOK_SPAR_LOG: why the aim / walker did nothing (every 5 s at most; 2026-11-08, 0.10.1)
     static double tl; static const char* last; double now = mono_s(); if (!bot_log() || (why == last && now - tl < 5)) return; tl = now; last = why; nlog("[nhook] [spar] idle: %s", why); }
-static void bot_step(void) {
+static void bot_step_body(void);
+static void bot_step(void) { g_pad_written = 0; bot_step_body(); if (g_vpad_on && !g_pad_written) nh_vpad_set(0, 0, 0, 0, 0, 0, 0); }   // (idle: the pad let go)
+static void bot_step_body(void) {
     double now = mono_s(); int spar = g_bot_spar, mode = bot_walk_ok() ? nav_mode() : 0;
-    static int diag = -1; if (diag < 0) diag = getenv("NHOOK_BOT_THROTTLE") || getenv("NHOOK_BOT_BTNSCAN") || getenv("NHOOK_BOT_FACE");
+    static int diag = -1; if (diag < 0) diag = getenv("NHOOK_BOT_THROTTLE") || getenv("NHOOK_BOT_BTNSCAN") || getenv("NHOOK_BOT_FACE") || getenv("NHOOK_BOT_HOLDBTN");
     if ((!spar && !mode && !diag) || !bot_allowed() || !g_gameplay_t0 || now - g_gameplay_t0 < 3.0) { g_bot_out = 0; g_nav_act = 0; g_bot_err = -1;
         bot_idle(!spar && !mode && !diag ? "nothing on" : !bot_allowed() ? "not allowed here" : !g_gameplay_t0 ? "not in a match" : "match just started"); return; }
     if (!bot_hook_install()) { g_bot_out = 0; return; }
-    if (mode) { nav_ensure(); nav_danger_update(now); }
+    if (mode) { nav_ensure(); nav_danger_update(now); if (g_nav.ok) bm_pop(g_st_curmap); }
     uint64_t blk = tls_block(), rec = 0; uint32_t meh = 0xFFFFFFFFu; float yaw0 = 0, pitch0 = 0;
     if (!blk || !hb_read(blk + 0xC0, &rec, 8) || !rec || !hb_read(rec + 0xC0, &meh, 4) || !hb_read(rec + 0xD4, &yaw0, 4) || !hb_read(rec + 0xD8, &pitch0, 4)) { g_bot_out = 0; bot_idle("no control record (TLS +0xC0)"); return; }
     float cam[3], fwd[3]; if (!nov_observer(cam, fwd)) { g_bot_out = 0; bot_idle("no observer camera"); return; }
@@ -113,22 +204,85 @@ static void bot_step(void) {
     if (me < 0 || objs[me].dead || objs[me].seat >= 0) { g_bot_out = 0; g_nav_act = 0; plen = 0; g_bot_err = -1;   // dead, respawning or in a vehicle
         static char w[96]; snprintf(w, sizeof w, me < 0 ? "the record's unit %08x is none of the %d units seen" : objs[me].dead ? "dead" : "in a vehicle", meh, n); bot_idle(me < 0 ? w : objs[me].dead ? "dead" : "in a vehicle"); return; }
     const NovObj* o = &objs[me]; int out = 0; float yaw = yaw0, pitch = pitch0;
+    NovObj ftg; int have_tg = 0; float tdist = 0, tyaw = 0, tpitch = 0;   // the spar target (the fighter's too) and the exact angles to it
     // the sparring aim: the nearest live enemy's head (the top of its bounding sphere's core, as the loader aimed), from the camera
     if (spar) {
         float bd = 1e30f; int bi = -1;
         for (int pass = 0; pass < 2 && bi < 0; pass++) for (int i = 0; i < n; i++) { const NovObj* t = &objs[i]; if (t->type || t->dead || i == me) continue;
             if (!pass && !bot_enemy(o, t)) continue; float dx = t->c[0] - cam[0], dy = t->c[1] - cam[1], dz = t->c[2] - cam[2], d = dx * dx + dy * dy + dz * dz; if (d < bd) { bd = d; bi = i; } }
+        if (g_bot_fighting && bi >= 0 && los_get(objs[bi].handle, now) != 1) {   // the fighter: the nearest enemy in sight (within 40 units) beats a nearer hidden one
+            float vd = 1600.0f; int vi = -1; for (int i = 0; i < n; i++) { const NovObj* t = &objs[i]; if (t->type || t->dead || i == me || !bot_enemy(o, t)) continue;
+                float dx = t->c[0] - cam[0], dy = t->c[1] - cam[1], dz = t->c[2] - cam[2], d = dx * dx + dy * dy + dz * dz; if (d < vd && los_get(t->handle, now) == 1) { vd = d; vi = i; } }
+            if (vi >= 0) { bi = vi; bd = vd; } }
         if (bi >= 0) { const NovObj* t = &objs[bi]; float d[3] = {t->c[0] - cam[0], t->c[1] - cam[1], t->c[2] + 0.55f * t->r - cam[2]}; float h = sqrtf(d[0] * d[0] + d[1] * d[1]);
-            if (h > 0.01f) { yaw = atan2f(d[1], d[0]); pitch = atan2f(d[2], h); out |= 1;
+            if (h > 0.01f) { yaw = atan2f(d[1], d[0]); pitch = atan2f(d[2], h); out |= 1; ftg = *t; have_tg = 1; tdist = sqrtf(bd); tyaw = yaw; tpitch = pitch;
                 // the error against the record's angles (the aim the engine used last tick: the lag behind a moving target). Not
                 // against the camera's forward: halo3's first-person camera looks 4.9 deg above the aim the record sets (the app's
                 // own aim request writes the same uncorrected pitch and its shots hit: native-aim-test.sh)
                 float fh = sqrtf(fwd[0] * fwd[0] + fwd[1] * fwd[1]), ey = bot_wrap(yaw - yaw0), ep = pitch - pitch0;
                 g_bot_err = sqrtf(ey * ey + ep * ep) * 57.2958f;
+                { static int fire = -1; static float fdeg = 3, frange = 35; if (fire < 0) { const char* e = getenv("NHOOK_BOT_FIRE"); fire = e && strcmp(e, "0"); if (getenv("NHOOK_BOT_FIRE_DEG")) fdeg = strtof(getenv("NHOOK_BOT_FIRE_DEG"), 0); if (getenv("NHOOK_BOT_FIRE_RANGE")) frange = strtof(getenv("NHOOK_BOT_FIRE_RANGE"), 0); }
+                  g_bot_fire = fire && g_bot_err < fdeg && sqrtf(bd) < frange; }
                 if (bot_log()) { static double tl; if (now - tl > 1.0) { tl = now; nlog("[nhook] [spar] target %08x at %.1f units, aim error %.1f deg (yaw %+.1f, pitch %+.1f; wrote %.1f / %.1f, view %.1f / %.1f)", t->handle, sqrtf(bd), g_bot_err, ey * 57.2958f, ep * 57.2958f,
                     yaw * 57.2958f, pitch * 57.2958f, atan2f(fwd[1], fwd[0]) * 57.2958f, atan2f(fwd[2], fh) * 57.2958f); } } } }
         else g_bot_err = -1; }
     else g_bot_err = -1;
+    // ---- the fighter (NHOOK_BOT_FIGHT=1): aim with a reaction delay, a turn-rate limit and drifting noise; fire only with a clear
+    // line; in reach keep the players' fighting distance, strafe with their switch timing, back off on low shields; grenades at mid
+    // range, melee up close. Out of sight / reach the walker below hunts (NHOOK_NAV=enemy).
+    // tunables (shim/tools/walker-train.py evolves them): NHOOK_BOT_SKILL 0..1 (reaction + aim noise), NHOOK_BOT_DIST (x the players'
+    // fighting distances), NHOOK_BOT_STRAFE (x strafe strength), NHOOK_BOT_SWITCH (x the strafe switch time), NHOOK_BOT_FIRE_EXTRA
+    // (deg of aim slack when firing), NHOOK_BOT_RETREAT (back off below this shield), NHOOK_BOT_GREN (s between grenades)
+    static int fight = -1; static float skill = 0.5f, kdist = 1, kstrafe = 1, kswitch = 1, fextra = 1, retreat = 0.35f, gren = 9;
+    if (fight < 0) { const char* e = getenv("NHOOK_BOT_FIGHT"); fight = e && strcmp(e, "0");
+        #define BKNOB(v, n) if (getenv(n)) v = strtof(getenv(n), 0)
+        BKNOB(skill, "NHOOK_BOT_SKILL"); BKNOB(kdist, "NHOOK_BOT_DIST"); BKNOB(kstrafe, "NHOOK_BOT_STRAFE"); BKNOB(kswitch, "NHOOK_BOT_SWITCH");
+        BKNOB(fextra, "NHOOK_BOT_FIRE_EXTRA"); BKNOB(retreat, "NHOOK_BOT_RETREAT"); BKNOB(gren, "NHOOK_BOT_GREN");
+        #undef BKNOB
+        if (fight) { bm_load(); nlog("[nhook] [fight] on: skill %.2f, distance x%.2f, strafe x%.2f, switch x%.2f, fire slack %.1f deg, back off below shield %.2f, grenades every %.0f s",
+                                     skill, kdist, kstrafe, kswitch, fextra, retreat, gren); } }
+    int engaged = 0; float ftx = 0, fty = 0; uint32_t fbtn = 0; g_bot_fighting = fight && spar;
+    if (fight && spar && have_tg) {
+        static uint32_t cur; static double tacq, tvis, tswitch, tmelee, tgren, tlos, tlast; static float ox, oy, side = 1;
+        double dt = tlast ? now - tlast : 0.033; if (dt > 0.2) dt = 0.2; tlast = now;
+        if (ftg.handle != cur) { cur = ftg.handle; tacq = now; tvis = 0; ox = (bot_rand01() - 0.5f) * 0.15f; oy = (bot_rand01() - 0.5f) * 0.08f; }
+        { static double tput; if (g_los_t > tput && g_los_req == g_los_done) { tput = g_los_t; los_put(g_los_res_tgt, g_los_res, g_los_t); } }   // (the last answer -> the cache)
+        if (now - tlos > 0.07 && g_los_req == g_los_done) { tlos = now;   // ask for the line to one enemy's chest: the target every other time, else the next of the 3 nearest
+            static int rr; const NovObj* q = &ftg; rr++;
+            if (rr & 1) { int cand[3] = {-1, -1, -1}; float cd[3] = {1e30f, 1e30f, 1e30f};
+                for (int i = 0; i < n; i++) { const NovObj* t = &objs[i]; if (t->type || t->dead || i == me || !bot_enemy(o, t) || t->handle == ftg.handle) continue;
+                    float dx = t->c[0] - cam[0], dy = t->c[1] - cam[1], dz = t->c[2] - cam[2], d = dx * dx + dy * dy + dz * dz;
+                    for (int k = 0; k < 3; k++) if (d < cd[k]) { for (int m = 2; m > k; m--) { cd[m] = cd[m - 1]; cand[m] = cand[m - 1]; } cd[k] = d; cand[k] = i; break; } }
+                int k = (rr >> 1) % 3; if (cand[k] >= 0 && cd[k] < 1600.0f) q = &objs[cand[k]]; }
+            g_los_p[0] = cam[0]; g_los_p[1] = cam[1]; g_los_p[2] = cam[2]; g_los_v[0] = q->c[0] - cam[0]; g_los_v[1] = q->c[1] - cam[1]; g_los_v[2] = q->c[2] + 0.3f * q->r - cam[2];
+            g_los_ign[0] = meh; g_los_ign[1] = q->handle; g_los_tgt = q->handle; g_los_req++; }
+        int vis = los_get(ftg.handle, now); if (vis < 0) vis = tdist < 6 ? 1 : 0;
+        if (vis) tvis = now;
+        int seen = tvis && now - tvis < 0.6;
+        float react = g_bm.reaction * (1.25f - skill) * 0.7f, noise = g_bm.aim_err * (1.25f - skill) / 57.2958f;
+        if (seen) {
+            // aim: OU noise around the exact angles, turning at most 1.5 rad/s before the reaction time is up, 7 rad/s after
+            float th = 0.45f, k = (float)dt / th, sg = noise * sqrtf(2.0f * (float)dt / th);
+            ox += -ox * k + sg * bot_gauss(); oy += -oy * k + 0.5f * sg * bot_gauss();
+            float dy = bot_wrap(tyaw + ox - yaw0), dp = (tpitch + oy) - pitch0, mx = (float)dt * (now - tacq < react ? 1.5f : 7.0f);
+            yaw = yaw0 + (dy > mx ? mx : dy < -mx ? -mx : dy); pitch = pitch0 + (dp > mx ? mx : dp < -mx ? -mx : dp); out |= 1;
+            float ey = bot_wrap(tyaw - yaw0), ep = tpitch - pitch0, err = sqrtf(ey * ey + ep * ep) * 57.2958f, size = atanf(0.4f / (tdist > 0.5f ? tdist : 0.5f)) * 57.2958f;
+            g_bot_err = err; g_bot_fire = vis && now - tacq > react && err < (size > 1.2f ? size : 1.2f) + fextra && tdist < 40;
+            if (tdist < 1.8f && now - tmelee > 0.7) { tmelee = now; fbtn |= 2; }                                            // B: melee
+            if (gren > 0 && tdist > 6 && tdist < 16 && vis && now - tgren > gren + 6 * bot_rand01() && now - tacq > react) { tgren = now; }
+            if (now - tgren < 0.15) fbtn |= 0x10000;                                                                       // (left trigger: a grenade)
+            if (tdist < 30) { engaged = 1;
+                float r = tdist > g_bm.dist_p75 * kdist ? 0.9f : tdist < g_bm.dist_p25 * kdist ? -0.7f : 0.25f; if (o->shield < retreat && o->shield >= 0) r = -0.8f;
+                if (now > tswitch) { side = -side; tswitch = now + g_bm.strafe_switch * kswitch * (0.6f + 0.8f * bot_rand01()); }
+                float lat = side * fminf(1.0f, kstrafe * (0.25f + g_bm.strafe_rms / (g_bm.run_speed > 0.5f ? g_bm.run_speed : 2.1f)));
+                // never off the floor: test where this step leads (1 unit along the move); flip the strafe, then drop the back-off
+                float fx = cosf(yaw0), fy = sinf(yaw0), lx = -fy, ly = fx;
+                for (int tries = 0; tries < 3; tries++) { float p2[3] = {o->c[0] + (fx * r + lx * lat) * 1.2f, o->c[1] + (fy * r + ly * lat) * 1.2f, o->c[2] - 0.35f};
+                    if (bot_floor_ok(p2)) break; if (tries == 0) { side = -side; lat = -lat; } else if (tries == 1) r = r < 0 ? 0 : r; else { lat = 0; r = 0; } }
+                ftx = r; fty = lat; } }
+        else { g_bot_fire = 0; if (tdist > 8) { yaw = yaw0; pitch = pitch0; out &= ~1; } }   // (out of sight: no tracking through walls -- look where it walks)
+        if (bot_log()) { static double tl; if (now - tl > 1.0) { tl = now; nlog("[nhook] [fight] target %08x %.1f u %s, err %.1f deg, %s%s, shield %.2f", ftg.handle, tdist, vis ? "in sight" : "hidden", g_bot_err, engaged ? "engaged" : "hunting", g_bot_fire ? ", FIRING" : "", o->shield); } }
+    }
     // the walker (nav.c's graph): the path's way PELOAD_NAV_LOOK nodes ahead; with the aim on, the throttle walks it in any
     // direction relative to the view
     float tx = 0, ty = 0;
@@ -163,7 +317,7 @@ static void bot_step(void) {
                     float rel = bot_wrap(way - yaw); tx = cosf(rel); ty = sinf(rel); if (fabsf(rel) > 1.05f) { tx *= 0.25f; ty *= 0.25f; } }
                 else { float rel = bot_wrap(way - yaw); tx = cosf(rel); ty = sinf(rel); }   // walk the way whatever the view
                 int strafe = 0;
-                if (mode == 2) { static float nearr = -1; if (nearr < 0) { const char* e = getenv("PELOAD_NAV_NEAR"); nearr = e ? atof(e) : 4.0f; } float gp[3]; nav_pos(goal, gp);
+                if (mode == 2 && !g_bot_fighting) { static float nearr = -1; if (nearr < 0) { const char* e = getenv("PELOAD_NAV_NEAR"); nearr = e ? atof(e) : 4.0f; } float gp[3]; nav_pos(goal, gp);
                     if ((gp[0] - pos[0]) * (gp[0] - pos[0]) + (gp[1] - pos[1]) * (gp[1] - pos[1]) < nearr * nearr) { float side = fmod(now, 3.0) < 1.5 ? 0.8f : -0.8f; tx = 0; ty = side; strafe = 1; } }   // near: strafe
                 // stuck: under 0.35 units in 1.5 s while walking -> back off, jump, raise the cost of the next stretch, replan; four
                 // times in 10 s: a new goal. Not while strafing beside the enemy (side to side is no progress by design: the loader's
@@ -187,13 +341,22 @@ static void bot_step(void) {
                     pos[0], pos[1], pos[2], cur, pidx, plen, tp[0], tp[1], tp[2], tx, ty); } }
             else g_nav_act = 0; }
         else g_nav_act = 0; }
+    if (engaged) { tx = ftx; ty = fty; out |= 2; }   // (the fighter's moves in reach override the walker's path)
+    // fire: the control record's bit 19 (+0xC8) -- the local unit fires, and the control packet carries the weapon's firing state
+    // to the server (halo3+0x5452c reads it from the local weapon: a packet bit of its own does nothing; 2026-11-08 scan: bits 19
+    // and 21 fire, 1 jumps). NHOOK_BOT_FIREBIT=<hex> = another bit.
+    { static uint64_t fb = 0; if (!fb) { const char* e = getenv("NHOOK_BOT_FIREBIT"); fb = e ? strtoull(e, 0, 16) : 0x80000ull; }
+      if (spar && g_bot_fire) { g_bot_btn = ((out & 4) ? g_bot_btn : 0) | fb; out |= 4; } else if (!(out & 4)) g_bot_btn = 0; }
     if (diag) { uint64_t b = 0; int d = bot_diag(&tx, &ty, &b, now); out |= d; if (d & 4) g_bot_btn = b; else if (!(out & 4)) g_bot_btn = 0;
         static double tl; if (now - tl > 0.25) { tl = now; const float* v = o->vel;
-            nlog("[nhook] [bot] test: pos (%.2f %.2f %.2f) vel (%.2f %.2f %.2f) yaw %.1f throttle (%.2f, %.2f) buttons 0x%llx", o->c[0], o->c[1], o->c[2], v[0], v[1], v[2],
-                 yaw0 * 57.2958f, tx, ty, (d & 4) ? (unsigned long long)b : 0ull); } }
+            nlog("[nhook] [bot] test: pos (%.2f %.2f %.2f) vel (%.2f %.2f %.2f) yaw %.1f throttle (%.2f, %.2f) buttons 0x%llx; shots %u deletes %lu", o->c[0], o->c[1], o->c[2], v[0], v[1], v[2],
+                 yaw0 * 57.2958f, tx, ty, (d & 4) ? (unsigned long long)b : 0ull, g_nov_shot_n, g_nov_del_calls); } }
     { static int fo = -1; static float fy, fp; static int hp; if (fo < 0) { const char* e = getenv("NHOOK_BOT_FACE"); int k = e ? sscanf(e, "%f,%f", &fy, &fp) : 0; fo = k >= 1; hp = k == 2; }
       if (fo) { yaw = fy / 57.29578f; if (hp) pitch = fp / 57.29578f; out |= 1; } }   // NHOOK_BOT_FACE (above)
     g_bot_yaw = yaw; g_bot_pitch = pitch; g_bot_tx = tx; g_bot_ty = ty; g_bot_out = out;
+    // the virtual controller: left stick = the throttle (y forward, x right = -left), A = jump, right trigger = fire
+    bot_pad(-ty, tx, (spar && g_bot_fire) ? 1.0f : 0.0f, (((out & 4) && (g_bot_btn & g_bot_jump)) ? 1u : 0u) | (fbtn & 0xFFFF) | ((fbtn & 0x10000) ? 0x40000000u : 0));
+    if (!(spar && g_bot_err >= 0)) g_bot_fire = 0;
 }
 static void* bot_thread(void* p) { (void)p; pthread_setname_np("shim-bot"); for (;;) { usleep(33000); bot_step(); } return 0; }
 static void bot_start(void) {   // first use: the thread (also from the launch switches)
@@ -208,7 +371,7 @@ static void bot_init(void) {   // launch switches (nstats_start)
     const char* j = getenv("NHOOK_BOT_JUMP"); if (j) g_bot_jump = strtoull(j, 0, 16);
     if (getenv("NHOOK_SPAR") && strcmp(getenv("NHOOK_SPAR"), "0")) g_bot_spar = 1;
     int m = bot_parse_nav(getenv("NHOOK_NAV")); if (m > 0) g_nav_mode_rt = m; else g_nav_mode_rt = 0;
-    if (g_bot_spar || g_nav_mode_rt > 0 || getenv("NHOOK_BOT_THROTTLE") || getenv("NHOOK_BOT_BTNSCAN") || getenv("NHOOK_BOT_FACE")) bot_start(); }
+    if (g_bot_spar || g_nav_mode_rt > 0 || getenv("NHOOK_BOT_THROTTLE") || getenv("NHOOK_BOT_BTNSCAN") || getenv("NHOOK_BOT_FACE") || getenv("NHOOK_BOT_HOLDBTN")) bot_start(); }
 static int bot_control(const char* act, const char* qs) {   // POST do=spar&on=0|1, do=walk&mode=off|roam|enemy|x,y,z|vehicle:<name>
     if (!bot_allowed()) return 0;
     if (!strcmp(act, "walk") && !bot_walk_ok()) return 0;   // (a joined client: the server decides its moves)

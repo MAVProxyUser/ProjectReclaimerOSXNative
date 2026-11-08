@@ -1230,7 +1230,7 @@ static void st_snapshot(StBuf* s) {
               } else sb_put(s, "null"); }
             const float* fwv = (const float*)(d + 0x5c); sb_put(s, ",\"facing\":%.0f", atan2f(fwv[1], fwv[0]) * 57.2958f);
             { const float* av = (const float*)(d + 0x1a0); float ah = sqrtf(av[0] * av[0] + av[1] * av[1]);   // the unit's aim (teleport.md: +0x1a0): where it shoots
-              if (isfinite(av[0]) && ah + fabsf(av[2]) > 0.5f) sb_put(s, ",\"aim\":[%.1f,%.1f]", atan2f(av[1], av[0]) * 57.2958f, atan2f(av[2], ah) * 57.2958f); }
+              if (isfinite(av[0]) && ah + fabsf(av[2]) > 0.5f) sb_put(s, ",\"look\":[%.1f,%.1f]", atan2f(av[1], av[0]) * 57.2958f, atan2f(av[2], ah) * 57.2958f); }
         } else sb_put(s, "null,\"weapons\":[],\"grenades\":{\"frag\":0,\"plasma\":0,\"spike\":0,\"firebomb\":0},\"vehicle\":null");
         int16_t sbs[8]; int sbok = st_statborg(pl[k].slot, sbs);
         sb_put(s, ",\"pos\":"); sb_f3(s, o); sb_put(s, ",\"speed\":%.2f,\"kills\":%d", spd, sbok ? sbs[SB_KILLS] : 0);

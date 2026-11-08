@@ -52,6 +52,7 @@ static const HkCat g_hk_cat[] = {
     {"opus decode (voice)", "forensic voice audio + the sender's channel (the app's voice mixer)", "text hook", "voice"},
     {"view constants", "the overlay's camera (installed when an overlay feature is first on)", "text hook", "overlay"},
     {"player control (sparring aim / walker)", "sparring aim, walker (test clients)", "text hook", "bot"},
+    {"control packet (walker on a server)", "a joined walker's moves and buttons into the packet the server gets (halo3+0x50fb8)", "text hook", "bot"},
     {"game tick (host tools)", "teleports / host requests on a server", "body hook", "host"},
     {"frame (host tools)", "teleports / host requests on a client (the app's per-frame function)", "text hook", "host"},
     {"kill volume test", "the Boundaries switch", "text hook", "host"},

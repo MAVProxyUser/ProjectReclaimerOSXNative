@@ -21,7 +21,8 @@
 typedef struct { float z; uint16_t comp; uint8_t wd, fl; int32_t nbr[8]; } NavNode;     // 40 bytes, as h3nav.py writes
 static struct { char name[96], file[1100]; int ok, failed; float x0,y0,cell,step,clearh; int w,h,n; uint32_t*first; NavNode*nd; int32_t*cellof;
     float*g; float*pen; int32_t*came; uint32_t*stamp; uint32_t gen; float*hf; int32_t*hn; int hcap;
-    float*dng; double dng_t; uint32_t dng_nd; } g_nav;
+    float*dng; double dng_t; uint32_t dng_nd;
+    float*pop; } g_nav;   // pop: 0..1 how much real players use a floor node (the native walker's model heat, nbot.c; 0 = none)
 static volatile int g_nav_act; static volatile float g_nav_lx, g_nav_ly, g_nav_rx, g_nav_ry; static volatile uint16_t g_nav_btn;
 // PELOAD_NAV=roam | enemy | x,y,z | vehicle:<name> (2026-10-18: walk up to the nearest vehicle whose name contains <name>,
 // e.g. vehicle:hornet, stop beside it and face it -- for looking at one with the overlay in a test run)
@@ -103,7 +104,7 @@ static int nav_astar(int s,int t,int32_t*path,int maxp){
         if(u==t){ found=1; break; } if(++pops>400000) break;
         float up[3]; nav_pos(u,up); float gu=g_nav.g[u];
         for(int k=0;k<8;k++){ int v=g_nav.nd[u].nbr[k]; if(v<0||v>=g_nav.n) continue; float vp[3]; nav_pos(v,vp);
-            float dx=vp[0]-up[0],dy=vp[1]-up[1],dz=vp[2]-up[2]; float c=sqrtf(dx*dx+dy*dy+dz*dz)*(1.0f+wpen[g_nav.nd[v].wd&15]+(g_nav.dng?kav*g_nav.dng[v]:0))+g_nav.pen[v]+((g_nav.nd[v].fl&1)?0.5f:0);
+            float dx=vp[0]-up[0],dy=vp[1]-up[1],dz=vp[2]-up[2]; float c=sqrtf(dx*dx+dy*dy+dz*dz)*(1.0f+wpen[g_nav.nd[v].wd&15]+(g_nav.dng?kav*g_nav.dng[v]:0)-(g_nav.pop?0.4f*g_nav.pop[v]:0))+g_nav.pen[v]+((g_nav.nd[v].fl&1)?0.5f:0);   // (pop: the lanes players use cost up to 40% less)
             float gv=gu+c; if(g_nav.stamp[v]==gen && g_nav.g[v]<=gv) continue;
             g_nav.stamp[v]=gen; g_nav.g[v]=gv; g_nav.came[v]=u;
             float hx=vp[0]-tp[0],hy=vp[1]-tp[1],hz=vp[2]-tp[2]; NAV_PUSH(gv+sqrtf(hx*hx+hy*hy+hz*hz),v); } }

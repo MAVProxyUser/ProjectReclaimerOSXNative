@@ -944,11 +944,15 @@ INTERPOSE(my_AudioUnitSetProperty, AudioUnitSetProperty);
 INTERPOSE(my_AudioUnitRender, AudioUnitRender);
 #include "nmic.c"   // the microphone path: NHOOK_AUDIO_TRACE, NHOOK_MUTE_OUTPUT, the soundboard microphone
 
+#include <dispatch/dispatch.h>
+static void vpad_start(void* c) { (void)c; g_vpad_on = nh_vpad_install(); }
 __attribute__((constructor)) static void nhook_init(void) {
     const char* lf = getenv("NHOOK_LOG");
     if (lf) g_logfd = open(lf, O_WRONLY | O_CREAT | O_APPEND, 0644);
     if (getenv("NHOOK_TRACE_WRITES")) g_trace_writes = atoi(getenv("NHOOK_TRACE_WRITES"));
     nlog("[nhook] loaded (pid %d)", getpid());
     hk_init(); app_build_pick();                     // the hooks check's items; this app build's addresses (napp_builds.h)
+    if (getenv("NHOOK_VPAD") && strcmp(getenv("NHOOK_VPAD"), "0") && getenv("RECLAIMER_PROFILE_DIR"))   // nvpad.m: test identities only
+        vpad_start(0);   // (at once: the app may enumerate controllers only early -- 300 ms later it never asked again)
     if (getenv("NHOOK_SELFTEST")) nstats_start();       // shim/tools/nhook-selftest.sh: the stats server without the app
 }
