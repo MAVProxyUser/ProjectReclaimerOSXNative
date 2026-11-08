@@ -96,7 +96,10 @@ while [ $(( $(date +%s) - t0 )) -lt "$TOTAL" ] && { [ "$NMATCH" = 0 ] || [ $((DO
   if [ -z "$addr" ]; then echo "$(date +%H:%M) no suitable server: waiting 5 minutes"; sleep 300; continue; fi
   cls=${line##*| }; cls=${cls%% *}; echo "$(date +%H:%M) joining $line"
   L="$TR/logs/$(date +%Y%m%d-%H%M%S).log"; RL="$L.rec"
-  play=0; [ "${OBS_PLAY_FIRST:-0}" = 1 ] && [ -z "${played_first:-}" ] && { play=1; played_first=1; }
+  # OBS_PLAY_FIRST=1: once per process group (a plan-run.sh and everything it starts: later steps inherit the variable and must
+  # not each open a full-screen game that waits for the user) -- $TR/.play-first holds the group that used it
+  play=0; PG=$(ps -o pgid= -p $$ | tr -d ' ')
+  if [ "${OBS_PLAY_FIRST:-0}" = 1 ] && [ -z "${played_first:-}" ] && [ "$(cat "$TR/.play-first" 2>/dev/null)" != "$PG" ]; then play=1; played_first=1; echo "$PG" > "$TR/.play-first"; fi
   # YOU CAN PLAY (2026-11-08, second version): the observer's game is a --background test window (640 x 360 rendering whatever
   # the window becomes, never the front app, so the controller never reaches it). A click in it (nhook NHOOK_TAKEOVER writes
   # $L.takeover) or OBS_PLAY_FIRST=1 (the first visit) launches the game in NORMAL mode on the same server instead: the user's

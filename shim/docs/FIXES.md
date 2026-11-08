@@ -3121,7 +3121,9 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   OBS_PLAY_FIRST=1 = the first visit is the user's from the start. Another Project Reclaimer appearing (the user's own game) no
   longer ends the observer (exit 1 made plan-run.sh skip to the next step, whose own check refused too): its game leaves and it
   waits until that one quits; plan-run.sh waits before every step while a game runs. NHOOK_TAKEOVER_BRIDGE=1 = the old in-place
-  take-over (window + bridge), kept for experiments.
+  take-over (window + bridge), kept for experiments. OBS_PLAY_FIRST is used once per process group ($TR/.play-first holds the group that used
+  it): the plan's later observer steps and learn-loop turns inherit the variable and would each have opened a full-screen game
+  waiting for the user.
 
 ## 19. Performance
 
