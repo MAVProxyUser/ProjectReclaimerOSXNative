@@ -126,25 +126,30 @@ def behaviour(R):
                         'approach_killer': r2(stt.mean(ak), 3) if ak else None, 'approach_others': r2(stt.mean(ao), 3) if ao else None,
                         'respawn_s_median': r2(stt.median([r['respawn_s'] for r in P]))}
     # teamwork (team games): cohesion, focus fire, aid, joins -- the walker's buddy spacing, join and aid odds
-    TM = [r for r in R if r['kind'] == 'team']; AD = [r for r in R if r['kind'] == 'aid']; JN = [r for r in R if r['kind'] == 'join']
-    if TM or AD or JN:
-        tw = {}
-        if TM:
-            wsum = sum(r['samples'] for r in TM)
-            def wavg(k): v = [(r[k], r['samples']) for r in TM if r.get(k) is not None]; return r2(sum(a * n for a, n in v) / sum(n for a, n in v), 3) if v else None
-            tw.update({'team_recordings': len(TM), 'near_mate_median': wavg('near_median'), 'near_mate_p25': wavg('near_p25'), 'near_mate_p75': wavg('near_p75'),
-                       'within8': wavg('within8'), 'within15': wavg('within15'), 'within25': wavg('within25'), 'near_mate_fighting_median': wavg('near_fighting_median'),
-                       'within15_fighting': wavg('within15_fighting'), 'focus_share': wavg('focus_share')})
-        if AD:
-            ai = [r for r in AD if r['aided']]; na = [r for r in AD if not r['aided']]
-            tw.update({'attacks_with_mates_near': len(AD), 'aided': r2(len(ai) / len(AD), 3), 'aided_by_fire': r2(sum(r['aid_kind'] == 'fire' for r in AD) / len(AD), 3),
-                       'aided_by_moving_in': r2(sum(r['aid_kind'] == 'move' for r in AD) / len(AD), 3), 'aid_s_median': r2(pct([r['aid_s'] for r in ai], .5)),
-                       'died5_if_aided': r2(sum(r['died5'] for r in ai) / len(ai), 3) if ai else None, 'died5_if_alone': r2(sum(r['died5'] for r in na) / len(na), 3) if na else None,
-                       'aided_if_mate_within_10': r2(sum(r['aided'] for r in AD if r['nearest_mate'] < 10) / max(1, sum(r['nearest_mate'] < 10 for r in AD)), 3)})
-        if JN:
-            jj = [j for j in JN if j['joined'] is not None]
-            tw.update({'join_cases': len(JN), 'joined': r2(len(jj) / len(JN), 3), 'join_s_median': r2(pct([j['joined'] for j in jj], .5))})
-        B['teamwork'] = tw
+    TM0 = [r for r in R if r['kind'] == 'team']; AD0 = [r for r in R if r['kind'] == 'aid']; JN0 = [r for r in R if r['kind'] == 'join']
+    # by game size too (2026-11-08 14:20: 30-vs-30 games put a teammate 3 units away 82% of the time -- no rule for a 2v2): "teamwork"
+    # = all team games, "teamwork_small" = 12 players or fewer, "teamwork_large" = more (the walker takes the one its game is)
+    for key, lo, hi in (('teamwork', 0, 999), ('teamwork_small', 0, 12), ('teamwork_large', 13, 999)):
+      TM = [r for r in TM0 if lo <= r.get('players', 0) <= hi or key == 'teamwork']; AD = [r for r in AD0 if lo <= r.get('players', 0) <= hi or key == 'teamwork']
+      JN = JN0 if key == 'teamwork' else []
+      if TM or AD or JN:
+          tw = {}
+          if TM:
+              wsum = sum(r['samples'] for r in TM)
+              def wavg(k): v = [(r[k], r['samples']) for r in TM if r.get(k) is not None]; return r2(sum(a * n for a, n in v) / sum(n for a, n in v), 3) if v else None
+              tw.update({'team_recordings': len(TM), 'near_mate_median': wavg('near_median'), 'near_mate_p25': wavg('near_p25'), 'near_mate_p75': wavg('near_p75'),
+                         'within8': wavg('within8'), 'within15': wavg('within15'), 'within25': wavg('within25'), 'near_mate_fighting_median': wavg('near_fighting_median'),
+                         'within15_fighting': wavg('within15_fighting'), 'focus_share': wavg('focus_share')})
+          if AD:
+              ai = [r for r in AD if r['aided']]; na = [r for r in AD if not r['aided']]
+              tw.update({'attacks_with_mates_near': len(AD), 'aided': r2(len(ai) / len(AD), 3), 'aided_by_fire': r2(sum(r['aid_kind'] == 'fire' for r in AD) / len(AD), 3),
+                         'aided_by_moving_in': r2(sum(r['aid_kind'] == 'move' for r in AD) / len(AD), 3), 'aid_s_median': r2(pct([r['aid_s'] for r in ai], .5)),
+                         'died5_if_aided': r2(sum(r['died5'] for r in ai) / len(ai), 3) if ai else None, 'died5_if_alone': r2(sum(r['died5'] for r in na) / len(na), 3) if na else None,
+                         'aided_if_mate_within_10': r2(sum(r['aided'] for r in AD if r['nearest_mate'] < 10) / max(1, sum(r['nearest_mate'] < 10 for r in AD)), 3)})
+          if JN:
+              jj = [j for j in JN if j['joined'] is not None]
+              tw.update({'join_cases': len(JN), 'joined': r2(len(jj) / len(JN), 3), 'join_s_median': r2(pct([j['joined'] for j in jj], .5))})
+          tw['recordings_or_cases'] = len(TM) + len(AD); B[key] = tw
     I = [r for r in R if r['kind'] == 'item']
     if I:
         def share(lo, hi, k):

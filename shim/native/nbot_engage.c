@@ -22,7 +22,8 @@ typedef struct { char grp[24]; float lat[20], rad[20]; char mine; } EgPiece;   /
 static struct { int loaded, on, npiece, nmine; float w[8]; int has_w; struct { char cls[12]; float p25, med, p75; int n; } band[10]; int nband;
                 float p_view, p_behind, p_mid, turn_s; EgPiece* lib; int gren_ok; float gren_every, gren_d0, gren_d1;
                 float rd_turn, rd_turn_s, p_killer, p_spot, it_near, it_mid, it_far;
-                float tw_spacing, tw_within15, p_join, join_s, p_aid, aid_s; } g_eg;   // (teamwork: team games)
+                float tw_spacing, tw_within15, p_join, join_s, p_aid, aid_s;   // (teamwork in use: tw_pick() from twset by the game's size)
+                float twset[3][6]; int twhas[3]; } g_eg;   // [0] all team games, [1] 12 players or fewer, [2] more
 static volatile uint32_t g_tw_mate; static volatile double g_tw_until;   // the teammate the walker works with right now (aid / join), until
 static volatile uint32_t g_tw_aid_mate;                                   // a teammate to go to (its attacker not known to us): nbot_goals.c   // (behaviour: radar, revenge, items)
 static const char* eg_find(const char* txt, const char* key, const char* end) {   // "key": within [txt, end)
@@ -77,11 +78,11 @@ static void eg_parse(const char* txt, const char* end, int overlay, int mine) {
             if (a >= 0 && a0 >= 0) g_eg.it_near = fmaxf(0.03f, 2 * (a - a0)); if (b >= 0 && b0 >= 0) g_eg.it_mid = fmaxf(0.03f, 2 * (b - b0)); if (c >= 0 && c0 >= 0) g_eg.it_far = fmaxf(0.03f, 2 * (c - c0)); } }
     // teamwork (engage-model.py behaviour.teamwork, from team games): the spacing to the nearest teammate, how often one is within
     // 15 units, the odds and delays of joining a teammate's fight and of coming to a teammate's aid
-    const char* tm = eg_find(txt, "teamwork", end);
-    if (tm && *tm == '{') { const char* tme = eg_close(tm);
-        g_eg.tw_spacing = eg_num(tm, "near_mate_median", tme, g_eg.tw_spacing); g_eg.tw_within15 = eg_num(tm, "within15", tme, g_eg.tw_within15);
-        g_eg.p_join = eg_num(tm, "joined", tme, g_eg.p_join); g_eg.join_s = eg_num(tm, "join_s_median", tme, g_eg.join_s);
-        g_eg.p_aid = eg_num(tm, "aided", tme, g_eg.p_aid); g_eg.aid_s = eg_num(tm, "aid_s_median", tme, g_eg.aid_s); }
+    static const char* const twk[3] = {"teamwork", "teamwork_small", "teamwork_large"};   // (by game size: 30-vs-30 is no rule for a 2v2)
+    for (int k = 0; k < 3; k++) { const char* tm = eg_find(txt, twk[k], end); if (!(tm && *tm == '{')) continue; const char* tme = eg_close(tm); float* v = g_eg.twset[k];
+        if (!g_eg.twhas[k]) { v[0] = 10.0f; v[1] = 0.5f; v[2] = 0.3f; v[3] = 1.5f; v[4] = 0.3f; v[5] = 1.5f; }
+        v[0] = eg_num(tm, "near_mate_median", tme, v[0]); v[1] = eg_num(tm, "within15", tme, v[1]); v[2] = eg_num(tm, "joined", tme, v[2]);
+        v[3] = eg_num(tm, "join_s_median", tme, v[3]); v[4] = eg_num(tm, "aided", tme, v[4]); v[5] = eg_num(tm, "aid_s_median", tme, v[5]); g_eg.twhas[k] = 1; }
     const char* lb = eg_find(txt, "library", end);
     if (lb && *lb == '{') { const char* le = eg_close(lb); if (!g_eg.lib) g_eg.lib = calloc(2400, sizeof(EgPiece));
         for (const char* p = lb + 1; g_eg.lib && p < le && g_eg.npiece < 2400; ) {
@@ -124,6 +125,10 @@ static void eg_load_for(const char* map, const char* engine) {
          g_eg.tw_spacing, g_eg.tw_within15 * 100, g_eg.p_join * 100, g_eg.join_s, g_eg.p_aid * 100, g_eg.aid_s);
 }
 static void eg_load(void) { eg_load_for("", ""); }   // (the aggregate only: the offline test, the first fight tick before the map is known)
+static void tw_pick(int players) {   // the teamwork numbers for a game of this size (small set, else large, else all team games, else defaults)
+    int k = players <= 12 ? (g_eg.twhas[1] ? 1 : g_eg.twhas[0] ? 0 : -1) : (g_eg.twhas[2] ? 2 : g_eg.twhas[0] ? 0 : -1);
+    if (k < 0) return; const float* v = g_eg.twset[k];
+    g_eg.tw_spacing = v[0]; g_eg.tw_within15 = v[1]; g_eg.p_join = v[2]; g_eg.join_s = v[3]; g_eg.p_aid = v[4]; g_eg.aid_s = v[5]; }
 static const char* eg_wcls(const char* tag) {   // the walker's weapon (a tag path) -> engage-model.py's weapon classes
     if (!tag) return "none";
     static const struct { const char* k; const char* c; } m[] = {{"sniper", "sniper"}, {"beam_rifle", "sniper"}, {"rocket", "rocket"}, {"spartan_laser", "rocket"}, {"fuel_rod", "rocket"},
@@ -169,6 +174,7 @@ static int eg_choose(const NovObj* objs, int n, int me, const float* cam, float 
     // attacker becomes the target when we know it, else we go to the teammate); a teammate shooting an enemy (aim within 8 deg) ->
     // join on the same enemy with the players' odds and delay. Decided once per (teammate, enemy) per 5 s; the teammate is then
     // the walker's unit partner for 12 s (nbot_goals.c keeps them together).
+    { int units = 0; for (int i = 0; i < n; i++) if (!objs[i].type && !objs[i].dead) units++; tw_pick(units); }   // (this game's size)
     if (ci < 0 || now - cur_seen >= 1.0) {
         static struct { uint32_t m, e; double t; } asked[64]; static int na;
         for (int i = 0; i < n && !sw_to; i++) { const NovObj* m = &objs[i]; if (m->type || m->dead || i == me || bot_enemy(o, m)) continue;

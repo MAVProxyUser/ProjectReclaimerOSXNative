@@ -466,7 +466,7 @@ def multi(path, head, t, slots, me, inf, cls, alive, X, Y, Z, YAW, SH, HP, TEAM,
                     if any(HT[k, m] == tg for m in mates): foc += 1
         if near:
             q = lambda v, f: float(np.percentile(v, f)) if v else None
-            out.append(dict(base, kind='team', samples=len(near), near_p25=round(q(near, 25), 2), near_median=round(q(near, 50), 2), near_p75=round(q(near, 75), 2),
+            out.append(dict(base, kind='team', samples=len(near), players=int(np.median(alive.sum(axis=1)[alive.sum(axis=1) > 0])) if alive.any() else 0, near_p25=round(q(near, 25), 2), near_median=round(q(near, 50), 2), near_p75=round(q(near, 75), 2),
                             within8=round(sum(d < 8 for d in near) / len(near), 3), within15=round(sum(d < 15 for d in near) / len(near), 3), within25=round(sum(d < 25 for d in near) / len(near), 3),
                             near_fighting_median=round(q(near_eng, 50), 2) if near_eng else None, within15_fighting=round(sum(d < 15 for d in near_eng) / len(near_eng), 3) if near_eng else None,
                             focus_share=round(foc / att_n, 3) if att_n else None))
@@ -492,7 +492,7 @@ def multi(path, head, t, slots, me, inf, cls, alive, X, Y, Z, YAW, SH, HP, TEAM,
                         if aid: break
                 died = bool((~alive[k:min(T, k + 50), p_]).any())
                 nm = min(math.hypot(X[k, m] - X[k, p_], Y[k, m] - Y[k, p_]) for m in mates)
-                out.append(dict(base, kind='aid', mates=len(mates), nearest_mate=round(nm, 1), aided=aid, aid_s=aid_s, aid_kind=kind_, died5=died))
+                out.append(dict(base, kind='aid', players=int(alive[k].sum()), mates=len(mates), nearest_mate=round(nm, 1), aided=aid, aid_s=aid_s, aid_kind=kind_, died5=died))
     # skirmishes every 3 s: components of the attack graph over the last 3 s
     for k in range(30, T, 30):
         g = recent(k, 30); g = g | g.T; seen = set()
