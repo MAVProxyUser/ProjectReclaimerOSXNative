@@ -102,6 +102,17 @@ parts.append('''<section><h2>Several enemies at once</h2><div class="two"><div s
     '{:,}'.format(t1.get('sets', 0)), num(t1.get('mean_candidates')), pct(t1.get('logit')), pct(t1.get('nearest')), pct(t1.get('nearest_aim')),
     pct(sa.get('turned_to_it')), pct((sa.get('turned_if_new_one_in_view') or [None])[0]), pct((sa.get('turned_if_new_one_behind') or [None])[0]), num(sa.get('turn_s_median'), 2),
     pct(two.get('died')), pct(one.get('died')), num(two.get('kills_per_stretch'), 2), num(one.get('kills_per_stretch'), 2), wbars(wrows)))
+bh = A.get('behaviour') or {}; rdr = bh.get('radar') or {}; rvg = bh.get('revenge') or {}; itm = bh.get('items') or {}
+if rdr or rvg or itm:
+    rows2 = []
+    if rdr: rows2 += [['radar: turned to an unseen MOVING enemy within 8 units (2.5 s)', pct(rdr.get('turn_moving_in_range'))], ['... to a STILL one within 8 units (the tracker does not show it)', pct(rdr.get('turn_still_in_range'))],
+                      ['... moving / still beyond 8 units (outside the 25 m tracker)', '%s / %s' % (pct(rdr.get('turn_moving_out_of_range')), pct(rdr.get('turn_still_out_of_range')))], ['radar: time to turn (median, s)', num(rdr.get('turn_s_median'), 2)]]
+    if rvg: rows2 += [['after a respawn: next target is the killer', '%s (chance %s)' % (pct(rvg.get('next_target_killer')), pct(rvg.get('chance')))],
+                      ['after a respawn: back within 8 units of the death spot in 40 s', '%s (another spot as far: %s)' % (pct(rvg.get('back_at_death_spot')), pct(rvg.get('baseline_spot')))],
+                      ['respawn wait (median, s)', num(rvg.get('respawn_s_median'))]]
+    if itm: rows2 += [['power items: reached by someone', '%s, median %s s after spawning' % (pct(itm.get('reached')), num(itm.get('reached_s_median')))], ['... first by the player nearest when it spawned', pct(itm.get('first_was_nearest'))],
+                      ['... players 10-20 units away heading straight in', '%s (to another point as far: %s)' % (pct(itm.get('heading_in_10_20')), pct(itm.get('baseline_10_20')))]]
+    parts.append('<section><h2>Radar, revenge and power items</h2><p>An enemy that comes up more than 75° off a player\'s view without attacking: does the player turn to face it, and does it matter whether the enemy moves (the motion tracker shows movement only) and how far it is? After a death: does the player go back, or after the killer? When a power weapon or power-up appears: who goes for it?</p>' + tbl(['Measure', 'Players'], rows2) + '</section>')
 jt = M.get('join_teammate') or {}
 if jt: parts.append('<section><h2>Teamwork</h2><p>When a teammate starts on an enemy within 25 units of a player without a target, the player joins on the same enemy within 3 s %s of the time (%s within 10 units), after %s s. %d cases.</p></section>' % (pct(jt.get('joined')), pct(jt.get('joined_if_within_10')), num(jt.get('join_s_median'), 2), jt.get('n', 0)))
 if sk: parts.append('<section><h2>How big fights get</h2><p>Every 3 seconds, the players linked by attacks form a skirmish.</p>' + bars([('%s players' % k, v, None) for k, v in (sk.get('size_share') or {}).items()], label_w=90, cls='wk') + '</section>')
