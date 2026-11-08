@@ -42,3 +42,33 @@ void nh_vpad_set(float lx, float ly, float rx, float ry, float lt, float rt, uin
         [g.dpad setValueForXAxis:((b & 8192) ? 1 : 0) - ((b & 4096) ? 1 : 0) yAxis:((b & 1024) ? 1 : 0) - ((b & 2048) ? 1 : 0)]; } }
 int nh_vpad_reads(void) { return g_vpad_reads; }
 int nh_vpad_stick_reads(void) { return g_vpad_stick_reads; }
+
+// ---- taking over the observer's game (2026-11-08; the user: "can you make it so that IF I choose to pickup the controls while you
+// sample public games I can play? it seems to only capture the mouse and not the joystick right now"). The observer runs the app
+// with --background (a 640 x 360 window below the others that never takes the focus; the real profile's borderless full screen
+// otherwise), so the app is never the frontmost app -- and the GameController framework hands a real controller's input only to
+// the frontmost app: a click captured the mouse, the controller did nothing. NHOOK_TAKEOVER=1 (shim/tools/observe-public.sh): the
+// first click in the app's window turns on +[GCController shouldMonitorBackgroundEvents] (the controller reaches the app whatever is
+// in front), activates the app, puts the window at the normal level, makes it 1600 x 900 (centered) when smaller, and tells nhook.c
+// (nh_takeover_fire: sound back on, the observer told through NHOOK_TAKEOVER_FILE).
+#import <AppKit/AppKit.h>
+void nh_takeover_fire(void);   // nhook.c
+static id g_tk_monitor;
+static void tk_take(NSWindow* w) {
+    if (@available(macOS 11.3, *)) [GCController setShouldMonitorBackgroundEvents:YES];
+    [NSApp activateIgnoringOtherApps:YES];
+    if (w) {
+        [w setLevel:NSNormalWindowLevel];
+        NSRect f = w.frame, v = (w.screen ?: [NSScreen mainScreen]).visibleFrame;
+        if (f.size.width < 900) { CGFloat ww = fmin(1600, v.size.width * 0.9), hh = ww * 9 / 16; [w setFrame:NSMakeRect(v.origin.x + (v.size.width - ww) / 2, v.origin.y + (v.size.height - hh) / 2, ww, hh) display:YES]; }
+        [w makeKeyAndOrderFront:nil]; }
+    nh_log("[nhook] [takeover] the user has the controls: controller input in the background on (%s), window %s", [GCController respondsToSelector:@selector(setShouldMonitorBackgroundEvents:)] ? "yes" : "this macOS cannot",
+           w ? "raised" : "not found");
+    nh_takeover_fire(); }
+void nh_takeover_install(void) {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        if (g_tk_monitor || !NSApp) { if (!NSApp) nh_takeover_install(); return; }
+        g_tk_monitor = [[NSEvent addLocalMonitorForEventsMatchingMask:(NSEventMaskLeftMouseDown | NSEventMaskRightMouseDown) handler:^NSEvent* (NSEvent* e) {
+            static int done; if (!done && e.window) { done = 1; tk_take(e.window); }
+            return e; }] retain];
+        nh_log("[nhook] [takeover] armed: a click in the game's window gives you the controls (the controller too)"); }); }

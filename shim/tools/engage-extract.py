@@ -92,6 +92,12 @@ def load(path):
     return head, S, E
 
 def wrap(a): return (a + 180.0) % 360.0 - 180.0
+def wcls(w):   # a weapon name -> its class (the same classes as shim/tools/coach.py)
+    w = (w or '').upper()
+    for c, keys in (('sniper', ('SNIPER', 'BEAM RIFLE')), ('laser', ('SPARTAN LASER',)), ('rocket', ('ROCKET', 'FUEL ROD', 'MISSILE')), ('shotgun', ('SHOTGUN', 'EXCAVATOR', 'MAULER')),
+                    ('sword', ('ENERGY BLADE', 'ENERGY SWORD', 'HAMMER')), ('precision', ('BATTLE RIFLE', 'CARBINE', 'MAGNUM')), ('auto', ('ASSAULT RIFLE', 'SMG', 'PLASMA RIFLE', 'SPIKE', 'NEEDLER', 'BRUTE SHOT'))):
+        if any(k in w for k in keys): return c
+    return 'other'
 
 def cut(path):
     head, S, E = load(path)
@@ -104,6 +110,7 @@ def cut(path):
     SH = np.zeros((T, N)); HP = np.zeros((T, N)); SHOTS = np.zeros((T, N)); TEAM = np.full((T, N), -1, int); VEH = np.zeros((T, N), bool)
     KILLS = np.zeros((T, N)); DEATHS = np.zeros((T, N)); HITS = np.zeros((T, N)); PRESENT = np.zeros((T, N), bool)
     WPN = np.full((T, N), '', dtype=object); VNAME = np.full((T, N), '', dtype=object); you = np.full(T, -1, int); GREN = np.full((T, N), -1.0)
+    CAMO = np.zeros((T, N)); OTHER = np.full((T, N), None, dtype=object)   # (columns 17 / 18 since 2026-11-08 16:35: None = not recorded)
     for k, s in enumerate(S):
         you[k] = s.get('you', -1)
         for r in s['p']:
@@ -113,6 +120,7 @@ def cut(path):
             SHOTS[k, c] = r[14] if len(r) > 14 else 0
             KILLS[k, c] = r[12] if len(r) > 12 else 0; DEATHS[k, c] = r[13] if len(r) > 13 else 0; HITS[k, c] = r[15] if len(r) > 15 else 0
             if len(r) > 16: GREN[k, c] = r[16]
+            if len(r) > 18: CAMO[k, c] = r[17] or 0; OTHER[k, c] = r[18] or ''
     local = int(np.bincount(you[you >= 0]).argmax()) if (you >= 0).any() else -1
     # the observer (left out: it only stands there) -- but in a recording of the local player's own game (nhook's recorder: you_plays)
     # "you" is a real player: kept in, and named in the meta record as local_slot (shim/tools/coach.py)
@@ -218,6 +226,7 @@ def cut(path):
     out.extend(multi(path, head, t, slots, me, inf, cls, alive, X, Y, Z, YAW, SH, HP, TEAM, ZOMB, FIRE, HURT, VX, VY, kills))
     out.extend(items(path, head, t, slots, me, cls, alive, X, Y, Z, VX, VY, E))
     out.append(weapons(path, head, t, slots, me, cls, alive, WPN, VEH, E))
+    out.extend(inventory(path, head, t, slots, me, inf, cls, alive, X, Y, Z, TEAM, ZOMB, VEH, WPN, OTHER, CAMO, FIRE, HURT, SHOTS, KILLS))
     # META (the tome: shim/tools/engage-model.py tracks/tome.json): what this recording is -- map, game type, length, players
     out.append({'kind': 'meta', 'file': os.path.basename(path), 'map': head.get('map'), 'mode': head.get('mode'), 'variant': head.get('variant'), 'class': cls,
                 'start': head.get('start'), 'samples': int(T), 'seconds': round(float(t[-1] - t[0]), 1) if T > 1 else 0, 'players_max': int(alive.sum(axis=1).max()) if T else 0,
@@ -235,6 +244,41 @@ def cut(path):
     return out
 
 POWER = ('rocket', 'sniper', 'beam rifle', 'spartan laser', 'shotgun', 'energy sword', 'gravity hammer', 'hammer', 'fuel rod', 'missile pod', 'flamethrower', 'plasma cannon', 'overshield', 'camo', 'power-up', 'powerup')
+def inventory(path, head, t, slots, me, inf, cls, alive, X, Y, Z, TEAM, ZOMB, VEH, WPN, OTHER, CAMO, FIRE, HURT, SHOTS, KILLS):
+    """the players' own inventory (2026-11-08; the user: "the walker should be aware of its own inventory, and power up status"),
+    from recordings with the other-weapon / camo columns: kind "wswitch" = a weapon switch (the one in hand and the one carried trade
+    places) with the nearest enemy's distance, fighting or not; kind "camo" = a stretch under active camo: its length, how much of it
+    the player fired, kills during it, the distance of its first shot, the closing speed toward the nearest enemy"""
+    out = []; T, N = alive.shape; base = {'file': os.path.basename(path), 'map': head.get('map'), 'mode': head.get('mode'), 'class': cls}
+    if T < 10 or not any(OTHER[k, c] is not None for k in (0, T // 2, T - 1) for c in range(N)): return out
+    side = ZOMB if inf else TEAM; pl = np.array([s_ != me for s_ in slots])
+    def nearest(k, i):
+        en = alive[k] & (side[k] != side[k, i]) & (np.arange(N) != i) & pl
+        if inf or (side[k] < 0).all(): en = alive[k] & (np.arange(N) != i) & pl   # (free-for-all: everyone)
+        if not en.any(): return None
+        d = np.sqrt((X[k] - X[k, i]) ** 2 + (Y[k] - Y[k, i]) ** 2 + (Z[k] - Z[k, i]) ** 2); d = np.where(en, d, np.inf); return float(d.min())
+    for i in range(N):
+        if not pl[i]: continue
+        for k in range(1, T):
+            if not (alive[k, i] and alive[k - 1, i]) or VEH[k, i] or VEH[k - 1, i]: continue
+            a0, b0, a1, b1 = WPN[k - 1, i], OTHER[k - 1, i], WPN[k, i], OTHER[k, i]
+            if a0 and b0 and a1 == b0 and b1 == a0 and a0 != b0:
+                fight = bool(FIRE[max(0, k - 30):k + 1, i].any() or HURT[max(0, k - 30):k + 1, i].any()); d = nearest(k, i)
+                out.append(dict(base, kind='wswitch', i=slots[i], t=round(float(t[k]), 2), frm=a0, to=a1, frm_c=wcls(a0), to_c=wcls(a1), dist=None if d is None else round(d, 1), fight=fight))
+        k = 0
+        while k < T:
+            if not (alive[k, i] and CAMO[k, i] > 0.05): k += 1; continue
+            k0 = k
+            while k < T and alive[k, i] and CAMO[k, i] > 0.05: k += 1
+            if k - k0 < 10: continue
+            fired = FIRE[k0:k, i]; f1 = int(np.argmax(fired)) if fired.any() else None
+            d0 = nearest(k0, i); df = nearest(k0 + f1, i) if f1 is not None else None
+            dk = KILLS[k - 1, i] - KILLS[k0, i]
+            out.append(dict(base, kind='camo', i=slots[i], t=round(float(t[k0]), 2), dur=round(float(t[k - 1] - t[k0]), 1), fired_share=round(float(fired.mean()), 3),
+                            kills=int(max(0, dk)), first_shot_dist=None if df is None else round(df, 1), nearest_at_start=None if d0 is None else round(d0, 1),
+                            died=bool(k < T and not alive[k, i])))
+    return out
+
 def weapons(path, head, t, slots, me, cls, alive, WPN, VEH, E):
     """WEAPONS (the user, 2026-11-08: "gather some stats about the most effective weapons"): per weapon (lower case) the seconds
     it was held in hand by live players on foot (the observer left out), the kills credited to it by the game (the kill event's

@@ -159,6 +159,22 @@ def behaviour(R, Dz=None):
                       'heading_in_20_40': share(20, 40, 1), 'baseline_20_40': share(20, 40, 2), 'heading_in_2_10': share(2, 10, 1), 'baseline_2_10': share(2, 10, 2),
                       'reached': r2(len(f) / len(I), 3), 'reached_s_median': r2(stt.median(f)) if f else None,
                       'first_was_nearest': r2(sum(bool(i['first_was_nearest']) for i in I if i['first_s'] is not None) / max(1, len(f)), 3)}
+    # the players' own inventory (engage-extract.py "wswitch" / "camo", recordings with the other-weapon / camo columns): which
+    # switches they make at what distance to the nearest enemy, in a fight or not; how they use active camo
+    SW = [r for r in R if r.get('kind') == 'wswitch']; CM = [r for r in R if r.get('kind') == 'camo']
+    if SW or CM:
+        inv = {}
+        if SW:
+            by = {}
+            for r in SW: by.setdefault('%s>%s' % (r['frm_c'], r['to_c']), []).append(r)
+            inv['switches'] = len(SW); inv['switch_in_fight'] = r2(sum(r['fight'] for r in SW) / len(SW), 3)
+            inv['by_pair'] = {k: {'n': len(v), 'dist_median': r2(pct([r['dist'] for r in v if r['dist'] is not None], .5)), 'in_fight': r2(sum(r['fight'] for r in v) / len(v), 3)}
+                              for k, v in sorted(by.items(), key=lambda kv: -len(kv[1])) if len(v) >= 5}
+        if CM:
+            inv['camo'] = {'stretches': len(CM), 'seconds_median': r2(pct([r['dur'] for r in CM], .5)), 'fired_share_median': r2(pct([r['fired_share'] for r in CM], .5), 3),
+                           'first_shot_dist_median': r2(pct([r['first_shot_dist'] for r in CM if r['first_shot_dist'] is not None], .5)),
+                           'kills_per_stretch': r2(sum(r['kills'] for r in CM) / len(CM)), 'died_in_it': r2(sum(r['died'] for r in CM) / len(CM), 3)}
+        B['inventory'] = inv
     # power-ups in fights (2026-11-08; the user: "the walker should be aware of its own inventory, and power up status as well"):
     # duels by who had an overshield (shield above 1) when the first shot went in -- the attacker's win share and closing speed
     D = [r for r in (Dz if Dz is not None else R) if r.get('kind', 'duel') == 'duel' and not r['ctx']['a_veh'] and not r['ctx']['b_veh'] and r['out']['win'] in ('a', 'b')]

@@ -926,13 +926,17 @@ static int my_getaddrinfo(const char* h, const char* sv, const struct addrinfo* 
 // streams: halo3's sound, the menus, voice) is wrapped; what it wrote goes into the recording while one runs
 #include <AudioToolbox/AudioToolbox.h>
 #include "../src/rec.h"
+static volatile int g_takeover;   // (nvpad.m nh_takeover_install: the user took the observer's controls -- sound back on)
+void nh_takeover_fire(void) {
+    g_takeover = 1; const char* f = getenv("NHOOK_TAKEOVER_FILE");   // (shim/tools/observe-public.sh: the visit lasts until the user quits)
+    if (f && *f) { int fd = open(f, O_WRONLY | O_CREAT | O_TRUNC, 0644); if (fd >= 0) { char b[64]; int n = snprintf(b, sizeof b, "%ld\n", (long)time(0)); write(fd, b, n); close(fd); } } }
 typedef struct { AudioUnit au; AURenderCallback cb; void* ref; AudioStreamBasicDescription fmt; int have; } AuWrap;
 static AuWrap g_auw[32]; static int g_nauw; static pthread_mutex_t g_au_mx = PTHREAD_MUTEX_INITIALIZER;
 static AuWrap* au_slot(AudioUnit au) { for (int i = 0; i < g_nauw; i++) if (g_auw[i].au == au) return &g_auw[i]; if (g_nauw >= 32) return 0; AuWrap* w = &g_auw[g_nauw++]; memset(w, 0, sizeof *w); w->au = au; return w; }
 static OSStatus au_tap(void* ref, AudioUnitRenderActionFlags* fl, const AudioTimeStamp* ts, UInt32 bus, UInt32 frames, AudioBufferList* io) {
     AuWrap* w = ref; OSStatus r = w->cb(w->ref, fl, ts, bus, frames, io);
     { static int mute = -1; if (mute < 0) mute = getenv("NHOOK_MUTE_OUTPUT") && strcmp(getenv("NHOOK_MUTE_OUTPUT"), "0");   // (nmic.c: silent test clients)
-      if (mute && !r && io) { for (UInt32 i = 0; i < io->mNumberBuffers; i++) if (io->mBuffers[i].mData) memset(io->mBuffers[i].mData, 0, io->mBuffers[i].mDataByteSize); return r; } }
+      if (mute && !g_takeover && !r && io) { for (UInt32 i = 0; i < io->mNumberBuffers; i++) if (io->mBuffers[i].mData) memset(io->mBuffers[i].mData, 0, io->mBuffers[i].mDataByteSize); return r; } }
     if (r || !g_rec_audio || !io || !w->have || !io->mNumberBuffers || (fl && (*fl & kAudioUnitRenderAction_OutputIsSilence))) return r;
     const AudioStreamBasicDescription* f = &w->fmt; int fl2 = (int)f->mFormatFlags, isf = (fl2 & kAudioFormatFlagIsFloat) != 0, bits = (int)f->mBitsPerChannel;
     if (!(fl2 & kAudioFormatFlagIsNonInterleaved)) {
@@ -995,6 +999,7 @@ INTERPOSE(my_AudioUnitRender, AudioUnitRender);
 
 #include <dispatch/dispatch.h>
 static void vpad_start(void* c) { (void)c; g_vpad_on = nh_vpad_install(); }
+void nh_takeover_install(void);   // nvpad.m
 __attribute__((constructor)) static void nhook_init(void) {
     const char* lf = getenv("NHOOK_LOG");
     if (lf) g_logfd = open(lf, O_WRONLY | O_CREAT | O_APPEND, 0644);
@@ -1003,5 +1008,6 @@ __attribute__((constructor)) static void nhook_init(void) {
     hk_init(); app_build_pick();                     // the hooks check's items; this app build's addresses (napp_builds.h)
     if (getenv("NHOOK_VPAD") && strcmp(getenv("NHOOK_VPAD"), "0") && getenv("RECLAIMER_PROFILE_DIR"))   // nvpad.m: test identities only
         vpad_start(0);   // (at once: the app may enumerate controllers only early -- 300 ms later it never asked again)
+    if (getenv("NHOOK_TAKEOVER") && strcmp(getenv("NHOOK_TAKEOVER"), "0")) nh_takeover_install();   // (the observer: a click gives the user the controls)
     if (getenv("NHOOK_SELFTEST")) nstats_start();       // shim/tools/nhook-selftest.sh: the stats server without the app
 }

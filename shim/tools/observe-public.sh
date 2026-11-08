@@ -23,6 +23,7 @@
 # already recorded in this phase by an earlier run.
 # OBS_RANDOM=1 draws the server (weights exp(score / 8): coverage and size still count) instead of taking the best one
 # (shim/tools/learn-loop.py: "randomly joining and completing games").
+# Click the observer's window to play it yourself (controller included): the visit then lasts until you quit the game.
 # Its game is muted (OBS_MUTE=0 = with sound); it records with match-recorder.py, so nhook's own recorder (ntracks.c) is off
 # (OBS_NATIVE_TRACKS=1 + NHOOK_TRACKS_DIR=<other folder> = both, to compare); NATIVE_DYLIB=<copy> keeps one dylib for the whole run while shim/build is rebuilt.
 # Refuses to start beside a running Project Reclaimer (the user's game included); stops at once if one appears that is not its own.
@@ -93,16 +94,24 @@ while [ $(( $(date +%s) - t0 )) -lt "$TOTAL" ] && { [ "$NMATCH" = 0 ] || [ $((DO
   if [ -z "$addr" ]; then echo "$(date +%H:%M) no suitable server: waiting 5 minutes"; sleep 300; continue; fi
   cls=${line##*| }; cls=${cls%% *}; echo "$(date +%H:%M) joining $line"
   L="$TR/logs/$(date +%Y%m%d-%H%M%S).log"; RL="$L.rec"
-  NATIVE_REAL=1 NHOOK_STATS_OPEN=0 NHOOK_MUTE_OUTPUT="${OBS_MUTE:-1}" NHOOK_TRACKS="${OBS_NATIVE_TRACKS:-0}" NATIVE_LOG="$L" bash shim/native.sh --join-server "$addr" --background > "$L.out" 2>&1 &
+  NATIVE_REAL=1 NHOOK_STATS_OPEN=0 NHOOK_TAKEOVER=1 NHOOK_TAKEOVER_FILE="$L.takeover" NHOOK_MUTE_OUTPUT="${OBS_MUTE:-1}" NHOOK_TRACKS="${OBS_NATIVE_TRACKS:-0}" NATIVE_LOG="$L" bash shim/native.sh --join-server "$addr" --background > "$L.out" 2>&1 &
   for i in $(seq 1 30); do P=$(sed -n 's/^native app pid \([0-9]*\).*/\1/p' "$L.out" 2>/dev/null); [ -n "$P" ] && break; sleep 1; done
   [ -z "${P:-}" ] && { echo "the app did not start"; sleep 30; continue; }
   left=$(( TOTAL - ($(date +%s) - t0) )); secs=$(( MAXS < left ? MAXS : left ))
   mode=$(echo "$line" | cut -d'|' -f2 | sed 's/^ *//; s/ *$//')
   ts=$(date +%s); : > "$RL"
   python3 shim/tools/match-recorder.py --port 8765 --seconds "$secs" --server "$addr" --mode "$mode" >> "$RL" 2>&1 &
-  RP=$!; got=0
+  RP=$!; got=0; tk=0
   # the game stays in the server for the whole visit: a recorder that stops early is restarted, the app is not rejoined
-  while kill -0 "$P" 2>/dev/null && [ $(( $(date +%s) - ts )) -lt "$secs" ]; do sleep 5
+  # YOU CAN PLAY (2026-11-08): click the observer's window -> nhook gives you the controls (the controller too, sound on) and writes
+  # $L.takeover; the visit then lasts until you quit the game (no leaving after a whole match, no time limit), recorded with you as
+  # a real player (match-recorder.py --you-plays: coach.py sees your matches)
+  while kill -0 "$P" 2>/dev/null && { [ -f "$L.takeover" ] || [ $(( $(date +%s) - ts )) -lt "$secs" ]; }; do sleep 5
+    if [ -f "$L.takeover" ]; then
+      if [ "$tk" = 0 ]; then tk=1; echo "$(date +%H:%M) you took the controls: this visit lasts until you quit the game (recording you as a player)"
+        kill $RP 2>/dev/null; sleep 2; python3 shim/tools/match-recorder.py --port 8765 --seconds 86400 --server "$addr" --mode "$mode" --you-plays >> "$RL" 2>&1 & RP=$!; fi
+      kill -0 $RP 2>/dev/null || { python3 shim/tools/match-recorder.py --port 8765 --seconds 86400 --server "$addr" --mode "$mode" --you-plays >> "$RL" 2>&1 & RP=$!; }
+      continue; fi
     kill -0 $RP 2>/dev/null || { echo "the recorder stopped: restarting it"; sleep 10; python3 shim/tools/match-recorder.py --port 8765 --seconds $(( secs - ($(date +%s) - ts) )) --server "$addr" --mode "$mode" >> "$RL" 2>&1 & RP=$!; }
     for q in $(pgrep -f "$APPRE"); do [ "$q" != "$P" ] && { echo "another Project Reclaimer started (pid $q): stopping"; kill $RP; kill "$P"; sleep 3; kill -9 "$P" 2>/dev/null; exit 1; }; done
     grep -aq 'Public join timed out\|join failed\|could not join\|server is full' "$L" 2>/dev/null && { echo "join failed: $addr"; skip="$skip $addr"; break; }
