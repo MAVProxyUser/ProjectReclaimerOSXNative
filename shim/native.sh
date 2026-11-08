@@ -9,6 +9,21 @@ cd "$(dirname "$0")/.."
 APP="${NATIVE_APP:-/Applications/Project Reclaimer.app}/Contents/MacOS/project-reclaimer"
 SUP="$HOME/Library/Application Support/ReclaimerMac"
 [ -f shim/build/nhook.dylib ] || bash shim/native/build.sh
+# The app updates itself. A build nhook has no addresses for (shim/native/napp_builds.h, by the app binary's UUID) is ported
+# here once: re-tools/machoport.py finds every point again from the 0.10.0 reference (re-tools/machoport-sigs.json) and checks
+# each one; the row goes into napp_builds.h (+ the dylib is rebuilt when the sources are here) and into
+# ReclaimerMac/native/app-builds.txt (a prebuilt dylib reads that). What it could not find stays off: the stats page's Hooks
+# check window and GET /hooks.json say which. NATIVE_NO_AUTOPORT=1 = never (the old behaviour: hooks off on a new build).
+if [ "${NATIVE_NO_AUTOPORT:-0}" != 1 ] && [ -f re-tools/machoport.py ] && [ -x "$APP" ]; then
+  python3 re-tools/machoport.py check "$APP" >/dev/null 2>&1; rc=$?
+  if [ $rc = 2 ]; then
+    REF="${NATIVE_PORT_REF:-re-tools/machoport-sigs.json}"   # (the 0.10.0 reference as signatures: no old app needed)
+    if [ -f "$REF" ]; then echo "native.sh: a new Project Reclaimer build -- porting nhook's addresses to it (re-tools/machoport.py)" >&2
+      python3 re-tools/machoport.py port "$REF" "$APP" --apply 2>&1 | sed 's/^/  /' >&2
+      if [ -f shim/native/nhook.c ]; then bash shim/native/build.sh >/dev/null 2>&1 && echo "native.sh: nhook rebuilt for it" >&2 || echo "native.sh: nhook did not rebuild (it reads ReclaimerMac/native/app-builds.txt instead)" >&2; fi
+    else echo "native.sh: this app build is not in nhook's address table, and the reference to port from is not at $REF: the hooks stay off (see the stats page's Hooks check)" >&2; fi
+  fi
+fi
 if [ "${NATIVE_REAL:-0}" = 1 ]; then PROF="$HOME/Library/Application Support/ProjectReclaimer"; unset RECLAIMER_PROFILE_DIR
      export NHOOK_STATS_OPEN="${NHOOK_STATS_OPEN:-1}"   # the stats page opens in the browser (unless a tab is already open)
 else PROF="${NATIVE_PROFILE:-$SUP/native/test-v2}"; export RECLAIMER_PROFILE_DIR="$PROF" RECLAIMER_CACHE_DIR="${RECLAIMER_CACHE_DIR:-$SUP/native/test-cache}"

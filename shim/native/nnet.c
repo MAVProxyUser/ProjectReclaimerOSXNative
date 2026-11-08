@@ -44,14 +44,14 @@ static int st_session(StSess* out, int max, uint32_t* state) {
         if (!ok || !j) continue; e->name[j] = 0; n++;
     }
     { static uint64_t mu[256]; int nm = muted_list(mu, 256); for (int i = 0; i < n; i++) for (int k = 0; k < nm; k++) if (mu[k] == out[i].voice) { out[i].muted = 1; break; } }
+    if (n > 0) { HK_ONCE(h, "network session"); hk_fire(h); }
     return n;
 }
-// ---- voice mute (the app's own list: static Mutex<Vec<u64 peer id>> at app 0x103f0a1e0 in 0.10.0 -- lock box +0, poison +8,
-// cap +0x10, ptr +0x18, len +0x20; set_muted(id, bool) 0x102154ef0 appends / removes under the lock, is_muted(id) 0x10214db98;
-// the scoreboard's own MUTE VOICE buttons use them (found from their strings, re-tools/machoref.py). The ids are the session's
-// peer ids (StSess.voice). Each function is checked before use: its adrp / add pair must reach the list's lock.
-#define APP_MUTED   0x103f0a1e0ull
-#define APP_SETMUTE 0x102154ef0ull
+// ---- voice mute (the app's own list: static Mutex<Vec<u64 peer id>> -- lock box +0, poison +8, cap +0x10, ptr +0x18, len +0x20;
+// set_muted(id, bool) appends / removes under the lock; the scoreboard's own MUTE VOICE buttons use it (found from their
+// strings, re-tools/machoref.py). 0.10.0: list 0x103f0a1e0, set_muted 0x102154ef0 (is_muted 0x10214db98); 0.10.1: 0x10409a728 /
+// 0x102214604 -- napp_builds.h `muted` / `set_muted`). The ids are the session's peer ids (StSess.voice). set_muted is checked
+// before use: its adrp / add pair must reach the list's lock.
 static void (*g_set_muted)(uint64_t, int);
 static int adrp_add_target_is(uint64_t f, int lim, uint64_t want) {   // an adrp + add (same register) in the function's first lim bytes reaching want
     uint32_t w[32]; if (lim > 128 || rd(f, w, (size_t)lim)) return 0;
@@ -62,13 +62,15 @@ static int adrp_add_target_is(uint64_t f, int lim, uint64_t want) {   // an adrp
     return 0;
 }
 static void voice_init(void) {
-    static int done; if (done || !g_img) return; done = 1; uint64_t sl = g_img - 0x103f94000ull;
-    if (adrp_add_target_is(APP_SETMUTE + sl, 64, APP_MUTED + sl)) { g_set_muted = (void (*)(uint64_t, int))(uintptr_t)(APP_SETMUTE + sl); nlog("[nhook] voice: mute available (set_muted at 0x%llx)", (unsigned long long)(APP_SETMUTE + sl)); }
-    else nlog("[nhook] voice: set_muted not where 0.10.0 has it: page mutes off");
+    static int done; if (done || !g_img) return; done = 1; uint64_t f = APP(set_muted), l = APP(muted); int h = hk_named("set_muted");
+    if (f && l && adrp_add_target_is(f, 64, l)) { g_set_muted = (void (*)(uint64_t, int))(uintptr_t)f; hk_state(h, HK_OK, f, "set_muted at 0x%llx reaches the mute list 0x%llx", (unsigned long long)f, (unsigned long long)l);
+        nlog("[nhook] voice: mute available (set_muted at 0x%llx)", (unsigned long long)f); }
+    else { hk_state(h, HK_FAIL, f, f ? "set_muted at 0x%llx does not reach the mute list: page mutes off" : "not in this build's table: page mutes off", (unsigned long long)f);
+        nlog("[nhook] voice: set_muted not where this build's table has it: page mutes off"); }
 }
 static int muted_list(uint64_t* out, int max) {   // the app's mute list (read without its lock: a racy copy is fine for showing it)
-    voice_init(); if (!g_set_muted) return 0; uint64_t sl = g_img - 0x103f94000ull, ptr = 0, len = 0;
-    if (rd(APP_MUTED + sl + 0x18, &ptr, 8) || rd(APP_MUTED + sl + 0x20, &len, 8) || !ptr || len > 4096) return 0;
+    voice_init(); if (!g_set_muted) return 0; uint64_t l = APP(muted), ptr = 0, len = 0;
+    if (rd(l + 0x18, &ptr, 8) || rd(l + 0x20, &len, 8) || !ptr || len > 4096) return 0;
     int n = (int)(len < (uint64_t)max ? len : (uint64_t)max); if (n && rd(ptr, out, (size_t)n * 8)) return 0; return n;
 }
 static int st_max_players(void) {                          // the session's limit (host or joined), 0 = not known
@@ -212,6 +214,7 @@ static void pk_hex(int dir, const struct sockaddr* sa, const uint8_t* b, long n)
 }
 static void pk_wire_body(int dir, int fd, const struct sockaddr* sa, const void* buf, long n);
 static void pk_wire(int dir, int fd, const struct sockaddr* sa, const void* buf, long n) {   // (timed: nhcost.h)
+    { HK_ONCE(h, "sockets (send / receive)"); hk_fire(h); }
     if (g_hc_off[HC_SOCK]) return; uint64_t t0 = hc_now(); pk_wire_body(dir, fd, sa, buf, n); hc_add(HC_SOCK, t0); }
 static void pk_wire_body(int dir, int fd, const struct sockaddr* sa, const void* buf, long n) {
     if (n > 0 && pk_kind(fd) == 1) pk_hex(dir, sa, (const uint8_t*)buf, n);

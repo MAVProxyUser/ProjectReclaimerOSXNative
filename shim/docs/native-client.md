@@ -77,7 +77,7 @@ COMMAND...`; `--rcon-app`. Options: `--map NAME` (a multiplayer game straight aw
 focus -- use it for every unattended run), `--headless` (no window, null renderer), `--local-players N`, `--data-dir`,
 `--settings FILE.json`, `--renderer vulkan`, `--verify-map FILE`, `--kit` / `--kit-tool` (the Reclaimer Kit).
 
-## Inside the app (0.10.0; for our hooks)
+## Inside the app (0.10.0 addresses; 0.10.1 and later: napp_builds.h, "When the app updates")
 
 - **Guest image**: halo3.dll is mapped at its RVAs (headers too) in a range reserved INSIDE the app binary: app vmaddr
   0x103f94000 + the app's slide (the log line "[host] linked recompiled engine, image at 0x..." prints it). Relocated, so
@@ -109,15 +109,37 @@ focus -- use it for every unattended run), `--headless` (no window, null rendere
 
 ## When the app updates
 
-nhook is written against 0.10.0's app binary. Tied to that build: the guest image and its code table (nhook.c `APP_IMAGE`,
-`APP_CODETAB`), the app functions it hooks or calls (the Opus decode and the voice mixer, the per-frame function, set_muted /
-is_muted) and the app data it reads or writes (the mute list, the chat-log byte, the channel volumes). Each address has a comment
-saying what it is and how it was found. halo3's own functions are reached by their halo3 address through the code table, so they
-move only with MCC's halo3.dll, not with the app. On a mismatch nhook stays off rather than guessing: no code table = "hooks off",
-and where it uses a fixed app address it first compares the instructions it expects there (voice packets, the host tools' frame
-hook, the chat-log gate, set_muted). To port: find each one again in the new app with `re-tools/machoref.py` by the strings and
-call patterns its comment names, then run shim/tools/nhook-selftest.sh and the live tests (native-fire-test, native-aim-test,
-native-host-test.sh walls|tpnext, native-voice-test).
+The app updates itself ("Update available ... Updated to 0.10.1; starting it."). nhook's app-specific addresses live in a table
+per app build, `shim/native/napp_builds.h`, keyed by the app binary's LC_UUID: the guest image, the code table, the Opus decode
+and the voice mixer's call / sender-id load (+ the id's offset in the mixer's entry), the per-frame function, the chat_log gate
+and byte, the mute list and set_muted. halo3's own functions are reached by their halo3 address through the code table, so they
+move only with MCC's halo3.dll, not with the app; the app's `[capacity]` lines give its moved halo3 fields at run time.
+
+- **Porting** = `python3 re-tools/machoport.py port re-tools/machoport-sigs.json <new app binary> --apply`: every point found again
+  by its code's shape and checked by what it must be (the mixer's bl reaches the decode, set_muted reaches the mute list, the
+  chat gate's ldrb reads the chat_log byte, ...). It writes the row into napp_builds.h and into ReclaimerMac/native/app-builds.txt
+  (which a prebuilt dylib reads). **shim/native.sh does this by itself** when the installed app has no row (then rebuilds the
+  dylib). A point it cannot find is 0 in the row and that feature stays off; the rest work. A point that moved in a way the
+  finder cannot follow: re-find it with `re-tools/machoref.py` (strref / calls / dataref / dis) and add a finder for it in
+  machoport.py's POINTS (kinds code / data / call / infunc / imm).
+- **Checking** = the hooks check (below) and `bash shim/tools/native-hooks-test.sh` (a local test match: PASS / FAIL per item),
+  then the feature tests (native-fire-test, native-aim-test, native-host-test.sh walls|tpnext, native-voice-test, native-spar-test);
+  `bash shim/tools/native-test-all.sh` runs all of them in a row (~20 min).
+- 0.10.0 -> 0.10.1 (2026-11-08): all 12 points found; the code table still 22894 entries; the voice mixer's sender entry grew by
+  0x28 bytes (the peer id at x26 - 0x2a0, was 0x278). The kept release zips (ReclaimerMac/native/v<version>/) hold both binaries.
+  0.10.1's own notes: "one host connection per client in both networking models: players' traffic goes through the host" (no
+  client-to-client connections, "Classic" networking the default) -- so a client sees only the host's address: the players table's
+  IP column and the Packets window have per-player addresses only when THIS app hosts (as on a dedicated server before).
+
+## The hooks check
+
+Everything nhook depends on in the app registers in `shim/native/nhchk.h`: per item its feature, its kind (address, entry /
+body / text hook, interpose, swizzle, app code / data, log line, reader), when it should fire, whether it installed (or was found)
+and why not, and how often it fired. `GET /hooks.json`, the stats page's **Hooks check** window (FAILED red, silent orange, ok
+green, "problems only"), and `[hooks]` lines in the log (90 s after the engine started, 60 s into each match). Verdicts: ok,
+FAILED (not installed / not found in this build: the feature is off), silent (installed, what it waits for happened, no call yet),
+waiting (a match / a shot / a talker / a page switch has not happened yet), off (a switch), not expected (display_event: the app
+never calls it). Hooks that install on first use are preflighted at start (their shape checks, nothing written).
 
 ## Our features on the native app (status)
 

@@ -21,6 +21,8 @@
 #include "../src/rec.h"
 
 void nh_log(const char* fmt, ...) __attribute__((format(printf, 1, 2)));   // nhook.c
+int nh_hk_named(const char* name); void nh_hk_fire(int i); void nh_hk_state(int i, int st, uint64_t at, const char* why);   // nhook.c / nhchk.h: the hooks check
+static int g_hk_present = -1, g_hk_fbo = -1, g_hk_depth = -1;
 int nov_build(float* verts, int cap, int w, int h, float scale);           // noverlay.c
 void nov_aim_tick(void);                                                   // noverlay.c: aim vs hits, measured against the hitboxes
 void hc_frame(double now);                                                 // nstats.c: the hook cost meter's on/off measurement
@@ -103,7 +105,7 @@ static IMP g_orig_dtex; static NSMutableSet* g_dseen; static id<MTLTexture> g_dl
 typedef struct { __unsafe_unretained id<MTLTexture> t; unsigned long frame, first_frame; int order, n_in_frame; } NrDepth;
 static NrDepth g_dfull[8]; static int g_ndfull; static unsigned long g_dfull_frame; static int g_dfull_order; static NSUInteger g_dbig;
 static void my_set_dtex(id self, SEL cmd, id<MTLTexture> t) {
-    ((void (*)(id, SEL, id))g_orig_dtex)(self, cmd, t);
+    ((void (*)(id, SEL, id))g_orig_dtex)(self, cmd, t); nh_hk_fire(g_hk_depth);
     if (!t) return; g_dpasses++;
     @synchronized (g_dseen) {
         NSUInteger area = t.width * t.height; if (area > g_dbig) { g_dbig = area; g_ndfull = 0; }
@@ -209,27 +211,32 @@ static void nr_frame(id<MTLCommandBuffer> cb, id<CAMetalDrawable> drawable) {
     }
 }
 static void my_present(id self, SEL cmd, id drawable) {
+    nh_hk_fire(g_hk_present);
     @autoreleasepool { @try { if (drawable) nr_frame((id<MTLCommandBuffer>)self, (id<CAMetalDrawable>)drawable); }
         @catch (NSException* ex) { static int told; if (!told++) nh_log("[nhook] render: exception %s (%s)", ex.name.UTF8String, ex.reason.UTF8String); } }
     ((void (*)(id, SEL, id))g_orig_present)(self, cmd, drawable);
 }
-static void my_set_fbo(id self, SEL cmd, BOOL v) { ((void (*)(id, SEL, BOOL))g_orig_fbo)(self, cmd, g_nr_readback ? NO : v); }
+static void my_set_fbo(id self, SEL cmd, BOOL v) { nh_hk_fire(g_hk_fbo); ((void (*)(id, SEL, BOOL))g_orig_fbo)(self, cmd, g_nr_readback ? NO : v); }
 
 void nr_install(void) {
-    if (getenv("NHOOK_NO_RENDER")) return;
+    g_hk_present = nh_hk_named("presentDrawable"); g_hk_fbo = nh_hk_named("render target (fbo)"); g_hk_depth = nh_hk_named("depth attachment");
+    if (getenv("NHOOK_NO_RENDER")) { nh_hk_state(g_hk_present, 3, 0, "NHOOK_NO_RENDER"); nh_hk_state(g_hk_fbo, 3, 0, "NHOOK_NO_RENDER"); nh_hk_state(g_hk_depth, 3, 0, "NHOOK_NO_RENDER"); return; }
     @autoreleasepool {
-        id<MTLDevice> dev = MTLCreateSystemDefaultDevice(); if (!dev) { nh_log("[nhook] render: no Metal device"); return; }
+        id<MTLDevice> dev = MTLCreateSystemDefaultDevice(); if (!dev) { nh_log("[nhook] render: no Metal device"); nh_hk_state(g_hk_present, -1, 0, "no Metal device"); return; }
         id<MTLCommandQueue> q = [dev newCommandQueue]; id<MTLCommandBuffer> cb = [q commandBuffer]; if (!cb) return;
         Class c = object_getClass(cb); Method m = class_getInstanceMethod(c, @selector(presentDrawable:));
         Method fm = class_getInstanceMethod([CAMetalLayer class], @selector(setFramebufferOnly:));
-        if (!m || !fm) { nh_log("[nhook] render: presentDrawable: / setFramebufferOnly: not found"); return; }
+        if (!m || !fm) { nh_log("[nhook] render: presentDrawable: / setFramebufferOnly: not found"); nh_hk_state(g_hk_present, -1, 0, "-[MTLCommandBuffer presentDrawable:] / -[CAMetalLayer setFramebufferOnly:] not found"); return; }
         g_dev = dev; g_pso_lines = [NSMutableDictionary new]; g_pso_blit = [NSMutableDictionary new];
         g_orig_fbo = method_setImplementation(fm, (IMP)my_set_fbo);
         { MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];   // the scene's depth (overlay hiding)
           Method dm = class_getInstanceMethod(object_getClass(rp.depthAttachment), @selector(setTexture:));
           if (dm && !getenv("NHOOK_NO_DEPTH")) { g_dseen = [NSMutableSet new]; g_orig_dtex = method_setImplementation(dm, (IMP)my_set_dtex);
-              nh_log("[nhook] [depth] watching -[%s setTexture:]", class_getName(object_getClass(rp.depthAttachment))); } }
+              nh_log("[nhook] [depth] watching -[%s setTexture:]", class_getName(object_getClass(rp.depthAttachment))); nh_hk_state(g_hk_depth, 1, 0, "-[MTLRenderPassDepthAttachmentDescriptor setTexture:] swizzled"); }
+          else nh_hk_state(g_hk_depth, dm ? 3 : -1, 0, dm ? "NHOOK_NO_DEPTH" : "the depth attachment's setTexture: not found"); }
         g_orig_present = method_setImplementation(m, (IMP)my_present);
         nh_log("[nhook] render: hooked -[%s presentDrawable:] (overlay, recording, captures)", class_getName(c));
+        { char w[160]; snprintf(w, sizeof w, "-[%s presentDrawable:] swizzled", class_getName(c)); nh_hk_state(g_hk_present, 1, 0, w); }
+        nh_hk_state(g_hk_fbo, 1, 0, "-[CAMetalLayer setFramebufferOnly:] swizzled");
     }
 }

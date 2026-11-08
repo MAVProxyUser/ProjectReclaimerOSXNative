@@ -6,7 +6,8 @@ Kept current as work lands. Open items are ranked (the order they are worked); f
 
 Since 2026-11-06 the user plays the native app, so this is the live list. The loader-era list below is closed (every item
 done / fixed / closed; #47's pending live check passed in the native app 2026-11-07). Ranked 2026-11-07; open since the
-evening of 2026-11-07: nothing to build (N1-N16 done; N17 built, its live check waits for the user's own game):
+evening of 2026-11-07: nothing to build (N1-N16 done; N17 built, its live check waits for the user's own game). 2026-11-08: the
+app updated itself to 0.10.1 and every hook went off -- N18 (port) and N19 (the hooks check) done the same night:
 
 | # | Item | Status / notes |
 |---|---|---|
@@ -27,6 +28,8 @@ evening of 2026-11-07: nothing to build (N1-N16 done; N17 built, its live check 
 | N15 | **Sparring aim, natively** (#17; user, 2026-11-07: "wrap up the rest") | DONE 2026-11-07 (nbot.c; FIXES.md "the sparring aim in the native app"): halo3's control record's yaw / pitch, written at the entry of the app's own 0xf7178; the server's page shows the partner aiming at the other player, median 0.01 deg (shim/tools/native-spar-test.sh); test clients only; shim/tools/native-spar.sh |
 | N16 | **The walker, natively** (#32; same) | DONE 2026-11-07, local games only (nbot.c + the shared nav.c core; FIXES.md "the walker in the native app"): 5 goals / 128 units in 80 s on Guardian; a joined client's moves come from the app's own input, so on a server the page offers no walker (the partner stands still); stuck handling no longer backs off blind |
 | N17 | **The page's mic switch, natively** (#22; same) | BUILT 2026-11-07, not checked live (nhook.c my_AudioUnitRender; FIXES.md "the page's mic switch"): the app's capture samples zeroed while muted; test clients open no microphone, so it waits for the user's own game |
+| N18 | **Client 0.10.1** ("new client .1 revision came out... pull it, patch it. push its changes. ALLL the work you just did needs to port to the new binary") | DONE 2026-11-08 (FIXES.md "nhook on client 0.10.1"): every fixed app address now comes from a per-build table (shim/native/napp_builds.h, by the app's UUID) made by re-tools/machoport.py from the 0.10.0 signatures (re-tools/machoport-sigs.json); all 12 points found + meaning-checked in 0.10.1 (the voice mixer's sender entry grew: id at x26 - 0x2a0); shim/native.sh ports a new build by itself |
+| N19 | **A hooks check** ("can you add a hooks check? like all the stuff you patch I assume you can detect IF on a new version the hook loaded properly or function. that could be an interestin self test almost") | DONE 2026-11-08 (shim/native/nhchk.h / nhchk.c; FIXES.md "the hooks check"): every hook / interpose / swizzle / app address / log line / reader with installed? + fired? -> GET /hooks.json, the page's Hooks check window, [hooks] log lines; self test shim/tools/native-hooks-test.sh (a local match that uses them all). Its first run found a real bug: the host tools' game-tick hook could not get a stub page (fixed: shared stub pages) |
 
 From the loader, the user's call (2026-11-07): CLOSED, not ported -- auto-vote (#50), graphics quality from the page (#68; the app's
 own Settings menu has it), the late camera update (mouse only; the user plays with a controller). To port: the sparring aim (#17),

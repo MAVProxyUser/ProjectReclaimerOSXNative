@@ -120,6 +120,12 @@ th .srt{display:inline-block;margin-left:2px;padding:0 2px;cursor:pointer;color:
 #fl .est{color:#777;margin-left:4px;cursor:help}
 #fl .k-join .tx{color:#7ddf6a}#fl .k-leave .tx{color:#c9a46a}#fl .k-server .tx,#fl .k-vote .tx,#fl .k-log .tx{color:#ffd75a}
 #fl .k-game .tx{color:var(--accent);font-weight:600}#fl .k-death .tx{color:#aaa}
+/* ---- hooks check (nhchk.c): every hook / address / tap nhook depends on, and whether it works in this app build ---- */
+#hkc{margin-bottom:16px}#hkc .fh{display:flex;align-items:center;gap:6px 12px;flex-wrap:wrap;margin-bottom:8px}#hkc .fh h2{margin:0 auto 0 0}
+#hkc .fh label{color:var(--dim);font-size:12px;cursor:pointer}#hkt td{font-size:12px;padding:2px 8px;vertical-align:top}#hkt td.n{text-align:right;font-variant-numeric:tabular-nums}
+#hkt .why{color:var(--dim);max-width:520px}#hkt .k{color:#888;white-space:nowrap}
+.hk-ok{color:#5c5}.hk-FAILED{color:#f55;font-weight:600}.hk-silent{color:#e93}.hk-waiting,.hk-not{color:#888}.hk-off{color:#888;font-style:italic}
+#hksum b{font-weight:600}
 /* ---- packets (pktlog.c): the type of every datagram / connection, never the content ---- */
 #pkts{margin-bottom:16px}#pkts .fh{display:flex;align-items:center;gap:6px 12px;flex-wrap:wrap;margin-bottom:8px}#pkts .fh h2{margin:0 auto 0 0}
 #pkts .fh label{color:var(--dim);font-size:12px;cursor:pointer}#pkts button{background:#222;color:var(--fg);border:1px solid var(--line);border-radius:4px;padding:2px 9px;font:inherit;font-size:12px;cursor:pointer}
@@ -237,6 +243,11 @@ th .srt{display:inline-block;margin-left:2px;padding:0 2px;cursor:pointer;color:
  <span class="note" id="hcsum"></span></div>
  <div style="overflow-x:auto"><table class="hct"><thead><tr><th>Hook / overlay part</th><th>thread</th><th>on</th><th title="calls (or frames) a second">calls/s</th><th title="time per call">µs/call</th><th title="its time per presented frame">ms/frame</th><th title="share of the median frame time">% frame</th><th title="estimated fps given back without it, IF its thread sets the frame rate">est. fps</th><th title="the on/off measurement: fps with it on -> off, the cost (median of the pairs) and the spread">measured</th><th></th></tr></thead><tbody id="hcb"></tbody></table></div>
  <div class="note">Self-timed figures are estimates; "measure" switches only that part off and on in turns (overlay features: on in the "on" phases even if you had them off) and puts it back as it was. The camera hook's assembly filter (about 700k calls a second, a few instructions each) is not timed and stays while its handler is off.</div></div>
+<div id="hkc" class="panel" style="display:none"><div class="fh"><h2 title="nhook's hooks check (the native app): everything this tooling depends on inside the app -- this app build's addresses, the code table, every hook, interposed function, swizzled method, app log line and memory reader -- whether it installed (or was found) in THIS app build, and whether it has fired. After an app update this says at once what still works.">Hooks check</h2>
+ <span class="note" id="hksum"></span>
+ <label title="only what FAILED or stayed silent"><input type="checkbox" id="hkp"> problems only</label></div>
+ <div style="overflow-x:auto"><table id="hkt"><thead><tr><th>item</th><th>kind</th><th>verdict</th><th title="calls / lines / reads since the app started">fired</th><th title="seconds since the last one">last</th><th>for</th><th>details</th></tr></thead><tbody></tbody></table></div>
+ <div class="note">ok = installed or found, and it fired (or it is an address that does not fire). FAILED = it could not be installed or found in this app build: the details say what was expected; that feature is off. silent = installed and what it waits for has happened, but no call yet. waiting = what it waits for (a match, a shot, someone talking, a page switch...) has not happened yet in this run. A new app build is ported with <code>re-tools/machoport.py</code> (shim/native.sh does it by itself).</div></div>
 <div id="pkts" class="panel"><div class="fh"><h2 title="pktlog.c: the type of every datagram and connection this game sends and receives -- never what is in it">Packets</h2>
  <label title="UDP datagrams and TCP connections on this game's sockets"><input type="checkbox" id="pkw" checked> wire</label>
  <label title="halo3's own network messages (needs the switch on the right)"><input type="checkbox" id="pkg" checked> game</label>
@@ -1135,6 +1146,19 @@ document.getElementById('pkp').addEventListener('click',e=>{ pkPause=!pkPause; e
 document.getElementById('pkgon').addEventListener('change',async e=>{ const j=await ovPost('do=pktgame&on='+(e.target.checked?1:0)); if(!j.ok) e.target.checked=!e.target.checked; });
 for(const id of ['pkw','pkg','pk1']) document.getElementById(id).addEventListener('change',()=>{ pkl.textContent=''; pkN=0; pkLast=null; pkSeq=0; pollPk(); });
 setInterval(pollPk,1000); pollPk();
+// ---- hooks check: /hooks.json every 3 s (nhchk.c) ----
+let hkBusy=false;
+async function pollHk(){ if(hkBusy || document.hidden) return; hkBusy=true;
+  try{ const j=await (await fetch('/hooks.json')).json(), el=document.getElementById('hkc'); el.style.display='';
+    const S=j.summary, a=j.app;
+    document.getElementById('hksum').innerHTML=`app ${E(a.version)}${a.known?'':' <b class="hk-FAILED">(not in the address table)</b>'} · <b class="hk-ok">${S.ok} ok</b>`+(S.failed?` · <b class="hk-FAILED">${S.failed} failed</b>`:'')+(S.silent?` · <b class="hk-silent">${S.silent} silent</b>`:'')+` · ${S.waiting} waiting`+(S.off?` · ${S.off} off`:'')+` · ${Math.round(j.match_seconds)} s in matches`;
+    const po=document.getElementById('hkp').checked, ord={FAILED:0,silent:1,waiting:2,'not expected':3,off:4,ok:5};
+    const it=j.items.filter(x=>!po||x.verdict==='FAILED'||x.verdict==='silent').sort((p,q)=>(ord[p.verdict]-ord[q.verdict]));
+    document.querySelector('#hkt tbody').innerHTML=it.length?it.map(x=>`<tr><td title="${E(x.at!=='0x0'?'at '+x.at:'')}">${E(x.name)}</td><td class="k">${E(x.kind)}</td><td class="hk-${E(x.verdict.split(' ')[0])}" title="state: ${E(x.state)}; expected to fire: ${E(x.when)}">${E(x.verdict)}</td><td class="n">${x.fires}</td><td class="n">${x.last_s==null?'-':x.last_s<10?x.last_s.toFixed(1)+' s':Math.round(x.last_s)+' s'}</td><td class="why">${E(x.feature)}</td><td class="why">${E(x.why)}</td></tr>`).join(''):'<tr><td colspan="7" class="note">no problems</td></tr>';
+  }catch(err){}
+  hkBusy=false; }
+document.getElementById('hkp').addEventListener('change',pollHk);
+setInterval(pollHk,3000); pollHk();
 // ---- live snapshots ----
 const es=new EventSource('/events');
 let gameInst=null;   // the game process this page shows; a new one (the game was restarted) -> reload the page for it

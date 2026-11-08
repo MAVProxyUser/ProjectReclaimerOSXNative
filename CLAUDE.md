@@ -329,6 +329,13 @@ server (&slot=); halo3 calls that mark network updates (0x1ec3c) need game_globa
 Lifted code calls lifted code at the BODY (x2 ctx, x3 guest rsp, x4-x7 args): body_hook_after; entry hooks see table calls only. Text
 hooks installed at run time stop the other threads (a 16 KB page is not executable while written). Crash frames -> halo3 functions:
 NHOOK_CODETAB_DUMP=<file> + shim/tools/native-frames.py (the JIT layout is fixed, only shifted between launches).
+Client 0.10.1 + the hooks check (2026-11-08): the app updates itself; every fixed app address nhook uses is in shim/native/napp_builds.h
+per build (by LC_UUID; nhook.c app_build_pick, APP(field); ReclaimerMac/native/app-builds.txt for a prebuilt dylib), made by
+`re-tools/machoport.py port re-tools/machoport-sigs.json <app binary> --apply` (shape finder + meaning checks; shim/native.sh runs it
+itself for an unknown build, NATIVE_NO_AUTOPORT=1 = no). 0.10.1: all 12 points, mixer sender id at x26 - 0x2a0 (was 0x278). Hooks check
+(nhchk.h / nhchk.c): every hook / interpose / swizzle / app address / log line / reader, installed? + fired? -> GET /hooks.json, the
+page's Hooks check window, [hooks] log lines; self test shim/tools/native-hooks-test.sh. Hook stubs share near pages (RX + an RW alias:
+stub_alloc; the near gaps ran out at 4 hooks; NHOOK_STUB_PAGE_EACH=1 = old). With hooks off the stats page still starts.
 Two-client tests (2026-11-07): native-dedicated.sh + the test profile + ReclaimerMac/native/test-second (its own identity):
 shim/tools/native-host-test.sh walls|tpnext, native-voice-test.sh (--voice-wav/--voice-talk); NHOOK_TAP_LOG=<file> = every app line.
 Sparring aim / walker / mic natively (2026-11-07, nbot.c): halo3's control record TLS +0xC0 (4 x 0x110: +0xD4 yaw, +0xD8 pitch, +0xDC

@@ -37,7 +37,7 @@ static int g_nov_cam_src;                    // 1 = the frame's own view constan
 static int nov_observer(float* pos, float* fwd) {   // local user 0's observer camera position / forward
     uint64_t blk = tls_block(), ob = 0; float r[0x34 / 4];
     if (!blk || !hb_read(blk + 0x578, &ob, 8) || !ob || !hb_read(ob + 0x11c, r, sizeof r)) return 0;
-    memcpy(pos, r, 12); if (fwd) memcpy(fwd, r + 0x28 / 4, 12); return isfinite(pos[0]);
+    memcpy(pos, r, 12); if (fwd) memcpy(fwd, r + 0x28 / 4, 12); if (isfinite(pos[0])) { HK_ONCE(h, "observer camera"); hk_fire(h); } return isfinite(pos[0]);
 }
 int nov_cam_is_player(const float* pos) {   // a captured world camera that sits at the player's view (not a shadow / reflection view)
     static float op[3]; static double t; double now = mono_s();
