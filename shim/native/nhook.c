@@ -185,7 +185,8 @@ static uint8_t* near_page(uint64_t code, size_t size) {   // a fresh RW range wi
 typedef struct { uint64_t rx; uint8_t* rw; size_t used; } StubPage;
 static StubPage g_stubp[32]; static int g_nstubp; static pthread_mutex_t g_stub_mx = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t stub_alloc(uint64_t code, size_t len, uint8_t** rw) {   // the RX address of a free slot near code; *rw = its writable alias
-    static int each = -1; if (each < 0) each = getenv("NHOOK_STUB_PAGE_EACH") != 0;
+    static int each = -1, far = -1; if (each < 0) each = getenv("NHOOK_STUB_PAGE_EACH") != 0; if (far < 0) far = getenv("NHOOK_FAR_TEST") != 0;
+    if (far) return 0;   // NHOOK_FAR_TEST=1: as if no gap were in range (tests the far hooks)
     if (each) { uint8_t* p = near_page(code, 0x4000); *rw = p; return (uint64_t)(uintptr_t)p; }   // (the caller makes it RX)
     len = (len + 63) & ~(size_t)63; const int64_t R = 0x7800000; uint64_t a = 0;
     pthread_mutex_lock(&g_stub_mx);
@@ -258,6 +259,9 @@ static uint64_t nh_call(uint64_t* ctx, uint32_t rva, int n, const uint64_t* a) {
 }
 extern char nh_tpls_start[], nh_tpls_displaced[], nh_tpls_handler[], nh_tpls_return[], nh_tpls_end[];
 static int hook_install_x0(const char* name, uint32_t rva, void* h, int skip, uint64_t* stub_out);
+static int jit_far_hook(const char* name, uint64_t e, void* h, int skip, uint64_t* stub_out);   // (below: no stub page in branch range)
+static int insn_pcrel(uint32_t w); static int nh_world_stop(thread_act_array_t* th, mach_msg_type_number_t* n, uint64_t lo, uint64_t hi, int* busy);
+static void nh_world_go(thread_act_array_t th, mach_msg_type_number_t n);
 // the hooks check around each installer: the item by the hook's name, a counting trampoline in front of the handler, the
 // outcome (ok + where, or FAILED + the installer's own last log line)
 static int hook_install_x(const char* name, uint32_t rva, void* h, int skip, uint64_t* stub_out) {
@@ -279,7 +283,8 @@ static int hook_install_x0(const char* name, uint32_t rva, void* h, int skip, ui
         nlog("[nhook] hook %s: halo3+0x%x entry %08x %08x %08x %08x is not a lifted wrapper: refused", name, rva, w[0], w[1], w[2], w[3]); return -1; }
     size_t tl = TE - T0; uint8_t* sw = 0;
     uint64_t sx = stub_alloc(e, tl, &sw);            // a slot near the code (stub_alloc: RX there, written through its RW alias)
-    if (!sx) { nlog("[nhook] hook %s: no stub page near 0x%llx", name, (unsigned long long)e); return -1; }
+    if (!sx) { nlog("[nhook] hook %s: no stub page near 0x%llx: a far hook instead", name, (unsigned long long)e);
+        return (w[0] & 0xfc000000u) == 0x14000000u ? -1 : jit_far_hook(name, e, h, skip, stub_out); }
     uint8_t* st = (uint8_t*)(uintptr_t)sx; int64_t d = (int64_t)(sx - e);
     memcpy(sw, T0, tl);
     memcpy(sw + (TD - T0), &displaced, 4);            // the displaced stp x29,x30,[sp,#-16]! (or a nop for a branch)
@@ -317,7 +322,22 @@ static int body_hook_after(const char* name, uint32_t rva, void (*h)(uint64_t*))
 static int body_hook_after0(const char* name, uint32_t rva, void (*h)(uint64_t*)) {
     uint64_t b = body_of(rva); if (!b) { nlog("[nhook] body hook %s: halo3+0x%x has no lifted body of the known shape: refused", name, rva); return -1; }
     size_t tl = (size_t)(nh_ba_end - nh_ba_start); uint8_t* sw = 0; uint64_t sx = stub_alloc(b, tl, &sw);
-    if (!sx) { nlog("[nhook] body hook %s: no stub page near 0x%llx", name, (unsigned long long)b); return -1; }
+    if (!sx) {   // no stub page in branch range: a far body hook -- the body's first four instructions move into the stub (its 4 slots)
+        uint32_t w4[4]; if (getenv("NHOOK_NO_FAR_HOOKS") || rd(b, w4, 16)) { nlog("[nhook] body hook %s: no stub page near 0x%llx", name, (unsigned long long)b); return -1; }
+        for (int i = 0; i < 4; i++) if (insn_pcrel(w4[i])) { nlog("[nhook] body hook %s: no stub page near 0x%llx and instruction %d is PC-relative", name, (unsigned long long)b, i); return -1; }
+        mach_vm_address_t st = 0; if (mach_vm_allocate(mach_task_self(), &st, 0x4000, VM_FLAGS_ANYWHERE) != KERN_SUCCESS) return -1;
+        memcpy((void*)st, nh_ba_start, tl); memcpy((uint8_t*)st + (nh_ba_displaced - nh_ba_start), w4, 16);
+        uint64_t hv = (uint64_t)(uintptr_t)h, rv = b + 16; memcpy((uint8_t*)st + (nh_ba_handler - nh_ba_start), &hv, 8); memcpy((uint8_t*)st + (nh_ba_return - nh_ba_start), &rv, 8);
+        mach_vm_protect(mach_task_self(), st, 0x4000, 0, VM_PROT_READ | VM_PROT_EXECUTE); sys_icache_invalidate((void*)st, tl);
+        uint32_t patch[4] = {0x58000050u, 0xd61f0200u, (uint32_t)st, (uint32_t)((uint64_t)st >> 32)}; int ok = 0;
+        for (int tries = 0;; tries++) { thread_act_array_t ths = 0; mach_msg_type_number_t n = 0; int busy = 0;
+            if (nh_world_stop(&ths, &n, b + 1, b + 16, &busy)) break;
+            if (busy && tries < 50) { nh_world_go(ths, n); usleep(1000); continue; }
+            if (!busy) { pthread_jit_write_protect_np(0); memcpy((void*)(uintptr_t)(b + 8), &patch[2], 8); __atomic_thread_fence(__ATOMIC_SEQ_CST);
+                         memcpy((void*)(uintptr_t)b, patch, 8); pthread_jit_write_protect_np(1); sys_icache_invalidate((void*)(uintptr_t)b, 16); ok = 1; }
+            nh_world_go(ths, n); break; }
+        if (!ok) return -1;
+        nlog("[nhook] far body hook %s: halo3+0x%x body 0x%llx -> stub 0x%llx", name, rva, (unsigned long long)b, (unsigned long long)st); return 0; }
     uint8_t* st = (uint8_t*)(uintptr_t)sx;
     int64_t d = (int64_t)(sx - b); if (d >= (1ll << 27) || d < -(1ll << 27)) { nlog("[nhook] body hook %s: stub out of branch range", name); return -1; }
     memcpy(sw, nh_ba_start, tl); uint32_t disp = 0xa9bf7bfd; memcpy(sw + (nh_ba_displaced - nh_ba_start), &disp, 4);
@@ -402,6 +422,33 @@ static int text_hook_x0(const char* name, uint64_t f, void* h, int filt, uint32_
     if (stub_out) *stub_out = (uint64_t)st + (uint64_t)(td - ts);
     return 0;
 }
+// A far hook on a lifted wrapper's entry (2026-11-08): some launches have NO free 16 KB gap within branch range of the JIT
+// code (a walker's engine_clock hook failed: "no stub page near ..." -- that client then never saw its players), so instead of one
+// `b stub` the entry's first four instructions (the wrapper prologue: stp / mov / stp / ldr w,[x0,#0x290] -- nothing PC-relative)
+// become `ldr x16, #8 ; br x16 ; .quad stub`, the stub (anywhere) runs them after the handler (stub.S _nh_tp4 / _nh_tps, as a text
+// hook) and returns to entry + 16. Written with the other threads stopped (none may be inside those 16 bytes) through
+// pthread_jit_write_protect_np (the code is MAP_JIT). NHOOK_NO_FAR_HOOKS=1 = none (the old failure).
+static int jit_far_hook(const char* name, uint64_t e, void* h, int skip, uint64_t* stub_out) {
+    if (getenv("NHOOK_NO_FAR_HOOKS")) return -1;
+    uint32_t w[4]; if (rd(e, w, 16)) return -1;
+    for (int i = 0; i < 4; i++) if (insn_pcrel(w[i])) { nlog("[nhook] far hook %s: instruction %d (%08x) is PC-relative: refused", name, i, w[i]); return -1; }
+    char* ts = skip ? nh_tps_start : nh_tp4_start; char* te = skip ? nh_tps_end : nh_tp4_end; char* td = skip ? nh_tps_displaced : nh_tp4_displaced;
+    char* th = skip ? nh_tps_handler : nh_tp4_handler; char* tr = skip ? nh_tps_return : nh_tp4_return;
+    size_t tl = te - ts; mach_vm_address_t st = 0; if (mach_vm_allocate(mach_task_self(), &st, 0x4000, VM_FLAGS_ANYWHERE) != KERN_SUCCESS) return -1;
+    memcpy((void*)st, ts, tl); memcpy((uint8_t*)st + (td - ts), w, 16);
+    uint64_t hv = (uint64_t)h, rv = e + 16; memcpy((uint8_t*)st + (th - ts), &hv, 8); memcpy((uint8_t*)st + (tr - ts), &rv, 8);
+    mach_vm_protect(mach_task_self(), st, 0x4000, 0, VM_PROT_READ | VM_PROT_EXECUTE); sys_icache_invalidate((void*)st, tl);
+    uint32_t patch[4] = {0x58000050u, 0xd61f0200u, (uint32_t)st, (uint32_t)((uint64_t)st >> 32)}; int tries = 0, ok = 0;
+    for (;; tries++) { thread_act_array_t ths = 0; mach_msg_type_number_t n = 0; int busy = 0;
+        if (nh_world_stop(&ths, &n, e + 1, e + 16, &busy)) break;
+        if (busy && tries < 50) { nh_world_go(ths, n); usleep(1000); continue; }
+        if (!busy) { pthread_jit_write_protect_np(0); memcpy((void*)(uintptr_t)(e + 8), &patch[2], 8); __atomic_thread_fence(__ATOMIC_SEQ_CST);
+                     memcpy((void*)(uintptr_t)e, patch, 8); pthread_jit_write_protect_np(1); sys_icache_invalidate((void*)(uintptr_t)e, 16); ok = 1; }
+        nh_world_go(ths, n); break; }
+    if (!ok) { nlog("[nhook] far hook %s: could not patch 0x%llx", name, (unsigned long long)e); return -1; }
+    nlog("[nhook] far hook %s: 0x%llx -> stub 0x%llx (16 bytes, %d retries)", name, (unsigned long long)e, (unsigned long long)st, tries);
+    if (stub_out) *stub_out = (uint64_t)st + (uint64_t)(td - ts);
+    return 0; }
 static int text_hook_t(const char* name, uint64_t f, nh_handler h, int filt, uint32_t want) { return text_hook_x(name, f, (void*)h, filt, want, 0, 0); }
 static int text_hook(const char* name, uint64_t f, nh_handler h) { return text_hook_t(name, f, h, 0, 0); }
 // the app's Opus decode (nstats.c nh_on_opus: forensic voice audio) -- this build's addresses (napp_builds.h), each checked

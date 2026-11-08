@@ -13,7 +13,7 @@ import gzip, hashlib, json, os, sys, time, urllib.request
 
 def arg(k, d):
     a = sys.argv; return a[a.index(k) + 1] if k in a else d
-PORT = int(arg('--port', '8765')); SECS = float(arg('--seconds', '0')); SERVER = arg('--server', '')
+PORT = int(arg('--port', '8765')); SECS = float(arg('--seconds', '0')); SERVER = arg('--server', ''); MODE = arg('--mode', '')
 OUT = arg('--out', os.path.expanduser('~/Library/Application Support/ReclaimerMac/tracks')); os.makedirs(OUT, exist_ok=True)
 TAG = hashlib.sha1(SERVER.encode()).hexdigest()[:8] if SERVER else 'local'
 
@@ -36,7 +36,7 @@ def main():
             if f: f.close(); print('[rec] %s: %d samples, %d events' % (cur, n, nev), flush=True)
             cur = mp; n = nev = 0
             path = os.path.join(OUT, '%s_%s_%s.jsonl.gz' % (time.strftime('%Y%m%d-%H%M%S'), mp, TAG)); f = gzip.open(path, 'wt')
-            f.write(json.dumps({'start': time.time(), 'map': mp, 'server': TAG, 'variant': (s.get('variant') or {}).get('name') if isinstance(s.get('variant'), dict) else None}) + '\n')
+            f.write(json.dumps({'start': time.time(), 'map': mp, 'server': TAG, 'mode': MODE, 'variant': (s.get('variant') or {}).get('name') if isinstance(s.get('variant'), dict) else None}) + '\n')
             print('[rec] recording %s -> %s' % (mp, os.path.basename(path)), flush=True)
             try: feed = get('/stats.json').get('feed_seq', 0)
             except Exception: pass

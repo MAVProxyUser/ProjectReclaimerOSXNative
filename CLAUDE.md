@@ -336,6 +336,11 @@ itself for an unknown build, NATIVE_NO_AUTOPORT=1 = no). 0.10.1: all 12 points, 
 (nhchk.h / nhchk.c): every hook / interpose / swizzle / app address / log line / reader, installed? + fired? -> GET /hooks.json, the
 page's Hooks check window, [hooks] log lines; self test shim/tools/native-hooks-test.sh. Hook stubs share near pages (RX + an RW alias:
 stub_alloc; the near gaps ran out at 4 hooks; NHOOK_STUB_PAGE_EACH=1 = old). With hooks off the stats page still starts.
+Walkers that fight (2026-11-08 night, nbot.c): a JOINED walker reaches the server through a text hook before halo3+0x50fb8 (the control
+packet builder: +0x10/+0x14 yaw/pitch, +0x18/+0x1c throttle); fire = control record bit 19 (+0xC8 at the reader); the fighter
+(NHOOK_BOT_FIGHT: collision-ray line of sight, model-driven distance / strafe / aim noise) ; walker-battle.sh / walker-train.py /
+observe-public.sh + match-recorder.py + walker-model.py / walker-compare.py (native-client.md "Walkers that fight"). The app reads
+controllers via IOHID only (GameController = haptics): a virtual GCController is never polled.
 Soundboard (2026-11-08, nmic.c): no input device on this Mac -> the app was "listening only"; nhook answers the default-input query with
 a virtual device and emulates the AUHAL unit the app opens on it (10 ms clock -> the app's input callback -> AudioUnitRender = soundboard
 samples); the page's Soundboard panel (files in ReclaimerMac/soundboard, upload, play / stop / volume). NHOOK_VMIC=0 off; NHOOK_AUDIO_TRACE,

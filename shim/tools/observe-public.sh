@@ -39,11 +39,12 @@ while [ $(( $(date +%s) - t0 )) -lt "$TOTAL" ]; do
   for i in $(seq 1 30); do P=$(sed -n 's/^native app pid \([0-9]*\).*/\1/p' "$L.out" 2>/dev/null); [ -n "$P" ] && break; sleep 1; done
   [ -z "${P:-}" ] && { echo "the app did not start"; sleep 30; continue; }
   left=$(( TOTAL - ($(date +%s) - t0) )); secs=$(( SESSION < left ? SESSION : left ))
-  ts=$(date +%s); python3 shim/tools/match-recorder.py --port 8765 --seconds "$secs" --server "$addr" &
+  mode=$(echo "$line" | cut -d'|' -f2 | sed 's/^ *//; s/ *$//')
+  ts=$(date +%s); python3 shim/tools/match-recorder.py --port 8765 --seconds "$secs" --server "$addr" --mode "$mode" &
   RP=$!
   # the game stays in the server for the whole session: a recorder that stops early is restarted, the app is not rejoined
   while kill -0 "$P" 2>/dev/null && [ $(( $(date +%s) - ts )) -lt "$secs" ]; do sleep 5
-    kill -0 $RP 2>/dev/null || { echo "the recorder stopped: restarting it"; sleep 10; python3 shim/tools/match-recorder.py --port 8765 --seconds $(( secs - ($(date +%s) - ts) )) --server "$addr" & RP=$!; }
+    kill -0 $RP 2>/dev/null || { echo "the recorder stopped: restarting it"; sleep 10; python3 shim/tools/match-recorder.py --port 8765 --seconds $(( secs - ($(date +%s) - ts) )) --server "$addr" --mode "$mode" & RP=$!; }
     for q in $(pgrep -f "$APPRE"); do [ "$q" != "$P" ] && { echo "another Project Reclaimer started (pid $q): stopping"; kill $RP; kill "$P"; sleep 3; kill -9 "$P" 2>/dev/null; exit 1; }; done
     grep -aq 'Public join timed out\|join failed\|could not join\|server is full' "$L" 2>/dev/null && { echo "join failed: $addr"; skip="$skip $addr"; break; }; done
   kill $RP 2>/dev/null; wait $RP 2>/dev/null

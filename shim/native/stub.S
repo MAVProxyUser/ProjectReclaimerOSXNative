@@ -347,6 +347,9 @@ _nh_ba_start:
     ret
 1:
 _nh_ba_displaced:
+    nop                      // (four slots: a near hook displaces one instruction, a far hook four -- unused ones stay nop)
+    nop
+    nop
     nop
     ldr  x16, _nh_ba_return
     br   x16

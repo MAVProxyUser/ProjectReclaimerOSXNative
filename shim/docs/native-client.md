@@ -146,6 +146,23 @@ Test: shim/tools/native-soundboard-test.sh. Diagnostics: NHOOK_AUDIO_TRACE=1, NH
 0.10.1's server browser downloads the selected server's mods by itself (and goes on "out of sight" when you join another one);
 cancel it in the app's mods window -- nhook does not touch it (backlog N23).
 
+## Walkers that fight, learned from real players (2026-11-08 night)
+
+- **How a joined client's walker reaches the server**: the controls packet "A" is built by halo3+0x50fb8 (the app's own code)
+  from a control record (+0x10 yaw, +0x14 pitch, +0x18 / +0x1c throttle, +8 button bits); a text hook before it writes the
+  walker's values (nbot.c bot_on_abuild). Fire = control record bit 19 at the reader (+0xC8): the local weapon fires and the
+  packet's trigger bytes (halo3+0x5452c, from the weapon's barrels) carry it. The app reads controllers through IOHID, not
+  GameController (nvpad.m's virtual pad is never polled).
+- **The fighter** (NHOOK_BOT_FIGHT=1, nbot.c): line of sight by halo3's collision ray 0x1fd748 from the engine thread, reaction
+  delay, aim noise, the real players' distance band / strafe timing / back-off, grenades, melee, floor-safe steps, no tracking
+  through walls; A* prefers the lanes players use (the model's heat).
+- **Battles**: `bash shim/tools/walker-battle.sh [N] [secs]` (our local server, Guardian free-for-all, test identities test-v2 /
+  test-second / test-third / test-fourth -- `init` makes the last two), `python3 shim/tools/walker-train.py [gens] [secs]`
+  (evolves the tactics), `python3 shim/tools/walker-compare.py` (walkers vs players on the same measurements).
+- **Real players**: `bash shim/tools/observe-public.sh [total] [session]` (the user's profile, background window, mod-free public
+  servers, nothing pressed) + match-recorder.py (no names) -> ReclaimerMac/tracks; `python3 shim/tools/walker-model.py` ->
+  tracks/walker-model.json (NHOOK_BOT_MODEL), merged with the stats page's footprint heatmaps.
+
 ## The hooks check
 
 Everything nhook depends on in the app registers in `shim/native/nhchk.h`: per item its feature, its kind (address, entry /

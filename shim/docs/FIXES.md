@@ -2667,6 +2667,57 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   (NHOOK_BOT_FACE=93.3: the sparring hook writes the yaw) and fires later (40 / 44 s); the log stays when it fails. 3 of 3 runs:
   8, 6, 10 hits of 10.
 
+- **Walkers that fight on a server** (2026-11-08 night; nbot.c bot_on_abuild / the fighter, nav.c g_nav.pop, backlog N24) — WHY: the
+  user: "make 3-4 walkers have a battle ... in a rumble pit match", "train your sparring partners well". A JOINED walker never moved
+  on the server: a client sends its controls as packet "A" (net-authority.md section 1), built by halo3+0x50fb8 (the app's own code)
+  from a control record; the app's input layer refills throttle and buttons from its devices every tick, and nbot.c wrote its values
+  at the control READER (0xf7178), which runs after the packet was built -- only the aim leaked through (the input layer only nudges
+  it). A virtual GameController pad (nvpad.m) did not help: the app reads controllers through IOHID and never polls GCController
+  (0 calls; it imports only GameController's haptics). LOGIC: (1) a text hook BEFORE 0x50fb8 writes the walker's yaw / pitch
+  (+0x10 / +0x14) and throttle (+0x18 / +0x1c) into the record it packs -- the server's path of a roaming walker 79.5 units vs the
+  client's 76.2 in 40 s (shim/tools/native-vpad-test.sh). (2) Fire = the control record's bit 19 at +0xC8 (a scan: bits 19 and 21
+  fire, 1 jumps): the local weapon fires and the packet's trigger bytes, which halo3+0x5452c reads from the local weapon's barrels,
+  carry it -- 180 shots counted by the server for 182 on the client (a packet button bit of its own does nothing). (3) The fighter
+  (NHOOK_BOT_FIGHT=1): line of sight by halo3's collision ray (0x1fd748, cast from the engine thread inside the control hook,
+  ignoring both bodies), a sight cache over the 3 nearest enemies (a visible one beats a nearer hidden one), a reaction delay, a
+  turn-rate limit and Ornstein-Uhlenbeck aim noise (NHOOK_BOT_SKILL), the real players' distance band, strafe timing and back-off
+  on low shields (the model), fire only with a clear line and the aim on, grenades (left trigger bit) and melee, never off the
+  walkable floor (a nav node within ~1 unit of every fighting step), no tracking through walls (out of sight beyond 8 units it
+  looks where it walks); the walker's old "near the enemy: strafe" rule is off while fighting (on Guardian's stacked floors it
+  strafed in place under an enemy). (4) A* prefers the lanes real players use (nav.c g_nav.pop, up to 40% cheaper) from the
+  model's heat, recordings plus the stats page's footprint heatmaps. Battle 3 (4 walkers, 4 minutes, Guardian free-for-all): 13
+  kills, each walker with a target in sight ~55% of the time. SWITCHES: NHOOK_BOT_NOPKT=1 (no packet hook: a joined walker is
+  local only again), NHOOK_BOT_FIGHT=0 (the old spar aim + walker), NHOOK_BOT_FIREBIT=<hex>, the knobs NHOOK_BOT_SKILL / _DIST /
+  _STRAFE / _SWITCH / _FIRE_EXTRA / _RETREAT / _GREN, diagnostics NHOOK_BOT_HOLDBTN / _PKTBTN / _BTNSCAN / _FACE, NHOOK_VPAD=1.
+- **Learning from real players** (2026-11-08 night; shim/tools/match-recorder.py, observe-public.sh, walker-model.py,
+  walker-compare.py, walker-train.py, walker-battle.sh, backlog N25) — WHY: the user: "join several games that don't require map
+  downloads, and watch and sample how real players move around the map, and skirmish ... build a library / model ... have 3-4
+  walkers spar while they learn to mimic actual players". LOGIC: observe-public.sh joins a busy mod-free public server with the
+  user's own profile in a background window (the 0.10 app lets only a real profile into public servers; nothing is pressed; the
+  walker code refuses public servers by itself; joins at least 3 minutes apart -- a first version rejoined each time its recorder
+  crashed: 3 joins in 2 minutes, fixed); match-recorder.py polls the stats page 10 times a second: per player slot, team, alive,
+  position, look angles, shield, health, weapon, vehicle, kills, deaths, shots, hits -- slots only, the names are dropped -- plus
+  the feed's kills; walker-model.py turns recordings into the walkers' numbers (speeds, standing share, fight distances, strafe
+  RMS and switch time, closing speed by shield, aim error, reaction, fire rate, hit share, per-map flow + heat); walker-compare.py
+  puts walkers and players side by side; walker-train.py evolves the fighter's tactics over 4-walker battles (fixed skill:
+  tactics, not aim, decide; fitness kills - 0.7 deaths + 2 x accuracy). First FFA data (Assembly, Snowbound): players run 2.1
+  units/s and stand 40% of the time, fight at 5.8-15.7 units (median 12.6), strafe 0.9 units/s switching every 1.1 s, stop closing
+  in on low shields, aim 4 deg off (median), react in ~1 s, fire 3.4 shots/s in fights, 48% of shots through a hitbox.
+
+- **Far hooks: no stub page in branch range** (2026-11-08; nhook.c jit_far_hook, body_hook_after0's far path, stub.S _nh_ba's four
+  displaced slots) — WHY: in a walker battle one client's engine_clock hook failed, "no stub page near 0x146ab4100": some launches
+  have no free 16 KB gap at all within +-128 MB of the JIT code (the shared stub pages need one gap; that launch had none), and
+  without that hook a client never finds its players -- the walker idled the whole battle, and the user's own game would lose its
+  stats page the same way. LOGIC: when stub_alloc finds no slot, the entry's (or body's) first four instructions -- a lifted wrapper's
+  prologue stp / mov / stp / ldr w,[x0,#0x290], none PC-relative -- are replaced by `ldr x16, #8 ; br x16 ; .quad stub` with the
+  other threads stopped (none inside those 16 bytes) through pthread_jit_write_protect_np; the stub (anywhere: stub.S _nh_tp4 /
+  _nh_tps for entry hooks, _nh_ba with four displaced slots for body hooks) runs them and returns to +16. Checked with
+  NHOOK_FAR_TEST=1 (as if no gap were in range): engine_clock 398,732 calls, the players read, the host tools' game tick (7,993)
+  and shape builder hooks fired. SWITCH: NHOOK_NO_FAR_HOOKS=1 = the old failure; NHOOK_FAR_TEST=1 forces the far path.
+- **Walker grenades** (2026-11-08; nbot.c) — WHY: the fighter "threw" through nvpad.m's left trigger, which the app never reads.
+  LOGIC: a 0.15 s pulse of the control record's bit 30 at the reader (the button scan: one press threw), like the trigger bit 19.
+  SWITCH: NHOOK_BOT_GRENBIT=<hex>; NHOOK_BOT_GREN=0 = no grenades.
+
 ## 19. Performance
 
 Numbers are from the commit messages; PERF-PLAN.md has the measurements. Compare only inside one match

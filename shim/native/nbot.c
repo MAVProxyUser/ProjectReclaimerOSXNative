@@ -346,7 +346,9 @@ static void bot_step_body(void) {
     // to the server (halo3+0x5452c reads it from the local weapon: a packet bit of its own does nothing; 2026-11-08 scan: bits 19
     // and 21 fire, 1 jumps). NHOOK_BOT_FIREBIT=<hex> = another bit.
     { static uint64_t fb = 0; if (!fb) { const char* e = getenv("NHOOK_BOT_FIREBIT"); fb = e ? strtoull(e, 0, 16) : 0x80000ull; }
-      if (spar && g_bot_fire) { g_bot_btn = ((out & 4) ? g_bot_btn : 0) | fb; out |= 4; } else if (!(out & 4)) g_bot_btn = 0; }
+      static uint64_t gb = 0; if (!gb) { const char* e = getenv("NHOOK_BOT_GRENBIT"); gb = e ? strtoull(e, 0, 16) : 0x40000000ull; }
+      uint64_t want = (spar && g_bot_fire ? fb : 0) | ((fbtn & 0x10000) ? gb : 0);   // (fbtn bit 16: the fighter's grenade pulse)
+      if (want) { g_bot_btn = ((out & 4) ? g_bot_btn : 0) | want; out |= 4; } else if (!(out & 4)) g_bot_btn = 0; }
     if (diag) { uint64_t b = 0; int d = bot_diag(&tx, &ty, &b, now); out |= d; if (d & 4) g_bot_btn = b; else if (!(out & 4)) g_bot_btn = 0;
         static double tl; if (now - tl > 0.25) { tl = now; const float* v = o->vel;
             nlog("[nhook] [bot] test: pos (%.2f %.2f %.2f) vel (%.2f %.2f %.2f) yaw %.1f throttle (%.2f, %.2f) buttons 0x%llx; shots %u deletes %lu", o->c[0], o->c[1], o->c[2], v[0], v[1], v[2],

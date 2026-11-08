@@ -18,7 +18,9 @@ from collections import defaultdict
 
 def arg(k, d):
     a = sys.argv; return a[a.index(k) + 1] if k in a else d
-DIR = next((a for a in sys.argv[1:] if not a.startswith('--') and os.path.isdir(a)), os.path.expanduser('~/Library/Application Support/ReclaimerMac/tracks'))
+_pos = [a for i, a in enumerate(sys.argv[1:], 1) if not a.startswith('--') and not sys.argv[i - 1] in ('--out', '--heatmaps')]
+DIR = _pos[0] if _pos else os.path.expanduser('~/Library/Application Support/ReclaimerMac/tracks')
+if not os.path.isdir(DIR): print('no recordings folder %s' % DIR); sys.exit(1)
 OUT = arg('--out', os.path.join(DIR, 'walker-model.json')); CELL = 2.0
 R_FIGHT, AIM_ON, MIN_ENG = 40.0, 10.0, 0.3
 
@@ -50,6 +52,8 @@ def main():
     for path in files:
         head, S, E = load(path)
         if not head or len(S) < 50: continue
+        infection = 'infection' in (head.get('mode') or '').lower()   # (zombies rush with melee, humans camp: not the walkers' game)
+        if infection and '--all-modes' not in sys.argv: continue
         mp = head.get('map') or '?'; n_samples += len(S)
         flow = maps.setdefault(mp, {'flow': defaultdict(lambda: [0.0, 0.0, 0]), 'heat': defaultdict(int)})
         # per slot series (alive, on foot, not the observer)
