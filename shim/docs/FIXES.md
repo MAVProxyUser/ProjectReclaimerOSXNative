@@ -2979,6 +2979,12 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   shot first, caught looking away, turn-back time, aim error, strafing when shot / attacking, closing in, jumps and grenades a
   fight-minute, turning to radar blips, dying outnumbered, help given / got, fight distance by weapon class. --pretend <file>
   <slot> tries it on a recorded player. tracks/coach.json; the work board's You tab.
+- **Whole matches: a recording from the match's start counts** (2026-11-08 15:05; match-recorder.py, shim/tools/observe-whole.py,
+  observe-public.sh) — WHY: a visit's first recording never counted ("began when we joined, maybe mid-match"), but after a restart
+  the observer usually joins as a match begins: a 22-minute Valhalla match from its start was thrown away and phase 1 crawled (2 of
+  10). LOGIC: the recorder writes the game's match clock at a recording's start (header match_time_at_start, its log line "(match
+  time N s)"); observe-whole.py counts a finished recording of 1500+ samples when it is not the visit's first or began under 90 s
+  into its match (old logs without the clock: as before).
 
 ## 19. Performance
 

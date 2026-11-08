@@ -107,13 +107,14 @@ while [ $(( $(date +%s) - t0 )) -lt "$TOTAL" ] && { [ "$NMATCH" = 0 ] || [ $((DO
     # never got into a match (stuck in the pregame lobby after a join -- 2026-11-08 11:35: launched Guardian while the server
     # moved on to The Pit, 15 minutes "pregame lobby: waiting"): leave after OBS_NOMATCH (300) s and skip the server
     if ! grep -aq '\[rec\] recording' "$RL" && [ $(( $(date +%s) - ts )) -gt "${OBS_NOMATCH:-300}" ]; then echo "$(date +%H:%M) no match after ${OBS_NOMATCH:-300} s: leaving $addr"; skip="$skip $addr"; break; fi
-    # whole matches: finished recordings after the first (that one began when we joined, mid-match), 1500+ samples
-    got=$(grep -a ': [0-9]* samples' "$RL" | tail -n +2 | awk '{ if ($3 + 0 >= 1500) n++ } END { print n + 0 }')
+    # whole matches (shim/tools/observe-whole.py): finished recordings of 1500+ samples that began at the match's start (the
+    # recorder's "match time" under 90 s) or after the first one (that one began when we joined, maybe mid-match)
+    got=$(python3 shim/tools/observe-whole.py "$RL")
     [ "$got" -ge "$WHOLE" ] && { echo "$(date +%H:%M) $got whole match(es) recorded here: next server"; break; }; done
   kill $RP 2>/dev/null; for i in 1 2 3 4 5 6; do kill -0 $RP 2>/dev/null || break; sleep 1; done   # (the recorder closes its file)
   cat "$RL"
   kill "$P" 2>/dev/null; sleep 3; kill -9 "$P" 2>/dev/null; sleep 2
-  got=$(grep -a ': [0-9]* samples' "$RL" | tail -n +2 | awk '{ if ($3 + 0 >= 1500) n++ } END { print n + 0 }')
+  got=$(python3 shim/tools/observe-whole.py "$RL")
   case "$cls" in slayer) n_slayer=$((n_slayer + got));; ctf) n_ctf=$((n_ctf + got));; infection) n_infection=$((n_infection + got));; *) n_other=$((n_other + got));; esac
   echo "whole matches so far: slayer $n_slayer, ctf $n_ctf, infection $n_infection, other $n_other"
   grep -a '\[switch\] game Playing' "$L" >/dev/null || { echo "never got into a match on $addr: skipping it"; skip="$skip $addr"; }
