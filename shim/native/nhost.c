@@ -29,7 +29,7 @@
 // Hooks are installed on first use (a switch or a teleport) and stay; their handlers do nothing while the switches are on.
 // Host only (game_globals +0x11: 5 host / 1 local, or this machine is the session's host peer).
 
-#define HT_FRAME_FN 0x1029ed000ull   // the app's per-frame function (0.10.0, unslid)
+// the app's per-frame function: napp_builds.h frame_fn (0.10.0 0x1029ed000, 0.10.1 0x102ac23d8; its prologue checked below)
 static const uint32_t g_ht_frame_words[4] = {0xd10103ffu, 0xa90157f6u, 0xa9024ff4u, 0xa9037bfdu};   // sub sp ; stp ; stp ; stp
 static volatile int g_ht_bnd_off, g_ht_inv_off, g_ht_tick_ok = -1, g_ht_bnd_ok = -1, g_ht_inv_ok = -1;
 static volatile unsigned long g_ht_bnd_skips, g_ht_inv_hidden, g_ht_ticks, g_ht_frames;
@@ -166,9 +166,9 @@ static void ht_shape(uint64_t* a) {
     if (inv) { int n = *(uint8_t*)(uintptr_t)(shape + 0x2e); if (n > 8) n = 8; for (int i = 0; i < n; i++) *(float*)(uintptr_t)(shape + 0x48 + 16 * (uint64_t)i) = -20000.0f; g_ht_inv_hidden++; } }
 // ---- installing (on first use, from the HTTP thread)
 static int ht_tick_install(void) {
-    if (g_ht_tick_ok >= 0) return g_ht_tick_ok; uint64_t f = HT_FRAME_FN + (g_img - APP_IMAGE); uint32_t w[4];
+    if (g_ht_tick_ok >= 0) return g_ht_tick_ok; uint64_t f = APP(frame_fn); uint32_t w[4];
     int tick = !getenv("NHOOK_HOST_NOTICK") && !body_hook_after("game tick (host tools)", 0xeefa8, ht_on_tick);
-    int frame = !getenv("NHOOK_HOST_NOFRAME") && g_img && !rd(f, w, 16) && !memcmp(w, g_ht_frame_words, 16) && !text_hook("frame (host tools)", f, ht_on_frame_entry);
+    int frame = !getenv("NHOOK_HOST_NOFRAME") && g_img && f && !rd(f, w, 16) && !memcmp(w, g_ht_frame_words, 16) && !text_hook("frame (host tools)", f, ht_on_frame_entry);
     g_ht_tick_ok = tick || frame;
     if (!g_ht_tick_ok) ht_say("teleport unavailable: neither halo3's game tick nor the app's frame function could be hooked"); return g_ht_tick_ok; }
 static int ht_bnd_install(void) {

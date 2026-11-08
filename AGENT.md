@@ -63,8 +63,9 @@ bash shim/build.sh && bash shim/play.sh                    # the loader
 
 - **Offline tests** (`shim/tools/`): nhook-selftest, results-feed-test, spawn-test, overlay-feat-test, forensic-oggtest,
   clipboard-test, d2d-test, rec-test, callcost.
-- **Live tests** (local server, test profiles), native: native-fire-test, native-aim-test, `native-host-test.sh walls|tpnext`,
-  native-voice-test, native-spar-test.
+- **Live tests** (local server, test profiles), native: native-hooks-test (every hook installed + firing: run it first after an
+  app update), native-fire-test, native-aim-test, `native-host-test.sh walls|tpnext`, native-voice-test, native-spar-test --
+  all of them in a row: `bash shim/tools/native-test-all.sh` (~20 min).
 - **Live tests**, loader: quiet-run, port-verify, spots-verify.
 
 ## Reverse engineering
@@ -72,6 +73,8 @@ bash shim/build.sh && bash shim/play.sh                    # the loader
 - **PE**: `re-tools/refs.py` (func / strref / globref), `decomp.py` (angr, `setup.sh` first), `slotdis.py`, `ctxcalls.py`,
   `memwrites.py`.
 - **The native app** (arm64 Mach-O): `re-tools/machoref.py` (strref / dis / func / calls / dataref).
+- **A new native app build** (it updates itself): `re-tools/machoport.py port re-tools/machoport-sigs.json <app binary> --apply`
+  (shim/native.sh does it at launch), then native-hooks-test; native-client.md "When the app updates" / "The hooks check".
 - **Map files**: `re-tools/h3bsp.py` and the other `h3*.py`.
 - **Checking a hit**: a unique signature hit can still be the wrong function. Validate it by what it does, and mark findings
   CONFIRMED or guessed in the docs.

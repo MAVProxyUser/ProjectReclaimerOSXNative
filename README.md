@@ -34,6 +34,11 @@ recompiles MCC's `halo3.dll` itself, so it needs neither this loader nor Rosetta
   boundaries), boundaries off, invisible walls off, speed 200% for everyone.
 - **Your own dedicated server on this Mac**, with the stats page: `bash shim/tools/native-dedicated.sh start` (this Mac only;
   page on http://127.0.0.1:8767); join it with `bash shim/native.sh --join-server 127.0.0.1:49190`.
+- **When the app updates itself** (it does: 0.10.0 -> 0.10.1 on 2026-11-08): `shim/native.sh` notices a build it has no
+  addresses for and ports them before it starts the app (`re-tools/machoport.py`: it finds each one again in the new app and
+  checks it; needs `python3` with numpy). The stats page's **Hooks check** window lists everything the tooling hooks or reads
+  inside the app and whether it works in this build -- anything that could not be found is marked FAILED and only that feature
+  is off. `bash shim/tools/native-hooks-test.sh` is the same as a self test (a short local test match).
 
 ```bash
 NATIVE_REAL=1 bash shim/native.sh                                      # the app with the stats page

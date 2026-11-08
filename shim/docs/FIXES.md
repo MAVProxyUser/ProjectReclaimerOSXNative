@@ -2580,6 +2580,52 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   equipment (left out of the spawn tracker) is listed and drawn as a dashed cyan ring with its name. Checked on local
   Valhalla: Warthog, Mongoose, Banshee, Wraith and the machine-gun turret outlines are recognisable.
 
+- **nhook on client 0.10.1: the app's addresses per build** (2026-11-08; shim/native/nhook.c app_build_pick / APP(), napp_builds.h,
+  re-tools/machoport.py, shim/native.sh) — WHY: the app updated itself to 0.10.1 and every hook stayed off ("no code table:
+  hooks off", no stats page at all): nhook used 0.10.0 constants for the guest image, the code table, the Opus decode / voice
+  mixer, the per-frame function, the chat_log gate and byte, the mute list and set_muted. LOGIC: one row per app build in
+  napp_builds.h, picked by the running app's LC_UUID (read from its loaded Mach-O header) + the app's dyld slide; a row
+  re-tools/machoport.py wrote later is read from ~/Library/Application Support/ReclaimerMac/native/app-builds.txt (a prebuilt
+  release dylib); a point 0 = not found in that build = that feature off. The run-time checks no longer compare 0.10.0's words:
+  they decode them (the mixer's `bl` must reach the decode, its id load `sub x8, x26, #off` must have the row's offset, the chat
+  gate's adrp + ldrb must reach the row's chat_log byte, set_muted's adrp + add the mute list). 0.10.1: image 0x104124000, code
+  table 0x1040d4bc8 (22894 entries, unchanged), decode 0x1003fdc68, mixer call 0x102212338, id load 0x10221220c with the id at
+  **x26 - 0x2a0** (0x278 in 0.10.0: the mixer's sender entry grew by 0x28; the channel byte stays at x26 - 7), frame function
+  0x102ac23d8, chat gates 0x100d7ea98 / 0x100d7eabc, chat_log 0x10408cdf3, mute list 0x10409a728, set_muted 0x102214604. The
+  halo3 side (code-table hooks, TLS fields, the capacity lines) needed nothing. shim/native.sh: when `machoport.py check` says the
+  installed app has no row (exit 2), it ports it from re-tools/machoport-sigs.json, writes both tables and rebuilds the dylib, before
+  launching. With hooks off (an unknown build) the stats page now starts anyway, so its Hooks check window says why
+  (hooks_off_page). SWITCHES: NATIVE_NO_AUTOPORT=1 (no port at launch: the old "hooks off"), NHOOK_APP_BUILD=<version> (that row
+  whatever the UUID), NATIVE_PORT_REF=<binary or sigs.json>. REMOVED with it: the 0.10.0 constants (APP_IMAGE, APP_CODETAB,
+  APP_MUTED, APP_SETMUTE, HT_FRAME_FN, the voice / chat literals), the exact-word checks (incl. the mixer's bl encoding and
+  #0x278), is_muted as a tracked address (never used at run time) -- native-client.md "What was removed".
+- **The hooks check** (2026-11-08; shim/native/nhchk.h + nhchk.c, GET /hooks.json, the stats page's Hooks check window,
+  shim/tools/native-hooks-test.sh) — WHY: the user, on 0.10.1: "can you add a hooks check? like all the stuff you patch I assume
+  you can detect IF on a new version the hook loaded properly or function". LOGIC: a registry of every thing nhook depends on in
+  the app -- the build's address row, the guest image, the code table, the halo3.dll image check, each entry / body / text hook,
+  each interposed function, each swizzled Metal method, each fixed app address (chat_log gate, set_muted, voice mixer), the app
+  log lines the parsers need, the memory readers (players table, statborg, game results, network session, observer camera) --
+  with its feature, WHEN it is expected to fire (always / engine / match / shots / online / voice / chat / mic / overlay / bot /
+  host / setup / never), its state (ok, on first use, off, FAILED + why) and its fires / last fire. Hooks are counted by a
+  trampoline in front of the handler (hk_wrap: 48 counting thunks that pass x0-x7 on; not the Opus shim, which reads the stub's
+  stack -- nh_on_opus counts it), so no handler changed; an install failure records the installer's own last log line (nlog keeps
+  each thread's last line). Hooks installed on first use (the camera, sparring aim / walker, the host tools) get a preflight at
+  start: the installer's shape checks without writing anything. Verdicts: ok / FAILED / silent (installed, its "when" happened,
+  never fired) / waiting / off / not expected. [hooks] summary lines 90 s after the engine started and 60 s into each match;
+  the snapshot's "hookcheck" counts ("hooks" is the cost meter's). The self test: a local Guardian test match that fires
+  (hold_trigger), has the overlay on, the walker roaming and uses the host tools (boundaries, invisible walls, a teleport), then
+  fails on anything FAILED or on an item that match must exercise that never fired. On 0.10.1 its first run passed 30 items and
+  found the stub-page bug below. In the user's first 0.10.1 game: 33 ok, 0 failed (the observer camera's "when" is the overlay:
+  nothing reads it with the overlay off -- it showed "silent" until that fix). shim/tools/hooks-watch.py prints verdict changes
+  live. SWITCH: NHOOK_NO_HKWRAP=1 = hooks without the counting thunk (fires stay 0).
+- **Stub slots: many hook stubs to a page** (2026-11-08; shim/native/nhook.c stub_alloc / stub_seal) — WHY: the hooks check's
+  first run on 0.10.1: the host tools' game-tick body hook FAILED, "near_page: 0 free gaps of 16384 bytes within 120 MB of
+  0x14aafa8c0": every entry / body hook took its own 16 KB page within branch range of the JIT region, and the free gaps there
+  are few (three hooks took them all). That hook is what a dedicated server runs host requests from. LOGIC: a near page is
+  mapped twice -- RX in the gap (what the hooks branch to) and RW anywhere (mach_vm_remap, shared) where stubs are written -- and
+  stubs are 64-byte-aligned slots in it, so one gap holds every stub and a page with live stubs is never made non-executable
+  (the reason for one page each). SWITCH: NHOOK_STUB_PAGE_EACH=1 = one page per stub (the old way).
+
 ## 19. Performance
 
 Numbers are from the commit messages; PERF-PLAN.md has the measurements. Compare only inside one match
@@ -3046,6 +3092,17 @@ Numbers are from the commit messages; PERF-PLAN.md has the measurements. Compare
 - **re-tools/tlsref.py** (2026-11-07) — who uses a halo3 TLS block field: halo3's idiom loads the field offset into a
   register (`mov edx, 0xc0` ; `mov rax, [rax+rcx*8]` ; `mov rsi, [rdx+rax]`), which a plain `[reg + 0xc0]` search misses;
   `--then` keeps only hits that go on to touch given offsets. Found the player control record's users (halo3+0xf3f48..0xf9520).
+
+- **re-tools/machoport.py** (2026-11-08) — nhook's app addresses into a new native app build, the arm64 Mach-O counterpart of
+  sigport.py / patchscan.py: each point (POINTS) found again by its function's shape (b / bl / adrp / adrp-relative add, ldr,
+  str and literal immediates masked; strict, then loose with conditional-branch offsets masked too), else a window of masked
+  instructions unique in the new __text; data points through their users' instructions; `call` (the bl to a ported function with
+  given words before it) and `infunc` / `imm` (an instruction inside a ported function, a field decoded from it: the mixer's
+  sender id offset). Every point then gets a meaning check in the new build, and the log text the parsers need is looked up.
+  `sigs` stores the reference build's needed functions as raw words (re-tools/machoport-sigs.json, 11 functions, 177 KB) so `port`
+  needs no 0.10.0 binary (the app replaces itself on update). `selftest` reproduces 0.10.0 from the binary and from the sigs;
+  porting 0.10.1 from either gives the same 12 addresses. **shim/tools/native-test-all.sh** -- every live native test in a row
+  (hooks, fire, aim, walls, tpnext, voice, spar; ~20 min), the check after an app update.
 
 ## 21. Superseded workarounds (kept for history; most switches still exist)
 

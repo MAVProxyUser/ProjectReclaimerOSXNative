@@ -26,13 +26,17 @@
 
 static volatile uint64_t g_img;                 // the recompiled engine's image (guest halo3) as the app logs it
 #include "nhcost.h"                            // the hook cost meter: every hook times itself
+#include "nhchk.h"                             // the hooks check: every hook / address / tap and whether it works
 static int g_logfd = -1;                         // NHOOK_LOG=<file>: our lines go there too
 
 static void nlog(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 
+static __thread char t_lastlog[200];             // this thread's last line (the hooks check's "why" for a hook that failed)
+static const char* hk_why(void) { return !strncmp(t_lastlog, "[nhook] ", 8) ? t_lastlog + 8 : t_lastlog; }
 static void nlog(const char* fmt, ...) {
     char b[1024]; va_list ap; va_start(ap, fmt); int n = vsnprintf(b, sizeof b - 1, fmt, ap); va_end(ap);
     if (n < 0) return;
+    snprintf(t_lastlog, sizeof t_lastlog, "%s", b);
     if (n > (int)sizeof b - 2) n = sizeof b - 2;
     b[n++] = '\n';
     write(2, b, n);                              // (dyld does not interpose the interposing image's own calls)
@@ -80,10 +84,57 @@ static int rd(uint64_t a, void* out, size_t n) {
 }
 
 
-// ---- the app's runtime (0.10.0; shim/docs/native-client.md "Inside the app") ---------------------------------------
-#define APP_IMAGE   0x103f94000ull   // the guest halo3 image: a reserved range of the app itself (unslid)
-#define APP_CODETAB 0x103f44418ull   // {ptr, count}: sorted {preferred-base guest address, host code} pairs (22894)
+// ---- the app's runtime: its addresses per build (2026-11-08, client 0.10.1) ----------------------------------------
+// Everything nhook uses at a fixed app address comes from napp_builds.h: one row per app build, keyed by the app binary's
+// LC_UUID, made by re-tools/machoport.py (it finds each point again in a new build by its code and checks what it means;
+// 0 = not found there: that feature stays off). Unslid vmaddrs + the app's slide (dyld). shim/docs/native-client.md "Inside
+// the app" / "When the app updates". NHOOK_APP_BUILD=<version> = that row whatever the UUID (a re-signed copy of a known build).
+// Until 2026-11-08 these were 0.10.0 constants (APP_IMAGE 0x103f94000, APP_CODETAB 0x103f44418, ...): 0.10.1 came out and
+// every hook stayed off ("no code table: hooks off").
+typedef struct { uint64_t image, codetab, opus_decode, mixer_call, mixer_id, mixer_id_off, frame_fn, chat_gate_a, chat_gate_b, chat_log, muted, set_muted; } AppAddrs;
+typedef struct { const char* version, * uuid; AppAddrs a; } AppBuild;
+#include "napp_builds.h"
+static AppAddrs g_app; static const char* g_app_ver = "unknown"; static char g_app_uuid[40]; static uint64_t g_app_slide; static int g_app_known;
+#define APP(f) (g_app.f ? g_app.f + g_app_slide : 0ull)
 static uint64_t g_slide, g_tab, g_ntab;
+static void app_build_pick(void) {
+    const struct mach_header_64* mh = 0;
+    for (uint32_t i = 0; i < _dyld_image_count(); i++) { const char* n = _dyld_get_image_name(i);
+        if (n && strstr(n, "/project-reclaimer") && !strstr(n, ".dylib")) { mh = (const struct mach_header_64*)_dyld_get_image_header(i); g_app_slide = (uint64_t)_dyld_get_image_vmaddr_slide(i); break; } }
+    if (!mh) { mh = (const struct mach_header_64*)_dyld_get_image_header(0); g_app_slide = (uint64_t)_dyld_get_image_vmaddr_slide(0); }
+    const uint8_t* p = (const uint8_t*)(mh + 1);   // (our own process's loaded header: a known address)
+    for (uint32_t k = 0; mh && k < mh->ncmds; k++) { const struct load_command* lc = (const struct load_command*)p;
+        if (lc->cmd == LC_UUID) { const uint8_t* u = ((const struct uuid_command*)lc)->uuid;
+            snprintf(g_app_uuid, sizeof g_app_uuid, "%02X%02X%02X%02X-%02X%02X-%02X%02X-%02X%02X-%02X%02X%02X%02X%02X%02X",
+                     u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7], u[8], u[9], u[10], u[11], u[12], u[13], u[14], u[15]); break; }
+        p += lc->cmdsize; }
+    const char* force = getenv("NHOOK_APP_BUILD"); const char* src = "built in";
+    for (size_t i = 0; i < sizeof g_app_builds / sizeof g_app_builds[0]; i++)
+        if (force ? !strcmp(force, g_app_builds[i].version) : !strcmp(g_app_uuid, g_app_builds[i].uuid)) { g_app = g_app_builds[i].a; g_app_ver = g_app_builds[i].version; g_app_known = 1; break; }
+    if (!g_app_known) {   // a row re-tools/machoport.py wrote after this dylib was built (a release bundle on a newer app)
+        static char ver[32]; char path[1024], line[2048]; const char* home = getenv("HOME");
+        snprintf(path, sizeof path, "%s/Library/Application Support/ReclaimerMac/native/app-builds.txt", home ? home : ""); FILE* f = fopen(path, "r");
+        while (f && fgets(line, sizeof line, f)) { char v[32], u[40]; int k = 0; if (line[0] == '#' || sscanf(line, "%31s %39s %n", v, u, &k) < 2) continue;
+            if (force ? strcmp(force, v) : strcmp(u, g_app_uuid)) continue;
+            AppAddrs a; memset(&a, 0, sizeof a); char* t = line + k; char* sv = 0;
+            for (char* tok = strtok_r(t, " \n", &sv); tok; tok = strtok_r(0, " \n", &sv)) { char* eq = strchr(tok, '='); if (!eq) continue; *eq = 0; uint64_t x = strtoull(eq + 1, 0, 16);
+                #define APP_SET(fl) if (!strcmp(tok, #fl)) a.fl = x;
+                APP_SET(image) APP_SET(codetab) APP_SET(opus_decode) APP_SET(mixer_call) APP_SET(mixer_id) APP_SET(mixer_id_off) APP_SET(frame_fn)
+                APP_SET(chat_gate_a) APP_SET(chat_gate_b) APP_SET(chat_log) APP_SET(muted) APP_SET(set_muted)
+                #undef APP_SET
+            }
+            g_app = a; snprintf(ver, sizeof ver, "%s", v); g_app_ver = ver; g_app_known = 1; src = "app-builds.txt"; break; }
+        if (f) fclose(f); }
+    int h = hk_named("app build"), miss = 0; char m[160] = ""; size_t ml = 0;
+    #define APP_MISS(f) if (g_app_known && !g_app.f) { miss++; ml += (size_t)snprintf(m + ml, ml < sizeof m ? sizeof m - ml : 0, " %s", #f); }
+    APP_MISS(image) APP_MISS(codetab) APP_MISS(opus_decode) APP_MISS(mixer_call) APP_MISS(mixer_id) APP_MISS(mixer_id_off) APP_MISS(frame_fn)
+    APP_MISS(chat_gate_a) APP_MISS(chat_gate_b) APP_MISS(chat_log) APP_MISS(muted) APP_MISS(set_muted)
+    #undef APP_MISS
+    if (!g_app_known) hk_state(h, HK_FAIL, 0, "this app (UUID %s) is not in napp_builds.h: python3 re-tools/machoport.py port <0.10.0 binary> <this binary> --apply, then rebuild (shim/native.sh does it itself)", g_app_uuid);
+    else if (miss) hk_state(h, HK_FAIL, 0, "%s (UUID %s%s): %d point(s) not found in this build:%s", g_app_ver, g_app_uuid, force ? ", forced by NHOOK_APP_BUILD" : "", miss, m);
+    else hk_state(h, HK_OK, 0, "%s (UUID %s%s), every point found", g_app_ver, g_app_uuid, force ? ", forced by NHOOK_APP_BUILD" : "");
+    nlog("[nhook] app build %s (UUID %s, slide 0x%llx, %s)%s", g_app_ver, g_app_uuid, (unsigned long long)g_app_slide, g_app_known ? src : "-", g_app_known ? "" : ": NOT in napp_builds.h -- the hooks stay off (re-tools/machoport.py)");
+}
 
 static uint64_t host_of(uint32_t rva) {           // the lifted entry of halo3+rva, 0 = not lifted
     uint64_t ga = 0x180000000ull + rva, lo = 0, hi = g_ntab;
@@ -124,6 +175,32 @@ static uint8_t* near_page(uint64_t code, size_t size) {   // a fresh RW range wi
     nlog("[nhook] near_page: %d free gaps of %zu bytes within 120 MB of 0x%llx, none could be allocated (nearest 0x%llx)", nc, size, (unsigned long long)code, nc ? (unsigned long long)cand[0] : 0ull);
     return 0;
 }
+
+// ---- stub slots (2026-11-08): many stubs to a page near the lifted code. Each entry / body hook used to take its own 16 KB
+// page within +-120 MB of the code, and the free gaps there are few: in a 0.10.1 test three hooks took them all and the
+// fourth (the host tools' game tick, which a dedicated server needs) found "0 free gaps" -- the hooks check showed it FAILED.
+// Now a near page is mapped twice: RX where the hooks branch to, RW anywhere (mach_vm_remap, shared) where stubs are written,
+// so a page that holds live stubs is never made non-executable and one gap holds 16 KB of stubs (each is ~0.2-0.4 KB).
+// NHOOK_STUB_PAGE_EACH=1 = the old one page per stub.
+typedef struct { uint64_t rx; uint8_t* rw; size_t used; } StubPage;
+static StubPage g_stubp[32]; static int g_nstubp; static pthread_mutex_t g_stub_mx = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t stub_alloc(uint64_t code, size_t len, uint8_t** rw) {   // the RX address of a free slot near code; *rw = its writable alias
+    static int each = -1; if (each < 0) each = getenv("NHOOK_STUB_PAGE_EACH") != 0;
+    if (each) { uint8_t* p = near_page(code, 0x4000); *rw = p; return (uint64_t)(uintptr_t)p; }   // (the caller makes it RX)
+    len = (len + 63) & ~(size_t)63; const int64_t R = 0x7800000; uint64_t a = 0;
+    pthread_mutex_lock(&g_stub_mx);
+    for (int i = 0; i < g_nstubp && !a; i++) { StubPage* p = &g_stubp[i]; int64_t d = (int64_t)(p->rx - code);
+        if (d > -R + 0x4000 && d < R - 0x4000 && p->used + len <= 0x4000) { a = p->rx + p->used; *rw = p->rw + p->used; p->used += len; } }
+    if (!a && g_nstubp < 32) { uint8_t* np = near_page(code, 0x4000); mach_vm_address_t rwa = 0; vm_prot_t cur = 0, mx = 0;
+        if (np && mach_vm_remap(mach_task_self(), &rwa, 0x4000, 0, VM_FLAGS_ANYWHERE, mach_task_self(), (mach_vm_address_t)(uintptr_t)np, FALSE, &cur, &mx, VM_INHERIT_NONE) == KERN_SUCCESS
+               && mach_vm_protect(mach_task_self(), (mach_vm_address_t)(uintptr_t)np, 0x4000, 0, VM_PROT_READ | VM_PROT_EXECUTE) == KERN_SUCCESS) {
+            g_stubp[g_nstubp++] = (StubPage){(uint64_t)(uintptr_t)np, (uint8_t*)(uintptr_t)rwa, len}; a = (uint64_t)(uintptr_t)np; *rw = (uint8_t*)(uintptr_t)rwa; }
+        else if (np) nlog("[nhook] stub page near 0x%llx: no writable alias (remap / protect refused)", (unsigned long long)code); }
+    pthread_mutex_unlock(&g_stub_mx); return a; }
+static void stub_seal(uint64_t rx, uint8_t* rw, size_t len) {   // after writing a stub: make it runnable
+    static int each = -1; if (each < 0) each = getenv("NHOOK_STUB_PAGE_EACH") != 0;
+    if (each) mach_vm_protect(mach_task_self(), (mach_vm_address_t)rx, 0x4000, 0, VM_PROT_READ | VM_PROT_EXECUTE);
+    (void)rw; __atomic_thread_fence(__ATOMIC_SEQ_CST); sys_icache_invalidate((void*)(uintptr_t)rx, len); }
 
 // NHOOK_PKG_PROBE=1 (2026-11-07, backlog N9): halo3's network message table (halo3+0x46b6e98 -> 46 x 0x40 {valid, name,
 // flags, size, max size, encode +0x20, decode +0x28}; the loader's pktlog.c) in the native app: each message's encode /
@@ -180,7 +257,13 @@ static uint64_t nh_call(uint64_t* ctx, uint32_t rva, int n, const uint64_t* a) {
     uint64_t r = ctx[0]; if (lg) nlog("[nhook] [call] halo3+0x%x returned 0x%llx", rva, (unsigned long long)r); memcpy(ctx, save, sizeof save); return r;
 }
 extern char nh_tpls_start[], nh_tpls_displaced[], nh_tpls_handler[], nh_tpls_return[], nh_tpls_end[];
-static int hook_install_x(const char* name, uint32_t rva, void* h, int skip, uint64_t* stub_out) {   // skip: stub.S _nh_tpls (the handler may do the function's work)
+static int hook_install_x0(const char* name, uint32_t rva, void* h, int skip, uint64_t* stub_out);
+// the hooks check around each installer: the item by the hook's name, a counting trampoline in front of the handler, the
+// outcome (ok + where, or FAILED + the installer's own last log line)
+static int hook_install_x(const char* name, uint32_t rva, void* h, int skip, uint64_t* stub_out) {
+    int id = hk_named(name); int r = hook_install_x0(name, rva, hk_wrap(id, h), skip, stub_out);
+    if (r) hk_state(id, HK_FAIL, 0, "halo3+0x%x: %s", rva, hk_why()); else { g_hk[id].kind = "entry hook"; hk_state(id, HK_OK, host_of(rva), "entry hook on halo3+0x%x", rva); } return r; }
+static int hook_install_x0(const char* name, uint32_t rva, void* h, int skip, uint64_t* stub_out) {   // skip: stub.S _nh_tpls (the handler may do the function's work)
     char* T0 = skip ? nh_tpls_start : nh_tpl_start; char* TE = skip ? nh_tpls_end : nh_tpl_end; char* TD = skip ? nh_tpls_displaced : nh_tpl_displaced;
     char* TH = skip ? nh_tpls_handler : nh_tpl_handler; char* TR = skip ? nh_tpls_return : nh_tpl_return;
     uint64_t e = host_of(rva); uint32_t w[4];
@@ -194,16 +277,15 @@ static int hook_install_x(const char* name, uint32_t rva, void* h, int skip, uin
         nlog("[nhook] hook %s: halo3+0x%x is a branch to 0x%llx: hooking the branch", name, rva, (unsigned long long)ret); }
     else if (w[0] != 0xa9bf7bfd || w[1] != 0x910003fd || w[2] != 0xa9bf53f3 || (w[3] & 0xffffffe0) != 0xb9429000) {   // ldr w<n>,[x0,#0x290]
         nlog("[nhook] hook %s: halo3+0x%x entry %08x %08x %08x %08x is not a lifted wrapper: refused", name, rva, w[0], w[1], w[2], w[3]); return -1; }
-    size_t tl = TE - T0;
-    uint8_t* st = near_page(e, 0x4000);              // its own page: a page that holds a live stub is never made writable again
-    if (!st) { nlog("[nhook] hook %s: no stub page near 0x%llx", name, (unsigned long long)e); return -1; }
-    int64_t d = (int64_t)((uint64_t)st - e);
-    memcpy(st, T0, tl);
-    memcpy(st + (TD - T0), &displaced, 4);            // the displaced stp x29,x30,[sp,#-16]! (or a nop for a branch)
+    size_t tl = TE - T0; uint8_t* sw = 0;
+    uint64_t sx = stub_alloc(e, tl, &sw);            // a slot near the code (stub_alloc: RX there, written through its RW alias)
+    if (!sx) { nlog("[nhook] hook %s: no stub page near 0x%llx", name, (unsigned long long)e); return -1; }
+    uint8_t* st = (uint8_t*)(uintptr_t)sx; int64_t d = (int64_t)(sx - e);
+    memcpy(sw, T0, tl);
+    memcpy(sw + (TD - T0), &displaced, 4);            // the displaced stp x29,x30,[sp,#-16]! (or a nop for a branch)
     uint64_t hv = (uint64_t)h, rv = ret;
-    memcpy(st + (TH - T0), &hv, 8); memcpy(st + (TR - T0), &rv, 8);
-    mach_vm_protect(mach_task_self(), (mach_vm_address_t)st, 0x4000, 0, VM_PROT_READ | VM_PROT_EXECUTE);
-    sys_icache_invalidate(st, tl);
+    memcpy(sw + (TH - T0), &hv, 8); memcpy(sw + (TR - T0), &rv, 8);
+    stub_seal(sx, sw, tl);
     uint32_t b = 0x14000000u | ((uint32_t)(d >> 2) & 0x03ffffffu);
     pthread_jit_write_protect_np(0);                // the code is MAP_JIT: writable only for a thread that turns it so
     __atomic_store_n((uint32_t*)e, b, __ATOMIC_RELEASE);
@@ -228,14 +310,19 @@ static uint64_t body_of(uint32_t rva) {   // the body a lifted wrapper calls (0 
         uint64_t b = e + 4u * (unsigned)i + (uint64_t)((int64_t)((int32_t)(w[i] << 6) >> 6) * 4); uint32_t b0 = 0;
         return rd(b, &b0, 4) || b0 != 0xa9bf7bfd ? 0 : b; }
     return 0; }
+static int body_hook_after0(const char* name, uint32_t rva, void (*h)(uint64_t*));
 static int body_hook_after(const char* name, uint32_t rva, void (*h)(uint64_t*)) {
+    int id = hk_named(name); int r = body_hook_after0(name, rva, (void (*)(uint64_t*))hk_wrap(id, (void*)h));
+    if (r) hk_state(id, HK_FAIL, 0, "halo3+0x%x: %s", rva, hk_why()); else { g_hk[id].kind = "body hook"; hk_state(id, HK_OK, body_of(rva), "body hook on halo3+0x%x", rva); } return r; }
+static int body_hook_after0(const char* name, uint32_t rva, void (*h)(uint64_t*)) {
     uint64_t b = body_of(rva); if (!b) { nlog("[nhook] body hook %s: halo3+0x%x has no lifted body of the known shape: refused", name, rva); return -1; }
-    size_t tl = (size_t)(nh_ba_end - nh_ba_start); uint8_t* st = near_page(b, 0x4000);
-    if (!st) { nlog("[nhook] body hook %s: no stub page near 0x%llx", name, (unsigned long long)b); return -1; }
-    int64_t d = (int64_t)((uint64_t)st - b); if (d >= (1ll << 27) || d < -(1ll << 27)) { nlog("[nhook] body hook %s: stub out of branch range", name); return -1; }
-    memcpy(st, nh_ba_start, tl); uint32_t disp = 0xa9bf7bfd; memcpy(st + (nh_ba_displaced - nh_ba_start), &disp, 4);
-    uint64_t hv = (uint64_t)(uintptr_t)h, rv = b + 4; memcpy(st + (nh_ba_handler - nh_ba_start), &hv, 8); memcpy(st + (nh_ba_return - nh_ba_start), &rv, 8);
-    mach_vm_protect(mach_task_self(), (mach_vm_address_t)(uintptr_t)st, 0x4000, 0, VM_PROT_READ | VM_PROT_EXECUTE); sys_icache_invalidate(st, tl);
+    size_t tl = (size_t)(nh_ba_end - nh_ba_start); uint8_t* sw = 0; uint64_t sx = stub_alloc(b, tl, &sw);
+    if (!sx) { nlog("[nhook] body hook %s: no stub page near 0x%llx", name, (unsigned long long)b); return -1; }
+    uint8_t* st = (uint8_t*)(uintptr_t)sx;
+    int64_t d = (int64_t)(sx - b); if (d >= (1ll << 27) || d < -(1ll << 27)) { nlog("[nhook] body hook %s: stub out of branch range", name); return -1; }
+    memcpy(sw, nh_ba_start, tl); uint32_t disp = 0xa9bf7bfd; memcpy(sw + (nh_ba_displaced - nh_ba_start), &disp, 4);
+    uint64_t hv = (uint64_t)(uintptr_t)h, rv = b + 4; memcpy(sw + (nh_ba_handler - nh_ba_start), &hv, 8); memcpy(sw + (nh_ba_return - nh_ba_start), &rv, 8);
+    stub_seal(sx, sw, tl);
     uint32_t br = 0x14000000u | ((uint32_t)(d >> 2) & 0x03ffffffu);
     pthread_jit_write_protect_np(0); __atomic_store_n((uint32_t*)(uintptr_t)b, br, __ATOMIC_RELEASE); pthread_jit_write_protect_np(1);
     sys_icache_invalidate((void*)(uintptr_t)b, 4);
@@ -278,8 +365,13 @@ static void nh_world_go(thread_act_array_t th, mach_msg_type_number_t n) {
 }
 extern char nh_tpf_start[], nh_tpf_want[], nh_tpf_displaced[], nh_tpf_handler[], nh_tpf_return[], nh_tpf_end[];
 extern char nh_tps_start[], nh_tps_displaced[], nh_tps_handler[], nh_tps_return[], nh_tps_end[];
-static int text_hook_x(const char* name, uint64_t f, void* h, int filt, uint32_t want, int skip, uint64_t* stub_out) {   // skip: stub.S _nh_tps   // filt: _nh_tpf, the handler only for parameter id `want`
-    if (getenv("NHOOK_NO_TEXT_HOOKS")) return -1;
+static int text_hook_x0(const char* name, uint64_t f, void* h, int filt, uint32_t want, int skip, uint64_t* stub_out);
+extern char nh_opus_shim[];
+static int text_hook_x(const char* name, uint64_t f, void* h, int filt, uint32_t want, int skip, uint64_t* stub_out) {
+    int id = hk_named(name); if (getenv("NHOOK_NO_TEXT_HOOKS")) { hk_state(id, HK_OFF, f, "NHOOK_NO_TEXT_HOOKS"); return -1; }
+    int r = text_hook_x0(name, f, h == (void*)nh_opus_shim ? h : hk_wrap(id, h), filt, want, skip, stub_out);   // (the Opus shim reads the stub's stack: no trampoline; nh_on_opus counts)
+    if (r) hk_state(id, HK_FAIL, f, "%s", hk_why()); else { g_hk[id].kind = "text hook"; hk_state(id, HK_OK, f, "text hook at 0x%llx (the app's own code)", (unsigned long long)f); } return r; }
+static int text_hook_x0(const char* name, uint64_t f, void* h, int filt, uint32_t want, int skip, uint64_t* stub_out) {   // skip: stub.S _nh_tps   // filt: _nh_tpf, the handler only for parameter id `want`
     uint32_t w[4]; if (rd(f, w, 16)) { nlog("[nhook] text hook %s: 0x%llx unreadable", name, (unsigned long long)f); return -1; }
     for (int i = 0; i < 4; i++) if (insn_pcrel(w[i])) { nlog("[nhook] text hook %s: instruction %d (%08x) is PC-relative: refused", name, i, w[i]); return -1; }
     char* ts = filt ? nh_tpf_start : skip ? nh_tps_start : nh_tp4_start; char* te = filt ? nh_tpf_end : skip ? nh_tps_end : nh_tp4_end;
@@ -312,19 +404,33 @@ static int text_hook_x(const char* name, uint64_t f, void* h, int filt, uint32_t
 }
 static int text_hook_t(const char* name, uint64_t f, nh_handler h, int filt, uint32_t want) { return text_hook_x(name, f, (void*)h, filt, want, 0, 0); }
 static int text_hook(const char* name, uint64_t f, nh_handler h) { return text_hook_t(name, f, h, 0, 0); }
-// the app's Opus decode (nstats.c nh_on_opus: forensic voice audio) -- 0.10.0 addresses, every word checked first
+// the app's Opus decode (nstats.c nh_on_opus: forensic voice audio) -- this build's addresses (napp_builds.h), each checked
+// first by what it must be: decode's prologue, the mixer's argument moves + a bl that reaches decode, its sender id load
+// (sub x8, x26, #off ; ldr x19, [x8] with off = the table's mixer_id_off: 0x278 in 0.10.0, 0x2a0 in 0.10.1 -- the sender
+// entry grew). Until 2026-11-08 these were exact 0.10.0 words (incl. the bl's offset and #0x278).
 extern char nh_opus_shim[];
-static uint64_t g_opus_ret;   // (nstats.c)
+static uint64_t g_opus_ret;      // (nstats.c nh_on_opus: other callers are ignored)
+static uint64_t g_mixer_id_off;  // (nstats.c nh_on_opus: the sender's peer id at x26 - this)
+static int g_hk_opus = -1;
+static int bl_reaches(uint64_t at, uint64_t want) { uint32_t w; if (rd(at, &w, 4) || (w & 0xfc000000u) != 0x94000000u) return 0;
+    return at + (uint64_t)((int64_t)((int32_t)(w << 6) >> 6) * 4) == want; }
 static void voice_hook_install(void) {
-    static const struct { uint64_t a; uint32_t w[4]; int n; } chk[] = {
-        {0x1003f1e7cull, {0x6db923e9, 0xa9016ffc, 0xa90267fa, 0xa9035ff8}, 4},   // decode: stp d9,d8 / x28,x27 / x26,x25 / x24,x23
-        {0x102152444ull, {0xd109e348, 0xf9400113}, 2},                           // the mixer: sub x8, x26, #0x278 ; ldr x19, [x8] (the id)
-        {0x10215256cull, {0xaa1903e1, 0xaa1803e2, 0x52807803, 0x978a7e41}, 4} }; // mov x1, x25 ; mov x2, x24 ; mov w3, #0x3c0 ; bl decode
-    uint64_t sl = g_img - APP_IMAGE;
-    for (size_t i = 0; i < sizeof chk / sizeof chk[0]; i++) { uint32_t w[4]; if (rd(chk[i].a + sl, w, 4u * (unsigned)chk[i].n) || memcmp(w, chk[i].w, 4u * (unsigned)chk[i].n)) {
-        nlog("[nhook] voice packets: not hooked (0x%llx is not the 0.10.0 code)", (unsigned long long)chk[i].a); return; } }
-    g_opus_ret = 0x102152578ull + 4 + sl;   // (nstats.c nh_on_opus: other callers are ignored)
-    text_hook("opus decode (voice)", 0x1003f1e7cull + sl, (nh_handler)(void*)nh_opus_shim);
+    int h = g_hk_opus = hk_named("opus decode (voice)"), mx = hk_named("voice mixer");
+    uint64_t dec = APP(opus_decode), call = APP(mixer_call), idl = APP(mixer_id), off = g_app.mixer_id_off;
+    if (!dec || !call || !idl || !off) { hk_state(h, HK_FAIL, 0, "this build's table has no opus_decode / mixer_call / mixer_id"); hk_state(mx, HK_FAIL, 0, "not in this build's table");
+        nlog("[nhook] voice packets: not hooked (this app build's table has no voice points)"); return; }
+    static const uint32_t wd[4] = {0x6db923e9, 0xa9016ffc, 0xa90267fa, 0xa9035ff8}, wc[3] = {0xaa1903e1, 0xaa1803e2, 0x52807803};
+    uint32_t d[4], c[3], i[2];
+    if (rd(dec, d, 16) || memcmp(d, wd, 16)) { hk_state(h, HK_FAIL, dec, "decode at 0x%llx does not start stp d9,d8 / x28,x27 / x26,x25 / x24,x23", (unsigned long long)dec);
+        nlog("[nhook] voice packets: not hooked (0x%llx is not the Opus decode)", (unsigned long long)dec); return; }
+    if (rd(call, c, 12) || memcmp(c, wc, 12) || !bl_reaches(call + 12, dec)) { hk_state(mx, HK_FAIL, call, "0x%llx is not mov x1, x25 ; mov x2, x24 ; mov w3, #0x3c0 ; bl decode", (unsigned long long)call);
+        hk_state(h, HK_FAIL, dec, "its caller (the voice mixer) did not check out"); nlog("[nhook] voice packets: not hooked (the mixer's decode call at 0x%llx is not the expected code)", (unsigned long long)call); return; }
+    if (rd(idl, i, 8) || (i[0] & 0xffc003ffu) != 0xd1000348u || ((i[0] >> 10) & 0xfffu) != off || i[1] != 0xf9400113u) {
+        hk_state(mx, HK_FAIL, idl, "0x%llx is not sub x8, x26, #0x%llx ; ldr x19, [x8]", (unsigned long long)idl, (unsigned long long)off);
+        hk_state(h, HK_FAIL, dec, "the mixer's sender id load did not check out"); nlog("[nhook] voice packets: not hooked (the mixer's id load at 0x%llx is not the expected code)", (unsigned long long)idl); return; }
+    g_mixer_id_off = off; g_opus_ret = call + 16;
+    hk_state(mx, HK_OK, call, "decode call at 0x%llx, sender id at x26 - 0x%llx, channel byte at x26 - 7", (unsigned long long)call, (unsigned long long)off);
+    text_hook("opus decode (voice)", dec, (nh_handler)(void*)nh_opus_shim);
 }
 // The target of an entry that is one `b` (the code table's entry for a function the app replaced)
 static uint64_t branch_target_of(uint32_t rva) {
@@ -519,10 +625,20 @@ static void* engine_thread(void* arg) {
 
 #include "nstats.c"   // the stats page (h3maps.c's map files, the players / objects readers, the HTTP server)
 
+// hooks off (an app build we have no addresses for, a wrong row): the stats page and the frame hooks still start, so the
+// page's Hooks window (and GET /hooks.json) says what is missing -- until 2026-11-08 there was no page at all then
+static void hooks_off_page(void) { nstats_start(); { extern void nr_install(void); nr_install(); } }
 static void hooks_start(void) {
-    g_slide = g_img - APP_IMAGE;
-    uint64_t tab[2]; if (rd(APP_CODETAB + g_slide, tab, 16) || !tab[0] || tab[1] < 1000 || tab[1] > 1000000) { nlog("[nhook] no code table: hooks off"); return; }
-    g_tab = tab[0]; g_ntab = tab[1];
+    int hi = hk_named("guest image"), ht = hk_named("code table");
+    g_slide = g_app_slide;
+    if (g_app.image && g_img != APP(image)) { hk_state(hi, HK_FAIL, g_img, "the app logged 0x%llx, this build's table says 0x%llx: the wrong row (hooks off)", (unsigned long long)g_img, (unsigned long long)APP(image));
+        hk_state(ht, HK_FAIL, 0, "not read: the guest image is not where this build's table has it"); nlog("[nhook] the engine image 0x%llx is not this build's (0x%llx): hooks off", (unsigned long long)g_img, (unsigned long long)APP(image)); hooks_off_page(); return; }
+    hk_state(hi, HK_OK, g_img, "at 0x%llx%s", (unsigned long long)g_img, g_app.image ? " (as this build's table has it)" : "");
+    uint64_t tab[2], ta = APP(codetab);
+    if (!ta || rd(ta, tab, 16) || !tab[0] || tab[1] < 1000 || tab[1] > 1000000) {
+        hk_state(ht, HK_FAIL, ta, "%s", !g_app_known ? "this app build is not in napp_builds.h (re-tools/machoport.py)" : !ta ? "not in this build's table" : "no {ptr, count} at this build's code-table address");
+        nlog("[nhook] no code table: hooks off%s", g_app_known ? "" : " (this app build is not in napp_builds.h: re-tools/machoport.py)"); hooks_off_page(); return; }
+    g_tab = tab[0]; g_ntab = tab[1]; hk_state(ht, HK_OK, ta, "%llu entries at 0x%llx", (unsigned long long)g_ntab, (unsigned long long)g_tab);
     if (getenv("NHOOK_CENSUS")) census_install();
     else if (getenv("NHOOK_COUNT")) {
         if (getenv("NHOOK_COUNT_RVAS")) { const char* w = getenv("NHOOK_COUNT_RVAS"); static char nm[NCNT][16];
@@ -567,6 +683,7 @@ static void hooks_start(void) {
         while (w && *w) { uint32_t r = (uint32_t)strtoul(w, 0, 16); uint64_t e = host_of(r), t = branch_target_of(r);
             nlog("[nhook] halo3+0x%x: %s (entry 0x%llx%s0x%llx)", r, rva_kind(r), (unsigned long long)e, t ? ", the app's code at " : "", (unsigned long long)t);
             w = strchr(w, ','); if (w) w++; } }
+    hk_preflight();                                      // nhchk.c: the first-use hooks' shape checks (nothing written)
     nstats_start();
     { extern void nr_install(void); nr_install(); }      // nrender.m: the overlay, recording and captures in the app's frames
 }
@@ -579,7 +696,7 @@ static void* probe_thread(void* arg) {
     // starting beside its supervisor, was not ready after 2 s once ("image+0: no MZ", "code table at 0x0" -> hooks off, no
     // stats page; 2026-11-07, its fifth start that day). Up to 60 s.
     { int w = 0; for (; w < 240; w++) { uint8_t h[2]; uint64_t t[2];
-          if (!rd(g_img, h, 2) && h[0] == 'M' && h[1] == 'Z' && !rd(APP_CODETAB + (g_img - APP_IMAGE), t, 16) && t[0] && t[1] >= 1000 && t[1] <= 1000000) break;
+          if (!rd(g_img, h, 2) && h[0] == 'M' && h[1] == 'Z' && (!g_app.codetab || (!rd(APP(codetab), t, 16) && t[0] && t[1] >= 1000 && t[1] <= 1000000))) break;
           usleep(250000); }
       if (w) nlog("[nhook] the engine image / code table were ready %.2f s later than the usual 2 s%s", w * 0.25, w >= 240 ? " -- not at all: giving up" : ""); }
     const char* path = getenv("NHOOK_HALO3");
@@ -605,6 +722,8 @@ static void* probe_thread(void* arg) {
         uint8_t* m = malloc(n); int ok = !rd(img + va, m, n); uint32_t same = 0;
         if (ok) for (uint32_t k = 0; k < n; k++) same += m[k] == f[ra + k];
         nlog("[nhook] %-8s rva 0x%-8x %s: %u of %u bytes as in the file", nm, va, ok ? "readable" : "UNREADABLE", same, n);
+        if (!strcmp(nm, ".text")) { int h = hk_named("halo3.dll image check"); const char* sp = strstr(path, "/halo3/"); sp = sp ? sp + 1 : path;   // (no home folder on the page)
+            if (ok && same == n) hk_state(h, HK_OK, img + va, ".text's first %u bytes as in MCC's %s", n, sp); else hk_state(h, HK_FAIL, img + va, ".text: %u of %u bytes as in MCC's %s (another halo3.dll?)", same, n, sp); hk_fire(h); }
         free(m);
     }
     // TLS directory: the index variable
@@ -633,14 +752,11 @@ static void* probe_thread(void* arg) {
                      dl ? " +" : " ", dl ? (unsigned long long)(v - (uint64_t)di.dli_saddr) : (unsigned long long)(v - img)), shown++;
         }
     }
-    // the runtime's guest -> host code table (0.10.0: sorted {preferred-base address, host code} pairs, (ptr, count) at
-    // app 0x103f44418; the guest image is the app's own reserved range at 0x103f94000 -- both + the app's slide)
-    uint64_t slide = _dyld_get_image_vmaddr_slide(0), aslide = img - 0x103f94000ull;
-    for (uint32_t i = 0; i < _dyld_image_count(); i++)
-        if (strstr(_dyld_get_image_name(i), "/project-reclaimer")) slide = _dyld_get_image_vmaddr_slide(i);
-    nlog("[nhook] app slide 0x%llx, image - 0x103f94000 = 0x%llx", (unsigned long long)slide, (unsigned long long)aslide);
+    // the runtime's guest -> host code table (sorted {preferred-base address, host code} pairs, (ptr, count) at this build's
+    // `codetab`; the guest image is the app's own reserved range at its `image` -- both + the app's slide: napp_builds.h)
+    nlog("[nhook] app %s slide 0x%llx, image 0x%llx (this build's table: 0x%llx)", g_app_ver, (unsigned long long)g_app_slide, (unsigned long long)img, (unsigned long long)APP(image));
     uint64_t tab[2] = {0};
-    if (!rd(0x103f44418ull + slide, tab, 16)) {
+    if (APP(codetab) && !rd(APP(codetab), tab, 16)) {
         nlog("[nhook] code table at 0x%llx, %llu entries", (unsigned long long)tab[0], (unsigned long long)tab[1]);
         uint64_t e[8]; if (!rd(tab[0], e, sizeof e)) for (int i = 0; i < 4; i++) nlog("[nhook]   [%d] 0x%llx -> 0x%llx", i, (unsigned long long)e[2*i], (unsigned long long)e[2*i+1]);
         const char* want = getenv("NHOOK_DUMPFN");   // NHOOK_DUMPFN=<rva>[,<rva>...]: hex of each function's host code
@@ -674,6 +790,8 @@ static void* probe_thread(void* arg) {
 static void on_line(const char* p, size_t n) {
     static const char key[] = "engine, image at 0x";
     if (n > 7 && !memcmp(p, "[nhook]", 7)) return;
+    { HK_ONCE(hl, "log tap (write)"); hk_fire(hl); }
+    if (n >= 12 && !memcmp(p, "[menus] open", 12)) { HK_ONCE(hm, "line: [menus] open"); hk_fire(hm); }
     if (!g_img)
         for (size_t i = 0; i + sizeof key - 1 <= n; i++)
             if (p[i] == 'e' && !memcmp(p + i, key, sizeof key - 1)) {
@@ -777,6 +895,7 @@ static OSStatus au_tap(void* ref, AudioUnitRenderActionFlags* fl, const AudioTim
     return r;
 }
 static OSStatus my_AudioUnitSetProperty(AudioUnit au, AudioUnitPropertyID id, AudioUnitScope sc, AudioUnitElement el, const void* data, UInt32 sz) {
+    { HK_ONCE(ha, "AudioUnitSetProperty"); hk_fire(ha); }
     if (id == kAudioUnitProperty_SetRenderCallback && data && sz >= sizeof(AURenderCallbackStruct) && !getenv("NHOOK_NO_AUDIO_TAP")) {
         const AURenderCallbackStruct* cs = data;
         if (cs->inputProc && cs->inputProc != au_tap) { pthread_mutex_lock(&g_au_mx); AuWrap* w = au_slot(au);
@@ -794,6 +913,7 @@ static OSStatus my_AudioUnitSetProperty(AudioUnit au, AudioUnitPropertyID id, Au
 // the page's mic switch (nstats.c mic_json, g_mic_muted): the app's capture pulls its samples on the AUHAL's input bus 1
 static OSStatus my_AudioUnitRender(AudioUnit au, AudioUnitRenderActionFlags* fl, const AudioTimeStamp* ts, UInt32 bus, UInt32 frames, AudioBufferList* io) {
     OSStatus r = AudioUnitRender(au, fl, ts, bus, frames, io);
+    if (bus == 1) { HK_ONCE(hm, "AudioUnitRender (mic)"); hk_fire(hm); }
     if (bus == 1 && !g_hc_off[HC_MIC]) { uint64_t t0 = hc_now(); g_mic_t = mono_s();
         if (mic_muted() && !r && io) for (UInt32 i = 0; i < io->mNumberBuffers; i++) if (io->mBuffers[i].mData) memset(io->mBuffers[i].mData, 0, io->mBuffers[i].mDataByteSize);
         hc_add(HC_MIC, t0); }
@@ -819,5 +939,6 @@ __attribute__((constructor)) static void nhook_init(void) {
     if (lf) g_logfd = open(lf, O_WRONLY | O_CREAT | O_APPEND, 0644);
     if (getenv("NHOOK_TRACE_WRITES")) g_trace_writes = atoi(getenv("NHOOK_TRACE_WRITES"));
     nlog("[nhook] loaded (pid %d)", getpid());
+    hk_init(); app_build_pick();                     // the hooks check's items; this app build's addresses (napp_builds.h)
     if (getenv("NHOOK_SELFTEST")) nstats_start();       // shim/tools/nhook-selftest.sh: the stats server without the app
 }

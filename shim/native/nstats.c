@@ -135,26 +135,30 @@ static uint64_t cap_new(const char* l, const char* what) { // "[capacity] <what>
 static volatile uint64_t g_res_base; static volatile int64_t g_res_stats = 0x6c98, g_res_vs = 0x2cf98, g_res_vslog = 7;
 static void nst_layout_line(const char* l) {
     uint64_t v;
-    { const char* m = "[c1] game results: "; const char* at; if (!strncmp(l, m, strlen(m)) && (at = strstr(l, " at 0x"))) { g_res_base = strtoull(at + 6, 0, 16); return; } }
+    { const char* m = "[c1] game results: "; const char* at; if (!strncmp(l, m, strlen(m)) && (at = strstr(l, " at 0x"))) { g_res_base = strtoull(at + 6, 0, 16);
+        HK_ONCE(h, "line: [c1] game results"); hk_fire(h); return; } }
     if ((v = cap_new(l, "results.address"))) { g_res_base = v; return; }
     if ((v = cap_new(l, "results.statistics"))) { g_res_stats = (int64_t)v; return; }
     if ((v = cap_new(l, "results.versus"))) { g_res_vs = (int64_t)v; return; }
     if ((v = cap_new(l, "results.versus_row_log2"))) { g_res_vslog = (int64_t)v; return; }
-    if ((v = cap_new(l, "game_globals.statborg"))) { g_sb_off = (int64_t)v; return; }
+    if ((v = cap_new(l, "game_globals.statborg"))) { g_sb_off = (int64_t)v; HK_ONCE(h, "line: [capacity] statborg"); hk_fire(h); return; }
     if ((v = cap_new(l, "session.peers_shift"))) { g_ses_peers_shift = (int64_t)v; return; }
     if ((v = cap_new(l, "session.players_shift"))) { g_ses_players_shift = (int64_t)v; return; }
-    const char* m = "[c1] network sessions moved to 0x"; if (!strncmp(l, m, strlen(m))) g_ses_store = strtoull(l + strlen(m), 0, 16);
+    const char* m = "[c1] network sessions moved to 0x"; if (!strncmp(l, m, strlen(m))) { g_ses_store = strtoull(l + strlen(m), 0, 16); HK_ONCE(h, "line: [c1] network sessions"); hk_fire(h); }
 }
 static void nst_on_line(const char* p, size_t n) {
     char l[4096]; if (n >= sizeof l) n = sizeof l - 1; memcpy(l, p, n); l[n] = 0;   // (a voice report names every sender: long)
-    if (!strncmp(l, "[voice] active ", 15)) { st_voice_report(l); return; }
+    if (!strncmp(l, "[voice] active ", 15)) { HK_ONCE(h, "line: [voice] active"); hk_fire(h); st_voice_report(l); return; }
     if (!strncmp(l, "[capacity] ", 11) || !strncmp(l, "[c1] ", 5)) { nst_layout_line(l); return; }
     if (!strncmp(l, "[menus] joining the game in progress", 36)) { g_sp_join = 1; return; }
+    if (!strncmp(l, "[engine] HUD notice: ", 21)) { HK_ONCE(h, "line: [engine] HUD notice"); hk_fire(h); }
     if (!strncmp(l, "[engine] HUD notice: ", 21)) {             // "<name> joined the server" / "<name> left the server" (st_roster_notice)
         const char* t = l + 21; size_t L = strlen(t); static const char* const sfx[2] = {" left the server", " joined the server"};
         for (int in = 0; in < 2; in++) { size_t k = strlen(sfx[in]); if (L > k && !strcmp(t + L - k, sfx[in])) { char nm[64]; size_t n2 = L - k; if (n2 >= sizeof nm) n2 = sizeof nm - 1;
                 memcpy(nm, t, n2); nm[n2] = 0; st_roster_notice(nm, in); return; } } }
+    if (!strncmp(l, "[online] joining ", 17)) { HK_ONCE(h, "line: [online] joining"); hk_fire(h); }
     if (!strncmp(l, "[online] joining ", 17)) { size_t k = 0; const char* q = l + 17; char a[96]; while (*q && *q != ' ' && k + 1 < sizeof a) a[k++] = *q++; a[k] = 0; if (k) memcpy(g_srv_addr, a, k + 1); return; }
+    if (!strncmp(l, "[switch] game ", 14)) { HK_ONCE(h, "line: [switch] game"); hk_fire(h); }
     if (!strncmp(l, "[switch] game Playing", 21)) { g_app_playing = 1; if (!g_gameplay_t0) { g_gameplay_t0 = mono_s(); g_match_pending = 1; } return; }
     // the server's next game on the same map: no "[switch] game ..." line at all, only its pregame lobby ("[shell] pregame
     // lobby: waiting" after the game over, "... left" when the countdown ends). The page saw ONE match for a whole session --
@@ -162,6 +166,7 @@ static void nst_on_line(const char* p, size_t n) {
     if (!strncmp(l, "[shell] pregame lobby: ", 23)) { if (!g_app_playing) return;
         if (!strncmp(l + 23, "waiting", 7)) g_gameplay_t0 = 0; else if (!strncmp(l + 23, "left", 4) && !g_gameplay_t0) { g_gameplay_t0 = mono_s(); g_match_pending = 1; } return; }
     if (!strncmp(l, "[loading] map ", 14)) {               // "[loading] map 320: Guardian, MCC's art of Guardian"
+        { HK_ONCE(h, "line: [loading] map"); hk_fire(h); }
         const char* c = strchr(l, ':'); if (c) { c++; while (*c == ' ') c++; size_t k = 0; while (c[k] && c[k] != ',' && k + 1 < sizeof g_loading) { g_loading[k] = c[k]; k++; } g_loading[k] = 0; }
         g_gameplay_t0 = 0; g_hb_map_recheck = 1; return;
     }
@@ -169,13 +174,14 @@ static void nst_on_line(const char* p, size_t n) {
     // the in-game menu (scoreboard, settings) logs that too, and the page used to drop out of the match there (2026-11-07)
     if (!strncmp(l, "[host] stopping", 15) || !strncmp(l, "[switch] leaving the game", 25) || (!strncmp(l, "[switch] game ", 14) && strncmp(l + 14, "Playing", 7))) { g_gameplay_t0 = 0; g_app_playing = 0; return; }
     // "[online] peer 0x<id> at <ip>:<port>: rtt ..." (every few seconds per peer): which session peer an address is
+    if (!strncmp(l, "[online] peer 0x", 16)) { HK_ONCE(h, "line: [online] peer"); hk_fire(h); }
     if (!strncmp(l, "[online] peer 0x", 16)) { char* at = strstr(l, " at "); if (at) { uint64_t id = strtoull(l + 16, 0, 16); char ip[64]; size_t k = 0; const char* q = at + 4;
             while (*q && *q != ' ' && k + 1 < sizeof ip) ip[k++] = *q++; ip[k] = 0; if (k && ip[k - 1] == ':') ip[k - 1] = 0; pk_peer_note(id, ip); } return; }
     // chat (the app prints these only with its chat_log byte set: chat_log_tick): "[chat] line [GLOBAL|TEAM|NEARBY] <name>
     // (0x<sender id>): <text>", "[chat] line [SERVER #rrggbb] <text>", "[chat] line [SERVER] <text>", "[chat] line [NOTICE] <text>".
     // Recorded as the loader's stats.c does: kind chat, a = the sender, how = "" (everyone) / team / nearby / server / notice,
     // text = the message alone, the sender's peer id for the forensic archive (t_st_chat_id).
-    if (!strncmp(l, "[chat] line [", 13)) {
+    if (!strncmp(l, "[chat] line [", 13)) { HK_ONCE(h, "line: [chat] line"); hk_fire(h);
         char* ch = l + 13; char* cb = strchr(ch, ']'); if (!cb) return; *cb = 0; char* rest = cb + 1; while (*rest == ' ') rest++;
         if (!strncmp(ch, "SERVER", 6)) { st_event_pos(0, "chat", 0, 0, "server", -1, -1, 0, "%s", rest); return; }
         if (!strcmp(ch, "NOTICE")) { st_event_pos(0, "chat", 0, 0, "notice", -1, -1, 0, "%s", rest); return; }
@@ -196,11 +202,18 @@ static void nst_on_line(const char* p, size_t n) {
 // the expected 0.10.0 instructions (adrp x8, 0x103efc000 ; ldrb w8, [x8, #0xc9b] at 0x100d2a6fc and 0x100d2a720) and
 // keeps it set from the snapshot tick (the state is rebuilt with each session). NHOOK_NO_CHAT_LOG=1 = off.
 static volatile uint8_t* g_chatlog;
+// (2026-11-08: this build's gate / byte from napp_builds.h; the check decodes the adrp + ldrb instead of comparing 0.10.0's
+// words -- adrp's page and ldrb's offset change with every build: 0.10.1 has the byte at 0x10408cdf3, read at 0x100d7ea98 / ea bc)
+static int chat_gate_reaches(uint64_t at, uint64_t want) {   // adrp x8, page ; ldrb w8, [x8, #off] with page + off == want
+    uint32_t w[2]; if (!at || rd(at, w, 8) || (w[0] & 0x9f00001fu) != 0x90000008u || (w[1] & 0xffc003ffu) != 0x39400108u) return 0;
+    int64_t imm = (int64_t)(((w[0] >> 29) & 3) | (((w[0] >> 5) & 0x7ffff) << 2)); if (imm & (1 << 20)) imm -= 1 << 21;
+    return ((at & ~0xfffull) + (uint64_t)(imm << 12) + ((w[1] >> 10) & 0xfff)) == want; }
 static void chat_log_tick(void) {
-    static int tried; if (!tried && g_img) { tried = 1; if (getenv("NHOOK_NO_CHAT_LOG")) return;
-        static const uint32_t w[2] = {0xd0018e88u, 0x39726d08u}; uint64_t sl = g_img - APP_IMAGE; uint32_t a[2], b[2];
-        if (rd(0x100d2a6fcull + sl, a, 8) || rd(0x100d2a720ull + sl, b, 8) || memcmp(a, w, 8) || memcmp(b, w, 8)) { nlog("[nhook] chat lines: the chat_log gate is not the 0.10.0 code; left off"); return; }
-        g_chatlog = (volatile uint8_t*)(uintptr_t)(0x103efcc9bull + sl); nlog("[nhook] chat lines: the app logs them (its chat_log byte set)"); }
+    static int tried; if (!tried && g_img) { tried = 1; int h = hk_named("chat_log gate"); if (getenv("NHOOK_NO_CHAT_LOG")) { hk_state(h, HK_OFF, 0, "NHOOK_NO_CHAT_LOG"); return; }
+        uint64_t b = APP(chat_log);
+        if (!b || !chat_gate_reaches(APP(chat_gate_a), b) || !chat_gate_reaches(APP(chat_gate_b), b)) { hk_state(h, HK_FAIL, b, "the chat_log gate (adrp ; ldrb at the table's chat_gate_a / _b) is not there in this build");
+            nlog("[nhook] chat lines: the chat_log gate is not this build's table's code; left off"); return; }
+        g_chatlog = (volatile uint8_t*)(uintptr_t)b; hk_state(h, HK_OK, b, "chat_log byte at 0x%llx (both gates checked)", (unsigned long long)b); nlog("[nhook] chat lines: the app logs them (its chat_log byte set)"); }
     if (g_chatlog && !*g_chatlog) *g_chatlog = 1;
 }
 
@@ -332,6 +345,7 @@ static int st_players(StPlayer* out, int max) {
         }
         p->name[j] = 0; n++;
     }
+    if (n > 0) { HK_ONCE(h, "players table"); hk_fire(h); }
     return n;
 }
 typedef struct { char name[64]; int slot, team, deaths, alive, shots, hits, hits_sphere; uint32_t unit; double life_start, longest, dist; float pos[3], top_speed;
@@ -525,6 +539,7 @@ static int st_statborg(int slot, int16_t out[8]) {
         if (!blk || !hb_read(blk + 0x20, &geg, 8) || !geg) return 0;
         if (!hb_read(geg + (uint64_t)g_sb_off + (uint64_t)slot * 0x40, out, 16)) return 0; }
     for (int i = 0; i < 7; i++) if (out[i] < -30000 || out[i] > 30000) return 0;
+    { HK_ONCE(h, "statborg"); hk_fire(h); }
     return 1;
 }
 // The kill feed from the scoreboard: a killer's kills (or betrayals) +1 and a victim's deaths +1 in the same ~second
@@ -703,6 +718,7 @@ static void rs_tick(const StPlayer* pl, int np, double now) {
     if (off || !g_res_base || g_res_vslog <= 0 || g_res_vslog > 7) return;
     int rowl = 1 << g_res_vslog; size_t vn = (size_t)rowl * (size_t)rowl;
     if (rd(g_res_base + (uint64_t)g_res_stats, g_rs_cur, sizeof g_rs_cur) || rd(g_res_base + (uint64_t)g_res_vs, g_rs_vcur, vn * 4)) return;
+    { HK_ONCE(h, "game results"); hk_fire(h); }
     int idx[128]; for (int i = 0; i < 128; i++) idx[i] = -1; for (int k = 0; k < np; k++) if (pl[k].slot >= 0 && pl[k].slot < 128) idx[pl[k].slot] = k;
     int fresh = !g_rs_have, dead = 0;
     static const int counted[4] = {RS_KILLS, RS_DEATHS, RS_BETRAYALS, RS_SUICIDES};   // (per-life stats like seconds-alive go back down)
@@ -794,6 +810,7 @@ static void st_engine_events(const StPlayer* pl, int np) {
 #include "nspawns.c"   // weapon / vehicle / power-up spawns and pickups (the loader's st_spawns)
 #include "nhost.c"     // the host tools: teleport, boundaries / invisible walls off, speed
 #include "nbot.c"      // the sparring aim and the walker (test clients)
+#include "nhchk.c"     // the hooks check: preflight, verdicts, /hooks.json, [hooks] lines
 // ---- the hook cost meter: rates per second, the fps estimate, and the real on/off measurement (nhcost.h) ------------------
 // A measurement (POST /control?do=hookab&h=<id>[&secs=36][&per=3]; do=hookab&stop=1 ends it) switches ONE hook (g_hc_off) or
 // overlay feature (its g_nov_on bit; "overlay" = every feature you had on) on and off in turns of `per` seconds, starting
@@ -980,7 +997,7 @@ static int st_vch(uint64_t id) { int ch = 0; pthread_mutex_lock(&g_vch_mx); for 
 __attribute__((used)) void nh_on_opus(uint64_t dec, const uint8_t* pkt, uint64_t len, uint64_t ent, uint64_t ret) {   // (timed: nhcost.h)
     if (g_hc_off[HC_OPUS]) return; uint64_t t0 = hc_now(); nh_on_opus_body(dec, pkt, len, ent, ret); hc_add(HC_OPUS, t0); }
 static void nh_on_opus_body(uint64_t dec, const uint8_t* pkt, uint64_t len, uint64_t ent, uint64_t ret) {
-    (void)dec; if (ret != g_opus_ret || !len || len > 4000 || !pkt) return; uint64_t id = 0; if (rd(ent - 0x278, &id, 8) || !id) return;
+    (void)dec; if (ret != g_opus_ret || !len || len > 4000 || !pkt) return; hk_fire(g_hk_opus); uint64_t id = 0; if (!g_mixer_id_off || rd(ent - g_mixer_id_off, &id, 8) || !id) return;
     g_opus_n++; g_opus_last = mono_s();
     static int nochan = -1; if (nochan < 0) nochan = getenv("NHOOK_VOICE_NOCHAN") != 0;
     uint8_t ch = 0xFF; if (!nochan && !rd(ent - 7, &ch, 1) && (ch < 1 || ch > 3)) ch = 0xFF;
@@ -1036,6 +1053,7 @@ static void st_snapshot(StBuf* s) {
     static const char* teams[8] = {"red", "blue", "green", "orange", "purple", "gold", "brown", "pink"};
     chat_log_tick();
     double now = mono_s(), t0 = g_gameplay_t0;
+    { static double last; if (last) hk_tick(now - last > 1 ? 0.1 : now - last); last = now; }
     sb_put(s, "{\"time\":%.2f,\"in_match\":%s,\"inst\":%d,\"native\":true", t0 ? now - t0 : 0.0, t0 ? "true" : "false", (int)getpid());
     { pthread_mutex_lock(&g_ev_mx); uint32_t fs = g_ev_seq; pthread_mutex_unlock(&g_ev_mx); sb_put(s, ",\"feed_seq\":%u", fs); }
     { char rb[1200]; int video_ok = g_nr_last > 0 && now - g_nr_last < 2.0; if (rec_status_json(rb, sizeof rb, video_ok) > 0) sb_put(s, ",\"rec\":%s", rb); }
@@ -1065,6 +1083,7 @@ static void st_snapshot(StBuf* s) {
     ht_overlay_json(s, m);   // teleport / host / bounds_off / invwalls_off / speed_idx / spots (nhost.c)
     sb_put(s, "}");
     bot_nav_json(s);         // "nav": the walker's path and goal (the page's map)
+    sb_put(s, ","); hk_snapshot_json(s);   // "hookcheck": the hooks check's counts (nhchk.c; the page's Hooks check window)
     if (strcmp(m, g_trk_map)) { snprintf(g_trk_map, sizeof g_trk_map, "%s", m); g_ntrk = 0; g_nbip = 0; sb_reset(); }   // a new map: new match stats
     pthread_mutex_lock(&g_hm_mx); snprintf(g_hm_cur, sizeof g_hm_cur, "%s", m); if (g_hm.dirty && now - g_hm.saved > 30) { hm_save(); g_hm.saved = now; } pthread_mutex_unlock(&g_hm_mx);
     static uint8_t tab[HB_MAXOBJ * 0x18]; int hi = 0; uint64_t arr = hb_object_array(); uint8_t hdr[0x60];
@@ -1378,6 +1397,7 @@ static void* st_conn(void* a) {
     else if (!strcmp(path, "/recordings.json")) { size_t ln = 0; char* j = rec_list_json(&ln); st_reply(fd, "application/json", j ? j : "[]", j ? ln : 2, 0); free(j); }
     else if (!strncmp(path, "/recordings/", 12)) st_rec_file(fd, req, path + 12);
     else if (!strncmp(path, "/forensics", 10) && (!path[10] || path[10] == '/')) fx_http(fd, path, qs, req);
+    else if (!strcmp(path, "/hooks.json")) { StBuf b = {0}; hk_json(&b); st_reply(fd, "application/json", b.b, b.n, 0); free(b.b); }
     else if (!strcmp(path, "/packets.json")) { static pthread_mutex_t pmx = PTHREAD_MUTEX_INITIALIZER; StBuf b = {0};
         pthread_mutex_lock(&pmx); pk_json(&b, qs); pthread_mutex_unlock(&pmx); st_reply(fd, "application/json", b.b, b.n, 0); free(b.b); }
     else if (!strcmp(path, "/option-map.json")) st_reply(fd, "application/json", g_st_optmap, sizeof g_st_optmap - 1, 0);
