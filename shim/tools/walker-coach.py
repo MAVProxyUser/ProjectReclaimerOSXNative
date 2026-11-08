@@ -185,14 +185,22 @@ def loop():
     if '--fresh' in sys.argv: st = {'knobs': {}, 'rounds': st.get('rounds', [])}; save_state(st)
     for i in range(rounds):
         st = load_state(); env = dict(os.environ); ids = (os.environ.get('WB_IDS') or '0 1 2 3').split()[:n]
-        for k in ids: env['W%s_ENV' % k] = env_of(knobs_of(st, k))
+        ammo_known = os.path.exists(os.path.join(SUP, 'native', 'ammo.json'))
+        for k in ids: env['W%s_ENV' % k] = (env_of(knobs_of(st, k)) + ('' if ammo_known else ' NHOOK_WPNDUMP=1')).strip()   # (no ammo field known yet: the walkers dump their weapon -> ammo-scan.py)
         tag = time.strftime('%Y%m%d-%H%M%S'); tr = os.path.join(CO, 'tracks', tag); os.makedirs(tr, exist_ok=True)
         env.update(WB_TRACKS=tr, DED_MAP=dmap, DED_GAME={'slayer': 'Slayer', 'ctf': 'Slayer'}.get(game, game))   # (CTF: the walkers have no flag play -- Slayer on the map)
         if '--teams' in sys.argv: env['DED_TEAMS'] = '1'
         before = set(os.listdir(BT))
         print('== round %d of %d: %d walkers, %d s on %s %s%s' % (i + 1, rounds, n, secs, mp, game, ' (teams)' if '--teams' in sys.argv else ''), flush=True)
         for k in ids: print('   walker %s: %s' % (k, env['W%s_ENV' % k] or '(defaults)'))
-        subprocess.run(['bash', os.path.join(HERE, 'walker-battle.sh'), str(n), str(secs)], cwd=ROOT, env=env, check=False)
+        logs = None
+        pr = subprocess.Popen(['bash', os.path.join(HERE, 'walker-battle.sh'), str(n), str(secs)], cwd=ROOT, env=env, stdout=subprocess.PIPE, text=True)
+        for line in pr.stdout:
+            print(line, end='', flush=True)
+            if line.startswith('logs: '): logs = line[6:].strip()
+        pr.wait()
+        if logs and not ammo_known:   # the walkers' weapon dumps -> the rounds-loaded field (ReclaimerMac/native/ammo.json when clear)
+            import glob as _g; subprocess.run([sys.executable, os.path.join(HERE, 'ammo-scan.py'), '--write'] + sorted(_g.glob(os.path.join(logs, 'w*.log'))), cwd=ROOT, check=False)
         new = sorted(f for f in set(os.listdir(BT)) - before if f.endswith('.jsonl'))
         if not new: print('no battle samples written: stopping'); return
         coach_round(tr, os.path.join(BT, new[-1]), mp=mp, cls={'ctf': 'ctf'}.get(game, 'slayer'), label='%s %d/%d' % (tag, i + 1, rounds), game_file=gfile)

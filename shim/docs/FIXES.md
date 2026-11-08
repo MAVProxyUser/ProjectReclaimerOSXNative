@@ -3066,6 +3066,16 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   length, share of it firing, first shot's distance, kills, died in it); the model sums switches by class pair (n, median distance,
   in-fight share) and camo use. Offline test: a synthetic recording (one BR -> shotgun switch at 6 units in a fight, one 3 s camo
   stretch firing at its end; an old 17-column recording gives none): all PASS.
+- **Finding the ammo field; the walker uses it** (2026-11-08 16:10; nstats.c NHOOK_WPNDUMP, shim/tools/ammo-scan.py, walker-coach.py,
+  nbot.c bot_ammo_off / bot_ammo_of) — WHY: the walker's inventory without ammo reloads only after fights. No HaloScript getter
+  gives a weapon's rounds (unit_get_total_grenade_count exists, nothing for ammo), so the field is found from data: NHOOK_WPNDUMP=1
+  logs the local player's held weapon object (0x300 bytes) with its shots counter every snapshot; ammo-scan.py scores every 16-bit
+  field (drops while the shots counter rises, jumps up on a reload with nothing fired; reserve = drops on a reload by about the
+  magazine's gain) and writes ReclaimerMac/native/ammo.json {"loaded", "reserve"} when one field wins on 2+ weapons or 3+ reloads.
+  walker-coach.py adds NHOOK_WPNDUMP=1 to the walkers while ammo.json is missing and scans their logs after the battle (the plan's
+  first coached battle finds it). The walker (ammo.json or NHOOK_AMMO_OFF=<hex>): rounds loaded + the most seen per weapon
+  definition; an empty magazine in a fight with a loaded other weapon = switch (vpad Y); out of a fight under 60% = reload (RB tap);
+  after a fight only when not full. Unknown field = the old behaviour.
 
 ## 19. Performance
 

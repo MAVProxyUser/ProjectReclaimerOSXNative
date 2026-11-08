@@ -201,7 +201,8 @@ static float bot_wrap(float a) { while (a > 3.14159265f) a -= 6.2831853f; while 
 
 static void bot_nav_json(StBuf* s) { nav_json(s); }   // the snapshot's "nav" (the page draws the walker's path and goal)
 // the walker's own inventory and power-ups (bot_inv below; the goal draw reads it)
-typedef struct { const char* held; const char* other; const char* held_c; const char* other_c; int held_rank, other_rank, has_other, gren, frag, plasma, os, camo; } BotInv;
+typedef struct { const char* held; const char* other; const char* held_c; const char* other_c; int held_rank, other_rank, has_other, gren, frag, plasma, os, camo;
+                 int ammo, ammo_max, other_ammo; } BotInv;   // (ammo: rounds loaded, -1 unknown; ammo_max: the most seen in that weapon)
 static BotInv g_inv;
 #include "nbot_engage.c"   // the fighter's tactics from the players' fights (engage-model.json: awareness, target choice, movement)
 #include "nbot_goals.c"    // radar, memory, own deaths, and where to go (the goal draw)
@@ -230,11 +231,24 @@ static int bot_wpn_rank(const char* n) { static const char* const pref[] = {"roc
 // (+0x360 above 0.05). The fighter switches to the other weapon when the target's distance is outside the held one's band and
 // inside the other's (vpad Y), throws only with a grenade in hand, holds fire under camo until close; the goal draw skips power
 // weapons with one in hand and goes for fights with an overshield / camo.
+// the rounds-loaded field of a weapon object: ReclaimerMac/native/ammo.json {"loaded": off} (shim/tools/ammo-scan.py finds it from
+// NHOOK_WPNDUMP dumps) or NHOOK_AMMO_OFF=<hex>; unknown = the walker reloads after fights only
+static int bot_ammo_off(void) {
+    static int off = -2; if (off != -2) return off; off = -1;
+    const char* e = getenv("NHOOK_AMMO_OFF"); if (e && *e) { off = (int)strtol(e, 0, 16); return off; }
+    char p[1024]; const char* h = getenv("HOME"); snprintf(p, sizeof p, "%s/Library/Application Support/ReclaimerMac/native/ammo.json", h ? h : "");
+    FILE* f = fopen(p, "r"); if (f) { char b[4096]; size_t n = fread(b, 1, sizeof b - 1, f); fclose(f); b[n] = 0; const char* k = strstr(b, "\"loaded\":"); if (k) off = atoi(k + 9); }
+    if (off >= 0x300) off = -1; if (off >= 0) nlog("[nhook] [inv] rounds loaded at weapon object +0x%x", off); return off; }
+static int bot_ammo_of(uint64_t wd, uint32_t def, int* maxv) {   // rounds loaded (-1 unknown), and the most seen for that weapon definition
+    static struct { uint32_t def; int max; } mx[64]; static int nmx; int off = bot_ammo_off(); int16_t a = -1;
+    if (off < 0 || !wd || !hb_read(wd + off, &a, 2) || a < 0) { if (maxv) *maxv = 0; return -1; }
+    int k = -1; for (int i = 0; i < nmx; i++) if (mx[i].def == def) { k = i; break; }
+    if (k < 0) { k = nmx < 64 ? nmx++ : 63; mx[k].def = def; mx[k].max = 0; } if (a > mx[k].max) mx[k].max = a; if (maxv) *maxv = mx[k].max; return a; }
 static void bot_inv(const NovObj* o, BotInv* v) {
-    memset(v, 0, sizeof *v); v->held_c = v->other_c = "none"; v->held_rank = v->other_rank = 99;
+    memset(v, 0, sizeof *v); v->held_c = v->other_c = "none"; v->held_rank = v->other_rank = 99; v->ammo = v->other_ammo = -1;
     for (int q = 0; q < 4; q++) { uint64_t wd = nov_datum(o->weapons[q]); uint32_t df = 0; if (!wd || !hb_read(wd, &df, 4)) continue; const char* nm = hb_tag_name(df);
-        if (q == o->wslot) { v->held = nm; v->held_c = eg_wcls(nm); v->held_rank = bot_wpn_rank(nm); }
-        else if (!v->has_other) { v->other = nm; v->other_c = eg_wcls(nm); v->other_rank = bot_wpn_rank(nm); v->has_other = 1; } }
+        if (q == o->wslot) { v->held = nm; v->held_c = eg_wcls(nm); v->held_rank = bot_wpn_rank(nm); v->ammo = bot_ammo_of(wd, df, &v->ammo_max); }
+        else if (!v->has_other) { v->other = nm; v->other_c = eg_wcls(nm); v->other_rank = bot_wpn_rank(nm); v->has_other = 1; v->other_ammo = bot_ammo_of(wd, df, 0); } }
     v->frag = o->gren[0]; v->plasma = o->gren[1]; for (int k = 0; k < 4; k++) if (o->gren[k] > 0) v->gren += o->gren[k];
     v->os = o->shield > 1.05f; v->camo = o->camo > 0.05f; }
 static float bot_band_off(const char* cls, float d, float kd) {   // 0 inside the players' band for this weapon class, else how far outside (relative); -1 no band
@@ -261,7 +275,7 @@ static void bot_step_body(void) {
     const NovObj* o = &objs[me]; int out = 0; float yaw = yaw0, pitch = pitch0;
     { static int noinv = -1; if (noinv < 0) noinv = getenv("NHOOK_BOT_NOINV") != 0; if (!noinv) bot_inv(o, &g_inv); else memset(&g_inv, 0, sizeof g_inv);   // (NHOOK_BOT_NOINV=1: blind to it, the old walker)
       if (bot_log()) { static BotInv last; static double tl; if (now - tl > 5.0 || last.held != g_inv.held || last.os != g_inv.os || last.camo != g_inv.camo || last.gren != g_inv.gren) { tl = now; last = g_inv;
-          nlog("[nhook] [inv] holding %s (%s), other %s (%s); grenades %d (frag %d, plasma %d)%s%s", g_inv.held ? g_inv.held : "-", g_inv.held_c, g_inv.other ? g_inv.other : "-", g_inv.other_c,
+          nlog("[nhook] [inv] holding %s (%s, %d rounds), other %s (%s); grenades %d (frag %d, plasma %d)%s%s", g_inv.held ? g_inv.held : "-", g_inv.held_c, g_inv.ammo, g_inv.other ? g_inv.other : "-", g_inv.other_c,
                g_inv.gren, g_inv.frag, g_inv.plasma, g_inv.os ? ", OVERSHIELD" : "", g_inv.camo ? ", CAMO" : ""); } } }
     NovObj ftg; int have_tg = 0; float tdist = 0, tyaw = 0, tpitch = 0;   // the spar target (the fighter's too) and the exact angles to it
     // the sparring aim: the nearest live enemy's head (the top of its bounding sphere's core, as the loader aimed), from the camera
@@ -349,7 +363,8 @@ static void bot_step_body(void) {
             // 3 s between switches; not in the first 0.3 s of a target)
             { static double tsw; if (g_vpad_on && g_inv.has_other && now - tsw > 3.0 && now - tacq > 0.3) {
                   float oh = bot_band_off(g_inv.held_c, tdist, kdist), oo = bot_band_off(g_inv.other_c, tdist, kdist);
-                  if (oh > 0.3f && oo >= 0 && oo < oh * 0.5f) { tsw = now; if (bot_log()) nlog("[nhook] [inv] switching to %s (%s) for %.1f units (the %s band is %.0f%% off)", g_inv.other, g_inv.other_c, tdist, g_inv.held_c, oh * 100); } }
+                  if (g_inv.ammo == 0 && g_inv.other_ammo != 0) { tsw = now; if (bot_log()) nlog("[nhook] [inv] magazine empty: switching to %s", g_inv.other); }   // (switching beats reloading mid-fight)
+                  else if (oh > 0.3f && oo >= 0 && oo < oh * 0.5f) { tsw = now; if (bot_log()) nlog("[nhook] [inv] switching to %s (%s) for %.1f units (the %s band is %.0f%% off)", g_inv.other, g_inv.other_c, tdist, g_inv.held_c, oh * 100); } }
               if (now - tsw < 0.15) fbtn |= 8; }
             if (tdist < 1.8f && now - tmelee > 0.7) { tmelee = now; fbtn |= 2; }                                            // B: melee
             { static float fj = -1; if (fj < 0) { const char* e = getenv("NHOOK_BOT_FJUMP"); fj = e ? strtof(e, 0) : 0.0f; }   // jumps a minute in a fight (walker-coach.py: the winners')
@@ -414,7 +429,9 @@ static void bot_step_body(void) {
     // picks up) 0.4-1.0 s after a fight in which the walker fired ends, unless it is walking to a weapon
     { static double tend, trel, tfired; static int was; if (g_bot_fire) tfired = now;
       if (was && !engaged) tend = now + 0.4 + 0.6 * bot_rand01(); if (engaged) tend = 0; was = engaged;
-      if (fight && g_vpad_on && tend && now > tend) { tend = 0; if (now - tfired < 8.0 && !g_bot_pick_on) { trel = now; if (bot_log()) nlog("[nhook] [inv] reloading after the fight"); } }
+      if (fight && g_vpad_on && tend && now > tend) { tend = 0; if (now - tfired < 8.0 && !g_bot_pick_on && (g_inv.ammo < 0 || g_inv.ammo < g_inv.ammo_max)) { trel = now; if (bot_log()) nlog("[nhook] [inv] reloading after the fight"); } }
+      { static double tlow; if (fight && g_vpad_on && !engaged && g_inv.ammo >= 0 && g_inv.ammo_max > 2 && g_inv.ammo < 0.6f * g_inv.ammo_max && now - tlow > 4.0 && now - trel > 4.0 && !g_bot_pick_on) {
+            tlow = now; trel = now; if (bot_log()) nlog("[nhook] [inv] reloading: %d of %d rounds", g_inv.ammo, g_inv.ammo_max); } }
       static uint32_t rpad = 1; if (rpad == 1) { const char* e = getenv("NHOOK_BOT_PICKPAD"); rpad = e ? (uint32_t)strtoul(e, 0, 16) : 0x20; }
       if (now - trel < 0.1) fbtn |= rpad; }
     // the walker (nav.c's graph): the path's way PELOAD_NAV_LOOK nodes ahead; with the aim on, the throttle walks it in any

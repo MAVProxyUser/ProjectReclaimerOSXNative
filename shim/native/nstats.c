@@ -1253,6 +1253,13 @@ static void st_snapshot(StBuf* s) {
                       t->longest > (t->alive ? now - t->life_start : 0) ? t->longest : (t->alive ? now - t->life_start : 0), t->dist, t->top_speed);
         if (g_st_var_ok) st_player_traits(s, pl[k].rec);
         sb_put(s, "}");
+        // NHOOK_WPNDUMP=1 (shim/tools/ammo-scan.py; 2026-11-08: the walker's ammo): the local player's held weapon object, 0x300 bytes
+        // as hex, with its shots counter, every snapshot while alive on foot -- the scan finds the 16-bit field that drops one a shot
+        { static int wdmp = -1; if (wdmp < 0) wdmp = getenv("NHOOK_WPNDUMP") && strcmp(getenv("NHOOK_WPNDUMP"), "0");
+          if (wdmp && you && have && !dead && *(const uint32_t*)(d + 0x10) == 0xFFFFFFFFu) { int ws2 = *(const int8_t*)(d + 0x262); const uint32_t* wp2 = (const uint32_t*)(d + 0x268);
+              uint64_t wd2 = (ws2 >= 0 && ws2 < 4) ? ST_DATUM(wp2[ws2]) : 0; static uint8_t wb[0x300]; uint32_t wdef = 0;
+              if (wd2 && hb_read(wd2, wb, sizeof wb)) { memcpy(&wdef, wb, 4); static char hx[0x300 * 2 + 1]; for (int q = 0; q < 0x300; q++) { static const char* H = "0123456789abcdef"; hx[2 * q] = H[wb[q] >> 4]; hx[2 * q + 1] = H[wb[q] & 15]; } hx[0x600] = 0;
+                  nlog("[wpndump] %.2f shots %d slot %d weapon %08x %s %s", now, t ? t->shots : -1, ws2, wp2[ws2], hb_tag_name(wdef), hx); } } }
         if (g_tks.rowopen) {   // (ntracks.c: the same player in the recording's line -- no name in the file)
             int al = have && !dead; float yw = 0, pt = 0; char wn[64] = "", vn[64] = "", on[64] = ""; int gr = 0;
             if (al) { const float* av = (const float*)(d + 0x1a0); float ah = sqrtf(av[0] * av[0] + av[1] * av[1]); if (isfinite(av[0]) && ah + fabsf(av[2]) > 0.5f) { yw = atan2f(av[1], av[0]) * 57.2958f; pt = atan2f(av[2], ah) * 57.2958f; }
