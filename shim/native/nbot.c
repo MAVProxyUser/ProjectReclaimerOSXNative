@@ -400,7 +400,13 @@ static void bot_step_body(void) {
                   if (g_inv.ammo == 0 && g_inv.other_ammo != 0) { tsw = now; if (bot_log()) nlog("[nhook] [inv] magazine empty: switching to %s", g_inv.other); }   // (switching beats reloading mid-fight)
                   else if (zsw) { tsw = now; if (bot_log()) nlog("[nhook] [inv] switching to %s: around the target (%.0f, %.0f) players kill with a %s %.1fx its carried share, a %s %.1fx (%d kills)",
                                                                 g_inv.other, ftg.c[0], ftg.c[1], g_inv.other_c, eo, g_inv.held_c, eh, zt); }
-                  else if (!zkeep && oh > 0.3f && oo >= 0 && oo < oh * 0.5f) { tsw = now; if (bot_log()) nlog("[nhook] [inv] switching to %s (%s) for %.1f units (the %s band is %.0f%% off)", g_inv.other, g_inv.other_c, tdist, g_inv.held_c, oh * 100); } }
+                  // the players' own switch for this pair (behaviour.inventory, 20+ switches): toward the shorter-range class when the
+                  // nearest enemy is closer than their median distance, toward the longer one when farther
+                  else if (!zkeep && hi >= 0 && oi >= 0 && g_eg.sw_n[hi][oi] >= 20 && g_inv.other_ammo != 0 && ({ float mh = 0, mo = 0;
+                           for (int q = 0; q < g_eg.nband; q++) { if (!strcmp(g_eg.band[q].cls, g_inv.held_c)) mh = g_eg.band[q].med; if (!strcmp(g_eg.band[q].cls, g_inv.other_c)) mo = g_eg.band[q].med; }
+                           mh > 0 && mo > 0 && (mo < mh ? tdist < g_eg.sw_d[hi][oi] : tdist > g_eg.sw_d[hi][oi]); })) {
+                      tsw = now; if (bot_log()) nlog("[nhook] [inv] switching to %s at %.1f units: players switch %s -> %s at %.1f (median of %d)", g_inv.other, tdist, g_inv.held_c, g_inv.other_c, g_eg.sw_d[hi][oi], g_eg.sw_n[hi][oi]); }
+                  else if (!zkeep && !(hi >= 0 && oi >= 0 && g_eg.sw_n[hi][oi] >= 20) && oh > 0.3f && oo >= 0 && oo < oh * 0.5f) { tsw = now; if (bot_log()) nlog("[nhook] [inv] switching to %s (%s) for %.1f units (the %s band is %.0f%% off)", g_inv.other, g_inv.other_c, tdist, g_inv.held_c, oh * 100); } }
               if (now - tsw < 0.15) fbtn |= 8; }
             if (tdist < 1.8f && now - tmelee > 0.7) { tmelee = now; fbtn |= 2; }                                            // B: melee
             { static float fj = -1; if (fj < 0) { const char* e = getenv("NHOOK_BOT_FJUMP"); fj = e ? strtof(e, 0) : 0.0f; }   // jumps a minute in a fight (walker-coach.py: the winners')

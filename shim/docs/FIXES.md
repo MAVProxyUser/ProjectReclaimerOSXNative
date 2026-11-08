@@ -3129,6 +3129,11 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   weapons carried there (20+ kills; the walker's tracks/maps/<map>.wzones.txt), e.g. The Pit: shotguns 25% of 119 kills at 3% of the
   weapons carried (8.2x). "Inventory: switches and camo": the players' most common weapon switches (class -> class, the nearest
   enemy's median distance, the share in a fight) and their camo stretches, from engage-extract.py's wswitch / camo records.
+- **The walker switches like the players** (2026-11-08 17:00; nbot_engage.c eg_parse behaviour.inventory.by_pair, nbot.c) — for a
+  held -> other class pair with 20+ recorded player switches, the walker switches toward the shorter-range class (the players'
+  distance band medians decide which is shorter) when its target is closer than the players' median nearest-enemy distance at
+  that switch, toward the longer one when farther (first data: sniper -> precision 10 units, precision -> sniper 11: a small
+  hysteresis, plus the 3 s between switches). Order: empty magazine, weapon zones, the players' switch, else the distance bands.
 
 ## 19. Performance
 
