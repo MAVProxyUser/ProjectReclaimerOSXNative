@@ -11,8 +11,9 @@
 #   firefight     native-firefight.sh: one walker on Courtyard, 5 minutes (walkers together in Firefight: not yet -- co-op joins)
 #   learn         learn-loop.py: random public games, each reviewed, refit, walkers coached on its map (PLAN_TURNS, default 6)
 #   bash shim/tools/plan-run.sh [first step, default sample-large]
-# Click the observer's window to play its game yourself (controller included): the visit lasts until you quit it, then the plan
-# goes on. Every step refuses to start beside a Project Reclaimer that is not its own (the user's game included).
+# Click the observer's window to play its game yourself: it relaunches in normal mode on that server (full resolution, your
+# controller); the visit lasts until you quit, then the plan goes on (OBS_PLAY_FIRST=1: the first visit is yours from the start).
+# A step waits while any Project Reclaimer runs (your own game included) instead of being skipped. Every step refuses to start beside a Project Reclaimer that is not its own (the user's game included).
 set -u
 cd "$(dirname "$0")/../.."
 TR="$HOME/Library/Application Support/ReclaimerMac/tracks"; LOG="$TR/plan.txt"; mkdir -p "$TR"
@@ -20,6 +21,9 @@ say() { echo "$(date +%H:%M) $*" | tee -a "$LOG"; }
 STEPS="sample-large sample-small refit spar-ffa spar-teams firefight learn"; FROM=${1:-sample-large}; on=0
 for s in $STEPS; do
   [ "$s" = "$FROM" ] && on=1; [ $on = 1 ] || continue
+  # (a game already running -- the user's own: wait for it to quit; every step's own check would refuse and skip otherwise)
+  if pgrep -f '^/Applications/Project Reclaimer.app/Contents/MacOS/project-reclaimer' >/dev/null; then say "step $s: waiting until the running Project Reclaimer quits"
+    while pgrep -f '^/Applications/Project Reclaimer.app/Contents/MacOS/project-reclaimer' >/dev/null; do sleep 30; done; fi
   say "step $s: starting"
   case $s in
     sample-large) OBS_MATCHES=10 OBS_MIN_PLAYERS=12 OBS_STRICT=1 OBS_DONE=${PLAN_DONE_LARGE:-0} bash shim/tools/observe-public.sh 28800 2700 >> "$TR/observe-large.txt" 2>&1;;

@@ -77,27 +77,21 @@ static void tk_bridge_all(void) {
     NSArray* a = g_orig_controllers ? ((NSArray* (*)(id, SEL))g_orig_controllers)([GCController class], @selector(controllers)) : [GCController controllers];
     int n = 0; for (GCController* c in a) if (c != g_vpad) { tk_bridge(c); n++; }
     static int said; if (!n && !said) { said = 1; nh_log("[nhook] [takeover] no physical controller seen yet (press a button on it; checked every 2 s)"); } }
+// (2026-11-08 16:50, after the user: "still no control and the observer window scale resolution is garbage": a --background game
+// renders at 640 x 360 whatever its window becomes, and the bridge never got the controller's input -- so a click no longer
+// changes this game at all: it only tells the observer, which RELAUNCHES the game in normal mode on the same server (the
+// user's own settings: full resolution, the controller read the way it always is). NHOOK_TAKEOVER_BRIDGE=1 = the bridge +
+// the window changes of before.)
 static void tk_take(NSWindow* w) {
-    if (@available(macOS 11.3, *)) [GCController setShouldMonitorBackgroundEvents:YES];
-    [NSApp activateIgnoringOtherApps:YES];
-    if (w) {
-        // full resolution (the user: "have full resolution available"): the window fills the screen's visible area at the normal
-        // level, resizable, and native full screen allowed (the green button / Ctrl-Cmd-F); the game renders at the window's size
-        [w setLevel:NSNormalWindowLevel];
-        w.styleMask = w.styleMask | NSWindowStyleMaskResizable | NSWindowStyleMaskTitled | NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskClosable;
-        w.collectionBehavior = (w.collectionBehavior & ~(NSWindowCollectionBehaviorFullScreenAuxiliary | NSWindowCollectionBehaviorFullScreenNone)) | NSWindowCollectionBehaviorFullScreenPrimary;
-        NSRect v = (w.screen ?: [NSScreen mainScreen]).visibleFrame; [w setFrame:v display:YES animate:NO];
-        [w makeKeyAndOrderFront:nil]; }
-    nh_log("[nhook] [takeover] the user has the controls: controller input in the background on (%s), window %s", [GCController respondsToSelector:@selector(setShouldMonitorBackgroundEvents:)] ? "yes" : "this macOS cannot",
-           w ? "raised" : "not found");
-    if (!g_vpad) nh_log("[nhook] [takeover] no virtual pad (it is installed at start with NHOOK_TAKEOVER): the controller cannot be bridged");
-    else {
-        if (!g_tk_bridged) g_tk_bridged = [[NSMutableSet alloc] init];
-        [[NSNotificationCenter defaultCenter] addObserverForName:GCControllerDidConnectNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification* n) { tk_bridge(n.object); }];
-        tk_bridge_all();
-        dispatch_source_t t = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());   // (a controller connected or found later)
-        dispatch_source_set_timer(t, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), 2 * NSEC_PER_SEC, NSEC_PER_SEC / 4);
-        dispatch_source_set_event_handler(t, ^{ tk_bridge_all(); }); dispatch_resume(t); }
+    if (getenv("NHOOK_TAKEOVER_BRIDGE")) {
+        if (@available(macOS 11.3, *)) [GCController setShouldMonitorBackgroundEvents:YES];
+        [NSApp activateIgnoringOtherApps:YES];
+        if (w) { [w setLevel:NSNormalWindowLevel]; w.styleMask = w.styleMask | NSWindowStyleMaskResizable;
+                 NSRect v = (w.screen ?: [NSScreen mainScreen]).visibleFrame; [w setFrame:v display:YES animate:NO]; [w makeKeyAndOrderFront:nil]; }
+        if (g_vpad) { if (!g_tk_bridged) g_tk_bridged = [[NSMutableSet alloc] init];
+            [[NSNotificationCenter defaultCenter] addObserverForName:GCControllerDidConnectNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification* n) { tk_bridge(n.object); }];
+            tk_bridge_all(); } }
+    nh_log("[nhook] [takeover] the user asked for the controls: the observer relaunches the game in normal mode on this server");
     nh_takeover_fire(); }
 void nh_takeover_now(void) {   // (stats control do=takeover: the same as a click in the window, from the stats page / a test)
     dispatch_async(dispatch_get_main_queue(), ^{ NSWindow* w = nil; for (NSWindow* x in NSApp.windows) if (x.isVisible && (!w || x.frame.size.width * x.frame.size.height > w.frame.size.width * w.frame.size.height)) w = x;

@@ -3109,6 +3109,19 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   resizable and titled, and allows native full screen (collection behavior FullScreenPrimary: the green button / Ctrl-Cmd-F);
   POST /control?do=takeover does what the click does (only with NHOOK_TAKEOVER: the observer); after a take-over the game's
   presented frame size is logged whenever it changes ("[takeover] the game draws W x H": does the game follow the window?).
+- **Taking over = relaunching the game in normal mode** (2026-11-08 16:35; observe-public.sh launch(), OBS_PLAY_FIRST, nvpad.m
+  tk_take, nhook.c, plan-run.sh) — WHY: the user: "still no control and the observer window scale resolution is garbage you broke
+  my ability to control the game somehow". Measured: a --background game renders 640 x 360 whatever its window becomes (the
+  filled-screen window showed a stretched 640 x 360 picture), and the bridge's virtual pad never got the controller's input (the
+  physical controller was found, but no input reached the background app); the virtual pad installed at start in the user's
+  observer game is gone too. LOGIC: a click in the observer's window only writes the take-over file; observe-public.sh then kills
+  the background game and launches it in NORMAL mode on the same server (no --background, no NHOOK_TAKEOVER, sound on: the user's
+  own settings -- borderless full screen at the display's resolution -- and the controller read by the app itself: the first
+  normal launch logged "[menus] input device: controller"); the visit lasts until the user quits, recorded with --you-plays.
+  OBS_PLAY_FIRST=1 = the first visit is the user's from the start. Another Project Reclaimer appearing (the user's own game) no
+  longer ends the observer (exit 1 made plan-run.sh skip to the next step, whose own check refused too): its game leaves and it
+  waits until that one quits; plan-run.sh waits before every step while a game runs. NHOOK_TAKEOVER_BRIDGE=1 = the old in-place
+  take-over (window + bridge), kept for experiments.
 
 ## 19. Performance
 
