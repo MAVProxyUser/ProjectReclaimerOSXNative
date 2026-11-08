@@ -13,6 +13,8 @@
 # recorded OBS_WHOLE whole matches there (a recording that started after the one it joined into, at least 1500 samples = 2.5
 # min), or MAXSESSION seconds, then picks again; at least OBS_MIN_PLAYERS (6) players, 4 when no server has that many.
 #   bash shim/tools/observe-public.sh [TOTAL seconds, default 3600] [MAXSESSION seconds, default 2700]
+# Infection is left out (2026-11-08 13:15, the user: "remove infection from the game type joins for now as with 86 [minutes] the
+# bias is heavy"); OBS_INFECTION=1 = back in.
 # Its game is muted (OBS_MUTE=0 = with sound); it records with match-recorder.py, so nhook's own recorder (ntracks.c) is off
 # (OBS_NATIVE_TRACKS=1 + NHOOK_TRACKS_DIR=<other folder> = both, to compare); NATIVE_DYLIB=<copy> keeps one dylib for the whole run while shim/build is rebuilt.
 # Refuses to start beside a running Project Reclaimer (the user's game included); stops at once if one appears that is not its own.
@@ -26,7 +28,7 @@ t0=$(date +%s); skip=""; n_slayer=0; n_ctf=0; n_infection=0; n_other=0
 pick() {   # "host:port map | mode | N players | class" of the best server now ("" = none)
   timeout 60 python3 shim/tools/servers10.py --json 2>/dev/null | python3 -c '
 import json, sys
-skip = set(sys.argv[1].split()); counts = json.loads(sys.argv[2]); minp = int(sys.argv[3]); cw = float(sys.argv[4])
+skip = set(sys.argv[1].split()); counts = json.loads(sys.argv[2]); minp = int(sys.argv[3]); cw = float(sys.argv[4]); infection = sys.argv[5] == "1"
 def cls(t):
     if any(k in t for k in ("campaign", "forge", "firefight", "death race", "race")): return None
     if "flood" in t and "cov" in t: return None                        # (memory: skip unsc vs flood vs cov)
@@ -43,11 +45,11 @@ for l in sys.stdin:
     n, mx = i.get("players") or 0, i.get("max_players") or 0
     if n >= mx: continue
     c = cls(((i.get("mode") or "") + " " + (i.get("name") or "")).lower())
-    if c is None: continue
+    if c is None or (c == "infection" and not infection): continue
     cands.append((n - cw * counts.get(c, 0) - (25 if c == "other" else 0), a, i.get("map"), i.get("mode"), n, c))
 for need in (minp, 4):
     ok = [x for x in cands if x[4] >= need]
-    if ok: b = max(ok); print(b[1], b[2], "|", b[3], "|", b[4], "players |", b[5]); break' "$skip" "{\"slayer\":$n_slayer,\"ctf\":$n_ctf,\"infection\":$n_infection,\"other\":$n_other}" "$MINP" "$CW"; }
+    if ok: b = max(ok); print(b[1], b[2], "|", b[3], "|", b[4], "players |", b[5]); break' "$skip" "{\"slayer\":$n_slayer,\"ctf\":$n_ctf,\"infection\":$n_infection,\"other\":$n_other}" "$MINP" "$CW" "${OBS_INFECTION:-0}"; }
 while [ $(( $(date +%s) - t0 )) -lt "$TOTAL" ]; do
   line=$(pick); addr=${line%% *}
   if [ -z "$addr" ]; then echo "$(date +%H:%M) no suitable server: waiting 5 minutes"; sleep 300; continue; fi

@@ -2911,6 +2911,13 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   matches): Mauler 5.9 kills/min, SMG 5.4, Energy Sword 5.0, Shotgun 4.4; best K/D Spartan Laser 2.80, Sniper 2.36, Carbine 1.90;
   sniper attackers win 92% of their duels; Assault Rifle / Battle Rifle ~1.0 K/D (the defaults); melee is the game's top kill
   credit (777), then the Assault Rifle (750) and Battle Rifle headshots (591).
+- **Stats page: Live and Tools tabs; the event feed and chat beside the map** (2026-11-08 13:20; stats_page.html) — WHY: the
+  user: "move the event and chat feed to where the tools are now. I think tools should just be its own tab like forensic is".
+  LOGIC: header tabs Live / Tools / Forensic archive (the archive stays its own page); Live = game rules, the event feed + chat in
+  the left column beside the map, Connected, the players table; Tools (#tools) = the in-game overlay panel (with recording, host
+  and walker controls), hook cost, soundboard, hooks check, packets. Blocks moved whole (no ids changed); the map is redrawn when
+  Live comes back. The observer leaves Infection out for now (observe-public.sh OBS_INFECTION=1 = back in; the user: 86 minutes
+  of Infection biased the data).
 
 ## 19. Performance
 
