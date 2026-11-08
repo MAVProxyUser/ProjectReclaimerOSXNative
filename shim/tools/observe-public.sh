@@ -15,20 +15,24 @@
 #   bash shim/tools/observe-public.sh [TOTAL seconds, default 3600] [MAXSESSION seconds, default 2700]
 # Infection is left out (2026-11-08 13:15, the user: "remove infection from the game type joins for now as with 86 [minutes] the
 # bias is heavy"); OBS_INFECTION=1 = back in.
+# OBS_MATCHES=N stops after N whole matches; OBS_MAX_PLAYERS caps the size (smaller games); OBS_STRICT=1 never falls back to a
+# smaller server than OBS_MIN_PLAYERS (it waits for one). The user, 2026-11-08 13:45: "observe 10 games of relative large size
+# first, then observe 4 smaller games" -> OBS_MATCHES=10 OBS_MIN_PLAYERS=12 OBS_STRICT=1, then OBS_MATCHES=4 OBS_MIN_PLAYERS=4
+# OBS_MAX_PLAYERS=11 OBS_STRICT=1.
 # Its game is muted (OBS_MUTE=0 = with sound); it records with match-recorder.py, so nhook's own recorder (ntracks.c) is off
 # (OBS_NATIVE_TRACKS=1 + NHOOK_TRACKS_DIR=<other folder> = both, to compare); NATIVE_DYLIB=<copy> keeps one dylib for the whole run while shim/build is rebuilt.
 # Refuses to start beside a running Project Reclaimer (the user's game included); stops at once if one appears that is not its own.
 set -u
 cd "$(dirname "$0")/../.."
 TOTAL=${1:-3600}; MAXS=${2:-2700}; TR="$HOME/Library/Application Support/ReclaimerMac/tracks"; mkdir -p "$TR/logs"
-WHOLE=${OBS_WHOLE:-1}; MINP=${OBS_MIN_PLAYERS:-6}; CW=${OBS_CLASS_W:-15}
+WHOLE=${OBS_WHOLE:-1}; MINP=${OBS_MIN_PLAYERS:-6}; MAXP=${OBS_MAX_PLAYERS:-999}; CW=${OBS_CLASS_W:-15}; NMATCH=${OBS_MATCHES:-0}; STRICT=${OBS_STRICT:-0}
 APPRE='^/Applications/Project Reclaimer.app/Contents/MacOS/project-reclaimer'
 if pgrep -f "$APPRE" >/dev/null; then echo "Project Reclaimer is running: not starting"; exit 1; fi
 t0=$(date +%s); skip=""; n_slayer=0; n_ctf=0; n_infection=0; n_other=0
 pick() {   # "host:port map | mode | N players | class" of the best server now ("" = none)
   timeout 60 python3 shim/tools/servers10.py --json 2>/dev/null | python3 -c '
 import json, sys
-skip = set(sys.argv[1].split()); counts = json.loads(sys.argv[2]); minp = int(sys.argv[3]); cw = float(sys.argv[4]); infection = sys.argv[5] == "1"
+skip = set(sys.argv[1].split()); counts = json.loads(sys.argv[2]); minp = int(sys.argv[3]); cw = float(sys.argv[4]); infection = sys.argv[5] == "1"; maxp = int(sys.argv[6]); strict = sys.argv[7] == "1"
 def cls(t):
     if any(k in t for k in ("campaign", "forge", "firefight", "death race", "race")): return None
     if "flood" in t and "cov" in t: return None                        # (memory: skip unsc vs flood vs cov)
@@ -43,14 +47,14 @@ for l in sys.stdin:
     i = s.get("info") or {}; a = s.get("address") or ""
     if not a or a in skip or i.get("password") or i.get("mods") or i.get("joins_closed") or i.get("version") != "0.10.1": continue
     n, mx = i.get("players") or 0, i.get("max_players") or 0
-    if n >= mx: continue
+    if n >= mx or n > maxp: continue
     c = cls(((i.get("mode") or "") + " " + (i.get("name") or "")).lower())
     if c is None or (c == "infection" and not infection): continue
     cands.append((n - cw * counts.get(c, 0) - (25 if c == "other" else 0), a, i.get("map"), i.get("mode"), n, c))
-for need in (minp, 4):
+for need in ((minp,) if strict else (minp, 4)):
     ok = [x for x in cands if x[4] >= need]
-    if ok: b = max(ok); print(b[1], b[2], "|", b[3], "|", b[4], "players |", b[5]); break' "$skip" "{\"slayer\":$n_slayer,\"ctf\":$n_ctf,\"infection\":$n_infection,\"other\":$n_other}" "$MINP" "$CW" "${OBS_INFECTION:-0}"; }
-while [ $(( $(date +%s) - t0 )) -lt "$TOTAL" ]; do
+    if ok: b = max(ok); print(b[1], b[2], "|", b[3], "|", b[4], "players |", b[5]); break' "$skip" "{\"slayer\":$n_slayer,\"ctf\":$n_ctf,\"infection\":$n_infection,\"other\":$n_other}" "$MINP" "$CW" "${OBS_INFECTION:-0}" "$MAXP" "$STRICT"; }
+while [ $(( $(date +%s) - t0 )) -lt "$TOTAL" ] && { [ "$NMATCH" = 0 ] || [ $((n_slayer + n_ctf + n_infection + n_other)) -lt "$NMATCH" ]; }; do
   line=$(pick); addr=${line%% *}
   if [ -z "$addr" ]; then echo "$(date +%H:%M) no suitable server: waiting 5 minutes"; sleep 300; continue; fi
   cls=${line##*| }; echo "$(date +%H:%M) joining $line"
@@ -88,4 +92,4 @@ while [ $(( $(date +%s) - t0 )) -lt "$TOTAL" ]; do
   [ "$got" = 0 ] && skip="$skip $addr"   # (a whole visit without a whole match: someone else's turn)
   w=$(( 180 - ($(date +%s) - ts) )); [ $w -gt 0 ] && { echo "waiting $w s before the next join"; sleep $w; }   # (joins at least 3 minutes apart)
 done
-echo "$(date +%H:%M) done; recordings in $TR"
+echo "$(date +%H:%M) done: $((n_slayer + n_ctf + n_infection + n_other)) whole matches (slayer $n_slayer, ctf $n_ctf, infection $n_infection, other $n_other); recordings in $TR"
