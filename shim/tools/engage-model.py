@@ -17,7 +17,7 @@ off the aim (/180 deg), it attacked me in the last 1.5 s, its shield + health / 
 it was just hurt, height difference / 5 -- and checked against "the nearest" and "the one nearest the aim" (top-1 hit rate on
 a held-out fifth); then how often / how fast players turn to a second attacker, what they do and how they fare outnumbered vs
 1v1, joining teammates' fights, and skirmish sizes. The model gets the weights ("target") and those numbers ("multi")."""
-import glob, gzip, json, math, os, random, sys
+import glob, gzip, json, math, os, random, sys, time
 from collections import defaultdict, Counter
 
 SUP = os.path.expanduser('~/Library/Application Support/ReclaimerMac')
@@ -281,6 +281,45 @@ def library(D, rnd):
         rnd.shuffle(v); out['%s/%s' % k] = v[:60]
     return out
 
+MIN_MAP_DUELS = int(arg('--min-map-duels', '150'))
+def write_json(path, obj):
+    tmp = path + '.tmp%d' % os.getpid(); json.dump(obj, open(tmp, 'w'), separators=(',', ':')); os.replace(tmp, path)   # (atomic: a walker starting now reads the old or the new file)
+def make_model(Rs, Ds):
+    st = stats(Ds) if Ds else {}
+    model = {'version': 1, 'source': {'duels': len(Ds), 'classes': sorted({e['class'] for e in Ds}), 'recordings': len({e['file'] for e in Ds})},
+             'distance_by_weapon': st.get('attack_distance_by_weapon', {}), 'move': st.get('move', {}),
+             'retreat': st.get('retreat_when_outshielded', {}), 'ttk': st.get('time_to_kill_by_weapon', {}),
+             'grenades': st.get('grenades', {}), 'library': library(Ds, random.Random(11))}
+    mm = multi_stats(Rs)
+    model['target'] = (mm.get('target_choice') or {}).get('weights'); model['multi'] = {k: v for k, v in mm.items() if k != 'target_choice'}
+    model['behaviour'] = behaviour(Rs); model['weapons'] = weapon_stats(Rs, Ds)
+    return model
+# Halo 3's multiplayer maps: internal name -> the name servers list (the observer's pick and the tome use it)
+H3MAPS = {'armory': "Rat's Nest", 'bunkerworld': 'Standoff', 'chill': 'Narrows', 'chillout': 'Cold Storage', 'construct': 'Construct', 'cyberdyne': 'The Pit',
+          'deadlock': 'High Ground', 'descent': 'Assembly', 'docks': 'Longshore', 'fortress': 'Citadel', 'ghosttown': 'Ghost Town', 'guardian': 'Guardian',
+          'isolation': 'Isolation', 'lockout': 'Blackout', 'midship': 'Heretic', 'riverworld': 'Valhalla', 'salvation': 'Epitaph', 'sandbox': 'Sandbox',
+          'shrine': 'Sandtrap', 'sidewinder': 'Avalanche', 'snowbound': 'Snowbound', 'spacecamp': 'Orbital', 'warehouse': 'Foundry', 'zanzibar': 'Last Resort'}
+def tome(R, path):
+    """THE TOME (the user: "keep track of all the maps you've played, and under what game types ... we all want it archived in our
+    tome for walker logic to get better and better over time"): per map x game type the recordings, minutes, the most players,
+    duels, kills, first / last sampled; the Halo 3 maps never sampled; written to tracks/tome.json and printed"""
+    T = {}
+    for r in R:
+        if r.get('kind') != 'meta': continue
+        mp, c = r.get('map') or '?', r['class']; e = T.setdefault(mp, {'name': H3MAPS.get(mp, mp), 'classes': {}})
+        x = e['classes'].setdefault(c, {'recordings': 0, 'minutes': 0.0, 'players_max': 0, 'kills': 0, 'duels': 0, 'first': None, 'last': None, 'modes': []})
+        x['recordings'] += 1; x['minutes'] = round(x['minutes'] + r['seconds'] / 60.0, 1); x['players_max'] = max(x['players_max'], r['players_max']); x['kills'] += r['kills']
+        st = r.get('start') or 0; x['first'] = min(x['first'] or st, st); x['last'] = max(x['last'] or st, st)
+        m = r.get('mode') or r.get('variant') or ''
+        if m and m not in x['modes'] and len(x['modes']) < 8: x['modes'].append(m)
+    for r in R:
+        if r.get('kind', 'duel') == 'duel' and r.get('map') in T and r['class'] in T[r['map']]['classes']: T[r['map']]['classes'][r['class']]['duels'] += 1
+    out = {'updated': time.time(), 'maps': T, 'never_sampled': sorted(v for k, v in H3MAPS.items() if k not in T)}
+    write_json(path, out)
+    print('tome -> %s: %d maps sampled, never: %s' % (path, len(T), ', '.join(out['never_sampled']) or '-'))
+    for mp, e in sorted(T.items(), key=lambda kv: -sum(x['minutes'] for x in kv[1]['classes'].values())):
+        print('  %-14s %-14s %s' % (mp, e['name'], '  '.join('%s %d rec %.0f min %d duels (max %d players)' % (c, x['recordings'], x['minutes'], x['duels'], x['players_max']) for c, x in sorted(e['classes'].items()))))
+
 def main():
     R = load(); D = [e for e in R if e.get('kind', 'duel') == 'duel']
     if not D: print('no duels in %s (shim/tools/engage-extract.py first)' % ENG); sys.exit(1)
@@ -295,17 +334,24 @@ def main():
     rep['all_but_infection']['behaviour'] = behaviour([r for r in R if r.get('kind', 'duel') != 'duel' and r['class'] != 'infection'])
     rep['all_but_infection']['weapons'] = weapon_stats([r for r in R if r.get('kind', 'duel') != 'duel' and r['class'] != 'infection'], [e for e in D if e['class'] != 'infection'])
     M = [e for e in D if e['class'] in MODEL_CLASSES]
-    st = stats(M) if M else {}
-    model = {'version': 1, 'source': {'duels': len(M), 'classes': sorted(MODEL_CLASSES)},
-             'distance_by_weapon': st.get('attack_distance_by_weapon', {}), 'move': st.get('move', {}),
-             'retreat': st.get('retreat_when_outshielded', {}), 'ttk': st.get('time_to_kill_by_weapon', {}),
-             'grenades': st.get('grenades', {}),
-             'library': library(M, random.Random(11))}
-    mm = multi_stats([r for r in R if r.get('kind', 'duel') != 'duel' and r['class'] in MODEL_CLASSES])
-    model['target'] = (mm.get('target_choice') or {}).get('weights'); model['multi'] = {k: v for k, v in mm.items() if k != 'target_choice'}
-    model['behaviour'] = behaviour([r for r in R if r.get('kind', 'duel') != 'duel' and r['class'] in MODEL_CLASSES])
-    model['weapons'] = weapon_stats([r for r in R if r.get('kind', 'duel') != 'duel' and r['class'] in MODEL_CLASSES], M)
-    tmp = OUT + '.tmp%d' % os.getpid(); json.dump(model, open(tmp, 'w'), separators=(',', ':')); os.replace(tmp, OUT)   # (atomic: a walker starting now reads the old or the new file)
+    model = make_model([r for r in R if r.get('kind', 'duel') != 'duel' and r['class'] in MODEL_CLASSES], M)
+    write_json(OUT, model)
+    # PER MAP (2026-11-08 14:00, the user: "refine itself to per map stats too ... and the walkers should be able to adapt learned
+    # logic for each map"): tracks/maps/<map>.engage.json = the same model from that map's matches (MIN_MAP_DUELS+ duels), with
+    # "by_class" = the same per game type on that map (slayer / ctf, MIN_MAP_DUELS+); the walker overlays map -> map x type on the
+    # aggregate wherever a number is there (nbot_engage.c eg_load)
+    mdir = os.path.join(os.path.dirname(OUT), 'maps'); os.makedirs(mdir, exist_ok=True); per = {}
+    for mp in sorted({e['map'] for e in M if e.get('map')}):
+        Dm = [e for e in M if e['map'] == mp]
+        if len(Dm) < MIN_MAP_DUELS: continue
+        Rm = [r for r in R if r.get('kind', 'duel') != 'duel' and r['class'] in MODEL_CLASSES and r.get('map') == mp]
+        mdl = make_model(Rm, Dm); mdl['map'] = mp; mdl['by_class'] = {}
+        for c in sorted({e['class'] for e in Dm}):
+            Dc = [e for e in Dm if e['class'] == c]
+            if len(Dc) >= MIN_MAP_DUELS: mdl['by_class'][c] = make_model([r for r in Rm if r['class'] == c], Dc)
+        write_json(os.path.join(mdir, mp + '.engage.json'), mdl); per[mp] = (len(Dm), sorted(mdl['by_class']))
+    print('per-map models (%s/maps): %s' % (os.path.dirname(OUT), ', '.join('%s %d duels%s' % (m, n, ' [' + '+'.join(c) + ']' if c else '') for m, (n, c) in per.items()) or 'none yet'))
+    tome(R, os.path.join(os.path.dirname(OUT), 'tome.json'))
     if '--json' in sys.argv: json.dump(rep, open(arg('--json', ''), 'w'), indent=1)
     print(json.dumps(rep, indent=1))
     print('model -> %s (%d library pieces in %d groups)' % (OUT, sum(len(v) for v in model['library'].values()), len(model['library'])))

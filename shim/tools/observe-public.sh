@@ -19,6 +19,8 @@
 # smaller server than OBS_MIN_PLAYERS (it waits for one). The user, 2026-11-08 13:45: "observe 10 games of relative large size
 # first, then observe 4 smaller games" -> OBS_MATCHES=10 OBS_MIN_PLAYERS=12 OBS_STRICT=1, then OBS_MATCHES=4 OBS_MIN_PLAYERS=4
 # OBS_MAX_PLAYERS=11 OBS_STRICT=1.
+# Coverage: the pick favours the map x game type the tome has least of (+25 none, +12 under 10 minutes); OBS_DONE=N = whole matches
+# already recorded in this phase by an earlier run.
 # Its game is muted (OBS_MUTE=0 = with sound); it records with match-recorder.py, so nhook's own recorder (ntracks.c) is off
 # (OBS_NATIVE_TRACKS=1 + NHOOK_TRACKS_DIR=<other folder> = both, to compare); NATIVE_DYLIB=<copy> keeps one dylib for the whole run while shim/build is rebuilt.
 # Refuses to start beside a running Project Reclaimer (the user's game included); stops at once if one appears that is not its own.
@@ -33,6 +35,30 @@ pick() {   # "host:port map | mode | N players | class" of the best server now (
   timeout 60 python3 shim/tools/servers10.py --json 2>/dev/null | python3 -c '
 import json, sys
 skip = set(sys.argv[1].split()); counts = json.loads(sys.argv[2]); minp = int(sys.argv[3]); cw = float(sys.argv[4]); infection = sys.argv[5] == "1"; maxp = int(sys.argv[6]); strict = sys.argv[7] == "1"
+# COVERAGE (2026-11-08 14:00, the user: "sample each map at least once in context if possible, so keep track of all the maps you have
+# played, and under what game types"): the tome (tracks/tome.json, engage-model.py) says how many minutes of each map x game type
+# are recorded; a server whose map x type has none gets +25 players in the pick, under 10 minutes +12. Listing names -> map: the
+# display name in the listing, else its first word first 5 letters (aVALANCE 30VS30 = Avalanche); unknown = no bonus.
+H3 = {"armory": "Rat\u0027s Nest", "bunkerworld": "Standoff", "chill": "Narrows", "chillout": "Cold Storage", "construct": "Construct", "cyberdyne": "The Pit",
+      "deadlock": "High Ground", "descent": "Assembly", "docks": "Longshore", "fortress": "Citadel", "ghosttown": "Ghost Town", "guardian": "Guardian",
+      "isolation": "Isolation", "lockout": "Blackout", "midship": "Heretic", "riverworld": "Valhalla", "salvation": "Epitaph", "sandbox": "Sandbox",
+      "shrine": "Sandtrap", "sidewinder": "Avalanche", "snowbound": "Snowbound", "spacecamp": "Orbital", "warehouse": "Foundry", "zanzibar": "Last Resort"}
+try: tome = json.load(open(sys.argv[8])).get("maps", {})
+except Exception: tome = {}
+def internal(listed):
+    l = (listed or "").lower()
+    for k, v in H3.items():
+        if v.lower() in l: return k
+    w = l.split()[0] if l.split() else ""
+    for k, v in H3.items():
+        f = v.lower().replace(chr(39), "").split()[0]
+        if len(w) >= 5 and len(f) >= 5 and w[:5] == f[:5]: return k
+    return None
+def coverage_bonus(listed, c):
+    k = internal(listed)
+    if k is None: return 0, "?"
+    m = ((tome.get(k) or {}).get("classes") or {}).get(c, {}).get("minutes", 0)
+    return (25 if m <= 0 else 12 if m < 10 else 0), "%s %s %.0f min" % (k, c, m)
 def cls(t):
     if any(k in t for k in ("campaign", "forge", "firefight", "death race", "race")): return None
     if "flood" in t and "cov" in t: return None                        # (memory: skip unsc vs flood vs cov)
@@ -50,14 +76,16 @@ for l in sys.stdin:
     if n >= mx or n > maxp: continue
     c = cls(((i.get("mode") or "") + " " + (i.get("name") or "")).lower())
     if c is None or (c == "infection" and not infection): continue
-    cands.append((n - cw * counts.get(c, 0) - (25 if c == "other" else 0), a, i.get("map"), i.get("mode"), n, c))
+    cb, cov = coverage_bonus(i.get("map"), c)
+    cands.append((n - cw * counts.get(c, 0) - (25 if c == "other" else 0) + cb, a, i.get("map"), i.get("mode"), n, c + (" (coverage +%d: %s)" % (cb, cov) if cb else "")))
 for need in ((minp,) if strict else (minp, 4)):
     ok = [x for x in cands if x[4] >= need]
-    if ok: b = max(ok); print(b[1], b[2], "|", b[3], "|", b[4], "players |", b[5]); break' "$skip" "{\"slayer\":$n_slayer,\"ctf\":$n_ctf,\"infection\":$n_infection,\"other\":$n_other}" "$MINP" "$CW" "${OBS_INFECTION:-0}" "$MAXP" "$STRICT"; }
-while [ $(( $(date +%s) - t0 )) -lt "$TOTAL" ] && { [ "$NMATCH" = 0 ] || [ $((n_slayer + n_ctf + n_infection + n_other)) -lt "$NMATCH" ]; }; do
+    if ok: b = max(ok); print(b[1], b[2], "|", b[3], "|", b[4], "players |", b[5]); break' "$skip" "{\"slayer\":$n_slayer,\"ctf\":$n_ctf,\"infection\":$n_infection,\"other\":$n_other}" "$MINP" "$CW" "${OBS_INFECTION:-0}" "$MAXP" "$STRICT" "$TR/tome.json"; }
+DONE0=${OBS_DONE:-0}   # (whole matches a previous run of this phase already recorded)
+while [ $(( $(date +%s) - t0 )) -lt "$TOTAL" ] && { [ "$NMATCH" = 0 ] || [ $((DONE0 + n_slayer + n_ctf + n_infection + n_other)) -lt "$NMATCH" ]; }; do
   line=$(pick); addr=${line%% *}
   if [ -z "$addr" ]; then echo "$(date +%H:%M) no suitable server: waiting 5 minutes"; sleep 300; continue; fi
-  cls=${line##*| }; echo "$(date +%H:%M) joining $line"
+  cls=${line##*| }; cls=${cls%% *}; echo "$(date +%H:%M) joining $line"
   L="$TR/logs/$(date +%Y%m%d-%H%M%S).log"; RL="$L.rec"
   NATIVE_REAL=1 NHOOK_STATS_OPEN=0 NHOOK_MUTE_OUTPUT="${OBS_MUTE:-1}" NHOOK_TRACKS="${OBS_NATIVE_TRACKS:-0}" NATIVE_LOG="$L" bash shim/native.sh --join-server "$addr" --background > "$L.out" 2>&1 &
   for i in $(seq 1 30); do P=$(sed -n 's/^native app pid \([0-9]*\).*/\1/p' "$L.out" 2>/dev/null); [ -n "$P" ] && break; sleep 1; done

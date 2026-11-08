@@ -309,6 +309,11 @@ Native stats page (nstats.c): http://127.0.0.1:8765/ while shim/native.sh runs (
 Lanes (2026-11-08, shim/native/nlanes.c): the map's heatmap can show deaths or LANES (passes per 0.5-unit cell, ruts relative to
 the map's traffic; <heatmaps>/<map>.lanes, merged under flock; shim/tools/lanes-import.py adds match-recorder.py's recordings,
 skipping ones marked lanes_live; lanes-test.sh, lanes-page-mock.py). NATIVE_DYLIB=<copy> runs a long job on a frozen dylib.
+Learning from real players (2026-11-08; native-client.md "Learning from real players"): nhook records every public match (ntracks.c);
+observe-public.sh samples on purpose (whole matches, coverage-driven by tracks/tome.json, OBS_MATCHES / _MIN_PLAYERS / _STRICT,
+Infection off); engage-extract.py -> engage-model.py = the aggregate model, per-map models (tracks/maps/<map>.engage.json, per game
+type inside) and the tome; the walkers overlay map -> game type on the aggregate (nbot_engage.c eg_load_for). Work board:
+shim/tools/workboard.py on 127.0.0.1:8790 (jobs, direction, tasks, coverage).
 Works (live-checked in a 72-player game, 2026-11-07): players, variant, heatmap, feed, kills / deaths / assists from halo3's
 statborg (game engine globals TLS +0x20 + the app's `[capacity] game_globals.statborg`; kill feed EXACT from halo3's game results
 -- versus matrix + per-damage-type kills, nstats.c rs_tick, offline test shim/tools/results-feed-test.sh -- else paired from the

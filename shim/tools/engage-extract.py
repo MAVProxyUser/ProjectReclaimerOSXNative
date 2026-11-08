@@ -52,7 +52,15 @@ FORCE = '--force' in sys.argv; QUIET = '--quiet' in sys.argv
 R_MAX, AIM_FIRE, AIM_DMG, AWARE, GAP, MIN_ATT, PRE, POST, MAXLEN = 45.0, 8.0, 12.0, 30.0, 2.0, 0.3, 3.0, 0.5, 30.0
 ZOMBIE = ('ENERGY BLADE',)
 
-def mode_class(mode, variant):
+def mode_class(mode, variant, engine=None):
+    # the game itself first: the engine the recording saw ("Slayer", "Capture the Flag", "Infection"), then the variant's name,
+    # then the server listing's mode last (2026-11-08: a "CTF 30VS30" server played "BIGASSSLAYER": filed as CTF)
+    e = (engine or '').lower()
+    if e: return 'infection' if 'infection' in e else 'ctf' if 'capture' in e or 'flag' in e else 'slayer' if 'slayer' in e else 'other'
+    for t in ((variant or '').lower(), (mode or '').lower()):
+        if any(k in t for k in ('infection', 'zombie', 'flood', 'braaa')): return 'infection'
+        if any(k in t for k in ('ctf', 'capture the flag', 'flag')): return 'ctf'
+        if any(k in t for k in ('slayer', 'swat', 'snipe', 'br starts', 'fiesta', 'ffa', 'free for all', 'rumble', 'doubles', 'beams', 'kills', 'mlg', 'team br')): return 'slayer'
     t = ((mode or '') + ' ' + (variant or '')).lower()
     if any(k in t for k in ('infection', 'zombie', 'flood', 'braaa')): return 'infection'
     if any(k in t for k in ('ctf', 'capture the flag', 'flag')): return 'ctf'
@@ -96,7 +104,7 @@ def cut(path):
             SHOTS[k, c] = r[14] if len(r) > 14 else 0
             if len(r) > 16: GREN[k, c] = r[16]
     me = np.bincount(you[you >= 0]).argmax() if (you >= 0).any() else -1   # the observer (left out: it only stands there)
-    cls = mode_class(head.get('mode'), head.get('variant')); inf = cls == 'infection'
+    cls = mode_class(head.get('mode'), head.get('variant'), head.get('engine') or (head.get('mode') if head.get('source') == 'nhook' else None)); inf = cls == 'infection'
     # velocities: +-2 samples, inside alive stretches, < 12 u/s on foot (a respawn / teleport otherwise)
     VX = np.full((T, N), np.nan); VY = np.full((T, N), np.nan); VZ = np.full((T, N), np.nan)
     if T > 5:
@@ -197,6 +205,10 @@ def cut(path):
     out.extend(multi(path, head, t, slots, me, inf, cls, alive, X, Y, Z, YAW, SH, HP, TEAM, ZOMB, FIRE, HURT, VX, VY, kills))
     out.extend(items(path, head, t, slots, me, cls, alive, X, Y, Z, VX, VY, E))
     out.append(weapons(path, head, t, slots, me, cls, alive, WPN, VEH, E))
+    # META (the tome: shim/tools/engage-model.py tracks/tome.json): what this recording is -- map, game type, length, players
+    out.append({'kind': 'meta', 'file': os.path.basename(path), 'map': head.get('map'), 'mode': head.get('mode'), 'variant': head.get('variant'), 'class': cls,
+                'start': head.get('start'), 'samples': int(T), 'seconds': round(float(t[-1] - t[0]), 1) if T > 1 else 0, 'players_max': int(alive.sum(axis=1).max()) if T else 0,
+                'source': head.get('source') or 'match-recorder', 'kills': sum(1 for e in E if e.get('ev') == 'kill')})
     return out
 
 POWER = ('rocket', 'sniper', 'beam rifle', 'spartan laser', 'shotgun', 'energy sword', 'gravity hammer', 'hammer', 'fuel rod', 'missile pod', 'flamethrower', 'plasma cannon', 'overshield', 'camo', 'power-up', 'powerup')

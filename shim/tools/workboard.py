@@ -11,10 +11,15 @@ import glob, gzip, json, os, subprocess, sys, threading, time, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 SUP = os.path.expanduser('~/Library/Application Support/ReclaimerMac'); TR = os.path.join(SUP, 'tracks'); WB = os.path.join(SUP, 'workboard')
-TASKS = os.path.join(WB, 'tasks.json')
+TASKS = os.path.join(WB, 'tasks.json'); DIRECTION = os.path.join(WB, 'direction.json'); TOME = os.path.join(TR, 'tome.json')
 def arg(k, d):
     a = sys.argv; return a[a.index(k) + 1] if k in a else d
 
+def direction_cmd():   # workboard.py direction "line" "line" ...  (the plan in words, shown on top)
+    os.makedirs(WB, exist_ok=True); tmp = DIRECTION + '.tmp'; json.dump({'t': time.time(), 'lines': sys.argv[2:]}, open(tmp, 'w'), indent=1); os.replace(tmp, DIRECTION); print('direction: %d lines' % (len(sys.argv) - 2))
+def tome_load():
+    try: return json.load(open(TOME))
+    except Exception: return None
 def tasks_load():
     try: return json.load(open(TASKS))
     except Exception: return []
@@ -89,7 +94,10 @@ def status():
         v = s.get('variant') or {}; live = {'map': s.get('map'), 'in_match': s.get('in_match'), 'time': s.get('time'), 'players': len(s.get('players') or []),
                                             'alive': sum(1 for p in s.get('players') or [] if p.get('alive')), 'mode': v.get('mode') if isinstance(v, dict) else None, 'variant': v.get('name') if isinstance(v, dict) else None}
     except Exception: pass
-    return {'now': time.time(), 'jobs': jobs, 'apps': apps, 'observer_log': tail(obs[0], 8) if obs else [], 'recorder': tail(rec[0], 4) if rec else [],
+    try: direction = json.load(open(DIRECTION))
+    except Exception: direction = None
+    per_map = sorted(os.path.basename(p)[:-len('.engage.json')] for p in glob.glob(os.path.join(TR, 'maps', '*.engage.json')))
+    return {'now': time.time(), 'jobs': jobs, 'apps': apps, 'direction': direction, 'tome': tome_load(), 'per_map_models': per_map, 'observer_log': tail(obs[0], 8) if obs else [], 'recorder': tail(rec[0], 4) if rec else [],
             'live': live, 'totals': totals(), 'tasks': tasks_load()}
 
 PAGE = r'''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Work board</title>
@@ -102,8 +110,10 @@ h1{font-size:20px;margin:0 0 4px}h2{font-size:13px;letter-spacing:.08em;text-tra
 .st-doing{color:var(--go)}.st-next{color:var(--acc)}.st-done{color:var(--dim);text-decoration:line-through}pre{margin:0;font:12px ui-monospace,monospace;white-space:pre-wrap;color:var(--dim)}
 .big{font-size:26px;font-weight:600}.none{color:var(--dim)}</style></head><body>
 <h1>Work board <span class="k" id="upd"></span></h1><div class="k">What is running on this Mac for Reclaimer and what is being worked on. Refreshes every 3 s.</div><br>
+<div class="p" id="dirp" style="margin-bottom:14px"><h2>Direction</h2><div id="dir"></div></div>
 <div class="grid"><div class="p"><h2>Running now</h2><div id="jobs"></div></div><div class="p"><h2>Game instances</h2><div id="apps"></div><div id="live"></div></div>
 <div class="p"><h2>Tasks</h2><div id="tasks"></div></div><div class="p"><h2>Data collected</h2><div id="tot"></div></div>
+<div class="p" style="grid-column:1/-1"><h2>Coverage: the tome (maps x game types sampled from real players)</h2><div id="cov" style="overflow-x:auto"></div></div>
 <div class="p" style="grid-column:1/-1"><h2>Observer</h2><pre id="obs"></pre><br><pre id="rec"></pre></div></div>
 <script>
 const E=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
@@ -118,6 +128,14 @@ async function tick(){try{const j=await (await fetch('/status.json')).json();
  const o=j.totals||{}; const m=o.model||{};
  document.getElementById('tot').innerHTML=`<div class="big">${o.files??'-'} matches · ${o.minutes??'-'} min</div><div class="k">${Object.entries(o.minutes_by_type||{}).map(([k,v])=>k+' '+v+' min').join(' · ')}</div>
   <div class="k">maps (min): ${Object.entries(o.maps||{}).map(([k,v])=>k+' '+v).join(', ')}</div><div class="k">engagement model: ${m.duels??'-'} duels, ${m.radar_contacts??'-'} radar contacts, ${m.pieces??'-'} movement pieces${m.updated?' · updated '+ago(m.updated):''}</div>`;
+ const d=j.direction; document.getElementById('dir').innerHTML=d&&d.lines?d.lines.map(l=>`<div class="row">${E(l)}</div>`).join('')+`<div class="k">set ${ago(d.t)}</div>`:'<div class="none">-</div>';
+ const tm=j.tome, cls=['slayer','ctf','infection','other'], pm=new Set(j.per_map_models||[]);
+ if(tm&&tm.maps){ const rows=Object.entries(tm.maps).sort((a,b)=>Object.values(b[1].classes).reduce((s,x)=>s+x.minutes,0)-Object.values(a[1].classes).reduce((s,x)=>s+x.minutes,0));
+   const cell=x=>x?`${Math.round(x.minutes)} min · ${x.recordings} rec · ${x.duels} duels<br><span class="k">max ${x.players_max} players · last ${ago(x.last)}</span>`:'<span class="none">-</span>';
+   document.getElementById('cov').innerHTML=`<table style="border-collapse:collapse;width:100%;font-size:12.5px"><tr><th style="text-align:left">map</th>${cls.map(c=>`<th style="text-align:left">${c}</th>`).join('')}<th style="text-align:left">walker model</th></tr>`+
+    rows.map(([m,e])=>`<tr style="border-top:1px solid var(--line)"><td><b>${E(e.name)}</b> <span class="k">${E(m)}</span></td>${cls.map(c=>`<td>${cell(e.classes[c])}</td>`).join('')}<td>${pm.has(m)?'<span style="color:var(--ok)">per-map</span>':'<span class="k">aggregate</span>'}</td></tr>`).join('')+'</table>'+
+    `<div class="k" style="margin-top:8px">never sampled yet: ${E((tm.never_sampled||[]).join(', ')||'none')} · tome updated ${ago(tm.updated)}</div>`; }
+ else document.getElementById('cov').innerHTML='<div class="none">no tome yet (engage-model.py writes it)</div>';
  document.getElementById('obs').textContent=(j.observer_log||[]).join('\n')||'(no observer log)'; document.getElementById('rec').textContent=(j.recorder||[]).join('\n');
 }catch(e){document.getElementById('upd').textContent='· not answering'} setTimeout(tick,3000)}
 tick();</script></body></html>'''
@@ -131,5 +149,6 @@ class H(BaseHTTPRequestHandler):
 
 if __name__ == '__main__':
     if len(sys.argv) > 3 and sys.argv[1] == 'task': tasks_cmd(); sys.exit(0)
+    if len(sys.argv) > 1 and sys.argv[1] == 'direction': direction_cmd(); sys.exit(0)
     port = int(arg('--port', '8790')); srv = ThreadingHTTPServer(('127.0.0.1', port), H); srv.daemon_threads = True
     print('work board: http://127.0.0.1:%d/' % port, flush=True); srv.serve_forever()

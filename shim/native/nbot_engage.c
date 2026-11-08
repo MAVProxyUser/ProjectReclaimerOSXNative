@@ -18,8 +18,8 @@
 #define EG_VIEW 75.0f
 static double g_gl_kill_t;   // the last time a target died while the walker fought it (nbot_goals.c: a life with a kill)
 static int rd_contact(const NovObj* me, const NovObj* t);   // (nbot_goals.c: on the walker's radar)
-typedef struct { char grp[24]; float lat[20], rad[20]; } EgPiece;
-static struct { int loaded, on, npiece; float w[8]; int has_w; struct { char cls[12]; float p25, med, p75; int n; } band[10]; int nband;
+typedef struct { char grp[24]; float lat[20], rad[20]; char mine; } EgPiece;   // mine: from this map's own model
+static struct { int loaded, on, npiece, nmine; float w[8]; int has_w; struct { char cls[12]; float p25, med, p75; int n; } band[10]; int nband;
                 float p_view, p_behind, p_mid, turn_s; EgPiece* lib; int gren_ok; float gren_every, gren_d0, gren_d1;
                 float rd_turn, rd_turn_s, p_killer, p_spot, it_near, it_mid, it_far; } g_eg;   // (behaviour: radar, revenge, items)
 static const char* eg_find(const char* txt, const char* key, const char* end) {   // "key": within [txt, end)
@@ -32,35 +32,35 @@ static int eg_arr(const char* p, float* out, int max) {   // [a, b, null, ...] -
     int n = 0; if (!p) return 0; while (*p == ' ') p++; if (*p != '[') return 0; p++;
     while (*p && *p != ']' && n < max) { while (*p == ' ' || *p == ',') p++; if (!strncmp(p, "null", 4)) { out[n++] = 0; p += 4; continue; } char* e; float v = strtof(p, &e); if (e == p) break; out[n++] = v; p = e; }
     return n; }
-static void eg_load(void) {
-    if (g_eg.loaded) return; g_eg.loaded = 1;
-    const char* e = getenv("NHOOK_BOT_ENGAGE"), * h = getenv("HOME"); if (e && !strcmp(e, "0")) { nlog("[nhook] [fight] engagement model off (NHOOK_BOT_ENGAGE=0)"); return; }
-    char path[1024]; if (e && *e) snprintf(path, sizeof path, "%s", e); else snprintf(path, sizeof path, "%s/Library/Application Support/ReclaimerMac/tracks/engage-model.json", h ? h : "");
-    FILE* f = fopen(path, "r"); if (!f) { nlog("[nhook] [fight] no engagement model at %s: the old fighter", path); return; }
-    fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET); if (n <= 0 || n > (16 << 20)) { fclose(f); return; }
-    char* txt = malloc((size_t)n + 1); if (!txt) { fclose(f); return; } size_t got = fread(txt, 1, (size_t)n, f); fclose(f); txt[got] = 0;
+// eg_parse: one model's text [txt, end) into g_eg. overlay = 0: the aggregate (defaults first); 1: a map's (or a map x game type's)
+// numbers replace the aggregate's only where they are there (target weights when fitted, distance bands by class, the
+// second-attacker odds, grenades, behaviour); its movement pieces are added marked "mine" (eg_move prefers them).
+static void eg_parse(const char* txt, const char* end, int overlay, int mine) {
     static const char* const fk[8] = {"log_dist", "off_aim", "attacked_me", "vitality", "previous_target", "teammate_on_it", "just_hurt", "height"};
-    const char* tw = eg_find(txt, "target", 0);
-    if (tw && *tw == '{') { const char* te = eg_close(tw); for (int i = 0; i < 8; i++) g_eg.w[i] = eg_num(tw, fk[i], te, 0); g_eg.has_w = 1; }
-    const char* db = eg_find(txt, "distance_by_weapon", 0);
+    if (!overlay) { g_eg.p_view = 0.33f; g_eg.p_behind = 0.07f; g_eg.turn_s = 1.75f;
+        g_eg.rd_turn = 0.28f; g_eg.rd_turn_s = 1.24f; g_eg.p_killer = 0.05f; g_eg.p_spot = 0.08f; g_eg.it_near = 0.03f; g_eg.it_mid = 0.11f; g_eg.it_far = 0.05f; }
+    const char* tw = eg_find(txt, "target", end);
+    if (tw && *tw == '{') { const char* te = eg_close(tw); for (int i = 0; i < 8; i++) g_eg.w[i] = eg_num(tw, fk[i], te, overlay ? g_eg.w[i] : 0); g_eg.has_w = 1; }
+    const char* db = eg_find(txt, "distance_by_weapon", end);
     if (db && *db == '{') { const char* de = eg_close(db);
         static const char* const cl[] = {"precision", "auto", "shotgun", "sniper", "rocket", "melee", "other", "none"};
-        for (int i = 0; i < 8 && g_eg.nband < 10; i++) { const char* c = eg_find(db, cl[i], de); if (!c) continue; const char* ce = eg_close(c);
-            snprintf(g_eg.band[g_eg.nband].cls, sizeof g_eg.band[0].cls, "%s", cl[i]); g_eg.band[g_eg.nband].p25 = eg_num(c, "p25", ce, 0); g_eg.band[g_eg.nband].med = eg_num(c, "median", ce, 0);
-            g_eg.band[g_eg.nband].p75 = eg_num(c, "p75", ce, 0); g_eg.band[g_eg.nband].n = (int)eg_num(c, "n", ce, 0); g_eg.nband++; } }
-    const char* sa = eg_find(txt, "second_attacker", 0);
-    g_eg.p_view = 0.33f; g_eg.p_behind = 0.07f; g_eg.turn_s = 1.75f;
+        for (int i = 0; i < 8; i++) { const char* c = eg_find(db, cl[i], de); if (!c) continue; const char* ce = eg_close(c); int k = -1;
+            for (int j = 0; j < g_eg.nband; j++) if (!strcmp(g_eg.band[j].cls, cl[i])) k = j;
+            if (k < 0) { if (g_eg.nband >= 10) continue; k = g_eg.nband++; }
+            int n = (int)eg_num(c, "n", ce, 0); if (overlay && n < 20) continue;   // (a map's band only from 20+ of its duels)
+            snprintf(g_eg.band[k].cls, sizeof g_eg.band[0].cls, "%s", cl[i]); g_eg.band[k].p25 = eg_num(c, "p25", ce, 0); g_eg.band[k].med = eg_num(c, "median", ce, 0);
+            g_eg.band[k].p75 = eg_num(c, "p75", ce, 0); g_eg.band[k].n = n; } }
+    const char* sa = eg_find(txt, "second_attacker", end);
     if (sa && *sa == '{') { const char* se = eg_close(sa); g_eg.p_view = eg_num(sa, "turned_if_new_one_in_view", se, g_eg.p_view); g_eg.p_behind = eg_num(sa, "turned_if_new_one_behind", se, g_eg.p_behind);
         g_eg.turn_s = eg_num(sa, "turn_s_median", se, g_eg.turn_s); }
     g_eg.p_mid = (g_eg.p_view + g_eg.p_behind) / 2;
     // grenades (recordings since 12:00 carry the counts): the players' throws per minute of fighting and their distance band
-    const char* gr = eg_find(txt, "grenades", 0);
+    const char* gr = eg_find(txt, "grenades", end);
     if (gr && *gr == '{') { const char* ge = eg_close(gr); float rate = eg_num(gr, "throws_per_fight_min", ge, 0); int nd = (int)eg_num(gr, "duels", ge, 0);
-        g_eg.gren_d0 = eg_num(gr, "throw_dist_p25", ge, 0); g_eg.gren_d1 = eg_num(gr, "throw_dist_p75", ge, 0);
-        if (nd >= 50 && rate > 0.05f && g_eg.gren_d1 > g_eg.gren_d0) { g_eg.gren_ok = 1; g_eg.gren_every = 60.0f / rate; } }
+        float d0 = eg_num(gr, "throw_dist_p25", ge, 0), d1 = eg_num(gr, "throw_dist_p75", ge, 0);
+        if (nd >= 50 && rate > 0.05f && d1 > d0) { g_eg.gren_ok = 1; g_eg.gren_every = 60.0f / rate; g_eg.gren_d0 = d0; g_eg.gren_d1 = d1; } }
     // behaviour (engage-model.py: the players' radar turns, revenge, power items) -> the walker's radar look and goal draw
-    g_eg.rd_turn = 0.28f; g_eg.rd_turn_s = 1.24f; g_eg.p_killer = 0.05f; g_eg.p_spot = 0.08f; g_eg.it_near = 0.03f; g_eg.it_mid = 0.11f; g_eg.it_far = 0.05f;
-    const char* bh = eg_find(txt, "behaviour", 0);
+    const char* bh = eg_find(txt, "behaviour", end);
     if (bh && *bh == '{') { const char* be = eg_close(bh); const char* rd = eg_find(bh, "radar", be), * rv = eg_find(bh, "revenge", be), * it = eg_find(bh, "items", be);
         if (rd && rd < be) { const char* re = eg_close(rd); g_eg.rd_turn = eg_num(rd, "turn_moving_in_range", re, g_eg.rd_turn); g_eg.rd_turn_s = eg_num(rd, "turn_s_median", re, g_eg.rd_turn_s); }
         if (rv && rv < be) { const char* ve = eg_close(rv); float nk = eg_num(rv, "next_target_killer", ve, -1), ch = eg_num(rv, "chance", ve, -1), bs = eg_num(rv, "back_at_death_spot", ve, -1), bb = eg_num(rv, "baseline_spot", ve, -1);
@@ -70,22 +70,46 @@ static void eg_load(void) {
             float a = eg_num(it, "heading_in_2_10", ie, -1), a0 = eg_num(it, "baseline_2_10", ie, -1), b = eg_num(it, "heading_in_10_20", ie, -1), b0 = eg_num(it, "baseline_10_20", ie, -1), c = eg_num(it, "heading_in_20_40", ie, -1), c0 = eg_num(it, "baseline_20_40", ie, -1);
             // per goal draw: twice the players' extra heading-in share at that distance (a draw lasts 6-15 s; they decide all the time)
             if (a >= 0 && a0 >= 0) g_eg.it_near = fmaxf(0.03f, 2 * (a - a0)); if (b >= 0 && b0 >= 0) g_eg.it_mid = fmaxf(0.03f, 2 * (b - b0)); if (c >= 0 && c0 >= 0) g_eg.it_far = fmaxf(0.03f, 2 * (c - c0)); } }
-    const char* lb = eg_find(txt, "library", 0);
-    if (lb && *lb == '{') { const char* le = eg_close(lb); g_eg.lib = calloc(1200, sizeof(EgPiece));
-        for (const char* p = lb + 1; g_eg.lib && p < le && g_eg.npiece < 1200; ) {
+    const char* lb = eg_find(txt, "library", end);
+    if (lb && *lb == '{') { const char* le = eg_close(lb); if (!g_eg.lib) g_eg.lib = calloc(2400, sizeof(EgPiece));
+        for (const char* p = lb + 1; g_eg.lib && p < le && g_eg.npiece < 2400; ) {
             const char* q = strchr(p, '"'); if (!q || q >= le) break; const char* q2 = strchr(q + 1, '"'); if (!q2) break;
             char grp[24]; snprintf(grp, sizeof grp, "%.*s", (int)(q2 - q - 1), q + 1); const char* arr = strchr(q2, '['); if (!arr || arr >= le) break; const char* ae = eg_close(arr);
-            for (const char* o = strchr(arr, '{'); o && o < ae && g_eg.npiece < 1200; o = strchr(o, '{')) { const char* oe = eg_close(o); EgPiece* pc = &g_eg.lib[g_eg.npiece];
-                if (eg_arr(eg_find(o, "lat", oe), pc->lat, 20) == 20 && eg_arr(eg_find(o, "rad", oe), pc->rad, 20) == 20) { snprintf(pc->grp, sizeof pc->grp, "%s", grp); g_eg.npiece++; }
+            for (const char* o = strchr(arr, '{'); o && o < ae && g_eg.npiece < 2400; o = strchr(o, '{')) { const char* oe = eg_close(o); EgPiece* pc = &g_eg.lib[g_eg.npiece];
+                if (eg_arr(eg_find(o, "lat", oe), pc->lat, 20) == 20 && eg_arr(eg_find(o, "rad", oe), pc->rad, 20) == 20) { snprintf(pc->grp, sizeof pc->grp, "%s", grp); pc->mine = (char)mine; g_eg.npiece++; if (mine) g_eg.nmine++; }
                 o = oe; }
             p = ae; } }
-    free(txt); g_eg.on = g_eg.has_w;
-    nlog("[nhook] [fight] engagement model %s: target weights %s (off aim %.2f, log distance %.2f, attacked me %.2f, just hurt %.2f), %d weapon bands, second attacker %.0f%% in view / %.0f%% behind after %.2f s, %d movement pieces, grenades %s (every %.0f s of fighting at %.0f..%.0f units)",
-         path, g_eg.has_w ? "loaded" : "MISSING", g_eg.w[1], g_eg.w[0], g_eg.w[2], g_eg.w[6], g_eg.nband, g_eg.p_view * 100, g_eg.p_behind * 100, g_eg.turn_s, g_eg.npiece,
+}
+static char* eg_read(const char* path, long* len) {
+    FILE* f = fopen(path, "r"); if (!f) return 0; fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET); if (n <= 0 || n > (32 << 20)) { fclose(f); return 0; }
+    char* txt = malloc((size_t)n + 1); if (!txt) { fclose(f); return 0; } size_t got = fread(txt, 1, (size_t)n, f); fclose(f); txt[got] = 0; *len = (long)got; return txt; }
+// The models for THIS map and game type (2026-11-08 14:00, the user: "the walkers should be able to adapt learned logic for each
+// map"): the aggregate (tracks/engage-model.json), overlaid by tracks/maps/<map>.engage.json, overlaid by its "by_class" section
+// for the game being played (slayer / ctf / other, from the variant's engine) -- reloaded whenever the map or the game changes.
+static char g_eg_key[128];
+static void eg_load_for(const char* map, const char* engine) {
+    const char* cls = !engine || !engine[0] ? "" : strstr(engine, "Capture") ? "ctf" : strstr(engine, "Slayer") ? "slayer" : strstr(engine, "Infection") ? "infection" : "other";
+    char key[128]; snprintf(key, sizeof key, "%s|%s", map ? map : "", cls); if (g_eg.loaded && !strcmp(key, g_eg_key)) return;
+    snprintf(g_eg_key, sizeof g_eg_key, "%s", key); free(g_eg.lib); memset(&g_eg, 0, sizeof g_eg); g_eg.loaded = 1;
+    const char* e = getenv("NHOOK_BOT_ENGAGE"), * h = getenv("HOME"); if (e && !strcmp(e, "0")) { nlog("[nhook] [fight] engagement model off (NHOOK_BOT_ENGAGE=0)"); return; }
+    char path[1024]; if (e && *e) snprintf(path, sizeof path, "%s", e); else snprintf(path, sizeof path, "%s/Library/Application Support/ReclaimerMac/tracks/engage-model.json", h ? h : "");
+    long n = 0; char* txt = eg_read(path, &n); if (!txt) { nlog("[nhook] [fight] no engagement model at %s: the old fighter", path); return; }
+    eg_parse(txt, txt + n, 0, 0); free(txt);
+    int map_ok = 0, cls_ok = 0;
+    if (map && map[0] && !getenv("NHOOK_BOT_NO_MAPMODEL")) { char mp[1200]; snprintf(mp, sizeof mp, "%.*s/maps/%s.engage.json", (int)(strrchr(path, '/') ? strrchr(path, '/') - path : 0), path, map);
+        long mn = 0; char* mt = eg_read(mp, &mn);
+        if (mt) { const char* bc = eg_find(mt, "by_class", 0); eg_parse(mt, bc ? bc : mt + mn, 1, 1); map_ok = 1;
+            if (bc && *bc == '{' && cls[0]) { const char* be = eg_close(bc), * c = eg_find(bc, cls, be); if (c && *c == '{') { eg_parse(c, eg_close(c), 1, 1); cls_ok = 1; } }
+            free(mt); } }
+    g_eg.on = g_eg.has_w;
+    nlog("[nhook] [fight] engagement model for %s (%s): aggregate%s%s; target weights %s (off aim %.2f, log distance %.2f, attacked me %.2f, just hurt %.2f), %d weapon bands, second attacker %.0f%% in view / %.0f%% behind after %.2f s, %d movement pieces (%d of this map), grenades %s (every %.0f s of fighting at %.0f..%.0f units)",
+         map && map[0] ? map : "?", cls[0] ? cls : "?", map_ok ? " + this map" : " (no model for this map yet)", cls_ok ? " + this map's game type" : "",
+         g_eg.has_w ? "loaded" : "MISSING", g_eg.w[1], g_eg.w[0], g_eg.w[2], g_eg.w[6], g_eg.nband, g_eg.p_view * 100, g_eg.p_behind * 100, g_eg.turn_s, g_eg.npiece, g_eg.nmine,
          g_eg.gren_ok ? "from the players" : "the tactics' own", g_eg.gren_every, g_eg.gren_d0, g_eg.gren_d1);
     nlog("[nhook] [fight] behaviour: radar look %.0f%% after %.2f s; after a respawn: the killer %.0f%%, the death spot %.0f%%; power items per draw %.0f%% / %.0f%% / %.0f%% (2-10 / 10-20 / 20-40 units)",
          g_eg.rd_turn * 100, g_eg.rd_turn_s, g_eg.p_killer * 100, g_eg.p_spot * 100, g_eg.it_near * 100, g_eg.it_mid * 100, g_eg.it_far * 100);
 }
+static void eg_load(void) { eg_load_for("", ""); }   // (the aggregate only: the offline test, the first fight tick before the map is known)
 static const char* eg_wcls(const char* tag) {   // the walker's weapon (a tag path) -> engage-model.py's weapon classes
     if (!tag) return "none";
     static const struct { const char* k; const char* c; } m[] = {{"sniper", "sniper"}, {"beam_rifle", "sniper"}, {"rocket", "rocket"}, {"spartan_laser", "rocket"}, {"fuel_rod", "rocket"},
@@ -152,7 +176,9 @@ static int eg_choose(const NovObj* objs, int n, int me, const float* cam, float 
 static int eg_move(const char* cls, float dist, double now, float* lat, float* rad) {
     static int cur = -1; static double t0; if (!g_eg.npiece) return 0;
     if (cur < 0 || now - t0 >= 2.0) { const char* band = dist < 6 ? "close" : dist < 15 ? "mid" : "far"; char g[24]; snprintf(g, sizeof g, "%s/%s", cls, band);
-        int cand[1200], nc = 0; for (int i = 0; i < g_eg.npiece; i++) if (!strcmp(g_eg.lib[i].grp, g)) cand[nc++] = i;
+        static int cand[2400]; int nc = 0;
+        for (int i = 0; i < g_eg.npiece; i++) if (g_eg.lib[i].mine && !strcmp(g_eg.lib[i].grp, g)) cand[nc++] = i;   // (this map's own pieces first)
+        if (!nc) for (int i = 0; i < g_eg.npiece; i++) if (!strcmp(g_eg.lib[i].grp, g)) cand[nc++] = i;
         if (!nc) { snprintf(g, sizeof g, "/%s", band); for (int i = 0; i < g_eg.npiece; i++) if (strstr(g_eg.lib[i].grp, g)) cand[nc++] = i; }   // (any weapon at this distance)
         if (!nc) return 0; cur = cand[arc4random_uniform((uint32_t)nc)]; t0 = now; }
     int k = (int)((now - t0) * 10); if (k > 19) k = 19; *lat = g_eg.lib[cur].lat[k]; *rad = g_eg.lib[cur].rad[k]; return 1; }

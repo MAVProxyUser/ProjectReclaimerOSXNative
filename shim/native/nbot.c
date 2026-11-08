@@ -282,6 +282,7 @@ static void bot_step_body(void) {
         if (fight) { bm_load(); eg_load(); nlog("[nhook] [fight] on: skill %.2f, distance x%.2f, strafe x%.2f, switch x%.2f, fire slack %.1f deg, back off below shield %.2f (%.2f), press %.2f, grenades every %.0f s",
                                      skill, kdist, kstrafe, kswitch, fextra, retreat, backoff, press, gren); } }
     int engaged = 0; float ftx = 0, fty = 0; uint32_t fbtn = 0; g_bot_fighting = fight && spar;
+    if (fight) eg_load_for(g_st_curmap, g_trk_mode);   // (the models for this map and game: reloaded when either changes)
     if (fight && spar && have_tg) {
         static uint32_t cur; static double tacq, tvis, tswitch, tmelee, tgren, tlos, tlast; static float ox, oy, side = 1;
         double dt = tlast ? now - tlast : 0.033; if (dt > 0.2) dt = 0.2; tlast = now;

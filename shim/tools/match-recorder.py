@@ -41,7 +41,8 @@ def main():
             cur = mp; n = nev = 0
             path = os.path.join(OUT, '%s_%s_%s.jsonl.gz' % (time.strftime('%Y%m%d-%H%M%S'), mp, TAG)); f = gzip.open(path, 'wt')
             f.write(json.dumps({'start': time.time(), 'map': mp, 'server': TAG, 'mode': MODE, 'variant': (s.get('variant') or {}).get('name') if isinstance(s.get('variant'), dict) else None,
-                                'lanes_live': bool(s.get('lanes_live'))}) + '\n')   # (lanes_live: the game counts this match's lanes itself; lanes-import.py skips it)
+                                'lanes_live': bool(s.get('lanes_live')),
+                                'engine': (s.get('variant') or {}).get('mode') if isinstance(s.get('variant'), dict) else None}) + '\n')   # (lanes_live: the game counts this match's lanes itself; lanes-import.py skips it)
             print('[rec] recording %s -> %s' % (mp, os.path.basename(path)), flush=True)
             try: feed = get('/stats.json').get('feed_seq', 0)
             except Exception: pass

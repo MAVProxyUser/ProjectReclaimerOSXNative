@@ -2926,6 +2926,21 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   feed?" -- the snapshot's medal events (nstats.c rs_tick: the game results' medal counts going up, with the player's team) fell
   through to a plain "name: medal" text row, unstyled and with no switch. LOGIC: "<player in team colour> earned <medal badge>",
   a "medals" switch beside the others (remembered with them), the same medal for the same player within 0.5 s merged (x2 ...).
+- **Per-map models, the tome, coverage-driven sampling** (2026-11-08 14:00; engage-model.py, engage-extract.py, nbot_engage.c,
+  nbot.c, observe-public.sh, workboard.py, match-recorder.py) — WHY: the user: the archive "should probably also refine itself to
+  per map stats too. both per map lanes and logic, as well as a larger aggregated everything general logic, and the walkers should
+  be able to adapt learned logic for each map ... sample each map at least once ... keep track of all the maps you've played, and
+  under what game types ... archived in our tome". LOGIC: engage-model.py builds one model per subset (make_model): the aggregate,
+  each map with 150+ duels (tracks/maps/<map>.engage.json) and inside it each game type with 150+ ("by_class"); tome.json from
+  engage-extract.py's new per-recording meta records (map, type, length, players, kills, start) -- per map x type recordings,
+  minutes, players, duels, kills, first / last, plus the Halo 3 maps never sampled. The walker: eg_load_for(map, engine) = the
+  aggregate, then the map's numbers, then its game type's, wherever present (a map's distance band from 20+ of its duels); reloaded
+  on a map / game change; the map's movement pieces first (EgPiece.mine). NHOOK_BOT_NO_MAPMODEL=1 = aggregate only. The observer's
+  pick adds +25 players for a map x type the tome has no minutes of, +12 under 10 (listing names -> maps by display name or the
+  first 5 letters); OBS_DONE carries a phase's count across a restart. Game type is classified by the engine (match-recorder.py
+  now writes "engine"; nhook's recorder's "mode" is it), then the variant's name, then the listing (a "CTF 30VS30" server's
+  "BIGASSSLAYER" was filed as CTF). The work board shows the direction and the tome's coverage grid (maps x types, per-map model
+  or aggregate, never sampled).
 
 ## 19. Performance
 

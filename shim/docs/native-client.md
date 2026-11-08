@@ -177,6 +177,38 @@ cancel it in the app's mods window -- nhook does not touch it (backlog N23).
 - **Weapon pickup is not a button bit**: shim/tools/native-pickup-scan.sh held each of the control record's 64 bits (+0xC8) on a
   Mauler lying on the floor: none swapped it (FIXES.md "The pickup scan"). Walkers keep their loadout (NHOOK_BOT_PICKBIT unset).
 
+## Learning from real players: the pipeline and the tome (2026-11-08)
+
+The walkers learn how real players move and fight from public matches, per map and in aggregate, and the archive grows with
+every match the hook sees.
+
+1. **Recording.** Every public match a hooked game is in is recorded by nhook itself (ntracks.c: tracks/<date>_<map>_<tag>
+   .jsonl.gz, 10 samples a second per player: position, aim, shield / health, weapon, vehicle, kills, deaths, shots, hits,
+   grenades; events: kills, deaths, medals, spawns, pickups -- slots only, never names; NHOOK_TRACKS=0 off). The observer
+   (`shim/tools/observe-public.sh`) samples on purpose: mod-free public servers, whole matches, Slayer / CTF (Infection left out
+   for now: OBS_INFECTION=1), OBS_MATCHES / OBS_MIN_PLAYERS / OBS_MAX_PLAYERS / OBS_STRICT for "10 large then 4 smaller games",
+   and it favours the map x game type the tome has least of (coverage +25 / +12 players in its pick). It runs its own
+   match-recorder.py (the same format; the header also names the game engine).
+2. **The engagement library.** `python3 shim/tools/engage-extract.py` cuts every recording into duels (who attacks first,
+   awareness, distances, movement across / toward the other, aim, fire, shields, outcome), target choices, second attackers,
+   outnumbered stretches, teammate joins, skirmish sizes, radar contacts (turning to unseen moving enemies), respawns (revenge,
+   the death spot), power-item spawns (who goes for them), weapon use (held time, kills, deaths) and one meta record per
+   recording -> tracks/engagements/*.eng.jsonl.gz. Game type: the engine first, the variant's name, the listing last.
+3. **The models.** `python3 shim/tools/engage-model.py [--json report.json]` -> tracks/engage-model.json (the AGGREGATE: every
+   Slayer / CTF / other match), tracks/maps/<map>.engage.json (PER MAP, 150+ duels, with "by_class" per game type on that map),
+   tracks/tome.json (THE TOME: per map x game type the recordings, minutes, players, duels, kills, first / last sampled, the
+   Halo 3 maps never sampled) and the report (who wins and why, distances, movement, target choice, radar, revenge, items,
+   weapon effectiveness).
+4. **The walkers** (nbot_engage.c / nbot_goals.c) load the aggregate and overlay the map's model and its game type's section
+   wherever there are enough samples, reloaded on a map or game change; the map's own movement pieces come first; lanes and
+   its own failed-death zones are per map. What they use: awareness (view, radar, attackers), the fitted target choice, second
+   attackers with the players' odds and delay, weapon distance bands, real movement pieces, grenades, the radar look, the
+   respawn draw (killer / death spot / the item's lane), power items, the goal draw (never idle).
+5. **Checking them.** `walker-battle.sh` (WB_IDS, WB_WATCH, DED_GAME / DED_MAP on the server) + `engage-compare.py`
+   (fight-likeness against the players on the same map) + `walker-compare.py` (movement); `native-firefight.sh` for Firefight.
+6. **Watching it all.** `python3 shim/tools/workboard.py` (http://127.0.0.1:8790/): what runs, the direction, the task list, the
+   tome's coverage grid, the observer's log; `workboard.py task "..." doing|next|done` / `workboard.py direction "..."`.
+
 ## Lanes (2026-11-08, nlanes.c)
 
 The stats page's map: heatmap **deaths / lanes / lanes + deaths / neither**. Lanes = how many times players crossed each 0.5-unit
