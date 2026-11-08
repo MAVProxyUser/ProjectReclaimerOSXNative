@@ -64,7 +64,7 @@ bash shim/build.sh && bash shim/play.sh                    # the loader
 - **Offline tests** (`shim/tools/`): nhook-selftest, results-feed-test, spawn-test, overlay-feat-test, forensic-oggtest,
   clipboard-test, d2d-test, rec-test, callcost.
 - **Live tests** (local server, test profiles), native: native-fire-test, native-aim-test, `native-host-test.sh walls|tpnext`,
-  native-voice-test.
+  native-voice-test, native-spar-test.
 - **Live tests**, loader: quiet-run, port-verify, spots-verify.
 
 ## Reverse engineering

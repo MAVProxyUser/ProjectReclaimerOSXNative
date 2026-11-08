@@ -14,6 +14,10 @@
 // events and a status line every 2 s. PELOAD_NAV_PITCH fixes the look-pitch sign (default: found by trying, -1 first;
 // it depends on the profile's inverted-look setting), PELOAD_NAV_TURN the turn gain (2.5), PELOAD_NAV_LOOK how many
 // path nodes ahead it steers at (6 = 1.5 units).
+// Shared with the native app (2026-11-07, shim/native/nbot.c): it includes this file with NAV_CORE defined -- the graph, the
+// danger map, A*, roam goals, the builder and the page's path ('nav' in the snapshot) -- and drives halo3's control record
+// instead of the pad; nav_step / nav_tick / nav_pad (the loader's stick driver) are left out there. NAV_TOOL_PATH_FN(buf, size)
+// names h3nav.py when the executable's folder doesn't lead to it; g_nav_mode_rt >= 0 overrides PELOAD_NAV's mode.
 typedef struct { float z; uint16_t comp; uint8_t wd, fl; int32_t nbr[8]; } NavNode;     // 40 bytes, as h3nav.py writes
 static struct { char name[96], file[1100]; int ok, failed; float x0,y0,cell,step,clearh; int w,h,n; uint32_t*first; NavNode*nd; int32_t*cellof;
     float*g; float*pen; int32_t*came; uint32_t*stamp; uint32_t gen; float*hf; int32_t*hn; int hcap;
@@ -21,7 +25,8 @@ static struct { char name[96], file[1100]; int ok, failed; float x0,y0,cell,step
 static volatile int g_nav_act; static volatile float g_nav_lx, g_nav_ly, g_nav_rx, g_nav_ry; static volatile uint16_t g_nav_btn;
 // PELOAD_NAV=roam | enemy | x,y,z | vehicle:<name> (2026-10-18: walk up to the nearest vehicle whose name contains <name>,
 // e.g. vehicle:hornet, stop beside it and face it -- for looking at one with the overlay in a test run)
-static int nav_mode(void){ static int m=-1; if(m<0){ const char*e=getenv("PELOAD_NAV"); m=!e||!*e?0: !strcasecmp(e,"enemy")?2: !strncasecmp(e,"vehicle:",8)?4: strchr(e,',')?3: 1; } return m; }
+static volatile int g_nav_mode_rt=-1;   // >= 0: the mode set at run time (the native page / NHOOK_NAV), else PELOAD_NAV
+static int nav_mode(void){ if(g_nav_mode_rt>=0) return g_nav_mode_rt; static int m=-1; if(m<0){ const char*e=getenv("PELOAD_NAV"); m=!e||!*e?0: !strcasecmp(e,"enemy")?2: !strncasecmp(e,"vehicle:",8)?4: strchr(e,',')?3: 1; } return m; }
 static int nav_ci_has(const char*s,const char*sub){ if(!s||!sub) return 0; size_t n=strlen(sub); for(;*s;s++) if(!strncasecmp(s,sub,n)) return 1; return 0; }
 static int nav_log(void){ static int l=-1; if(l<0) l=getenv("PELOAD_NAV_LOG")?1:0; return l; }
 static void nav_say(const char*fmt,...){ if(!nav_log()) return; char m[400]; va_list ap; va_start(ap,fmt); int k=vsnprintf(m,sizeof m,fmt,ap); va_end(ap); if(k>(int)sizeof m-1) k=sizeof m-1; (void)!write(2,m,k); }
@@ -136,12 +141,19 @@ static void nav_ensure(void){
     if(nav_load(path)){ nav_say("  [nav] %s: %d floor nodes (%dx%d cells of %.2f) from %s\n",name,g_nav.n,g_nav.w,g_nav.h,g_nav.cell,path); return; }
     // make one only once a match is running: in the menu the 'map being played' is whatever map its scene borrows from
     // (Forge's desert_sandbox, Guardian), and building a big map's graph costs a core for a while
-    extern double g_gameplay_t0; if(!g_gameplay_t0) return;
+#ifndef NAV_CORE
+    extern double g_gameplay_t0;
+#endif
+    if(!g_gameplay_t0) return;
     static char spawned[96]; if(!strcmp(spawned,name) || (fe&&*fe)){ return; }
     snprintf(spawned,sizeof spawned,"%s",name);
     char tool[1100]; const char*e=getenv("PELOAD_NAV_TOOL");
     if(e&&*e) snprintf(tool,sizeof tool,"%s",e);
+#ifdef NAV_TOOL_PATH_FN
+    else NAV_TOOL_PATH_FN(tool,sizeof tool);
+#else
     else { char exe[1024]; uint32_t es=sizeof exe; tool[0]=0; if(!_NSGetExecutablePath(exe,&es)){ char*sl=strrchr(exe,'/'); if(sl){ *sl=0; snprintf(tool,sizeof tool,"%s/../../re-tools/h3nav.py",exe); } } }
+#endif
     if(!tool[0] || access(tool,R_OK)){ g_nav.failed=2; nav_say("  [nav] no walking graph for %s: %s not found\n",name,tool[0]?tool:"h3nav.py"); return; }
     char dir[1100]; snprintf(dir,sizeof dir,"%s",path); char*sl=strrchr(dir,'/'); if(sl){ *sl=0; mkdir(dir,0755); }
     char lg[1110]; snprintf(lg,sizeof lg,"%s.log",path);
@@ -154,8 +166,9 @@ static void nav_ensure(void){
     setpriority(PRIO_PROCESS,pid,10);   // below the game
     { char m[1300]; int k=snprintf(m,sizeof m,"  [nav] making the walking graph for %s (%s)\n",name,mp); (void)!write(2,m,k); }
     snprintf(g_nav_making,sizeof g_nav_making,"%s",path); pthread_t th; pthread_create(&th,0,nav_wait,(void*)(intptr_t)pid); pthread_detach(th); }
-static void nav_step(void);
 static void nav_publish(const int32_t*path,int from,int plen,int goal);
+#ifndef NAV_CORE
+static void nav_step(void);
 static void* nav_thread(void*a){ (void)a; pthread_setname_np("shim-nav"); for(;;){ usleep(33000); nav_step(); } return 0; }
 // called at each Present: starts the nav thread (planning a long path over a big map takes tens of ms -- not on the
 // render thread)
@@ -244,6 +257,7 @@ static void nav_step(void){
     g_nav_lx=lx; g_nav_ly=ly; g_nav_rx=rx; g_nav_ry=ry; g_nav_btn=btn; g_nav_act=1;
     if(now-tstat>2.0){ tstat=now; nav_say("  [nav] at (%.1f %.1f %.1f) node %d (danger %.2f), path %d/%d, next (%.1f %.1f %.1f), turn %.0f deg -> L=(%.2f,%.2f) R=(%.2f,%.2f)\n",
         pos[0],pos[1],pos[2],cur,g_nav.dng?g_nav.dng[cur]:0.0f,pidx,plen,tp[0],tp[1],tp[2],yaw_err*57.2958f,lx,ly,rx,ry); } }
+#endif
 // the stats page's map: the walker's goal and the rest of its path (at most 160 points)
 static pthread_mutex_t g_nav_pmx=PTHREAD_MUTEX_INITIALIZER; static float g_nav_pts[160][2], g_nav_goalp[3]; static int g_nav_npts, g_nav_hasgoal;
 static void nav_publish(const int32_t*path,int from,int plen,int goal){ pthread_mutex_lock(&g_nav_pmx); g_nav_npts=0; g_nav_hasgoal=goal>=0;
@@ -256,5 +270,7 @@ static void nav_json(StBuf*s){ if(!nav_mode()) return; static const char*const m
     if(g_nav_hasgoal) sb_put(s,",\"goal\":[%.2f,%.2f,%.2f]",g_nav_goalp[0],g_nav_goalp[1],g_nav_goalp[2]);
     sb_put(s,",\"path\":["); for(int i=0;i<g_nav_npts;i++) sb_put(s,"%s[%.2f,%.2f]",i?",":"",g_nav_pts[i][0],g_nav_pts[i][1]); sb_put(s,"]}");
     pthread_mutex_unlock(&g_nav_pmx); }
+#ifndef NAV_CORE
 int nav_pad(int16_t*lx,int16_t*ly,int16_t*rx,int16_t*ry,uint16_t*b){
     if(!g_nav_act) return 0; *lx=ax16(g_nav_lx); *ly=ax16(g_nav_ly); *rx=ax16(g_nav_rx); *ry=ax16(g_nav_ry); *b=g_nav_btn; return 1; }
+#endif

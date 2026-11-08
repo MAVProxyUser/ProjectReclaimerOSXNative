@@ -69,6 +69,9 @@ static int nov_camera(float* vp, float aspect) {
 typedef struct { float c[3], r, o[3], vel[3]; int type; uint32_t handle; uint64_t p; uint32_t def; uint16_t nmsz, nmoff;
     float health, shield, camo; int team, seat, wslot, dead; uint32_t weapons[4], parent, owner; int8_t gren[4]; int rcount; uint16_t roff; } NovObj;
 static uint8_t g_nov_tab[HB_MAXOBJ * 0x18]; static int g_nov_hi;
+// nov_collect's static buffers are shared: the overlay (render thread) and the sparring aim / walker (nbot.c, its own thread)
+// take this lock around it; g_nov_units_only (under it) = 1 bipeds only, 2 vehicles only, whatever the overlay switches say
+static pthread_mutex_t g_nov_collect_mx = PTHREAD_MUTEX_INITIALIZER; static int g_nov_units_only;
 static uint64_t nov_datum(uint32_t h) { int i = h & 0xFFFF; if (h == 0xFFFFFFFFu || i >= g_nov_hi) return 0; const uint8_t* e = g_nov_tab + i * 0x18;
     if (*(const uint16_t*)e != (uint16_t)(h >> 16)) return 0; return *(const uint64_t*)(e + 0x10); }
 static int nov_collect(NovObj* out, int max) {
@@ -81,7 +84,8 @@ static int nov_collect(NovObj* out, int max) {
     for (int i = 0; i < hi && n < max; i++) {
         const uint8_t* e = g_nov_tab + i * 0x18; if (!*(const uint16_t*)e) continue; int t = e[3], unit = t == 0 || t == 1 || t == 12;
         static int dbg = -1; if (dbg < 0) dbg = getenv("NHOOK_OV_DEBUG") ? 1 : 0;   // calibration: scenery / machines / crates too
-        int want = (t == 0 && fb) || ((t == 1 || t == 12) && fveh) || (t == 5 && ft) || ((t == 2 || t == 3) && fw) || (dbg && t >= 6 && t <= 10); if (!want) continue;
+        int want = g_nov_units_only ? (g_nov_units_only == 1 ? t == 0 : (t == 1 || t == 12))
+                 : (t == 0 && fb) || ((t == 1 || t == 12) && fveh) || (t == 5 && ft) || ((t == 2 || t == 3) && fw) || (dbg && t >= 6 && t <= 10); if (!want) continue;
         uint64_t p = *(const uint64_t*)(e + 0x10); static uint8_t dh[0x380]; size_t rn = unit ? 0x380 : 0x140; if (!p || !hb_read(p, dh, rn)) continue;
         const float* od = (const float*)(dh + 0x1c); NovObj* o = &out[n]; memset(o, 0, sizeof *o);
         o->c[0] = od[0]; o->c[1] = od[1]; o->c[2] = od[2]; o->r = od[3]; memcpy(o->o, dh + 0x50, 12); memcpy(o->vel, dh + 0x74, 12);
@@ -409,7 +413,7 @@ static int nov_build_body(float* verts, int cap, int w, int h, float scale) {
     pthread_mutex_lock(&g_nov_mx);
     g_nov_scale = scale > 0 ? scale : 1; g_nov_W = w / g_nov_scale; g_nov_H = h / g_nov_scale;
     int fh = nov_feat(NOV_HIT), ft = nov_feat(NOV_TRC), fi = nov_feat(NOV_INF), fw = nov_feat(NOV_ITM), fveh = nov_feat(NOV_VEH); double now = mono_s();
-    static NovObj objs[2048]; int n = nov_collect(objs, 2048), nv = 0; const float* cam = vp + 28;
+    static NovObj objs[2048]; pthread_mutex_lock(&g_nov_collect_mx); int n = nov_collect(objs, 2048), nv = 0; pthread_mutex_unlock(&g_nov_collect_mx); const float* cam = vp + 28;
     for (int i = 0; i < n; i++) { const NovObj* o = &objs[i]; if (o->type) continue; float dx = o->c[0] - cam[0], dy = o->c[1] - cam[1], dz = o->c[2] - cam[2];
         if (dx * dx + dy * dy + dz * dz < (o->r + 0.3f) * (o->r + 0.3f)) { g_nov_myteam = o->team; g_nov_myside = nov_side_of(o->handle); break; } }
     static const float cwhite[3] = {1, 1, 1}, cgrey[3] = {0.7f, 0.7f, 0.7f}, ctrace[3] = {1, 0.95f, 0.55f}, cvel[3] = {1, 0.5f, 0.1f}, citem[3] = {0.3f, 1, 0.45f}, cequip[3] = {0.3f, 0.9f, 1};

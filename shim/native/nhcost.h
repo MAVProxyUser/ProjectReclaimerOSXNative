@@ -11,7 +11,7 @@
 // Off switches: g_hc_off[k] makes a hook's handler return at once (the A/B measurement and nothing else sets them). The
 // camera hook's stub filters ~700k calls a second in assembly before its C handler: that filter is not timed and stays
 // while the handler is off (NHOOK_NO_VIEWHOOK=1 at launch removes the hook).
-enum { HC_DEL, HC_AIM, HC_VIEW, HC_OV, HC_OV_HIT, HC_OV_VEH, HC_OV_TRC, HC_OV_INF, HC_OV_ITM, HC_OV_ZON, HC_AIMT, HC_OPUS, HC_SOCK, HC_SNAP, HC_N };
+enum { HC_DEL, HC_AIM, HC_VIEW, HC_OV, HC_OV_HIT, HC_OV_VEH, HC_OV_TRC, HC_OV_INF, HC_OV_ITM, HC_OV_ZON, HC_AIMT, HC_OPUS, HC_SOCK, HC_SNAP, HC_BOT, HC_MIC, HC_N };
 typedef struct { const char* id, * name, * thread; int crit; volatile uint64_t ticks, calls; } HcSlot;
 static HcSlot g_hc[HC_N] = {
     [HC_DEL]    = {"bullets", "Bullet hook (object_delete): shots, hits, tracer records", "simulation", 1, 0, 0},
@@ -27,7 +27,9 @@ static HcSlot g_hc[HC_N] = {
     [HC_AIMT]   = {"aimtick", "Aim meter: hitbox measurement", "render (present)", 1, 0, 0},
     [HC_OPUS]   = {"voice", "Voice hook (Opus decode): forensic audio", "voice", 0, 0, 0},
     [HC_SOCK]   = {"packets", "Socket hook: packet log", "network", 0, 0, 0},
-    [HC_SNAP]   = {"stats", "Stats snapshot (10 a second)", "its own", 0, 0, 0} };
+    [HC_SNAP]   = {"stats", "Stats snapshot (10 a second)", "its own", 0, 0, 0},
+    [HC_BOT]    = {"bot", "Sparring aim / walker: the player's controls (test clients)", "simulation", 1, 0, 0},
+    [HC_MIC]    = {"mic", "Microphone switch (the app's capture)", "audio", 0, 0, 0} };
 static volatile uint8_t g_hc_off[HC_N];
 static inline uint64_t hc_now(void) { uint64_t v; __asm__ volatile("mrs %0, cntvct_el0" : "=r"(v)); return v; }
 static inline void hc_add(int k, uint64_t t0) { uint64_t d = hc_now() - t0; __atomic_fetch_add(&g_hc[k].ticks, d, __ATOMIC_RELAXED); __atomic_fetch_add(&g_hc[k].calls, 1, __ATOMIC_RELAXED); }

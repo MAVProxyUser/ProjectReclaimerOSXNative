@@ -209,6 +209,16 @@ few shots there). NHOOK_TAP_LOG=<file> copies every line the hooks read (any pro
 Voice channel: the mixer entry's byte at end - 7 (1 global, 2 team, 3 proximity; FIXES.md "the channel"). Host diagnostic:
 do=floorprobe&x=&y=&z= (halo3's collision ray down + the open / solid test at 9 depths, in host_msg).
 
+The sparring partner, the walker and the page's mic switch (2026-11-07, shim/native/nbot.c; FIXES.md): halo3's per-player
+control record (TLS block +0xC0, 4 x 0x110 bytes: +0xC0 unit, +0xC8 buttons (bit 0 crouch, bit 1 jump), +0xD0 flags, +0xD4 yaw,
++0xD8 pitch, +0xDC / +0xE0 throttle forward / left) is filled by halo3+0xf66ac and copied into the unit's control by 0xf7178 --
+both are the app's own code, so a text hook at the app's 0xf7178 writes record 0. The aim reaches the server; a joined client's
+MOVEMENT does not (the app sends it from its own input layer), so the walker runs only in a local game / one this client hosts.
+Test clients only (a test profile, a local game or a loopback / private server). shim/tools/native-spar.sh puts the second test
+identity on our server with the aim on; shim/tools/native-spar-test.sh checks both. NHOOK_BOT_THROTTLE=x,y / NHOOK_BOT_BTNSCAN=1
+re-find the record's throttle axes / button bits after an app update. Mic: AudioUnitRender on input bus 1 is interposed and
+zeroed while muted (do=mic&on=, NHOOK_MIC_MUTED=1).
+
 Not yet: the packet log's game layer (halo3 message names; 0.10's wire protocol is the app's own).
 
 ### Kills (static RE of halo3.dll)

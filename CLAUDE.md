@@ -331,6 +331,9 @@ hooks installed at run time stop the other threads (a 16 KB page is not executab
 NHOOK_CODETAB_DUMP=<file> + shim/tools/native-frames.py (the JIT layout is fixed, only shifted between launches).
 Two-client tests (2026-11-07): native-dedicated.sh + the test profile + ReclaimerMac/native/test-second (its own identity):
 shim/tools/native-host-test.sh walls|tpnext, native-voice-test.sh (--voice-wav/--voice-talk); NHOOK_TAP_LOG=<file> = every app line.
+Sparring aim / walker / mic natively (2026-11-07, nbot.c): halo3's control record TLS +0xC0 (4 x 0x110: +0xD4 yaw, +0xD8 pitch, +0xDC
+throttle, +0xC8 buttons bit 1 jump) written at the app's own 0xf7178 entry; aim reaches the server, a joined client's movement doesn't
+(app input layer) -> walker in local games only; test clients only; native-spar.sh / native-spar-test.sh; mic = AudioUnitRender bus 1 zeroed.
 Forensic voice audio: text hook on the app's Opus decode (0x1003f1e7c, caller = voice mixer 0x102152578, id at x26-0x278;
 stub.S _nh_opus_shim; NHOOK_NO_VOICEHOOK=1 off; [perf] "voice packets" -- live-checked 2026-11-07: real talkers archived and decoded). Chat = the app's own `[chat] line` log, on since nhook sets its chat_log byte (nstats.c chat_log_tick). Not yet: packet log
 game layer. Test runs: NATIVE_LOG=<scratch file> (the default log is the user's). Offline test:

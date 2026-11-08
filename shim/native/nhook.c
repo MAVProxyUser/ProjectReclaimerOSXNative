@@ -791,6 +791,13 @@ static OSStatus my_AudioUnitSetProperty(AudioUnit au, AudioUnitPropertyID id, Au
 
 #define INTERPOSE(rep, orig) __attribute__((used)) static struct { const void* r; const void* o; } \
     _ip_##orig __attribute__((section("__DATA,__interpose"))) = { (const void*)(rep), (const void*)(orig) }
+// the page's mic switch (nstats.c mic_json, g_mic_muted): the app's capture pulls its samples on the AUHAL's input bus 1
+static OSStatus my_AudioUnitRender(AudioUnit au, AudioUnitRenderActionFlags* fl, const AudioTimeStamp* ts, UInt32 bus, UInt32 frames, AudioBufferList* io) {
+    OSStatus r = AudioUnitRender(au, fl, ts, bus, frames, io);
+    if (bus == 1 && !g_hc_off[HC_MIC]) { uint64_t t0 = hc_now(); g_mic_t = mono_s();
+        if (mic_muted() && !r && io) for (UInt32 i = 0; i < io->mNumberBuffers; i++) if (io->mBuffers[i].mData) memset(io->mBuffers[i].mData, 0, io->mBuffers[i].mDataByteSize);
+        hc_add(HC_MIC, t0); }
+    return r; }
 INTERPOSE(my_write, write);
 INTERPOSE(my_writev, writev);
 INTERPOSE(my_open, open);
@@ -805,6 +812,7 @@ INTERPOSE(my_connect, connect);
 INTERPOSE(my_close, close);
 INTERPOSE(my_getaddrinfo, getaddrinfo);
 INTERPOSE(my_AudioUnitSetProperty, AudioUnitSetProperty);
+INTERPOSE(my_AudioUnitRender, AudioUnitRender);
 
 __attribute__((constructor)) static void nhook_init(void) {
     const char* lf = getenv("NHOOK_LOG");

@@ -288,6 +288,15 @@ The target is in its match about 50 s after starting; `TARGET_MAP=<name>` picks 
 `bash shim/target.sh stop` stops it (`play.sh` leaves a running target alone). `TARGET_SHOW=1` gives it a
 window (minimized in the Dock; add `TARGET_MINIMIZE=0` to keep it on screen).
 
+With the native app (0.10+), the second test identity on our own server turns toward the nearest enemy's head
+(a sparring partner: it aims, never fires, and stands where it spawned):
+
+```bash
+bash shim/tools/native-spar.sh                                    # starts our local server too; its page: http://127.0.0.1:8766/
+NATIVE_REAL=1 bash shim/native.sh --join-server 127.0.0.1:49190   # you
+bash shim/tools/native-spar.sh stop
+```
+
 Any client can run that way: `PELOAD_HIDE_WINDOW=1` (no window, no Dock icon) and `PELOAD_MAX_FPS=<n>` (frame
 cap; 30 by default with a hidden window, `0` = uncapped).
 

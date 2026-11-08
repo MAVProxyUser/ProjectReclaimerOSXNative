@@ -793,6 +793,7 @@ static void st_engine_events(const StPlayer* pl, int np) {
 
 #include "nspawns.c"   // weapon / vehicle / power-up spawns and pickups (the loader's st_spawns)
 #include "nhost.c"     // the host tools: teleport, boundaries / invisible walls off, speed
+#include "nbot.c"      // the sparring aim and the walker (test clients)
 // ---- the hook cost meter: rates per second, the fps estimate, and the real on/off measurement (nhcost.h) ------------------
 // A measurement (POST /control?do=hookab&h=<id>[&secs=36][&per=3]; do=hookab&stop=1 ends it) switches ONE hook (g_hc_off) or
 // overlay feature (its g_nov_on bit; "overlay" = every feature you had on) on and off in turns of `per` seconds, starting
@@ -1058,9 +1059,12 @@ static void st_snapshot(StBuf* s) {
       if (__atomic_exchange_n(&g_match_pending, 0, __ATOMIC_ACQ_REL)) st_event_pos(0, "game", m, 0, 0, -1, -1, 0, "Match started: %s", g_loading[0] ? g_loading : m[0] ? m : "?");
       if (t0) st_maptop_ensure(mp, m); }
     sb_put(s, ",\"zone_show\":%d,\"weak_show\":%d,\"overlay\":{", nz_show(), g_nov_wk); nov_json(s);
-    sb_put(s, ",\"controls\":%s,\"spar\":false,\"spar_aim\":-1.0,\"spar_available\":false,\"mic\":\"off\",\"mic_in_use\":false,\"quality\":\"\"", st_controls_ok() ? "true" : "false");
+    sb_put(s, ",\"controls\":%s,\"quality\":\"\"", st_controls_ok() ? "true" : "false");
+    bot_overlay_json(s);     // spar / spar_aim / spar_available / walk / walk_available (nbot.c)
+    mic_json(s);             // mic / mic_in_use (the page's Mic button)
     ht_overlay_json(s, m);   // teleport / host / bounds_off / invwalls_off / speed_idx / spots (nhost.c)
     sb_put(s, "}");
+    bot_nav_json(s);         // "nav": the walker's path and goal (the page's map)
     if (strcmp(m, g_trk_map)) { snprintf(g_trk_map, sizeof g_trk_map, "%s", m); g_ntrk = 0; g_nbip = 0; sb_reset(); }   // a new map: new match stats
     pthread_mutex_lock(&g_hm_mx); snprintf(g_hm_cur, sizeof g_hm_cur, "%s", m); if (g_hm.dirty && now - g_hm.saved > 30) { hm_save(); g_hm.saved = now; } pthread_mutex_unlock(&g_hm_mx);
     static uint8_t tab[HB_MAXOBJ * 0x18]; int hi = 0; uint64_t arr = hb_object_array(); uint8_t hdr[0x60];
@@ -1160,6 +1164,8 @@ static void st_snapshot(StBuf* s) {
                   sb_put(s, ",\"in\":\"%08x\"", rh);
               } else sb_put(s, "null"); }
             const float* fwv = (const float*)(d + 0x5c); sb_put(s, ",\"facing\":%.0f", atan2f(fwv[1], fwv[0]) * 57.2958f);
+            { const float* av = (const float*)(d + 0x1a0); float ah = sqrtf(av[0] * av[0] + av[1] * av[1]);   // the unit's aim (teleport.md: +0x1a0): where it shoots
+              if (isfinite(av[0]) && ah + fabsf(av[2]) > 0.5f) sb_put(s, ",\"aim\":[%.1f,%.1f]", atan2f(av[1], av[0]) * 57.2958f, atan2f(av[2], ah) * 57.2958f); }
         } else sb_put(s, "null,\"weapons\":[],\"grenades\":{\"frag\":0,\"plasma\":0,\"spike\":0,\"firebomb\":0},\"vehicle\":null");
         int16_t sbs[8]; int sbok = st_statborg(pl[k].slot, sbs);
         sb_put(s, ",\"pos\":"); sb_f3(s, o); sb_put(s, ",\"speed\":%.2f,\"kills\":%d", spd, sbok ? sbs[SB_KILLS] : 0);
@@ -1306,6 +1312,8 @@ static int st_control(const char* act, const char* qs) {
         int live = g_nr_last > 0 && mono_s() - g_nr_last < 2.0; char err[200];
         return rec_start(ao, secs, g_st_curmap[0] ? g_st_curmap : "game", ao || !live ? 0 : g_nr_w, ao || !live ? 0 : g_nr_h, err, sizeof err); }
     if (!strcmp(act, "recstop")) { rec_stop(); return 1; }
+    if (!strcmp(act, "spar") || !strcmp(act, "walk")) return bot_control(act, qs);   // the sparring aim / walker (nbot.c, test clients)
+    if (!strcmp(act, "mic")) { const char* v = strstr(qs, "on="); if (!v) return 0; mic_muted(); g_mic_muted = atoi(v + 3) ? 0 : 1; return 1; }
     if (!strcmp(act, "forensic")) return fx_control(qs);       // archive / voice audio / consent (forensic.c)
     if (!strcmp(act, "hookab")) return hc_control(qs);           // the hook cost meter's on/off measurement
     if (!strcmp(act, "pktgame")) return pk_control(qs);           // the Packets window's game layer (nnet.c)
@@ -1422,6 +1430,7 @@ static void* st_listen_thread(void* a) {
     return 0;
 }
 static void nstats_start(void) {
+    bot_init();   // the sparring aim / walker's launch switches (NHOOK_SPAR, NHOOK_NAV)
     const char* e = getenv("NHOOK_STATS_HTTP"); if (e) g_st_port = atoi(e); if (g_st_port <= 0 || g_st_port > 65535) return;
     Dl_info di; if (dladdr((void*)nstats_start, &di) && di.dli_fname) {   // the repo: <repo>/shim/build/nhook.dylib
         snprintf(g_repo, sizeof g_repo, "%s", di.dli_fname); for (int k = 0; k < 3; k++) { char* sl = strrchr(g_repo, '/'); if (sl) *sl = 0; } }
