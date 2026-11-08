@@ -140,6 +140,30 @@ green, "problems only"), and `[hooks]` lines in the log (90 s after the engine s
 FAILED (not installed / not found in this build: the feature is off), silent (installed, what it waits for happened, no call yet),
 waiting (a match / a shot / a talker / a page switch has not happened yet), off (a switch), not expected (display_event: the app
 never calls it). Hooks that install on first use are preflighted at start (their shape checks, nothing written).
+While someone plays: `python3 shim/tools/hooks-watch.py [port]` prints each item whose verdict changes. The user's first 0.10.1
+session (5 maps on a public server): 33 ok, 0 failed; voice (ids at the new offset, channels), chat, the kill feed and the overlay's
+hitboxes (a capture: on the players' armour) all checked live.
+
+## What was removed (2026-11-08, client 0.10.1)
+
+**From nhook, with the 0.10.1 port** (each replaced, not lost; the old way stays behind its switch where it is a behaviour):
+- The 0.10.0 constants: `APP_IMAGE` (0x103f94000), `APP_CODETAB` (0x103f44418), `APP_MUTED` / `APP_SETMUTE`, `HT_FRAME_FN`
+  and the Opus decode / voice mixer / chat gate literals -- now `APP(field)` from napp_builds.h, per build.
+- The run-time checks that compared exact 0.10.0 instruction words (the mixer's `bl` encoding 0x978a7e41, `#0x278`, the chat
+  gate's adrp / ldrb words): they now decode the instructions and compare against the build's own row.
+- The fixed sender-id offset 0x278 in the voice hook (now the row's `mixer_id_off`: 0x2a0 in 0.10.1).
+- `is_muted` (0x10214db98 in 0.10.0): only ever named in a comment, never used at run time, so it is not a table point.
+- One 16 KB stub page per entry / body hook: stubs now share near pages (NHOOK_STUB_PAGE_EACH=1 = the old way).
+- "Hooks off" = no stats page at all: with hooks off the page now starts and its Hooks check window says why.
+
+**From the app itself in 0.10.1** (its release notes; what it changes for our page):
+- Client-to-client connections and the standby connections to a possible replacement host: every player's traffic now goes
+  through the host ("one host connection per client in both networking models"). A client sees only the host's address, so the
+  players table's IP column and the Packets window have per-player addresses only when this app hosts.
+- "Enhanced" networking as the default ("Classic" is the default now; Enhanced is still selectable).
+
+**Loader features not brought to the native app** (the user's call, 2026-11-07; BACKLOG): auto-vote (#50), graphics quality
+from the page (#68; the app's own Settings menu has it), the late camera update (mouse only; the user plays with a controller).
 
 ## Our features on the native app (status)
 

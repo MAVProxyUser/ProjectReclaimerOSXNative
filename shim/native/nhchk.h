@@ -87,7 +87,7 @@ static const HkCat g_hk_cat[] = {
     {"statborg", "kills / deaths / assists per player", "reader", "match"},
     {"game results", "exact kill feed, per-weapon kills, medals", "reader", "match"},
     {"network session", "the Connected list (halo3 session)", "reader", "online"},
-    {"observer camera", "the overlay's fallback camera (halo3 observer TLS +0x578)", "reader", "match"},
+    {"observer camera", "the overlay's fallback camera (halo3 observer TLS +0x578; read only while the overlay is on)", "reader", "overlay"},
 };
 static const HkCat* hk_cat(const char* name) { for (size_t k = 0; k < sizeof g_hk_cat / sizeof g_hk_cat[0]; k++) if (!strcmp(g_hk_cat[k].name, name)) return &g_hk_cat[k]; return 0; }
 static int hk_named(const char* name) { const HkCat* c = hk_cat(name); return hk_id(name, c ? c->feature : "", c ? c->kind : "", c ? c->when : "always"); }

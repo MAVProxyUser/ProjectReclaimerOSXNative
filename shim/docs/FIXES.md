@@ -2596,7 +2596,9 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   installed app has no row (exit 2), it ports it from re-tools/machoport-sigs.json, writes both tables and rebuilds the dylib, before
   launching. With hooks off (an unknown build) the stats page now starts anyway, so its Hooks check window says why
   (hooks_off_page). SWITCHES: NATIVE_NO_AUTOPORT=1 (no port at launch: the old "hooks off"), NHOOK_APP_BUILD=<version> (that row
-  whatever the UUID), NATIVE_PORT_REF=<binary or sigs.json>.
+  whatever the UUID), NATIVE_PORT_REF=<binary or sigs.json>. REMOVED with it: the 0.10.0 constants (APP_IMAGE, APP_CODETAB,
+  APP_MUTED, APP_SETMUTE, HT_FRAME_FN, the voice / chat literals), the exact-word checks (incl. the mixer's bl encoding and
+  #0x278), is_muted as a tracked address (never used at run time) -- native-client.md "What was removed".
 - **The hooks check** (2026-11-08; shim/native/nhchk.h + nhchk.c, GET /hooks.json, the stats page's Hooks check window,
   shim/tools/native-hooks-test.sh) — WHY: the user, on 0.10.1: "can you add a hooks check? like all the stuff you patch I assume
   you can detect IF on a new version the hook loaded properly or function". LOGIC: a registry of every thing nhook depends on in
@@ -2613,7 +2615,9 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   the snapshot's "hookcheck" counts ("hooks" is the cost meter's). The self test: a local Guardian test match that fires
   (hold_trigger), has the overlay on, the walker roaming and uses the host tools (boundaries, invisible walls, a teleport), then
   fails on anything FAILED or on an item that match must exercise that never fired. On 0.10.1 its first run passed 30 items and
-  found the stub-page bug below. SWITCH: NHOOK_NO_HKWRAP=1 = hooks without the counting thunk (fires stay 0).
+  found the stub-page bug below. In the user's first 0.10.1 game: 33 ok, 0 failed (the observer camera's "when" is the overlay:
+  nothing reads it with the overlay off -- it showed "silent" until that fix). shim/tools/hooks-watch.py prints verdict changes
+  live. SWITCH: NHOOK_NO_HKWRAP=1 = hooks without the counting thunk (fires stay 0).
 - **Stub slots: many hook stubs to a page** (2026-11-08; shim/native/nhook.c stub_alloc / stub_seal) — WHY: the hooks check's
   first run on 0.10.1: the host tools' game-tick body hook FAILED, "near_page: 0 free gaps of 16384 bytes within 120 MB of
   0x14aafa8c0": every entry / body hook took its own 16 KB page within branch range of the JIT region, and the free gaps there
