@@ -186,6 +186,22 @@ own traffic and deeper as more is recorded; hover gives the count and the usual 
 (`--show <map>`; safe while a game runs: both merge under a lock). Offline: `bash shim/tools/lanes-test.sh`,
 `python3 shim/tools/lanes-page-mock.py --map <map>` (the page with that map's data on http://127.0.0.1:8798/).
 
+## The motion tracker (halo3, found 2026-11-08; static RE of halo3.dll -- the app lifts the same code)
+
+- halo3+0x2d289c = the HUD's per-user draw (ecx = local user 0..3). It calls halo3+0x2d349c "is the tracker shown" (the user's
+  player, the HUD flag at [TLS block +0x220] +0x144.., the player's radar mode != 1) and then the tracker's draw halo3+0x2f3904
+  with S = [TLS block + 0xF0] + user * 0x28c8 + 0x244 (the HUD's per-user block; halo3+0x2cf7f8 packs the radar mode into its
+  +0xca8 bits).
+- S+0xcbc = the range in world units (the draw divides by 0.3281 for metres; its scale switches at 10, 75, 150 m). S+0xcb4 = the
+  newest of 10 history frames (the draw goes (cb4 + 1 + k) % 10, k = 0..9: oldest first). Frame f at S + 0xf0 + f * 0x104:
+  int32 count, then up to 16 blips x 16 bytes: float x, float y (the sensor plane), float ?, u8 type (+0xc; 7 drawn 3x larger,
+  6 its own branch), u8 size class (+0xd: x a scale table at [halo3 globals +0x80]), u8 colour (+0xe). halo3+0x2f36b8 draws one
+  frame, halo3+0x2f329c one blip. The list at S+0xb18 (16 bytes each, count S+0xcac, fades S+0xc58) is drawn on top.
+- Player traits: resolved at player +0x1FC; radar mode +0x214, range +0x216 (u16). halo3+0x202de4 is the player's network
+  update (it replicates them; not the tracker).
+- nbot_goals.c rd_blips reads user 0's newest frame; NHOOK_RADAR_LOG=1 logs it beside the true enemy positions in the walker's
+  frame every 2 s, to fit x / y to the world. The walker's radar uses halo3's rules (rd_contact) until that is done.
+
 ## The hooks check
 
 Everything nhook depends on in the app registers in `shim/native/nhchk.h`: per item its feature, its kind (address, entry /

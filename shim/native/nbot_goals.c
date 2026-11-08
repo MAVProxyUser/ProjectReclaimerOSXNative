@@ -42,6 +42,33 @@ static int rd_contact(const NovObj* me, const NovObj* t) {
     if (mode == 4) return 1;
     float sp = sqrtf(t->vel[0] * t->vel[0] + t->vel[1] * t->vel[1]);   // (units a second: a running player ~2.25)
     return sp > GL_RADAR_SPEED || t->seat >= 0 || t->parent != 0xFFFFFFFFu; }
+// THE ENGINE'S OWN MOTION TRACKER (found 2026-11-08 13:05 in halo3.dll; docs/native-client.md "The motion tracker"): the HUD draw
+// for local user u (halo3+0x2d289c) calls halo3+0x2d349c "is the tracker shown" (user's player, chud flag, radar mode != off) and
+// then the tracker's draw halo3+0x2f3904 with S = [TLS block + 0xF0] + u * 0x28c8 + 0x244: S+0xcbc = the range in world units
+// (the draw: / 0.3281 = metres, scales switch at 10 / 75 / 150 m), S+0xcb4 = the newest of 10 history frames, frame f at S + 0xf0 +
+// f * 0x104 = int count, then up to 16 blips of 16 bytes {float x, float y (the sensor plane), ?, u8 type +0xc (7 = drawn 3x:
+// vehicles?), u8 size class +0xd, u8 colour +0xe} drawn by halo3+0x2f329c. rd_blips reads the newest frame of user 0;
+// NHOOK_RADAR_LOG=1 logs it beside every enemy's true position in the walker's frame every 2 s (to fit x / y -> world: scale,
+// rotation) -- until that is fitted, rd_contact (halo3's rules from the traits) decides.
+typedef struct { float x, y, z; uint8_t type, size, color, pad; } RdBlip;
+static int rd_blips(RdBlip* out, int max, float* range, int* frame) {
+    uint64_t blk = tls_block(), chud = 0; if (!blk || !hb_read(blk + 0xF0, &chud, 8) || !chud) return -1;
+    static uint8_t b[0xcc0]; if (!hb_read(chud + 0x244, b, sizeof b)) return -1;
+    int cur = *(const int32_t*)(b + 0xcb4); if (cur < 0) return -1; cur %= 10; *frame = cur; *range = *(const float*)(b + 0xcbc);
+    const uint8_t* f = b + 0xf0 + cur * 0x104; int n = *(const int32_t*)f; if (n < 0 || n > 16) return -1; if (n > max) n = max;
+    for (int i = 0; i < n; i++) { const uint8_t* q = f + 4 + i * 16; memcpy(&out[i].x, q, 12); out[i].type = q[0xc]; out[i].size = q[0xd]; out[i].color = q[0xe]; }
+    return n; }
+static void rd_log(double now, const NovObj* objs, int n, int me) {
+    static int on = -1; if (on < 0) on = getenv("NHOOK_RADAR_LOG") != 0; if (!on) return; static double tl; if (now - tl < 2.0) return; tl = now;
+    RdBlip bl[16]; float rng = 0; int fr = -1, nb = rd_blips(bl, 16, &rng, &fr); const NovObj* o = &objs[me]; char line[1600]; int k = 0;
+    float fx = 0, fy = 0; { float c[3], f[3]; if (nov_observer(c, f)) { fx = f[0]; fy = f[1]; } } float fl = sqrtf(fx * fx + fy * fy); if (fl > 1e-3f) { fx /= fl; fy /= fl; }
+    k += snprintf(line + k, sizeof line - (size_t)k, "[nhook] [radar] frame %d range %.2f u, %d blips:", fr, rng, nb);
+    for (int i = 0; i < nb && k < 1200; i++) k += snprintf(line + k, sizeof line - (size_t)k, " (%.3f %.3f %.3f t%d s%d c%d)", bl[i].x, bl[i].y, bl[i].z, bl[i].type, bl[i].size, bl[i].color);
+    k += snprintf(line + k, sizeof line - (size_t)k, " | enemies (fwd, left, units):");
+    for (int i = 0; i < n && k < 1550; i++) { const NovObj* t = &objs[i]; if (t->type || t->dead || i == me || !bot_enemy(o, t)) continue; float dx = t->c[0] - o->c[0], dy = t->c[1] - o->c[1];
+        if (dx * dx + dy * dy > 30 * 30) continue; float sp = sqrtf(t->vel[0] * t->vel[0] + t->vel[1] * t->vel[1]);
+        k += snprintf(line + k, sizeof line - (size_t)k, " (%.1f %.1f v%.1f)", dx * fx + dy * fy, -dx * fy + dy * fx, sp); }
+    nlog("%s", line); }
 typedef struct { uint32_t h; float pos[3]; double t; int radar; } GlSeen;
 static GlSeen g_gls[64]; static int g_ngls;
 static void gl_note(uint32_t h, const float* p, double now, int radar) {
@@ -124,6 +151,7 @@ static void gl_pick(double now, const NovObj* objs, int n, int me) {
 // every walker tick (alive, on foot): memory, deaths, the goal; returns 1 when a goal is set (g_gl.pos)
 static int gl_tick(double now, const NovObj* objs, int n, int me, int (*vis_of)(uint32_t, double)) {
     const NovObj* o = &objs[me]; g_bot_unit = o->handle;
+    rd_log(now, objs, n, me);   // (NHOOK_RADAR_LOG: the engine's tracker beside the truth)
     for (int i = 0; i < n; i++) { const NovObj* t = &objs[i]; if (t->type || t->dead || i == me || !bot_enemy(o, t)) continue;
         int rd = rd_contact(o, t), vs = vis_of(t->handle, now) == 1; if (rd || vs) gl_note(t->handle, t->c, now, !vs); }
     if (!g_gl.kind) gl_pick(now, objs, n, me);

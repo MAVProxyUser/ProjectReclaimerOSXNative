@@ -2891,6 +2891,12 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
 - **No lanes from our local test server** (2026-11-08 13:00; nlanes.c ln_here) — WHY: the user's own client (the real profile)
   joined the walkers once and wore 3.9 km of walker moves into Guardian's real lanes. LOGIC: lanes are not recorded in a game on
   a 127.x server (NHOOK_LANES_LOCAL=1 = they are); guardian.lanes rebuilt from its 5 recordings (98.5 km).
+- **The engine's motion tracker found** (2026-11-08 13:05; native-client.md "The motion tracker", nbot_goals.c rd_blips /
+  rd_log) — WHY: the user: the walkers should "simply look at the radar's literal output, and check near players not every
+  player". No string names it; found from the radar traits (player +0x214 / +0x216 reads) -> the "tracker shown" check
+  halo3+0x2d349c -> its caller, the HUD draw, which passes the tracker state (S = [TLS +0xF0] + user * 0x28c8 + 0x244: range,
+  10 history frames of up to 16 blips) to its draw. LOGIC: rd_blips reads user 0's newest frame; NHOOK_RADAR_LOG=1 logs it beside
+  the truth to fit the sensor plane to the world; the walker keeps halo3's rules (rd_contact) until then.
 
 ## 19. Performance
 
