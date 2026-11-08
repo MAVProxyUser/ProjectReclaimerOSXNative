@@ -116,7 +116,10 @@ static void gl_pick(double now, const NovObj* objs, int n, int me) {
     #define GL_ADD(K, P, WHO, W, ...) do { if (nc < 96 && (W) > 0) { c[nc].kind = K; memcpy(c[nc].pos, P, 12); c[nc].who = WHO; c[nc].w = (W) * fmaxf(0.15f, 1.0f - 0.6f * gl_zone(P)); snprintf(c[nc].what, sizeof c[nc].what, __VA_ARGS__); nc++; } } while (0)
     // enemies: known positions (seen in the last 6 s, on radar now)
     for (int i = 0; i < n; i++) { const NovObj* t = &objs[i]; if (t->type || t->dead || i == me || !bot_enemy(o, t)) continue; const GlSeen* s = gl_seen(t->handle); if (!s || now - s->t > 6.0) continue;
-        float dx = s->pos[0] - o->c[0], dy = s->pos[1] - o->c[1], d = sqrtf(dx * dx + dy * dy); GL_ADD(GK_ENEMY, s->pos, t->handle, GL_W_ENEMY * expf(-d / 25.0f), "%08x %s", t->handle, s->radar ? "on radar" : "seen"); }
+        float dx = s->pos[0] - o->c[0], dy = s->pos[1] - o->c[1], d = sqrtf(dx * dx + dy * dy);
+        // with an overshield (defenders with one survive twice as often: engage-model behaviour.powerups) or camo: fights are worth more
+        float pw = (g_inv.os || g_inv.camo) ? 2.5f : 1.0f; if (t->shield > 1.05f && !g_inv.os) pw *= 0.5f;   // (an overshielded enemy: half)
+        GL_ADD(GK_ENEMY, s->pos, t->handle, pw * GL_W_ENEMY * expf(-d / 25.0f), "%08x %s%s", t->handle, s->radar ? "on radar" : "seen", pw > 1 ? " (powered up)" : ""); }
     // REVENGE: drawn once per respawn with the players' own odds (engage-model.json behaviour: their excess over chance) -- the most
     // recent death only; the killer's known position, else the death spot, or -- that death within 8 units of a power item's spawn
     // point -- a point 10..25 units out along a lane leaving the item, drawn by traffic (the killer took it and left the usual way)
@@ -133,7 +136,9 @@ static void gl_pick(double now, const NovObj* objs, int n, int me) {
     // POWER ITEMS: power-ups and power weapons lying at their spawn points (nspawns.c's live table), taken with the players' extra
     // heading-in share at that distance (per draw)
     { int bi2 = -1; float bd2 = 1e30f; for (int i = 0; i < HB_MAXOBJ; i++) { if (!g_wt[i].live || g_wt[i].state != 0) continue; int k = g_wt[i].kind;
-          if (!(k == 2 || (k == 0 && gl_power_tag(hb_tag_name(g_wt[i].def))))) continue; float dx = g_wt[i].cur[0] - o->c[0], dy = g_wt[i].cur[1] - o->c[1], d = dx * dx + dy * dy; if (d < bd2) { bd2 = d; bi2 = i; } }
+          if (!(k == 2 || (k == 0 && gl_power_tag(hb_tag_name(g_wt[i].def))))) continue;
+          if (k == 0 && g_inv.held_rank <= 3 && g_inv.other_rank <= 3) continue;   // (two power weapons in hand already)
+          if (k == 2 && (g_inv.os || g_inv.camo)) continue;   /* (a power-up running: use it, not another) */ float dx = g_wt[i].cur[0] - o->c[0], dy = g_wt[i].cur[1] - o->c[1], d = dx * dx + dy * dy; if (d < bd2) { bd2 = d; bi2 = i; } }
       if (bi2 >= 0) { float d = sqrtf(bd2), p = d < 10 ? g_eg.it_near : d < 20 ? g_eg.it_mid : d < 40 ? g_eg.it_far : 0; if (g_wt[bi2].kind == 2) p *= 1.5f;   // (power-ups: walkers can take them)
           if (bot_rand01() < p) { g_gl.kind = GK_ITEM; memcpy(g_gl.pos, g_wt[bi2].cur, 12); g_gl.who = 0; g_gl.t0 = now; g_gl.until = now + 8.0 + 8.0 * bot_rand01();
               snprintf(g_gl.what, sizeof g_gl.what, "%s", g_wt[bi2].kind == 2 ? "a power-up" : "a power weapon");

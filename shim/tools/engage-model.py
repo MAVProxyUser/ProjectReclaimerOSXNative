@@ -103,7 +103,7 @@ def multi_stats(R):
                            'sides_top': {k: r2(n / len(K), 3) for k, n in sd.most_common(8)}}
     return S
 
-def behaviour(R):
+def behaviour(R, Dz=None):
     """radar (contact records), revenge (respawn) and power items (item): the numbers the walkers' goal draw and radar turn use"""
     import statistics as stt
     B = {}
@@ -159,6 +159,15 @@ def behaviour(R):
                       'heading_in_20_40': share(20, 40, 1), 'baseline_20_40': share(20, 40, 2), 'heading_in_2_10': share(2, 10, 1), 'baseline_2_10': share(2, 10, 2),
                       'reached': r2(len(f) / len(I), 3), 'reached_s_median': r2(stt.median(f)) if f else None,
                       'first_was_nearest': r2(sum(bool(i['first_was_nearest']) for i in I if i['first_s'] is not None) / max(1, len(f)), 3)}
+    # power-ups in fights (2026-11-08; the user: "the walker should be aware of its own inventory, and power up status as well"):
+    # duels by who had an overshield (shield above 1) when the first shot went in -- the attacker's win share and closing speed
+    D = [r for r in (Dz if Dz is not None else R) if r.get('kind', 'duel') == 'duel' and not r['ctx']['a_veh'] and not r['ctx']['b_veh'] and r['out']['win'] in ('a', 'b')]
+    if D:
+        def grp(sel):
+            g = [r for r in D if sel(r['ctx']['a_sh'] > 1.05, r['ctx']['b_sh'] > 1.05)]; return (r2(sum(r['out']['win'] == 'a' for r in g) / len(g), 3) if g else None), len(g)
+        nn, n0 = grp(lambda a, b: not a and not b); wv, n1 = grp(lambda a, b: b and not a); ww, n2 = grp(lambda a, b: a and not b)
+        B['powerups'] = {'attacker_wins_normal': nn, 'duels_normal': n0, 'attacker_wins_vs_overshield': wv, 'duels_vs_overshield': n1,
+                         'attacker_wins_with_overshield': ww, 'duels_with_overshield': n2}
     return B
 
 def weapon_stats(R, D):
@@ -317,7 +326,7 @@ def make_model(Rs, Ds):
              'grenades': st.get('grenades', {}), 'library': library(Ds, random.Random(11))}
     mm = multi_stats(Rs)
     model['target'] = (mm.get('target_choice') or {}).get('weights'); model['multi'] = {k: v for k, v in mm.items() if k != 'target_choice'}
-    model['behaviour'] = behaviour(Rs); model['weapons'] = weapon_stats(Rs, Ds)
+    model['behaviour'] = behaviour(Rs, Ds); model['weapons'] = weapon_stats(Rs, Ds)
     return model
 # Halo 3's multiplayer maps: internal name -> the name servers list (the observer's pick and the tome use it)
 H3MAPS = {'armory': "Rat's Nest", 'bunkerworld': 'Standoff', 'chill': 'Narrows', 'chillout': 'Cold Storage', 'construct': 'Construct', 'cyberdyne': 'The Pit',
@@ -353,10 +362,10 @@ def main():
         sub = [e for e in D if e['class'] == c]
         if sub: rep['by_class'][c] = stats(sub)
         msub = [r for r in R if r.get('kind', 'duel') != 'duel' and r['class'] == c]
-        if msub: rep['by_class'].setdefault(c, {})['multi'] = multi_stats(msub); rep['by_class'][c]['behaviour'] = behaviour(msub); rep['by_class'][c]['weapons'] = weapon_stats(msub, sub)
+        if msub: rep['by_class'].setdefault(c, {})['multi'] = multi_stats(msub); rep['by_class'][c]['behaviour'] = behaviour(msub, sub); rep['by_class'][c]['weapons'] = weapon_stats(msub, sub)
     rep['all_but_infection'] = stats([e for e in D if e['class'] != 'infection'])
     rep['all_but_infection']['multi'] = multi_stats([r for r in R if r.get('kind', 'duel') != 'duel' and r['class'] != 'infection'])
-    rep['all_but_infection']['behaviour'] = behaviour([r for r in R if r.get('kind', 'duel') != 'duel' and r['class'] != 'infection'])
+    rep['all_but_infection']['behaviour'] = behaviour([r for r in R if r.get('kind', 'duel') != 'duel' and r['class'] != 'infection'], [e for e in D if e['class'] != 'infection'])
     rep['all_but_infection']['weapons'] = weapon_stats([r for r in R if r.get('kind', 'duel') != 'duel' and r['class'] != 'infection'], [e for e in D if e['class'] != 'infection'])
     M = [e for e in D if e['class'] in MODEL_CLASSES]
     model = make_model([r for r in R if r.get('kind', 'duel') != 'duel' and r['class'] in MODEL_CLASSES], M)

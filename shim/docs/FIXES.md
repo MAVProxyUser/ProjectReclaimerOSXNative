@@ -2999,6 +2999,41 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   coach -> next battle; `round <tracks> <samples>` coaches one battle (--dry: no change), `show` prints the knobs and rounds.
   Per round: K/D, duels won, shot first and the distance to the winners (coach.py's gap averaged; 0 = their numbers) per walker in
   ReclaimerMac/battles/coach/state.json. New knobs default to the old behaviour (1, 1, 0, 1).
+- **The walker knows its inventory and power-ups** (2026-11-08 16:30; nbot.c bot_inv, nbot_engage.c, nbot_goals.c, engage-model.py
+  behaviour.powerups) — WHY: the user: "the walker should be aware of its own inventory, and power up status as well". LOGIC: every
+  tick bot_inv reads the walker's own unit: the held and the other weapon (class + rank), grenades by type, an overshield (shield
+  above 1.05) and active camo (+0x360 above 0.05); `[inv]` log lines on a change. The fighter: switches weapons (vpad Y, 0.15 s, 3 s
+  apart) when the target is 30%+ outside the held weapon's players' band and well inside the other's; throws only with a grenade in
+  hand; under camo holds fire beyond the band's near edge + 2 units unless hit in the last 2 s and walks in; reloads after a fight in
+  which it fired (vpad RB tapped 0.4-1.0 s after; no ammo count is read yet); picks up on the vpad too (RB held 0.6 s,
+  NHOOK_BOT_PICKPAD = another button). Target choice: an overshielded enemy costs half the players' logit (attackers win 54% against
+  one vs 77%, behaviour.powerups, 35 duels) unless the walker has one; a camo'd enemy is not seen in view beyond 8 units (radar,
+  attacks and close range still tell). Goal draw: fights weigh x2.5 with an overshield / camo (defenders with an overshield survive
+  twice as often), an overshielded enemy half; no power-weapon goals with two power weapons in hand, no power-up goals with one
+  running. NHOOK_BOT_NOINV=1 = blind to it (the old walker). behaviour(R, D) now gets the duels (it got none: powerups was empty).
+- **Recordings carry camo and the second weapon** (2026-11-08 16:35; match-recorder.py, ntracks.c, nstats.c) — WHY: the walker's
+  inventory logic should be learnt from players, and camo was never recorded. LOGIC: two columns more per player sample: 17 = the
+  active camo amount, 18 = the other weapon carried ('' none; the stats page's weapons list minus the one in hand). Old readers
+  index up to 16 and are unchanged.
+- **One game against what we assumed** (2026-11-08 16:45; shim/tools/game-review.py) — WHY: the user: "coaching yourself based on
+  the dataset you JUST collected for that game vs the assumptions you made about the map, and the larger aggregated data". LOGIC:
+  for one cut recording, the same measures over the game, over the map's earlier matches (same class) and over every earlier
+  match of that class: first-shot wins, caught looking away, high / low ground, wins and distance per weapon class, radar turns,
+  dying outnumbered, help, items, back to the death spot, kills a minute, the winners' K/D line, kills a held-minute per weapon and
+  coach.py's fight measures; a SURPRISE vs the map = shares 2+ standard errors of a game this size, other numbers 30%+ (15+ cases).
+  tracks/reviews/<recording>.json (+ team_game); the work board's Walkers tab shows the latest.
+- **The learn loop** (2026-11-08 16:50; shim/tools/learn-loop.py, observe-public.sh OBS_RANDOM, walker-coach.py --game-file /
+  --ded-map) — WHY: the user: "start randomly joining and completing games ... in order to instruct the walker how to play the game
+  in question. iterate with the goal of better vs human scoring". LOGIC: a turn = observe-public.sh with OBS_MATCHES=1 OBS_RANDOM=1
+  (the server DRAWN with weights exp(score / 8) instead of the best score; no Infection / mods / downloads) -> engage-extract ->
+  game-review -> engage-model (aggregate, per map, tome) -> on a stock map, walker-coach.py loop on that map (the server gets the
+  display name: riverworld -> Valhalla; team games and CTF as Team Slayer 2v2, the walkers have no flag play) against THIS game's
+  winners (top quarter of 8+ players, weight 2) blended with the map's / class's winners (weight 1) -> tracks/learn-loop.json. The
+  observer only watches: walkers stay on our own server (bot_allowed); "better vs human scoring" = the walkers' distance to the human
+  winners going down. walker-coach.py --dry no longer saves its round.
+- **Work board: Walkers tab** (2026-11-08 16:55; workboard.py #walkers) — the latest game review (this game / the map / everything,
+  surprises), the learn loop's turns, each walker's knobs and its coached rounds (distance to the winners, K/D, duels won); new job
+  kinds learn-loop / walker-coach / game-review / coach.
 
 ## 19. Performance
 

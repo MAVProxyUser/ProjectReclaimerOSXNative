@@ -37,7 +37,8 @@ def tasks_cmd():
 KINDS = [('observe-public.sh', 'Observer (public games)'), ('match-recorder.py', 'Match recorder'), ('walker-battle.sh', 'Walker battle'),
          ('walker-train.py', 'Walker training'), ('native-firefight.sh', 'Firefight run'), ('engage-extract.py', 'Engagement extraction'),
          ('engage-model.py', 'Engagement model'), ('lanes-import.py', 'Lanes import'), ('engage-compare.py', 'Walkers vs players'), ('learnings.py', 'Learnings'),
-         ('refresh: new recordings', 'Learning refresh (every 20 min)')]
+         ('refresh: new recordings', 'Learning refresh (every 20 min)'), ('learn-loop.py', 'Learn loop (a public game, then coached walkers)'),
+         ('walker-coach.py', 'Walker self-coaching'), ('game-review.py', 'Game review'), ('coach.py', 'Coach (you vs the winners)')]
 def procs():
     try: out = subprocess.run(['ps', '-axo', 'pid,etime,command'], capture_output=True, text=True, timeout=5).stdout.splitlines()[1:]
     except Exception: return [], []
@@ -102,7 +103,18 @@ def status():
     except Exception: learn = None
     try: coach = json.load(open(os.path.join(TR, 'coach.json')))
     except Exception: coach = None
-    return {'now': time.time(), 'jobs': jobs, 'apps': apps, 'direction': direction, 'tome': tome_load(), 'per_map_models': per_map, 'learnings': learn, 'coach': coach, 'observer_log': tail(obs[0], 8) if obs else [], 'recorder': tail(rec[0], 4) if rec else [],
+    rv = sorted(glob.glob(os.path.join(TR, 'reviews', '*.json')), key=os.path.getmtime)
+    try: review = json.load(open(rv[-1])) if rv else None
+    except Exception: review = None
+    try: ll = json.load(open(os.path.join(TR, 'learn-loop.json'))); ll = {'updated': ll.get('updated'), 'turns': ll.get('turns', [])[-12:]}
+    except Exception: ll = None
+    try:
+        cs = json.load(open(os.path.join(SUP, 'battles', 'coach', 'state.json')))
+        wc = {'knobs': cs.get('knobs', {}), 'rounds': [{'t': r['t'], 'label': r.get('label'), 'map': r.get('map'), 'class': r.get('class'), 'winners': r.get('winners'),
+              'walkers': {w: {'likeness': v.get('likeness'), 'kd': v.get('kd'), 'duels_won': v.get('duels_won'), 'duels': v.get('duels'), 'changes': v.get('changes')} for w, v in r.get('walkers', {}).items()}}
+              for r in cs.get('rounds', [])[-16:]]}
+    except Exception: wc = None
+    return {'review': review, 'learnloop': ll, 'wcoach': wc, 'now': time.time(), 'jobs': jobs, 'apps': apps, 'direction': direction, 'tome': tome_load(), 'per_map_models': per_map, 'learnings': learn, 'coach': coach, 'observer_log': tail(obs[0], 8) if obs else [], 'recorder': tail(rec[0], 4) if rec else [],
             'live': live, 'totals': totals(), 'tasks': tasks_load()}
 
 PAGE = r'''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Work board</title>
@@ -119,10 +131,14 @@ h1{font-size:20px;margin:0 0 4px}h2{font-size:13px;letter-spacing:.08em;text-tra
 .li .n{color:var(--dim);font-size:11px;margin-left:4px}.li.weak{opacity:.55}
 #tabs{display:inline-flex;gap:4px;margin-left:12px;vertical-align:middle}#tabs a{font-size:13px;font-weight:500;color:var(--dim);text-decoration:none;padding:3px 10px;border:1px solid var(--line);border-radius:4px}
 #tabs a.on{color:var(--fg);border-color:var(--acc)}#tabs a:hover{color:var(--fg)}</style></head><body>
-<h1>Work board <nav id="tabs"><a href="#" data-v="work">Work</a><a href="#learnings" data-v="learnings">Learnings</a><a href="#you" data-v="you">You</a></nav> <span class="k" id="upd"></span></h1>
+<h1>Work board <nav id="tabs"><a href="#" data-v="work">Work</a><a href="#learnings" data-v="learnings">Learnings</a><a href="#you" data-v="you">You</a><a href="#walkers" data-v="walkers">Walkers</a></nav> <span class="k" id="upd"></span></h1>
 <div class="k">What is running on this Mac for Reclaimer, what is being worked on, and what the game is learning from real players. Refreshes every 3 s.</div><br>
 <div id="learnview" hidden><div class="p"><h2>What the game is learning <span class="k" id="lrsrc"></span></h2><div class="k" style="margin-bottom:8px">Plain-language findings from every recorded public match (Infection left out of the fighting findings), each with the number of cases it rests on; thin ones (under 30 cases) are dimmed. Rebuilt every 20 minutes while sampling runs.</div><div id="lrn" class="lgrid"></div></div></div>
 <div id="youview" hidden><div class="p"><h2>You vs the winners <span class="k" id="ysrc"></span></h2><div class="k" style="margin-bottom:8px">Your public matches (played through our launcher: the recorder marks your slot) next to the WINNERS -- the top quarter of players by K/D in non-Infection matches -- and everyone, measure by measure; the biggest gaps first, each with what the winners do differently. shim/tools/coach.py.</div><div id="you"></div></div></div>
+<div id="walkview" hidden>
+<div class="p" style="margin-bottom:14px"><h2>The last public game vs what we assumed <span class="k" id="rvsrc"></span></h2><div class="k" style="margin-bottom:8px">One whole public match (watched, never played by a walker) measured like the map's earlier matches and like everything; a SURPRISE = this game is off the map's number by more than a game this size explains (shares: 2+ standard errors; other numbers: 30%+ with 15+ cases). The per-map model takes the game in right after.</div><div id="rv" style="overflow-x:auto"></div></div>
+<div class="grid"><div class="p"><h2>Learn loop</h2><div class="k" style="margin-bottom:6px">Each turn: a random public game observed whole -> reviewed -> models refit -> walkers coached on that map against that game's winners. Distance to the winners: 0 = their numbers (lower is better).</div><div id="ll"></div></div>
+<div class="p"><h2>Walker self-coaching <span class="k">(battles/coach/state.json)</span></h2><div id="wk"></div><div id="wr" style="margin-top:8px"></div></div></div></div>
 <div id="workview">
 <div class="p" id="dirp" style="margin-bottom:14px"><h2>Direction</h2><div id="dir"></div></div>
 <div class="grid"><div class="p"><h2>Running now</h2><div id="jobs"></div></div><div class="p"><h2>Game instances</h2><div id="apps"></div><div id="live"></div></div>
@@ -158,10 +174,19 @@ async function tick(){try{const j=await (await fetch('/status.json')).json();
    document.getElementById('you').innerHTML=`<table style="border-collapse:collapse;width:100%;font-size:13px"><tr><th style="text-align:left">measure</th><th>you</th><th>winners</th><th>everyone</th><th style="text-align:left">verdict</th></tr>`+
     C.rows.map(r=>`<tr style="border-top:1px solid var(--line)${r.thin?';opacity:.55':''}"><td>${E(r.measure)}</td><td style="text-align:center"><b>${E(r.you)}</b></td><td style="text-align:center">${E(r.winners)}</td><td style="text-align:center" class="k">${E(r.everyone)}</td><td style="color:${r.advice?'var(--go)':'var(--ok)'}">${E(r.verdict)}${r.thin?' <span class="k">(thin)</span>':''}${r.advice?`<div class="k">-> ${E(r.advice)}</div>`:''}</td></tr>`).join('')+'</table>'; }
  else document.getElementById('you').innerHTML=`<div class="none">${E((C&&C.note)||'no report yet (shim/tools/coach.py)')}</div>`;
+ const R=j.review, pf=(v,sh)=>v==null?'-':sh?Math.round(v*100)+'%':(+v).toFixed(2);
+ if(R&&R.rows){ document.getElementById('rvsrc').textContent=`· ${R.map} ${R.class}${R.team_game?' (teams)':''}, ${R.mode||''}, ${R.players} players, ${R.minutes} min · the map before it: ${R.games_on_map_before} game(s) · ${ago(R.updated)}`;
+   document.getElementById('rv').innerHTML=`<table style="border-collapse:collapse;width:100%;font-size:12.5px"><tr><th style="text-align:left">measure</th><th>this game</th><th>the map before</th><th>everything</th><th style="text-align:left">surprise</th></tr>`+
+    R.rows.map(r=>{const s=r.surprise_vs_map; return `<tr style="border-top:1px solid var(--line)"><td>${E(r.measure)}</td><td style="text-align:center"><b>${pf(r.game,r.share)}</b> <span class="k">${r.game_n}</span></td><td style="text-align:center">${pf(r.map,r.share)} <span class="k">${r.map_n}</span></td><td style="text-align:center" class="k">${pf(r.all,r.share)} ${r.all_n}</td><td style="color:var(--go)">${s==null?'':(r.share?(s>0?'+':'')+s+' SE':(s>0?'+':'')+Math.round(s*100)+'%')}</td></tr>`}).join('')+'</table>'; }
+ else document.getElementById('rv').innerHTML='<div class="none">no game reviewed yet (shim/tools/game-review.py)</div>';
+ const LL=j.learnloop; document.getElementById('ll').innerHTML=LL&&LL.turns&&LL.turns.length?LL.turns.slice().reverse().map(t=>`<div class="row"><b>${E(t.map)}</b><span class="k">${E(t.class)} · ${t.players} players · ${ago(t.t)}</span><span class="k">${(t.surprises||[]).length} surprise(s)${Array.isArray(t.battle)?' · '+t.battle.map(b=>Object.entries(b.walkers).map(([w,v])=>'w'+w+' '+(v.likeness??'-')).join(' ')).join(' | '):t.battle?' · '+E(t.battle):''}</span></div>`).join(''):'<div class="none">not started yet (shim/tools/learn-loop.py runs after Firefight)</div>';
+ const W=j.wcoach; if(W){ const ks=Object.entries(W.knobs||{}); document.getElementById('wk').innerHTML=ks.length?ks.map(([w,k])=>`<div class="row"><b>walker ${E(w)}</b><span class="k">${Object.entries(k).map(([n,v])=>n.toLowerCase()+' '+(+v).toFixed(2)).join(' · ')}</span></div>`).join(''):'<div class="none">all knobs at their defaults</div>';
+   document.getElementById('wr').innerHTML=(W.rounds||[]).slice().reverse().map(r=>`<div class="row"><span class="k">${ago(r.t)}</span><b>${E(r.map)}</b><span class="k">${Object.entries(r.walkers).map(([w,v])=>'w'+w+': dist '+(v.likeness??'-')+', K/D '+(v.kd??'-')+', duels won '+(v.duels_won==null?'-':Math.round(v.duels_won*100)+'%')).join(' · ')}</span></div>`).join('')||'<div class="none">no coached battle yet</div>'; }
+ else document.getElementById('wk').innerHTML='<div class="none">no coached battle yet (shim/tools/walker-coach.py)</div>';
  document.getElementById('obs').textContent=(j.observer_log||[]).join('\n')||'(no observer log)'; document.getElementById('rec').textContent=(j.recorder||[]).join('\n');
 }catch(e){document.getElementById('upd').textContent='· not answering'} setTimeout(tick,3000)}
-function showView(){ const v=location.hash==='#learnings'?'learnings':location.hash==='#you'?'you':'work';
-  document.getElementById('learnview').hidden=v!=='learnings'; document.getElementById('youview').hidden=v!=='you'; document.getElementById('workview').hidden=v!=='work';
+function showView(){ const v=location.hash==='#learnings'?'learnings':location.hash==='#you'?'you':location.hash==='#walkers'?'walkers':'work';
+  document.getElementById('walkview').hidden=v!=='walkers'; document.getElementById('learnview').hidden=v!=='learnings'; document.getElementById('youview').hidden=v!=='you'; document.getElementById('workview').hidden=v!=='work';
   for(const a of document.querySelectorAll('#tabs a')) a.classList.toggle('on',a.dataset.v===v); }
 window.addEventListener('hashchange',showView); showView();
 tick();</script></body></html>'''

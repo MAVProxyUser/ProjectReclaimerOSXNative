@@ -103,7 +103,7 @@ static void bot_los_do(uint64_t* ctx) {
     if (hit) { const float* h = (const float*)(res + 0x08); float dx = h[0] - P[0], dy = h[1] - P[1], dz = h[2] - P[2]; d = sqrtf(dx * dx + dy * dy + dz * dz); }
     g_los_res = !hit || d > L - 0.5f; g_los_res_tgt = g_los_tgt; g_los_t = mono_s(); g_los_done = q; }
 typedef struct { float x, y, w; } GlLane; static GlLane* g_gll; static int g_ngll; static float g_gll_wsum;   // the lanes as goal material (nbot_goals.c)
-static double g_fjump_until;   // (a jump in a fight: NHOOK_BOT_FJUMP)
+static double g_fjump_until; static int g_bot_camo_hold;   // (a jump in a fight: NHOOK_BOT_FJUMP)
 static int bot_fcmp(const void* a, const void* b) { float x = *(const float*)a, y = *(const float*)b; return x < y ? -1 : x > y; }
 // the model's heat for this map -> g_nav.pop (how much real players use each floor node: A* prefers their lanes); once per map
 static void bm_pop(const char* map) {
@@ -200,6 +200,9 @@ static int bot_enemy(const NovObj* me, const NovObj* t) {   // the overlay's fri
 static float bot_wrap(float a) { while (a > 3.14159265f) a -= 6.2831853f; while (a < -3.14159265f) a += 6.2831853f; return a; }
 
 static void bot_nav_json(StBuf* s) { nav_json(s); }   // the snapshot's "nav" (the page draws the walker's path and goal)
+// the walker's own inventory and power-ups (bot_inv below; the goal draw reads it)
+typedef struct { const char* held; const char* other; const char* held_c; const char* other_c; int held_rank, other_rank, has_other, gren, frag, plasma, os, camo; } BotInv;
+static BotInv g_inv;
 #include "nbot_engage.c"   // the fighter's tactics from the players' fights (engage-model.json: awareness, target choice, movement)
 #include "nbot_goals.c"    // radar, memory, own deaths, and where to go (the goal draw)
 
@@ -222,6 +225,20 @@ static void bot_idle(const char* why) {   // NHOOK_SPAR_LOG: why the aim / walke
 // and the power weapons); a weapon not listed ranks below all of these
 static int bot_wpn_rank(const char* n) { static const char* const pref[] = {"rocket_launcher", "spartan_laser", "sniper_rifle", "beam_rifle", "battle_rifle", "covenant_carbine",
     "shotgun", "energy_sword", "gravity_hammer", "brute_shot", "assault_rifle", 0}; if (!n) return 99; for (int i = 0; pref[i]; i++) if (strstr(n, pref[i])) return i; return 50; }
+// ---- the walker's own inventory and power-ups (2026-11-08; the user: "the walker should be aware of its own inventory, and power up
+// status as well"): the held and the other weapon (class + rank), grenades by type, an overshield (shield above 1), active camo
+// (+0x360 above 0.05). The fighter switches to the other weapon when the target's distance is outside the held one's band and
+// inside the other's (vpad Y), throws only with a grenade in hand, holds fire under camo until close; the goal draw skips power
+// weapons with one in hand and goes for fights with an overshield / camo.
+static void bot_inv(const NovObj* o, BotInv* v) {
+    memset(v, 0, sizeof *v); v->held_c = v->other_c = "none"; v->held_rank = v->other_rank = 99;
+    for (int q = 0; q < 4; q++) { uint64_t wd = nov_datum(o->weapons[q]); uint32_t df = 0; if (!wd || !hb_read(wd, &df, 4)) continue; const char* nm = hb_tag_name(df);
+        if (q == o->wslot) { v->held = nm; v->held_c = eg_wcls(nm); v->held_rank = bot_wpn_rank(nm); }
+        else if (!v->has_other) { v->other = nm; v->other_c = eg_wcls(nm); v->other_rank = bot_wpn_rank(nm); v->has_other = 1; } }
+    v->frag = o->gren[0]; v->plasma = o->gren[1]; for (int k = 0; k < 4; k++) if (o->gren[k] > 0) v->gren += o->gren[k];
+    v->os = o->shield > 1.05f; v->camo = o->camo > 0.05f; }
+static float bot_band_off(const char* cls, float d, float kd) {   // 0 inside the players' band for this weapon class, else how far outside (relative); -1 no band
+    float a, b; if (!eg_band(cls, &a, &b)) return -1; a *= kd; b *= kd; return d < a ? (a - d) / a : d > b ? (d - b) / b : 0; }
 static void bot_step_body(void);
 static void bot_step(void) { g_pad_written = 0; bot_step_body(); if (g_vpad_on && !g_pad_written) nh_vpad_set(0, 0, 0, 0, 0, 0, 0); }   // (idle: the pad let go)
 static void bot_step_body(void) {
@@ -242,6 +259,10 @@ static void bot_step_body(void) {
     if (me < 0 || objs[me].dead || objs[me].seat >= 0) { g_bot_out = 0; g_nav_act = 0; plen = 0; g_bot_err = -1;   // dead, respawning or in a vehicle
         static char w[96]; snprintf(w, sizeof w, me < 0 ? "the record's unit %08x is none of the %d units seen" : objs[me].dead ? "dead" : "in a vehicle", meh, n); bot_idle(me < 0 ? w : objs[me].dead ? "dead" : "in a vehicle"); return; }
     const NovObj* o = &objs[me]; int out = 0; float yaw = yaw0, pitch = pitch0;
+    { static int noinv = -1; if (noinv < 0) noinv = getenv("NHOOK_BOT_NOINV") != 0; if (!noinv) bot_inv(o, &g_inv); else memset(&g_inv, 0, sizeof g_inv);   // (NHOOK_BOT_NOINV=1: blind to it, the old walker)
+      if (bot_log()) { static BotInv last; static double tl; if (now - tl > 5.0 || last.held != g_inv.held || last.os != g_inv.os || last.camo != g_inv.camo || last.gren != g_inv.gren) { tl = now; last = g_inv;
+          nlog("[nhook] [inv] holding %s (%s), other %s (%s); grenades %d (frag %d, plasma %d)%s%s", g_inv.held ? g_inv.held : "-", g_inv.held_c, g_inv.other ? g_inv.other : "-", g_inv.other_c,
+               g_inv.gren, g_inv.frag, g_inv.plasma, g_inv.os ? ", OVERSHIELD" : "", g_inv.camo ? ", CAMO" : ""); } } }
     NovObj ftg; int have_tg = 0; float tdist = 0, tyaw = 0, tpitch = 0;   // the spar target (the fighter's too) and the exact angles to it
     // the sparring aim: the nearest live enemy's head (the top of its bounding sphere's core, as the loader aimed), from the camera
     if (spar) {
@@ -320,6 +341,16 @@ static void bot_step_body(void) {
             yaw = yaw0 + (dy > mx ? mx : dy < -mx ? -mx : dy); pitch = pitch0 + (dp > mx ? mx : dp < -mx ? -mx : dp); out |= 1;
             float ey = bot_wrap(tyaw - yaw0), ep = tpitch - pitch0, err = sqrtf(ey * ey + ep * ep) * 57.2958f, size = atanf(0.4f / (tdist > 0.5f ? tdist : 0.5f)) * 57.2958f;
             g_bot_err = err; g_bot_fire = vis && now - tacq > react && err < (size > 1.2f ? size : 1.2f) + fextra && tdist < 40;
+            { static float mv = -1; static double thurt; float v2 = o->shield + o->health; if (mv >= 0 && v2 < mv - 0.02f) thurt = now; mv = v2;
+              // under active camo: no shot beyond the near edge of the weapon's band (+2 units) unless we were hit in the last 2 s --
+              // firing gives camo away; walk in instead (below)
+              float a = 0, b = 0; if (g_inv.camo && now - thurt > 2.0 && eg_band(g_inv.held_c, &a, &b) && tdist > a * kdist + 2.0f) { g_bot_fire = 0; g_bot_camo_hold = 1; } else g_bot_camo_hold = 0; }
+            // the other weapon when the target is outside the held one's band and well inside the other's (vpad Y held 0.15 s,
+            // 3 s between switches; not in the first 0.3 s of a target)
+            { static double tsw; if (g_vpad_on && g_inv.has_other && now - tsw > 3.0 && now - tacq > 0.3) {
+                  float oh = bot_band_off(g_inv.held_c, tdist, kdist), oo = bot_band_off(g_inv.other_c, tdist, kdist);
+                  if (oh > 0.3f && oo >= 0 && oo < oh * 0.5f) { tsw = now; if (bot_log()) nlog("[nhook] [inv] switching to %s (%s) for %.1f units (the %s band is %.0f%% off)", g_inv.other, g_inv.other_c, tdist, g_inv.held_c, oh * 100); } }
+              if (now - tsw < 0.15) fbtn |= 8; }
             if (tdist < 1.8f && now - tmelee > 0.7) { tmelee = now; fbtn |= 2; }                                            // B: melee
             { static float fj = -1; if (fj < 0) { const char* e = getenv("NHOOK_BOT_FJUMP"); fj = e ? strtof(e, 0) : 0.0f; }   // jumps a minute in a fight (walker-coach.py: the winners')
               if (fj > 0 && bot_rand01() < fj * (float)dt / 60.0f) g_fjump_until = now + 0.25; }
@@ -328,7 +359,7 @@ static void bot_step_body(void) {
               // the next throw's time is drawn ONCE per throw (it was drawn every tick, so the shortest draw won: throws came early)
               static float gx = -1; if (gx < 0) { const char* e = getenv("NHOOK_BOT_GRENX"); gx = e ? strtof(e, 0) : 1.0f; }   // (walker-coach.py: x the time between grenades)
               if (!gnext) gnext = now + gx * (pl && !gset ? g_eg.gren_every * (0.5f + bot_rand01()) : gren + 6 * bot_rand01());
-              if ((pl || gren > 0) && tdist > gd0 && tdist < gd1 && vis && now > gnext && now - tacq > react) { tgren = now;
+              if ((pl || gren > 0) && (g_inv.gren > 0 || !g_inv.held) && tdist > gd0 && tdist < gd1 && vis && now > gnext && now - tacq > react) { tgren = now;
                   gnext = now + gx * (pl && !gset ? g_eg.gren_every * (0.5f + bot_rand01()) : gren + 6 * bot_rand01()); } }
             if (now - tgren < 0.15) fbtn |= 0x10000;                                                                       // (left trigger: a grenade)
             if (tdist < 30) { engaged = 1;
@@ -339,6 +370,7 @@ static void bot_step_body(void) {
                 if (g_eg.on) { uint64_t wd = (o->wslot >= 0 && o->wslot < 4) ? nov_datum(o->weapons[o->wslot]) : 0; uint32_t wdef = 0;
                     if (wd && hb_read(wd, &wdef, 4)) wc = eg_wcls(hb_tag_name(wdef)); float a2, b2; if (eg_band(wc, &a2, &b2)) { p25 = a2; p75 = b2; } }
                 float r = tdist > p75 * kdist ? 0.9f : tdist < p25 * kdist ? -backoff - 0.2f : press; if (o->shield < retreat && o->shield >= 0) r = -backoff;
+                if (g_bot_camo_hold) r = 0.9f;   // (camo: walk in to the near edge of the band before the first shot)
                 if (now > tswitch) { side = -side; tswitch = now + g_bm.strafe_switch * kswitch * (0.6f + 0.8f * bot_rand01()); }
                 float lat = side * fminf(1.0f, kstrafe * (0.25f + g_bm.strafe_rms / run));
                 if (g_eg.on && eg_move(wc, tdist, now, &el, &er)) {   // a real player's moves: across as recorded, toward / away pulled into the band
@@ -348,7 +380,8 @@ static void bot_step_body(void) {
                     // on Guardian (engage-compare.py; the push-back made the walkers hover at the band's near edge)
                     static float rsc = -1; if (rsc < 0) { const char* e = getenv("NHOOK_BOT_RADSCALE"); rsc = e ? strtof(e, 0) : 1.0f; }   // (walker-coach.py: x the replayed closing / backing off)
                     float pull = tdist > p75 * kdist ? 0.6f : 0.0f; r = fmaxf(-1.0f, fminf(1.0f, rsc * er / run + pull));
-                    if (o->shield < retreat && o->shield >= 0) r = -backoff; }
+                    if (o->shield < retreat && o->shield >= 0) r = -backoff;
+                    if (g_bot_camo_hold) r = 0.9f; }
                 // never off the floor: test where this step leads (1 unit along the move); flip the strafe, then drop the back-off
                 float fx = cosf(yaw0), fy = sinf(yaw0), lx = -fy, ly = fx;
                 for (int tries = 0; tries < 3; tries++) { float p2[3] = {o->c[0] + (fx * r + lx * lat) * 1.2f, o->c[1] + (fy * r + ly * lat) * 1.2f, o->c[2] - 0.35f};
@@ -362,6 +395,7 @@ static void bot_step_body(void) {
     // each weapon is tried once
     { static int pb = -1; static uint64_t pbit; if (pb < 0) { const char* e = getenv("NHOOK_BOT_PICKBIT"); pbit = e ? strtoull(e, 0, 16) : 0; pb = pbit != 0; }
       static double tscan, tpress; static uint32_t tried[32]; static int ntried; static uint32_t want_h;
+      if (pb == 0 && g_vpad_on) pb = 2;   // (on the virtual controller: hold its pick-up button, NHOOK_BOT_PICKPAD, default RB)
       if (pb && fight && !engaged && now - tscan > 1.0) { tscan = now; static NovObj w[512]; pthread_mutex_lock(&g_nov_collect_mx); g_nov_units_only = 3; int nw = nov_collect(w, 512); g_nov_units_only = 0; pthread_mutex_unlock(&g_nov_collect_mx);
           int cur = 99; uint32_t held = o->wslot >= 0 && o->wslot < 4 ? o->weapons[o->wslot] : 0xFFFFFFFFu;
           for (int i = 0; i < nw; i++) if (w[i].handle == held) { cur = bot_wpn_rank(hb_tag_name(w[i].def)); break; }
@@ -374,7 +408,15 @@ static void bot_step_body(void) {
       if (engaged) g_bot_pick_on = 0;
       if (g_bot_pick_on) { float dx = g_bot_pick_pos[0] - o->c[0], dy = g_bot_pick_pos[1] - o->c[1];
           if (dx * dx + dy * dy < 0.8f) { tpress = now; g_bot_pick_on = 0; if (ntried < 32) tried[ntried++] = want_h; else tried[(ntried++) & 31] = want_h; } }
-      if (pb && now - tpress < 0.6) fbtn |= 0x20000; }   // (fbtn bit 17: hold the pick-up bit; mapped below)
+      static uint32_t ppad = 1; if (ppad == 1) { const char* e = getenv("NHOOK_BOT_PICKPAD"); ppad = e ? (uint32_t)strtoul(e, 0, 16) : 0x20; }
+      if (pb && now - tpress < 0.6) fbtn |= 0x20000 | (g_vpad_on ? ppad : 0); }   // (fbtn bit 17: hold the pick-up bit; mapped below; the pad's button directly)
+    // reload after a fight (the players' habit; no ammo count is read yet): the pad's reload button (NHOOK_BOT_PICKPAD, a TAP; a hold
+    // picks up) 0.4-1.0 s after a fight in which the walker fired ends, unless it is walking to a weapon
+    { static double tend, trel, tfired; static int was; if (g_bot_fire) tfired = now;
+      if (was && !engaged) tend = now + 0.4 + 0.6 * bot_rand01(); if (engaged) tend = 0; was = engaged;
+      if (fight && g_vpad_on && tend && now > tend) { tend = 0; if (now - tfired < 8.0 && !g_bot_pick_on) { trel = now; if (bot_log()) nlog("[nhook] [inv] reloading after the fight"); } }
+      static uint32_t rpad = 1; if (rpad == 1) { const char* e = getenv("NHOOK_BOT_PICKPAD"); rpad = e ? (uint32_t)strtoul(e, 0, 16) : 0x20; }
+      if (now - trel < 0.1) fbtn |= rpad; }
     // the walker (nav.c's graph): the path's way PELOAD_NAV_LOOK nodes ahead; with the aim on, the throttle walks it in any
     // direction relative to the view
     float tx = 0, ty = 0;

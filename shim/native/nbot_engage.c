@@ -22,6 +22,7 @@ typedef struct { char grp[24]; float lat[20], rad[20]; char mine; } EgPiece;   /
 static struct { int loaded, on, npiece, nmine; float w[8]; int has_w; struct { char cls[12]; float p25, med, p75; int n; } band[10]; int nband;
                 float p_view, p_behind, p_mid, turn_s; EgPiece* lib; int gren_ok; float gren_every, gren_d0, gren_d1;
                 float rd_turn, rd_turn_s, p_killer, p_spot, it_near, it_mid, it_far;
+                float os_pen;   // (behaviour.powerups: the logit the attacker loses against an overshield; target choice)
                 float tw_spacing, tw_within15, p_join, join_s, p_aid, aid_s;   // (teamwork in use: tw_pick() from twset by the game's size)
                 float twset[3][6]; int twhas[3]; } g_eg;   // [0] all team games, [1] 12 players or fewer, [2] more
 static volatile uint32_t g_tw_mate; static volatile double g_tw_until;   // the teammate the walker works with right now (aid / join), until
@@ -43,7 +44,7 @@ static int eg_arr(const char* p, float* out, int max) {   // [a, b, null, ...] -
 static void eg_parse(const char* txt, const char* end, int overlay, int mine) {
     static const char* const fk[8] = {"log_dist", "off_aim", "attacked_me", "vitality", "previous_target", "teammate_on_it", "just_hurt", "height"};
     if (!overlay) { g_eg.p_view = 0.33f; g_eg.p_behind = 0.07f; g_eg.turn_s = 1.75f;
-        g_eg.rd_turn = 0.28f; g_eg.rd_turn_s = 1.24f; g_eg.p_killer = 0.05f; g_eg.p_spot = 0.08f; g_eg.it_near = 0.03f; g_eg.it_mid = 0.11f; g_eg.it_far = 0.05f;
+        g_eg.os_pen = -1.0f; g_eg.rd_turn = 0.28f; g_eg.rd_turn_s = 1.24f; g_eg.p_killer = 0.05f; g_eg.p_spot = 0.08f; g_eg.it_near = 0.03f; g_eg.it_mid = 0.11f; g_eg.it_far = 0.05f;
         g_eg.tw_spacing = 10.0f; g_eg.tw_within15 = 0.5f; g_eg.p_join = 0.3f; g_eg.join_s = 1.5f; g_eg.p_aid = 0.3f; g_eg.aid_s = 1.5f; }
     const char* tw = eg_find(txt, "target", end);
     if (tw && *tw == '{') { const char* te = eg_close(tw); for (int i = 0; i < 8; i++) g_eg.w[i] = eg_num(tw, fk[i], te, overlay ? g_eg.w[i] : 0); g_eg.has_w = 1; }
@@ -67,7 +68,9 @@ static void eg_parse(const char* txt, const char* end, int overlay, int mine) {
         if (nd >= 50 && rate > 0.05f && d1 > d0) { g_eg.gren_ok = 1; g_eg.gren_every = 60.0f / rate; g_eg.gren_d0 = d0; g_eg.gren_d1 = d1; } }
     // behaviour (engage-model.py: the players' radar turns, revenge, power items) -> the walker's radar look and goal draw
     const char* bh = eg_find(txt, "behaviour", end);
-    if (bh && *bh == '{') { const char* be = eg_close(bh); const char* rd = eg_find(bh, "radar", be), * rv = eg_find(bh, "revenge", be), * it = eg_find(bh, "items", be);
+    if (bh && *bh == '{') { const char* be = eg_close(bh); const char* rd = eg_find(bh, "radar", be), * rv = eg_find(bh, "revenge", be), * it = eg_find(bh, "items", be), * pu = eg_find(bh, "powerups", be);
+        if (pu && pu < be) { const char* pe = eg_close(pu); float wn = eg_num(pu, "attacker_wins_normal", pe, -1), wv = eg_num(pu, "attacker_wins_vs_overshield", pe, -1), nv = eg_num(pu, "duels_vs_overshield", pe, 0);
+            if (wn > 0.02f && wn < 0.98f && wv > 0.02f && wv < 0.98f && nv >= 20) g_eg.os_pen = logf(wv / (1 - wv)) - logf(wn / (1 - wn)); }
         if (rd && rd < be) { const char* re = eg_close(rd); g_eg.rd_turn = eg_num(rd, "turn_moving_in_range", re, g_eg.rd_turn); g_eg.rd_turn_s = eg_num(rd, "turn_s_median", re, g_eg.rd_turn_s); }
         if (rv && rv < be) { const char* ve = eg_close(rv); float nk = eg_num(rv, "next_target_killer", ve, -1), ch = eg_num(rv, "chance", ve, -1), bs = eg_num(rv, "back_at_death_spot", ve, -1), bb = eg_num(rv, "baseline_spot", ve, -1);
             // the players' EXCESS over chance / the baseline spot, at least 5% / 8% (the user saw it; FFA data shows little of it yet)
@@ -205,10 +208,15 @@ static int eg_choose(const NovObj* objs, int n, int me, const float* cam, float 
         float dx = t->c[0] - cam[0], dy = t->c[1] - cam[1], dz = t->c[2] - cam[2], d = sqrtf(dx * dx + dy * dy + dz * dz); if (d > 45) continue;
         EgUnit* u = eg_unit(t->handle); float off = fabsf(bot_wrap(atan2f(dy, dx) - yaw0)) * 57.2958f; int att = now - u->att_t < 1.5, pv = t->handle == prev && now - prev_t < 3.0;
         if (!(off < EG_VIEW || att || d < 5 || pv || t->handle == cur || rd_contact(o, t))) continue;   // (unknown: behind us, quiet and off the radar)
+        // active camo (+0x360): not seen in view beyond 8 units -- known only when it attacked us, is on the radar (moving) or close
+        if (t->camo > 0.3f && !(att || d < 8 || pv || t->handle == cur || rd_contact(o, t))) continue;
         int mate = 0; for (int k = 0; k < n && !mate; k++) { const NovObj* m = &objs[k]; if (m->type || m->dead || k == me || bot_enemy(o, m)) continue;   /* (a teammate: free-for-all has none) */ mate = eg_aim_at(m, t->c, 8); }
         float f[8] = {logf(d > 0.5f ? d : 0.5f), off / 180.0f, (float)att, fminf(1.5f, (t->shield + t->health) / 2), (float)pv, (float)mate, (float)(now - u->hurt_t < 1.0), (t->c[2] - o->c[2]) / 5.0f};
         float s = 0; for (int k = 0; k < 8; k++) s += g_eg.w[k] * f[k];
         int vs = vis_of(t->handle, now); s += vs == 1 ? 1.5f : vs == 0 ? -1.5f : 0;
+        // an overshielded enemy (shield above 1): the players' attackers win 54% against one, 77% otherwise (engage-model.json
+        // behaviour.powerups) -- half that logit as a penalty unless we have one too (choose the fight we would win)
+        if (t->shield > 1.05f && o->shield <= 1.05f) s += 0.5f * g_eg.os_pen;
         if (nc2 < 64) { ci2[nc2] = i; cs2[nc2] = s; nc2++; }
         if (s > bs) { bs = s; bi = i; } }
     if (!pickbest && nc2 > 1) { float sum = 0; for (int k = 0; k < nc2; k++) { cs2[k] = expf(cs2[k] - bs); sum += cs2[k]; }

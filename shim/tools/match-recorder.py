@@ -3,13 +3,20 @@
 around the map, and skirmish when they encounter each other ... start building a library / model"). Polls a running nhook stats
 page (the native app, any game) 10 times a second and writes one gzipped JSON line per sample:
     {"t": seconds, "map": "<map>", "you": <observer slot>, "p": [[slot, team, alive, x, y, z, yaw, pitch, shield, health,
-     weapon, vehicle, kills, deaths, shots, hits, grenades carried (since 2026-11-08 12:00)], ...]}
+     weapon, vehicle, kills, deaths, shots, hits, grenades carried (since 2026-11-08 12:00), active camo amount, the other weapon carried
+     (both since 2026-11-08 16:00)], ...]}
 and one line per feed event (kills, deaths, spawns...): {"t": .., "ev": kind, "a": <slot>, "b": <slot>, "how": "...", "est": bool,
 "pos": [x, y, z]}. Player NAMES are not kept (slots only: a name is mapped to its slot from the samples and dropped). A new file
 per match: <ReclaimerMac/tracks>/<date>_<map>_<server tag>.jsonl.gz (the server tag = a hash of its address).
     python3 shim/tools/match-recorder.py [--port 8765] [--seconds N] [--server host:port] [--out DIR]
 Used by shim/tools/observe-public.sh; the model: shim/tools/walker-model.py."""
 import gzip, hashlib, json, os, signal, sys, time, urllib.request
+
+def other_weapon(p):
+    """the carried weapon that is not in hand ('' none): the stats page's weapons list holds both"""
+    w = p.get('weapon') or ''; ws = [x for x in (p.get('weapons') or []) if isinstance(x, str)]
+    if w in ws: ws.remove(w)
+    return ws[0] if ws else ''
 
 def arg(k, d):
     a = sys.argv; return a[a.index(k) + 1] if k in a else d
@@ -57,7 +64,8 @@ def main():
             rows.append([sl, p.get('team', -1), 1 if p.get('alive') else 0, round(q[0], 3), round(q[1], 3), round(q[2], 3), round(a[0], 2), round(a[1], 2),
                          round(p.get('shield', 0) or 0, 3), round(p.get('health', 0) or 0, 3), p.get('weapon') or '', p.get('vehicle') or '',
                          p.get('kills', 0), p.get('deaths', 0), p.get('shots', 0), p.get('hits', 0),
-                         sum((p.get('grenades') or {}).values()) if isinstance(p.get('grenades'), dict) else 0])   # (16: grenades carried; a drop = a throw)
+                         sum((p.get('grenades') or {}).values()) if isinstance(p.get('grenades'), dict) else 0,   # (16: grenades carried; a drop = a throw)
+                         round(p.get('camo', 0) or 0, 2), other_weapon(p)])   # (17: active camo, 18: the other weapon -- the inventory the walkers learn from)
         f.write(json.dumps({'t': round(tick - t0, 2), 'you': you, 'p': rows, 'proj': len(s.get('projectiles') or [])}, separators=(',', ':')) + '\n'); n += 1
         if tick - last_feed > 1.0:   # the feed: names -> slots, then dropped
             last_feed = tick

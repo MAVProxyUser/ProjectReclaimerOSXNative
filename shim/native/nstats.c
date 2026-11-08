@@ -1254,14 +1254,15 @@ static void st_snapshot(StBuf* s) {
         if (g_st_var_ok) st_player_traits(s, pl[k].rec);
         sb_put(s, "}");
         if (g_tks.rowopen) {   // (ntracks.c: the same player in the recording's line -- no name in the file)
-            int al = have && !dead; float yw = 0, pt = 0; char wn[64] = "", vn[64] = ""; int gr = 0;
+            int al = have && !dead; float yw = 0, pt = 0; char wn[64] = "", vn[64] = "", on[64] = ""; int gr = 0;
             if (al) { const float* av = (const float*)(d + 0x1a0); float ah = sqrtf(av[0] * av[0] + av[1] * av[1]); if (isfinite(av[0]) && ah + fabsf(av[2]) > 0.5f) { yw = atan2f(av[1], av[0]) * 57.2958f; pt = atan2f(av[2], ah) * 57.2958f; }
                 int ws = *(const int8_t*)(d + 0x262); const uint32_t* wp = (const uint32_t*)(d + 0x268); uint64_t wd = (ws >= 0 && ws < 4) ? ST_DATUM(wp[ws]) : 0; uint32_t df = 0;
                 if (wd && hb_read(wd, &df, 4)) snprintf(wn, sizeof wn, "%s", hb_tag_name(df));
                 uint32_t par = *(const uint32_t*)(d + 0x10); uint64_t vd = par != 0xFFFFFFFFu ? ST_DATUM(par) : 0; if (vd && hb_read(vd, &df, 4)) snprintf(vn, sizeof vn, "%s", hb_tag_name(df));
-                const int8_t* g = (const int8_t*)(d + 0x294); for (int q = 0; q < 4; q++) gr += g[q] > 0 ? g[q] : 0; }
+                const int8_t* g = (const int8_t*)(d + 0x294); for (int q = 0; q < 4; q++) gr += g[q] > 0 ? g[q] : 0;
+                for (int q = 0; q < 4 && !on[0]; q++) { if (q == ws) continue; uint64_t od = ST_DATUM(wp[q]); uint32_t odf = 0; if (od && hb_read(od, &odf, 4)) snprintf(on, sizeof on, "%s", hb_tag_name(odf)); } }
             trk_player(pl[k].slot, pl[k].name, team, al, o, yw, pt, al ? *(const float*)(d + 0xF8) : 0, al ? *(const float*)(d + 0xF4) : 0, wn, vn,
-                       sbok ? sbs[SB_KILLS] : 0, t ? (sbok ? sbs[SB_DEATHS] : t->deaths) : 0, t ? t->shots : 0, hits, gr); }
+                       sbok ? sbs[SB_KILLS] : 0, t ? (sbok ? sbs[SB_DEATHS] : t->deaths) : 0, t ? t->shots : 0, hits, gr, al ? *(const float*)(d + 0x360) : 0, on); }
     }
     trk_end();
     if (t0) { rs_tick(pl, np, now); sb_tick(pl, np, now); }

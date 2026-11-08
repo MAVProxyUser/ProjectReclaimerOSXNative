@@ -21,6 +21,8 @@
 # OBS_MAX_PLAYERS=11 OBS_STRICT=1.
 # Coverage: the pick favours the map x game type the tome has least of (+25 none, +12 under 10 minutes); OBS_DONE=N = whole matches
 # already recorded in this phase by an earlier run.
+# OBS_RANDOM=1 draws the server (weights exp(score / 8): coverage and size still count) instead of taking the best one
+# (shim/tools/learn-loop.py: "randomly joining and completing games").
 # Its game is muted (OBS_MUTE=0 = with sound); it records with match-recorder.py, so nhook's own recorder (ntracks.c) is off
 # (OBS_NATIVE_TRACKS=1 + NHOOK_TRACKS_DIR=<other folder> = both, to compare); NATIVE_DYLIB=<copy> keeps one dylib for the whole run while shim/build is rebuilt.
 # Refuses to start beside a running Project Reclaimer (the user's game included); stops at once if one appears that is not its own.
@@ -35,6 +37,7 @@ pick() {   # "host:port map | mode | N players | class" of the best server now (
   timeout 60 python3 shim/tools/servers10.py --json 2>/dev/null | python3 -c '
 import json, sys
 skip = set(sys.argv[1].split()); counts = json.loads(sys.argv[2]); minp = int(sys.argv[3]); cw = float(sys.argv[4]); infection = sys.argv[5] == "1"; maxp = int(sys.argv[6]); strict = sys.argv[7] == "1"
+rnd = len(sys.argv) > 9 and sys.argv[9] == "1"   # OBS_RANDOM=1: a weighted draw (exp(score / 8)) instead of the best score
 # COVERAGE (2026-11-08 14:00, the user: "sample each map at least once in context if possible, so keep track of all the maps you have
 # played, and under what game types"): the tome (tracks/tome.json, engage-model.py) says how many minutes of each map x game type
 # are recorded; a server whose map x type has none gets +25 players in the pick, under 10 minutes +12. Listing names -> map: the
@@ -80,7 +83,10 @@ for l in sys.stdin:
     cands.append((n - cw * counts.get(c, 0) - (25 if c == "other" else 0) + cb, a, i.get("map"), i.get("mode"), n, c + (" (coverage +%d: %s)" % (cb, cov) if cb else "")))
 for need in ((minp,) if strict else (minp, 4)):
     ok = [x for x in cands if x[4] >= need]
-    if ok: b = max(ok); print(b[1], b[2], "|", b[3], "|", b[4], "players |", b[5]); break' "$skip" "{\"slayer\":$n_slayer,\"ctf\":$n_ctf,\"infection\":$n_infection,\"other\":$n_other}" "$MINP" "$CW" "${OBS_INFECTION:-0}" "$MAXP" "$STRICT" "$TR/tome.json"; }
+    if ok and rnd:
+        import math, random; top = max(x[0] for x in ok); b = random.choices(ok, [math.exp((x[0] - top) / 8.0) for x in ok])[0]
+    elif ok: b = max(ok)
+    if ok: print(b[1], b[2], "|", b[3], "|", b[4], "players |", b[5]); break' "$skip" "{\"slayer\":$n_slayer,\"ctf\":$n_ctf,\"infection\":$n_infection,\"other\":$n_other}" "$MINP" "$CW" "${OBS_INFECTION:-0}" "$MAXP" "$STRICT" "$TR/tome.json" "${OBS_RANDOM:-0}"; }
 DONE0=${OBS_DONE:-0}   # (whole matches a previous run of this phase already recorded)
 while [ $(( $(date +%s) - t0 )) -lt "$TOTAL" ] && { [ "$NMATCH" = 0 ] || [ $((DONE0 + n_slayer + n_ctf + n_infection + n_other)) -lt "$NMATCH" ]; }; do
   line=$(pick); addr=${line%% *}

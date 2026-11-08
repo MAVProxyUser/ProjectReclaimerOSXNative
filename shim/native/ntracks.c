@@ -8,7 +8,7 @@
 //            Flag", "Infection" ...), "variant": its name, "lanes_live": the game counts lanes itself, "source": "nhook",
 //            "you_plays": true (the local player is a real player here, not an observer)}
 //   sample  {"t", "you": the local player's slot, "p": [[slot, team, alive, x, y, z, yaw, pitch, shield, health, weapon, vehicle, kills, deaths, shots,
-//            hits, grenades], ...], "proj": 0}
+//            hits, grenades, camo (active camo amount), the other weapon carried], ...], "proj": 0}
 //   event   {"t", "ev": kill / death / weapon / vehicle / powerup ..., "a", "b": slots (names are never written), "how", "est",
 //            "verb", "pos"}
 // A new file per match (a new map or a new match start); closed when the match ends or the app leaves. NO NAMES: a name only maps to
@@ -44,12 +44,12 @@ static void trk_begin(double now, double t0, const char* map) {
     // it is a real player here, so the analysis keeps it in (an observer's recording leaves its "you" out)
     g_tks.row.n = 0; sb_put(&g_tks.row, "{\"t\":%.2f,\"you\":%d,\"p\":[", now - g_tks.start, g_ht_my_slot); g_tks.rowopen = 1; }
 static void trk_player(int slot, const char* name, int team, int alive, const float* p, float yaw, float pitch, float sh, float hp, const char* wpn, const char* veh,
-                       int kills, int deaths, int shots, int hits, int gren) {
+                       int kills, int deaths, int shots, int hits, int gren, float camo, const char* other) {
     if (!g_tks.rowopen || slot < 0 || slot >= 128) return;
     if (name) snprintf(g_tks.names[slot], sizeof g_tks.names[slot], "%s", name);
     StBuf* r = &g_tks.row; int first = r->n > 0 && r->b[r->n - 1] == '[';
     sb_put(r, "%s[%d,%d,%d,%.3f,%.3f,%.3f,%.2f,%.2f,%.3f,%.3f,", first ? "" : ",", slot, team, alive, alive ? p[0] : 0.0, alive ? p[1] : 0.0, alive ? p[2] : 0.0, yaw, pitch, sh, hp);
-    sb_str(r, wpn ? wpn : ""); sb_put(r, ","); sb_str(r, veh ? veh : ""); sb_put(r, ",%d,%d,%d,%d,%d]", kills, deaths, shots, hits, gren); }
+    sb_str(r, wpn ? wpn : ""); sb_put(r, ","); sb_str(r, veh ? veh : ""); sb_put(r, ",%d,%d,%d,%d,%d,%.2f,", kills, deaths, shots, hits, gren, isfinite(camo) ? camo : 0.0f); sb_str(r, other ? other : ""); sb_put(r, "]"); }
 static int trk_slot(const char* name) { if (!name || !name[0]) return -1; for (int i = 0; i < 128; i++) if (g_tks.names[i][0] && !strcmp(g_tks.names[i], name)) return i; return -1; }
 static void trk_end(void) {
     if (!g_tks.rowopen || !g_tks.f) return; g_tks.rowopen = 0;

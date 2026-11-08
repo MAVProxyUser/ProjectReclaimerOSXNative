@@ -205,8 +205,18 @@ every match the hook sees.
    attackers with the players' odds and delay, weapon distance bands, real movement pieces, grenades, the radar look, the
    respawn draw (killer / death spot / the item's lane), power items, the goal draw (never idle); in team games teamwork from the
    players' team games: the spacing to a teammate, joining a teammate's fight, coming to a teammate's aid, then moving as a unit.
+   Their own inventory and power-ups (nbot.c bot_inv): weapon switch for the range (vpad Y), grenades only in hand, reload after a
+   fight (vpad RB tap), pickups (RB held), camo = hold fire until close, an overshield = fights worth more; an overshielded enemy is a
+   worse target (attackers win 54% vs 77%: behaviour.powerups), a camo'd one unseen beyond 8 units. NHOOK_BOT_NOINV=1 = off.
 5. **Checking them.** `walker-battle.sh` (WB_IDS, WB_WATCH, DED_GAME / DED_MAP on the server) + `engage-compare.py`
    (fight-likeness against the players on the same map) + `walker-compare.py` (movement); `native-firefight.sh` for Firefight.
+   **Coaching them** (`walker-coach.py`): coach.py's report per walker against the human winners -> each measure moves one knob
+   (RADSCALE closing, NOISE aim, REACT aim-back, LIBSCALE strafe, FJUMP jumps, GRENX grenades, RADARLOOK radar, DIST distance; the
+   directional ones only while behind) -> the next battle (`loop`), state in battles/coach/state.json.
+   **The learn loop** (`learn-loop.py`): a random public game observed whole (OBS_MATCHES=1 OBS_RANDOM=1) -> `game-review.py` (this
+   game vs the map before it vs everything: the surprises, tracks/reviews/) -> engage-model.py -> walker-coach.py on that map against
+   that game's winners (x2) and the map's -> tracks/learn-loop.json. Walkers never join public servers; they are measured against
+   the players.
 6. **Watching it all.** `python3 shim/tools/workboard.py` (http://127.0.0.1:8790/): what runs, the direction, the task list, "What the
    game is learning" (`python3 shim/tools/learnings.py`: findings with their sample sizes), "You" (`python3 shim/tools/coach.py`:
    your own public matches -- the recorder marks your slot -- against the winners, measure by measure), the tome's coverage grid, the observer's log; `workboard.py task "..." doing|next|done` / `workboard.py direction "..."`.
