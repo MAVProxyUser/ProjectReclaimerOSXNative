@@ -187,6 +187,16 @@ rdx, r8, r9, result x2): body_hook_after hooks there; code-table entry hooks see
 per-frame function runs from halo3's render loop (0xb19bc, a client only); a dedicated server runs halo3's main loop 0xb2538
 -> game tick runner 0xeefa8 -> 0xef120. Crash frames: NHOOK_CODETAB_DUMP + shim/tools/native-frames.py.
 
+Two clients (2026-11-07): our native dedicated server plus the test profile and a SECOND test profile with its own identity,
+ReclaimerMac/native/test-second (made by the app on its first start; renamed "Second"): shim/tools/native-host-test.sh tpnext,
+shim/tools/native-voice-test.sh. NATIVE_ALLOW_SECOND=1 lets a test client start beside the server. The app's own test options
+for that: `--voice-wav FILE` + `--voice-talk all|team|nearby|open` (talk from a WAV), `--chat-say SECONDS:all|team|nearby:TEXT`,
+`--voice-mute <peer>`, `--ballot-choose 0..3`; test requests that work on a joined client: `{"campaign":{"aim_at_nearest_player":
+{"height":0.5,"approach":0}}}` and `{"campaign":{"fire_pulses":{"count":50,"every":0.1,"hold":0.05}}}` (hold_trigger fires only a
+few shots there). NHOOK_TAP_LOG=<file> copies every line the hooks read (any process that loads the dylib: a server's worker).
+Voice channel: the mixer entry's byte at end - 7 (1 global, 2 team, 3 proximity; FIXES.md "the channel"). Host diagnostic:
+do=floorprobe&x=&y=&z= (halo3's collision ray down + the open / solid test at 9 depths, in host_msg).
+
 Not yet: the packet log's game layer (halo3 message names; 0.10's wire protocol is the app's own).
 
 ### Kills (static RE of halo3.dll)

@@ -81,6 +81,8 @@ int main(void) {
     { (*ST(2, 63 + 51))++; const char* w[] = {"Carol: Flag Score"}; tick("an objective medal (no kill behind it)", 1, w, 0); }
     { g_sb_kill_t[3] = g_now + 0.1; for (int m = 0; m < 5; m++) (*ST(3, 63 + 11 + m))++; tick("5 medals at once (the table filling in)", 0, 0, 0); }
     { g_sb_kill_t[0] = g_now + 0.1; (*ST(0, 63 + 74))++; (*ST(0, 63 + 86))++; tick("Kill and Assist are not reported", 0, 0, 0); }
+    { kill_r(0, 1, 11, 1, 0, 0); g_sb_kill_t[0] = g_now + 0.1; (*ST(0, 63 + 77))++; tick("a kill and its medal before the scoreboard's death: both wait", 0, 0, 0);
+      sbv(1, 0); const char* w[] = {"Alice killed Bob (Battle rifle)", "Alice: First Strike"}; tick("... then the kill line, its medal after it", 2, w, 0); }
     { for (int i = 0; i < 4; i++) (*ST(i, 1))++; (*ST(0, 3))++; (*ST(2, 3))++; const char* w[] = {"Game over: Alice, Carol won"}; tick("game over (games-completed, games-won)", 1, w, 0); }
     memset(g_mem, 0, 0x4a940); tick("new match (counts back to 0)", 0, 0, 0);
     { kill(2, 3, 0, 1, 0, 0); const char* w[] = {"Carol killed Dave"}; tick("an unnamed weapon (type 0, a modded map's)", 1, w, 0); }

@@ -327,6 +327,8 @@ server (&slot=); halo3 calls that mark network updates (0x1ec3c) need game_globa
 Lifted code calls lifted code at the BODY (x2 ctx, x3 guest rsp, x4-x7 args): body_hook_after; entry hooks see table calls only. Text
 hooks installed at run time stop the other threads (a 16 KB page is not executable while written). Crash frames -> halo3 functions:
 NHOOK_CODETAB_DUMP=<file> + shim/tools/native-frames.py (the JIT layout is fixed, only shifted between launches).
+Two-client tests (2026-11-07): native-dedicated.sh + the test profile + ReclaimerMac/native/test-second (its own identity):
+shim/tools/native-host-test.sh walls|tpnext, native-voice-test.sh (--voice-wav/--voice-talk); NHOOK_TAP_LOG=<file> = every app line.
 Forensic voice audio: text hook on the app's Opus decode (0x1003f1e7c, caller = voice mixer 0x102152578, id at x26-0x278;
 stub.S _nh_opus_shim; NHOOK_NO_VOICEHOOK=1 off; [perf] "voice packets" -- live-checked 2026-11-07: real talkers archived and decoded). Chat = the app's own `[chat] line` log, on since nhook sets its chat_log byte (nstats.c chat_log_tick). Not yet: packet log
 game layer. Test runs: NATIVE_LOG=<scratch file> (the default log is the user's). Offline test:

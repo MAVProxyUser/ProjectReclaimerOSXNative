@@ -394,7 +394,7 @@ function renderTable(){
   const ps=snap.players.slice().sort(sortK?((a,b)=>(sortMode==='team'?a.team-b.team:0)||sortD*cmpv(SORTV[sortK](a),SORTV[sortK](b))||a.name.localeCompare(b.name))
     :((a,b)=>PRANK[st.get(a)]-PRANK[st.get(b)]||a.team-b.team||a.name.localeCompare(b.name)));
   document.getElementById('tb').innerHTML=ps.map(p=>`<tr data-s="${p.slot}" class="${p.alive?'':st.get(p)==='quit'?'quit':'dead'} ${p.you?'you':''} ${p.slot===sel?'sel':''}">
-   <td><span class="sw" style="background:${C[p.team_name]||'#888'}"></span>${E(p.name)}${p.you?' (you)':''}${p.host?'<span class="hostb" title="hosts this game">★ HOST</span>':''}${p.talking?'<span class="talkic" title="talking">🔊</span>':''}${p.muted?' 🔇':''}</td>
+   <td><span class="sw" style="background:${C[p.team_name]||'#888'}"></span>${E(p.name)}${p.you?' (you)':''}${p.host?'<span class="hostb" title="hosts this game">★ HOST</span>':''}${p.talking?'<span class="talkic" title="talking'+(p.voice_ch?' ('+p.voice_ch+' voice)':'')+'">🔊</span>':''}${p.muted?' 🔇':''}</td>
    <td class="ipc">${p.ip?E(p.ip.replace(/:\d+$/,'')):''}${p.rdns?`<div class="pk-x">${E(p.rdns)}</div>`:''}</td>
    <td>${B(p.shield,'#58b8ff')}</td><td>${B(p.health,'#7ddf6a')}</td><td>${E(p.weapon||(p.alive?'':st.get(p)))}</td>
    <td>${p.kills??''}</td><td>${p.deaths??''}</td><td>${kdOf(p).toFixed(2)}</td><td>${p.shots??''}</td><td>${p.shots?Math.round(p.accuracy*100)+'%':''}</td><td>${botCell(p)}</td><td>${aimCell(p)}</td><td>${p.grenades.frag}f ${p.grenades.plasma}p ${p.grenades.spike}s ${p.grenades.firebomb}b</td>
@@ -432,7 +432,7 @@ function renderConn(){ const ss=(snap&&snap.session)||[], el=document.getElement
   for(const p of ss){ seen.add(p.voice); let c=connChips.get(p.voice);
     if(!c){ c=document.createElement('span'); c.className='pc'; c.dataset.name=p.name; c.innerHTML=`<span class="nm"></span>${muteBtn(p.voice,false)}`; connChips.set(p.voice,c); added=true; }
     if(c.dataset.name!==p.name){ c.dataset.name=p.name; added=true; }
-    c.querySelector('.nm').textContent=p.name; c.title=(p.host?'hosts this game':'')+(p.talking?(p.host?', ':'')+'talking':'');
+    c.querySelector('.nm').textContent=p.name; c.title=(p.host?'hosts this game':'')+(p.talking?(p.host?', ':'')+'talking'+(p.voice_ch?' ('+p.voice_ch+' voice)':''):'');
     let hb=c.querySelector('.hostb'); if(p.host&&!hb){ hb=document.createElement('span'); hb.className='hostb'; hb.textContent='★ HOST'; c.querySelector('.nm').after(hb); } else if(!p.host&&hb) hb.remove();
     c.classList.toggle('talk',!!p.talking); c.classList.toggle('muted',!!p.muted);
     const b=c.querySelector('.mb'); b.classList.toggle('on',!!p.muted); b.dataset.m=p.muted?'1':'0'; b.title=p.muted?'Unmute':'Mute'; b.disabled=!canMute; }

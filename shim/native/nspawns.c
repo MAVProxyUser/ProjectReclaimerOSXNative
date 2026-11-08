@@ -97,6 +97,15 @@ static void st_spawns(const uint8_t*tab,int hi,const StPlayer*pl,int np,const ch
                 if(g_wlog){ int k=snprintf(lm,sizeof lm,"  [spawn] attached right after creation, not a spawn: %s (parent %08x)\n",st_wclass(def,t)->nm,par); (void)!write(2,lm,(size_t)k); }
                 continue; }
             g_wt[i].st=1; memcpy(g_wt[i].pos,d+0x50,12); memcpy(g_wt[i].sp0,d+0x50,12); memcpy(g_wt[i].cur,d+0x50,12); g_wt[i].state=1; g_wt[i].parent=par;
+            // a dead player's dropped weapon: on a CLIENT of the native app it arrives as a new object (the host's own one keeps
+            // its object) -- "Assault rifle spawned at" every death spot (2026-11-07, our local server, both clients). A weapon
+            // that appears within 2 units of where a player died in the last 4 s is that drop: no event, no spawn point.
+            static int keep_drops=-1; if(keep_drops<0) keep_drops=getenv("NHOOK_SPAWN_DROPS")!=0;   // (=1: the old "spawned" for them)
+            if(g_wt[i].kind==0 && !keep_drops){ const float*wp=(const float*)(d+0x50); int drop=-1;
+                for(int sl=0;sl<128 && drop<0;sl++){ const SbNow*w=&g_sbnow[sl]; if(w->died<=0 || now-w->died>4.0) continue;
+                    float dx=w->pos[0]-wp[0], dy=w->pos[1]-wp[1], dz=w->pos[2]-wp[2]; if(dx*dx+dy*dy<4.0f && fabsf(dz)<3.0f) drop=sl; }
+                if(drop>=0){ if(g_wlog){ int k=snprintf(lm,sizeof lm,"  [spawn] dropped by %s where they died, not a spawn: %s\n",g_sbnow[drop].name,st_wclass(def,t)->nm); (void)!write(2,lm,(size_t)k); }
+                    continue; } }
             if(nconf<1024){ conf[nconf++]=i; if(g_wt[i].kind==0) nwc++; } continue; }
         if(g_wt[i].st==1 && par==0xFFFFFFFFu) memcpy(g_wt[i].pos,d+0x50,12);   // where it lies now (a power-up: where it is taken)
         if(g_wt[i].st==1 && g_wt[i].kind==0 && par!=0xFFFFFFFFu){   // a weapon picked up (the first time)
@@ -118,14 +127,28 @@ static void st_spawns(const uint8_t*tab,int hi,const StPlayer*pl,int np,const ch
             if(g_wt[i].state==1 && g_wt[i].sp>=0){ float dx=g_wt[i].cur[0]-g_wt[i].sp0[0], dy=g_wt[i].cur[1]-g_wt[i].sp0[1], dz=g_wt[i].cur[2]-g_wt[i].sp0[2];
                 if(dx*dx+dy*dy<2.25f && fabsf(dz)<3.0f) g_wt[i].state=0; } }
         g_wt[i].parent=par; }
-    // spawns confirmed in this snapshot: weapons in a burst = one line; vehicles and power-ups one by one
-    if(nwc>8){ struct { char nm[40]; int n; } sum[24]; int ns=0;
-        for(int q=0;q<nconf;q++){ int i=conf[q]; if(g_wt[i].kind!=0) continue; const char*nm=st_wclass(g_wt[i].def,g_wt[i].type)->nm; int k=0;
+    // spawns confirmed in this snapshot: weapons in a burst = one line; vehicles and power-ups one by one.
+    // A match's first weapons reach a CLIENT over several snapshots (the host's objects come in over ~1 s): "Excavator spawned
+    // at", "Smg spawned at" ... then "17 weapons and equipment spawned" at a client's match start (2026-11-07). From a match's
+    // first weapon spawn on they are gathered (sp_held) until 0.5 s pass without a new one (3 s at most) and go out together:
+    // one line for more than 8 (a host's burst, all in one snapshot, goes out 0.5 s later). NHOOK_SPAWN_NOGATHER=1 = old.
+    typedef struct { uint32_t def; uint8_t type; float pos[3]; } SpW; static SpW sp_held[512]; static int sp_nheld, sp_armed; static double sp_t0, sp_win, sp_last;
+    static int nogather=-1; if(nogather<0) nogather=getenv("NHOOK_SPAWN_NOGATHER")!=0;
+    if(g_gameplay_t0!=sp_t0){ sp_t0=g_gameplay_t0; sp_armed=!nogather; sp_win=0; sp_nheld=0; }
+    if(sp_armed && nwc>0){ sp_armed=0; sp_win=now+3.0; }
+    SpW ws[1536]; int nws=0;
+    if(sp_win>0){ for(int q=0;q<nconf;q++){ int i=conf[q]; if(g_wt[i].kind!=0 || sp_nheld>=512) continue; SpW*h=&sp_held[sp_nheld++]; h->def=g_wt[i].def; h->type=g_wt[i].type; memcpy(h->pos,g_wt[i].pos,12); sp_last=now; }
+        if(now>=sp_win || now-sp_last>=0.5){ sp_win=0; for(int k=0;k<sp_nheld;k++) ws[nws++]=sp_held[k]; sp_nheld=0; } }
+    else for(int q=0;q<nconf && nws<1536;q++){ int i=conf[q]; if(g_wt[i].kind!=0) continue; ws[nws].def=g_wt[i].def; ws[nws].type=g_wt[i].type; memcpy(ws[nws].pos,g_wt[i].pos,12); nws++; }
+    if(nws>8){ struct { char nm[40]; int n; } sum[24]; int ns=0;
+        for(int q=0;q<nws;q++){ const char*nm=st_wclass(ws[q].def,ws[q].type)->nm; int k=0;
             for(; k<ns; k++) if(!strcmp(sum[k].nm,nm)) break; if(k==ns && ns<24){ snprintf(sum[ns].nm,sizeof sum[ns].nm,"%s",nm); sum[ns].n=0; ns++; } if(k<ns) sum[k].n++; }
-        char txt[380]; int k=snprintf(txt,sizeof txt,"%d weapons and equipment spawned:",nwc);
+        char txt[380]; int k=snprintf(txt,sizeof txt,"%d weapons and equipment spawned:",nws);
         for(int q=0;q<ns && k<(int)sizeof txt-48;q++){ k+=snprintf(txt+k,sizeof txt-(size_t)k,"%s %s",q?",":"",sum[q].nm); if(sum[q].n>1) k+=snprintf(txt+k,sizeof txt-(size_t)k," x%d",sum[q].n); }
         st_event_verb(t_st_evpos,"weapon",0,0,"","spawned",-1,-1,0,"%s",txt); }
-    for(int q=0;q<nconf;q++){ int i=conf[q], kd=g_wt[i].kind; if(kd==0 && nwc>8) continue; const char*nm=st_wclass(g_wt[i].def,g_wt[i].type)->nm; const float*ps=g_wt[i].pos;
+    else for(int q=0;q<nws;q++){ const char*nm=st_wclass(ws[q].def,ws[q].type)->nm; const float*ps=ws[q].pos;
+        t_st_evpos=ps; st_event_verb(t_st_evpos,"weapon",0,0,nm,"spawned",-1,-1,0,"%s spawned at (%.1f, %.1f)",nm,ps[0],ps[1]); t_st_evpos=0; }
+    for(int q=0;q<nconf;q++){ int i=conf[q], kd=g_wt[i].kind; if(kd==0) continue; const char*nm=st_wclass(g_wt[i].def,g_wt[i].type)->nm; const float*ps=g_wt[i].pos;
         t_st_evpos=ps; st_event_verb(t_st_evpos,g_wkind[kd],0,0,nm,"spawned",-1,-1,0,"%s spawned at (%.1f, %.1f)",nm,ps[0],ps[1]); t_st_evpos=0; }
     // spawn points for the heatmap (hm_spawn), burst weapons included. After joining a game in progress, the first spawns seen
     // (the first 5 s of them) are whatever lies around -- dropped weapons, parked vehicles --, not spawn points: left out;

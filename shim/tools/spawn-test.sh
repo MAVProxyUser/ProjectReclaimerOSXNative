@@ -8,13 +8,18 @@
 #   attached right after its creation (a loadout weapon) is no spawn and no pickup; a weapon's first holder = picked up
 #   (team from the unit); respawns later; power-ups taken via the player's pickup tick (gone the same snapshot, or
 #   still there), a first sight of a tick = nothing; slot reuse; unknown tags; a map change starts over.
+# Runs the same fake game twice: against the loader's copy (shim/src/stats.c) and the native app's (shim/native/nspawns.c,
+# since 2026-11-07; there also: a weapon appearing where a player just died is their drop, not a spawn).
 #   bash shim/tools/spawn-test.sh
 set -e
 cd "$(dirname "$0")/.."
 T=$(mktemp -d "${TMPDIR:-/tmp}/spawntest.XXXXXX"); trap 'rm -rf "$T"' EXIT
 cut_block(){ awk -v s="$2" -v e="$3" 'index($0,s)==1{on=1} on && index($0,e)==1 && !(index($0,s)==1){exit} on{print}' "$1"; }
+for MODE in loader native; do
 {
+[ $MODE = native ] && echo '#define NATIVE 1'
 cat <<'EOF'
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -34,17 +39,33 @@ static int hb_current_map(char*out,size_t n){ snprintf(out,n,"%s","/maps/sidewin
 static HbMap* hbm_get(const char*p){ return strcmp(p,"/maps/sidewinder.map")?0:&g_map; }
 static const char* hb_tag_name(uint32_t def){ (void)def; return "?"; }
 static int hb_read(uint64_t a,void*d,size_t n){ if(!a) return 0; memcpy(d,(const void*)(uintptr_t)a,n); return 1; }
-static __thread const float*t_st_evpos;
 typedef struct { char kind[12], a[64], how[64], verb[24], text[400]; int ta, haspos; float pos[3]; } Ev;
 static Ev g_evs[256]; static int g_nev;
-static void st_event_verb(double at,const char*kind,const char*a,const char*b,const char*how,const char*verb,int ta,int tb,int flags,const char*fmt,...){
-    (void)at; (void)b; (void)tb; (void)flags; Ev*e=&g_evs[g_nev++&255]; memset(e,0,sizeof *e);
+static void ev_rec(const float*pos,const char*kind,const char*a,const char*how,const char*verb,int ta,const char*fmt,va_list ap){
+    Ev*e=&g_evs[g_nev++&255]; memset(e,0,sizeof *e);
     snprintf(e->kind,sizeof e->kind,"%s",kind); snprintf(e->a,sizeof e->a,"%s",a?a:""); snprintf(e->how,sizeof e->how,"%s",how?how:""); snprintf(e->verb,sizeof e->verb,"%s",verb?verb:"");
-    e->ta=ta; if(t_st_evpos){ memcpy(e->pos,t_st_evpos,12); e->haspos=1; }
-    va_list ap; va_start(ap,fmt); vsnprintf(e->text,sizeof e->text,fmt,ap); va_end(ap); }
+    e->ta=ta; if(pos){ memcpy(e->pos,pos,12); e->haspos=1; } vsnprintf(e->text,sizeof e->text,fmt,ap); }
+static volatile int g_sp_join; static pthread_mutex_t g_hm_mx=PTHREAD_MUTEX_INITIALIZER;
+EOF
+if [ $MODE = loader ]; then cat <<'EOF'
+static __thread const float*t_st_evpos;
+static void st_event_verb(double at,const char*kind,const char*a,const char*b,const char*how,const char*verb,int ta,int tb,int flags,const char*fmt,...){
+    (void)at; (void)b; (void)tb; (void)flags; va_list ap; va_start(ap,fmt); ev_rec(t_st_evpos,kind,a,how,verb,ta,fmt,ap); va_end(ap); }
+static int hm_spawn(int kind,const char*name,const float*pos){ (void)kind; (void)name; (void)pos; return -1; }   // (the heatmap: not tested here)
 EOF
 cut_block src/stats.c '// tag names (hb_tag_name: "GAUSS BULLET") in sentence case' 'static void st_death_event'
 cut_block src/stats.c '// Spawns and pickups (backlog 47' 'static void st_snapshot(StBuf*s){'
+else
+cat <<'EOF'
+#define HB_MAXOBJ 16384
+static void st_event_verb(const float*pos,const char*kind,const char*a,const char*b,const char*how,const char*verb,int ta,int tb,int flags,const char*fmt,...){
+    (void)b; (void)tb; (void)flags; va_list ap; va_start(ap,fmt); ev_rec(pos,kind,a,how,verb,ta,fmt,ap); va_end(ap); }
+EOF
+grep -m1 '^typedef struct { char name\[64\], how\[96\]; int team, have, dead;' native/nstats.c; echo 'static SbNow g_sbnow[128];'
+cut_block native/nstats.c '#define HM_CELL 0.5f' 'static pthread_mutex_t g_hm_mx'
+echo 'static char g_hm_cur[64]; static void hm_switch(const char*m){ (void)m; }'
+cat native/nspawns.c
+fi
 cat <<'EOF'
 // ---- the fake game ----
 static const char*const TAGS[]={ 0,
@@ -103,6 +124,9 @@ int main(void){
     snap(); CHECK(nnew()==0);   // everything pending
     parent(21,H(60));           // ... attached a snapshot later: no spawn, no pickup
     snap();
+#ifdef NATIVE
+    { int b0=base; for(int k=0;k<6;k++) snap(); base=b0; }   // (native: a match's first weapons go out once 0.5 s pass without a new one)
+#endif
     CHECK(find("weapon","10 weapons and equipment spawned: Battle rifle x6, Sniper rifle x2, Bubbleshield x2")!=0);
     Ev*w=find("vehicle","Wraith spawned at (-38.5, -25.2)"); CHECK(w && w->haspos && w->pos[2]<-4.6f && !strcmp(w->how,"Wraith") && !strcmp(w->verb,"spawned"));
     CHECK(find("vehicle","Warthog snow spawned at (-19.6, -30.0)")!=0); CHECK(find("vehicle","Hornet lite spawned at (27.0, -26.7)")!=0);
@@ -114,6 +138,13 @@ int main(void){
     parent(6,0xFFFFFFFFu); snap(); parent(6,H(60)); snap(); CHECK(nnew()==0);   // dropped and picked up again: not its first holder
     obj(22,0x116,2,2,0xFFFFFFFFu,40,-20,5); snap(); CHECK(nnew()==0); snap(); CHECK(find("weapon","Sniper rifle spawned at (40.0, -20.0)")!=0 && nnew()==1);
     obj(23,0x117,3,15,0xFFFFFFFFu,1,1,1); snap(); snap(); CHECK(find("weapon","Shotgun ammo spawned at (1.0, 1.0)")!=0);
+#ifdef NATIVE
+    printf("== native: Bravo dies; a rifle appears where they died (their drop on a client), another one 10 units away\n");
+    g_sbnow[1].died=now-1.0; g_sbnow[1].pos[0]=30; g_sbnow[1].pos[1]=30; g_sbnow[1].pos[2]=1; snprintf(g_sbnow[1].name,64,"Bravo");
+    obj(28,0x11c,2,1,0xFFFFFFFFu,30.6f,29.4f,0.8f); obj(29,0x11d,2,1,0xFFFFFFFFu,40,30,1); snap(); snap();
+    CHECK(nnew()==1 && find("weapon","Battle rifle spawned at (40.0, 30.0)")!=0);
+    del(28); del(29); snap(); g_sbnow[1].died=0;
+#endif
     printf("== power-ups: Bravo takes the overshield (gone the same snapshot), Alpha the camo (still there)\n");
     *(int32_t*)(rec[0]+0x21C)=0; snap();   // (players already seen: ticks 0)
     *(int32_t*)(rec[1]+0x218)=4321; del(12); snap();
@@ -137,6 +168,8 @@ int main(void){
     CHECK(nnew()==5);
     printf("%s\n",fails?"FAILED":"all spawn checks passed"); return fails!=0; }
 EOF
-} > "$T/t.c"
-clang -O1 -g -Wall -Wno-unused-function -Wno-unused-variable -o "$T/t" "$T/t.c"
-PELOAD_SPAWN_LOG=${PELOAD_SPAWN_LOG:-} "$T/t"
+} > "$T/t_$MODE.c"
+echo "######## $MODE"
+clang -O1 -g -Wall -Wno-unused-function -Wno-unused-variable -o "$T/t_$MODE" "$T/t_$MODE.c"
+PELOAD_SPAWN_LOG=${PELOAD_SPAWN_LOG:-} NHOOK_SPAWN_LOG=${NHOOK_SPAWN_LOG:-} "$T/t_$MODE"
+done

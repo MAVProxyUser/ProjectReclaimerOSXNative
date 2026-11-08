@@ -23,7 +23,8 @@
 //   invisible  the Havok polygon-shape builder (halo3+0x21b4d8, lifted; built on demand: getChildShape ran 289,915 times in a
 //   walls      game) gets an around-hook (stub.S _nh_tpls): the original runs, then a surface flagged invisible (flag 2) has
 //              its vertices moved to z = -20000 -- the loader's exit patch. Shape = rcx (also the result), the BSP reference
-//              {small*, large*} = r9, the surface index = the 8th argument (guest stack +0x40 at the entry).
+//              {small*, large*} = *r9, the surface index = the 9th argument (guest stack +0x48 at the entry), which the
+//              builder also stores at shape +0x28 (read from there).
 //   speed      the game variant's base player speed trait (game_globals +0x1608 +0x134 +0x10), as the loader.
 // Hooks are installed on first use (a switch or a teleport) and stay; their handlers do nothing while the switches are on.
 // Host only (game_globals +0x11: 5 host / 1 local, or this machine is the session's host peer).
@@ -33,7 +34,7 @@ static const uint32_t g_ht_frame_words[4] = {0xd10103ffu, 0xa90157f6u, 0xa9024ff
 static volatile int g_ht_bnd_off, g_ht_inv_off, g_ht_tick_ok = -1, g_ht_bnd_ok = -1, g_ht_inv_ok = -1;
 static volatile unsigned long g_ht_bnd_skips, g_ht_inv_hidden, g_ht_ticks, g_ht_frames;
 static volatile int g_ht_my_slot = -1;                     // the local player's slot (st_snapshot: the profile's nickname)
-typedef struct { int kind, slot, who; float v[3]; char label[64]; } HtReq;   // kind 1 next to `slot`, 2 to v (who), 3 by v
+typedef struct { int kind, slot, who; float v[3]; char label[64]; } HtReq;   // kind 1 next to `slot`, 2 to v (who), 3 by v, 4 floor probe at v
 static HtReq g_ht_req; static volatile int g_ht_pending; static pthread_mutex_t g_ht_mx = PTHREAD_MUTEX_INITIALIZER;
 static char g_ht_msg[200]; static double g_ht_msg_t;
 static void ht_say(const char* fmt, ...) { va_list ap; va_start(ap, fmt); vsnprintf(g_ht_msg, sizeof g_ht_msg, fmt, ap); va_end(ap); g_ht_msg_t = st_wall(); nlog("[nhook] [host] %s", g_ht_msg); }
@@ -57,6 +58,16 @@ static uint32_t ht_unit_of(uint64_t blk, int slot) {
 static int ht_inside(uint64_t* ctx, const float* p, float dz) {   // scenario_location_from_point: inside the map structure?
     static uint16_t loc; static float q[3]; loc = 0xFFFF; q[0] = p[0]; q[1] = p[1]; q[2] = p[2] + dz;
     uint64_t a[2] = {(uint64_t)(uintptr_t)&loc, (uint64_t)(uintptr_t)q}; nh_call(ctx, 0x9bc78, 2, a); return loc != 0xFFFF; }
+// A floor under a point: halo3's collision ray (halo3+0x1fd748: bool (u64 flags, bool, point*, vector*, ignore, ignore, ignore,
+// result*); the vector is the whole ray) straight down, as halo3's own "put it on the ground below" (0x259c7c) calls it: its
+// flags = the runtime default at halo3+0x20ad508 with 0x24000 set, no object ignored (-1 x3), the result's +0x18 / +0x20 zeroed and
+// its +0x28 word -1 first; the hit point at result +0x08. 1 = a hit (*hz its z), 0 = none, -1 = no call possible.
+static int ht_floor(uint64_t* ctx, const float* p, float up, float depth, float* hz) {
+    static float P[3], V[3]; static uint8_t res[0x200]; uint64_t fl = 0; if (rd(g_img + 0x20ad508, &fl, 8)) return -1;
+    P[0] = p[0]; P[1] = p[1]; P[2] = p[2] + up; V[0] = 0; V[1] = 0; V[2] = -depth; memset(res, 0, sizeof res); *(uint16_t*)(res + 0x28) = 0xFFFF;
+    uint64_t a[8] = {(fl & 0xFFFFFFFF00000000ull) | (uint64_t)((uint32_t)fl | 0x24000u), 0, (uint64_t)(uintptr_t)P, (uint64_t)(uintptr_t)V,
+                     0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, (uint64_t)(uintptr_t)res};
+    int hit = (int)(nh_call(ctx, 0x1fd748, 8, a) & 0xff) != 0; if (hit && hz) *hz = *(float*)(res + 0x10); return hit; }
 // halo3's own network layer (its simulation entity table, TLS block +0x240) does not exist in the native app -- the app has
 // its own netcode -- but game_globals +0x11 still says 5 (host), so halo3's "mark this object for a network update"
 // (halo3+0x1ec3c, called by teleport, disconnect-from-map, vehicle exit ...) reads that NULL table: signal 11 at 0x48
@@ -76,6 +87,12 @@ static void ht_do(uint64_t* ctx, HtReq* r) {
     if (!tls || rd(g_img + 0xa39f9c, &idx, 4) || idx >= 64 || rd(tls + (uint64_t)idx * 8, &blk, 8) || !blk) { ht_say("teleport: no game state on this thread"); return; }
     { uint64_t gg = *(uint64_t*)(uintptr_t)(blk + 0x48); uint8_t st = gg ? *(uint8_t*)(uintptr_t)(gg + 0x11) : 0;
       if (st != 5 && st != 1 && !(g_st_hostpeer >= 0 && g_st_hostpeer == g_st_localpeer)) { ht_say("teleport refused: this game is hosted elsewhere (only the host moves players)"); return; } }
+    if (r->kind == 4) {   // do=floorprobe (a diagnostic): "inside the map's open space" at depths around v -- what the floor check sees
+        static const float dz[9] = {1.2f, 0.3f, 0.0f, -0.3f, -0.45f, -0.6f, -0.8f, -1.1f, -1.5f}; char o[180]; int k = 0;
+        for (int i = 0; i < 9; i++) k += snprintf(o + k, sizeof o - (size_t)k, " %+.2f:%s", dz[i], ht_inside(ctx, r->v, dz[i]) ? "open" : "solid");
+        float hz = 0; int h = ht_floor(ctx, r->v, 0.3f, 1.8f, &hz);
+        ht_say("floor probe at (%.2f, %.2f, %.2f): ray down %s;%s", r->v[0], r->v[1], r->v[2], h > 0 ? "hit" : h == 0 ? "no floor within 1.5" : "unavailable", o);
+        if (h > 0) { size_t L = strlen(g_ht_msg); snprintf(g_ht_msg + L, sizeof g_ht_msg - L, " (floor z %.2f)", hz); } return; }
     int who = r->who >= 0 ? r->who : g_ht_my_slot; if (who < 0) { ht_say("teleport: this app has no player of its own here (a dedicated server): add &slot=<player> to say whom to move"); return; }
     uint32_t me = ht_unit_of(blk, who); int ty = -1;
     uint8_t* mp = ht_datum(blk, me, &ty); if (!mp || ty != 0) { ht_say("teleport: player %d has no body right now", who); return; }
@@ -91,10 +108,20 @@ static void ht_do(uint64_t* ctx, HtReq* r) {
     if (r->kind == 1) {   // next to another player: right, left, behind, close behind -- inside the structure at knee and head height
         uint32_t tu = ht_unit_of(blk, r->slot); uint8_t* tp = ht_datum(blk, tu, &ty); if (!tp || ty != 0 || tu == me) { ht_say("teleport: player %d has no body right now", r->slot); return; }
         const float* to = (const float*)(tp + 0x50), * tf = (const float*)(tp + 0x5c); float fx = tf[0], fy = tf[1], fl = sqrtf(fx * fx + fy * fy); if (fl < 1e-4f) { fx = 1; fy = 0; } else { fx /= fl; fy /= fl; }
-        const float cand[4][2] = {{fy, -fx}, {-fy, fx}, {-fx, -fy}, {-0.35f * fx, -0.35f * fy}}; static const char* const cn[4] = {"right", "left", "behind", "close behind"}; int ok = -1;
-        for (int c = 0; c < 4 && ok < 0; c++) { pos[0] = to[0] + cand[c][0]; pos[1] = to[1] + cand[c][1]; pos[2] = to[2] + 0.1f;
-            if (fabsf(pos[0]) > 30000 || fabsf(pos[1]) > 30000 || fabsf(pos[2]) > 30000) continue; if (!ht_inside(ctx, pos, 0.3f) || !ht_inside(ctx, pos, 1.2f)) continue; ok = c; }
+        // A spot also needs a floor: "right of" a player at a ledge was open air -- a player put there fell into Guardian's kill
+        // volume (2026-11-07, our server). Floor = halo3's collision ray from 0.3 above the spot hits something within 1.5 below
+        // it (ht_floor; "solid below the floor" was no test: open floors and thin walkways have open space under them). The
+        // first spot with a floor wins, else the first open one as before. NHOOK_HOST_NOFLOOR=1 = no floor check (old).
+        const float cand[4][2] = {{fy, -fx}, {-fy, fx}, {-fx, -fy}, {-0.35f * fx, -0.35f * fy}}; static const char* const cn[4] = {"right", "left", "behind", "close behind"}; int ok = -1, open1 = -1;
+        static int nofloor = -1; if (nofloor < 0) nofloor = getenv("NHOOK_HOST_NOFLOOR") != 0; int lg = getenv("NHOOK_HOST_LOG") != 0;
+        for (int c = 0; c < 4 && (ok < 0 || lg); c++) { pos[0] = to[0] + cand[c][0]; pos[1] = to[1] + cand[c][1]; pos[2] = to[2] + 0.1f;
+            if (fabsf(pos[0]) > 30000 || fabsf(pos[1]) > 30000 || fabsf(pos[2]) > 30000) continue; if (!ht_inside(ctx, pos, 0.3f) || !ht_inside(ctx, pos, 1.2f)) continue;
+            float fz = 0; int fh = nofloor ? 1 : ht_floor(ctx, pos, 0.3f, 1.8f, &fz), floor = fh != 0;   // (-1: no ray possible -> as before)
+            if (lg) nlog("[nhook] [host] next to: %s (%.2f, %.2f, %.2f) open, floor below: %s (z %.2f)", cn[c], pos[0], pos[1], pos[2], fh > 0 ? "yes" : fh == 0 ? "no" : "not known", fz);
+            if (open1 < 0) open1 = c; if (floor && ok < 0) ok = c; }
+        if (ok < 0) ok = open1;
         if (ok < 0) { ht_say("teleport: no open spot next to player %d", r->slot); return; }
+        pos[0] = to[0] + cand[ok][0]; pos[1] = to[1] + cand[ok][1]; pos[2] = to[2] + 0.1f;
         fwd[0] = to[0] - pos[0]; fwd[1] = to[1] - pos[1]; fwd[2] = 0; float l = sqrtf(fwd[0] * fwd[0] + fwd[1] * fwd[1]); if (l > 1e-4f) { fwd[0] /= l; fwd[1] /= l; } else { fwd[0] = fx; fwd[1] = fy; }
         ht_teleport(ctx, blk, me, pos, fwd); ht_say("moved player %d next to player %d (%s) at (%.1f, %.1f, %.1f)", who, r->slot, cn[ok], pos[0], pos[1], pos[2]); return; }
     if (r->kind == 2) memcpy(pos, r->v, 12); else { pos[0] = mo[0] + r->v[0]; pos[1] = mo[1] + r->v[1]; pos[2] = mo[2] + r->v[2]; }
@@ -125,12 +152,13 @@ static int ht_soft_ceiling(uint64_t* ctx) {   // halo3+0x1bac00(biped, position*
     if (!g_ht_bnd_off) return 0; ctx[0] = 0; ctx[4] += 8; return 1; }
 // ---- invisible walls: the shape builder, around
 // A body hook (nhook.c body_hook_after): halo3 calls the builder directly from lifted code, which the code-table entry hook
-// never saw (0 calls in a live test, 2026-11-07). a[2] = rcx = the shape (also the result), a[5] = r9 = the BSP reference
-// {small*, large*}, a[9] = the 8th argument = the surface index.
+// never saw (0 calls in a live test, 2026-11-07). a[2] = rcx = the shape (also the result), a[5] = r9 -> the BSP reference
+// {small*, large*}; the surface index is the 9th argument ([rbp+0x70] in the x86: `movsxd r14,[rbp+0x70]`), which the builder
+// stores at shape +0x28 -- read there (a[9], the 8th argument, was the wrong one: no wall was ever hidden, 2026-11-07).
 static volatile unsigned long g_ht_inv_calls;
 static void ht_shape(uint64_t* a) {
     g_ht_inv_calls++; if (!g_ht_inv_off) return;
-    uint64_t shape = a[2], refp = a[5]; int32_t sidx = (int32_t)a[9];
+    uint64_t shape = a[2], refp = a[5]; int32_t sidx = shape ? *(int32_t*)(uintptr_t)(shape + 0x28) : -1;
     uint64_t tb = 0; if (!shape || !refp || sidx < 0 || rd(g_img + 0x1fcf4c8, &tb, 8) || !tb) return;
     uint64_t small = *(uint64_t*)(uintptr_t)refp, large = *(uint64_t*)(uintptr_t)(refp + 8); int inv = 0;
     if (small) { uint32_t sa = *(uint32_t*)(uintptr_t)(small + 0x40); if (sa) inv = (*(uint8_t*)(uintptr_t)(tb + (uint64_t)sa * 4 + (uint64_t)sidx * 12 + 0xa) & 2) != 0; }
@@ -193,12 +221,14 @@ static float ht_qf(const char* qs, const char* key, float dflt) { char k[16]; sn
 static int ht_qi(const char* qs, const char* key, int dflt) { char k[16]; snprintf(k, sizeof k, "%s=", key); const char* v = strstr(qs, k); return v ? atoi(v + strlen(k)) : dflt; }
 static int ht_queue(const HtReq* r) { if (!ht_tick_install()) return 0; pthread_mutex_lock(&g_ht_mx); g_ht_req = *r; __atomic_store_n(&g_ht_pending, 1, __ATOMIC_RELEASE); pthread_mutex_unlock(&g_ht_mx); return 1; }
 static int ht_control(const char* act, const char* qs) {   // 1 = handled (ok), 0 = refused, -1 = not a host tool
-    int tp = !strcmp(act, "tpnext") || !strcmp(act, "tpto") || !strcmp(act, "tpby") || !strcmp(act, "explore");
+    int tp = !strcmp(act, "tpnext") || !strcmp(act, "tpto") || !strcmp(act, "tpby") || !strcmp(act, "explore") || !strcmp(act, "floorprobe");
     if (!tp && strcmp(act, "bounds") && strcmp(act, "invwalls") && strcmp(act, "speed")) return -1;
     if (!ht_is_host()) { ht_say("%s refused: only the host of a game can do that (this app is a client here)", act); return 0; }
     HtReq r; memset(&r, 0, sizeof r); r.who = -1;
     if (!strcmp(act, "tpnext")) { r.kind = 1; r.slot = ht_qi(qs, "slot", -1); r.who = ht_qi(qs, "who", -1); return r.slot >= 0 && ht_queue(&r); }
     if (!strcmp(act, "tpto")) { r.kind = 2; r.v[0] = ht_qf(qs, "x", NAN); r.v[1] = ht_qf(qs, "y", NAN); r.v[2] = ht_qf(qs, "z", NAN); r.who = ht_qi(qs, "slot", -1);
+        return isfinite(r.v[0]) && isfinite(r.v[1]) && isfinite(r.v[2]) && ht_queue(&r); }
+    if (!strcmp(act, "floorprobe")) { r.kind = 4; r.v[0] = ht_qf(qs, "x", NAN); r.v[1] = ht_qf(qs, "y", NAN); r.v[2] = ht_qf(qs, "z", NAN);
         return isfinite(r.v[0]) && isfinite(r.v[1]) && isfinite(r.v[2]) && ht_queue(&r); }
     if (!strcmp(act, "tpby")) { r.kind = 3; r.v[0] = ht_qf(qs, "dx", 0); r.v[1] = ht_qf(qs, "dy", 0); r.v[2] = ht_qf(qs, "dz", 0); r.who = ht_qi(qs, "slot", -1); return ht_queue(&r); }
     if (!strcmp(act, "explore")) {   // a spot past the boundaries: the boundaries go off first, then the move
