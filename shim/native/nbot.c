@@ -103,6 +103,7 @@ static void bot_los_do(uint64_t* ctx) {
     if (hit) { const float* h = (const float*)(res + 0x08); float dx = h[0] - P[0], dy = h[1] - P[1], dz = h[2] - P[2]; d = sqrtf(dx * dx + dy * dy + dz * dz); }
     g_los_res = !hit || d > L - 0.5f; g_los_res_tgt = g_los_tgt; g_los_t = mono_s(); g_los_done = q; }
 typedef struct { float x, y, w; } GlLane; static GlLane* g_gll; static int g_ngll; static float g_gll_wsum;   // the lanes as goal material (nbot_goals.c)
+static double g_fjump_until;   // (a jump in a fight: NHOOK_BOT_FJUMP)
 static int bot_fcmp(const void* a, const void* b) { float x = *(const float*)a, y = *(const float*)b; return x < y ? -1 : x > y; }
 // the model's heat for this map -> g_nav.pop (how much real players use each floor node: A* prefers their lanes); once per map
 static void bm_pop(const char* map) {
@@ -320,12 +321,15 @@ static void bot_step_body(void) {
             float ey = bot_wrap(tyaw - yaw0), ep = tpitch - pitch0, err = sqrtf(ey * ey + ep * ep) * 57.2958f, size = atanf(0.4f / (tdist > 0.5f ? tdist : 0.5f)) * 57.2958f;
             g_bot_err = err; g_bot_fire = vis && now - tacq > react && err < (size > 1.2f ? size : 1.2f) + fextra && tdist < 40;
             if (tdist < 1.8f && now - tmelee > 0.7) { tmelee = now; fbtn |= 2; }                                            // B: melee
+            { static float fj = -1; if (fj < 0) { const char* e = getenv("NHOOK_BOT_FJUMP"); fj = e ? strtof(e, 0) : 0.0f; }   // jumps a minute in a fight (walker-coach.py: the winners')
+              if (fj > 0 && bot_rand01() < fj * (float)dt / 60.0f) g_fjump_until = now + 0.25; }
             { float gd0 = 6, gd1 = 16; static int gset = -1; static double gnext; if (gset < 0) gset = getenv("NHOOK_BOT_GREN") != 0;   // (the players' band and rate unless NHOOK_BOT_GREN is set)
               int pl = g_eg.on && g_eg.gren_ok; if (pl) { gd0 = g_eg.gren_d0; gd1 = g_eg.gren_d1; }
               // the next throw's time is drawn ONCE per throw (it was drawn every tick, so the shortest draw won: throws came early)
-              if (!gnext) gnext = now + (pl && !gset ? g_eg.gren_every * (0.5f + bot_rand01()) : gren + 6 * bot_rand01());
+              static float gx = -1; if (gx < 0) { const char* e = getenv("NHOOK_BOT_GRENX"); gx = e ? strtof(e, 0) : 1.0f; }   // (walker-coach.py: x the time between grenades)
+              if (!gnext) gnext = now + gx * (pl && !gset ? g_eg.gren_every * (0.5f + bot_rand01()) : gren + 6 * bot_rand01());
               if ((pl || gren > 0) && tdist > gd0 && tdist < gd1 && vis && now > gnext && now - tacq > react) { tgren = now;
-                  gnext = now + (pl && !gset ? g_eg.gren_every * (0.5f + bot_rand01()) : gren + 6 * bot_rand01()); } }
+                  gnext = now + gx * (pl && !gset ? g_eg.gren_every * (0.5f + bot_rand01()) : gren + 6 * bot_rand01()); } }
             if (now - tgren < 0.15) fbtn |= 0x10000;                                                                       // (left trigger: a grenade)
             if (tdist < 30) { engaged = 1;
                 // closing in: the players pressed in at ~0.8 units/s with shields up and only stopped (-0.03) on low shields; the walkers
@@ -342,7 +346,8 @@ static void bot_step_body(void) {
                     lat = fmaxf(-1.0f, fminf(1.0f, lsc * el / run));
                     // pulled in when beyond the band, never pushed back inside it: the players close in at 1.3 units/s with shields up
                     // on Guardian (engage-compare.py; the push-back made the walkers hover at the band's near edge)
-                    float pull = tdist > p75 * kdist ? 0.6f : 0.0f; r = fmaxf(-1.0f, fminf(1.0f, er / run + pull));
+                    static float rsc = -1; if (rsc < 0) { const char* e = getenv("NHOOK_BOT_RADSCALE"); rsc = e ? strtof(e, 0) : 1.0f; }   // (walker-coach.py: x the replayed closing / backing off)
+                    float pull = tdist > p75 * kdist ? 0.6f : 0.0f; r = fmaxf(-1.0f, fminf(1.0f, rsc * er / run + pull));
                     if (o->shield < retreat && o->shield >= 0) r = -backoff; }
                 // never off the floor: test where this step leads (1 unit along the move); flip the strafe, then drop the back-off
                 float fx = cosf(yaw0), fy = sinf(yaw0), lx = -fy, ly = fx;
@@ -444,7 +449,7 @@ static void bot_step_body(void) {
     { static uint64_t fb = 0; if (!fb) { const char* e = getenv("NHOOK_BOT_FIREBIT"); fb = e ? strtoull(e, 0, 16) : 0x80000ull; }
       static uint64_t gb = 0; if (!gb) { const char* e = getenv("NHOOK_BOT_GRENBIT"); gb = e ? strtoull(e, 0, 16) : 0x40000000ull; }
       static uint64_t pkb = 1; if (pkb == 1) { const char* e = getenv("NHOOK_BOT_PICKBIT"); pkb = e ? strtoull(e, 0, 16) : 0; }
-      uint64_t want = (spar && g_bot_fire ? fb : 0) | ((fbtn & 0x10000) ? gb : 0) | ((fbtn & 0x20000) ? pkb : 0);   // (fbtn bit 16: the grenade pulse, 17: pick up)
+      uint64_t want = (spar && g_bot_fire ? fb : 0) | ((fbtn & 0x10000) ? gb : 0) | ((fbtn & 0x20000) ? pkb : 0) | (now < g_fjump_until ? g_bot_jump : 0);   // (fbtn bit 16: the grenade pulse, 17: pick up)
       if (want) { g_bot_btn = ((out & 4) ? g_bot_btn : 0) | want; out |= 4; } else if (!(out & 4)) g_bot_btn = 0; }
     if (diag) { uint64_t b = 0; int d = bot_diag(&tx, &ty, &b, now); out |= d; if (d & 4) g_bot_btn = b; else if (!(out & 4)) g_bot_btn = 0;
         static double tl; if (now - tl > 0.25) { tl = now; const float* v = o->vel;

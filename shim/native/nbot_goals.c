@@ -188,7 +188,8 @@ static int gl_radar_look(double now, const NovObj* objs, int n, int me, int have
         int k = -1; for (int j = 0; j < na; j++) if (asked[j].h == t->handle) { k = j; break; }
         if (k >= 0 && now - asked[k].t < 6.0) continue;   // (one decision per contact per 6 s)
         if (k < 0) { k = na < 32 ? na++ : (int)arc4random_uniform(32); asked[k].h = t->handle; } asked[k].t = now;
-        if (!look_h && bot_rand01() < g_eg.rd_turn) { look_h = t->handle; look_at = now + g_eg.rd_turn_s * (0.5f + bot_rand01()); look_until = look_at + 1.5;
+        static float rls = -1; if (rls < 0) { const char* e = getenv("NHOOK_BOT_RADARLOOK"); rls = e ? strtof(e, 0) : 1.0f; }   // (walker-coach.py: x the radar-look odds)
+        if (!look_h && bot_rand01() < g_eg.rd_turn * rls) { look_h = t->handle; look_at = now + g_eg.rd_turn_s * (0.5f + bot_rand01()); look_until = look_at + 1.5;
             if (bot_log()) nlog("[nhook] [goal] radar: %08x moving %.1f units away -- looking in %.1f s", t->handle, sqrtf((t->c[0] - o->c[0]) * (t->c[0] - o->c[0]) + (t->c[1] - o->c[1]) * (t->c[1] - o->c[1])), look_at - now); } }
     if (!look_h || now < look_at) return 0;
     if (now > look_until) { look_h = 0; return 0; }

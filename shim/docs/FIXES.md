@@ -2985,6 +2985,20 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   10). LOGIC: the recorder writes the game's match clock at a recording's start (header match_time_at_start, its log line "(match
   time N s)"); observe-whole.py counts a finished recording of 1500+ samples when it is not the visit's first or began under 90 s
   into its match (old logs without the clock: as before).
+- **The walkers coach themselves** (2026-11-08 15:40; nbot.c, nbot_goals.c, shim/tools/walker-coach.py) — WHY: the user: "the
+  walkers can use the coach on themselves eh!?". LOGIC: coach.py's report is made for every walker of a battle (its slot -> the
+  test identity from the battle's samples; names never written) against the WINNERS of the same game class on the same map (40+
+  player-matches), else that class on every map, else every match; each measure moves one knob half its gap in log space (x2 /
+  x0.5 at most a round, 8+ samples): closing in -> NHOOK_BOT_RADSCALE (new: x the replayed closing / backing off), aim error ->
+  NOISE, time to aim back -> REACT, strafing when shot / attacking -> LIBSCALE, jumps a fight-minute -> NHOOK_BOT_FJUMP (new: extra
+  jumps while in sight of the target, Poisson), grenades a fight-minute -> NHOOK_BOT_GRENX (new: x the time between throws),
+  turning to radar contacts -> NHOOK_BOT_RADARLOOK (new: x rd_turn), fight distance by weapon class -> DIST (same-map winners
+  only: distances belong to their map). Measures with a better direction (aim error, aim-back time, radar turns) move a knob only
+  while the walker is behind: the goal is to beat the players, not copy their misses. `walker-coach.py loop [--rounds N] [--secs S]
+  [--n 2..4] [--map M] [--game G] [--teams]` = battle (walker-battle.sh with W<k>_ENV from the knobs, its own tracks folder) ->
+  coach -> next battle; `round <tracks> <samples>` coaches one battle (--dry: no change), `show` prints the knobs and rounds.
+  Per round: K/D, duels won, shot first and the distance to the winners (coach.py's gap averaged; 0 = their numbers) per walker in
+  ReclaimerMac/battles/coach/state.json. New knobs default to the old behaviour (1, 1, 0, 1).
 
 ## 19. Performance
 
