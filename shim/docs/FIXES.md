@@ -2811,6 +2811,21 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   (in view 33%, behind 7%, ~1.75 s), and a movement library (2-s pieces of the attackers' moves by weapon class / distance).
   First numbers (Slayer, mostly FFA BR): the first attacker wins 84% of decided duels; the defender was looking away 52% of the
   time and then won 7% (27% facing); BR fights start at 21.7 units median (14-31); outnumbered players die 41% vs 17%.
+  shim/tools/engage-compare.py <walkers' recordings> = the same measures for a walker battle beside the players' (fight-
+  likeness score; signed measures by their gap): last night's final battle 68% (attack distance 8 vs 14 units, outnumbered
+  deaths 11% vs 53%, second-attacker turn 0.5 vs 1.3 s).
+- **The fighter fights like the players: awareness, target choice, second attackers, weapon bands, real moves** (2026-11-08
+  12:00; shim/native/nbot_engage.c, nbot.c) — WHY: the night's fighter took the NEAREST enemy (with a seen one first), knew every
+  enemy around it, kept one distance band for every weapon and strafed side to side on a timer. LOGIC: engage-model.json
+  (NHOOK_BOT_ENGAGE=<file>): an enemy is known in view (75 deg), when it attacked us (aimed within 12 deg while we were hurt),
+  within 5 units, or our target of the last 3 s; a new target = the best w . features over the known enemies within 45 units
+  (the players' fitted rule) +-1.5 for a clear / blocked line of sight; kept while alive and seen within 1 s; a NEW attacker
+  while we fight for 1 s+ turns us with the players' odds (in view / behind) after their delay x 0.5..1.5, once per attacker;
+  the band = the players' attack distances for the held weapon's class (20+ duels); moves = 2-s pieces of the players' fights
+  (weapon class / distance band) as the throttle with a pull into the band. The A* lane preference (g_nav.pop) also takes the
+  lanes (<map>.lanes on-foot passes, real heatmaps folder; NHOOK_BOT_LANES=<dir>, =0 = heat only): a node keeps the larger of
+  heat and lanes. Offline: shim/tools/engage-load-test.sh (the C loader reads what Python wrote). Live battle test: after the
+  sampling block (one game at a time). SWITCHES: NHOOK_BOT_ENGAGE=0 = the night's fighter; NHOOK_BOT_LANES=0.
 
 ## 19. Performance
 

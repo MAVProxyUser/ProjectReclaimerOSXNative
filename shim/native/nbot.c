@@ -102,6 +102,7 @@ static void bot_los_do(uint64_t* ctx) {
     int hit = (int)(nh_call(ctx, 0x1fd748, 8, a) & 0xff) != 0; float L = sqrtf(V[0] * V[0] + V[1] * V[1] + V[2] * V[2]), d = L;
     if (hit) { const float* h = (const float*)(res + 0x08); float dx = h[0] - P[0], dy = h[1] - P[1], dz = h[2] - P[2]; d = sqrtf(dx * dx + dy * dy + dz * dz); }
     g_los_res = !hit || d > L - 0.5f; g_los_res_tgt = g_los_tgt; g_los_t = mono_s(); g_los_done = q; }
+static int bot_fcmp(const void* a, const void* b) { float x = *(const float*)a, y = *(const float*)b; return x < y ? -1 : x > y; }
 // the model's heat for this map -> g_nav.pop (how much real players use each floor node: A* prefers their lanes); once per map
 static void bm_pop(const char* map) {
     static char done[64]; if (!g_nav.ok || !map || !map[0] || !strcmp(done, map)) return; snprintf(done, sizeof done, "%s", map);
@@ -110,8 +111,7 @@ static void bm_pop(const char* map) {
     FILE* f = fopen(path, "r"); if (!f) return; fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET); if (n <= 0 || n > (64 << 20)) { fclose(f); return; }
     char* txt = malloc((size_t)n + 1); if (!txt) { fclose(f); return; } size_t got = fread(txt, 1, (size_t)n, f); fclose(f); txt[got] = 0;
     char key[96]; snprintf(key, sizeof key, "\"%s\":", map); char* m = strstr(txt, "\"maps\""); m = m ? strstr(m, key) : 0; char* hp = m ? strstr(m, "\"heat\":") : 0;
-    if (!hp) { free(txt); nlog("[nhook] [fight] the model has no heat for %s: shortest paths", map); return; }
-    float* pop = calloc((size_t)g_nav.n, sizeof(float)); int cells = 0; float mx = 0; char* q = strchr(hp, '[') + 1;
+    float* pop = calloc((size_t)g_nav.n, sizeof(float)); int cells = 0; float mx = 0; char* q = hp ? strchr(hp, '[') + 1 : 0;
     while (q && *q) { while (*q == ' ' || *q == '\n' || *q == ',') q++; if (*q != '[') break; float x, y, z, c; if (sscanf(q, "[%f,%f,%f,%f]", &x, &y, &z, &c) != 4 && sscanf(q, "[%f, %f, %f, %f]", &x, &y, &z, &c) != 4) break;
         if (z < -9000) {   // a footprint heatmap cell (no height): every floor node under its 2 x 2 units
             for (float ox = -0.75f; ox <= 0.8f; ox += 0.75f) for (float oy = -0.75f; oy <= 0.8f; oy += 0.75f) {
@@ -119,9 +119,30 @@ static void bm_pop(const char* map) {
                 int cc = cy * g_nav.w + cx; for (uint32_t i = g_nav.first[cc]; i < g_nav.first[cc + 1]; i++) { pop[i] += c / 9.0f; if (pop[i] > mx) mx = pop[i]; } } }
         else { float pz[3] = {x, y, z + 0.5f}; int nd = nav_node_at(pz); if (nd >= 0) { pop[nd] += c; if (pop[nd] > mx) mx = pop[nd]; } }   /* (walker-model.py heat: x, y, z, samples) */
         cells++; q = strchr(q, ']'); if (q) q++; }
-    free(txt); if (mx <= 0) { free(pop); return; }
-    for (int i = 0; i < g_nav.n; i++) pop[i] = pop[i] > 0 ? logf(1 + pop[i]) / logf(1 + mx) : 0;
-    float* old = g_nav.pop; g_nav.pop = pop; free(old); nlog("[nhook] [fight] %s: player lanes from %d heat cells (A* prefers them)", map, cells); }
+    free(txt);
+    if (mx > 0) for (int i = 0; i < g_nav.n; i++) pop[i] = pop[i] > 0 ? logf(1 + pop[i]) / logf(1 + mx) : 0;
+    // the LANES (nlanes.c, 2026-11-08): how many times players crossed each 0.5-unit cell, from the real heatmaps folder (test runs
+    // record into their own; NHOOK_BOT_LANES=<folder>, =0 = heat only): every floor node under a cell gets its on-foot passes,
+    // log-scaled to 1 at the 99th percentile; a node keeps the larger of heat and lanes (routes beat places players stand)
+    int lcells = 0; { const char* ld = getenv("NHOOK_BOT_LANES"); char lp[1100];
+      if (!(ld && !strcmp(ld, "0"))) {
+        if (ld && *ld) snprintf(lp, sizeof lp, "%s/%s.lanes", ld, map); else snprintf(lp, sizeof lp, "%s/Library/Application Support/ReclaimerMac/heatmaps/%s.lanes", h ? h : "", map);
+        LnGrid lg = {0}; LnSrc* src = 0; uint32_t ns = 0; double since = 0;
+        if (ln_read(lp, &lg, &src, &ns, &since) && lg.used) {
+            float* lpop = calloc((size_t)g_nav.n, sizeof(float));
+            for (uint32_t i = 0; lpop && i < lg.cap; i++) { const LnCell* c = &lg.c[i]; if (!(c->foot > 0)) continue; float x = (c->x + 0.5f) * LN_CELL, y = (c->y + 0.5f) * LN_CELL;
+                int cx = (int)floorf((x - g_nav.x0) / g_nav.cell), cy = (int)floorf((y - g_nav.y0) / g_nav.cell); if (cx < 0 || cy < 0 || cx >= g_nav.w || cy >= g_nav.h) continue;
+                int cc = cy * g_nav.w + cx; for (uint32_t k = g_nav.first[cc]; k < g_nav.first[cc + 1]; k++) lpop[k] += c->foot; lcells++; }
+            if (lpop) { int nz = 0; for (int i = 0; i < g_nav.n; i++) if (lpop[i] > 0) nz++;
+                float* v = nz ? malloc(sizeof(float) * (size_t)nz) : 0; int k2 = 0; for (int i = 0; v && i < g_nav.n; i++) if (lpop[i] > 0) v[k2++] = lpop[i];
+                float q99 = 0; if (v && k2) { qsort(v, (size_t)k2, sizeof(float), bot_fcmp); q99 = v[(k2 - 1) * 99 / 100]; }   // (the 99th percentile)
+                free(v);
+                if (q99 > 0) for (int i = 0; i < g_nav.n; i++) { float lv = lpop[i] > 0 ? fminf(1.0f, logf(1 + lpop[i]) / logf(1 + q99)) : 0; if (lv > pop[i]) pop[i] = lv; }
+                free(lpop); }
+        }
+        ln_free(&lg); free(src); } }
+    if (mx <= 0 && !lcells) { free(pop); nlog("[nhook] [fight] no heat or lanes for %s: shortest paths", map); return; }
+    float* old = g_nav.pop; g_nav.pop = pop; free(old); nlog("[nhook] [fight] %s: player lanes from %d heat cells and %d lane cells (A* prefers them)", map, cells, lcells); }
 static int bot_floor_ok(const float* p) {   // a walkable floor node within ~1 unit (fighting moves leave the path: never off a ledge)
     if (!g_nav.ok) return 1; int n = nav_node_at(p); if (n < 0) return 0; float q[3]; nav_pos(n, q);
     return (q[0] - p[0]) * (q[0] - p[0]) + (q[1] - p[1]) * (q[1] - p[1]) < 1.44f && fabsf(q[2] - p[2]) < 1.2f; }
@@ -172,6 +193,7 @@ static int bot_enemy(const NovObj* me, const NovObj* t) {   // the overlay's fri
 static float bot_wrap(float a) { while (a > 3.14159265f) a -= 6.2831853f; while (a < -3.14159265f) a += 6.2831853f; return a; }
 
 static void bot_nav_json(StBuf* s) { nav_json(s); }   // the snapshot's "nav" (the page draws the walker's path and goal)
+#include "nbot_engage.c"   // the fighter's tactics from the players' fights (engage-model.json: awareness, target choice, movement)
 
 // Diagnostics for re-finding the record's fields after an app update (test clients): NHOOK_BOT_THROTTLE=x,y holds that throttle;
 // NHOOK_BOT_BTNSCAN=1 presses record +0xC8 bit k (k = 0..31, one a second, 0.25 s each) -- both log position, velocity and yaw
@@ -215,9 +237,12 @@ static void bot_step_body(void) {
     // the sparring aim: the nearest live enemy's head (the top of its bounding sphere's core, as the loader aimed), from the camera
     if (spar) {
         float bd = 1e30f; int bi = -1;
-        for (int pass = 0; pass < 2 && bi < 0; pass++) for (int i = 0; i < n; i++) { const NovObj* t = &objs[i]; if (t->type || t->dead || i == me) continue;
+        if (g_bot_fighting && g_eg.on) {   // the players' awareness and choice rule (nbot_engage.c)
+            bi = eg_choose(objs, n, me, cam, atan2f(fwd[1], fwd[0]), now, los_get);
+            if (bi >= 0) { float dx = objs[bi].c[0] - cam[0], dy = objs[bi].c[1] - cam[1], dz = objs[bi].c[2] - cam[2]; bd = dx * dx + dy * dy + dz * dz; } }
+        else for (int pass = 0; pass < 2 && bi < 0; pass++) for (int i = 0; i < n; i++) { const NovObj* t = &objs[i]; if (t->type || t->dead || i == me) continue;
             if (!pass && !bot_enemy(o, t)) continue; float dx = t->c[0] - cam[0], dy = t->c[1] - cam[1], dz = t->c[2] - cam[2], d = dx * dx + dy * dy + dz * dz; if (d < bd) { bd = d; bi = i; } }
-        if (g_bot_fighting && bi >= 0 && los_get(objs[bi].handle, now) != 1) {   // the fighter: the nearest enemy in sight (within 40 units) beats a nearer hidden one
+        if (g_bot_fighting && !g_eg.on && bi >= 0 && los_get(objs[bi].handle, now) != 1) {   // the fighter: the nearest enemy in sight (within 40 units) beats a nearer hidden one
             float vd = 1600.0f; int vi = -1; for (int i = 0; i < n; i++) { const NovObj* t = &objs[i]; if (t->type || t->dead || i == me || !bot_enemy(o, t)) continue;
                 float dx = t->c[0] - cam[0], dy = t->c[1] - cam[1], dz = t->c[2] - cam[2], d = dx * dx + dy * dy + dz * dz; if (d < vd && los_get(t->handle, now) == 1) { vd = d; vi = i; } }
             if (vi >= 0) { bi = vi; bd = vd; } }
@@ -246,7 +271,7 @@ static void bot_step_body(void) {
         BKNOB(skill, "NHOOK_BOT_SKILL"); BKNOB(kdist, "NHOOK_BOT_DIST"); BKNOB(kstrafe, "NHOOK_BOT_STRAFE"); BKNOB(kswitch, "NHOOK_BOT_SWITCH");
         BKNOB(fextra, "NHOOK_BOT_FIRE_EXTRA"); BKNOB(retreat, "NHOOK_BOT_RETREAT"); BKNOB(gren, "NHOOK_BOT_GREN"); BKNOB(backoff, "NHOOK_BOT_BACKOFF"); BKNOB(press, "NHOOK_BOT_PRESS");
         #undef BKNOB
-        if (fight) { bm_load(); nlog("[nhook] [fight] on: skill %.2f, distance x%.2f, strafe x%.2f, switch x%.2f, fire slack %.1f deg, back off below shield %.2f (%.2f), press %.2f, grenades every %.0f s",
+        if (fight) { bm_load(); eg_load(); nlog("[nhook] [fight] on: skill %.2f, distance x%.2f, strafe x%.2f, switch x%.2f, fire slack %.1f deg, back off below shield %.2f (%.2f), press %.2f, grenades every %.0f s",
                                      skill, kdist, kstrafe, kswitch, fextra, retreat, backoff, press, gren); } }
     int engaged = 0; float ftx = 0, fty = 0; uint32_t fbtn = 0; g_bot_fighting = fight && spar;
     if (fight && spar && have_tg) {
@@ -286,9 +311,17 @@ static void bot_step_body(void) {
             if (tdist < 30) { engaged = 1;
                 // closing in: the players pressed in at ~0.8 units/s with shields up and only stopped (-0.03) on low shields; the walkers
                 // had backed off hard (-0.37): NHOOK_BOT_PRESS (throttle inside the distance band), NHOOK_BOT_BACKOFF (on low shields / too close)
-                float r = tdist > g_bm.dist_p75 * kdist ? 0.9f : tdist < g_bm.dist_p25 * kdist ? -backoff - 0.2f : press; if (o->shield < retreat && o->shield >= 0) r = -backoff;
+                // (engage-model.json: the band players attack from with this weapon class, and pieces of their real fights as the moves)
+                float p25 = g_bm.dist_p25, p75 = g_bm.dist_p75, run = g_bm.run_speed > 0.5f ? g_bm.run_speed : 2.1f, el = 0, er = 0; const char* wc = "none";
+                if (g_eg.on) { uint64_t wd = (o->wslot >= 0 && o->wslot < 4) ? nov_datum(o->weapons[o->wslot]) : 0; uint32_t wdef = 0;
+                    if (wd && hb_read(wd, &wdef, 4)) wc = eg_wcls(hb_tag_name(wdef)); float a2, b2; if (eg_band(wc, &a2, &b2)) { p25 = a2; p75 = b2; } }
+                float r = tdist > p75 * kdist ? 0.9f : tdist < p25 * kdist ? -backoff - 0.2f : press; if (o->shield < retreat && o->shield >= 0) r = -backoff;
                 if (now > tswitch) { side = -side; tswitch = now + g_bm.strafe_switch * kswitch * (0.6f + 0.8f * bot_rand01()); }
-                float lat = side * fminf(1.0f, kstrafe * (0.25f + g_bm.strafe_rms / (g_bm.run_speed > 0.5f ? g_bm.run_speed : 2.1f)));
+                float lat = side * fminf(1.0f, kstrafe * (0.25f + g_bm.strafe_rms / run));
+                if (g_eg.on && eg_move(wc, tdist, now, &el, &er)) {   // a real player's moves: across as recorded, toward / away pulled into the band
+                    lat = fmaxf(-1.0f, fminf(1.0f, kstrafe * el / run));
+                    float pull = tdist > p75 * kdist ? 0.6f : tdist < p25 * kdist ? -0.5f : 0.0f; r = fmaxf(-1.0f, fminf(1.0f, er / run + pull));
+                    if (o->shield < retreat && o->shield >= 0) r = -backoff; }
                 // never off the floor: test where this step leads (1 unit along the move); flip the strafe, then drop the back-off
                 float fx = cosf(yaw0), fy = sinf(yaw0), lx = -fy, ly = fx;
                 for (int tries = 0; tries < 3; tries++) { float p2[3] = {o->c[0] + (fx * r + lx * lat) * 1.2f, o->c[1] + (fy * r + ly * lat) * 1.2f, o->c[2] - 0.35f};

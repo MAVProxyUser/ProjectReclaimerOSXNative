@@ -65,6 +65,9 @@ while [ $(( $(date +%s) - t0 )) -lt "$TOTAL" ]; do
     kill -0 $RP 2>/dev/null || { echo "the recorder stopped: restarting it"; sleep 10; python3 shim/tools/match-recorder.py --port 8765 --seconds $(( secs - ($(date +%s) - ts) )) --server "$addr" --mode "$mode" >> "$RL" 2>&1 & RP=$!; }
     for q in $(pgrep -f "$APPRE"); do [ "$q" != "$P" ] && { echo "another Project Reclaimer started (pid $q): stopping"; kill $RP; kill "$P"; sleep 3; kill -9 "$P" 2>/dev/null; exit 1; }; done
     grep -aq 'Public join timed out\|join failed\|could not join\|server is full' "$L" 2>/dev/null && { echo "join failed: $addr"; skip="$skip $addr"; break; }
+    # never got into a match (stuck in the pregame lobby after a join -- 2026-11-08 11:35: launched Guardian while the server
+    # moved on to The Pit, 15 minutes "pregame lobby: waiting"): leave after OBS_NOMATCH (300) s and skip the server
+    if ! grep -aq '\[rec\] recording' "$RL" && [ $(( $(date +%s) - ts )) -gt "${OBS_NOMATCH:-300}" ]; then echo "$(date +%H:%M) no match after ${OBS_NOMATCH:-300} s: leaving $addr"; skip="$skip $addr"; break; fi
     # whole matches: finished recordings after the first (that one began when we joined, mid-match), 1500+ samples
     got=$(grep -a ': [0-9]* samples' "$RL" | tail -n +2 | awk '{ if ($3 + 0 >= 1500) n++ } END { print n + 0 }')
     [ "$got" -ge "$WHOLE" ] && { echo "$(date +%H:%M) $got whole match(es) recorded here: next server"; break; }; done

@@ -146,6 +146,7 @@ def stats(D):
     for e in D:
         if e['ctx']['a_veh']: continue
         byw[wcls(e['ctx']['a_wpn'])].append(e['ctx']['dist'])
+    S['attack_distance_all'] = r2(pct([e['ctx']['dist'] for e in D if not e['ctx']['a_veh']], .5))
     S['attack_distance_by_weapon'] = {w: {'n': len(v), 'p25': r2(pct(v, .25)), 'median': r2(pct(v, .5)), 'p75': r2(pct(v, .75))} for w, v in sorted(byw.items(), key=lambda kv: -len(kv[1])) if len(v) >= 5}
     # time to kill (decided duels: from the first attack to the kill), by the winner's weapon class
     ttk = defaultdict(list)

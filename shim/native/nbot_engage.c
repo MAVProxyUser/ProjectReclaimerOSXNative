@@ -1,0 +1,127 @@
+// nbot_engage.c -- the fighter's tactics from how real players fight (included by nbot.c; 2026-11-08 midday, the user: "only AFTER
+// you've learned how players engage in fights ...", "don't just limit the logic to single player engagement ... they may get shot
+// by someone else while fighting 1:1 and change focus"). The numbers come from shim/tools/engage-model.py over the engagement
+// library (shim/tools/engage-extract.py: duels and the multi-player records of the recorded public matches), file
+// ReclaimerMac/tracks/engage-model.json (NHOOK_BOT_ENGAGE=<file>, =0 = off: the old nearest-enemy fighter):
+//   awareness   an enemy is known when it is in view (within EG_VIEW deg of the aim), it attacked us (aimed at us while we were
+//               hurt in the last 1.5 s), it is within 5 units, or it was our target in the last 3 s -- players are caught looking
+//               away half the time (and then win 7% of their duels): the walker does not see through the back of its head
+//   choice      a new target = the known enemy within 45 units with the best score w . features, the players' own choice rule
+//               fitted as a conditional logit (log distance, how far off the aim, attacked me, shield + health, previous target,
+//               a teammate on it, just hurt, height); plus +1.5 when the line of sight is clear, -1.5 when blocked (not in the
+//               data: they attacked whom they saw). The target is KEPT while it lives and was seen in the last second.
+//   second      fighting B for a second or more, a NEW enemy C attacks: the walker turns to C with the players' odds (in view /
+//               behind) after their delay (median ~1.75 s, drawn 0.5..1.5x), decided once per attacker
+//   distance    the band players attack from with the walker's weapon class (25%..75%), when the class has 20+ duels
+//   movement    2-second pieces of real fights (the attacker's speed across / toward the other every 0.1 s) by weapon class and
+//               distance band, played back as the throttle, with a pull back into the band
+#define EG_VIEW 75.0f
+typedef struct { char grp[24]; float lat[20], rad[20]; } EgPiece;
+static struct { int loaded, on, npiece; float w[8]; int has_w; struct { char cls[12]; float p25, med, p75; int n; } band[10]; int nband;
+                float p_view, p_behind, p_mid, turn_s; EgPiece* lib; } g_eg;
+static const char* eg_find(const char* txt, const char* key, const char* end) {   // "key": within [txt, end)
+    char k[64]; snprintf(k, sizeof k, "\"%s\":", key); const char* p = strstr(txt, k); return p && (!end || p < end) ? p + strlen(k) : 0; }
+static float eg_num(const char* txt, const char* key, const char* end, float d) {
+    const char* p = eg_find(txt, key, end); if (!p) return d; while (*p == ' ') p++; if (*p == '[') p++; if (!strncmp(p, "null", 4)) return d; return strtof(p, 0); }
+static const char* eg_close(const char* p) {   // the end of the {...} / [...] that starts at p
+    int dep = 0; for (; *p; p++) { if (*p == '{' || *p == '[') dep++; else if (*p == '}' || *p == ']') { if (--dep == 0) return p + 1; } } return p; }
+static int eg_arr(const char* p, float* out, int max) {   // [a, b, null, ...] -> values (null = 0)
+    int n = 0; if (!p) return 0; while (*p == ' ') p++; if (*p != '[') return 0; p++;
+    while (*p && *p != ']' && n < max) { while (*p == ' ' || *p == ',') p++; if (!strncmp(p, "null", 4)) { out[n++] = 0; p += 4; continue; } char* e; float v = strtof(p, &e); if (e == p) break; out[n++] = v; p = e; }
+    return n; }
+static void eg_load(void) {
+    if (g_eg.loaded) return; g_eg.loaded = 1;
+    const char* e = getenv("NHOOK_BOT_ENGAGE"), * h = getenv("HOME"); if (e && !strcmp(e, "0")) { nlog("[nhook] [fight] engagement model off (NHOOK_BOT_ENGAGE=0)"); return; }
+    char path[1024]; if (e && *e) snprintf(path, sizeof path, "%s", e); else snprintf(path, sizeof path, "%s/Library/Application Support/ReclaimerMac/tracks/engage-model.json", h ? h : "");
+    FILE* f = fopen(path, "r"); if (!f) { nlog("[nhook] [fight] no engagement model at %s: the old fighter", path); return; }
+    fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET); if (n <= 0 || n > (16 << 20)) { fclose(f); return; }
+    char* txt = malloc((size_t)n + 1); if (!txt) { fclose(f); return; } size_t got = fread(txt, 1, (size_t)n, f); fclose(f); txt[got] = 0;
+    static const char* const fk[8] = {"log_dist", "off_aim", "attacked_me", "vitality", "previous_target", "teammate_on_it", "just_hurt", "height"};
+    const char* tw = eg_find(txt, "target", 0);
+    if (tw && *tw == '{') { const char* te = eg_close(tw); for (int i = 0; i < 8; i++) g_eg.w[i] = eg_num(tw, fk[i], te, 0); g_eg.has_w = 1; }
+    const char* db = eg_find(txt, "distance_by_weapon", 0);
+    if (db && *db == '{') { const char* de = eg_close(db);
+        static const char* const cl[] = {"precision", "auto", "shotgun", "sniper", "rocket", "melee", "other", "none"};
+        for (int i = 0; i < 8 && g_eg.nband < 10; i++) { const char* c = eg_find(db, cl[i], de); if (!c) continue; const char* ce = eg_close(c);
+            snprintf(g_eg.band[g_eg.nband].cls, sizeof g_eg.band[0].cls, "%s", cl[i]); g_eg.band[g_eg.nband].p25 = eg_num(c, "p25", ce, 0); g_eg.band[g_eg.nband].med = eg_num(c, "median", ce, 0);
+            g_eg.band[g_eg.nband].p75 = eg_num(c, "p75", ce, 0); g_eg.band[g_eg.nband].n = (int)eg_num(c, "n", ce, 0); g_eg.nband++; } }
+    const char* sa = eg_find(txt, "second_attacker", 0);
+    g_eg.p_view = 0.33f; g_eg.p_behind = 0.07f; g_eg.turn_s = 1.75f;
+    if (sa && *sa == '{') { const char* se = eg_close(sa); g_eg.p_view = eg_num(sa, "turned_if_new_one_in_view", se, g_eg.p_view); g_eg.p_behind = eg_num(sa, "turned_if_new_one_behind", se, g_eg.p_behind);
+        g_eg.turn_s = eg_num(sa, "turn_s_median", se, g_eg.turn_s); }
+    g_eg.p_mid = (g_eg.p_view + g_eg.p_behind) / 2;
+    const char* lb = eg_find(txt, "library", 0);
+    if (lb && *lb == '{') { const char* le = eg_close(lb); g_eg.lib = calloc(1200, sizeof(EgPiece));
+        for (const char* p = lb + 1; g_eg.lib && p < le && g_eg.npiece < 1200; ) {
+            const char* q = strchr(p, '"'); if (!q || q >= le) break; const char* q2 = strchr(q + 1, '"'); if (!q2) break;
+            char grp[24]; snprintf(grp, sizeof grp, "%.*s", (int)(q2 - q - 1), q + 1); const char* arr = strchr(q2, '['); if (!arr || arr >= le) break; const char* ae = eg_close(arr);
+            for (const char* o = strchr(arr, '{'); o && o < ae && g_eg.npiece < 1200; o = strchr(o, '{')) { const char* oe = eg_close(o); EgPiece* pc = &g_eg.lib[g_eg.npiece];
+                if (eg_arr(eg_find(o, "lat", oe), pc->lat, 20) == 20 && eg_arr(eg_find(o, "rad", oe), pc->rad, 20) == 20) { snprintf(pc->grp, sizeof pc->grp, "%s", grp); g_eg.npiece++; }
+                o = oe; }
+            p = ae; } }
+    free(txt); g_eg.on = g_eg.has_w;
+    nlog("[nhook] [fight] engagement model %s: target weights %s (off aim %.2f, log distance %.2f, attacked me %.2f, just hurt %.2f), %d weapon bands, second attacker %.0f%% in view / %.0f%% behind after %.2f s, %d movement pieces",
+         path, g_eg.has_w ? "loaded" : "MISSING", g_eg.w[1], g_eg.w[0], g_eg.w[2], g_eg.w[6], g_eg.nband, g_eg.p_view * 100, g_eg.p_behind * 100, g_eg.turn_s, g_eg.npiece);
+}
+static const char* eg_wcls(const char* tag) {   // the walker's weapon (a tag path) -> engage-model.py's weapon classes
+    if (!tag) return "none";
+    static const struct { const char* k; const char* c; } m[] = {{"sniper", "sniper"}, {"beam_rifle", "sniper"}, {"rocket", "rocket"}, {"spartan_laser", "rocket"}, {"fuel_rod", "rocket"},
+        {"missile", "rocket"}, {"shotgun", "shotgun"}, {"mauler", "shotgun"}, {"energy_sword", "melee"}, {"energy_blade", "melee"}, {"hammer", "melee"}, {"battle_rifle", "precision"},
+        {"carbine", "precision"}, {"magnum", "precision"}, {"dmr", "precision"}, {"assault_rifle", "auto"}, {"smg", "auto"}, {"plasma_rifle", "auto"}, {"spike_rifle", "auto"},
+        {"needler", "auto"}, {"brute_shot", "auto"}, {"machinegun", "auto"}, {"plasma_pistol", "auto"}, {"plasma_cannon", "auto"}, {"sentinel", "auto"}, {0, 0}};
+    for (int i = 0; m[i].k; i++) if (strstr(tag, m[i].k)) return m[i].c; return "other"; }
+static int eg_band(const char* cls, float* p25, float* p75) {   // the players' attack distances with this class (20+ duels)
+    for (int i = 0; i < g_eg.nband; i++) if (!strcmp(g_eg.band[i].cls, cls) && g_eg.band[i].n >= 20 && g_eg.band[i].p75 > g_eg.band[i].p25) { *p25 = g_eg.band[i].p25; *p75 = g_eg.band[i].p75; return 1; }
+    return 0; }
+// per-unit memory: shield + health a moment ago (just hurt), its last drop, whether it aimed at us while we were hurt
+typedef struct { uint32_t h; float vit; double hurt_t, att_t, seen_tgt; int asked; } EgUnit;
+static EgUnit g_egu[128]; static int g_negu;
+static EgUnit* eg_unit(uint32_t h) { for (int i = 0; i < g_negu; i++) if (g_egu[i].h == h) return &g_egu[i];
+    if (g_negu < 128) { EgUnit* u = &g_egu[g_negu++]; memset(u, 0, sizeof *u); u->h = h; u->vit = -1; return u; }
+    EgUnit* u = &g_egu[arc4random_uniform(128)]; memset(u, 0, sizeof *u); u->h = h; u->vit = -1; return u; }
+static int eg_aim_at(const NovObj* t, const float* p, float deg) {   // t's unit aim (+0x1a0) within deg of the line to p
+    float av[3]; if (!t->p || !hb_read(t->p + 0x1a0, av, 12)) return 0; float dx = p[0] - t->c[0], dy = p[1] - t->c[1];
+    float a1 = atan2f(av[1], av[0]), a2 = atan2f(dy, dx), d = fabsf(bot_wrap(a1 - a2)) * 57.2958f; return d < deg; }
+// The choice: returns the index in objs of the target (-1 = nobody known), keeps / switches as the players do.
+static int eg_choose(const NovObj* objs, int n, int me, const float* cam, float yaw0, double now, int (*vis_of)(uint32_t, double)) {
+    const NovObj* o = &objs[me]; static uint32_t cur; static double cur_t0, cur_seen, sw_at; static uint32_t sw_to, prev; static double prev_t; static float myvit = -1; static double my_hurt;
+    float mv = o->shield + o->health; if (myvit >= 0 && mv < myvit - 0.02f) my_hurt = now; myvit = mv;
+    int ci = -1;
+    for (int i = 0; i < n; i++) { const NovObj* t = &objs[i]; if (t->type || i == me) continue; EgUnit* u = eg_unit(t->handle);
+        float v = t->dead ? 0 : t->shield + t->health; if (u->vit >= 0 && v < u->vit - 0.02f) u->hurt_t = now; u->vit = v;
+        if (!t->dead && bot_enemy(o, t) && now - my_hurt < 1.5 && eg_aim_at(t, o->c, 12)) { if (now - u->att_t > 1.5) u->asked = 0; u->att_t = now; }
+        if (t->handle == cur) ci = i; }
+    if (ci >= 0 && (objs[ci].dead || !bot_enemy(o, &objs[ci]))) ci = -1;
+    if (ci >= 0 && vis_of(cur, now) == 1) cur_seen = now;
+    // a second attacker while fighting the current target for a second or more: turn to it with the players' odds, once per attacker
+    if (ci >= 0 && now - cur_t0 > 1.0) for (int i = 0; i < n; i++) { const NovObj* t = &objs[i]; if (t->type || t->dead || i == me || t->handle == cur || !bot_enemy(o, t)) continue;
+        EgUnit* u = eg_unit(t->handle); if (now - u->att_t > 0.2 || u->asked) continue; u->asked = 1;
+        float dx = t->c[0] - cam[0], dy = t->c[1] - cam[1], off = fabsf(bot_wrap(atan2f(dy, dx) - yaw0)) * 57.2958f;
+        float p = off < 45 ? g_eg.p_view : off >= 90 ? g_eg.p_behind : g_eg.p_mid;
+        if (bot_rand01() < p) { sw_to = t->handle; sw_at = now + g_eg.turn_s * (0.5f + bot_rand01()); if (bot_log()) nlog("[nhook] [fight] second attacker %08x (%.0f deg off): turning to it in %.1f s", t->handle, off, sw_at - now); }
+        else if (bot_log()) nlog("[nhook] [fight] second attacker %08x (%.0f deg off): staying on the target", t->handle, off); }
+    if (sw_to && now >= sw_at) { for (int i = 0; i < n; i++) if (objs[i].handle == sw_to && !objs[i].dead && i != me) { prev = cur; prev_t = now; cur = sw_to; cur_t0 = now; cur_seen = now; ci = i; break; } sw_to = 0; }
+    if (ci >= 0 && now - cur_seen < 1.0) return ci;   // (kept: alive and seen in the last second)
+    // a new target: the players' choice rule over the KNOWN enemies within 45 units
+    int bi = -1; float bs = -1e30f;
+    for (int i = 0; i < n; i++) { const NovObj* t = &objs[i]; if (t->type || t->dead || i == me || !bot_enemy(o, t)) continue;
+        float dx = t->c[0] - cam[0], dy = t->c[1] - cam[1], dz = t->c[2] - cam[2], d = sqrtf(dx * dx + dy * dy + dz * dz); if (d > 45) continue;
+        EgUnit* u = eg_unit(t->handle); float off = fabsf(bot_wrap(atan2f(dy, dx) - yaw0)) * 57.2958f; int att = now - u->att_t < 1.5, pv = t->handle == prev && now - prev_t < 3.0;
+        if (!(off < EG_VIEW || att || d < 5 || pv || t->handle == cur)) continue;   // (unknown: behind us and quiet)
+        int mate = 0; for (int k = 0; k < n && !mate; k++) { const NovObj* m = &objs[k]; if (m->type || m->dead || k == me || bot_enemy(o, m)) continue;   /* (a teammate: free-for-all has none) */ mate = eg_aim_at(m, t->c, 8); }
+        float f[8] = {logf(d > 0.5f ? d : 0.5f), off / 180.0f, (float)att, fminf(1.5f, (t->shield + t->health) / 2), (float)pv, (float)mate, (float)(now - u->hurt_t < 1.0), (t->c[2] - o->c[2]) / 5.0f};
+        float s = 0; for (int k = 0; k < 8; k++) s += g_eg.w[k] * f[k];
+        int vs = vis_of(t->handle, now); s += vs == 1 ? 1.5f : vs == 0 ? -1.5f : 0;
+        if (s > bs) { bs = s; bi = i; } }
+    if (bi >= 0 && objs[bi].handle != cur) { if (cur) { prev = cur; prev_t = now; } cur = objs[bi].handle; cur_t0 = now; cur_seen = now;
+        if (bot_log()) nlog("[nhook] [fight] new target %08x (score %.2f)", cur, bs); }
+    else if (bi < 0 && ci >= 0) return ci;   // (nobody else known: stay on the hidden one -- the walker hunts it)
+    return bi; }
+// movement: a piece of a real fight by weapon class / distance band, played at 10 rows a second
+static int eg_move(const char* cls, float dist, double now, float* lat, float* rad) {
+    static int cur = -1; static double t0; if (!g_eg.npiece) return 0;
+    if (cur < 0 || now - t0 >= 2.0) { const char* band = dist < 6 ? "close" : dist < 15 ? "mid" : "far"; char g[24]; snprintf(g, sizeof g, "%s/%s", cls, band);
+        int cand[1200], nc = 0; for (int i = 0; i < g_eg.npiece; i++) if (!strcmp(g_eg.lib[i].grp, g)) cand[nc++] = i;
+        if (!nc) { snprintf(g, sizeof g, "/%s", band); for (int i = 0; i < g_eg.npiece; i++) if (strstr(g_eg.lib[i].grp, g)) cand[nc++] = i; }   // (any weapon at this distance)
+        if (!nc) return 0; cur = cand[arc4random_uniform((uint32_t)nc)]; t0 = now; }
+    int k = (int)((now - t0) * 10); if (k > 19) k = 19; *lat = g_eg.lib[cur].lat[k]; *rad = g_eg.lib[cur].rad[k]; return 1; }
