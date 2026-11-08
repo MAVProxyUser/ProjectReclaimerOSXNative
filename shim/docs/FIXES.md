@@ -2228,6 +2228,47 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   n bytes of the first 3 datagrams each way per peer, debug only) and the app's `--ui-script` pressing SERVER BROWSER in a
   test-profile run. A Network.framework QUIC prober (the 0.9 protocol) was tried first: 0.10 servers don't speak it.
 
+- **nhook: the sparring aim in the native app** (2026-11-07; new shim/native/nbot.c, nstats.c snapshot / st_control,
+  shim/tools/native-spar.sh; backlog N15, the loader's #17) — WHY: the user picked it to port ("wrap up the rest"). HOW: halo3's
+  per-player control record (TLS block +0xC0, 4 x 0x110 bytes; +0xC0 unit, +0xC8 buttons, +0xD0 flags, +0xD4 yaw, +0xD8 pitch,
+  +0xDC / +0xE0 throttle; static RE: halo3+0xf7354 runs, per local player, the update 0xf66ac then the reader 0xf7178 that copies
+  the record into the unit's control). In the app both are its OWN code (their code-table entries are a `b` into its text: a
+  body hook on 0xf66ac was refused), so a text hook at the entry of the app's 0xf7178 (ctx[1] = the local player index) writes
+  record 0's yaw / pitch toward the nearest live enemy's head (the loader's aim point: the bounding sphere's centre + 0.55 r,
+  from the observer camera) just before it is copied -- what the app's own aim request (aim_at_nearest_player, 0x102734f00)
+  writes once. A thread (shim-bot, 30 Hz) decides; the hook only copies. Checked live: a moving practice target followed within
+  0.5 deg; on our server (shim/tools/native-spar-test.sh) the SERVER's page has the partner's aim on the other player, median
+  0.01 deg. The camera looks 4.9 deg above the record's pitch, so the page's "aim off by" is measured against the record. Test
+  clients only, as in the loader (it takes over a player's view): the app must run a test profile (RECLAIMER_PROFILE_DIR; the
+  app's test profile refuses public servers itself), in a local game or on a server at a loopback / private address. Switches:
+  NHOOK_SPAR=1, the page's Sparring aim button (do=spar&on=), NHOOK_SPAR_LOG=1; the Hook cost panel's "bot" switch;
+  NHOOK_NO_BOT=1 = none of it. shim/tools/native-spar.sh = the second test identity on our server with the aim on.
+- **nhook: the walker in the native app; nav.c shared** (2026-11-07; nbot.c, shim/src/nav.c NAV_CORE / NAV_TOOL_PATH_FN /
+  g_nav_mode_rt, noverlay.c g_nov_collect_mx / g_nov_units_only, stats_page.html "Walk"; backlog N16, the loader's #32) — WHY:
+  the user picked it to port. HOW: nav.c's graph, danger map, A*, roam goals, builder and page path are compiled into nhook
+  (NAV_CORE: without the loader's stick driver nav_step / nav_pad); the walker writes the record's yaw (at most ~0.2 rad a step,
+  looking a little down) and throttle (forward, left: NHOOK_BOT_THROTTLE=0,1 moved a player facing +y toward -x) and, when
+  stuck, the jump bit (record +0xC8 bit 1; bit 0 = crouch: NHOOK_BOT_BTNSCAN=1). With the aim on it walks the path in any
+  direction relative to the view. Two changes from the loader's walker: no stuck detection while it strafes beside the enemy
+  (side to side is no progress by design: it took that for stuck and backed off blind, off a ledge into Guardian's kill volume),
+  and the back-off walks toward a path node already walked. LIMIT: only where this client's moves count -- a local game, or one
+  it hosts. A joined client's movement reaches the server from the app's own input (its IOHID keyboards and game controllers),
+  not from halo3's record: the throttle moved only the client's prediction and the server kept the player at its spawn (both
+  pages, 2026-11-07); a key event sent to the app's window did not move it either. So the page offers the walker only then
+  (walk_available), and the sparring partner on a server stands still. Checked live: roaming a local Guardian game, 5 goals and
+  128 units in 80 s (native-spar-test.sh). Switches: NHOOK_NAV=roam|enemy|x,y,z|vehicle:<name>, the page's Walk list
+  (do=walk&mode=), PELOAD_NAV_LOG=1 and nav.c's PELOAD_NAV_* knobs; NHOOK_NO_BOT=1 = none of it. The loader is unchanged.
+- **nhook: the page's mic switch** (2026-11-07; nhook.c my_AudioUnitRender, nbot.c mic_json / g_mic_muted, nstats.c st_control
+  do=mic; backlog N17, the loader's #22) — WHY: the user picked it to port. HOW: the app records its microphone with an AUHAL unit
+  whose input callback pulls the samples with AudioUnitRender(..., bus 1, ...); nhook interposes AudioUnitRender and zeroes
+  bus 1's buffers while muted, so the app's voice hears silence (nothing goes out with an open mic; silence with the talk key).
+  The page's Mic button (the loader's: do=mic&on=) shows once the app has captured in the last 30 s, or while muted;
+  NHOOK_MIC_MUTED=1 starts muted. NOT checked live: test clients open no microphone ("[voice] no capture (no microphone)"),
+  and a test with the real microphone would capture the room -- it waits for the user's own game. Off: the Hook cost panel's
+  "mic" switch (the interposer then passes everything through).
+- **nhook snapshot: each player's aim** (2026-11-07; nstats.c st_snapshot "aim") — WHY: checking that the sparring partner's
+  aim reaches the server needed the server's view of it; "facing" (+0x5c) is the body, which follows the way it walks. HOW:
+  "aim": [yaw, pitch] in degrees from the unit's aim vector +0x1a0 (teleport.md). No old-behaviour switch (one more field).
 - **"Run 2.4x" removed** (2026-10-19, revert 606a38c) — it crashed the client as soon as it was used; the user asked for it
   to be deleted. The page's Speed 2x / speed menu (the host's movement-speed trait) is unchanged. (10-19)
 - **Stats server: headers only, Host, Origin; no open CORS** (security review 2026-10-19) — stats.c `st_conn`, `st_hdr`,
@@ -3001,6 +3042,10 @@ Numbers are from the commit messages; PERF-PLAN.md has the measurements. Compare
   **shim/tools/sample-binaries.py** — a thread's samples by the image they end in (translated guest code "Rosetta JIT",
   "Rosetta Runtime Routines", the loader, system libraries). **shim/tools/ab-phases.py** — fps and [submit] waits per
   PELOAD_AB phase. **shim/tools/hitch-sample.sh** — `sample` a client when a second drops below N fps.
+
+- **re-tools/tlsref.py** (2026-11-07) — who uses a halo3 TLS block field: halo3's idiom loads the field offset into a
+  register (`mov edx, 0xc0` ; `mov rax, [rax+rcx*8]` ; `mov rsi, [rdx+rax]`), which a plain `[reg + 0xc0]` search misses;
+  `--then` keeps only hits that go on to touch given offsets. Found the player control record's users (halo3+0xf3f48..0xf9520).
 
 ## 21. Superseded workarounds (kept for history; most switches still exist)
 

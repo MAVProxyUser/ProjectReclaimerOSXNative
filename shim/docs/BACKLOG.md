@@ -6,7 +6,7 @@ Kept current as work lands. Open items are ranked (the order they are worked); f
 
 Since 2026-11-06 the user plays the native app, so this is the live list. The loader-era list below is closed (every item
 done / fixed / closed; #47's pending live check passed in the native app 2026-11-07). Ranked 2026-11-07; open since the
-evening of 2026-11-07: N15-N17, the loader features the user picked to port (N1-N14 done):
+evening of 2026-11-07: nothing to build (N1-N16 done; N17 built, its live check waits for the user's own game):
 
 | # | Item | Status / notes |
 |---|---|---|
@@ -24,9 +24,9 @@ evening of 2026-11-07: N15-N17, the loader features the user picked to port (N1-
 | N12 | **A native dedicated server test** | DONE 2026-11-07: shim/tools/native-dedicated.sh (local-only config) with nhook; a test client joined it; both pages right |
 | N13 | **Host tools on the native app** (user, 2026-11-07: "port the host tools too") | DONE 2026-11-07: teleport (next to / point / delta / spots), boundaries off, invisible walls off, speed; all checked live: a hosted match, our native dedicated server, next to a player with two clients (shim/tools/native-host-test.sh tpnext), invisible walls with the loader's test wall (native-host-test.sh walls; the surface index was wrong until then); next to a player now needs a floor (halo3's collision ray) |
 | N14 | **Found in the two-client tests** (2026-11-07) | DONE 2026-11-07 (FIXES.md, same day): the first spawn line named Guardian's weapons from the loading scenery's tags (the map being played now follows the engine's scenario at once); a dead player's dropped weapon was a "spawn" on clients; a client's opening weapons were several lines; a medal came before its kill; next to a player could be over a drop; the server's next game was no new match; a player who left was "left" only after the game's end (now from the app's HUD notices); one server start had no stats page (the probe ran before the engine was ready); shim/tools/spawn-test.sh compiles again and covers the native copy |
-| N15 | **Sparring aim, natively** (#17; user, 2026-11-07: "wrap up the rest") | OPEN: a test client that turns toward the nearest enemy's head, switchable from its page |
-| N16 | **The walker, natively** (#32; same) | OPEN: walk a test client along the map's floor graph (roam / enemy / a point), avoiding death hotspots |
-| N17 | **The page's mic switch, natively** (#22; same) | OPEN: microphone on / off from the stats page |
+| N15 | **Sparring aim, natively** (#17; user, 2026-11-07: "wrap up the rest") | DONE 2026-11-07 (nbot.c; FIXES.md "the sparring aim in the native app"): halo3's control record's yaw / pitch, written at the entry of the app's own 0xf7178; the server's page shows the partner aiming at the other player, median 0.01 deg (shim/tools/native-spar-test.sh); test clients only; shim/tools/native-spar.sh |
+| N16 | **The walker, natively** (#32; same) | DONE 2026-11-07, local games only (nbot.c + the shared nav.c core; FIXES.md "the walker in the native app"): 5 goals / 128 units in 80 s on Guardian; a joined client's moves come from the app's own input, so on a server the page offers no walker (the partner stands still); stuck handling no longer backs off blind |
+| N17 | **The page's mic switch, natively** (#22; same) | BUILT 2026-11-07, not checked live (nhook.c my_AudioUnitRender; FIXES.md "the page's mic switch"): the app's capture samples zeroed while muted; test clients open no microphone, so it waits for the user's own game |
 
 From the loader, the user's call (2026-11-07): CLOSED, not ported -- auto-vote (#50), graphics quality from the page (#68; the app's
 own Settings menu has it), the late camera update (mouse only; the user plays with a controller). To port: the sparring aim (#17),
