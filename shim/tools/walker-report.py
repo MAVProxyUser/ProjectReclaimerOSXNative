@@ -75,7 +75,7 @@ def fitness_chart(train):
 
 # ---- sections
 src = real['source'] if real else {}; bsrc = bots['source'] if bots else {}
-summary = [('Real-player samples', '{:,}'.format(src.get('samples', 0)), '%s players, %s engagements' % (src.get('players', 0), src.get('engagements', 0))),
+summary = [('Free-for-all samples', '{:,}'.format(src.get('samples', 0)), '%s players, %s engagements' % (src.get('players', 0), src.get('engagements', 0))),
            ('Walker battles', str(len(battles)), '%d training generations' % len(train)),
            ('Kills in the last battle', str(sum((p.get('kills') or 0) for p in battles[-1][1])) if battles else '–', '%d s, 4 walkers' % battles[-1][2] if battles else ''),
            ('Champion fitness', fmt(best['fitness'], 1) if best else '–', ('mean of %s battles, %s kills / %s deaths' % (best.get('battles'), best.get('kills', '?'), best.get('deaths', '?'))) if best else '')]
@@ -94,7 +94,7 @@ summary.insert(1, ('Human-likeness', '%.0f%%' % human if human is not None else 
 rows_html = ''.join('<tr><td>%s</td><td class="n">%s</td><td class="n">%s</td></tr>' % (E(l), fmt(a), fmt(b)) for l, a, b in cmp_rows)
 tact = ''
 if best:
-    names = {'dist': 'fighting distance (x the players\')', 'strafe': 'strafe strength (x)', 'switch': 'strafe switch time (x)', 'fire': 'aim slack when firing (deg)', 'retreat': 'back off below shield', 'gren': 'seconds between grenades',
+    names = {'dist': 'fighting distance (x the players\')', 'strafe': 'strafe strength (x)', 'switch': 'strafe switch time (x)', 'fire': 'aim slack when firing (deg)', 'retreat': 'retreat when shields fall below (share)', 'gren': 'seconds between grenades',
              'press': 'pressing in (throttle)', 'backoff': 'back-off on low shields (throttle)'}
     tact = ''.join('<tr><td>%s</td><td class="n">%s</td></tr>' % (E(names.get(k, k)), fmt(v)) for k, v in best['tactics'].items())
 _rn = runs_of(train)
@@ -158,7 +158,7 @@ code { font: 12.5px var(--mono); background: var(--panel); border: 1px solid var
 <p class="note">The server counted no hits during either run (its hit meter needs rendered frames; fixed afterwards), so kills and deaths alone decided. Run 1 selected on single battles, run 2 on the mean of three.</p>
 <div class="key"><span><i style="background:var(--accent)"></i>best walker</span><span><i style="background:var(--dim)"></i>average</span></div>@@8@@</div>
 <div class="tbl"><table><thead><tr><th class="n">Battle</th><th class="n">Run · gen</th><th class="n">Best</th><th class="n">Average</th><th class="n">Kills</th></tr></thead><tbody>@@9@@</tbody></table>
-<p class="note" style="margin-top:12px">Best tactics so far:</p><table><tbody>@@10@@</tbody></table></div></div></section>
+<p class="note" style="margin-top:12px">Champion tactics:</p><table><tbody>@@10@@</tbody></table></div></div></section>
 <section><h2>Human, step by step</h2><p>The same score after each change, each measured on its own battle with walker-compare.py (100% means the real players' numbers).</p>
 <div class="tbl"><table><thead><tr><th>Walkers</th><th class="n">Human-likeness</th></tr></thead><tbody>@@12@@</tbody></table></div></section>
 <section><h2>Last battle</h2><div class="tbl"><table><thead><tr><th>Walker</th><th class="n">Kills</th><th class="n">Deaths</th><th class="n">Shots</th></tr></thead><tbody>@@11@@</tbody></table></div></section>
@@ -168,7 +168,7 @@ code { font: 12.5px var(--mono); background: var(--panel); border: 1px solid var
 <li>halo3's own collision ray answers "can I see him" ten times a second. The walker only fires with a clear line, and it does not track enemies through walls.</li>
 <li>Distance, strafing, back-off and aim noise come from the real players' numbers. Paths prefer the lanes players actually use.</li></ol>
 <p class="note">Not yet: weapon pickup (none of the control record's 64 button bits picks a weapon up), the real players' fighting distance on a small map (Guardian fights run closer than the recorded maps), and more real-player fights (the recordings hold @@13@@ engagements; Infection games count only for the lanes).</p>
-<p class="note">Run it again: <code>bash shim/tools/walker-battle.sh 4 300</code>, <code>python3 shim/tools/walker-train.py 8 300</code>, <code>python3 shim/tools/walker-compare.py</code>.</p></section>
+<p class="note">Run it again: <code>bash shim/tools/walker-battle.sh 4 300</code>, <code>python3 shim/tools/walker-train.py 8 300 --resume</code>, <code>python3 shim/tools/walker-train.py --champion</code>, <code>python3 shim/tools/walker-compare.py</code>.</p></section>
 </div>'''
 VALUES = [E(time.strftime('%d %b %Y')),
              ''.join('<div class="fig"><span class="k">%s</span><span class="v">%s</span><span class="s">%s</span></div>' % (E(k), E(v), E(s)) for k, v, s in summary),
