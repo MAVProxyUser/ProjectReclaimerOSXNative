@@ -23,7 +23,8 @@ static struct { int loaded, on, npiece, nmine; float w[8]; int has_w; struct { c
                 float p_view, p_behind, p_mid, turn_s; EgPiece* lib; int gren_ok; float gren_every, gren_d0, gren_d1;
                 float rd_turn, rd_turn_s, p_killer, p_spot, it_near, it_mid, it_far; } g_eg;   // (behaviour: radar, revenge, items)
 static const char* eg_find(const char* txt, const char* key, const char* end) {   // "key": within [txt, end)
-    char k[64]; snprintf(k, sizeof k, "\"%s\":", key); const char* p = strstr(txt, k); return p && (!end || p < end) ? p + strlen(k) : 0; }
+    char k[64]; snprintf(k, sizeof k, "\"%s\":", key); const char* p = strstr(txt, k); if (!p || (end && p >= end)) return 0;
+    p += strlen(k); while (*p == ' ' || *p == '\n' || *p == '\t') p++; return p; }   // (whitespace after the colon: a pretty-printed model too)
 static float eg_num(const char* txt, const char* key, const char* end, float d) {
     const char* p = eg_find(txt, key, end); if (!p) return d; while (*p == ' ') p++; if (*p == '[') p++; if (!strncmp(p, "null", 4)) return d; return strtof(p, 0); }
 static const char* eg_close(const char* p) {   // the end of the {...} / [...] that starts at p

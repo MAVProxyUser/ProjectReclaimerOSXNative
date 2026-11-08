@@ -38,12 +38,27 @@ int main(void) {
                           "objects\\weapons\\rifle\\sniper_rifle\\sniper_rifle", "objects\\weapons\\support_high\\rocket_launcher\\rocket_launcher", "objects\\weapons\\pistol\\needler\\needler", 0};
     for (int i = 0; tags[i]; i++) printf("C %s\n", eg_wcls(tags[i]));
     float a, b; for (int i = 0; i < g_eg.nband; i++) printf("E %s %d\n", g_eg.band[i].cls, eg_band(g_eg.band[i].cls, &a, &b));
+    if (getenv("OVERLAY_TEST")) {   // the per-map overlay: maps/testmap.engage.json (+ its slayer section) over the aggregate
+        eg_load_for("testmap", "Slayer");
+        printf("O %.4f %.4f %.4f %.4f %d %d\n", g_eg.w[1], g_eg.p_view, g_eg.p_behind, g_eg.rd_turn, g_eg.npiece, g_eg.nmine);
+        for (int i = 0; i < g_eg.nband; i++) printf("OB %s %d %.2f %.2f\n", g_eg.band[i].cls, g_eg.band[i].n, g_eg.band[i].p25, g_eg.band[i].p75); }
     return 0; }
 EOF
 cp shim/native/nbot_engage.c "$T/"
 clang -O1 -Wall -Wno-unused-function -o "$T/t" "$T/t.c" 2>&1 | grep -v '^$' | head -5
 [ -x "$T/t" ] || { echo "FAIL build"; exit 1; }
-NHOOK_BOT_ENGAGE="$M" "$T/t" 2>"$T/log" > "$T/out"; sed 's/^/  /' "$T/log"
+mkdir -p "$T/model/maps"; cp "$M" "$T/model/engage-model.json"
+python3 - "$T/model/maps/testmap.engage.json" <<'PY'
+import json, sys
+piece = {'d': 5.0, 'lat': [0.5] * 20, 'rad': [0.25] * 20, 'sh': 1.0}
+m = {'target': {'log_dist': -0.1, 'off_aim': -3.0, 'attacked_me': 0.5, 'vitality': 0.1, 'previous_target': -1.0, 'teammate_on_it': 0.2, 'just_hurt': 0.3, 'height': 0.0},
+     'distance_by_weapon': {'auto': {'n': 50, 'p25': 3.0, 'median': 6.0, 'p75': 9.0}, 'sniper': {'n': 5, 'p25': 40.0, 'median': 50.0, 'p75': 60.0}},
+     'multi': {'second_attacker': {'turned_if_new_one_in_view': [0.5, 40], 'turned_if_new_one_behind': [0.2, 40], 'turn_s_median': 1.0}},
+     'behaviour': {'radar': {'turn_moving_in_range': 0.4, 'turn_s_median': 1.0}}, 'library': {'auto/close': [piece]},
+     'by_class': {'slayer': {'multi': {'second_attacker': {'turned_if_new_one_in_view': [0.6, 40]}}, 'library': {'auto/mid': [piece]}}}}
+json.dump(m, open(sys.argv[1], 'w'))
+PY
+NHOOK_BOT_ENGAGE="$T/model/engage-model.json" OVERLAY_TEST=1 "$T/t" 2>"$T/log" > "$T/out"; sed 's/^/  /' "$T/log"
 python3 - "$M" "$T/out" <<'EOF'
 import json, sys
 m = json.load(open(sys.argv[1])); L = open(sys.argv[2]).read().splitlines(); fails = 0
@@ -75,5 +90,16 @@ C = [l.split()[1] for l in L if l.startswith('C ')]
 check('weapon classes', C == ['precision', 'auto', 'melee', 'sniper', 'rocket', 'auto'], str(C))
 E = {l.split()[1]: int(l.split()[2]) for l in L if l.startswith('E ')}
 check('a band is used from 20 duels', all(E[k] == (1 if v['n'] >= 20 and v['p75'] > v['p25'] else 0) for k, v in m['distance_by_weapon'].items() if k in E))
+O = next((l for l in L if l.startswith('O ')), None)
+if O:
+    v = O.split()[1:]; w1, pv, pb, rt, npc, nm = float(v[0]), float(v[1]), float(v[2]), float(v[3]), int(v[4]), int(v[5])
+    want_pieces = min(sum(len(x) for x in m['library'].values()), 2400) + 2
+    check('overlay: the map\'s target weights replace the aggregate\'s', abs(w1 - (-3.0)) < 1e-3, str(w1))
+    check('overlay: the slayer section wins over the map (second attacker in view 0.6), the map over the aggregate (behind 0.2)', abs(pv - 0.6) < 1e-3 and abs(pb - 0.2) < 1e-3, '%s %s' % (pv, pb))
+    check('overlay: the map\'s radar look (0.4)', abs(rt - 0.4) < 1e-3, str(rt))
+    check('overlay: the map\'s 2 pieces added, marked its own', npc == want_pieces and nm == 2, '%d pieces (%d its own), want %d / 2' % (npc, nm, want_pieces))
+    OB = {l.split()[1]: l.split()[2:] for l in L if l.startswith('OB ')}
+    check('overlay: the map\'s auto band (50 duels) replaces the aggregate\'s', OB.get('auto', [0, 0, 0])[1:] == ['3.00', '9.00'], str(OB.get('auto')))
+    check('overlay: a map band from under 20 duels is ignored (sniper keeps the aggregate\'s)', 'sniper' not in OB or OB['sniper'][1] != '40.00', str(OB.get('sniper')))
 print('engage load test: %s' % ('all PASS' if not fails else '%d FAIL' % fails)); sys.exit(1 if fails else 0)
 EOF
