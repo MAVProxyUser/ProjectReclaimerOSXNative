@@ -36,7 +36,8 @@ def tasks_cmd():
 
 KINDS = [('observe-public.sh', 'Observer (public games)'), ('match-recorder.py', 'Match recorder'), ('walker-battle.sh', 'Walker battle'),
          ('walker-train.py', 'Walker training'), ('native-firefight.sh', 'Firefight run'), ('engage-extract.py', 'Engagement extraction'),
-         ('engage-model.py', 'Engagement model'), ('lanes-import.py', 'Lanes import'), ('engage-compare.py', 'Walkers vs players')]
+         ('engage-model.py', 'Engagement model'), ('lanes-import.py', 'Lanes import'), ('engage-compare.py', 'Walkers vs players'), ('learnings.py', 'Learnings'),
+         ('refresh: new recordings', 'Learning refresh (every 20 min)')]
 def procs():
     try: out = subprocess.run(['ps', '-axo', 'pid,etime,command'], capture_output=True, text=True, timeout=5).stdout.splitlines()[1:]
     except Exception: return [], []
@@ -97,7 +98,9 @@ def status():
     try: direction = json.load(open(DIRECTION))
     except Exception: direction = None
     per_map = sorted(os.path.basename(p)[:-len('.engage.json')] for p in glob.glob(os.path.join(TR, 'maps', '*.engage.json')))
-    return {'now': time.time(), 'jobs': jobs, 'apps': apps, 'direction': direction, 'tome': tome_load(), 'per_map_models': per_map, 'observer_log': tail(obs[0], 8) if obs else [], 'recorder': tail(rec[0], 4) if rec else [],
+    try: learn = json.load(open(os.path.join(TR, 'learnings.json')))
+    except Exception: learn = None
+    return {'now': time.time(), 'jobs': jobs, 'apps': apps, 'direction': direction, 'tome': tome_load(), 'per_map_models': per_map, 'learnings': learn, 'observer_log': tail(obs[0], 8) if obs else [], 'recorder': tail(rec[0], 4) if rec else [],
             'live': live, 'totals': totals(), 'tasks': tasks_load()}
 
 PAGE = r'''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Work board</title>
@@ -108,11 +111,15 @@ h1{font-size:20px;margin:0 0 4px}h2{font-size:13px;letter-spacing:.08em;text-tra
 .row{display:flex;gap:8px;align-items:baseline;padding:3px 0;border-bottom:1px solid var(--line)}.row:last-child{border:0}.k{color:var(--dim);font-size:12px}
 .dot{width:9px;height:9px;border-radius:50%;background:var(--ok);display:inline-block;animation:pulse 1.6s infinite}@keyframes pulse{50%{opacity:.35}}
 .st-doing{color:var(--go)}.st-next{color:var(--acc)}.st-done{color:var(--dim);text-decoration:line-through}pre{margin:0;font:12px ui-monospace,monospace;white-space:pre-wrap;color:var(--dim)}
-.big{font-size:26px;font-weight:600}.none{color:var(--dim)}</style></head><body>
+.big{font-size:26px;font-weight:600}.none{color:var(--dim)}
+.lgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:12px}.lcard{border:1px solid var(--line);border-radius:5px;padding:8px 10px;min-width:0}
+.lcard h3{margin:0 0 6px;font-size:13px;color:var(--go)}.li{padding:4px 0;border-bottom:1px solid var(--line);font-size:13px}.li:last-child{border:0}.li b{color:var(--fg)}
+.li .n{color:var(--dim);font-size:11px;margin-left:4px}.li.weak{opacity:.55}</style></head><body>
 <h1>Work board <span class="k" id="upd"></span></h1><div class="k">What is running on this Mac for Reclaimer and what is being worked on. Refreshes every 3 s.</div><br>
 <div class="p" id="dirp" style="margin-bottom:14px"><h2>Direction</h2><div id="dir"></div></div>
 <div class="grid"><div class="p"><h2>Running now</h2><div id="jobs"></div></div><div class="p"><h2>Game instances</h2><div id="apps"></div><div id="live"></div></div>
 <div class="p"><h2>Tasks</h2><div id="tasks"></div></div><div class="p"><h2>Data collected</h2><div id="tot"></div></div>
+<div class="p" style="grid-column:1/-1"><h2>What the game is learning <span class="k" id="lrsrc"></span></h2><div id="lrn" class="lgrid"></div></div>
 <div class="p" style="grid-column:1/-1"><h2>Coverage: the tome (maps x game types sampled from real players)</h2><div id="cov" style="overflow-x:auto"></div></div>
 <div class="p" style="grid-column:1/-1"><h2>Observer</h2><pre id="obs"></pre><br><pre id="rec"></pre></div></div>
 <script>
@@ -136,6 +143,10 @@ async function tick(){try{const j=await (await fetch('/status.json')).json();
     rows.map(([m,e])=>`<tr style="border-top:1px solid var(--line)"><td><b>${E(e.name)}</b> <span class="k">${E(m)}</span></td>${cls.map(c=>`<td>${cell(e.classes[c])}</td>`).join('')}<td>${pm.has(m)?'<span style="color:var(--ok)">per-map</span>':'<span class="k">aggregate</span>'}</td></tr>`).join('')+'</table>'+
     `<div class="k" style="margin-top:8px">never sampled yet: ${E((tm.never_sampled||[]).join(', ')||'none')} · tome updated ${ago(tm.updated)}</div>`; }
  else document.getElementById('cov').innerHTML='<div class="none">no tome yet (engage-model.py writes it)</div>';
+ const L=j.learnings; if(L&&L.sections){ const s=L.source||{};
+   document.getElementById('lrsrc').textContent=`· ${s.recordings} matches, ${s.minutes} min, ${(s.duels||0).toLocaleString()} duels (${(s.decided||0).toLocaleString()} ending in a kill), ${s.maps} maps · refreshed ${ago(L.updated)}`;
+   document.getElementById('lrn').innerHTML=L.sections.map(sc=>`<div class="lcard"><h3>${E(sc.topic)}</h3>${sc.items.map(i=>`<div class="li${i.weak?' weak':''}"><b>${E(i.title)}</b> ${E(i.text)}<span class="n">n=${(i.n||0).toLocaleString()}${i.weak?' · thin':''}</span></div>`).join('')||'<div class="none">nothing yet</div>'}</div>`).join(''); }
+ else document.getElementById('lrn').innerHTML='<div class="none">no findings yet (shim/tools/learnings.py)</div>';
  document.getElementById('obs').textContent=(j.observer_log||[]).join('\n')||'(no observer log)'; document.getElementById('rec').textContent=(j.recorder||[]).join('\n');
 }catch(e){document.getElementById('upd').textContent='· not answering'} setTimeout(tick,3000)}
 tick();</script></body></html>'''

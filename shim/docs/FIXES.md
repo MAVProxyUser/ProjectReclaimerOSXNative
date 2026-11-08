@@ -2954,6 +2954,18 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   goal to the teammate); a teammate shooting an enemy -> join with their odds and delay; once per (teammate, enemy) per 5 s; that
   teammate is the unit partner for 12 s. The goal draw adds the nearest teammate (weight 2 x within15, the unit partner 4),
   followed as it moves, reached at the players' spacing. Free-for-all has no teammates: nothing changes there.
+- **What the game is learning** (2026-11-08 14:40; shim/tools/learnings.py, workboard.py) — WHY: the user: "add one more service that
+  tells what the game is learning about everything from these stats? best lane to not get killed on a map, best weapon overall,
+  best weapon per map, best tactics in each situation 1:1 1:3, distance shots with hitscan weapons, grenade tactics, jumping
+  tactics, strafe tactics, team cohesion, best way to survive vs specific weapons ... add one more data display to
+  http://127.0.0.1:8790". LOGIC: learnings.py reads the engagement library, lanes, deaths heatmaps and spawn points and writes
+  plain-language findings with their sample sizes (under --min 30 cases = "thin") to tracks/learnings.json: the fundamentals (first
+  shot, facing, shield lead, high ground), weapons (K/D and kills a minute held overall, the best per map), range (win rate by
+  distance per weapon class), outnumbered and teamwork, movement in a fight (strafe / jump / push terciles), grenades, surviving a
+  specific weapon (by distance, strafing, jumping, the attacker's firing pause of 1.2+ s as the reload stand-in), maps (the busy
+  4-unit squares with the fewest / most deaths per 100 crossings, named by the nearest spawn; fight distance), radar / revenge /
+  power items. The work board's "What the game is learning" panel shows it; a loop re-cuts new recordings, refits the models and
+  the tome and rewrites the findings every 20 minutes while sampling runs.
 
 ## 19. Performance
 
