@@ -3124,6 +3124,11 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   take-over (window + bridge), kept for experiments. OBS_PLAY_FIRST is used once per process group ($TR/.play-first holds the group that used
   it): the plan's later observer steps and learn-loop turns inherit the variable and would each have opened a full-screen game
   waiting for the user.
+- **Learnings: weapon zones and inventory** (2026-11-08 16:55; learnings.py) — "Weapon zones": per map up to 3 spots (non-overlapping,
+  named by the nearest spawn) where one weapon class makes 25%+ of the kills on players within ~9 units and 2.5x+ its share of the
+  weapons carried there (20+ kills; the walker's tracks/maps/<map>.wzones.txt), e.g. The Pit: shotguns 25% of 119 kills at 3% of the
+  weapons carried (8.2x). "Inventory: switches and camo": the players' most common weapon switches (class -> class, the nearest
+  enemy's median distance, the share in a fight) and their camo stretches, from engage-extract.py's wswitch / camo records.
 
 ## 19. Performance
 
