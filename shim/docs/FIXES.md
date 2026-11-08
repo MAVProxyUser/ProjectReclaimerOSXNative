@@ -2846,6 +2846,38 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   own maps when they have 300+ duels there (--all-maps = all: small Guardian with Assault Rifles vs Valhalla's Battle Rifles was
   no comparison); engage-extract.py --force takes a recording under 2 minutes old (a battle that just ended); engage-model.py's
   choice fit runs batched (padded sets + mask: minutes -> seconds) and writes the model atomically.
+- **Radar, memory, own deaths and the goal draw** (2026-11-08 12:50; shim/native/nbot_goals.c, nbot.c, nbot_engage.c, nstats.c) —
+  WHY: the user, watching four walkers: they "don't understand how the radar works", players return "to where you were just
+  killed to seek out the person that just killed you", "seek out spawning power weapons, and items like overshield and camo" (a
+  "route selection randomizer / solidifier"), walkers should know "their own death heat map" and "sometimes walkers just stop".
+  The hunt walked to the NEAREST enemy's node, known through walls; an unreachable one kept the goal and the walker stood.
+  LOGIC: radar = halo3's motion tracker rules for the walker's own resolved traits (player +0x1FC: +0x18 mode, +0x1A range; the
+  snapshot publishes them for the walker's unit): enemies within the range (1 unit = 3.048 m) moving faster than 1.2 u/s or in a
+  vehicle, all of them with "enhanced"; a contact is a KNOWN enemy (target choice) and remembered with its position. Goals: a
+  weighted draw among known enemies (exp(-d/25)), after a respawn (25 s) the most recent killer's known position / the death spot
+  / -- when that death was within 8 units of a power item's spawn point -- a point 10..25 units out along a lane leaving the
+  item, drawn by traffic; power-ups and power weapons lying at their spawn points (nspawns.c g_wt); lane cells 10..40 units away
+  by traffic (the busier half of <map>.lanes); held 6..15 s, dropped when reached, gone, held long enough or with no floor / no
+  path -- and the next drawn at once (no more standing). Own deaths: position, killer (the last attacker within 3 s), FAILED when
+  the life had no kill (a target died while fought): +3 path cost within 5 units per failed death, goal weights x (1 - 0.6 x
+  failed deaths within 6 units, at least 0.15). The weights are first guesses until the players' numbers are in (engage-extract
+  contact / respawn records). SWITCH: NHOOK_BOT_GOALS=0 = the old nearest-enemy hunt. Live test pending.
+- **Radar and revenge in the players' data** (2026-11-08 12:50; engage-extract.py "contact" / "respawn" records) — WHY: the same
+  requests, measured first. LOGIC: contact = an enemy within 15 units comes up more than 75 deg off a player's view, not attacking,
+  while the player has no target: turned to face it within 2.5 s? (moving vs still); respawn = after each death with a known
+  killer: back within 8 units of the death spot in 40 s (vs another death spot as far from the spawn), next target = the killer
+  (vs 1 / enemies), approach speeds. Vectorized ([T, N] per player; the per-pair loop took minutes). First numbers, three big
+  free-for-all Slayer matches (20,362 contacts, 1,934 respawns): within ~8 units players turn to an unseen MOVING enemy 26-32% vs a
+  still one 20-21%; past 8.2 units 19% vs 17-18% -- the radar's effect and its 25 m range; turn 1.24 s. Revenge did NOT show
+  there: next target = the killer 6% (chance 7%), back at the death spot 13% (baseline 10%), no faster approach to the killer.
+- **Stats page: the players table above the event feed; our local server serves the page from the checkout** (2026-11-08 12:40;
+  stats_page.html, native-dedicated.sh) — WHY: the user: "move all the players in the game, their k/d spread, their current
+  weapon, kills, etc. ... above the event feed"; the dedicated server served the dylib's built-in copy, so page edits needed a
+  server restart. LOGIC: the players panel moved before the feeds; native-dedicated.sh sets NHOOK_STATS_PAGE like native.sh.
+- **walker-battle.sh: WB_IDS, WB_WATCH** (2026-11-08 12:10) — WB_IDS="1 2 3" picks the identities (leave test-v2 out when the
+  user joins with NATIVE_REAL=1 NATIVE_ALLOW_SECOND=1 bash shim/native.sh --join-server 127.0.0.1:49190); WB_WATCH=1 opens the
+  server's stats page (http://127.0.0.1:8767/) to watch. The battle-end cleanup follows the chosen identities.
+- **engage-report.py** (2026-11-08) — the "How players fight" page from engage-model.py's report and engage-compare.py's outputs.
 
 ## 19. Performance
 

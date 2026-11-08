@@ -102,6 +102,7 @@ static void bot_los_do(uint64_t* ctx) {
     int hit = (int)(nh_call(ctx, 0x1fd748, 8, a) & 0xff) != 0; float L = sqrtf(V[0] * V[0] + V[1] * V[1] + V[2] * V[2]), d = L;
     if (hit) { const float* h = (const float*)(res + 0x08); float dx = h[0] - P[0], dy = h[1] - P[1], dz = h[2] - P[2]; d = sqrtf(dx * dx + dy * dy + dz * dz); }
     g_los_res = !hit || d > L - 0.5f; g_los_res_tgt = g_los_tgt; g_los_t = mono_s(); g_los_done = q; }
+typedef struct { float x, y, w; } GlLane; static GlLane* g_gll; static int g_ngll; static float g_gll_wsum;   // the lanes as goal material (nbot_goals.c)
 static int bot_fcmp(const void* a, const void* b) { float x = *(const float*)a, y = *(const float*)b; return x < y ? -1 : x > y; }
 // the model's heat for this map -> g_nav.pop (how much real players use each floor node: A* prefers their lanes); once per map
 static void bm_pop(const char* map) {
@@ -133,6 +134,11 @@ static void bm_pop(const char* map) {
             for (uint32_t i = 0; lpop && i < lg.cap; i++) { const LnCell* c = &lg.c[i]; if (!(c->foot > 0)) continue; float x = (c->x + 0.5f) * LN_CELL, y = (c->y + 0.5f) * LN_CELL;
                 int cx = (int)floorf((x - g_nav.x0) / g_nav.cell), cy = (int)floorf((y - g_nav.y0) / g_nav.cell); if (cx < 0 || cy < 0 || cx >= g_nav.w || cy >= g_nav.h) continue;
                 int cc = cy * g_nav.w + cx; for (uint32_t k = g_nav.first[cc]; k < g_nav.first[cc + 1]; k++) lpop[k] += c->foot; lcells++; }
+            { int ng = 0; float* fv = malloc(sizeof(float) * (lg.used + 1)); for (uint32_t i = 0; fv && i < lg.cap; i++) if (lg.c[i].foot > 0) fv[ng++] = lg.c[i].foot;   // (the busier half: goal material)
+              float med = 0; if (fv && ng) { qsort(fv, (size_t)ng, sizeof(float), bot_fcmp); med = fv[ng / 2]; } free(fv);
+              GlLane* gl2 = malloc(sizeof(GlLane) * (size_t)(ng + 1)); int k3 = 0; float ws2 = 0;
+              for (uint32_t i = 0; gl2 && i < lg.cap; i++) if (lg.c[i].foot > med && lg.c[i].foot > 1) { gl2[k3].x = (lg.c[i].x + 0.5f) * LN_CELL; gl2[k3].y = (lg.c[i].y + 0.5f) * LN_CELL; gl2[k3].w = logf(1 + lg.c[i].foot); ws2 += gl2[k3].w; k3++; }
+              GlLane* old2 = g_gll; g_gll = gl2; g_ngll = k3; g_gll_wsum = ws2; free(old2); }
             if (lpop) { int nz = 0; for (int i = 0; i < g_nav.n; i++) if (lpop[i] > 0) nz++;
                 float* v = nz ? malloc(sizeof(float) * (size_t)nz) : 0; int k2 = 0; for (int i = 0; v && i < g_nav.n; i++) if (lpop[i] > 0) v[k2++] = lpop[i];
                 float q99 = 0; if (v && k2) { qsort(v, (size_t)k2, sizeof(float), bot_fcmp); q99 = v[(k2 - 1) * 99 / 100]; }   // (the 99th percentile)
@@ -194,6 +200,7 @@ static float bot_wrap(float a) { while (a > 3.14159265f) a -= 6.2831853f; while 
 
 static void bot_nav_json(StBuf* s) { nav_json(s); }   // the snapshot's "nav" (the page draws the walker's path and goal)
 #include "nbot_engage.c"   // the fighter's tactics from the players' fights (engage-model.json: awareness, target choice, movement)
+#include "nbot_goals.c"    // radar, memory, own deaths, and where to go (the goal draw)
 
 // Diagnostics for re-finding the record's fields after an app update (test clients): NHOOK_BOT_THROTTLE=x,y holds that throttle;
 // NHOOK_BOT_BTNSCAN=1 presses record +0xC8 bit k (k = 0..31, one a second, 0.25 s each) -- both log position, velocity and yaw
@@ -230,6 +237,7 @@ static void bot_step_body(void) {
     static NovObj objs[1024]; int n = bot_units(objs, 1024), me = -1;
     for (int i = 0; i < n; i++) if (objs[i].type == 0 && objs[i].handle == meh) { me = i; break; }
     static int32_t path[8192]; static int plen, pidx, goal = -1; static double tplan, tstat, tjump, tback, tstuck[4]; static float bstr; static float hist[64][3]; static double histt[64]; static int hh;
+    gl_life(now, me >= 0 && !objs[me].dead, me >= 0 ? objs[me].c : 0, 0, 0);   // (nbot_goals.c: deaths, respawns, failed zones)
     if (me < 0 || objs[me].dead || objs[me].seat >= 0) { g_bot_out = 0; g_nav_act = 0; plen = 0; g_bot_err = -1;   // dead, respawning or in a vehicle
         static char w[96]; snprintf(w, sizeof w, me < 0 ? "the record's unit %08x is none of the %d units seen" : objs[me].dead ? "dead" : "in a vehicle", meh, n); bot_idle(me < 0 ? w : objs[me].dead ? "dead" : "in a vehicle"); return; }
     const NovObj* o = &objs[me]; int out = 0; float yaw = yaw0, pitch = pitch0;
@@ -370,6 +378,9 @@ static void bot_step_body(void) {
             int need = plen == 0 || goal < 0 || now - tplan > (mode == 2 ? 1.0 : 3.0);
             if (goal >= 0 && plen) { float gp[3]; nav_pos(goal, gp); if ((gp[0] - pos[0]) * (gp[0] - pos[0]) + (gp[1] - pos[1]) * (gp[1] - pos[1]) < 1.0f) { nav_say("  [nav] reached the goal\n"); goal = -1; need = 1; } }
             if (mode == 2 && g_bot_pick_on) { int gn = nav_node_at(g_bot_pick_pos); if (gn >= 0) goal = gn; }   // (the fighter's pickup: walk to the weapon)
+            else if (mode == 2 && g_eg.on && gl_on()) {   // the goal draw (nbot_goals.c): known enemies, revenge, items, lanes -- never none
+                if (gl_tick(now, objs, n, me, los_get)) { float gp[3] = {g_gl.pos[0], g_gl.pos[1], g_gl.kind == GK_ENEMY || g_gl.kind == GK_REVENGE || g_gl.kind == GK_ITEM ? g_gl.pos[2] - 0.35f : pos[2]};
+                    int gn = nav_node_at(gp); if (gn < 0) { gl_drop(now, "no floor there"); } else if (gn != goal) { goal = gn; need = 1; } } }
             else if (mode == 2) { float bd = 1e30f; int bi = -1; for (int pass = 0; pass < 2 && bi < 0; pass++) for (int i = 0; i < n; i++) { const NovObj* t = &objs[i]; if (t->type || t->dead || i == me) continue;
                     if (!pass && !bot_enemy(o, t)) continue; float dx = t->c[0] - pos[0], dy = t->c[1] - pos[1], d = dx * dx + dy * dy; if (d < bd) { bd = d; bi = i; } }
                 if (bi >= 0) { float tp[3] = {objs[bi].c[0], objs[bi].c[1], objs[bi].c[2] - 0.35f}; int gn = nav_node_at(tp); if (gn >= 0) goal = gn; } }
@@ -382,7 +393,9 @@ static void bot_step_body(void) {
                     float tp[3] = {t->c[0] - dx / d * back, t->c[1] - dy / d * back, t->c[2]}; int gn = nav_node_at(tp); if (gn >= 0) goal = gn; } }
             else if (mode == 1 && goal < 0) goal = nav_pick_roam(cur);
             if (goal >= 0 && need) { int np = nav_astar(cur, goal, path, 8192); tplan = now;
-                if (np < 2) { if (mode != 2) { nav_say("  [nav] no path from node %d to %d: a new goal\n", cur, goal); goal = -1; } plen = 0; }
+                if (np < 2) { if (mode != 2) { nav_say("  [nav] no path from node %d to %d: a new goal\n", cur, goal); goal = -1; }
+                              else if (g_eg.on && gl_on()) { gl_drop(now, "no path"); goal = -1; }   // (the goal draw: another at once -- it used to stand there)
+                              plen = 0; }
                 else { nav_say("  [nav] path of %d nodes from (%.1f %.1f %.1f) to node %d\n", np, pos[0], pos[1], pos[2], goal); plen = np; pidx = 0; } }
             if (plen >= 2) {
                 { float bd = 1e30f; int bi = pidx; for (int i = pidx; i < plen && i < pidx + 60; i++) { float p[3]; nav_pos(path[i], p); float d = (p[0] - pos[0]) * (p[0] - pos[0]) + (p[1] - pos[1]) * (p[1] - pos[1]); if (d < bd) { bd = d; bi = i; } }

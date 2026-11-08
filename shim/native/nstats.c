@@ -1210,6 +1210,8 @@ static void st_snapshot(StBuf* s) {
                 else { int ws = *(const int8_t*)(d + 0x262); const uint32_t* wp = (const uint32_t*)(d + 0x268); uint64_t wd = (ws >= 0 && ws < 4) ? ST_DATUM(wp[ws]) : 0;
                        if (wd && hb_read(wd, &df, 4)) { snprintf(w->how, sizeof w->how, "%s", hb_tag_name(df)); st_nice_case(w->how); } } } }
         int you = g_nick[0] && !strcmp(pl[k].name, g_nick); if (you) g_ht_my_slot = pl[k].slot;
+        if (g_bot_unit && pl[k].unit == g_bot_unit && pl[k].rec) { uint16_t rm = 0, rr = 0;   // (nbot_goals.c: the walker's radar, from its resolved traits)
+            if (hb_read(pl[k].rec + 0x1FC + 0x18, &rm, 2) && hb_read(pl[k].rec + 0x1FC + 0x1A, &rr, 2)) { if (rm >= 1 && rm <= 4) g_rd_mode = rm; if (rr >= 1 && rr <= 7) g_rd_range = rr; } }
         char pip[64] = "", prd[128] = ""; for (int q = 0; q < nss; q++) if (!strcmp(ss[q].name, pl[k].name)) { if (pk_addr_of(ss[q].voice, pip, sizeof pip)) pk_rdns_str(pip, prd, sizeof prd); break; }
         sb_put(s, "%s{\"name\":", first ? "" : ","); first = 0; sb_str(s, pl[k].name); sb_put(s, ",\"slot\":%d", pl[k].slot);
         if (pip[0]) { sb_put(s, ",\"ip\":"); sb_str(s, pip); } if (prd[0]) { sb_put(s, ",\"rdns\":"); sb_str(s, prd); }

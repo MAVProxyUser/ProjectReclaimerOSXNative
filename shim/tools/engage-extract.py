@@ -27,6 +27,15 @@ it attacks; the nearest to its aim when it attacks several) held across pauses u
   join         team games: a teammate starts attacking an enemy near this player (25 units) while this player has no target:
                did it join on the same enemy within 3 s
   skirmish     every 3 s: the groups of players linked by attacks in those 3 s (sizes per side)
+  contact      RADAR (the user, 2026-11-08: "the walkers don't understand how the radar works, and that is critical"): an enemy
+               within 15 units comes up UNSEEN (more than 75 deg off the player's view), not attacking it, while the player has
+               no target: its distance, its speed (halo3's motion tracker shows movement, not a crouch-walk or standing), and
+               whether / how fast the player turned to face it (within 30 deg in 2.5 s) before being attacked -- moving vs still
+               enemies at the same distance = what the radar adds; the distance where turning falls off = its range
+  respawn      REVENGE (the user: "a propensity to return to where you were just killed to seek out the person that just
+               killed you"): after each death with a known killer, the first 40 s of the next life: time to come within 8 units
+               of where it died (and, as a baseline, of another death spot on the map as far from the spawn), whether its next
+               target was the killer (chance = 1 / enemies alive), and its approach speed toward the killer vs other enemies
 Infection: every player has a team of his own there, so the sides are guessed from weapons (a zombie carries the Energy Blade).
 Output: ReclaimerMac/tracks/engagements/<recording>.eng.jsonl.gz (one JSON per duel), made again only when the recording is
 newer. The walkers' battles (ReclaimerMac/battles/tracks) can be cut the same way with --tracks / --out.
@@ -293,6 +302,71 @@ def multi(path, head, t, slots, me, inf, cls, alive, X, Y, Z, YAW, SH, HP, TEAM,
                         if HT[k2, i] >= 0: break
                         k2 += 1
                     out.append(dict(base, kind='join', joined=j, dist=round(d, 2), ang=round(ang, 1), c_vit=round(vit(k, c), 3), other=bool(HT[k2, i] >= 0 and HT[k2, i] != c) if k2 < T else False))
+    # radar: unseen quiet contacts within 15 units while the player has no target (vectorized per player: [T, N] at once)
+    SPD = np.hypot(np.nan_to_num(VX), np.nan_to_num(VY))
+    R15 = np.zeros((T, N, N), bool); R15[15:] = (cs[15:] - cs[:-15]) > 0; R15[:15] = cs[:15] > 0
+    for i in range(N):
+        if not pl[i]: continue
+        dx, dy = X - X[:, i:i + 1], Y - Y[:, i:i + 1]; d = np.hypot(dx, dy)
+        off = np.abs(wrap(YAW[:, i:i + 1] - np.degrees(np.arctan2(dy, dx))))
+        cond = (alive[:, i:i + 1] & (HT[:, i:i + 1] < 0) & alive & pl[None, :] & (side != side[:, i:i + 1]) & (d < 15) & (off > 75) & ~R15[:, :, i])
+        cond[:, i] = False
+        new = cond.copy(); new[1:] &= ~cond[:-1]; new[:15] = False; new[T - 25:] = False
+        last_ev = {}
+        for k, c in zip(*np.nonzero(new)):
+            if t[k] - last_ev.get(c, -1e9) < 3.0: continue
+            last_ev[c] = t[k]; turned = None; hit = False
+            for q in range(k, min(T, k + 26)):
+                if not alive[q, i] or not alive[q, c]: break
+                if ATT[q, c, i]: hit = True; break
+                ex, ey = X[q, c] - X[q, i], Y[q, c] - Y[q, i]
+                if abs((YAW[q, i] - math.degrees(math.atan2(ey, ex)) + 180) % 360 - 180) < 30: turned = round(float(t[q] - t[k]), 2); break
+            out.append(dict(base, kind='contact', dist=round(float(d[k, c]), 2), off=round(float(off[k, c]), 1), speed=round(float(SPD[k, c]), 2), own_speed=round(float(SPD[k, i]), 2),
+                            dz=round(float(Z[k, c] - Z[k, i]), 2), turned=turned, attacked_first=hit))
+    # revenge: each death with a known killer -> the next life's first 40 s
+    death_spots = [(kt, kb, ka) for (kt, ka, kb, kh) in kills]
+    spots_xy = []
+    for (kt, ka, kb, kh) in kills:
+        if kb in slots:
+            v = slots.index(kb); kk = int(np.searchsorted(t, kt)) - 1
+            if 0 <= kk < T: spots_xy.append((X[kk, v], Y[kk, v]))
+    rnd = __import__('random').Random(len(t))
+    for (kt, ka, kb, kh) in kills:
+        if ka not in slots or kb not in slots or ka == kb: continue
+        v, kl = slots.index(kb), slots.index(ka)
+        if not pl[v]: continue
+        kd = int(np.searchsorted(t, kt)) - 1
+        if kd < 0: continue
+        sx, sy = X[kd, v], Y[kd, v]
+        if not (sx or sy):   # (the death sample may already be dead: the last live position)
+            q = kd
+            while q > 0 and not alive[q, v]: q -= 1
+            sx, sy = X[q, v], Y[q, v]
+        r0 = kd + 1   # (the respawn: alive again, at least 1 s after the kill)
+        while r0 < T and not (alive[r0, v] and t[r0] - kt > 1.0): r0 += 1
+        if r0 >= T - 10: continue
+        px, py = X[r0, v], Y[r0, v]; d0 = math.hypot(px - sx, py - sy)
+        if d0 < 10: continue   # (respawned next to it: nothing to measure)
+        cand = [p2 for p2 in spots_xy if abs(math.hypot(px - p2[0], py - p2[1]) - d0) < 0.2 * d0 and math.hypot(p2[0] - sx, p2[1] - sy) > 15]
+        bx, by = rnd.choice(cand) if cand else (None, None)
+        reach = base_reach = None; nxt = None; appk = []; appo = []
+        for q in range(r0, min(T, r0 + 400)):
+            if not alive[q, v]: break
+            tt = float(t[q] - t[r0])
+            if reach is None and math.hypot(X[q, v] - sx, Y[q, v] - sy) < 8: reach = round(tt, 2)
+            if bx is not None and base_reach is None and math.hypot(X[q, v] - bx, Y[q, v] - by) < 8: base_reach = round(tt, 2)
+            if nxt is None and HT[q, v] >= 0: nxt = 'killer' if HT[q, v] == kl else 'other'
+            if tt < 15 and not np.isnan(VX[q, v]):
+                ex, ey = X[q] - X[q, v], Y[q] - Y[q, v]; hn = np.hypot(ex, ey)
+                m = pl & alive[q] & (side[q] != side[q, v]) & (hn >= 0.5); m[v] = False
+                if m.any():
+                    rv = (VX[q, v] * ex + VY[q, v] * ey) / np.where(hn > 0, hn, 1)
+                    if m[kl]: appk.append(float(rv[kl]))
+                    m[kl] = False; appo.extend(float(x) for x in rv[m])
+        nen = int(sum(1 for c in range(N) if c != v and pl[c] and alive[r0, c] and side[r0, c] != side[r0, v]))
+        out.append(dict(base, kind='respawn', team_game=team_game, d0=round(d0, 1), reached=reach, base_reached=base_reach if bx is not None else 'none',
+                        next_target=nxt, enemies=nen, killer_alive=bool(alive[r0, kl]), app_killer=round(float(np.mean(appk)), 3) if appk else None,
+                        app_other=round(float(np.mean(appo)), 3) if appo else None, respawn_s=round(float(t[r0] - kt), 1)))
     # skirmishes every 3 s: components of the attack graph over the last 3 s
     for k in range(30, T, 30):
         g = recent(k, 30); g = g | g.T; seen = set()
@@ -321,9 +395,9 @@ def main():
         os.rename(tmp, o); done += 1; tot += len(eps)
         if not QUIET:
             w = {}
-            for e in eps: w[e['out']['win']] = w.get(e['out']['win'], 0) + 1
+            for e in eps: k = e['out']['win'] if e.get('kind') == 'duel' else e.get('kind'); w[k] = w.get(k, 0) + 1
             print('%-48s %4d duels %s' % (os.path.basename(p), len(eps), ' '.join('%s %d' % kv for kv in sorted(w.items()))))
-    print('%d recordings cut, %d duels -> %s' % (done, tot, OUT))
+    print('%d recordings cut, %d records -> %s' % (done, tot, OUT))
 
 if __name__ == '__main__':
     main()

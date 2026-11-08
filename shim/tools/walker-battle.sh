@@ -8,6 +8,8 @@
 #   bash shim/tools/walker-battle.sh [N walkers 2..4, default 4] [seconds, default 300] [extra env for every walker...]
 #   W0_ENV..W3_ENV="NHOOK_BOT_SKILL=0.8 ..." = settings for one walker (shim/tools/walker-train.py evolves them)
 #   bash shim/tools/walker-battle.sh init       (once: makes the identities test-third / test-fourth -- the app's first start)
+#   WB_WATCH=1 = open the server's stats page (http://127.0.0.1:8767/) to watch; WB_IDS="1 2 3" = which identities (0 test-v2 .. 3 test-fourth); join yourself with
+#   NATIVE_REAL=1 NATIVE_ALLOW_SECOND=1 bash shim/native.sh --join-server 127.0.0.1:49190   (walkers never drive a real profile)
 # Refuses to start beside another Project Reclaimer (the user's game included).
 set -u
 cd "$(dirname "$0")/../.."
@@ -29,11 +31,12 @@ t = p + '.tmp'; json.dump(d, open(t, 'w'), indent=2); os.chmod(t, 0o600); os.rep
 EOF
   done; exit 0; fi
 N=${1:-4}; SECS=${2:-300}; shift 2 2>/dev/null; EXTRA=("$@")
+IDS=(${WB_IDS:-0 1 2 3})   # (which identities walk, by index into NAMES: WB_IDS="1 2 3" leaves test-v2 out -- e.g. when the user plays beside them)
 [ "$N" -ge 2 ] && [ "$N" -le 4 ] || { echo "2..4 walkers"; exit 1; }
-for k in $(seq 0 $((N - 1))); do [ $k -lt 2 ] || [ -f "$SUP/${NAMES[$k]}/profile.json" ] || { echo "${NAMES[$k]} missing: bash shim/tools/walker-battle.sh init"; exit 1; }; done
+for i in $(seq 0 $((N - 1))); do k=${IDS[$i]}; [ $k -lt 2 ] || [ -f "$SUP/${NAMES[$k]}/profile.json" ] || { echo "${NAMES[$k]} missing: bash shim/tools/walker-battle.sh init"; exit 1; }; done
 T=$(mktemp -d "${TMPDIR:-/tmp}/walker-battle.XXXXXX"); OUT="$BT/$(date +%Y%m%d-%H%M%S)-n$N.jsonl"
 bash shim/tools/native-dedicated.sh start >/dev/null || exit 1
-for k in $(seq 0 $((N - 1))); do d="$SUP/${NAMES[$k]}"
+for i in $(seq 0 $((N - 1))); do k=${IDS[$i]}; d="$SUP/${NAMES[$k]}"
   WE=$(eval echo "\${W${k}_ENV:-}")   # (per walker: W0_ENV .. W3_ENV, e.g. "NHOOK_BOT_SKILL=0.8 NHOOK_BOT_DIST=0.7": walker-train.py)
   env $WE NATIVE_LOG="$T/w$k.log" NATIVE_PROFILE="$d" RECLAIMER_CACHE_DIR="$d-cache" PELOAD_FORENSIC_DIR="$d-forensics" NHOOK_HEATMAP_DIR="$d-heatmaps" \
     NHOOK_STATS_HTTP="${PORTS[$k]}" NHOOK_STATS_OPEN=0 NATIVE_ALLOW_SECOND=1 NHOOK_MUTE_OUTPUT=1 \
@@ -41,6 +44,8 @@ for k in $(seq 0 $((N - 1))); do d="$SUP/${NAMES[$k]}"
     bash shim/native.sh --join-server 127.0.0.1:49190 --background > "$T/w$k.out" 2>&1 &
   sleep 6; done
 echo "battle: $N walkers, $SECS s; logs $T; samples -> $OUT"
+# WB_WATCH=1: open the server's stats page (every walker on the map, the scoreboard, the feed) in the browser to watch the battle
+[ "${WB_WATCH:-0}" = 1 ] && open "http://127.0.0.1:8767/" 2>/dev/null
 # the server's view recorded like the real players' (match-recorder.py -> battles/tracks: walker-model.py compares them)
 WT="${WB_TRACKS:-$BT/tracks}"; mkdir -p "$WT"; python3 shim/tools/match-recorder.py --port 8767 --seconds "$SECS" --out "$WT" > "$T/rec.txt" 2>&1 & RECP=$!   # (WB_TRACKS: another folder, e.g. one set of settings)
 t0=$(date +%s)
@@ -67,7 +72,7 @@ for e in L:
 for n, qs in moved.items():
     d = sum(((b[0] - a[0]) ** 2 + (b[1] - a[1]) ** 2) ** 0.5 for a, b in zip(qs, qs[1:])); print('  %-16s moved %.0f units (10 s samples)' % (n[:16], d))
 EOF
-for k in $(seq 0 $((N - 1))); do P=$(sed -n 's/^native app pid \([0-9]*\).*/\1/p' "$T/w$k.out"); [ -n "$P" ] && kill "$P" 2>/dev/null; done; sleep 3
-for k in $(seq 0 $((N - 1))); do P=$(sed -n 's/^native app pid \([0-9]*\).*/\1/p' "$T/w$k.out"); [ -n "$P" ] && kill -9 "$P" 2>/dev/null; done
+for i in $(seq 0 $((N - 1))); do k=${IDS[$i]}; P=$(sed -n 's/^native app pid \([0-9]*\).*/\1/p' "$T/w$k.out"); [ -n "$P" ] && kill "$P" 2>/dev/null; done; sleep 3
+for i in $(seq 0 $((N - 1))); do k=${IDS[$i]}; P=$(sed -n 's/^native app pid \([0-9]*\).*/\1/p' "$T/w$k.out"); [ -n "$P" ] && kill -9 "$P" 2>/dev/null; done
 kill $RECP 2>/dev/null; wait $RECP 2>/dev/null
 bash shim/tools/native-dedicated.sh stop >/dev/null; echo "logs: $T"

@@ -16,6 +16,8 @@
 //   movement    2-second pieces of real fights (the attacker's speed across / toward the other every 0.1 s) by weapon class and
 //               distance band, played back as the throttle, with a pull back into the band
 #define EG_VIEW 75.0f
+static double g_gl_kill_t;   // the last time a target died while the walker fought it (nbot_goals.c: a life with a kill)
+static int rd_contact(const NovObj* me, const NovObj* t);   // (nbot_goals.c: on the walker's radar)
 typedef struct { char grp[24]; float lat[20], rad[20]; } EgPiece;
 static struct { int loaded, on, npiece; float w[8]; int has_w; struct { char cls[12]; float p25, med, p75; int n; } band[10]; int nband;
                 float p_view, p_behind, p_mid, turn_s; EgPiece* lib; int gren_ok; float gren_every, gren_d0, gren_d1; } g_eg;
@@ -98,6 +100,7 @@ static int eg_choose(const NovObj* objs, int n, int me, const float* cam, float 
         float v = t->dead ? 0 : t->shield + t->health; if (u->vit >= 0 && v < u->vit - 0.02f) u->hurt_t = now; u->vit = v;
         if (!t->dead && bot_enemy(o, t) && now - my_hurt < 1.5 && eg_aim_at(t, o->c, 12)) { if (now - u->att_t > 1.5) u->asked = 0; u->att_t = now; }
         if (t->handle == cur) ci = i; }
+    if (ci >= 0 && objs[ci].dead && now - cur_seen < 2.0) g_gl_kill_t = now;   // (it died while we fought it)
     if (ci >= 0 && (objs[ci].dead || !bot_enemy(o, &objs[ci]))) ci = -1;
     if (ci >= 0 && vis_of(cur, now) == 1) cur_seen = now;
     // a second attacker while fighting the current target for a second or more: turn to it with the players' odds, once per attacker
@@ -117,7 +120,7 @@ static int eg_choose(const NovObj* objs, int n, int me, const float* cam, float 
     for (int i = 0; i < n; i++) { const NovObj* t = &objs[i]; if (t->type || t->dead || i == me || !bot_enemy(o, t)) continue;
         float dx = t->c[0] - cam[0], dy = t->c[1] - cam[1], dz = t->c[2] - cam[2], d = sqrtf(dx * dx + dy * dy + dz * dz); if (d > 45) continue;
         EgUnit* u = eg_unit(t->handle); float off = fabsf(bot_wrap(atan2f(dy, dx) - yaw0)) * 57.2958f; int att = now - u->att_t < 1.5, pv = t->handle == prev && now - prev_t < 3.0;
-        if (!(off < EG_VIEW || att || d < 5 || pv || t->handle == cur)) continue;   // (unknown: behind us and quiet)
+        if (!(off < EG_VIEW || att || d < 5 || pv || t->handle == cur || rd_contact(o, t))) continue;   // (unknown: behind us, quiet and off the radar)
         int mate = 0; for (int k = 0; k < n && !mate; k++) { const NovObj* m = &objs[k]; if (m->type || m->dead || k == me || bot_enemy(o, m)) continue;   /* (a teammate: free-for-all has none) */ mate = eg_aim_at(m, t->c, 8); }
         float f[8] = {logf(d > 0.5f ? d : 0.5f), off / 180.0f, (float)att, fminf(1.5f, (t->shield + t->health) / 2), (float)pv, (float)mate, (float)(now - u->hurt_t < 1.0), (t->c[2] - o->c[2]) / 5.0f};
         float s = 0; for (int k = 0; k < 8; k++) s += g_eg.w[k] * f[k];
