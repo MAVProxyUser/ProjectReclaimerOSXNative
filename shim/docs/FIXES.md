@@ -3158,6 +3158,21 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   top 3 50% (7.5%), nearest enemy +3.85 (by far the strongest), own death +0.84, just used +0.92; team -- 37% (2%), 68% (6%),
   nearest teammate -0.85 (near them), just used +1.74 (teams spawn together); the farthest point from enemies only 4-32%; every
   point used (0.87-0.94 of uniform).
+- **My analysis jobs no longer compete with the user's game** (2026-11-08 17:40; shim/tools/refresh-loop.sh) — WHY: the user: "something
+  you did is making input feel choppy": the 20-minute learning refresh's model refit ran at ~90% of a core for minutes beside the
+  user's full-screen game (that stretch: 49-52 fps, 255-342 ms frames). LOGIC: the refresh runs every step under taskpolicy -b + nice
+  20 (efficiency cores, below everything) and WAITS while a Project Reclaimer runs without --background / --server (the user playing).
+  Run the work board the same way (taskpolicy -b). The remaining once-a-second 150-300 ms frame in the user's full-screen game is NOT
+  any hook: aim meter, stats snapshots / recorder and voice hook switched off live changed nothing; the hooks cost table and a 5 s
+  sample show nhook cheap on the game's threads; 640 x 360 background games stayed at ~17 ms worst frames for hours. To be measured
+  in a local full-screen game: as is / without nhook's render hooks / without nhook.
+- **The observer picks for coverage, not size** (2026-11-08 17:50; observe-public.sh pick) — WHY: the user: "you have way too many
+  valhalla observations vs say sandtrap or snowbound": the bonus only rewarded a map x type with nothing recorded and never held back
+  one with plenty, so the one big mod-free server (Valhalla / The Pit / Guardian rotation) won 6 of 9 joins. LOGIC: coverage +40 none,
+  +25 under 10 min, +10 under 30 min, minus a point per 3 minutes already recorded (at most -30); players count up to 16 only; a server
+  already visited in this run -10 a visit; a map x type under 10 minutes may be joined with 4+ players even in a strict (12+) phase.
+  Live check: the big server (24/24) lost to Sandtrap Team Snipers (13 players, no Sandtrap Slayer recorded) and, for small games,
+  Foundry (never sampled).
 
 ## 19. Performance
 

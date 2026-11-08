@@ -35,11 +35,11 @@ TOTAL=${1:-3600}; MAXS=${2:-2700}; TR="$HOME/Library/Application Support/Reclaim
 WHOLE=${OBS_WHOLE:-1}; MINP=${OBS_MIN_PLAYERS:-6}; MAXP=${OBS_MAX_PLAYERS:-999}; CW=${OBS_CLASS_W:-15}; NMATCH=${OBS_MATCHES:-0}; STRICT=${OBS_STRICT:-0}
 APPRE='^/Applications/Project Reclaimer.app/Contents/MacOS/project-reclaimer'
 if pgrep -f "$APPRE" >/dev/null; then echo "Project Reclaimer is running: not starting"; exit 1; fi
-t0=$(date +%s); skip=""; n_slayer=0; n_ctf=0; n_infection=0; n_other=0
+t0=$(date +%s); skip=""; seen=""; n_slayer=0; n_ctf=0; n_infection=0; n_other=0
 pick() {   # "host:port map | mode | N players | class" of the best server now ("" = none)
   timeout 60 python3 shim/tools/servers10.py --json 2>/dev/null | python3 -c '
 import json, sys
-skip = set(sys.argv[1].split()); counts = json.loads(sys.argv[2]); minp = int(sys.argv[3]); cw = float(sys.argv[4]); infection = sys.argv[5] == "1"; maxp = int(sys.argv[6]); strict = sys.argv[7] == "1"
+skip = set(sys.argv[1].split()); seen = sys.argv[10].split() if len(sys.argv) > 10 else []; counts = json.loads(sys.argv[2]); minp = int(sys.argv[3]); cw = float(sys.argv[4]); infection = sys.argv[5] == "1"; maxp = int(sys.argv[6]); strict = sys.argv[7] == "1"
 rnd = len(sys.argv) > 9 and sys.argv[9] == "1"   # OBS_RANDOM=1: a weighted draw (exp(score / 8)) instead of the best score
 # COVERAGE (2026-11-08 14:00, the user: "sample each map at least once in context if possible, so keep track of all the maps you have
 # played, and under what game types"): the tome (tracks/tome.json, engage-model.py) says how many minutes of each map x game type
@@ -61,10 +61,14 @@ def internal(listed):
         if len(w) >= 5 and len(f) >= 5 and w[:5] == f[:5]: return k
     return None
 def coverage_bonus(listed, c):
+    # (2026-11-08 17:45, the user: "you have way too many valhalla observations vs say sandtrap or snowbound": the bonus only rewarded
+    # a map x type with nothing and never held back one with plenty, so the biggest server -- Valhalla / The Pit / Guardian -- won
+    # 6 of 9 joins) -- now +40 none, +25 under 10 min, +10 under 30 min, and minus a point for every 3 minutes already recorded
+    # (at most -30: Valhalla Slayer at 77 min = -25)
     k = internal(listed)
     if k is None: return 0, "?"
     m = ((tome.get(k) or {}).get("classes") or {}).get(c, {}).get("minutes", 0)
-    return (25 if m <= 0 else 12 if m < 10 else 0), "%s %s %.0f min" % (k, c, m)
+    return (40 if m <= 0 else 25 if m < 10 else 10 if m < 30 else -min(30, int(m / 3))), "%s %s %.0f min" % (k, c, m)
 def cls(t):
     if any(k in t for k in ("campaign", "forge", "firefight", "death race", "race")): return None
     if "flood" in t and "cov" in t: return None                        # (memory: skip unsc vs flood vs cov)
@@ -83,18 +87,21 @@ for l in sys.stdin:
     c = cls(((i.get("mode") or "") + " " + (i.get("name") or "")).lower())
     if c is None or (c == "infection" and not infection): continue
     cb, cov = coverage_bonus(i.get("map"), c)
-    cands.append((n - cw * counts.get(c, 0) - (25 if c == "other" else 0) + cb, a, i.get("map"), i.get("mode"), n, c + (" (coverage +%d: %s)" % (cb, cov) if cb else "")))
+    # size counts up to 16 players (a 60-player lobby is no better sample of a map than a 16-player one); a server already visited
+    # in this run -10 a visit (the same big server kept winning)
+    rep_pen = 10 * seen.count(a)
+    cands.append((min(n, 16) - cw * counts.get(c, 0) - (25 if c == "other" else 0) + cb - rep_pen, a, i.get("map"), i.get("mode"), n, c + (" (coverage %+d: %s)" % (cb, cov) if cb else "") + (" (visited %d x: -%d)" % (seen.count(a), rep_pen) if rep_pen else ""), cb))
 for need in ((minp,) if strict else (minp, 4)):
-    ok = [x for x in cands if x[4] >= need]
+    ok = [x for x in cands if x[4] >= need or (x[6] >= 25 and x[4] >= 4)]   # (a map x type with under 10 min recorded: 4 players are enough)
     if ok and rnd:
         import math, random; top = max(x[0] for x in ok); b = random.choices(ok, [math.exp((x[0] - top) / 8.0) for x in ok])[0]
     elif ok: b = max(ok)
-    if ok: print(b[1], b[2], "|", b[3], "|", b[4], "players |", b[5]); break' "$skip" "{\"slayer\":$n_slayer,\"ctf\":$n_ctf,\"infection\":$n_infection,\"other\":$n_other}" "$MINP" "$CW" "${OBS_INFECTION:-0}" "$MAXP" "$STRICT" "$TR/tome.json" "${OBS_RANDOM:-0}"; }
+    if ok: print(b[1], b[2], "|", b[3], "|", b[4], "players |", b[5]); break' "$skip" "{\"slayer\":$n_slayer,\"ctf\":$n_ctf,\"infection\":$n_infection,\"other\":$n_other}" "$MINP" "$CW" "${OBS_INFECTION:-0}" "$MAXP" "$STRICT" "$TR/tome.json" "${OBS_RANDOM:-0}" "$seen"; }
 DONE0=${OBS_DONE:-0}   # (whole matches a previous run of this phase already recorded)
 while [ $(( $(date +%s) - t0 )) -lt "$TOTAL" ] && { [ "$NMATCH" = 0 ] || [ $((DONE0 + n_slayer + n_ctf + n_infection + n_other)) -lt "$NMATCH" ]; }; do
   line=$(pick); addr=${line%% *}
   if [ -z "$addr" ]; then echo "$(date +%H:%M) no suitable server: waiting 5 minutes"; sleep 300; continue; fi
-  cls=${line##*| }; cls=${cls%% *}; echo "$(date +%H:%M) joining $line"
+  cls=${line##*| }; cls=${cls%% *}; echo "$(date +%H:%M) joining $line"; seen="$seen $addr"
   L="$TR/logs/$(date +%Y%m%d-%H%M%S).log"; RL="$L.rec"
   # OBS_PLAY_FIRST=1: once per process group (a plan-run.sh and everything it starts: later steps inherit the variable and must
   # not each open a full-screen game that waits for the user) -- $TR/.play-first holds the group that used it
