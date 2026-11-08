@@ -114,14 +114,18 @@ h1{font-size:20px;margin:0 0 4px}h2{font-size:13px;letter-spacing:.08em;text-tra
 .big{font-size:26px;font-weight:600}.none{color:var(--dim)}
 .lgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:12px}.lcard{border:1px solid var(--line);border-radius:5px;padding:8px 10px;min-width:0}
 .lcard h3{margin:0 0 6px;font-size:13px;color:var(--go)}.li{padding:4px 0;border-bottom:1px solid var(--line);font-size:13px}.li:last-child{border:0}.li b{color:var(--fg)}
-.li .n{color:var(--dim);font-size:11px;margin-left:4px}.li.weak{opacity:.55}</style></head><body>
-<h1>Work board <span class="k" id="upd"></span></h1><div class="k">What is running on this Mac for Reclaimer and what is being worked on. Refreshes every 3 s.</div><br>
+.li .n{color:var(--dim);font-size:11px;margin-left:4px}.li.weak{opacity:.55}
+#tabs{display:inline-flex;gap:4px;margin-left:12px;vertical-align:middle}#tabs a{font-size:13px;font-weight:500;color:var(--dim);text-decoration:none;padding:3px 10px;border:1px solid var(--line);border-radius:4px}
+#tabs a.on{color:var(--fg);border-color:var(--acc)}#tabs a:hover{color:var(--fg)}</style></head><body>
+<h1>Work board <nav id="tabs"><a href="#" data-v="work">Work</a><a href="#learnings" data-v="learnings">Learnings</a></nav> <span class="k" id="upd"></span></h1>
+<div class="k">What is running on this Mac for Reclaimer, what is being worked on, and what the game is learning from real players. Refreshes every 3 s.</div><br>
+<div id="learnview" hidden><div class="p"><h2>What the game is learning <span class="k" id="lrsrc"></span></h2><div class="k" style="margin-bottom:8px">Plain-language findings from every recorded public match (Infection left out of the fighting findings), each with the number of cases it rests on; thin ones (under 30 cases) are dimmed. Rebuilt every 20 minutes while sampling runs.</div><div id="lrn" class="lgrid"></div></div></div>
+<div id="workview">
 <div class="p" id="dirp" style="margin-bottom:14px"><h2>Direction</h2><div id="dir"></div></div>
 <div class="grid"><div class="p"><h2>Running now</h2><div id="jobs"></div></div><div class="p"><h2>Game instances</h2><div id="apps"></div><div id="live"></div></div>
 <div class="p"><h2>Tasks</h2><div id="tasks"></div></div><div class="p"><h2>Data collected</h2><div id="tot"></div></div>
-<div class="p" style="grid-column:1/-1"><h2>What the game is learning <span class="k" id="lrsrc"></span></h2><div id="lrn" class="lgrid"></div></div>
 <div class="p" style="grid-column:1/-1"><h2>Coverage: the tome (maps x game types sampled from real players)</h2><div id="cov" style="overflow-x:auto"></div></div>
-<div class="p" style="grid-column:1/-1"><h2>Observer</h2><pre id="obs"></pre><br><pre id="rec"></pre></div></div>
+<div class="p" style="grid-column:1/-1"><h2>Observer</h2><pre id="obs"></pre><br><pre id="rec"></pre></div></div></div>
 <script>
 const E=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 function ago(t){const s=Math.round(Date.now()/1000-t);return s<90?s+' s ago':s<5400?Math.round(s/60)+' min ago':Math.round(s/3600)+' h ago'}
@@ -149,6 +153,9 @@ async function tick(){try{const j=await (await fetch('/status.json')).json();
  else document.getElementById('lrn').innerHTML='<div class="none">no findings yet (shim/tools/learnings.py)</div>';
  document.getElementById('obs').textContent=(j.observer_log||[]).join('\n')||'(no observer log)'; document.getElementById('rec').textContent=(j.recorder||[]).join('\n');
 }catch(e){document.getElementById('upd').textContent='· not answering'} setTimeout(tick,3000)}
+function showView(){ const l=location.hash==='#learnings'; document.getElementById('learnview').hidden=!l; document.getElementById('workview').hidden=l;
+  for(const a of document.querySelectorAll('#tabs a')) a.classList.toggle('on',(a.dataset.v==='learnings')===l); }
+window.addEventListener('hashchange',showView); showView();
 tick();</script></body></html>'''
 
 class H(BaseHTTPRequestHandler):

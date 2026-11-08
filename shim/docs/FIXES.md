@@ -2965,7 +2965,9 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   specific weapon (by distance, strafing, jumping, the attacker's firing pause of 1.2+ s as the reload stand-in), maps (the busy
   4-unit squares with the fewest / most deaths per 100 crossings, named by the nearest spawn; fight distance), radar / revenge /
   power items. The work board's "What the game is learning" panel shows it; a loop re-cuts new recordings, refits the models and
-  the tome and rewrites the findings every 20 minutes while sampling runs.
+  the tome and rewrites the findings every 20 minutes while sampling runs. The board has tabs like the stats page (the user: "make the
+  results a tab on the work board page ... just like we use tabs on the stats service"): Work (direction, jobs, tasks, data,
+  coverage, observer) and Learnings (#learnings).
 
 ## 19. Performance
 
