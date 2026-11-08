@@ -2920,8 +2920,8 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   of Infection biased the data).
 - **observe-public.sh: the server going away ends the visit** (2026-11-08 13:40) — WHY: the server shut down mid-session ("the host
   left the game: back to the main menu"); the game sat in the main menu and the visit only ended at MAXSESSION (45 min): the 5-
-  minute "no match" rule only covers a visit that never got into one. LOGIC: "back to the main menu" or "[switch] leaving the
-  game" in the app log ends the visit and skips that server for the run.
+  minute "no match" rule only covers a visit that never got into one. LOGIC: "back to the main menu" in the app log ends the visit
+  and skips that server for the run ("[switch] leaving the game" is no sign: the app logs it on every join).
 
 ## 19. Performance
 
