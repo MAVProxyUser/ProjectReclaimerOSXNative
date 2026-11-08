@@ -25,6 +25,9 @@ canvas{width:100%;height:auto;display:block;background:#0b0b0b;border-radius:4px
 .ctl label{cursor:pointer}.ctl .ctlg{display:inline-flex;flex-wrap:wrap;align-items:center;gap:6px 10px}.ctl select{background:#222;color:var(--fg);border:1px solid var(--line);border-radius:4px}
 .legend{display:flex;align-items:center;gap:8px;margin-top:6px;color:var(--dim)}
 .ramp{height:8px;width:140px;border-radius:2px;background:linear-gradient(90deg,#1840ff,#18d0ff,#30e060,#f0e040,#ff3020)}
+.legend .lg{display:inline-flex;align-items:center;gap:8px}
+.legend .lg[hidden],#lnopt[hidden]{display:none}
+.lramp{height:8px;width:140px;border-radius:2px;background:linear-gradient(90deg,rgba(222,196,150,.25),rgba(196,150,100,.7) 40%,#94603a 75%,#6e4222);box-shadow:inset 0 1px 1px #0009,inset 0 -1px 0 #fff3}
 .col{display:flex;flex-direction:column;gap:16px;min-width:0}
 #det{min-width:0}
 /* ---- in-game overlay panel (user, 2026-10-18): a row per feature with its own Show / Walls / Text; the Selected bar sets many ---- */
@@ -196,7 +199,10 @@ th .srt{display:inline-block;margin-left:2px;padding:0 2px;cursor:pointer;color:
  <div class="panel" id="heat"><h2 id="mt">Death heatmap</h2><canvas id="cv" width="560" height="560"></canvas>
   <div class="ctl">
    <label title="For the deaths and the spawn points">Show <select id="scope"><option value="match">this match</option><option value="all">all matches</option></select></label>
-   <label title="Deaths per spot (collected for every map all the time, this switch only shows or hides it)"><input type="checkbox" id="hmv" checked> heatmap</label>
+   <label title="What the map's colours show. Deaths: where players died (a heat ramp). Lanes: the ways players move -- every time a player crosses a spot it wears a little deeper, so the lanes they use most are carved into the map as ruts: a faint scratch after one pass, a full-depth rut after 400+ (the native app records them all the time, on every map; shim/native/nlanes.c). Both are collected all the time; this only chooses what is drawn.">heatmap <select id="hmode"><option value="deaths">deaths</option><option value="lanes">lanes</option><option value="both">lanes + deaths</option><option value="off">neither</option></select></label>
+   <span class="ctlg" id="lnopt" title="Which moves wear the lanes: on foot (players walking and running), in vehicles (the seats' moves -- aircraft too, so flight paths show as lanes across open air)">lanes
+    <label><input type="checkbox" id="lnf" checked> on foot</label>
+    <label><input type="checkbox" id="lnv"> vehicles</label></span>
    <label><input type="checkbox" id="fp" checked> where players go</label>
    <label><input type="checkbox" id="pd" checked> players now</label>
    <span class="ctlg" title="A label beside every living player's dot, its lines stacked: name, then x/y, then health / shield, then the weapon in hand and the other weapon. Each switch adds or removes its own line. Your own label and the selected player's always show the name. Labels of players standing close together are moved apart, with a thin line back to their dot; when there is no room left, the rest are left out (the map's corner says how many).">on map
@@ -214,7 +220,8 @@ th .srt{display:inline-block;margin-left:2px;padding:0 2px;cursor:pointer;color:
    <label title="In a game you host with PELOAD_ALLOW_TELEPORT=1: click a spot on the map to teleport yourself there (onto the highest surface at that point, roofs and cliff tops included). For exploring past the map's edges with the boundary patches (shim/docs/map-boundaries.md)."><input type="checkbox" id="tph"> click to teleport</label>
    <span id="hov" class="note" style="margin:0"></span>
   </div>
-  <div class="legend"><span>fewer</span><span class="ramp"></span><span>more deaths</span><span id="dc"></span></div></div>
+  <div class="legend"><span id="dleg" class="lg"><span>fewer</span><span class="ramp"></span><span>more deaths</span><span id="dc"></span></span>
+   <span id="lleg" class="lg" hidden><span id="lleg0" title="Below this a spot is only dusted: the typical spot players crossed on this map">typical spot</span><span class="lramp"></span><span id="lleg1" title="The busiest half percent of the map: the deepest ruts. How deep the deepest are grows with the traffic recorded (full depth from 400 passes).">busiest</span><span id="lc"></span></span></div></div>
   <div id="det" class="panel"><h2>Player details</h2><div class="note">Click a player in the table.</div></div>
  </div>
 </div>
@@ -602,15 +609,106 @@ function buildLayers(){
   h.putImageData(im,0,0);
   document.getElementById('dc').textContent=`${ds.length} deaths`;
   { const mt={making:' (making the map picture...)',failed:' (no map picture: it could not be made, see maptop/<map>.log)','no tool':' (no map picture: re-tools/h3bsp.py not found)'}[heat.maptop]||'';
-    document.getElementById('mt').textContent=`Death heatmap — ${heat.map||'?'}${mt}`; }
+    document.getElementById('mt').textContent=`${{deaths:'Death heatmap',lanes:'Lanes',both:'Lanes and deaths',off:'Map'}[hmode()]||'Map'} — ${heat.map||'?'}${mt}`; }
+  buildLanes();
 }
 function toScreen(x,y){return [view.ox+(x-view.wx0)*view.sc, view.oy+(view.wh-(y-view.wy0))*view.sc]}
+// ---- lanes (2026-11-08, the user: "start mapping 'lanes' that players usually use and make a 'lane' option for the heat map, so
+// you can select lanes, or deaths. I'd expect the lanes to start in essence carving a visible rut the more they are used across
+// the map"). GET /lanes.json (shim/native/nlanes.c): per 0.5-unit cell, how many times players crossed it -- on foot and in
+// vehicles apart, every match on this map or this match only (the scope), x, y, foot, vehicle, flow x, flow y (tenths of a pass).
+// Drawn as a groove pressed into the map: the passes are smoothed (a lane is ~1.5 units wide; cells under 0.6 px are merged),
+// depth = log(1 + passes) / log(1 + LANE_SAT) -- one pass is a faint scratch, LANE_SAT or more a full-depth rut, so a lane
+// deepens as more matches are played on the map -- and lit from the top left like a relief (the far wall catches the light,
+// the near wall falls in shadow), its floor worn-earth coloured, pale dust where little used, darker mud where deep.
+const LANE_SAT=400, LANE_DEPTH=0.9;   // passes for a full-depth rut; its depth in world units (how steep the walls look)
+let lanes=null, laneGen=0, laneImg=null, laneKey='', laneGrid=null, laneErr='', laneCells=null, laneTimer=null, laneScale=null;
+const hmode=()=>document.getElementById('hmode').value;
+const laneOn=()=>{ const m=hmode(); return m==='lanes'||m==='both'; }, deathOn=()=>{ const m=hmode(); return m==='deaths'||m==='both'; };
+try{ const j=JSON.parse(localStorage.getItem('mapLanes')||'null'); if(j){ if(['deaths','lanes','both','off'].includes(j.m)) document.getElementById('hmode').value=j.m;
+  if(typeof j.f==='boolean') document.getElementById('lnf').checked=j.f; if(typeof j.v==='boolean') document.getElementById('lnv').checked=j.v; } }catch(err){}
+function saveLaneUi(){ try{ localStorage.setItem('mapLanes',JSON.stringify({m:hmode(),f:document.getElementById('lnf').checked,v:document.getElementById('lnv').checked})); }catch(err){} }
+function laneUi(){ const on=laneOn(); document.getElementById('lnopt').hidden=!on; document.getElementById('lleg').hidden=!on; document.getElementById('dleg').hidden=!deathOn(); }
+async function pollLanes(){ clearTimeout(laneTimer);
+  if(laneOn()&&!document.hidden){ try{ const r=await fetch('/lanes.json?scope='+(scope()==='all'?'all':'match'));
+      if(!r.ok){ lanes=null; laneErr='no lanes from this game (the lanes are recorded by the native app)'; }
+      else { lanes=await r.json(); laneErr=''; laneCells=new Map(); const c=lanes.cells||[]; for(let i=0;i<c.length;i+=6) laneCells.set(c[i]+','+c[i+1],i); } }
+    catch(e){ laneErr='not connected'; }
+    laneGen++; buildLanes(); drawMap(); }
+  laneTimer=setTimeout(pollLanes,10000); }
+function laneBlur(F,w,h,s){   // separable gaussian, sigma s cells, in place
+  const R=Math.ceil(s*3), K=new Float32Array(2*R+1); let ks=0; for(let i=-R;i<=R;i++){ K[i+R]=Math.exp(-i*i/(2*s*s)); ks+=K[i+R]; } for(let i=0;i<K.length;i++) K[i]/=ks;
+  const T=new Float32Array(Math.max(w,h));
+  for(let y=0;y<h;y++){ const o=y*w; for(let x=0;x<w;x++){ let a=0; for(let i=-R;i<=R;i++){ const xx=x+i; if(xx>=0&&xx<w) a+=F[o+xx]*K[i+R]; } T[x]=a; } F.set(T.subarray(0,w),o); }
+  for(let x=0;x<w;x++){ for(let y=0;y<h;y++){ let a=0; for(let i=-R;i<=R;i++){ const yy=y+i; if(yy>=0&&yy<h) a+=F[yy*w+x]*K[i+R]; } T[y]=a; } for(let y=0;y<h;y++) F[y*w+x]=T[y]; } }
+function buildLanes(){
+  laneUi();
+  const lc=document.getElementById('lc');
+  if(!laneOn()){ laneImg=null; laneKey=''; return; }
+  const W=cv.width,H=cv.height, lf=document.getElementById('lnf').checked, lv=document.getElementById('lnv').checked;
+  const key=[laneGen,W,H,view&&view.sc,view&&view.wx0,view&&view.wy0,view&&view.ox,view&&view.oy,lf,lv].join();
+  if(key===laneKey) return; laneKey=key; laneImg=null; laneGrid=null;
+  if(laneErr){ lc.textContent=laneErr; return; }
+  if(!lanes||!view){ lc.textContent=''; return; }
+  if(heat&&heat.map&&lanes.map&&lanes.map!==heat.map){ lc.textContent='(the lanes are of '+lanes.map+')'; return; }
+  const km=(lf?lanes.foot_km||0:0)+(lv?lanes.vehicle_km||0:0);
+  lc.textContent=`${km.toFixed(km<10?1:0)} km ${lf&&lv?'on foot and in vehicles':lv?'in vehicles':'on foot'} ${scope()==='all'?'on this map':'this match'}`+(lanes.imported?` (${lanes.imported} recorded matches added)`:'');
+  const c=lanes.cells||[]; if(!c.length) return;
+  const cs0=lanes.cell||0.5, k=Math.max(1,Math.floor(0.6/(cs0*view.sc))), cs=cs0*k;   // (cells under ~0.6 px: k x k merged)
+  // the world the canvas shows (x = wx0 + (sx - ox) / sc, y = wy0 + wh - (sy - oy) / sc), in cells, with a margin for the blur
+  const wxl=view.wx0-view.ox/view.sc, wxr=view.wx0+(W-view.ox)/view.sc, wyt=view.wy0+view.wh+view.oy/view.sc, wyb=view.wy0+view.wh-(H-view.oy)/view.sc;
+  const Mg=8, X0=Math.floor(wxl/cs)-Mg, Y0=Math.floor(wyb/cs)-Mg, gw=Math.ceil(wxr/cs)+Mg-X0+1, gh=Math.ceil(wyt/cs)+Mg-Y0+1;
+  if(gw<=2||gh<=2||gw*gh>6e6) return;
+  const F=new Float32Array(gw*gh);
+  for(let i=0;i<c.length;i+=6){ const v=(lf?c[i+2]:0)+(lv?c[i+3]:0); if(!v) continue; const gx=Math.floor(c[i]/k)-X0, gy=Math.floor(c[i+1]/k)-Y0;
+    if(gx>=0&&gy>=0&&gx<gw&&gy<gh) F[gy*gw+gx]+=v/10/k; }   // (passes: a lane crossing k merged cells crossed k of them)
+  const s=Math.max(0.9,0.55/cs); laneBlur(F,gw,gh,s);
+  // The ruts are RELATIVE to this map's own traffic: a rut starts at the typical worn spot (the median of the cells players
+  // crossed) and is fully shaped at the busiest half percent -- on a map where players went everywhere (85 km of Infection on
+  // Standoff) a fixed scale wore the whole valley into one flat hollow. How DEEP they are grows with the traffic recorded
+  // (grow: the busiest cells' passes against LANE_SAT), so a fresh map's lanes are scratches and well-played ones deep ruts.
+  // Below the typical spot only a light dust wash (w) shows where players went at all.
+  const norm=Math.sqrt(2*Math.PI)*s, vals=[];
+  for(let q=0;q<F.length;q++){ F[q]*=norm; if(F[q]>0.5&&!(q%3)) vals.push(F[q]); }   // F: passes (a thin lane's count)
+  vals.sort((a,b)=>a-b); const Q=f=>vals.length?vals[Math.min(vals.length-1,Math.floor(f*(vals.length-1)))]:1;
+  const lo=Math.max(1,Q(0.5)), hi=Math.max(lo*4,Q(0.995)), grow=Math.min(1,0.3+0.7*Math.log1p(hi)/Math.log1p(LANE_SAT)), lr=Math.log(hi/lo), llo=Math.log1p(lo);
+  laneScale={lo,hi,grow};
+  const D=new Float32Array(gw*gh), S=new Float32Array(gw*gh), Wsh=new Float32Array(gw*gh);
+  for(let q=0;q<F.length;q++){ const P=F[q]; if(P<=0.05) continue; Wsh[q]=Math.min(1,Math.log1p(P)/llo); if(P>lo) D[q]=Math.min(1,Math.log(P/lo)/lr)*grow; }
+  const Lx=-0.55, Ly=0.55, Lz=0.63, g=LANE_DEPTH/(2*cs);   // the light: top left, 39 deg up
+  for(let y=1;y<gh-1;y++) for(let x=1;x<gw-1;x++){ const q=y*gw+x; if(D[q]<0.004&&D[q-1]<0.004&&D[q+1]<0.004&&D[q-gw]<0.004&&D[q+gw]<0.004) continue;
+    const hx=(D[q+1]-D[q-1])*g, hy=(D[q+gw]-D[q-gw])*g, n=1/Math.sqrt(hx*hx+hy*hy+1);   // surface z = -depth: normal (dD/dx, dD/dy, 1)
+    S[q]=(hx*Lx+hy*Ly+Lz)*n-Lz; }
+  laneGrid={X0,Y0,gw,gh,cs,F};
+  document.getElementById('lleg0').textContent=`typical spot (${lo<10?lo.toFixed(1):Math.round(lo)} passes)`;
+  document.getElementById('lleg1').textContent=`busiest (${Math.round(hi)}+, ${Math.round(grow*100)}% deep)`;
+  laneImg=document.createElement('canvas'); laneImg.width=W; laneImg.height=H; const lx=laneImg.getContext('2d'), im=lx.createImageData(W,H), px=im.data;
+  for(let sy=0;sy<H;sy++){ const wy=view.wy0+view.wh-(sy+0.5-view.oy)/view.sc, fy=wy/cs-Y0-0.5, y0=Math.floor(fy); if(y0<0||y0>=gh-1) continue; const ty=fy-y0;
+    for(let sx=0;sx<W;sx++){ const wx=view.wx0+(sx+0.5-view.ox)/view.sc, fx=wx/cs-X0-0.5, x0=Math.floor(fx); if(x0<0||x0>=gw-1) continue; const tx=fx-x0, q=y0*gw+x0;
+      const d=(D[q]*(1-tx)+D[q+1]*tx)*(1-ty)+(D[q+gw]*(1-tx)+D[q+gw+1]*tx)*ty, w=(Wsh[q]*(1-tx)+Wsh[q+1]*tx)*(1-ty)+(Wsh[q+gw]*(1-tx)+Wsh[q+gw+1]*tx)*ty;
+      if(d<0.01&&w<0.08) continue;
+      const sh=(S[q]*(1-tx)+S[q+1]*tx)*(1-ty)+(S[q+gw]*(1-tx)+S[q+gw+1]*tx)*ty, t=Math.pow(d,0.8);
+      let r=222-94*t, gg=196-116*t, b=150-110*t, a=Math.max(0.05+0.17*w,d>0.01?0.3+0.62*Math.pow(d,0.7):0);   // floor: dust (a wash) -> dark mud (a full rut)
+      if(sh>0){ const f=Math.min(1,sh*2.6); r+=(255-r)*f; gg+=(244-gg)*f; b+=(222-b)*f; a=Math.min(1,a+0.25*f); }        // the lit wall
+      else { const f=Math.min(1,-sh*2.8); r*=1-0.85*f; gg*=1-0.88*f; b*=1-0.9*f; a=Math.min(1,a+0.35*f); }                  // the wall in shadow
+      const o=(sy*W+sx)*4; px[o]=r; px[o+1]=gg; px[o+2]=b; px[o+3]=a*255; } }
+  lx.putImageData(im,0,0); }
+function laneAt(x,y){   // the hover: passes here (the smoothed count) and which way they mostly go (the raw cells within 1 unit)
+  if(!laneGrid||!laneCells||!lanes) return '';
+  const G=laneGrid, gx=Math.floor(x/G.cs)-G.X0, gy=Math.floor(y/G.cs)-G.Y0; if(gx<0||gy<0||gx>=G.gw||gy>=G.gh) return '';
+  const p=G.F[gy*G.gw+gx]; if(p<0.5) return '';
+  const cs0=lanes.cell||0.5, cx0=Math.floor(x/cs0), cy0=Math.floor(y/cs0), c=lanes.cells; let f=0, fx=0, fy=0;
+  for(let dy=-2;dy<=2;dy++) for(let dx=-2;dx<=2;dx++){ const i=laneCells.get((cx0+dx)+','+(cy0+dy)); if(i===undefined) continue; f+=c[i+2]; fx+=c[i+4]; fy+=c[i+5]; }
+  let dir=''; if(f>20){ const one=Math.hypot(fx,fy)/f; const ar='→↗↑↖←↙↓↘'[((Math.round(Math.atan2(fy,fx)/(Math.PI/4))%8)+8)%8];
+    dir=one>0.55?`, mostly one way ${ar}`:one>0.25?`, more ${ar} than back`:', both ways'; }
+  return ` — players crossed here about ${p<10?p.toFixed(1):Math.round(p)} times${scope()==='all'?'':' this match'}${dir}`; }
 function drawMap(){
   cx.fillStyle='#0b0b0b'; cx.fillRect(0,0,cv.width,cv.height);
   if(!view){cx.fillStyle='#777';cx.font='14px system-ui';cx.textAlign='center';cx.fillText('the map fills in as players move and die',cv.width/2,cv.height/2);return}
   if(mapTop){ const j=mapTop.j, [ax,ay]=toScreen(j.x0,j.y1), [bx,by]=toScreen(j.x1,j.y0); cx.globalAlpha=0.85; cx.drawImage(mapTop.im,ax,ay,bx-ax,by-ay); cx.globalAlpha=1; }
   if(document.getElementById('fp').checked&&base){ if(mapTop) cx.globalAlpha=0.35; cx.drawImage(base,0,0); cx.globalAlpha=1; }
-  if(heatImg && document.getElementById('hmv').checked) cx.drawImage(heatImg,0,0);
+  if(laneImg && laneOn()) cx.drawImage(laneImg,0,0);
+  if(heatImg && deathOn()) cx.drawImage(heatImg,0,0);
   const sp=sel!=null&&snap?snap.players.find(q=>q.slot===sel):null;
   if(sp&&heat){cx.strokeStyle='#fff';cx.lineWidth=1.5;for(const d of heat.deaths){if(d[7]!==sel||d[4]!==sp.name||(scope()!=='all'&&d[5]!==heat.match))continue;const [x,y]=toScreen(d[0],d[1]);cx.beginPath();cx.arc(x,y,6,0,7);cx.stroke()}}
   const tags=[]; drawSpawns(tags);
@@ -824,7 +922,9 @@ let mapTopWas='', mapTopBust='';
 async function pollHeat(){ try{ heat=await (await fetch('/heat.json')).json();
     if(mapTopWas==='making' && heat.maptop==='ready'){ mapTopName=null; mapTopBust='?v='+Date.now(); }   // made (again): fetch the new picture
     mapTopWas=heat.maptop||''; loadMapTop(heat.map); buildLayers(); drawMap(); }catch(e){} setTimeout(pollHeat,4000) }
-for(const id of ['scope','fp','pd','pl','pxy','phs','pw1','pw2','vh','hmv']) document.getElementById(id).addEventListener('change',()=>{buildLayers();drawMap();renderDet()});
+for(const id of ['scope','fp','pd','pl','pxy','phs','pw1','pw2','vh','hmode','lnf','lnv']) document.getElementById(id).addEventListener('change',()=>{buildLayers();drawMap();renderDet()});
+for(const id of ['scope','hmode']) document.getElementById(id).addEventListener('change',()=>{ laneUi(); if(laneOn()) pollLanes(); });   // (a new scope = other lanes)
+for(const id of ['hmode','lnf','lnv']) document.getElementById(id).addEventListener('change',saveLaneUi);
 // ---- the map in the whole browser window: click the map (or "full window"); the X or Esc puts it back ----
 const mapfs=document.createElement('div'); mapfs.id='mapfs'; mapfs.innerHTML='<button class="fsx" title="Close (Esc)">×</button>'; document.body.appendChild(mapfs);
 let fsHome=null;
@@ -844,7 +944,7 @@ window.addEventListener('resize',()=>{ if(mapfs.classList.contains('open')) fsSi
 cv.addEventListener('mousemove',e=>{ if(!view) return; const r=cv.getBoundingClientRect(), sx=(e.clientX-r.left)*cv.width/r.width, sy=(e.clientY-r.top)*cv.height/r.height;
   const x=view.wx0+(sx-view.ox)/view.sc, y=view.wy0+view.wh-(sy-view.oy)/view.sc; let t=`x ${x.toFixed(1)}, y ${y.toFixed(1)}`;
   let best=null, bd=64; for(const h of spawnHits){ const d=(h[0]-sx)**2+(h[1]-sy)**2; if(d<=bd){ bd=d; best=h[2]; } }   // (later = drawn on top: live items over points)
-  if(best) t=best;
+  if(best) t=best; else if(laneOn()) t+=laneAt(x,y);
   document.getElementById('hov').textContent=t; });
 cv.addEventListener('mouseleave',()=>{ document.getElementById('hov').textContent=''; });
 // "click to teleport": host + PELOAD_ALLOW_TELEPORT, or a client of our host (tpto is forwarded: the host moves us); lands 0.6 above the
@@ -1216,5 +1316,5 @@ let lastSnapAt=0;
 es.addEventListener('message',()=>{ lastSnapAt=Date.now(); document.body.classList.remove('stale'); });
 es.onerror=()=>{ document.body.classList.add('stale'); const t=lastSnapAt?new Date(lastSnapAt).toLocaleTimeString():null;
   document.getElementById('hd').textContent=t?`not connected: no game is running on this port -- showing the last data, from ${t} (it reconnects by itself)`:'not connected: start the game (play.sh serves this page while it runs)'; };
-pollHeat();
+pollHeat(); laneUi(); pollLanes();
 </script></body></html>

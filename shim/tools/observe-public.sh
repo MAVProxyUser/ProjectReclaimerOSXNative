@@ -6,6 +6,7 @@
 # sparring aim / walker refuse public servers by themselves), records it with shim/tools/match-recorder.py for SESSION seconds,
 # quits the app and picks again, until TOTAL seconds. Recordings: ~/Library/Application Support/ReclaimerMac/tracks (no names).
 #   bash shim/tools/observe-public.sh [TOTAL seconds, default 3600] [SESSION seconds, default 1500]
+# Its game is muted (OBS_MUTE=0 = with sound); NATIVE_DYLIB=<copy> keeps one dylib for the whole run while shim/build is rebuilt.
 # Refuses to start beside a running Project Reclaimer (the user's game included); stops at once if one appears that is not its own.
 set -u
 cd "$(dirname "$0")/../.."
@@ -27,7 +28,9 @@ for l in sys.stdin:
     if n < 4 or n >= mx: continue
     mode = ((i.get("mode") or "") + " " + (i.get("name") or "")).lower()
     if "flood" in mode and "cov" in mode: continue                       # (memory: skip unsc vs flood vs cov)
-    score = n + (40 if ("ffa" in mode or "free" in mode or "rumble" in mode) else 0) + (15 if "slayer" in mode else 0) - (60 if "infection" in mode else 0)
+    # (2026-11-08 morning, the user: "perhaps some of the larger ones slayer types more preferable, but infection also valuable"):
+    # the player count leads, Slayer first, Infection next (its lanes), free-for-all a little
+    score = n + (20 if "slayer" in mode else 0) + (10 if "infection" in mode else 0) + (8 if ("ffa" in mode or "free" in mode or "rumble" in mode) else 0)
     if best is None or score > best[0]: best = (score, a, i.get("map"), i.get("mode"), n)
 if best: print(best[1], best[2], "|", best[3], "|", best[4], "players")' "$skip"; }
 while [ $(( $(date +%s) - t0 )) -lt "$TOTAL" ]; do
@@ -35,7 +38,7 @@ while [ $(( $(date +%s) - t0 )) -lt "$TOTAL" ]; do
   if [ -z "$addr" ]; then echo "$(date +%H:%M) no suitable server: waiting 5 minutes"; sleep 300; continue; fi
   echo "$(date +%H:%M) joining $line"
   L="$TR/logs/$(date +%Y%m%d-%H%M%S).log"
-  NATIVE_REAL=1 NHOOK_STATS_OPEN=0 NATIVE_LOG="$L" bash shim/native.sh --join-server "$addr" --background > "$L.out" 2>&1 &
+  NATIVE_REAL=1 NHOOK_STATS_OPEN=0 NHOOK_MUTE_OUTPUT="${OBS_MUTE:-1}" NATIVE_LOG="$L" bash shim/native.sh --join-server "$addr" --background > "$L.out" 2>&1 &
   for i in $(seq 1 30); do P=$(sed -n 's/^native app pid \([0-9]*\).*/\1/p' "$L.out" 2>/dev/null); [ -n "$P" ] && break; sleep 1; done
   [ -z "${P:-}" ] && { echo "the app did not start"; sleep 30; continue; }
   left=$(( TOTAL - ($(date +%s) - t0) )); secs=$(( SESSION < left ? SESSION : left ))

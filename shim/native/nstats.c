@@ -300,6 +300,7 @@ static void hm_json(StBuf* s) {
     for (uint32_t i = 0; i < g_hm.nsp; i++) { HmSpawn* q = &g_hm.sp[i]; sb_put(s, "%s[%.2f,%.2f,%.2f,%d,", i ? "," : "", q->x, q->y, q->z, q->kind); sb_str(s, q->name); sb_put(s, ",%u,%u]", q->n, q->match); }
     sb_put(s, "]}"); pthread_mutex_unlock(&g_hm_mx);
 }
+#include "nlanes.c"   // the lanes players use (the page's heatmap "Lanes"; GET /lanes.json)
 // the map picture behind the heatmap: the loader's tools make missing ones (re-tools/h3bsp.py; the repo = two folders up
 // from this dylib, shim/build/nhook.dylib)
 static char g_repo[1024];
@@ -350,7 +351,7 @@ static int st_players(StPlayer* out, int max) {
     if (n > 0) { HK_ONCE(h, "players table"); hk_fire(h); }
     return n;
 }
-typedef struct { char name[64]; int slot, team, deaths, alive, shots, hits, hits_sphere; uint32_t unit; double life_start, longest, dist; float pos[3], top_speed;
+typedef struct { char name[64]; int slot, team, deaths, alive, shots, hits, hits_sphere; uint32_t unit; double life_start, longest, dist, ln_t; float pos[3], top_speed;
                  int aim_n, aim_on, aim_head, aim_on_judged, aim_on_reg, aim_off_judged, aim_off_reg, aim_ei; float aim_err[64];
                  int aim_open_n, aim_open_on, aim_far_n, aim_far_on; double aim_last; } StTrack;   // aim: st_aim_tick
 static StTrack g_trk[256]; static int g_ntrk; static char g_trk_map[64];
@@ -1099,7 +1100,7 @@ static void st_snapshot(StBuf* s) {
     chat_log_tick();
     double now = mono_s(), t0 = g_gameplay_t0;
     { static double last; if (last) hk_tick(now - last > 1 ? 0.1 : now - last); last = now; }
-    sb_put(s, "{\"time\":%.2f,\"in_match\":%s,\"inst\":%d,\"native\":true", t0 ? now - t0 : 0.0, t0 ? "true" : "false", (int)getpid());
+    sb_put(s, "{\"time\":%.2f,\"in_match\":%s,\"inst\":%d,\"native\":true,\"lanes_live\":%s", t0 ? now - t0 : 0.0, t0 ? "true" : "false", (int)getpid(), ln_on() ? "true" : "false");
     { pthread_mutex_lock(&g_ev_mx); uint32_t fs = g_ev_seq; pthread_mutex_unlock(&g_ev_mx); sb_put(s, ",\"feed_seq\":%u", fs); }
     { char rb[1200]; int video_ok = g_nr_last > 0 && now - g_nr_last < 2.0; if (rec_status_json(rb, sizeof rb, video_ok) > 0) sb_put(s, ",\"rec\":%s", rb); }
     { double fps, p50, p95, mx; int nobj = 0; uint64_t oa = hb_object_array(); uint8_t oh[0x60]; if (oa && hb_read(oa, oh, sizeof oh)) nobj = *(int32_t*)(oh + 0x40);   // (data array: +0x40 count in use)
@@ -1132,6 +1133,7 @@ static void st_snapshot(StBuf* s) {
     sb_json(s);              // "soundboard": the microphone path and what plays (nmic.c)   // "hookcheck": the hooks check's counts (nhchk.c; the page's Hooks check window)
     if (strcmp(m, g_trk_map)) { snprintf(g_trk_map, sizeof g_trk_map, "%s", m); g_ntrk = 0; g_nbip = 0; sb_reset(); }   // a new map: new match stats
     pthread_mutex_lock(&g_hm_mx); snprintf(g_hm_cur, sizeof g_hm_cur, "%s", m); if (g_hm.dirty && now - g_hm.saved > 30) { hm_save(); g_hm.saved = now; } pthread_mutex_unlock(&g_hm_mx);
+    ln_tick(m, t0, now);
     static uint8_t tab[HB_MAXOBJ * 0x18]; int hi = 0; uint64_t arr = hb_object_array(); uint8_t hdr[0x60];
     if (arr && hb_read(arr, hdr, sizeof hdr) && *(uint32_t*)(hdr + 0x2c) == 0x64407440 && *(int32_t*)(hdr + 0x24) == 0x18) {
         hi = *(int32_t*)(hdr + 0x3c);
@@ -1194,9 +1196,10 @@ static void st_snapshot(StBuf* s) {
         if (t) {
             if (have && !dead) {
                 if (!t->alive || t->unit != h) { t->alive = 1; t->life_start = now; }
-                else { float dx = o[0] - t->pos[0], dy = o[1] - t->pos[1], dz = o[2] - t->pos[2], dd = sqrtf(dx * dx + dy * dy + dz * dz); if (dd < 20) t->dist += dd; }
+                else { float dx = o[0] - t->pos[0], dy = o[1] - t->pos[1], dz = o[2] - t->pos[2], dd = sqrtf(dx * dx + dy * dy + dz * dz); if (dd < 20) t->dist += dd;
+                       if (t0) ln_move(t->pos, o, now - t->ln_t, *(const uint32_t*)(d + 0x10) != 0xFFFFFFFFu); }   // (the lanes: nlanes.c)
                 if (spd > t->top_speed && spd < 50) t->top_speed = spd;
-                memcpy(t->pos, o, 12);
+                memcpy(t->pos, o, 12); t->ln_t = now;
                 if (t0) { pthread_mutex_lock(&g_hm_mx); hm_switch(g_hm_cur); hm_cell_add((int32_t)floorf(o[0] / HM_CELL), (int32_t)floorf(o[1] / HM_CELL), 1); g_hm.dirty = 1; pthread_mutex_unlock(&g_hm_mx); }
             } else if (t->alive && !have) t->alive = 0;
             t->unit = h; if (team >= 0) t->team = team;
@@ -1445,6 +1448,7 @@ static void* st_conn(void* a) {
     } else if (!strcmp(path, "/feed.json")) {
         const char* v = strstr(qs, "since="); StBuf b = {0}; st_feed_json(&b, v ? (uint32_t)strtoul(v + 6, 0, 10) : 0); st_reply(fd, "application/json", b.b, b.n, 0); free(b.b);
     } else if (!strcmp(path, "/heat.json")) { StBuf b = {0}; hm_json(&b); st_reply(fd, "application/json", b.b, b.n, 0); free(b.b); }
+    else if (!strcmp(path, "/lanes.json")) { StBuf b = {0}; ln_json(&b, strstr(qs, "scope=match") != 0); st_reply(fd, "application/json", b.b, b.n, 0); free(b.b); }
     else if (!strcmp(path, "/vshapes.json")) st_reply(fd, "application/json", "{\"gen\":0,\"shapes\":{}}", 21, 0);
     else if (!strcmp(path, "/recordings.json")) { size_t ln = 0; char* j = rec_list_json(&ln); st_reply(fd, "application/json", j ? j : "[]", j ? ln : 2, 0); free(j); }
     else if (!strncmp(path, "/recordings/", 12)) st_rec_file(fd, req, path + 12);
@@ -1504,6 +1508,7 @@ static void* st_listen_thread(void* a) {
 }
 static void nstats_start(void) {
     bot_init();   // the sparring aim / walker's launch switches (NHOOK_SPAR, NHOOK_NAV)
+    atexit(ln_atexit);   // (the lanes since the last 30-s save)
     const char* e = getenv("NHOOK_STATS_HTTP"); if (e) g_st_port = atoi(e); if (g_st_port <= 0 || g_st_port > 65535) return;
     Dl_info di; if (dladdr((void*)nstats_start, &di) && di.dli_fname) {   // the repo: <repo>/shim/build/nhook.dylib
         snprintf(g_repo, sizeof g_repo, "%s", di.dli_fname); for (int k = 0; k < 3; k++) { char* sl = strrchr(g_repo, '/'); if (sl) *sl = 0; } }

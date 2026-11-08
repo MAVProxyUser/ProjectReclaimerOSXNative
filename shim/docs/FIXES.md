@@ -2766,6 +2766,24 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   (run 2: two sets tied at 1.63 in the last generation; over all their battles 2.97 vs 1.63). LOGIC: `--champion [--since <t>]`
   reads train.jsonl and writes the set with the best mean over ALL its battles (at least 3) to best-tactics.json ("by": "mean
   over all its battles"). Training itself is unchanged.
+- **Lanes: the ways players move, carved into the map** (2026-11-08 11:00; shim/native/nlanes.c, stats_page.html, shim/tools/
+  lanes-import.py) — WHY: the user asked for "a 'lane' option for the heat map, so you can select lanes, or deaths ... carving a
+  visible rut the more they are used". The footprint heatmap counts TIME per 0.5-unit cell (a camper wears his spot most), so it
+  shows where players stand, not the routes they take. LOGIC: every stats snapshot (~10/s) each live player's move since the last
+  one (same body, <= 0.6 s, 0.02 .. 8 units, < 40 units/s -- respawns and teleporters are no lane) is walked through the grid
+  (Amanatides & Woo) adding the length inside each cell in cells = "passes"; on foot and in vehicles apart, the on-foot
+  direction summed. Per map in <heatmaps>/<map>.lanes (RLN1), saved every 30 s and at exit as a MERGE under an flock on
+  <map>.lanes.lock (read, add what came since the last save, temporary file, rename) so lanes-import.py and a second game add
+  up; this match's lanes in memory. GET /lanes.json?scope=all|match; the snapshot's lanes_live (match-recorder.py writes it into
+  each recording, lanes-import.py skips those: never counted twice). lanes-import.py walks match-recorder.py's recordings the
+  same way (the night's 25 recordings: Standoff 85 km on foot, Last Resort 66, Guardian 58 ...). The page: heatmap = deaths /
+  lanes / lanes + deaths / neither (remembered), lanes on foot / vehicles; the passes smoothed (sigma >= 0.55 units), a rut from
+  the map's typical crossed spot (median) to full shape at its busiest 0.5% (log scale), deeper overall as traffic grows (the
+  busiest cells against 400 passes), lit from the top left as a relief, worn-earth floor, a dust wash below the typical spot;
+  hover = "players crossed here about N times, mostly one way ↗ / both ways". A fixed scale (one pass a scratch, 400 a full rut)
+  wore Standoff's whole valley into one hollow -- relative depth shows its lanes. Offline: shim/tools/lanes-test.sh (the walk
+  adds up, the merge keeps both writers' cells and the import list), shim/tools/lanes-page-mock.py (the page on a real map's
+  data, no game). SWITCH: NHOOK_LANES=0 = no lanes recorded (the page then has none); heatmap "deaths" = the old view.
 
 ## 19. Performance
 

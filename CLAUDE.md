@@ -306,6 +306,9 @@ shim/native/ = nhook.dylib (bash shim/native.sh [--map guardian --seconds 60 --b
 halo3 functions (x0 = guest context, +0x2d8 = TLS pointer), NHOOK_CENSUS=1; reads the players table. main_loop_body / sim tick /
 display_event / object_delete etc. are the app's own code now (census): docs native-client.md "Inside the app".
 Native stats page (nstats.c): http://127.0.0.1:8765/ while shim/native.sh runs (page served from the checkout: edits = refresh).
+Lanes (2026-11-08, shim/native/nlanes.c): the map's heatmap can show deaths or LANES (passes per 0.5-unit cell, ruts relative to
+the map's traffic; <heatmaps>/<map>.lanes, merged under flock; shim/tools/lanes-import.py adds match-recorder.py's recordings,
+skipping ones marked lanes_live; lanes-test.sh, lanes-page-mock.py). NATIVE_DYLIB=<copy> runs a long job on a frozen dylib.
 Works (live-checked in a 72-player game, 2026-11-07): players, variant, heatmap, feed, kills / deaths / assists from halo3's
 statborg (game engine globals TLS +0x20 + the app's `[capacity] game_globals.statborg`; kill feed EXACT from halo3's game results
 -- versus matrix + per-damage-type kills, nstats.c rs_tick, offline test shim/tools/results-feed-test.sh -- else paired from the

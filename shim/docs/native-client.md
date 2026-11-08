@@ -172,6 +172,15 @@ cancel it in the app's mods window -- nhook does not touch it (backlog N23).
 - **Weapon pickup is not a button bit**: shim/tools/native-pickup-scan.sh held each of the control record's 64 bits (+0xC8) on a
   Mauler lying on the floor: none swapped it (FIXES.md "The pickup scan"). Walkers keep their loadout (NHOOK_BOT_PICKBIT unset).
 
+## Lanes (2026-11-08, nlanes.c)
+
+The stats page's map: heatmap **deaths / lanes / lanes + deaths / neither**. Lanes = how many times players crossed each 0.5-unit
+cell (moves between snapshots; standing still adds nothing), on foot and in vehicles apart, carved as ruts relative to the map's
+own traffic and deeper as more is recorded; hover gives the count and the usual direction. Recorded live by nhook on every map
+(<heatmaps>/<map>.lanes, NHOOK_LANES=0 off) and added from the recordings with `python3 shim/tools/lanes-import.py`
+(`--show <map>`; safe while a game runs: both merge under a lock). Offline: `bash shim/tools/lanes-test.sh`,
+`python3 shim/tools/lanes-page-mock.py --map <map>` (the page with that map's data on http://127.0.0.1:8798/).
+
 ## The hooks check
 
 Everything nhook depends on in the app registers in `shim/native/nhchk.h`: per item its feature, its kind (address, entry /
