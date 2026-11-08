@@ -5,6 +5,8 @@
 # auto-update: nothing is listed anywhere. One server: Guardian Slayer on UDP 49190, an RCON password in rcon-password.txt
 # (127.0.0.1 only). The server's stats page: http://127.0.0.1:8767/ (NHOOK_STATS_HTTP).
 #   bash shim/tools/native-dedicated.sh start|stop|status|rcon <command...>
+#   DED_GAME="Team Slayer" DED_MAP=Guardian bash shim/tools/native-dedicated.sh start   another game / map (its own config,
+#   local-<map>-<game>.toml, made from local-test.toml; the app's own variant and map names -- a wrong one shows in server.log)
 # Join it with a test client:  bash shim/native.sh --join-server 127.0.0.1:49190
 set -u
 cd "$(dirname "$0")/../.."
@@ -53,11 +55,14 @@ case "${1:-status}" in
     [ -f "$PIDF" ] && kill -0 "$(cat "$PIDF")" 2>/dev/null && { echo "already running (pid $(cat "$PIDF"))"; exit 0; }
     if [ -f shim/native/build.sh ]; then bash shim/native/build.sh >/dev/null || { echo "build failed"; exit 1; }; fi   # (a release bundle ships the dylib built)
     [ -f shim/build/nhook.dylib ] || { echo "shim/build/nhook.dylib missing"; exit 1; }; cfg
+    CF=local-test.toml
+    if [ -n "${DED_GAME:-}${DED_MAP:-}" ]; then CF="local-$(echo "${DED_MAP:-Guardian}-${DED_GAME:-Slayer}" | tr -c 'A-Za-z0-9\n-' '_').toml"
+      sed -e "s|^map = \".*\"|map = \"${DED_MAP:-Guardian}\"|" -e "s|^game = \"Slayer\"|game = \"${DED_GAME:-Slayer}\"|" "$D/local-test.toml" > "$D/$CF"; chmod 600 "$D/$CF"; echo "config $CF: ${DED_MAP:-Guardian}, ${DED_GAME:-Slayer}"; fi
     (cd "$D" && RECLAIMER_PROFILE_DIR="$D/profile" RECLAIMER_CACHE_DIR="$D/cache" NHOOK_STATS_HTTP="${NHOOK_STATS_HTTP:-8767}" NHOOK_STATS_OPEN=0 \
        PELOAD_FORENSIC_DIR="$D/forensics" NHOOK_HEATMAP_DIR="$D/heatmaps" NHOOK_LOG="$LOG.nhook" \
        NHOOK_STATS_PAGE="$OLDPWD/shim/src/stats_page.html" \
        NHOOK_HALO3="$(cat "$HOME/Library/Application Support/ProjectReclaimer/mcc-folder.txt")/halo3/halo3.dll" \
-       DYLD_INSERT_LIBRARIES="$OLDPWD/shim/build/nhook.dylib" "$B" --server ./local-test.toml < /dev/null > "$LOG" 2>&1 & echo $! > "$PIDF")   # (no nohup: a system binary strips DYLD_*)
+       DYLD_INSERT_LIBRARIES="$OLDPWD/shim/build/nhook.dylib" "$B" --server "./$CF" < /dev/null > "$LOG" 2>&1 & echo $! > "$PIDF")   # (no nohup: a system binary strips DYLD_*)
     echo "started (pid $(cat "$PIDF")), log $LOG; stats http://127.0.0.1:${NHOOK_STATS_HTTP:-8767}/; join: bash shim/native.sh --join-server 127.0.0.1:49190" ;;
   stop)
     [ -f "$PIDF" ] && { P=$(cat "$PIDF"); pkill -TERM -P "$P" 2>/dev/null; kill "$P" 2>/dev/null; sleep 2; pkill -9 -P "$P" 2>/dev/null; kill -9 "$P" 2>/dev/null; rm -f "$PIDF"; echo stopped; } || echo "not running" ;;
