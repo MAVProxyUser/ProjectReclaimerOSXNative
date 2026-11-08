@@ -3076,6 +3076,15 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   first coached battle finds it). The walker (ammo.json or NHOOK_AMMO_OFF=<hex>): rounds loaded + the most seen per weapon
   definition; an empty magazine in a fight with a loaded other weapon = switch (vpad Y); out of a fight under 60% = reload (RB tap);
   after a fight only when not full. Unknown field = the old behaviour.
+- **The take-over bridges the controller through the virtual pad** (2026-11-08 16:25; nvpad.m tk_bridge, nhook.c) — WHY: the
+  user, after the first take-over: "I still can't control an observer, it's only mouse control". The click worked (the log: the
+  user has the controls, background events on, window raised) but the app enumerates +[GCController controllers] once, early,
+  and a --background app finds no physical controller then; it never reads one later. It does read nhook's virtual pad in
+  --background clients (the walkers). LOGIC: with NHOOK_TAKEOVER the virtual pad is installed at start (at rest until the click;
+  the user drives it, no bot does: bot_allowed() still refuses the real profile and public servers); the click attaches a
+  valueChangedHandler (serial queue) to every physical controller (+controllers' original list without the virtual pad, connect
+  notifications, a 2 s rescan) that copies sticks, triggers, A B X Y, bumpers, stick clicks, menu / options and the d-pad into it
+  (nh_vpad_set). Log: "[takeover] your controller (<vendor>) drives the game through the virtual pad".
 
 ## 19. Performance
 

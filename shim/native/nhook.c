@@ -1008,6 +1008,8 @@ __attribute__((constructor)) static void nhook_init(void) {
     hk_init(); app_build_pick();                     // the hooks check's items; this app build's addresses (napp_builds.h)
     if (getenv("NHOOK_VPAD") && strcmp(getenv("NHOOK_VPAD"), "0") && getenv("RECLAIMER_PROFILE_DIR"))   // nvpad.m: test identities only
         vpad_start(0);   // (at once: the app may enumerate controllers only early -- 300 ms later it never asked again)
-    if (getenv("NHOOK_TAKEOVER") && strcmp(getenv("NHOOK_TAKEOVER"), "0")) nh_takeover_install();   // (the observer: a click gives the user the controls)
+    if (getenv("NHOOK_TAKEOVER") && strcmp(getenv("NHOOK_TAKEOVER"), "0")) {   // (the observer: a click gives the user the controls)
+        if (!g_vpad_on) vpad_start(0);   // (the bridge's virtual pad, at once like the walkers': the app enumerates controllers early; the user drives it, never a bot)
+        nh_takeover_install(); }
     if (getenv("NHOOK_SELFTEST")) nstats_start();       // shim/tools/nhook-selftest.sh: the stats server without the app
 }

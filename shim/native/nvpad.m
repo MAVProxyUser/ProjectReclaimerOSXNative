@@ -54,6 +54,29 @@ int nh_vpad_stick_reads(void) { return g_vpad_stick_reads; }
 #import <AppKit/AppKit.h>
 void nh_takeover_fire(void);   // nhook.c
 static id g_tk_monitor;
+// THE BRIDGE (2026-11-08, same day: the click worked -- window raised, background events on -- and the controller still did
+// nothing): the app enumerates +[GCController controllers] once, early, and a --background app finds no physical controller
+// then, so it never reads one. It does read nhook's virtual pad (the walkers' moves work in --background clients), so with
+// NHOOK_TAKEOVER the virtual pad is installed at start (nhook.c) and, after the click, every physical controller's changes are
+// copied into it (valueChangedHandler on a serial queue -> nh_vpad_set): sticks, triggers, A B X Y, bumpers, stick clicks, menu /
+// options, the d-pad. Before the click the virtual pad stays at rest.
+static NSMutableSet* g_tk_bridged;
+static void tk_copy(GCExtendedGamepad* p) {
+    uint32_t b = (p.buttonA.isPressed ? 1 : 0) | (p.buttonB.isPressed ? 2 : 0) | (p.buttonX.isPressed ? 4 : 0) | (p.buttonY.isPressed ? 8 : 0)
+               | (p.leftShoulder.isPressed ? 16 : 0) | (p.rightShoulder.isPressed ? 32 : 0) | (p.leftThumbstickButton.isPressed ? 64 : 0) | (p.rightThumbstickButton.isPressed ? 128 : 0)
+               | (p.buttonMenu.isPressed ? 256 : 0) | (p.buttonOptions.isPressed ? 512 : 0)
+               | (p.dpad.up.isPressed ? 1024 : 0) | (p.dpad.down.isPressed ? 2048 : 0) | (p.dpad.left.isPressed ? 4096 : 0) | (p.dpad.right.isPressed ? 8192 : 0);
+    nh_vpad_set(p.leftThumbstick.xAxis.value, p.leftThumbstick.yAxis.value, p.rightThumbstick.xAxis.value, p.rightThumbstick.yAxis.value, p.leftTrigger.value, p.rightTrigger.value, b); }
+static void tk_bridge(GCController* c) {
+    if (!c || c == g_vpad || !c.extendedGamepad || [g_tk_bridged containsObject:c]) return;
+    static dispatch_queue_t q; if (!q) q = dispatch_queue_create("nhook.pad-bridge", DISPATCH_QUEUE_SERIAL);
+    [g_tk_bridged addObject:c]; c.handlerQueue = q;
+    c.extendedGamepad.valueChangedHandler = ^(GCExtendedGamepad* gp, GCControllerElement* el) { (void)el; tk_copy(gp); };
+    nh_log("[nhook] [takeover] your controller (%s) drives the game through the virtual pad", c.vendorName ? c.vendorName.UTF8String : "?"); }
+static void tk_bridge_all(void) {
+    NSArray* a = g_orig_controllers ? ((NSArray* (*)(id, SEL))g_orig_controllers)([GCController class], @selector(controllers)) : [GCController controllers];
+    int n = 0; for (GCController* c in a) if (c != g_vpad) { tk_bridge(c); n++; }
+    static int said; if (!n && !said) { said = 1; nh_log("[nhook] [takeover] no physical controller seen yet (press a button on it; checked every 2 s)"); } }
 static void tk_take(NSWindow* w) {
     if (@available(macOS 11.3, *)) [GCController setShouldMonitorBackgroundEvents:YES];
     [NSApp activateIgnoringOtherApps:YES];
@@ -64,6 +87,14 @@ static void tk_take(NSWindow* w) {
         [w makeKeyAndOrderFront:nil]; }
     nh_log("[nhook] [takeover] the user has the controls: controller input in the background on (%s), window %s", [GCController respondsToSelector:@selector(setShouldMonitorBackgroundEvents:)] ? "yes" : "this macOS cannot",
            w ? "raised" : "not found");
+    if (!g_vpad) nh_log("[nhook] [takeover] no virtual pad (it is installed at start with NHOOK_TAKEOVER): the controller cannot be bridged");
+    else {
+        if (!g_tk_bridged) g_tk_bridged = [[NSMutableSet alloc] init];
+        [[NSNotificationCenter defaultCenter] addObserverForName:GCControllerDidConnectNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification* n) { tk_bridge(n.object); }];
+        tk_bridge_all();
+        dispatch_source_t t = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());   // (a controller connected or found later)
+        dispatch_source_set_timer(t, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), 2 * NSEC_PER_SEC, NSEC_PER_SEC / 4);
+        dispatch_source_set_event_handler(t, ^{ tk_bridge_all(); }); dispatch_resume(t); }
     nh_takeover_fire(); }
 void nh_takeover_install(void) {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
