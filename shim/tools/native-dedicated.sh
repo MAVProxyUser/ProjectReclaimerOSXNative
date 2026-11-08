@@ -57,14 +57,18 @@ case "${1:-status}" in
     if [ -f shim/native/build.sh ]; then bash shim/native/build.sh >/dev/null || { echo "build failed"; exit 1; }; fi   # (a release bundle ships the dylib built)
     [ -f shim/build/nhook.dylib ] || { echo "shim/build/nhook.dylib missing"; exit 1; }; cfg
     CF=local-test.toml
-    if [ "${DED_TEAMS:-0}" = 1 ]; then   # Team Slayer: a one-game playlist (the template's syntax: Slayer with rounds.teams on)
+    if [ "${DED_TEAMS:-0}" = 1 ] || [ -n "${DED_OPTIONS:-}" ]; then   # a one-game playlist (the template's syntax): Team Slayer (rounds.teams on) and / or
+      # DED_OPTIONS = more game options as JSON, e.g. '{"player.primary_weapon": 0, "player.secondary_weapon": 1}' (BR + AR starts;
+      # shim/docs/option-map.json has every option and its choices)
       mkdir -p "$D/playlists"; PV=$(python3 -c "import json; print(json.load(open('$D/playlists/slayer.playlist.json')).get('version', 1))" 2>/dev/null || echo 1)
-      printf '{"version": %s, "name": "nhook teams", "games": [{"map": "%s", "game": "Slayer", "name": "Team Slayer", "options": {"rounds.teams": 1}}]}\n' "$PV" "${DED_MAP:-Guardian}" > "$D/playlists/nhook-teams.playlist.json"
-      CF="local-teams-$(echo "${DED_MAP:-Guardian}" | tr -c 'A-Za-z0-9\n-' '_').toml"
-      sed -e '/^map = /d' -e 's|^game = "Slayer"|playlist = "playlists/nhook-teams.playlist.json"|' "$D/local-test.toml" > "$D/$CF"; chmod 600 "$D/$CF"; echo "config $CF: Team Slayer on ${DED_MAP:-Guardian}"
+      OPTS=$(python3 -c "import json, sys; o = json.loads(sys.argv[2] or '{}'); o.update({'rounds.teams': 1} if sys.argv[1] == '1' else {}); print(json.dumps(o))" "${DED_TEAMS:-0}" "${DED_OPTIONS:-}") || { echo "DED_OPTIONS is not JSON"; exit 1; }
+      PN="nhook-$([ "${DED_TEAMS:-0}" = 1 ] && echo teams || echo ffa)"; GN=$([ "${DED_TEAMS:-0}" = 1 ] && echo "Team Slayer" || echo "Slayer")
+      printf '{"version": %s, "name": "%s", "games": [{"map": "%s", "game": "Slayer", "name": "%s", "options": %s}]}\n' "$PV" "$PN" "${DED_MAP:-Guardian}" "$GN" "$OPTS" > "$D/playlists/$PN.playlist.json"
+      CF="local-$PN-$(echo "${DED_MAP:-Guardian}" | tr -c 'A-Za-z0-9\n-' '_').toml"
+      sed -e '/^map = /d' -e "s|^game = \"Slayer\"|playlist = \"playlists/$PN.playlist.json\"|" "$D/local-test.toml" > "$D/$CF"; chmod 600 "$D/$CF"; echo "config $CF: $GN on ${DED_MAP:-Guardian}, options $OPTS"
     elif [ -n "${DED_GAME:-}${DED_MAP:-}" ]; then CF="local-$(echo "${DED_MAP:-Guardian}-${DED_GAME:-Slayer}" | tr -c 'A-Za-z0-9\n-' '_').toml"
       sed -e "s|^map = \".*\"|map = \"${DED_MAP:-Guardian}\"|" -e "s|^game = \"Slayer\"|game = \"${DED_GAME:-Slayer}\"|" "$D/local-test.toml" > "$D/$CF"; chmod 600 "$D/$CF"; echo "config $CF: ${DED_MAP:-Guardian}, ${DED_GAME:-Slayer}"; fi
-    (cd "$D" && RECLAIMER_PROFILE_DIR="$D/profile" RECLAIMER_CACHE_DIR="$D/cache" NHOOK_STATS_HTTP="${NHOOK_STATS_HTTP:-8767}" NHOOK_STATS_OPEN=0 \
+    (cd "$D" && NHOOK_ROLE=server RECLAIMER_PROFILE_DIR="$D/profile" RECLAIMER_CACHE_DIR="$D/cache" NHOOK_STATS_HTTP="${NHOOK_STATS_HTTP:-8767}" NHOOK_STATS_OPEN=0 \
        PELOAD_FORENSIC_DIR="$D/forensics" NHOOK_HEATMAP_DIR="$D/heatmaps" NHOOK_LOG="$LOG.nhook" \
        NHOOK_STATS_PAGE="$OLDPWD/shim/src/stats_page.html" \
        NHOOK_HALO3="$(cat "$HOME/Library/Application Support/ProjectReclaimer/mcc-folder.txt")/halo3/halo3.dll" \

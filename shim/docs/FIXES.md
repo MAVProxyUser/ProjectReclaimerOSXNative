@@ -3134,6 +3134,30 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   distance band medians decide which is shorter) when its target is closer than the players' median nearest-enemy distance at
   that switch, toward the longer one when farther (first data: sniper -> precision 10 units, precision -> sniper 11: a small
   hysteresis, plus the 3 s between switches). Order: empty magazine, weapon zones, the players' switch, else the distance bands.
+- **The bullet log and the spread ("bloom") analysis** (2026-11-08 17:20; noverlay.c nov_slog_*, shim/tools/bloom.py, bloom-test.sh,
+  bloom-battle.sh, native-dedicated.sh DED_OPTIONS / NHOOK_ROLE) — WHY: the user: "what can you tell me about the 'random bloom' on
+  both the AR, and the BR? ... do they seem random? any disadvantages or flaws under certain situations?". Nothing measured a
+  bullet's direction before (tracers on screen, shots / hits counters). LOGIC: NHOOK_SHOTLOG=<file> (%p pid, %r NHOOK_ROLE: "server"
+  on our dedicated server, else "client") logs every deleted bullet from the object_delete hook with its owner's aim vector (+0x1a0),
+  velocity (+0x74) and held weapon at that moment, its start (+0x1e8), end (+0x1c) and distance travelled (+0x1b0), the estimated
+  victim; a 16384-record ring written by a thread every 0.5 s (the engine thread only copies). bloom.py: each straight bullet's
+  angle off the aim in the aim's right / up frame; per weapon median / p90 / max, the bias, the shape (KS against a uniform disc and
+  a Gaussian), the error by the bullet's index in a string of fire, by burst position, by time since the last burst, by ground
+  speed, airborne, distance, hit / miss; the correlation of consecutive bullets' errors. Offline test (a synthetic AR cone growing
+  1 -> 4 deg over 15 rounds, a BR Gaussian with a hidden +0.5 deg up on every third round): all found. bloom-battle.sh: 4 walkers on
+  our server with BR + AR starts (DED_OPTIONS '{"player.primary_weapon": 0, "player.secondary_weapon": 1}' -> a one-game playlist
+  with those options), the server's log (authoritative) and the clients' analysed apart.
+- **How random are the spawns** (2026-11-08 17:25; shim/tools/spawn-patterns.py) — WHY: the user: "pay attention to the randomness of
+  the spawn patterns too ... patterns in either would be interesting". LOGIC: every respawn in the recorded public matches (a
+  player alive again after a death; Infection left out) is matched to the map's spawn points (respawn positions merged within 2
+  units, seen twice or more) and compared with every other point at that moment: log distance to the nearest live enemy, enemies
+  within 15 units, log distance to the nearest teammate (team games), log distance to the player's own death spot, used in the
+  last 10 s; a conditional logit per map and per class, its top-1 / top-3 hit rate against chance, how often the farthest point
+  from enemies was chosen, the same point as the player's previous spawn, the spread of use (entropy over uniform).
+  tracks/spawns.json. First run (16,110 respawns): free-for-all -- the model's first pick is the chosen point 26.5% (chance 2.5%),
+  top 3 50% (7.5%), nearest enemy +3.85 (by far the strongest), own death +0.84, just used +0.92; team -- 37% (2%), 68% (6%),
+  nearest teammate -0.85 (near them), just used +1.74 (teams spawn together); the farthest point from enemies only 4-32%; every
+  point used (0.87-0.94 of uniform).
 
 ## 19. Performance
 
