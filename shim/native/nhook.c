@@ -741,11 +741,13 @@ static void* probe_thread(void* arg) {
     sleep(2);
     // ... and until the image is mapped (its MZ header) and the runtime's code table is filled: a dedicated server's worker,
     // starting beside its supervisor, was not ready after 2 s once ("image+0: no MZ", "code table at 0x0" -> hooks off, no
-    // stats page; 2026-11-07, its fifth start that day). Up to 60 s.
-    { int w = 0; for (; w < 240; w++) { uint8_t h[2]; uint64_t t[2];
+    // stats page; 2026-11-07, its fifth start that day). Up to 10 minutes: once (2026-11-08, a server's engine process while
+    // four clients started) it was not ready after 60 s, the old limit, and the hooks stayed off for the process's life.
+    { int w = 0; for (; w < 2400; w++) { uint8_t h[2]; uint64_t t[2];
           if (!rd(g_img, h, 2) && h[0] == 'M' && h[1] == 'Z' && (!g_app.codetab || (!rd(APP(codetab), t, 16) && t[0] && t[1] >= 1000 && t[1] <= 1000000))) break;
+          if (w == 240) nlog("[nhook] the engine image / code table are not ready 60 s later than the usual 2 s: still waiting (up to 10 minutes)");
           usleep(250000); }
-      if (w) nlog("[nhook] the engine image / code table were ready %.2f s later than the usual 2 s%s", w * 0.25, w >= 240 ? " -- not at all: giving up" : ""); }
+      if (w) nlog("[nhook] the engine image / code table were ready %.2f s later than the usual 2 s%s", w * 0.25, w >= 2400 ? " -- not at all: giving up" : ""); }
     const char* path = getenv("NHOOK_HALO3");
     if (!path) { nlog("[nhook] NHOOK_HALO3 not set: no image check"); hooks_start(); return 0; }   // (the hooks start anyway: shim/tools/native-dedicated.sh once lost them all)
     int fd = open(path, O_RDONLY); struct stat st;

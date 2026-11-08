@@ -166,6 +166,9 @@ cancel it in the app's mods window -- nhook does not touch it (backlog N23).
 - **How human**: `python3 shim/tools/walker-compare.py [walkers' folder]` prints players vs walkers per measure and a
   human-likeness score = 100 x exp(-mean |log(walker / player)|); `python3 shim/tools/walker-report.py [out.html]` = the night's
   page (no names: Walker 1-4). `WB_TRACKS=<folder>` keeps one battle's recordings apart (one set of settings measured alone).
+  The night's numbers: training run 1 55%, run 2 73%, the trained champion's showcase battles 70 -> 81% as the reaction was fixed
+  (walker-model's reaction = 30 -> 5 deg of aim: NHOOK_BOT_TURN0, the turn rate before reacting, 0.73 rad/s; NHOOK_BOT_REACT the
+  delay factor, 1.6). `python3 shim/tools/walker-train.py --champion` = the tactics set with the best mean over all its battles.
 - **Weapon pickup is not a button bit**: shim/tools/native-pickup-scan.sh held each of the control record's 64 bits (+0xC8) on a
   Mauler lying on the floor: none swapped it (FIXES.md "The pickup scan"). Walkers keep their loadout (NHOOK_BOT_PICKBIT unset).
 

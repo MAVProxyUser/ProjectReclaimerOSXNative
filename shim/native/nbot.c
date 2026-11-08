@@ -268,12 +268,15 @@ static void bot_step_body(void) {
         int seen = tvis && now - tvis < 0.6;
         // (2026-11-08 walker-compare: walkers reacted in 0.42 s and aimed 2.8 deg off against the players' 1.08 s and 4.1 deg: the
         //  factors below bring skill 0.5 to the players' numbers -- skill 1 is still faster and steadier than they are)
-        float react = g_bm.reaction * (1.25f - skill) * 1.3f, noise = g_bm.aim_err * (1.25f - skill) * 1.6f / 57.2958f;
+        static float rk = -1, t0r = -1; if (rk < 0) { const char* e = getenv("NHOOK_BOT_REACT"); rk = e ? (float)atof(e) : 1.6f; e = getenv("NHOOK_BOT_TURN0"); t0r = e ? (float)atof(e) : 0.73f; }
+        // (07:50: walker-model's "reaction" = 30 deg -> 5 deg of aim, so the turn rate BEFORE the reaction time decides it: 1.5 rad/s
+        //  measured 0.49-0.53 s against the players' 1.08 whatever the delay; NHOOK_BOT_TURN0 = that rate, NHOOK_BOT_REACT the delay factor)
+        float react = g_bm.reaction * (1.25f - skill) * rk, noise = g_bm.aim_err * (1.25f - skill) * 1.6f / 57.2958f;
         if (seen) {
             // aim: OU noise around the exact angles, turning at most 1.5 rad/s before the reaction time is up, 7 rad/s after
             float th = 0.45f, k = (float)dt / th, sg = noise * sqrtf(2.0f * (float)dt / th);
             ox += -ox * k + sg * bot_gauss(); oy += -oy * k + 0.5f * sg * bot_gauss();
-            float dy = bot_wrap(tyaw + ox - yaw0), dp = (tpitch + oy) - pitch0, mx = (float)dt * (now - tacq < react ? 1.5f : 7.0f);
+            float dy = bot_wrap(tyaw + ox - yaw0), dp = (tpitch + oy) - pitch0, mx = (float)dt * (now - tacq < react ? t0r : 7.0f);
             yaw = yaw0 + (dy > mx ? mx : dy < -mx ? -mx : dy); pitch = pitch0 + (dp > mx ? mx : dp < -mx ? -mx : dp); out |= 1;
             float ey = bot_wrap(tyaw - yaw0), ep = tpitch - pitch0, err = sqrtf(ey * ey + ep * ep) * 57.2958f, size = atanf(0.4f / (tdist > 0.5f ? tdist : 0.5f)) * 57.2958f;
             g_bot_err = err; g_bot_fire = vis && now - tacq > react && err < (size > 1.2f ? size : 1.2f) + fextra && tdist < 40;

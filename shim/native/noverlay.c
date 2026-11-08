@@ -267,8 +267,9 @@ static void on_object_delete_body(uint64_t* ctx) {   // (x0: the guest context t
     uint8_t* e = data + (size_t)i * 0x18; if (e[3] != 5 || *(uint16_t*)e != (uint16_t)(h >> 16)) return;   // projectiles only
     uint8_t* p = *(uint8_t**)(e + 0x10); if (!p) return;
     { uint32_t own = *(uint32_t*)(p + 0xC0), vic = 0xFFFFFFFFu; const float* ip = (const float*)(p + 0x1c); int hi = *(int32_t*)(arr + 0x3c);
-      static int noaim = -1; if (noaim < 0) noaim = getenv("NHOOK_NO_AIM") != 0;   // (hits come from the aim meter's hitbox test; this pass only without it)
-      if (noaim && own != 0xFFFFFFFFu && hi > 0 && hi <= 65536) for (int j = 0; j < hi; j++) { uint8_t* b = data + (size_t)j * 0x18; if (b[3] != 0 || !*(uint16_t*)b) continue;
+      static int noaim = -1; if (noaim < 0) noaim = getenv("NHOOK_NO_AIM") != 0;   // (hits come from the aim meter's hitbox test; this pass only without it --
+      extern volatile unsigned long g_nr_frames;                                     //  or without frames: a dedicated server's aim meter never runs)
+      if ((noaim || !g_nr_frames) && own != 0xFFFFFFFFu && hi > 0 && hi <= 65536) for (int j = 0; j < hi; j++) { uint8_t* b = data + (size_t)j * 0x18; if (b[3] != 0 || !*(uint16_t*)b) continue;
           uint32_t bh = ((uint32_t)*(uint16_t*)b << 16) | (uint32_t)j; if (bh == own) continue; uint8_t* bp = *(uint8_t**)(b + 0x10); if (!bp) continue;
           const float* c = (const float*)(bp + 0x1c); float r2 = c[3] + 0.1f, dx = ip[0] - c[0], dy = ip[1] - c[1], dz = ip[2] - c[2];
           if (r2 > 0 && r2 < 5 && dx * dx + dy * dy + dz * dz <= r2 * r2) { vic = bh; break; } }

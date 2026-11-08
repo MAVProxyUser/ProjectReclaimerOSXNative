@@ -1241,7 +1241,7 @@ static void st_snapshot(StBuf* s) {
                 sb_put(s, "%s", any ? "," : ",\"medals\":{"); any = 1; sb_str(s, g_medal[m]); sb_put(s, ":%d", c); }
             if (any) sb_put(s, "}"); }
         static int noaim = -1; if (noaim < 0) noaim = getenv("NHOOK_NO_AIM") != 0;   // hits: shots through an enemy's hitbox (the aim meter); without it the old estimate
-        int hits = t ? (noaim ? t->hits_sphere : t->hits) : 0;
+        int hits = t ? ((noaim || !g_nr_frames) ? t->hits_sphere : t->hits) : 0;   // (no frames = no aim meter: a dedicated server)
         if (t) sb_put(s, ",\"deaths\":%d,\"hits\":%d,\"accuracy\":%.3f,\"shots\":%d,\"life\":%.1f,\"longest_life\":%.1f,\"distance\":%.1f,\"top_speed\":%.2f", sbok ? sbs[SB_DEATHS] : t->deaths, hits, t->shots ? (double)hits / t->shots : 0.0, t->shots, t->alive ? now - t->life_start : 0.0,
                       t->longest > (t->alive ? now - t->life_start : 0) ? t->longest : (t->alive ? now - t->life_start : 0), t->dist, t->top_speed);
         if (g_st_var_ok) st_player_traits(s, pl[k].rec);

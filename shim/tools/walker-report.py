@@ -2,7 +2,8 @@
 """The walkers' night report (2026-11-08): one HTML page from what the night produced -- the real players' model (tracks/), the
 walkers measured the same way (battles/tracks/), the training log (battles/train.jsonl) and the battle scoreboards (battles/*.jsonl).
 No player names: walkers are "Walker 1..4" (by test identity), players are never named.
-    python3 shim/tools/walker-report.py [out.html]"""
+    [WB_TRACKS=<the walkers' folder>] [WB_STEPS="label|folder;label|folder..."] python3 shim/tools/walker-report.py [out.html]
+WB_STEPS = the human-likeness after each change (walker-compare.py on each folder, the same score as its own)."""
 import glob, gzip, html, json, os, subprocess, sys, tempfile, time
 
 HERE = os.path.dirname(os.path.abspath(__file__)); SUP = os.path.expanduser('~/Library/Application Support/ReclaimerMac')
@@ -12,6 +13,11 @@ def nick(p):
     try: return json.load(open(os.path.join(SUP, 'native', p, 'profile.json')))['identity']['nickname']
     except Exception: return None
 ALIAS = {nick(p): 'Walker %d' % (i + 1) for i, p in enumerate(IDS) if nick(p)}
+def compare(d):
+    out = tempfile.mktemp(suffix='.json')
+    subprocess.run([sys.executable, os.path.join(HERE, 'walker-compare.py'), d, '--json', out], capture_output=True, text=True)
+    try: return json.load(open(out)).get('score')
+    except Exception: return None
 def model(d):
     out = tempfile.mktemp(suffix='.json')
     subprocess.run([sys.executable, os.path.join(HERE, 'walker-model.py'), d, '--out', out, '--heatmaps', '/nonexistent'], capture_output=True, text=True)
@@ -43,6 +49,12 @@ def pair_bars(rows):
             yy = y + k * 12; out.append('<rect x="%d" y="%d" width="%.1f" height="10" class="%s"/>' % (lw, yy + 2, max(1.5, v * sc), cls))
             out.append('<text x="%.1f" y="%d" class="val">%s</text>' % (lw + max(1.5, v * sc) + 6, yy + 11, fmt(v)))
     out.append('</svg>'); return ''.join(out)
+def runs_of(train):
+    r, last, out = 0, None, []
+    for t in train:
+        if last is not None and t['gen'] <= last: r += 1
+        last = t['gen']; out.append(r + 1)
+    return out
 def fitness_chart(train):
     if not train: return '<p class="note">No training generations yet.</p>'
     W, H, pl, pb = 560, 220, 44, 30; gens = [t['gen'] for t in train]; bestf = [max(w['fitness'] for w in t['walkers']) for t in train]
@@ -52,7 +64,10 @@ def fitness_chart(train):
     o = ['<svg viewBox="0 0 %d %d" role="img" aria-label="fitness per generation" class="chart">' % (W, H)]
     for k in range(5):
         v = lo + span * k / 4; o.append('<line x1="%d" x2="%d" y1="%.1f" y2="%.1f" class="grid"/><text x="%d" y="%.1f" class="ax" text-anchor="end">%.1f</text>' % (pl, W - 16, Y(v), Y(v), pl - 6, Y(v) + 4, v))
-    for i in range(len(train)): o.append('<text x="%.1f" y="%d" class="ax" text-anchor="middle">%d</text>' % (X(i), H - 8, gens[i]))
+    rn = runs_of(train)
+    for i in range(len(train)): o.append('<text x="%.1f" y="%d" class="ax" text-anchor="middle">%d</text>' % (X(i), H - 8, i + 1))
+    for i in range(1, len(train)):
+        if rn[i] != rn[i - 1]: o.append('<line x1="%.1f" x2="%.1f" y1="12" y2="%d" class="grid" stroke-dasharray="3 3"/><text x="%.1f" y="24" class="ax">run %d</text>' % ((X(i) + X(i - 1)) / 2, (X(i) + X(i - 1)) / 2, H - pb, (X(i) + X(i - 1)) / 2 + 4, rn[i]))
     for series, cls in ((meanf, 'ln-mean'), (bestf, 'ln-best')):
         o.append('<polyline class="%s" points="%s"/>' % (cls, ' '.join('%.1f,%.1f' % (X(i), Y(v)) for i, v in enumerate(series))))
         o.append('<circle cx="%.1f" cy="%.1f" r="4" class="%s-dot"/>' % (X(len(series) - 1), Y(series[-1]), cls))
@@ -63,7 +78,7 @@ src = real['source'] if real else {}; bsrc = bots['source'] if bots else {}
 summary = [('Real-player samples', '{:,}'.format(src.get('samples', 0)), '%s players, %s engagements' % (src.get('players', 0), src.get('engagements', 0))),
            ('Walker battles', str(len(battles)), '%d training generations' % len(train)),
            ('Kills in the last battle', str(sum((p.get('kills') or 0) for p in battles[-1][1])) if battles else '–', '%d s, 4 walkers' % battles[-1][2] if battles else ''),
-           ('Best fitness', fmt(best['fitness'], 1) if best else '–', 'generation %s' % best['gen'] if best else '')]
+           ('Champion fitness', fmt(best['fitness'], 1) if best else '–', ('mean of %s battles, %s kills / %s deaths' % (best.get('battles'), best.get('kills', '?'), best.get('deaths', '?'))) if best else '')]
 cmp_rows = [('running speed (u/s)', g(real, 'move', 'speed_median'), g(bots, 'move', 'speed_median')),
             ('time standing (share)', g(real, 'move', 'stand_share'), g(bots, 'move', 'stand_share')),
             ('fight distance (u)', g(real, 'fight', 'dist_median'), g(bots, 'fight', 'dist_median')),
@@ -72,16 +87,18 @@ cmp_rows = [('running speed (u/s)', g(real, 'move', 'speed_median'), g(bots, 'mo
             ('aim error (deg)', g(real, 'fight', 'aim_err_median'), g(bots, 'fight', 'aim_err_median')),
             ('reaction (s)', g(real, 'fight', 'reaction_s'), g(bots, 'fight', 'reaction_s')),
             ('shots a second in fights', g(real, 'fight', 'shots_per_s'), g(bots, 'fight', 'shots_per_s'))]
-import math
-_lr = [abs(math.log(b / a)) for l, a, b in cmp_rows if a and b and a > 0 and b > 0]
-human = 100 * math.exp(-sum(_lr) / len(_lr)) if _lr else None
-summary.insert(1, ('Human-likeness', '%.0f%%' % human if human is not None else '–', 'walkers vs players over %d measures' % len(_lr)))
+human = compare(WDIR)
+steps = [x.split('|', 1) for x in (os.environ.get('WB_STEPS') or '').split(';') if '|' in x]
+step_sc = [(lab, compare(os.path.expanduser(d))) for lab, d in steps]
+summary.insert(1, ('Human-likeness', '%.0f%%' % human if human is not None else '–', 'walkers vs players, walker-compare.py'))
 rows_html = ''.join('<tr><td>%s</td><td class="n">%s</td><td class="n">%s</td></tr>' % (E(l), fmt(a), fmt(b)) for l, a, b in cmp_rows)
 tact = ''
 if best:
-    names = {'dist': 'fighting distance (x the players\')', 'strafe': 'strafe strength (x)', 'switch': 'strafe switch time (x)', 'fire': 'aim slack when firing (deg)', 'retreat': 'back off below shield', 'gren': 'seconds between grenades'}
+    names = {'dist': 'fighting distance (x the players\')', 'strafe': 'strafe strength (x)', 'switch': 'strafe switch time (x)', 'fire': 'aim slack when firing (deg)', 'retreat': 'back off below shield', 'gren': 'seconds between grenades',
+             'press': 'pressing in (throttle)', 'backoff': 'back-off on low shields (throttle)'}
     tact = ''.join('<tr><td>%s</td><td class="n">%s</td></tr>' % (E(names.get(k, k)), fmt(v)) for k, v in best['tactics'].items())
-gen_rows = ''.join('<tr><td class="n">%d</td><td class="n">%s</td><td class="n">%s</td><td class="n">%d</td></tr>' % (t['gen'], fmt(max(w['fitness'] for w in t['walkers']), 1), fmt(sum(w['fitness'] for w in t['walkers']) / len(t['walkers']), 1), sum(w['kills'] for w in t['walkers'])) for t in train)
+_rn = runs_of(train)
+gen_rows = ''.join('<tr><td class="n">%d</td><td class="n">%d · %d</td><td class="n">%s</td><td class="n">%s</td><td class="n">%d</td></tr>' % (i + 1, _rn[i], t['gen'], fmt(max(w['fitness'] for w in t['walkers']), 1), fmt(sum(w['fitness'] for w in t['walkers']) / len(t['walkers']), 1), sum(w['kills'] for w in t['walkers'])) for i, t in enumerate(train))
 last_b = ''
 if battles:
     stamp, ps, secs = battles[-1]
@@ -137,23 +154,29 @@ code { font: 12.5px var(--mono); background: var(--panel); border: 1px solid var
 <section><h2>Walkers next to players</h2><div class="key"><span><i style="background:var(--pl)"></i>real players</span><span><i style="background:var(--wk)"></i>walkers</span></div>@@5@@
 <p class="note">The walkers are measured from the server's view of their battles with the same tool. Walkers: @@6@@ samples, @@7@@ engagements.</p></section>
 <section><h2>Training</h2><div class="two"><div style="display:grid;gap:10px">
-<p>Each generation is one free-for-all on Guardian. All four walkers share the same skill, so only tactics decide. Fitness is kills minus 0.7 × deaths plus 2 × accuracy. The best two carry over, two mutants join.</p>
+<p>Each generation is one five-minute free-for-all on Guardian. All four walkers share the same skill, so only tactics decide. Fitness is kills minus 0.7 × deaths plus 2 × accuracy. The best two by their last three battles carry over, and two mutants join. The champion is the set with the best mean over all its battles.</p>
+<p class="note">The server counted no hits during either run (its hit meter needs rendered frames; fixed afterwards), so kills and deaths alone decided. Run 1 selected on single battles, run 2 on the mean of three.</p>
 <div class="key"><span><i style="background:var(--accent)"></i>best walker</span><span><i style="background:var(--dim)"></i>average</span></div>@@8@@</div>
-<div class="tbl"><table><thead><tr><th class="n">Gen</th><th class="n">Best</th><th class="n">Average</th><th class="n">Kills</th></tr></thead><tbody>@@9@@</tbody></table>
+<div class="tbl"><table><thead><tr><th class="n">Battle</th><th class="n">Run · gen</th><th class="n">Best</th><th class="n">Average</th><th class="n">Kills</th></tr></thead><tbody>@@9@@</tbody></table>
 <p class="note" style="margin-top:12px">Best tactics so far:</p><table><tbody>@@10@@</tbody></table></div></div></section>
+<section><h2>Human, step by step</h2><p>The same score after each change, each measured on its own battle with walker-compare.py (100% means the real players' numbers).</p>
+<div class="tbl"><table><thead><tr><th>Walkers</th><th class="n">Human-likeness</th></tr></thead><tbody>@@12@@</tbody></table></div></section>
 <section><h2>Last battle</h2><div class="tbl"><table><thead><tr><th>Walker</th><th class="n">Kills</th><th class="n">Deaths</th><th class="n">Shots</th></tr></thead><tbody>@@11@@</tbody></table></div></section>
 <section><h2>How the walkers play on a server</h2><ol class="flow">
 <li>A hook before halo3's control packet builder writes the walker's throttle and aim into the packet the server receives.</li>
 <li>Firing sets the control record's trigger bit. The local weapon fires and the packet reports it, so the server counts the shots.</li>
 <li>halo3's own collision ray answers "can I see him" ten times a second. The walker only fires with a clear line, and it does not track enemies through walls.</li>
 <li>Distance, strafing, back-off and aim noise come from the real players' numbers. Paths prefer the lanes players actually use.</li></ol>
+<p class="note">Not yet: weapon pickup (none of the control record's 64 button bits picks a weapon up), the real players' fighting distance on a small map (Guardian fights run closer than the recorded maps), and more real-player fights (the recordings hold @@13@@ engagements; Infection games count only for the lanes).</p>
 <p class="note">Run it again: <code>bash shim/tools/walker-battle.sh 4 300</code>, <code>python3 shim/tools/walker-train.py 8 300</code>, <code>python3 shim/tools/walker-compare.py</code>.</p></section>
 </div>'''
 VALUES = [E(time.strftime('%d %b %Y')),
              ''.join('<div class="fig"><span class="k">%s</span><span class="v">%s</span><span class="s">%s</span></div>' % (E(k), E(v), E(s)) for k, v, s in summary),
              weap or '<li><span>none yet</span><span></span></li>', rows_html, pair_bars(cmp_rows),
              '{:,}'.format(bsrc.get('samples', 0)), bsrc.get('engagements', 0), fitness_chart(train), gen_rows or '<tr><td colspan="4" class="note">none yet</td></tr>',
-             tact or '<tr><td class="note">none yet</td></tr>', last_b or '<tr><td colspan="4" class="note">none yet</td></tr>']
+             tact or '<tr><td class="note">none yet</td></tr>', last_b or '<tr><td colspan="4" class="note">none yet</td></tr>',
+             ''.join('<tr><td>%s</td><td class="n">%s</td></tr>' % (E(l), '%.0f%%' % v if v is not None else '–') for l, v in step_sc) or '<tr><td colspan="2" class="note">no steps given (WB_STEPS)</td></tr>',
+             src.get('engagements', 0)]
 page = TEMPLATE
 for i, v in enumerate(VALUES, 1): page = page.replace('@@%d@@' % i, str(v))
 open(OUT, 'w').write(page); print('report ->', OUT)

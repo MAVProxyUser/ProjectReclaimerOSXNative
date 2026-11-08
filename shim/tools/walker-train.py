@@ -7,6 +7,8 @@ Every tactics set keeps its history: the best two by their MEAN over their last 
 free-for-all is noisy), two children are mutated from them (and crossed). Everything is logged to
 ~/Library/Application Support/ReclaimerMac/battles/train.jsonl; the best tactics so far to battles/best-tactics.json.
     python3 shim/tools/walker-train.py [generations, default 6] [seconds per battle, default 300] [--skill 0.6] [--resume]
+    python3 shim/tools/walker-train.py --champion [--since <unix time>]   (no battles: from train.jsonl, the tactics set with the best
+        mean over ALL its battles, at least 3 -- a set's last three can end on one bad match -> best-tactics.json)
 """
 import json, os, random, re, subprocess, sys, time
 
@@ -51,7 +53,24 @@ def battle(pop, secs, skill):
     L = [json.loads(l) for l in open(os.path.join(BT, new[-1])) if l.strip()]
     return (L[-1]['players'] if L else None), new[-1]
 
+def champion():
+    since = float(arg('--since', '0')); h = {}
+    for l in open(LOG):
+        d = json.loads(l)
+        if d['t'] < since: continue
+        for w in d['walkers']:
+            if w['shots'] == 0 and w['kills'] == 0: continue
+            h.setdefault(json.dumps(w['tactics'], sort_keys=True), []).append(w)
+    ok = sorted(((sum(w['fitness'] for w in v) / len(v), k, v) for k, v in h.items() if len(v) >= 3), reverse=True)
+    if not ok: print('no tactics set has 3 battles'); sys.exit(1)
+    for m, k, v in ok[:5]: print('%6.2f over %d (kills %d, deaths %d): %s' % (m, len(v), sum(w['kills'] for w in v), sum(w['deaths'] for w in v), k))
+    m, k, v = ok[0]; t = json.loads(k); skill = v[-1].get('skill') or float(arg('--skill', '0.6'))
+    json.dump({'t': time.time(), 'by': 'mean over all its battles', 'fitness': m, 'battles': len(v), 'kills': sum(w['kills'] for w in v),
+               'deaths': sum(w['deaths'] for w in v), 'tactics': t, 'env': env(t, skill)}, open(BEST, 'w'), indent=1)
+    print('champion ->', BEST)
+
 def main():
+    if '--champion' in sys.argv: return champion()
     gens = int(sys.argv[1]) if len(sys.argv) > 1 and sys.argv[1].isdigit() else 6
     secs = int(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2].isdigit() else 300
     skill = float(arg('--skill', '0.6'))

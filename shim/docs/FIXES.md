@@ -2739,6 +2739,33 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   assault rifle, NO bit of the control record's 64 (+0xC8; all but 1 jump, 19 / 21 fire, 30 grenade) held 1.5 s swaps it. Pickup
   is not a plain button bit there -- most likely a separate held-action state the app's input layer keeps. NHOOK_BOT_PICKBIT
   stays unset (walkers keep their loadout); backlog N24.
+- **A dedicated server's hits** (2026-11-08 07:30; nstats.c, the players' "hits" / "accuracy") — WHY: every battle scoreboard of
+  the night (both training runs, 17 battles) had hits 0 for every walker, so the fitness's accuracy term never counted. The
+  hits come from the aim meter (noverlay.c nov_aim_shot queues each shot; nov_aim_tick resolves it against the target's posed
+  hitboxes on the RENDER thread, every frame) and a dedicated server never presents a frame. LOGIC: a process that has
+  presented no frame (g_nr_frames 0) reports the old estimate instead (hits_sphere: the projectile's end point inside a
+  biped's bounding sphere), and noverlay.c's object_delete hook runs that sphere pass there too (it ran only with
+  NHOOK_NO_AIM: the first showcase battle after the snapshot change alone still said 0). SWITCH: NHOOK_NO_AIM=1 = the
+  estimate everywhere (as before).
+- **Walkers react like the players** (2026-11-08 07:40; nbot.c, the fighter's reaction delay) — WHY: the showcase battle with
+  the trained champion (four walkers, skill 0.6) measured a 0.49 s reaction against the recorded players' 1.08 s (walker-compare
+  .py). A first try (the delay factor 1.3 -> 2.8) changed nothing (0.53 s): walker-model's reaction is the time from a target
+  in reach within 30 deg of the view to the aim within 5 deg, and before its reaction time the fighter turned 1.5 rad/s -- the
+  25 deg in ~0.3 s whatever the delay. LOGIC: the turn rate before the reaction time = NHOOK_BOT_TURN0, the delay = the
+  model's reaction x (1.25 - skill) x NHOOK_BOT_REACT (default 1.6, was a fixed 1.3). Measured: 1.5 rad/s -> 0.51 s, 0.45 ->
+  1.79 s (measured ~ 0.79 / rate), so the default is 0.73 rad/s (the players' 1.08 s).
+  SWITCHES: NHOOK_BOT_TURN0=1.5 NHOOK_BOT_REACT=1.3 = before.
+- **The engine image wait: 10 minutes, not 60 s** (2026-11-08 07:30; nhook.c probe_thread) — WHY: one battle's server engine
+  process (while four clients started beside it) had no MZ at the engine image and code table 0 for 60 s, the old limit; the
+  probe gave up, every hook stayed off for the process's life, its stats page showed no players and a wrong map, and the
+  battle had no scoreboard (the hooks check said it: "code table FAILED", "halo3.dll image check FAILED 7173 of 65536").
+  LOGIC: keep polling every 250 ms up to 10 minutes, a "still waiting" line at 60 s. SWITCH: none (waiting longer only delays
+  hooks that would otherwise never come).
+- **walker-train.py --champion** (2026-11-08 07:30) — WHY: selection carries the best two by their LAST three battles' mean,
+  so the final best-tactics.json can name a set whose last three ended badly by luck while another had the better record
+  (run 2: two sets tied at 1.63 in the last generation; over all their battles 2.97 vs 1.63). LOGIC: `--champion [--since <t>]`
+  reads train.jsonl and writes the set with the best mean over ALL its battles (at least 3) to best-tactics.json ("by": "mean
+  over all its battles"). Training itself is unchanged.
 
 ## 19. Performance
 
