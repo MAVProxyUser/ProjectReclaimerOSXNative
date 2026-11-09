@@ -3286,6 +3286,12 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   switch presses (the learnt record bit): 0 of 32 took" -- 32 x "switching from PLASMA PISTOL to ASSAULT RIFLE" with the trigger held
   (the plasma pistol held = an overcharge held) while the earlier switches, 3 of 3 and 2 of 2, came with the trigger up. LOGIC: from a
   switch press until 0.15 s after it the trigger (and the reload click) stays up; PLASMA PISTOL joins the weapons whose trigger is pulsed.
+- **The battle rifle is pulled, not held: accuracy 22.6% -> 61.8%** (2026-11-09 12:10-12:15; nbot.c the trigger, shim/tools/fire-ab.sh)
+  — WHY: in a BR-start Valhalla match the walker's accuracy was 26% against the players' 34-59%. A held battle rifle measured 1.7 shots
+  a second of trigger over a minute; the live A/B (fire-ab.sh: a knob at A then B for 90 s each, measured from the scoreboard and the
+  [firegate] lines) settled it: pulled at NHOOK_BOT_PULL_PER 136 shots, 8.5 a second of trigger, accuracy 61.8%; held 159 shots, 9.7 a
+  second, accuracy 22.6% -- the held burst rifle fires about as fast but sprays. LOGIC: the precision class (battle rifle / carbine /
+  magnum) is a pull weapon: NHOOK_BOT_PULL_PRECISION (live, 1; 0 = held). The top players in that match: 52-56%.
 - **The hit test's pad grows with distance; the tuner ignores windows across a map change** (2026-11-09 12:05; nbot.c the fire gate,
   death-tuner.py) — WHY: a BR-start Valhalla match: the walker's accuracy 26% (on target 44%) against the others' 34-59% (60-76%),
   its aim line off the predicted target 17-46% of the steps -- the body column is ~0.6 deg wide at 25 units, while Halo 3's bullet

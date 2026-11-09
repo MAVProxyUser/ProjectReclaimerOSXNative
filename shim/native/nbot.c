@@ -1339,7 +1339,11 @@ static void bot_step_body(void) {
                       if (bot_log()) nlog("[nhook] [melee] %s at %.2f units (target shield %.2f: %s), holding %s", mcls ? "swing" : "melee", tdist, ftg.shield, ftg.shield < 0.05f ? "beatdown" : "full", g_inv.held ? g_inv.held : "-"); }
                   static float mh = -1; if (mh < 0) { const char* e = getenv("NHOOK_BOT_MELEE_HOLD"); mh = e ? strtof(e, 0) : 0.3f; }
                   if (now - tmelee < mh) { fbtn |= bot_meleepad(); g_bot_melee_until = tmelee + mh; } }
-              g_bot_pull = !nomel && bot_pull_weapon(g_inv.held); }
+              g_bot_pull = !nomel && bot_pull_weapon(g_inv.held);
+              // (12:10-12:15: the battle rifle HELD sprays -- an A/B in a BR Valhalla match, 90 s each (shim/tools/fire-ab.sh): pulled
+              //  136 shots, 8.5 a second of trigger, accuracy 61.8%; held 159 shots, 9.7 a second, accuracy 22.6% (the top players there
+              //  52-56%). The battle rifle / carbine / magnum are pulled at NHOOK_BOT_PULL_PER: NHOOK_BOT_PULL_PRECISION (live, 1; 0 = held))
+              { float ppr = 1; lk_over(&ppr, "NHOOK_BOT_PULL_PRECISION"); if (ppr > 0 && g_inv.held_c && !strcmp(g_inv.held_c, "precision")) g_bot_pull = 1; } }
             { static float fj0 = -1; if (fj0 < 0) { const char* e = getenv("NHOOK_BOT_FJUMP"); fj0 = e ? strtof(e, 0) : 0.0f; } float fj = fj0; lk_over(&fj, "NHOOK_BOT_FJUMP");   // jumps a minute in a fight (walker-coach.py: the winners')
               // (11:30, the lessons: jumping helps a defender, not an attacker -- x NHOOK_BOT_FJUMP_DEF / _ATK by the role, 1 = as before)
               { int rl = du_role(ftg.handle); float jd = 1, ja = 1; lk_over(&jd, "NHOOK_BOT_FJUMP_DEF"); lk_over(&ja, "NHOOK_BOT_FJUMP_ATK"); fj *= rl < 0 ? jd : rl > 0 ? ja : 1.0f; }
