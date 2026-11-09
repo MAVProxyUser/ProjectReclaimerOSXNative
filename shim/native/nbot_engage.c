@@ -147,7 +147,7 @@ static const char* bot_tagkey(const char* in, char* out, size_t n) {
 static const char* eg_wcls(const char* tag0) {   // the walker's weapon (a tag path or name) -> engage-model.py's weapon classes
     if (!tag0) return "none"; char tb[96]; const char* tag = bot_tagkey(tag0, tb, sizeof tb);
     static const struct { const char* k; const char* c; } m[] = {{"sniper", "sniper"}, {"beam_rifle", "sniper"}, {"rocket", "rocket"}, {"spartan_laser", "rocket"}, {"fuel_rod", "rocket"},
-        {"missile", "rocket"}, {"shotgun", "shotgun"}, {"mauler", "shotgun"}, {"energy_sword", "melee"}, {"energy_blade", "melee"}, {"hammer", "melee"}, {"battle_rifle", "precision"},
+        {"missile", "rocket"}, {"shotgun", "shotgun"}, {"mauler", "shotgun"}, {"excavator", "shotgun"}, {"flak_cannon", "rocket"}, {"energy_sword", "melee"}, {"energy_blade", "melee"}, {"hammer", "melee"}, {"battle_rifle", "precision"},
         {"carbine", "precision"}, {"magnum", "precision"}, {"dmr", "precision"}, {"assault_rifle", "auto"}, {"smg", "auto"}, {"plasma_rifle", "auto"}, {"spike_rifle", "auto"},
         {"needler", "auto"}, {"brute_shot", "auto"}, {"machinegun", "auto"}, {"plasma_pistol", "auto"}, {"plasma_cannon", "auto"}, {"sentinel", "auto"}, {0, 0}};
     for (int i = 0; m[i].k; i++) if (strstr(tag, m[i].k)) return m[i].c; return "other"; }

@@ -20,6 +20,13 @@ echo "built shim/build/nhook.dylib"
 # the walker's BRAIN as a reloadable module (2026-11-09): the same C code with -DNH_BRAIN -- no start-up, no hooks, no interposing; the
 # body's exports (nhx_*, the ObjC / stub symbols) bound at load (-undefined dynamic_lookup). A running game's body loads a newer one
 # by itself within 2 s (nbot.c brain_tick): code changes reach a walker without a restart
-clang $CF -DNH_BRAIN -Wno-unused-function -Wno-unused-variable -dynamiclib -undefined dynamic_lookup -o build/nbrain.dylib.new native/nhook.c -lz
+# (2026-11-09, the user: "each training session reload you should describe what the new brain is trying to show that it learned"):
+# native/brain-lesson.txt = what this brain is meant to show, compiled in (the walker logs it when it loads the brain: "[brain] lesson")
+# and appended to battles/follow/brain-lessons.jsonl with the build time (follow-study.py prints the lesson in play with each window)
+LES=""; [ -f native/brain-lesson.txt ] && LES=$(tr '\n' ' ' < native/brain-lesson.txt | sed 's/["\\]/\\&/g')
+printf '#define NH_BRAIN_LESSON "%s"\n' "$LES" > build/brain_lesson.h
+clang $CF -DNH_BRAIN -include build/brain_lesson.h -Wno-unused-function -Wno-unused-variable -dynamiclib -undefined dynamic_lookup -o build/nbrain.dylib.new native/nhook.c -lz
+if [ -n "$LES" ]; then BL="$HOME/Library/Application Support/ReclaimerMac/battles/follow/brain-lessons.jsonl"; mkdir -p "$(dirname "$BL")"
+  python3 -c 'import json,sys,time; open(sys.argv[1],"a").write(json.dumps({"t": round(time.time()), "built": time.strftime("%H:%M:%S"), "lesson": open(sys.argv[2]).read().strip()}) + "\n")' "$BL" native/brain-lesson.txt; fi
 mv -f build/nbrain.dylib.new build/nbrain.dylib
 echo "built shim/build/nbrain.dylib"

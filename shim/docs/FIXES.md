@@ -3272,6 +3272,44 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   a running battle, at every round end (our server's in_match true -> false) walker-coach.py round + match-study.py, then each
   walker's game restarted headless with its new knobs and the newest build (they rejoin in the lobby; the user's game and the
   server stay).
+- **The walker learns its magazine field, never fights empty; one-packet button impulses; committed strafes; velocity is per second**
+  (2026-11-09 08:30-09:20; nbot.c ammo_learn / bot_ammo_of / the EMPTY block / the floor check / [moves] / the pick-up press, build.sh +
+  brain-lesson.txt, follow-study.py) — WHY: the user: "empty magazines sans reload are unacceptable btw. do better. find ammo, new weapon,
+  or switch to alternate. reload click noise is a signal in the game. so clearly it goes somewhere"; "it is playing like garbage";
+  "[the best player] simply moves more nimble, and engages faster, and stays on the headshots ... our walker does not move with that much
+  *authority*"; "each training session reload you should describe what the new brain is trying to show that it learned". FOUND /
+  LOGIC: (1) MAGAZINE -- the field ammo.json named (+0x1b4) is no count in this app; the brain now watches its own held weapon object
+  (its handle; int16 fields +0x100..+0x3ff, 10 Hz) for one that steps down 1-6 while the trigger is held and jumps up on a reload:
+  +0x23a (AR 32 -> 27 -> 13 ..., -2 = the reserve, 117 / 64 / 160), adopted after 15+ drops ("[ammo] LEARNED"), saved to
+  ReclaimerMac/native/ammo-learned.json and read back by every later brain / launch. On 0 there: the other weapon if it has rounds
+  (switch), else the reload tap at once (in fights too; reload no longer needs the virtual pad), and after 2 reloads still empty =
+  DRY: any weapon on the floor counts as better (same kind refills); the grenade-and-beatdown rush only when DRY.
+  NHOOK_BOT_AMMO_LEARN=0 (live) = off. (2) IMPULSES -- the packed record's +0x2c bits act like one-packet impulses (a held act
+  "seats and then unseats", a held switch never switched, an act held 2.5 s on a weapon took nothing): switch and pick-up act go out
+  for NHOOK_BOT_SWPULSE / NHOOK_BOT_ACTPULSE (0.03 s, ~one packet; act every 0.4 s at the weapon). First press pick-up: "TOOK the BATTLE
+  RIFLE after 0.8 s". A taken weapon is matched by NAME (in hand it is another object handle than on the floor). Out of a fight the
+  walker switches to the other weapon when it ranks 2+ better. (3) STRAFES -- the "never off a ledge" check flipped the strafe on
+  23-60% of fight steps ([moves], new: asked / flipped / stopped, speed by position): a jitter in place = the recordings' "strafes 0.0
+  u/s". Now the strafe keeps its side while that side has floor 1 unit off, else takes the open side and holds it 0.6 s, else stops;
+  no check where the graph has no floor under the walker itself: flips 2%, 1.54 u/s in fights, 65% across the enemy line. (4)
+  VELOCITY -- object +0x74 is units a SECOND (1.11 vs 1.04 u/s by position), not a tick: the grenade lead and the turret lead were
+  x30 -- 30x too far ahead of a moving target (the lead honing had preferred the smallest value); fixed, the grenade honing restarted
+  (nade-state.json keeps the old results under before_vel_fix). (5) LESSONS -- shim/native/brain-lesson.txt is compiled into each
+  brain (build/brain_lesson.h): "[brain] lesson: ..." when it loads, appended to battles/follow/brain-lessons.jsonl; follow-study.py
+  prints the lesson in play with each window. Also: the Mauler / Fuel Rod are known by their tag names (excavator / flak_cannon:
+  shotgun / rocket classes, ranks after the shotgun).
+- **No false "empty magazine" rushes; pick-ups walk onto the weapon** (2026-11-09 08:10; nbot.c bot_ammo_of, the pick-up press) — WHY:
+  the walker ranked #21-#23 of ~24 with 30-40 deaths a match, killed mostly by battle-rifle headshots, snipers and shotguns while it
+  held its spawn rifle. Its log: "empty magazine: a grenade at N units, then the beatdown" 111 times in one session -- the weapon
+  object's rounds field (+0x1b4, ammo.json) read 0 for a rifle's whole life in the public game (129 now and then), so every fight
+  began with a grenade and a punch rush at an armed player; and "at the weapon (1.3 units): holding act to take it" 8 times for one
+  battle rifle in hand -- the press began 1.3 units off and the fetch ended with it, so the walker turned back before touching the
+  weapon. LOGIC: the rounds field is trusted for a weapon definition only once it has shown NHOOK_BOT_AMMO_TRUST (3, live) different
+  non-zero values (a magazine counting down); until then the rounds are unknown (-1: no empty rush, reloads after fights only). A
+  fetch within NHOOK_BOT_PICK_R keeps its bid while act is held: the straight walk ends ON the weapon (full speed beyond 1 unit, 0.45
+  to 0.3, then still), act held until the weapon is in one of the walker's slots ("TOOK") or NHOOK_BOT_PICK_HOLD (2.5, live) s pass
+  ("could not take", tried; the log line gives the distance across / up and the arbiter's winner). NHOOK_BOT_AMMO_TRUST=0 = the old
+  trust-at-once; NHOOK_BOT_PICK_HOLD=0 = press and leave as before.
 - **The walker aims at the HEAD HITBOX; the brain's hitbox geometry works** (2026-11-09 08:00; nbot.c bot_head and the fighter's aim
   point, h3maps.c HB_CURMAP, nstats.c, follow-study.py hone_aim) — WHY: the same requests ("you can see all I can see for aim, tune,
   etc re: hitbox. don't make me a crutch"): the fighter aimed NHOOK_BOT_AIM_HEAD x the bounding radius over the bounding sphere's centre,

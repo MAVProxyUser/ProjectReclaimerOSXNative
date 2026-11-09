@@ -389,7 +389,7 @@ static void bot_idle(const char* why) {   // NHOOK_SPAR_LOG: why the aim / walke
 // weapons by preference, best first (what the recorded players carried besides the assault rifle -- the Carbine 44% of the time --
 // and the power weapons); a weapon not listed ranks below all of these
 static int bot_wpn_rank(const char* n0) { static const char* const pref[] = {"rocket_launcher", "spartan_laser", "sniper_rifle", "beam_rifle", "battle_rifle", "covenant_carbine",
-    "shotgun", "energy_sword", "gravity_hammer", "brute_shot", "assault_rifle", 0}; if (!n0) return 99; char nb[96]; const char* n = bot_tagkey(n0, nb, sizeof nb); for (int i = 0; pref[i]; i++) if (strstr(n, pref[i])) return i; return 50; }
+    "shotgun", "excavator", "flak_cannon", "energy_sword", "gravity_hammer", "brute_shot", "assault_rifle", 0};   /* (08:15: excavator = the Mauler, flak_cannon = the Fuel Rod: Halo 3's tag names) */ if (!n0) return 99; char nb[96]; const char* n = bot_tagkey(n0, nb, sizeof nb); for (int i = 0; pref[i]; i++) if (strstr(n, pref[i])) return i; return 50; }
 // ---- the walker's own inventory and power-ups (2026-11-08; the user: "the walker should be aware of its own inventory, and power up
 // status as well"): the held and the other weapon (class + rank), grenades by type, an overshield (shield above 1), active camo
 // (+0x360 above 0.05). The fighter switches to the other weapon when the target's distance is outside the held one's band and
@@ -403,11 +403,68 @@ static int bot_ammo_off(void) {
     char p[1024]; const char* h = getenv("HOME"); snprintf(p, sizeof p, "%s/Library/Application Support/ReclaimerMac/native/ammo.json", h ? h : "");
     FILE* f = fopen(p, "r"); if (f) { char b[4096]; size_t n = fread(b, 1, sizeof b - 1, f); fclose(f); b[n] = 0; const char* k = strstr(b, "\"loaded\":"); if (k) off = atoi(k + 9); }
     if (off >= 0x300) off = -1; if (off >= 0) nlog("[nhook] [inv] rounds loaded at weapon object +0x%x", off); return off; }
+// (08:10: in the public game the field read 0 for the whole life of a rifle and 129 now and then -- not a count there -- and the walker
+//  took every 0 for an empty magazine: "empty magazine: a grenade at N units, then the beatdown" 111 times in one session, rushing
+//  armed players to punch them. The field is TRUSTED for a weapon definition only once it has shown 3 different non-zero values (a
+//  magazine counting down); until then the rounds are unknown (-1). NHOOK_BOT_AMMO_TRUST=0 = the old trust-at-once)
+// LEARNING THE ROUNDS FIELDS (2026-11-09 08:30; the user: "empty magazines sans reload are unacceptable btw. do better. find ammo, new
+// weapon, or switch to alternate. reload click noise is a signal in the game. so clearly it goes somewhere"): the rounds field the
+// walker read (+0x1b4, ammo.json) is no count in this client -- 0 for a rifle's whole life, 129 now and then -- so it never knew it
+// was empty and never reloaded in time. The brain watches its OWN held weapon object (its handle, never a sweep): every int16 field in
+// +0x100..+0x3ff, 10 times a second; a field that steps DOWN by 1-6 while the trigger is held ("dec"), never while it is not ("bad"),
+// and jumps UP on a reload / a fresh weapon ("inc") is the magazine. Adopted once dec >= 15, inc >= 1, bad <= dec / 4: from then the
+// walker's rounds are that field (any weapon), and a 0 there is empty. [ammo] lines every 30 s give the best candidates.
+// NHOOK_BOT_AMMO_LEARN=0 (live) = off.
+static int g_ammo_learned = -1;
+static int g_bot_trig;   // (the trigger held last step: defined with the fire section below)
+static int g_bot_dry;    // (the magazine stays empty after reloads: no reserve -- the other weapon or any weapon on the floor)
+static const char* ammo_learned_path(void) { static char p[1024]; if (!p[0]) { const char* h = getenv("HOME"); snprintf(p, sizeof p, "%s/Library/Application Support/ReclaimerMac/native/ammo-learned.json", h ? h : ""); } return p; }
+static void ammo_learn(double now, const NovObj* o) {
+    float on = 1; lk_over(&on, "NHOOK_BOT_AMMO_LEARN"); if (on <= 0) return;
+    { static int rd0; if (!rd0) { rd0 = 1; FILE* f = fopen(ammo_learned_path(), "r");   // (what an earlier brain / launch learned: ammo-learned.json)
+        if (f) { char b[256]; size_t n = fread(b, 1, sizeof b - 1, f); fclose(f); b[n] = 0; const char* k = strstr(b, "\"loaded\":"); int v = k ? atoi(k + 9) : -1;
+            if (v >= 0x100 && v < 0x400 && g_ammo_learned < 0) { g_ammo_learned = v; nlog("[nhook] [ammo] the magazine is weapon object +0x%x (learned before: %s)", v, ammo_learned_path()); } } } }
+    static double tl, tlog; if (now - tl < 0.1) return; tl = now;
+    static struct { int dec, inc, bad; int16_t last; } al[0x180]; static uint64_t lwd; static int was_firing;
+    uint64_t wd = (o->wslot >= 0 && o->wslot < 4) ? nov_datum(o->weapons[o->wslot]) : 0; if (!wd) { lwd = 0; return; }
+    static uint8_t buf[0x400]; if (!hb_read(wd, buf, sizeof buf)) return;
+    int same = wd == lwd, firing = g_bot_trig || was_firing; lwd = wd; was_firing = g_bot_trig;
+    for (int i = 0; i < 0x180; i++) { int16_t v = *(const int16_t*)(buf + 0x100 + i * 2);
+        if (same) { int d = (int)v - (int)al[i].last;
+            if (d < 0 && d >= -6) { if (firing) al[i].dec++; else al[i].bad++; }
+            else if (d > 0 && d <= 400) al[i].inc++;
+            else if (d) al[i].bad++; }
+        al[i].last = v; }
+    if (now - tlog > 30) { tlog = now; int top[4] = {-1, -1, -1, -1};
+        for (int i = 0; i < 0x180; i++) { int sc = al[i].dec - 2 * al[i].bad; if (al[i].dec < 3) continue;
+            for (int k = 0; k < 4; k++) if (top[k] < 0 || sc > al[top[k]].dec - 2 * al[top[k]].bad) { for (int q = 3; q > k; q--) top[q] = top[q - 1]; top[k] = i; break; } }
+        char b[400]; int q = 0; for (int k = 0; k < 4 && top[k] >= 0; k++) { int i = top[k];
+            q += snprintf(b + q, sizeof b - (size_t)q, " +0x%x = %d (down %d while firing, up %d, wrong %d);", 0x100 + i * 2, al[i].last, al[i].dec, al[i].inc, al[i].bad); }
+        if (q) nlog("[nhook] [ammo] rounds-field candidates (held weapon):%s%s", b, g_ammo_learned >= 0 ? "" : " -- none adopted yet");
+        if (g_ammo_learned < 0 && top[0] >= 0) { int i = top[0];
+            if (al[i].dec >= 15 && al[i].inc >= 1 && al[i].bad * 4 <= al[i].dec) { g_ammo_learned = 0x100 + i * 2;
+                nlog("[nhook] [ammo] LEARNED: the magazine is weapon object +0x%x (down %d times while firing, up %d, wrong %d)", g_ammo_learned, al[i].dec, al[i].inc, al[i].bad);
+                FILE* f = fopen(ammo_learned_path(), "w"); if (f) { fprintf(f, "{\"loaded\": %d, \"hex\": \"0x%x\", \"down\": %d, \"up\": %d, \"wrong\": %d}\n", g_ammo_learned, g_ammo_learned, al[i].dec, al[i].inc, al[i].bad); fclose(f); } } }
+        if (g_ammo_learned >= 0) { char b[200]; int q = 0; for (int off = g_ammo_learned - 8; off <= g_ammo_learned + 8; off += 2) q += snprintf(b + q, sizeof b - (size_t)q, " %+d:%d", off - g_ammo_learned, *(const int16_t*)(buf + off));
+            nlog("[nhook] [ammo] around the magazine (+0x%x):%s", g_ammo_learned, b); } } }
 static int bot_ammo_of(uint64_t wd, uint32_t def, int* maxv) {   // rounds loaded (-1 unknown), and the most seen for that weapon definition
-    static struct { uint32_t def; int max; } mx[64]; static int nmx; int off = bot_ammo_off(); int16_t a = -1;
+    static struct { uint32_t def; int max, nv; int16_t v[3]; } mx[64]; static int nmx; int off = bot_ammo_off(); int16_t a = -1;
+    if (g_ammo_learned >= 0) { if (!wd || !hb_read(wd + g_ammo_learned, &a, 2) || a < 0) { if (maxv) *maxv = 0; return -1; }   // (learned: ammo_learn above)
+        int k = -1; for (int i = 0; i < nmx; i++) if (mx[i].def == def) { k = i; break; }
+        if (k < 0) { k = nmx < 64 ? nmx++ : 63; mx[k].def = def; mx[k].max = 0; mx[k].nv = 0; } if (a > mx[k].max) mx[k].max = a; if (maxv) *maxv = mx[k].max; return a; }
     if (off < 0 || !wd || !hb_read(wd + off, &a, 2) || a < 0) { if (maxv) *maxv = 0; return -1; }
     int k = -1; for (int i = 0; i < nmx; i++) if (mx[i].def == def) { k = i; break; }
-    if (k < 0) { k = nmx < 64 ? nmx++ : 63; mx[k].def = def; mx[k].max = 0; } if (a > mx[k].max) mx[k].max = a; if (maxv) *maxv = mx[k].max; return a; }
+    if (k < 0) { k = nmx < 64 ? nmx++ : 63; mx[k].def = def; mx[k].max = 0; mx[k].nv = 0; } if (a > mx[k].max) mx[k].max = a;
+    if (a > 0 && mx[k].nv < 3) { int seen = 0; for (int i = 0; i < mx[k].nv; i++) if (mx[k].v[i] == a) seen = 1; if (!seen) mx[k].v[mx[k].nv++] = a; }
+    float need = 3; lk_over(&need, "NHOOK_BOT_AMMO_TRUST");
+    if (mx[k].nv < (int)need) { if (maxv) *maxv = 0; return -1; }
+    // (08:20: still "empty magazine ... then the beatdown": a trusted field can drop straight from 129 to 0. A 0 is EMPTY only after
+    //  a countdown -- this weapon object's last non-zero value was a magazine's worth (<= 60) within the last 10 s; else unknown)
+    { static struct { uint64_t wd; int v; double t; } lw[16]; static unsigned nlw; struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); double tn = ts.tv_sec + ts.tv_nsec * 1e-9;
+      int j = -1; for (int i = 0; i < 16; i++) if (lw[i].wd == wd) { j = i; break; } if (j < 0) { j = (int)(nlw++ & 15); lw[j].wd = wd; lw[j].v = -1; lw[j].t = 0; }
+      if (a > 0) { lw[j].v = a; lw[j].t = tn; }
+      else if (!(lw[j].v > 0 && lw[j].v <= 60 && tn - lw[j].t < 10.0)) { if (maxv) *maxv = 0; return -1; } }
+    if (maxv) *maxv = mx[k].max; return a; }
 static void bot_inv(const NovObj* o, BotInv* v) {
     memset(v, 0, sizeof *v); v->held_c = v->other_c = "none"; v->held_rank = v->other_rank = 99; v->ammo = v->other_ammo = -1;
     for (int q = 0; q < 4; q++) { uint64_t wd = nov_datum(o->weapons[q]); uint32_t df = 0; if (!wd || !hb_read(wd, &df, 4)) continue; const char* nm = hb_tag_name(df);
@@ -641,7 +698,7 @@ static int gun_seated(double now, const NovObj* objs, int n, int me, const float
     static double tlast; double dt = tlast > 0 && now - tlast < 0.5 ? now - tlast : 0.033; tlast = now;
     float yaw = yaw0, pitch = pitch0; int fire = 0;
     if (bi >= 0) { const NovObj* t = &objs[bi]; float dx = t->c[0] - cam[0], dy = t->c[1] - cam[1], d = sqrtf(dx * dx + dy * dy + (t->c[2] - cam[2]) * (t->c[2] - cam[2]));
-        float lt = d / 300.0f, px = t->c[0] + t->vel[0] * 30 * lt - cam[0], py = t->c[1] + t->vel[1] * 30 * lt - cam[1], pz = t->c[2] + 0.3f * t->r + t->vel[2] * 30 * lt - cam[2];
+        float lt = d / 300.0f, px = t->c[0] + t->vel[0] * lt - cam[0], py = t->c[1] + t->vel[1] * lt - cam[1], pz = t->c[2] + 0.3f * t->r + t->vel[2] * lt - cam[2];   // (09:05: +0x74 is units a SECOND -- measured against position: x30 led 30x too far)
         float ty_ = atan2f(py, px), tp_ = atan2f(pz, sqrtf(px * px + py * py)), mx = (float)dt * 12.0f;   // (02:20: "increase look sensitivity for aiming while in a vehicle": 4 -> 12 rad/s)
         float dyw = bot_wrap(ty_ - yaw0), dpt = tp_ - pitch0; yaw = yaw0 + (dyw > mx ? mx : dyw < -mx ? -mx : dyw); pitch = pitch0 + (dpt > mx ? mx : dpt < -mx ? -mx : dpt);
         float err = sqrtf(bot_wrap(ty_ - yaw) * bot_wrap(ty_ - yaw) + (tp_ - pitch) * (tp_ - pitch)), size = atanf(t->r / (d > 0.5f ? d : 0.5f));
@@ -721,8 +778,11 @@ static void arb_reset(Arb* a) { memset(a, 0, sizeof *a); }
 static void arb_bid(Arb* a, int k, float score, const float* pt, const char* why) {
     if (a->b[k].on && a->b[k].score >= score) return;   // (one bid per behaviour: its best)
     a->b[k].on = 1; a->b[k].score = score; a->b[k].why = why; if (pt) memcpy(a->b[k].pt, pt, 12); }
+static const char* g_arb_why = "-";   // (the last winner's reason: diagnostics)
+static char g_pick_name[64];         // (the weapon being fetched: diagnostics)
 static int arb_choose(Arb* a, double now) {
     int w = ARB_HUNT; float ws = -1e30f; for (int k = 0; k < ARB_N; k++) if (a->b[k].on && a->b[k].score > ws) { ws = a->b[k].score; w = k; }
+    g_arb_why = a->b[w].why ? a->b[w].why : "?";
     static int last = -1; static double tl;
     if (w != last && now - tl > 0.5) { tl = now; last = w; char b[300]; int q = snprintf(b, sizeof b, "[nhook] [arb] %s %.0f", a->b[w].why ? a->b[w].why : "?", ws);
         for (int k = 0; k < ARB_N && q < (int)sizeof b - 40; k++) if (k != w && a->b[k].on) q += snprintf(b + q, sizeof b - (size_t)q, " > %s %.0f", a->b[k].why, a->b[k].score);
@@ -823,7 +883,7 @@ static void bot_step_body(void) {
     if (me < 0 || objs[me].dead || seated) { g_bot_out = 0; g_nav_act = 0; plen = 0; g_bot_err = -1;   // dead, respawning or in a vehicle
         static char w[96]; snprintf(w, sizeof w, me < 0 ? "the record's unit %08x is none of the %d units seen" : objs[me].dead ? "dead" : "in a vehicle", meh, n); bot_idle(me < 0 ? w : objs[me].dead ? "dead" : "in a vehicle"); return; }
     const NovObj* o = &objs[me]; int out = 0; float yaw = yaw0, pitch = pitch0; g_bot_unit_p = o->p;
-    { static int noinv = -1; if (noinv < 0) noinv = getenv("NHOOK_BOT_NOINV") != 0; if (!noinv) bot_inv(o, &g_inv); else memset(&g_inv, 0, sizeof g_inv);   // (NHOOK_BOT_NOINV=1: blind to it, the old walker)
+    { static int noinv = -1; if (noinv < 0) noinv = getenv("NHOOK_BOT_NOINV") != 0; if (!noinv) { ammo_learn(now, o); bot_inv(o, &g_inv); } else memset(&g_inv, 0, sizeof g_inv);   // (NHOOK_BOT_NOINV=1: blind to it, the old walker)
       if (bot_log()) { static BotInv last; static double tl; if (now - tl > 5.0 || last.held != g_inv.held || last.os != g_inv.os || last.camo != g_inv.camo || last.gren != g_inv.gren) { tl = now; last = g_inv;
           nlog("[nhook] [inv] holding %s (%s, %d rounds), other %s (%s); grenades %d (frag %d, plasma %d)%s%s", g_inv.held ? g_inv.held : "-", g_inv.held_c, g_inv.ammo, g_inv.other ? g_inv.other : "-", g_inv.other_c,
                g_inv.gren, g_inv.frag, g_inv.plasma, g_inv.os ? ", OVERSHIELD" : "", g_inv.camo ? ", CAMO" : ""); } } }
@@ -946,7 +1006,7 @@ static void bot_step_body(void) {
                       tsw = now; if (bot_log()) nlog("[nhook] [inv] switching to %s at %.1f units: players switch %s -> %s at %.1f (median of %d)", g_inv.other, tdist, g_inv.held_c, g_inv.other_c, g_eg.sw_d[hi][oi], g_eg.sw_n[hi][oi]); }
                   else if (!zkeep && !(hi >= 0 && oi >= 0 && g_eg.sw_n[hi][oi] >= 20) && oh > 0.3f && oo >= 0 && oo < oh * 0.5f) { tsw = now; if (bot_log()) nlog("[nhook] [inv] switching to %s (%s) for %.1f units (the %s band is %.0f%% off)", g_inv.other, g_inv.other_c, tdist, g_inv.held_c, oh * 100); } }
               { static float sh = -1; if (sh < 0) { const char* e = getenv("NHOOK_BOT_SWITCH_HOLD"); sh = e ? strtof(e, 0) : 0.4f; }   // (0.15 s never registered: see nvpad.m's read counters)
-                if (now - tsw < sh) { fbtn |= 8; g_bot_switch_until = tsw + 0.15; } } }   // (the switch bit: a short press)
+                if (now - tsw < sh) { fbtn |= 8; float swp = 0.03f; lk_over(&swp, "NHOOK_BOT_SWPULSE"); g_bot_switch_until = tsw + swp; } } }   // (the switch bit: ONE packet -- 08:55: held 0.15 s it never switched; an impulse per packet?)
             // B: melee -- the players' range (+ 0.25: positions are a tick or two old), held 0.12 s, at most every 0.6 s
             { static int nomel = -1; if (nomel < 0) nomel = getenv("NHOOK_BOT_NOMELEE") != 0;
               if (nomel) { if (tdist < 1.8f && now - tmelee > 0.7) { tmelee = now; fbtn |= 2; } }   // (the old: B, one step)
@@ -972,16 +1032,16 @@ static void bot_step_body(void) {
             { static int ne = -1; if (ne < 0) ne = getenv("NHOOK_BOT_NOEMPTY") != 0;
               // (2026-11-09: the found "rounds loaded" field reads 0 for a fresh rifle in a player's game and 129 in the walkers' --
               //  not a magazine: "empty" only when the weapon has shown 8+ rounds there before)
-              g_bot_empty = !ne && g_inv.ammo == 0 && g_inv.ammo_max >= 2 && g_inv.held && strcmp(g_inv.held_c ? g_inv.held_c : "", "melee");
+              g_bot_empty = !ne && g_inv.ammo == 0 && g_inv.ammo_max >= 2 && g_inv.held && strcmp(g_inv.held_c ? g_inv.held_c : "", "melee") && (g_ammo_learned < 0 || g_bot_dry);   // (08:30: with the magazine known, only when DRY -- else it reloads / switches)
               if (g_bot_empty && vis && g_inv.gren > 0 && tdist > 3 && tdist < 16 && now - tgren > 1.2) { tgren = now; nade_note(now, &ftg, tdist);
                   if (bot_log()) nlog("[nhook] [fight] empty magazine: a grenade at %.1f units, then the beatdown", tdist); } }
             if (now - tgren < 0.15) { fbtn |= 0x10000;                                                                     // (left trigger: a grenade)
-                // the PREDICTIVE throw (same request): aimed where the target will be -- its velocity (units a tick, x30 a second) times
+                // the PREDICTIVE throw (same request): aimed where the target will be -- its velocity (units a second; 09:05: it was taken as a tick, x30) times
                 // the flight (0.4 s + distance / 10) -- and a little up for the arc (0.025 rad a unit, at most 0.4). NHOOK_BOT_NOLEAD=1 = off.
                 static int nl = -1; if (nl < 0) nl = getenv("NHOOK_BOT_NOLEAD") != 0;
                 if (!nl) { float n0 = 0.4f, npu = 0.1f, narc = 0.025f, nmax = 0.4f;   // (live knobs: NHOOK_BOT_NADE_T0 / _TPU s a unit / _ARC rad a unit / _ARCMAX -- follow-study.py hones them)
                     lk_over(&n0, "NHOOK_BOT_NADE_T0"); lk_over(&npu, "NHOOK_BOT_NADE_TPU"); lk_over(&narc, "NHOOK_BOT_NADE_ARC"); lk_over(&nmax, "NHOOK_BOT_NADE_ARCMAX");
-                    float lt = n0 + tdist * npu, px = ftg.c[0] + ftg.vel[0] * 30 * lt - cam[0], py = ftg.c[1] + ftg.vel[1] * 30 * lt - cam[1], pz = ftg.c[2] - cam[2];
+                    float lt = n0 + tdist * npu, px = ftg.c[0] + ftg.vel[0] * lt - cam[0], py = ftg.c[1] + ftg.vel[1] * lt - cam[1], pz = ftg.c[2] - cam[2];   // (09:05: the velocity is units a SECOND: the old x30 threw 30x too far ahead of a moving target)
                     g_nade_lead = lt; g_nade_arc = fminf(nmax, narc * tdist);
                     float ly = atan2f(py, px), lp = atan2f(pz, sqrtf(px * px + py * py)) + fminf(nmax, narc * tdist), mxr = (float)dt * 7.0f;
                     float dyw = bot_wrap(ly - yaw0), dpt = lp - pitch0; yaw = yaw0 + (dyw > mxr ? mxr : dyw < -mxr ? -mxr : dyw); pitch = pitch0 + (dpt > mxr ? mxr : dpt < -mxr ? -mxr : dpt); out |= 1; } }
@@ -1025,9 +1085,32 @@ static void bot_step_body(void) {
                   if (!na && hd < 0.8f && dz > 0.5f) { r = -0.7f; lat = lat >= 0 ? 0.5f : -0.5f; }
                   else if (!na && hd < 1.0f && r > 0) { r = 0; if (fabsf(lat) < 0.3f) lat = lat >= 0 ? 0.4f : -0.4f; } }
                 // never off the floor: test where this step leads (1 unit along the move); flip the strafe, then drop the back-off
-                float fx = cosf(yaw0), fy = sinf(yaw0), lx = -fy, ly = fx;
-                for (int tries = 0; tries < 3; tries++) { float p2[3] = {o->c[0] + (fx * r + lx * lat) * 1.2f, o->c[1] + (fy * r + ly * lat) * 1.2f, o->c[2] - 0.35f};
-                    if (bot_floor_ok(p2)) break; if (tries == 0) { side = -side; lat = -lat; } else if (tries == 1) r = r < 0 ? 0 : r; else { lat = 0; r = 0; } }
+                float fx = cosf(yaw0), fy = sinf(yaw0), lx = -fy, ly = fx; float lat_in = lat, r_in = r; int ftries = 0;
+                // (09:10: the check flipped the strafe on 23-60% of fight steps -- a strafe reversing every few steps is a jitter in
+                //  place: the recordings' "strafes 0.0 u/s", nothing of the best player's committed moves. Now: no check where the graph has no
+                //  floor under the walker itself (too sparse to judge), 1.0 unit ahead, and a flip only after NHOOK_BOT_FLOORN (2)
+                //  failing steps in a row: a strafe is committed to. NHOOK_BOT_FLOORN=1 = the old twitchy check)
+                { static double thold; float me3[3] = {o->c[0], o->c[1], o->c[2] - 0.35f};
+                  // (09:15: a flip after two failing steps still flipped on 31% of steps by walls: both sides are looked at now -- the
+                  //  strafe keeps its side while that side has floor 1 unit off, else takes the other side if it has floor and holds it
+                  //  0.6 s (no flip back meanwhile: a side that fails then only drops the strafe), else no strafe; then the throttle)
+                  if (bot_floor_ok(me3)) {
+                      float pa[3] = {o->c[0] + (fx * r + lx * lat) * 1.0f, o->c[1] + (fy * r + ly * lat) * 1.0f, o->c[2] - 0.35f};
+                      if (!bot_floor_ok(pa)) { float pb2[3] = {o->c[0] + (fx * r - lx * lat) * 1.0f, o->c[1] + (fy * r - ly * lat) * 1.0f, o->c[2] - 0.35f};
+                          if (now > thold && fabsf(lat) > 0.05f && bot_floor_ok(pb2)) { side = -side; lat = -lat; thold = now + 0.6; ftries = 1; }
+                          else { float pc[3] = {o->c[0] + fx * r * 1.0f, o->c[1] + fy * r * 1.0f, o->c[2] - 0.35f}; lat = 0; ftries = 2;
+                              if (!bot_floor_ok(pc)) { r = r < 0 ? 0 : r; float pd[3] = {o->c[0] + fx * r * 1.0f, o->c[1] + fy * r * 1.0f, o->c[2] - 0.35f}; if (!bot_floor_ok(pd)) { r = 0; ftries = 3; } } } } } }
+                // (08:45, the user: "[the best player] simply moves more nimble, and engages faster ... our walker does not move with that much
+                //  *authority*": the recordings say the walker stands still 58% and strafes 0.0 u/s in fights. [moves] every 10 s of
+                //  fighting: what the fight asked for, what the floor check let through, how fast the walker really moved across)
+                { static double tm; static int ns, nask, nflip, nzero; static float vlat, vall; ns++; if (fabsf(lat_in) > 0.2f || fabsf(r_in) > 0.2f) nask++; if (ftries == 1 || ftries == 2) nflip++; if (ftries == 3) nzero++;
+                  float ex = ftg.c[0] - o->c[0], ey = ftg.c[1] - o->c[1], el2 = sqrtf(ex * ex + ey * ey) + 1e-3f; vlat += fabsf((o->vel[0] * -ey + o->vel[1] * ex) / el2) * 30.0f; vall += sqrtf(o->vel[0] * o->vel[0] + o->vel[1] * o->vel[1]) * 30.0f;
+                  static float lp[3]; static double lt; static float dsum; static double dts; static float vraw;
+                  if (lt > 0 && now - lt < 0.2) { float dx2 = o->c[0] - lp[0], dy2 = o->c[1] - lp[1]; dsum += sqrtf(dx2 * dx2 + dy2 * dy2); dts += now - lt; }
+                  memcpy(lp, o->c, 12); lt = now; vraw += sqrtf(o->vel[0] * o->vel[0] + o->vel[1] * o->vel[1]);
+                  if (now - tm > 10.0) { if (tm > 0 && ns > 20 && bot_log()) nlog("[nhook] [moves] %d fight steps: moves asked %.0f%%, floor check flipped %.0f%% / stopped %.0f%%; moved %.2f u/s by position (velocity field %.3f a step), across the enemy line %.0f%% of it",
+                          ns, 100.0 * nask / ns, 100.0 * nflip / ns, 100.0 * nzero / ns, dts > 0 ? dsum / dts : 0.0, vraw / ns, vall > 0 ? 100.0 * vlat / vall : 0.0);
+                      tm = now; ns = nask = nflip = nzero = 0; vlat = vall = 0; dsum = 0; dts = 0; vraw = 0; } }
                 ftx = r; fty = lat; } }
         else { g_bot_fire = 0;
             // LEVELS APART (2026-11-08, the user: "enemy radar on multi level maps. like if you see someone on radar and then in turn
@@ -1069,6 +1152,7 @@ static void bot_step_body(void) {
       if (pb && fight && now - tscan > 1.0) { tscan = now; static NovObj w[512]; pthread_mutex_lock(&g_nov_collect_mx); g_nov_units_only = 3; int nw = nov_collect(w, 512); g_nov_units_only = 0; pthread_mutex_unlock(&g_nov_collect_mx);
           int cur = 99; uint32_t held = o->wslot >= 0 && o->wslot < 4 ? o->weapons[o->wslot] : 0xFFFFFFFFu;
           for (int i = 0; i < nw; i++) if (w[i].handle == held) { cur = bot_wpn_rank(hb_tag_name(w[i].def)); break; }
+          if (g_bot_dry) cur = 99;   // (dry: any weapon -- the same kind refills it)
           // (07:10: in a public game no better weapon ever lay within 12 units out of a fight -- "ALWAYS uses a garbage AR": POWER weapons
           //  (rocket .. shotgun, rank <= 6) are fetched from NHOOK_BOT_FETCH_FAR (30) units, the rest from 12; a better rank counts as
           //  nearer (distance x (1 + 0.15 x rank)), so a battle rifle 20 units off beats a carbine at 15)
@@ -1083,18 +1167,37 @@ static void bot_step_body(void) {
               if (w[bi].handle == want_h && g_bot_pick_on && now - t_prog > 6.0) { g_bot_pick_on = 0; tried[(ntried++) & 31] = want_h;
                   if (bot_log()) nlog("[nhook] [fight] gave up on %s (%.1f units): no closer in 6 s", hb_tag_name(w[bi].def), d); }
               else { if (!g_bot_pick_on || want_h != w[bi].handle) { if (bot_log()) nlog("[nhook] [fight] going for %s (%.1f units, rank %d over %d)", hb_tag_name(w[bi].def), d, bot_wpn_rank(hb_tag_name(w[bi].def)), cur); }
-                     g_bot_pick_on = 1; memcpy(g_bot_pick_pos, w[bi].c, 12); want_h = w[bi].handle; g_pick_gain = cur - bot_wpn_rank(hb_tag_name(w[bi].def)); g_pick_d = d; } }
+                     g_bot_pick_on = 1; memcpy(g_bot_pick_pos, w[bi].c, 12); want_h = w[bi].handle; snprintf(g_pick_name, sizeof g_pick_name, "%s", hb_tag_name(w[bi].def)); g_pick_gain = cur - bot_wpn_rank(hb_tag_name(w[bi].def)); g_pick_d = d; } }
           else g_bot_pick_on = 0; }
       // (07:30: "gave up on BATTLE RIFLE (2.1 units): no closer in 6 s" -- the path ends at the graph's floor node, a weapon on a rack /
       //  ledge lies off it; the press needed 0.9 units. Now within NHOOK_BOT_PICK_R (1.3) across and 1.5 up / down; the last 3 units are
       //  walked straight at it (the step's FETCH branch below))
+      // (08:05: "at the weapon (1.3 units): holding act to take it" 8 times, ONE battle rifle in hand: the press began 1.3 units off and the
+      //  fetch ended with it -- the walker turned back to the fight before touching the weapon. Now the fetch goes on while act is held:
+      //  the walk ends ON the weapon (the step's FETCH branch), act held until the weapon is in one of its slots ("took"), or
+      //  NHOOK_BOT_PICK_HOLD (2.5) s pass ("could not take": tried). With a free slot walking over it picks it up by itself)
+      static double tp0; float phold = 2.5f; lk_over(&phold, "NHOOK_BOT_PICK_HOLD");
+      if (tp0 > 0 && now - tp0 > phold + 1.0) tp0 = 0;   // (a press that outlived its hold: the walker died / respawned meanwhile)
+      // (09:00: a "could not take the BATTLE RIFLE" walker was holding one a moment later -- in hand the weapon is another object
+      //  handle than on the floor: taken = its NAME is in a slot now)
+      if (tp0 > 0) { int got = 0; for (int k = 0; k < 4; k++) if (o->weapons[k] == want_h) got = 1;
+          if ((g_inv.held && !strcmp(g_inv.held, g_pick_name)) || (g_inv.other && !strcmp(g_inv.other, g_pick_name))) got = 1;
+          if (got || !g_bot_pick_on || now - tp0 > phold) { if (bot_log()) nlog("[nhook] [fight] %s the %s after %.1f s of act (%.2f units across, %+.2f up; the legs: %s; holding %s, other %s)", got ? "TOOK" : !g_bot_pick_on ? "left" : "could not take", g_pick_name, now - tp0,
+                  g_pick_d, g_bot_pick_pos[2] - o->c[2], g_arb_why, g_inv.held ? g_inv.held : "-", g_inv.other ? g_inv.other : "-");
+              if (!got && g_bot_pick_on) { g_bot_pick_on = 0; tried[(ntried++) & 31] = want_h; } if (got) g_bot_pick_on = 0; tp0 = 0; } }
       if (g_bot_pick_on) { float dx = g_bot_pick_pos[0] - o->c[0], dy = g_bot_pick_pos[1] - o->c[1], dz = g_bot_pick_pos[2] - o->c[2], pr = 1.3f; lk_over(&pr, "NHOOK_BOT_PICK_R");
           g_pick_d = sqrtf(dx * dx + dy * dy);
-          if (dx * dx + dy * dy < pr * pr && fabsf(dz) < 1.5f) { tpress = now; g_bot_pick_on = 0; tried[(ntried++) & 31] = want_h;
-              if (bot_log()) nlog("[nhook] [fight] at the weapon (%.1f units): holding act to take it", sqrtf(dx * dx + dy * dy)); } }
+          if (dx * dx + dy * dy < pr * pr && fabsf(dz) < 1.5f) { tpress = now; if (!tp0) { tp0 = now;
+              if (bot_log()) nlog("[nhook] [fight] at the weapon (%.1f units): walking onto it, act held", sqrtf(dx * dx + dy * dy)); } } }
       uint32_t ppad = bot_pickpad();
       gun_vlist(now);
-      if (pb && now - tpress < 0.6 && !gun_near_veh(o->c, 0xFFFFFFFFu)) g_bot_act_until = tpress + 0.6;   // (the act bit held: pick up -- never beside a vehicle: it boards it)
+      // (08:15: standing ON a battle rifle with act held 2.5 s took nothing -- act was already down before the weapon became the action
+      //  target, and a hold needs a press to begin: while at the weapon act is PULSED, 0.5 s down / 0.2 s up, a new press every 0.7 s)
+      // (08:55: still nothing taken standing on it -- the +0x2c bits look like one-packet IMPULSES (a held act "seats and then
+      //  unseats"; a held switch never switched): act now goes out for NHOOK_BOT_ACTPULSE (0.03 s, ~one packet) every 0.4 s at the weapon)
+      if (pb && tp0 > 0 && !gun_near_veh(o->c, 0xFFFFFFFFu)) { float ap = 0.03f; lk_over(&ap, "NHOOK_BOT_ACTPULSE"); static double tap;
+          if (now - tap > 0.4) { tap = now; g_bot_act_until = now + ap; } }
+      else if (pb && now - tpress < 0.6 && !gun_near_veh(o->c, 0xFFFFFFFFu)) g_bot_act_until = tpress + 0.6;   // (the act bit held: pick up -- never beside a vehicle: it boards it)
       if (pb && now - tpress < 0.6) fbtn |= 0x20000 | (g_vpad_on ? ppad : 0); }   // (fbtn bit 17: hold the pick-up bit; mapped below; the pad's button directly)
     // reload after a fight (the players' habit; no ammo count is read yet): the pad's reload button (NHOOK_BOT_PICKPAD, a TAP; a hold
     // picks up) 0.4-1.0 s after a fight in which the walker fired ends, unless it is walking to a weapon
@@ -1103,9 +1206,25 @@ static void bot_step_body(void) {
       // (2026-11-08: not with a sword / hammer -- nothing to reload, and the tap then picks up the weapon on the floor: melee test
       //  walkers swapped their hammers for plasma rifles / SMGs after every fight)
       int noreload = g_inv.held_c && !strcmp(g_inv.held_c, "melee");
-      if (fight && g_vpad_on && tend && now > tend) { tend = 0; if (!noreload && now - tfired < 8.0 && !g_bot_pick_on && (g_inv.ammo < 0 || g_inv.ammo < g_inv.ammo_max)) { trel = now; if (bot_log()) nlog("[nhook] [inv] reloading after the fight"); } }
-      { static double tlow; if (fight && g_vpad_on && !engaged && g_inv.ammo >= 0 && g_inv.ammo_max > 2 && g_inv.ammo < 0.6f * g_inv.ammo_max && now - tlow > 4.0 && now - trel > 4.0 && !g_bot_pick_on) {
+      if (fight && tend && now > tend) { tend = 0; if (!noreload && now - tfired < 8.0 && !g_bot_pick_on && (g_inv.ammo < 0 || g_inv.ammo < g_inv.ammo_max)) { trel = now; if (bot_log()) nlog("[nhook] [inv] reloading after the fight"); } }
+      { static double tlow; if (fight && !engaged && g_inv.ammo >= 0 && g_inv.ammo_max > 2 && g_inv.ammo < 0.6f * g_inv.ammo_max && now - tlow > 4.0 && now - trel > 4.0 && !g_bot_pick_on) {
             tlow = now; trel = now; if (bot_log()) nlog("[nhook] [inv] reloading: %d of %d rounds", g_inv.ammo, g_inv.ammo_max); } }
+      // EMPTY (08:30, the user: "empty magazines sans reload are unacceptable btw. do better. find ammo, new weapon, or switch to
+      // alternate"): with the magazine known (the learned field, ammo_learn), a 0 there -> the other weapon if it has rounds (switch
+      // bit), else the reload tap at once, in a fight too; still 0 after 2 reloads = DRY (no reserve): the other weapon, else any
+      // weapon on the floor is "better" (the pick-up scan, a high fetch bid) -- walking over the same weapon refills it
+      { static double tswe; static int nrel;
+        if (g_ammo_learned >= 0 && g_inv.ammo == 0 && !noreload && g_inv.held) {
+            if (g_inv.has_other && g_inv.other_ammo != 0 && now - tswe > 1.5) { tswe = now; float swp = 0.03f; lk_over(&swp, "NHOOK_BOT_SWPULSE"); g_bot_switch_until = now + swp; fbtn |= 8;
+                if (bot_log()) nlog("[nhook] [inv] EMPTY %s: switching to %s", g_inv.held, g_inv.other); }
+            else if (now - trel > 2.5 && now - tswe > 1.0) { if (nrel >= 2) { if (!g_bot_dry && bot_log()) nlog("[nhook] [inv] DRY: %s still empty after %d reloads -- any weapon on the floor will do", g_inv.held, nrel); g_bot_dry = 1; }
+                else { trel = now; nrel++; if (bot_log()) nlog("[nhook] [inv] EMPTY %s: reloading (try %d)", g_inv.held, nrel); } } }
+        else if (g_inv.ammo > 0) { nrel = 0; g_bot_dry = 0; }
+        // THE BETTER WEAPON IN HAND (09:20: "TOOK the BATTLE RIFLE ... holding ASSAULT RIFLE, other BATTLE RIFLE"): out of a fight, with the
+        // other weapon 2+ ranks better and not known empty, one switch impulse (every 2 s until it is in hand)
+        { static double tbt; if (!engaged && g_inv.has_other && g_inv.other_rank + 2 <= g_inv.held_rank && g_inv.other_ammo != 0 && now - tbt > 2.0 && now - tswe > 1.0) { tbt = now; tswe = now;
+              float swp = 0.03f; lk_over(&swp, "NHOOK_BOT_SWPULSE"); g_bot_switch_until = now + swp; fbtn |= 8;
+              if (bot_log()) nlog("[nhook] [inv] the better weapon in hand: switching from %s to %s", g_inv.held, g_inv.other); } } }
       uint32_t rpad = bot_pickpad();
       if (now - trel < 0.1) { fbtn |= rpad; if (!gun_near_veh(o->c, 0xFFFFFFFFu)) g_bot_act_until = trel + 0.1; } }   // (the act bit tapped: reload -- not beside a vehicle)
     // the walker (nav.c's graph): the path's way PELOAD_NAV_LOOK nodes ahead; with the aim on, the throttle walks it in any
@@ -1201,7 +1320,7 @@ static void bot_step_body(void) {
         { static double ttap; if (g_gun_press_ok && now - ttap > 1.2) { ttap = now; g_bot_act_until = now + 0.15; } }   // (a TAP, then 1.2 s to see it seated: a held press seats and then unseats)
         { static double tl; if (bot_log() && now - tl > 1.0) { tl = now; nlog("[nhook] [gunner] boarding: %.1f units from the point behind the turret%s", gbd, g_gun_press_ok ? ", right behind it: pressing act" : ""); } } }
     else if (arbw == ARB_FETCH && g_pick_d < 3.0f) {   // (the last 3 units of a weapon fetch: straight at it -- it may lie off the walking graph)
-        float way = atan2f(g_bot_pick_pos[1] - o->c[1], g_bot_pick_pos[0] - o->c[0]), rel = bot_wrap(way - yaw), sp = g_pick_d > 1.0f ? 1.0f : 0.5f; tx = cosf(rel) * sp; ty = sinf(rel) * sp; out |= 2; }
+        float way = atan2f(g_bot_pick_pos[1] - o->c[1], g_bot_pick_pos[0] - o->c[0]), rel = bot_wrap(way - yaw), sp = g_pick_d > 1.0f ? 1.0f : g_pick_d > 0.3f ? 0.45f : 0.0f;   /* (08:05: onto it, then still) */ tx = cosf(rel) * sp; ty = sinf(rel) * sp; out |= 2; }
     else if (arbw == ARB_FIGHT) { tx = ftx; ty = fty; out |= 2; }   // (the fighter's moves: the arbiter gave it the legs)
     else if (arbw == ARB_HOLD) { tx = 0; ty = 0; out |= 2; }   // (levels apart: the enemy below -- hold the high ground)
     if (testb) { g_bot_btn = ((out & 4) ? g_bot_btn : 0) | g_bot_testbtn; out |= 4; }   // (do=botbtn: held until its time is up)
@@ -1296,7 +1415,11 @@ static void io_out_apply(const NhIO* io) {   // (the body) -> the hooks' globals
 #ifdef NH_BRAIN
 __attribute__((visibility("default"))) int nh_brain_version(void) { return NHIO_VERSION; }
 __attribute__((visibility("default"))) int nh_brain_step(NhIO* io) { if (io->version != NHIO_VERSION) return 0;
-    static int told; if (!told) { told = 1; nlog("[nhook] [brain] code built %s %s is stepping", __DATE__, __TIME__); }
+    static int told; if (!told) { told = 1; nlog("[nhook] [brain] code built %s %s is stepping", __DATE__, __TIME__);
+#ifdef NH_BRAIN_LESSON
+        if (NH_BRAIN_LESSON[0]) nlog("[nhook] [brain] lesson: %s", NH_BRAIN_LESSON);
+#endif
+    }
     io_in_apply(io);
     { static char hmmap[64]; if (strcmp(hmmap, g_st_curmap)) { snprintf(hmmap, sizeof hmmap, "%s", g_st_curmap);   // (the death map of the map being played: the
           pthread_mutex_lock(&g_hm_mx); hm_switch(g_st_curmap); pthread_mutex_unlock(&g_hm_mx);                     //  brain's own copy -- nav_danger_update avoids its hot spots)

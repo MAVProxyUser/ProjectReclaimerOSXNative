@@ -354,6 +354,10 @@ def main():
         if ls is None: print('  protecting you: you are not in the game -- the walker plays on its own', flush=True)
         else: print('  protecting you: median %s units from you, within 6 units %s of the time, longest apart %.0f s; went after %d of your attackers' % (
             med(sh), '%.0f%%' % (100 * sum(d <= 6 for d in sh) / len(sh)) if sh else '-', o['apart_s'], att), flush=True)
+        try:   # (the user: "each training session reload you should describe what the new brain is trying to show that it learned")
+            les = json.loads(open(os.path.join(SUP, 'battles', 'follow', 'brain-lessons.jsonl')).read().strip().splitlines()[-1])
+            print('  brain in play (built %s): %s' % (les['built'], les['lesson']), flush=True)
+        except Exception: pass
         print('  walker this window: %d kills / %d deaths, accuracy %s, kills with %s' % (w['k'], w['d'], '%.0f%%' % (100 * w['hits'] / w['shots']) if w['shots'] else '-',
               ', '.join(sorted(set(w['kw']))) or '-'), flush=True)
         rmo = role_model(rec, port, ws)
