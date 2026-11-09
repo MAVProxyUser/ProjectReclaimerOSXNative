@@ -3286,6 +3286,11 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   switch presses (the learnt record bit): 0 of 32 took" -- 32 x "switching from PLASMA PISTOL to ASSAULT RIFLE" with the trigger held
   (the plasma pistol held = an overcharge held) while the earlier switches, 3 of 3 and 2 of 2, came with the trigger up. LOGIC: from a
   switch press until 0.15 s after it the trigger (and the reload click) stays up; PLASMA PISTOL joins the weapons whose trigger is pulsed.
+- **Policy A/B result; a general knob A/B** (2026-11-09 14:35; follow-study.py knob_ab, --ab N --ab-set "K=v,..." --ab-name NAME) —
+  RESULT of --policy-ab 8 (14:00-14:35, The Pit / 9-15 players): policy ON (0.5) 5 kills / 14 deaths in 4 windows (K/D 0.36, 3.5 deaths a
+  window), OFF 3 / 23 in 4 (0.13, 5.75 deaths a window) -- the learnt policy stays on. NEW: any set of live knobs alternated SET (B) /
+  REMOVED (A: the brain's defaults) per window, the tally in battles/follow/ab-<name>.json; first use: the retreat rules (break off,
+  out of crossfires, recharge) off vs on.
 - **A clean policy A/B** (2026-11-09 14:00; follow-study.py --policy-ab N) — WHY: accuracy slid 66% -> 28% over windows that changed the
   opponents (a new 16-player match), the policy's weights (its 04:44 retrain) and a string of rules at once; the trainer's challengers
   nudge one knob among many, too noisy to tell whether the learnt policy helps. LOGIC: for N windows the study writes NHOOK_BOT_POLICY
