@@ -828,6 +828,16 @@ static int arb_choose(Arb* a, double now) {
         for (int k = 0; k < ARB_N && q < (int)sizeof b - 40; k++) if (k != w && a->b[k].on) q += snprintf(b + q, sizeof b - (size_t)q, " > %s %.0f", a->b[k].why, a->b[k].score);
         nlog("%s", b); }
     return w; }
+typedef struct { uint32_t tg; float td; int tvis; int naim; uint32_t ah[4]; float ad[4]; const char* aw[4]; float sh, hp; const char* w; int am; } DeathSnap;
+static void* g_death_snap;
+static void death_note(double now) {
+    const DeathSnap* d = (const DeathSnap*)g_death_snap; static int nd, nother, nnoaim, nfar; static float dsum; (void)now;
+    int other = d->naim > 0; for (int k = 0; k < d->naim; k++) if (d->ah[k] == d->tg) other = 0;
+    char b[300]; int q = 0; for (int k = 0; k < d->naim; k++) q += snprintf(b + q, sizeof b - (size_t)q, " %08x %.0f u (%s)%s", d->ah[k], d->ad[k], d->aw[k], d->ah[k] == d->tg ? " = my target" : "");
+    if (bot_log()) nlog("[nhook] [death] fighting %08x at %.0f u (%s); aiming at me:%s; my shield %.2f health %.2f, %s %d rounds", d->tg, d->td, d->tg ? (d->tvis ? "in sight" : "hidden") : "no target", d->naim ? b : " nobody seen", d->sh, d->hp, d->w ? d->w : "-", d->am);
+    nd++; if (other) nother++; if (!d->naim) nnoaim++; if (d->naim && d->ad[0] > 20) nfar++; if (d->naim) dsum += d->ad[0];
+    if (nd % 8 == 0 && bot_log()) nlog("[nhook] [deaths] %d deaths: the likely killer was NOT my target %d times, nobody aiming at me seen %d, killer 20+ units away %d; mean killer distance %.0f u",
+                                     nd, nother, nnoaim, nfar, nd - nnoaim > 0 ? dsum / (nd - nnoaim) : 0.0f); }
 // The target's HEAD (2026-11-09 07:55; the user: "you can see all I can see for aim, tune, etc re: hitbox. don't make me a crutch in any
 // way"): the head region of the target's collision model posed by its node matrices -- the same geometry and the same "head" (the region
 // whose nodes sit highest) the aim meter judges every shot with (noverlay.c nov_aim_tick_body) -- its centre and mean radius. The fighter
@@ -921,6 +931,7 @@ static void bot_step_body(void) {
     honk_scan(now, objs, n, me);   // (02:35: finding the field a teammate's honk changes, above)
     nade_check(now, objs, n);   // (the last grenade's outcome, above)
     if (seated && gun_on() && !g_bot_shadow && gun_seated(now, objs, n, me, cam, yaw0, pitch0)) { plen = 0; g_bot_err = -1; return; }   // (the gunner, above)
+    { static int alive_was = 1; int alive_now = me >= 0 && !objs[me].dead; if (alive_was && !alive_now && me >= 0 && g_death_snap) death_note(now); alive_was = me >= 0 ? alive_now : alive_was; }
     if (me < 0 || objs[me].dead || seated) { g_bot_out = 0; g_nav_act = 0; plen = 0; g_bot_err = -1;   // dead, respawning or in a vehicle
         static char w[96]; snprintf(w, sizeof w, me < 0 ? "the record's unit %08x is none of the %d units seen" : objs[me].dead ? "dead" : "in a vehicle", meh, n); bot_idle(me < 0 ? w : objs[me].dead ? "dead" : "in a vehicle"); return; }
     const NovObj* o = &objs[me]; int out = 0; float yaw = yaw0, pitch = pitch0; g_bot_unit_p = o->p;
@@ -1326,6 +1337,16 @@ static void bot_step_body(void) {
     beh_follow(&W, &arb);
     int ob_carry = 0; float ob_d = 1e9f; beh_ball(&W, &arb, gun_go, &ob_carry, &ob_d);
     beh_fetch(&W, &arb); beh_fight(&W, &arb, ob_carry); beh_hold(&W, &arb); beh_hunt(&W, &arb);
+    // DEATH NOTES (12:05): what killed the walker -- each step remembers its target and the enemies aiming at it (within 12 deg, 40
+    // units: the likely killer), its shield, weapon and rounds; at the death a [death] line, every 8 deaths a [deaths] summary: how
+    // often the likely killer was NOT the target (awareness), at what distance, with what
+    { static DeathSnap lastS; static int was_alive = 1, nd, nother; static float dsum;
+      lastS.tg = have_tg ? ftg.handle : 0; lastS.td = have_tg ? tdist : 0; lastS.tvis = have_tg ? los_get(ftg.handle, now) == 1 : 0; lastS.naim = 0; lastS.sh = o->shield; lastS.hp = o->health; lastS.w = g_inv.held; lastS.am = g_inv.ammo;
+      for (int i = 0; i < n && lastS.naim < 4; i++) { const NovObj* t = &objs[i]; if (t->type || t->dead || i == me || !bot_enemy(o, t)) continue; float dx = o->c[0] - t->c[0], dy = o->c[1] - t->c[1], d = sqrtf(dx * dx + dy * dy); if (d > 40 || d < 0.2f) continue;
+          float ay = atan2f(t->aim[1], t->aim[0]); if ((cosf(ay) * dx + sinf(ay) * dy) / d < 0.978f) continue;   // (cos 12 deg)
+          uint32_t tw = t->wslot >= 0 && t->wslot < 4 ? t->weapons[t->wslot] : 0xFFFFFFFFu; uint64_t twd = nov_datum(tw); uint32_t twdef = 0;
+          lastS.ah[lastS.naim] = t->handle; lastS.ad[lastS.naim] = d; lastS.aw[lastS.naim] = twd && hb_read(twd, &twdef, 4) ? eg_wcls(hb_tag_name(twdef)) : "?"; lastS.naim++; }
+      (void)was_alive; (void)nd; (void)nother; (void)dsum; g_death_snap = &lastS; }
     int arbw = arb_choose(&arb, now);
     // (09:55: the recordings: the walker moves under 0.3 u/s 53% of its life -- median 0.09 u/s, the players 0.7-1.2 -- while its fight moves
     //  measure 1.5 u/s: [still] every 30 s splits the still time by the legs' winner and the path state)

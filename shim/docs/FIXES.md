@@ -3272,6 +3272,11 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   a running battle, at every round end (our server's in_match true -> false) walker-coach.py round + match-study.py, then each
   walker's game restarted headless with its new knobs and the newest build (they rejoin in the lobby; the user's game and the
   server stay).
+- **Death notes** (2026-11-09 12:05; nbot.c DeathSnap / death_note) — WHY: the walker dies to enemies it is not dueling (battle-rifle
+  headshots, snipers) and its target choice already turns to attackers when hurt (nbot_engage.c eg_choose): the next fix needs the
+  facts. LOGIC: each step keeps its target (handle, distance, in sight) and the enemies within 40 units aiming within 12 deg of it (the
+  likely killer: handle, distance, weapon class), its shield / health, weapon and rounds; at the alive -> dead change a [death] line,
+  every 8 deaths a [deaths] summary (killer not my target, nobody aiming seen, killer 20+ units away, mean killer distance).
 - **The fighting distance is copied only from close-range role models** (2026-11-09 12:00; follow-study.py train) — WHY: today's best
   player killed from 26 units with a sniper rifle and the trainer's challenger pulled the walker's distance halfway toward it (DIST 0.82
   -> 1.01) -- assault-rifle fights from sniper range. LOGIC: DIST follows the role model's kill distance only when its two most common kill
