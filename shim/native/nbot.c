@@ -952,6 +952,16 @@ static void bot_step_body(void) {
             if (bi >= 0) { float dx = objs[bi].c[0] - cam[0], dy = objs[bi].c[1] - cam[1], dz = objs[bi].c[2] - cam[2]; bd = dx * dx + dy * dy + dz * dz; } }
         else for (int pass = 0; pass < 2 && bi < 0; pass++) for (int i = 0; i < n; i++) { const NovObj* t = &objs[i]; if (t->type || t->dead || i == me) continue;
             if (!pass && !bot_enemy(o, t)) continue; float dx = t->c[0] - cam[0], dy = t->c[1] - cam[1], dz = t->c[2] - cam[2], d = dx * dx + dy * dy + dz * dz; if (d < bd) { bd = d; bi = i; } }
+        // (14:15: FINISH THE WEAK -- 1 kill / 9 deaths / 5 ASSISTS in a 14-player Pit: its damage went to kills other players took. An
+        //  enemy in sight within NHOOK_BOT_FINISH_R (20) units with shield + health under NHOOK_BOT_FINISH_V (0.5) becomes the target --
+        //  the weakest one; the one at arm's length below still comes first)
+        if (g_bot_fighting && bi >= 0) { float fr = 20, fv = 0.5f; lk_over(&fr, "NHOOK_BOT_FINISH_R"); lk_over(&fv, "NHOOK_BOT_FINISH_V");
+            int wi = -1; float wv = fv; for (int i = 0; i < n; i++) { const NovObj* t = &objs[i]; if (t->type || t->dead || i == me || !bot_enemy(o, t)) continue;
+                float dx = t->c[0] - cam[0], dy = t->c[1] - cam[1], dz = t->c[2] - cam[2], d = dx * dx + dy * dy + dz * dz; float v = t->shield + t->health;
+                if (d < fr * fr && v < wv && los_get(t->handle, now) == 1) { wv = v; wi = i; } }
+            if (wi >= 0 && wi != bi) { const NovObj* wt = &objs[wi]; float dx = wt->c[0] - cam[0], dy = wt->c[1] - cam[1], dz = wt->c[2] - cam[2];
+                static double tl; if (bot_log() && now - tl > 2) { tl = now; nlog("[nhook] [fight] %08x is nearly dead (%.2f): finishing it", wt->handle, wv); }
+                bi = wi; bd = dx * dx + dy * dy + dz * dz; } }
         // (12:55: THE ONE AT ARM'S LENGTH -- "[death] fighting 80d30114 at 9 u ... aiming at me: 80e60071 1 u": an enemy within
         //  NHOOK_BOT_NEAR_THREAT (3) units, and closer than half the chosen target, becomes the target at once, whatever the choice rule)
         if (g_bot_fighting && bi >= 0) { float nt = 3; lk_over(&nt, "NHOOK_BOT_NEAR_THREAT"); int ni = -1; float nd = nt * nt;

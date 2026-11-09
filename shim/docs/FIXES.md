@@ -3272,6 +3272,10 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   a running battle, at every round end (our server's in_match true -> false) walker-coach.py round + match-study.py, then each
   walker's game restarted headless with its new knobs and the newest build (they rejoin in the lobby; the user's game and the
   server stay).
+- **Finish the weak** (2026-11-09 14:15; nbot.c target choice) — WHY: in a 14-player Pit match the walker stood at 1 kill / 9 deaths
+  with 5 ASSISTS -- it hit (the targets' shields fell, accuracy ~40%) but other players took the kills. LOGIC: after the choice rule, the
+  weakest enemy in sight within NHOOK_BOT_FINISH_R (20, live) units with shield + health under NHOOK_BOT_FINISH_V (0.5, live) becomes the
+  target ("[fight] ... is nearly dead (v): finishing it"); the enemy at arm's length still overrides it.
 - **Let go of the trigger to switch; pulse the plasma pistol** (2026-11-09 14:05; nbot.c the trigger, bot_pull_weapon) — WHY: "[inv]
   switch presses (the learnt record bit): 0 of 32 took" -- 32 x "switching from PLASMA PISTOL to ASSAULT RIFLE" with the trigger held
   (the plasma pistol held = an overcharge held) while the earlier switches, 3 of 3 and 2 of 2, came with the trigger up. LOGIC: from a
