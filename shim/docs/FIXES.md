@@ -3272,6 +3272,13 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   a running battle, at every round end (our server's in_match true -> false) walker-coach.py round + match-study.py, then each
   walker's game restarted headless with its new knobs and the newest build (they rejoin in the lobby; the user's game and the
   server stay).
+- **Every weapon ranked, no switch ping-pong, switch pulses counted** (2026-11-09 10:35-10:40; nbot.c bot_wpn_rank, the better-weapon
+  switch, [inv] switch pulses) — WHY: "switching from SPIKE RIFLE / SMG to ASSAULT RIFLE" every 3 s: the Spiker, SMG, plasma rifle,
+  needler, magnum and plasma pistol had no rank (unknown = 50, "worse than anything"), and in a fight the better-weapon switch and the
+  range-band switch undid each other. LOGIC: those six ranked after the assault rifle (in that order); in a fight the better-weapon
+  switch needs the held weapon OUT of its band as well as the other one in its band; 1 s after every new switch pulse the brain checks
+  whether the weapon in hand changed and logs "[inv] switch pulses (P s): N of M took" every 2 minutes (NHOOK_BOT_SWPULSE live, set
+  to 0.06 s while measuring).
 - **The aim leads moving targets (host-side hit registration); the policy retrains itself and its weight is trained** (2026-11-09
   10:20-10:30; nbot.c the fighter's aim point, follow-study.py hone_lead / policy_retrain / TRAINED) — WHY: Halo 3 registers a client's
   bullets on the host with no lag compensation (non-host players lead by their ping), and a third of the walker's shots through a

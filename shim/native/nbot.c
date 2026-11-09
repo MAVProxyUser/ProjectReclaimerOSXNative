@@ -389,7 +389,7 @@ static void bot_idle(const char* why) {   // NHOOK_SPAR_LOG: why the aim / walke
 // weapons by preference, best first (what the recorded players carried besides the assault rifle -- the Carbine 44% of the time --
 // and the power weapons); a weapon not listed ranks below all of these
 static int bot_wpn_rank(const char* n0) { static const char* const pref[] = {"rocket_launcher", "spartan_laser", "sniper_rifle", "beam_rifle", "battle_rifle", "covenant_carbine",
-    "shotgun", "excavator", "flak_cannon", "energy_sword", "gravity_hammer", "brute_shot", "assault_rifle", 0};   /* (08:15: excavator = the Mauler, flak_cannon = the Fuel Rod: Halo 3's tag names) */ if (!n0) return 99; char nb[96]; const char* n = bot_tagkey(n0, nb, sizeof nb); for (int i = 0; pref[i]; i++) if (strstr(n, pref[i])) return i; return 50; }
+    "shotgun", "excavator", "flak_cannon", "energy_sword", "gravity_hammer", "brute_shot", "assault_rifle", "spike_rifle", "smg", "plasma_rifle", "needler", "magnum", "plasma_pistol", 0};   /* (10:35: the rest ranked -- unknown = 50 made a Spiker / SMG "worse than anything") */   /* (08:15: excavator = the Mauler, flak_cannon = the Fuel Rod: Halo 3's tag names) */ if (!n0) return 99; char nb[96]; const char* n = bot_tagkey(n0, nb, sizeof nb); for (int i = 0; pref[i]; i++) if (strstr(n, pref[i])) return i; return 50; }
 // ---- the walker's own inventory and power-ups (2026-11-08; the user: "the walker should be aware of its own inventory, and power up
 // status as well"): the held and the other weapon (class + rank), grenades by type, an overshield (shield above 1), active camo
 // (+0x360 above 0.05). The fighter switches to the other weapon when the target's distance is outside the held one's band and
@@ -1245,10 +1245,16 @@ static void bot_step_body(void) {
         // THE BETTER WEAPON IN HAND (09:20: "TOOK the BATTLE RIFLE ... holding ASSAULT RIFLE, other BATTLE RIFLE"): out of a fight, with the
         // other weapon 2+ ranks better and not known empty, one switch impulse (every 2 s until it is in hand)
         // (10:05: in a fight only when the target's distance is inside the other weapon's band -- it swapped the rifle for a shotgun mid-range)
-        { static double tbt; float kdb = 1; lk_over(&kdb, "NHOOK_BOT_DIST"); float ob = engaged ? bot_band_off(g_inv.other_c, tdist, kdb) : 0;
-          if ((!engaged || (tdist > 3.0f && ob <= 0.05f)) && g_inv.has_other && g_inv.other_rank + 2 <= g_inv.held_rank && g_inv.other_ammo != 0 && now - tbt > 3.0 && now - tswe > 1.0) { tbt = now; tswe = now;   // (09:45: in fights too, beyond 3 units -- a 20-player FFA is nearly always "engaged")
+        // (10:35: in a fight also only when the HELD weapon is out of its band -- else the band rule switched straight back: ping-pong)
+        { static double tbt; float kdb = 1; lk_over(&kdb, "NHOOK_BOT_DIST"); float ob = engaged ? bot_band_off(g_inv.other_c, tdist, kdb) : 0, hbo = engaged ? bot_band_off(g_inv.held_c, tdist, kdb) : 1;
+          if ((!engaged || (tdist > 3.0f && ob <= 0.05f && hbo != 0)) && g_inv.has_other && g_inv.other_rank + 2 <= g_inv.held_rank && g_inv.other_ammo != 0 && now - tbt > 3.0 && now - tswe > 1.0) { tbt = now; tswe = now;   // (09:45: in fights too, beyond 3 units -- a 20-player FFA is nearly always "engaged")
               float swp = 0.03f; lk_over(&swp, "NHOOK_BOT_SWPULSE"); g_bot_switch_until = now + swp; fbtn |= 8;
               if (bot_log()) nlog("[nhook] [inv] the better weapon in hand: switching from %s to %s%s", g_inv.held, g_inv.other, engaged ? " (the target is in its range)" : ""); } } }
+      // (10:40: does a switch pulse take? 1 s after each new pulse: the weapon in hand changed or not -- [inv] switch pulses every 2 min)
+      { static double tchk, tlast_until, trep; static const char* held0; static int ntry, nok;
+        if (g_bot_switch_until != tlast_until && g_bot_switch_until > now) { tlast_until = g_bot_switch_until; tchk = now; held0 = g_inv.held; }
+        if (tchk > 0 && now - tchk > 1.0) { ntry++; if (g_inv.held != held0) nok++; tchk = 0; }
+        if (now - trep > 120) { if (trep > 0 && ntry && bot_log()) { float swp = 0.03f; lk_over(&swp, "NHOOK_BOT_SWPULSE"); nlog("[nhook] [inv] switch pulses (%.2f s): %d of %d took", swp, nok, ntry); } trep = now; ntry = nok = 0; } }
       uint32_t rpad = bot_pickpad();
       if (now - trel < 0.1) { fbtn |= rpad; if (!gun_near_veh(o->c, 0xFFFFFFFFu)) g_bot_act_until = trel + 0.1; } }   // (the act bit tapped: reload -- not beside a vehicle)
     // the walker (nav.c's graph): the path's way PELOAD_NAV_LOOK nodes ahead; with the aim on, the throttle walks it in any
