@@ -1167,6 +1167,10 @@ static void bot_step_body(void) {
           float far = 30.0f; lk_over(&far, "NHOOK_BOT_FETCH_FAR"); float bd = 1e30f, bdd = 0; int bi = -1;
           for (int i = 0; i < nw; i++) { if (w[i].parent != 0xFFFFFFFFu) continue; int rk = bot_wpn_rank(hb_tag_name(w[i].def)); if (rk >= cur) continue;
               int t2 = 0; for (int k = 0; k < ntried && k < 32; k++) if (tried[k] == w[i].handle) t2 = 1; if (t2) continue;
+              // (10:10: "[still] 100% of 30 s ... fetch 79%": standing under a weapon on a ledge -- only weapons lying on walkable floor
+              //  (a graph node within 1 unit across and 1 unit below / 0.6 above the weapon) are fetched)
+              if (g_nav.ok) { float wp[3] = {w[i].c[0], w[i].c[1], w[i].c[2] - 0.3f}; int wn = nav_node_at(wp); float q[3]; if (wn < 0) continue; nav_pos(wn, q);
+                  float hx = q[0] - w[i].c[0], hy = q[1] - w[i].c[1], hz = w[i].c[2] - q[2]; if (hx * hx + hy * hy > 1.0f || hz > 1.3f || hz < -0.6f) continue; }
               float dx = w[i].c[0] - o->c[0], dy = w[i].c[1] - o->c[1], dz = w[i].c[2] - o->c[2], d = dx * dx + dy * dy, lim = rk <= 6 ? far * far : 144.0f;
               float sc = sqrtf(d) * (1.0f + 0.15f * (float)rk); if (d < lim && fabsf(dz) < 4.0f && sc < bd) { bd = sc; bdd = d; bi = i; } }
           bd = bdd;
@@ -1195,7 +1199,9 @@ static void bot_step_body(void) {
               if (!got && g_bot_pick_on) { g_bot_pick_on = 0; tried[(ntried++) & 31] = want_h; } if (got) g_bot_pick_on = 0; tp0 = 0; } }
       if (g_bot_pick_on) { float dx = g_bot_pick_pos[0] - o->c[0], dy = g_bot_pick_pos[1] - o->c[1], dz = g_bot_pick_pos[2] - o->c[2], pr = 1.3f; lk_over(&pr, "NHOOK_BOT_PICK_R");
           g_pick_d = sqrtf(dx * dx + dy * dy);
-          if (dx * dx + dy * dy < pr * pr && fabsf(dz) < 1.5f) { tpress = now; if (!tp0) { tp0 = now;
+          if (dx * dx + dy * dy < 0.36f && fabsf(dz) >= 1.5f) { g_bot_pick_on = 0; tried[(ntried++) & 31] = want_h;   // (under / over it, out of reach: at once)
+              if (bot_log()) nlog("[nhook] [fight] the %s is %.1f units %s: out of reach, left", g_pick_name, fabsf(dz), dz > 0 ? "above" : "below"); }
+          else if (dx * dx + dy * dy < pr * pr && fabsf(dz) < 1.5f) { tpress = now; if (!tp0) { tp0 = now;
               if (bot_log()) nlog("[nhook] [fight] at the weapon (%.1f units): walking onto it, act held", sqrtf(dx * dx + dy * dy)); } } }
       uint32_t ppad = bot_pickpad();
       gun_vlist(now);

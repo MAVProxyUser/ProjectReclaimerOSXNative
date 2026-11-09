@@ -3272,6 +3272,17 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   a running battle, at every round end (our server's in_match true -> false) walker-coach.py round + match-study.py, then each
   walker's game restarted headless with its new knobs and the newest build (they rejoin in the lobby; the user's game and the
   server stay).
+- **No switch to an empty gun, range-aware upgrades, reachable fetches only, the policy's jumps drawn, [still]** (2026-11-09 10:00-10:15;
+  nbot.c the switch press / the better-weapon switch / the pick-up scan and press / [still], npolicy.c) — WHY: "EMPTY SNIPER RIFLE:
+  switching to ASSAULT RIFLE" every 1.5 s (the fight's band rule switched straight back to the long-range sniper without looking at its
+  rounds); the better-weapon switch swapped a rifle for a shotgun mid-range; the recordings had the walker under 0.3 u/s 53% of its life
+  and [still] (new: every 30 s, the still share by the legs' winner) put 65-79% of it on the weapon FETCH -- standing under a weapon on a
+  ledge (more than 1.5 up: the press never began, nothing timed out); the policy made 0 jumps (a jump is rare in any 0.1 s sample, its
+  probability never passed 0.5). LOGIC: a switch press goes out only if the other weapon is not known empty; in a fight the
+  better-weapon switch needs the target inside the other weapon's band (bot_band_off <= 0.05); the scan fetches only weapons with a
+  walking-graph node within 1 unit across, 1.3 below / 0.6 above them, and a walker within 0.6 across but 1.5+ apart in height leaves at
+  once ("out of reach, left"); the policy's jump is drawn with its probability every 0.1 s. (Note: [still] reads 100% during the
+  post-game screen -- every player is frozen there.)
 - **Head tracking, no stands mid-fight, the better gun in hand, a learnt movement policy (GPU)** (2026-11-09 09:30-10:00; follow-study.py
   NOISE floor / lvl_knobs, trainer.json, nbrain_beh.c beh_fetch, nbot.c the pick-up look / the better-weapon switch / the policy hook,
   shim/native/npolicy.c, shim/tools/policy-train.py) — WHY: "[the best player] ... stays on the headshots no matter what the opponent

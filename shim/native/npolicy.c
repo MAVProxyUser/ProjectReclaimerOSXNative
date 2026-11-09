@@ -68,7 +68,10 @@ static int pol_move(double now, const NovObj* objs, int n, int me, const NovObj*
             // (the world move -> the view frame)
             float wx = out[0] * ux + out[1] * vx, wy = out[0] * uy + out[1] * vy, fx = cosf(yaw0), fy = sinf(yaw0), run = g_bm.run_speed > 0.5f ? g_bm.run_speed : 2.1f;
             out[0] = fmaxf(-1, fminf(1, (wx * fx + wy * fy) / run)); out[1] = fmaxf(-1, fminf(1, (wx * -fy + wy * fx) / run));
+            // (10:10: "0 jumps": a jump is rare in any one 0.1 s sample, so its probability never passes 0.5 -- the jump is DRAWN with the
+            //  model's probability each 0.1 s: the best players' jump rate, in the moments they jump)
+            { float pj = 1.0f / (1.0f + expf(-out[2])); out[2] = bot_rand01() < pj ? 1.0f : -1.0f; }
             #undef UV
         } }
     if (have < 3) return 0;
-    *r = out[0]; *lat = out[1]; *jump = out[2] > 0.0f; return 1; }
+    *r = out[0]; *lat = out[1]; *jump = out[2] > 0.0f; out[2] = -1.0f; return 1; }   // (a drawn jump goes out once)
