@@ -5,6 +5,8 @@
 set -e
 cd "$(dirname "$0")/.."
 mkdir -p build/native-obj
+# (2026-11-09: a // comment appended mid-line once commented out the stuck alarm's reset for ~6 hours: warn about any such line)
+python3 tools/comment-scan.py >&2 || echo "build.sh: WARNING -- code after a mid-line // comment (above)" >&2
 O=build/native-obj; CF="-arch arm64 -mmacosx-version-min=11.0 -O2 -g -Wall"
 clang $CF -fobjc-arc -c -o $O/nrender.o native/nrender.m
 clang $CF -DREC_NO_GL -Wno-deprecated-declarations -c -o $O/rec.o src/rec.m

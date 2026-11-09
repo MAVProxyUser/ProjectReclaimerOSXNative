@@ -156,7 +156,7 @@ static void bot_los_do(uint64_t* ctx) {
     if (hit) { const float* h = (const float*)(res + 0x08); float dx = h[0] - P[0], dy = h[1] - P[1], dz = h[2] - P[2]; d = sqrtf(dx * dx + dy * dy + dz * dz); }
     g_los_res = !hit || d > L - 0.5f; g_los_res_tgt = g_los_tgt; g_los_t = mono_s(); g_los_done = q; }
 typedef struct { float x, y, w; } GlLane; static GlLane* g_gll; static int g_ngll; static float g_gll_wsum;   // the lanes as goal material (nbot_goals.c)
-static double g_escape_until, g_escape_t; static float g_escape_dir;   // (14:50: the wedged-spot escape)
+static double g_escape_until, g_escape_t; static float g_escape_dir; static double g_act_last;   // (14:50: the wedged-spot escape)
 static double g_fjump_until; static int g_bot_camo_hold;   // (a jump in a fight: NHOOK_BOT_FJUMP)
 static int bot_fcmp(const void* a, const void* b) { float x = *(const float*)a, y = *(const float*)b; return x < y ? -1 : x > y; }
 // the model's heat for this map -> g_nav.pop (how much real players use each floor node: A* prefers their lanes); once per map
@@ -1546,15 +1546,18 @@ static void bot_step_body(void) {
                   //  server only. A jump of over 1.5 units within 0.25 s while alive on foot is a snap-back: stuck at the server's spot,
                   //  so that step is blocked and the plan goes round. NHOOK_BOT_SNAPBACK=0 (live) = off)
                   static float sb_last[3]; static double sb_t; int snapped = 0; float sbk = 1; lk_over(&sbk, "NHOOK_BOT_SNAPBACK");
+                  if (now < g_bot_act_until) g_act_last = now;   /* (08:15: for the snap-back line -- does the server hold a walker around a pickup?) */
                   // (07:27: and only BACK to where it stood in the last 5 s (within 1 unit) -- a man cannon (Valhalla's bases) also moves a
                   //  walker 1.5+ units in 0.25 s, forward)
-                  { static float rp[50][3]; static double rt[50]; static int rn; static double trp;
+                  // (08:10: 12 s of positions, not 5: a client that wandered off longer before the server put it back was missed --
+                  //  30 s held on The Pit with 3 snaps seen)
+                  { static float rp[120][3]; static double rt[120]; static int rn; static double trp;
                     float ddx = pos[0] - sb_last[0], ddy = pos[1] - sb_last[1];
                     if (sbk > 0 && sb_t > 0 && now - sb_t < 0.25 && ddx * ddx + ddy * ddy > 1.5f * 1.5f)
-                        for (int i = 0; i < 50 && i < rn; i++) { int k = (rn - 1 - i) % 50; if (now - rt[k] > 5.0) break; float ex = rp[k][0] - pos[0], ey = rp[k][1] - pos[1], ez = rp[k][2] - pos[2];
+                        for (int i = 0; i < 120 && i < rn; i++) { int k = (rn - 1 - i) % 120; if (now - rt[k] > 12.0) break; float ex = rp[k][0] - pos[0], ey = rp[k][1] - pos[1], ez = rp[k][2] - pos[2];
                             if (now - rt[k] > 0.3 && ex * ex + ey * ey < 1.0f && fabsf(ez) < 1.0f) { snapped = 1; break; } }
                     memcpy(sb_last, pos, 12); sb_t = now;
-                    if (now - trp >= 0.1) { trp = now; memcpy(rp[rn % 50], pos, 12); rt[rn % 50] = now; rn++; } }
+                    if (now - trp >= 0.1) { trp = now; memcpy(rp[rn % 120], pos, 12); rt[rn % 120] = now; rn++; } }
                   static int pg_goal = -2, pg_best; static double pg_t; int noprog = 0; float npg = 4; lk_over(&npg, "NHOOK_BOT_NOPROG");
                   { int walking = !strafe && arbw != ARB_FIGHT && arbw != ARB_HOLD && !g_bot_fighting && plen > 0, rem = plen - pidx;
                     if (!walking || goal != pg_goal) { pg_goal = walking ? goal : -2; pg_best = rem; pg_t = now; }
@@ -1562,7 +1565,7 @@ static void bot_step_body(void) {
                     else if (npg > 0 && now - pg_t > npg) { noprog = 1; pg_t = now; pg_best = rem; } }
                   if (!strafe && arbw != ARB_FIGHT && arbw != ARB_HOLD && !(g_bot_fighting && tdist < 3.0f) && ((now - histt[j & 63] >= 1.4 && dx * dx + dy * dy < 0.35f * 0.35f) || noprog || snapped) && (now - tjump > 1.5 || snapped)) {
                       if (noprog) nav_say("  [nav] no progress for %.0f s at (%.1f %.1f %.1f): treated as stuck\n", npg, pos[0], pos[1], pos[2]);
-                      if (snapped && bot_log()) nlog("[nhook] [nav] snapped back by the server to (%.1f %.1f %.1f): treated as stuck", pos[0], pos[1], pos[2]);
+                      if (snapped && bot_log()) nlog("[nhook] [nav] snapped back by the server to (%.1f %.1f %.1f): treated as stuck (act last pressed %.1f s ago; legs %s)", pos[0], pos[1], pos[2], g_act_last > 0 ? now - g_act_last : -1.0, g_arb_why);
                       // (01:10: fighting at arm's length is no progress by design, not stuck)
                       // (07:05: these statements sat AFTER that comment on its line -- commented out since 01:10: tjump never moved, so
                       //  "stuck" fired on EVERY step once a walker slowed (3 lines in one 0.1 s step), each adding +8 to 10 path nodes,

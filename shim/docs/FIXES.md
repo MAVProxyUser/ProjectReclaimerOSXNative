@@ -3326,7 +3326,10 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   step, so the next plan went north again by a neighbouring step (it got free only when a plan went south). Since 07:29 a snap-back also
   adds NHOOK_NAV_BLOCKPEN to every path node the client walked before it (kb+1 .. pidx+2) for the session ("[nav] snap-back: N path
   nodes the server never let it walk cost +25"). The Pit with it: 6 snap-backs, the longest spells at (-15.6, -3.3) 3.2 s and 5.9 s
-  (43.7 s before), standing 21.6% near enemies, median 1.44 u/s.
+  (43.7 s before), standing 21.6% near enemies, median 1.44 u/s. 08:10: the position ring holds 12 s (120 entries; it was 5 s -- a later
+  Pit battle held a walker 30 s at the same spot with only 3 snaps seen). OPEN: that hold began right after the walker TOOK the
+  Excavator at its spawn (-16.9, -3.6) with act, and the first snap of the earlier battle came while fetching a weapon: the server may
+  hold a walker's biped around a pickup / act press. Next: log act presses beside the snap-backs.
 - **No progress = stuck** (2026-11-09 07:15; nbot.c the nav stuck test; fight-speed.py --spells) — WHY: with the alarm fixed, a battle on
   The Pit: the server's recording (fight-speed.py --spells: per slot the standing share and the longest still spells) had one walker
   standing 68% of its time, 41.7 s at one spot and 17.9 s at another, while its own log said it walked (4% still): it hovered at
@@ -3347,7 +3350,9 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   src/nav.c for code after a mid-line // (a tail ending in ";" with an assignment) finds nothing else. The day's stuck measurements
   before 07:05 were taken with the broken alarm -- "jumping did not help", "the wedge escape made it worse", the off-lane cost and the
   lift penalty are unjudged; the blocked steps learned under it were moved to maptop/guardian.blocked.txt.bug-0730 (161 steps, mostly
-  bogus: a step was blocked at every step of a slow stretch). Battle 8 (3 walkers, 3 min, Guardian): 50 "stuck at" (26 fetch, 22 hunt),
+  bogus: a step was blocked at every step of a slow stretch). Guard (08:05): shim/tools/comment-scan.py finds code after a mid-line //
+  (a comment tail ending like a statement); shim/native/build.sh runs it on native/*.c + src/nav.c and prints a WARNING (non-fatal).
+  Battle 8 (3 walkers, 3 min, Guardian): 50 "stuck at" (26 fetch, 22 hunt),
   2 "4 times", no traps; the server's recording (fight-speed.py --dir battles/tracks): median 1.07 u/s with an enemy within 15 units,
   standing 28.9% (battle 6: 0.84 / 38.7%); 4,291 fight steps against ~2,400 before (less wandering). fight-speed.py --dir / --all-groups
   measure the walkers' own battle recordings the same way as the players'.
