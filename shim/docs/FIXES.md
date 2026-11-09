@@ -3272,6 +3272,28 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   a running battle, at every round end (our server's in_match true -> false) walker-coach.py round + match-study.py, then each
   walker's game restarted headless with its new knobs and the newest build (they rejoin in the lobby; the user's game and the
   server stay).
+- **Shadow mode, the input map from a real player, melee bits, the memory watch** (2026-11-09 00:15; nbot.c shadow_log / inp_context /
+  bot_meleebits, shim/tools/shadow-study.py, mem-watch.py, play-vs-walkers.sh) — WHY: the user asked for a walker in the biggest public
+  game ("I need it to learn in a REAL scenario now"); declined -- an automated player with memory-read targeting against people who
+  never agreed to face one -- and offered shadow mode instead (the user: "option 1 please"). Also: "I'm sending walking, jumping,
+  change grenade, you know the entire dang controller map. the server should see it all in context", "over time the choppiness came.
+  I wonder what's causing that memory leak". LOGIC: NHOOK_SHADOW=1 runs the walker's whole brain in the player's own game on any
+  server and publishes nothing (the end of bot_step_body returns before g_bot_out is set; bot_write and the packet hook write only
+  from it; the virtual pad is skipped) -- verified: the packet hook's one-time "builder's record" line never appears; every 0.1 s
+  its decision (target + position, fire, melee, empty, throttle, aim) and the player's own (throttle, aim, the record's buttons) ->
+  tracks/shadow/<time>_<map>.jsonl; the snapshot's "shadow" = its target live. shadow-study.py: same target (player's look within 10
+  deg of it), fire agreement by distance, melee, movement direction, aim gap. NHOOK_INPUT_LOG now labels bits IN CONTEXT: each bit
+  that switches on is checked 0.6 s later against the player's unit (found by handle in the object array): grenades fewer = throw,
+  +0x298 changed = grenade switch, +0x262 = weapon switch, +0x268 / +0x26c = pick-up, risen 0.3+ = jump -> an [input-map] line per bit
+  every 60 s. First two rounds of the user's play: 0x80040 (fire) 121 times, the extra byte bit 0 78, 0x21100800 (bit 11 -- a
+  packet bit -- with 20 / 24 / 29) 33, bit 1 (jump) 19, bit 5 17, bit 0 7, extra bit 1 6. MELEE BITS: while a walker melees,
+  0x21100800 goes into its control record and bit 11 into the packed record (NHOOK_BOT_MELEEBITS, =0 off) -- the best candidate,
+  unconfirmed until the input map names it. AMMO: the found "rounds loaded" field (+0x1b4) reads 0 for a fresh rifle in a player's
+  game and 129 in the walkers' -- not a magazine: "empty" now needs 8+ rounds seen in that weapon before. mem-watch.py: every minute,
+  each client's footprint (top: phys_footprint, no scanning), worst frame, kills / deaths -> battles/mem-watch.csv; --report fits MB
+  per hour per client. A Magnum secondary alone in the playlist options gave nobody a Magnum: primary + secondary set together now
+  (as the bloom battle's) -- and a full second slot would stop the walkers' only way to get power weapons (the game's own pick-up
+  into an empty slot) until their pick-up button works.
 - **Engage, lead the grenade, burst at range, follow the best walker, a fourth walker** (2026-11-08 22:45; nbot.c, nbot_engage.c,
   shim/tools/fire-rhythm.py, walker-scores.py, walker-coach.py follow, coach-rounds.sh v2, walker-battle.sh test-fifth) — WHY: the user:
   "walkers should never just walk past an enemy without predictive grenade lay some shots, or a beat down! engage!" (a walker went

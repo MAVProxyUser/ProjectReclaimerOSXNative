@@ -6,7 +6,8 @@
 # the old three values put back when the game closes (shim/tools/play-window.py). The user's stats page opens in the browser (8765); the
 # server's own page (every player) is http://127.0.0.1:8767/.
 #   bash shim/tools/play-vs-walkers.sh [walkers 3] [minutes 60]        PV_FULL=1 = the user's own (full-screen) settings
-# Quit the game to end; the walkers and the server stop when the time is up, or: pkill -f 'walker-battle.sh'; bash
+# DED_OPTIONS (JSON game options, shim/docs/option-map.json) reach the server, e.g. '{"player.secondary_weapon": 7}' = a Magnum start
+# secondary. The user's game logs its packed controls (NHOOK_INPUT_LOG, read only; PV_INPUT_LOG=0 = off). Quit the game to end; the walkers and the server stop when the time is up, or: pkill -f 'walker-battle.sh'; bash
 # shim/tools/native-dedicated.sh stop.
 set -u
 cd "$(dirname "$0")/../.."
@@ -23,7 +24,7 @@ sleep 8
 # those three values -- only those: anything the user changes in the game stays -- are put back when the game closes
 PS="$HOME/Library/Application Support/ProjectReclaimer/settings.json"; OLD=""
 if [ "${PV_FULL:-0}" != 1 ]; then OLD=$(python3 shim/tools/play-window.py set "$PS" "${PV_SIZE:-1600x900}"); fi
-NATIVE_REAL=1 NATIVE_ALLOW_SECOND=1 bash shim/native.sh --join-server 127.0.0.1:49190 &
+NATIVE_REAL=1 NATIVE_ALLOW_SECOND=1 NHOOK_INPUT_LOG="${PV_INPUT_LOG:-1}" bash shim/native.sh --join-server 127.0.0.1:49190 &   # (the input logger: read only)
 GP=$!
 echo "walkers: $N (headless), for $MIN minutes; your game: $([ "${PV_FULL:-0}" = 1 ] && echo full screen || echo "a ${PV_SIZE:-1600x900} window"); the server's page: http://127.0.0.1:8767/"
 wait $GP

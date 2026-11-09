@@ -66,10 +66,16 @@ static int bot_allowed(void);
 int nh_vpad_install(void); void nh_vpad_set(float lx, float ly, float rx, float ry, float lt, float rt, uint32_t b); int nh_vpad_reads(void); int nh_vpad_stick_reads(void);
 void nh_vpad_btn_reads(unsigned long* out4);   // nvpad.m: the app's reads of B, Y, RB, the right trigger
 static volatile int g_vpad_on; static int g_pad_written;
+// SHADOW MODE (2026-11-09, the user: "I need it to learn in a REAL scenario now" -- a walker in a public match was declined: an
+// automated player with memory-read targeting against people who never agreed to face one): NHOOK_SHADOW=1 runs the walker's whole
+// brain (fighter, goals, nav) inside the PLAYER's own game, any server, but publishes NOTHING -- g_bot_out stays 0 (bot_write and the
+// packet hook write only from it), the virtual pad is never set. Every 0.1 s its decision and what the player actually did go to
+// tracks/shadow/<time>_<map>.jsonl (shim/tools/shadow-study.py compares them); the stats snapshot's "shadow" shows its target live.
+static int g_bot_shadow; static volatile uint32_t g_sh_tgt; static volatile float g_sh_d; static volatile int g_sh_fire; static volatile double g_sh_t;
 static void bot_pad(float lx, float ly, float rt, uint32_t b) {   // b: nvpad.m's button bits; bit 30 = the left trigger (a grenade)
-    if (!g_vpad_on) return; nh_vpad_set(lx, ly, 0, 0, (b & 0x40000000u) ? 1.0f : 0.0f, rt, b & 0xFFFFu); g_pad_written = 1; }
+    if (!g_vpad_on || g_bot_shadow) return; nh_vpad_set(lx, ly, 0, 0, (b & 0x40000000u) ? 1.0f : 0.0f, rt, b & 0xFFFFu); g_pad_written = 1; }
 static int bot_walk_ok(void) { static int nopkt = -1; if (nopkt < 0) nopkt = getenv("NHOOK_BOT_NOPKT") != 0;   // (the walker: this client's moves count:
-    return bot_allowed() && (!g_srv_addr[0] || g_vpad_on || !nopkt); }                                            //  a local game, or the control packet hook)
+    return (bot_allowed() || g_bot_shadow) && (!g_srv_addr[0] || g_vpad_on || !nopkt); }                                            //  a local game, or the control packet hook)
 static int bot_allowed(void) {
     static int t = -1; if (t < 0) { const char* p = getenv("RECLAIMER_PROFILE_DIR"); t = p && *p && !getenv("NHOOK_NO_BOT"); }
     return t && bot_private_addr(g_srv_addr); }
@@ -184,15 +190,53 @@ static volatile uint32_t g_bot_tpk8, g_bot_tpk2c; static volatile double g_bot_t
 // +0x260 (net-authority.md, packet "A" +0x1a). This writes that byte on the walker's own unit just before each packet is built --
 // the experiment: does the server switch the weapon? The bytes +0x258..+0x26f are logged once at the first request.
 static volatile uint64_t g_bot_unit_p; static volatile int g_bot_wsel_v; static volatile double g_bot_wsel_until;
+// MELEE BITS (2026-11-09, NHOOK_INPUT_LOG on the user's own game: one action switched on 0x21100800 in the packed button word 33 times
+// in two rounds -- bit 11 (one of the bits the control packet carries) with 20 / 24 / 29 -- the best candidate for melee, the
+// user's 5 melee kills a round; the virtual pad's buttons never reach a headless client). While the walker melees, those bits go into
+// its control record (NHOOK_BOT_MELEEBITS, hex) and bit 11 straight into the packed record. NHOOK_BOT_MELEEBITS=0 = off.
+static volatile double g_bot_melee_until;
+static uint64_t bot_meleebits(void) { static uint64_t v = 1; if (v == 1) { const char* e = getenv("NHOOK_BOT_MELEEBITS"); v = e ? strtoull(e, 0, 16) : 0x21100800ull; } return v; }   // (an empty magazine with the enemy in sight: grenade + rush for the beatdown)   // (levels apart: holding the high ground until; the last levels-apart step)   // (the held weapon acts on a pull; when this string of fire began)
 // NHOOK_INPUT_LOG=1 (2026-11-08): what a REAL player's game puts in the packed record -- the button word (+8, a u64) and the extra
 // byte (+0x2c) -- and the local unit's weapon slot bytes (+0x260 / +0x262) and grenade type (+0x298), logged whenever one changes
 // ([input] lines, ms since the first). The walkers' buttons never reach the game in a headless client (melee, reload, weapon and
 // grenade switches); the user meleeing / reloading / switching shows which bit or byte each one is. Read only.
 static int inp_log_on(void) { static int v = -1; if (v < 0) v = getenv("NHOOK_INPUT_LOG") != 0; return v; }
+// IN CONTEXT (2026-11-09, the user: "I'm sending walking, jumping, change grenade, you know the entire dang controller map. the server
+// should see it all in context"): every bit that switches on is checked 0.6 s later against the player's own unit -- grenades fewer
+// (a throw), the grenade type changed (+0x298), the weapon slot changed (+0x262: a switch), the weapons changed (+0x268 / +0x26c: a
+// pick-up), risen 0.3+ units (a jump) -- tallied per bit; every 60 s an [input-map] line per bit. The unit by its handle straight from
+// the object array (noverlay's table is not filled in a player's game).
+static uint64_t inp_unit_ptr(uint32_t h) {
+    uint64_t oa = hb_object_array(); uint8_t hdr[0x60]; if (!oa || h == 0xFFFFFFFFu || !hb_read(oa, hdr, sizeof hdr)) return 0;
+    int i = h & 0xFFFF, hi = *(int32_t*)(hdr + 0x3c); if (i >= hi) return 0; uint64_t data = *(uint64_t*)(hdr + 0x48); uint8_t e[0x18];
+    if (!data || !hb_read(data + (uint64_t)i * 0x18, e, sizeof e) || *(uint16_t*)e != (uint16_t)(h >> 16)) return 0; return *(uint64_t*)(e + 0x10); }
+typedef struct { int ok, wslot, gtype, gsum; uint32_t w0, w1; float z; } InpUnit;
+static InpUnit inp_unit(void) { InpUnit u; memset(&u, 0, sizeof u); uint64_t p = inp_unit_ptr(g_my_unit); uint8_t b[0x2a0];
+    if (!p || !hb_read(p, b, sizeof b)) return u; u.ok = 1; u.wslot = (int8_t)b[0x262]; u.gtype = (int8_t)b[0x298]; u.w0 = *(uint32_t*)(b + 0x268); u.w1 = *(uint32_t*)(b + 0x26c);
+    for (int k = 0; k < 4; k++) u.gsum += (int8_t)b[0x294 + k]; u.z = *(float*)(b + 0x58); return u; }
+enum { IE_THROW, IE_GSWITCH, IE_WSWITCH, IE_PICKUP, IE_JUMP, IE_NONE, IE_N };
+static const char* const g_ie_name[IE_N] = {"throw", "grenade switch", "weapon switch", "pick-up", "jump", "nothing seen"};
+static void inp_context(uint64_t on8, uint8_t on2c) {
+    static struct { double t; uint64_t b8; uint8_t b2c; InpUnit u; } q[32]; static int nq; static unsigned cnt[72][IE_N]; static double tsum;
+    double now = mono_s();
+    for (int i = 0; i < nq; ) { if (now - q[i].t < 0.6) { i++; continue; }
+        InpUnit a = q[i].u, b = inp_unit(); int ef[IE_N] = {0}, any = 0;
+        if (a.ok && b.ok) { if (b.gsum < a.gsum) ef[IE_THROW] = any = 1; if (b.gtype != a.gtype) ef[IE_GSWITCH] = any = 1;
+            if (b.w0 != a.w0 || b.w1 != a.w1) ef[IE_PICKUP] = any = 1; else if (b.wslot != a.wslot) ef[IE_WSWITCH] = any = 1; if (b.z - a.z > 0.3f) ef[IE_JUMP] = any = 1; }
+        if (!any) ef[IE_NONE] = 1;
+        for (int k = 0; k < 64; k++) if (q[i].b8 >> k & 1) for (int e = 0; e < IE_N; e++) cnt[k][e] += (unsigned)ef[e];
+        for (int k = 0; k < 8; k++) if (q[i].b2c >> k & 1) for (int e = 0; e < IE_N; e++) cnt[64 + k][e] += (unsigned)ef[e];
+        q[i] = q[--nq]; }
+    if ((on8 || on2c) && nq < 32) { q[nq].t = now; q[nq].b8 = on8; q[nq].b2c = on2c; q[nq].u = inp_unit(); nq++; }
+    if (now - tsum >= 60.0) { tsum = now;
+        for (int k = 0; k < 72; k++) { unsigned tot = 0; for (int e = 0; e < IE_N; e++) tot += cnt[k][e]; if (!tot) continue;
+            char l[300]; int m = 0; for (int e = 0; e < IE_N; e++) if (cnt[k][e]) m += snprintf(l + m, sizeof l - (size_t)m, "%s%s %u", m ? ", " : "", g_ie_name[e], cnt[k][e]);
+            nlog("[nhook] [input-map] %s bit %d: %s", k < 64 ? "+8" : "+0x2c", k < 64 ? k : k - 64, l); } } }
 static void inp_log(const uint8_t* act) {
     static uint64_t p8 = ~0ull; static uint8_t p2c = 0xFF, pw0 = 0xFF, pw2 = 0xFF, pg = 0xFF; static double t0;
     uint64_t b8 = *(const uint64_t*)(act + 8); uint8_t b2c = act[0x2c], w0 = 0xFF, w2 = 0xFF, gr = 0xFF;
-    uint64_t up = g_my_unit != 0xFFFFFFFFu ? nov_datum(g_my_unit) : 0; if (up) { const uint8_t* u = (const uint8_t*)(uintptr_t)up; w0 = u[0x260]; w2 = u[0x262]; gr = u[0x298]; }
+    inp_context(p8 == ~0ull ? 0 : b8 & ~p8, (uint8_t)(p2c == 0xFF ? 0 : b2c & ~p2c));   // (every packet: the pending checks too)
+    { InpUnit u = inp_unit(); if (u.ok) { w2 = (uint8_t)u.wslot; gr = (uint8_t)u.gtype; uint64_t up = inp_unit_ptr(g_my_unit); uint8_t x; if (up && hb_read(up + 0x260, &x, 1)) w0 = x; } }
     if (b8 == p8 && b2c == p2c && w0 == pw0 && w2 == pw2 && gr == pg) return;
     double now = mono_s(); if (!t0) t0 = now;
     nlog("[nhook] [input] %8.0f ms: +8 %016llx (on %llx, off %llx) +0x2c %02x (on %02x, off %02x); unit +0x260 %d +0x262 %d grenade %d",
@@ -214,7 +258,8 @@ static void bot_on_abuild(uint64_t* ctx) {
             nlog("[nhook] [bot] weapon slot test: unit +0x258..+0x26f = %s (+0x262 the current slot %d)", h, (int)(int8_t)u[0x262]); }
         u[0x260] = (uint8_t)g_bot_wsel_v; }
     int tpk = g_bot_tpk_until > 0 && mono_s() < g_bot_tpk_until;
-    uint32_t b8 = g_bot_pkt_btn8 | (extra ? xb : 0) | (tpk ? g_bot_tpk8 : 0); if (b8) *(uint64_t*)(act + 8) |= b8;
+    uint32_t b8 = g_bot_pkt_btn8 | (extra ? xb : 0) | (tpk ? g_bot_tpk8 : 0) | (mono_s() < g_bot_melee_until ? (uint32_t)(bot_meleebits() & 0x4807u) : 0);   // (melee: the packet's bits of it)
+    if (b8) *(uint64_t*)(act + 8) |= b8;
     uint32_t b2c = g_bot_pkt_btn2c | (tpk ? g_bot_tpk2c : 0); if (b2c) *(act + 0x2c) |= (uint8_t)b2c; }
 static void pkt_hook_install(void) {   // the control packet builder's hook: the walker's moves, and NHOOK_INPUT_LOG's reads
     static int done; if (done || getenv("NHOOK_BOT_NOPKT")) return; done = 1; uint64_t a = branch_target_of(0x50fb8);
@@ -347,7 +392,7 @@ static int bot_pull_weapon(const char* w) {
     if (!w) return 0; for (int i = 0; k[i]; i++) if (strstr(w, k[i])) return 1; return 0; }
 static int g_bot_pull, g_bot_trig; static double g_bot_fire_t0;
 static double g_bot_hold_high, g_bot_hold_last;
-static int g_bot_empty;   // (an empty magazine with the enemy in sight: grenade + rush for the beatdown)   // (levels apart: holding the high ground until; the last levels-apart step)   // (the held weapon acts on a pull; when this string of fire began)
+static int g_bot_empty;
 // the virtual pad's melee and act / pick-up / reload buttons (nvpad.m bits: 1 B, 0x20 RB). 2026-11-08: the walkers pressed B to
 // melee and held RB to pick up -- Halo 3's own layout -- but the app's layout for these profiles is Bumper Jumper's (its own
 // descriptions: "LB jumps and RB melees ... B acts and reloads"): ten weapon changes in a melee battle followed a B press (none
@@ -355,13 +400,28 @@ static int g_bot_empty;   // (an empty magazine with the enemy in sight: grenade
 // NHOOK_BOT_PICKPAD = other buttons (hex bits) for another layout; NHOOK_BOT_NOMELEE=1 also brings back the old B melee.
 static uint32_t bot_meleepad(void) { static uint32_t v = 1; if (v == 1) { const char* e = getenv("NHOOK_BOT_MELEEPAD"); v = e ? (uint32_t)strtoul(e, 0, 16) : 0x20; } return v; }
 static uint32_t bot_pickpad(void) { static uint32_t v = 1; if (v == 1) { const char* e = getenv("NHOOK_BOT_PICKPAD"); v = e ? (uint32_t)strtoul(e, 0, 16) : 0x02; } return v; }
+static void shadow_log(double now, const NovObj* o, const NovObj* t, float tdist, int engaged, float yaw, float pitch, float tx, float ty, float yaw0, float pitch0, uint64_t rec) {
+    static FILE* f; static double tlast, t0seen; static int fail;
+    if (now - tlast < 0.1 || fail) return; tlast = now;
+    if (!f || g_gameplay_t0 != t0seen) { if (f) fclose(f); f = 0; t0seen = g_gameplay_t0; const char* h = getenv("HOME"); char d[1100], p[1300];
+        snprintf(d, sizeof d, "%s/Library/Application Support/ReclaimerMac/tracks/shadow", h ? h : "/tmp"); mkdir(d, 0755);
+        time_t tt = time(0); struct tm tm; localtime_r(&tt, &tm); char ts[32]; strftime(ts, sizeof ts, "%Y%m%d-%H%M%S", &tm);
+        snprintf(p, sizeof p, "%s/%s_%s.jsonl", d, ts, g_st_curmap[0] ? g_st_curmap : "map"); f = fopen(p, "w"); if (!f) { fail = 1; return; }
+        nlog("[nhook] [shadow] recording -> %s", p); }
+    uint64_t btn = 0; float rx = 0, ry = 0; if (rec) { hb_read(rec + 0xC8, &btn, 8); hb_read(rec + 0xDC, &rx, 4); hb_read(rec + 0xE0, &ry, 4); }
+    fprintf(f, "{\"t\":%.2f,\"pos\":[%.2f,%.2f,%.2f],\"w\":\"%s\",\"sh\":%.2f", now - g_gameplay_t0, o->c[0], o->c[1], o->c[2], g_inv.held_c ? g_inv.held_c : "", o->shield);
+    if (t) fprintf(f, ",\"tg\":\"%08x\",\"tp\":[%.2f,%.2f,%.2f],\"tsh\":%.2f,\"d\":%.2f", t->handle, t->c[0], t->c[1], t->c[2], t->shield, tdist);
+    fprintf(f, ",\"eng\":%d,\"fire\":%d,\"mel\":%d,\"empty\":%d,\"want\":[%.2f,%.2f,%.3f,%.3f],\"you\":[%.2f,%.2f,%.3f,%.3f,\"%llx\"]}\n",
+            engaged, g_bot_trig, now < g_bot_melee_until, g_bot_empty, tx, ty, yaw, pitch, rx, ry, yaw0, pitch0, (unsigned long long)btn);
+    { static double tf; if (now - tf > 2.0) { tf = now; fflush(f); } }
+    g_sh_tgt = t ? t->handle : 0; g_sh_d = tdist; g_sh_fire = g_bot_trig; g_sh_t = now; }
 static void bot_step_body(void);
 static void bot_step(void) { g_pad_written = 0; bot_step_body(); if (g_vpad_on && !g_pad_written) nh_vpad_set(0, 0, 0, 0, 0, 0, 0); }   // (idle: the pad let go)
 static void bot_step_body(void) {
     double now = mono_s(); int spar = g_bot_spar, mode = bot_walk_ok() ? nav_mode() : 0;
     static int diag0 = -1; if (diag0 < 0) diag0 = getenv("NHOOK_BOT_THROTTLE") || getenv("NHOOK_BOT_BTNSCAN") || getenv("NHOOK_BOT_FACE") || getenv("NHOOK_BOT_HOLDBTN");
     int testb = g_bot_testbtn && now < g_bot_testbtn_until, diag = diag0 || testb;
-    if ((!spar && !mode && !diag) || !bot_allowed() || !g_gameplay_t0 || now - g_gameplay_t0 < 3.0) { g_bot_out = 0; g_nav_act = 0; g_bot_err = -1;
+    if ((!spar && !mode && !diag) || !(bot_allowed() || g_bot_shadow) || !g_gameplay_t0 || now - g_gameplay_t0 < 3.0) { g_bot_out = 0; g_nav_act = 0; g_bot_err = -1;
         bot_idle(!spar && !mode && !diag ? "nothing on" : !bot_allowed() ? "not allowed here" : !g_gameplay_t0 ? "not in a match" : "match just started"); return; }
     if (!bot_hook_install()) { g_bot_out = 0; return; }
     if (mode) { nav_ensure(); nav_danger_update(now); if (g_nav.ok) bm_pop(g_st_curmap); }
@@ -494,7 +554,7 @@ static void bot_step_body(void) {
                   if (vis && tdist < mr && now - tmelee > 0.6 && now - tacq > 0.15) { tmelee = now;
                       if (bot_log()) nlog("[nhook] [melee] %s at %.2f units (target shield %.2f: %s), holding %s", mcls ? "swing" : "melee", tdist, ftg.shield, ftg.shield < 0.05f ? "beatdown" : "full", g_inv.held ? g_inv.held : "-"); }
                   static float mh = -1; if (mh < 0) { const char* e = getenv("NHOOK_BOT_MELEE_HOLD"); mh = e ? strtof(e, 0) : 0.3f; }
-                  if (now - tmelee < mh) fbtn |= bot_meleepad(); }
+                  if (now - tmelee < mh) { fbtn |= bot_meleepad(); g_bot_melee_until = tmelee + mh; } }
               g_bot_pull = !nomel && bot_pull_weapon(g_inv.held); }
             { static float fj = -1; if (fj < 0) { const char* e = getenv("NHOOK_BOT_FJUMP"); fj = e ? strtof(e, 0) : 0.0f; }   // jumps a minute in a fight (walker-coach.py: the winners')
               if (fj > 0 && bot_rand01() < fj * (float)dt / 60.0f) g_fjump_until = now + 0.25; }
@@ -509,7 +569,9 @@ static void bot_step_body(void) {
             // without predictive grenade lay some shots, or a beat down! engage!"): an empty magazine (the ammo field) with the enemy
             // in sight -> a grenade at once (3-16 units, if any) and the rush below for the beatdown. NHOOK_BOT_NOEMPTY=1 = off.
             { static int ne = -1; if (ne < 0) ne = getenv("NHOOK_BOT_NOEMPTY") != 0;
-              g_bot_empty = !ne && g_inv.ammo == 0 && g_inv.held && strcmp(g_inv.held_c ? g_inv.held_c : "", "melee");
+              // (2026-11-09: the found "rounds loaded" field reads 0 for a fresh rifle in a player's game and 129 in the walkers' --
+              //  not a magazine: "empty" only when the weapon has shown 8+ rounds there before)
+              g_bot_empty = !ne && g_inv.ammo == 0 && g_inv.ammo_max >= 8 && g_inv.held && strcmp(g_inv.held_c ? g_inv.held_c : "", "melee");
               if (g_bot_empty && vis && g_inv.gren > 0 && tdist > 3 && tdist < 16 && now - tgren > 1.2) { tgren = now;
                   if (bot_log()) nlog("[nhook] [fight] empty magazine: a grenade at %.1f units, then the beatdown", tdist); } }
             if (now - tgren < 0.15) { fbtn |= 0x10000;                                                                     // (left trigger: a grenade)
@@ -716,7 +778,7 @@ static void bot_step_body(void) {
           float duty = tdist < 15 ? 0.34f : tdist < 25 ? 0.22f : 0.15f, per = 0.25f / duty;
           burst_ok = fmod(now - g_bot_fire_t0, per) < 0.25; }
       int trig = !nofire && spar && g_bot_fire && burst_ok && (!g_bot_pull || fmod(now - g_bot_fire_t0, 0.24) < 0.12); g_bot_trig = trig;
-      uint64_t want = (trig ? fb : 0) | ((fbtn & 0x10000) ? gb : 0) | ((fbtn & 0x20000) ? pkb : 0) | (now < g_fjump_until ? g_bot_jump : 0);   // (fbtn bit 16: the grenade pulse, 17: pick up)
+      uint64_t want = (now < g_bot_melee_until ? bot_meleebits() : 0) | (trig ? fb : 0) | ((fbtn & 0x10000) ? gb : 0) | ((fbtn & 0x20000) ? pkb : 0) | (now < g_fjump_until ? g_bot_jump : 0);   // (fbtn bit 16: the grenade pulse, 17: pick up)
       if (want) { g_bot_btn = ((out & 4) ? g_bot_btn : 0) | want; out |= 4; } else if (!(out & 4)) g_bot_btn = 0; }
     if (diag) { uint64_t b = 0; int d = bot_diag(&tx, &ty, &b, now); out |= d; if (d & 4) g_bot_btn = b; else if (!(out & 4)) g_bot_btn = 0;
         static double tl; if (now - tl > 0.25) { tl = now; const float* v = o->vel;
@@ -724,6 +786,7 @@ static void bot_step_body(void) {
                  yaw0 * 57.2958f, tx, ty, (d & 4) ? (unsigned long long)b : 0ull, g_nov_shot_n, g_nov_del_calls); } }
     { static int fo = -1; static float fy, fp; static int hp; if (fo < 0) { const char* e = getenv("NHOOK_BOT_FACE"); int k = e ? sscanf(e, "%f,%f", &fy, &fp) : 0; fo = k >= 1; hp = k == 2; }
       if (fo) { yaw = fy / 57.29578f; if (hp) pitch = fp / 57.29578f; out |= 1; } }   // NHOOK_BOT_FACE (above)
+    if (g_bot_shadow) { shadow_log(now, o, have_tg ? &ftg : 0, tdist, engaged, yaw, pitch, tx, ty, yaw0, pitch0, rec); g_bot_out = 0; g_bot_btn = 0; return; }   // (decided, never published)
     g_bot_yaw = yaw; g_bot_pitch = pitch; g_bot_tx = tx; g_bot_ty = ty; g_bot_out = out;
     // the virtual controller: left stick = the throttle (y forward, x right = -left), A = jump, right trigger = fire
     { uint32_t tp = g_bot_testpad && now < g_bot_testpad_until ? g_bot_testpad : 0;   // (do=botpad)
@@ -740,6 +803,9 @@ static int bot_parse_nav(const char* v) {   // -> mode (0 off, 1 roam, 2 enemy, 
     float p[3]; if (sscanf(v, "%f,%f,%f", &p[0], &p[1], &p[2]) == 3) { memcpy(g_bot_pt, p, 12); return 3; }
     return -1; }
 static void bot_init(void) {   // launch switches (nstats_start)
+    if (getenv("NHOOK_SHADOW") && strcmp(getenv("NHOOK_SHADOW"), "0")) { g_bot_shadow = 1;   // (the walker's brain on: fighter, goals, nav -- outputs never)
+        setenv("NHOOK_SPAR", "1", 0); setenv("NHOOK_NAV", "enemy", 0); setenv("NHOOK_BOT_FIGHT", "1", 0); setenv("NHOOK_BOT_FIRE", "1", 0); setenv("NHOOK_SPAR_LOG", "1", 0);
+        nlog("[nhook] [shadow] the walker rides along: it decides every step, publishes nothing; decisions -> tracks/shadow/"); }
     const char* j = getenv("NHOOK_BOT_JUMP"); if (j) g_bot_jump = strtoull(j, 0, 16);
     if (getenv("NHOOK_SPAR") && strcmp(getenv("NHOOK_SPAR"), "0")) g_bot_spar = 1;
     int m = bot_parse_nav(getenv("NHOOK_NAV")); if (m > 0) g_nav_mode_rt = m; else g_nav_mode_rt = 0;
@@ -762,6 +828,7 @@ static int bot_control(const char* act, const char* qs) {   // POST do=spar&on=0
     int md = bot_parse_nav(m); if (md < 0) return 0; g_nav_mode_rt = md; if (md) bot_start(); return 1; }
 static void bot_overlay_json(StBuf* s) {   // the snapshot's overlay keys for the page's "Sparring aim" button and "Walk" list
     static const char* const mn[5] = {"off", "roam", "enemy", "point", "vehicle"}; int m = g_nav_mode_rt; int ok = bot_allowed();
+    if (g_bot_shadow) sb_put(s, ",\"shadow\":{\"target\":\"%08x\",\"distance\":%.1f,\"fire\":%s,\"fresh\":%s}", g_sh_tgt, g_sh_d, g_sh_fire ? "true" : "false", mono_s() - g_sh_t < 1.0 ? "true" : "false");
     sb_put(s, ",\"spar\":%s,\"spar_aim\":%.1f,\"spar_available\":%s,\"walk\":\"%s\",\"walk_available\":%s", g_bot_spar ? "true" : "false",
            g_bot_spar && g_bot_err >= 0 ? (double)g_bot_err : -1.0, ok ? "true" : "false", m >= 0 && m < 5 ? mn[m] : "off", bot_walk_ok() ? "true" : "false"); }
 
