@@ -3286,6 +3286,11 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   switch presses (the learnt record bit): 0 of 32 took" -- 32 x "switching from PLASMA PISTOL to ASSAULT RIFLE" with the trigger held
   (the plasma pistol held = an overcharge held) while the earlier switches, 3 of 3 and 2 of 2, came with the trigger up. LOGIC: from a
   switch press until 0.15 s after it the trigger (and the reload click) stays up; PLASMA PISTOL joins the weapons whose trigger is pulsed.
+- **A kicked walker stays out** (2026-11-09 15:00; shim/tools/walker-public.sh) — WHY: at 05:42 the walker was kicked from the
+  owner-approved server ("You were kicked from this server. You can rejoin in 9 minutes.") -- the user's terms: every player can boot it,
+  so anyone with an issue can get it out at once; a kick is that signal, and the patient rejoin loop would have come back after the
+  cooldown. LOGIC: after each attempt the loop looks at the walker's log; a kick ends the loop ("the walker was kicked from ...: not
+  rejoining"). The walker was stopped by hand this time; nothing rejoined.
 - **Wedged: escape and fence off the spot** (2026-11-09 14:50; nbot.c the nav stuck handler, g_escape_*) — WHY: jumping on every stuck did
   not help (259 "stuck at" lines in the next 3000, 188 before): the walker sat WEDGED at (60.8, -146.9) / (60, -58) on Valhalla for minutes
   ("stuck 4 times ... a new goal" 144 times -- each new goal led back) and died there (0 kills / 7 deaths in a window). LOGIC: at 4 stucks

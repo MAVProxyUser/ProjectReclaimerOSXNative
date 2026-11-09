@@ -31,5 +31,9 @@ while true; do
     echo "$(date +%H:%M:%S) out of the game"
   else echo "$(date +%H:%M:%S) not in within 180 s (the server full?): trying again in 30 s"; fi
   for p in $(apps); do kill "$p"; done; sleep 4; for p in $(apps); do kill -9 "$p" 2>/dev/null; done; wait $L 2>/dev/null
+  # (2026-11-09 05:42: the walker was KICKED -- "You were kicked from this server. You can rejoin in 9 minutes." -- any player can boot it
+  #  and that is the signal that someone has an issue: the loop stops instead of rejoining after the cooldown)
+  if tail -n 400 "$S/battles/aiwalker.log" 2>/dev/null | grep -a -q 'You were kicked from this server'; then
+    echo "$(date +%H:%M:%S) the walker was kicked from $ADDR: not rejoining (stopped)"; exit 0; fi
   sleep 30
 done
