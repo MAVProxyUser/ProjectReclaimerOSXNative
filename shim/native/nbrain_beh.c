@@ -68,7 +68,10 @@ static void beh_ball(const World* W, Arb* a, int gun_go, int* ob_carry, float* o
 
 // FETCH a better weapon (the pick-up scan chose it: g_bot_pick_on) 45; FIGHT -- an enemy in reach and in sight, the fighter's moves 60
 // (not while carrying the ball beyond melee reach); HOLD the high ground over an enemy below 65; HUNT -- the goal draw, always, 10
-static void beh_fetch(const World* W, Arb* a) { (void)W; if (g_bot_pick_on) { float u = 45; lk_over(&u, "NHOOK_U_FETCH"); arb_bid(a, ARB_FETCH, u, g_bot_pick_pos, "fetch a better weapon"); } }
+// (07:20: the fetch bid scales with the upgrade: NHOOK_U_FETCH 45 + NHOOK_U_FETCH_GAIN 6 a rank better, - 1 a unit beyond 10 -- an assault
+//  rifle -> a battle rifle close by bids ~81, over the fight's 60; a small upgrade far off loses to it)
+static void beh_fetch(const World* W, Arb* a) { (void)W; if (g_bot_pick_on) { float u = 45, g = 6; lk_over(&u, "NHOOK_U_FETCH"); lk_over(&g, "NHOOK_U_FETCH_GAIN");
+    arb_bid(a, ARB_FETCH, u + g * (float)g_pick_gain - fmaxf(0.0f, g_pick_d - 10.0f), g_bot_pick_pos, "fetch a better weapon"); } }
 static void beh_fight(const World* W, Arb* a, int ob_carry) { if (W->engaged && !(ob_carry && W->tdist > 2.5f)) { float u = 60; lk_over(&u, "NHOOK_U_FIGHT"); arb_bid(a, ARB_FIGHT, u, 0, "fight"); } }
 static void beh_hold(const World* W, Arb* a) { if (W->fight && W->now - g_bot_hold_high < 0.3) { float u = 65; lk_over(&u, "NHOOK_U_HOLD"); arb_bid(a, ARB_HOLD, u, 0, "hold the high ground"); } }
 static void beh_hunt(const World* W, Arb* a) { (void)W; float u = 10; lk_over(&u, "NHOOK_U_HUNT"); arb_bid(a, ARB_HUNT, u, 0, "hunt"); }

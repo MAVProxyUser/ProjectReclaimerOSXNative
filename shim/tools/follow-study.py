@@ -174,6 +174,60 @@ def role_model(rec_dir, port, ws):
     allkd = [d for sl, x in P.items() if sl != ws for d in x['kd']]
     return {'P': P, 'order': order, 'rm': rm, 'names': names, 'allkd': allkd, 'score': score, 'ws': ws}
 
+TRAINED = {'NHOOK_BOT_DIST': (0.5, 2.5), 'NHOOK_BOT_FJUMP': (0.0, 12.0), 'NHOOK_BOT_LIBSCALE': (0.5, 3.0), 'NHOOK_BOT_PRESS': (0.2, 0.95),
+           'NHOOK_BOT_REACT': (0.3, 3.0), 'NHOOK_BOT_RADSCALE': (0.3, 2.5), 'NHOOK_BOT_NOISE': (0.3, 2.0), 'NHOOK_BOT_GRENX': (0.1, 3.0)}
+def lvl_knobs(level, inc):
+    """the look sensitivity a level brings: the turn rate once reacting (7 rad/s at level 0, +10% a level, at most 14), the one before
+    reacting (0.73 rad/s, +10% a level, at most 2), the aim noise x (1 - 0.04 a level, at least 0.5)"""
+    return {'NHOOK_BOT_TURN': round(min(14.0, 7.0 * (1 + 0.1 * level)), 2), 'NHOOK_BOT_TURN0': round(min(2.0, 0.73 * (1 + 0.1 * level)), 3),
+            'NHOOK_BOT_NOISE': round(max(0.3, inc.get('NHOOK_BOT_NOISE', 1.0) * max(0.5, 1 - 0.04 * level)), 3)}
+def write_knobs(knobs_path, k):
+    try: cur = json.load(open(knobs_path))
+    except Exception: cur = {}
+    cur.update(k); os.makedirs(os.path.dirname(knobs_path), exist_ok=True); tmp = knobs_path + '.tmp'; json.dump(cur, open(tmp, 'w')); os.replace(tmp, knobs_path)
+def train(T, score, o, knobs_path):
+    """the trainer (07:15, the user: "the walker should do better every match. the ranking should steadily move up ... increase look
+    sensitivity as you level up skills"): an INCUMBENT knob set and its window scores; every 2 of its windows a CHALLENGER = halfway from
+    it toward the role model's numbers + one random knob nudged (x e^N(0, 0.2)); the challenger plays 2 windows and is KEPT (level + 1)
+    only if its mean beats the incumbent's last 4 by 0.05, else the incumbent comes back. Returns the lines to print."""
+    out = []; inc = T['inc']
+    if T.get('ch') is not None:
+        T['ch_scores'].append(score)
+        if len(T['ch_scores']) >= 2:
+            ref = statistics.mean(T['inc_scores'][-4:]) if T['inc_scores'] else -9; m = statistics.mean(T['ch_scores'])
+            if m > ref + 0.05:
+                T['inc'] = T['ch']; T['inc_scores'] = list(T['ch_scores']); T['level'] += 1
+                out.append('trainer: the challenger WON (%.2f vs %.2f): kept -- level %d (%s)' % (m, ref, T['level'], T.get('ch_desc', '')))
+            else: out.append('trainer: the challenger lost (%.2f vs %.2f): back to the incumbent (%s)' % (m, ref, T.get('ch_desc', '')))
+            T['ch'] = None; T['ch_scores'] = []; T['since'] = 0
+            k = dict(T['inc']); k.update(lvl_knobs(T['level'], T['inc'])); write_knobs(knobs_path, k)
+        else: out.append('trainer: the challenger has played %d of 2 windows (%s)' % (len(T['ch_scores']), T.get('ch_desc', '')))
+        return out
+    T['inc_scores'] = (T['inc_scores'] + [score])[-6:]; T['since'] = T.get('since', 0) + 1
+    if T['since'] >= 2:
+        ch = dict(inc); desc = []
+        if o and o.get('rm') is not None:
+            x = o['P'][o['rm']]; me = o['P'].get(o.get('ws'))
+            if len(x['kd']) >= 3 and len(o['allkd']) >= 10:
+                t = min(2.5, max(0.5, statistics.median(x['kd']) / max(0.5, statistics.median(o['allkd'])))); ch['NHOOK_BOT_DIST'] = round((ch.get('NHOOK_BOT_DIST', 1.0) + t) / 2, 3); desc.append('DIST->%.2f' % ch['NHOOK_BOT_DIST'])
+            if x['near_s'] > 30:
+                t = min(12.0, x['jumps'] / (x['near_s'] / 60.0)); ch['NHOOK_BOT_FJUMP'] = round((ch.get('NHOOK_BOT_FJUMP', 0.0) + t) / 2, 2); desc.append('FJUMP->%.1f' % ch['NHOOK_BOT_FJUMP'])
+            if me and len(x['lat']) >= 30 and len(me['lat']) >= 20 and statistics.median(me['lat']) > 0.05:
+                r = statistics.median(x['lat']) / statistics.median(me['lat']); ch['NHOOK_BOT_LIBSCALE'] = round(ch.get('NHOOK_BOT_LIBSCALE', 1.0) * min(1.25, max(0.8, r)), 3); desc.append('LIBSCALE->%.2f' % ch['NHOOK_BOT_LIBSCALE'])
+            if me and x['alive_s'] > 60 and me['alive_s'] > 30:
+                si, ms = x['still_s'] / x['alive_s'], me['still_s'] / me['alive_s']
+                if abs(ms - si) > 0.05: ch['NHOOK_BOT_PRESS'] = round(ch.get('NHOOK_BOT_PRESS', 0.4) + (0.1 if ms > si else -0.05), 2); desc.append('PRESS->%.2f' % ch['NHOOK_BOT_PRESS'])
+            if me and len(x['react']) >= 5 and len(me['react']) >= 3 and statistics.median(x['react']) < statistics.median(me['react']):
+                ch['NHOOK_BOT_REACT'] = round(ch.get('NHOOK_BOT_REACT', 1.0) * max(0.8, statistics.median(x['react']) / statistics.median(me['react'])), 3); desc.append('REACT->%.2f' % ch['NHOOK_BOT_REACT'])
+        kn = random.choice(list(TRAINED)); ch[kn] = round(ch.get(kn, 1.0 if kn != 'NHOOK_BOT_PRESS' else 0.4) * math.exp(random.gauss(0, 0.2)), 3); desc.append('%s~%.2f' % (kn.replace('NHOOK_BOT_', ''), ch[kn]))
+        for kk, (lo, hi) in TRAINED.items():
+            if kk in ch: ch[kk] = min(hi, max(lo, ch[kk]))
+        T['ch'] = ch; T['ch_scores'] = []; T['ch_desc'] = ' '.join(desc)
+        k = dict(ch); k.update(lvl_knobs(T['level'], ch)); write_knobs(knobs_path, k)
+        out.append('trainer: a challenger plays the next 2 windows: %s' % T['ch_desc'])
+    else: out.append('trainer: the incumbent plays (%d window%s since the last challenger)' % (T['since'], '' if T['since'] == 1 else 's'))
+    return out
+
 def copy_role_model(o, knobs_path):
     """the walker takes the role model's fighting distance (vs everyone's) and its jumps near enemies, through the live knobs"""
     x = o['P'][o['rm']]; k = {}
@@ -259,6 +313,14 @@ def main():
     try: nst.update({k: v for k, v in json.load(open(NST)).items() if k != 'off'})
     except Exception: pass
     nade_lines(logp, nst)   # (from now on)
+    TRF = os.path.join(OUT, 'trainer.json'); TR = None   # (the trainer's incumbent / challenger / level: kept across restarts)
+    try: TR = json.load(open(TRF))
+    except Exception: pass
+    if not TR:
+        try: live = json.load(open(os.path.join(SUP, 'battles', 'live-knobs', 'AIWalkerTest.json')))
+        except Exception: live = {}
+        inc = {k: BASE.get(k, live.get(k)) for k in TRAINED if BASE.get(k, live.get(k)) is not None}; inc.update({k: live[k] for k in TRAINED if k in live})
+        TR = {'level': 0, 'inc': inc, 'inc_scores': [], 'ch': None, 'ch_scores': [], 'since': 0}
     AST = os.path.join(OUT, 'aim-state.json'); ast = {}
     try: ast.update(json.load(open(AST)))
     except Exception: pass
@@ -291,8 +353,12 @@ def main():
             print('  role model: %s, %d kills / %d deaths: fights at %s units (everyone %s), %s jumps a minute near enemies, moves %s u/s; kills with %s; holds %s; kills from %s' % (
                 nm.get(rmo['rm'], 'slot %s' % rmo['rm']), x['k'], x['d'], med(x['kd']), med(rmo['allkd']), round(x['jumps'] / (x['near_s'] / 60.0), 1) if x['near_s'] > 30 else '-',
                 med(x['spd']), ', '.join('%s %d' % kv for kv in x['kw'].most_common(3)) or '-', ', '.join(h for h, _ in top) or '-', spots or '-'), flush=True)
-            k = copy_role_model(rmo, os.path.join(SUP, 'battles', 'live-knobs', WALKER_NAME[0] + '.json'))
-            print('  copying the role model: %s' % (' '.join('%s=%s' % (a.replace('NHOOK_BOT_', ''), b) for a, b in k.items()) or 'not enough of his fights yet'), flush=True)
+        if w['k'] + w['d'] > 0:   # (a window the walker fought in: the trainer's turn)
+            sc = math.log((w['k'] + 1) / (w['d'] + 1))
+            for line in train(TR, sc, rmo, os.path.join(SUP, 'battles', 'live-knobs', WALKER_NAME[0] + '.json')): print('  ' + line, flush=True)
+            print('  trainer: level %d, incumbent %s, its last windows %s' % (TR['level'], ' '.join('%s=%s' % (k2.replace('NHOOK_BOT_', ''), v2) for k2, v2 in sorted(TR['inc'].items())),
+                  ' '.join('%.2f' % v for v in TR['inc_scores'][-4:])), flush=True)
+            json.dump(TR, open(TRF, 'w'), indent=1)
         res = nade_lines(logp, nst); kp = os.path.join(SUP, 'battles', 'live-knobs', WALKER_NAME[0] + '.json')
         cur, nxt, st = hone(res, nst, kp)
         try: json.dump({k: v for k, v in nst.items() if k != 'off'}, open(NST, 'w'))

@@ -3272,6 +3272,22 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   a running battle, at every round end (our server's in_match true -> false) walker-coach.py round + match-study.py, then each
   walker's game restarted headless with its new knobs and the newest build (they rejoin in the lobby; the user's game and the
   server stay).
+- **Training session: the trainer keeps what works and levels up the look; power weapons map-wide; the death map in the brain** (2026-11-09
+  07:20; follow-study.py train / lvl_knobs, nbot.c the fighter's turn rate / the pick-up scan / nh_brain_step, nbrain_beh.c beh_fetch) —
+  WHY: the user, away 7 hours: "I need walker to learn to hold his own ... the only thing that matters now is training in fluidly
+  mimicking the best players in the games walker plays with ... the walker should do better every match. the ranking should steadily
+  move up ... increase look sensitivity as you level up skills so walker can react like the best players too". Found on the way: no
+  weapon fetch had EVER started in the public game (out of a fight nothing better lay within 12 units, and in a 24-player game it is
+  nearly always in a fight -- the scan skipped fights and a fetch was cleared by one), and the reloadable brain had lost the death map
+  (the body's copy; nav_danger_update had nothing to avoid). LOGIC: TRAINER -- an incumbent knob set (DIST, FJUMP, LIBSCALE, PRESS,
+  REACT, RADSCALE, NOISE, GRENX) with its window scores (log((k + 1) / (d + 1)), windows the walker fought in); every 2 of its windows a
+  challenger = halfway toward the role model's numbers + one knob nudged x e^N(0, 0.2), bounded; 2 windows later it is kept (level + 1)
+  if its mean beats the incumbent's last 4 by 0.05, else the incumbent returns; battles/follow/trainer.json. LEVELS raise the look:
+  NHOOK_BOT_TURN (the turn rate once reacting, a new live knob, 7 rad/s) +10% a level up to 14, NHOOK_BOT_TURN0 (before reacting, 0.73)
+  +10% up to 2, NOISE x (1 - 0.04 a level, down to half). FETCH -- the scan runs in fights too; power weapons (rank <= 6) from
+  NHOOK_BOT_FETCH_FAR (30) units, others 12, a better rank counting nearer; the bid = NHOOK_U_FETCH 45 + NHOOK_U_FETCH_GAIN 6 a rank
+  better - 1 a unit beyond 10 (an AR -> a battle rifle close by ~81, over the fight's 60). DEATH MAP -- the brain loads the map being
+  played's (hm_switch) itself: "death map for guardian: 544 deaths". All hot-loaded (brains #4, #5) into the walker in the game.
 - **Brain stage 2: the behaviours in their own file** (2026-11-09 06:55; shim/native/nbrain_beh.c, nbot.c bot_step_body) — the same
   rewrite: board / follow / ball / fetch / fight / hold / hunt moved out of the 470-line step into functions that see one World
   (time, objects, self, camera, the fighter's view: engaged, fighter on, target distance) and only BID (side effects they own stay with

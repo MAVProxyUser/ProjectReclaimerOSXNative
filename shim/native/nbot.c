@@ -44,6 +44,7 @@ static volatile uint64_t g_bot_testbtn; static volatile double g_bot_testbtn_unt
 // 8 Y, 0x10 LB, 0x20 RB, 0x40 / 0x80 stick clicks, 0x400.. d-pad; 0x40000000 the left trigger, 0x80000000 the right trigger)
 static volatile uint32_t g_bot_testpad; static volatile double g_bot_testpad_until;
 static int g_bot_pick_on; static float g_bot_pick_pos[3];   // a weapon on the floor the walker walks to (the fighter's pickups)
+static int g_pick_gain; static float g_pick_d;               // (how many ranks better it is, how far: the fetch bid scales with them)
 // line-of-sight results per enemy (the fighter checks the nearest few in turn and prefers one it can see)
 typedef struct { uint32_t h; int res; double t; } LosEnt; static LosEnt g_lost[16];
 static int los_get(uint32_t h, double now) { for (int i = 0; i < 16; i++) if (g_lost[i].h == h && now - g_lost[i].t < 0.5) return g_lost[i].res; return -1; }
@@ -867,7 +868,8 @@ static void bot_step_body(void) {
             // aim: OU noise around the exact angles, turning at most 1.5 rad/s before the reaction time is up, 7 rad/s after
             float th = 0.45f, k = (float)dt / th, sg = noise * sqrtf(2.0f * (float)dt / th);
             ox += -ox * k + sg * bot_gauss(); oy += -oy * k + 0.5f * sg * bot_gauss();
-            float dy = bot_wrap(tyaw + ox - yaw0), dp = (tpitch + oy) - pitch0, mx = (float)dt * (now - tacq < react ? t0r : 7.0f);
+            float turn = 7.0f; lk_over(&turn, "NHOOK_BOT_TURN");   // (07:10: the turn rate once reacting -- "increase look sensitivity as you level up": the trainer raises it)
+            float dy = bot_wrap(tyaw + ox - yaw0), dp = (tpitch + oy) - pitch0, mx = (float)dt * (now - tacq < react ? t0r : turn);
             yaw = yaw0 + (dy > mx ? mx : dy < -mx ? -mx : dy); pitch = pitch0 + (dp > mx ? mx : dp < -mx ? -mx : dp); out |= 1;
             float ey = bot_wrap(tyaw - yaw0), ep = tpitch - pitch0, err = sqrtf(ey * ey + ep * ep) * 57.2958f, size = atanf(0.4f / (tdist > 0.5f ? tdist : 0.5f)) * 57.2958f;
             g_bot_err = err; g_bot_fire = vis && now - tacq > react && err < (size > 1.2f ? size : 1.2f) + fextra && tdist < 40;
@@ -1010,20 +1012,26 @@ static void bot_step_body(void) {
       //  given up: a target that brings no progress (0.5 units closer) in 6 s is now marked tried. The tried list is 32 entries
       //  long: its check read past the end once 32 had been tried)
       static double t_prog; static float d_prog;
-      if (pb && fight && !engaged && now - tscan > 1.0) { tscan = now; static NovObj w[512]; pthread_mutex_lock(&g_nov_collect_mx); g_nov_units_only = 3; int nw = nov_collect(w, 512); g_nov_units_only = 0; pthread_mutex_unlock(&g_nov_collect_mx);
+      // (07:20: the scan runs during fights too -- in a 24-player game the walker is nearly always "engaged": it never fetched; the arbiter weighs it)
+      if (pb && fight && now - tscan > 1.0) { tscan = now; static NovObj w[512]; pthread_mutex_lock(&g_nov_collect_mx); g_nov_units_only = 3; int nw = nov_collect(w, 512); g_nov_units_only = 0; pthread_mutex_unlock(&g_nov_collect_mx);
           int cur = 99; uint32_t held = o->wslot >= 0 && o->wslot < 4 ? o->weapons[o->wslot] : 0xFFFFFFFFu;
           for (int i = 0; i < nw; i++) if (w[i].handle == held) { cur = bot_wpn_rank(hb_tag_name(w[i].def)); break; }
-          float bd = 144.0f; int bi = -1;
+          // (07:10: in a public game no better weapon ever lay within 12 units out of a fight -- "ALWAYS uses a garbage AR": POWER weapons
+          //  (rocket .. shotgun, rank <= 6) are fetched from NHOOK_BOT_FETCH_FAR (30) units, the rest from 12; a better rank counts as
+          //  nearer (distance x (1 + 0.15 x rank)), so a battle rifle 20 units off beats a carbine at 15)
+          float far = 30.0f; lk_over(&far, "NHOOK_BOT_FETCH_FAR"); float bd = 1e30f, bdd = 0; int bi = -1;
           for (int i = 0; i < nw; i++) { if (w[i].parent != 0xFFFFFFFFu) continue; int rk = bot_wpn_rank(hb_tag_name(w[i].def)); if (rk >= cur) continue;
               int t2 = 0; for (int k = 0; k < ntried && k < 32; k++) if (tried[k] == w[i].handle) t2 = 1; if (t2) continue;
-              float dx = w[i].c[0] - o->c[0], dy = w[i].c[1] - o->c[1], dz = w[i].c[2] - o->c[2], d = dx * dx + dy * dy; if (d < bd && fabsf(dz) < 2.5f) { bd = d; bi = i; } }
+              float dx = w[i].c[0] - o->c[0], dy = w[i].c[1] - o->c[1], dz = w[i].c[2] - o->c[2], d = dx * dx + dy * dy, lim = rk <= 6 ? far * far : 144.0f;
+              float sc = sqrtf(d) * (1.0f + 0.15f * (float)rk); if (d < lim && fabsf(dz) < 4.0f && sc < bd) { bd = sc; bdd = d; bi = i; } }
+          bd = bdd;
           if (bi >= 0) { float d = sqrtf(bd);
               if (w[bi].handle != want_h || !g_bot_pick_on) { t_prog = now; d_prog = d; } else if (d < d_prog - 0.5f) { d_prog = d; t_prog = now; }
               if (w[bi].handle == want_h && g_bot_pick_on && now - t_prog > 6.0) { g_bot_pick_on = 0; tried[(ntried++) & 31] = want_h;
                   if (bot_log()) nlog("[nhook] [fight] gave up on %s (%.1f units): no closer in 6 s", hb_tag_name(w[bi].def), d); }
-              else { g_bot_pick_on = 1; memcpy(g_bot_pick_pos, w[bi].c, 12); want_h = w[bi].handle; if (bot_log()) nlog("[nhook] [fight] going for %s (%.1f units)", hb_tag_name(w[bi].def), d); } }
+              else { if (!g_bot_pick_on || want_h != w[bi].handle) { if (bot_log()) nlog("[nhook] [fight] going for %s (%.1f units, rank %d over %d)", hb_tag_name(w[bi].def), d, bot_wpn_rank(hb_tag_name(w[bi].def)), cur); }
+                     g_bot_pick_on = 1; memcpy(g_bot_pick_pos, w[bi].c, 12); want_h = w[bi].handle; g_pick_gain = cur - bot_wpn_rank(hb_tag_name(w[bi].def)); g_pick_d = d; } }
           else g_bot_pick_on = 0; }
-      if (engaged) g_bot_pick_on = 0;
       if (g_bot_pick_on) { float dx = g_bot_pick_pos[0] - o->c[0], dy = g_bot_pick_pos[1] - o->c[1];
           if (dx * dx + dy * dy < 0.8f) { tpress = now; g_bot_pick_on = 0; tried[(ntried++) & 31] = want_h; } }
       uint32_t ppad = bot_pickpad();
@@ -1229,7 +1237,11 @@ static void io_out_apply(const NhIO* io) {   // (the body) -> the hooks' globals
 __attribute__((visibility("default"))) int nh_brain_version(void) { return NHIO_VERSION; }
 __attribute__((visibility("default"))) int nh_brain_step(NhIO* io) { if (io->version != NHIO_VERSION) return 0;
     static int told; if (!told) { told = 1; nlog("[nhook] [brain] code built %s %s is stepping", __DATE__, __TIME__); }
-    io_in_apply(io); bot_step(); io_out_pack(io); return 1; }
+    io_in_apply(io);
+    { static char hmmap[64]; if (strcmp(hmmap, g_st_curmap)) { snprintf(hmmap, sizeof hmmap, "%s", g_st_curmap);   // (the death map of the map being played: the
+          pthread_mutex_lock(&g_hm_mx); hm_switch(g_st_curmap); pthread_mutex_unlock(&g_hm_mx);                     //  brain's own copy -- nav_danger_update avoids its hot spots)
+          nlog("[nhook] [brain] death map for %s: %u deaths", g_st_curmap[0] ? g_st_curmap : "-", (unsigned)g_hm.nd); } }
+    bot_step(); io_out_pack(io); return 1; }
 static void* bot_thread(void* p) { (void)p; return 0; }   // (never started here: the body's thread calls nh_brain_step)
 #else
 typedef int (*NhBrainStep)(NhIO*);
