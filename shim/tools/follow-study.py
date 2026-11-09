@@ -261,7 +261,11 @@ def train(T, score, o, knobs_path):
         ch = dict(inc); desc = []
         if o and o.get('rm') is not None:
             x = o['P'][o['rm']]; me = o['P'].get(o.get('ws'))
-            if len(x['kd']) >= 3 and len(o['allkd']) >= 10:
+            # (12:00: not from a SNIPER / precision role model -- today's best player killed from 26 units with a sniper rifle, and its
+            #  distance pulled the walker's assault-rifle fights out to sniper range: only when its kills are mostly close-range weapons)
+            top_w = ' '.join(w for w, _ in x['kw'].most_common(2)).lower()
+            far_rm = any(k in top_w for k in ('sniper', 'battle', 'carbine', 'beam', 'dmr', 'magnum'))
+            if len(x['kd']) >= 3 and len(o['allkd']) >= 10 and not far_rm:
                 t = min(2.5, max(0.5, statistics.median(x['kd']) / max(0.5, statistics.median(o['allkd'])))); ch['NHOOK_BOT_DIST'] = round((ch.get('NHOOK_BOT_DIST', 1.0) + t) / 2, 3); desc.append('DIST->%.2f' % ch['NHOOK_BOT_DIST'])
             if x['near_s'] > 30:
                 t = min(12.0, x['jumps'] / (x['near_s'] / 60.0)); ch['NHOOK_BOT_FJUMP'] = round((ch.get('NHOOK_BOT_FJUMP', 0.0) + t) / 2, 2); desc.append('FJUMP->%.1f' % ch['NHOOK_BOT_FJUMP'])

@@ -3272,6 +3272,11 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   a running battle, at every round end (our server's in_match true -> false) walker-coach.py round + match-study.py, then each
   walker's game restarted headless with its new knobs and the newest build (they rejoin in the lobby; the user's game and the
   server stay).
+- **The fighting distance is copied only from close-range role models** (2026-11-09 12:00; follow-study.py train) — WHY: today's best
+  player killed from 26 units with a sniper rifle and the trainer's challenger pulled the walker's distance halfway toward it (DIST 0.82
+  -> 1.01) -- assault-rifle fights from sniper range. LOGIC: DIST follows the role model's kill distance only when its two most common kill
+  weapons are no sniper / battle rifle / carbine / beam rifle / DMR / magnum; the running challenger's DIST was reset to the incumbent's.
+  (Also live since 11:55: the learnt switch button took at once -- "switching from ASSAULT RIFLE to EXCAVATOR", then holding it.)
 - **The switch button found (record bit 0); outranged = no charge; the policy learns being under fire** (2026-11-09 11:45-11:55; nbot.c
   swscan_tick / the OUTRANGED block / g_bot_outranged, nbrain_beh.c beh_fight, policy-train.py FEAT, npolicy.c) — WHY: the switch scan
   hit control-record bit 0 four times in seven presses (no other bit more than once) -- under the 75% bar, a press can fall in a
