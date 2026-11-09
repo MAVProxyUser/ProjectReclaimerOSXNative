@@ -3286,6 +3286,11 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   switch presses (the learnt record bit): 0 of 32 took" -- 32 x "switching from PLASMA PISTOL to ASSAULT RIFLE" with the trigger held
   (the plasma pistol held = an overcharge held) while the earlier switches, 3 of 3 and 2 of 2, came with the trigger up. LOGIC: from a
   switch press until 0.15 s after it the trigger (and the reload click) stays up; PLASMA PISTOL joins the weapons whose trigger is pulsed.
+- **The walker's stats stay on 8765** (2026-11-09 11:40; shim/tools/stats-proxy.py) — WHY: the user: "game stats disappeared for some
+  reason. http://127.0.0.1:8765" -- the relay QUIT when the user's own game started, and that game (opened from /Applications, no
+  nhook) has no stats page, so 8765 stayed empty after it closed; then "the stats server should stay tied to the walker for now".
+  LOGIC: --stay = never step aside; without it, a new game of the user's gets the port for 30 s (a game with nhook binds it at its
+  start) and the relay serves again once the port is free -- it never ends by itself.
 - **Cover when outnumbered; reload in a lull** (2026-11-09 11:35; nbrain_beh.c beh_cover, nbot.c g_naim_me / the lull reload) — WHY:
   the death review in a 37-player Pit match: 28 of the last 40 deaths "outnumbered" (2-4 enemies aiming at it) and 5 "empty" (in a
   brawl the walker is never out of a fight, and the reload only came out of one). LOGIC: with NHOOK_BOT_COVER_NAIM (2) or more

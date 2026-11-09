@@ -136,7 +136,11 @@ static void beh_cover(const World* W, Arb* a) {
                 if (bot_log()) nlog("[nhook] [cover] shield %.2f: spot %d of the candidates hidden from %08x, %.1f units away -- going", o->shield, k, g_cov_from, sqrtf((spot[0] - o->c[0]) * (spot[0] - o->c[0]) + (spot[1] - o->c[1]) * (spot[1] - o->c[1])));
                 arb_bid(a, ARB_RECHARGE, u, spot, "take cover"); return; }
             if (r < 0) pend++; }
-        if ((g_cov_k >= g_cov_n && !pend) || W->now - tsearch > 1.5) { if (bot_log()) nlog("[nhook] [cover] none of %d spots hidden from %08x: fighting on", g_cov_n, g_cov_from); st = 0; g_cov_n = 0; }
+        if ((g_cov_k >= g_cov_n && !pend) || W->now - tsearch > 1.5) {
+            // (11:40: 0 of 89 searches found a spot -- the answers per spot: 1 seen, 0 hidden, - no answer; dz = the spot's head over the walker's)
+            char rs[16]; int q = 0; for (int k = 0; k < g_cov_n && q < 15; k++) { int r = los_get(cov_tag(k), W->now); rs[q++] = r < 0 ? '-' : (char)('0' + r); } rs[q] = 0;
+            if (bot_log()) nlog("[nhook] [cover] none of %d spots hidden from %08x: fighting on (answers %s, asked %d, spot 0 dz %.1f)", g_cov_n, g_cov_from, rs, g_cov_k, g_cov_n ? g_cov_c[0][2] - o->c[2] : 0.0f);
+            st = 0; g_cov_n = 0; }
         return; }
     if (!hit || !g_ftg_vis || !g_ftg_h || W->now - tsearch < 1.0) return;
     int cur = nav_node_at(o->c); if (cur < 0) return; float cp[3]; nav_pos(cur, cp); int comp = g_nav.nd[cur].comp; float hz = o->c[2] - cp[2] + 0.55f * o->r;

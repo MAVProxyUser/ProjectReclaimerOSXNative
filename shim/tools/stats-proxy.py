@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-"""Serve another stats page on a port (2026-11-09; the user, his game closed with the walker playing on: "I need to see the game stats for the
-walker so ... I can still see http://127.0.0.1:8765/"): a relay on 127.0.0.1:<listen> to 127.0.0.1:<target> (GET and POST, bodies and
-headers passed through) -- the walker's own page (8771) under the user's usual address. This Mac only. It steps aside by itself when the
-port is wanted back: every 5 s it checks whether a Project Reclaimer game without --headless is running, and quits if so (the user's
-game binds 8765 at its start).
-    python3 shim/tools/stats-proxy.py [--listen 8765] [--target 8771]"""
+"""Serve another stats page on a port (2026-11-09; the user, their game closed with the walker playing on: "I need to see the game stats for
+the walker so ... I can still see http://127.0.0.1:8765/"): a relay on 127.0.0.1:<listen> to 127.0.0.1:<target> (GET and POST, bodies and
+headers passed through, Cache-Control too) -- the walker's own page (8771) under the user's usual address. This Mac only. When a game of
+the user's starts (a Project Reclaimer without --headless) it lets the port go for 30 s -- a game started with nhook binds 8765 then --
+and serves again once the port is free (the game had no page of its own, or it ended).
+--stay: never step aside (the user, 11:40: "the stats server should stay tied to the walker for now").
+    python3 shim/tools/stats-proxy.py [--listen 8765] [--target 8771] [--stay]"""
 import http.server, os, socketserver, subprocess, sys, threading, time, urllib.request
 
 def arg(k, d):
     a = sys.argv; return a[a.index(k) + 1] if k in a else d
-LISTEN, TARGET = int(arg('--listen', '8765')), int(arg('--target', '8771'))
+LISTEN, TARGET = int(arg('--listen', '8765')), int(arg('--target', '8771')); STAY = '--stay' in sys.argv
 
 class H(http.server.BaseHTTPRequestHandler):
     def relay(self, body=None):
@@ -41,19 +42,35 @@ class H(http.server.BaseHTTPRequestHandler):
     def do_POST(self): self.relay(self.rfile.read(int(self.headers.get('Content-Length') or 0)))
     def log_message(self, *a): pass
 
-def users_game():
+def users_game():   # -> the pids of the user's own games (not walkers / servers)
     r = subprocess.run(['pgrep', '-fl', '^/Applications/Project Reclaimer.app/Contents/MacOS/project-reclaimer'], capture_output=True, text=True)
-    return any('--headless' not in l and '--server' not in l and '--server-worker' not in l for l in r.stdout.splitlines() if l.strip())
+    return {l.split()[0] for l in r.stdout.splitlines() if l.strip() and '--headless' not in l and '--server' not in l and '--server-worker' not in l}
 
 class S(socketserver.ThreadingMixIn, http.server.HTTPServer): daemon_threads = True; allow_reuse_address = True
 
+def port_free():
+    import socket
+    k = socket.socket(); k.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try: k.bind(('127.0.0.1', LISTEN)); return True
+    except OSError: return False
+    finally: k.close()
+
 def main():
-    if users_game(): print('a game of the user runs: it serves %d itself' % LISTEN); return 0
-    srv = S(('127.0.0.1', LISTEN), H); threading.Thread(target=srv.serve_forever, daemon=True).start()
-    print('%s 127.0.0.1:%d -> 127.0.0.1:%d' % (time.strftime('%H:%M:%S'), LISTEN, TARGET), flush=True)
+    # (2026-11-09: it used to QUIT when the user's game started -- and the user's game, opened straight from /Applications, has no stats
+    #  page of its own: "game stats disappeared". Now: a new game of the user -> the port is let go for 30 s, so a game with nhook can take
+    #  it at its start; nobody took it (a game without nhook) or the game ended -> the relay serves again. It never ends by itself)
+    srv = None; yielded = set(); since = 0
     while True:
+        ug = set() if STAY else users_game(); new = ug - yielded
+        if srv and new:
+            print('%s the user\'s game started: letting %d go for 30 s' % (time.strftime('%H:%M:%S'), LISTEN), flush=True); srv.shutdown(); srv.server_close(); srv = None
+            yielded |= new; since = time.time()
+        elif not srv and time.time() - since > 30 and port_free():
+            srv = S(('127.0.0.1', LISTEN), H); threading.Thread(target=srv.serve_forever, daemon=True).start()
+            print('%s 127.0.0.1:%d -> 127.0.0.1:%d%s' % (time.strftime('%H:%M:%S'), LISTEN, TARGET, ' (the user\'s game has no page of its own)' if ug else ''), flush=True)
+            yielded |= ug
+        yielded &= ug   # (ended games drop out)
         time.sleep(5)
-        if users_game(): print('%s the user\'s game is back: stepping aside' % time.strftime('%H:%M:%S'), flush=True); srv.shutdown(); return 0
 
 if __name__ == '__main__':
     sys.exit(main())
