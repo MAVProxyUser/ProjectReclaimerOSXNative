@@ -3334,6 +3334,11 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   14.2) toward one weapon (51.6 s held), act last pressed 12-47 s before -- not the act press; the fetch never gave up because the
   client kept getting closer. Two snap-backs within 20 s while fetching drop that weapon (g_fetch_abort -> the pickup code's tried list,
   "[fight] the X: the server put me back twice on the way -- left"). Why the server holds a fetching walker is still open.
+  Lead (08:35): snap-backs gather on ONE test identity -- test-third (w2): 3-7 a battle against 0-2 for test-v2 / test-second over 6
+  battles -- the only one whose settings.json has "frame_limit": 60 / "auto_frame_limit": true (60 fps against ~590 uncapped). The PUBLIC
+  walker's profile (native/public-walker/home/.../ProjectReclaimer/settings.json) has the same 60 cap. One battle with test-third
+  uncapped (373 fps): 2 snap-backs, still a 17.9 s hold at (-15.6, -3.3) -- not conclusive; its settings were put back
+  (settings.json.bak-0830 = the original). Every snap-back is logged now, so the next public session shows whether it happens there.
 - **No progress = stuck** (2026-11-09 07:15; nbot.c the nav stuck test; fight-speed.py --spells) — WHY: with the alarm fixed, a battle on
   The Pit: the server's recording (fight-speed.py --spells: per slot the standing share and the longest still spells) had one walker
   standing 68% of its time, 41.7 s at one spot and 17.9 s at another, while its own log said it walked (4% still): it hovered at
