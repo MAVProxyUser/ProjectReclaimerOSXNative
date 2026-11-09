@@ -3272,6 +3272,17 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   a running battle, at every round end (our server's in_match true -> false) walker-coach.py round + match-study.py, then each
   walker's game restarted headless with its new knobs and the newest build (they rejoin in the lobby; the user's game and the
   server stay).
+- **A walker on an owner-approved public server, under a name that discloses it** (2026-11-09 04:00; nbot.c bot_owner_ok / bot_allowed,
+  camp_say_thread) — WHY: the user asked the host of a public server whether a walker could join; the host agreed for that server. The
+  user asked for a non-developer identity renamed "AIWalkerTest" for disclosure. (Earlier the same night a walker on another owner's
+  server had been refused while its owner had not agreed.) LOGIC: NHOOK_BOT_ALLOW_SERVER=<ip:port> unlocks the walker on exactly that
+  joined address and only while the profile's nickname starts "AIWalker" ("[bot] owner-approved server ...: the walker plays / not
+  this one"); a test profile never plays anything public (the app refuses public servers to one), so the walker runs as a REGULAR
+  profile in a home of its own (ReclaimerMac/native/public-walker/home via HOME= and NATIVE_REAL=1: a copy of a test identity, never
+  the user's -- every copy of the user's identity carries the developer flag), with ReclaimerMac linked in for its maps and models.
+  The console chat lines (camping, "coming!") go only to OUR server now (they used our server's RCON wherever the walker was). The
+  chat announcement asked for is not possible yet: the app's player-chat send is not found (--ui-script drives menus; --request-at
+  answers only inside a match). No server address or host name is kept in the sources.
 - **Five-minute variant epochs; the public server behind carrier-grade NAT** (2026-11-09 03:45; shim/tools/walker-epochs.py,
   walker-restart.sh WR_ENV, ded-public-config.py [master] off, native-dedicated.sh MCCF) — WHY: the user: "walkers should read the game
   corpus every 5 minutes and retrain and understand where their K/D, shots fired vs landed, melee kills, powerup kills, power weapon

@@ -76,9 +76,18 @@ static void bot_pad(float lx, float ly, float rt, uint32_t b) {   // b: nvpad.m'
     if (!g_vpad_on || g_bot_shadow) return; nh_vpad_set(lx, ly, 0, 0, (b & 0x40000000u) ? 1.0f : 0.0f, rt, b & 0xFFFFu); g_pad_written = 1; }
 static int bot_walk_ok(void) { static int nopkt = -1; if (nopkt < 0) nopkt = getenv("NHOOK_BOT_NOPKT") != 0;   // (the walker: this client's moves count:
     return (bot_allowed() || g_bot_shadow) && (!g_srv_addr[0] || g_vpad_on || !nopkt); }                                            //  a local game, or the control packet hook)
+// (2026-11-09) A PUBLIC server whose OWNER agreed (the user asked its host first). NHOOK_BOT_ALLOW_SERVER=<ip:port> unlocks exactly that
+// address, and only for an identity whose nickname says what it is (starts "AIWalker"); a test profile still never plays anything
+// public. Anything else: off. (No server's address or host is kept in the sources.)
+static int bot_owner_ok(void) {
+    static const char* e = (const char*)1; if (e == (const char*)1) e = getenv("NHOOK_BOT_ALLOW_SERVER");
+    int ok = e && *e && g_srv_addr[0] && !strcmp(e, g_srv_addr) && !strncmp(g_nick, "AIWalker", 8) && !getenv("NHOOK_NO_BOT");
+    static int told = -1; if (ok != told) { told = ok; if (e && *e) nlog("[nhook] [bot] owner-approved server %s: %s (joined %s, nickname %s)", e, ok ? "the walker plays" : "not this one",
+                                                                          g_srv_addr[0] ? g_srv_addr : "-", !strncmp(g_nick, "AIWalker", 8) ? "discloses" : "does NOT disclose"); }
+    return ok; }
 static int bot_allowed(void) {
     static int t = -1; if (t < 0) { const char* p = getenv("RECLAIMER_PROFILE_DIR"); t = p && *p && !getenv("NHOOK_NO_BOT"); }
-    return t && bot_private_addr(g_srv_addr); }
+    return (t && bot_private_addr(g_srv_addr)) || bot_owner_ok(); }
 
 // halo3's control record of local player 0 (engine thread)
 // ---- the fighter (2026-11-08, NHOOK_BOT_FIGHT=1; the user: "make 3-4 walkers have a battle ... learn to mimic actual players"):
@@ -459,6 +468,7 @@ static void bot_step(void) { g_pad_written = 0; bot_step_body(); if (g_vpad_on &
 // ReclaimerMac/native/test-dedicated/rcon-password.txt). Every decision is logged ([camp]) whether or not the line goes out.
 static void* camp_say_thread(void* a) {
     char* msg = a; char exe[1024]; uint32_t n = sizeof exe; char pw[128] = "", pfd[1024]; const char* home = getenv("HOME") ? getenv("HOME") : "/tmp";
+    if (!bot_private_addr(g_srv_addr)) { nlog("[nhook] [camp] \"%s\" not said: not our server (the console line is our server's)", msg); free(msg); return 0; }
     const char* pf = getenv("NHOOK_CHAT_RCON_PWFILE"); if (!pf) { snprintf(pfd, sizeof pfd, "%s/Library/Application Support/ReclaimerMac/native/test-dedicated/rcon-password.txt", home); pf = pfd; }
     FILE* f = fopen(pf, "r"); if (f) { if (fgets(pw, sizeof pw, f)) pw[strcspn(pw, "\r\n")] = 0; fclose(f); }
     if (!pw[0] || _NSGetExecutablePath(exe, &n) != 0) { nlog("[nhook] [camp] no RCON password file or no app path: \"%s\" stays in this log", msg); free(msg); return 0; }
