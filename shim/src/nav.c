@@ -91,6 +91,22 @@ static void nav_danger_update(double now){
     g_nav.dng_nd=nd; }
 static int g_nav_noavoid;   // set around a comparison plan (PELOAD_NAV_LOG): the same A* without the danger term
 // A* over the floor graph; cost = distance x (1 + wall penalty + avoid x danger) + learned penalties; -> path length
+// PORTALS (2026-11-08, shim/tools/nav-portals.py): one-way links between the graph's separate parts learned from real players --
+// lifts, cannons, jumps the floor graph cannot walk (Guardian: 423 parts; a walker under an enemy on another part had "no path").
+// <map>.portals.txt beside <map>.nav: "from to seconds count"; A* crosses one at the players' median time (x 2.2 units/s, the run
+// speed, as its length) + 1. PELOAD_NAV_NOPORTALS=1 = none.
+static int32_t*g_np_a,*g_np_b; static float*g_np_c; static int g_np_n;
+static void nav_portals_load(const char*navpath){
+    free(g_np_a); free(g_np_b); free(g_np_c); g_np_a=g_np_b=0; g_np_c=0; g_np_n=0; if(getenv("PELOAD_NAV_NOPORTALS")) return;
+    char p[1100]; snprintf(p,sizeof p,"%s",navpath); size_t L=strlen(p); if(L<4||strcmp(p+L-4,".nav")) return; snprintf(p+L-4,sizeof p-(L-4),".portals.txt");
+    FILE*f=fopen(p,"r"); if(!f) return; int cap=0; char l[200];
+    while(fgets(l,sizeof l,f)){ int a,b,n; float dt; if(l[0]=='#'||sscanf(l,"%d %d %f %d",&a,&b,&dt,&n)!=4||a<0||b<0||a>=g_nav.n||b>=g_nav.n) continue;
+        if(g_np_n==cap){ cap=cap?cap*2:256; g_np_a=realloc(g_np_a,4*(size_t)cap); g_np_b=realloc(g_np_b,4*(size_t)cap); g_np_c=realloc(g_np_c,4*(size_t)cap); }
+        g_np_a[g_np_n]=a; g_np_b[g_np_n]=b; g_np_c[g_np_n]=dt*2.2f+1.0f; g_np_n++; }
+    fclose(f);
+    for(int i=1;i<g_np_n;i++){ int32_t a=g_np_a[i],b=g_np_b[i]; float c=g_np_c[i]; int j=i-1; while(j>=0&&g_np_a[j]>a){ g_np_a[j+1]=g_np_a[j]; g_np_b[j+1]=g_np_b[j]; g_np_c[j+1]=g_np_c[j]; j--; } g_np_a[j+1]=a; g_np_b[j+1]=b; g_np_c[j+1]=c; }
+    nav_say("  [nav] %d portals (lifts, jumps, steps players took) from %s\n",g_np_n,p); }
+static int nav_portal_first(int u){ int lo=0,hi=g_np_n; while(lo<hi){ int m=(lo+hi)/2; if(g_np_a[m]<u) lo=m+1; else hi=m; } return lo; }
 static int nav_astar(int s,int t,int32_t*path,int maxp){
     if(s<0||t<0) return 0; uint32_t gen=++g_nav.gen; if(!gen){ memset(g_nav.stamp,0,4*(size_t)g_nav.n); gen=g_nav.gen=1; }
     float tp[3]; nav_pos(t,tp); int hn=0;
@@ -106,6 +122,10 @@ static int nav_astar(int s,int t,int32_t*path,int maxp){
         for(int k=0;k<8;k++){ int v=g_nav.nd[u].nbr[k]; if(v<0||v>=g_nav.n) continue; float vp[3]; nav_pos(v,vp);
             float dx=vp[0]-up[0],dy=vp[1]-up[1],dz=vp[2]-up[2]; float c=sqrtf(dx*dx+dy*dy+dz*dz)*(1.0f+wpen[g_nav.nd[v].wd&15]+(g_nav.dng?kav*g_nav.dng[v]:0)-(g_nav.pop?0.4f*g_nav.pop[v]:0))+g_nav.pen[v]+((g_nav.nd[v].fl&1)?0.5f:0);   // (pop: the lanes players use cost up to 40% less)
             float gv=gu+c; if(g_nav.stamp[v]==gen && g_nav.g[v]<=gv) continue;
+            g_nav.stamp[v]=gen; g_nav.g[v]=gv; g_nav.came[v]=u;
+            float hx=vp[0]-tp[0],hy=vp[1]-tp[1],hz=vp[2]-tp[2]; NAV_PUSH(gv+sqrtf(hx*hx+hy*hy+hz*hz),v); }
+        for(int j=g_np_n?nav_portal_first(u):0;j<g_np_n&&g_np_a[j]==u;j++){ int v=g_np_b[j]; float vp[3]; nav_pos(v,vp);   // (the portals out of u)
+            float gv=gu+g_np_c[j]+g_nav.pen[v]; if(g_nav.stamp[v]==gen && g_nav.g[v]<=gv) continue;
             g_nav.stamp[v]=gen; g_nav.g[v]=gv; g_nav.came[v]=u;
             float hx=vp[0]-tp[0],hy=vp[1]-tp[1],hz=vp[2]-tp[2]; NAV_PUSH(gv+sqrtf(hx*hx+hy*hy+hz*hz),v); } }
     #undef NAV_PUSH
@@ -139,7 +159,7 @@ static void nav_ensure(void){
     if(g_nav.ok || g_nav.failed>=2) return;
     char path[1100]; const char*fe=getenv("PELOAD_NAV_FILE"); const char*home=getenv("HOME");
     if(fe&&*fe) snprintf(path,sizeof path,"%s",fe); else snprintf(path,sizeof path,"%s/Library/Application Support/ReclaimerMac/maptop/%s.nav",home?home:"/tmp",name);
-    if(nav_load(path)){ nav_say("  [nav] %s: %d floor nodes (%dx%d cells of %.2f) from %s\n",name,g_nav.n,g_nav.w,g_nav.h,g_nav.cell,path); return; }
+    if(nav_load(path)){ nav_say("  [nav] %s: %d floor nodes (%dx%d cells of %.2f) from %s\n",name,g_nav.n,g_nav.w,g_nav.h,g_nav.cell,path); nav_portals_load(path); return; }
     // make one only once a match is running: in the menu the 'map being played' is whatever map its scene borrows from
     // (Forge's desert_sandbox, Guardian), and building a big map's graph costs a core for a while
 #ifndef NAV_CORE

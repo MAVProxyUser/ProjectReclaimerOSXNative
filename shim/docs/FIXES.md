@@ -3252,6 +3252,26 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   unit (players table, by the profile's nickname: nstats.c g_my_unit) when the record's unit is stale (NHOOK_BOT_RECUNIT=1 = old).
   Melee: the user's 5 melee kills are named "Melee" on our server (so "" is not melee -- corrected above); the walkers' close kills
   were all gunfire.
+- **Levels apart, learned lifts / jumps, the stuck give-up, coaching between rounds** (2026-11-08 22:45; nbot.c, src/nav.c portals,
+  shim/tools/nav-portals.py, coach-rounds.sh, match-study.py) — WHY: the user, after a round against three coached walkers: "they
+  are way more aggressive now! ... one thing I think they have a hard time with is enemy radar on multi level maps. like if you see
+  someone on radar and then in turn don't directly see them they are above or below you. the engagement struggled with that", "why
+  was 'second' walker stationary so long with the smg and assault rifle?", "Can the coach process at the end of every round, and
+  restart the walkers with the new training?". match-study.py on that round (the user 10 / 3, the walkers 12/9, 5/14, 5/12): replies
+  when shot at first 1.8-2.5 s (were 4.4-5.5; the user 1.65), fired first 39-46 of ~80 fights. LEVELS APART (an enemy within 12
+  units across, over 2 above / below, 2 s+): the walkers kept moving (1.3-1.7 u/s), never reached the other's level, won 3 / lost 6;
+  the user stood (0.5 u/s) and won 3 from above, lost none. Now a known enemy hidden on another level is aimed at (up / down, 3
+  rad/s) and, when it is BELOW, the walker holds its ground up to 8 s (NHOOK_BOT_NOLEVELS=1 = off). Guardian's floor graph has 423
+  separate parts (the upper level, z ~22, apart from the main floor, z 15-20): nav-portals.py learns one-way links from every
+  recorded player who crossed between parts within 4 s alive (lifts, cannons, jumps, steps): 161 on Guardian (2,122 crossings, 37
+  recordings) -> maptop/<map>.portals.txt; src/nav.c loads them beside the graph and A* crosses one at the players' median time x
+  2.2 units/s + 1 (PELOAD_NAV_NOPORTALS=1 = none). THE STATIONARY WALKER: 24 s at a ledge on the middle level (z ~19), hunting a
+  hidden enemy 17 units off along a path dropping ~3 units: creeping, "stuck", backing off, replanning the same stretch -- in the
+  goal draw four stucks in 10 s never dropped the goal; now they do ("stuck 4 times"). Its weapons (assault rifle, SMG) were what it
+  held, not a choice. match-study.py adds the weapon held while standing still and the levels-apart episodes. coach-rounds.sh: beside
+  a running battle, at every round end (our server's in_match true -> false) walker-coach.py round + match-study.py, then each
+  walker's game restarted headless with its new knobs and the newest build (they rejoin in the lobby; the user's game and the
+  server stay).
 - **Walker battles run headless** (2026-11-08 22:15; walker-battle.sh) — WHY: the user: "running all 3 clients visible lagged the
   screen hard, can you drive the client without the display?". LOGIC: the walkers' games start with the app's own --headless ("no
   window, the null renderer"); the walker needs no frames (aim, line of sight and moves come from the game's state). Checked: two

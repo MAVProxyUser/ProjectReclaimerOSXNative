@@ -316,7 +316,8 @@ static void mel_load(void) {
 static int bot_pull_weapon(const char* w) {
     static const char* const k[] = {"HAMMER", "SWORD", "ENERGY BLADE", "SNIPER", "BEAM RIFLE", "MAGNUM", "ROCKET", "BRUTE SHOT", "FUEL ROD", 0};
     if (!w) return 0; for (int i = 0; k[i]; i++) if (strstr(w, k[i])) return 1; return 0; }
-static int g_bot_pull, g_bot_trig; static double g_bot_fire_t0;   // (the held weapon acts on a pull; when this string of fire began)
+static int g_bot_pull, g_bot_trig; static double g_bot_fire_t0;
+static double g_bot_hold_high, g_bot_hold_last;   // (levels apart: holding the high ground until; the last levels-apart step)   // (the held weapon acts on a pull; when this string of fire began)
 // the virtual pad's melee and act / pick-up / reload buttons (nvpad.m bits: 1 B, 0x20 RB). 2026-11-08: the walkers pressed B to
 // melee and held RB to pick up -- Halo 3's own layout -- but the app's layout for these profiles is Bumper Jumper's (its own
 // descriptions: "LB jumps and RB melees ... B acts and reloads"): ten weapon changes in a melee battle followed a B press (none
@@ -512,7 +513,25 @@ static void bot_step_body(void) {
                 for (int tries = 0; tries < 3; tries++) { float p2[3] = {o->c[0] + (fx * r + lx * lat) * 1.2f, o->c[1] + (fy * r + ly * lat) * 1.2f, o->c[2] - 0.35f};
                     if (bot_floor_ok(p2)) break; if (tries == 0) { side = -side; lat = -lat; } else if (tries == 1) r = r < 0 ? 0 : r; else { lat = 0; r = 0; } }
                 ftx = r; fty = lat; } }
-        else { g_bot_fire = 0; if (tdist > 8) { yaw = yaw0; pitch = pitch0; out &= ~1; } }   // (out of sight: no tracking through walls -- look where it walks)
+        else { g_bot_fire = 0;
+            // LEVELS APART (2026-11-08, the user: "enemy radar on multi level maps. like if you see someone on radar and then in turn
+            // don't directly see them they are above or below you. the engagement struggled with that"). match-study.py on that
+            // round: within 12 units across and over 2 units above / below, the walkers kept moving (1.3-1.7 u/s), never reached
+            // the other's level and won 3 / lost 6; the user stood (0.5 u/s) and won 3 from above, lost none. A known enemy hidden
+            // on another level: the walker aims at it (up / down, at most 3 rad/s: where it will show), and with the enemy BELOW
+            // it holds its ground up to 8 s (g_bot_hold_high, the move override below) -- the high ground wins. NHOOK_BOT_NOLEVELS=1 = off.
+            static int nolv = -1; if (nolv < 0) nolv = getenv("NHOOK_BOT_NOLEVELS") != 0;
+            float lz = ftg.c[2] - o->c[2], lh = hypotf(ftg.c[0] - o->c[0], ftg.c[1] - o->c[1]);
+            if (!nolv && fabsf(lz) > 2.0f && lh < 12.0f) {
+                float mxr = (float)dt * 3.0f, dyw = bot_wrap(tyaw - yaw0), dpt = tpitch - pitch0;
+                yaw = yaw0 + (dyw > mxr ? mxr : dyw < -mxr ? -mxr : dyw); pitch = pitch0 + (dpt > mxr ? mxr : dpt < -mxr ? -mxr : dpt); out |= 1;
+                static uint32_t lv_tgt; static double lv_t0;
+                if (ftg.handle != lv_tgt || now - g_bot_hold_last > 2.0) { lv_tgt = ftg.handle; lv_t0 = now; }
+                if (lz < -2.0f && now - lv_t0 < 8.0) g_bot_hold_high = now;
+                g_bot_hold_last = now;
+                if (bot_log()) { static double tl; if (now - tl > 2.0) { tl = now; nlog("[nhook] [fight] levels apart: %08x %.1f units %s, %.1f across -- %s", ftg.handle, fabsf(lz), lz > 0 ? "above" : "below", lh,
+                    lz < -2.0f && now - lv_t0 < 8.0 ? "holding the high ground, aimed down" : lz > 0 ? "aimed up, the path goes on" : "aimed down, hunting again"); } } }
+            else if (tdist > 8) { yaw = yaw0; pitch = pitch0; out &= ~1; } }   // (out of sight: no tracking through walls -- look where it walks)
         if (bot_log() && g_vpad_on) { static double tr; static unsigned long pr[4]; static int ps, pc; if (now - tr > 10.0) { unsigned long r[4]; nh_vpad_btn_reads(r); int sr = nh_vpad_stick_reads(), cr = nh_vpad_reads();
               if (tr > 0) nlog("[nhook] [vpad] the app read in %.0f s: controllers %d, left stick %d, B %lu, Y %lu, RB %lu, right trigger %lu", now - tr, cr - pc, sr - ps, r[0] - pr[0], r[1] - pr[1], r[2] - pr[2], r[3] - pr[3]);
               tr = now; memcpy(pr, r, sizeof pr); ps = sr; pc = cr; } }
@@ -614,7 +633,13 @@ static void bot_step_body(void) {
                       nav_pos(path[pidx >= 4 ? pidx - 4 : 0], bk);
                       for (int i = pidx; i < plen && i < pidx + 10; i++) g_nav.pen[path[i]] += 4.0f;
                       memmove(tstuck, tstuck + 1, 3 * sizeof(double)); tstuck[3] = now;
-                      if (now - tstuck[0] < 10.0) { nav_say("  [nav] stuck 4 times at (%.1f %.1f %.1f): a new goal\n", pos[0], pos[1], pos[2]); if (mode != 2) goal = -1; memset(tstuck, 0, sizeof tstuck); }
+                      // (2026-11-08, the user: "why was 'second' walker stationary so long with the smg and assault rifle?": 24 s at a ledge on
+                      //  Guardian's middle level, its path to a hidden enemy 17 units off dropping ~3 units -- creeping, "stuck", backing off,
+                      //  replanning the same stretch: in the goal draw (mode 2) four stucks never dropped the goal. Now they do -- the draw
+                      //  picks another at once)
+                      if (now - tstuck[0] < 10.0) { nav_say("  [nav] stuck 4 times at (%.1f %.1f %.1f): a new goal\n", pos[0], pos[1], pos[2]);
+                          if (mode != 2) goal = -1; else if (g_eg.on && gl_on()) { gl_drop(now, "stuck 4 times"); goal = -1; plen = 0; }
+                          memset(tstuck, 0, sizeof tstuck); }
                       else nav_say("  [nav] stuck at (%.1f %.1f %.1f): back off and replan\n", pos[0], pos[1], pos[2]);
                       tplan = 0; } }
                 if (now - tback < 0.6) { float bw = atan2f(bk[1] - pos[1], bk[0] - pos[0]), rel = bot_wrap(bw - yaw);
@@ -625,7 +650,8 @@ static void bot_step_body(void) {
                     pos[0], pos[1], pos[2], cur, pidx, plen, tp[0], tp[1], tp[2], tx, ty); } }
             else g_nav_act = 0; }
         else g_nav_act = 0; }
-    if (engaged) { tx = ftx; ty = fty; out |= 2; }   // (the fighter's moves in reach override the walker's path)
+    if (engaged) { tx = ftx; ty = fty; out |= 2; }
+    else if (fight && now - g_bot_hold_high < 0.3) { tx = 0; ty = 0; out |= 2; }   // (levels apart: the enemy below -- hold the high ground)   // (the fighter's moves in reach override the walker's path)
     if (testb) { g_bot_btn = ((out & 4) ? g_bot_btn : 0) | g_bot_testbtn; out |= 4; }   // (do=botbtn: held until its time is up)
     // fire: the control record's bit 19 (+0xC8) -- the local unit fires, and the control packet carries the weapon's firing state
     // to the server (halo3+0x5452c reads it from the local weapon: a packet bit of its own does nothing; 2026-11-08 scan: bits 19
