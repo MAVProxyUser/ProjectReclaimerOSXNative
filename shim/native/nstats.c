@@ -1378,6 +1378,8 @@ static void* st_snap_thread(void* a) {
         if (g_hc_off[HC_SNAP]) { usleep(100000); continue; }   // (the hook cost measurement: snapshots paused)
         static int prof = -1; if (prof < 0) prof = getenv("NHOOK_RD_PROF") != 0; t_rd_prof = prof;
         unsigned long n0 = t_rd_n, b0 = t_rd_b, h0 = t_oc_hits; uint64_t t0 = hc_now(); StBuf s = {0};
+        { extern volatile unsigned long g_nr_frames; void nov_aim_tick(void); static int hl = -1; if (hl < 0) hl = !getenv("NHOOK_NO_HEADLESS_AIM");
+          if (hl && !g_nr_frames) nov_aim_tick(); }   // (a headless client's shots judged against the hitboxes here: noverlay.c nov_aim_tick)
         t_tls_memo = 1; t_sb_memo = 1; st_ocache_fill(); st_snapshot(&s); t_noc = 0; t_tls_memo = 0; t_sb_memo = 0; hc_add(HC_SNAP, t0); sm_add(SM_SNAP, t0);
         g_snap_rd_n = t_rd_n - n0; g_snap_rd_b = t_rd_b - b0; g_snap_oc_hits = t_oc_hits - h0;
         if (prof) { static double tl; double nw = mono_s(); if (nw - tl > 10) { tl = nw; Dl_info di; uintptr_t base = 0; if (dladdr((void*)&st_snapshot, &di)) base = (uintptr_t)di.dli_fbase;

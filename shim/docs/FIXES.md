@@ -3272,6 +3272,31 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   a running battle, at every round end (our server's in_match true -> false) walker-coach.py round + match-study.py, then each
   walker's game restarted headless with its new knobs and the newest build (they rejoin in the lobby; the user's game and the
   server stay).
+- **The walker judges its own shots against the hitboxes, headless too; head-height aim, a head gate for precision weapons, the trainer
+  scores accuracy and headshots** (2026-11-09 07:45; noverlay.c nov_aim_tick, nstats.c st_snap_thread, nbot.c the fighter's aim point
+  and fire gate, follow-study.py hone_aim / the window score) — WHY: the user: "try to constantly bump up accuracy too. hitting the
+  critical hitbox is key ... headshots being main goal", then "you can see all I can see for aim, tune, etc re: hitbox. don't make me
+  a crutch in any way" and "the walker should be able to load the same dylib I do and have any function I had". The aim meter (every
+  shot's path against the target's posed collision model: on = through a hitbox, head = through the topmost region) ran only in the
+  Metal frame hook, and a --headless client never draws a frame, so the public walker had no measure of its own shots: the aim-height
+  honing read them from the USER's client on 8765 (only while they played). LOGIC: the stats snapshot thread runs nov_aim_tick while the
+  renderer has drawn nothing (g_nr_frames 0, i.e. headless: then nothing else touches hb_geom's cache), behind a try-lock so only one
+  caller at a time; hone_aim reads the walker's OWN stats page (follow-study --port, the player marked "you"). The fighter aims at
+  centre + NHOOK_BOT_AIM_HEAD x radius (live knob, was a fixed 0.55; honed among 0.45..0.9 by head hits a shot) and, holding a
+  precision weapon or sniper, holds fire while the aim error exceeds the head's angular size (atan(0.15 / distance)) x
+  NHOOK_BOT_HEADGATE (live, 1.0; trained 0.6..2.0) + 0.3 degrees. The trainer's window score = log((k + 1) / (d + 1)) + 0.5 x
+  accuracy + the window's head hits a judged shot (from the walker's own aim block, 5+ shots) + 0.2 x headshot kills; HEADGATE is a
+  trained knob, the aim HEIGHT is hone_aim's alone (two optimisers on one knob fought). First live numbers after the one rejoin: 27
+  shots judged, 44% through a hitbox, 25% of those the head, median error 0.3 deg. The study's refit also waits while another model
+  build runs (refresh-loop.sh builds the same models; two at once each took 10-20 min). NHOOK_NO_HEADLESS_AIM=1 = the old
+  render-thread-only judging; NHOOK_BOT_HEADGATE=99 = no gate.
+- **Weapon fetches that finish** (2026-11-09 07:25-07:30; nbot.c the pick-up scan and the step's FETCH branch) — WHY: "ALWAYS uses a
+  garbage AR": the pick-up button ("pb") was set only with the virtual controller on, which the public walker has not, so no fetch had
+  ever started; once they did, "gave up on BATTLE RIFLE (2.1 units): no closer in 6 s" -- the path ends at the walking graph's floor
+  node and a weapon on a rack or ledge lies off it, while the press needed 0.9 units. LOGIC: the pick-up is the packet's act bit (pb 2
+  whatever the controller); the press fires within NHOOK_BOT_PICK_R (1.3, live) units across and 1.5 up / down; the last 3 units of a
+  FETCH are walked straight at the weapon (half speed inside 1 unit). Live: "at the weapon (1.3 units): holding act to take it" for a
+  sniper rifle and a shotgun. NHOOK_BOT_PICK_R=0.9 = the old reach.
 - **Training session: the trainer keeps what works and levels up the look; power weapons map-wide; the death map in the brain** (2026-11-09
   07:20; follow-study.py train / lvl_knobs, nbot.c the fighter's turn rate / the pick-up scan / nh_brain_step, nbrain_beh.c beh_fetch) —
   WHY: the user, away 7 hours: "I need walker to learn to hold his own ... the only thing that matters now is training in fluidly

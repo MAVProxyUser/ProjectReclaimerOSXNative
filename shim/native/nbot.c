@@ -873,6 +873,13 @@ static void bot_step_body(void) {
             yaw = yaw0 + (dy > mx ? mx : dy < -mx ? -mx : dy); pitch = pitch0 + (dp > mx ? mx : dp < -mx ? -mx : dp); out |= 1;
             float ey = bot_wrap(tyaw - yaw0), ep = tpitch - pitch0, err = sqrtf(ey * ey + ep * ep) * 57.2958f, size = atanf(0.4f / (tdist > 0.5f ? tdist : 0.5f)) * 57.2958f;
             g_bot_err = err; g_bot_fire = vis && now - tacq > react && err < (size > 1.2f ? size : 1.2f) + fextra && tdist < 40;
+            // (07:35, the user: "hitting the critical hitbox is key. the game reticule has a red dot in some cases when it's a head shot,
+            //  you should tune to hit them when possible. headshots being main goal"): with a PRECISION weapon (battle rifle, carbine,
+            //  magnum, sniper -- headshots kill faster) the trigger waits for the aim to sit on the HEAD: within its angular radius
+            //  (0.15 units) x NHOOK_BOT_HEADGATE (1.0) + 0.3 deg. The automatic weapons keep the body gate (a headshot adds nothing there)
+            if (g_bot_fire && g_inv.held_c && (!strcmp(g_inv.held_c, "precision") || !strcmp(g_inv.held_c, "sniper"))) {
+                float hg = 1.0f; lk_over(&hg, "NHOOK_BOT_HEADGATE"); float hs = atanf(0.15f / (tdist > 0.5f ? tdist : 0.5f)) * 57.2958f;
+                if (err > hs * hg + 0.3f) g_bot_fire = 0; }
             { static float mv = -1; static double thurt; float v2 = o->shield + o->health; if (mv >= 0 && v2 < mv - 0.02f) thurt = now; mv = v2;
               // under active camo: no shot beyond the near edge of the weapon's band (+2 units) unless we were hit in the last 2 s --
               // firing gives camo away; walk in instead (below)
@@ -1006,7 +1013,8 @@ static void bot_step_body(void) {
     // each weapon is tried once
     { static int pb = -1; static uint64_t pbit; if (pb < 0) { const char* e = getenv("NHOOK_BOT_PICKBIT"); pbit = e ? strtoull(e, 0, 16) : 0; pb = pbit != 0; }
       static double tscan, tpress; static uint32_t tried[32]; static int ntried; static uint32_t want_h;
-      if (pb == 0 && g_vpad_on) pb = 2;   // (on the virtual controller: hold its pick-up button, NHOOK_BOT_PICKPAD, default B)
+      if (pb == 0) pb = 2;   // (07:25: the pick-up is the packet's ACT bit now -- it needs no virtual controller; the public walker has none, and with
+                             //  "pb" tied to it no fetch had ever started: "ALWAYS uses a garbage AR")
       { static int np = -1; if (np < 0) np = getenv("NHOOK_BOT_NOPICK") != 0; if (np) pb = 0; }   // (NHOOK_BOT_NOPICK=1: keep the start weapons -- melee-battle.sh)
       // (2026-11-08: a walker stood the whole battle "going for BATTLE RIFLE (8.1 units)" -- a weapon it could not reach was never
       //  given up: a target that brings no progress (0.5 units closer) in 6 s is now marked tried. The tried list is 32 entries
@@ -1032,8 +1040,13 @@ static void bot_step_body(void) {
               else { if (!g_bot_pick_on || want_h != w[bi].handle) { if (bot_log()) nlog("[nhook] [fight] going for %s (%.1f units, rank %d over %d)", hb_tag_name(w[bi].def), d, bot_wpn_rank(hb_tag_name(w[bi].def)), cur); }
                      g_bot_pick_on = 1; memcpy(g_bot_pick_pos, w[bi].c, 12); want_h = w[bi].handle; g_pick_gain = cur - bot_wpn_rank(hb_tag_name(w[bi].def)); g_pick_d = d; } }
           else g_bot_pick_on = 0; }
-      if (g_bot_pick_on) { float dx = g_bot_pick_pos[0] - o->c[0], dy = g_bot_pick_pos[1] - o->c[1];
-          if (dx * dx + dy * dy < 0.8f) { tpress = now; g_bot_pick_on = 0; tried[(ntried++) & 31] = want_h; } }
+      // (07:30: "gave up on BATTLE RIFLE (2.1 units): no closer in 6 s" -- the path ends at the graph's floor node, a weapon on a rack /
+      //  ledge lies off it; the press needed 0.9 units. Now within NHOOK_BOT_PICK_R (1.3) across and 1.5 up / down; the last 3 units are
+      //  walked straight at it (the step's FETCH branch below))
+      if (g_bot_pick_on) { float dx = g_bot_pick_pos[0] - o->c[0], dy = g_bot_pick_pos[1] - o->c[1], dz = g_bot_pick_pos[2] - o->c[2], pr = 1.3f; lk_over(&pr, "NHOOK_BOT_PICK_R");
+          g_pick_d = sqrtf(dx * dx + dy * dy);
+          if (dx * dx + dy * dy < pr * pr && fabsf(dz) < 1.5f) { tpress = now; g_bot_pick_on = 0; tried[(ntried++) & 31] = want_h;
+              if (bot_log()) nlog("[nhook] [fight] at the weapon (%.1f units): holding act to take it", sqrtf(dx * dx + dy * dy)); } }
       uint32_t ppad = bot_pickpad();
       gun_vlist(now);
       if (pb && now - tpress < 0.6 && !gun_near_veh(o->c, 0xFFFFFFFFu)) g_bot_act_until = tpress + 0.6;   // (the act bit held: pick up -- never beside a vehicle: it boards it)
@@ -1142,6 +1155,8 @@ static void bot_step_body(void) {
         yaw = fy; pitch = fp; out |= 1; float rel = bot_wrap(way - yaw), sp = gbd > 1.0f ? 1.0f : gbd > 0.4f ? 0.45f : 0.15f; tx = cosf(rel) * sp; ty = sinf(rel) * sp; out |= 2;
         { static double ttap; if (g_gun_press_ok && now - ttap > 1.2) { ttap = now; g_bot_act_until = now + 0.15; } }   // (a TAP, then 1.2 s to see it seated: a held press seats and then unseats)
         { static double tl; if (bot_log() && now - tl > 1.0) { tl = now; nlog("[nhook] [gunner] boarding: %.1f units from the point behind the turret%s", gbd, g_gun_press_ok ? ", right behind it: pressing act" : ""); } } }
+    else if (arbw == ARB_FETCH && g_pick_d < 3.0f) {   // (the last 3 units of a weapon fetch: straight at it -- it may lie off the walking graph)
+        float way = atan2f(g_bot_pick_pos[1] - o->c[1], g_bot_pick_pos[0] - o->c[0]), rel = bot_wrap(way - yaw), sp = g_pick_d > 1.0f ? 1.0f : 0.5f; tx = cosf(rel) * sp; ty = sinf(rel) * sp; out |= 2; }
     else if (arbw == ARB_FIGHT) { tx = ftx; ty = fty; out |= 2; }   // (the fighter's moves: the arbiter gave it the legs)
     else if (arbw == ARB_HOLD) { tx = 0; ty = 0; out |= 2; }   // (levels apart: the enemy below -- hold the high ground)
     if (testb) { g_bot_btn = ((out & 4) ? g_bot_btn : 0) | g_bot_testbtn; out |= 4; }   // (do=botbtn: held until its time is up)

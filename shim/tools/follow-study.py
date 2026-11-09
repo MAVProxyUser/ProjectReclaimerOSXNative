@@ -48,13 +48,21 @@ def nade_lines(logp, state):
 
 ARC = [0.015, 0.025, 0.035]
 AIMH = [0.55, 0.65, 0.75, 0.85]
-def hone_aim(astate, knobs_path, watcher_port=8765, name='AIWalkerTest'):
-    """the aim point's height (NHOOK_BOT_AIM_HEAD) by HEAD HITS a shot -- measured by the watching player's client (its stats page
-    analyses every other player's shots: n aimed shots, 'on' = through a hitbox, 'head' = of those the topmost) -- the window's change
-    in those cumulative counts credited to the height that ran; next: untried first, else the best (1 in 4 random)"""
-    try: d = json.load(urllib.request.urlopen('http://127.0.0.1:%d/stats.json' % watcher_port, timeout=3))
+def aim_counts(port):
+    """the walker's own judged shots so far (its stats page, the player marked 'you'): (aimed shots, through a hitbox, through the head)"""
+    try: d = json.load(urllib.request.urlopen('http://127.0.0.1:%d/stats.json' % port, timeout=3))
     except Exception: return None
-    a = next((p.get('aim') for p in d.get('players', []) if p.get('name') == name), None)
+    a = next((p.get('aim') for p in d.get('players', []) if p.get('you')), None)
+    if not a or not a.get('n'): return None
+    return a['n'], a['n'] * (a.get('on') or 0), a['n'] * (a.get('on') or 0) * (a.get('head') or 0)
+def hone_aim(astate, knobs_path, port):
+    """the aim point's height (NHOOK_BOT_AIM_HEAD) by HEAD HITS a shot -- measured by the WALKER'S OWN client (its stats page judges
+    its shots against the hitboxes, headless too since 2026-11-09: n aimed shots, 'on' = through a hitbox, 'head' = of those the
+    topmost; the player marked 'you') -- the window's change
+    in those cumulative counts credited to the height that ran; next: untried first, else the best (1 in 4 random)"""
+    try: d = json.load(urllib.request.urlopen('http://127.0.0.1:%d/stats.json' % port, timeout=3))
+    except Exception: return None
+    a = next((p.get('aim') for p in d.get('players', []) if p.get('you')), None)
     if not a or not a.get('n'): return None
     shots, heads = a['n'], a['n'] * (a.get('on') or 0) * (a.get('head') or 0)
     cur = astate.get('cur', 0.55); st = astate.setdefault('stats', {}); last = astate.get('last')
@@ -99,6 +107,10 @@ def refit(rec_dir):
     if p is not None and p.poll() is None: return 'a refit is still running (%.0f s)' % (time.time() - REFIT['t0'])
     msg = ('the last refit took %.0f s; ' % REFIT.get('took', 0)) if p is not None else ''
     if p is not None: REFIT['took'] = time.time() - REFIT['t0']
+    # (07:50: one model build on this Mac at a time -- refresh-loop.sh and an earlier run of this script build the same models; two at
+    #  once only doubled the CPU, each took 10-20 minutes)
+    if subprocess.run(['pgrep', '-f', 'shim/tools/engage-(extract|model)\\.py'], capture_output=True).returncode == 0:
+        REFIT['p'] = None; return msg + 'another model build is running: this one waits'
     root = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..')
     cmd = ('taskpolicy -b nice -n 20 python3 shim/tools/engage-extract.py --tracks "%s" --out "%s" --quiet >/dev/null 2>&1; '
            'taskpolicy -b nice -n 20 python3 shim/tools/engage-model.py >/dev/null 2>&1') % (rec_dir, os.path.join(SUP, 'tracks', 'engagements'))
@@ -174,8 +186,10 @@ def role_model(rec_dir, port, ws):
     allkd = [d for sl, x in P.items() if sl != ws for d in x['kd']]
     return {'P': P, 'order': order, 'rm': rm, 'names': names, 'allkd': allkd, 'score': score, 'ws': ws}
 
+AIMP = [None]   # (the walker's aim counts at the last window's end)
 TRAINED = {'NHOOK_BOT_DIST': (0.5, 2.5), 'NHOOK_BOT_FJUMP': (0.0, 12.0), 'NHOOK_BOT_LIBSCALE': (0.5, 3.0), 'NHOOK_BOT_PRESS': (0.2, 0.95),
-           'NHOOK_BOT_REACT': (0.3, 3.0), 'NHOOK_BOT_RADSCALE': (0.3, 2.5), 'NHOOK_BOT_NOISE': (0.3, 2.0), 'NHOOK_BOT_GRENX': (0.1, 3.0)}
+           'NHOOK_BOT_REACT': (0.3, 3.0), 'NHOOK_BOT_RADSCALE': (0.3, 2.5), 'NHOOK_BOT_NOISE': (0.3, 2.0), 'NHOOK_BOT_GRENX': (0.1, 3.0),
+           'NHOOK_BOT_HEADGATE': (0.6, 2.0)}   # (07:35: "headshots being main goal": the head gate trained too; the aim HEIGHT is hone_aim's alone)
 def lvl_knobs(level, inc):
     """the look sensitivity a level brings: the turn rate once reacting (7 rad/s at level 0, +10% a level, at most 14), the one before
     reacting (0.73 rad/s, +10% a level, at most 2), the aim noise x (1 - 0.04 a level, at least 0.5)"""
@@ -354,7 +368,15 @@ def main():
                 nm.get(rmo['rm'], 'slot %s' % rmo['rm']), x['k'], x['d'], med(x['kd']), med(rmo['allkd']), round(x['jumps'] / (x['near_s'] / 60.0), 1) if x['near_s'] > 30 else '-',
                 med(x['spd']), ', '.join('%s %d' % kv for kv in x['kw'].most_common(3)) or '-', ', '.join(h for h, _ in top) or '-', spots or '-'), flush=True)
         if w['k'] + w['d'] > 0:   # (a window the walker fought in: the trainer's turn)
-            sc = math.log((w['k'] + 1) / (w['d'] + 1))
+            # (07:35: the score counts accuracy and HEADSHOT kills too -- "try to constantly bump up accuracy too ... headshots being main goal")
+            hs_k = sum(1 for kw in w['kw'] if 'headshot' in (kw or '').lower())
+            # (07:50: + the HEAD-HIT rate of its own judged shots this window -- through the head / aimed shots, the walker's own aim meter)
+            ac = aim_counts(port); hr = None
+            if ac and AIMP[0] and ac[0] - AIMP[0][0] >= 5: hr = max(0.0, ac[2] - AIMP[0][2]) / (ac[0] - AIMP[0][0])
+            AIMP[0] = ac or AIMP[0]
+            sc = math.log((w['k'] + 1) / (w['d'] + 1)) + 0.5 * (w['hits'] / w['shots'] if w['shots'] else 0.0) + 0.2 * hs_k + (hr or 0.0)
+            print('  window score %.2f: K/D term %.2f, accuracy %s, head hits a shot %s, headshot kills %d' % (sc, math.log((w['k'] + 1) / (w['d'] + 1)),
+                  '%.0f%%' % (100 * w['hits'] / w['shots']) if w['shots'] else '-', '%.2f' % hr if hr is not None else '-', hs_k), flush=True)
             for line in train(TR, sc, rmo, os.path.join(SUP, 'battles', 'live-knobs', WALKER_NAME[0] + '.json')): print('  ' + line, flush=True)
             print('  trainer: level %d, incumbent %s, its last windows %s' % (TR['level'], ' '.join('%s=%s' % (k2.replace('NHOOK_BOT_', ''), v2) for k2, v2 in sorted(TR['inc'].items())),
                   ' '.join('%.2f' % v for v in TR['inc_scores'][-4:])), flush=True)
@@ -363,7 +385,7 @@ def main():
         cur, nxt, st = hone(res, nst, kp)
         try: json.dump({k: v for k, v in nst.items() if k != 'off'}, open(NST, 'w'))
         except OSError: pass
-        ha = hone_aim(ast, kp)
+        ha = hone_aim(ast, kp, port)
         if ha: print('  aim height: %.2f -> next %.2f; head hits a shot so far %s' % (ha[0], ha[1], ', '.join('%s: %.2f (%d shots)' % (k2, v[1] / v[0] if v[0] else 0, v[0]) for k2, v in sorted(ha[2].items()))), flush=True)
         try: json.dump(ast, open(AST, 'w'))
         except OSError: pass

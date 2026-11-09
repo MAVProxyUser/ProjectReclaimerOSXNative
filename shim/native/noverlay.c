@@ -366,7 +366,12 @@ static void nov_aim_tick_body(void) {   // nrender.m, every frame (the render th
         __atomic_store_n(&g_nov_aimr_w, k + 1, __ATOMIC_RELEASE); g_nov_aim_done++;
     }
 }
-void nov_aim_tick(void) { if (g_hc_off[HC_AIMT]) return; uint64_t t0 = hc_now(); nov_aim_tick_body(); hc_add(HC_AIMT, t0); }
+// (2026-11-09, the user: "the walker should be able to load the same dylib I do and have any function I had": a HEADLESS client -- the
+//  public walker -- never draws a frame, so its shots were never judged against the hitboxes (no aim meter, no head share for its own
+//  tuning). nstats.c's snapshot thread runs this tick while the renderer has drawn nothing (g_nr_frames 0); one caller at a time.
+//  NHOOK_NO_HEADLESS_AIM=1 = the old render-thread-only judging)
+void nov_aim_tick(void) { if (g_hc_off[HC_AIMT]) return; static volatile int busy; if (__atomic_exchange_n(&busy, 1, __ATOMIC_ACQUIRE)) return;
+    uint64_t t0 = hc_now(); nov_aim_tick_body(); hc_add(HC_AIMT, t0); __atomic_store_n(&busy, 0, __ATOMIC_RELEASE); }
 static void on_object_delete(uint64_t* ctx) { if (g_hc_off[HC_DEL]) return; uint64_t t0 = hc_now(); on_object_delete_body(ctx); hc_add(HC_DEL, t0); sm_add(SM_DEL, t0); }   // (timed: nhcost.h)
 static const float g_nov_teamcol[8][3] = {{1, 0.3f, 0.25f}, {0.35f, 0.6f, 1}, {0.35f, 1, 0.35f}, {1, 0.6f, 0.15f}, {0.75f, 0.4f, 1}, {1, 0.9f, 0.2f}, {0.75f, 0.55f, 0.35f}, {1, 0.55f, 0.8f}};
 
