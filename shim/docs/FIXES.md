@@ -3381,6 +3381,8 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   0.7 radii under the centre (9 samples); NHOOK_BOT_FIRE_HITTEST=0 = the cone. Automatic weapons track the head node but aim
   NHOOK_BOT_HEAD_DZ_AUTO (-1.5) head radii under its centre (the neck); precision weapons the head centre (HEAD_DZ taken out of the
   public walker's file). [firegate]'s "aim line not through it" counts what the hit test holds back.
+  A/B (fire-ab.sh, 4 x 60 s each side, a 36-player Last Resort match, mostly assault rifles): the neck (-1.5) -- 486 shots, accuracy
+  54.3%, 5.1 hits a trigger second, 9 kills / 8 deaths; the upper chest (-3.0) -- 388 shots, 42.5%, 3.7, 4 / 10.
 - **The work board learns again while the walker plays; its Walkers tab shows the public walker** (2026-11-09 11:18;
   shim/tools/refresh-loop.sh playing(), shim/tools/workboard.py pubwalker()) — WHY: the user: "are we no longer learning and updating
   the work board, etc?" The 20-minute refresh waits while the user plays, and it took the headless public walker for the user: it had
