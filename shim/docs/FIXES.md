@@ -3426,6 +3426,18 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   brain" revision. A build without nh_brain_warm is swapped in cold as before. Old behaviour: NHOOK_BRAIN_COLD=1. Needs the new body
   (nhook.dylib: a walker launch); brains are NHIO layout 1 as before. Open: an old brain's memory is never freed (dlclose would not
   free its mallocs; ~nav graph + models per swap).
+- **The handoff: a warming brain adopts the running brain's target and goal** (2026-11-09 15:29; nbot.c hand_publish / hand_adopt /
+  BrainHand, nbot_engage.c g_eg_adopt / g_eg_cur) — WHY: the first mid-match hot swap (15:27, Guardian) did not stall -- the 68 ms
+  loading step ran on the warm-up thread and the walker walked straight through it -- but the new brain had picked its own target and
+  goal while it warmed up: at the swap it turned 15-19 deg to another enemy and walked to another goal. LOGIC: the running brain (and
+  the body's built-in one) writes its target (and since when) and its goal (kind, place, whom, until) after every step into a 4 KB
+  shared-memory block of the process (shm "/nhbrain-<pid>", a seqlock); a warming brain copies them before every warm step
+  (eg_choose takes the adopted target, g_gl the goal), so at the swap it carries on with them and decides for itself from the next
+  step. A block of another layout (HAND_VER) is ignored. Live check of the adoption still to do (the walker was kicked at 15:29).
+- **walker-public.sh keeps the last session's log** (2026-11-09 15:36) — WHY: the 15:29 kick ended the app cleanly (a normal exit),
+  the loop relaunched once, native.sh truncated aiwalker.log and the kick left no trace; the rejoin then failed with "You were kicked
+  from this server. You can rejoin in 29 minutes." and the loop stopped as it should. LOGIC: before each launch aiwalker.log ->
+  aiwalker.prev.log; the kick check also matches "kicked".
 - **Before dry: switch at 20% of the magazine in a close fight; reload after each kill** (2026-11-09 15:07; nbot.c) — WHY: the same
   match: all 23 empty-magazine deaths came mid-duel at ~5 units -- in a brawl the next enemy comes right after a kill, so the
   after-the-fight and lull reloads never came, and the EMPTY switch at 0 rounds was too late. LOGIC: in a close fight (g_eng_close)

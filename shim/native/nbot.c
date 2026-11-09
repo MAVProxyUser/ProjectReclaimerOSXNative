@@ -411,6 +411,34 @@ static BotInv g_inv;
 static volatile uint32_t g_ob_enemy_carrier; static int g_ob_state; static float g_ob_pos[3];
 #include "nbot_engage.c"   // the fighter's tactics from the players' fights (engage-model.json: awareness, target choice, movement)
 #include "nbot_goals.c"    // radar, memory, own deaths, and where to go (the goal draw)
+// THE HANDOFF (2026-11-09, the hot takeover; the user: "brain updates should be seamless to the walker even if it is in the middle of an
+// active firefight"): the first mid-match swap (15:27) did not stall, but the new brain had chosen its own target and goal while it
+// warmed up -- at the swap it turned 15-19 deg to another enemy and walked to another goal. Now the running brain publishes its intent
+// every step -- its target (and since when) and its goal -- in a small shared-memory block of this process (shm "/nhbrain-<pid>",
+// a seqlock: odd while written); a brain warming up beside it adopts them every warm step, so at the swap it fights the same enemy and
+// walks to the same goal, and from then on decides for itself. Layout HAND_VER; another layout is ignored (a cold start of intent).
+typedef struct { uint32_t magic, ver; volatile uint32_t seq; uint32_t target; double target_t0; int gk; float gpos[3]; uint32_t gwho; double gt0, guntil; char gwhat[40]; } BrainHand;
+#define HAND_MAGIC 0x4e48424eu
+#define HAND_VER 1
+static BrainHand* hand_get(void) {
+    static BrainHand* h; static int tried; if (h || tried) return h; tried = 1;
+    char nm[32]; snprintf(nm, sizeof nm, "/nhbrain-%d", (int)getpid()); int fd = shm_open(nm, O_RDWR | O_CREAT, 0600); if (fd < 0) return 0;
+    struct stat st; if (!fstat(fd, &st) && st.st_size < 4096 && ftruncate(fd, 4096)) { close(fd); return 0; }
+    void* p = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0); close(fd); if (p == MAP_FAILED) return 0; h = (BrainHand*)p; return h; }
+static void hand_publish(void) {   // (the running brain, every step)
+    BrainHand* h = hand_get(); if (!h) return; uint32_t q = h->seq; if (q & 1) q++;
+    __atomic_store_n(&h->seq, q + 1, __ATOMIC_RELEASE);
+    h->magic = HAND_MAGIC; h->ver = HAND_VER; h->target = g_eg_cur; h->target_t0 = g_eg_cur_t0;
+    h->gk = g_gl.kind; memcpy(h->gpos, g_gl.pos, 12); h->gwho = g_gl.who; h->gt0 = g_gl.t0; h->guntil = g_gl.until; memcpy(h->gwhat, g_gl.what, sizeof h->gwhat);
+    __atomic_store_n(&h->seq, q + 2, __ATOMIC_RELEASE); }
+static void hand_adopt(void) {   // (a warming brain, every warm step)
+    BrainHand* h = hand_get(); if (!h) return; BrainHand c;
+    for (int tries = 0; tries < 4; tries++) { uint32_t a = __atomic_load_n(&h->seq, __ATOMIC_ACQUIRE); if (a & 1) continue;
+        memcpy(&c, h, sizeof c); if (__atomic_load_n(&h->seq, __ATOMIC_ACQUIRE) != a) continue;
+        if (c.magic != HAND_MAGIC || c.ver != HAND_VER || !a) return;
+        g_eg_adopt = c.target; g_eg_adopt_t0 = c.target_t0; g_eg_adopt_on = 1;
+        g_gl.kind = c.gk; memcpy(g_gl.pos, c.gpos, 12); g_gl.who = c.gwho; g_gl.t0 = c.gt0; g_gl.until = c.guntil; memcpy(g_gl.what, c.gwhat, sizeof g_gl.what); g_gl.what[sizeof g_gl.what - 1] = 0;
+        return; } }
 
 // Diagnostics for re-finding the record's fields after an app update (test clients): NHOOK_BOT_THROTTLE=x,y holds that throttle;
 // NHOOK_BOT_BTNSCAN=1 presses record +0xC8 bit k (k = 0..31, one a second, 0.25 s each) -- both log position, velocity and yaw
@@ -2032,7 +2060,10 @@ __attribute__((visibility("default"))) int nh_brain_step(NhIO* io) { if (io->ver
     { static char hmmap[64]; if (strcmp(hmmap, g_st_curmap)) { snprintf(hmmap, sizeof hmmap, "%s", g_st_curmap);   // (the death map of the map being played: the
           pthread_mutex_lock(&g_hm_mx); hm_switch(g_st_curmap); pthread_mutex_unlock(&g_hm_mx);                     //  brain's own copy -- nav_danger_update avoids its hot spots)
           nlog("[nhook] [brain] death map for %s: %u deaths", g_st_curmap[0] ? g_st_curmap : "-", (unsigned)g_hm.nd); } }
-    bot_step(); io_out_pack(io); return 1; }
+    if (g_brain_warm) hand_adopt();
+    bot_step(); io_out_pack(io);
+    if (!g_brain_warm) hand_publish();
+    return 1; }
 // THE HOT TAKEOVER: the body steps a new brain here, on its own thread, beside the running one, until the new one's steps are cheap
 // (its nav graph, death map, map tags, models loaded; its target, aim and path caught up with the world); then it swaps between
 // two steps. Nothing this copy decides here leaves it (the body throws the outputs away; g_brain_warm silences logs and files)
@@ -2094,8 +2125,8 @@ static void* bot_thread(void* p) { (void)p; pthread_setname_np("shim-bot");
     for (;;) { usleep(33000); brain_tick();
         NhBrainStep nx = __atomic_exchange_n(&g_brain_next, (NhBrainStep)0, __ATOMIC_ACQ_REL);
         if (nx) { g_brain = nx; g_brain_n++; g_brain_busy = 0; nlog("[nhook] [brain] #%d took over at this step (the old one stepped until the last)", g_brain_n); }
-        if (g_brain) { NhIO io; memset(&io, 0, sizeof io); io_in_pack(&io); if (g_brain(&io)) io_out_apply(&io); else bot_step(); }
-        else bot_step(); }
+        if (g_brain) { NhIO io; memset(&io, 0, sizeof io); io_in_pack(&io); if (g_brain(&io)) io_out_apply(&io); else { bot_step(); hand_publish(); } }
+        else { bot_step(); hand_publish(); } }
     return 0; }
 #endif
 static void bot_start(void) {   // first use: the thread (also from the launch switches)

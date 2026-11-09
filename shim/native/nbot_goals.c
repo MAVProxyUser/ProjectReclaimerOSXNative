@@ -270,6 +270,7 @@ static void brain_review(double now) {
     if (now - tchk > 2.0) { tchk = now; char p[1100]; const char* h = getenv("HOME");
         snprintf(p, sizeof p, "%s/Library/Application Support/ReclaimerMac/battles/live-knobs/%s.review", h ? h : "/tmp", g_nick[0] ? g_nick : "walker");
         FILE* f = fopen(p, "r");
+        if (!f && seq0 < 0) seq0 = 0;   // (no signal file yet: the monitor's first one -- seq 1 -- is new)
         if (f) { long q = 0; char r[64] = ""; int got = fscanf(f, "%ld %63[^\n]", &q, r); fclose(f);
             if (got >= 1) { if (seq0 < 0) seq0 = q; else if (q != seq0) { seq0 = q; force = 1; snprintf(why, sizeof why, "%s", got > 1 ? r : "monitor"); } } } }
     if (strcmp(map, g_st_curmap)) {   // (a new map -- or a new build of the brain: a revision with its death map; a fresh window, the caution carries)

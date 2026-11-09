@@ -173,9 +173,16 @@ static EgUnit* eg_unit(uint32_t h) { for (int i = 0; i < g_negu; i++) if (g_egu[
 static int eg_aim_at(const NovObj* t, const float* p, float deg) {   // t's unit aim (+0x1a0) within deg of the line to p
     float av[3]; if (!t->p || !hb_read(t->p + 0x1a0, av, 12)) return 0; float dx = p[0] - t->c[0], dy = p[1] - t->c[1];
     float a1 = atan2f(av[1], av[0]), a2 = atan2f(dy, dx), d = fabsf(bot_wrap(a1 - a2)) * 57.2958f; return d < deg; }
+// (2026-11-09, the hot takeover's handoff, nbot.c hand_adopt): a brain warming up beside the running one is given the running brain's
+// target every warm step (g_eg_adopt_on: g_eg_adopt, 0 = none, and since when), so at the swap it fights the same enemy
+static uint32_t g_eg_cur, g_eg_adopt; static double g_eg_cur_t0, g_eg_adopt_t0; static int g_eg_adopt_on;
 // The choice: returns the index in objs of the target (-1 = nobody known), keeps / switches as the players do.
 static int eg_choose(const NovObj* objs, int n, int me, const float* cam, float yaw0, double now, int (*vis_of)(uint32_t, double)) {
     const NovObj* o = &objs[me]; static uint32_t cur; static double cur_t0, cur_seen, sw_at; static uint32_t sw_to, prev; static double prev_t; static float myvit = -1; static double my_hurt;
+    if (g_eg_adopt_on) { g_eg_adopt_on = 0;
+        if (g_eg_adopt != cur) { if (cur) { prev = cur; prev_t = now; } cur = g_eg_adopt; cur_seen = now; sw_to = 0; }
+        cur_t0 = g_eg_adopt_t0; }
+    g_eg_cur = cur; g_eg_cur_t0 = cur_t0;
     float mv = o->shield + o->health; if (myvit >= 0 && mv < myvit - 0.02f) my_hurt = now; myvit = mv;
     int ci = -1;
     // (2026-11-09, the user: "auto target anyone shooting me. this will hone the walkers skills immensely"): the LEADER the walker

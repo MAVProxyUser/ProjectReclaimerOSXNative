@@ -18,6 +18,9 @@ except Exception: sys.exit(1)
 sys.exit(0 if any(p.get("you") for p in d.get("players", [])) else 1)'; }
 apps() { pgrep -f "^/Applications/Project Reclaimer.app/Contents/MacOS/project-reclaimer --join-server $ADDR --headless"; }
 while true; do
+  # (2026-11-09 15:29: a kick ended the session, the relaunch truncated the log and the kick's evidence with it: the last session's log
+  #  is kept as aiwalker.prev.log)
+  [ -s "$S/battles/aiwalker.log" ] && mv -f "$S/battles/aiwalker.log" "$S/battles/aiwalker.prev.log"
   WE=$(python3 shim/tools/walker-coach.py show 2>/dev/null | sed -n "s/^walker $WID: //p")
   env $WE HOME="$FH" NATIVE_REAL=1 NATIVE_ALLOW_SECOND=1 NATIVE_LOG="$S/battles/aiwalker.log" NHOOK_STATS_HTTP=$PORT NHOOK_STATS_OPEN=0 NHOOK_MUTE_OUTPUT=1 \
     PELOAD_FORENSIC_DIR="$S/native/public-walker/forensics" NHOOK_HEATMAP_DIR="$S/native/public-walker/heatmaps" \
@@ -33,7 +36,7 @@ while true; do
   for p in $(apps); do kill "$p"; done; sleep 4; for p in $(apps); do kill -9 "$p" 2>/dev/null; done; wait $L 2>/dev/null
   # (2026-11-09 05:42: the walker was KICKED -- "You were kicked from this server. You can rejoin in 9 minutes." -- any player can boot it
   #  and that is the signal that someone has an issue: the loop stops instead of rejoining after the cooldown)
-  if tail -n 400 "$S/battles/aiwalker.log" 2>/dev/null | grep -a -q 'You were kicked from this server'; then
+  if tail -n 400 "$S/battles/aiwalker.log" 2>/dev/null | grep -a -q 'You were kicked from this server\|kicked'; then
     echo "$(date +%H:%M:%S) the walker was kicked from $ADDR: not rejoining (stopped)"; exit 0; fi
   sleep 30
 done
