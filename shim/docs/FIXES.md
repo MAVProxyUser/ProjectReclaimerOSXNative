@@ -3448,6 +3448,16 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   brain is refused by a v2 body and the other way round: rebuild both). Lead latency = rtt x NHOOK_BOT_LEAD_RTT (1.25 / 1000 -- 0.08 s
   at 64 ms, 0.18 s at 145 ms); a NHOOK_BOT_LEAD_LAT in the live file still wins. A review's kills = the scoreboard's since the window
   began (the old count when the body has none); the review line gives the ping.
+- **Infection tactics: a zombie hunts and charges, a human groups up** (2026-11-09 18:40; nbot.c g_inf_me, inf_group_goal, the goal
+  choice, the fight move; nbrain_beh.c cover / recharge / break-off) — WHY: the user asked for an Infection profile ("I know it's a
+  completely new game tactic" -> "yes"): the walker played Infection with its normal fight -- as a zombie the caution of a bad window
+  halved its charge (caution 0.98 on Sandtrap while it died ~3 a minute), as a human it fought alone. LOGIC: g_inf_me = its side from the
+  sides the body hands the brain (NhIO v3): 1 zombie, 0 human, -1 not Infection ("[inf] I'm a ZOMBIE now ..." / "I'm a HUMAN ..."). A
+  ZOMBIE: the nav goal is the nearest human, distance x (1 + 0.5 per other human within 6 units of it) -- the lonely ones first; in a
+  fight r = 1 (straight in) with a NHOOK_INF_ZWEAVE (0.35) weave every 0.7 s, after the crowd / caution / shield rules (they no longer
+  hold it back); no cover, recharge or break-off. A HUMAN out of a fight: to the biggest group of humans within 80 units (humans within
+  NHOOK_INF_GROUP 8 units of each other) and, within NHOOK_INF_HOLD (4) of it, holds there (no goal, the old path dropped; the stuck
+  grenade waits while it holds); swords and hammers are kited as before (NHOOK_BOT_KITE). NHOOK_INF=0 (live) = the normal fight.
 - **Infection sides by a vote; the brain gets them** (2026-11-09 18:25; nstats.c st_is_zombie, the players' "zombie", "infection sides"
   line, nbot.c NhIO layout 3) — WHY: the user: "hitbox rendering for other team doesn't work on infection games. even though there is a
   *clear* other team, although they do switch mid game". In a custom variant (a 97-player "Infection - 300% Large": zombies colour 10, 50%

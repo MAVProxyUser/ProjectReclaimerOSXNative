@@ -98,7 +98,7 @@ static void beh_break(const World* W, Arb* a) {
     const NovObj* o = W->o; static float hist[8][3]; static double th, t0; static int nh;
     if (W->now - th > 0.5) { th = W->now; memmove(hist[1], hist[0], sizeof(float) * 21); memcpy(hist[0], o->c, 12); if (nh < 8) nh++; }
     float u = 70; lk_over(&u, "NHOOK_U_BREAK"); if (u <= 0) return;
-    if (o->shield > 0.6f || g_noshield) { t0 = 0; return; }
+    if (o->shield > 0.6f || g_noshield || g_inf_me == 1) { t0 = 0; return; }
     int start = o->shield < 0.15f && g_ftg_vis && g_ftg_d > 3.0f && g_ftg_d < 25.0f && g_ftg_v > o->shield + o->health + 0.2f;
     if (t0 <= 0 && !start) return;
     if (t0 <= 0) { t0 = W->now; if (bot_log()) nlog("[nhook] [break] shield %.2f, the target healthier (%.2f) at %.0f units: breaking off the way I came", o->shield, g_ftg_v, g_ftg_d); }
@@ -116,6 +116,7 @@ static void beh_break(const World* W, Arb* a) {
 static void beh_cover(const World* W, Arb* a) {
     const NovObj* o = W->o; static float sh[16]; static double tsh; static int nsh;
     if (W->now - tsh > 0.1) { tsh = W->now; memmove(sh + 1, sh, sizeof(float) * 15); sh[0] = o->shield; if (nsh < 16) nsh++; }
+    if (g_inf_me == 1) return;   // (Infection: a zombie never takes cover)
     float u = 80, drop = 0.35f, lim = 0.5f, until = 0.9f; lk_over(&u, "NHOOK_U_COVER"); lk_over(&drop, "NHOOK_BOT_COVER_DROP"); lk_over(&lim, "NHOOK_BOT_COVER_SH"); lk_over(&until, "NHOOK_BOT_COVER_UNTIL");
     static int st; static double t0, tsearch; static float spot[3], fz[8]; static signed char ans[8];   // (ans: -1 none yet, 0 hidden, 1 seen)
     if (u <= 0 || !g_nav.ok) { st = 0; g_cov_n = 0; return; }
@@ -157,7 +158,7 @@ static void beh_cover(const World* W, Arb* a) {
     if (bot_log()) nlog("[nhook] [cover] shield %.2f (from %.2f in 1.5 s), %08x at %.0f units: testing %d spots", o->shield, mx, g_ftg_h, al, nc); }
 static void beh_recharge(const World* W, Arb* a) {
     const NovObj* o = W->o; static double t0; float u = 65, lim = 0.6f; lk_over(&u, "NHOOK_U_RECHARGE"); lk_over(&lim, "NHOOK_BOT_RECHARGE_SH");
-    if (u <= 0 || o->shield >= 0.95f || g_noshield) { t0 = 0; return; }
+    if (u <= 0 || o->shield >= 0.95f || g_noshield || g_inf_me == 1) { t0 = 0; return; }
     if (g_eng_close) return;
     if (o->shield >= lim && t0 <= 0) return;
     if (t0 <= 0) { t0 = W->now; if (bot_log()) nlog("[nhook] [recharge] shield %.2f, nobody in sight: backing off to recharge", o->shield); }

@@ -75,6 +75,13 @@ static int g_noshield;
 // the three-minute review counted "a target that died while I fought it" as a kill -- 17 "kills" in a UK match the scoreboard put at 3
 static int g_my_kills = -1, g_my_deaths = -1;
 static double g_nav_ok_t;   // (2026-11-09) the last time the planner found a path (the unstick: no path anywhere for 45 s = stuck too)
+// INFECTION (2026-11-09, the user: "yes" to an Infection profile -- the walker went in with its normal fight: as a zombie the caution of
+// a bad window HALVED its charge, as a human it fought alone): g_inf_me = its side, from the sides the body hands the brain (NhIO v3):
+// 1 a zombie, 0 a human, -1 not Infection. A zombie hunts the nearest human (the lonely ones first), charges straight in with a light
+// weave whatever the caution / crowd / shield say, no cover / recharge / break-off. A human goes to the biggest group of humans near it
+// and holds there (kiting swords / hammers, NHOOK_BOT_KITE, as before). Live knobs NHOOK_INF (1; 0 = off), NHOOK_INF_ZWEAVE (0.35),
+// NHOOK_INF_GROUP (8 units: a group), NHOOK_INF_HOLD (4 units: close enough to hold)
+static int g_inf_me = -1; static double g_inf_hold_t;
 static int bot_log(void) { static int l = -1; if (l < 0) l = getenv("NHOOK_SPAR_LOG") ? 1 : 0; return l && !g_brain_warm; }
 
 static int bot_private_addr(const char* a) {   // "ip:port" at a loopback / private address
@@ -284,6 +291,19 @@ static void bm_pop(const char* map) {
     int lcells = 0; { LnGrid lg = {0}; if (bm_lanes_read(map, &lg)) lcells = bm_lanes_mix(&lg, pop); ln_free(&lg); }
     if (mx <= 0 && !lcells) { free(pop); nlog("[nhook] [fight] no heat or lanes for %s: shortest paths", map); return; }
     float* old = g_nav.pop; g_nav.pop = pop; free(old); nlog("[nhook] [fight] %s: player lanes from %d heat cells and %d lane cells (A* prefers them)", map, cells, lcells); }
+static int inf_group_goal(const NovObj* objs, int n, int me, const float* pos, int* goal, double now) {   // -> 0 not handled, 1 a goal, 2 hold here
+    float gr = 8, hd = 4; lk_over(&gr, "NHOOK_INF_GROUP"); lk_over(&hd, "NHOOK_INF_HOLD");
+    int bi = -1, bn = 0; float bd = 1e30f;
+    for (int i = 0; i < n; i++) { const NovObj* t = &objs[i]; if (t->type || t->dead || i == me || nov_side_of(t->handle) != 0) continue;
+        float dx = t->c[0] - pos[0], dy = t->c[1] - pos[1], d = sqrtf(dx * dx + dy * dy); if (d > 80) continue;
+        int nb = 1; for (int j = 0; j < n; j++) { const NovObj* u = &objs[j]; if (j == i || j == me || u->type || u->dead || nov_side_of(u->handle) != 0) continue;
+            float ex = u->c[0] - t->c[0], ey = u->c[1] - t->c[1]; if (ex * ex + ey * ey < gr * gr) nb++; }
+        if (nb > bn || (nb == bn && d < bd)) { bn = nb; bd = d; bi = i; } }
+    if (bi < 0) return 0;
+    if (bd <= hd) { g_inf_hold_t = now; return 2; }
+    float tp[3] = {objs[bi].c[0], objs[bi].c[1], objs[bi].c[2] - 0.35f}; int gn = nav_node_at(tp); if (gn < 0) return 0; *goal = gn;
+    static double tl; if (bot_log() && now - tl > 15) { tl = now; nlog("[nhook] [inf] a human: to the group of %d humans at (%.0f, %.0f), %.0f units away", bn, objs[bi].c[0], objs[bi].c[1], bd); }
+    return 1; }
 static int bot_floor_ok(const float* p) {   // a walkable floor node within ~1 unit (fighting moves leave the path: never off a ledge)
     if (!g_nav.ok) return 1; int n = nav_node_at(p); if (n < 0) return 0; float q[3]; nav_pos(n, q);
     return (q[0] - p[0]) * (q[0] - p[0]) + (q[1] - p[1]) * (q[1] - p[1]) < 1.44f && fabsf(q[2] - p[2]) < 1.2f; }
@@ -1145,6 +1165,10 @@ static void bot_step_body(void) {
       float fo = -1; lk_over(&fo, "NHOOK_BOT_NOSHIELD"); if (fo >= 0) ns = fo > 0.5f;
       if (ns != g_noshield && bot_log()) nlog("[nhook] [bot] %s", ns ? "no shields in this game (SWAT: a headshot kills): the shield rules stand down; the SWAT profile is on -- reacting x0.5, turning x1.5 / x1.3, aim noise x0.6, autos aim at the head too, the trigger only when the aim line goes through the HEAD, pressing x0.5" : "shields are back: the shield rules are on again, the SWAT profile off");
       g_noshield = ns; }
+    { float io = 1; lk_over(&io, "NHOOK_INF"); int im = (io > 0 && g_nov_sides_on && me >= 0) ? nov_side_of(objs[me].handle) : -1;
+      if (im != g_inf_me && bot_log()) nlog("[nhook] [inf] %s", im == 1 ? "I'm a ZOMBIE now: hunting the nearest human, the lonely ones first, charging straight in -- no cover, no backing off" :
+                                                          im == 0 ? "I'm a HUMAN: to the biggest group of humans near me, holding there, kiting swords and hammers" : "not Infection (or not known): the normal fight");
+      g_inf_me = im; }
     // seated = a seat index OR a parent (02:20: on the turret the walker went on fighting on foot -- "stuck" in one spot -- after a burst:
     //  the seat field alone missed it). The state is logged at each change with every handle it is read from
     int seated = me >= 0 && !objs[me].dead && (objs[me].seat >= 0 || objs[me].parent != 0xFFFFFFFFu); if (seated) g_bot_seat_t = now;
@@ -1572,6 +1596,8 @@ static void bot_step_body(void) {
                 // (06:58: the fight GAIN -- "[moves] ... moved 1.09 u/s, asked 1.19 u/s" in a local battle: not blocked, timid; the best
                 //  players move 1.71 u/s (median) in fights. The fight's move is scaled by NHOOK_BOT_FIGHT_GAIN (1.4, live; 1 = old), each
                 //  axis kept within -1..1, before the floor check below (which still keeps it on the ledge); a kite / crowd escape is full already)
+                // INFECTION, a zombie: straight in, a light weave -- whatever the crowd, the caution or the shield said above
+                if (g_inf_me == 1) { float zw = 0.35f; lk_over(&zw, "NHOOK_INF_ZWEAVE"); r = 1.0f; lat = fmod(now, 1.4) < 0.7 ? zw : -zw; g_kite = 0; }
                 if (!g_kite) { float fg = 1.4f; lk_over(&fg, "NHOOK_BOT_FIGHT_GAIN"); if (fg > 0 && fg != 1.0f) { r = fmaxf(-1, fminf(1, r * fg)); lat = fmaxf(-1, fminf(1, lat * fg)); } }
                 // never off the floor: test where this step leads (1 unit along the move); flip the strafe, then drop the back-off
                 float fx = cosf(yaw0), fy = sinf(yaw0), lx = -fy, ly = fx; float lat_in = lat, r_in = r; int ftries = 0;
@@ -1835,12 +1861,20 @@ static void bot_step_body(void) {
     if (mode && g_nav.ok) {
         float pos[3] = {o->c[0], o->c[1], o->c[2] - 0.35f}; int cur = nav_node_at(pos);
         if (cur >= 0) {
-            int need = plen == 0 || goal < 0 || now - tplan > (mode == 2 ? 1.0 : 3.0);
+            int need = plen == 0 || goal < 0 || now - tplan > (mode == 2 ? 1.0 : 3.0); int gres = 0;
             if (goal >= 0 && plen) { float gp[3]; nav_pos(goal, gp); if ((gp[0] - pos[0]) * (gp[0] - pos[0]) + (gp[1] - pos[1]) * (gp[1] - pos[1]) < 1.0f) { nav_say("  [nav] reached the goal\n"); goal = -1; need = 1;
                 // (06:15: the goal draw handed the same goal back at once -- "path of 2 nodes ... reached the goal" in a loop, the walker
                 //  standing still, read as "stuck" ~1 a second in local battles: a reached hunt goal is dropped from the draw)
                 if (mode == 2 && g_eg.on && gl_on()) gl_drop(now, "reached"); } }
             if (mode == 2 && g_bot_pick_on) { int gn = nav_node_at(g_bot_pick_pos); if (gn >= 0) goal = gn; }   // (the fighter's pickup: walk to the weapon)
+            else if (mode == 2 && g_inf_me == 1) {   // INFECTION, a zombie: the nearest human, one with other humans near it counted farther
+                float bs = 1e30f; int bi = -1;
+                for (int i = 0; i < n; i++) { const NovObj* t = &objs[i]; if (t->type || t->dead || i == me || nov_side_of(t->handle) != 0) continue;
+                    float dx = t->c[0] - pos[0], dy = t->c[1] - pos[1], d = sqrtf(dx * dx + dy * dy); int nb = 0;
+                    for (int j = 0; j < n; j++) { const NovObj* u = &objs[j]; if (j == i || u->type || u->dead || nov_side_of(u->handle) != 0) continue; float ex = u->c[0] - t->c[0], ey = u->c[1] - t->c[1]; if (ex * ex + ey * ey < 36) nb++; }
+                    float sc = d * (1 + 0.5f * nb); if (sc < bs) { bs = sc; bi = i; } }
+                if (bi >= 0) { float tp[3] = {objs[bi].c[0], objs[bi].c[1], objs[bi].c[2] - 0.35f}; int gn = nav_node_at(tp); if (gn >= 0) goal = gn; } }
+            else if (mode == 2 && g_inf_me == 0 && !g_bot_fighting && (gres = inf_group_goal(objs, n, me, pos, &goal, now)) != 0) { if (gres == 2) { goal = -1; plen = 0; } }   // INFECTION, a human: with the group
             else if (mode == 2 && g_eg.on && gl_on()) {   // the goal draw (nbot_goals.c): known enemies, revenge, items, lanes -- never none
                 if (gl_tick(now, objs, n, me, los_get)) { float gp[3] = {g_gl.pos[0], g_gl.pos[1], g_gl.kind == GK_ENEMY || g_gl.kind == GK_REVENGE || g_gl.kind == GK_ITEM || g_gl.kind == GK_MATE || g_gl.kind == GK_AID ? g_gl.pos[2] - 0.35f : pos[2]};
                     int gn = nav_node_at(gp); if (gn < 0) { gl_drop(now, "no floor there"); } else if (gn != goal) { goal = gn; need = 1; } } }
@@ -2098,7 +2132,8 @@ static void bot_step_body(void) {
           for (int i = i0; i < rn; i++) { float dx = ring[i & 127][0] - a0[0], dy = ring[i & 127][1] - a0[1]; if (dx * dx + dy * dy > 36.0f) { stuck = 0; break; } } }
       // (17:35: on the Hugegrass island the escape hopped it back and forth over 6 units, so it never counted as standing still: no path
       //  found to anywhere for the same time counts as stuck too)
-      if (!stuck && us > 0 && alive_me && g_nav.ok && now - tfight > 15.0 && alive_t0 > 0 && now - alive_t0 > us && now - g_nav_ok_t > us) stuck = 1;   /* (only with a walking graph: none = no plan at all, not stuck) */
+      if (now - g_inf_hold_t < 3.0) stuck = 0;
+      if (!stuck && us > 0 && alive_me && g_nav.ok && now - g_inf_hold_t > 3.0 && now - tfight > 15.0 && alive_t0 > 0 && now - alive_t0 > us && now - g_nav_ok_t > us) stuck = 1;   /* (only with a walking graph: none = no plan at all, not stuck) */
       if (stuck) { int mate = 0; for (int i = 0; i < n; i++) { const NovObj* t = &objs[i]; if (t->type || t->dead || i == me || bot_enemy(o, t)) continue;
               float dx = t->c[0] - o->c[0], dy = t->c[1] - o->c[1], dz = t->c[2] - o->c[2]; if (dx * dx + dy * dy + dz * dz < 100.0f) { mate = 1; break; } }
           int nades = g_inv.frag + g_inv.plasma > 0 || g_inv.gren > 0;
