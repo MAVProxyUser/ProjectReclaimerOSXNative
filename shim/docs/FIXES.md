@@ -3272,6 +3272,24 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   a running battle, at every round end (our server's in_match true -> false) walker-coach.py round + match-study.py, then each
   walker's game restarted headless with its new knobs and the newest build (they rejoin in the lobby; the user's game and the
   server stay).
+- **The walker's brain reloads in a running game: code changes without a restart or a rejoin** (2026-11-09 06:20; nbot.c NhIO /
+  brain_tick / nh_brain_step, nhook.c / nstats.c NH_BRAIN guards, build.sh nbrain.dylib, shim/tools/stats-proxy.py) — WHY: the user:
+  "why did the walker quit? it should have just restarted itself. stop quitting games. make the engine able to restart or reimport the
+  code change"; "I want those changes to be loaded into the running bot without a restart or rejoin". LOGIC: build.sh also builds the
+  same C code with -DNH_BRAIN as shim/build/nbrain.dylib (-undefined dynamic_lookup): no start-up (the constructor), no interposing
+  (INTERPOSE empty), and what only the body knows comes from the body's exports -- nhx_tls_block (the engine context its hooks
+  pinned), nhx_hb_current_map / nhx_hb_tag_name (the maps it saw opened), nhx_bot_hook_install; the ObjC / stub symbols bind to the
+  body's. The body's step thread looks at nbrain.dylib (beside nhook.dylib, or NHOOK_BRAIN) every 2 s; a changed one is copied to a
+  fresh file in TMPDIR (dlopen caches by path), dlopen'ed, its layout (nh_brain_version, NHIO_VERSION 1) checked, and from the next step
+  nh_brain_step(NhIO*) is the walker: the body packs its state (own / leader / human units, server, nickname, map, mode, radar traits,
+  match start, test controls, line-of-sight answers ...), the brain applies it to its own copy, steps, and returns what the hooks write
+  (aim, throttle, buttons, the act / melee / switch windows, the seat and exit times, line-of-sight requests -- the request counter last)
+  for the body to apply. A brain starts its own memory (path, goal, models, live knobs) afresh; old brains stay loaded (their threads).
+  NHOOK_NO_BRAIN=1 = the built-in walker. Each brain logs "[brain] code built <date time> is stepping" once. VERIFIED on our local
+  server: a test walker on the new body loaded brain #1 and walked through it; the brain was rebuilt under it; "#2 loaded", the new
+  build's line, 47 decisions from it within seconds -- same process (pid unchanged), still in the server's player list. ALSO:
+  stats-proxy.py serves the walker's stats page (8771) on the user's usual 8765 while his game is closed (this Mac only; it steps
+  aside when a game of his starts).
 - **A leash, not a puppy; the aim point on the head; weapons fetched within the leash** (2026-11-09 06:00; nbot.c WINGMAN / the sparring
   aim, follow-study.py hone_aim) — WHY: the user: "now the walker is super needy following me like a puppy but not engaging in anything
   aggressively. I feel like it sucks at hitting the head hitbox. and ALWAYS uses a garbage AR instead of finding something better". The

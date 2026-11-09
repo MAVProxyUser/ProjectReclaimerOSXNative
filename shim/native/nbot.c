@@ -324,6 +324,13 @@ static void bot_on_abuild(uint64_t* ctx) {
     if (b8) *(uint64_t*)(act + 8) |= b8;
     double nw = mono_s(); uint32_t b2c = g_bot_pkt_btn2c | (tpk ? g_bot_tpk2c : 0) | (nw < g_bot_act_until && (nw - g_bot_seat_t > 0.6 || nw < g_gun_exit_until) ? bot_actbit() : 0) | (nw < g_bot_switch_until ? bot_switchbit() : 0);
     if (b2c) *(act + 0x2c) |= (uint8_t)b2c; }
+#ifdef NH_BRAIN   // (the brain: the hooks are the body's, installed once)
+int nhx_bot_hook_install(void);
+static void pkt_hook_install(void) {}
+static int bot_hook_install(void) { return nhx_bot_hook_install(); }
+#define pkt_hook_install pkt_hook_install_body
+#define bot_hook_install bot_hook_install_body
+#endif
 static void pkt_hook_install(void) {   // the control packet builder's hook: the walker's moves, and NHOOK_INPUT_LOG's reads
     static int done; if (done || getenv("NHOOK_BOT_NOPKT")) return; done = 1; uint64_t a = branch_target_of(0x50fb8);
     if (!a || text_hook("control packet (walker on a server)", a, bot_on_abuild)) nlog("[nhook] [bot] halo3+0x50fb8 could not be hooked: a joined walker's moves stay local");
@@ -334,6 +341,12 @@ static int bot_hook_install(void) {
     uint64_t t = branch_target_of(0xf7178);
     g_bot_hook = t ? !text_hook("player control (sparring aim / walker)", t, bot_on_reader) : !body_hook_after("player control (sparring aim / walker)", 0xf66ac, bot_on_update);
     if (!g_bot_hook) nlog("[nhook] [bot] halo3+0xf66ac could not be hooked: no sparring aim / walker"); return g_bot_hook; }
+#ifdef NH_BRAIN
+#undef pkt_hook_install
+#undef bot_hook_install
+#else
+__attribute__((visibility("default"))) int nhx_bot_hook_install(void) { return bot_hook_install(); }   // (the brain's way to it)
+#endif
 
 // units (players' bipeds) from the object table: noverlay.c's collector in its units-only mode, under its lock
 static int bot_units(NovObj* o, int max) {
@@ -1176,7 +1189,90 @@ static void bot_step_body(void) {
       bot_pad(-ty, tx, (g_bot_trig || (tp & 0x80000000u)) ? 1.0f : 0.0f, (((out & 4) && (g_bot_btn & g_bot_jump)) ? 1u : 0u) | (fbtn & 0xFFFF) | ((fbtn & 0x10000) ? 0x40000000u : 0) | (tp & 0x4000FFFFu)); }
     if (!(spar && g_bot_err >= 0)) g_bot_fire = 0;
 }
-static void* bot_thread(void* p) { (void)p; pthread_setname_np("shim-bot"); for (;;) { usleep(33000); bot_step(); } return 0; }
+// ---- THE BRAIN AS A RELOADABLE MODULE (2026-11-09, the user: "I want those changes to be loaded into the running bot without a restart
+// or rejoin"). nbrain.dylib is this same code built with -DNH_BRAIN (build.sh): no start-up, no hooks, no interposing; the engine
+// context, the current map and its tag names and the hooks come from the body (nhx_* exports). Every step the body hands it the game's
+// state (NhIO inputs: who it is, its leader, the server, the match, line-of-sight answers, test controls) and takes back what the hooks
+// write (NhIO outputs: aim, throttle, buttons, the act / melee / switch windows, line-of-sight requests). The body looks at
+// nbrain.dylib (beside nhook.dylib, or NHOOK_BRAIN) every 2 s: a newer one is copied to a fresh file (dlopen caches by path), loaded,
+// its layout version checked, and from the next step it is the walker -- the game, its connection and its place never stop. A brain's
+// own memory (path, goal, models, live knobs) starts again at a load. Old brains are never unloaded (threads they started -- the
+// walking-graph builder's waiter, chat lines -- may still run in them). NHOOK_NO_BRAIN=1 = the built-in walker only. [brain] lines.
+#define NHIO_VERSION 1
+typedef struct {
+    int version;
+    // body -> brain
+    uint32_t my_unit, follow_unit, human_unit[8]; int human_n; char srv_addr[96], nick[64], st_curmap[64], trk_mode[48], veh[64];
+    double gameplay_t0; int rd_mode, rd_range, vpad_on, spar, nav_mode_rt, ht_my_slot, shadow; float pt[3]; uint64_t jump;
+    uint64_t testbtn; double testbtn_until; uint32_t testpad; double testpad_until;
+    int los_done, los_res; uint32_t los_res_tgt; double los_t; uint64_t inp_b8_acc;
+    // brain -> body
+    int out; float yaw, pitch, tx, ty; uint64_t btn; int fire, fighting, trig; float err; uint64_t unit_p;
+    double melee_until, act_until, switch_until, seat_t, gun_exit_until;
+    int los_req; float los_p[3], los_v[3]; uint32_t los_ign[2], los_tgt; int nav_act; uint32_t bot_unit;
+} NhIO;
+static void io_in_pack(NhIO* io) {   // (the body) its state -> the brain
+    io->version = NHIO_VERSION; io->my_unit = g_my_unit; io->follow_unit = g_follow_unit; io->human_n = g_human_n; for (int i = 0; i < 8; i++) io->human_unit[i] = g_human_unit[i];
+    memcpy(io->srv_addr, g_srv_addr, sizeof io->srv_addr); memcpy(io->nick, g_nick, sizeof io->nick); memcpy(io->st_curmap, g_st_curmap, sizeof io->st_curmap);
+    memcpy(io->trk_mode, g_trk_mode, sizeof io->trk_mode); memcpy(io->veh, g_bot_veh, sizeof io->veh); memcpy(io->pt, g_bot_pt, sizeof io->pt);
+    io->gameplay_t0 = g_gameplay_t0; io->rd_mode = g_rd_mode; io->rd_range = g_rd_range; io->vpad_on = g_vpad_on; io->spar = g_bot_spar; io->nav_mode_rt = g_nav_mode_rt;
+    io->ht_my_slot = g_ht_my_slot; io->shadow = g_bot_shadow; io->jump = g_bot_jump; io->testbtn = g_bot_testbtn; io->testbtn_until = g_bot_testbtn_until;
+    io->testpad = g_bot_testpad; io->testpad_until = g_bot_testpad_until; io->los_done = g_los_done; io->los_res = g_los_res; io->los_res_tgt = g_los_res_tgt; io->los_t = g_los_t;
+    io->inp_b8_acc = g_inp_b8_acc;
+    io->los_req = g_los_req; }   // (the brain keeps counting from the body's)
+static void io_in_apply(const NhIO* io) {   // (the brain) the body's state -> this copy's globals
+    g_my_unit = io->my_unit; g_follow_unit = io->follow_unit; g_human_n = io->human_n; for (int i = 0; i < 8; i++) g_human_unit[i] = io->human_unit[i];
+    memcpy((void*)g_srv_addr, io->srv_addr, sizeof io->srv_addr); memcpy(g_nick, io->nick, sizeof io->nick); memcpy(g_st_curmap, io->st_curmap, sizeof io->st_curmap);
+    memcpy(g_trk_mode, io->trk_mode, sizeof io->trk_mode); memcpy(g_bot_veh, io->veh, sizeof io->veh); memcpy(g_bot_pt, io->pt, sizeof io->pt);
+    g_gameplay_t0 = io->gameplay_t0; g_rd_mode = io->rd_mode; g_rd_range = io->rd_range; g_vpad_on = io->vpad_on; g_bot_spar = io->spar; g_nav_mode_rt = io->nav_mode_rt;
+    g_ht_my_slot = io->ht_my_slot; g_bot_shadow = io->shadow; g_bot_jump = io->jump; g_bot_testbtn = io->testbtn; g_bot_testbtn_until = io->testbtn_until;
+    g_bot_testpad = io->testpad; g_bot_testpad_until = io->testpad_until; g_los_done = io->los_done; g_los_res = io->los_res; g_los_res_tgt = io->los_res_tgt; g_los_t = io->los_t;
+    g_inp_b8_acc = io->inp_b8_acc; g_los_req = io->los_req; }
+static void io_out_pack(NhIO* io) {   // (the brain) what the hooks write
+    io->out = g_bot_out; io->yaw = g_bot_yaw; io->pitch = g_bot_pitch; io->tx = g_bot_tx; io->ty = g_bot_ty; io->btn = g_bot_btn; io->fire = g_bot_fire; io->fighting = g_bot_fighting;
+    io->trig = g_bot_trig; io->err = g_bot_err; io->unit_p = g_bot_unit_p; io->melee_until = g_bot_melee_until; io->act_until = g_bot_act_until; io->switch_until = g_bot_switch_until;
+    io->seat_t = g_bot_seat_t; io->gun_exit_until = g_gun_exit_until; io->los_req = g_los_req; memcpy(io->los_p, g_los_p, sizeof io->los_p); memcpy(io->los_v, g_los_v, sizeof io->los_v);
+    io->los_ign[0] = g_los_ign[0]; io->los_ign[1] = g_los_ign[1]; io->los_tgt = g_los_tgt; io->nav_act = g_nav_act; io->bot_unit = g_bot_unit; }
+static void io_out_apply(const NhIO* io) {   // (the body) -> the hooks' globals (the line-of-sight request last: its fields first)
+    g_bot_yaw = io->yaw; g_bot_pitch = io->pitch; g_bot_tx = io->tx; g_bot_ty = io->ty; g_bot_btn = io->btn; g_bot_fire = io->fire; g_bot_fighting = io->fighting; g_bot_trig = io->trig;
+    g_bot_err = io->err; g_bot_unit_p = io->unit_p; g_bot_melee_until = io->melee_until; g_bot_act_until = io->act_until; g_bot_switch_until = io->switch_until;
+    g_bot_seat_t = io->seat_t; g_gun_exit_until = io->gun_exit_until; g_nav_act = io->nav_act; g_bot_unit = io->bot_unit;
+    if (io->los_req != g_los_req) { memcpy(g_los_p, io->los_p, sizeof g_los_p); memcpy(g_los_v, io->los_v, sizeof g_los_v); g_los_ign[0] = io->los_ign[0]; g_los_ign[1] = io->los_ign[1];
+        g_los_tgt = io->los_tgt; __atomic_store_n(&g_los_req, io->los_req, __ATOMIC_RELEASE); }
+    g_bot_out = io->out; }
+#ifdef NH_BRAIN
+__attribute__((visibility("default"))) int nh_brain_version(void) { return NHIO_VERSION; }
+__attribute__((visibility("default"))) int nh_brain_step(NhIO* io) { if (io->version != NHIO_VERSION) return 0;
+    static int told; if (!told) { told = 1; nlog("[nhook] [brain] code built %s %s is stepping", __DATE__, __TIME__); }
+    io_in_apply(io); bot_step(); io_out_pack(io); return 1; }
+static void* bot_thread(void* p) { (void)p; return 0; }   // (never started here: the body's thread calls nh_brain_step)
+#else
+typedef int (*NhBrainStep)(NhIO*);
+static NhBrainStep g_brain; static int g_brain_n;
+static void brain_tick(void) {   // (the body, every 2 s) a newer nbrain.dylib -> loaded from a fresh copy and swapped in
+    static double t; double now = mono_s(); if (now - t < 2.0) return; t = now;
+    static int off = -1; if (off < 0) off = getenv("NHOOK_NO_BRAIN") != 0; if (off) return;
+    static char path[1100]; if (!path[0]) { const char* e = getenv("NHOOK_BRAIN"); Dl_info di;
+        if (e && *e) snprintf(path, sizeof path, "%s", e);
+        else if (dladdr((void*)brain_tick, &di) && di.dli_fname) { snprintf(path, sizeof path, "%s", di.dli_fname); char* sl = strrchr(path, '/'); if (sl) snprintf(sl + 1, sizeof path - (size_t)(sl + 1 - path), "nbrain.dylib"); }
+        else return; }
+    struct stat st; if (stat(path, &st)) return; static struct timespec mt; static off_t sz;
+    if (st.st_mtimespec.tv_sec == mt.tv_sec && st.st_mtimespec.tv_nsec == mt.tv_nsec && st.st_size == sz) return;
+    mt = st.st_mtimespec; sz = st.st_size;
+    char cp[1200]; snprintf(cp, sizeof cp, "%s/nbrain-%d-%d.dylib", getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp", (int)getpid(), g_brain_n + 1);
+    { int in = open(path, O_RDONLY), outf = open(cp, O_WRONLY | O_CREAT | O_TRUNC, 0755); char b[65536]; ssize_t r; int ok = in >= 0 && outf >= 0;
+      while (ok && (r = read(in, b, sizeof b)) > 0) if (write(outf, b, (size_t)r) != r) ok = 0;
+      if (in >= 0) close(in); if (outf >= 0) close(outf); if (!ok) { nlog("[nhook] [brain] could not copy %s", path); return; } }
+    void* h = dlopen(cp, RTLD_NOW | RTLD_LOCAL); if (!h) { nlog("[nhook] [brain] %s not loaded: %s", path, dlerror()); return; }
+    int (*ver)(void) = (int (*)(void))dlsym(h, "nh_brain_version"); NhBrainStep f = (NhBrainStep)dlsym(h, "nh_brain_step");
+    if (!ver || !f || ver() != NHIO_VERSION) { nlog("[nhook] [brain] %s refused: layout %d, this body's %d", path, ver ? ver() : -1, NHIO_VERSION); return; }
+    g_brain = f; g_brain_n++; nlog("[nhook] [brain] #%d loaded from %s: the walker runs it from the next step (no restart)", g_brain_n, path); }
+static void* bot_thread(void* p) { (void)p; pthread_setname_np("shim-bot");
+    for (;;) { usleep(33000); brain_tick();
+        if (g_brain) { NhIO io; memset(&io, 0, sizeof io); io_in_pack(&io); if (g_brain(&io)) io_out_apply(&io); else bot_step(); }
+        else bot_step(); }
+    return 0; }
+#endif
 static void bot_start(void) {   // first use: the thread (also from the launch switches)
     if (__atomic_exchange_n(&g_bot_started, 1, __ATOMIC_ACQ_REL)) return; pthread_t th; pthread_create(&th, 0, bot_thread, 0); pthread_detach(th); }
 static int bot_parse_nav(const char* v) {   // -> mode (0 off, 1 roam, 2 enemy, 3 point, 4 vehicle), sets the target

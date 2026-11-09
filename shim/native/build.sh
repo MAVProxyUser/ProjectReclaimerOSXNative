@@ -17,3 +17,9 @@ clang $CF -dynamiclib -o build/nhook.dylib.new $O/nhook.o $O/stub.o $O/nrender.o
   -framework Foundation -framework Metal -framework QuartzCore -framework CoreVideo -framework AVFoundation -framework CoreMedia -framework AudioToolbox -framework CoreAudio -framework GameController -framework AppKit -lz
 mv -f build/nhook.dylib.new build/nhook.dylib
 echo "built shim/build/nhook.dylib"
+# the walker's BRAIN as a reloadable module (2026-11-09): the same C code with -DNH_BRAIN -- no start-up, no hooks, no interposing; the
+# body's exports (nhx_*, the ObjC / stub symbols) bound at load (-undefined dynamic_lookup). A running game's body loads a newer one
+# by itself within 2 s (nbot.c brain_tick): code changes reach a walker without a restart
+clang $CF -DNH_BRAIN -Wno-unused-function -Wno-unused-variable -dynamiclib -undefined dynamic_lookup -o build/nbrain.dylib.new native/nhook.c -lz
+mv -f build/nbrain.dylib.new build/nbrain.dylib
+echo "built shim/build/nbrain.dylib"

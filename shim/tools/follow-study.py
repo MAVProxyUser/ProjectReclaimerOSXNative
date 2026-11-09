@@ -266,13 +266,16 @@ def main():
     while True:
         t0 = time.time(); time.sleep(EVERY); t1 = time.time(); n += 1
         ws, ls = slots(port, leader)
-        if ws is None or ls is None: print('%s window %d: the walker or its leader is not in the game' % (time.strftime('%H:%M:%S'), n), flush=True); continue
-        o = window(rec, t0, t1, ws, ls)
+        if ws is None: print('%s window %d: the walker is not in the game' % (time.strftime('%H:%M:%S'), n), flush=True); continue
+        # (the leader away -- 2026-11-09, the user: "leave walker on his own refining for now": the role model, grenades and the refit
+        #  go on; only the shadowing line needs the leader)
+        o = window(rec, t0, t1, ws, ls if ls is not None else -999)
         sh = o['shadow']; w = o['w']
         print('%s window %d (the last %d s):' % (time.strftime('%H:%M:%S'), n, EVERY), flush=True)
         try: att = sum(1 for l in open(logp, 'rb').read()[nst.get('off', 0):].decode('utf-8', 'replace').splitlines() if 'shooting my leader' in l)
         except OSError: att = 0
-        print('  protecting you: median %s units from you, within 6 units %s of the time, longest apart %.0f s; went after %d of your attackers' % (
+        if ls is None: print('  protecting you: you are not in the game -- the walker plays on its own', flush=True)
+        else: print('  protecting you: median %s units from you, within 6 units %s of the time, longest apart %.0f s; went after %d of your attackers' % (
             med(sh), '%.0f%%' % (100 * sum(d <= 6 for d in sh) / len(sh)) if sh else '-', o['apart_s'], att), flush=True)
         print('  walker this window: %d kills / %d deaths, accuracy %s, kills with %s' % (w['k'], w['d'], '%.0f%%' % (100 * w['hits'] / w['shots']) if w['shots'] else '-',
               ', '.join(sorted(set(w['kw']))) or '-'), flush=True)

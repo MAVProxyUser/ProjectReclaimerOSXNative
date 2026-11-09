@@ -630,8 +630,16 @@ static int tls_holds_players(uint64_t blk) {        // the block's +0x10 is halo
     return blk && !rd(blk + 0x10, &parr, 8) && parr && !rd(parr, hdr, sizeof hdr) && *(uint32_t*)(hdr + 0x2c) == 0x64407440 && !memcmp(hdr, "players", 8);
 }
 static __thread int t_tls_memo; static __thread uint64_t t_tls_val;   // (the snapshot thread: one lookup per run, st_snap_thread)
+#ifdef NH_BRAIN   // (the brain: the engine context is the body's -- pinned by its hooks)
+uint64_t nhx_tls_block(void);
+static uint64_t tls_block(void) { return nhx_tls_block(); }
+#define tls_block_now tls_block_now_body   // (the body's lookup compiles, unused, here)
+static uint64_t tls_block_now(void);
+#else
 static uint64_t tls_block_now(void);
 static uint64_t tls_block(void) { if (t_tls_memo) { if (t_tls_memo == 1) { t_tls_val = tls_block_now(); t_tls_memo = 2; } return t_tls_val; } return tls_block_now(); }
+__attribute__((visibility("default"))) uint64_t nhx_tls_block(void) { return tls_block_now(); }   // (the brain's way to it)
+#endif
 static uint64_t tls_block_now(void) {                   // halo3's TLS block of the engine main thread (index 0 here)
     static volatile uint64_t last_good; static double bad_since;
     uint64_t c = g_main_ctx, arr = 0, blk = 0; uint32_t idx = 0;
@@ -979,8 +987,12 @@ static OSStatus my_AudioUnitSetProperty(AudioUnit au, AudioUnitPropertyID id, Au
     return AudioUnitSetProperty(au, id, sc, el, data, sz);
 }
 
+#ifdef NH_BRAIN   // (the reloadable brain, nbrain.dylib: the body interposes, once, at launch)
+#define INTERPOSE(rep, orig)
+#else
 #define INTERPOSE(rep, orig) __attribute__((used)) static struct { const void* r; const void* o; } \
     _ip_##orig __attribute__((section("__DATA,__interpose"))) = { (const void*)(rep), (const void*)(orig) }
+#endif
 // the page's mic switch (nstats.c mic_json, g_mic_muted): the app's capture pulls its samples on the AUHAL's input bus 1
 static OSStatus my_AudioUnitRender_body(AudioUnit au, AudioUnitRenderActionFlags* fl, const AudioTimeStamp* ts, UInt32 bus, UInt32 frames, AudioBufferList* io);
 static OSStatus my_AudioUnitRender(AudioUnit au, AudioUnitRenderActionFlags* fl, const AudioTimeStamp* ts, UInt32 bus, UInt32 frames, AudioBufferList* io) {
@@ -1014,6 +1026,7 @@ INTERPOSE(my_AudioUnitRender, AudioUnitRender);
 #include <dispatch/dispatch.h>
 static void vpad_start(void* c) { (void)c; g_vpad_on = nh_vpad_install(); }
 void nh_takeover_install(void);   // nvpad.m
+#ifndef NH_BRAIN
 __attribute__((constructor)) static void nhook_init(void) {
     const char* lf = getenv("NHOOK_LOG");
     if (lf) g_logfd = open(lf, O_WRONLY | O_CREAT | O_APPEND, 0644);
@@ -1026,3 +1039,4 @@ __attribute__((constructor)) static void nhook_init(void) {
     if (getenv("NHOOK_TAKEOVER") && strcmp(getenv("NHOOK_TAKEOVER"), "0")) nh_takeover_install();   // (the observer: a click asks for the game in normal mode)
     if (getenv("NHOOK_SELFTEST")) nstats_start();       // shim/tools/nhook-selftest.sh: the stats server without the app
 }
+#endif   // (NH_BRAIN: no start-up -- the body did it)

@@ -45,7 +45,21 @@ static int hb_scenario_name(char* out, size_t n) {         // as hitbox.c: game_
     out[k] = 0; return k > 0;
 }
 #define HB_MAXOBJ 16384                                   // the app's object table: 0x3fc0 slots ([capacity] objects.count)
+#ifdef NH_BRAIN   // (the brain: the maps the body saw opened, and their tag names)
+int nhx_hb_current_map(char* out, size_t n); const char* nhx_hb_tag_name(uint32_t def);
+#define hb_current_map hb_current_map_body
+#define hb_tag_name hb_tag_name_body
+#endif
 #include "../src/h3maps.c"
+#ifdef NH_BRAIN
+#undef hb_current_map
+#undef hb_tag_name
+static int hb_current_map(char* out, size_t n) { return nhx_hb_current_map(out, n); }
+static const char* hb_tag_name(uint32_t def) { return nhx_hb_tag_name(def); }
+#else
+__attribute__((visibility("default"))) int nhx_hb_current_map(char* out, size_t n) { return hb_current_map(out, n); }
+__attribute__((visibility("default"))) const char* nhx_hb_tag_name(uint32_t def) { return hb_tag_name(def); }
+#endif
 
 // ---- JSON buffer (stats.c) ------------------------------------------------------------------------------------------
 typedef struct { char* b; size_t n, cap; } StBuf;
