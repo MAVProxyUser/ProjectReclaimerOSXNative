@@ -201,7 +201,10 @@ static volatile double g_bot_melee_until;
 //  that left no trace yet came with play: MELEE's best candidate now; the extra byte's bit 0 came with 10 pick-ups (the ACT button:
 //  pick up / reload), its bit 1 with weapon switches. The walker sends them in the packed record while it melees / picks up / reloads
 //  / switches: NHOOK_BOT_MELEEBITS (+8, default 1), NHOOK_BOT_ACTBIT / NHOOK_BOT_SWITCHBIT (the extra byte, default 1 / 2; 0 = off))
-static uint64_t bot_meleebits(void) { static uint64_t v = 2; if (v == 2) { const char* e = getenv("NHOOK_BOT_MELEEBITS"); v = e ? strtoull(e, 0, 16) : 0x1; } return v; }
+// (01:10: MELEE IS +8 BIT 5 -- the user's two beatdowns in the Pit round came 0.2 s after bit 5 presses (round clock 232.3 / 381.3 s, his
+//  log 211.0 / 360.0 s: the same 21.3 s offset both times), and his two other bit-5 presses were swings that missed; the walkers had
+//  sent bit 0 and "meleed" every step at 0.4 units with nothing landing. Bit 5 goes where fire's bit 19 goes: the control record)
+static uint64_t bot_meleebits(void) { static uint64_t v = 2; if (v == 2) { const char* e = getenv("NHOOK_BOT_MELEEBITS"); v = e ? strtoull(e, 0, 16) : 0x20; } return v; }
 static uint8_t bot_actbit(void) { static int v = -1; if (v < 0) { const char* e = getenv("NHOOK_BOT_ACTBIT"); v = e ? (int)strtol(e, 0, 16) : 0x1; } return (uint8_t)v; }
 static uint8_t bot_switchbit(void) { static int v = -1; if (v < 0) { const char* e = getenv("NHOOK_BOT_SWITCHBIT"); v = e ? (int)strtol(e, 0, 16) : 0x2; } return (uint8_t)v; }
 static volatile double g_bot_act_until, g_bot_switch_until;   // (the act / switch bits held until)
@@ -269,7 +272,7 @@ static void bot_on_abuild(uint64_t* ctx) {
             nlog("[nhook] [bot] weapon slot test: unit +0x258..+0x26f = %s (+0x262 the current slot %d)", h, (int)(int8_t)u[0x262]); }
         u[0x260] = (uint8_t)g_bot_wsel_v; }
     int tpk = g_bot_tpk_until > 0 && mono_s() < g_bot_tpk_until;
-    uint32_t b8 = g_bot_pkt_btn8 | (extra ? xb : 0) | (tpk ? g_bot_tpk8 : 0) | (mono_s() < g_bot_melee_until ? (uint32_t)(bot_meleebits() & 0x4807u) : 0);   // (melee: the packet's bits of it)
+    uint32_t b8 = g_bot_pkt_btn8 | (extra ? xb : 0) | (tpk ? g_bot_tpk8 : 0) | (mono_s() < g_bot_melee_until ? (uint32_t)(bot_meleebits() & 0x4827u) : 0);   // (melee: the packet's bits of it)
     if (b8) *(uint64_t*)(act + 8) |= b8;
     double nw = mono_s(); uint32_t b2c = g_bot_pkt_btn2c | (tpk ? g_bot_tpk2c : 0) | (nw < g_bot_act_until ? bot_actbit() : 0) | (nw < g_bot_switch_until ? bot_switchbit() : 0);
     if (b2c) *(act + 0x2c) |= (uint8_t)b2c; }
@@ -585,7 +588,7 @@ static void bot_step_body(void) {
             { static int ne = -1; if (ne < 0) ne = getenv("NHOOK_BOT_NOEMPTY") != 0;
               // (2026-11-09: the found "rounds loaded" field reads 0 for a fresh rifle in a player's game and 129 in the walkers' --
               //  not a magazine: "empty" only when the weapon has shown 8+ rounds there before)
-              g_bot_empty = !ne && g_inv.ammo == 0 && g_inv.ammo_max >= 8 && g_inv.held && strcmp(g_inv.held_c ? g_inv.held_c : "", "melee");
+              g_bot_empty = !ne && g_inv.ammo == 0 && g_inv.ammo_max >= 2 && g_inv.held && strcmp(g_inv.held_c ? g_inv.held_c : "", "melee");
               if (g_bot_empty && vis && g_inv.gren > 0 && tdist > 3 && tdist < 16 && now - tgren > 1.2) { tgren = now;
                   if (bot_log()) nlog("[nhook] [fight] empty magazine: a grenade at %.1f units, then the beatdown", tdist); } }
             if (now - tgren < 0.15) { fbtn |= 0x10000;                                                                     // (left trigger: a grenade)
@@ -627,6 +630,13 @@ static void bot_step_body(void) {
                   int back = !nb && al > 0.1f && vl > 0.01f && (ax * vx + ay * vy) / (al * vl) < -0.342f;   // (cos 110 deg)
                   if (back && tdist < g_mel.back) { static double tb; if (bot_log() && now - tb > 2.0) { tb = now; nlog("[nhook] [melee] its back is turned at %.1f units: going in", tdist); } }
                   if (!nm && vis && ((back && tdist < g_mel.back) || (g_bot_empty && tdist < 12.0f) || (ftg.shield < 0.05f && ftg.health > 0 && tdist < g_mel.rush && !(g_inv.held_c && !strcmp(g_inv.held_c, "rocket"))) || (mcls && tdist < 10.0f))) { r = 0.9f; lat *= back ? 0.0f : 0.3f; } }
+                // ARM'S LENGTH (01:10, the user: "if i stand still they'll try to walk over me and get stuck jumping not shooting or meleeing"):
+                // the rush above drove on at full throttle inside a unit -- onto the enemy's head (Second 0.36 units across, 0.4-1.1 above,
+                // bouncing). Within a unit across: no closer (circle); on top of it (0.5+ above, 0.8 across): step off. NHOOK_BOT_NOARM=1 = old
+                { static int na = -1; if (na < 0) na = getenv("NHOOK_BOT_NOARM") != 0;
+                  float hx = ftg.c[0] - o->c[0], hy = ftg.c[1] - o->c[1], hd = sqrtf(hx * hx + hy * hy), dz = o->c[2] - ftg.c[2];
+                  if (!na && hd < 0.8f && dz > 0.5f) { r = -0.7f; lat = lat >= 0 ? 0.5f : -0.5f; }
+                  else if (!na && hd < 1.0f && r > 0) { r = 0; if (fabsf(lat) < 0.3f) lat = lat >= 0 ? 0.4f : -0.4f; } }
                 // never off the floor: test where this step leads (1 unit along the move); flip the strafe, then drop the back-off
                 float fx = cosf(yaw0), fy = sinf(yaw0), lx = -fy, ly = fx;
                 for (int tries = 0; tries < 3; tries++) { float p2[3] = {o->c[0] + (fx * r + lx * lat) * 1.2f, o->c[1] + (fy * r + ly * lat) * 1.2f, o->c[2] - 0.35f};
@@ -749,7 +759,7 @@ static void bot_step_body(void) {
                 if (strafe) hh = 0;
                 hist[hh & 63][0] = pos[0]; hist[hh & 63][1] = pos[1]; hist[hh & 63][2] = pos[2]; histt[hh & 63] = now; hh++;
                 static float bk[3]; { int j = hh - 1; while (j > 0 && hh - j < 63 && now - histt[(j - 1) & 63] <= 1.5) j--; float dx = pos[0] - hist[j & 63][0], dy = pos[1] - hist[j & 63][1];
-                  if (!strafe && now - histt[j & 63] >= 1.4 && dx * dx + dy * dy < 0.35f * 0.35f && now - tjump > 1.5) { tjump = now; hh = 0; tback = now; bstr = (nav_rand() & 1) ? 0.3f : -0.3f;
+                  if (!strafe && !(g_bot_fighting && tdist < 3.0f) && now - histt[j & 63] >= 1.4 && dx * dx + dy * dy < 0.35f * 0.35f && now - tjump > 1.5) {   // (01:10: fighting at arm's length is no progress by design, not stuck) tjump = now; hh = 0; tback = now; bstr = (nav_rand() & 1) ? 0.3f : -0.3f;
                       nav_pos(path[pidx >= 4 ? pidx - 4 : 0], bk);
                       for (int i = pidx; i < plen && i < pidx + 10; i++) g_nav.pen[path[i]] += 4.0f;
                       memmove(tstuck, tstuck + 1, 3 * sizeof(double)); tstuck[3] = now;

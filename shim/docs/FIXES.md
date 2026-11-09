@@ -3272,6 +3272,20 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   a running battle, at every round end (our server's in_match true -> false) walker-coach.py round + match-study.py, then each
   walker's game restarted headless with its new knobs and the newest build (they rejoin in the lobby; the user's game and the
   server stay).
+- **Melee is bit 5; walkers stop climbing onto the enemy at arm's length** (2026-11-09 01:15; nbot.c bot_meleebits, the fight move's
+  ARM'S LENGTH block, the stuck test, g_bot_empty) — WHY: the user, Pit FFA: "if i stand still they'll try to walk over me and get stuck
+  jumping not shooting or meleeing", "it's not actually meleeing though", "fourth and third are standing around ... all the logic locked
+  up". Live: Second stood 0.36 units across and 0.4-1.1 above the user (on his head, bouncing), logging "melee at 0.46 units" every
+  step with nothing landing, "firing" a shotgun with 0 rounds; the round's walker kills under a unit were all gunshots, the user's two
+  melee kills the only "Melee" ones. LOGIC: (1) MELEE = control word bit 5 (0x20): the user's two beatdowns came 0.2 s after his bit 5
+  presses (round clock 232.3 / 381.3 s vs his input log 211.0 / 360.0 s -- one 21.3 s offset for both), his other two bit-5 presses
+  were missed swings; the walker had sent bit 0. It goes into the control record (+0xC8, where fire's bit 19 works for a joined
+  walker) and the packed record (mask 0x4827). NHOOK_BOT_MELEEBITS=1 = the old bit 0. (2) ARM'S LENGTH: the beatdown / back / empty
+  rush drove on at full throttle inside a unit; now within 1 unit across it does not close further (circles), and on top of the enemy
+  (0.5+ above, under 0.8 across) it steps off. NHOOK_BOT_NOARM=1 = old. (3) The stuck test (back off, jump, replan, four times = drop
+  the goal) no longer counts a walker fighting within 3 units -- standing at arm's length is no progress by design; it was what made
+  them "stand around" after a point-blank fight. (4) EMPTY needs 2+ rounds seen in the weapon (was 8: a shotgun holds 6, so an empty
+  shotgun never counted as empty and kept "firing").
 - **Every player dot on the stats map is visible on any background** (2026-11-09 01:10; shim/src/stats_page.html drawMap) — WHY: the user,
   in a 4-player FFA on The Pit: "I can only see 2 walkers ... I see second, and fourth, but not third". Third was in the match and in
   the snapshot; in FFA every player has its own team colour, and its blue (#4070f0) 3.5 px dot vanished on the dark map picture and on
