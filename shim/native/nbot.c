@@ -150,6 +150,7 @@ static void bot_los_do(uint64_t* ctx) {
     if (hit) { const float* h = (const float*)(res + 0x08); float dx = h[0] - P[0], dy = h[1] - P[1], dz = h[2] - P[2]; d = sqrtf(dx * dx + dy * dy + dz * dz); }
     g_los_res = !hit || d > L - 0.5f; g_los_res_tgt = g_los_tgt; g_los_t = mono_s(); g_los_done = q; }
 typedef struct { float x, y, w; } GlLane; static GlLane* g_gll; static int g_ngll; static float g_gll_wsum;   // the lanes as goal material (nbot_goals.c)
+static double g_escape_until, g_escape_t; static float g_escape_dir;   // (14:50: the wedged-spot escape)
 static double g_fjump_until; static int g_bot_camo_hold;   // (a jump in a fight: NHOOK_BOT_FJUMP)
 static int bot_fcmp(const void* a, const void* b) { float x = *(const float*)a, y = *(const float*)b; return x < y ? -1 : x > y; }
 // the model's heat for this map -> g_nav.pop (how much real players use each floor node: A* prefers their lanes); once per map
@@ -1499,12 +1500,20 @@ static void bot_step_body(void) {
                       //  Guardian's middle level, its path to a hidden enemy 17 units off dropping ~3 units -- creeping, "stuck", backing off,
                       //  replanning the same stretch: in the goal draw (mode 2) four stucks never dropped the goal. Now they do -- the draw
                       //  picks another at once)
+                      // (14:50: WEDGED -- stuck 4 times at one spot ((60.8, -146.9) for minutes on Valhalla: 0 kills / 7 deaths in that window):
+                      //  every graph node within 2.5 units costs NHOOK_BOT_WEDGE_PEN (60) more, and an ESCAPE runs 3 s: a random compass
+                      //  direction at full throttle, a new one every 0.5 s, a jump every 0.6 s (g_escape_*, applied below the path walk)
+                      if (now - tstuck[0] < 10.0) { float wp = 60; lk_over(&wp, "NHOOK_BOT_WEDGE_PEN");
+                          for (int i = 0; i < g_nav.n; i++) { float q[3]; nav_pos(i, q); float ddx = q[0] - pos[0], ddy = q[1] - pos[1], ddz = q[2] - pos[2]; if (ddx * ddx + ddy * ddy < 6.25f && fabsf(ddz) < 2.0f) g_nav.pen[i] += wp; }
+                          g_escape_until = now + 3.0; g_escape_t = 0; if (bot_log()) nlog("[nhook] [nav] wedged at (%.1f %.1f): escaping, the spot's nodes +%.0f", pos[0], pos[1], wp); }
                       if (now - tstuck[0] < 10.0) { nav_say("  [nav] stuck 4 times at (%.1f %.1f %.1f): a new goal\n", pos[0], pos[1], pos[2]);
                           if (mode != 2) goal = -1; else if (g_eg.on && gl_on()) { gl_drop(now, "stuck 4 times"); goal = -1; plen = 0; }
                           memset(tstuck, 0, sizeof tstuck); }
                       else nav_say("  [nav] stuck at (%.1f %.1f %.1f): back off and replan\n", pos[0], pos[1], pos[2]);
                       tplan = 0; } }
-                if (now - tback < 0.6) { float bw = atan2f(bk[1] - pos[1], bk[0] - pos[0]), rel = bot_wrap(bw - yaw);
+                if (now < g_escape_until) { if (now - g_escape_t > 0.5) { g_escape_t = now; g_escape_dir = bot_rand01() * 6.2831853f; }
+                    float rel = bot_wrap(g_escape_dir - yaw); tx = cosf(rel); ty = sinf(rel); if (fmod(now, 0.6) < 0.15) g_fjump_until = now + 0.12; }
+                else if (now - tback < 0.6) { float bw = atan2f(bk[1] - pos[1], bk[0] - pos[0]), rel = bot_wrap(bw - yaw);
                     if ((bk[0] - pos[0]) * (bk[0] - pos[0]) + (bk[1] - pos[1]) * (bk[1] - pos[1]) > 0.09f) { tx = cosf(rel) * 0.8f; ty = sinf(rel) * 0.8f + bstr; } else { tx = 0; ty = 0; } }
                 out |= 2; g_nav_act = 1;
                 if (now - tjump < 0.25 && g_bot_jump) { g_bot_btn = g_bot_jump; out |= 4; }
@@ -1522,6 +1531,7 @@ static void bot_step_body(void) {
         float way = atan2f(g_bot_pick_pos[1] - o->c[1], g_bot_pick_pos[0] - o->c[0]), rel = bot_wrap(way - yaw), sp = g_pick_d > 1.0f ? 1.0f : g_pick_d > 0.3f ? 0.45f : 0.0f;   /* (08:05: onto it, then still) */ tx = cosf(rel) * sp; ty = sinf(rel) * sp; out |= 2; }
     else if (arbw == ARB_FIGHT) { tx = ftx; ty = fty; out |= 2; }   // (the fighter's moves: the arbiter gave it the legs)
     else if (arbw == ARB_HOLD) { tx = 0; ty = 0; out |= 2; }   // (levels apart: the enemy below -- hold the high ground)
+    if (now < g_escape_until) { float rel = bot_wrap(g_escape_dir - yaw); tx = cosf(rel); ty = sinf(rel); out |= 2; }   // (wedged: the escape beats every other move)
     if (testb) { g_bot_btn = ((out & 4) ? g_bot_btn : 0) | g_bot_testbtn; out |= 4; }   // (do=botbtn: held until its time is up)
     // fire: the control record's bit 19 (+0xC8) -- the local unit fires, and the control packet carries the weapon's firing state
     // to the server (halo3+0x5452c reads it from the local weapon: a packet bit of its own does nothing; 2026-11-08 scan: bits 19

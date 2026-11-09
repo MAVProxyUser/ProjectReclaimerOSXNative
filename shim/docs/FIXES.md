@@ -3286,6 +3286,11 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   switch presses (the learnt record bit): 0 of 32 took" -- 32 x "switching from PLASMA PISTOL to ASSAULT RIFLE" with the trigger held
   (the plasma pistol held = an overcharge held) while the earlier switches, 3 of 3 and 2 of 2, came with the trigger up. LOGIC: from a
   switch press until 0.15 s after it the trigger (and the reload click) stays up; PLASMA PISTOL joins the weapons whose trigger is pulsed.
+- **Wedged: escape and fence off the spot** (2026-11-09 14:50; nbot.c the nav stuck handler, g_escape_*) — WHY: jumping on every stuck did
+  not help (259 "stuck at" lines in the next 3000, 188 before): the walker sat WEDGED at (60.8, -146.9) / (60, -58) on Valhalla for minutes
+  ("stuck 4 times ... a new goal" 144 times -- each new goal led back) and died there (0 kills / 7 deaths in a window). LOGIC: at 4 stucks
+  within 10 s every graph node within 2.5 units (2 in height) costs NHOOK_BOT_WEDGE_PEN (60, live) more and an ESCAPE runs 3 s: a random
+  compass direction at full throttle, a new one every 0.5 s, a jump every 0.6 s, overriding every other leg move ("[nav] wedged at ...").
 - **Jump when stuck; route around stuck spots** (2026-11-09 14:45; nbot.c the nav stuck handler) — WHY: on Valhalla "[nav] stuck at ...:
   back off and replan" 188 times in 3000 log lines, ~50 at one spot ((61, -148)) -- the +4 node penalty never sent the path around it and
   the walker never jumped (Valhalla's rocks and lips free a player with a jump); a 4 kills / 26 deaths match. LOGIC: every stuck event
