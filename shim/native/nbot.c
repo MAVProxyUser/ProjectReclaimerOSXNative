@@ -491,7 +491,9 @@ static int bot_ammo_of(uint64_t wd, uint32_t def, int* maxv) {   // rounds loade
     static struct { uint32_t def; int max, nv; int16_t v[3]; } mx[64]; static int nmx; int off = bot_ammo_off(); int16_t a = -1;
     if (g_ammo_learned >= 0) { if (!wd || !hb_read(wd + g_ammo_learned, &a, 2) || a < 0) { if (maxv) *maxv = 0; return -1; }   // (learned: ammo_learn above)
         int k = -1; for (int i = 0; i < nmx; i++) if (mx[i].def == def) { k = i; break; }
-        if (k < 0) { k = nmx < 64 ? nmx++ : 63; mx[k].def = def; mx[k].max = 0; mx[k].nv = 0; } if (a > mx[k].max) mx[k].max = a; if (maxv) *maxv = mx[k].max; return a; }
+        if (k < 0) { k = nmx < 64 ? nmx++ : 63; mx[k].def = def; mx[k].max = 0; mx[k].nv = 0; } if (a > mx[k].max) mx[k].max = a;
+        if (mx[k].max <= 0) { if (maxv) *maxv = 0; return -1; }   // (13:15: never above 0 for this weapon = no magazine there -- the plasma rifle's battery: "DRY: PLASMA RIFLE" was false)
+        if (maxv) *maxv = mx[k].max; return a; }
     if (off < 0 || !wd || !hb_read(wd + off, &a, 2) || a < 0) { if (maxv) *maxv = 0; return -1; }
     int k = -1; for (int i = 0; i < nmx; i++) if (mx[i].def == def) { k = i; break; }
     if (k < 0) { k = nmx < 64 ? nmx++ : 63; mx[k].def = def; mx[k].max = 0; mx[k].nv = 0; } if (a > mx[k].max) mx[k].max = a;

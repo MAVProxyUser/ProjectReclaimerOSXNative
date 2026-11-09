@@ -3272,6 +3272,10 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   a running battle, at every round end (our server's in_match true -> false) walker-coach.py round + match-study.py, then each
   walker's game restarted headless with its new knobs and the newest build (they rejoin in the lobby; the user's game and the
   server stay).
+- **Battery weapons have no magazine** (2026-11-09 13:15; nbot.c bot_ammo_of) — WHY: "DRY: PLASMA RIFLE still empty after 2 reloads"
+  and a death "PLASMA RIFLE 0 rounds": the learnt magazine field (+0x23a) reads 0 for a plasma rifle all its life (a battery, no rounds),
+  so it counted as empty -> reload clicks, DRY, the empty-gun rush. LOGIC: the field counts for a weapon definition only once it has read
+  above 0 for it; before that the rounds are unknown (-1: no EMPTY / DRY handling).
 - **RECHARGE: back off to refill the shield** (2026-11-09 13:10; nbrain_beh.c beh_recharge, nbot.c ARB_RECHARGE) — WHY: the death notes
   show a death every ~18 s (the best players about one a minute), most of them close fights lost on the last sliver of health, and the
   walker went from one fight straight into the next hunt with its shield broken. LOGIC: a new arbiter slot (a path to its point): with the
