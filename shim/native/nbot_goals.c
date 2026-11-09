@@ -245,14 +245,14 @@ static void hm_reload_brain(void) {   // (g_hm_mx held) the brain's copy of the 
     char m[64]; snprintf(m, sizeof m, "%s", g_hm.map); if (!m[0]) return; g_hm.dirty = 0; g_hm.map[0] = 0; hm_switch(m); }
 static void rv_note(double now, const char* trig, const char* map, float mins, int kills, int deaths, int empty, float dpm, float prev, int zones, float hx, float hy, int hn, uint32_t nd) {
     char hot[96] = "none"; if (hn >= 2) snprintf(hot, sizeof hot, "(%.0f, %.0f) with %d deaths within 6 units", hx, hy, hn);
-    if (bot_log()) nlog("[nhook] [brain] review r%d [%s] (%s, %.0f min): %d kills %d deaths (%d on an empty magazine), %.1f deaths a minute -> caution %.2f (was %.2f): "
+    if (bot_log()) nlog("[nhook] [brain] review r%d [%s] (%s%s, %.0f min): %d kills %d deaths (%d on an empty magazine), %.1f deaths a minute -> caution %.2f (was %.2f): "
                         "pressing x%.2f, lull reload under %.0f%% of the magazine; death map %u deaths; own deaths weigh on the paths, the hottest spot %s",
-                        g_rv_n, trig, map, mins, kills, deaths, empty, dpm, g_rv_caut, prev, 1.0f - 0.6f * g_rv_caut, 100 * (0.45f + 0.25f * g_rv_caut), (unsigned)nd, hot);
+                        g_rv_n, trig, map, g_noshield ? ", SWAT profile" : "", mins, kills, deaths, empty, dpm, g_rv_caut, prev, 1.0f - 0.6f * g_rv_caut, 100 * (0.45f + 0.25f * g_rv_caut), (unsigned)nd, hot);
     char path[1100]; const char* h = getenv("HOME");
     snprintf(path, sizeof path, "%s/Library/Application Support/ReclaimerMac/battles/follow/review-%s.jsonl", h ? h : "/tmp", g_nick[0] ? g_nick : "walker");
     FILE* f = fopen(path, "a");
-    if (f) { fprintf(f, "{\"t\": %.0f, \"r\": %d, \"trigger\": \"%s\", \"map\": \"%s\", \"mins\": %.1f, \"kills\": %d, \"deaths\": %d, \"empty\": %d, \"dpm\": %.2f, \"caution\": %.2f, \"was\": %.2f, \"press_x\": %.2f, \"zones\": %d, \"deathmap\": %u, \"hot\": [%.1f, %.1f, %d]}\n",
-                     (double)time(0), g_rv_n, trig, map, mins, kills, deaths, empty, dpm, g_rv_caut, prev, 1.0f - 0.6f * g_rv_caut, zones, (unsigned)nd, hx, hy, hn); fclose(f); }
+    if (f) { fprintf(f, "{\"t\": %.0f, \"r\": %d, \"trigger\": \"%s\", \"profile\": \"%s\", \"map\": \"%s\", \"mins\": %.1f, \"kills\": %d, \"deaths\": %d, \"empty\": %d, \"dpm\": %.2f, \"caution\": %.2f, \"was\": %.2f, \"press_x\": %.2f, \"zones\": %d, \"deathmap\": %u, \"hot\": [%.1f, %.1f, %d]}\n",
+                     (double)time(0), g_rv_n, trig, g_noshield ? "swat" : "normal", map, mins, kills, deaths, empty, dpm, g_rv_caut, prev, 1.0f - 0.6f * g_rv_caut, zones, (unsigned)nd, hx, hy, hn); fclose(f); }
     (void)now; }
 static void brain_review(double now) {
     static double t0, tchk; static int k0; static char map[64]; static long seq0 = -1; char why[64] = ""; int force = 0;

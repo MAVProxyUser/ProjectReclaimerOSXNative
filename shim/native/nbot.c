@@ -1095,11 +1095,13 @@ static void bot_step_body(void) {
     brain_review(now);   // (nbot_goals.c: every 3 minutes, its own deaths / kills -> caution, the paths around its death spots)
     { static char nsm[64]; static double tfirst, tsh;
       if (strcmp(nsm, g_st_curmap)) { snprintf(nsm, sizeof nsm, "%s", g_st_curmap); tfirst = 0; tsh = 0; }
-      int any = 0; for (int i = 0; i < n; i++) if (objs[i].type == 0 && !objs[i].dead) { any = 1; if (objs[i].shield > 0.05f) tsh = now; }
+      int any = 0; for (int i = 0; i < n; i++) if (objs[i].type == 0 && !objs[i].dead) { any++; if (objs[i].shield > 0.05f) tsh = now; }
       if (any && tfirst <= 0) tfirst = now;
-      int ns = tfirst > 0 && now - (tsh > tfirst ? tsh : tfirst) > 20.0;
+      // (16:00, the user: "the brain will need to adapt quickly in context cuz this is a fast paced game type": 4+ live players and
+      //  none with a shield for 5 s is enough -- every player spawns with a full one in a game that has them)
+      int ns = tfirst > 0 && now - (tsh > tfirst ? tsh : tfirst) > (any >= 4 ? 5.0 : 20.0);
       float fo = -1; lk_over(&fo, "NHOOK_BOT_NOSHIELD"); if (fo >= 0) ns = fo > 0.5f;
-      if (ns != g_noshield && bot_log()) nlog("[nhook] [bot] %s", ns ? "no shields in this game (nobody has shown one for 20 s): the shield rules stand down -- no back-off, recharge or break-off by shield" : "shields are back: the shield rules are on again");
+      if (ns != g_noshield && bot_log()) nlog("[nhook] [bot] %s", ns ? "no shields in this game (SWAT: a headshot kills): the shield rules stand down; the SWAT profile is on -- reacting x0.5, turning x1.5 / x1.3, aim noise x0.6, autos aim at the head too, the trigger only when the aim line goes through the HEAD, pressing x0.5" : "shields are back: the shield rules are on again, the SWAT profile off");
       g_noshield = ns; }
     // seated = a seat index OR a parent (02:20: on the turret the walker went on fighting on foot -- "stuck" in one spot -- after a burst:
     //  the seat field alone missed it). The state is logged at each change with every handle it is read from
@@ -1182,7 +1184,7 @@ static void bot_step_body(void) {
             if (!prec && !(hall > 0)) { float ab = 0.2f; lk_over(&ab, "NHOOK_BOT_AIM_BODY"); ap[2] = t->c[2] + ab * t->r; }
             // (11:20: automatic weapons track the head but aim at the NECK, NHOOK_BOT_HEAD_DZ_AUTO (-1.5 head radii, live): spread / drift
             //  upward still hits the head, downward the chest -- aimed at the head itself every shot drifting up missed everything)
-            else if (ha_on > 0 && bot_head(t, now, hp)) { float dz = hdz; if (!prec) { dz = -1.5f; lk_over(&dz, "NHOOK_BOT_HEAD_DZ_AUTO"); }
+            else if (ha_on > 0 && bot_head(t, now, hp)) { float dz = hdz; if (!prec && !g_noshield) { dz = -1.5f; lk_over(&dz, "NHOOK_BOT_HEAD_DZ_AUTO"); }
                 if (t->handle != hv_h || now - hv_t > 0.4) { hv_h = t->handle; memcpy(hv_p, hp, 12); memcpy(hv_v, t->vel, 12); hv_t = now; hv_ok = 0; }
                 else if (now - hv_t >= 0.06) { float dtt = (float)(now - hv_t), a = hv_ok ? 0.5f : 1.0f;
                     // (11:55: horizontally the engine's own body velocity -- the head node sways with the animation, and x a 0.15-0.25 s lead
@@ -1229,6 +1231,7 @@ static void bot_step_body(void) {
     lk_over(&skill, "NHOOK_BOT_SKILL"); lk_over(&kdist, "NHOOK_BOT_DIST"); lk_over(&kstrafe, "NHOOK_BOT_STRAFE"); lk_over(&kswitch, "NHOOK_BOT_SWITCH"); lk_over(&fextra, "NHOOK_BOT_FIRE_EXTRA");
     lk_over(&retreat, "NHOOK_BOT_RETREAT"); lk_over(&gren, "NHOOK_BOT_GREN"); lk_over(&backoff, "NHOOK_BOT_BACKOFF"); lk_over(&press, "NHOOK_BOT_PRESS");
     press *= 1.0f - 0.6f * rv_caution();   // (the three-minute review, nbot_goals.c brain_review: a bad window -> less pressing into the target)
+    if (g_noshield) { float sp = 0.5f; lk_over(&sp, "NHOOK_SWAT_PRESS"); press *= sp; }
     int engaged = 0; float ftx = 0, fty = 0; uint32_t fbtn = 0; g_bot_fighting = fight && spar; g_eng_close = 0; g_ftg_vis = 0;   // (set again below when an enemy is in sight within 20 units)
     if (fight) { eg_load_for(g_st_curmap, g_trk_mode); wz_load(g_st_curmap); }   // (the models for this map and game: reloaded when either changes; the weapon zones)
     if (fight && spar && have_tg) {
@@ -1279,12 +1282,20 @@ static void bot_step_body(void) {
         //  factors below bring skill 0.5 to the players' numbers -- skill 1 is still faster and steadier than they are)
         static float rk0 = -1, t0r0 = -1; if (rk0 < 0) { const char* e = getenv("NHOOK_BOT_REACT"); rk0 = e ? (float)atof(e) : 1.6f; e = getenv("NHOOK_BOT_TURN0"); t0r0 = e ? (float)atof(e) : 0.73f; }
         float rk = rk0, t0r = t0r0; lk_over(&rk, "NHOOK_BOT_REACT"); lk_over(&t0r, "NHOOK_BOT_TURN0");   // (live knobs, above)
+        // THE SWAT PROFILE (2026-11-09 16:00, the user: "the swat gametype is headshots only btw... no shields... one shot. so you gonna
+        //  have to kick up the accuracy, speed to target, etc. or walker is gonna get destroyed. the brain will need to adapt quickly in
+        //  context"): with no shields in the game (g_noshield) the first shot on a head wins -- react NHOOK_SWAT_REACT (0.5) x sooner,
+        //  turn to the target NHOOK_SWAT_TURN0 (1.5) x faster before the reaction and NHOOK_SWAT_TURN (1.3) x after, aim noise
+        //  NHOOK_SWAT_NOISE (0.6) x, every weapon at the head, the trigger only on the head (NHOOK_SWAT_HEADONLY 1), pressing
+        //  NHOOK_SWAT_PRESS (0.5) x (one shot kills: no running into the open). All live; off again the moment a shield shows
+        if (g_noshield) { float a = 0.5f, b = 1.5f; lk_over(&a, "NHOOK_SWAT_REACT"); lk_over(&b, "NHOOK_SWAT_TURN0"); rk *= a; t0r *= b; }
         // (07:50: walker-model's "reaction" = 30 deg -> 5 deg of aim, so the turn rate BEFORE the reaction time decides it: 1.5 rad/s
         //  measured 0.49-0.53 s against the players' 1.08 whatever the delay; NHOOK_BOT_TURN0 = that rate, NHOOK_BOT_REACT the delay factor)
         // NHOOK_BOT_NOISE: x the aim noise (2026-11-08 12:15: on Guardian the players' horizontal aim error while attacking is 6.8 deg,
         // the walkers' 3.8 -- lag and moving targets the walkers do not have; engage-compare.py)
         static float nk0 = -1; if (nk0 < 0) { const char* e = getenv("NHOOK_BOT_NOISE"); nk0 = e ? strtof(e, 0) : 1.0f; }
         float nk = nk0; lk_over(&nk, "NHOOK_BOT_NOISE");
+        if (g_noshield) { float c = 0.6f; lk_over(&c, "NHOOK_SWAT_NOISE"); nk *= c; }
         float react = g_bm.reaction * (1.25f - skill) * rk, noise = g_bm.aim_err * (1.25f - skill) * 1.6f * nk / 57.2958f;
         // (13:35: steadier with a precision weapon -- battle-rifle duels at 14 units lost on the headshot race; the head is about +-0.3
         //  deg there and the wander +-0.6: x NHOOK_BOT_NOISE_PREC (0.7, live) with a precision weapon / sniper)
@@ -1294,6 +1305,7 @@ static void bot_step_body(void) {
             float th = 0.45f, k = (float)dt / th, sg = noise * sqrtf(2.0f * (float)dt / th);
             ox += -ox * k + sg * bot_gauss(); oy += -oy * k + 0.5f * sg * bot_gauss();
             float turn = 7.0f; lk_over(&turn, "NHOOK_BOT_TURN");   // (07:10: the turn rate once reacting -- "increase look sensitivity as you level up": the trainer raises it)
+            if (g_noshield) { float e = 1.3f; lk_over(&e, "NHOOK_SWAT_TURN"); turn *= e; }
             float dy = bot_wrap(tyaw + ox - yaw0), dp = (tpitch + oy) - pitch0, mx = (float)dt * (now - tacq < react ? t0r : turn);
             yaw = yaw0 + (dy > mx ? mx : dy < -mx ? -mx : dy); pitch = pitch0 + (dp > mx ? mx : dp < -mx ? -mx : dp); out |= 1;
             float ey = bot_wrap(tyaw - yaw0), ep = tpitch - pitch0, err = sqrtf(ey * ey + ep * ep) * 57.2958f, size = atanf(0.4f / (tdist > 0.5f ? tdist : 0.5f)) * 57.2958f;
@@ -1320,7 +1332,8 @@ static void bot_step_body(void) {
                 float dv[3] = {cosf(pitch0) * cosf(yaw0), cosf(pitch0) * sinf(yaw0), sinf(pitch0)};
                 can_hit = ray_pd(cam, dv, g_bot_head_c) < g_bot_head_r * 1.1f + pad;
                 float top = g_bot_head_c[2] - g_bot_head_r, bot = g_bot_body_c[2] - 0.7f * ftg.r;
-                for (int k = 0; k <= 8 && !can_hit && top > bot; k++) { float f = (float)k / 8.0f;
+                float sho = 1; lk_over(&sho, "NHOOK_SWAT_HEADONLY"); int body_ok = !(g_noshield && sho > 0);
+                for (int k = 0; k <= 8 && body_ok && !can_hit && top > bot; k++) { float f = (float)k / 8.0f;
                     float P[3] = {g_bot_body_c[0] + (g_bot_head_c[0] - g_bot_body_c[0]) * f, g_bot_body_c[1] + (g_bot_head_c[1] - g_bot_body_c[1]) * f, bot + (top - bot) * f};
                     if (ray_pd(cam, dv, P) < 0.22f + pad) can_hit = 1; } }
             g_bot_err = err; g_bot_fire = fvis && (fwr <= 0 || now - tacq > react) && can_hit && tdist < reach;

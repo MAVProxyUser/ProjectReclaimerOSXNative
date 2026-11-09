@@ -3438,6 +3438,15 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   the loop relaunched once, native.sh truncated aiwalker.log and the kick left no trace; the rejoin then failed with "You were kicked
   from this server. You can rejoin in 29 minutes." and the loop stopped as it should. LOGIC: before each launch aiwalker.log ->
   aiwalker.prev.log; the kick check also matches "kicked".
+- **The SWAT profile: faster to the head, head-only trigger, in context** (2026-11-09 16:00; nbot.c g_noshield sites, nbot_goals.c
+  rv_note "profile") — WHY: the user: "the swat gametype is headshots only btw... no shields... one shot. so you gonna have to kick up
+  the accuracy, speed to target, etc. or walker is gonna get destroyed. the brain will need to adapt quickly in context cuz this is a
+  fast paced game type". LOGIC: the shieldless check now needs only 5 s with 4+ live players and no shield (20 s otherwise); while it
+  holds: the reaction factor x NHOOK_SWAT_REACT (0.5), the turn rate before the reaction x NHOOK_SWAT_TURN0 (1.5) and after x
+  NHOOK_SWAT_TURN (1.3) (the turn is a clamp toward the aim point: faster, no overshoot), the aim noise x NHOOK_SWAT_NOISE (0.6),
+  automatic weapons aim at the head centre (not the neck), the hit test passes only through the HEAD (NHOOK_SWAT_HEADONLY 1: the body
+  column is skipped), the press into the target x NHOOK_SWAT_PRESS (0.5). All live knobs; everything returns the moment a shield shows.
+  Each revision records the profile ("SWAT profile" in the line, "profile": "swat" | "normal" in review-<nick>.jsonl).
 - **Games without shields (SWAT): the shield rules stand down** (2026-11-09 15:45; nbot.c g_noshield, fight movement, why_note,
   nbrain_beh.c beh_recharge / beh_break) — WHY: the walker moved to a new approved server playing SWAT (no shields, a headshot kills);
   every rule that reads its own shield as "how hurt am I" would see a permanent 0: back off inside every fight (the fight movement's
