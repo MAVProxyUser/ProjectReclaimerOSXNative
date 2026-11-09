@@ -3286,6 +3286,16 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   switch presses (the learnt record bit): 0 of 32 took" -- 32 x "switching from PLASMA PISTOL to ASSAULT RIFLE" with the trigger held
   (the plasma pistol held = an overcharge held) while the earlier switches, 3 of 3 and 2 of 2, came with the trigger up. LOGIC: from a
   switch press until 0.15 s after it the trigger (and the reload click) stays up; PLASMA PISTOL joins the weapons whose trigger is pulsed.
+- **[firegate]; the fire slack 1 -> 2 degrees** (2026-11-09 07:50; nbot.c the fire gate, the trigger) — WHY: walker-model.py over the
+  walkers' own battle recordings against the top fifth of 128 public matches: reaction 0.32 vs 0.85 s and aim error 3.8 vs 4.1 deg (fine),
+  but aimed at a target they fired 1.6 shots/s against the players' 3.85 and hit 19% against 47%. The new [firegate] line (every 20 s:
+  of the steps with a target within 40 units, the share hidden / reacting / aim off / camo / head gate / fire allowed, and how often the
+  trigger was really down) over a Guardian battle: hidden 23%, aim off 37%, allowed 33% -- the gate waited for the aim to sit within
+  max(target size, 1.2) + NHOOK_BOT_FIRE_EXTRA (1) deg, ~1.5-2.5 deg at fight range, while the players shoot at ~4 deg off and let the
+  aim assist / bullet magnetism pull the rounds in. LOGIC: NHOOK_BOT_FIRE_EXTRA defaults to 2 (live knob as before; 1 = old). The next
+  Guardian battle: fire allowed 33% -> 56%, aim off 37% -> 25%; from the recording 1.0 -> 1.2 shots/s engaged, hit share 26% -> 20%
+  (64-84 engagements; the battle's weapons -- hammers, shotguns, Excavators -- are not the public matches' mix): to be judged in public
+  play (a live knob for the trainer).
 - **Hunt one hidden target at a time** (2026-11-09 07:40; nbot_engage.c eg_pick) — WHY: on The Pit a walker logged "new target e41300ab"
   / "new target e4170175" alternating about once a second while both were hidden: the target draw (random by design -- exp(score) /
   sum, the players' own choice rule) ran on every step once the current target had not been seen for 1 s, and every flip changed the

@@ -580,6 +580,7 @@ static void mel_load(void) {
 static int bot_pull_weapon(const char* w) {
     static const char* const k[] = {"HAMMER", "SWORD", "ENERGY BLADE", "SNIPER", "BEAM RIFLE", "MAGNUM", "ROCKET", "BRUTE SHOT", "FUEL ROD", "PLASMA PISTOL", 0};   /* (14:05: the plasma pistol held = an overcharge held, and no switch away from it: 0 of 32) */
     if (!w) return 0; for (int i = 0; k[i]; i++) if (strstr(w, k[i])) return 1; return 0; }
+static int g_fg_n, g_fg_hid, g_fg_react, g_fg_aim, g_fg_camo, g_fg_head, g_fg_ok, g_fg_trig;   // ([firegate] counters, 07:50)
 static int g_bot_pull, g_bot_trig; static double g_bot_fire_t0;   // (the held weapon acts on a pull; when this string of fire began)
 static double g_bot_hold_high, g_bot_hold_last;   // (levels apart: holding the high ground until; the last levels-apart step)
 static int g_fol_go;   // (the leader is 5+ units away: its path beats the fight's moves)
@@ -1018,7 +1019,7 @@ static void bot_step_body(void) {
     // tunables (shim/tools/walker-train.py evolves them): NHOOK_BOT_SKILL 0..1 (reaction + aim noise), NHOOK_BOT_DIST (x the players'
     // fighting distances), NHOOK_BOT_STRAFE (x strafe strength), NHOOK_BOT_SWITCH (x the strafe switch time), NHOOK_BOT_FIRE_EXTRA
     // (deg of aim slack when firing), NHOOK_BOT_RETREAT (back off below this shield), NHOOK_BOT_GREN (s between grenades)
-    static int fight = -1; static float skill_0 = 0.5f, kdist_0 = 1, kstrafe_0 = 1, kswitch_0 = 1, fextra_0 = 1, retreat_0 = 0.35f, gren_0 = 9, backoff_0 = 0.15f, press_0 = 0.4f;
+    static int fight = -1; static float skill_0 = 0.5f, kdist_0 = 1, kstrafe_0 = 1, kswitch_0 = 1, fextra_0 = 2, retreat_0 = 0.35f, gren_0 = 9, backoff_0 = 0.15f, press_0 = 0.4f;
     if (fight < 0) { const char* e = getenv("NHOOK_BOT_FIGHT"); fight = e && strcmp(e, "0");
         #define BKNOB(v, n) if (getenv(n)) v = strtof(getenv(n), 0)
         BKNOB(skill_0, "NHOOK_BOT_SKILL"); BKNOB(kdist_0, "NHOOK_BOT_DIST"); BKNOB(kstrafe_0, "NHOOK_BOT_STRAFE"); BKNOB(kswitch_0, "NHOOK_BOT_SWITCH");
@@ -1100,6 +1101,14 @@ static void bot_step_body(void) {
               // under active camo: no shot beyond the near edge of the weapon's band (+2 units) unless we were hit in the last 2 s --
               // firing gives camo away; walk in instead (below)
               float a = 0, b = 0; if (g_inv.camo && now - thurt > 2.0 && eg_band(g_inv.held_c, &a, &b) && tdist > a * kdist + 2.0f) { g_bot_fire = 0; g_bot_camo_hold = 1; } else g_bot_camo_hold = 0; }
+            // (07:50: the fire slack NHOOK_BOT_FIRE_EXTRA 1 -> 2 deg: [firegate] said "aim off" held 30-60% of the steps with a visible target;
+            //  the walkers' aim error (3.8 deg median) is the best players' (4.1), who shoot at it and let Halo's aim assist / bullet
+            //  magnetism pull the rounds in: 1.6 shots/s vs their 3.85 while aimed at a target)
+            // (07:50: [firegate] -- the battle recordings: aimed at a target (within 10 deg for 0.3 s+) the walkers fired 1.6 shots/s,
+            //  the best players 3.85. Every 20 s: of the steps with a target within 40 units, the share hidden / still reacting / aim off /
+            //  held by the head gate / camo / fire allowed, and of those the share the trigger was really down (burst / pulse / switch))
+            if (tdist < 40) { g_fg_n++; if (!vis) g_fg_hid++; else if (now - tacq <= react) g_fg_react++; else if (err >= (size > 1.2f ? size : 1.2f) + fextra) g_fg_aim++;
+                else if (g_bot_camo_hold) g_fg_camo++; else if (!g_bot_fire) g_fg_head++; else g_fg_ok++; }
             // the other weapon when the target is outside the held one's band and well inside the other's (vpad Y held 0.15 s,
             // 3 s between switches; not in the first 0.3 s of a target)
             { static double tsw; if (g_vpad_on && g_inv.has_other && now - tsw > 3.0 && now - tacq > 0.3) {
@@ -1650,6 +1659,10 @@ static void bot_step_body(void) {
           float duty = tdist < 15 ? 0.34f : tdist < 25 ? 0.22f : 0.15f, per = 0.25f / duty;
           burst_ok = fmod(now - g_bot_fire_t0, per) < 0.25; }
       int trig = !nofire && spar && g_bot_fire && burst_ok && (!g_bot_pull || fmod(now - g_bot_fire_t0, 0.24) < 0.12) && !ob_carry; g_bot_trig = trig;   // (with the ball: melee only)
+      { static double tfg; if (g_bot_fire && trig) g_fg_trig++;
+        if (now - tfg > 20.0) { if (tfg > 0 && g_fg_n > 30 && bot_log()) nlog("[nhook] [firegate] %d steps with a target within 40 u: hidden %.0f%%, reacting %.0f%%, aim off %.0f%%, camo %.0f%%, head gate / other %.0f%%, fire allowed %.0f%% -- trigger down in %.0f%% of those (held %s)",
+              g_fg_n, 100.0 * g_fg_hid / g_fg_n, 100.0 * g_fg_react / g_fg_n, 100.0 * g_fg_aim / g_fg_n, 100.0 * g_fg_camo / g_fg_n, 100.0 * g_fg_head / g_fg_n, 100.0 * g_fg_ok / g_fg_n, g_fg_ok ? 100.0 * g_fg_trig / g_fg_ok : 0.0, g_inv.held ? g_inv.held : "-");
+          tfg = now; g_fg_n = g_fg_hid = g_fg_react = g_fg_aim = g_fg_camo = g_fg_head = g_fg_ok = g_fg_trig = 0; } }
       // (13:25: the SPARTAN LASER fires after its charge, and every release starts the charge again -- the aim gate flickered the trigger:
       //  a death holding it at 8 units. With it in hand and the target in sight within 40 units the trigger stays down)
       if (!nofire && spar && have_tg && tdist < 40 && g_inv.held && strstr(g_inv.held, "SPARTAN LASER") && los_get(ftg.handle, now) == 1) { trig = 1; g_bot_trig = 1; }
