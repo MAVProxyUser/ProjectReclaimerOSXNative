@@ -3272,6 +3272,13 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   a running battle, at every round end (our server's in_match true -> false) walker-coach.py round + match-study.py, then each
   walker's game restarted headless with its new knobs and the newest build (they rejoin in the lobby; the user's game and the
   server stay).
+- **The melee race; kite swords and hammers** (2026-11-09 12:15-12:20; nbot.c the melee press, the KITE block) — WHY: the first death
+  notes: killed at 0-3 units with the walker's shield gone and its health 0.78-1.00 (lost beatdowns: once a shield is down the first
+  melee wins, and the lunge reaches past the players' median landing distance the walker waited for, 0.97 + 0.25); killed at 1 unit
+  with FULL shields by an enemy holding a melee weapon (a one-hit kill). LOGIC: within NHOOK_BOT_MELEE_RACE (1.8, live) units with the
+  walker's or the target's shield under 0.15 the melee goes out at once (not with a sword / hammer of its own: their swing ranges
+  stay); a target holding a melee-class weapon within NHOOK_BOT_KITE (5, live) units -> throttle full back, the strafe at least 0.8,
+  shooting, after every rush / policy rule (the floor check still applies). NHOOK_BOT_MELEE_RACE=0 / NHOOK_BOT_KITE=0 = off.
 - **Death notes** (2026-11-09 12:05; nbot.c DeathSnap / death_note) — WHY: the walker dies to enemies it is not dueling (battle-rifle
   headshots, snipers) and its target choice already turns to attackers when hurt (nbot_engage.c eg_choose): the next fix needs the
   facts. LOGIC: each step keeps its target (handle, distance, in sight) and the enemies within 40 units aiming within 12 deg of it (the

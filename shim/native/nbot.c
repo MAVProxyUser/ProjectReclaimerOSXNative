@@ -1073,6 +1073,10 @@ static void bot_step_body(void) {
               if (nomel) { if (tdist < 1.8f && now - tmelee > 0.7) { tmelee = now; fbtn |= 2; } }   // (the old: B, one step)
               else { mel_load(); int mcls = g_inv.held_c && !strcmp(g_inv.held_c, "melee");
                   float mr = (mcls ? (g_inv.held && strstr(g_inv.held, "HAMMER") ? g_mel.hammer : g_mel.sword) : g_mel.range) + 0.25f;
+                  // (12:15: the MELEE RACE -- the death notes: killed at 0-3 units with the walker's shield gone and health 0.8-1.0: the
+                  //  first melee wins once a shield is down, and the lunge reaches past the players' median landing distance. Within
+                  //  NHOOK_BOT_MELEE_RACE (1.8) units with either shield under 0.15: melee now)
+                  float mrace = 1.8f; lk_over(&mrace, "NHOOK_BOT_MELEE_RACE"); if (!mcls && (o->shield < 0.15f || ftg.shield < 0.15f) && mrace > mr) mr = mrace;
                   if (vis && tdist < mr && now - tmelee > 0.6 && now - tacq > 0.15) { tmelee = now;
                       if (bot_log()) nlog("[nhook] [melee] %s at %.2f units (target shield %.2f: %s), holding %s", mcls ? "swing" : "melee", tdist, ftg.shield, ftg.shield < 0.05f ? "beatdown" : "full", g_inv.held ? g_inv.held : "-"); }
                   static float mh = -1; if (mh < 0) { const char* e = getenv("NHOOK_BOT_MELEE_HOLD"); mh = e ? strtof(e, 0) : 0.3f; }
@@ -1135,6 +1139,13 @@ static void bot_step_body(void) {
                     float pull = tdist > p75 * kdist ? 0.6f : 0.0f; r = fmaxf(-1.0f, fminf(1.0f, rsc * er / run + pull));
                     if (o->shield < retreat && o->shield >= 0) r = -backoff;
                     if (g_bot_camo_hold) r = 0.9f; }
+                // KITE A SWORD / HAMMER (12:20: "[death] ... edb300a6 1 u (melee) = my target; my shield 1.00": a one-hit kill at arm's
+                //  length): the target holding a melee-class weapon within NHOOK_BOT_KITE (5) units -> full speed back, a full strafe,
+                //  shooting; after the policy and the rushes below it stays (g_kite)
+                int g_kite = 0;
+                { float kr = 5; lk_over(&kr, "NHOOK_BOT_KITE"); uint32_t tw = ftg.wslot >= 0 && ftg.wslot < 4 ? ftg.weapons[ftg.wslot] : 0xFFFFFFFFu; uint64_t twd = nov_datum(tw); uint32_t twdef = 0;
+                  if (kr > 0 && tdist < kr && twd && hb_read(twd, &twdef, 4) && !strcmp(eg_wcls(hb_tag_name(twdef)), "melee") && !(g_inv.held_c && !strcmp(g_inv.held_c, "melee"))) {
+                      g_kite = 1; static double tk; if (bot_log() && now - tk > 3) { tk = now; nlog("[nhook] [fight] a %s at %.1f units: kiting it", hb_tag_name(twdef), tdist); } } }
                 // THE LEARNT POLICY (npolicy.c): the best players' moves for this moment, blended in by NHOOK_BOT_POLICY (live, 0 off);
                 // the rush, arm's length and floor rules below still apply on top. [policy] every 30 s: how often it moved the walker
                 { static double tpj, tpl; static int npol, nsteps, njump; float pw = 0; lk_over(&pw, "NHOOK_BOT_POLICY"); pol_tick(now); nsteps++;
@@ -1161,6 +1172,7 @@ static void bot_step_body(void) {
                   float hx = ftg.c[0] - o->c[0], hy = ftg.c[1] - o->c[1], hd = sqrtf(hx * hx + hy * hy), dz = o->c[2] - ftg.c[2];
                   if (!na && hd < 0.8f && dz > 0.5f) { r = -0.7f; lat = lat >= 0 ? 0.5f : -0.5f; }
                   else if (!na && hd < 1.0f && r > 0) { r = 0; if (fabsf(lat) < 0.3f) lat = lat >= 0 ? 0.4f : -0.4f; } }
+                if (g_kite) { r = -1.0f; if (fabsf(lat) < 0.7f) lat = lat >= 0 ? 0.8f : -0.8f; }
                 // never off the floor: test where this step leads (1 unit along the move); flip the strafe, then drop the back-off
                 float fx = cosf(yaw0), fy = sinf(yaw0), lx = -fy, ly = fx; float lat_in = lat, r_in = r; int ftries = 0;
                 // (09:10: the check flipped the strafe on 23-60% of fight steps -- a strafe reversing every few steps is a jitter in
