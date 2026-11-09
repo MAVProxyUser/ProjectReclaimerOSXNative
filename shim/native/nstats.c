@@ -138,6 +138,7 @@ static volatile int g_match_pending; static char g_loading[96];
 // players table fills (st_snapshot). The page used to sit at "not in a match", overlay off, for the whole next map (2026-11-07).
 static volatile int g_app_playing;
 static char g_srv_addr[96];                                // the server this app joined ("[online] joining <ip>:<port>")
+static float g_net_rtt_ms;   // the joined server's round trip, ms (its "[online] peer ... rtt" lines; 0 = not known yet)
 static volatile int g_sp_join;                             // joined a game in progress: its first spawn burst is not spawn points (nspawns.c)
 // where the app moved halo3's tables: it logs each move ("[capacity] <what>: <old> -> <new>", "[c1] ...")
 static volatile int64_t g_sb_off = 0x159c0;                // game engine globals (TLS +0x20) -> statborg (halo3: +0xfeb8)
@@ -192,6 +193,10 @@ static void nst_on_line(const char* p, size_t n) {
     if (!strncmp(l, "[host] stopping", 15) || !strncmp(l, "[switch] leaving the game", 25) || (!strncmp(l, "[switch] game ", 14) && strncmp(l + 14, "Playing", 7))) { g_gameplay_t0 = 0; g_app_playing = 0; return; }
     // "[online] peer 0x<id> at <ip>:<port>: rtt ..." (every few seconds per peer): which session peer an address is
     if (!strncmp(l, "[online] peer 0x", 16)) { HK_ONCE(h, "line: [online] peer"); hk_fire(h); }
+    // (2026-11-09: the walker's lead time follows the ping -- on a UK server 145 ms away its accuracy fell to 5-12% against the lobby's
+    //  17-23%, with a lead tuned on a 44-64 ms server): "... at <ip>:<port>: rtt <ms> ms" of the joined server's peer -> g_net_rtt_ms
+    if (!strncmp(l, "[online] peer 0x", 16) && g_srv_addr[0]) { const char* at = strstr(l, " at "); const char* r = strstr(l, ": rtt ");
+        if (at && r && !strncmp(at + 4, g_srv_addr, strlen(g_srv_addr)) && at[4 + strlen(g_srv_addr)] == ':') { float v = strtof(r + 6, 0); if (v > 0 && v < 2000) g_net_rtt_ms = v; } }
     if (!strncmp(l, "[online] peer 0x", 16)) { char* at = strstr(l, " at "); if (at) { uint64_t id = strtoull(l + 16, 0, 16); char ip[64]; size_t k = 0; const char* q = at + 4;
             while (*q && *q != ' ' && k + 1 < sizeof ip) ip[k++] = *q++; ip[k] = 0; if (k && ip[k - 1] == ':') ip[k - 1] = 0; pk_peer_note(id, ip); } return; }
     // chat (the app prints these only with its chat_log byte set: chat_log_tick): "[chat] line [GLOBAL|TEAM|NEARBY] <name>

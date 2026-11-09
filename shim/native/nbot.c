@@ -63,6 +63,9 @@ static int g_brain_warm;
 // stand down -- otherwise a permanent 0 meant: back off inside every fight (fight movement), back off to recharge, break off, and every
 // death "entered hurt" (the tuner stepping recharge settings for nothing). NHOOK_BOT_NOSHIELD=1 / 0 forces it on / off (live)
 static int g_noshield;
+// (2026-11-09) the walker's own kills / deaths in THIS match from the scoreboard (the game results, nstats.c g_rs_cur; -1 = not known):
+// the three-minute review counted "a target that died while I fought it" as a kill -- 17 "kills" in a UK match the scoreboard put at 3
+static int g_my_kills = -1, g_my_deaths = -1;
 static int bot_log(void) { static int l = -1; if (l < 0) l = getenv("NHOOK_SPAR_LOG") ? 1 : 0; return l && !g_brain_warm; }
 
 static int bot_private_addr(const char* a) {   // "ip:port" at a loopback / private address
@@ -1175,7 +1178,12 @@ static void bot_step_body(void) {
             //  client's bullets with no lag compensation, and the target as drawn is already behind) + the bullet's flight (distance /
             //  the weapon class's speed x NHOOK_BOT_PROJ_SPEED) + one bot step, all x NHOOK_BOT_LEAD_X (1; death-tuner.py tunes it on
             //  the server's registered accuracy). The fire gate's hit test uses the same predicted head and body
-            float tl = 0; { const char* hc2 = g_inv.held_c ? g_inv.held_c : ""; float lat = 0.08f, lx = 1, psx = 1; lk_over(&lat, "NHOOK_BOT_LEAD_LAT"); lk_over(&lx, "NHOOK_BOT_LEAD_X"); lk_over(&psx, "NHOOK_BOT_PROJ_SPEED");
+            // (2026-11-09: the latency part follows the joined server's measured round trip: g_net_rtt_ms x NHOOK_BOT_LEAD_RTT (1.25 /
+            //  1000 -- 0.08 s at the 64 ms where 0.08 was tuned; 0.18 s at 145 ms, where the fixed 0.08 left the walker at 5-12% accuracy
+            //  against the lobby's 17-23%); a NHOOK_BOT_LEAD_LAT in the live file still overrides it)
+            float tl = 0; { const char* hc2 = g_inv.held_c ? g_inv.held_c : ""; float lat = 0.08f, lx = 1, psx = 1, lrt = 1.25f; lk_over(&lrt, "NHOOK_BOT_LEAD_RTT");
+                if (g_net_rtt_ms > 1.0f && lrt > 0) lat = g_net_rtt_ms / 1000.0f * lrt;
+                lk_over(&lat, "NHOOK_BOT_LEAD_LAT"); lk_over(&lx, "NHOOK_BOT_LEAD_X"); lk_over(&psx, "NHOOK_BOT_PROJ_SPEED");
                 float spd = (!strcmp(hc2, "sniper") ? 2000.0f : !strcmp(hc2, "precision") ? 400.0f : !strcmp(hc2, "auto") ? 300.0f : !strcmp(hc2, "shotgun") ? 250.0f : !strcmp(hc2, "rocket") ? 40.0f : 300.0f) * (psx > 0.05f ? psx : 0.05f);
                 float dd2 = sqrtf((t->c[0] - cam[0]) * (t->c[0] - cam[0]) + (t->c[1] - cam[1]) * (t->c[1] - cam[1]) + (t->c[2] - cam[2]) * (t->c[2] - cam[2]));
                 tl = (lat + dd2 / spd + 0.033f) * lx; if (tl < 0) tl = 0; if (tl > 0.8f) tl = 0.8f; }
@@ -2030,7 +2038,7 @@ static void bot_step_body(void) {
 // its layout version checked, and from the next step it is the walker -- the game, its connection and its place never stop. A brain's
 // own memory (path, goal, models, live knobs) starts again at a load. Old brains are never unloaded (threads they started -- the
 // walking-graph builder's waiter, chat lines -- may still run in them). NHOOK_NO_BRAIN=1 = the built-in walker only. [brain] lines.
-#define NHIO_VERSION 1
+#define NHIO_VERSION 2   // (2: my_kills / my_deaths / rtt_ms -- the scoreboard and the ping, 2026-11-09)
 typedef struct {
     int version;
     // body -> brain
@@ -2038,6 +2046,7 @@ typedef struct {
     double gameplay_t0; int rd_mode, rd_range, vpad_on, spar, nav_mode_rt, ht_my_slot, shadow; float pt[3]; uint64_t jump;
     uint64_t testbtn; double testbtn_until; uint32_t testpad; double testpad_until;
     int los_done, los_res; uint32_t los_res_tgt; double los_t; uint64_t inp_b8_acc;
+    int my_kills, my_deaths; float rtt_ms;
     // brain -> body
     int out; float yaw, pitch, tx, ty; uint64_t btn; int fire, fighting, trig; float err; uint64_t unit_p;
     double melee_until, act_until, switch_until, seat_t, gun_exit_until;
@@ -2051,6 +2060,8 @@ static void io_in_pack(NhIO* io) {   // (the body) its state -> the brain
     io->ht_my_slot = g_ht_my_slot; io->shadow = g_bot_shadow; io->jump = g_bot_jump; io->testbtn = g_bot_testbtn; io->testbtn_until = g_bot_testbtn_until;
     io->testpad = g_bot_testpad; io->testpad_until = g_bot_testpad_until; io->los_done = g_los_done; io->los_res = g_los_res; io->los_res_tgt = g_los_res_tgt; io->los_t = g_los_t;
     io->inp_b8_acc = g_inp_b8_acc;
+    io->my_kills = io->my_deaths = -1; io->rtt_ms = g_net_rtt_ms;
+    { int sl = g_ht_my_slot; if (g_rs_have && sl >= 0 && sl < 128) { io->my_kills = g_rs_cur[sl][RS_KILLS] & 0x7fff; io->my_deaths = g_rs_cur[sl][RS_DEATHS] & 0x7fff; } }
     io->los_req = g_los_req; }   // (the brain keeps counting from the body's)
 static void io_in_apply(const NhIO* io) {   // (the brain) the body's state -> this copy's globals
     g_my_unit = io->my_unit; g_follow_unit = io->follow_unit; g_human_n = io->human_n; for (int i = 0; i < 8; i++) g_human_unit[i] = io->human_unit[i];
@@ -2059,7 +2070,7 @@ static void io_in_apply(const NhIO* io) {   // (the brain) the body's state -> t
     g_gameplay_t0 = io->gameplay_t0; g_rd_mode = io->rd_mode; g_rd_range = io->rd_range; g_vpad_on = io->vpad_on; g_bot_spar = io->spar; g_nav_mode_rt = io->nav_mode_rt;
     g_ht_my_slot = io->ht_my_slot; g_bot_shadow = io->shadow; g_bot_jump = io->jump; g_bot_testbtn = io->testbtn; g_bot_testbtn_until = io->testbtn_until;
     g_bot_testpad = io->testpad; g_bot_testpad_until = io->testpad_until; g_los_done = io->los_done; g_los_res = io->los_res; g_los_res_tgt = io->los_res_tgt; g_los_t = io->los_t;
-    g_inp_b8_acc = io->inp_b8_acc; g_los_req = io->los_req; }
+    g_inp_b8_acc = io->inp_b8_acc; g_los_req = io->los_req; g_my_kills = io->my_kills; g_my_deaths = io->my_deaths; g_net_rtt_ms = io->rtt_ms; }
 static void io_out_pack(NhIO* io) {   // (the brain) what the hooks write
     io->out = g_bot_out; io->yaw = g_bot_yaw; io->pitch = g_bot_pitch; io->tx = g_bot_tx; io->ty = g_bot_ty; io->btn = g_bot_btn; io->fire = g_bot_fire; io->fighting = g_bot_fighting;
     io->trig = g_bot_trig; io->err = g_bot_err; io->unit_p = g_bot_unit_p; io->melee_until = g_bot_melee_until; io->act_until = g_bot_act_until; io->switch_until = g_bot_switch_until;

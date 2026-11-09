@@ -246,8 +246,8 @@ static void hm_reload_brain(void) {   // (g_hm_mx held) the brain's copy of the 
 static void rv_note(double now, const char* trig, const char* map, float mins, int kills, int deaths, int empty, float dpm, float prev, int zones, float hx, float hy, int hn, uint32_t nd) {
     char hot[96] = "none"; if (hn >= 2) snprintf(hot, sizeof hot, "(%.0f, %.0f) with %d deaths within 6 units", hx, hy, hn);
     if (bot_log()) nlog("[nhook] [brain] review r%d [%s] (%s%s, %.0f min): %d kills %d deaths (%d on an empty magazine), %.1f deaths a minute -> caution %.2f (was %.2f): "
-                        "pressing x%.2f, lull reload under %.0f%% of the magazine; death map %u deaths; own deaths weigh on the paths, the hottest spot %s",
-                        g_rv_n, trig, map, g_noshield ? ", SWAT profile" : "", mins, kills, deaths, empty, dpm, g_rv_caut, prev, 1.0f - 0.6f * g_rv_caut, 100 * (0.45f + 0.25f * g_rv_caut), (unsigned)nd, hot);
+                        "pressing x%.2f, lull reload under %.0f%% of the magazine; death map %u deaths; own deaths weigh on the paths, the hottest spot %s; ping %.0f ms",
+                        g_rv_n, trig, map, g_noshield ? ", SWAT profile" : "", mins, kills, deaths, empty, dpm, g_rv_caut, prev, 1.0f - 0.6f * g_rv_caut, 100 * (0.45f + 0.25f * g_rv_caut), (unsigned)nd, hot, g_net_rtt_ms);
     char path[1100]; const char* h = getenv("HOME");
     snprintf(path, sizeof path, "%s/Library/Application Support/ReclaimerMac/battles/follow/review-%s.jsonl", h ? h : "/tmp", g_nick[0] ? g_nick : "walker");
     FILE* f = fopen(path, "a");
@@ -255,7 +255,7 @@ static void rv_note(double now, const char* trig, const char* map, float mins, i
                      (double)time(0), g_rv_n, trig, g_noshield ? "swat" : "normal", map, mins, kills, deaths, empty, dpm, g_rv_caut, prev, 1.0f - 0.6f * g_rv_caut, zones, (unsigned)nd, hx, hy, hn); fclose(f); }
     (void)now; }
 static void brain_review(double now) {
-    static double t0, tchk; static int k0; static char map[64]; static long seq0 = -1; char why[64] = ""; int force = 0;
+    static double t0, tchk; static int k0, ks0 = -1; static char map[64]; static long seq0 = -1; char why[64] = ""; int force = 0;
     if (g_brain_warm) return;   // (a brain warming up beside the running one revises from its first own step)
     // (a new build of the brain starts its statics afresh: it carries on from the last revision -- its number and caution -- when
     //  that one is under 15 minutes old, so a code reload does not forget what the reviews learnt)
@@ -274,13 +274,16 @@ static void brain_review(double now) {
         if (f) { long q = 0; char r[64] = ""; int got = fscanf(f, "%ld %63[^\n]", &q, r); fclose(f);
             if (got >= 1) { if (seq0 < 0) seq0 = q; else if (q != seq0) { seq0 = q; force = 1; snprintf(why, sizeof why, "%s", got > 1 ? r : "monitor"); } } } }
     if (strcmp(map, g_st_curmap)) {   // (a new map -- or a new build of the brain: a revision with its death map; a fresh window, the caution carries)
-        int loaded = !map[0]; snprintf(map, sizeof map, "%s", g_st_curmap); t0 = now; k0 = g_gl_nkill; if (!map[0]) return;
+        int loaded = !map[0]; snprintf(map, sizeof map, "%s", g_st_curmap); t0 = now; k0 = g_gl_nkill; ks0 = g_my_kills; if (!map[0]) return;
         uint32_t nd; pthread_mutex_lock(&g_hm_mx); nd = g_hm.nd; pthread_mutex_unlock(&g_hm_mx); g_rv_n++;
         rv_note(now, loaded ? "new brain" : "map", map, 0, 0, 0, 0, 0, g_rv_caut, 0, 0, 0, 0, nd); return; }
     float win = 180; lk_over(&win, "NHOOK_BOT_REVIEW_S");
     if (!force && (win <= 0 || now - t0 < win)) return;
     if (!force) snprintf(why, sizeof why, "every %.0f s", win);
+    // kills: the scoreboard's (g_my_kills, this match) when the body knows it, else the targets that died while it fought them
     double w0 = t0; int kills = g_gl_nkill - k0; t0 = now; k0 = g_gl_nkill;
+    if (g_my_kills >= 0) { if (ks0 >= 0 && g_my_kills >= ks0) kills = g_my_kills - ks0; else kills = g_my_kills; }
+    ks0 = g_my_kills;
     int deaths = 0, empty = 0; for (int i = 0; i < g_ngld; i++) if (g_gld[i].t > w0) { deaths++; empty += g_gld[i].empty; }
     if (!force && !deaths && !kills) return;   // (not playing: no revision)
     float mins = (float)(now - w0) / 60.0f; if (mins < 0.05f) mins = 0.05f;

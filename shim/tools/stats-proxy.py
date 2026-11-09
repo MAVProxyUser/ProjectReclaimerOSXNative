@@ -7,6 +7,39 @@ and serves again once the port is free (the game had no page of its own, or it e
 --stay: never step aside (the user, 11:40: "the stats server should stay tied to the walker for now").
     python3 shim/tools/stats-proxy.py [--listen 8765] [--target 8771] [--stay]"""
 import http.server, os, socketserver, subprocess, sys, threading, time, urllib.request
+import json, select, socket
+
+# THE SERVER'S NAME (2026-11-09; the user: "can you add the name of the connected server to the top of http://127.0.0.1:8765"): the
+# game's stats.json says only which address it joined (server_addr); the relay asks that server once a minute what it is -- the one
+# status datagram every client sends to each listed server (a6 01 00 <nonce8>, zero-padded to 1229 bytes -> a7 <nonce8> {"info": {name,
+# map, mode, players, max_players, ...}}; shim/tools/servers10.py, server-status.md) -- and adds server_name / server_info to the
+# stats.json it passes on. Nothing is sent anywhere else.
+_srv = {'addr': None, 't': 0.0, 'info': None, 'busy': False}
+def server_info(addr):
+    if not addr or ':' not in addr: return None
+    now = time.time()
+    if _srv['addr'] == addr and (now - _srv['t'] < 60 or _srv['busy']): return _srv['info']
+    if _srv['busy']: return _srv['info'] if _srv['addr'] == addr else None
+    if _srv['addr'] != addr: _srv.update(addr=addr, info=None)
+    _srv['busy'] = True; _srv['t'] = now
+    def ask():
+        try:
+            h, port = addr.rsplit(':', 1); k = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); n = os.urandom(8)
+            q = bytes([0xa6, 1, 0]) + n; q += bytes(1229 - len(q)); k.sendto(q, (h, int(port))); end = time.time() + 2.5
+            while time.time() < end:
+                r, _, _ = select.select([k], [], [], 0.2)
+                if not r: continue
+                d, _ = k.recvfrom(65536)
+                if len(d) >= 10 and d[0] == 0xa7 and d[1:9] == n:
+                    j = json.loads(d[9:]); i = j.get('info') if isinstance(j, dict) else None
+                    if isinstance(i, dict) and _srv['addr'] == addr:
+                        _srv['info'] = {x: i.get(x) for x in ('name', 'map', 'mode', 'players', 'max_players', 'version')}
+                    break
+            k.close()
+        except Exception: pass
+        finally: _srv['busy'] = False
+    threading.Thread(target=ask, daemon=True).start()
+    return _srv['info']
 
 def arg(k, d):
     a = sys.argv; return a[a.index(k) + 1] if k in a else d
@@ -21,6 +54,12 @@ class H(http.server.BaseHTTPRequestHandler):
             with urllib.request.urlopen(req, timeout=10) as r: data = r.read(); code = r.status; ct = r.headers.get('Content-Type', 'application/octet-stream'); cc = r.headers.get('Cache-Control')
         except urllib.error.HTTPError as e: data = e.read(); code = e.code; ct = e.headers.get('Content-Type', 'text/plain'); cc = None
         except Exception as e: data = ('relay: %s' % e).encode(); code = 502; ct = 'text/plain'; cc = None
+        if code == 200 and self.command == 'GET' and self.path.startswith('/stats.json'):
+            try:
+                j = json.loads(data); inf = server_info(j.get('server_addr'))
+                if inf: j['server_name'] = inf.get('name'); j['server_info'] = inf
+                data = json.dumps(j).encode()
+            except Exception: pass
         # (2026-11-09: the game's Cache-Control passed on -- without it the browser kept an old copy of the page after an edit)
         self.send_response(code); self.send_header('Content-Type', ct); self.send_header('Content-Length', str(len(data)))
         self.send_header('Cache-Control', cc or 'no-cache'); self.end_headers(); self.wfile.write(data)
@@ -34,6 +73,11 @@ class H(http.server.BaseHTTPRequestHandler):
             while True:
                 line = r.readline()
                 if not line: break
+                if line.startswith(b'data: {') and b'"server_addr"' in line:   # (the snapshots the page draws: the server's name added, as in stats.json)
+                    try:
+                        j = json.loads(line[6:]); inf = server_info(j.get('server_addr'))
+                        if inf: j['server_name'] = inf.get('name'); j['server_info'] = inf; line = b'data: ' + json.dumps(j).encode() + b'\n'
+                    except Exception: pass
                 self.wfile.write(line); self.wfile.flush()
         except Exception: pass
     def do_GET(self):

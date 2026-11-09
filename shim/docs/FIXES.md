@@ -3438,6 +3438,23 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   the loop relaunched once, native.sh truncated aiwalker.log and the kick left no trace; the rejoin then failed with "You were kicked
   from this server. You can rejoin in 29 minutes." and the loop stopped as it should. LOGIC: before each launch aiwalker.log ->
   aiwalker.prev.log; the kick check also matches "kicked".
+- **The lead follows the ping; the reviews count the scoreboard's kills** (2026-11-09 16:50; nstats.c g_net_rtt_ms, nbot.c NhIO layout 2
+  (my_kills / my_deaths / rtt_ms), the lead time, nbot_goals.c brain_review) — WHY: on a server 145 ms away the walker's accuracy fell
+  to 5-12% against the lobby's 17-23% (it was above the lobby's median on a 44-64 ms server): the lead's latency part was a fixed 0.08 s
+  tuned at 64 ms ("the host registers a client's bullets with no lag compensation"). And the three-minute reviews counted "a target that
+  died while I fought it" as a kill -- 17 "kills" in that match where the scoreboard said 3 -- so the caution stayed 0 while it lost.
+  LOGIC: the body reads the joined server's round trip from the app's own "[online] peer ... rtt <ms> ms" line (the peer at the joined
+  address) and this match's kills / deaths from the game results (g_rs_cur at its slot); NhIO v2 hands them to the brain (a layout-1
+  brain is refused by a v2 body and the other way round: rebuild both). Lead latency = rtt x NHOOK_BOT_LEAD_RTT (1.25 / 1000 -- 0.08 s
+  at 64 ms, 0.18 s at 145 ms); a NHOOK_BOT_LEAD_LAT in the live file still wins. A review's kills = the scoreboard's since the window
+  began (the old count when the body has none); the review line gives the ping.
+- **The stats page names the server** (2026-11-09 17:00; shim/tools/stats-proxy.py server_info, stats_page.html #srv) — WHY: the user
+  asked for the connected server's name at the top of the page, with its full description rather than only its address. LOGIC: the
+  relay on 8765 sends the joined server the one status datagram every client sends to listed servers (a6 01 00 <nonce8> padded to
+  1229 -> a7 <nonce8> {"info": ...}; servers10.py), at most once a minute, and adds server_name + server_info (map, mode, players, max,
+  version) to the stats.json AND the /events snapshots it passes on (the page draws from the stream). The page's first line: "Server:
+  <name> (<address> · <players>/<max> players · <mode>)"; the address alone without the relay, "Hosting this game" as host; the
+  anonymised demo shows "An example server".
 - **The SWAT profile: faster to the head, head-only trigger, in context** (2026-11-09 16:00; nbot.c g_noshield sites, nbot_goals.c
   rv_note "profile") — WHY: the user: "the swat gametype is headshots only btw... no shields... one shot. so you gonna have to kick up
   the accuracy, speed to target, etc. or walker is gonna get destroyed. the brain will need to adapt quickly in context cuz this is a
