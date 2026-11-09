@@ -33,7 +33,15 @@ static void nbot_tool_path(char* t, size_t n);
 static void nbot_tool_path(char* t, size_t n) {   // re-tools/h3nav.py beside the dylib's checkout / bundle (shim/build/nhook.dylib)
     Dl_info di; t[0] = 0; if (!dladdr((void*)nbot_tool_path, &di) || !di.dli_fname) return;
     char d[1024]; snprintf(d, sizeof d, "%s", di.dli_fname); char* sl = strrchr(d, '/'); if (!sl) return; *sl = 0;
-    snprintf(t, n, "%s/../../re-tools/h3nav.py", d); }
+    snprintf(t, n, "%s/../../re-tools/h3nav.py", d);
+    // (2026-11-09: a brain runs from a COPY in $TMPDIR (hot swaps) -- the path above then led nowhere and a new map got no walking graph,
+    //  "re-tools/h3nav.py not found" on hugetowers. Then the checkout the body came from: DYLD_INSERT_LIBRARIES (shim/native.sh injects
+    //  <checkout>/shim/build/nhook.dylib), else NHOOK_STATS_PAGE (<checkout>/shim/src/stats_page.html))
+    if (!access(t, R_OK)) return;
+    const char* e = getenv("DYLD_INSERT_LIBRARIES"); char b[1024] = "";
+    if (e && *e) { snprintf(b, sizeof b, "%s", e); char* c = strchr(b, ':'); if (c) *c = 0; char* q = strstr(b, "/shim/build/"); if (q) *q = 0; else b[0] = 0; }
+    if (!b[0] && (e = getenv("NHOOK_STATS_PAGE")) && *e) { snprintf(b, sizeof b, "%s", e); char* q = strstr(b, "/shim/src/"); if (q) *q = 0; else b[0] = 0; }
+    if (b[0]) snprintf(t, n, "%s/re-tools/h3nav.py", b); }
 
 static volatile int g_bot_spar, g_bot_started;           // the sparring aim on
 static float g_bot_pt[3]; static char g_bot_veh[64];    // walker targets (point / vehicle name)
@@ -2060,7 +2068,7 @@ static void bot_step_body(void) {
           for (int i = i0; i < rn; i++) { float dx = ring[i & 127][0] - a0[0], dy = ring[i & 127][1] - a0[1]; if (dx * dx + dy * dy > 36.0f) { stuck = 0; break; } } }
       // (17:35: on the Hugegrass island the escape hopped it back and forth over 6 units, so it never counted as standing still: no path
       //  found to anywhere for the same time counts as stuck too)
-      if (!stuck && us > 0 && alive_me && now - tfight > 15.0 && alive_t0 > 0 && now - alive_t0 > us && now - g_nav_ok_t > us) stuck = 1;
+      if (!stuck && us > 0 && alive_me && g_nav.ok && now - tfight > 15.0 && alive_t0 > 0 && now - alive_t0 > us && now - g_nav_ok_t > us) stuck = 1;   /* (only with a walking graph: none = no plan at all, not stuck) */
       if (stuck) { int mate = 0; for (int i = 0; i < n; i++) { const NovObj* t = &objs[i]; if (t->type || t->dead || i == me || bot_enemy(o, t)) continue;
               float dx = t->c[0] - o->c[0], dy = t->c[1] - o->c[1], dz = t->c[2] - o->c[2]; if (dx * dx + dy * dy + dz * dz < 100.0f) { mate = 1; break; } }
           int nades = g_inv.frag + g_inv.plasma > 0 || g_inv.gren > 0;

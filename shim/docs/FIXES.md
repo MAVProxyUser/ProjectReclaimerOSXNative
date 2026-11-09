@@ -3448,6 +3448,12 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   brain is refused by a v2 body and the other way round: rebuild both). Lead latency = rtt x NHOOK_BOT_LEAD_RTT (1.25 / 1000 -- 0.08 s
   at 64 ms, 0.18 s at 145 ms); a NHOOK_BOT_LEAD_LAT in the live file still wins. A review's kills = the scoreboard's since the window
   began (the old count when the body has none); the review line gives the ping.
+- **A brain running from its temp copy finds the walking-graph tool again; no graph is not "stuck"** (2026-11-09 17:50; nbot.c
+  nbot_tool_path, the unstick) — WHY: on a new map (hugetowers) the walker got no walking graph: "re-tools/h3nav.py not found" under
+  $TMPDIR -- a brain runs from a copy there (hot swaps), and the tool path was taken from the brain's own file. And the new rule "no path
+  anywhere for 45 s = stuck" would have had it grenade itself over and over on a map with no graph at all. LOGIC: when the path beside
+  the dylib does not exist, the checkout comes from DYLD_INSERT_LIBRARIES (shim/native.sh injects <checkout>/shim/build/nhook.dylib),
+  else NHOOK_STATS_PAGE; the no-path stuck rule needs a loaded graph (g_nav.ok). The next brain made the hugetowers graph at once.
 - **Floor steps learned both ways; a stuck walker heads where players leave from** (2026-11-09 17:45; shim/tools/nav-portals.py STEPS,
   nbot.c the island escape) — WHY: the user: "the player position tells me the current walker ... can't even move from its spawn point,
   and clearly is not learning from teammate lanes". The recording showed it: Hugegrass's spawn room is closed, its exits are teleporters in
