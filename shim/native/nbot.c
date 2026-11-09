@@ -156,7 +156,7 @@ static void bot_los_do(uint64_t* ctx) {
     if (hit) { const float* h = (const float*)(res + 0x08); float dx = h[0] - P[0], dy = h[1] - P[1], dz = h[2] - P[2]; d = sqrtf(dx * dx + dy * dy + dz * dz); }
     g_los_res = !hit || d > L - 0.5f; g_los_res_tgt = g_los_tgt; g_los_t = mono_s(); g_los_done = q; }
 typedef struct { float x, y, w; } GlLane; static GlLane* g_gll; static int g_ngll; static float g_gll_wsum;   // the lanes as goal material (nbot_goals.c)
-static double g_escape_until, g_escape_t; static float g_escape_dir; static double g_act_last;   // (14:50: the wedged-spot escape)
+static double g_escape_until, g_escape_t; static float g_escape_dir; static double g_act_last; static int g_fetch_abort;   // (14:50: the wedged-spot escape)
 static double g_fjump_until; static int g_bot_camo_hold;   // (a jump in a fight: NHOOK_BOT_FJUMP)
 static int bot_fcmp(const void* a, const void* b) { float x = *(const float*)a, y = *(const float*)b; return x < y ? -1 : x > y; }
 // the model's heat for this map -> g_nav.pop (how much real players use each floor node: A* prefers their lanes); once per map
@@ -1371,6 +1371,7 @@ static void bot_step_body(void) {
           if (got || !g_bot_pick_on || now - tp0 > phold) { if (bot_log()) nlog("[nhook] [fight] %s the %s after %.1f s of act (%.2f units across, %+.2f up; the legs: %s; holding %s, other %s)", got ? "TOOK" : !g_bot_pick_on ? "left" : "could not take", g_pick_name, now - tp0,
                   g_pick_d, g_bot_pick_pos[2] - o->c[2], g_arb_why, g_inv.held ? g_inv.held : "-", g_inv.other ? g_inv.other : "-");
               if (!got && g_bot_pick_on) { g_bot_pick_on = 0; tried[(ntried++) & 31] = want_h; } if (got) g_bot_pick_on = 0; tp0 = 0; } }
+      if (g_fetch_abort) { g_fetch_abort = 0; if (g_bot_pick_on) { g_bot_pick_on = 0; tried[(ntried++) & 31] = want_h; if (bot_log()) nlog("[nhook] [fight] the %s: the server put me back twice on the way -- left", g_pick_name); } }
       if (g_bot_pick_on) { float dx = g_bot_pick_pos[0] - o->c[0], dy = g_bot_pick_pos[1] - o->c[1], dz = g_bot_pick_pos[2] - o->c[2], pr = 1.3f; lk_over(&pr, "NHOOK_BOT_PICK_R");
           g_pick_d = sqrtf(dx * dx + dy * dy);
           if (dx * dx + dy * dy < 0.36f && fabsf(dz) >= 1.5f) { g_bot_pick_on = 0; tried[(ntried++) & 31] = want_h;   // (under / over it, out of reach: at once)
@@ -1566,6 +1567,10 @@ static void bot_step_body(void) {
                   if (!strafe && arbw != ARB_FIGHT && arbw != ARB_HOLD && !(g_bot_fighting && tdist < 3.0f) && ((now - histt[j & 63] >= 1.4 && dx * dx + dy * dy < 0.35f * 0.35f) || noprog || snapped) && (now - tjump > 1.5 || snapped)) {
                       if (noprog) nav_say("  [nav] no progress for %.0f s at (%.1f %.1f %.1f): treated as stuck\n", npg, pos[0], pos[1], pos[2]);
                       if (snapped && bot_log()) nlog("[nhook] [nav] snapped back by the server to (%.1f %.1f %.1f): treated as stuck (act last pressed %.1f s ago; legs %s)", pos[0], pos[1], pos[2], g_act_last > 0 ? now - g_act_last : -1.0, g_arb_why);
+                      // (08:20: EVERY snap-back of a Pit battle came while fetching a weapon -- 6 in 35 s toward one, act last pressed
+                      //  12-47 s before, so not the act press -- and the fetch never gave up: on its own screen it kept getting closer.
+                      //  Two snap-backs within 20 s while fetching drop that weapon (g_fetch_abort -> the pickup code's "tried" list))
+                      if (snapped && arbw == ARB_FETCH) { static double tsf; static int nsf; if (now - tsf > 20.0) nsf = 0; tsf = now; if (++nsf >= 2) { g_fetch_abort = 1; nsf = 0; } }
                       // (01:10: fighting at arm's length is no progress by design, not stuck)
                       // (07:05: these statements sat AFTER that comment on its line -- commented out since 01:10: tjump never moved, so
                       //  "stuck" fired on EVERY step once a walker slowed (3 lines in one 0.1 s step), each adding +8 to 10 path nodes,

@@ -3329,7 +3329,11 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   (43.7 s before), standing 21.6% near enemies, median 1.44 u/s. 08:10: the position ring holds 12 s (120 entries; it was 5 s -- a later
   Pit battle held a walker 30 s at the same spot with only 3 snaps seen). OPEN: that hold began right after the walker TOOK the
   Excavator at its spawn (-16.9, -3.6) with act, and the first snap of the earlier battle came while fetching a weapon: the server may
-  hold a walker's biped around a pickup / act press. Next: log act presses beside the snap-backs.
+  hold a walker's biped around a pickup / act press. Next: log act presses beside the snap-backs. 08:20, the next Pit battle with act
+  timing on the snap-back line: EVERY snap-back came with the legs on "fetch a better weapon", one walker 6 times in 35 s at (17.7,
+  14.2) toward one weapon (51.6 s held), act last pressed 12-47 s before -- not the act press; the fetch never gave up because the
+  client kept getting closer. Two snap-backs within 20 s while fetching drop that weapon (g_fetch_abort -> the pickup code's tried list,
+  "[fight] the X: the server put me back twice on the way -- left"). Why the server holds a fetching walker is still open.
 - **No progress = stuck** (2026-11-09 07:15; nbot.c the nav stuck test; fight-speed.py --spells) — WHY: with the alarm fixed, a battle on
   The Pit: the server's recording (fight-speed.py --spells: per slot the standing share and the longest still spells) had one walker
   standing 68% of its time, 41.7 s at one spot and 17.9 s at another, while its own log said it walked (4% still): it hovered at
