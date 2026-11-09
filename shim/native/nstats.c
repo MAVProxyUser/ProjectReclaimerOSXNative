@@ -494,16 +494,27 @@ static void st_player_traits(StBuf*s,uint64_t rec){
 // "shield recharge 100%" IS the default, so it tells nothing -- shields None vs Normal does) tells a zombie -- a player whose active traits (player +0x1FC) hold that value; the initial
 // infected set (the first zombies) likewise. -1 = not an Infection variant or no telling field.
 static int nov_trait_get(const uint8_t* t, const StTraitF* f) { return f->sz == 2 ? *(const uint16_t*)(t + f->off) : f->sz == -1 ? *(const int8_t*)(t + f->off) : t[f->off]; }
+// (2026-11-09, the user: "hitbox rendering for other team doesn't work on infection games. even though there is a *clear* other team":
+//  a custom variant -- ALSOCAT's "Infection - 300% Large": zombies colour 10, 50% gravity, no grenades, swords / hammers; humans a
+//  shotgun start, radar off -- and the check decided on the FIRST trait where the zombie set differs from a human's: one that the
+//  player's resolved traits do not carry the same way made every zombie "human", so everyone was on "my side" and the enemies filter
+//  drew nobody. Now every such trait VOTES: the player's resolved value equal to the zombie set's -> zombie, equal to a human's ->
+//  human, anything else (a power-up, a map default) no vote; the zombie or the alpha zombie set with more zombie votes than human ones
+//  -> zombie. NHOOK_ZOMBIE_FIRST=1 = the old first-field decision)
 static int st_is_zombie(uint64_t rec) {
     if (!g_st_var_ok || *(const int32_t*)g_st_var != 10) return -1;
     uint8_t act[0x1C]; if (!rec || !hb_read(rec + 0x1FC, act, sizeof act)) return -1;
+    static int first = -1; if (first < 0) first = getenv("NHOOK_ZOMBIE_FIRST") != 0;
     const uint8_t* base = g_st_var + 0x134; int told = 0;
-    for (int set = 0; set < 2; set++) { const uint8_t* z = g_st_var + (set ? 0x1DC : 0x1C0);
+    for (int set = 0; set < 2; set++) { const uint8_t* z = g_st_var + (set ? 0x1DC : 0x1C0); int yes = 0, no = 0;
         for (size_t i = 0; i < sizeof g_trait_f / sizeof *g_trait_f; i++) { const StTraitF* f = &g_trait_f[i]; if (f->sz == 0) continue;
             int zv = nov_trait_get(z, f), bv = nov_trait_get(base, f), unch = f->sz == -1 ? -2 : 0;
             int hv = bv != unch ? bv : f->def;                         // what a human's ACTIVE traits hold: the base set's value, else Halo's default
             if (zv == unch || zv == hv || (f->sz == -1 && zv < 0)) continue;   // unchanged, the same as a human's, or random / map default
-            told = 1; if (nov_trait_get(act, f) == zv) return 1; break; } }
+            told = 1; int av = nov_trait_get(act, f);
+            if (first) { if (av == zv) return 1; break; }
+            if (av == zv) yes++; else if (av == hv) no++; }
+        if (!first && yes > no) return 1; }
     return told ? 0 : -1;
 }
 
@@ -1181,7 +1192,9 @@ static void st_snapshot(StBuf* s) {
     if (g_app_playing && !g_gameplay_t0 && np > 0 && hi > 0) { g_gameplay_t0 = now; t0 = now; g_match_pending = 1; }   // the server's next map
     { int ns = 0, any = 0; static struct { uint32_t unit; int8_t side; } tmp[256];   // Infection's sides for the overlay's team filters
       for (int k = 0; k < np && ns < 256; k++) { int z = st_is_zombie(pl[k].rec); if (z >= 0) any = 1; tmp[ns].unit = pl[k].unit; tmp[ns].side = (int8_t)z; ns++; }
-      g_nov_nside = 0; memcpy(g_nov_side, tmp, sizeof tmp[0] * (size_t)ns); g_nov_nside = ns; g_nov_sides_on = any; }
+      g_nov_nside = 0; memcpy(g_nov_side, tmp, sizeof tmp[0] * (size_t)ns); g_nov_nside = ns; g_nov_sides_on = any;
+      { static int lz = -1, lh = -1; static double tl; int zc = 0, hc = 0; for (int k = 0; k < ns; k++) { if (tmp[k].side == 1) zc++; else if (tmp[k].side == 0) hc++; }
+        if (any && (zc != lz || hc != lh) && now - tl > 5) { tl = now; lz = zc; lh = hc; nlog("[nhook] infection sides: %d zombies, %d humans (the overlay's friend / enemy)", zc, hc); } } }
     // deaths: every biped, alive -> dead (stats.c); the killer is not known here yet
     { StBip nb[2048]; int nn = 0;
       for (int i = 0; i < hi && nn < 2048; i++) {
@@ -1251,6 +1264,7 @@ static void st_snapshot(StBuf* s) {
         char pip[64] = "", prd[128] = ""; for (int q = 0; q < nss; q++) if (!strcmp(ss[q].name, pl[k].name)) { if (pk_addr_of(ss[q].voice, pip, sizeof pip)) pk_rdns_str(pip, prd, sizeof prd); break; }
         sb_put(s, "%s{\"name\":", first ? "" : ","); first = 0; sb_str(s, pl[k].name); sb_put(s, ",\"slot\":%d", pl[k].slot);
         if (pip[0]) { sb_put(s, ",\"ip\":"); sb_str(s, pip); } if (prd[0]) { sb_put(s, ",\"rdns\":"); sb_str(s, prd); }
+        { int z = st_is_zombie(pl[k].rec); if (z >= 0) sb_put(s, ",\"zombie\":%s", z ? "true" : "false"); }   // (Infection: the side the overlay's team filters use)
         sb_put(s, ",\"handle\":\"%08x\",\"team\":%d,\"team_name\":\"%s\",\"you\":%s,\"alive\":%s,\"health\":%.3f,\"shield\":%.3f,\"camo\":%.3f",
                h, team, (team >= 0 && team < 8) ? teams[team] : "none", you ? "true" : "false", dead ? "false" : "true", dead ? 0 : *(const float*)(d + 0xF4), dead ? 0 : *(const float*)(d + 0xF8), have ? *(const float*)(d + 0x360) : 0);
         sb_put(s, ",\"weapon\":");

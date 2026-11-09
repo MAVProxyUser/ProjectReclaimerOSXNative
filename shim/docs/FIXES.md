@@ -3448,6 +3448,17 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   brain is refused by a v2 body and the other way round: rebuild both). Lead latency = rtt x NHOOK_BOT_LEAD_RTT (1.25 / 1000 -- 0.08 s
   at 64 ms, 0.18 s at 145 ms); a NHOOK_BOT_LEAD_LAT in the live file still wins. A review's kills = the scoreboard's since the window
   began (the old count when the body has none); the review line gives the ping.
+- **Infection sides by a vote; the brain gets them** (2026-11-09 18:25; nstats.c st_is_zombie, the players' "zombie", "infection sides"
+  line, nbot.c NhIO layout 3) — WHY: the user: "hitbox rendering for other team doesn't work on infection games. even though there is a
+  *clear* other team, although they do switch mid game". In a custom variant (a 97-player "Infection - 300% Large": zombies colour 10, 50%
+  gravity, no grenades, swords / hammers; humans a shotgun start, radar off; every player a team of its own) the check decided on the
+  FIRST trait where the variant's zombie set differs from a human's, and one the players' resolved traits do not carry the same way made
+  every zombie "human": everyone on "my side", the overlay's enemies filter drew nobody. And the brain never had the sides (the body's
+  snapshot fills them): its bot_enemy fell back to team numbers -- everyone an enemy, its own side included. LOGIC: every trait where
+  the zombie (or alpha zombie) set differs from a human's votes -- the resolved value equal to the zombie's: zombie, to a human's: human,
+  else no vote; more zombie votes in either set -> zombie. Each player in stats.json says "zombie": true|false (Infection only); the log
+  says "infection sides: N zombies, M humans" when the counts change. NhIO v3 hands the sides (128 units) to the brain. NHOOK_ZOMBIE_FIRST=1
+  = the old first-field decision.
 - **Lanes learned live: a minute into a new map, and at every revision** (2026-11-09 18:15; nbot.c bm_lanes_read / bm_lanes_mix /
   bm_lanes_refresh / bm_lanes_apply / g_bm_heat, nbot_goals.c brain_review) — WHY: the user: "lanes for the new map should come quick.
   learn them with each 3 minute brain update". The planner's lanes (g_nav.pop: A* prefers the routes players take; the goal draw's lane
