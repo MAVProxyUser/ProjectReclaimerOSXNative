@@ -856,8 +856,72 @@ static int arb_choose(Arb* a, double now) {
     return w; }
 typedef struct { uint32_t tg; float td; int tvis; int naim; uint32_t ah[4]; float ad[4]; const char* aw[4]; float sh, hp; const char* w; int am; } DeathSnap;
 static void* g_death_snap;
+// WHY DID THEY BEAT ME (2026-11-09 11:25, the user: "walker needs to focus hard on its K/D spread and tweak settings until it gets
+// better, I feel like a per death why did the other player beat me calculation could be interesting, weighting future growth"): every
+// step the duels of this life -- per enemy: when it came into sight, when it started aiming at the walker, when the walker started
+// firing at it (and its shield + health then), its shield + health when last seen -- and the walker's own damage episode (the first
+// hit after 3 s without one, the shield before it). At a death the likely killer (the target if it aimed at the walker, else the
+// nearest enemy aiming at it) and ONE cause, in this order:
+//   empty        the magazine empty / dry
+//   outnumbered  2+ enemies aiming at it
+//   unseen       the killer hurt it before it was ever in sight (flanked / from behind)
+//   point blank  under 2.5 units against a shotgun / sword / hammer
+//   traded       the killer left with under 0.25 shield + health: nearly won
+//   entered hurt the shield under 0.5 when the fatal damage began
+//   slow start   it fired back 0.5+ s after the damage began / the killer came into sight, or never
+//   outranged    its weapon well outside its range band at that distance, the killer's inside its own
+//   outshot      an even start, lost the exchange
+// -> "[why]" line + a JSON line in battles/follow/why-<nickname>.jsonl (shim/tools/death-tuner.py turns the causes into setting steps)
+typedef struct { uint32_t h; double vis_t, vis_last, aim_t, aim_last, fire_t, fire_last, vl_t; float vit0, vl; } DuelE;
+static DuelE g_du[12]; static int g_ndu; static double g_dmg0_t, g_dmg_last_t; static float g_dmg_sh0 = 1, g_du_vprev = -1;
+static DuelE* du_get(uint32_t h, int add) {
+    for (int i = 0; i < g_ndu; i++) if (g_du[i].h == h) return &g_du[i];
+    if (!add) return 0; int k = g_ndu < 12 ? g_ndu++ : 0;
+    if (g_ndu == 12) { double old = 1e30; for (int i = 0; i < 12; i++) { double t = g_du[i].vis_last > g_du[i].aim_last ? g_du[i].vis_last : g_du[i].aim_last; if (t < old) { old = t; k = i; } } }
+    memset(&g_du[k], 0, sizeof g_du[k]); g_du[k].h = h; g_du[k].vit0 = -1; return &g_du[k]; }
+static void du_tick(double now, const NovObj* objs, int n, int me, uint32_t tgt, int trig) {
+    // (called only while alive: why_note clears the table at a death)
+    if (me < 0) return; const NovObj* o = &objs[me]; static float sprev = 1; if (o->dead) return;
+    float v = o->shield + o->health;
+    if (g_du_vprev >= 0 && v < g_du_vprev - 0.01f) { if (now - g_dmg_last_t > 3.0) { g_dmg0_t = now; g_dmg_sh0 = sprev; } g_dmg_last_t = now; }
+    g_du_vprev = v; sprev = o->shield;
+    for (int i = 0; i < n; i++) { const NovObj* t = &objs[i]; if (t->type || t->dead || i == me || !bot_enemy(o, t)) continue;
+        float dx = o->c[0] - t->c[0], dy = o->c[1] - t->c[1], d = sqrtf(dx * dx + dy * dy); if (d > 60 || d < 0.2f) continue;
+        int vis = los_get(t->handle, now) == 1; float ay = atan2f(t->aim[1], t->aim[0]); int aiming = d < 40 && (cosf(ay) * dx + sinf(ay) * dy) / d > 0.978f;
+        if (!vis && !aiming) continue; DuelE* e = du_get(t->handle, 1);
+        if (vis) { if (now - e->vis_last > 3.0) e->vis_t = now; e->vis_last = now; e->vl = t->shield + t->health; e->vl_t = now; }
+        if (aiming) { if (now - e->aim_last > 3.0) e->aim_t = now; e->aim_last = now; } }
+    if (trig && tgt) { DuelE* e = du_get(tgt, 1); if (now - e->fire_last > 3.0) { e->fire_t = now; e->vit0 = now - e->vl_t < 0.5 ? e->vl : -1; } e->fire_last = now; } }
+static void why_note(double now, const DeathSnap* d) {
+    uint32_t k = 0; const char* kw = "?"; float kd = 0;
+    for (int i = 0; i < d->naim; i++) if (d->ah[i] == d->tg) { k = d->tg; kw = d->aw[i]; kd = d->ad[i]; }
+    if (!k && d->naim) { k = d->ah[0]; kw = d->aw[0]; kd = d->ad[0]; for (int i = 1; i < d->naim; i++) if (d->ad[i] < kd) { k = d->ah[i]; kw = d->aw[i]; kd = d->ad[i]; } }
+    if (!k && d->tg) { k = d->tg; kd = d->td; }
+    const DuelE* e = k ? du_get(k, 0) : 0; double d0 = g_dmg0_t > 0 ? g_dmg0_t : now;
+    int seen_first = e && e->vis_t > 0 && e->vis_t <= d0 + 0.3;
+    double from = e && e->vis_t > d0 ? e->vis_t : d0; float gap = e && e->fire_t >= from - 3.0 && e->fire_last >= from ? (float)(e->fire_t > from ? e->fire_t - from : 0) : -1;
+    float kl = e && now - e->vl_t < 1.5 ? e->vl : -1, dmg = e && e->vit0 >= 0 && kl >= 0 ? e->vit0 - kl : -1;
+    const char* mc = g_inv.held_c ? g_inv.held_c : "?"; float a1 = 0, b1 = 0, a2 = 0, b2 = 0; int mb = eg_band(mc, &a1, &b1), kb = eg_band(kw, &a2, &b2);
+    const char* band = !mb ? "?" : kd < a1 * 0.7f ? "too close" : kd > b1 * 1.3f ? "too far" : "in range"; int kin = kb && kd >= a2 * 0.85f && kd <= b2 * 1.15f;
+    const char* cause; char det[200];
+    if (d->am == 0 || g_bot_dry) { cause = "empty"; snprintf(det, sizeof det, "%s with %d rounds", d->w ? d->w : "-", d->am); }
+    else if (d->naim >= 2) { cause = "outnumbered"; snprintf(det, sizeof det, "%d enemies aiming at me", d->naim); }
+    else if (k && !seen_first && d->tg != k) { cause = "unseen"; snprintf(det, sizeof det, "it hurt me before I ever saw it (my target was %08x)", d->tg); }
+    else if (kd < 2.5f && (!strcmp(kw, "shotgun") || !strcmp(kw, "melee"))) { cause = "point blank"; snprintf(det, sizeof det, "%s at %.1f units", kw, kd); }
+    else if (kl >= 0 && kl < 0.25f) { cause = "traded"; snprintf(det, sizeof det, "it was left with %.2f shield + health", kl); }
+    else if (g_dmg_sh0 < 0.5f) { cause = "entered hurt"; snprintf(det, sizeof det, "my shield was %.2f when the fatal damage began", g_dmg_sh0); }
+    else if (gap < 0 || gap > 0.5f) { cause = "slow start"; if (gap < 0) snprintf(det, sizeof det, "I never fired at it"); else snprintf(det, sizeof det, "I fired back %.2f s after it hurt me / came into sight", gap); }
+    else if (strcmp(band, "in range") && strcmp(band, "?") && kin) { cause = "outranged"; snprintf(det, sizeof det, "my %s %s at %.0f units, its %s in range", mc, band, kd, kw); }
+    else { cause = "outshot"; snprintf(det, sizeof det, "even start (fired back in %.2f s), it kept %.2f, I took %.2f off it", gap, kl, dmg); }
+    if (bot_log()) nlog("[nhook] [why] died to %08x (%s, %.0f u): %s -- %s", k, kw, kd, cause, det);
+    char path[1100]; const char* h = getenv("HOME"); snprintf(path, sizeof path, "%s/Library/Application Support/ReclaimerMac/battles/follow/why-%s.jsonl", h ? h : "/tmp", g_nick[0] ? g_nick : "walker");
+    FILE* f = fopen(path, "a"); if (!f) return;
+    fprintf(f, "{\"t\": %.0f, \"map\": \"%s\", \"killer\": \"%08x\", \"cause\": \"%s\", \"detail\": \"%s\", \"dist\": %.1f, \"naim\": %d, \"my_w\": \"%s\", \"killer_w\": \"%s\", \"band\": \"%s\", \"sh0\": %.2f, \"dur\": %.1f, \"gap\": %.2f, \"k_left\": %.2f, \"dmg\": %.2f, \"ammo\": %d, \"seen_first\": %d}\n",
+            (double)time(0), g_st_curmap, k, cause, det, kd, d->naim, mc, kw, band, g_dmg_sh0, now - d0, gap, kl, dmg, d->am, seen_first);
+    fclose(f); }
+static void why_reset(void) { g_ndu = 0; g_dmg0_t = 0; g_dmg_last_t = 0; g_du_vprev = -1; g_dmg_sh0 = 1; }
 static void death_note(double now) {
-    const DeathSnap* d = (const DeathSnap*)g_death_snap; static int nd, nother, nnoaim, nfar; static float dsum; (void)now;
+    const DeathSnap* d = (const DeathSnap*)g_death_snap; static int nd, nother, nnoaim, nfar; static float dsum; why_note(now, d); why_reset();
     int other = d->naim > 0; for (int k = 0; k < d->naim; k++) if (d->ah[k] == d->tg) other = 0;
     char b[300]; int q = 0; for (int k = 0; k < d->naim; k++) q += snprintf(b + q, sizeof b - (size_t)q, " %08x %.0f u (%s)%s", d->ah[k], d->ad[k], d->aw[k], d->ah[k] == d->tg ? " = my target" : "");
     if (bot_log()) nlog("[nhook] [death] fighting %08x at %.0f u (%s); aiming at me:%s; my shield %.2f health %.2f, %s %d rounds", d->tg, d->td, d->tg ? (d->tvis ? "in sight" : "hidden") : "no target", d->naim ? b : " nobody seen", d->sh, d->hp, d->w ? d->w : "-", d->am);
@@ -1149,16 +1213,19 @@ static void bot_step_body(void) {
                   float oh = bot_band_off(g_inv.held_c, tdist, kdist), oo = bot_band_off(g_inv.other_c, tdist, kdist);
                   int hi = wz_ci(g_inv.held_c), oi = wz_ci(g_inv.other_c), zt = 0, zsw = 0, zkeep = 0; float eh = 0, eo = 0;
                   if (g_wz.n && hi >= 0 && oi >= 0) { eh = wz_eff(hi, ftg.c, &zt); eo = wz_eff(oi, ftg.c, 0); if (zt >= 8) { zsw = eo > 1.5f * eh && eo > 1.2f && g_inv.other_ammo != 0; zkeep = eh > 1.5f * eo; } }
+                  // (2026-11-09 11:15, the user: "select best weapon in inventory should be a setting too"): the range / zone / players'
+                  //  switch in a fight is NHOOK_BOT_FIGHT_SWITCH (live, 1; 0 = keep the weapon in hand -- the empty-magazine switch stays)
+                  float fsw = 1; lk_over(&fsw, "NHOOK_BOT_FIGHT_SWITCH"); if (!(fsw > 0)) zsw = 0;
                   if (g_inv.ammo == 0 && g_inv.other_ammo != 0) { tsw = now; if (bot_log()) nlog("[nhook] [inv] magazine empty: switching to %s", g_inv.other); }   // (switching beats reloading mid-fight)
                   else if (zsw) { tsw = now; if (bot_log()) nlog("[nhook] [inv] switching to %s: around the target (%.0f, %.0f) players kill with a %s %.1fx its carried share, a %s %.1fx (%d kills)",
                                                                 g_inv.other, ftg.c[0], ftg.c[1], g_inv.other_c, eo, g_inv.held_c, eh, zt); }
                   // the players' own switch for this pair (behaviour.inventory, 20+ switches): toward the shorter-range class when the
                   // nearest enemy is closer than their median distance, toward the longer one when farther
-                  else if (!zkeep && hi >= 0 && oi >= 0 && g_eg.sw_n[hi][oi] >= 20 && g_inv.other_ammo != 0 && ({ float mh = 0, mo = 0;
+                  else if (fsw > 0 && !zkeep && hi >= 0 && oi >= 0 && g_eg.sw_n[hi][oi] >= 20 && g_inv.other_ammo != 0 && ({ float mh = 0, mo = 0;
                            for (int q = 0; q < g_eg.nband; q++) { if (!strcmp(g_eg.band[q].cls, g_inv.held_c)) mh = g_eg.band[q].med; if (!strcmp(g_eg.band[q].cls, g_inv.other_c)) mo = g_eg.band[q].med; }
                            mh > 0 && mo > 0 && (mo < mh ? tdist < g_eg.sw_d[hi][oi] : tdist > g_eg.sw_d[hi][oi]); })) {
                       tsw = now; if (bot_log()) nlog("[nhook] [inv] switching to %s at %.1f units: players switch %s -> %s at %.1f (median of %d)", g_inv.other, tdist, g_inv.held_c, g_inv.other_c, g_eg.sw_d[hi][oi], g_eg.sw_n[hi][oi]); }
-                  else if (!zkeep && !(hi >= 0 && oi >= 0 && g_eg.sw_n[hi][oi] >= 20) && oh > 0.3f && oo >= 0 && oo < oh * 0.5f) { tsw = now; if (bot_log()) nlog("[nhook] [inv] switching to %s (%s) for %.1f units (the %s band is %.0f%% off)", g_inv.other, g_inv.other_c, tdist, g_inv.held_c, oh * 100); } }
+                  else if (fsw > 0 && !zkeep && !(hi >= 0 && oi >= 0 && g_eg.sw_n[hi][oi] >= 20) && oh > 0.3f && oo >= 0 && oo < oh * 0.5f) { tsw = now; if (bot_log()) nlog("[nhook] [inv] switching to %s (%s) for %.1f units (the %s band is %.0f%% off)", g_inv.other, g_inv.other_c, tdist, g_inv.held_c, oh * 100); } }
               { static float sh = -1; if (sh < 0) { const char* e = getenv("NHOOK_BOT_SWITCH_HOLD"); sh = e ? strtof(e, 0) : 0.4f; }   // (0.15 s never registered: see nvpad.m's read counters)
                 if (now - tsw < sh && g_inv.other_ammo != 0) { fbtn |= 8; bot_switch_press(tsw); } } }   // (the switch bit: ONE packet -- 08:55: held 0.15 s it never switched; an impulse per packet?)
             // B: melee -- the players' range (+ 0.25: positions are a tick or two old), held 0.12 s, at most every 0.6 s
@@ -1465,7 +1532,21 @@ static void bot_step_body(void) {
           // (12:25: "[death] fighting ... at 8 u ... EXCAVATOR 2 rounds": out of a fight a close-range gun (shotgun / Mauler / sword /
           //  hammer) is never put in hand by rank -- the range-band switch brings it out when an enemy is close)
           int close_gun = g_inv.other_c && (!strcmp(g_inv.other_c, "shotgun") || !strcmp(g_inv.other_c, "melee"));
-          if (((!engaged && !close_gun) || (engaged && tdist > 3.0f && ob <= 0.05f && hbo != 0)) && g_inv.has_other && g_inv.other_rank + 2 <= g_inv.held_rank && g_inv.other_ammo != 0 && now - tbt > 3.0 && now - tswe > 1.0) { tbt = now; tswe = now;   // (09:45: in fights too, beyond 3 units -- a 20-player FFA is nearly always "engaged")
+          // (2026-11-09 11:15, the user: "select best weapon in inventory should be a setting too, and select best weapon for your hunt
+          //  just the same"): NHOOK_BOT_BEST_WEAPON (live, 1; 0 = off) with NHOOK_BOT_BEST_RANKS (2) = how many ranks better the other
+          //  weapon must be. THE HUNT'S WEAPON, NHOOK_BOT_HUNT_WEAPON (live, 1): out of a fight with a goal (an enemy's last position,
+          //  a radar blip, revenge, an item, a lane), the weapon players kill with around the goal point (the zone model, 8+ kills
+          //  there) goes in hand ahead of the meeting -- the other weapon NHOOK_BOT_HUNT_WEAPON_X (1.3) times as effective there; the
+          //  one in hand that much better there is kept (the rank rule does not switch it back). Shotguns / swords count here too
+          float bw = 1, brk = 2, hw = 1, hx = 1.3f; lk_over(&bw, "NHOOK_BOT_BEST_WEAPON"); lk_over(&brk, "NHOOK_BOT_BEST_RANKS"); lk_over(&hw, "NHOOK_BOT_HUNT_WEAPON"); lk_over(&hx, "NHOOK_BOT_HUNT_WEAPON_X");
+          int hpick = 0, hkeep = 0, hzt = 0; float hhe = 0, hoe = 0;
+          if (hw > 0 && !engaged && g_gl.kind && g_wz.n && g_inv.has_other && g_inv.other_ammo != 0) { int hi2 = wz_ci(g_inv.held_c), oi2 = wz_ci(g_inv.other_c);
+              if (hi2 >= 0 && oi2 >= 0) { hhe = wz_eff(hi2, g_gl.pos, &hzt); hoe = wz_eff(oi2, g_gl.pos, 0); if (hzt >= 8) { hpick = hoe > hx * hhe && hoe > 1.0f; hkeep = hhe > hx * hoe; } } }
+          int rpick = bw > 0 && g_inv.other_rank + (int)(brk + 0.5f) <= g_inv.held_rank;
+          if (hpick && now - tbt > 3.0 && now - tswe > 1.0) { tbt = now; tswe = now; bot_switch_press(now); fbtn |= 8;
+              if (bot_log()) nlog("[nhook] [inv] for the hunt (%s at %.0f, %.0f): switching to %s -- players kill with a %s %.1fx its carried share there, a %s %.1fx (%d kills)",
+                                  gl_kn[g_gl.kind], g_gl.pos[0], g_gl.pos[1], g_inv.other, g_inv.other_c, hoe, g_inv.held_c, hhe, hzt); }
+          else if (((!engaged && !close_gun && !hkeep) || (engaged && tdist > 3.0f && ob <= 0.05f && hbo != 0)) && g_inv.has_other && rpick && g_inv.other_ammo != 0 && now - tbt > 3.0 && now - tswe > 1.0) { tbt = now; tswe = now;   // (09:45: in fights too, beyond 3 units -- a 20-player FFA is nearly always "engaged")
               bot_switch_press(now); fbtn |= 8;
               if (bot_log()) nlog("[nhook] [inv] the better weapon in hand: switching from %s to %s%s", g_inv.held, g_inv.other, engaged ? " (the target is in its range)" : ""); } } }
       // (10:40: does a switch pulse take? 1 s after each new pulse: the weapon in hand changed or not -- [inv] switch pulses every 2 min)
@@ -1494,7 +1575,8 @@ static void bot_step_body(void) {
           float ay = atan2f(t->aim[1], t->aim[0]); if ((cosf(ay) * dx + sinf(ay) * dy) / d < 0.978f) continue;   // (cos 12 deg)
           uint32_t tw = t->wslot >= 0 && t->wslot < 4 ? t->weapons[t->wslot] : 0xFFFFFFFFu; uint64_t twd = nov_datum(tw); uint32_t twdef = 0;
           lastS.ah[lastS.naim] = t->handle; lastS.ad[lastS.naim] = d; lastS.aw[lastS.naim] = twd && hb_read(twd, &twdef, 4) ? eg_wcls(hb_tag_name(twdef)) : "?"; lastS.naim++; }
-      (void)was_alive; (void)nd; (void)nother; (void)dsum; g_death_snap = &lastS; }
+      (void)was_alive; (void)nd; (void)nother; (void)dsum; g_death_snap = &lastS;
+      du_tick(now, objs, n, me, have_tg ? ftg.handle : 0, g_bot_trig); }
     { static float ol0 = -1; if (ol0 < 0) { const char* e = getenv("NHOOK_NAV_OFFLANE"); ol0 = e ? strtof(e, 0) : 0.0f; } float ol = ol0; lk_over(&ol, "NHOOK_NAV_OFFLANE"); g_nav_offlane = ol;
       float lp = 40; lk_over(&lp, "NHOOK_NAV_LIFTPEN"); g_nav_liftpen = lp;
       float bp = 25; lk_over(&bp, "NHOOK_NAV_BLOCKPEN"); g_nav_blkpen = bp; }   // (06:30: lifts only when nothing else goes there: a stuck at a lift's foot, the next node 5.5 units up, was the commonest)   // (15:30: paths along the players' lanes: src/nav.c)

@@ -48,4 +48,8 @@ echo '{"identity": {"nickname": "AIWalkerTest", "other": "x"}}' > "$S/native/pub
 echo '{"NHOOK_BOT_REACT": 0.842}' > "$S/battles/live-knobs/AIWalkerTest.json"
 J=$("$T/t" json); echo "$J" | python3 -c 'import json,sys; d=json.load(sys.stdin); ids=[x["id"] for x in d["files"]]; f={x["id"]:x for x in d["files"]}
 assert sorted(ids)==["test/AIWalkerTest","test/Second"], ids; assert f["test/AIWalkerTest"]["where"]=="pub" and f["test/Second"]["where"]=="test"' && ok "a linked folder is listed once; the public walker told apart by its nickname" || no "linked folder: $J"
+# the death review rides along: the last lines of battles/follow/why-<nick>.jsonl (a broken line skipped)
+mkdir -p "$S/battles/follow"; { echo '{"t": 1, "cause": "slow start"}'; echo 'not json'; echo '{"t": 2, "cause": "outshot"}'; } > "$S/battles/follow/why-AIWalkerTest.json"l
+J=$("$T/t" json); echo "$J" | python3 -c 'import json,sys; d=json.load(sys.stdin); f={x["id"]:x for x in d["files"]}
+assert [r["cause"] for r in f["test/AIWalkerTest"]["why"]]==["slow start","outshot"], f["test/AIWalkerTest"]["why"]; assert f["test/AIWalkerTest"]["tune"]==[]' && ok "the death review's last lines ride along (a broken line skipped)" || no "why: $J"
 exit $bad

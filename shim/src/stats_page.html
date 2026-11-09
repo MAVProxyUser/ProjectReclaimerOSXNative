@@ -128,6 +128,10 @@ th .srt{display:inline-block;margin-left:2px;padding:0 2px;cursor:pointer;color:
 .wkr .ct{display:flex;align-items:center;gap:6px;justify-content:flex-end;flex-wrap:wrap}.wkr input[type=range]{width:140px;accent-color:var(--accent)}
 .wkr input[type=number]{width:70px}.wkr .st{font-size:11px;color:var(--dim);min-width:86px;text-align:right}.wkr .st.set{color:var(--accent)}
 .wkr button.rs{padding:0 6px;visibility:hidden}.wkr.isset button.rs{visibility:visible}
+#wkwhy{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,420px),1fr));gap:12px;margin-top:12px}
+.wkc{display:grid;grid-template-columns:110px minmax(0,1fr) 64px;gap:3px 8px;align-items:center;font-size:12px}.wkc .bar{height:8px;border-radius:3px;background:var(--accent);min-width:2px}
+.wkc .n{color:var(--dim);text-align:right;font-variant-numeric:tabular-nums}.wkd{font-size:12px;line-height:1.45}.wkd div{border-top:1px solid #222;padding:3px 0}.wkd b{font-weight:600}
+.wkd .tm{color:var(--dim);font-variant-numeric:tabular-nums;margin-right:6px}.wkt{font-size:12px;line-height:1.45}.wkt .ok{color:#5c5}.wkt .bad{color:#e55}
 .col .feeds{grid-template-columns:minmax(0,1fr);margin-bottom:0}.col #fl{height:430px}.col #cm{height:170px}
 #fl .ev,#cm .ev{padding:1px 0;border-bottom:1px solid #1f1f1f;overflow-wrap:anywhere}
 #fl time,#cm time{color:#777;font-variant-numeric:tabular-nums;margin-right:8px}
@@ -245,6 +249,7 @@ th .srt{display:inline-block;margin-left:2px;padding:0 2px;cursor:pointer;color:
  <span id="wkmsg" class="note" style="margin:0"></span></div>
  <div class="note">A change goes into the walker's settings file and the walker reads it within a second -- no restart, it keeps its place in the game.
   A value in <span style="color:var(--accent)">blue</span> is set in the file; ↺ takes it out again, back to the walker's launch value (the default shown, unless its launch script set another).</div>
+ <div id="wkwhy"></div>
  <div id="wkgroups"></div>
 </div></div>
 <!-- the tools in their own tab (user, 2026-11-08: "tools should just be its own tab like forensic is"): #tools -->
@@ -407,11 +412,18 @@ function kdOf(p){ return (p.kills||0)/Math.max(1,p.deaths||0); }
 // last 64 straight shots that passed near an enemy, as this client saw the target; on = share through a hitbox; reg = share
 // of those the server registered (shield / health went down within 0.6 s); miss_reg = damage after a shot that visibly missed
 function aimCell(p){ const a=p.aim; if(!a||a.n<5) return a?`<span style="color:var(--dim);font-size:11px" title="the aim figures start at 5 aimed shots">${a.n} shot${a.n>1?'s':''}</span>`:'';
-  const c=a.err<0.6?'#5c5':a.err<1.5?'#cc4':a.err<3?'#e93':'#e55', w=Math.max(4,Math.min(40,40-a.err*8));
-  const reg=a.reg>=0&&a.reg_n>=3?`<div style="font-size:11px;color:var(--dim)">${Math.round(a.reg*100)}% of ${a.reg_n} hits counted</div>`:'';
-  return `<span title="${E(aimTip(a))}"><span style="display:inline-block;width:${w}px;height:6px;border-radius:3px;background:${c};vertical-align:middle;margin-right:4px"></span>${a.err.toFixed(1)}° off${reg}</span>`; }
-function aimTip(a){ return `${a.n} aimed shots: median miss ${a.err.toFixed(2)}° (75% within ${a.err75.toFixed(2)}°), ${Math.round(a.on*100)}% through a hitbox`+
-  (a.on>0?` (${Math.round(a.head*100)}% of them the topmost hitbox: the head on Spartans and Elites)`:'')+(a.reg>=0?`; the server registered ${Math.round(a.reg*100)}% of ${a.reg_n} on-target shots`:'')+
+  // (2026-11-09, the user: "all aim stats are *always* 0.0 degrees off. why?" -- a shot through a hitbox counts 0 off, so with over half
+  //  on target the median of ALL shots is 0: the cell shows the share on target and how far the MISSES went -- "miss", nhook since
+  //  11:20; older games: the share alone)
+  const on=Math.round(a.on*100), c=on>=60?'#5c5':on>=45?'#cc4':on>=30?'#e93':'#e55', w=Math.max(4,Math.min(40,on*0.4));
+  const ms=a.miss===undefined?'':a.miss<0?' · no misses':` · misses by ${a.miss.toFixed(1)}°`;
+  // (2026-11-09, the user: "the 'hits counted' variable doesn't seem to update properly, it's always the same number" -- it did update,
+  //  but "counted" = the target lost shield / health within 0.6 s of a shot through its hitbox, which anyone's damage satisfies in a
+  //  crowd: 90-100% for every player. The line under the cell is the HEAD share of the hits now; "counted" stays in the tooltip)
+  const reg=a.on>0&&a.n*a.on>=3?`<div style="font-size:11px;color:var(--dim)">${Math.round(a.head*100)}% of ${Math.round(a.n*a.on)} hits on the head</div>`:'';
+  return `<span title="${E(aimTip(a))}"><span style="display:inline-block;width:${w}px;height:6px;border-radius:3px;background:${c};vertical-align:middle;margin-right:4px"></span>${on}% on target${ms}${reg}</span>`; }
+function aimTip(a){ return `${a.n} aimed shots: ${Math.round(a.on*100)}% through a hitbox`+(a.miss===undefined?'':a.miss<0?', no misses':`; the misses passed a median ${a.miss.toFixed(2)}° outside the nearest hitbox (75% within ${a.miss75.toFixed(2)}°)`)+
+  (a.on>0?` (${Math.round(a.head*100)}% of them the topmost hitbox: the head on Spartans and Elites)`:'')+(a.reg>=0?`; damage followed ${Math.round(a.reg*100)}% of ${a.reg_n} on-target shots within 0.6 s (anyone's damage counts, so in a crowd this stays near 100%)`:'')+
   (a.miss_reg>=0?`, and ${Math.round(a.miss_reg*100)}% of ${a.miss_n} visible misses`:'')+'. Measured on this client: a remote player\'s target is where this client draws it, and in a crowd other players\' damage on the same target counts as registered too.'; }
 // Aimbot? -- outliers against this game's lobby (snap.players with 20+ aimed shots): signal = [value, the count it rests on]
 // three signals (2 needed): long-range accuracy is not a fourth -- on a big map nearly every shot is long range, so it only
@@ -439,7 +451,7 @@ function botDetail(p){ const f=aimFlags(p); if(f) return E('suspect: '+f.why.joi
 function aimDetail(p){ const a=p.aim; if(!a) return 'no straight shot near an enemy yet'; return E(aimTip(a)); }
 
 const SORTV={name:p=>p.name.toLowerCase(),ip:p=>p.ip||'',shield:p=>p.shield,health:p=>p.health,weapon:p=>(p.weapon||'').toLowerCase(),kills:p=>p.kills||0,deaths:p=>p.deaths||0,
- kd:kdOf,shots:p=>p.shots||0,accuracy:p=>p.shots?p.accuracy:-1,aim:p=>p.aim&&p.aim.n>=5?p.aim.err:999,aimbot:p=>{ const f=aimFlags(p); return f?-f.score:p.aim&&p.aim.n>=40?0:1; },grenades:p=>p.grenades?p.grenades.frag+p.grenades.plasma+p.grenades.spike+p.grenades.firebomb:0,
+ kd:kdOf,shots:p=>p.shots||0,accuracy:p=>p.shots?p.accuracy:-1,aim:p=>p.aim&&p.aim.n>=5?-p.aim.on:999,aimbot:p=>{ const f=aimFlags(p); return f?-f.score:p.aim&&p.aim.n>=40?0:1; },grenades:p=>p.grenades?p.grenades.frag+p.grenades.plasma+p.grenades.spike+p.grenades.firebomb:0,
  vehicle:p=>(p.vehicle||'').toLowerCase(),pos:p=>p.alive?p.pos[0]:-1e9,speed:p=>p.speed||0,traits:p=>Object.keys(p.traits||{}).length};
 let sortK=null, sortD=1, sortMode='team';
 try{ const j=JSON.parse(localStorage.getItem('statsSort')||'null'); if(j){ sortK=j.k in SORTV?j.k:null; sortD=j.d===-1?-1:1; sortMode=j.m==='full'?'full':'team'; } }catch(err){}
@@ -1392,6 +1404,12 @@ const WK=[
   ['NHOOK_BOT_DIST','Fighting distance x',1,0.3,3,0.05,'Multiplies the distance it keeps from the target.'],
   ['NHOOK_BOT_STRAFE','Strafe x',1,0,3,0.05,'Multiplies its side-to-side dodging.'],
   ['NHOOK_BOT_POLICY','Moves learned from players',0.5,0,1,0.05,'How much of its fight movement comes from the model learned from players (the rest is its own rules).']]},
+ {g:'Weapons',k:[
+  ['NHOOK_BOT_BEST_WEAPON','Best weapon in hand',1,0,1,0,'On: when the other weapon it carries is clearly better (by the rank below) and has rounds, it switches to it -- out of a fight always, in a fight when the target is in that weapon\'s range. A shotgun or sword comes out by range or for the hunt, never by rank.'],
+  ['NHOOK_BOT_BEST_RANKS','... ranks better',2,1,6,1,'How many ranks better the other weapon must be (power weapons rank highest, then precision, then automatic weapons).'],
+  ['NHOOK_BOT_HUNT_WEAPON','Best weapon for the hunt',1,0,1,0,'On: out of a fight, the weapon players kill with most around where it is heading (the enemy\'s last position, a radar blip, a lane, an item -- from the recorded matches, 8+ kills there) goes in hand before the meeting.'],
+  ['NHOOK_BOT_HUNT_WEAPON_X','... at least x as effective there',1.3,1,3,0.05,'How much better the other weapon must do around the goal to switch -- and how much better the one in hand must do to be kept.'],
+  ['NHOOK_BOT_FIGHT_SWITCH','Switch by range in a fight',1,0,1,0,'On: in a fight it switches to the other weapon when the target is outside the held one\'s range and inside the other\'s (or players switch there). An empty magazine always switches.']]},
  {g:'Cover',k:[
   ['NHOOK_U_COVER','Take cover (priority)',80,0,100,1,'When its shield is being stripped it tests spots 3-6 units around from the attacker\'s eyes and moves to the first one the attacker cannot see, still shooting. 0 = never.'],
   ['NHOOK_BOT_COVER_DROP','Shield loss that sends it to cover',0.35,0.1,1,0.05,'How much shield it must lose within 1.5 s ...'],
@@ -1427,8 +1445,26 @@ async function wkLoad(force){
   sel.innerHTML=fs.map(f=>`<option value="${E(f.id)}"${f.id===wkSel?' selected':''}>${E(f.nick)} -- ${f.where==='pub'?'public walker':'test walker'}${f.mine?' (this game)':''}</option>`).join('');
   if(!fs.length) wkMsg('No walker settings files yet.'); wkRender(); }
 function wkFmt(v,st){ if(!st) return v>0?'on':'off'; const t=(+v).toFixed(st<0.01?3:st<1?2:0); return t.includes('.')?t.replace(/0+$/,'').replace(/\.$/,''):t; }
+// why it died (nbot.c why_note -> battles/follow/why-<nick>.jsonl) and the tuner's steps (shim/tools/death-tuner.py)
+const WK_CAUSE={'empty':'magazine empty','outnumbered':'outnumbered (2+ aiming)','unseen':'hit before it saw them','point blank':'point blank (shotgun / sword)',
+  'traded':'traded (killer nearly dead)','entered hurt':'started the fight hurt','slow start':'slow to fire back','outranged':'wrong range for its weapon','outshot':'out-shot in an even fight'};
+const wkT=t=>new Date(t*1000).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+function wkWhy(f){
+  const w=f.why||[], t=f.tune||[], tuneOn=!((f.knobs||{}).NHOOK_TUNE<=0);
+  const cnt={}; for(const r of w) cnt[r.cause]=(cnt[r.cause]||0)+1; const tot=w.length||1, mx=Math.max(1,...Object.values(cnt));
+  const bars=Object.entries(cnt).sort((a,b)=>b[1]-a[1]).map(([c,n])=>`<span title="${E(c)}">${E(WK_CAUSE[c]||c)}</span><span class="bar" style="width:${Math.round(100*n/mx)}%"></span><span class="n">${n} · ${Math.round(100*n/tot)}%</span>`).join('');
+  const last=w.slice(-10).reverse().map(r=>`<div><span class="tm">${wkT(r.t)}</span><b>${E(WK_CAUSE[r.cause]||r.cause)}</b> -- ${E(r.detail)} <span style="color:var(--dim)">(${E(r.killer_w)} at ${(+r.dist).toFixed(0)} u, ${E(r.map)})</span></div>`).join('');
+  const steps=t.filter(r=>r.event==='step'||r.event==='verdict').slice(-8).reverse().map(r=>r.event==='step'
+     ?`<div><span class="tm">${wkT(r.t)}</span>for <b>${E(WK_CAUSE[r.cause]||r.cause)}</b>: ${E(r.knob)} ${r.from} → ${r.to}${r.kd_before!=null?` (K/D before ${r.kd_before})`:''}</div>`
+     :`<div><span class="tm">${wkT(r.t)}</span>${E(r.knob)} ${r.from??'launch value'} → ${r.to}: K/D ${r.kd_before??'?'} → ${r.kd_after} <span class="${r.kept?'ok':'bad'}">${r.kept?'kept':'put back'}</span></div>`).join('');
+  return `<div class="wkg"><h3>Why it died -- last ${w.length} deaths</h3>${w.length?`<div class="wkc">${bars}</div>`:'<div class="note">No deaths reviewed yet: a review is written at each death.</div>'}
+    <div class="note">One cause a death, the first that fits: empty magazine, outnumbered, hit before it saw the killer, point blank, traded, started hurt, slow to fire back, wrong range, out-shot.</div></div>
+   <div class="wkg"><h3>The last deaths</h3><div class="wkd">${last||'<span class="note">none yet</span>'}</div></div>
+   <div class="wkg"><h3>Self-tuning from deaths</h3><label title="NHOOK_TUNE in the settings file: shim/tools/death-tuner.py steps one setting for the commonest recent cause every 6 deaths and puts it back if K/D got 25% worse"><input type="checkbox" data-k="NHOOK_TUNE"${tuneOn?' checked':''}> on</label>
+    <div class="note">Every 6 deaths one setting moves for the commonest recent cause (newer deaths count more); after the next 6 deaths it stays if K/D held up, else it goes back. Needs the tuner running (shim/tools/death-tuner.py).</div>
+    <div class="wkt">${steps||'<span class="note">no steps yet</span>'}</div></div>`; }
 function wkRender(){
-  const f=wkFile(), box=document.getElementById('wkgroups'); if(!f){ box.innerHTML=''; return; } const kn=f.knobs||{};
+  const f=wkFile(), box=document.getElementById('wkgroups'); document.getElementById('wkwhy').innerHTML=f?wkWhy(f):''; if(!f){ box.innerHTML=''; return; } const kn=f.knobs||{};
   box.innerHTML=WK.map(G=>`<div class="wkg"><h3>${E(G.g)}</h3>${G.k.map(([k,lab,def,mn,mx,st,ds])=>{ const has=k in kn, v=has?kn[k]:def;
     const lo=Math.min(mn,v), hi=Math.max(mx,v);
     const ctl=st?`<input type="range" data-k="${k}" min="${lo}" max="${hi}" step="${st}" value="${v}"><input type="number" data-k="${k}" min="${lo}" max="${hi}" step="${st}" value="${wkFmt(v,st)}">`
@@ -1443,6 +1479,7 @@ async function wkSet(k,v){ const lab=(WK.flatMap(g=>g.k).find(r=>r[0]===k)||[])[
   if(await wkPost(`set=${encodeURIComponent(k+':'+v)}`,`${lab}: ${v}`)){ const f=wkFile(); if(f){ (f.knobs=f.knobs||{})[k]=+v; } } wkDirty=0; wkRender(); }
 document.getElementById('wkf').addEventListener('change',e=>{ wkSel=e.target.value; wkRender(); wkMsg(''); });
 const wkg=document.getElementById('wkgroups');
+document.getElementById('wkwhy').addEventListener('change',e=>{ const k=e.target.dataset.k; if(k) wkSet(k,e.target.checked?1:0); });
 wkg.addEventListener('input',e=>{ const k=e.target.dataset.k; if(!k||e.target.type==='checkbox') return; wkDirty=1;   // (the slider and the box move together)
   for(const o of wkg.querySelectorAll(`input[data-k="${k}"]`)) if(o!==e.target) o.value=e.target.value; });
 wkg.addEventListener('change',e=>{ const k=e.target.dataset.k; if(!k) return; const v=e.target.type==='checkbox'?(e.target.checked?1:0):e.target.value; if(v===''||isNaN(+v)) return; wkSet(k,+v); });

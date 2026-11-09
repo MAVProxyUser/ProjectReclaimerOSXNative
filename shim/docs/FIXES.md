@@ -3286,6 +3286,36 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   switch presses (the learnt record bit): 0 of 32 took" -- 32 x "switching from PLASMA PISTOL to ASSAULT RIFLE" with the trigger held
   (the plasma pistol held = an overcharge held) while the earlier switches, 3 of 3 and 2 of 2, came with the trigger up. LOGIC: from a
   switch press until 0.15 s after it the trigger (and the reload click) stays up; PLASMA PISTOL joins the weapons whose trigger is pulsed.
+- **Why did they beat me: a cause per death, and a tuner that moves settings by it** (2026-11-09 11:10-11:20; nbot.c du_tick /
+  why_note, shim/tools/death-tuner.py, nwknobs.c "why" / "tune", stats_page.html Walker tab) — WHY: the user: "walker needs to focus
+  hard on its K/D spread and tweak settings until it gets better, I feel like a per death why did the other player beat me
+  calculation could be interesting, weighting future growth". LOGIC: every step the duels of this life (per enemy: in sight since,
+  aiming at the walker since, the walker firing at it since and its shield + health then, its shield + health last seen) and the
+  walker's damage episode (the first hit after 3 s without one, the shield before it). At a death: the likely killer (the target if
+  it aimed at the walker, else the nearest enemy aiming at it) and ONE cause, the first that fits -- empty, outnumbered (2+
+  aiming), unseen (hurt before ever in sight), point blank (shotgun / sword under 2.5 u), traded (killer left under 0.25),
+  entered hurt (shield under 0.5 when the damage began), slow start (fired back 0.5+ s late or never), outranged (own weapon off
+  its band, the killer's in), outshot -> "[why]" + battles/follow/why-<nick>.jsonl. death-tuner.py weighs the causes (each death's
+  weight halves every 20 deaths), every 6 deaths steps ONE setting for the heaviest cause (each cause its own list: slow start ->
+  reaction / first turn / see-near, outnumbered -> cover shield / retreat / press, outshot -> wobble / lead / fire slack, ...),
+  and after the next 6 deaths puts it back if K/D (kills from the walker's stats page per death reviewed) fell 25%+ (that move then
+  rests 30 deaths); NHOOK_TUNE=0 in the knob file pauses it (the tab's switch); steps -> battles/follow/tuner-<nick>.jsonl. The
+  Walker tab shows the causes of the last 60 deaths, the last 10 with their detail, and the tuner's steps / verdicts. First live
+  run (20-player Pit): 8 of the first 10 reviewed deaths "outnumbered" (2-4 enemies aiming).
+- **Weapon choice as settings; the best weapon for the hunt** (2026-11-09 11:10; nbot.c the better-weapon rule / the fight switch) —
+  WHY: the user: "select best weapon in inventory should be a setting too, and select best weapon for your hunt just the same".
+  LOGIC: NHOOK_BOT_BEST_WEAPON (1) + NHOOK_BOT_BEST_RANKS (2): the rank rule; NHOOK_BOT_FIGHT_SWITCH (1): the range / zone / players'
+  switch in a fight (the empty-magazine switch stays either way); NHOOK_BOT_HUNT_WEAPON (1) + _X (1.3): out of a fight with a goal,
+  the zone model around the goal point (players' kills by weapon class over its carried share, 8+ kills there) puts the weapon that
+  does 1.3x better there in hand before the meeting -- shotguns and swords too -- and keeps the one in hand that does 1.3x better
+  (the rank rule does not switch it back). All live; the Walker tab's Weapons group. "[inv] for the hunt (...)" lines.
+- **Aim column: the share on target and how far the misses went; the head share under it** (2026-11-09 11:15; nstats.c st_aim_json
+  "miss" / "miss75", stats_page.html aimCell) — WHY: the user: "all aim stats are *always* 0.0 degrees off. why?" and "the 'hits
+  counted' variable doesn't seem to update properly, it's always the same number". A shot through a hitbox is 0 off, so with over
+  half on target the median of all shots is 0; and "counted" (damage within 0.6 s of an on-target shot) is met by anyone's damage
+  in a crowd: 90-100% for every player, though it did update. LOGIC: the cell shows "N% on target · misses by X°" (the median over
+  the shots that missed; a game started before this shows the share alone) and "N% of M hits on the head"; "counted" stays in the
+  tooltip with its caveat; the column sorts by the share on target.
 - **The stats page's Walker tab: the walkers' settings changed while they play** (2026-11-09 10:45-11:05; shim/native/nwknobs.c,
   nstats.c GET /walker.json + POST do=wknob, shim/src/stats_page.html #walker, nbot.c lk_tick; test shim/tools/wknobs-test.sh) — WHY:
   the user: "add a walker settings page to the status window as a tab please so we can adjust it on the fly". LOGIC: the walkers'

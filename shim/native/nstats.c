@@ -979,7 +979,11 @@ static void st_aim_tick(const StPlayer* pl, int np, double now, const uint8_t* t
 static int st_aim_fcmp(const void* x, const void* y) { float a = *(const float*)x, b = *(const float*)y; return a < b ? -1 : a > b; }
 static void st_aim_json(StBuf* s, const StTrack* t) {
     if (!t || !t->aim_n) return; int m = t->aim_n < 64 ? t->aim_n : 64; float e[64]; memcpy(e, t->aim_err, (size_t)m * 4); qsort(e, (size_t)m, 4, st_aim_fcmp);
-    sb_put(s, ",\"aim\":{\"n\":%d,\"err\":%.2f,\"err75\":%.2f,\"on\":%.3f,\"head\":%.3f,\"reg\":%.3f,\"reg_n\":%d,\"miss_reg\":%.3f,\"miss_n\":%d,\"open_n\":%d,\"open_on\":%d,\"far_n\":%d,\"far_on\":%d}",
+    // (2026-11-09, the user: "all aim stats are *always* 0.0 degrees off. why?" -- a shot through a hitbox is 0 off, and with over half
+    //  of the shots on target the median of all of them is 0: "miss" / "miss75" = the same over the shots that MISSED, -1 = none)
+    int m0 = 0; while (m0 < m && e[m0] <= 0) m0++; int mm = m - m0;
+    sb_put(s, ",\"aim\":{\"miss\":%.2f,\"miss75\":%.2f,", mm ? e[m0 + mm / 2] : -1.0f, mm ? e[m0 + (mm * 3) / 4] : -1.0f);
+    sb_put(s, "\"n\":%d,\"err\":%.2f,\"err75\":%.2f,\"on\":%.3f,\"head\":%.3f,\"reg\":%.3f,\"reg_n\":%d,\"miss_reg\":%.3f,\"miss_n\":%d,\"open_n\":%d,\"open_on\":%d,\"far_n\":%d,\"far_on\":%d}",
            t->aim_n, e[m / 2], e[(m * 3) / 4], (double)t->aim_on / t->aim_n, t->aim_on ? (double)t->aim_head / t->aim_on : 0.0,
            t->aim_on_judged ? (double)t->aim_on_reg / t->aim_on_judged : -1.0, t->aim_on_judged, t->aim_off_judged ? (double)t->aim_off_reg / t->aim_off_judged : -1.0, t->aim_off_judged,
            t->aim_open_n, t->aim_open_on, t->aim_far_n, t->aim_far_on);

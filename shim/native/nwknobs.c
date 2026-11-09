@@ -47,12 +47,28 @@ static int wk_write(const char* path, const LiveKnob* k, int nk) {
     fputc('{', f); for (int i = 0; i < nk; i++) fprintf(f, "%s\"%s\": %.6g", i ? ", " : "", k[i].n, (double)k[i].v); fputs("}\n", f);
     if (fclose(f) != 0 || rename(tmp, path) != 0) { unlink(tmp); return 0; }
     return 1; }
+// the last <max> JSON lines of a file (our own: battles/follow/why-<nick>.jsonl, tuner-<nick>.jsonl) as a JSON array
+static void wk_tail_json(StBuf* b, const char* path, int max) {
+    sb_put(b, "["); FILE* f = fopen(path, "r"); if (!f) { sb_put(b, "]"); return; }
+    static char buf[65536]; fseek(f, 0, SEEK_END); long sz = ftell(f); long from = sz > (long)sizeof buf - 1 ? sz - (long)sizeof buf + 1 : 0; fseek(f, from, SEEK_SET);
+    size_t n = fread(buf, 1, sizeof buf - 1, f); fclose(f); buf[n] = 0;
+    char* lines[256]; int nl = 0; char* p = buf; if (from > 0) { char* nlp = strchr(p, '\n'); p = nlp ? nlp + 1 : p + n; }
+    while (*p) { char* e = strchr(p, '\n'); if (e) *e = 0; size_t L = strlen(p); int ok = L > 1 && p[0] == '{' && p[L - 1] == '}';
+        for (size_t i = 0; ok && i < L; i++) if ((unsigned char)p[i] < 0x20) ok = 0;
+        if (ok) { if (nl == 256) { memmove(lines, lines + 1, sizeof lines[0] * 255); nl = 255; } lines[nl++] = p; }
+        if (!e) break; p = e + 1; }
+    int k0 = nl > max ? nl - max : 0; for (int i = k0; i < nl; i++) sb_put(b, "%s%s", i > k0 ? "," : "", lines[i]);
+    sb_put(b, "]"); }
 static void wk_file_json(StBuf* b, const char* id, const char* nick, int pub, const char* path, int mine, int* first) {
     LiveKnob k[64]; int nk = wk_read(path, k, 64);
     sb_put(b, "%s{\"id\":", *first ? "" : ","); sb_str(b, id); sb_put(b, ",\"nick\":"); sb_str(b, nick);
     sb_put(b, ",\"where\":\"%s\",\"mine\":%s,\"exists\":%s,\"knobs\":{", pub ? "pub" : "test", mine ? "true" : "false", nk >= 0 ? "true" : "false");
     for (int i = 0; i < nk; i++) { sb_put(b, "%s", i ? "," : ""); sb_str(b, k[i].n); sb_put(b, ":%.6g", isfinite(k[i].v) ? (double)k[i].v : 0.0); }
-    sb_put(b, "}}"); *first = 0; }
+    // (the death review and the tuner's steps: nbot.c why_note, shim/tools/death-tuner.py)
+    char fp[1100]; snprintf(fp, sizeof fp, "%s/Library/Application Support/ReclaimerMac/battles/follow/why-%s.jsonl", wk_home(), nick);
+    sb_put(b, "},\"why\":"); wk_tail_json(b, fp, 60);
+    snprintf(fp, sizeof fp, "%s/Library/Application Support/ReclaimerMac/battles/follow/tuner-%s.jsonl", wk_home(), nick);
+    sb_put(b, ",\"tune\":"); wk_tail_json(b, fp, 16); sb_put(b, "}"); *first = 0; }
 static const char* wk_pub_nick(void) {   // (the public walker's nickname: its profile's identity.nickname -- nothing else is read from it)
     static char nk[64]; static int done; if (done) return nk; done = 1;
     char p[1100]; snprintf(p, sizeof p, "%s/Library/Application Support/ReclaimerMac/native/public-walker/home/Library/Application Support/ProjectReclaimer/profile.json", wk_home());
