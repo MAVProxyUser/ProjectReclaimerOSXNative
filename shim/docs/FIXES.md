@@ -3272,6 +3272,11 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   a running battle, at every round end (our server's in_match true -> false) walker-coach.py round + match-study.py, then each
   walker's game restarted headless with its new knobs and the newest build (they rejoin in the lobby; the user's game and the
   server stay).
+- **brain-timeline.py: every training window with the brain that played it** (2026-11-09 12:45; shim/tools/brain-timeline.py) — WHY: "each
+  training session reload you should describe what the new brain is trying to show that it learned" -- the lesson of a brain and the
+  windows it played live in two files. LOGIC: battles/follow/learned.jsonl (one line a window) joined with battles/follow/brain-lessons.jsonl
+  (one line a build: its lesson) by the window's middle; per brain its windows and sums (kills / deaths / K/D / accuracy). First reading:
+  before the lessons (03:31-03:40) 7 / 24 (0.29); 03:43-04:29 21 / 35 (0.60). --since HH:MM, --json.
 - **Automatics aim at the chest; out of crossfires; the melee race at 1.45** (2026-11-09 12:35-12:40; nbot.c the aim point, the
   OUTNUMBERED block, live knobs) — WHY: since 08:00 every weapon aimed at the head hitbox -- right for a battle rifle / carbine / magnum
   / sniper, wrong for an assault rifle (no headshot bonus, the smallest part: fewer hits a second); most death notes had 2-4 enemies
