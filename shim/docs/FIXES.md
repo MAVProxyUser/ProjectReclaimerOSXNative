@@ -3458,6 +3458,10 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   nav-portals.py <map> every --links-every (300 s) of a match (every recording of the map, the one being written included; background
   priority; "links" events in monitor-<nick>.jsonl), and the brain reads maptop/<map>.portals.txt again whenever it changes (checked
   every 5 s: "[brain] the players' links for this map changed") instead of only when the map loads.
+  (17:35) The first version never fired on the Hugegrass island: the island escape hopped the walker back and forth over 6 units, and
+  enemies seen far across the map kept "fighting" true. Now "no path found to anywhere for NHOOK_BOT_UNSTICK_S" (g_nav_ok_t, reset at
+  each life's start) also counts as stuck, and only a fight within 40 units holds it off. After a quit and rejoin (the user: "it needs to
+  quit and rejoin") the brain had 354 learned links (the monitor's relearn, from 178) and walked out of the east base down to the field.
 - **One player in the whole window, beside a map of just that player** (2026-11-09 17:10; stats_page.html #pfs / openPfs / drawPlayerMap /
   trackSnap, shim/tools/stats-proxy.py /trail.json) — WHY: the user: the player details popup "full window, and it should side by side a
   version of the heatmap with JUST my player visualized". LOGIC: clicking a name opens the details over the whole window (the #det panel

@@ -66,6 +66,7 @@ static int g_noshield;
 // (2026-11-09) the walker's own kills / deaths in THIS match from the scoreboard (the game results, nstats.c g_rs_cur; -1 = not known):
 // the three-minute review counted "a target that died while I fought it" as a kill -- 17 "kills" in a UK match the scoreboard put at 3
 static int g_my_kills = -1, g_my_deaths = -1;
+static double g_nav_ok_t;   // (2026-11-09) the last time the planner found a path (the unstick: no path anywhere for 45 s = stuck too)
 static int bot_log(void) { static int l = -1; if (l < 0) l = getenv("NHOOK_SPAR_LOG") ? 1 : 0; return l && !g_brain_warm; }
 
 static int bot_private_addr(const char* a) {   // "ip:port" at a loopback / private address
@@ -1827,7 +1828,7 @@ static void bot_step_body(void) {
                               if (mode != 2) { nav_say("  [nav] no path from node %d to %d: a new goal\n", cur, goal); goal = -1; }
                               else if (g_eg.on && gl_on()) { gl_drop(now, "no path"); goal = -1; }   // (the goal draw: another at once -- it used to stand there)
                               plen = 0; }
-                else { nav_say("  [nav] path of %d nodes from (%.1f %.1f %.1f) to node %d\n", np, pos[0], pos[1], pos[2], goal); plen = np; pidx = 0; } }
+                else { nav_say("  [nav] path of %d nodes from (%.1f %.1f %.1f) to node %d\n", np, pos[0], pos[1], pos[2], goal); plen = np; pidx = 0; g_nav_ok_t = now; } }
             if (plen >= 2) {
                 { float bd = 1e30f; int bi = pidx; for (int i = pidx; i < plen && i < pidx + 60; i++) { float p[3]; nav_pos(path[i], p); float d = (p[0] - pos[0]) * (p[0] - pos[0]) + (p[1] - pos[1]) * (p[1] - pos[1]); if (d < bd) { bd = d; bi = i; } }
                   pidx = bi; if (bd > 4.0f) tplan = 0; }   // more than 2 units off the path: replan
@@ -2042,12 +2043,16 @@ static void bot_step_body(void) {
       float us = 45; lk_over(&us, "NHOOK_BOT_UNSTICK_S");
       int alive_me = me >= 0 && !objs[me].dead;
       if (!alive_me) rn = 0;
-      if (engaged || g_bot_fighting) tfight = now;
+      static double alive_t0; if (!alive_me) alive_t0 = 0; else if (alive_t0 <= 0) { alive_t0 = now; g_nav_ok_t = now; }
+      if ((engaged || g_bot_fighting) && tdist < 40.0f) tfight = now;
       if (alive_me && now - tsam >= 1.0) { tsam = now; memcpy(ring[rn & 127], o->c, 12); rtm[rn & 127] = now; rn++; }
       int stuck = 0;
       if (us > 0 && alive_me && now - tfight > 15.0 && rn > (int)us + 1 && (int)us < 120) {
           int i0 = rn - (int)us; float* a0 = ring[i0 & 127]; stuck = 1;
           for (int i = i0; i < rn; i++) { float dx = ring[i & 127][0] - a0[0], dy = ring[i & 127][1] - a0[1]; if (dx * dx + dy * dy > 36.0f) { stuck = 0; break; } } }
+      // (17:35: on the Hugegrass island the escape hopped it back and forth over 6 units, so it never counted as standing still: no path
+      //  found to anywhere for the same time counts as stuck too)
+      if (!stuck && us > 0 && alive_me && now - tfight > 15.0 && alive_t0 > 0 && now - alive_t0 > us && now - g_nav_ok_t > us) stuck = 1;
       if (stuck) { int mate = 0; for (int i = 0; i < n; i++) { const NovObj* t = &objs[i]; if (t->type || t->dead || i == me || bot_enemy(o, t)) continue;
               float dx = t->c[0] - o->c[0], dy = t->c[1] - o->c[1], dz = t->c[2] - o->c[2]; if (dx * dx + dy * dy + dz * dz < 100.0f) { mate = 1; break; } }
           int nades = g_inv.frag + g_inv.plasma > 0 || g_inv.gren > 0;
