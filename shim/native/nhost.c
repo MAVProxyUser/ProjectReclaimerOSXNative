@@ -34,6 +34,7 @@ static const uint32_t g_ht_frame_words[4] = {0xd10103ffu, 0xa90157f6u, 0xa9024ff
 static volatile int g_ht_bnd_off, g_ht_inv_off, g_ht_tick_ok = -1, g_ht_bnd_ok = -1, g_ht_inv_ok = -1;
 static volatile unsigned long g_ht_bnd_skips, g_ht_inv_hidden, g_ht_ticks, g_ht_frames;
 static volatile int g_ht_my_slot = -1;                     // the local player's slot (st_snapshot: the profile's nickname)
+static volatile uint32_t g_my_unit = 0xFFFFFFFFu;          // ... and its unit (nbot.c: when the control record's unit is stale)
 typedef struct { int kind, slot, who; float v[3]; char label[64]; } HtReq;   // kind 1 next to `slot`, 2 to v (who), 3 by v, 4 floor probe at v
 static HtReq g_ht_req; static volatile int g_ht_pending; static pthread_mutex_t g_ht_mx = PTHREAD_MUTEX_INITIALIZER;
 static char g_ht_msg[200]; static double g_ht_msg_t;

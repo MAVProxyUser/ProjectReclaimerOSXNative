@@ -155,7 +155,15 @@ static int eg_band(const char* cls, float* p25, float* p75) {   // the players' 
     for (int i = 0; i < g_eg.nband; i++) if (!strcmp(g_eg.band[i].cls, cls) && g_eg.band[i].n >= 20 && g_eg.band[i].p75 > g_eg.band[i].p25) { *p25 = g_eg.band[i].p25; *p75 = g_eg.band[i].p75; return 1; }
     return 0; }
 // per-unit memory: shield + health a moment ago (just hurt), its last drop, whether it aimed at us while we were hurt
-typedef struct { uint32_t h; float vit; double hurt_t, att_t, seen_tgt; int asked; } EgUnit;
+typedef struct { uint32_t h; float vit; double hurt_t, att_t, seen_tgt, asked_t; int asked; } EgUnit;
+// COACHED UP (2026-11-08, the user after beating two walkers 17-4: "shooting first" -- match-study.py: shot at first, the walkers
+// fired back after a median 4.4-5.5 s (the user 1.1 s) and 14-22 times never; with a second attacker on them they "stayed on the
+// target" 19 of 22 times -- the players' own odds: 33% in view, 7% behind, after ~1.75 s): a second attacker hurting the walker
+// while its current target is not shooting at it wins (asked again every second while it keeps hitting), the turn takes half the
+// players' delay (NHOOK_BOT_TURNX, default 0.5), and a new target that is shooting at the walker gets NHOOK_BOT_ATTBONUS (6) on
+// its score -- enough to outweigh being behind (off aim -7.74 at 180 deg). NHOOK_BOT_HUMANLIKE=1 = the players' rules as before.
+static int eg_humanlike(void) { static int v = -1; if (v < 0) v = getenv("NHOOK_BOT_HUMANLIKE") != 0; return v; }
+static float eg_knob(const char* n, float d) { const char* e = getenv(n); return e ? strtof(e, 0) : d; }
 static EgUnit g_egu[128]; static int g_negu;
 static volatile uint32_t g_eg_fast;   // a target taken on purpose (a second attacker after the players' delay): turned to at full speed
 static EgUnit* eg_unit(uint32_t h) { for (int i = 0; i < g_negu; i++) if (g_egu[i].h == h) return &g_egu[i];
@@ -178,10 +186,13 @@ static int eg_choose(const NovObj* objs, int n, int me, const float* cam, float 
     if (ci >= 0 && vis_of(cur, now) == 1) cur_seen = now;
     // a second attacker while fighting the current target for a second or more: turn to it with the players' odds, once per attacker
     if (ci >= 0 && now - cur_t0 > 1.0) for (int i = 0; i < n; i++) { const NovObj* t = &objs[i]; if (t->type || t->dead || i == me || t->handle == cur || !bot_enemy(o, t)) continue;
-        EgUnit* u = eg_unit(t->handle); if (now - u->att_t > 0.2 || u->asked) continue; u->asked = 1;
+        EgUnit* u = eg_unit(t->handle); if (now - u->att_t > 0.2) continue;
+        int hl = eg_humanlike(); if (u->asked && (hl || now - u->asked_t < 1.0)) continue; u->asked = 1; u->asked_t = now;
         float dx = t->c[0] - cam[0], dy = t->c[1] - cam[1], off = fabsf(bot_wrap(atan2f(dy, dx) - yaw0)) * 57.2958f;
         float p = off < 45 ? g_eg.p_view : off >= 90 ? g_eg.p_behind : g_eg.p_mid;
-        if (bot_rand01() < p) { sw_to = t->handle; sw_at = now + g_eg.turn_s * (0.5f + bot_rand01()); if (bot_log()) nlog("[nhook] [fight] second attacker %08x (%.0f deg off): turning to it in %.1f s", t->handle, off, sw_at - now); }
+        int cur_att = 0; if (!hl) { EgUnit* cu = eg_unit(cur); cur_att = now - cu->att_t < 1.0; p = cur_att ? fmaxf(p, 0.5f) : 1.0f; }   // (coached: see EgUnit)
+        static float tx = -1; if (tx < 0) tx = hl ? 1.0f : eg_knob("NHOOK_BOT_TURNX", 0.5f);
+        if (bot_rand01() < p) { sw_to = t->handle; sw_at = now + tx * g_eg.turn_s * (0.5f + bot_rand01()); if (bot_log()) nlog("[nhook] [fight] second attacker %08x (%.0f deg off%s): turning to it in %.1f s", t->handle, off, cur_att ? ", the target shoots too" : "", sw_at - now); }
         else if (bot_log()) nlog("[nhook] [fight] second attacker %08x (%.0f deg off): staying on the target", t->handle, off); }
     // TEAMWORK (team games; the user: "cooperate with other team mates toward a common offense, or if one comes to your aid, ensure
     // you are working together for your and his collective defense as a unit"): with no target, a teammate within 25 units under
@@ -229,6 +240,7 @@ static int eg_choose(const NovObj* objs, int n, int me, const float* cam, float 
         // an overshielded enemy (shield above 1): the players' attackers win 54% against one, 77% otherwise (engage-model.json
         // behaviour.powerups) -- half that logit as a penalty unless we have one too (choose the fight we would win)
         if (t->shield > 1.05f && o->shield <= 1.05f) s += 0.5f * g_eg.os_pen;
+        { static float ab = -1; if (ab < 0) ab = eg_humanlike() ? 0.0f : eg_knob("NHOOK_BOT_ATTBONUS", 6.0f); if (att) s += ab; }   // (coached: the one shooting at us)
         if (nc2 < 64) { ci2[nc2] = i; cs2[nc2] = s; nc2++; }
         if (s > bs) { bs = s; bi = i; } }
     if (!pickbest && nc2 > 1) { float sum = 0; for (int k = 0; k < nc2; k++) { cs2[k] = expf(cs2[k] - bs); sum += cs2[k]; }

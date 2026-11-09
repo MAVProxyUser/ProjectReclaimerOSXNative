@@ -339,6 +339,13 @@ static void bot_step_body(void) {
     float cam[3], fwd[3]; if (!nov_observer(cam, fwd)) { g_bot_out = 0; bot_idle("no observer camera"); return; }
     static NovObj objs[1024]; int n = bot_units(objs, 1024), me = -1;
     for (int i = 0; i < n; i++) if (objs[i].type == 0 && objs[i].handle == meh) { me = i; break; }
+    // (2026-11-08, the user's match against two walkers: a walker stood still 21% of its alive time, in spells of 14-17 s, logging
+    //  "the record's unit ... is none of the units seen" ~20 times: after a respawn the control record's unit can stay stale. Then
+    //  the player's own unit -- the players table, by the profile's nickname (nstats.c g_my_unit) -- is the walker's body.
+    //  NHOOK_BOT_RECUNIT=1 = the record only, the old)
+    { static int ro = -1; if (ro < 0) ro = getenv("NHOOK_BOT_RECUNIT") != 0;
+      if (me < 0 && !ro && g_my_unit != 0xFFFFFFFFu) for (int i = 0; i < n; i++) if (objs[i].type == 0 && objs[i].handle == g_my_unit) { me = i;
+          static double tl; if (bot_log() && now - tl > 10) { tl = now; nlog("[nhook] [spar] the control record's unit %08x is stale: the player's unit %08x drives", meh, g_my_unit); } break; } }
     static int32_t path[8192]; static int plen, pidx, goal = -1; static double tplan, tstat, tjump, tback, tstuck[4]; static float bstr; static float hist[64][3]; static double histt[64]; static int hh;
     gl_life(now, me >= 0 && !objs[me].dead, me >= 0 ? objs[me].c : 0, 0, 0);   // (nbot_goals.c: deaths, respawns, failed zones)
     if (me < 0 || objs[me].dead || objs[me].seat >= 0) { g_bot_out = 0; g_nav_act = 0; plen = 0; g_bot_err = -1;   // dead, respawning or in a vehicle

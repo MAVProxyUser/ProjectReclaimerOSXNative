@@ -3233,9 +3233,29 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   pickups at all (melee-battle.sh: the walkers keep the start weapon -- they swapped the hammer for a shotgun / sniper rifle).
   Also: no reload tap while holding a sword / hammer (nothing to reload; the tap picked up the weapon on the floor: the test walkers
   swapped their hammers for plasma rifles / SMGs after fights). melee-battle.sh lists every kill (type, the killer's weapon, the
-  distance at the victim's last live sample): our local server names melee and hammer kills "" -- an unnamed kill within 4.5 units
-  counts as melee. First battle (4 walkers, hammers, 3 min, before the reload fix): 95 melee presses at 0.7-1.2 units, 3 melee /
+  distance at the victim's last live sample): (WRONG, corrected 22:30: our server names melee kills "Melee" -- the user's five were;
+  "" are other kills) an unnamed kill within 4.5 units counts as melee. First battle (4 walkers, hammers, 3 min, before the reload fix): 95 melee presses at 0.7-1.2 units, 3 melee /
   hammer kills of 7 (one hammer kill from 4.2 units: its shockwave).
+- **Coached up after the user's 17-4 win over two walkers** (2026-11-08 22:30; nbot_engage.c EgUnit / second attacker / target
+  score, nbot.c the walker's unit, shim/tools/match-study.py) — WHY: the user: "the bots should study that ass whipping I just gave
+  them! there are some things I notice they fail at. meles and just generally shooting first ... some times they stand around".
+  match-study.py on that match (Guardian, 562 s; the user 17 kills / 4 deaths, 54% accuracy; the walkers 7/11 and 5/16, 39% / 31%):
+  in fights (two enemies within 40 units, someone firing) the walkers fired FIRST as often as the user (28 / 28 / 26 of ~55) but,
+  shot at first, replied after a median 4.4-5.5 s against the user's 1.1 s, and 14-22 times never; the user won 24 fights and lost
+  7. Their logs: "second attacker ...: staying on the target" 19 times, "turning to it" 3 -- the players' odds (33% in view, 7% from
+  behind, after ~1.75 s) and a target score where being behind (off aim -7.74 at 180 deg) outweighs having just shot us. One
+  walker stood still 21% of its alive time in 14-17 s spells: "the record's unit ... is none of the units seen" ~20 times -- after a
+  respawn the control record's unit stays stale and the walker idled. LOGIC: a second attacker hurting the walker while its current
+  target is not shooting at it is turned to (the players' odds, at least 0.5, when both shoot), asked again every second while it
+  keeps hitting, after half the players' turn delay (NHOOK_BOT_TURNX 0.5); a new target that shoots at the walker gets +6 on its
+  score (NHOOK_BOT_ATTBONUS); NHOOK_BOT_HUMANLIKE=1 = the players' rules as before. The walker's body falls back to the player's own
+  unit (players table, by the profile's nickname: nstats.c g_my_unit) when the record's unit is stale (NHOOK_BOT_RECUNIT=1 = old).
+  Melee: the user's 5 melee kills are named "Melee" on our server (so "" is not melee -- corrected above); the walkers' close kills
+  were all gunfire.
+- **Walker battles run headless** (2026-11-08 22:15; walker-battle.sh) — WHY: the user: "running all 3 clients visible lagged the
+  screen hard, can you drive the client without the display?". LOGIC: the walkers' games start with the app's own --headless ("no
+  window, the null renderer"); the walker needs no frames (aim, line of sight and moves come from the game's state). Checked: two
+  headless walkers moved ~67 units in 2 minutes and fought (71 shots, a kill). WB_VISIBLE=1 = the small --background windows.
 - **Every bullet was logged twice** (2026-11-08 19:15; shim/tools/bloom.py load) — WHY: the bloom battle's log had each bullet twice
   ~1 ms apart (same shooter, start, end and length; the aim sampled again): the app deletes most projectiles twice and the
   object_delete hook logs both. Consecutive bullets then looked perfectly correlated. LOGIC: the first report of a (shooter, start,
