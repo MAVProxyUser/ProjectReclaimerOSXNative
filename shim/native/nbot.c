@@ -101,9 +101,10 @@ static const char* lk_path(void) { static char p[1100]; const char* e = getenv("
     snprintf(p, sizeof p, "%s/Library/Application Support/ReclaimerMac/battles/live-knobs/%s.json", getenv("HOME") ? getenv("HOME") : "/tmp", g_nick[0] ? g_nick : "walker"); return p; }
 static void lk_tick(void) {
     static double t; double now = mono_s(); if (now - t < 1.0) return; t = now;
-    static time_t mt; static off_t sz; static int had; struct stat st; const char* p = lk_path();
-    if (stat(p, &st) != 0) { if (had) { had = 0; g_nlk = 0; mt = 0; nlog("[nhook] [knobs] %s gone: the launch values again", p); } return; }
-    if (had && st.st_mtime == mt && st.st_size == sz) return;
+    // (2026-11-09: the change time to the nanosecond -- the Walker tab can write twice in one second with the same file size)
+    static struct timespec mt; static off_t sz; static int had; struct stat st; const char* p = lk_path();
+    if (stat(p, &st) != 0) { if (had) { had = 0; g_nlk = 0; mt.tv_sec = 0; mt.tv_nsec = 0; nlog("[nhook] [knobs] %s gone: the launch values again", p); } return; }
+    if (had && st.st_mtimespec.tv_sec == mt.tv_sec && st.st_mtimespec.tv_nsec == mt.tv_nsec && st.st_size == sz) return;
     FILE* f = fopen(p, "r"); if (!f) return; char b[8192]; size_t n = fread(b, 1, sizeof b - 1, f); fclose(f); b[n] = 0;
     LiveKnob k[64]; int nk = 0; const char* q = b; char list[600]; int lq = 0; list[0] = 0;
     while (nk < 64 && (q = strchr(q, '"'))) { const char* e = strchr(q + 1, '"'); if (!e) break; size_t L = (size_t)(e - q - 1);
@@ -111,7 +112,7 @@ static void lk_tick(void) {
         if (end != c && L > 0 && L < sizeof k[0].n) { memcpy(k[nk].n, q + 1, L); k[nk].n[L] = 0; k[nk].v = v;
             if (lq < (int)sizeof list - 60) lq += snprintf(list + lq, sizeof list - (size_t)lq, "%s%s=%.3g", nk ? " " : "", k[nk].n + (strncmp(k[nk].n, "NHOOK_BOT_", 10) ? 0 : 10), v); nk++; }
         q = end != c ? end : e + 1; }
-    memcpy(g_lk, k, sizeof k); g_nlk = nk; mt = st.st_mtime; sz = st.st_size; had = 1;
+    memcpy(g_lk, k, sizeof k); g_nlk = nk; mt = st.st_mtimespec; sz = st.st_size; had = 1;
     nlog("[nhook] [knobs] live from %s: %s", p, nk ? list : "(none)"); }
 static int lk_get(const char* n, float* v) { for (int i = 0; i < g_nlk; i++) if (!strcmp(g_lk[i].n, n)) { *v = g_lk[i].v; return 1; } return 0; }
 static void lk_over(float* v, const char* n) { float x; if (lk_get(n, &x)) *v = x; }
@@ -464,6 +465,12 @@ static void ammo_learn(double now, const NovObj* o) {
 // 0.7 s later whether the weapon slot (+0x262) changed; a bit that switches twice is THE switch, saved to native/switch-bit.txt and
 // read back by every later brain. [swscan] lines. NHOOK_BOT_SWSCAN=0 (live) = off.
 static int g_swbit = -1; static uint64_t g_swscan_bits; static double g_swrec_until; static int g_eng_close; static int g_swscan_busy;
+// (cover, 2026-11-09: the fight target's handle and where it is -- the attacker the cover is tested against)
+static uint32_t g_ftg_h; static float g_ftg_c[3], g_ftg_r;
+// COVER SEARCH (beh_cover, nbrain_beh.c): candidate spots tested from the attacker's eyes on the line-of-sight channel -- bot_cov_ray
+// takes 2 of every 3 ray slots while a search runs; each answer is filed under the tag 0xC0E00000 | generation << 4 | k
+static float g_cov_c[8][3]; static int g_cov_n, g_cov_k, g_cov_gen; static uint32_t g_cov_from; static int g_cov_slot;
+static uint32_t cov_tag(int k) { return 0xC0E00000u | ((uint32_t)(g_cov_gen & 0xFF) << 4) | (uint32_t)k; }
 static float g_ftg_v = 2, g_ftg_d = 99; static int g_ftg_vis;   // (14:20: the fight's target -- its shield + health, distance, in sight: the break-off rule)   // (busy: a candidate pressed / watched -- no other switch then)
 static const char* swbit_path(void) { static char p[1024]; if (!p[0]) { const char* h = getenv("HOME"); snprintf(p, sizeof p, "%s/Library/Application Support/ReclaimerMac/native/switch-bit.txt", h ? h : ""); } return p; }
 static void swscan_tick(double now, const NovObj* o, int engaged) {
@@ -580,7 +587,7 @@ static void mel_load(void) {
 static int bot_pull_weapon(const char* w) {
     static const char* const k[] = {"HAMMER", "SWORD", "ENERGY BLADE", "SNIPER", "BEAM RIFLE", "MAGNUM", "ROCKET", "BRUTE SHOT", "FUEL ROD", "PLASMA PISTOL", 0};   /* (14:05: the plasma pistol held = an overcharge held, and no switch away from it: 0 of 32) */
     if (!w) return 0; for (int i = 0; k[i]; i++) if (strstr(w, k[i])) return 1; return 0; }
-static int g_fg_n, g_fg_hid, g_fg_react, g_fg_aim, g_fg_camo, g_fg_head, g_fg_ok, g_fg_trig;   // ([firegate] counters, 07:39)
+static int g_fg_n, g_fg_hid, g_fg_react, g_fg_aim, g_fg_camo, g_fg_head, g_fg_ok, g_fg_trig, g_fg_vis;   // ([firegate] counters, 07:39)
 static int g_bot_pull, g_bot_trig; static double g_bot_fire_t0;   // (the held weapon acts on a pull; when this string of fire began)
 static double g_bot_hold_high, g_bot_hold_last;   // (levels apart: holding the high ground until; the last levels-apart step)
 static int g_fol_go;   // (the leader is 5+ units away: its path beats the fight's moves)
@@ -742,6 +749,13 @@ static int gun_seated(double now, const NovObj* objs, int n, int me, const float
         float sc = d * (v == 0 ? 16.0f : 1.0f) * (0.5f + 0.25f * (hp < 2.0f ? hp : 2.0f)); if (sc < bs) { bs = sc; bi = i; } }
     { static double tput; if (g_los_t > tput && g_los_req == g_los_done) { tput = g_los_t; los_put(g_los_res_tgt, g_los_res, g_los_t); } }
     static double tlos; static int rr;
+    // (cover: a search's rays first, 2 slots of 3 -- the fight's own sight test keeps every third, fresher than its 0.5 s cache)
+    if (now - tlos > 0.07 && g_los_req == g_los_done && g_cov_n > 0 && g_cov_k < g_cov_n && (++g_cov_slot % 3) != 0) {
+        const NovObj* ca = 0; for (int i = 0; i < n; i++) if (objs[i].handle == g_cov_from && !objs[i].dead) { ca = &objs[i]; break; }
+        if (!ca) g_cov_k = g_cov_n;
+        else { int k = g_cov_k++; tlos = now; g_los_p[0] = ca->c[0]; g_los_p[1] = ca->c[1]; g_los_p[2] = ca->c[2] + 0.5f * ca->r;
+            g_los_v[0] = g_cov_c[k][0] - g_los_p[0]; g_los_v[1] = g_cov_c[k][1] - g_los_p[1]; g_los_v[2] = g_cov_c[k][2] - g_los_p[2];
+            g_los_ign[0] = mv->handle; g_los_ign[1] = ca->handle; g_los_tgt = cov_tag(k); g_los_req++; } }
     if (now - tlos > 0.07 && g_los_req == g_los_done) {   // the line from the camera: the target every other time, else another enemy in turn
         const NovObj* q = bi >= 0 ? &objs[bi] : 0; rr++;
         if (!(rr & 1) || !q) { int cnt = 0; for (int i = 0; i < n; i++) { const NovObj* t = &objs[i]; if (t->type || t->dead || i == me || !bot_enemy(o, t)) continue; if (cnt++ == (rr >> 1) % 8) { q = t; break; } } }
@@ -994,7 +1008,11 @@ static void bot_step_body(void) {
             // (12:40: the HEAD only with a precision weapon or a sniper -- Halo 3's assault rifle, SMG, plasma rifle and co. do no extra
             //  damage there and the head is the smallest part: they aim at the chest, NHOOK_BOT_AIM_BODY (0.2) x the radius over the centre)
             int prec = g_inv.held_c && (!strcmp(g_inv.held_c, "precision") || !strcmp(g_inv.held_c, "sniper"));
-            if (!prec) { float ab = 0.2f; lk_over(&ab, "NHOOK_BOT_AIM_BODY"); ap[2] = t->c[2] + ab * t->r; }
+            // (2026-11-09 11:05, the user: "you should not be firing at a static height, rather attempting to track heads with the aiming
+            //  reticule just like any real human would"): the HEAD HITBOX (bot_head: the skeleton's head node, crouching / leaning /
+            //  jumping) with every weapon -- NHOOK_BOT_HEAD_ALL (live, 1); 0 = the old chest height for the automatic weapons
+            float hall = 1; lk_over(&hall, "NHOOK_BOT_HEAD_ALL");
+            if (!prec && !(hall > 0)) { float ab = 0.2f; lk_over(&ab, "NHOOK_BOT_AIM_BODY"); ap[2] = t->c[2] + ab * t->r; }
             else if (ha_on > 0 && bot_head(t, now, hp)) { ap[0] = hp[0]; ap[1] = hp[1]; ap[2] = hp[2] + hdz * hp[3]; g_bot_head_r = hp[3]; }   // (the head hitbox: bot_head above)
             // LEAD (10:25): Halo 3 registers a client's bullets on the HOST, no lag compensation -- a third of the walker's shots through
             // a hitbox registered no damage (aim reg 0.67): the aim point leads the target by its velocity (units a second) x
@@ -1063,6 +1081,11 @@ static void bot_step_body(void) {
               if ((cosf(ay) * dx + sinf(ay) * dy) / dd > 0.978f) { vis = 1; static double tl; if (bot_log() && now - tl > 3) { tl = now; nlog("[nhook] [fight] %08x is shooting me at %.1f units: seen (the ray said hidden)", ftg.handle, tdist); } } } }
         if (vis) tvis = now;
         int seen = tvis && now - tvis < 0.6;
+        // (2026-11-09 10:50, the user: "it should always be shooting aggressively. crank that dial to max"): NHOOK_BOT_FIRE_LINGER (s, live,
+        //  0 = off) keeps the trigger allowed that long after the target went behind cover -- shots at where it is, through a doorway /
+        //  over a ledge it just left; the aim already follows a target for 0.6 s after it was last seen ("seen")
+        float flinger = 0; lk_over(&flinger, "NHOOK_BOT_FIRE_LINGER"); if (flinger > 0.6f) flinger = 0.6f;
+        int fvis = vis || (flinger > 0 && tvis > 0 && now - tvis < flinger);
         // (2026-11-08 walker-compare: walkers reacted in 0.42 s and aimed 2.8 deg off against the players' 1.08 s and 4.1 deg: the
         //  factors below bring skill 0.5 to the players' numbers -- skill 1 is still faster and steadier than they are)
         static float rk0 = -1, t0r0 = -1; if (rk0 < 0) { const char* e = getenv("NHOOK_BOT_REACT"); rk0 = e ? (float)atof(e) : 1.6f; e = getenv("NHOOK_BOT_TURN0"); t0r0 = e ? (float)atof(e) : 0.73f; }
@@ -1085,7 +1108,16 @@ static void bot_step_body(void) {
             float dy = bot_wrap(tyaw + ox - yaw0), dp = (tpitch + oy) - pitch0, mx = (float)dt * (now - tacq < react ? t0r : turn);
             yaw = yaw0 + (dy > mx ? mx : dy < -mx ? -mx : dy); pitch = pitch0 + (dp > mx ? mx : dp < -mx ? -mx : dp); out |= 1;
             float ey = bot_wrap(tyaw - yaw0), ep = tpitch - pitch0, err = sqrtf(ey * ey + ep * ep) * 57.2958f, size = atanf(0.4f / (tdist > 0.5f ? tdist : 0.5f)) * 57.2958f;
-            g_bot_err = err; g_bot_fire = vis && now - tacq > react && err < (size > 1.2f ? size : 1.2f) + fextra && tdist < 40;
+            // (2026-11-09 10:58, the user: "it should ALWAYS be *allowed* to fire IF it can hit an enemy in range of the weapon in its
+            //  hand. it should never NOT be allowed to fire"): the trigger no longer waits out the reaction delay -- that delay still
+            //  slows the first turn onto a new target (TURN0); NHOOK_BOT_FIRE_REACT=1 (live) = the old wait. The reach is the held
+            //  weapon's -- sniper 120, precision / rockets 60, automatic and others 40, shotgun 12, sword / hammer 4 units -- x
+            //  NHOOK_BOT_FIRE_RANGE (1, live); it was 40 for every weapon
+            float fwr = 0, frm = 1; lk_over(&fwr, "NHOOK_BOT_FIRE_REACT"); lk_over(&frm, "NHOOK_BOT_FIRE_RANGE");
+            const char* hcl = g_inv.held_c ? g_inv.held_c : "";
+            float reach = frm * (!strcmp(hcl, "sniper") ? 120.0f : (!strcmp(hcl, "precision") || !strcmp(hcl, "rocket")) ? 60.0f : !strcmp(hcl, "shotgun") ? 12.0f : !strcmp(hcl, "melee") ? 4.0f : 40.0f);
+            float cone = (size > 1.2f ? size : 1.2f) + fextra;
+            g_bot_err = err; g_bot_fire = fvis && (fwr <= 0 || now - tacq > react) && err < cone && tdist < reach;
             // (07:35, the user: "hitting the critical hitbox is key. the game reticule has a red dot in some cases when it's a head shot,
             //  you should tune to hit them when possible. headshots being main goal"): with a PRECISION weapon (battle rifle, carbine,
             //  magnum, sniper -- headshots kill faster) the trigger waits for the aim to sit on the HEAD: within its angular radius
@@ -1107,8 +1139,10 @@ static void bot_step_body(void) {
             // (07:39: [firegate] -- the battle recordings: aimed at a target (within 10 deg for 0.3 s+) the walkers fired 1.6 shots/s,
             //  the best players 3.85. Every 20 s: of the steps with a target within 40 units, the share hidden / still reacting / aim off /
             //  held by the head gate / camo / fire allowed, and of those the share the trigger was really down (burst / pulse / switch))
-            if (tdist < 40) { g_fg_n++; if (!vis) g_fg_hid++; else if (now - tacq <= react) g_fg_react++; else if (err >= (size > 1.2f ? size : 1.2f) + fextra) g_fg_aim++;
-                else if (g_bot_camo_hold) g_fg_camo++; else if (!g_bot_fire) g_fg_head++; else g_fg_ok++; }
+            // (10:58: counted over the weapon's reach; "allowed" is now a share of the steps the walker could SEE the target -- hidden =
+            //  it cannot hit it; "aim turning" = still swinging onto it, outside the fire slack)
+            if (tdist < reach) { g_fg_n++; if (!fvis) g_fg_hid++; else { g_fg_vis++; if (fwr > 0 && now - tacq <= react) g_fg_react++; else if (err >= cone) g_fg_aim++;
+                else if (g_bot_camo_hold) g_fg_camo++; else if (!g_bot_fire) g_fg_head++; else g_fg_ok++; } }
             // the other weapon when the target is outside the held one's band and well inside the other's (vpad Y held 0.15 s,
             // 3 s between switches; not in the first 0.3 s of a target)
             { static double tsw; if (g_vpad_on && g_inv.has_other && now - tsw > 3.0 && now - tacq > 0.3) {
@@ -1316,6 +1350,7 @@ static void bot_step_body(void) {
               if (tr > 0) nlog("[nhook] [vpad] the app read in %.0f s: controllers %d, left stick %d, B %lu, Y %lu, RB %lu, right trigger %lu", now - tr, cr - pc, sr - ps, r[0] - pr[0], r[1] - pr[1], r[2] - pr[2], r[3] - pr[3]);
               tr = now; memcpy(pr, r, sizeof pr); ps = sr; pc = cr; } }
         g_eng_close = engaged && tdist < 20 && vis; g_ftg_v = ftg.shield + ftg.health; g_ftg_d = tdist; g_ftg_vis = vis;
+        g_ftg_h = ftg.handle; memcpy(g_ftg_c, ftg.c, 12); g_ftg_r = ftg.r;
         if (bot_log()) { static double tl; if (now - tl > 1.0) { tl = now; nlog("[nhook] [fight] target %08x %.1f u %s, err %.1f deg, %s%s, shield %.2f", ftg.handle, tdist, vis ? "in sight" : "hidden", g_bot_err, engaged ? "engaged" : "hunting", g_bot_fire ? ", FIRING" : "", o->shield); } }
     }
     // ---- pickups (NHOOK_BOT_PICKBIT=<hex>: the control record's pick-up bit, shim/tools/native-pickup-scan.sh finds it): out of a
@@ -1449,7 +1484,7 @@ static void bot_step_body(void) {
     float gbp[3] = {0, 0, 0}, gface[3] = {0, 0, 0}, gbd = 1e9f; int gun_go = 0; beh_board(&W, &arb, gbp, gface, &gbd, &gun_go);
     beh_follow(&W, &arb);
     int ob_carry = 0; float ob_d = 1e9f; beh_ball(&W, &arb, gun_go, &ob_carry, &ob_d);
-    beh_fetch(&W, &arb); beh_fight(&W, &arb, ob_carry); beh_hold(&W, &arb); beh_break(&W, &arb); beh_recharge(&W, &arb); beh_hunt(&W, &arb);
+    beh_fetch(&W, &arb); beh_fight(&W, &arb, ob_carry); beh_hold(&W, &arb); beh_break(&W, &arb); beh_cover(&W, &arb); beh_recharge(&W, &arb); beh_hunt(&W, &arb);
     // DEATH NOTES (12:05): what killed the walker -- each step remembers its target and the enemies aiming at it (within 12 deg, 40
     // units: the likely killer), its shield, weapon and rounds; at the death a [death] line, every 8 deaths a [deaths] summary: how
     // often the likely killer was NOT the target (awareness), at what distance, with what
@@ -1672,15 +1707,21 @@ static void bot_step_body(void) {
       // 5.7 (!), 1.6): beyond 8 units 0.25 s bursts with a pause that keeps the players' share of their close-range rate (8-15: 34%,
       // 15-25: 22%, 25+: 15%); the spread settles in the pauses. Close in the trigger stays held. NHOOK_BOT_HOSE=1 = always held.
       static int hose = -1; if (hose < 0) hose = getenv("NHOOK_BOT_HOSE") != 0;
+      // (10:50: NHOOK_BOT_HOSE is a live knob too -- 1 = the trigger stays held at every range, the walker settings page's "aggressive")
+      { float hk = (float)hose; lk_over(&hk, "NHOOK_BOT_HOSE"); hose = hk > 0; }
       int burst_ok = 1;
       if (!hose && !g_bot_pull && g_inv.held_c && !strcmp(g_inv.held_c, "auto") && tdist >= 8.0f) {
           float duty = tdist < 15 ? 0.34f : tdist < 25 ? 0.22f : 0.15f, per = 0.25f / duty;
           burst_ok = fmod(now - g_bot_fire_t0, per) < 0.25; }
-      int trig = !nofire && spar && g_bot_fire && burst_ok && (!g_bot_pull || fmod(now - g_bot_fire_t0, 0.24) < 0.12) && !ob_carry; g_bot_trig = trig;   // (with the ball: melee only)
+      // (10:50: NHOOK_BOT_PULL_PER, live: the pull weapons' trigger period, down for half of it -- 0.24 s = ~4 pulls a second; at least
+      //  0.1 s, the bot steps every 33 ms. With the ball: melee only)
+      float pper = 0.24f; lk_over(&pper, "NHOOK_BOT_PULL_PER"); if (pper < 0.1f) pper = 0.1f;
+      int trig = !nofire && spar && g_bot_fire && burst_ok && (!g_bot_pull || fmod(now - g_bot_fire_t0, pper) < pper * 0.5) && !ob_carry; g_bot_trig = trig;
       { static double tfg; if (g_bot_fire && trig) g_fg_trig++;
-        if (now - tfg > 20.0) { if (tfg > 0 && g_fg_n > 30 && bot_log()) nlog("[nhook] [firegate] %d steps with a target within 40 u: hidden %.0f%%, reacting %.0f%%, aim off %.0f%%, camo %.0f%%, head gate / other %.0f%%, fire allowed %.0f%% -- trigger down in %.0f%% of those (held %s)",
-              g_fg_n, 100.0 * g_fg_hid / g_fg_n, 100.0 * g_fg_react / g_fg_n, 100.0 * g_fg_aim / g_fg_n, 100.0 * g_fg_camo / g_fg_n, 100.0 * g_fg_head / g_fg_n, 100.0 * g_fg_ok / g_fg_n, g_fg_ok ? 100.0 * g_fg_trig / g_fg_ok : 0.0, g_inv.held ? g_inv.held : "-");
-          tfg = now; g_fg_n = g_fg_hid = g_fg_react = g_fg_aim = g_fg_camo = g_fg_head = g_fg_ok = g_fg_trig = 0; } }
+        if (now - tfg > 20.0) { int nv = g_fg_vis > 0 ? g_fg_vis : 1;
+            if (tfg > 0 && g_fg_n > 30 && bot_log()) nlog("[nhook] [firegate] %d steps with a target in its weapon's reach: hidden %.0f%% (no shot possible); of the %d it could see: fire allowed %.0f%%, aim still turning onto it %.0f%%, reaction wait %.0f%%, camo %.0f%%, head gate / other %.0f%% -- trigger down in %.0f%% of the allowed (held %s)",
+              g_fg_n, 100.0 * g_fg_hid / g_fg_n, g_fg_vis, 100.0 * g_fg_ok / nv, 100.0 * g_fg_aim / nv, 100.0 * g_fg_react / nv, 100.0 * g_fg_camo / nv, 100.0 * g_fg_head / nv, g_fg_ok ? 100.0 * g_fg_trig / g_fg_ok : 0.0, g_inv.held ? g_inv.held : "-");
+          tfg = now; g_fg_n = g_fg_hid = g_fg_react = g_fg_aim = g_fg_camo = g_fg_head = g_fg_ok = g_fg_trig = g_fg_vis = 0; } }
       // (13:25: the SPARTAN LASER fires after its charge, and every release starts the charge again -- the aim gate flickered the trigger:
       //  a death holding it at 8 units. With it in hand and the target in sight within 40 units the trigger stays down)
       if (!nofire && spar && have_tg && tdist < 40 && g_inv.held && strstr(g_inv.held, "SPARTAN LASER") && los_get(ftg.handle, now) == 1) { trig = 1; g_bot_trig = 1; }

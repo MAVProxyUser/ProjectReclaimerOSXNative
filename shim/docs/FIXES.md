@@ -3286,6 +3286,44 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   switch presses (the learnt record bit): 0 of 32 took" -- 32 x "switching from PLASMA PISTOL to ASSAULT RIFLE" with the trigger held
   (the plasma pistol held = an overcharge held) while the earlier switches, 3 of 3 and 2 of 2, came with the trigger up. LOGIC: from a
   switch press until 0.15 s after it the trigger (and the reload click) stays up; PLASMA PISTOL joins the weapons whose trigger is pulsed.
+- **The stats page's Walker tab: the walkers' settings changed while they play** (2026-11-09 10:45-11:05; shim/native/nwknobs.c,
+  nstats.c GET /walker.json + POST do=wknob, shim/src/stats_page.html #walker, nbot.c lk_tick; test shim/tools/wknobs-test.sh) — WHY:
+  the user: "add a walker settings page to the status window as a tab please so we can adjust it on the fly". LOGIC: the walkers'
+  live knob files (battles/live-knobs/<nickname>.json, which lk_tick re-reads within a second -- no restart, no rejoin) are listed
+  from the user's REAL home (getpwuid: the public walker runs with a HOME of its own whose ReclaimerMac links back to the user's, so
+  the folder is listed once and the public walker told apart by its profile's nickname); a change rewrites the file whole through a
+  temporary file + rename; names must be NHOOK_[A-Z0-9_]+, values finite, ids pub/<nick> or test/<nick> (no paths). The tab groups
+  37 knobs (shooting, aim, moving in a fight, cover, what it goes for) with the code's defaults, a ↺ per knob (back to the launch
+  value) and a "Max aggression" preset + its undo. lk_tick now compares the file's change time to the NANOSECOND (two page writes in
+  one second with the same size were missed). A game started before this answers 404 for /walker.json: the tab says to restart it.
+  shim/tools/stats-proxy.py (the walker's page on 8765) passes Cache-Control on -- the browser kept an old page after an edit.
+- **Fire whenever the aim is on an enemy in the weapon's reach; track the real head with every weapon** (2026-11-09 10:50-11:05;
+  nbot.c the fire gate, the aim point, the trigger; nbrain_beh.c beh_follow) — WHY: the user: "it should always be shooting
+  aggressively. crank that dial to max", then "it should ALWAYS be *allowed* to fire IF it can hit an enemy in range of the weapon in
+  its hand", "that 32% accuracy can't help ... missing that head hitbox!", "you should not be firing at a static height, rather
+  attempting to track heads with the aiming reticule just like any real human would". The public walker's [firegate]: fire allowed
+  11-68% of the steps with a target within 40 units, the trigger down in only 31-51% of those; its head share 0 (automatic weapons
+  aimed at a fixed chest height). LOGIC: the trigger no longer waits out the reaction delay (it only slows the first turn;
+  NHOOK_BOT_FIRE_REACT=1 = the old wait); the reach is the held weapon's -- sniper 120, precision / rockets 60, automatic 40, shotgun
+  12, sword / hammer 4 units -- x NHOOK_BOT_FIRE_RANGE (it was 40 for all); the aim follows the head hitbox (bot_head, the skeleton's
+  head node) with every weapon (NHOOK_BOT_HEAD_ALL, 1; 0 = the old chest height for automatic weapons). New live knobs:
+  NHOOK_BOT_HOSE (was launch-only), NHOOK_BOT_FIRE_LINGER (keep firing up to 0.6 s after the target ducks; 0), NHOOK_BOT_PULL_PER
+  (single-shot trigger period, 0.24), NHOOK_BOT_NOWING (no following; was launch-only). [firegate] now gives "fire allowed" as a share
+  of the steps the walker could SEE the target in reach. The first max-aggression preset (fire slack 6 deg, trigger held at every
+  range, firing 0.4 s after the target ducked) put the trigger down 92-100% of the allowed steps but cost accuracy; the preset now
+  keeps a 0.5 deg slack, bursts at range and no lingering: skill 1, fast turns (3 / 14 rad/s), single-shot period 0.16 s, sees
+  within 4 units, pushes in, no back-off / recharge break-off, hunting (50) before small weapon upgrades (fetch base 35). Live, 15
+  minutes on a 10-player Guardian: 24 kills / 25 deaths against 10 / 19 before, head share 0 -> 12%, accuracy 38% -> 43% (session).
+- **Take cover when the shield is being stripped** (2026-11-09 11:00; nbrain_beh.c beh_cover, nbot.c the line-of-sight scheduler /
+  g_cov_* / g_ftg_h) — WHY: the user: "the walker is aware of when its shield is getting decimated too eh? and like when it should try
+  to take cover near by while continuing to shoot and defend itself aggressively?" -- it only had the break-off (shield under 0.15,
+  back the way it came). LOGIC: the shield down NHOOK_BOT_COVER_DROP (0.35) within 1.5 s and under NHOOK_BOT_COVER_SH (0.5) with the
+  target in sight -> up to 8 floor spots 3-6 units around (sideways first, never toward the attacker, its own floor part, within 1.5
+  units of its level) tested from the attacker's eyes to where the walker's head would be, on the line-of-sight channel (2 ray
+  slots of every 3 while searching; answers filed under 0xC0E00000 | generation << 4 | k). The first hidden spot: the legs go there
+  bidding NHOOK_U_COVER (80) while the aim keeps tracking and shooting, until the shield is over NHOOK_BOT_COVER_UNTIL (0.9) or 6 s,
+  or it is hit hard there again. None hidden -> fight on / the break-off. Live: searches ran in 2-10 unit fights; none of the 1-7
+  spots was hidden in the first ones (close fights in the open) -- not judged yet. NHOOK_U_COVER=0 = off.
 - **Press in with shields up (same level); strafe along a ledge instead of freezing** (2026-11-09 07:48-07:53; nbot.c the fight move,
   its floor check) — WHY: the walkers' battle recordings: closing speed 0.02-0.03 u/s in their engagements, the best players' 0.78 (0.85
   with shields up, 0.31 low; walker-model.py --top). The first press-in (+0.4 throttle with shield > 0.7 beyond the band's near edge) made

@@ -33,7 +33,10 @@ static void beh_follow(const World* W, Arb* a) {
     int wing = 0; float lp[3] = {0, 0, 0};
     float leash = 15, wstart = 8, wstop = 4; lk_over(&leash, "NHOOK_BOT_LEASH"); lk_over(&wstart, "NHOOK_BOT_WING_START"); lk_over(&wstop, "NHOOK_BOT_WING_STOP");
     int fol_far = 0;
-    if (!nw && !g_bot_shadow) { int li = -1; float bd = 1e30f; int human = 0, fol = 0;
+    // (2026-11-09 10:50, the user: "it does not need to focus on finding me in the moment"): NHOOK_BOT_NOWING is a live knob too
+    //  (1 = no following / closing up; the followed player stays a friend)
+    float nwk = (float)nw; lk_over(&nwk, "NHOOK_BOT_NOWING");
+    if (!(nwk > 0) && !g_bot_shadow) { int li = -1; float bd = 1e30f; int human = 0, fol = 0;
         for (int i = 0; i < n; i++) { const NovObj* t = &objs[i]; if (i == me || t->type || t->dead || bot_enemy(o, t)) continue; int hu = t->handle == g_follow_unit;
             if (hu) { float fx = t->c[0] - o->c[0], fy = t->c[1] - o->c[1]; li = i; bd = fx * fx + fy * fy; human = 1; fol = 1; break; }
             for (int k = 0; k < g_human_n && k < 8; k++) if (g_human_unit[k] == t->handle) hu = 1;
@@ -102,6 +105,48 @@ static void beh_break(const World* W, Arb* a) {
     if (W->now - t0 > 3.0 || nh < 6) return;
     const float* b = hist[5]; float dx = b[0] - o->c[0], dy = b[1] - o->c[1]; if (dx * dx + dy * dy < 4.0f) return;   // (came from under 2 units: nowhere to go back to)
     arb_bid(a, ARB_RECHARGE, u, b, "break off"); }
+// COVER (2026-11-09 11:10, the user: "the walker is aware of when its shield is getting decimated too eh? and like when it should try
+// to take cover near by while continuing to shoot and defend itself aggressively?"): the shield down NHOOK_BOT_COVER_DROP (0.35) within
+// 1.5 s and under NHOOK_BOT_COVER_SH (0.5), the target in sight -> up to 8 floor spots 3-6 units around (sideways first, never toward
+// the attacker; its own floor part, within 1.5 units of its level) are tested from the attacker's eyes to where the walker's head
+// would be (bot_cov_ray: the line-of-sight channel). The first spot the attacker cannot see wins: the legs go there, bidding
+// NHOOK_U_COVER (80: over the break-off's 70 and the fight) while the aim keeps tracking and shooting; it stays until the shield is
+// back over NHOOK_BOT_COVER_UNTIL (0.9) or 6 s, or until it is hit hard there again (a new search, at most one a second). No hidden
+// spot -> the break-off as before. NHOOK_U_COVER=0 off. [cover] lines
+static void beh_cover(const World* W, Arb* a) {
+    const NovObj* o = W->o; static float sh[16]; static double tsh; static int nsh;
+    if (W->now - tsh > 0.1) { tsh = W->now; memmove(sh + 1, sh, sizeof(float) * 15); sh[0] = o->shield; if (nsh < 16) nsh++; }
+    float u = 80, drop = 0.35f, lim = 0.5f, until = 0.9f; lk_over(&u, "NHOOK_U_COVER"); lk_over(&drop, "NHOOK_BOT_COVER_DROP"); lk_over(&lim, "NHOOK_BOT_COVER_SH"); lk_over(&until, "NHOOK_BOT_COVER_UNTIL");
+    static int st; static double t0, tsearch; static float spot[3], fz[8];
+    if (u <= 0 || !g_nav.ok) { st = 0; g_cov_n = 0; return; }
+    float mx = o->shield; for (int i = 0; i < nsh; i++) if (sh[i] > mx) mx = sh[i];
+    int hit = o->shield >= 0 && o->shield < lim && mx - o->shield >= drop;
+    if (st == 2) {
+        float dx = spot[0] - o->c[0], dy = spot[1] - o->c[1]; int there = dx * dx + dy * dy < 1.0f;
+        if (o->shield >= until || W->now - t0 > 6.0) { st = 0; if (bot_log()) nlog("[nhook] [cover] out after %.1f s, shield %.2f", W->now - t0, o->shield); return; }
+        if (!(there && hit && W->now - tsearch > 1.0)) { arb_bid(a, ARB_RECHARGE, u, spot, "take cover"); return; }
+        st = 0; if (bot_log()) nlog("[nhook] [cover] hit hard in cover (shield %.2f): looking again", o->shield); }
+    if (st == 1) {
+        int pend = 0;
+        for (int k = 0; k < g_cov_n; k++) { int r = los_get(cov_tag(k), W->now);
+            if (r == 0) { memcpy(spot, g_cov_c[k], 12); spot[2] = fz[k] + 0.1f; st = 2; t0 = W->now; g_cov_n = 0;
+                if (bot_log()) nlog("[nhook] [cover] shield %.2f: spot %d of the candidates hidden from %08x, %.1f units away -- going", o->shield, k, g_cov_from, sqrtf((spot[0] - o->c[0]) * (spot[0] - o->c[0]) + (spot[1] - o->c[1]) * (spot[1] - o->c[1])));
+                arb_bid(a, ARB_RECHARGE, u, spot, "take cover"); return; }
+            if (r < 0) pend++; }
+        if ((g_cov_k >= g_cov_n && !pend) || W->now - tsearch > 1.5) { if (bot_log()) nlog("[nhook] [cover] none of %d spots hidden from %08x: fighting on", g_cov_n, g_cov_from); st = 0; g_cov_n = 0; }
+        return; }
+    if (!hit || !g_ftg_vis || !g_ftg_h || W->now - tsearch < 1.0) return;
+    int cur = nav_node_at(o->c); if (cur < 0) return; float cp[3]; nav_pos(cur, cp); int comp = g_nav.nd[cur].comp; float hz = o->c[2] - cp[2] + 0.55f * o->r;
+    float ax = o->c[0] - g_ftg_c[0], ay = o->c[1] - g_ftg_c[1], al = sqrtf(ax * ax + ay * ay); if (al < 0.5f) return; ax /= al; ay /= al;
+    static const float cand[8][2] = {{90, 3}, {-90, 3}, {45, 3.5f}, {-45, 3.5f}, {0, 4}, {90, 5}, {-90, 5}, {0, 6}};
+    int nc = 0, used[8];
+    for (int i = 0; i < 8 && nc < 8; i++) { float an = cand[i][0] / 57.2958f, r = cand[i][1], c = cosf(an), sn = sinf(an);
+        float p[3] = {o->c[0] + (ax * c - ay * sn) * r, o->c[1] + (ax * sn + ay * c) * r, o->c[2] + 0.5f}; int nd = nav_node_at(p); if (nd < 0 || nd == cur || g_nav.nd[nd].comp != comp) continue;
+        float np[3]; nav_pos(nd, np); if (fabsf(np[2] - cp[2]) > 1.5f) continue; int dup = 0; for (int j = 0; j < nc; j++) if (used[j] == nd) dup = 1; if (dup) continue;
+        used[nc] = nd; fz[nc] = np[2]; g_cov_c[nc][0] = np[0]; g_cov_c[nc][1] = np[1]; g_cov_c[nc][2] = np[2] + hz; nc++; }
+    if (!nc) return;
+    g_cov_gen++; g_cov_n = nc; g_cov_k = 0; g_cov_from = g_ftg_h; st = 1; tsearch = W->now;
+    if (bot_log()) nlog("[nhook] [cover] shield %.2f (from %.2f in 1.5 s), %08x at %.0f units: testing %d spots", o->shield, mx, g_ftg_h, al, nc); }
 static void beh_recharge(const World* W, Arb* a) {
     const NovObj* o = W->o; static double t0; float u = 65, lim = 0.6f; lk_over(&u, "NHOOK_U_RECHARGE"); lk_over(&lim, "NHOOK_BOT_RECHARGE_SH");
     if (u <= 0 || o->shield >= 0.95f) { t0 = 0; return; }

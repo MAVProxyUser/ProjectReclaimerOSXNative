@@ -118,6 +118,16 @@ th .srt{display:inline-block;margin-left:2px;padding:0 2px;cursor:pointer;color:
 #fl,#cm{height:260px;overflow-y:auto;font-size:12px;line-height:1.5;resize:vertical}
 #tabs{display:inline-flex;gap:4px;margin-left:14px;vertical-align:middle}#tabs a{font-size:13px;font-weight:500;color:var(--dim);text-decoration:none;padding:3px 10px;border:1px solid var(--line);border-radius:4px}
 #tabs a.on{color:var(--fg);border-color:var(--accent)}#tabs a:hover{color:var(--fg)}
+#wkp .wkh{display:flex;flex-wrap:wrap;align-items:center;gap:6px 12px;margin-bottom:4px}#wkp .wkh h2{margin:0 auto 0 0}
+#wkp select,#wkp button,#wkp input[type=number]{background:#222;color:var(--fg);border:1px solid var(--line);border-radius:4px;padding:2px 8px;font:inherit;font-size:12px}
+#wkp button{cursor:pointer}#wkp button:hover{border-color:var(--accent)}#wkp button.hot{border-color:#e0703a;color:#ffb38a}
+#wkgroups{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,460px),1fr));gap:12px;margin-top:12px}
+.wkg{border:1px solid var(--line);border-radius:6px;padding:10px}.wkg h3{font-size:12px;margin:0 0 6px;color:var(--fg);font-weight:600;letter-spacing:.04em;text-transform:uppercase}
+.wkr{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:2px 10px;padding:6px 0;border-top:1px solid #222;align-items:center}.wkr:first-of-type{border-top:0}
+.wkr .nm{font-size:13px}.wkr .ds{grid-column:1/-1;color:var(--dim);font-size:11.5px;line-height:1.35}
+.wkr .ct{display:flex;align-items:center;gap:6px;justify-content:flex-end;flex-wrap:wrap}.wkr input[type=range]{width:140px;accent-color:var(--accent)}
+.wkr input[type=number]{width:70px}.wkr .st{font-size:11px;color:var(--dim);min-width:86px;text-align:right}.wkr .st.set{color:var(--accent)}
+.wkr button.rs{padding:0 6px;visibility:hidden}.wkr.isset button.rs{visibility:visible}
 .col .feeds{grid-template-columns:minmax(0,1fr);margin-bottom:0}.col #fl{height:430px}.col #cm{height:170px}
 #fl .ev,#cm .ev{padding:1px 0;border-bottom:1px solid #1f1f1f;overflow-wrap:anywhere}
 #fl time,#cm time{color:#777;font-variant-numeric:tabular-nums;margin-right:8px}
@@ -158,7 +168,7 @@ th .srt{display:inline-block;margin-left:2px;padding:0 2px;cursor:pointer;color:
 .hct{border-collapse:collapse;font-size:12px;width:100%}.hct th,.hct td{padding:2px 6px;border-bottom:1px solid #2a2a2a;text-align:left;white-space:nowrap}.hct td:first-child{white-space:normal;min-width:220px}
 </style></head>
 <body>
-<h1>Reclaimer live stats <nav id="tabs"><a href="#" data-v="live">Live</a><a href="#tools" data-v="tools" title="the in-game overlay, recording, host and walker controls, hook cost, soundboard, hooks check, packets">Tools</a><a href="/forensics" title="voice, chat and events archive + viewer">Forensic archive</a></nav></h1><div id="hd">connecting...</div><div><span id="pf" class="note" title="latency.c, every second: the engine's frame rate and the new frames the window got (what the screen can show), frame time median / 95th percentile, draws per frame, objects in the camera's view, and input -> screen: a mouse or stick turn followed to the frame on the screen (median of the last measured ones; the display step is modelled from its refresh). The same numbers go to ~/Library/Application Support/ReclaimerMac/perf/*.csv every second."></span></div>
+<h1>Reclaimer live stats <nav id="tabs"><a href="#" data-v="live">Live</a><a href="#tools" data-v="tools" title="the in-game overlay, recording, host and walker controls, hook cost, soundboard, hooks check, packets">Tools</a><a href="#walker" data-v="walker" title="The walker's settings: how it shoots, aims and moves -- changed while it plays">Walker</a><a href="/forensics" title="voice, chat and events archive + viewer">Forensic archive</a></nav></h1><div id="hd">connecting...</div><div><span id="pf" class="note" title="latency.c, every second: the engine's frame rate and the new frames the window got (what the screen can show), frame time median / 95th percentile, draws per frame, objects in the camera's view, and input -> screen: a mouse or stick turn followed to the frame on the screen (median of the last measured ones; the display step is modelled from its refresh). The same numbers go to ~/Library/Application Support/ReclaimerMac/perf/*.csv every second."></span></div>
 <!-- top (user, 2026-10-18): game rules first, then the overlay controls beside the death heatmap -->
 <div id="liveview">
 <div id="rules" class="panel"><h2><span id="rt">Game rules</span> <span id="slots" class="slots"></span></h2><div id="rb" class="note">not in a match</div></div>
@@ -225,6 +235,18 @@ th .srt{display:inline-block;margin-left:2px;padding:0 2px;cursor:pointer;color:
   <div class="note">Click a player for details. Their deaths are ringed on the heatmap.</div></div>
 </div>
 </div>
+<!-- the Walker tab (user, 2026-11-09: "add a walker settings page to the status window as a tab please so we can adjust it on the fly"):
+     the walkers' live knob files, GET /walker.json + POST do=wknob (shim/native/nwknobs.c); rows built by the script (WK) -->
+<div id="walkerview" hidden>
+<div id="wkp" class="panel"><div class="wkh"><h2>Walker settings</h2>
+ <label title="Each walker has its own settings file, named after its nickname">Walker <select id="wkf"></select></label>
+ <button id="wkmax" class="hot" title="In the action and on the head: skill 1 (fastest reaction, steadiest aim), fires the moment its aim is on an enemy in reach (fire slack 0.5 deg), tracks the head with every weapon, fast single-shot trigger, sees anything within 4 units, fast turns, hunts enemies before small weapon upgrades, pushes in, never backs off or breaks off to recharge, no following">Max aggression</button>
+ <button id="wkdef" title="Takes every setting the Max aggression button sets out of the file: back to the walker's launch values">Undo max aggression</button>
+ <span id="wkmsg" class="note" style="margin:0"></span></div>
+ <div class="note">A change goes into the walker's settings file and the walker reads it within a second -- no restart, it keeps its place in the game.
+  A value in <span style="color:var(--accent)">blue</span> is set in the file; ↺ takes it out again, back to the walker's launch value (the default shown, unless its launch script set another).</div>
+ <div id="wkgroups"></div>
+</div></div>
 <!-- the tools in their own tab (user, 2026-11-08: "tools should just be its own tab like forensic is"): #tools -->
 <div id="toolsview" hidden>
 <!-- in-game overlay panel (user, 2026-10-18): rows and presets are built by the script (FEATS, PRESETS) -->
@@ -1339,8 +1361,103 @@ es.addEventListener('message',()=>{ lastSnapAt=Date.now(); document.body.classLi
 es.onerror=()=>{ document.body.classList.add('stale'); const t=lastSnapAt?new Date(lastSnapAt).toLocaleTimeString():null;
   document.getElementById('hd').textContent=t?`not connected: no game is running on this port -- showing the last data, from ${t} (it reconnects by itself)`:'not connected: start the game (play.sh serves this page while it runs)'; };
 pollHeat(); laneUi(); pollLanes();
-// Live / Tools (2026-11-08): the tools are their own tab (#tools); the map is redrawn when Live comes back
-function showView(){ const t=location.hash==='#tools'; document.getElementById('liveview').hidden=t; document.getElementById('toolsview').hidden=!t;
-  for(const a of document.querySelectorAll('#tabs a[data-v]')) a.classList.toggle('on',(a.dataset.v==='tools')===t); if(!t){ try{ buildLayers(); drawMap(); }catch(e){} } }
+// ---- the Walker tab (2026-11-09): the walkers' live knob files (GET /walker.json, POST /control?do=wknob; shim/native/nwknobs.c).
+// Each row: [knob, label, the code's default, min, max, step, what it does] -- step 0 = an on / off switch
+const WK=[
+ {g:'Shooting',k:[
+  ['NHOOK_BOT_SKILL','Skill',0.5,0,1,0.05,'Reaction speed and aim steadiness together. 1 = the fastest reaction and the steadiest aim (both x0.25); 0.5 = about the players\' average.'],
+  ['NHOOK_BOT_REACT','Reaction delay x',1.6,0.2,2.5,0.01,'Multiplies the delay before it starts shooting at a new target (skill applies on top). Lower = engages faster.'],
+  ['NHOOK_BOT_FIRE_REACT','Wait out the reaction delay before firing',0,0,1,0,'Off (since 2026-11-09): it fires the moment it sees a target in its weapon\'s reach -- the delay only slows its first turn. On: the old wait.'],
+  ['NHOOK_BOT_FIRE_RANGE','Weapon reach x',1,0.3,2,0.05,'It fires at targets within the held weapon\'s reach: sniper 120 units, battle rifle / carbine / magnum / rockets 60, automatic weapons 40, shotgun 12, sword / hammer 4 -- times this.'],
+  ['NHOOK_BOT_SEE_NEAR','Always sees within (units)',2.5,0,8,0.5,'A target this close (and on about its level) counts as visible even when the sight line test says hidden -- so it shoots it.'],
+  ['NHOOK_BOT_FIRE_EXTRA','Fire slack (degrees)',2,0,10,0.5,'How far off the target the aim may be while it still pulls the trigger. Higher = shoots more, sooner, and lets the game\'s aim assist pull the rounds in.'],
+  ['NHOOK_BOT_HOSE','Trigger held at every range',0,0,1,0,'Off: automatic weapons fire short bursts past 8 units (the best players\' rhythm, less spread). On: the trigger stays down.'],
+  ['NHOOK_BOT_FIRE_LINGER','Keep firing after the target ducks (s)',0,0,0.6,0.05,'Seconds it keeps shooting at a target that just went behind cover -- through a doorway, over a ledge.'],
+  ['NHOOK_BOT_PULL_PER','Single-shot trigger period (s)',0.24,0.1,0.5,0.01,'Magnum, sniper, rockets, Brute Shot, sword, hammer: one pull per period (0.24 = about 4 a second). Lower = faster clicking.'],
+  ['NHOOK_BOT_HEADGATE_SH','Wait for headshots below shield',0.1,0,1,0.05,'With a precision weapon, once the target\'s shield is under this it fires only when the aim is on the head. 0 = never waits.'],
+  ['NHOOK_BOT_HEADGATE','Headshot window x',1,0.2,3,0.05,'The width of that head window. Larger = takes the shot sooner.'],
+  ['NHOOK_BOT_GREN','Grenade every (s)',9,2,30,1,'The shortest time between its grenade throws.']]},
+ {g:'Aim',k:[
+  ['NHOOK_BOT_TURN0','Turn rate while reacting (rad/s)',0.73,0.2,6,0.05,'How fast it turns toward a new target before the reaction delay is over.'],
+  ['NHOOK_BOT_TURN','Turn rate (rad/s)',7,2,20,0.5,'How fast it turns once it reacts -- the look sensitivity.'],
+  ['NHOOK_BOT_NOISE','Aim wobble x',1,0,2,0.01,'Multiplies the wander of its aim. Lower = stays on the head.'],
+  ['NHOOK_BOT_HEAD_ALL','Track the head with every weapon',1,0,1,0,'On: the aim follows the target\'s real head (from its skeleton: crouching, leaning, jumping) with every weapon. Off: automatic weapons aim at a fixed chest height (the old way).'],
+  ['NHOOK_BOT_AIM_HEAD','Fallback aim height',0.55,0,1,0.05,'Only when the head cannot be read from the skeleton: the centre plus this many body radii (0.55 = about the head).'],
+  ['NHOOK_BOT_AIM_BODY','Chest height (head tracking off)',0.2,-0.5,1,0.05,'With "Track the head" off, automatic weapons aim this many body radii over the centre (0.2 = the chest).'],
+  ['NHOOK_BOT_AIMLEAD','Lead moving targets (s)',0,0,0.2,0.01,'Aims this far ahead of a moving target.']]},
+ {g:'Moving in a fight',k:[
+  ['NHOOK_BOT_PRESS','Push toward the target',0.4,-1,1,0.05,'Throttle toward the target while it is inside the weapon\'s range band (negative = backs away).'],
+  ['NHOOK_BOT_CLOSE','Extra push with shields up',0.4,0,1,0.05,'More throttle toward the target while its own shield is over 70%.'],
+  ['NHOOK_BOT_RETREAT','Back off below shield',0.35,0,1,0.05,'Backs away while its own shield is under this. 0 = never.'],
+  ['NHOOK_BOT_DIST','Fighting distance x',1,0.3,3,0.05,'Multiplies the distance it keeps from the target.'],
+  ['NHOOK_BOT_STRAFE','Strafe x',1,0,3,0.05,'Multiplies its side-to-side dodging.'],
+  ['NHOOK_BOT_POLICY','Moves learned from players',0.5,0,1,0.05,'How much of its fight movement comes from the model learned from players (the rest is its own rules).']]},
+ {g:'Cover',k:[
+  ['NHOOK_U_COVER','Take cover (priority)',80,0,100,1,'When its shield is being stripped it tests spots 3-6 units around from the attacker\'s eyes and moves to the first one the attacker cannot see, still shooting. 0 = never.'],
+  ['NHOOK_BOT_COVER_DROP','Shield loss that sends it to cover',0.35,0.1,1,0.05,'How much shield it must lose within 1.5 s ...'],
+  ['NHOOK_BOT_COVER_SH','... with the shield under',0.5,0.1,1,0.05,'... and the shield below this.'],
+  ['NHOOK_BOT_COVER_UNTIL','Leave cover at shield',0.9,0.3,1,0.05,'It stays in cover until the shield is back over this (6 s at most), then fights on.'],
+  ['NHOOK_U_BREAK','Break off when nearly dead (priority)',70,0,100,1,'Shield almost gone and the target healthier, with no cover found: back the way it came for up to 3 s, still shooting. 0 = never.']]},
+ {g:'What it goes for',k:[
+  ['NHOOK_BOT_NOWING','No following',0,0,1,0,'On: never follows or closes up on its leader (you, when it was started to follow you). The leader stays a friend.'],
+  ['NHOOK_U_RECHARGE','Break off to recharge (priority)',65,0,100,1,'After a fight with its shield low it backs off until the shield is back. 0 = never: straight on to the next fight.'],
+  ['NHOOK_U_FIGHT','Fight (priority)',60,0,100,1,'How much fighting beats the other goals for the legs. Careful above ~75: a walker out of ammo fetches a weapon at about 45-75.'],
+  ['NHOOK_U_HUNT','Hunt enemies (priority)',10,0,100,1,'Going after enemies it saw or has on its radar, or along the lanes players use, when there is no fight. Higher = it stops wandering off for small weapon upgrades.'],
+  ['NHOOK_U_FETCH','Fetch a better weapon (priority)',45,0,100,1,'The base worth of picking up a better weapon or ammo; each step of improvement adds the gain below, distance takes some off.'],
+  ['NHOOK_U_FETCH_GAIN','Fetch: worth per step of improvement',6,0,20,0.5,'How much a better weapon adds to the fetch. An empty magazine makes any loaded weapon a big improvement.'],
+  ['NHOOK_BOT_HUNT_KEEP','Keep chasing a hidden target (s)',5,0,20,0.5,'Seconds it stays on a target it can no longer see before picking another.']]}];
+// (11:00, the user: "that 32% accuracy can't help ... missing that head hitbox!" -- the first version's 6 deg fire slack, trigger held at
+//  every range and firing after the target ducked spent the rounds: it fires the moment its aim is ON the enemy, aims at the head with
+//  every weapon, and goes for enemies before small weapon upgrades)
+const WK_MAX={NHOOK_BOT_SKILL:1,NHOOK_BOT_FIRE_EXTRA:0.5,NHOOK_BOT_PULL_PER:0.16,NHOOK_BOT_SEE_NEAR:4,
+  NHOOK_BOT_TURN0:3,NHOOK_BOT_TURN:14,NHOOK_BOT_RETREAT:0,NHOOK_BOT_CLOSE:0.6,NHOOK_BOT_PRESS:0.8,NHOOK_BOT_NOWING:1,NHOOK_U_RECHARGE:0,NHOOK_U_HUNT:50,NHOOK_U_FETCH:35};
+// (the undo also takes out what the first version set)
+const WK_MAX_OLD=['NHOOK_BOT_HOSE','NHOOK_BOT_FIRE_LINGER','NHOOK_BOT_HEADGATE_SH','NHOOK_BOT_AIM_BODY'];
+let wkData=null, wkSel=null, wkDirty=0;
+const wkFile=()=>wkData&&wkData.files.find(f=>f.id===wkSel);
+function wkMsg(t){ document.getElementById('wkmsg').textContent=t||''; }
+async function wkLoad(force){
+  if(document.getElementById('walkerview').hidden) return;
+  const ae=document.activeElement; if(!force&&(wkDirty||(ae&&ae.closest&&ae.closest('#wkgroups')&&ae.tagName==='INPUT'))) return;   // (not under the user's hand)
+  try{ const r=await fetch('/walker.json',{cache:'no-store'}); if(!r.ok) throw r.status; wkData=await r.json(); }
+  catch(e){ wkData=null; document.getElementById('wkf').innerHTML=''; document.getElementById('wkgroups').innerHTML='';
+    wkMsg('This game started before the Walker tab existed: it can show the settings once it is restarted.'); return; }
+  const sel=document.getElementById('wkf'); const fs=wkData.files||[];
+  if(!fs.find(f=>f.id===wkSel)) wkSel=wkData.self||(fs.find(f=>f.where==='pub')||fs[0]||{}).id||null;
+  sel.innerHTML=fs.map(f=>`<option value="${E(f.id)}"${f.id===wkSel?' selected':''}>${E(f.nick)} -- ${f.where==='pub'?'public walker':'test walker'}${f.mine?' (this game)':''}</option>`).join('');
+  if(!fs.length) wkMsg('No walker settings files yet.'); wkRender(); }
+function wkFmt(v,st){ if(!st) return v>0?'on':'off'; const t=(+v).toFixed(st<0.01?3:st<1?2:0); return t.includes('.')?t.replace(/0+$/,'').replace(/\.$/,''):t; }
+function wkRender(){
+  const f=wkFile(), box=document.getElementById('wkgroups'); if(!f){ box.innerHTML=''; return; } const kn=f.knobs||{};
+  box.innerHTML=WK.map(G=>`<div class="wkg"><h3>${E(G.g)}</h3>${G.k.map(([k,lab,def,mn,mx,st,ds])=>{ const has=k in kn, v=has?kn[k]:def;
+    const lo=Math.min(mn,v), hi=Math.max(mx,v);
+    const ctl=st?`<input type="range" data-k="${k}" min="${lo}" max="${hi}" step="${st}" value="${v}"><input type="number" data-k="${k}" min="${lo}" max="${hi}" step="${st}" value="${wkFmt(v,st)}">`
+                :`<label><input type="checkbox" data-k="${k}"${v>0?' checked':''}> on</label>`;
+    return `<div class="wkr${has?' isset':''}" title="${E(k)}"><span class="nm">${E(lab)}</span><span class="ct">${ctl}<span class="st${has?' set':''}">${has?'set':'default '+wkFmt(def,st)}</span><button class="rs" data-r="${k}" title="Take it out of the file: back to the launch value">↺</button></span><span class="ds">${E(ds)}</span></div>`; }).join('')}</div>`).join(''); }
+async function wkPost(q,what){
+  const f=wkFile(); if(!f) return false;
+  try{ const r=await fetch(`/control?do=wknob&f=${encodeURIComponent(f.id)}&${q}`,{method:'POST',headers:{'X-Reclaimer-Control':'1'}}); const j=await r.json();
+    wkMsg(j.ok?`${what} -- saved ${new Date().toLocaleTimeString()}, the walker reads it within a second`:(j.error||'not saved')); return !!j.ok; }
+  catch(e){ wkMsg('not saved: '+e); return false; } }
+async function wkSet(k,v){ const lab=(WK.flatMap(g=>g.k).find(r=>r[0]===k)||[])[1]||k;
+  if(await wkPost(`set=${encodeURIComponent(k+':'+v)}`,`${lab}: ${v}`)){ const f=wkFile(); if(f){ (f.knobs=f.knobs||{})[k]=+v; } } wkDirty=0; wkRender(); }
+document.getElementById('wkf').addEventListener('change',e=>{ wkSel=e.target.value; wkRender(); wkMsg(''); });
+const wkg=document.getElementById('wkgroups');
+wkg.addEventListener('input',e=>{ const k=e.target.dataset.k; if(!k||e.target.type==='checkbox') return; wkDirty=1;   // (the slider and the box move together)
+  for(const o of wkg.querySelectorAll(`input[data-k="${k}"]`)) if(o!==e.target) o.value=e.target.value; });
+wkg.addEventListener('change',e=>{ const k=e.target.dataset.k; if(!k) return; const v=e.target.type==='checkbox'?(e.target.checked?1:0):e.target.value; if(v===''||isNaN(+v)) return; wkSet(k,+v); });
+wkg.addEventListener('click',async e=>{ const b=e.target.closest('button[data-r]'); if(!b) return; const k=b.dataset.r;
+  if(await wkPost(`del=${encodeURIComponent(k)}`,`${k} back to its launch value`)){ const f=wkFile(); if(f&&f.knobs) delete f.knobs[k]; } wkRender(); });
+document.getElementById('wkmax').addEventListener('click',async()=>{ const q=Object.entries(WK_MAX).map(([k,v])=>k+':'+v).join(',');
+  if(await wkPost(`set=${encodeURIComponent(q)}`,'Max aggression')){ const f=wkFile(); if(f) Object.assign(f.knobs=f.knobs||{},WK_MAX); } wkRender(); });
+document.getElementById('wkdef').addEventListener('click',async()=>{ const q=Object.keys(WK_MAX).concat(WK_MAX_OLD).join(',');
+  if(await wkPost(`del=${encodeURIComponent(q)}`,'Max aggression undone')){ const f=wkFile(); if(f&&f.knobs) for(const k of q.split(',')) delete f.knobs[k]; } wkRender(); });
+setInterval(()=>wkLoad(false),5000);
+// Live / Tools / Walker (2026-11-08, Walker 2026-11-09): the tools and the walker settings are their own tabs (#tools, #walker); the map is
+// redrawn when Live comes back
+function showView(){ const h=location.hash, v=h==='#tools'?'tools':h==='#walker'?'walker':'live';
+  document.getElementById('liveview').hidden=v!=='live'; document.getElementById('toolsview').hidden=v!=='tools'; document.getElementById('walkerview').hidden=v!=='walker';
+  for(const a of document.querySelectorAll('#tabs a[data-v]')) a.classList.toggle('on',a.dataset.v===v);
+  if(v==='walker') wkLoad(true); if(v==='live'){ try{ buildLayers(); drawMap(); }catch(e){} } }
 window.addEventListener('hashchange',showView); showView();
 </script></body></html>

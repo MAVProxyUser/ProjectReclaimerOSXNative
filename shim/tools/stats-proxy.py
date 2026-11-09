@@ -17,10 +17,12 @@ class H(http.server.BaseHTTPRequestHandler):
         for k in ('Content-Type', 'X-Reclaimer-Control'):
             if self.headers.get(k): req.add_header(k, self.headers[k])
         try:
-            with urllib.request.urlopen(req, timeout=10) as r: data = r.read(); code = r.status; ct = r.headers.get('Content-Type', 'application/octet-stream')
-        except urllib.error.HTTPError as e: data = e.read(); code = e.code; ct = e.headers.get('Content-Type', 'text/plain')
-        except Exception as e: data = ('relay: %s' % e).encode(); code = 502; ct = 'text/plain'
-        self.send_response(code); self.send_header('Content-Type', ct); self.send_header('Content-Length', str(len(data))); self.end_headers(); self.wfile.write(data)
+            with urllib.request.urlopen(req, timeout=10) as r: data = r.read(); code = r.status; ct = r.headers.get('Content-Type', 'application/octet-stream'); cc = r.headers.get('Cache-Control')
+        except urllib.error.HTTPError as e: data = e.read(); code = e.code; ct = e.headers.get('Content-Type', 'text/plain'); cc = None
+        except Exception as e: data = ('relay: %s' % e).encode(); code = 502; ct = 'text/plain'; cc = None
+        # (2026-11-09: the game's Cache-Control passed on -- without it the browser kept an old copy of the page after an edit)
+        self.send_response(code); self.send_header('Content-Type', ct); self.send_header('Content-Length', str(len(data)))
+        self.send_header('Cache-Control', cc or 'no-cache'); self.end_headers(); self.wfile.write(data)
     def stream(self):   # (the page's live feed, /events: Server-Sent Events -- passed on line by line as they come, never buffered)
         try:
             r = urllib.request.urlopen('http://127.0.0.1:%d%s' % (TARGET, self.path), timeout=60)

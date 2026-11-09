@@ -829,6 +829,7 @@ static void st_engine_events(const StPlayer* pl, int np) {
 #include "nspawns.c"   // weapon / vehicle / power-up spawns and pickups (the loader's st_spawns)
 #include "nhost.c"     // the host tools: teleport, boundaries / invisible walls off, speed
 #include "nbot.c"      // the sparring aim and the walker (test clients)
+#include "nwknobs.c"   // the Walker tab: the walkers' live knob files (GET /walker.json, do=wknob)
 #include "nhchk.c"     // the hooks check: preflight, verdicts, /hooks.json, [hooks] lines
 // ---- the hook cost meter: rates per second, the fps estimate, and the real on/off measurement (nhcost.h) ------------------
 // A measurement (POST /control?do=hookab&h=<id>[&secs=36][&per=3]; do=hookab&stop=1 ends it) switches ONE hook (g_hc_off) or
@@ -1439,6 +1440,7 @@ static int st_control(const char* act, const char* qs) {
     if (!strcmp(act, "recstop")) { rec_stop(); return 1; }
     if (!strcmp(act, "takeover")) { if (!getenv("NHOOK_TAKEOVER")) return 0; void nh_takeover_now(void); nh_takeover_now(); return 1; }   // (the observer's game: the user's controls, nvpad.m)
     if (!strcmp(act, "spar") || !strcmp(act, "walk") || !strcmp(act, "botbtn") || !strcmp(act, "botpad") || !strcmp(act, "botpkt") || !strcmp(act, "botwslot")) return bot_control(act, qs);   // the sparring aim / walker / button scans (nbot.c, test clients)
+    if (!strcmp(act, "wknob")) return wk_control(qs);           // the Walker tab (nwknobs.c)
     if (!strcmp(act, "mic")) { const char* v = strstr(qs, "on="); if (!v) return 0; mic_muted(); g_mic_muted = atoi(v + 3) ? 0 : 1; return 1; }
     if (!strcmp(act, "forensic")) return fx_control(qs);       // archive / voice audio / consent (forensic.c)
     if (!strcmp(act, "hookab")) return hc_control(qs);           // the hook cost meter's on/off measurement
@@ -1511,6 +1513,7 @@ static void* st_conn(void* a) {
     else if (!strncmp(path, "/recordings/", 12)) st_rec_file(fd, req, path + 12);
     else if (!strncmp(path, "/forensics", 10) && (!path[10] || path[10] == '/')) fx_http(fd, path, qs, req);
     else if (!strcmp(path, "/soundboard.json")) { StBuf b = {0}; sb_files_json(&b); st_reply(fd, "application/json", b.b, b.n, 0); free(b.b); }
+    else if (!strcmp(path, "/walker.json")) { StBuf b = {0}; wk_json(&b); st_reply(fd, "application/json", b.b, b.n, 0); free(b.b); }
     else if (!strcmp(path, "/hooks.json")) { StBuf b = {0}; hk_json(&b); st_reply(fd, "application/json", b.b, b.n, 0); free(b.b); }
     else if (!strcmp(path, "/packets.json")) { static pthread_mutex_t pmx = PTHREAD_MUTEX_INITIALIZER; StBuf b = {0};
         pthread_mutex_lock(&pmx); pk_json(&b, qs); pthread_mutex_unlock(&pmx); st_reply(fd, "application/json", b.b, b.n, 0); free(b.b); }
