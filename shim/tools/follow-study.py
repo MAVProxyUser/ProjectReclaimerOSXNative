@@ -185,7 +185,7 @@ def copy_role_model(o, knobs_path):
     me = o['P'].get(o.get('ws'))
     if me:   # the movement: a step (at most 25%) a window toward the role model -- reaction, strafing, pushing on instead of standing
         step = lambda c, r: c * min(1.25, max(0.8, r))
-        if len(x['react']) >= 5 and len(me['react']) >= 3 and statistics.median(me['react']) > 0:
+        if len(x['react']) >= 5 and len(me['react']) >= 3 and statistics.median(me['react']) > 0 and statistics.median(x['react']) < statistics.median(me['react']):   # (only toward a FASTER trigger: copying a slower one made the walker sluggish)
             k['NHOOK_BOT_REACT'] = round(min(3.0, max(0.3, step(cur.get('NHOOK_BOT_REACT', BASE.get('NHOOK_BOT_REACT', 1.0)), statistics.median(x['react']) / statistics.median(me['react'])))), 3)
         if len(x['lat']) >= 30 and len(me['lat']) >= 20 and statistics.median(me['lat']) > 0.05:
             k['NHOOK_BOT_LIBSCALE'] = round(min(3.0, max(0.5, step(cur.get('NHOOK_BOT_LIBSCALE', BASE.get('NHOOK_BOT_LIBSCALE', 1.0)), statistics.median(x['lat']) / statistics.median(me['lat'])))), 3)
