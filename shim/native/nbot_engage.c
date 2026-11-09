@@ -240,7 +240,7 @@ static int eg_choose(const NovObj* objs, int n, int me, const float* cam, float 
           if (bi >= 0 && objs[bi].handle != cur) { if (cur) { prev = cur; prev_t = now; } cur = objs[bi].handle; cur_t0 = now; cur_seen = now; g_eg_fast = cur;
               if (bot_log()) nlog("[nhook] [fight] engage: %08x in sight at %.1f units -- taken", cur, sqrtf(bd)); return bi; } } }
     if (ci >= 0 && now - cur_seen < 1.0) return ci;   // (kept: alive and seen in the last second)
-    // (07:40: HUNT ONE -- with the target hidden the draw below ran on EVERY step: on The Pit the walker flipped between two hidden
+    // (07:34: HUNT ONE -- with the target hidden the draw below ran on EVERY step: on The Pit the walker flipped between two hidden
     //  enemies about once a second ("new target e41300ab" / "e4170175" ...), each flip a new hunt goal and a new path -- a replan every
     //  ~0.5 s, wandering. A hidden current target is kept for NHOOK_BOT_HUNT_KEEP (5 s, live; 0 = old) after the last draw unless
     //  some enemy is in sight)

@@ -3286,7 +3286,7 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   switch presses (the learnt record bit): 0 of 32 took" -- 32 x "switching from PLASMA PISTOL to ASSAULT RIFLE" with the trigger held
   (the plasma pistol held = an overcharge held) while the earlier switches, 3 of 3 and 2 of 2, came with the trigger up. LOGIC: from a
   switch press until 0.15 s after it the trigger (and the reload click) stays up; PLASMA PISTOL joins the weapons whose trigger is pulsed.
-- **Press in with shields up (same level); strafe along a ledge instead of freezing** (2026-11-09 07:55-08:00; nbot.c the fight move,
+- **Press in with shields up (same level); strafe along a ledge instead of freezing** (2026-11-09 07:48-07:53; nbot.c the fight move,
   its floor check) — WHY: the walkers' battle recordings: closing speed 0.02-0.03 u/s in their engagements, the best players' 0.78 (0.85
   with shields up, 0.31 low; walker-model.py --top). The first press-in (+0.4 throttle with shield > 0.7 beyond the band's near edge) made
   a Guardian battle worse -- standing 51.5%, median 0.47 u/s: it pushed walkers toward enemies on a LOWER level and the floor check
@@ -3295,7 +3295,7 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   units of the walker's height, not when outranged or holding camo; at a ledge (all three steps fail) the strafe alone is tried, either
   side (|lat| or 0.6), before standing. The next Guardian battle: "stopped" 1% of fight steps, standing 28.1% near enemies (28.5-33% in
   the battles before the press-in), closing median 0.12 u/s.
-- **[firegate]; the fire slack 1 -> 2 degrees** (2026-11-09 07:50; nbot.c the fire gate, the trigger) — WHY: walker-model.py over the
+- **[firegate]; the fire slack 1 -> 2 degrees** (2026-11-09 07:39-07:44; nbot.c the fire gate, the trigger) — WHY: walker-model.py over the
   walkers' own battle recordings against the top fifth of 128 public matches: reaction 0.32 vs 0.85 s and aim error 3.8 vs 4.1 deg (fine),
   but aimed at a target they fired 1.6 shots/s against the players' 3.85 and hit 19% against 47%. The new [firegate] line (every 20 s:
   of the steps with a target within 40 units, the share hidden / reacting / aim off / camo / head gate / fire allowed, and how often the
@@ -3305,7 +3305,7 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   Guardian battle: fire allowed 33% -> 56%, aim off 37% -> 25%; from the recording 1.0 -> 1.2 shots/s engaged, hit share 26% -> 20%
   (64-84 engagements; the battle's weapons -- hammers, shotguns, Excavators -- are not the public matches' mix): to be judged in public
   play (a live knob for the trainer).
-- **Hunt one hidden target at a time** (2026-11-09 07:40; nbot_engage.c eg_pick) — WHY: on The Pit a walker logged "new target e41300ab"
+- **Hunt one hidden target at a time** (2026-11-09 07:34; nbot_engage.c eg_pick) — WHY: on The Pit a walker logged "new target e41300ab"
   / "new target e4170175" alternating about once a second while both were hidden: the target draw (random by design -- exp(score) /
   sum, the players' own choice rule) ran on every step once the current target had not been seen for 1 s, and every flip changed the
   hunt goal and the path (a replan every ~0.5 s). LOGIC: a hidden current target is kept for NHOOK_BOT_HUNT_KEEP (5 s, live; 0 = old)
@@ -3326,15 +3326,15 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   step, so the next plan went north again by a neighbouring step (it got free only when a plan went south). Since 07:29 a snap-back also
   adds NHOOK_NAV_BLOCKPEN to every path node the client walked before it (kb+1 .. pidx+2) for the session ("[nav] snap-back: N path
   nodes the server never let it walk cost +25"). The Pit with it: 6 snap-backs, the longest spells at (-15.6, -3.3) 3.2 s and 5.9 s
-  (43.7 s before), standing 21.6% near enemies, median 1.44 u/s. 08:10: the position ring holds 12 s (120 entries; it was 5 s -- a later
+  (43.7 s before), standing 21.6% near enemies, median 1.44 u/s. 08:01: the position ring holds 12 s (120 entries; it was 5 s -- a later
   Pit battle held a walker 30 s at the same spot with only 3 snaps seen). OPEN: that hold began right after the walker TOOK the
   Excavator at its spawn (-16.9, -3.6) with act, and the first snap of the earlier battle came while fetching a weapon: the server may
-  hold a walker's biped around a pickup / act press. Next: log act presses beside the snap-backs. 08:20, the next Pit battle with act
+  hold a walker's biped around a pickup / act press. Next: log act presses beside the snap-backs. 08:06, the next Pit battle with act
   timing on the snap-back line: EVERY snap-back came with the legs on "fetch a better weapon", one walker 6 times in 35 s at (17.7,
   14.2) toward one weapon (51.6 s held), act last pressed 12-47 s before -- not the act press; the fetch never gave up because the
   client kept getting closer. Two snap-backs within 20 s while fetching drop that weapon (g_fetch_abort -> the pickup code's tried list,
   "[fight] the X: the server put me back twice on the way -- left"). Why the server holds a fetching walker is still open.
-  Lead (08:35): snap-backs gather on ONE test identity -- test-third (w2): 3-7 a battle against 0-2 for test-v2 / test-second over 6
+  Lead (08:12): snap-backs gather on ONE test identity -- test-third (w2): 3-7 a battle against 0-2 for test-v2 / test-second over 6
   battles -- the only one whose settings.json has "frame_limit": 60 / "auto_frame_limit": true (60 fps against ~590 uncapped). The PUBLIC
   walker's profile (native/public-walker/home/.../ProjectReclaimer/settings.json) has the same 60 cap. One battle with test-third
   uncapped (373 fps): 2 snap-backs, still a 17.9 s hold at (-15.6, -3.3) -- not conclusive; its settings were put back
@@ -3359,7 +3359,7 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   src/nav.c for code after a mid-line // (a tail ending in ";" with an assignment) finds nothing else. The day's stuck measurements
   before 07:05 were taken with the broken alarm -- "jumping did not help", "the wedge escape made it worse", the off-lane cost and the
   lift penalty are unjudged; the blocked steps learned under it were moved to maptop/guardian.blocked.txt.bug-0730 (161 steps, mostly
-  bogus: a step was blocked at every step of a slow stretch). Guard (08:05): shim/tools/comment-scan.py finds code after a mid-line //
+  bogus: a step was blocked at every step of a slow stretch). Guard (07:58): shim/tools/comment-scan.py finds code after a mid-line //
   (a comment tail ending like a statement); shim/native/build.sh runs it on native/*.c + src/nav.c and prints a WARNING (non-fatal).
   Battle 8 (3 walkers, 3 min, Guardian): 50 "stuck at" (26 fetch, 22 hunt),
   2 "4 times", no traps; the server's recording (fight-speed.py --dir battles/tracks): median 1.07 u/s with an enemy within 15 units,

@@ -580,7 +580,7 @@ static void mel_load(void) {
 static int bot_pull_weapon(const char* w) {
     static const char* const k[] = {"HAMMER", "SWORD", "ENERGY BLADE", "SNIPER", "BEAM RIFLE", "MAGNUM", "ROCKET", "BRUTE SHOT", "FUEL ROD", "PLASMA PISTOL", 0};   /* (14:05: the plasma pistol held = an overcharge held, and no switch away from it: 0 of 32) */
     if (!w) return 0; for (int i = 0; k[i]; i++) if (strstr(w, k[i])) return 1; return 0; }
-static int g_fg_n, g_fg_hid, g_fg_react, g_fg_aim, g_fg_camo, g_fg_head, g_fg_ok, g_fg_trig;   // ([firegate] counters, 07:50)
+static int g_fg_n, g_fg_hid, g_fg_react, g_fg_aim, g_fg_camo, g_fg_head, g_fg_ok, g_fg_trig;   // ([firegate] counters, 07:39)
 static int g_bot_pull, g_bot_trig; static double g_bot_fire_t0;   // (the held weapon acts on a pull; when this string of fire began)
 static double g_bot_hold_high, g_bot_hold_last;   // (levels apart: holding the high ground until; the last levels-apart step)
 static int g_fol_go;   // (the leader is 5+ units away: its path beats the fight's moves)
@@ -1101,10 +1101,10 @@ static void bot_step_body(void) {
               // under active camo: no shot beyond the near edge of the weapon's band (+2 units) unless we were hit in the last 2 s --
               // firing gives camo away; walk in instead (below)
               float a = 0, b = 0; if (g_inv.camo && now - thurt > 2.0 && eg_band(g_inv.held_c, &a, &b) && tdist > a * kdist + 2.0f) { g_bot_fire = 0; g_bot_camo_hold = 1; } else g_bot_camo_hold = 0; }
-            // (07:50: the fire slack NHOOK_BOT_FIRE_EXTRA 1 -> 2 deg: [firegate] said "aim off" held 30-60% of the steps with a visible target;
+            // (07:44: the fire slack NHOOK_BOT_FIRE_EXTRA 1 -> 2 deg: [firegate] said "aim off" held 30-60% of the steps with a visible target;
             //  the walkers' aim error (3.8 deg median) is the best players' (4.1), who shoot at it and let Halo's aim assist / bullet
             //  magnetism pull the rounds in: 1.6 shots/s vs their 3.85 while aimed at a target)
-            // (07:50: [firegate] -- the battle recordings: aimed at a target (within 10 deg for 0.3 s+) the walkers fired 1.6 shots/s,
+            // (07:39: [firegate] -- the battle recordings: aimed at a target (within 10 deg for 0.3 s+) the walkers fired 1.6 shots/s,
             //  the best players 3.85. Every 20 s: of the steps with a target within 40 units, the share hidden / still reacting / aim off /
             //  held by the head gate / camo / fire allowed, and of those the share the trigger was really down (burst / pulse / switch))
             if (tdist < 40) { g_fg_n++; if (!vis) g_fg_hid++; else if (now - tacq <= react) g_fg_react++; else if (err >= (size > 1.2f ? size : 1.2f) + fextra) g_fg_aim++;
@@ -1203,12 +1203,12 @@ static void bot_step_body(void) {
                     float pull = tdist > p75 * kdist ? 0.6f : 0.0f; r = fmaxf(-1.0f, fminf(1.0f, rsc * er / run + pull));
                     if (o->shield < retreat && o->shield >= 0) r = -backoff;
                     if (g_bot_camo_hold) r = 0.9f; }
-                // (07:55: PRESS IN with shields up -- the walkers' battle recordings: closing speed 0.02-0.03 u/s in their engagements; the
+                // (07:48: PRESS IN with shields up -- the walkers' battle recordings: closing speed 0.02-0.03 u/s in their engagements; the
                 //  best players' 0.78 (0.85 with shields up, 0.31 with them low: walker-model.py --top). Shield over 0.7 and the target
                 //  beyond the near edge of the weapon's band: NHOOK_BOT_CLOSE (0.4 throttle, live; 0 = old) more toward it -- not when
                 //  outranged, retreating or holding camo)
                 { float cb = 0.4f; lk_over(&cb, "NHOOK_BOT_CLOSE");
-                  if (cb > 0 && o->shield > 0.7f && tdist > p25 * kdist && !g_bot_outranged && !g_bot_camo_hold && fabsf(ftg.c[2] - o->c[2]) < 1.5f) r = fminf(1.0f, r + cb); }   /* (08:00: same level only -- toward an enemy below, the ledge check stopped it dead: "stopped" 62-76% of fight steps, 52% standing) */
+                  if (cb > 0 && o->shield > 0.7f && tdist > p25 * kdist && !g_bot_outranged && !g_bot_camo_hold && fabsf(ftg.c[2] - o->c[2]) < 1.5f) r = fminf(1.0f, r + cb); }   /* (07:53: same level only -- toward an enemy below, the ledge check stopped it dead: "stopped" 62-76% of fight steps, 52% standing) */
                 // KITE A SWORD / HAMMER (12:20: "[death] ... edb300a6 1 u (melee) = my target; my shield 1.00": a one-hit kill at arm's
                 //  length): the target holding a melee-class weapon within NHOOK_BOT_KITE (5) units -> full speed back, a full strafe,
                 //  shooting; after the policy and the rushes below it stays (g_kite)
@@ -1277,7 +1277,7 @@ static void bot_step_body(void) {
                           if (now > thold && fabsf(lat) > 0.05f && bot_floor_ok(pb2)) { side = -side; lat = -lat; thold = now + 0.6; ftries = 1; }
                           else { float pc[3] = {o->c[0] + fx * r * 1.0f, o->c[1] + fy * r * 1.0f, o->c[2] - 0.35f}; lat = 0; ftries = 2;
                               if (!bot_floor_ok(pc)) { r = r < 0 ? 0 : r; float pd[3] = {o->c[0] + fx * r * 1.0f, o->c[1] + fy * r * 1.0f, o->c[2] - 0.35f}; if (!bot_floor_ok(pd)) { r = 0; ftries = 3;
-                                  // (08:00: at a ledge, strafe ALONG it instead of standing: the strafe alone (either side) when its step has floor)
+                                  // (07:53: at a ledge, strafe ALONG it instead of standing: the strafe alone (either side) when its step has floor)
                                   float sl = fabsf(lat_in) > 0.2f ? fabsf(lat_in) : 0.6f;
                                   for (int sgn = 0; sgn < 2 && ftries == 3; sgn++) { float ls = (sgn ? -side : side) * sl; float pe[3] = {o->c[0] + lx * ls * 1.0f, o->c[1] + ly * ls * 1.0f, o->c[2] - 0.35f};
                                       if (bot_floor_ok(pe)) { lat = ls; ftries = 2; if (sgn) side = -side; } } } } } } } }
@@ -1547,10 +1547,10 @@ static void bot_step_body(void) {
                   //  server only. A jump of over 1.5 units within 0.25 s while alive on foot is a snap-back: stuck at the server's spot,
                   //  so that step is blocked and the plan goes round. NHOOK_BOT_SNAPBACK=0 (live) = off)
                   static float sb_last[3]; static double sb_t; int snapped = 0; float sbk = 1; lk_over(&sbk, "NHOOK_BOT_SNAPBACK");
-                  if (now < g_bot_act_until) g_act_last = now;   /* (08:15: for the snap-back line -- does the server hold a walker around a pickup?) */
+                  if (now < g_bot_act_until) g_act_last = now;   /* (08:01: for the snap-back line -- does the server hold a walker around a pickup?) */
                   // (07:27: and only BACK to where it stood in the last 5 s (within 1 unit) -- a man cannon (Valhalla's bases) also moves a
                   //  walker 1.5+ units in 0.25 s, forward)
-                  // (08:10: 12 s of positions, not 5: a client that wandered off longer before the server put it back was missed --
+                  // (08:01: 12 s of positions, not 5: a client that wandered off longer before the server put it back was missed --
                   //  30 s held on The Pit with 3 snaps seen)
                   { static float rp[120][3]; static double rt[120]; static int rn; static double trp;
                     float ddx = pos[0] - sb_last[0], ddy = pos[1] - sb_last[1];
@@ -1567,7 +1567,7 @@ static void bot_step_body(void) {
                   if (!strafe && arbw != ARB_FIGHT && arbw != ARB_HOLD && !(g_bot_fighting && tdist < 3.0f) && ((now - histt[j & 63] >= 1.4 && dx * dx + dy * dy < 0.35f * 0.35f) || noprog || snapped) && (now - tjump > 1.5 || snapped)) {
                       if (noprog) nav_say("  [nav] no progress for %.0f s at (%.1f %.1f %.1f): treated as stuck\n", npg, pos[0], pos[1], pos[2]);
                       if (snapped && bot_log()) nlog("[nhook] [nav] snapped back by the server to (%.1f %.1f %.1f): treated as stuck (act last pressed %.1f s ago; legs %s)", pos[0], pos[1], pos[2], g_act_last > 0 ? now - g_act_last : -1.0, g_arb_why);
-                      // (08:20: EVERY snap-back of a Pit battle came while fetching a weapon -- 6 in 35 s toward one, act last pressed
+                      // (08:06: EVERY snap-back of a Pit battle came while fetching a weapon -- 6 in 35 s toward one, act last pressed
                       //  12-47 s before, so not the act press -- and the fetch never gave up: on its own screen it kept getting closer.
                       //  Two snap-backs within 20 s while fetching drop that weapon (g_fetch_abort -> the pickup code's "tried" list))
                       if (snapped && arbw == ARB_FETCH) { static double tsf; static int nsf; if (now - tsf > 20.0) nsf = 0; tsf = now; if (++nsf >= 2) { g_fetch_abort = 1; nsf = 0; } }
