@@ -908,6 +908,10 @@ static void bot_step_body(void) {
         float ha_on = 1, hdz = 0; lk_over(&ha_on, "NHOOK_BOT_HEADAIM"); lk_over(&hdz, "NHOOK_BOT_HEAD_DZ"); g_bot_head_r = -1;
         if (bi >= 0) { const NovObj* t = &objs[bi]; float hp[4], ap[3] = {t->c[0], t->c[1], t->c[2] + aimh * t->r};
             if (ha_on > 0 && bot_head(t, now, hp)) { ap[0] = hp[0]; ap[1] = hp[1]; ap[2] = hp[2] + hdz * hp[3]; g_bot_head_r = hp[3]; }   // (the head hitbox: bot_head above)
+            // LEAD (10:25): Halo 3 registers a client's bullets on the HOST, no lag compensation -- a third of the walker's shots through
+            // a hitbox registered no damage (aim reg 0.67): the aim point leads the target by its velocity (units a second) x
+            // NHOOK_BOT_AIMLEAD s (live, 0.06; follow-study.py hones it on registered hits a shot)
+            { float lead = 0.06f; lk_over(&lead, "NHOOK_BOT_AIMLEAD"); ap[0] += t->vel[0] * lead; ap[1] += t->vel[1] * lead; ap[2] += t->vel[2] * lead * 0.5f; }
             float d[3] = {ap[0] - cam[0], ap[1] - cam[1], ap[2] - cam[2]}; float h = sqrtf(d[0] * d[0] + d[1] * d[1]);
             if (h > 0.01f) { yaw = atan2f(d[1], d[0]); pitch = atan2f(d[2], h); out |= 1; ftg = *t; have_tg = 1; tdist = sqrtf(bd); tyaw = yaw; tpitch = pitch;
                 // the error against the record's angles (the aim the engine used last tick: the lag behind a moving target). Not

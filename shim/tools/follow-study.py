@@ -77,6 +77,27 @@ def hone_aim(astate, knobs_path, port):
     except Exception: k = {}
     k['NHOOK_BOT_HEAD_DZ'] = nxt; tmp = knobs_path + '.tmp'; json.dump(k, open(tmp, 'w')); os.replace(tmp, knobs_path)
     return cur, nxt, st
+LEADS = [0.0, 0.04, 0.08, 0.12, 0.16]   # (10:25: the aim lead in seconds -- Halo 3 registers bullets on the host)
+def hone_lead(astate, knobs_path, port):
+    """the aim lead (NHOOK_BOT_AIMLEAD, s) by REGISTERED hits a shot -- the walker's own aim block: reg x reg_n (shots through a hitbox
+    that the target's shield / health answered within 0.6 s) + miss_reg x miss_n (damage after a visible miss), over its aimed shots n;
+    the window's change credited to the lead that ran; next: untried first (25+ shots), else the best (1 in 4 random)"""
+    try: d = json.load(urllib.request.urlopen('http://127.0.0.1:%d/stats.json' % port, timeout=3))
+    except Exception: return None
+    a = next((p.get('aim') for p in d.get('players', []) if p.get('you')), None)
+    if not a or not a.get('n'): return None
+    shots = a['n']; reg = (a.get('reg') or 0) * (a.get('reg_n') or 0) + (a.get('miss_reg') or 0) * (a.get('miss_n') or 0)
+    cur = astate.get('lead_cur', 0.06); st = astate.setdefault('lead_stats', {}); last = astate.get('lead_last')
+    if last and shots >= last[0]:
+        t = st.setdefault('%.2f' % cur, [0, 0.0]); t[0] += shots - last[0]; t[1] += max(0.0, reg - last[1])
+    astate['lead_last'] = [shots, reg]
+    untried = [v for v in LEADS if st.get('%.2f' % v, [0, 0])[0] < 25]
+    nxt = untried[0] if untried else random.choice(LEADS) if random.random() < 0.25 else max(LEADS, key=lambda v: (st['%.2f' % v][1] + 0.5) / (st['%.2f' % v][0] + 5))
+    astate['lead_cur'] = nxt
+    try: k = json.load(open(knobs_path))
+    except Exception: k = {}
+    k['NHOOK_BOT_AIMLEAD'] = nxt; tmp = knobs_path + '.tmp'; json.dump(k, open(tmp, 'w')); os.replace(tmp, knobs_path)
+    return cur, nxt, st
 def hone(results, nstate, knobs_path):
     """stage 1: the lead per unit (TPU) among 0.06..0.14; once every value has 12+ throws, stage 2: the arc per unit (ARC) among
     0.015 / 0.025 / 0.035 with the best lead held. Each window's throws go to the setting that ran; the next is untried first, else
@@ -117,6 +138,23 @@ def refit(rec_dir):
            'taskpolicy -b nice -n 20 python3 shim/tools/engage-model.py >/dev/null 2>&1') % (rec_dir, os.path.join(SUP, 'tracks', 'engagements'))
     REFIT['p'] = subprocess.Popen(['bash', '-c', cmd], cwd=root); REFIT['t0'] = time.time()
     return msg + 'refit started: this game\'s fights -> the models (the walker re-reads them when they change)'
+
+POLICY = {'p': None, 't0': 0, 'n': 0}
+def policy_retrain(every=6):
+    """the learnt movement policy (policy-train.py) again from the newest matches, on the GPU, every `every` windows, one at a time;
+    the walker's brain reloads policy.json when it changes"""
+    POLICY['n'] += 1; p = POLICY['p']
+    if p is not None and p.poll() is None: return 'the policy is still training (%.0f s)' % (time.time() - POLICY['t0'])
+    msg = ''
+    if p is not None:
+        try:
+            J = json.load(open(os.path.join(SUP, 'battles', 'follow', 'policy.json'))); msg = 'policy retrained %s: move error %.2f (standing still %.2f); ' % (J.get('trained', '?'), J.get('val_move_err', 0), J.get('val_still_err', 0))
+        except Exception: pass
+        POLICY['p'] = None
+    if POLICY['n'] % every: return msg + 'next policy training in %d windows' % (every - POLICY['n'] % every)
+    root = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..')
+    POLICY['p'] = subprocess.Popen(['bash', '-c', 'nice -n 10 python3 shim/tools/policy-train.py --epochs 8 > "%s" 2>&1' % os.path.join(SUP, 'battles', 'follow', 'policy-train.log')], cwd=root); POLICY['t0'] = time.time()
+    return msg + 'policy training started (GPU)'
 
 def slots(port, leader):
     try: d = json.load(urllib.request.urlopen('http://127.0.0.1:%d/stats.json' % port, timeout=3))
@@ -190,7 +228,7 @@ def role_model(rec_dir, port, ws):
 AIMP = [None]   # (the walker's aim counts at the last window's end)
 TRAINED = {'NHOOK_BOT_DIST': (0.5, 2.5), 'NHOOK_BOT_FJUMP': (0.0, 12.0), 'NHOOK_BOT_LIBSCALE': (0.5, 3.0), 'NHOOK_BOT_PRESS': (0.2, 0.95),
            'NHOOK_BOT_REACT': (0.3, 3.0), 'NHOOK_BOT_RADSCALE': (0.3, 2.5), 'NHOOK_BOT_NOISE': (0.05, 2.0), 'NHOOK_BOT_GRENX': (0.1, 3.0),
-           'NHOOK_BOT_HEADGATE': (0.6, 2.0)}   # (07:35: "headshots being main goal": the head gate trained too; the aim HEIGHT is hone_aim's alone)
+           'NHOOK_BOT_HEADGATE': (0.6, 2.0), 'NHOOK_BOT_POLICY': (0.2, 1.0)}   # (10:20: the learnt policy's share of the fight moves)   # (07:35: "headshots being main goal": the head gate trained too; the aim HEIGHT is hone_aim's alone)
 def lvl_knobs(level, inc):
     """the look sensitivity a level brings: the turn rate once reacting (7 rad/s at level 0, +10% a level, at most 14), the one before
     reacting (0.73 rad/s, +10% a level, at most 2), the aim noise x (1 - 0.04 a level, at least 0.5)"""
@@ -391,10 +429,13 @@ def main():
         try: json.dump({k: v for k, v in nst.items() if k != 'off'}, open(NST, 'w'))
         except OSError: pass
         ha = hone_aim(ast, kp, port)
+        hl = hone_lead(ast, kp, port)
+        if hl: print('  aim lead: %.2f s -> next %.2f; registered hits a shot so far %s' % (hl[0], hl[1], ', '.join('%s s: %.2f (%d shots)' % (k2, v[1] / v[0] if v[0] else 0, v[0]) for k2, v in sorted(hl[2].items()))), flush=True)
         if ha: print('  aim height: %+.2f head radii over the head hitbox -> next %+.2f; head hits a shot so far %s' % (ha[0], ha[1], ', '.join('%s: %.2f (%d shots)' % (k2, v[1] / v[0] if v[0] else 0, v[0]) for k2, v in sorted(ha[2].items()))), flush=True)
         try: json.dump(ast, open(AST, 'w'))
         except OSError: pass
         if '--refit' in sys.argv: print('  learning: ' + refit(rec), flush=True)
+        if '--refit' in sys.argv: print('  policy: ' + policy_retrain(), flush=True)
         print('  grenades: %d thrown, %d hit (%d killed) with %s -> next %s; so far %s' % (len(res), sum(1 for l in res if ': hit' in l or 'KILLED' in l),
               sum(1 for l in res if 'KILLED' in l), cur, nxt, ', '.join('%s: %d/%d' % (k, v[1], v[0]) for k, v in sorted(st.items()))), flush=True)
         open(os.path.join(OUT, 'learned.jsonl'), 'a').write(json.dumps({'t': round(t1), 'window': n, 'shadow_median': med(o['shadow']), 'walker': {k: v for k, v in o['w'].items()},

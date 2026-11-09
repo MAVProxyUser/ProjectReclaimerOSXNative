@@ -3272,6 +3272,15 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   a running battle, at every round end (our server's in_match true -> false) walker-coach.py round + match-study.py, then each
   walker's game restarted headless with its new knobs and the newest build (they rejoin in the lobby; the user's game and the
   server stay).
+- **The aim leads moving targets (host-side hit registration); the policy retrains itself and its weight is trained** (2026-11-09
+  10:20-10:30; nbot.c the fighter's aim point, follow-study.py hone_lead / policy_retrain / TRAINED) — WHY: Halo 3 registers a client's
+  bullets on the host with no lag compensation (non-host players lead by their ping), and a third of the walker's shots through a
+  hitbox registered no damage (aim block reg 0.67); "keep crushing it and refining ... reloading the winning model". LOGIC: the aim
+  point = the head hitbox + the target's velocity (units a second) x NHOOK_BOT_AIMLEAD (live, 0.06 s; z at half), honed each window
+  among 0 / 0.04 / 0.08 / 0.12 / 0.16 s on REGISTERED hits a shot (reg x reg_n + miss_reg x miss_n over the aimed shots; untried first,
+  25+ shots each, then the best, 1 in 4 random; aim-state.json lead_*). Every 6 windows (~18 min) follow-study.py starts policy-train.py
+  on the GPU again with the newest matches (one at a time, battles/follow/policy-train.log); the brain reloads policy.json when it
+  changes. NHOOK_BOT_POLICY joins the trained knobs (0.2-1.0; the incumbent starts at 0.5). NHOOK_BOT_AIMLEAD=0 = no lead.
 - **No switch to an empty gun, range-aware upgrades, reachable fetches only, the policy's jumps drawn, [still]** (2026-11-09 10:00-10:15;
   nbot.c the switch press / the better-weapon switch / the pick-up scan and press / [still], npolicy.c) — WHY: "EMPTY SNIPER RIFLE:
   switching to ASSAULT RIFLE" every 1.5 s (the fight's band rule switched straight back to the long-range sniper without looking at its
