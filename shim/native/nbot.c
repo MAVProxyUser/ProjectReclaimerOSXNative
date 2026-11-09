@@ -456,7 +456,8 @@ static void ammo_learn(double now, const NovObj* o) {
 // fight, with two weapons, the brain presses one candidate record bit for 0.1 s (never jump 1, fire 19 / 21, grenade 30) and looks
 // 0.7 s later whether the weapon slot (+0x262) changed; a bit that switches twice is THE switch, saved to native/switch-bit.txt and
 // read back by every later brain. [swscan] lines. NHOOK_BOT_SWSCAN=0 (live) = off.
-static int g_swbit = -1; static uint64_t g_swscan_bits; static double g_swrec_until; static int g_eng_close; static int g_swscan_busy;   // (busy: a candidate pressed / watched -- no other switch then)
+static int g_swbit = -1; static uint64_t g_swscan_bits; static double g_swrec_until; static int g_eng_close; static int g_swscan_busy;
+static float g_ftg_v = 2, g_ftg_d = 99; static int g_ftg_vis;   // (14:20: the fight's target -- its shield + health, distance, in sight: the break-off rule)   // (busy: a candidate pressed / watched -- no other switch then)
 static const char* swbit_path(void) { static char p[1024]; if (!p[0]) { const char* h = getenv("HOME"); snprintf(p, sizeof p, "%s/Library/Application Support/ReclaimerMac/native/switch-bit.txt", h ? h : ""); } return p; }
 static void swscan_tick(double now, const NovObj* o, int engaged) {
     g_swscan_bits = 0;
@@ -1018,7 +1019,7 @@ static void bot_step_body(void) {
     float skill = skill_0, kdist = kdist_0, kstrafe = kstrafe_0, kswitch = kswitch_0, fextra = fextra_0, retreat = retreat_0, gren = gren_0, backoff = backoff_0, press = press_0;   // (live knobs)
     lk_over(&skill, "NHOOK_BOT_SKILL"); lk_over(&kdist, "NHOOK_BOT_DIST"); lk_over(&kstrafe, "NHOOK_BOT_STRAFE"); lk_over(&kswitch, "NHOOK_BOT_SWITCH"); lk_over(&fextra, "NHOOK_BOT_FIRE_EXTRA");
     lk_over(&retreat, "NHOOK_BOT_RETREAT"); lk_over(&gren, "NHOOK_BOT_GREN"); lk_over(&backoff, "NHOOK_BOT_BACKOFF"); lk_over(&press, "NHOOK_BOT_PRESS");
-    int engaged = 0; float ftx = 0, fty = 0; uint32_t fbtn = 0; g_bot_fighting = fight && spar; g_eng_close = 0;   // (set again below when an enemy is in sight within 20 units)
+    int engaged = 0; float ftx = 0, fty = 0; uint32_t fbtn = 0; g_bot_fighting = fight && spar; g_eng_close = 0; g_ftg_vis = 0;   // (set again below when an enemy is in sight within 20 units)
     if (fight) { eg_load_for(g_st_curmap, g_trk_mode); wz_load(g_st_curmap); }   // (the models for this map and game: reloaded when either changes; the weapon zones)
     if (fight && spar && have_tg) {
         static uint32_t cur; static double tacq, tvis, tswitch, tmelee, tgren, tlos, tlast; static float ox, oy, side = 1;
@@ -1276,7 +1277,7 @@ static void bot_step_body(void) {
         if (bot_log() && g_vpad_on) { static double tr; static unsigned long pr[4]; static int ps, pc; if (now - tr > 10.0) { unsigned long r[4]; nh_vpad_btn_reads(r); int sr = nh_vpad_stick_reads(), cr = nh_vpad_reads();
               if (tr > 0) nlog("[nhook] [vpad] the app read in %.0f s: controllers %d, left stick %d, B %lu, Y %lu, RB %lu, right trigger %lu", now - tr, cr - pc, sr - ps, r[0] - pr[0], r[1] - pr[1], r[2] - pr[2], r[3] - pr[3]);
               tr = now; memcpy(pr, r, sizeof pr); ps = sr; pc = cr; } }
-        g_eng_close = engaged && tdist < 20 && vis;
+        g_eng_close = engaged && tdist < 20 && vis; g_ftg_v = ftg.shield + ftg.health; g_ftg_d = tdist; g_ftg_vis = vis;
         if (bot_log()) { static double tl; if (now - tl > 1.0) { tl = now; nlog("[nhook] [fight] target %08x %.1f u %s, err %.1f deg, %s%s, shield %.2f", ftg.handle, tdist, vis ? "in sight" : "hidden", g_bot_err, engaged ? "engaged" : "hunting", g_bot_fire ? ", FIRING" : "", o->shield); } }
     }
     // ---- pickups (NHOOK_BOT_PICKBIT=<hex>: the control record's pick-up bit, shim/tools/native-pickup-scan.sh finds it): out of a
@@ -1409,7 +1410,7 @@ static void bot_step_body(void) {
     float gbp[3] = {0, 0, 0}, gface[3] = {0, 0, 0}, gbd = 1e9f; int gun_go = 0; beh_board(&W, &arb, gbp, gface, &gbd, &gun_go);
     beh_follow(&W, &arb);
     int ob_carry = 0; float ob_d = 1e9f; beh_ball(&W, &arb, gun_go, &ob_carry, &ob_d);
-    beh_fetch(&W, &arb); beh_fight(&W, &arb, ob_carry); beh_hold(&W, &arb); beh_recharge(&W, &arb); beh_hunt(&W, &arb);
+    beh_fetch(&W, &arb); beh_fight(&W, &arb, ob_carry); beh_hold(&W, &arb); beh_break(&W, &arb); beh_recharge(&W, &arb); beh_hunt(&W, &arb);
     // DEATH NOTES (12:05): what killed the walker -- each step remembers its target and the enemies aiming at it (within 12 deg, 40
     // units: the likely killer), its shield, weapon and rounds; at the death a [death] line, every 8 deaths a [deaths] summary: how
     // often the likely killer was NOT the target (awareness), at what distance, with what

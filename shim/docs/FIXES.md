@@ -3272,6 +3272,12 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   a running battle, at every round end (our server's in_match true -> false) walker-coach.py round + match-study.py, then each
   walker's game restarted headless with its new knobs and the newest build (they rejoin in the lobby; the user's game and the
   server stay).
+- **Break off when the shield pops** (2026-11-09 14:20; nbrain_beh.c beh_break, nbot.c g_ftg_*) — WHY: the last 15 death notes: the
+  walker's shield 0 at death but its health a median 0.87 (once the shield pops a single headshot kills) and 9 of 15 with 2+ enemies
+  aiming; the recharge behaviour waits for nobody in sight -- too late. LOGIC: the walker keeps its position every 0.5 s (4 s); with its
+  shield under 0.15 and the fight's target in sight, 3-25 units away and healthier than it by 0.2+, it goes back to where it was ~2.5 s
+  ago (2+ units off), still shooting, for up to 3 s or until its shield is over 0.6, bidding NHOOK_U_BREAK (70, over the fight's 60;
+  0 = off). The fight's target vitality / distance / sight are kept per step (g_ftg_v / _d / _vis; the sight reset each step).
 - **Finish the weak** (2026-11-09 14:15; nbot.c target choice) — WHY: in a 14-player Pit match the walker stood at 1 kill / 9 deaths
   with 5 ASSISTS -- it hit (the targets' shields fell, accuracy ~40%) but other players took the kills. LOGIC: after the choice rule, the
   weakest enemy in sight within NHOOK_BOT_FINISH_R (20, live) units with shield + health under NHOOK_BOT_FINISH_V (0.5, live) becomes the
