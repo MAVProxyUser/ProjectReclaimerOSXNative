@@ -21,7 +21,21 @@ class H(http.server.BaseHTTPRequestHandler):
         except urllib.error.HTTPError as e: data = e.read(); code = e.code; ct = e.headers.get('Content-Type', 'text/plain')
         except Exception as e: data = ('relay: %s' % e).encode(); code = 502; ct = 'text/plain'
         self.send_response(code); self.send_header('Content-Type', ct); self.send_header('Content-Length', str(len(data))); self.end_headers(); self.wfile.write(data)
-    def do_GET(self): self.relay()
+    def stream(self):   # (the page's live feed, /events: Server-Sent Events -- passed on line by line as they come, never buffered)
+        try:
+            r = urllib.request.urlopen('http://127.0.0.1:%d%s' % (TARGET, self.path), timeout=60)
+            self.send_response(r.status)
+            for k in ('Content-Type', 'Cache-Control'):
+                if r.headers.get(k): self.send_header(k, r.headers[k])
+            self.send_header('Connection', 'close'); self.end_headers()
+            while True:
+                line = r.readline()
+                if not line: break
+                self.wfile.write(line); self.wfile.flush()
+        except Exception: pass
+    def do_GET(self):
+        if self.path.startswith('/events'): self.stream()
+        else: self.relay()
     def do_POST(self): self.relay(self.rfile.read(int(self.headers.get('Content-Length') or 0)))
     def log_message(self, *a): pass
 

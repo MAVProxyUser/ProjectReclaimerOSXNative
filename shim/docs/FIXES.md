@@ -3272,6 +3272,10 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   a running battle, at every round end (our server's in_match true -> false) walker-coach.py round + match-study.py, then each
   walker's game restarted headless with its new knobs and the newest build (they rejoin in the lobby; the user's game and the
   server stay).
+- **The stats relay streams the live feed** (2026-11-09 06:35; shim/tools/stats-proxy.py) — WHY: the user: "why is it 'connecting...' and
+  'not in match' I can't see anything from the walker stats page fluidly". The page's live data is Server-Sent Events (EventSource
+  '/events'); the relay read each answer whole before passing it on, and a stream never ends. LOGIC: /events is passed on line by line
+  as it comes (flushed); everything else as before. Checked in a browser through 8765: the match time advanced 2m 47s -> 2m 51s in 3 s.
 - **The walker's brain reloads in a running game: code changes without a restart or a rejoin** (2026-11-09 06:20; nbot.c NhIO /
   brain_tick / nh_brain_step, nhook.c / nstats.c NH_BRAIN guards, build.sh nbrain.dylib, shim/tools/stats-proxy.py) — WHY: the user:
   "why did the walker quit? it should have just restarted itself. stop quitting games. make the engine able to restart or reimport the
