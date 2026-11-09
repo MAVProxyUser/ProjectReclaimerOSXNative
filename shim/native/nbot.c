@@ -1166,8 +1166,8 @@ static void bot_step_body(void) {
       if (ns != g_noshield && bot_log()) nlog("[nhook] [bot] %s", ns ? "no shields in this game (SWAT: a headshot kills): the shield rules stand down; the SWAT profile is on -- reacting x0.5, turning x1.5 / x1.3, aim noise x0.6, autos aim at the head too, the trigger only when the aim line goes through the HEAD, pressing x0.5" : "shields are back: the shield rules are on again, the SWAT profile off");
       g_noshield = ns; }
     { float io = 1; lk_over(&io, "NHOOK_INF"); int im = (io > 0 && g_nov_sides_on && me >= 0) ? nov_side_of(objs[me].handle) : -1;
-      if (im != g_inf_me && bot_log()) nlog("[nhook] [inf] %s", im == 1 ? "I'm a ZOMBIE now: hunting the nearest human, the lonely ones first, charging straight in -- no cover, no backing off" :
-                                                          im == 0 ? "I'm a HUMAN: to the biggest group of humans near me, holding there, kiting swords and hammers" : "not Infection (or not known): the normal fight");
+      static int said; if (bot_log() && (im != g_inf_me || !said)) { said = 1; nlog("[nhook] [inf] %s", im == 1 ? "I'm a ZOMBIE now: hunting the nearest human, the lonely ones first, charging straight in -- no cover, no backing off" :
+                                                          im == 0 ? "I'm a HUMAN: to the biggest group of humans near me, holding there, kiting swords and hammers" : "not Infection (or not known): the normal fight"); }
       g_inf_me = im; }
     // seated = a seat index OR a parent (02:20: on the turret the walker went on fighting on foot -- "stuck" in one spot -- after a burst:
     //  the seat field alone missed it). The state is logged at each change with every handle it is read from
