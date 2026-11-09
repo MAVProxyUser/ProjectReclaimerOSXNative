@@ -3286,7 +3286,22 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   switch presses (the learnt record bit): 0 of 32 took" -- 32 x "switching from PLASMA PISTOL to ASSAULT RIFLE" with the trigger held
   (the plasma pistol held = an overcharge held) while the earlier switches, 3 of 3 and 2 of 2, came with the trigger up. LOGIC: from a
   switch press until 0.15 s after it the trigger (and the reload click) stays up; PLASMA PISTOL joins the weapons whose trigger is pulsed.
-- **No progress = stuck** (2026-11-09 07:25; nbot.c the nav stuck test; fight-speed.py --spells) — WHY: with the alarm fixed, a battle on
+- **Snapped back by the server = stuck** (2026-11-09 07:22-07:27; nbot.c the nav stuck test / the blocked step) — WHY: the 12.3 s still spell
+  left on The Pit (and the 41.7 s one before) was at one spot, (-15.6, -3.3): the walker's log walked west to (-19.2, -4.2) and the next
+  step stood at (-15.6, -3.3) again -- the server held its biped there (something blocks that way on the server only) and the client
+  was corrected back, over and over; each return looked like a fresh detour to the no-progress test. LOGIC: a jump of over 1.5 units
+  within 0.25 s while the legs walk a path (alive, on foot) is a snap-back: the stuck handler runs at once (no 1.5 s guard), logged
+  "[nav] snapped back by the server to ...", and the blocked step is the path step LEAVING the snap spot (the path node nearest it up to
+  pidx -> the next), not the client's far position. NHOOK_BOT_SNAPBACK=0 (live) = off. Only a jump BACK to a spot it stood on within
+  the last 5 s (within 1 unit; a 50-entry 0.1 s position ring) counts: Valhalla's man cannons also move a walker 1.5+ units in 0.25 s.
+  Valhalla (3 walkers, 3 min, the snap-back brain hot-loaded midway): the server's recording near enemies: median 1.51 u/s, standing
+  13.8%, longest still spell 8.4 s; 7 snap-backs, 4 at one spot (86.2, -146.9). The Pit after that: 14 snap-backs detected, yet one
+  walker held 43.7 s at (-15.6, -3.3) and 33.2 s at (-20.0, -7.7): the server held it whatever the first step, and each snap blocked one
+  step, so the next plan went north again by a neighbouring step (it got free only when a plan went south). Since 07:29 a snap-back also
+  adds NHOOK_NAV_BLOCKPEN to every path node the client walked before it (kb+1 .. pidx+2) for the session ("[nav] snap-back: N path
+  nodes the server never let it walk cost +25"). The Pit with it: 6 snap-backs, the longest spells at (-15.6, -3.3) 3.2 s and 5.9 s
+  (43.7 s before), standing 21.6% near enemies, median 1.44 u/s.
+- **No progress = stuck** (2026-11-09 07:15; nbot.c the nav stuck test; fight-speed.py --spells) — WHY: with the alarm fixed, a battle on
   The Pit: the server's recording (fight-speed.py --spells: per slot the standing share and the longest still spells) had one walker
   standing 68% of its time, 41.7 s at one spot and 17.9 s at another, while its own log said it walked (4% still): it hovered at
   (-16, -3.7), sliding back and forth along an obstacle -- always over 0.35 units in 1.4 s, so never "stuck" -- replanning paths of
@@ -3295,7 +3310,7 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   (back off, jump, block the step, penalties, replan), logged "[nav] no progress for 4 s at ...". The Pit again (3 walkers, 3 min): the
   server's recording: median 1.39 u/s with an enemy within 15 units (0.78 before), standing 20.7% (41.4%; the best players 19.8%), longest
   still spell 12.3 s (41.7 s), 4,359 fight steps (575), 15 "stuck", 3 "no progress".
-- **The stuck alarm fired on every step: its reset was inside a comment** (2026-11-09 07:30; nbot.c the nav stuck test) — WHY: a step
+- **The stuck alarm fired on every step: its reset was inside a comment** (2026-11-09 07:05; nbot.c the nav stuck test) — WHY: a step
   trace (new NHOOK_BOT_STEPLOG=<s>: every 0.1 s for that many seconds of gameplay -- position, velocity, view / move yaw, throttle,
   legs) showed a walker moving in 83% of its 1.5 s windows while "stuck at" came 3 times in one 0.1 s step. aa7733b (01:07) appended
   "&& !(g_bot_fighting && tdist < 3)" plus a // comment to the test's line, and the statements that followed on that line -- tjump = now;
@@ -3304,7 +3319,7 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   always true (the wedge escape of 14:50 "fired constantly"), and the back-off / jump / short look-ahead never ran (they key on tjump /
   tback). 239-669 "stuck at" a 3-minute battle came from this. LOGIC: the statements on their own line again. A scan of native/*.c and
   src/nav.c for code after a mid-line // (a tail ending in ";" with an assignment) finds nothing else. The day's stuck measurements
-  before 07:30 were taken with the broken alarm -- "jumping did not help", "the wedge escape made it worse", the off-lane cost and the
+  before 07:05 were taken with the broken alarm -- "jumping did not help", "the wedge escape made it worse", the off-lane cost and the
   lift penalty are unjudged; the blocked steps learned under it were moved to maptop/guardian.blocked.txt.bug-0730 (161 steps, mostly
   bogus: a step was blocked at every step of a slow stretch). Battle 8 (3 walkers, 3 min, Guardian): 50 "stuck at" (26 fetch, 22 hunt),
   2 "4 times", no traps; the server's recording (fight-speed.py --dir battles/tracks): median 1.07 u/s with an enemy within 15 units,
@@ -3316,7 +3331,7 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   fifth by K/D of 128 recordings: reaction 0.85 s, strafe switch 0.74 s, aim error 4.1 deg, bands 8.0 / 15.1 / 25.8, run 1.95 u/s) is read
   first when it exists and NHOOK_BOT_MODEL_TOP (live, default 1) is on; 0 = the everyone model (re-read on a switch or a change of the
   file). The per-map lanes (walker-model.json "maps") still come from everyone's model. Not refit by refresh-loop.sh yet: rerun the
-  --top command after new recordings. Also the fight GAIN (07:00; nbot.c before the fight's floor check): battle 5's [moves] said
+  --top command after new recordings. Also the fight GAIN (06:58; nbot.c before the fight's floor check): battle 5's [moves] said
   "moved 1.09 u/s, asked 1.19 u/s" -- timid, not blocked -- against the best players' 1.71: r and lat are scaled by
   NHOOK_BOT_FIGHT_GAIN (1.4, live; 1 = old), each kept within -1..1, before the floor check (not while kiting a sword / hammer).
 - **The walker moves with authority: committed policy moves, the blend keeps its speed, the high ground sways, traps** (2026-11-09
