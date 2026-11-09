@@ -3288,7 +3288,11 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   every 60 s. First two rounds of the user's play: 0x80040 (fire) 121 times, the extra byte bit 0 78, 0x21100800 (bit 11 -- a
   packet bit -- with 20 / 24 / 29) 33, bit 1 (jump) 19, bit 5 17, bit 0 7, extra bit 1 6. MELEE BITS: while a walker melees,
   0x21100800 goes into its control record and bit 11 into the packed record (NHOOK_BOT_MELEEBITS, =0 off) -- the best candidate,
-  unconfirmed until the input map names it. AMMO: the found "rounds loaded" field (+0x1b4) reads 0 for a fresh rifle in a player's
+  unconfirmed until the input map names it. CORRECTED 00:35: the input map, in context, put 15 grenade throws after 0x21100800 -- it is
+  the GRENADE THROW, not melee -- so NHOOK_BOT_MELEEBITS is off by default (no walker restart had it yet); melee leaves no trace in the
+  unit and hides among the "nothing seen" bits. Shadow fixes the same hour: the shadow walker judged its fire by the PLAYER's view (it
+  never fired) -- it now turns a virtual view of its own; the player's buttons were read from the control record at random moments
+  (always 0) -- now ORed from every packed record between samples (the packet hook runs in shadow mode for that). AMMO: the found "rounds loaded" field (+0x1b4) reads 0 for a fresh rifle in a player's
   game and 129 in the walkers' -- not a magazine: "empty" now needs 8+ rounds seen in that weapon before. mem-watch.py: every minute,
   each client's footprint (top: phys_footprint, no scanning), worst frame, kills / deaths -> battles/mem-watch.csv; --report fits MB
   per hour per client. A Magnum secondary alone in the playlist options gave nobody a Magnum: primary + secondary set together now
