@@ -3272,6 +3272,24 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   a running battle, at every round end (our server's in_match true -> false) walker-coach.py round + match-study.py, then each
   walker's game restarted headless with its new knobs and the newest build (they rejoin in the lobby; the user's game and the
   server stay).
+- **The gunner stays on, any of three vehicles, honks, the loyal wingman** (2026-11-09 02:30; nbot.c gun_* / bot_on_abuild / inp_log /
+  the step's seated test and WINGMAN block, nstats.c g_human_unit) — WHY: the user, Third on his turret: "third has got to stop jumping
+  out of the turret, and increase look sensitivity for aiming while in a vehicle. he should treat the wraith the same way if I jump
+  in, or mongoose. make the other walkers train on either wraith or mongoose or warthog too. cohesion should be the goal for the
+  moment. always be a loyal wingman. and smoke the nearest, or easiest target you can"; "they have to stop falling out the turret
+  though. and IF they do they MUST get back in, especially if the team mate honks". Seen: Third boarded, fired at 52 / 47 / 29 units,
+  came off; its boarding pulse (0.4 s of each second) went on pressing act once seated (= get out); after a later burst it fought on
+  foot while seated (the seat field alone missed the turret); Second sat in a Banshee and Fourth on a chaingun, 0.8 s act holds never
+  got them out. LOGIC: SEATED = a seat index or a parent (logged at each change with the unit / record / player handles); while
+  seated the act bit only leaves inside a deliberate exit window (bot_on_abuild: g_bot_seat_t / g_gun_exit_until); boarding is a
+  0.15 s TAP with 1.2 s to see it seated; exits alternate a 0.25 s tap and a 1.2 s hold. Vehicles: Warthog, Wraith (their turret),
+  Mongoose (no turret: its passenger seat, 0.8 behind it); the aim in a seat turns 12 rad/s (was 4); the target is the EASIEST: distance
+  x 4 out of sight x (0.5 + 0.25 x (shield + health)). HONK: the player's game (NHOOK_INPUT_LOG) writes the wall time of each melee
+  press while seated as a driver (+0x24E 0 with a parent) to battles/honk.txt (NHOOK_HONK_FILE); a walker going to a teammate's vehicle
+  answers a new honk with "<name>: coming!" (RCON say) and drops weapon detours while boarding. WINGMAN: no fight in sight -> within 6
+  units of its leader (the nearest human teammate -- nstats publishes the units of players whose names are no walker's -- else the
+  teammate walker with the lowest unit handle), the pathfinder there, replanned every second (NHOOK_BOT_NOWING=1 off). Walkers do
+  not DRIVE yet: they ride with whoever does.
 - **The gunner tells the turret from the passenger seat** (2026-11-09 02:05; nbot.c gun_seated / gun_board) — WHY: the user, Third
   in his Warthog for the first time: "third needs to understand turret vs passenger seat. he's in the wrong spot". Its act pulse went
   off anywhere within 1.5 units of a point 1.3 behind the turret -- a circle that reaches the passenger door -- and it took a seat in

@@ -1196,6 +1196,7 @@ static void st_snapshot(StBuf* s) {
       { int host = g_st_localpeer >= 0 && g_st_hostpeer == g_st_localpeer; sb_put(s, ",\"addr_role\":\"%s\"", host ? "host" : nss || g_srv_addr[0] ? "client" : "none");
         if (!host && g_srv_addr[0]) { sb_put(s, ",\"server_addr\":"); sb_str(s, g_srv_addr); } } }
     sb_put(s, ",\"players\":["); int first = 1;
+    { int hn = 0; for (int k = 0; k < np && hn < 8; k++) { const char* nm = pl[k].name; if (strcmp(nm, "Second") && strcmp(nm, "Third") && strcmp(nm, "Fourth") && strcmp(nm, "Fifth") && pl[k].unit != 0xFFFFFFFFu) g_human_unit[hn++] = pl[k].unit; } g_human_n = hn; }   // (the walkers' wingman: humans lead)
     for (int k = 0; k < np; k++) {
         StTrack* t = st_track(&pl[k]); uint32_t h = pl[k].unit; uint64_t p = ST_DATUM(h); static uint8_t d[0x380];
         int have = p && ST_TYPE(h) == 0 && hb_read(p, d, sizeof d); int dead = !have || ((*(const uint32_t*)(d + 0x110) >> 2) & 1);
