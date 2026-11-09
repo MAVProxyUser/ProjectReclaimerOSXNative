@@ -1054,6 +1054,7 @@ static void bot_step_body(void) {
           static double tl; if (bot_log() && now - tl > 10) { tl = now; nlog("[nhook] [spar] the control record's unit %08x is stale: the player's unit %08x drives", meh, g_my_unit); } break; } }
     static int32_t path[8192]; static int plen, pidx, goal = -1; static double tplan, tstat, tjump, tback, tstuck[4]; static float bstr; static float hist[64][3]; static double histt[64]; static int hh;
     gl_life(now, me >= 0 && !objs[me].dead, me >= 0 ? objs[me].c : 0, 0, 0);   // (nbot_goals.c: deaths, respawns, failed zones)
+    brain_review(now);   // (nbot_goals.c: every 3 minutes, its own deaths / kills -> caution, the paths around its death spots)
     // seated = a seat index OR a parent (02:20: on the turret the walker went on fighting on foot -- "stuck" in one spot -- after a burst:
     //  the seat field alone missed it). The state is logged at each change with every handle it is read from
     int seated = me >= 0 && !objs[me].dead && (objs[me].seat >= 0 || objs[me].parent != 0xFFFFFFFFu); if (seated) g_bot_seat_t = now;
@@ -1181,6 +1182,7 @@ static void bot_step_body(void) {
     float skill = skill_0, kdist = kdist_0, kstrafe = kstrafe_0, kswitch = kswitch_0, fextra = fextra_0, retreat = retreat_0, gren = gren_0, backoff = backoff_0, press = press_0;   // (live knobs)
     lk_over(&skill, "NHOOK_BOT_SKILL"); lk_over(&kdist, "NHOOK_BOT_DIST"); lk_over(&kstrafe, "NHOOK_BOT_STRAFE"); lk_over(&kswitch, "NHOOK_BOT_SWITCH"); lk_over(&fextra, "NHOOK_BOT_FIRE_EXTRA");
     lk_over(&retreat, "NHOOK_BOT_RETREAT"); lk_over(&gren, "NHOOK_BOT_GREN"); lk_over(&backoff, "NHOOK_BOT_BACKOFF"); lk_over(&press, "NHOOK_BOT_PRESS");
+    press *= 1.0f - 0.6f * rv_caution();   // (the three-minute review, nbot_goals.c brain_review: a bad window -> less pressing into the target)
     int engaged = 0; float ftx = 0, fty = 0; uint32_t fbtn = 0; g_bot_fighting = fight && spar; g_eng_close = 0; g_ftg_vis = 0;   // (set again below when an enemy is in sight within 20 units)
     if (fight) { eg_load_for(g_st_curmap, g_trk_mode); wz_load(g_st_curmap); }   // (the models for this map and game: reloaded when either changes; the weapon zones)
     if (fight && spar && have_tg) {
@@ -1611,8 +1613,16 @@ static void bot_step_body(void) {
       //  never out of a fight, so the reload above never came): engaged, but its target out of sight for 1 s+ and nobody aiming at it,
       //  the magazine under NHOOK_BOT_RELOAD_LULL (0.45, live; 0 = off) -> reload now
       { static double tvz, tll; if (g_ftg_vis) tvz = now; float rl = 0.45f; lk_over(&rl, "NHOOK_BOT_RELOAD_LULL");
+        if (rl > 0) rl += 0.25f * rv_caution();   // (the three-minute review: a bad window reloads sooner)
         if (rl > 0 && engaged && now - tvz > 1.0 && g_naim_me == 0 && g_inv.ammo >= 0 && g_inv.ammo_max > 2 && g_inv.ammo < rl * g_inv.ammo_max && g_inv.reserve != 0 && now - tll > 4.0 && now - trel > 4.0 && !g_bot_pick_on) {
             tll = now; trel = now; if (bot_log()) nlog("[nhook] [inv] reloading in a lull: %d of %d rounds, the target out of sight", g_inv.ammo, g_inv.ammo_max); } }
+      // AFTER A KILL (2026-11-09, a 58-player Pit match: 104 deaths, 23 of the 91 reviewed on an EMPTY magazine, all mid-duel -- in a
+      //  brawl the next enemy comes straight after a kill, so the after-the-fight and lull reloads never came): its target died, the
+      //  magazine under NHOOK_BOT_RELOAD_KILL (0.6, live; 0 = off) of its most and nobody aiming at it -> reload now
+      { static int nk0 = -1; if (nk0 < 0) nk0 = g_gl_nkill;
+        if (g_gl_nkill != nk0) { nk0 = g_gl_nkill; float ak = 0.6f; lk_over(&ak, "NHOOK_BOT_RELOAD_KILL");
+            if (ak > 0 && !noreload && g_naim_me == 0 && g_inv.ammo >= 0 && g_inv.ammo_max > 2 && g_inv.ammo < ak * g_inv.ammo_max && g_inv.reserve != 0 && now - trel > 2.0 && !g_bot_pick_on) {
+                trel = now; if (bot_log()) nlog("[nhook] [inv] reloading after a kill: %d of %d rounds, nobody aiming at me", g_inv.ammo, g_inv.ammo_max); } } }
       // EMPTY (08:30, the user: "empty magazines sans reload are unacceptable btw. do better. find ammo, new weapon, or switch to
       // alternate"): with the magazine known (the learned field, ammo_learn), a 0 there -> the other weapon if it has rounds (switch
       // bit), else the reload tap at once, in a fight too; still 0 after 2 reloads = DRY (no reserve): the other weapon, else any
@@ -1633,6 +1643,15 @@ static void bot_step_body(void) {
             else if (now - trel > 2.5 && now - tswe > 1.0) { if (nrel >= 2) { if (!g_bot_dry && bot_log()) nlog("[nhook] [inv] DRY: %s still empty after %d reloads -- any weapon on the floor will do", g_inv.held, nrel); g_bot_dry = 1; }
                 else { trel = now; nrel++; if (bot_log()) nlog("[nhook] [inv] EMPTY %s: reloading (try %d)", g_inv.held, nrel); } } }
         else if (g_inv.ammo > 0) { nrel = 0; g_bot_dry = 0; }
+        // BEFORE DRY (2026-11-09, the same match: every empty-magazine death came mid-duel at ~5 units, the switch at 0 rounds too late):
+        //  in a close fight with the magazine at NHOOK_BOT_DRYSW (0.2, live; 0 = off) of its most or less, the target still above half
+        //  its vitality and the other weapon loaded -> switch now (faster than a reload); the rank / band switches then wait (no ping-pong).
+        //  Not a shotgun / sword (its last round still kills there), not a weapon of 4 rounds or fewer
+        { float dsw = 0.2f; lk_over(&dsw, "NHOOK_BOT_DRYSW");
+          if (dsw > 0 && g_eng_close && !noreload && g_inv.held_c && strcmp(g_inv.held_c, "shotgun") && g_inv.ammo > 0 && g_inv.ammo_max > 4 && g_inv.ammo <= dsw * g_inv.ammo_max
+              && g_ftg_v > 0.5f && g_swbit >= 0 && g_inv.has_other && g_inv.other_ammo != 0 && now - tswe > 1.5) {
+              tswe = now + 3.0; bot_switch_press(now); fbtn |= 8;
+              if (bot_log()) nlog("[nhook] [inv] %s down to %d of %d in a fight (the target at %.2f): switching to %s before it runs dry", g_inv.held, g_inv.ammo, g_inv.ammo_max, g_ftg_v, g_inv.other); } }
         // THE BETTER WEAPON IN HAND (09:20: "TOOK the BATTLE RIFLE ... holding ASSAULT RIFLE, other BATTLE RIFLE"): out of a fight, with the
         // other weapon 2+ ranks better and not known empty, one switch impulse (every 2 s until it is in hand)
         // (10:05: in a fight only when the target's distance is inside the other weapon's band -- it swapped the rifle for a shotgun mid-range)

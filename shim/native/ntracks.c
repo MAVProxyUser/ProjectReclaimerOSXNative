@@ -6,7 +6,7 @@
 // shim/tools/match-recorder.py, so engage-extract.py / walker-model.py / lanes-import.py read it as they are:
 //   header  {"start": unix, "map", "server": 8-hex tag of the address (FNV-1a), "mode": the game engine ("Slayer", "Capture the
 //            Flag", "Infection" ...), "variant": its name, "lanes_live": the game counts lanes itself, "source": "nhook",
-//            "you_plays": true (the local player is a real player here, not an observer)}
+//            "you_plays": true (the local player is a real player here, not an observer), "walker": a walker drives it}
 //   sample  {"t", "you": the local player's slot, "p": [[slot, team, alive, x, y, z, yaw, pitch, shield, health, weapon, vehicle, kills, deaths, shots,
 //            hits, grenades, camo (active camo amount), the other weapon carried], ...], "proj": 0}
 //   event   {"t", "ev": kill / death / weapon / vehicle / powerup ..., "a", "b": slots (names are never written), "how", "est",
@@ -37,7 +37,11 @@ static void trk_begin(double now, double t0, const char* map) {
         snprintf(g_tks.map, sizeof g_tks.map, "%s", map); g_tks.t0 = t0; g_tks.start = now; g_tks.n = g_tks.nev = 0; memset(g_tks.names, 0, sizeof g_tks.names);
         pthread_mutex_lock(&g_ev_mx); g_tks.ev_seq = g_ev_seq; pthread_mutex_unlock(&g_ev_mx);
         StBuf hb = {0}; sb_put(&hb, "{\"start\":%.3f,\"map\":", (double)tt); sb_str(&hb, map); sb_put(&hb, ",\"server\":\"%08x\",\"mode\":", fnv); sb_str(&hb, g_trk_mode);
-        sb_put(&hb, ",\"variant\":"); sb_str(&hb, g_trk_var); sb_put(&hb, ",\"lanes_live\":%s,\"source\":\"nhook\",\"you_plays\":true}\n", ln_on() ? "true" : "false");
+        // "walker": a walker drives the local player (2026-11-09; the user: the You tab must use only real stats): its slot is not a
+        // human's, so coach.py never takes it for "you" and engage-extract.py leaves it out of the players' data
+        const char* wsp = getenv("NHOOK_SPAR"); const char* wnv = getenv("NHOOK_NAV"); const char* wft = getenv("NHOOK_BOT_FIGHT");
+        int walker = (wsp && *wsp && strcmp(wsp, "0")) || (wnv && *wnv && strcmp(wnv, "0")) || (wft && *wft && strcmp(wft, "0"));
+        sb_put(&hb, ",\"variant\":"); sb_str(&hb, g_trk_var); sb_put(&hb, ",\"lanes_live\":%s,\"source\":\"nhook\",\"you_plays\":true,\"walker\":%s}\n", ln_on() ? "true" : "false", walker ? "true" : "false");
         gzwrite(g_tks.f, hb.b, (unsigned)hb.n); free(hb.b);
         nlog("[nhook] [tracks] recording %s (%s %s) -> %s", map, g_trk_mode, g_trk_var, strrchr(g_tks.path, '/') + 1); }
     // "you" = the local player's slot (2026-11-08, shim/tools/coach.py: "you vs the winning population"); the header's you_plays says

@@ -3384,6 +3384,66 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   A/B (fire-ab.sh, 4 x 60 s each side, a 36-player Last Resort match, mostly assault rifles): the neck (-1.5) -- 486 shots, accuracy
   54.3%, 5.1 hits a trigger second, 9 kills / 8 deaths; the upper chest (-3.0) -- 388 shots, 42.5%, 3.7, 4 / 10.
   Higher (-0.75) vs the neck (-1.5), same match: 48.0% vs 50.1%, 3.8 vs 3.7 hits a trigger second, 5 / 6 vs 8 / 6: the neck stays.
+- **The brain revises itself: per map, every 3 minutes, and when a monitor trips; the death map is read again each time** (2026-11-09
+  15:07-15:15; nbot_goals.c brain_review / rv_note / hm_reload_brain / gl_pen_zone_w, nbot_engage.c g_gl_nkill, nbot.c press / lull
+  reload, shim/tools/brain-monitor.py, death-tuner.py MONITOR, workboard.py Brain tab) — WHY: a 58-player Pit match ended 63 kills /
+  104 deaths, the most deaths in the game (the top killer 108 / 47), and the user: "I'd expect a brain loaded every 3 minutes to learn
+  from its death heat map and frequency" / "there should be per map, and periodic, and other conditional settings that auto trigger
+  new brains ... bad k/d spread, bad accuracy deviations, bad shots landed ... auto trigger relearning and reset the levers until they
+  get tripped accordingly again". The loaded brain was 2.5 h old; its copy of the map's death file was read once per map (the body saves
+  the match's deaths into it every 30 s, so a 58-minute match planned around earlier matches' deaths); its failed-death path penalties
+  (+3 each, gl_pen_zone) never faded -- 60+ of them over most of The Pit. Of the 91 reviewed deaths: 73 in a straight duel with its own
+  target, 73 closer than 70% of the distance players open fire from with its weapon, 82 with the shield gone, 23 on an EMPTY magazine.
+  LOGIC: a REVISION r<N> ("[brain] review r<N> [<trigger>]", battles/follow/review-<nick>.jsonl) on a map change, on a new build of the
+  brain ("new brain": it carries on from the last revision's number and caution when that is under 15 min old), every
+  NHOOK_BOT_REVIEW_S (180, live; 0 = off), and at once when battles/live-knobs/<nick>.review gets a new "<seq> <reason>" (read every
+  2 s). Each: the death map read again (the danger map rebuilt from it), kills (g_gl_nkill: each target that died while fought, once)
+  and deaths in the window -> CAUTION = half the last + half of (1 - K/D capped at 1) + (deaths a minute - 1) / 3, capped at 1; it cuts
+  the press into the target inside the weapon's band (x 1 - 0.6 caution) and raises the lull reload threshold (+ 0.25 caution); the
+  path penalties halve (a monitor's relearn: zeroed) and each own death of the last 3 periods adds its zone again, 3 / 2 / 1 by age.
+  brain-monitor.py (every 10 s, the walker's scoreboard; inside one match) trips: spread (kills - deaths over 5 min <= -6), kd (its
+  last 10 deaths under half the lobby's median, and < 0.6), accuracy (its last 150 shots 0.08 under the lobby's median or 0.10 under
+  its match), hits (hits landed a minute over 3 min under half its match rate), deaths (> 2.5 a minute), stale (no revision for two
+  periods in a match); one trip per 90 s, a tripped trigger waits until its number recovers (hysteresis). A trip writes the .review
+  signal; spread / kd / accuracy / hits also RESET THE LEVERS: death-tuner.py puts every setting it moves back to its last good set
+  (its start, then after each kept step whose window beat the walker's K/D so far) -> monitor-<nick>.jsonl / .json, tuner "reset" /
+  "good set". The work board's Brain tab: the loaded build and lesson, every revision, the triggers (armed / TRIPPED, value, limit),
+  trips and resets, and ALARMS when the monitor stops or no revision came for two periods in a match. Old behaviour: NHOOK_BOT_REVIEW_S=0
+  (no periodic revisions; map revisions remain), stop brain-monitor.py (no trips / resets).
+- **Before dry: switch at 20% of the magazine in a close fight; reload after each kill** (2026-11-09 15:07; nbot.c) — WHY: the same
+  match: all 23 empty-magazine deaths came mid-duel at ~5 units -- in a brawl the next enemy comes right after a kill, so the
+  after-the-fight and lull reloads never came, and the EMPTY switch at 0 rounds was too late. LOGIC: in a close fight (g_eng_close)
+  with the held magazine at NHOOK_BOT_DRYSW (0.2, live; 0 = off) of its most or less (not a shotgun / sword, not a weapon of 4 rounds
+  or fewer), the target above half its vitality and the other weapon loaded -> switch now; the rank / band switches then wait 4.5 s
+  (no ping-pong). When its target dies (g_gl_nkill) with the magazine under NHOOK_BOT_RELOAD_KILL (0.6, live; 0 = off) of its most and
+  nobody aiming at it -> reload. Old behaviour: NHOOK_BOT_DRYSW=0 NHOOK_BOT_RELOAD_KILL=0.
+- **The You tab: Start / Stop sessions, only real matches of the user's; walkers' recordings marked** (2026-11-09 15:00; ntracks.c
+  "walker", shim/tools/walkerrec.py, coach.py, engage-extract.py, workboard.py) — WHY: the user: "the you page should only be activated
+  by a start and stop button on that page btw. and clear stats that are manufactured and only use real stats from started sessions".
+  The tab showed "37 matches, K/D 0.36": the public walker's own recordings mark its slot "you" (you_plays), so coach.py took the
+  walker's games for the user's; with no match it kept an EXAMPLE report (--pretend). The extractor also kept a walker's slot in the
+  players' data as a real player. LOGIC: the recording header says "walker": true when NHOOK_SPAR / NHOOK_NAV / NHOOK_BOT_FIGHT drive
+  the local player; walkerrec.walker_files() = those + every recording named in a walker log (battles/*.log "[tracks] recording ... ->
+  <file>", for the recordings made before the field). coach.py: "you" = the user's slot in a match that STARTS inside a session
+  (workboard/you-sessions.json; the tab's Start / Stop: POST /you?do=start|stop with an X-Workboard header) and is no walker's; no
+  session or no match = a note, never a report; --pretend only prints. Stop re-reads the recordings (extract + coach, background
+  priority). engage-extract.py leaves a walker's slot out like the observer's (meta "walker": true). The old coach.json was replaced.
+- **The work board lists what really runs; the refit is ~4.7x faster** (2026-11-09 14:50-15:10; workboard.py KINDS / observer_age,
+  engage-model.py fit_choice / main) — WHY: the user: "the jobs in the work page are still like hung" -- Running now listed only the
+  refit (70 min at background priority, so the 20-minute learning refresh came every ~1.5-1.75 h), never the public walker, its tuner,
+  the release watch or the refresh loop; the observer panel showed a run from the night before; direction and tasks were a day old.
+  The target-choice fit was 76% of a refit (cProfile on a tenth of the data: 132 of 173 s): 400 full-batch gradient steps over ~316k
+  choice sets padded to the largest, 28 fits a run, and the report (every class, all but Infection: their own fits) was built on every
+  refresh and thrown away (stdout to /dev/null). LOGIC: the same objective (the sets' log-likelihood - 0.01 |w|^2) solved by Newton's
+  method over the candidates laid end to end (np.*.reduceat segments; converged when a step < 1e-8, at most 60), the top-1 checks
+  vectorised the same way; the report only with --json / --report. A tenth of the data: 173 -> 56 s, the same weights to 3 decimals;
+  all of it (305k duels): ~70 min -> 14.7 min at background priority, weights within 0.05 of the old fit (more data since).
+  ENGAGE_FIT_GD=1 = the old gradient ascent; --report = the old printed report. The board: Running now knows walker-public.sh,
+  death-tuner.py, release-watch.sh, fire-ab.sh, refresh-loop.sh, stats-proxy.py, brain-monitor.py; the observer panel says "not
+  running" when its log is 30+ min old.
+- **walker-progress.py: the public walker match by match** (2026-11-09 14:47) — the walker's final kills / deaths / shots / hits per
+  recorded match and its rank in that lobby (K/D, kills, accuracy among 50+ shot players): `python3 shim/tools/walker-progress.py
+  [--hours N | --since HH:MM] [--server <tag>]`.
 - **The work board learns again while the walker plays; its Walkers tab shows the public walker** (2026-11-09 11:18;
   shim/tools/refresh-loop.sh playing(), shim/tools/workboard.py pubwalker()) — WHY: the user: "are we no longer learning and updating
   the work board, etc?" The 20-minute refresh waits while the user plays, and it took the headless public walker for the user: it had

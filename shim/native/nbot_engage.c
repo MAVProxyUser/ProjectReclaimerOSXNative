@@ -17,6 +17,7 @@
 //               distance band, played back as the throttle, with a pull back into the band
 #define EG_VIEW 75.0f
 static double g_gl_kill_t;   // the last time a target died while the walker fought it (nbot_goals.c: a life with a kill)
+static int g_gl_nkill; static uint32_t g_gl_kill_h;   // kills counted once each (2026-11-09: the three-minute review, nbot_goals.c brain_review)
 static int rd_contact(const NovObj* me, const NovObj* t);   // (nbot_goals.c: on the walker's radar)
 typedef struct { char grp[24]; float lat[20], rad[20]; char mine; } EgPiece;   // mine: from this map's own model
 static struct { int loaded, on, npiece, nmine; float w[8]; int has_w; struct { char cls[12]; float p25, med, p75; int n; } band[10]; int nband;
@@ -189,7 +190,9 @@ static int eg_choose(const NovObj* objs, int n, int me, const float* cam, float 
             if (now - u->att_t > 1.5) u->asked = 0; u->att_t = now;
             if (now - u->attl_t > 3.0 && bot_log()) nlog("[nhook] [wing] %08x is shooting my leader: on it", t->handle); u->attl_t = now; }
         if (t->handle == cur) ci = i; }
-    if (ci >= 0 && objs[ci].dead && now - cur_seen < 2.0) g_gl_kill_t = now;   // (it died while we fought it)
+    if (ci >= 0 && objs[ci].dead && now - cur_seen < 2.0) {   // (it died while we fought it)
+        if (objs[ci].handle != g_gl_kill_h || now - g_gl_kill_t > 3.0) g_gl_nkill++;
+        g_gl_kill_h = objs[ci].handle; g_gl_kill_t = now; }
     if (ci >= 0 && (objs[ci].dead || !bot_enemy(o, &objs[ci]))) ci = -1;
     if (ci >= 0 && vis_of(cur, now) == 1) cur_seen = now;
     // a second attacker while fighting the current target for a second or more: turn to it with the players' odds, once per attacker

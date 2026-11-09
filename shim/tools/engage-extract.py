@@ -60,6 +60,13 @@ FORCE = '--force' in sys.argv; QUIET = '--quiet' in sys.argv
 R_MAX, AIM_FIRE, AIM_DMG, AWARE, GAP, MIN_ATT, PRE, POST, MAXLEN = 45.0, 8.0, 12.0, 30.0, 2.0, 0.3, 3.0, 0.5, 30.0
 ZOMBIE = ('ENERGY BLADE',)
 
+_WALKER = None
+def walker_files():   # the recordings a walker made (shim/tools/walkerrec.py), read once a run
+    global _WALKER
+    if _WALKER is None:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import walkerrec; _WALKER = walkerrec.walker_files()
+    return _WALKER
+
 def mode_class(mode, variant, engine=None):
     # the game itself first: the engine the recording saw ("Slayer", "Capture the Flag", "Infection"), then the variant's name,
     # then the server listing's mode last (2026-11-08: a "CTF 30VS30" server played "BIGASSSLAYER": filed as CTF)
@@ -124,7 +131,10 @@ def cut(path):
     local = int(np.bincount(you[you >= 0]).argmax()) if (you >= 0).any() else -1
     # the observer (left out: it only stands there) -- but in a recording of the local player's own game (nhook's recorder: you_plays)
     # "you" is a real player: kept in, and named in the meta record as local_slot (shim/tools/coach.py)
-    me = -1 if head.get('you_plays') else local
+    # (2026-11-09) -- unless a WALKER drives "you" (the public walker, walker battles: shim/tools/walkerrec.py): a bot, left out like the
+    # observer, and never "you" for coach.py
+    walker = bool(head.get('walker')) or os.path.basename(path) in walker_files()
+    me = -1 if head.get('you_plays') and not walker else local
     cls = mode_class(head.get('mode'), head.get('variant'), head.get('engine') or (head.get('mode') if head.get('source') == 'nhook' else None)); inf = cls == 'infection'
     # velocities: +-2 samples, inside alive stretches, < 12 u/s on foot (a respawn / teleport otherwise)
     VX = np.full((T, N), np.nan); VY = np.full((T, N), np.nan); VZ = np.full((T, N), np.nan)
@@ -231,14 +241,14 @@ def cut(path):
     out.append({'kind': 'meta', 'file': os.path.basename(path), 'map': head.get('map'), 'mode': head.get('mode'), 'variant': head.get('variant'), 'class': cls,
                 'start': head.get('start'), 'samples': int(T), 'seconds': round(float(t[-1] - t[0]), 1) if T > 1 else 0, 'players_max': int(alive.sum(axis=1).max()) if T else 0,
                 'source': head.get('source') or 'match-recorder', 'kills': sum(1 for e in E if e.get('ev') == 'kill'),
-                'local_slot': local if head.get('you_plays') else None})
+                'local_slot': local if head.get('you_plays') and me < 0 else None, 'walker': me >= 0 and bool(head.get('you_plays'))})
     # PLAYERS: one summary per player of the match (coach.py's winners: the top quarter by kills / deaths)
     dtt = np.clip(np.diff(t, prepend=t[0]), 0, 0.5)
     for c in range(N):
         if slots[c] == me or not PRESENT[:, c].any(): continue
         pres = float(dtt[PRESENT[:, c]].sum())
         if pres < 60: continue
-        out.append({'kind': 'player', 'file': os.path.basename(path), 'map': head.get('map'), 'class': cls, 'slot': slots[c], 'you': bool(head.get('you_plays') and slots[c] == local),
+        out.append({'kind': 'player', 'file': os.path.basename(path), 'map': head.get('map'), 'class': cls, 'slot': slots[c], 'you': bool(head.get('you_plays') and me < 0 and slots[c] == local),
                     'seconds': round(pres, 1), 'kills': int(KILLS[:, c].max()), 'deaths': int(DEATHS[:, c].max()), 'shots': int(SHOTS[:, c].max()), 'hits': int(HITS[:, c].max()),
                     'team': int(np.bincount(TEAM[PRESENT[:, c], c] + 1).argmax()) - 1 if PRESENT[:, c].any() else -1})
     return out

@@ -76,16 +76,17 @@ static void gl_note(uint32_t h, const float* p, double now, int radar) {
     if (!s) { if (g_ngls < 64) s = &g_gls[g_ngls++]; else { int o = 0; for (int i = 1; i < 64; i++) if (g_gls[i].t < g_gls[o].t) o = i; s = &g_gls[o]; } s->h = h; }
     memcpy(s->pos, p, 12); s->t = now; s->radar = radar; }
 static const GlSeen* gl_seen(uint32_t h) { for (int i = 0; i < g_ngls; i++) if (g_gls[i].h == h) return &g_gls[i]; return 0; }
-typedef struct { float pos[3]; double t; int failed; uint32_t killer; } GlDeath;
+typedef struct { float pos[3]; double t; int failed, empty; uint32_t killer; } GlDeath;
 static GlDeath g_gld[64]; static int g_ngld; static double g_gl_respawn_t, g_gl_life_t0;   // (g_gl_kill_t: nbot_engage.c)
 static float gl_zone(const float* p) {   // failed deaths within 6 units
     float z = 0; for (int i = 0; i < g_ngld; i++) { if (!g_gld[i].failed) continue; float dx = p[0] - g_gld[i].pos[0], dy = p[1] - g_gld[i].pos[1]; if (dx * dx + dy * dy < 36) z += 1; }
     return z; }
-static void gl_pen_zone(const float* p) {   // A* goes around: +3 on every floor node within 5 units
+static void gl_pen_zone_w(const float* p, float w) {   // A* goes around: +w on every floor node within 5 units
     if (!g_nav.ok || !g_nav.pen) return; int r = (int)ceilf(5.0f / g_nav.cell);
     int cx0 = (int)floorf((p[0] - g_nav.x0) / g_nav.cell), cy0 = (int)floorf((p[1] - g_nav.y0) / g_nav.cell);
     for (int cy = cy0 - r; cy <= cy0 + r; cy++) for (int cx = cx0 - r; cx <= cx0 + r; cx++) { if (cx < 0 || cy < 0 || cx >= g_nav.w || cy >= g_nav.h) continue;
-        int cc = cy * g_nav.w + cx; for (uint32_t k = g_nav.first[cc]; k < g_nav.first[cc + 1]; k++) { float q[3]; nav_pos((int)k, q); float dx = q[0] - p[0], dy = q[1] - p[1]; if (dx * dx + dy * dy < 25) g_nav.pen[k] += 3.0f; } } }
+        int cc = cy * g_nav.w + cx; for (uint32_t k = g_nav.first[cc]; k < g_nav.first[cc + 1]; k++) { float q[3]; nav_pos((int)k, q); float dx = q[0] - p[0], dy = q[1] - p[1]; if (dx * dx + dy * dy < 25) g_nav.pen[k] += w; } } }
+static void gl_pen_zone(const float* p) { gl_pen_zone_w(p, 3.0f); }
 // the lanes as goal material: the busier half of the map's lane cells (x, y, passes), loaded by bm_pop
 // (GlLane / g_gll: declared in nbot.c before bm_pop, which loads them)
 static int gl_power_tag(const char* tag) {
@@ -213,9 +214,84 @@ static void gl_life(double now, int alive, const float* pos, uint32_t target, in
         GlDeath* d = g_ngld < 64 ? &g_gld[g_ngld++] : (memmove(g_gld, g_gld + 1, 63 * sizeof *g_gld), &g_gld[63]);
         memcpy(d->pos, last, 12); d->t = now; d->failed = failed; d->killer = killer;
         int nf = 0; for (int i = 0; i < g_ngld; i++) if (g_gld[i].failed) { float dx = g_gld[i].pos[0] - last[0], dy = g_gld[i].pos[1] - last[1]; if (dx * dx + dy * dy < 36) nf++; }
+        d->empty = g_inv.ammo == 0;
         if (failed) gl_pen_zone(last);
         if (bot_log()) nlog("[nhook] [goal] died at (%.1f, %.1f) killed by %08x, %s (%d failed deaths in this zone)", last[0], last[1], killer, failed ? "no kill this life" : "after a kill", nf);
         g_gl.kind = GK_NONE; }
     if (was == 0 && alive) { g_gl_respawn_t = now; g_gl_life_t0 = now; g_gl.kind = GK_NONE; }
     if (was < 0 && alive) g_gl_life_t0 = now;
     was = alive; }
+// THE THREE-MINUTE REVIEW (2026-11-09; the user, after a 58-player Pit match the walker ended with 104 deaths -- the most in the game,
+// with 63 kills, the 4th most -- "I'd expect a brain loaded every 3 minutes to learn from its death heat map and frequency"). Every
+// NHOOK_BOT_REVIEW_S (180, live; 0 = off) of a map: its own deaths and kills in that window, where it died (its own death heat) and
+// how often -> a revision of its posture, r<N>:
+//   CAUTION 0..1 = how badly the window went: 1 - K/D (K/D = (kills + 0.5) / (deaths + 0.5), capped at 1) + (deaths a minute - 1) / 3,
+//   capped at 1, blended half and half with the last revision's (a good window brings it back down). It scales what the match showed:
+//   the press into the target inside its weapon's band (x 1 - 0.6 caution: 73 of the 91 reviewed deaths came closer than 70% of the
+//   distance players open fire from with its weapon) and the lull reload threshold (+ 0.25 caution) -- where those are read (nbot.c).
+//   ZONES: the floor graph's learnt penalties halve (old lessons fade -- over a 58-minute match 60+ failed deaths had stacked +3 apiece
+//   over most of The Pit) and each own death of the last 3 windows adds its zone again, 3 / 2 / 1 by age.
+// One "[brain] review r<N>" line each + a JSON line in battles/follow/review-<nick>.jsonl (the stats page's walker tab).
+static float g_rv_caut; static int g_rv_n;
+static float rv_caution(void) { return g_rv_caut; }
+// (2026-11-09, the user: "its death map only refreshes on map changes -- that should be more periodic and so should brain reloads ...
+//  per map, and periodic, and other conditional settings that auto trigger new brains: bad K/D spread, bad accuracy deviations, bad
+//  shots landed ... after a certain threshold auto trigger relearning and reset the levers until they get tripped again"). A revision
+// now comes (1) on every map change, (2) every NHOOK_BOT_REVIEW_S, (3) when shim/tools/brain-monitor.py trips a trigger: it writes
+// battles/live-knobs/<nick>.review = "<seq> <reason>" (read every 2 s; a new seq = a revision now, a RELEARN: the path penalties are
+// rebuilt from its own recent deaths instead of halved). Every revision reloads the map's death file (the body saves this match's
+// deaths into it every 30 s; the brain's copy was loaded once per map, so a 58-minute match planned around the deaths of earlier ones).
+static void hm_reload_brain(void) {   // (g_hm_mx held) the brain's copy of the death map, read again from the body's file
+    char m[64]; snprintf(m, sizeof m, "%s", g_hm.map); if (!m[0]) return; g_hm.dirty = 0; g_hm.map[0] = 0; hm_switch(m); }
+static void rv_note(double now, const char* trig, const char* map, float mins, int kills, int deaths, int empty, float dpm, float prev, int zones, float hx, float hy, int hn, uint32_t nd) {
+    char hot[96] = "none"; if (hn >= 2) snprintf(hot, sizeof hot, "(%.0f, %.0f) with %d deaths within 6 units", hx, hy, hn);
+    if (bot_log()) nlog("[nhook] [brain] review r%d [%s] (%s, %.0f min): %d kills %d deaths (%d on an empty magazine), %.1f deaths a minute -> caution %.2f (was %.2f): "
+                        "pressing x%.2f, lull reload under %.0f%% of the magazine; death map %u deaths; own deaths weigh on the paths, the hottest spot %s",
+                        g_rv_n, trig, map, mins, kills, deaths, empty, dpm, g_rv_caut, prev, 1.0f - 0.6f * g_rv_caut, 100 * (0.45f + 0.25f * g_rv_caut), (unsigned)nd, hot);
+    char path[1100]; const char* h = getenv("HOME");
+    snprintf(path, sizeof path, "%s/Library/Application Support/ReclaimerMac/battles/follow/review-%s.jsonl", h ? h : "/tmp", g_nick[0] ? g_nick : "walker");
+    FILE* f = fopen(path, "a");
+    if (f) { fprintf(f, "{\"t\": %.0f, \"r\": %d, \"trigger\": \"%s\", \"map\": \"%s\", \"mins\": %.1f, \"kills\": %d, \"deaths\": %d, \"empty\": %d, \"dpm\": %.2f, \"caution\": %.2f, \"was\": %.2f, \"press_x\": %.2f, \"zones\": %d, \"deathmap\": %u, \"hot\": [%.1f, %.1f, %d]}\n",
+                     (double)time(0), g_rv_n, trig, map, mins, kills, deaths, empty, dpm, g_rv_caut, prev, 1.0f - 0.6f * g_rv_caut, zones, (unsigned)nd, hx, hy, hn); fclose(f); }
+    (void)now; }
+static void brain_review(double now) {
+    static double t0, tchk; static int k0; static char map[64]; static long seq0 = -1; char why[64] = ""; int force = 0;
+    // (a new build of the brain starts its statics afresh: it carries on from the last revision -- its number and caution -- when
+    //  that one is under 15 minutes old, so a code reload does not forget what the reviews learnt)
+    { static int resumed; if (!resumed) { resumed = 1; char p[1100]; const char* h = getenv("HOME");
+        snprintf(p, sizeof p, "%s/Library/Application Support/ReclaimerMac/battles/follow/review-%s.jsonl", h ? h : "/tmp", g_nick[0] ? g_nick : "walker");
+        FILE* f = fopen(p, "rb");
+        if (f) { char buf[4096]; fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, sz > 4000 ? sz - 4000 : 0, SEEK_SET); size_t n = fread(buf, 1, sizeof buf - 1, f); buf[n] = 0; fclose(f);
+            char* last = 0; for (char* q = buf; (q = strstr(q, "{\"t\": ")); q++) last = q;
+            double lt = 0; int lr = 0; float lc = 0;
+            if (last && sscanf(last, "{\"t\": %lf, \"r\": %d,", &lt, &lr) == 2) { char* c = strstr(last, "\"caution\": "); if (c) lc = strtof(c + 11, 0);
+                if (time(0) - lt < 900) { g_rv_n = lr; g_rv_caut = lc; if (bot_log()) nlog("[nhook] [brain] carrying on from revision r%d (caution %.2f, %.0f s ago)", lr, lc, time(0) - lt); } } } } }
+    if (now - tchk > 2.0) { tchk = now; char p[1100]; const char* h = getenv("HOME");
+        snprintf(p, sizeof p, "%s/Library/Application Support/ReclaimerMac/battles/live-knobs/%s.review", h ? h : "/tmp", g_nick[0] ? g_nick : "walker");
+        FILE* f = fopen(p, "r");
+        if (f) { long q = 0; char r[64] = ""; int got = fscanf(f, "%ld %63[^\n]", &q, r); fclose(f);
+            if (got >= 1) { if (seq0 < 0) seq0 = q; else if (q != seq0) { seq0 = q; force = 1; snprintf(why, sizeof why, "%s", got > 1 ? r : "monitor"); } } } }
+    if (strcmp(map, g_st_curmap)) {   // (a new map -- or a new build of the brain: a revision with its death map; a fresh window, the caution carries)
+        int loaded = !map[0]; snprintf(map, sizeof map, "%s", g_st_curmap); t0 = now; k0 = g_gl_nkill; if (!map[0]) return;
+        uint32_t nd; pthread_mutex_lock(&g_hm_mx); nd = g_hm.nd; pthread_mutex_unlock(&g_hm_mx); g_rv_n++;
+        rv_note(now, loaded ? "new brain" : "map", map, 0, 0, 0, 0, 0, g_rv_caut, 0, 0, 0, 0, nd); return; }
+    float win = 180; lk_over(&win, "NHOOK_BOT_REVIEW_S");
+    if (!force && (win <= 0 || now - t0 < win)) return;
+    if (!force) snprintf(why, sizeof why, "every %.0f s", win);
+    double w0 = t0; int kills = g_gl_nkill - k0; t0 = now; k0 = g_gl_nkill;
+    int deaths = 0, empty = 0; for (int i = 0; i < g_ngld; i++) if (g_gld[i].t > w0) { deaths++; empty += g_gld[i].empty; }
+    if (!force && !deaths && !kills) return;   // (not playing: no revision)
+    float mins = (float)(now - w0) / 60.0f; if (mins < 0.05f) mins = 0.05f;
+    float dpm = deaths / mins, kd = (kills + 0.5f) / (deaths + 0.5f); if (kd > 1) kd = 1;
+    float bad = (1 - kd) + (dpm > 1 ? (dpm - 1) / 3.0f : 0); if (bad > 1) bad = 1;
+    float prev = g_rv_caut; if (deaths || kills) g_rv_caut = 0.5f * prev + 0.5f * bad; g_rv_n++;
+    uint32_t nd; pthread_mutex_lock(&g_hm_mx); hm_reload_brain(); nd = g_hm.nd; pthread_mutex_unlock(&g_hm_mx);
+    if (g_nav.ok) g_nav.dng_t = 0;   // (the danger map is rebuilt from it at the next plan)
+    // the own death heat: penalties halve (a monitor's relearn: start again from zero), then every own death of the last 3 windows
+    // adds its zone again by age
+    int zones = 0; float hx = 0, hy = 0; int hn = 0; float span = win > 0 ? win : 180;
+    if (g_nav.ok && g_nav.pen) { for (int i = 0; i < g_nav.n; i++) g_nav.pen[i] *= force ? 0.0f : 0.5f;
+        for (int i = 0; i < g_ngld; i++) { double age = now - g_gld[i].t; if (age > 3 * span) continue; gl_pen_zone_w(g_gld[i].pos, age < span ? 3.0f : age < 2 * span ? 2.0f : 1.0f); zones++;
+            int nn = 0; for (int j = 0; j < g_ngld; j++) { float dx = g_gld[j].pos[0] - g_gld[i].pos[0], dy = g_gld[j].pos[1] - g_gld[i].pos[1]; if (now - g_gld[j].t <= 3 * span && dx * dx + dy * dy < 36) nn++; }
+            if (nn > hn) { hn = nn; hx = g_gld[i].pos[0]; hy = g_gld[i].pos[1]; } } }
+    rv_note(now, why, map, mins, kills, deaths, empty, dpm, prev, zones, hx, hy, hn, nd); }

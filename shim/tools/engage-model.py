@@ -9,7 +9,7 @@
     band players attack from, the retreat / push rules as the players' numbers, and a MOVEMENT LIBRARY -- 2-second pieces of
     real fights (the attacker's speed across / toward the other, every 0.1 s) by weapon class and distance band, from duels the
     player won or survived, that the walker plays back instead of its own strafe.
-    python3 shim/tools/engage-model.py [--eng DIR] [--out FILE] [--json report.json] [--classes slayer,ctf]
+    python3 shim/tools/engage-model.py [--eng DIR] [--out FILE] [--json report.json | --report] [--classes slayer,ctf]
 Infection duels are reported apart and left out of the walkers' model (zombies rush with swords; --model-classes to change).
 Several enemies at once (the extractor's choice / switch / pressure / join / skirmish records): the TARGET CHOICE rule is fitted
 as a conditional logit -- P(enemy k) ~ exp(w . features_k) over the enemies within 45 units, features = log distance, how far
@@ -43,24 +43,48 @@ def r2(x, n=2): return None if x is None else round(x, n)
 
 FEATS = ['log_dist', 'off_aim', 'attacked_me', 'vitality', 'previous_target', 'teammate_on_it', 'just_hurt', 'height']
 def fit_choice(C, iters=400, l2=0.02):
-    """Conditional logit by gradient ascent on standardized features. -> (raw weights, standardized weights, top-1 rates)."""
+    """Conditional logit on standardized features (Newton; ENGAGE_FIT_GD=1 = the old gradient ascent). -> (raw weights, standardized weights, top-1 rates)."""
     import numpy as np
     if len(C) < 30: return None
     allf = np.array([f for c in C for f in c['feat']], float); mu = allf.mean(0); sd = allf.std(0); sd[sd < 1e-6] = 1
     rnd = random.Random(5); idx = list(range(len(C))); rnd.shuffle(idx); cut = len(idx) // 5; test = [C[i] for i in idx[:cut]]; train = [C[i] for i in idx[cut:]]
     # (batched: every choice set padded to the largest, a mask for the padding -- the per-set loop took minutes on a day's data)
-    K = max(len(c['feat']) for c in train); S = len(train); Fb = np.zeros((S, K, len(FEATS))); Mk = np.zeros((S, K), bool); ch = np.array([c['chosen'] for c in train])
-    for i, c in enumerate(train): f = (np.array(c['feat'], float) - mu) / sd; Fb[i, :len(f)] = f; Mk[i, :len(f)] = True
-    w = np.zeros(len(FEATS)); Fc = Fb[np.arange(S), ch]
-    for it in range(iters):
-        sc = np.where(Mk, Fb @ w, -np.inf); sc -= sc.max(axis=1, keepdims=True); p = np.exp(sc); p /= p.sum(axis=1, keepdims=True)
-        g = (Fc - np.einsum('sk,skf->sf', p, Fb)).sum(axis=0) - l2 * w * 1.0
-        w += 1.0 * g / S
-    def top1(rule):
-        return sum(1 for c in test if rule(np.array(c['feat'], float)) == c['chosen']) / max(1, len(test))
-    res = {'logit': top1(lambda F: int(np.argmax(((F - mu) / sd) @ w))), 'nearest': top1(lambda F: int(np.argmin(F[:, 0]))),
-           'nearest_aim': top1(lambda F: int(np.argmin(F[:, 1]))), 'random': sum(1 / len(c['feat']) for c in test) / max(1, len(test)),
-           'sets': len(C), 'mean_candidates': round(sum(len(c['feat']) for c in C) / len(C), 2)}
+    if os.environ.get('ENGAGE_FIT_GD') == '1':   # the old fit: 400 full-batch gradient steps on sets padded to the largest
+        K = max(len(c['feat']) for c in train); S = len(train); Fb = np.zeros((S, K, len(FEATS))); Mk = np.zeros((S, K), bool); ch = np.array([c['chosen'] for c in train])
+        for i, c in enumerate(train): f = (np.array(c['feat'], float) - mu) / sd; Fb[i, :len(f)] = f; Mk[i, :len(f)] = True
+        w = np.zeros(len(FEATS)); Fc = Fb[np.arange(S), ch]
+        for it in range(iters):
+            sc = np.where(Mk, Fb @ w, -np.inf); sc -= sc.max(axis=1, keepdims=True); p = np.exp(sc); p /= p.sum(axis=1, keepdims=True)
+            g = (Fc - np.einsum('sk,skf->sf', p, Fb)).sum(axis=0) - l2 * w * 1.0
+            w += 1.0 * g / S
+        def top1(rule):
+            return sum(1 for c in test if rule(np.array(c['feat'], float)) == c['chosen']) / max(1, len(test))
+        res = {'logit': top1(lambda F: int(np.argmax(((F - mu) / sd) @ w))), 'nearest': top1(lambda F: int(np.argmin(F[:, 0]))),
+               'nearest_aim': top1(lambda F: int(np.argmin(F[:, 1]))), 'random': sum(1 / len(c['feat']) for c in test) / max(1, len(test)),
+               'sets': len(C), 'mean_candidates': round(sum(len(c['feat']) for c in C) / len(C), 2)}
+    else:
+        # (2026-11-09: the fit was 76% of a refit -- ~70 min a refresh at background priority, so the 20-minute learning refresh came
+        #  every ~1.5 h. The same objective -- sum of the sets' log-likelihoods - l2/2 |w|^2 -- solved by Newton's method on the
+        #  candidates laid end to end (segments, no padding): converged in ~10 steps instead of 400 gradient steps that stopped short.)
+        def flat(sets):
+            sz = np.array([len(c['feat']) for c in sets]); st = np.concatenate(([0], np.cumsum(sz)[:-1])).astype(np.int64)
+            return np.array([f for c in sets for f in c['feat']], float), st, np.repeat(np.arange(len(sets)), sz), np.array([c['chosen'] for c in sets])
+        Fr, st, seg, ch = flat(train); F = (Fr - mu) / sd; Fc = F[st + ch]; w = np.zeros(len(FEATS)); I = np.eye(len(FEATS))
+        for it in range(60):
+            sc = F @ w; e = np.exp(sc - np.maximum.reduceat(sc, st)[seg]); p = e / np.add.reduceat(e, st)[seg]
+            Ef = np.add.reduceat(p[:, None] * F, st)
+            g = (Fc - Ef).sum(axis=0) - l2 * w
+            H = (F * p[:, None]).T @ F - Ef.T @ Ef + l2 * I
+            step = np.linalg.solve(H, g); w += step
+            if np.abs(step).max() < 1e-8: break
+        Tr, tst, tseg, tch = flat(test)
+        def top1(score):   # the share of held-out sets whose highest-scoring candidate (the first on a tie) is the chosen one
+            if not len(tch): return 0.0
+            ismax = np.flatnonzero(score == np.maximum.reduceat(score, tst)[tseg]); first = ismax[np.unique(tseg[ismax], return_index=True)[1]]
+            return float(np.mean(first - tst == tch))
+        res = {'logit': top1(((Tr - mu) / sd) @ w), 'nearest': top1(-Tr[:, 0]), 'nearest_aim': top1(-Tr[:, 1]),
+               'random': float(np.mean(1.0 / np.diff(np.append(tst, len(Tr))))) if len(tch) else 0.0,
+               'sets': len(C), 'mean_candidates': round(sum(len(c['feat']) for c in C) / len(C), 2)}
     raw = w / sd; return {'weights': {k: round(float(v), 3) for k, v in zip(FEATS, raw)}, 'weights_standardized': {k: round(float(v), 3) for k, v in zip(FEATS, w)},
                           'bias_note': 'raw weights apply to raw features (log units, /180 deg, 0/1 flags, vitality 0..1.5, height/5)', 'top1': {k: (round(v, 3) if isinstance(v, float) else v) for k, v in res.items()}}
 
@@ -374,15 +398,19 @@ def main():
     R = load(); D = [e for e in R if e.get('kind', 'duel') == 'duel']
     if not D: print('no duels in %s (shim/tools/engage-extract.py first)' % ENG); sys.exit(1)
     rep = {'source': {'duels': len(D), 'recordings': len({e['file'] for e in D}), 'maps': dict(Counter(e['map'] for e in D))}, 'by_class': {}}
-    for c in ('slayer', 'ctf', 'infection', 'other'):
+    # (2026-11-09: the report -- every class, then all but Infection, each with its own choice fits -- was built on every refresh and
+    #  thrown away (the refresh, plan-run, learn-loop and follow-study send stdout to /dev/null); now only for --json / --report.)
+    want_report = '--json' in sys.argv or '--report' in sys.argv
+    for c in (('slayer', 'ctf', 'infection', 'other') if want_report else ()):
         sub = [e for e in D if e['class'] == c]
         if sub: rep['by_class'][c] = stats(sub)
         msub = [r for r in R if r.get('kind', 'duel') != 'duel' and r['class'] == c]
         if msub: rep['by_class'].setdefault(c, {})['multi'] = multi_stats(msub); rep['by_class'][c]['behaviour'] = behaviour(msub, sub); rep['by_class'][c]['weapons'] = weapon_stats(msub, sub)
-    rep['all_but_infection'] = stats([e for e in D if e['class'] != 'infection'])
-    rep['all_but_infection']['multi'] = multi_stats([r for r in R if r.get('kind', 'duel') != 'duel' and r['class'] != 'infection'])
-    rep['all_but_infection']['behaviour'] = behaviour([r for r in R if r.get('kind', 'duel') != 'duel' and r['class'] != 'infection'], [e for e in D if e['class'] != 'infection'])
-    rep['all_but_infection']['weapons'] = weapon_stats([r for r in R if r.get('kind', 'duel') != 'duel' and r['class'] != 'infection'], [e for e in D if e['class'] != 'infection'])
+    if want_report:
+        rep['all_but_infection'] = stats([e for e in D if e['class'] != 'infection'])
+        rep['all_but_infection']['multi'] = multi_stats([r for r in R if r.get('kind', 'duel') != 'duel' and r['class'] != 'infection'])
+        rep['all_but_infection']['behaviour'] = behaviour([r for r in R if r.get('kind', 'duel') != 'duel' and r['class'] != 'infection'], [e for e in D if e['class'] != 'infection'])
+        rep['all_but_infection']['weapons'] = weapon_stats([r for r in R if r.get('kind', 'duel') != 'duel' and r['class'] != 'infection'], [e for e in D if e['class'] != 'infection'])
     M = [e for e in D if e['class'] in MODEL_CLASSES]
     model = make_model([r for r in R if r.get('kind', 'duel') != 'duel' and r['class'] in MODEL_CLASSES], M)
     write_json(OUT, model)
@@ -403,7 +431,8 @@ def main():
     print('per-map models (%s/maps): %s' % (os.path.dirname(OUT), ', '.join('%s %d duels%s' % (m, n, ' [' + '+'.join(c) + ']' if c else '') for m, (n, c) in per.items()) or 'none yet'))
     tome(R, os.path.join(os.path.dirname(OUT), 'tome.json'))
     if '--json' in sys.argv: json.dump(rep, open(arg('--json', ''), 'w'), indent=1)
-    print(json.dumps(rep, indent=1))
+    if '--report' in sys.argv: print(json.dumps(rep, indent=1))
+    elif not want_report: print('(the full report: --report, or --json <file>)')
     print('model -> %s (%d library pieces in %d groups)' % (OUT, sum(len(v) for v in model['library'].values()), len(model['library'])))
 
 if __name__ == '__main__':

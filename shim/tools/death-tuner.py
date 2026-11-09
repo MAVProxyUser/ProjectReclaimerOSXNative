@@ -14,7 +14,8 @@ LEAD (11:24, the user: "classic inability to lead a shot, and predict the path o
 accuracy (the scoreboard's hits / shots, the walker's /stats.json): every LEAD_SHOTS (250) shots the lead multiplier
 NHOOK_BOT_LEAD_X moves one step (0.25, 0..3) in its current direction; the next window keeps it unless accuracy fell 3+ points
 (then it goes back and the direction turns). The walker tab's "Self-tune from deaths" switch is NHOOK_TUNE in the same
-file (0 = paused). Steps and verdicts -> battles/follow/tuner-<nickname>.jsonl and stdout.
+file (0 = paused). Steps and verdicts -> battles/follow/tuner-<nickname>.jsonl and stdout. A brain monitor trip with "reset"
+(shim/tools/brain-monitor.py) puts the settings it moves back to the last good set (below, MONITOR).
     python3 shim/tools/death-tuner.py --nick AIWalkerTest --stats http://127.0.0.1:8771 [--step 6] [--half 20] [--dry]
 """
 import json, os, sys, time, urllib.request
@@ -60,6 +61,12 @@ def you():
     except Exception: pass
     return None
 LEAD_SHOTS = int(arg('--lead-shots', '250'))
+# RESET THE LEVERS (2026-11-09; the user: "... auto trigger relearning and reset the levers until they get tripped accordingly again"):
+# shim/tools/brain-monitor.py trips on a bad K/D spread / K/D / accuracy / hits landed and writes a trip record with "reset": true
+# into battles/follow/monitor-<nick>.jsonl; this loop then puts every setting it moves (MOVES + the lead) back to its LAST GOOD SET
+# -- the settings at the tuner's start, then after each kept step whose window beat the walker's K/D so far -- and steps on from there.
+MONITOR = os.path.join(SUP, 'battles', 'follow', 'monitor-%s.jsonl' % NICK)
+MANAGED = sorted({m[0] for ms in MOVES.values() for m in ms} | {'NHOOK_BOT_LEAD_X'})
 
 def main():
     off = os.path.getsize(WHY) if os.path.exists(WHY) else 0   # (only deaths from now on)
@@ -70,6 +77,8 @@ def main():
     hist = []                # (deaths, kills) after each death this loop saw
     pending = None           # the last step: {knob, old, new, cause, d0, k0, before}
     log({'event': 'start', 'nick': NICK, 'step': STEP, 'half': HALF, 'dry': DRY})
+    kn0 = knobs_read(); good = {k: kn0.get(k) for k in MANAGED}; good_why = 'the settings at the tuner\'s start'
+    moff = os.path.getsize(MONITOR) if os.path.exists(MONITOR) else 0   # (only trips from now on)
     while True:
         time.sleep(5)
         y = you()
@@ -99,6 +108,25 @@ def main():
                 old = kn.get('NHOOK_BOT_LEAD_X'); kn['NHOOK_BOT_LEAD_X'] = new; knobs_write(kn); lead['pending'] = {'old': old, 'new': new}
                 log({'event': 'lead step', 'knob': 'NHOOK_BOT_LEAD_X', 'from': cur, 'to': new, 'acc_before': lead['acc_before'], 'shots': SH - lead['s0']})
             lead['s0'] = SH; lead['h0'] = HI
+        # the monitor's trips: a reset puts the levers back to the last good set
+        try: msz = os.path.getsize(MONITOR)
+        except OSError: msz = moff
+        if msz < moff: moff = 0
+        if msz > moff:
+            with open(MONITOR) as f: f.seek(moff); mnew = f.read(); moff = f.tell()
+            for line in mnew.splitlines():
+                try: r = json.loads(line)
+                except Exception: continue
+                if r.get('event') != 'trip' or not r.get('reset'): continue
+                kn = knobs_read(); changed = {}
+                for k in MANAGED:
+                    if kn.get(k) != good.get(k):
+                        changed[k] = [kn.get(k), good.get(k)]
+                        if good.get(k) is None: kn.pop(k, None)
+                        else: kn[k] = good[k]
+                if changed: knobs_write(kn)
+                pending = None; lead['pending'] = None; lead['acc_before'] = None; lead['s0'] = SH; lead['h0'] = HI
+                log({'event': 'reset', 'trigger': r.get('trigger'), 'value': r.get('value'), 'to': good_why, 'changed': changed})
         try: sz = os.path.getsize(WHY)
         except OSError: continue
         if sz < off: off = 0
@@ -129,6 +157,9 @@ def main():
                 knobs_write(kn); rest[(pending['cause'], pending['knob'])] = 30
             log({'event': 'verdict', 'knob': pending['knob'], 'cause': pending['cause'], 'from': pending['old'], 'to': pending['new'],
                  'kd_before': before, 'kd_after': round(after, 2), 'kept': not worse})
+            if not worse and after >= K / max(1, D):   # (a window better than its K/D so far: the levers as they are now = the good set)
+                kn = knobs_read(); good = {k: kn.get(k) for k in MANAGED}; good_why = 'the set after %s %s -> %s (K/D %.2f over %d deaths)' % (pending['knob'], pending['old'], pending['new'], after, STEP)
+                log({'event': 'good set', 'why': good_why})
             pending = None
         if pending or since_step < STEP: continue
         # the next step: the heaviest cause that has a move

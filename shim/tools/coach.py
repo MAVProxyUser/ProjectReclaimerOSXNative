@@ -7,7 +7,8 @@ Reads the engagement library (shim/tools/engage-extract.py: duels, radar contact
 tracks/coach.json (the work board's "You" tab) and prints the report: per measure your number, the winners', everyone's, a
 verdict and what to do, biggest gaps first.
     python3 shim/tools/coach.py [--pretend <recording file name> <slot>] [--quiet]
---pretend treats one recorded player as "you" (to try it before you have played)."""
+--pretend treats one recorded player as "you" and only prints (to try the report; the You tab never shows it).
+Only matches that start inside a session started on the board's You tab count (workboard/you-sessions.json), never a walker's."""
 import glob, gzip, json, math, os, sys, time
 from collections import defaultdict
 
@@ -107,16 +108,29 @@ def main():
         if e.get('class') != 'infection': by_file[e['file']].append(e)
     players = [e for e in R if e.get('kind') == 'player' and e['class'] != 'infection' and e['seconds'] >= 300]
     pre = arg('--pretend', 2)
+    # SESSIONS (2026-11-09; the user: "the you page should only be activated by a start and stop button on that page ... clear stats
+    # that are manufactured and only use real stats from started sessions"): "you" = your slot in a match that STARTED inside a
+    # session you started with the board's You tab (workboard/you-sessions.json) and that no walker recorded (shim/tools/walkerrec.py:
+    # in the public walker's own recordings its slot was marked "you", and the tab showed the walker's games as yours). No session,
+    # no report. --pretend only prints (it never reaches the tab).
+    try: SS = json.load(open(os.path.join(SUP, 'workboard', 'you-sessions.json'))).get('sessions', [])
+    except Exception: SS = []
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import walkerrec; WF = walkerrec.walker_files()
+    start_of = {e['file']: e.get('start') or 0 for e in R if e.get('kind') == 'meta'}
+    def in_session(f):
+        st = start_of.get(f) or 0
+        return any(x['start'] <= st < (x.get('end') or 1e12) for x in SS)
     if pre: you_keys = [(pre[0], int(pre[1]))]
-    else: you_keys = [(e['file'], e['slot']) for e in players if e.get('you')]
+    else: you_keys = [(e['file'], e['slot']) for e in players if e.get('you') and e['file'] not in WF and in_session(e['file'])]
+    sess = [{'start': x['start'], 'end': x.get('end'), 'matches': len({f for f, _ in you_keys if x['start'] <= (start_of.get(f) or 0) < (x.get('end') or 1e12)})} for x in SS][-20:]
     if not you_keys:
-        note = 'No match of yours recorded yet: play a public match through our launcher (shim/native.sh with NATIVE_REAL=1, or Reclaimer.app) and it is recorded with your slot marked.'
-        try: old = json.load(open(os.path.join(TR, 'coach.json')))
-        except Exception: old = None
-        if old and old.get('pretend'):   # (keep the example report until there is a real one; say so)
-            old['note'] = note; json.dump(old, open(os.path.join(TR, 'coach.json'), 'w'), indent=1); print(note + ' (the example report stays)'); return
-        out = {'updated': time.time(), 'you': None, 'note': note}
-        json.dump(out, open(os.path.join(TR, 'coach.json'), 'w'), indent=1); print(note); return
+        note = ('Press Start when you begin playing and Stop when you are done: only matches that start inside a session count.' if not SS else
+                'No match of yours recorded in your sessions yet. A match counts when it starts inside a session and the game runs with nhook '
+                '(launched through our launcher: shim/native.sh NATIVE_REAL=1, or Reclaimer.app); it is read a couple of minutes after it ends.')
+        out = {'updated': time.time(), 'you': None, 'note': note, 'sessions': sess}
+        if not pre:
+            tmp = os.path.join(TR, 'coach.json.tmp'); json.dump(out, open(tmp, 'w'), indent=1); os.replace(tmp, os.path.join(TR, 'coach.json'))
+        print(note); return
     others = [e for e in players if (e['file'], e['slot']) not in set(you_keys)]
     kd = sorted(((e['kills'] + 1) / (e['deaths'] + 1), e['file'], e['slot']) for e in others)
     top = kd[int(len(kd) * 0.75):] if kd else []
@@ -137,8 +151,9 @@ def main():
                      'advice': advice if behind else '', 'gap': round(off, 3), 'thin': y[1] < 10})
     rows.sort(key=lambda r: (r['thin'], -r['gap'] if r['advice'] else 9))
     yk = Y.get('kd', (None, 0)); out = {'updated': time.time(), 'pretend': bool(pre), 'you': {'matches': len({f for f, _ in you_keys}), 'kd': round(yk[0], 2) if yk[0] else None},
-           'winners': {'players': len(top), 'kd_from': round(top[0][0], 2) if top else None}, 'everyone': len(others), 'rows': rows}
-    tmp = os.path.join(TR, 'coach.json.tmp'); json.dump(out, open(tmp, 'w'), indent=1); os.replace(tmp, os.path.join(TR, 'coach.json'))
+           'winners': {'players': len(top), 'kd_from': round(top[0][0], 2) if top else None}, 'everyone': len(others), 'rows': rows, 'sessions': sess}
+    if not pre:
+        tmp = os.path.join(TR, 'coach.json.tmp'); json.dump(out, open(tmp, 'w'), indent=1); os.replace(tmp, os.path.join(TR, 'coach.json'))
     if not QUIET:
         print('You vs the winners%s: %d match(es) of yours; winners = the top quarter by K/D (%d players, K/D %.2f+) of %d player-matches' % (' (PRETEND)' if pre else '', out['you']['matches'], len(top), top[0][0] if top else 0, len(others)))
         print('%-52s %10s %10s %10s  %s' % ('', 'you', 'winners', 'everyone', 'verdict'))
