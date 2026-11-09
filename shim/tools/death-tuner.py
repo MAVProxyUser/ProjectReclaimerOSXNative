@@ -9,7 +9,11 @@ empty, outnumbered, unseen, point blank, traded, entered hurt, slow start, outra
     tried in turn, inside bounds) in the walker's live knob file (battles/live-knobs/<nickname>.json: it reads it within a second),
   - judges the last step on the walker's own K/D (its stats page, /stats.json): the STEP deaths after it against the STEP deaths
     before; 25%+ worse -> the setting goes back and that move rests for 30 deaths; else it stays.
-"traded" deaths (the killer nearly dead too) take no step. The walker tab's "Self-tune from deaths" switch is NHOOK_TUNE in the same
+"traded" deaths (the killer nearly dead too) take no step.
+LEAD (11:50, the user: "classic inability to lead a shot, and predict the path of the head"): a second track on the SERVER's
+accuracy (the scoreboard's hits / shots, the walker's /stats.json): every LEAD_SHOTS (250) shots the lead multiplier
+NHOOK_BOT_LEAD_X moves one step (0.25, 0..3) in its current direction; the next window keeps it unless accuracy fell 3+ points
+(then it goes back and the direction turns). The walker tab's "Self-tune from deaths" switch is NHOOK_TUNE in the same
 file (0 = paused). Steps and verdicts -> battles/follow/tuner-<nickname>.jsonl and stdout.
     python3 shim/tools/death-tuner.py --nick AIWalkerTest --stats http://127.0.0.1:8771 [--step 6] [--half 20] [--dry]
 """
@@ -51,14 +55,16 @@ def you():
     try:
         d = json.load(urllib.request.urlopen(STATS + '/stats.json', timeout=4))
         for p in d.get('players', []):
-            if p.get('you'): return int(p.get('kills') or 0), int(p.get('deaths') or 0)
+            if p.get('you'): return int(p.get('kills') or 0), int(p.get('deaths') or 0), int(p.get('shots') or 0), int(p.get('hits') or 0)
     except Exception: pass
     return None
+LEAD_SHOTS = int(arg('--lead-shots', '250'))
 
 def main():
     off = os.path.getsize(WHY) if os.path.exists(WHY) else 0   # (only deaths from now on)
     weights = {}; rest = {}; turn = {}; deaths = 0; since_step = 0
-    K = D = 0; last = None   # the walker's kills / deaths since the start, across matches
+    K = D = SH = HI = 0; last = None   # the walker's kills / deaths / shots / hits since the start, across matches
+    lead = {'dir': 1, 's0': 0, 'h0': 0, 'pending': None, 'acc_before': None}
     hist = []                # (deaths, kills) after each death this loop saw
     pending = None           # the last step: {knob, old, new, cause, d0, k0, before}
     log({'event': 'start', 'nick': NICK, 'step': STEP, 'half': HALF, 'dry': DRY})
@@ -66,9 +72,27 @@ def main():
         time.sleep(5)
         y = you()
         if y:
-            if last and (y[0] < last[0] or y[1] < last[1]): last = (0, 0)   # (a new match: the counters started again)
-            if last: K += max(0, y[0] - last[0]); D += max(0, y[1] - last[1])
+            if last and (y[0] < last[0] or y[1] < last[1] or y[2] < last[2]): last = (0, 0, 0, 0)   # (a new match: the counters started again)
+            if last: K += max(0, y[0] - last[0]); D += max(0, y[1] - last[1]); SH += max(0, y[2] - last[2]); HI += max(0, y[3] - last[3])
             last = y
+        # the lead track: one window of LEAD_SHOTS server-counted shots
+        if SH - lead['s0'] >= LEAD_SHOTS and knobs_read().get('NHOOK_TUNE', 1) > 0:
+            acc = (HI - lead['h0']) / max(1, SH - lead['s0']); kn = knobs_read(); pd = lead['pending']
+            if pd:
+                worse = lead['acc_before'] is not None and acc < lead['acc_before'] - 0.03
+                if worse:
+                    if pd['old'] is None: kn.pop('NHOOK_BOT_LEAD_X', None)
+                    else: kn['NHOOK_BOT_LEAD_X'] = pd['old']
+                    knobs_write(kn); lead['dir'] = -lead['dir']
+                log({'event': 'lead verdict', 'knob': 'NHOOK_BOT_LEAD_X', 'from': pd['old'], 'to': pd['new'], 'acc_before': lead['acc_before'], 'acc_after': round(acc, 3), 'kept': not worse})
+                lead['acc_before'] = lead['acc_before'] if worse else round(acc, 3); lead['pending'] = None
+            else:
+                lead['acc_before'] = round(acc, 3)
+                kn = knobs_read(); cur = kn.get('NHOOK_BOT_LEAD_X', 1.0); new = round(min(3.0, max(0.0, cur + 0.25 * lead['dir'])), 3)
+                if new == cur: lead['dir'] = -lead['dir']; new = round(min(3.0, max(0.0, cur + 0.25 * lead['dir'])), 3)
+                old = kn.get('NHOOK_BOT_LEAD_X'); kn['NHOOK_BOT_LEAD_X'] = new; knobs_write(kn); lead['pending'] = {'old': old, 'new': new}
+                log({'event': 'lead step', 'knob': 'NHOOK_BOT_LEAD_X', 'from': cur, 'to': new, 'acc_before': lead['acc_before'], 'shots': SH - lead['s0']})
+            lead['s0'] = SH; lead['h0'] = HI
         try: sz = os.path.getsize(WHY)
         except OSError: continue
         if sz < off: off = 0

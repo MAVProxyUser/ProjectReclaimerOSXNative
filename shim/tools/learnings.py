@@ -68,6 +68,11 @@ def main():
     for e in dec: e['f'] = duel_features(e)
     S = []   # sections
     def sec(topic, items): S.append({'topic': topic, 'items': [i for i in items if i]})
+    # (2026-11-09, the user: "i feel like the *lessons* in 'what the game is learning' are not applied to the walkers kernel"): a lesson
+    # that maps onto a walker setting writes it here -> tracks/walker-lessons.json, which the walker reads as a layer under its live
+    # knob file (nbot.c ls_get: the Walker tab's own settings still win); each item's "walker" line says how the walker uses it
+    WL = {}; WHY = {}
+    def wl(knob, val, title): WL[knob] = round(float(val), 3); WHY[knob] = title
     def item(title, text, n, mp=None, weak=False): return {'title': title, 'text': text, 'n': n, 'map': mp, 'weak': weak or n < MIN}
     meta = [r for r in R if r.get('kind') == 'meta']
     src = {'recordings': len(meta), 'minutes': round(sum(r['seconds'] for r in meta) / 60), 'duels': len(D), 'decided': len(dec), 'maps': len({r['map'] for r in meta})}
@@ -79,6 +84,8 @@ def main():
     lead = [e for e in dec if (e['ctx']['a_sh'] + e['ctx']['a_hp']) - (e['ctx']['b_sh'] + e['ctx']['b_hp']) > 0.5]; fl, nl = rate(lead, lambda e: e['out']['win'] == 'a')
     behind = [e for e in dec if (e['ctx']['a_sh'] + e['ctx']['a_hp']) - (e['ctx']['b_sh'] + e['ctx']['b_hp']) < -0.5]; fb, nb = rate(behind, lambda e: e['out']['win'] == 'a')
     above = [e for e in dec if -e['ctx']['dz'] > 2]; fab, nab = rate(above, lambda e: e['out']['win'] == 'a'); level = [e for e in dec if abs(e['ctx']['dz']) <= 0.5]; flv, nlv = rate(level, lambda e: e['out']['win'] == 'a')
+    if nl and nb and min(nl, nb) >= MIN: wl('NHOOK_U_RECHARGE', 65 if fl - fb > 0.15 else 0, 'Pick fights with your shields up')
+    if nab and nlv and min(nab, nlv) >= MIN: wl('NHOOK_U_HOLD', max(50, min(85, 65 + 100 * (fab - flv))), 'Take the high ground')
     sec('The fundamentals', [
         item('Shoot first', 'Whoever opens fire wins %s of the duels that end in a kill.' % pc(f), n) if n else None,
         item('Never get caught looking away', 'A defender looking more than 60 deg away when shot wins only %s; one already facing the attacker wins %s.' % (pc(fa), pc(ff)), min(na_, nf)) if na_ and nf else None,
@@ -98,8 +105,12 @@ def main():
         return out
     wt = wtable(W, 10)
     items = []
+    WRANK = []
     if wt:
         by_kd = sorted(wt, key=lambda x: -x[2]); by_kpm = sorted(wt, key=lambda x: -x[1])
+        # (11:55: the walker's weapon ranks from this table -- K/D x sqrt(kills a minute held), 10+ minutes held; it was a fixed list in
+        #  nbot.c, which also missed the HUD's "Energy Blade" -- written as tag-style keys to walker-lessons.json "_wrank", best first)
+        WRANK = [w.lower().replace(' ', '_') for w, kpm, kd, k, d, mn in sorted(wt, key=lambda x: -(x[2] * math.sqrt(max(0.0, x[1]))))]
         items.append(item('Best weapon overall (K/D)', ', '.join('%s %.2f' % (wname(w), kd) for w, kpm, kd, k, d, mn in by_kd[:4]) + ' -- kills per death of the players holding it.', sum(x[3] + x[4] for x in by_kd[:4])))
         items.append(item('Fastest killers (kills a minute held)', ', '.join('%s %.1f' % (wname(w), kpm) for w, kpm, kd, k, d, mn in by_kpm[:4]) + '.', sum(x[3] for x in by_kpm[:4])))
         worst = by_kd[-2:]; items.append(item('Weakest in hand', ', '.join('%s %.2f K/D' % (wname(w), kd) for w, kpm, kd, k, d, mn in worst) + ' -- swap them when you can.', sum(x[3] + x[4] for x in worst)))
@@ -161,14 +172,19 @@ def main():
         r_lo = sum(e['out']['win'] == win_side for e in lo) / len(lo); r_hi = sum(e['out']['win'] == win_side for e in hi) / len(hi)
         return r_lo, r_hi, lo[-1]['f'][key], hi[0]['f'][key], len(v)
     s_ = split_rate(dec, 'b_strafe', 'b', 'b')
+    if s_ and s_[0] > 0: wl('NHOOK_BOT_STRAFE_DEF', max(0.5, min(1.6, (s_[1] / s_[0]) ** 2)), 'Strafe when you are shot')
     if s_: items.append(item('Strafe when you are shot', 'Defenders who strafed hardest (RMS %.1f+ u/s) won %s of their duels; the least strafing (under %.1f) %s.' % (s_[3], pc(s_[1]), s_[2], pc(s_[0])), s_[4]))
     s_ = split_rate(dec, 'a_strafe', 'a', 'a')
+    if s_ and s_[0] > 0: wl('NHOOK_BOT_STRAFE_ATK', max(0.3, min(1.5, (s_[1] / s_[0]) ** 2)), 'Strafe while you attack')
     if s_: items.append(item('Strafe while you attack', 'Attackers strafing hardest won %s; the least strafing %s.' % (pc(s_[1]), pc(s_[0])), s_[4]))
     jb = [e for e in dec if e['f']['b_jumps'] > 0]; nj = [e for e in dec if e['f']['b_jumps'] == 0]
+    if jb and nj and min(len(jb), len(nj)) >= MIN: wl('NHOOK_BOT_FJUMP_DEF', 1 if sum(e['out']['win'] == 'b' for e in jb) / len(jb) > sum(e['out']['win'] == 'b' for e in nj) / len(nj) else 0, 'Jumping under fire')
     if jb and nj: items.append(item('Jumping under fire', 'Defenders who jumped during the fight won %s; those who stayed on the ground %s.' % (pc(sum(e['out']['win'] == 'b' for e in jb) / len(jb)), pc(sum(e['out']['win'] == 'b' for e in nj) / len(nj))), min(len(jb), len(nj))))
     ja = [e for e in dec if e['f']['a_jumps'] > 0]; nja = [e for e in dec if e['f']['a_jumps'] == 0]
+    if ja and nja and min(len(ja), len(nja)) >= MIN: wl('NHOOK_BOT_FJUMP_ATK', 1 if sum(e['out']['win'] == 'a' for e in ja) / len(ja) > sum(e['out']['win'] == 'a' for e in nja) / len(nja) else 0, 'Jumping while attacking')
     if ja and nja: items.append(item('Jumping while attacking', 'Attackers who jumped won %s; grounded attackers %s.' % (pc(sum(e['out']['win'] == 'a' for e in ja) / len(ja)), pc(sum(e['out']['win'] == 'a' for e in nja) / len(nja))), min(len(ja), len(nja))))
     s_ = split_rate([e for e in dec if e['f']['a_close'] is not None], 'a_close', 'a', 'a')
+    if s_: wl('NHOOK_BOT_CLOSE', max(0.0, min(1.0, 0.4 + 2 * (s_[1] - s_[0]))), 'Push or hold')
     if s_: items.append(item('Push or hold', 'Attackers who pushed in fastest (%.1f+ u/s toward the enemy) won %s; those backing off (%.1f or less) %s.' % (s_[3], pc(s_[1]), s_[2], pc(s_[0])), s_[4]))
     sec('Movement in a fight', items)
 
@@ -177,6 +193,11 @@ def main():
     items = []
     if G:
         tg = [e for e in G if e['out'].get('a_throws')]; ng = [e for e in G if not e['out'].get('a_throws')]
+        # (11:55: the walker threw ~2 grenades a minute at the coach's GRENX 0.237 -- 4x the players' rate -- while attackers who throw
+        #  win less: the time between its throws = the players' x (win without / win with)^2)
+        if tg and ng and min(len(tg), len(ng)) >= MIN:
+            ww, wo = sum(e['out']['win'] == 'a' for e in tg) / len(tg), sum(e['out']['win'] == 'a' for e in ng) / len(ng)
+            if ww > 0: wl('NHOOK_BOT_GRENX', max(0.5, min(3.0, (wo / ww) ** 2)), 'Open with a grenade?')
         if tg and ng: items.append(item('Open with a grenade?', 'Attackers who threw a grenade in the duel won %s; without one %s.' % (pc(sum(e['out']['win'] == 'a' for e in tg) / len(tg)), pc(sum(e['out']['win'] == 'a' for e in ng) / len(ng))), min(len(tg), len(ng))))
         th = sorted(x[1] for e in G for x in (e['out'].get('a_throws') or []) + (e['out'].get('b_throws') or []) if e['out']['win'] in ('a', 'b'))
         if th: items.append(item('Grenade distance', 'Grenades in fights are thrown from %.0f-%.0f units (middle half), median %.0f.' % (th[len(th) // 4], th[3 * len(th) // 4], th[len(th) // 2]), len(th)))
@@ -207,6 +228,7 @@ def main():
         if len(st) >= 10 and len(ns) >= 10: bits.append('strafing hard %s vs barely %s' % (pc(sum(surv(e) for e in st) / len(st)), pc(sum(surv(e) for e in ns) / len(ns))))
         if len(jm) >= 10: bits.append('jumping %s' % pc(sum(surv(e) for e in jm) / len(jm)))
         if len(gp) >= 10 and len(ngp) >= 10: bits.append('when it paused firing 1.2+ s (a reload, a lost aim) %s vs %s' % (pc(sum(surv(e) for e in gp) / len(gp)), pc(sum(surv(e) for e in ngp) / len(ngp))))
+        if c == 'sword' and best: wl('NHOOK_BOT_KITE', max(3, min(12, best[0] if best[0] > 0 else 6)), 'Surviving a Sword or Hammer')
         items.append(item('Surviving %s' % label, 'Shot at by %s, the defender survives %s overall; %s.' % (label, pc(sum(surv(e) for e in sub) / len(sub)), '; '.join(bits)), len(sub)))
     sec('Surviving a specific weapon', items)
 
@@ -319,7 +341,44 @@ def main():
             pc(len(f2) / len(IT)), sorted(i['first_s'] for i in f2)[len(f2) // 2] if f2 else 0, pc(sum(bool(i['first_was_nearest']) for i in f2) / max(1, len(f2)))), len(IT)))
     sec('Radar, revenge, power items', items)
 
-    out = {'updated': now, 'source': src, 'min_cases': MIN, 'sections': S}
+    # how the walker uses each lesson (by title; the per-map titles by their shape)
+    USE = {
+        'Shoot first': 'applied: it fires the moment its aim line goes through a target in its weapon\'s reach -- no reaction wait (NHOOK_BOT_FIRE_REACT 0)',
+        'Never get caught looking away': 'applied: it turns to whoever is hurting it (a second attacker takes the aim) and looks at radar contacts',
+        'Weakest in hand': 'not yet: its weapon ranks are a fixed list, not these K/D numbers',
+        'Best weapon overall (K/D)': 'not yet: its weapon ranks are a fixed list, not these K/D numbers',
+        'Fastest killers (kills a minute held)': 'not yet: its weapon ranks are a fixed list',
+        '1v1 vs outnumbered': 'applied: outnumbered deaths drive the death tuner (cover sooner, push less)',
+        'Outnumbered: run or stand?': 'applied: under fire it looks for cover instead of backing off',
+        'Outnumbered: have a teammate near': 'applied in team games: it closes up on teammates (teamwork goals)',
+        'Teammates save lives': 'applied in team games: it goes to the aid of a teammate under attack',
+        'Cohesion in large team games': 'applied in team games: the teamwork goals use these distances',
+        'Open with a grenade?': 'not yet: its grenade rate comes from the players\' throw rate x the coach\'s GRENX',
+        'Grenade distance': 'applied: it throws only inside the players\' grenade band (engage model)',
+        'Grenade back when attacked': 'no change: no difference in the data',
+        'The radar works': 'not yet: it does not crouch-walk to stay off enemy radar',
+        'Revenge?': 'applied: revenge is drawn with the players\' own odds over chance -- here none, so almost never',
+        'Power items go fast': 'applied in part: power items are goals by value and distance; it does not time their respawns yet',
+    }
+    for sct in S:
+        for it in sct['items']:
+            t = it['title']; k = [kn for kn, ti in WHY.items() if ti == t]
+            if k: it['walker'] = 'sets ' + ', '.join('%s %s' % (kn, WL[kn]) for kn in k) + ' (walker-lessons.json; a value on the Walker tab wins)'
+            elif t in USE: it['walker'] = USE[t]
+            elif t.startswith('Best weapon on '): it['walker'] = 'applied in part: power weapons are fetch goals; the map\'s best is not preferred yet'
+            elif t.endswith(': where it wins'): it['walker'] = 'applied: its range band per weapon class (fighting distance, switching by range)'
+            elif t.startswith('Surviving '): it['walker'] = 'applied: kite a sword / hammer, strafe under fire; distance per weapon from the range bands'
+            elif t.endswith(': where to walk'): it['walker'] = 'applied: its walking graph steers around the map\'s death hot spots'
+            elif ' own (' in t: it['walker'] = 'applied: the weapon zones -- it switches to that weapon for a target there, and for the hunt'
+            elif t.startswith('Switching '): it['walker'] = 'applied: it switches at the players\' distance for that weapon pair'
+            elif t == 'Under active camo': it['walker'] = 'applied: under camo it holds fire beyond its range band unless hit'
+    for sct in S:
+        for it in sct['items']:
+            if it['title'] in ('Best weapon overall (K/D)', 'Fastest killers (kills a minute held)', 'Weakest in hand') and WRANK:
+                it['walker'] = 'applied: its weapon ranks (which weapon is "better" for switching and picking up) are this table, K/D x sqrt(kills a minute): ' + ', '.join(WRANK[:5]) + ' ...'
+    lp = os.path.join(TR, 'walker-lessons.json'); lw = dict(WL); lw['_why'] = WHY; lw['_updated'] = now; lw['_wrank'] = WRANK
+    json.dump(lw, open(lp + '.tmp', 'w'), indent=1); os.replace(lp + '.tmp', lp)
+    out = {'updated': now, 'source': src, 'min_cases': MIN, 'sections': S, 'walker': WL}
     tmp = os.path.join(TR, 'learnings.json.tmp'); json.dump(out, open(tmp, 'w'), indent=1); os.replace(tmp, os.path.join(TR, 'learnings.json'))
     if not QUIET:
         print('What the game is learning -- %d recordings, %d min, %d duels (%d decided), %d maps' % (src['recordings'], src['minutes'], src['duels'], src['decided'], src['maps']))

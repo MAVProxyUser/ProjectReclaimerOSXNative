@@ -115,7 +115,36 @@ static void lk_tick(void) {
     memcpy(g_lk, k, sizeof k); g_nlk = nk; mt = st.st_mtimespec; sz = st.st_size; had = 1;
     nlog("[nhook] [knobs] live from %s: %s", p, nk ? list : "(none)"); }
 static int lk_get(const char* n, float* v) { for (int i = 0; i < g_nlk; i++) if (!strcmp(g_lk[i].n, n)) { *v = g_lk[i].v; return 1; } return 0; }
-static void lk_over(float* v, const char* n) { float x; if (lk_get(n, &x)) *v = x; }
+// LESSONS (2026-11-09 11:50, the user: "i feel like the *lessons* in 'what the game is learning' are not applied to the walkers kernel"):
+// shim/tools/learnings.py writes the settings its lessons call for to tracks/walker-lessons.json (strafe / jump by role, push, the
+// high ground, shields up, the sword's distance ...); they apply UNDER the live knob file -- a value set on the Walker tab wins -- and
+// over the launch values. Re-read within 2 s of a change; NHOOK_BOT_LESSONS=0 (environment or live knob) = off. [lessons] lines
+static LiveKnob g_ls[64]; static int g_nls;
+static char g_wr[40][40]; static int g_nwr;   // ("_wrank": the players' weapons best first, tag-style keys -- bot_wpn_rank)
+static void ls_tick(void) {
+    static double t; double now = mono_s(); if (now - t < 2.0) return; t = now;
+    static struct timespec mt; static int had; struct stat st; char p[1100]; const char* h = getenv("HOME");
+    snprintf(p, sizeof p, "%s/Library/Application Support/ReclaimerMac/tracks/walker-lessons.json", h ? h : "/tmp");
+    if (stat(p, &st) != 0) { if (had) { had = 0; g_nls = 0; } return; }
+    if (had && st.st_mtimespec.tv_sec == mt.tv_sec && st.st_mtimespec.tv_nsec == mt.tv_nsec) return;
+    FILE* f = fopen(p, "r"); if (!f) return; char b[16384]; size_t n = fread(b, 1, sizeof b - 1, f); fclose(f); b[n] = 0;
+    LiveKnob k[64]; int nk = 0; const char* q = b; char list[700]; int lq = 0; list[0] = 0;
+    while (nk < 64 && (q = strchr(q, '"'))) { const char* e = strchr(q + 1, '"'); if (!e) break; size_t L = (size_t)(e - q - 1);
+        const char* c = e + 1; while (*c == ' ' || *c == ':' || *c == '\t') c++; char* end; float v = strtof(c, &end);
+        if (end != c && L > 6 && L < sizeof k[0].n && !strncmp(q + 1, "NHOOK_", 6)) { memcpy(k[nk].n, q + 1, L); k[nk].n[L] = 0; k[nk].v = v;
+            if (lq < (int)sizeof list - 60) lq += snprintf(list + lq, sizeof list - (size_t)lq, "%s%s=%.3g", nk ? " " : "", k[nk].n + 6, v); nk++; }
+        q = end != c ? end : e + 1; }
+    memcpy(g_ls, k, sizeof k); g_nls = nk; mt = st.st_mtimespec; had = 1;
+    { int nw = 0; const char* w = strstr(b, "\"_wrank\""); const char* end = w ? strchr(w, ']') : 0; w = w ? strchr(w, '[') : 0;
+      while (w && end && nw < 40) { const char* a = strchr(w, '"'); if (!a || a > end) break; const char* z = strchr(a + 1, '"'); if (!z || z > end) break;
+          size_t L = (size_t)(z - a - 1); if (L > 0 && L < sizeof g_wr[0]) { memcpy(g_wr[nw], a + 1, L); g_wr[nw][L] = 0; nw++; } w = z + 1; }
+      g_nwr = nw; }
+    nlog("[nhook] [lessons] from the players' data (%s): %s; %d weapons ranked%s%s", p, nk ? list : "(none)", g_nwr, g_nwr ? ", best " : "", g_nwr ? g_wr[0] : ""); }
+static int ls_get(const char* n, float* v) {
+    static int off = -1; if (off < 0) { const char* e = getenv("NHOOK_BOT_LESSONS"); off = e && !strcmp(e, "0"); }
+    float on = 1; if (off || (lk_get("NHOOK_BOT_LESSONS", &on) && on <= 0)) return 0;
+    for (int i = 0; i < g_nls; i++) if (!strcmp(g_ls[i].n, n)) { *v = g_ls[i].v; return 1; } return 0; }
+static void lk_over(float* v, const char* n) { float x; if (lk_get(n, &x)) *v = x; else if (ls_get(n, &x)) *v = x; }
 
 // halo3's control record of local player 0 (engine thread)
 // ---- the fighter (2026-11-08, NHOOK_BOT_FIGHT=1; the user: "make 3-4 walkers have a battle ... learn to mimic actual players"):
@@ -396,7 +425,15 @@ static void bot_idle(const char* why) {   // NHOOK_SPAR_LOG: why the aim / walke
     static double tl; static const char* last; double now = mono_s(); if (!bot_log() || (why == last && now - tl < 5)) return; tl = now; last = why; nlog("[nhook] [spar] idle: %s", why); }
 // weapons by preference, best first (what the recorded players carried besides the assault rifle -- the Carbine 44% of the time --
 // and the power weapons); a weapon not listed ranks below all of these
-static int bot_wpn_rank(const char* n0) { static const char* const pref[] = {"rocket_launcher", "spartan_laser", "sniper_rifle", "beam_rifle", "battle_rifle", "covenant_carbine",
+// (11:55: with the lessons' "_wrank" -- the players' K/D x kill rate per weapon -- the rank is its place there; weapons not in it rank
+//  after, by the fixed list. NHOOK_BOT_WRANK_DATA=0 (live) = the fixed list only)
+static int bot_wpn_rank_fixed(const char* n0);
+static int bot_wpn_rank(const char* n0) {
+    float on = 1; lk_over(&on, "NHOOK_BOT_WRANK_DATA");
+    if (n0 && g_nwr > 0 && on > 0) { char nb[96]; const char* n = bot_tagkey(n0, nb, sizeof nb); for (int i = 0; i < g_nwr; i++) if (strstr(n, g_wr[i])) return i;
+        return g_nwr + bot_wpn_rank_fixed(n0); }
+    return bot_wpn_rank_fixed(n0); }
+static int bot_wpn_rank_fixed(const char* n0) { static const char* const pref[] = {"rocket_launcher", "spartan_laser", "sniper_rifle", "beam_rifle", "battle_rifle", "covenant_carbine",
     "shotgun", "excavator", "flak_cannon", "energy_sword", "gravity_hammer", "brute_shot", "assault_rifle", "spike_rifle", "smg", "plasma_rifle", "needler", "magnum", "plasma_pistol", 0};   /* (10:35: the rest ranked -- unknown = 50 made a Spiker / SMG "worse than anything") */   /* (08:15: excavator = the Mauler, flak_cannon = the Fuel Rod: Halo 3's tag names) */ if (!n0) return 99; char nb[96]; const char* n = bot_tagkey(n0, nb, sizeof nb); for (int i = 0; pref[i]; i++) if (strstr(n, pref[i])) return i; return 50; }
 // ---- the walker's own inventory and power-ups (2026-11-08; the user: "the walker should be aware of its own inventory, and power up
 // status as well"): the held and the other weapon (class + rank), grenades by type, an overshield (shield above 1), active camo
@@ -879,6 +916,12 @@ static DuelE* du_get(uint32_t h, int add) {
     if (!add) return 0; int k = g_ndu < 12 ? g_ndu++ : 0;
     if (g_ndu == 12) { double old = 1e30; for (int i = 0; i < 12; i++) { double t = g_du[i].vis_last > g_du[i].aim_last ? g_du[i].vis_last : g_du[i].aim_last; if (t < old) { old = t; k = i; } } }
     memset(&g_du[k], 0, sizeof g_du[k]); g_du[k].h = h; g_du[k].vit0 = -1; return &g_du[k]; }
+// (11:50, the lessons "Jumping under fire" / "Jumping while attacking" / "Strafe ... ": the role in the duel with h -- 1 attacking (it
+//  fired at h before h aimed at it), -1 defending (h aimed at it first), 0 not known)
+static int du_role(uint32_t h) { const DuelE* e = h ? du_get(h, 0) : 0; if (!e) return 0;
+    if (e->fire_t > 0 && (e->aim_t <= 0 || e->fire_t <= e->aim_t + 0.1)) return 1;
+    if (e->aim_t > 0 && (e->fire_t <= 0 || e->aim_t < e->fire_t - 0.1)) return -1;
+    return 0; }
 static void du_tick(double now, const NovObj* objs, int n, int me, uint32_t tgt, int trig) {
     // (called only while alive: why_note clears the table at a death)
     if (me < 0) return; const NovObj* o = &objs[me]; static float sprev = 1; if (o->dead) return;
@@ -970,7 +1013,8 @@ static int bot_head(const NovObj* t, double now, float* out) {   // -> 1: out = 
 #endif
 }
 static float g_bot_head_r = -1;   // (the current target's head radius, -1 = not known)
-static float g_bot_head_c[3];      // (... and its centre: the fire gate's hit test)
+static float g_bot_head_c[3];      // (... and its centre: the fire gate's hit test -- where it WILL be, the lead below)
+static float g_bot_body_c[3];      // (the target's centre where it will be: the hit test's body column)
 // the distance from the line cam + s * dv (s > 0) to the point P; behind the camera = far
 static float ray_pd(const float* cam, const float* dv, const float* P) {
     float wx = P[0] - cam[0], wy = P[1] - cam[1], wz = P[2] - cam[2], s = wx * dv[0] + wy * dv[1] + wz * dv[2];
@@ -993,7 +1037,7 @@ static void bot_models_tick(void) {   // (live knobs: the models re-read when th
     if (stat(p, &st) == 0) { if (m4 && st.st_mtime != m4) { g_mel.loaded = 0; mel_load(); nlog("[nhook] [knobs] melee.json changed: re-read"); } m4 = st.st_mtime; } }
 static void bot_step_body(void) {
     double now = mono_s(); int spar = g_bot_spar, mode = bot_walk_ok() ? nav_mode() : 0;
-    lk_tick(); bot_models_tick();   // (live knobs and models: no restart)
+    lk_tick(); ls_tick(); bot_models_tick();   // (live knobs, the lessons and models: no restart)
     static int diag0 = -1; if (diag0 < 0) diag0 = getenv("NHOOK_BOT_THROTTLE") || getenv("NHOOK_BOT_BTNSCAN") || getenv("NHOOK_BOT_FACE") || getenv("NHOOK_BOT_HOLDBTN");
     int testb = g_bot_testbtn && now < g_bot_testbtn_until, diag = diag0 || testb;
     if ((!spar && !mode && !diag) || !(bot_allowed() || g_bot_shadow) || !g_gameplay_t0 || now - g_gameplay_t0 < 3.0) { g_bot_out = 0; g_nav_act = 0; g_bot_err = -1;
@@ -1084,8 +1128,29 @@ static void bot_step_body(void) {
             if (!prec && !(hall > 0)) { float ab = 0.2f; lk_over(&ab, "NHOOK_BOT_AIM_BODY"); ap[2] = t->c[2] + ab * t->r; }
             // (11:30: automatic weapons track the head but aim at the NECK, NHOOK_BOT_HEAD_DZ_AUTO (-1.5 head radii, live): spread / drift
             //  upward still hits the head, downward the chest -- aimed at the head itself every shot drifting up missed everything)
+            // THE HEAD'S PATH (11:40, the user: "classic inability to lead a shot, and predict the path of the head"): the shot meets
+            //  the head where it will BE -- the head node's own velocity (smoothed from its positions every 0.06 s+: crouching, jumping,
+            //  strafing; the body's velocity before there is one) x the lead time: NHOOK_BOT_LEAD_LAT (0.08 s: the host registers a
+            //  client's bullets with no lag compensation, and the target as drawn is already behind) + the bullet's flight (distance /
+            //  the weapon class's speed x NHOOK_BOT_PROJ_SPEED) + one bot step, all x NHOOK_BOT_LEAD_X (1; death-tuner.py tunes it on
+            //  the server's registered accuracy). The fire gate's hit test uses the same predicted head and body
+            float tl = 0; { const char* hc2 = g_inv.held_c ? g_inv.held_c : ""; float lat = 0.08f, lx = 1, psx = 1; lk_over(&lat, "NHOOK_BOT_LEAD_LAT"); lk_over(&lx, "NHOOK_BOT_LEAD_X"); lk_over(&psx, "NHOOK_BOT_PROJ_SPEED");
+                float spd = (!strcmp(hc2, "sniper") ? 2000.0f : !strcmp(hc2, "precision") ? 400.0f : !strcmp(hc2, "auto") ? 300.0f : !strcmp(hc2, "shotgun") ? 250.0f : !strcmp(hc2, "rocket") ? 40.0f : 300.0f) * (psx > 0.05f ? psx : 0.05f);
+                float dd2 = sqrtf((t->c[0] - cam[0]) * (t->c[0] - cam[0]) + (t->c[1] - cam[1]) * (t->c[1] - cam[1]) + (t->c[2] - cam[2]) * (t->c[2] - cam[2]));
+                tl = (lat + dd2 / spd + 0.033f) * lx; if (tl < 0) tl = 0; if (tl > 0.8f) tl = 0.8f; }
+            static uint32_t hv_h; static float hv_p[3], hv_v[3]; static double hv_t; static int hv_ok;
+            g_bot_body_c[0] = t->c[0] + t->vel[0] * tl; g_bot_body_c[1] = t->c[1] + t->vel[1] * tl; g_bot_body_c[2] = t->c[2] + t->vel[2] * tl;
+            if (!prec && !(hall > 0)) { float ab = 0.2f; lk_over(&ab, "NHOOK_BOT_AIM_BODY"); ap[2] = t->c[2] + ab * t->r; }
+            // (11:30: automatic weapons track the head but aim at the NECK, NHOOK_BOT_HEAD_DZ_AUTO (-1.5 head radii, live): spread / drift
+            //  upward still hits the head, downward the chest -- aimed at the head itself every shot drifting up missed everything)
             else if (ha_on > 0 && bot_head(t, now, hp)) { float dz = hdz; if (!prec) { dz = -1.5f; lk_over(&dz, "NHOOK_BOT_HEAD_DZ_AUTO"); }
-                ap[0] = hp[0]; ap[1] = hp[1]; ap[2] = hp[2] + dz * hp[3]; g_bot_head_r = hp[3]; memcpy(g_bot_head_c, hp, 12); }
+                if (t->handle != hv_h || now - hv_t > 0.4) { hv_h = t->handle; memcpy(hv_p, hp, 12); memcpy(hv_v, t->vel, 12); hv_t = now; hv_ok = 0; }
+                else if (now - hv_t >= 0.06) { float dtt = (float)(now - hv_t), a = hv_ok ? 0.5f : 1.0f;
+                    for (int q = 0; q < 3; q++) { float v = (hp[q] - hv_p[q]) / dtt; if (v > 12) v = 12; if (v < -12) v = -12; hv_v[q] += a * (v - hv_v[q]); }
+                    memcpy(hv_p, hp, 12); hv_t = now; hv_ok = 1; }
+                float ph[3] = {hp[0] + hv_v[0] * tl, hp[1] + hv_v[1] * tl, hp[2] + hv_v[2] * tl};
+                ap[0] = ph[0]; ap[1] = ph[1]; ap[2] = ph[2] + dz * hp[3]; g_bot_head_r = hp[3]; memcpy(g_bot_head_c, ph, 12); }
+            if (g_bot_head_r < 0) { ap[0] += t->vel[0] * tl; ap[1] += t->vel[1] * tl; ap[2] += t->vel[2] * tl; }
             // LEAD (10:25): Halo 3 registers a client's bullets on the HOST, no lag compensation -- a third of the walker's shots through
             // a hitbox registered no damage (aim reg 0.67): the aim point leads the target by its velocity (units a second) x
             // NHOOK_BOT_AIMLEAD s (live, 0.06; follow-study.py hones it on registered hits a shot)
@@ -1198,9 +1263,9 @@ static void bot_step_body(void) {
             if (fht > 0 && g_bot_head_r > 0) { float pad = 0.03f; lk_over(&pad, "NHOOK_BOT_FIRE_PAD");
                 float dv[3] = {cosf(pitch0) * cosf(yaw0), cosf(pitch0) * sinf(yaw0), sinf(pitch0)};
                 can_hit = ray_pd(cam, dv, g_bot_head_c) < g_bot_head_r * 1.1f + pad;
-                float top = g_bot_head_c[2] - g_bot_head_r, bot = ftg.c[2] - 0.7f * ftg.r;
+                float top = g_bot_head_c[2] - g_bot_head_r, bot = g_bot_body_c[2] - 0.7f * ftg.r;
                 for (int k = 0; k <= 8 && !can_hit && top > bot; k++) { float f = (float)k / 8.0f;
-                    float P[3] = {ftg.c[0] + (g_bot_head_c[0] - ftg.c[0]) * f, ftg.c[1] + (g_bot_head_c[1] - ftg.c[1]) * f, bot + (top - bot) * f};
+                    float P[3] = {g_bot_body_c[0] + (g_bot_head_c[0] - g_bot_body_c[0]) * f, g_bot_body_c[1] + (g_bot_head_c[1] - g_bot_body_c[1]) * f, bot + (top - bot) * f};
                     if (ray_pd(cam, dv, P) < 0.22f + pad) can_hit = 1; } }
             g_bot_err = err; g_bot_fire = fvis && (fwr <= 0 || now - tacq > react) && can_hit && tdist < reach;
             // (07:35, the user: "hitting the critical hitbox is key. the game reticule has a red dot in some cases when it's a head shot,
@@ -1268,6 +1333,8 @@ static void bot_step_body(void) {
                   if (now - tmelee < mh) { fbtn |= bot_meleepad(); g_bot_melee_until = tmelee + mh; } }
               g_bot_pull = !nomel && bot_pull_weapon(g_inv.held); }
             { static float fj0 = -1; if (fj0 < 0) { const char* e = getenv("NHOOK_BOT_FJUMP"); fj0 = e ? strtof(e, 0) : 0.0f; } float fj = fj0; lk_over(&fj, "NHOOK_BOT_FJUMP");   // jumps a minute in a fight (walker-coach.py: the winners')
+              // (11:50, the lessons: jumping helps a defender, not an attacker -- x NHOOK_BOT_FJUMP_DEF / _ATK by the role, 1 = as before)
+              { int rl = du_role(ftg.handle); float jd = 1, ja = 1; lk_over(&jd, "NHOOK_BOT_FJUMP_DEF"); lk_over(&ja, "NHOOK_BOT_FJUMP_ATK"); fj *= rl < 0 ? jd : rl > 0 ? ja : 1.0f; }
               if (fj > 0 && bot_rand01() < fj * (float)dt / 60.0f) g_fjump_until = now + 0.25; }
             { float gd0 = 6, gd1 = 16; static int gset = -1; static double gnext; if (gset < 0) gset = getenv("NHOOK_BOT_GREN") != 0;   // (the players' band and rate unless NHOOK_BOT_GREN is set)
               int pl = g_eg.on && g_eg.gren_ok; if (pl) { gd0 = g_eg.gren_d0; gd1 = g_eg.gren_d1; }
@@ -1315,7 +1382,10 @@ static void bot_step_body(void) {
                           static double tl; if (bot_log() && now - tl > 5) { tl = now; nlog("[nhook] [fight] outranged: a %s at %.0f units vs my %s -- no closing in, strafing, a better weapon first", tcls, tdist, wc); } } } }
                 if (g_bot_camo_hold) r = 0.9f;   // (camo: walk in to the near edge of the band before the first shot)
                 if (now > tswitch) { side = -side; tswitch = now + g_bm.strafe_switch * kswitch * (0.6f + 0.8f * bot_rand01()); }
-                float lat = side * fminf(1.0f, kstrafe * (0.25f + g_bm.strafe_rms / run));
+                // (11:50, the lessons: attackers who strafe least win more, defenders who strafe hardest survive more -- the strafe x
+                //  NHOOK_BOT_STRAFE_ATK / _DEF by the role in this duel)
+                float ksr = kstrafe; { int rl = du_role(ftg.handle); float sa = 1, sd = 1; lk_over(&sa, "NHOOK_BOT_STRAFE_ATK"); lk_over(&sd, "NHOOK_BOT_STRAFE_DEF"); ksr *= rl > 0 ? sa : rl < 0 ? sd : 1.0f; }
+                float lat = side * fminf(1.0f, ksr * (0.25f + g_bm.strafe_rms / run));
                 if (g_eg.on && eg_move(wc, tdist, now, &el, &er)) {   // a real player's moves: across as recorded, toward / away pulled into the band
                     static float lsc0 = -1; if (lsc0 < 0) { const char* e = getenv("NHOOK_BOT_LIBSCALE"); lsc0 = e ? strtof(e, 0) : 1.0f; } float lsc = lsc0; lk_over(&lsc, "NHOOK_BOT_LIBSCALE");   // (the players' own moves: not the tactics' strafe scale)
                     lat = fmaxf(-1.0f, fminf(1.0f, lsc * el / run));

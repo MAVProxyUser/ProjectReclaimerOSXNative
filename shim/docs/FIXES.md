@@ -3286,6 +3286,37 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   switch presses (the learnt record bit): 0 of 32 took" -- 32 x "switching from PLASMA PISTOL to ASSAULT RIFLE" with the trigger held
   (the plasma pistol held = an overcharge held) while the earlier switches, 3 of 3 and 2 of 2, came with the trigger up. LOGIC: from a
   switch press until 0.15 s after it the trigger (and the reload click) stays up; PLASMA PISTOL joins the weapons whose trigger is pulsed.
+- **Weapon ranks and the grenade rate from the players' data** (2026-11-09 11:55; learnings.py WRANK / the grenade lesson, nbot.c
+  bot_wpn_rank / ls_tick "_wrank") — WHY: two lessons the walker ignored: its "better weapon" order was a fixed list (which missed the
+  HUD's "Energy Blade" -- only the tag name energy_sword was in it), and the coach's NHOOK_BOT_GRENX 0.237 had it throwing ~2 grenades
+  a minute, 4x the players' rate, though attackers who throw win less (70% vs 78%) and a throw is time not shooting. LOGIC: learnings.py
+  writes "_wrank" (weapons held 10+ minutes, by K/D x sqrt(kills a minute held), best first, tag-style keys) and NHOOK_BOT_GRENX =
+  (win without / win with)^2 to walker-lessons.json; bot_wpn_rank = the place in "_wrank" (others after it, by the fixed list;
+  NHOOK_BOT_WRANK_DATA=0 = the fixed list). The public walker's live file lost GRENX (the lesson owns it). Measured on the hit test +
+  head lead before this: 65% of its shots on target since (55% before), the scoreboard's accuracy 52.4% (48%), 7th of 19 by accuracy
+  in a 37-player Pit match (median 48%); the head share of hits 32% (55%: automatic weapons aim at the neck now).
+- **The players' lessons drive the walker: walker-lessons.json under the live knobs; jump / strafe by role** (2026-11-09 11:50;
+  shim/tools/learnings.py WL / USE, nbot.c ls_tick / ls_get / du_role, the fight jump and strafe) — WHY: the user: "i feel like the
+  *lessons* in 'what the game is learning' are not applied to the walkers kernel". Many were, but through the models where nobody
+  could see it (revenge odds, range bands, weapon zones, switch distances, death hot spots); others not at all (jumping and strafing
+  are role-dependent in the data, the high-ground bid was fixed, the sword distance hand-set) and two were contradicted by the
+  max-aggression preset (no recharge break-off: "pick fights with your shields up" -- 89% vs 51%). LOGIC: learnings.py writes the
+  settings its lessons call for to tracks/walker-lessons.json (refreshed with the data every 20 minutes): NHOOK_U_RECHARGE (shields
+  up), NHOOK_U_HOLD (65 + the high ground's edge), NHOOK_BOT_STRAFE_ATK / _DEF ((hardest / least strafing win rate)^2), NHOOK_BOT_FJUMP_ATK
+  / _DEF (jump only in the role where jumpers win), NHOOK_BOT_CLOSE (0.4 + 2 x the push edge), NHOOK_BOT_KITE (the sword's
+  best-surviving distance); the walker reads it as a layer between the launch values and the live knob file (a Walker tab value
+  wins; NHOOK_BOT_LESSONS=0 off; [lessons] lines). The role in a duel (du_role: it fired first = attacking, the other aimed first =
+  defending) scales the fight jump rate and the strafe. Every lesson on the Learnings tab gets a "walker" line: what it sets, how
+  the walker already uses it, or "not yet" (weapon K/D ranks, the grenade opener, radar stealth, power-item timing). The public
+  walker's live file lost U_RECHARGE 0 and CLOSE (the lessons own them); the Max aggression preset no longer sets them.
+- **Lead along the head's path; a lead tuner on the server's accuracy** (2026-11-09 11:40; nbot.c the aim point, the hit test;
+  shim/tools/death-tuner.py the lead track) — WHY: the user: "'fires on a cone around the head' classic inability to lead a shot, and
+  predict the path of the head". LOGIC: the head node's velocity (smoothed from its positions every 0.06 s+, the body's velocity
+  until then) x the lead time = NHOOK_BOT_LEAD_LAT (0.08 s: the host registers client bullets without lag compensation and the target
+  as drawn is already behind) + distance / the weapon class's bullet speed (sniper 2000, precision 400, automatic 300, shotgun 250,
+  rockets 40 units/s, x NHOOK_BOT_PROJ_SPEED) + one bot step, x NHOOK_BOT_LEAD_X; the aim point and the fire gate's hit test use the
+  predicted head and body. death-tuner.py's lead track: every 250 server-counted shots (the scoreboard's hits / shots) LEAD_X moves
+  0.25 in its direction; the next window puts it back and turns the direction if accuracy fell 3+ points.
 - **Fire only when the aim line goes through the target; automatic weapons aim at the neck** (2026-11-09 11:30; nbot.c the fire gate
   ray_pd / g_bot_head_c, the aim point) — WHY: the user, from the scoreboard: "we miss way more shots than the competition" -- the
   walker 54% of its shots on target (accuracy 48%), the best players 64-84% (53-60%); its misses a median 1.1 deg off. The trigger was
