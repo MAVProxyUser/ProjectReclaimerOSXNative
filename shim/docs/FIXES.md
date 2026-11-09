@@ -3272,6 +3272,19 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   a running battle, at every round end (our server's in_match true -> false) walker-coach.py round + match-study.py, then each
   walker's game restarted headless with its new knobs and the newest build (they rejoin in the lobby; the user's game and the
   server stay).
+- **No driving; the honk is the walkers' to detect; restarts that keep the teams** (2026-11-09 02:50; nbot.c gun_seated / honk_scan /
+  WINGMAN, shim/tools/walker-restart.sh, hold-teams.py) — WHY: the user: "walkers should not attempt to drive vehicles until they study
+  the player driving corpus from historic games" (a walker's boarding tap landed in a Wraith its teammate had just left: the driver's
+  seat), "honk detector should run on the walkers not me" (02:30 put it in the player's input logger). LOGIC: seat 0 of a vehicle with
+  no parent = the driver's: out at once (tap / hold in turn), whoever's vehicle it is -- a driving study first (the recordings have a
+  vehicle column). The player's game writes nothing now; honk_scan (in every walker, NHOOK_HONK_SCAN=0 off) keeps a copy of a driving
+  teammate's unit datum and vehicle datum (0x380 bytes each) and logs each byte that leaves its value and comes back within 1.5 s,
+  skipping bytes that pulse 10+ times a minute -> "[honkscan] unit|vehicle +0xNNN pulsed for N ms (wall t)", to match against the
+  player's own [input] bit-5 presses and name the honk field (then honk_age reads it; battles/honk.txt stays a manual trigger).
+  WINGMAN follows beyond 6 units until within 4 (it flapped at 6) and logs at most every 10 s. TEAMS: our server's RCON `team` answers
+  "This game has no teams." in these playlists even mid-match, so hold-teams.py cannot hold them; the auto-balance deals them anew at
+  every coach restart (all walkers at once) -- the gunner / wingman is whichever walker is on the human's team. walker-restart.sh
+  restarts walkers ONE at a time (each rejoins the smaller team, the one it left), each back in the server's list before the next.
 - **The gunner stays on, any of three vehicles, honks, the loyal wingman** (2026-11-09 02:30; nbot.c gun_* / bot_on_abuild / inp_log /
   the step's seated test and WINGMAN block, nstats.c g_human_unit) — WHY: the user, Third on his turret: "third has got to stop jumping
   out of the turret, and increase look sensitivity for aiming while in a vehicle. he should treat the wraith the same way if I jump

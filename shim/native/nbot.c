@@ -211,12 +211,12 @@ static volatile double g_bot_act_until, g_bot_switch_until;   // (the act / swit
 // (02:20, the user: "third has got to stop jumping out of the turret": act pressed while seated is "get out" -- the boarding pulse that
 //  seated it went on pressing. While seated the act bit only goes out inside a deliberate exit window)
 static volatile double g_bot_seat_t, g_gun_exit_until;
-// HONK (the user: "IF they do they MUST get back in, especially if the team mate honks"): the horn is melee while driving. The player's
-// game (NHOOK_INPUT_LOG) writes the wall time of each honk to <battles>/honk.txt (NHOOK_HONK_FILE); the walkers read it twice a second
+// HONK (the user: "IF they do they MUST get back in, especially if the team mate honks"; then "honk detector should run on the walkers
+// not me": nothing in the player's game). The walker's own detector is honk_scan below (finding the field first); honk.txt
+// (NHOOK_HONK_FILE: a wall time) stays as a manual trigger for tests
 static const char* honk_path(void) { static char p[1024]; if (!p[0]) { const char* e = getenv("NHOOK_HONK_FILE");
     if (e) snprintf(p, sizeof p, "%s", e); else snprintf(p, sizeof p, "%s/Library/Application Support/ReclaimerMac/battles/honk.txt", getenv("HOME") ? getenv("HOME") : "/tmp"); } return p; }
 static double wall_s(void) { struct timeval tv; gettimeofday(&tv, 0); return tv.tv_sec + tv.tv_usec * 1e-6; }
-static void honk_write(void) { FILE* f = fopen(honk_path(), "w"); if (f) { fprintf(f, "%.3f\n", wall_s()); fclose(f); } nlog("[nhook] [input] honk (melee while driving): %s", honk_path()); }
 static double honk_age(void) {   // seconds since the last honk (1e9: none)
     static double tr, last; double now = mono_s(); if (now - tr > 0.5) { tr = now; FILE* f = fopen(honk_path(), "r"); if (f) { double v = 0; if (fscanf(f, "%lf", &v) == 1) last = v; fclose(f); } }
     return last > 0 ? wall_s() - last : 1e9; }
@@ -261,8 +261,6 @@ static void inp_log(const uint8_t* act) {
     static uint64_t p8 = ~0ull; static uint8_t p2c = 0xFF, pw0 = 0xFF, pw2 = 0xFF, pg = 0xFF; static double t0;
     uint64_t b8 = *(const uint64_t*)(act + 8); uint8_t b2c = act[0x2c], w0 = 0xFF, w2 = 0xFF, gr = 0xFF;
     __atomic_fetch_or(&g_inp_b8_acc, b8, __ATOMIC_RELAXED);
-    if (p8 != ~0ull && (b8 & ~p8 & 0x20)) { uint64_t up = inp_unit_ptr(g_my_unit); uint32_t par = 0xFFFFFFFFu; int16_t st = -1;   // (melee while seated as the driver: a honk)
-        if (up && hb_read(up + 0x10, &par, 4) && par != 0xFFFFFFFFu && hb_read(up + 0x24E, &st, 2) && st == 0) honk_write(); }
     inp_context(p8 == ~0ull ? 0 : b8 & ~p8, (uint8_t)(p2c == 0xFF ? 0 : b2c & ~p2c));   // (every packet: the pending checks too)
     { InpUnit u = inp_unit(); if (u.ok) { w2 = (uint8_t)u.wslot; gr = (uint8_t)u.gtype; uint64_t up = inp_unit_ptr(g_my_unit); uint8_t x; if (up && hb_read(up + 0x260, &x, 1)) w0 = x; } }
     if (b8 == p8 && b2c == p2c && w0 == pw0 && w2 == pw2 && gr == pg) return;
@@ -519,13 +517,19 @@ static int gun_find(const NovObj* objs, int n, int me, const NovObj** wh, const 
 static int gun_seated(double now, const NovObj* objs, int n, int me, const float* cam, float yaw0, float pitch0) {   // -> 1: handled
     gun_vlist(now); const NovObj* o = &objs[me]; const NovObj* mv = gun_v(o->parent); const NovObj *wh = 0, *tu = 0;
     int served = gun_find(objs, n, me, &wh, &tu), mine = served && mv && ((tu && mv->handle == tu->handle) || mv->handle == wh->handle);
-    static double texit, tlog, tmiss[4]; g_bot_melee_until = 0; g_bot_switch_until = 0;
+    static double texit, tlog, tmiss[4]; static int ex; double exd; g_bot_melee_until = 0; g_bot_switch_until = 0;
     // (01:58, the user: "third needs to understand turret vs passenger seat. he's in the wrong spot": the Warthog itself is the driver's
     //  and the passenger's; the gunner sits on the turret (the vehicle parented to it). In the passenger seat with the turret free: out
     //  and board again from behind -- after 4 such misses in a minute it stays a passenger)
+    // NO DRIVING (02:45, the user: "walkers should not attempt to drive vehicles until they study the player driving corpus from historic
+    //  games"; a walker's tap landed in a Wraith its teammate had just left -- the driver's seat): seat 0 of a vehicle with no parent is
+    //  the driver's -- out at once, whoever's vehicle it is
+    if (mv && mv->parent == 0xFFFFFFFFu && o->seat == 0) { if (now - texit > 1.5) { texit = now; double d2 = (++ex & 1) ? 0.25 : 1.2; g_bot_act_until = now + d2; g_gun_exit_until = now + d2 + 0.1;
+            nlog("[nhook] [gunner] in the DRIVER's seat of %s: walkers do not drive -- getting out (act %.2f s)", hb_tag_name(mv->def), d2); }
+        g_bot_yaw = yaw0; g_bot_pitch = pitch0; g_bot_btn = 0; g_bot_fire = 0; g_bot_out = 1; g_nav_act = 0; return 1; }
     int passenger = mine && tu && mv->handle == wh->handle, tfree = 1;
     if (passenger) for (int i = 0; i < n; i++) if (objs[i].type == 0 && !objs[i].dead && objs[i].parent == tu->handle) tfree = 0;
-    static int ex; double exd;   // (an exit: a 0.25 s tap and a 1.2 s hold in turn -- Second's 0.8 s holds never got it out of a Banshee)
+    // (an exit: a 0.25 s tap and a 1.2 s hold in turn -- Second's 0.8 s holds never got it out of a Banshee)
     if (passenger && tfree && now - texit > 3.0 && !(tmiss[0] > 0 && now - tmiss[0] < 60.0)) {
         memmove(tmiss, tmiss + 1, 3 * sizeof(double)); tmiss[3] = now; texit = now; exd = (++ex & 1) ? 0.25 : 1.2; g_bot_act_until = now + exd; g_gun_exit_until = now + exd + 0.1;
         nlog("[nhook] [gunner] in the PASSENGER seat with the turret free: getting out to board the turret from behind");
@@ -580,6 +584,28 @@ static int gun_board(double now, const NovObj* objs, int n, int me, float* bpt, 
     bpt[0] = tu->c[0] - f[0] * bk - f[1] * sd; bpt[1] = tu->c[1] - f[1] * bk + f[0] * sd; bpt[2] = wh->c[2]; memcpy(face, tu->c, 12); *hog = wh->handle;
     float dx = bpt[0] - c[0], dy = bpt[1] - c[1]; *bd = sqrtf(dx * dx + dy * dy);
     g_gun_press_ok = stage && *bd < 0.7f && along < -0.3f; return 1; }
+// HONK SCAN (02:35): what a teammate's honk changes in ITS unit and its vehicle as THIS walker's game sees them is not known. While a
+// teammate drives (sits straight in a vehicle), the walker keeps the driver's unit datum (0x380 bytes) and the vehicle's and logs each
+// byte that leaves its value and returns within 1.5 s (a pulse) -- bytes pulsing more than 10 times a minute (animation, timers) are
+// skipped -> "[honkscan] unit|vehicle +0xNNN a -> b, back after N ms"; the player's own [input] bit-5 presses give the honk times to
+// match. Then the honk field replaces the scan. NHOOK_HONK_SCAN=0 = off.
+static void honk_scan(double now, const NovObj* objs, int n, int me) {
+    static int off = -1; if (off < 0) { const char* e = getenv("NHOOK_HONK_SCAN"); off = e && !strcmp(e, "0"); } if (off || me < 0) return;
+    static uint32_t hu = 0xFFFFFFFFu, hv = 0xFFFFFFFFu; static uint8_t base[2][0x380], away[2][0x380]; static double taway[2][0x380], pul[2][0x380][10]; static int have;
+    const NovObj* o = &objs[me]; const NovObj* drv = 0; const NovObj* veh = 0; gun_vlist(now);
+    for (int i = 0; i < n; i++) { const NovObj* t = &objs[i]; if (i == me || t->type || t->dead || t->parent == 0xFFFFFFFFu || bot_enemy(o, t)) continue;
+        const NovObj* v = gun_v(t->parent); if (v && v->parent == 0xFFFFFFFFu) { drv = t; veh = v; break; } }
+    if (!drv) { hu = hv = 0xFFFFFFFFu; have = 0; return; }
+    uint8_t cur[2][0x380]; if (!hb_read(drv->p, cur[0], 0x380) || !hb_read(veh->p, cur[1], 0x380)) return;
+    if (drv->handle != hu || veh->handle != hv || !have) { hu = drv->handle; hv = veh->handle; memcpy(base, cur, sizeof base); memset(away, 0, sizeof away); memset(pul, 0, sizeof pul); have = 1;
+        nlog("[nhook] [honkscan] watching my teammate %08x in %s %08x: honk a few times", hu, hb_tag_name(veh->def), hv); return; }
+    for (int w = 0; w < 2; w++) for (int i = 0; i < 0x380; i++) {
+        if (cur[w][i] != base[w][i]) { if (!away[w][i]) { away[w][i] = 1; taway[w][i] = now; } else if (now - taway[w][i] > 1.5) { base[w][i] = cur[w][i]; away[w][i] = 0; } continue; }
+        if (!away[w][i]) continue; away[w][i] = 0; double dur = now - taway[w][i];
+        int recent = 0; for (int k = 0; k < 10; k++) if (now - pul[w][i][k] < 60.0) recent++;
+        memmove(pul[w][i], pul[w][i] + 1, 9 * sizeof(double)); pul[w][i][9] = now;
+        if (recent < 10) nlog("[nhook] [honkscan] %s +0x%03x pulsed for %.0f ms (wall %.2f)", w ? "vehicle" : "unit", i, dur * 1e3, wall_s()); }
+}
 static void bot_step_body(void) {
     double now = mono_s(); int spar = g_bot_spar, mode = bot_walk_ok() ? nav_mode() : 0;
     static int diag0 = -1; if (diag0 < 0) diag0 = getenv("NHOOK_BOT_THROTTLE") || getenv("NHOOK_BOT_BTNSCAN") || getenv("NHOOK_BOT_FACE") || getenv("NHOOK_BOT_HOLDBTN");
@@ -609,6 +635,7 @@ static void bot_step_body(void) {
     { static int was = -1; if (me >= 0 && seated != was) { was = seated; gun_vlist(now); const NovObj* pv = gun_v(objs[me].parent);
         nlog("[nhook] [gunner] seated: %s (my unit %08x, the record's %08x, the player's %08x; seat %d, parent %08x %s)", seated ? "yes" : "no", objs[me].handle, meh, g_my_unit,
              objs[me].seat, objs[me].parent, pv ? hb_tag_name(pv->def) : "-"); } }
+    honk_scan(now, objs, n, me);   // (02:35: finding the field a teammate's honk changes, above)
     if (seated && gun_on() && !g_bot_shadow && gun_seated(now, objs, n, me, cam, yaw0, pitch0)) { plen = 0; g_bot_err = -1; return; }   // (the gunner, above)
     if (me < 0 || objs[me].dead || seated) { g_bot_out = 0; g_nav_act = 0; plen = 0; g_bot_err = -1;   // dead, respawning or in a vehicle
         static char w[96]; snprintf(w, sizeof w, me < 0 ? "the record's unit %08x is none of the %d units seen" : objs[me].dead ? "dead" : "in a vehicle", meh, n); bot_idle(me < 0 ? w : objs[me].dead ? "dead" : "in a vehicle"); return; }
@@ -885,8 +912,8 @@ static void bot_step_body(void) {
               float dx = t->c[0] - o->c[0], dy = t->c[1] - o->c[1], d = dx * dx + dy * dy;
               if (hu && (!human || d < bd)) { human = 1; bd = d; li = i; }
               else if (!human && !hu && t->handle < o->handle && (li < 0 || t->handle < objs[li].handle)) { li = i; bd = d; } }
-          if (li >= 0 && bd > 36.0f) { wing = 1; memcpy(lp, objs[li].c, 12);
-              if (!was || now - tw > 1.0) { tw = now; goal = -1; if (!was) nlog("[nhook] [wing] %.0f units from my %s: closing up", sqrtf(bd), human ? "human teammate" : "lead walker"); } } }
+          if (li >= 0 && bd > (was ? 16.0f : 36.0f)) { wing = 1; memcpy(lp, objs[li].c, 12);   // (follow beyond 6 units, until within 4)
+              static double tlog; if (!was || now - tw > 1.0) { tw = now; goal = -1; if (!was && now - tlog > 10.0) { tlog = now; nlog("[nhook] [wing] %.0f units from my %s: closing up", sqrtf(bd), human ? "human teammate" : "lead walker"); } } } }
       if (wing) { mode = 3; memcpy(g_bot_pt, lp, 12); g_bot_pt[2] -= 0.35f; } else if (was) goal = -1;
       was = wing; }
     if (mode && g_nav.ok) {
