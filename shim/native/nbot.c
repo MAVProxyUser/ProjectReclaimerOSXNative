@@ -947,6 +947,7 @@ static void why_note(double now, const DeathSnap* d) {
     else if (kd < 2.5f && (!strcmp(kw, "shotgun") || !strcmp(kw, "melee"))) { cause = "point blank"; snprintf(det, sizeof det, "%s at %.1f units", kw, kd); }
     else if (kl >= 0 && kl < 0.25f) { cause = "traded"; snprintf(det, sizeof det, "it was left with %.2f shield + health", kl); }
     else if (g_dmg_sh0 < 0.5f) { cause = "entered hurt"; snprintf(det, sizeof det, "my shield was %.2f when the fatal damage began", g_dmg_sh0); }
+    else if (k && k != d->tg && gap < 0 && seen_first) { cause = "ignored attacker"; snprintf(det, sizeof det, "it was in sight and shooting me; I stayed on %08x", d->tg); }
     else if (gap < 0 || gap > 0.5f) { cause = "slow start"; if (gap < 0) snprintf(det, sizeof det, "I never fired at it"); else snprintf(det, sizeof det, "I fired back %.2f s after it hurt me / came into sight", gap); }
     else if (strcmp(band, "in range") && strcmp(band, "?") && kin) { cause = "outranged"; snprintf(det, sizeof det, "my %s %s at %.0f units, its %s in range", mc, band, kd, kw); }
     else { cause = "outshot"; snprintf(det, sizeof det, "even start (fired back in %.2f s), it kept %.2f, I took %.2f off it", gap, kl, dmg); }

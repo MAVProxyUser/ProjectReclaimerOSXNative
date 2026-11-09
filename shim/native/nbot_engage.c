@@ -198,8 +198,10 @@ static int eg_choose(const NovObj* objs, int n, int me, const float* cam, float 
         int hl = eg_humanlike(); if (u->asked && (hl || now - u->asked_t < 1.0)) continue; u->asked = 1; u->asked_t = now;
         float dx = t->c[0] - cam[0], dy = t->c[1] - cam[1], off = fabsf(bot_wrap(atan2f(dy, dx) - yaw0)) * 57.2958f;
         float p = off < 45 ? g_eg.p_view : off >= 90 ? g_eg.p_behind : g_eg.p_mid;
-        int cur_att = 0; if (!hl) { EgUnit* cu = eg_unit(cur); cur_att = now - cu->att_t < 1.0; p = cur_att ? fmaxf(p, 0.5f) : 1.0f; }   // (coached: see EgUnit)
-        static float tx = -1; if (tx < 0) tx = hl ? 1.0f : eg_knob("NHOOK_BOT_TURNX", 0.5f);
+        // (2026-11-09 12:00: deaths to a visible attacker the walker never fired at while it shot someone else -- the "ignored attacker"
+        //  cause: the odds to turn when the target shoots too, NHOOK_BOT_SECOND_P (0.5), and the delay factor NHOOK_BOT_TURNX are live)
+        int cur_att = 0; if (!hl) { EgUnit* cu = eg_unit(cur); cur_att = now - cu->att_t < 1.0; p = cur_att ? fmaxf(p, eg_knob("NHOOK_BOT_SECOND_P", 0.5f)) : 1.0f; }   // (coached: see EgUnit)
+        float tx = hl ? 1.0f : eg_knob("NHOOK_BOT_TURNX", 0.5f);
         if (bot_rand01() < p) { sw_to = t->handle; sw_at = now + tx * g_eg.turn_s * (0.5f + bot_rand01()); if (bot_log()) nlog("[nhook] [fight] second attacker %08x (%.0f deg off%s): turning to it in %.1f s", t->handle, off, cur_att ? ", the target shoots too" : "", sw_at - now); }
         else if (bot_log()) nlog("[nhook] [fight] second attacker %08x (%.0f deg off): staying on the target", t->handle, off); }
     // TEAMWORK (team games; the user: "cooperate with other team mates toward a common offense, or if one comes to your aid, ensure

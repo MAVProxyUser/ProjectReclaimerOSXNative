@@ -1427,6 +1427,8 @@ const WK=[
   ['NHOOK_U_HUNT','Hunt enemies (priority)',10,0,100,1,'Going after enemies it saw or has on its radar, or along the lanes players use, when there is no fight. Higher = it stops wandering off for small weapon upgrades.'],
   ['NHOOK_U_FETCH','Fetch a better weapon (priority)',45,0,100,1,'The base worth of picking up a better weapon or ammo; each step of improvement adds the gain below, distance takes some off.'],
   ['NHOOK_U_FETCH_GAIN','Fetch: worth per step of improvement',6,0,20,0.5,'How much a better weapon adds to the fetch. An empty magazine makes any loaded weapon a big improvement.'],
+  ['NHOOK_BOT_SECOND_P','Turn to a second attacker (odds)',0.5,0,1,0.05,'When another enemy starts hitting it while its target shoots too: the chance it turns to the new one (1 if the target is not shooting).'],
+  ['NHOOK_BOT_TURNX','... turn delay x',0.5,0.1,1.5,0.05,'Multiplies the players\' delay before turning to a second attacker. Lower = turns sooner.'],
   ['NHOOK_BOT_HUNT_KEEP','Keep chasing a hidden target (s)',5,0,20,0.5,'Seconds it stays on a target it can no longer see before picking another.']]}];
 // (10:57, the user: "that 32% accuracy can't help ... missing that head hitbox!" -- the first version's 6 deg fire slack, trigger held at
 //  every range and firing after the target ducked spent the rounds: it fires the moment its aim is ON the enemy, aims at the head with
@@ -1453,7 +1455,7 @@ async function wkLoad(force){
 function wkFmt(v,st){ if(!st) return v>0?'on':'off'; const t=(+v).toFixed(st<0.01?3:st<1?2:0); return t.includes('.')?t.replace(/0+$/,'').replace(/\.$/,''):t; }
 // why it died (nbot.c why_note -> battles/follow/why-<nick>.jsonl) and the tuner's steps (shim/tools/death-tuner.py)
 const WK_CAUSE={'empty':'magazine empty','outnumbered':'outnumbered (2+ aiming)','unseen':'hit before it saw them','point blank':'point blank (shotgun / sword)',
-  'traded':'traded (killer nearly dead)','entered hurt':'started the fight hurt','slow start':'slow to fire back','outranged':'wrong range for its weapon','outshot':'out-shot in an even fight'};
+  'traded':'traded (killer nearly dead)','ignored attacker':'ignored an attacker for its target','entered hurt':'started the fight hurt','slow start':'slow to fire back','outranged':'wrong range for its weapon','outshot':'out-shot in an even fight'};
 const wkT=t=>new Date(t*1000).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
 function wkWhy(f){
   const w=f.why||[], t=f.tune||[], tuneOn=!((f.knobs||{}).NHOOK_TUNE<=0);

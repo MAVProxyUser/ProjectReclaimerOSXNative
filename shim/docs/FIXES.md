@@ -3286,6 +3286,13 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   switch presses (the learnt record bit): 0 of 32 took" -- 32 x "switching from PLASMA PISTOL to ASSAULT RIFLE" with the trigger held
   (the plasma pistol held = an overcharge held) while the earlier switches, 3 of 3 and 2 of 2, came with the trigger up. LOGIC: from a
   switch press until 0.15 s after it the trigger (and the reload click) stays up; PLASMA PISTOL joins the weapons whose trigger is pulsed.
+- **"Ignored attacker": a death cause, live turn-to-attacker knobs, tuner moves** (2026-11-09 12:00; nbot.c why_note, nbot_engage.c the
+  second-attacker rule, death-tuner.py) — WHY: on Valhalla 3 of 12 deaths were "slow start -- I never fired at it": a battle rifle
+  14-26 units away, in sight, killing the walker while it stayed on another target (when the target shoots too, the walker turned to a
+  second attacker only half the time, after the players' turn delay x 0.5). LOGIC: such a death (the killer in sight before the
+  damage, not the target, never fired at) is "ignored attacker"; the odds to turn when the target shoots too (NHOOK_BOT_SECOND_P, 0.5)
+  and the delay factor (NHOOK_BOT_TURNX, 0.5 -- it was read once at start) are live knobs on the Walker tab, and the tuner's moves for
+  the cause raise the odds by 0.15 and shorten the delay by 0.1.
 - **Lead horizontally with the body's velocity** (2026-11-09 11:55; nbot.c the head's path) — WHY: on Valhalla (battle rifles at 20-30
   units) the walker's aim line missed the target 29-36% of the steps and its accuracy fell to 25% (41% on target): the head node's
   frame-to-frame motion sways with the animation, and times a 0.15-0.25 s lead at that range it shook the aim. LOGIC: the predicted

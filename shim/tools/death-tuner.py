@@ -30,6 +30,7 @@ LOG = os.path.join(SUP, 'battles', 'follow', 'tuner-%s.jsonl' % NICK)
 
 # cause -> [(knob, step, lo, hi, the code's default)] -- tried in turn; a step moves the CURRENT value (file, else the default)
 MOVES = {
+    'ignored attacker': [('NHOOK_BOT_SECOND_P', +0.15, 0.3, 1.0, 0.5), ('NHOOK_BOT_TURNX', -0.1, 0.1, 1.0, 0.5)],
     'slow start':   [('NHOOK_BOT_REACT', -0.1, 0.2, 2.5, 1.6), ('NHOOK_BOT_TURN0', +0.5, 0.5, 6.0, 0.73), ('NHOOK_BOT_SEE_NEAR', +1.0, 2.0, 8.0, 2.5)],
     'unseen':       [('NHOOK_U_COVER', +5, 0, 95, 80), ('NHOOK_BOT_COVER_DROP', -0.05, 0.15, 0.6, 0.35), ('NHOOK_BOT_HUNT_KEEP', -1.0, 1.0, 10.0, 5.0)],
     'outnumbered':  [('NHOOK_BOT_COVER_SH', +0.1, 0.3, 0.9, 0.5), ('NHOOK_BOT_RETREAT', +0.1, 0.0, 0.6, 0.35), ('NHOOK_BOT_CLOSE', -0.1, 0.0, 1.0, 0.4)],
