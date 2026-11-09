@@ -81,3 +81,22 @@ static void beh_fight(const World* W, Arb* a, int ob_carry) { if (W->engaged && 
     arb_bid(a, ARB_FIGHT, g_bot_outranged ? uo : u, 0, g_bot_outranged ? "fight (outranged)" : "fight"); } }   // (outranged: under a weapon fetch's 45)
 static void beh_hold(const World* W, Arb* a) { if (W->fight && W->now - g_bot_hold_high < 0.3) { float u = 65; lk_over(&u, "NHOOK_U_HOLD"); arb_bid(a, ARB_HOLD, u, 0, "hold the high ground"); } }
 static void beh_hunt(const World* W, Arb* a) { (void)W; float u = 10; lk_over(&u, "NHOOK_U_HUNT"); arb_bid(a, ARB_HUNT, u, 0, "hunt"); }
+
+// RECHARGE (2026-11-09 13:10; the death notes: a death every ~18 s, mostly close fights lost on the last sliver of health -- and after a
+// fight the walker went straight on hunting with its shield broken): the shield under NHOOK_BOT_RECHARGE_SH (0.6) with no enemy in sight
+// within 20 units (g_eng_close) -> 6 units away from the nearest enemy, for up to 6 s or until the shield is back over 0.95, bidding
+// NHOOK_U_RECHARGE (65: over the fight's 60 for a target far off / hidden -- a fight in sight within 20 units is not bid against: the
+// recharge waits). NHOOK_U_RECHARGE=0 off
+static void beh_recharge(const World* W, Arb* a) {
+    const NovObj* o = W->o; static double t0; float u = 65, lim = 0.6f; lk_over(&u, "NHOOK_U_RECHARGE"); lk_over(&lim, "NHOOK_BOT_RECHARGE_SH");
+    if (u <= 0 || o->shield >= 0.95f) { t0 = 0; return; }
+    if (g_eng_close) return;
+    if (o->shield >= lim && t0 <= 0) return;
+    if (t0 <= 0) { t0 = W->now; if (bot_log()) nlog("[nhook] [recharge] shield %.2f, nobody in sight: backing off to recharge", o->shield); }
+    if (W->now - t0 > 6) return;
+    int ei = -1; float ed = 1e30f;
+    for (int i = 0; i < W->n; i++) { const NovObj* t = &W->objs[i]; if (i == W->me || t->type || t->dead || !bot_enemy(o, t)) continue; float dx = t->c[0] - o->c[0], dy = t->c[1] - o->c[1], d = dx * dx + dy * dy; if (d < ed) { ed = d; ei = i; } }
+    if (ei < 0) return;
+    float dx = o->c[0] - W->objs[ei].c[0], dy = o->c[1] - W->objs[ei].c[1], dl = sqrtf(dx * dx + dy * dy) + 1e-3f;
+    float pt[3] = {o->c[0] + dx / dl * 6.0f, o->c[1] + dy / dl * 6.0f, o->c[2]};
+    arb_bid(a, ARB_RECHARGE, u, pt, "recharge the shield"); }

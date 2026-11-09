@@ -813,7 +813,7 @@ static void ob_scan(double now, const NovObj* objs, int n, int me) {
 // NHOOK_U_BOARD 95, _FOLLOW_FAR 90 (the leader beyond the leash), _BALL_RUN 80, _BALL_FETCH 75, _HOLD 65, _FIGHT 60, _BALL_HUNT 50,
 // _FETCH 45 (a better weapon), _BALL_ESCORT 30, _FOLLOW_NEAR 20 (closing up inside the leash), _HUNT 10 (the goal draw, always).
 // A change of winner: "[arb] <winner> <score> > <others>" (at most twice a second).
-enum { ARB_HUNT, ARB_FIGHT, ARB_FOLLOW, ARB_FETCH, ARB_BALL, ARB_BOARD, ARB_HOLD, ARB_N };
+enum { ARB_HUNT, ARB_FIGHT, ARB_FOLLOW, ARB_FETCH, ARB_BALL, ARB_BOARD, ARB_HOLD, ARB_RECHARGE, ARB_N };
 typedef struct { struct { float score, pt[3]; const char* why; int on; } b[ARB_N]; } Arb;
 static void arb_reset(Arb* a) { memset(a, 0, sizeof *a); }
 static void arb_bid(Arb* a, int k, float score, const float* pt, const char* why) {
@@ -1384,7 +1384,7 @@ static void bot_step_body(void) {
     float gbp[3] = {0, 0, 0}, gface[3] = {0, 0, 0}, gbd = 1e9f; int gun_go = 0; beh_board(&W, &arb, gbp, gface, &gbd, &gun_go);
     beh_follow(&W, &arb);
     int ob_carry = 0; float ob_d = 1e9f; beh_ball(&W, &arb, gun_go, &ob_carry, &ob_d);
-    beh_fetch(&W, &arb); beh_fight(&W, &arb, ob_carry); beh_hold(&W, &arb); beh_hunt(&W, &arb);
+    beh_fetch(&W, &arb); beh_fight(&W, &arb, ob_carry); beh_hold(&W, &arb); beh_recharge(&W, &arb); beh_hunt(&W, &arb);
     // DEATH NOTES (12:05): what killed the walker -- each step remembers its target and the enemies aiming at it (within 12 deg, 40
     // units: the likely killer), its shield, weapon and rounds; at the death a [death] line, every 8 deaths a [deaths] summary: how
     // often the likely killer was NOT the target (awareness), at what distance, with what
@@ -1402,11 +1402,11 @@ static void bot_step_body(void) {
       if (dts > 0 && dts < 0.2) { float dx = o->c[0] - lp2[0], dy = o->c[1] - lp2[1]; float sp2 = sqrtf(dx * dx + dy * dy) / (float)dts; tot += dts;
           if (sp2 < 0.3f) { still += dts; int k = arbw; if ((arbw == ARB_HUNT || arbw == ARB_FIGHT) && plen < 2 && !engaged) k = ARB_N; else if (engaged) k = ARB_N + 1 > k ? (arbw == ARB_FIGHT ? ARB_FIGHT : k) : k; by[k] += dts; } }
       memcpy(lp2, o->c, 12);
-      if (now - tl > 30) { if (tl > 0 && tot > 5 && bot_log()) { static const char* nm[ARB_N + 2] = {"hunt", "fight", "follow", "fetch", "ball", "board", "hold", "no path (hunt)", "?"}; char b[400]; int q = 0;
+      if (now - tl > 30) { if (tl > 0 && tot > 5 && bot_log()) { static const char* nm[ARB_N + 2] = {"hunt", "fight", "follow", "fetch", "ball", "board", "hold", "recharge", "no path (hunt)", "?"}; char b[400]; int q = 0;
               for (int k = 0; k < ARB_N + 2; k++) if (by[k] > 0.5) q += snprintf(b + q, sizeof b - (size_t)q, " %s %.0f%%,", nm[k], 100.0 * by[k] / tot);
               nlog("[nhook] [still] %.0f%% of %.0f s alive under 0.3 u/s:%s plan %d nodes, goal %d", 100.0 * still / tot, tot, q ? b : " -", plen, goal); }
           tl = now; tot = still = 0; memset(by, 0, sizeof by); } }
-    if (arbw == ARB_FOLLOW || arbw == ARB_FETCH || arbw == ARB_BALL || (arbw == ARB_BOARD && gbd > 4.0f)) {   // a path to the winner's point
+    if (arbw == ARB_FOLLOW || arbw == ARB_FETCH || arbw == ARB_BALL || arbw == ARB_RECHARGE || (arbw == ARB_BOARD && gbd > 4.0f)) {   // a path to the winner's point
         static float lastp[3]; static int lastw = -1; static double trp; const float* wp = arb.b[arbw].pt;
         mode = 3; memcpy(g_bot_pt, wp, 12); g_bot_pt[2] -= 0.35f;
         float dx = wp[0] - lastp[0], dy = wp[1] - lastp[1];

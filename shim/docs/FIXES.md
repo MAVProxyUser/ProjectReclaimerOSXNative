@@ -3272,6 +3272,12 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   a running battle, at every round end (our server's in_match true -> false) walker-coach.py round + match-study.py, then each
   walker's game restarted headless with its new knobs and the newest build (they rejoin in the lobby; the user's game and the
   server stay).
+- **RECHARGE: back off to refill the shield** (2026-11-09 13:10; nbrain_beh.c beh_recharge, nbot.c ARB_RECHARGE) — WHY: the death notes
+  show a death every ~18 s (the best players about one a minute), most of them close fights lost on the last sliver of health, and the
+  walker went from one fight straight into the next hunt with its shield broken. LOGIC: a new arbiter slot (a path to its point): with the
+  shield under NHOOK_BOT_RECHARGE_SH (0.6) and no enemy in sight within 20 units (g_eng_close), 6 units away from the nearest enemy,
+  for up to 6 s or until the shield is over 0.95, bidding NHOOK_U_RECHARGE (65, over the fight's 60 for a far / hidden target; a fight in
+  sight is not bid against). NHOOK_U_RECHARGE=0 = off.
 - **Kite swords and hammers sideways, never melee into them** (2026-11-09 13:00; nbot.c the KITE move, g_kite_t) — WHY: "[fight] a
   GRAVITY HAMMER at 4.0 units: kiting it", then 3.3, 1.8 units, a beatdown at 0.92 on its broken shield -- and the hammer swing killed
   the walker first: back-pedalling is slower than a charge, and a melee race with a sword / hammer is lost. LOGIC: kiting = full
