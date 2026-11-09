@@ -3272,6 +3272,14 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   a running battle, at every round end (our server's in_match true -> false) walker-coach.py round + match-study.py, then each
   walker's game restarted headless with its new knobs and the newest build (they rejoin in the lobby; the user's game and the
   server stay).
+- **The gunner tells the turret from the passenger seat** (2026-11-09 02:05; nbot.c gun_seated / gun_board) — WHY: the user, Third
+  in his Warthog for the first time: "third needs to understand turret vs passenger seat. he's in the wrong spot". Its act pulse went
+  off anywhere within 1.5 units of a point 1.3 behind the turret -- a circle that reaches the passenger door -- and it took a seat in
+  the Warthog itself as "mine". LOGIC: the Warthog object holds the driver and the passenger; the gunner sits on the TURRET (the
+  vehicle parented to it). In the passenger seat with the turret free it gets out (act 0.8 s) and boards again; after 4 such misses in
+  a minute it stays a passenger. Boarding in stages along the Warthog's forward (object +0x5c): beside / in front of the turret ->
+  round the side (1.8 out, 1 back), behind -> 1.6 straight back, lined up there (0.9+ back, under 0.8 off the line) -> in to 0.6 back
+  (until it drifts under 0.15 back or 1.2 off); act only in that last stage within 0.7 of the point and behind the turret.
 - **The gunner: a walker mans its teammate's Warthog turret, and gets out of any other seat** (2026-11-09 01:50; nbot.c gun_seated /
   gun_board / gun_near_veh / gun_find, shim/tools/hold-teams.py) — WHY: the user: "every time my guy is in a warthog, it must come find
   me and get into the turret gunner. I want it to train as my gunner as I drive it around after the other walkers"; then "third got
