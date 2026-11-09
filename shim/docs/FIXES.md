@@ -3272,6 +3272,14 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   a running battle, at every round end (our server's in_match true -> false) walker-coach.py round + match-study.py, then each
   walker's game restarted headless with its new knobs and the newest build (they rejoin in the lobby; the user's game and the
   server stay).
+- **A walker with a HOME of its own could not build a new map's walking graph** (2026-11-09 04:45; shim/native.sh) — WHY: the user: "AIwalker
+  test is just standing around now... doing nothing". The public game moved to Last Resort (zanzibar), which had no walking graph;
+  the walker's background builder (re-tools/h3nav.py, spawned with the walker's environment) died "No module named 'numpy'": the
+  public walker runs with HOME = its own folder, and Python's user packages live under the user's real home. With no graph it could
+  aim but not walk. (Built by hand with the real home; a restart then loaded it.) LOGIC: when $HOME is not the user's real home (read
+  from the user database: ~$(id -un)), native.sh exports PYTHONUSERBASE=<real home>/Library/Python/<python3's version> unless set.
+  Still open: once that graph appeared, the running walker's step thread spun at the map-setup line (nav_ensure / nav_danger_update /
+  bm_pop, inlined) and never stepped again -- a restart loaded the same graph; a sample (sample <pid>) of the next freeze names the loop.
 - **Live knobs and models (no reconnect), the walker shadows a named player, grenade honing, kills in the player panel** (2026-11-09
   04:30; nbot.c lk_* / bot_models_tick / nade_note / nade_check / the WINGMAN leader, nbot_engage.c eg_knob, nhost.c + nstats.c
   g_follow_unit, shim/tools/follow-study.py, walker-public.sh, stats_page.html) — WHY: the user, the walker struggling in a public FFA:

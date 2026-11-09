@@ -30,6 +30,11 @@ else PROF="${NATIVE_PROFILE:-$SUP/native/test-v2}"; export RECLAIMER_PROFILE_DIR
      export RECLAIMER_TEST_SILENT="${RECLAIMER_TEST_SILENT:-1}"
      export PELOAD_FORENSIC_DIR="${PELOAD_FORENSIC_DIR:-$SUP/native/test-forensics}"   # test runs keep out of the real archive
      export NHOOK_HEATMAP_DIR="${NHOOK_HEATMAP_DIR:-$SUP/native/test-heatmaps}"; mkdir -p "$NHOOK_HEATMAP_DIR"; fi   # ... and the real heatmaps
+# a HOME of its own (walker-public.sh, a public server's walker): Python's user packages (numpy for the walking-graph builder,
+# re-tools/h3nav.py) stay under the user's real home -- found from the user database, not $HOME (2026-11-09: Last Resort's graph
+# failed "No module named 'numpy'" and the walker stood still)
+RH=$(eval echo "~$(id -un)")
+if [ "$HOME" != "$RH" ] && [ -z "${PYTHONUSERBASE:-}" ]; then export PYTHONUSERBASE="$RH/Library/Python/$(/usr/bin/python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])')"; fi
 MCC="$(cat "$PROF/mcc-folder.txt" 2>/dev/null)"
 export NHOOK_HALO3="${NHOOK_HALO3:-$MCC/halo3/halo3.dll}"
 # the stats page from the checkout (edits show on a browser refresh; the dylib's built-in copy otherwise)
