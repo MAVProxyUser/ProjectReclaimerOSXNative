@@ -368,6 +368,7 @@ def main():
             elif t.startswith('Best weapon on '): it['walker'] = 'applied in part: power weapons are fetch goals; the map\'s best is not preferred yet'
             elif t.endswith(': where it wins'): it['walker'] = 'applied: its range band per weapon class (fighting distance, switching by range)'
             elif t.startswith('Surviving '): it['walker'] = 'applied: kite a sword / hammer, strafe under fire; distance per weapon from the range bands'
+            elif t.endswith(': fight distance'): it['walker'] = 'applied: the map\'s own engagement model (tracks/maps/<map>.engage.json) sets its range bands on this map'
             elif t.endswith(': where to walk'): it['walker'] = 'applied: its walking graph steers around the map\'s death hot spots'
             elif ' own (' in t: it['walker'] = 'applied: the weapon zones -- it switches to that weapon for a target there, and for the hunt'
             elif t.startswith('Switching '): it['walker'] = 'applied: it switches at the players\' distance for that weapon pair'
