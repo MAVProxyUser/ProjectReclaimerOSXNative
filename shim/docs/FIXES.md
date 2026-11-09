@@ -3286,6 +3286,15 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   switch presses (the learnt record bit): 0 of 32 took" -- 32 x "switching from PLASMA PISTOL to ASSAULT RIFLE" with the trigger held
   (the plasma pistol held = an overcharge held) while the earlier switches, 3 of 3 and 2 of 2, came with the trigger up. LOGIC: from a
   switch press until 0.15 s after it the trigger (and the reload click) stays up; PLASMA PISTOL joins the weapons whose trigger is pulsed.
+- **Stucks only while walking a path; the wedge escape off by default; an off-lane path cost** (2026-11-09 15:10-15:30; nbot.c the nav
+  stuck check / escape, src/nav.c nav_astar g_nav_offlane) — WHY: a local 4-walker battle (test identities, our dedicated server) after the
+  kick: 300-460 "stuck at" and 100-150 "wedged" a walker in 5 minutes. Stucks were also counted while a fight held the legs (the walker
+  strafes instead of walking the path), and "4 stucks in 10 s" was nearly always true, so the 3 s escape ran most of the time (its
+  penalties piling up) -- it also overrode fight moves, live in the public game from 05:40 until the kick at 05:42. The stuck rate itself
+  is old (402 in a 01:09 battle), spread over Guardian's upper level, the path's next node often 0.8 units up. LOGIC: the stuck check needs
+  the legs on a path behaviour (not FIGHT / HOLD); the escape never overrides a fight's legs and runs only with NHOOK_BOT_WEDGE_PEN > 0
+  (default 0 now); NHOOK_NAV_OFFLANE (env or live; 0 = off, the loader's) adds that much x the step cost on graph nodes no recorded player
+  was seen on (g_nav.pop 0), so paths keep to the players' lanes.
 - **A kicked walker stays out** (2026-11-09 15:00; shim/tools/walker-public.sh) — WHY: at 05:42 the walker was kicked from the
   owner-approved server ("You were kicked from this server. You can rejoin in 9 minutes.") -- the user's terms: every player can boot it,
   so anyone with an issue can get it out at once; a kick is that signal, and the patient rejoin loop would have come back after the

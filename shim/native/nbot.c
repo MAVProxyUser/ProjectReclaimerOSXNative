@@ -1422,6 +1422,7 @@ static void bot_step_body(void) {
           uint32_t tw = t->wslot >= 0 && t->wslot < 4 ? t->weapons[t->wslot] : 0xFFFFFFFFu; uint64_t twd = nov_datum(tw); uint32_t twdef = 0;
           lastS.ah[lastS.naim] = t->handle; lastS.ad[lastS.naim] = d; lastS.aw[lastS.naim] = twd && hb_read(twd, &twdef, 4) ? eg_wcls(hb_tag_name(twdef)) : "?"; lastS.naim++; }
       (void)was_alive; (void)nd; (void)nother; (void)dsum; g_death_snap = &lastS; }
+    { static float ol0 = -1; if (ol0 < 0) { const char* e = getenv("NHOOK_NAV_OFFLANE"); ol0 = e ? strtof(e, 0) : 0.0f; } float ol = ol0; lk_over(&ol, "NHOOK_NAV_OFFLANE"); g_nav_offlane = ol; }   // (15:30: paths along the players' lanes: src/nav.c)
     int arbw = arb_choose(&arb, now);
     // (09:55: the recordings: the walker moves under 0.3 u/s 53% of its life -- median 0.09 u/s, the players 0.7-1.2 -- while its fight moves
     //  measure 1.5 u/s: [still] every 30 s splits the still time by the legs' winner and the path state)
@@ -1488,7 +1489,10 @@ static void bot_step_body(void) {
                 if (strafe) hh = 0;
                 hist[hh & 63][0] = pos[0]; hist[hh & 63][1] = pos[1]; hist[hh & 63][2] = pos[2]; histt[hh & 63] = now; hh++;
                 static float bk[3]; { int j = hh - 1; while (j > 0 && hh - j < 63 && now - histt[(j - 1) & 63] <= 1.5) j--; float dx = pos[0] - hist[j & 63][0], dy = pos[1] - hist[j & 63][1];
-                  if (!strafe && !(g_bot_fighting && tdist < 3.0f) && now - histt[j & 63] >= 1.4 && dx * dx + dy * dy < 0.35f * 0.35f && now - tjump > 1.5) {   // (01:10: fighting at arm's length is no progress by design, not stuck) tjump = now; hh = 0; tback = now; bstr = (nav_rand() & 1) ? 0.3f : -0.3f;
+                  // (15:10: only while the legs FOLLOW the path -- in a fight (or holding) they belong to the fight, the walker strafes
+                  //  instead of walking the path, and that read as "stuck" all fight long: in a local battle 300-400 "stuck" and 100+
+                  //  "wedged" a walker in 5 minutes, each one jumping and the escape running the walker about mid-fight)
+                  if (!strafe && arbw != ARB_FIGHT && arbw != ARB_HOLD && !(g_bot_fighting && tdist < 3.0f) && now - histt[j & 63] >= 1.4 && dx * dx + dy * dy < 0.35f * 0.35f && now - tjump > 1.5) {   // (01:10: fighting at arm's length is no progress by design, not stuck) tjump = now; hh = 0; tback = now; bstr = (nav_rand() & 1) ? 0.3f : -0.3f;
                       nav_pos(path[pidx >= 4 ? pidx - 4 : 0], bk);
                       // (14:45: "stuck at" 188 times in 3000 log lines on Valhalla, ~50 at one spot: the +4 penalty never routed around it, and
                       //  the walker never jumped -- on rocks and lips a jump is what frees a player. Each stuck now jumps (0.25 s) and the next 10
@@ -1503,9 +1507,12 @@ static void bot_step_body(void) {
                       // (14:50: WEDGED -- stuck 4 times at one spot ((60.8, -146.9) for minutes on Valhalla: 0 kills / 7 deaths in that window):
                       //  every graph node within 2.5 units costs NHOOK_BOT_WEDGE_PEN (60) more, and an ESCAPE runs 3 s: a random compass
                       //  direction at full throttle, a new one every 0.5 s, a jump every 0.6 s (g_escape_*, applied below the path walk)
-                      if (now - tstuck[0] < 10.0) { float wp = 60; lk_over(&wp, "NHOOK_BOT_WEDGE_PEN");
+                      // (15:20: OFF by default -- in local battles "stuck" fires ~1 a second whatever the walker does (an old problem: 402 in a
+                      //  01:09 battle), so "4 in 10 s" was nearly always true and the escape ran most of the time, the penalties piling up;
+                      //  NHOOK_BOT_WEDGE_PEN > 0 (live) turns it on)
+                      if (now - tstuck[0] < 10.0) { float wp = 0; lk_over(&wp, "NHOOK_BOT_WEDGE_PEN"); if (wp > 0)
                           for (int i = 0; i < g_nav.n; i++) { float q[3]; nav_pos(i, q); float ddx = q[0] - pos[0], ddy = q[1] - pos[1], ddz = q[2] - pos[2]; if (ddx * ddx + ddy * ddy < 6.25f && fabsf(ddz) < 2.0f) g_nav.pen[i] += wp; }
-                          g_escape_until = now + 3.0; g_escape_t = 0; if (bot_log()) nlog("[nhook] [nav] wedged at (%.1f %.1f): escaping, the spot's nodes +%.0f", pos[0], pos[1], wp); }
+                          if (wp > 0) { g_escape_until = now + 3.0; g_escape_t = 0; if (bot_log()) nlog("[nhook] [nav] wedged at (%.1f %.1f): escaping, the spot's nodes +%.0f", pos[0], pos[1], wp); } }
                       if (now - tstuck[0] < 10.0) { nav_say("  [nav] stuck 4 times at (%.1f %.1f %.1f): a new goal\n", pos[0], pos[1], pos[2]);
                           if (mode != 2) goal = -1; else if (g_eg.on && gl_on()) { gl_drop(now, "stuck 4 times"); goal = -1; plen = 0; }
                           memset(tstuck, 0, sizeof tstuck); }
@@ -1531,7 +1538,7 @@ static void bot_step_body(void) {
         float way = atan2f(g_bot_pick_pos[1] - o->c[1], g_bot_pick_pos[0] - o->c[0]), rel = bot_wrap(way - yaw), sp = g_pick_d > 1.0f ? 1.0f : g_pick_d > 0.3f ? 0.45f : 0.0f;   /* (08:05: onto it, then still) */ tx = cosf(rel) * sp; ty = sinf(rel) * sp; out |= 2; }
     else if (arbw == ARB_FIGHT) { tx = ftx; ty = fty; out |= 2; }   // (the fighter's moves: the arbiter gave it the legs)
     else if (arbw == ARB_HOLD) { tx = 0; ty = 0; out |= 2; }   // (levels apart: the enemy below -- hold the high ground)
-    if (now < g_escape_until) { float rel = bot_wrap(g_escape_dir - yaw); tx = cosf(rel); ty = sinf(rel); out |= 2; }   // (wedged: the escape beats every other move)
+    if (now < g_escape_until && arbw != ARB_FIGHT && arbw != ARB_HOLD) { float rel = bot_wrap(g_escape_dir - yaw); tx = cosf(rel); ty = sinf(rel); out |= 2; }   // (wedged: the escape beats the path moves -- never a fight's)
     if (testb) { g_bot_btn = ((out & 4) ? g_bot_btn : 0) | g_bot_testbtn; out |= 4; }   // (do=botbtn: held until its time is up)
     // fire: the control record's bit 19 (+0xC8) -- the local unit fires, and the control packet carries the weapon's firing state
     // to the server (halo3+0x5452c reads it from the local weapon: a packet bit of its own does nothing; 2026-11-08 scan: bits 19

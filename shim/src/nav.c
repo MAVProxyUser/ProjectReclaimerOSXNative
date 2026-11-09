@@ -89,6 +89,7 @@ static void nav_danger_update(double now){
     int hot=0; for(int i=0;i<g_nav.n;i++){ g_nav.dng[i]=1.0f-expf(-g_nav.dng[i]/s0); if(g_nav.dng[i]>0.5f) hot++; }
     if(nd!=g_nav.dng_nd) nav_say("  [nav] danger from %u deaths on %s (scale %.1f): %d of %d floor nodes above 0.5\n",nd,g_nav.name,s0,hot,g_nav.n);
     g_nav.dng_nd=nd; }
+static float g_nav_offlane;   // (2026-11-09: x the step cost added on graph nodes no recorded player ever used -- the native walker sets it, NHOOK_NAV_OFFLANE; 0 = off, the loader's)
 static int g_nav_noavoid;   // set around a comparison plan (PELOAD_NAV_LOG): the same A* without the danger term
 // A* over the floor graph; cost = distance x (1 + wall penalty + avoid x danger) + learned penalties; -> path length
 // PORTALS (2026-11-08, shim/tools/nav-portals.py): one-way links between the graph's separate parts learned from real players --
@@ -120,7 +121,7 @@ static int nav_astar(int s,int t,int32_t*path,int maxp){
         if(u==t){ found=1; break; } if(++pops>400000) break;
         float up[3]; nav_pos(u,up); float gu=g_nav.g[u];
         for(int k=0;k<8;k++){ int v=g_nav.nd[u].nbr[k]; if(v<0||v>=g_nav.n) continue; float vp[3]; nav_pos(v,vp);
-            float dx=vp[0]-up[0],dy=vp[1]-up[1],dz=vp[2]-up[2]; float c=sqrtf(dx*dx+dy*dy+dz*dz)*(1.0f+wpen[g_nav.nd[v].wd&15]+(g_nav.dng?kav*g_nav.dng[v]:0)-(g_nav.pop?0.4f*g_nav.pop[v]:0))+g_nav.pen[v]+((g_nav.nd[v].fl&1)?0.5f:0);   // (pop: the lanes players use cost up to 40% less)
+            float dx=vp[0]-up[0],dy=vp[1]-up[1],dz=vp[2]-up[2]; float c=sqrtf(dx*dx+dy*dy+dz*dz)*(1.0f+wpen[g_nav.nd[v].wd&15]+(g_nav.dng?kav*g_nav.dng[v]:0)-(g_nav.pop?0.4f*g_nav.pop[v]:0)+(g_nav.pop&&g_nav.pop[v]<=0?g_nav_offlane:0))+g_nav.pen[v]+((g_nav.nd[v].fl&1)?0.5f:0);   // (pop: the lanes players use cost up to 40% less; g_nav_offlane: a node no player was seen on costs that much more)
             float gv=gu+c; if(g_nav.stamp[v]==gen && g_nav.g[v]<=gv) continue;
             g_nav.stamp[v]=gen; g_nav.g[v]=gv; g_nav.came[v]=u;
             float hx=vp[0]-tp[0],hy=vp[1]-tp[1],hz=vp[2]-tp[2]; NAV_PUSH(gv+sqrtf(hx*hx+hy*hy+hz*hz),v); }
