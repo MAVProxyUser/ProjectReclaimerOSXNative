@@ -1137,7 +1137,11 @@ static void bot_step_body(void) {
             else if (ha_on > 0 && bot_head(t, now, hp)) { float dz = hdz; if (!prec) { dz = -1.5f; lk_over(&dz, "NHOOK_BOT_HEAD_DZ_AUTO"); }
                 if (t->handle != hv_h || now - hv_t > 0.4) { hv_h = t->handle; memcpy(hv_p, hp, 12); memcpy(hv_v, t->vel, 12); hv_t = now; hv_ok = 0; }
                 else if (now - hv_t >= 0.06) { float dtt = (float)(now - hv_t), a = hv_ok ? 0.5f : 1.0f;
-                    for (int q = 0; q < 3; q++) { float v = (hp[q] - hv_p[q]) / dtt; if (v > 12) v = 12; if (v < -12) v = -12; hv_v[q] += a * (v - hv_v[q]); }
+                    // (11:55: horizontally the engine's own body velocity -- the head node sways with the animation, and x a 0.15-0.25 s lead
+                    //  at 20-30 units that sway shook the aim: on Valhalla the BR's aim line missed the target 29-36% of the steps; the head's
+                    //  own velocity only vertically -- crouching, jumping -- smoothed harder)
+                    { float v = (hp[2] - hv_p[2]) / dtt; if (v > 12) v = 12; if (v < -12) v = -12; hv_v[2] += (hv_ok ? 0.3f : 1.0f) * (v - hv_v[2]); }
+                    hv_v[0] = t->vel[0]; hv_v[1] = t->vel[1]; (void)a;
                     memcpy(hv_p, hp, 12); hv_t = now; hv_ok = 1; }
                 float ph[3] = {hp[0] + hv_v[0] * tl, hp[1] + hv_v[1] * tl, hp[2] + hv_v[2] * tl};
                 ap[0] = ph[0]; ap[1] = ph[1]; ap[2] = ph[2] + dz * hp[3]; g_bot_head_r = hp[3]; memcpy(g_bot_head_c, ph, 12); }

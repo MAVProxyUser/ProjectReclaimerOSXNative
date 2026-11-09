@@ -3286,6 +3286,10 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   switch presses (the learnt record bit): 0 of 32 took" -- 32 x "switching from PLASMA PISTOL to ASSAULT RIFLE" with the trigger held
   (the plasma pistol held = an overcharge held) while the earlier switches, 3 of 3 and 2 of 2, came with the trigger up. LOGIC: from a
   switch press until 0.15 s after it the trigger (and the reload click) stays up; PLASMA PISTOL joins the weapons whose trigger is pulsed.
+- **Lead horizontally with the body's velocity** (2026-11-09 11:55; nbot.c the head's path) — WHY: on Valhalla (battle rifles at 20-30
+  units) the walker's aim line missed the target 29-36% of the steps and its accuracy fell to 25% (41% on target): the head node's
+  frame-to-frame motion sways with the animation, and times a 0.15-0.25 s lead at that range it shook the aim. LOGIC: the predicted
+  head moves with the engine's body velocity horizontally and the head node's own (smoothed, 0.3) velocity only vertically.
 - **Cover searches were never asked on foot** (2026-11-09 11:45-11:50; nbot.c the on-foot line-of-sight scheduler, nbrain_beh.c
   beh_cover) — WHY: 0 of 89 cover searches found a spot; the new answers diagnostic said "asked 0" every time: the cover rays had gone
   into the vehicle gunner's scheduler (gun_seated -- its anchor text matched first), which never runs on foot. LOGIC: the cover rays
