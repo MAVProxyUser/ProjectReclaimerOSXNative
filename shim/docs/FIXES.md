@@ -3448,6 +3448,14 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   brain is refused by a v2 body and the other way round: rebuild both). Lead latency = rtt x NHOOK_BOT_LEAD_RTT (1.25 / 1000 -- 0.08 s
   at 64 ms, 0.18 s at 145 ms); a NHOOK_BOT_LEAD_LAT in the live file still wins. A review's kills = the scoreboard's since the window
   began (the old count when the body has none); the review line gives the ping.
+- **Lanes learned live: a minute into a new map, and at every revision** (2026-11-09 18:15; nbot.c bm_lanes_read / bm_lanes_mix /
+  bm_lanes_refresh / bm_lanes_apply / g_bm_heat, nbot_goals.c brain_review) — WHY: the user: "lanes for the new map should come quick.
+  learn them with each 3 minute brain update". The planner's lanes (g_nav.pop: A* prefers the routes players take; the goal draw's lane
+  cells g_gll) were built once per map, from the real heatmaps folder only -- while the public walker's body saves the lanes of the
+  match it is in (every player's moves it sees) into ITS folder (NHOOK_HEATMAP_DIR) every 30 s: a new map started with none and never
+  got this match's. LOGIC: the lanes come from both folders (summed; the same file once); the model's heat part is kept apart
+  (g_bm_heat); a revision -- and once 60 s into a map -- reads the files on a side thread, and the walker's next step mixes them in (the
+  planner's arrays are only touched on its thread; a few ms): "[brain] lanes relearned for <map>: N lane cells, X km of players' moves".
 - **No brain update without its lesson** (2026-11-09 18:05; shim/native/build.sh) — WHY: the user: "every update should describe its
   lesson" -- builds had gone out carrying the previous brain's lesson (the SWAT text on the island / unstick brains). LOGIC: build.sh
   hashes the brain's sources (native/*.c *.h, src/nav.c, src/h3maps.c) and native/brain-lesson.txt; when the code changed since the last

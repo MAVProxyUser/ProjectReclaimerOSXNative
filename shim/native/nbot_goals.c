@@ -255,8 +255,11 @@ static void rv_note(double now, const char* trig, const char* map, float mins, i
                      (double)time(0), g_rv_n, trig, g_noshield ? "swat" : "normal", map, mins, kills, deaths, empty, dpm, g_rv_caut, prev, 1.0f - 0.6f * g_rv_caut, zones, (unsigned)nd, hx, hy, hn); fclose(f); }
     (void)now; }
 static void brain_review(double now) {
-    static double t0, tchk; static int k0, ks0 = -1; static char map[64]; static long seq0 = -1; char why[64] = ""; int force = 0;
+    static double t0, tchk, lr_next; static int k0, ks0 = -1; static char map[64]; static long seq0 = -1; char why[64] = ""; int force = 0;
     if (g_brain_warm) return;   // (a brain warming up beside the running one revises from its first own step)
+    // (2026-11-09, the user: "lanes for the new map should come quick. learn them with each 3 minute brain update"): the lanes files
+    // read again a minute into a map (the body saves the match's lanes every 30 s) and at every revision (bm_lanes_refresh, nbot.c)
+    if (lr_next > 0 && now >= lr_next && map[0]) { lr_next = 0; bm_lanes_refresh(map); }
     // (a new build of the brain starts its statics afresh: it carries on from the last revision -- its number and caution -- when
     //  that one is under 15 minutes old, so a code reload does not forget what the reviews learnt)
     { static int resumed; if (!resumed) { resumed = 1; char p[1100]; const char* h = getenv("HOME");
@@ -282,7 +285,7 @@ static void brain_review(double now) {
         if (f) { long q = 0; char r[64] = ""; int got = fscanf(f, "%ld %63[^\n]", &q, r); fclose(f);
             if (got >= 1) { if (seq0 < 0) seq0 = q; else if (q != seq0) { seq0 = q; force = 1; snprintf(why, sizeof why, "%s", got > 1 ? r : "monitor"); } } } }
     if (strcmp(map, g_st_curmap)) {   // (a new map -- or a new build of the brain: a revision with its death map; a fresh window, the caution carries)
-        int loaded = !map[0]; snprintf(map, sizeof map, "%s", g_st_curmap); t0 = now; k0 = g_gl_nkill; ks0 = g_my_kills; if (!map[0]) return;
+        int loaded = !map[0]; snprintf(map, sizeof map, "%s", g_st_curmap); t0 = now; k0 = g_gl_nkill; ks0 = g_my_kills; lr_next = now + 60.0; if (!map[0]) return;
         uint32_t nd; pthread_mutex_lock(&g_hm_mx); nd = g_hm.nd; pthread_mutex_unlock(&g_hm_mx); g_rv_n++;
         rv_note(now, loaded ? "new brain" : "map", map, 0, 0, 0, 0, 0, g_rv_caut, 0, 0, 0, 0, nd); return; }
     float win = 180; lk_over(&win, "NHOOK_BOT_REVIEW_S");
@@ -309,4 +312,5 @@ static void brain_review(double now) {
         for (int i = 0; i < g_ngld; i++) { double age = now - g_gld[i].t; if (age > 3 * span) continue; gl_pen_zone_w(g_gld[i].pos, age < span ? 3.0f : age < 2 * span ? 2.0f : 1.0f); zones++;
             int nn = 0; for (int j = 0; j < g_ngld; j++) { float dx = g_gld[j].pos[0] - g_gld[i].pos[0], dy = g_gld[j].pos[1] - g_gld[i].pos[1]; if (now - g_gld[j].t <= 3 * span && dx * dx + dy * dy < 36) nn++; }
             if (nn > hn) { hn = nn; hx = g_gld[i].pos[0]; hy = g_gld[i].pos[1]; } } }
+    bm_lanes_refresh(map);
     rv_note(now, why, map, mins, kills, deaths, empty, dpm, prev, zones, hx, hy, hn, nd); }

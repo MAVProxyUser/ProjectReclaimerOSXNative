@@ -210,6 +210,53 @@ typedef struct { float x, y, w; } GlLane; static GlLane* g_gll; static int g_ngl
 static double g_escape_until, g_escape_t; static float g_escape_dir; static double g_act_last; static int g_fetch_abort;   // (14:50: the wedged-spot escape)
 static double g_fjump_until; static int g_bot_camo_hold;   // (a jump in a fight: NHOOK_BOT_FJUMP)
 static int bot_fcmp(const void* a, const void* b) { float x = *(const float*)a, y = *(const float*)b; return x < y ? -1 : x > y; }
+// LANES LEARNED LIVE (2026-11-09, the user: "lanes for the new map should come quick. learn them with each 3 minute brain update"):
+// the lanes files of a map -- the real heatmaps folder's and the walker's own (NHOOK_HEATMAP_DIR, where its body saves the match it is
+// in every 30 s: every player's moves it sees) -- summed into one grid; mixed into g_nav.pop (with the model's heat, g_bm_heat) and the
+// goal lanes (g_gll) by bm_lanes_mix; bm_lanes_refresh reads them on a side thread at each revision, bm_lanes_apply mixes them in on
+// the walker's thread at its next step (the planner's arrays are only touched there)
+static float* g_bm_heat; static int g_bm_heat_n;
+static int bm_lanes_read(const char* map, LnGrid* lg) {
+    const char* ld = getenv("NHOOK_BOT_LANES"), * h = getenv("HOME"), * hd = getenv("NHOOK_HEATMAP_DIR"); if (ld && !strcmp(ld, "0")) return 0;
+    char p1[1100], p2[1100] = ""; int n = 0;
+    if (ld && *ld) snprintf(p1, sizeof p1, "%s/%s.lanes", ld, map); else snprintf(p1, sizeof p1, "%s/Library/Application Support/ReclaimerMac/heatmaps/%s.lanes", h ? h : "", map);
+    if (hd && *hd) snprintf(p2, sizeof p2, "%s/%s.lanes", hd, map);
+    const char* ps[2] = {p1, p2};
+    for (int k = 0; k < 2; k++) { if (!ps[k][0] || (k == 1 && !strcmp(p1, p2))) continue;
+        { char rp1[PATH_MAX], rp2[PATH_MAX]; if (k == 1 && realpath(p1, rp1) && realpath(p2, rp2) && !strcmp(rp1, rp2)) continue; }
+        LnSrc* src = 0; uint32_t ns = 0; double since = 0; if (ln_read(ps[k], lg, &src, &ns, &since)) n++; free(src); }
+    return n && lg->used ? n : 0; }
+static int bm_lanes_mix(LnGrid* lg, float* pop) {   // lanes -> pop (each node the larger of its heat and lanes) + the goal lanes; -> lane cells
+    int lcells = 0; float* lpop = calloc((size_t)g_nav.n, sizeof(float));
+    for (uint32_t i = 0; lpop && i < lg->cap; i++) { const LnCell* c = &lg->c[i]; if (!(c->foot > 0)) continue; float x = (c->x + 0.5f) * LN_CELL, y = (c->y + 0.5f) * LN_CELL;
+        int cx = (int)floorf((x - g_nav.x0) / g_nav.cell), cy = (int)floorf((y - g_nav.y0) / g_nav.cell); if (cx < 0 || cy < 0 || cx >= g_nav.w || cy >= g_nav.h) continue;
+        int cc = cy * g_nav.w + cx; for (uint32_t k = g_nav.first[cc]; k < g_nav.first[cc + 1]; k++) lpop[k] += c->foot; lcells++; }
+    { int ng = 0; float* fv = malloc(sizeof(float) * (lg->used + 1)); for (uint32_t i = 0; fv && i < lg->cap; i++) if (lg->c[i].foot > 0) fv[ng++] = lg->c[i].foot;   // (the busier half: goal material)
+      float med = 0; if (fv && ng) { qsort(fv, (size_t)ng, sizeof(float), bot_fcmp); med = fv[ng / 2]; } free(fv);
+      GlLane* gl2 = malloc(sizeof(GlLane) * (size_t)(ng + 1)); int k3 = 0; float ws2 = 0;
+      for (uint32_t i = 0; gl2 && i < lg->cap; i++) if (lg->c[i].foot > med && lg->c[i].foot > 1) { gl2[k3].x = (lg->c[i].x + 0.5f) * LN_CELL; gl2[k3].y = (lg->c[i].y + 0.5f) * LN_CELL; gl2[k3].w = logf(1 + lg->c[i].foot); ws2 += gl2[k3].w; k3++; }
+      GlLane* old2 = g_gll; g_gll = gl2; g_ngll = k3; g_gll_wsum = ws2; free(old2); }
+    if (lpop) { int nz = 0; for (int i = 0; i < g_nav.n; i++) if (lpop[i] > 0) nz++;
+        float* v = nz ? malloc(sizeof(float) * (size_t)nz) : 0; int k2 = 0; for (int i = 0; v && i < g_nav.n; i++) if (lpop[i] > 0) v[k2++] = lpop[i];
+        float q99 = 0; if (v && k2) { qsort(v, (size_t)k2, sizeof(float), bot_fcmp); q99 = v[(k2 - 1) * 99 / 100]; }   /* (the 99th percentile) */
+        free(v);
+        if (q99 > 0) for (int i = 0; i < g_nav.n; i++) { float lv = lpop[i] > 0 ? fminf(1.0f, logf(1 + lpop[i]) / logf(1 + q99)) : 0; if (lv > pop[i]) pop[i] = lv; }
+        free(lpop); }
+    return lcells; }
+static LnGrid* volatile g_lr_ready; static volatile int g_lr_busy; static char g_lr_map[64];
+static void* bm_lr_thread(void* a) { (void)a; LnGrid* g = calloc(1, sizeof *g); if (g && !bm_lanes_read(g_lr_map, g)) { ln_free(g); free(g); g = 0; }
+    if (!g) { g_lr_busy = 0; return 0; } __atomic_store_n(&g_lr_ready, g, __ATOMIC_RELEASE); return 0; }
+static void bm_lanes_refresh(const char* map) {   // (a revision) the lanes files read again on a side thread
+    if (g_lr_busy || !g_nav.ok || !map || !map[0]) return; g_lr_busy = 1; snprintf(g_lr_map, sizeof g_lr_map, "%s", map);
+    pthread_t th; if (pthread_create(&th, 0, bm_lr_thread, 0)) { g_lr_busy = 0; return; } pthread_detach(th); }
+static void bm_lanes_apply(void) {   // (every step, the walker's thread) a refreshed grid -> mixed in
+    LnGrid* g = __atomic_exchange_n(&g_lr_ready, (LnGrid*)0, __ATOMIC_ACQ_REL); if (!g) return; g_lr_busy = 0;
+    if (!strcmp(g_lr_map, g_st_curmap) && g_nav.ok && g_bm_heat && g_bm_heat_n == g_nav.n) {
+        double t0 = mono_s(); float* pop = malloc(sizeof(float) * (size_t)g_nav.n);
+        if (pop) { memcpy(pop, g_bm_heat, sizeof(float) * (size_t)g_nav.n); int lc = bm_lanes_mix(g, pop); float* old = g_nav.pop; g_nav.pop = pop; free(old);
+            double tot = 0; for (uint32_t i = 0; i < g->cap; i++) tot += g->c[i].foot;
+            if (bot_log()) nlog("[nhook] [brain] lanes relearned for %s: %d lane cells, %.1f km of players' moves (this match's included), mixed in %.0f ms", g_st_curmap, lc, tot * LN_CELL * 3.048 / 1000.0, (mono_s() - t0) * 1000); } }
+    ln_free(g); free(g); }
 // the model's heat for this map -> g_nav.pop (how much real players use each floor node: A* prefers their lanes); once per map
 static void bm_pop(const char* map) {
     static char done[64]; if (!g_nav.ok || !map || !map[0] || !strcmp(done, map)) return; snprintf(done, sizeof done, "%s", map);
@@ -231,28 +278,10 @@ static void bm_pop(const char* map) {
     // the LANES (nlanes.c, 2026-11-08): how many times players crossed each 0.5-unit cell, from the real heatmaps folder (test runs
     // record into their own; NHOOK_BOT_LANES=<folder>, =0 = heat only): every floor node under a cell gets its on-foot passes,
     // log-scaled to 1 at the 99th percentile; a node keeps the larger of heat and lanes (routes beat places players stand)
-    int lcells = 0; { const char* ld = getenv("NHOOK_BOT_LANES"); char lp[1100];
-      if (!(ld && !strcmp(ld, "0"))) {
-        if (ld && *ld) snprintf(lp, sizeof lp, "%s/%s.lanes", ld, map); else snprintf(lp, sizeof lp, "%s/Library/Application Support/ReclaimerMac/heatmaps/%s.lanes", h ? h : "", map);
-        LnGrid lg = {0}; LnSrc* src = 0; uint32_t ns = 0; double since = 0;
-        if (ln_read(lp, &lg, &src, &ns, &since) && lg.used) {
-            float* lpop = calloc((size_t)g_nav.n, sizeof(float));
-            for (uint32_t i = 0; lpop && i < lg.cap; i++) { const LnCell* c = &lg.c[i]; if (!(c->foot > 0)) continue; float x = (c->x + 0.5f) * LN_CELL, y = (c->y + 0.5f) * LN_CELL;
-                int cx = (int)floorf((x - g_nav.x0) / g_nav.cell), cy = (int)floorf((y - g_nav.y0) / g_nav.cell); if (cx < 0 || cy < 0 || cx >= g_nav.w || cy >= g_nav.h) continue;
-                int cc = cy * g_nav.w + cx; for (uint32_t k = g_nav.first[cc]; k < g_nav.first[cc + 1]; k++) lpop[k] += c->foot; lcells++; }
-            { int ng = 0; float* fv = malloc(sizeof(float) * (lg.used + 1)); for (uint32_t i = 0; fv && i < lg.cap; i++) if (lg.c[i].foot > 0) fv[ng++] = lg.c[i].foot;   // (the busier half: goal material)
-              float med = 0; if (fv && ng) { qsort(fv, (size_t)ng, sizeof(float), bot_fcmp); med = fv[ng / 2]; } free(fv);
-              GlLane* gl2 = malloc(sizeof(GlLane) * (size_t)(ng + 1)); int k3 = 0; float ws2 = 0;
-              for (uint32_t i = 0; gl2 && i < lg.cap; i++) if (lg.c[i].foot > med && lg.c[i].foot > 1) { gl2[k3].x = (lg.c[i].x + 0.5f) * LN_CELL; gl2[k3].y = (lg.c[i].y + 0.5f) * LN_CELL; gl2[k3].w = logf(1 + lg.c[i].foot); ws2 += gl2[k3].w; k3++; }
-              GlLane* old2 = g_gll; g_gll = gl2; g_ngll = k3; g_gll_wsum = ws2; free(old2); }
-            if (lpop) { int nz = 0; for (int i = 0; i < g_nav.n; i++) if (lpop[i] > 0) nz++;
-                float* v = nz ? malloc(sizeof(float) * (size_t)nz) : 0; int k2 = 0; for (int i = 0; v && i < g_nav.n; i++) if (lpop[i] > 0) v[k2++] = lpop[i];
-                float q99 = 0; if (v && k2) { qsort(v, (size_t)k2, sizeof(float), bot_fcmp); q99 = v[(k2 - 1) * 99 / 100]; }   // (the 99th percentile)
-                free(v);
-                if (q99 > 0) for (int i = 0; i < g_nav.n; i++) { float lv = lpop[i] > 0 ? fminf(1.0f, logf(1 + lpop[i]) / logf(1 + q99)) : 0; if (lv > pop[i]) pop[i] = lv; }
-                free(lpop); }
-        }
-        ln_free(&lg); free(src); } }
+    // (2026-11-09: + the walker's OWN heatmaps folder, NHOOK_HEATMAP_DIR -- where its body saves the lanes of the match it is in every
+    //  30 s; and the heat part kept apart, g_bm_heat, so every three-minute revision mixes the newest lanes in again: bm_lanes_refresh)
+    { free(g_bm_heat); g_bm_heat = malloc(sizeof(float) * (size_t)g_nav.n); if (g_bm_heat) memcpy(g_bm_heat, pop, sizeof(float) * (size_t)g_nav.n); g_bm_heat_n = g_nav.n; }
+    int lcells = 0; { LnGrid lg = {0}; if (bm_lanes_read(map, &lg)) lcells = bm_lanes_mix(&lg, pop); ln_free(&lg); }
     if (mx <= 0 && !lcells) { free(pop); nlog("[nhook] [fight] no heat or lanes for %s: shortest paths", map); return; }
     float* old = g_nav.pop; g_nav.pop = pop; free(old); nlog("[nhook] [fight] %s: player lanes from %d heat cells and %d lane cells (A* prefers them)", map, cells, lcells); }
 static int bot_floor_ok(const float* p) {   // a walkable floor node within ~1 unit (fighting moves leave the path: never off a ledge)
@@ -1105,6 +1134,7 @@ static void bot_step_body(void) {
     static int32_t path[8192]; static int plen, pidx, goal = -1; static double tplan, tstat, tjump, tback, tstuck[4]; static float bstr; static float hist[64][3]; static double histt[64]; static int hh;
     gl_life(now, me >= 0 && !objs[me].dead, me >= 0 ? objs[me].c : 0, 0, 0);   // (nbot_goals.c: deaths, respawns, failed zones)
     brain_review(now);   // (nbot_goals.c: every 3 minutes, its own deaths / kills -> caution, the paths around its death spots)
+    bm_lanes_apply();   // (lanes reread by a revision: mixed into the planner here, on the walker's own thread)
     { static char nsm[64]; static double tfirst, tsh;
       if (strcmp(nsm, g_st_curmap)) { snprintf(nsm, sizeof nsm, "%s", g_st_curmap); tfirst = 0; tsh = 0; }
       int any = 0; for (int i = 0; i < n; i++) if (objs[i].type == 0 && !objs[i].dead) { any++; if (objs[i].shield > 0.05f) tsh = now; }
