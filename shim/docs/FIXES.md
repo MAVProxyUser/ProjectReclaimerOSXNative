@@ -3272,6 +3272,17 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   a running battle, at every round end (our server's in_match true -> false) walker-coach.py round + match-study.py, then each
   walker's game restarted headless with its new knobs and the newest build (they rejoin in the lobby; the user's game and the
   server stay).
+- **The walker copies the match's best player, not its leader** (2026-11-09 05:15; shim/tools/follow-study.py role_model / copy_role_model)
+  — WHY: the user: "the walker should study what everyone else does for lanes, weapon choices, and tactics, not me ... it should only aim
+  to protect me, and get better in its ranking vs the humans. right now <the top player> is destroying everyone. study him. be like
+  him". LOGIC: each window, over the whole current match (the newest recording of the walker's view): every player's kills / deaths,
+  kill distances, weapons killed with and held, speed, jumps a minute while an enemy is within 20 units, the 6-unit cells it kills
+  from; the walker's rank by (kills + 1) / (deaths + 1); the ROLE MODEL = the best by that with 5+ kills (names from the walker's stats
+  page, printed only). Copied through the live knobs (no restart): NHOOK_BOT_DIST = its median kill distance / everyone's (0.5..2.5),
+  NHOOK_BOT_FJUMP = its jumps a minute near enemies (up to 12). Its weapons and spots are reported (steering the walker toward them is
+  code: next). The report drops the leader's own numbers (the walker learns from the best, not from its leader) and shows protection
+  instead: distance to the leader and how many of its attackers the walker went after. First dry run: the role model 69 kills / 16
+  deaths, fights at 16 units (everyone 17.8), ~10 jumps a minute near enemies, battle-rifle headshots and melee; the walker #24 of 27.
 - **The wingman defends its leader, follows at all costs, and learns from the live game every 3 minutes** (2026-11-09 05:00; nbot_engage.c
   eg_choose, nbot.c WINGMAN / g_fol_go, follow-study.py --refit + the sample-time fix, walker-epochs.py the same fix) — WHY: the user:
   "he should be trying to find me at all costs to be my wingman and help ME every chance he can all paths should be plotted to me";

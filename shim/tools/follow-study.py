@@ -17,7 +17,7 @@ names) and, every --every seconds, over that window:
 -> stdout and battles/follow/learned.jsonl (the windows, for the walker's next settings). The leader is found by name on the walker's
 stats page (--leader-from-profile: the player profile's nickname, never printed; else --leader NAME); the walker is its own "you".
     python3 shim/tools/follow-study.py --port 8771 --dir <recordings dir> [--every 180] [--leader-from-profile]"""
-import glob, gzip, json, math, os, random, statistics, subprocess, sys, time, urllib.request
+import collections, glob, gzip, json, math, os, random, statistics, subprocess, sys, time, urllib.request
 
 SUP = os.path.expanduser('~/Library/Application Support/ReclaimerMac'); OUT = os.path.join(SUP, 'battles', 'follow')
 
@@ -84,6 +84,62 @@ WALKER_NAME = ['AIWalkerTest']
 
 def med(v): return round(statistics.median(v), 1) if v else None
 
+def role_model(rec_dir, port, ws):
+    """the whole current match (the newest recording): every player's K / D, kill distances, weapons, speed, jumps near enemies,
+    where they kill -> the walker's rank and the best player (the role model), by name from the walker's stats page"""
+    paths = sorted(glob.glob(os.path.join(rec_dir, '*.jsonl.gz')), key=os.path.getmtime)
+    if not paths: return None
+    head, S, E = read(paths[-1])
+    if len(S) < 50: return None
+    try: names = {p.get('slot'): p.get('name') for p in json.load(urllib.request.urlopen('http://127.0.0.1:%d/stats.json' % port, timeout=3)).get('players', [])}
+    except Exception: names = {}
+    first = {r[0]: r for r in S[0]['p']}; last = {r[0]: r for r in S[-1]['p']}
+    P = {}
+    for sl, r in last.items():
+        f = first.get(sl, r); P[sl] = {'k': max(0, (r[12] or 0) - (f[12] or 0) if sl in first else r[12] or 0), 'd': max(0, (r[13] or 0) - (f[13] or 0) if sl in first else r[13] or 0),
+                                     'kd': [], 'kw': collections.Counter(), 'held': collections.Counter(), 'spd': [], 'jumps': 0, 'near_s': 0.0, 'spots': collections.Counter()}
+    prev = {}; jt = {}
+    for s0 in S:
+        R = {r[0]: r for r in s0['p']}
+        for sl, r in R.items():
+            if sl not in P or not r[2]: prev.pop(sl, None); continue
+            P[sl]['held'][r[10] or '?'] += 1
+            q = prev.get(sl)
+            if q:
+                dt = s0['t'] - q[0]
+                if 0.05 < dt < 0.5:
+                    P[sl]['spd'].append(math.hypot(r[3] - q[1][3], r[4] - q[1][4]) / dt)
+                    near = any(o is not r and o[2] and o[1] != r[1] or (o is not r and o[2] and r[1] is None) for o in R.values() if math.hypot(o[3] - r[3], o[4] - r[4]) < 20)
+                    if near:
+                        P[sl]['near_s'] += dt
+                        if r[5] - q[1][5] > 0.12 and s0['t'] - jt.get(sl, -9) > 1.0: P[sl]['jumps'] += 1; jt[sl] = s0['t']
+            prev[sl] = (s0['t'], r)
+    T = [s0['t'] for s0 in S]
+    for e in E:
+        a, b = e.get('a'), e.get('b')
+        if a not in P or a == b: continue
+        i = min(range(len(T)), key=lambda j: abs(T[j] - e['t'])) if len(T) < 4000 else max(0, min(len(T) - 1, int((e['t'] - T[0]) * 10)))
+        R = {r[0]: r for r in S[i]['p']}; k, v = R.get(a), R.get(b)
+        if k and v: P[a]['kd'].append(math.hypot(k[3] - v[3], k[4] - v[4])); P[a]['spots'][(int(k[3] // 6) * 6, int(k[4] // 6) * 6)] += 1
+        P[a]['kw'][e.get('how') or '?'] += 1
+    score = lambda x: (x['k'] + 1) / (x['d'] + 1)
+    order = sorted(P, key=lambda sl: (score(P[sl]), P[sl]['k']), reverse=True)
+    cands = [sl for sl in order if sl != ws and P[sl]['k'] >= 5] or [sl for sl in order if sl != ws]
+    rm = cands[0] if cands else None
+    allkd = [d for sl, x in P.items() if sl != ws for d in x['kd']]
+    return {'P': P, 'order': order, 'rm': rm, 'names': names, 'allkd': allkd, 'score': score}
+
+def copy_role_model(o, knobs_path):
+    """the walker takes the role model's fighting distance (vs everyone's) and its jumps near enemies, through the live knobs"""
+    x = o['P'][o['rm']]; k = {}
+    if len(x['kd']) >= 3 and len(o['allkd']) >= 10:
+        k['NHOOK_BOT_DIST'] = round(min(2.5, max(0.5, statistics.median(x['kd']) / max(0.5, statistics.median(o['allkd'])))), 2)
+    if x['near_s'] > 30: k['NHOOK_BOT_FJUMP'] = round(min(12.0, x['jumps'] / (x['near_s'] / 60.0)), 1)
+    try: cur = json.load(open(knobs_path))
+    except Exception: cur = {}
+    cur.update(k); os.makedirs(os.path.dirname(knobs_path), exist_ok=True); tmp = knobs_path + '.tmp'; json.dump(cur, open(tmp, 'w')); os.replace(tmp, knobs_path)
+    return k
+
 def window(rec_dir, t0, t1, ws, ls):
     o = {'shadow': [], 'w': {'k': 0, 'd': 0, 'shots': 0, 'hits': 0, 'kd': [], 'kw': []}, 'l': {'k': 0, 'd': 0, 'shots': 0, 'hits': 0, 'kd': [], 'kw': []}, 'apart_s': 0.0}
     for path in sorted(glob.glob(os.path.join(rec_dir, '*.jsonl.gz')), key=os.path.getmtime)[-2:]:
@@ -147,7 +203,25 @@ def main():
         ws, ls = slots(port, leader)
         if ws is None or ls is None: print('%s window %d: the walker or its leader is not in the game' % (time.strftime('%H:%M:%S'), n), flush=True); continue
         o = window(rec, t0, t1, ws, ls)
-        print(report(o, n), flush=True)
+        sh = o['shadow']; w = o['w']
+        print('%s window %d (the last %d s):' % (time.strftime('%H:%M:%S'), n, EVERY), flush=True)
+        try: att = sum(1 for l in open(logp, 'rb').read()[nst.get('off', 0):].decode('utf-8', 'replace').splitlines() if 'shooting my leader' in l)
+        except OSError: att = 0
+        print('  protecting you: median %s units from you, within 6 units %s of the time, longest apart %.0f s; went after %d of your attackers' % (
+            med(sh), '%.0f%%' % (100 * sum(d <= 6 for d in sh) / len(sh)) if sh else '-', o['apart_s'], att), flush=True)
+        print('  walker this window: %d kills / %d deaths, accuracy %s, kills with %s' % (w['k'], w['d'], '%.0f%%' % (100 * w['hits'] / w['shots']) if w['shots'] else '-',
+              ', '.join(sorted(set(w['kw']))) or '-'), flush=True)
+        rmo = role_model(rec, port, ws)
+        if rmo and rmo['rm'] is not None:
+            P, nm = rmo['P'], rmo['names']; x = P[rmo['rm']]; me = P.get(ws)
+            rank = rmo['order'].index(ws) + 1 if ws in rmo['order'] else None
+            if me: print('  walker in the match: #%s of %d by K/D (%d kills / %d deaths)' % (rank, len(rmo['order']), me['k'], me['d']), flush=True)
+            top = x['held'].most_common(2); spots = ', '.join('(%d, %d)' % c for c, _ in x['spots'].most_common(2))
+            print('  role model: %s, %d kills / %d deaths: fights at %s units (everyone %s), %s jumps a minute near enemies, moves %s u/s; kills with %s; holds %s; kills from %s' % (
+                nm.get(rmo['rm'], 'slot %s' % rmo['rm']), x['k'], x['d'], med(x['kd']), med(rmo['allkd']), round(x['jumps'] / (x['near_s'] / 60.0), 1) if x['near_s'] > 30 else '-',
+                med(x['spd']), ', '.join('%s %d' % kv for kv in x['kw'].most_common(3)) or '-', ', '.join(h for h, _ in top) or '-', spots or '-'), flush=True)
+            k = copy_role_model(rmo, os.path.join(SUP, 'battles', 'live-knobs', WALKER_NAME[0] + '.json'))
+            print('  copying the role model: %s' % (' '.join('%s=%s' % (a.replace('NHOOK_BOT_', ''), b) for a, b in k.items()) or 'not enough of his fights yet'), flush=True)
         res = nade_lines(logp, nst); kp = os.path.join(SUP, 'battles', 'live-knobs', WALKER_NAME[0] + '.json')
         cur, nxt, st = hone(res, nst, kp)
         if '--refit' in sys.argv: print('  learning: ' + refit(rec), flush=True)
