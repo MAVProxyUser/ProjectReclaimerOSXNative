@@ -46,19 +46,29 @@ def nade_lines(logp, state):
     except OSError: return []
     return [l for l in b.decode('utf-8', 'replace').splitlines() if '[nade] ' in l]
 
+ARC = [0.015, 0.025, 0.035]
 def hone(results, nstate, knobs_path):
-    cur = nstate.get('cur', 0.10); st = nstate.setdefault('stats', {})
-    t = st.setdefault('%.2f' % cur, [0, 0]); t[0] += len(results); t[1] += sum(1 for l in results if ': hit' in l or 'KILLED' in l)
-    untried = [v for v in TPU if '%.2f' % v not in st or st['%.2f' % v][0] == 0]
-    if untried: nxt = untried[0]
-    elif random.random() < 0.25: nxt = random.choice(TPU)
-    else: nxt = max(TPU, key=lambda v: (st['%.2f' % v][1] + 1) / (st['%.2f' % v][0] + 2))
-    nstate['cur'] = nxt
+    """stage 1: the lead per unit (TPU) among 0.06..0.14; once every value has 12+ throws, stage 2: the arc per unit (ARC) among
+    0.015 / 0.025 / 0.035 with the best lead held. Each window's throws go to the setting that ran; the next is untried first, else
+    the best hit rate (1 in 4 windows a random one)"""
+    pick = lambda vals, st: ([v for v in vals if st.get('%.3f' % v, [0, 0])[0] == 0] or [random.choice(vals) if random.random() < 0.25 else
+                             max(vals, key=lambda v: (st['%.3f' % v][1] + 1) / (st['%.3f' % v][0] + 2))])[0]
+    hits = sum(1 for l in results if ': hit' in l or 'KILLED' in l)
+    stage = nstate.get('stage', 1); key = 'stats' if stage == 1 else 'arc_stats'; st = nstate.setdefault(key, {})
+    cur = nstate.get('cur', 0.10) if stage == 1 else nstate.get('arc', 0.025)
+    t = st.setdefault('%.3f' % cur, [0, 0]); t[0] += len(results); t[1] += hits
+    if stage == 1 and all(nstate['stats'].get('%.3f' % v, [0, 0])[0] >= 12 for v in TPU):
+        best = max(TPU, key=lambda v: (nstate['stats']['%.3f' % v][1] + 1) / (nstate['stats']['%.3f' % v][0] + 2))
+        nstate['stage'] = 2; nstate['cur'] = best; stage = 2; st = nstate.setdefault('arc_stats', {})
+    if stage == 1: nxt = pick(TPU, st); nstate['cur'] = nxt
+    else: nxt = pick(ARC, st); nstate['arc'] = nxt
     try: k = json.load(open(knobs_path))
     except Exception: k = {}
-    k['NHOOK_BOT_NADE_TPU'] = nxt
+    k['NHOOK_BOT_NADE_TPU'] = nstate['cur']
+    if stage == 2: k['NHOOK_BOT_NADE_ARC'] = nstate['arc']
     os.makedirs(os.path.dirname(knobs_path), exist_ok=True); tmp = knobs_path + '.tmp'; json.dump(k, open(tmp, 'w')); os.replace(tmp, knobs_path)
-    return cur, nxt, st
+    return ('lead %.2f s a unit' % cur if key == 'stats' else 'arc %.3f rad a unit (lead %.2f)' % (cur, nstate['cur'])), \
+           ('lead %.2f' % nxt if stage == 1 else 'arc %.3f' % nxt), dict(list(nstate['stats'].items()) + [('arc ' + a, b) for a, b in nstate.get('arc_stats', {}).items()])
 
 REFIT = {'p': None, 't0': 0}
 BASE = {}   # the walker's launch knobs (walker-coach.py show, --id): where the live knobs start from
@@ -223,7 +233,11 @@ def main():
     r0 = subprocess.run(['python3', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'walker-coach.py'), 'show'], capture_output=True, text=True)
     for l in r0.stdout.splitlines():
         if l.startswith('walker %s: ' % arg('--id', '4')): BASE.update({kv.split('=')[0]: float(kv.split('=')[1]) for kv in l.split(': ', 1)[1].split() if '=' in kv})
-    logp = arg('--log', os.path.join(SUP, 'battles', 'aiwalker.log')); nst = {}; nade_lines(logp, nst)   # (from now on)
+    logp = arg('--log', os.path.join(SUP, 'battles', 'aiwalker.log')); nst = {}
+    NST = os.path.join(OUT, 'nade-state.json')   # (the grenade honing survives a restart of this study)
+    try: nst.update({k: v for k, v in json.load(open(NST)).items() if k != 'off'})
+    except Exception: pass
+    nade_lines(logp, nst)   # (from now on)
     print('%s following-study every %d s (the walker on %d, its leader by name)' % (time.strftime('%H:%M:%S'), EVERY, port), flush=True)
     while True:
         t0 = time.time(); time.sleep(EVERY); t1 = time.time(); n += 1
@@ -254,8 +268,10 @@ def main():
             print('  copying the role model: %s' % (' '.join('%s=%s' % (a.replace('NHOOK_BOT_', ''), b) for a, b in k.items()) or 'not enough of his fights yet'), flush=True)
         res = nade_lines(logp, nst); kp = os.path.join(SUP, 'battles', 'live-knobs', WALKER_NAME[0] + '.json')
         cur, nxt, st = hone(res, nst, kp)
+        try: json.dump({k: v for k, v in nst.items() if k != 'off'}, open(NST, 'w'))
+        except OSError: pass
         if '--refit' in sys.argv: print('  learning: ' + refit(rec), flush=True)
-        print('  grenades: %d thrown, %d hit (%d killed), lead %.2f s a unit -> next %.2f; so far %s' % (len(res), sum(1 for l in res if ': hit' in l or 'KILLED' in l),
+        print('  grenades: %d thrown, %d hit (%d killed) with %s -> next %s; so far %s' % (len(res), sum(1 for l in res if ': hit' in l or 'KILLED' in l),
               sum(1 for l in res if 'KILLED' in l), cur, nxt, ', '.join('%s: %d/%d' % (k, v[1], v[0]) for k, v in sorted(st.items()))), flush=True)
         open(os.path.join(OUT, 'learned.jsonl'), 'a').write(json.dumps({'t': round(t1), 'window': n, 'shadow_median': med(o['shadow']), 'walker': {k: v for k, v in o['w'].items()},
                                                                        'leader': {k: v for k, v in o['l'].items()}}) + '\n')

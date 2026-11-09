@@ -3272,6 +3272,13 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   a running battle, at every round end (our server's in_match true -> false) walker-coach.py round + match-study.py, then each
   walker's game restarted headless with its new knobs and the newest build (they rejoin in the lobby; the user's game and the
   server stay).
+- **Grenade practice: twice the throws, the arc honed after the lead, the honing kept across restarts** (2026-11-09 05:50; follow-study.py
+  hone, battles/live-knobs, battles/follow/nade-state.json) — WHY: the user: "I really want the walker to practice grenade lays here too".
+  LOGIC: NHOOK_BOT_GRENX 0.42 -> 0.2 in the live knobs (x the players' time between throws: about twice the throws). Honing in two
+  stages: the lead per unit (NHOOK_BOT_NADE_TPU 0.06..0.14) until every value has 12+ throws, then the arc per unit (NHOOK_BOT_NADE_ARC
+  0.015 / 0.025 / 0.035) with the best lead held; each window's throws credited to the setting that ran; the next = untried first,
+  else the best hit rate (1 in 4 random). The state is saved after each window and read at the study's start (a restart of the study
+  had dropped the counts: seeded with the night's 0.06 11/19, 0.08 16/34, 0.10 12/46).
 - **The walker copies the best player's movement, step by step; its rank leads every report** (2026-11-09 05:40; follow-study.py
   role_model / copy_role_model) — WHY: the user: "the biggest thing to study is the mannerisms in movement and fluidity in covering lanes,
   and engaging, and not hesitating. keep crushing it and refining and studying and reloading the winning model. tell me the rank of the
