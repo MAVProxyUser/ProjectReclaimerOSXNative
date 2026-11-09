@@ -3286,6 +3286,13 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   switch presses (the learnt record bit): 0 of 32 took" -- 32 x "switching from PLASMA PISTOL to ASSAULT RIFLE" with the trigger held
   (the plasma pistol held = an overcharge held) while the earlier switches, 3 of 3 and 2 of 2, came with the trigger up. LOGIC: from a
   switch press until 0.15 s after it the trigger (and the reload click) stays up; PLASMA PISTOL joins the weapons whose trigger is pulsed.
+- **The hit test's pad grows with distance; the tuner ignores windows across a map change** (2026-11-09 12:05; nbot.c the fire gate,
+  death-tuner.py) — WHY: a BR-start Valhalla match: the walker's accuracy 26% (on target 44%) against the others' 34-59% (60-76%),
+  its aim line off the predicted target 17-46% of the steps -- the body column is ~0.6 deg wide at 25 units, while Halo 3's bullet
+  magnetism pulls shots in from a little off; and the tuner had judged a Pit -> Valhalla window as the lead step's fault. Its
+  server / client hit ratio (0.59 against the players' 0.68-0.81) points at too much lead at range. LOGIC: pad += tan(NHOOK_BOT_FIRE_PAD_DEG
+  0.5 deg) x the distance; the tuner's lead and death windows that span a map change give no verdict (the step stays); the public
+  walker's LEAD_X starts the search at 0.5.
 - **"Ignored attacker": a death cause, live turn-to-attacker knobs, tuner moves** (2026-11-09 12:00; nbot.c why_note, nbot_engage.c the
   second-attacker rule, death-tuner.py) — WHY: on Valhalla 3 of 12 deaths were "slow start -- I never fired at it": a battle rifle
   14-26 units away, in sight, killing the walker while it stayed on another target (when the target shoots too, the walker turned to a

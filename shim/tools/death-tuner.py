@@ -56,7 +56,7 @@ def you():
     try:
         d = json.load(urllib.request.urlopen(STATS + '/stats.json', timeout=4))
         for p in d.get('players', []):
-            if p.get('you'): return int(p.get('kills') or 0), int(p.get('deaths') or 0), int(p.get('shots') or 0), int(p.get('hits') or 0)
+            if p.get('you'): return int(p.get('kills') or 0), int(p.get('deaths') or 0), int(p.get('shots') or 0), int(p.get('hits') or 0), d.get('map') or ''
     except Exception: pass
     return None
 LEAD_SHOTS = int(arg('--lead-shots', '250'))
@@ -65,7 +65,8 @@ def main():
     off = os.path.getsize(WHY) if os.path.exists(WHY) else 0   # (only deaths from now on)
     weights = {}; rest = {}; turn = {}; deaths = 0; since_step = 0
     K = D = SH = HI = 0; last = None   # the walker's kills / deaths / shots / hits since the start, across matches
-    lead = {'dir': 1, 's0': 0, 'h0': 0, 'pending': None, 'acc_before': None}
+    lead = {'dir': 1, 's0': 0, 'h0': 0, 'pending': None, 'acc_before': None, 'map': None}
+    MAP = None   # (12:05: a window that spans a map change is no evidence -- Valhalla plays far worse than The Pit: no verdict, start again)
     hist = []                # (deaths, kills) after each death this loop saw
     pending = None           # the last step: {knob, old, new, cause, d0, k0, before}
     log({'event': 'start', 'nick': NICK, 'step': STEP, 'half': HALF, 'dry': DRY})
@@ -73,10 +74,14 @@ def main():
         time.sleep(5)
         y = you()
         if y:
-            if last and (y[0] < last[0] or y[1] < last[1] or y[2] < last[2]): last = (0, 0, 0, 0)   # (a new match: the counters started again)
+            if last and (y[0] < last[0] or y[1] < last[1] or y[2] < last[2]): last = (0, 0, 0, 0, last[4])   # (a new match: the counters started again)
+            MAP = y[4]
             if last: K += max(0, y[0] - last[0]); D += max(0, y[1] - last[1]); SH += max(0, y[2] - last[2]); HI += max(0, y[3] - last[3])
             last = y
         # the lead track: one window of LEAD_SHOTS server-counted shots
+        if lead['map'] != MAP:
+            if lead['pending'] or lead['acc_before'] is not None: log({'event': 'lead window dropped', 'why': 'map %s -> %s' % (lead['map'], MAP)})
+            lead.update({'s0': SH, 'h0': HI, 'acc_before': None, 'map': MAP})   # (a pending step stays; it is judged on this map's windows)
         if SH - lead['s0'] >= LEAD_SHOTS and knobs_read().get('NHOOK_TUNE', 1) > 0:
             acc = (HI - lead['h0']) / max(1, SH - lead['s0']); kn = knobs_read(); pd = lead['pending']
             if pd:
@@ -112,6 +117,8 @@ def main():
         kn = knobs_read()
         if kn.get('NHOOK_TUNE', 1) <= 0: continue
         # the verdict on the last step: the STEP deaths since it against the STEP deaths before it
+        if pending and pending.get('map') != MAP:
+            log({'event': 'verdict dropped', 'knob': pending['knob'], 'why': 'map %s -> %s (the step stays)' % (pending.get('map'), MAP)}); pending = None
         if pending and deaths - pending['d0'] >= STEP:
             dk = K - pending['k0']; dd = max(1, deaths - pending['d0']); after = dk / dd
             before = pending['before']; worse = before is not None and before > 0 and after < 0.75 * before
@@ -139,7 +146,7 @@ def main():
                     d_a, k_a = hist[-STEP - 1]; d_b, k_b = hist[-1]
                     before = round((k_b - k_a) / max(1, d_b - d_a), 2) if d_b > d_a else None
                 old = kn.get(knob); kn[knob] = new; knobs_write(kn)
-                pending = {'knob': knob, 'old': old, 'new': new, 'cause': c, 'd0': deaths, 'k0': K, 'D0': D, 'before': before}
+                pending = {'knob': knob, 'old': old, 'new': new, 'cause': c, 'd0': deaths, 'k0': K, 'D0': D, 'before': before, 'map': MAP}
                 turn[c] = (i0 + j + 1) % len(moves); since_step = 0; done = True
                 log({'event': 'step', 'cause': c, 'weight': round(w, 2), 'knob': knob, 'from': cur, 'to': new, 'kd_before': before,
                      'causes': {k: round(v, 2) for k, v in sorted(weights.items(), key=lambda x: -x[1])}})

@@ -1264,7 +1264,11 @@ static void bot_step_body(void) {
             //  from the head down to 0.7 radii under the centre, + the pad) -- not a cone around the aim point, which let every shot
             //  drifting over the head go. NHOOK_BOT_FIRE_HITTEST=0 (live) = the cone
             int can_hit = err < cone; float fht = 1; lk_over(&fht, "NHOOK_BOT_FIRE_HITTEST");
-            if (fht > 0 && g_bot_head_r > 0) { float pad = 0.03f; lk_over(&pad, "NHOOK_BOT_FIRE_PAD");
+            // (12:05: on Valhalla, battle rifles at 20-30 units, the aim line was off the predicted target 17-46% of the steps: the body
+            //  column is ~0.6 deg wide there, while Halo 3's bullet magnetism pulls shots in from a little off -- the pad grows with the
+            //  distance by NHOOK_BOT_FIRE_PAD_DEG (0.5 deg, live))
+            if (fht > 0 && g_bot_head_r > 0) { float pad = 0.03f, pdeg = 0.5f; lk_over(&pad, "NHOOK_BOT_FIRE_PAD"); lk_over(&pdeg, "NHOOK_BOT_FIRE_PAD_DEG");
+                pad += tanf(pdeg / 57.2958f) * tdist;
                 float dv[3] = {cosf(pitch0) * cosf(yaw0), cosf(pitch0) * sinf(yaw0), sinf(pitch0)};
                 can_hit = ray_pd(cam, dv, g_bot_head_c) < g_bot_head_r * 1.1f + pad;
                 float top = g_bot_head_c[2] - g_bot_head_r, bot = g_bot_body_c[2] - 0.7f * ftg.r;

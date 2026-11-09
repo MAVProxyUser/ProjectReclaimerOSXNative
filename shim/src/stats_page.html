@@ -1397,6 +1397,7 @@ const WK=[
   ['NHOOK_BOT_HEAD_DZ_AUTO','Automatic weapons: aim under the head (head radii)',-1.5,-4,1,0.25,'They track the head but aim this far below its centre: -1.5 = the neck, so spread upward still hits the head and downward the chest. 0 = the head centre.'],
   ['NHOOK_BOT_HEAD_DZ','Precision weapons: aim over the head centre (head radii)',0,-2,1,0.1,'0 = the centre of the head.'],
   ['NHOOK_BOT_FIRE_HITTEST','Fire only when the aim line goes through it',1,0,1,0,'On: the trigger is allowed only when its aim line passes through the target\'s head or body (plus the pad below). Off: a cone around the aim point (fire slack).'],
+  ['NHOOK_BOT_FIRE_PAD_DEG','... plus an angle (degrees)',0.5,0,3,0.1,'The hit test grows this many degrees with the distance -- Halo 3\'s bullet magnetism pulls shots in from a little off at range.'],
   ['NHOOK_BOT_FIRE_PAD','... hit test pad (units)',0.03,0,0.3,0.01,'How much wider than the head and body the hit test is. Larger = shoots sooner, misses more.'],
   ['NHOOK_BOT_AIM_HEAD','Fallback aim height',0.55,0,1,0.05,'Only when the head cannot be read from the skeleton: the centre plus this many body radii (0.55 = about the head).'],
   ['NHOOK_BOT_AIM_BODY','Chest height (head tracking off)',0.2,-0.5,1,0.05,'With "Track the head" off, automatic weapons aim this many body radii over the centre (0.2 = the chest).'],
