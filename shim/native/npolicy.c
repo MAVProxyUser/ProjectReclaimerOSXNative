@@ -70,7 +70,7 @@ static int pol_move(double now, const NovObj* objs, int n, int me, const NovObj*
             pol_run(x, raw);
             if (g_pol.k == 0) { out[0] = raw[0]; out[1] = raw[1]; out[2] = raw[2]; }
             else { int K = g_pol.k; float mx = raw[0]; for (int c = 1; c < K; c++) if (raw[c] > mx) mx = raw[c];   // (sample a component, then the move from it)
-                // (07:15: COMMITTED draws -- a fresh component and noise every 0.1 s made the walker dither (its fight speed 1.0-1.3 u/s, the
+                // (06:50: COMMITTED draws -- a fresh component and noise every 0.1 s made the walker dither (its fight speed 1.0-1.3 u/s, the
                 //  best players' median 1.71: they commit to a strafe for about half a second). The component and the two normal draws are
                 //  kept for NHOOK_BOT_POL_COMMIT (0.5 s, live; 0.1 = old) -- the means still follow the moment every 0.1 s)
                 static int cc; static float g0, g1; static double tcm; float cm = 0.5f; lk_over(&cm, "NHOOK_BOT_POL_COMMIT");

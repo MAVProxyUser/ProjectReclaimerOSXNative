@@ -130,6 +130,12 @@ static int g_bm_done;   // (bot_models_tick clears it when walker-model.json cha
 static void bm_load(void) {
     if (g_bm_done) return; g_bm_done = 1; char path[1024]; const char* e = getenv("NHOOK_BOT_MODEL"), * h = getenv("HOME");
     if (e && *e) snprintf(path, sizeof path, "%s", e); else snprintf(path, sizeof path, "%s/Library/Application Support/ReclaimerMac/tracks/walker-model.json", h ? h : "");
+    // (06:55: the walker is to mimic the BEST players -- walker-model.py --top writes tracks/walker-model-top.json, the top fifth of each
+    //  recorded match by K/D (reaction 0.85 s vs 0.94 for everyone, strafe switch 0.74 vs 0.81 s); its fight numbers are read first
+    //  when present (the maps' lanes still come from everyone's model). NHOOK_BOT_MODEL_TOP=0 (live) = the everyone model)
+    { float mt = 1; lk_over(&mt, "NHOOK_BOT_MODEL_TOP"); char tp[1024]; struct stat st2;
+      snprintf(tp, sizeof tp, "%s/Library/Application Support/ReclaimerMac/tracks/walker-model-top.json", h ? h : "");
+      if (!(e && *e) && mt > 0 && stat(tp, &st2) == 0) snprintf(path, sizeof path, "%s", tp); }
     FILE* f = fopen(path, "r"); if (!f) { nlog("[nhook] [fight] no model at %s: built-in numbers", path); return; }
     static char txt[1 << 16]; size_t n = fread(txt, 1, sizeof txt - 1, f); fclose(f); txt[n] = 0;
     g_bm.dist_p25 = bm_num(txt, "dist_p25", g_bm.dist_p25); g_bm.dist_med = bm_num(txt, "dist_median", g_bm.dist_med); g_bm.dist_p75 = bm_num(txt, "dist_p75", g_bm.dist_p75);
@@ -889,9 +895,12 @@ static float g_bot_head_r = -1;   // (the current target's head radius, -1 = not
 #include "npolicy.c"     // the learnt movement policy (policy-train.py on the GPU -> policy.json)
 static void bot_models_tick(void) {   // (live knobs: the models re-read when their files change -- every 10 s a look at the files' times)
     static double t; double now = mono_s(); if (now - t < 10.0) return; t = now; const char* h = getenv("HOME"); char p[1100]; struct stat st;
-    static time_t m1, m2, m3, m4;
+    static time_t m1, m2, m3, m4, m5; static float mt_last = -1; float mt = 1; lk_over(&mt, "NHOOK_BOT_MODEL_TOP");
     snprintf(p, sizeof p, "%s/Library/Application Support/ReclaimerMac/tracks/walker-model.json", h ? h : "");
     if (!getenv("NHOOK_BOT_MODEL") && stat(p, &st) == 0) { if (m1 && st.st_mtime != m1) { g_bm_done = 0; bm_load(); nlog("[nhook] [knobs] walker-model.json changed: re-read"); } m1 = st.st_mtime; }
+    snprintf(p, sizeof p, "%s/Library/Application Support/ReclaimerMac/tracks/walker-model-top.json", h ? h : "");
+    if (!getenv("NHOOK_BOT_MODEL") && stat(p, &st) == 0) { if ((m5 && st.st_mtime != m5) || (mt_last >= 0 && (mt > 0) != (mt_last > 0))) { g_bm_done = 0; bm_load(); nlog("[nhook] [knobs] walker-model-top.json changed / switched: re-read"); } m5 = st.st_mtime; }
+    mt_last = mt;
     snprintf(p, sizeof p, "%s/Library/Application Support/ReclaimerMac/tracks/engage-model.json", h ? h : "");
     if (stat(p, &st) == 0) { if (m2 && st.st_mtime != m2) { g_eg_key[0] = 0; nlog("[nhook] [knobs] engage-model.json changed: re-read at the next step"); } m2 = st.st_mtime; }
     snprintf(p, sizeof p, "%s/Library/Application Support/ReclaimerMac/tracks/maps", h ? h : "");
@@ -1198,7 +1207,7 @@ static void bot_step_body(void) {
                   if (pw > 0) { float pr, pl; int jp; if (pol_move(now, objs, n, me, o, &ftg, yaw0, &pr, &pl, &jp)) { npol++;
                       float m0 = hypotf(r, lat), m1 = hypotf(pr, pl);
                       r = (1 - pw) * r + pw * pr; lat = (1 - pw) * lat + pw * pl;
-                      // (07:15: two moves that disagree cancel -- the blend's speed is the faster one's: a direction from both, never a dither
+                      // (06:50: two moves that disagree cancel -- the blend's speed is the faster one's: a direction from both, never a dither
                       //  in place. NHOOK_BOT_POL_KEEPSPEED=0 = old)
                       { float ks = 1; lk_over(&ks, "NHOOK_BOT_POL_KEEPSPEED"); float mb = hypotf(r, lat), mt = fmaxf(m0, m1);
                         if (ks > 0 && mb > 0.05f && mb < mt) { r = fmaxf(-1, fminf(1, r * mt / mb)); lat = fmaxf(-1, fminf(1, lat * mt / mb)); } }
@@ -1233,6 +1242,10 @@ static void bot_step_body(void) {
                   if (cw > 0 && o->shield < csh) { int na = 0; for (int i = 0; i < n; i++) { const NovObj* t = &objs[i]; if (t->type || t->dead || i == me || !bot_enemy(o, t)) continue;
                           float dx = o->c[0] - t->c[0], dy = o->c[1] - t->c[1], d = sqrtf(dx * dx + dy * dy); if (d > 20 || d < 0.3f) continue; float ay = atan2f(t->aim[1], t->aim[0]); if ((cosf(ay) * dx + sinf(ay) * dy) / d > 0.978f) na++; }
                       if (na >= 2) { r = -1.0f; if (fabsf(lat) < 0.7f) lat = lat >= 0 ? 0.8f : -0.8f; static double tl; if (bot_log() && now - tl > 4) { tl = now; nlog("[nhook] [fight] outnumbered: %d enemies aiming at me, shield %.2f -- backing out of the crossfire", na, o->shield); } } } }
+                // (07:00: the fight GAIN -- "[moves] ... moved 1.09 u/s, asked 1.19 u/s" in a local battle: not blocked, timid; the best
+                //  players move 1.71 u/s (median) in fights. The fight's move is scaled by NHOOK_BOT_FIGHT_GAIN (1.4, live; 1 = old), each
+                //  axis kept within -1..1, before the floor check below (which still keeps it on the ledge); a kite / crowd escape is full already)
+                if (!g_kite) { float fg = 1.4f; lk_over(&fg, "NHOOK_BOT_FIGHT_GAIN"); if (fg > 0 && fg != 1.0f) { r = fmaxf(-1, fminf(1, r * fg)); lat = fmaxf(-1, fminf(1, lat * fg)); } }
                 // never off the floor: test where this step leads (1 unit along the move); flip the strafe, then drop the back-off
                 float fx = cosf(yaw0), fy = sinf(yaw0), lx = -fy, ly = fx; float lat_in = lat, r_in = r; int ftries = 0;
                 // (09:10: the check flipped the strafe on 23-60% of fight steps -- a strafe reversing every few steps is a jitter in
@@ -1505,13 +1518,19 @@ static void bot_step_body(void) {
                   // (15:10: only while the legs FOLLOW the path -- in a fight (or holding) they belong to the fight, the walker strafes
                   //  instead of walking the path, and that read as "stuck" all fight long: in a local battle 300-400 "stuck" and 100+
                   //  "wedged" a walker in 5 minutes, each one jumping and the escape running the walker about mid-fight)
-                  if (!strafe && arbw != ARB_FIGHT && arbw != ARB_HOLD && !(g_bot_fighting && tdist < 3.0f) && now - histt[j & 63] >= 1.4 && dx * dx + dy * dy < 0.35f * 0.35f && now - tjump > 1.5) {   // (01:10: fighting at arm's length is no progress by design, not stuck) tjump = now; hh = 0; tback = now; bstr = (nav_rand() & 1) ? 0.3f : -0.3f;
+                  if (!strafe && arbw != ARB_FIGHT && arbw != ARB_HOLD && !(g_bot_fighting && tdist < 3.0f) && now - histt[j & 63] >= 1.4 && dx * dx + dy * dy < 0.35f * 0.35f && now - tjump > 1.5) {
+                      // (01:10: fighting at arm's length is no progress by design, not stuck)
+                      // (07:30: these statements sat AFTER that comment on its line -- commented out since 01:10: tjump never moved, so
+                      //  "stuck" fired on EVERY step once a walker slowed (3 lines in one 0.1 s step), each adding +8 to 10 path nodes,
+                      //  blocking steps and replanning; no back-off ever ran, no jump timing, "4 in 10 s" always true. 239-669 stucks a
+                      //  battle came from this)
+                      tjump = now; hh = 0; tback = now; bstr = (nav_rand() & 1) ? 0.3f : -0.3f;
                       nav_pos(path[pidx >= 4 ? pidx - 4 : 0], bk);
                       // (14:45: "stuck at" 188 times in 3000 log lines on Valhalla, ~50 at one spot: the +4 penalty never routed around it, and
                       //  the walker never jumped -- on rocks and lips a jump is what frees a player. Each stuck now jumps (0.25 s) and the next 10
                       //  path nodes cost NHOOK_BOT_STUCK_PEN (8, live) more)
                       { float sp = 8; lk_over(&sp, "NHOOK_BOT_STUCK_PEN"); for (int i = pidx; i < plen && i < pidx + 10; i++) g_nav.pen[path[i]] += sp; }
-                      // (06:55: 2 of 3 stucks came at the FIRST step of a fresh path -- the replan from the spot chose the same step again
+                      // (06:42: 2 of 3 stucks came at the FIRST step of a fresh path -- the replan from the spot chose the same step again
                       //  ("stuck at (-3.7 -18.5 19.0) ... path 0/141", 0/192, 0/164, 0/165 on Guardian). The step being pushed along
                       //  (the walker's node -> the path's next) is marked blocked in the walking graph (nav.c nav_block_step: +25, live
                       //  NHOOK_NAV_BLOCKPEN); blocked twice it is kept for the map (maptop/<map>.blocked.txt))
@@ -1519,7 +1538,7 @@ static void bot_step_body(void) {
                         if (nx >= 0 && cur >= 0 && cur != nx) { from = cur; bs = nav_block_step(cur, nx); }
                         if (!bs && nx >= 0) { from = path[pidx]; bs = nav_block_step(from, nx); }
                         if (bs) nav_say("  [nav] the step %d -> %d is blocked%s\n", from, nx, bs == 2 ? " (again: kept for this map)" : "");
-                        // (07:10: one Guardian node had 5 of its 8 steps blocked -- the walker pinned there whatever way it pushed: a TRAP
+                        // (06:48: one Guardian node had 5 of its 8 steps blocked -- the walker pinned there whatever way it pushed: a TRAP
                         //  (nav.c nav_trap, 3+ blocked; A* keeps out of it). Caught in one, the escape runs 2 s (random directions at full
                         //  throttle, jumps) -- only then: run on "4 stucks in 10 s" it fired all the time (15:20 entry). NHOOK_BOT_TRAP_ESC=0 off)
                         { float te = 2.0f; lk_over(&te, "NHOOK_BOT_TRAP_ESC"); if (te > 0 && from >= 0 && nav_trap(from) && now > g_escape_until + 2.0) { g_escape_until = now + te; g_escape_t = 0;
@@ -1560,14 +1579,14 @@ static void bot_step_body(void) {
         { static double ttap; if (g_gun_press_ok && now - ttap > 1.2) { ttap = now; g_bot_act_until = now + 0.15; } }   // (a TAP, then 1.2 s to see it seated: a held press seats and then unseats)
         { static double tl; if (bot_log() && now - tl > 1.0) { tl = now; nlog("[nhook] [gunner] boarding: %.1f units from the point behind the turret%s", gbd, g_gun_press_ok ? ", right behind it: pressing act" : ""); } } }
     else if (arbw == ARB_FETCH && g_pick_d < 1.3f && engaged && tdist < 10.0f) { tx = ftx; ty = fty; out |= 2; }   // (09:30: at the weapon in a fight: the fight's moves, act still pulsed -- never a still target)
-    // (06:45: "going for EXCAVATOR (1.6 units ...)" then 30+ "stuck at (11.9 -11.8 18.1) (legs: fetch ...)" on Guardian: 1.6 units ACROSS
+    // (06:35: "going for EXCAVATOR (1.6 units ...)" then 30+ "stuck at (11.9 -11.8 18.1) (legs: fetch ...)" on Guardian: 1.6 units ACROSS
     //  but on another level, its path 27 nodes round -- the straight walk ran into the wall. Straight only on the same level (under 1 unit
     //  up / down) and when the path is no detour (at most 2 nodes a unit + 4); else the path's way)
     else if (arbw == ARB_FETCH && g_pick_d < 3.0f && fabsf(g_bot_pick_pos[2] - o->c[2]) < 1.0f && (plen == 0 || plen - pidx <= (int)(g_pick_d * 2.0f) + 4)) {   // (the last 3 units of a weapon fetch: straight at it -- it may lie off the walking graph)
         float way = atan2f(g_bot_pick_pos[1] - o->c[1], g_bot_pick_pos[0] - o->c[0]), rel = bot_wrap(way - yaw), sp = g_pick_d > 1.0f ? 1.0f : 0.45f;   /* (06:15: through it at half speed -- takes come walking over it (~0.8 units); standing still on it never took and read as stuck) */ tx = cosf(rel) * sp; ty = sinf(rel) * sp; out |= 2; }
     else if (arbw == ARB_FIGHT) { tx = ftx; ty = fty; out |= 2; }   // (the fighter's moves: the arbiter gave it the legs)
     else if (arbw == ARB_HOLD) {   // (levels apart: the enemy below -- hold the high ground)
-        // (07:00: "[still] 73% of 30 s alive under 0.3 u/s: ... hold 58%" -- a statue on the ledge. The user, who won 3-0 from above, moved
+        // (06:47: "[still] 73% of 30 s alive under 0.3 u/s: ... hold 58%" -- a statue on the ledge. The user, who won 3-0 from above, moved
         //  ~0.5 u/s there: the walker now sways side to side at NHOOK_BOT_HOLD_SWAY (0.3, live; 0 = old) throttle, turning back every
         //  0.9-1.3 s or where the floor 1 unit to that side is not its own level (never off the ledge it holds))
         tx = 0; ty = 0; out |= 2; float hs = 0.3f; lk_over(&hs, "NHOOK_BOT_HOLD_SWAY");
@@ -1614,6 +1633,13 @@ static void bot_step_body(void) {
     { static int fo = -1; static float fy, fp; static int hp; if (fo < 0) { const char* e = getenv("NHOOK_BOT_FACE"); int k = e ? sscanf(e, "%f,%f", &fy, &fp) : 0; fo = k >= 1; hp = k == 2; }
       if (fo) { yaw = fy / 57.29578f; if (hp) pitch = fp / 57.29578f; out |= 1; } }   // NHOOK_BOT_FACE (above)
     if (g_bot_shadow) { g_sh_yaw = yaw; g_sh_pitch = pitch; g_sh_aim_ok = 1; shadow_log(now, o, have_tg ? &ftg : 0, tdist, engaged, yaw, pitch, tx, ty, yaw0, pitch0, rec); g_bot_out = 0; g_bot_btn = 0; return; }   // (decided, never published)
+    // (07:20: the step trace -- the server saw walkers stand 15-50% of their time near enemies while their own [still] said ~10%, and
+    //  "stuck" fired every ~1.5 s of path walking: moving or not? NHOOK_BOT_STEPLOG=<s> logs every 0.1 s for that many seconds of
+    //  gameplay: position, velocity, view / move yaw, throttle, the legs)
+    { static float sl = -1; if (sl < 0) { const char* e = getenv("NHOOK_BOT_STEPLOG"); sl = e ? strtof(e, 0) : 0; } static double tsl;
+      if (sl > 0 && g_gameplay_t0 > 0 && now - g_gameplay_t0 < sl && now - tsl >= 0.1) { tsl = now;
+          nlog("[step] t %.2f pos %.2f %.2f %.2f vel %.2f %.2f yaw %.0f->%.0f thr %.2f %.2f out %d legs %s fight %d", now - g_gameplay_t0, o->c[0], o->c[1], o->c[2],
+               o->vel[0], o->vel[1], yaw0 * 57.2958f, yaw * 57.2958f, tx, ty, out, g_arb_why, (int)g_bot_fighting); } }
     g_bot_yaw = yaw; g_bot_pitch = pitch; g_bot_tx = tx; g_bot_ty = ty; g_bot_out = out;
     bot_camp_tick(now, tx, ty, out, engaged, fight && now - g_bot_hold_high < 0.3);   // (camping: a chat line, above)
     // the virtual controller: left stick = the throttle (y forward, x right = -left), A = jump, right trigger = fire

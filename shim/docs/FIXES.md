@@ -3286,8 +3286,32 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   switch presses (the learnt record bit): 0 of 32 took" -- 32 x "switching from PLASMA PISTOL to ASSAULT RIFLE" with the trigger held
   (the plasma pistol held = an overcharge held) while the earlier switches, 3 of 3 and 2 of 2, came with the trigger up. LOGIC: from a
   switch press until 0.15 s after it the trigger (and the reload click) stays up; PLASMA PISTOL joins the weapons whose trigger is pulsed.
+- **The stuck alarm fired on every step: its reset was inside a comment** (2026-11-09 07:30; nbot.c the nav stuck test) — WHY: a step
+  trace (new NHOOK_BOT_STEPLOG=<s>: every 0.1 s for that many seconds of gameplay -- position, velocity, view / move yaw, throttle,
+  legs) showed a walker moving in 83% of its 1.5 s windows while "stuck at" came 3 times in one 0.1 s step. aa7733b (01:07) appended
+  "&& !(g_bot_fighting && tdist < 3)" plus a // comment to the test's line, and the statements that followed on that line -- tjump = now;
+  hh = 0; tback = now; bstr = ... -- became part of the comment. From then on, once a walker made under 0.35 units in 1.4 s, every step
+  was a "stuck": +NHOOK_BOT_STUCK_PEN on 10 path nodes, a blocked step (since 06:42), a replan from scratch (~10 a second), "4 in 10 s"
+  always true (the wedge escape of 14:50 "fired constantly"), and the back-off / jump / short look-ahead never ran (they key on tjump /
+  tback). 239-669 "stuck at" a 3-minute battle came from this. LOGIC: the statements on their own line again. A scan of native/*.c and
+  src/nav.c for code after a mid-line // (a tail ending in ";" with an assignment) finds nothing else. The day's stuck measurements
+  before 07:30 were taken with the broken alarm -- "jumping did not help", "the wedge escape made it worse", the off-lane cost and the
+  lift penalty are unjudged; the blocked steps learned under it were moved to maptop/guardian.blocked.txt.bug-0730 (161 steps, mostly
+  bogus: a step was blocked at every step of a slow stretch). Battle 8 (3 walkers, 3 min, Guardian): 50 "stuck at" (26 fetch, 22 hunt),
+  2 "4 times", no traps; the server's recording (fight-speed.py --dir battles/tracks): median 1.07 u/s with an enemy within 15 units,
+  standing 28.9% (battle 6: 0.84 / 38.7%); 4,291 fight steps against ~2,400 before (less wandering). fight-speed.py --dir / --all-groups
+  measure the walkers' own battle recordings the same way as the players'.
+- **The walker fights from the BEST players' model** (2026-11-09 06:55; nbot.c bm_load / bot_models_tick) — WHY: the walker's fight
+  numbers (reaction, strafe switch, aim error, distance band, run speed) came from tracks/walker-model.json -- every player of 6 old
+  recordings (reaction 1.08 s); the goal is the best players. LOGIC: walker-model.py --top --out tracks/walker-model-top.json (the top
+  fifth by K/D of 128 recordings: reaction 0.85 s, strafe switch 0.74 s, aim error 4.1 deg, bands 8.0 / 15.1 / 25.8, run 1.95 u/s) is read
+  first when it exists and NHOOK_BOT_MODEL_TOP (live, default 1) is on; 0 = the everyone model (re-read on a switch or a change of the
+  file). The per-map lanes (walker-model.json "maps") still come from everyone's model. Not refit by refresh-loop.sh yet: rerun the
+  --top command after new recordings. Also the fight GAIN (07:00; nbot.c before the fight's floor check): battle 5's [moves] said
+  "moved 1.09 u/s, asked 1.19 u/s" -- timid, not blocked -- against the best players' 1.71: r and lat are scaled by
+  NHOOK_BOT_FIGHT_GAIN (1.4, live; 1 = old), each kept within -1..1, before the floor check (not while kiting a sword / hammer).
 - **The walker moves with authority: committed policy moves, the blend keeps its speed, the high ground sways, traps** (2026-11-09
-  07:00-07:20; npolicy.c pol_move, nbot.c the policy blend / ARB_HOLD legs / the stuck handler, src/nav.c nav_trap; new
+  06:45-06:50; npolicy.c pol_move, nbot.c the policy blend / ARB_HOLD legs / the stuck handler, src/nav.c nav_trap; new
   shim/tools/fight-speed.py) — WHY: the user: the best player "moves more nimble ... with authority". fight-speed.py over 60 recorded
   public matches (an enemy within 15 units, speed over 0.5 s): the top fifth by K/D move at a median 1.71 u/s and stand (< 0.5 u/s)
   19.8% of the time, the others 1.51 u/s / 32.9%; the walkers' [moves] lines in local battles: 0.97-1.27 u/s. The learnt policy drew a
@@ -3305,7 +3329,7 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   (128 recordings: reaction 0.85 s vs 0.94 for everyone, closing in 0.78 vs 0.40 u/s, strafe switch 0.74 vs 0.81 s, 3.85 vs 3.28
   shots/s, hit share 47% vs 41%) -- the default model (6 old files, reaction 1.08 s) is an average player's.
 - **Fewer walker stucks: a reached goal leaves the draw, short look-ahead at a path's start, fetches by the path, lifts last, learned
-  blocked steps** (2026-11-09 06:15-07:00; nbot.c the nav step / the FETCH branch / the stuck handler, src/nav.c nav_astar /
+  blocked steps** (2026-11-09 06:15-06:45; nbot.c the nav step / the FETCH branch / the stuck handler, src/nav.c nav_astar /
   nav_block_step / nav_blocked_load) — WHY: local 3-walker battles (test identities, our dedicated server) logged 360-670 "stuck at"
   in 3 minutes. The stuck line now names the legs, the path index and the goal, which showed: (1) the goal draw handed a reached hunt
   goal straight back ("path of 2 nodes ... reached the goal" in a loop, standing still); (2) 601 of 610 stucks were at path index 0:

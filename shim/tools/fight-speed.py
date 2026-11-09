@@ -5,7 +5,9 @@ sample of a live player on foot with an enemy within 15 units -> its speed acros
 ACROSS the enemy line (strafe) vs along it. Players are grouped: the top fifth of each match by K/D (k + d >= 5), the others, and the
 recorder's own slot (the player who recorded: the user, or the walker in its own sessions). Prints medians / quartiles and the share of samples
 under 0.5 u/s (standing). No player names are printed.
-    python3 shim/tools/fight-speed.py [--files N] [--near 15] [--json]"""
+    python3 shim/tools/fight-speed.py [--files N] [--near 15] [--json] [--dir <recordings>] [--all-groups]
+--dir battles/tracks = the walkers' own local battles (every slot a walker: use the "others" + "top" lines; --all-groups puts every
+slot in one group, "all")."""
 import glob, gzip, json, math, os, statistics, sys, zlib
 
 SUP = os.path.expanduser('~/Library/Application Support/ReclaimerMac')
@@ -25,8 +27,8 @@ def load(path):
     return S, you
 def main():
     near = arg('--near', 15.0); nf = arg('--files', 400)
-    files = sorted(glob.glob(os.path.join(SUP, 'tracks', '*.jsonl.gz')))[-nf:]
-    G = {'top': [], 'others': [], 'recorder': []}; ST = {'top': [], 'others': [], 'recorder': []}
+    files = sorted(glob.glob(os.path.join(os.path.expanduser(arg('--dir', os.path.join(SUP, 'tracks'))), '*.jsonl.gz')))[-nf:]
+    G = {'top': [], 'others': [], 'recorder': [], 'all': []}; ST = {'top': [], 'others': [], 'recorder': [], 'all': []}
     for p in files:
         S, you = load(p)
         if len(S) < 50: continue
@@ -53,7 +55,7 @@ def main():
                 if not en: continue
                 dE, E = min(en, key=lambda e: e[0]); ux, uy = (E[3] - x) / dE, (E[4] - y) / dE
                 across = abs(vx * -uy + vy * ux)
-                g = 'recorder' if sl == you else 'top' if sl in top else 'others'
+                g = 'all' if '--all-groups' in sys.argv else 'recorder' if sl == you else 'top' if sl in top else 'others'
                 if g == 'recorder' and not plays[0]: continue   # (an observer: not playing)
                 G[g].append(sp); ST[g].append(across)
     out = {}
