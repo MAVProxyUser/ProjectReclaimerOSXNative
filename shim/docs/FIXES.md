@@ -3448,6 +3448,11 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   brain is refused by a v2 body and the other way round: rebuild both). Lead latency = rtt x NHOOK_BOT_LEAD_RTT (1.25 / 1000 -- 0.08 s
   at 64 ms, 0.18 s at 145 ms); a NHOOK_BOT_LEAD_LAT in the live file still wins. A review's kills = the scoreboard's since the window
   began (the old count when the body has none); the review line gives the ping.
+- **walker-public.sh --mods: a walker joins a mod server** (2026-11-09 17:00) — WHY: the user moved to a big mod server (2 mods, ~4 GB);
+  when a server needs mods the PC lacks, the app opens its "required mods window" -- nobody clicks it in a headless walker -- and the loop
+  stopped any join that took over 180 s, mid-download. LOGIC: --mods adds the app's own --download-mods to the join ("the host's game
+  needs mods this PC lacks or has turned off: join with --download-mods") and lets a join take JOIN_WAIT (1800 s). First use: the app
+  found both mods "Ready" and joined the game in progress in ~30 s.
 - **The stats page names the server** (2026-11-09 17:00; shim/tools/stats-proxy.py server_info, stats_page.html #srv) — WHY: the user
   asked for the connected server's name at the top of the page, with its full description rather than only its address. LOGIC: the
   relay on 8765 sends the joined server the one status datagram every client sends to listed servers (a6 01 00 <nonce8> padded to
