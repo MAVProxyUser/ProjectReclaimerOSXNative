@@ -9,11 +9,13 @@
 #   FAIL  anything FAILED (not installed / not found in this app build), or an item this match must exercise that never fired
 #   ok    the rest; items a local match cannot exercise (voice, chat, online lines, the mic) are listed as "not exercised here"
 #   bash shim/tools/native-hooks-test.sh [--keep]     (--keep: the logs and /hooks.json stay in the temp folder)
-# Refuses to run beside another Project Reclaimer (the user's game included).
+# Refuses to run beside another Project Reclaimer (the user's game included) -- unless HOOKS_TEST_BESIDE=1 (2026-11-09: a new app
+# build tested beside the public walker: its own stats port HOOKS_TEST_PORT, default 8781; NATIVE_APP = the app to test).
 set -u
 cd "$(dirname "$0")/../.."
-if pgrep -f '^/Applications/Project Reclaimer.app/Contents/MacOS/project-reclaimer' >/dev/null; then echo "Project Reclaimer is running: not starting a test"; exit 1; fi
+if [ "${HOOKS_TEST_BESIDE:-0}" != 1 ] && pgrep -f '^/Applications/Project Reclaimer.app/Contents/MacOS/project-reclaimer' >/dev/null; then echo "Project Reclaimer is running: not starting a test"; exit 1; fi
 T=$(mktemp -d "${TMPDIR:-/tmp}/native-hooks.XXXXXX"); LOG="$T/app.log"; PORT=8765
+if [ "${HOOKS_TEST_BESIDE:-0}" = 1 ]; then PORT=${HOOKS_TEST_PORT:-8781}; export NATIVE_ALLOW_SECOND=1 NHOOK_STATS_HTTP=$PORT NHOOK_MUTE_OUTPUT=1; fi
 bash shim/native/build.sh >/dev/null || { echo "FAIL build"; exit 1; }
 post() { curl -s -m 3 -X POST -H 'X-Reclaimer-Control: 1' "http://127.0.0.1:$PORT/control?$1"; echo; }
 NATIVE_LOG="$LOG" NHOOK_STATS_OPEN=0 NHOOK_HITBOXES=1 NHOOK_HB_TRACERS=1 NHOOK_NAV=roam NATIVE_SECS=125 \

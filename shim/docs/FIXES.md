@@ -3286,6 +3286,16 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   switch presses (the learnt record bit): 0 of 32 took" -- 32 x "switching from PLASMA PISTOL to ASSAULT RIFLE" with the trigger held
   (the plasma pistol held = an overcharge held) while the earlier switches, 3 of 3 and 2 of 2, came with the trigger up. LOGIC: from a
   switch press until 0.15 s after it the trigger (and the reload click) stays up; PLASMA PISTOL joins the weapons whose trigger is pulsed.
+- **A release watcher that ports nhook to a new client build without touching the walker's** (2026-11-09 12:25;
+  shim/tools/release-watch.sh, native-hooks-test.sh HOOKS_TEST_BESIDE) — WHY: the user: "I see that .2 is out.. ensure you pull it and
+  update everything, ensure all the hooks work, and continue testing. while you work the patches out stay on this current server
+  since it is on .1". At 12:20 GitHub's latest release (what the app's own updater asks) was still v0.10.1, no v0.10.2 tag, and 273
+  of 283 listed servers ran 0.10.1 (10 ran 0.10.0, none 0.10.2). LOGIC: release-watch.sh polls the latest release every 5 minutes;
+  a new tag -> its macOS client zip checked against SHA256SUMS.txt into ReclaimerMac/native/<tag>/, unpacked there (never into
+  /Applications: the walker runs from there and stays on its server's build), machoport.py port --apply (napp_builds.h +
+  app-builds.txt), nhook rebuilt, and the hooks self test against that app beside the walker (HOOKS_TEST_BESIDE=1: no refusal, its
+  own stats port 8781, output muted, NATIVE_APP = the unpacked app). Dry run on the kept 0.10.1 app beside the walker: PASS, 33 ok,
+  0 failed, 10 not exercised in a local match.
 - **The battle rifle is pulled, not held: accuracy 22.6% -> 61.8%** (2026-11-09 11:57-12:00; nbot.c the trigger, shim/tools/fire-ab.sh)
   — WHY: in a BR-start Valhalla match the walker's accuracy was 26% against the players' 34-59%. A held battle rifle measured 1.7 shots
   a second of trigger over a minute; the live A/B (fire-ab.sh: a knob at A then B for 90 s each, measured from the scoreboard and the
