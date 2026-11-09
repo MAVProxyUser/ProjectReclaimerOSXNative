@@ -1013,7 +1013,11 @@ static void bot_step_body(void) {
             //  you should tune to hit them when possible. headshots being main goal"): with a PRECISION weapon (battle rifle, carbine,
             //  magnum, sniper -- headshots kill faster) the trigger waits for the aim to sit on the HEAD: within its angular radius
             //  (0.15 units) x NHOOK_BOT_HEADGATE (1.0) + 0.3 deg. The automatic weapons keep the body gate (a headshot adds nothing there)
-            if (g_bot_fire && g_inv.held_c && (!strcmp(g_inv.held_c, "precision") || !strcmp(g_inv.held_c, "sniper"))) {
+            // (11:00: the gate only for the KILL shot -- shields still up, a body hit strips them as well as a head hit, and the gate at
+            //  20+ units (about the aim's own spread) halved the battle rifle's rate: it lost the precision duels -- 5 of 12 deaths to
+            //  battle-rifle headshots. Shields down (< NHOOK_BOT_HEADGATE_SH 0.1): the head gate. The aim point stays the head throughout)
+            float hgs = 0.1f; lk_over(&hgs, "NHOOK_BOT_HEADGATE_SH");
+            if (g_bot_fire && ftg.shield < hgs && g_inv.held_c && (!strcmp(g_inv.held_c, "precision") || !strcmp(g_inv.held_c, "sniper"))) {
                 float hg = 1.0f; lk_over(&hg, "NHOOK_BOT_HEADGATE"); float hs = atanf(0.15f / (tdist > 0.5f ? tdist : 0.5f)) * 57.2958f;   // (the width stays 0.15 units -- the head hitbox's mean radius, ~0.07, would halve it -- but the error is now measured from the real head: bot_head)
                 if (err > hs * hg + 0.3f) g_bot_fire = 0; }
             { static float mv = -1; static double thurt; float v2 = o->shield + o->health; if (mv >= 0 && v2 < mv - 0.02f) thurt = now; mv = v2;

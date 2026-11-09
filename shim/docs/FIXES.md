@@ -3272,6 +3272,11 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   a running battle, at every round end (our server's in_match true -> false) walker-coach.py round + match-study.py, then each
   walker's game restarted headless with its new knobs and the newest build (they rejoin in the lobby; the user's game and the
   server stay).
+- **The head gate holds fire only for the kill shot** (2026-11-09 11:00; nbot.c the precision fire gate) — WHY: 5 of the walker's last
+  12 deaths were battle-rifle headshots: it lost the precision duels; the always-on head gate (fire only within the head's angular size
+  + 0.3 deg) is about the aim's own spread at 20+ units, so it halved the rate of fire while the target's shields were still up -- and
+  with shields up a body hit strips them as fast as a head hit. LOGIC: the aim point stays the head hitbox; the head gate applies only
+  while the target's shield is under NHOOK_BOT_HEADGATE_SH (0.1, live): the kill shot. NHOOK_BOT_HEADGATE_SH=2 = the old always-on gate.
 - **The brain finds the weapon-switch button itself** (2026-11-09 10:50; nbot.c swscan_tick / bot_switch_press) — WHY: the packed
   packet's +0x2c bit 1 (seen with the user's switches) rarely switched when the walker sent it ("EMPTY BRUTE SHOT: switching" again and
   again; held 0.15 s it never did, 0.03 s now and then). Like fire -- its packet bit alone does nothing, the control record's bit 19
