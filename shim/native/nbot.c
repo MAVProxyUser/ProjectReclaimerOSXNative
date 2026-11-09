@@ -419,6 +419,7 @@ static int g_ammo_learned = -1;
 static int g_bot_trig;   // (the trigger held last step: defined with the fire section below)
 static int g_bot_dry;    // (the magazine stays empty after reloads: no reserve -- the other weapon or any weapon on the floor)
 static int g_bot_outranged;   // (11:50: the target out-ranges the held weapon from beyond its band: the fight bids low)
+static double g_kite_t;       // (13:00: the last step that kited a sword / hammer: no melee into it)
 static double g_bot_click_until;   // (11:40: the trigger pulled on an empty magazine -- the game reloads by itself, the "click")
 static const char* ammo_learned_path(void) { static char p[1024]; if (!p[0]) { const char* h = getenv("HOME"); snprintf(p, sizeof p, "%s/Library/Application Support/ReclaimerMac/native/ammo-learned.json", h ? h : ""); } return p; }
 static void ammo_learn(double now, const NovObj* o) {
@@ -1100,7 +1101,7 @@ static void bot_step_body(void) {
                   //  first melee wins once a shield is down, and the lunge reaches past the players' median landing distance. Within
                   //  NHOOK_BOT_MELEE_RACE (1.8) units with either shield under 0.15: melee now)
                   float mrace = 1.8f; lk_over(&mrace, "NHOOK_BOT_MELEE_RACE"); if (!mcls && (o->shield < 0.15f || ftg.shield < 0.15f) && mrace > mr) mr = mrace;
-                  if (vis && tdist < mr && now - tmelee > 0.6 && now - tacq > 0.15) { tmelee = now;
+                  if (vis && tdist < mr && now - tmelee > 0.6 && now - tacq > 0.15 && now - g_kite_t > 0.5) { tmelee = now;   // (not into a sword / hammer: g_kite_t)
                       if (bot_log()) nlog("[nhook] [melee] %s at %.2f units (target shield %.2f: %s), holding %s", mcls ? "swing" : "melee", tdist, ftg.shield, ftg.shield < 0.05f ? "beatdown" : "full", g_inv.held ? g_inv.held : "-"); }
                   static float mh = -1; if (mh < 0) { const char* e = getenv("NHOOK_BOT_MELEE_HOLD"); mh = e ? strtof(e, 0) : 0.3f; }
                   if (now - tmelee < mh) { fbtn |= bot_meleepad(); g_bot_melee_until = tmelee + mh; } }
@@ -1195,7 +1196,9 @@ static void bot_step_body(void) {
                   float hx = ftg.c[0] - o->c[0], hy = ftg.c[1] - o->c[1], hd = sqrtf(hx * hx + hy * hy), dz = o->c[2] - ftg.c[2];
                   if (!na && hd < 0.8f && dz > 0.5f) { r = -0.7f; lat = lat >= 0 ? 0.5f : -0.5f; }
                   else if (!na && hd < 1.0f && r > 0) { r = 0; if (fabsf(lat) < 0.3f) lat = lat >= 0 ? 0.4f : -0.4f; } }
-                if (g_kite) { r = -1.0f; if (fabsf(lat) < 0.7f) lat = lat >= 0 ? 0.8f : -0.8f; }
+                // (13:00: a hammer closed from 4 to 0.9 units while the walker back-pedalled -- backwards is slow; across is full speed:
+                //  the kite strafes at full speed, backs off at half, and never melees the swinger: g_kite_t blocks the melee below)
+                if (g_kite) { r = -0.5f; lat = lat >= 0 ? 1.0f : -1.0f; g_kite_t = now; }
                 // OUTNUMBERED (12:35: the death notes -- most deaths with 2-4 enemies aiming at the walker at once): 2+ enemies within 20
                 // units aiming within 12 deg of it and its shield under NHOOK_BOT_CROWD_SH (0.5) -> full speed back with a full strafe,
                 // still shooting: out of the crossfire. NHOOK_BOT_CROWD=0 (live) off

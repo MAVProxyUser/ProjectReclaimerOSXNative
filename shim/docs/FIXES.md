@@ -3272,6 +3272,10 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   a running battle, at every round end (our server's in_match true -> false) walker-coach.py round + match-study.py, then each
   walker's game restarted headless with its new knobs and the newest build (they rejoin in the lobby; the user's game and the
   server stay).
+- **Kite swords and hammers sideways, never melee into them** (2026-11-09 13:00; nbot.c the KITE move, g_kite_t) — WHY: "[fight] a
+  GRAVITY HAMMER at 4.0 units: kiting it", then 3.3, 1.8 units, a beatdown at 0.92 on its broken shield -- and the hammer swing killed
+  the walker first: back-pedalling is slower than a charge, and a melee race with a sword / hammer is lost. LOGIC: kiting = full
+  strafe (1.0), back at half (-0.5), shooting; no melee press within 0.5 s of a kiting step.
 - **Arm's length first: the nearest threat is the target and is "seen"** (2026-11-09 12:50-12:55; nbot.c target choice, vis) — WHY: a
   0-kill / 9-death window on Guardian (14 players): every death at 0-6 units with a nearly full magazine, 3 melees in it; a quarter of the
   targets within 3 units read "hidden" (the melee and the trigger wait for "in sight"); a death fighting a target 9 units off while an
