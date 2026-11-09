@@ -31,7 +31,12 @@ static int nav_mode(void){ if(g_nav_mode_rt>=0) return g_nav_mode_rt; static int
 static int nav_ci_has(const char*s,const char*sub){ if(!s||!sub) return 0; size_t n=strlen(sub); for(;*s;s++) if(!strncasecmp(s,sub,n)) return 1; return 0; }
 static int nav_log(void){ static int l=-1; if(l<0) l=getenv("PELOAD_NAV_LOG")?1:0; return l; }
 static void nav_say(const char*fmt,...){ if(!nav_log()) return; char m[400]; va_list ap; va_start(ap,fmt); int k=vsnprintf(m,sizeof m,fmt,ap); va_end(ap); if(k>(int)sizeof m-1) k=sizeof m-1; (void)!write(2,m,k); }
-static void nav_free(void){ free(g_nav.dng); free(g_nav.first); free(g_nav.nd); free(g_nav.cellof); free(g_nav.g); free(g_nav.pen); free(g_nav.came); free(g_nav.stamp); free(g_nav.hf); free(g_nav.hn);
+// BLOCKED STEPS (2026-11-09): per node, bit k = its step to nbr[k] was found blocked by a walker that pushed along it and did not move
+// ("stuck", 2 of 3 stucks in local battles came at the FIRST step of a fresh path: the replan from the spot chose the same step again).
+// A blocked step costs g_nav_blkpen more (a soft ban: still taken when nothing else goes there). A step blocked twice is kept in
+// maptop/<map>.blocked.txt ("x y z k" per line: the node's floor point + the direction, found again by position after a graph rebuild).
+static uint8_t*g_nav_blk; static float g_nav_blkpen=25.0f;
+static void nav_free(void){ free(g_nav.dng); free(g_nav.first); free(g_nav.nd); free(g_nav.cellof); free(g_nav.g); free(g_nav.pen); free(g_nav.came); free(g_nav.stamp); free(g_nav.hf); free(g_nav.hn); free(g_nav_blk); g_nav_blk=0;
     char nm[96]; memcpy(nm,g_nav.name,sizeof nm); memset(&g_nav,0,sizeof g_nav); memcpy(g_nav.name,nm,sizeof nm); }
 static int nav_load(const char*path){
     int fd=open(path,O_RDONLY); if(fd<0) return 0; struct stat st; uint8_t h[64];
@@ -42,7 +47,7 @@ static int nav_load(const char*path){
     if(!g_nav.first||!g_nav.nd || pread(fd,g_nav.first,4*((size_t)w*hh+1),64)!=(ssize_t)(4*((size_t)w*hh+1)) || pread(fd,g_nav.nd,40*(size_t)n,64+4*((off_t)w*hh+1))!=(ssize_t)(40*(size_t)n)){ close(fd); nav_free(); return 0; }
     close(fd); g_nav.x0=x0; g_nav.y0=y0; g_nav.cell=cell; g_nav.w=w; g_nav.h=hh; g_nav.n=n; g_nav.step=step; g_nav.clearh=clr;
     g_nav.cellof=malloc(4*(size_t)n); g_nav.g=malloc(4*(size_t)n); g_nav.pen=calloc((size_t)n,4); g_nav.came=malloc(4*(size_t)n); g_nav.stamp=calloc((size_t)n,4);
-    g_nav.hcap=8*n+16; g_nav.hf=malloc(4*(size_t)g_nav.hcap); g_nav.hn=malloc(4*(size_t)g_nav.hcap);
+    g_nav_blk=calloc((size_t)n,1); g_nav.hcap=8*n+16; g_nav.hf=malloc(4*(size_t)g_nav.hcap); g_nav.hn=malloc(4*(size_t)g_nav.hcap);
     if(!g_nav.cellof||!g_nav.g||!g_nav.pen||!g_nav.came||!g_nav.stamp||!g_nav.hf||!g_nav.hn){ nav_free(); return 0; }
     for(int c=0;c<w*hh;c++) for(uint32_t i=g_nav.first[c];i<g_nav.first[c+1] && i<(uint32_t)n;i++) g_nav.cellof[i]=c;
     snprintf(g_nav.file,sizeof g_nav.file,"%s",path); g_nav.ok=1; return 1; }
@@ -89,6 +94,7 @@ static void nav_danger_update(double now){
     int hot=0; for(int i=0;i<g_nav.n;i++){ g_nav.dng[i]=1.0f-expf(-g_nav.dng[i]/s0); if(g_nav.dng[i]>0.5f) hot++; }
     if(nd!=g_nav.dng_nd) nav_say("  [nav] danger from %u deaths on %s (scale %.1f): %d of %d floor nodes above 0.5\n",nd,g_nav.name,s0,hot,g_nav.n);
     g_nav.dng_nd=nd; }
+static float g_nav_liftpen, g_nav_liftdz = 2.0f;   // (2026-11-09: a portal rising more than liftdz costs liftpen more -- the native walker sets it, NHOOK_NAV_LIFTPEN; 0 = the loader's)
 static float g_nav_offlane;   // (2026-11-09: x the step cost added on graph nodes no recorded player ever used -- the native walker sets it, NHOOK_NAV_OFFLANE; 0 = off, the loader's)
 static int g_nav_noavoid;   // set around a comparison plan (PELOAD_NAV_LOG): the same A* without the danger term
 // A* over the floor graph; cost = distance x (1 + wall penalty + avoid x danger) + learned penalties; -> path length
@@ -107,6 +113,21 @@ static void nav_portals_load(const char*navpath){
     fclose(f);
     for(int i=1;i<g_np_n;i++){ int32_t a=g_np_a[i],b=g_np_b[i]; float c=g_np_c[i]; int j=i-1; while(j>=0&&g_np_a[j]>a){ g_np_a[j+1]=g_np_a[j]; g_np_b[j+1]=g_np_b[j]; g_np_c[j+1]=g_np_c[j]; j--; } g_np_a[j+1]=a; g_np_b[j+1]=b; g_np_c[j+1]=c; }
     nav_say("  [nav] %d portals (lifts, jumps, steps players took) from %s\n",g_np_n,p); }
+static void nav_blocked_path(char*p,size_t sz){ snprintf(p,sz,"%s",g_nav.file); size_t L=strlen(p); if(L<4||strcmp(p+L-4,".nav")){ p[0]=0; return; } snprintf(p+L-4,sz-(L-4),".blocked.txt"); }
+static void nav_blocked_load(void){ if(!g_nav_blk||getenv("PELOAD_NAV_NOBLOCKED")) return; char p[1100]; nav_blocked_path(p,sizeof p); if(!p[0]) return;
+    FILE*f=fopen(p,"r"); if(!f) return; char l[200]; int nb=0;
+    while(fgets(l,sizeof l,f)){ float q[3]; int k; if(l[0]=='#'||sscanf(l,"%f %f %f %d",&q[0],&q[1],&q[2],&k)!=4||k<0||k>7) continue;
+        float qq[3]={q[0],q[1],q[2]+0.2f}; int u=nav_node_at(qq); if(u<0) continue; float up[3]; nav_pos(u,up); if(fabsf(up[2]-q[2])>0.3f) continue;
+        if(!(g_nav_blk[u]>>k&1)){ g_nav_blk[u]|=(uint8_t)(1u<<k); nb++; } }
+    fclose(f); nav_say("  [nav] %d blocked steps (learned) from %s\n",nb,p); }
+// a walker stuck going from node u to node v: mark the step (when v is one of u's 8 neighbours); returns 2 = blocked before (now kept
+// in the file), 1 = newly blocked, 0 = no such step
+static int nav_block_step(int u,int v){ if(!g_nav_blk||u<0||v<0||u>=g_nav.n||v>=g_nav.n) return 0; int k=-1; for(int i=0;i<8;i++) if(g_nav.nd[u].nbr[i]==v){ k=i; break; } if(k<0) return 0;
+    if(!(g_nav_blk[u]>>k&1)){ g_nav_blk[u]|=(uint8_t)(1u<<k); return 1; }
+    static int32_t kept[256]; static int nk; for(int i=0;i<nk;i++) if(kept[i]==u*8+k) return 2; if(nk<256) kept[nk++]=u*8+k;
+    char p[1100]; nav_blocked_path(p,sizeof p); if(p[0]){ FILE*f=fopen(p,"a"); if(f){ float up[3]; nav_pos(u,up); fprintf(f,"%.2f %.2f %.2f %d\n",up[0],up[1],up[2],k); fclose(f); } }
+    return 2; }
+static int nav_trap(int u){ return g_nav_blk && u>=0 && u<g_nav.n && __builtin_popcount(g_nav_blk[u])>=3; }
 static int nav_portal_first(int u){ int lo=0,hi=g_np_n; while(lo<hi){ int m=(lo+hi)/2; if(g_np_a[m]<u) lo=m+1; else hi=m; } return lo; }
 static int nav_astar(int s,int t,int32_t*path,int maxp){
     if(s<0||t<0) return 0; uint32_t gen=++g_nav.gen; if(!gen){ memset(g_nav.stamp,0,4*(size_t)g_nav.n); gen=g_nav.gen=1; }
@@ -122,11 +143,14 @@ static int nav_astar(int s,int t,int32_t*path,int maxp){
         float up[3]; nav_pos(u,up); float gu=g_nav.g[u];
         for(int k=0;k<8;k++){ int v=g_nav.nd[u].nbr[k]; if(v<0||v>=g_nav.n) continue; float vp[3]; nav_pos(v,vp);
             float dx=vp[0]-up[0],dy=vp[1]-up[1],dz=vp[2]-up[2]; float c=sqrtf(dx*dx+dy*dy+dz*dz)*(1.0f+wpen[g_nav.nd[v].wd&15]+(g_nav.dng?kav*g_nav.dng[v]:0)-(g_nav.pop?0.4f*g_nav.pop[v]:0)+(g_nav.pop&&g_nav.pop[v]<=0?g_nav_offlane:0))+g_nav.pen[v]+((g_nav.nd[v].fl&1)?0.5f:0);   // (pop: the lanes players use cost up to 40% less; g_nav_offlane: a node no player was seen on costs that much more)
+            if(g_nav_blk && (g_nav_blk[u]>>k&1)) c+=g_nav_blkpen;   // (a step a walker was found stuck on)
+            if(g_nav_blk && __builtin_popcount(g_nav_blk[v])>=3) c+=2*g_nav_blkpen;   // (a TRAP: 3+ ways out of v blocked -- walkers get pinned there whatever they do: keep out)
             float gv=gu+c; if(g_nav.stamp[v]==gen && g_nav.g[v]<=gv) continue;
             g_nav.stamp[v]=gen; g_nav.g[v]=gv; g_nav.came[v]=u;
             float hx=vp[0]-tp[0],hy=vp[1]-tp[1],hz=vp[2]-tp[2]; NAV_PUSH(gv+sqrtf(hx*hx+hy*hy+hz*hz),v); }
         for(int j=g_np_n?nav_portal_first(u):0;j<g_np_n&&g_np_a[j]==u;j++){ int v=g_np_b[j]; float vp[3]; nav_pos(v,vp);   // (the portals out of u)
-            float gv=gu+g_np_c[j]+g_nav.pen[v]; if(g_nav.stamp[v]==gen && g_nav.g[v]<=gv) continue;
+            float gv=gu+g_np_c[j]+g_nav.pen[v]; { float up_[3]; nav_pos(u,up_); if(vp[2]-up_[2]>g_nav_liftdz) gv+=g_nav_liftpen; }   // (a tall portal -- a lift -- costs g_nav_liftpen more: the native walker cannot ride one yet)
+            if(g_nav.stamp[v]==gen && g_nav.g[v]<=gv) continue;
             g_nav.stamp[v]=gen; g_nav.g[v]=gv; g_nav.came[v]=u;
             float hx=vp[0]-tp[0],hy=vp[1]-tp[1],hz=vp[2]-tp[2]; NAV_PUSH(gv+sqrtf(hx*hx+hy*hy+hz*hz),v); } }
     #undef NAV_PUSH
@@ -160,7 +184,7 @@ static void nav_ensure(void){
     if(g_nav.ok || g_nav.failed>=2) return;
     char path[1100]; const char*fe=getenv("PELOAD_NAV_FILE"); const char*home=getenv("HOME");
     if(fe&&*fe) snprintf(path,sizeof path,"%s",fe); else snprintf(path,sizeof path,"%s/Library/Application Support/ReclaimerMac/maptop/%s.nav",home?home:"/tmp",name);
-    if(nav_load(path)){ nav_say("  [nav] %s: %d floor nodes (%dx%d cells of %.2f) from %s\n",name,g_nav.n,g_nav.w,g_nav.h,g_nav.cell,path); nav_portals_load(path); return; }
+    if(nav_load(path)){ nav_say("  [nav] %s: %d floor nodes (%dx%d cells of %.2f) from %s\n",name,g_nav.n,g_nav.w,g_nav.h,g_nav.cell,path); nav_portals_load(path); nav_blocked_load(); return; }
     // make one only once a match is running: in the menu the 'map being played' is whatever map its scene borrows from
     // (Forge's desert_sandbox, Guardian), and building a big map's graph costs a core for a while
 #ifndef NAV_CORE

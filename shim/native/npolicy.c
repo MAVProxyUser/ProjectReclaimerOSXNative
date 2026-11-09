@@ -70,9 +70,15 @@ static int pol_move(double now, const NovObj* objs, int n, int me, const NovObj*
             pol_run(x, raw);
             if (g_pol.k == 0) { out[0] = raw[0]; out[1] = raw[1]; out[2] = raw[2]; }
             else { int K = g_pol.k; float mx = raw[0]; for (int c = 1; c < K; c++) if (raw[c] > mx) mx = raw[c];   // (sample a component, then the move from it)
-                float w[16], sw = 0; for (int c = 0; c < K; c++) { w[c] = expf(raw[c] - mx); sw += w[c]; } float u = bot_rand01() * sw; int c = 0; for (; c < K - 1; c++) { u -= w[c]; if (u <= 0) break; }
-                float ls0 = fmaxf(-3, fminf(2, raw[3 * K + 2 * c])), ls1 = fmaxf(-3, fminf(2, raw[3 * K + 2 * c + 1]));
-                out[0] = fmaxf(-4, fminf(4, raw[K + 2 * c] + expf(ls0) * bot_gauss())); out[1] = fmaxf(-4, fminf(4, raw[K + 2 * c + 1] + expf(ls1) * bot_gauss())); out[2] = raw[5 * K]; }
+                // (07:15: COMMITTED draws -- a fresh component and noise every 0.1 s made the walker dither (its fight speed 1.0-1.3 u/s, the
+                //  best players' median 1.71: they commit to a strafe for about half a second). The component and the two normal draws are
+                //  kept for NHOOK_BOT_POL_COMMIT (0.5 s, live; 0.1 = old) -- the means still follow the moment every 0.1 s)
+                static int cc; static float g0, g1; static double tcm; float cm = 0.5f; lk_over(&cm, "NHOOK_BOT_POL_COMMIT");
+                if (now - tcm >= cm || cc >= K) { tcm = now;
+                    float w[16], sw = 0; for (int c = 0; c < K; c++) { w[c] = expf(raw[c] - mx); sw += w[c]; } float u = bot_rand01() * sw; int c = 0; for (; c < K - 1; c++) { u -= w[c]; if (u <= 0) break; }
+                    cc = c; g0 = bot_gauss(); g1 = bot_gauss(); }
+                int c = cc; float ls0 = fmaxf(-3, fminf(2, raw[3 * K + 2 * c])), ls1 = fmaxf(-3, fminf(2, raw[3 * K + 2 * c + 1]));
+                out[0] = fmaxf(-4, fminf(4, raw[K + 2 * c] + expf(ls0) * g0)); out[1] = fmaxf(-4, fminf(4, raw[K + 2 * c + 1] + expf(ls1) * g1)); out[2] = raw[5 * K]; }
             // (the world move -> the view frame)
             float wx = out[0] * ux + out[1] * vx, wy = out[0] * uy + out[1] * vy, fx = cosf(yaw0), fy = sinf(yaw0), run = g_bm.run_speed > 0.5f ? g_bm.run_speed : 2.1f;
             out[0] = fmaxf(-1, fminf(1, (wx * fx + wy * fy) / run)); out[1] = fmaxf(-1, fminf(1, (wx * -fy + wy * fx) / run));

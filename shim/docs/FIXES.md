@@ -3286,6 +3286,40 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   switch presses (the learnt record bit): 0 of 32 took" -- 32 x "switching from PLASMA PISTOL to ASSAULT RIFLE" with the trigger held
   (the plasma pistol held = an overcharge held) while the earlier switches, 3 of 3 and 2 of 2, came with the trigger up. LOGIC: from a
   switch press until 0.15 s after it the trigger (and the reload click) stays up; PLASMA PISTOL joins the weapons whose trigger is pulsed.
+- **The walker moves with authority: committed policy moves, the blend keeps its speed, the high ground sways, traps** (2026-11-09
+  07:00-07:20; npolicy.c pol_move, nbot.c the policy blend / ARB_HOLD legs / the stuck handler, src/nav.c nav_trap; new
+  shim/tools/fight-speed.py) — WHY: the user: the best player "moves more nimble ... with authority". fight-speed.py over 60 recorded
+  public matches (an enemy within 15 units, speed over 0.5 s): the top fifth by K/D move at a median 1.71 u/s and stand (< 0.5 u/s)
+  19.8% of the time, the others 1.51 u/s / 32.9%; the walkers' [moves] lines in local battles: 0.97-1.27 u/s. The learnt policy drew a
+  fresh mixture component and fresh noise every 0.1 s -- a dither the engine's acceleration averages away -- and its 50/50 blend with the
+  fight moves cancelled when the two disagreed. Holding the high ground stood still ("[still] 73% of 30 s ... hold 58%"; the user, who
+  won 3-0 from above, moved ~0.5 u/s there). Learned blocked steps showed traps: one Guardian node had 5 of its 8 steps blocked.
+  LOGIC: the component and its two normal draws are kept for NHOOK_BOT_POL_COMMIT (0.5 s, live; 0.1 = old), the means still follow the
+  moment every 0.1 s; after the blend the move is scaled up to the faster of the two moves' speeds (NHOOK_BOT_POL_KEEPSPEED=0 = old);
+  ARB_HOLD sways at NHOOK_BOT_HOLD_SWAY (0.3, live; 0 = old) throttle across the view, turning every 0.9-1.3 s or where the floor 1 unit
+  to that side is not its own level (a graph node within 0.6 across, 0.5 up / down); a node with 3+ blocked steps is a trap (A* adds
+  2 x NHOOK_NAV_BLOCKPEN to enter it), and a stuck inside one runs the escape for NHOOK_BOT_TRAP_ESC (2 s, live; 0 = off) -- only there.
+  Battle 4 (3 walkers, 3 min, after all of it): stucks 308 -> 239 (17 trap escapes), [still] 19-24% -> 9% of the time alive; the fight
+  speed stayed 1.25 u/s, so [moves] now also prints the speed the fight ASKED for ("asked N u/s": hypot(r, lat) after the floor check x
+  the run speed) to tell a timid fighter from a blocked one. walker-model.py --top = the model of each match's top fifth by K/D only
+  (128 recordings: reaction 0.85 s vs 0.94 for everyone, closing in 0.78 vs 0.40 u/s, strafe switch 0.74 vs 0.81 s, 3.85 vs 3.28
+  shots/s, hit share 47% vs 41%) -- the default model (6 old files, reaction 1.08 s) is an average player's.
+- **Fewer walker stucks: a reached goal leaves the draw, short look-ahead at a path's start, fetches by the path, lifts last, learned
+  blocked steps** (2026-11-09 06:15-07:00; nbot.c the nav step / the FETCH branch / the stuck handler, src/nav.c nav_astar /
+  nav_block_step / nav_blocked_load) — WHY: local 3-walker battles (test identities, our dedicated server) logged 360-670 "stuck at"
+  in 3 minutes. The stuck line now names the legs, the path index and the goal, which showed: (1) the goal draw handed a reached hunt
+  goal straight back ("path of 2 nodes ... reached the goal" in a loop, standing still); (2) 601 of 610 stucks were at path index 0:
+  steering at the node 6 ahead cut the corner into the wall right at a path's start (cap: 2 nodes for the first steps, 1 for 3 s after
+  a stuck, live NHOOK_BOT_LOOK_STUCK) -- 610 -> 358; (3) 412 of 666 came while fetching a weapon: within 3 units ACROSS the walker
+  walked straight at it even on another level (an Excavator 1.6 units across, its path 27 nodes round) and pushed into the wall for a
+  minute; (4) the rest at the first step of a fresh path, the replan from the spot choosing the same step again (0/141, 0/192, 0/164 at
+  one spot); (5) one at a lift's foot, the next node 5.5 units up. LOGIC: (1) gl_drop(now, "reached"); (2) the look-ahead cap; (3)
+  the straight walk needs |dz| < 1 and a path of at most 2 x distance + 4 nodes, else the path's way; the walk goes through the weapon
+  at half speed (takes come walking over it, ~0.8 units); (4) every stuck marks the step being pushed along (the walker's node -> the
+  path's next, one of its 8 neighbours) blocked: a per-node bit mask g_nav_blk, +g_nav_blkpen (25, live NHOOK_NAV_BLOCKPEN, 0 = old) on
+  that step in A*; a step blocked twice in a session is appended to maptop/<map>.blocked.txt ("x y z k": the node's floor point and
+  the direction, found by position again after a graph rebuild) and loaded with the graph (PELOAD_NAV_NOBLOCKED=1 = ignore the file);
+  (5) a portal rising more than 2 units costs g_nav_liftpen more (40, live NHOOK_NAV_LIFTPEN, 0 = old; the loader leaves it 0).
 - **Stucks only while walking a path; the wedge escape off by default; an off-lane path cost** (2026-11-09 15:10-15:30; nbot.c the nav
   stuck check / escape, src/nav.c nav_astar g_nav_offlane) — WHY: a local 4-walker battle (test identities, our dedicated server) after the
   kick: 300-460 "stuck at" and 100-150 "wedged" a walker in 5 minutes. Stucks were also counted while a fight held the legs (the walker

@@ -1196,7 +1196,12 @@ static void bot_step_body(void) {
                 // the rush, arm's length and floor rules below still apply on top. [policy] every 30 s: how often it moved the walker
                 { static double tpj, tpl; static int npol, nsteps, njump; float pw = 0; lk_over(&pw, "NHOOK_BOT_POLICY"); pol_tick(now); nsteps++;
                   if (pw > 0) { float pr, pl; int jp; if (pol_move(now, objs, n, me, o, &ftg, yaw0, &pr, &pl, &jp)) { npol++;
+                      float m0 = hypotf(r, lat), m1 = hypotf(pr, pl);
                       r = (1 - pw) * r + pw * pr; lat = (1 - pw) * lat + pw * pl;
+                      // (07:15: two moves that disagree cancel -- the blend's speed is the faster one's: a direction from both, never a dither
+                      //  in place. NHOOK_BOT_POL_KEEPSPEED=0 = old)
+                      { float ks = 1; lk_over(&ks, "NHOOK_BOT_POL_KEEPSPEED"); float mb = hypotf(r, lat), mt = fmaxf(m0, m1);
+                        if (ks > 0 && mb > 0.05f && mb < mt) { r = fmaxf(-1, fminf(1, r * mt / mb)); lat = fmaxf(-1, fminf(1, lat * mt / mb)); } }
                       if (pw >= 0.5f && jp && now - tpj > 0.7) { tpj = now; g_fjump_until = now + 0.12; njump++; } } }
                   if (now - tpl > 30) { if (tpl > 0 && pw > 0 && bot_log()) nlog("[nhook] [policy] weight %.2f: moved %d of %d fight steps, %d jumps", pw, npol, nsteps, njump); tpl = now; npol = nsteps = njump = 0; } }
                 // the beatdown rush (players: half of the melee kills finish a victim whose shield is down, closing in from ~3.2 units) and a
@@ -1247,14 +1252,14 @@ static void bot_step_body(void) {
                 // (08:45, the user: "[the best player] simply moves more nimble, and engages faster ... our walker does not move with that much
                 //  *authority*": the recordings say the walker stands still 58% and strafes 0.0 u/s in fights. [moves] every 10 s of
                 //  fighting: what the fight asked for, what the floor check let through, how fast the walker really moved across)
-                { static double tm; static int ns, nask, nflip, nzero; static float vlat, vall; ns++; if (fabsf(lat_in) > 0.2f || fabsf(r_in) > 0.2f) nask++; if (ftries == 1 || ftries == 2) nflip++; if (ftries == 3) nzero++;
+                { static double tm; static int ns, nask, nflip, nzero; static float vlat, vall, vask; ns++; vask += fminf(1.0f, hypotf(r, lat)) * (g_bm.run_speed > 0.5f ? g_bm.run_speed : 2.1f); if (fabsf(lat_in) > 0.2f || fabsf(r_in) > 0.2f) nask++; if (ftries == 1 || ftries == 2) nflip++; if (ftries == 3) nzero++;
                   float ex = ftg.c[0] - o->c[0], ey = ftg.c[1] - o->c[1], el2 = sqrtf(ex * ex + ey * ey) + 1e-3f; vlat += fabsf((o->vel[0] * -ey + o->vel[1] * ex) / el2) * 30.0f; vall += sqrtf(o->vel[0] * o->vel[0] + o->vel[1] * o->vel[1]) * 30.0f;
                   static float lp[3]; static double lt; static float dsum; static double dts; static float vraw;
                   if (lt > 0 && now - lt < 0.2) { float dx2 = o->c[0] - lp[0], dy2 = o->c[1] - lp[1]; dsum += sqrtf(dx2 * dx2 + dy2 * dy2); dts += now - lt; }
                   memcpy(lp, o->c, 12); lt = now; vraw += sqrtf(o->vel[0] * o->vel[0] + o->vel[1] * o->vel[1]);
-                  if (now - tm > 10.0) { if (tm > 0 && ns > 20 && bot_log()) nlog("[nhook] [moves] %d fight steps: moves asked %.0f%%, floor check flipped %.0f%% / stopped %.0f%%; moved %.2f u/s by position (velocity field %.3f a step), across the enemy line %.0f%% of it",
-                          ns, 100.0 * nask / ns, 100.0 * nflip / ns, 100.0 * nzero / ns, dts > 0 ? dsum / dts : 0.0, vraw / ns, vall > 0 ? 100.0 * vlat / vall : 0.0);
-                      tm = now; ns = nask = nflip = nzero = 0; vlat = vall = 0; dsum = 0; dts = 0; vraw = 0; } }
+                  if (now - tm > 10.0) { if (tm > 0 && ns > 20 && bot_log()) nlog("[nhook] [moves] %d fight steps: moves asked %.0f%%, floor check flipped %.0f%% / stopped %.0f%%; moved %.2f u/s by position (velocity field %.3f a step), across the enemy line %.0f%% of it; asked %.2f u/s",
+                          ns, 100.0 * nask / ns, 100.0 * nflip / ns, 100.0 * nzero / ns, dts > 0 ? dsum / dts : 0.0, vraw / ns, vall > 0 ? 100.0 * vlat / vall : 0.0, vask / ns);
+                      tm = now; ns = nask = nflip = nzero = 0; vlat = vall = vask = 0; dsum = 0; dts = 0; vraw = 0; } }
                 ftx = r; fty = lat; } }
         else { g_bot_fire = 0;
             // LEVELS APART (2026-11-08, the user: "enemy radar on multi level maps. like if you see someone on radar and then in turn
@@ -1422,7 +1427,9 @@ static void bot_step_body(void) {
           uint32_t tw = t->wslot >= 0 && t->wslot < 4 ? t->weapons[t->wslot] : 0xFFFFFFFFu; uint64_t twd = nov_datum(tw); uint32_t twdef = 0;
           lastS.ah[lastS.naim] = t->handle; lastS.ad[lastS.naim] = d; lastS.aw[lastS.naim] = twd && hb_read(twd, &twdef, 4) ? eg_wcls(hb_tag_name(twdef)) : "?"; lastS.naim++; }
       (void)was_alive; (void)nd; (void)nother; (void)dsum; g_death_snap = &lastS; }
-    { static float ol0 = -1; if (ol0 < 0) { const char* e = getenv("NHOOK_NAV_OFFLANE"); ol0 = e ? strtof(e, 0) : 0.0f; } float ol = ol0; lk_over(&ol, "NHOOK_NAV_OFFLANE"); g_nav_offlane = ol; }   // (15:30: paths along the players' lanes: src/nav.c)
+    { static float ol0 = -1; if (ol0 < 0) { const char* e = getenv("NHOOK_NAV_OFFLANE"); ol0 = e ? strtof(e, 0) : 0.0f; } float ol = ol0; lk_over(&ol, "NHOOK_NAV_OFFLANE"); g_nav_offlane = ol;
+      float lp = 40; lk_over(&lp, "NHOOK_NAV_LIFTPEN"); g_nav_liftpen = lp;
+      float bp = 25; lk_over(&bp, "NHOOK_NAV_BLOCKPEN"); g_nav_blkpen = bp; }   // (06:30: lifts only when nothing else goes there: a stuck at a lift's foot, the next node 5.5 units up, was the commonest)   // (15:30: paths along the players' lanes: src/nav.c)
     int arbw = arb_choose(&arb, now);
     // (09:55: the recordings: the walker moves under 0.3 u/s 53% of its life -- median 0.09 u/s, the players 0.7-1.2 -- while its fight moves
     //  measure 1.5 u/s: [still] every 30 s splits the still time by the legs' winner and the path state)
@@ -1445,7 +1452,10 @@ static void bot_step_body(void) {
         float pos[3] = {o->c[0], o->c[1], o->c[2] - 0.35f}; int cur = nav_node_at(pos);
         if (cur >= 0) {
             int need = plen == 0 || goal < 0 || now - tplan > (mode == 2 ? 1.0 : 3.0);
-            if (goal >= 0 && plen) { float gp[3]; nav_pos(goal, gp); if ((gp[0] - pos[0]) * (gp[0] - pos[0]) + (gp[1] - pos[1]) * (gp[1] - pos[1]) < 1.0f) { nav_say("  [nav] reached the goal\n"); goal = -1; need = 1; } }
+            if (goal >= 0 && plen) { float gp[3]; nav_pos(goal, gp); if ((gp[0] - pos[0]) * (gp[0] - pos[0]) + (gp[1] - pos[1]) * (gp[1] - pos[1]) < 1.0f) { nav_say("  [nav] reached the goal\n"); goal = -1; need = 1;
+                // (06:15: the goal draw handed the same goal back at once -- "path of 2 nodes ... reached the goal" in a loop, the walker
+                //  standing still, read as "stuck" ~1 a second in local battles: a reached hunt goal is dropped from the draw)
+                if (mode == 2 && g_eg.on && gl_on()) gl_drop(now, "reached"); } }
             if (mode == 2 && g_bot_pick_on) { int gn = nav_node_at(g_bot_pick_pos); if (gn >= 0) goal = gn; }   // (the fighter's pickup: walk to the weapon)
             else if (mode == 2 && g_eg.on && gl_on()) {   // the goal draw (nbot_goals.c): known enemies, revenge, items, lanes -- never none
                 if (gl_tick(now, objs, n, me, los_get)) { float gp[3] = {g_gl.pos[0], g_gl.pos[1], g_gl.kind == GK_ENEMY || g_gl.kind == GK_REVENGE || g_gl.kind == GK_ITEM || g_gl.kind == GK_MATE || g_gl.kind == GK_AID ? g_gl.pos[2] - 0.35f : pos[2]};
@@ -1471,7 +1481,10 @@ static void bot_step_body(void) {
                   pidx = bi; if (bd > 4.0f) tplan = 0; }   // more than 2 units off the path: replan
                 { static double tpub; if (now - tpub > 0.25) { tpub = now; nav_publish(path, pidx, plen, goal); } }
                 static int look = -1; if (look < 0) { const char* e = getenv("PELOAD_NAV_LOOK"); look = e ? atoi(e) : 6; if (look < 1) look = 1; }
-                int ti = pidx + look < plen ? pidx + look : plen - 1; float tp[3]; nav_pos(path[ti], tp);
+                // (06:20: 601 of 610 stucks in a local battle were at path index 0 -- steering at the node 6 ahead cuts every corner into
+                //  the wall at a path's start: for 3 s after a stuck the walker steers at the next node, NHOOK_BOT_LOOK_STUCK (1))
+                float lks = 1; lk_over(&lks, "NHOOK_BOT_LOOK_STUCK"); int lk = now - tjump < 3.0 && tjump > 0 ? (int)lks : look; if (pidx < 2 && lk > 2) lk = 2; if (lk < 1) lk = 1;   /* (and 2 nodes at most for a path's first steps) */
+                int ti = pidx + lk < plen ? pidx + lk : plen - 1; float tp[3]; nav_pos(path[ti], tp);
                 float way = atan2f(tp[1] - pos[1], tp[0] - pos[0]);
                 float rlook; if (!(out & 1) && g_eg.on && gl_on() && gl_radar_look(now, objs, n, me, have_tg && engaged, &rlook)) {   // (a radar contact: look at it, keep walking the path)
                     float e = bot_wrap(rlook - yaw0), mx = 0.2f; yaw = yaw0 + (e > mx ? mx : e < -mx ? -mx : e); pitch = -0.05f; out |= 1; }
@@ -1498,6 +1511,19 @@ static void bot_step_body(void) {
                       //  the walker never jumped -- on rocks and lips a jump is what frees a player. Each stuck now jumps (0.25 s) and the next 10
                       //  path nodes cost NHOOK_BOT_STUCK_PEN (8, live) more)
                       { float sp = 8; lk_over(&sp, "NHOOK_BOT_STUCK_PEN"); for (int i = pidx; i < plen && i < pidx + 10; i++) g_nav.pen[path[i]] += sp; }
+                      // (06:55: 2 of 3 stucks came at the FIRST step of a fresh path -- the replan from the spot chose the same step again
+                      //  ("stuck at (-3.7 -18.5 19.0) ... path 0/141", 0/192, 0/164, 0/165 on Guardian). The step being pushed along
+                      //  (the walker's node -> the path's next) is marked blocked in the walking graph (nav.c nav_block_step: +25, live
+                      //  NHOOK_NAV_BLOCKPEN); blocked twice it is kept for the map (maptop/<map>.blocked.txt))
+                      { int nx = pidx + 1 < plen ? path[pidx + 1] : -1, bs = 0, from = -1;
+                        if (nx >= 0 && cur >= 0 && cur != nx) { from = cur; bs = nav_block_step(cur, nx); }
+                        if (!bs && nx >= 0) { from = path[pidx]; bs = nav_block_step(from, nx); }
+                        if (bs) nav_say("  [nav] the step %d -> %d is blocked%s\n", from, nx, bs == 2 ? " (again: kept for this map)" : "");
+                        // (07:10: one Guardian node had 5 of its 8 steps blocked -- the walker pinned there whatever way it pushed: a TRAP
+                        //  (nav.c nav_trap, 3+ blocked; A* keeps out of it). Caught in one, the escape runs 2 s (random directions at full
+                        //  throttle, jumps) -- only then: run on "4 stucks in 10 s" it fired all the time (15:20 entry). NHOOK_BOT_TRAP_ESC=0 off)
+                        { float te = 2.0f; lk_over(&te, "NHOOK_BOT_TRAP_ESC"); if (te > 0 && from >= 0 && nav_trap(from) && now > g_escape_until + 2.0) { g_escape_until = now + te; g_escape_t = 0;
+                            if (bot_log()) nlog("[nhook] [nav] trapped at (%.1f %.1f %.1f), node %d (%d of 8 ways blocked): escaping", pos[0], pos[1], pos[2], from, __builtin_popcount(g_nav_blk[from])); } } }
                       g_fjump_until = now + 0.25;
                       memmove(tstuck, tstuck + 1, 3 * sizeof(double)); tstuck[3] = now;
                       // (2026-11-08, the user: "why was 'second' walker stationary so long with the smg and assault rifle?": 24 s at a ledge on
@@ -1516,7 +1542,7 @@ static void bot_step_body(void) {
                       if (now - tstuck[0] < 10.0) { nav_say("  [nav] stuck 4 times at (%.1f %.1f %.1f): a new goal\n", pos[0], pos[1], pos[2]);
                           if (mode != 2) goal = -1; else if (g_eg.on && gl_on()) { gl_drop(now, "stuck 4 times"); goal = -1; plen = 0; }
                           memset(tstuck, 0, sizeof tstuck); }
-                      else nav_say("  [nav] stuck at (%.1f %.1f %.1f): back off and replan\n", pos[0], pos[1], pos[2]);
+                      else nav_say("  [nav] stuck at (%.1f %.1f %.1f): back off and replan (legs: %s, path %d/%d, goal %d)\n", pos[0], pos[1], pos[2], g_arb_why, pidx, plen, goal);
                       tplan = 0; } }
                 if (now < g_escape_until) { if (now - g_escape_t > 0.5) { g_escape_t = now; g_escape_dir = bot_rand01() * 6.2831853f; }
                     float rel = bot_wrap(g_escape_dir - yaw); tx = cosf(rel); ty = sinf(rel); if (fmod(now, 0.6) < 0.15) g_fjump_until = now + 0.12; }
@@ -1534,10 +1560,22 @@ static void bot_step_body(void) {
         { static double ttap; if (g_gun_press_ok && now - ttap > 1.2) { ttap = now; g_bot_act_until = now + 0.15; } }   // (a TAP, then 1.2 s to see it seated: a held press seats and then unseats)
         { static double tl; if (bot_log() && now - tl > 1.0) { tl = now; nlog("[nhook] [gunner] boarding: %.1f units from the point behind the turret%s", gbd, g_gun_press_ok ? ", right behind it: pressing act" : ""); } } }
     else if (arbw == ARB_FETCH && g_pick_d < 1.3f && engaged && tdist < 10.0f) { tx = ftx; ty = fty; out |= 2; }   // (09:30: at the weapon in a fight: the fight's moves, act still pulsed -- never a still target)
-    else if (arbw == ARB_FETCH && g_pick_d < 3.0f) {   // (the last 3 units of a weapon fetch: straight at it -- it may lie off the walking graph)
-        float way = atan2f(g_bot_pick_pos[1] - o->c[1], g_bot_pick_pos[0] - o->c[0]), rel = bot_wrap(way - yaw), sp = g_pick_d > 1.0f ? 1.0f : g_pick_d > 0.3f ? 0.45f : 0.0f;   /* (08:05: onto it, then still) */ tx = cosf(rel) * sp; ty = sinf(rel) * sp; out |= 2; }
+    // (06:45: "going for EXCAVATOR (1.6 units ...)" then 30+ "stuck at (11.9 -11.8 18.1) (legs: fetch ...)" on Guardian: 1.6 units ACROSS
+    //  but on another level, its path 27 nodes round -- the straight walk ran into the wall. Straight only on the same level (under 1 unit
+    //  up / down) and when the path is no detour (at most 2 nodes a unit + 4); else the path's way)
+    else if (arbw == ARB_FETCH && g_pick_d < 3.0f && fabsf(g_bot_pick_pos[2] - o->c[2]) < 1.0f && (plen == 0 || plen - pidx <= (int)(g_pick_d * 2.0f) + 4)) {   // (the last 3 units of a weapon fetch: straight at it -- it may lie off the walking graph)
+        float way = atan2f(g_bot_pick_pos[1] - o->c[1], g_bot_pick_pos[0] - o->c[0]), rel = bot_wrap(way - yaw), sp = g_pick_d > 1.0f ? 1.0f : 0.45f;   /* (06:15: through it at half speed -- takes come walking over it (~0.8 units); standing still on it never took and read as stuck) */ tx = cosf(rel) * sp; ty = sinf(rel) * sp; out |= 2; }
     else if (arbw == ARB_FIGHT) { tx = ftx; ty = fty; out |= 2; }   // (the fighter's moves: the arbiter gave it the legs)
-    else if (arbw == ARB_HOLD) { tx = 0; ty = 0; out |= 2; }   // (levels apart: the enemy below -- hold the high ground)
+    else if (arbw == ARB_HOLD) {   // (levels apart: the enemy below -- hold the high ground)
+        // (07:00: "[still] 73% of 30 s alive under 0.3 u/s: ... hold 58%" -- a statue on the ledge. The user, who won 3-0 from above, moved
+        //  ~0.5 u/s there: the walker now sways side to side at NHOOK_BOT_HOLD_SWAY (0.3, live; 0 = old) throttle, turning back every
+        //  0.9-1.3 s or where the floor 1 unit to that side is not its own level (never off the ledge it holds))
+        tx = 0; ty = 0; out |= 2; float hs = 0.3f; lk_over(&hs, "NHOOK_BOT_HOLD_SWAY");
+        if (hs > 0 && g_nav.ok) { static double tsw; static float sd = 1; if (now - tsw > 0.9 + 0.4 * bot_rand01()) { tsw = now; sd = -sd; }
+            float me3[3] = {o->c[0], o->c[1], o->c[2] - 0.15f}; int mn = nav_node_at(me3); float mz[3] = {0, 0, o->c[2] - 0.35f}; if (mn >= 0) nav_pos(mn, mz);
+            for (int tries = 0; tries < 2; tries++) { float side = yaw + sd * 1.5707963f, q[3] = {o->c[0] + cosf(side), o->c[1] + sinf(side), mz[2] + 0.2f}; int qn = nav_node_at(q); float qp[3];
+                if (qn >= 0) { nav_pos(qn, qp); if ((qp[0] - q[0]) * (qp[0] - q[0]) + (qp[1] - q[1]) * (qp[1] - q[1]) < 0.36f && fabsf(qp[2] - mz[2]) < 0.5f) { ty = sd * hs; break; } }
+                sd = -sd; tsw = now; } } }
     if (now < g_escape_until && arbw != ARB_FIGHT && arbw != ARB_HOLD) { float rel = bot_wrap(g_escape_dir - yaw); tx = cosf(rel); ty = sinf(rel); out |= 2; }   // (wedged: the escape beats the path moves -- never a fight's)
     if (testb) { g_bot_btn = ((out & 4) ? g_bot_btn : 0) | g_bot_testbtn; out |= 4; }   // (do=botbtn: held until its time is up)
     // fire: the control record's bit 19 (+0xC8) -- the local unit fires, and the control packet carries the weapon's firing state

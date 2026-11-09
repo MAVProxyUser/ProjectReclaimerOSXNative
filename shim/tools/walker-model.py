@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Learn how real players move and fight from shim/tools/match-recorder.py's recordings (2026-11-08), for the walkers (nbot.c).
-    python3 shim/tools/walker-model.py [recordings dir] [--out model.json] [--report]
+    python3 shim/tools/walker-model.py [recordings dir] [--out model.json] [--report] [--top]
+--top (2026-11-09): the fights and speeds of each match's top fifth by K/D only (kills + deaths >= 5) -- the players the walker is
+to mimic (the default model is every player: its reaction 1.08 s is an average player's); write it with --out elsewhere.
 Default dir ~/Library/Application Support/ReclaimerMac/tracks, default out <dir>/walker-model.json (nbot.c reads it:
 NHOOK_BOT_MODEL). The observer's own player ("you") is left out. Per player and sample (10 a second): position, look (yaw /
 pitch), alive, shield, health, weapon, vehicle. Measured:
@@ -66,8 +68,17 @@ def main():
                 sl, team, alive, x, y, z, yaw, pitch, sh, hp, wpn, veh = r[:12]
                 if sl == you: continue
                 ser[sl].append((s['t'], alive, x, y, z, yaw, pitch, sh, hp, wpn, veh, team, r[14] if len(r) > 15 else 0, r[15] if len(r) > 15 else 0))
+        TOPSET = None
+        if '--top' in sys.argv:   # (the top fifth of this match by K/D)
+            kd = {}
+            for s in S:
+                for r in s['p']:
+                    if len(r) > 13: kd[r[0]] = (max(kd.get(r[0], (0, 0))[0], r[12] or 0), max(kd.get(r[0], (0, 0))[1], r[13] or 0))
+            ranked = sorted([sl for sl, (k, d) in kd.items() if k + d >= 5 and sl in ser], key=lambda q: -(kd[q][0] + 1) / (kd[q][1] + 1))
+            TOPSET = set(ranked[:max(1, len(ranked) // 5)]) if ranked else set()
         if not lanes_only:
-            for sl in ser: players.add((path, sl))
+            for sl in ser:
+                if TOPSET is None or sl in TOPSET: players.add((path, sl))
         # velocities (0.3 s central differences inside continuous alive stretches)
         vel = {}
         for sl, a in ser.items():
@@ -90,6 +101,7 @@ def main():
         engs = []                    # (slot, engagement) of this file
         # engagements
         for sl, a in ser.items():
+            if TOPSET is not None and sl not in TOPSET: continue   # (--top: only the best players' engagements; every player is a target)
             cur = None   # {target, rows, pre}
             for i, e in enumerate(a):
                 t, alive, x, y, z, yaw, pitch, sh, hp, wpn, veh, team = e[:12]
@@ -153,6 +165,7 @@ def main():
                 if v[i] is None: continue
                 cx, cy = round(e[2] / CELL), round(e[3] / CELL); flow['heat'][(cx, cy, round(e[4] / 1.5))] += 1   # (with a floor level: multi-storey maps)
                 if tindex[e[0]] in engaged[sl]: continue
+                if TOPSET is not None and sl not in TOPSET: continue
                 sp = math.hypot(v[i][0], v[i][1])
                 if not lanes_only:
                     M['speed'].append(sp); roam_secs += 0.1
