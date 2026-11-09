@@ -3272,6 +3272,10 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   a running battle, at every round end (our server's in_match true -> false) walker-coach.py round + match-study.py, then each
   walker's game restarted headless with its new knobs and the newest build (they rejoin in the lobby; the user's game and the
   server stay).
+- **Empty mid-fight: switch first** (2026-11-09 13:40; nbot.c the EMPTY block) — WHY: "[death] ... ASSAULT RIFLE 0 rounds" at 4 units
+  against two enemies: the walker reloaded first (right while switching was unreliable); with the learnt switch button ("3 of 3 took")
+  the Halo answer is the switch -- faster than a reload. LOGIC: an empty magazine with an enemy in sight within 20 units (g_eng_close),
+  the switch button learnt and the other weapon not known empty -> the switch; else the reload (act tap + trigger click) as before.
 - **Steadier aim with precision weapons** (2026-11-09 13:35; nbot.c the aim noise) — WHY: battle-rifle duels lost on the headshot race at
   8-14 units ("my shield 0.06 health 1.00"): the head is about +-0.3 deg at 14 units, the wander +-0.6 at level 4. LOGIC: with a precision
   weapon / sniper the OU wander x NHOOK_BOT_NOISE_PREC (0.7, live). (Also measured: the learnt switch button "3 of 3 took".)

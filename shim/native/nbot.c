@@ -1359,7 +1359,12 @@ static void bot_step_body(void) {
         if (g_ammo_learned >= 0 && g_inv.ammo == 0 && !noreload && g_inv.held) {
             // (11:25: RELOAD FIRST when the reserve has rounds -- the act tap reloads every time, the switch is not yet reliable)
             { static double tclick; if (g_inv.reserve > 0 && now - tclick > 1.5) { tclick = now; g_bot_click_until = now + 0.12; } }   // (the click: an empty pull reloads)
-            if (g_inv.reserve > 0 && now - trel > 2.5) { trel = now; nrel++; if (bot_log()) nlog("[nhook] [inv] EMPTY %s: reloading from %d in reserve (act tap + trigger click)", g_inv.held, g_inv.reserve); }
+            // (13:40: in a fight -- an enemy in sight within 20 units -- with the other weapon loaded: SWITCH first, it is faster than a
+            //  reload; the learnt switch button takes ("3 of 3 took"). "[death] ... ASSAULT RIFLE 0 rounds" at 4 units)
+            if (g_eng_close && g_swbit >= 0 && g_inv.has_other && g_inv.other_ammo != 0 && now - tswe > 1.5) { tswe = now; bot_switch_press(now); fbtn |= 8;
+                if (bot_log()) nlog("[nhook] [inv] EMPTY %s in a fight: switching to %s (faster than a reload)", g_inv.held, g_inv.other); }
+            else if (g_eng_close && g_swbit >= 0 && g_inv.has_other && g_inv.other_ammo != 0) ;
+            else if (g_inv.reserve > 0 && now - trel > 2.5) { trel = now; nrel++; if (bot_log()) nlog("[nhook] [inv] EMPTY %s: reloading from %d in reserve (act tap + trigger click)", g_inv.held, g_inv.reserve); }
             else if (g_inv.reserve > 0) ;
             else if (g_inv.has_other && g_inv.other_ammo != 0 && now - tswe > 1.5) { tswe = now; bot_switch_press(now); fbtn |= 8;
                 if (bot_log()) nlog("[nhook] [inv] EMPTY %s: switching to %s", g_inv.held, g_inv.other); }
