@@ -221,6 +221,16 @@ static int eg_choose(const NovObj* objs, int n, int me, const float* cam, float 
                                     known ? "taking its enemy" : aid ? "going to the teammate" : "(enemy not known: staying)");
                 break; } } }
     if (sw_to && now >= sw_at) { for (int i = 0; i < n; i++) if (objs[i].handle == sw_to && !objs[i].dead && i != me) { prev = cur; prev_t = now; cur = sw_to; cur_t0 = now; cur_seen = now; ci = i; g_eg_fast = sw_to; break; } sw_to = 0; }
+    // ENGAGE (2026-11-08, the user: "walkers should never just walk past an enemy without predictive grenade lay some shots, or a beat
+    // down! engage!"): a VISIBLE enemy within 10 units is taken at once -- unless the current target is itself visible within 10 --
+    // instead of the drawn choice keeping a far / hidden one. NHOOK_BOT_NOENGAGE=1 = off.
+    { static int ne = -1; if (ne < 0) ne = getenv("NHOOK_BOT_NOENGAGE") != 0;
+      if (!ne && !(ci >= 0 && vis_of(cur, now) == 1 && ({ float ex = objs[ci].c[0] - cam[0], ey = objs[ci].c[1] - cam[1], ez = objs[ci].c[2] - cam[2]; ex * ex + ey * ey + ez * ez < 100.0f; }))) {
+          int bi = -1; float bd = 100.0f;
+          for (int i = 0; i < n; i++) { const NovObj* t = &objs[i]; if (t->type || t->dead || i == me || !bot_enemy(o, t) || vis_of(t->handle, now) != 1) continue;
+              float dx = t->c[0] - cam[0], dy = t->c[1] - cam[1], dz = t->c[2] - cam[2], d = dx * dx + dy * dy + dz * dz; if (d < bd) { bd = d; bi = i; } }
+          if (bi >= 0 && objs[bi].handle != cur) { if (cur) { prev = cur; prev_t = now; } cur = objs[bi].handle; cur_t0 = now; cur_seen = now; g_eg_fast = cur;
+              if (bot_log()) nlog("[nhook] [fight] engage: %08x in sight at %.1f units -- taken", cur, sqrtf(bd)); return bi; } } }
     if (ci >= 0 && now - cur_seen < 1.0) return ci;   // (kept: alive and seen in the last second)
     // a new target: the players' choice rule over the KNOWN enemies within 45 units -- DRAWN from its probabilities (exp(score) /
     // sum), not the best score: the best-score walker was more predictable than the players (the rule named its target 72% of the

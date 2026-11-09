@@ -16,13 +16,13 @@ cd "$(dirname "$0")/../.."
 SUP="$HOME/Library/Application Support/ReclaimerMac/native"; APPRE='^/Applications/Project Reclaimer.app/Contents/MacOS/project-reclaimer'
 BT="$HOME/Library/Application Support/ReclaimerMac/battles"; mkdir -p "$BT"
 if pgrep -f "$APPRE" >/dev/null; then echo "Project Reclaimer is running: not starting"; exit 1; fi
-NAMES=(test-v2 test-second test-third test-fourth); NICK=("" Second Third Fourth); PORTS=(8765 8766 8768 8769)
+NAMES=(test-v2 test-second test-third test-fourth test-fifth); NICK=("" Second Third Fourth Fifth); PORTS=(8765 8766 8768 8769 8770)   # (test-fifth: 2026-11-08, a fourth walker beside the user)
 if [ "${1:-}" = init ]; then
-  for k in 2 3; do d="$SUP/${NAMES[$k]}"; [ -f "$d/profile.json" ] && { echo "${NAMES[$k]}: exists"; continue; }
+  for k in 2 3 4; do d="$SUP/${NAMES[$k]}"; [ -f "$d/profile.json" ] && { echo "${NAMES[$k]}: exists"; continue; }
     mkdir -p "$d"; echo "${NAMES[$k]}: the app's first start makes its identity"
     cp "$SUP/test-second/mcc-folder.txt" "$d/mcc-folder.txt" 2>/dev/null   # (else it stops at "Where is Halo: The Master Chief Collection?")
     NATIVE_LOG="$BT/init-${NAMES[$k]}.log" NATIVE_PROFILE="$d" RECLAIMER_CACHE_DIR="$d-cache" PELOAD_FORENSIC_DIR="$d-forensics" NHOOK_HEATMAP_DIR="$d-heatmaps" \
-      NHOOK_STATS_OPEN=0 NHOOK_MUTE_OUTPUT=1 NATIVE_SECS=30 bash shim/native.sh --map guardian --seconds 25 --background > "$BT/init-${NAMES[$k]}.out" 2>&1
+      NHOOK_STATS_OPEN=0 NHOOK_MUTE_OUTPUT=1 NATIVE_SECS=30 bash shim/native.sh --map guardian --seconds 25 "${WB_INIT_VIEW:---headless}" > "$BT/init-${NAMES[$k]}.out" 2>&1
     [ -f "$d/profile.json" ] || { echo "  no profile.json made"; continue; }
     python3 - "$d/profile.json" "${NICK[$k]}" <<'EOF'
 import json, os, sys
@@ -32,7 +32,7 @@ EOF
   done; exit 0; fi
 N=${1:-4}; SECS=${2:-300}; shift 2 2>/dev/null; EXTRA=("$@")
 IDS=(${WB_IDS:-0 1 2 3})   # (which identities walk, by index into NAMES: WB_IDS="1 2 3" leaves test-v2 out -- e.g. when the user plays beside them)
-[ "$N" -ge 2 ] && [ "$N" -le 4 ] || { echo "2..4 walkers"; exit 1; }
+[ "$N" -ge 2 ] && [ "$N" -le 5 ] || { echo "2..5 walkers"; exit 1; }
 for i in $(seq 0 $((N - 1))); do k=${IDS[$i]}; [ $k -lt 2 ] || [ -f "$SUP/${NAMES[$k]}/profile.json" ] || { echo "${NAMES[$k]} missing: bash shim/tools/walker-battle.sh init"; exit 1; }; done
 T=$(mktemp -d "${TMPDIR:-/tmp}/walker-battle.XXXXXX"); OUT="$BT/$(date +%Y%m%d-%H%M%S)-n$N.jsonl"
 # the walkers' games run HEADLESS by default (2026-11-08, the user: "running all 3 clients visible lagged the screen hard, can you drive

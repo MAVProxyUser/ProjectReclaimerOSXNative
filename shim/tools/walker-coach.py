@@ -6,6 +6,7 @@ report and each measure moves one of its knobs part of the way toward the winner
                                             [--ded-map <the server's map name>] [--game-file <a public recording: its winners x2>]
     python3 shim/tools/walker-coach.py round <battle tracks dir> <battle samples .jsonl> [--map M] [--class C]   (coach one battle)
     python3 shim/tools/walker-coach.py show                                                                      (the knobs + history)
+    python3 shim/tools/walker-coach.py follow <best id> <other ids...> [--w 0.5]                                  (the others toward the best walker)
 measure (coach.py)                     knob (nbot.c / nbot_goals.c)
   closing in while attacking           NHOOK_BOT_RADSCALE  x the replayed closing / backing off
   aim error while firing               NHOOK_BOT_NOISE     x the aim noise
@@ -38,7 +39,7 @@ H3MAPS = {'armory': "Rat's Nest", 'bunkerworld': 'Standoff', 'chill': 'Narrows',
           'deadlock': 'High Ground', 'descent': 'Assembly', 'docks': 'Longshore', 'fortress': 'Citadel', 'ghosttown': 'Ghost Town', 'guardian': 'Guardian',
           'isolation': 'Isolation', 'lockout': 'Blackout', 'midship': 'Heretic', 'riverworld': 'Valhalla', 'salvation': 'Epitaph', 'sandbox': 'Sandbox',
           'shrine': 'Sandtrap', 'sidewinder': 'Avalanche', 'snowbound': 'Snowbound', 'spacecamp': 'Orbital', 'warehouse': 'Foundry', 'zanzibar': 'Last Resort'}
-NICKS = {'Second': 1, 'Third': 2, 'Fourth': 3}   # (walker-battle.sh's test identities; any other name = test-v2, index 0 -- names are never written)
+NICKS = {'Second': 1, 'Third': 2, 'Fourth': 3, 'Fifth': 4}   # (walker-battle.sh's test identities; any other name = test-v2, index 0 -- names are never written)
 
 def load_state():
     try: return json.load(open(STATE))
@@ -207,9 +208,27 @@ def loop():
         subprocess.run(['bash', os.path.join(HERE, 'native-dedicated.sh'), 'stop'], cwd=ROOT, check=False, stdout=subprocess.DEVNULL)
         time.sleep(5)
 
+def follow(best, others, w=0.5):
+    """(2026-11-08, the user: "pay attention to which walker is doing the best too, and train the other walkers to be more like the
+    good walker") every other walker's knobs move w of the way to the best walker's (in log space for the x-knobs, linearly for the
+    + ones); written to the state and to the round history"""
+    st = load_state(); kb = knobs_of(st, best); moved = {}
+    for k in others:
+        if str(k) == str(best): continue
+        kn = knobs_of(st, k); new = {}
+        for n, (dflt, lo, hi, kind) in KNOBS.items():
+            a, b = kn[n], kb[n]
+            v = a + w * (b - a) if kind == '+' or a <= 0 or b <= 0 else math.exp(math.log(a) + w * (math.log(b) - math.log(a)))
+            new[n] = min(hi, max(lo, v))
+        st['knobs'][str(k)] = new; moved[str(k)] = env_of(new)
+    st.setdefault('follows', []).append({'t': time.time(), 'best': str(best), 'w': w, 'moved': moved}); save_state(st)
+    print('the best walker this round: %s (%s); the others moved %.0f%% of the way:' % (best, env_of(kb) or 'defaults', 100 * w))
+    for k, e in moved.items(): print('  walker %s: %s' % (k, e or 'defaults'))
+
 if __name__ == '__main__':
     a = sys.argv[1:]
     if a and a[0] == 'round': coach_round(a[1], a[2], mp=arg('--map'), cls=arg('--class'), apply='--dry' not in a, game_file=arg('--game-file'))
     elif a and a[0] == 'loop': loop()
     elif a and a[0] == 'show': show()
+    elif a and a[0] == 'follow': follow(a[1], [x for x in a[2:] if not x.startswith('--') and x != arg('--w', '')], float(arg('--w', '0.5')))
     else: print(__doc__)

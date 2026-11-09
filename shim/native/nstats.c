@@ -1104,6 +1104,7 @@ static void slow_watch(double now, double fps, int in_match) {
 static void st_snapshot(StBuf* s) {
     static const char* teams[8] = {"red", "blue", "green", "orange", "purple", "gold", "brown", "pink"};
     chat_log_tick();
+    if (inp_log_on() && g_img && g_gameplay_t0) pkt_hook_install();   // (NHOOK_INPUT_LOG: the packet hook in any game, a player's too)
     double now = mono_s(), t0 = g_gameplay_t0;
     { static double last; if (last) hk_tick(now - last > 1 ? 0.1 : now - last); last = now; }
     sb_put(s, "{\"time\":%.2f,\"in_match\":%s,\"inst\":%d,\"native\":true,\"lanes_live\":%s", t0 ? now - t0 : 0.0, t0 ? "true" : "false", (int)getpid(), ln_on() ? "true" : "false");
@@ -1409,7 +1410,7 @@ static int st_control(const char* act, const char* qs) {
         return rec_start(ao, secs, g_st_curmap[0] ? g_st_curmap : "game", ao || !live ? 0 : g_nr_w, ao || !live ? 0 : g_nr_h, err, sizeof err); }
     if (!strcmp(act, "recstop")) { rec_stop(); return 1; }
     if (!strcmp(act, "takeover")) { if (!getenv("NHOOK_TAKEOVER")) return 0; void nh_takeover_now(void); nh_takeover_now(); return 1; }   // (the observer's game: the user's controls, nvpad.m)
-    if (!strcmp(act, "spar") || !strcmp(act, "walk") || !strcmp(act, "botbtn") || !strcmp(act, "botpad") || !strcmp(act, "botpkt")) return bot_control(act, qs);   // the sparring aim / walker / button scans (nbot.c, test clients)
+    if (!strcmp(act, "spar") || !strcmp(act, "walk") || !strcmp(act, "botbtn") || !strcmp(act, "botpad") || !strcmp(act, "botpkt") || !strcmp(act, "botwslot")) return bot_control(act, qs);   // the sparring aim / walker / button scans (nbot.c, test clients)
     if (!strcmp(act, "mic")) { const char* v = strstr(qs, "on="); if (!v) return 0; mic_muted(); g_mic_muted = atoi(v + 3) ? 0 : 1; return 1; }
     if (!strcmp(act, "forensic")) return fx_control(qs);       // archive / voice audio / consent (forensic.c)
     if (!strcmp(act, "hookab")) return hc_control(qs);           // the hook cost meter's on/off measurement

@@ -179,21 +179,50 @@ static volatile unsigned long g_bot_pkt_n; static volatile uint32_t g_bot_pkt_bt
 // do=botpkt&b8=<hex>&b2c=<hex>&secs= (2026-11-08, melee-scan.py --packet): those bits ORed into the packed record for a time --
 // the packet carries only +8 bits 0-2, 11, 14 and +0x2c's 7 bits, so the melee bit is among them (no pad button meleed)
 static volatile uint32_t g_bot_tpk8, g_bot_tpk2c; static volatile double g_bot_tpk_until;
+// do=botwslot&v=<n>&secs= (2026-11-08): the walker's buttons never reach the game in a headless client (Y never switched weapons,
+// an empty rifle went "click click click" past the user), but the control packet carries the weapon index from the local unit's
+// +0x260 (net-authority.md, packet "A" +0x1a). This writes that byte on the walker's own unit just before each packet is built --
+// the experiment: does the server switch the weapon? The bytes +0x258..+0x26f are logged once at the first request.
+static volatile uint64_t g_bot_unit_p; static volatile int g_bot_wsel_v; static volatile double g_bot_wsel_until;
+// NHOOK_INPUT_LOG=1 (2026-11-08): what a REAL player's game puts in the packed record -- the button word (+8, a u64) and the extra
+// byte (+0x2c) -- and the local unit's weapon slot bytes (+0x260 / +0x262) and grenade type (+0x298), logged whenever one changes
+// ([input] lines, ms since the first). The walkers' buttons never reach the game in a headless client (melee, reload, weapon and
+// grenade switches); the user meleeing / reloading / switching shows which bit or byte each one is. Read only.
+static int inp_log_on(void) { static int v = -1; if (v < 0) v = getenv("NHOOK_INPUT_LOG") != 0; return v; }
+static void inp_log(const uint8_t* act) {
+    static uint64_t p8 = ~0ull; static uint8_t p2c = 0xFF, pw0 = 0xFF, pw2 = 0xFF, pg = 0xFF; static double t0;
+    uint64_t b8 = *(const uint64_t*)(act + 8); uint8_t b2c = act[0x2c], w0 = 0xFF, w2 = 0xFF, gr = 0xFF;
+    uint64_t up = g_my_unit != 0xFFFFFFFFu ? nov_datum(g_my_unit) : 0; if (up) { const uint8_t* u = (const uint8_t*)(uintptr_t)up; w0 = u[0x260]; w2 = u[0x262]; gr = u[0x298]; }
+    if (b8 == p8 && b2c == p2c && w0 == pw0 && w2 == pw2 && gr == pg) return;
+    double now = mono_s(); if (!t0) t0 = now;
+    nlog("[nhook] [input] %8.0f ms: +8 %016llx (on %llx, off %llx) +0x2c %02x (on %02x, off %02x); unit +0x260 %d +0x262 %d grenade %d",
+         (now - t0) * 1e3, (unsigned long long)b8, (unsigned long long)(p8 == ~0ull ? 0 : b8 & ~p8), (unsigned long long)(p8 == ~0ull ? 0 : p8 & ~b8),
+         b2c, (uint8_t)(p2c == 0xFF ? 0 : b2c & ~p2c), (uint8_t)(p2c == 0xFF ? 0 : p2c & ~b2c), (int)(int8_t)w0, (int)(int8_t)w2, (int)(int8_t)gr);
+    p8 = b8; p2c = b2c; pw0 = w0; pw2 = w2; pg = gr; }
 static void bot_on_abuild(uint64_t* ctx) {
-    uint8_t* act = (uint8_t*)(uintptr_t)ctx[2]; if (!act || !g_bot_out || g_hc_off[HC_BOT]) return; g_bot_pkt_n++;
+    uint8_t* act = (uint8_t*)(uintptr_t)ctx[2]; if (act && inp_log_on()) inp_log(act);
+    if (!act || !g_bot_out || g_hc_off[HC_BOT]) return; g_bot_pkt_n++;
     { static int told; if (!told) { told = 1; uint64_t blk = tls_block(), rec = 0; if (blk) hb_read(blk + 0xC0, &rec, 8);
         nlog("[nhook] [bot] control packet: the builder's record %p, the reader's record 0x%llx (record +0x%llx)", (void*)act, (unsigned long long)rec, rec ? (unsigned long long)((uint64_t)(uintptr_t)act - rec) : 0ull); } }
     int o = g_bot_out;
     if (o & 1) { *(float*)(act + 0x10) = g_bot_yaw; *(float*)(act + 0x14) = g_bot_pitch; }
     if (o & 2) { *(float*)(act + 0x18) = g_bot_tx; *(float*)(act + 0x1c) = g_bot_ty; }
     static int extra = -1; static uint32_t xb; if (extra < 0) { const char* e = getenv("NHOOK_BOT_PKTBTN"); extra = e != 0; xb = e ? (uint32_t)strtoul(e, 0, 16) : 0; }
+    if (g_bot_wsel_until > 0 && mono_s() < g_bot_wsel_until && g_bot_unit_p) {
+        uint8_t* u = (uint8_t*)(uintptr_t)g_bot_unit_p; static int told;
+        if (!told) { told = 1; char h[80]; int q = 0; for (int i = 0x258; i < 0x270; i++) q += snprintf(h + q, sizeof h - (size_t)q, "%02x%s", u[i], (i & 3) == 3 ? " " : "");
+            nlog("[nhook] [bot] weapon slot test: unit +0x258..+0x26f = %s (+0x262 the current slot %d)", h, (int)(int8_t)u[0x262]); }
+        u[0x260] = (uint8_t)g_bot_wsel_v; }
     int tpk = g_bot_tpk_until > 0 && mono_s() < g_bot_tpk_until;
     uint32_t b8 = g_bot_pkt_btn8 | (extra ? xb : 0) | (tpk ? g_bot_tpk8 : 0); if (b8) *(uint64_t*)(act + 8) |= b8;
     uint32_t b2c = g_bot_pkt_btn2c | (tpk ? g_bot_tpk2c : 0); if (b2c) *(act + 0x2c) |= (uint8_t)b2c; }
+static void pkt_hook_install(void) {   // the control packet builder's hook: the walker's moves, and NHOOK_INPUT_LOG's reads
+    static int done; if (done || getenv("NHOOK_BOT_NOPKT")) return; done = 1; uint64_t a = branch_target_of(0x50fb8);
+    if (!a || text_hook("control packet (walker on a server)", a, bot_on_abuild)) nlog("[nhook] [bot] halo3+0x50fb8 could not be hooked: a joined walker's moves stay local");
+    else if (inp_log_on()) nlog("[nhook] [input] logging the packed controls (NHOOK_INPUT_LOG)"); }
 static int bot_hook_install(void) {
     if (g_bot_hook >= 0) return g_bot_hook;
-    { static int done; if (!done && !getenv("NHOOK_BOT_NOPKT")) { done = 1; uint64_t a = branch_target_of(0x50fb8);
-        if (!a || text_hook("control packet (walker on a server)", a, bot_on_abuild)) nlog("[nhook] [bot] halo3+0x50fb8 could not be hooked: a joined walker's moves stay local"); } }
+    pkt_hook_install();
     uint64_t t = branch_target_of(0xf7178);
     g_bot_hook = t ? !text_hook("player control (sparring aim / walker)", t, bot_on_reader) : !body_hook_after("player control (sparring aim / walker)", 0xf66ac, bot_on_update);
     if (!g_bot_hook) nlog("[nhook] [bot] halo3+0xf66ac could not be hooked: no sparring aim / walker"); return g_bot_hook; }
@@ -317,7 +346,8 @@ static int bot_pull_weapon(const char* w) {
     static const char* const k[] = {"HAMMER", "SWORD", "ENERGY BLADE", "SNIPER", "BEAM RIFLE", "MAGNUM", "ROCKET", "BRUTE SHOT", "FUEL ROD", 0};
     if (!w) return 0; for (int i = 0; k[i]; i++) if (strstr(w, k[i])) return 1; return 0; }
 static int g_bot_pull, g_bot_trig; static double g_bot_fire_t0;
-static double g_bot_hold_high, g_bot_hold_last;   // (levels apart: holding the high ground until; the last levels-apart step)   // (the held weapon acts on a pull; when this string of fire began)
+static double g_bot_hold_high, g_bot_hold_last;
+static int g_bot_empty;   // (an empty magazine with the enemy in sight: grenade + rush for the beatdown)   // (levels apart: holding the high ground until; the last levels-apart step)   // (the held weapon acts on a pull; when this string of fire began)
 // the virtual pad's melee and act / pick-up / reload buttons (nvpad.m bits: 1 B, 0x20 RB). 2026-11-08: the walkers pressed B to
 // melee and held RB to pick up -- Halo 3's own layout -- but the app's layout for these profiles is Bumper Jumper's (its own
 // descriptions: "LB jumps and RB melees ... B acts and reloads"): ten weapon changes in a melee battle followed a B press (none
@@ -351,7 +381,7 @@ static void bot_step_body(void) {
     gl_life(now, me >= 0 && !objs[me].dead, me >= 0 ? objs[me].c : 0, 0, 0);   // (nbot_goals.c: deaths, respawns, failed zones)
     if (me < 0 || objs[me].dead || objs[me].seat >= 0) { g_bot_out = 0; g_nav_act = 0; plen = 0; g_bot_err = -1;   // dead, respawning or in a vehicle
         static char w[96]; snprintf(w, sizeof w, me < 0 ? "the record's unit %08x is none of the %d units seen" : objs[me].dead ? "dead" : "in a vehicle", meh, n); bot_idle(me < 0 ? w : objs[me].dead ? "dead" : "in a vehicle"); return; }
-    const NovObj* o = &objs[me]; int out = 0; float yaw = yaw0, pitch = pitch0;
+    const NovObj* o = &objs[me]; int out = 0; float yaw = yaw0, pitch = pitch0; g_bot_unit_p = o->p;
     { static int noinv = -1; if (noinv < 0) noinv = getenv("NHOOK_BOT_NOINV") != 0; if (!noinv) bot_inv(o, &g_inv); else memset(&g_inv, 0, sizeof g_inv);   // (NHOOK_BOT_NOINV=1: blind to it, the old walker)
       if (bot_log()) { static BotInv last; static double tl; if (now - tl > 5.0 || last.held != g_inv.held || last.os != g_inv.os || last.camo != g_inv.camo || last.gren != g_inv.gren) { tl = now; last = g_inv;
           nlog("[nhook] [inv] holding %s (%s, %d rounds), other %s (%s); grenades %d (frag %d, plasma %d)%s%s", g_inv.held ? g_inv.held : "-", g_inv.held_c, g_inv.ammo, g_inv.other ? g_inv.other : "-", g_inv.other_c,
@@ -475,7 +505,20 @@ static void bot_step_body(void) {
               if (!gnext) gnext = now + gx * (pl && !gset ? g_eg.gren_every * (0.5f + bot_rand01()) : gren + 6 * bot_rand01());
               if ((pl || gren > 0) && (g_inv.gren > 0 || !g_inv.held) && tdist > gd0 && tdist < gd1 && vis && now > gnext && now - tacq > react) { tgren = now;
                   gnext = now + gx * (pl && !gset ? g_eg.gren_every * (0.5f + bot_rand01()) : gren + 6 * bot_rand01()); } }
-            if (now - tgren < 0.15) fbtn |= 0x10000;                                                                       // (left trigger: a grenade)
+            // OUT OF AMMO (2026-11-08, the user: a walker went "click click click" right past him -- "never just walk past an enemy
+            // without predictive grenade lay some shots, or a beat down! engage!"): an empty magazine (the ammo field) with the enemy
+            // in sight -> a grenade at once (3-16 units, if any) and the rush below for the beatdown. NHOOK_BOT_NOEMPTY=1 = off.
+            { static int ne = -1; if (ne < 0) ne = getenv("NHOOK_BOT_NOEMPTY") != 0;
+              g_bot_empty = !ne && g_inv.ammo == 0 && g_inv.held && strcmp(g_inv.held_c ? g_inv.held_c : "", "melee");
+              if (g_bot_empty && vis && g_inv.gren > 0 && tdist > 3 && tdist < 16 && now - tgren > 1.2) { tgren = now;
+                  if (bot_log()) nlog("[nhook] [fight] empty magazine: a grenade at %.1f units, then the beatdown", tdist); } }
+            if (now - tgren < 0.15) { fbtn |= 0x10000;                                                                     // (left trigger: a grenade)
+                // the PREDICTIVE throw (same request): aimed where the target will be -- its velocity (units a tick, x30 a second) times
+                // the flight (0.4 s + distance / 10) -- and a little up for the arc (0.025 rad a unit, at most 0.4). NHOOK_BOT_NOLEAD=1 = off.
+                static int nl = -1; if (nl < 0) nl = getenv("NHOOK_BOT_NOLEAD") != 0;
+                if (!nl) { float lt = 0.4f + tdist / 10.0f, px = ftg.c[0] + ftg.vel[0] * 30 * lt - cam[0], py = ftg.c[1] + ftg.vel[1] * 30 * lt - cam[1], pz = ftg.c[2] - cam[2];
+                    float ly = atan2f(py, px), lp = atan2f(pz, sqrtf(px * px + py * py)) + fminf(0.4f, 0.025f * tdist), mxr = (float)dt * 7.0f;
+                    float dyw = bot_wrap(ly - yaw0), dpt = lp - pitch0; yaw = yaw0 + (dyw > mxr ? mxr : dyw < -mxr ? -mxr : dyw); pitch = pitch0 + (dpt > mxr ? mxr : dpt < -mxr ? -mxr : dpt); out |= 1; } }
             if (tdist < 30) { engaged = 1;
                 // closing in: the players pressed in at ~0.8 units/s with shields up and only stopped (-0.03) on low shields; the walkers
                 // had backed off hard (-0.37): NHOOK_BOT_PRESS (throttle inside the distance band), NHOOK_BOT_BACKOFF (on low shields / too close)
@@ -507,7 +550,7 @@ static void bot_step_body(void) {
                   float ax = ftg.aim[0], ay = ftg.aim[1], al = sqrtf(ax * ax + ay * ay), vx = o->c[0] - ftg.c[0], vy = o->c[1] - ftg.c[1], vl = sqrtf(vx * vx + vy * vy);
                   int back = !nb && al > 0.1f && vl > 0.01f && (ax * vx + ay * vy) / (al * vl) < -0.342f;   // (cos 110 deg)
                   if (back && tdist < g_mel.back) { static double tb; if (bot_log() && now - tb > 2.0) { tb = now; nlog("[nhook] [melee] its back is turned at %.1f units: going in", tdist); } }
-                  if (!nm && vis && ((back && tdist < g_mel.back) || (ftg.shield < 0.05f && ftg.health > 0 && tdist < g_mel.rush && !(g_inv.held_c && !strcmp(g_inv.held_c, "rocket"))) || (mcls && tdist < 10.0f))) { r = 0.9f; lat *= back ? 0.0f : 0.3f; } }
+                  if (!nm && vis && ((back && tdist < g_mel.back) || (g_bot_empty && tdist < 12.0f) || (ftg.shield < 0.05f && ftg.health > 0 && tdist < g_mel.rush && !(g_inv.held_c && !strcmp(g_inv.held_c, "rocket"))) || (mcls && tdist < 10.0f))) { r = 0.9f; lat *= back ? 0.0f : 0.3f; } }
                 // never off the floor: test where this step leads (1 unit along the move); flip the strafe, then drop the back-off
                 float fx = cosf(yaw0), fy = sinf(yaw0), lx = -fy, ly = fx;
                 for (int tries = 0; tries < 3; tries++) { float p2[3] = {o->c[0] + (fx * r + lx * lat) * 1.2f, o->c[1] + (fy * r + ly * lat) * 1.2f, o->c[2] - 0.35f};
@@ -662,7 +705,17 @@ static void bot_step_body(void) {
       // (a weapon that acts on a pull -- hammer, sword, sniper, magnum, rockets: the trigger pulsed 0.12 s down / 0.12 s up while firing)
       { static int was; if (spar && g_bot_fire && !was) g_bot_fire_t0 = now; was = spar && g_bot_fire; }
       static int nofire = -1; if (nofire < 0) { const char* e = getenv("NHOOK_BOT_FIRE"); nofire = e && !strcmp(e, "0"); }   // (=0: never pull the trigger -- melee-battle.sh MELEE_ONLY)
-      int trig = !nofire && spar && g_bot_fire && (!g_bot_pull || fmod(now - g_bot_fire_t0, 0.24) < 0.12); g_bot_trig = trig;
+      // automatic weapons at range fire in BURSTS (2026-11-08, the user: a walker "shanking shots due to the random bloom on the AR,
+      // spreading out at range ... lack of weapon proficiency"; shim/tools/fire-rhythm.py: aiming at an enemy with an automatic
+      // weapon, the top-quarter players fire 9.0 shots/s within 8 units, 3.1 at 8-15, 2.0 at 15-25, 1.4 beyond -- the walkers 5.2,
+      // 5.7 (!), 1.6): beyond 8 units 0.25 s bursts with a pause that keeps the players' share of their close-range rate (8-15: 34%,
+      // 15-25: 22%, 25+: 15%); the spread settles in the pauses. Close in the trigger stays held. NHOOK_BOT_HOSE=1 = always held.
+      static int hose = -1; if (hose < 0) hose = getenv("NHOOK_BOT_HOSE") != 0;
+      int burst_ok = 1;
+      if (!hose && !g_bot_pull && g_inv.held_c && !strcmp(g_inv.held_c, "auto") && tdist >= 8.0f) {
+          float duty = tdist < 15 ? 0.34f : tdist < 25 ? 0.22f : 0.15f, per = 0.25f / duty;
+          burst_ok = fmod(now - g_bot_fire_t0, per) < 0.25; }
+      int trig = !nofire && spar && g_bot_fire && burst_ok && (!g_bot_pull || fmod(now - g_bot_fire_t0, 0.24) < 0.12); g_bot_trig = trig;
       uint64_t want = (trig ? fb : 0) | ((fbtn & 0x10000) ? gb : 0) | ((fbtn & 0x20000) ? pkb : 0) | (now < g_fjump_until ? g_bot_jump : 0);   // (fbtn bit 16: the grenade pulse, 17: pick up)
       if (want) { g_bot_btn = ((out & 4) ? g_bot_btn : 0) | want; out |= 4; } else if (!(out & 4)) g_bot_btn = 0; }
     if (diag) { uint64_t b = 0; int d = bot_diag(&tx, &ty, &b, now); out |= d; if (d & 4) g_bot_btn = b; else if (!(out & 4)) g_bot_btn = 0;
@@ -693,6 +746,8 @@ static void bot_init(void) {   // launch switches (nstats_start)
     if (g_bot_spar || g_nav_mode_rt > 0 || getenv("NHOOK_BOT_THROTTLE") || getenv("NHOOK_BOT_BTNSCAN") || getenv("NHOOK_BOT_FACE") || getenv("NHOOK_BOT_HOLDBTN")) bot_start(); }
 static int bot_control(const char* act, const char* qs) {   // POST do=spar&on=0|1, do=walk&mode=off|roam|enemy|x,y,z|vehicle:<name>, do=botbtn&bits=<hex>&secs=
     if (!bot_allowed()) return 0;
+    if (!strcmp(act, "botwslot")) { const char* v = strstr(qs, "v="), * t = strstr(qs, "secs="); if (!v) return 0;
+        g_bot_wsel_v = atoi(v + 2); g_bot_wsel_until = mono_s() + (t ? strtod(t + 5, 0) : 1.0); return 1; }
     if (!strcmp(act, "botpkt")) { const char* a = strstr(qs, "b8="), * c = strstr(qs, "b2c="), * t = strstr(qs, "secs=");
         g_bot_tpk8 = a ? (uint32_t)strtoul(a + 3, 0, 16) : 0; g_bot_tpk2c = c ? (uint32_t)strtoul(c + 4, 0, 16) : 0;
         g_bot_tpk_until = mono_s() + (t ? strtod(t + 5, 0) : 0.3); bot_start(); return 1; }

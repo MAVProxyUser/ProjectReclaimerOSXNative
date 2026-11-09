@@ -3272,6 +3272,29 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   a running battle, at every round end (our server's in_match true -> false) walker-coach.py round + match-study.py, then each
   walker's game restarted headless with its new knobs and the newest build (they rejoin in the lobby; the user's game and the
   server stay).
+- **Engage, lead the grenade, burst at range, follow the best walker, a fourth walker** (2026-11-08 22:45; nbot.c, nbot_engage.c,
+  shim/tools/fire-rhythm.py, walker-scores.py, walker-coach.py follow, coach-rounds.sh v2, walker-battle.sh test-fifth) — WHY: the user:
+  "walkers should never just walk past an enemy without predictive grenade lay some shots, or a beat down! engage!" (a walker went
+  "click click click" right past him: an empty magazine), "it is shanking shots due to the random bloom on the AR, spreading out at
+  range", "pay attention to which walker is doing the best too, and train the other walkers to be more like the good walker", "can we
+  add one more headless walker". LOGIC: ENGAGE -- a visible enemy within 10 units is taken at once unless the current target is itself
+  visible within 10 (NHOOK_BOT_NOENGAGE=1 off). PREDICTIVE GRENADE -- the throw is aimed where the target will be: its velocity x the
+  flight (0.4 s + distance / 10), +0.025 rad a unit for the arc (NHOOK_BOT_NOLEAD=1 off). EMPTY MAGAZINE (the ammo field: ammo.json
+  "loaded" is known now) with the enemy in sight -> a grenade at once (3-16 units) and the rush for the beatdown (NHOOK_BOT_NOEMPTY=1
+  off). BURSTS -- fire-rhythm.py over the public recordings, aiming at an enemy with an automatic weapon: the top-quarter players fire
+  9.0 shots/s within 8 units, 3.1 at 8-15, 2.0 at 15-25, 1.4 beyond; the walkers 5.2, 5.7, 1.6 (spraying at mid range, timid up
+  close); beyond 8 units the walker fires 0.25 s bursts with pauses keeping the players' share of their close-range rate (34 / 22 /
+  15%) (NHOOK_BOT_HOSE=1 = held). (The 10 Hz shots counter is too coarse for burst lengths: rates only.) FOLLOW THE BEST --
+  walker-coach.py follow <best> <others> moves each other walker's knobs half way (log space) toward the best one's; coach-rounds.sh
+  picks the best from the finished round's final scores ((kills + 1) / (deaths + 1); walker-scores.py --recording). COACH-ROUNDS v2: a
+  round ends when the battle recorder starts a new file (the in-match flag stayed on through a short lobby and the first version
+  missed a round); each walker is coached on THAT recording alone (a folder with just it: the battle folder's older battles had other
+  slots); slots -> walkers from the server's players list written every poll; COACH_LAST=<recording>. First pass (the user's 44 / 19
+  round): Third 32 / 34 the best walker; the others moved toward it. FOURTH WALKER -- test-fifth ("Fifth", stats 8770): ~0.35 core and
+  ~2.2 GB a headless walker; a new identity needs the small --background window once (headless never makes one: "no identity yet").
+  ALSO: NHOOK_INPUT_LOG=1 logs a REAL player's packed buttons (+8, +0x2c) and the unit's weapon / grenade bytes when they change
+  (the user meleeing / reloading / switching names the bits the walkers' dead buttons should set); do=botwslot (writes the unit's
+  +0x260 before each packet: the weapon-switch experiment -- untested, the walker had one weapon: +0x268 slot 0 the rifle, +0x26c none).
 - **Walker battles run headless** (2026-11-08 22:15; walker-battle.sh) — WHY: the user: "running all 3 clients visible lagged the
   screen hard, can you drive the client without the display?". LOGIC: the walkers' games start with the app's own --headless ("no
   window, the null renderer"); the walker needs no frames (aim, line of sight and moves come from the game's state). Checked: two
