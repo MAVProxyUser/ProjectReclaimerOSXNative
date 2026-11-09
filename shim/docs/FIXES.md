@@ -3272,6 +3272,11 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   a running battle, at every round end (our server's in_match true -> false) walker-coach.py round + match-study.py, then each
   walker's game restarted headless with its new knobs and the newest build (they rejoin in the lobby; the user's game and the
   server stay).
+- **Brain stage 2: the behaviours in their own file** (2026-11-09 06:55; shim/native/nbrain_beh.c, nbot.c bot_step_body) — the same
+  rewrite: board / follow / ball / fetch / fight / hold / hunt moved out of the 470-line step into functions that see one World
+  (time, objects, self, camera, the fighter's view: engaged, fighter on, target distance) and only BID (side effects they own stay with
+  them: the honk answer, the loose ball's act tap). The step builds the World, asks each, the arbiter chooses, the step walks the
+  winner. No behaviour change (the same scores and rules); hot-loaded into the running walker.
 - **Brain stage 1: the locomotion arbiter** (2026-11-09 06:45; nbot.c arb_* and the step's locomotion section) — WHY: the user: "I feel
   like native/nbot_* should be its own kernel or something. it looks like a pile of if then statements now" -> "yes" to the rewrite.
   Six blocks wrote the walker's path one after another (boarding, the wingman, the ball, the weapon fetch, the fight's moves, levels

@@ -727,6 +727,7 @@ static int arb_choose(Arb* a, double now) {
         for (int k = 0; k < ARB_N && q < (int)sizeof b - 40; k++) if (k != w && a->b[k].on) q += snprintf(b + q, sizeof b - (size_t)q, " > %s %.0f", a->b[k].why, a->b[k].score);
         nlog("%s", b); }
     return w; }
+#include "nbrain_beh.c"   // the behaviours: each bids for the legs (brain stage 2)
 static void bot_models_tick(void) {   // (live knobs: the models re-read when their files change -- every 10 s a look at the files' times)
     static double t; double now = mono_s(); if (now - t < 10.0) return; t = now; const char* h = getenv("HOME"); char p[1100]; struct stat st;
     static time_t m1, m2, m3, m4;
@@ -1044,66 +1045,13 @@ static void bot_step_body(void) {
     // the walker (nav.c's graph): the path's way PELOAD_NAV_LOOK nodes ahead; with the aim on, the throttle walks it in any
     // direction relative to the view
     float tx = 0, ty = 0;
-    Arb arb; arb_reset(&arb);   // (the locomotion arbiter: every behaviour bids for the legs, above)
-    float gbp[3], gface[3], gbd = 1e9f; uint32_t ghog = 0xFFFFFFFFu; int gun_go = !g_bot_shadow && gun_board(now, objs, n, me, gbp, gface, &gbd, &ghog);
-    { static int was; static double tg, thonk_seen; if (gun_go) { if (!was) nlog("[nhook] [gunner] my teammate is in a vehicle with a seat free: going to it (%.1f units)", gbd);
-        g_bot_pick_on = 0;   // (no detour for a weapon)
-        double ha = honk_age(); if (ha < 15.0 && wall_s() - ha > thonk_seen + 1.0) { thonk_seen = wall_s() - ha;   // (a new honk: answer it)
-            nlog("[nhook] [gunner] my teammate honked: coming (%.1f units)", gbd); char* m = malloc(96); if (m) { snprintf(m, 96, "%s: coming!", g_nick[0] ? g_nick : "walker");
-                pthread_t th; if (pthread_create(&th, 0, camp_say_thread, m) == 0) pthread_detach(th); else free(m); } }
-        (void)tg; }
-      else if (was) nlog("[nhook] [gunner] no teammate's vehicle to ride any more"); was = gun_go; }
-    // WINGMAN (02:20, the user: "coheasion should be the goal for the moment. always be a loyal wingman"): with no fight in sight a walker
-    // stays within 6 units of its leader -- the nearest human teammate, else the teammate walker with the lowest unit handle (one of a
-    // pair leads, the other follows). Beyond 6 units the pathfinder takes it there (replanned every second). NHOOK_BOT_NOWING=1 = off
-    { static int nw = -1; if (nw < 0) nw = getenv("NHOOK_BOT_NOWING") != 0; static int was; static double tw;
-      int wing = 0; float lp[3] = {0, 0, 0};
-      // (02:10, the user, in an FFA public game: "have it try to shadow me and be my near by wingman ... it should always find me":
-      //  NHOOK_BOT_FOLLOW names the leader -- a friend in any game type -- followed beyond 5 units until within 3, and even in a fight
-      //  once it is 12+ units away)
-      // (02:25, the user: "he should be trying to find me at all costs ... all paths should be plotted to me": beyond 5 units the
-      //  leader is the goal even mid-fight -- the fight still aims and fires, its moves wait until the walker is back beside it)
-      // (05:55, the user: "now the walker is super needy following me like a puppy but not engaging in anything aggressively ... ALWAYS
-      //  uses a garbage AR instead of finding something better": a LEASH -- within NHOOK_BOT_LEASH (15) units of the leader it fights
-      //  and fetches weapons freely; beyond, the leader's path beats the fight. Out of a fight it closes up beyond NHOOK_BOT_WING_START
-      //  (8) until within NHOOK_BOT_WING_STOP (4). All live knobs)
-      float leash = 15, wstart = 8, wstop = 4; lk_over(&leash, "NHOOK_BOT_LEASH"); lk_over(&wstart, "NHOOK_BOT_WING_START"); lk_over(&wstop, "NHOOK_BOT_WING_STOP");
-      int fol_far = 0; float fol_d2 = -1; if (g_follow_unit != 0xFFFFFFFFu) for (int i = 0; i < n; i++) if (objs[i].handle == g_follow_unit && !objs[i].dead) {
-          float fx = objs[i].c[0] - o->c[0], fy = objs[i].c[1] - o->c[1]; fol_d2 = fx * fx + fy * fy; fol_far = fol_d2 > leash * leash; }
-      if (!nw && !g_bot_shadow) { int li = -1; float bd = 1e30f; int human = 0, fol = 0;   // (the arbiter below weighs following against the rest)
-          for (int i = 0; i < n; i++) { const NovObj* t = &objs[i]; if (i == me || t->type || t->dead || bot_enemy(o, t)) continue; int hu = t->handle == g_follow_unit;
-              if (hu) { float fx = t->c[0] - o->c[0], fy = t->c[1] - o->c[1]; li = i; bd = fx * fx + fy * fy; human = 1; fol = 1; break; }
-              for (int k = 0; k < g_human_n && k < 8; k++) if (g_human_unit[k] == t->handle) hu = 1;
-              float dx = t->c[0] - o->c[0], dy = t->c[1] - o->c[1], d = dx * dx + dy * dy;
-              if (hu && (!human || d < bd)) { human = 1; bd = d; li = i; }
-              else if (!human && !hu && t->handle < o->handle && (li < 0 || t->handle < objs[li].handle)) { li = i; bd = d; } }
-          if (li >= 0 && bd > (fol ? (was ? wstop * wstop : wstart * wstart) : (was ? 16.0f : 36.0f))) { wing = 1; memcpy(lp, objs[li].c, 12);   // (follow beyond 6 units, until within 4; the named leader: the live WING_START / WING_STOP)
-              static double tlog; if (!was && now - tlog > 10.0) { tlog = now; nlog("[nhook] [wing] %.0f units from my %s: closing up", sqrtf(bd), human ? "human teammate" : "lead walker"); } (void)tw; }
-          if (li >= 0 && fol && bd > leash * leash) fol_far = 1; }
-      was = wing; g_fol_go = wing && fol_far;
-      if (wing) { float u_far = 90, u_near = 20; lk_over(&u_far, "NHOOK_U_FOLLOW_FAR"); lk_over(&u_near, "NHOOK_U_FOLLOW_NEAR");
-          arb_bid(&arb, ARB_FOLLOW, fol_far ? u_far : u_near, lp, fol_far ? "follow (beyond the leash)" : "close up on the leader"); } }
-    // the ball's moves (above): loose -> to it, act tapped on it (never beside a vehicle); carried by me -> away from the nearest enemy,
-    // no shots, melee in reach; an enemy's -> to the carrier while not in a fight; a teammate's -> close to the carrier. NHOOK_BOT_NOBALL=1 off
-    int ob_carry = 0; float ob_d = 1e9f;
-    { static int nb = -1; if (nb < 0) nb = getenv("NHOOK_BOT_NOBALL") != 0;
-      if (!nb && !gun_go && !g_bot_shadow) { ob_scan(now, objs, n, me); ob_carry = g_ob_state == 2 || (g_inv.held && ob_is_ball(g_inv.held));
-        float dx = g_ob_pos[0] - o->c[0], dy = g_ob_pos[1] - o->c[1]; ob_d = sqrtf(dx * dx + dy * dy); static double tob, tact;
-        if (ob_carry) { int ei = -1; float ed = 1e30f;
-            for (int i = 0; i < n; i++) { const NovObj* t = &objs[i]; if (i == me || t->type || t->dead || !bot_enemy(o, t)) continue; float ex = t->c[0] - o->c[0], ey = t->c[1] - o->c[1], e2 = ex * ex + ey * ey; if (e2 < ed) { ed = e2; ei = i; } }
-            if (ei >= 0) { float ex = o->c[0] - objs[ei].c[0], ey = o->c[1] - objs[ei].c[1], el = sqrtf(ex * ex + ey * ey) + 1e-3f;
-                float ap[3] = {o->c[0] + ex / el * 12.0f, o->c[1] + ey / el * 12.0f, o->c[2]}; float u = 80; lk_over(&u, "NHOOK_U_BALL_RUN"); arb_bid(&arb, ARB_BALL, u, ap, "run with the ball"); (void)tob; }
-            g_bot_pick_on = 0; }
-        else if (g_ob_state == 1) { { float u = 75; lk_over(&u, "NHOOK_U_BALL_FETCH"); arb_bid(&arb, ARB_BALL, u, g_ob_pos, "fetch the loose ball"); }
-            if (ob_d < 1.5f && fabsf(g_ob_pos[2] - o->c[2]) < 1.6f && now - tact > 0.8 && !gun_near_veh(o->c, 0xFFFFFFFFu)) { tact = now; g_bot_act_until = now + 0.15; } }
-        else if (g_ob_state == 4) { float u = 50; lk_over(&u, "NHOOK_U_BALL_HUNT"); arb_bid(&arb, ARB_BALL, u, g_ob_pos, "hunt the ball carrier"); }
-        else if (g_ob_state == 3 && ob_d > 5.0f) { float u = 30; lk_over(&u, "NHOOK_U_BALL_ESCORT"); arb_bid(&arb, ARB_BALL, u, g_ob_pos, "escort the ball carrier"); } } }
-    // the rest of the bids, and the choice (above: arb_*)
-    if (gun_go) { float u = 95; lk_over(&u, "NHOOK_U_BOARD"); arb_bid(&arb, ARB_BOARD, u, gbp, "board the leader's vehicle"); }
-    if (g_bot_pick_on) { float u = 45; lk_over(&u, "NHOOK_U_FETCH"); arb_bid(&arb, ARB_FETCH, u, g_bot_pick_pos, "fetch a better weapon"); }
-    if (engaged && !(ob_carry && tdist > 2.5f)) { float u = 60; lk_over(&u, "NHOOK_U_FIGHT"); arb_bid(&arb, ARB_FIGHT, u, 0, "fight"); }
-    if (fight && now - g_bot_hold_high < 0.3) { float u = 65; lk_over(&u, "NHOOK_U_HOLD"); arb_bid(&arb, ARB_HOLD, u, 0, "hold the high ground"); }
-    { float u = 10; lk_over(&u, "NHOOK_U_HUNT"); arb_bid(&arb, ARB_HUNT, u, 0, "hunt"); }
+    // the behaviours bid for the legs (nbrain_beh.c), the arbiter chooses (arb_*)
+    Arb arb; arb_reset(&arb);
+    World W = {now, objs, n, me, o, cam, engaged, fight, tdist};
+    float gbp[3] = {0, 0, 0}, gface[3] = {0, 0, 0}, gbd = 1e9f; int gun_go = 0; beh_board(&W, &arb, gbp, gface, &gbd, &gun_go);
+    beh_follow(&W, &arb);
+    int ob_carry = 0; float ob_d = 1e9f; beh_ball(&W, &arb, gun_go, &ob_carry, &ob_d);
+    beh_fetch(&W, &arb); beh_fight(&W, &arb, ob_carry); beh_hold(&W, &arb); beh_hunt(&W, &arb);
     int arbw = arb_choose(&arb, now);
     if (arbw == ARB_FOLLOW || arbw == ARB_FETCH || arbw == ARB_BALL || (arbw == ARB_BOARD && gbd > 4.0f)) {   // a path to the winner's point
         static float lastp[3]; static int lastw = -1; static double trp; const float* wp = arb.b[arbw].pt;
