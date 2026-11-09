@@ -460,6 +460,7 @@ static int bot_pull_weapon(const char* w) {
     if (!w) return 0; for (int i = 0; k[i]; i++) if (strstr(w, k[i])) return 1; return 0; }
 static int g_bot_pull, g_bot_trig; static double g_bot_fire_t0;   // (the held weapon acts on a pull; when this string of fire began)
 static double g_bot_hold_high, g_bot_hold_last;   // (levels apart: holding the high ground until; the last levels-apart step)
+static int g_fol_go;   // (the leader is 5+ units away: its path beats the fight's moves)
 // GRENADE OUTCOMES (2026-11-09, the user: "this is the first place to try to hone the predictive nades"): each throw notes its target and
 // the target's shield + health; 1.6 s later "[nade] <target> at D units, lead L s, arc A rad: hit / missed / KILLED / target gone" --
 // follow-study.py counts them per window and steps the live grenade-lead knobs (NHOOK_BOT_NADE_*) toward the best hit rate
@@ -1021,8 +1022,10 @@ static void bot_step_body(void) {
       // (02:10, the user, in an FFA public game: "have it try to shadow me and be my near by wingman ... it should always find me":
       //  NHOOK_BOT_FOLLOW names the leader -- a friend in any game type -- followed beyond 5 units until within 3, and even in a fight
       //  once it is 12+ units away)
+      // (02:25, the user: "he should be trying to find me at all costs ... all paths should be plotted to me": beyond 5 units the
+      //  leader is the goal even mid-fight -- the fight still aims and fires, its moves wait until the walker is back beside it)
       int fol_far = 0; if (g_follow_unit != 0xFFFFFFFFu) for (int i = 0; i < n; i++) if (objs[i].handle == g_follow_unit && !objs[i].dead) {
-          float fx = objs[i].c[0] - o->c[0], fy = objs[i].c[1] - o->c[1]; fol_far = fx * fx + fy * fy > 144.0f; }
+          float fx = objs[i].c[0] - o->c[0], fy = objs[i].c[1] - o->c[1]; fol_far = fx * fx + fy * fy > 25.0f; }
       if (!nw && !gun_go && (!engaged || fol_far) && !g_bot_shadow) { int li = -1; float bd = 1e30f; int human = 0, fol = 0;
           for (int i = 0; i < n; i++) { const NovObj* t = &objs[i]; if (i == me || t->type || t->dead || bot_enemy(o, t)) continue; int hu = t->handle == g_follow_unit;
               if (hu) { float fx = t->c[0] - o->c[0], fy = t->c[1] - o->c[1]; li = i; bd = fx * fx + fy * fy; human = 1; fol = 1; break; }
@@ -1033,7 +1036,7 @@ static void bot_step_body(void) {
           if (li >= 0 && bd > (fol ? (was ? 9.0f : 25.0f) : (was ? 16.0f : 36.0f))) { wing = 1; memcpy(lp, objs[li].c, 12);   // (follow beyond 6 units, until within 4; the named leader 5 / 3)
               static double tlog; if (!was || now - tw > 1.0) { tw = now; goal = -1; if (!was && now - tlog > 10.0) { tlog = now; nlog("[nhook] [wing] %.0f units from my %s: closing up", sqrtf(bd), human ? "human teammate" : "lead walker"); } } } }
       if (wing) { mode = 3; memcpy(g_bot_pt, lp, 12); g_bot_pt[2] -= 0.35f; } else if (was) goal = -1;
-      was = wing; }
+      was = wing; g_fol_go = wing && fol_far; }
     // the ball's moves (above): loose -> to it, act tapped on it (never beside a vehicle); carried by me -> away from the nearest enemy,
     // no shots, melee in reach; an enemy's -> to the carrier while not in a fight; a teammate's -> close to the carrier. NHOOK_BOT_NOBALL=1 off
     int ob_carry = 0; float ob_d = 1e9f;
@@ -1123,7 +1126,7 @@ static void bot_step_body(void) {
         yaw = fy; pitch = fp; out |= 1; float rel = bot_wrap(way - yaw), sp = gbd > 1.0f ? 1.0f : gbd > 0.4f ? 0.45f : 0.15f; tx = cosf(rel) * sp; ty = sinf(rel) * sp; out |= 2;
         { static double ttap; if (g_gun_press_ok && now - ttap > 1.2) { ttap = now; g_bot_act_until = now + 0.15; } }   // (a TAP, then 1.2 s to see it seated: a held press seats and then unseats)
         { static double tl; if (bot_log() && now - tl > 1.0) { tl = now; nlog("[nhook] [gunner] boarding: %.1f units from the point behind the turret%s", gbd, g_gun_press_ok ? ", right behind it: pressing act" : ""); } } }
-    else if (engaged && !gun_go && !(ob_carry && tdist > 2.5f) && !(g_ob_state == 1 && ob_d < 8.0f)) { tx = ftx; ty = fty; out |= 2; }   // (the ball: run with it / fetch it first)
+    else if (engaged && !gun_go && !g_fol_go && !(ob_carry && tdist > 2.5f) && !(g_ob_state == 1 && ob_d < 8.0f)) { tx = ftx; ty = fty; out |= 2; }   // (following the leader: its path first)   // (the ball: run with it / fetch it first)
     else if (fight && now - g_bot_hold_high < 0.3) { tx = 0; ty = 0; out |= 2; }   // (levels apart: the enemy below -- hold the high ground)   // (the fighter's moves in reach override the walker's path)
     if (testb) { g_bot_btn = ((out & 4) ? g_bot_btn : 0) | g_bot_testbtn; out |= 4; }   // (do=botbtn: held until its time is up)
     // fire: the control record's bit 19 (+0xC8) -- the local unit fires, and the control packet carries the weapon's firing state

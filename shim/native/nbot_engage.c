@@ -155,7 +155,7 @@ static int eg_band(const char* cls, float* p25, float* p75) {   // the players' 
     for (int i = 0; i < g_eg.nband; i++) if (!strcmp(g_eg.band[i].cls, cls) && g_eg.band[i].n >= 20 && g_eg.band[i].p75 > g_eg.band[i].p25) { *p25 = g_eg.band[i].p25; *p75 = g_eg.band[i].p75; return 1; }
     return 0; }
 // per-unit memory: shield + health a moment ago (just hurt), its last drop, whether it aimed at us while we were hurt
-typedef struct { uint32_t h; float vit; double hurt_t, att_t, seen_tgt, asked_t; int asked; } EgUnit;
+typedef struct { uint32_t h; float vit; double hurt_t, att_t, seen_tgt, asked_t, attl_t; int asked; } EgUnit;   // (attl_t: it shot the walker's leader)
 // COACHED UP (2026-11-08, the user after beating two walkers 17-4: "shooting first" -- match-study.py: shot at first, the walkers
 // fired back after a median 4.4-5.5 s (the user 1.1 s) and 14-22 times never; with a second attacker on them they "stayed on the
 // target" 19 of 22 times -- the players' own odds: 33% in view, 7% behind, after ~1.75 s): a second attacker hurting the walker
@@ -177,9 +177,17 @@ static int eg_choose(const NovObj* objs, int n, int me, const float* cam, float 
     const NovObj* o = &objs[me]; static uint32_t cur; static double cur_t0, cur_seen, sw_at; static uint32_t sw_to, prev; static double prev_t; static float myvit = -1; static double my_hurt;
     float mv = o->shield + o->health; if (myvit >= 0 && mv < myvit - 0.02f) my_hurt = now; myvit = mv;
     int ci = -1;
+    // (2026-11-09, the user: "auto target anyone shooting me. this will hone the walkers skills immensely"): the LEADER the walker
+    // shadows (NHOOK_BOT_FOLLOW) -- when it loses shield / health, an enemy aiming at it within 12 deg is ITS attacker: counted as
+    // attacking the walker too (known, the attacker bonus, the switch to it) and marked attl_t for a bonus of its own
+    const NovObj* L = 0; if (g_follow_unit != 0xFFFFFFFFu) for (int i = 0; i < n; i++) if (objs[i].handle == g_follow_unit && !objs[i].dead && !objs[i].type) { L = &objs[i]; break; }
+    static float lvit = -1; static double lead_hurt; if (L) { float lv = L->shield + L->health; if (lvit >= 0 && lv < lvit - 0.02f) lead_hurt = now; lvit = lv; } else lvit = -1;
     for (int i = 0; i < n; i++) { const NovObj* t = &objs[i]; if (t->type || i == me) continue; EgUnit* u = eg_unit(t->handle);
         float v = t->dead ? 0 : t->shield + t->health; if (u->vit >= 0 && v < u->vit - 0.02f) u->hurt_t = now; u->vit = v;
         if (!t->dead && bot_enemy(o, t) && now - my_hurt < 1.5 && eg_aim_at(t, o->c, 12)) { if (now - u->att_t > 1.5) u->asked = 0; u->att_t = now; }
+        if (L && t != L && !t->dead && bot_enemy(o, t) && now - lead_hurt < 1.5 && eg_aim_at(t, L->c, 12)) {
+            if (now - u->att_t > 1.5) u->asked = 0; u->att_t = now;
+            if (now - u->attl_t > 3.0 && bot_log()) nlog("[nhook] [wing] %08x is shooting my leader: on it", t->handle); u->attl_t = now; }
         if (t->handle == cur) ci = i; }
     if (ci >= 0 && objs[ci].dead && now - cur_seen < 2.0) g_gl_kill_t = now;   // (it died while we fought it)
     if (ci >= 0 && (objs[ci].dead || !bot_enemy(o, &objs[ci]))) ci = -1;
@@ -253,6 +261,11 @@ static int eg_choose(const NovObj* objs, int n, int me, const float* cam, float 
         if (t->shield > 1.05f && o->shield <= 1.05f) s += 0.5f * g_eg.os_pen;
         { float ab = eg_humanlike() ? 0.0f : eg_knob("NHOOK_BOT_ATTBONUS", 6.0f); if (att) s += ab; }   // (coached: the one shooting at us)
         { float cb = eg_knob("NHOOK_BOT_BALLBONUS", 8.0f); if (carrier) s += cb; }   // (oddball: the enemy carrying the ball first)
+        if (L) {   // (helping the leader: its attacker +4 more, its own target +5, anyone within 8 units of it +3)
+            if (now - u->attl_t < 1.5) s += eg_knob("NHOOK_BOT_LEADATT", 4.0f);
+            float lx = t->c[0] - L->c[0], ly = t->c[1] - L->c[1], ld = sqrtf(lx * lx + ly * ly);
+            if (ld < 40.0f && eg_aim_at(L, t->c, 6)) s += eg_knob("NHOOK_BOT_LEADTGT", 5.0f);
+            if (ld < 8.0f) s += eg_knob("NHOOK_BOT_LEADNEAR", 3.0f); }
         if (nc2 < 64) { ci2[nc2] = i; cs2[nc2] = s; nc2++; }
         if (s > bs) { bs = s; bi = i; } }
     if (!pickbest && nc2 > 1) { float sum = 0; for (int k = 0; k < nc2; k++) { cs2[k] = expf(cs2[k] - bs); sum += cs2[k]; }

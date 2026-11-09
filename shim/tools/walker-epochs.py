@@ -72,6 +72,7 @@ def epoch_numbers(t0, t1, walker):
     for path in sorted(glob.glob(os.path.join(BT, 'tracks', '*_local.jsonl.gz')), key=os.path.getmtime)[-3:]:
         if os.path.getmtime(path) < t0: continue
         head, S, E = read_rec(path); st = head.get('start') or head.get('wall') or 0
+        if st and S: st -= S[0]['t']   # (a sample's t counts from the RECORDER's start; 'start' is this file's first sample, wall time)
         if not st or not S: continue
         out['map'] = S[-1].get('map') or out['map']
         W = [s for s in S if t0 <= st + s['t'] <= t1]

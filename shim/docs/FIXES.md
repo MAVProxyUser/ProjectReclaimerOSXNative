@@ -3272,6 +3272,20 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   a running battle, at every round end (our server's in_match true -> false) walker-coach.py round + match-study.py, then each
   walker's game restarted headless with its new knobs and the newest build (they rejoin in the lobby; the user's game and the
   server stay).
+- **The wingman defends its leader, follows at all costs, and learns from the live game every 3 minutes** (2026-11-09 05:00; nbot_engage.c
+  eg_choose, nbot.c WINGMAN / g_fol_go, follow-study.py --refit + the sample-time fix, walker-epochs.py the same fix) — WHY: the user:
+  "he should be trying to find me at all costs to be my wingman and help ME every chance he can all paths should be plotted to me";
+  "also auto target anyone shooting me"; "walker should be learning every dirty trick from the tome of data and every 3 minutes
+  learning from the current gamers and hone and restart the model". LOGIC: LEADER'S ATTACKERS -- when the leader (NHOOK_BOT_FOLLOW)
+  loses shield / health, an enemy aiming at it within 12 deg counts as attacking the walker (known, the attacker bonus, the quick
+  switch) and gets NHOOK_BOT_LEADATT (+4) more ("[wing] <id> is shooting my leader: on it"); the leader's own target (it aims within
+  6 deg, under 40 units) +NHOOK_BOT_LEADTGT (5); anyone within 8 units of it +NHOOK_BOT_LEADNEAR (3) -- all live knobs. AT ALL COSTS --
+  beyond 5 units (was 12 in a fight) the leader is the path's goal and the fight's moves wait (it still aims and fires) until it is
+  back beside it. LIVE LEARNING -- follow-study.py --refit: each window engage-extract.py cuts the walker's recordings of this game
+  (every current player's fights) into tracks/engagements and engage-model.py refits the models + tome (taskpolicy -b, nice 20, one at
+  a time); the walker re-reads the changed files itself. BUG FIXED: a recording's sample t counts from the RECORDER's start, its header
+  start is the file's first sample -- follow-study.py and walker-epochs.py added t to the start and missed every window (shadowing
+  "None", the Sandtrap epochs scored 0.00): the wall time is now start - first t + t.
 - **A walker with a HOME of its own could not build a new map's walking graph** (2026-11-09 04:45; shim/native.sh) — WHY: the user: "AIwalker
   test is just standing around now... doing nothing". The public game moved to Last Resort (zanzibar), which had no walking graph;
   the walker's background builder (re-tools/h3nav.py, spawned with the walker's environment) died "No module named 'numpy'": the

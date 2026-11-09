@@ -11,10 +11,13 @@ names) and, every --every seconds, over that window:
            per unit of distance (NHOOK_BOT_NADE_TPU) is tried among 0.06..0.14 s / unit, each window's throws credited to the value
            that ran, the next value the best hit rate so far (a never-tried one first; 1 in 4 windows a random one) -> written to the
            walker's LIVE knobs file (battles/live-knobs/<its name>.json: it re-reads it within a second, no restart)
+  refit    (--refit) the LIVE match joins the learning: engage-extract.py cuts this game's recordings (every current player's fights)
+           into tracks/engagements, engage-model.py refits the models + tome at background priority (taskpolicy -b, nice 20; one at
+           a time) -- the walker re-reads changed model files by itself (nbot.c bot_models_tick): no restart
 -> stdout and battles/follow/learned.jsonl (the windows, for the walker's next settings). The leader is found by name on the walker's
 stats page (--leader-from-profile: the player profile's nickname, never printed; else --leader NAME); the walker is its own "you".
     python3 shim/tools/follow-study.py --port 8771 --dir <recordings dir> [--every 180] [--leader-from-profile]"""
-import glob, gzip, json, math, os, random, statistics, sys, time, urllib.request
+import glob, gzip, json, math, os, random, statistics, subprocess, sys, time, urllib.request
 
 SUP = os.path.expanduser('~/Library/Application Support/ReclaimerMac'); OUT = os.path.join(SUP, 'battles', 'follow')
 
@@ -57,6 +60,19 @@ def hone(results, nstate, knobs_path):
     os.makedirs(os.path.dirname(knobs_path), exist_ok=True); tmp = knobs_path + '.tmp'; json.dump(k, open(tmp, 'w')); os.replace(tmp, knobs_path)
     return cur, nxt, st
 
+REFIT = {'p': None, 't0': 0}
+def refit(rec_dir):
+    """the live match into the models, in the background (one at a time)"""
+    p = REFIT['p']
+    if p is not None and p.poll() is None: return 'a refit is still running (%.0f s)' % (time.time() - REFIT['t0'])
+    msg = ('the last refit took %.0f s; ' % REFIT.get('took', 0)) if p is not None else ''
+    if p is not None: REFIT['took'] = time.time() - REFIT['t0']
+    root = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..')
+    cmd = ('taskpolicy -b nice -n 20 python3 shim/tools/engage-extract.py --tracks "%s" --out "%s" --quiet >/dev/null 2>&1; '
+           'taskpolicy -b nice -n 20 python3 shim/tools/engage-model.py >/dev/null 2>&1') % (rec_dir, os.path.join(SUP, 'tracks', 'engagements'))
+    REFIT['p'] = subprocess.Popen(['bash', '-c', cmd], cwd=root); REFIT['t0'] = time.time()
+    return msg + 'refit started: this game\'s fights -> the models (the walker re-reads them when they change)'
+
 def slots(port, leader):
     try: d = json.load(urllib.request.urlopen('http://127.0.0.1:%d/stats.json' % port, timeout=3))
     except Exception: return None, None
@@ -73,6 +89,7 @@ def window(rec_dir, t0, t1, ws, ls):
     for path in sorted(glob.glob(os.path.join(rec_dir, '*.jsonl.gz')), key=os.path.getmtime)[-2:]:
         if os.path.getmtime(path) < t0: continue
         head, S, E = read(path); st = head.get('start') or 0
+        if st and S: st -= S[0]['t']   # (a sample's t counts from the RECORDER's start; 'start' is this file's first sample, wall time)
         W = [s for s in S if st and t0 <= st + s['t'] <= t1]
         if len(W) < 2: continue
         rows = [{r[0]: r for r in s['p']} for s in W]
@@ -133,6 +150,7 @@ def main():
         print(report(o, n), flush=True)
         res = nade_lines(logp, nst); kp = os.path.join(SUP, 'battles', 'live-knobs', WALKER_NAME[0] + '.json')
         cur, nxt, st = hone(res, nst, kp)
+        if '--refit' in sys.argv: print('  learning: ' + refit(rec), flush=True)
         print('  grenades: %d thrown, %d hit (%d killed), lead %.2f s a unit -> next %.2f; so far %s' % (len(res), sum(1 for l in res if ': hit' in l or 'KILLED' in l),
               sum(1 for l in res if 'KILLED' in l), cur, nxt, ', '.join('%s: %d/%d' % (k, v[1], v[0]) for k, v in sorted(st.items()))), flush=True)
         open(os.path.join(OUT, 'learned.jsonl'), 'a').write(json.dumps({'t': round(t1), 'window': n, 'shadow_median': med(o['shadow']), 'walker': {k: v for k, v in o['w'].items()},
