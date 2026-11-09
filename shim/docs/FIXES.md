@@ -3272,6 +3272,12 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   a running battle, at every round end (our server's in_match true -> false) walker-coach.py round + match-study.py, then each
   walker's game restarted headless with its new knobs and the newest build (they rejoin in the lobby; the user's game and the
   server stay).
+- **The empty pull reloads; the first shot as fast as the best player** (2026-11-09 11:35-11:40; nbot.c g_bot_click_until / the EMPTY
+  block, trainer.json) — WHY: "EMPTY BRUTE SHOT: reloading from 5 in reserve" twice and still empty; the user: "reload click noise is a
+  signal in the game" -- Halo reloads an empty gun when its trigger is pulled; and "[the best player] ... engages faster": the walker
+  fired ~1.0 s after acquiring a target (the average player's reaction 1.08 s x (1.25 - skill) x REACT 1.223), the best player here 0.7 s.
+  LOGIC: on a 0 in the magazine with reserve rounds the fire bit goes out for 0.12 s every 1.5 s (the click) as well as the act-tap reload.
+  The trainer's incumbent REACT 1.223 -> 0.9 (first shot ~0.73 s after acquiring; still a trained knob, trainer.json notes).
 - **Reload first on an empty magazine; the switch scan judges by hit rate** (2026-11-09 11:25-11:30; nbot.c BotInv.reserve, the EMPTY
   block, swscan_tick) — WHY: "EMPTY BRUTE SHOT: switching to ASSAULT RIFLE" for a minute -- the walker stood in fights with an empty gun
   while switch pulses failed (packet pulses: 1 of 2 took), but every act-tap reload worked; and the scan's single "hits" (bits 0, 3, 35)

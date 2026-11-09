@@ -418,6 +418,7 @@ static int bot_ammo_off(void) {
 static int g_ammo_learned = -1;
 static int g_bot_trig;   // (the trigger held last step: defined with the fire section below)
 static int g_bot_dry;    // (the magazine stays empty after reloads: no reserve -- the other weapon or any weapon on the floor)
+static double g_bot_click_until;   // (11:40: the trigger pulled on an empty magazine -- the game reloads by itself, the "click")
 static const char* ammo_learned_path(void) { static char p[1024]; if (!p[0]) { const char* h = getenv("HOME"); snprintf(p, sizeof p, "%s/Library/Application Support/ReclaimerMac/native/ammo-learned.json", h ? h : ""); } return p; }
 static void ammo_learn(double now, const NovObj* o) {
     float on = 1; lk_over(&on, "NHOOK_BOT_AMMO_LEARN"); if (on <= 0) return;
@@ -1279,7 +1280,8 @@ static void bot_step_body(void) {
       { static double tswe; static int nrel;
         if (g_ammo_learned >= 0 && g_inv.ammo == 0 && !noreload && g_inv.held) {
             // (11:25: RELOAD FIRST when the reserve has rounds -- the act tap reloads every time, the switch is not yet reliable)
-            if (g_inv.reserve > 0 && now - trel > 2.5) { trel = now; nrel++; if (bot_log()) nlog("[nhook] [inv] EMPTY %s: reloading from %d in reserve", g_inv.held, g_inv.reserve); }
+            { static double tclick; if (g_inv.reserve > 0 && now - tclick > 1.5) { tclick = now; g_bot_click_until = now + 0.12; } }   // (the click: an empty pull reloads)
+            if (g_inv.reserve > 0 && now - trel > 2.5) { trel = now; nrel++; if (bot_log()) nlog("[nhook] [inv] EMPTY %s: reloading from %d in reserve (act tap + trigger click)", g_inv.held, g_inv.reserve); }
             else if (g_inv.reserve > 0) ;
             else if (g_inv.has_other && g_inv.other_ammo != 0 && now - tswe > 1.5) { tswe = now; bot_switch_press(now); fbtn |= 8;
                 if (bot_log()) nlog("[nhook] [inv] EMPTY %s: switching to %s", g_inv.held, g_inv.other); }
@@ -1430,7 +1432,7 @@ static void bot_step_body(void) {
           burst_ok = fmod(now - g_bot_fire_t0, per) < 0.25; }
       int trig = !nofire && spar && g_bot_fire && burst_ok && (!g_bot_pull || fmod(now - g_bot_fire_t0, 0.24) < 0.12) && !ob_carry; g_bot_trig = trig;   // (with the ball: melee only)
       { static double tobm; if (ob_carry && have_tg && tdist < 1.8f && now - tobm > 0.6) { tobm = now; g_bot_melee_until = now + 0.12; } }
-      uint64_t want = g_swscan_bits | (g_swbit >= 0 && now < g_swrec_until ? (1ull << g_swbit) : 0) | (now < g_bot_melee_until ? bot_meleebits() : 0) | (trig ? fb : 0) | ((fbtn & 0x10000) ? gb : 0) | ((fbtn & 0x20000) ? pkb : 0) | (now < g_fjump_until ? g_bot_jump : 0);   // (fbtn bit 16: the grenade pulse, 17: pick up)
+      uint64_t want = (now < g_bot_click_until ? fb : 0) | g_swscan_bits | (g_swbit >= 0 && now < g_swrec_until ? (1ull << g_swbit) : 0) | (now < g_bot_melee_until ? bot_meleebits() : 0) | (trig ? fb : 0) | ((fbtn & 0x10000) ? gb : 0) | ((fbtn & 0x20000) ? pkb : 0) | (now < g_fjump_until ? g_bot_jump : 0);   // (fbtn bit 16: the grenade pulse, 17: pick up)
       if (want) { g_bot_btn = ((out & 4) ? g_bot_btn : 0) | want; out |= 4; } else if (!(out & 4)) g_bot_btn = 0; }
     if (diag) { uint64_t b = 0; int d = bot_diag(&tx, &ty, &b, now); out |= d; if (d & 4) g_bot_btn = b; else if (!(out & 4)) g_bot_btn = 0;
         static double tl; if (now - tl > 0.25) { tl = now; const float* v = o->vel;
