@@ -1823,8 +1823,16 @@ static void bot_step_body(void) {
             static int npf; static double npt0, npu; static float npto[3];
             if (goal >= 0 && need) { int g0 = goal; int np = nav_astar(cur, goal, path, 8192); tplan = now;
                 if (np < 2) { if (now - npt0 > 8.0) { npt0 = now; npf = 0; }
-                              if (++npf >= 3 && now > npu) { nav_pos(g0, npto); npu = now + 4.0; npf = 0;
-                                  nav_say("  [nav] no path 3 times in 8 s from node %d: walking straight at (%.1f %.1f) for 4 s, hopping (an island of the floor graph)\n", cur, npto[0], npto[1]); }
+                              // (17:40, the user: "clearly is not learning from teammate lanes" -- the walker hopped west toward its goal
+                              //  while every teammate left the room by the teleporters 8 units east): the escape heads for the NEAREST
+                              //  PLACE PLAYERS LEFT FROM -- a learned link's start (g_np_a, nav-portals.py) within 60 units, not in its own
+                              //  spot -- else at the goal
+                              if (++npf >= 3 && now > npu) { nav_pos(g0, npto); npu = now + 4.0; npf = 0; int via = -1; float bd = 3600.0f;
+                                  for (int q = 0; q < g_np_n; q++) { float qp[3]; nav_pos(g_np_a[q], qp); float dx = qp[0] - pos[0], dy = qp[1] - pos[1], dd = dx * dx + dy * dy;
+                                      if (dd > 0.5f && dd < bd && fabsf(qp[2] - pos[2]) < 4.0f) { bd = dd; via = q; } }
+                                  if (via >= 0) nav_pos(g_np_a[via], npto);
+                                  nav_say("  [nav] no path 3 times in 8 s from node %d: walking straight at (%.1f %.1f) for 4 s, hopping (%s)\n", cur, npto[0], npto[1],
+                                          via >= 0 ? "where players left this spot from" : "an island of the floor graph: toward the goal"); }
                               if (mode != 2) { nav_say("  [nav] no path from node %d to %d: a new goal\n", cur, goal); goal = -1; }
                               else if (g_eg.on && gl_on()) { gl_drop(now, "no path"); goal = -1; }   // (the goal draw: another at once -- it used to stand there)
                               plen = 0; }

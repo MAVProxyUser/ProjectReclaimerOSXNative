@@ -5,7 +5,8 @@ WALK between (steps of 0.35, drops up to 2): gravity lifts, man cannons and jump
 (z ~22) are separate parts from the main floor (z 15-20) -- 423 parts in all -- and a walker under an enemy had "no path" (718
 goals dropped in one round). Every recorded player that went from one part to another within 4 s, alive all the way (a lift, a
 cannon, a jump), is such a link: its start node (the last node in the part it left) and end node (the first in the part it reached),
-grouped by both nodes' 2-unit cells; groups seen 3 times or more become one-way portals with the players' median travel time.
+grouped by both nodes' 2-unit cells; groups seen 3 times or more become one-way portals with the players' median travel time; a STEP
+(ends under 3 units apart, under 1.5 up / down: floor the graph's 0.35 step split) counts from one sighting, both ways.
 Reads every recording of the map (tracks/ + battles/tracks/), writes maptop/<map>.portals.txt ("from to seconds count" per line;
 nav.c loads it beside <map>.nav).
     python3 shim/tools/nav-portals.py <map> [--min 3] [--quiet]"""
@@ -71,11 +72,16 @@ def main():
                             T[key].append((a, b, t - pv[0]))
                         last[k] = (t, nd)
         except (EOFError, OSError): pass
-    portals = []
+    # STEPS (2026-11-09, Hugegrass: the spawn room's floor tiles differ by ~0.9 units, over the graph's 0.35 step, so the room fell apart
+    #  into dozens of parts and the walker stood on one with no way out -- players walk over them): a crossing between parts whose ends
+    #  are under 3 units apart across and 1.5 up / down is FLOOR, not a lift: kept from ONE sighting, both ways
+    portals = []; have = set()
     for key, v in T.items():
-        if len(v) < MIN: continue
         a = collections.Counter(x[0] for x in v).most_common(1)[0][0]; b = collections.Counter(x[1] for x in v).most_common(1)[0][0]
-        dt = sorted(x[2] for x in v)[len(v) // 2]; portals.append((a, b, dt, len(v)))
+        pa, pb = nav.pos(a), nav.pos(b); step = math.hypot(pa[0] - pb[0], pa[1] - pb[1]) < 3.0 and abs(pa[2] - pb[2]) < 1.5
+        if len(v) < MIN and not step: continue
+        dt = sorted(x[2] for x in v)[len(v) // 2]; portals.append((a, b, dt, len(v))); have.add((a, b))
+        if step and (b, a) not in have: portals.append((b, a, dt, len(v))); have.add((b, a))
     portals.sort(key=lambda x: -x[3])
     out = os.path.join(SUP, 'maptop', m + '.portals.txt')
     with open(out + '.tmp', 'w') as f:

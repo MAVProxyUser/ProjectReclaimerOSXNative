@@ -3448,6 +3448,15 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   brain is refused by a v2 body and the other way round: rebuild both). Lead latency = rtt x NHOOK_BOT_LEAD_RTT (1.25 / 1000 -- 0.08 s
   at 64 ms, 0.18 s at 145 ms); a NHOOK_BOT_LEAD_LAT in the live file still wins. A review's kills = the scoreboard's since the window
   began (the old count when the body has none); the review line gives the ping.
+- **Floor steps learned both ways; a stuck walker heads where players leave from** (2026-11-09 17:45; shim/tools/nav-portals.py STEPS,
+  nbot.c the island escape) — WHY: the user: "the player position tells me the current walker ... can't even move from its spawn point,
+  and clearly is not learning from teammate lanes". The recording showed it: Hugegrass's spawn room is closed, its exits are teleporters in
+  the east wall (players walk to x ~612 and appear at (377, 22) or (177, 242)); the room's floor tiles differ by ~0.9 units, over the
+  floor graph's 0.35 step, so the room was dozens of parts, and the walker's part beside the teleporter had a learned link IN, none OUT
+  (links needed 3 sightings, one way). Its escape walked at its goal -- west, deeper into the room. LOGIC: a crossing between parts whose
+  ends are under 3 units apart across and 1.5 up / down is floor: kept from one sighting, both ways (Hugegrass: 463 -> 3,684 links; every
+  spawn-room part now reaches the field). The island escape walks to the nearest learned link's start within 60 units and 4 up / down
+  (where players left from) before the goal ("walking straight at ... (where players left this spot from)").
 - **Stuck too long: a grenade at its feet; the players' links learned live** (2026-11-09 17:25; nbot.c "STUCK TOO LONG", nbot_goals.c
   brain_review LIVE LINKS, shim/tools/brain-monitor.py links()) — WHY: the user: "seems to me like being *stuck* is because the map lanes
   are not being studied in real time. if stuck too long look straight down and throw grenades and intentionally stand on them" -- on
