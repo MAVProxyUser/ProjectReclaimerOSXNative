@@ -2985,7 +2985,7 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   10). LOGIC: the recorder writes the game's match clock at a recording's start (header match_time_at_start, its log line "(match
   time N s)"); observe-whole.py counts a finished recording of 1500+ samples when it is not the visit's first or began under 90 s
   into its match (old logs without the clock: as before).
-- **The walkers coach themselves** (2026-11-08 15:40; nbot.c, nbot_goals.c, shim/tools/walker-coach.py) — WHY: the user: "the
+- **The walkers coach themselves** (2026-11-08 15:20; nbot.c, nbot_goals.c, shim/tools/walker-coach.py) — WHY: the user: "the
   walkers can use the coach on themselves eh!?". LOGIC: coach.py's report is made for every walker of a battle (its slot -> the
   test identity from the battle's samples; names never written) against the WINNERS of the same game class on the same map (40+
   player-matches), else that class on every map, else every match; each measure moves one knob half its gap in log space (x2 /
@@ -2999,7 +2999,7 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   coach -> next battle; `round <tracks> <samples>` coaches one battle (--dry: no change), `show` prints the knobs and rounds.
   Per round: K/D, duels won, shot first and the distance to the winners (coach.py's gap averaged; 0 = their numbers) per walker in
   ReclaimerMac/battles/coach/state.json. New knobs default to the old behaviour (1, 1, 0, 1).
-- **The walker knows its inventory and power-ups** (2026-11-08 16:30; nbot.c bot_inv, nbot_engage.c, nbot_goals.c, engage-model.py
+- **The walker knows its inventory and power-ups** (2026-11-08 15:30; nbot.c bot_inv, nbot_engage.c, nbot_goals.c, engage-model.py
   behaviour.powerups) — WHY: the user: "the walker should be aware of its own inventory, and power up status as well". LOGIC: every
   tick bot_inv reads the walker's own unit: the held and the other weapon (class + rank), grenades by type, an overshield (shield
   above 1.05) and active camo (+0x360 above 0.05); `[inv]` log lines on a change. The fighter: switches weapons (vpad Y, 0.15 s, 3 s
@@ -3011,18 +3011,18 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   attacks and close range still tell). Goal draw: fights weigh x2.5 with an overshield / camo (defenders with an overshield survive
   twice as often), an overshielded enemy half; no power-weapon goals with two power weapons in hand, no power-up goals with one
   running. NHOOK_BOT_NOINV=1 = blind to it (the old walker). behaviour(R, D) now gets the duels (it got none: powerups was empty).
-- **Recordings carry camo and the second weapon** (2026-11-08 16:35; match-recorder.py, ntracks.c, nstats.c) — WHY: the walker's
+- **Recordings carry camo and the second weapon** (2026-11-08 15:32; match-recorder.py, ntracks.c, nstats.c) — WHY: the walker's
   inventory logic should be learnt from players, and camo was never recorded. LOGIC: two columns more per player sample: 17 = the
   active camo amount, 18 = the other weapon carried ('' none; the stats page's weapons list minus the one in hand). Old readers
   index up to 16 and are unchanged.
-- **One game against what we assumed** (2026-11-08 16:45; shim/tools/game-review.py) — WHY: the user: "coaching yourself based on
+- **One game against what we assumed** (2026-11-08 15:35; shim/tools/game-review.py) — WHY: the user: "coaching yourself based on
   the dataset you JUST collected for that game vs the assumptions you made about the map, and the larger aggregated data". LOGIC:
   for one cut recording, the same measures over the game, over the map's earlier matches (same class) and over every earlier
   match of that class: first-shot wins, caught looking away, high / low ground, wins and distance per weapon class, radar turns,
   dying outnumbered, help, items, back to the death spot, kills a minute, the winners' K/D line, kills a held-minute per weapon and
   coach.py's fight measures; a SURPRISE vs the map = shares 2+ standard errors of a game this size, other numbers 30%+ (15+ cases).
   tracks/reviews/<recording>.json (+ team_game); the work board's Walkers tab shows the latest.
-- **The learn loop** (2026-11-08 16:50; shim/tools/learn-loop.py, observe-public.sh OBS_RANDOM, walker-coach.py --game-file /
+- **The learn loop** (2026-11-08 15:38; shim/tools/learn-loop.py, observe-public.sh OBS_RANDOM, walker-coach.py --game-file /
   --ded-map) — WHY: the user: "start randomly joining and completing games ... in order to instruct the walker how to play the game
   in question. iterate with the goal of better vs human scoring". LOGIC: a turn = observe-public.sh with OBS_MATCHES=1 OBS_RANDOM=1
   (the server DRAWN with weights exp(score / 8) instead of the best score; no Infection / mods / downloads) -> engage-extract ->
@@ -3031,9 +3031,237 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   winners (top quarter of 8+ players, weight 2) blended with the map's / class's winners (weight 1) -> tracks/learn-loop.json. The
   observer only watches: walkers stay on our own server (bot_allowed); "better vs human scoring" = the walkers' distance to the human
   winners going down. walker-coach.py --dry no longer saves its round.
-- **Work board: Walkers tab** (2026-11-08 16:55; workboard.py #walkers) — the latest game review (this game / the map / everything,
+- **Work board: Walkers tab** (2026-11-08 15:40; workboard.py #walkers) — the latest game review (this game / the map / everything,
   surprises), the learn loop's turns, each walker's knobs and its coached rounds (distance to the winners, K/D, duels won); new job
   kinds learn-loop / walker-coach / game-review / coach.
+- **You can play the observer's game** (2026-11-08 15:45; nvpad.m nh_takeover_install, nhook.c nh_takeover_fire, observe-public.sh,
+  match-recorder.py --you-plays) — WHY: the user: "can you make it so that IF I choose to pickup the controls while you sample
+  public games I can play? it seems to only capture the mouse and not the joystick right now". The observer runs the app with
+  --background (the app's test mode: a 640 x 360 window below the others, never the frontmost app; without it the real profile's
+  borderless full screen would take the display), and the GameController framework delivers a real controller's input only to
+  the frontmost app. LOGIC: NHOOK_TAKEOVER=1 (the observer sets it) arms a local mouse-down monitor; the first click in the game's
+  window turns on +[GCController shouldMonitorBackgroundEvents] (macOS 11.3+), activates the app, puts the window at the normal
+  level and makes it 1600 x 900 (90% of the screen at most) when smaller; nh_takeover_fire turns the sound back on (the mute tap
+  checks g_takeover) and writes NHOOK_TAKEOVER_FILE. observe-public.sh: with that file the visit lasts until the user quits the
+  game (no leaving after a whole match, no time limit, no 5-minute no-match leave), the recorder restarts with --you-plays (header
+  you_plays: the user's slot is a real player: coach.py's You tab). Not live-tested with a controller yet (the user's next
+  take-over is the test).
+- **The plan runs unattended** (2026-11-08 15:46; shim/tools/plan-run.sh) — sample-large (OBS_DONE from PLAN_DONE_LARGE) ->
+  sample-small -> refit -> spar-ffa (walker-coach.py, 2 coached rounds, radar log) -> spar-teams (2v2) -> firefight (one walker on
+  Courtyard; walkers together in Firefight need co-op joins, not done) -> learn (learn-loop.py); tracks/plan.txt; `plan-run.sh
+  <step>` starts at a step. The observer's dylib is a frozen copy (NATIVE_DYLIB) refreshed when no game runs.
+- **Kills by weapon** (2026-11-08 15:55; shim/tools/weapon-kills.py, workboard.py Learnings tab) — WHY: the user: "running kills
+  counts to each weapon in playertable like arrangement. add vehicle guns too ... grenades should also be accounted for. scrape the
+  history ... see the per game progression any time I go to the learnings tab". LOGIC: every public recording's kill events (the
+  game's own feed: how = weapon / vehicle / gunner seat / grenade / melee; ", headshot" = a headshot of that weapon; betrayals
+  apart; our local servers' recordings left out) summed per weapon per match -> tracks/weapon-kills.json (games oldest first, live
+  = recorded in the last 2 minutes; per weapon its kind, kills per game, headshots, betrayals); a per-file cache (size + time)
+  makes a rerun read only new / growing files, and the work board reruns it every minute (wk_loop). The table: class chips (all /
+  slayer / ctf / infection / other), kind chips (hide a kind), sortable columns (kills, share, headshots, games, kills a game, best
+  game, last game), a per-game line; a click opens the weapon's kills game by game (bars named by map, the live match amber);
+  choices kept in localStorage. First count: 26 matches with kill events, 13,632 kills, 52 weapons.
+- **Weapon switches and camo learnt from players** (2026-11-08 15:50; engage-extract.py inventory(), engage-model.py
+  behaviour.inventory, shim/tools/inventory-extract-test.sh) — from recordings with columns 17 / 18: "wswitch" records (the held
+  and the carried weapon trade places: classes, nearest enemy's distance, in a fight) and "camo" records (a stretch under camo:
+  length, share of it firing, first shot's distance, kills, died in it); the model sums switches by class pair (n, median distance,
+  in-fight share) and camo use. Offline test: a synthetic recording (one BR -> shotgun switch at 6 units in a fight, one 3 s camo
+  stretch firing at its end; an old 17-column recording gives none): all PASS.
+- **Finding the ammo field; the walker uses it** (2026-11-08 16:10; nstats.c NHOOK_WPNDUMP, shim/tools/ammo-scan.py, walker-coach.py,
+  nbot.c bot_ammo_off / bot_ammo_of) — WHY: the walker's inventory without ammo reloads only after fights. No HaloScript getter
+  gives a weapon's rounds (unit_get_total_grenade_count exists, nothing for ammo), so the field is found from data: NHOOK_WPNDUMP=1
+  logs the local player's held weapon object (0x300 bytes) with its shots counter every snapshot; ammo-scan.py scores every 16-bit
+  field (drops while the shots counter rises, jumps up on a reload with nothing fired; reserve = drops on a reload by about the
+  magazine's gain) and writes ReclaimerMac/native/ammo.json {"loaded", "reserve"} when one field wins on 2+ weapons or 3+ reloads.
+  walker-coach.py adds NHOOK_WPNDUMP=1 to the walkers while ammo.json is missing and scans their logs after the battle (the plan's
+  first coached battle finds it). The walker (ammo.json or NHOOK_AMMO_OFF=<hex>): rounds loaded + the most seen per weapon
+  definition; an empty magazine in a fight with a loaded other weapon = switch (vpad Y); out of a fight under 60% = reload (RB tap);
+  after a fight only when not full. Unknown field = the old behaviour.
+- **The take-over bridges the controller through the virtual pad** (2026-11-08 16:25; nvpad.m tk_bridge, nhook.c) — WHY: the
+  user, after the first take-over: "I still can't control an observer, it's only mouse control". The click worked (the log: the
+  user has the controls, background events on, window raised) but the app enumerates +[GCController controllers] once, early,
+  and a --background app finds no physical controller then; it never reads one later. It does read nhook's virtual pad in
+  --background clients (the walkers). LOGIC: with NHOOK_TAKEOVER the virtual pad is installed at start (at rest until the click;
+  the user drives it, no bot does: bot_allowed() still refuses the real profile and public servers); the click attaches a
+  valueChangedHandler (serial queue) to every physical controller (+controllers' original list without the virtual pad, connect
+  notifications, a 2 s rescan) that copies sticks, triggers, A B X Y, bumpers, stick clicks, menu / options and the d-pad into it
+  (nh_vpad_set). Log: "[takeover] your controller (<vendor>) drives the game through the virtual pad".
+- **The walker's weapon names never matched natively** (2026-11-08 16:30; nbot_engage.c bot_tagkey, eg_wcls, nbot.c bot_wpn_rank,
+  nbot_goals.c gl_power_tag) — WHY: found while adding weapon zones: natively hb_tag_name gives the tag's last path part in
+  CAPITALS with spaces ("ASSAULT RIFLE", h3maps.c hb_tag_name_l), and every walker lookup was written for "assault_rifle": every
+  weapon was class "other" (no per-class distance band from the players: the default band for everything), no pickup ranked
+  better (rank 50 for all), no lying power weapon counted for the goal draw. LOGIC: bot_tagkey lowercases and turns spaces into
+  underscores before each lookup. No switch: the old behaviour was a bug.
+- **Weapon zones: the walker picks its weapon by where the target stands** (2026-11-08 16:35; weapon-kills.py -> tracks/maps/
+  <map>.wzones.txt, nbot.c wz_load / wz_eff, shim/tools/wzones-test.sh) — WHY: the user: "walker should use its best weapon based on
+  situation that can be derived from game observations of where kills happen with certain weapons. if opponent is in a certain zone
+  and you have a certain high kill weapon for that zone and aren't using it switch to it and use it". LOGIC: weapon-kills.py counts
+  every recorded match's kills (Infection left out) by the victim's 6-unit cell and the killer's weapon class (the walker's classes:
+  precision, auto, sniper, shotgun, rocket, melee) and each class's share of the weapons carried on foot on that map (the samples),
+  and writes them per map as text. The walker loads its map's file (with the engagement models); for the target's position the 3 x 3
+  cells around it give each class's kill share there over its carried share; in a fight it switches (vpad Y) to the other weapon
+  when that ratio is 1.5x the held one's and above 1.2 with 8+ kills around, and keeps a weapon the zone favours 1.5x even when the
+  distance band would switch away (an empty magazine still switches first). Recounted every minute with the kills table.
+  NHOOK_BOT_NOZONES=1 = off, NHOOK_WZONES_DIR = another folder. Offline test (the real C cut out of nbot.c): all PASS. First
+  files: 9 maps, Valhalla from 2,470 kills.
+- **Take-over at full resolution, and from the stats page** (2026-11-08 16:45; nvpad.m tk_take / nh_takeover_now, nstats.c
+  do=takeover, nhook.c tk_size_watch) — WHY: the user: "relaunch the next match and ensure I can have control with the joystick and
+  have full resolution available". LOGIC: the take-over window fills the screen's visible area (it was 1600 x 900 at most), stays
+  resizable and titled, and allows native full screen (collection behavior FullScreenPrimary: the green button / Ctrl-Cmd-F);
+  POST /control?do=takeover does what the click does (only with NHOOK_TAKEOVER: the observer); after a take-over the game's
+  presented frame size is logged whenever it changes ("[takeover] the game draws W x H": does the game follow the window?).
+- **Taking over = relaunching the game in normal mode** (2026-11-08 16:35; observe-public.sh launch(), OBS_PLAY_FIRST, nvpad.m
+  tk_take, nhook.c, plan-run.sh) — WHY: the user: "still no control and the observer window scale resolution is garbage you broke
+  my ability to control the game somehow". Measured: a --background game renders 640 x 360 whatever its window becomes (the
+  filled-screen window showed a stretched 640 x 360 picture), and the bridge's virtual pad never got the controller's input (the
+  physical controller was found, but no input reached the background app); the virtual pad installed at start in the user's
+  observer game is gone too. LOGIC: a click in the observer's window only writes the take-over file; observe-public.sh then kills
+  the background game and launches it in NORMAL mode on the same server (no --background, no NHOOK_TAKEOVER, sound on: the user's
+  own settings -- borderless full screen at the display's resolution -- and the controller read by the app itself: the first
+  normal launch logged "[menus] input device: controller"); the visit lasts until the user quits, recorded with --you-plays.
+  OBS_PLAY_FIRST=1 = the first visit is the user's from the start. Another Project Reclaimer appearing (the user's own game) no
+  longer ends the observer (exit 1 made plan-run.sh skip to the next step, whose own check refused too): its game leaves and it
+  waits until that one quits; plan-run.sh waits before every step while a game runs. NHOOK_TAKEOVER_BRIDGE=1 = the old in-place
+  take-over (window + bridge), kept for experiments. OBS_PLAY_FIRST is used once per process group ($TR/.play-first holds the group that used
+  it): the plan's later observer steps and learn-loop turns inherit the variable and would each have opened a full-screen game
+  waiting for the user.
+- **Learnings: weapon zones and inventory** (2026-11-08 16:55; learnings.py) — "Weapon zones": per map up to 3 spots (non-overlapping,
+  named by the nearest spawn) where one weapon class makes 25%+ of the kills on players within ~9 units and 2.5x+ its share of the
+  weapons carried there (20+ kills; the walker's tracks/maps/<map>.wzones.txt), e.g. The Pit: shotguns 25% of 119 kills at 3% of the
+  weapons carried (8.2x). "Inventory: switches and camo": the players' most common weapon switches (class -> class, the nearest
+  enemy's median distance, the share in a fight) and their camo stretches, from engage-extract.py's wswitch / camo records.
+- **The walker switches like the players** (2026-11-08 17:00; nbot_engage.c eg_parse behaviour.inventory.by_pair, nbot.c) — for a
+  held -> other class pair with 20+ recorded player switches, the walker switches toward the shorter-range class (the players'
+  distance band medians decide which is shorter) when its target is closer than the players' median nearest-enemy distance at
+  that switch, toward the longer one when farther (first data: sniper -> precision 10 units, precision -> sniper 11: a small
+  hysteresis, plus the 3 s between switches). Order: empty magazine, weapon zones, the players' switch, else the distance bands.
+- **The bullet log and the spread ("bloom") analysis** (2026-11-08 17:20; noverlay.c nov_slog_*, shim/tools/bloom.py, bloom-test.sh,
+  bloom-battle.sh, native-dedicated.sh DED_OPTIONS / NHOOK_ROLE) — WHY: the user: "what can you tell me about the 'random bloom' on
+  both the AR, and the BR? ... do they seem random? any disadvantages or flaws under certain situations?". Nothing measured a
+  bullet's direction before (tracers on screen, shots / hits counters). LOGIC: NHOOK_SHOTLOG=<file> (%p pid, %r NHOOK_ROLE: "server"
+  on our dedicated server, else "client") logs every deleted bullet from the object_delete hook with its owner's aim vector (+0x1a0),
+  velocity (+0x74) and held weapon at that moment, its start (+0x1e8), end (+0x1c) and distance travelled (+0x1b0), the estimated
+  victim; a 16384-record ring written by a thread every 0.5 s (the engine thread only copies). bloom.py: each straight bullet's
+  angle off the aim in the aim's right / up frame; per weapon median / p90 / max, the bias, the shape (KS against a uniform disc and
+  a Gaussian), the error by the bullet's index in a string of fire, by burst position, by time since the last burst, by ground
+  speed, airborne, distance, hit / miss; the correlation of consecutive bullets' errors. Offline test (a synthetic AR cone growing
+  1 -> 4 deg over 15 rounds, a BR Gaussian with a hidden +0.5 deg up on every third round): all found. bloom-battle.sh: 4 walkers on
+  our server with BR + AR starts (DED_OPTIONS '{"player.primary_weapon": 0, "player.secondary_weapon": 1}' -> a one-game playlist
+  with those options), the server's log (authoritative) and the clients' analysed apart.
+- **How random are the spawns** (2026-11-08 17:25; shim/tools/spawn-patterns.py) — WHY: the user: "pay attention to the randomness of
+  the spawn patterns too ... patterns in either would be interesting". LOGIC: every respawn in the recorded public matches (a
+  player alive again after a death; Infection left out) is matched to the map's spawn points (respawn positions merged within 2
+  units, seen twice or more) and compared with every other point at that moment: log distance to the nearest live enemy, enemies
+  within 15 units, log distance to the nearest teammate (team games), log distance to the player's own death spot, used in the
+  last 10 s; a conditional logit per map and per class, its top-1 / top-3 hit rate against chance, how often the farthest point
+  from enemies was chosen, the same point as the player's previous spawn, the spread of use (entropy over uniform).
+  tracks/spawns.json. First run (16,110 respawns): free-for-all -- the model's first pick is the chosen point 26.5% (chance 2.5%),
+  top 3 50% (7.5%), nearest enemy +3.85 (by far the strongest), own death +0.84, just used +0.92; team -- 37% (2%), 68% (6%),
+  nearest teammate -0.85 (near them), just used +1.74 (teams spawn together); the farthest point from enemies only 4-32%; every
+  point used (0.87-0.94 of uniform).
+- **My analysis jobs no longer compete with the user's game** (2026-11-08 17:40; shim/tools/refresh-loop.sh) — WHY: the user: "something
+  you did is making input feel choppy": the 20-minute learning refresh's model refit ran at ~90% of a core for minutes beside the
+  user's full-screen game (that stretch: 49-52 fps, 255-342 ms frames). LOGIC: the refresh runs every step under taskpolicy -b + nice
+  20 (efficiency cores, below everything) and WAITS while a Project Reclaimer runs without --background / --server (the user playing).
+  Run the work board the same way (taskpolicy -b). The remaining once-a-second 150-300 ms frame in the user's full-screen game is NOT
+  any hook: aim meter, stats snapshots / recorder and voice hook switched off live changed nothing; the hooks cost table and a 5 s
+  sample show nhook cheap on the game's threads. (Corrected 19:20: the 640 x 360 background games did NOT stay flat -- their worst
+  frames grew too, to 40-60 ms in the 60-90-player lobbies; see "Finding the full-screen stutter" below.)
+- **The observer picks for coverage, not size** (2026-11-08 17:50; observe-public.sh pick) — WHY: the user: "you have way too many
+  valhalla observations vs say sandtrap or snowbound": the bonus only rewarded a map x type with nothing recorded and never held back
+  one with plenty, so the one big mod-free server (Valhalla / The Pit / Guardian rotation) won 6 of 9 joins. LOGIC: coverage +40 none,
+  +25 under 10 min, +10 under 30 min, minus a point per 3 minutes already recorded (at most -30); players count up to 16 only; a server
+  already visited in this run -10 a visit; a map x type under 10 minutes may be joined with 4+ players even in a strict (12+) phase.
+  Live check: the big server (24/24) lost to Sandtrap Team Snipers (13 players, no Sandtrap Slayer recorded) and, for small games,
+  Foundry (never sampled).
+- **The walker melees like the players, and pulls the trigger on single-shot weapons** (2026-11-08 19:15; nbot.c mel_load /
+  bot_pull_weapon / the fight's melee block and rush, shim/tools/melee-model.py -> tracks/melee.json) — WHY: the user, watching a
+  walker hold a Gravity Hammer on an enemy at 0.6-1.3 units ("FIRING" in its log the whole time) without a swing: "clearly you never
+  trained on melees sooooo many opportunities for the walker to melee". Melee is the second biggest killer in the recordings (3,865
+  kills; the battle rifle 6,206). Two faults: the walker HELD the right trigger for the whole fight -- the hammer, the sword and
+  single-shot weapons act on a pull, so it swung / fired once at most (the bullet log shows the battle rifle and carbine firing on
+  while held: bursts every 0.25-0.35 s, so those stay held) -- and its melee button was down for ONE 33 ms step. LOGIC: melee-model.py
+  measures every "Melee" / "Energy sword" / "Gravity hammer" kill in the public recordings (Infection out): killer -> victim distance
+  at the kill, 1 s and 2 s before, the victim's shield 0.5 s before (beatdown = under 0.05), the killer's weapon class -- anchored at
+  the victim's LAST LIVE SAMPLE: a kill event's own time comes from the game's results (polled) and lags the death by up to ~1-2 s
+  (anchored at the event, only 419 of 3,836 melee kills had a live victim and every "1 s before" was shifted). 43 matches: melee at a
+  median 0.65 units (p75 0.97, p90 1.23), the killer closing ~2.1 units in the last second (a median 2.9 apart 1 s before); 48% finish
+  a victim whose shield was already down (closing in from 3.2 units, p75), mostly assault-rifle carriers (2,649 of 3,836); sword p75
+  1.28, hammer p75 1.33, mostly against full shields. Offline test: shim/tools/melee-model-test.sh. The walker: B within the players' range + 0.25 (positions
+  are a tick or two old; hammer / sword: their own range), held 0.12 s, at most every 0.6 s, logged ([melee]); a target whose shield is
+  down within the rush distance -- or any target within 10 units with a sword / hammer in hand -- is walked straight at (throttle
+  0.9, strafe x0.3; not with a rocket launcher); the trigger is pulsed 0.12 s down / 0.12 s up while firing a pull weapon (hammer,
+  sword, sniper, beam rifle, magnum, rockets, brute shot, fuel rod). NHOOK_BOT_NOMELEE=1 = the old melee (1.8 units, one step, the
+  trigger held); NHOOK_MELEE_FILE = another melee.json.
+  THE BUTTONS (20:45): in four melee battles (melee-battle.sh, 4 walkers with Gravity hammers) no kill was ever a melee -- 333 presses
+  held 0.3 s, a walker "swinging" 30 times at 0.33-0.6 units while its target's shield fell and came back -- and the hammers kept
+  turning into floor weapons with pick-ups off. The app reads the virtual pad 26 times a second (nvpad.m read counters: B, Y, RB,
+  the right trigger, the left stick 257 times in 10 s each, logged as [vpad] lines), so short presses were seen; but 10 of the
+  weapon changes followed a B press: these profiles' layout is Bumper Jumper's ("LB jumps and RB melees ... B acts and reloads",
+  the app's own description), not Halo 3's own (B melees). The walker pressed B to melee (= pick up) and held RB to pick up / tapped
+  it to reload (= melee). Now melee = RB (NHOOK_BOT_MELEEPAD, hex nvpad bits), pick up and reload = B (NHOOK_BOT_PICKPAD).
+  NHOOK_BOT_FIRE=0 now also stops the fighter's trigger (melee-battle.sh MELEE_ONLY=1: no shots, no grenades -- every kill a melee).
+  STILL OPEN (20:55): a MELEE_ONLY battle with hammers (no shots, no grenades, melee on RB) -- 503 swings at a median 0.54 units,
+  ZERO kills. Neither B nor RB nor the pulsed trigger has ever landed a walker melee (no "Melee" kill in any of the 22 walker
+  battles; their 78 unnamed kills are grenades at 6-15 units). B does act (pick-ups), so the pad's buttons reach the app; melee
+  does not reach the server, or is not in the control packet the walker's packet hook passes on (halo3+0x50fb8 packet "A": button
+  bits 0-2, 11, 14 + 7 more at +0x2c). Next: a button scan on our local server -- one walker beside a standing one, each pad
+  button and each control-record bit pressed alone for 0.3 s, the standing one's shield read from the server's stats.
+  FROM BEHIND (21:10; melee-model.py, the user: "especially if the opponent's back is to it"): each melee kill's attacker angle off
+  the victim's LOOK direction (the recordings' yaw = unit +0x1a0; behind = over 110 deg): 19% of melee kills come from behind (sword
+  8%), half of those on a shield of half or more (assassinations); they close in from 3.3 units (p75, 1 s before). Opportunities:
+  every 0.5 s, an enemy within 5 units looking away from a player (one per pair per 3 s), taken = that player's melee kill of it
+  within 3 s: within 1.5 units 1,419 times, taken 20.4%; 1.5-3 units 5,096, 5.5%; 3-5 units 19,265, 3.0% -- players miss four of
+  five backstabs at arm's length. melee.json walker.back_rush_from (3.31). NovObj.aim (noverlay.c): a unit's look direction for
+  the walker. THE SCAN (shim/tools/melee-scan.py; do=botpad = virtual-pad buttons held for a time, do=botpkt = bits ORed into the
+  packed control record -- packet "A" carries only action +8 bits 0-2, 11, 14 and +0x2c's 7 bits): on our server, A teleported
+  1 unit beside B (tpnext), A's sparring aim on B (0.0 deg error at 1.0 unit), each input 0.3 s, B's shield from the server's
+  stats: all 13 pad buttons x2, all 12 packet bits x2 -- no damage. BUT the positive control (--no-pads --bits 19: the fire
+  bit) did no damage either: the measurement itself is broken (B's server-side shield / A's position or fire in that setup), so
+  those negatives prove nothing yet. Being fixed next.
+  21:40: the scan's own fault found halfway -- by hand (melee-scan.py --hold, then do=botpad / do=botbtn): the pad's right trigger
+  held 3 s fired NOTHING (0 shots on A's own client), the control-record fire bit 19 held 3 s fired 31 shots on A's client while
+  the SERVER counted 0 and B's shield stayed full: in this setup (sparring aim only, no fighter) a joined client's shots never
+  reach the server, so no scan result there means anything yet (in walker battles -- fighter on, pad + bit together -- shots do
+  land: 117 assault-rifle kills). Next: the same probe with the fighter's path. TURNED BACKS (same hour, the user: "especially if
+  the opponent's back is to it"): the walker runs straight at a target looking away (its aim, NovObj.aim, over 110 deg off the
+  line to the walker) within melee.json's back_rush_from (3.31 units) and presses melee there; it keeps shooting meanwhile (no
+  walker melee lands yet). NHOOK_BOT_NOBACK=1 = off. melee-scan.py --hold / --debug / --rt-control / --no-pads.
+- **A walker no longer stands still going for a weapon it cannot reach** (2026-11-08 20:20; nbot.c pickups) — WHY: in a melee test
+  battle one walker stood the whole 3 minutes logging "going for BATTLE RIFLE (8.1 units)" (moved 0 units): a pickup target was only
+  marked tried once reached. LOGIC: a target that brings no progress (0.5 units closer) in 6 s is given up and marked tried ("gave up
+  on ..."). The tried list's check read past its 32 entries once 32 pickups had been tried (now bounded). NHOOK_BOT_NOPICK=1 = no
+  pickups at all (melee-battle.sh: the walkers keep the start weapon -- they swapped the hammer for a shotgun / sniper rifle).
+  Also: no reload tap while holding a sword / hammer (nothing to reload; the tap picked up the weapon on the floor: the test walkers
+  swapped their hammers for plasma rifles / SMGs after fights). melee-battle.sh lists every kill (type, the killer's weapon, the
+  distance at the victim's last live sample): our local server names melee and hammer kills "" -- an unnamed kill within 4.5 units
+  counts as melee. First battle (4 walkers, hammers, 3 min, before the reload fix): 95 melee presses at 0.7-1.2 units, 3 melee /
+  hammer kills of 7 (one hammer kill from 4.2 units: its shockwave).
+- **Every bullet was logged twice** (2026-11-08 19:15; shim/tools/bloom.py load) — WHY: the bloom battle's log had each bullet twice
+  ~1 ms apart (same shooter, start, end and length; the aim sampled again): the app deletes most projectiles twice and the
+  object_delete hook logs both. Consecutive bullets then looked perfectly correlated. LOGIC: the first report of a (shooter, start,
+  end) within 0.1 s is kept -- and at the source (noverlay.c on_object_delete_body): a projectile handle among the last 256 projectile
+  deletes is skipped, so the shots counters, the aim meter (accuracy), tracers and the bullet log count each bullet once (they all counted it
+  twice; accuracy, hits over shots, was roughly unchanged). NHOOK_DEL_DUPS=1 = the old double count.
+- **Finding the full-screen stutter: stall meters, the A/B runner, NHOOK_NO_TAP** (2026-11-08 19:20; nhcost.h SM_*, nrender.m,
+  nhook.c tap / my_AudioUnitRender, nmic.c vmic_clock, nnet.c pk_wire, noverlay.c on_object_delete, nstats.c [stall] line;
+  shim/tools/hitch-ab.sh, hitch-summary.py) — WHY: the user: the full-screen game "choppy as heck ... that we NEVER EVER EVER had";
+  their 2-hour game through nhook (16:34-18:51) had a frame over 100 ms in 73% of the app's 5-second frame windows (worst-frame
+  median 152 ms), growing with time: 18 ms at the start, 36 / 62 / 109 / 175 ms at the start of later matches, more within each
+  match as players came and went. The cost meter sums each hook's time, so one 150 ms call a second hides as ~1.5 ms a second.
+  LOGIC: every place nhook runs inside an app thread (present: nhook's part and the app's own present call apart; the depth
+  attachment setter; the log tap: the wait for its lock and the time holding it; sockets; AudioUnitRender; the virtual mic's call
+  into the app's input callback; object_delete) and the snapshot keep their LONGEST single call per 10 s: the [stall] line beside
+  [perf+], with the depth-texture table's size and the depth passes. NHOOK_NO_TAP=1: the app's log lines are read only until the
+  engine's image line (no match state / chat / voice report / peers from the log after it). hitch-ab.sh <server> <secs> <arm>...:
+  the app in normal mode (the user's settings: full screen) on one public server per arm -- none (the app alone) / nhook /
+  nhook:ENV=..; waits for a free slot; HITCH_SAMPLE=1 samples the app for 3 s once the stutter shows. hitch-summary.py: per log the
+  app's own "[capture] frame ... max" windows (printed with or without nhook). First runs (The Pit, 6 min each): the app alone
+  worst-frame median 22.0 ms (2% of windows over 100 ms), with nhook 21.4 ms (0%) -- the same early in a session: it builds up.
+  Long runs (hitch-summary.py --curve, worst-frame median per 2 minutes): nhook 22 27 25 24 28 25 30 33 40, nhook with NHOOK_VMIC=0
+  14 17 21 27, the app ALONE 14 14 14 16 21 28 32 39 -- the build-up is the 0.10.1 app's own (backlog N20, first seen in the user's
+  first 0.10.1 session, before the virtual mic existed). Every stall meter stayed under 0.1 ms; the snapshot switched off and on in
+  10 s phases mid-run: worst frame 33.0 / 31.5 ms (no difference). The ~30 ms frame every ~10 s (the 5 s windows alternate ~14 / ~30
+  ms) is the app's too: the app alone shows it on Valhalla. Not a fix -- a finding; nhook keeps the meters ([stall], every 10 s).
 
 ## 19. Performance
 

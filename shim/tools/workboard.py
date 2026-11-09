@@ -114,7 +114,9 @@ def status():
               'walkers': {w: {'likeness': v.get('likeness'), 'kd': v.get('kd'), 'duels_won': v.get('duels_won'), 'duels': v.get('duels'), 'changes': v.get('changes')} for w, v in r.get('walkers', {}).items()}}
               for r in cs.get('rounds', [])[-16:]]}
     except Exception: wc = None
-    return {'review': review, 'learnloop': ll, 'wcoach': wc, 'now': time.time(), 'jobs': jobs, 'apps': apps, 'direction': direction, 'tome': tome_load(), 'per_map_models': per_map, 'learnings': learn, 'coach': coach, 'observer_log': tail(obs[0], 8) if obs else [], 'recorder': tail(rec[0], 4) if rec else [],
+    try: wk = json.load(open(os.path.join(TR, 'weapon-kills.json')))
+    except Exception: wk = None
+    return {'wkills': wk, 'review': review, 'learnloop': ll, 'wcoach': wc, 'now': time.time(), 'jobs': jobs, 'apps': apps, 'direction': direction, 'tome': tome_load(), 'per_map_models': per_map, 'learnings': learn, 'coach': coach, 'observer_log': tail(obs[0], 8) if obs else [], 'recorder': tail(rec[0], 4) if rec else [],
             'live': live, 'totals': totals(), 'tasks': tasks_load()}
 
 PAGE = r'''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Work board</title>
@@ -133,7 +135,9 @@ h1{font-size:20px;margin:0 0 4px}h2{font-size:13px;letter-spacing:.08em;text-tra
 #tabs a.on{color:var(--fg);border-color:var(--acc)}#tabs a:hover{color:var(--fg)}</style></head><body>
 <h1>Work board <nav id="tabs"><a href="#" data-v="work">Work</a><a href="#learnings" data-v="learnings">Learnings</a><a href="#you" data-v="you">You</a><a href="#walkers" data-v="walkers">Walkers</a></nav> <span class="k" id="upd"></span></h1>
 <div class="k">What is running on this Mac for Reclaimer, what is being worked on, and what the game is learning from real players. Refreshes every 3 s.</div><br>
-<div id="learnview" hidden><div class="p"><h2>What the game is learning <span class="k" id="lrsrc"></span></h2><div class="k" style="margin-bottom:8px">Plain-language findings from every recorded public match (Infection left out of the fighting findings), each with the number of cases it rests on; thin ones (under 30 cases) are dimmed. Rebuilt every 20 minutes while sampling runs.</div><div id="lrn" class="lgrid"></div></div></div>
+<div id="learnview" hidden><div class="p" style="margin-bottom:14px"><h2>Kills by weapon <span class="k" id="wksrc"></span></h2>
+<div class="k" style="margin-bottom:8px">Every kill in the game's own kill feed of every recorded public match (our local servers left out), by what made it: weapons, vehicles (the driver's weapon or a splatter), vehicle guns (gunner seats), turrets, grenades, melee. Headshots are counted in their weapon. Click a column to sort, a row for its kills game by game; the line is its kills per game, oldest to newest. Recounted every minute (the match being recorded is in it).</div>
+<div id="wkf" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px"></div><div id="wk2" style="overflow-x:auto"></div></div><div class="p"><h2>What the game is learning <span class="k" id="lrsrc"></span></h2><div class="k" style="margin-bottom:8px">Plain-language findings from every recorded public match (Infection left out of the fighting findings), each with the number of cases it rests on; thin ones (under 30 cases) are dimmed. Rebuilt every 20 minutes while sampling runs.</div><div id="lrn" class="lgrid"></div></div></div>
 <div id="youview" hidden><div class="p"><h2>You vs the winners <span class="k" id="ysrc"></span></h2><div class="k" style="margin-bottom:8px">Your public matches (played through our launcher: the recorder marks your slot) next to the WINNERS -- the top quarter of players by K/D in non-Infection matches -- and everyone, measure by measure; the biggest gaps first, each with what the winners do differently. shim/tools/coach.py.</div><div id="you"></div></div></div>
 <div id="walkview" hidden>
 <div class="p" style="margin-bottom:14px"><h2>The last public game vs what we assumed <span class="k" id="rvsrc"></span></h2><div class="k" style="margin-bottom:8px">One whole public match (watched, never played by a walker) measured like the map's earlier matches and like everything; a SURPRISE = this game is off the map's number by more than a game this size explains (shares: 2+ standard errors; other numbers: 30%+ with 15+ cases). The per-map model takes the game in right after.</div><div id="rv" style="overflow-x:auto"></div></div>
@@ -174,6 +178,7 @@ async function tick(){try{const j=await (await fetch('/status.json')).json();
    document.getElementById('you').innerHTML=`<table style="border-collapse:collapse;width:100%;font-size:13px"><tr><th style="text-align:left">measure</th><th>you</th><th>winners</th><th>everyone</th><th style="text-align:left">verdict</th></tr>`+
     C.rows.map(r=>`<tr style="border-top:1px solid var(--line)${r.thin?';opacity:.55':''}"><td>${E(r.measure)}</td><td style="text-align:center"><b>${E(r.you)}</b></td><td style="text-align:center">${E(r.winners)}</td><td style="text-align:center" class="k">${E(r.everyone)}</td><td style="color:${r.advice?'var(--go)':'var(--ok)'}">${E(r.verdict)}${r.thin?' <span class="k">(thin)</span>':''}${r.advice?`<div class="k">-> ${E(r.advice)}</div>`:''}</td></tr>`).join('')+'</table>'; }
  else document.getElementById('you').innerHTML=`<div class="none">${E((C&&C.note)||'no report yet (shim/tools/coach.py)')}</div>`;
+ if(j.wkills&&(!WKD||j.wkills.updated!==WKD.updated)){ WKD=j.wkills; wkRender(); } else if(!WKD) wkRender();
  const R=j.review, pf=(v,sh)=>v==null?'-':sh?Math.round(v*100)+'%':(+v).toFixed(2);
  if(R&&R.rows){ document.getElementById('rvsrc').textContent=`· ${R.map} ${R.class}${R.team_game?' (teams)':''}, ${R.mode||''}, ${R.players} players, ${R.minutes} min · the map before it: ${R.games_on_map_before} game(s) · ${ago(R.updated)}`;
    document.getElementById('rv').innerHTML=`<table style="border-collapse:collapse;width:100%;font-size:12.5px"><tr><th style="text-align:left">measure</th><th>this game</th><th>the map before</th><th>everything</th><th style="text-align:left">surprise</th></tr>`+
@@ -185,6 +190,31 @@ async function tick(){try{const j=await (await fetch('/status.json')).json();
  else document.getElementById('wk').innerHTML='<div class="none">no coached battle yet (shim/tools/walker-coach.py)</div>';
  document.getElementById('obs').textContent=(j.observer_log||[]).join('\n')||'(no observer log)'; document.getElementById('rec').textContent=(j.recorder||[]).join('\n');
 }catch(e){document.getElementById('upd').textContent='· not answering'} setTimeout(tick,3000)}
+let WKS={key:'kills',dir:-1}, WKC='all', WKK=new Set(), WKOPEN=null, WKD=null;
+function wkRender(){ const D=WKD, el=document.getElementById('wk2'); if(!D||!D.games){ el.innerHTML='<div class="none">no kills counted yet (shim/tools/weapon-kills.py)</div>'; return; }
+  const gi=D.games.map((g,i)=>i).filter(i=>WKC==='all'||D.games[i].class===WKC), G=gi.map(i=>D.games[i]), tot=G.reduce((s,g)=>s+g.kills,0);
+  document.getElementById('wksrc').textContent=`· ${G.length} games, ${tot.toLocaleString()} kills${G.some(g=>g.live)?' · a match is being recorded':''} · counted ${ago(D.updated)}`;
+  const kinds=['weapon','vehicle','vehicle gun','turret','grenade','melee','other'], cls=['all','slayer','ctf','infection','other'];
+  document.getElementById('wkf').innerHTML=cls.map(c=>`<a href="#learnings" data-c="${c}" style="font-size:12px;padding:2px 8px;border:1px solid ${WKC===c?'var(--acc)':'var(--line)'};border-radius:4px;color:${WKC===c?'var(--fg)':'var(--dim)'};text-decoration:none">${c}</a>`).join('')+'<span class="k" style="margin:0 6px">|</span>'+
+    kinds.map(k=>`<a href="#learnings" data-k="${k}" style="font-size:12px;padding:2px 8px;border:1px solid var(--line);border-radius:4px;color:${WKK.has(k)?'var(--dim)':'var(--fg)'};text-decoration:${WKK.has(k)?'line-through':'none'}">${k}</a>`).join('');
+  const R=Object.entries(D.weapons).filter(([n,w])=>!WKK.has(w.kind)).map(([n,w])=>{ const pg=gi.map(i=>w.per_game[i]||0), k=pg.reduce((a,b)=>a+b,0), used=pg.filter(x=>x).length, last=pg.length?pg[pg.length-1]:0;
+    return {n, kind:w.kind, kills:k, share:tot?k/tot:0, hs:k?w.headshots*(k/Math.max(1,w.kills))/k:0, used, per:used?k/used:0, best:Math.max(0,...pg), last, pg, betr:w.betrayals}; }).filter(r=>r.kills>0);
+  R.sort((a,b)=>{const x=a[WKS.key],y=b[WKS.key]; return (typeof x==='string'?x.localeCompare(y):(x-y))*WKS.dir;});
+  const spark=pg=>{ const m=Math.max(1,...pg), W=180, H=22; if(pg.length<2) return ''; const pts=pg.map((v,i)=>`${(i*(W/(pg.length-1))).toFixed(1)},${(H-1-v/m*(H-2)).toFixed(1)}`).join(' ');
+    return `<svg width="${W}" height="${H}" style="vertical-align:middle"><polyline points="${pts}" fill="none" stroke="var(--acc)" stroke-width="1.5"/></svg>`; };
+  const cols=[['n','weapon'],['kind','kind'],['kills','kills'],['share','share'],['hs','headshots'],['used','games'],['per','kills a game'],['best','best game'],['last','last game'],['pg','game by game']];
+  el.innerHTML=`<table style="border-collapse:collapse;width:100%;font-size:12.5px"><tr>${cols.map(([k,l])=>`<th data-s="${k}" style="text-align:${k==='n'||k==='kind'||k==='pg'?'left':'right'};cursor:${k==='pg'?'default':'pointer'};white-space:nowrap;padding:3px 6px">${l}${WKS.key===k?(WKS.dir<0?' ▾':' ▴'):''}</th>`).join('')}</tr>`+
+    R.map(r=>`<tr data-w="${E(r.n)}" style="border-top:1px solid var(--line);cursor:pointer"><td style="padding:3px 6px"><b>${E(r.n)}</b></td><td class="k" style="padding:3px 6px">${E(r.kind)}</td><td style="text-align:right;padding:3px 6px"><b>${r.kills.toLocaleString()}</b></td>
+      <td style="text-align:right;padding:3px 6px">${(r.share*100).toFixed(1)}%</td><td style="text-align:right;padding:3px 6px" class="k">${r.hs?Math.round(r.hs*100)+'%':''}</td><td style="text-align:right;padding:3px 6px">${r.used}</td>
+      <td style="text-align:right;padding:3px 6px">${r.per.toFixed(1)}</td><td style="text-align:right;padding:3px 6px">${r.best}</td><td style="text-align:right;padding:3px 6px">${r.last}</td><td style="padding:3px 6px">${spark(r.pg)}</td></tr>`+
+      (WKOPEN===r.n?`<tr><td colspan="10" style="padding:4px 6px 10px"><div style="display:flex;gap:3px;align-items:flex-end;overflow-x:auto;padding-bottom:4px">${r.pg.map((v,i)=>{const g=G[i], m=Math.max(1,...r.pg);
+        return `<div title="${E(g.map)} · ${E(g.mode||g.class)} · ${g.players} players · ${v} of ${g.kills} kills" style="display:flex;flex-direction:column;align-items:center;min-width:34px"><span class="k" style="font-size:10px">${v}</span><div style="width:22px;height:${Math.max(1,Math.round(v/m*60))}px;background:${g.live?'var(--go)':'var(--acc)'};border-radius:2px"></div><span class="k" style="font-size:9.5px;max-width:40px;overflow:hidden;white-space:nowrap">${E((g.map||'?').slice(0,7))}</span></div>`}).join('')}</div></td></tr>`:'')).join('')+'</table>'; }
+document.addEventListener('click',e=>{ const t=e.target.closest('#wk2 th[data-s],#wk2 tr[data-w],#wkf a'); if(!t) return;
+  if(t.dataset.s&&t.dataset.s!=='pg'){ WKS=WKS.key===t.dataset.s?{key:WKS.key,dir:-WKS.dir}:{key:t.dataset.s,dir:t.dataset.s==='n'||t.dataset.s==='kind'?1:-1}; }
+  else if(t.dataset.w!==undefined){ WKOPEN=WKOPEN===t.dataset.w?null:t.dataset.w; }
+  else if(t.dataset.c){ e.preventDefault(); WKC=t.dataset.c; } else if(t.dataset.k){ e.preventDefault(); WKK.has(t.dataset.k)?WKK.delete(t.dataset.k):WKK.add(t.dataset.k); }
+  try{ localStorage.setItem('wk', JSON.stringify({s:WKS,c:WKC,k:[...WKK]})); }catch(_){} wkRender(); });
+try{ const v=JSON.parse(localStorage.getItem('wk')||'null'); if(v){ WKS=v.s||WKS; WKC=v.c||WKC; WKK=new Set(v.k||[]); } }catch(_){}
 function showView(){ const v=location.hash==='#learnings'?'learnings':location.hash==='#you'?'you':location.hash==='#walkers'?'walkers':'work';
   document.getElementById('walkview').hidden=v!=='walkers'; document.getElementById('learnview').hidden=v!=='learnings'; document.getElementById('youview').hidden=v!=='you'; document.getElementById('workview').hidden=v!=='work';
   for(const a of document.querySelectorAll('#tabs a')) a.classList.toggle('on',a.dataset.v===v); }
@@ -198,8 +228,19 @@ class H(BaseHTTPRequestHandler):
         else: b = PAGE.encode(); ct = 'text/html; charset=utf-8'
         self.send_response(200); self.send_header('Content-Type', ct); self.send_header('Content-Length', str(len(b))); self.send_header('Cache-Control', 'no-store'); self.end_headers(); self.wfile.write(b)
 
+def wk_loop():   # the weapon kills table, recounted every minute (shim/tools/weapon-kills.py: only new / growing recordings are read)
+    import importlib.util, threading
+    sp = importlib.util.spec_from_file_location('weapon_kills', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'weapon-kills.py')); m = importlib.util.module_from_spec(sp); sp.loader.exec_module(m)
+    def run():
+        while True:
+            try: m.update(quiet=True)
+            except Exception as e: print('weapon kills:', e, flush=True)
+            time.sleep(60)
+    threading.Thread(target=run, daemon=True).start()
+
 if __name__ == '__main__':
     if len(sys.argv) > 3 and sys.argv[1] == 'task': tasks_cmd(); sys.exit(0)
     if len(sys.argv) > 1 and sys.argv[1] == 'direction': direction_cmd(); sys.exit(0)
+    wk_loop()
     port = int(arg('--port', '8790')); srv = ThreadingHTTPServer(('127.0.0.1', port), H); srv.daemon_threads = True
     print('work board: http://127.0.0.1:%d/' % port, flush=True); srv.serve_forever()

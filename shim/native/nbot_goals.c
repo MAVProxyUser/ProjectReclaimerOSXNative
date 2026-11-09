@@ -90,7 +90,7 @@ static void gl_pen_zone(const float* p) {   // A* goes around: +3 on every floor
 // (GlLane / g_gll: declared in nbot.c before bm_pop, which loads them)
 static int gl_power_tag(const char* tag) {
     static const char* const pw[] = {"rocket", "sniper", "beam_rifle", "spartan_laser", "shotgun", "energy_sword", "hammer", "fuel_rod", "missile", "flamethrower", "machinegun_turret", "plasma_cannon", 0};
-    if (!tag) return 0; for (int i = 0; pw[i]; i++) if (strstr(tag, pw[i])) return 1; return 0; }
+    if (!tag) return 0; char tb[96]; bot_tagkey(tag, tb, sizeof tb); for (int i = 0; pw[i]; i++) if (strstr(tb, pw[i])) return 1; return 0; }
 // power items' spawn points (power-ups, power weapons) from the spawn tracker (nspawns.c: g_hm.sp)
 static int gl_power_spawn_near(const float* p, float r, float* out) {
     int got = 0; float bd = r * r; pthread_mutex_lock(&g_hm_mx);

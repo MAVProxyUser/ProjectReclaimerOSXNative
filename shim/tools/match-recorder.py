@@ -21,6 +21,7 @@ def other_weapon(p):
 def arg(k, d):
     a = sys.argv; return a[a.index(k) + 1] if k in a else d
 PORT = int(arg('--port', '8765')); SECS = float(arg('--seconds', '0')); SERVER = arg('--server', ''); MODE = arg('--mode', '')
+YOU_PLAYS = '--you-plays' in sys.argv   # (observe-public.sh: the user took the observer's controls -- "you" is a real player in this recording)
 OUT = arg('--out', os.path.expanduser('~/Library/Application Support/ReclaimerMac/tracks')); os.makedirs(OUT, exist_ok=True)
 TAG = hashlib.sha1(SERVER.encode()).hexdigest()[:8] if SERVER else 'local'
 
@@ -50,7 +51,7 @@ def main():
             f.write(json.dumps({'start': time.time(), 'map': mp, 'server': TAG, 'mode': MODE, 'variant': (s.get('variant') or {}).get('name') if isinstance(s.get('variant'), dict) else None,
                                 'lanes_live': bool(s.get('lanes_live')),
                                 'engine': (s.get('variant') or {}).get('mode') if isinstance(s.get('variant'), dict) else None,
-                                'match_time_at_start': round(s.get('time') or 0, 1)}) + '\n')   # (the game's match clock: under ~90 s = recorded from its start)   # (lanes_live: the game counts this match's lanes itself; lanes-import.py skips it)
+                                'match_time_at_start': round(s.get('time') or 0, 1), **({'you_plays': True} if YOU_PLAYS else {})}) + '\n')   # (the game's match clock: under ~90 s = recorded from its start)   # (lanes_live: the game counts this match's lanes itself; lanes-import.py skips it)
             print('[rec] recording %s -> %s (match time %.0f s)' % (mp, os.path.basename(path), s.get('time') or 0), flush=True)
             try: feed = get('/stats.json').get('feed_seq', 0)
             except Exception: pass

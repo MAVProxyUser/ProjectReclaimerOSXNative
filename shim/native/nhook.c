@@ -26,6 +26,8 @@
 
 static volatile uint64_t g_img;                 // the recompiled engine's image (guest halo3) as the app logs it
 #include "nhcost.h"                            // the hook cost meter: every hook times itself
+__attribute__((visibility("default"))) uint64_t nh_sm_now(void) { return hc_now(); }                                  // (nrender.m: the stall meters)
+__attribute__((visibility("default"))) void nh_sm_add(int k, uint64_t t0) { if (k >= 0 && k < SM_N) sm_add(k, t0); }
 #include "nhchk.h"                             // the hooks check: every hook / address / tap and whether it works
 static int g_logfd = -1;                         // NHOOK_LOG=<file>: our lines go there too
 
@@ -836,6 +838,9 @@ static void* probe_thread(void* arg) {
 }
 
 // one whole log line of the app (stdout / stderr)
+// NHOOK_NO_TAP=1 (2026-11-08, the full-screen stutter bisect): the app's log lines are read only until the engine's image line
+// (the hooks need its address) -- no match state, chat, voice report, peers from the log after that
+static int g_no_tap;
 static void on_line(const char* p, size_t n) {
     static const char key[] = "engine, image at 0x";
     if (n > 7 && !memcmp(p, "[nhook]", 7)) return;
@@ -855,6 +860,7 @@ static void on_line(const char* p, size_t n) {
             }
     { static FILE* tf; static int ti; if (!ti) { ti = 1; const char* f = getenv("NHOOK_TAP_LOG"); if (f && *f) tf = fopen(f, "a"); }   // NHOOK_TAP_LOG=<file>: every
       if (tf) { fwrite(p, 1, n, tf); fputc('\n', tf); fflush(tf); } }   //  line the hooks read (what a process logs that nobody shows: a server worker)
+    if (g_no_tap) return;
     nst_on_line(p, n);                                // match state and events (nstats.c)
 }
 
@@ -864,13 +870,14 @@ static pthread_mutex_t g_lb_mu = PTHREAD_MUTEX_INITIALIZER;
 static char g_lb[3][4096]; static size_t g_lbn[3];
 static void tap(int fd, const char* p, size_t n) {
     if (fd != 1 && fd != 2) return;
-    pthread_mutex_lock(&g_lb_mu);
+    if (g_no_tap && g_img) return;   // (NHOOK_NO_TAP: after the engine's image line, the app's lines go unread)
+    uint64_t t0 = hc_now(); pthread_mutex_lock(&g_lb_mu); uint64_t t1 = hc_now(); sm_add(SM_TAP_WAIT, t0);
     for (size_t i = 0; i < n; i++) {
         char c = p[i];
         if (c == '\n') { on_line(g_lb[fd], g_lbn[fd]); g_lbn[fd] = 0; continue; }
         if (g_lbn[fd] < sizeof g_lb[fd]) g_lb[fd][g_lbn[fd]++] = c;
     }
-    pthread_mutex_unlock(&g_lb_mu);
+    pthread_mutex_unlock(&g_lb_mu); sm_add(SM_TAP, t1);
 }
 
 static int g_trace_writes;                       // NHOOK_TRACE_WRITES=<n>: log the first n writes to fds 1 / 2
@@ -926,13 +933,21 @@ static int my_getaddrinfo(const char* h, const char* sv, const struct addrinfo* 
 // streams: halo3's sound, the menus, voice) is wrapped; what it wrote goes into the recording while one runs
 #include <AudioToolbox/AudioToolbox.h>
 #include "../src/rec.h"
+static volatile int g_takeover;   // (nvpad.m nh_takeover_install: the user took the observer's controls -- sound back on)
+extern volatile int g_nr_w, g_nr_h;   // (nrender.m: the presented frame's size)
+static void* tk_size_watch(void* a) {   // after a take-over: log the game's frame size when it changes (does it follow the window?)
+    (void)a; int lw = 0, lh = 0; for (int i = 0; i < 600; i++) { if (g_nr_w != lw || g_nr_h != lh) { lw = g_nr_w; lh = g_nr_h; nlog("[nhook] [takeover] the game draws %d x %d", lw, lh); } sleep(1); } return 0; }
+void nh_takeover_fire(void) {
+    { pthread_t th; if (!pthread_create(&th, 0, tk_size_watch, 0)) pthread_detach(th); }
+    g_takeover = 1; const char* f = getenv("NHOOK_TAKEOVER_FILE");   // (shim/tools/observe-public.sh: the visit lasts until the user quits)
+    if (f && *f) { int fd = open(f, O_WRONLY | O_CREAT | O_TRUNC, 0644); if (fd >= 0) { char b[64]; int n = snprintf(b, sizeof b, "%ld\n", (long)time(0)); write(fd, b, n); close(fd); } } }
 typedef struct { AudioUnit au; AURenderCallback cb; void* ref; AudioStreamBasicDescription fmt; int have; } AuWrap;
 static AuWrap g_auw[32]; static int g_nauw; static pthread_mutex_t g_au_mx = PTHREAD_MUTEX_INITIALIZER;
 static AuWrap* au_slot(AudioUnit au) { for (int i = 0; i < g_nauw; i++) if (g_auw[i].au == au) return &g_auw[i]; if (g_nauw >= 32) return 0; AuWrap* w = &g_auw[g_nauw++]; memset(w, 0, sizeof *w); w->au = au; return w; }
 static OSStatus au_tap(void* ref, AudioUnitRenderActionFlags* fl, const AudioTimeStamp* ts, UInt32 bus, UInt32 frames, AudioBufferList* io) {
     AuWrap* w = ref; OSStatus r = w->cb(w->ref, fl, ts, bus, frames, io);
     { static int mute = -1; if (mute < 0) mute = getenv("NHOOK_MUTE_OUTPUT") && strcmp(getenv("NHOOK_MUTE_OUTPUT"), "0");   // (nmic.c: silent test clients)
-      if (mute && !r && io) { for (UInt32 i = 0; i < io->mNumberBuffers; i++) if (io->mBuffers[i].mData) memset(io->mBuffers[i].mData, 0, io->mBuffers[i].mDataByteSize); return r; } }
+      if (mute && !g_takeover && !r && io) { for (UInt32 i = 0; i < io->mNumberBuffers; i++) if (io->mBuffers[i].mData) memset(io->mBuffers[i].mData, 0, io->mBuffers[i].mDataByteSize); return r; } }
     if (r || !g_rec_audio || !io || !w->have || !io->mNumberBuffers || (fl && (*fl & kAudioUnitRenderAction_OutputIsSilence))) return r;
     const AudioStreamBasicDescription* f = &w->fmt; int fl2 = (int)f->mFormatFlags, isf = (fl2 & kAudioFormatFlagIsFloat) != 0, bits = (int)f->mBitsPerChannel;
     if (!(fl2 & kAudioFormatFlagIsNonInterleaved)) {
@@ -967,7 +982,10 @@ static OSStatus my_AudioUnitSetProperty(AudioUnit au, AudioUnitPropertyID id, Au
 #define INTERPOSE(rep, orig) __attribute__((used)) static struct { const void* r; const void* o; } \
     _ip_##orig __attribute__((section("__DATA,__interpose"))) = { (const void*)(rep), (const void*)(orig) }
 // the page's mic switch (nstats.c mic_json, g_mic_muted): the app's capture pulls its samples on the AUHAL's input bus 1
+static OSStatus my_AudioUnitRender_body(AudioUnit au, AudioUnitRenderActionFlags* fl, const AudioTimeStamp* ts, UInt32 bus, UInt32 frames, AudioBufferList* io);
 static OSStatus my_AudioUnitRender(AudioUnit au, AudioUnitRenderActionFlags* fl, const AudioTimeStamp* ts, UInt32 bus, UInt32 frames, AudioBufferList* io) {
+    uint64_t t0 = hc_now(); OSStatus r = my_AudioUnitRender_body(au, fl, ts, bus, frames, io); sm_add(SM_AUR, t0); return r; }   // (the stall meter)
+static OSStatus my_AudioUnitRender_body(AudioUnit au, AudioUnitRenderActionFlags* fl, const AudioTimeStamp* ts, UInt32 bus, UInt32 frames, AudioBufferList* io) {
     { OSStatus vr; if (vmic_render(au, bus, frames, io, &vr)) return vr; }   // (nmic.c: the virtual microphone's samples = the soundboard)
     OSStatus r = AudioUnitRender(au, fl, ts, bus, frames, io);
     if (bus == 1) { HK_ONCE(hm, "AudioUnitRender (mic)"); hk_fire(hm); }
@@ -995,13 +1013,16 @@ INTERPOSE(my_AudioUnitRender, AudioUnitRender);
 
 #include <dispatch/dispatch.h>
 static void vpad_start(void* c) { (void)c; g_vpad_on = nh_vpad_install(); }
+void nh_takeover_install(void);   // nvpad.m
 __attribute__((constructor)) static void nhook_init(void) {
     const char* lf = getenv("NHOOK_LOG");
     if (lf) g_logfd = open(lf, O_WRONLY | O_CREAT | O_APPEND, 0644);
     if (getenv("NHOOK_TRACE_WRITES")) g_trace_writes = atoi(getenv("NHOOK_TRACE_WRITES"));
+    g_no_tap = getenv("NHOOK_NO_TAP") != 0;
     nlog("[nhook] loaded (pid %d)", getpid());
     hk_init(); app_build_pick();                     // the hooks check's items; this app build's addresses (napp_builds.h)
     if (getenv("NHOOK_VPAD") && strcmp(getenv("NHOOK_VPAD"), "0") && getenv("RECLAIMER_PROFILE_DIR"))   // nvpad.m: test identities only
         vpad_start(0);   // (at once: the app may enumerate controllers only early -- 300 ms later it never asked again)
+    if (getenv("NHOOK_TAKEOVER") && strcmp(getenv("NHOOK_TAKEOVER"), "0")) nh_takeover_install();   // (the observer: a click asks for the game in normal mode)
     if (getenv("NHOOK_SELFTEST")) nstats_start();       // shim/tools/nhook-selftest.sh: the stats server without the app
 }

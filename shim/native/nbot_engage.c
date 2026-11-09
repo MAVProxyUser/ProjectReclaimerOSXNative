@@ -23,6 +23,7 @@ static struct { int loaded, on, npiece, nmine; float w[8]; int has_w; struct { c
                 float p_view, p_behind, p_mid, turn_s; EgPiece* lib; int gren_ok; float gren_every, gren_d0, gren_d1;
                 float rd_turn, rd_turn_s, p_killer, p_spot, it_near, it_mid, it_far;
                 float os_pen;   // (behaviour.powerups: the logit the attacker loses against an overshield; target choice)
+                float sw_d[6][6]; int sw_n[6][6];   // (behaviour.inventory.by_pair: the players' switches class -> class, the nearest enemy's median distance)
                 float tw_spacing, tw_within15, p_join, join_s, p_aid, aid_s;   // (teamwork in use: tw_pick() from twset by the game's size)
                 float twset[3][6]; int twhas[3]; } g_eg;   // [0] all team games, [1] 12 players or fewer, [2] more
 static volatile uint32_t g_tw_mate; static volatile double g_tw_until;   // the teammate the walker works with right now (aid / join), until
@@ -68,7 +69,13 @@ static void eg_parse(const char* txt, const char* end, int overlay, int mine) {
         if (nd >= 50 && rate > 0.05f && d1 > d0) { g_eg.gren_ok = 1; g_eg.gren_every = 60.0f / rate; g_eg.gren_d0 = d0; g_eg.gren_d1 = d1; } }
     // behaviour (engage-model.py: the players' radar turns, revenge, power items) -> the walker's radar look and goal draw
     const char* bh = eg_find(txt, "behaviour", end);
-    if (bh && *bh == '{') { const char* be = eg_close(bh); const char* rd = eg_find(bh, "radar", be), * rv = eg_find(bh, "revenge", be), * it = eg_find(bh, "items", be), * pu = eg_find(bh, "powerups", be);
+    if (bh && *bh == '{') { const char* be = eg_close(bh); const char* rd = eg_find(bh, "radar", be), * rv = eg_find(bh, "revenge", be), * it = eg_find(bh, "items", be), * pu = eg_find(bh, "powerups", be), * iv = eg_find(bh, "inventory", be);
+        if (iv && iv < be) { const char* ie2 = eg_close(iv); const char* bp = eg_find(iv, "by_pair", ie2);
+            static const char* const cl6[6] = {"precision", "auto", "sniper", "shotgun", "rocket", "melee"};   // (nbot.c wz_cls's order)
+            if (bp && bp < ie2) { const char* bpe = eg_close(bp);
+                for (int a = 0; a < 6; a++) for (int b = 0; b < 6; b++) { if (a == b) continue; char k[32]; snprintf(k, sizeof k, "%s>%s", cl6[a], cl6[b]); const char* q = eg_find(bp, k, bpe);
+                    if (!q || q >= bpe) continue; const char* qe = eg_close(q); int n = (int)eg_num(q, "n", qe, 0); float d = eg_num(q, "dist_median", qe, -1);
+                    if (n > 0 && d > 0) { g_eg.sw_n[a][b] = n; g_eg.sw_d[a][b] = d; } } } }
         if (pu && pu < be) { const char* pe = eg_close(pu); float wn = eg_num(pu, "attacker_wins_normal", pe, -1), wv = eg_num(pu, "attacker_wins_vs_overshield", pe, -1), nv = eg_num(pu, "duels_vs_overshield", pe, 0);
             if (wn > 0.02f && wn < 0.98f && wv > 0.02f && wv < 0.98f && nv >= 20) g_eg.os_pen = logf(wv / (1 - wv)) - logf(wn / (1 - wn)); }
         if (rd && rd < be) { const char* re = eg_close(rd); g_eg.rd_turn = eg_num(rd, "turn_moving_in_range", re, g_eg.rd_turn); g_eg.rd_turn_s = eg_num(rd, "turn_s_median", re, g_eg.rd_turn_s); }
@@ -132,8 +139,13 @@ static void tw_pick(int players) {   // the teamwork numbers for a game of this 
     int k = players <= 12 ? (g_eg.twhas[1] ? 1 : g_eg.twhas[0] ? 0 : -1) : (g_eg.twhas[2] ? 2 : g_eg.twhas[0] ? 0 : -1);
     if (k < 0) return; const float* v = g_eg.twset[k];
     g_eg.tw_spacing = v[0]; g_eg.tw_within15 = v[1]; g_eg.p_join = v[2]; g_eg.join_s = v[3]; g_eg.p_aid = v[4]; g_eg.aid_s = v[5]; }
-static const char* eg_wcls(const char* tag) {   // the walker's weapon (a tag path) -> engage-model.py's weapon classes
-    if (!tag) return "none";
+// a weapon / item name -> the matching key: lowercase, spaces as underscores (2026-11-08: natively hb_tag_name gives the tag's
+// last path part in CAPITALS with spaces -- "ASSAULT RIFLE" -- so every lookup below written for "assault_rifle" missed: every
+// weapon was class "other" (no per-class distance band), no pickup ever ranked better, no power weapon was seen as one)
+static const char* bot_tagkey(const char* in, char* out, size_t n) {
+    size_t j = 0; for (; in && in[j] && j + 1 < n; j++) { char c = in[j]; out[j] = c == ' ' ? '_' : (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c; } out[j] = 0; return out; }
+static const char* eg_wcls(const char* tag0) {   // the walker's weapon (a tag path or name) -> engage-model.py's weapon classes
+    if (!tag0) return "none"; char tb[96]; const char* tag = bot_tagkey(tag0, tb, sizeof tb);
     static const struct { const char* k; const char* c; } m[] = {{"sniper", "sniper"}, {"beam_rifle", "sniper"}, {"rocket", "rocket"}, {"spartan_laser", "rocket"}, {"fuel_rod", "rocket"},
         {"missile", "rocket"}, {"shotgun", "shotgun"}, {"mauler", "shotgun"}, {"energy_sword", "melee"}, {"energy_blade", "melee"}, {"hammer", "melee"}, {"battle_rifle", "precision"},
         {"carbine", "precision"}, {"magnum", "precision"}, {"dmr", "precision"}, {"assault_rifle", "auto"}, {"smg", "auto"}, {"plasma_rifle", "auto"}, {"spike_rifle", "auto"},

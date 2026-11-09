@@ -177,6 +177,16 @@ cancel it in the app's mods window -- nhook does not touch it (backlog N23).
 - **Weapon pickup is not a button bit**: shim/tools/native-pickup-scan.sh held each of the control record's 64 bits (+0xC8) on a
   Mauler lying on the floor: none swapped it (FIXES.md "The pickup scan"). Walkers keep their loadout (NHOOK_BOT_PICKBIT unset).
 
+### Melee (2026-11-08 evening; backlog N26 -- open)
+The players' numbers come from `shim/tools/melee-model.py` (tracks/melee.json; offline test melee-model-test.sh): melee kills at a
+median 0.65 units, ~2 units closed in the last second, half of them finishing a downed shield; 19% from behind, and an enemy looking
+away within 1.5 units is meleed to death only 20% of the time. The walker presses melee within the players' range (NHOOK_BOT_MELEEPAD,
+RB: the test profiles act like Bumper Jumper -- B is "act / pick up", NHOOK_BOT_PICKPAD), rushes a target whose shield is down,
+pulses the trigger for pull weapons (hammer, sword, sniper, magnum, rockets). NO WALKER MELEE HAS LANDED YET: melee-battle.sh
+(MELEE_ONLY=1 = no shots / grenades) gave 0 melee kills; `shim/tools/melee-scan.py` (do=botpad pad buttons, do=botpkt packet bits,
+do=botbtn control-record bits, each beside a standing player on our server) found nothing -- but its fire-bit control failed too, so
+the scan setup is being fixed first. Shot dispersal (bloom-battle.sh, NHOOK_SHOTLOG) runs only on request.
+
 ## Learning from real players: the pipeline and the tome (2026-11-08)
 
 The walkers learn how real players move and fight from public matches, per map and in aggregate, and the archive grows with
@@ -208,6 +218,10 @@ every match the hook sees.
    Their own inventory and power-ups (nbot.c bot_inv): weapon switch for the range (vpad Y), grenades only in hand, reload after a
    fight (vpad RB tap), pickups (RB held), camo = hold fire until close, an overshield = fights worth more; an overshielded enemy is a
    worse target (attackers win 54% vs 77%: behaviour.powerups), a camo'd one unseen beyond 8 units. NHOOK_BOT_NOINV=1 = off.
+   Its weapon choice in a fight, in order: an empty magazine (ammo field from ammo-scan.py, once found) -> the WEAPON ZONES (the
+   players' kills on targets standing where its target stands, by weapon class, over each class's carried share:
+   tracks/maps/<map>.wzones.txt from weapon-kills.py) -> the players' own switch distance for that pair (behaviour.inventory) ->
+   the distance bands. NB: natively hb_tag_name gives "ASSAULT RIFLE"; every walker lookup goes through bot_tagkey.
 5. **Checking them.** `walker-battle.sh` (WB_IDS, WB_WATCH, DED_GAME / DED_MAP on the server) + `engage-compare.py`
    (fight-likeness against the players on the same map) + `walker-compare.py` (movement); `native-firefight.sh` for Firefight.
    **Coaching them** (`walker-coach.py`): coach.py's report per walker against the human winners -> each measure moves one knob
@@ -217,6 +231,13 @@ every match the hook sees.
    game vs the map before it vs everything: the surprises, tracks/reviews/) -> engage-model.py -> walker-coach.py on that map against
    that game's winners (x2) and the map's -> tracks/learn-loop.json. Walkers never join public servers; they are measured against
    the players.
+   **The plan** (`plan-run.sh [step]`): sample-large -> sample-small -> refit -> spar-ffa -> spar-teams -> firefight -> learn,
+   tracks/plan.txt; a step waits while any Project Reclaimer runs.
+   **Playing the observer's game**: click its window -> it relaunches in normal mode on that server (your settings, full
+   resolution, your controller), recorded with you as a player, until you quit (OBS_PLAY_FIRST=1: the first visit of a plan is
+   yours). The in-place take-over of a --background game cannot work: it renders 640 x 360 and gets no controller input.
+   **Kills by weapon** (`weapon-kills.py`, the Learnings tab, recounted every minute by the work board): every recorded match's
+   kill feed by weapon / vehicle / gunner seat / grenade / melee, game by game.
 6. **Watching it all.** `python3 shim/tools/workboard.py` (http://127.0.0.1:8790/): what runs, the direction, the task list, "What the
    game is learning" (`python3 shim/tools/learnings.py`: findings with their sample sizes), "You" (`python3 shim/tools/coach.py`:
    your own public matches -- the recorder marks your slot -- against the winners, measure by measure), the tome's coverage grid, the observer's log; `workboard.py task "..." doing|next|done` / `workboard.py direction "..."`.

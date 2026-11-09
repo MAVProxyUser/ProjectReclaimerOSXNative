@@ -252,6 +252,55 @@ def main():
         items.append(item('%s: fight distance' % mname(mp), 'Fights start at %.0f units (median; middle half %.0f-%.0f).' % (dd[len(dd) // 2], dd[len(dd) // 4], dd[3 * len(dd) // 4]), len(sub), mp))
     sec('Maps', items)
 
+    # ---- weapon zones (shim/tools/weapon-kills.py -> tracks/maps/<map>.wzones.txt: the walker's weapon choice by where the target
+    # stands): spots where one weapon class takes far more of the kills than its share of the weapons carried on that map
+    items = []
+    CLN = {'precision': 'precision rifles (BR / Carbine / Magnum)', 'auto': 'automatics', 'sniper': 'snipers', 'shotgun': 'shotguns', 'rocket': 'rockets / lasers', 'melee': 'swords / hammers'}
+    for fz in sorted(glob.glob(os.path.join(TR, 'maps', '*.wzones.txt'))):
+        mp = os.path.basename(fz)[:-len('.wzones.txt')]; held = {}; cells = {}
+        for ln in open(fz):
+            t = ln.split()
+            if not t or t[0] == 'wzones': continue
+            if t[0] == 'held': held = {k: float(v) for k, v in (x.split('=') for x in t[1:])}; continue
+            cells[(int(t[0]), int(t[1]))] = {k: int(v) for k, v in (x.split('=') for x in t[2:])}
+        if not cells: continue
+        sp = read_spawns(mp); found = []
+        for (cx, cy) in cells:
+            by = Counter()
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1): by.update(cells.get((cx + dx, cy + dy), {}))
+            kt = sum(by.values())
+            if kt < 20: continue
+            for c, kc in by.items():
+                hs = held.get(c, 0)
+                if kc < 8 or hs < 0.003: continue
+                e = (kc + 0.5) / (kt + 3) / hs
+                if e >= 2.5 and kc / kt >= 0.25: found.append((e, c, cx, cy, kc, kt, hs))
+        found.sort(reverse=True); pick = []
+        for f in found:
+            if all(abs(f[2] - q[2]) > 3 or abs(f[3] - q[3]) > 3 for q in pick) and len(pick) < 3: pick.append(f)
+        for e, c, cx, cy, kc, kt, hs in pick:
+            x, y = (cx + 0.5) * 6, (cy + 0.5) * 6; near = min(sp, key=lambda s_: (s_[0] - x) ** 2 + (s_[1] - y) ** 2) if sp else None
+            tag = (' near the %s' % wname(near[2])) if near and (near[0] - x) ** 2 + (near[1] - y) ** 2 < 225 else ''
+            items.append(item('%s: %s own (%.0f, %.0f)%s' % (mname(mp), CLN.get(c, c), x, y, tag), 'they make %s of the %d kills on players standing within ~9 units of it while being %s of the weapons carried on this map (%.1fx): a walker with one switches to it for a target there.' % (pc(kc / kt), kt, pc(hs), e), kt, mp))
+    sec('Weapon zones', items)
+
+    # ---- the players' own inventory (recordings with the other-weapon / camo columns, since 2026-11-08 15:32)
+    items = []
+    SW = [r for r in R if r.get('kind') == 'wswitch' and r['class'] != 'infection']; CM = [r for r in R if r.get('kind') == 'camo' and r['class'] != 'infection']
+    if SW:
+        pairs = Counter((r['frm_c'], r['to_c']) for r in SW)
+        for (a_, b_), n in pairs.most_common(4):
+            ds = sorted(r['dist'] for r in SW if (r['frm_c'], r['to_c']) == (a_, b_) and r['dist'] is not None)
+            items.append(item('Switching %s -> %s' % (a_, b_), '%d switches; the nearest enemy was %.0f units away (median), %s of them in a fight.' % (n, ds[len(ds) // 2] if ds else 0,
+                pc(sum(r['fight'] for r in SW if (r['frm_c'], r['to_c']) == (a_, b_)) / n)), n))
+    if CM:
+        fd = sorted(r['first_shot_dist'] for r in CM if r['first_shot_dist'] is not None)
+        items.append(item('Under active camo', '%d camo stretches (median %.0f s): players fire %s of the time, open fire at %s units (median), get %.2f kills and die in %s of them.' % (len(CM),
+            sorted(r['dur'] for r in CM)[len(CM) // 2], pc(sorted(r['fired_share'] for r in CM)[len(CM) // 2]), '%.0f' % fd[len(fd) // 2] if fd else '-',
+            sum(r['kills'] for r in CM) / len(CM), pc(sum(r['died'] for r in CM) / len(CM))), len(CM)))
+    sec('Inventory: switches and camo', items)
+
     # ---- radar, revenge, power items (the behaviour records)
     items = []
     C = [r for r in R if r.get('kind') == 'contact' and r['class'] != 'infection']

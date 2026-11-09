@@ -1078,6 +1078,11 @@ static void slow_watch(double now, double fps, int in_match) {
         double rt = HCD(HC_OV) + HCD(HC_AIMT) + HCD(HC_VIEW), et = HCD(HC_DEL) + HCD(HC_AIM), sn = HCD(HC_SNAP); unsigned long sn_n = (unsigned long)(g_hc[HC_SNAP].calls - hc_last[HC_SNAP][1]);
         nlog("[nhook] [perf+] footprint %.0f MB, CPU %.2f cores; nhook: render thread %.0f us/frame (overlay %.0f, aim tick %.0f, camera hook %.0f), engine thread %.1f ms/s (bullets + aim), snapshot %.1f ms each",
              fp, (cpu - cpu_last) / dt, rt * 1e6 / fd, HCD(HC_OV) * 1e6 / fd, HCD(HC_AIMT) * 1e6 / fd, HCD(HC_VIEW) * 1e6 / fd, et * 1e3 / dt, sn_n ? sn * 1e3 / sn_n : 0);
+        // the stall meters (nhcost.h): the longest single call of each place nhook runs in the app's threads, this window
+        { char b[700]; int q = 0; extern unsigned long nr_depth_count(void), nr_depth_passes(void);
+          for (int k = 0; k < SM_N && q < (int)sizeof b - 60; k++) { uint64_t m = __atomic_exchange_n(&g_sm_max[k], 0, __ATOMIC_RELAXED), c = __atomic_exchange_n(&g_sm_n[k], 0, __ATOMIC_RELAXED);
+              if (c) q += snprintf(b + q, sizeof b - (size_t)q, "%s%s %.2f", q ? ", " : "", g_sm_name[k], (double)m / f * 1e3); }
+          nlog("[nhook] [stall] longest single call in 10 s (ms): %s; depth textures in the seen table %lu, depth passes %lu", q ? b : "-", nr_depth_count(), nr_depth_passes()); }
         #undef HCD
     }
     // the [slow] line: in a match, fps below half the session's best for 3 windows
@@ -1253,6 +1258,13 @@ static void st_snapshot(StBuf* s) {
                       t->longest > (t->alive ? now - t->life_start : 0) ? t->longest : (t->alive ? now - t->life_start : 0), t->dist, t->top_speed);
         if (g_st_var_ok) st_player_traits(s, pl[k].rec);
         sb_put(s, "}");
+        // NHOOK_WPNDUMP=1 (shim/tools/ammo-scan.py; 2026-11-08: the walker's ammo): the local player's held weapon object, 0x300 bytes
+        // as hex, with its shots counter, every snapshot while alive on foot -- the scan finds the 16-bit field that drops one a shot
+        { static int wdmp = -1; if (wdmp < 0) wdmp = getenv("NHOOK_WPNDUMP") && strcmp(getenv("NHOOK_WPNDUMP"), "0");
+          if (wdmp && you && have && !dead && *(const uint32_t*)(d + 0x10) == 0xFFFFFFFFu) { int ws2 = *(const int8_t*)(d + 0x262); const uint32_t* wp2 = (const uint32_t*)(d + 0x268);
+              uint64_t wd2 = (ws2 >= 0 && ws2 < 4) ? ST_DATUM(wp2[ws2]) : 0; static uint8_t wb[0x300]; uint32_t wdef = 0;
+              if (wd2 && hb_read(wd2, wb, sizeof wb)) { memcpy(&wdef, wb, 4); static char hx[0x300 * 2 + 1]; for (int q = 0; q < 0x300; q++) { static const char* H = "0123456789abcdef"; hx[2 * q] = H[wb[q] >> 4]; hx[2 * q + 1] = H[wb[q] & 15]; } hx[0x600] = 0;
+                  nlog("[wpndump] %.2f shots %d slot %d weapon %08x %s %s", now, t ? t->shots : -1, ws2, wp2[ws2], hb_tag_name(wdef), hx); } } }
         if (g_tks.rowopen) {   // (ntracks.c: the same player in the recording's line -- no name in the file)
             int al = have && !dead; float yw = 0, pt = 0; char wn[64] = "", vn[64] = "", on[64] = ""; int gr = 0;
             if (al) { const float* av = (const float*)(d + 0x1a0); float ah = sqrtf(av[0] * av[0] + av[1] * av[1]); if (isfinite(av[0]) && ah + fabsf(av[2]) > 0.5f) { yw = atan2f(av[1], av[0]) * 57.2958f; pt = atan2f(av[2], ah) * 57.2958f; }
@@ -1340,7 +1352,7 @@ static void* st_snap_thread(void* a) {
         if (g_hc_off[HC_SNAP]) { usleep(100000); continue; }   // (the hook cost measurement: snapshots paused)
         static int prof = -1; if (prof < 0) prof = getenv("NHOOK_RD_PROF") != 0; t_rd_prof = prof;
         unsigned long n0 = t_rd_n, b0 = t_rd_b, h0 = t_oc_hits; uint64_t t0 = hc_now(); StBuf s = {0};
-        t_tls_memo = 1; t_sb_memo = 1; st_ocache_fill(); st_snapshot(&s); t_noc = 0; t_tls_memo = 0; t_sb_memo = 0; hc_add(HC_SNAP, t0);
+        t_tls_memo = 1; t_sb_memo = 1; st_ocache_fill(); st_snapshot(&s); t_noc = 0; t_tls_memo = 0; t_sb_memo = 0; hc_add(HC_SNAP, t0); sm_add(SM_SNAP, t0);
         g_snap_rd_n = t_rd_n - n0; g_snap_rd_b = t_rd_b - b0; g_snap_oc_hits = t_oc_hits - h0;
         if (prof) { static double tl; double nw = mono_s(); if (nw - tl > 10) { tl = nw; Dl_info di; uintptr_t base = 0; if (dladdr((void*)&st_snapshot, &di)) base = (uintptr_t)di.dli_fbase;
             nlog("[nhook] [rdprof] the snapshot: %lu system calls, %lu bytes a run (%lu reads answered from the %.1f MB object copy); sites over 10 s (nhook.dylib offsets, atos -o shim/build/nhook.dylib -l 0x0):", g_snap_rd_n, g_snap_rd_b, g_snap_oc_hits, g_snap_oc_mb100 / 100.0);
@@ -1396,7 +1408,8 @@ static int st_control(const char* act, const char* qs) {
         int live = g_nr_last > 0 && mono_s() - g_nr_last < 2.0; char err[200];
         return rec_start(ao, secs, g_st_curmap[0] ? g_st_curmap : "game", ao || !live ? 0 : g_nr_w, ao || !live ? 0 : g_nr_h, err, sizeof err); }
     if (!strcmp(act, "recstop")) { rec_stop(); return 1; }
-    if (!strcmp(act, "spar") || !strcmp(act, "walk") || !strcmp(act, "botbtn")) return bot_control(act, qs);   // the sparring aim / walker / button scans (nbot.c, test clients)
+    if (!strcmp(act, "takeover")) { if (!getenv("NHOOK_TAKEOVER")) return 0; void nh_takeover_now(void); nh_takeover_now(); return 1; }   // (the observer's game: the user's controls, nvpad.m)
+    if (!strcmp(act, "spar") || !strcmp(act, "walk") || !strcmp(act, "botbtn") || !strcmp(act, "botpad") || !strcmp(act, "botpkt")) return bot_control(act, qs);   // the sparring aim / walker / button scans (nbot.c, test clients)
     if (!strcmp(act, "mic")) { const char* v = strstr(qs, "on="); if (!v) return 0; mic_muted(); g_mic_muted = atoi(v + 3) ? 0 : 1; return 1; }
     if (!strcmp(act, "forensic")) return fx_control(qs);       // archive / voice audio / consent (forensic.c)
     if (!strcmp(act, "hookab")) return hc_control(qs);           // the hook cost meter's on/off measurement

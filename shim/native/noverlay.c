@@ -67,7 +67,8 @@ static int nov_camera(float* vp, float aspect) {
 
 // ---- objects (hitbox.c hb_collect) --------------------------------------------------------------------------------
 typedef struct { float c[3], r, o[3], vel[3]; int type; uint32_t handle; uint64_t p; uint32_t def; uint16_t nmsz, nmoff;
-    float health, shield, camo; int team, seat, wslot, dead; uint32_t weapons[4], parent, owner; int8_t gren[4]; int rcount; uint16_t roff; } NovObj;
+    float health, shield, camo; int team, seat, wslot, dead; uint32_t weapons[4], parent, owner; int8_t gren[4]; int rcount; uint16_t roff;
+    float aim[3]; } NovObj;   // (aim: a unit's look direction, +0x1a0 -- the recordings' yaw; nbot.c: is its back to the walker)
 static uint8_t g_nov_tab[HB_MAXOBJ * 0x18]; static int g_nov_hi;
 // nov_collect's static buffers are shared: the overlay (render thread) and the sparring aim / walker (nbot.c, its own thread)
 // take this lock around it; g_nov_units_only (under it) = 1 bipeds only, 2 vehicles only, whatever the overlay switches say
@@ -94,7 +95,7 @@ static int nov_collect(NovObj* out, int max) {
         { int16_t rs = *(const int16_t*)(dh + 0x13a); if ((*(const uint32_t*)(dh + 4) >> 11) & 1) rs -= 0x20; o->rcount = rs > 0 ? rs / 10 : 0; o->roff = *(const uint16_t*)(dh + 0x13c); }
         o->dead = (*(const uint32_t*)(dh + 0x110) >> 2) & 1; o->health = o->dead ? 0 : *(const float*)(dh + 0xF4); o->shield = o->dead ? 0 : *(const float*)(dh + 0xF8);
         if (unit) { o->team = *(const int32_t*)(dh + 0x174); o->seat = *(const int16_t*)(dh + 0x24E); o->wslot = *(const int8_t*)(dh + 0x262);
-            memcpy(o->weapons, dh + 0x268, 16); memcpy(o->gren, dh + 0x294, 4); o->camo = *(const float*)(dh + 0x360); }
+            memcpy(o->weapons, dh + 0x268, 16); memcpy(o->gren, dh + 0x294, 4); o->camo = *(const float*)(dh + 0x360); memcpy(o->aim, dh + 0x1a0, 12); }
         o->owner = t == 5 ? *(const uint32_t*)(dh + 0xC0) : 0xFFFFFFFFu;
         if (!(o->r > 0.001f && o->r < 50.f) || o->c[0] != o->c[0]) continue; n++;
     }
@@ -254,6 +255,41 @@ static void nov_aim_shot(const uint8_t* arr, const uint8_t* data, const uint8_t*
       a->rcount = (uint8_t)(rc > 32 ? 0 : rc); if (a->rcount) memcpy(a->perm, tp + roff + (size_t)a->rcount * 8, a->rcount); }
     __atomic_store_n(&a->seq, w + 1, __ATOMIC_RELEASE); __atomic_store_n(&g_nov_aim_w, w + 1, __ATOMIC_RELEASE); g_nov_aim_n++;
 }
+// ---- the bullet log (NHOOK_SHOTLOG=<file>, %p = this process's id; 2026-11-08, the user: "what can you tell me about the 'random
+// bloom' on both the AR and the BR ... do they seem random? any disadvantages or flaws under certain situations?"): every deleted
+// projectile with its owner's state at that moment -- the shooter's aim vector (unit +0x1a0: where it shoots), its velocity
+// (+0x74) and the weapon in its hand, the projectile's start (+0x1e8), end (+0x1c) and distance travelled (+0x1b0), the estimated
+// victim. halo3 resolves bullets inside the tick that fires them, so the owner's aim here is the aim the shot was fired with
+// (within the tick's own update order). On our dedicated server this is the authoritative simulation; on a client it is that
+// client's own view. Lines (shim/tools/bloom.py): t owner weapon projectile victim sx sy sz ex ey ez trav ax ay az vx vy vz
+typedef struct { double t; uint32_t owner, wdef, pdef, victim; float s[3], e[3], trav, aim[3], vel[3]; } NovSlog;
+static NovSlog g_slog[16384]; static volatile unsigned g_slog_w;
+static int nov_slog_on(void) { static int on = -1; if (on < 0) { const char* e = getenv("NHOOK_SHOTLOG"); on = e && *e; } return on; }
+static void nov_slog_name(char* o, size_t n, uint32_t def) { snprintf(o, n, "%s", def ? hb_tag_name(def) : "-"); for (char* q = o; *q; q++) if (*q == ' ') *q = '_'; }
+static void* nov_slog_thread(void* a) {
+    (void)a; pthread_setname_np("shim-shotlog"); char path[1024]; const char* e = getenv("NHOOK_SHOTLOG"); size_t j = 0;
+    for (const char* q = e; *q && j + 12 < sizeof path; q++) {   // (%p = the process id, %r = NHOOK_ROLE: "server" on our dedicated server, else "client")
+        if (q[0] == '%' && q[1] == 'p') { j += (size_t)snprintf(path + j, sizeof path - j, "%d", getpid()); q++; }
+        else if (q[0] == '%' && q[1] == 'r') { const char* ro = getenv("NHOOK_ROLE"); j += (size_t)snprintf(path + j, sizeof path - j, "%s", ro && *ro ? ro : "client"); q++; }
+        else path[j++] = *q; } path[j] = 0;
+    FILE* f = fopen(path, "a"); if (!f) { nlog("[nhook] [shotlog] cannot open %s", path); return 0; }
+    nlog("[nhook] [shotlog] every bullet -> %s", path); unsigned r = 0;
+    for (;;) { usleep(500000); unsigned w = __atomic_load_n(&g_slog_w, __ATOMIC_ACQUIRE); if (w - r > 16384) r = w - 16384;
+        for (; r != w; r++) { const NovSlog* x = &g_slog[r & 16383]; char wn[48], pn[48]; nov_slog_name(wn, sizeof wn, x->wdef); nov_slog_name(pn, sizeof pn, x->pdef);
+            fprintf(f, "%.4f %08x %s %s %08x %.3f %.3f %.3f %.3f %.3f %.3f %.2f %.5f %.5f %.5f %.3f %.3f %.3f\n", x->t, x->owner, wn, pn, x->victim, x->s[0], x->s[1], x->s[2],
+                    x->e[0], x->e[1], x->e[2], x->trav, x->aim[0], x->aim[1], x->aim[2], x->vel[0], x->vel[1], x->vel[2]); }
+        fflush(f); } return 0; }
+static void nov_slog_add(const uint8_t* arr, const uint8_t* data, const uint8_t* p, uint32_t own, uint32_t vic) {
+    static int started; if (!started) { started = 1; pthread_t th; if (!pthread_create(&th, 0, nov_slog_thread, 0)) pthread_detach(th); }
+    int hi = *(const int32_t*)(arr + 0x3c); if (own == 0xFFFFFFFFu || hi <= 0 || hi > 65536) return; int oi = own & 0xFFFF; if (oi >= hi) return;
+    const uint8_t* oe = data + (size_t)oi * 0x18; if (oe[3] != 0 || *(const uint16_t*)oe != (uint16_t)(own >> 16)) return;   // (a biped's bullet)
+    const uint8_t* op = *(uint8_t* const*)(oe + 0x10); if (!op) return;
+    unsigned k = __atomic_load_n(&g_slog_w, __ATOMIC_RELAXED); NovSlog* x = &g_slog[k & 16383];
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); x->t = ts.tv_sec + ts.tv_nsec * 1e-9; x->owner = own; x->victim = vic; x->pdef = *(const uint32_t*)p; x->wdef = 0;
+    { int ws = *(const int8_t*)(op + 0x262); uint32_t wh = (ws >= 0 && ws < 4) ? ((const uint32_t*)(op + 0x268))[ws] : 0xFFFFFFFFu;
+      if (wh != 0xFFFFFFFFu && (int)(wh & 0xFFFF) < hi) { const uint8_t* we = data + (size_t)(wh & 0xFFFF) * 0x18; const uint8_t* wp = *(uint8_t* const*)(we + 0x10); if (wp && *(const uint16_t*)we == (uint16_t)(wh >> 16)) x->wdef = *(const uint32_t*)wp; } }
+    memcpy(x->s, p + 0x1e8, 12); memcpy(x->e, p + 0x1c, 12); memcpy(&x->trav, p + 0x1b0, 4); memcpy(x->aim, op + 0x1a0, 12); memcpy(x->vel, op + 0x74, 12);
+    __atomic_store_n(&g_slog_w, k + 1, __ATOMIC_RELEASE); }
 static void on_object_delete_body(uint64_t* ctx) {   // (x0: the guest context the app's own object_delete gets -- read through rd: checked)
     g_nov_del_calls++;
     uint64_t c2[2], tls = 0; static uint32_t idx = 0xFFFFFFFFu;
@@ -266,6 +302,11 @@ static void on_object_delete_body(uint64_t* ctx) {   // (x0: the guest context t
     uint8_t* data = *(uint8_t**)(arr + 0x48); int i = h & 0xFFFF; if (!data || i >= *(int32_t*)(arr + 0x20)) return;
     uint8_t* e = data + (size_t)i * 0x18; if (e[3] != 5 || *(uint16_t*)e != (uint16_t)(h >> 16)) return;   // projectiles only
     uint8_t* p = *(uint8_t**)(e + 0x10); if (!p) return;
+    // (2026-11-08: the app deletes most projectiles TWICE, ~1 ms apart -- the bullet log had every bullet twice, the same start / end
+    //  / length, other bullets' deletes in between -- so shots, the aim meter, tracers and the bullet log counted each one twice: a
+    //  handle among the last 256 projectile deletes is skipped. NHOOK_DEL_DUPS=1 = the old double count)
+    { static int dups = -1; if (dups < 0) dups = getenv("NHOOK_DEL_DUPS") != 0; static uint32_t recent[256]; static unsigned rn;
+      if (!dups) { for (int k = 0; k < 256; k++) if (recent[k] == h) return; recent[rn++ & 255] = h; } }
     { uint32_t own = *(uint32_t*)(p + 0xC0), vic = 0xFFFFFFFFu; const float* ip = (const float*)(p + 0x1c); int hi = *(int32_t*)(arr + 0x3c);
       static int noaim = -1; if (noaim < 0) noaim = getenv("NHOOK_NO_AIM") != 0;   // (hits come from the aim meter's hitbox test; this pass only without it --
       extern volatile unsigned long g_nr_frames;                                     //  or without frames: a dedicated server's aim meter never runs)
@@ -274,7 +315,8 @@ static void on_object_delete_body(uint64_t* ctx) {   // (x0: the guest context t
           const float* c = (const float*)(bp + 0x1c); float r2 = c[3] + 0.1f, dx = ip[0] - c[0], dy = ip[1] - c[1], dz = ip[2] - c[2];
           if (r2 > 0 && r2 < 5 && dx * dx + dy * dy + dz * dz <= r2 * r2) { vic = bh; break; } }
       unsigned q = __atomic_load_n(&g_nov_shot_n, __ATOMIC_RELAXED) & 8191; g_nov_shot[q].owner = own; g_nov_shot[q].victim = vic; g_nov_shot[q].def = *(uint32_t*)p;
-      __atomic_store_n(&g_nov_shot_n, g_nov_shot_n + 1, __ATOMIC_RELEASE); }   // (one writer: the engine thread)
+      __atomic_store_n(&g_nov_shot_n, g_nov_shot_n + 1, __ATOMIC_RELEASE);   // (one writer: the engine thread)
+      if (nov_slog_on()) nov_slog_add(arr, data, p, own, vic); }
     if (!g_hc_off[HC_AIM]) { uint64_t t1 = hc_now(); nov_aim_shot(arr, data, p); hc_add(HC_AIM, t1); }
     if (!nov_feat(NOV_TRC)) return;   // (the tracer record: only while tracers are on)
     unsigned k = __atomic_fetch_add(&g_nov_imp_n, 1, __ATOMIC_RELAXED) & 255; NovImp* r = &g_nov_imp[k];
@@ -325,7 +367,7 @@ static void nov_aim_tick_body(void) {   // nrender.m, every frame (the render th
     }
 }
 void nov_aim_tick(void) { if (g_hc_off[HC_AIMT]) return; uint64_t t0 = hc_now(); nov_aim_tick_body(); hc_add(HC_AIMT, t0); }
-static void on_object_delete(uint64_t* ctx) { if (g_hc_off[HC_DEL]) return; uint64_t t0 = hc_now(); on_object_delete_body(ctx); hc_add(HC_DEL, t0); }   // (timed: nhcost.h)
+static void on_object_delete(uint64_t* ctx) { if (g_hc_off[HC_DEL]) return; uint64_t t0 = hc_now(); on_object_delete_body(ctx); hc_add(HC_DEL, t0); sm_add(SM_DEL, t0); }   // (timed: nhcost.h)
 static const float g_nov_teamcol[8][3] = {{1, 0.3f, 0.25f}, {0.35f, 0.6f, 1}, {0.35f, 1, 0.35f}, {1, 0.6f, 0.15f}, {0.75f, 0.4f, 1}, {1, 0.9f, 0.2f}, {0.75f, 0.55f, 0.35f}, {1, 0.55f, 0.8f}};
 
 // ---- zones (hitbox.c hbz_load / hbz_outline / hbz_draw, the loader's line mode): kill volumes (red) and safe zones (green)
