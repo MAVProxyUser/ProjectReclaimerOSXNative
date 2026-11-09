@@ -3383,6 +3383,7 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   public walker's file). [firegate]'s "aim line not through it" counts what the hit test holds back.
   A/B (fire-ab.sh, 4 x 60 s each side, a 36-player Last Resort match, mostly assault rifles): the neck (-1.5) -- 486 shots, accuracy
   54.3%, 5.1 hits a trigger second, 9 kills / 8 deaths; the upper chest (-3.0) -- 388 shots, 42.5%, 3.7, 4 / 10.
+  Higher (-0.75) vs the neck (-1.5), same match: 48.0% vs 50.1%, 3.8 vs 3.7 hits a trigger second, 5 / 6 vs 8 / 6: the neck stays.
 - **The work board learns again while the walker plays; its Walkers tab shows the public walker** (2026-11-09 11:18;
   shim/tools/refresh-loop.sh playing(), shim/tools/workboard.py pubwalker()) — WHY: the user: "are we no longer learning and updating
   the work board, etc?" The 20-minute refresh waits while the user plays, and it took the headless public walker for the user: it had
