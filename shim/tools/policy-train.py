@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The walker's MOVEMENT POLICY, learnt from the best players (2026-11-09; the user: "kampy [the best player] simply moves more nimble,
+"""The walker's MOVEMENT POLICY, learnt from the best players (2026-11-09; the user: "[the best player] simply moves more nimble,
 and engages faster ... our walker does not move with that much *authority* and confidence"; "this is a m4 mac so make sure the special
 GPU is being used ... M4 has AI cores... use them for walker logic").
 
