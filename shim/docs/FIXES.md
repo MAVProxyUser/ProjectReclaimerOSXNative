@@ -3448,6 +3448,20 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   brain is refused by a v2 body and the other way round: rebuild both). Lead latency = rtt x NHOOK_BOT_LEAD_RTT (1.25 / 1000 -- 0.08 s
   at 64 ms, 0.18 s at 145 ms); a NHOOK_BOT_LEAD_LAT in the live file still wins. A review's kills = the scoreboard's since the window
   began (the old count when the body has none); the review line gives the ping.
+- **One player in the whole window, beside a map of just that player** (2026-11-09 17:10; stats_page.html #pfs / openPfs / drawPlayerMap /
+  trackSnap, shim/tools/stats-proxy.py /trail.json) — WHY: the user: the player details popup "full window, and it should side by side a
+  version of the heatmap with JUST my player visualized". LOGIC: clicking a name opens the details over the whole window (the #det panel
+  moves in; X, Esc or the name again closes it) beside a canvas of that player alone on the map picture: a heatmap of its positions (cells
+  of 7 screen points, the page's colour ramp by time spent), its path (the last 30 s brighter), its death spots (white X), where it stood
+  when its kill count rose (yellow), where it is now. The path: this match from the walker's own recording through the relay on 8765
+  (/trail.json?slot=&map=: the newest tracks/*.jsonl.gz of that map, written in the last 90 s; positions every 0.5 s alive; a slot whose
+  counters go back down changed hands and starts again; cached 10 s), else what the page has seen since it opened.
+- **Islands of the floor graph: walk out instead of standing there** (2026-11-09 17:15; nbot.c the path planner) — WHY: on Hugegrass the
+  walker spawned on a part of the graph joined to the rest by nothing it knew and stood at its base for 6 minutes, every goal "no path"
+  (the player view above showed it: 148 units in 6 min). LOGIC: 3 failed plans within 8 s -> 4 s walking straight at the last goal,
+  hopping, unless fighting ("[nav] no path 3 times in 8 s ... an island of the floor graph"). And the links were learned from this match's
+  players: shim/tools/nav-portals.py hugeass_remastered_mcc (2,614 crossings between parts, 178 portals seen 3+ times) -> maptop/
+  <map>.portals.txt, loaded by the next brain's nav (a hot takeover).
 - **walker-public.sh --mods: a walker joins a mod server** (2026-11-09 17:00) — WHY: the user moved to a big mod server (2 mods, ~4 GB);
   when a server needs mods the PC lacks, the app opens its "required mods window" -- nobody clicks it in a headless walker -- and the loop
   stopped any join that took over 180 s, mid-download. LOGIC: --mods adds the app's own --download-mods to the join ("the host's game

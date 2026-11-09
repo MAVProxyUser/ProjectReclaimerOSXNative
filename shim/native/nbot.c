@@ -1816,8 +1816,15 @@ static void bot_step_body(void) {
                 if (bi >= 0) { const NovObj* t = &veh[bi]; float dx = t->c[0] - pos[0], dy = t->c[1] - pos[1], d = sqrtf(dx * dx + dy * dy) + 1e-3f, back = t->r + 1.5f;
                     float tp[3] = {t->c[0] - dx / d * back, t->c[1] - dy / d * back, t->c[2]}; int gn = nav_node_at(tp); if (gn >= 0) goal = gn; } }
             else if (mode == 1 && goal < 0) goal = nav_pick_roam(cur);
-            if (goal >= 0 && need) { int np = nav_astar(cur, goal, path, 8192); tplan = now;
-                if (np < 2) { if (mode != 2) { nav_say("  [nav] no path from node %d to %d: a new goal\n", cur, goal); goal = -1; }
+            // ISLANDS (2026-11-09, Hugegrass: the walker spawned on a part of the floor graph joined to the rest by nothing it knew -- 6 min
+            //  stood at its base, every goal "no path"): 3 failed plans within 8 s -> 4 s walking straight at the last goal, hopping
+            //  (the graph misses a drop, a ramp edge, a lift: the legs find it; nav-portals.py learns it from players afterwards)
+            static int npf; static double npt0, npu; static float npto[3];
+            if (goal >= 0 && need) { int g0 = goal; int np = nav_astar(cur, goal, path, 8192); tplan = now;
+                if (np < 2) { if (now - npt0 > 8.0) { npt0 = now; npf = 0; }
+                              if (++npf >= 3 && now > npu) { nav_pos(g0, npto); npu = now + 4.0; npf = 0;
+                                  nav_say("  [nav] no path 3 times in 8 s from node %d: walking straight at (%.1f %.1f) for 4 s, hopping (an island of the floor graph)\n", cur, npto[0], npto[1]); }
+                              if (mode != 2) { nav_say("  [nav] no path from node %d to %d: a new goal\n", cur, goal); goal = -1; }
                               else if (g_eg.on && gl_on()) { gl_drop(now, "no path"); goal = -1; }   // (the goal draw: another at once -- it used to stand there)
                               plen = 0; }
                 else { nav_say("  [nav] path of %d nodes from (%.1f %.1f %.1f) to node %d\n", np, pos[0], pos[1], pos[2], goal); plen = np; pidx = 0; } }
@@ -1943,6 +1950,10 @@ static void bot_step_body(void) {
                 if (now - tjump < 0.25 && g_bot_jump) { g_bot_btn = g_bot_jump; out |= 4; }
                 if (now - tstat > 2.0) { tstat = now; nav_say("  [nav] at (%.1f %.1f %.1f) node %d, path %d/%d, next (%.1f %.1f %.1f) -> throttle (%.2f, %.2f)\n",
                     pos[0], pos[1], pos[2], cur, pidx, plen, tp[0], tp[1], tp[2], tx, ty); } }
+            else if (now < npu && !g_bot_fighting) { float way = atan2f(npto[1] - pos[1], npto[0] - pos[0]);
+                if (!(out & 1)) { float e = bot_wrap(way - yaw0), mx = 0.2f; yaw = yaw0 + (e > mx ? mx : e < -mx ? -mx : e); pitch = -0.08f; out |= 1; }
+                float rel = bot_wrap(way - yaw); tx = cosf(rel); ty = sinf(rel); if (fmod(now, 1.2) < 0.15) g_fjump_until = now + 0.12;
+                out |= 2; g_nav_act = 1; }
             else g_nav_act = 0; }
         else g_nav_act = 0; }
     if (arbw == ARB_BOARD && gbd <= 4.0f) {   // boarding: straight to the point behind the turret, facing the turret, act pulsed (0.4 s a second) close in

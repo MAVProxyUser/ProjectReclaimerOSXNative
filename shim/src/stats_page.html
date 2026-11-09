@@ -72,6 +72,12 @@ th .srt{display:inline-block;margin-left:2px;padding:0 2px;cursor:pointer;color:
 #mapfs .fsx{position:absolute;top:8px;right:12px;width:34px;height:34px;border-radius:17px;border:1px solid #555;background:#222;color:#ddd;font-size:22px;line-height:30px;cursor:pointer;z-index:51}
 #mapfs .fsx:hover{background:#333;color:#fff}#mapfs .ctl{margin-top:8px}
 #cv{cursor:zoom-in}#mapfs #cv{cursor:crosshair}
+/* (2026-11-09) one player in the whole window: the details beside a map of just that player (#pfs) */
+#pfs{position:fixed;inset:0;z-index:60;background:var(--bg);display:none;padding:16px;gap:16px;grid-template-columns:minmax(300px,440px) minmax(0,1fr)}
+#pfs.open{display:grid}#pfsl{overflow:auto;min-width:0;min-height:0}#pfsl #det{display:block}
+#pfsr{display:flex;flex-direction:column;gap:8px;min-width:0;min-height:0}#pcv{width:100%;flex:1;min-height:0;background:#0b0b0b;border-radius:6px}
+#pcap{color:var(--dim)}#pcap b{color:var(--fg)}.pk{display:inline-block;width:10px;height:10px;border-radius:5px;margin:0 4px 0 10px;vertical-align:-1px}
+@media (max-width:900px){#pfs.open{grid-template-columns:minmax(0,1fr);overflow:auto}#pfsl{overflow:visible}#pcv{flex:none;height:65vh}}
 #det .x{float:right;cursor:pointer;background:none;border:0;color:var(--dim);font-size:18px;line-height:1}
 #det dl{display:grid;grid-template-columns:auto 1fr;gap:3px 12px;margin:8px 0 0}
 #det dt{color:var(--dim)}#det dd{margin:0;overflow-wrap:anywhere}
@@ -583,7 +589,7 @@ function renderRules(){
     parts.push(sect(title+' traits',rows.length?rows:[['','no changes']])); }
   el.className='cols'; el.innerHTML=parts.join(''); }
 // pointerdown, not click: the rows are rebuilt 10 times a second, so a click's down and up land on different rows
-document.getElementById('tb').addEventListener('pointerdown',e=>{const tr=e.target.closest('tr');if(!tr)return;const s=+tr.dataset.s;sel=(sel===s)?null:s;renderTable();renderDet();drawMap()});
+document.getElementById('tb').addEventListener('pointerdown',e=>{const tr=e.target.closest('tr');if(!tr)return;const s=+tr.dataset.s;sel=(sel===s)?null:s;renderTable();renderDet();drawMap();if(sel!=null)openPfs();else closePfs()});
 function renderDet(){
   const el=document.getElementById('det'); if(sel==null||!snap){el.innerHTML='<h2>Player details</h2><div class="note">Click a player in the table.</div>';return}
   const p=snap.players.find(q=>q.slot===sel); if(!p){el.innerHTML=`<button class="x" onclick="closeDet()">×</button><div class="note">that player left the game</div>`;el.style.display='block';return}
@@ -608,7 +614,61 @@ function renderDet(){
    <div class="note">Shots counts every projectile (each shotgun pellet is one). A hit is a shot whose path went through an enemy's hitboxes, as this client saw that enemy (the native app; the loader: a shot that ended inside another player's body bounds, an estimate); turret shots count for the vehicle, not the gunner.</div>`;
   el.style.display='block';
 }
-function closeDet(){sel=null;renderTable();renderDet();drawMap()}
+function closeDet(){sel=null;closePfs();renderTable();renderDet();drawMap()}
+// ---- ONE PLAYER IN THE WHOLE WINDOW (2026-11-09; the user: the player details "full window, and it should side by side a version of the
+// heatmap with JUST my player visualized"): clicking a name opens the details over the whole window (the #det panel moves in) beside a
+// map of that player alone -- where it went (a heatmap of its positions + its path), where it died (white X), where it was when it got
+// a kill (yellow dot), where it is now. The path: this match from the walker's own recording (the relay on 8765: /trail.json, every
+// 0.5 s alive), else what this page has seen since it opened. X / Esc / the name again closes it.
+const pfs=document.createElement('div'); pfs.id='pfs';
+pfs.innerHTML='<div id="pfsl"></div><div id="pfsr"><canvas id="pcv"></canvas><div id="pcap"></div></div>'; document.body.appendChild(pfs);
+const pcv=pfs.querySelector('#pcv'), pcx=pcv.getContext('2d'); let detHome=null, ptrail=null, ptrailT=0, ptrkMap=null;
+const ptrk=new Map();   // what this page saw: slot|name -> {pts, deaths, was, last, lt}
+function trackSnap(){ if(!snap) return; if(snap.map!==ptrkMap){ ptrk.clear(); ptrkMap=snap.map; } const now=Date.now();
+  for(const p of snap.players){ const k=p.slot+'|'+p.name; let t=ptrk.get(k); if(!t){ t={pts:[],deaths:[],was:null,last:null,lt:0}; ptrk.set(k,t); }
+    if(p.alive&&p.pos){ const q=[p.pos[0],p.pos[1]]; if(now-t.lt>=500){ t.pts.push(q); t.lt=now; if(t.pts.length>20000) t.pts.splice(0,5000); } t.last=q; }
+    else if(t.was&&t.last) t.deaths.push(t.last);
+    t.was=!!p.alive; } }
+function pfsSize(){ const r=pcv.getBoundingClientRect(), d=window.devicePixelRatio||1; pcv.width=Math.max(200,Math.floor(r.width*d)); pcv.height=Math.max(200,Math.floor(r.height*d)); drawPlayerMap(); }
+function openPfs(){ const det=document.getElementById('det'); if(!pfs.classList.contains('open')){ detHome={parent:det.parentNode,next:det.nextSibling}; pfs.querySelector('#pfsl').appendChild(det); pfs.classList.add('open'); }
+  ptrail=null; ptrailT=0; pfsSize(); pollTrail(); }
+function closePfs(){ if(!pfs.classList.contains('open')) return; const det=document.getElementById('det'); if(detHome) detHome.parent.insertBefore(det,detHome.next); pfs.classList.remove('open'); }
+async function pollTrail(){ if(!pfs.classList.contains('open')||sel==null||!snap) return; const s0=sel; ptrailT=Date.now();
+  try{ const r=await fetch('/trail.json?slot='+s0+'&map='+encodeURIComponent(snap.map||'')); if(r.ok){ const j=await r.json(); if(sel===s0) ptrail=j.none?null:j; } }catch(e){}
+  drawPlayerMap(); }
+window.addEventListener('resize',()=>{ if(pfs.classList.contains('open')) pfsSize(); });
+function drawPlayerMap(){
+  if(!pfs.classList.contains('open')) return;
+  if(Date.now()-ptrailT>8000) pollTrail();
+  const W=pcv.width, H=pcv.height, d=window.devicePixelRatio||1; pcx.fillStyle='#0b0b0b'; pcx.fillRect(0,0,W,H);
+  const p=snap&&sel!=null?snap.players.find(q=>q.slot===sel):null; const cap=document.getElementById('pcap');
+  if(!p){ cap.textContent='that player left the game'; return; }
+  const seen=ptrk.get(p.slot+'|'+p.name)||{pts:[],deaths:[]}, tr=ptrail&&ptrail.slot===sel&&ptrail.map===snap.map&&ptrail.points.length>=seen.pts.length?ptrail:null;
+  const pts=tr?tr.points:seen.pts, kills=tr?tr.kills:[];
+  const deaths=tr?tr.deaths:(heat&&heat.deaths?heat.deaths.filter(q=>q[7]===sel&&q[4]===p.name&&q[5]===heat.match).map(q=>[q[0],q[1]]):seen.deaths);
+  let x0,x1,y0,y1;
+  if(mapTop){ ({x0,x1,y0,y1}=mapTop.j); }
+  else { x0=y0=1e9; x1=y1=-1e9; for(const q of pts.concat(deaths,kills,p.pos?[[p.pos[0],p.pos[1]]]:[])){ x0=Math.min(x0,q[0]); x1=Math.max(x1,q[0]); y0=Math.min(y0,q[1]); y1=Math.max(y1,q[1]); }
+         if(x0>x1){ cap.textContent='no position yet'; return; } x0-=15; x1+=15; y0-=15; y1+=15; }
+  const sc=Math.min(W/(x1-x0),H/(y1-y0)), ox=(W-(x1-x0)*sc)/2, oy=(H-(y1-y0)*sc)/2, S=(x,y)=>[ox+(x-x0)*sc, oy+(y1-y)*sc];
+  if(mapTop){ pcx.globalAlpha=0.55; pcx.drawImage(mapTop.im,ox,oy,(x1-x0)*sc,(y1-y0)*sc); pcx.globalAlpha=1; }
+  // the heatmap of this player alone: its positions in cells of 7 screen points, coloured by how long it stood there
+  const cs=Math.max(4,Math.round(7*d)), cols=Math.ceil(W/cs), rows=Math.ceil(H/cs), G=new Float32Array(cols*rows); let mx=0;
+  for(const q of pts){ const [x,y]=S(q[0],q[1]), c=Math.floor(x/cs), r=Math.floor(y/cs); if(c<0||r<0||c>=cols||r>=rows) continue; const v=++G[r*cols+c]; if(v>mx) mx=v; }
+  for(let k=0;k<G.length;k++){ if(!G[k]) continue; const c=LUT[Math.min(255,Math.round(Math.sqrt(G[k]/mx)*255))];
+    pcx.fillStyle=`rgba(${c[0]},${c[1]},${c[2]},${(c[3]/255).toFixed(2)})`; pcx.fillRect((k%cols)*cs,Math.floor(k/cols)*cs,cs,cs); }
+  // its path, faint, the newest stretch brighter
+  if(pts.length>1){ pcx.lineWidth=1*d; pcx.strokeStyle='rgba(255,255,255,0.18)'; pcx.beginPath(); pts.forEach((q,i)=>{ const [x,y]=S(q[0],q[1]); i?pcx.lineTo(x,y):pcx.moveTo(x,y); }); pcx.stroke();
+    const tail=pts.slice(-60); pcx.lineWidth=2*d; pcx.strokeStyle='rgba(255,255,255,0.7)'; pcx.beginPath(); tail.forEach((q,i)=>{ const [x,y]=S(q[0],q[1]); i?pcx.lineTo(x,y):pcx.moveTo(x,y); }); pcx.stroke(); }
+  for(const q of deaths){ const [x,y]=S(q[0],q[1]), r=5*d; pcx.lineWidth=2.5*d; pcx.strokeStyle='#000'; pcx.beginPath(); pcx.moveTo(x-r,y-r); pcx.lineTo(x+r,y+r); pcx.moveTo(x+r,y-r); pcx.lineTo(x-r,y+r); pcx.stroke();
+    pcx.lineWidth=1.5*d; pcx.strokeStyle='#fff'; pcx.stroke(); }
+  for(const q of kills){ const [x,y]=S(q[0],q[1]); pcx.beginPath(); pcx.arc(x,y,4*d,0,7); pcx.fillStyle='#ffd23a'; pcx.fill(); pcx.lineWidth=1.5*d; pcx.strokeStyle='#000'; pcx.stroke(); }
+  if(p.alive&&p.pos){ const [x,y]=S(p.pos[0],p.pos[1]); pcx.beginPath(); pcx.arc(x,y,8*d,0,7); pcx.lineWidth=4*d; pcx.strokeStyle='#000'; pcx.stroke(); pcx.fillStyle=C[p.team_name]||'#888'; pcx.fill(); pcx.lineWidth=2.5*d; pcx.strokeStyle='#ff0'; pcx.stroke(); }
+  const mins=tr?tr.seconds/60:pts.length*0.5/60;
+  cap.innerHTML=`<b>${E(p.name)}</b> alone on ${E(snap.map||'the map')}: ${mins.toFixed(1)} min alive, ${deaths.length} death${deaths.length===1?'':'s'}, ${kills.length} kill spot${kills.length===1?'':'s'}`+
+    `<span class="pk" style="background:linear-gradient(90deg,#1840ff,#30e060,#ff3020)"></span>where it spent its time<span class="pk" style="background:#fff"></span>its path (the last 30 s brighter)`+
+    `<span class="pk" style="background:none;border:1.5px solid #fff;border-radius:0"></span>died<span class="pk" style="background:#ffd23a"></span>got a kill<span class="pk" style="background:${C[p.team_name]||'#888'};box-shadow:0 0 0 2px #ff0"></span>now`+
+    `<div class="note">${tr?'This whole match, from the walker\'s recording of it.':'Since this page opened (the whole match needs the relay on 8765: shim/tools/stats-proxy.py).'} Kill spots are where this player stood when its kill count went up.</div>`; }
 // ---- heatmap ----
 const cv=document.getElementById('cv'), cx=cv.getContext('2d'); let base=null, heatImg=null, view=null;
 const scope=()=>document.getElementById('scope').value;
@@ -990,7 +1050,7 @@ function closeMapFs(){ if(!mapfs.classList.contains('open')||!fsHome) return; co
 mapfs.querySelector('.fsx').addEventListener('click',closeMapFs);
 document.getElementById('fsb').addEventListener('click',()=>{ mapfs.classList.contains('open')?closeMapFs():openMapFs(); });
 cv.addEventListener('click',()=>{ if(!mapfs.classList.contains('open') && !document.getElementById('tph').checked) openMapFs(); });
-document.addEventListener('keydown',e=>{ if(e.key==='Escape') closeMapFs(); });
+document.addEventListener('keydown',e=>{ if(e.key==='Escape'){ if(pfs.classList.contains('open')) closeDet(); else closeMapFs(); } });
 window.addEventListener('resize',()=>{ if(mapfs.classList.contains('open')) fsSize(); });
 // world coordinates under the mouse
 cv.addEventListener('mousemove',e=>{ if(!view) return; const r=cv.getBoundingClientRect(), sx=(e.clientX-r.left)*cv.width/r.width, sy=(e.clientY-r.top)*cv.height/r.height;
@@ -1354,7 +1414,7 @@ es.onmessage=m=>{snap=JSON.parse(m.data);
   document.getElementById('hd').textContent=`${snap.map||'-'}  |  ${snap.in_match?'match time '+fmtT(snap.time):'not in a match'}  |  ${snap.players.length} players, ${snap.vehicles.length} vehicles, ${snap.projectiles.length} projectiles in flight`;
   { const p=snap.perf, e=document.getElementById('pf'); if(!p){ e.textContent=''; } else { const ms=v=>v>=0?Math.round(v)+' ms':'-';
       e.textContent=p.native?`${p.fps.toFixed(0)} fps  |  frame ${p.frame_ms[0].toFixed(1)} / ${p.frame_ms[1].toFixed(1)} / ${p.frame_ms[2].toFixed(1)} ms (median / 95% / max)  |  ${p.objects} objects`:`${p.fps.toFixed(1)} fps (window ${p.window_fps.toFixed(1)})  |  frame ${p.frame_ms[0].toFixed(1)} / ${p.frame_ms[1].toFixed(1)} ms (median / 95%)  |  ${Math.round(p.draws)} draws  |  ${p.in_view} of ${p.objects} objects in view  |  input -> screen ${ms(p.input_to_screen_ms)}${p.inputs?' ('+p.inputs+' measured)':''}  |  ${Math.round(p.refresh_hz)} Hz display`; } }
-  needVShapes(); renderTable(); renderDet(); renderOverlay(); renderRules(); renderSlots(); renderConn(); renderRec(); renderHooks(); renderSb(); if(snap.soundboard && !sbFiles.length && !sbKey) pollSb(); drawMap()};
+  trackSnap(); needVShapes(); renderTable(); renderDet(); drawPlayerMap(); renderOverlay(); renderRules(); renderSlots(); renderConn(); renderRec(); renderHooks(); renderSb(); if(snap.soundboard && !sbFiles.length && !sbKey) pollSb(); drawMap()};
 // ---- hook cost (nhook: nhcost.h + nstats.c hc_json): self-timed figures per hook / overlay part, and the on/off measurement ----
 function renderHooks(){ const H=snap&&snap.hooks, el=document.getElementById('hcost'); if(!H){ el.style.display='none'; return; } el.style.display='';
   const m=H.measuring, f=(v,d)=>v>=0?v.toFixed(d):'-';

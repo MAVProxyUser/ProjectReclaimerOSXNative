@@ -45,6 +45,49 @@ def arg(k, d):
     a = sys.argv; return a[a.index(k) + 1] if k in a else d
 LISTEN, TARGET = int(arg('--listen', '8765')), int(arg('--target', '8771')); STAY = '--stay' in sys.argv
 
+# ONE PLAYER'S MATCH (2026-11-09; the user: the player details "full window, and it should side by side a version of the heatmap with JUST my
+# player visualized"): GET /trail.json?slot=<n>&map=<map> -> that slot's path, death spots and kill spots this match, from the walker's own
+# recording of it (nhook ntracks.c: every player's position 10x a second; the newest tracks/*.jsonl.gz written in the last 90 s, of that
+# map). Positions every 0.5 s alive; a death where it was last alive; a kill where it stood when its kill count rose. A slot whose
+# counters go back down changed hands: its path starts again. No names in the recording: the page asks by slot. Cached 10 s.
+TRACKS = os.path.expanduser('~/Library/Application Support/ReclaimerMac/tracks')
+_trail = {}
+def trail(slot, mp):
+    import glob, gzip
+    fs = sorted(glob.glob(os.path.join(TRACKS, '*.jsonl.gz')), key=os.path.getmtime)
+    if not fs or time.time() - os.path.getmtime(fs[-1]) > 90: return None
+    f = fs[-1]; c = _trail.get((f, slot))
+    if c and time.time() - c[0] < 10: return c[1]
+    head = None; pts, deaths, kills = [], [], []; lt = -9.0; was = None; lastpos = None; k0 = d0 = None; t0 = t1 = None
+    try:
+        with gzip.open(f, 'rt', errors='replace') as g:
+            for line in g:
+                if head is None:
+                    head = json.loads(line)
+                    if mp and head.get('map') != mp: return None
+                    continue
+                if not line.startswith('{"t"'): continue
+                try: smp = json.loads(line)
+                except ValueError: continue
+                for r in smp.get('p') or []:
+                    if r[0] != slot: continue
+                    t = smp['t']; k, d = (r[12], r[13]) if len(r) > 13 else (0, 0)
+                    if k0 is not None and (k < k0 or d < d0): pts, deaths, kills, lastpos, was, t0 = [], [], [], None, None, None
+                    alive = bool(r[2]) and bool(r[3] or r[4])
+                    if alive:
+                        lastpos = [round(r[3], 1), round(r[4], 1)]
+                        if t - lt >= 0.5: pts.append(lastpos); lt = t
+                        if t0 is None: t0 = t
+                        t1 = t
+                    elif was and lastpos: deaths.append(lastpos)
+                    if k0 is not None and k > k0 and lastpos: kills.append(lastpos)
+                    k0, d0, was = k, d, alive
+                    break
+    except (EOFError, OSError, ValueError): pass
+    res = {'file': os.path.basename(f), 'map': head.get('map') if head else None, 'slot': slot, 'points': pts, 'deaths': deaths, 'kills': kills,
+           'seconds': round(t1 - t0, 1) if t0 is not None and t1 is not None else 0}
+    _trail[(f, slot)] = (time.time(), res); return res
+
 class H(http.server.BaseHTTPRequestHandler):
     def relay(self, body=None):
         req = urllib.request.Request('http://127.0.0.1:%d%s' % (TARGET, self.path), data=body, method=self.command)
@@ -82,6 +125,13 @@ class H(http.server.BaseHTTPRequestHandler):
         except Exception: pass
     def do_GET(self):
         if self.path.startswith('/events'): self.stream()
+        elif self.path.startswith('/trail.json'):
+            from urllib.parse import urlparse, parse_qs
+            q = parse_qs(urlparse(self.path).query)
+            try: r = trail(int(q.get('slot', ['-1'])[0]), q.get('map', [''])[0])
+            except ValueError: r = None
+            b = json.dumps(r or {'points': [], 'deaths': [], 'kills': [], 'none': True}).encode()
+            self.send_response(200); self.send_header('Content-Type', 'application/json'); self.send_header('Content-Length', str(len(b))); self.send_header('Cache-Control', 'no-cache'); self.end_headers(); self.wfile.write(b)
         else: self.relay()
     def do_POST(self): self.relay(self.rfile.read(int(self.headers.get('Content-Length') or 0)))
     def log_message(self, *a): pass
