@@ -3272,6 +3272,12 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   a running battle, at every round end (our server's in_match true -> false) walker-coach.py round + match-study.py, then each
   walker's game restarted headless with its new knobs and the newest build (they rejoin in the lobby; the user's game and the
   server stay).
+- **Every player dot on the stats map is visible on any background** (2026-11-09 01:10; shim/src/stats_page.html drawMap) — WHY: the user,
+  in a 4-player FFA on The Pit: "I can only see 2 walkers ... I see second, and fourth, but not third". Third was in the match and in
+  the snapshot; in FFA every player has its own team colour, and its blue (#4070f0) 3.5 px dot vanished on the dark map picture and on
+  the heatmap's blue-green blobs it stood on. LOGIC: each dot is 4.5 px (6 selected) with a 3.5 px black ring under it and a light edge
+  (white 2 px = you, yellow = selected, translucent white 1 px = everyone else); the labels keep 6 px clear of a dot. No switch (drawing
+  only).
 - **The walker presses melee / act / switch in the packed record** (2026-11-09 01:00; nbot.c bot_meleebits / bot_actbit / bot_switchbit,
   bot_on_abuild; shadow-study.py, match-study.py) — WHY: a headless walker's buttons never reach the server (the virtual pad is not read
   for buttons in a headless / background client), so it could not melee, pick up or switch weapons ("claiming you can't change weapons

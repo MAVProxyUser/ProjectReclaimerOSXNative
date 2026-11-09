@@ -743,9 +743,11 @@ function drawMap(){
     if(vOn&&p.in&&vids.has(p.in)){   // in a vehicle: a small seat dot on it; the name is in the vehicle's label
       cx.fillStyle=C[p.team_name]||'#888'; cx.beginPath(); cx.arc(x,y,p.slot===sel||p.you?3:2.2,0,7); cx.fill(); cx.lineWidth=p.slot===sel||p.you?1.5:0.8; cx.strokeStyle=p.slot===sel?'#ff0':p.you?'#fff':'#000'; cx.stroke(); continue; }
     on.push({p,x,y});
-    cx.fillStyle=C[p.team_name]||'#888'; cx.beginPath(); cx.arc(x,y,p.slot===sel?6:3.5,0,7); cx.fill();
-    if(p.slot===sel||p.you){cx.strokeStyle=p.you?'#fff':'#ff0';cx.lineWidth=2;cx.stroke()} }
-   taken=taken.concat(drawLabels(on,vobs)||[], on.map(q=>[q.x-4,q.y-4,q.x+4,q.y+4])); }   // after every dot: no dot is drawn over a label
+    // (2026-11-09: a black ring + a light edge on every dot -- in FFA each player has its own team colour, and Third's blue 3.5 px dot
+    //  vanished on the dark map and the heatmap's blue-green blobs: "I can only see 2 walkers")
+    cx.beginPath(); cx.arc(x,y,p.slot===sel?6:4.5,0,7); cx.lineWidth=3.5; cx.strokeStyle='#000'; cx.stroke(); cx.fillStyle=C[p.team_name]||'#888'; cx.fill();
+    cx.lineWidth=p.slot===sel||p.you?2:1; cx.strokeStyle=p.slot===sel?'#ff0':p.you?'#fff':'#ffffffb0'; cx.stroke(); }
+   taken=taken.concat(drawLabels(on,vobs)||[], on.map(q=>[q.x-6,q.y-6,q.x+6,q.y+6])); }   // after every dot: no dot is drawn over a label
   placeTags(tags.filter(t=>!t.veh),taken);
 }
 // ---- vehicles (user, 2026-10-26: "mini icon assets ... that represent the real vehicle ... the vehicle itself needs to look different
