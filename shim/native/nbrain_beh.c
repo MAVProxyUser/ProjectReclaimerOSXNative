@@ -105,7 +105,7 @@ static void beh_break(const World* W, Arb* a) {
     if (W->now - t0 > 3.0 || nh < 6) return;
     const float* b = hist[5]; float dx = b[0] - o->c[0], dy = b[1] - o->c[1]; if (dx * dx + dy * dy < 4.0f) return;   // (came from under 2 units: nowhere to go back to)
     arb_bid(a, ARB_RECHARGE, u, b, "break off"); }
-// COVER (2026-11-09 11:10, the user: "the walker is aware of when its shield is getting decimated too eh? and like when it should try
+// COVER (2026-11-09 11:00, the user: "the walker is aware of when its shield is getting decimated too eh? and like when it should try
 // to take cover near by while continuing to shoot and defend itself aggressively?"): the shield down NHOOK_BOT_COVER_DROP (0.35) within
 // 1.5 s and under NHOOK_BOT_COVER_SH (0.5), the target in sight -> up to 8 floor spots 3-6 units around (sideways first, never toward
 // the attacker; its own floor part, within 1.5 units of its level) are tested from the attacker's eyes to where the walker's head
@@ -121,6 +121,9 @@ static void beh_cover(const World* W, Arb* a) {
     if (u <= 0 || !g_nav.ok) { st = 0; g_cov_n = 0; return; }
     float mx = o->shield; for (int i = 0; i < nsh; i++) if (sh[i] > mx) mx = sh[i];
     int hit = o->shield >= 0 && o->shield < lim && mx - o->shield >= drop;
+    // (11:35: 28 of 40 deaths "outnumbered" -- 2-4 enemies aiming at it: with NHOOK_BOT_COVER_NAIM (2, live) or more aiming and the shield
+    //  starting to go, look for cover at once instead of waiting for the big drop)
+    { float cn = 2; lk_over(&cn, "NHOOK_BOT_COVER_NAIM"); if (cn > 0 && g_naim_me >= (int)cn && o->shield < 0.95f && mx - o->shield >= 0.1f) hit = 1; }
     if (st == 2) {
         float dx = spot[0] - o->c[0], dy = spot[1] - o->c[1]; int there = dx * dx + dy * dy < 1.0f;
         if (o->shield >= until || W->now - t0 > 6.0) { st = 0; if (bot_log()) nlog("[nhook] [cover] out after %.1f s, shield %.2f", W->now - t0, o->shield); return; }

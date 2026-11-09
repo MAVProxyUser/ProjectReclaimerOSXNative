@@ -160,7 +160,7 @@ h1{font-size:20px;margin:0 0 4px}h2{font-size:13px;letter-spacing:.08em;text-tra
 .st-doing{color:var(--go)}.st-next{color:var(--acc)}.st-done{color:var(--dim);text-decoration:line-through}pre{margin:0;font:12px ui-monospace,monospace;white-space:pre-wrap;color:var(--dim)}
 .big{font-size:26px;font-weight:600}.none{color:var(--dim)}
 .lgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:12px}.lcard{border:1px solid var(--line);border-radius:5px;padding:8px 10px;min-width:0}
-.lcard h3{margin:0 0 6px;font-size:13px;color:var(--go)}.li{padding:4px 0;border-bottom:1px solid var(--line);font-size:13px}.li:last-child{border:0}.li b{color:var(--fg)}
+.lcard h3{margin:0 0 6px;font-size:13px;color:var(--go)}.li{padding:4px 0;border-bottom:1px solid var(--line);font-size:13px}.li .wk{font-size:11.5px;margin-top:3px;padding-left:8px;border-left:2px solid var(--line)}.li .wkset{color:var(--acc);border-color:var(--acc)}.li .wkok{color:var(--ok);border-color:var(--ok)}.li .wkno{color:var(--go);border-color:var(--go)}.li:last-child{border:0}.li b{color:var(--fg)}
 .li .n{color:var(--dim);font-size:11px;margin-left:4px}.li.weak{opacity:.55}
 #tabs{display:inline-flex;gap:4px;margin-left:12px;vertical-align:middle}#tabs a{font-size:13px;font-weight:500;color:var(--dim);text-decoration:none;padding:3px 10px;border:1px solid var(--line);border-radius:4px}
 #tabs a.on{color:var(--fg);border-color:var(--acc)}#tabs a:hover{color:var(--fg)}</style></head><body>
@@ -207,7 +207,7 @@ async function tick(){try{const j=await (await fetch('/status.json')).json();
  else document.getElementById('cov').innerHTML='<div class="none">no tome yet (engage-model.py writes it)</div>';
  const L=j.learnings; if(L&&L.sections){ const s=L.source||{};
    document.getElementById('lrsrc').textContent=`· ${s.recordings} matches, ${s.minutes} min, ${(s.duels||0).toLocaleString()} duels (${(s.decided||0).toLocaleString()} ending in a kill), ${s.maps} maps · refreshed ${ago(L.updated)}`;
-   document.getElementById('lrn').innerHTML=L.sections.map(sc=>`<div class="lcard"><h3>${E(sc.topic)}</h3>${sc.items.map(i=>`<div class="li${i.weak?' weak':''}"><b>${E(i.title)}</b> ${E(i.text)}<span class="n">n=${(i.n||0).toLocaleString()}${i.weak?' · thin':''}</span></div>`).join('')||'<div class="none">nothing yet</div>'}</div>`).join(''); }
+   document.getElementById('lrn').innerHTML=L.sections.map(sc=>`<div class="lcard"><h3>${E(sc.topic)}</h3>${sc.items.map(i=>`<div class="li${i.weak?' weak':''}"><b>${E(i.title)}</b> ${E(i.text)}<span class="n">n=${(i.n||0).toLocaleString()}${i.weak?' · thin':''}</span>${i.walker?`<div class="wk ${/^not yet/.test(i.walker)?'wkno':/^sets /.test(i.walker)?'wkset':'wkok'}">in the walker: ${E(i.walker)}</div>`:''}</div>`).join('')||'<div class="none">nothing yet</div>'}</div>`).join(''); }
  else document.getElementById('lrn').innerHTML='<div class="none">no findings yet (shim/tools/learnings.py)</div>';
  const C=j.coach; if(C&&C.rows){ document.getElementById('ysrc').textContent=`· ${C.pretend?'EXAMPLE (a recorded player stands in for you until your own matches are recorded) · ':''}${C.you.matches} match(es), K/D ${C.you.kd??'-'} · winners: ${C.winners.players} players, K/D ${C.winners.kd_from}+ · refreshed ${ago(C.updated)}`;
    document.getElementById('you').innerHTML=`<table style="border-collapse:collapse;width:100%;font-size:13px"><tr><th style="text-align:left">measure</th><th>you</th><th>winners</th><th>everyone</th><th style="text-align:left">verdict</th></tr>`+

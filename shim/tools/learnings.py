@@ -108,7 +108,7 @@ def main():
     WRANK = []
     if wt:
         by_kd = sorted(wt, key=lambda x: -x[2]); by_kpm = sorted(wt, key=lambda x: -x[1])
-        # (11:55: the walker's weapon ranks from this table -- K/D x sqrt(kills a minute held), 10+ minutes held; it was a fixed list in
+        # (11:33: the walker's weapon ranks from this table -- K/D x sqrt(kills a minute held), 10+ minutes held; it was a fixed list in
         #  nbot.c, which also missed the HUD's "Energy Blade" -- written as tag-style keys to walker-lessons.json "_wrank", best first)
         WRANK = [w.lower().replace(' ', '_') for w, kpm, kd, k, d, mn in sorted(wt, key=lambda x: -(x[2] * math.sqrt(max(0.0, x[1]))))]
         items.append(item('Best weapon overall (K/D)', ', '.join('%s %.2f' % (wname(w), kd) for w, kpm, kd, k, d, mn in by_kd[:4]) + ' -- kills per death of the players holding it.', sum(x[3] + x[4] for x in by_kd[:4])))
@@ -193,7 +193,7 @@ def main():
     items = []
     if G:
         tg = [e for e in G if e['out'].get('a_throws')]; ng = [e for e in G if not e['out'].get('a_throws')]
-        # (11:55: the walker threw ~2 grenades a minute at the coach's GRENX 0.237 -- 4x the players' rate -- while attackers who throw
+        # (11:33: the walker threw ~2 grenades a minute at the coach's GRENX 0.237 -- 4x the players' rate -- while attackers who throw
         #  win less: the time between its throws = the players' x (win without / win with)^2)
         if tg and ng and min(len(tg), len(ng)) >= MIN:
             ww, wo = sum(e['out']['win'] == 'a' for e in tg) / len(tg), sum(e['out']['win'] == 'a' for e in ng) / len(ng)

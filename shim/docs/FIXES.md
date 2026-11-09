@@ -3286,7 +3286,13 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   switch presses (the learnt record bit): 0 of 32 took" -- 32 x "switching from PLASMA PISTOL to ASSAULT RIFLE" with the trigger held
   (the plasma pistol held = an overcharge held) while the earlier switches, 3 of 3 and 2 of 2, came with the trigger up. LOGIC: from a
   switch press until 0.15 s after it the trigger (and the reload click) stays up; PLASMA PISTOL joins the weapons whose trigger is pulsed.
-- **Weapon ranks and the grenade rate from the players' data** (2026-11-09 11:55; learnings.py WRANK / the grenade lesson, nbot.c
+- **Cover when outnumbered; reload in a lull** (2026-11-09 11:35; nbrain_beh.c beh_cover, nbot.c g_naim_me / the lull reload) — WHY:
+  the death review in a 37-player Pit match: 28 of the last 40 deaths "outnumbered" (2-4 enemies aiming at it) and 5 "empty" (in a
+  brawl the walker is never out of a fight, and the reload only came out of one). LOGIC: with NHOOK_BOT_COVER_NAIM (2) or more
+  enemies within 40 units aiming at it and the shield down 0.1+ in 1.5 s, the cover search starts at once; engaged, but the target out
+  of sight 1 s+ and nobody aiming at it, a magazine under NHOOK_BOT_RELOAD_LULL (0.45) x full is reloaded ("reloading in a lull").
+  Also: the head-path change had left the chest-height line and its comment twice (harmless); removed.
+- **Weapon ranks and the grenade rate from the players' data** (2026-11-09 11:33; learnings.py WRANK / the grenade lesson, nbot.c
   bot_wpn_rank / ls_tick "_wrank") — WHY: two lessons the walker ignored: its "better weapon" order was a fixed list (which missed the
   HUD's "Energy Blade" -- only the tag name energy_sword was in it), and the coach's NHOOK_BOT_GRENX 0.237 had it throwing ~2 grenades
   a minute, 4x the players' rate, though attackers who throw win less (70% vs 78%) and a throw is time not shooting. LOGIC: learnings.py
@@ -3295,7 +3301,7 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   NHOOK_BOT_WRANK_DATA=0 = the fixed list). The public walker's live file lost GRENX (the lesson owns it). Measured on the hit test +
   head lead before this: 65% of its shots on target since (55% before), the scoreboard's accuracy 52.4% (48%), 7th of 19 by accuracy
   in a 37-player Pit match (median 48%); the head share of hits 32% (55%: automatic weapons aim at the neck now).
-- **The players' lessons drive the walker: walker-lessons.json under the live knobs; jump / strafe by role** (2026-11-09 11:50;
+- **The players' lessons drive the walker: walker-lessons.json under the live knobs; jump / strafe by role** (2026-11-09 11:28;
   shim/tools/learnings.py WL / USE, nbot.c ls_tick / ls_get / du_role, the fight jump and strafe) — WHY: the user: "i feel like the
   *lessons* in 'what the game is learning' are not applied to the walkers kernel". Many were, but through the models where nobody
   could see it (revenge odds, range bands, weapon zones, switch distances, death hot spots); others not at all (jumping and strafing
@@ -3309,7 +3315,7 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   defending) scales the fight jump rate and the strafe. Every lesson on the Learnings tab gets a "walker" line: what it sets, how
   the walker already uses it, or "not yet" (weapon K/D ranks, the grenade opener, radar stealth, power-item timing). The public
   walker's live file lost U_RECHARGE 0 and CLOSE (the lessons own them); the Max aggression preset no longer sets them.
-- **Lead along the head's path; a lead tuner on the server's accuracy** (2026-11-09 11:40; nbot.c the aim point, the hit test;
+- **Lead along the head's path; a lead tuner on the server's accuracy** (2026-11-09 11:24; nbot.c the aim point, the hit test;
   shim/tools/death-tuner.py the lead track) — WHY: the user: "'fires on a cone around the head' classic inability to lead a shot, and
   predict the path of the head". LOGIC: the head node's velocity (smoothed from its positions every 0.06 s+, the body's velocity
   until then) x the lead time = NHOOK_BOT_LEAD_LAT (0.08 s: the host registers client bullets without lag compensation and the target
@@ -3317,7 +3323,7 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   rockets 40 units/s, x NHOOK_BOT_PROJ_SPEED) + one bot step, x NHOOK_BOT_LEAD_X; the aim point and the fire gate's hit test use the
   predicted head and body. death-tuner.py's lead track: every 250 server-counted shots (the scoreboard's hits / shots) LEAD_X moves
   0.25 in its direction; the next window puts it back and turns the direction if accuracy fell 3+ points.
-- **Fire only when the aim line goes through the target; automatic weapons aim at the neck** (2026-11-09 11:30; nbot.c the fire gate
+- **Fire only when the aim line goes through the target; automatic weapons aim at the neck** (2026-11-09 11:20; nbot.c the fire gate
   ray_pd / g_bot_head_c, the aim point) — WHY: the user, from the scoreboard: "we miss way more shots than the competition" -- the
   walker 54% of its shots on target (accuracy 48%), the best players 64-84% (53-60%); its misses a median 1.1 deg off. The trigger was
   allowed inside a cone (body size + slack) around the aim point, and the aim point was the head -- plus the live knob file's
@@ -3327,14 +3333,14 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   0.7 radii under the centre (9 samples); NHOOK_BOT_FIRE_HITTEST=0 = the cone. Automatic weapons track the head node but aim
   NHOOK_BOT_HEAD_DZ_AUTO (-1.5) head radii under its centre (the neck); precision weapons the head centre (HEAD_DZ taken out of the
   public walker's file). [firegate]'s "aim line not through it" counts what the hit test holds back.
-- **The work board learns again while the walker plays; its Walkers tab shows the public walker** (2026-11-09 11:25;
+- **The work board learns again while the walker plays; its Walkers tab shows the public walker** (2026-11-09 11:18;
   shim/tools/refresh-loop.sh playing(), shim/tools/workboard.py pubwalker()) — WHY: the user: "are we no longer learning and updating
   the work board, etc?" The 20-minute refresh waits while the user plays, and it took the headless public walker for the user: it had
   waited since the walker joined (10:33); the Walkers tab showed only the local coached rounds and the learn loop, neither running
   since the night. LOGIC: a --headless game is not the user's; the Walkers tab's first panel: the public walker's kills / deaths /
   share on target / head share now (its stats page, 8771), the causes of its last 60 deaths, the death tuner's steps and verdicts,
   and the brain's current lesson.
-- **Why did they beat me: a cause per death, and a tuner that moves settings by it** (2026-11-09 11:10-11:20; nbot.c du_tick /
+- **Why did they beat me: a cause per death, and a tuner that moves settings by it** (2026-11-09 11:09-11:14; nbot.c du_tick /
   why_note, shim/tools/death-tuner.py, nwknobs.c "why" / "tune", stats_page.html Walker tab) — WHY: the user: "walker needs to focus
   hard on its K/D spread and tweak settings until it gets better, I feel like a per death why did the other player beat me
   calculation could be interesting, weighting future growth". LOGIC: every step the duels of this life (per enemy: in sight since,
@@ -3350,14 +3356,14 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   rests 30 deaths); NHOOK_TUNE=0 in the knob file pauses it (the tab's switch); steps -> battles/follow/tuner-<nick>.jsonl. The
   Walker tab shows the causes of the last 60 deaths, the last 10 with their detail, and the tuner's steps / verdicts. First live
   run (20-player Pit): 8 of the first 10 reviewed deaths "outnumbered" (2-4 enemies aiming).
-- **Weapon choice as settings; the best weapon for the hunt** (2026-11-09 11:10; nbot.c the better-weapon rule / the fight switch) —
+- **Weapon choice as settings; the best weapon for the hunt** (2026-11-09 11:06; nbot.c the better-weapon rule / the fight switch) —
   WHY: the user: "select best weapon in inventory should be a setting too, and select best weapon for your hunt just the same".
   LOGIC: NHOOK_BOT_BEST_WEAPON (1) + NHOOK_BOT_BEST_RANKS (2): the rank rule; NHOOK_BOT_FIGHT_SWITCH (1): the range / zone / players'
   switch in a fight (the empty-magazine switch stays either way); NHOOK_BOT_HUNT_WEAPON (1) + _X (1.3): out of a fight with a goal,
   the zone model around the goal point (players' kills by weapon class over its carried share, 8+ kills there) puts the weapon that
   does 1.3x better there in hand before the meeting -- shotguns and swords too -- and keeps the one in hand that does 1.3x better
   (the rank rule does not switch it back). All live; the Walker tab's Weapons group. "[inv] for the hunt (...)" lines.
-- **Aim column: the share on target and how far the misses went; the head share under it** (2026-11-09 11:15; nstats.c st_aim_json
+- **Aim column: the share on target and how far the misses went; the head share under it** (2026-11-09 11:13; nstats.c st_aim_json
   "miss" / "miss75", stats_page.html aimCell) — WHY: the user: "all aim stats are *always* 0.0 degrees off. why?" and "the 'hits
   counted' variable doesn't seem to update properly, it's always the same number". A shot through a hitbox is 0 off, so with over
   half on target the median of all shots is 0; and "counted" (damage within 0.6 s of an on-target shot) is met by anyone's damage

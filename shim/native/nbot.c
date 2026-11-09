@@ -115,7 +115,7 @@ static void lk_tick(void) {
     memcpy(g_lk, k, sizeof k); g_nlk = nk; mt = st.st_mtimespec; sz = st.st_size; had = 1;
     nlog("[nhook] [knobs] live from %s: %s", p, nk ? list : "(none)"); }
 static int lk_get(const char* n, float* v) { for (int i = 0; i < g_nlk; i++) if (!strcmp(g_lk[i].n, n)) { *v = g_lk[i].v; return 1; } return 0; }
-// LESSONS (2026-11-09 11:50, the user: "i feel like the *lessons* in 'what the game is learning' are not applied to the walkers kernel"):
+// LESSONS (2026-11-09 11:28, the user: "i feel like the *lessons* in 'what the game is learning' are not applied to the walkers kernel"):
 // shim/tools/learnings.py writes the settings its lessons call for to tracks/walker-lessons.json (strafe / jump by role, push, the
 // high ground, shields up, the sword's distance ...); they apply UNDER the live knob file -- a value set on the Walker tab wins -- and
 // over the launch values. Re-read within 2 s of a change; NHOOK_BOT_LESSONS=0 (environment or live knob) = off. [lessons] lines
@@ -425,7 +425,7 @@ static void bot_idle(const char* why) {   // NHOOK_SPAR_LOG: why the aim / walke
     static double tl; static const char* last; double now = mono_s(); if (!bot_log() || (why == last && now - tl < 5)) return; tl = now; last = why; nlog("[nhook] [spar] idle: %s", why); }
 // weapons by preference, best first (what the recorded players carried besides the assault rifle -- the Carbine 44% of the time --
 // and the power weapons); a weapon not listed ranks below all of these
-// (11:55: with the lessons' "_wrank" -- the players' K/D x kill rate per weapon -- the rank is its place there; weapons not in it rank
+// (11:33: with the lessons' "_wrank" -- the players' K/D x kill rate per weapon -- the rank is its place there; weapons not in it rank
 //  after, by the fixed list. NHOOK_BOT_WRANK_DATA=0 (live) = the fixed list only)
 static int bot_wpn_rank_fixed(const char* n0);
 static int bot_wpn_rank(const char* n0) {
@@ -504,6 +504,7 @@ static void ammo_learn(double now, const NovObj* o) {
 static int g_swbit = -1; static uint64_t g_swscan_bits; static double g_swrec_until; static int g_eng_close; static int g_swscan_busy;
 // (cover, 2026-11-09: the fight target's handle and where it is -- the attacker the cover is tested against)
 static uint32_t g_ftg_h; static float g_ftg_c[3], g_ftg_r;
+static int g_naim_me;   // (enemies within 40 units aiming at the walker, last step: cover when outnumbered, the lull reload)
 // COVER SEARCH (beh_cover, nbrain_beh.c): candidate spots tested from the attacker's eyes on the line-of-sight channel -- bot_cov_ray
 // takes 2 of every 3 ray slots while a search runs; each answer is filed under the tag 0xC0E00000 | generation << 4 | k
 static float g_cov_c[8][3]; static int g_cov_n, g_cov_k, g_cov_gen; static uint32_t g_cov_from; static int g_cov_slot;
@@ -893,7 +894,7 @@ static int arb_choose(Arb* a, double now) {
     return w; }
 typedef struct { uint32_t tg; float td; int tvis; int naim; uint32_t ah[4]; float ad[4]; const char* aw[4]; float sh, hp; const char* w; int am; } DeathSnap;
 static void* g_death_snap;
-// WHY DID THEY BEAT ME (2026-11-09 11:25, the user: "walker needs to focus hard on its K/D spread and tweak settings until it gets
+// WHY DID THEY BEAT ME (2026-11-09 11:12, the user: "walker needs to focus hard on its K/D spread and tweak settings until it gets
 // better, I feel like a per death why did the other player beat me calculation could be interesting, weighting future growth"): every
 // step the duels of this life -- per enemy: when it came into sight, when it started aiming at the walker, when the walker started
 // firing at it (and its shield + health then), its shield + health when last seen -- and the walker's own damage episode (the first
@@ -916,7 +917,7 @@ static DuelE* du_get(uint32_t h, int add) {
     if (!add) return 0; int k = g_ndu < 12 ? g_ndu++ : 0;
     if (g_ndu == 12) { double old = 1e30; for (int i = 0; i < 12; i++) { double t = g_du[i].vis_last > g_du[i].aim_last ? g_du[i].vis_last : g_du[i].aim_last; if (t < old) { old = t; k = i; } } }
     memset(&g_du[k], 0, sizeof g_du[k]); g_du[k].h = h; g_du[k].vit0 = -1; return &g_du[k]; }
-// (11:50, the lessons "Jumping under fire" / "Jumping while attacking" / "Strafe ... ": the role in the duel with h -- 1 attacking (it
+// (11:30, the lessons "Jumping under fire" / "Jumping while attacking" / "Strafe ... ": the role in the duel with h -- 1 attacking (it
 //  fired at h before h aimed at it), -1 defending (h aimed at it first), 0 not known)
 static int du_role(uint32_t h) { const DuelE* e = h ? du_get(h, 0) : 0; if (!e) return 0;
     if (e->fire_t > 0 && (e->aim_t <= 0 || e->fire_t <= e->aim_t + 0.1)) return 1;
@@ -1121,14 +1122,11 @@ static void bot_step_body(void) {
             // (12:40: the HEAD only with a precision weapon or a sniper -- Halo 3's assault rifle, SMG, plasma rifle and co. do no extra
             //  damage there and the head is the smallest part: they aim at the chest, NHOOK_BOT_AIM_BODY (0.2) x the radius over the centre)
             int prec = g_inv.held_c && (!strcmp(g_inv.held_c, "precision") || !strcmp(g_inv.held_c, "sniper"));
-            // (2026-11-09 11:05, the user: "you should not be firing at a static height, rather attempting to track heads with the aiming
+            // (2026-11-09 11:00, the user: "you should not be firing at a static height, rather attempting to track heads with the aiming
             //  reticule just like any real human would"): the HEAD HITBOX (bot_head: the skeleton's head node, crouching / leaning /
             //  jumping) with every weapon -- NHOOK_BOT_HEAD_ALL (live, 1); 0 = the old chest height for the automatic weapons
             float hall = 1; lk_over(&hall, "NHOOK_BOT_HEAD_ALL");
-            if (!prec && !(hall > 0)) { float ab = 0.2f; lk_over(&ab, "NHOOK_BOT_AIM_BODY"); ap[2] = t->c[2] + ab * t->r; }
-            // (11:30: automatic weapons track the head but aim at the NECK, NHOOK_BOT_HEAD_DZ_AUTO (-1.5 head radii, live): spread / drift
-            //  upward still hits the head, downward the chest -- aimed at the head itself every shot drifting up missed everything)
-            // THE HEAD'S PATH (11:40, the user: "classic inability to lead a shot, and predict the path of the head"): the shot meets
+            // THE HEAD'S PATH (11:24, the user: "classic inability to lead a shot, and predict the path of the head"): the shot meets
             //  the head where it will BE -- the head node's own velocity (smoothed from its positions every 0.06 s+: crouching, jumping,
             //  strafing; the body's velocity before there is one) x the lead time: NHOOK_BOT_LEAD_LAT (0.08 s: the host registers a
             //  client's bullets with no lag compensation, and the target as drawn is already behind) + the bullet's flight (distance /
@@ -1141,7 +1139,7 @@ static void bot_step_body(void) {
             static uint32_t hv_h; static float hv_p[3], hv_v[3]; static double hv_t; static int hv_ok;
             g_bot_body_c[0] = t->c[0] + t->vel[0] * tl; g_bot_body_c[1] = t->c[1] + t->vel[1] * tl; g_bot_body_c[2] = t->c[2] + t->vel[2] * tl;
             if (!prec && !(hall > 0)) { float ab = 0.2f; lk_over(&ab, "NHOOK_BOT_AIM_BODY"); ap[2] = t->c[2] + ab * t->r; }
-            // (11:30: automatic weapons track the head but aim at the NECK, NHOOK_BOT_HEAD_DZ_AUTO (-1.5 head radii, live): spread / drift
+            // (11:20: automatic weapons track the head but aim at the NECK, NHOOK_BOT_HEAD_DZ_AUTO (-1.5 head radii, live): spread / drift
             //  upward still hits the head, downward the chest -- aimed at the head itself every shot drifting up missed everything)
             else if (ha_on > 0 && bot_head(t, now, hp)) { float dz = hdz; if (!prec) { dz = -1.5f; lk_over(&dz, "NHOOK_BOT_HEAD_DZ_AUTO"); }
                 if (t->handle != hv_h || now - hv_t > 0.4) { hv_h = t->handle; memcpy(hv_p, hp, 12); memcpy(hv_v, t->vel, 12); hv_t = now; hv_ok = 0; }
@@ -1245,7 +1243,7 @@ static void bot_step_body(void) {
             float dy = bot_wrap(tyaw + ox - yaw0), dp = (tpitch + oy) - pitch0, mx = (float)dt * (now - tacq < react ? t0r : turn);
             yaw = yaw0 + (dy > mx ? mx : dy < -mx ? -mx : dy); pitch = pitch0 + (dp > mx ? mx : dp < -mx ? -mx : dp); out |= 1;
             float ey = bot_wrap(tyaw - yaw0), ep = tpitch - pitch0, err = sqrtf(ey * ey + ep * ep) * 57.2958f, size = atanf(0.4f / (tdist > 0.5f ? tdist : 0.5f)) * 57.2958f;
-            // (2026-11-09 10:58, the user: "it should ALWAYS be *allowed* to fire IF it can hit an enemy in range of the weapon in its
+            // (2026-11-09 10:54, the user: "it should ALWAYS be *allowed* to fire IF it can hit an enemy in range of the weapon in its
             //  hand. it should never NOT be allowed to fire"): the trigger no longer waits out the reaction delay -- that delay still
             //  slows the first turn onto a new target (TURN0); NHOOK_BOT_FIRE_REACT=1 (live) = the old wait. The reach is the held
             //  weapon's -- sniper 120, precision / rockets 60, automatic and others 40, shotgun 12, sword / hammer 4 units -- x
@@ -1254,7 +1252,7 @@ static void bot_step_body(void) {
             const char* hcl = g_inv.held_c ? g_inv.held_c : "";
             float reach = frm * (!strcmp(hcl, "sniper") ? 120.0f : (!strcmp(hcl, "precision") || !strcmp(hcl, "rocket")) ? 60.0f : !strcmp(hcl, "shotgun") ? 12.0f : !strcmp(hcl, "melee") ? 4.0f : 40.0f);
             float cone = (size > 1.2f ? size : 1.2f) + fextra;
-            // (11:30, the user: "a quick scoreboard glance immediately shows we miss way more shots than the competition" -- 54% of its
+            // (11:20, the user: "a quick scoreboard glance immediately shows we miss way more shots than the competition" -- 54% of its
             //  shots on target against the best players' 64-84%, misses a median 1.1 deg off): with the head known, CAN HIT = the aim line
             //  passes through the head (its radius x 1.1 + NHOOK_BOT_FIRE_PAD 0.03 units) or the body under it (a column 0.22 units wide
             //  from the head down to 0.7 radii under the centre, + the pad) -- not a cone around the aim point, which let every shot
@@ -1333,7 +1331,7 @@ static void bot_step_body(void) {
                   if (now - tmelee < mh) { fbtn |= bot_meleepad(); g_bot_melee_until = tmelee + mh; } }
               g_bot_pull = !nomel && bot_pull_weapon(g_inv.held); }
             { static float fj0 = -1; if (fj0 < 0) { const char* e = getenv("NHOOK_BOT_FJUMP"); fj0 = e ? strtof(e, 0) : 0.0f; } float fj = fj0; lk_over(&fj, "NHOOK_BOT_FJUMP");   // jumps a minute in a fight (walker-coach.py: the winners')
-              // (11:50, the lessons: jumping helps a defender, not an attacker -- x NHOOK_BOT_FJUMP_DEF / _ATK by the role, 1 = as before)
+              // (11:30, the lessons: jumping helps a defender, not an attacker -- x NHOOK_BOT_FJUMP_DEF / _ATK by the role, 1 = as before)
               { int rl = du_role(ftg.handle); float jd = 1, ja = 1; lk_over(&jd, "NHOOK_BOT_FJUMP_DEF"); lk_over(&ja, "NHOOK_BOT_FJUMP_ATK"); fj *= rl < 0 ? jd : rl > 0 ? ja : 1.0f; }
               if (fj > 0 && bot_rand01() < fj * (float)dt / 60.0f) g_fjump_until = now + 0.25; }
             { float gd0 = 6, gd1 = 16; static int gset = -1; static double gnext; if (gset < 0) gset = getenv("NHOOK_BOT_GREN") != 0;   // (the players' band and rate unless NHOOK_BOT_GREN is set)
@@ -1382,7 +1380,7 @@ static void bot_step_body(void) {
                           static double tl; if (bot_log() && now - tl > 5) { tl = now; nlog("[nhook] [fight] outranged: a %s at %.0f units vs my %s -- no closing in, strafing, a better weapon first", tcls, tdist, wc); } } } }
                 if (g_bot_camo_hold) r = 0.9f;   // (camo: walk in to the near edge of the band before the first shot)
                 if (now > tswitch) { side = -side; tswitch = now + g_bm.strafe_switch * kswitch * (0.6f + 0.8f * bot_rand01()); }
-                // (11:50, the lessons: attackers who strafe least win more, defenders who strafe hardest survive more -- the strafe x
+                // (11:30, the lessons: attackers who strafe least win more, defenders who strafe hardest survive more -- the strafe x
                 //  NHOOK_BOT_STRAFE_ATK / _DEF by the role in this duel)
                 float ksr = kstrafe; { int rl = du_role(ftg.handle); float sa = 1, sd = 1; lk_over(&sa, "NHOOK_BOT_STRAFE_ATK"); lk_over(&sd, "NHOOK_BOT_STRAFE_DEF"); ksr *= rl > 0 ? sa : rl < 0 ? sd : 1.0f; }
                 float lat = side * fminf(1.0f, ksr * (0.25f + g_bm.strafe_rms / run));
@@ -1595,6 +1593,12 @@ static void bot_step_body(void) {
       if (fight && tend && now > tend) { tend = 0; if (!noreload && now - tfired < 8.0 && !g_bot_pick_on && (g_inv.ammo < 0 || g_inv.ammo < g_inv.ammo_max)) { trel = now; if (bot_log()) nlog("[nhook] [inv] reloading after the fight"); } }
       { static double tlow; if (fight && !engaged && g_inv.ammo >= 0 && g_inv.ammo_max > 2 && g_inv.ammo < 0.6f * g_inv.ammo_max && now - tlow > 4.0 && now - trel > 4.0 && !g_bot_pick_on) {
             tlow = now; trel = now; if (bot_log()) nlog("[nhook] [inv] reloading: %d of %d rounds", g_inv.ammo, g_inv.ammo_max); } }
+      // THE LULL RELOAD (2026-11-09 11:35: 5 of 40 deaths in a 37-player Pit match with the magazine EMPTY -- in a brawl the walker is
+      //  never out of a fight, so the reload above never came): engaged, but its target out of sight for 1 s+ and nobody aiming at it,
+      //  the magazine under NHOOK_BOT_RELOAD_LULL (0.45, live; 0 = off) -> reload now
+      { static double tvz, tll; if (g_ftg_vis) tvz = now; float rl = 0.45f; lk_over(&rl, "NHOOK_BOT_RELOAD_LULL");
+        if (rl > 0 && engaged && now - tvz > 1.0 && g_naim_me == 0 && g_inv.ammo >= 0 && g_inv.ammo_max > 2 && g_inv.ammo < rl * g_inv.ammo_max && g_inv.reserve != 0 && now - tll > 4.0 && now - trel > 4.0 && !g_bot_pick_on) {
+            tll = now; trel = now; if (bot_log()) nlog("[nhook] [inv] reloading in a lull: %d of %d rounds, the target out of sight", g_inv.ammo, g_inv.ammo_max); } }
       // EMPTY (08:30, the user: "empty magazines sans reload are unacceptable btw. do better. find ammo, new weapon, or switch to
       // alternate"): with the magazine known (the learned field, ammo_learn), a 0 there -> the other weapon if it has rounds (switch
       // bit), else the reload tap at once, in a fight too; still 0 after 2 reloads = DRY (no reserve): the other weapon, else any
@@ -1666,7 +1670,7 @@ static void bot_step_body(void) {
           float ay = atan2f(t->aim[1], t->aim[0]); if ((cosf(ay) * dx + sinf(ay) * dy) / d < 0.978f) continue;   // (cos 12 deg)
           uint32_t tw = t->wslot >= 0 && t->wslot < 4 ? t->weapons[t->wslot] : 0xFFFFFFFFu; uint64_t twd = nov_datum(tw); uint32_t twdef = 0;
           lastS.ah[lastS.naim] = t->handle; lastS.ad[lastS.naim] = d; lastS.aw[lastS.naim] = twd && hb_read(twd, &twdef, 4) ? eg_wcls(hb_tag_name(twdef)) : "?"; lastS.naim++; }
-      (void)was_alive; (void)nd; (void)nother; (void)dsum; g_death_snap = &lastS;
+      (void)was_alive; (void)nd; (void)nother; (void)dsum; g_death_snap = &lastS; g_naim_me = lastS.naim;
       du_tick(now, objs, n, me, have_tg ? ftg.handle : 0, g_bot_trig); }
     { static float ol0 = -1; if (ol0 < 0) { const char* e = getenv("NHOOK_NAV_OFFLANE"); ol0 = e ? strtof(e, 0) : 0.0f; } float ol = ol0; lk_over(&ol, "NHOOK_NAV_OFFLANE"); g_nav_offlane = ol;
       float lp = 40; lk_over(&lp, "NHOOK_NAV_LIFTPEN"); g_nav_liftpen = lp;

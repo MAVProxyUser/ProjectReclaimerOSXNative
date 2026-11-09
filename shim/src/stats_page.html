@@ -1428,12 +1428,12 @@ const WK=[
   ['NHOOK_U_FETCH','Fetch a better weapon (priority)',45,0,100,1,'The base worth of picking up a better weapon or ammo; each step of improvement adds the gain below, distance takes some off.'],
   ['NHOOK_U_FETCH_GAIN','Fetch: worth per step of improvement',6,0,20,0.5,'How much a better weapon adds to the fetch. An empty magazine makes any loaded weapon a big improvement.'],
   ['NHOOK_BOT_HUNT_KEEP','Keep chasing a hidden target (s)',5,0,20,0.5,'Seconds it stays on a target it can no longer see before picking another.']]}];
-// (11:00, the user: "that 32% accuracy can't help ... missing that head hitbox!" -- the first version's 6 deg fire slack, trigger held at
+// (10:57, the user: "that 32% accuracy can't help ... missing that head hitbox!" -- the first version's 6 deg fire slack, trigger held at
 //  every range and firing after the target ducked spent the rounds: it fires the moment its aim is ON the enemy, aims at the head with
 //  every weapon, and goes for enemies before small weapon upgrades)
 const WK_MAX={NHOOK_BOT_SKILL:1,NHOOK_BOT_FIRE_EXTRA:0.5,NHOOK_BOT_PULL_PER:0.16,NHOOK_BOT_SEE_NEAR:4,
   NHOOK_BOT_TURN0:3,NHOOK_BOT_TURN:14,NHOOK_BOT_RETREAT:0,NHOOK_BOT_PRESS:0.8,NHOOK_BOT_NOWING:1,NHOOK_U_HUNT:50,NHOOK_U_FETCH:35};
-// (11:55: the press-in with shields up and the recharge break-off are the players' lessons now -- learnings.py -> walker-lessons.json:
+// (11:33: the press-in with shields up and the recharge break-off are the players' lessons now -- learnings.py -> walker-lessons.json:
 //  "Push or hold", "Pick fights with your shields up" -- the preset leaves them to the data)
 // (the undo also takes out what the first version set)
 const WK_MAX_OLD=['NHOOK_BOT_HOSE','NHOOK_BOT_FIRE_LINGER','NHOOK_BOT_HEADGATE_SH','NHOOK_BOT_AIM_BODY','NHOOK_BOT_CLOSE','NHOOK_U_RECHARGE'];

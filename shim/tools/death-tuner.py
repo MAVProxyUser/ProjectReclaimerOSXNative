@@ -10,7 +10,7 @@ empty, outnumbered, unseen, point blank, traded, entered hurt, slow start, outra
   - judges the last step on the walker's own K/D (its stats page, /stats.json): the STEP deaths after it against the STEP deaths
     before; 25%+ worse -> the setting goes back and that move rests for 30 deaths; else it stays.
 "traded" deaths (the killer nearly dead too) take no step.
-LEAD (11:50, the user: "classic inability to lead a shot, and predict the path of the head"): a second track on the SERVER's
+LEAD (11:24, the user: "classic inability to lead a shot, and predict the path of the head"): a second track on the SERVER's
 accuracy (the scoreboard's hits / shots, the walker's /stats.json): every LEAD_SHOTS (250) shots the lead multiplier
 NHOOK_BOT_LEAD_X moves one step (0.25, 0..3) in its current direction; the next window keeps it unless accuracy fell 3+ points
 (then it goes back and the direction turns). The walker tab's "Self-tune from deaths" switch is NHOOK_TUNE in the same
