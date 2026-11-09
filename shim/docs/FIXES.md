@@ -3272,6 +3272,9 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   a running battle, at every round end (our server's in_match true -> false) walker-coach.py round + match-study.py, then each
   walker's game restarted headless with its new knobs and the newest build (they rejoin in the lobby; the user's game and the
   server stay).
+- **Outranged from 1.2x the band** (2026-11-09 13:50; nbot.c the OUTRANGED block) — WHY: the death summary's mean killer distance rose
+  to 16 units; a sniper killed the walker at 14 units, under the 1.5x threshold (~15 units for the assault rifle's band). LOGIC:
+  NHOOK_BOT_OUTRANGE is now the factor (1.2, live; 0 = off) on the held weapon's band far edge (p75 x DIST).
 - **Empty mid-fight: switch first** (2026-11-09 13:40; nbot.c the EMPTY block) — WHY: "[death] ... ASSAULT RIFLE 0 rounds" at 4 units
   against two enemies: the walker reloaded first (right while switching was unreliable); with the learnt switch button ("3 of 3 took")
   the Halo answer is the switch -- faster than a reload. LOGIC: an empty magazine with an enemy in sight within 20 units (g_eng_close),

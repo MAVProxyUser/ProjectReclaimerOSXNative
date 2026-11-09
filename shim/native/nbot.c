@@ -1154,8 +1154,9 @@ static void bot_step_body(void) {
                 // OUTRANGED (11:50: today's best player sniped from 26 units while the walker's rifle pulled it across the open into the
                 //  scope): the target 1.5x beyond the held weapon's band and holding a sniper / precision weapon -> no closing in, a full
                 //  strafe, no long shots; the fight bids under a weapon fetch (g_bot_outranged: nbrain_beh.c beh_fight). NHOOK_BOT_OUTRANGE=0 off
-                { float orng = 1; lk_over(&orng, "NHOOK_BOT_OUTRANGE"); g_bot_outranged = 0;
-                  if (orng > 0 && tdist > 1.5f * p75 * kdist && strcmp(wc, "sniper") && strcmp(wc, "precision") && strcmp(wc, "rocket")) {
+                // (13:50: NHOOK_BOT_OUTRANGE is the factor now -- 1.2 x the band's far edge (1.5 missed a sniper at 14 units); 0 = off)
+                { float orng = 1.2f; lk_over(&orng, "NHOOK_BOT_OUTRANGE"); g_bot_outranged = 0;
+                  if (orng > 0 && tdist > orng * p75 * kdist && strcmp(wc, "sniper") && strcmp(wc, "precision") && strcmp(wc, "rocket")) {
                       uint32_t tw = ftg.wslot >= 0 && ftg.wslot < 4 ? ftg.weapons[ftg.wslot] : 0xFFFFFFFFu; uint64_t twd = nov_datum(tw); uint32_t twdef = 0;
                       const char* tcls = twd && hb_read(twd, &twdef, 4) ? eg_wcls(hb_tag_name(twdef)) : "none";
                       if (!strcmp(tcls, "sniper") || !strcmp(tcls, "precision")) { g_bot_outranged = 1; r = 0; g_bot_fire = 0;
