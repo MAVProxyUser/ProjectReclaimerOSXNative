@@ -970,6 +970,11 @@ static int bot_head(const NovObj* t, double now, float* out) {   // -> 1: out = 
 #endif
 }
 static float g_bot_head_r = -1;   // (the current target's head radius, -1 = not known)
+static float g_bot_head_c[3];      // (... and its centre: the fire gate's hit test)
+// the distance from the line cam + s * dv (s > 0) to the point P; behind the camera = far
+static float ray_pd(const float* cam, const float* dv, const float* P) {
+    float wx = P[0] - cam[0], wy = P[1] - cam[1], wz = P[2] - cam[2], s = wx * dv[0] + wy * dv[1] + wz * dv[2];
+    return s <= 0 ? 1e9f : sqrtf(fmaxf(0.0f, wx * wx + wy * wy + wz * wz - s * s)); }
 #include "nbrain_beh.c"   // the behaviours: each bids for the legs (brain stage 2)
 #include "npolicy.c"     // the learnt movement policy (policy-train.py on the GPU -> policy.json)
 static void bot_models_tick(void) {   // (live knobs: the models re-read when their files change -- every 10 s a look at the files' times)
@@ -1077,7 +1082,10 @@ static void bot_step_body(void) {
             //  jumping) with every weapon -- NHOOK_BOT_HEAD_ALL (live, 1); 0 = the old chest height for the automatic weapons
             float hall = 1; lk_over(&hall, "NHOOK_BOT_HEAD_ALL");
             if (!prec && !(hall > 0)) { float ab = 0.2f; lk_over(&ab, "NHOOK_BOT_AIM_BODY"); ap[2] = t->c[2] + ab * t->r; }
-            else if (ha_on > 0 && bot_head(t, now, hp)) { ap[0] = hp[0]; ap[1] = hp[1]; ap[2] = hp[2] + hdz * hp[3]; g_bot_head_r = hp[3]; }   // (the head hitbox: bot_head above)
+            // (11:30: automatic weapons track the head but aim at the NECK, NHOOK_BOT_HEAD_DZ_AUTO (-1.5 head radii, live): spread / drift
+            //  upward still hits the head, downward the chest -- aimed at the head itself every shot drifting up missed everything)
+            else if (ha_on > 0 && bot_head(t, now, hp)) { float dz = hdz; if (!prec) { dz = -1.5f; lk_over(&dz, "NHOOK_BOT_HEAD_DZ_AUTO"); }
+                ap[0] = hp[0]; ap[1] = hp[1]; ap[2] = hp[2] + dz * hp[3]; g_bot_head_r = hp[3]; memcpy(g_bot_head_c, hp, 12); }
             // LEAD (10:25): Halo 3 registers a client's bullets on the HOST, no lag compensation -- a third of the walker's shots through
             // a hitbox registered no damage (aim reg 0.67): the aim point leads the target by its velocity (units a second) x
             // NHOOK_BOT_AIMLEAD s (live, 0.06; follow-study.py hones it on registered hits a shot)
@@ -1181,7 +1189,20 @@ static void bot_step_body(void) {
             const char* hcl = g_inv.held_c ? g_inv.held_c : "";
             float reach = frm * (!strcmp(hcl, "sniper") ? 120.0f : (!strcmp(hcl, "precision") || !strcmp(hcl, "rocket")) ? 60.0f : !strcmp(hcl, "shotgun") ? 12.0f : !strcmp(hcl, "melee") ? 4.0f : 40.0f);
             float cone = (size > 1.2f ? size : 1.2f) + fextra;
-            g_bot_err = err; g_bot_fire = fvis && (fwr <= 0 || now - tacq > react) && err < cone && tdist < reach;
+            // (11:30, the user: "a quick scoreboard glance immediately shows we miss way more shots than the competition" -- 54% of its
+            //  shots on target against the best players' 64-84%, misses a median 1.1 deg off): with the head known, CAN HIT = the aim line
+            //  passes through the head (its radius x 1.1 + NHOOK_BOT_FIRE_PAD 0.03 units) or the body under it (a column 0.22 units wide
+            //  from the head down to 0.7 radii under the centre, + the pad) -- not a cone around the aim point, which let every shot
+            //  drifting over the head go. NHOOK_BOT_FIRE_HITTEST=0 (live) = the cone
+            int can_hit = err < cone; float fht = 1; lk_over(&fht, "NHOOK_BOT_FIRE_HITTEST");
+            if (fht > 0 && g_bot_head_r > 0) { float pad = 0.03f; lk_over(&pad, "NHOOK_BOT_FIRE_PAD");
+                float dv[3] = {cosf(pitch0) * cosf(yaw0), cosf(pitch0) * sinf(yaw0), sinf(pitch0)};
+                can_hit = ray_pd(cam, dv, g_bot_head_c) < g_bot_head_r * 1.1f + pad;
+                float top = g_bot_head_c[2] - g_bot_head_r, bot = ftg.c[2] - 0.7f * ftg.r;
+                for (int k = 0; k <= 8 && !can_hit && top > bot; k++) { float f = (float)k / 8.0f;
+                    float P[3] = {ftg.c[0] + (g_bot_head_c[0] - ftg.c[0]) * f, ftg.c[1] + (g_bot_head_c[1] - ftg.c[1]) * f, bot + (top - bot) * f};
+                    if (ray_pd(cam, dv, P) < 0.22f + pad) can_hit = 1; } }
+            g_bot_err = err; g_bot_fire = fvis && (fwr <= 0 || now - tacq > react) && can_hit && tdist < reach;
             // (07:35, the user: "hitting the critical hitbox is key. the game reticule has a red dot in some cases when it's a head shot,
             //  you should tune to hit them when possible. headshots being main goal"): with a PRECISION weapon (battle rifle, carbine,
             //  magnum, sniper -- headshots kill faster) the trigger waits for the aim to sit on the HEAD: within its angular radius
@@ -1205,7 +1226,7 @@ static void bot_step_body(void) {
             //  held by the head gate / camo / fire allowed, and of those the share the trigger was really down (burst / pulse / switch))
             // (10:58: counted over the weapon's reach; "allowed" is now a share of the steps the walker could SEE the target -- hidden =
             //  it cannot hit it; "aim turning" = still swinging onto it, outside the fire slack)
-            if (tdist < reach) { g_fg_n++; if (!fvis) g_fg_hid++; else { g_fg_vis++; if (fwr > 0 && now - tacq <= react) g_fg_react++; else if (err >= cone) g_fg_aim++;
+            if (tdist < reach) { g_fg_n++; if (!fvis) g_fg_hid++; else { g_fg_vis++; if (fwr > 0 && now - tacq <= react) g_fg_react++; else if (!can_hit) g_fg_aim++;
                 else if (g_bot_camo_hold) g_fg_camo++; else if (!g_bot_fire) g_fg_head++; else g_fg_ok++; } }
             // the other weapon when the target is outside the held one's band and well inside the other's (vpad Y held 0.15 s,
             // 3 s between switches; not in the first 0.3 s of a target)
@@ -1801,7 +1822,7 @@ static void bot_step_body(void) {
       int trig = !nofire && spar && g_bot_fire && burst_ok && (!g_bot_pull || fmod(now - g_bot_fire_t0, pper) < pper * 0.5) && !ob_carry; g_bot_trig = trig;
       { static double tfg; if (g_bot_fire && trig) g_fg_trig++;
         if (now - tfg > 20.0) { int nv = g_fg_vis > 0 ? g_fg_vis : 1;
-            if (tfg > 0 && g_fg_n > 30 && bot_log()) nlog("[nhook] [firegate] %d steps with a target in its weapon's reach: hidden %.0f%% (no shot possible); of the %d it could see: fire allowed %.0f%%, aim still turning onto it %.0f%%, reaction wait %.0f%%, camo %.0f%%, head gate / other %.0f%% -- trigger down in %.0f%% of the allowed (held %s)",
+            if (tfg > 0 && g_fg_n > 30 && bot_log()) nlog("[nhook] [firegate] %d steps with a target in its weapon's reach: hidden %.0f%% (no shot possible); of the %d it could see: fire allowed %.0f%%, aim line not through it (turning / off) %.0f%%, reaction wait %.0f%%, camo %.0f%%, head gate / other %.0f%% -- trigger down in %.0f%% of the allowed (held %s)",
               g_fg_n, 100.0 * g_fg_hid / g_fg_n, g_fg_vis, 100.0 * g_fg_ok / nv, 100.0 * g_fg_aim / nv, 100.0 * g_fg_react / nv, 100.0 * g_fg_camo / nv, 100.0 * g_fg_head / nv, g_fg_ok ? 100.0 * g_fg_trig / g_fg_ok : 0.0, g_inv.held ? g_inv.held : "-");
           tfg = now; g_fg_n = g_fg_hid = g_fg_react = g_fg_aim = g_fg_camo = g_fg_head = g_fg_ok = g_fg_trig = g_fg_vis = 0; } }
       // (13:25: the SPARTAN LASER fires after its charge, and every release starts the charge again -- the aim gate flickered the trigger:

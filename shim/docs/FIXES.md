@@ -3286,6 +3286,23 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   switch presses (the learnt record bit): 0 of 32 took" -- 32 x "switching from PLASMA PISTOL to ASSAULT RIFLE" with the trigger held
   (the plasma pistol held = an overcharge held) while the earlier switches, 3 of 3 and 2 of 2, came with the trigger up. LOGIC: from a
   switch press until 0.15 s after it the trigger (and the reload click) stays up; PLASMA PISTOL joins the weapons whose trigger is pulsed.
+- **Fire only when the aim line goes through the target; automatic weapons aim at the neck** (2026-11-09 11:30; nbot.c the fire gate
+  ray_pd / g_bot_head_c, the aim point) — WHY: the user, from the scoreboard: "we miss way more shots than the competition" -- the
+  walker 54% of its shots on target (accuracy 48%), the best players 64-84% (53-60%); its misses a median 1.1 deg off. The trigger was
+  allowed inside a cone (body size + slack) around the aim point, and the aim point was the head -- plus the live knob file's
+  NHOOK_BOT_HEAD_DZ 0.5 from an earlier tuning, half a head radius ABOVE it -- so every shot drifting upward missed everything.
+  LOGIC: with the head known, the trigger is allowed only when the line from the camera along the record's aim passes within the
+  head's radius x 1.1 + NHOOK_BOT_FIRE_PAD (0.03 units) of its centre, or within 0.22 + pad of the body column from the head down to
+  0.7 radii under the centre (9 samples); NHOOK_BOT_FIRE_HITTEST=0 = the cone. Automatic weapons track the head node but aim
+  NHOOK_BOT_HEAD_DZ_AUTO (-1.5) head radii under its centre (the neck); precision weapons the head centre (HEAD_DZ taken out of the
+  public walker's file). [firegate]'s "aim line not through it" counts what the hit test holds back.
+- **The work board learns again while the walker plays; its Walkers tab shows the public walker** (2026-11-09 11:25;
+  shim/tools/refresh-loop.sh playing(), shim/tools/workboard.py pubwalker()) — WHY: the user: "are we no longer learning and updating
+  the work board, etc?" The 20-minute refresh waits while the user plays, and it took the headless public walker for the user: it had
+  waited since the walker joined (10:33); the Walkers tab showed only the local coached rounds and the learn loop, neither running
+  since the night. LOGIC: a --headless game is not the user's; the Walkers tab's first panel: the public walker's kills / deaths /
+  share on target / head share now (its stats page, 8771), the causes of its last 60 deaths, the death tuner's steps and verdicts,
+  and the brain's current lesson.
 - **Why did they beat me: a cause per death, and a tuner that moves settings by it** (2026-11-09 11:10-11:20; nbot.c du_tick /
   why_note, shim/tools/death-tuner.py, nwknobs.c "why" / "tune", stats_page.html Walker tab) — WHY: the user: "walker needs to focus
   hard on its K/D spread and tweak settings until it gets better, I feel like a per death why did the other player beat me

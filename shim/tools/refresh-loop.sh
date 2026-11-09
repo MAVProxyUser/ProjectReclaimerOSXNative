@@ -6,7 +6,9 @@
 set -u
 cd "$(dirname "$0")/../.."
 bg() { taskpolicy -b nice -n 20 "$@"; }
-playing() { ps -Ao command | grep '^/Applications/Project Reclaimer.app/Contents/MacOS/project-reclaimer' | grep -v -- '--background' | grep -v -- '--server' | grep -q .; }
+# (2026-11-09: a --headless game is a walker, not the user -- the refresh waited the whole time the public walker played: "are we no
+#  longer learning and updating the work board?")
+playing() { ps -Ao command | grep '^/Applications/Project Reclaimer.app/Contents/MacOS/project-reclaimer' | grep -v -- '--background' | grep -v -- '--server' | grep -v -- '--headless' | grep -q .; }
 while true; do
   if playing; then echo "$(date +%H:%M) a game is being played: the refresh waits"; while playing; do sleep 60; done; fi
   echo "$(date +%H:%M) refresh: new recordings -> models + tome -> learnings -> coach"

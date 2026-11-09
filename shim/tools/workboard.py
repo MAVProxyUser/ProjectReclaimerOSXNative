@@ -17,6 +17,36 @@ def arg(k, d):
 
 def direction_cmd():   # workboard.py direction "line" "line" ...  (the plan in words, shown on top)
     os.makedirs(WB, exist_ok=True); tmp = DIRECTION + '.tmp'; json.dump({'t': time.time(), 'lines': sys.argv[2:]}, open(tmp, 'w'), indent=1); os.replace(tmp, DIRECTION); print('direction: %d lines' % (len(sys.argv) - 2))
+# the public walker as it learns (2026-11-09, the user: "are we no longer learning and updating the work board, etc?"): its K/D now (its
+# own stats page, 8771), why it died (nbot.c why_note -> battles/follow/why-<nick>.jsonl), the death tuner's steps / verdicts
+# (shim/tools/death-tuner.py -> tuner-<nick>.jsonl) and the brain's current lesson (its log's last "[brain] lesson:")
+PUBWALKER = os.environ.get('WB_PUBWALKER', 'AIWalkerTest')
+def jl_tail(path, n):
+    try:
+        with open(path, 'rb') as f:
+            f.seek(0, 2); sz = f.tell(); f.seek(max(0, sz - 65536)); lines = f.read().decode('utf-8', 'replace').splitlines()
+    except OSError: return []
+    out = []
+    for l in lines[-n:]:
+        try: out.append(json.loads(l))
+        except Exception: pass
+    return out
+def pubwalker():
+    r = {'nick': PUBWALKER, 'why': jl_tail(os.path.join(SUP, 'battles', 'follow', 'why-%s.jsonl' % PUBWALKER), 60),
+         'tune': jl_tail(os.path.join(SUP, 'battles', 'follow', 'tuner-%s.jsonl' % PUBWALKER), 12)}
+    try:
+        with urllib.request.urlopen('http://127.0.0.1:8771/stats.json', timeout=1.5) as h: s = json.loads(h.read())
+        me = [p for p in s.get('players') or [] if p.get('you')]
+        r['live'] = {'map': s.get('map'), 'players': len(s.get('players') or []), 'kills': me[0].get('kills') if me else None, 'deaths': me[0].get('deaths') if me else None,
+                     'on': (me[0].get('aim') or {}).get('on') if me else None, 'head': (me[0].get('aim') or {}).get('head') if me else None}
+    except Exception: r['live'] = None
+    try:
+        with open(os.path.join(SUP, 'battles', 'aiwalker.log'), 'rb') as f:
+            f.seek(0, 2); sz = f.tell(); f.seek(max(0, sz - 2000000)); t = f.read().decode('utf-8', 'replace')
+        i = t.rfind('[brain] lesson: '); r['lesson'] = t[i + 16:t.find('\n', i)].strip() if i >= 0 else None
+        j = t.rfind('[brain] code built '); r['brain'] = t[j + 19:t.find(' is stepping', j)] if j >= 0 else None
+    except OSError: r['lesson'] = r['brain'] = None
+    return r
 def tome_load():
     try: return json.load(open(TOME))
     except Exception: return None
@@ -116,7 +146,8 @@ def status():
     except Exception: wc = None
     try: wk = json.load(open(os.path.join(TR, 'weapon-kills.json')))
     except Exception: wk = None
-    return {'wkills': wk, 'review': review, 'learnloop': ll, 'wcoach': wc, 'now': time.time(), 'jobs': jobs, 'apps': apps, 'direction': direction, 'tome': tome_load(), 'per_map_models': per_map, 'learnings': learn, 'coach': coach, 'observer_log': tail(obs[0], 8) if obs else [], 'recorder': tail(rec[0], 4) if rec else [],
+    pw = pubwalker()
+    return {'pubwalker': pw, 'wkills': wk, 'review': review, 'learnloop': ll, 'wcoach': wc, 'now': time.time(), 'jobs': jobs, 'apps': apps, 'direction': direction, 'tome': tome_load(), 'per_map_models': per_map, 'learnings': learn, 'coach': coach, 'observer_log': tail(obs[0], 8) if obs else [], 'recorder': tail(rec[0], 4) if rec else [],
             'live': live, 'totals': totals(), 'tasks': tasks_load()}
 
 PAGE = r'''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Work board</title>
@@ -140,6 +171,10 @@ h1{font-size:20px;margin:0 0 4px}h2{font-size:13px;letter-spacing:.08em;text-tra
 <div id="wkf" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px"></div><div id="wk2" style="overflow-x:auto"></div></div><div class="p"><h2>What the game is learning <span class="k" id="lrsrc"></span></h2><div class="k" style="margin-bottom:8px">Plain-language findings from every recorded public match (Infection left out of the fighting findings), each with the number of cases it rests on; thin ones (under 30 cases) are dimmed. Rebuilt every 20 minutes while sampling runs.</div><div id="lrn" class="lgrid"></div></div></div>
 <div id="youview" hidden><div class="p"><h2>You vs the winners <span class="k" id="ysrc"></span></h2><div class="k" style="margin-bottom:8px">Your public matches (played through our launcher: the recorder marks your slot) next to the WINNERS -- the top quarter of players by K/D in non-Infection matches -- and everyone, measure by measure; the biggest gaps first, each with what the winners do differently. shim/tools/coach.py.</div><div id="you"></div></div></div>
 <div id="walkview" hidden>
+<div class="p" style="margin-bottom:14px"><h2>Public walker -- learning while it plays <span class="k" id="pwsrc"></span></h2><div id="pwlive" style="margin-bottom:8px"></div>
+<div class="grid"><div><div class="k" style="margin-bottom:4px">Why it died (the last 60 deaths: one cause each)</div><div id="pwwhy"></div></div>
+<div><div class="k" style="margin-bottom:4px">The death tuner (one setting every 6 deaths for the commonest recent cause; put back if K/D fell)</div><div id="pwtune"></div></div></div>
+<div class="k" style="margin-top:8px">The brain now: <span id="pwlesson"></span></div></div>
 <div class="p" style="margin-bottom:14px"><h2>The last public game vs what we assumed <span class="k" id="rvsrc"></span></h2><div class="k" style="margin-bottom:8px">One whole public match (watched, never played by a walker) measured like the map's earlier matches and like everything; a SURPRISE = this game is off the map's number by more than a game this size explains (shares: 2+ standard errors; other numbers: 30%+ with 15+ cases). The per-map model takes the game in right after.</div><div id="rv" style="overflow-x:auto"></div></div>
 <div class="grid"><div class="p"><h2>Learn loop</h2><div class="k" style="margin-bottom:6px">Each turn: a random public game observed whole -> reviewed -> models refit -> walkers coached on that map against that game's winners. Distance to the winners: 0 = their numbers (lower is better).</div><div id="ll"></div></div>
 <div class="p"><h2>Walker self-coaching <span class="k">(battles/coach/state.json)</span></h2><div id="wk"></div><div id="wr" style="margin-top:8px"></div></div></div></div>
@@ -185,6 +220,14 @@ async function tick(){try{const j=await (await fetch('/status.json')).json();
     R.rows.map(r=>{const s=r.surprise_vs_map; return `<tr style="border-top:1px solid var(--line)"><td>${E(r.measure)}</td><td style="text-align:center"><b>${pf(r.game,r.share)}</b> <span class="k">${r.game_n}</span></td><td style="text-align:center">${pf(r.map,r.share)} <span class="k">${r.map_n}</span></td><td style="text-align:center" class="k">${pf(r.all,r.share)} ${r.all_n}</td><td style="color:var(--go)">${s==null?'':(r.share?(s>0?'+':'')+s+' SE':(s>0?'+':'')+Math.round(s*100)+'%')}</td></tr>`}).join('')+'</table>'; }
  else document.getElementById('rv').innerHTML='<div class="none">no game reviewed yet (shim/tools/game-review.py)</div>';
  const LL=j.learnloop; document.getElementById('ll').innerHTML=LL&&LL.turns&&LL.turns.length?LL.turns.slice().reverse().map(t=>`<div class="row"><b>${E(t.map)}</b><span class="k">${E(t.class)} · ${t.players} players · ${ago(t.t)}</span><span class="k">${(t.surprises||[]).length} surprise(s)${Array.isArray(t.battle)?' · '+t.battle.map(b=>Object.entries(b.walkers).map(([w,v])=>'w'+w+' '+(v.likeness??'-')).join(' ')).join(' | '):t.battle?' · '+E(t.battle):''}</span></div>`).join(''):'<div class="none">not started yet (shim/tools/learn-loop.py runs after Firefight)</div>';
+ const PW=j.pubwalker; if(PW){ const L=PW.live; document.getElementById('pwsrc').textContent=PW.nick+(PW.brain?` · brain built ${PW.brain}`:'');
+   document.getElementById('pwlive').innerHTML=L?`<span class="row"><b>${L.kills} kills / ${L.deaths} deaths</b> <span class="k">(K/D ${(L.kills/Math.max(1,L.deaths)).toFixed(2)}) on ${E(L.map)} with ${L.players} players · ${L.on!=null?Math.round(L.on*100)+'% of its shots on target, '+Math.round((L.head||0)*100)+'% of hits on the head':''}</span></span>`:'<span class="k">not in a game</span>';
+   const cnt={}; for(const r of PW.why) cnt[r.cause]=(cnt[r.cause]||0)+1; const tot=PW.why.length||1;
+   document.getElementById('pwwhy').innerHTML=PW.why.length?Object.entries(cnt).sort((a,b)=>b[1]-a[1]).map(([c,n])=>`<div class="row"><b>${E(c)}</b> <span class="k">${n} (${Math.round(100*n/tot)}%)</span></div>`).join('')+`<div class="k" style="margin-top:4px">last: ${E(PW.why[PW.why.length-1].cause)} -- ${E(PW.why[PW.why.length-1].detail)}</div>`:'<span class="k">no deaths reviewed yet</span>';
+   const st=(PW.tune||[]).filter(r=>r.event!=='start').slice().reverse();
+   document.getElementById('pwtune').innerHTML=st.length?st.map(r=>r.event==='step'?`<div class="row"><span class="k">${ago(r.t)}</span> for <b>${E(r.cause)}</b>: ${E(r.knob)} ${r.from} → ${r.to}</div>`
+      :`<div class="row"><span class="k">${ago(r.t)}</span> ${E(r.knob)} → ${r.to}: K/D ${r.kd_before??'?'} → ${r.kd_after} <b style="color:${r.kept?'var(--ok)':'#e66'}">${r.kept?'kept':'put back'}</b></div>`).join(''):'<span class="k">no steps yet (one every 6 deaths)</span>';
+   document.getElementById('pwlesson').textContent=PW.lesson||'-'; }
  const W=j.wcoach; if(W){ const ks=Object.entries(W.knobs||{}); document.getElementById('wk').innerHTML=ks.length?ks.map(([w,k])=>`<div class="row"><b>walker ${E(w)}</b><span class="k">${Object.entries(k).map(([n,v])=>n.toLowerCase()+' '+(+v).toFixed(2)).join(' · ')}</span></div>`).join(''):'<div class="none">all knobs at their defaults</div>';
    document.getElementById('wr').innerHTML=(W.rounds||[]).slice().reverse().map(r=>`<div class="row"><span class="k">${ago(r.t)}</span><b>${E(r.map)}</b><span class="k">${Object.entries(r.walkers).map(([w,v])=>'w'+w+': dist '+(v.likeness??'-')+', K/D '+(v.kd??'-')+', duels won '+(v.duels_won==null?'-':Math.round(v.duels_won*100)+'%')).join(' · ')}</span></div>`).join('')||'<div class="none">no coached battle yet</div>'; }
  else document.getElementById('wk').innerHTML='<div class="none">no coached battle yet (shim/tools/walker-coach.py)</div>';
