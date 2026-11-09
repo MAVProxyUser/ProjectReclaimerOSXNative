@@ -1010,9 +1010,18 @@ static void bot_step_body(void) {
                     float dx = t->c[0] - cam[0], dy = t->c[1] - cam[1], dz = t->c[2] - cam[2], d = dx * dx + dy * dy + dz * dz;
                     for (int k = 0; k < 3; k++) if (d < cd[k]) { for (int m = 2; m > k; m--) { cd[m] = cd[m - 1]; cand[m] = cand[m - 1]; } cd[k] = d; cand[k] = i; break; } }
                 int k = (rr >> 1) % 3; if (cand[k] >= 0 && cd[k] < 1600.0f) q = &objs[cand[k]]; }
-            g_los_p[0] = cam[0]; g_los_p[1] = cam[1]; g_los_p[2] = cam[2]; g_los_v[0] = q->c[0] - cam[0]; g_los_v[1] = q->c[1] - cam[1]; g_los_v[2] = q->c[2] + 0.3f * q->r - cam[2];
+            // (12:30: the ray goes to the HEAD -- the walker aims there, and waist-high cover hid a chest-high ray: targets within 3
+            //  units read "hidden" 26% of the time, 3-6 units 35%, while they shot the walker dead. Its head hitbox (bot_head), else
+            //  0.6 x the radius above the centre)
+            float lz = q->c[2] + 0.6f * q->r, lx = q->c[0], ly = q->c[1]; { float hp[4]; if (bot_head(q, now, hp)) { lx = hp[0]; ly = hp[1]; lz = hp[2]; } }
+            g_los_p[0] = cam[0]; g_los_p[1] = cam[1]; g_los_p[2] = cam[2]; g_los_v[0] = lx - cam[0]; g_los_v[1] = ly - cam[1]; g_los_v[2] = lz - cam[2];
             g_los_ign[0] = meh; g_los_ign[1] = q->handle; g_los_tgt = q->handle; g_los_req++; }
         int vis = los_get(ftg.handle, now); if (vis < 0) vis = tdist < 6 ? 1 : 0;
+        // (12:30: SHOT AT = SEEN -- the target aiming within 12 deg at the walker while the walker was hurt in the last 0.5 s, within 25
+        //  units: it can be shot back; "[death] fighting ... at 5 u (hidden); aiming at me: ... = my target")
+        { static float vit0 = -1; static double thurt2; float vv = o->shield + o->health; if (vit0 >= 0 && vv < vit0 - 0.01f) thurt2 = now; vit0 = vv;
+          if (!vis && tdist < 25 && now - thurt2 < 0.5) { float dx = o->c[0] - ftg.c[0], dy = o->c[1] - ftg.c[1], dd = sqrtf(dx * dx + dy * dy) + 1e-3f, ay = atan2f(ftg.aim[1], ftg.aim[0]);
+              if ((cosf(ay) * dx + sinf(ay) * dy) / dd > 0.978f) { vis = 1; static double tl; if (bot_log() && now - tl > 3) { tl = now; nlog("[nhook] [fight] %08x is shooting me at %.1f units: seen (the ray said hidden)", ftg.handle, tdist); } } } }
         if (vis) tvis = now;
         int seen = tvis && now - tvis < 0.6;
         // (2026-11-08 walker-compare: walkers reacted in 0.42 s and aimed 2.8 deg off against the players' 1.08 s and 4.1 deg: the
@@ -1329,7 +1338,10 @@ static void bot_step_body(void) {
         // (10:05: in a fight only when the target's distance is inside the other weapon's band -- it swapped the rifle for a shotgun mid-range)
         // (10:35: in a fight also only when the HELD weapon is out of its band -- else the band rule switched straight back: ping-pong)
         { static double tbt; float kdb = 1; lk_over(&kdb, "NHOOK_BOT_DIST"); float ob = engaged ? bot_band_off(g_inv.other_c, tdist, kdb) : 0, hbo = engaged ? bot_band_off(g_inv.held_c, tdist, kdb) : 1;
-          if ((!engaged || (tdist > 3.0f && ob <= 0.05f && hbo != 0)) && g_inv.has_other && g_inv.other_rank + 2 <= g_inv.held_rank && g_inv.other_ammo != 0 && now - tbt > 3.0 && now - tswe > 1.0) { tbt = now; tswe = now;   // (09:45: in fights too, beyond 3 units -- a 20-player FFA is nearly always "engaged")
+          // (12:25: "[death] fighting ... at 8 u ... EXCAVATOR 2 rounds": out of a fight a close-range gun (shotgun / Mauler / sword /
+          //  hammer) is never put in hand by rank -- the range-band switch brings it out when an enemy is close)
+          int close_gun = g_inv.other_c && (!strcmp(g_inv.other_c, "shotgun") || !strcmp(g_inv.other_c, "melee"));
+          if (((!engaged && !close_gun) || (engaged && tdist > 3.0f && ob <= 0.05f && hbo != 0)) && g_inv.has_other && g_inv.other_rank + 2 <= g_inv.held_rank && g_inv.other_ammo != 0 && now - tbt > 3.0 && now - tswe > 1.0) { tbt = now; tswe = now;   // (09:45: in fights too, beyond 3 units -- a 20-player FFA is nearly always "engaged")
               bot_switch_press(now); fbtn |= 8;
               if (bot_log()) nlog("[nhook] [inv] the better weapon in hand: switching from %s to %s%s", g_inv.held, g_inv.other, engaged ? " (the target is in its range)" : ""); } } }
       // (10:40: does a switch pulse take? 1 s after each new pulse: the weapon in hand changed or not -- [inv] switch pulses every 2 min)

@@ -3272,6 +3272,15 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   a running battle, at every round end (our server's in_match true -> false) walker-coach.py round + match-study.py, then each
   walker's game restarted headless with its new knobs and the newest build (they rejoin in the lobby; the user's game and the
   server stay).
+- **The sight ray goes to the head; an attacker counts as seen; no close-range gun as the roaming weapon** (2026-11-09 12:25-12:30;
+  nbot.c the LOS request / the shot-at override / the better-weapon switch) — WHY: a death note "fighting efef0095 at 2 u (in sight) ...
+  aiming at me: efef0095 2 u = my target" came after the walker's own lines called that target "hidden, hunting" at 6.5, 4.1 and 3.3
+  units -- no fire, no melee; over 30k log lines close targets read hidden 26% of the time within 3 units, 35% at 3-6 (the ray went to
+  0.3 x the radius above the centre: waist-high cover blocked it while the head stood clear); another death: an 8-unit fight with a
+  Mauler in hand (2 rounds), put there by the better-weapon rule while roaming. LOGIC: the current target's ray goes to its head
+  hitbox (bot_head), other enemies' to 0.6 x their radius above the centre; a target aiming within 12 deg at the walker while it was hurt
+  in the last 0.5 s counts as seen within 25 units ("[fight] ... is shooting me ...: seen"); out of a fight the better-weapon rule never
+  puts a shotgun / melee-class weapon in hand (the range-band switch brings it out when an enemy is close).
 - **The melee race; kite swords and hammers** (2026-11-09 12:15-12:20; nbot.c the melee press, the KITE block) — WHY: the first death
   notes: killed at 0-3 units with the walker's shield gone and its health 0.78-1.00 (lost beatdowns: once a shield is down the first
   melee wins, and the lunge reaches past the players' median landing distance the walker waited for, 0.97 + 0.25); killed at 1 unit
