@@ -5,14 +5,14 @@ target's position, fire, melee, its throttle forward / left and aim yaw / pitch)
 record's button word). Per file:
   target      when the walker has a target, how often the player looks within 10 deg of it (the same enemy)
   fire        the walker wants to fire vs the player firing (button bit 19), by distance band
-  melee       the walker's melee vs the player's melee (button bit 11, from NHOOK_INPUT_LOG's labelling)
+  melee       the walker's melee vs the player's melee (button bit 0; NHOOK_INPUT_LOG's labelling: bit 11 is part of the grenade throw)
   move        the angle between the walker's chosen direction and the player's (both moving), median; how often within 45 deg
   aim         the angle between the walker's intended aim and the player's, both on the walker's target
     python3 shim/tools/shadow-study.py [file.jsonl ...]   (default: the newest in tracks/shadow)"""
 import glob, json, math, os, sys
 
 SH = os.path.expanduser('~/Library/Application Support/ReclaimerMac/tracks/shadow')
-FIRE, MELEE = 1 << 19, 1 << 11
+FIRE, MELEE = 1 << 19, 1 << 0   # (the input map from the user's own play: +8 bit 0 = melee; 0x21100800 = bit 11 + 20/24/29 is the grenade throw)
 def wrap(a): return (a + math.pi) % (2 * math.pi) - math.pi
 def med(v):
     v = sorted(v); return round(v[len(v) // 2], 1) if v else None

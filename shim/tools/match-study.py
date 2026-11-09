@@ -11,7 +11,8 @@ second -- position, look, shield, health, weapon, kills, deaths, SHOTS and HITS 
   idle         a player alive and moving under 0.3 units/s for 2 s or more: the spells, their total and where (6-unit cells)
   melee        kills within 1.5 units (our server names melee ""; public servers "Melee")
 Writes <recording>.study.json beside it and prints the report.
-    python3 shim/tools/match-study.py <recording.jsonl.gz> [--human SLOT]   (default: the player with the most kills)"""
+    python3 shim/tools/match-study.py <recording.jsonl.gz> [--human SLOT | you]   (default: the player with the most kills; you = the
+    recording's own "you" slot -- the player's own recordings)"""
 import bisect, collections, gzip, json, math, os, sys
 
 def read(path):
@@ -36,8 +37,12 @@ def main():
     head, S, E = read(path); T = [s['t'] for s in S]
     rows = lambda s: {r[0]: r for r in s['p']}
     last = rows(S[-1]); slots = sorted(last)
-    human = int(sys.argv[sys.argv.index('--human') + 1]) if '--human' in sys.argv else max(slots, key=lambda k: last[k][12])
-    name = lambda k: 'you' if k == human else 'walker %d' % k
+    ha = sys.argv[sys.argv.index('--human') + 1] if '--human' in sys.argv else None
+    if ha == 'you':   # (the player's own recording, ntracks.c: each sample's "you" = its slot)
+        ys = [s.get('you') for s in S if s.get('you') is not None and s.get('you') >= 0]; human = ys[-1] if ys else max(slots, key=lambda k: last[k][12])
+    else: human = int(ha) if ha is not None else max(slots, key=lambda k: last[k][12])
+    who = 'walker %d' if path.endswith('_local.jsonl.gz') else 'player %d'   # (our server's battles: walkers by slot; a public recording: players)
+    name = lambda k: 'you' if k == human else who % k
     out = {'recording': os.path.basename(path), 'human': human, 'seconds': round(T[-1] - T[0], 1)}
     # scoreboard
     sb = {k: {'kills': last[k][12], 'deaths': last[k][13], 'shots': last[k][14], 'hits': last[k][15]} for k in slots}

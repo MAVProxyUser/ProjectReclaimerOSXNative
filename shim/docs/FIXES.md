@@ -3272,6 +3272,18 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   a running battle, at every round end (our server's in_match true -> false) walker-coach.py round + match-study.py, then each
   walker's game restarted headless with its new knobs and the newest build (they rejoin in the lobby; the user's game and the
   server stay).
+- **The walker presses melee / act / switch in the packed record** (2026-11-09 01:00; nbot.c bot_meleebits / bot_actbit / bot_switchbit,
+  bot_on_abuild; shadow-study.py, match-study.py) — WHY: a headless walker's buttons never reach the server (the virtual pad is not read
+  for buttons in a headless / background client), so it could not melee, pick up or switch weapons ("claiming you can't change weapons
+  on headless walkers is weird"); the user's own play, labelled in context by NHOOK_INPUT_LOG, named the bits. LOGIC: with more of the
+  user's play (jump 27 times after +8 bit 1, a grenade throw 47 times after 0x21100800), +8 bit 0 is the one packed bit that came with
+  play and left no trace in the unit: MELEE's best candidate; the extra byte (+0x2c) bit 0 came with 10 pick-ups (the act button: pick
+  up / reload), its bit 1 with the weapon switches. The walker ORs them into the packed record before each control packet: +8 bit 0 while
+  it melees (g_bot_melee_until), +0x2c bit 0 for 0.6 s with a pick-up hold and 0.1 s with a reload tap (g_bot_act_until), +0x2c bit 1
+  for 0.15 s at a weapon switch (g_bot_switch_until). Switches: NHOOK_BOT_MELEEBITS (hex, default 1; 0 = off), NHOOK_BOT_ACTBIT /
+  NHOOK_BOT_SWITCHBIT (hex, default 1 / 2; 0 = off). Unconfirmed until a walker lands a beatdown / picks up / changes its held weapon on
+  the server's view (the next rounds' study). shadow-study.py counts the player's melee on +8 bit 0 (bit 11 is part of the throw);
+  match-study.py names a public recording's players "player N" (it said "walker N"), --human you = the recording's own slot.
 - **Shadow mode, the input map from a real player, melee bits, the memory watch** (2026-11-09 00:15; nbot.c shadow_log / inp_context /
   bot_meleebits, shim/tools/shadow-study.py, mem-watch.py, play-vs-walkers.sh) — WHY: the user asked for a walker in the biggest public
   game ("I need it to learn in a REAL scenario now"); declined -- an automated player with memory-read targeting against people who

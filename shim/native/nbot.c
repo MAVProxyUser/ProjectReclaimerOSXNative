@@ -197,7 +197,14 @@ static volatile uint64_t g_bot_unit_p; static volatile int g_bot_wsel_v; static 
 static volatile double g_bot_melee_until;
 // (2026-11-09 00:35: the input map labelled 0x21100800 IN CONTEXT -- 15 grenade throws follow it, it is the GRENADE THROW, not melee:
 //  off by default; melee leaves no trace in the unit and is among the "nothing seen" bits still)
-static uint64_t bot_meleebits(void) { static uint64_t v = 1; if (v == 1) { const char* e = getenv("NHOOK_BOT_MELEEBITS"); v = e ? strtoull(e, 0, 16) : 0; } return v; }   // (an empty magazine with the enemy in sight: grenade + rush for the beatdown)   // (levels apart: holding the high ground until; the last levels-apart step)   // (the held weapon acts on a pull; when this string of fire began)
+// (00:55: with more of the user's play -- jump 27 times after +8 bit 1, a throw 47 after bit 11 -- +8 bit 0 is the one packet bit
+//  that left no trace yet came with play: MELEE's best candidate now; the extra byte's bit 0 came with 10 pick-ups (the ACT button:
+//  pick up / reload), its bit 1 with weapon switches. The walker sends them in the packed record while it melees / picks up / reloads
+//  / switches: NHOOK_BOT_MELEEBITS (+8, default 1), NHOOK_BOT_ACTBIT / NHOOK_BOT_SWITCHBIT (the extra byte, default 1 / 2; 0 = off))
+static uint64_t bot_meleebits(void) { static uint64_t v = 2; if (v == 2) { const char* e = getenv("NHOOK_BOT_MELEEBITS"); v = e ? strtoull(e, 0, 16) : 0x1; } return v; }
+static uint8_t bot_actbit(void) { static int v = -1; if (v < 0) { const char* e = getenv("NHOOK_BOT_ACTBIT"); v = e ? (int)strtol(e, 0, 16) : 0x1; } return (uint8_t)v; }
+static uint8_t bot_switchbit(void) { static int v = -1; if (v < 0) { const char* e = getenv("NHOOK_BOT_SWITCHBIT"); v = e ? (int)strtol(e, 0, 16) : 0x2; } return (uint8_t)v; }
+static volatile double g_bot_act_until, g_bot_switch_until;   // (the act / switch bits held until)
 // NHOOK_INPUT_LOG=1 (2026-11-08): what a REAL player's game puts in the packed record -- the button word (+8, a u64) and the extra
 // byte (+0x2c) -- and the local unit's weapon slot bytes (+0x260 / +0x262) and grenade type (+0x298), logged whenever one changes
 // ([input] lines, ms since the first). The walkers' buttons never reach the game in a headless client (melee, reload, weapon and
@@ -264,7 +271,8 @@ static void bot_on_abuild(uint64_t* ctx) {
     int tpk = g_bot_tpk_until > 0 && mono_s() < g_bot_tpk_until;
     uint32_t b8 = g_bot_pkt_btn8 | (extra ? xb : 0) | (tpk ? g_bot_tpk8 : 0) | (mono_s() < g_bot_melee_until ? (uint32_t)(bot_meleebits() & 0x4807u) : 0);   // (melee: the packet's bits of it)
     if (b8) *(uint64_t*)(act + 8) |= b8;
-    uint32_t b2c = g_bot_pkt_btn2c | (tpk ? g_bot_tpk2c : 0); if (b2c) *(act + 0x2c) |= (uint8_t)b2c; }
+    double nw = mono_s(); uint32_t b2c = g_bot_pkt_btn2c | (tpk ? g_bot_tpk2c : 0) | (nw < g_bot_act_until ? bot_actbit() : 0) | (nw < g_bot_switch_until ? bot_switchbit() : 0);
+    if (b2c) *(act + 0x2c) |= (uint8_t)b2c; }
 static void pkt_hook_install(void) {   // the control packet builder's hook: the walker's moves, and NHOOK_INPUT_LOG's reads
     static int done; if (done || getenv("NHOOK_BOT_NOPKT")) return; done = 1; uint64_t a = branch_target_of(0x50fb8);
     if (!a || text_hook("control packet (walker on a server)", a, bot_on_abuild)) nlog("[nhook] [bot] halo3+0x50fb8 could not be hooked: a joined walker's moves stay local");
@@ -394,9 +402,9 @@ static void mel_load(void) {
 static int bot_pull_weapon(const char* w) {
     static const char* const k[] = {"HAMMER", "SWORD", "ENERGY BLADE", "SNIPER", "BEAM RIFLE", "MAGNUM", "ROCKET", "BRUTE SHOT", "FUEL ROD", 0};
     if (!w) return 0; for (int i = 0; k[i]; i++) if (strstr(w, k[i])) return 1; return 0; }
-static int g_bot_pull, g_bot_trig; static double g_bot_fire_t0;
-static double g_bot_hold_high, g_bot_hold_last;
-static int g_bot_empty;
+static int g_bot_pull, g_bot_trig; static double g_bot_fire_t0;   // (the held weapon acts on a pull; when this string of fire began)
+static double g_bot_hold_high, g_bot_hold_last;   // (levels apart: holding the high ground until; the last levels-apart step)
+static int g_bot_empty;   // (an empty magazine with the enemy in sight: grenade + rush for the beatdown)
 // the virtual pad's melee and act / pick-up / reload buttons (nvpad.m bits: 1 B, 0x20 RB). 2026-11-08: the walkers pressed B to
 // melee and held RB to pick up -- Halo 3's own layout -- but the app's layout for these profiles is Bumper Jumper's (its own
 // descriptions: "LB jumps and RB melees ... B acts and reloads"): ten weapon changes in a melee battle followed a B press (none
@@ -551,7 +559,7 @@ static void bot_step_body(void) {
                       tsw = now; if (bot_log()) nlog("[nhook] [inv] switching to %s at %.1f units: players switch %s -> %s at %.1f (median of %d)", g_inv.other, tdist, g_inv.held_c, g_inv.other_c, g_eg.sw_d[hi][oi], g_eg.sw_n[hi][oi]); }
                   else if (!zkeep && !(hi >= 0 && oi >= 0 && g_eg.sw_n[hi][oi] >= 20) && oh > 0.3f && oo >= 0 && oo < oh * 0.5f) { tsw = now; if (bot_log()) nlog("[nhook] [inv] switching to %s (%s) for %.1f units (the %s band is %.0f%% off)", g_inv.other, g_inv.other_c, tdist, g_inv.held_c, oh * 100); } }
               { static float sh = -1; if (sh < 0) { const char* e = getenv("NHOOK_BOT_SWITCH_HOLD"); sh = e ? strtof(e, 0) : 0.4f; }   // (0.15 s never registered: see nvpad.m's read counters)
-                if (now - tsw < sh) fbtn |= 8; } }
+                if (now - tsw < sh) { fbtn |= 8; g_bot_switch_until = tsw + 0.15; } } }   // (the switch bit: a short press)
             // B: melee -- the players' range (+ 0.25: positions are a tick or two old), held 0.12 s, at most every 0.6 s
             { static int nomel = -1; if (nomel < 0) nomel = getenv("NHOOK_BOT_NOMELEE") != 0;
               if (nomel) { if (tdist < 1.8f && now - tmelee > 0.7) { tmelee = now; fbtn |= 2; } }   // (the old: B, one step)
@@ -676,6 +684,7 @@ static void bot_step_body(void) {
       if (g_bot_pick_on) { float dx = g_bot_pick_pos[0] - o->c[0], dy = g_bot_pick_pos[1] - o->c[1];
           if (dx * dx + dy * dy < 0.8f) { tpress = now; g_bot_pick_on = 0; tried[(ntried++) & 31] = want_h; } }
       uint32_t ppad = bot_pickpad();
+      if (pb && now - tpress < 0.6) g_bot_act_until = tpress + 0.6;   // (the act bit held: pick up)
       if (pb && now - tpress < 0.6) fbtn |= 0x20000 | (g_vpad_on ? ppad : 0); }   // (fbtn bit 17: hold the pick-up bit; mapped below; the pad's button directly)
     // reload after a fight (the players' habit; no ammo count is read yet): the pad's reload button (NHOOK_BOT_PICKPAD, a TAP; a hold
     // picks up) 0.4-1.0 s after a fight in which the walker fired ends, unless it is walking to a weapon
@@ -688,7 +697,7 @@ static void bot_step_body(void) {
       { static double tlow; if (fight && g_vpad_on && !engaged && g_inv.ammo >= 0 && g_inv.ammo_max > 2 && g_inv.ammo < 0.6f * g_inv.ammo_max && now - tlow > 4.0 && now - trel > 4.0 && !g_bot_pick_on) {
             tlow = now; trel = now; if (bot_log()) nlog("[nhook] [inv] reloading: %d of %d rounds", g_inv.ammo, g_inv.ammo_max); } }
       uint32_t rpad = bot_pickpad();
-      if (now - trel < 0.1) fbtn |= rpad; }
+      if (now - trel < 0.1) { fbtn |= rpad; g_bot_act_until = trel + 0.1; } }   // (the act bit tapped: reload)
     // the walker (nav.c's graph): the path's way PELOAD_NAV_LOOK nodes ahead; with the aim on, the throttle walks it in any
     // direction relative to the view
     float tx = 0, ty = 0;
