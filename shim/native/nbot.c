@@ -447,6 +447,31 @@ static void ammo_learn(double now, const NovObj* o) {
                 FILE* f = fopen(ammo_learned_path(), "w"); if (f) { fprintf(f, "{\"loaded\": %d, \"hex\": \"0x%x\", \"down\": %d, \"up\": %d, \"wrong\": %d}\n", g_ammo_learned, g_ammo_learned, al[i].dec, al[i].inc, al[i].bad); fclose(f); } } }
         if (g_ammo_learned >= 0) { char b[200]; int q = 0; for (int off = g_ammo_learned - 8; off <= g_ammo_learned + 8; off += 2) q += snprintf(b + q, sizeof b - (size_t)q, " %+d:%d", off - g_ammo_learned, *(const int16_t*)(buf + off));
             nlog("[nhook] [ammo] around the magazine (+0x%x):%s", g_ammo_learned, b); } } }
+// THE WEAPON-SWITCH BUTTON (2026-11-09 10:50): the packed packet's +0x2c bit 1 came with the user's switches but, sent by the walker,
+// rarely switched ("EMPTY BRUTE SHOT: switching" again and again) -- like fire, whose packet bit alone does nothing, the switch is
+// probably a CONTROL RECORD button (+0xC8, the word the walker's fire bit 19 goes into) and the packet bit its consequence. Out of a
+// fight, with two weapons, the brain presses one candidate record bit for 0.1 s (never jump 1, fire 19 / 21, grenade 30) and looks
+// 0.7 s later whether the weapon slot (+0x262) changed; a bit that switches twice is THE switch, saved to native/switch-bit.txt and
+// read back by every later brain. [swscan] lines. NHOOK_BOT_SWSCAN=0 (live) = off.
+static int g_swbit = -1; static uint64_t g_swscan_bits; static double g_swrec_until;
+static const char* swbit_path(void) { static char p[1024]; if (!p[0]) { const char* h = getenv("HOME"); snprintf(p, sizeof p, "%s/Library/Application Support/ReclaimerMac/native/switch-bit.txt", h ? h : ""); } return p; }
+static void swscan_tick(double now, const NovObj* o, int engaged) {
+    g_swscan_bits = 0;
+    { static int rd0; if (!rd0) { rd0 = 1; FILE* f = fopen(swbit_path(), "r"); if (f) { int b = -1; if (fscanf(f, "%d", &b) == 1 && b >= 0 && b < 64) { g_swbit = b; nlog("[nhook] [swscan] the switch is control-record bit %d (learned before)", b); } fclose(f); } } }
+    if (g_swbit >= 0) return; float on = 1; lk_over(&on, "NHOOK_BOT_SWSCAN"); if (on <= 0) return;
+    static int cand = -1, hits[64], tries[64], slot0; static double tpress, tnext;
+    if (tpress > 0) {
+        if (now - tpress < 0.1) { g_swscan_bits = 1ull << cand; return; }
+        if (now - tpress < 0.8) return;
+        tries[cand]++; int changed = o->wslot != slot0; if (changed) { hits[cand]++; nlog("[nhook] [swscan] bit %d changed the weapon slot (%d -> %d): %d of %d", cand, slot0, o->wslot, hits[cand], tries[cand]); }
+        tpress = 0; tnext = now + 0.3;
+        if (hits[cand] >= 2) { g_swbit = cand; FILE* f = fopen(swbit_path(), "w"); if (f) { fprintf(f, "%d\n", cand); fclose(f); } nlog("[nhook] [swscan] LEARNED: the weapon switch is control-record bit %d", cand); return; }
+        if (!changed) cand = -1; }   // (a hit: the same bit again, to confirm)
+    if (engaged || !g_inv.has_other || now < tnext || o->seat >= 0 || o->parent != 0xFFFFFFFFu) return;
+    if (cand < 0) { static int next = 0; for (int k = 0; k < 64; k++) { int b = (next + k) % 64; if (b == 1 || b == 19 || b == 21 || b == 30) continue; if (tries[b] >= 3 && !hits[b]) continue; cand = b; next = b + 1; break; } }
+    if (cand < 0) return;
+    slot0 = o->wslot; tpress = now; g_swscan_bits = 1ull << cand; }
+static void bot_switch_press(double now) { if (g_swbit >= 0) g_swrec_until = now + 0.1; else { float swp = 0.03f; lk_over(&swp, "NHOOK_BOT_SWPULSE"); g_bot_switch_until = now + swp; } }   // (the learnt record bit, else the packet pulse)
 static int bot_ammo_of(uint64_t wd, uint32_t def, int* maxv) {   // rounds loaded (-1 unknown), and the most seen for that weapon definition
     static struct { uint32_t def; int max, nv; int16_t v[3]; } mx[64]; static int nmx; int off = bot_ammo_off(); int16_t a = -1;
     if (g_ammo_learned >= 0) { if (!wd || !hb_read(wd + g_ammo_learned, &a, 2) || a < 0) { if (maxv) *maxv = 0; return -1; }   // (learned: ammo_learn above)
@@ -884,7 +909,8 @@ static void bot_step_body(void) {
     if (me < 0 || objs[me].dead || seated) { g_bot_out = 0; g_nav_act = 0; plen = 0; g_bot_err = -1;   // dead, respawning or in a vehicle
         static char w[96]; snprintf(w, sizeof w, me < 0 ? "the record's unit %08x is none of the %d units seen" : objs[me].dead ? "dead" : "in a vehicle", meh, n); bot_idle(me < 0 ? w : objs[me].dead ? "dead" : "in a vehicle"); return; }
     const NovObj* o = &objs[me]; int out = 0; float yaw = yaw0, pitch = pitch0; g_bot_unit_p = o->p;
-    { static int noinv = -1; if (noinv < 0) noinv = getenv("NHOOK_BOT_NOINV") != 0; if (!noinv) { ammo_learn(now, o); bot_inv(o, &g_inv); } else memset(&g_inv, 0, sizeof g_inv);   // (NHOOK_BOT_NOINV=1: blind to it, the old walker)
+    { static int noinv = -1; if (noinv < 0) noinv = getenv("NHOOK_BOT_NOINV") != 0; if (!noinv) { ammo_learn(now, o); bot_inv(o, &g_inv); } else memset(&g_inv, 0, sizeof g_inv);
+      { static int eng_last; swscan_tick(now, o, eng_last); eng_last = g_bot_fighting && g_bot_err >= 0; }   // (the switch-bit scan: out of fights)   // (NHOOK_BOT_NOINV=1: blind to it, the old walker)
       if (bot_log()) { static BotInv last; static double tl; if (now - tl > 5.0 || last.held != g_inv.held || last.os != g_inv.os || last.camo != g_inv.camo || last.gren != g_inv.gren) { tl = now; last = g_inv;
           nlog("[nhook] [inv] holding %s (%s, %d rounds), other %s (%s); grenades %d (frag %d, plasma %d)%s%s", g_inv.held ? g_inv.held : "-", g_inv.held_c, g_inv.ammo, g_inv.other ? g_inv.other : "-", g_inv.other_c,
                g_inv.gren, g_inv.frag, g_inv.plasma, g_inv.os ? ", OVERSHIELD" : "", g_inv.camo ? ", CAMO" : ""); } } }
@@ -1011,7 +1037,7 @@ static void bot_step_body(void) {
                       tsw = now; if (bot_log()) nlog("[nhook] [inv] switching to %s at %.1f units: players switch %s -> %s at %.1f (median of %d)", g_inv.other, tdist, g_inv.held_c, g_inv.other_c, g_eg.sw_d[hi][oi], g_eg.sw_n[hi][oi]); }
                   else if (!zkeep && !(hi >= 0 && oi >= 0 && g_eg.sw_n[hi][oi] >= 20) && oh > 0.3f && oo >= 0 && oo < oh * 0.5f) { tsw = now; if (bot_log()) nlog("[nhook] [inv] switching to %s (%s) for %.1f units (the %s band is %.0f%% off)", g_inv.other, g_inv.other_c, tdist, g_inv.held_c, oh * 100); } }
               { static float sh = -1; if (sh < 0) { const char* e = getenv("NHOOK_BOT_SWITCH_HOLD"); sh = e ? strtof(e, 0) : 0.4f; }   // (0.15 s never registered: see nvpad.m's read counters)
-                if (now - tsw < sh && g_inv.other_ammo != 0) { fbtn |= 8; float swp = 0.03f;   /* (10:00: never TO a weapon known empty -- "EMPTY SNIPER RIFLE: switching" looped: the band rule switched back) */ lk_over(&swp, "NHOOK_BOT_SWPULSE"); g_bot_switch_until = tsw + swp; } } }   // (the switch bit: ONE packet -- 08:55: held 0.15 s it never switched; an impulse per packet?)
+                if (now - tsw < sh && g_inv.other_ammo != 0) { fbtn |= 8; bot_switch_press(tsw); } } }   // (the switch bit: ONE packet -- 08:55: held 0.15 s it never switched; an impulse per packet?)
             // B: melee -- the players' range (+ 0.25: positions are a tick or two old), held 0.12 s, at most every 0.6 s
             { static int nomel = -1; if (nomel < 0) nomel = getenv("NHOOK_BOT_NOMELEE") != 0;
               if (nomel) { if (tdist < 1.8f && now - tmelee > 0.7) { tmelee = now; fbtn |= 2; } }   // (the old: B, one step)
@@ -1237,7 +1263,7 @@ static void bot_step_body(void) {
       // weapon on the floor is "better" (the pick-up scan, a high fetch bid) -- walking over the same weapon refills it
       { static double tswe; static int nrel;
         if (g_ammo_learned >= 0 && g_inv.ammo == 0 && !noreload && g_inv.held) {
-            if (g_inv.has_other && g_inv.other_ammo != 0 && now - tswe > 1.5) { tswe = now; float swp = 0.03f; lk_over(&swp, "NHOOK_BOT_SWPULSE"); g_bot_switch_until = now + swp; fbtn |= 8;
+            if (g_inv.has_other && g_inv.other_ammo != 0 && now - tswe > 1.5) { tswe = now; bot_switch_press(now); fbtn |= 8;
                 if (bot_log()) nlog("[nhook] [inv] EMPTY %s: switching to %s", g_inv.held, g_inv.other); }
             else if (now - trel > 2.5 && now - tswe > 1.0) { if (nrel >= 2) { if (!g_bot_dry && bot_log()) nlog("[nhook] [inv] DRY: %s still empty after %d reloads -- any weapon on the floor will do", g_inv.held, nrel); g_bot_dry = 1; }
                 else { trel = now; nrel++; if (bot_log()) nlog("[nhook] [inv] EMPTY %s: reloading (try %d)", g_inv.held, nrel); } } }
@@ -1248,13 +1274,13 @@ static void bot_step_body(void) {
         // (10:35: in a fight also only when the HELD weapon is out of its band -- else the band rule switched straight back: ping-pong)
         { static double tbt; float kdb = 1; lk_over(&kdb, "NHOOK_BOT_DIST"); float ob = engaged ? bot_band_off(g_inv.other_c, tdist, kdb) : 0, hbo = engaged ? bot_band_off(g_inv.held_c, tdist, kdb) : 1;
           if ((!engaged || (tdist > 3.0f && ob <= 0.05f && hbo != 0)) && g_inv.has_other && g_inv.other_rank + 2 <= g_inv.held_rank && g_inv.other_ammo != 0 && now - tbt > 3.0 && now - tswe > 1.0) { tbt = now; tswe = now;   // (09:45: in fights too, beyond 3 units -- a 20-player FFA is nearly always "engaged")
-              float swp = 0.03f; lk_over(&swp, "NHOOK_BOT_SWPULSE"); g_bot_switch_until = now + swp; fbtn |= 8;
+              bot_switch_press(now); fbtn |= 8;
               if (bot_log()) nlog("[nhook] [inv] the better weapon in hand: switching from %s to %s%s", g_inv.held, g_inv.other, engaged ? " (the target is in its range)" : ""); } } }
       // (10:40: does a switch pulse take? 1 s after each new pulse: the weapon in hand changed or not -- [inv] switch pulses every 2 min)
       { static double tchk, tlast_until, trep; static const char* held0; static int ntry, nok;
-        if (g_bot_switch_until != tlast_until && g_bot_switch_until > now) { tlast_until = g_bot_switch_until; tchk = now; held0 = g_inv.held; }
+        { double su = g_swbit >= 0 ? g_swrec_until : g_bot_switch_until; if (su != tlast_until && su > now) { tlast_until = su; tchk = now; held0 = g_inv.held; } }
         if (tchk > 0 && now - tchk > 1.0) { ntry++; if (g_inv.held != held0) nok++; tchk = 0; }
-        if (now - trep > 120) { if (trep > 0 && ntry && bot_log()) { float swp = 0.03f; lk_over(&swp, "NHOOK_BOT_SWPULSE"); nlog("[nhook] [inv] switch pulses (%.2f s): %d of %d took", swp, nok, ntry); } trep = now; ntry = nok = 0; } }
+        if (now - trep > 120) { if (trep > 0 && ntry && bot_log()) { float swp = 0.03f; lk_over(&swp, "NHOOK_BOT_SWPULSE"); nlog("[nhook] [inv] switch presses (%s): %d of %d took", g_swbit >= 0 ? "the learnt record bit" : "packet pulses", nok, ntry); (void)swp; } trep = now; ntry = nok = 0; } }
       uint32_t rpad = bot_pickpad();
       if (now - trel < 0.1) { fbtn |= rpad; if (!gun_near_veh(o->c, 0xFFFFFFFFu)) g_bot_act_until = trel + 0.1; } }   // (the act bit tapped: reload -- not beside a vehicle)
     // the walker (nav.c's graph): the path's way PELOAD_NAV_LOOK nodes ahead; with the aim on, the throttle walks it in any
@@ -1386,7 +1412,7 @@ static void bot_step_body(void) {
           burst_ok = fmod(now - g_bot_fire_t0, per) < 0.25; }
       int trig = !nofire && spar && g_bot_fire && burst_ok && (!g_bot_pull || fmod(now - g_bot_fire_t0, 0.24) < 0.12) && !ob_carry; g_bot_trig = trig;   // (with the ball: melee only)
       { static double tobm; if (ob_carry && have_tg && tdist < 1.8f && now - tobm > 0.6) { tobm = now; g_bot_melee_until = now + 0.12; } }
-      uint64_t want = (now < g_bot_melee_until ? bot_meleebits() : 0) | (trig ? fb : 0) | ((fbtn & 0x10000) ? gb : 0) | ((fbtn & 0x20000) ? pkb : 0) | (now < g_fjump_until ? g_bot_jump : 0);   // (fbtn bit 16: the grenade pulse, 17: pick up)
+      uint64_t want = g_swscan_bits | (g_swbit >= 0 && now < g_swrec_until ? (1ull << g_swbit) : 0) | (now < g_bot_melee_until ? bot_meleebits() : 0) | (trig ? fb : 0) | ((fbtn & 0x10000) ? gb : 0) | ((fbtn & 0x20000) ? pkb : 0) | (now < g_fjump_until ? g_bot_jump : 0);   // (fbtn bit 16: the grenade pulse, 17: pick up)
       if (want) { g_bot_btn = ((out & 4) ? g_bot_btn : 0) | want; out |= 4; } else if (!(out & 4)) g_bot_btn = 0; }
     if (diag) { uint64_t b = 0; int d = bot_diag(&tx, &ty, &b, now); out |= d; if (d & 4) g_bot_btn = b; else if (!(out & 4)) g_bot_btn = 0;
         static double tl; if (now - tl > 0.25) { tl = now; const float* v = o->vel;

@@ -3272,6 +3272,15 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   a running battle, at every round end (our server's in_match true -> false) walker-coach.py round + match-study.py, then each
   walker's game restarted headless with its new knobs and the newest build (they rejoin in the lobby; the user's game and the
   server stay).
+- **The brain finds the weapon-switch button itself** (2026-11-09 10:50; nbot.c swscan_tick / bot_switch_press) — WHY: the packed
+  packet's +0x2c bit 1 (seen with the user's switches) rarely switched when the walker sent it ("EMPTY BRUTE SHOT: switching" again and
+  again; held 0.15 s it never did, 0.03 s now and then). Like fire -- its packet bit alone does nothing, the control record's bit 19
+  fires -- the switch is likely a control-record button and the packet bit its consequence. LOGIC: out of a fight, with two weapons,
+  one candidate bit of the record's button word (+0xC8) at a time is pressed 0.1 s (never jump 1, fire 19 / 21, grenade 30); 0.7 s later
+  the unit's weapon slot (+0x262) is compared; a bit that changes it twice is adopted ("[swscan] LEARNED"), saved to
+  native/switch-bit.txt and read back by later brains; from then every switch (empty magazine, better weapon, range band) presses that
+  bit for 0.1 s instead of the packet pulse (bot_switch_press). NHOOK_BOT_SWSCAN=0 (live) = no scan. (A text replacement made the new
+  helper call itself when no bit was learned -- brain #37, caught before its first switch; #38 fixed it within a minute.)
 - **Every weapon ranked, no switch ping-pong, switch pulses counted** (2026-11-09 10:35-10:40; nbot.c bot_wpn_rank, the better-weapon
   switch, [inv] switch pulses) — WHY: "switching from SPIKE RIFLE / SMG to ASSAULT RIFLE" every 3 s: the Spiker, SMG, plasma rifle,
   needler, magnum and plasma pistol had no rank (unknown = 50, "worse than anything"), and in a fight the better-weapon switch and the
