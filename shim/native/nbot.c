@@ -1203,6 +1203,12 @@ static void bot_step_body(void) {
                     float pull = tdist > p75 * kdist ? 0.6f : 0.0f; r = fmaxf(-1.0f, fminf(1.0f, rsc * er / run + pull));
                     if (o->shield < retreat && o->shield >= 0) r = -backoff;
                     if (g_bot_camo_hold) r = 0.9f; }
+                // (07:55: PRESS IN with shields up -- the walkers' battle recordings: closing speed 0.02-0.03 u/s in their engagements; the
+                //  best players' 0.78 (0.85 with shields up, 0.31 with them low: walker-model.py --top). Shield over 0.7 and the target
+                //  beyond the near edge of the weapon's band: NHOOK_BOT_CLOSE (0.4 throttle, live; 0 = old) more toward it -- not when
+                //  outranged, retreating or holding camo)
+                { float cb = 0.4f; lk_over(&cb, "NHOOK_BOT_CLOSE");
+                  if (cb > 0 && o->shield > 0.7f && tdist > p25 * kdist && !g_bot_outranged && !g_bot_camo_hold && fabsf(ftg.c[2] - o->c[2]) < 1.5f) r = fminf(1.0f, r + cb); }   /* (08:00: same level only -- toward an enemy below, the ledge check stopped it dead: "stopped" 62-76% of fight steps, 52% standing) */
                 // KITE A SWORD / HAMMER (12:20: "[death] ... edb300a6 1 u (melee) = my target; my shield 1.00": a one-hit kill at arm's
                 //  length): the target holding a melee-class weapon within NHOOK_BOT_KITE (5) units -> full speed back, a full strafe,
                 //  shooting; after the policy and the rushes below it stays (g_kite)
@@ -1270,7 +1276,11 @@ static void bot_step_body(void) {
                       if (!bot_floor_ok(pa)) { float pb2[3] = {o->c[0] + (fx * r - lx * lat) * 1.0f, o->c[1] + (fy * r - ly * lat) * 1.0f, o->c[2] - 0.35f};
                           if (now > thold && fabsf(lat) > 0.05f && bot_floor_ok(pb2)) { side = -side; lat = -lat; thold = now + 0.6; ftries = 1; }
                           else { float pc[3] = {o->c[0] + fx * r * 1.0f, o->c[1] + fy * r * 1.0f, o->c[2] - 0.35f}; lat = 0; ftries = 2;
-                              if (!bot_floor_ok(pc)) { r = r < 0 ? 0 : r; float pd[3] = {o->c[0] + fx * r * 1.0f, o->c[1] + fy * r * 1.0f, o->c[2] - 0.35f}; if (!bot_floor_ok(pd)) { r = 0; ftries = 3; } } } } } }
+                              if (!bot_floor_ok(pc)) { r = r < 0 ? 0 : r; float pd[3] = {o->c[0] + fx * r * 1.0f, o->c[1] + fy * r * 1.0f, o->c[2] - 0.35f}; if (!bot_floor_ok(pd)) { r = 0; ftries = 3;
+                                  // (08:00: at a ledge, strafe ALONG it instead of standing: the strafe alone (either side) when its step has floor)
+                                  float sl = fabsf(lat_in) > 0.2f ? fabsf(lat_in) : 0.6f;
+                                  for (int sgn = 0; sgn < 2 && ftries == 3; sgn++) { float ls = (sgn ? -side : side) * sl; float pe[3] = {o->c[0] + lx * ls * 1.0f, o->c[1] + ly * ls * 1.0f, o->c[2] - 0.35f};
+                                      if (bot_floor_ok(pe)) { lat = ls; ftries = 2; if (sgn) side = -side; } } } } } } } }
                 // (08:45, the user: "[the best player] simply moves more nimble, and engages faster ... our walker does not move with that much
                 //  *authority*": the recordings say the walker stands still 58% and strafes 0.0 u/s in fights. [moves] every 10 s of
                 //  fighting: what the fight asked for, what the floor check let through, how fast the walker really moved across)

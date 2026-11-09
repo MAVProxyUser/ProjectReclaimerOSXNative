@@ -3286,6 +3286,15 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   switch presses (the learnt record bit): 0 of 32 took" -- 32 x "switching from PLASMA PISTOL to ASSAULT RIFLE" with the trigger held
   (the plasma pistol held = an overcharge held) while the earlier switches, 3 of 3 and 2 of 2, came with the trigger up. LOGIC: from a
   switch press until 0.15 s after it the trigger (and the reload click) stays up; PLASMA PISTOL joins the weapons whose trigger is pulsed.
+- **Press in with shields up (same level); strafe along a ledge instead of freezing** (2026-11-09 07:55-08:00; nbot.c the fight move,
+  its floor check) — WHY: the walkers' battle recordings: closing speed 0.02-0.03 u/s in their engagements, the best players' 0.78 (0.85
+  with shields up, 0.31 low; walker-model.py --top). The first press-in (+0.4 throttle with shield > 0.7 beyond the band's near edge) made
+  a Guardian battle worse -- standing 51.5%, median 0.47 u/s: it pushed walkers toward enemies on a LOWER level and the floor check
+  stopped them dead ("stopped" on 62-76% of fight steps): when the forward step and the strafe + forward step both left the floor it
+  dropped the strafe too and never tried strafing alone. LOGIC: NHOOK_BOT_CLOSE (0.4, live; 0 = off) only toward a target within 1.5
+  units of the walker's height, not when outranged or holding camo; at a ledge (all three steps fail) the strafe alone is tried, either
+  side (|lat| or 0.6), before standing. The next Guardian battle: "stopped" 1% of fight steps, standing 28.1% near enemies (28.5-33% in
+  the battles before the press-in), closing median 0.12 u/s.
 - **[firegate]; the fire slack 1 -> 2 degrees** (2026-11-09 07:50; nbot.c the fire gate, the trigger) — WHY: walker-model.py over the
   walkers' own battle recordings against the top fifth of 128 public matches: reaction 0.32 vs 0.85 s and aim error 3.8 vs 4.1 deg (fine),
   but aimed at a target they fired 1.6 shots/s against the players' 3.85 and hit 19% against 47%. The new [firegate] line (every 20 s:
