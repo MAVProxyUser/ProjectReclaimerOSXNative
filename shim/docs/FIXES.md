@@ -3272,6 +3272,26 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   a running battle, at every round end (our server's in_match true -> false) walker-coach.py round + match-study.py, then each
   walker's game restarted headless with its new knobs and the newest build (they rejoin in the lobby; the user's game and the
   server stay).
+- **Head tracking, no stands mid-fight, the better gun in hand, a learnt movement policy (GPU)** (2026-11-09 09:30-10:00; follow-study.py
+  NOISE floor / lvl_knobs, trainer.json, nbrain_beh.c beh_fetch, nbot.c the pick-up look / the better-weapon switch / the policy hook,
+  shim/native/npolicy.c, shim/tools/policy-train.py) — WHY: "[the best player] ... stays on the headshots no matter what the opponent
+  does"; "this is a m4 mac so make sure the special GPU is being used"; "M4 has AI cores... use them for walker logic". FOUND / LOGIC:
+  (1) AIM -- the fighter's aim wandered (an OU process) by the AVERAGE public player's median error, 4.06 deg x (1.25 - skill 0.5) x 1.6
+  x NOISE 0.96 = about +-4.7 deg, while a head at 10 units is +-0.4: NOISE set to 0.15 (+-0.7 deg) in the trainer's incumbent and the
+  live knobs, its floor 0.3 -> 0.05 (the bounds and the level rule). (2) With an enemy within 10 units the weapon fetch bids only
+  NHOOK_U_FETCH_HOT (40, under the fight's 60) unless the weapon is within 2 units or the walker is dry -- it had stood on weapons
+  pressing act for 2.5 s mid-fight ("moved 0.00 u/s" fight windows); at a weapon in a fight the legs take the fight's moves while act
+  pulses. (3) Out of a fight the walker looks at the weapon it presses for (every failed take was a weapon on the floor; NHOOK_BOT_PICKLOOK
+  =0 off); the better-weapon switch (2+ ranks) runs in fights too beyond 3 units -- confirmed: "switching from ASSAULT RIFLE to BATTLE
+  RIFLE", then holding it (the one-packet switch impulse works). (4) POLICY -- policy-train.py: behaviour cloning on every recorded
+  match (10 Hz): each fighting player sample (nearest enemy within 25 units) -> its next move in the enemy-line frame (toward / left,
+  units a second) and its jumps, from 27 inputs (distance, height, shields / healths, enemy facing it, its view against the line, its
+  last two moves, the enemy's last move, a second enemy, enemies within 10, weapon class); the top fifth of each match by (k+1)/(d+1)
+  weigh 1, the rest 0.15; the walker's own slot left out; a 27-128-128-3 SiLU network trained with PyTorch on the M4 GPU (MPS) ->
+  battles/follow/policy.json with the validation error against standing still / repeating the last move. npolicy.c (brain) reloads it
+  on change, builds the same inputs from the walker's state at 10 Hz and runs it in microseconds on a CPU core (a Neural Engine call
+  would cost more in dispatch than the network); the fight blends its move in by NHOOK_BOT_POLICY (live, 0 = off), its jumps at >= 0.5;
+  the rush / arm's length / floor rules still apply on top. [policy] lines: loaded (validation numbers), moves per 30 s.
 - **The walker learns its magazine field, never fights empty; one-packet button impulses; committed strafes; velocity is per second**
   (2026-11-09 08:30-09:20; nbot.c ammo_learn / bot_ammo_of / the EMPTY block / the floor check / [moves] / the pick-up press, build.sh +
   brain-lesson.txt, follow-study.py) — WHY: the user: "empty magazines sans reload are unacceptable btw. do better. find ammo, new weapon,

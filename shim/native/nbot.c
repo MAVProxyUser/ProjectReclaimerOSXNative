@@ -831,6 +831,7 @@ static int bot_head(const NovObj* t, double now, float* out) {   // -> 1: out = 
 }
 static float g_bot_head_r = -1;   // (the current target's head radius, -1 = not known)
 #include "nbrain_beh.c"   // the behaviours: each bids for the legs (brain stage 2)
+#include "npolicy.c"     // the learnt movement policy (policy-train.py on the GPU -> policy.json)
 static void bot_models_tick(void) {   // (live knobs: the models re-read when their files change -- every 10 s a look at the files' times)
     static double t; double now = mono_s(); if (now - t < 10.0) return; t = now; const char* h = getenv("HOME"); char p[1100]; struct stat st;
     static time_t m1, m2, m3, m4;
@@ -1065,6 +1066,13 @@ static void bot_step_body(void) {
                     float pull = tdist > p75 * kdist ? 0.6f : 0.0f; r = fmaxf(-1.0f, fminf(1.0f, rsc * er / run + pull));
                     if (o->shield < retreat && o->shield >= 0) r = -backoff;
                     if (g_bot_camo_hold) r = 0.9f; }
+                // THE LEARNT POLICY (npolicy.c): the best players' moves for this moment, blended in by NHOOK_BOT_POLICY (live, 0 off);
+                // the rush, arm's length and floor rules below still apply on top. [policy] every 30 s: how often it moved the walker
+                { static double tpj, tpl; static int npol, nsteps, njump; float pw = 0; lk_over(&pw, "NHOOK_BOT_POLICY"); pol_tick(now); nsteps++;
+                  if (pw > 0) { float pr, pl; int jp; if (pol_move(now, objs, n, me, o, &ftg, yaw0, &pr, &pl, &jp)) { npol++;
+                      r = (1 - pw) * r + pw * pr; lat = (1 - pw) * lat + pw * pl;
+                      if (pw >= 0.5f && jp && now - tpj > 0.7) { tpj = now; g_fjump_until = now + 0.12; njump++; } } }
+                  if (now - tpl > 30) { if (tpl > 0 && pw > 0 && bot_log()) nlog("[nhook] [policy] weight %.2f: moved %d of %d fight steps, %d jumps", pw, npol, nsteps, njump); tpl = now; npol = nsteps = njump = 0; } }
                 // the beatdown rush (players: half of the melee kills finish a victim whose shield is down, closing in from ~3.2 units) and a
                 // sword / hammer closing in to its swing range (melee.json; not with a rocket launcher in hand)
                 { static int nm = -1; if (nm < 0) nm = getenv("NHOOK_BOT_NOMELEE") != 0; int mcls = g_inv.held_c && !strcmp(g_inv.held_c, "melee");
@@ -1195,6 +1203,10 @@ static void bot_step_body(void) {
       //  target, and a hold needs a press to begin: while at the weapon act is PULSED, 0.5 s down / 0.2 s up, a new press every 0.7 s)
       // (08:55: still nothing taken standing on it -- the +0x2c bits look like one-packet IMPULSES (a held act "seats and then
       //  unseats"; a held switch never switched): act now goes out for NHOOK_BOT_ACTPULSE (0.03 s, ~one packet) every 0.4 s at the weapon)
+      // (09:40: every "could not take" had the weapon ~0.3 below the walker's centre -- on the ground -- the takes were at waist height:
+      //  out of a fight the walker LOOKS at the weapon while it presses (the action target may need the view on it). NHOOK_BOT_PICKLOOK=0 off)
+      if (tp0 > 0 && !engaged) { float pl = 1; lk_over(&pl, "NHOOK_BOT_PICKLOOK"); if (pl > 0) { float dx = g_bot_pick_pos[0] - cam[0], dy = g_bot_pick_pos[1] - cam[1], dz = g_bot_pick_pos[2] - cam[2];
+          yaw = atan2f(dy, dx); pitch = atan2f(dz, sqrtf(dx * dx + dy * dy) + 1e-3f); out |= 1; } }
       if (pb && tp0 > 0 && !gun_near_veh(o->c, 0xFFFFFFFFu)) { float ap = 0.03f; lk_over(&ap, "NHOOK_BOT_ACTPULSE"); static double tap;
           if (now - tap > 0.4) { tap = now; g_bot_act_until = now + ap; } }
       else if (pb && now - tpress < 0.6 && !gun_near_veh(o->c, 0xFFFFFFFFu)) g_bot_act_until = tpress + 0.6;   // (the act bit held: pick up -- never beside a vehicle: it boards it)
@@ -1222,7 +1234,7 @@ static void bot_step_body(void) {
         else if (g_inv.ammo > 0) { nrel = 0; g_bot_dry = 0; }
         // THE BETTER WEAPON IN HAND (09:20: "TOOK the BATTLE RIFLE ... holding ASSAULT RIFLE, other BATTLE RIFLE"): out of a fight, with the
         // other weapon 2+ ranks better and not known empty, one switch impulse (every 2 s until it is in hand)
-        { static double tbt; if (!engaged && g_inv.has_other && g_inv.other_rank + 2 <= g_inv.held_rank && g_inv.other_ammo != 0 && now - tbt > 2.0 && now - tswe > 1.0) { tbt = now; tswe = now;
+        { static double tbt; if ((!engaged || tdist > 3.0f) && g_inv.has_other && g_inv.other_rank + 2 <= g_inv.held_rank && g_inv.other_ammo != 0 && now - tbt > 3.0 && now - tswe > 1.0) { tbt = now; tswe = now;   // (09:45: in fights too, beyond 3 units -- a 20-player FFA is nearly always "engaged")
               float swp = 0.03f; lk_over(&swp, "NHOOK_BOT_SWPULSE"); g_bot_switch_until = now + swp; fbtn |= 8;
               if (bot_log()) nlog("[nhook] [inv] the better weapon in hand: switching from %s to %s", g_inv.held, g_inv.other); } } }
       uint32_t rpad = bot_pickpad();
@@ -1319,6 +1331,7 @@ static void bot_step_body(void) {
         yaw = fy; pitch = fp; out |= 1; float rel = bot_wrap(way - yaw), sp = gbd > 1.0f ? 1.0f : gbd > 0.4f ? 0.45f : 0.15f; tx = cosf(rel) * sp; ty = sinf(rel) * sp; out |= 2;
         { static double ttap; if (g_gun_press_ok && now - ttap > 1.2) { ttap = now; g_bot_act_until = now + 0.15; } }   // (a TAP, then 1.2 s to see it seated: a held press seats and then unseats)
         { static double tl; if (bot_log() && now - tl > 1.0) { tl = now; nlog("[nhook] [gunner] boarding: %.1f units from the point behind the turret%s", gbd, g_gun_press_ok ? ", right behind it: pressing act" : ""); } } }
+    else if (arbw == ARB_FETCH && g_pick_d < 1.3f && engaged && tdist < 10.0f) { tx = ftx; ty = fty; out |= 2; }   // (09:30: at the weapon in a fight: the fight's moves, act still pulsed -- never a still target)
     else if (arbw == ARB_FETCH && g_pick_d < 3.0f) {   // (the last 3 units of a weapon fetch: straight at it -- it may lie off the walking graph)
         float way = atan2f(g_bot_pick_pos[1] - o->c[1], g_bot_pick_pos[0] - o->c[0]), rel = bot_wrap(way - yaw), sp = g_pick_d > 1.0f ? 1.0f : g_pick_d > 0.3f ? 0.45f : 0.0f;   /* (08:05: onto it, then still) */ tx = cosf(rel) * sp; ty = sinf(rel) * sp; out |= 2; }
     else if (arbw == ARB_FIGHT) { tx = ftx; ty = fty; out |= 2; }   // (the fighter's moves: the arbiter gave it the legs)

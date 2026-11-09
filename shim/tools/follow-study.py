@@ -189,13 +189,13 @@ def role_model(rec_dir, port, ws):
 
 AIMP = [None]   # (the walker's aim counts at the last window's end)
 TRAINED = {'NHOOK_BOT_DIST': (0.5, 2.5), 'NHOOK_BOT_FJUMP': (0.0, 12.0), 'NHOOK_BOT_LIBSCALE': (0.5, 3.0), 'NHOOK_BOT_PRESS': (0.2, 0.95),
-           'NHOOK_BOT_REACT': (0.3, 3.0), 'NHOOK_BOT_RADSCALE': (0.3, 2.5), 'NHOOK_BOT_NOISE': (0.3, 2.0), 'NHOOK_BOT_GRENX': (0.1, 3.0),
+           'NHOOK_BOT_REACT': (0.3, 3.0), 'NHOOK_BOT_RADSCALE': (0.3, 2.5), 'NHOOK_BOT_NOISE': (0.05, 2.0), 'NHOOK_BOT_GRENX': (0.1, 3.0),
            'NHOOK_BOT_HEADGATE': (0.6, 2.0)}   # (07:35: "headshots being main goal": the head gate trained too; the aim HEIGHT is hone_aim's alone)
 def lvl_knobs(level, inc):
     """the look sensitivity a level brings: the turn rate once reacting (7 rad/s at level 0, +10% a level, at most 14), the one before
     reacting (0.73 rad/s, +10% a level, at most 2), the aim noise x (1 - 0.04 a level, at least 0.5)"""
     return {'NHOOK_BOT_TURN': round(min(14.0, 7.0 * (1 + 0.1 * level)), 2), 'NHOOK_BOT_TURN0': round(min(2.0, 0.73 * (1 + 0.1 * level)), 3),
-            'NHOOK_BOT_NOISE': round(max(0.3, inc.get('NHOOK_BOT_NOISE', 1.0) * max(0.5, 1 - 0.04 * level)), 3)}
+            'NHOOK_BOT_NOISE': round(max(0.05, inc.get('NHOOK_BOT_NOISE', 1.0) * max(0.5, 1 - 0.04 * level)), 3)}   # (09:30: the floor 0.3 -> 0.05: 'stays on the headshots')
 def write_knobs(knobs_path, k):
     try: cur = json.load(open(knobs_path))
     except Exception: cur = {}
