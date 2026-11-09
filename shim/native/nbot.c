@@ -1340,7 +1340,7 @@ static void bot_step_body(void) {
                   static float mh = -1; if (mh < 0) { const char* e = getenv("NHOOK_BOT_MELEE_HOLD"); mh = e ? strtof(e, 0) : 0.3f; }
                   if (now - tmelee < mh) { fbtn |= bot_meleepad(); g_bot_melee_until = tmelee + mh; } }
               g_bot_pull = !nomel && bot_pull_weapon(g_inv.held);
-              // (12:10-12:15: the battle rifle HELD sprays -- an A/B in a BR Valhalla match, 90 s each (shim/tools/fire-ab.sh): pulled
+              // (11:57-12:00: the battle rifle HELD sprays -- an A/B in a BR Valhalla match, 90 s each (shim/tools/fire-ab.sh): pulled
               //  136 shots, 8.5 a second of trigger, accuracy 61.8%; held 159 shots, 9.7 a second, accuracy 22.6% (the top players there
               //  52-56%). The battle rifle / carbine / magnum are pulled at NHOOK_BOT_PULL_PER: NHOOK_BOT_PULL_PRECISION (live, 1; 0 = held))
               { float ppr = 1; lk_over(&ppr, "NHOOK_BOT_PULL_PRECISION"); if (ppr > 0 && g_inv.held_c && !strcmp(g_inv.held_c, "precision")) g_bot_pull = 1; } }

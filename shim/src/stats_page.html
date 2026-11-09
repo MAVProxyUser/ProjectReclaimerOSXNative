@@ -244,7 +244,7 @@ th .srt{display:inline-block;margin-left:2px;padding:0 2px;cursor:pointer;color:
 <div id="walkerview" hidden>
 <div id="wkp" class="panel"><div class="wkh"><h2>Walker settings</h2>
  <label title="Each walker has its own settings file, named after its nickname">Walker <select id="wkf"></select></label>
- <button id="wkmax" class="hot" title="In the action and on the head: skill 1 (fastest reaction, steadiest aim), fires the moment its aim is on an enemy in reach (fire slack 0.5 deg), tracks the head with every weapon, fast single-shot trigger, sees anything within 4 units, fast turns, hunts enemies before small weapon upgrades, pushes in, never backs off, no following (recharging and pressing in with shields up follow the players' lessons)">Max aggression</button>
+ <button id="wkmax" class="hot" title="In the action and on the head: skill 1 (fastest reaction, steadiest aim), fires the moment its aim is on an enemy in reach (fire slack 0.5 deg), tracks the head with every weapon, sees anything within 4 units, fast turns, hunts enemies before small weapon upgrades, pushes in, never backs off, no following (recharging and pressing in with shields up follow the players' lessons)">Max aggression</button>
  <button id="wkdef" title="Takes every setting the Max aggression button sets out of the file: back to the walker's launch values">Undo max aggression</button>
  <span id="wkmsg" class="note" style="margin:0"></span></div>
  <div class="note">A change goes into the walker's settings file and the walker reads it within a second -- no restart, it keeps its place in the game.
@@ -1446,12 +1446,13 @@ const WK=[
 // (10:57, the user: "that 32% accuracy can't help ... missing that head hitbox!" -- the first version's 6 deg fire slack, trigger held at
 //  every range and firing after the target ducked spent the rounds: it fires the moment its aim is ON the enemy, aims at the head with
 //  every weapon, and goes for enemies before small weapon upgrades)
-const WK_MAX={NHOOK_BOT_SKILL:1,NHOOK_BOT_FIRE_EXTRA:0.5,NHOOK_BOT_PULL_PER:0.16,NHOOK_BOT_SEE_NEAR:4,
+// (12:05: no pull period -- fire-ab.sh on Guardian: 0.3 s 68% accuracy / 3.5 hits a trigger second, 0.16 s 52% / 4.1: the default 0.24 between)
+const WK_MAX={NHOOK_BOT_SKILL:1,NHOOK_BOT_FIRE_EXTRA:0.5,NHOOK_BOT_SEE_NEAR:4,
   NHOOK_BOT_TURN0:3,NHOOK_BOT_TURN:14,NHOOK_BOT_RETREAT:0,NHOOK_BOT_PRESS:0.8,NHOOK_BOT_NOWING:1,NHOOK_U_HUNT:50,NHOOK_U_FETCH:35};
 // (11:33: the press-in with shields up and the recharge break-off are the players' lessons now -- learnings.py -> walker-lessons.json:
 //  "Push or hold", "Pick fights with your shields up" -- the preset leaves them to the data)
 // (the undo also takes out what the first version set)
-const WK_MAX_OLD=['NHOOK_BOT_HOSE','NHOOK_BOT_FIRE_LINGER','NHOOK_BOT_HEADGATE_SH','NHOOK_BOT_AIM_BODY','NHOOK_BOT_CLOSE','NHOOK_U_RECHARGE'];
+const WK_MAX_OLD=['NHOOK_BOT_HOSE','NHOOK_BOT_FIRE_LINGER','NHOOK_BOT_HEADGATE_SH','NHOOK_BOT_AIM_BODY','NHOOK_BOT_CLOSE','NHOOK_U_RECHARGE','NHOOK_BOT_PULL_PER'];
 let wkData=null, wkSel=null, wkDirty=0;
 const wkFile=()=>wkData&&wkData.files.find(f=>f.id===wkSel);
 function wkMsg(t){ document.getElementById('wkmsg').textContent=t||''; }
