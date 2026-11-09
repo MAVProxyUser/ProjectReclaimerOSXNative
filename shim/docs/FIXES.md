@@ -3272,6 +3272,12 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   a running battle, at every round end (our server's in_match true -> false) walker-coach.py round + match-study.py, then each
   walker's game restarted headless with its new knobs and the newest build (they rejoin in the lobby; the user's game and the
   server stay).
+- **Arm's length first: the nearest threat is the target and is "seen"** (2026-11-09 12:50-12:55; nbot.c target choice, vis) — WHY: a
+  0-kill / 9-death window on Guardian (14 players): every death at 0-6 units with a nearly full magazine, 3 melees in it; a quarter of the
+  targets within 3 units read "hidden" (the melee and the trigger wait for "in sight"); a death fighting a target 9 units off while an
+  enemy 1 unit away shot it. LOGIC: within NHOOK_BOT_SEE_NEAR (2.5, live) units and 1.5 in height a target counts as seen; after the
+  choice rule an enemy within NHOOK_BOT_NEAR_THREAT (3, live) units and 2 in height, closer than half the chosen target, becomes the
+  target ("[fight] ...: the one at arm's length first").
 - **brain-timeline.py: every training window with the brain that played it** (2026-11-09 12:45; shim/tools/brain-timeline.py) — WHY: "each
   training session reload you should describe what the new brain is trying to show that it learned" -- the lesson of a brain and the
   windows it played live in two files. LOGIC: battles/follow/learned.jsonl (one line a window) joined with battles/follow/brain-lessons.jsonl

@@ -949,6 +949,13 @@ static void bot_step_body(void) {
             if (bi >= 0) { float dx = objs[bi].c[0] - cam[0], dy = objs[bi].c[1] - cam[1], dz = objs[bi].c[2] - cam[2]; bd = dx * dx + dy * dy + dz * dz; } }
         else for (int pass = 0; pass < 2 && bi < 0; pass++) for (int i = 0; i < n; i++) { const NovObj* t = &objs[i]; if (t->type || t->dead || i == me) continue;
             if (!pass && !bot_enemy(o, t)) continue; float dx = t->c[0] - cam[0], dy = t->c[1] - cam[1], dz = t->c[2] - cam[2], d = dx * dx + dy * dy + dz * dz; if (d < bd) { bd = d; bi = i; } }
+        // (12:55: THE ONE AT ARM'S LENGTH -- "[death] fighting 80d30114 at 9 u ... aiming at me: 80e60071 1 u": an enemy within
+        //  NHOOK_BOT_NEAR_THREAT (3) units, and closer than half the chosen target, becomes the target at once, whatever the choice rule)
+        if (g_bot_fighting && bi >= 0) { float nt = 3; lk_over(&nt, "NHOOK_BOT_NEAR_THREAT"); int ni = -1; float nd = nt * nt;
+            for (int i = 0; i < n; i++) { const NovObj* t = &objs[i]; if (t->type || t->dead || i == me || !bot_enemy(o, t)) continue;
+                float dx = t->c[0] - cam[0], dy = t->c[1] - cam[1], dz = t->c[2] - cam[2], d = dx * dx + dy * dy + dz * dz; if (d < nd && fabsf(dz) < 2.0f) { nd = d; ni = i; } }
+            if (ni >= 0 && ni != bi && nd * 4 < bd) { static double tl; if (bot_log() && now - tl > 2) { tl = now; nlog("[nhook] [fight] %08x at %.1f units: the one at arm's length first (was %08x at %.1f)", objs[ni].handle, sqrtf(nd), objs[bi].handle, sqrtf(bd)); }
+                bi = ni; bd = nd; } }
         if (g_bot_fighting && !g_eg.on && bi >= 0 && los_get(objs[bi].handle, now) != 1) {   // the fighter: the nearest enemy in sight (within 40 units) beats a nearer hidden one
             float vd = 1600.0f; int vi = -1; for (int i = 0; i < n; i++) { const NovObj* t = &objs[i]; if (t->type || t->dead || i == me || !bot_enemy(o, t)) continue;
                 float dx = t->c[0] - cam[0], dy = t->c[1] - cam[1], dz = t->c[2] - cam[2], d = dx * dx + dy * dy + dz * dz; if (d < vd && los_get(t->handle, now) == 1) { vd = d; vi = i; } }
@@ -1021,6 +1028,9 @@ static void bot_step_body(void) {
             g_los_p[0] = cam[0]; g_los_p[1] = cam[1]; g_los_p[2] = cam[2]; g_los_v[0] = lx - cam[0]; g_los_v[1] = ly - cam[1]; g_los_v[2] = lz - cam[2];
             g_los_ign[0] = meh; g_los_ign[1] = q->handle; g_los_tgt = q->handle; g_los_req++; }
         int vis = los_get(ftg.handle, now); if (vis < 0) vis = tdist < 6 ? 1 : 0;
+        // (12:50: ARM'S LENGTH = SEEN -- within NHOOK_BOT_SEE_NEAR (2.5) units a target is in reach whatever the ray says: a quarter of
+        //  the targets within 3 units read "hidden" and the melee waits for "in sight"; 9 close-range deaths against 3 melees)
+        { float sn = 2.5f; lk_over(&sn, "NHOOK_BOT_SEE_NEAR"); if (!vis && tdist < sn && fabsf(ftg.c[2] - o->c[2]) < 1.5f) vis = 1; }
         // (12:30: SHOT AT = SEEN -- the target aiming within 12 deg at the walker while the walker was hurt in the last 0.5 s, within 25
         //  units: it can be shot back; "[death] fighting ... at 5 u (hidden); aiming at me: ... = my target")
         { static float vit0 = -1; static double thurt2; float vv = o->shield + o->health; if (vit0 >= 0 && vv < vit0 - 0.01f) thurt2 = now; vit0 = vv;
