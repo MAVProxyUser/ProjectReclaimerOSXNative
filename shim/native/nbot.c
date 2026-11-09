@@ -1518,7 +1518,17 @@ static void bot_step_body(void) {
                   // (15:10: only while the legs FOLLOW the path -- in a fight (or holding) they belong to the fight, the walker strafes
                   //  instead of walking the path, and that read as "stuck" all fight long: in a local battle 300-400 "stuck" and 100+
                   //  "wedged" a walker in 5 minutes, each one jumping and the escape running the walker about mid-fight)
-                  if (!strafe && arbw != ARB_FIGHT && arbw != ARB_HOLD && !(g_bot_fighting && tdist < 3.0f) && now - histt[j & 63] >= 1.4 && dx * dx + dy * dy < 0.35f * 0.35f && now - tjump > 1.5) {
+                  // (07:25: NO PROGRESS -- on The Pit a walker hovered around one spot for 41.7 s (the server's recording: 68% of its
+                  //  time standing) while its own log said "moving": it slid back and forth along an obstacle, never under 0.35 units in
+                  //  1.4 s, replanning paths of 111-145 nodes. Now also stuck when the path left to the SAME goal has not shrunk by 2 nodes
+                  //  in NHOOK_BOT_NOPROG (4 s, live; 0 = off) of path walking)
+                  static int pg_goal = -2, pg_best; static double pg_t; int noprog = 0; float npg = 4; lk_over(&npg, "NHOOK_BOT_NOPROG");
+                  { int walking = !strafe && arbw != ARB_FIGHT && arbw != ARB_HOLD && !g_bot_fighting && plen > 0, rem = plen - pidx;
+                    if (!walking || goal != pg_goal) { pg_goal = walking ? goal : -2; pg_best = rem; pg_t = now; }
+                    else if (rem < pg_best - 2 || rem > pg_best + 4) { pg_best = rem; pg_t = now; }   /* (progress, or a new longer plan: a detour starts over) */
+                    else if (npg > 0 && now - pg_t > npg) { noprog = 1; pg_t = now; pg_best = rem; } }
+                  if (!strafe && arbw != ARB_FIGHT && arbw != ARB_HOLD && !(g_bot_fighting && tdist < 3.0f) && ((now - histt[j & 63] >= 1.4 && dx * dx + dy * dy < 0.35f * 0.35f) || noprog) && now - tjump > 1.5) {
+                      if (noprog) nav_say("  [nav] no progress for %.0f s at (%.1f %.1f %.1f): treated as stuck\n", npg, pos[0], pos[1], pos[2]);
                       // (01:10: fighting at arm's length is no progress by design, not stuck)
                       // (07:30: these statements sat AFTER that comment on its line -- commented out since 01:10: tjump never moved, so
                       //  "stuck" fired on EVERY step once a walker slowed (3 lines in one 0.1 s step), each adding +8 to 10 path nodes,

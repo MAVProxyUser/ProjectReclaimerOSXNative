@@ -3286,6 +3286,15 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   switch presses (the learnt record bit): 0 of 32 took" -- 32 x "switching from PLASMA PISTOL to ASSAULT RIFLE" with the trigger held
   (the plasma pistol held = an overcharge held) while the earlier switches, 3 of 3 and 2 of 2, came with the trigger up. LOGIC: from a
   switch press until 0.15 s after it the trigger (and the reload click) stays up; PLASMA PISTOL joins the weapons whose trigger is pulsed.
+- **No progress = stuck** (2026-11-09 07:25; nbot.c the nav stuck test; fight-speed.py --spells) — WHY: with the alarm fixed, a battle on
+  The Pit: the server's recording (fight-speed.py --spells: per slot the standing share and the longest still spells) had one walker
+  standing 68% of its time, 41.7 s at one spot and 17.9 s at another, while its own log said it walked (4% still): it hovered at
+  (-16, -3.7), sliding back and forth along an obstacle -- always over 0.35 units in 1.4 s, so never "stuck" -- replanning paths of
+  111-145 nodes. LOGIC: while the legs follow a path, the path left (plen - pidx) to the SAME goal must shrink by 2 nodes within
+  NHOOK_BOT_NOPROG (4 s, live; 0 = off) -- a new plan 4+ nodes longer (a detour) starts the count over -- else the stuck handler runs
+  (back off, jump, block the step, penalties, replan), logged "[nav] no progress for 4 s at ...". The Pit again (3 walkers, 3 min): the
+  server's recording: median 1.39 u/s with an enemy within 15 units (0.78 before), standing 20.7% (41.4%; the best players 19.8%), longest
+  still spell 12.3 s (41.7 s), 4,359 fight steps (575), 15 "stuck", 3 "no progress".
 - **The stuck alarm fired on every step: its reset was inside a comment** (2026-11-09 07:30; nbot.c the nav stuck test) — WHY: a step
   trace (new NHOOK_BOT_STEPLOG=<s>: every 0.1 s for that many seconds of gameplay -- position, velocity, view / move yaw, throttle,
   legs) showed a walker moving in 83% of its 1.5 s windows while "stuck at" came 3 times in one 0.1 s step. aa7733b (01:07) appended

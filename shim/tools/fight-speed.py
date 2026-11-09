@@ -7,7 +7,8 @@ recorder's own slot (the player who recorded: the user, or the walker in its own
 under 0.5 u/s (standing). No player names are printed.
     python3 shim/tools/fight-speed.py [--files N] [--near 15] [--json] [--dir <recordings>] [--all-groups]
 --dir battles/tracks = the walkers' own local battles (every slot a walker: use the "others" + "top" lines; --all-groups puts every
-slot in one group, "all")."""
+slot in one group, "all"). --spells: per slot of the newest recording, the share of time standing and its longest still spells
+(seconds, x, y, z) -- a walker hovering at one spot shows here even when its own log says it walks."""
 import glob, gzip, json, math, os, statistics, sys, zlib
 
 SUP = os.path.expanduser('~/Library/Application Support/ReclaimerMac')
@@ -25,8 +26,27 @@ def load(path):
                 elif 'start' in d and not d.get('you_plays'): plays[0] = False
     except (OSError, EOFError, zlib.error): pass
     return S, you
+def spells(path):
+    S, you = load(path); st = {}; runs = {}; cur = {}; j = 0
+    for i in range(1, len(S)):
+        t0, P0 = S[i]
+        while j < i - 1 and t0 - S[j + 1][0] >= 0.5: j += 1
+        tp, Pp = S[j]
+        if not 0.45 < t0 - tp < 0.8: continue
+        for sl, r in P0.items():
+            q = Pp.get(sl)
+            if len(r) < 12 or not r[2] or not q or not q[2] or r[11]: cur.pop(sl, None); continue
+            sp = math.hypot(r[3] - q[3], r[4] - q[4]) / (t0 - tp); a = st.setdefault(sl, [0, 0]); a[0] += 1; a[1] += sp < 0.5
+            if sp < 0.5: cur.setdefault(sl, (t0, r[3], r[4], r[5]))
+            elif sl in cur: c = cur.pop(sl); runs.setdefault(sl, []).append((round(t0 - c[0], 1), round(c[1], 1), round(c[2], 1), round(c[3], 1)))
+    print(os.path.basename(path))
+    for sl, (n, k) in sorted(st.items()):
+        print('  slot %s: standing %.0f%% of %d samples; longest still spells (s, x, y, z): %s' % (sl, 100.0 * k / max(1, n), n, sorted(runs.get(sl, []), key=lambda x: -x[0])[:4]))
 def main():
     near = arg('--near', 15.0); nf = arg('--files', 400)
+    if '--spells' in sys.argv:
+        for p in sorted(glob.glob(os.path.join(os.path.expanduser(arg('--dir', os.path.join(SUP, 'tracks'))), '*.jsonl.gz')))[-arg('--files', 1):]: spells(p)
+        return 0
     files = sorted(glob.glob(os.path.join(os.path.expanduser(arg('--dir', os.path.join(SUP, 'tracks'))), '*.jsonl.gz')))[-nf:]
     G = {'top': [], 'others': [], 'recorder': [], 'all': []}; ST = {'top': [], 'others': [], 'recorder': [], 'all': []}
     for p in files:
