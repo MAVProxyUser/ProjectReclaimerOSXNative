@@ -959,7 +959,11 @@ static void bot_step_body(void) {
         float aimh = 0.55f; lk_over(&aimh, "NHOOK_BOT_AIM_HEAD");
         float ha_on = 1, hdz = 0; lk_over(&ha_on, "NHOOK_BOT_HEADAIM"); lk_over(&hdz, "NHOOK_BOT_HEAD_DZ"); g_bot_head_r = -1;
         if (bi >= 0) { const NovObj* t = &objs[bi]; float hp[4], ap[3] = {t->c[0], t->c[1], t->c[2] + aimh * t->r};
-            if (ha_on > 0 && bot_head(t, now, hp)) { ap[0] = hp[0]; ap[1] = hp[1]; ap[2] = hp[2] + hdz * hp[3]; g_bot_head_r = hp[3]; }   // (the head hitbox: bot_head above)
+            // (12:40: the HEAD only with a precision weapon or a sniper -- Halo 3's assault rifle, SMG, plasma rifle and co. do no extra
+            //  damage there and the head is the smallest part: they aim at the chest, NHOOK_BOT_AIM_BODY (0.2) x the radius over the centre)
+            int prec = g_inv.held_c && (!strcmp(g_inv.held_c, "precision") || !strcmp(g_inv.held_c, "sniper"));
+            if (!prec) { float ab = 0.2f; lk_over(&ab, "NHOOK_BOT_AIM_BODY"); ap[2] = t->c[2] + ab * t->r; }
+            else if (ha_on > 0 && bot_head(t, now, hp)) { ap[0] = hp[0]; ap[1] = hp[1]; ap[2] = hp[2] + hdz * hp[3]; g_bot_head_r = hp[3]; }   // (the head hitbox: bot_head above)
             // LEAD (10:25): Halo 3 registers a client's bullets on the HOST, no lag compensation -- a third of the walker's shots through
             // a hitbox registered no damage (aim reg 0.67): the aim point leads the target by its velocity (units a second) x
             // NHOOK_BOT_AIMLEAD s (live, 0.06; follow-study.py hones it on registered hits a shot)
@@ -1182,6 +1186,13 @@ static void bot_step_body(void) {
                   if (!na && hd < 0.8f && dz > 0.5f) { r = -0.7f; lat = lat >= 0 ? 0.5f : -0.5f; }
                   else if (!na && hd < 1.0f && r > 0) { r = 0; if (fabsf(lat) < 0.3f) lat = lat >= 0 ? 0.4f : -0.4f; } }
                 if (g_kite) { r = -1.0f; if (fabsf(lat) < 0.7f) lat = lat >= 0 ? 0.8f : -0.8f; }
+                // OUTNUMBERED (12:35: the death notes -- most deaths with 2-4 enemies aiming at the walker at once): 2+ enemies within 20
+                // units aiming within 12 deg of it and its shield under NHOOK_BOT_CROWD_SH (0.5) -> full speed back with a full strafe,
+                // still shooting: out of the crossfire. NHOOK_BOT_CROWD=0 (live) off
+                { float cw = 1, csh = 0.5f; lk_over(&cw, "NHOOK_BOT_CROWD"); lk_over(&csh, "NHOOK_BOT_CROWD_SH");
+                  if (cw > 0 && o->shield < csh) { int na = 0; for (int i = 0; i < n; i++) { const NovObj* t = &objs[i]; if (t->type || t->dead || i == me || !bot_enemy(o, t)) continue;
+                          float dx = o->c[0] - t->c[0], dy = o->c[1] - t->c[1], d = sqrtf(dx * dx + dy * dy); if (d > 20 || d < 0.3f) continue; float ay = atan2f(t->aim[1], t->aim[0]); if ((cosf(ay) * dx + sinf(ay) * dy) / d > 0.978f) na++; }
+                      if (na >= 2) { r = -1.0f; if (fabsf(lat) < 0.7f) lat = lat >= 0 ? 0.8f : -0.8f; static double tl; if (bot_log() && now - tl > 4) { tl = now; nlog("[nhook] [fight] outnumbered: %d enemies aiming at me, shield %.2f -- backing out of the crossfire", na, o->shield); } } } }
                 // never off the floor: test where this step leads (1 unit along the move); flip the strafe, then drop the back-off
                 float fx = cosf(yaw0), fy = sinf(yaw0), lx = -fy, ly = fx; float lat_in = lat, r_in = r; int ftries = 0;
                 // (09:10: the check flipped the strafe on 23-60% of fight steps -- a strafe reversing every few steps is a jitter in

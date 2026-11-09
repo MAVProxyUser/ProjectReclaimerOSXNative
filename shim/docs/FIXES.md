@@ -3272,6 +3272,13 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   a running battle, at every round end (our server's in_match true -> false) walker-coach.py round + match-study.py, then each
   walker's game restarted headless with its new knobs and the newest build (they rejoin in the lobby; the user's game and the
   server stay).
+- **Automatics aim at the chest; out of crossfires; the melee race at 1.45** (2026-11-09 12:35-12:40; nbot.c the aim point, the
+  OUTNUMBERED block, live knobs) — WHY: since 08:00 every weapon aimed at the head hitbox -- right for a battle rifle / carbine / magnum
+  / sniper, wrong for an assault rifle (no headshot bonus, the smallest part: fewer hits a second); most death notes had 2-4 enemies
+  aiming at the walker at once; a melee race at 1.67 units fell short and the enemy's melee landed (0 u, shield 0.03, health 1.00).
+  LOGIC: precision / sniper classes aim at the head hitbox (+ HEAD_DZ, honed), every other class at the centre + NHOOK_BOT_AIM_BODY
+  (0.2, live) x the radius; with 2+ enemies within 20 units aiming within 12 deg and the walker's shield under NHOOK_BOT_CROWD_SH (0.5)
+  it backs off at full speed with a full strafe while shooting (NHOOK_BOT_CROWD=0 off); NHOOK_BOT_MELEE_RACE 1.8 -> 1.45 (live knob).
 - **The sight ray goes to the head; an attacker counts as seen; no close-range gun as the roaming weapon** (2026-11-09 12:25-12:30;
   nbot.c the LOS request / the shot-at override / the better-weapon switch) — WHY: a death note "fighting efef0095 at 2 u (in sight) ...
   aiming at me: efef0095 2 u = my target" came after the walker's own lines called that target "hidden, hunting" at 6.5, 4.1 and 3.3
