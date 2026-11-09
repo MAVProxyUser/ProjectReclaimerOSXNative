@@ -1489,7 +1489,11 @@ static void bot_step_body(void) {
                 static float bk[3]; { int j = hh - 1; while (j > 0 && hh - j < 63 && now - histt[(j - 1) & 63] <= 1.5) j--; float dx = pos[0] - hist[j & 63][0], dy = pos[1] - hist[j & 63][1];
                   if (!strafe && !(g_bot_fighting && tdist < 3.0f) && now - histt[j & 63] >= 1.4 && dx * dx + dy * dy < 0.35f * 0.35f && now - tjump > 1.5) {   // (01:10: fighting at arm's length is no progress by design, not stuck) tjump = now; hh = 0; tback = now; bstr = (nav_rand() & 1) ? 0.3f : -0.3f;
                       nav_pos(path[pidx >= 4 ? pidx - 4 : 0], bk);
-                      for (int i = pidx; i < plen && i < pidx + 10; i++) g_nav.pen[path[i]] += 4.0f;
+                      // (14:45: "stuck at" 188 times in 3000 log lines on Valhalla, ~50 at one spot: the +4 penalty never routed around it, and
+                      //  the walker never jumped -- on rocks and lips a jump is what frees a player. Each stuck now jumps (0.25 s) and the next 10
+                      //  path nodes cost NHOOK_BOT_STUCK_PEN (8, live) more)
+                      { float sp = 8; lk_over(&sp, "NHOOK_BOT_STUCK_PEN"); for (int i = pidx; i < plen && i < pidx + 10; i++) g_nav.pen[path[i]] += sp; }
+                      g_fjump_until = now + 0.25;
                       memmove(tstuck, tstuck + 1, 3 * sizeof(double)); tstuck[3] = now;
                       // (2026-11-08, the user: "why was 'second' walker stationary so long with the smg and assault rifle?": 24 s at a ledge on
                       //  Guardian's middle level, its path to a hidden enemy 17 units off dropping ~3 units -- creeping, "stuck", backing off,

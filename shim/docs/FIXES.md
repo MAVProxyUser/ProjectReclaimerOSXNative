@@ -3286,6 +3286,10 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   switch presses (the learnt record bit): 0 of 32 took" -- 32 x "switching from PLASMA PISTOL to ASSAULT RIFLE" with the trigger held
   (the plasma pistol held = an overcharge held) while the earlier switches, 3 of 3 and 2 of 2, came with the trigger up. LOGIC: from a
   switch press until 0.15 s after it the trigger (and the reload click) stays up; PLASMA PISTOL joins the weapons whose trigger is pulsed.
+- **Jump when stuck; route around stuck spots** (2026-11-09 14:45; nbot.c the nav stuck handler) — WHY: on Valhalla "[nav] stuck at ...:
+  back off and replan" 188 times in 3000 log lines, ~50 at one spot ((61, -148)) -- the +4 node penalty never sent the path around it and
+  the walker never jumped (Valhalla's rocks and lips free a player with a jump); a 4 kills / 26 deaths match. LOGIC: every stuck event
+  also jumps (0.25 s) and adds NHOOK_BOT_STUCK_PEN (8, live; was a fixed 4) to the next 10 path nodes.
 - **Policy A/B result; a general knob A/B** (2026-11-09 14:35; follow-study.py knob_ab, --ab N --ab-set "K=v,..." --ab-name NAME) —
   RESULT of --policy-ab 8 (14:00-14:35, The Pit / 9-15 players): policy ON (0.5) 5 kills / 14 deaths in 4 windows (K/D 0.36, 3.5 deaths a
   window), OFF 3 / 23 in 4 (0.13, 5.75 deaths a window) -- the learnt policy stays on. NEW: any set of live knobs alternated SET (B) /
