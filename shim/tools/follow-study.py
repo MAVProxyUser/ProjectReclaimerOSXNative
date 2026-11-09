@@ -61,6 +61,7 @@ def hone(results, nstate, knobs_path):
     return cur, nxt, st
 
 REFIT = {'p': None, 't0': 0}
+BASE = {}   # the walker's launch knobs (walker-coach.py show, --id): where the live knobs start from
 def refit(rec_dir):
     """the live match into the models, in the background (one at a time)"""
     p = REFIT['p']
@@ -98,20 +99,33 @@ def role_model(rec_dir, port, ws):
     for sl, r in last.items():
         f = first.get(sl, r); P[sl] = {'k': max(0, (r[12] or 0) - (f[12] or 0) if sl in first else r[12] or 0), 'd': max(0, (r[13] or 0) - (f[13] or 0) if sl in first else r[13] or 0),
                                      'kd': [], 'kw': collections.Counter(), 'held': collections.Counter(), 'spd': [], 'jumps': 0, 'near_s': 0.0, 'spots': collections.Counter()}
-    prev = {}; jt = {}
+    prev = {}; jt = {}; infront = {}
+    for sl in P: P[sl].update({'alive_s': 0.0, 'still_s': 0.0, 'lat': [], 'react': []})
     for s0 in S:
         R = {r[0]: r for r in s0['p']}
         for sl, r in R.items():
-            if sl not in P or not r[2]: prev.pop(sl, None); continue
+            if sl not in P or not r[2]: prev.pop(sl, None); infront.pop(sl, None); continue
             P[sl]['held'][r[10] or '?'] += 1
+            # HESITATION: an enemy within 40 units comes within 15 deg of the look -> seconds to the first shot (within 3 s)
+            yw = math.radians(r[6] or 0); f = None
+            for q in R.values():
+                if q is r or not q[2] or (q[1] == r[1] and r[1] is not None and r[1] >= 0 and False): continue
+                dx, dy = q[3] - r[3], q[4] - r[4]; dd = math.hypot(dx, dy)
+                if 2 < dd < 40 and abs((math.degrees(math.atan2(dy, dx) - yw) + 180) % 360 - 180) < 15: f = q[0]; break
+            st = infront.get(sl)
+            if f is not None and st is None: infront[sl] = (s0['t'], r[14] or 0)
+            elif st is not None:
+                if (r[14] or 0) > st[1]: P[sl]['react'].append(s0['t'] - st[0]); infront[sl] = None if f is None else (1e18, 1e18)
+                elif f is None or s0['t'] - st[0] > 3.0: infront.pop(sl, None)
             q = prev.get(sl)
             if q:
                 dt = s0['t'] - q[0]
                 if 0.05 < dt < 0.5:
-                    P[sl]['spd'].append(math.hypot(r[3] - q[1][3], r[4] - q[1][4]) / dt)
+                    vx, vy = (r[3] - q[1][3]) / dt, (r[4] - q[1][4]) / dt; sp = math.hypot(vx, vy)
+                    P[sl]['spd'].append(sp); P[sl]['alive_s'] += dt; P[sl]['still_s'] += dt if sp < 0.3 else 0.0
                     near = any(o is not r and o[2] and o[1] != r[1] or (o is not r and o[2] and r[1] is None) for o in R.values() if math.hypot(o[3] - r[3], o[4] - r[4]) < 20)
                     if near:
-                        P[sl]['near_s'] += dt
+                        P[sl]['near_s'] += dt; P[sl]['lat'].append(abs(-math.sin(yw) * vx + math.cos(yw) * vy))   # (sideways to the look: strafing)
                         if r[5] - q[1][5] > 0.12 and s0['t'] - jt.get(sl, -9) > 1.0: P[sl]['jumps'] += 1; jt[sl] = s0['t']
             prev[sl] = (s0['t'], r)
     T = [s0['t'] for s0 in S]
@@ -127,7 +141,7 @@ def role_model(rec_dir, port, ws):
     cands = [sl for sl in order if sl != ws and P[sl]['k'] >= 5] or [sl for sl in order if sl != ws]
     rm = cands[0] if cands else None
     allkd = [d for sl, x in P.items() if sl != ws for d in x['kd']]
-    return {'P': P, 'order': order, 'rm': rm, 'names': names, 'allkd': allkd, 'score': score}
+    return {'P': P, 'order': order, 'rm': rm, 'names': names, 'allkd': allkd, 'score': score, 'ws': ws}
 
 def copy_role_model(o, knobs_path):
     """the walker takes the role model's fighting distance (vs everyone's) and its jumps near enemies, through the live knobs"""
@@ -137,6 +151,16 @@ def copy_role_model(o, knobs_path):
     if x['near_s'] > 30: k['NHOOK_BOT_FJUMP'] = round(min(12.0, x['jumps'] / (x['near_s'] / 60.0)), 1)
     try: cur = json.load(open(knobs_path))
     except Exception: cur = {}
+    me = o['P'].get(o.get('ws'))
+    if me:   # the movement: a step (at most 25%) a window toward the role model -- reaction, strafing, pushing on instead of standing
+        step = lambda c, r: c * min(1.25, max(0.8, r))
+        if len(x['react']) >= 5 and len(me['react']) >= 3 and statistics.median(me['react']) > 0:
+            k['NHOOK_BOT_REACT'] = round(min(3.0, max(0.3, step(cur.get('NHOOK_BOT_REACT', BASE.get('NHOOK_BOT_REACT', 1.0)), statistics.median(x['react']) / statistics.median(me['react'])))), 3)
+        if len(x['lat']) >= 30 and len(me['lat']) >= 20 and statistics.median(me['lat']) > 0.05:
+            k['NHOOK_BOT_LIBSCALE'] = round(min(3.0, max(0.5, step(cur.get('NHOOK_BOT_LIBSCALE', BASE.get('NHOOK_BOT_LIBSCALE', 1.0)), statistics.median(x['lat']) / statistics.median(me['lat'])))), 3)
+        if x['alive_s'] > 60 and me['alive_s'] > 30:
+            si, ms = x['still_s'] / x['alive_s'], me['still_s'] / me['alive_s']; pr = cur.get('NHOOK_BOT_PRESS', BASE.get('NHOOK_BOT_PRESS', 0.4))
+            k['NHOOK_BOT_PRESS'] = round(min(0.95, pr + 0.1) if ms > si + 0.05 else max(0.2, pr - 0.05) if ms < si - 0.05 else pr, 2)
     cur.update(k); os.makedirs(os.path.dirname(knobs_path), exist_ok=True); tmp = knobs_path + '.tmp'; json.dump(cur, open(tmp, 'w')); os.replace(tmp, knobs_path)
     return k
 
@@ -196,6 +220,9 @@ def main():
     if '--leader-from-profile' in sys.argv:
         leader = json.load(open(os.path.expanduser('~/Library/Application Support/ProjectReclaimer/profile.json')))['identity']['nickname']
     os.makedirs(OUT, exist_ok=True); n = 0
+    r0 = subprocess.run(['python3', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'walker-coach.py'), 'show'], capture_output=True, text=True)
+    for l in r0.stdout.splitlines():
+        if l.startswith('walker %s: ' % arg('--id', '4')): BASE.update({kv.split('=')[0]: float(kv.split('=')[1]) for kv in l.split(': ', 1)[1].split() if '=' in kv})
     logp = arg('--log', os.path.join(SUP, 'battles', 'aiwalker.log')); nst = {}; nade_lines(logp, nst)   # (from now on)
     print('%s following-study every %d s (the walker on %d, its leader by name)' % (time.strftime('%H:%M:%S'), EVERY, port), flush=True)
     while True:
@@ -215,7 +242,10 @@ def main():
         if rmo and rmo['rm'] is not None:
             P, nm = rmo['P'], rmo['names']; x = P[rmo['rm']]; me = P.get(ws)
             rank = rmo['order'].index(ws) + 1 if ws in rmo['order'] else None
-            if me: print('  walker in the match: #%s of %d by K/D (%d kills / %d deaths)' % (rank, len(rmo['order']), me['k'], me['d']), flush=True)
+            if me: print('  RANK vs the crowd: #%s of %d by K/D (%d kills / %d deaths this match)' % (rank, len(rmo['order']), me['k'], me['d']), flush=True)
+            mv = lambda z: 'stands still %s, strafes %s u/s in fights, fires %s s after an enemy comes in front' % (
+                '%.0f%%' % (100 * z['still_s'] / z['alive_s']) if z['alive_s'] > 10 else '-', med(z['lat']), med(z['react']))
+            if me: print('  movement: role model %s\n            walker     %s' % (mv(x), mv(me)), flush=True)
             top = x['held'].most_common(2); spots = ', '.join('(%d, %d)' % c for c, _ in x['spots'].most_common(2))
             print('  role model: %s, %d kills / %d deaths: fights at %s units (everyone %s), %s jumps a minute near enemies, moves %s u/s; kills with %s; holds %s; kills from %s' % (
                 nm.get(rmo['rm'], 'slot %s' % rmo['rm']), x['k'], x['d'], med(x['kd']), med(rmo['allkd']), round(x['jumps'] / (x['near_s'] / 60.0), 1) if x['near_s'] > 30 else '-',

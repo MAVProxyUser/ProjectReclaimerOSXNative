@@ -3272,6 +3272,16 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   a running battle, at every round end (our server's in_match true -> false) walker-coach.py round + match-study.py, then each
   walker's game restarted headless with its new knobs and the newest build (they rejoin in the lobby; the user's game and the
   server stay).
+- **The walker copies the best player's movement, step by step; its rank leads every report** (2026-11-09 05:40; follow-study.py
+  role_model / copy_role_model) — WHY: the user: "the biggest thing to study is the mannerisms in movement and fluidity in covering lanes,
+  and engaging, and not hesitating. keep crushing it and refining and studying and reloading the winning model. tell me the rank of the
+  model vs the crowd every time you refresh it". LOGIC: per player over the match: the share of alive time under 0.3 u/s (standing),
+  the sideways speed to its look while an enemy is within 20 units (strafing), and HESITATION = the seconds from an enemy within 40
+  units coming within 15 deg of its look to its next shot (within 3 s). Each window the walker's live knobs move at most 25% toward
+  the role model: NHOOK_BOT_REACT x (its hesitation / the walker's), NHOOK_BOT_LIBSCALE x (its strafing / the walker's), NHOOK_BOT_PRESS
+  +0.1 when the walker stands more than it (-0.05 when less), from the walker's launch knobs (walker-coach.py show, --id). The report
+  opens with "RANK vs the crowd: #r of N" and prints both movements side by side. First dry run: the match's best stood still 47% of
+  its time and fired 0.8 s after an enemy came in front; the walker 35% and 0.7 s, #15 of 25.
 - **Kills / deaths on the stats page are this match's** (2026-11-09 05:25; nstats.c the players JSON) — WHY: the user: "the kills for
   game in play are wrong ... they don't match what is on my screen". On a public Slayer server the statborg's kills (stat 2) ran ~2.2x
   the score (94 vs 44 for the top player) -- the same in two clients (the user's, joined a match earlier, and the walker's, joined this
