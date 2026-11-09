@@ -13,6 +13,14 @@
 void nh_log(const char* fmt, ...) __attribute__((format(printf, 1, 2)));   // nhook.c
 static GCController* g_vpad; static IMP g_orig_controllers; static volatile int g_vpad_reads, g_vpad_stick_reads; static IMP g_orig_lstick;
 static id my_lstick(id self, SEL cmd) { g_vpad_stick_reads++; return ((id (*)(id, SEL))g_orig_lstick)(self, cmd); }   // (counts the app's reads)
+// (2026-11-08: the walkers' short presses -- B 0.12 s, Y 0.15 s -- never registered while a 0.6 s RB hold did: how often the app
+//  reads each control is counted, nh_vpad_btn_reads; nbot.c logs the rates every 10 s with NHOOK_SPAR_LOG)
+static volatile unsigned long g_vpad_br[4]; static IMP g_orig_bb, g_orig_by, g_orig_rs, g_orig_rt;
+static id my_bb(id self, SEL cmd) { g_vpad_br[0]++; return ((id (*)(id, SEL))g_orig_bb)(self, cmd); }
+static id my_by(id self, SEL cmd) { g_vpad_br[1]++; return ((id (*)(id, SEL))g_orig_by)(self, cmd); }
+static id my_rs(id self, SEL cmd) { g_vpad_br[2]++; return ((id (*)(id, SEL))g_orig_rs)(self, cmd); }
+static id my_rt(id self, SEL cmd) { g_vpad_br[3]++; return ((id (*)(id, SEL))g_orig_rt)(self, cmd); }
+void nh_vpad_btn_reads(unsigned long* out4) { for (int i = 0; i < 4; i++) out4[i] = g_vpad_br[i]; }
 static NSArray* my_controllers(id self, SEL cmd) {
     NSArray* a = ((NSArray* (*)(id, SEL))g_orig_controllers)(self, cmd); g_vpad_reads++;
     return g_vpad ? (a ? [a arrayByAddingObject:g_vpad] : @[g_vpad]) : a; }
@@ -23,6 +31,11 @@ int nh_vpad_install(void) {   // 1 = the virtual controller is in +[GCController
         GCController* c = [GCController controllerWithExtendedGamepad]; if (!c || !c.extendedGamepad) { nh_log("[nhook] [vpad] no programmable controller"); return 0; }
         Method m = class_getClassMethod([GCController class], @selector(controllers)); if (!m) { nh_log("[nhook] [vpad] +[GCController controllers] not found"); return 0; }
         g_vpad = [c retain]; g_orig_controllers = method_setImplementation(m, (IMP)my_controllers);
+        { Class gc = object_getClass(c.extendedGamepad); Method m2;
+          if ((m2 = class_getInstanceMethod(gc, @selector(buttonB)))) g_orig_bb = method_setImplementation(m2, (IMP)my_bb);
+          if ((m2 = class_getInstanceMethod(gc, @selector(buttonY)))) g_orig_by = method_setImplementation(m2, (IMP)my_by);
+          if ((m2 = class_getInstanceMethod(gc, @selector(rightShoulder)))) g_orig_rs = method_setImplementation(m2, (IMP)my_rs);
+          if ((m2 = class_getInstanceMethod(gc, @selector(rightTrigger)))) g_orig_rt = method_setImplementation(m2, (IMP)my_rt); }
         { Method ls = class_getInstanceMethod(object_getClass(c.extendedGamepad), @selector(leftThumbstick)); if (ls) g_orig_lstick = method_setImplementation(ls, (IMP)my_lstick);
           nh_log("[nhook] [vpad] controller class %s, gamepad class %s, attached %d", class_getName(object_getClass(c)), class_getName(object_getClass(c.extendedGamepad)), (int)c.isAttachedToDevice); }
         nh_log("[nhook] [vpad] a virtual controller is in +[GCController controllers] (the walker's sticks and buttons)"); }

@@ -215,7 +215,7 @@ static void pk_hex(int dir, const struct sockaddr* sa, const uint8_t* b, long n)
 static void pk_wire_body(int dir, int fd, const struct sockaddr* sa, const void* buf, long n);
 static void pk_wire(int dir, int fd, const struct sockaddr* sa, const void* buf, long n) {   // (timed: nhcost.h)
     { HK_ONCE(h, "sockets (send / receive)"); hk_fire(h); }
-    if (g_hc_off[HC_SOCK]) return; uint64_t t0 = hc_now(); pk_wire_body(dir, fd, sa, buf, n); hc_add(HC_SOCK, t0); }
+    if (g_hc_off[HC_SOCK]) return; uint64_t t0 = hc_now(); pk_wire_body(dir, fd, sa, buf, n); hc_add(HC_SOCK, t0); sm_add(SM_SOCK, t0); }
 static void pk_wire_body(int dir, int fd, const struct sockaddr* sa, const void* buf, long n) {
     if (n > 0 && pk_kind(fd) == 1) pk_hex(dir, sa, (const uint8_t*)buf, n);
     if (!g_pk_on || n < 0 || pk_kind(fd) != 1) return;

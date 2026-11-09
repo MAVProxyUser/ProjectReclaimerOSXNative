@@ -1078,6 +1078,11 @@ static void slow_watch(double now, double fps, int in_match) {
         double rt = HCD(HC_OV) + HCD(HC_AIMT) + HCD(HC_VIEW), et = HCD(HC_DEL) + HCD(HC_AIM), sn = HCD(HC_SNAP); unsigned long sn_n = (unsigned long)(g_hc[HC_SNAP].calls - hc_last[HC_SNAP][1]);
         nlog("[nhook] [perf+] footprint %.0f MB, CPU %.2f cores; nhook: render thread %.0f us/frame (overlay %.0f, aim tick %.0f, camera hook %.0f), engine thread %.1f ms/s (bullets + aim), snapshot %.1f ms each",
              fp, (cpu - cpu_last) / dt, rt * 1e6 / fd, HCD(HC_OV) * 1e6 / fd, HCD(HC_AIMT) * 1e6 / fd, HCD(HC_VIEW) * 1e6 / fd, et * 1e3 / dt, sn_n ? sn * 1e3 / sn_n : 0);
+        // the stall meters (nhcost.h): the longest single call of each place nhook runs in the app's threads, this window
+        { char b[700]; int q = 0; extern unsigned long nr_depth_count(void), nr_depth_passes(void);
+          for (int k = 0; k < SM_N && q < (int)sizeof b - 60; k++) { uint64_t m = __atomic_exchange_n(&g_sm_max[k], 0, __ATOMIC_RELAXED), c = __atomic_exchange_n(&g_sm_n[k], 0, __ATOMIC_RELAXED);
+              if (c) q += snprintf(b + q, sizeof b - (size_t)q, "%s%s %.2f", q ? ", " : "", g_sm_name[k], (double)m / f * 1e3); }
+          nlog("[nhook] [stall] longest single call in 10 s (ms): %s; depth textures in the seen table %lu, depth passes %lu", q ? b : "-", nr_depth_count(), nr_depth_passes()); }
         #undef HCD
     }
     // the [slow] line: in a match, fps below half the session's best for 3 windows
@@ -1347,7 +1352,7 @@ static void* st_snap_thread(void* a) {
         if (g_hc_off[HC_SNAP]) { usleep(100000); continue; }   // (the hook cost measurement: snapshots paused)
         static int prof = -1; if (prof < 0) prof = getenv("NHOOK_RD_PROF") != 0; t_rd_prof = prof;
         unsigned long n0 = t_rd_n, b0 = t_rd_b, h0 = t_oc_hits; uint64_t t0 = hc_now(); StBuf s = {0};
-        t_tls_memo = 1; t_sb_memo = 1; st_ocache_fill(); st_snapshot(&s); t_noc = 0; t_tls_memo = 0; t_sb_memo = 0; hc_add(HC_SNAP, t0);
+        t_tls_memo = 1; t_sb_memo = 1; st_ocache_fill(); st_snapshot(&s); t_noc = 0; t_tls_memo = 0; t_sb_memo = 0; hc_add(HC_SNAP, t0); sm_add(SM_SNAP, t0);
         g_snap_rd_n = t_rd_n - n0; g_snap_rd_b = t_rd_b - b0; g_snap_oc_hits = t_oc_hits - h0;
         if (prof) { static double tl; double nw = mono_s(); if (nw - tl > 10) { tl = nw; Dl_info di; uintptr_t base = 0; if (dladdr((void*)&st_snapshot, &di)) base = (uintptr_t)di.dli_fbase;
             nlog("[nhook] [rdprof] the snapshot: %lu system calls, %lu bytes a run (%lu reads answered from the %.1f MB object copy); sites over 10 s (nhook.dylib offsets, atos -o shim/build/nhook.dylib -l 0x0):", g_snap_rd_n, g_snap_rd_b, g_snap_oc_hits, g_snap_oc_mb100 / 100.0);

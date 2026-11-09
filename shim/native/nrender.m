@@ -21,7 +21,9 @@
 #include "../src/rec.h"
 
 void nh_log(const char* fmt, ...) __attribute__((format(printf, 1, 2)));   // nhook.c
-int nh_hk_named(const char* name); void nh_hk_fire(int i); void nh_hk_state(int i, int st, uint64_t at, const char* why);   // nhook.c / nhchk.h: the hooks check
+int nh_hk_named(const char* name); void nh_hk_fire(int i); void nh_hk_state(int i, int st, uint64_t at, const char* why);
+uint64_t nh_sm_now(void); void nh_sm_add(int k, uint64_t t0);   // nhook.c: the stall meters (nhcost.h SM_PRESENT 0, SM_PRESENT_CALL 1, SM_DEPTH 2)
+enum { NR_SM_PRESENT = 0, NR_SM_PRESENT_CALL = 1, NR_SM_DEPTH = 2 };   // nhook.c / nhchk.h: the hooks check
 static int g_hk_present = -1, g_hk_fbo = -1, g_hk_depth = -1;
 int nov_build(float* verts, int cap, int w, int h, float scale);           // noverlay.c
 void nov_aim_tick(void);                                                   // noverlay.c: aim vs hits, measured against the hitboxes
@@ -109,7 +111,11 @@ static id<MTLTexture> g_dkeep[8];
 // order = how many full-size attachments came before it in that frame
 typedef struct { __unsafe_unretained id<MTLTexture> t; unsigned long frame, first_frame; int order, n_in_frame; } NrDepth;
 static NrDepth g_dfull[8]; static int g_ndfull; static unsigned long g_dfull_frame; static int g_dfull_order; static NSUInteger g_dbig;
-static void my_set_dtex(id self, SEL cmd, id<MTLTexture> t) {
+static void my_set_dtex_body(id self, SEL cmd, id<MTLTexture> t);
+static void my_set_dtex(id self, SEL cmd, id<MTLTexture> t) { uint64_t t0 = nh_sm_now(); my_set_dtex_body(self, cmd, t); nh_sm_add(NR_SM_DEPTH, t0); }
+unsigned long nr_depth_count(void) { unsigned long n = 0; if (g_dseen) @synchronized (g_dseen) { n = (unsigned long)[g_dseen count]; } return n; }
+unsigned long nr_depth_passes(void) { return g_dpasses; }
+static void my_set_dtex_body(id self, SEL cmd, id<MTLTexture> t) {
     ((void (*)(id, SEL, id))g_orig_dtex)(self, cmd, t); nh_hk_fire(g_hk_depth);
     if (!t) return; g_dpasses++;
     @synchronized (g_dseen) {
@@ -218,10 +224,11 @@ static void nr_frame(id<MTLCommandBuffer> cb, id<CAMetalDrawable> drawable) {
     }
 }
 static void my_present(id self, SEL cmd, id drawable) {
-    nh_hk_fire(g_hk_present);
+    nh_hk_fire(g_hk_present); uint64_t t0 = nh_sm_now();
     @autoreleasepool { @try { if (drawable) nr_frame((id<MTLCommandBuffer>)self, (id<CAMetalDrawable>)drawable); }
         @catch (NSException* ex) { static int told; if (!told++) nh_log("[nhook] render: exception %s (%s)", ex.name.UTF8String, ex.reason.UTF8String); } }
-    ((void (*)(id, SEL, id))g_orig_present)(self, cmd, drawable);
+    uint64_t t1 = nh_sm_now(); nh_sm_add(NR_SM_PRESENT, t0);
+    ((void (*)(id, SEL, id))g_orig_present)(self, cmd, drawable); nh_sm_add(NR_SM_PRESENT_CALL, t1);
 }
 static void my_set_fbo(id self, SEL cmd, BOOL v) { nh_hk_fire(g_hk_fbo); ((void (*)(id, SEL, BOOL))g_orig_fbo)(self, cmd, g_nr_readback ? NO : v); }
 

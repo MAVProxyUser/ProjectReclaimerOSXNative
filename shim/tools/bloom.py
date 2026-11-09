@@ -16,8 +16,12 @@ import json, math, os, sys
 from collections import defaultdict
 
 def load(paths):
+    # (2026-11-08: the app deletes most projectiles TWICE, ~1 ms apart -- the same start, end and length, the aim sampled again --
+    #  and the object_delete hook logs both: every bullet appeared twice, which made consecutive bullets look perfectly
+    #  correlated. The first report of a (shooter, start, end) within 0.1 s is kept.)
     S = []
     for p in paths:
+        seen = {}
         for l in open(p, errors='replace'):
             t = l.split()
             if len(t) != 18: continue
@@ -25,6 +29,9 @@ def load(paths):
                 r = {'t': float(t[0]), 'own': t[1], 'w': t[2].replace('_', ' '), 'p': t[3].replace('_', ' '), 'vic': t[4], 's': [float(x) for x in t[5:8]], 'e': [float(x) for x in t[8:11]],
                      'trav': float(t[11]), 'a': [float(x) for x in t[12:15]], 'v': [float(x) for x in t[15:18]], 'file': os.path.basename(p)}
             except ValueError: continue
+            k = (t[1], tuple(t[5:11])); t0 = seen.get(k)
+            seen[k] = r['t']
+            if t0 is not None and abs(r['t'] - t0) < 0.1: continue
             S.append(r)
     return S
 

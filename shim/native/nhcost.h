@@ -35,3 +35,15 @@ static inline uint64_t hc_now(void) { uint64_t v; __asm__ volatile("mrs %0, cntv
 static inline void hc_add(int k, uint64_t t0) { uint64_t d = hc_now() - t0; __atomic_fetch_add(&g_hc[k].ticks, d, __ATOMIC_RELAXED); __atomic_fetch_add(&g_hc[k].calls, 1, __ATOMIC_RELAXED); }
 static inline void hc_add_ticks(int k, uint64_t d) { if (d) __atomic_fetch_add(&g_hc[k].ticks, d, __ATOMIC_RELAXED); }
 static double hc_freq(void) { static double f; if (!f) { uint64_t v; __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(v)); f = v ? (double)v : 24e6; } return f; }
+// ---- stall meters (2026-11-08; the user: full-screen play "choppy as heck ... that we NEVER EVER EVER had"): the cost meter above
+// sums each hook's time, so ONE 150 ms call a second hides as ~1.5 ms a second. These keep the LONGEST single call of every place
+// nhook runs inside one of the app's own threads (and of the snapshot), per 10 s window: the [stall] line beside [perf+]. The
+// present hook is split into nhook's part and the app's own present call it wraps; the log tap into the wait for its lock and
+// the time holding it. Never switched off: one counter read at each end.
+enum { SM_PRESENT, SM_PRESENT_CALL, SM_DEPTH, SM_TAP_WAIT, SM_TAP, SM_SOCK, SM_AUR, SM_VMIC, SM_DEL, SM_SNAP, SM_N };
+static const char* const g_sm_name[SM_N] = {"present (nhook)", "present (the app's call)", "depth attachment", "log tap wait", "log tap",
+                                            "sockets", "AudioUnitRender", "virtual mic clock", "object_delete", "snapshot"};
+static volatile uint64_t g_sm_max[SM_N], g_sm_n[SM_N];
+static inline void sm_add(int k, uint64_t t0) { uint64_t d = hc_now() - t0, m = __atomic_load_n(&g_sm_max[k], __ATOMIC_RELAXED);
+    __atomic_fetch_add(&g_sm_n[k], 1, __ATOMIC_RELAXED);
+    while (d > m && !__atomic_compare_exchange_n(&g_sm_max[k], &m, d, 1, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {} }

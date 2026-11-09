@@ -125,7 +125,7 @@ static void* vmic_clock(void* p) {
     VmicUnit* u = p; pthread_setname_np("nhook-vmic"); AudioTimeStamp ts; memset(&ts, 0, sizeof ts); ts.mFlags = kAudioTimeStampSampleTimeValid | kAudioTimeStampHostTimeValid;
     const UInt32 fr = 480; mach_timebase_info_data_t tb; mach_timebase_info(&tb); uint64_t per = (uint64_t)(10e6 * tb.denom / tb.numer), next = mach_absolute_time();
     while (u->run) { next += per; mach_wait_until(next); if (!u->run) break; ts.mHostTime = mach_absolute_time();
-        AudioUnitRenderActionFlags fl = 0; if (u->cb.inputProc) u->cb.inputProc(u->cb.inputProcRefCon, &fl, &ts, 1, fr, 0); ts.mSampleTime += fr;
+        AudioUnitRenderActionFlags fl = 0; uint64_t t0 = hc_now(); if (u->cb.inputProc) u->cb.inputProc(u->cb.inputProcRefCon, &fl, &ts, 1, fr, 0); sm_add(SM_VMIC, t0); ts.mSampleTime += fr;
         if (mach_absolute_time() > next + per * 20) next = mach_absolute_time(); }   // (a stall: no catching up)
     return 0; }
 // my_AudioUnitSetProperty / GetProperty / Initialize / Start / Stop / Render / Dispose: 1 = an emulated unit's call, *r its result

@@ -301,6 +301,11 @@ static void on_object_delete_body(uint64_t* ctx) {   // (x0: the guest context t
     uint8_t* data = *(uint8_t**)(arr + 0x48); int i = h & 0xFFFF; if (!data || i >= *(int32_t*)(arr + 0x20)) return;
     uint8_t* e = data + (size_t)i * 0x18; if (e[3] != 5 || *(uint16_t*)e != (uint16_t)(h >> 16)) return;   // projectiles only
     uint8_t* p = *(uint8_t**)(e + 0x10); if (!p) return;
+    // (2026-11-08: the app deletes most projectiles TWICE, ~1 ms apart -- the bullet log had every bullet twice, the same start / end
+    //  / length, other bullets' deletes in between -- so shots, the aim meter, tracers and the bullet log counted each one twice: a
+    //  handle among the last 256 projectile deletes is skipped. NHOOK_DEL_DUPS=1 = the old double count)
+    { static int dups = -1; if (dups < 0) dups = getenv("NHOOK_DEL_DUPS") != 0; static uint32_t recent[256]; static unsigned rn;
+      if (!dups) { for (int k = 0; k < 256; k++) if (recent[k] == h) return; recent[rn++ & 255] = h; } }
     { uint32_t own = *(uint32_t*)(p + 0xC0), vic = 0xFFFFFFFFu; const float* ip = (const float*)(p + 0x1c); int hi = *(int32_t*)(arr + 0x3c);
       static int noaim = -1; if (noaim < 0) noaim = getenv("NHOOK_NO_AIM") != 0;   // (hits come from the aim meter's hitbox test; this pass only without it --
       extern volatile unsigned long g_nr_frames;                                     //  or without frames: a dedicated server's aim meter never runs)
@@ -361,7 +366,7 @@ static void nov_aim_tick_body(void) {   // nrender.m, every frame (the render th
     }
 }
 void nov_aim_tick(void) { if (g_hc_off[HC_AIMT]) return; uint64_t t0 = hc_now(); nov_aim_tick_body(); hc_add(HC_AIMT, t0); }
-static void on_object_delete(uint64_t* ctx) { if (g_hc_off[HC_DEL]) return; uint64_t t0 = hc_now(); on_object_delete_body(ctx); hc_add(HC_DEL, t0); }   // (timed: nhcost.h)
+static void on_object_delete(uint64_t* ctx) { if (g_hc_off[HC_DEL]) return; uint64_t t0 = hc_now(); on_object_delete_body(ctx); hc_add(HC_DEL, t0); sm_add(SM_DEL, t0); }   // (timed: nhcost.h)
 static const float g_nov_teamcol[8][3] = {{1, 0.3f, 0.25f}, {0.35f, 0.6f, 1}, {0.35f, 1, 0.35f}, {1, 0.6f, 0.15f}, {0.75f, 0.4f, 1}, {1, 0.9f, 0.2f}, {0.75f, 0.55f, 0.35f}, {1, 0.55f, 0.8f}};
 
 // ---- zones (hitbox.c hbz_load / hbz_outline / hbz_draw, the loader's line mode): kill volumes (red) and safe zones (green)

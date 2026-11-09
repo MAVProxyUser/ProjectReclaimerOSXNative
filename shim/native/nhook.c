@@ -26,6 +26,8 @@
 
 static volatile uint64_t g_img;                 // the recompiled engine's image (guest halo3) as the app logs it
 #include "nhcost.h"                            // the hook cost meter: every hook times itself
+__attribute__((visibility("default"))) uint64_t nh_sm_now(void) { return hc_now(); }                                  // (nrender.m: the stall meters)
+__attribute__((visibility("default"))) void nh_sm_add(int k, uint64_t t0) { if (k >= 0 && k < SM_N) sm_add(k, t0); }
 #include "nhchk.h"                             // the hooks check: every hook / address / tap and whether it works
 static int g_logfd = -1;                         // NHOOK_LOG=<file>: our lines go there too
 
@@ -836,6 +838,9 @@ static void* probe_thread(void* arg) {
 }
 
 // one whole log line of the app (stdout / stderr)
+// NHOOK_NO_TAP=1 (2026-11-08, the full-screen stutter bisect): the app's log lines are read only until the engine's image line
+// (the hooks need its address) -- no match state, chat, voice report, peers from the log after that
+static int g_no_tap;
 static void on_line(const char* p, size_t n) {
     static const char key[] = "engine, image at 0x";
     if (n > 7 && !memcmp(p, "[nhook]", 7)) return;
@@ -855,6 +860,7 @@ static void on_line(const char* p, size_t n) {
             }
     { static FILE* tf; static int ti; if (!ti) { ti = 1; const char* f = getenv("NHOOK_TAP_LOG"); if (f && *f) tf = fopen(f, "a"); }   // NHOOK_TAP_LOG=<file>: every
       if (tf) { fwrite(p, 1, n, tf); fputc('\n', tf); fflush(tf); } }   //  line the hooks read (what a process logs that nobody shows: a server worker)
+    if (g_no_tap) return;
     nst_on_line(p, n);                                // match state and events (nstats.c)
 }
 
@@ -864,13 +870,14 @@ static pthread_mutex_t g_lb_mu = PTHREAD_MUTEX_INITIALIZER;
 static char g_lb[3][4096]; static size_t g_lbn[3];
 static void tap(int fd, const char* p, size_t n) {
     if (fd != 1 && fd != 2) return;
-    pthread_mutex_lock(&g_lb_mu);
+    if (g_no_tap && g_img) return;   // (NHOOK_NO_TAP: after the engine's image line, the app's lines go unread)
+    uint64_t t0 = hc_now(); pthread_mutex_lock(&g_lb_mu); uint64_t t1 = hc_now(); sm_add(SM_TAP_WAIT, t0);
     for (size_t i = 0; i < n; i++) {
         char c = p[i];
         if (c == '\n') { on_line(g_lb[fd], g_lbn[fd]); g_lbn[fd] = 0; continue; }
         if (g_lbn[fd] < sizeof g_lb[fd]) g_lb[fd][g_lbn[fd]++] = c;
     }
-    pthread_mutex_unlock(&g_lb_mu);
+    pthread_mutex_unlock(&g_lb_mu); sm_add(SM_TAP, t1);
 }
 
 static int g_trace_writes;                       // NHOOK_TRACE_WRITES=<n>: log the first n writes to fds 1 / 2
@@ -975,7 +982,10 @@ static OSStatus my_AudioUnitSetProperty(AudioUnit au, AudioUnitPropertyID id, Au
 #define INTERPOSE(rep, orig) __attribute__((used)) static struct { const void* r; const void* o; } \
     _ip_##orig __attribute__((section("__DATA,__interpose"))) = { (const void*)(rep), (const void*)(orig) }
 // the page's mic switch (nstats.c mic_json, g_mic_muted): the app's capture pulls its samples on the AUHAL's input bus 1
+static OSStatus my_AudioUnitRender_body(AudioUnit au, AudioUnitRenderActionFlags* fl, const AudioTimeStamp* ts, UInt32 bus, UInt32 frames, AudioBufferList* io);
 static OSStatus my_AudioUnitRender(AudioUnit au, AudioUnitRenderActionFlags* fl, const AudioTimeStamp* ts, UInt32 bus, UInt32 frames, AudioBufferList* io) {
+    uint64_t t0 = hc_now(); OSStatus r = my_AudioUnitRender_body(au, fl, ts, bus, frames, io); sm_add(SM_AUR, t0); return r; }   // (the stall meter)
+static OSStatus my_AudioUnitRender_body(AudioUnit au, AudioUnitRenderActionFlags* fl, const AudioTimeStamp* ts, UInt32 bus, UInt32 frames, AudioBufferList* io) {
     { OSStatus vr; if (vmic_render(au, bus, frames, io, &vr)) return vr; }   // (nmic.c: the virtual microphone's samples = the soundboard)
     OSStatus r = AudioUnitRender(au, fl, ts, bus, frames, io);
     if (bus == 1) { HK_ONCE(hm, "AudioUnitRender (mic)"); hk_fire(hm); }
@@ -1008,6 +1018,7 @@ __attribute__((constructor)) static void nhook_init(void) {
     const char* lf = getenv("NHOOK_LOG");
     if (lf) g_logfd = open(lf, O_WRONLY | O_CREAT | O_APPEND, 0644);
     if (getenv("NHOOK_TRACE_WRITES")) g_trace_writes = atoi(getenv("NHOOK_TRACE_WRITES"));
+    g_no_tap = getenv("NHOOK_NO_TAP") != 0;
     nlog("[nhook] loaded (pid %d)", getpid());
     hk_init(); app_build_pick();                     // the hooks check's items; this app build's addresses (napp_builds.h)
     if (getenv("NHOOK_VPAD") && strcmp(getenv("NHOOK_VPAD"), "0") && getenv("RECLAIMER_PROFILE_DIR"))   // nvpad.m: test identities only

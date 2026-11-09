@@ -3164,8 +3164,8 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   20 (efficiency cores, below everything) and WAITS while a Project Reclaimer runs without --background / --server (the user playing).
   Run the work board the same way (taskpolicy -b). The remaining once-a-second 150-300 ms frame in the user's full-screen game is NOT
   any hook: aim meter, stats snapshots / recorder and voice hook switched off live changed nothing; the hooks cost table and a 5 s
-  sample show nhook cheap on the game's threads; 640 x 360 background games stayed at ~17 ms worst frames for hours. To be measured
-  in a local full-screen game: as is / without nhook's render hooks / without nhook.
+  sample show nhook cheap on the game's threads. (Corrected 19:20: the 640 x 360 background games did NOT stay flat -- their worst
+  frames grew too, to 40-60 ms in the 60-90-player lobbies; see "Finding the full-screen stutter" below.)
 - **The observer picks for coverage, not size** (2026-11-08 17:50; observe-public.sh pick) — WHY: the user: "you have way too many
   valhalla observations vs say sandtrap or snowbound": the bonus only rewarded a map x type with nothing recorded and never held back
   one with plenty, so the one big mod-free server (Valhalla / The Pit / Guardian rotation) won 6 of 9 joins. LOGIC: coverage +40 none,
@@ -3173,6 +3173,75 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   already visited in this run -10 a visit; a map x type under 10 minutes may be joined with 4+ players even in a strict (12+) phase.
   Live check: the big server (24/24) lost to Sandtrap Team Snipers (13 players, no Sandtrap Slayer recorded) and, for small games,
   Foundry (never sampled).
+- **The walker melees like the players, and pulls the trigger on single-shot weapons** (2026-11-08 19:15; nbot.c mel_load /
+  bot_pull_weapon / the fight's melee block and rush, shim/tools/melee-model.py -> tracks/melee.json) — WHY: the user, watching a
+  walker hold a Gravity Hammer on an enemy at 0.6-1.3 units ("FIRING" in its log the whole time) without a swing: "clearly you never
+  trained on melees sooooo many opportunities for the walker to melee". Melee is the second biggest killer in the recordings (3,865
+  kills; the battle rifle 6,206). Two faults: the walker HELD the right trigger for the whole fight -- the hammer, the sword and
+  single-shot weapons act on a pull, so it swung / fired once at most (the bullet log shows the battle rifle and carbine firing on
+  while held: bursts every 0.25-0.35 s, so those stay held) -- and its melee button was down for ONE 33 ms step. LOGIC: melee-model.py
+  measures every "Melee" / "Energy sword" / "Gravity hammer" kill in the public recordings (Infection out): killer -> victim distance
+  at the kill, 1 s and 2 s before, the victim's shield 0.5 s before (beatdown = under 0.05), the killer's weapon class -- anchored at
+  the victim's LAST LIVE SAMPLE: a kill event's own time comes from the game's results (polled) and lags the death by up to ~1-2 s
+  (anchored at the event, only 419 of 3,836 melee kills had a live victim and every "1 s before" was shifted). 43 matches: melee at a
+  median 0.65 units (p75 0.97, p90 1.23), the killer closing ~2.1 units in the last second (a median 2.9 apart 1 s before); 48% finish
+  a victim whose shield was already down (closing in from 3.2 units, p75), mostly assault-rifle carriers (2,649 of 3,836); sword p75
+  1.28, hammer p75 1.33, mostly against full shields. Offline test: shim/tools/melee-model-test.sh. The walker: B within the players' range + 0.25 (positions
+  are a tick or two old; hammer / sword: their own range), held 0.12 s, at most every 0.6 s, logged ([melee]); a target whose shield is
+  down within the rush distance -- or any target within 10 units with a sword / hammer in hand -- is walked straight at (throttle
+  0.9, strafe x0.3; not with a rocket launcher); the trigger is pulsed 0.12 s down / 0.12 s up while firing a pull weapon (hammer,
+  sword, sniper, beam rifle, magnum, rockets, brute shot, fuel rod). NHOOK_BOT_NOMELEE=1 = the old melee (1.8 units, one step, the
+  trigger held); NHOOK_MELEE_FILE = another melee.json.
+  THE BUTTONS (20:45): in four melee battles (melee-battle.sh, 4 walkers with Gravity hammers) no kill was ever a melee -- 333 presses
+  held 0.3 s, a walker "swinging" 30 times at 0.33-0.6 units while its target's shield fell and came back -- and the hammers kept
+  turning into floor weapons with pick-ups off. The app reads the virtual pad 26 times a second (nvpad.m read counters: B, Y, RB,
+  the right trigger, the left stick 257 times in 10 s each, logged as [vpad] lines), so short presses were seen; but 10 of the
+  weapon changes followed a B press: these profiles' layout is Bumper Jumper's ("LB jumps and RB melees ... B acts and reloads",
+  the app's own description), not Halo 3's own (B melees). The walker pressed B to melee (= pick up) and held RB to pick up / tapped
+  it to reload (= melee). Now melee = RB (NHOOK_BOT_MELEEPAD, hex nvpad bits), pick up and reload = B (NHOOK_BOT_PICKPAD).
+  NHOOK_BOT_FIRE=0 now also stops the fighter's trigger (melee-battle.sh MELEE_ONLY=1: no shots, no grenades -- every kill a melee).
+  STILL OPEN (20:55): a MELEE_ONLY battle with hammers (no shots, no grenades, melee on RB) -- 503 swings at a median 0.54 units,
+  ZERO kills. Neither B nor RB nor the pulsed trigger has ever landed a walker melee (no "Melee" kill in any of the 22 walker
+  battles; their 78 unnamed kills are grenades at 6-15 units). B does act (pick-ups), so the pad's buttons reach the app; melee
+  does not reach the server, or is not in the control packet the walker's packet hook passes on (halo3+0x50fb8 packet "A": button
+  bits 0-2, 11, 14 + 7 more at +0x2c). Next: a button scan on our local server -- one walker beside a standing one, each pad
+  button and each control-record bit pressed alone for 0.3 s, the standing one's shield read from the server's stats.
+- **A walker no longer stands still going for a weapon it cannot reach** (2026-11-08 20:20; nbot.c pickups) — WHY: in a melee test
+  battle one walker stood the whole 3 minutes logging "going for BATTLE RIFLE (8.1 units)" (moved 0 units): a pickup target was only
+  marked tried once reached. LOGIC: a target that brings no progress (0.5 units closer) in 6 s is given up and marked tried ("gave up
+  on ..."). The tried list's check read past its 32 entries once 32 pickups had been tried (now bounded). NHOOK_BOT_NOPICK=1 = no
+  pickups at all (melee-battle.sh: the walkers keep the start weapon -- they swapped the hammer for a shotgun / sniper rifle).
+  Also: no reload tap while holding a sword / hammer (nothing to reload; the tap picked up the weapon on the floor: the test walkers
+  swapped their hammers for plasma rifles / SMGs after fights). melee-battle.sh lists every kill (type, the killer's weapon, the
+  distance at the victim's last live sample): our local server names melee and hammer kills "" -- an unnamed kill within 4.5 units
+  counts as melee. First battle (4 walkers, hammers, 3 min, before the reload fix): 95 melee presses at 0.7-1.2 units, 3 melee /
+  hammer kills of 7 (one hammer kill from 4.2 units: its shockwave).
+- **Every bullet was logged twice** (2026-11-08 19:15; shim/tools/bloom.py load) — WHY: the bloom battle's log had each bullet twice
+  ~1 ms apart (same shooter, start, end and length; the aim sampled again): the app deletes most projectiles twice and the
+  object_delete hook logs both. Consecutive bullets then looked perfectly correlated. LOGIC: the first report of a (shooter, start,
+  end) within 0.1 s is kept -- and at the source (noverlay.c on_object_delete_body): a projectile handle among the last 256 projectile
+  deletes is skipped, so the shots counters, the aim meter (accuracy), tracers and the bullet log count each bullet once (they all counted it
+  twice; accuracy, hits over shots, was roughly unchanged). NHOOK_DEL_DUPS=1 = the old double count.
+- **Finding the full-screen stutter: stall meters, the A/B runner, NHOOK_NO_TAP** (2026-11-08 19:20; nhcost.h SM_*, nrender.m,
+  nhook.c tap / my_AudioUnitRender, nmic.c vmic_clock, nnet.c pk_wire, noverlay.c on_object_delete, nstats.c [stall] line;
+  shim/tools/hitch-ab.sh, hitch-summary.py) — WHY: the user: the full-screen game "choppy as heck ... that we NEVER EVER EVER had";
+  their 2-hour game through nhook (16:34-18:51) had a frame over 100 ms in 73% of the app's 5-second frame windows (worst-frame
+  median 152 ms), growing with time: 18 ms at the start, 36 / 62 / 109 / 175 ms at the start of later matches, more within each
+  match as players came and went. The cost meter sums each hook's time, so one 150 ms call a second hides as ~1.5 ms a second.
+  LOGIC: every place nhook runs inside an app thread (present: nhook's part and the app's own present call apart; the depth
+  attachment setter; the log tap: the wait for its lock and the time holding it; sockets; AudioUnitRender; the virtual mic's call
+  into the app's input callback; object_delete) and the snapshot keep their LONGEST single call per 10 s: the [stall] line beside
+  [perf+], with the depth-texture table's size and the depth passes. NHOOK_NO_TAP=1: the app's log lines are read only until the
+  engine's image line (no match state / chat / voice report / peers from the log after it). hitch-ab.sh <server> <secs> <arm>...:
+  the app in normal mode (the user's settings: full screen) on one public server per arm -- none (the app alone) / nhook /
+  nhook:ENV=..; waits for a free slot; HITCH_SAMPLE=1 samples the app for 3 s once the stutter shows. hitch-summary.py: per log the
+  app's own "[capture] frame ... max" windows (printed with or without nhook). First runs (The Pit, 6 min each): the app alone
+  worst-frame median 22.0 ms (2% of windows over 100 ms), with nhook 21.4 ms (0%) -- the same early in a session: it builds up.
+  Long runs (hitch-summary.py --curve, worst-frame median per 2 minutes): nhook 22 27 25 24 28 25 30 33 40, nhook with NHOOK_VMIC=0
+  14 17 21 27, the app ALONE 14 14 14 16 21 28 32 39 -- the build-up is the 0.10.1 app's own (backlog N20, first seen in the user's
+  first 0.10.1 session, before the virtual mic existed). Every stall meter stayed under 0.1 ms; the snapshot switched off and on in
+  10 s phases mid-run: worst frame 33.0 / 31.5 ms (no difference). The ~30 ms frame every ~10 s (the 5 s windows alternate ~14 / ~30
+  ms) is the app's too: the app alone shows it on Valhalla. Not a fix -- a finding; nhook keeps the meters ([stall], every 10 s).
 
 ## 19. Performance
 

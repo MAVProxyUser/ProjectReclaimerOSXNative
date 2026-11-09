@@ -61,6 +61,7 @@ static int bot_allowed(void);
 // the virtual game controller (nvpad.m, NHOOK_VPAD=1, 2026-11-08): with it a JOINED client's moves reach the server too (the app
 // sends what its controllers say), so the walker may walk there; it also fires (the right trigger) with NHOOK_BOT_FIRE=1
 int nh_vpad_install(void); void nh_vpad_set(float lx, float ly, float rx, float ry, float lt, float rt, uint32_t b); int nh_vpad_reads(void); int nh_vpad_stick_reads(void);
+void nh_vpad_btn_reads(unsigned long* out4);   // nvpad.m: the app's reads of B, Y, RB, the right trigger
 static volatile int g_vpad_on; static int g_pad_written;
 static void bot_pad(float lx, float ly, float rt, uint32_t b) {   // b: nvpad.m's button bits; bit 30 = the left trigger (a grenade)
     if (!g_vpad_on) return; nh_vpad_set(lx, ly, 0, 0, (b & 0x40000000u) ? 1.0f : 0.0f, rt, b & 0xFFFFu); g_pad_written = 1; }
@@ -285,6 +286,37 @@ static float wz_eff(int ci, const float* p, int* tot) {   // kills there with th
     if (tot) *tot = kt; return ((kc + 0.5f) / (kt + 0.5f * WZ_NC)) / fmaxf(0.03f, g_wz.held[ci]); }
 static float bot_band_off(const char* cls, float d, float kd) {   // 0 inside the players' band for this weapon class, else how far outside (relative); -1 no band
     float a, b; if (!eg_band(cls, &a, &b)) return -1; a *= kd; b *= kd; return d < a ? (a - d) / a : d > b ? (d - b) / b : 0; }
+// ---- melee (2026-11-08; the user, watching a walker hold a Gravity Hammer on an enemy at 0.6-1.3 units: "clearly you never trained
+// on melees sooooo many opportunities for the walker to melee"). The walker HELD the right trigger the whole fight: the hammer, the
+// sword and single-shot weapons act on a PULL, so it swung / fired once at most; and its melee button was down for one 33 ms step.
+// Players' numbers (shim/tools/melee-model.py over 43 public matches -> tracks/melee.json, NHOOK_MELEE_FILE): 3,836 melee kills at
+// a median 0.65 units (p75 0.97), the killer closing ~2.1 units in the last second (2.9 apart 1 s before); half of them finish a
+// victim whose shield was already down (closing in from ~3.2 units, p75); sword kills within 1.28 (p75), hammer within 1.33.
+// NHOOK_BOT_NOMELEE=1 = the old melee (1.8 units, one step, the trigger held).
+typedef struct { float range, rush, sword, hammer; int loaded; } BotMelee;
+static BotMelee g_mel = {0.97f, 3.24f, 1.28f, 1.33f, 0};
+static void mel_load(void) {
+    if (g_mel.loaded) return; g_mel.loaded = 1; char p[1100]; const char* e = getenv("NHOOK_MELEE_FILE"), *h = getenv("HOME");
+    if (e) snprintf(p, sizeof p, "%s", e); else snprintf(p, sizeof p, "%s/Library/Application Support/ReclaimerMac/tracks/melee.json", h ? h : "/tmp");
+    FILE* f = fopen(p, "r"); if (!f) { nlog("[nhook] [melee] no %s: the built-in numbers (range %.2f, rush from %.1f)", p, g_mel.range, g_mel.rush); return; }
+    static char b[65536]; size_t n = fread(b, 1, sizeof b - 1, f); fclose(f); b[n] = 0; const char* w = strstr(b, "\"walker\"");
+    #define MELNUM(k, v) { const char* q = w ? strstr(w, "\"" k "\":") : 0; if (q) { float x = strtof(q + strlen(k) + 3, 0); if (x > 0.1f && x < 10) v = x; } }
+    MELNUM("melee_range", g_mel.range) MELNUM("rush_from", g_mel.rush) MELNUM("sword_range", g_mel.sword) MELNUM("hammer_range", g_mel.hammer)
+    #undef MELNUM
+    nlog("[nhook] [melee] players' numbers: melee within %.2f units, beatdown rush from %.1f, sword %.2f, hammer %.2f", g_mel.range, g_mel.rush, g_mel.sword, g_mel.hammer); }
+// weapons that act on a trigger PULL (holding does not repeat): the trigger is pulsed (0.12 s down, 0.12 s up) while firing.
+// (the bullet log shows the battle rifle and carbine firing on while held: bursts every 0.25-0.35 s)
+static int bot_pull_weapon(const char* w) {
+    static const char* const k[] = {"HAMMER", "SWORD", "ENERGY BLADE", "SNIPER", "BEAM RIFLE", "MAGNUM", "ROCKET", "BRUTE SHOT", "FUEL ROD", 0};
+    if (!w) return 0; for (int i = 0; k[i]; i++) if (strstr(w, k[i])) return 1; return 0; }
+static int g_bot_pull, g_bot_trig; static double g_bot_fire_t0;   // (the held weapon acts on a pull; when this string of fire began)
+// the virtual pad's melee and act / pick-up / reload buttons (nvpad.m bits: 1 B, 0x20 RB). 2026-11-08: the walkers pressed B to
+// melee and held RB to pick up -- Halo 3's own layout -- but the app's layout for these profiles is Bumper Jumper's (its own
+// descriptions: "LB jumps and RB melees ... B acts and reloads"): ten weapon changes in a melee battle followed a B press (none
+// melee), the hammers were swapped for floor weapons, and RB "pick-ups" / reload taps were melees. NHOOK_BOT_MELEEPAD /
+// NHOOK_BOT_PICKPAD = other buttons (hex bits) for another layout; NHOOK_BOT_NOMELEE=1 also brings back the old B melee.
+static uint32_t bot_meleepad(void) { static uint32_t v = 1; if (v == 1) { const char* e = getenv("NHOOK_BOT_MELEEPAD"); v = e ? (uint32_t)strtoul(e, 0, 16) : 0x20; } return v; }
+static uint32_t bot_pickpad(void) { static uint32_t v = 1; if (v == 1) { const char* e = getenv("NHOOK_BOT_PICKPAD"); v = e ? (uint32_t)strtoul(e, 0, 16) : 0x02; } return v; }
 static void bot_step_body(void);
 static void bot_step(void) { g_pad_written = 0; bot_step_body(); if (g_vpad_on && !g_pad_written) nh_vpad_set(0, 0, 0, 0, 0, 0, 0); }   // (idle: the pad let go)
 static void bot_step_body(void) {
@@ -407,8 +439,18 @@ static void bot_step_body(void) {
                            mh > 0 && mo > 0 && (mo < mh ? tdist < g_eg.sw_d[hi][oi] : tdist > g_eg.sw_d[hi][oi]); })) {
                       tsw = now; if (bot_log()) nlog("[nhook] [inv] switching to %s at %.1f units: players switch %s -> %s at %.1f (median of %d)", g_inv.other, tdist, g_inv.held_c, g_inv.other_c, g_eg.sw_d[hi][oi], g_eg.sw_n[hi][oi]); }
                   else if (!zkeep && !(hi >= 0 && oi >= 0 && g_eg.sw_n[hi][oi] >= 20) && oh > 0.3f && oo >= 0 && oo < oh * 0.5f) { tsw = now; if (bot_log()) nlog("[nhook] [inv] switching to %s (%s) for %.1f units (the %s band is %.0f%% off)", g_inv.other, g_inv.other_c, tdist, g_inv.held_c, oh * 100); } }
-              if (now - tsw < 0.15) fbtn |= 8; }
-            if (tdist < 1.8f && now - tmelee > 0.7) { tmelee = now; fbtn |= 2; }                                            // B: melee
+              { static float sh = -1; if (sh < 0) { const char* e = getenv("NHOOK_BOT_SWITCH_HOLD"); sh = e ? strtof(e, 0) : 0.4f; }   // (0.15 s never registered: see nvpad.m's read counters)
+                if (now - tsw < sh) fbtn |= 8; } }
+            // B: melee -- the players' range (+ 0.25: positions are a tick or two old), held 0.12 s, at most every 0.6 s
+            { static int nomel = -1; if (nomel < 0) nomel = getenv("NHOOK_BOT_NOMELEE") != 0;
+              if (nomel) { if (tdist < 1.8f && now - tmelee > 0.7) { tmelee = now; fbtn |= 2; } }   // (the old: B, one step)
+              else { mel_load(); int mcls = g_inv.held_c && !strcmp(g_inv.held_c, "melee");
+                  float mr = (mcls ? (g_inv.held && strstr(g_inv.held, "HAMMER") ? g_mel.hammer : g_mel.sword) : g_mel.range) + 0.25f;
+                  if (vis && tdist < mr && now - tmelee > 0.6 && now - tacq > 0.15) { tmelee = now;
+                      if (bot_log()) nlog("[nhook] [melee] %s at %.2f units (target shield %.2f: %s), holding %s", mcls ? "swing" : "melee", tdist, ftg.shield, ftg.shield < 0.05f ? "beatdown" : "full", g_inv.held ? g_inv.held : "-"); }
+                  static float mh = -1; if (mh < 0) { const char* e = getenv("NHOOK_BOT_MELEE_HOLD"); mh = e ? strtof(e, 0) : 0.3f; }
+                  if (now - tmelee < mh) fbtn |= bot_meleepad(); }
+              g_bot_pull = !nomel && bot_pull_weapon(g_inv.held); }
             { static float fj = -1; if (fj < 0) { const char* e = getenv("NHOOK_BOT_FJUMP"); fj = e ? strtof(e, 0) : 0.0f; }   // jumps a minute in a fight (walker-coach.py: the winners')
               if (fj > 0 && bot_rand01() < fj * (float)dt / 60.0f) g_fjump_until = now + 0.25; }
             { float gd0 = 6, gd1 = 16; static int gset = -1; static double gnext; if (gset < 0) gset = getenv("NHOOK_BOT_GREN") != 0;   // (the players' band and rate unless NHOOK_BOT_GREN is set)
@@ -439,12 +481,19 @@ static void bot_step_body(void) {
                     float pull = tdist > p75 * kdist ? 0.6f : 0.0f; r = fmaxf(-1.0f, fminf(1.0f, rsc * er / run + pull));
                     if (o->shield < retreat && o->shield >= 0) r = -backoff;
                     if (g_bot_camo_hold) r = 0.9f; }
+                // the beatdown rush (players: half of the melee kills finish a victim whose shield is down, closing in from ~3.2 units) and a
+                // sword / hammer closing in to its swing range (melee.json; not with a rocket launcher in hand)
+                { static int nm = -1; if (nm < 0) nm = getenv("NHOOK_BOT_NOMELEE") != 0; int mcls = g_inv.held_c && !strcmp(g_inv.held_c, "melee");
+                  if (!nm && vis && ((ftg.shield < 0.05f && ftg.health > 0 && tdist < g_mel.rush && !(g_inv.held_c && !strcmp(g_inv.held_c, "rocket"))) || (mcls && tdist < 10.0f))) { r = 0.9f; lat *= 0.3f; } }
                 // never off the floor: test where this step leads (1 unit along the move); flip the strafe, then drop the back-off
                 float fx = cosf(yaw0), fy = sinf(yaw0), lx = -fy, ly = fx;
                 for (int tries = 0; tries < 3; tries++) { float p2[3] = {o->c[0] + (fx * r + lx * lat) * 1.2f, o->c[1] + (fy * r + ly * lat) * 1.2f, o->c[2] - 0.35f};
                     if (bot_floor_ok(p2)) break; if (tries == 0) { side = -side; lat = -lat; } else if (tries == 1) r = r < 0 ? 0 : r; else { lat = 0; r = 0; } }
                 ftx = r; fty = lat; } }
         else { g_bot_fire = 0; if (tdist > 8) { yaw = yaw0; pitch = pitch0; out &= ~1; } }   // (out of sight: no tracking through walls -- look where it walks)
+        if (bot_log() && g_vpad_on) { static double tr; static unsigned long pr[4]; static int ps, pc; if (now - tr > 10.0) { unsigned long r[4]; nh_vpad_btn_reads(r); int sr = nh_vpad_stick_reads(), cr = nh_vpad_reads();
+              if (tr > 0) nlog("[nhook] [vpad] the app read in %.0f s: controllers %d, left stick %d, B %lu, Y %lu, RB %lu, right trigger %lu", now - tr, cr - pc, sr - ps, r[0] - pr[0], r[1] - pr[1], r[2] - pr[2], r[3] - pr[3]);
+              tr = now; memcpy(pr, r, sizeof pr); ps = sr; pc = cr; } }
         if (bot_log()) { static double tl; if (now - tl > 1.0) { tl = now; nlog("[nhook] [fight] target %08x %.1f u %s, err %.1f deg, %s%s, shield %.2f", ftg.handle, tdist, vis ? "in sight" : "hidden", g_bot_err, engaged ? "engaged" : "hunting", g_bot_fire ? ", FIRING" : "", o->shield); } }
     }
     // ---- pickups (NHOOK_BOT_PICKBIT=<hex>: the control record's pick-up bit, shim/tools/native-pickup-scan.sh finds it): out of a
@@ -452,29 +501,41 @@ static void bot_step_body(void) {
     // each weapon is tried once
     { static int pb = -1; static uint64_t pbit; if (pb < 0) { const char* e = getenv("NHOOK_BOT_PICKBIT"); pbit = e ? strtoull(e, 0, 16) : 0; pb = pbit != 0; }
       static double tscan, tpress; static uint32_t tried[32]; static int ntried; static uint32_t want_h;
-      if (pb == 0 && g_vpad_on) pb = 2;   // (on the virtual controller: hold its pick-up button, NHOOK_BOT_PICKPAD, default RB)
+      if (pb == 0 && g_vpad_on) pb = 2;   // (on the virtual controller: hold its pick-up button, NHOOK_BOT_PICKPAD, default B)
+      { static int np = -1; if (np < 0) np = getenv("NHOOK_BOT_NOPICK") != 0; if (np) pb = 0; }   // (NHOOK_BOT_NOPICK=1: keep the start weapons -- melee-battle.sh)
+      // (2026-11-08: a walker stood the whole battle "going for BATTLE RIFLE (8.1 units)" -- a weapon it could not reach was never
+      //  given up: a target that brings no progress (0.5 units closer) in 6 s is now marked tried. The tried list is 32 entries
+      //  long: its check read past the end once 32 had been tried)
+      static double t_prog; static float d_prog;
       if (pb && fight && !engaged && now - tscan > 1.0) { tscan = now; static NovObj w[512]; pthread_mutex_lock(&g_nov_collect_mx); g_nov_units_only = 3; int nw = nov_collect(w, 512); g_nov_units_only = 0; pthread_mutex_unlock(&g_nov_collect_mx);
           int cur = 99; uint32_t held = o->wslot >= 0 && o->wslot < 4 ? o->weapons[o->wslot] : 0xFFFFFFFFu;
           for (int i = 0; i < nw; i++) if (w[i].handle == held) { cur = bot_wpn_rank(hb_tag_name(w[i].def)); break; }
           float bd = 144.0f; int bi = -1;
           for (int i = 0; i < nw; i++) { if (w[i].parent != 0xFFFFFFFFu) continue; int rk = bot_wpn_rank(hb_tag_name(w[i].def)); if (rk >= cur) continue;
-              int t2 = 0; for (int k = 0; k < ntried; k++) if (tried[k] == w[i].handle) t2 = 1; if (t2) continue;
+              int t2 = 0; for (int k = 0; k < ntried && k < 32; k++) if (tried[k] == w[i].handle) t2 = 1; if (t2) continue;
               float dx = w[i].c[0] - o->c[0], dy = w[i].c[1] - o->c[1], dz = w[i].c[2] - o->c[2], d = dx * dx + dy * dy; if (d < bd && fabsf(dz) < 2.5f) { bd = d; bi = i; } }
-          if (bi >= 0) { g_bot_pick_on = 1; memcpy(g_bot_pick_pos, w[bi].c, 12); want_h = w[bi].handle; if (bot_log()) nlog("[nhook] [fight] going for %s (%.1f units)", hb_tag_name(w[bi].def), sqrtf(bd)); }
+          if (bi >= 0) { float d = sqrtf(bd);
+              if (w[bi].handle != want_h || !g_bot_pick_on) { t_prog = now; d_prog = d; } else if (d < d_prog - 0.5f) { d_prog = d; t_prog = now; }
+              if (w[bi].handle == want_h && g_bot_pick_on && now - t_prog > 6.0) { g_bot_pick_on = 0; tried[(ntried++) & 31] = want_h;
+                  if (bot_log()) nlog("[nhook] [fight] gave up on %s (%.1f units): no closer in 6 s", hb_tag_name(w[bi].def), d); }
+              else { g_bot_pick_on = 1; memcpy(g_bot_pick_pos, w[bi].c, 12); want_h = w[bi].handle; if (bot_log()) nlog("[nhook] [fight] going for %s (%.1f units)", hb_tag_name(w[bi].def), d); } }
           else g_bot_pick_on = 0; }
       if (engaged) g_bot_pick_on = 0;
       if (g_bot_pick_on) { float dx = g_bot_pick_pos[0] - o->c[0], dy = g_bot_pick_pos[1] - o->c[1];
-          if (dx * dx + dy * dy < 0.8f) { tpress = now; g_bot_pick_on = 0; if (ntried < 32) tried[ntried++] = want_h; else tried[(ntried++) & 31] = want_h; } }
-      static uint32_t ppad = 1; if (ppad == 1) { const char* e = getenv("NHOOK_BOT_PICKPAD"); ppad = e ? (uint32_t)strtoul(e, 0, 16) : 0x20; }
+          if (dx * dx + dy * dy < 0.8f) { tpress = now; g_bot_pick_on = 0; tried[(ntried++) & 31] = want_h; } }
+      uint32_t ppad = bot_pickpad();
       if (pb && now - tpress < 0.6) fbtn |= 0x20000 | (g_vpad_on ? ppad : 0); }   // (fbtn bit 17: hold the pick-up bit; mapped below; the pad's button directly)
     // reload after a fight (the players' habit; no ammo count is read yet): the pad's reload button (NHOOK_BOT_PICKPAD, a TAP; a hold
     // picks up) 0.4-1.0 s after a fight in which the walker fired ends, unless it is walking to a weapon
     { static double tend, trel, tfired; static int was; if (g_bot_fire) tfired = now;
       if (was && !engaged) tend = now + 0.4 + 0.6 * bot_rand01(); if (engaged) tend = 0; was = engaged;
-      if (fight && g_vpad_on && tend && now > tend) { tend = 0; if (now - tfired < 8.0 && !g_bot_pick_on && (g_inv.ammo < 0 || g_inv.ammo < g_inv.ammo_max)) { trel = now; if (bot_log()) nlog("[nhook] [inv] reloading after the fight"); } }
+      // (2026-11-08: not with a sword / hammer -- nothing to reload, and the tap then picks up the weapon on the floor: melee test
+      //  walkers swapped their hammers for plasma rifles / SMGs after every fight)
+      int noreload = g_inv.held_c && !strcmp(g_inv.held_c, "melee");
+      if (fight && g_vpad_on && tend && now > tend) { tend = 0; if (!noreload && now - tfired < 8.0 && !g_bot_pick_on && (g_inv.ammo < 0 || g_inv.ammo < g_inv.ammo_max)) { trel = now; if (bot_log()) nlog("[nhook] [inv] reloading after the fight"); } }
       { static double tlow; if (fight && g_vpad_on && !engaged && g_inv.ammo >= 0 && g_inv.ammo_max > 2 && g_inv.ammo < 0.6f * g_inv.ammo_max && now - tlow > 4.0 && now - trel > 4.0 && !g_bot_pick_on) {
             tlow = now; trel = now; if (bot_log()) nlog("[nhook] [inv] reloading: %d of %d rounds", g_inv.ammo, g_inv.ammo_max); } }
-      static uint32_t rpad = 1; if (rpad == 1) { const char* e = getenv("NHOOK_BOT_PICKPAD"); rpad = e ? (uint32_t)strtoul(e, 0, 16) : 0x20; }
+      uint32_t rpad = bot_pickpad();
       if (now - trel < 0.1) fbtn |= rpad; }
     // the walker (nav.c's graph): the path's way PELOAD_NAV_LOOK nodes ahead; with the aim on, the throttle walks it in any
     // direction relative to the view
@@ -550,7 +611,11 @@ static void bot_step_body(void) {
     { static uint64_t fb = 0; if (!fb) { const char* e = getenv("NHOOK_BOT_FIREBIT"); fb = e ? strtoull(e, 0, 16) : 0x80000ull; }
       static uint64_t gb = 0; if (!gb) { const char* e = getenv("NHOOK_BOT_GRENBIT"); gb = e ? strtoull(e, 0, 16) : 0x40000000ull; }
       static uint64_t pkb = 1; if (pkb == 1) { const char* e = getenv("NHOOK_BOT_PICKBIT"); pkb = e ? strtoull(e, 0, 16) : 0; }
-      uint64_t want = (spar && g_bot_fire ? fb : 0) | ((fbtn & 0x10000) ? gb : 0) | ((fbtn & 0x20000) ? pkb : 0) | (now < g_fjump_until ? g_bot_jump : 0);   // (fbtn bit 16: the grenade pulse, 17: pick up)
+      // (a weapon that acts on a pull -- hammer, sword, sniper, magnum, rockets: the trigger pulsed 0.12 s down / 0.12 s up while firing)
+      { static int was; if (spar && g_bot_fire && !was) g_bot_fire_t0 = now; was = spar && g_bot_fire; }
+      static int nofire = -1; if (nofire < 0) { const char* e = getenv("NHOOK_BOT_FIRE"); nofire = e && !strcmp(e, "0"); }   // (=0: never pull the trigger -- melee-battle.sh MELEE_ONLY)
+      int trig = !nofire && spar && g_bot_fire && (!g_bot_pull || fmod(now - g_bot_fire_t0, 0.24) < 0.12); g_bot_trig = trig;
+      uint64_t want = (trig ? fb : 0) | ((fbtn & 0x10000) ? gb : 0) | ((fbtn & 0x20000) ? pkb : 0) | (now < g_fjump_until ? g_bot_jump : 0);   // (fbtn bit 16: the grenade pulse, 17: pick up)
       if (want) { g_bot_btn = ((out & 4) ? g_bot_btn : 0) | want; out |= 4; } else if (!(out & 4)) g_bot_btn = 0; }
     if (diag) { uint64_t b = 0; int d = bot_diag(&tx, &ty, &b, now); out |= d; if (d & 4) g_bot_btn = b; else if (!(out & 4)) g_bot_btn = 0;
         static double tl; if (now - tl > 0.25) { tl = now; const float* v = o->vel;
@@ -560,7 +625,7 @@ static void bot_step_body(void) {
       if (fo) { yaw = fy / 57.29578f; if (hp) pitch = fp / 57.29578f; out |= 1; } }   // NHOOK_BOT_FACE (above)
     g_bot_yaw = yaw; g_bot_pitch = pitch; g_bot_tx = tx; g_bot_ty = ty; g_bot_out = out;
     // the virtual controller: left stick = the throttle (y forward, x right = -left), A = jump, right trigger = fire
-    bot_pad(-ty, tx, (spar && g_bot_fire) ? 1.0f : 0.0f, (((out & 4) && (g_bot_btn & g_bot_jump)) ? 1u : 0u) | (fbtn & 0xFFFF) | ((fbtn & 0x10000) ? 0x40000000u : 0));
+    bot_pad(-ty, tx, g_bot_trig ? 1.0f : 0.0f, (((out & 4) && (g_bot_btn & g_bot_jump)) ? 1u : 0u) | (fbtn & 0xFFFF) | ((fbtn & 0x10000) ? 0x40000000u : 0));
     if (!(spar && g_bot_err >= 0)) g_bot_fire = 0;
 }
 static void* bot_thread(void* p) { (void)p; pthread_setname_np("shim-bot"); for (;;) { usleep(33000); bot_step(); } return 0; }
