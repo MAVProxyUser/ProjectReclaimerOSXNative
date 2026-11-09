@@ -67,7 +67,8 @@ static int nov_camera(float* vp, float aspect) {
 
 // ---- objects (hitbox.c hb_collect) --------------------------------------------------------------------------------
 typedef struct { float c[3], r, o[3], vel[3]; int type; uint32_t handle; uint64_t p; uint32_t def; uint16_t nmsz, nmoff;
-    float health, shield, camo; int team, seat, wslot, dead; uint32_t weapons[4], parent, owner; int8_t gren[4]; int rcount; uint16_t roff; } NovObj;
+    float health, shield, camo; int team, seat, wslot, dead; uint32_t weapons[4], parent, owner; int8_t gren[4]; int rcount; uint16_t roff;
+    float aim[3]; } NovObj;   // (aim: a unit's look direction, +0x1a0 -- the recordings' yaw; nbot.c: is its back to the walker)
 static uint8_t g_nov_tab[HB_MAXOBJ * 0x18]; static int g_nov_hi;
 // nov_collect's static buffers are shared: the overlay (render thread) and the sparring aim / walker (nbot.c, its own thread)
 // take this lock around it; g_nov_units_only (under it) = 1 bipeds only, 2 vehicles only, whatever the overlay switches say
@@ -94,7 +95,7 @@ static int nov_collect(NovObj* out, int max) {
         { int16_t rs = *(const int16_t*)(dh + 0x13a); if ((*(const uint32_t*)(dh + 4) >> 11) & 1) rs -= 0x20; o->rcount = rs > 0 ? rs / 10 : 0; o->roff = *(const uint16_t*)(dh + 0x13c); }
         o->dead = (*(const uint32_t*)(dh + 0x110) >> 2) & 1; o->health = o->dead ? 0 : *(const float*)(dh + 0xF4); o->shield = o->dead ? 0 : *(const float*)(dh + 0xF8);
         if (unit) { o->team = *(const int32_t*)(dh + 0x174); o->seat = *(const int16_t*)(dh + 0x24E); o->wslot = *(const int8_t*)(dh + 0x262);
-            memcpy(o->weapons, dh + 0x268, 16); memcpy(o->gren, dh + 0x294, 4); o->camo = *(const float*)(dh + 0x360); }
+            memcpy(o->weapons, dh + 0x268, 16); memcpy(o->gren, dh + 0x294, 4); o->camo = *(const float*)(dh + 0x360); memcpy(o->aim, dh + 0x1a0, 12); }
         o->owner = t == 5 ? *(const uint32_t*)(dh + 0xC0) : 0xFFFFFFFFu;
         if (!(o->r > 0.001f && o->r < 50.f) || o->c[0] != o->c[0]) continue; n++;
     }

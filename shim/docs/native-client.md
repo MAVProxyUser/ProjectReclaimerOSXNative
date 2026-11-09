@@ -177,6 +177,16 @@ cancel it in the app's mods window -- nhook does not touch it (backlog N23).
 - **Weapon pickup is not a button bit**: shim/tools/native-pickup-scan.sh held each of the control record's 64 bits (+0xC8) on a
   Mauler lying on the floor: none swapped it (FIXES.md "The pickup scan"). Walkers keep their loadout (NHOOK_BOT_PICKBIT unset).
 
+### Melee (2026-11-08 evening; backlog N26 -- open)
+The players' numbers come from `shim/tools/melee-model.py` (tracks/melee.json; offline test melee-model-test.sh): melee kills at a
+median 0.65 units, ~2 units closed in the last second, half of them finishing a downed shield; 19% from behind, and an enemy looking
+away within 1.5 units is meleed to death only 20% of the time. The walker presses melee within the players' range (NHOOK_BOT_MELEEPAD,
+RB: the test profiles act like Bumper Jumper -- B is "act / pick up", NHOOK_BOT_PICKPAD), rushes a target whose shield is down,
+pulses the trigger for pull weapons (hammer, sword, sniper, magnum, rockets). NO WALKER MELEE HAS LANDED YET: melee-battle.sh
+(MELEE_ONLY=1 = no shots / grenades) gave 0 melee kills; `shim/tools/melee-scan.py` (do=botpad pad buttons, do=botpkt packet bits,
+do=botbtn control-record bits, each beside a standing player on our server) found nothing -- but its fire-bit control failed too, so
+the scan setup is being fixed first. Shot dispersal (bloom-battle.sh, NHOOK_SHOTLOG) runs only on request.
+
 ## Learning from real players: the pipeline and the tome (2026-11-08)
 
 The walkers learn how real players move and fight from public matches, per map and in aggregate, and the archive grows with

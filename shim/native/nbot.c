@@ -40,6 +40,9 @@ static float g_bot_pt[3]; static char g_bot_veh[64];    // walker targets (point
 static volatile int g_bot_out;                          // what the hook writes: 1 yaw / pitch, 2 throttle, 4 buttons
 static volatile float g_bot_yaw, g_bot_pitch, g_bot_tx, g_bot_ty; static volatile uint64_t g_bot_btn; static volatile int g_bot_fire, g_bot_fighting;
 static volatile uint64_t g_bot_testbtn; static volatile double g_bot_testbtn_until;   // do=botbtn (button scans, test identities)
+// do=botpad&b=<hex>&secs= (2026-11-08, shim/tools/melee-scan.sh): virtual-pad buttons held for a time (nvpad.m bits: 1 A, 2 B, 4 X,
+// 8 Y, 0x10 LB, 0x20 RB, 0x40 / 0x80 stick clicks, 0x400.. d-pad; 0x40000000 the left trigger, 0x80000000 the right trigger)
+static volatile uint32_t g_bot_testpad; static volatile double g_bot_testpad_until;
 static int g_bot_pick_on; static float g_bot_pick_pos[3];   // a weapon on the floor the walker walks to (the fighter's pickups)
 // line-of-sight results per enemy (the fighter checks the nearest few in turn and prefers one it can see)
 typedef struct { uint32_t h; int res; double t; } LosEnt; static LosEnt g_lost[16];
@@ -173,6 +176,9 @@ static void bot_on_update(uint64_t* a) { bot_write((uint32_t)a[3]); }        // 
 // the builder writes the walker's values into the record it is about to pack: the server gets them like a player's input.
 // NHOOK_BOT_NOPKT=1 = off (the old: moves local only). NHOOK_BOT_PKTBTN=<hex> ORs bits into record +8 (tests).
 static volatile unsigned long g_bot_pkt_n; static volatile uint32_t g_bot_pkt_btn8, g_bot_pkt_btn2c;
+// do=botpkt&b8=<hex>&b2c=<hex>&secs= (2026-11-08, melee-scan.py --packet): those bits ORed into the packed record for a time --
+// the packet carries only +8 bits 0-2, 11, 14 and +0x2c's 7 bits, so the melee bit is among them (no pad button meleed)
+static volatile uint32_t g_bot_tpk8, g_bot_tpk2c; static volatile double g_bot_tpk_until;
 static void bot_on_abuild(uint64_t* ctx) {
     uint8_t* act = (uint8_t*)(uintptr_t)ctx[2]; if (!act || !g_bot_out || g_hc_off[HC_BOT]) return; g_bot_pkt_n++;
     { static int told; if (!told) { told = 1; uint64_t blk = tls_block(), rec = 0; if (blk) hb_read(blk + 0xC0, &rec, 8);
@@ -181,8 +187,9 @@ static void bot_on_abuild(uint64_t* ctx) {
     if (o & 1) { *(float*)(act + 0x10) = g_bot_yaw; *(float*)(act + 0x14) = g_bot_pitch; }
     if (o & 2) { *(float*)(act + 0x18) = g_bot_tx; *(float*)(act + 0x1c) = g_bot_ty; }
     static int extra = -1; static uint32_t xb; if (extra < 0) { const char* e = getenv("NHOOK_BOT_PKTBTN"); extra = e != 0; xb = e ? (uint32_t)strtoul(e, 0, 16) : 0; }
-    uint32_t b8 = g_bot_pkt_btn8 | (extra ? xb : 0); if (b8) *(uint64_t*)(act + 8) |= b8;
-    if (g_bot_pkt_btn2c) *(act + 0x2c) |= (uint8_t)g_bot_pkt_btn2c; }
+    int tpk = g_bot_tpk_until > 0 && mono_s() < g_bot_tpk_until;
+    uint32_t b8 = g_bot_pkt_btn8 | (extra ? xb : 0) | (tpk ? g_bot_tpk8 : 0); if (b8) *(uint64_t*)(act + 8) |= b8;
+    uint32_t b2c = g_bot_pkt_btn2c | (tpk ? g_bot_tpk2c : 0); if (b2c) *(act + 0x2c) |= (uint8_t)b2c; }
 static int bot_hook_install(void) {
     if (g_bot_hook >= 0) return g_bot_hook;
     { static int done; if (!done && !getenv("NHOOK_BOT_NOPKT")) { done = 1; uint64_t a = branch_target_of(0x50fb8);
@@ -625,7 +632,8 @@ static void bot_step_body(void) {
       if (fo) { yaw = fy / 57.29578f; if (hp) pitch = fp / 57.29578f; out |= 1; } }   // NHOOK_BOT_FACE (above)
     g_bot_yaw = yaw; g_bot_pitch = pitch; g_bot_tx = tx; g_bot_ty = ty; g_bot_out = out;
     // the virtual controller: left stick = the throttle (y forward, x right = -left), A = jump, right trigger = fire
-    bot_pad(-ty, tx, g_bot_trig ? 1.0f : 0.0f, (((out & 4) && (g_bot_btn & g_bot_jump)) ? 1u : 0u) | (fbtn & 0xFFFF) | ((fbtn & 0x10000) ? 0x40000000u : 0));
+    { uint32_t tp = g_bot_testpad && now < g_bot_testpad_until ? g_bot_testpad : 0;   // (do=botpad)
+      bot_pad(-ty, tx, (g_bot_trig || (tp & 0x80000000u)) ? 1.0f : 0.0f, (((out & 4) && (g_bot_btn & g_bot_jump)) ? 1u : 0u) | (fbtn & 0xFFFF) | ((fbtn & 0x10000) ? 0x40000000u : 0) | (tp & 0x4000FFFFu)); }
     if (!(spar && g_bot_err >= 0)) g_bot_fire = 0;
 }
 static void* bot_thread(void* p) { (void)p; pthread_setname_np("shim-bot"); for (;;) { usleep(33000); bot_step(); } return 0; }
@@ -644,6 +652,11 @@ static void bot_init(void) {   // launch switches (nstats_start)
     if (g_bot_spar || g_nav_mode_rt > 0 || getenv("NHOOK_BOT_THROTTLE") || getenv("NHOOK_BOT_BTNSCAN") || getenv("NHOOK_BOT_FACE") || getenv("NHOOK_BOT_HOLDBTN")) bot_start(); }
 static int bot_control(const char* act, const char* qs) {   // POST do=spar&on=0|1, do=walk&mode=off|roam|enemy|x,y,z|vehicle:<name>, do=botbtn&bits=<hex>&secs=
     if (!bot_allowed()) return 0;
+    if (!strcmp(act, "botpkt")) { const char* a = strstr(qs, "b8="), * c = strstr(qs, "b2c="), * t = strstr(qs, "secs=");
+        g_bot_tpk8 = a ? (uint32_t)strtoul(a + 3, 0, 16) : 0; g_bot_tpk2c = c ? (uint32_t)strtoul(c + 4, 0, 16) : 0;
+        g_bot_tpk_until = mono_s() + (t ? strtod(t + 5, 0) : 0.3); bot_start(); return 1; }
+    if (!strcmp(act, "botpad")) { const char* b = strstr(qs, "b="), * t = strstr(qs, "secs="); if (!b) return 0;
+        g_bot_testpad = (uint32_t)strtoul(b + 2, 0, 16); g_bot_testpad_until = mono_s() + (t ? strtod(t + 5, 0) : 0.3); bot_start(); return 1; }
     if (!strcmp(act, "botbtn")) { const char* b = strstr(qs, "bits="), * t = strstr(qs, "secs="); if (!b) return 0;
         g_bot_testbtn = strtoull(b + 5, 0, 16); g_bot_testbtn_until = mono_s() + (t ? strtod(t + 5, 0) : 1.0); bot_start(); return 1; }
     if (!strcmp(act, "walk") && !bot_walk_ok()) return 0;   // (a joined client: the server decides its moves)

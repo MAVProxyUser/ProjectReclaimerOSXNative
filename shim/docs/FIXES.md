@@ -3206,6 +3206,18 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   does not reach the server, or is not in the control packet the walker's packet hook passes on (halo3+0x50fb8 packet "A": button
   bits 0-2, 11, 14 + 7 more at +0x2c). Next: a button scan on our local server -- one walker beside a standing one, each pad
   button and each control-record bit pressed alone for 0.3 s, the standing one's shield read from the server's stats.
+  FROM BEHIND (21:10; melee-model.py, the user: "especially if the opponent's back is to it"): each melee kill's attacker angle off
+  the victim's LOOK direction (the recordings' yaw = unit +0x1a0; behind = over 110 deg): 19% of melee kills come from behind (sword
+  8%), half of those on a shield of half or more (assassinations); they close in from 3.3 units (p75, 1 s before). Opportunities:
+  every 0.5 s, an enemy within 5 units looking away from a player (one per pair per 3 s), taken = that player's melee kill of it
+  within 3 s: within 1.5 units 1,419 times, taken 20.4%; 1.5-3 units 5,096, 5.5%; 3-5 units 19,265, 3.0% -- players miss four of
+  five backstabs at arm's length. melee.json walker.back_rush_from (3.31). NovObj.aim (noverlay.c): a unit's look direction for
+  the walker. THE SCAN (shim/tools/melee-scan.py; do=botpad = virtual-pad buttons held for a time, do=botpkt = bits ORed into the
+  packed control record -- packet "A" carries only action +8 bits 0-2, 11, 14 and +0x2c's 7 bits): on our server, A teleported
+  1 unit beside B (tpnext), A's sparring aim on B (0.0 deg error at 1.0 unit), each input 0.3 s, B's shield from the server's
+  stats: all 13 pad buttons x2, all 12 packet bits x2 -- no damage. BUT the positive control (--no-pads --bits 19: the fire
+  bit) did no damage either: the measurement itself is broken (B's server-side shield / A's position or fire in that setup), so
+  those negatives prove nothing yet. Being fixed next.
 - **A walker no longer stands still going for a weapon it cannot reach** (2026-11-08 20:20; nbot.c pickups) — WHY: in a melee test
   battle one walker stood the whole 3 minutes logging "going for BATTLE RIFLE (8.1 units)" (moved 0 units): a pickup target was only
   marked tried once reached. LOGIC: a target that brings no progress (0.5 units closer) in 6 s is given up and marked tried ("gave up
