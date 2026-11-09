@@ -3272,6 +3272,16 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   a running battle, at every round end (our server's in_match true -> false) walker-coach.py round + match-study.py, then each
   walker's game restarted headless with its new knobs and the newest build (they rejoin in the lobby; the user's game and the
   server stay).
+- **Walkers say when they decide to camp** (2026-11-09 01:30; nbot.c bot_camp_tick / camp_say_thread) — WHY: the user: "can you have
+  the walkers send a chat message when they *decide* to camp, and wait for a user. just send a chat message that says i'm camping...".
+  The walkers had no camping decision of their own (nothing named camp in the code): their standing still was the levels-apart hold
+  of the high ground (a choice) or being stuck / fighting at arm's length (not). LOGIC: camping = the throttle the walker CHOSE is
+  under 0.1 for 2 s with no fight in sight and a path driving it (a stuck walker still pushes its throttle, so it never counts) ->
+  "[camp] decided to camp (<why>)" in its log and, at most once every 30 s, "<nickname>: i'm camping..." in everyone's chat as a
+  [Server] line: our server's RCON say, run as `<the app> --rcon 127.0.0.1:49190 <password> say <text>` on its own thread with a bare
+  environment (no DYLD_*), the password from test-dedicated/rcon-password.txt. Real player chat from the walker needs the app's chat
+  send path (not found yet). Checked: the same command in the same environment put "[SERVER] walkers: camping announcements on" in
+  the user's game. NHOOK_BOT_CAMPCHAT=0 = off; NHOOK_CHAT_RCON=<host:port>, NHOOK_CHAT_RCON_PWFILE=<file>.
 - **Melee is bit 5; walkers stop climbing onto the enemy at arm's length** (2026-11-09 01:15; nbot.c bot_meleebits, the fight move's
   ARM'S LENGTH block, the stuck test, g_bot_empty) — WHY: the user, Pit FFA: "if i stand still they'll try to walk over me and get stuck
   jumping not shooting or meleeing", "it's not actually meleeing though", "fourth and third are standing around ... all the logic locked

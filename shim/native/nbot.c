@@ -433,6 +433,42 @@ static void shadow_log(double now, const NovObj* o, const NovObj* t, float tdist
     g_sh_tgt = t ? t->handle : 0; g_sh_d = tdist; g_sh_fire = g_bot_trig; g_sh_t = now; }
 static void bot_step_body(void);
 static void bot_step(void) { g_pad_written = 0; bot_step_body(); if (g_vpad_on && !g_pad_written) nh_vpad_set(0, 0, 0, 0, 0, 0, 0); }   // (idle: the pad let go)
+// CAMPING (2026-11-09, the user: "can you have the walkers send a chat message when they *decide* to camp, and wait for a user. just
+// send a chat message that says i'm camping..."). Camping = the walker's OWN decision is to stand: the throttle it chose is under 0.1
+// (a stuck walker is still trying to walk, so being stuck never counts; neither does a fight in sight, nor a step without a path) for
+// 2 s -- holding the high ground over an enemy below is the main case. One line a spell, at most one every 30 s: "<nickname>: i'm
+// camping..." as a [Server] line through our server's RCON say (the app's own player-chat send is not found yet), from a spawned
+// `<this app> --rcon <addr> <password> say <text>` on its own thread (no DYLD_* passed on). NHOOK_BOT_CAMPCHAT=0 = off;
+// NHOOK_CHAT_RCON=<host:port> (default 127.0.0.1:49190: our server), NHOOK_CHAT_RCON_PWFILE (default
+// ReclaimerMac/native/test-dedicated/rcon-password.txt). Every decision is logged ([camp]) whether or not the line goes out.
+static void* camp_say_thread(void* a) {
+    char* msg = a; char exe[1024]; uint32_t n = sizeof exe; char pw[128] = "", pfd[1024]; const char* home = getenv("HOME") ? getenv("HOME") : "/tmp";
+    const char* pf = getenv("NHOOK_CHAT_RCON_PWFILE"); if (!pf) { snprintf(pfd, sizeof pfd, "%s/Library/Application Support/ReclaimerMac/native/test-dedicated/rcon-password.txt", home); pf = pfd; }
+    FILE* f = fopen(pf, "r"); if (f) { if (fgets(pw, sizeof pw, f)) pw[strcspn(pw, "\r\n")] = 0; fclose(f); }
+    if (!pw[0] || _NSGetExecutablePath(exe, &n) != 0) { nlog("[nhook] [camp] no RCON password file or no app path: \"%s\" stays in this log", msg); free(msg); return 0; }
+    const char* addr = getenv("NHOOK_CHAT_RCON"); if (!addr) addr = "127.0.0.1:49190";
+    char* argv[] = {exe, "--rcon", (char*)addr, pw, "say", msg, 0}; char he[1100]; snprintf(he, sizeof he, "HOME=%s", home);
+    char* envp[] = {he, "PATH=/usr/bin:/bin:/usr/sbin:/sbin", 0};
+    posix_spawn_file_actions_t fa; posix_spawn_file_actions_init(&fa);
+    posix_spawn_file_actions_addopen(&fa, 1, "/dev/null", O_WRONLY, 0); posix_spawn_file_actions_addopen(&fa, 2, "/dev/null", O_WRONLY, 0);
+    pid_t pid; int rc = posix_spawn(&pid, exe, &fa, 0, argv, envp); posix_spawn_file_actions_destroy(&fa);
+    if (rc == 0) { int st = 0; waitpid(pid, &st, 0); nlog("[nhook] [camp] said \"%s\" (rcon exit %d)", msg, WIFEXITED(st) ? WEXITSTATUS(st) : -1); }
+    else nlog("[nhook] [camp] could not run the app's --rcon: %s", strerror(rc));
+    free(msg); return 0; }
+static void bot_camp_tick(double now, float tx, float ty, int out, int engaged, int hold_high) {
+    static int off = -1; if (off < 0) { const char* e = getenv("NHOOK_BOT_CAMPCHAT"); off = e && !strcmp(e, "0"); }
+    static double tlast, tstill, tsaid = -1e9; static int spell;
+    if (now - tlast > 0.5) { tstill = 0; spell = 0; }   // (steps skipped: dead, in the lobby)
+    tlast = now;
+    if (!((out & 2) && fabsf(tx) < 0.1f && fabsf(ty) < 0.1f && !engaged)) { tstill = 0; spell = 0; return; }
+    if (tstill == 0) tstill = now;
+    if (spell || now - tstill < 2.0) return;
+    spell = 1; int say = !off && now - tsaid >= 30.0;
+    nlog("[nhook] [camp] decided to camp (%s) for 2 s%s", hold_high ? "holding the high ground over an enemy below" : "standing by choice, no enemy in sight",
+         say ? ": saying so" : off ? "" : " (said so under 30 s ago)");
+    if (!say) return; tsaid = now;
+    char* msg = malloc(160); if (!msg) return; snprintf(msg, 160, "%s: i'm camping...", g_nick[0] ? g_nick : "walker");
+    pthread_t th; if (pthread_create(&th, 0, camp_say_thread, msg) == 0) pthread_detach(th); else free(msg); }
 static void bot_step_body(void) {
     double now = mono_s(); int spar = g_bot_spar, mode = bot_walk_ok() ? nav_mode() : 0;
     static int diag0 = -1; if (diag0 < 0) diag0 = getenv("NHOOK_BOT_THROTTLE") || getenv("NHOOK_BOT_BTNSCAN") || getenv("NHOOK_BOT_FACE") || getenv("NHOOK_BOT_HOLDBTN");
@@ -813,6 +849,7 @@ static void bot_step_body(void) {
       if (fo) { yaw = fy / 57.29578f; if (hp) pitch = fp / 57.29578f; out |= 1; } }   // NHOOK_BOT_FACE (above)
     if (g_bot_shadow) { g_sh_yaw = yaw; g_sh_pitch = pitch; g_sh_aim_ok = 1; shadow_log(now, o, have_tg ? &ftg : 0, tdist, engaged, yaw, pitch, tx, ty, yaw0, pitch0, rec); g_bot_out = 0; g_bot_btn = 0; return; }   // (decided, never published)
     g_bot_yaw = yaw; g_bot_pitch = pitch; g_bot_tx = tx; g_bot_ty = ty; g_bot_out = out;
+    bot_camp_tick(now, tx, ty, out, engaged, fight && now - g_bot_hold_high < 0.3);   // (camping: a chat line, above)
     // the virtual controller: left stick = the throttle (y forward, x right = -left), A = jump, right trigger = fire
     { uint32_t tp = g_bot_testpad && now < g_bot_testpad_until ? g_bot_testpad : 0;   // (do=botpad)
       bot_pad(-ty, tx, (g_bot_trig || (tp & 0x80000000u)) ? 1.0f : 0.0f, (((out & 4) && (g_bot_btn & g_bot_jump)) ? 1u : 0u) | (fbtn & 0xFFFF) | ((fbtn & 0x10000) ? 0x40000000u : 0) | (tp & 0x4000FFFFu)); }
