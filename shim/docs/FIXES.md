@@ -3448,6 +3448,12 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   brain is refused by a v2 body and the other way round: rebuild both). Lead latency = rtt x NHOOK_BOT_LEAD_RTT (1.25 / 1000 -- 0.08 s
   at 64 ms, 0.18 s at 145 ms); a NHOOK_BOT_LEAD_LAT in the live file still wins. A review's kills = the scoreboard's since the window
   began (the old count when the body has none); the review line gives the ping.
+- **No brain update without its lesson** (2026-11-09 18:05; shim/native/build.sh) — WHY: the user: "every update should describe its
+  lesson" -- builds had gone out carrying the previous brain's lesson (the SWAT text on the island / unstick brains). LOGIC: build.sh
+  hashes the brain's sources (native/*.c *.h, src/nav.c, src/h3maps.c) and native/brain-lesson.txt; when the code changed since the last
+  brain build and the lesson did not (or it is empty), the BRAIN is not built (the body still is; the walker keeps its brain): "NO BRAIN
+  BUILT -- ... write this update's lesson". A rebuild of unchanged code needs nothing. BRAIN_LESSON_SAME=1 builds anyway, marked
+  "same_lesson" in brain-lessons.jsonl. State: shim/build/brain-state.txt. Tested: a one-line change refused, reverted -> built.
 - **The Brain tab confirms every new brain; quiet windows are revisions too** (2026-11-09 18:00; nbot.c nh_brain_step, nbot_goals.c
   brain_review, shim/tools/brain-monitor.py brain_info, workboard.py "Brain loads") — WHY: the user: "how come the #brain log doesn't
   indicate a new brain loaded any more? it just says some stuff, but doesn't confirm new brain" -- the tab took the loaded build from
