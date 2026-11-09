@@ -89,6 +89,32 @@ static int bot_allowed(void) {
     static int t = -1; if (t < 0) { const char* p = getenv("RECLAIMER_PROFILE_DIR"); t = p && *p && !getenv("NHOOK_NO_BOT"); }
     return (t && bot_private_addr(g_srv_addr)) || bot_owner_ok(); }
 
+// LIVE KNOBS (2026-11-09, the user: "fix the walker code so it can do a hot launch of its learning model and not lose connection"):
+// the walker's tunables come from <battles>/live-knobs/<nickname>.json (NHOOK_KNOB_FILE) while it holds them -- {"NHOOK_BOT_NOISE": 0.9,
+// ...}, re-read within a second of a change -- else from the launch environment (a knob taken out of the file goes back to it). The
+// models (walker-model.json, engage-model.json, melee.json) are re-read when their files change (bot_models_tick). No restart: the
+// walker keeps its place in the game. [knobs] log lines.
+typedef struct { char n[48]; float v; } LiveKnob; static LiveKnob g_lk[64]; static int g_nlk;
+static const char* lk_path(void) { static char p[1100]; const char* e = getenv("NHOOK_KNOB_FILE");
+    if (e && *e) return e;
+    snprintf(p, sizeof p, "%s/Library/Application Support/ReclaimerMac/battles/live-knobs/%s.json", getenv("HOME") ? getenv("HOME") : "/tmp", g_nick[0] ? g_nick : "walker"); return p; }
+static void lk_tick(void) {
+    static double t; double now = mono_s(); if (now - t < 1.0) return; t = now;
+    static time_t mt; static off_t sz; static int had; struct stat st; const char* p = lk_path();
+    if (stat(p, &st) != 0) { if (had) { had = 0; g_nlk = 0; mt = 0; nlog("[nhook] [knobs] %s gone: the launch values again", p); } return; }
+    if (had && st.st_mtime == mt && st.st_size == sz) return;
+    FILE* f = fopen(p, "r"); if (!f) return; char b[8192]; size_t n = fread(b, 1, sizeof b - 1, f); fclose(f); b[n] = 0;
+    LiveKnob k[64]; int nk = 0; const char* q = b; char list[600]; int lq = 0; list[0] = 0;
+    while (nk < 64 && (q = strchr(q, '"'))) { const char* e = strchr(q + 1, '"'); if (!e) break; size_t L = (size_t)(e - q - 1);
+        const char* c = e + 1; while (*c == ' ' || *c == ':' || *c == '\t') c++; char* end; float v = strtof(c, &end);
+        if (end != c && L > 0 && L < sizeof k[0].n) { memcpy(k[nk].n, q + 1, L); k[nk].n[L] = 0; k[nk].v = v;
+            if (lq < (int)sizeof list - 60) lq += snprintf(list + lq, sizeof list - (size_t)lq, "%s%s=%.3g", nk ? " " : "", k[nk].n + (strncmp(k[nk].n, "NHOOK_BOT_", 10) ? 0 : 10), v); nk++; }
+        q = end != c ? end : e + 1; }
+    memcpy(g_lk, k, sizeof k); g_nlk = nk; mt = st.st_mtime; sz = st.st_size; had = 1;
+    nlog("[nhook] [knobs] live from %s: %s", p, nk ? list : "(none)"); }
+static int lk_get(const char* n, float* v) { for (int i = 0; i < g_nlk; i++) if (!strcmp(g_lk[i].n, n)) { *v = g_lk[i].v; return 1; } return 0; }
+static void lk_over(float* v, const char* n) { float x; if (lk_get(n, &x)) *v = x; }
+
 // halo3's control record of local player 0 (engine thread)
 // ---- the fighter (2026-11-08, NHOOK_BOT_FIGHT=1; the user: "make 3-4 walkers have a battle ... learn to mimic actual players"):
 // the walker's numbers come from real players (shim/tools/walker-model.py over match-recorder.py's recordings: NHOOK_BOT_MODEL,
@@ -99,8 +125,9 @@ typedef struct { float dist_p25, dist_med, dist_p75, strafe_switch, aim_err, rea
 static BotModel g_bm = {5.8f, 12.5f, 15.7f, 1.1f, 4.0f, 1.0f, 2.1f, 0.9f, 0};
 static float bm_num(const char* txt, const char* key, float d) { char k[64]; snprintf(k, sizeof k, "\"%s\":", key); const char* p = strstr(txt, k);
     if (!p) return d; p += strlen(k); while (*p == ' ') p++; if (!strncmp(p, "null", 4)) return d; return strtof(p, 0); }
+static int g_bm_done;   // (bot_models_tick clears it when walker-model.json changes)
 static void bm_load(void) {
-    static int done; if (done) return; done = 1; char path[1024]; const char* e = getenv("NHOOK_BOT_MODEL"), * h = getenv("HOME");
+    if (g_bm_done) return; g_bm_done = 1; char path[1024]; const char* e = getenv("NHOOK_BOT_MODEL"), * h = getenv("HOME");
     if (e && *e) snprintf(path, sizeof path, "%s", e); else snprintf(path, sizeof path, "%s/Library/Application Support/ReclaimerMac/tracks/walker-model.json", h ? h : "");
     FILE* f = fopen(path, "r"); if (!f) { nlog("[nhook] [fight] no model at %s: built-in numbers", path); return; }
     static char txt[1 << 16]; size_t n = fread(txt, 1, sizeof txt - 1, f); fclose(f); txt[n] = 0;
@@ -313,6 +340,7 @@ static int bot_units(NovObj* o, int max) {
     pthread_mutex_lock(&g_nov_collect_mx); g_nov_units_only = 1; int n = nov_collect(o, max); g_nov_units_only = 0; pthread_mutex_unlock(&g_nov_collect_mx);
     return n; }
 static int bot_enemy(const NovObj* me, const NovObj* t) {   // the overlay's friend-or-foe (Infection sides, else teams; FFA: everyone)
+    if (g_follow_unit != 0xFFFFFFFFu && t->handle == g_follow_unit) return 0;   // (NHOOK_BOT_FOLLOW: the player it shadows is its friend, FFA too)
     if (g_nov_sides_on) { int a = nov_side_of(me->handle), b = nov_side_of(t->handle); if (a >= 0 && b >= 0) return a != b; }
     return me->team < 0 || t->team != me->team; }
 static float bot_wrap(float a) { while (a > 3.14159265f) a -= 6.2831853f; while (a < -3.14159265f) a += 6.2831853f; return a; }
@@ -432,6 +460,18 @@ static int bot_pull_weapon(const char* w) {
     if (!w) return 0; for (int i = 0; k[i]; i++) if (strstr(w, k[i])) return 1; return 0; }
 static int g_bot_pull, g_bot_trig; static double g_bot_fire_t0;   // (the held weapon acts on a pull; when this string of fire began)
 static double g_bot_hold_high, g_bot_hold_last;   // (levels apart: holding the high ground until; the last levels-apart step)
+// GRENADE OUTCOMES (2026-11-09, the user: "this is the first place to try to hone the predictive nades"): each throw notes its target and
+// the target's shield + health; 1.6 s later "[nade] <target> at D units, lead L s, arc A rad: hit / missed / KILLED / target gone" --
+// follow-study.py counts them per window and steps the live grenade-lead knobs (NHOOK_BOT_NADE_*) toward the best hit rate
+static float g_nade_lead, g_nade_arc, g_nade_hp, g_nade_d; static double g_nade_t; static uint32_t g_nade_tgt; static int g_nade_pending;
+static void nade_note(double now, const NovObj* t, float d) { g_nade_t = now; g_nade_tgt = t->handle; g_nade_d = d; g_nade_pending = 1;
+    g_nade_hp = (t->shield > 0 ? t->shield : 0) + (t->health > 0 ? t->health : 0); }
+static void nade_check(double now, const NovObj* objs, int n) {
+    if (!g_nade_pending || now - g_nade_t < 1.6) return; g_nade_pending = 0; const NovObj* t = 0;
+    for (int i = 0; i < n; i++) if (objs[i].handle == g_nade_tgt) { t = &objs[i]; break; }
+    float hp = t && !t->dead ? (t->shield > 0 ? t->shield : 0) + (t->health > 0 ? t->health : 0) : 0;
+    const char* r = !t ? "target gone" : t->dead ? "KILLED" : g_nade_hp - hp > 0.3f ? "hit" : "missed";
+    nlog("[nhook] [nade] %08x at %.1f units, lead %.2f s, arc %.2f rad: %s (shield+health %.2f -> %.2f)", g_nade_tgt, g_nade_d, g_nade_lead, g_nade_arc, r, g_nade_hp, hp); }
 static int g_bot_empty;   // (an empty magazine with the enemy in sight: grenade + rush for the beatdown)
 // the virtual pad's melee and act / pick-up / reload buttons (nvpad.m bits: 1 B, 0x20 RB). 2026-11-08: the walkers pressed B to
 // melee and held RB to pick up -- Halo 3's own layout -- but the app's layout for these profiles is Bumper Jumper's (its own
@@ -652,8 +692,20 @@ static void ob_scan(double now, const NovObj* objs, int n, int me) {
     if (st != g_ob_state && bot_log()) nlog("[nhook] [ball] %s", st == 0 ? "no ball seen" : st == 1 ? "the ball is loose: going for it" : st == 2 ? "I carry the ball: running, melee only"
                                             : st == 3 ? "a teammate carries the ball: escorting" : "an enemy carries the ball: hunting the carrier");
     g_ob_state = st; }
+static void bot_models_tick(void) {   // (live knobs: the models re-read when their files change -- every 10 s a look at the files' times)
+    static double t; double now = mono_s(); if (now - t < 10.0) return; t = now; const char* h = getenv("HOME"); char p[1100]; struct stat st;
+    static time_t m1, m2, m3, m4;
+    snprintf(p, sizeof p, "%s/Library/Application Support/ReclaimerMac/tracks/walker-model.json", h ? h : "");
+    if (!getenv("NHOOK_BOT_MODEL") && stat(p, &st) == 0) { if (m1 && st.st_mtime != m1) { g_bm_done = 0; bm_load(); nlog("[nhook] [knobs] walker-model.json changed: re-read"); } m1 = st.st_mtime; }
+    snprintf(p, sizeof p, "%s/Library/Application Support/ReclaimerMac/tracks/engage-model.json", h ? h : "");
+    if (stat(p, &st) == 0) { if (m2 && st.st_mtime != m2) { g_eg_key[0] = 0; nlog("[nhook] [knobs] engage-model.json changed: re-read at the next step"); } m2 = st.st_mtime; }
+    snprintf(p, sizeof p, "%s/Library/Application Support/ReclaimerMac/tracks/maps", h ? h : "");
+    if (stat(p, &st) == 0) { if (m3 && st.st_mtime != m3) { g_eg_key[0] = 0; nlog("[nhook] [knobs] the per-map models changed: re-read at the next step"); } m3 = st.st_mtime; }
+    snprintf(p, sizeof p, "%s/Library/Application Support/ReclaimerMac/tracks/melee.json", h ? h : "");
+    if (stat(p, &st) == 0) { if (m4 && st.st_mtime != m4) { g_mel.loaded = 0; mel_load(); nlog("[nhook] [knobs] melee.json changed: re-read"); } m4 = st.st_mtime; } }
 static void bot_step_body(void) {
     double now = mono_s(); int spar = g_bot_spar, mode = bot_walk_ok() ? nav_mode() : 0;
+    lk_tick(); bot_models_tick();   // (live knobs and models: no restart)
     static int diag0 = -1; if (diag0 < 0) diag0 = getenv("NHOOK_BOT_THROTTLE") || getenv("NHOOK_BOT_BTNSCAN") || getenv("NHOOK_BOT_FACE") || getenv("NHOOK_BOT_HOLDBTN");
     int testb = g_bot_testbtn && now < g_bot_testbtn_until, diag = diag0 || testb;
     if ((!spar && !mode && !diag) || !(bot_allowed() || g_bot_shadow) || !g_gameplay_t0 || now - g_gameplay_t0 < 3.0) { g_bot_out = 0; g_nav_act = 0; g_bot_err = -1;
@@ -687,6 +739,7 @@ static void bot_step_body(void) {
         nlog("[nhook] [gunner] seated: %s (my unit %08x, the record's %08x, the player's %08x; seat %d, parent %08x %s)", seated ? "yes" : "no", objs[me].handle, meh, g_my_unit,
              objs[me].seat, objs[me].parent, pv ? hb_tag_name(pv->def) : "-"); } }
     honk_scan(now, objs, n, me);   // (02:35: finding the field a teammate's honk changes, above)
+    nade_check(now, objs, n);   // (the last grenade's outcome, above)
     if (seated && gun_on() && !g_bot_shadow && gun_seated(now, objs, n, me, cam, yaw0, pitch0)) { plen = 0; g_bot_err = -1; return; }   // (the gunner, above)
     if (me < 0 || objs[me].dead || seated) { g_bot_out = 0; g_nav_act = 0; plen = 0; g_bot_err = -1;   // dead, respawning or in a vehicle
         static char w[96]; snprintf(w, sizeof w, me < 0 ? "the record's unit %08x is none of the %d units seen" : objs[me].dead ? "dead" : "in a vehicle", meh, n); bot_idle(me < 0 ? w : objs[me].dead ? "dead" : "in a vehicle"); return; }
@@ -727,14 +780,17 @@ static void bot_step_body(void) {
     // tunables (shim/tools/walker-train.py evolves them): NHOOK_BOT_SKILL 0..1 (reaction + aim noise), NHOOK_BOT_DIST (x the players'
     // fighting distances), NHOOK_BOT_STRAFE (x strafe strength), NHOOK_BOT_SWITCH (x the strafe switch time), NHOOK_BOT_FIRE_EXTRA
     // (deg of aim slack when firing), NHOOK_BOT_RETREAT (back off below this shield), NHOOK_BOT_GREN (s between grenades)
-    static int fight = -1; static float skill = 0.5f, kdist = 1, kstrafe = 1, kswitch = 1, fextra = 1, retreat = 0.35f, gren = 9, backoff = 0.15f, press = 0.4f;
+    static int fight = -1; static float skill_0 = 0.5f, kdist_0 = 1, kstrafe_0 = 1, kswitch_0 = 1, fextra_0 = 1, retreat_0 = 0.35f, gren_0 = 9, backoff_0 = 0.15f, press_0 = 0.4f;
     if (fight < 0) { const char* e = getenv("NHOOK_BOT_FIGHT"); fight = e && strcmp(e, "0");
         #define BKNOB(v, n) if (getenv(n)) v = strtof(getenv(n), 0)
-        BKNOB(skill, "NHOOK_BOT_SKILL"); BKNOB(kdist, "NHOOK_BOT_DIST"); BKNOB(kstrafe, "NHOOK_BOT_STRAFE"); BKNOB(kswitch, "NHOOK_BOT_SWITCH");
-        BKNOB(fextra, "NHOOK_BOT_FIRE_EXTRA"); BKNOB(retreat, "NHOOK_BOT_RETREAT"); BKNOB(gren, "NHOOK_BOT_GREN"); BKNOB(backoff, "NHOOK_BOT_BACKOFF"); BKNOB(press, "NHOOK_BOT_PRESS");
+        BKNOB(skill_0, "NHOOK_BOT_SKILL"); BKNOB(kdist_0, "NHOOK_BOT_DIST"); BKNOB(kstrafe_0, "NHOOK_BOT_STRAFE"); BKNOB(kswitch_0, "NHOOK_BOT_SWITCH");
+        BKNOB(fextra_0, "NHOOK_BOT_FIRE_EXTRA"); BKNOB(retreat_0, "NHOOK_BOT_RETREAT"); BKNOB(gren_0, "NHOOK_BOT_GREN"); BKNOB(backoff_0, "NHOOK_BOT_BACKOFF"); BKNOB(press_0, "NHOOK_BOT_PRESS");
         #undef BKNOB
         if (fight) { bm_load(); eg_load(); nlog("[nhook] [fight] on: skill %.2f, distance x%.2f, strafe x%.2f, switch x%.2f, fire slack %.1f deg, back off below shield %.2f (%.2f), press %.2f, grenades every %.0f s",
-                                     skill, kdist, kstrafe, kswitch, fextra, retreat, backoff, press, gren); } }
+                                     skill_0, kdist_0, kstrafe_0, kswitch_0, fextra_0, retreat_0, backoff_0, press_0, gren_0); } }
+    float skill = skill_0, kdist = kdist_0, kstrafe = kstrafe_0, kswitch = kswitch_0, fextra = fextra_0, retreat = retreat_0, gren = gren_0, backoff = backoff_0, press = press_0;   // (live knobs)
+    lk_over(&skill, "NHOOK_BOT_SKILL"); lk_over(&kdist, "NHOOK_BOT_DIST"); lk_over(&kstrafe, "NHOOK_BOT_STRAFE"); lk_over(&kswitch, "NHOOK_BOT_SWITCH"); lk_over(&fextra, "NHOOK_BOT_FIRE_EXTRA");
+    lk_over(&retreat, "NHOOK_BOT_RETREAT"); lk_over(&gren, "NHOOK_BOT_GREN"); lk_over(&backoff, "NHOOK_BOT_BACKOFF"); lk_over(&press, "NHOOK_BOT_PRESS");
     int engaged = 0; float ftx = 0, fty = 0; uint32_t fbtn = 0; g_bot_fighting = fight && spar;
     if (fight) { eg_load_for(g_st_curmap, g_trk_mode); wz_load(g_st_curmap); }   // (the models for this map and game: reloaded when either changes; the weapon zones)
     if (fight && spar && have_tg) {
@@ -758,12 +814,14 @@ static void bot_step_body(void) {
         int seen = tvis && now - tvis < 0.6;
         // (2026-11-08 walker-compare: walkers reacted in 0.42 s and aimed 2.8 deg off against the players' 1.08 s and 4.1 deg: the
         //  factors below bring skill 0.5 to the players' numbers -- skill 1 is still faster and steadier than they are)
-        static float rk = -1, t0r = -1; if (rk < 0) { const char* e = getenv("NHOOK_BOT_REACT"); rk = e ? (float)atof(e) : 1.6f; e = getenv("NHOOK_BOT_TURN0"); t0r = e ? (float)atof(e) : 0.73f; }
+        static float rk0 = -1, t0r0 = -1; if (rk0 < 0) { const char* e = getenv("NHOOK_BOT_REACT"); rk0 = e ? (float)atof(e) : 1.6f; e = getenv("NHOOK_BOT_TURN0"); t0r0 = e ? (float)atof(e) : 0.73f; }
+        float rk = rk0, t0r = t0r0; lk_over(&rk, "NHOOK_BOT_REACT"); lk_over(&t0r, "NHOOK_BOT_TURN0");   // (live knobs, above)
         // (07:50: walker-model's "reaction" = 30 deg -> 5 deg of aim, so the turn rate BEFORE the reaction time decides it: 1.5 rad/s
         //  measured 0.49-0.53 s against the players' 1.08 whatever the delay; NHOOK_BOT_TURN0 = that rate, NHOOK_BOT_REACT the delay factor)
         // NHOOK_BOT_NOISE: x the aim noise (2026-11-08 12:15: on Guardian the players' horizontal aim error while attacking is 6.8 deg,
         // the walkers' 3.8 -- lag and moving targets the walkers do not have; engage-compare.py)
-        static float nk = -1; if (nk < 0) { const char* e = getenv("NHOOK_BOT_NOISE"); nk = e ? strtof(e, 0) : 1.0f; }
+        static float nk0 = -1; if (nk0 < 0) { const char* e = getenv("NHOOK_BOT_NOISE"); nk0 = e ? strtof(e, 0) : 1.0f; }
+        float nk = nk0; lk_over(&nk, "NHOOK_BOT_NOISE");
         float react = g_bm.reaction * (1.25f - skill) * rk, noise = g_bm.aim_err * (1.25f - skill) * 1.6f * nk / 57.2958f;
         if (seen) {
             // aim: OU noise around the exact angles, turning at most 1.5 rad/s before the reaction time is up, 7 rad/s after
@@ -805,14 +863,14 @@ static void bot_step_body(void) {
                   static float mh = -1; if (mh < 0) { const char* e = getenv("NHOOK_BOT_MELEE_HOLD"); mh = e ? strtof(e, 0) : 0.3f; }
                   if (now - tmelee < mh) { fbtn |= bot_meleepad(); g_bot_melee_until = tmelee + mh; } }
               g_bot_pull = !nomel && bot_pull_weapon(g_inv.held); }
-            { static float fj = -1; if (fj < 0) { const char* e = getenv("NHOOK_BOT_FJUMP"); fj = e ? strtof(e, 0) : 0.0f; }   // jumps a minute in a fight (walker-coach.py: the winners')
+            { static float fj0 = -1; if (fj0 < 0) { const char* e = getenv("NHOOK_BOT_FJUMP"); fj0 = e ? strtof(e, 0) : 0.0f; } float fj = fj0; lk_over(&fj, "NHOOK_BOT_FJUMP");   // jumps a minute in a fight (walker-coach.py: the winners')
               if (fj > 0 && bot_rand01() < fj * (float)dt / 60.0f) g_fjump_until = now + 0.25; }
             { float gd0 = 6, gd1 = 16; static int gset = -1; static double gnext; if (gset < 0) gset = getenv("NHOOK_BOT_GREN") != 0;   // (the players' band and rate unless NHOOK_BOT_GREN is set)
               int pl = g_eg.on && g_eg.gren_ok; if (pl) { gd0 = g_eg.gren_d0; gd1 = g_eg.gren_d1; }
               // the next throw's time is drawn ONCE per throw (it was drawn every tick, so the shortest draw won: throws came early)
-              static float gx = -1; if (gx < 0) { const char* e = getenv("NHOOK_BOT_GRENX"); gx = e ? strtof(e, 0) : 1.0f; }   // (walker-coach.py: x the time between grenades)
+              static float gx0 = -1; if (gx0 < 0) { const char* e = getenv("NHOOK_BOT_GRENX"); gx0 = e ? strtof(e, 0) : 1.0f; } float gx = gx0; lk_over(&gx, "NHOOK_BOT_GRENX");   // (walker-coach.py: x the time between grenades)
               if (!gnext) gnext = now + gx * (pl && !gset ? g_eg.gren_every * (0.5f + bot_rand01()) : gren + 6 * bot_rand01());
-              if ((pl || gren > 0) && (g_inv.gren > 0 || !g_inv.held) && tdist > gd0 && tdist < gd1 && vis && now > gnext && now - tacq > react) { tgren = now;
+              if ((pl || gren > 0) && (g_inv.gren > 0 || !g_inv.held) && tdist > gd0 && tdist < gd1 && vis && now > gnext && now - tacq > react) { tgren = now; nade_note(now, &ftg, tdist);
                   gnext = now + gx * (pl && !gset ? g_eg.gren_every * (0.5f + bot_rand01()) : gren + 6 * bot_rand01()); } }
             // OUT OF AMMO (2026-11-08, the user: a walker went "click click click" right past him -- "never just walk past an enemy
             // without predictive grenade lay some shots, or a beat down! engage!"): an empty magazine (the ammo field) with the enemy
@@ -821,14 +879,17 @@ static void bot_step_body(void) {
               // (2026-11-09: the found "rounds loaded" field reads 0 for a fresh rifle in a player's game and 129 in the walkers' --
               //  not a magazine: "empty" only when the weapon has shown 8+ rounds there before)
               g_bot_empty = !ne && g_inv.ammo == 0 && g_inv.ammo_max >= 2 && g_inv.held && strcmp(g_inv.held_c ? g_inv.held_c : "", "melee");
-              if (g_bot_empty && vis && g_inv.gren > 0 && tdist > 3 && tdist < 16 && now - tgren > 1.2) { tgren = now;
+              if (g_bot_empty && vis && g_inv.gren > 0 && tdist > 3 && tdist < 16 && now - tgren > 1.2) { tgren = now; nade_note(now, &ftg, tdist);
                   if (bot_log()) nlog("[nhook] [fight] empty magazine: a grenade at %.1f units, then the beatdown", tdist); } }
             if (now - tgren < 0.15) { fbtn |= 0x10000;                                                                     // (left trigger: a grenade)
                 // the PREDICTIVE throw (same request): aimed where the target will be -- its velocity (units a tick, x30 a second) times
                 // the flight (0.4 s + distance / 10) -- and a little up for the arc (0.025 rad a unit, at most 0.4). NHOOK_BOT_NOLEAD=1 = off.
                 static int nl = -1; if (nl < 0) nl = getenv("NHOOK_BOT_NOLEAD") != 0;
-                if (!nl) { float lt = 0.4f + tdist / 10.0f, px = ftg.c[0] + ftg.vel[0] * 30 * lt - cam[0], py = ftg.c[1] + ftg.vel[1] * 30 * lt - cam[1], pz = ftg.c[2] - cam[2];
-                    float ly = atan2f(py, px), lp = atan2f(pz, sqrtf(px * px + py * py)) + fminf(0.4f, 0.025f * tdist), mxr = (float)dt * 7.0f;
+                if (!nl) { float n0 = 0.4f, npu = 0.1f, narc = 0.025f, nmax = 0.4f;   // (live knobs: NHOOK_BOT_NADE_T0 / _TPU s a unit / _ARC rad a unit / _ARCMAX -- follow-study.py hones them)
+                    lk_over(&n0, "NHOOK_BOT_NADE_T0"); lk_over(&npu, "NHOOK_BOT_NADE_TPU"); lk_over(&narc, "NHOOK_BOT_NADE_ARC"); lk_over(&nmax, "NHOOK_BOT_NADE_ARCMAX");
+                    float lt = n0 + tdist * npu, px = ftg.c[0] + ftg.vel[0] * 30 * lt - cam[0], py = ftg.c[1] + ftg.vel[1] * 30 * lt - cam[1], pz = ftg.c[2] - cam[2];
+                    g_nade_lead = lt; g_nade_arc = fminf(nmax, narc * tdist);
+                    float ly = atan2f(py, px), lp = atan2f(pz, sqrtf(px * px + py * py)) + fminf(nmax, narc * tdist), mxr = (float)dt * 7.0f;
                     float dyw = bot_wrap(ly - yaw0), dpt = lp - pitch0; yaw = yaw0 + (dyw > mxr ? mxr : dyw < -mxr ? -mxr : dyw); pitch = pitch0 + (dpt > mxr ? mxr : dpt < -mxr ? -mxr : dpt); out |= 1; } }
             if (tdist < 30) { engaged = 1;
                 // closing in: the players pressed in at ~0.8 units/s with shields up and only stopped (-0.03) on low shields; the walkers
@@ -842,11 +903,11 @@ static void bot_step_body(void) {
                 if (now > tswitch) { side = -side; tswitch = now + g_bm.strafe_switch * kswitch * (0.6f + 0.8f * bot_rand01()); }
                 float lat = side * fminf(1.0f, kstrafe * (0.25f + g_bm.strafe_rms / run));
                 if (g_eg.on && eg_move(wc, tdist, now, &el, &er)) {   // a real player's moves: across as recorded, toward / away pulled into the band
-                    static float lsc = -1; if (lsc < 0) { const char* e = getenv("NHOOK_BOT_LIBSCALE"); lsc = e ? strtof(e, 0) : 1.0f; }   // (the players' own moves: not the tactics' strafe scale)
+                    static float lsc0 = -1; if (lsc0 < 0) { const char* e = getenv("NHOOK_BOT_LIBSCALE"); lsc0 = e ? strtof(e, 0) : 1.0f; } float lsc = lsc0; lk_over(&lsc, "NHOOK_BOT_LIBSCALE");   // (the players' own moves: not the tactics' strafe scale)
                     lat = fmaxf(-1.0f, fminf(1.0f, lsc * el / run));
                     // pulled in when beyond the band, never pushed back inside it: the players close in at 1.3 units/s with shields up
                     // on Guardian (engage-compare.py; the push-back made the walkers hover at the band's near edge)
-                    static float rsc = -1; if (rsc < 0) { const char* e = getenv("NHOOK_BOT_RADSCALE"); rsc = e ? strtof(e, 0) : 1.0f; }   // (walker-coach.py: x the replayed closing / backing off)
+                    static float rsc0 = -1; if (rsc0 < 0) { const char* e = getenv("NHOOK_BOT_RADSCALE"); rsc0 = e ? strtof(e, 0) : 1.0f; } float rsc = rsc0; lk_over(&rsc, "NHOOK_BOT_RADSCALE");   // (walker-coach.py: x the replayed closing / backing off)
                     float pull = tdist > p75 * kdist ? 0.6f : 0.0f; r = fmaxf(-1.0f, fminf(1.0f, rsc * er / run + pull));
                     if (o->shield < retreat && o->shield >= 0) r = -backoff;
                     if (g_bot_camo_hold) r = 0.9f; }
@@ -957,13 +1018,19 @@ static void bot_step_body(void) {
     // pair leads, the other follows). Beyond 6 units the pathfinder takes it there (replanned every second). NHOOK_BOT_NOWING=1 = off
     { static int nw = -1; if (nw < 0) nw = getenv("NHOOK_BOT_NOWING") != 0; static int was; static double tw;
       int wing = 0; float lp[3] = {0, 0, 0};
-      if (!nw && !gun_go && !engaged && !g_bot_shadow) { int li = -1; float bd = 1e30f; int human = 0;
-          for (int i = 0; i < n; i++) { const NovObj* t = &objs[i]; if (i == me || t->type || t->dead || bot_enemy(o, t)) continue; int hu = 0;
+      // (02:10, the user, in an FFA public game: "have it try to shadow me and be my near by wingman ... it should always find me":
+      //  NHOOK_BOT_FOLLOW names the leader -- a friend in any game type -- followed beyond 5 units until within 3, and even in a fight
+      //  once it is 12+ units away)
+      int fol_far = 0; if (g_follow_unit != 0xFFFFFFFFu) for (int i = 0; i < n; i++) if (objs[i].handle == g_follow_unit && !objs[i].dead) {
+          float fx = objs[i].c[0] - o->c[0], fy = objs[i].c[1] - o->c[1]; fol_far = fx * fx + fy * fy > 144.0f; }
+      if (!nw && !gun_go && (!engaged || fol_far) && !g_bot_shadow) { int li = -1; float bd = 1e30f; int human = 0, fol = 0;
+          for (int i = 0; i < n; i++) { const NovObj* t = &objs[i]; if (i == me || t->type || t->dead || bot_enemy(o, t)) continue; int hu = t->handle == g_follow_unit;
+              if (hu) { float fx = t->c[0] - o->c[0], fy = t->c[1] - o->c[1]; li = i; bd = fx * fx + fy * fy; human = 1; fol = 1; break; }
               for (int k = 0; k < g_human_n && k < 8; k++) if (g_human_unit[k] == t->handle) hu = 1;
               float dx = t->c[0] - o->c[0], dy = t->c[1] - o->c[1], d = dx * dx + dy * dy;
               if (hu && (!human || d < bd)) { human = 1; bd = d; li = i; }
               else if (!human && !hu && t->handle < o->handle && (li < 0 || t->handle < objs[li].handle)) { li = i; bd = d; } }
-          if (li >= 0 && bd > (was ? 16.0f : 36.0f)) { wing = 1; memcpy(lp, objs[li].c, 12);   // (follow beyond 6 units, until within 4)
+          if (li >= 0 && bd > (fol ? (was ? 9.0f : 25.0f) : (was ? 16.0f : 36.0f))) { wing = 1; memcpy(lp, objs[li].c, 12);   // (follow beyond 6 units, until within 4; the named leader 5 / 3)
               static double tlog; if (!was || now - tw > 1.0) { tw = now; goal = -1; if (!was && now - tlog > 10.0) { tlog = now; nlog("[nhook] [wing] %.0f units from my %s: closing up", sqrtf(bd), human ? "human teammate" : "lead walker"); } } } }
       if (wing) { mode = 3; memcpy(g_bot_pt, lp, 12); g_bot_pt[2] -= 0.35f; } else if (was) goal = -1;
       was = wing; }

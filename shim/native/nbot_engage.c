@@ -163,7 +163,7 @@ typedef struct { uint32_t h; float vit; double hurt_t, att_t, seen_tgt, asked_t;
 // players' delay (NHOOK_BOT_TURNX, default 0.5), and a new target that is shooting at the walker gets NHOOK_BOT_ATTBONUS (6) on
 // its score -- enough to outweigh being behind (off aim -7.74 at 180 deg). NHOOK_BOT_HUMANLIKE=1 = the players' rules as before.
 static int eg_humanlike(void) { static int v = -1; if (v < 0) v = getenv("NHOOK_BOT_HUMANLIKE") != 0; return v; }
-static float eg_knob(const char* n, float d) { const char* e = getenv(n); return e ? strtof(e, 0) : d; }
+static float eg_knob(const char* n, float d) { float v; if (lk_get(n, &v)) return v; const char* e = getenv(n); return e ? strtof(e, 0) : d; }   // (live knobs first)
 static EgUnit g_egu[128]; static int g_negu;
 static volatile uint32_t g_eg_fast;   // a target taken on purpose (a second attacker after the players' delay): turned to at full speed
 static EgUnit* eg_unit(uint32_t h) { for (int i = 0; i < g_negu; i++) if (g_egu[i].h == h) return &g_egu[i];
@@ -251,8 +251,8 @@ static int eg_choose(const NovObj* objs, int n, int me, const float* cam, float 
         // an overshielded enemy (shield above 1): the players' attackers win 54% against one, 77% otherwise (engage-model.json
         // behaviour.powerups) -- half that logit as a penalty unless we have one too (choose the fight we would win)
         if (t->shield > 1.05f && o->shield <= 1.05f) s += 0.5f * g_eg.os_pen;
-        { static float ab = -1; if (ab < 0) ab = eg_humanlike() ? 0.0f : eg_knob("NHOOK_BOT_ATTBONUS", 6.0f); if (att) s += ab; }   // (coached: the one shooting at us)
-        { static float cb = -1; if (cb < 0) cb = eg_knob("NHOOK_BOT_BALLBONUS", 8.0f); if (carrier) s += cb; }   // (oddball: the enemy carrying the ball first)
+        { float ab = eg_humanlike() ? 0.0f : eg_knob("NHOOK_BOT_ATTBONUS", 6.0f); if (att) s += ab; }   // (coached: the one shooting at us)
+        { float cb = eg_knob("NHOOK_BOT_BALLBONUS", 8.0f); if (carrier) s += cb; }   // (oddball: the enemy carrying the ball first)
         if (nc2 < 64) { ci2[nc2] = i; cs2[nc2] = s; nc2++; }
         if (s > bs) { bs = s; bi = i; } }
     if (!pickbest && nc2 > 1) { float sum = 0; for (int k = 0; k < nc2; k++) { cs2[k] = expf(cs2[k] - bs); sum += cs2[k]; }

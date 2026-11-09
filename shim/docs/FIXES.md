@@ -3272,6 +3272,27 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   a running battle, at every round end (our server's in_match true -> false) walker-coach.py round + match-study.py, then each
   walker's game restarted headless with its new knobs and the newest build (they rejoin in the lobby; the user's game and the
   server stay).
+- **Live knobs and models (no reconnect), the walker shadows a named player, grenade honing, kills in the player panel** (2026-11-09
+  04:30; nbot.c lk_* / bot_models_tick / nade_note / nade_check / the WINGMAN leader, nbot_engage.c eg_knob, nhost.c + nstats.c
+  g_follow_unit, shim/tools/follow-study.py, walker-public.sh, stats_page.html) — WHY: the user, the walker struggling in a public FFA:
+  "have it try to shadow me and be my near by wingman. and update every 3 minutes what it learns. it should always find me"; "fix the
+  walker code so it can do a hot launch of its learning model and not lose connection"; "ensure the walker can reset its model
+  without leaving again!"; "this is the first place to try to hone the predictive nades"; "if we lost the slot... patiently wait to
+  rejoin"; "when you select a player... show their kills and deaths here too". LOGIC: LIVE KNOBS -- <battles>/live-knobs/<nickname>.json
+  (NHOOK_KNOB_FILE) is re-read within a second of a change and wins over the launch environment for the coached knobs (REACT, TURN0,
+  NOISE, FJUMP, GRENX, LIBSCALE, RADSCALE, SKILL, DIST, STRAFE, SWITCH, FIRE_EXTRA, RETREAT, GREN, BACKOFF, PRESS, every eg_knob:
+  ATTBONUS, BALLBONUS ...) and the new grenade-lead knobs NHOOK_BOT_NADE_T0 / _TPU / _ARC / _ARCMAX (were 0.4 s + 0.1 s a unit, 0.025 rad
+  a unit up to 0.4); a knob taken out returns to its launch value. MODELS -- walker-model.json, engage-model.json (+ tracks/maps/),
+  melee.json re-read when their files change (checked every 10 s). Verified in the public game: "[knobs] live from ..." and "melee.json
+  changed: re-read" with the walker still in it. (New CODE still needs a relaunch.) FOLLOW -- NHOOK_BOT_FOLLOW=<player name> (read at
+  launch from the profile, never stored): that player is never an enemy (any game type), is the wingman's leader before anyone,
+  followed beyond 5 units until within 3, and even mid-fight once 12+ units away. GRENADES -- each throw notes its target; 1.6 s later
+  "[nade] ... hit / missed / KILLED / target gone" (shield + health drop > 0.3 = hit); follow-study.py credits each window's throws to
+  the lead per unit then running and steps NHOOK_BOT_NADE_TPU over 0.06..0.14 (untried first, then the best hit rate, 1 in 4 random)
+  through the live knobs file. follow-study.py: every 3 minutes from the walker's own recording -- how close it shadowed (median, share
+  within 6 units, longest apart), the leader's and the walker's kills / deaths / accuracy / kill distances / weapons, lessons where
+  they differ. walker-public.sh: the disclosed walker on one owner-approved server, relaunched patiently (180 s to get in, a minute
+  out = rejoin, 30 s between tries). Stats page: the player panel shows Kills (+ assists) and K/D beside Deaths.
 - **A walker on an owner-approved public server, under a name that discloses it** (2026-11-09 04:00; nbot.c bot_owner_ok / bot_allowed,
   camp_say_thread) — WHY: the user asked the host of a public server whether a walker could join; the host agreed for that server. The
   user asked for a non-developer identity renamed "AIWalkerTest" for disclosure. (Earlier the same night a walker on another owner's

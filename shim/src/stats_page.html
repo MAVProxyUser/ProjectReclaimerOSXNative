@@ -559,7 +559,10 @@ function renderDet(){
    ['Weapon',E(p.weapon||'')],['Carrying',E((p.weapons||[]).join(', '))],
    ['Grenades',`frag ${p.grenades.frag}, plasma ${p.grenades.plasma}, spike ${p.grenades.spike}, firebomb ${p.grenades.firebomb}`],
    ['Vehicle',p.vehicle?E(p.vehicle)+(p.seat!=null?` (seat ${p.seat})`:''):'on foot'],
-   ['Deaths',`${p.deaths??0} this match`+(scope()==='all'?` · ${myDeaths} on the map`:'')],['This life',fmtT(p.life)],['Longest life',fmtT(p.longest_life)],
+   // (2026-11-09, the user: "when you select a player... show their kills and deaths here too")
+   ['Kills',`${p.kills??0} this match`+(p.assists!=null?` · ${p.assists} assists`:'')],
+   ['Deaths',`${p.deaths??0} this match`+(scope()==='all'?` · ${myDeaths} on the map`:'')],
+   ['K/D',p.deaths?((p.kills??0)/p.deaths).toFixed(2):`${p.kills??0}.00 (no deaths)`],['This life',fmtT(p.life)],['Longest life',fmtT(p.longest_life)],
    ['Distance',`${(p.distance||0).toFixed(0)} units`],['Speed',`${p.speed.toFixed(2)} (top ${(p.top_speed||0).toFixed(2)})`],
    ['Active traits',Object.keys(p.traits||{}).length?Object.entries(p.traits).map(([k,x])=>`${E(TK[k]||k)}: ${E(x)}`).join('<br>'):(snap.variant?'game defaults':'')],
    ['Effects',(p.effects||[]).map(f=>`${E(f.what)}, ${Math.ceil(f.left)} s left`).join('<br>')||'none'],
