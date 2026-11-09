@@ -3294,7 +3294,9 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   ~2.2 GB a headless walker; a new identity needs the small --background window once (headless never makes one: "no identity yet").
   ALSO: NHOOK_INPUT_LOG=1 logs a REAL player's packed buttons (+8, +0x2c) and the unit's weapon / grenade bytes when they change
   (the user meleeing / reloading / switching names the bits the walkers' dead buttons should set); do=botwslot (writes the unit's
-  +0x260 before each packet: the weapon-switch experiment -- untested, the walker had one weapon: +0x268 slot 0 the rifle, +0x26c none).
+  +0x260 before each packet: the weapon-switch experiment -- NEGATIVE, 22:44: with two weapons (Mauler or Brute Shot + the assault
+  rifle), +0x260 = 1 or 0 for 2 s never changed the server's view of the held weapon, 4 tries; the unit then read +0x260 = 2, +0x262
+  = 1 (the current slot), +0x268 / +0x26c the two weapons: the switch is not that byte -- NHOOK_INPUT_LOG on the user's Y press next).
 - **Walker battles run headless** (2026-11-08 22:15; walker-battle.sh) — WHY: the user: "running all 3 clients visible lagged the
   screen hard, can you drive the client without the display?". LOGIC: the walkers' games start with the app's own --headless ("no
   window, the null renderer"); the walker needs no frames (aim, line of sight and moves come from the game's state). Checked: two
