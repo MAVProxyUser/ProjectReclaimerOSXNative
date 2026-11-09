@@ -3272,6 +3272,22 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   a running battle, at every round end (our server's in_match true -> false) walker-coach.py round + match-study.py, then each
   walker's game restarted headless with its new knobs and the newest build (they rejoin in the lobby; the user's game and the
   server stay).
+- **The gunner: a walker mans its teammate's Warthog turret, and gets out of any other seat** (2026-11-09 01:50; nbot.c gun_seated /
+  gun_board / gun_near_veh / gun_find, shim/tools/hold-teams.py) — WHY: the user: "every time my guy is in a warthog, it must come find
+  me and get into the turret gunner. I want it to train as my gunner as I drive it around after the other walkers"; then "third got
+  into a banshee on its own... now it is stuck. have it get out, and ONLY get in *MY* warthog" and "one of the walkers tried to board
+  me, but jumped into the passenger seat". The act bit (+0x2c bit 0) enters vehicles: a pick-up hold beside a Banshee seated Third in
+  it, another put a walker in the user's passenger seat (FFA), and a seated walker went idle ("in a vehicle"). LOGIC: (1) seated
+  anywhere but a TEAMMATE's Warthog or its turret -> hold act 0.8 s (again every 3 s) to get out; (2) the pick-up hold and the
+  reload tap never press act within 3.5 units of a vehicle; (3) a teammate seated in a Warthog whose turret (the vehicle parented to
+  it) nobody mans -> the pathfinder to a point 1.3 units behind the turret (the Warthog's forward, object +0x5c), straight in the last
+  4 units facing the turret, act pulsed 0.4 s a second within 1.5 units -- from behind the gunner seat's entry is the nearest; its
+  fight still aims and fires on the way but no longer steers; (4) on the turret (or in that Warthog's passenger seat): the nearest
+  enemy (one out of sight counts 4x as far), line of sight from the camera ignoring the turret, the chest led by velocity x d/300, the
+  view turned at most 4 rad/s, the trigger (bit 19) held within max(2.5 deg, the target's size) and 60 units; out again when the
+  teammate leaves the Warthog. Teams: Halo 3 never seats an enemy in a gunner seat, so the match is Team Slayer (DED_TEAMS=1) and
+  hold-teams.py keeps them (every 5 s, RCON `team`: Third red with the human, Second / Fourth / Fifth blue -- coach restarts let the
+  auto-balance shuffle the walkers; the human's name is never printed). NHOOK_BOT_GUNNER=0 = the old (seated = idle, pick-ups anywhere).
 - **Walkers say when they decide to camp** (2026-11-09 01:30; nbot.c bot_camp_tick / camp_say_thread) — WHY: the user: "can you have
   the walkers send a chat message when they *decide* to camp, and wait for a user. just send a chat message that says i'm camping...".
   The walkers had no camping decision of their own (nothing named camp in the code): their standing still was the levels-apart hold

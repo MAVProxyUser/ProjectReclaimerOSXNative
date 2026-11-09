@@ -469,6 +469,80 @@ static void bot_camp_tick(double now, float tx, float ty, int out, int engaged, 
     if (!say) return; tsaid = now;
     char* msg = malloc(160); if (!msg) return; snprintf(msg, 160, "%s: i'm camping...", g_nick[0] ? g_nick : "walker");
     pthread_t th; if (pthread_create(&th, 0, camp_say_thread, msg) == 0) pthread_detach(th); else free(msg); }
+// THE GUNNER (2026-11-09, the user: "every time my guy is in a warthog, it must come find me and get into the turret gunner. I want it
+// to train as my gunner as I drive it around after the other walkers"; then "third got into a banshee on its own... now it is stuck.
+// have it get out, and ONLY get in *MY* warthog", "one of the walkers tried to board me, but jumped into the passenger seat"). The act
+// bit (+0x2c bit 0) DOES enter vehicles: a pick-up hold next to a Banshee put Third in it, a walker's next to the user's Warthog put
+// one in its passenger seat, and seated the walker went idle. Now:
+//   - SEATED anywhere but its teammate's Warthog (or that Warthog's turret) a walker holds act to get out (0.8 s, again every 3 s);
+//   - no pick-up hold / reload tap within 3.5 units of a vehicle, unless boarding that Warthog;
+//   - a TEAMMATE driving a Warthog whose turret nobody mans: the walker walks there (the pathfinder, then straight in the last 4
+//     units) to a point 1.3 units behind the turret, facing it, and pulses act (0.4 s of each second) -- the nearest seat entry from
+//     behind is the gunner's. FFA has no teammates: it never boards an enemy's vehicle;
+//   - ON THE TURRET (or in that Warthog's passenger seat): the nearest enemy, preferring one in sight of the camera (line of sight,
+//     the turret ignored), its chest led by its velocity, the view turned at most 4 rad/s, the trigger held within 2.5 deg (or the
+//     target's size) and 60 units. Out again when the teammate leaves the Warthog.
+// NHOOK_BOT_GUNNER=0 = none of it (the old: seated = idle; pick-ups anywhere). [gunner] log lines.
+static NovObj g_gv[256]; static int g_gvn; static double g_gvt;
+static void gun_vlist(double now) { if (now - g_gvt < 0.2) return; g_gvt = now;
+    pthread_mutex_lock(&g_nov_collect_mx); g_nov_units_only = 2; g_gvn = nov_collect(g_gv, 256); g_nov_units_only = 0; pthread_mutex_unlock(&g_nov_collect_mx); }
+static const NovObj* gun_v(uint32_t h) { if (h == 0xFFFFFFFFu) return 0; for (int i = 0; i < g_gvn; i++) if (g_gv[i].handle == h) return &g_gv[i]; return 0; }
+static int gun_on(void) { static int v = -1; if (v < 0) { const char* e = getenv("NHOOK_BOT_GUNNER"); v = !(e && !strcmp(e, "0")); } return v; }
+static int gun_near_veh(const float* c, uint32_t except) {   // a vehicle within 3.5 units across, 3 up / down (no act there)
+    if (!gun_on()) return 0;
+    for (int i = 0; i < g_gvn; i++) { const NovObj* v = &g_gv[i]; if (v->dead || v->handle == except || v->parent != 0xFFFFFFFFu) continue;
+        float dx = v->c[0] - c[0], dy = v->c[1] - c[1], dz = v->c[2] - c[2]; if (dx * dx + dy * dy < 3.5f * 3.5f && fabsf(dz) < 3.0f) return 1; }
+    return 0; }
+// the Warthog a TEAMMATE sits in (straight in it: driver / passenger -- not on its turret) and that Warthog's turret
+static int gun_find(const NovObj* objs, int n, int me, const NovObj** wh, const NovObj** tu) {
+    const NovObj* o = &objs[me];
+    for (int i = 0; i < n; i++) { const NovObj* t = &objs[i]; if (i == me || t->type || t->dead || t->seat < 0 || bot_enemy(o, t)) continue;
+        const NovObj* v = gun_v(t->parent); if (!v || v->parent != 0xFFFFFFFFu || !nav_ci_has(hb_tag_name(v->def), "warthog")) continue;
+        const NovObj* q = 0; for (int k = 0; k < g_gvn; k++) if (g_gv[k].parent == v->handle) { q = &g_gv[k]; break; }
+        *wh = v; *tu = q; return 1; }
+    return 0; }
+static int gun_seated(double now, const NovObj* objs, int n, int me, const float* cam, float yaw0, float pitch0) {   // -> 1: handled
+    gun_vlist(now); const NovObj* o = &objs[me]; const NovObj* mv = gun_v(o->parent); const NovObj *wh = 0, *tu = 0;
+    int served = gun_find(objs, n, me, &wh, &tu), mine = served && mv && ((tu && mv->handle == tu->handle) || mv->handle == wh->handle);
+    static double texit, tlog; g_bot_melee_until = 0; g_bot_switch_until = 0;
+    if (!mine) {
+        if (now - texit > 3.0) { texit = now; g_bot_act_until = now + 0.8;
+            nlog("[nhook] [gunner] in %s (seat %d): not my teammate's Warthog -- getting out", mv ? hb_tag_name(mv->def) : "a vehicle", o->seat); }
+        g_bot_yaw = yaw0; g_bot_pitch = pitch0; g_bot_btn = 0; g_bot_fire = 0; g_bot_out = 1; g_nav_act = 0; return 1; }
+    g_bot_act_until = 0;
+    // the target: the nearest enemy, one out of sight counting 4x as far
+    int bi = -1; float bs = 1e30f;
+    for (int i = 0; i < n; i++) { const NovObj* t = &objs[i]; if (t->type || t->dead || i == me || !bot_enemy(o, t)) continue;
+        float dx = t->c[0] - cam[0], dy = t->c[1] - cam[1], dz = t->c[2] - cam[2], d = dx * dx + dy * dy + dz * dz; if (d > 60.0f * 60.0f) continue;
+        int v = los_get(t->handle, now); float sc = d * (v == 0 ? 16.0f : 1.0f); if (sc < bs) { bs = sc; bi = i; } }
+    { static double tput; if (g_los_t > tput && g_los_req == g_los_done) { tput = g_los_t; los_put(g_los_res_tgt, g_los_res, g_los_t); } }
+    static double tlos; static int rr;
+    if (now - tlos > 0.07 && g_los_req == g_los_done) {   // the line from the camera: the target every other time, else another enemy in turn
+        const NovObj* q = bi >= 0 ? &objs[bi] : 0; rr++;
+        if (!(rr & 1) || !q) { int cnt = 0; for (int i = 0; i < n; i++) { const NovObj* t = &objs[i]; if (t->type || t->dead || i == me || !bot_enemy(o, t)) continue; if (cnt++ == (rr >> 1) % 8) { q = t; break; } } }
+        if (q) { tlos = now; g_los_p[0] = cam[0]; g_los_p[1] = cam[1]; g_los_p[2] = cam[2]; g_los_v[0] = q->c[0] - cam[0]; g_los_v[1] = q->c[1] - cam[1]; g_los_v[2] = q->c[2] + 0.3f * q->r - cam[2];
+                 g_los_ign[0] = mv->handle; g_los_ign[1] = q->handle; g_los_tgt = q->handle; g_los_req++; } }
+    static double tlast; double dt = tlast > 0 && now - tlast < 0.5 ? now - tlast : 0.033; tlast = now;
+    float yaw = yaw0, pitch = pitch0; int fire = 0;
+    if (bi >= 0) { const NovObj* t = &objs[bi]; float dx = t->c[0] - cam[0], dy = t->c[1] - cam[1], d = sqrtf(dx * dx + dy * dy + (t->c[2] - cam[2]) * (t->c[2] - cam[2]));
+        float lt = d / 300.0f, px = t->c[0] + t->vel[0] * 30 * lt - cam[0], py = t->c[1] + t->vel[1] * 30 * lt - cam[1], pz = t->c[2] + 0.3f * t->r + t->vel[2] * 30 * lt - cam[2];
+        float ty_ = atan2f(py, px), tp_ = atan2f(pz, sqrtf(px * px + py * py)), mx = (float)dt * 4.0f;
+        float dyw = bot_wrap(ty_ - yaw0), dpt = tp_ - pitch0; yaw = yaw0 + (dyw > mx ? mx : dyw < -mx ? -mx : dyw); pitch = pitch0 + (dpt > mx ? mx : dpt < -mx ? -mx : dpt);
+        float err = sqrtf(bot_wrap(ty_ - yaw) * bot_wrap(ty_ - yaw) + (tp_ - pitch) * (tp_ - pitch)), size = atanf(t->r / (d > 0.5f ? d : 0.5f));
+        int vis = los_get(t->handle, now); fire = vis != 0 && d < 60.0f && err < fmaxf(0.0436f, size);
+        if (bot_log() && now - tlog > 2.0) { tlog = now; nlog("[nhook] [gunner] %s: target %08x at %.1f units, %s, aim error %.1f deg%s", tu && mv->handle == tu->handle ? "on the turret" : "in the Warthog",
+                                                         t->handle, d, vis > 0 ? "in sight" : vis == 0 ? "hidden" : "sight unknown", err * 57.2958f, fire ? ", FIRING" : ""); } }
+    else if (bot_log() && now - tlog > 4.0) { tlog = now; nlog("[nhook] [gunner] %s: no enemy within 60 units", tu && mv->handle == tu->handle ? "on the turret" : "in the Warthog"); }
+    static uint64_t fb = 0; if (!fb) { const char* e = getenv("NHOOK_BOT_FIREBIT"); fb = e ? strtoull(e, 0, 16) : 0x80000ull; }
+    g_bot_yaw = yaw; g_bot_pitch = pitch; g_bot_btn = fire ? fb : 0; g_bot_fire = fire; g_bot_trig = fire; g_bot_out = 1 | (fire ? 4 : 0); g_nav_act = 0; return 1; }
+// boarding: a teammate's Warthog with its turret free -> 1, the point 1.3 units behind the turret (bpt), the turret (face), the distance
+static int gun_board(double now, const NovObj* objs, int n, int me, float* bpt, float* face, float* bd, uint32_t* hog) {
+    if (!gun_on()) return 0; gun_vlist(now); const NovObj *wh = 0, *tu = 0;
+    if (!gun_find(objs, n, me, &wh, &tu) || !tu) return 0;
+    for (int i = 0; i < n; i++) if (objs[i].type == 0 && !objs[i].dead && objs[i].parent == tu->handle && i != me) return 0;   // (manned)
+    float f[3] = {1, 0, 0}; if (wh->p) hb_read(wh->p + 0x5c, f, 12); float fl = sqrtf(f[0] * f[0] + f[1] * f[1]); if (fl > 0.1f) { f[0] /= fl; f[1] /= fl; } else { f[0] = 1; f[1] = 0; }
+    bpt[0] = tu->c[0] - f[0] * 1.3f; bpt[1] = tu->c[1] - f[1] * 1.3f; bpt[2] = wh->c[2]; memcpy(face, tu->c, 12); *hog = wh->handle;
+    float dx = bpt[0] - objs[me].c[0], dy = bpt[1] - objs[me].c[1]; *bd = sqrtf(dx * dx + dy * dy); return 1; }
 static void bot_step_body(void) {
     double now = mono_s(); int spar = g_bot_spar, mode = bot_walk_ok() ? nav_mode() : 0;
     static int diag0 = -1; if (diag0 < 0) diag0 = getenv("NHOOK_BOT_THROTTLE") || getenv("NHOOK_BOT_BTNSCAN") || getenv("NHOOK_BOT_FACE") || getenv("NHOOK_BOT_HOLDBTN");
@@ -492,6 +566,7 @@ static void bot_step_body(void) {
           static double tl; if (bot_log() && now - tl > 10) { tl = now; nlog("[nhook] [spar] the control record's unit %08x is stale: the player's unit %08x drives", meh, g_my_unit); } break; } }
     static int32_t path[8192]; static int plen, pidx, goal = -1; static double tplan, tstat, tjump, tback, tstuck[4]; static float bstr; static float hist[64][3]; static double histt[64]; static int hh;
     gl_life(now, me >= 0 && !objs[me].dead, me >= 0 ? objs[me].c : 0, 0, 0);   // (nbot_goals.c: deaths, respawns, failed zones)
+    if (me >= 0 && !objs[me].dead && objs[me].seat >= 0 && gun_on() && !g_bot_shadow && gun_seated(now, objs, n, me, cam, yaw0, pitch0)) { plen = 0; g_bot_err = -1; return; }   // (the gunner, above)
     if (me < 0 || objs[me].dead || objs[me].seat >= 0) { g_bot_out = 0; g_nav_act = 0; plen = 0; g_bot_err = -1;   // dead, respawning or in a vehicle
         static char w[96]; snprintf(w, sizeof w, me < 0 ? "the record's unit %08x is none of the %d units seen" : objs[me].dead ? "dead" : "in a vehicle", meh, n); bot_idle(me < 0 ? w : objs[me].dead ? "dead" : "in a vehicle"); return; }
     const NovObj* o = &objs[me]; int out = 0; float yaw = yaw0, pitch = pitch0; g_bot_unit_p = o->p;
@@ -730,7 +805,8 @@ static void bot_step_body(void) {
       if (g_bot_pick_on) { float dx = g_bot_pick_pos[0] - o->c[0], dy = g_bot_pick_pos[1] - o->c[1];
           if (dx * dx + dy * dy < 0.8f) { tpress = now; g_bot_pick_on = 0; tried[(ntried++) & 31] = want_h; } }
       uint32_t ppad = bot_pickpad();
-      if (pb && now - tpress < 0.6) g_bot_act_until = tpress + 0.6;   // (the act bit held: pick up)
+      gun_vlist(now);
+      if (pb && now - tpress < 0.6 && !gun_near_veh(o->c, 0xFFFFFFFFu)) g_bot_act_until = tpress + 0.6;   // (the act bit held: pick up -- never beside a vehicle: it boards it)
       if (pb && now - tpress < 0.6) fbtn |= 0x20000 | (g_vpad_on ? ppad : 0); }   // (fbtn bit 17: hold the pick-up bit; mapped below; the pad's button directly)
     // reload after a fight (the players' habit; no ammo count is read yet): the pad's reload button (NHOOK_BOT_PICKPAD, a TAP; a hold
     // picks up) 0.4-1.0 s after a fight in which the walker fired ends, unless it is walking to a weapon
@@ -743,10 +819,14 @@ static void bot_step_body(void) {
       { static double tlow; if (fight && g_vpad_on && !engaged && g_inv.ammo >= 0 && g_inv.ammo_max > 2 && g_inv.ammo < 0.6f * g_inv.ammo_max && now - tlow > 4.0 && now - trel > 4.0 && !g_bot_pick_on) {
             tlow = now; trel = now; if (bot_log()) nlog("[nhook] [inv] reloading: %d of %d rounds", g_inv.ammo, g_inv.ammo_max); } }
       uint32_t rpad = bot_pickpad();
-      if (now - trel < 0.1) { fbtn |= rpad; g_bot_act_until = trel + 0.1; } }   // (the act bit tapped: reload)
+      if (now - trel < 0.1) { fbtn |= rpad; if (!gun_near_veh(o->c, 0xFFFFFFFFu)) g_bot_act_until = trel + 0.1; } }   // (the act bit tapped: reload -- not beside a vehicle)
     // the walker (nav.c's graph): the path's way PELOAD_NAV_LOOK nodes ahead; with the aim on, the throttle walks it in any
     // direction relative to the view
     float tx = 0, ty = 0;
+    float gbp[3], gface[3], gbd = 1e9f; uint32_t ghog = 0xFFFFFFFFu; int gun_go = !g_bot_shadow && gun_board(now, objs, n, me, gbp, gface, &gbd, &ghog);
+    { static int was; static double tg; if (gun_go) { if (!was) nlog("[nhook] [gunner] my teammate drives a Warthog with the turret free: going to man it (%.1f units)", gbd);
+        if (gbd > 4.0f) { mode = 3; memcpy(g_bot_pt, gbp, 12); g_bot_pt[2] -= 0.3f; if (!was || now - tg > 1.0) { tg = now; goal = -1; } } }
+      else if (was) { nlog("[nhook] [gunner] no teammate's Warthog to man any more"); goal = -1; plen = 0; } was = gun_go; }
     if (mode && g_nav.ok) {
         float pos[3] = {o->c[0], o->c[1], o->c[2] - 0.35f}; int cur = nav_node_at(pos);
         if (cur >= 0) {
@@ -816,7 +896,12 @@ static void bot_step_body(void) {
                     pos[0], pos[1], pos[2], cur, pidx, plen, tp[0], tp[1], tp[2], tx, ty); } }
             else g_nav_act = 0; }
         else g_nav_act = 0; }
-    if (engaged) { tx = ftx; ty = fty; out |= 2; }
+    if (gun_go && gbd <= 4.0f) {   // boarding: straight to the point behind the turret, facing the turret, act pulsed (0.4 s a second) close in
+        float way = atan2f(gbp[1] - o->c[1], gbp[0] - o->c[0]), fy = atan2f(gface[1] - cam[1], gface[0] - cam[0]), fp = atan2f(gface[2] - cam[2], sqrtf((gface[0] - cam[0]) * (gface[0] - cam[0]) + (gface[1] - cam[1]) * (gface[1] - cam[1])));
+        yaw = fy; pitch = fp; out |= 1; float rel = bot_wrap(way - yaw), sp = gbd > 1.0f ? 1.0f : 0.35f; tx = cosf(rel) * sp; ty = sinf(rel) * sp; out |= 2;
+        if (gbd < 1.5f && fmod(now, 1.0) < 0.4) g_bot_act_until = now + 0.05;
+        { static double tl; if (bot_log() && now - tl > 1.0) { tl = now; nlog("[nhook] [gunner] boarding: %.1f units from the point behind the turret%s", gbd, gbd < 1.5f ? ", pressing act" : ""); } } }
+    else if (engaged && !gun_go) { tx = ftx; ty = fty; out |= 2; }
     else if (fight && now - g_bot_hold_high < 0.3) { tx = 0; ty = 0; out |= 2; }   // (levels apart: the enemy below -- hold the high ground)   // (the fighter's moves in reach override the walker's path)
     if (testb) { g_bot_btn = ((out & 4) ? g_bot_btn : 0) | g_bot_testbtn; out |= 4; }   // (do=botbtn: held until its time is up)
     // fire: the control record's bit 19 (+0xC8) -- the local unit fires, and the control packet carries the weapon's firing state
