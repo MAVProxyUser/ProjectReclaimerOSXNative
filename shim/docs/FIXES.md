@@ -3448,6 +3448,15 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   brain is refused by a v2 body and the other way round: rebuild both). Lead latency = rtt x NHOOK_BOT_LEAD_RTT (1.25 / 1000 -- 0.08 s
   at 64 ms, 0.18 s at 145 ms); a NHOOK_BOT_LEAD_LAT in the live file still wins. A review's kills = the scoreboard's since the window
   began (the old count when the body has none); the review line gives the ping.
+- **The Brain tab confirms every new brain; quiet windows are revisions too** (2026-11-09 18:00; nbot.c nh_brain_step, nbot_goals.c
+  brain_review, shim/tools/brain-monitor.py brain_info, workboard.py "Brain loads") — WHY: the user: "how come the #brain log doesn't
+  indicate a new brain loaded any more? it just says some stuff, but doesn't confirm new brain" -- the tab took the loaded build from
+  the walker log's last 3 MB, which path-planning lines had filled (an empty "brain"), and a 3-minute window with no kill or death made
+  no revision (the monitor forced them as "stale"). LOGIC: each brain, at its first own step, appends {t, built, warm, map, lesson} to
+  battles/follow/brain-<nick>.jsonl; the tab's header says "Brain code built ... · loaded HH:MM (n ago), warmed up beside the running
+  brain, then took over on <map>" and a "Brain loads" list shows the last 12; the monitor reads the same file. A periodic review in a
+  match is a revision even when nothing happened (out of a match still none). The links events read "players' links relearned: ...".
+  This build's lesson describes it (brain-lesson.txt was still the SWAT one).
 - **A brain running from its temp copy finds the walking-graph tool again; no graph is not "stuck"** (2026-11-09 17:50; nbot.c
   nbot_tool_path, the unstick) — WHY: on a new map (hugetowers) the walker got no walking graph: "re-tools/h3nav.py not found" under
   $TMPDIR -- a brain runs from a copy there (hot swaps), and the tool path was taken from the brain's own file. And the new rule "no path

@@ -55,8 +55,15 @@ def last_review():
         return json.loads(lines[-1]) if lines else None
     except Exception: return None
 _brain = {'t': 0, 'v': {}}
-def brain_info():   # the loaded brain's build and lesson: the walker log's last "[brain] code built" / "[brain] lesson:" lines
-    if time.time() - _brain['t'] < 30: return _brain['v']
+def brain_info():   # the loaded brain's build and lesson: the last line of brain-<nick>.jsonl (each brain writes one when it takes over),
+    # else the walker log's last "[brain] code built" / "[brain] lesson:" lines (2026-11-09: the log's last 3 MB alone lost them under path lines)
+    if time.time() - _brain['t'] < 10: return _brain['v']
+    try:
+        with open(os.path.join(FOL, 'brain-%s.jsonl' % NICK), 'rb') as f:
+            f.seek(max(0, os.path.getsize(os.path.join(FOL, 'brain-%s.jsonl' % NICK)) - 8192)); last = f.read().decode(errors='replace').strip().splitlines()[-1]
+        j = json.loads(last); v = {'built': j.get('built'), 'lesson': j.get('lesson'), 'loaded': j.get('t'), 'warm': j.get('warm')}
+        _brain.update(t=time.time(), v=v); return v
+    except Exception: pass
     v = {}
     try:
         with open(WLOG, 'rb') as f:

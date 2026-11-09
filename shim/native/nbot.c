@@ -2141,7 +2141,23 @@ static void io_out_apply(const NhIO* io) {   // (the body) -> the hooks' globals
 #ifdef NH_BRAIN
 __attribute__((visibility("default"))) int nh_brain_version(void) { return NHIO_VERSION; }
 __attribute__((visibility("default"))) int nh_brain_step(NhIO* io) { if (io->version != NHIO_VERSION) return 0;
-    { static int was_warm; if (was_warm && !g_brain_warm) nlog("[nhook] [brain] code built %s %s took over (warm: the world, its maps and models already loaded)", __DATE__, __TIME__); was_warm = g_brain_warm; }
+    { static int was_warm, noted; if (was_warm && !g_brain_warm) nlog("[nhook] [brain] code built %s %s took over (warm: the world, its maps and models already loaded)", __DATE__, __TIME__);
+      // (2026-11-09, the user: "how come the #brain log doesn't indicate a new brain loaded any more?" -- the Brain tab read the build from
+      //  the walker log's last 3 MB, which path lines filled): every brain that takes over writes one line to battles/follow/brain-<nick>.jsonl
+      //  -- when, its build, warm or cold, its lesson -- the tab lists them
+      if (!g_brain_warm && !noted && g_nick[0]) { noted = 1; char path[1100]; const char* h = getenv("HOME");
+          snprintf(path, sizeof path, "%s/Library/Application Support/ReclaimerMac/battles/follow/brain-%s.jsonl", h ? h : "/tmp", g_nick);
+          FILE* f = fopen(path, "a");
+          if (f) { const char* les = "";
+#ifdef NH_BRAIN_LESSON
+              les = NH_BRAIN_LESSON;
+#endif
+              fprintf(f, "{\"t\": %.0f, \"built\": \"%s %s\", \"warm\": %d, \"map\": \"", (double)time(0), __DATE__, __TIME__, was_warm);
+              for (const char* c = g_st_curmap; *c; c++) if (*c != '"' && *c != '\\') fputc(*c, f);
+              fputs("\", \"lesson\": \"", f);
+              for (const char* c = les; *c; c++) { if (*c == '"' || *c == '\\') fputc('\\', f); if ((unsigned char)*c >= 0x20) fputc(*c, f); }
+              fputs("\"}\n", f); fclose(f); } }
+      was_warm = g_brain_warm; }
     g_nav_quiet = g_brain_warm;
     static int told; if (!told) { told = 1; nlog("[nhook] [brain] code built %s %s is %s", __DATE__, __TIME__, g_brain_warm ? "warming up beside the running brain" : "stepping");
 #ifdef NH_BRAIN_LESSON

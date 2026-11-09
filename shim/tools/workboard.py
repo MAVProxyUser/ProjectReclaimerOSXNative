@@ -57,7 +57,8 @@ def brainmon():
     try: st = json.load(open(os.path.join(F, 'monitor-%s.json' % PUBWALKER)))
     except Exception: st = None
     tune = [r for r in jl_tail(os.path.join(F, 'tuner-%s.jsonl' % PUBWALKER), 200) if r.get('event') in ('reset', 'good set')][-12:]
-    return {'state': st, 'reviews': jl_tail(os.path.join(F, 'review-%s.jsonl' % PUBWALKER), 40), 'events': jl_tail(os.path.join(F, 'monitor-%s.jsonl' % PUBWALKER), 40), 'tune': tune}
+    return {'state': st, 'reviews': jl_tail(os.path.join(F, 'review-%s.jsonl' % PUBWALKER), 40), 'events': jl_tail(os.path.join(F, 'monitor-%s.jsonl' % PUBWALKER), 40), 'tune': tune,
+            'loads': jl_tail(os.path.join(F, 'brain-%s.jsonl' % PUBWALKER), 12)}
 def tome_load():
     try: return json.load(open(TOME))
     except Exception: return None
@@ -193,7 +194,8 @@ h1{font-size:20px;margin:0 0 4px}h2{font-size:13px;letter-spacing:.08em;text-tra
 <div id="brainview" hidden>
 <div class="p" style="margin-bottom:14px"><h2>The walker's brain <span class="k" id="bmsrc"></span></h2><div id="bmalarm"></div><div id="bmbrain" style="margin:6px 0 10px"></div>
 <div class="k" style="margin-bottom:8px">A new revision comes on every map change, every review period (3 min), and whenever the monitor trips a trigger below: the brain then reads its death map again, rebuilds the paths around its own recent deaths and sets its caution from the window; the triggers that reset the levers also put the tuner's settings back to its last good set. A tripped trigger re-arms when its number recovers. shim/tools/brain-monitor.py, nbot_goals.c brain_review.</div>
-<div class="grid"><div><h2>Triggers</h2><div id="bmtrig"></div></div><div><h2>Monitor events</h2><div id="bmev"></div></div></div></div>
+<div class="grid"><div><h2>Triggers</h2><div id="bmtrig"></div></div><div><h2>Monitor events</h2><div id="bmev"></div></div></div>
+<h2 style="margin-top:12px">Brain loads <span class="k">(each new build of the brain, as it takes over)</span></h2><div id="bmloads"></div></div>
 <div class="p"><h2>Revisions</h2><div id="bmrev" style="overflow-x:auto"></div></div></div>
 <div id="walkview" hidden>
 <div class="p" style="margin-bottom:14px"><h2>Public walker -- learning while it plays <span class="k" id="pwsrc"></span></h2><div id="pwlive" style="margin-bottom:8px"></div>
@@ -238,14 +240,16 @@ async function tick(){try{const j=await (await fetch('/status.json')).json();
    if(!st||now-st.t>60) al.push('the brain monitor is not running (shim/tools/brain-monitor.py)'+(st?' -- its last look '+ago(st.t):''));
    const rv=R[0], per=(st&&st.review_period)||180; if(st&&st.metrics&&st.metrics.in_match&&(!rv||now-rv.t>2*per+30)) al.push('STALE: no brain revision for '+(rv?ago(rv.t).replace(' ago',''):'ever')+' in a match');
    document.getElementById('bmalarm').innerHTML=al.map(x=>`<div style="color:var(--go);font-weight:600">${E(x)}</div>`).join('');
-   const bi=(st&&st.brain)||{}; document.getElementById('bmsrc').textContent=rv?`· revision r${rv.r} [${rv.trigger}] ${ago(rv.t)} on ${rv.map}`:'· no revision yet';
-   document.getElementById('bmbrain').innerHTML=`<div><b>Brain code built ${E(bi.built||'?')}</b></div><div class="k">${E(bi.lesson||'')}</div>`;
+   const LD=(B.loads||[]).slice().reverse(), ld=LD[0], bi=ld?{built:ld.built,lesson:ld.lesson}:((st&&st.brain)||{});
+   document.getElementById('bmsrc').textContent=rv?`· revision r${rv.r} [${rv.trigger}] ${ago(rv.t)} on ${rv.map}`:'· no revision yet';
+   document.getElementById('bmbrain').innerHTML=`<div><b>Brain code built ${E(bi.built||'?')}</b>${ld?` <span class="k">· loaded ${new Date(ld.t*1000).toLocaleTimeString()} (${ago(ld.t)}), ${ld.warm?'warmed up beside the running brain, then took over':'cold start'}${ld.map?' on '+E(ld.map):''}</span>`:''}</div><div class="k">${E(bi.lesson||'')}</div>`;
+   document.getElementById('bmloads').innerHTML=LD.length?LD.map(x=>`<div class="row"><span class="k">${new Date(x.t*1000).toLocaleTimeString()}</span><b>built ${E(x.built)}</b><span class="k">${x.warm?'warm takeover':'cold start'}${x.map?' · '+E(x.map):''}</span><span class="k" style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${E(x.lesson||'')}">${E((x.lesson||'').slice(0,140))}</span></div>`).join(''):'<div class="none">no brain load recorded yet (each new build writes one as it takes over)</div>';
    const T=(st&&st.triggers)||[], M=(st&&st.metrics)||{};
    document.getElementById('bmtrig').innerHTML=(st&&st.metrics?`<div class="k" style="margin-bottom:4px">${E(M.map)}: K ${M.kills} D ${M.deaths}, accuracy ${M.acc_match??'-'} (lobby ${M.lobby_acc!=null?M.lobby_acc.toFixed(3):'-'}), lobby K/D ${M.lobby_kd!=null?M.lobby_kd.toFixed(2):'-'}</div>`:`<div class="none">${E((st&&st.note)||'no numbers yet')}</div>`)+
      T.map(t=>`<div class="row"><span style="color:${t.armed?(t.bad?'var(--go)':'var(--ok)'):'var(--go)'}">${t.armed?'armed':'TRIPPED'}</span><b>${E(t.name)}</b><span>${E(t.value??'-')}</span><span class="k">trips ${E(t.threshold)}${t.resets?' · resets the levers':''}${t.last_trip?' · last '+ago(t.last_trip):''}</span></div>`).join('')+
      (T.length?'':'<div class="k">(each trigger appears once its window has numbers: 2-5 minutes into a match)</div>');
    const ev=[...(B.events||[]).filter(e=>e.event!=='start'),...(B.tune||[]).map(e=>({...e,tuner:1}))].sort((a,b)=>b.t-a.t).slice(0,16);
-   document.getElementById('bmev').innerHTML=ev.length?ev.map(e=>`<div class="row"><span class="k">${new Date(e.t*1000).toLocaleTimeString()}</span><b>${E(e.tuner?(e.event==='reset'?'levers reset':'good set kept'):e.event)}</b><span class="k">${E(e.tuner?(e.event==='reset'?'to '+e.to+' ('+Object.keys(e.changed||{}).length+' settings)':e.why):e.event==='trip'?e.trigger+' '+e.value+' '+e.threshold:e.event==='map'?(e.from||'-')+' -> '+e.map:e.trigger+' '+(e.value??''))}</span></div>`).join(''):'<div class="none">no trips yet</div>';
+   document.getElementById('bmev').innerHTML=ev.length?ev.map(e=>`<div class="row"><span class="k">${new Date(e.t*1000).toLocaleTimeString()}</span><b>${E(e.tuner?(e.event==='reset'?'levers reset':'good set kept'):e.event)}</b><span class="k">${E(e.tuner?(e.event==='reset'?'to '+e.to+' ('+Object.keys(e.changed||{}).length+' settings)':e.why):e.event==='trip'?e.trigger+' '+e.value+' '+e.threshold:e.event==='map'?(e.from||'-')+' -> '+e.map:e.event==='links'?'players\' links relearned: '+(e.result||e.error||'').replace(/ -> .*/,''):e.trigger+' '+(e.value??''))}</span></div>`).join(''):'<div class="none">no trips yet</div>';
    document.getElementById('bmrev').innerHTML=R.length?`<table style="border-collapse:collapse;width:100%;font-size:13px"><tr><th style="text-align:left">when</th><th>r</th><th style="text-align:left">trigger</th><th style="text-align:left">map</th><th>kills</th><th>deaths</th><th>empty</th><th>deaths/min</th><th>caution</th><th>press</th><th>death map</th><th style="text-align:left">hottest own spot</th></tr>`+
      R.map(r=>`<tr style="border-top:1px solid var(--line)"><td>${new Date(r.t*1000).toLocaleTimeString()}</td><td style="text-align:center">${r.r}</td><td>${E(r.trigger)}</td><td>${E(r.map)}</td><td style="text-align:center">${r.kills}</td><td style="text-align:center">${r.deaths}</td><td style="text-align:center">${r.empty}</td><td style="text-align:center">${r.dpm}</td><td style="text-align:center">${r.caution}</td><td style="text-align:center">x${r.press_x}</td><td style="text-align:center">${r.deathmap??'-'}</td><td>${r.hot&&r.hot[2]>=2?`(${r.hot[0].toFixed(0)}, ${r.hot[1].toFixed(0)}): ${r.hot[2]} deaths`:'-'}</td></tr>`).join('')+'</table>':'<div class="none">no revision yet</div>'; }
  { const S=j.you_sessions||[], on=S.length&&!S[S.length-1].end; document.getElementById('ystart').disabled=!!on; document.getElementById('ystop').disabled=!on;

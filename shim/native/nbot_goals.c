@@ -293,7 +293,9 @@ static void brain_review(double now) {
     if (g_my_kills >= 0) { if (ks0 >= 0 && g_my_kills >= ks0) kills = g_my_kills - ks0; else kills = g_my_kills; }
     ks0 = g_my_kills;
     int deaths = 0, empty = 0; for (int i = 0; i < g_ngld; i++) if (g_gld[i].t > w0) { deaths++; empty += g_gld[i].empty; }
-    if (!force && !deaths && !kills) return;   // (not playing: no revision)
+    // (2026-11-09: a quiet window -- no kill, no death -- is a revision too, so the reviews keep coming every period (the monitor had to
+    //  force them as "stale"); only out of a match none)
+    if (!force && !deaths && !kills && !(g_gameplay_t0 > 0)) return;
     float mins = (float)(now - w0) / 60.0f; if (mins < 0.05f) mins = 0.05f;
     float dpm = deaths / mins, kd = (kills + 0.5f) / (deaths + 0.5f); if (kd > 1) kd = 1;
     float bad = (1 - kd) + (dpm > 1 ? (dpm - 1) / 3.0f : 0); if (bad > 1) bad = 1;
