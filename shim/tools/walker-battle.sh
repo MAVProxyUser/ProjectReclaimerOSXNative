@@ -35,13 +35,17 @@ IDS=(${WB_IDS:-0 1 2 3})   # (which identities walk, by index into NAMES: WB_IDS
 [ "$N" -ge 2 ] && [ "$N" -le 4 ] || { echo "2..4 walkers"; exit 1; }
 for i in $(seq 0 $((N - 1))); do k=${IDS[$i]}; [ $k -lt 2 ] || [ -f "$SUP/${NAMES[$k]}/profile.json" ] || { echo "${NAMES[$k]} missing: bash shim/tools/walker-battle.sh init"; exit 1; }; done
 T=$(mktemp -d "${TMPDIR:-/tmp}/walker-battle.XXXXXX"); OUT="$BT/$(date +%Y%m%d-%H%M%S)-n$N.jsonl"
+# the walkers' games run HEADLESS by default (2026-11-08, the user: "running all 3 clients visible lagged the screen hard, can you drive
+# the client without the display?"): the app's own --headless (no window, the null renderer); WB_VISIBLE=1 = the old small windows
+# (--background, 640 x 360) to watch them
+VIEW=--headless; [ "${WB_VISIBLE:-0}" = 1 ] && VIEW=--background
 bash shim/tools/native-dedicated.sh start >/dev/null || exit 1
 for i in $(seq 0 $((N - 1))); do k=${IDS[$i]}; d="$SUP/${NAMES[$k]}"
   WE=$(eval echo "\${W${k}_ENV:-}")   # (per walker: W0_ENV .. W3_ENV, e.g. "NHOOK_BOT_SKILL=0.8 NHOOK_BOT_DIST=0.7": walker-train.py)
   env $WE NATIVE_LOG="$T/w$k.log" NATIVE_PROFILE="$d" RECLAIMER_CACHE_DIR="$d-cache" PELOAD_FORENSIC_DIR="$d-forensics" NHOOK_HEATMAP_DIR="$d-heatmaps" \
     NHOOK_STATS_HTTP="${PORTS[$k]}" NHOOK_STATS_OPEN=0 NATIVE_ALLOW_SECOND=1 NHOOK_MUTE_OUTPUT=1 \
     NHOOK_VPAD=1 NHOOK_SPAR=1 NHOOK_NAV=enemy NHOOK_BOT_FIRE=1 NHOOK_BOT_FIGHT=1 NHOOK_SPAR_LOG=1 PELOAD_NAV_LOG=1 ${EXTRA[@]+"${EXTRA[@]}"} \
-    bash shim/native.sh --join-server 127.0.0.1:49190 --background > "$T/w$k.out" 2>&1 &
+    bash shim/native.sh --join-server 127.0.0.1:49190 "$VIEW" > "$T/w$k.out" 2>&1 &
   sleep 6; done
 echo "battle: $N walkers, $SECS s; logs $T; samples -> $OUT"
 # WB_WATCH=1: open the server's stats page (every walker on the map, the scoreboard, the feed) in the browser to watch the battle
