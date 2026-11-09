@@ -1103,6 +1103,10 @@ static void bot_step_body(void) {
                   //  first melee wins once a shield is down, and the lunge reaches past the players' median landing distance. Within
                   //  NHOOK_BOT_MELEE_RACE (1.8) units with either shield under 0.15: melee now)
                   float mrace = 1.8f; lk_over(&mrace, "NHOOK_BOT_MELEE_RACE"); if (!mcls && (o->shield < 0.15f || ftg.shield < 0.15f) && mrace > mr) mr = mrace;
+                  // (13:20: THE LUNGE, measured -- 10 recorded melee kills: the killer's lunge began at a median 2.24 units (p25 1.78), the
+                  //  victim's shield then a median 0.57, the killer's full. Within NHOOK_BOT_MELEE_LUNGE (2.0) units with the target's shield
+                  //  under NHOOK_BOT_MELEE_LUNGE_SH (0.7): melee)
+                  { float ml = 2.0f, mls = 0.7f; lk_over(&ml, "NHOOK_BOT_MELEE_LUNGE"); lk_over(&mls, "NHOOK_BOT_MELEE_LUNGE_SH"); if (!mcls && ftg.shield < mls && ml > mr) mr = ml; }
                   if (vis && tdist < mr && now - tmelee > 0.6 && now - tacq > 0.15 && now - g_kite_t > 0.5) { tmelee = now;   // (not into a sword / hammer: g_kite_t)
                       if (bot_log()) nlog("[nhook] [melee] %s at %.2f units (target shield %.2f: %s), holding %s", mcls ? "swing" : "melee", tdist, ftg.shield, ftg.shield < 0.05f ? "beatdown" : "full", g_inv.held ? g_inv.held : "-"); }
                   static float mh = -1; if (mh < 0) { const char* e = getenv("NHOOK_BOT_MELEE_HOLD"); mh = e ? strtof(e, 0) : 0.3f; }

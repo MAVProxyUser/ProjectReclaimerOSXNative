@@ -3272,6 +3272,12 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   a running battle, at every round end (our server's in_match true -> false) walker-coach.py round + match-study.py, then each
   walker's game restarted headless with its new knobs and the newest build (they rejoin in the lobby; the user's game and the
   server stay).
+- **The melee lunge from the players' numbers** (2026-11-09 13:20; nbot.c the melee press, shim/tools/melee-lunge.py) — WHY: the walker
+  meleed within 1.22 units (1.45 in a race) and lost beatdown after beatdown; guessed ranges had fallen short (1.67 whiffed).
+  melee-lunge.py measured 10 recorded melee kills: the killer's lunge (its fastest step in the last 0.6 s) began at a median 2.24 units
+  (p25 1.78, p75 3.28), the kill at 1.45, the victim's shield then a median 0.57, the killer's full. LOGIC: within NHOOK_BOT_MELEE_LUNGE
+  (2.0, live) units with the target's shield under NHOOK_BOT_MELEE_LUNGE_SH (0.7, live) the melee goes out (not with a sword / hammer of
+  its own, never into a kited swinger).
 - **Battery weapons have no magazine** (2026-11-09 13:15; nbot.c bot_ammo_of) — WHY: "DRY: PLASMA RIFLE still empty after 2 reloads"
   and a death "PLASMA RIFLE 0 rounds": the learnt magazine field (+0x23a) reads 0 for a plasma rifle all its life (a battery, no rounds),
   so it counted as empty -> reload clicks, DRY, the empty-gun rush. LOGIC: the field counts for a weapon definition only once it has read
