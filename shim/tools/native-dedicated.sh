@@ -74,11 +74,12 @@ case "${1:-status}" in
     # DED_PUBLIC=1 (2026-11-09, the public walker server): the app counts any RECLAIMER_PROFILE_DIR profile as a TEST profile and then
     # leaves the masters and the router alone ("test profile: master at ... left alone") -- a listed server runs without it, with a
     # home of its own in the server's folder (never the user's profile)
+    MCCF="$(cat "$HOME/Library/Application Support/ProjectReclaimer/mcc-folder.txt")"   # (read before a public server's own HOME replaces it)
     (cd "$D" && if [ "${DED_PUBLIC:-0}" = 1 ]; then mkdir -p "$D/public-home"; export HOME="$D/public-home"; else export RECLAIMER_PROFILE_DIR="$D/profile" RECLAIMER_CACHE_DIR="$D/cache"; fi
        NHOOK_ROLE=server NHOOK_STATS_HTTP="${NHOOK_STATS_HTTP:-8767}" NHOOK_STATS_OPEN=0 \
        PELOAD_FORENSIC_DIR="$D/forensics" NHOOK_HEATMAP_DIR="$D/heatmaps" NHOOK_LOG="$LOG.nhook" \
        NHOOK_STATS_PAGE="$OLDPWD/shim/src/stats_page.html" \
-       NHOOK_HALO3="$(cat "$HOME/Library/Application Support/ProjectReclaimer/mcc-folder.txt")/halo3/halo3.dll" \
+       NHOOK_HALO3="$MCCF/halo3/halo3.dll" \
        DYLD_INSERT_LIBRARIES="$OLDPWD/shim/build/nhook.dylib" "$B" --server "./$CF" < /dev/null > "$LOG" 2>&1 & echo $! > "$PIDF")   # (no nohup: a system binary strips DYLD_*)
     echo "started (pid $(cat "$PIDF")), log $LOG; stats http://127.0.0.1:${NHOOK_STATS_HTTP:-8767}/; join: bash shim/native.sh --join-server 127.0.0.1:49190" ;;
   stop)

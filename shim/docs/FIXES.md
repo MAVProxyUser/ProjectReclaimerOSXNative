@@ -3272,6 +3272,25 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   a running battle, at every round end (our server's in_match true -> false) walker-coach.py round + match-study.py, then each
   walker's game restarted headless with its new knobs and the newest build (they rejoin in the lobby; the user's game and the
   server stay).
+- **Five-minute variant epochs; the public server behind carrier-grade NAT** (2026-11-09 03:45; shim/tools/walker-epochs.py,
+  walker-restart.sh WR_ENV, ded-public-config.py [master] off, native-dedicated.sh MCCF) — WHY: the user: "walkers should read the game
+  corpus every 5 minutes and retrain and understand where their K/D, shots fired vs landed, melee kills, powerup kills, power weapon
+  kills, and heat maps per level come into play in being better. the better walker variant will win out every 5 minutes in a weighted
+  vote for the best model"; "upnp won't help I'm on starlink behind cgnat". LOGIC: walker-epochs.py keeps a population of 4 knob sets
+  (A = the coached knobs, B..D log-normal mutations); every 300 s it scores the running one from the recordings -- log((k+1)/(d+1)) +
+  0.8 accuracy + 0.3 (melee + power-weapon + power-up kills) + 0.02 ball seconds - 0.5 share of deaths in the map's hot cells (the
+  top tenth of 3-unit cells by deaths over the whole corpus of that map, tracks/ + battles/tracks) -- as a running mean, then a vote:
+  votes exp(mean / 0.5), an untried variant as the best + 0.5; every 3rd epoch the worst tried variant becomes a mutation of the best;
+  a new pick restarts the walker with its knobs (walker-restart.sh WR_ENV, after the coached ones). battles/epochs/{population.json,
+  epochs.jsonl}. NAT: with this machine's master on, the server registered only with it ("registered with the server list at
+  127.0.0.1:49175") -- behind carrier-grade NAT nobody reaches that master and it kept the listing to itself; with [master] off the game
+  socket registers with the project's public masters (seen: "registered with the server list at <public master> as <public addr>:<NAT
+  port>"), which list it and introduce players through the NAT. UPnP / PCP get no answer there. BUG FIXED: DED_PUBLIC changed HOME before
+  the launcher read the MCC folder, so the server's nhook found no halo3.dll and its stats page (8767) never came up -- the folder is
+  read first now; the running match is recorded from the walker's own page (8766) meanwhile. DECLINED the same hour: the walker in the
+  LARGEST public game on another owner's server, renamed and announcing itself -- that server's owner and players never agreed to an
+  automated client that reads positions from memory (the platform's own bots need the owner's allow_bots and take no part in the
+  game); our listed server (named for it, a welcome line naming the walker) and shadow mode stay the ways.
 - **Oddball play, a public walker server, out of any driver's seat** (2026-11-09 03:20; nbot.c ob_scan / the ball moves / driver's-seat
   exit tries / gun_near_veh, nbot_engage.c carrier bonus, shim/tools/ded-public-config.py, native-dedicated.sh DED_CONFIG / DED_PUBLIC,
   walker-battle.sh one walker) — WHY: the user: "start a big team battle match with one walker, and me, and make it public, set the size

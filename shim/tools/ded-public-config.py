@@ -52,7 +52,10 @@ host_name = %s
 admins = []
 stats_server = "off"
 [master]
-enabled = true
+# off: this machine's master (behind carrier-grade NAT nobody reaches it, and it kept the server's registration to itself: "registered
+# with the server list at 127.0.0.1:49175") -- the game socket registers with the project's public masters, which list it and introduce /
+# relay players through the NAT
+enabled = false
 port = 49175
 peers = []
 [rcon]
