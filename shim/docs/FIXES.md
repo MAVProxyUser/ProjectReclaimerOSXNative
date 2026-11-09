@@ -3218,6 +3218,14 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   stats: all 13 pad buttons x2, all 12 packet bits x2 -- no damage. BUT the positive control (--no-pads --bits 19: the fire
   bit) did no damage either: the measurement itself is broken (B's server-side shield / A's position or fire in that setup), so
   those negatives prove nothing yet. Being fixed next.
+  21:40: the scan's own fault found halfway -- by hand (melee-scan.py --hold, then do=botpad / do=botbtn): the pad's right trigger
+  held 3 s fired NOTHING (0 shots on A's own client), the control-record fire bit 19 held 3 s fired 31 shots on A's client while
+  the SERVER counted 0 and B's shield stayed full: in this setup (sparring aim only, no fighter) a joined client's shots never
+  reach the server, so no scan result there means anything yet (in walker battles -- fighter on, pad + bit together -- shots do
+  land: 117 assault-rifle kills). Next: the same probe with the fighter's path. TURNED BACKS (same hour, the user: "especially if
+  the opponent's back is to it"): the walker runs straight at a target looking away (its aim, NovObj.aim, over 110 deg off the
+  line to the walker) within melee.json's back_rush_from (3.31 units) and presses melee there; it keeps shooting meanwhile (no
+  walker melee lands yet). NHOOK_BOT_NOBACK=1 = off. melee-scan.py --hold / --debug / --rt-control / --no-pads.
 - **A walker no longer stands still going for a weapon it cannot reach** (2026-11-08 20:20; nbot.c pickups) — WHY: in a melee test
   battle one walker stood the whole 3 minutes logging "going for BATTLE RIFLE (8.1 units)" (moved 0 units): a pickup target was only
   marked tried once reached. LOGIC: a target that brings no progress (0.5 units closer) in 6 s is given up and marked tried ("gave up

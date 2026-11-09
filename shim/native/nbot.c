@@ -300,17 +300,17 @@ static float bot_band_off(const char* cls, float d, float kd) {   // 0 inside th
 // a median 0.65 units (p75 0.97), the killer closing ~2.1 units in the last second (2.9 apart 1 s before); half of them finish a
 // victim whose shield was already down (closing in from ~3.2 units, p75); sword kills within 1.28 (p75), hammer within 1.33.
 // NHOOK_BOT_NOMELEE=1 = the old melee (1.8 units, one step, the trigger held).
-typedef struct { float range, rush, sword, hammer; int loaded; } BotMelee;
-static BotMelee g_mel = {0.97f, 3.24f, 1.28f, 1.33f, 0};
+typedef struct { float range, rush, sword, hammer, back; int loaded; } BotMelee;
+static BotMelee g_mel = {0.97f, 3.24f, 1.28f, 1.33f, 3.31f, 0};   // (back: an enemy looking away is rushed from here -- players: 3.3 units)
 static void mel_load(void) {
     if (g_mel.loaded) return; g_mel.loaded = 1; char p[1100]; const char* e = getenv("NHOOK_MELEE_FILE"), *h = getenv("HOME");
     if (e) snprintf(p, sizeof p, "%s", e); else snprintf(p, sizeof p, "%s/Library/Application Support/ReclaimerMac/tracks/melee.json", h ? h : "/tmp");
     FILE* f = fopen(p, "r"); if (!f) { nlog("[nhook] [melee] no %s: the built-in numbers (range %.2f, rush from %.1f)", p, g_mel.range, g_mel.rush); return; }
     static char b[65536]; size_t n = fread(b, 1, sizeof b - 1, f); fclose(f); b[n] = 0; const char* w = strstr(b, "\"walker\"");
     #define MELNUM(k, v) { const char* q = w ? strstr(w, "\"" k "\":") : 0; if (q) { float x = strtof(q + strlen(k) + 3, 0); if (x > 0.1f && x < 10) v = x; } }
-    MELNUM("melee_range", g_mel.range) MELNUM("rush_from", g_mel.rush) MELNUM("sword_range", g_mel.sword) MELNUM("hammer_range", g_mel.hammer)
+    MELNUM("melee_range", g_mel.range) MELNUM("rush_from", g_mel.rush) MELNUM("sword_range", g_mel.sword) MELNUM("hammer_range", g_mel.hammer) MELNUM("back_rush_from", g_mel.back)
     #undef MELNUM
-    nlog("[nhook] [melee] players' numbers: melee within %.2f units, beatdown rush from %.1f, sword %.2f, hammer %.2f", g_mel.range, g_mel.rush, g_mel.sword, g_mel.hammer); }
+    nlog("[nhook] [melee] players' numbers: melee within %.2f units, beatdown rush from %.1f, a turned back from %.1f, sword %.2f, hammer %.2f", g_mel.range, g_mel.rush, g_mel.back, g_mel.sword, g_mel.hammer); }
 // weapons that act on a trigger PULL (holding does not repeat): the trigger is pulsed (0.12 s down, 0.12 s up) while firing.
 // (the bullet log shows the battle rifle and carbine firing on while held: bursts every 0.25-0.35 s)
 static int bot_pull_weapon(const char* w) {
@@ -491,7 +491,15 @@ static void bot_step_body(void) {
                 // the beatdown rush (players: half of the melee kills finish a victim whose shield is down, closing in from ~3.2 units) and a
                 // sword / hammer closing in to its swing range (melee.json; not with a rocket launcher in hand)
                 { static int nm = -1; if (nm < 0) nm = getenv("NHOOK_BOT_NOMELEE") != 0; int mcls = g_inv.held_c && !strcmp(g_inv.held_c, "melee");
-                  if (!nm && vis && ((ftg.shield < 0.05f && ftg.health > 0 && tdist < g_mel.rush && !(g_inv.held_c && !strcmp(g_inv.held_c, "rocket"))) || (mcls && tdist < 10.0f))) { r = 0.9f; lat *= 0.3f; } }
+                  // (2026-11-08, the user: "melee more when it is in close to an opponent! especially if the opponent's back is to it":
+                  //  a target LOOKING AWAY -- its aim more than 110 deg off the line to the walker -- within the players' back-rush
+                  //  distance is run at straight; players take that chance at arm's length only 20% of the time. Shots go on: the
+                  //  walker's melee does not land on a server yet, backlog N26. NHOOK_BOT_NOBACK=1 = off)
+                  static int nb = -1; if (nb < 0) nb = getenv("NHOOK_BOT_NOBACK") != 0;
+                  float ax = ftg.aim[0], ay = ftg.aim[1], al = sqrtf(ax * ax + ay * ay), vx = o->c[0] - ftg.c[0], vy = o->c[1] - ftg.c[1], vl = sqrtf(vx * vx + vy * vy);
+                  int back = !nb && al > 0.1f && vl > 0.01f && (ax * vx + ay * vy) / (al * vl) < -0.342f;   // (cos 110 deg)
+                  if (back && tdist < g_mel.back) { static double tb; if (bot_log() && now - tb > 2.0) { tb = now; nlog("[nhook] [melee] its back is turned at %.1f units: going in", tdist); } }
+                  if (!nm && vis && ((back && tdist < g_mel.back) || (ftg.shield < 0.05f && ftg.health > 0 && tdist < g_mel.rush && !(g_inv.held_c && !strcmp(g_inv.held_c, "rocket"))) || (mcls && tdist < 10.0f))) { r = 0.9f; lat *= back ? 0.0f : 0.3f; } }
                 // never off the floor: test where this step leads (1 unit along the move); flip the strafe, then drop the back-off
                 float fx = cosf(yaw0), fy = sinf(yaw0), lx = -fy, ly = fx;
                 for (int tries = 0; tries < 3; tries++) { float p2[3] = {o->c[0] + (fx * r + lx * lat) * 1.2f, o->c[1] + (fy * r + ly * lat) * 1.2f, o->c[2] - 0.35f};

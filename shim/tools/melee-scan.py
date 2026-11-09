@@ -23,7 +23,8 @@ PADS = [('A', 0x1), ('B', 0x2), ('X', 0x4), ('Y', 0x8), ('LB', 0x10), ('RB', 0x2
         ('d-pad up', 0x400), ('d-pad down', 0x800), ('d-pad left', 0x1000), ('d-pad right', 0x2000), ('left trigger', 0x40000000)]
 BITS = [int(b) for b in arg('--bits', ','.join(str(b) for b in range(64) if b not in (1, 19, 21, 30))).split(',') if b != '']
 if '--pads-only' in sys.argv: BITS = []
-if '--no-pads' in sys.argv: PADS = []   # (e.g. --no-pads --bits 19: the positive control -- the fire bit must hurt B)
+if '--no-pads' in sys.argv: PADS = []   # (e.g. --no-pads --bits 19: the control-record fire bit)
+if '--rt-control' in sys.argv: PADS = [('right trigger', 0x80000000)]; BITS = []   # (the positive control: the pad's trigger must hurt B)
 # --packet: the bits the control packet actually carries to the server (net-authority.md: action +8 bits 0-2, 11, 14 and +0x2c's
 # 7 bits), set straight in the packed record (do=botpkt) -- no pad button meleed (first scan, 2026-11-08)
 PKT = [('packet +8 bit %d' % k, 'b8', 1 << k) for k in (0, 1, 2, 11, 14)] + [('packet +0x2c bit %d' % k, 'b2c', 1 << k) for k in range(7)]
@@ -63,6 +64,9 @@ def main():
             time.sleep(2)
         else: print('the two players never both came alive'); return 1
         time.sleep(4)
+        if '--hold' in sys.argv:   # (the setup only, for poking by hand: POST controls to 8765 (A), read 8767 (the server))
+            a, b = players(); print('holding %s s: A slot %s, B slot %s' % (arg('--hold', '300'), a.get('slot'), b.get('slot')), flush=True)
+            time.sleep(float(arg('--hold', '300'))); return 0
         cands = [('pkt', n, (f, v)) for n, f, v in PKT] if '--packet' in sys.argv else [('pad', n, v) for n, v in PADS] + [('bit', 'bit %d' % k, 1 << k) for k in BITS]
         for kind, name, v in cands * REP:
             # B alive with a full shield (it recharges ~5 s after damage; a dead B respawns)
@@ -77,6 +81,11 @@ def main():
             else: ok = ctl(PA, ('do=botpad&b=%x&secs=%.2f' if kind == 'pad' else 'do=botbtn&bits=%x&secs=%.2f') % (v, SECS))
             time.sleep(1.2)
             a2, b2 = players(); s1 = b2.get('shield', 0) if b2 else 0; h1 = b2.get('health', 0) if b2 else 0; alive = bool(b2 and b2.get('alive'))
+            if '--debug' in sys.argv:   # (the setup itself: where both are on the server, what A's client sees, A's shots)
+                sa = get(PA) or {}; pa = [p for p in (sa.get('players') or []) if p.get('name') == 'Second']
+                pos = lambda p: [round(x, 2) for x in (p.get('pos') or p.get('position') or [])] if p else None
+                print('   server: A %s B %s (keys %s); A sees B shield %s; A perf %s; A shots %s' % (pos(a2), pos(b2), sorted((b2 or {}).keys())[:12],
+                      pa[0].get('shield') if pa else None, (sa.get('perf') or {}).get('fps'), [p.get('shots') for p in (sa.get('players') or []) if p.get('name') != 'Second']), flush=True)
             dmg = (s0 - s1) + (h0 - h1) if alive else s0 + h0
             r = {'input': name, 'kind': kind, 'value': v if kind != 'pkt' else '%s=%x' % v, 'accepted': bool(ok), 'shield_before': s0, 'shield_after': s1, 'health_after': h1, 'killed': not alive, 'damage': round(dmg, 3)}
             res.append(r); print('%-20s %s damage %.2f (shield %.2f -> %.2f, health %.2f)%s' % (name, ' ' if ok else '!', dmg, s0, s1, h1, '  <== HIT' if dmg > 0.15 else ''), flush=True)
