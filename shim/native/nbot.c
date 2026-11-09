@@ -453,13 +453,14 @@ static void ammo_learn(double now, const NovObj* o) {
 // fight, with two weapons, the brain presses one candidate record bit for 0.1 s (never jump 1, fire 19 / 21, grenade 30) and looks
 // 0.7 s later whether the weapon slot (+0x262) changed; a bit that switches twice is THE switch, saved to native/switch-bit.txt and
 // read back by every later brain. [swscan] lines. NHOOK_BOT_SWSCAN=0 (live) = off.
-static int g_swbit = -1; static uint64_t g_swscan_bits; static double g_swrec_until;
+static int g_swbit = -1; static uint64_t g_swscan_bits; static double g_swrec_until; static int g_eng_close; static int g_swscan_busy;   // (busy: a candidate pressed / watched -- no other switch then)
 static const char* swbit_path(void) { static char p[1024]; if (!p[0]) { const char* h = getenv("HOME"); snprintf(p, sizeof p, "%s/Library/Application Support/ReclaimerMac/native/switch-bit.txt", h ? h : ""); } return p; }
 static void swscan_tick(double now, const NovObj* o, int engaged) {
     g_swscan_bits = 0;
     { static int rd0; if (!rd0) { rd0 = 1; FILE* f = fopen(swbit_path(), "r"); if (f) { int b = -1; if (fscanf(f, "%d", &b) == 1 && b >= 0 && b < 64) { g_swbit = b; nlog("[nhook] [swscan] the switch is control-record bit %d (learned before)", b); } fclose(f); } } }
     if (g_swbit >= 0) return; float on = 1; lk_over(&on, "NHOOK_BOT_SWSCAN"); if (on <= 0) return;
     static int cand = -1, hits[64], tries[64], slot0; static double tpress, tnext;
+    g_swscan_busy = tpress > 0;
     if (tpress > 0) {
         if (now - tpress < 0.1) { g_swscan_bits = 1ull << cand; return; }
         if (now - tpress < 0.8) return;
@@ -470,8 +471,9 @@ static void swscan_tick(double now, const NovObj* o, int engaged) {
     if (engaged || !g_inv.has_other || now < tnext || o->seat >= 0 || o->parent != 0xFFFFFFFFu) return;
     if (cand < 0) { static int next = 0; for (int k = 0; k < 64; k++) { int b = (next + k) % 64; if (b == 1 || b == 19 || b == 21 || b == 30) continue; if (tries[b] >= 3 && !hits[b]) continue; cand = b; next = b + 1; break; } }
     if (cand < 0) return;
-    slot0 = o->wslot; tpress = now; g_swscan_bits = 1ull << cand; }
-static void bot_switch_press(double now) { if (g_swbit >= 0) g_swrec_until = now + 0.1; else { float swp = 0.03f; lk_over(&swp, "NHOOK_BOT_SWPULSE"); g_bot_switch_until = now + swp; } }   // (the learnt record bit, else the packet pulse)
+    if (now - g_bot_switch_until < 1.0 || now - g_swrec_until < 1.0) return;   // (a switch just went out: wait until it has settled)
+    slot0 = o->wslot; tpress = now; g_swscan_busy = 1; g_swscan_bits = 1ull << cand; }
+static void bot_switch_press(double now) { if (g_swscan_busy) return; if (g_swbit >= 0) g_swrec_until = now + 0.1; else { float swp = 0.03f; lk_over(&swp, "NHOOK_BOT_SWPULSE"); g_bot_switch_until = now + swp; } }   // (the learnt record bit, else the packet pulse)
 static int bot_ammo_of(uint64_t wd, uint32_t def, int* maxv) {   // rounds loaded (-1 unknown), and the most seen for that weapon definition
     static struct { uint32_t def; int max, nv; int16_t v[3]; } mx[64]; static int nmx; int off = bot_ammo_off(); int16_t a = -1;
     if (g_ammo_learned >= 0) { if (!wd || !hb_read(wd + g_ammo_learned, &a, 2) || a < 0) { if (maxv) *maxv = 0; return -1; }   // (learned: ammo_learn above)
@@ -910,7 +912,7 @@ static void bot_step_body(void) {
         static char w[96]; snprintf(w, sizeof w, me < 0 ? "the record's unit %08x is none of the %d units seen" : objs[me].dead ? "dead" : "in a vehicle", meh, n); bot_idle(me < 0 ? w : objs[me].dead ? "dead" : "in a vehicle"); return; }
     const NovObj* o = &objs[me]; int out = 0; float yaw = yaw0, pitch = pitch0; g_bot_unit_p = o->p;
     { static int noinv = -1; if (noinv < 0) noinv = getenv("NHOOK_BOT_NOINV") != 0; if (!noinv) { ammo_learn(now, o); bot_inv(o, &g_inv); } else memset(&g_inv, 0, sizeof g_inv);
-      { static int eng_last; swscan_tick(now, o, eng_last); eng_last = g_bot_fighting && g_bot_err >= 0; }   // (the switch-bit scan: out of fights)   // (NHOOK_BOT_NOINV=1: blind to it, the old walker)
+      swscan_tick(now, o, g_eng_close);   // (the switch-bit scan: no enemy in sight within 20 units -- g_eng_close, set by the fight section)   // (NHOOK_BOT_NOINV=1: blind to it, the old walker)
       if (bot_log()) { static BotInv last; static double tl; if (now - tl > 5.0 || last.held != g_inv.held || last.os != g_inv.os || last.camo != g_inv.camo || last.gren != g_inv.gren) { tl = now; last = g_inv;
           nlog("[nhook] [inv] holding %s (%s, %d rounds), other %s (%s); grenades %d (frag %d, plasma %d)%s%s", g_inv.held ? g_inv.held : "-", g_inv.held_c, g_inv.ammo, g_inv.other ? g_inv.other : "-", g_inv.other_c,
                g_inv.gren, g_inv.frag, g_inv.plasma, g_inv.os ? ", OVERSHIELD" : "", g_inv.camo ? ", CAMO" : ""); } } }
@@ -937,7 +939,7 @@ static void bot_step_body(void) {
             // LEAD (10:25): Halo 3 registers a client's bullets on the HOST, no lag compensation -- a third of the walker's shots through
             // a hitbox registered no damage (aim reg 0.67): the aim point leads the target by its velocity (units a second) x
             // NHOOK_BOT_AIMLEAD s (live, 0.06; follow-study.py hones it on registered hits a shot)
-            { float lead = 0.06f; lk_over(&lead, "NHOOK_BOT_AIMLEAD"); ap[0] += t->vel[0] * lead; ap[1] += t->vel[1] * lead; ap[2] += t->vel[2] * lead * 0.5f; }
+            { float lead = 0.0f; lk_over(&lead, "NHOOK_BOT_AIMLEAD"); ap[0] += t->vel[0] * lead; ap[1] += t->vel[1] * lead; ap[2] += t->vel[2] * lead * 0.5f; }
             float d[3] = {ap[0] - cam[0], ap[1] - cam[1], ap[2] - cam[2]}; float h = sqrtf(d[0] * d[0] + d[1] * d[1]);
             if (h > 0.01f) { yaw = atan2f(d[1], d[0]); pitch = atan2f(d[2], h); out |= 1; ftg = *t; have_tg = 1; tdist = sqrtf(bd); tyaw = yaw; tpitch = pitch;
                 // the error against the record's angles (the aim the engine used last tick: the lag behind a moving target). Not
@@ -968,7 +970,7 @@ static void bot_step_body(void) {
     float skill = skill_0, kdist = kdist_0, kstrafe = kstrafe_0, kswitch = kswitch_0, fextra = fextra_0, retreat = retreat_0, gren = gren_0, backoff = backoff_0, press = press_0;   // (live knobs)
     lk_over(&skill, "NHOOK_BOT_SKILL"); lk_over(&kdist, "NHOOK_BOT_DIST"); lk_over(&kstrafe, "NHOOK_BOT_STRAFE"); lk_over(&kswitch, "NHOOK_BOT_SWITCH"); lk_over(&fextra, "NHOOK_BOT_FIRE_EXTRA");
     lk_over(&retreat, "NHOOK_BOT_RETREAT"); lk_over(&gren, "NHOOK_BOT_GREN"); lk_over(&backoff, "NHOOK_BOT_BACKOFF"); lk_over(&press, "NHOOK_BOT_PRESS");
-    int engaged = 0; float ftx = 0, fty = 0; uint32_t fbtn = 0; g_bot_fighting = fight && spar;
+    int engaged = 0; float ftx = 0, fty = 0; uint32_t fbtn = 0; g_bot_fighting = fight && spar; g_eng_close = 0;   // (set again below when an enemy is in sight within 20 units)
     if (fight) { eg_load_for(g_st_curmap, g_trk_mode); wz_load(g_st_curmap); }   // (the models for this map and game: reloaded when either changes; the weapon zones)
     if (fight && spar && have_tg) {
         static uint32_t cur; static double tacq, tvis, tswitch, tmelee, tgren, tlos, tlast; static float ox, oy, side = 1;
@@ -1176,6 +1178,7 @@ static void bot_step_body(void) {
         if (bot_log() && g_vpad_on) { static double tr; static unsigned long pr[4]; static int ps, pc; if (now - tr > 10.0) { unsigned long r[4]; nh_vpad_btn_reads(r); int sr = nh_vpad_stick_reads(), cr = nh_vpad_reads();
               if (tr > 0) nlog("[nhook] [vpad] the app read in %.0f s: controllers %d, left stick %d, B %lu, Y %lu, RB %lu, right trigger %lu", now - tr, cr - pc, sr - ps, r[0] - pr[0], r[1] - pr[1], r[2] - pr[2], r[3] - pr[3]);
               tr = now; memcpy(pr, r, sizeof pr); ps = sr; pc = cr; } }
+        g_eng_close = engaged && tdist < 20 && vis;
         if (bot_log()) { static double tl; if (now - tl > 1.0) { tl = now; nlog("[nhook] [fight] target %08x %.1f u %s, err %.1f deg, %s%s, shield %.2f", ftg.handle, tdist, vis ? "in sight" : "hidden", g_bot_err, engaged ? "engaged" : "hunting", g_bot_fire ? ", FIRING" : "", o->shield); } }
     }
     // ---- pickups (NHOOK_BOT_PICKBIT=<hex>: the control record's pick-up bit, shim/tools/native-pickup-scan.sh finds it): out of a

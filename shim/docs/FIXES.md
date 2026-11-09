@@ -3272,6 +3272,16 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   a running battle, at every round end (our server's in_match true -> false) walker-coach.py round + match-study.py, then each
   walker's game restarted headless with its new knobs and the newest build (they rejoin in the lobby; the user's game and the
   server stay).
+- **A mixture policy sampled, the aim lead off, the switch scan isolated** (2026-11-09 11:05-11:20; policy-train.py --mdn, npolicy.c,
+  nbot.c swscan / bot_switch_press, follow-study.py LEADS) — WHY: the one-move policy predicts the AVERAGE of what the best players do
+  -- a player strafes left OR right, the mean is a timid half-move: not "nimble"; the aim-lead honing's first try (0.04 s) registered
+  0.20 hits a shot against 0.70 with no lead (125 / 35 shots) and the window went 0 kills / 4 deaths at 19% accuracy -- this client's
+  hits register where it sees the target; the switch scan's first two "hits" (bits 0 and 3) were confounded by the empty-magazine
+  handler's own switch pulses. LOGIC: policy-train.py --mdn K (default 5): the network outputs a K-Gaussian mixture over the next
+  move (K logits, K x 2 means, K x 2 log sigmas) + the jump logit, trained by likelihood on the GPU (28 s, 10 epochs); npolicy.c samples
+  a component, then a move from it, every 0.1 s (the last two moves are inputs: sampled strafes chain into the players' rhythms);
+  either shape loads ("one mean move" / "a mixture of moves (sampled)"). The aim lead defaults to 0 and is honed only among 0 / 0.02 s.
+  While a scan candidate is pressed and watched, bot_switch_press sends nothing, and a candidate waits 1 s after any other switch.
 - **The head gate holds fire only for the kill shot** (2026-11-09 11:00; nbot.c the precision fire gate) — WHY: 5 of the walker's last
   12 deaths were battle-rifle headshots: it lost the precision duels; the always-on head gate (fire only within the head's angular size
   + 0.3 deg) is about the aim's own spread at 20+ units, so it halved the rate of fire while the target's shields were still up -- and

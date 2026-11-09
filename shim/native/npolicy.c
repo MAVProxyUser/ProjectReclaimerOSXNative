@@ -8,7 +8,7 @@
 // policy alone); its jumps go out at NHOOK_BOT_POLICY >= 0.5. Included by nbot.c (brain code).
 
 enum { POL_MAXIN = 64, POL_MAXH = 256, POL_MAXL = 4 };
-static struct { int ok, nin, nl, rows[POL_MAXL], cols[POL_MAXL]; float mean[POL_MAXIN], sd[POL_MAXIN]; float* W[POL_MAXL]; float* b[POL_MAXL]; char trained[32]; float val, still, rep; } g_pol;
+static struct { int ok, nin, nl, k, rows[POL_MAXL], cols[POL_MAXL]; float mean[POL_MAXIN], sd[POL_MAXIN]; float* W[POL_MAXL]; float* b[POL_MAXL]; char trained[32]; float val, still, rep; } g_pol;
 
 // a JSON number array (nested brackets flattened) starting at the first '[' at or after p; -> count read (at most max), *end past it
 static int pol_floats(const char* p, float* out, int max, const char** end) {
@@ -30,25 +30,26 @@ static void pol_tick(double now) {
         float* bv = malloc(sizeof(float) * POL_MAXH); int nb = pol_floats(bb, bv, POL_MAXH, &e);
         if (nw <= 0 || nb <= 0 || nb > POL_MAXH || nw != nb * prev) { free(wv); free(bv); bad = 1; break; }
         W[nl] = wv; B[nl] = bv; rows[nl] = nb; cols[nl] = prev; prev = nb; nl++; L = e; }
-    if (bad || nl < 2 || rows[nl - 1] != 3) { nlog("[nhook] [policy] %s: not a policy this walker can run (inputs %d, layers %d)", path, nin, nl); for (int i = 0; i < nl; i++) { free(W[i]); free(B[i]); } free(buf); return; }
+    int nout = nl ? rows[nl - 1] : 0, mk = nout == 3 ? 0 : (nout - 1) % 5 == 0 && nout <= 61 ? (nout - 1) / 5 : -1;   // (3 = one mean move; 5K+1 = a K-mixture, 11:05)
+    if (bad || nl < 2 || mk < 0) { nlog("[nhook] [policy] %s: not a policy this walker can run (inputs %d, layers %d)", path, nin, nl); for (int i = 0; i < nl; i++) { free(W[i]); free(B[i]); } free(buf); return; }
     for (int i = 0; i < g_pol.nl; i++) { free(g_pol.W[i]); free(g_pol.b[i]); }
-    g_pol.nin = nin; g_pol.nl = nl; memcpy(g_pol.mean, mean, sizeof mean); for (int i = 0; i < nin; i++) g_pol.sd[i] = sd[i] > 1e-6f ? sd[i] : 1;
+    g_pol.nin = nin; g_pol.nl = nl; g_pol.k = mk; memcpy(g_pol.mean, mean, sizeof mean); for (int i = 0; i < nin; i++) g_pol.sd[i] = sd[i] > 1e-6f ? sd[i] : 1;
     for (int i = 0; i < nl; i++) { g_pol.W[i] = W[i]; g_pol.b[i] = B[i]; g_pol.rows[i] = rows[i]; g_pol.cols[i] = cols[i]; }
     { const char* t = strstr(buf, "\"trained\""); g_pol.trained[0] = 0; if (t && (t = strchr(t + 9, '"'))) { int k = 0; for (t++; *t && *t != '"' && k < 31; t++) g_pol.trained[k++] = *t; g_pol.trained[k] = 0; } }
     { const char* t; g_pol.val = (t = strstr(buf, "\"val_move_err\"")) ? strtof(t + 15, 0) : 0; g_pol.still = (t = strstr(buf, "\"val_still_err\"")) ? strtof(t + 16, 0) : 0; g_pol.rep = (t = strstr(buf, "\"val_repeat_err\"")) ? strtof(t + 17, 0) : 0; }
     g_pol.ok = 1; free(buf);
-    nlog("[nhook] [policy] loaded (trained %s): %d inputs, %d layers; validation move error %.3f vs standing still %.3f, repeating the last move %.3f", g_pol.trained, nin, nl, g_pol.val, g_pol.still, g_pol.rep); }
-static void pol_run(const float* x, float* o) {   // -> o[3]
+    nlog("[nhook] [policy] loaded (trained %s): %d inputs, %d layers, %s; validation move error %.3f vs standing still %.3f, repeating the last move %.3f", g_pol.trained, nin, nl, mk ? "a mixture of moves (sampled)" : "one mean move", g_pol.val, g_pol.still, g_pol.rep); }
+static void pol_run(const float* x, float* o) {   // -> o[the last layer's rows]
     static float a[POL_MAXH], c[POL_MAXH]; int n = g_pol.nin; for (int i = 0; i < n; i++) a[i] = (x[i] - g_pol.mean[i]) / g_pol.sd[i];
     for (int l = 0; l < g_pol.nl; l++) { const float* W = g_pol.W[l]; int R = g_pol.rows[l], C = g_pol.cols[l];
         for (int r = 0; r < R; r++) { float s = g_pol.b[l][r]; const float* w = W + (size_t)r * C; for (int k = 0; k < C; k++) s += w[k] * a[k]; c[r] = l + 1 < g_pol.nl ? s / (1.0f + expf(-s)) : s; }
         memcpy(a, c, sizeof(float) * (size_t)R); }
-    o[0] = a[0]; o[1] = a[1]; o[2] = a[2]; }
+    memcpy(o, a, sizeof(float) * (size_t)g_pol.rows[g_pol.nl - 1]); }
 static int pol_cls(const char* c) { static const char* const k[] = {"auto", "precision", "shotgun", "sniper", "rocket", "melee", "other"}; for (int i = 0; i < 7; i++) if (c && !strcmp(c, k[i])) return i; return 6; }
 // the policy's move in the walker's view frame (*r toward, *lat left; throttle -1..1) and its jump wish; -> 1 when it ran
 static int pol_move(double now, const NovObj* objs, int n, int me, const NovObj* o, const NovObj* E, float yaw0, float* r, float* lat, int* jump) {
-    if (!g_pol.ok || g_pol.nin != 27) return 0;
-    static double ts; static float hist[3][3]; static uint32_t eh; static float eprev[3], ecur[3]; static float out[3]; static int have;
+    if (!g_pol.ok || g_pol.nin != 27) return 0;   // (inputs: policy-train.py FEAT)
+    static double ts; static float hist[3][3]; static uint32_t eh; static float eprev[3], ecur[3]; static float out[3], raw[64]; static int have;
     if (now - ts >= 0.1) { ts = now; memmove(hist[1], hist[0], sizeof(float) * 6); memcpy(hist[0], o->c, 12);
         if (E->handle != eh) { eh = E->handle; memcpy(eprev, E->c, 12); } else memcpy(eprev, ecur, 12); memcpy(ecur, E->c, 12); have++;
         if (have >= 3) {
@@ -64,7 +65,12 @@ static int pol_move(double now, const NovObj* objs, int n, int me, const NovObj*
                 if (d < 10) n10++; if (t->handle != E->handle && d < d2) { d2 = d; c2 = (tx * ux + ty * uy) / fmaxf(d, 1e-3f); s2 = (tx * vx + ty * vy) / fmaxf(d, 1e-3f); } }
             float f0[20] = {dE / 10, E->c[2] - o->c[2], o->shield, o->health, E->shield, E->health, ef, vc, vs, m1u, m1v, m2u, m2v, e1u, e1v, d2 / 10, c2, s2, n10 / 4.0f, 10.0f * (hist[0][2] - hist[1][2])};
             memcpy(x, f0, sizeof f0); for (int k = 0; k < 7; k++) x[20 + k] = 0; x[20 + pol_cls(g_inv.held_c)] = 1;
-            pol_run(x, out);
+            pol_run(x, raw);
+            if (g_pol.k == 0) { out[0] = raw[0]; out[1] = raw[1]; out[2] = raw[2]; }
+            else { int K = g_pol.k; float mx = raw[0]; for (int c = 1; c < K; c++) if (raw[c] > mx) mx = raw[c];   // (sample a component, then the move from it)
+                float w[16], sw = 0; for (int c = 0; c < K; c++) { w[c] = expf(raw[c] - mx); sw += w[c]; } float u = bot_rand01() * sw; int c = 0; for (; c < K - 1; c++) { u -= w[c]; if (u <= 0) break; }
+                float ls0 = fmaxf(-3, fminf(2, raw[3 * K + 2 * c])), ls1 = fmaxf(-3, fminf(2, raw[3 * K + 2 * c + 1]));
+                out[0] = fmaxf(-4, fminf(4, raw[K + 2 * c] + expf(ls0) * bot_gauss())); out[1] = fmaxf(-4, fminf(4, raw[K + 2 * c + 1] + expf(ls1) * bot_gauss())); out[2] = raw[5 * K]; }
             // (the world move -> the view frame)
             float wx = out[0] * ux + out[1] * vx, wy = out[0] * uy + out[1] * vy, fx = cosf(yaw0), fy = sinf(yaw0), run = g_bm.run_speed > 0.5f ? g_bm.run_speed : 2.1f;
             out[0] = fmaxf(-1, fminf(1, (wx * fx + wy * fy) / run)); out[1] = fmaxf(-1, fminf(1, (wx * -fy + wy * fx) / run));

@@ -102,12 +102,22 @@ def main():
     Xt_, Yt_, Wt_ = torch.tensor(Xt), torch.tensor(Yt), torch.tensor(Wt); Xv_, Yv_, Wv_ = torch.tensor(Xv), torch.tensor(Yv), torch.tensor(Wv)
     mu, sd = Xt_.mean(0), Xt_.std(0).clamp(min=1e-3)
     nf = Xt_.shape[1]
-    net = torch.nn.Sequential(torch.nn.Linear(nf, 128), torch.nn.SiLU(), torch.nn.Linear(128, 128), torch.nn.SiLU(), torch.nn.Linear(128, 3)).to(dev)
+    # (11:05: a MIXTURE of K Gaussians over the move (--mdn K, default 5): a player strafes left OR right -- one mean move is the
+    #  timid average of both; the walker samples a real move from the mixture every 0.1 s. Outputs: K logits, K x 2 means, K x 2 log
+    #  sigmas, the jump logit. --mdn 0 = the single mean move (3 outputs))
+    K = int(arg('--mdn', '5')); nout = 3 if K == 0 else K * 5 + 1
+    net = torch.nn.Sequential(torch.nn.Linear(nf, 128), torch.nn.SiLU(), torch.nn.Linear(128, 128), torch.nn.SiLU(), torch.nn.Linear(128, nout)).to(dev)
     opt = torch.optim.AdamW(net.parameters(), lr=2e-3, weight_decay=1e-4)
+    def mean_move(o):
+        if K == 0: return o[:, :2]
+        pi = torch.softmax(o[:, :K], 1); m = o[:, K:3 * K].reshape(-1, K, 2); return (pi.unsqueeze(2) * m).sum(1)
     def loss_of(X, Y, W):
-        o = net((X - mu.to(dev)) / sd.to(dev)); mse = ((o[:, :2] - Y[:, :2]) ** 2).sum(1)
-        bce = torch.nn.functional.binary_cross_entropy_with_logits(o[:, 2], Y[:, 2], reduction='none')
-        return ((mse + 0.5 * bce) * W).sum() / W.sum(), (mse * W).sum() / W.sum()
+        o = net((X - mu.to(dev)) / sd.to(dev)); mse = ((mean_move(o) - Y[:, :2]) ** 2).sum(1)
+        bce = torch.nn.functional.binary_cross_entropy_with_logits(o[:, -1], Y[:, 2], reduction='none')
+        if K == 0: return ((mse + 0.5 * bce) * W).sum() / W.sum(), (mse * W).sum() / W.sum()
+        lp = torch.log_softmax(o[:, :K], 1); m = o[:, K:3 * K].reshape(-1, K, 2); ls = o[:, 3 * K:5 * K].reshape(-1, K, 2).clamp(-3, 2)
+        z = (Y[:, None, :2] - m) / ls.exp(); comp = lp + (-0.5 * z ** 2 - ls - 0.9189385).sum(2); nll = -torch.logsumexp(comp, 1)
+        return ((nll + 0.5 * bce) * W).sum() / W.sum(), (mse * W).sum() / W.sum()
     Xg, Yg, Wg = Xt_.to(dev), Yt_.to(dev), Wt_.to(dev); n = Xg.shape[0]; bs = 4096
     t1 = time.time()
     for ep in range(EPOCHS):
@@ -121,11 +131,11 @@ def main():
     Yv2, Wv2 = Yv_[:, :2], Wv_
     still = float(((Yv2 ** 2).sum(1) * Wv2).sum() / Wv2.sum()); rep = float((((Yv2 - Xv_[:, 9:11]) ** 2).sum(1) * Wv2).sum() / Wv2.sum())
     with torch.no_grad():
-        o = net((Xv_.to(dev) - mu.to(dev)) / sd.to(dev)).cpu(); jp = torch.sigmoid(o[:, 2]); jy = Yv_[:, 2]
+        o = net((Xv_.to(dev) - mu.to(dev)) / sd.to(dev)).cpu(); jp = torch.sigmoid(o[:, -1]); jy = Yv_[:, 2]
         jprec = float(((jp > 0.5) & (jy > 0.5)).sum()) / max(1.0, float((jp > 0.5).sum())); jrec = float(((jp > 0.5) & (jy > 0.5)).sum()) / max(1.0, float((jy > 0.5).sum()))
     layers = [m for m in net if isinstance(m, torch.nn.Linear)]
     J = {'version': 1, 'trained': time.strftime('%Y-%m-%d %H:%M:%S'), 'device': str(dev), 'train_s': round(time.time() - t1, 1), 'features': FEAT, 'classes': CLS,
-         'out': ['toward_u_s', 'left_u_s', 'jump_logit'], 'act': 'silu', 'mean': [round(v, 6) for v in mu.tolist()], 'std': [round(v, 6) for v in sd.tolist()],
+         'out': ['toward_u_s', 'left_u_s', 'jump_logit'] if K == 0 else ['mixture logits x%d' % K, 'means x%d x2' % K, 'log sigmas x%d x2' % K, 'jump_logit'], 'mdn': K, 'act': 'silu', 'mean': [round(v, 6) for v in mu.tolist()], 'std': [round(v, 6) for v in sd.tolist()],
          'layers': [{'W': [[round(v, 6) for v in row] for row in L.weight.detach().cpu().tolist()], 'b': [round(v, 6) for v in L.bias.detach().cpu().tolist()]} for L in layers],
          'samples': len(Xt), 'best_samples': sum(1 for w in Wt if w >= 1), 'recordings': len(files),
          'val_move_err': round(float(vm), 4), 'val_still_err': round(still, 4), 'val_repeat_err': round(rep, 4), 'jump_precision': round(jprec, 3), 'jump_recall': round(jrec, 3)}

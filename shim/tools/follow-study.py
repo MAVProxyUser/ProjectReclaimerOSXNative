@@ -77,7 +77,7 @@ def hone_aim(astate, knobs_path, port):
     except Exception: k = {}
     k['NHOOK_BOT_HEAD_DZ'] = nxt; tmp = knobs_path + '.tmp'; json.dump(k, open(tmp, 'w')); os.replace(tmp, knobs_path)
     return cur, nxt, st
-LEADS = [0.0, 0.04, 0.08, 0.12, 0.16]   # (10:25: the aim lead in seconds -- Halo 3 registers bullets on the host)
+LEADS = [0.0, 0.02]   # (10:25: the aim lead in seconds; 11:15: 0.04 s registered 0.20 hits a shot vs 0.70 with none -- this client registers where it sees: only 0 / 0.02 tried now)
 def hone_lead(astate, knobs_path, port):
     """the aim lead (NHOOK_BOT_AIMLEAD, s) by REGISTERED hits a shot -- the walker's own aim block: reg x reg_n (shots through a hitbox
     that the target's shield / health answered within 0.6 s) + miss_reg x miss_n (damage after a visible miss), over its aimed shots n;
