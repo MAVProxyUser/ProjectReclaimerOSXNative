@@ -3272,6 +3272,11 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   a running battle, at every round end (our server's in_match true -> false) walker-coach.py round + match-study.py, then each
   walker's game restarted headless with its new knobs and the newest build (they rejoin in the lobby; the user's game and the
   server stay).
+- **A clean policy A/B** (2026-11-09 14:00; follow-study.py --policy-ab N) — WHY: accuracy slid 66% -> 28% over windows that changed the
+  opponents (a new 16-player match), the policy's weights (its 04:44 retrain) and a string of rules at once; the trainer's challengers
+  nudge one knob among many, too noisy to tell whether the learnt policy helps. LOGIC: for N windows the study writes NHOOK_BOT_POLICY
+  0 (OFF) and the trainer's incumbent weight (ON) alternately at each window start (after every other knob write), credits each window's
+  kills / deaths to the phase that ran it and prints the tally (battles/follow/policy-ab.json).
 - **Outranged from 1.2x the band** (2026-11-09 13:50; nbot.c the OUTRANGED block) — WHY: the death summary's mean killer distance rose
   to 16 units; a sniper killed the walker at 14 units, under the 1.5x threshold (~15 units for the assault rifle's band). LOGIC:
   NHOOK_BOT_OUTRANGE is now the factor (1.2, live; 0 = off) on the held weapon's band far edge (p75 x DIST).

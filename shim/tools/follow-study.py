@@ -98,6 +98,28 @@ def hone_lead(astate, knobs_path, port):
     except Exception: k = {}
     k['NHOOK_BOT_AIMLEAD'] = nxt; tmp = knobs_path + '.tmp'; json.dump(k, open(tmp, 'w')); os.replace(tmp, knobs_path)
     return cur, nxt, st
+def policy_ab(w, knobs_path, inc_w):
+    """--policy-ab N (2026-11-09 14:00): N windows alternating the learnt policy OFF (NHOOK_BOT_POLICY 0) and ON (the trainer's weight),
+    written at each window start; each window's kills / deaths credited to the phase that ran it (battles/follow/policy-ab.json)"""
+    n_total = int(arg('--policy-ab', '0'))
+    if n_total <= 0: return None
+    p = os.path.join(SUP, 'battles', 'follow', 'policy-ab.json')
+    try: st = json.load(open(p))
+    except Exception: st = {'n': 0, 'on': [0, 0, 0], 'off': [0, 0, 0], 'cur': None}
+    if st.get('cur') in ('on', 'off') and w is not None:
+        t = st[st['cur']]; t[0] += w['k']; t[1] += w['d']; t[2] += 1; st['n'] += 1
+    line = None
+    if st['n'] < n_total:
+        nxt = 'off' if st.get('cur') != 'off' else 'on'; st['cur'] = nxt
+        try: k = json.load(open(knobs_path))
+        except Exception: k = {}
+        k['NHOOK_BOT_POLICY'] = 0.0 if nxt == 'off' else inc_w; tmp = knobs_path + '.tmp'; json.dump(k, open(tmp, 'w')); os.replace(tmp, knobs_path)
+        line = 'policy A/B (%d of %d windows): next window policy %s' % (st['n'], n_total, 'OFF' if nxt == 'off' else 'ON (%.2f)' % inc_w)
+    else:
+        st['cur'] = None; line = 'policy A/B done (%d windows)' % st['n']
+    on, off = st['on'], st['off']
+    line += '; so far ON %d / %d in %d windows (K/D %.2f), OFF %d / %d in %d windows (K/D %.2f)' % (on[0], on[1], on[2], on[0] / max(1, on[1]), off[0], off[1], off[2], off[0] / max(1, off[1]))
+    json.dump(st, open(p, 'w')); return line
 def hone(results, nstate, knobs_path):
     """stage 1: the lead per unit (TPU) among 0.06..0.14; once every value has 12+ throws, stage 2: the arc per unit (ARC) among
     0.015 / 0.025 / 0.035 with the best lead held. Each window's throws go to the setting that ran; the next is untried first, else
@@ -440,6 +462,8 @@ def main():
         except OSError: pass
         if '--refit' in sys.argv: print('  learning: ' + refit(rec), flush=True)
         if '--refit' in sys.argv: print('  policy: ' + policy_retrain(), flush=True)
+        pab = policy_ab(w, os.path.join(SUP, 'battles', 'live-knobs', WALKER_NAME[0] + '.json'), TR['inc'].get('NHOOK_BOT_POLICY', 0.5))
+        if pab: print('  ' + pab, flush=True)
         print('  grenades: %d thrown, %d hit (%d killed) with %s -> next %s; so far %s' % (len(res), sum(1 for l in res if ': hit' in l or 'KILLED' in l),
               sum(1 for l in res if 'KILLED' in l), cur, nxt, ', '.join('%s: %d/%d' % (k, v[1], v[0]) for k, v in sorted(st.items()))), flush=True)
         open(os.path.join(OUT, 'learned.jsonl'), 'a').write(json.dumps({'t': round(t1), 'window': n, 'shadow_median': med(o['shadow']), 'walker': {k: v for k, v in o['w'].items()},
