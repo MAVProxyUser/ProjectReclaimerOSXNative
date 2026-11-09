@@ -83,6 +83,25 @@ def at_or_before(S, key, target):   # the newest sample whose key is <= target (
 def at_time(S, t):
     return at_or_before(S, 't', t)
 
+# LIVE LINKS (2026-11-09, the user: "being stuck is because the map lanes are not being studied in real time"): every LINKS_EVERY (300 s)
+# in a match, the links between the floor graph's parts that players took (shim/tools/nav-portals.py <map>: lifts, drops, jumps, from
+# every recording of the map, the one being written included) are learned again; the brain reads the file again when it changes
+LINKS_EVERY = float(arg('--links-every', '300'))
+_links = {'t': 0.0, 'busy': False}
+def links(mp):
+    import subprocess, threading
+    if not mp or _links['busy'] or time.time() - _links['t'] < LINKS_EVERY: return
+    _links.update(t=time.time(), busy=True)
+    def run():
+        try:
+            r = subprocess.run(['taskpolicy', '-b', 'nice', '-n', '20', sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'nav-portals.py'), mp],
+                               capture_output=True, text=True, timeout=600)
+            line = next((l for l in r.stdout.splitlines() if 'portals' in l and 'crossings' in l), r.stdout.strip().splitlines()[-1] if r.stdout.strip() else 'no output')
+            log({'event': 'links', 'map': mp, 'result': line[:240]})
+        except Exception as e: log({'event': 'links', 'map': mp, 'error': str(e)[:200]})
+        finally: _links['busy'] = False
+    threading.Thread(target=run, daemon=True).start()
+
 def main():
     S = []; mp = None; armed = {}; last_trip = 0; tripped_at = {}
     log({'event': 'start', 'nick': NICK, 'spread': SPREAD, 'cool': COOL, 'dry': DRY})
@@ -96,6 +115,7 @@ def main():
                 if m != mp: log({'event': 'map', 'map': m, 'from': mp})
                 S = []; mp = m; armed = {}
             S.append({'t': now, 'k': k, 'd': dd, 's': sh, 'h': hi}); S = S[-2000:]
+            if d.get('in_match') and not DRY: links(m)
             others = [p for p in d.get('players', []) if not p.get('you')]
             lobby_acc = statistics.median([p['hits'] / p['shots'] for p in others if (p.get('shots') or 0) >= 50]) if sum(1 for p in others if (p.get('shots') or 0) >= 50) >= 3 else None
             lobby_kd = statistics.median([(p.get('kills', 0) + 1) / (p.get('deaths', 0) + 1) for p in others if (p.get('deaths') or 0) >= 3]) if sum(1 for p in others if (p.get('deaths') or 0) >= 3) >= 3 else None

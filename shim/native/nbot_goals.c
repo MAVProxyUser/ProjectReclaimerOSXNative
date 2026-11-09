@@ -267,6 +267,14 @@ static void brain_review(double now) {
             double lt = 0; int lr = 0; float lc = 0;
             if (last && sscanf(last, "{\"t\": %lf, \"r\": %d,", &lt, &lr) == 2) { char* c = strstr(last, "\"caution\": "); if (c) lc = strtof(c + 11, 0);
                 if (time(0) - lt < 900) { g_rv_n = lr; g_rv_caut = lc; if (bot_log()) nlog("[nhook] [brain] carrying on from revision r%d (caution %.2f, %.0f s ago)", lr, lc, time(0) - lt); } } } } }
+    // LIVE LINKS (2026-11-09, the user: "being stuck is because the map lanes are not being studied in real time"): the links between
+    // the floor graph's parts that players use (lifts, drops, jumps: maptop/<map>.portals.txt, shim/tools/nav-portals.py) are read again
+    // whenever that file changes -- brain-monitor.py relearns them from the match being played every 5 minutes -- not only at the map's load
+    { static double tpc; static time_t pm; static char pf[1100];
+      if (now - tpc > 5.0 && g_nav.ok && g_nav.file[0]) { tpc = now; char q[1100]; snprintf(q, sizeof q, "%s", g_nav.file); size_t L = strlen(q);
+          if (L > 4 && !strcmp(q + L - 4, ".nav")) { snprintf(q + L - 4, sizeof q - (L - 4), ".portals.txt"); struct stat st;
+              if (!stat(q, &st)) { if (strcmp(pf, q)) { snprintf(pf, sizeof pf, "%s", q); pm = st.st_mtime; }
+                  else if (st.st_mtime != pm) { pm = st.st_mtime; nav_portals_load(g_nav.file); if (bot_log()) nlog("[nhook] [brain] the players' links for this map changed: %d loaded (live)", g_np_n); } } } } }
     if (now - tchk > 2.0) { tchk = now; char p[1100]; const char* h = getenv("HOME");
         snprintf(p, sizeof p, "%s/Library/Application Support/ReclaimerMac/battles/live-knobs/%s.review", h ? h : "/tmp", g_nick[0] ? g_nick : "walker");
         FILE* f = fopen(p, "r");

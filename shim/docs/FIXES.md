@@ -3448,6 +3448,16 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   brain is refused by a v2 body and the other way round: rebuild both). Lead latency = rtt x NHOOK_BOT_LEAD_RTT (1.25 / 1000 -- 0.08 s
   at 64 ms, 0.18 s at 145 ms); a NHOOK_BOT_LEAD_LAT in the live file still wins. A review's kills = the scoreboard's since the window
   began (the old count when the body has none); the review line gives the ping.
+- **Stuck too long: a grenade at its feet; the players' links learned live** (2026-11-09 17:25; nbot.c "STUCK TOO LONG", nbot_goals.c
+  brain_review LIVE LINKS, shim/tools/brain-monitor.py links()) — WHY: the user: "seems to me like being *stuck* is because the map lanes
+  are not being studied in real time. if stuck too long look straight down and throw grenades and intentionally stand on them" -- on
+  Hugegrass the walker stayed alive 6+ minutes in a spawn spot no path led out of. LOGIC: alive, no fight for 15 s, and every position
+  of the last NHOOK_BOT_UNSTICK_S (45 s, live; 0 = off) within 6 units of where the stretch began -> pitch straight down, legs still,
+  the trigger off, a grenade (left trigger) every 1.5 s until it dies and respawns elsewhere ("[unstick]"); never with a teammate within
+  10 units (friendly fire: a betrayal, and betrayal booting kicks) or without a grenade. LIVE LINKS: brain-monitor.py runs
+  nav-portals.py <map> every --links-every (300 s) of a match (every recording of the map, the one being written included; background
+  priority; "links" events in monitor-<nick>.jsonl), and the brain reads maptop/<map>.portals.txt again whenever it changes (checked
+  every 5 s: "[brain] the players' links for this map changed") instead of only when the map loads.
 - **One player in the whole window, beside a map of just that player** (2026-11-09 17:10; stats_page.html #pfs / openPfs / drawPlayerMap /
   trackSnap, shim/tools/stats-proxy.py /trail.json) — WHY: the user: the player details popup "full window, and it should side by side a
   version of the heatmap with JUST my player visualized". LOGIC: clicking a name opens the details over the whole window (the #det panel

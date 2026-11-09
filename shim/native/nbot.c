@@ -2033,6 +2033,29 @@ static void bot_step_body(void) {
       if (sl > 0 && g_gameplay_t0 > 0 && now - g_gameplay_t0 < sl && now - tsl >= 0.1) { tsl = now;
           nlog("[step] t %.2f pos %.2f %.2f %.2f vel %.2f %.2f yaw %.0f->%.0f thr %.2f %.2f out %d legs %s fight %d", now - g_gameplay_t0, o->c[0], o->c[1], o->c[2],
                o->vel[0], o->vel[1], yaw0 * 57.2958f, yaw * 57.2958f, tx, ty, out, g_arb_why, (int)g_bot_fighting); } }
+    // STUCK TOO LONG (2026-11-09 17:20, the user: "if stuck too long look straight down and throw grenades and intentionally stand on
+    //  them" -- on Hugegrass the walker spent 6+ minutes alive in a spawn spot no path led out of): alive, not fighting for 15 s, and every
+    //  position of the last NHOOK_BOT_UNSTICK_S (45 s, live; 0 = off) within 6 units of where that stretch began -> look straight down,
+    //  stand still, a grenade at its feet every 1.5 s (the left trigger) until it dies and respawns somewhere else. Never with a
+    //  teammate within 10 units (friendly fire: a betrayal) or without a grenade
+    { static double tfight, tsam, tdo, tsay; static float ring[128][3]; static double rtm[128]; static int rn;
+      float us = 45; lk_over(&us, "NHOOK_BOT_UNSTICK_S");
+      int alive_me = me >= 0 && !objs[me].dead;
+      if (!alive_me) rn = 0;
+      if (engaged || g_bot_fighting) tfight = now;
+      if (alive_me && now - tsam >= 1.0) { tsam = now; memcpy(ring[rn & 127], o->c, 12); rtm[rn & 127] = now; rn++; }
+      int stuck = 0;
+      if (us > 0 && alive_me && now - tfight > 15.0 && rn > (int)us + 1 && (int)us < 120) {
+          int i0 = rn - (int)us; float* a0 = ring[i0 & 127]; stuck = 1;
+          for (int i = i0; i < rn; i++) { float dx = ring[i & 127][0] - a0[0], dy = ring[i & 127][1] - a0[1]; if (dx * dx + dy * dy > 36.0f) { stuck = 0; break; } } }
+      if (stuck) { int mate = 0; for (int i = 0; i < n; i++) { const NovObj* t = &objs[i]; if (t->type || t->dead || i == me || bot_enemy(o, t)) continue;
+              float dx = t->c[0] - o->c[0], dy = t->c[1] - o->c[1], dz = t->c[2] - o->c[2]; if (dx * dx + dy * dy + dz * dz < 100.0f) { mate = 1; break; } }
+          int nades = g_inv.frag + g_inv.plasma > 0 || g_inv.gren > 0;
+          if (!mate && nades) { pitch = -1.45f; out |= 1 | 2; tx = 0; ty = 0; g_bot_trig = 0;
+              if (now - tdo > 1.5) tdo = now;
+              if (now - tdo < 0.15) fbtn |= 0x10000;
+              if (now - tsay > 20.0 && bot_log()) { tsay = now; nlog("[nhook] [unstick] stuck %.0f s within 6 units of (%.1f, %.1f): looking straight down, a grenade at my feet -- a respawn elsewhere", us, o->c[0], o->c[1]); } }
+          else if (now - tsay > 20.0 && bot_log()) { tsay = now; nlog("[nhook] [unstick] stuck %.0f s at (%.1f, %.1f) but %s: staying", us, o->c[0], o->c[1], mate ? "a teammate is within 10 units" : "no grenade"); } } }
     g_bot_yaw = yaw; g_bot_pitch = pitch; g_bot_tx = tx; g_bot_ty = ty; g_bot_out = out;
     bot_camp_tick(now, tx, ty, out, engaged, fight && now - g_bot_hold_high < 0.3);   // (camping: a chat line, above)
     // the virtual controller: left stick = the throttle (y forward, x right = -left), A = jump, right trigger = fire
