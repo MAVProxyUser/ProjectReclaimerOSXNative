@@ -117,7 +117,7 @@ static void beh_cover(const World* W, Arb* a) {
     const NovObj* o = W->o; static float sh[16]; static double tsh; static int nsh;
     if (W->now - tsh > 0.1) { tsh = W->now; memmove(sh + 1, sh, sizeof(float) * 15); sh[0] = o->shield; if (nsh < 16) nsh++; }
     float u = 80, drop = 0.35f, lim = 0.5f, until = 0.9f; lk_over(&u, "NHOOK_U_COVER"); lk_over(&drop, "NHOOK_BOT_COVER_DROP"); lk_over(&lim, "NHOOK_BOT_COVER_SH"); lk_over(&until, "NHOOK_BOT_COVER_UNTIL");
-    static int st; static double t0, tsearch; static float spot[3], fz[8];
+    static int st; static double t0, tsearch; static float spot[3], fz[8]; static signed char ans[8];   // (ans: -1 none yet, 0 hidden, 1 seen)
     if (u <= 0 || !g_nav.ok) { st = 0; g_cov_n = 0; return; }
     float mx = o->shield; for (int i = 0; i < nsh; i++) if (sh[i] > mx) mx = sh[i];
     int hit = o->shield >= 0 && o->shield < lim && mx - o->shield >= drop;
@@ -131,14 +131,15 @@ static void beh_cover(const World* W, Arb* a) {
         st = 0; if (bot_log()) nlog("[nhook] [cover] hit hard in cover (shield %.2f): looking again", o->shield); }
     if (st == 1) {
         int pend = 0;
-        for (int k = 0; k < g_cov_n; k++) { int r = los_get(cov_tag(k), W->now);
+        // (11:50: the answers are kept here as they come -- the line-of-sight cache forgets them after 0.5 s, before the last spot is asked)
+        for (int k = 0; k < g_cov_n; k++) { int r = ans[k] >= 0 ? ans[k] : los_get(cov_tag(k), W->now); if (r >= 0) ans[k] = (signed char)r;
             if (r == 0) { memcpy(spot, g_cov_c[k], 12); spot[2] = fz[k] + 0.1f; st = 2; t0 = W->now; g_cov_n = 0;
                 if (bot_log()) nlog("[nhook] [cover] shield %.2f: spot %d of the candidates hidden from %08x, %.1f units away -- going", o->shield, k, g_cov_from, sqrtf((spot[0] - o->c[0]) * (spot[0] - o->c[0]) + (spot[1] - o->c[1]) * (spot[1] - o->c[1])));
                 arb_bid(a, ARB_RECHARGE, u, spot, "take cover"); return; }
             if (r < 0) pend++; }
         if ((g_cov_k >= g_cov_n && !pend) || W->now - tsearch > 1.5) {
             // (11:40: 0 of 89 searches found a spot -- the answers per spot: 1 seen, 0 hidden, - no answer; dz = the spot's head over the walker's)
-            char rs[16]; int q = 0; for (int k = 0; k < g_cov_n && q < 15; k++) { int r = los_get(cov_tag(k), W->now); rs[q++] = r < 0 ? '-' : (char)('0' + r); } rs[q] = 0;
+            char rs[16]; int q = 0; for (int k = 0; k < g_cov_n && q < 15; k++) { int r = ans[k]; rs[q++] = r < 0 ? '-' : (char)('0' + r); } rs[q] = 0;
             if (bot_log()) nlog("[nhook] [cover] none of %d spots hidden from %08x: fighting on (answers %s, asked %d, spot 0 dz %.1f)", g_cov_n, g_cov_from, rs, g_cov_k, g_cov_n ? g_cov_c[0][2] - o->c[2] : 0.0f);
             st = 0; g_cov_n = 0; }
         return; }
@@ -152,7 +153,7 @@ static void beh_cover(const World* W, Arb* a) {
         float np[3]; nav_pos(nd, np); if (fabsf(np[2] - cp[2]) > 1.5f) continue; int dup = 0; for (int j = 0; j < nc; j++) if (used[j] == nd) dup = 1; if (dup) continue;
         used[nc] = nd; fz[nc] = np[2]; g_cov_c[nc][0] = np[0]; g_cov_c[nc][1] = np[1]; g_cov_c[nc][2] = np[2] + hz; nc++; }
     if (!nc) return;
-    g_cov_gen++; g_cov_n = nc; g_cov_k = 0; g_cov_from = g_ftg_h; st = 1; tsearch = W->now;
+    g_cov_gen++; g_cov_n = nc; g_cov_k = 0; g_cov_from = g_ftg_h; st = 1; tsearch = W->now; memset(ans, -1, sizeof ans);
     if (bot_log()) nlog("[nhook] [cover] shield %.2f (from %.2f in 1.5 s), %08x at %.0f units: testing %d spots", o->shield, mx, g_ftg_h, al, nc); }
 static void beh_recharge(const World* W, Arb* a) {
     const NovObj* o = W->o; static double t0; float u = 65, lim = 0.6f; lk_over(&u, "NHOOK_U_RECHARGE"); lk_over(&lim, "NHOOK_BOT_RECHARGE_SH");

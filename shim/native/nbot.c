@@ -787,13 +787,6 @@ static int gun_seated(double now, const NovObj* objs, int n, int me, const float
         float sc = d * (v == 0 ? 16.0f : 1.0f) * (0.5f + 0.25f * (hp < 2.0f ? hp : 2.0f)); if (sc < bs) { bs = sc; bi = i; } }
     { static double tput; if (g_los_t > tput && g_los_req == g_los_done) { tput = g_los_t; los_put(g_los_res_tgt, g_los_res, g_los_t); } }
     static double tlos; static int rr;
-    // (cover: a search's rays first, 2 slots of 3 -- the fight's own sight test keeps every third, fresher than its 0.5 s cache)
-    if (now - tlos > 0.07 && g_los_req == g_los_done && g_cov_n > 0 && g_cov_k < g_cov_n && (++g_cov_slot % 3) != 0) {
-        const NovObj* ca = 0; for (int i = 0; i < n; i++) if (objs[i].handle == g_cov_from && !objs[i].dead) { ca = &objs[i]; break; }
-        if (!ca) g_cov_k = g_cov_n;
-        else { int k = g_cov_k++; tlos = now; g_los_p[0] = ca->c[0]; g_los_p[1] = ca->c[1]; g_los_p[2] = ca->c[2] + 0.5f * ca->r;
-            g_los_v[0] = g_cov_c[k][0] - g_los_p[0]; g_los_v[1] = g_cov_c[k][1] - g_los_p[1]; g_los_v[2] = g_cov_c[k][2] - g_los_p[2];
-            g_los_ign[0] = mv->handle; g_los_ign[1] = ca->handle; g_los_tgt = cov_tag(k); g_los_req++; } }
     if (now - tlos > 0.07 && g_los_req == g_los_done) {   // the line from the camera: the target every other time, else another enemy in turn
         const NovObj* q = bi >= 0 ? &objs[bi] : 0; rr++;
         if (!(rr & 1) || !q) { int cnt = 0; for (int i = 0; i < n; i++) { const NovObj* t = &objs[i]; if (t->type || t->dead || i == me || !bot_enemy(o, t)) continue; if (cnt++ == (rr >> 1) % 8) { q = t; break; } } }
@@ -1192,6 +1185,14 @@ static void bot_step_body(void) {
             ox = (bot_rand01() - 0.5f) * 0.15f; oy = (bot_rand01() - 0.5f) * 0.08f;
             if (g_eg_fast && g_eg_fast == cur) { tacq = now - 30; g_eg_fast = 0; } }   // (a second attacker: the decision delay was its reaction -- turn at full speed)
         { static double tput; if (g_los_t > tput && g_los_req == g_los_done) { tput = g_los_t; los_put(g_los_res_tgt, g_los_res, g_los_t); } }   // (the last answer -> the cache)
+        // (cover, 11:45: a search's rays get 2 slots of 3 -- the fight's own sight test keeps every third, fresher than its 0.5 s
+        //  cache. It sat in the gunner's scheduler until 11:45 and was never asked on foot: 0 of 89 searches had an answer)
+        if (now - tlos > 0.07 && g_los_req == g_los_done && g_cov_n > 0 && g_cov_k < g_cov_n && (++g_cov_slot % 3) != 0) {
+            const NovObj* ca = 0; for (int i = 0; i < n; i++) if (objs[i].handle == g_cov_from && !objs[i].dead) { ca = &objs[i]; break; }
+            if (!ca) g_cov_k = g_cov_n;
+            else { int k = g_cov_k++; tlos = now; g_los_p[0] = ca->c[0]; g_los_p[1] = ca->c[1]; g_los_p[2] = ca->c[2] + 0.5f * ca->r;
+                g_los_v[0] = g_cov_c[k][0] - g_los_p[0]; g_los_v[1] = g_cov_c[k][1] - g_los_p[1]; g_los_v[2] = g_cov_c[k][2] - g_los_p[2];
+                g_los_ign[0] = o->handle; g_los_ign[1] = ca->handle; g_los_tgt = cov_tag(k); g_los_req++; } }
         if (now - tlos > 0.07 && g_los_req == g_los_done) { tlos = now;   // ask for the line to one enemy's chest: the target every other time, else the next of the 3 nearest
             static int rr; const NovObj* q = &ftg; rr++;
             if (rr & 1) { int cand[3] = {-1, -1, -1}; float cd[3] = {1e30f, 1e30f, 1e30f};

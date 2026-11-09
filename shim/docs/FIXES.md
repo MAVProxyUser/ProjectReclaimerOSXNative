@@ -3286,6 +3286,12 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   switch presses (the learnt record bit): 0 of 32 took" -- 32 x "switching from PLASMA PISTOL to ASSAULT RIFLE" with the trigger held
   (the plasma pistol held = an overcharge held) while the earlier switches, 3 of 3 and 2 of 2, came with the trigger up. LOGIC: from a
   switch press until 0.15 s after it the trigger (and the reload click) stays up; PLASMA PISTOL joins the weapons whose trigger is pulsed.
+- **Cover searches were never asked on foot** (2026-11-09 11:45-11:50; nbot.c the on-foot line-of-sight scheduler, nbrain_beh.c
+  beh_cover) — WHY: 0 of 89 cover searches found a spot; the new answers diagnostic said "asked 0" every time: the cover rays had gone
+  into the vehicle gunner's scheduler (gun_seated -- its anchor text matched first), which never runs on foot. LOGIC: the cover rays
+  take 2 slots of 3 in the fight's own scheduler; beh_cover keeps each spot's answer as it arrives (the line-of-sight cache forgets
+  after 0.5 s, before the last of 6-8 spots is asked); "[cover] none ... (answers 1101..., asked N)". First live minutes: 2 of 4
+  searches found a hidden spot 2.7-4.9 units away and went.
 - **The walker's stats stay on 8765** (2026-11-09 11:40; shim/tools/stats-proxy.py) — WHY: the user: "game stats disappeared for some
   reason. http://127.0.0.1:8765" -- the relay QUIT when the user's own game started, and that game (opened from /Applications, no
   nhook) has no stats page, so 8765 stayed empty after it closed; then "the stats server should stay tied to the walker for now".
