@@ -3272,6 +3272,17 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   a running battle, at every round end (our server's in_match true -> false) walker-coach.py round + match-study.py, then each
   walker's game restarted headless with its new knobs and the newest build (they rejoin in the lobby; the user's game and the
   server stay).
+- **Brain stage 1: the locomotion arbiter** (2026-11-09 06:45; nbot.c arb_* and the step's locomotion section) — WHY: the user: "I feel
+  like native/nbot_* should be its own kernel or something. it looks like a pile of if then statements now" -> "yes" to the rewrite.
+  Six blocks wrote the walker's path one after another (boarding, the wingman, the ball, the weapon fetch, the fight's moves, levels
+  apart) and the last writer won -- the puppy (following beat fighting) and the AR forever (following overwrote the fetch). LOGIC:
+  each behaviour BIDS for the legs (a score; a point for a path) and the highest bid moves the walker: board the leader's vehicle 95,
+  follow beyond the leash 90, run with the ball 80, fetch the loose ball 75, hold the high ground 65, fight 60, hunt the ball carrier
+  50, fetch a better weapon 45, escort the ball carrier 30, close up on the leader 20, hunt (the goal draw) 10 -- each a live knob
+  (NHOOK_U_*). A path winner -> the pathfinder to its point (replanned on a new winner, a 1.5-unit move of the point, or every second);
+  fight / hold -> their moves after the path; hunt -> the goal draw. "[arb] <winner> <score> > <others>" on a change. Aim and buttons
+  keep their code (later stages: perception, aim / trigger channels). Hot-loaded into the public walker (brain #2): same process,
+  still in the game, "[arb] fight 60 > hunt 10", "[arb] hold the high ground 65 > hunt 10".
 - **The stats relay streams the live feed** (2026-11-09 06:35; shim/tools/stats-proxy.py) — WHY: the user: "why is it 'connecting...' and
   'not in match' I can't see anything from the walker stats page fluidly". The page's live data is Server-Sent Events (EventSource
   '/events'); the relay read each answer whole before passing it on, and a stream never ends. LOGIC: /events is passed on line by line
