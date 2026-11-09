@@ -1007,7 +1007,7 @@ static void bot_step_body(void) {
                       tsw = now; if (bot_log()) nlog("[nhook] [inv] switching to %s at %.1f units: players switch %s -> %s at %.1f (median of %d)", g_inv.other, tdist, g_inv.held_c, g_inv.other_c, g_eg.sw_d[hi][oi], g_eg.sw_n[hi][oi]); }
                   else if (!zkeep && !(hi >= 0 && oi >= 0 && g_eg.sw_n[hi][oi] >= 20) && oh > 0.3f && oo >= 0 && oo < oh * 0.5f) { tsw = now; if (bot_log()) nlog("[nhook] [inv] switching to %s (%s) for %.1f units (the %s band is %.0f%% off)", g_inv.other, g_inv.other_c, tdist, g_inv.held_c, oh * 100); } }
               { static float sh = -1; if (sh < 0) { const char* e = getenv("NHOOK_BOT_SWITCH_HOLD"); sh = e ? strtof(e, 0) : 0.4f; }   // (0.15 s never registered: see nvpad.m's read counters)
-                if (now - tsw < sh) { fbtn |= 8; float swp = 0.03f; lk_over(&swp, "NHOOK_BOT_SWPULSE"); g_bot_switch_until = tsw + swp; } } }   // (the switch bit: ONE packet -- 08:55: held 0.15 s it never switched; an impulse per packet?)
+                if (now - tsw < sh && g_inv.other_ammo != 0) { fbtn |= 8; float swp = 0.03f;   /* (10:00: never TO a weapon known empty -- "EMPTY SNIPER RIFLE: switching" looped: the band rule switched back) */ lk_over(&swp, "NHOOK_BOT_SWPULSE"); g_bot_switch_until = tsw + swp; } } }   // (the switch bit: ONE packet -- 08:55: held 0.15 s it never switched; an impulse per packet?)
             // B: melee -- the players' range (+ 0.25: positions are a tick or two old), held 0.12 s, at most every 0.6 s
             { static int nomel = -1; if (nomel < 0) nomel = getenv("NHOOK_BOT_NOMELEE") != 0;
               if (nomel) { if (tdist < 1.8f && now - tmelee > 0.7) { tmelee = now; fbtn |= 2; } }   // (the old: B, one step)
@@ -1234,9 +1234,11 @@ static void bot_step_body(void) {
         else if (g_inv.ammo > 0) { nrel = 0; g_bot_dry = 0; }
         // THE BETTER WEAPON IN HAND (09:20: "TOOK the BATTLE RIFLE ... holding ASSAULT RIFLE, other BATTLE RIFLE"): out of a fight, with the
         // other weapon 2+ ranks better and not known empty, one switch impulse (every 2 s until it is in hand)
-        { static double tbt; if ((!engaged || tdist > 3.0f) && g_inv.has_other && g_inv.other_rank + 2 <= g_inv.held_rank && g_inv.other_ammo != 0 && now - tbt > 3.0 && now - tswe > 1.0) { tbt = now; tswe = now;   // (09:45: in fights too, beyond 3 units -- a 20-player FFA is nearly always "engaged")
+        // (10:05: in a fight only when the target's distance is inside the other weapon's band -- it swapped the rifle for a shotgun mid-range)
+        { static double tbt; float kdb = 1; lk_over(&kdb, "NHOOK_BOT_DIST"); float ob = engaged ? bot_band_off(g_inv.other_c, tdist, kdb) : 0;
+          if ((!engaged || (tdist > 3.0f && ob <= 0.05f)) && g_inv.has_other && g_inv.other_rank + 2 <= g_inv.held_rank && g_inv.other_ammo != 0 && now - tbt > 3.0 && now - tswe > 1.0) { tbt = now; tswe = now;   // (09:45: in fights too, beyond 3 units -- a 20-player FFA is nearly always "engaged")
               float swp = 0.03f; lk_over(&swp, "NHOOK_BOT_SWPULSE"); g_bot_switch_until = now + swp; fbtn |= 8;
-              if (bot_log()) nlog("[nhook] [inv] the better weapon in hand: switching from %s to %s", g_inv.held, g_inv.other); } } }
+              if (bot_log()) nlog("[nhook] [inv] the better weapon in hand: switching from %s to %s%s", g_inv.held, g_inv.other, engaged ? " (the target is in its range)" : ""); } } }
       uint32_t rpad = bot_pickpad();
       if (now - trel < 0.1) { fbtn |= rpad; if (!gun_near_veh(o->c, 0xFFFFFFFFu)) g_bot_act_until = trel + 0.1; } }   // (the act bit tapped: reload -- not beside a vehicle)
     // the walker (nav.c's graph): the path's way PELOAD_NAV_LOOK nodes ahead; with the aim on, the throttle walks it in any
@@ -1250,6 +1252,16 @@ static void bot_step_body(void) {
     int ob_carry = 0; float ob_d = 1e9f; beh_ball(&W, &arb, gun_go, &ob_carry, &ob_d);
     beh_fetch(&W, &arb); beh_fight(&W, &arb, ob_carry); beh_hold(&W, &arb); beh_hunt(&W, &arb);
     int arbw = arb_choose(&arb, now);
+    // (09:55: the recordings: the walker moves under 0.3 u/s 53% of its life -- median 0.09 u/s, the players 0.7-1.2 -- while its fight moves
+    //  measure 1.5 u/s: [still] every 30 s splits the still time by the legs' winner and the path state)
+    { static double tl, tlast; static float lp2[3]; static double tot, still; static double by[ARB_N + 2]; double dts = tlast > 0 ? now - tlast : 0; tlast = now;
+      if (dts > 0 && dts < 0.2) { float dx = o->c[0] - lp2[0], dy = o->c[1] - lp2[1]; float sp2 = sqrtf(dx * dx + dy * dy) / (float)dts; tot += dts;
+          if (sp2 < 0.3f) { still += dts; int k = arbw; if ((arbw == ARB_HUNT || arbw == ARB_FIGHT) && plen < 2 && !engaged) k = ARB_N; else if (engaged) k = ARB_N + 1 > k ? (arbw == ARB_FIGHT ? ARB_FIGHT : k) : k; by[k] += dts; } }
+      memcpy(lp2, o->c, 12);
+      if (now - tl > 30) { if (tl > 0 && tot > 5 && bot_log()) { static const char* nm[ARB_N + 2] = {"hunt", "fight", "follow", "fetch", "ball", "board", "hold", "no path (hunt)", "?"}; char b[400]; int q = 0;
+              for (int k = 0; k < ARB_N + 2; k++) if (by[k] > 0.5) q += snprintf(b + q, sizeof b - (size_t)q, " %s %.0f%%,", nm[k], 100.0 * by[k] / tot);
+              nlog("[nhook] [still] %.0f%% of %.0f s alive under 0.3 u/s:%s plan %d nodes, goal %d", 100.0 * still / tot, tot, q ? b : " -", plen, goal); }
+          tl = now; tot = still = 0; memset(by, 0, sizeof by); } }
     if (arbw == ARB_FOLLOW || arbw == ARB_FETCH || arbw == ARB_BALL || (arbw == ARB_BOARD && gbd > 4.0f)) {   // a path to the winner's point
         static float lastp[3]; static int lastw = -1; static double trp; const float* wp = arb.b[arbw].pt;
         mode = 3; memcpy(g_bot_pt, wp, 12); g_bot_pt[2] -= 0.35f;
