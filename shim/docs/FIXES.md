@@ -3272,6 +3272,13 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   a running battle, at every round end (our server's in_match true -> false) walker-coach.py round + match-study.py, then each
   walker's game restarted headless with its new knobs and the newest build (they rejoin in the lobby; the user's game and the
   server stay).
+- **Kills / deaths on the stats page are this match's** (2026-11-09 05:25; nstats.c the players JSON) — WHY: the user: "the kills for
+  game in play are wrong ... they don't match what is on my screen". On a public Slayer server the statborg's kills (stat 2) ran ~2.2x
+  the score (94 vs 44 for the top player) -- the same in two clients (the user's, joined a match earlier, and the walker's, joined this
+  one), so it is the server's own count, not this match's. LOGIC: "kills" / "deaths" = the game results' kills (stat 9) / deaths (11)
+  -- they start again with each match (rs_tick) -- whenever the results have anything for the slot; else the statborg's as before.
+  The statborg's are kept as "kills_total" / "deaths_total". NHOOK_SB_KILLS=1 = the old (statborg) numbers. Takes effect at a game's
+  next launch (the JSON is the running hook's).
 - **The walker copies the match's best player, not its leader** (2026-11-09 05:15; shim/tools/follow-study.py role_model / copy_role_model)
   — WHY: the user: "the walker should study what everyone else does for lanes, weapon choices, and tactics, not me ... it should only aim
   to protect me, and get better in its ranking vs the humans. right now <the top player> is destroying everyone. study him. be like

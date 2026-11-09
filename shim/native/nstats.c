@@ -1249,7 +1249,15 @@ static void st_snapshot(StBuf* s) {
               if (isfinite(av[0]) && ah + fabsf(av[2]) > 0.5f) sb_put(s, ",\"look\":[%.1f,%.1f]", atan2f(av[1], av[0]) * 57.2958f, atan2f(av[2], ah) * 57.2958f); }
         } else sb_put(s, "null,\"weapons\":[],\"grenades\":{\"frag\":0,\"plasma\":0,\"spike\":0,\"firebomb\":0},\"vehicle\":null");
         int16_t sbs[8]; int sbok = st_statborg(pl[k].slot, sbs);
-        sb_put(s, ",\"pos\":"); sb_f3(s, o); sb_put(s, ",\"speed\":%.2f,\"kills\":%d", spd, sbok ? sbs[SB_KILLS] : 0);
+        // (2026-11-09, the user: "the kills for game in play are wrong ... they don't match what is on my screen": on a public server the
+        //  statborg's kills ran ~2.2x the score in Slayer -- 94 vs 44 -- the same in two clients, so the server's own count across games.
+        //  THIS match's kills / deaths come from the game results (they start again with each match, rs_tick); the statborg's stay as
+        //  kills_total / deaths_total, and are the kills only while the results have nothing for the slot yet. NHOOK_SB_KILLS=1 = old)
+        int rsk = -1, rsd = -1; { static int old = -1; if (old < 0) old = getenv("NHOOK_SB_KILLS") != 0;
+          if (!old && g_rs_have && pl[k].slot >= 0 && pl[k].slot < 128) { int a = g_rs_cur[pl[k].slot][RS_KILLS] & 0x7fff, b = g_rs_cur[pl[k].slot][RS_DEATHS] & 0x7fff;
+              if (a || b) { rsk = a; rsd = b; } } }
+        sb_put(s, ",\"pos\":"); sb_f3(s, o); sb_put(s, ",\"speed\":%.2f,\"kills\":%d", spd, rsk >= 0 ? rsk : sbok ? sbs[SB_KILLS] : 0);
+        if (sbok) sb_put(s, ",\"kills_total\":%d,\"deaths_total\":%d", sbs[SB_KILLS], sbs[SB_DEATHS]);
         if (sbok) sb_put(s, ",\"score\":%d,\"assists\":%d,\"betrayals\":%d,\"suicides\":%d", sbs[SB_SCORE], sbs[SB_ASSISTS], sbs[SB_BETRAYALS], sbs[SB_SUICIDES]);
         st_aim_json(s, t);
         if (pl[k].slot >= 0 && pl[k].slot < 128 && g_rs_have) { int any = 0;   // this match's medals (the game results' counts)
@@ -1258,7 +1266,7 @@ static void st_snapshot(StBuf* s) {
             if (any) sb_put(s, "}"); }
         static int noaim = -1; if (noaim < 0) noaim = getenv("NHOOK_NO_AIM") != 0;   // hits: shots through an enemy's hitbox (the aim meter); without it the old estimate
         int hits = t ? ((noaim || !g_nr_frames) ? t->hits_sphere : t->hits) : 0;   // (no frames = no aim meter: a dedicated server)
-        if (t) sb_put(s, ",\"deaths\":%d,\"hits\":%d,\"accuracy\":%.3f,\"shots\":%d,\"life\":%.1f,\"longest_life\":%.1f,\"distance\":%.1f,\"top_speed\":%.2f", sbok ? sbs[SB_DEATHS] : t->deaths, hits, t->shots ? (double)hits / t->shots : 0.0, t->shots, t->alive ? now - t->life_start : 0.0,
+        if (t) sb_put(s, ",\"deaths\":%d,\"hits\":%d,\"accuracy\":%.3f,\"shots\":%d,\"life\":%.1f,\"longest_life\":%.1f,\"distance\":%.1f,\"top_speed\":%.2f", rsd >= 0 ? rsd : sbok ? sbs[SB_DEATHS] : t->deaths, hits, t->shots ? (double)hits / t->shots : 0.0, t->shots, t->alive ? now - t->life_start : 0.0,
                       t->longest > (t->alive ? now - t->life_start : 0) ? t->longest : (t->alive ? now - t->life_start : 0), t->dist, t->top_speed);
         if (g_st_var_ok) st_player_traits(s, pl[k].rec);
         sb_put(s, "}");
