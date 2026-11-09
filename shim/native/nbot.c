@@ -762,7 +762,11 @@ static void bot_step_body(void) {
             float vd = 1600.0f; int vi = -1; for (int i = 0; i < n; i++) { const NovObj* t = &objs[i]; if (t->type || t->dead || i == me || !bot_enemy(o, t)) continue;
                 float dx = t->c[0] - cam[0], dy = t->c[1] - cam[1], dz = t->c[2] - cam[2], d = dx * dx + dy * dy + dz * dz; if (d < vd && los_get(t->handle, now) == 1) { vd = d; vi = i; } }
             if (vi >= 0) { bi = vi; bd = vd; } }
-        if (bi >= 0) { const NovObj* t = &objs[bi]; float d[3] = {t->c[0] - cam[0], t->c[1] - cam[1], t->c[2] + 0.55f * t->r - cam[2]}; float h = sqrtf(d[0] * d[0] + d[1] * d[1]);
+        // (2026-11-09, the user: "I feel like it sucks at hitting the head hitbox": the user's client measured 120 of its shots -- median
+        //  error 0.11 deg, 47.5% through a hitbox, only 28% of those the head: aimed at the neck. NHOOK_BOT_AIM_HEAD = the aim point's
+        //  height over the bounding sphere's centre, x its radius (was 0.55; a live knob: follow-study.py hones it on the head share))
+        float aimh = 0.55f; lk_over(&aimh, "NHOOK_BOT_AIM_HEAD");
+        if (bi >= 0) { const NovObj* t = &objs[bi]; float d[3] = {t->c[0] - cam[0], t->c[1] - cam[1], t->c[2] + aimh * t->r - cam[2]}; float h = sqrtf(d[0] * d[0] + d[1] * d[1]);
             if (h > 0.01f) { yaw = atan2f(d[1], d[0]); pitch = atan2f(d[2], h); out |= 1; ftg = *t; have_tg = 1; tdist = sqrtf(bd); tyaw = yaw; tpitch = pitch;
                 // the error against the record's angles (the aim the engine used last tick: the lag behind a moving target). Not
                 // against the camera's forward: halo3's first-person camera looks 4.9 deg above the aim the record sets (the app's
@@ -1024,16 +1028,22 @@ static void bot_step_body(void) {
       //  once it is 12+ units away)
       // (02:25, the user: "he should be trying to find me at all costs ... all paths should be plotted to me": beyond 5 units the
       //  leader is the goal even mid-fight -- the fight still aims and fires, its moves wait until the walker is back beside it)
-      int fol_far = 0; if (g_follow_unit != 0xFFFFFFFFu) for (int i = 0; i < n; i++) if (objs[i].handle == g_follow_unit && !objs[i].dead) {
-          float fx = objs[i].c[0] - o->c[0], fy = objs[i].c[1] - o->c[1]; fol_far = fx * fx + fy * fy > 25.0f; }
-      if (!nw && !gun_go && (!engaged || fol_far) && !g_bot_shadow) { int li = -1; float bd = 1e30f; int human = 0, fol = 0;
+      // (05:55, the user: "now the walker is super needy following me like a puppy but not engaging in anything aggressively ... ALWAYS
+      //  uses a garbage AR instead of finding something better": a LEASH -- within NHOOK_BOT_LEASH (15) units of the leader it fights
+      //  and fetches weapons freely; beyond, the leader's path beats the fight. Out of a fight it closes up beyond NHOOK_BOT_WING_START
+      //  (8) until within NHOOK_BOT_WING_STOP (4). All live knobs)
+      float leash = 15, wstart = 8, wstop = 4; lk_over(&leash, "NHOOK_BOT_LEASH"); lk_over(&wstart, "NHOOK_BOT_WING_START"); lk_over(&wstop, "NHOOK_BOT_WING_STOP");
+      int fol_far = 0; float fol_d2 = -1; if (g_follow_unit != 0xFFFFFFFFu) for (int i = 0; i < n; i++) if (objs[i].handle == g_follow_unit && !objs[i].dead) {
+          float fx = objs[i].c[0] - o->c[0], fy = objs[i].c[1] - o->c[1]; fol_d2 = fx * fx + fy * fy; fol_far = fol_d2 > leash * leash; }
+      if (g_bot_pick_on && fol_d2 >= 0 && !fol_far) { if (was) goal = -1; was = 0; g_fol_go = 0; }   // (a better weapon within the leash: fetch it first)
+      else if (!nw && !gun_go && (!engaged || fol_far) && !g_bot_shadow) { int li = -1; float bd = 1e30f; int human = 0, fol = 0;
           for (int i = 0; i < n; i++) { const NovObj* t = &objs[i]; if (i == me || t->type || t->dead || bot_enemy(o, t)) continue; int hu = t->handle == g_follow_unit;
               if (hu) { float fx = t->c[0] - o->c[0], fy = t->c[1] - o->c[1]; li = i; bd = fx * fx + fy * fy; human = 1; fol = 1; break; }
               for (int k = 0; k < g_human_n && k < 8; k++) if (g_human_unit[k] == t->handle) hu = 1;
               float dx = t->c[0] - o->c[0], dy = t->c[1] - o->c[1], d = dx * dx + dy * dy;
               if (hu && (!human || d < bd)) { human = 1; bd = d; li = i; }
               else if (!human && !hu && t->handle < o->handle && (li < 0 || t->handle < objs[li].handle)) { li = i; bd = d; } }
-          if (li >= 0 && bd > (fol ? (was ? 9.0f : 25.0f) : (was ? 16.0f : 36.0f))) { wing = 1; memcpy(lp, objs[li].c, 12);   // (follow beyond 6 units, until within 4; the named leader 5 / 3)
+          if (li >= 0 && bd > (fol ? (was ? wstop * wstop : wstart * wstart) : (was ? 16.0f : 36.0f))) { wing = 1; memcpy(lp, objs[li].c, 12);   // (follow beyond 6 units, until within 4; the named leader: the live WING_START / WING_STOP)
               static double tlog; if (!was || now - tw > 1.0) { tw = now; goal = -1; if (!was && now - tlog > 10.0) { tlog = now; nlog("[nhook] [wing] %.0f units from my %s: closing up", sqrtf(bd), human ? "human teammate" : "lead walker"); } } } }
       if (wing) { mode = 3; memcpy(g_bot_pt, lp, 12); g_bot_pt[2] -= 0.35f; } else if (was) goal = -1;
       was = wing; g_fol_go = wing && fol_far; }

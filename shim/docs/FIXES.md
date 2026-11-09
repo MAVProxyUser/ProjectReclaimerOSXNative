@@ -3272,6 +3272,17 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   a running battle, at every round end (our server's in_match true -> false) walker-coach.py round + match-study.py, then each
   walker's game restarted headless with its new knobs and the newest build (they rejoin in the lobby; the user's game and the
   server stay).
+- **A leash, not a puppy; the aim point on the head; weapons fetched within the leash** (2026-11-09 06:00; nbot.c WINGMAN / the sparring
+  aim, follow-study.py hone_aim) — WHY: the user: "now the walker is super needy following me like a puppy but not engaging in anything
+  aggressively. I feel like it sucks at hitting the head hitbox. and ALWAYS uses a garbage AR instead of finding something better". The
+  user's client had measured the walker's shots: 120 aimed, median error 0.11 deg, 47.5% through a hitbox, only 28% of those the head
+  -- it aimed at 0.55 x the bounding radius over the centre, the neck. Following at all costs beyond 5 units held its fight's moves
+  back nearly always, and the wingman's goal (the leader) overwrote the fighter's weapon fetch every step. LOGIC: live knobs
+  NHOOK_BOT_LEASH (15): within it the walker fights freely, beyond it the leader's path beats the fight; NHOOK_BOT_WING_START (8) /
+  _WING_STOP (4): out of a fight it closes up beyond / until; a better weapon within the leash (bot_wpn_rank, the old 12-unit fetch)
+  is fetched before following. NHOOK_BOT_AIM_HEAD (0.55) = the aim point's height x the radius; follow-study.py hones it over 0.55 /
+  0.65 / 0.75 / 0.85 by head hits a shot -- the change each window in the watching client's aim analysis of the walker (n, on, head)
+  -- 20+ shots each first, then the best (1 in 4 random), saved in battles/follow/aim-state.json.
 - **Grenade practice: twice the throws, the arc honed after the lead, the honing kept across restarts** (2026-11-09 05:50; follow-study.py
   hone, battles/live-knobs, battles/follow/nade-state.json) — WHY: the user: "I really want the walker to practice grenade lays here too".
   LOGIC: NHOOK_BOT_GRENX 0.42 -> 0.2 in the live knobs (x the players' time between throws: about twice the throws). Honing in two

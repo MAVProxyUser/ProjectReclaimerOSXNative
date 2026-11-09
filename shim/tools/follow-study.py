@@ -47,6 +47,27 @@ def nade_lines(logp, state):
     return [l for l in b.decode('utf-8', 'replace').splitlines() if '[nade] ' in l]
 
 ARC = [0.015, 0.025, 0.035]
+AIMH = [0.55, 0.65, 0.75, 0.85]
+def hone_aim(astate, knobs_path, watcher_port=8765, name='AIWalkerTest'):
+    """the aim point's height (NHOOK_BOT_AIM_HEAD) by HEAD HITS a shot -- measured by the watching player's client (its stats page
+    analyses every other player's shots: n aimed shots, 'on' = through a hitbox, 'head' = of those the topmost) -- the window's change
+    in those cumulative counts credited to the height that ran; next: untried first, else the best (1 in 4 random)"""
+    try: d = json.load(urllib.request.urlopen('http://127.0.0.1:%d/stats.json' % watcher_port, timeout=3))
+    except Exception: return None
+    a = next((p.get('aim') for p in d.get('players', []) if p.get('name') == name), None)
+    if not a or not a.get('n'): return None
+    shots, heads = a['n'], a['n'] * (a.get('on') or 0) * (a.get('head') or 0)
+    cur = astate.get('cur', 0.55); st = astate.setdefault('stats', {}); last = astate.get('last')
+    if last and shots >= last[0]:
+        t = st.setdefault('%.2f' % cur, [0, 0.0]); t[0] += shots - last[0]; t[1] += max(0.0, heads - last[1])
+    astate['last'] = [shots, heads]
+    untried = [v for v in AIMH if st.get('%.2f' % v, [0, 0])[0] < 20]
+    nxt = untried[0] if untried else random.choice(AIMH) if random.random() < 0.25 else max(AIMH, key=lambda v: (st['%.2f' % v][1] + 0.5) / (st['%.2f' % v][0] + 5))
+    astate['cur'] = nxt
+    try: k = json.load(open(knobs_path))
+    except Exception: k = {}
+    k['NHOOK_BOT_AIM_HEAD'] = nxt; tmp = knobs_path + '.tmp'; json.dump(k, open(tmp, 'w')); os.replace(tmp, knobs_path)
+    return cur, nxt, st
 def hone(results, nstate, knobs_path):
     """stage 1: the lead per unit (TPU) among 0.06..0.14; once every value has 12+ throws, stage 2: the arc per unit (ARC) among
     0.015 / 0.025 / 0.035 with the best lead held. Each window's throws go to the setting that ran; the next is untried first, else
@@ -238,6 +259,9 @@ def main():
     try: nst.update({k: v for k, v in json.load(open(NST)).items() if k != 'off'})
     except Exception: pass
     nade_lines(logp, nst)   # (from now on)
+    AST = os.path.join(OUT, 'aim-state.json'); ast = {}
+    try: ast.update(json.load(open(AST)))
+    except Exception: pass
     print('%s following-study every %d s (the walker on %d, its leader by name)' % (time.strftime('%H:%M:%S'), EVERY, port), flush=True)
     while True:
         t0 = time.time(); time.sleep(EVERY); t1 = time.time(); n += 1
@@ -269,6 +293,10 @@ def main():
         res = nade_lines(logp, nst); kp = os.path.join(SUP, 'battles', 'live-knobs', WALKER_NAME[0] + '.json')
         cur, nxt, st = hone(res, nst, kp)
         try: json.dump({k: v for k, v in nst.items() if k != 'off'}, open(NST, 'w'))
+        except OSError: pass
+        ha = hone_aim(ast, kp)
+        if ha: print('  aim height: %.2f -> next %.2f; head hits a shot so far %s' % (ha[0], ha[1], ', '.join('%s: %.2f (%d shots)' % (k2, v[1] / v[0] if v[0] else 0, v[0]) for k2, v in sorted(ha[2].items()))), flush=True)
+        try: json.dump(ast, open(AST, 'w'))
         except OSError: pass
         if '--refit' in sys.argv: print('  learning: ' + refit(rec), flush=True)
         print('  grenades: %d thrown, %d hit (%d killed) with %s -> next %s; so far %s' % (len(res), sum(1 for l in res if ': hit' in l or 'KILLED' in l),
