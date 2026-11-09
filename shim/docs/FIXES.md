@@ -3272,6 +3272,16 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   a running battle, at every round end (our server's in_match true -> false) walker-coach.py round + match-study.py, then each
   walker's game restarted headless with its new knobs and the newest build (they rejoin in the lobby; the user's game and the
   server stay).
+- **The switch button found (record bit 0); outranged = no charge; the policy learns being under fire** (2026-11-09 11:45-11:55; nbot.c
+  swscan_tick / the OUTRANGED block / g_bot_outranged, nbrain_beh.c beh_fight, policy-train.py FEAT, npolicy.c) — WHY: the switch scan
+  hit control-record bit 0 four times in seven presses (no other bit more than once) -- under the 75% bar, a press can fall in a
+  reload / firing animation; today's best player sniped from 26 units (20 sniper kills, standing still 62%) while the walker's rifle
+  pulled it across the open into the scope; most of its deaths come from enemies it is not dueling. LOGIC: a bit is adopted at 3+ hits
+  and 55%+, also straight from the saved counts when a brain loads ("[swscan] LEARNED: ... bit 0"); every switch presses it 0.1 s.
+  OUTRANGED: a target 1.5x beyond the held weapon's band (p75 x DIST) holding a sniper / precision weapon, the walker holding neither
+  (nor a rocket) -> no closing in (r 0), a full strafe, no fire, and the fight bids NHOOK_U_FIGHT_OUTRANGED (35, under a weapon fetch's
+  45): go get a long gun. NHOOK_BOT_OUTRANGE=0 = off. POLICY: two more inputs (29): the player's shield change over the last 0.3 s and
+  the enemies within 25 units looking within 15 deg of it; npolicy.c builds both and runs a 27- or a 29-input policy.
 - **The empty pull reloads; the first shot as fast as the best player** (2026-11-09 11:35-11:40; nbot.c g_bot_click_until / the EMPTY
   block, trainer.json) — WHY: "EMPTY BRUTE SHOT: reloading from 5 in reserve" twice and still empty; the user: "reload click noise is a
   signal in the game" -- Halo reloads an empty gun when its trigger is pulled; and "[the best player] ... engages faster": the walker

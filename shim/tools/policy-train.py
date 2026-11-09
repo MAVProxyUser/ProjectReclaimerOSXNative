@@ -30,7 +30,8 @@ def wcls(w):
         if k in w: return c
     return 'other'
 FEAT = ['dist/10', 'dz', 'my_shield', 'my_health', 'en_shield', 'en_health', 'en_faces_me', 'my_view_cos', 'my_view_sin', 'my_u1', 'my_v1', 'my_u2', 'my_v2',
-        'en_u1', 'en_v1', 'e2_dist/10', 'e2_cos', 'e2_sin', 'near10/4', 'my_dz1'] + ['w_' + c for c in CLS]
+        'en_u1', 'en_v1', 'e2_dist/10', 'e2_cos', 'e2_sin', 'near10/4', 'my_dz1'] + ['w_' + c for c in CLS] + ['my_shield_d3', 'aimed_at_me/3']
+# (11:45: +2 -- under fire: the shield's change over the last 0.3 s, and how many enemies within 25 units look within 15 deg of the player)
 
 def load(path):
     S, you = [], None
@@ -58,7 +59,7 @@ def samples(S, you):
         if not (0.07 < S[i + 1][0] - t0 < 0.14 and 0.07 < t0 - S[i - 1][0] < 0.14): continue
         for sl, r in P0.items():
             if sl == you or len(r) < 12 or not r[2] or r[11]: continue   # (alive, on foot)
-            rows = [S[i + k][1].get(sl) for k in (-2, -1, 1, 2)]
+            rows = [S[i + k][1].get(sl) for k in (-2, -1, 1, 2)]; r3 = S[i - 3][1].get(sl) if i >= 3 else None
             if any(q is None or not q[2] or q[11] for q in rows): continue
             pm2, pm1, p1, p2 = rows; x, y, z = r[3], r[4], r[5]
             if max(math.hypot(a[3] - b[3], a[4] - b[4]) for a, b in ((pm2, pm1), (pm1, r), (r, p1))) > 1.2: continue   # (a respawn / teleport)
@@ -77,7 +78,13 @@ def samples(S, you):
             else: d2, c2, s2 = 30.0, 0.0, 0.0
             n10 = sum(1 for e in en if e[0] < 10)
             wc = [0.0] * len(CLS); wc[CLS.index(wcls(r[10]))] = 1.0
-            f = [dE / 10, E[5] - z, r[8] or 0, r[9] or 0, E[8] or 0, E[9] or 0, ef, vc, vs, m1[0], m1[1], m2[0], m2[1], e1[0], e1[1], d2 / 10, c2, s2, n10 / 4, 10 * (z - pm1[5])] + wc
+            sd3 = ((r[8] or 0) - (r3[8] or 0)) if r3 and r3[2] else 0.0
+            aimd = 0
+            for dq, q in en:
+                if dq < 0.3: continue
+                cq = (math.cos(q[6]) * (x - q[3]) + math.sin(q[6]) * (y - q[4])) / dq
+                if cq > 0.9659: aimd += 1   # (cos 15 deg)
+            f = [dE / 10, E[5] - z, r[8] or 0, r[9] or 0, E[8] or 0, E[9] or 0, ef, vc, vs, m1[0], m1[1], m2[0], m2[1], e1[0], e1[1], d2 / 10, c2, s2, n10 / 4, 10 * (z - pm1[5])] + wc + [sd3, aimd / 3]
             tg = uv(p1[3] - x, p1[4] - y); jump = 1.0 if (p2[5] - z) > 0.35 and (p1[5] - z) > 0.12 else 0.0
             out.append((f, [max(-4.0, min(4.0, tg[0])), max(-4.0, min(4.0, tg[1])), jump], 1.0 if sl in top else OTHERS))
     return out

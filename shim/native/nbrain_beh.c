@@ -77,6 +77,7 @@ static void beh_fetch(const World* W, Arb* a) { if (g_bot_pick_on) { float u = 4
     float bid = u + g * (float)g_pick_gain - fmaxf(0.0f, g_pick_d - 10.0f);
     if (W->engaged && W->tdist < 10.0f && g_pick_d > 2.0f && !g_bot_dry) bid = fminf(bid, hot);
     arb_bid(a, ARB_FETCH, bid, g_bot_pick_pos, "fetch a better weapon"); } }
-static void beh_fight(const World* W, Arb* a, int ob_carry) { if (W->engaged && !(ob_carry && W->tdist > 2.5f)) { float u = 60; lk_over(&u, "NHOOK_U_FIGHT"); arb_bid(a, ARB_FIGHT, u, 0, "fight"); } }
+static void beh_fight(const World* W, Arb* a, int ob_carry) { if (W->engaged && !(ob_carry && W->tdist > 2.5f)) { float u = 60, uo = 35; lk_over(&u, "NHOOK_U_FIGHT"); lk_over(&uo, "NHOOK_U_FIGHT_OUTRANGED");
+    arb_bid(a, ARB_FIGHT, g_bot_outranged ? uo : u, 0, g_bot_outranged ? "fight (outranged)" : "fight"); } }   // (outranged: under a weapon fetch's 45)
 static void beh_hold(const World* W, Arb* a) { if (W->fight && W->now - g_bot_hold_high < 0.3) { float u = 65; lk_over(&u, "NHOOK_U_HOLD"); arb_bid(a, ARB_HOLD, u, 0, "hold the high ground"); } }
 static void beh_hunt(const World* W, Arb* a) { (void)W; float u = 10; lk_over(&u, "NHOOK_U_HUNT"); arb_bid(a, ARB_HUNT, u, 0, "hunt"); }

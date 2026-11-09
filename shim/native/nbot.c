@@ -418,6 +418,7 @@ static int bot_ammo_off(void) {
 static int g_ammo_learned = -1;
 static int g_bot_trig;   // (the trigger held last step: defined with the fire section below)
 static int g_bot_dry;    // (the magazine stays empty after reloads: no reserve -- the other weapon or any weapon on the floor)
+static int g_bot_outranged;   // (11:50: the target out-ranges the held weapon from beyond its band: the fight bids low)
 static double g_bot_click_until;   // (11:40: the trigger pulled on an empty magazine -- the game reloads by itself, the "click")
 static const char* ammo_learned_path(void) { static char p[1024]; if (!p[0]) { const char* h = getenv("HOME"); snprintf(p, sizeof p, "%s/Library/Application Support/ReclaimerMac/native/ammo-learned.json", h ? h : ""); } return p; }
 static void ammo_learn(double now, const NovObj* o) {
@@ -464,7 +465,9 @@ static void swscan_tick(double now, const NovObj* o, int engaged) {
     // (11:30: single "hits" were noise -- the slot also changes from late packet pulses and pick-ups: the counts now persist across brains
     //  in native/switch-scan.txt and a bit is adopted at 3+ hits with a 75%+ hit rate; the real button switches every time)
     char sp[1100]; snprintf(sp, sizeof sp, "%s.scan", swbit_path());
-    if (!loaded) { loaded = 1; FILE* f = fopen(sp, "r"); if (f) { int b, t, h; while (fscanf(f, "%d %d %d", &b, &t, &h) == 3) if (b >= 0 && b < 64) { tries[b] = t; hits[b] = h; } fclose(f); } }
+    if (!loaded) { loaded = 1; FILE* f = fopen(sp, "r"); if (f) { int b, t, h; while (fscanf(f, "%d %d %d", &b, &t, &h) == 3) if (b >= 0 && b < 64) { tries[b] = t; hits[b] = h; } fclose(f); }
+        int best = -1; for (int b = 0; b < 64; b++) if (hits[b] >= 3 && hits[b] * 100 >= tries[b] * 55 && (best < 0 || hits[b] * tries[best] > hits[best] * tries[b])) best = b;
+        if (best >= 0) { g_swbit = best; FILE* g = fopen(swbit_path(), "w"); if (g) { fprintf(g, "%d\n", best); fclose(g); } nlog("[nhook] [swscan] LEARNED (from the saved counts): the weapon switch is control-record bit %d (%d of %d)", best, hits[best], tries[best]); return; } }
     g_swscan_busy = tpress > 0;
     if (tpress > 0) {
         if (now - tpress < 0.1) { g_swscan_bits = 1ull << cand; return; }
@@ -472,7 +475,8 @@ static void swscan_tick(double now, const NovObj* o, int engaged) {
         tries[cand]++; int changed = o->wslot != slot0; if (changed) { hits[cand]++; nlog("[nhook] [swscan] bit %d changed the weapon slot (%d -> %d): %d of %d", cand, slot0, o->wslot, hits[cand], tries[cand]); }
         tpress = 0; tnext = now + 0.3;
         { FILE* f = fopen(sp, "w"); if (f) { for (int b = 0; b < 64; b++) if (tries[b]) fprintf(f, "%d %d %d\n", b, tries[b], hits[b]); fclose(f); } }
-        if (hits[cand] >= 3 && hits[cand] * 4 >= tries[cand] * 3) { g_swbit = cand; FILE* f = fopen(swbit_path(), "w"); if (f) { fprintf(f, "%d\n", cand); fclose(f); } nlog("[nhook] [swscan] LEARNED: the weapon switch is control-record bit %d", cand); return; }
+        // (11:50: 75% -> 55% -- a press can fall in a reload / firing animation; the in-use rate is logged)
+        if (hits[cand] >= 3 && hits[cand] * 100 >= tries[cand] * 55) { g_swbit = cand; FILE* f = fopen(swbit_path(), "w"); if (f) { fprintf(f, "%d\n", cand); fclose(f); } nlog("[nhook] [swscan] LEARNED: the weapon switch is control-record bit %d", cand); return; }
         if (!changed || tries[cand] >= 6) cand = -1; }   // (a hit: the same bit again, to confirm -- up to 6 tries in a row)
     if (engaged || !g_inv.has_other || now < tnext || o->seat >= 0 || o->parent != 0xFFFFFFFFu) return;
     if (cand < 0) { static int next = 0; for (int k = 0; k < 64; k++) { int b = (next + k) % 64; if (b == 1 || b == 19 || b == 21 || b == 30) continue;
@@ -1099,6 +1103,15 @@ static void bot_step_body(void) {
                 if (g_eg.on) { uint64_t wd = (o->wslot >= 0 && o->wslot < 4) ? nov_datum(o->weapons[o->wslot]) : 0; uint32_t wdef = 0;
                     if (wd && hb_read(wd, &wdef, 4)) wc = eg_wcls(hb_tag_name(wdef)); float a2, b2; if (eg_band(wc, &a2, &b2)) { p25 = a2; p75 = b2; } }
                 float r = tdist > p75 * kdist ? 0.9f : tdist < p25 * kdist ? -backoff - 0.2f : press; if (o->shield < retreat && o->shield >= 0) r = -backoff;
+                // OUTRANGED (11:50: today's best player sniped from 26 units while the walker's rifle pulled it across the open into the
+                //  scope): the target 1.5x beyond the held weapon's band and holding a sniper / precision weapon -> no closing in, a full
+                //  strafe, no long shots; the fight bids under a weapon fetch (g_bot_outranged: nbrain_beh.c beh_fight). NHOOK_BOT_OUTRANGE=0 off
+                { float orng = 1; lk_over(&orng, "NHOOK_BOT_OUTRANGE"); g_bot_outranged = 0;
+                  if (orng > 0 && tdist > 1.5f * p75 * kdist && strcmp(wc, "sniper") && strcmp(wc, "precision") && strcmp(wc, "rocket")) {
+                      uint32_t tw = ftg.wslot >= 0 && ftg.wslot < 4 ? ftg.weapons[ftg.wslot] : 0xFFFFFFFFu; uint64_t twd = nov_datum(tw); uint32_t twdef = 0;
+                      const char* tcls = twd && hb_read(twd, &twdef, 4) ? eg_wcls(hb_tag_name(twdef)) : "none";
+                      if (!strcmp(tcls, "sniper") || !strcmp(tcls, "precision")) { g_bot_outranged = 1; r = 0; g_bot_fire = 0;
+                          static double tl; if (bot_log() && now - tl > 5) { tl = now; nlog("[nhook] [fight] outranged: a %s at %.0f units vs my %s -- no closing in, strafing, a better weapon first", tcls, tdist, wc); } } } }
                 if (g_bot_camo_hold) r = 0.9f;   // (camo: walk in to the near edge of the band before the first shot)
                 if (now > tswitch) { side = -side; tswitch = now + g_bm.strafe_switch * kswitch * (0.6f + 0.8f * bot_rand01()); }
                 float lat = side * fminf(1.0f, kstrafe * (0.25f + g_bm.strafe_rms / run));

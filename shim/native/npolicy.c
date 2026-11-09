@@ -48,23 +48,25 @@ static void pol_run(const float* x, float* o) {   // -> o[the last layer's rows]
 static int pol_cls(const char* c) { static const char* const k[] = {"auto", "precision", "shotgun", "sniper", "rocket", "melee", "other"}; for (int i = 0; i < 7; i++) if (c && !strcmp(c, k[i])) return i; return 6; }
 // the policy's move in the walker's view frame (*r toward, *lat left; throttle -1..1) and its jump wish; -> 1 when it ran
 static int pol_move(double now, const NovObj* objs, int n, int me, const NovObj* o, const NovObj* E, float yaw0, float* r, float* lat, int* jump) {
-    if (!g_pol.ok || g_pol.nin != 27) return 0;   // (inputs: policy-train.py FEAT)
-    static double ts; static float hist[3][3]; static uint32_t eh; static float eprev[3], ecur[3]; static float out[3], raw[64]; static int have;
-    if (now - ts >= 0.1) { ts = now; memmove(hist[1], hist[0], sizeof(float) * 6); memcpy(hist[0], o->c, 12);
+    if (!g_pol.ok || (g_pol.nin != 27 && g_pol.nin != 29)) return 0;   // (inputs: policy-train.py FEAT -- 27, or 29 with the under-fire pair, 11:45)
+    static double ts; static float hist[3][3], shh[4]; static uint32_t eh; static float eprev[3], ecur[3]; static float out[3], raw[64]; static int have;
+    if (now - ts >= 0.1) { ts = now; memmove(hist[1], hist[0], sizeof(float) * 6); memcpy(hist[0], o->c, 12); memmove(shh + 1, shh, sizeof(float) * 3); shh[0] = o->shield;
         if (E->handle != eh) { eh = E->handle; memcpy(eprev, E->c, 12); } else memcpy(eprev, ecur, 12); memcpy(ecur, E->c, 12); have++;
         if (have >= 3) {
             float dx = E->c[0] - o->c[0], dy = E->c[1] - o->c[1], dE = sqrtf(dx * dx + dy * dy); if (dE < 0.3f) return 0;
-            float ux = dx / dE, uy = dy / dE, vx = -uy, vy = ux; float x[27];
+            float ux = dx / dE, uy = dy / dE, vx = -uy, vy = ux; float x[29];
             #define UV(ax, ay, U, V) do { U = 10.0f * ((ax) * ux + (ay) * uy); V = 10.0f * ((ax) * vx + (ay) * vy); } while (0)
             float m1u, m1v, m2u, m2v, e1u, e1v; UV(hist[0][0] - hist[1][0], hist[0][1] - hist[1][1], m1u, m1v); UV(hist[1][0] - hist[2][0], hist[1][1] - hist[2][1], m2u, m2v);
             UV(ecur[0] - eprev[0], ecur[1] - eprev[1], e1u, e1v);
             float ey = atan2f(E->aim[1], E->aim[0]), ef = cosf(ey) * (o->c[0] - E->c[0]) / dE + sinf(ey) * (o->c[1] - E->c[1]) / dE;
             float vc = cosf(yaw0) * ux + sinf(yaw0) * uy, vs = cosf(yaw0) * vx + sinf(yaw0) * vy;
-            float d2 = 30, c2 = 0, s2 = 0; int n10 = 0;
+            float d2 = 30, c2 = 0, s2 = 0; int n10 = 0, aimd = 0;
             for (int i = 0; i < n; i++) { const NovObj* t = &objs[i]; if (i == me || t->type || t->dead || !bot_enemy(o, t)) continue; float tx = t->c[0] - o->c[0], ty = t->c[1] - o->c[1], d = sqrtf(tx * tx + ty * ty);
-                if (d < 10) n10++; if (t->handle != E->handle && d < d2) { d2 = d; c2 = (tx * ux + ty * uy) / fmaxf(d, 1e-3f); s2 = (tx * vx + ty * vy) / fmaxf(d, 1e-3f); } }
+                if (d < 10) n10++; if (d > 0.3f && d < 25) { float ay = atan2f(t->aim[1], t->aim[0]); if ((cosf(ay) * -tx + sinf(ay) * -ty) / d > 0.9659f) aimd++; }   // (aimed at me, within 15 deg)
+                if (t->handle != E->handle && d < d2) { d2 = d; c2 = (tx * ux + ty * uy) / fmaxf(d, 1e-3f); s2 = (tx * vx + ty * vy) / fmaxf(d, 1e-3f); } }
             float f0[20] = {dE / 10, E->c[2] - o->c[2], o->shield, o->health, E->shield, E->health, ef, vc, vs, m1u, m1v, m2u, m2v, e1u, e1v, d2 / 10, c2, s2, n10 / 4.0f, 10.0f * (hist[0][2] - hist[1][2])};
             memcpy(x, f0, sizeof f0); for (int k = 0; k < 7; k++) x[20 + k] = 0; x[20 + pol_cls(g_inv.held_c)] = 1;
+            x[27] = shh[0] - shh[3]; x[28] = aimd / 3.0f;   // (used by a 29-input policy only)
             pol_run(x, raw);
             if (g_pol.k == 0) { out[0] = raw[0]; out[1] = raw[1]; out[2] = raw[2]; }
             else { int K = g_pol.k; float mx = raw[0]; for (int c = 1; c < K; c++) if (raw[c] > mx) mx = raw[c];   // (sample a component, then the move from it)
