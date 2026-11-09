@@ -58,6 +58,12 @@ static int hb_live_defs(uint32_t*defs,int max){   // distinct definition datums 
         int dup=0; for(int k=0;k<n;k++) if(defs[k]==d){ dup=1; break; } if(!dup) defs[n++]=d; }
     pthread_mutex_unlock(&mx); return n; }
 static volatile int g_hb_map_recheck;   // set: the next call decides again now (stats.c, when a match's loading screen ends)
+// HB_CURMAP: what the geometry / name lookups below ask for the map being played (2026-11-09: the native walker's reloadable brain
+// builds this file with hb_current_map renamed, so these calls reached its own, empty copy -- no hitbox geometry there; it defines
+// HB_CURMAP as the body's export). Everyone else: hb_current_map.
+#ifndef HB_CURMAP
+#define HB_CURMAP hb_current_map
+#endif
 static int hb_current_map(char*out,size_t n){
     static pthread_mutex_t mx=PTHREAD_MUTEX_INITIALIZER; static char cur[1024]; static double tchk; static int last_np=-1;
     pthread_mutex_lock(&mx); double now=mono_s();
@@ -196,7 +202,7 @@ static HbGeom* hb_geom(uint32_t def){
     if(g_hbg_gen!=g_hb_mapgen){ g_hbg_gen=g_hb_mapgen; for(int i=0;i<g_hbg_n;i++){ free(g_hbg[i].node); free(g_hbg[i].reg); free(g_hbg[i].perm); free(g_hbg[i].wk); free(g_hbg[i].pts); } g_hbg_n=0; }
     for(int i=0;i<g_hbg_n;i++) if(g_hbg[i].def==def) return g_hbg[i].ok?&g_hbg[i]:0;
     if(g_hbg_n>=96) return 0; HbGeom*g=&g_hbg[g_hbg_n++]; memset(g,0,sizeof *g); g->def=def;
-    char paths[HB_NPATHS+1][1024]; int np=0; hb_current_map(paths[0],1024); if(paths[0][0]) np=1;
+    char paths[HB_NPATHS+1][1024]; int np=0; HB_CURMAP(paths[0],1024); if(paths[0][0]) np=1;
     { pthread_mutex_lock(&g_hb_mapmx); for(int k=0;k<g_hb_nmappaths;k++) if(strcmp(g_hb_mappaths[k],paths[0])) memcpy(paths[np++],g_hb_mappaths[k],1024); pthread_mutex_unlock(&g_hb_mapmx); }
     for(int k=0;k<np && !g->ok;k++){ HbMap*m=hbm_get(paths[k]); int ti=def&0xFFFF; if(!m || ti>=m->ntags || m->salt[ti]!=(def>>16)) continue;
         if(m->grp[ti]!='bipd' && m->grp[ti]!='vehi' && m->grp[ti]!='gint') continue; hbg_build(g,m,ti);
@@ -212,7 +218,7 @@ static int hbv_cmp(const void*a,const void*b){ const float*p=a,*q=b; return p[0]
 static float hbv_cross(const float*o,const float*a,const float*b){ return (a[1]-o[1])*(b[2]-o[2])-(a[2]-o[2])*(b[1]-o[1]); }
 char* hb_vshape(uint32_t def,uint64_t datum){
     HbGeom g; memset(&g,0,sizeof g); g.def=def;
-    char paths[HB_NPATHS+1][1024]; int np=0; hb_current_map(paths[0],1024); if(paths[0][0]) np=1;
+    char paths[HB_NPATHS+1][1024]; int np=0; HB_CURMAP(paths[0],1024); if(paths[0][0]) np=1;
     { pthread_mutex_lock(&g_hb_mapmx); for(int k=0;k<g_hb_nmappaths;k++) if(strcmp(g_hb_mappaths[k],paths[0])) memcpy(paths[np++],g_hb_mappaths[k],1024); pthread_mutex_unlock(&g_hb_mapmx); }
     for(int k=0;k<np && !g.ok;k++){ HbMap*m=hbm_get(paths[k]); int ti=def&0xFFFF; if(!m || ti>=m->ntags || m->salt[ti]!=(def>>16) || m->grp[ti]!='vehi') continue; hbg_build(&g,m,ti); }
     char*out=0; float*pt=0;
@@ -268,7 +274,7 @@ static const char* hb_tag_name_l(uint32_t def){
     static struct { uint32_t def; char nm[32]; } cache[256]; static int nc; static unsigned gen;
     if(gen!=g_hb_mapgen){ gen=g_hb_mapgen; nc=0; }   // (definition datums are per map: names start over with the map)
     for(int i=0;i<nc;i++) if(cache[i].def==def) return cache[i].nm;
-    char out[32]="?"; char paths[HB_NPATHS+1][1024]; int np=0; hb_current_map(paths[0],1024); if(paths[0][0]) np=1;   // the map being played first
+    char out[32]="?"; char paths[HB_NPATHS+1][1024]; int np=0; HB_CURMAP(paths[0],1024); if(paths[0][0]) np=1;   // the map being played first
     { pthread_mutex_lock(&g_hb_mapmx); for(int k=0;k<g_hb_nmappaths;k++) if(strcmp(g_hb_mappaths[k],paths[0])) memcpy(paths[np++],g_hb_mappaths[k],1024); pthread_mutex_unlock(&g_hb_mapmx); }
     for(int k=0;k<np;k++){ HbMap*m=hbm_get(paths[k]); int ti=def&0xFFFF; if(!m || !m->names || ti>=m->ntags || m->salt[ti]!=(def>>16)) continue;
         const char*full=m->names+m->noff[ti]; const char*b=strrchr(full,'\\'); b=b?b+1:full; int j=0;

@@ -47,6 +47,7 @@ static int hb_scenario_name(char* out, size_t n) {         // as hitbox.c: game_
 #define HB_MAXOBJ 16384                                   // the app's object table: 0x3fc0 slots ([capacity] objects.count)
 #ifdef NH_BRAIN   // (the brain: the maps the body saw opened, and their tag names)
 int nhx_hb_current_map(char* out, size_t n); const char* nhx_hb_tag_name(uint32_t def);
+#define HB_CURMAP nhx_hb_current_map   // (h3maps.c's geometry / name lookups: the body's map, not the brain's empty copy)
 #define hb_current_map hb_current_map_body
 #define hb_tag_name hb_tag_name_body
 #endif

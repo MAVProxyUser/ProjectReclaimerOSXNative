@@ -47,7 +47,8 @@ def nade_lines(logp, state):
     return [l for l in b.decode('utf-8', 'replace').splitlines() if '[nade] ' in l]
 
 ARC = [0.015, 0.025, 0.035]
-AIMH = [0.55, 0.65, 0.75, 0.85]
+AIMH = [0.55, 0.65, 0.75, 0.85]   # (the old aim heights over the bounding sphere's centre, x its radius: the fallback, no longer honed)
+HDZ = [-0.5, -0.25, 0.0, 0.25, 0.5]   # (07:55: head radii above the HEAD HITBOX's centre -- the brain aims at the real head now)
 def aim_counts(port):
     """the walker's own judged shots so far (its stats page, the player marked 'you'): (aimed shots, through a hitbox, through the head)"""
     try: d = json.load(urllib.request.urlopen('http://127.0.0.1:%d/stats.json' % port, timeout=3))
@@ -56,7 +57,7 @@ def aim_counts(port):
     if not a or not a.get('n'): return None
     return a['n'], a['n'] * (a.get('on') or 0), a['n'] * (a.get('on') or 0) * (a.get('head') or 0)
 def hone_aim(astate, knobs_path, port):
-    """the aim point's height (NHOOK_BOT_AIM_HEAD) by HEAD HITS a shot -- measured by the WALKER'S OWN client (its stats page judges
+    """the aim point's height over the HEAD HITBOX's centre (NHOOK_BOT_HEAD_DZ, head radii; was NHOOK_BOT_AIM_HEAD) by HEAD HITS a shot -- measured by the WALKER'S OWN client (its stats page judges
     its shots against the hitboxes, headless too since 2026-11-09: n aimed shots, 'on' = through a hitbox, 'head' = of those the
     topmost; the player marked 'you') -- the window's change
     in those cumulative counts credited to the height that ran; next: untried first, else the best (1 in 4 random)"""
@@ -65,16 +66,16 @@ def hone_aim(astate, knobs_path, port):
     a = next((p.get('aim') for p in d.get('players', []) if p.get('you')), None)
     if not a or not a.get('n'): return None
     shots, heads = a['n'], a['n'] * (a.get('on') or 0) * (a.get('head') or 0)
-    cur = astate.get('cur', 0.55); st = astate.setdefault('stats', {}); last = astate.get('last')
+    cur = astate.get('dz_cur', 0.0); st = astate.setdefault('dz_stats', {}); last = astate.get('last')
     if last and shots >= last[0]:
         t = st.setdefault('%.2f' % cur, [0, 0.0]); t[0] += shots - last[0]; t[1] += max(0.0, heads - last[1])
     astate['last'] = [shots, heads]
-    untried = [v for v in AIMH if st.get('%.2f' % v, [0, 0])[0] < 20]
-    nxt = untried[0] if untried else random.choice(AIMH) if random.random() < 0.25 else max(AIMH, key=lambda v: (st['%.2f' % v][1] + 0.5) / (st['%.2f' % v][0] + 5))
-    astate['cur'] = nxt
+    untried = [v for v in HDZ if st.get('%.2f' % v, [0, 0])[0] < 20]
+    nxt = untried[0] if untried else random.choice(HDZ) if random.random() < 0.25 else max(HDZ, key=lambda v: (st['%.2f' % v][1] + 0.5) / (st['%.2f' % v][0] + 5))
+    astate['dz_cur'] = nxt
     try: k = json.load(open(knobs_path))
     except Exception: k = {}
-    k['NHOOK_BOT_AIM_HEAD'] = nxt; tmp = knobs_path + '.tmp'; json.dump(k, open(tmp, 'w')); os.replace(tmp, knobs_path)
+    k['NHOOK_BOT_HEAD_DZ'] = nxt; tmp = knobs_path + '.tmp'; json.dump(k, open(tmp, 'w')); os.replace(tmp, knobs_path)
     return cur, nxt, st
 def hone(results, nstate, knobs_path):
     """stage 1: the lead per unit (TPU) among 0.06..0.14; once every value has 12+ throws, stage 2: the arc per unit (ARC) among
@@ -386,7 +387,7 @@ def main():
         try: json.dump({k: v for k, v in nst.items() if k != 'off'}, open(NST, 'w'))
         except OSError: pass
         ha = hone_aim(ast, kp, port)
-        if ha: print('  aim height: %.2f -> next %.2f; head hits a shot so far %s' % (ha[0], ha[1], ', '.join('%s: %.2f (%d shots)' % (k2, v[1] / v[0] if v[0] else 0, v[0]) for k2, v in sorted(ha[2].items()))), flush=True)
+        if ha: print('  aim height: %+.2f head radii over the head hitbox -> next %+.2f; head hits a shot so far %s' % (ha[0], ha[1], ', '.join('%s: %.2f (%d shots)' % (k2, v[1] / v[0] if v[0] else 0, v[0]) for k2, v in sorted(ha[2].items()))), flush=True)
         try: json.dump(ast, open(AST, 'w'))
         except OSError: pass
         if '--refit' in sys.argv: print('  learning: ' + refit(rec), flush=True)

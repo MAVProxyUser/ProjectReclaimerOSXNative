@@ -3272,6 +3272,19 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   a running battle, at every round end (our server's in_match true -> false) walker-coach.py round + match-study.py, then each
   walker's game restarted headless with its new knobs and the newest build (they rejoin in the lobby; the user's game and the
   server stay).
+- **The walker aims at the HEAD HITBOX; the brain's hitbox geometry works** (2026-11-09 08:00; nbot.c bot_head and the fighter's aim
+  point, h3maps.c HB_CURMAP, nstats.c, follow-study.py hone_aim) — WHY: the same requests ("you can see all I can see for aim, tune,
+  etc re: hitbox. don't make me a crutch"): the fighter aimed NHOOK_BOT_AIM_HEAD x the bounding radius over the bounding sphere's centre,
+  a guess -- 8% of its 120 judged shots went through the head. LOGIC: bot_head poses the target's collision model with its node
+  matrices (the aim meter's geometry: the region whose nodes sit highest = the head) and returns the head's centre and mean radius;
+  the offset from the object's centre is kept 50 ms per target and added to the fresh centre; the fighter aims there plus
+  NHOOK_BOT_HEAD_DZ head radii (live, 0; hone_aim now hones it among -0.5..+0.5 on head hits a shot, NHOOK_BOT_AIM_HEAD stays the
+  fallback), and the precision head gate measures its error from there (width unchanged, 0.15 units). Live: mp_masterchief's head
+  0.22-0.25 units above the centre, radius 0.07 -- the old point (0.55 x ~0.35) was at the neck. Brain only (its bot thread owns its
+  own hb_geom cache; in the body the render / snapshot thread owns it). FOUND: in the brain build h3maps.c's hb_geom / vehicle-shape /
+  name lookups called the brain's own renamed hb_current_map (empty: the brain never sees the map opens), so the brain had NO hitbox
+  geometry ("geometry NOT found" for mp_elite / mp_masterchief); they now call HB_CURMAP, which the brain defines as the body's export
+  (default hb_current_map: the loader and the body unchanged). NHOOK_BOT_HEADAIM=0 (live) = the old height.
 - **The walker judges its own shots against the hitboxes, headless too; head-height aim, a head gate for precision weapons, the trainer
   scores accuracy and headshots** (2026-11-09 07:45; noverlay.c nov_aim_tick, nstats.c st_snap_thread, nbot.c the fighter's aim point
   and fire gate, follow-study.py hone_aim / the window score) — WHY: the user: "try to constantly bump up accuracy too. hitting the

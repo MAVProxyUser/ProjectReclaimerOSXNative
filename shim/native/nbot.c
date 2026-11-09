@@ -728,6 +728,48 @@ static int arb_choose(Arb* a, double now) {
         for (int k = 0; k < ARB_N && q < (int)sizeof b - 40; k++) if (k != w && a->b[k].on) q += snprintf(b + q, sizeof b - (size_t)q, " > %s %.0f", a->b[k].why, a->b[k].score);
         nlog("%s", b); }
     return w; }
+// The target's HEAD (2026-11-09 07:55; the user: "you can see all I can see for aim, tune, etc re: hitbox. don't make me a crutch in any
+// way"): the head region of the target's collision model posed by its node matrices -- the same geometry and the same "head" (the region
+// whose nodes sit highest) the aim meter judges every shot with (noverlay.c nov_aim_tick_body) -- its centre and mean radius. The fighter
+// aims there, NHOOK_BOT_HEAD_DZ head radii above it (live, 0; follow-study.py hones it on head hits a shot), instead of a guessed height
+// over the bounding sphere (NHOOK_BOT_AIM_HEAD, still the fallback). The offset from the object's centre is kept 50 ms per target and
+// added to its fresh centre. BRAIN only: there the bot thread owns its own hb_geom cache (the brain reads the map the body names); in the
+// body hb_geom belongs to the render / snapshot thread. NHOOK_BOT_HEADAIM=0 (live) = the old height.
+static int bot_head(const NovObj* t, double now, float* out) {   // -> 1: out = head centre xyz + radius
+#ifndef NH_BRAIN
+    (void)t; (void)now; (void)out; return 0;
+#else
+    static uint32_t ch = 0xFFFFFFFFu; static double ct; static float co[4]; static int cok;
+    if (t->handle != ch || now - ct > 0.05) { ch = t->handle; ct = now; cok = 0;
+        HbGeom* g = t->def ? hb_geom(t->def) : 0; int nn = t->nmsz / 52;
+        static float mt[128 * 13];
+        if (g && !(t->nmsz % 52) && nn >= 1 && nn <= 128 && nn > g->maxnode && t->nmoff >= 0x100 && hb_read(t->p + t->nmoff, mt, (size_t)nn * 52) && fabsf(mt[0] - 1.0f) <= 0.1f) {
+            uint8_t perm[32] = {0}; int rc = t->rcount > 0 && t->rcount <= 32 ? t->rcount : 0; if (rc && !hb_read(t->p + t->roff + (size_t)rc * 8, perm, (size_t)rc)) rc = 0;
+            uint8_t sel[256]; memset(sel, 0, sizeof sel);
+            if (g->nhreg > 0 && rc > 0) for (int i = 0; i < g->nhreg && i < rc; i++) { int pi = perm[i]; if (pi >= g->hnperm[i]) pi = 0;
+                int cr = g->hcreg[i], cp = g->hnperm[i] ? g->hcperm[i][pi] : 0; if (cr >= 0 && cr < 256 && cp >= 0) sel[cr] = (uint8_t)cp; }
+            float zs[256] = {0}; int zc[256] = {0};
+            for (int q = 0; q < g->nseg; q++) { if (g->perm[q] != sel[g->reg[q]]) continue; zs[g->reg[q]] += mt[g->node[q] * 13 + 12]; zc[g->reg[q]]++; }
+            int head = -1; float hb = -1e30f; for (int q = 0; q < g->nreg && q < 256; q++) if (zc[q] && zs[q] / zc[q] > hb) { hb = zs[q] / zc[q]; head = q; }
+            static float pts[2048][3]; int np = 0; float c[3] = {0, 0, 0};
+            if (head >= 0) for (int q = 0; q < g->nseg && np + 2 <= 2048; q++) { if (g->reg[q] != head || g->perm[q] != sel[head]) continue;
+                const float* M = mt + g->node[q] * 13, * P = g->pts + q * 6;
+                for (int e = 0; e < 2; e++) { const float* v = P + e * 3; float* w = pts[np++];
+                    for (int k = 0; k < 3; k++) w[k] = M[10 + k] + M[0] * (v[0] * M[1 + k] + v[1] * M[4 + k] + v[2] * M[7 + k]);
+                    c[0] += w[0]; c[1] += w[1]; c[2] += w[2]; } }
+            if (np >= 2) { c[0] /= np; c[1] /= np; c[2] /= np; float r = 0;
+                for (int i = 0; i < np; i++) r += sqrtf((pts[i][0] - c[0]) * (pts[i][0] - c[0]) + (pts[i][1] - c[1]) * (pts[i][1] - c[1]) + (pts[i][2] - c[2]) * (pts[i][2] - c[2]));
+                r /= np; float ox = c[0] - t->c[0], oy = c[1] - t->c[1], oz = c[2] - t->c[2];
+                if (r > 0.02f && r < 0.6f && ox * ox + oy * oy + oz * oz < 4.0f * t->r * t->r) { co[0] = ox; co[1] = oy; co[2] = oz; co[3] = r; cok = 1; } }
+            static int told; if (!told && cok) { told = 1; nlog("[nhook] [aim] aiming at the head hitbox: region %d, %.2f units above the centre, radius %.2f (%d edge points)", head, co[2], co[3], np); } }
+        if (!cok) { static double tw; if (now - tw > 30) { tw = now; char mp[1024] = ""; hb_current_map(mp, sizeof mp);
+            nlog("[nhook] [aim] no head hitbox for %08x (definition %08x): geometry %s, nodes %d (size %u at +0x%x), regions %d; map \"%s\"", t->handle, t->def,
+                 g ? "found" : "NOT found", nn, (unsigned)t->nmsz, (unsigned)t->nmoff, t->rcount, mp); } } }
+    if (!cok) return 0;
+    out[0] = t->c[0] + co[0]; out[1] = t->c[1] + co[1]; out[2] = t->c[2] + co[2]; out[3] = co[3]; return 1;
+#endif
+}
+static float g_bot_head_r = -1;   // (the current target's head radius, -1 = not known)
 #include "nbrain_beh.c"   // the behaviours: each bids for the legs (brain stage 2)
 static void bot_models_tick(void) {   // (live knobs: the models re-read when their files change -- every 10 s a look at the files' times)
     static double t; double now = mono_s(); if (now - t < 10.0) return; t = now; const char* h = getenv("HOME"); char p[1100]; struct stat st;
@@ -802,7 +844,10 @@ static void bot_step_body(void) {
         //  error 0.11 deg, 47.5% through a hitbox, only 28% of those the head: aimed at the neck. NHOOK_BOT_AIM_HEAD = the aim point's
         //  height over the bounding sphere's centre, x its radius (was 0.55; a live knob: follow-study.py hones it on the head share))
         float aimh = 0.55f; lk_over(&aimh, "NHOOK_BOT_AIM_HEAD");
-        if (bi >= 0) { const NovObj* t = &objs[bi]; float d[3] = {t->c[0] - cam[0], t->c[1] - cam[1], t->c[2] + aimh * t->r - cam[2]}; float h = sqrtf(d[0] * d[0] + d[1] * d[1]);
+        float ha_on = 1, hdz = 0; lk_over(&ha_on, "NHOOK_BOT_HEADAIM"); lk_over(&hdz, "NHOOK_BOT_HEAD_DZ"); g_bot_head_r = -1;
+        if (bi >= 0) { const NovObj* t = &objs[bi]; float hp[4], ap[3] = {t->c[0], t->c[1], t->c[2] + aimh * t->r};
+            if (ha_on > 0 && bot_head(t, now, hp)) { ap[0] = hp[0]; ap[1] = hp[1]; ap[2] = hp[2] + hdz * hp[3]; g_bot_head_r = hp[3]; }   // (the head hitbox: bot_head above)
+            float d[3] = {ap[0] - cam[0], ap[1] - cam[1], ap[2] - cam[2]}; float h = sqrtf(d[0] * d[0] + d[1] * d[1]);
             if (h > 0.01f) { yaw = atan2f(d[1], d[0]); pitch = atan2f(d[2], h); out |= 1; ftg = *t; have_tg = 1; tdist = sqrtf(bd); tyaw = yaw; tpitch = pitch;
                 // the error against the record's angles (the aim the engine used last tick: the lag behind a moving target). Not
                 // against the camera's forward: halo3's first-person camera looks 4.9 deg above the aim the record sets (the app's
@@ -878,7 +923,7 @@ static void bot_step_body(void) {
             //  magnum, sniper -- headshots kill faster) the trigger waits for the aim to sit on the HEAD: within its angular radius
             //  (0.15 units) x NHOOK_BOT_HEADGATE (1.0) + 0.3 deg. The automatic weapons keep the body gate (a headshot adds nothing there)
             if (g_bot_fire && g_inv.held_c && (!strcmp(g_inv.held_c, "precision") || !strcmp(g_inv.held_c, "sniper"))) {
-                float hg = 1.0f; lk_over(&hg, "NHOOK_BOT_HEADGATE"); float hs = atanf(0.15f / (tdist > 0.5f ? tdist : 0.5f)) * 57.2958f;
+                float hg = 1.0f; lk_over(&hg, "NHOOK_BOT_HEADGATE"); float hs = atanf(0.15f / (tdist > 0.5f ? tdist : 0.5f)) * 57.2958f;   // (the width stays 0.15 units -- the head hitbox's mean radius, ~0.07, would halve it -- but the error is now measured from the real head: bot_head)
                 if (err > hs * hg + 0.3f) g_bot_fire = 0; }
             { static float mv = -1; static double thurt; float v2 = o->shield + o->health; if (mv >= 0 && v2 < mv - 0.02f) thurt = now; mv = v2;
               // under active camo: no shot beyond the near edge of the weapon's band (+2 units) unless we were hit in the last 2 s --
