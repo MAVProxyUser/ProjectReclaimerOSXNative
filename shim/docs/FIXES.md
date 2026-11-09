@@ -3272,6 +3272,10 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   a running battle, at every round end (our server's in_match true -> false) walker-coach.py round + match-study.py, then each
   walker's game restarted headless with its new knobs and the newest build (they rejoin in the lobby; the user's game and the
   server stay).
+- **Let go of the trigger to switch; pulse the plasma pistol** (2026-11-09 14:05; nbot.c the trigger, bot_pull_weapon) — WHY: "[inv]
+  switch presses (the learnt record bit): 0 of 32 took" -- 32 x "switching from PLASMA PISTOL to ASSAULT RIFLE" with the trigger held
+  (the plasma pistol held = an overcharge held) while the earlier switches, 3 of 3 and 2 of 2, came with the trigger up. LOGIC: from a
+  switch press until 0.15 s after it the trigger (and the reload click) stays up; PLASMA PISTOL joins the weapons whose trigger is pulsed.
 - **A clean policy A/B** (2026-11-09 14:00; follow-study.py --policy-ab N) — WHY: accuracy slid 66% -> 28% over windows that changed the
   opponents (a new 16-player match), the policy's weights (its 04:44 retrain) and a string of rules at once; the trainer's challengers
   nudge one knob among many, too noisy to tell whether the learnt policy helps. LOGIC: for N windows the study writes NHOOK_BOT_POLICY

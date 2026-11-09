@@ -570,7 +570,7 @@ static void mel_load(void) {
 // weapons that act on a trigger PULL (holding does not repeat): the trigger is pulsed (0.12 s down, 0.12 s up) while firing.
 // (the bullet log shows the battle rifle and carbine firing on while held: bursts every 0.25-0.35 s)
 static int bot_pull_weapon(const char* w) {
-    static const char* const k[] = {"HAMMER", "SWORD", "ENERGY BLADE", "SNIPER", "BEAM RIFLE", "MAGNUM", "ROCKET", "BRUTE SHOT", "FUEL ROD", 0};
+    static const char* const k[] = {"HAMMER", "SWORD", "ENERGY BLADE", "SNIPER", "BEAM RIFLE", "MAGNUM", "ROCKET", "BRUTE SHOT", "FUEL ROD", "PLASMA PISTOL", 0};   /* (14:05: the plasma pistol held = an overcharge held, and no switch away from it: 0 of 32) */
     if (!w) return 0; for (int i = 0; k[i]; i++) if (strstr(w, k[i])) return 1; return 0; }
 static int g_bot_pull, g_bot_trig; static double g_bot_fire_t0;   // (the held weapon acts on a pull; when this string of fire began)
 static double g_bot_hold_high, g_bot_hold_last;   // (levels apart: holding the high ground until; the last levels-apart step)
@@ -1532,7 +1532,10 @@ static void bot_step_body(void) {
       //  a death holding it at 8 units. With it in hand and the target in sight within 40 units the trigger stays down)
       if (!nofire && spar && have_tg && tdist < 40 && g_inv.held && strstr(g_inv.held, "SPARTAN LASER") && los_get(ftg.handle, now) == 1) { trig = 1; g_bot_trig = 1; }
       { static double tobm; if (ob_carry && have_tg && tdist < 1.8f && now - tobm > 0.6) { tobm = now; g_bot_melee_until = now + 0.12; } }
-      uint64_t want = (now < g_bot_click_until ? fb : 0) | g_swscan_bits | (g_swbit >= 0 && now < g_swrec_until ? (1ull << g_swbit) : 0) | (now < g_bot_melee_until ? bot_meleebits() : 0) | (trig ? fb : 0) | ((fbtn & 0x10000) ? gb : 0) | ((fbtn & 0x20000) ? pkb : 0) | (now < g_fjump_until ? g_bot_jump : 0);   // (fbtn bit 16: the grenade pulse, 17: pick up)
+      // (14:05: the trigger is let go around a switch press -- "switching from PLASMA PISTOL to ASSAULT RIFLE" 32 times with the trigger
+      //  held, none took; the switches that took came with the trigger up)
+      if (g_swbit >= 0 && now < g_swrec_until + 0.15) { trig = 0; g_bot_trig = 0; }
+      uint64_t want = (now < g_bot_click_until && !(g_swbit >= 0 && now < g_swrec_until + 0.15) ? fb : 0) | g_swscan_bits | (g_swbit >= 0 && now < g_swrec_until ? (1ull << g_swbit) : 0) | (now < g_bot_melee_until ? bot_meleebits() : 0) | (trig ? fb : 0) | ((fbtn & 0x10000) ? gb : 0) | ((fbtn & 0x20000) ? pkb : 0) | (now < g_fjump_until ? g_bot_jump : 0);   // (fbtn bit 16: the grenade pulse, 17: pick up)
       if (want) { g_bot_btn = ((out & 4) ? g_bot_btn : 0) | want; out |= 4; } else if (!(out & 4)) g_bot_btn = 0; }
     if (diag) { uint64_t b = 0; int d = bot_diag(&tx, &ty, &b, now); out |= d; if (d & 4) g_bot_btn = b; else if (!(out & 4)) g_bot_btn = 0;
         static double tl; if (now - tl > 0.25) { tl = now; const float* v = o->vel;
