@@ -1519,6 +1519,9 @@ static void bot_step_body(void) {
           float duty = tdist < 15 ? 0.34f : tdist < 25 ? 0.22f : 0.15f, per = 0.25f / duty;
           burst_ok = fmod(now - g_bot_fire_t0, per) < 0.25; }
       int trig = !nofire && spar && g_bot_fire && burst_ok && (!g_bot_pull || fmod(now - g_bot_fire_t0, 0.24) < 0.12) && !ob_carry; g_bot_trig = trig;   // (with the ball: melee only)
+      // (13:25: the SPARTAN LASER fires after its charge, and every release starts the charge again -- the aim gate flickered the trigger:
+      //  a death holding it at 8 units. With it in hand and the target in sight within 40 units the trigger stays down)
+      if (!nofire && spar && have_tg && tdist < 40 && g_inv.held && strstr(g_inv.held, "SPARTAN LASER") && los_get(ftg.handle, now) == 1) { trig = 1; g_bot_trig = 1; }
       { static double tobm; if (ob_carry && have_tg && tdist < 1.8f && now - tobm > 0.6) { tobm = now; g_bot_melee_until = now + 0.12; } }
       uint64_t want = (now < g_bot_click_until ? fb : 0) | g_swscan_bits | (g_swbit >= 0 && now < g_swrec_until ? (1ull << g_swbit) : 0) | (now < g_bot_melee_until ? bot_meleebits() : 0) | (trig ? fb : 0) | ((fbtn & 0x10000) ? gb : 0) | ((fbtn & 0x20000) ? pkb : 0) | (now < g_fjump_until ? g_bot_jump : 0);   // (fbtn bit 16: the grenade pulse, 17: pick up)
       if (want) { g_bot_btn = ((out & 4) ? g_bot_btn : 0) | want; out |= 4; } else if (!(out & 4)) g_bot_btn = 0; }

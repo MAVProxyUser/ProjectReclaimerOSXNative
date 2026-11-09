@@ -3272,6 +3272,9 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   a running battle, at every round end (our server's in_match true -> false) walker-coach.py round + match-study.py, then each
   walker's game restarted headless with its new knobs and the newest build (they rejoin in the lobby; the user's game and the
   server stay).
+- **The Spartan Laser's trigger stays down through the charge** (2026-11-09 13:25; nbot.c the trigger) — WHY: a death holding a Spartan
+  Laser at 8 units; it fires only after a held charge and the aim-error gate released the trigger whenever the error spiked, restarting
+  the charge. LOGIC: with a SPARTAN LASER in hand and the target in sight within 40 units the trigger is held (the aim keeps tracking).
 - **The melee lunge from the players' numbers** (2026-11-09 13:20; nbot.c the melee press, shim/tools/melee-lunge.py) — WHY: the walker
   meleed within 1.22 units (1.45 in a race) and lost beatdown after beatdown; guessed ranges had fallen short (1.67 whiffed).
   melee-lunge.py measured 10 recorded melee kills: the killer's lunge (its fastest step in the last 0.6 s) began at a median 2.24 units
