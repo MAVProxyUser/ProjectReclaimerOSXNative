@@ -3410,6 +3410,22 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   "good set". The work board's Brain tab: the loaded build and lesson, every revision, the triggers (armed / TRIPPED, value, limit),
   trips and resets, and ALARMS when the monitor stops or no revision came for two periods in a match. Old behaviour: NHOOK_BOT_REVIEW_S=0
   (no periodic revisions; map revisions remain), stop brain-monitor.py (no trips / resets).
+- **Hot takeover: a new brain warms up beside the running one and swaps between two steps** (2026-11-09 15:25; nbot.c brain_tick /
+  brain_warm_thread / bot_thread / nh_brain_warm / g_brain_warm, nav.c g_nav_quiet, nbot_goals.c brain_review) — WHY: the user: "brain
+  updates should be seamless to the walker even if it is in the middle of an active firefight. it should never pause movement etc. the
+  brain should always be ready for a hot takeover". The bot thread itself copied and dlopen'ed a new nbrain.dylib and stepped it at
+  once: the new copy loaded its nav graph (91k nodes on Valhalla), the map's 11,658 tags, the models and the death map inside its first
+  steps on the walker's own thread (legs and aim held their last values meanwhile), then started from nothing -- in the 15:14 swap a
+  29-unit fight went from "FIRING, err 0.8 deg" to "hunting", 15 deg off. LOGIC: brain_tick only copies the new build and starts
+  shim-brain-warm; that thread dlopens it and calls its nh_brain_warm (the step with g_brain_warm set: bot_log() silent, no why / review
+  / switch-scan / gun-exit files, nav's stuck alarm and blocked-steps file off via g_nav_quiet, outputs thrown away) every 33 ms with
+  the same inputs (io_in_pack only reads) while the running brain keeps driving -- until it has stepped NHOOK_BRAIN_WARM_STEPS (30) and
+  its last 3 steps each took under 4 ms (everything loaded; its target, aim smoothing, velocity estimates and path caught up), at most
+  NHOOK_BRAIN_WARM_MAX (20 s). The bot thread swaps the step pointer between two steps ("[brain] #N ready: warm (... steps in ... s,
+  the slowest ... ms)", "#N took over at this step", and from the brain "took over (warm ...)"); its first own step makes the "new
+  brain" revision. A build without nh_brain_warm is swapped in cold as before. Old behaviour: NHOOK_BRAIN_COLD=1. Needs the new body
+  (nhook.dylib: a walker launch); brains are NHIO layout 1 as before. Open: an old brain's memory is never freed (dlclose would not
+  free its mallocs; ~nav graph + models per swap).
 - **Before dry: switch at 20% of the magazine in a close fight; reload after each kill** (2026-11-09 15:07; nbot.c) — WHY: the same
   match: all 23 empty-magazine deaths came mid-duel at ~5 units -- in a brawl the next enemy comes right after a kill, so the
   after-the-fight and lull reloads never came, and the EMPTY switch at 0 rounds was too late. LOGIC: in a close fight (g_eng_close)

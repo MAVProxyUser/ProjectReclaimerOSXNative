@@ -256,6 +256,7 @@ static void rv_note(double now, const char* trig, const char* map, float mins, i
     (void)now; }
 static void brain_review(double now) {
     static double t0, tchk; static int k0; static char map[64]; static long seq0 = -1; char why[64] = ""; int force = 0;
+    if (g_brain_warm) return;   // (a brain warming up beside the running one revises from its first own step)
     // (a new build of the brain starts its statics afresh: it carries on from the last revision -- its number and caution -- when
     //  that one is under 15 minutes old, so a code reload does not forget what the reviews learnt)
     { static int resumed; if (!resumed) { resumed = 1; char p[1100]; const char* h = getenv("HOME");

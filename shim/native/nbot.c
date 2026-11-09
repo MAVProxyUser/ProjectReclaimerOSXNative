@@ -54,7 +54,11 @@ static volatile unsigned long g_bot_writes;
 static int g_bot_hook = -1;                             // the body hook: -1 not tried, 0 failed, 1 in
 static uint64_t g_bot_jump = 0x2;                       // record +0xC8: bit 1 jump, bit 0 crouch (NHOOK_BOT_BTNSCAN, 2026-11-07);
                                                         // NHOOK_BOT_JUMP=<hex mask> another, 0 = no jumping
-static int bot_log(void) { static int l = -1; if (l < 0) l = getenv("NHOOK_SPAR_LOG") ? 1 : 0; return l; }
+// (2026-11-09, the user: "brain updates should be seamless to the walker even if it is in the middle of an active firefight. it should
+// never pause movement etc. the brain should always be ready for a hot takeover"): g_brain_warm = this copy of the brain is warming up
+// beside the running one (nh_brain_warm): it reads the same world and decides, but writes nothing -- no log lines, no files, no outputs
+static int g_brain_warm;
+static int bot_log(void) { static int l = -1; if (l < 0) l = getenv("NHOOK_SPAR_LOG") ? 1 : 0; return l && !g_brain_warm; }
 
 static int bot_private_addr(const char* a) {   // "ip:port" at a loopback / private address
     if (!a[0]) return 1;   // (no server: a local game)
@@ -528,7 +532,7 @@ static void swscan_tick(double now, const NovObj* o, int engaged) {
         if (now - tpress < 0.8) return;
         tries[cand]++; int changed = o->wslot != slot0; if (changed) { hits[cand]++; nlog("[nhook] [swscan] bit %d changed the weapon slot (%d -> %d): %d of %d", cand, slot0, o->wslot, hits[cand], tries[cand]); }
         tpress = 0; tnext = now + 0.3;
-        { FILE* f = fopen(sp, "w"); if (f) { for (int b = 0; b < 64; b++) if (tries[b]) fprintf(f, "%d %d %d\n", b, tries[b], hits[b]); fclose(f); } }
+        if (!g_brain_warm) { FILE* f = fopen(sp, "w"); if (f) { for (int b = 0; b < 64; b++) if (tries[b]) fprintf(f, "%d %d %d\n", b, tries[b], hits[b]); fclose(f); } }
         // (11:50: 75% -> 55% -- a press can fall in a reload / firing animation; the in-use rate is logged)
         if (hits[cand] >= 3 && hits[cand] * 100 >= tries[cand] * 55) { g_swbit = cand; FILE* f = fopen(swbit_path(), "w"); if (f) { fprintf(f, "%d\n", cand); fclose(f); } nlog("[nhook] [swscan] LEARNED: the weapon switch is control-record bit %d", cand); return; }
         if (!changed || tries[cand] >= 6) cand = -1; }   // (a hit: the same bit again, to confirm -- up to 6 tries in a row)
@@ -953,6 +957,7 @@ static void why_note(double now, const DeathSnap* d) {
     else { cause = "outshot"; snprintf(det, sizeof det, "even start (fired back in %.2f s), it kept %.2f, I took %.2f off it", gap, kl, dmg); }
     if (bot_log()) nlog("[nhook] [why] died to %08x (%s, %.0f u): %s -- %s", k, kw, kd, cause, det);
     char path[1100]; const char* h = getenv("HOME"); snprintf(path, sizeof path, "%s/Library/Application Support/ReclaimerMac/battles/follow/why-%s.jsonl", h ? h : "/tmp", g_nick[0] ? g_nick : "walker");
+    if (g_brain_warm) return;
     FILE* f = fopen(path, "a"); if (!f) return;
     fprintf(f, "{\"t\": %.0f, \"map\": \"%s\", \"killer\": \"%08x\", \"cause\": \"%s\", \"detail\": \"%s\", \"dist\": %.1f, \"naim\": %d, \"my_w\": \"%s\", \"killer_w\": \"%s\", \"band\": \"%s\", \"sh0\": %.2f, \"dur\": %.1f, \"gap\": %.2f, \"k_left\": %.2f, \"dmg\": %.2f, \"ammo\": %d, \"seen_first\": %d}\n",
             (double)time(0), g_st_curmap, k, cause, det, kd, d->naim, mc, kw, band, g_dmg_sh0, now - d0, gap, kl, dmg, d->am, seen_first);
@@ -1061,7 +1066,7 @@ static void bot_step_body(void) {
     { static int was = -1; if (me >= 0 && seated != was) {
         if (was == 1 && !seated && g_gun_exit_bit_last >= 0 && now - g_gun_exit_bit_t < 1.4) {   // (out within a try of a record bit: that bit)
             char ep[1024]; snprintf(ep, sizeof ep, "%s/Library/Application Support/ReclaimerMac/battles/exit-bit.txt", getenv("HOME") ? getenv("HOME") : "/tmp");
-            FILE* f = fopen(ep, "w"); if (f) { fprintf(f, "%d\n", g_gun_exit_bit_last); fclose(f); }
+            FILE* f = g_brain_warm ? 0 : fopen(ep, "w"); if (f) { fprintf(f, "%d\n", g_gun_exit_bit_last); fclose(f); }
             nlog("[nhook] [gunner] OUT of the driver's seat right after control-record bit %d: kept as the exit (%s)", g_gun_exit_bit_last, ep); }
         was = seated; gun_vlist(now); const NovObj* pv = gun_v(objs[me].parent);
         nlog("[nhook] [gunner] seated: %s (my unit %08x, the record's %08x, the player's %08x; seat %d, parent %08x %s)", seated ? "yes" : "no", objs[me].handle, meh, g_my_unit,
@@ -2016,7 +2021,9 @@ static void io_out_apply(const NhIO* io) {   // (the body) -> the hooks' globals
 #ifdef NH_BRAIN
 __attribute__((visibility("default"))) int nh_brain_version(void) { return NHIO_VERSION; }
 __attribute__((visibility("default"))) int nh_brain_step(NhIO* io) { if (io->version != NHIO_VERSION) return 0;
-    static int told; if (!told) { told = 1; nlog("[nhook] [brain] code built %s %s is stepping", __DATE__, __TIME__);
+    { static int was_warm; if (was_warm && !g_brain_warm) nlog("[nhook] [brain] code built %s %s took over (warm: the world, its maps and models already loaded)", __DATE__, __TIME__); was_warm = g_brain_warm; }
+    g_nav_quiet = g_brain_warm;
+    static int told; if (!told) { told = 1; nlog("[nhook] [brain] code built %s %s is %s", __DATE__, __TIME__, g_brain_warm ? "warming up beside the running brain" : "stepping");
 #ifdef NH_BRAIN_LESSON
         if (NH_BRAIN_LESSON[0]) nlog("[nhook] [brain] lesson: %s", NH_BRAIN_LESSON);
 #endif
@@ -2026,13 +2033,48 @@ __attribute__((visibility("default"))) int nh_brain_step(NhIO* io) { if (io->ver
           pthread_mutex_lock(&g_hm_mx); hm_switch(g_st_curmap); pthread_mutex_unlock(&g_hm_mx);                     //  brain's own copy -- nav_danger_update avoids its hot spots)
           nlog("[nhook] [brain] death map for %s: %u deaths", g_st_curmap[0] ? g_st_curmap : "-", (unsigned)g_hm.nd); } }
     bot_step(); io_out_pack(io); return 1; }
+// THE HOT TAKEOVER: the body steps a new brain here, on its own thread, beside the running one, until the new one's steps are cheap
+// (its nav graph, death map, map tags, models loaded; its target, aim and path caught up with the world); then it swaps between
+// two steps. Nothing this copy decides here leaves it (the body throws the outputs away; g_brain_warm silences logs and files)
+__attribute__((visibility("default"))) int nh_brain_warm(NhIO* io) { g_brain_warm = 1; int r = nh_brain_step(io); g_brain_warm = 0; return r; }
 static void* bot_thread(void* p) { (void)p; return 0; }   // (never started here: the body's thread calls nh_brain_step)
 #else
 typedef int (*NhBrainStep)(NhIO*);
 static NhBrainStep g_brain; static int g_brain_n;
-static void brain_tick(void) {   // (the body, every 2 s) a newer nbrain.dylib -> loaded from a fresh copy and swapped in
+// THE HOT TAKEOVER (2026-11-09, the user: "brain updates should be seamless to the walker even if it is in the middle of an active
+// firefight. it should never pause movement etc. the brain should always be ready for a hot takeover"). Before, the bot thread itself
+// copied + dlopen'ed a new nbrain.dylib and stepped it at once: the new copy loaded its nav graph (91k nodes on Valhalla), the map's
+// tags, models and death map inside its first steps on the walker's own thread -- the legs and aim held their last values meanwhile --
+// and then started from nothing (a 31-unit fight went from FIRING at 0.8 deg to "hunting" 15 deg off). Now a separate thread (shim-brain-warm)
+// copies and loads it, then steps it (nh_brain_warm: outputs thrown away, no logs / files) with the same inputs every 33 ms while
+// the running brain keeps driving, until it has stepped NHOOK_BRAIN_WARM_STEPS (30, ~1 s) and its last 3 steps each took under 4 ms
+// (everything loaded, its target / aim / path caught up), at most NHOOK_BRAIN_WARM_MAX (20 s); then the bot thread swaps it in
+// between two steps. A brain without nh_brain_warm (older builds) is swapped in at once, as before. NHOOK_BRAIN_COLD=1 = the old way.
+static NhBrainStep g_brain_next; static volatile int g_brain_busy; static char g_brain_cp[1200];
+static void* brain_warm_thread(void* arg) {   // (shim-brain-warm) load g_brain_cp, warm it, hand it to the bot thread
+    (void)arg; pthread_setname_np("shim-brain-warm");
+    void* h = dlopen(g_brain_cp, RTLD_NOW | RTLD_LOCAL);
+    if (!h) { nlog("[nhook] [brain] %s not loaded: %s", g_brain_cp, dlerror()); g_brain_busy = 0; return 0; }
+    int (*ver)(void) = (int (*)(void))dlsym(h, "nh_brain_version"); NhBrainStep f = (NhBrainStep)dlsym(h, "nh_brain_step"), w = (NhBrainStep)dlsym(h, "nh_brain_warm");
+    if (!ver || !f || ver() != NHIO_VERSION) { nlog("[nhook] [brain] %s refused: layout %d, this body's %d", g_brain_cp, ver ? ver() : -1, NHIO_VERSION); g_brain_busy = 0; return 0; }
+    static int cold = -1; if (cold < 0) cold = getenv("NHOOK_BRAIN_COLD") && strcmp(getenv("NHOOK_BRAIN_COLD"), "0");
+    double t0 = mono_s(); int n = 0, fast = 0; double slow = 0;
+    if (w && !cold) {
+        int need = 30; const char* e = getenv("NHOOK_BRAIN_WARM_STEPS"); if (e) need = atoi(e);
+        double mx = 20; e = getenv("NHOOK_BRAIN_WARM_MAX"); if (e) mx = atof(e);
+        while (mono_s() - t0 < mx) {
+            NhIO io; memset(&io, 0, sizeof io); io_in_pack(&io);
+            double a = mono_s(); w(&io); double dt = mono_s() - a; n++; if (dt > slow) slow = dt;
+            fast = dt < 0.004 ? fast + 1 : 0;
+            if (n >= need && fast >= 3) break;
+            usleep(33000); } }
+    nlog("[nhook] [brain] #%d ready: %s (%d warm-up steps in %.1f s beside the running brain, the slowest %.0f ms) -- taking over at the next step",
+         g_brain_n + 1, w && !cold ? "warm" : "cold (no warm-up)", n, mono_s() - t0, slow * 1000);
+    __atomic_store_n(&g_brain_next, f, __ATOMIC_RELEASE); return 0; }
+static void brain_tick(void) {   // (the body, every 2 s) a newer nbrain.dylib -> a fresh copy, warmed beside the running brain (above)
     static double t; double now = mono_s(); if (now - t < 2.0) return; t = now;
     static int off = -1; if (off < 0) off = getenv("NHOOK_NO_BRAIN") != 0; if (off) return;
+    if (g_brain_busy) return;
     static char path[1100]; if (!path[0]) { const char* e = getenv("NHOOK_BRAIN"); Dl_info di;
         if (e && *e) snprintf(path, sizeof path, "%s", e);
         else if (dladdr((void*)brain_tick, &di) && di.dli_fname) { snprintf(path, sizeof path, "%s", di.dli_fname); char* sl = strrchr(path, '/'); if (sl) snprintf(sl + 1, sizeof path - (size_t)(sl + 1 - path), "nbrain.dylib"); }
@@ -2040,16 +2082,18 @@ static void brain_tick(void) {   // (the body, every 2 s) a newer nbrain.dylib -
     struct stat st; if (stat(path, &st)) return; static struct timespec mt; static off_t sz;
     if (st.st_mtimespec.tv_sec == mt.tv_sec && st.st_mtimespec.tv_nsec == mt.tv_nsec && st.st_size == sz) return;
     mt = st.st_mtimespec; sz = st.st_size;
-    char cp[1200]; snprintf(cp, sizeof cp, "%s/nbrain-%d-%d.dylib", getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp", (int)getpid(), g_brain_n + 1);
-    { int in = open(path, O_RDONLY), outf = open(cp, O_WRONLY | O_CREAT | O_TRUNC, 0755); char b[65536]; ssize_t r; int ok = in >= 0 && outf >= 0;
+    static int nload; nload++;
+    snprintf(g_brain_cp, sizeof g_brain_cp, "%s/nbrain-%d-%d.dylib", getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp", (int)getpid(), nload);
+    { int in = open(path, O_RDONLY), outf = open(g_brain_cp, O_WRONLY | O_CREAT | O_TRUNC, 0755); char b[65536]; ssize_t r; int ok = in >= 0 && outf >= 0;
       while (ok && (r = read(in, b, sizeof b)) > 0) if (write(outf, b, (size_t)r) != r) ok = 0;
       if (in >= 0) close(in); if (outf >= 0) close(outf); if (!ok) { nlog("[nhook] [brain] could not copy %s", path); return; } }
-    void* h = dlopen(cp, RTLD_NOW | RTLD_LOCAL); if (!h) { nlog("[nhook] [brain] %s not loaded: %s", path, dlerror()); return; }
-    int (*ver)(void) = (int (*)(void))dlsym(h, "nh_brain_version"); NhBrainStep f = (NhBrainStep)dlsym(h, "nh_brain_step");
-    if (!ver || !f || ver() != NHIO_VERSION) { nlog("[nhook] [brain] %s refused: layout %d, this body's %d", path, ver ? ver() : -1, NHIO_VERSION); return; }
-    g_brain = f; g_brain_n++; nlog("[nhook] [brain] #%d loaded from %s: the walker runs it from the next step (no restart)", g_brain_n, path); }
+    g_brain_busy = 1; pthread_t th;
+    if (pthread_create(&th, 0, brain_warm_thread, 0)) { g_brain_busy = 0; return; }
+    pthread_detach(th); nlog("[nhook] [brain] a new build in %s: warming it up beside the running brain", path); }
 static void* bot_thread(void* p) { (void)p; pthread_setname_np("shim-bot");
     for (;;) { usleep(33000); brain_tick();
+        NhBrainStep nx = __atomic_exchange_n(&g_brain_next, (NhBrainStep)0, __ATOMIC_ACQ_REL);
+        if (nx) { g_brain = nx; g_brain_n++; g_brain_busy = 0; nlog("[nhook] [brain] #%d took over at this step (the old one stepped until the last)", g_brain_n); }
         if (g_brain) { NhIO io; memset(&io, 0, sizeof io); io_in_pack(&io); if (g_brain(&io)) io_out_apply(&io); else bot_step(); }
         else bot_step(); }
     return 0; }

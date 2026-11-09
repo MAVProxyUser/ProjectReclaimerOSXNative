@@ -97,6 +97,9 @@ static void nav_danger_update(double now){
 static float g_nav_liftpen, g_nav_liftdz = 2.0f;   // (2026-11-09: a portal rising more than liftdz costs liftpen more -- the native walker sets it, NHOOK_NAV_LIFTPEN; 0 = the loader's)
 static float g_nav_offlane;   // (2026-11-09: x the step cost added on graph nodes no recorded player ever used -- the native walker sets it, NHOOK_NAV_OFFLANE; 0 = off, the loader's)
 static int g_nav_noavoid;   // set around a comparison plan (PELOAD_NAV_LOG): the same A* without the danger term
+// (2026-11-09) set while a new walker brain warms up beside the running one (nbot.c nh_brain_warm): its legs are not its own yet, so
+// "barely moved while walking" means nothing -- no stuck alarm, no penalties, nothing written to the blocked-steps file
+static int g_nav_quiet;
 // A* over the floor graph; cost = distance x (1 + wall penalty + avoid x danger) + learned penalties; -> path length
 // PORTALS (2026-11-08, shim/tools/nav-portals.py): one-way links between the graph's separate parts learned from real players --
 // lifts, cannons, jumps the floor graph cannot walk (Guardian: 423 parts; a walker under an enemy on another part had "no path").
@@ -125,7 +128,7 @@ static void nav_blocked_load(void){ if(!g_nav_blk||getenv("PELOAD_NAV_NOBLOCKED"
 static int nav_block_step(int u,int v){ if(!g_nav_blk||u<0||v<0||u>=g_nav.n||v>=g_nav.n) return 0; int k=-1; for(int i=0;i<8;i++) if(g_nav.nd[u].nbr[i]==v){ k=i; break; } if(k<0) return 0;
     if(!(g_nav_blk[u]>>k&1)){ g_nav_blk[u]|=(uint8_t)(1u<<k); return 1; }
     static int32_t kept[256]; static int nk; for(int i=0;i<nk;i++) if(kept[i]==u*8+k) return 2; if(nk<256) kept[nk++]=u*8+k;
-    char p[1100]; nav_blocked_path(p,sizeof p); if(p[0]){ FILE*f=fopen(p,"a"); if(f){ float up[3]; nav_pos(u,up); fprintf(f,"%.2f %.2f %.2f %d\n",up[0],up[1],up[2],k); fclose(f); } }
+    char p[1100]; nav_blocked_path(p,sizeof p); if(p[0] && !g_nav_quiet){ FILE*f=fopen(p,"a"); if(f){ float up[3]; nav_pos(u,up); fprintf(f,"%.2f %.2f %.2f %d\n",up[0],up[1],up[2],k); fclose(f); } }
     return 2; }
 static int nav_trap(int u){ return g_nav_blk && u>=0 && u<g_nav.n && __builtin_popcount(g_nav_blk[u])>=3; }
 static int nav_portal_first(int u){ int lo=0,hi=g_np_n; while(lo<hi){ int m=(lo+hi)/2; if(g_np_a[m]<u) lo=m+1; else hi=m; } return lo; }
@@ -291,7 +294,7 @@ static void nav_step(void){
     // stuck: barely moved in 1.5 s while walking -> jump, penalise the next stretch, replan
     uint16_t btn=0; hist[hh&63][0]=pos[0]; hist[hh&63][1]=pos[1]; hist[hh&63][2]=pos[2]; histt[hh&63]=now; hh++;
     { int j=hh-1; while(j>0 && hh-j<63 && now-histt[(j-1)&63]<=1.5) j--; float dx=pos[0]-hist[j&63][0], dy=pos[1]-hist[j&63][1];
-      if(now-histt[j&63]>=1.4 && dx*dx+dy*dy<0.35f*0.35f && now-tjump>1.5){ tjump=now; hh=0; tback=now; bstr=(nav_rand()&1)?0.7f:-0.7f;
+      if(!g_nav_quiet && now-histt[j&63]>=1.4 && dx*dx+dy*dy<0.35f*0.35f && now-tjump>1.5){ tjump=now; hh=0; tback=now; bstr=(nav_rand()&1)?0.7f:-0.7f;
           for(int i=pidx;i<plen && i<pidx+10;i++) g_nav.pen[path[i]]+=4.0f;
           memmove(tstuck,tstuck+1,3*sizeof(double)); tstuck[3]=now;
           if(now-tstuck[0]<10.0){ nav_say("  [nav] stuck 4 times at (%.1f %.1f %.1f): a new goal\n",pos[0],pos[1],pos[2]); if(mode!=2) goal=-1; memset(tstuck,0,sizeof tstuck);
