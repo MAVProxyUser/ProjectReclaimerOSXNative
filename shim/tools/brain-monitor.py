@@ -26,7 +26,8 @@ import json, os, statistics, sys, time, urllib.request
 
 def arg(k, d):
     a = sys.argv; return a[a.index(k) + 1] if k in a else d
-NICK = arg('--nick', 'AIWalkerTest'); STATS = arg('--stats', 'http://127.0.0.1:8771'); DRY = '--dry' in sys.argv or '--once' in sys.argv
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import walkerrec
+NICK = arg('--nick', '') or walkerrec.pubwalker_nick(); STATS = arg('--stats', 'http://127.0.0.1:8771'); DRY = '--dry' in sys.argv or '--once' in sys.argv
 SUP = os.path.expanduser('~/Library/Application Support/ReclaimerMac')
 WLOG = arg('--log', os.path.join(SUP, 'battles', 'aiwalker.log'))
 FOL = os.path.join(SUP, 'battles', 'follow'); KN = os.path.join(SUP, 'battles', 'live-knobs')

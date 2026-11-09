@@ -20,7 +20,8 @@ def direction_cmd():   # workboard.py direction "line" "line" ...  (the plan in 
 # the public walker as it learns (2026-11-09, the user: "are we no longer learning and updating the work board, etc?"): its K/D now (its
 # own stats page, 8771), why it died (nbot.c why_note -> battles/follow/why-<nick>.jsonl), the death tuner's steps / verdicts
 # (shim/tools/death-tuner.py -> tuner-<nick>.jsonl) and the brain's current lesson (its log's last "[brain] lesson:")
-PUBWALKER = os.environ.get('WB_PUBWALKER', 'AIWalkerTest')
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import walkerrec
+PUBWALKER = os.environ.get('WB_PUBWALKER') or walkerrec.pubwalker_nick()   # (the public walker's profile names it)
 def jl_tail(path, n):
     try:
         with open(path, 'rb') as f:

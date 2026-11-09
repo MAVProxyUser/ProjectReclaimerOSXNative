@@ -3438,6 +3438,19 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   the loop relaunched once, native.sh truncated aiwalker.log and the kick left no trace; the rejoin then failed with "You were kicked
   from this server. You can rejoin in 29 minutes." and the loop stopped as it should. LOGIC: before each launch aiwalker.log ->
   aiwalker.prev.log; the kick check also matches "kicked".
+- **Games without shields (SWAT): the shield rules stand down** (2026-11-09 15:45; nbot.c g_noshield, fight movement, why_note,
+  nbrain_beh.c beh_recharge / beh_break) — WHY: the walker moved to a new approved server playing SWAT (no shields, a headshot kills);
+  every rule that reads its own shield as "how hurt am I" would see a permanent 0: back off inside every fight (the fight movement's
+  shield < NHOOK_BOT_RETREAT), back off to recharge, break off, and every death "entered hurt" (the tuner stepping recharge settings for
+  nothing). LOGIC: g_noshield = no live player in the object table has shown a shield above 0.05 for 20 s of this map (a shield seen
+  turns it off at once; a new map starts it again); then those four rules stand down. Cover by a shield drop never fires there anyway.
+  "[bot] no shields in this game" / "shields are back" lines. NHOOK_BOT_NOSHIELD=1 / 0 (live) forces it on / off.
+- **The public walker's name comes from its profile** (2026-11-09 15:45; walkerrec.pubwalker_nick, workboard.py, death-tuner.py,
+  brain-monitor.py, fire-ab.sh) — WHY: the new server's admin approved another name for it (the client allows 1-15 UTF-16 units, so the
+  approved 19-character name was shortened with the user); every tool that followed the walker had its old name built in. LOGIC: the
+  name = identity.nickname of the walker's own profile (native/public-walker/home, only that field read); --nick / WB_PUBWALKER still
+  override. The walker's live settings file was copied to the new name; its why / tuner / review / monitor files start fresh under it.
+  The nickname keeps the "AIWalker" prefix the bot's disclosure check needs (nbot.c: it plays only under a name that says so).
 - **Before dry: switch at 20% of the magazine in a close fight; reload after each kill** (2026-11-09 15:07; nbot.c) — WHY: the same
   match: all 23 empty-magazine deaths came mid-duel at ~5 units -- in a brawl the next enemy comes right after a kill, so the
   after-the-fight and lull reloads never came, and the EMPTY switch at 0 rounds was too late. LOGIC: in a close fight (g_eng_close)

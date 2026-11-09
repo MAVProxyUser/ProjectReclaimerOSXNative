@@ -3,9 +3,9 @@
 # each window measured from the walker's stats page (the scoreboard's shots / hits / kills / deaths) and its [firegate] lines (seconds
 # with the trigger down); a window that spans a match change is void. The sums per side at the end. The death tuner is paused for the
 # run (NHOOK_TUNE 0) and the knob put back after. (Public matches change every 10-15 minutes: two long windows kept crossing one.)
-#   bash shim/tools/fire-ab.sh <KNOB> <A> <B> [secs 60] [cycles 3] [nick AIWalkerTest] [stats http://127.0.0.1:8771]
+#   bash shim/tools/fire-ab.sh <KNOB> <A> <B> [secs 60] [cycles 3] [nick: the public walker's] [stats http://127.0.0.1:8771]
 set -u
-K=$1; VA=$2; VB=$3; SECS=${4:-60}; CYC=${5:-3}; NICK=${6:-AIWalkerTest}; ST=${7:-http://127.0.0.1:8771}
+K=$1; VA=$2; VB=$3; SECS=${4:-60}; CYC=${5:-3}; NICK=${6:-$(python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import walkerrec; print(walkerrec.pubwalker_nick())' "$(dirname "$0")")}; ST=${7:-http://127.0.0.1:8771}
 S="$HOME/Library/Application Support/ReclaimerMac"; KF="$S/battles/live-knobs/$NICK.json"; L="$S/battles/aiwalker.log"
 OUT=$(mktemp /tmp/fire-ab.XXXXXX)
 setk() { python3 - "$KF" "${2:-$K}" "$1" <<'PY'

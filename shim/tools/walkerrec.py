@@ -31,5 +31,13 @@ def walker_files(tracks=None, logs=None):
         if b not in out and header(p).get('walker'): out.add(b)
     return out
 
+def pubwalker_nick(default='AIWalkerTest'):
+    """the public walker's nickname -- its own profile (native/public-walker/home ... profile.json, identity.nickname; only that field is
+    read): the tools that follow it (work board, death tuner, brain monitor, fire-ab) take it from there, so a rename (2026-11-09: the
+    new server's admin approved another name) needs no code change"""
+    p = os.path.join(SUP, 'native', 'public-walker', 'home', 'Library', 'Application Support', 'ProjectReclaimer', 'profile.json')
+    try: return json.load(open(p))['identity']['nickname'] or default
+    except Exception: return default
+
 if __name__ == '__main__':
     for b in sorted(walker_files()): print(b)

@@ -1,7 +1,7 @@
 #!/bin/bash
-# The disclosed walker (AIWalkerTest) on ONE owner-approved public server, patiently (2026-11-09; the user: "if we lost the slot...
+# The disclosed walker (an AIWalker... name) on ONE owner-approved public server, patiently (2026-11-09; the user: "if we lost the slot...
 # patiently wait to rejoin. that is ok"). Its own home (ReclaimerMac/native/public-walker/home: a regular profile, a copy of a test
-# identity named AIWalkerTest -- never the user's), NHOOK_BOT_ALLOW_SERVER = that address only, its console chat lines off. With
+# identity whose nickname starts with AIWalker -- never the user's), NHOOK_BOT_ALLOW_SERVER = that address only, its console chat lines off. With
 # --follow it shadows the player whose profile this Mac holds (the nickname is read here at launch, never written anywhere).
 # Loop: launch; in the game within 180 s (its stats page lists it) -> stay while it is; else / once out -> stop it, wait 30 s, again.
 #   bash shim/tools/walker-public.sh <host:port> [--follow] [--id 4]      log: battles/aiwalker.log, stats http://127.0.0.1:8771/

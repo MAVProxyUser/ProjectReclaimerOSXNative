@@ -58,6 +58,11 @@ static uint64_t g_bot_jump = 0x2;                       // record +0xC8: bit 1 j
 // never pause movement etc. the brain should always be ready for a hot takeover"): g_brain_warm = this copy of the brain is warming up
 // beside the running one (nh_brain_warm): it reads the same world and decides, but writes nothing -- no log lines, no files, no outputs
 static int g_brain_warm;
+// SHIELDLESS GAMES (2026-11-09: SWAT on the new approved server -- no shields, a headshot kills): g_noshield = no live player has shown
+// a shield above 0.05 for 20 s of this map (set in bot_step_body). The rules that read the walker's own shield as "how hurt am I" then
+// stand down -- otherwise a permanent 0 meant: back off inside every fight (fight movement), back off to recharge, break off, and every
+// death "entered hurt" (the tuner stepping recharge settings for nothing). NHOOK_BOT_NOSHIELD=1 / 0 forces it on / off (live)
+static int g_noshield;
 static int bot_log(void) { static int l = -1; if (l < 0) l = getenv("NHOOK_SPAR_LOG") ? 1 : 0; return l && !g_brain_warm; }
 
 static int bot_private_addr(const char* a) {   // "ip:port" at a loopback / private address
@@ -978,7 +983,7 @@ static void why_note(double now, const DeathSnap* d) {
     else if (k && !seen_first && d->tg != k) { cause = "unseen"; snprintf(det, sizeof det, "it hurt me before I ever saw it (my target was %08x)", d->tg); }
     else if (kd < 2.5f && (!strcmp(kw, "shotgun") || !strcmp(kw, "melee"))) { cause = "point blank"; snprintf(det, sizeof det, "%s at %.1f units", kw, kd); }
     else if (kl >= 0 && kl < 0.25f) { cause = "traded"; snprintf(det, sizeof det, "it was left with %.2f shield + health", kl); }
-    else if (g_dmg_sh0 < 0.5f) { cause = "entered hurt"; snprintf(det, sizeof det, "my shield was %.2f when the fatal damage began", g_dmg_sh0); }
+    else if (!g_noshield && g_dmg_sh0 < 0.5f) { cause = "entered hurt"; snprintf(det, sizeof det, "my shield was %.2f when the fatal damage began", g_dmg_sh0); }
     else if (k && k != d->tg && gap < 0 && seen_first) { cause = "ignored attacker"; snprintf(det, sizeof det, "it was in sight and shooting me; I stayed on %08x", d->tg); }
     else if (gap < 0 || gap > 0.5f) { cause = "slow start"; if (gap < 0) snprintf(det, sizeof det, "I never fired at it"); else snprintf(det, sizeof det, "I fired back %.2f s after it hurt me / came into sight", gap); }
     else if (strcmp(band, "in range") && strcmp(band, "?") && kin) { cause = "outranged"; snprintf(det, sizeof det, "my %s %s at %.0f units, its %s in range", mc, band, kd, kw); }
@@ -1088,6 +1093,14 @@ static void bot_step_body(void) {
     static int32_t path[8192]; static int plen, pidx, goal = -1; static double tplan, tstat, tjump, tback, tstuck[4]; static float bstr; static float hist[64][3]; static double histt[64]; static int hh;
     gl_life(now, me >= 0 && !objs[me].dead, me >= 0 ? objs[me].c : 0, 0, 0);   // (nbot_goals.c: deaths, respawns, failed zones)
     brain_review(now);   // (nbot_goals.c: every 3 minutes, its own deaths / kills -> caution, the paths around its death spots)
+    { static char nsm[64]; static double tfirst, tsh;
+      if (strcmp(nsm, g_st_curmap)) { snprintf(nsm, sizeof nsm, "%s", g_st_curmap); tfirst = 0; tsh = 0; }
+      int any = 0; for (int i = 0; i < n; i++) if (objs[i].type == 0 && !objs[i].dead) { any = 1; if (objs[i].shield > 0.05f) tsh = now; }
+      if (any && tfirst <= 0) tfirst = now;
+      int ns = tfirst > 0 && now - (tsh > tfirst ? tsh : tfirst) > 20.0;
+      float fo = -1; lk_over(&fo, "NHOOK_BOT_NOSHIELD"); if (fo >= 0) ns = fo > 0.5f;
+      if (ns != g_noshield && bot_log()) nlog("[nhook] [bot] %s", ns ? "no shields in this game (nobody has shown one for 20 s): the shield rules stand down -- no back-off, recharge or break-off by shield" : "shields are back: the shield rules are on again");
+      g_noshield = ns; }
     // seated = a seat index OR a parent (02:20: on the turret the walker went on fighting on foot -- "stuck" in one spot -- after a burst:
     //  the seat field alone missed it). The state is logged at each change with every handle it is read from
     int seated = me >= 0 && !objs[me].dead && (objs[me].seat >= 0 || objs[me].parent != 0xFFFFFFFFu); if (seated) g_bot_seat_t = now;
@@ -1416,7 +1429,7 @@ static void bot_step_body(void) {
                 float p25 = g_bm.dist_p25, p75 = g_bm.dist_p75, run = g_bm.run_speed > 0.5f ? g_bm.run_speed : 2.1f, el = 0, er = 0; const char* wc = "none";
                 if (g_eg.on) { uint64_t wd = (o->wslot >= 0 && o->wslot < 4) ? nov_datum(o->weapons[o->wslot]) : 0; uint32_t wdef = 0;
                     if (wd && hb_read(wd, &wdef, 4)) wc = eg_wcls(hb_tag_name(wdef)); float a2, b2; if (eg_band(wc, &a2, &b2)) { p25 = a2; p75 = b2; } }
-                float r = tdist > p75 * kdist ? 0.9f : tdist < p25 * kdist ? -backoff - 0.2f : press; if (o->shield < retreat && o->shield >= 0) r = -backoff;
+                float r = tdist > p75 * kdist ? 0.9f : tdist < p25 * kdist ? -backoff - 0.2f : press; if (!g_noshield && o->shield < retreat && o->shield >= 0) r = -backoff;
                 // OUTRANGED (11:50: today's best player sniped from 26 units while the walker's rifle pulled it across the open into the
                 //  scope): the target 1.5x beyond the held weapon's band and holding a sniper / precision weapon -> no closing in, a full
                 //  strafe, no long shots; the fight bids under a weapon fetch (g_bot_outranged: nbrain_beh.c beh_fight). NHOOK_BOT_OUTRANGE=0 off
@@ -1440,7 +1453,7 @@ static void bot_step_body(void) {
                     // on Guardian (engage-compare.py; the push-back made the walkers hover at the band's near edge)
                     static float rsc0 = -1; if (rsc0 < 0) { const char* e = getenv("NHOOK_BOT_RADSCALE"); rsc0 = e ? strtof(e, 0) : 1.0f; } float rsc = rsc0; lk_over(&rsc, "NHOOK_BOT_RADSCALE");   // (walker-coach.py: x the replayed closing / backing off)
                     float pull = tdist > p75 * kdist ? 0.6f : 0.0f; r = fmaxf(-1.0f, fminf(1.0f, rsc * er / run + pull));
-                    if (o->shield < retreat && o->shield >= 0) r = -backoff;
+                    if (!g_noshield && o->shield < retreat && o->shield >= 0) r = -backoff;
                     if (g_bot_camo_hold) r = 0.9f; }
                 // (07:48: PRESS IN with shields up -- the walkers' battle recordings: closing speed 0.02-0.03 u/s in their engagements; the
                 //  best players' 0.78 (0.85 with shields up, 0.31 with them low: walker-model.py --top). Shield over 0.7 and the target
