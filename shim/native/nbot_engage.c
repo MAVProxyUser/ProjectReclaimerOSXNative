@@ -240,6 +240,14 @@ static int eg_choose(const NovObj* objs, int n, int me, const float* cam, float 
           if (bi >= 0 && objs[bi].handle != cur) { if (cur) { prev = cur; prev_t = now; } cur = objs[bi].handle; cur_t0 = now; cur_seen = now; g_eg_fast = cur;
               if (bot_log()) nlog("[nhook] [fight] engage: %08x in sight at %.1f units -- taken", cur, sqrtf(bd)); return bi; } } }
     if (ci >= 0 && now - cur_seen < 1.0) return ci;   // (kept: alive and seen in the last second)
+    // (07:40: HUNT ONE -- with the target hidden the draw below ran on EVERY step: on The Pit the walker flipped between two hidden
+    //  enemies about once a second ("new target e41300ab" / "e4170175" ...), each flip a new hunt goal and a new path -- a replan every
+    //  ~0.5 s, wandering. A hidden current target is kept for NHOOK_BOT_HUNT_KEEP (5 s, live; 0 = old) after the last draw unless
+    //  some enemy is in sight)
+    { static double tdraw; float hk = eg_knob("NHOOK_BOT_HUNT_KEEP", 5.0f);
+      if (ci >= 0 && hk > 0 && now - tdraw < hk) { int anyvis = 0; for (int i = 0; i < n && !anyvis; i++) { const NovObj* t = &objs[i]; if (!t->type && !t->dead && i != me && bot_enemy(o, t) && vis_of(t->handle, now) == 1) anyvis = 1; }
+          if (!anyvis) return ci; }
+      tdraw = now; }
     // a new target: the players' choice rule over the KNOWN enemies within 45 units -- DRAWN from its probabilities (exp(score) /
     // sum), not the best score: the best-score walker was more predictable than the players (the rule named its target 72% of the
     // time, the players' own 39%: engage-compare.py, 2026-11-08 12:10). NHOOK_BOT_PICK=best = the old argmax.

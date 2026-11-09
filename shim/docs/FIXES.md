@@ -3286,6 +3286,13 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   switch presses (the learnt record bit): 0 of 32 took" -- 32 x "switching from PLASMA PISTOL to ASSAULT RIFLE" with the trigger held
   (the plasma pistol held = an overcharge held) while the earlier switches, 3 of 3 and 2 of 2, came with the trigger up. LOGIC: from a
   switch press until 0.15 s after it the trigger (and the reload click) stays up; PLASMA PISTOL joins the weapons whose trigger is pulsed.
+- **Hunt one hidden target at a time** (2026-11-09 07:40; nbot_engage.c eg_pick) — WHY: on The Pit a walker logged "new target e41300ab"
+  / "new target e4170175" alternating about once a second while both were hidden: the target draw (random by design -- exp(score) /
+  sum, the players' own choice rule) ran on every step once the current target had not been seen for 1 s, and every flip changed the
+  hunt goal and the path (a replan every ~0.5 s). LOGIC: a hidden current target is kept for NHOOK_BOT_HUNT_KEEP (5 s, live; 0 = old)
+  after the last draw unless some enemy is in sight (vis_of == 1); the ENGAGE rule (a visible enemy within 10 units) is unchanged.
+  The Pit (3 walkers, 3 min): "new target" 237 -> 36; the server's recording near enemies: median 1.65 u/s, standing 19.8%, across the
+  enemy line 0.78 u/s -- the best players' 1.71 / 19.8% / 0.75 (fight-speed.py over 60 public matches).
 - **Snapped back by the server = stuck** (2026-11-09 07:22-07:27; nbot.c the nav stuck test / the blocked step) — WHY: the 12.3 s still spell
   left on The Pit (and the 41.7 s one before) was at one spot, (-15.6, -3.3): the walker's log walked west to (-19.2, -4.2) and the next
   step stood at (-15.6, -3.3) again -- the server held its biped there (something blocks that way on the server only) and the client
