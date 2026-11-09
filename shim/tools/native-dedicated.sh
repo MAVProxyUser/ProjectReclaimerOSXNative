@@ -8,6 +8,8 @@
 #   DED_GAME="Team Slayer" DED_MAP=Guardian bash shim/tools/native-dedicated.sh start   another game / map (its own config,
 #   local-<map>-<game>.toml, made from local-test.toml; the app's own variant and map names -- a wrong one shows in server.log)
 #   DED_TEAMS=1 [DED_MAP=...] = Team Slayer (a one-game playlist: Slayer with rounds.teams on, the template's playlist syntax)
+#   DED_CONFIG=<file>.toml = that config in the server's folder as it is (shim/tools/ded-public-config.py: a PUBLIC one)
+#   DED_PUBLIC=1 = no test profile (a listed server: masters, UPnP), its own home in the server's folder
 # Join it with a test client:  bash shim/native.sh --join-server 127.0.0.1:49190
 set -u
 cd "$(dirname "$0")/../.."
@@ -57,7 +59,8 @@ case "${1:-status}" in
     if [ -f shim/native/build.sh ]; then bash shim/native/build.sh >/dev/null || { echo "build failed"; exit 1; }; fi   # (a release bundle ships the dylib built)
     [ -f shim/build/nhook.dylib ] || { echo "shim/build/nhook.dylib missing"; exit 1; }; cfg
     CF=local-test.toml
-    if [ "${DED_TEAMS:-0}" = 1 ] || [ -n "${DED_OPTIONS:-}" ]; then   # a one-game playlist (the template's syntax): Team Slayer (rounds.teams on) and / or
+    if [ -n "${DED_CONFIG:-}" ]; then CF=$DED_CONFIG; [ -f "$D/$CF" ] || { echo "no config $D/$CF (shim/tools/ded-public-config.py writes one)"; exit 1; }; echo "config $CF"
+    elif [ "${DED_TEAMS:-0}" = 1 ] || [ -n "${DED_OPTIONS:-}" ]; then   # a one-game playlist (the template's syntax): Team Slayer (rounds.teams on) and / or
       # DED_OPTIONS = more game options as JSON, e.g. '{"player.primary_weapon": 0, "player.secondary_weapon": 1}' (BR + AR starts;
       # shim/docs/option-map.json has every option and its choices)
       mkdir -p "$D/playlists"; PV=$(python3 -c "import json; print(json.load(open('$D/playlists/slayer.playlist.json')).get('version', 1))" 2>/dev/null || echo 1)
@@ -68,7 +71,11 @@ case "${1:-status}" in
       sed -e '/^map = /d' -e "s|^game = \"Slayer\"|playlist = \"playlists/$PN.playlist.json\"|" "$D/local-test.toml" > "$D/$CF"; chmod 600 "$D/$CF"; echo "config $CF: $GN on ${DED_MAP:-Guardian}, options $OPTS"
     elif [ -n "${DED_GAME:-}${DED_MAP:-}" ]; then CF="local-$(echo "${DED_MAP:-Guardian}-${DED_GAME:-Slayer}" | tr -c 'A-Za-z0-9\n-' '_').toml"
       sed -e "s|^map = \".*\"|map = \"${DED_MAP:-Guardian}\"|" -e "s|^game = \"Slayer\"|game = \"${DED_GAME:-Slayer}\"|" "$D/local-test.toml" > "$D/$CF"; chmod 600 "$D/$CF"; echo "config $CF: ${DED_MAP:-Guardian}, ${DED_GAME:-Slayer}"; fi
-    (cd "$D" && NHOOK_ROLE=server RECLAIMER_PROFILE_DIR="$D/profile" RECLAIMER_CACHE_DIR="$D/cache" NHOOK_STATS_HTTP="${NHOOK_STATS_HTTP:-8767}" NHOOK_STATS_OPEN=0 \
+    # DED_PUBLIC=1 (2026-11-09, the public walker server): the app counts any RECLAIMER_PROFILE_DIR profile as a TEST profile and then
+    # leaves the masters and the router alone ("test profile: master at ... left alone") -- a listed server runs without it, with a
+    # home of its own in the server's folder (never the user's profile)
+    (cd "$D" && if [ "${DED_PUBLIC:-0}" = 1 ]; then mkdir -p "$D/public-home"; export HOME="$D/public-home"; else export RECLAIMER_PROFILE_DIR="$D/profile" RECLAIMER_CACHE_DIR="$D/cache"; fi
+       NHOOK_ROLE=server NHOOK_STATS_HTTP="${NHOOK_STATS_HTTP:-8767}" NHOOK_STATS_OPEN=0 \
        PELOAD_FORENSIC_DIR="$D/forensics" NHOOK_HEATMAP_DIR="$D/heatmaps" NHOOK_LOG="$LOG.nhook" \
        NHOOK_STATS_PAGE="$OLDPWD/shim/src/stats_page.html" \
        NHOOK_HALO3="$(cat "$HOME/Library/Application Support/ProjectReclaimer/mcc-folder.txt")/halo3/halo3.dll" \

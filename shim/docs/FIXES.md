@@ -3272,6 +3272,29 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   a running battle, at every round end (our server's in_match true -> false) walker-coach.py round + match-study.py, then each
   walker's game restarted headless with its new knobs and the newest build (they rejoin in the lobby; the user's game and the
   server stay).
+- **Oddball play, a public walker server, out of any driver's seat** (2026-11-09 03:20; nbot.c ob_scan / the ball moves / driver's-seat
+  exit tries / gun_near_veh, nbot_engage.c carrier bonus, shim/tools/ded-public-config.py, native-dedicated.sh DED_CONFIG / DED_PUBLIC,
+  walker-battle.sh one walker) — WHY: the user: "start a big team battle match with one walker, and me, and make it public, set the size
+  to 127 ... sand trap, and fiesta oddball. the walkers will have to learn to run with the oddball and melee only and obtain the oddball
+  from other players with whatever weapon given. vehicles enabled ... call the public game 'walker texas rangers only!', and set the
+  description to experimental walker test"; "make sure the game settings are as such that they auto start too ... is walkers game even
+  in the list? does it matter that I'm behind nat?". Seen first: a walker in a Wraith's DRIVER's seat could not get out (packet act
+  taps and holds both failed; turret seats leave on act), and it got in because the act guard measured to the vehicle's centre (a
+  Wraith is wide). LOGIC: ODDBALL -- every 0.3 s the ball (a weapon whose tag name has "ball" / "skull"; two balls: the nearest):
+  loose -> the pathfinder to it, act tapped on it (not beside a vehicle); mine -> 12 units away from the nearest enemy (replanned every
+  2 s), no shots, melee within 1.8 units, the fight's moves only in melee reach; an enemy's -> its carrier is always known (the game
+  marks it) and gets +8 on the target score (NHOOK_BOT_BALLBONUS), the walker goes to it when not fighting; a teammate's -> stays
+  within 5 units. A loose ball within 8 units beats the fight's moves. NHOOK_BOT_NOBALL=1 off. DRIVER'S SEAT EXIT: tries go round --
+  the packet's act tap, its hold, then control-record bits (+0xC8) 2..31 bar the known ones, 0.5 s each; the bit after which the seat
+  ends is logged and kept in battles/exit-bit.txt, tried first from then on. ACT GUARD: within 2 units of a vehicle's HULL (centre
+  distance minus its radius). PUBLIC SERVER: ded-public-config.py writes <slug>.toml + a one-game playlist (here Fiesta Oddball =
+  Oddball with rounds.teams 1 and random primary / secondary, map weapons / vehicles / power-ups / grenades at their defaults, on
+  Sandtrap, max_players 127 -- the server's cap -- min_players 1 so it starts with the first player); host_name = the line under the
+  name; listed (hidden false), UPnP on, bind "::"; stats reporting OFF (a walker's games must not count); RCON on 127.0.0.1 only; every
+  joiner reads a welcome line naming the automated player. The app counts any RECLAIMER_PROFILE_DIR profile as a TEST profile and then
+  leaves the masters and the router alone ("[net] test profile: master at 148.251.153.44 left alone", no UPnP: the first start was
+  not listed), so DED_PUBLIC=1 runs the server without one, with a home of its own (test-dedicated/public-home, never the user's
+  profile). The walkers stay test profiles and join on 127.0.0.1 (allowed: a private address). walker-battle.sh takes 1 walker.
 - **No driving; the honk is the walkers' to detect; restarts that keep the teams** (2026-11-09 02:50; nbot.c gun_seated / honk_scan /
   WINGMAN, shim/tools/walker-restart.sh, hold-teams.py) — WHY: the user: "walkers should not attempt to drive vehicles until they study
   the player driving corpus from historic games" (a walker's boarding tap landed in a Wraith its teammate had just left: the driver's

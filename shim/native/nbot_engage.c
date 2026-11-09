@@ -240,7 +240,8 @@ static int eg_choose(const NovObj* objs, int n, int me, const float* cam, float 
     for (int i = 0; i < n; i++) { const NovObj* t = &objs[i]; if (t->type || t->dead || i == me || !bot_enemy(o, t)) continue;
         float dx = t->c[0] - cam[0], dy = t->c[1] - cam[1], dz = t->c[2] - cam[2], d = sqrtf(dx * dx + dy * dy + dz * dz); if (d > 45) continue;
         EgUnit* u = eg_unit(t->handle); float off = fabsf(bot_wrap(atan2f(dy, dx) - yaw0)) * 57.2958f; int att = now - u->att_t < 1.5, pv = t->handle == prev && now - prev_t < 3.0;
-        if (!(off < EG_VIEW || att || d < 5 || pv || t->handle == cur || rd_contact(o, t))) continue;   // (unknown: behind us, quiet and off the radar)
+        int carrier = g_ob_enemy_carrier && t->handle == g_ob_enemy_carrier;   // (oddball: the carrier is marked on every player's screen)
+        if (!(off < EG_VIEW || att || d < 5 || pv || t->handle == cur || rd_contact(o, t) || carrier)) continue;   // (unknown: behind us, quiet and off the radar)
         // active camo (+0x360): not seen in view beyond 8 units -- known only when it attacked us, is on the radar (moving) or close
         if (t->camo > 0.3f && !(att || d < 8 || pv || t->handle == cur || rd_contact(o, t))) continue;
         int mate = 0; for (int k = 0; k < n && !mate; k++) { const NovObj* m = &objs[k]; if (m->type || m->dead || k == me || bot_enemy(o, m)) continue;   /* (a teammate: free-for-all has none) */ mate = eg_aim_at(m, t->c, 8); }
@@ -251,6 +252,7 @@ static int eg_choose(const NovObj* objs, int n, int me, const float* cam, float 
         // behaviour.powerups) -- half that logit as a penalty unless we have one too (choose the fight we would win)
         if (t->shield > 1.05f && o->shield <= 1.05f) s += 0.5f * g_eg.os_pen;
         { static float ab = -1; if (ab < 0) ab = eg_humanlike() ? 0.0f : eg_knob("NHOOK_BOT_ATTBONUS", 6.0f); if (att) s += ab; }   // (coached: the one shooting at us)
+        { static float cb = -1; if (cb < 0) cb = eg_knob("NHOOK_BOT_BALLBONUS", 8.0f); if (carrier) s += cb; }   // (oddball: the enemy carrying the ball first)
         if (nc2 < 64) { ci2[nc2] = i; cs2[nc2] = s; nc2++; }
         if (s > bs) { bs = s; bi = i; } }
     if (!pickbest && nc2 > 1) { float sum = 0; for (int k = 0; k < nc2; k++) { cs2[k] = expf(cs2[k] - bs); sum += cs2[k]; }

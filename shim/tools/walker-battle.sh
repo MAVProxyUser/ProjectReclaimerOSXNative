@@ -32,7 +32,7 @@ EOF
   done; exit 0; fi
 N=${1:-4}; SECS=${2:-300}; shift 2 2>/dev/null; EXTRA=("$@")
 IDS=(${WB_IDS:-0 1 2 3})   # (which identities walk, by index into NAMES: WB_IDS="1 2 3" leaves test-v2 out -- e.g. when the user plays beside them)
-[ "$N" -ge 2 ] && [ "$N" -le 5 ] || { echo "2..5 walkers"; exit 1; }
+[ "$N" -ge 1 ] && [ "$N" -le 5 ] || { echo "1..5 walkers"; exit 1; }   # (1: a lone walker beside human players, 2026-11-09)
 for i in $(seq 0 $((N - 1))); do k=${IDS[$i]}; [ $k -lt 2 ] || [ -f "$SUP/${NAMES[$k]}/profile.json" ] || { echo "${NAMES[$k]} missing: bash shim/tools/walker-battle.sh init"; exit 1; }; done
 T=$(mktemp -d "${TMPDIR:-/tmp}/walker-battle.XXXXXX"); OUT="$BT/$(date +%Y%m%d-%H%M%S)-n$N.jsonl"
 # the walkers' games run HEADLESS by default (2026-11-08, the user: "running all 3 clients visible lagged the screen hard, can you drive
