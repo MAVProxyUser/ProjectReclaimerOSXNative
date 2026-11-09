@@ -362,7 +362,7 @@ static float bot_wrap(float a) { while (a > 3.14159265f) a -= 6.2831853f; while 
 static void bot_nav_json(StBuf* s) { nav_json(s); }   // the snapshot's "nav" (the page draws the walker's path and goal)
 // the walker's own inventory and power-ups (bot_inv below; the goal draw reads it)
 typedef struct { const char* held; const char* other; const char* held_c; const char* other_c; int held_rank, other_rank, has_other, gren, frag, plasma, os, camo;
-                 int ammo, ammo_max, other_ammo; } BotInv;   // (ammo: rounds loaded, -1 unknown; ammo_max: the most seen in that weapon)
+                 int ammo, ammo_max, other_ammo, reserve; } BotInv;   // (reserve: rounds not loaded, the field before the learnt magazine; -1 unknown)   // (ammo: rounds loaded, -1 unknown; ammo_max: the most seen in that weapon)
 static BotInv g_inv;
 // ODDBALL (2026-11-09, the user: "the walkers will have to learn to run with the oddball and melee only and obtain the oddball from other
 // players with whatever weapon given"): the ball's state, read every 0.3 s (ob_scan): 0 none seen, 1 loose, 2 I carry it, 3 a teammate
@@ -459,17 +459,24 @@ static void swscan_tick(double now, const NovObj* o, int engaged) {
     g_swscan_bits = 0;
     { static int rd0; if (!rd0) { rd0 = 1; FILE* f = fopen(swbit_path(), "r"); if (f) { int b = -1; if (fscanf(f, "%d", &b) == 1 && b >= 0 && b < 64) { g_swbit = b; nlog("[nhook] [swscan] the switch is control-record bit %d (learned before)", b); } fclose(f); } } }
     if (g_swbit >= 0) return; float on = 1; lk_over(&on, "NHOOK_BOT_SWSCAN"); if (on <= 0) return;
-    static int cand = -1, hits[64], tries[64], slot0; static double tpress, tnext;
+    static int cand = -1, hits[64], tries[64], slot0, loaded; static double tpress, tnext;
+    // (11:30: single "hits" were noise -- the slot also changes from late packet pulses and pick-ups: the counts now persist across brains
+    //  in native/switch-scan.txt and a bit is adopted at 3+ hits with a 75%+ hit rate; the real button switches every time)
+    char sp[1100]; snprintf(sp, sizeof sp, "%s.scan", swbit_path());
+    if (!loaded) { loaded = 1; FILE* f = fopen(sp, "r"); if (f) { int b, t, h; while (fscanf(f, "%d %d %d", &b, &t, &h) == 3) if (b >= 0 && b < 64) { tries[b] = t; hits[b] = h; } fclose(f); } }
     g_swscan_busy = tpress > 0;
     if (tpress > 0) {
         if (now - tpress < 0.1) { g_swscan_bits = 1ull << cand; return; }
         if (now - tpress < 0.8) return;
         tries[cand]++; int changed = o->wslot != slot0; if (changed) { hits[cand]++; nlog("[nhook] [swscan] bit %d changed the weapon slot (%d -> %d): %d of %d", cand, slot0, o->wslot, hits[cand], tries[cand]); }
         tpress = 0; tnext = now + 0.3;
-        if (hits[cand] >= 2) { g_swbit = cand; FILE* f = fopen(swbit_path(), "w"); if (f) { fprintf(f, "%d\n", cand); fclose(f); } nlog("[nhook] [swscan] LEARNED: the weapon switch is control-record bit %d", cand); return; }
-        if (!changed) cand = -1; }   // (a hit: the same bit again, to confirm)
+        { FILE* f = fopen(sp, "w"); if (f) { for (int b = 0; b < 64; b++) if (tries[b]) fprintf(f, "%d %d %d\n", b, tries[b], hits[b]); fclose(f); } }
+        if (hits[cand] >= 3 && hits[cand] * 4 >= tries[cand] * 3) { g_swbit = cand; FILE* f = fopen(swbit_path(), "w"); if (f) { fprintf(f, "%d\n", cand); fclose(f); } nlog("[nhook] [swscan] LEARNED: the weapon switch is control-record bit %d", cand); return; }
+        if (!changed || tries[cand] >= 6) cand = -1; }   // (a hit: the same bit again, to confirm -- up to 6 tries in a row)
     if (engaged || !g_inv.has_other || now < tnext || o->seat >= 0 || o->parent != 0xFFFFFFFFu) return;
-    if (cand < 0) { static int next = 0; for (int k = 0; k < 64; k++) { int b = (next + k) % 64; if (b == 1 || b == 19 || b == 21 || b == 30) continue; if (tries[b] >= 3 && !hits[b]) continue; cand = b; next = b + 1; break; } }
+    if (cand < 0) { static int next = 0; for (int k = 0; k < 64; k++) { int b = (next + k) % 64; if (b == 1 || b == 19 || b == 21 || b == 30) continue;
+            if (tries[b] >= 3 && hits[b] * 2 < tries[b]) continue;   // (3+ tries switching under half the time: not the button)
+            cand = b; next = b + 1; break; } }
     if (cand < 0) return;
     if (now - g_bot_switch_until < 1.0 || now - g_swrec_until < 1.0) return;   // (a switch just went out: wait until it has settled)
     slot0 = o->wslot; tpress = now; g_swscan_busy = 1; g_swscan_bits = 1ull << cand; }
@@ -495,7 +502,8 @@ static int bot_ammo_of(uint64_t wd, uint32_t def, int* maxv) {   // rounds loade
 static void bot_inv(const NovObj* o, BotInv* v) {
     memset(v, 0, sizeof *v); v->held_c = v->other_c = "none"; v->held_rank = v->other_rank = 99; v->ammo = v->other_ammo = -1;
     for (int q = 0; q < 4; q++) { uint64_t wd = nov_datum(o->weapons[q]); uint32_t df = 0; if (!wd || !hb_read(wd, &df, 4)) continue; const char* nm = hb_tag_name(df);
-        if (q == o->wslot) { v->held = nm; v->held_c = eg_wcls(nm); v->held_rank = bot_wpn_rank(nm); v->ammo = bot_ammo_of(wd, df, &v->ammo_max); }
+        if (q == o->wslot) { v->held = nm; v->held_c = eg_wcls(nm); v->held_rank = bot_wpn_rank(nm); v->ammo = bot_ammo_of(wd, df, &v->ammo_max);
+            v->reserve = -1; if (g_ammo_learned >= 0) { int16_t rv = -1; if (hb_read(wd + g_ammo_learned - 2, &rv, 2) && rv >= 0 && rv < 2000) v->reserve = rv; } }
         else if (!v->has_other) { v->other = nm; v->other_c = eg_wcls(nm); v->other_rank = bot_wpn_rank(nm); v->has_other = 1; v->other_ammo = bot_ammo_of(wd, df, 0); } }
     v->frag = o->gren[0]; v->plasma = o->gren[1]; for (int k = 0; k < 4; k++) if (o->gren[k] > 0) v->gren += o->gren[k];
     v->os = o->shield > 1.05f; v->camo = o->camo > 0.05f; }
@@ -1270,7 +1278,10 @@ static void bot_step_body(void) {
       // weapon on the floor is "better" (the pick-up scan, a high fetch bid) -- walking over the same weapon refills it
       { static double tswe; static int nrel;
         if (g_ammo_learned >= 0 && g_inv.ammo == 0 && !noreload && g_inv.held) {
-            if (g_inv.has_other && g_inv.other_ammo != 0 && now - tswe > 1.5) { tswe = now; bot_switch_press(now); fbtn |= 8;
+            // (11:25: RELOAD FIRST when the reserve has rounds -- the act tap reloads every time, the switch is not yet reliable)
+            if (g_inv.reserve > 0 && now - trel > 2.5) { trel = now; nrel++; if (bot_log()) nlog("[nhook] [inv] EMPTY %s: reloading from %d in reserve", g_inv.held, g_inv.reserve); }
+            else if (g_inv.reserve > 0) ;
+            else if (g_inv.has_other && g_inv.other_ammo != 0 && now - tswe > 1.5) { tswe = now; bot_switch_press(now); fbtn |= 8;
                 if (bot_log()) nlog("[nhook] [inv] EMPTY %s: switching to %s", g_inv.held, g_inv.other); }
             else if (now - trel > 2.5 && now - tswe > 1.0) { if (nrel >= 2) { if (!g_bot_dry && bot_log()) nlog("[nhook] [inv] DRY: %s still empty after %d reloads -- any weapon on the floor will do", g_inv.held, nrel); g_bot_dry = 1; }
                 else { trel = now; nrel++; if (bot_log()) nlog("[nhook] [inv] EMPTY %s: reloading (try %d)", g_inv.held, nrel); } } }

@@ -3272,6 +3272,14 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   a running battle, at every round end (our server's in_match true -> false) walker-coach.py round + match-study.py, then each
   walker's game restarted headless with its new knobs and the newest build (they rejoin in the lobby; the user's game and the
   server stay).
+- **Reload first on an empty magazine; the switch scan judges by hit rate** (2026-11-09 11:25-11:30; nbot.c BotInv.reserve, the EMPTY
+  block, swscan_tick) — WHY: "EMPTY BRUTE SHOT: switching to ASSAULT RIFLE" for a minute -- the walker stood in fights with an empty gun
+  while switch pulses failed (packet pulses: 1 of 2 took), but every act-tap reload worked; and the scan's single "hits" (bits 0, 3, 35)
+  were noise: the slot also changes from late packet pulses and pick-ups. LOGIC: the reserve = the int16 before the learnt magazine
+  (+0x238 here: 117 / 64 / 160 seen); on a 0 in the magazine with reserve rounds the walker reloads at once (every 2.5 s until loaded),
+  switches only with the reserve out, then any weapon on the floor (DRY). The scan's tries / hits per bit persist across brains
+  (native/switch-bit.txt.scan); a bit is adopted at 3+ hits and a 75%+ hit rate, up to 6 presses of a bit in a row, a bit switching under
+  half the time after 3 tries is dropped.
 - **A mixture policy sampled, the aim lead off, the switch scan isolated** (2026-11-09 11:05-11:20; policy-train.py --mdn, npolicy.c,
   nbot.c swscan / bot_switch_press, follow-study.py LEADS) — WHY: the one-move policy predicts the AVERAGE of what the best players do
   -- a player strafes left OR right, the mean is a timid half-move: not "nimble"; the aim-lead honing's first try (0.04 s) registered
