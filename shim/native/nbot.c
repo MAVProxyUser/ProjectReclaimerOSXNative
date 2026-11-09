@@ -1052,6 +1052,9 @@ static void bot_step_body(void) {
         static float nk0 = -1; if (nk0 < 0) { const char* e = getenv("NHOOK_BOT_NOISE"); nk0 = e ? strtof(e, 0) : 1.0f; }
         float nk = nk0; lk_over(&nk, "NHOOK_BOT_NOISE");
         float react = g_bm.reaction * (1.25f - skill) * rk, noise = g_bm.aim_err * (1.25f - skill) * 1.6f * nk / 57.2958f;
+        // (13:35: steadier with a precision weapon -- battle-rifle duels at 14 units lost on the headshot race; the head is about +-0.3
+        //  deg there and the wander +-0.6: x NHOOK_BOT_NOISE_PREC (0.7, live) with a precision weapon / sniper)
+        if (g_inv.held_c && (!strcmp(g_inv.held_c, "precision") || !strcmp(g_inv.held_c, "sniper"))) { float np = 0.7f; lk_over(&np, "NHOOK_BOT_NOISE_PREC"); noise *= np; }
         if (seen) {
             // aim: OU noise around the exact angles, turning at most 1.5 rad/s before the reaction time is up, 7 rad/s after
             float th = 0.45f, k = (float)dt / th, sg = noise * sqrtf(2.0f * (float)dt / th);

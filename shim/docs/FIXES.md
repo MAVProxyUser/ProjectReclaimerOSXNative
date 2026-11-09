@@ -3272,6 +3272,9 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   a running battle, at every round end (our server's in_match true -> false) walker-coach.py round + match-study.py, then each
   walker's game restarted headless with its new knobs and the newest build (they rejoin in the lobby; the user's game and the
   server stay).
+- **Steadier aim with precision weapons** (2026-11-09 13:35; nbot.c the aim noise) — WHY: battle-rifle duels lost on the headshot race at
+  8-14 units ("my shield 0.06 health 1.00"): the head is about +-0.3 deg at 14 units, the wander +-0.6 at level 4. LOGIC: with a precision
+  weapon / sniper the OU wander x NHOOK_BOT_NOISE_PREC (0.7, live). (Also measured: the learnt switch button "3 of 3 took".)
 - **The Spartan Laser's trigger stays down through the charge** (2026-11-09 13:25; nbot.c the trigger) — WHY: a death holding a Spartan
   Laser at 8 units; it fires only after a held charge and the aim-error gate released the trigger whenever the error spiked, restarting
   the charge. LOGIC: with a SPARTAN LASER in hand and the target in sight within 40 units the trigger is held (the aim keeps tracking).
