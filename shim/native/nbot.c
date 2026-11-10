@@ -1301,7 +1301,9 @@ static void bot_step_body(void) {
     float skill = skill_0, kdist = kdist_0, kstrafe = kstrafe_0, kswitch = kswitch_0, fextra = fextra_0, retreat = retreat_0, gren = gren_0, backoff = backoff_0, press = press_0;   // (live knobs)
     lk_over(&skill, "NHOOK_BOT_SKILL"); lk_over(&kdist, "NHOOK_BOT_DIST"); lk_over(&kstrafe, "NHOOK_BOT_STRAFE"); lk_over(&kswitch, "NHOOK_BOT_SWITCH"); lk_over(&fextra, "NHOOK_BOT_FIRE_EXTRA");
     lk_over(&retreat, "NHOOK_BOT_RETREAT"); lk_over(&gren, "NHOOK_BOT_GREN"); lk_over(&backoff, "NHOOK_BOT_BACKOFF"); lk_over(&press, "NHOOK_BOT_PRESS");
-    press *= 1.0f - 0.6f * rv_caution();   // (the three-minute review, nbot_goals.c brain_review: a bad window -> less pressing into the target)
+    // (the three-minute review, nbot_goals.c brain_review: a bad window -> less pressing into the target -- at most NHOOK_BOT_CAUTION_PRESS
+    //  (0.25, live) less since 2026-11-09: at 0.6 a cautious walker hung back against the user in a 4-player Pit -- "not aggressive")
+    { float cp = 0.25f; lk_over(&cp, "NHOOK_BOT_CAUTION_PRESS"); press *= 1.0f - cp * rv_caution(); }
     if (g_noshield) { float sp = 0.5f; lk_over(&sp, "NHOOK_SWAT_PRESS"); press *= sp; }
     int engaged = 0; float ftx = 0, fty = 0; uint32_t fbtn = 0; g_bot_fighting = fight && spar; g_eng_close = 0; g_ftg_vis = 0;   // (set again below when an enemy is in sight within 20 units)
     if (fight) { eg_load_for(g_st_curmap, g_trk_mode); wz_load(g_st_curmap); }   // (the models for this map and game: reloaded when either changes; the weapon zones)
@@ -1387,7 +1389,10 @@ static void bot_step_body(void) {
             //  NHOOK_BOT_FIRE_RANGE (1, live); it was 40 for every weapon
             float fwr = 0, frm = 1; lk_over(&fwr, "NHOOK_BOT_FIRE_REACT"); lk_over(&frm, "NHOOK_BOT_FIRE_RANGE");
             const char* hcl = g_inv.held_c ? g_inv.held_c : "";
-            float reach = frm * (!strcmp(hcl, "sniper") ? 120.0f : (!strcmp(hcl, "precision") || !strcmp(hcl, "rocket")) ? 60.0f : !strcmp(hcl, "shotgun") ? 12.0f : !strcmp(hcl, "melee") ? 4.0f : 40.0f);
+            // (2026-11-09, the user: "did dumb things like shoot at me with a shotgun from REAL far away": the shotgun's reach was 12 units;
+            //  a Halo 3 shotgun kills inside ~5. NHOOK_BOT_REACH_SHOTGUN (6, live): beyond it the walker closes in instead of firing)
+            float rsg = 6.0f; lk_over(&rsg, "NHOOK_BOT_REACH_SHOTGUN");
+            float reach = frm * (!strcmp(hcl, "sniper") ? 120.0f : (!strcmp(hcl, "precision") || !strcmp(hcl, "rocket")) ? 60.0f : !strcmp(hcl, "shotgun") ? rsg : !strcmp(hcl, "melee") ? 4.0f : 40.0f);
             float cone = (size > 1.2f ? size : 1.2f) + fextra;
             // (11:20, the user: "a quick scoreboard glance immediately shows we miss way more shots than the competition" -- 54% of its
             //  shots on target against the best players' 64-84%, misses a median 1.1 deg off): with the head known, CAN HIT = the aim line

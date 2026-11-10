@@ -286,6 +286,10 @@ static void brain_review(double now) {
             if (got >= 1) { if (seq0 < 0) seq0 = q; else if (q != seq0) { seq0 = q; force = 1; snprintf(why, sizeof why, "%s", got > 1 ? r : "monitor"); } } } }
     if (strcmp(map, g_st_curmap)) {   // (a new map -- or a new build of the brain: a revision with its death map; a fresh window, the caution carries)
         int loaded = !map[0]; snprintf(map, sizeof map, "%s", g_st_curmap); t0 = now; k0 = g_gl_nkill; ks0 = g_my_kills; lr_next = now + 60.0; if (!map[0]) return;
+        // (2026-11-09, the user after a Pit round: "the walkers were not aggressive, felt like a regression": a walker's caution from a
+        //  bad Guardian round carried into the Pit -- 0.67, pressing x0.60 from the first second. A new MAP starts at caution 0; only a
+        //  new build of the brain on the same map carries it on)
+        if (!loaded && g_rv_caut > 0) { if (bot_log()) nlog("[nhook] [brain] a new map: caution %.2f -> 0 (each map starts fresh)", g_rv_caut); g_rv_caut = 0; }
         uint32_t nd; pthread_mutex_lock(&g_hm_mx); nd = g_hm.nd; pthread_mutex_unlock(&g_hm_mx); g_rv_n++;
         rv_note(now, loaded ? "new brain" : "map", map, 0, 0, 0, 0, 0, g_rv_caut, 0, 0, 0, 0, nd); return; }
     float win = 180; lk_over(&win, "NHOOK_BOT_REVIEW_S");

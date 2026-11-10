@@ -3448,6 +3448,18 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   brain is refused by a v2 body and the other way round: rebuild both). Lead latency = rtt x NHOOK_BOT_LEAD_RTT (1.25 / 1000 -- 0.08 s
   at 64 ms, 0.18 s at 145 ms); a NHOOK_BOT_LEAD_LAT in the live file still wins. A review's kills = the scoreboard's since the window
   began (the old count when the body has none); the review line gives the ping.
+- **Aggressive against a human again: caution per map and capped, the shotgun's reach 6 units** (2026-11-09 19:55; nbot_goals.c
+  brain_review, nbot.c the press / the fire gate's reach) — WHY: the user, after a Pit round against 3 walkers: "the walkers were not
+  aggressive felt like a regression, did dumb things like shoot at me with a shotgun from REAL far away". Their reviews: a caution from a
+  bad Guardian round carried into the Pit (one walker started at 0.67 -- pressing x0.60 from the first second; the carry-on was meant for a
+  new BUILD on the same map), the caution could cut the press by 60%, and the shotgun's reach in the fire gate was 12 units (a Halo 3
+  shotgun kills inside ~5; the walkers fired at a median 4.1 u, the top tenth 13 u). They also ran the public walker's big-lobby settings
+  (cover at 90% shield, back off at 60%, no closing in). LOGIC: a new map resets the caution to 0 ("a new map: caution X -> 0"); the press
+  cut is NHOOK_BOT_CAUTION_PRESS (0.25, live) x caution at most; the shotgun fires inside NHOOK_BOT_REACH_SHOTGUN (6, live) units, beyond
+  that the walker closes in. The battle walkers' settings files: the public walker's aim / turn tuning without its cover / back-off /
+  closing settings (NHOOK_BOT_RETREAT 0). Also from that round: the user's game lagged with 5 engines on the Mac (load average 58 on 14
+  cores): the walkers now run on the efficiency cores (taskpolicy -b) beside the user's game, and the learning refresh stays off during
+  a battle the user plays.
 - **A replaced brain lets go of its memory and its open map files** (2026-11-09 19:50; nbot.c nh_brain_free, bot_thread, proc_footprint_mb)
   — WHY: the user, playing 3 walkers: "it with 3 minutes left in this round got choppy... check the memory leak or whatever open file
   handles" / "we are all laggy now. close everything, fix the memory leak". Measured: no process grew (a walker 1.9 -> 0.7 GB, the user's
