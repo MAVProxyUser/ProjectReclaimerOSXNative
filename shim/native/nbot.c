@@ -2244,6 +2244,18 @@ __attribute__((visibility("default"))) int nh_brain_step(NhIO* io) { if (io->ver
 // (its nav graph, death map, map tags, models loaded; its target, aim and path caught up with the world); then it swaps between
 // two steps. Nothing this copy decides here leaves it (the body throws the outputs away; g_brain_warm silences logs and files)
 __attribute__((visibility("default"))) int nh_brain_warm(NhIO* io) { g_brain_warm = 1; int r = nh_brain_step(io); g_brain_warm = 0; return r; }
+// (2026-11-09, the user: "we are all laggy now. close everything, fix the memory leak": a hot swap left the old brain's memory behind --
+//  its walking graph, lanes, the brain's copy of the death map, the learned links -- and the map files its hitbox reader OPENED, with their
+//  tag tables (an open file per map per brain, never closed). The body calls this on the brain it replaced, 5 s after the takeover; that
+//  brain never steps again)
+__attribute__((visibility("default"))) void nh_brain_free(void) {
+    free(g_nav.pop); g_nav.pop = 0; nav_free(); free(g_np_a); free(g_np_b); free(g_np_c); g_np_a = g_np_b = 0; g_np_c = 0; g_np_n = 0;
+    pthread_mutex_lock(&g_hm_mx); free(g_hm.cells); free(g_hm.d); free(g_hm.sp); memset(&g_hm, 0, sizeof g_hm); pthread_mutex_unlock(&g_hm_mx);
+    free(g_bm_heat); g_bm_heat = 0; g_bm_heat_n = 0; free(g_gll); g_gll = 0; g_ngll = 0;
+    int nf = 0; pthread_mutex_lock(&g_hbm_mx);
+    for (int i = 0; i < g_hbm_n; i++) { HbMap* m = &g_hbm[i]; if (m->fd >= 0) { close(m->fd); nf++; } free(m->tp); free(m->salt); free(m->grp); free(m->names); free(m->noff); memset(m, 0, sizeof *m); m->fd = -1; }
+    g_hbm_n = 0; pthread_mutex_unlock(&g_hbm_mx);
+    nlog("[nhook] [brain] the replaced brain (built %s %s) let go of its memory: walking graph, lanes, links, death map, %d map files closed", __DATE__, __TIME__, nf); }
 static void* bot_thread(void* p) { (void)p; return 0; }   // (never started here: the body's thread calls nh_brain_step)
 #else
 typedef int (*NhBrainStep)(NhIO*);
@@ -2258,11 +2270,15 @@ static NhBrainStep g_brain; static int g_brain_n;
 // (everything loaded, its target / aim / path caught up), at most NHOOK_BRAIN_WARM_MAX (20 s); then the bot thread swaps it in
 // between two steps. A brain without nh_brain_warm (older builds) is swapped in at once, as before. NHOOK_BRAIN_COLD=1 = the old way.
 static NhBrainStep g_brain_next; static volatile int g_brain_busy; static char g_brain_cp[1200];
+typedef void (*NhBrainFree)(void); static NhBrainFree g_brain_next_free, g_brain_cur_free, g_brain_old_free; static double g_brain_free_at;   // (the replaced brain's memory, 5 s after)
+static double proc_footprint_mb(void) { task_vm_info_data_t vi; mach_msg_type_number_t vc = TASK_VM_INFO_COUNT;
+    return task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vi, &vc) == KERN_SUCCESS ? vi.phys_footprint / 1048576.0 : -1; }
 static void* brain_warm_thread(void* arg) {   // (shim-brain-warm) load g_brain_cp, warm it, hand it to the bot thread
     (void)arg; pthread_setname_np("shim-brain-warm");
     void* h = dlopen(g_brain_cp, RTLD_NOW | RTLD_LOCAL);
     if (!h) { nlog("[nhook] [brain] %s not loaded: %s", g_brain_cp, dlerror()); g_brain_busy = 0; return 0; }
     int (*ver)(void) = (int (*)(void))dlsym(h, "nh_brain_version"); NhBrainStep f = (NhBrainStep)dlsym(h, "nh_brain_step"), w = (NhBrainStep)dlsym(h, "nh_brain_warm");
+    g_brain_next_free = (NhBrainFree)dlsym(h, "nh_brain_free");
     if (!ver || !f || ver() != NHIO_VERSION) { nlog("[nhook] [brain] %s refused: layout %d, this body's %d", g_brain_cp, ver ? ver() : -1, NHIO_VERSION); g_brain_busy = 0; return 0; }
     static int cold = -1; if (cold < 0) cold = getenv("NHOOK_BRAIN_COLD") && strcmp(getenv("NHOOK_BRAIN_COLD"), "0");
     double t0 = mono_s(); int n = 0, fast = 0; double slow = 0;
@@ -2300,7 +2316,12 @@ static void brain_tick(void) {   // (the body, every 2 s) a newer nbrain.dylib -
 static void* bot_thread(void* p) { (void)p; pthread_setname_np("shim-bot");
     for (;;) { usleep(33000); brain_tick();
         NhBrainStep nx = __atomic_exchange_n(&g_brain_next, (NhBrainStep)0, __ATOMIC_ACQ_REL);
-        if (nx) { g_brain = nx; g_brain_n++; g_brain_busy = 0; nlog("[nhook] [brain] #%d took over at this step (the old one stepped until the last)", g_brain_n); }
+        if (nx) { if (g_brain_old_free) { NhBrainFree fr = g_brain_old_free; g_brain_old_free = 0; fr(); }   /* (a brain two swaps back: free it now) */
+            if (g_brain_cur_free) { g_brain_old_free = g_brain_cur_free; g_brain_free_at = mono_s() + 5.0; }
+            g_brain = nx; g_brain_cur_free = g_brain_next_free; g_brain_n++; g_brain_busy = 0;
+            nlog("[nhook] [brain] #%d took over at this step (the old one stepped until the last); process footprint %.0f MB", g_brain_n, proc_footprint_mb()); }
+        if (g_brain_old_free && mono_s() > g_brain_free_at) { NhBrainFree fr = g_brain_old_free; g_brain_old_free = 0; double a = proc_footprint_mb(); fr();
+            nlog("[nhook] [brain] footprint %.0f -> %.0f MB after the replaced brain let go", a, proc_footprint_mb()); }
         if (g_brain) { NhIO io; memset(&io, 0, sizeof io); io_in_pack(&io); if (g_brain(&io)) io_out_apply(&io); else { bot_step(); hand_publish(); } }
         else { bot_step(); hand_publish(); } }
     return 0; }

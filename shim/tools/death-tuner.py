@@ -16,7 +16,7 @@ NHOOK_BOT_LEAD_X moves one step (0.25, 0..3) in its current direction; the next 
 (then it goes back and the direction turns). The walker tab's "Self-tune from deaths" switch is NHOOK_TUNE in the same
 file (0 = paused). Steps and verdicts -> battles/follow/tuner-<nickname>.jsonl and stdout. A brain monitor trip with "reset"
 (shim/tools/brain-monitor.py) puts the settings it moves back to the last good set (below, MONITOR).
-    python3 shim/tools/death-tuner.py --nick AIWalkerTest --stats http://127.0.0.1:8771 [--step 6] [--half 20] [--dry]
+    python3 shim/tools/death-tuner.py --nick AIWalkerTest --stats http://127.0.0.1:8771 [--step 6] [--half 20] [--dry] [--rival <name> [--rival-w 3]]
 """
 import json, os, sys, time, urllib.request
 
@@ -62,6 +62,17 @@ def you():
     except Exception: pass
     return None
 LEAD_SHOTS = int(arg('--lead-shots', '250'))
+# THE RIVAL (2026-11-09, the user, playing 3 walkers on our Guardian server: "aggressively try to get better than me by training on me ...
+# + corrections in playing me"): --rival <name> -- a death whose killer was that player counts RIVAL_W (3) times in the causes' weights,
+# so the steps go first at what that player beats the walker with. The killer is the why line's unit handle, matched against the
+# players' handles on the walker's stats page when the line is read (a life later the handle is gone: then it counts once)
+RIVAL = arg('--rival', ''); RIVAL_W = float(arg('--rival-w', '3'))
+def rival_handles():
+    if not RIVAL: return set()
+    try:
+        d = json.load(urllib.request.urlopen(STATS + '/stats.json', timeout=4))
+        return {(p.get('handle') or '').lower() for p in d.get('players', []) if p.get('name') == RIVAL and p.get('handle')}
+    except Exception: return set()
 # RESET THE LEVERS (2026-11-09; the user: "... auto trigger relearning and reset the levers until they get tripped accordingly again"):
 # shim/tools/brain-monitor.py trips on a bad K/D spread / K/D / accuracy / hits landed and writes a trip record with "reset": true
 # into battles/follow/monitor-<nick>.jsonl; this loop then puts every setting it moves (MOVES + the lead) back to its LAST GOOD SET
@@ -133,12 +144,15 @@ def main():
         if sz < off: off = 0
         if sz == off: continue
         with open(WHY) as f: f.seek(off); new = f.read(); off = f.tell()
+        rh = rival_handles() if new.strip() else set()
         for line in new.splitlines():
             try: r = json.loads(line)
             except Exception: continue
             c = r.get('cause', '?'); deaths += 1; since_step += 1
             for k in weights: weights[k] *= 0.5 ** (1.0 / HALF)
-            weights[c] = weights.get(c, 0) + 1.0
+            byr = (r.get('killer') or '').lower() in rh
+            weights[c] = weights.get(c, 0) + (RIVAL_W if byr else 1.0)
+            if byr: log({'event': 'rival death', 'cause': c, 'weight': RIVAL_W, 'detail': r.get('detail'), 'dist': r.get('dist')})
             for k in list(rest):
                 rest[k] -= 1
                 if rest[k] <= 0: del rest[k]

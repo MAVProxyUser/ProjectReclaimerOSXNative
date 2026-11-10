@@ -3448,6 +3448,25 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   brain is refused by a v2 body and the other way round: rebuild both). Lead latency = rtt x NHOOK_BOT_LEAD_RTT (1.25 / 1000 -- 0.08 s
   at 64 ms, 0.18 s at 145 ms); a NHOOK_BOT_LEAD_LAT in the live file still wins. A review's kills = the scoreboard's since the window
   began (the old count when the body has none); the review line gives the ping.
+- **A replaced brain lets go of its memory and its open map files** (2026-11-09 19:50; nbot.c nh_brain_free, bot_thread, proc_footprint_mb)
+  — WHY: the user, playing 3 walkers: "it with 3 minutes left in this round got choppy... check the memory leak or whatever open file
+  handles" / "we are all laggy now. close everything, fix the memory leak". Measured: no process grew (a walker 1.9 -> 0.7 GB, the user's
+  game 3.6 -> 3.4 GB, 77-117 open files each); the user's game's WORST frame climbed 62 -> 102 ms over the round (the 0.10.1 app's own
+  build-up, backlog N20) and a fresh server resets it. The real leak was a hot swap: the old brain's walking graph, lanes, links, its copy of
+  the death map and -- in h3maps.c's g_hbm -- the game's map files its hitbox reader OPENED (an fd + tag tables per map per brain, never
+  closed) stayed for the process's life: dozens of reloads in a long session piled them up. LOGIC: every brain exports nh_brain_free
+  (frees g_nav + pop, the links, g_hm, g_bm_heat, g_gll; closes and frees g_hbm); the body calls the replaced brain's 5 s after the
+  takeover (a brain two swaps back: at once); each takeover logs the process footprint, and "footprint X -> Y MB after the replaced brain
+  let go".
+- **Training on the player they fight: the rival** (2026-11-09 19:45; shim/tools/death-tuner.py --rival, shim/tools/rival-coach.py) —
+  WHY: the user: "I want them to continue the every 3 minute train + brain reload vs me on this level. and aggressively try to get better
+  than me by training on me vs the entire collection corpus + corrections in playing me". LOGIC: the death tuner's --rival <name>: a death
+  whose killer (the why line's unit handle, matched on the walker's stats page) was that player weighs RIVAL_W (3) in the causes ("rival
+  death" events). rival-coach.py, every 180 s of a battle: the battle's recording cut into fights (only that file), the rival's measures
+  (coach.py: closing, aim error, time to aim back, strafing, jumps, grenades, radar turns, fight distance) blended 2 : 1 with the corpus
+  winners' (walker-coach.py winners(), computed once at background priority, cached battles/coach/winners-<map>-<class>.json); each walker's
+  steps (walker-coach.py steps()) written into its LIVE settings file (it plays with them within a second); battles/coach/rival.jsonl.
+  No names in files ("rival").
 - **Infection tactics: a zombie hunts and charges, a human groups up** (2026-11-09 18:40; nbot.c g_inf_me, inf_group_goal, the goal
   choice, the fight move; nbrain_beh.c cover / recharge / break-off) — WHY: the user asked for an Infection profile ("I know it's a
   completely new game tactic" -> "yes"): the walker played Infection with its normal fight -- as a zombie the caution of a bad window
