@@ -2599,6 +2599,50 @@ update: section 9). Hooks marked "checked" compare the prologue first and refuse
   whatever the UUID), NATIVE_PORT_REF=<binary or sigs.json>. REMOVED with it: the 0.10.0 constants (APP_IMAGE, APP_CODETAB,
   APP_MUTED, APP_SETMUTE, HT_FRAME_FN, the voice / chat literals), the exact-word checks (incl. the mixer's bl encoding and
   #0x278), is_muted as a tracked address (never used at run time) -- native-client.md "What was removed".
+- **nhook on client 0.10.2: points found by meaning, any mixer register** (2026-11-10; re-tools/machoport.py mean_codetab /
+  mean_frame_fn / mean_chat / mean_muted + register-free checks, shim/native/nhook.c voice_hook_install, stub.S _nh_opus_shim,
+  nstats.c nh_on_opus, nhost.c ht_frame_ok, nhchk.c, shim/native/build.sh) — WHY: 0.10.2 came out (release-watch.sh fetched it) and
+  the port found 3 of 12 points: the app is now built with unwind tables (__eh_frame 62 KB -> 5.4 MB, __gcc_except_tab 15 KB ->
+  2.6 MB, __text +9 MB), so prologues and register allocation moved and the shape finder failed; its "muted" vote even picked
+  ANOTHER Mutex<Vec> (0x10599b4e0) that its weak check (an aligned global) passed. LOGIC: when a point's shape finder fails or its
+  result fails the meaning check, a finder by meaning runs: the code table = the {ptr, count} the binary search loads (adrp ; add ;
+  ldp) right after `mov x?, #0x180000000` -- 0.10.2 put a hash map (its own global, read with ldr) in front of it; the frame
+  function = the one function that tests halo3's frame flag image+0x46bb83d then copies the frame count +0x46bba40, with a
+  sub sp / stp x3 prologue; the chat gate = the nearest adrp x8 ; ldrb w8 ; tb(n)z w8, #0 before the first exact "[chat] line "
+  reference and the (up to two) nearest tests of that byte -- 0.10.2 has ONE gate, so chat_gate_a == chat_gate_b; the mute list =
+  set_muted's first adrp + add (and "muted" must now be reached by set_muted). The voice mixer keeps its sender entry in x22 in
+  0.10.2 (x26 before) and moves x26 / x25 into the decode's x1 / x2 (x25 / x24 before): the call check masks the moves' source
+  registers, the id load is any `sub x8, x<19..28>, #off ; ldr x<19..28>, [x8]` and its base register is the entry register --
+  nhook sets g_mixer_reg from it at run time, _nh_opus_shim hands x19..x28 to nh_on_opus as an array and the handler picks that
+  one (x3 = x26 as before). The frame hook's exact prologue compare (0.10.1's sub sp, #0x40; 0.10.2 has #0x80 and two more saved
+  registers) is now ht_frame_ok: sub sp ; stp ; stp ; stp (the four displaced words, none PC-relative) + the frame flag / count.
+  0.10.2: image 0x1059ec000, code table 0x1059acc38, decode 0x10040baf0, mixer call 0x102807e8c, id load 0x102807d38 (x22 -
+  0x2a0, channel byte x22 - 7), frame 0x1031c75f8, chat gate 0x100f28fa4, chat_log 0x10595a433, mute list 0x105969760,
+  set_muted 0x10280a7b8. THE CODE TABLE SPLIT: the first live run on 0.10.2 waited forever ("not ready ... still waiting") -- the
+  sorted table nhook reads holds only 561 functions in 0.10.2 (22894 in 0.10.1; nhook wanted >= 1000) and the rest are in a NEW
+  hash map, a 13th table point `codehash` (0.10.2: 0x1059acc70; 0 = none, builds before): {ptr, cap (a power of two), shift u32},
+  16-byte slots {guest, host} (host 0 = empty), index = guest * 0x9e3779b97f4a7c15 >> (64 - shift), linear probing (the app's
+  lookup at 0x103c08aa0, after a OnceLock check: once == 0 = complete). nhook.c ct_ready waits for both, ct_build merges them into
+  one sorted copy of ours (g_tab / g_ntab: host_of, the census, NHOOK_CODETAB_DUMP, NHOOK_DUMPFN read it); machoport.py
+  mean_codehash finds it (the golden-ratio lookup after `mov #0x180000000`; none at all = 0, so 0.10.0 / 0.10.1 rows stay right);
+  the wait's progress line now prints both tables' headers. AHEAD-OF-TIME HALO3: the second live run (23455 functions found) failed
+  7 hooks -- 0.10.2 compiles the hash map's ~22.9k halo3 functions INTO THE APP (its __text grew 9 MB): every such code-table entry is
+  a thunk in the app's __TEXT, `stp x29, x30, [sp, #-16]! ; mov x29, sp ; bl T ; ldp x29, x30, [sp], #16 ; ret`, and T is ordinary
+  signed app code taking the guest context in x0 (mov x19, x0 ; ldp x26, x25, [x0, #8] = rcx, rdx) -- no JIT wrapper / body split;
+  the 561 sorted-table functions are still JIT wrappers of the old shape (display_event, the shape builder). nhook.c thunk_target /
+  aot_target / is_jit_wrapper: hook_install on a thunk entry becomes a text hook on T (same handler(ctx), same skip / stub_out
+  meaning); branch_target_of returns T, so every "the app's own code" hook (object_delete, view constants, kill volume / soft
+  ceiling, the walker's control reader 0xf7178 and packet builder 0x50fb8) finds it; body_of refuses thunks (it scanned past the
+  5-word thunk into the NEXT one and took an unrelated bl: two hooks both "found" 0x105010308); body_hook_after on T runs the handler
+  at T's ENTRY with a[] built from the context (a[10] = 0) -- only for handlers that need no result (body_hook_entry_ok: the host
+  tools' game tick), the others are refused with that reason (the shape builder, still JIT in 0.10.2, keeps the real body hook).
+  NHOOK_DUMP_ENTRY also dumps a thunk's target. 0.10.1 still ports to its own row and the 0.10.0 selftest passes. build.sh's lesson gate no longer
+  hashes napp_builds.h: a port is data, and the watcher's port build was refused ("NO BRAIN BUILT") because of it. SWITCHES:
+  none new (the old exact-word checks would refuse 0.10.2 outright; NATIVE_NO_AUTOPORT=1 / NHOOK_APP_BUILD as before).
+- **rival-coach.py: the corpus winners from this map only** (2026-11-09; shim/tools/rival-coach.py corpus_winners) — WHY: the
+  user's game lagged beside 3 walkers + the server; the coach loaded the whole engagement library (GBs) to compute the winners
+  once. LOGIC: only tracks/engagements/*_<map>_*.eng.jsonl.gz is read (the winners are this map's anyway when it has 40+
+  player-matches), still at background priority and cached for a day. SWITCH: none (coach.load() = the old whole-library read).
 - **The hooks check** (2026-11-08; shim/native/nhchk.h + nhchk.c, GET /hooks.json, the stats page's Hooks check window,
   shim/tools/native-hooks-test.sh) — WHY: the user, on 0.10.1: "can you add a hooks check? like all the stuff you patch I assume
   you can detect IF on a new version the hook loaded properly or function". LOGIC: a registry of every thing nhook depends on in

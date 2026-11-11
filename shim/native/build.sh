@@ -26,10 +26,12 @@ echo "built shim/build/nhook.dylib"
 # native/brain-lesson.txt = what this brain is meant to show, compiled in (the walker logs it when it loads the brain: "[brain] lesson")
 # and appended to battles/follow/brain-lessons.jsonl with the build time (follow-study.py prints the lesson in play with each window)
 # EVERY BRAIN UPDATE DESCRIBES ITS LESSON (2026-11-09, the user: "every update should describe its lesson"): when the brain's code
-# changed since the last brain build (a hash of native/*.c *.h, src/nav.c, src/h3maps.c) but native/brain-lesson.txt did not, the brain
+# changed since the last brain build (a hash of native/*.c *.h but napp_builds.h, src/nav.c, src/h3maps.c) but native/brain-lesson.txt did not, the brain
 # is NOT built -- the running walker keeps its brain until the lesson says what the new one is meant to show. A rebuild of unchanged
 # code needs nothing. BRAIN_LESSON_SAME=1 builds anyway (logged as such in brain-lessons.jsonl). State: build/brain-state.txt
-SRCH=$(cat native/*.c native/*.h src/nav.c src/h3maps.c 2>/dev/null | shasum -a 256 | cut -c1-16)
+# (napp_builds.h is left out of the hash, 2026-11-10: it is the app's address table, which re-tools/machoport.py rewrites when the
+#  app updates -- a port changes no walker behaviour, and the release watcher's port build was refused by this gate for it)
+SRCH=$(ls native/*.c native/*.h src/nav.c src/h3maps.c 2>/dev/null | grep -v '/napp_builds\.h$' | xargs cat | shasum -a 256 | cut -c1-16)
 LESH=$( [ -f native/brain-lesson.txt ] && shasum -a 256 < native/brain-lesson.txt | cut -c1-16 || echo none)
 read -r OSRC OLES 2>/dev/null < build/brain-state.txt || { OSRC=""; OLES=""; }
 if [ ! -s native/brain-lesson.txt ]; then echo "build.sh: NO BRAIN BUILT -- native/brain-lesson.txt is empty: describe what this brain is meant to show" >&2; exit 1; fi

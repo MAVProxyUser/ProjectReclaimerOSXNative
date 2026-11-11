@@ -130,6 +130,15 @@ move only with MCC's halo3.dll, not with the app; the app's `[capacity]` lines g
   0.10.1's own notes: "one host connection per client in both networking models: players' traffic goes through the host" (no
   client-to-client connections, "Classic" networking the default) -- so a client sees only the host's address: the players table's
   IP column and the Packets window have per-player addresses only when THIS app hosts (as on a dedicated server before).
+- 0.10.1 -> 0.10.2 (2026-11-10): built with unwind tables (+26 MB, mostly __eh_frame / __gcc_except_tab), so 9 of 12 shapes did
+  not carry over; machoport.py now falls back to finders by MEANING (code table after `mov #0x180000000`, the frame function by
+  halo3's frame flag, the chat gate before "[chat] line ", the mute list from set_muted). All 12 found. The voice mixer's entry
+  register is x22 now (x26 before): nhook reads it from the id load (g_mixer_reg). One chat gate (chat_gate_a == chat_gate_b).
+  The code table SPLIT: the sorted {guest, host} table holds 561 functions, the other ~22k are in a new hash map (table point
+  `codehash`, 0x1059acc70: {ptr, cap, shift}, 16-byte slots); nhook merges both into its own sorted copy (nhook.c ct_build).
+  Those ~22.9k functions are compiled AHEAD OF TIME into the app: their entries are thunks (`stp ; mov ; bl T ; ldp ; ret`) to
+  ordinary app code T(ctx in x0). Entry hooks become text hooks on T, "the app's own code" lookups follow the thunk, body hooks on
+  T run at its entry (nhook.c aot_target, body_hook_entry_ok). The 561 left are JIT wrappers of the old shape.
 
 ## The soundboard (nmic.c)
 

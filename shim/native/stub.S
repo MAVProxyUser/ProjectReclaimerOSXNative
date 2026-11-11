@@ -181,15 +181,25 @@ _nh_tpf_want:
 _nh_tpf_end:
 
 // The voice hook's handler entry (nhook.c, the text hook on the app's Opus decode): the decoder's caller keeps the sender's
-// voice entry in x26 (callee-saved, untouched at decode's entry); hand it to the C handler as its fourth argument.
+// voice entry in a callee-saved register (x26 in 0.10.0 / 0.10.1, x22 in 0.10.2), untouched at decode's entry; x19..x28 go to
+// the C handler as an array (x5) and it picks the one the build's id load names (nhook.c g_mixer_reg). x3 = x26 as before.
 // x0-x2 (decoder, packet, length) are the decode call's own arguments, still in place (the stub saved and restores x0-x17);
-// x4 = the caller's return address from the stub's save area.
+// x4 = the caller's return address from the stub's save area (the stub's +0x98; +0x60 for this frame).
     .p2align 2
     .globl _nh_opus_shim
 _nh_opus_shim:
+    stp  x29, x30, [sp, #-0x60]!
+    stp  x19, x20, [sp, #0x10]
+    stp  x21, x22, [sp, #0x20]
+    stp  x23, x24, [sp, #0x30]
+    stp  x25, x26, [sp, #0x40]
+    stp  x27, x28, [sp, #0x50]
     mov  x3, x26
-    ldr  x4, [sp, #0x98]     // decode's own return address (the stub saved x30 there): only the mixer's call counts
-    b    _nh_on_opus
+    ldr  x4, [sp, #0xf8]
+    add  x5, sp, #0x10
+    bl   _nh_on_opus
+    ldp  x29, x30, [sp], #0x60
+    ret
 
 // Skip-capable variants (2026-11-07, the host tools: shim/native/nhost.c). The handler returns int: 0 = run the function
 // as usual (the displaced instruction(s), then the rest); nonzero = the handler did the function's work itself (its result

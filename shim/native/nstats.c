@@ -1031,11 +1031,15 @@ static volatile double g_opus_last;   // the last packet (mono): the voice repor
 static volatile unsigned long g_opus_n;
 static uint64_t g_opus_ret;   // the mixer's return address after its decode call (nhook.c voice_hook_install sets it)
 static void nh_on_opus_body(uint64_t dec, const uint8_t* pkt, uint64_t len, uint64_t ent, uint64_t ret);
+static int g_mixer_reg = 26;   // the mixer's entry register (nhook.c voice_hook_install, from the build's id load: 26 / 22)
 static struct { uint64_t id; uint8_t ch; } g_vch[128]; static pthread_mutex_t g_vch_mx = PTHREAD_MUTEX_INITIALIZER;   // each sender's channel (last packet)
 static const char* st_vch_name(int ch) { return ch == 1 ? "global" : ch == 2 ? "team" : ch == 3 ? "proximity" : "not known"; }
 static int st_vch(uint64_t id) { int ch = 0; pthread_mutex_lock(&g_vch_mx); for (int i = 0; i < 128; i++) if (g_vch[i].id == id) { ch = g_vch[i].ch; break; } pthread_mutex_unlock(&g_vch_mx); return ch; }
-__attribute__((used)) void nh_on_opus(uint64_t dec, const uint8_t* pkt, uint64_t len, uint64_t ent, uint64_t ret) {   // (timed: nhcost.h)
-    if (g_hc_off[HC_OPUS]) return; uint64_t t0 = hc_now(); nh_on_opus_body(dec, pkt, len, ent, ret); hc_add(HC_OPUS, t0); }
+// regs = x19..x28 at decode's entry (stub.S _nh_opus_shim): the sender entry is the one g_mixer_reg names
+__attribute__((used)) void nh_on_opus(uint64_t dec, const uint8_t* pkt, uint64_t len, uint64_t ent, uint64_t ret, const uint64_t* regs) {   // (timed: nhcost.h)
+    if (g_hc_off[HC_OPUS]) return; uint64_t t0 = hc_now();
+    if (regs && g_mixer_reg >= 19 && g_mixer_reg <= 28) ent = regs[g_mixer_reg - 19];
+    nh_on_opus_body(dec, pkt, len, ent, ret); hc_add(HC_OPUS, t0); }
 static void nh_on_opus_body(uint64_t dec, const uint8_t* pkt, uint64_t len, uint64_t ent, uint64_t ret) {
     (void)dec; if (ret != g_opus_ret || !len || len > 4000 || !pkt) return; hk_fire(g_hk_opus); uint64_t id = 0; if (!g_mixer_id_off || rd(ent - g_mixer_id_off, &id, 8) || !id) return;
     g_opus_n++; g_opus_last = mono_s();

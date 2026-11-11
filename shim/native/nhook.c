@@ -93,7 +93,8 @@ static int rd(uint64_t a, void* out, size_t n) {
 // the app" / "When the app updates". NHOOK_APP_BUILD=<version> = that row whatever the UUID (a re-signed copy of a known build).
 // Until 2026-11-08 these were 0.10.0 constants (APP_IMAGE 0x103f94000, APP_CODETAB 0x103f44418, ...): 0.10.1 came out and
 // every hook stayed off ("no code table: hooks off").
-typedef struct { uint64_t image, codetab, opus_decode, mixer_call, mixer_id, mixer_id_off, frame_fn, chat_gate_a, chat_gate_b, chat_log, muted, set_muted; } AppAddrs;
+// codehash (2026-11-10, 0.10.2): the app's second guest -> host code table, a hash map (0 = the build has none: 0.10.0 / 0.10.1)
+typedef struct { uint64_t image, codetab, opus_decode, mixer_call, mixer_id, mixer_id_off, frame_fn, chat_gate_a, chat_gate_b, chat_log, muted, set_muted, codehash; } AppAddrs;
 typedef struct { const char* version, * uuid; AppAddrs a; } AppBuild;
 #include "napp_builds.h"
 static AppAddrs g_app; static const char* g_app_ver = "unknown"; static char g_app_uuid[40]; static uint64_t g_app_slide; static int g_app_known;
@@ -122,7 +123,7 @@ static void app_build_pick(void) {
             for (char* tok = strtok_r(t, " \n", &sv); tok; tok = strtok_r(0, " \n", &sv)) { char* eq = strchr(tok, '='); if (!eq) continue; *eq = 0; uint64_t x = strtoull(eq + 1, 0, 16);
                 #define APP_SET(fl) if (!strcmp(tok, #fl)) a.fl = x;
                 APP_SET(image) APP_SET(codetab) APP_SET(opus_decode) APP_SET(mixer_call) APP_SET(mixer_id) APP_SET(mixer_id_off) APP_SET(frame_fn)
-                APP_SET(chat_gate_a) APP_SET(chat_gate_b) APP_SET(chat_log) APP_SET(muted) APP_SET(set_muted)
+                APP_SET(chat_gate_a) APP_SET(chat_gate_b) APP_SET(chat_log) APP_SET(muted) APP_SET(set_muted) APP_SET(codehash)
                 #undef APP_SET
             }
             g_app = a; snprintf(ver, sizeof ver, "%s", v); g_app_ver = ver; g_app_known = 1; src = "app-builds.txt"; break; }
@@ -132,12 +133,50 @@ static void app_build_pick(void) {
     APP_MISS(image) APP_MISS(codetab) APP_MISS(opus_decode) APP_MISS(mixer_call) APP_MISS(mixer_id) APP_MISS(mixer_id_off) APP_MISS(frame_fn)
     APP_MISS(chat_gate_a) APP_MISS(chat_gate_b) APP_MISS(chat_log) APP_MISS(muted) APP_MISS(set_muted)
     #undef APP_MISS
+    // (codehash 0 is no miss: builds before 0.10.2 have no hash map)
     if (!g_app_known) hk_state(h, HK_FAIL, 0, "this app (UUID %s) is not in napp_builds.h: python3 re-tools/machoport.py port <0.10.0 binary> <this binary> --apply, then rebuild (shim/native.sh does it itself)", g_app_uuid);
     else if (miss) hk_state(h, HK_FAIL, 0, "%s (UUID %s%s): %d point(s) not found in this build:%s", g_app_ver, g_app_uuid, force ? ", forced by NHOOK_APP_BUILD" : "", miss, m);
     else hk_state(h, HK_OK, 0, "%s (UUID %s%s), every point found", g_app_ver, g_app_uuid, force ? ", forced by NHOOK_APP_BUILD" : "");
     nlog("[nhook] app build %s (UUID %s, slide 0x%llx, %s)%s", g_app_ver, g_app_uuid, (unsigned long long)g_app_slide, g_app_known ? src : "-", g_app_known ? "" : ": NOT in napp_builds.h -- the hooks stay off (re-tools/machoport.py)");
 }
 
+// The guest -> host code table(s) (ct_ready / ct_build): until 0.10.1 one sorted {guest, host} array, {ptr, count} at the build's
+// `codetab` (22894 entries); since 0.10.2 that array holds 561 and the rest are in a hash map at `codehash`: {ptr, cap, shift u32},
+// cap = a power of two, 16-byte slots {guest, host} (host 0 = empty), index = guest * 0x9e3779b97f4a7c15 >> (64 - shift), linear
+// probing (the app's own lookup, 0.10.2 0x103c08aa0). ct_build merges both into one sorted copy of ours (g_tab / g_ntab): host_of,
+// the census and the dumps read that. Guest addresses are preferred-base (0x180000000 + rva) in both.
+static int ct_hash_hdr(uint64_t hm[3]) {
+    if (!g_app.codehash || rd(APP(codehash), hm, 24)) return 0;
+    return hm[0] && hm[1] >= 1024 && hm[1] <= (1ull << 24) && !(hm[1] & (hm[1] - 1)); }
+static int ct_ready(void) {
+    uint64_t t[2], hm[3]; if (!APP(codetab) || rd(APP(codetab), t, 16) || !t[0] || !t[1] || t[1] > 1000000) return 0;
+    return g_app.codehash ? ct_hash_hdr(hm) : t[1] >= 1000; }
+static int ct_cmp(const void* a, const void* b) { uint64_t x = *(const uint64_t*)a, y = *(const uint64_t*)b; return x < y ? -1 : x > y; }
+static uint64_t g_ct_sorted, g_ct_hashed;
+static int ct_build(void) {
+    uint64_t t[2], hm[3] = {0}; if (!ct_ready() || rd(APP(codetab), t, 16)) return -1;
+    int hh = ct_hash_hdr(hm); uint64_t cap = hh ? hm[1] : 0, n = 0;
+    uint64_t* m = malloc((t[1] + cap) * 16); if (!m) return -1;
+    if (rd(t[0], m, t[1] * 16)) { free(m); return -1; } n = t[1];
+    if (cap) { uint64_t* hs = malloc(cap * 16); if (!hs || rd(hm[0], hs, cap * 16)) { free(hs); free(m); return -1; }
+        for (uint64_t i = 0; i < cap; i++) if (hs[2 * i + 1] && hs[2 * i] >= 0x180000000ull) { m[2 * n] = hs[2 * i]; m[2 * n + 1] = hs[2 * i + 1]; n++; }
+        free(hs); }
+    qsort(m, n, 16, ct_cmp);
+    uint64_t k = 0; for (uint64_t i = 0; i < n; i++) if (!k || m[2 * i] != m[2 * (k - 1)]) { m[2 * k] = m[2 * i]; m[2 * k + 1] = m[2 * i + 1]; k++; }
+    g_ct_sorted = t[1]; g_ct_hashed = k - (k < t[1] ? k : t[1]); g_tab = (uint64_t)(uintptr_t)m; g_ntab = k; return 0; }
+// 0.10.2 (2026-11-10): every code-table entry is a THUNK -- stp x29, x30, [sp, #-16]! ; mov x29, sp ; bl T ; ldp x29, x30, [sp], #16 ;
+// ret -- and T is what the entry used to be (the lifted wrapper, or the app's own function). thunk_target = T (0 = not a thunk).
+static uint64_t thunk_target(uint64_t e) {
+    uint32_t w[5]; if (!e || rd(e, w, sizeof w)) return 0;
+    if (w[0] != 0xa9bf7bfdu || w[1] != 0x910003fdu || (w[2] & 0xfc000000u) != 0x94000000u || w[3] != 0xa8c17bfdu || w[4] != 0xd65f03c0u) return 0;
+    return e + 8 + (uint64_t)((int64_t)((int32_t)(w[2] << 6) >> 6) * 4); }
+static int text_hook_x0(const char* name, uint64_t f, void* h, int filt, uint32_t want, int skip, uint64_t* stub_out);
+static uint64_t branch_target_of(uint32_t rva);
+static int is_jit_wrapper(uint64_t e) {   // a lifted wrapper: stp x29,x30,[sp,#-16]! ; mov x29,sp ; stp x19,x20,[sp,#-16]! ; ldr w<n>,[x0,#0x290]
+    uint32_t w[4]; return e && !rd(e, w, 16) && w[0] == 0xa9bf7bfdu && w[1] == 0x910003fdu && w[2] == 0xa9bf53f3u && (w[3] & 0xffffffe0u) == 0xb9429000u; }
+// the app's own code behind a thunk entry (0.10.2: halo3 compiled ahead of time into the app; the function takes the guest context
+// in x0, like the app's replaced functions always did), 0 = the entry is no thunk or its target is a JIT wrapper
+static uint64_t aot_target(uint64_t e) { uint64_t t = thunk_target(e); return t && !is_jit_wrapper(t) ? t : 0; }
 static uint64_t host_of(uint32_t rva) {           // the lifted entry of halo3+rva, 0 = not lifted
     uint64_t ga = 0x180000000ull + rva, lo = 0, hi = g_ntab;
     while (lo < hi) { uint64_t mid = (lo + hi) / 2, e[2]; if (rd(g_tab + mid * 16, e, 16)) return 0;
@@ -216,6 +255,7 @@ static int hook_install(const char* name, uint32_t rva, nh_handler h);
 static const char* rva_kind(uint32_t rva) {
     uint64_t e = host_of(rva); uint32_t w[4]; if (!e || rd(e, w, 16)) return "not lifted";
     if ((w[0] & 0xfc000000u) == 0x14000000u) return "the app's own code";
+    if (aot_target(e)) return "the app's own code (ahead of time, behind a thunk)";
     return w[0] == 0xa9bf7bfd && w[1] == 0x910003fd ? "lifted" : "other"; }
 static void* pkg_probe(void* a) {
     (void)a; for (int tries = 0; tries < 80; tries++) { sleep(3); uint64_t tb = 0; if (!g_img || rd(g_img + 0x46b6e98, &tb, 8) || !tb) continue;
@@ -274,6 +314,11 @@ static int hook_install_x0(const char* name, uint32_t rva, void* h, int skip, ui
     char* TH = skip ? nh_tpls_handler : nh_tpl_handler; char* TR = skip ? nh_tpls_return : nh_tpl_return;
     uint64_t e = host_of(rva); uint32_t w[4];
     if (!e || rd(e, w, 16)) { nlog("[nhook] hook %s: halo3+0x%x not lifted", name, rva); return -1; }
+    // 0.10.2: a thunk entry (stp ; mov ; bl T ; ldp ; ret) -- T, the app's own code, takes the guest context in x0 like the JIT
+    // wrapper did, so the entry hook becomes a text hook on T (same handler, same skip / stub_out meaning: stub.S _nh_tp4 / _nh_tps)
+    { uint64_t t = aot_target(e);
+      if (t) { nlog("[nhook] hook %s: halo3+0x%x is the app's own code at 0x%llx (thunk entry): a text hook there", name, rva, (unsigned long long)t);
+               return text_hook_x0(name, t, h, 0, 0, skip, stub_out); } }
     // An entry that is one `b` (object_delete, halo3+0x342ed8: the app replaced the function with its own code, the lifted
     // entry jumps there): that branch becomes `b stub`, and the stub runs the handler, executes nothing in its place and
     // continues at the branch's target -- whatever is there (the guest registers are untouched either way).
@@ -312,16 +357,40 @@ static int hook_install(const char* name, uint32_t rva, nh_handler h) { return h
 // original first, then h(a) (a[0..5] = x2..x7, a[6..9] = stack arguments 5-8, a[10] = the result).
 extern char nh_ba_start[], nh_ba_displaced[], nh_ba_handler[], nh_ba_return[], nh_ba_end[];
 static uint64_t body_of(uint32_t rva) {   // the body a lifted wrapper calls (0 = not that shape)
-    uint64_t e = host_of(rva); uint32_t w[24]; if (!e || rd(e, w, sizeof w) || w[0] != 0xa9bf7bfd || w[1] != 0x910003fd) return 0;
+    // (a 0.10.2 thunk entry starts stp ; mov too: without the wrapper check the scan ran past its 5 words into the NEXT thunk and
+    //  took an unrelated bl -- two different hooks both "found" 0x105010308 in the first 0.10.2 run)
+    uint64_t e = host_of(rva); uint32_t w[24]; if (!e || !is_jit_wrapper(e) || rd(e, w, sizeof w)) return 0;
     for (int i = 4; i < 24; i++) if ((w[i] & 0xfc000000u) == 0x94000000u) {
         uint64_t b = e + 4u * (unsigned)i + (uint64_t)((int64_t)((int32_t)(w[i] << 6) >> 6) * 4); uint32_t b0 = 0;
         return rd(b, &b0, 4) || b0 != 0xa9bf7bfd ? 0 : b; }
     return 0; }
 static int body_hook_after0(const char* name, uint32_t rva, void (*h)(uint64_t*));
 static int body_hook_after(const char* name, uint32_t rva, void (*h)(uint64_t*)) {
+    // (where it goes is decided BEFORE installing: afterwards the body's first word is our `b`, and body_of no longer knows it)
+    uint64_t jb = body_of(rva), at = jb ? jb : branch_target_of(rva);
     int id = hk_named(name); int r = body_hook_after0(name, rva, (void (*)(uint64_t*))hk_wrap(id, (void*)h));
-    if (r) hk_state(id, HK_FAIL, 0, "halo3+0x%x: %s", rva, hk_why()); else { g_hk[id].kind = "body hook"; hk_state(id, HK_OK, body_of(rva), "body hook on halo3+0x%x", rva); } return r; }
+    if (r) hk_state(id, HK_FAIL, 0, "halo3+0x%x: %s", rva, hk_why()); else { g_hk[id].kind = "body hook"; hk_state(id, HK_OK, at, "body hook on halo3+0x%x%s", rva, jb ? "" : " (the app's own code: at its entry)"); } return r; }
+// On the app's own code (0.10.2: a thunk entry; there is no wrapper / body split to hook "after") a body hook runs at the function's
+// ENTRY instead: a[] is built from the guest context there (a[0] ctx, a[1] guest rsp, a[2..5] rcx rdx r8 r9, a[6..9] the guest
+// stack's arguments 5-8, a[10] = 0: no result yet). Only for handlers that do not need the result or to run after the function --
+// body_hook_entry_ok() names them; the others are refused ("needs the function's result").
+enum { BHE_N = 8 }; static void (*g_bhe_h[BHE_N])(uint64_t*); static int g_bhe_n;
+static void bhe_run(int k, uint64_t* ctx) {
+    uint64_t a[11] = {0}; a[0] = (uint64_t)(uintptr_t)ctx; a[1] = ctx[4]; a[2] = ctx[1]; a[3] = ctx[2]; a[4] = ctx[8]; a[5] = ctx[9];
+    for (int i = 0; i < 4; i++) rd(ctx[4] + 0x28 + 8u * (unsigned)i, &a[6 + i], 8);
+    g_bhe_h[k](a); }
+#define BHE(k) static void bhe##k(uint64_t* c) { bhe_run(k, c); }
+BHE(0) BHE(1) BHE(2) BHE(3) BHE(4) BHE(5) BHE(6) BHE(7)
+#undef BHE
+static nh_handler const g_bhe_fn[BHE_N] = {bhe0, bhe1, bhe2, bhe3, bhe4, bhe5, bhe6, bhe7};
+static int body_hook_entry_ok(uint32_t rva) { return rva == 0xeefa8; }   // the game tick (host tools: runs pending requests; no result read)
 static int body_hook_after0(const char* name, uint32_t rva, void (*h)(uint64_t*)) {
+    { uint64_t t = aot_target(host_of(rva));
+      if (t) { if (!body_hook_entry_ok(rva)) { nlog("[nhook] body hook %s: halo3+0x%x is the app's own code at 0x%llx and the handler needs the function's result: refused", name, rva, (unsigned long long)t); return -1; }
+               if (g_bhe_n >= BHE_N) { nlog("[nhook] body hook %s: no entry-adapter slot left", name); return -1; }
+               int k = g_bhe_n; g_bhe_h[k] = h;
+               nlog("[nhook] body hook %s: halo3+0x%x is the app's own code at 0x%llx (thunk entry): hooked at its entry", name, rva, (unsigned long long)t);
+               if (text_hook_x0(name, t, (void*)g_bhe_fn[k], 0, 0, 0, 0)) return -1; g_bhe_n++; return 0; } }
     uint64_t b = body_of(rva); if (!b) { nlog("[nhook] body hook %s: halo3+0x%x has no lifted body of the known shape: refused", name, rva); return -1; }
     size_t tl = (size_t)(nh_ba_end - nh_ba_start); uint8_t* sw = 0; uint64_t sx = stub_alloc(b, tl, &sw);
     if (!sx) {   // no stub page in branch range: a far body hook -- the body's first four instructions move into the stub (its 4 slots)
@@ -459,7 +528,8 @@ static int text_hook(const char* name, uint64_t f, nh_handler h) { return text_h
 // entry grew). Until 2026-11-08 these were exact 0.10.0 words (incl. the bl's offset and #0x278).
 extern char nh_opus_shim[];
 static uint64_t g_opus_ret;      // (nstats.c nh_on_opus: other callers are ignored)
-static uint64_t g_mixer_id_off;  // (nstats.c nh_on_opus: the sender's peer id at x26 - this)
+static uint64_t g_mixer_id_off;  // (nstats.c nh_on_opus: the sender's peer id at <entry register> - this)
+static int g_mixer_reg;          // the mixer's entry register: the id load's base (x26 in 0.10.0 / 0.10.1, x22 in 0.10.2; nstats.c)
 static int g_hk_opus = -1;
 static int bl_reaches(uint64_t at, uint64_t want) { uint32_t w; if (rd(at, &w, 4) || (w & 0xfc000000u) != 0x94000000u) return 0;
     return at + (uint64_t)((int64_t)((int32_t)(w << 6) >> 6) * 4) == want; }
@@ -468,22 +538,28 @@ static void voice_hook_install(void) {
     uint64_t dec = APP(opus_decode), call = APP(mixer_call), idl = APP(mixer_id), off = g_app.mixer_id_off;
     if (!dec || !call || !idl || !off) { hk_state(h, HK_FAIL, 0, "this build's table has no opus_decode / mixer_call / mixer_id"); hk_state(mx, HK_FAIL, 0, "not in this build's table");
         nlog("[nhook] voice packets: not hooked (this app build's table has no voice points)"); return; }
-    static const uint32_t wd[4] = {0x6db923e9, 0xa9016ffc, 0xa90267fa, 0xa9035ff8}, wc[3] = {0xaa1903e1, 0xaa1803e2, 0x52807803};
+    // (registers vary by build since 0.10.2 -- mov x1, x26 ; mov x2, x25 and the entry in x22 -- so the moves' source registers
+    //  are not compared; the id load names the entry register: sub x8, x<entry>, #off ; ldr x<callee-saved>, [x8])
+    static const uint32_t wd[4] = {0x6db923e9, 0xa9016ffc, 0xa90267fa, 0xa9035ff8};
     uint32_t d[4], c[3], i[2];
     if (rd(dec, d, 16) || memcmp(d, wd, 16)) { hk_state(h, HK_FAIL, dec, "decode at 0x%llx does not start stp d9,d8 / x28,x27 / x26,x25 / x24,x23", (unsigned long long)dec);
         nlog("[nhook] voice packets: not hooked (0x%llx is not the Opus decode)", (unsigned long long)dec); return; }
-    if (rd(call, c, 12) || memcmp(c, wc, 12) || !bl_reaches(call + 12, dec)) { hk_state(mx, HK_FAIL, call, "0x%llx is not mov x1, x25 ; mov x2, x24 ; mov w3, #0x3c0 ; bl decode", (unsigned long long)call);
+    if (rd(call, c, 12) || (c[0] & 0xffe0ffffu) != 0xaa0003e1u || (c[1] & 0xffe0ffffu) != 0xaa0003e2u || c[2] != 0x52807803u || !bl_reaches(call + 12, dec)) {
+        hk_state(mx, HK_FAIL, call, "0x%llx is not mov x1, x? ; mov x2, x? ; mov w3, #0x3c0 ; bl decode", (unsigned long long)call);
         hk_state(h, HK_FAIL, dec, "its caller (the voice mixer) did not check out"); nlog("[nhook] voice packets: not hooked (the mixer's decode call at 0x%llx is not the expected code)", (unsigned long long)call); return; }
-    if (rd(idl, i, 8) || (i[0] & 0xffc003ffu) != 0xd1000348u || ((i[0] >> 10) & 0xfffu) != off || i[1] != 0xf9400113u) {
-        hk_state(mx, HK_FAIL, idl, "0x%llx is not sub x8, x26, #0x%llx ; ldr x19, [x8]", (unsigned long long)idl, (unsigned long long)off);
+    int er = rd(idl, i, 8) ? -1 : (int)((i[0] >> 5) & 31), tr = (int)(i[1] & 31);
+    if (er < 0 || (i[0] & 0xffc0001fu) != 0xd1000008u || ((i[0] >> 10) & 0xfffu) != off || (i[1] & 0xffffffe0u) != 0xf9400100u || er < 19 || er > 28 || tr < 19 || tr > 28) {
+        hk_state(mx, HK_FAIL, idl, "0x%llx is not sub x8, x<19..28>, #0x%llx ; ldr x<19..28>, [x8]", (unsigned long long)idl, (unsigned long long)off);
         hk_state(h, HK_FAIL, dec, "the mixer's sender id load did not check out"); nlog("[nhook] voice packets: not hooked (the mixer's id load at 0x%llx is not the expected code)", (unsigned long long)idl); return; }
-    g_mixer_id_off = off; g_opus_ret = call + 16;
-    hk_state(mx, HK_OK, call, "decode call at 0x%llx, sender id at x26 - 0x%llx, channel byte at x26 - 7", (unsigned long long)call, (unsigned long long)off);
+    g_mixer_id_off = off; g_mixer_reg = er; g_opus_ret = call + 16;
+    hk_state(mx, HK_OK, call, "decode call at 0x%llx, sender id at x%d - 0x%llx, channel byte at x%d - 7", (unsigned long long)call, er, (unsigned long long)off, er);
     text_hook("opus decode (voice)", dec, (nh_handler)(void*)nh_opus_shim);
 }
 // The target of an entry that is one `b` (the code table's entry for a function the app replaced)
+// (2026-11-10: and since 0.10.2 the target of a thunk entry, when it is the app's own code -- nearly every halo3 function)
 static uint64_t branch_target_of(uint32_t rva) {
-    uint64_t e = host_of(rva); uint32_t w0; if (!e || rd(e, &w0, 4) || (w0 & 0xfc000000u) != 0x14000000u) return 0;
+    uint64_t e = host_of(rva); uint32_t w0; if (!e || rd(e, &w0, 4)) return 0;
+    if ((w0 & 0xfc000000u) != 0x14000000u) return aot_target(e);
     return e + (uint64_t)((int64_t)((int32_t)(w0 << 6) >> 6) * 4);
 }
 
@@ -691,11 +767,12 @@ static void hooks_start(void) {
     if (g_app.image && g_img != APP(image)) { hk_state(hi, HK_FAIL, g_img, "the app logged 0x%llx, this build's table says 0x%llx: the wrong row (hooks off)", (unsigned long long)g_img, (unsigned long long)APP(image));
         hk_state(ht, HK_FAIL, 0, "not read: the guest image is not where this build's table has it"); nlog("[nhook] the engine image 0x%llx is not this build's (0x%llx): hooks off", (unsigned long long)g_img, (unsigned long long)APP(image)); hooks_off_page(); return; }
     hk_state(hi, HK_OK, g_img, "at 0x%llx%s", (unsigned long long)g_img, g_app.image ? " (as this build's table has it)" : "");
-    uint64_t tab[2], ta = APP(codetab);
-    if (!ta || rd(ta, tab, 16) || !tab[0] || tab[1] < 1000 || tab[1] > 1000000) {
-        hk_state(ht, HK_FAIL, ta, "%s", !g_app_known ? "this app build is not in napp_builds.h (re-tools/machoport.py)" : !ta ? "not in this build's table" : "no {ptr, count} at this build's code-table address");
+    uint64_t ta = APP(codetab);
+    if (!ta || ct_build() || g_ntab < 1000) {
+        hk_state(ht, HK_FAIL, ta, "%s", !g_app_known ? "this app build is not in napp_builds.h (re-tools/machoport.py)" : !ta ? "not in this build's table" : g_ntab ? "fewer than 1000 functions in this build's code table(s)" : "no {ptr, count} at this build's code-table address (or no hash map at its codehash)");
         nlog("[nhook] no code table: hooks off%s", g_app_known ? "" : " (this app build is not in napp_builds.h: re-tools/machoport.py)"); hooks_off_page(); return; }
-    g_tab = tab[0]; g_ntab = tab[1]; hk_state(ht, HK_OK, ta, "%llu entries at 0x%llx", (unsigned long long)g_ntab, (unsigned long long)g_tab);
+    hk_state(ht, HK_OK, ta, "%llu functions (%llu sorted at 0x%llx%s)", (unsigned long long)g_ntab, (unsigned long long)g_ct_sorted, (unsigned long long)ta, g_ct_hashed ? " + the hash map" : "");
+    nlog("[nhook] code table: %llu functions (%llu in the sorted table, %llu more in the hash map)", (unsigned long long)g_ntab, (unsigned long long)g_ct_sorted, (unsigned long long)g_ct_hashed);
     if (getenv("NHOOK_CENSUS")) census_install();
     else if (getenv("NHOOK_COUNT")) {
         if (getenv("NHOOK_COUNT_RVAS")) { const char* w = getenv("NHOOK_COUNT_RVAS"); static char nm[NCNT][16];
@@ -732,9 +809,11 @@ static void hooks_start(void) {
                  fclose(f); nlog("[nhook] code table (%llu entries) -> %s", (unsigned long long)g_ntab, getenv("NHOOK_CODETAB_DUMP")); } }
     if (getenv("NHOOK_DUMP_ENTRY")) { const char* w = getenv("NHOOK_DUMP_ENTRY");   // NHOOK_DUMP_ENTRY=<rva>[:<words>],...: a lifted function's first words (arm64; RE)
         while (w && *w) { uint32_t r = (uint32_t)strtoul(w, 0, 16); const char* c = strchr(w, ':'), * cm = strchr(w, ','); int n = c && (!cm || c < cm) ? atoi(c + 1) : 48;
-            if (n > 512) n = 512; uint64_t e = host_of(r); uint32_t buf[512];
-            if (e && !rd(e, buf, 4u * (unsigned)n)) { char line[64 * 9 + 64]; for (int i = 0; i < n; i += 64) { int k = 0; for (int j = i; j < n && j < i + 64; j++) k += snprintf(line + k, sizeof line - (size_t)k, "%08x ", buf[j]);
-                nlog("[nhook] [entry] halo3+0x%x at 0x%llx +%d: %s", r, (unsigned long long)e, i * 4, line); } }
+            if (n > 512) n = 512; uint32_t buf[512];
+            // (the entry, then -- on 0.10.2's thunk entries -- the thunk's bl target)
+            for (uint64_t e = host_of(r), pass = 0; e && pass < 2; e = thunk_target(e), pass++)
+              if (!rd(e, buf, 4u * (unsigned)n)) { char line[64 * 9 + 64]; for (int i = 0; i < n; i += 64) { int k = 0; for (int j = i; j < n && j < i + 64; j++) k += snprintf(line + k, sizeof line - (size_t)k, "%08x ", buf[j]);
+                nlog("[nhook] [entry] halo3+0x%x %s 0x%llx +%d: %s", r, pass ? "thunk target" : "at", (unsigned long long)e, i * 4, line); } }
             w = cm; if (w) w++; } }
     if (getenv("NHOOK_RVA_KIND")) { const char* w = getenv("NHOOK_RVA_KIND");   // NHOOK_RVA_KIND=<rva>,<rva>...: how the app runs each halo3 function
         while (w && *w) { uint32_t r = (uint32_t)strtoul(w, 0, 16); uint64_t e = host_of(r), t = branch_target_of(r);
@@ -753,9 +832,13 @@ static void* probe_thread(void* arg) {
     // starting beside its supervisor, was not ready after 2 s once ("image+0: no MZ", "code table at 0x0" -> hooks off, no
     // stats page; 2026-11-07, its fifth start that day). Up to 10 minutes: once (2026-11-08, a server's engine process while
     // four clients started) it was not ready after 60 s, the old limit, and the hooks stayed off for the process's life.
-    { int w = 0; for (; w < 2400; w++) { uint8_t h[2]; uint64_t t[2];
-          if (!rd(g_img, h, 2) && h[0] == 'M' && h[1] == 'Z' && (!g_app.codetab || (!rd(APP(codetab), t, 16) && t[0] && t[1] >= 1000 && t[1] <= 1000000))) break;
-          if (w == 240) nlog("[nhook] the engine image / code table are not ready 60 s later than the usual 2 s: still waiting (up to 10 minutes)");
+    { int w = 0; for (; w < 2400; w++) { uint8_t h[2];
+          if (!rd(g_img, h, 2) && h[0] == 'M' && h[1] == 'Z' && (!g_app.codetab || ct_ready())) break;
+          if (w == 40 || (w && w % 240 == 0)) { uint8_t h2[2] = {0}; uint64_t t2[2] = {0}, hm[3] = {0}; int ri = rd(g_img, h2, 2), rt = APP(codetab) ? rd(APP(codetab), t2, 16) : -1;
+              int rh = g_app.codehash ? rd(APP(codehash), hm, 24) : -1;
+              nlog("[nhook] the engine image / code table are not ready %d s later than the usual 2 s: still waiting (up to 10 minutes) -- image+0 %s, code table at 0x%llx: %s {0x%llx, %llu}, hash map %s {0x%llx, cap %llu, shift %llu}",
+                   w / 4, ri ? "unreadable" : (h2[0] == 'M' && h2[1] == 'Z') ? "MZ" : "no MZ", (unsigned long long)APP(codetab), rt ? "unreadable" : "", (unsigned long long)t2[0], (unsigned long long)t2[1],
+                   !g_app.codehash ? "(none in this build)" : rh ? "unreadable" : "", (unsigned long long)hm[0], (unsigned long long)hm[1], (unsigned long long)(hm[2] & 0xffffffffu)); }
           usleep(250000); }
       if (w) nlog("[nhook] the engine image / code table were ready %.2f s later than the usual 2 s%s", w * 0.25, w >= 2400 ? " -- not at all: giving up" : ""); }
     const char* path = getenv("NHOOK_HALO3");
@@ -816,13 +899,12 @@ static void* probe_thread(void* arg) {
     nlog("[nhook] app %s slide 0x%llx, image 0x%llx (this build's table: 0x%llx)", g_app_ver, (unsigned long long)g_app_slide, (unsigned long long)img, (unsigned long long)APP(image));
     uint64_t tab[2] = {0};
     if (APP(codetab) && !rd(APP(codetab), tab, 16)) {
-        nlog("[nhook] code table at 0x%llx, %llu entries", (unsigned long long)tab[0], (unsigned long long)tab[1]);
+        nlog("[nhook] code table at 0x%llx, %llu entries%s", (unsigned long long)tab[0], (unsigned long long)tab[1], g_app.codehash ? " (+ the hash map: merged when the hooks start)" : "");
         uint64_t e[8]; if (!rd(tab[0], e, sizeof e)) for (int i = 0; i < 4; i++) nlog("[nhook]   [%d] 0x%llx -> 0x%llx", i, (unsigned long long)e[2*i], (unsigned long long)e[2*i+1]);
         const char* want = getenv("NHOOK_DUMPFN");   // NHOOK_DUMPFN=<rva>[,<rva>...]: hex of each function's host code
         for (const char* w = want; w && *w; ) {
-            uint64_t rva = strtoull(w, 0, 16), ga = 0x180000000ull + rva, lo = 0, hi = tab[1], host = 0;
-            while (lo < hi) { uint64_t mid = (lo + hi) / 2, ent[2]; if (rd(tab[0] + mid * 16, ent, 16)) break;
-                              if (ent[0] < ga) lo = mid + 1; else if (ent[0] > ga) hi = mid; else { host = ent[1]; break; } }
+            uint64_t rva = strtoull(w, 0, 16), host = 0;   // (both tables, merged: ct_build)
+            if (!g_ntab) ct_build(); if (g_ntab) host = host_of((uint32_t)rva);
             nlog("[nhook] halo3+0x%llx -> host 0x%llx", (unsigned long long)rva, (unsigned long long)host);
             if (host) { mach_vm_address_t ra = host; mach_vm_size_t rs = 0; vm_region_basic_info_data_64_t bi; mach_msg_type_number_t bc = VM_REGION_BASIC_INFO_COUNT_64; mach_port_t on;
                 if (mach_vm_region(mach_task_self(), &ra, &rs, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&bi, &bc, &on) == KERN_SUCCESS)

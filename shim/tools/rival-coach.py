@@ -43,7 +43,18 @@ def corpus_winners():
     try: os.setpriority(os.PRIO_PROCESS, 0, 20)
     except Exception: pass
     from collections import defaultdict
-    R = coach.load(); by_file = defaultdict(list)
+    # (2026-11-09: only this map's recordings -- the whole library is GBs in memory, and the user's game lagged beside walkers; the
+    #  winners are this map's anyway when it has 40+ player-matches)
+    import glob
+    R = []
+    for p in sorted(glob.glob(os.path.join(SUP, 'tracks', 'engagements', '*_%s_*.eng.jsonl.gz' % MAP))):
+        try:
+            with gzip.open(p, 'rt') as f:
+                for l in f:
+                    try: R.append(json.loads(l))
+                    except Exception: break
+        except (EOFError, OSError): pass
+    by_file = defaultdict(list)
     for e in R:
         if e.get('class') != 'infection': by_file[e['file']].append(e)
     W, desc, _ = wc.winners(R, by_file, CLS, MAP)

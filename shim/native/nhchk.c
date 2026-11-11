@@ -8,22 +8,24 @@
 // ---- preflight: would a first-use hook install? (the installers' own shape checks; nothing is written)
 static void hk_text_preflight(const char* name, uint64_t f, const char* what) {
     int id = hk_named(name); if (id < 0 || g_hk[id].state == HK_OK) return; uint32_t w[4];
-    if (!f) { hk_state(id, HK_FAIL, 0, "%s is not the app's own code in this build (no `b` in its code-table entry)", what); return; }
+    if (!f) { hk_state(id, HK_FAIL, 0, "%s is not the app's own code in this build (no `b` or thunk in its code-table entry)", what); return; }
     if (rd(f, w, 16)) { hk_state(id, HK_FAIL, f, "%s at 0x%llx is unreadable", what, (unsigned long long)f); return; }
     for (int i = 0; i < 4; i++) if (insn_pcrel(w[i])) { hk_state(id, HK_FAIL, f, "%s at 0x%llx: instruction %d (%08x) is PC-relative", what, (unsigned long long)f, i, w[i]); return; }
     hk_state(id, HK_LAZY, f, "installs on first use (%s at 0x%llx checks out)", what, (unsigned long long)f); }
 static void hk_body_preflight(const char* name, uint32_t rva) {
-    int id = hk_named(name); if (id < 0 || g_hk[id].state == HK_OK) return; uint64_t b = body_of(rva);
+    int id = hk_named(name); if (id < 0 || g_hk[id].state == HK_OK) return; uint64_t b = body_of(rva), t = b ? 0 : aot_target(host_of(rva));
     if (b) hk_state(id, HK_LAZY, b, "installs on first use (halo3+0x%x's lifted body at 0x%llx checks out)", rva, (unsigned long long)b);
+    else if (t && body_hook_entry_ok(rva)) hk_text_preflight(name, t, "the app's own code (0.10.2+: hooked at its entry)");
+    else if (t) hk_state(id, HK_FAIL, t, "halo3+0x%x is the app's own code at 0x%llx and this hook needs the function's result (no body to hook after)", rva, (unsigned long long)t);
     else hk_state(id, HK_FAIL, 0, "halo3+0x%x has no lifted body of the known shape in this build", rva); }
 static void hk_preflight(void) {
     if (getenv("NHOOK_NO_VIEWHOOK")) hk_state(hk_named("view constants"), HK_OFF, 0, "NHOOK_NO_VIEWHOOK");
     else hk_text_preflight("view constants", branch_target_of(0x2af478), "halo3+0x2af478 (set shader parameter)");
     hk_text_preflight("player control (sparring aim / walker)", branch_target_of(0xf7178), "halo3+0xf7178 (the player-control reader)");
     hk_body_preflight("game tick (host tools)", 0xeefa8);
-    { int id = hk_named("frame (host tools)"); uint64_t f = APP(frame_fn); uint32_t w[4];
+    { int id = hk_named("frame (host tools)"); uint64_t f = APP(frame_fn);
       if (g_hk[id].state != HK_OK) { if (!f) hk_state(id, HK_FAIL, 0, "frame_fn is not in this build's table");
-          else if (rd(f, w, 16) || memcmp(w, g_ht_frame_words, 16)) hk_state(id, HK_FAIL, f, "0x%llx does not start sub sp, sp, #0x40 ; stp x22, x21 ; stp x20, x19 ; stp x29, x30", (unsigned long long)f);
+          else if (!ht_frame_ok(f)) hk_state(id, HK_FAIL, f, "0x%llx is not the frame function (sub sp ; stp x3, then halo3's frame flag +0x46bb83d and count +0x46bba40)", (unsigned long long)f);
           else hk_text_preflight("frame (host tools)", f, "the app's per-frame function"); } }
     hk_text_preflight("kill volume test", branch_target_of(0x1b8e00), "halo3+0x1b8e00 (kill volume / safe zone test)");
     hk_text_preflight("soft ceiling test", branch_target_of(0x1bac00), "halo3+0x1bac00 (soft ceiling test)");

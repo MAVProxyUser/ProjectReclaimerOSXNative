@@ -46,14 +46,17 @@ RUNTIME = os.path.join(os.path.expanduser('~'), 'Library', 'Application Support'
 #   infunc  how = (field whose function holds it, mask, value, next word or None): the first instruction there with
 #           (word & mask) == value (and that next word after it)
 #   imm     how = (field, 'imm12'): a value decoded from the instruction at that field's address (not an address)
+#   mean    found by meaning only (MEAN below; no reference shape)
 POINTS = [
     ('image',       'data',   0x103f94000, [0x1004779f4, 0x10047ab60, 0x100531fe8, 0x1005391a4], "the guest halo3 image: a reserved range of the app"),
     ('codetab',     'data',   0x103f44418, [0x1032964c0, 0x10324d580], "{ptr, count} of the sorted {guest address, host code} pairs"),
     ('opus_decode', 'code',   0x1003f1e7c, None, "the app's Opus decode (opus-rs): x0 decoder, x1 packet, x2 length"),
-    ('mixer_call',  'call',   0x10215256c, ('opus_decode', -12, [0xaa1903e1, 0xaa1803e2, 0x52807803]),
-                    "the voice mixer's decode call: mov x1, x25 ; mov x2, x24 ; mov w3, #0x3c0 ; bl decode"),
-    ('mixer_id',    'infunc', 0x102152444, ('mixer_call', 0xffc003ff, 0xd1000348, 0xf9400113),
-                    "the voice mixer's sender id load: sub x8, x26, #<id offset> ; ldr x19, [x8]"),
+    # (since 0.10.2 the registers vary -- mov x1, x26 ; mov x2, x25 and the entry in x22 --: the moves' sources are masked, and
+    #  the id load is any sub x8, x<19..28>, #off ; ldr x<19..28>, [x8], its base = the mixer's entry register)
+    ('mixer_call',  'call',   0x10215256c, ('opus_decode', -12, [(0xaa0003e1, 0xffe0ffff), (0xaa0003e2, 0xffe0ffff), (0x52807803, 0xffffffff)]),
+                    "the voice mixer's decode call: mov x1, x? ; mov x2, x? ; mov w3, #0x3c0 ; bl decode"),
+    ('mixer_id',    'infunc', 0x102152444, ('mixer_call', 0xffc0001f, 0xd1000008, (0xffffffe0, 0xf9400100), lambda w, n: 19 <= (w >> 5) & 31 <= 28 and 19 <= n & 31 <= 28 and 0x100 <= (w >> 10) & 0xfff < 0x800),
+                    "the voice mixer's sender id load: sub x8, x<entry>, #<id offset> ; ldr x<n>, [x8]"),
     ('mixer_id_off','imm',    0x278,       ('mixer_id', 'imm12'), "where the mixer's sender entry keeps the peer id: x26 - this"),
     ('frame_fn',    'code',   0x1029ed000, None, "the app's per-frame function (host tools' frame hook)"),
     ('chat_gate_a', 'code',   0x100d2a6fc, None, "the chat code's chat_log test (adrp ; ldrb), first"),
@@ -61,6 +64,8 @@ POINTS = [
     ('chat_log',    'data',   0x103efcc9b, [0x100d2a700, 0x100d2a724], "the chat_log byte (a field of the chat state)"),
     ('muted',       'data',   0x103f0a1e0, [0x102154f14, 0x10214dbb4], "the mute list: static Mutex<Vec<u64>> (lock +0, cap +0x10, ptr +0x18, len +0x20)"),
     ('set_muted',   'code',   0x102154ef0, None, "set_muted(id, bool)"),
+    # (2026-11-10, 0.10.2: the sorted table above holds 561 functions, the other ~22k are in a hash map -- nhook.c ct_build merges both)
+    ('codehash',    'mean',   0,           None, "the second guest -> host code table: a hash map {ptr, cap, shift} (0.10.2+; 0 = none in the build)"),
 ]
 FIELDS = [p[0] for p in POINTS]
 
@@ -251,15 +256,18 @@ def find_call(b, callee, off, before):
     bl = np.nonzero((b.w & 0xFC000000) == 0x94000000)[0]
     imm = (b.w[bl] & 0x3FFFFFF).astype(np.int64); imm = np.where(imm & (1 << 25), imm - (1 << 26), imm)
     sites = [b.ta + int(i) * 4 for i in bl[(b.ta + bl.astype(np.int64) * 4 + imm * 4) == callee]]
-    good = [s for s in sites if [b.word(s - 4 * (len(before) - k)) for k in range(len(before))] == before]
+    pat = [(x, 0xffffffff) if isinstance(x, int) else x for x in before]
+    good = [s for s in sites if all((b.word(s - 4 * (len(pat) - k)) & m) == v for k, (v, m) in enumerate(pat))]
     if len(good) == 1: return good[0] + off, 'the one of %d call(s) with those words before it' % len(sites)
     return None, '%d of %d calls have those words before them' % (len(good), len(sites))
 
-def find_infunc(b, inside, mask, value, nxt):
+def find_infunc(b, inside, mask, value, nxt, cond=None):
     if not inside: return None, 'no function'
     fs, fe = b.func(inside)
+    nm, nv = (0xffffffff, nxt) if isinstance(nxt, int) else nxt if nxt else (0, 0)
     for x in range(fs, fe, 4):
-        if (b.word(x) & mask) == value and (nxt is None or b.word(x + 4) == nxt): return x, 'in the function at %#x' % fs
+        w = b.word(x)
+        if (w & mask) == value and (b.word(x + 4) & nm) == nv and (cond is None or cond(w, b.word(x + 4))): return x, 'in the function at %#x' % fs
     return None, 'not in the function at %#x' % fs
 
 # ---- meaning checks (run on the build's own addresses) ------------------------------------------------------------------
@@ -277,6 +285,100 @@ def reaches(b, f, lim, want):
         except IndexError: return False
     return False
 
+def movz_movk(w, i, lo, hi):
+    """w[i] = mov w?, #lo and w[i+1] = movk w?, #hi, lsl #16 (any register)"""
+    return (int(w[i]) & 0xffffffe0) == (0x52800000 | lo << 5) and (int(w[i + 1]) & 0xffffffe0) == (0x72a00000 | hi << 5)
+
+def frame_shape(b, f):
+    """the per-frame function (nhost.c ht_frame_ok): sub sp, sp, #n ; stp x3 (the text hook's four displaced words), and in its first
+    48 instructions halo3's frame flag (image+0x46bb83d) followed within 10 by the frame count (image+0x46bba40)"""
+    w = [b.word(f + 4 * k) for k in range(48)]
+    if (w[0] & 0xffc003ff) != 0xd10003ff or any((w[k] & 0xffc00000) != 0xa9000000 for k in (1, 2, 3)): return False
+    return any(movz_movk(w, k, 0xb83d, 0x46b) and any(movz_movk(w, j, 0xba40, 0x46b) for j in range(k + 2, min(k + 10, 47))) for k in range(4, 47))
+
+# ---- finders by MEANING (2026-11-10, 0.10.2: built with unwind tables, +8 MB; register allocation and prologues moved, so several
+#      shapes did not carry over). Run when a point's shape finder fails or its result fails the meaning check.
+def mean_codetab(b, res):
+    """the sorted {guest, host} table's {ptr, count}: the binary search after mov x?, #0x180000000 (guest = host - image +
+    0x180000000) loads it with adrp ; add ; ldp. 0.10.2 put a hash map (its own global) in front: that site has ldr, not ldp."""
+    w = b.w; out = set()
+    mz = np.nonzero(((w & 0xffffffe0) == 0xd2c00300) | ((w & 0xffffffe0) == 0xb26107e0))[0]
+    for i in mz:
+        for k in range(int(i) + 1, min(int(i) + 16, len(w) - 2)):
+            p, a, l = int(w[k]), int(w[k + 1]), int(w[k + 2])
+            if (p & 0x9f000000) == 0x90000000 and (a & 0xffc00000) == 0x91000000 and (a & 31) == (p & 31) == (a >> 5) & 31 \
+               and (l & 0xffc00000) == 0xa9400000 and (l >> 5) & 31 == p & 31 and (l >> 15) & 0x7f == 0:
+                t = ref_target(b, b.ta + (k + 1) * 4)
+                if t: out.add(t)
+                break
+    return (out.pop(), 'by meaning: the binary search after mov #0x180000000') if len(out) == 1 else (None, 'by meaning: %d candidates' % len(out))
+
+def mean_codehash(b, res=None):
+    """the hash map of guest -> host code (0.10.2+): after mov x?, #0x180000000 the app hashes the guest address with the golden
+    ratio (movk #0x9e37, lsl #48) and loads {ptr, cap, shift} with adrp ; add X ; ldr x?, [X, #8]. No golden-ratio site at all =
+    the build has no hash map (0); every site that names its global must name the same one."""
+    w = b.w; out = set(); golden = 0
+    mz = np.nonzero(((w & 0xffffffe0) == 0xd2c00300) | ((w & 0xffffffe0) == 0xb26107e0))[0]
+    for i in mz:
+        i = int(i)
+        if not np.any((w[i:i + 24] & 0xffffffe0) == (0xf2e00000 | 0x9e37 << 5)): continue
+        golden += 1
+        for k in range(i + 1, min(i + 16, len(w) - 5)):
+            p, a = int(w[k]), int(w[k + 1])
+            if (p & 0x9f000000) == 0x90000000 and (a & 0xffc00000) == 0x91000000 and (a & 31) == (p & 31) == (a >> 5) & 31:
+                r = p & 31
+                if any((int(w[k + 2 + j]) & 0xffffffe0) == (0xf9400000 | 1 << 10 | r << 5) for j in range(3)):
+                    t = ref_target(b, b.ta + (k + 1) * 4)
+                    if t: out.add(t)
+                break
+    if not golden: return 0, 'by meaning: no hash lookup in this build (none)'
+    return (out.pop(), 'by meaning: the golden-ratio lookup after mov #0x180000000 (%d site(s))' % golden) if len(out) == 1 else (None, 'by meaning: %d candidates' % len(out))
+MEAN = {'codehash': mean_codehash}
+
+def mean_frame_fn(b, res):
+    w = b.w; out = set()
+    for i in np.nonzero((w & 0xffffffe0) == (0x52800000 | 0xb83d << 5))[0]:
+        i = int(i)
+        if i + 12 < len(w) and movz_movk(w, i, 0xb83d, 0x46b) and any(movz_movk(w, j, 0xba40, 0x46b) for j in range(i + 2, i + 10)):
+            fs = b.func(b.ta + i * 4)[0]
+            if fs and frame_shape(b, fs): out.add(fs)
+    return (out.pop(), 'by meaning: halo3\'s frame flag + frame count') if len(out) == 1 else (None, 'by meaning: %d candidates' % len(out))
+
+def mean_chat(b, res):
+    """the chat_log gate(s): adrp x8 ; ldrb w8, [x8, #off] ; tbz|tbnz w8, #0 within 0x200 bytes before the first exact "[chat] line "
+    reference: the nearest one's byte, and the (up to two) nearest tests of that byte (0.10.1 had two gates, 0.10.2 one: then
+    both fields are that one; other flags of the chat state are tested a little earlier)"""
+    t = b'[chat] line '; pos = b.d.find(t)
+    vms = []
+    while pos >= 0:
+        for seg, sn, a, z, o in b.secs:
+            if o <= pos < o + z and sn in ('__cstring', '__const'): vms.append(a + pos - o)
+        pos = b.d.find(t, pos + 1)
+    w = b.w; refs = []
+    for i in np.nonzero((w & 0x9f000000) == 0x90000000)[0]:
+        i = int(i)
+        if i + 1 < len(w) and (int(w[i + 1]) & 0xffc00000) == 0x91000000:
+            tg = ref_target(b, b.ta + (i + 1) * 4)
+            if tg is not None and any(v - 1 <= tg <= v for v in vms): refs.append(b.ta + (i + 1) * 4)
+    if not refs: return {}, 'by meaning: no "[chat] line " reference'
+    r0 = min(refs); gates = []
+    for x in range(r0 - 0x200, r0, 4):
+        p, l, tb = b.word(x), b.word(x + 4), b.word(x + 8)
+        if (p & 0x9f00001f) == 0x90000008 and (l & 0xffc003ff) == 0x39400108 and (tb & 0x7ef8001f) == 0x36000008: gates.append(x)
+    if not gates: return {}, 'by meaning: no byte test before "[chat] line "'
+    byte = ref_target(b, gates[-1] + 4); gates = [g for g in gates if ref_target(b, g + 4) == byte][-2:]   # (the nearest test's byte)
+    return {'chat_gate_a': gates[0], 'chat_gate_b': gates[-1], 'chat_log': byte}, 'by meaning: %d gate(s) right before "[chat] line "' % len(gates)
+
+def mean_muted(b, res):
+    f = res.get('set_muted')
+    if not f: return None, 'by meaning: no set_muted'
+    for k in range(0, 64, 4):
+        p, a = b.word(f + k), b.word(f + k + 4)
+        if (p & 0x9f000000) == 0x90000000 and (a & 0xffc00000) == 0x91000000:
+            t = ref_target(b, f + k + 4)
+            if t: return t, 'by meaning: set_muted\'s first adrp + add'
+    return None, 'by meaning: set_muted reaches no global'
+
 def checks(b, a):
     """{field: (ok, why)} for one build's addresses a (dict)."""
     r = {}
@@ -286,21 +388,28 @@ def checks(b, a):
     ok('codetab', g('codetab') and b.section_of(g('codetab')) == '__DATA,__data', 'in __DATA,__data')
     ok('opus_decode', g('opus_decode') and b.word(g('opus_decode')) == 0x6db923e9 and b.func(g('opus_decode'))[0] == g('opus_decode'),
        'a function start: stp d9, d8, [sp, #-0x70]!')
-    mi = g('mixer_id')
-    ok('mixer_id', mi and (b.word(mi) & 0xffc003ff) == 0xd1000348 and b.word(mi + 4) == 0xf9400113 and b.func(mi)[0] == b.func(g('mixer_call'))[0],
-       'sub x8, x26, #off ; ldr x19, [x8] in the mixer function')
+    mi = g('mixer_id'); er = (b.word(mi) >> 5) & 31 if mi else None   # the mixer's entry register (x26 to 0.10.1, x22 in 0.10.2)
+    ok('mixer_id', mi and (b.word(mi) & 0xffc0001f) == 0xd1000008 and (b.word(mi + 4) & 0xffffffe0) == 0xf9400100 and 19 <= er <= 28
+       and 19 <= b.word(mi + 4) & 31 <= 28 and b.func(mi)[0] == b.func(g('mixer_call'))[0],
+       'sub x8, x<19..28>, #off ; ldr x<19..28>, [x8] in the mixer function (nhook.c voice_hook_install)')
     ok('mixer_id_off', mi and g('mixer_id_off') == (b.word(mi) >> 10) & 0xfff and 0x100 <= g('mixer_id_off') < 0x800, "the id load's offset (0x100..0x800)")
     mc = g('mixer_call')
-    ok('mixer_call', mc and [b.word(mc + 4 * k) for k in range(3)] == [0xaa1903e1, 0xaa1803e2, 0x52807803] and bl_target(b, mc + 12) == g('opus_decode')
-       and any(b.word(x) == 0x385f9348 for x in range(b.func(mc)[0], b.func(mc)[1], 4)),
-       'mov x1, x25 ; mov x2, x24 ; mov w3, #0x3c0 ; bl opus_decode; the function reads the channel byte (ldurb w8, [x26, #-7])')
-    ff = g('frame_fn'); ok('frame_fn', ff and b.func(ff)[0] == ff and [b.word(ff + 4 * k) for k in range(4)] == [0xd10103ff, 0xa90157f6, 0xa9024ff4, 0xa9037bfd],
-                         'a function start: sub sp, sp, #0x40 ; stp x22, x21 ; stp x20, x19 ; stp x29, x30 (nhost.c g_ht_frame_words)')
+    ok('mixer_call', mc and (b.word(mc) & 0xffe0ffff) == 0xaa0003e1 and (b.word(mc + 4) & 0xffe0ffff) == 0xaa0003e2 and b.word(mc + 8) == 0x52807803
+       and bl_target(b, mc + 12) == g('opus_decode') and er is not None
+       and any(b.word(x) == (0x385f9008 | er << 5) for x in range(b.func(mc)[0], b.func(mc)[1], 4)),
+       'mov x1, x? ; mov x2, x? ; mov w3, #0x3c0 ; bl opus_decode; the function reads the channel byte (ldurb w8, [x<entry>, #-7])')
+    ff = g('frame_fn'); ok('frame_fn', ff and b.func(ff)[0] == ff and frame_shape(b, ff),
+                         'a function start: sub sp, sp, #n ; stp ; stp ; stp, then halo3\'s frame flag +0x46bb83d and count +0x46bba40 (nhost.c ht_frame_ok)')
     for f in ('chat_gate_a', 'chat_gate_b'):
         x = g(f); ok(f, x and (b.word(x) & 0x9f00001f) == 0x90000008 and (b.word(x + 4) & 0xffc003ff) == 0x39400108 and ref_target(b, x + 4) == g('chat_log'),
                      'adrp x8 ; ldrb w8, [x8, #chat_log]')
     ok('chat_log', g('chat_log') and b.section_of(g('chat_log')) in ('__DATA,__data', '__DATA,__bss', '__DATA,__common'), 'a byte in __DATA')
-    ok('muted', g('muted') and b.section_of(g('muted')) in ('__DATA,__data', '__DATA,__bss', '__DATA,__common') and g('muted') % 8 == 0, 'an aligned global in __DATA')
+    ok('muted', g('muted') and b.section_of(g('muted')) in ('__DATA,__data', '__DATA,__bss', '__DATA,__common') and g('muted') % 8 == 0
+       and (not g('set_muted') or reaches(b, g('set_muted'), 64, g('muted'))),
+       'an aligned global in __DATA that set_muted reaches (2026-11-10: a data vote in 0.10.2 found another Mutex<Vec>)')
+    mh = mean_codehash(b)[0]
+    ok('codehash', mh is not None and g('codehash') == mh and (not mh or b.section_of(mh) in ('__DATA,__data', '__DATA,__bss', '__DATA,__common')),
+       'the one global the golden-ratio code lookup loads {ptr, cap, shift} from, or 0 when the build has no such lookup')
     ok('set_muted', g('set_muted') and b.func(g('set_muted'))[0] == g('set_muted') and reaches(b, g('set_muted'), 64, g('muted')),
        'a function start reaching the mute list (adrp + add) in its first 64 bytes')
     return r
@@ -375,8 +484,16 @@ def main():
             elif kind == 'data': res[f], how[f] = port_data(old, new, ref, arg)
             elif kind == 'call': res[f], how[f] = find_call(new, res.get(arg[0]), arg[1], arg[2])
             elif kind == 'infunc': res[f], how[f] = find_infunc(new, res.get(arg[0]), *arg[1:])
+            elif kind == 'mean': res[f], how[f] = MEAN[f](new, res)
             elif kind == 'imm': res[f], how[f] = (((new.word(res[arg[0]]) >> 10) & 0xfff), 'decoded') if res.get(arg[0]) else (None, 'no ' + arg[0])
             if res[f] is None: res[f] = 0
+        c = checks(new, res)
+        if not c['codetab'][0]: res['codetab'], how['codetab'] = (lambda r: (r[0] or 0, r[1]))(mean_codetab(new, res))
+        if not c['frame_fn'][0]: res['frame_fn'], how['frame_fn'] = (lambda r: (r[0] or 0, r[1]))(mean_frame_fn(new, res))
+        if not (c['chat_gate_a'][0] and c['chat_gate_b'][0] and c['chat_log'][0]):
+            m, why = mean_chat(new, res)
+            for f in ('chat_gate_a', 'chat_gate_b', 'chat_log'): res[f] = m.get(f, 0); how[f] = why
+        if not c['muted'][0] or not c['set_muted'][0]: res['muted'], how['muted'] = (lambda r: (r[0] or 0, r[1]))(mean_muted(new, res))
         bad, c = report(new, res, how)
         for f in FIELDS:
             if not c[f][0]: res[f] = 0

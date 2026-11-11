@@ -346,7 +346,12 @@ NHOOK_CODETAB_DUMP=<file> + shim/tools/native-frames.py (the JIT layout is fixed
 Client 0.10.1 + the hooks check (2026-11-08): the app updates itself; every fixed app address nhook uses is in shim/native/napp_builds.h
 per build (by LC_UUID; nhook.c app_build_pick, APP(field); ReclaimerMac/native/app-builds.txt for a prebuilt dylib), made by
 `re-tools/machoport.py port re-tools/machoport-sigs.json <app binary> --apply` (shape finder + meaning checks; shim/native.sh runs it
-itself for an unknown build, NATIVE_NO_AUTOPORT=1 = no). 0.10.1: all 12 points, mixer sender id at x26 - 0x2a0 (was 0x278). Hooks check
+itself for an unknown build, NATIVE_NO_AUTOPORT=1 = no). 0.10.1: all 12 points, mixer sender id at x26 - 0x2a0 (was 0x278).
+Client 0.10.2 (2026-11-10): built with unwind tables (shapes moved): machoport falls back to finders BY MEANING; the code table SPLIT
+into a sorted table (561) + a hash map (13th point `codehash`; nhook.c ct_build merges both); the voice mixer's entry is x22 (nhook
+reads the register from the id load: g_mixer_reg); one chat gate (chat_gate_a == chat_gate_b). halo3 is compiled AHEAD OF TIME
+into the app: entries are thunks (stp ; mov ; bl T ; ldp ; ret) to app code T(ctx): entry hooks -> text hooks on T, body hooks at
+T's entry (aot_target). FIXES.md "nhook on client 0.10.2". Hooks check
 (nhchk.h / nhchk.c): every hook / interpose / swizzle / app address / log line / reader, installed? + fired? -> GET /hooks.json, the
 page's Hooks check window, [hooks] log lines; self test shim/tools/native-hooks-test.sh. Hook stubs share near pages (RX + an RW alias:
 stub_alloc; the near gaps ran out at 4 hooks; NHOOK_STUB_PAGE_EACH=1 = old). With hooks off the stats page still starts.

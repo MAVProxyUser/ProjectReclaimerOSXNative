@@ -29,8 +29,20 @@
 // Hooks are installed on first use (a switch or a teleport) and stay; their handlers do nothing while the switches are on.
 // Host only (game_globals +0x11: 5 host / 1 local, or this machine is the session's host peer).
 
-// the app's per-frame function: napp_builds.h frame_fn (0.10.0 0x1029ed000, 0.10.1 0x102ac23d8; its prologue checked below)
-static const uint32_t g_ht_frame_words[4] = {0xd10103ffu, 0xa90157f6u, 0xa9024ff4u, 0xa9037bfdu};   // sub sp ; stp ; stp ; stp
+// the app's per-frame function: napp_builds.h frame_fn (0.10.0 0x1029ed000, 0.10.1 0x102ac23d8, 0.10.2 0x1031c75f8). Checked
+// by shape and meaning (2026-11-10: 0.10.2 saves two more registers, sub sp, #0x80): its first instruction is sub sp, sp, #n and
+// the next three are stp (the four the text hook displaces: none PC-relative), and within its first 48 instructions it reads
+// halo3's frame flag image+0x46bb83d (mov w, #0xb83d ; movk w, #0x46b, lsl #16) and then the frame count +0x46bba40. Until
+// 2026-11-10 the four prologue words were compared exactly (0.10.1's sub sp, #0x40).
+static int ht_frame_ok(uint64_t f) {
+    uint32_t w[48]; if (!f || rd(f, w, sizeof w)) return 0;
+    if ((w[0] & 0xffc003ffu) != 0xd10003ffu) return 0;
+    for (int k = 1; k < 4; k++) if ((w[k] & 0xffc00000u) != 0xa9000000u) return 0;
+    for (int k = 4; k + 1 < 48; k++)
+        if ((w[k] & 0xffffffe0u) == (0x52800000u | (0xb83du << 5)) && (w[k + 1] & 0xffffffe0u) == (0x72a00000u | (0x46bu << 5)))
+            for (int j = k + 2; j + 1 < 48 && j < k + 10; j++)
+                if ((w[j] & 0xffffffe0u) == (0x52800000u | (0xba40u << 5)) && (w[j + 1] & 0xffffffe0u) == (0x72a00000u | (0x46bu << 5))) return 1;
+    return 0; }
 static volatile int g_ht_bnd_off, g_ht_inv_off, g_ht_tick_ok = -1, g_ht_bnd_ok = -1, g_ht_inv_ok = -1;
 static volatile unsigned long g_ht_bnd_skips, g_ht_inv_hidden, g_ht_ticks, g_ht_frames;
 static volatile int g_ht_my_slot = -1;                     // the local player's slot (st_snapshot: the profile's nickname)
@@ -169,9 +181,9 @@ static void ht_shape(uint64_t* a) {
     if (inv) { int n = *(uint8_t*)(uintptr_t)(shape + 0x2e); if (n > 8) n = 8; for (int i = 0; i < n; i++) *(float*)(uintptr_t)(shape + 0x48 + 16 * (uint64_t)i) = -20000.0f; g_ht_inv_hidden++; } }
 // ---- installing (on first use, from the HTTP thread)
 static int ht_tick_install(void) {
-    if (g_ht_tick_ok >= 0) return g_ht_tick_ok; uint64_t f = APP(frame_fn); uint32_t w[4];
+    if (g_ht_tick_ok >= 0) return g_ht_tick_ok; uint64_t f = APP(frame_fn);
     int tick = !getenv("NHOOK_HOST_NOTICK") && !body_hook_after("game tick (host tools)", 0xeefa8, ht_on_tick);
-    int frame = !getenv("NHOOK_HOST_NOFRAME") && g_img && f && !rd(f, w, 16) && !memcmp(w, g_ht_frame_words, 16) && !text_hook("frame (host tools)", f, ht_on_frame_entry);
+    int frame = !getenv("NHOOK_HOST_NOFRAME") && g_img && f && ht_frame_ok(f) && !text_hook("frame (host tools)", f, ht_on_frame_entry);
     g_ht_tick_ok = tick || frame;
     if (!g_ht_tick_ok) ht_say("teleport unavailable: neither halo3's game tick nor the app's frame function could be hooked"); return g_ht_tick_ok; }
 static int ht_bnd_install(void) {
